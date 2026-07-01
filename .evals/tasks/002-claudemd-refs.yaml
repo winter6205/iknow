@@ -1,0 +1,28 @@
+id: 002-claudemd-refs
+tier: fast
+description: "Verify CLAUDE.md has @-ref auto-load chain (rules + docs + evals)"
+repo: .
+test_command: |
+  set -e
+  CLAUDE="CLAUDE.md"
+  [ -f "$CLAUDE" ] || { echo "FAIL: $CLAUDE not found"; exit 1; }
+
+  # Must reference at least: 1 rule file + 1 docs/ entry + 1 eval/README entry.
+  REFS=$(grep -cE '@[A-Za-z0-9_./~*-]+' "$CLAUDE" || echo 0)
+  if [ "$REFS" -lt 3 ]; then
+    echo "FAIL: $CLAUDE has only $REFS @-refs, need ≥3 (rules + docs + evals)"
+    exit 1
+  fi
+
+  # Spot-check at least one @-.claude/rules reference (proves S1-S6 wiring).
+  if ! grep -qE '@\.claude/rules/[A-Za-z0-9_-]+' "$CLAUDE"; then
+    echo "FAIL: $CLAUDE missing @.claude/rules/ ref (S1-S6 auto-load not wired)"
+    exit 1
+  fi
+
+  echo "PASS: $CLAUDE has $REFS @-refs including @.claude/rules/ wiring"
+prompt: |
+  Run `bash .evals/run.sh --task 002-claudemd-refs`.
+  Verifies CLAUDE.md has @-ref auto-load chain: at least 3 @-refs, with
+  @.claude/rules/<file> spot-checked. Catches: deleting @-refs without
+  noticing → S1-S6 rules no longer auto-load.

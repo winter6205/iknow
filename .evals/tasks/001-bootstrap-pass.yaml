@@ -1,0 +1,19 @@
+id: 001-bootstrap-pass
+tier: fast
+description: "Bootstrap baseline — verify scaffold structure exists"
+repo: .
+test_command: |
+  set -e
+  test -d .evals || { echo "FAIL: .evals/ missing"; exit 1; }
+  test -d docs || { echo "FAIL: docs/ missing"; exit 1; }
+  test -f docs/CONTEXT.md || { echo "FAIL: docs/CONTEXT.md missing"; exit 1; }
+  test -d docs/handoff || { echo "FAIL: docs/handoff/ missing"; exit 1; }
+  test -f scripts/bootstrap.sh || { echo "FAIL: scripts/bootstrap.sh missing"; exit 1; }
+  test -d .githooks || { echo "FAIL: .githooks/ missing"; exit 1; }
+  test -d .claude/rules || { echo "FAIL: .claude/rules/ missing"; exit 1; }
+  echo "PASS: bootstrap baseline OK"
+prompt: |
+  Run `bash .evals/run.sh`. Confirms 001-bootstrap-pass task exits 0,
+  meaning the scaffold structure (`.evals/`, `docs/`, `docs/CONTEXT.md`,
+  `docs/handoff/`, `scripts/bootstrap.sh`, `.githooks/`, `.claude/rules/`)
+  is in place.

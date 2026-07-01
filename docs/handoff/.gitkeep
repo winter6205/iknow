@@ -1,0 +1,5 @@
+# handoff/<date>-<topic>.md — session 交接记录
+
+每份 handoff 描述一次完整 session 闭环: 学到的 + 改的 + 待办.
+
+首批 handoff 在第一次 session 终结时创建 (走 task-end ritual Q3).

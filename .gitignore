@@ -1,0 +1,9 @@
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/tmp/
+.claude/private/
+.env
+.env.*
+!.env.example
+# runtime eval artifacts
+.evals/results/
