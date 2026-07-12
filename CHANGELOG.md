@@ -2,6 +2,20 @@
 
 ## 0.1.0 (unreleased)
 
+### Product CLI chat (host interaction)
+
+- **TTY REPL** + **pipe-aware** serial turns (`src/cli/chat-session.ts`)
+- Session: `ConversationState`, `prior_chunks` bridge, slash `/status` `/mode` `/role` …
+- Human view default in chat; `ask` / oneshot remain G2 JSON for scripts
+- Explicit `--mode` wins over `IKNOW_AGENT_MODE`; empty ask → usage (no demo query)
+- SIGINT: first warns, second exits immediately (`process.exit(130)`)
+- Commits of note: `ffc475e` (CLI polish), `f431436` (ffc475e review SIGINT/chain)
+
+### M1 / M2 model wiring
+
+- Embedding vector arm (OpenAI-compatible) + optional LLM tool agent
+- Fail-closed offline/key/protocol checks; deterministic remains CI default
+
 ### Trajectory eval harness (ADLC Phase 4 / P3 closeout)
 
 - **`npm run eval`**: full 32-sample trajectory suite (`src/eval/*`)
@@ -42,7 +56,7 @@ Bootstrap scaffold from project template.
 
 ### Next
 
-- **M1**: real embedding arm for `kb_retrieve` (materials: `docs/integration-materials.env.example`)
-- **M2**: LLM tool_calls agent mode behind `IKNOW_AGENT_MODE` (keep deterministic CI)
+- **Interaction polish** (next stage): multi-turn UX quality, TTY smoke checklist, optional session export
 - Ratify `docs/iknow-spec/docs/protocol/ADR-v0.1-assumptions-p3.md`
 - Replace draft eval samples with real queries; calibrate soft gates
+- Persist KB / observability / deploy (P4)

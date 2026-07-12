@@ -69,6 +69,26 @@ _Avoid_: mock agent, stub brain (unless truly empty fakes)
 Shared note markers and answer regexes in `src/eval/lexicon.ts` used by both loop notes and scorer.
 _Avoid_: duplicated string literals in loop and score-trajectory
 
+**ConversationState**:
+Host-layer multi-turn bag: turns, `last_priors`, short `history_finals`, json_mode — not part of tool schema.
+_Avoid_: SessionContext (auth only), chat memory tool, stuffing full tool transcripts into session
+
+**prior_chunks (cross-turn)**:
+Protocol bridge for the next retrieve: `{ chunk_id, summary }[]` derived from last answer spans (capped/sanitized).
+_Avoid_: pasting full chunk text, unlimited host arrays, using priors on sensitive edge-001 pre-check path
+
+**chat REPL** / **product CLI**:
+TTY interactive `iknow chat` (or bare TTY invoke) with human view; pipe mode is serial non-terminal turns.
+_Avoid_: treating one-shot JSON ask as the interactive product; `terminal: true` on pipes; default demo query on empty ask
+
+**oneshot / ask**:
+Script/CI path: single question → full G2 JSON on stdout; empty query → usage + exit 1.
+_Avoid_: inventing a demo Chinese query when args are empty
+
+**processChatLine**:
+Pure-ish turn handler used by REPL and unit tests (slash + agent.answer + format).
+_Avoid_: embedding readline/TTY side effects inside this function
+
 ## Relationships
 
 - **Query → kb_retrieve → Chunk[]**: agent issues a retrieve hop; store returns ranked chunks
@@ -78,6 +98,8 @@ _Avoid_: duplicated string literals in loop and score-trajectory
 - **Agent loop → max_hops → G2**: loop terminates with G2 envelope when done or budget exhausted
 - **tool_calls log → scoreTrajectory → trajectory_score / release_gates**: suite aggregates hard + soft gates
 - **session_overrides → createSession → agent run**: data-driven timeout/role without runner special cases
+- **User line → processChatLine → answer(opts) → IknowAnswer → ConversationState**: multi-turn host path
+- **last_priors → answer prior_chunks → kb_retrieve**: cross-turn retrieve bridge only
 
 ## Flagged ambiguities
 
@@ -87,6 +109,9 @@ _Avoid_: duplicated string literals in loop and score-trajectory
 - **hops vs tool_calls.length**: hops only count retrieve+verify; compile/governance do not consume hop budget
 - **ordinal vs ts**: log field is `ordinal` (1-based sequence); do not use `ts` for tool call order
 - **draft eval set**: `eval-set.draft.json` is DRAFT-EVAL-SET; hard_pass on draft ≠ production gate until real queries replace samples
+- **chat vs test harness**: product CLI is TTY/pipe-aware session code under `src/cli/`; unit tests call `processChatLine` without claiming that is the product UX
+- **--mode vs env**: explicit CLI `--mode` wins over `IKNOW_AGENT_MODE`; env alone may still select llm when flag omitted
+- **next phase focus**: interaction polish (UX, multi-turn quality) — not reopening the 4-tool protocol
 
 ---
 

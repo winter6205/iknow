@@ -193,20 +193,29 @@ npm run eval      # 32-sample suite → docs/iknow-spec/docs/eval/results/ (giti
 | 路径 | 角色 |
 |------|------|
 | `src/kb-*` / `src/agent-loop` / `src/knowledge-store` | 产品实现（可独立运行） |
+| `src/interaction/` | 会话袋、slash、人读/JSON 投影（host，非 tool） |
+| `src/cli.ts` + `src/cli/*` | **产品 CLI**：TTY chat / 管道 chat / ask oneshot |
 | `src/eval/` | trajectory scorer + suite runner |
 | `docs/iknow-spec/` | 协议与评测真值 |
+| `docs/design/interaction-surface-v0.md` | 交互设计（协议对齐） |
+| `docs/STATUS.md` | 已实现 / 未实现 / 展望 |
 | `_upstream_gbrain/` | **只读**参考（gitignore，禁止 runtime 链接） |
 
-**Agent mode（规划）**: 当前仅 **deterministic** loop；LLM 模式待 `IKNOW_AGENT_MODE`（见 integration materials）。  
-**Embedding**: 当前 keyword/overlap RRF；真实向量待 `IKNOW_EMBEDDING_*` 材料。
+**Agent mode**: `deterministic`（默认 / CI）或 `llm`（`--mode llm` / `IKNOW_AGENT_MODE`；显式 `--mode` 优先）。  
+**Embedding**: 可选 `--embeddings` / `IKNOW_EMBEDDING_MODE=api`（9router 等）；失败回退 overlap。  
+**交互主入口**: TTY 上 `npx tsx src/cli.ts` 或 `chat`；脚本用 `ask`。  
+**下阶段焦点**: **打磨交互**（UX/多轮质量），不重开 4 tool 协议。  
+**Git**: 无用户明确 `commit`/`push` 授权则不执行。
 
 ### Domain docs (auto-load on session start)
 
 - @docs/CONTEXT.md — 项目领域语言 + Flagged ambiguities
+- @docs/STATUS.md — 功能现状与展望
 - @docs/architecture.md — 独立 runtime 能力切分
+- @docs/design/interaction-surface-v0.md — 交互方案
 - @docs/iknow-spec/HANDOFF.md — 协议/阶段真值（优先于过时分支叙述）
 - @docs/handoff/<latest>.md — 最近 session 交接
-- @docs/CHANGELOG.md — 版本变更记录
+- @docs/CHANGELOG.md — 版本变更记录（根目录 `CHANGELOG.md` 为真值）
 - @docs/integration-materials.env.example — LLM/向量接入材料占位（只写环境变量名）
 
 ### 3 层记忆模型 (where to write)
