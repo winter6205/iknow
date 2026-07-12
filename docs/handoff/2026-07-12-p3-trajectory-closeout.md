@@ -39,10 +39,15 @@ git: origin/master tracking; tip includes 850e7a6 (+ earlier P3 commits)
 
 ## Open / next
 
-1. User fills `docs/integration-materials.env.example` placeholders (env **names** + chosen providers)
-2. M1 embedding arm → M2 LLM agent mode
+1. User profile: **network API + API key** (not local weights). Fill providers/models/key **env names** in `.env.local` from `docs/integration-materials.env.example`.
+2. M1 embedding arm (remote embed API) → M2 LLM agent mode (remote chat tools API)
 3. Real query log replace draft eval set; soft-gate calibration
 4. P4 engineering (auth prod, async jobs, observability, deploy)
+
+## Auth convention
+
+- `IKNOW_*_API_KEY_ENV` = **name** of the secret variable (e.g. `OPENAI_API_KEY`)
+- Actual secret only in OS/user env or secret manager — never in git / chat / example file values
 
 ## Do not
 
