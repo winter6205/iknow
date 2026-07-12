@@ -1,9 +1,9 @@
 # iknow 交互方案设计 v0（对齐原协议）
 
-> 状态：**I1–I3 partially implemented**（`iknow chat` REPL + ConversationState + priors/history + human/json）  
+> 状态：**I1–I3 + HTTP/web host**（`iknow chat` + `iknow serve` + Session API + `web/`）  
 > 范围：交互与会话表面，**不改** 4 tool 协议拓扑  
 > 依据：`HANDOFF` → ADR-v0.1 → tool-schema → architecture → analysis-c-auth-async  
-> 日期：与 P3 runtime 现状对齐（单次 CLI + 双模式 Agent + chat host）
+> HTTP 契约：`docs/design/session-http-api-v0.md`
 
 ---
 
@@ -218,6 +218,7 @@ answer(
 | **I1 REPL 壳** | `chat` 循环 + human 渲染 + 单进程复用 store | 多轮输入；每轮仍有 G2 JSON 可选 |
 | **I2 会话袋** | `ConversationState` + priors 注入 `answer` | 续问可带 prior；单测可注入 priors |
 | **I3 LLM 历史** | `history_finals` 短窗 + 截断 | 指代类续问在有 key 时可用 |
+| **I3.5 Session HTTP + Web** | `serve` + `/api/v1/*` + `web/` chat | create+message 返回 G2；UI 展示 snapshot |
 | **I4 真机交互冒烟** | 主线程/人工清单：三模式各 ≥3 轮 | 有命令与结果记录（无密钥） |
 | **I5 多轮 eval（可选）** | N 次单轮 + 注入 priors 的样本 | 不阻塞 I1–I4 |
 

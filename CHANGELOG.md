@@ -2,6 +2,15 @@
 
 ## 0.1.0 (unreleased)
 
+### Session HTTP API + Web UI (host interaction)
+
+- **`iknow serve`**: in-process Session API (`src/session-api/`) + static `web/` chat page
+- Routes: `GET /api/v1/health`, `POST/GET /api/v1/sessions`, `…/messages`, `…/commands`, `…/reset`
+- Every message returns full **G2** `IknowAnswer`; human projection optional
+- Reserved: `GET …/sessions/:id/events` → **501** (SSE future)
+- Contract: `docs/design/session-http-api-v0.md` · plan: `plans/web-interaction-session-api.md`
+- Tests: `tests/session-api.test.ts` (hub + HTTP + static index)
+
 ### Product CLI chat (host interaction)
 
 - **TTY REPL** + **pipe-aware** serial turns (`src/cli/chat-session.ts`)
@@ -56,7 +65,7 @@ Bootstrap scaffold from project template.
 
 ### Next
 
-- **Interaction polish** (next stage): multi-turn UX quality, TTY smoke checklist, optional session export
+- Web/TTY interaction polish; optional session export; SSE streaming behind reserved path
 - Ratify `docs/iknow-spec/docs/protocol/ADR-v0.1-assumptions-p3.md`
 - Replace draft eval samples with real queries; calibrate soft gates
-- Persist KB / observability / deploy (P4)
+- Persist sessions + KB / observability / deploy (P4)

@@ -4,7 +4,7 @@
 
 iknow = 企业知识库问答 Agent（非纯 RAG pipeline）。通过 4 个工具实现可溯源的企业问答：所有答案必须提供原文引用（source_span）和治理状态标签（snapshot_id），双索引只影响排序、verify 永远看原文，满足企业零容忍要求。
 
-当前分支：`master`。协议层已决，评测资产已建（构造数据），**独立 iknow 运行时已实现**（无 gbrain runtime 链接）；trajectory suite 可 `npm run eval` 实跑。
+当前分支：`master`。协议层已决，评测资产已建（构造数据），**独立 iknow 运行时已实现**（无 gbrain runtime 链接）；trajectory suite 可 `npm run eval` 实跑；**host 层**含 CLI chat + **Session HTTP API + Web UI**（`iknow serve`，见 `docs/design/session-http-api-v0.md`）。
 
 ## 二、Agent 开发流程阶段与当前进度
 

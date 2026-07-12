@@ -13,8 +13,10 @@ iknow is a **standalone** enterprise knowledge-base agent. Runtime code lives at
 | Agent loop | `src/agent-loop/` | Tool orchestration, `max_hops`, G2 envelope |
 | Knowledge store | `src/knowledge-store/` | In-memory KB abstraction (replaceable later) |
 | Shared | `src/shared/` | Schema, errors, hashing helpers |
-| CLI / entry | `src/cli.ts`, `src/index.ts` | Dev/ask + `chat` REPL entrypoints |
+| CLI / entry | `src/cli.ts`, `src/index.ts` | Dev/ask + `chat` REPL + `serve` entrypoints |
 | Interaction host | `src/interaction/` | Conversation bag, human/json format, slash parse (no tool schema change) |
+| Session HTTP | `src/session-api/` | Multi-conversation hub + node:http API + static web root |
+| Web UI | `web/` | Same-origin chat page (G2 side panel); no new FE framework |
 
 ```text
 user query
@@ -47,9 +49,12 @@ user query
 
 Multi-turn chat / REPL is a **host-layer** concern (not a 5th tool). See:
 
-- **`docs/design/interaction-surface-v0.md`** — design v0; **I1–I3 partially implemented**
+- **`docs/design/interaction-surface-v0.md`** — design v0; **I1–I3 + HTTP/web host**
+- **`docs/design/session-http-api-v0.md`** — Session REST contract
 - **`src/interaction/`** — `ConversationState`, priors/history, format, slash commands
+- **`src/session-api/`** — HTTP host over the same conversation bag
 - **`npx tsx src/cli.ts chat`** — REPL; one-shot `ask` / bare query stay JSON for scripts
+- **`npx tsx src/cli.ts serve`** — Web UI + `/api/v1/*`
 
 Cross-turn bridge = protocol `prior_chunks` (+ LLM-only short `history`). No fifth tool.
 

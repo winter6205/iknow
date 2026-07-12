@@ -1,7 +1,7 @@
 # iknow 功能现状与展望
 
 > 维护说明：描述产品/工程事实，不替代协议真值（`docs/iknow-spec/`）。  
-> 最后对齐代码线：`master` @ `843bd23`（交互审查修复后）。  
+> 最后对齐代码线：session HTTP API + web UI（`src/session-api/` + `web/`）。  
 > 协议真值链仍为：`HANDOFF` → `ADR-v0.1` → `tool-schema` → `mapping` → eval。
 
 ---
@@ -52,6 +52,9 @@
 | 轮间桥 | `answer(q, { prior_chunks, history })`；priors 统一消毒 cap=5 | `priors.ts` + agents |
 | Slash | `/help` `/quit` `/json` `/role` `/mode` `/reset` | `interaction/slash.ts` |
 | 单次脚本 | `ask "…"` / 裸 query → JSON（CI 兼容） | `cli.ts` |
+| **Session HTTP API** | 进程内多会话：create / message / command / reset；G2 每轮 | `src/session-api/` |
+| **Web 交互页** | 静态 chat UI：空/载入/错/数据四态；侧栏 G2；预留 SSE | `web/` + `iknow serve` |
+| API 契约 | v0 路由与预留路径 | `docs/design/session-http-api-v0.md` |
 
 ### 1.5 评测与质量门禁
 
@@ -85,8 +88,8 @@
 | **向量持久化** | 索引进程内；磁盘 cache 路径配置有、生产级缓存/失效策略未齐 |
 | **后台 compile 队列** | 设计允许异步作业；产品级 job/notify 未做 |
 | **鉴权生产化** | 仅 session 角色枚举与敏感拦截默认；完整 ACL/审批流待 ADR 确认后实现 |
-| **Web / UI / HTTP Session API** | 仅 CLI；无浏览器产品界面 |
-| **流式输出** | 无 token streaming |
+| **Web 生产化** | 有 v0 静态页 + 同进程 API；无独立 SPA 构建链 / 无鉴权 |
+| **流式输出** | SSE 路径预留 `…/events` → 501；无 token streaming |
 | **多轮 trajectory eval** | 评测仍是单次 input；无 N 轮会话样本与评分器 |
 
 ### 2.2 交互与 Agent 体验
@@ -165,7 +168,8 @@
 | 可运行 4-tool 引擎 | **有** |
 | 向量 + LLM 接线 | **有**（依赖外部 API） |
 | CLI 多轮交互 | **有**（进程内会话） |
-| 生产数据 / 持久化 / Web / 上线 | **无或极弱** |
+| HTTP 会话 + Web UI | **有**（v0 内存会话；SSE/鉴权未做） |
+| 生产数据 / 持久化 / 上线 | **无或极弱** |
 
 ---
 
@@ -178,6 +182,8 @@ npx tsx src/cli.ts chat --mode deterministic
 npx tsx src/cli.ts chat --embeddings
 npx tsx src/cli.ts chat --mode llm
 npx tsx src/cli.ts ask "单次问题"
+npx tsx src/cli.ts serve --port 8787   # Web UI + /api/v1/*
+# or: npm run serve
 ```
 
 配置：`.env.local` + 环境变量中的 API Key（见 `docs/integration-materials.env.example`）。
