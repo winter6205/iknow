@@ -272,11 +272,7 @@ async function runInteractive(
     rl.on("close", () => {
       void chain.finally(() => {
         process.off("SIGINT", onSigint);
-        if (!closed) {
-          writeErr("再见。");
-        } else {
-          writeErr("再见。");
-        }
+        writeErr("再见。");
         resolve();
       });
     });

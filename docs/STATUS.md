@@ -45,7 +45,7 @@
 
 | 能力 | 说明 | 位置 |
 |------|------|------|
-| **多轮 REPL** | `npx tsx src/cli.ts chat` | `src/cli.ts` |
+| **产品 CLI 多轮** | TTY REPL + 管道串行；默认 TTY 无参进 chat | `src/cli/*` + `src/cli.ts` |
 | 人读输出 | 答案 + 依据 + 治理/snapshot/hops | `interaction/format.ts` |
 | 机器输出 | `/json on` 或 one-shot JSON | 同上 |
 | 会话袋 | `ConversationState`：turns、`last_priors`、history_finals | `interaction/conversation.ts` |
