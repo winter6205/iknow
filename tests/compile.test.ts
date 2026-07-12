@@ -5,7 +5,7 @@ import { kbCompile } from "../src/kb-compile/compile.ts";
 import { sha256Hex } from "../src/shared/hash.ts";
 
 describe("kb_compile", () => {
-  it("content_hash dedups second compile of same content", () => {
+  it("content_hash dedups second compile of same content", async () => {
     const store = createSeededStore();
     const content = store.getChunk("chunk-expense").text;
     const hash = sha256Hex(content);
@@ -33,7 +33,7 @@ describe("kb_compile", () => {
     assert.equal(store.listFacts().length, factCountAfterFirst);
   });
 
-  it("facts link chunk_version from source chunks", () => {
+  it("facts link chunk_version from source chunks", async () => {
     const store = createSeededStore();
     const chunk = store.getChunk("chunk-leave");
     // No inline content: extraction uses store chunks so source_chunk_id links.
@@ -60,7 +60,7 @@ describe("kb_compile", () => {
     }
   });
 
-  it("content_hash mismatch throws ValidationError unless force", () => {
+  it("content_hash mismatch throws ValidationError unless force", async () => {
     const store = createSeededStore();
     assert.throws(
       () =>

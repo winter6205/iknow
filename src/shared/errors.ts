@@ -8,7 +8,8 @@ export type IknowErrorCode =
   | "GOVERNANCE_TIMEOUT"
   | "COMPILE_FAILED"
   | "G2_REQUIRED"
-  | "MAX_HOPS";
+  | "MAX_HOPS"
+  | "NETWORK";
 
 export class IknowError extends Error {
   readonly code: IknowErrorCode;
@@ -66,6 +67,13 @@ export class CompileFailedError extends IknowError {
   constructor(message: string, details?: Record<string, unknown>) {
     super("COMPILE_FAILED", message, details);
     this.name = "CompileFailedError";
+  }
+}
+
+export class NetworkError extends IknowError {
+  constructor(message: string, details?: Record<string, unknown>) {
+    super("NETWORK", message, details);
+    this.name = "NetworkError";
   }
 }
 

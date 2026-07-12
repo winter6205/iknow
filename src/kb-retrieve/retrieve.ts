@@ -10,6 +10,7 @@ import type {
 import { ValidationError } from "../shared/errors.js";
 import { buildIdf, scoreKeyword, scoreOverlap } from "./keyword.js";
 import { rrfFusion, type RankedHit } from "./rrf.js";
+import type { VectorIndex } from "./embedding/vector-index.js";
 
 const TOP_ARM = 50;
 const TOP_OUT = 5;
@@ -18,6 +19,11 @@ const MIN_KEYWORD = 2.5;
 /** Overlap arm rescue: admit candidates with low keyword but meaningful overlap. */
 const MIN_OVERLAP_FLOOR = 0.12;
 const ADMIN_ROLE: CallerRole = "admin";
+
+export interface KbRetrieveOptions {
+  /** When set, replaces pseudo-vector (overlap) arm with real cosine ranks. */
+  vectorIndex?: VectorIndex;
+}
 
 function factStatusFromFacts(
   facts: { document_version: string }[],
@@ -37,14 +43,16 @@ function callerMayRead(
 }
 
 /**
- * kb_retrieve: dual-arm keyword + overlap → RRF; fact arm only contributes chunk_id ranks.
+ * kb_retrieve: dual-arm keyword + (vector|overlap) → RRF; fact arm only contributes chunk_id ranks.
  * Fact text is never returned.
+ * Async so real embedding query arm can call the network when vectorIndex is provided.
  */
-export function kbRetrieve(
+export async function kbRetrieve(
   store: InMemoryKnowledgeStore,
   input: KbRetrieveInput,
   session: SessionContext,
-): KbRetrieveOutput {
+  options?: KbRetrieveOptions,
+): Promise<KbRetrieveOutput> {
   if (!input.query || input.query.trim().length === 0) {
     throw new ValidationError("query is required");
   }
@@ -165,12 +173,33 @@ export function kbRetrieve(
     .filter((c) => c.keyword > 0)
     .map((c) => ({ id: c.chunk_id, score: c.keyword }));
 
-  const vectorList: RankedHit[] = candidates
-    .slice()
-    .sort((a, b) => b.overlap - a.overlap)
-    .slice(0, TOP_ARM)
-    .filter((c) => c.overlap > 0)
-    .map((c) => ({ id: c.chunk_id, score: c.overlap }));
+  // Vector arm: real embeddings when index provided; else overlap as pseudo-vector.
+  let vectorList: RankedHit[];
+  const vIndex = options?.vectorIndex;
+  if (vIndex && vIndex.size > 0) {
+    try {
+      const ranked = await vIndex.rankQuery(expandedQuery, TOP_ARM);
+      const allowed = new Set(candidates.map((c) => c.chunk_id));
+      vectorList = ranked
+        .filter((r) => allowed.has(r.id))
+        .map((r) => ({ id: r.id, score: r.score }));
+    } catch {
+      // EXIT: embedding query failed → fall back to overlap arm
+      vectorList = candidates
+        .slice()
+        .sort((a, b) => b.overlap - a.overlap)
+        .slice(0, TOP_ARM)
+        .filter((c) => c.overlap > 0)
+        .map((c) => ({ id: c.chunk_id, score: c.overlap }));
+    }
+  } else {
+    vectorList = candidates
+      .slice()
+      .sort((a, b) => b.overlap - a.overlap)
+      .slice(0, TOP_ARM)
+      .filter((c) => c.overlap > 0)
+      .map((c) => ({ id: c.chunk_id, score: c.overlap }));
+  }
 
   const factList: RankedHit[] =
     index === "chunk"

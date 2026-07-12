@@ -110,9 +110,13 @@ export function loadEvalSet(path: string = DEFAULT_EVAL_SET): EvalSetFile {
   return set;
 }
 
-export function runSample(
+/**
+ * Offline sample runner for CI / npm test / npm run eval.
+ * Never attaches vectorIndex — keyword+overlap only (no embedding API).
+ */
+export async function runSample(
   sample: EvalSample,
-): { log: TrajectoryRunLog; score: TrajectoryScoreResult } {
+): Promise<{ log: TrajectoryRunLog; score: TrajectoryScoreResult }> {
   const store = createSeededStore();
   const overrides = sample.session_overrides ?? {};
   const role = overrides.caller_role ?? "employee";
@@ -122,8 +126,9 @@ export function runSample(
       simulate_governance_timeout:
         overrides.simulate_governance_timeout ?? false,
     }),
+    // vectorIndex intentionally omitted (deterministic suite)
   });
-  const ans = agent.answer(sample.input);
+  const ans = await agent.answer(sample.input);
   const log: TrajectoryRunLog = {
     sample_id: sample.id,
     tool_calls: ans.tool_calls,
@@ -215,18 +220,18 @@ export function aggregateResults(
   };
 }
 
-export function runEvalSuite(opts?: {
+export async function runEvalSuite(opts?: {
   evalSetPath?: string;
   outDir?: string;
   /** Report filename; default trajectory-suite-latest.json */
   fileName?: string;
-}): SuiteReport {
+}): Promise<SuiteReport> {
   const evalSetPath = opts?.evalSetPath ?? DEFAULT_EVAL_SET;
   const set = loadEvalSet(evalSetPath);
   const results: TrajectoryScoreResult[] = [];
   for (const sample of set.samples) {
     try {
-      results.push(runSample(sample).score);
+      results.push((await runSample(sample)).score);
     } catch (err) {
       results.push(syntheticRunnerFail(sample, err));
     }

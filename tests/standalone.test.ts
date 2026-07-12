@@ -24,7 +24,7 @@ function walkTsFiles(dir: string): string[] {
 }
 
 describe("standalone iknow boundary", () => {
-  it("package.json name is iknow and has no gbrain dependency", () => {
+  it("package.json name is iknow and has no gbrain dependency", async () => {
     const pkg = JSON.parse(
       readFileSync(join(root, "package.json"), "utf8"),
     ) as {
@@ -60,7 +60,7 @@ describe("standalone iknow boundary", () => {
     }
   });
 
-  it("no file under src/ imports path containing _upstream_gbrain or gbrain/", () => {
+  it("no file under src/ imports path containing _upstream_gbrain or gbrain/", async () => {
     const srcDir = join(root, "src");
     const files = walkTsFiles(srcDir);
     assert.ok(files.length > 0, "expected src ts files");

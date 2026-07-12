@@ -3,11 +3,11 @@ import assert from "node:assert/strict";
 import { rrfFusion, RRF_K } from "../src/kb-retrieve/rrf.ts";
 
 describe("rrfFusion", () => {
-  it("uses RRF_K = 60", () => {
+  it("uses RRF_K = 60", async () => {
     assert.equal(RRF_K, 60);
   });
 
-  it("ranks shared id higher than single-list hits", () => {
+  it("ranks shared id higher than single-list hits", async () => {
     const fused = rrfFusion(
       [
         [
@@ -33,12 +33,12 @@ describe("rrfFusion", () => {
     assert.equal(fused[0]!.score, 1);
   });
 
-  it("returns empty for empty lists", () => {
+  it("returns empty for empty lists", async () => {
     assert.deepEqual(rrfFusion([]), []);
     assert.deepEqual(rrfFusion([[], []]), []);
   });
 
-  it("handles single list", () => {
+  it("handles single list", async () => {
     const fused = rrfFusion([[{ id: "only", score: 9 }]]);
     assert.equal(fused.length, 1);
     assert.equal(fused[0]!.id, "only");

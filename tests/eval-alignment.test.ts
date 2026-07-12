@@ -34,7 +34,7 @@ const raw = JSON.parse(readFileSync(evalPath, "utf8")) as {
 };
 
 describe("eval-set structural alignment", () => {
-  it("has 32 samples", () => {
+  it("has 32 samples", async () => {
     assert.equal(raw.samples.length, 32);
     assert.equal(raw.meta.counts.total, 32);
   });
@@ -42,7 +42,7 @@ describe("eval-set structural alignment", () => {
 
 describe("eval sample agent.answer policies", () => {
   for (const sample of raw.samples) {
-    it(`${sample.id}: G2 snapshot_id + hops<=5`, () => {
+    it(`${sample.id}: G2 snapshot_id + hops<=5`, async () => {
       const store = createSeededStore();
       const overrides = sample.session_overrides ?? {};
       const agent = new IknowAgent({
@@ -52,7 +52,7 @@ describe("eval sample agent.answer policies", () => {
             overrides.simulate_governance_timeout ?? false,
         }),
       });
-      const ans = agent.answer(sample.input);
+      const ans = await agent.answer(sample.input);
 
       // every answer has snapshot_id (G2)
       assert.ok(ans.snapshot_id, `${sample.id} missing snapshot_id`);

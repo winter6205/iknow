@@ -8,7 +8,7 @@ import { loadEvalSet, runEvalSuite, runSample } from "../src/eval/run-suite.ts";
 import type { TrajectoryRunLog } from "../src/eval/types.ts";
 
 describe("scoreTrajectory pure math", () => {
-  it("scores full required+recommended coverage at 1.0 when hard pass", () => {
+  it("scores full required+recommended coverage at 1.0 when hard pass", async () => {
     const sample = {
       id: "qa-hard-001",
       category: "hard",
@@ -43,7 +43,7 @@ describe("scoreTrajectory pure math", () => {
     assert.ok(Math.abs(s.trajectory_score - 1) < 1e-9, String(s.trajectory_score));
   });
 
-  it("zeros outcome when G2 missing", () => {
+  it("zeros outcome when G2 missing", async () => {
     const sample = {
       id: "qa-easy-001",
       category: "easy",
@@ -73,22 +73,22 @@ describe("scoreTrajectory pure math", () => {
 });
 
 describe("live agent trajectory", () => {
-  it("qa-easy-001 produces tool_calls + G2", () => {
+  it("qa-easy-001 produces tool_calls + G2", async () => {
     const set = loadEvalSet();
     const sample = set.samples.find((s) => s.id === "qa-easy-001");
     assert.ok(sample);
-    const { log, score } = runSample(sample!);
+    const { log, score } = await runSample(sample!);
     assert.ok(log.tool_calls.length >= 1);
     assert.ok(log.tool_calls.every((c) => c.tool && c.ordinal >= 1));
     assert.ok(log.output_fields.snapshot_id.startsWith("snap_"));
     assert.ok(score.required_coverage > 0);
   });
 
-  it("qa-edge-004 denies competitor", () => {
+  it("qa-edge-004 denies competitor", async () => {
     const set = loadEvalSet();
     const sample = set.samples.find((s) => s.id === "qa-edge-004");
     assert.ok(sample);
-    const { log, score } = runSample(sample!);
+    const { log, score } = await runSample(sample!);
     assert.ok(log.tool_calls.some((c) => c.tool === "kb_governance"));
     assert.match(log.final_answer, /拒绝|越权/);
     assert.ok(
@@ -99,8 +99,8 @@ describe("live agent trajectory", () => {
 });
 
 describe("runEvalSuite", () => {
-  it("scores all 32 samples and writes aggregate", () => {
-    const report = runEvalSuite();
+  it("scores all 32 samples and writes aggregate", async () => {
+    const report = await runEvalSuite();
     assert.equal(report.results.length, 32);
     assert.equal(report.aggregate.total, 32);
     assert.ok(report.aggregate.mean_trajectory_score >= 0);
@@ -117,7 +117,7 @@ describe("runEvalSuite", () => {
 });
 
 describe("checkHardConstraints unit", () => {
-  it("flags hops over 5", () => {
+  it("flags hops over 5", async () => {
     const sample = {
       id: "x",
       category: "easy",

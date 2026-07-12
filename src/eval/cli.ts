@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
  * npm run eval — run trajectory suite on eval-set.draft.json
+ * Offline / deterministic: no embedding API required.
  */
 import { runEvalSuite } from "./run-suite.js";
 
-try {
-  const report = runEvalSuite();
+async function main(): Promise<void> {
+  const report = await runEvalSuite();
   const aggregate = report.aggregate;
 
   console.log(
@@ -31,8 +32,10 @@ try {
   ) {
     process.exitCode = 1;
   }
-} catch (err) {
+}
+
+main().catch((err) => {
   const msg = err instanceof Error ? err.message : String(err);
   console.error(`[eval] suite failed: ${msg}`);
   process.exit(1);
-}
+});

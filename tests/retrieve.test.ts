@@ -8,9 +8,9 @@ import { sha256Hex } from "../src/shared/hash.ts";
 import { ValidationError } from "../src/shared/errors.ts";
 
 describe("kb_retrieve", () => {
-  it("keyword hit returns refund policy chunk", () => {
+  it("keyword hit returns refund policy chunk", async () => {
     const store = createSeededStore();
-    const out = kbRetrieve(
+    const out = await kbRetrieve(
       store,
       { query: "公司的退款政策是什么？" },
       createSession("employee"),
@@ -27,7 +27,7 @@ describe("kb_retrieve", () => {
     );
   });
 
-  it("fact text is never present in retrieve output", () => {
+  it("fact text is never present in retrieve output", async () => {
     const store = createSeededStore();
     const content = store.getChunk("chunk-expense").text;
     kbCompile(store, {
@@ -37,7 +37,7 @@ describe("kb_retrieve", () => {
       document_version: "2026.1",
     });
 
-    const out = kbRetrieve(
+    const out = await kbRetrieve(
       store,
       { query: "报销流程", index: "both" },
       createSession("employee"),
@@ -57,9 +57,9 @@ describe("kb_retrieve", () => {
     }
   });
 
-  it("freshness filter keeps only fresh docs when requested", () => {
+  it("freshness filter keeps only fresh docs when requested", async () => {
     const store = createSeededStore();
-    const out = kbRetrieve(
+    const out = await kbRetrieve(
       store,
       {
         query: "年假",
@@ -77,9 +77,9 @@ describe("kb_retrieve", () => {
     );
   });
 
-  it("permission filter hides competitor_external for non-admin", () => {
+  it("permission filter hides competitor_external for non-admin", async () => {
     const store = createSeededStore();
-    const employeeOut = kbRetrieve(
+    const employeeOut = await kbRetrieve(
       store,
       { query: "竞对 薪酬" },
       createSession("employee"),
@@ -90,7 +90,7 @@ describe("kb_retrieve", () => {
       "employee must not see competitor_external",
     );
 
-    const adminOut = kbRetrieve(
+    const adminOut = await kbRetrieve(
       store,
       { query: "竞对 薪酬" },
       createSession("admin"),
@@ -101,9 +101,9 @@ describe("kb_retrieve", () => {
     );
   });
 
-  it("rejects empty query", () => {
+  it("rejects empty query", async () => {
     const store = createSeededStore();
-    assert.throws(
+    await assert.rejects(
       () => kbRetrieve(store, { query: "   " }, createSession()),
       (e: unknown) => e instanceof ValidationError,
     );

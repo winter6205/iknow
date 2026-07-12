@@ -26,10 +26,57 @@ npm run eval
 
 ```bash
 npm run dev -- "公司的退款政策是什么？"
+# or:
+npx tsx src/cli.ts "公司的退款政策是什么？"
+
 npm run dev -- --role employee "年假天数是怎么规定的？"
 npm run dev -- --governance-timeout "检索时治理服务超时了，你还能正常回答退款政策吗？"
 npm run eval   # 32-sample trajectory suite (hard gates + trajectory_score)
 ```
+
+### Agent mode (M2 LLM path)
+
+Default is **deterministic** (no network). To use the tool-calling LLM agent:
+
+```bash
+# CLI flag (takes precedence for this process)
+npx tsx src/cli.ts --mode llm "公司的退款政策是什么？"
+
+# or set env (see docs/integration-materials.env.example)
+# IKNOW_AGENT_MODE=llm
+```
+
+Required env (names only — put real keys in the shell / OS secret store):
+
+| Variable | Role |
+|----------|------|
+| `IKNOW_LLM_API_KEY_ENV` | Name of env var that holds the API key (default `NINE_ROUTER_API_KEY`) |
+| *(that key env)* | Actual secret value (e.g. export `NINE_ROUTER_API_KEY=...`) |
+| `IKNOW_LLM_BASE_URL` | OpenAI-compatible base (default `http://localhost:20128/v1`) |
+| `IKNOW_LLM_MODEL` | Tool-capable model id |
+| `IKNOW_AGENT_MODE` | `deterministic` (default) or `llm` |
+
+If `--mode llm` is set but the key env is empty, CLI exits with `llm_mode_missing_api_key`.
+
+### Optional: embedding vector arm (M1)
+
+Default retrieve is keyword + overlap (offline). To enable the real embedding arm over an OpenAI-compatible HTTP API:
+
+1. Copy `docs/integration-materials.env.example` settings into `.env.local` (never commit secrets).
+2. Set `IKNOW_EMBEDDING_MODE=api` **or** pass `--embeddings` on the CLI.
+3. Point `IKNOW_EMBEDDING_API_KEY_ENV` at the env var that holds the key (default `NINE_ROUTER_API_KEY`).
+4. Configure `IKNOW_EMBEDDING_BASE_URL` / `IKNOW_EMBEDDING_MODEL` / dims as needed.
+
+```bash
+# env-based
+export IKNOW_EMBEDDING_MODE=api
+npm run dev -- "公司的退款政策是什么？"
+
+# flag-based (only useful when the key env is set)
+npx tsx src/cli.ts --embeddings "公司的退款政策是什么？"
+```
+
+If the embedding API fails, the CLI continues with keyword-only retrieve. `npm test` / `npm run eval` stay offline and do **not** call the network.
 
 ## Layout
 

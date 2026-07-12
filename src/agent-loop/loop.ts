@@ -23,9 +23,11 @@ export interface AgentLoopOptions {
   store: InMemoryKnowledgeStore;
   session: SessionContext;
   maxHops?: number;
+  /** Optional embedding vector index for kb_retrieve vector arm (M1). */
+  vectorIndex?: import("../kb-retrieve/embedding/vector-index.js").VectorIndex;
 }
 
-type RetrieveResult = ReturnType<typeof kbRetrieve>;
+type RetrieveResult = Awaited<ReturnType<typeof kbRetrieve>>;
 
 /**
  * Deterministic agent loop (no external LLM).
@@ -37,14 +39,20 @@ export class IknowAgent {
   private readonly store: InMemoryKnowledgeStore;
   private readonly session: SessionContext;
   private readonly maxHops: number;
+  private readonly vectorIndex?: import("../kb-retrieve/embedding/vector-index.js").VectorIndex;
 
   constructor(opts: AgentLoopOptions) {
     this.store = opts.store;
     this.session = opts.session;
     this.maxHops = opts.maxHops ?? MAX_HOPS;
+    this.vectorIndex = opts.vectorIndex;
   }
 
-  answer(query: string): IknowAnswer {
+  private retrieveOpts() {
+    return this.vectorIndex ? { vectorIndex: this.vectorIndex } : undefined;
+  }
+
+  async answer(query: string): Promise<IknowAnswer> {
     const trace = new ToolTrace();
     const notes: string[] = [];
     let hops = 0;
@@ -90,7 +98,7 @@ export class IknowAgent {
     ) {
       hops += 1;
       trace.record("kb_retrieve", { query: q });
-      const denied = kbRetrieve(this.store, { query: q }, this.session);
+      const denied = await kbRetrieve(this.store, { query: q }, this.session, this.retrieveOpts());
       const docId = denied.chunks[0]?.doc_id ?? "crm-contacts";
       trace.record("kb_governance", {
         action: "snapshot_status",
@@ -115,7 +123,7 @@ export class IknowAgent {
     }
     hops += 1;
     trace.record("kb_retrieve", { query: q });
-    let retrieved = kbRetrieve(this.store, { query: q }, this.session);
+    let retrieved = await kbRetrieve(this.store, { query: q }, this.session, this.retrieveOpts());
     this.noteRetrieveDegradation(retrieved, notes);
     retrieved = this.applyNonexistentDocFilter(q, retrieved);
 
@@ -149,7 +157,7 @@ export class IknowAgent {
       if (hops < this.maxHops) {
         hops += 1;
         trace.record("kb_retrieve", { query: q, reason: "post_compile" });
-        retrieved = kbRetrieve(this.store, { query: q }, this.session);
+        retrieved = await kbRetrieve(this.store, { query: q }, this.session, this.retrieveOpts());
         this.noteRetrieveDegradation(retrieved, notes);
       }
     }
@@ -185,10 +193,11 @@ export class IknowAgent {
           query: q,
           prior_chunks: [prior],
         });
-        retrieved = kbRetrieve(
+        retrieved = await kbRetrieve(
           this.store,
           { query: q, prior_chunks: [prior] },
           this.session,
+          this.retrieveOpts(),
         );
         this.noteRetrieveDegradation(retrieved, notes);
         if (retrieved.chunks.length === 0) {

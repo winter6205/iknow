@@ -18,6 +18,23 @@ export { kbCompile } from "./kb-compile/compile.js";
 export { kbGovernance } from "./kb-governance/governance.js";
 
 export { IknowAgent, IknowAgentLoop, MAX_HOPS } from "./agent-loop/loop.js";
+export { LlmIknowAgent, parseFinalContent } from "./agent-loop/llm-agent.js";
+export {
+  OpenAiCompatibleLlmClient,
+  type LlmChatClient,
+  type LlmChatResult,
+  type LlmMessage,
+  type LlmToolCall,
+  type LlmToolDef,
+  type OpenAiCompatibleLlmClientOptions,
+} from "./agent-loop/llm-client.js";
+export {
+  KB_TOOL_DEFS,
+  HOP_TOOLS,
+  TOOL_NAMES,
+  isKbToolName,
+  type KbToolName,
+} from "./agent-loop/tool-defs.js";
 export {
   createSession,
   createManagerSession,
@@ -36,6 +53,43 @@ export {
   seedEnterpriseKb,
   seedDemoKnowledge,
 } from "./fixtures/seed-kb.js";
+
+export {
+  loadIknowEnv,
+  getApiKey,
+  assertOfflineCompatible,
+  assertToolProtocolSupported,
+} from "./config/env.js";
+export type {
+  IknowEnv,
+  EmbeddingEnv,
+  LlmEnv,
+  AgentMode,
+  EmbeddingMode,
+} from "./config/env.js";
+
+export {
+  createEmbeddingClientFromEnv,
+  getOrCreateVectorIndex,
+  ensureStoreIndexed,
+  resetVectorIndexForTests,
+  getSharedEmbeddingClient,
+  FakeEmbeddingClient,
+  OpenAiCompatibleEmbeddingClient,
+  VectorIndex,
+  cosine,
+  l2normalize,
+} from "./kb-retrieve/embedding/index.js";
+export type {
+  EmbeddingClient,
+  ChunkEmbedInput,
+} from "./kb-retrieve/embedding/index.js";
+
+export { createIknowRuntime } from "./runtime/create-runtime.js";
+export type {
+  CreateIknowRuntimeOptions,
+  IknowRuntime,
+} from "./runtime/create-runtime.js";
 
 export { scoreTrajectory, checkHardConstraints } from "./eval/score-trajectory.js";
 export { runEvalSuite, runSample, loadEvalSet, aggregateResults } from "./eval/run-suite.js";

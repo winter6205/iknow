@@ -10,7 +10,7 @@ const THREE_STATES = new Set([
 ]);
 
 describe("kb_verify_citation", () => {
-  it("returns supported when claim is grounded in chunk text", () => {
+  it("returns supported when claim is grounded in chunk text", async () => {
     const store = createSeededStore();
     const out = kbVerifyCitation(store, {
       claim: "客户可在收货后30天内申请全额退款",
@@ -28,7 +28,7 @@ describe("kb_verify_citation", () => {
     );
   });
 
-  it("returns unsupported when claim is not grounded", () => {
+  it("returns unsupported when claim is not grounded", async () => {
     const store = createSeededStore();
     const out = kbVerifyCitation(store, {
       claim: "公司提供终身免费保修和火星配送服务",

@@ -6,7 +6,7 @@ import { createSession } from "../src/agent-loop/session.ts";
 import { GovernanceTimeoutError } from "../src/shared/errors.ts";
 
 describe("kb_governance", () => {
-  it("snapshot_id is always present", () => {
+  it("snapshot_id is always present", async () => {
     const store = createSeededStore();
     const out = kbGovernance(
       store,
@@ -18,7 +18,7 @@ describe("kb_governance", () => {
     assert.ok(out.checked_at);
   });
 
-  it("stale for revoked documents", () => {
+  it("stale for revoked documents", async () => {
     const store = createSeededStore();
     const out = kbGovernance(
       store,
@@ -39,7 +39,7 @@ describe("kb_governance", () => {
     );
   });
 
-  it("timeout throws GOVERNANCE_TIMEOUT when simulate flag set", () => {
+  it("timeout throws GOVERNANCE_TIMEOUT when simulate flag set", async () => {
     const store = createSeededStore();
     assert.throws(
       () =>
@@ -54,7 +54,7 @@ describe("kb_governance", () => {
     );
   });
 
-  it("detect_conflict marks dual refund policies", () => {
+  it("detect_conflict marks dual refund policies", async () => {
     const store = createSeededStore();
     const out = kbGovernance(
       store,
@@ -65,7 +65,7 @@ describe("kb_governance", () => {
     assert.ok(out.snapshot_id);
   });
 
-  it("snapshot_status also surfaces refund dual-policy conflict", () => {
+  it("snapshot_status also surfaces refund dual-policy conflict", async () => {
     const store = createSeededStore();
     const out = kbGovernance(
       store,
