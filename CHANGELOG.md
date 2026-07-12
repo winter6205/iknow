@@ -29,8 +29,20 @@ Bootstrap scaffold from project template.
 - tier-grouped eval framework: fast/medium/slow, parallel within tier
 - 3-layer memory model: CLAUDE.md / auto memory / `docs/`
 
+### Review hardening (trajectory OCR + staged reviews)
+
+- Shared `src/eval/lexicon.ts` + policy-string scorer (`policy-checks.ts`)
+- Data-driven `session_overrides` on eval samples; resilient suite runner
+- `ToolCallLog.ordinal`; `release_gates`; draft eval-set warn
+- Store/compile/loop root-cause fixes from prior staged review
+
+### Ops
+
+- Remote: private `https://github.com/winter6205/iknow` (`master` tracking `origin/master`)
+
 ### Next
 
-- Ratify open P3 assumptions in `docs/iknow-spec/docs/protocol/ADR-v0.1-assumptions-p3.md`
-- Swap in-memory store for durable backend when needed
-- Expand medium/slow eval tasks as product grows
+- **M1**: real embedding arm for `kb_retrieve` (materials: `docs/integration-materials.env.example`)
+- **M2**: LLM tool_calls agent mode behind `IKNOW_AGENT_MODE` (keep deterministic CI)
+- Ratify `docs/iknow-spec/docs/protocol/ADR-v0.1-assumptions-p3.md`
+- Replace draft eval samples with real queries; calibrate soft gates

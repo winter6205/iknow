@@ -138,7 +138,10 @@ Risks / Notes:
 - Memory 三层 + 写入准入 + 维护 → @.claude/rules/memory.md
 - 代码修改 + 测试 + 高风险区域 → @.claude/rules/code-quality.md
 - 权限 + 工具使用 + 安全与隐私 → @.claude/rules/security-boundaries.md
-- 项目架构 → @docs/architecture.md（待建）
+- 5 个通用任务模板 (test-coverage / pr-review / error-handling-fix / refactor-dedup / security-audit) → @.claude/rules/task-templates.md
+- 项目架构 → @docs/architecture.md
+- 规格交接 → @docs/iknow-spec/HANDOFF.md
+- 接入材料占位 → @docs/integration-materials.env.example
 - Git 工作流细节 → @docs/git-workflow.md（待建）
 - 测试细节 → @docs/testing.md（待建）
 - 发布流程 → @docs/release.md（待建）
@@ -155,6 +158,8 @@ Risks / Notes:
 |---|---|
 | 接手陌生项目 / 摸架构 | `codebase-memory` (get_architecture + search_graph) |
 | 改前摸调用链 | `serena` (find_referencing_symbols) |
+| Agent 生命周期 / 阶段门 | 项目 skill `agent-development-lifecycle` |
+| Trajectory / 门禁评测 | 项目 skill `agent-evaluation-system` + `npm run eval` |
 | 改前写测试 / S2 边界 | `defensive-contract-validator` |
 | Bug 修复 | `systematic-debugging` (含 Phase 1 红线: 先建反馈循环) |
 | 写 spec / 设计 | `spec-driven-development` |
@@ -163,19 +168,45 @@ Risks / Notes:
 | 跨 session 记忆 / 规则迭代 | `self-evolving-rules` (7 步流程) |
 | Skill 创建 / 优化 | `arthurpower:skill-authoring` / `SkillOpt` |
 
-### Eval (regression test for this template)
+### Eval (iknow product + template)
+
+**产品 trajectory（主路径）**:
+
+```bash
+npm test          # unit + eval alignment + trajectory unit tests
+npm run eval      # 32-sample suite → docs/iknow-spec/docs/eval/results/ (gitignored)
+```
+
+硬门禁目标: `hard_pass_rate = 1.0`；Sprint-1 软目标: `mean_trajectory_score ≥ 0.6`。
+
+**模板 scaffold eval**（仓库自带）:
 
 - @.evals/README.md — eval framework 怎么用
 - @.evals/run.sh — bash runner
 - @.evals/tasks/*.yaml — task definitions
 
-跑 baseline: `bash .evals/run.sh`
+跑 template baseline: `bash .evals/run.sh`
+
+### Runtime map (iknow)
+
+| 路径 | 角色 |
+|------|------|
+| `src/kb-*` / `src/agent-loop` / `src/knowledge-store` | 产品实现（可独立运行） |
+| `src/eval/` | trajectory scorer + suite runner |
+| `docs/iknow-spec/` | 协议与评测真值 |
+| `_upstream_gbrain/` | **只读**参考（gitignore，禁止 runtime 链接） |
+
+**Agent mode（规划）**: 当前仅 **deterministic** loop；LLM 模式待 `IKNOW_AGENT_MODE`（见 integration materials）。  
+**Embedding**: 当前 keyword/overlap RRF；真实向量待 `IKNOW_EMBEDDING_*` 材料。
 
 ### Domain docs (auto-load on session start)
 
 - @docs/CONTEXT.md — 项目领域语言 + Flagged ambiguities
+- @docs/architecture.md — 独立 runtime 能力切分
+- @docs/iknow-spec/HANDOFF.md — 协议/阶段真值（优先于过时分支叙述）
 - @docs/handoff/<latest>.md — 最近 session 交接
 - @docs/CHANGELOG.md — 版本变更记录
+- @docs/integration-materials.env.example — LLM/向量接入材料占位（只写环境变量名）
 
 ### 3 层记忆模型 (where to write)
 

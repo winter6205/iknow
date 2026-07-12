@@ -5,6 +5,11 @@ CLAUDE.local.md
 .env
 .env.*
 !.env.example
+!.env.testing.example
+# local filled materials (never commit secrets)
+.env.local
+docs/integration-materials.env
+**/integration-materials.filled.env
 
 # runtime eval artifacts
 .evals/results/

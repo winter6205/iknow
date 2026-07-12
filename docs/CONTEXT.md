@@ -22,28 +22,52 @@ A precise location into source material (chunk + offsets or equivalent) that gro
 _Avoid_: Quote range, highlight, bookmark
 
 **G2**:
-The agent response envelope shape (structured final answer contract after the hop loop).
+The agent response envelope that must carry `snapshot_id` (and citation fields when answering from KB) before return to the user.
 _Avoid_: Final answer bag, response wrapper, JSON reply shell
 
 **kb_retrieve**:
-Tool that dual-arm ranks and merges candidates (e.g. RRF + filters) into ranked Chunks for the agent loop.
+Tool that dual-arm ranks and merges candidates (keyword/overlap → RRF, k=60) into ranked Chunks for the agent loop.
 _Avoid_: search, RAG query, vector lookup (alone)
 
 **kb_verify** / **kb_verify_citation**:
 Tool that pure three-state checks whether a claim is supported by a given `source_span` / chunk evidence.
-_Avoid_: fact-check, NLI pass, trust score
+_Avoid_: fact-check, NLI pass, trust score, confidence float
 
 **kb_compile**:
-Tool that turns verified evidence into Facts with content_hash dedup for stable reuse.
+Tool that turns evidence into Facts with content_hash dedup for stable reuse.
 _Avoid_: summarize, extract, ingest
 
 **kb_governance**:
-Tool that checks freshness, conflicts, and `snapshot_id` scope before or after compilation.
+Tool that checks freshness, conflicts, and stamps `snapshot_id` (B-position independent tool).
 _Avoid_: ACL admin, content moderation, CMS publish
 
 **max_hops**:
-Hard budget on agent-loop tool-call rounds (protocol default 5) before forcing a G2 envelope exit.
+Hard budget on hop-counted tool rounds (`kb_retrieve` + `kb_verify_citation` only; default 5) before forced exit.
 _Avoid_: retries, steps, turns (unless clearly UI chat turns)
+
+**trajectory** / **trajectory_score**:
+Path-quality score over tool sequence vs required/recommended tools, efficiency, and hard-gate outcome (P2 formula).
+_Avoid_: accuracy alone, pass rate only, LLM-as-judge score (those are outcome/soft metrics)
+
+**tool_calls log**:
+Structured per-answer list `{ tool, args, ordinal }` for trajectory scoring; `tool_trace` is names-only compat.
+_Avoid_: ts (ambiguous with timestamp), stack, audit log (unless product audit)
+
+**release_gates**:
+Named milestone targets for suite rollup (`hard_pass_rate`, `mean_trajectory`) under `SuiteAggregate.release_gates`.
+_Avoid_: sprint1_gates (legacy name), CI green alone
+
+**session_overrides**:
+Eval-sample fields that configure harness session (e.g. `simulate_governance_timeout`) without hardcoding sample ids in the runner.
+_Avoid_: special-case if id === "qa-edge-006" in code
+
+**deterministic agent**:
+Rule-based `IknowAgent` loop used for CI and baseline eval; no external LLM/tool_calls API.
+_Avoid_: mock agent, stub brain (unless truly empty fakes)
+
+**lexicon (eval)**:
+Shared note markers and answer regexes in `src/eval/lexicon.ts` used by both loop notes and scorer.
+_Avoid_: duplicated string literals in loop and score-trajectory
 
 ## Relationships
 
@@ -51,13 +75,18 @@ _Avoid_: retries, steps, turns (unless clearly UI chat turns)
 - **Chunk + claim → kb_verify_citation → three-state**: verify binds claim to `source_span`
 - **Verified evidence → kb_compile → Fact**: compile emits content_hash–stable facts
 - **Fact / KB view → kb_governance → snapshot_id status**: governance stamps freshness/conflict
-- **Agent loop → max_hops → G2**: loop terminates into G2 envelope when done or budget exhausted
+- **Agent loop → max_hops → G2**: loop terminates with G2 envelope when done or budget exhausted
+- **tool_calls log → scoreTrajectory → trajectory_score / release_gates**: suite aggregates hard + soft gates
+- **session_overrides → createSession → agent run**: data-driven timeout/role without runner special cases
 
 ## Flagged ambiguities
 
 - **gbrain vs iknow runtime**: `_upstream_gbrain/` is READ-ONLY design reference; product runtime is standalone `iknow` with **zero** import/link to gbrain
 - **"verify" alone**: prefer `kb_verify_citation` / `kb_verify` tool name in code; "verify" in prose means citation support check, not human QA sign-off
 - **snapshot vs Snapshot (template)**: project term is `snapshot_id` (governance), not generic project backup
+- **hops vs tool_calls.length**: hops only count retrieve+verify; compile/governance do not consume hop budget
+- **ordinal vs ts**: log field is `ordinal` (1-based sequence); do not use `ts` for tool call order
+- **draft eval set**: `eval-set.draft.json` is DRAFT-EVAL-SET; hard_pass on draft ≠ production gate until real queries replace samples
 
 ---
 
@@ -71,4 +100,4 @@ bash scripts/bootstrap.sh --interactive
 
 ---
 
-**Maintenance cadence**: monthly review per `.claude/rules/memory.md` memory maintenance section.
+**Maintenance cadence**: monthly review per project memory rules.
