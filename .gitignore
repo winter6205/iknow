@@ -5,5 +5,26 @@ CLAUDE.local.md
 .env
 .env.*
 !.env.example
+
 # runtime eval artifacts
 .evals/results/
+
+# Node / TypeScript build
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+
+# Local agent workspace state (not product code)
+.grok/
+
+# --- Upstream reference ONLY (immutable). Never commit. Never import at runtime. ---
+_upstream_gbrain/
+_upstream_gbrain/**
+# obsolete nested clone name from early Phase 2 experiments
+gbrain/
+gbrain/**
+
+# personal / local tooling (not team-shared)
+.claude/skills/
+.serena/

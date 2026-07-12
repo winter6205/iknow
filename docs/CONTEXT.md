@@ -5,58 +5,70 @@
 
 ## Language
 
-> Add terms below as the project grows. Each entry: definition + `_Avoid_` alternatives.
-> First time on a new project: copy this template, replace terms with project-specific ones.
+**Chunk**:
+A retrievable text unit from the enterprise KB, identified and returned by `kb_retrieve` with ranking metadata.
+_Avoid_: Document fragment, passage, snippet (unless speaking of UI display only)
 
-**Example — fill these in for your project**:
+**Fact**:
+A compiled, deduplicated claim produced by `kb_compile` (content_hash–stable) for later citation and governance.
+_Avoid_: Assertion, take, note, summary blob
 
-**Customer**:
-A person who places orders and consumes services.
-_Avoid_: User, client, account holder
+**snapshot_id**:
+An opaque governance identifier for a point-in-time KB / fact view used by `kb_governance` freshness and conflict checks.
+_Avoid_: Version, tag, checkpoint, revision (unless mapping to external VCS)
 
-**Order**:
-A customer's request for a product or service, tracked through fulfillment.
-_Avoid_: Request, ticket, transaction
+**source_span**:
+A precise location into source material (chunk + offsets or equivalent) that grounds a citation in `kb_verify_citation`.
+_Avoid_: Quote range, highlight, bookmark
 
-**Snapshot**:
-A point-in-time capture of project state, persisted for later inspection or rollback.
-_Avoid_: Backup, dump, freeze
+**G2**:
+The agent response envelope shape (structured final answer contract after the hop loop).
+_Avoid_: Final answer bag, response wrapper, JSON reply shell
+
+**kb_retrieve**:
+Tool that dual-arm ranks and merges candidates (e.g. RRF + filters) into ranked Chunks for the agent loop.
+_Avoid_: search, RAG query, vector lookup (alone)
+
+**kb_verify** / **kb_verify_citation**:
+Tool that pure three-state checks whether a claim is supported by a given `source_span` / chunk evidence.
+_Avoid_: fact-check, NLI pass, trust score
+
+**kb_compile**:
+Tool that turns verified evidence into Facts with content_hash dedup for stable reuse.
+_Avoid_: summarize, extract, ingest
+
+**kb_governance**:
+Tool that checks freshness, conflicts, and `snapshot_id` scope before or after compilation.
+_Avoid_: ACL admin, content moderation, CMS publish
+
+**max_hops**:
+Hard budget on agent-loop tool-call rounds (protocol default 5) before forcing a G2 envelope exit.
+_Avoid_: retries, steps, turns (unless clearly UI chat turns)
 
 ## Relationships
 
-> How do the entities above interact? List directional relationships.
-
-<!-- Example format:
-- **Order → Fulfillment**: Order emits `OrderPlaced` event; Fulfillment consumes it
-- **Customer → Order**: Customer owns 0+ Orders (1:N relationship)
--->
+- **Query → kb_retrieve → Chunk[]**: agent issues a retrieve hop; store returns ranked chunks
+- **Chunk + claim → kb_verify_citation → three-state**: verify binds claim to `source_span`
+- **Verified evidence → kb_compile → Fact**: compile emits content_hash–stable facts
+- **Fact / KB view → kb_governance → snapshot_id status**: governance stamps freshness/conflict
+- **Agent loop → max_hops → G2**: loop terminates into G2 envelope when done or budget exhausted
 
 ## Flagged ambiguities
 
-> Track previously ambiguous terms that have been resolved. Prevents regression.
-
-<!-- Example format:
-- "ticket" was previously used to mean both a support issue and a sale order — resolved: sale order = **Order**, support issue = **Ticket**
--->
+- **gbrain vs iknow runtime**: `_upstream_gbrain/` is READ-ONLY design reference; product runtime is standalone `iknow` with **zero** import/link to gbrain
+- **"verify" alone**: prefer `kb_verify_citation` / `kb_verify` tool name in code; "verify" in prose means citation support check, not human QA sign-off
+- **snapshot vs Snapshot (template)**: project term is `snapshot_id` (governance), not generic project backup
 
 ---
 
 ## Bootstrap mode
 
-If this file looks like the template above (only example entries, no real project terms), run:
+If this file only had template examples and no real project terms, seed via:
 
 ```bash
 bash scripts/bootstrap.sh --interactive
 ```
 
-This walks you through 3 questions to seed real project terms:
-
-1. What are the 3-5 core entities in this domain?
-2. Which existing labels / names in your code should be normalized?
-3. Which ambiguities have caused bugs before?
-
-Answers get written into the `## Language` section above.
-
 ---
 
-**Maintenance cadence**: monthly review per `.claude/rules/memory.md` § 月度维护流程.
+**Maintenance cadence**: monthly review per `.claude/rules/memory.md` memory maintenance section.

@@ -1,19 +1,29 @@
 # Changelog
 
-## 0.1.0 (unreleased) — initial scaffold
+## 0.1.0 (unreleased)
 
-Bootstrap scaffold from project template. No business code yet.
-Baseline: `bash .evals/run.sh` 5/5 fast pass.
+### P3 scaffold
 
-### Scaffold verified
+Standalone enterprise KB agent scaffold (no gbrain runtime dependency):
 
-- `bash scripts/bootstrap.sh` — 6-step idempotent setup ✓
-- `bash .evals/run.sh` — default = tier=fast 5/5 passed in ~9s
+- **4 tools**: `kb_retrieve`, `kb_verify_citation`, `kb_compile`, `kb_governance`
+- **Agent loop**: hop-bounded loop (`max_hops`) with G2 response envelope
+- **Knowledge store**: in-memory store (fixture seed for demos/eval)
+- **Capability layout**: `src/kb-retrieve/`, `src/kb-verify/`, `src/kb-compile/`, `src/kb-governance/`, `src/agent-loop/`, `src/knowledge-store/`
+- **Tests**: `npm test` — 59/59 pass (unit + eval-set G2/hops alignment + standalone boundary)
+- **Upstream**: `_upstream_gbrain/` gitignored READ-ONLY reference only — runtime has zero link to gbrain
+
+### Initial scaffold
+
+Bootstrap scaffold from project template.
+
+- `bash scripts/bootstrap.sh` — 6-step idempotent setup
+- `bash .evals/run.sh` — default = tier=fast baseline
 - tier-grouped eval framework: fast/medium/slow, parallel within tier
 - 3-layer memory model: CLAUDE.md / auto memory / `docs/`
 
 ### Next
 
-- Add project-specific CONTEXT.md terms (replace template examples)
-- Add medium/slow eval tasks as project grows
-- First session handoff in `docs/handoff/<date>-<topic>.md`
+- Ratify open P3 assumptions in `docs/iknow-spec/docs/protocol/ADR-v0.1-assumptions-p3.md`
+- Swap in-memory store for durable backend when needed
+- Expand medium/slow eval tasks as product grows
