@@ -29,6 +29,18 @@ function statusLabel(phase: ChatPhase): { text: string; tone: string } {
   }
 }
 
+function parseAgentMode(value: string): AgentMode | null {
+  if (value === "deterministic" || value === "llm") return value;
+  return null;
+}
+
+function parseCallerRole(value: string): CallerRole | null {
+  if (value === "employee" || value === "manager" || value === "admin") {
+    return value;
+  }
+  return null;
+}
+
 export function ChatHeader({
   session,
   phase,
@@ -61,6 +73,7 @@ export function ChatHeader({
           className={styles.status}
           data-tone={status.tone}
           title={healthLabel ?? undefined}
+          aria-live="polite"
         >
           <span className={styles.dot} aria-hidden="true" />
           {status.text}
@@ -78,7 +91,10 @@ export function ChatHeader({
             className={styles.select}
             value={mode}
             disabled={busy}
-            onChange={(e) => onModeChange(e.target.value as AgentMode)}
+            onChange={(e) => {
+              const next = parseAgentMode(e.target.value);
+              if (next) onModeChange(next);
+            }}
           >
             <option value="deterministic">deterministic</option>
             <option value="llm">llm</option>
@@ -92,7 +108,10 @@ export function ChatHeader({
             className={styles.select}
             value={role}
             disabled={busy}
-            onChange={(e) => onRoleChange(e.target.value as CallerRole)}
+            onChange={(e) => {
+              const next = parseCallerRole(e.target.value);
+              if (next) onRoleChange(next);
+            }}
           >
             <option value="employee">employee</option>
             <option value="manager">manager</option>

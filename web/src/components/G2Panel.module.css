@@ -75,13 +75,28 @@
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  white-space: normal;
 }
 
 .gov {
-  color: var(--status-ok) !important;
+  color: var(--text-tertiary);
+}
+
+.gov[data-status="ok"] {
+  color: var(--status-ok);
+}
+
+.gov[data-status="blocked"],
+.gov[data-status="denied"],
+.gov[data-status="error"] {
+  color: var(--status-danger);
+}
+
+.gov[data-status="warn"],
+.gov[data-status="review"] {
+  color: var(--status-warn);
 }
 
 .empty {
@@ -101,10 +116,12 @@
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   line-height: 1.45;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
   max-height: 22rem;
   white-space: pre;
-  word-break: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 @media (max-width: 960px) {

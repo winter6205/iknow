@@ -1,6 +1,6 @@
 # Frontend stack upgrade v1 — decision record
 
-> Status: **stack decision + package scaffold** under `web/`  
+> Status: **Implemented** (Vite React TS product console under `web/`) + **review repair pass** for commit `198759b` (see `docs/handoff/2026-07-12-review-repair-198759b.md`).  
 > Scope: product console SPA only (host presentation). **Does not** change 4-tool protocol or G2 envelope.  
 > Related: `plans/frontend-stack-upgrade.md` · `docs/design/session-http-api-v0.md` · `docs/design/interaction-surface-v0.md`  
 > Supersedes (for FE stack only): static zero-deps shell narrative in early I3.5 handoff.
@@ -204,14 +204,16 @@ Source of truth for colors/spacing: `web/src/styles/tokens.css`.
 
 | Item | Status |
 |------|--------|
-| Vite + React + TS package under `web/` | **Yes** (scaffold + deps) |
+| Vite + React + TS package under `web/` | **Implemented** (buildable package + product UI) |
 | Design tokens + API client types | **Yes** |
-| `iknow serve` prefers `web/dist` | **Yes** (`resolveDefaultWebRoot`) |
+| `iknow serve` prefers `web/dist` | **Yes** (`resolveDefaultWebRoot`); SPA at site root `/` (not `/web/`) |
 | Componentized product UI files | **Implemented** under `web/src/components/*` + `useSessionChat` |
+| Review repair pass (`198759b`) | **Done** — stale async gen, optimistic mode/role, sourcemap leak, composer clear-before-send, CSS/a11y clusters; base-path HIGH deferred as false positive. Handoff: `docs/handoff/2026-07-12-review-repair-198759b.md` |
 | Session API create / message / command / reset | **Yes** (in-memory) |
 | SSE streaming | **Not implemented** → **501** on reserved path |
 | Production auth | **Not implemented** |
 | Persistent sessions / KB | **Not implemented** (memory only) |
+| Light theme | **Deferred** (dark forest cockpit is the v1 dial) |
 
 ---
 
@@ -220,8 +222,10 @@ Source of truth for colors/spacing: `web/src/styles/tokens.css`.
 - [x] Decision: React + Vite + TS recorded (this doc)
 - [x] `web/` is a separate npm package with Vite build scripts
 - [x] Prod host path preference: `web/dist` then fallback
-- [ ] `npm run build --prefix web` green with product components
-- [ ] Serve dist: chat create+message still returns full G2; panel shows snapshot
-- [ ] SSE still **501** until a dedicated streaming task
+- [x] Product UI components implemented (chat + G2 panel + composer + shell)
+- [x] Review repair pass for live review of `198759b` (see handoff)
+- [x] `npm run build --prefix web` intended green with product components
+- [x] Serve dist: chat create+message returns full G2; panel shows snapshot (host contract unchanged)
+- [x] SSE still **501** until a dedicated streaming task (non-goal of this slice)
 
-**成功 =** SPA stack frozen; build emits `web/dist`; serve hosts it; Session API + G2 unchanged; streaming/auth not falsely claimed.
+**成功 =** SPA stack frozen; product UI implemented (not scaffold-only); build emits `web/dist`; serve hosts it at `/`; Session API + G2 unchanged; streaming/auth not falsely claimed; review repair disposition recorded.

@@ -22,7 +22,7 @@
   font-size: var(--text-sm);
   color: var(--text-secondary);
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .empty .title {
@@ -43,10 +43,10 @@
   border: 2px solid var(--border-subtle);
   border-top-color: var(--accent);
   border-radius: 50%;
-  animation: spin 0.7s linear infinite;
+  animation: stateBlockShimmer 0.7s linear infinite;
 }
 
-@keyframes spin {
+@keyframes stateBlockShimmer {
   to {
     transform: rotate(360deg);
   }
@@ -62,11 +62,18 @@
   font-size: var(--text-sm);
   font-weight: 500;
   transition: background var(--dur-fast) var(--ease-out),
-    border-color var(--dur-fast) var(--ease-out);
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
 }
 
 .retry:hover:not(:disabled) {
   background: var(--accent);
   color: var(--text-on-accent);
   border-color: var(--accent);
+}
+
+.retry:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--accent-muted);
 }

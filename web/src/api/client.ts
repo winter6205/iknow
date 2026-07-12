@@ -10,14 +10,37 @@ import type {
 } from "./types";
 import { SessionApiError } from "./types";
 
+/**
+ * Session HTTP API base path (session-http-api-v0).
+ * @see docs/design/session-http-api-v0.md
+ */
 const API = "/api/v1";
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+const DEFAULT_TIMEOUT_MS = 120_000;
+
+function defaultSignal(external?: AbortSignal): AbortSignal | undefined {
+  if (external) return external;
+  // AbortSignal.timeout is available in modern browsers / Node 18+
+  if (typeof AbortSignal !== "undefined" && "timeout" in AbortSignal) {
+    return AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  }
+  return undefined;
+}
+
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  signal?: AbortSignal,
+): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const res = await fetch(path, { ...init, headers });
+  const res = await fetch(path, {
+    ...init,
+    headers,
+    signal: signal ?? init.signal ?? defaultSignal(),
+  });
   const text = await res.text();
   let data: unknown = null;
   if (text) {
@@ -39,25 +62,33 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return data as T;
 }
 
-export function health(): Promise<HealthResponse> {
-  return request(`${API}/health`);
+export function health(signal?: AbortSignal): Promise<HealthResponse> {
+  return request(`${API}/health`, {}, signal);
 }
 
-export function createSession(body: {
-  role?: CallerRole;
-  mode?: AgentMode;
-  json_mode?: boolean;
-  embeddings?: boolean;
-}): Promise<CreateSessionResponse> {
-  return request(`${API}/sessions`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+export function createSession(
+  body: {
+    role?: CallerRole;
+    mode?: AgentMode;
+    json_mode?: boolean;
+    embeddings?: boolean;
+  },
+  signal?: AbortSignal,
+): Promise<CreateSessionResponse> {
+  return request(
+    `${API}/sessions`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+    signal,
+  );
 }
 
 export function postMessage(
   id: string,
   text: string,
+  signal?: AbortSignal,
 ): Promise<PostMessageResponse> {
   return request(
     `${API}/sessions/${encodeURIComponent(id)}/messages`,
@@ -65,6 +96,7 @@ export function postMessage(
       method: "POST",
       body: JSON.stringify({ text }),
     },
+    signal,
   );
 }
 
@@ -72,6 +104,7 @@ export function postCommand(
   id: string,
   command: string,
   args: string[] = [],
+  signal?: AbortSignal,
 ): Promise<PostCommandResponse> {
   return request(
     `${API}/sessions/${encodeURIComponent(id)}/commands`,
@@ -79,15 +112,21 @@ export function postCommand(
       method: "POST",
       body: JSON.stringify({ command, args }),
     },
+    signal,
   );
 }
 
 export function resetSession(
   id: string,
   opts: { new_id?: boolean } = {},
+  signal?: AbortSignal,
 ): Promise<ResetSessionResponse> {
-  return request(`${API}/sessions/${encodeURIComponent(id)}/reset`, {
-    method: "POST",
-    body: JSON.stringify(opts),
-  });
+  return request(
+    `${API}/sessions/${encodeURIComponent(id)}/reset`,
+    {
+      method: "POST",
+      body: JSON.stringify(opts),
+    },
+    signal,
+  );
 }

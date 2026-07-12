@@ -1,6 +1,7 @@
 /**
  * iknow product shell design tokens.
  * Forest cockpit + warm parchment (productized; not purple AI default).
+ * Dark theme only (single intentional theme).
  */
 :root {
   --bg-base: #041c1c;
@@ -8,7 +9,8 @@
   --bg-panel: #0e2f2f;
   --bg-input: #062222;
   --bg-user: #123636;
-  --bg-agent: #0a2828;
+  /* Slightly deeper than elevated chrome so agent bubbles read as content, not bar */
+  --bg-agent: #082424;
 
   --border-subtle: rgba(255, 230, 203, 0.14);
   --border-strong: rgba(255, 230, 203, 0.28);
@@ -27,7 +29,8 @@
   --status-ok: #3d9b6e;
   --status-warn: #c9a227;
   --status-danger: #c45c5c;
-  --status-busy: #d4a04a;
+  /* Busy tracks accent so re-theme stays coherent */
+  --status-busy: var(--accent);
 
   --radius-sm: 4px;
   --radius-md: 8px;
@@ -52,8 +55,10 @@
   --header-h: 56px;
   --side-w: 20rem;
   --chat-max: 46rem;
-  --z-header: 10;
+  --z-base: 0;
   --z-noise: 1;
+  --z-root: 2;
+  --z-header: 10;
 
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --dur-fast: 120ms;

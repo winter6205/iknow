@@ -1,3 +1,7 @@
+/** Display keep lengths for opaque ids (conversation / snapshot). */
+export const SHORT_CONV = 12;
+export const SHORT_SNAP = 14;
+
 /** Shorten opaque ids for display (conversation / snapshot). */
 export function shortId(id: string | null | undefined, keep = 8): string {
   if (!id) return "—";

@@ -1,6 +1,8 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+// Production serves `dist` at site root. A `/web/` prefix is an optional
+// reverse-proxy alias only — do not set `base` to `/web/` (breaks current serve).
 export default defineConfig({
   plugins: [react()],
   base: "/",
@@ -8,7 +10,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:8787",
+        target: process.env.IKNOW_DEV_API || "http://127.0.0.1:8787",
         changeOrigin: true,
       },
     },
@@ -16,6 +18,6 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
-    sourcemap: true,
+    sourcemap: process.env.SOURCE_MAP === "true",
   },
 });

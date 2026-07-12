@@ -43,6 +43,13 @@ export type SessionChatApi = SessionChatState & {
   setMode: (mode: AgentMode) => Promise<void>;
   setRole: (role: CallerRole) => Promise<void>;
   retryBootstrap: () => void;
+  /** Clear mid-session error without resetting conversation. */
+  clearError: () => void;
+};
+
+/** Safe extras for applySession — cannot override derived session fields. */
+type ApplySessionExtras = {
+  healthLabel?: string | null;
 };
 
 function errMessage(e: unknown): string {
@@ -51,12 +58,28 @@ function errMessage(e: unknown): string {
   return String(e);
 }
 
+/** Short stable-ish slice for message ids (not a cryptographic hash). */
+function queryIdSlice(query: string): string {
+  const raw = query.slice(0, 24);
+  let h = 0;
+  for (let i = 0; i < raw.length; i += 1) {
+    h = (h * 31 + raw.charCodeAt(i)) | 0;
+  }
+  return `${raw.length.toString(36)}_${(h >>> 0).toString(36)}`;
+}
+
 function turnsToMessages(turns: TurnDto[]): ChatUiMessage[] {
   const out: ChatUiMessage[] = [];
   turns.forEach((t, i) => {
-    out.push({ id: `u-${i}-${t.query.length}`, role: "user", text: t.query });
+    const snap = t.answer.snapshot_id || "nosnap";
+    const q = queryIdSlice(t.query);
     out.push({
-      id: `a-${i}-${t.answer.snapshot_id || i}`,
+      id: `u-${i}-${snap}-${q}`,
+      role: "user",
+      text: t.query,
+    });
+    out.push({
+      id: `a-${i}-${snap}-${q}`,
       role: "agent",
       text: t.answer.text,
       answer: t.answer,
@@ -95,14 +118,16 @@ export function useSessionChat(): SessionChatApi {
     (
       session: SessionSummary,
       turns: TurnDto[],
-      extras: Partial<SessionChatState> = {},
+      extras: ApplySessionExtras = {},
     ) => {
       sessionIdRef.current = session.conversation_id;
       modeRef.current = session.mode;
       roleRef.current = session.caller_role;
       const messages = turnsToMessages(turns);
+      // Spread extras first so derived session/messages/mode/role always win.
       setState((prev) => ({
         ...prev,
+        ...extras,
         phase: "ready",
         error: null,
         session,
@@ -110,7 +135,6 @@ export function useSessionChat(): SessionChatApi {
         lastAnswer: lastAnswerFromMessages(messages),
         mode: session.mode,
         role: session.caller_role,
-        ...extras,
       }));
     },
     [],
@@ -158,12 +182,13 @@ export function useSessionChat(): SessionChatApi {
   }, [bootstrap]);
 
   const sendMessage = useCallback(async (text: string) => {
+    const gen = bootGen.current;
     const id = sessionIdRef.current;
     const trimmed = text.trim();
     if (!id || !trimmed) return;
 
     const userMsg: ChatUiMessage = {
-      id: `u-local-${Date.now()}`,
+      id: `u-local-${Date.now()}-${queryIdSlice(trimmed)}`,
       role: "user",
       text: trimmed,
     };
@@ -176,11 +201,12 @@ export function useSessionChat(): SessionChatApi {
 
     try {
       const res = await api.postMessage(id, trimmed);
+      if (gen !== bootGen.current) return;
       sessionIdRef.current = res.session.conversation_id;
       modeRef.current = res.session.mode;
       roleRef.current = res.session.caller_role;
       const agentMsg: ChatUiMessage = {
-        id: `a-${res.turn.answer.snapshot_id || Date.now()}`,
+        id: `a-${res.turn.answer.snapshot_id || Date.now()}-${queryIdSlice(trimmed)}`,
         role: "agent",
         text: res.turn.answer.text,
         answer: res.turn.answer,
@@ -196,16 +222,22 @@ export function useSessionChat(): SessionChatApi {
         lastAnswer: res.turn.answer,
       }));
     } catch (e) {
-      setState((prev) => ({
-        ...prev,
-        phase: "error",
-        error: errMessage(e),
-        // keep optimistic user message; allow retry via composer or reset
-      }));
+      if (gen === bootGen.current) {
+        setState((prev) => ({
+          ...prev,
+          phase: "error",
+          error: errMessage(e),
+          // Intentional: keep optimistic user bubble on failed send so history
+          // still shows what was attempted; Composer keeps draft via rethrow.
+        }));
+      }
+      // Always rethrow so Composer keeps draft text for retry.
+      throw e instanceof Error ? e : new Error(errMessage(e));
     }
   }, []);
 
   const reset = useCallback(async () => {
+    const gen = bootGen.current;
     const id = sessionIdRef.current;
     if (!id) {
       await bootstrap();
@@ -214,8 +246,10 @@ export function useSessionChat(): SessionChatApi {
     setState((prev) => ({ ...prev, phase: "loading", error: null }));
     try {
       const res = await api.resetSession(id, { new_id: false });
+      if (gen !== bootGen.current) return;
       applySession(res.session, res.turns);
     } catch (e) {
+      if (gen !== bootGen.current) return;
       setState((prev) => ({
         ...prev,
         phase: "error",
@@ -225,6 +259,8 @@ export function useSessionChat(): SessionChatApi {
   }, [applySession, bootstrap]);
 
   const newSession = useCallback(async () => {
+    // Bump gen so in-flight sendMessage / reset / postCommand cannot clobber.
+    const gen = ++bootGen.current;
     setState((prev) => ({
       ...prev,
       phase: "loading",
@@ -237,8 +273,10 @@ export function useSessionChat(): SessionChatApi {
         role: roleRef.current,
         mode: modeRef.current,
       });
+      if (gen !== bootGen.current) return;
       applySession(created.session, created.turns);
     } catch (e) {
+      if (gen !== bootGen.current) return;
       setState((prev) => ({
         ...prev,
         phase: "error",
@@ -247,63 +285,84 @@ export function useSessionChat(): SessionChatApi {
     }
   }, [applySession]);
 
-  const setMode = useCallback(async (mode: AgentMode) => {
-    const id = sessionIdRef.current;
-    modeRef.current = mode;
-    setState((prev) => ({ ...prev, mode }));
-    if (!id) return;
-    try {
-      const res = await api.postCommand(id, "mode", [mode]);
-      sessionIdRef.current = res.session.conversation_id;
-      modeRef.current = res.session.mode;
-      roleRef.current = res.session.caller_role;
-      setState((prev) => ({
-        ...prev,
-        session: res.session,
-        mode: res.session.mode,
-        role: res.session.caller_role,
-        error: null,
-        phase: prev.phase === "error" ? "ready" : prev.phase,
-      }));
-    } catch (e) {
-      setState((prev) => ({
-        ...prev,
-        phase: "error",
-        error: errMessage(e),
-      }));
-    }
-  }, []);
+  /** Wait for API confirm before updating mode/role (no optimistic UI). */
+  const postCommand = useCallback(
+    async (command: "mode" | "role", args: string[]) => {
+      const gen = bootGen.current;
+      const id = sessionIdRef.current;
+      if (!id) return;
+      try {
+        const res = await api.postCommand(id, command, args);
+        if (gen !== bootGen.current) return;
+        sessionIdRef.current = res.session.conversation_id;
+        modeRef.current = res.session.mode;
+        roleRef.current = res.session.caller_role;
+        setState((prev) => ({
+          ...prev,
+          session: res.session,
+          mode: res.session.mode,
+          role: res.session.caller_role,
+          error: null,
+          phase: prev.phase === "error" ? "ready" : prev.phase,
+        }));
+      } catch (e) {
+        if (gen !== bootGen.current) return;
+        // Do not write optimistic mode/role — server values stay in refs/state.
+        setState((prev) => ({
+          ...prev,
+          phase: "error",
+          error: errMessage(e),
+        }));
+      }
+    },
+    [],
+  );
 
-  const setRole = useCallback(async (role: CallerRole) => {
-    const id = sessionIdRef.current;
-    roleRef.current = role;
-    setState((prev) => ({ ...prev, role }));
-    if (!id) return;
-    try {
-      const res = await api.postCommand(id, "role", [role]);
-      sessionIdRef.current = res.session.conversation_id;
-      modeRef.current = res.session.mode;
-      roleRef.current = res.session.caller_role;
-      setState((prev) => ({
-        ...prev,
-        session: res.session,
-        mode: res.session.mode,
-        role: res.session.caller_role,
-        error: null,
-        phase: prev.phase === "error" ? "ready" : prev.phase,
-      }));
-    } catch (e) {
-      setState((prev) => ({
-        ...prev,
-        phase: "error",
-        error: errMessage(e),
-      }));
-    }
-  }, []);
+  const setMode = useCallback(
+    async (mode: AgentMode) => {
+      const gen = bootGen.current;
+      const id = sessionIdRef.current;
+      // No session yet: local preference only (used by next createSession).
+      if (!id) {
+        modeRef.current = mode;
+        if (gen !== bootGen.current) return;
+        setState((prev) => ({ ...prev, mode }));
+        return;
+      }
+      await postCommand("mode", [mode]);
+    },
+    [postCommand],
+  );
+
+  const setRole = useCallback(
+    async (role: CallerRole) => {
+      const gen = bootGen.current;
+      const id = sessionIdRef.current;
+      if (!id) {
+        roleRef.current = role;
+        if (gen !== bootGen.current) return;
+        setState((prev) => ({ ...prev, role }));
+        return;
+      }
+      await postCommand("role", [role]);
+    },
+    [postCommand],
+  );
 
   const retryBootstrap = useCallback(() => {
     void bootstrap();
   }, [bootstrap]);
+
+  const clearError = useCallback(() => {
+    setState((prev) => {
+      if (!prev.error) return prev;
+      return {
+        ...prev,
+        error: null,
+        phase: prev.session ? "ready" : prev.phase === "error" ? "error" : prev.phase,
+      };
+    });
+  }, []);
 
   return {
     ...state,
@@ -313,5 +372,6 @@ export function useSessionChat(): SessionChatApi {
     setMode,
     setRole,
     retryBootstrap,
+    clearError,
   };
 }

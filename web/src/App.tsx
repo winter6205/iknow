@@ -79,15 +79,8 @@ function ChatApp() {
               kind="error"
               title="请求失败"
               detail={chat.error}
-              onRetry={
-                chat.session
-                  ? () => {
-                      /* clear by reset path; composer can resend */
-                      void chat.reset();
-                    }
-                  : chat.retryBootstrap
-              }
-              retryLabel={chat.session ? "重置会话" : "重试"}
+              onRetry={chat.session ? chat.clearError : chat.retryBootstrap}
+              retryLabel={chat.session ? "关闭错误" : "重试"}
             />
           ) : null}
           <MessageList messages={chat.messages} />

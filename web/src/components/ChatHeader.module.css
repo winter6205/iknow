@@ -69,7 +69,7 @@
   width: 0.5rem;
   height: 0.5rem;
   border-radius: 50%;
-  background: var(--status-ok);
+  background: var(--text-tertiary);
 }
 
 .status[data-tone="ok"] .dot {
@@ -87,7 +87,7 @@
 
 .status[data-tone="danger"] {
   color: var(--status-danger);
-  border-color: rgba(196, 92, 92, 0.35);
+  border-color: color-mix(in srgb, var(--status-danger) 35%, transparent);
 }
 
 .sessionId {
@@ -133,6 +133,12 @@
   opacity: 0.45;
 }
 
+.select:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--accent-muted);
+}
+
 .btnGhost,
 .btnPrimary {
   padding: var(--space-2) var(--space-3);
@@ -141,7 +147,8 @@
   font-weight: 500;
   transition: background var(--dur-fast) var(--ease-out),
     border-color var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
+    color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
 }
 
 .btnGhost {
@@ -156,6 +163,12 @@
   background: var(--bg-panel);
 }
 
+.btnGhost:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--accent-muted);
+}
+
 .btnPrimary {
   border: 1px solid var(--accent);
   background: var(--accent);
@@ -165,6 +178,12 @@
 .btnPrimary:hover:not(:disabled) {
   background: var(--accent-hover);
   border-color: var(--accent-hover);
+}
+
+.btnPrimary:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--accent-muted);
 }
 
 @media (max-width: 720px) {

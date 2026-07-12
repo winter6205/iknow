@@ -27,19 +27,27 @@ export function Composer({
   const submit = useCallback(async () => {
     const text = value.trim();
     if (!text || locked) return;
-    setValue("");
-    await onSend(text);
+    try {
+      await onSend(text);
+      setValue("");
+    } catch {
+      // Keep draft text so the user can retry after a failed send.
+    }
   }, [value, locked, onSend]);
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
-    void submit();
+    void submit().catch(() => {
+      /* rejections already handled in submit */
+    });
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      void submit();
+      void submit().catch(() => {
+        /* rejections already handled in submit */
+      });
     }
   };
 

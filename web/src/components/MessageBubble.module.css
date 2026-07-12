@@ -45,6 +45,10 @@
 }
 
 .gov {
+  color: var(--text-tertiary);
+}
+
+.gov[data-status="ok"] {
   color: var(--status-ok);
 }
 

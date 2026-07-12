@@ -6,6 +6,16 @@ export type MessageBubbleProps = {
   message: ChatUiMessage;
 };
 
+function sourceKey(
+  s: { chunk_id: string; offset?: [number, number] },
+  index: number,
+): string {
+  if (s.offset) {
+    return `${s.chunk_id}:${s.offset[0]}-${s.offset[1]}`;
+  }
+  return `${s.chunk_id}#${index}`;
+}
+
 export function MessageBubble({ message }: MessageBubbleProps) {
   if (message.role === "user") {
     return (
@@ -20,6 +30,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
 
   const { answer } = message;
   const sources = answer.source_spans ?? [];
+  const govStatus = String(answer.governance_status).toLowerCase();
 
   return (
     <article className={`${styles.bubble} ${styles.agent}`} data-role="agent">
@@ -30,10 +41,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           {" · "}
           snap {shortId(answer.snapshot_id, 8)}
           {" · "}
-          <span
-            className={styles.gov}
-            data-status={answer.governance_status || "unknown"}
-          >
+          <span className={styles.gov} data-status={govStatus}>
             {answer.governance_status || "—"}
           </span>
         </span>
@@ -44,7 +52,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           <h3 className={styles.sourcesTitle}>来源</h3>
           <ol className={styles.sourceList}>
             {sources.map((s, i) => (
-              <li key={`${s.chunk_id}-${i}`} className={styles.sourceItem}>
+              <li key={sourceKey(s, i)} className={styles.sourceItem}>
                 <span className={styles.chunkId} title={s.chunk_id}>
                   {shortId(s.chunk_id, 12)}
                 </span>

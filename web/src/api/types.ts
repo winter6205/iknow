@@ -1,7 +1,30 @@
 /** Mirror of session-http-api-v0 DTOs used by the product UI. */
 
 export type CallerRole = "employee" | "manager" | "admin";
+
+/** Matches AgentModeCli / session-api mode. */
 export type AgentMode = "deterministic" | "llm";
+
+/**
+ * Mirrors `GovernanceStatus` in `src/shared/schema.ts`.
+ * Open string tail keeps unknown wire values type-safe at the edges.
+ */
+export type GovernanceStatus =
+  | "ok"
+  | "stale"
+  | "conflict"
+  | "degraded"
+  | "timeout"
+  | (string & {});
+
+/** Mirrors `CommandEffectKind` in `src/session-api/contract.ts`. */
+export type CommandEffectKind =
+  | "help"
+  | "info"
+  | "error"
+  | "mode_change"
+  | "reset"
+  | "quit";
 
 export type SourceSpan = {
   chunk_id: string;
@@ -19,7 +42,7 @@ export type IknowAnswer = {
   text: string;
   source_spans: SourceSpan[];
   snapshot_id: string;
-  governance_status: string;
+  governance_status: GovernanceStatus;
   tool_trace: string[];
   tool_calls: ToolCallLog[];
   hops_used: number;
@@ -54,7 +77,7 @@ export type PostMessageResponse = {
 
 export type PostCommandResponse = {
   session: SessionSummary;
-  effect: string;
+  effect: CommandEffectKind;
   message: string;
 };
 
