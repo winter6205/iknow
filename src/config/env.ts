@@ -1,5 +1,6 @@
 /**
- * Load iknow runtime config from process.env + optional `.env.local` (cwd).
+ * Load iknow runtime config from process.env + optional `.env` / `.env.local` (cwd).
+ * Precedence: process.env > `.env.local` > `.env`.
  * Never logs secret values.
  */
 import { readFileSync, existsSync } from "node:fs";
@@ -29,8 +30,16 @@ export interface EmbeddingEnv {
   model: string;
   apiKeyEnv: string;
   apiKey: string | undefined;
+  /**
+   * Local expected vector size (`IKNOW_EMBEDDING_DIMS`).
+   * Used to size the in-process index and as `dimsHint` on the embedding client.
+   */
   dims: number;
-  /** Request body `dimensions` when API supports it. */
+  /**
+   * Optional request-body truncation (`IKNOW_EMBEDDING_DIMENSIONS`).
+   * Sent as `dimensions` when the provider supports reducing output size;
+   * defaults to the same value as `dims` when unset.
+   */
   dimensions: number;
   timeoutMs: number;
   cachePath: string;
@@ -42,6 +51,9 @@ export interface IknowEnv {
   embedding: EmbeddingEnv;
   requireOffline: boolean;
 }
+
+/** Placeholder values treated as "no real secret set" (case-insensitive). */
+const API_KEY_PLACEHOLDERS = new Set(["yes"]);
 
 function parseEnvFile(path: string): Record<string, string> {
   if (!existsSync(path)) return {};
@@ -75,7 +87,20 @@ function envGet(
   return fallback;
 }
 
+/** Integer env values (tokens, timeouts, dims). Non-finite → fallback. */
 function envInt(
+  file: Record<string, string>,
+  key: string,
+  fallback: number,
+): number {
+  const raw = envGet(file, key, "");
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.trunc(n) : fallback;
+}
+
+/** Float env values (e.g. temperature 0.0–2.0). Non-finite → fallback. */
+function envNumber(
   file: Record<string, string>,
   key: string,
   fallback: number,
@@ -86,18 +111,35 @@ function envInt(
   return Number.isFinite(n) ? n : fallback;
 }
 
-export function getApiKey(envVarName: string): string | undefined {
+/**
+ * Resolve an API key by name.
+ * Precedence: `process.env[envVarName]` then optional `fileMap` (from dotenv merge).
+ *
+ * Values that are empty/whitespace, or the placeholder `"yes"` (case-insensitive),
+ * are treated as unset so template/docs defaults like `API_KEY=yes` do not become
+ * live credentials.
+ */
+export function getApiKey(
+  envVarName: string,
+  fileMap?: Record<string, string>,
+): string | undefined {
   if (!envVarName) return undefined;
-  const v = process.env[envVarName];
-  if (!v || v.trim() === "" || v.trim().toLowerCase() === "yes") {
-    return undefined;
-  }
-  return v;
+  const fromProc = process.env[envVarName];
+  const raw =
+    fromProc !== undefined && fromProc !== ""
+      ? fromProc
+      : fileMap?.[envVarName];
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  if (API_KEY_PLACEHOLDERS.has(trimmed.toLowerCase())) return undefined;
+  return trimmed;
 }
 
 /**
  * Fail closed when offline mode forbids network LLM / API embeddings.
  * @param agentMode effective mode (CLI may override env.agentMode)
+ * Call sites: create-runtime, cli (not loadIknowEnv — avoids double validation).
  */
 export function assertOfflineCompatible(
   env: IknowEnv,
@@ -119,7 +161,10 @@ export function assertOfflineCompatible(
   }
 }
 
-/** Fail closed: only openai_tools is implemented. */
+/**
+ * Fail closed: only openai_tools is implemented.
+ * Call sites: cli LLM branch, LlmIknowAgent ctor (not loadIknowEnv).
+ */
 export function assertToolProtocolSupported(
   protocol: LlmEnv["toolProtocol"],
 ): void {
@@ -132,9 +177,10 @@ export function assertToolProtocolSupported(
 }
 
 export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
+  // process.env still wins via envGet / getApiKey; among files, .env.local overrides .env
   const file = {
-    ...parseEnvFile(join(cwd, ".env.local")),
     ...parseEnvFile(join(cwd, ".env")),
+    ...parseEnvFile(join(cwd, ".env.local")),
   };
 
   const llmKeyEnv = envGet(file, "IKNOW_LLM_API_KEY_ENV", "NINE_ROUTER_API_KEY");
@@ -145,7 +191,7 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
   );
 
   const embModeRaw = envGet(file, "IKNOW_EMBEDDING_MODE", "off").toLowerCase();
-  const embApiKey = getApiKey(embKeyEnv);
+  const embApiKey = getApiKey(embKeyEnv, file);
   // local treated as api HTTP for this project (network API profile)
   let embMode: EmbeddingMode =
     embModeRaw === "api" || embModeRaw === "local" ? "api" : "off";
@@ -163,6 +209,8 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
     "openai_tools",
   ).toLowerCase();
 
+  const dims = envInt(file, "IKNOW_EMBEDDING_DIMS", 2048);
+
   return {
     agentMode,
     requireOffline:
@@ -176,7 +224,7 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
       ).replace(/\/$/, ""),
       model: envGet(file, "IKNOW_LLM_MODEL", "deepseek-flash-combo"),
       apiKeyEnv: llmKeyEnv,
-      apiKey: getApiKey(llmKeyEnv),
+      apiKey: getApiKey(llmKeyEnv, file),
       maxOutputTokens: envInt(file, "IKNOW_LLM_MAX_OUTPUT_TOKENS", 2048),
       contextWindowTokens: envInt(
         file,
@@ -184,7 +232,7 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
         1_000_000,
       ),
       timeoutMs: envInt(file, "IKNOW_LLM_TIMEOUT_MS", 60_000),
-      temperature: envInt(file, "IKNOW_LLM_TEMPERATURE", 0),
+      temperature: envNumber(file, "IKNOW_LLM_TEMPERATURE", 0),
       toolProtocol:
         toolProto === "anthropic_tools" ? "anthropic_tools" : "openai_tools",
     },
@@ -196,15 +244,12 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
         "IKNOW_EMBEDDING_BASE_URL",
         "http://localhost:20128/v1",
       ).replace(/\/$/, ""),
+      // Intentional 9router route id (not a typo of "zhipu"/"zhipuai")
       model: envGet(file, "IKNOW_EMBEDDING_MODEL", "zhipueb/embedding-3"),
       apiKeyEnv: embKeyEnv,
       apiKey: embApiKey,
-      dims: envInt(file, "IKNOW_EMBEDDING_DIMS", 2048),
-      dimensions: envInt(
-        file,
-        "IKNOW_EMBEDDING_DIMENSIONS",
-        envInt(file, "IKNOW_EMBEDDING_DIMS", 2048),
-      ),
+      dims,
+      dimensions: envInt(file, "IKNOW_EMBEDDING_DIMENSIONS", dims),
       timeoutMs: envInt(file, "IKNOW_EMBEDDING_TIMEOUT_MS", 30_000),
       cachePath: envGet(
         file,

@@ -7,7 +7,7 @@ import type {
   KbRetrieveOutput,
   SessionContext,
 } from "../shared/schema.js";
-import { ValidationError } from "../shared/errors.js";
+import { NetworkError, ValidationError } from "../shared/errors.js";
 import { buildIdf, scoreKeyword, scoreOverlap } from "./keyword.js";
 import { rrfFusion, type RankedHit } from "./rrf.js";
 import type { VectorIndex } from "./embedding/vector-index.js";
@@ -23,6 +23,21 @@ const ADMIN_ROLE: CallerRole = "admin";
 export interface KbRetrieveOptions {
   /** When set, replaces pseudo-vector (overlap) arm with real cosine ranks. */
   vectorIndex?: VectorIndex;
+}
+
+type OverlapCandidate = {
+  chunk_id: string;
+  overlap: number;
+};
+
+/** Rank candidates by overlap score (pseudo-vector arm / network fallback). */
+function rankByOverlap(candidates: OverlapCandidate[]): RankedHit[] {
+  return candidates
+    .slice()
+    .sort((a, b) => b.overlap - a.overlap)
+    .slice(0, TOP_ARM)
+    .filter((c) => c.overlap > 0)
+    .map((c) => ({ id: c.chunk_id, score: c.overlap }));
 }
 
 function factStatusFromFacts(
@@ -183,22 +198,19 @@ export async function kbRetrieve(
       vectorList = ranked
         .filter((r) => allowed.has(r.id))
         .map((r) => ({ id: r.id, score: r.score }));
-    } catch {
-      // EXIT: embedding query failed → fall back to overlap arm
-      vectorList = candidates
-        .slice()
-        .sort((a, b) => b.overlap - a.overlap)
-        .slice(0, TOP_ARM)
-        .filter((c) => c.overlap > 0)
-        .map((c) => ({ id: c.chunk_id, score: c.overlap }));
+    } catch (err) {
+      // EXIT: only network failures fall back to overlap; other errors propagate.
+      if (!(err instanceof NetworkError)) {
+        throw err;
+      }
+      console.error(
+        "[kb_retrieve] vector arm network error; falling back to overlap:",
+        err.message,
+      );
+      vectorList = rankByOverlap(candidates);
     }
   } else {
-    vectorList = candidates
-      .slice()
-      .sort((a, b) => b.overlap - a.overlap)
-      .slice(0, TOP_ARM)
-      .filter((c) => c.overlap > 0)
-      .map((c) => ({ id: c.chunk_id, score: c.overlap }));
+    vectorList = rankByOverlap(candidates);
   }
 
   const factList: RankedHit[] =

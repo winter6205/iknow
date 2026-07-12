@@ -162,6 +162,7 @@ Risks / Notes:
 | Trajectory / 门禁评测 | 项目 skill `agent-evaluation-system` + `npm run eval` |
 | 改前写测试 / S2 边界 | `defensive-contract-validator` |
 | Bug 修复 | `systematic-debugging` (含 Phase 1 红线: 先建反馈循环) |
+| 审查报告修复 / review report repair | 项目 skill `review-report-repair` |
 | 写 spec / 设计 | `spec-driven-development` |
 | 多文件规划 | `writing-plans` |
 | 完成前验收 | `verification-before-completion` |

@@ -228,14 +228,15 @@ export async function runEvalSuite(opts?: {
 }): Promise<SuiteReport> {
   const evalSetPath = opts?.evalSetPath ?? DEFAULT_EVAL_SET;
   const set = loadEvalSet(evalSetPath);
-  const results: TrajectoryScoreResult[] = [];
-  for (const sample of set.samples) {
-    try {
-      results.push((await runSample(sample)).score);
-    } catch (err) {
-      results.push(syntheticRunnerFail(sample, err));
-    }
-  }
+  const results = await Promise.all(
+    set.samples.map(async (sample) => {
+      try {
+        return (await runSample(sample)).score;
+      } catch (err) {
+        return syntheticRunnerFail(sample, err);
+      }
+    }),
+  );
   const report: SuiteReport = {
     generated_at: new Date().toISOString(),
     eval_set: evalSetPath,

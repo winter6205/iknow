@@ -1,8 +1,12 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   assertOfflineCompatible,
   assertToolProtocolSupported,
+  getApiKey,
   loadIknowEnv,
 } from "../src/config/env.ts";
 import { createIknowRuntime } from "../src/runtime/create-runtime.ts";
@@ -17,9 +21,12 @@ const KEYS = [
   "IKNOW_AGENT_MODE",
   "IKNOW_EMBEDDING_MODE",
   "IKNOW_LLM_TOOL_PROTOCOL",
+  "IKNOW_LLM_TEMPERATURE",
+  "IKNOW_LLM_API_KEY_ENV",
   "IKNOW_EMBEDDING_API_KEY_ENV",
   "NINE_ROUTER_API_KEY",
   "IKNOW_TEST_EMB_KEY",
+  "IKNOW_TEST_LLM_KEY",
 ] as const;
 
 const saved: Partial<Record<(typeof KEYS)[number], string | undefined>> = {};
@@ -123,5 +130,106 @@ describe("offline + tool protocol policy", () => {
 
   it("openai_tools is accepted", () => {
     assert.doesNotThrow(() => assertToolProtocolSupported("openai_tools"));
+  });
+});
+
+describe("getApiKey + dotenv precedence", () => {
+  beforeEach(() => {
+    stashEnv();
+    clearPolicyEnv();
+  });
+  afterEach(() => {
+    restoreEnv();
+  });
+
+  it("getApiKey prefers process.env over fileMap", () => {
+    process.env.IKNOW_TEST_LLM_KEY = "from-process";
+    assert.equal(
+      getApiKey("IKNOW_TEST_LLM_KEY", { IKNOW_TEST_LLM_KEY: "from-file" }),
+      "from-process",
+    );
+  });
+
+  it("getApiKey falls back to fileMap when process unset", () => {
+    delete process.env.IKNOW_TEST_LLM_KEY;
+    assert.equal(
+      getApiKey("IKNOW_TEST_LLM_KEY", { IKNOW_TEST_LLM_KEY: "from-file" }),
+      "from-file",
+    );
+  });
+
+  it('getApiKey treats "yes" (any case) as unset placeholder', () => {
+    process.env.IKNOW_TEST_LLM_KEY = "YES";
+    assert.equal(getApiKey("IKNOW_TEST_LLM_KEY"), undefined);
+    delete process.env.IKNOW_TEST_LLM_KEY;
+    assert.equal(
+      getApiKey("IKNOW_TEST_LLM_KEY", { IKNOW_TEST_LLM_KEY: "yes" }),
+      undefined,
+    );
+  });
+
+  it("getApiKey returns undefined for empty name or blank value", () => {
+    assert.equal(getApiKey(""), undefined);
+    process.env.IKNOW_TEST_LLM_KEY = "   ";
+    assert.equal(getApiKey("IKNOW_TEST_LLM_KEY"), undefined);
+  });
+
+  it("loadIknowEnv: .env.local overrides .env; process still wins", () => {
+    const dir = mkdtempSync(join(tmpdir(), "iknow-env-"));
+    try {
+      writeFileSync(
+        join(dir, ".env"),
+        "IKNOW_LLM_MODEL=from-env\nIKNOW_LLM_PROVIDER=base\n",
+      );
+      writeFileSync(
+        join(dir, ".env.local"),
+        "IKNOW_LLM_MODEL=from-local\n",
+      );
+      const env = loadIknowEnv(dir);
+      assert.equal(env.llm.model, "from-local");
+      assert.equal(env.llm.provider, "base");
+
+      process.env.IKNOW_LLM_MODEL = "from-process";
+      // KEYS doesn't include IKNOW_LLM_MODEL — restore manually
+      try {
+        const env2 = loadIknowEnv(dir);
+        assert.equal(env2.llm.model, "from-process");
+      } finally {
+        delete process.env.IKNOW_LLM_MODEL;
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("loadIknowEnv resolves apiKey from dotenv fileMap", () => {
+    const dir = mkdtempSync(join(tmpdir(), "iknow-env-key-"));
+    try {
+      writeFileSync(
+        join(dir, ".env.local"),
+        [
+          "IKNOW_LLM_API_KEY_ENV=IKNOW_TEST_LLM_KEY",
+          "IKNOW_TEST_LLM_KEY=secret-from-dotenv",
+          "IKNOW_EMBEDDING_MODE=api",
+          "IKNOW_EMBEDDING_API_KEY_ENV=IKNOW_TEST_EMB_KEY",
+          "IKNOW_TEST_EMB_KEY=emb-secret-from-dotenv",
+          "",
+        ].join("\n"),
+      );
+      delete process.env.IKNOW_TEST_LLM_KEY;
+      delete process.env.IKNOW_TEST_EMB_KEY;
+      const env = loadIknowEnv(dir);
+      assert.equal(env.llm.apiKey, "secret-from-dotenv");
+      assert.equal(env.embedding.apiKey, "emb-secret-from-dotenv");
+      assert.equal(env.embedding.mode, "api");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("loadIknowEnv parses temperature as float via envNumber", () => {
+    process.env.IKNOW_LLM_TEMPERATURE = "0.7";
+    const env = loadIknowEnv();
+    assert.equal(env.llm.temperature, 0.7);
   });
 });

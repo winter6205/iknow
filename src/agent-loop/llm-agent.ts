@@ -29,16 +29,21 @@ export interface LlmIknowAgentOptions {
   toolProtocol?: "openai_tools" | "anthropic_tools";
 }
 
-const SYSTEM_PROMPT = `You are an enterprise knowledge-base agent for a single company.
+/** Extra LLM rounds beyond max_hops (non-hop tools + final text). */
+const EXTRA_ROUNDS = 8;
+
+function buildSystemPrompt(maxHops: number): string {
+  return `You are an enterprise knowledge-base agent for a single company.
 
 Rules:
 1. You MUST use the provided tools (kb_retrieve, kb_verify_citation, kb_compile, kb_governance). Never invent documents, facts, IDs, or policies.
 2. Always retrieve before answering. Prefer grounded summaries from tool results only.
-3. Hop budget: kb_retrieve and kb_verify_citation each consume 1 hop; max hops is ${MAX_HOPS}. kb_compile and kb_governance do not consume hops.
+3. Hop budget: kb_retrieve and kb_verify_citation each consume 1 hop; max hops is ${maxHops}. kb_compile and kb_governance do not consume hops.
 4. G2: every final answer requires a governance snapshot_id. Call kb_governance with action=snapshot_status (and the relevant doc_id when known) before you finish.
 5. If evidence is missing, say you cannot confirm — do not fabricate.
 6. Final reply may be plain text or a JSON object {"text":"...","source_spans":[{"chunk_id":"...","quote":"..."}]} . Prefer JSON when you have citations.
 7. Do not claim external competitor knowledge or bypass role permissions.`;
+}
 
 export class LlmIknowAgent {
   private readonly store: InMemoryKnowledgeStore;
@@ -83,16 +88,40 @@ export class LlmIknowAgent {
     }
 
     const messages: LlmMessage[] = [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: buildSystemPrompt(this.maxHops) },
       { role: "user", content: q },
     ];
 
     // Safety: bound total LLM rounds (hops + non-hop tools + final).
-    const maxRounds = this.maxHops + 8;
+    const maxRounds = this.maxHops + EXTRA_ROUNDS;
     let finalContent: string | undefined;
 
     for (let round = 0; round < maxRounds; round++) {
-      const result = await this.llm.chat(messages, KB_TOOL_DEFS);
+      let result;
+      try {
+        result = await this.llm.chat(messages, KB_TOOL_DEFS);
+      } catch (err) {
+        // G2: LLM failure must still return a governance snapshot.
+        const msg = err instanceof Error ? err.message : String(err);
+        notes.push(`llm_error: ${msg}`);
+        if (!snapshotId) {
+          const g = await this.forceSnapshot(preferredDocId, trace);
+          snapshotId = g.snapshot_id;
+          governanceStatus = g.status;
+          if (g.extraNotes?.length) notes.push(...g.extraNotes);
+        }
+        return {
+          text: "模型调用失败，无法确认完整结论。",
+          source_spans: sourceSpansAccum.slice(0, 5),
+          snapshot_id: snapshotId,
+          governance_status: governanceStatus,
+          tool_trace: trace.names(),
+          tool_calls: trace.logs(),
+          hops_used: hops,
+          notes,
+        };
+      }
+
       const toolCalls = result.tool_calls ?? [];
 
       if (toolCalls.length === 0) {
@@ -131,8 +160,11 @@ export class LlmIknowAgent {
           tc,
         );
         if (isHop) hops += 1;
-        if (isKbToolName(name) || name) {
-          trace.record(name || "unknown_tool", args);
+        // Only record known kb_* tools on the trajectory; unknown names get a note.
+        if (isKbToolName(name)) {
+          trace.record(name, args);
+        } else {
+          notes.push(`unknown_tool:${name || "empty"}`);
         }
         if (docHint) preferredDocId = docHint;
         if (spans?.length) sourceSpansAccum.push(...spans);
@@ -251,12 +283,12 @@ export class LlmIknowAgent {
           const out = this.tools.kb_governance(
             args as unknown as Parameters<ToolRegistry["kb_governance"]>[0],
           );
-          const docHint =
-            typeof args.doc_id === "string"
-              ? args.doc_id
-              : typeof args.chunk_id === "string"
-                ? this.store.tryGetChunk(args.chunk_id)?.doc_id
-                : undefined;
+          let docHint: string | undefined;
+          if (typeof args.doc_id === "string") {
+            docHint = args.doc_id;
+          } else if (typeof args.chunk_id === "string") {
+            docHint = this.store.tryGetChunk(args.chunk_id)?.doc_id;
+          }
           return {
             resultJson: JSON.stringify(out),
             args,
@@ -382,12 +414,12 @@ export function parseFinalContent(
         answer?: unknown;
         source_spans?: unknown;
       };
-      const text =
-        typeof obj.text === "string"
-          ? obj.text
-          : typeof obj.answer === "string"
-            ? obj.answer
-            : undefined;
+      let text: string | undefined;
+      if (typeof obj.text === "string") {
+        text = obj.text;
+      } else if (typeof obj.answer === "string") {
+        text = obj.answer;
+      }
       if (text !== undefined) {
         const spans = normalizeSpans(obj.source_spans);
         return {
@@ -428,6 +460,12 @@ function normalizeSpans(raw: unknown): SourceSpan[] {
   return out;
 }
 
+function governanceStatusFromResult(result: string): GovernanceStatus {
+  if (result === "conflict") return "conflict";
+  if (result === "ok") return "ok";
+  return "stale";
+}
+
 function localSnapshot(
   store: InMemoryKnowledgeStore,
   docId: string,
@@ -435,8 +473,7 @@ function localSnapshot(
 ): { snapshot_id: string; status: GovernanceStatus } {
   const doc = store.tryGetDocument(docId);
   const ts = new Date().toISOString();
-  const status: GovernanceStatus =
-    result === "conflict" ? "conflict" : result === "ok" ? "ok" : "stale";
+  const status = governanceStatusFromResult(result);
   return {
     snapshot_id: buildSnapshotId({
       doc_id: docId,

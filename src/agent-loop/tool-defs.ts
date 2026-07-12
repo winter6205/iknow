@@ -4,13 +4,31 @@
  */
 import type { LlmToolDef } from "./llm-client.js";
 
+/** Tools that consume hop budget (max_hops). Single source of truth. */
+export const HOP_TOOL_NAMES = ["kb_retrieve", "kb_verify_citation"] as const;
+
+export const HOP_TOOLS: ReadonlySet<string> = new Set(HOP_TOOL_NAMES);
+
+export const TOOL_NAMES = [
+  "kb_retrieve",
+  "kb_verify_citation",
+  "kb_compile",
+  "kb_governance",
+] as const;
+
+export type KbToolName = (typeof TOOL_NAMES)[number];
+
+export function isKbToolName(name: string): name is KbToolName {
+  return (TOOL_NAMES as readonly string[]).includes(name);
+}
+
 export const KB_TOOL_DEFS: LlmToolDef[] = [
   {
     type: "function",
     function: {
       name: "kb_retrieve",
       description:
-        "Retrieve enterprise KB chunks via dual-index RRF. Use for every user question before answering. Returns summaries + chunk_ids only (not raw invention).",
+        "Retrieve enterprise KB chunks via dual-index RRF. Prefer this when enterprise knowledge is needed before answering. Returns summaries + chunk_ids only (not raw information).",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -24,6 +42,7 @@ export const KB_TOOL_DEFS: LlmToolDef[] = [
             description: "Optional prior hits for multi-hop retrieve (summary only).",
             items: {
               type: "object",
+              additionalProperties: false,
               properties: {
                 chunk_id: { type: "string" },
                 summary: { type: "string" },
@@ -38,6 +57,7 @@ export const KB_TOOL_DEFS: LlmToolDef[] = [
           },
           filter: {
             type: "object",
+            additionalProperties: false,
             properties: {
               doc_type: { type: "string" },
               time_range: {
@@ -74,12 +94,13 @@ export const KB_TOOL_DEFS: LlmToolDef[] = [
           },
           source_span: {
             type: "object",
+            additionalProperties: false,
             properties: {
               chunk_id: { type: "string" },
               quote: { type: "string" },
               offset: {
                 type: "array",
-                items: { type: "number" },
+                items: { type: "integer" },
                 minItems: 2,
                 maxItems: 2,
               },
@@ -142,19 +163,3 @@ export const KB_TOOL_DEFS: LlmToolDef[] = [
     },
   },
 ];
-
-/** Tools that consume hop budget (max_hops). */
-export const HOP_TOOLS = new Set(["kb_retrieve", "kb_verify_citation"]);
-
-export const TOOL_NAMES = [
-  "kb_retrieve",
-  "kb_verify_citation",
-  "kb_compile",
-  "kb_governance",
-] as const;
-
-export type KbToolName = (typeof TOOL_NAMES)[number];
-
-export function isKbToolName(name: string): name is KbToolName {
-  return (TOOL_NAMES as readonly string[]).includes(name);
-}

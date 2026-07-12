@@ -128,11 +128,20 @@ export class OpenAiCompatibleLlmClient implements LlmChatClient {
       };
       try {
         json = JSON.parse(raw) as typeof json;
-      } catch {
-        throw new NetworkError("llm response is not valid JSON");
+      } catch (parseErr) {
+        const detail =
+          parseErr instanceof Error ? parseErr.message : String(parseErr);
+        throw new NetworkError(
+          `llm response is not valid JSON (${detail}): ${raw.slice(0, 120)}`,
+        );
       }
-      const msg = json.choices?.[0]?.message;
-      if (!msg) {
+      if (!Array.isArray(json.choices) || json.choices.length === 0) {
+        throw new NetworkError(
+          "llm response missing or empty choices array",
+        );
+      }
+      const msg = json.choices[0]?.message;
+      if (!msg || typeof msg !== "object") {
         throw new NetworkError("llm response missing choices[0].message");
       }
       const content =
@@ -148,6 +157,12 @@ export class OpenAiCompatibleLlmClient implements LlmChatClient {
       if (err instanceof NetworkError || err instanceof ValidationError) {
         throw err;
       }
+      if (isAbortError(err)) {
+        throw new NetworkError(
+          `llm request timed out after ${this.timeoutMs}ms`,
+          { timeoutMs: this.timeoutMs, cause: "AbortError" },
+        );
+      }
       const m = err instanceof Error ? err.message : String(err);
       throw new NetworkError(`llm request failed: ${m}`);
     } finally {
@@ -156,14 +171,25 @@ export class OpenAiCompatibleLlmClient implements LlmChatClient {
   }
 }
 
+function isAbortError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const name = (err as { name?: string }).name;
+  return name === "AbortError" || name === "TimeoutError";
+}
+
 function serializeMessage(m: LlmMessage): Record<string, unknown> {
   const out: Record<string, unknown> = { role: m.role };
   if (m.content !== undefined && m.content !== null) {
-    out.content = m.content;
+    // Empty tool results still need a non-empty string for some gateways.
+    if (m.role === "tool" && m.content === "") {
+      out.content = "[empty tool result]";
+    } else {
+      out.content = m.content;
+    }
   } else if (m.role === "assistant" && m.tool_calls?.length) {
     out.content = null;
   } else if (m.role === "tool") {
-    out.content = m.content ?? "";
+    out.content = "[empty tool result]";
   }
   if (m.tool_calls?.length) {
     out.tool_calls = m.tool_calls;

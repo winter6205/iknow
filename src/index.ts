@@ -18,7 +18,7 @@ export { kbCompile } from "./kb-compile/compile.js";
 export { kbGovernance } from "./kb-governance/governance.js";
 
 export { IknowAgent, IknowAgentLoop, MAX_HOPS } from "./agent-loop/loop.js";
-export { LlmIknowAgent, parseFinalContent } from "./agent-loop/llm-agent.js";
+export { LlmIknowAgent } from "./agent-loop/llm-agent.js";
 export {
   OpenAiCompatibleLlmClient,
   type LlmChatClient,
@@ -72,13 +72,8 @@ export {
   createEmbeddingClientFromEnv,
   getOrCreateVectorIndex,
   ensureStoreIndexed,
-  resetVectorIndexForTests,
   getSharedEmbeddingClient,
-  FakeEmbeddingClient,
   OpenAiCompatibleEmbeddingClient,
-  VectorIndex,
-  cosine,
-  l2normalize,
 } from "./kb-retrieve/embedding/index.js";
 export type {
   EmbeddingClient,

@@ -10,6 +10,7 @@ import { IknowAgent } from "./agent-loop/loop.js";
 import {
   assertOfflineCompatible,
   assertToolProtocolSupported,
+  loadIknowEnv,
 } from "./config/env.js";
 import {
   CALLER_ROLES,
@@ -17,17 +18,33 @@ import {
   type CallerRole,
 } from "./shared/schema.js";
 import { createIknowRuntime } from "./runtime/create-runtime.js";
+import { isIknowError } from "./shared/errors.js";
+
+const AGENT_MODES = ["deterministic", "llm"] as const;
+type AgentModeCli = (typeof AGENT_MODES)[number];
+
+function parseAgentMode(value: unknown): AgentModeCli {
+  if (
+    typeof value === "string" &&
+    (AGENT_MODES as readonly string[]).includes(value.toLowerCase())
+  ) {
+    return value.toLowerCase() as AgentModeCli;
+  }
+  throw new Error(
+    `Invalid mode: ${JSON.stringify(value)}; expected one of: ${AGENT_MODES.join("|")}`,
+  );
+}
 
 function parseArgs(argv: string[]): {
   query: string;
   role: CallerRole;
   degrade: boolean;
-  mode: "deterministic" | "llm";
+  mode: AgentModeCli;
   embeddings: boolean;
 } {
   let role: CallerRole = "employee";
   let degrade = false;
-  let mode: "deterministic" | "llm" = "deterministic";
+  let mode: AgentModeCli = "deterministic";
   let embeddings = false;
   const rest: string[] = [];
   for (let i = 0; i < argv.length; i++) {
@@ -43,8 +60,13 @@ function parseArgs(argv: string[]): {
     } else if (a === "--governance-timeout") {
       degrade = true;
     } else if (a === "--mode") {
-      const raw = (argv[++i] ?? "").toLowerCase();
-      mode = raw === "llm" ? "llm" : "deterministic";
+      const raw = argv[++i];
+      if (raw === undefined) {
+        throw new Error(
+          `Missing value for --mode; expected one of: ${AGENT_MODES.join("|")}`,
+        );
+      }
+      mode = parseAgentMode(raw);
     } else if (a === "--embeddings") {
       embeddings = true;
     } else {
@@ -60,6 +82,35 @@ function parseArgs(argv: string[]): {
   };
 }
 
+function printCliError(err: unknown): void {
+  if (isIknowError(err)) {
+    console.error(
+      JSON.stringify({
+        error: err.code.toLowerCase(),
+        name: err.name,
+        message: err.message,
+        details: err.details,
+      }),
+    );
+    return;
+  }
+  if (err instanceof Error) {
+    console.error(
+      JSON.stringify({
+        error: "error",
+        message: err.message,
+      }),
+    );
+    return;
+  }
+  console.error(
+    JSON.stringify({
+      error: "error",
+      message: String(err),
+    }),
+  );
+}
+
 async function main(): Promise<void> {
   const { query, role, degrade, mode, embeddings } = parseArgs(
     process.argv.slice(2),
@@ -67,22 +118,37 @@ async function main(): Promise<void> {
 
   // --embeddings forces API mode for this process so createIknowRuntime can
   // build a vector index when the key named by IKNOW_EMBEDDING_API_KEY_ENV exists.
-  // Without a key, loadIknowEnv keeps mode off and retrieve stays keyword-only.
   if (embeddings) {
     process.env.IKNOW_EMBEDDING_MODE = "api";
   }
 
-  // Seed store + optional vector index when IKNOW_EMBEDDING_MODE=api and key present.
-  // Index failures are swallowed inside createIknowRuntime (keyword-only fallback).
-  const { store, vectorIndex, env } = await createIknowRuntime({
-    enableEmbeddings: embeddings ? true : undefined,
+  // CLI opt-in is authoritative: only true when --embeddings is passed.
+  const env = loadIknowEnv();
+  if (embeddings && !env.embedding.apiKey) {
+    console.error(
+      JSON.stringify({
+        error: "embeddings_missing_api_key",
+        message:
+          "Set the env var named by IKNOW_EMBEDDING_API_KEY_ENV, or omit --embeddings.",
+        apiKeyEnv: env.embedding.apiKeyEnv,
+      }),
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  // Seed store + optional vector index when enableEmbeddings and mode=api.
+  // Network embed failures fall back to keyword-only inside createIknowRuntime.
+  const { store, vectorIndex, env: runtimeEnv } = await createIknowRuntime({
+    enableEmbeddings: embeddings,
+    env,
   });
 
   const agentMode =
-    mode === "llm" || env.agentMode === "llm" ? "llm" : "deterministic";
+    mode === "llm" || runtimeEnv.agentMode === "llm" ? "llm" : "deterministic";
 
   // Re-check after CLI --mode may override env.agentMode (createIknowRuntime already checked env).
-  assertOfflineCompatible(env, agentMode);
+  assertOfflineCompatible(runtimeEnv, agentMode);
 
   const session = {
     caller_role: role,
@@ -91,14 +157,14 @@ async function main(): Promise<void> {
 
   if (agentMode === "llm") {
     // M2 path: requires LLM client env; fails closed with a clear error if not configured.
-    assertToolProtocolSupported(env.llm.toolProtocol);
-    if (!env.llm.apiKey) {
+    assertToolProtocolSupported(runtimeEnv.llm.toolProtocol);
+    if (!runtimeEnv.llm.apiKey) {
       console.error(
         JSON.stringify({
           error: "llm_mode_missing_api_key",
           message:
             "Set the env var named by IKNOW_LLM_API_KEY_ENV, or use --mode deterministic.",
-          apiKeyEnv: env.llm.apiKeyEnv,
+          apiKeyEnv: runtimeEnv.llm.apiKeyEnv,
         }),
       );
       process.exitCode = 1;
@@ -109,20 +175,20 @@ async function main(): Promise<void> {
       "./agent-loop/llm-client.js"
     );
     const llm = new OpenAiCompatibleLlmClient({
-      baseUrl: env.llm.baseUrl,
-      apiKey: env.llm.apiKey,
-      model: env.llm.model,
-      timeoutMs: env.llm.timeoutMs,
-      temperature: env.llm.temperature,
-      maxTokens: env.llm.maxOutputTokens,
-      contextWindowTokens: env.llm.contextWindowTokens,
+      baseUrl: runtimeEnv.llm.baseUrl,
+      apiKey: runtimeEnv.llm.apiKey,
+      model: runtimeEnv.llm.model,
+      timeoutMs: runtimeEnv.llm.timeoutMs,
+      temperature: runtimeEnv.llm.temperature,
+      maxTokens: runtimeEnv.llm.maxOutputTokens,
+      contextWindowTokens: runtimeEnv.llm.contextWindowTokens,
     });
     const agent = new LlmIknowAgent({
       store,
       session,
       llm,
       vectorIndex,
-      toolProtocol: env.llm.toolProtocol,
+      toolProtocol: runtimeEnv.llm.toolProtocol,
     });
     const answer = await agent.answer(query);
     console.log(JSON.stringify(answer, null, 2));
@@ -139,6 +205,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error(err instanceof Error ? err.message : err);
+  printCliError(err);
   process.exit(1);
 });

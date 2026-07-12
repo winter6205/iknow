@@ -1,9 +1,11 @@
 export type { EmbeddingClient, ChunkEmbedInput } from "./types.js";
 export { OpenAiCompatibleEmbeddingClient } from "./openai-compatible.js";
-export { FakeEmbeddingClient, cosine, l2normalize } from "./fake.js";
+export { FakeEmbeddingClient } from "./fake.js";
+export { cosine, l2normalize } from "./math.js";
 export { VectorIndex } from "./vector-index.js";
 
-import { loadIknowEnv } from "../../config/env.js";
+import { loadIknowEnv, type IknowEnv } from "../../config/env.js";
+import { NetworkError } from "../../shared/errors.js";
 import { OpenAiCompatibleEmbeddingClient } from "./openai-compatible.js";
 import { FakeEmbeddingClient } from "./fake.js";
 import { VectorIndex } from "./vector-index.js";
@@ -14,34 +16,45 @@ import type { InMemoryKnowledgeStore } from "../../knowledge-store/memory-store.
 let sharedIndex: VectorIndex | undefined;
 let sharedClient: EmbeddingClient | undefined;
 
+/**
+ * Build an embedding client from env.
+ * @param forceFake use deterministic FakeEmbeddingClient (offline tests)
+ * @param env optional preloaded IknowEnv (avoids re-reading dotenv)
+ */
 export function createEmbeddingClientFromEnv(
   forceFake = false,
+  env?: IknowEnv,
 ): EmbeddingClient | undefined {
-  if (forceFake) return new FakeEmbeddingClient(32);
-  const env = loadIknowEnv();
-  if (env.embedding.mode !== "api") return undefined;
-  if (!env.embedding.apiKey) return undefined;
+  const resolved = env ?? loadIknowEnv();
+  if (forceFake) {
+    return new FakeEmbeddingClient(resolved.embedding.dims || 32);
+  }
+  if (resolved.embedding.mode !== "api") return undefined;
+  if (!resolved.embedding.apiKey) return undefined;
   return new OpenAiCompatibleEmbeddingClient({
-    baseUrl: env.embedding.baseUrl,
-    apiKey: env.embedding.apiKey,
-    model: env.embedding.model,
-    dimensions: env.embedding.dimensions,
-    timeoutMs: env.embedding.timeoutMs,
-    dimsHint: env.embedding.dims,
+    baseUrl: resolved.embedding.baseUrl,
+    apiKey: resolved.embedding.apiKey,
+    model: resolved.embedding.model,
+    dimensions: resolved.embedding.dimensions,
+    timeoutMs: resolved.embedding.timeoutMs,
+    dimsHint: resolved.embedding.dims,
   });
 }
 
 export function getOrCreateVectorIndex(opts?: {
   forceFake?: boolean;
   client?: EmbeddingClient;
+  env?: IknowEnv;
 }): VectorIndex | undefined {
+  // Explicit client: isolated index, do not touch process singletons.
   if (opts?.client) {
-    sharedClient = opts.client;
-    sharedIndex = new VectorIndex(opts.client);
-    return sharedIndex;
+    return new VectorIndex(opts.client);
   }
   if (sharedIndex) return sharedIndex;
-  const client = createEmbeddingClientFromEnv(opts?.forceFake ?? false);
+  const client = createEmbeddingClientFromEnv(
+    opts?.forceFake ?? false,
+    opts?.env,
+  );
   if (!client) return undefined;
   sharedClient = client;
   sharedIndex = new VectorIndex(client);
@@ -64,8 +77,19 @@ export async function ensureStoreIndexed(
     text: c.text,
     summary: c.summary,
   }));
-  await idx.ensureChunks(chunks);
-  return idx;
+  try {
+    await idx.ensureChunks(chunks);
+    return idx;
+  } catch (err) {
+    if (err instanceof NetworkError) {
+      if (idx === sharedIndex) {
+        sharedIndex = undefined;
+        sharedClient = undefined;
+      }
+      return undefined;
+    }
+    throw err;
+  }
 }
 
 export function getSharedEmbeddingClient(): EmbeddingClient | undefined {

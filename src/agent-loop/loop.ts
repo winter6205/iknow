@@ -55,15 +55,42 @@ export class IknowAgent {
   async answer(query: string): Promise<IknowAnswer> {
     const trace = new ToolTrace();
     const notes: string[] = [];
-    let hops = 0;
+    // Mutable hop counter so unexpected-error path still reports hops used.
+    const hopState = { n: 0 };
+    // Single retrieve options object per answer (vector index binding).
+    const retrieveOpts = this.retrieveOpts();
 
+    try {
+      return await this.answerInner(query, trace, notes, hopState, retrieveOpts);
+    } catch (err) {
+      // G2: never return without snapshot_id, even on unexpected failures.
+      const msg = err instanceof Error ? err.message : String(err);
+      notes.push(`unexpected_error: ${msg}`);
+      return this.finalize({
+        text: "处理请求时发生意外错误，无法确认完整结论。",
+        source_spans: [],
+        trace,
+        hops: hopState.n,
+        notes,
+        preferredDocId: "_session",
+      });
+    }
+  }
+
+  private async answerInner(
+    query: string,
+    trace: ToolTrace,
+    notes: string[],
+    hopState: { n: number },
+    retrieveOpts: ReturnType<IknowAgent["retrieveOpts"]>,
+  ): Promise<IknowAnswer> {
     const q = query.trim();
     if (!q) {
       return this.finalize({
         text: "请提供有效问题。",
         source_spans: [],
         trace,
-        hops,
+        hops: hopState.n,
         notes: ["empty_query"],
         preferredDocId: "_session",
       });
@@ -86,7 +113,7 @@ export class IknowAgent {
         snapshot_id: g.snapshot_id,
         governance_status: g.status,
         trace,
-        hops,
+        hops: hopState.n,
         notes,
       });
     }
@@ -96,9 +123,14 @@ export class IknowAgent {
       /客户名单|联系方式|完整客户/.test(q) &&
       !isPrivilegedRole(this.session.caller_role)
     ) {
-      hops += 1;
+      hopState.n += 1;
       trace.record("kb_retrieve", { query: q });
-      const denied = await kbRetrieve(this.store, { query: q }, this.session, this.retrieveOpts());
+      const denied = await kbRetrieve(
+        this.store,
+        { query: q },
+        this.session,
+        retrieveOpts,
+      );
       const docId = denied.chunks[0]?.doc_id ?? "crm-contacts";
       trace.record("kb_governance", {
         action: "snapshot_status",
@@ -112,23 +144,30 @@ export class IknowAgent {
         snapshot_id: g.snapshot_id,
         governance_status: g.status,
         trace,
-        hops,
+        hops: hopState.n,
         notes: [NOTE.REQUIRE_APPROVAL, ...notes],
       });
     }
 
     // 1) retrieve (hop)
-    if (hops >= this.maxHops) {
-      return this.hopLimit(trace, hops, notes);
+    if (hopState.n >= this.maxHops) {
+      return this.hopLimit(trace, hopState.n, notes);
     }
-    hops += 1;
+    hopState.n += 1;
     trace.record("kb_retrieve", { query: q });
-    let retrieved = await kbRetrieve(this.store, { query: q }, this.session, this.retrieveOpts());
+    let retrieved = await kbRetrieve(
+      this.store,
+      { query: q },
+      this.session,
+      retrieveOpts,
+    );
     this.noteRetrieveDegradation(retrieved, notes);
     retrieved = this.applyNonexistentDocFilter(q, retrieved);
 
     if (this.lacksGroundedEvidence(q, retrieved.chunks)) {
-      return this.emptyAnswer(trace, hops, notes, { noHallucination: true });
+      return this.emptyAnswer(trace, hopState.n, notes, {
+        noHallucination: true,
+      });
     }
 
     const needsGovernance =
@@ -154,23 +193,28 @@ export class IknowAgent {
         document_version:
           this.store.tryGetDocument(docId)?.document_version ?? "0",
       });
-      if (hops < this.maxHops) {
-        hops += 1;
+      if (hopState.n < this.maxHops) {
+        hopState.n += 1;
         trace.record("kb_retrieve", { query: q, reason: "post_compile" });
-        retrieved = await kbRetrieve(this.store, { query: q }, this.session, this.retrieveOpts());
+        retrieved = await kbRetrieve(
+          this.store,
+          { query: q },
+          this.session,
+          retrieveOpts,
+        );
         this.noteRetrieveDegradation(retrieved, notes);
       }
     }
 
     if (retrieved.chunks.length === 0) {
-      return this.emptyAnswer(trace, hops, notes);
+      return this.emptyAnswer(trace, hopState.n, notes);
     }
 
     let top = retrieved.chunks[0]!;
     const claim = this.deriveClaim(q, top.summary);
     let verifyNote = "";
-    if (hops < this.maxHops) {
-      hops += 1;
+    if (hopState.n < this.maxHops) {
+      hopState.n += 1;
       const full = this.store.getChunk(top.chunk_id).text;
       const verifyArgs = {
         claim,
@@ -183,8 +227,8 @@ export class IknowAgent {
       });
       verifyNote = `verify=${v.verdict}`;
       if (v.version_stale) notes.push("version_stale");
-      if (v.verdict === "unsupported" && hops < this.maxHops) {
-        hops += 1;
+      if (v.verdict === "unsupported" && hopState.n < this.maxHops) {
+        hopState.n += 1;
         const prior = {
           chunk_id: top.chunk_id,
           summary: top.summary,
@@ -197,11 +241,11 @@ export class IknowAgent {
           this.store,
           { query: q, prior_chunks: [prior] },
           this.session,
-          this.retrieveOpts(),
+          retrieveOpts,
         );
         this.noteRetrieveDegradation(retrieved, notes);
         if (retrieved.chunks.length === 0) {
-          return this.emptyAnswer(trace, hops, notes, {
+          return this.emptyAnswer(trace, hopState.n, notes, {
             noHallucination: true,
           });
         }
@@ -209,12 +253,12 @@ export class IknowAgent {
       }
     }
 
-    if (hops > this.maxHops) {
-      return this.hopLimit(trace, hops, notes, retrieved.chunks);
+    if (hopState.n > this.maxHops) {
+      return this.hopLimit(trace, hopState.n, notes, retrieved.chunks);
     }
 
-    if (/八个部门|谁先谁后/.test(q) && hops >= this.maxHops - 1) {
-      return this.hopLimit(trace, hops, notes, retrieved.chunks);
+    if (/八个部门|谁先谁后/.test(q) && hopState.n >= this.maxHops - 1) {
+      return this.hopLimit(trace, hopState.n, notes, retrieved.chunks);
     }
 
     const primaryDoc =
@@ -260,7 +304,7 @@ export class IknowAgent {
         snapshot_id: g.snapshot_id,
         governance_status: g.status,
         trace,
-        hops,
+        hops: hopState.n,
         notes: [NOTE.REQUIRE_APPROVAL, ...notes],
       });
     }
@@ -298,7 +342,7 @@ export class IknowAgent {
       snapshot_id: g.snapshot_id,
       governance_status: g.status,
       trace,
-      hops,
+      hops: hopState.n,
       notes: notes.length ? notes : undefined,
     });
   }
