@@ -8,6 +8,7 @@ CLAUDE.local.md
 
 # runtime eval artifacts
 .evals/results/
+docs/iknow-spec/docs/eval/results/
 
 # Node / TypeScript build
 node_modules/

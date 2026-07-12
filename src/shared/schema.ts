@@ -196,13 +196,24 @@ export interface SnapshotPayload {
 // Agent answer envelope (G2)
 // ---------------------------------------------------------------------------
 
+/** Structured tool call log (trajectory-eval-spec §1.2). */
+export interface ToolCallLog {
+  tool: string;
+  args: Record<string, unknown>;
+  /** 1-based ordinal in this answer run. */
+  ts: number;
+}
+
 export interface IknowAnswer {
   text: string;
   source_spans: SourceSpan[];
   /** G2 required on every final answer. */
   snapshot_id: string;
   governance_status: GovernanceStatus;
+  /** Tool names only (compat). Prefer tool_calls for trajectory eval. */
   tool_trace: string[];
+  /** Structured call log for trajectory scoring. */
+  tool_calls: ToolCallLog[];
   hops_used: number;
   notes?: string[];
 }

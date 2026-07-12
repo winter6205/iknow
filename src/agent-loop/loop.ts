@@ -13,6 +13,7 @@ import type {
 } from "../shared/schema.js";
 import { IknowError } from "../shared/errors.js";
 import { isPrivilegedRole } from "./session.js";
+import { ToolTrace } from "./trace.js";
 
 /** Only kb_retrieve + kb_verify_citation count as hops (ADR). */
 export const MAX_HOPS = 5;
@@ -29,6 +30,7 @@ type RetrieveResult = ReturnType<typeof kbRetrieve>;
  * Deterministic agent loop (no external LLM).
  * Policy: retrieve → optional verify → governance snapshot → answer.
  * G2: never return without snapshot_id.
+ * Emits structured tool_calls for trajectory eval.
  */
 export class IknowAgent {
   private readonly store: InMemoryKnowledgeStore;
@@ -42,7 +44,7 @@ export class IknowAgent {
   }
 
   answer(query: string): IknowAnswer {
-    const toolTrace: string[] = [];
+    const trace = new ToolTrace();
     const notes: string[] = [];
     let hops = 0;
 
@@ -51,7 +53,7 @@ export class IknowAgent {
       return this.finalize({
         text: "请提供有效问题。",
         source_spans: [],
-        toolTrace,
+        trace,
         hops,
         notes: ["empty_query"],
         preferredDocId: "_session",
@@ -60,63 +62,64 @@ export class IknowAgent {
 
     // edge-004: competitor / non-enterprise knowledge
     if (/竞对|竞争对手|他司薪酬|外部薪酬/.test(q)) {
-      toolTrace.push("kb_governance");
+      trace.record("kb_governance", {
+        action: "snapshot_status",
+        doc_id: "competitor-pay",
+      });
       const g = this.safeGovernance("competitor-pay");
       notes.push(...(g.extraNotes ?? []));
       if (!notes.includes("permission_denied")) {
         notes.push("permission_denied");
       }
-      return {
+      return this.envelope({
         text: "越权查询已拒绝：不得返回非本企业知识。",
         source_spans: [],
         snapshot_id: g.snapshot_id,
         governance_status: g.status,
-        tool_trace: toolTrace,
-        hops_used: hops,
+        trace,
+        hops,
         notes,
-      };
+      });
     }
 
-    // edge-001: sensitive customer contacts — non-privileged only.
-    // Privileged callers skip this pre-path and use the single main retrieve.
+    // edge-001: sensitive — non-privileged only (privileged uses main path once)
     if (
       /客户名单|联系方式|完整客户/.test(q) &&
       !isPrivilegedRole(this.session.caller_role)
     ) {
-      toolTrace.push("kb_retrieve");
       hops += 1;
+      trace.record("kb_retrieve", { query: q });
       const denied = kbRetrieve(this.store, { query: q }, this.session);
-      toolTrace.push("kb_governance");
-      const g = this.safeGovernance(
-        denied.chunks[0]?.doc_id ?? "crm-contacts",
-      );
+      const docId = denied.chunks[0]?.doc_id ?? "crm-contacts";
+      trace.record("kb_governance", {
+        action: "snapshot_status",
+        doc_id: docId,
+      });
+      const g = this.safeGovernance(docId);
       notes.push(...(g.extraNotes ?? []));
-      return {
+      return this.envelope({
         text: "该请求涉及敏感客户数据，需审批（requireApprovalFor）后方可返回，当前已拦截。",
         source_spans: [],
         snapshot_id: g.snapshot_id,
         governance_status: g.status,
-        tool_trace: toolTrace,
-        hops_used: hops,
+        trace,
+        hops,
         notes: ["require_approval", ...notes],
-      };
+      });
     }
 
-    // 1) retrieve (counts as hop) — single main path for all remaining queries
+    // 1) retrieve (hop)
     if (hops >= this.maxHops) {
-      return this.hopLimit(toolTrace, hops, notes);
+      return this.hopLimit(trace, hops, notes);
     }
-    toolTrace.push("kb_retrieve");
     hops += 1;
+    trace.record("kb_retrieve", { query: q });
     let retrieved = kbRetrieve(this.store, { query: q }, this.session);
     this.noteRetrieveDegradation(retrieved, notes);
     retrieved = this.applyNonexistentDocFilter(q, retrieved);
 
-    // No grounded evidence (empty / weak match / edge-002 nonexistent docs)
     if (this.lacksGroundedEvidence(q, retrieved.chunks)) {
-      return this.emptyAnswer(toolTrace, hops, notes, {
-        noHallucination: true,
-      });
+      return this.emptyAnswer(trace, hops, notes, { noHallucination: true });
     }
 
     const needsGovernance =
@@ -127,7 +130,6 @@ export class IknowAgent {
       /串起来|SOP|汇总|清单|衔接|完整/.test(q) &&
       retrieved.chunks[0] !== undefined;
 
-    // compile is not a hop (infra tool)
     if (needsCompile && retrieved.chunks[0]) {
       const docId = retrieved.chunks[0].doc_id;
       const content = this.store
@@ -135,7 +137,7 @@ export class IknowAgent {
         .filter((c) => c.doc_id === docId)
         .map((c) => c.text)
         .join("\n");
-      toolTrace.push("kb_compile");
+      trace.record("kb_compile", { doc_id: docId });
       kbCompile(this.store, {
         doc_id: docId,
         content,
@@ -143,27 +145,29 @@ export class IknowAgent {
         document_version:
           this.store.tryGetDocument(docId)?.document_version ?? "0",
       });
-      // re-retrieve after compile is infra; still counts if we call retrieve
       if (hops < this.maxHops) {
-        toolTrace.push("kb_retrieve");
         hops += 1;
+        trace.record("kb_retrieve", { query: q, reason: "post_compile" });
         retrieved = kbRetrieve(this.store, { query: q }, this.session);
         this.noteRetrieveDegradation(retrieved, notes);
       }
     }
 
     if (retrieved.chunks.length === 0) {
-      return this.emptyAnswer(toolTrace, hops, notes);
+      return this.emptyAnswer(trace, hops, notes);
     }
 
-    // 2) verify top claim (counts as hop); top always from current retrieved
     let top = retrieved.chunks[0]!;
     const claim = this.deriveClaim(q, top.summary);
     let verifyNote = "";
     if (hops < this.maxHops) {
-      toolTrace.push("kb_verify_citation");
       hops += 1;
       const full = this.store.getChunk(top.chunk_id).text;
+      const verifyArgs = {
+        claim,
+        chunk_id: top.chunk_id,
+      };
+      trace.record("kb_verify_citation", verifyArgs);
       const v = kbVerifyCitation(this.store, {
         claim,
         source_span: { chunk_id: top.chunk_id, quote: full.slice(0, 120) },
@@ -171,19 +175,23 @@ export class IknowAgent {
       verifyNote = `verify=${v.verdict}`;
       if (v.version_stale) notes.push("version_stale");
       if (v.verdict === "unsupported" && hops < this.maxHops) {
-        toolTrace.push("kb_retrieve");
         hops += 1;
+        const prior = {
+          chunk_id: top.chunk_id,
+          summary: top.summary,
+        };
+        trace.record("kb_retrieve", {
+          query: q,
+          prior_chunks: [prior],
+        });
         retrieved = kbRetrieve(
           this.store,
-          {
-            query: q,
-            prior_chunks: [{ chunk_id: top.chunk_id, summary: top.summary }],
-          },
+          { query: q, prior_chunks: [prior] },
           this.session,
         );
         this.noteRetrieveDegradation(retrieved, notes);
         if (retrieved.chunks.length === 0) {
-          return this.emptyAnswer(toolTrace, hops, notes, {
+          return this.emptyAnswer(trace, hops, notes, {
             noHallucination: true,
           });
         }
@@ -192,27 +200,32 @@ export class IknowAgent {
     }
 
     if (hops > this.maxHops) {
-      return this.hopLimit(toolTrace, hops, notes, retrieved.chunks);
+      return this.hopLimit(trace, hops, notes, retrieved.chunks);
     }
 
-    // edge-005: multi-hop pressure — if query demands many departments, declare hop limit
     if (/八个部门|谁先谁后/.test(q) && hops >= this.maxHops - 1) {
-      return this.hopLimit(toolTrace, hops, notes, retrieved.chunks);
+      return this.hopLimit(trace, hops, notes, retrieved.chunks);
     }
 
-    // 3) governance (not a hop); G2 always needs snapshot_id
-    toolTrace.push("kb_governance");
     const primaryDoc =
       retrieved.chunks.find((c) =>
         /refund|退款/.test(`${c.doc_id} ${c.summary}`),
       )?.doc_id ?? top.doc_id;
 
-    let g = this.safeGovernance(
-      primaryDoc,
-      needsGovernance ? "detect_conflict" : "snapshot_status",
-    );
+    const govAction = needsGovernance
+      ? "detect_conflict"
+      : "snapshot_status";
+    trace.record("kb_governance", {
+      action: govAction,
+      doc_id: primaryDoc,
+    });
+    let g = this.safeGovernance(primaryDoc, govAction);
     notes.push(...(g.extraNotes ?? []));
     if (needsGovernance && g.status === "ok") {
+      trace.record("kb_governance", {
+        action: "snapshot_status",
+        doc_id: primaryDoc,
+      });
       g = this.safeGovernance(primaryDoc, "snapshot_status");
       notes.push(...(g.extraNotes ?? []));
     }
@@ -223,27 +236,23 @@ export class IknowAgent {
     });
     if (anyRevoked || /作废|还有效吗/.test(q)) {
       notes.push("document_revoked_or_stale");
-      // keep snapshot_id; surface stale status
       g = { ...g, status: "stale" };
     }
 
-    // sensitive surface: requireApprovalFor even if retrieved via role
     const sensitiveHit = retrieved.chunks.some((c) => {
       const d = this.store.tryGetDocument(c.doc_id);
-      return (
-        d?.sensitivity === "sensitive" || d?.requires_approval === true
-      );
+      return d?.sensitivity === "sensitive" || d?.requires_approval === true;
     });
     if (sensitiveHit && !isPrivilegedRole(this.session.caller_role)) {
-      return {
+      return this.envelope({
         text: "该请求涉及敏感数据，需审批（requireApprovalFor）后方可返回，当前已拦截。",
         source_spans: [],
         snapshot_id: g.snapshot_id,
         governance_status: g.status,
-        tool_trace: toolTrace,
-        hops_used: hops,
+        trace,
+        hops,
         notes: ["require_approval", ...notes],
-      };
+      });
     }
 
     const spans = retrieved.chunks.slice(0, 3).map((c) => ({
@@ -273,14 +282,35 @@ export class IknowAgent {
         "\n\n【降级】治理不可达或超时：已显式声明降级，结果带未充分过滤标记。";
     }
 
-    return {
+    return this.envelope({
       text,
       source_spans: spans,
       snapshot_id: g.snapshot_id,
       governance_status: g.status,
-      tool_trace: toolTrace,
-      hops_used: hops,
+      trace,
+      hops,
       notes: notes.length ? notes : undefined,
+    });
+  }
+
+  private envelope(args: {
+    text: string;
+    source_spans: IknowAnswer["source_spans"];
+    snapshot_id: string;
+    governance_status: GovernanceStatus;
+    trace: ToolTrace;
+    hops: number;
+    notes?: string[];
+  }): IknowAnswer {
+    return {
+      text: args.text,
+      source_spans: args.source_spans,
+      snapshot_id: args.snapshot_id,
+      governance_status: args.governance_status,
+      tool_trace: args.trace.names(),
+      tool_calls: args.trace.logs(),
+      hops_used: args.hops,
+      notes: args.notes,
     };
   }
 
@@ -288,7 +318,6 @@ export class IknowAgent {
     return `${query} —— 依据：${summary}`.slice(0, 200);
   }
 
-  /** True when retrieve returned noise only (no meaningful token overlap with query). */
   private isWeakMatch(query: string, chunks: Chunk[]): boolean {
     if (chunks.length === 0) return true;
     const keys = query
@@ -299,15 +328,12 @@ export class IknowAgent {
       .filter((t) => !/公司|你们|有没有|一份|怎么|什么|哪些|是否/.test(t));
     if (keys.length === 0) return false;
     return !chunks.some((c) => {
-      const blob = `${c.summary} ${this.store.getChunk(c.chunk_id).text}`.toLowerCase();
+      const blob =
+        `${c.summary} ${this.store.getChunk(c.chunk_id).text}`.toLowerCase();
       return keys.some((k) => blob.includes(k));
     });
   }
 
-  /**
-   * Unified "no grounded evidence" predicate (edge-002 + empty + weak match).
-   * When true, answer() must take emptyAnswer — never invent content.
-   */
   private lacksGroundedEvidence(query: string, chunks: Chunk[]): boolean {
     if (chunks.length === 0) return true;
     if (/全员持股|根本不存在/.test(query)) return true;
@@ -332,7 +358,6 @@ export class IknowAgent {
     return false;
   }
 
-  /** Explicit "does this nonexistent doc exist?" → zero chunks if no distinctive hit. */
   private applyNonexistentDocFilter(
     query: string,
     retrieved: RetrieveResult,
@@ -364,38 +389,34 @@ export class IknowAgent {
     }
   }
 
-  /**
-   * Dedicated empty_result path. Always G2 snapshot_id; never "根据企业知识库" body.
-   */
   private emptyAnswer(
-    toolTrace: string[],
+    trace: ToolTrace,
     hops: number,
     notes: string[],
     opts?: { noHallucination?: boolean },
   ): IknowAnswer {
-    toolTrace.push("kb_governance");
+    trace.record("kb_governance", {
+      action: "snapshot_status",
+      doc_id: "_session",
+    });
     const g = this.safeGovernance("_session");
     notes.push(...(g.extraNotes ?? []));
     const tagNotes = opts?.noHallucination
       ? ["empty_result", "no_hallucination", ...notes]
       : ["empty_result", ...notes];
-    return {
+    return this.envelope({
       text: opts?.noHallucination
         ? "未在企业知识库中找到相关内容，无法确认；不得编造不存在的文档。"
         : "未在企业知识库中找到相关内容，无法确认。",
       source_spans: [],
       snapshot_id: g.snapshot_id,
       governance_status: g.status,
-      tool_trace: toolTrace,
-      hops_used: hops,
+      trace,
+      hops,
       notes: tagNotes,
-    };
+    });
   }
 
-  /**
-   * Governance wrapper: never mutates caller notes.
-   * All failure paths return extraNotes for the caller to merge.
-   */
   private safeGovernance(
     docId: string,
     action: GovernanceAction = "snapshot_status",
@@ -419,7 +440,6 @@ export class IknowAgent {
       };
     } catch (err) {
       if (err instanceof IknowError && err.code === "GOVERNANCE_TIMEOUT") {
-        // edge-006: degraded local snapshot, never omit snapshot_id (G2)
         return {
           ...this.localSnapshot(docId, action, "stale"),
           extraNotes: [
@@ -464,28 +484,28 @@ export class IknowAgent {
   }
 
   private hopLimit(
-    toolTrace: string[],
+    trace: ToolTrace,
     hops: number,
     notes: string[],
     chunks: Pick<Chunk, "chunk_id">[] = [],
   ): IknowAnswer {
     notes.push("max_hops_exceeded");
     const g = this.localSnapshot("_session", "snapshot_status", "stale");
-    return {
+    return this.envelope({
       text: "探索步数已达上限（max_hops=5），无法确认完整结论。以下为已检索来源范围限制声明。",
       source_spans: chunks.map((c) => ({ chunk_id: c.chunk_id })),
       snapshot_id: g.snapshot_id,
       governance_status: g.status,
-      tool_trace: toolTrace,
-      hops_used: Math.min(hops, this.maxHops),
+      trace,
+      hops: Math.min(hops, this.maxHops),
       notes,
-    };
+    });
   }
 
   private finalize(args: {
     text: string;
     source_spans: IknowAnswer["source_spans"];
-    toolTrace: string[];
+    trace: ToolTrace;
     hops: number;
     notes: string[];
     preferredDocId: string;
@@ -495,15 +515,15 @@ export class IknowAgent {
       "snapshot_status",
       "ok",
     );
-    return {
+    return this.envelope({
       text: args.text,
       source_spans: args.source_spans,
       snapshot_id: g.snapshot_id,
       governance_status: g.status,
-      tool_trace: args.toolTrace,
-      hops_used: args.hops,
+      trace: args.trace,
+      hops: args.hops,
       notes: args.notes,
-    };
+    });
   }
 }
 

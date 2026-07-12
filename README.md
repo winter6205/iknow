@@ -19,6 +19,7 @@ Design truth: `docs/iknow-spec/` (HANDOFF → ADR → tool-schema → mapping �
 npm install
 npm run typecheck
 npm test
+npm run eval
 ```
 
 ## Run
@@ -27,6 +28,7 @@ npm test
 npm run dev -- "公司的退款政策是什么？"
 npm run dev -- --role employee "年假天数是怎么规定的？"
 npm run dev -- --governance-timeout "检索时治理服务超时了，你还能正常回答退款政策吗？"
+npm run eval   # 32-sample trajectory suite (hard gates + trajectory_score)
 ```
 
 ## Layout

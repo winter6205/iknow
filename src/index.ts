@@ -26,6 +26,7 @@ export {
   isPrivilegedRole,
   withRole,
 } from "./agent-loop/session.js";
+export { ToolTrace } from "./agent-loop/trace.js";
 
 export { createToolRegistry } from "./tools/registry.js";
 export type { ToolRegistry } from "./tools/registry.js";
@@ -35,6 +36,10 @@ export {
   seedEnterpriseKb,
   seedDemoKnowledge,
 } from "./fixtures/seed-kb.js";
+
+export { scoreTrajectory, checkHardConstraints } from "./eval/score-trajectory.js";
+export { runEvalSuite, runSample, loadEvalSet, aggregateResults } from "./eval/run-suite.js";
+export type * from "./eval/types.js";
 
 export type * from "./shared/schema.js";
 export * from "./shared/errors.js";

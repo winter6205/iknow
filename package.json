@@ -18,7 +18,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test tests/**/*.test.ts",
-    "dev": "tsx src/cli.ts"
+    "dev": "tsx src/cli.ts",
+    "eval": "tsx src/eval/cli.ts"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",

@@ -1,7 +1,9 @@
-# Trajectory Eval Harness 规格（iknow / Phase 2）
+# Trajectory Eval Harness 规格（iknow）
 
-> 状态：SPEC ONLY，不跑（无 gbrain / mock 后端）。供 Phase 3 实现后直接接手跑。
-> 评分框架来源：P2-plan.md §1.2。本文将其落地为可执行的输入/输出 schema + 打分伪码。
+> 状态：**IMPLEMENTED**（独立 iknow 运行时）。  
+> 运行：`npm run eval` → 写入 `docs/eval/results/trajectory-suite-latest.json`（gitignore）。  
+> 实现：`src/eval/score-trajectory.ts` + `src/eval/run-suite.ts`。  
+> 评分框架来源：P2-plan.md §1.2。
 
 ## 1. 输入
 

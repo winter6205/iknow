@@ -4,7 +4,7 @@
 
 iknow = 企业知识库问答 Agent（非纯 RAG pipeline）。通过 4 个工具实现可溯源的企业问答：所有答案必须提供原文引用（source_span）和治理状态标签（snapshot_id），双索引只影响排序、verify 永远看原文，满足企业零容忍要求。
 
-当前分支：`phase-2-eval`（从 `main` baseline `15e929c` 切出）。协议层已决，评测资产已建（构造数据），实现未启动。
+当前分支：`master`。协议层已决，评测资产已建（构造数据），**独立 iknow 运行时已实现**（无 gbrain runtime 链接）；trajectory suite 可 `npm run eval` 实跑。
 
 ## 二、Agent 开发流程阶段与当前进度
 
@@ -13,8 +13,8 @@ iknow = 企业知识库问答 Agent（非纯 RAG pipeline）。通过 4 个工�
 | P0 需求定性 | 确认 Agent 形态（A/B/C/D 理由分析） | 形态判定结论 | ✅ 已完成 |
 | P1 协议层设计 | 4 tool 契约 + 6 原则 + 7 漏洞对抗 + 架构图 + gbrain 适配映射 | `docs/protocol/` 下 7 文件 | ✅ 已闭环 |
 | P2 评测体系构建 | eval 集 + 门禁草案 + P1 脆点复盘 + trajectory 规格 | `docs/eval/` 下 5 文件 | ✅ 已完成（构造数据，待真实替换） |
-| P3 实现 | Agent 代码、gbrain 后端接入、trajectory 实跑、门禁校准 | 未产出 | ⏳ 未启动 |
-| P4 工程化上线 | 鉴权、异步、治理降级、部署 | 未产出 | ⏳ 未启动 |
+| P3 实现 | 独立 Agent 代码、4 tool、trajectory 实跑 | `src/**` + `npm run eval` | ✅ 核心已交付（真实数据/门禁数字校准待续） |
+| P4 工程化上线 | 鉴权生产化、异步队列、观测/部署 | 未产出 | ⏳ 未启动 |
 
 ## 三、关键决策摘要
 
@@ -61,7 +61,8 @@ iknow = 企业知识库问答 Agent（非纯 RAG pipeline）。通过 4 个工�
 
 ## 六、后续顺序
 
-1. 接真实 query 日志替换构造数据并校准门禁
-2. 进 Phase 3 实现（按 mapping 写代码）
-3. 跑全链路 trajectory eval（retrieve→verify→governance），产出 policy 违规清单
-4. 工程化上线（鉴权、异步、治理降级、部署）
+1. ~~进 Phase 3 实现~~（独立 `src/` 已交付；`npm test` / `npm run eval`）
+2. ~~跑全链路 trajectory eval~~（硬约束 32/32 pass；mean trajectory ≈0.83 ≥ Sprint-1 0.6）
+3. 接真实 query 日志替换构造数据并校准门禁数字（eval-gate 软指标）
+4. 工程化上线 P4（鉴权生产化、异步队列、观测/部署）
+5. 可选：ADR 假设草案 `ADR-v0.1-assumptions-p3.md` 用户书面确认
