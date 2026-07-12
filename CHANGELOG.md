@@ -2,6 +2,13 @@
 
 ## 0.1.0 (unreleased)
 
+### I4 smoke + LLM client resilience
+
+- Full I4 interaction smoke: deterministic / embeddings / llm CLI + Session HTTP (`docs/handoff/i4-smoke/`)
+- LLM client: force `stream: false`; `parseLlmResponseJson` tolerates SSE `data: [DONE]` trailers
+- Tests: `tests/llm-client-parse.test.ts`
+- Note: shell `NINE_ROUTER_API_KEY` may 401 on chat until aligned with 9router key `iknow`
+
 ### Frontend stack upgrade (Vite + React + TS)
 
 - Product UI package under **`web/`**: Vite 6 + React 19 + TypeScript SPA (`iknow-web`)

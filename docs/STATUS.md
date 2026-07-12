@@ -97,7 +97,7 @@
 
 | 缺口 | 说明 |
 |------|------|
-| **I4 主线程真机三模式深度冒烟清单** | 有管道/自动化测；人机长会话 + llm/embeddings 成本/延迟基线文档化不足 |
+| **I4 真机三模式冒烟** | **已做**（2026-07-12）：`docs/handoff/i4-smoke/`；det/emb/llm/HTTP 全 PASS；shell key 与 9router chat 对齐仍为运维项 |
 | **指代/省略续问鲁棒性** | deterministic 仍偏关键词；LLM 依赖模型与 host priors，未系统评测 |
 | **澄清轮（0 tool）** | 设计允许「意图不清先问」；未作为一等状态机落地 |
 | **会话持久化** | REPL 进程内；无跨进程会话恢复 |
@@ -128,10 +128,10 @@
 
 ### 3.1 近端（建议 1–2 个迭代）
 
-1. **真机交互清单（I4）**  
-   - deterministic / embeddings / llm 各多轮脚本化或人工清单 + 结果归档（无密钥）。  
-2. **真实语料与 query**  
+1. **真实语料与 query**  
    - 导入一版脱敏 KB；替换 draft eval 的一部分 hard/edge。  
+2. **env 密钥对齐**  
+   - 将 `.env.local` 的 `NINE_ROUTER_API_KEY` 与 9router UI `iknow` key 同步（chat 401 根因）。  
 3. **会话小增强**  
    - 可选会话导出/导入 JSON；澄清轮最小状态。  
 4. **观测最小集**  

@@ -1,0 +1,56 @@
+{
+  "suite": "i4-smoke",
+  "target": "http-session",
+  "base_url": "http://127.0.0.1:8791",
+  "mode": "deterministic",
+  "timestamp": "2026-07-12T15:44:40Z",
+  "duration_ms": 399,
+  "pass": true,
+  "exit": 0,
+  "conversation_id_present": true,
+  "has_snapshot_id": {
+    "turn1": true,
+    "turn2": true
+  },
+  "confirmed_501": true,
+  "steps": {
+    "health": {
+      "status": 200,
+      "ok": true
+    },
+    "create_session": {
+      "status": 201,
+      "ok": true,
+      "conversation_id_present": true
+    },
+    "message_1": {
+      "status": 200,
+      "has_snapshot_id": true,
+      "ok": true
+    },
+    "message_2": {
+      "status": 200,
+      "has_snapshot_id": true,
+      "ok": true
+    },
+    "commands_status": {
+      "status": 200,
+      "ok": true
+    },
+    "reset": {
+      "status": 200,
+      "ok": true
+    },
+    "static_root": {
+      "status": 200,
+      "html_contains_root_or_iknow": true,
+      "ok": true
+    },
+    "events_sse": {
+      "status": 501,
+      "expect_501": true,
+      "confirmed_501": true,
+      "ok": true
+    }
+  }
+}

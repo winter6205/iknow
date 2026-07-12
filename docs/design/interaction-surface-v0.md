@@ -258,8 +258,8 @@ answer(
 - [x] I2 会话袋：`ConversationState` + `prior_chunks` 注入 `answer`  
 - [x] I3 LLM 历史：`history_finals` 短窗（LlmIknowAgent）  
 - [x] I3.5 Session HTTP + Web：**Vite React SPA** 栈（`web/`；build → `web/dist`；`serve` 托管）；SSE 未实现（501）  
-- [ ] I4 真机交互冒烟（人工）  
+- [x] I4 真机交互冒烟：三模式 CLI + Session HTTP（见 `docs/handoff/i4-smoke/`）  
 - [ ] I5 多轮 eval（可选）  
-- [ ] **未** 声称交互主路径已齐（仍缺 I4 冒烟；流式/鉴权未做）  
+- [ ] 流式/鉴权/会话持久化仍未做（不阻塞 I4）  
 
-**成功 =** I1–I3 可本地跑通；I3.5 SPA 构建与 G2 投影可验收；I4 真机清单另开。
+**成功 =** I1–I4 可本地跑通；I3.5 SPA 构建与 G2 投影可验收；I5 可选。

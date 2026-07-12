@@ -1,0 +1,31 @@
+{
+  "mode": "llm",
+  "timestamp": "2026-07-12T15:59:27.397Z",
+  "result": "pass",
+  "key_source": "9router.apiKeys.name=iknow",
+  "probe": {
+    "status": 200,
+    "parse_ok": true,
+    "has_choices": true
+  },
+  "ask": {
+    "exit": 0,
+    "duration_ms": 41748,
+    "has_snapshot_id": true,
+    "hops_used": 5,
+    "governance_status": "conflict",
+    "tool_calls_len": 8,
+    "llm_success": true
+  },
+  "pipe": {
+    "exit": 0,
+    "duration_ms": 70859,
+    "status_seen": true,
+    "llm_error_count": 0,
+    "llm_success": true
+  },
+  "notes": [
+    "Shell NINE_ROUTER_API_KEY may 401; smoke injects active 9router key name iknow for process only.",
+    "Client forces stream:false and parseLlmResponseJson strips SSE trailers."
+  ]
+}

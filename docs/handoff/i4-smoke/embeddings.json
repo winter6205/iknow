@@ -1,0 +1,26 @@
+{
+  "mode": "deterministic",
+  "embeddings": true,
+  "timestamp": "2026-07-12T16:00:00Z",
+  "pipe": {
+    "exit": 0,
+    "turns_ok": true,
+    "status_seen": true,
+    "duration_ms": 6023,
+    "notes": [
+      "3 user turns answered (2 KB hits with governance conflict footer + 1 empty/no_hallucination for leave flow)",
+      "status line present: mode=deterministic role=employee json=off turns=3 priors=0",
+      "stdout shows governance/snapshot markers (治理: conflict|stale, snap_…)",
+      "stderr empty",
+      "IKNOW_CHAT_QUIET=1",
+      "flag: --embeddings; key via IKNOW_EMBEDDING_API_KEY_ENV → NINE_ROUTER_API_KEY (value not logged)"
+    ]
+  },
+  "ask": {
+    "exit": 0,
+    "has_snapshot_id": true,
+    "hops_used": 2,
+    "governance_status": "conflict",
+    "duration_ms": 5461
+  }
+}

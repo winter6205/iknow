@@ -1,0 +1,23 @@
+{
+  "mode": "deterministic",
+  "timestamp": "2026-07-12T15:43:01Z",
+  "pipe": {
+    "exit": 0,
+    "turns_ok": true,
+    "status_seen": true,
+    "duration_ms": 10730,
+    "notes": [
+      "3 user turns answered (2 KB hits with governance conflict footer + 1 empty/no_hallucination for leave flow)",
+      "status line present: mode=deterministic role=employee json=off turns=3 priors=0",
+      "stdout shows governance/snapshot markers (治理: conflict|stale, snap_…)",
+      "stderr empty",
+      "IKNOW_CHAT_QUIET=1"
+    ]
+  },
+  "ask": {
+    "exit": 0,
+    "has_snapshot_id": true,
+    "hops_used": 2,
+    "governance_status": "conflict"
+  }
+}
