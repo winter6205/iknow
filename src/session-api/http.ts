@@ -39,12 +39,20 @@ const MIME: Record<string, string> = {
   ".map": "application/json; charset=utf-8",
 };
 
+/** Prefer Vite build output; fall back to web/ source root when dist is absent. */
+export function resolveDefaultWebRoot(): string {
+  const dist = path.resolve(__dirname, "../../web/dist");
+  if (fs.existsSync(dist)) {
+    return dist;
+  }
+  return path.resolve(__dirname, "../../web");
+}
+
 export function createSessionHttpServer(
   opts: SessionHttpServerOptions,
 ): http.Server {
   const hub = opts.hub;
-  const webRoot =
-    opts.webRoot ?? path.resolve(__dirname, "../../web");
+  const webRoot = opts.webRoot ?? resolveDefaultWebRoot();
 
   return http.createServer((req, res) => {
     void handle(req, res, hub, webRoot);
@@ -251,34 +259,52 @@ function tryServeStatic(
   webRoot: string,
   pathname: string,
 ): boolean {
+  // Never treat /api as static (caller should only invoke for non-API GETs,
+  // but double-guard path traversal + SPA scope).
+  if (pathname === "/api" || pathname.startsWith("/api/")) {
+    return false;
+  }
+
   let rel = pathname === "/" ? "/index.html" : pathname;
   if (rel.startsWith("/web/")) {
     rel = rel.slice("/web".length);
   }
   // Prevent path traversal.
+  const rootAbs = path.resolve(webRoot);
   const resolved = path.resolve(webRoot, "." + rel);
-  if (!resolved.startsWith(path.resolve(webRoot))) {
+  if (!resolved.startsWith(rootAbs + path.sep) && resolved !== rootAbs) {
     sendJson(res, 403, {
       error: "permission_denied",
       message: "path not allowed",
     } satisfies ApiErrorBody);
     return true;
   }
-  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
-    // SPA fallback for bare /
-    if (pathname === "/" || pathname === "/index.html") {
-      return false;
-    }
-    return false;
+  if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+    pipeFile(res, resolved);
+    return true;
   }
-  const ext = path.extname(resolved).toLowerCase();
+
+  // SPA fallback: GET non-/api routes with missing file → index.html when present.
+  const indexPath = path.resolve(webRoot, "index.html");
+  if (
+    (indexPath.startsWith(rootAbs + path.sep) || indexPath === rootAbs) &&
+    fs.existsSync(indexPath) &&
+    fs.statSync(indexPath).isFile()
+  ) {
+    pipeFile(res, indexPath);
+    return true;
+  }
+  return false;
+}
+
+function pipeFile(res: http.ServerResponse, filePath: string): void {
+  const ext = path.extname(filePath).toLowerCase();
   const type = MIME[ext] ?? "application/octet-stream";
   res.writeHead(200, {
     "Content-Type": type,
     "Cache-Control": "no-cache",
   });
-  fs.createReadStream(resolved).pipe(res);
-  return true;
+  fs.createReadStream(filePath).pipe(res);
 }
 
 function sendJson(
