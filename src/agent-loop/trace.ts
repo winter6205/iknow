@@ -8,7 +8,7 @@ export class ToolTrace {
     this.calls.push({
       tool,
       args,
-      ts: this.calls.length + 1,
+      ordinal: this.calls.length + 1,
     });
   }
 

@@ -4,28 +4,35 @@
  */
 import { runEvalSuite } from "./run-suite.js";
 
-const report = runEvalSuite();
-const a = report.aggregate;
+try {
+  const report = runEvalSuite();
+  const aggregate = report.aggregate;
 
-console.log(
-  JSON.stringify(
-    {
-      generated_at: report.generated_at,
-      total: a.total,
-      hard_pass_rate: a.hard_pass_rate,
-      mean_trajectory_score: a.mean_trajectory_score,
-      per_category: a.per_category,
-      sprint1_gates: a.sprint1_gates,
-      violations: a.global_hard_violation_list,
-    },
-    null,
-    2,
-  ),
-);
+  console.log(
+    JSON.stringify(
+      {
+        generated_at: report.generated_at,
+        eval_set_status: report.eval_set_status,
+        total: aggregate.total,
+        hard_pass_rate: aggregate.hard_pass_rate,
+        mean_trajectory_score: aggregate.mean_trajectory_score,
+        per_category: aggregate.per_category,
+        release_gates: aggregate.release_gates,
+        violations: aggregate.global_hard_violation_list,
+      },
+      null,
+      2,
+    ),
+  );
 
-if (
-  !a.sprint1_gates.hard_pass_rate_ok ||
-  !a.sprint1_gates.mean_trajectory_ok
-) {
-  process.exitCode = 1;
+  if (
+    !aggregate.release_gates.hard_pass_rate_ok ||
+    !aggregate.release_gates.mean_trajectory_ok
+  ) {
+    process.exitCode = 1;
+  }
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  console.error(`[eval] suite failed: ${msg}`);
+  process.exit(1);
 }

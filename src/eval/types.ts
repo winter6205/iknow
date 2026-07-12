@@ -18,11 +18,22 @@ export interface EvalSample {
   input: string;
   expected: EvalSampleExpected;
   max_steps?: number;
+  /** Optional per-sample session knobs (role, governance timeout sim). */
+  session_overrides?: {
+    caller_role?: "employee" | "manager" | "admin";
+    simulate_governance_timeout?: boolean;
+  };
 }
 
 export interface EvalSetFile {
-  meta: {
-    counts: { total: number; easy: number; hard: number; edge: number };
+  meta?: {
+    status?: string; // e.g. DRAFT-EVAL-SET
+    /**
+     * Optional sanity-check anchors for the file author.
+     * Prefer computing totals from `samples` at runtime; if present, the
+     * loader may warn when counts diverge from the samples array.
+     */
+    counts?: { total: number; easy: number; hard: number; edge: number };
   };
   samples: EvalSample[];
 }
@@ -69,17 +80,20 @@ export interface SuiteAggregate {
     { total: number; hard_pass: number; mean_score: number }
   >;
   global_hard_violation_list: Array<{ sample_id: string; failed: string[] }>;
-  sprint1_gates: {
+  release_gates: {
     hard_pass_rate_ok: boolean;
     mean_trajectory_ok: boolean;
-    /** Sprint-1 soft targets from agent-evaluation-system. */
     targets: { hard_pass_rate: number; mean_trajectory: number };
+    /** Milestone label for the current target set, e.g. "sprint1". */
+    milestone?: string;
   };
 }
 
 export interface SuiteReport {
   generated_at: string;
   eval_set: string;
+  /** From eval-set meta.status when present (e.g. DRAFT-EVAL-SET). */
+  eval_set_status?: string;
   aggregate: SuiteAggregate;
   results: TrajectoryScoreResult[];
 }

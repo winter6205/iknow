@@ -12,6 +12,7 @@ import type {
   SessionContext,
 } from "../shared/schema.js";
 import { IknowError } from "../shared/errors.js";
+import { NOTE } from "../eval/lexicon.js";
 import { isPrivilegedRole } from "./session.js";
 import { ToolTrace } from "./trace.js";
 
@@ -68,8 +69,8 @@ export class IknowAgent {
       });
       const g = this.safeGovernance("competitor-pay");
       notes.push(...(g.extraNotes ?? []));
-      if (!notes.includes("permission_denied")) {
-        notes.push("permission_denied");
+      if (!notes.includes(NOTE.PERMISSION_DENIED)) {
+        notes.push(NOTE.PERMISSION_DENIED);
       }
       return this.envelope({
         text: "越权查询已拒绝：不得返回非本企业知识。",
@@ -104,7 +105,7 @@ export class IknowAgent {
         governance_status: g.status,
         trace,
         hops,
-        notes: ["require_approval", ...notes],
+        notes: [NOTE.REQUIRE_APPROVAL, ...notes],
       });
     }
 
@@ -235,7 +236,7 @@ export class IknowAgent {
       return d?.freshness === "revoked";
     });
     if (anyRevoked || /作废|还有效吗/.test(q)) {
-      notes.push("document_revoked_or_stale");
+      notes.push(NOTE.DOCUMENT_REVOKED_OR_STALE);
       g = { ...g, status: "stale" };
     }
 
@@ -251,7 +252,7 @@ export class IknowAgent {
         governance_status: g.status,
         trace,
         hops,
-        notes: ["require_approval", ...notes],
+        notes: [NOTE.REQUIRE_APPROVAL, ...notes],
       });
     }
 
@@ -328,8 +329,8 @@ export class IknowAgent {
       .filter((t) => !/公司|你们|有没有|一份|怎么|什么|哪些|是否/.test(t));
     if (keys.length === 0) return false;
     return !chunks.some((c) => {
-      const blob =
-        `${c.summary} ${this.store.getChunk(c.chunk_id).text}`.toLowerCase();
+      const rec = this.store.tryGetChunk(c.chunk_id);
+      const blob = `${c.summary} ${rec?.text ?? ""}`.toLowerCase();
       return keys.some((k) => blob.includes(k));
     });
   }
@@ -342,7 +343,8 @@ export class IknowAgent {
       this.isWeakMatch(query, chunks)
     ) {
       const grounded = chunks.some((c) => {
-        const text = `${c.summary} ${this.store.getChunk(c.chunk_id).text}`;
+        const rec = this.store.tryGetChunk(c.chunk_id);
+        const text = `${c.summary} ${rec?.text ?? ""}`;
         const keys = query
           .replace(/[《》？?，,。.\s]/g, " ")
           .split(/\s+/)
@@ -402,8 +404,8 @@ export class IknowAgent {
     const g = this.safeGovernance("_session");
     notes.push(...(g.extraNotes ?? []));
     const tagNotes = opts?.noHallucination
-      ? ["empty_result", "no_hallucination", ...notes]
-      : ["empty_result", ...notes];
+      ? [NOTE.EMPTY_RESULT, NOTE.NO_HALLUCINATION, ...notes]
+      : [NOTE.EMPTY_RESULT, ...notes];
     return this.envelope({
       text: opts?.noHallucination
         ? "未在企业知识库中找到相关内容，无法确认；不得编造不存在的文档。"
@@ -442,15 +444,13 @@ export class IknowAgent {
       if (err instanceof IknowError && err.code === "GOVERNANCE_TIMEOUT") {
         return {
           ...this.localSnapshot(docId, action, "stale"),
-          extraNotes: [
-            "governance_timeout: explicit degradation; results marked unverified",
-          ],
+          extraNotes: [NOTE.GOVERNANCE_TIMEOUT],
         };
       }
       if (err instanceof IknowError && err.code === "PERMISSION_DENIED") {
         return {
           ...this.localSnapshot(docId, action, "ok"),
-          extraNotes: ["permission_denied"],
+          extraNotes: [NOTE.PERMISSION_DENIED],
         };
       }
       return {
@@ -489,7 +489,7 @@ export class IknowAgent {
     notes: string[],
     chunks: Pick<Chunk, "chunk_id">[] = [],
   ): IknowAnswer {
-    notes.push("max_hops_exceeded");
+    notes.push(NOTE.MAX_HOPS_EXCEEDED);
     const g = this.localSnapshot("_session", "snapshot_status", "stale");
     return this.envelope({
       text: "探索步数已达上限（max_hops=5），无法确认完整结论。以下为已检索来源范围限制声明。",

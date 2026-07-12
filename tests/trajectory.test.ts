@@ -23,9 +23,9 @@ describe("scoreTrajectory pure math", () => {
     const log: TrajectoryRunLog = {
       sample_id: sample.id,
       tool_calls: [
-        { tool: "kb_retrieve", args: {}, ts: 1 },
-        { tool: "kb_verify_citation", args: {}, ts: 2 },
-        { tool: "kb_governance", args: {}, ts: 3 },
+        { tool: "kb_retrieve", args: {}, ordinal: 1 },
+        { tool: "kb_verify_citation", args: {}, ordinal: 2 },
+        { tool: "kb_governance", args: {}, ordinal: 3 },
       ],
       final_answer: "冲突 请以治理标注为准",
       output_fields: {
@@ -56,7 +56,7 @@ describe("scoreTrajectory pure math", () => {
     };
     const log: TrajectoryRunLog = {
       sample_id: sample.id,
-      tool_calls: [{ tool: "kb_retrieve", args: {}, ts: 1 }],
+      tool_calls: [{ tool: "kb_retrieve", args: {}, ordinal: 1 }],
       final_answer: "根据企业知识库：\n• hi",
       output_fields: {
         source_span: [{ chunk_id: "c1" }],
@@ -79,7 +79,7 @@ describe("live agent trajectory", () => {
     assert.ok(sample);
     const { log, score } = runSample(sample!);
     assert.ok(log.tool_calls.length >= 1);
-    assert.ok(log.tool_calls.every((c) => c.tool && c.ts >= 1));
+    assert.ok(log.tool_calls.every((c) => c.tool && c.ordinal >= 1));
     assert.ok(log.output_fields.snapshot_id.startsWith("snap_"));
     assert.ok(score.required_coverage > 0);
   });
@@ -105,11 +105,14 @@ describe("runEvalSuite", () => {
     assert.equal(report.aggregate.total, 32);
     assert.ok(report.aggregate.mean_trajectory_score >= 0);
     assert.ok(report.aggregate.hard_pass_rate >= 0);
-    // Sprint-1: mean trajectory soft target
+    // Soft mean target (release_gates.milestone=sprint1)
     assert.ok(
       report.aggregate.mean_trajectory_score >= 0.5,
       `mean=${report.aggregate.mean_trajectory_score}`,
     );
+    assert.ok(report.aggregate.release_gates);
+    assert.equal(report.aggregate.release_gates.milestone, "sprint1");
+    assert.equal(report.eval_set_status, "DRAFT-EVAL-SET");
   });
 });
 
@@ -124,7 +127,7 @@ describe("checkHardConstraints unit", () => {
     };
     const r = checkHardConstraints(sample, {
       sample_id: "x",
-      tool_calls: [{ tool: "kb_retrieve", args: {}, ts: 1 }],
+      tool_calls: [{ tool: "kb_retrieve", args: {}, ordinal: 1 }],
       final_answer: "根据企业知识库：\n• a",
       output_fields: {
         source_span: [{ chunk_id: "c" }],

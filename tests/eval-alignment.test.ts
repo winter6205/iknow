@@ -22,6 +22,10 @@ interface EvalSample {
     policies: string[];
     output_properties: string[];
   };
+  session_overrides?: {
+    caller_role?: "employee" | "manager" | "admin";
+    simulate_governance_timeout?: boolean;
+  };
 }
 
 const raw = JSON.parse(readFileSync(evalPath, "utf8")) as {
@@ -40,13 +44,12 @@ describe("eval sample agent.answer policies", () => {
   for (const sample of raw.samples) {
     it(`${sample.id}: G2 snapshot_id + hops<=5`, () => {
       const store = createSeededStore();
-      const govTimeout =
-        sample.id === "qa-edge-006" ||
-        sample.input.includes("治理服务超时");
+      const overrides = sample.session_overrides ?? {};
       const agent = new IknowAgent({
         store,
-        session: createSession("employee", {
-          simulate_governance_timeout: govTimeout,
+        session: createSession(overrides.caller_role ?? "employee", {
+          simulate_governance_timeout:
+            overrides.simulate_governance_timeout ?? false,
         }),
       });
       const ans = agent.answer(sample.input);

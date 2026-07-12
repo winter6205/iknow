@@ -200,8 +200,8 @@ export interface SnapshotPayload {
 export interface ToolCallLog {
   tool: string;
   args: Record<string, unknown>;
-  /** 1-based ordinal in this answer run. */
-  ts: number;
+  /** 1-based ordinal in this answer run (not a wall-clock timestamp). */
+  ordinal: number;
 }
 
 export interface IknowAnswer {
