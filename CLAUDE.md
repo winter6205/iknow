@@ -194,17 +194,24 @@ npm run eval      # 32-sample suite → docs/iknow-spec/docs/eval/results/ (giti
 |------|------|
 | `src/kb-*` / `src/agent-loop` / `src/knowledge-store` | 产品实现（可独立运行） |
 | `src/interaction/` | 会话袋、slash、人读/JSON 投影（host，非 tool） |
-| `src/cli.ts` + `src/cli/*` | **产品 CLI**：TTY chat / 管道 chat / ask oneshot |
+| `src/session-api/` | Session HTTP API + 静态托管（prefer `web/dist`） |
+| `src/cli.ts` + `src/cli/*` | **产品 CLI**：TTY chat / 管道 chat / ask oneshot / **serve** |
+| `web/` | 产品 SPA（Vite + React + TS）；`npm run web:dev` / `web:build` |
 | `src/eval/` | trajectory scorer + suite runner |
 | `docs/iknow-spec/` | 协议与评测真值 |
 | `docs/design/interaction-surface-v0.md` | 交互设计（协议对齐） |
+| `docs/design/session-http-api-v0.md` | Session HTTP 契约 |
+| `docs/handoff/i4-smoke/` | I4 真机冒烟证据（无密钥） |
 | `docs/STATUS.md` | 已实现 / 未实现 / 展望 |
 | `_upstream_gbrain/` | **只读**参考（gitignore，禁止 runtime 链接） |
 
 **Agent mode**: `deterministic`（默认 / CI）或 `llm`（`--mode llm` / `IKNOW_AGENT_MODE`；显式 `--mode` 优先）。  
 **Embedding**: 可选 `--embeddings` / `IKNOW_EMBEDDING_MODE=api`（9router 等）；失败回退 overlap。  
-**交互主入口**: TTY 上 `npx tsx src/cli.ts` 或 `chat`；脚本用 `ask`。  
-**下阶段焦点**: **打磨交互**（UX/多轮质量），不重开 4 tool 协议。  
+**交互主入口**: TTY `chat`；脚本 `ask`；浏览器 `iknow serve` + `web/dist`（开发可 `web:dev` 代理 `/api`）。  
+**LLM 客户端**: `stream: false` + `parseLlmResponseJson`（容忍 SSE trailer）。  
+**9router key**: 环境变量名 `NINE_ROUTER_API_KEY`；`models` 200 ≠ chat/embeddings 必通；探针 `scripts/i4-probe-nine-endpoints.ts`。  
+**I4**: 已归档三模式 + HTTP 冒烟；I5 多轮 eval / 会话持久化仍开。  
+**下阶段焦点**: 多轮质量、消息模型、真实语料 — 不重开 4 tool 协议。  
 **Git**: 无用户明确 `commit`/`push` 授权则不执行。
 
 ### Domain docs (auto-load on session start)

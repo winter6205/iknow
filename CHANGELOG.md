@@ -7,7 +7,8 @@
 - Full I4 interaction smoke: deterministic / embeddings / llm CLI + Session HTTP (`docs/handoff/i4-smoke/`)
 - LLM client: force `stream: false`; `parseLlmResponseJson` tolerates SSE `data: [DONE]` trailers
 - Tests: `tests/llm-client-parse.test.ts`
-- Note: shell `NINE_ROUTER_API_KEY` may 401 on chat until aligned with 9router key `iknow`
+- Note: env name is `NINE_ROUTER_API_KEY`; some agent shells saw `models` 200 but chat/embeddings 401 on the same value (endpoint auth / env inheritance)
+- Session closeout: CONTEXT / Claude.md runtime map / `docs/handoff/2026-07-13-session-closeout.md`
 
 ### Frontend stack upgrade (Vite + React + TS)
 

@@ -89,6 +89,30 @@ _Avoid_: inventing a demo Chinese query when args are empty
 Pure-ish turn handler used by REPL and unit tests (slash + agent.answer + format).
 _Avoid_: embedding readline/TTY side effects inside this function
 
+**Session HTTP API** / **session-api**:
+Host multi-conversation surface over `node:http` (`src/session-api/`): create/message/command/reset; every message returns full G2; not tool schema.
+_Avoid_: fifth chat tool, REST wrapping of individual kb_* tools
+
+**iknow serve**:
+CLI host that runs Session API + static product UI (`web/dist` preferred, fallback `web/`).
+_Avoid_: separate frontend-only server as the production path without proxying `/api`
+
+**product SPA (web/)**:
+Vite + React + TypeScript chat console; same-origin Session client; G2 side panel required.
+_Avoid_: zero-dep static shell as product; dropping `snapshot_id` for “clean UI”
+
+**parseLlmResponseJson**:
+LLM body parser that accepts plain JSON or JSON followed by SSE trailer (`data: [DONE]`); client also sends `stream: false`.
+_Avoid_: bare `JSON.parse(raw)` on 9router chat responses
+
+**I4 smoke**:
+Documented three-mode + HTTP interaction smoke under `docs/handoff/i4-smoke/` (no secrets in artifacts).
+_Avoid_: claiming interactive product complete without I4 evidence
+
+**NINE_ROUTER_API_KEY**:
+Env name for 9router API key (via `IKNOW_LLM_API_KEY_ENV` / embedding key env defaults). Value must be the active key 9router accepts for the endpoint in use.
+_Avoid_: renaming the env var for “alignment”; treating `GET /v1/models` 200 as proof that chat/embeddings will 200
+
 ## Relationships
 
 - **Query → kb_retrieve → Chunk[]**: agent issues a retrieve hop; store returns ranked chunks
@@ -100,6 +124,8 @@ _Avoid_: embedding readline/TTY side effects inside this function
 - **session_overrides → createSession → agent run**: data-driven timeout/role without runner special cases
 - **User line → processChatLine → answer(opts) → IknowAnswer → ConversationState**: multi-turn host path
 - **last_priors → answer prior_chunks → kb_retrieve**: cross-turn retrieve bridge only
+- **Browser → Session HTTP → ConversationState → Agent.answer → G2**: product SPA / API host path
+- **chat/completions body → parseLlmResponseJson → tool_calls loop**: LLM agent path
 
 ## Flagged ambiguities
 
@@ -111,7 +137,9 @@ _Avoid_: embedding readline/TTY side effects inside this function
 - **draft eval set**: `eval-set.draft.json` is DRAFT-EVAL-SET; hard_pass on draft ≠ production gate until real queries replace samples
 - **chat vs test harness**: product CLI is TTY/pipe-aware session code under `src/cli/`; unit tests call `processChatLine` without claiming that is the product UX
 - **--mode vs env**: explicit CLI `--mode` wins over `IKNOW_AGENT_MODE`; env alone may still select llm when flag omitted
-- **next phase focus**: interaction polish (UX, multi-turn quality) — not reopening the 4-tool protocol
+- **9router key vs endpoint**: same `NINE_ROUTER_API_KEY` can yield `models` 200 while `chat/completions` or `embeddings` return 401; agent shell env may differ from operator interactive shell
+- **SSE trailer vs stream flag**: gateway may return `text/event-stream` trailer even when client requested non-stream; use `parseLlmResponseJson`, not only `stream: false`
+- **next phase focus**: multi-turn quality / message persistence / real KB data — not reopening the 4-tool protocol; I4 smoke archived
 
 ---
 
