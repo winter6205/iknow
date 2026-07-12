@@ -10,8 +10,10 @@ import {
   processChatLine,
   type ChatLineContext,
 } from "../src/cli/chat-session.ts";
+import { resolveStartupMode } from "../src/cli/runtime.ts";
 import { isInteractive } from "../src/cli/session-io.ts";
 import { getVersion, usageText } from "../src/cli/usage.ts";
+import type { IknowEnv } from "../src/config/env.ts";
 
 describe("parseArgs", () => {
   it("defaults bare invocation to chat when interactive", () => {
@@ -45,6 +47,13 @@ describe("parseArgs", () => {
     });
     assert.equal(p.command, "chat");
     assert.equal(p.mode, "deterministic");
+    assert.equal(p.modeExplicit, true);
+  });
+
+  it("default mode is not modeExplicit", () => {
+    const p = parseArgs(["chat"], { interactive: false });
+    assert.equal(p.mode, "deterministic");
+    assert.equal(p.modeExplicit, false);
   });
 
   it("ask with query", () => {
@@ -72,6 +81,40 @@ describe("parseArgs", () => {
     assert.equal(parseArgs(["-h"]).command, "help");
     assert.equal(parseArgs(["--help", "ask", "x"]).command, "help");
   });
+
+  it("-V / --version sets versionOnly", () => {
+    const v = parseArgs(["--version"]);
+    assert.equal(v.command, "help");
+    assert.equal(v.versionOnly, true);
+    assert.equal(parseArgs(["-V"]).versionOnly, true);
+  });
+});
+
+describe("resolveStartupMode", () => {
+  function envWithMode(agentMode: "deterministic" | "llm"): IknowEnv {
+    return { agentMode } as IknowEnv;
+  }
+
+  it("env llm upgrades default when --mode not explicit", () => {
+    assert.equal(
+      resolveStartupMode("deterministic", envWithMode("llm"), false),
+      "llm",
+    );
+  });
+
+  it("explicit --mode deterministic wins over env llm", () => {
+    assert.equal(
+      resolveStartupMode("deterministic", envWithMode("llm"), true),
+      "deterministic",
+    );
+  });
+
+  it("explicit --mode llm wins over env deterministic", () => {
+    assert.equal(
+      resolveStartupMode("llm", envWithMode("deterministic"), true),
+      "llm",
+    );
+  });
 });
 
 describe("usage / version", () => {
@@ -79,11 +122,17 @@ describe("usage / version", () => {
     assert.match(getVersion(), /^\d+\.\d+\.\d+/);
   });
 
-  it("usageText mentions chat and ask", () => {
+  it("usageText mentions chat and ask (bilingual)", () => {
     const t = usageText();
     assert.match(t, /chat/);
     assert.match(t, /ask/);
     assert.match(t, /iknow/);
+    assert.match(t, /交互对话|interactive chat/i);
+    assert.match(t, /单次 JSON|one-shot JSON/i);
+    assert.match(t, /--mode/);
+    assert.match(t, /--role/);
+    assert.match(t, /IKNOW_CHAT_QUIET/);
+    assert.match(t, /--version|version/i);
   });
 });
 
@@ -222,5 +271,45 @@ describe("processChatLine (pipe simulation)", () => {
     assert.ok(r.output.startsWith("{"));
     const parsed = JSON.parse(r.output) as { text: string };
     assert.ok(typeof parsed.text === "string");
+  });
+
+  it("/reset clears conversation bag via processChatLine", async () => {
+    const ctx = makeCtx();
+    await processChatLine("公司的退款政策是什么？", ctx);
+    assert.ok(ctx.state.turns.length >= 1);
+    const r = await processChatLine("/reset", ctx);
+    assert.equal(r.quit, false);
+    assert.match(r.output, /cleared|Session/i);
+    assert.equal(ctx.state.turns.length, 0);
+    assert.equal(ctx.state.last_priors.length, 0);
+    assert.equal(ctx.state.history_finals.length, 0);
+  });
+
+  it("/mode change rebuilds agent; failure keeps mode", async () => {
+    const ctx = makeCtx();
+    const r = await processChatLine("/mode llm", ctx);
+    // Offline fixture agent rebuild may fail without key — host must not crash.
+    if (r.stderr) {
+      assert.match(r.stderr, /mode stays deterministic|错误|LLM|key/i);
+      assert.equal(ctx.mode, "deterministic");
+    } else {
+      assert.equal(ctx.mode, "llm");
+      assert.match(r.output, /Mode set to llm/i);
+    }
+  });
+
+  it("agent throw surfaces on stderr without quitting", async () => {
+    const ctx = makeCtx();
+    ctx.agent = {
+      answer: async () => {
+        throw new Error("boom-agent");
+      },
+    };
+    const r = await processChatLine("any question", ctx);
+    assert.equal(r.quit, false);
+    assert.equal(r.output, "");
+    assert.equal(r.ranQuery, true);
+    assert.ok(r.stderr);
+    assert.match(r.stderr!, /boom-agent/);
   });
 });

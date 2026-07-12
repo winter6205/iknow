@@ -26,6 +26,9 @@ import {
   writeOut,
 } from "./session-io.js";
 
+/** Visual separator after a completed answer on TTY only. */
+const TTY_ANSWER_SEP = "────────";
+
 export type ChatSessionOpts = {
   agent: AnswerAgent;
   store: InMemoryKnowledgeStore;
@@ -36,6 +39,12 @@ export type ChatSessionOpts = {
   buildAgent: (mode: AgentModeCli) => Promise<AnswerAgent>;
   /** Optional note for banner (e.g. embeddings on/off). */
   embeddingsNote?: string;
+  /**
+   * Quiet pipe mode: no turn markers on stderr.
+   * Default: true when `IKNOW_CHAT_QUIET=1`, else false.
+   * Interactive TTY ignores this (still uses prompt + optional 思考中).
+   */
+  quiet?: boolean;
 };
 
 export type ChatLineContext = {
@@ -150,6 +159,13 @@ function formatChatError(err: unknown): string {
   return `错误: ${String(err)}`;
 }
 
+function resolveQuiet(optsQuiet: boolean | undefined): boolean {
+  if (typeof optsQuiet === "boolean") {
+    return optsQuiet;
+  }
+  return process.env.IKNOW_CHAT_QUIET === "1";
+}
+
 /**
  * Run a product chat session (TTY REPL or non-interactive pipe).
  */
@@ -169,12 +185,14 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
   const interactive = isInteractive();
   const emb =
     opts.embeddingsNote ??
-    (process.env.IKNOW_EMBEDDING_MODE === "api" ? "embeddings=api" : "embeddings=off");
+    (process.env.IKNOW_EMBEDDING_MODE === "api"
+      ? "embeddings=api"
+      : "embeddings=off");
 
   if (interactive) {
     await runInteractive(ctx, emb);
   } else {
-    await runPiped(ctx);
+    await runPiped(ctx, resolveQuiet(opts.quiet));
   }
 }
 
@@ -197,82 +215,138 @@ async function runInteractive(
     terminal: true,
   });
 
+  let closed = false;
+  let busy = false;
+  let farewellPrinted = false;
+  let exitCode: number | undefined;
+  const sayGoodbye = (): void => {
+    if (farewellPrinted) {
+      return;
+    }
+    farewellPrinted = true;
+    writeErr("再见。");
+  };
+
   let sigintCount = 0;
+  let lastSigintAt = 0;
   const onSigint = (): void => {
+    // One physical Ctrl+C can hit both process and readline; debounce dual delivery.
+    const now = Date.now();
+    if (now - lastSigintAt < 80) {
+      return;
+    }
+    lastSigintAt = now;
+
     sigintCount += 1;
     if (sigintCount === 1) {
       writeErr("\n再次 Ctrl+C 退出，或输入 /quit");
-      // re-show prompt after interrupt message
-      rl.prompt(true);
+      // Re-show prompt only when idle (never stack prompts mid-turn).
+      if (!closed && !busy) {
+        rl.prompt(true);
+      }
       return;
     }
+    // Second SIGINT: exit without also printing 再见
+    farewellPrinted = true;
     writeErr("\n退出。");
+    closed = true;
+    exitCode = 130;
     rl.close();
-    process.exit(130);
   };
+  // Node may deliver Ctrl+C to process and/or readline depending on platform.
   process.on("SIGINT", onSigint);
+  rl.on("SIGINT", onSigint);
 
   const prompt = (): void => {
+    if (closed) {
+      return;
+    }
     sigintCount = 0;
     rl.setPrompt("iknow> ");
     rl.prompt();
   };
 
-  // Serialize turns: never start next line until previous finishes.
+  // Serialize turns: never start next line / prompt until previous finishes.
   let chain: Promise<void> = Promise.resolve();
-  let closed = false;
 
   const handle = async (line: string): Promise<void> => {
-    // Thinking indicator on stderr for agent queries only.
+    busy = true;
+    // Pause input so the next prompt cannot appear mid-turn.
+    rl.pause();
+
     const looksLikeQuery =
       line.trim().length > 0 && !line.trim().startsWith("/");
-    if (looksLikeQuery) {
+    // 思考中 only when stderr is a TTY (never spam pipes / redirected logs).
+    const showThinking = looksLikeQuery && Boolean(process.stderr.isTTY);
+
+    if (showThinking) {
       process.stderr.write("思考中…");
     }
 
-    const result = await processChatLine(line, ctx);
-
-    if (looksLikeQuery) {
-      clearErrLine();
-      if (!process.stderr.isTTY) {
-        // Non-clearable: end the thinking token with newline.
-        process.stderr.write("\n");
+    try {
+      let result: ProcessChatLineResult;
+      try {
+        result = await processChatLine(line, ctx);
+      } catch (err) {
+        if (showThinking) {
+          clearErrLine();
+        }
+        writeErr(formatChatError(err));
+        if (!closed) {
+          prompt();
+          rl.resume();
+        }
+        return;
       }
-    }
 
-    if (result.stderr) {
-      writeErr(result.stderr);
-    }
-    if (result.output) {
-      writeOut(result.output);
-      writeOut(""); // blank line before next prompt
-    }
-    if (result.quit) {
-      closed = true;
-      rl.close();
-      return;
-    }
-    if (!closed) {
-      prompt();
+      if (showThinking) {
+        clearErrLine();
+      }
+
+      if (result.stderr) {
+        writeErr(result.stderr);
+      }
+      if (result.output) {
+        writeOut(result.output);
+        // Separator after agent answers only (TTY path).
+        if (result.ranQuery) {
+          writeOut(TTY_ANSWER_SEP);
+        } else {
+          writeOut("");
+        }
+      }
+
+      if (result.quit) {
+        closed = true;
+        rl.close();
+        return;
+      }
+
+      // Prompt only after the full turn is done.
+      if (!closed) {
+        prompt();
+        rl.resume();
+      }
+    } finally {
+      busy = false;
     }
   };
 
   await new Promise<void>((resolve) => {
     rl.on("line", (line) => {
-      chain = chain
-        .then(() => handle(line))
-        .catch((err) => {
-          clearErrLine();
-          writeErr(formatChatError(err));
-          if (!closed) {
-            prompt();
-          }
-        });
+      if (closed) {
+        return;
+      }
+      chain = chain.then(() => handle(line));
     });
     rl.on("close", () => {
       void chain.finally(() => {
         process.off("SIGINT", onSigint);
-        writeErr("再见。");
+        rl.removeListener("SIGINT", onSigint);
+        sayGoodbye();
+        if (exitCode !== undefined) {
+          process.exitCode = exitCode;
+        }
         resolve();
       });
     });
@@ -280,7 +354,7 @@ async function runInteractive(
   });
 }
 
-async function runPiped(ctx: ChatLineContext): Promise<void> {
+async function runPiped(ctx: ChatLineContext, quiet: boolean): Promise<void> {
   // Do not force terminal:true — avoids prompt garble on pipes.
   const rl = readline.createInterface({
     input: process.stdin,
@@ -291,9 +365,17 @@ async function runPiped(ctx: ChatLineContext): Promise<void> {
 
   let turn = 0;
   for await (const line of rl) {
-    turn += 1;
-    writeErr(`# turn ${turn}`);
+    // Empty lines: skip (no turn marker, no agent call).
+    if (line.trim().length === 0) {
+      continue;
+    }
 
+    turn += 1;
+    if (!quiet) {
+      writeErr(`── turn ${turn} ──`);
+    }
+
+    // Never print 思考中 on pipe (quiet product / script friendly).
     const result = await processChatLine(line, ctx);
 
     if (result.stderr) {

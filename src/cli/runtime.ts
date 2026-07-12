@@ -108,13 +108,21 @@ export async function buildAgent(
   return { agent, mode: "deterministic" };
 }
 
-/** CLI default: explicit --mode llm, or env IKNOW_AGENT_MODE=llm. */
+/**
+ * Resolve agent mode for process startup.
+ * Explicit `--mode` on argv always wins; otherwise env `IKNOW_AGENT_MODE=llm`
+ * upgrades the default (deterministic) to llm.
+ */
 export function resolveStartupMode(
   cliMode: AgentModeCli,
   env: IknowEnv,
+  modeExplicit = false,
 ): AgentModeCli {
-  if (cliMode === "llm" || env.agentMode === "llm") {
+  if (modeExplicit) {
+    return cliMode;
+  }
+  if (env.agentMode === "llm") {
     return "llm";
   }
-  return "deterministic";
+  return cliMode;
 }

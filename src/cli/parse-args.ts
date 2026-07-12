@@ -20,6 +20,8 @@ export type ParsedCli = {
   role: CallerRole;
   degrade: boolean;
   mode: AgentModeCli;
+  /** True when argv contained an explicit `--mode` (overrides env). */
+  modeExplicit: boolean;
   embeddings: boolean;
   json: boolean;
   /**
@@ -27,6 +29,10 @@ export type ParsedCli = {
    * Host should print usage and exit 1 (no default demo query).
    */
   missingQuery: boolean;
+  /**
+   * True when argv was `-V` / `--version` (host prints version only).
+   */
+  versionOnly: boolean;
 };
 
 export type ParseArgsOptions = {
@@ -50,6 +56,7 @@ export function parseArgs(
   let role: CallerRole = "employee";
   let degrade = false;
   let mode: AgentModeCli = "deterministic";
+  let modeExplicit = false;
   let embeddings = false;
   let json = false;
   const rest: string[] = [];
@@ -61,10 +68,12 @@ export function parseArgs(
         role,
         degrade,
         mode,
+        modeExplicit,
         embeddings,
         json,
         query: "",
         missingQuery: false,
+        versionOnly: false,
       });
     }
     if (a === "--role") {
@@ -85,27 +94,37 @@ export function parseArgs(
         );
       }
       mode = parseAgentModeCli(raw);
+      modeExplicit = true;
     } else if (a === "--embeddings") {
       embeddings = true;
     } else if (a === "--json") {
       json = true;
     } else if (a === "--version" || a === "-V") {
-      // Treat as help-adjacent; host may print version-only if desired.
       return baseParsed("help", {
         role,
         degrade,
         mode,
+        modeExplicit,
         embeddings,
         json,
         query: "",
         missingQuery: false,
+        versionOnly: true,
       });
     } else {
       rest.push(a);
     }
   }
 
-  const flags = { role, degrade, mode, embeddings, json };
+  const flags = {
+    role,
+    degrade,
+    mode,
+    modeExplicit,
+    embeddings,
+    json,
+    versionOnly: false,
+  };
   const head = rest[0];
 
   if (head === "chat") {

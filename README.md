@@ -24,19 +24,54 @@ npm run eval
 
 ## Run
 
+**Primary interactive entry is `chat`.** Use one-shot `ask` / bare query only for scripts and CI.
+
+```bash
+npx tsx src/cli.ts -h          # bilingual usage (中文 + English)
+```
+
 ### Product defaults
 
 | Invocation | Behavior |
 |------------|----------|
-| `iknow` on a TTY | open **chat** session |
+| `iknow` on a TTY | open **chat** (primary interactive entry) |
 | `iknow` when piped / non-TTY | print usage |
 | `iknow chat` | chat (TTY REPL or line-by-line pipe) |
 | `iknow ask "…"` / `iknow "…"` | **one-shot JSON** (scripts / CI) |
 | empty `ask` / empty query | usage + exit 1 (no demo default query) |
 
+### Interactive chat (primary)
+
 ```bash
-npx tsx src/cli.ts -h
+npx tsx src/cli.ts              # TTY → chat
+npx tsx src/cli.ts chat
+npx tsx src/cli.ts chat --mode deterministic --role employee
+npx tsx src/cli.ts chat --json  # start with machine JSON output
+
+# Piped multi-turn (no prompt garble; empty lines skipped; turns fully awaited)
+printf '公司的退款政策是什么？\n\n/status\n/quit\n' | npx tsx src/cli.ts chat
+
+# Quiet pipe: no turn markers on stderr
+printf '公司的退款政策是什么？\n/quit\n' | IKNOW_CHAT_QUIET=1 npx tsx src/cli.ts chat
 ```
+
+**TTY:** prompt `iknow> ` only after each turn finishes; banner / errors on stderr; answers on stdout; optional `思考中…` only when stderr is a TTY; separator line after each answer; single farewell on exit (no double「再见」).
+
+**Pipe:** no prompts; empty lines skipped; `── turn N ──` on stderr unless `IKNOW_CHAT_QUIET=1`; no `思考中` spam; slash commands still work.
+
+| Input | Behavior |
+|-------|----------|
+| plain text | one `answer` turn (priors + short history injected) |
+| blank line | skipped (pipe and TTY) |
+| `/json on\|off` | toggle full G2 JSON vs human view |
+| `/role <r>` | set `caller_role` (employee\|manager\|admin) |
+| `/mode deterministic\|llm` | rebuild agent when mode changes |
+| `/status` | mode / role / json / turns / priors |
+| `/reset` | clear turns / priors / history (store kept) |
+| `/help` | list commands |
+| `/quit` or `/exit` / Ctrl+D | leave |
+
+Human view shows answer + source_spans + governance/snapshot/hops.
 
 ### One-shot (JSON — scripts / CI)
 
@@ -51,33 +86,7 @@ npm run dev -- --governance-timeout "检索时治理服务超时了，你还能�
 npm run eval   # 32-sample trajectory suite (hard gates + trajectory_score)
 ```
 
-### Interactive chat (product session)
-
-```bash
-npx tsx src/cli.ts              # TTY → chat
-npx tsx src/cli.ts chat
-npx tsx src/cli.ts chat --mode deterministic --role employee
-npx tsx src/cli.ts chat --json  # start with machine JSON output
-
-# Piped multi-turn (no prompt garble; turns fully awaited)
-printf '公司的退款政策是什么？\n/status\n/quit\n' | npx tsx src/cli.ts chat
-```
-
-TTY: prompt `iknow> `, banner on stderr, answers on stdout, turn queue (mutex).  
-Pipe: `terminal:false`, `# turn N` on stderr, slash commands still work.
-
-| Input | Behavior |
-|-------|----------|
-| plain text | one `answer` turn (priors + short history injected) |
-| `/json on\|off` | toggle full G2 JSON vs human view |
-| `/role <r>` | set `caller_role` (employee\|manager\|admin) |
-| `/mode deterministic\|llm` | rebuild agent when mode changes |
-| `/status` | mode / role / json / turns / priors |
-| `/reset` | clear turns / priors / history (store kept) |
-| `/help` | list commands |
-| `/quit` or `/exit` / Ctrl+D | leave |
-
-Human view shows answer + source_spans + governance/snapshot/hops. One-shot stays JSON so scripts do not break.
+One-shot always prints G2 JSON on stdout so scripts do not break.
 
 ### Agent mode (M2 LLM path)
 

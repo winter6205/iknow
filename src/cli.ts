@@ -15,7 +15,7 @@ import {
   type RuntimeBundle,
 } from "./cli/runtime.js";
 import { isInteractive, writeErr } from "./cli/session-io.js";
-import { printUsage } from "./cli/usage.js";
+import { getVersion, printUsage } from "./cli/usage.js";
 import { formatAnswerJson } from "./interaction/index.js";
 import { isIknowError } from "./shared/errors.js";
 import type { AgentModeCli } from "./interaction/slash.js";
@@ -89,7 +89,11 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     throw err;
   }
 
-  const startupMode = resolveStartupMode(parsed.mode, bundle.env);
+  const startupMode = resolveStartupMode(
+    parsed.mode,
+    bundle.env,
+    parsed.modeExplicit,
+  );
   let agent;
   try {
     const built = await buildAgent(bundle, startupMode);
@@ -128,7 +132,11 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     return;
   }
 
-  let mode: AgentModeCli = resolveStartupMode(parsed.mode, bundle.env);
+  let mode: AgentModeCli = resolveStartupMode(
+    parsed.mode,
+    bundle.env,
+    parsed.modeExplicit,
+  );
   let agent;
   try {
     const built = await buildAgent(bundle, mode);
@@ -163,6 +171,11 @@ async function main(): Promise<void> {
   const parsed = parseArgs(process.argv.slice(2), {
     interactive: isInteractive(),
   });
+
+  if (parsed.versionOnly) {
+    process.stdout.write(`${getVersion()}\n`);
+    return;
+  }
 
   if (parsed.command === "help") {
     printUsage();
