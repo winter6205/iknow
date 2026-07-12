@@ -24,6 +24,20 @@ npm run eval
 
 ## Run
 
+### Product defaults
+
+| Invocation | Behavior |
+|------------|----------|
+| `iknow` on a TTY | open **chat** session |
+| `iknow` when piped / non-TTY | print usage |
+| `iknow chat` | chat (TTY REPL or line-by-line pipe) |
+| `iknow ask "…"` / `iknow "…"` | **one-shot JSON** (scripts / CI) |
+| empty `ask` / empty query | usage + exit 1 (no demo default query) |
+
+```bash
+npx tsx src/cli.ts -h
+```
+
 ### One-shot (JSON — scripts / CI)
 
 ```bash
@@ -37,15 +51,20 @@ npm run dev -- --governance-timeout "检索时治理服务超时了，你还能�
 npm run eval   # 32-sample trajectory suite (hard gates + trajectory_score)
 ```
 
-### Interactive chat (REPL)
+### Interactive chat (product session)
 
 ```bash
+npx tsx src/cli.ts              # TTY → chat
 npx tsx src/cli.ts chat
 npx tsx src/cli.ts chat --mode deterministic --role employee
-npx tsx src/cli.ts chat --json          # start with machine JSON output
+npx tsx src/cli.ts chat --json  # start with machine JSON output
+
+# Piped multi-turn (no prompt garble; turns fully awaited)
+printf '公司的退款政策是什么？\n/status\n/quit\n' | npx tsx src/cli.ts chat
 ```
 
-Prompt is `iknow> `. Session reuses one runtime + agent + conversation bag.
+TTY: prompt `iknow> `, banner on stderr, answers on stdout, turn queue (mutex).  
+Pipe: `terminal:false`, `# turn N` on stderr, slash commands still work.
 
 | Input | Behavior |
 |-------|----------|
@@ -53,6 +72,7 @@ Prompt is `iknow> `. Session reuses one runtime + agent + conversation bag.
 | `/json on\|off` | toggle full G2 JSON vs human view |
 | `/role <r>` | set `caller_role` (employee\|manager\|admin) |
 | `/mode deterministic\|llm` | rebuild agent when mode changes |
+| `/status` | mode / role / json / turns / priors |
 | `/reset` | clear turns / priors / history (store kept) |
 | `/help` | list commands |
 | `/quit` or `/exit` / Ctrl+D | leave |

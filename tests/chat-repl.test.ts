@@ -73,6 +73,25 @@ describe("applySlashCommand", () => {
     if (help.type === "help") {
       assert.match(help.text, /\/json/);
       assert.match(help.text, /\/role/);
+      assert.match(help.text, /\/status/);
+    }
+  });
+
+  it("status reports session counters", () => {
+    const state = createConversation(createSession("manager"), {
+      json_mode: false,
+    });
+    const effect = applySlashCommand("status", [], {
+      state,
+      mode: "llm",
+    });
+    assert.equal(effect.type, "info");
+    if (effect.type === "info") {
+      assert.match(effect.text, /mode=llm/);
+      assert.match(effect.text, /role=manager/);
+      assert.match(effect.text, /json=off/);
+      assert.match(effect.text, /turns=0/);
+      assert.match(effect.text, /priors=0/);
     }
   });
 

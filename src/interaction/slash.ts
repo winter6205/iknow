@@ -46,15 +46,16 @@ function sanitizeCommandForDisplay(command: string): string {
   return command.replace(/[\u0000-\u001F\u007F]/g, "");
 }
 
-const HELP_TEXT = `Commands:
-  /help                 Show this help
-  /quit  /exit          Leave chat
-  /json on|off          Toggle machine JSON output
-  /role <role>          Set caller role (${allowedRolesList()})
-  /mode <mode>          Set agent mode (${allowedModesList()})
-  /reset                Clear turns/priors/history (keep store + session)
+const HELP_TEXT = `命令 / Commands:
+  /help                 显示帮助 · show this help
+  /status               会话状态 · mode / role / json / turns / priors
+  /quit  /exit          退出 · leave chat
+  /json on|off          切换 JSON 输出 · toggle machine JSON
+  /role <role>          设置角色 · set role (${allowedRolesList()})
+  /mode <mode>          切换模式 · set mode (${allowedModesList()})
+  /reset                清空会话 · clear turns/priors/history (store kept)
 
-Anything else is a question for the agent.`;
+其他输入视为问题 · anything else is a question for the agent.`;
 
 /**
  * Classify a raw readline line into empty / query / slash.
@@ -98,6 +99,12 @@ export function applySlashCommand(
     case "?":
       return { type: "help", text: HELP_TEXT };
 
+    case "status":
+      return {
+        type: "info",
+        text: formatStatus(ctx),
+      };
+
     case "json":
       return applyJson(args, ctx);
 
@@ -123,6 +130,17 @@ export function applySlashCommand(
         text: `Unknown command /${sanitizeCommandForDisplay(command)}. Type /help for commands.`,
       };
   }
+}
+
+function formatStatus(ctx: SlashContext): string {
+  const { state, mode } = ctx;
+  return [
+    `mode=${mode}`,
+    `role=${state.session.caller_role}`,
+    `json=${state.json_mode ? "on" : "off"}`,
+    `turns=${state.turns.length}`,
+    `priors=${state.last_priors.length}`,
+  ].join("  ");
 }
 
 function applyJson(args: string[], ctx: SlashContext): SlashEffect {

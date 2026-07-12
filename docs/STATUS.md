@@ -1,0 +1,201 @@
+# iknow 功能现状与展望
+
+> 维护说明：描述产品/工程事实，不替代协议真值（`docs/iknow-spec/`）。  
+> 最后对齐代码线：`master` @ `843bd23`（交互审查修复后）。  
+> 协议真值链仍为：`HANDOFF` → `ADR-v0.1` → `tool-schema` → `mapping` → eval。
+
+---
+
+## 1. 已实现功能
+
+### 1.1 协议与设计资产（P0–P2 文档侧）
+
+| 能力 | 说明 | 位置 |
+|------|------|------|
+| 产品定义 | 企业 KB **Agent**（非纯 RAG 流水线） | `docs/iknow-spec/` |
+| ADR / 架构 / 4 tool 契约 | 已闭环 | `docs/protocol/*` |
+| 评测集草案 | 32 条构造用例（easy/hard/edge） | `docs/eval/eval-set.draft.json` |
+| 门禁与 trajectory 规格 | 硬门禁 + 打分公式 | `eval-gate` / `trajectory-eval-spec` |
+| gbrain 映射与只读基线 | 改造参考，禁止 runtime 链接 | `mapping-*` / `_upstream_gbrain/`（gitignore） |
+| 交互方案设计 | 多轮 host 层设计 v0 | `docs/design/interaction-surface-v0.md` |
+| 审查修复技能 | 报告驱动根因修复流程 | `.claude/skills/review-report-repair/` |
+
+### 1.2 运行时核心（独立 `iknow`，无 gbrain 依赖）
+
+| 能力 | 说明 | 位置 |
+|------|------|------|
+| 4 tools | `kb_retrieve` / `kb_verify_citation` / `kb_compile` / `kb_governance` | `src/kb-*` |
+| 内存知识库 | 合成 seed 语料（企业政策/HR/财务等场景） | `src/knowledge-store` / `fixtures` |
+| 确定性 Agent | 规则 loop，G2、`max_hops=5`、敏感/竞对/冲突等策略 | `src/agent-loop/loop.ts` |
+| LLM Agent | OpenAI-compatible tool_calls（9router 等），fail-closed 缺 key | `llm-agent.ts` / `llm-client.ts` |
+| G2 信封 | 每轮答案含 `text` / `source_spans` / `snapshot_id` / `governance_status` / `tool_calls` | `IknowAnswer` |
+| Session 鉴权注入 | `caller_role` 等，**不**进 tool 入参 | `SessionContext` |
+| 配置加载 | `.env` / `.env.local` + `process.env`；密钥只读 env 名 | `src/config/env.ts` |
+
+### 1.3 检索增强（M1）
+
+| 能力 | 说明 |
+|------|------|
+| 双臂排序 | 关键词 +（向量 **或** overlap 回退）→ RRF(k=60) |
+| Embedding 客户端 | OpenAI-compatible `/embeddings`（如 `zhipueb/embedding-3` + dimensions） |
+| 内存向量索引 | `VectorIndex`；可选 `--embeddings` / `IKNOW_EMBEDDING_MODE=api` |
+| 失败回退 | 网络失败时回退 overlap 臂，主路径可继续 |
+
+### 1.4 交互表面（I1–I3，相对设计稿）
+
+| 能力 | 说明 | 位置 |
+|------|------|------|
+| **多轮 REPL** | `npx tsx src/cli.ts chat` | `src/cli.ts` |
+| 人读输出 | 答案 + 依据 + 治理/snapshot/hops | `interaction/format.ts` |
+| 机器输出 | `/json on` 或 one-shot JSON | 同上 |
+| 会话袋 | `ConversationState`：turns、`last_priors`、history_finals | `interaction/conversation.ts` |
+| 轮间桥 | `answer(q, { prior_chunks, history })`；priors 统一消毒 cap=5 | `priors.ts` + agents |
+| Slash | `/help` `/quit` `/json` `/role` `/mode` `/reset` | `interaction/slash.ts` |
+| 单次脚本 | `ask "…"` / 裸 query → JSON（CI 兼容） | `cli.ts` |
+
+### 1.5 评测与质量门禁
+
+| 能力 | 说明 |
+|------|------|
+| 单元/契约测试 | `npm test`（含 interaction / chat-repl / llm mock / env 等） |
+| Trajectory suite | `npm run eval`（32 条；硬门禁 + 软 mean） |
+| 结构化 tool 日志 | `tool_calls[{tool,args,ordinal}]` |
+| 审查修复闭环 | 多轮 live-review 根因修复已合入主干 |
+
+### 1.6 工程与协作
+
+| 能力 | 说明 |
+|------|------|
+| 独立仓库 | 私有 GitHub `winter6205/iknow`，`master` 跟踪 `origin` |
+| 上游参考隔离 | `_upstream_gbrain/` 只读 + gitignore |
+| 接入材料模板 | 网络 API + Key 画像 | `docs/integration-materials.env.example` |
+
+---
+
+## 2. 未实现 / 仅部分实现
+
+### 2.1 产品与数据
+
+| 缺口 | 说明 |
+|------|------|
+| **真实企业语料** | 仍为 seed 合成库；无生产导入/版本切换流水线 |
+| **真 query 评测集** | `eval-set.draft.json` 仍为 DRAFT 构造数据；`relevant_chunks` 等未用真实日志回填 |
+| **软门禁校准** | Hit@5 / Faithfulness 等数字未用真实数据标定 |
+| **持久化存储** | 仅内存 store；无 DB / 对象存储 / 多租户 |
+| **向量持久化** | 索引进程内；磁盘 cache 路径配置有、生产级缓存/失效策略未齐 |
+| **后台 compile 队列** | 设计允许异步作业；产品级 job/notify 未做 |
+| **鉴权生产化** | 仅 session 角色枚举与敏感拦截默认；完整 ACL/审批流待 ADR 确认后实现 |
+| **Web / UI / HTTP Session API** | 仅 CLI；无浏览器产品界面 |
+| **流式输出** | 无 token streaming |
+| **多轮 trajectory eval** | 评测仍是单次 input；无 N 轮会话样本与评分器 |
+
+### 2.2 交互与 Agent 体验
+
+| 缺口 | 说明 |
+|------|------|
+| **I4 主线程真机三模式深度冒烟清单** | 有管道/自动化测；人机长会话 + llm/embeddings 成本/延迟基线文档化不足 |
+| **指代/省略续问鲁棒性** | deterministic 仍偏关键词；LLM 依赖模型与 host priors，未系统评测 |
+| **澄清轮（0 tool）** | 设计允许「意图不清先问」；未作为一等状态机落地 |
+| **会话持久化** | REPL 进程内；无跨进程会话恢复 |
+| **anthropic_tools** | 仅 openai_tools；选 anthropic 会 fail-closed |
+| **全量 context 打包** | history 有字符预算；未从窗口严格扣 system/tools/检索正文 |
+
+### 2.3 协议开放项（设计未决，禁止静默定稿）
+
+见 `HANDOFF` §5 / `ADR-v0.1-assumptions-p3.md`：
+
+- §7 `requireApprovalFor` 与治理 B 定位的最终产品规则  
+- 鉴权模型与角色/ACL 细节的批准  
+- 异步交互产品形态（队列 UX）  
+- `prior_chunks.summary` 生产方 / verify 批大小等（实现有默认，待书面批准）  
+
+### 2.4 运维与上线（P4）
+
+| 缺口 | 说明 |
+|------|------|
+| 可观测性 | 无统一 trace_id、指标、告警、成本看板 |
+| 限流与配额 | 无租户级 RPM/TPM 产品封装 |
+| 部署与发布 | 无标准镜像/编排/健康检查发布流水线 |
+| 密钥托管 | 依赖本机/OS env；无集成密钥管理系统说明 |
+
+---
+
+## 3. 未来展望
+
+### 3.1 近端（建议 1–2 个迭代）
+
+1. **真机交互清单（I4）**  
+   - deterministic / embeddings / llm 各多轮脚本化或人工清单 + 结果归档（无密钥）。  
+2. **真实语料与 query**  
+   - 导入一版脱敏 KB；替换 draft eval 的一部分 hard/edge。  
+3. **会话小增强**  
+   - 可选会话导出/导入 JSON；澄清轮最小状态。  
+4. **观测最小集**  
+   - 结构化日志：conversation_id、turn、hops、tool 耗时、是否 embedding/llm。
+
+### 3.2 中期
+
+1. **持久化 KB + 版本原子切换**（对齐 ADR chunk/fact 同 version）。  
+2. **向量存储升级**（pgvector 等）与索引增量更新。  
+3. **LLM 护栏硬化**（强制首跳 retrieve、冲突必 governance 等 host 规则可配置）。  
+4. **多轮 eval**（注入 priors 的 N 步样本 + trajectory 扩展）。  
+5. **HTTP/Session API** 或轻量 Web 控制台（仍投影 G2，不另起协议）。
+
+### 3.3 远期
+
+1. **P4 工程化**：多租户、审计合规、审批流与企业 IdP 对接。  
+2. **人机协同**：requireApprovalFor 完整产品流（待开放项批准）。  
+3. **持续评测**：生产抽样 + 漂移告警 + 成本门禁。  
+4. **与上游 Company Brain 能力对照升级**：仅移植思路，保持 runtime 独立。
+
+### 3.4 非目标（刻意不做）
+
+- Runtime 链接或 vendoring 可执行 gbrain 树  
+- 用连续置信度替代三态 verify  
+- 为聊天新增第 5 个 KB tool 取代 host 会话层  
+- 用「展示层省略 snapshot」换取简洁 UI  
+
+---
+
+## 4. 能力地图（一句话）
+
+| 层 | 状态 |
+|----|------|
+| 协议与评测资产 | **有**（构造数据） |
+| 可运行 4-tool 引擎 | **有** |
+| 向量 + LLM 接线 | **有**（依赖外部 API） |
+| CLI 多轮交互 | **有**（进程内会话） |
+| 生产数据 / 持久化 / Web / 上线 | **无或极弱** |
+
+---
+
+## 5. 常用命令（现状）
+
+```bash
+npm test
+npm run eval
+npx tsx src/cli.ts chat --mode deterministic
+npx tsx src/cli.ts chat --embeddings
+npx tsx src/cli.ts chat --mode llm
+npx tsx src/cli.ts ask "单次问题"
+```
+
+配置：`.env.local` + 环境变量中的 API Key（见 `docs/integration-materials.env.example`）。
+
+---
+
+## 6. 文档索引
+
+| 文档 | 用途 |
+|------|------|
+| `docs/iknow-spec/HANDOFF.md` | 阶段与开放项 |
+| `docs/design/interaction-surface-v0.md` | 交互设计与 I 阶段 |
+| `docs/architecture.md` | 运行时能力切分 |
+| `docs/CONTEXT.md` | 领域术语 |
+| `docs/CHANGELOG.md` | 版本变更 |
+| `docs/handoff/*` | 会话交接 |
+| 本文 `docs/STATUS.md` | **已实现 / 未实现 / 展望** |
+
+---
+
+*更新本文时：改代码能力后同步 §1–§2；改路线图时同步 §3；并在 CHANGELOG 留一条引用。*
