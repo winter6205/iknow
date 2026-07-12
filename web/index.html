@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>iknow — 企业知识库 Agent</title>
+    <link rel="stylesheet" href="/web/styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <h1>iknow</h1>
+      <span class="badge" id="session-id" title="conversation_id">—</span>
+      <span class="visually-status" id="conn-status" aria-live="polite">未连接</span>
+      <div class="toolbar">
+        <label class="field" for="mode-select">
+          模式
+          <select id="mode-select" name="mode">
+            <option value="deterministic">deterministic</option>
+            <option value="llm">llm</option>
+          </select>
+        </label>
+        <label class="field" for="role-select">
+          角色
+          <select id="role-select" name="role">
+            <option value="employee">employee</option>
+            <option value="manager">manager</option>
+            <option value="admin">admin</option>
+          </select>
+        </label>
+        <button type="button" id="reset-btn">清空会话</button>
+        <button type="button" id="new-session-btn">新会话</button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <main class="chat-panel" aria-label="对话">
+        <div
+          id="messages"
+          class="messages"
+          role="log"
+          aria-relevant="additions"
+          aria-live="polite"
+        ></div>
+        <form id="composer" class="composer" aria-label="输入问题">
+          <label class="sr-only" for="query-input">问题</label>
+          <textarea
+            id="query-input"
+            name="query"
+            rows="2"
+            placeholder="输入问题，Enter 发送 · Shift+Enter 换行"
+            autocomplete="off"
+          ></textarea>
+          <button type="submit" class="primary" id="send-btn">发送</button>
+        </form>
+      </main>
+
+      <aside class="side" aria-label="会话与 G2 信封">
+        <h2>会话</h2>
+        <div id="side-summary"></div>
+        <h2>最近 G2（不可省略）</h2>
+        <pre id="side-g2" aria-label="G2 JSON 投影"></pre>
+        <p class="visually-status">
+          API：POST /api/v1/sessions · /messages · /commands · /reset<br />
+          预留：GET …/events（SSE，v0=501）
+        </p>
+      </aside>
+    </div>
+
+    <div id="live-region" class="sr-only" aria-live="assertive"></div>
+
+    <script type="module" src="/web/app.js"></script>
+  </body>
+</html>
