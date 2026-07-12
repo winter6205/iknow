@@ -42,7 +42,7 @@ iknow = 企业知识库问答 Agent（非纯 RAG pipeline）。通过 4 个工�
 | `docs/eval/eval-set.draft.json` | eval 集（32 条：easy18/hard8/edge6，构造数据） | 已完成（待真实数据替换） |
 | `docs/eval/eval-gate.draft.md` | 发布门禁草案（硬约束 7 项 + 软指标 6 项候选阈值） | 已完成（待校准） |
 | `docs/eval/p1-fragility-review.md` | P1 两脆点复盘 | 已完成 |
-| `docs/eval/trajectory-eval-spec.md` | trajectory 评分规格（spec-only） | 已完成（实跑待 P3） |
+| `docs/eval/trajectory-eval-spec.md` | trajectory 评分规格 + runner 契约 | ✅ IMPLEMENTED（`npm run eval` → `src/eval/`） |
 
 ## 五、待决项（方案内未处理）
 

@@ -78,8 +78,22 @@ trajectory_score = (required_coverage*0.6 + recommended_coverage*0.3 + efficienc
 - eval-gate.draft.md §2 软指标 → 本文 §2 trajectory_score 为其中一项，其余（Hit@K 等）需 gbrain 后端
 - eval-gate §4 分层通过线 → 用本文输出按 category 聚合比对
 
-## 6. 运行前置（Phase 3 提供）
+## 6. 运行方式（已实现）
 
-- gbrain 真实索引 OR mock retrieve/verify/governance 端点
-- LLM 接入（tool_calls 历史格式，ADR §1 已定）
-- 本文不定义实现，仅定义契约
+```bash
+npm run typecheck
+npm test          # includes tests/trajectory.test.ts
+npm run eval      # 32 samples → docs/iknow-spec/docs/eval/results/trajectory-suite-latest.json
+```
+
+| 模块 | 路径 |
+|------|------|
+| CLI | `src/eval/cli.ts` |
+| Suite runner | `src/eval/run-suite.ts`（`runEvalSuite` / `runSample` / `loadEvalSet`） |
+| Scorer | `src/eval/score-trajectory.ts`（`scoreTrajectory` / `checkHardConstraints`） |
+| Types | `src/eval/types.ts` |
+| Agent logs | `IknowAnswer.tool_calls` via `src/agent-loop/trace.ts` |
+
+Sprint-1 gates（report + CLI exit）：`hard_pass_rate >= 1.0`，`mean_trajectory_score >= 0.6`。
+
+后续可选：真实索引 / LLM tool_calls 历史（ADR §1）接入后复用同一 scorer 契约。
