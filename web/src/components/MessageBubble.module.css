@@ -1,0 +1,107 @@
+.bubble {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-width: min(100%, var(--chat-max));
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-subtle);
+}
+
+.user {
+  align-self: flex-end;
+  background: var(--bg-user);
+  border-color: var(--border-strong);
+}
+
+.agent {
+  align-self: flex-start;
+  background: var(--bg-agent);
+}
+
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-3);
+}
+
+.role {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.user .role {
+  color: var(--text-secondary);
+}
+
+.metaLine {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.gov {
+  color: var(--status-ok);
+}
+
+.gov[data-status="blocked"],
+.gov[data-status="denied"],
+.gov[data-status="error"] {
+  color: var(--status-danger);
+}
+
+.gov[data-status="warn"],
+.gov[data-status="review"] {
+  color: var(--status-warn);
+}
+
+.body {
+  font-size: var(--text-md);
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.55;
+}
+
+.sources {
+  margin-top: var(--space-1);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.sourcesTitle {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-tertiary);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.sourceList {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.sourceItem {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.chunkId {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--accent);
+  margin-right: var(--space-2);
+}
+
+.quote {
+  color: var(--text-tertiary);
+}
