@@ -98,6 +98,8 @@ export class OpenAiCompatibleLlmClient implements LlmChatClient {
       messages: messages.map(serializeMessage),
       temperature: this.temperature,
       max_tokens: this.maxTokens,
+      // Explicit non-stream: some gateways still append SSE trailers; parser tolerates that.
+      stream: false,
     };
     if (tools.length > 0) {
       body.tools = tools;
@@ -132,7 +134,7 @@ export class OpenAiCompatibleLlmClient implements LlmChatClient {
         }>;
       };
       try {
-        json = JSON.parse(raw) as typeof json;
+        json = parseLlmResponseJson(raw) as typeof json;
       } catch (parseErr) {
         const detail =
           parseErr instanceof Error ? parseErr.message : String(parseErr);
@@ -180,6 +182,82 @@ function isAbortError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const name = (err as { name?: string }).name;
   return name === "AbortError" || name === "TimeoutError";
+}
+
+/**
+ * Parse chat/completions body. Tolerates gateways that return a JSON object
+ * followed by SSE trailer lines (`data: [DONE]`) or `data: {...}` wrappers.
+ * Exported for unit tests.
+ */
+export function parseLlmResponseJson(raw: string): unknown {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    throw new Error("empty body");
+  }
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    // continue
+  }
+
+  // Strip trailing SSE done markers after a leading JSON object.
+  const withoutDone = trimmed
+    .replace(/(?:\r?\n)+data:\s*\[DONE\]\s*$/i, "")
+    .trim();
+  if (withoutDone !== trimmed) {
+    try {
+      return JSON.parse(withoutDone) as unknown;
+    } catch {
+      // continue
+    }
+  }
+
+  // First complete JSON object in the payload (brace scan).
+  const start = withoutDone.indexOf("{");
+  if (start >= 0) {
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (let i = start; i < withoutDone.length; i++) {
+      const ch = withoutDone[i]!;
+      if (inStr) {
+        if (esc) {
+          esc = false;
+        } else if (ch === "\\") {
+          esc = true;
+        } else if (ch === "\"") {
+          inStr = false;
+        }
+        continue;
+      }
+      if (ch === "\"") {
+        inStr = true;
+        continue;
+      }
+      if (ch === "{") depth += 1;
+      if (ch === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          return JSON.parse(withoutDone.slice(start, i + 1)) as unknown;
+        }
+      }
+    }
+  }
+
+  // SSE: first data: line that is JSON
+  for (const line of withoutDone.split(/\r?\n/)) {
+    const m = line.match(/^data:\s*(.+)$/);
+    if (!m) continue;
+    const payload = m[1]!.trim();
+    if (!payload || payload === "[DONE]") continue;
+    try {
+      return JSON.parse(payload) as unknown;
+    } catch {
+      // try next line
+    }
+  }
+
+  throw new Error("no JSON object found in llm body");
 }
 
 function serializeMessage(m: LlmMessage): Record<string, unknown> {
