@@ -1,4 +1,11 @@
-import type { IknowAnswer, PriorChunk, SessionContext } from "../shared/schema.js";
+import type {
+  HistoryTurn,
+  IknowAnswer,
+  PriorChunk,
+  SessionContext,
+} from "../shared/schema.js";
+
+export type { HistoryTurn };
 
 export type ConversationTurn = {
   query: string;
@@ -10,6 +17,6 @@ export type ConversationState = {
   session: SessionContext;
   turns: ConversationTurn[];
   last_priors: PriorChunk[];
-  history_finals: Array<{ role: "user" | "assistant"; content: string }>;
+  history_finals: HistoryTurn[];
   json_mode: boolean;
 };

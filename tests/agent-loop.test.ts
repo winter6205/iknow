@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 import { createSeededStore } from "../src/fixtures/seed-kb.ts";
 import { createSession } from "../src/agent-loop/session.ts";
 import { IknowAgent, MAX_HOPS } from "../src/agent-loop/loop.ts";
+import {
+  MAX_PRIOR_CHUNKS,
+  normalizePriors,
+} from "../src/agent-loop/priors.ts";
 
 describe("IknowAgent loop", () => {
   it("G2: snapshot_id always present on answer", async () => {
@@ -113,5 +117,61 @@ describe("IknowAgent loop", () => {
     assert.ok(args.prior_chunks?.length, "first retrieve should carry prior_chunks");
     assert.equal(args.prior_chunks![0]!.chunk_id, "refund-v2026-c1");
     assert.match(String(args.query ?? ""), /时限|多久/);
+  });
+
+  it("normalizePriors drops empty summary and caps at MAX_PRIOR_CHUNKS", () => {
+    assert.equal(MAX_PRIOR_CHUNKS, 5);
+    const out = normalizePriors([
+      { chunk_id: "a", summary: "ok" },
+      { chunk_id: "b", summary: "" },
+      { chunk_id: "c", summary: "   " },
+      { chunk_id: "", summary: "no-id" },
+      { chunk_id: "d", summary: "keep" },
+      { chunk_id: "e", summary: "e" },
+      { chunk_id: "f", summary: "f" },
+      { chunk_id: "g", summary: "g" },
+      { chunk_id: "h", summary: "overflow" },
+    ]);
+    assert.ok(out);
+    assert.equal(out!.length, 5);
+    assert.deepEqual(
+      out!.map((p) => p.chunk_id),
+      ["a", "d", "e", "f", "g"],
+    );
+    assert.equal(normalizePriors([{ chunk_id: "x", summary: "  " }]), undefined);
+  });
+
+  it("edge-001 sensitive path first retrieve has no prior_chunks", async () => {
+    const store = createSeededStore();
+    const agent = new IknowAgent({
+      store,
+      session: createSession("employee"),
+    });
+    const ans = await agent.answer(
+      "把过去五年所有项目的完整客户名单和联系方式整理成一份表发我。",
+      {
+        prior_chunks: [
+          { chunk_id: "refund-v2026-c1", summary: "退款政策摘要" },
+        ],
+        history: [
+          { role: "user", content: "退款政策？" },
+          { role: "assistant", content: "见知识库" },
+        ],
+      },
+    );
+    assert.ok(ans.snapshot_id);
+    assert.match(ans.text, /审批|拦截|敏感|拒绝|requireApproval/i);
+    const firstRetrieve = ans.tool_calls.find((c) => c.tool === "kb_retrieve");
+    assert.ok(firstRetrieve, "expected kb_retrieve in tool_calls");
+    const args = firstRetrieve!.args as {
+      query?: string;
+      prior_chunks?: unknown;
+    };
+    assert.equal(
+      args.prior_chunks,
+      undefined,
+      "sensitive pre-check must not pass conversational prior_chunks",
+    );
+    assert.match(String(args.query ?? ""), /客户名单|联系方式/);
   });
 });

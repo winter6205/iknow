@@ -18,10 +18,13 @@ import { buildSnapshotId } from "../shared/hash.js";
 import { createToolRegistry, type ToolRegistry } from "../tools/registry.js";
 import { MAX_HOPS } from "./loop.js";
 import type { LlmChatClient, LlmMessage, LlmToolCall } from "./llm-client.js";
+import { MAX_PRIOR_CHUNKS, normalizePriors } from "./priors.js";
 import { HOP_TOOLS, isKbToolName, KB_TOOL_DEFS } from "./tool-defs.js";
 import { ToolTrace } from "./trace.js";
 
 export type { AgentAnswerOpts };
+/** Shared prior sanitizer (alias kept for older call sites / tests). */
+export { MAX_PRIOR_CHUNKS, normalizePriors as normalizePriorChunks };
 
 export interface LlmIknowAgentOptions {
   store: InMemoryKnowledgeStore;
@@ -44,8 +47,14 @@ const EXTRA_ROUNDS = 8;
 /** Cap history to last N final user/assistant messages (design §6). */
 const HISTORY_MAX_MESSAGES = 6;
 
-function buildSystemPrompt(maxHops: number): string {
-  return `You are an enterprise knowledge-base agent for a single company.
+/** Per-prior summary chars in the system appendix. */
+const PRIOR_SUMMARY_CHARS = 160;
+
+/** Total prior appendix char budget (header + lines). */
+const MAX_PRIORS_APPENDIX_CHARS = 1_200;
+
+function buildSystemPrompt(maxHops: number, priorsAppendix?: string): string {
+  const base = `You are an enterprise knowledge-base agent for a single company.
 
 Rules:
 1. You MUST use the provided tools (kb_retrieve, kb_verify_citation, kb_compile, kb_governance). Never invent documents, facts, IDs, or policies.
@@ -55,6 +64,8 @@ Rules:
 5. If evidence is missing, say you cannot confirm — do not fabricate.
 6. Final reply may be plain text or a JSON object {"text":"...","source_spans":[{"chunk_id":"...","quote":"..."}]} . Prefer JSON when you have citations.
 7. Do not claim external competitor knowledge or bypass role permissions.`;
+  if (!priorsAppendix) return base;
+  return `${base}\n\n${priorsAppendix}`;
 }
 
 export class LlmIknowAgent {
@@ -83,27 +94,28 @@ export class LlmIknowAgent {
   }
 
   /**
-   * system + capped history finals + optional prior_chunks appendix + current user.
+   * One system message (policy + optional priors section) + capped history finals + current user.
+   * Single system role keeps priors visible on gateways that only honor the first system message.
    */
   private buildInitialMessages(
     query: string,
     opts?: AgentAnswerOpts,
   ): LlmMessage[] {
+    const priors = normalizePriors(opts?.prior_chunks);
+    const priorsAppendix = priors?.length
+      ? priorChunksAppendix(priors)
+      : undefined;
+
     const messages: LlmMessage[] = [
-      { role: "system", content: buildSystemPrompt(this.maxHops) },
+      {
+        role: "system",
+        content: buildSystemPrompt(this.maxHops, priorsAppendix),
+      },
     ];
 
     const history = capHistory(opts?.history, this.contextWindowTokens);
     for (const turn of history) {
       messages.push({ role: turn.role, content: turn.content });
-    }
-
-    const priors = normalizePriorChunks(opts?.prior_chunks);
-    if (priors?.length) {
-      messages.push({
-        role: "system",
-        content: priorChunksAppendix(priors),
-      });
     }
 
     messages.push({ role: "user", content: query });
@@ -528,37 +540,21 @@ function localSnapshot(
 }
 
 function readContextWindowTokens(llm: LlmChatClient): number | undefined {
-  const cw = (llm as { contextWindowTokens?: unknown }).contextWindowTokens;
+  const cw = llm.contextWindowTokens;
   return typeof cw === "number" && cw > 0 ? cw : undefined;
-}
-
-function normalizePriorChunks(
-  priors: PriorChunk[] | undefined,
-): PriorChunk[] | undefined {
-  if (!priors?.length) return undefined;
-  const out: PriorChunk[] = [];
-  for (const p of priors) {
-    if (
-      typeof p?.chunk_id === "string" &&
-      p.chunk_id.length > 0 &&
-      typeof p?.summary === "string"
-    ) {
-      out.push({ chunk_id: p.chunk_id, summary: p.summary });
-    }
-  }
-  return out.length ? out : undefined;
 }
 
 /**
  * Keep last N user/assistant finals; optionally shrink by approx char budget
  * derived from contextWindowTokens (~15% of window, 4 chars/token).
+ * Most-recent turn always kept but truncated to charBudget when oversized.
  */
 export function capHistory(
   history: AgentAnswerOpts["history"] | undefined,
   contextWindowTokens?: number,
 ): Array<{ role: "user" | "assistant"; content: string }> {
   if (!history?.length) return [];
-  let msgs = history
+  const msgs = history
     .filter(
       (m): m is { role: "user" | "assistant"; content: string } =>
         (m.role === "user" || m.role === "assistant") &&
@@ -575,23 +571,42 @@ export function capHistory(
   let total = 0;
   const kept: typeof msgs = [];
   for (let i = msgs.length - 1; i >= 0; i--) {
-    const len = msgs[i]!.content.length;
-    if (kept.length > 0 && total + len > charBudget) break;
-    kept.push(msgs[i]!);
+    const msg = msgs[i]!;
+    let content = msg.content;
+    let len = content.length;
+
+    if (kept.length === 0) {
+      // First (most-recent) message must still respect the budget.
+      if (len > charBudget) {
+        content = content.slice(0, charBudget);
+        len = content.length;
+      }
+      kept.push({ role: msg.role, content });
+      total += len;
+      continue;
+    }
+
+    if (total + len > charBudget) break;
+    kept.push(msg);
     total += len;
   }
   return kept.reverse();
 }
 
 function priorChunksAppendix(priors: PriorChunk[]): string {
-  const lines = priors.map(
-    (p) =>
-      `- ${p.chunk_id}: ${p.summary.length > 160 ? `${p.summary.slice(0, 160)}…` : p.summary}`,
-  );
-  return [
+  const lines = priors.map((p) => {
+    const summary =
+      p.summary.length > PRIOR_SUMMARY_CHARS
+        ? `${p.summary.slice(0, PRIOR_SUMMARY_CHARS)}…`
+        : p.summary;
+    return `- ${p.chunk_id}: ${summary}`;
+  });
+  const text = [
     "Prior chunks from earlier turns (ids + short summaries only).",
     "When continuing the same thread, pass them as prior_chunks to kb_retrieve.",
     "Do not invent chunk_ids. Prefer re-retrieve for new factual claims.",
     ...lines,
   ].join("\n");
+  if (text.length <= MAX_PRIORS_APPENDIX_CHARS) return text;
+  return `${text.slice(0, MAX_PRIORS_APPENDIX_CHARS - 1)}…`;
 }

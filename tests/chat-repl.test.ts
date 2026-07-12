@@ -185,6 +185,61 @@ describe("applySlashCommand", () => {
       mode: "deterministic",
     });
     assert.equal(effect.type, "error");
+    if (effect.type === "error") {
+      assert.match(effect.text, /Unknown command \/foo/);
+    }
+  });
+
+  it("strips control chars (incl. ESC) from reflected unknown command", () => {
+    const state = createConversation(createSession("employee"));
+    // ESC + CSI clear-screen payload reflected without sanitization would
+    // corrupt the terminal when console.log prints the error.
+    const hostile = `evil\x1b[2J\x1b[Hcmd`;
+    const effect = applySlashCommand(hostile, [], {
+      state,
+      mode: "deterministic",
+    });
+    assert.equal(effect.type, "error");
+    if (effect.type === "error") {
+      // ESC (0x1B) stripped; printable remnants like '[' may remain
+      assert.ok(!effect.text.includes("\x1b"));
+      assert.ok(!/[\u0000-\u001F\u007F]/.test(effect.text));
+      assert.equal(
+        effect.text,
+        "Unknown command /evil[2J[Hcmd. Type /help for commands.",
+      );
+    }
+  });
+
+  it("usage/help lists roles and modes from shared sources", () => {
+    const state = createConversation(createSession("employee"));
+    const help = applySlashCommand("help", [], {
+      state,
+      mode: "deterministic",
+    });
+    assert.equal(help.type, "help");
+    if (help.type === "help") {
+      assert.match(help.text, /employee\|manager\|admin/);
+      assert.match(help.text, /deterministic\|llm/);
+    }
+
+    const roleUsage = applySlashCommand("role", [], {
+      state,
+      mode: "deterministic",
+    });
+    assert.equal(roleUsage.type, "error");
+    if (roleUsage.type === "error") {
+      assert.match(roleUsage.text, /employee\|manager\|admin/);
+    }
+
+    const modeUsage = applySlashCommand("mode", ["magic"], {
+      state,
+      mode: "deterministic",
+    });
+    assert.equal(modeUsage.type, "error");
+    if (modeUsage.type === "error") {
+      assert.match(modeUsage.text, /deterministic\|llm/);
+    }
   });
 });
 

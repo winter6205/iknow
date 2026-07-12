@@ -78,6 +78,28 @@ describe("interaction: derivePriorsFromAnswer", () => {
     assert.equal(priors[0]!.summary.length, 200);
     assert.equal(priors[0]!.summary, "X".repeat(200));
   });
+
+  it("uses store summary as-is without 200 re-slice (soft-cap 500)", () => {
+    const storeSummary = "S".repeat(250);
+    const answer = makeAnswer({
+      text: "store path",
+      snapshot_id: "snap-store-summary-cccccc",
+      source_spans: [{ chunk_id: "c-store", quote: "ignored-quote" }],
+    });
+    const priors = derivePriorsFromAnswer(answer, {
+      tryGetChunk: () => ({ summary: storeSummary }),
+    });
+    assert.equal(priors.length, 1);
+    assert.equal(priors[0]!.summary, storeSummary);
+    assert.equal(priors[0]!.summary.length, 250);
+
+    const huge = "H".repeat(600);
+    const priorsHuge = derivePriorsFromAnswer(answer, {
+      tryGetChunk: () => ({ summary: huge }),
+    });
+    assert.equal(priorsHuge[0]!.summary.length, 500);
+    assert.equal(priorsHuge[0]!.summary, "H".repeat(500));
+  });
 });
 
 describe("interaction: recordTurn / resetConversation", () => {
@@ -144,8 +166,10 @@ describe("interaction: format", () => {
     assert.ok(human.includes("答案正文"));
     assert.ok(human.includes("治理: ok"));
     assert.ok(human.includes("snapshot:"));
-    // short form present; full id not required in human line
-    assert.ok(human.includes(fullSnap.slice(0, 12)));
+    // short form + ellipsis when truncated (not mistaken for full id)
+    const short = fullSnap.slice(0, 12);
+    assert.ok(human.includes(`${short}…`));
+    assert.ok(!human.includes(fullSnap));
     assert.ok(human.includes("chunk-refund-30"));
     assert.ok(human.includes("30天内"));
     assert.ok(human.includes("hops: 2"));
@@ -155,6 +179,18 @@ describe("interaction: format", () => {
     // conceptual: required envelope fields not dropped from human view
     assert.match(human, /snapshot:\s+\S+/);
     assert.match(human, /治理:\s+\S+/);
+  });
+
+  it("shortSnapshot leaves short ids unchanged (no ellipsis)", () => {
+    const shortSnap = "short-id";
+    const answer = makeAnswer({
+      text: "t",
+      snapshot_id: shortSnap,
+      source_spans: [],
+    });
+    const human = formatAnswerHuman(answer);
+    assert.ok(human.includes(`snapshot: ${shortSnap}`));
+    assert.ok(!human.includes("…"));
   });
 
   it("formatAnswerJson keeps full snapshot_id and G2 fields", () => {

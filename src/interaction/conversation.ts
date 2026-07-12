@@ -8,7 +8,13 @@ export type PriorLookupStore = {
 };
 
 const MAX_PRIORS = 5;
-const MAX_SUMMARY_LEN = 200;
+/** Cap for quote fallback when store has no summary. */
+const MAX_QUOTE_SUMMARY_LEN = 200;
+/**
+ * Soft cap only if store summary is pathologically huge (defense-in-depth).
+ * Normal store summaries are preferred as-is; this is not the 200 quote limit.
+ */
+const MAX_STORE_SUMMARY_LEN = 500;
 
 export type CreateConversationOptions = {
   conversation_id?: string;
@@ -36,7 +42,9 @@ export function createConversation(
 /**
  * Derive next-turn prior_chunks from an answer's source_spans.
  * Unique chunk_ids in first-seen order, max K=5.
- * summary: store chunk.summary if present, else quote truncated to ≤200.
+ * summary:
+ * - store chunk.summary if present → preferred as-is (soft-cap 500 only if huge)
+ * - else quote truncated to ≤200
  */
 export function derivePriorsFromAnswer(
   answer: IknowAnswer,
@@ -53,13 +61,15 @@ export function derivePriorsFromAnswer(
     seen.add(chunkId);
 
     const fromStore = store.tryGetChunk?.(chunkId)?.summary;
-    let summary =
-      typeof fromStore === "string" && fromStore.length > 0
-        ? fromStore
-        : (span.quote ?? "").slice(0, MAX_SUMMARY_LEN);
-
-    if (summary.length > MAX_SUMMARY_LEN) {
-      summary = summary.slice(0, MAX_SUMMARY_LEN);
+    let summary: string;
+    if (typeof fromStore === "string" && fromStore.length > 0) {
+      // Prefer store summary as-is; soft-cap only for pathological length.
+      summary =
+        fromStore.length > MAX_STORE_SUMMARY_LEN
+          ? fromStore.slice(0, MAX_STORE_SUMMARY_LEN)
+          : fromStore;
+    } else {
+      summary = (span.quote ?? "").slice(0, MAX_QUOTE_SUMMARY_LEN);
     }
 
     priors.push({ chunk_id: chunkId, summary });

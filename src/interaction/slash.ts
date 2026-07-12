@@ -27,12 +27,31 @@ export type SlashEffect =
   | { type: "mode_change"; mode: AgentModeCli; message: string }
   | { type: "reset"; message: string };
 
+/** Pipe-joined allowed roles for usage/error strings. */
+function allowedRolesList(): string {
+  return CALLER_ROLES.join("|");
+}
+
+/** Pipe-joined allowed modes for usage/error strings. */
+function allowedModesList(): string {
+  return AGENT_MODES.join("|");
+}
+
+/**
+ * Strip C0 control chars (incl. ESC) and DEL so reflected command text
+ * cannot inject terminal escape sequences when printed.
+ */
+function sanitizeCommandForDisplay(command: string): string {
+  // eslint-disable-next-line no-control-regex -- intentional control-char strip
+  return command.replace(/[\u0000-\u001F\u007F]/g, "");
+}
+
 const HELP_TEXT = `Commands:
   /help                 Show this help
   /quit  /exit          Leave chat
   /json on|off          Toggle machine JSON output
-  /role <role>          Set caller role (${CALLER_ROLES.join("|")})
-  /mode <mode>          Set agent mode (${AGENT_MODES.join("|")})
+  /role <role>          Set caller role (${allowedRolesList()})
+  /mode <mode>          Set agent mode (${allowedModesList()})
   /reset                Clear turns/priors/history (keep store + session)
 
 Anything else is a question for the agent.`;
@@ -101,7 +120,7 @@ export function applySlashCommand(
     default:
       return {
         type: "error",
-        text: `Unknown command /${command}. Type /help for commands.`,
+        text: `Unknown command /${sanitizeCommandForDisplay(command)}. Type /help for commands.`,
       };
   }
 }
@@ -126,7 +145,7 @@ function applyRole(args: string[], ctx: SlashContext): SlashEffect {
   if (raw === undefined || raw === "") {
     return {
       type: "error",
-      text: `Usage: /role <${CALLER_ROLES.join("|")}>`,
+      text: `Usage: /role <${allowedRolesList()}>`,
     };
   }
   let role: CallerRole;
@@ -149,7 +168,7 @@ function applyMode(args: string[], ctx: SlashContext): SlashEffect {
   if (!(AGENT_MODES as readonly string[]).includes(raw)) {
     return {
       type: "error",
-      text: `Usage: /mode <${AGENT_MODES.join("|")}>`,
+      text: `Usage: /mode <${allowedModesList()}>`,
     };
   }
   const next = raw as AgentModeCli;
@@ -174,6 +193,6 @@ export function parseAgentModeCli(value: unknown): AgentModeCli {
     return value.toLowerCase() as AgentModeCli;
   }
   throw new Error(
-    `Invalid mode: ${JSON.stringify(value)}; expected one of: ${AGENT_MODES.join("|")}`,
+    `Invalid mode: ${JSON.stringify(value)}; expected one of: ${allowedModesList()}`,
   );
 }

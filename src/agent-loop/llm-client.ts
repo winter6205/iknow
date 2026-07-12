@@ -41,6 +41,11 @@ export interface LlmChatClient {
     messages: LlmMessage[],
     tools: LlmToolDef[],
   ): Promise<LlmChatResult>;
+  /**
+   * Optional context window size in tokens (history budgeting).
+   * OpenAiCompatibleLlmClient sets this; mocks may omit it.
+   */
+  readonly contextWindowTokens?: number;
 }
 
 export interface OpenAiCompatibleLlmClientOptions {

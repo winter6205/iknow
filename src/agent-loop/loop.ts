@@ -15,6 +15,7 @@ import type {
 } from "../shared/schema.js";
 import { IknowError } from "../shared/errors.js";
 import { NOTE } from "../eval/lexicon.js";
+import { normalizePriors } from "./priors.js";
 import { isPrivilegedRole } from "./session.js";
 import { ToolTrace } from "./trace.js";
 
@@ -132,13 +133,15 @@ export class IknowAgent {
       });
     }
 
-    // edge-001: sensitive — non-privileged only (privileged uses main path once)
+    // edge-001: sensitive — non-privileged only (privileged uses main path once).
+    // design §6: deterministic safety gate uses {query} only — no conversational
+    // turnPriors / prior_chunks. First main retrieve below may merge turnPriors.
     if (
       /客户名单|联系方式|完整客户/.test(q) &&
       !isPrivilegedRole(this.session.caller_role)
     ) {
       hopState.n += 1;
-      const firstInput = buildFirstRetrieveInput(q, turnPriors);
+      const firstInput = { query: q };
       trace.record("kb_retrieve", { ...firstInput });
       const denied = await kbRetrieve(
         this.store,
@@ -598,20 +601,6 @@ export class IknowAgent {
 
 /** Alias for tests / older call sites. */
 export { IknowAgent as IknowAgentLoop };
-
-function normalizePriors(
-  priors: PriorChunk[] | undefined,
-): PriorChunk[] | undefined {
-  if (!priors?.length) return undefined;
-  return priors
-    .filter(
-      (p) =>
-        typeof p?.chunk_id === "string" &&
-        p.chunk_id.length > 0 &&
-        typeof p?.summary === "string",
-    )
-    .map((p) => ({ chunk_id: p.chunk_id, summary: p.summary }));
-}
 
 /** First retrieve of a turn: optional host prior_chunks; hop re-retrieve keeps its own prior. */
 function buildFirstRetrieveInput(

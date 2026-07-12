@@ -219,11 +219,20 @@ export interface IknowAnswer {
 }
 
 /**
+ * One final user/assistant turn in multi-turn history
+ * (host ConversationState.history_finals + AgentAnswerOpts.history).
+ */
+export type HistoryTurn = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+/**
  * Multi-turn opts for Agent.answer (host→agent; does not change tool schema).
  * - prior_chunks: protocol bridge into first kb_retrieve (both modes)
  * - history: LLM-only short window of final user/assistant turns
  */
 export interface AgentAnswerOpts {
   prior_chunks?: PriorChunk[];
-  history?: Array<{ role: "user" | "assistant"; content: string }>;
+  history?: HistoryTurn[];
 }

@@ -1,4 +1,8 @@
-export type { ConversationTurn, ConversationState } from "./types.js";
+export type {
+  ConversationTurn,
+  ConversationState,
+  HistoryTurn,
+} from "./types.js";
 export {
   createConversation,
   derivePriorsFromAnswer,
