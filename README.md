@@ -24,15 +24,40 @@ npm run eval
 
 ## Run
 
+### One-shot (JSON — scripts / CI)
+
 ```bash
 npm run dev -- "公司的退款政策是什么？"
 # or:
 npx tsx src/cli.ts "公司的退款政策是什么？"
+npx tsx src/cli.ts ask "公司的退款政策是什么？"
 
 npm run dev -- --role employee "年假天数是怎么规定的？"
 npm run dev -- --governance-timeout "检索时治理服务超时了，你还能正常回答退款政策吗？"
 npm run eval   # 32-sample trajectory suite (hard gates + trajectory_score)
 ```
+
+### Interactive chat (REPL)
+
+```bash
+npx tsx src/cli.ts chat
+npx tsx src/cli.ts chat --mode deterministic --role employee
+npx tsx src/cli.ts chat --json          # start with machine JSON output
+```
+
+Prompt is `iknow> `. Session reuses one runtime + agent + conversation bag.
+
+| Input | Behavior |
+|-------|----------|
+| plain text | one `answer` turn (priors + short history injected) |
+| `/json on\|off` | toggle full G2 JSON vs human view |
+| `/role <r>` | set `caller_role` (employee\|manager\|admin) |
+| `/mode deterministic\|llm` | rebuild agent when mode changes |
+| `/reset` | clear turns / priors / history (store kept) |
+| `/help` | list commands |
+| `/quit` or `/exit` / Ctrl+D | leave |
+
+Human view shows answer + source_spans + governance/snapshot/hops. One-shot stays JSON so scripts do not break.
 
 ### Agent mode (M2 LLM path)
 

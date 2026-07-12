@@ -72,4 +72,46 @@ describe("IknowAgent loop", () => {
     assert.ok(ans.snapshot_id);
     assert.match(ans.text, /拒绝|越权|不得|非本企业/);
   });
+
+  it("answer(query) one-arg still works (multi-turn opts optional)", async () => {
+    const store = createSeededStore();
+    const agent = new IknowAgent({
+      store,
+      session: createSession("employee"),
+    });
+    const ans = await agent.answer("公司的退款政策是什么？");
+    assert.ok(ans.snapshot_id);
+    assert.ok(ans.tool_trace.includes("kb_retrieve"));
+  });
+
+  it("multi-turn prior_chunks on first retrieve (trace args)", async () => {
+    const store = createSeededStore();
+    const agent = new IknowAgent({
+      store,
+      session: createSession("employee"),
+    });
+    const priors = [
+      {
+        chunk_id: "refund-v2026-c1",
+        summary: "退款需在规定期限内申请",
+      },
+    ];
+    const ans = await agent.answer("那时限是多久？", {
+      prior_chunks: priors,
+      history: [
+        { role: "user", content: "退款政策？" },
+        { role: "assistant", content: "见知识库" },
+      ],
+    });
+    assert.ok(ans.snapshot_id, "G2 still required with multi-turn opts");
+    const firstRetrieve = ans.tool_calls.find((c) => c.tool === "kb_retrieve");
+    assert.ok(firstRetrieve, "expected kb_retrieve in tool_calls");
+    const args = firstRetrieve!.args as {
+      query?: string;
+      prior_chunks?: Array<{ chunk_id: string; summary: string }>;
+    };
+    assert.ok(args.prior_chunks?.length, "first retrieve should carry prior_chunks");
+    assert.equal(args.prior_chunks![0]!.chunk_id, "refund-v2026-c1");
+    assert.match(String(args.query ?? ""), /时限|多久/);
+  });
 });

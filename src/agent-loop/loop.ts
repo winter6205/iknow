@@ -5,10 +5,12 @@ import { kbCompile } from "../kb-compile/compile.js";
 import { kbGovernance } from "../kb-governance/governance.js";
 import { buildSnapshotId, sha256Hex } from "../shared/hash.js";
 import type {
+  AgentAnswerOpts,
   Chunk,
   GovernanceAction,
   GovernanceStatus,
   IknowAnswer,
+  PriorChunk,
   SessionContext,
 } from "../shared/schema.js";
 import { IknowError } from "../shared/errors.js";
@@ -26,6 +28,8 @@ export interface AgentLoopOptions {
   /** Optional embedding vector index for kb_retrieve vector arm (M1). */
   vectorIndex?: import("../kb-retrieve/embedding/vector-index.js").VectorIndex;
 }
+
+export type { AgentAnswerOpts };
 
 type RetrieveResult = Awaited<ReturnType<typeof kbRetrieve>>;
 
@@ -52,16 +56,25 @@ export class IknowAgent {
     return this.vectorIndex ? { vectorIndex: this.vectorIndex } : undefined;
   }
 
-  async answer(query: string): Promise<IknowAnswer> {
+  async answer(query: string, opts?: AgentAnswerOpts): Promise<IknowAnswer> {
     const trace = new ToolTrace();
     const notes: string[] = [];
     // Mutable hop counter so unexpected-error path still reports hops used.
     const hopState = { n: 0 };
     // Single retrieve options object per answer (vector index binding).
     const retrieveOpts = this.retrieveOpts();
+    // history is LLM-only; deterministic ignores it (design §6).
+    const turnPriors = normalizePriors(opts?.prior_chunks);
 
     try {
-      return await this.answerInner(query, trace, notes, hopState, retrieveOpts);
+      return await this.answerInner(
+        query,
+        trace,
+        notes,
+        hopState,
+        retrieveOpts,
+        turnPriors,
+      );
     } catch (err) {
       // G2: never return without snapshot_id, even on unexpected failures.
       const msg = err instanceof Error ? err.message : String(err);
@@ -83,6 +96,7 @@ export class IknowAgent {
     notes: string[],
     hopState: { n: number },
     retrieveOpts: ReturnType<IknowAgent["retrieveOpts"]>,
+    turnPriors: PriorChunk[] | undefined,
   ): Promise<IknowAnswer> {
     const q = query.trim();
     if (!q) {
@@ -124,10 +138,11 @@ export class IknowAgent {
       !isPrivilegedRole(this.session.caller_role)
     ) {
       hopState.n += 1;
-      trace.record("kb_retrieve", { query: q });
+      const firstInput = buildFirstRetrieveInput(q, turnPriors);
+      trace.record("kb_retrieve", { ...firstInput });
       const denied = await kbRetrieve(
         this.store,
-        { query: q },
+        firstInput,
         this.session,
         retrieveOpts,
       );
@@ -149,15 +164,16 @@ export class IknowAgent {
       });
     }
 
-    // 1) retrieve (hop)
+    // 1) retrieve (hop) — first retrieve merges turn prior_chunks when provided
     if (hopState.n >= this.maxHops) {
       return this.hopLimit(trace, hopState.n, notes);
     }
     hopState.n += 1;
-    trace.record("kb_retrieve", { query: q });
+    const firstInput = buildFirstRetrieveInput(q, turnPriors);
+    trace.record("kb_retrieve", { ...firstInput });
     let retrieved = await kbRetrieve(
       this.store,
-      { query: q },
+      firstInput,
       this.session,
       retrieveOpts,
     );
@@ -582,3 +598,26 @@ export class IknowAgent {
 
 /** Alias for tests / older call sites. */
 export { IknowAgent as IknowAgentLoop };
+
+function normalizePriors(
+  priors: PriorChunk[] | undefined,
+): PriorChunk[] | undefined {
+  if (!priors?.length) return undefined;
+  return priors
+    .filter(
+      (p) =>
+        typeof p?.chunk_id === "string" &&
+        p.chunk_id.length > 0 &&
+        typeof p?.summary === "string",
+    )
+    .map((p) => ({ chunk_id: p.chunk_id, summary: p.summary }));
+}
+
+/** First retrieve of a turn: optional host prior_chunks; hop re-retrieve keeps its own prior. */
+function buildFirstRetrieveInput(
+  query: string,
+  turnPriors: PriorChunk[] | undefined,
+): { query: string; prior_chunks?: PriorChunk[] } {
+  if (!turnPriors?.length) return { query };
+  return { query, prior_chunks: turnPriors };
+}

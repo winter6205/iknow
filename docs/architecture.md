@@ -13,7 +13,8 @@ iknow is a **standalone** enterprise knowledge-base agent. Runtime code lives at
 | Agent loop | `src/agent-loop/` | Tool orchestration, `max_hops`, G2 envelope |
 | Knowledge store | `src/knowledge-store/` | In-memory KB abstraction (replaceable later) |
 | Shared | `src/shared/` | Schema, errors, hashing helpers |
-| CLI / entry | `src/cli.ts`, `src/index.ts` | Dev/ask entrypoints |
+| CLI / entry | `src/cli.ts`, `src/index.ts` | Dev/ask + `chat` REPL entrypoints |
+| Interaction host | `src/interaction/` | Conversation bag, human/json format, slash parse (no tool schema change) |
 
 ```text
 user query
@@ -42,8 +43,19 @@ user query
 - Capability ideas may be **ported** into `src/*`; runtime behavior is entirely under the `iknow` package.
 - See `docs/UPSTREAM_BASELINE.md` for baseline pin and policy.
 
+## Interaction design (product surface)
+
+Multi-turn chat / REPL is a **host-layer** concern (not a 5th tool). See:
+
+- **`docs/design/interaction-surface-v0.md`** — design v0; **I1–I3 partially implemented**
+- **`src/interaction/`** — `ConversationState`, priors/history, format, slash commands
+- **`npx tsx src/cli.ts chat`** — REPL; one-shot `ask` / bare query stay JSON for scripts
+
+Cross-turn bridge = protocol `prior_chunks` (+ LLM-only short `history`). No fifth tool.
+
 ## Non-goals (this scaffold)
 
 - Durable multi-tenant store (in-memory only for now)
 - Production auth / multi-tenant isolation (high-risk; separate track)
 - Bundling or re-exporting gbrain binaries
+- Claiming full interactive product parity until I4 live smoke (+ optional I5 multi-turn eval)

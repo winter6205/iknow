@@ -6,8 +6,10 @@
 import type { InMemoryKnowledgeStore } from "../knowledge-store/memory-store.js";
 import type { VectorIndex } from "../kb-retrieve/embedding/vector-index.js";
 import type {
+  AgentAnswerOpts,
   GovernanceStatus,
   IknowAnswer,
+  PriorChunk,
   SessionContext,
   SourceSpan,
 } from "../shared/schema.js";
@@ -19,6 +21,8 @@ import type { LlmChatClient, LlmMessage, LlmToolCall } from "./llm-client.js";
 import { HOP_TOOLS, isKbToolName, KB_TOOL_DEFS } from "./tool-defs.js";
 import { ToolTrace } from "./trace.js";
 
+export type { AgentAnswerOpts };
+
 export interface LlmIknowAgentOptions {
   store: InMemoryKnowledgeStore;
   session: SessionContext;
@@ -27,17 +31,25 @@ export interface LlmIknowAgentOptions {
   maxHops?: number;
   /** From IKNOW_LLM_TOOL_PROTOCOL; only openai_tools is implemented. */
   toolProtocol?: "openai_tools" | "anthropic_tools";
+  /**
+   * Optional token budget hint for history truncation (design §6).
+   * Falls back to llm.contextWindowTokens when present.
+   */
+  contextWindowTokens?: number;
 }
 
 /** Extra LLM rounds beyond max_hops (non-hop tools + final text). */
 const EXTRA_ROUNDS = 8;
+
+/** Cap history to last N final user/assistant messages (design §6). */
+const HISTORY_MAX_MESSAGES = 6;
 
 function buildSystemPrompt(maxHops: number): string {
   return `You are an enterprise knowledge-base agent for a single company.
 
 Rules:
 1. You MUST use the provided tools (kb_retrieve, kb_verify_citation, kb_compile, kb_governance). Never invent documents, facts, IDs, or policies.
-2. Always retrieve before answering. Prefer grounded summaries from tool results only.
+2. Always retrieve before answering. Prefer grounded summaries from tool results only. Follow-up factual questions still need kb_retrieve (with prior_chunks when continuing a thread).
 3. Hop budget: kb_retrieve and kb_verify_citation each consume 1 hop; max hops is ${maxHops}. kb_compile and kb_governance do not consume hops.
 4. G2: every final answer requires a governance snapshot_id. Call kb_governance with action=snapshot_status (and the relevant doc_id when known) before you finish.
 5. If evidence is missing, say you cannot confirm — do not fabricate.
@@ -50,6 +62,7 @@ export class LlmIknowAgent {
   private readonly llm: LlmChatClient;
   private readonly maxHops: number;
   private readonly tools: ToolRegistry;
+  private readonly contextWindowTokens?: number;
 
   constructor(opts: LlmIknowAgentOptions) {
     if (opts.toolProtocol === "anthropic_tools") {
@@ -64,9 +77,40 @@ export class LlmIknowAgent {
     this.tools = createToolRegistry(opts.store, opts.session, {
       vectorIndex: opts.vectorIndex,
     });
+    this.contextWindowTokens =
+      opts.contextWindowTokens ??
+      readContextWindowTokens(opts.llm);
   }
 
-  async answer(query: string): Promise<IknowAnswer> {
+  /**
+   * system + capped history finals + optional prior_chunks appendix + current user.
+   */
+  private buildInitialMessages(
+    query: string,
+    opts?: AgentAnswerOpts,
+  ): LlmMessage[] {
+    const messages: LlmMessage[] = [
+      { role: "system", content: buildSystemPrompt(this.maxHops) },
+    ];
+
+    const history = capHistory(opts?.history, this.contextWindowTokens);
+    for (const turn of history) {
+      messages.push({ role: turn.role, content: turn.content });
+    }
+
+    const priors = normalizePriorChunks(opts?.prior_chunks);
+    if (priors?.length) {
+      messages.push({
+        role: "system",
+        content: priorChunksAppendix(priors),
+      });
+    }
+
+    messages.push({ role: "user", content: query });
+    return messages;
+  }
+
+  async answer(query: string, opts?: AgentAnswerOpts): Promise<IknowAnswer> {
     const trace = new ToolTrace();
     let hops = 0;
     const notes: string[] = [];
@@ -87,10 +131,7 @@ export class LlmIknowAgent {
       });
     }
 
-    const messages: LlmMessage[] = [
-      { role: "system", content: buildSystemPrompt(this.maxHops) },
-      { role: "user", content: q },
-    ];
+    const messages = this.buildInitialMessages(q, opts);
 
     // Safety: bound total LLM rounds (hops + non-hop tools + final).
     const maxRounds = this.maxHops + EXTRA_ROUNDS;
@@ -484,4 +525,73 @@ function localSnapshot(
     }),
     status,
   };
+}
+
+function readContextWindowTokens(llm: LlmChatClient): number | undefined {
+  const cw = (llm as { contextWindowTokens?: unknown }).contextWindowTokens;
+  return typeof cw === "number" && cw > 0 ? cw : undefined;
+}
+
+function normalizePriorChunks(
+  priors: PriorChunk[] | undefined,
+): PriorChunk[] | undefined {
+  if (!priors?.length) return undefined;
+  const out: PriorChunk[] = [];
+  for (const p of priors) {
+    if (
+      typeof p?.chunk_id === "string" &&
+      p.chunk_id.length > 0 &&
+      typeof p?.summary === "string"
+    ) {
+      out.push({ chunk_id: p.chunk_id, summary: p.summary });
+    }
+  }
+  return out.length ? out : undefined;
+}
+
+/**
+ * Keep last N user/assistant finals; optionally shrink by approx char budget
+ * derived from contextWindowTokens (~15% of window, 4 chars/token).
+ */
+export function capHistory(
+  history: AgentAnswerOpts["history"] | undefined,
+  contextWindowTokens?: number,
+): Array<{ role: "user" | "assistant"; content: string }> {
+  if (!history?.length) return [];
+  let msgs = history
+    .filter(
+      (m): m is { role: "user" | "assistant"; content: string } =>
+        (m.role === "user" || m.role === "assistant") &&
+        typeof m.content === "string",
+    )
+    .slice(-HISTORY_MAX_MESSAGES);
+
+  if (contextWindowTokens == null || contextWindowTokens <= 0) {
+    return msgs;
+  }
+
+  // ~4 chars/token; reserve ~15% of window for history finals only.
+  const charBudget = Math.max(1, Math.floor(contextWindowTokens * 0.15 * 4));
+  let total = 0;
+  const kept: typeof msgs = [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const len = msgs[i]!.content.length;
+    if (kept.length > 0 && total + len > charBudget) break;
+    kept.push(msgs[i]!);
+    total += len;
+  }
+  return kept.reverse();
+}
+
+function priorChunksAppendix(priors: PriorChunk[]): string {
+  const lines = priors.map(
+    (p) =>
+      `- ${p.chunk_id}: ${p.summary.length > 160 ? `${p.summary.slice(0, 160)}…` : p.summary}`,
+  );
+  return [
+    "Prior chunks from earlier turns (ids + short summaries only).",
+    "When continuing the same thread, pass them as prior_chunks to kb_retrieve.",
+    "Do not invent chunk_ids. Prefer re-retrieve for new factual claims.",
+    ...lines,
+  ].join("\n");
 }

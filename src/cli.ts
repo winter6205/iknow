@@ -1,52 +1,69 @@
 #!/usr/bin/env node
 /**
- * CLI: npx tsx src/cli.ts "query"
- * Optional: --role employee|manager|admin
- * Optional: --governance-timeout  (edge-006 degrade path)
- * Optional: --mode deterministic|llm  (llm uses LlmIknowAgent; needs API key)
- * Optional: --embeddings  (opt-in vector arm when embedding key is present)
+ * CLI:
+ *   npx tsx src/cli.ts chat [--mode …] [--embeddings] [--role …] [--json] [--governance-timeout]
+ *   npx tsx src/cli.ts ask "query" …
+ *   npx tsx src/cli.ts "query"           # one-shot JSON (scripts / backward compat)
  */
+import * as readline from "node:readline";
 import { IknowAgent } from "./agent-loop/loop.js";
 import {
   assertOfflineCompatible,
   assertToolProtocolSupported,
   loadIknowEnv,
+  type IknowEnv,
 } from "./config/env.js";
 import {
   CALLER_ROLES,
   parseCallerRole,
+  type AgentAnswerOpts,
   type CallerRole,
+  type IknowAnswer,
+  type SessionContext,
 } from "./shared/schema.js";
 import { createIknowRuntime } from "./runtime/create-runtime.js";
 import { isIknowError } from "./shared/errors.js";
+import type { InMemoryKnowledgeStore } from "./knowledge-store/memory-store.js";
+import type { VectorIndex } from "./kb-retrieve/embedding/vector-index.js";
+import {
+  createConversation,
+  formatAnswerHuman,
+  formatAnswerJson,
+  recordTurn,
+  type ConversationState,
+} from "./interaction/index.js";
+import {
+  AGENT_MODES,
+  applySlashCommand,
+  parseAgentModeCli,
+  parseChatLine,
+  type AgentModeCli,
+} from "./interaction/slash.js";
 
-const AGENT_MODES = ["deterministic", "llm"] as const;
-type AgentModeCli = (typeof AGENT_MODES)[number];
+type CliCommand = "chat" | "ask" | "oneshot";
 
-function parseAgentMode(value: unknown): AgentModeCli {
-  if (
-    typeof value === "string" &&
-    (AGENT_MODES as readonly string[]).includes(value.toLowerCase())
-  ) {
-    return value.toLowerCase() as AgentModeCli;
-  }
-  throw new Error(
-    `Invalid mode: ${JSON.stringify(value)}; expected one of: ${AGENT_MODES.join("|")}`,
-  );
-}
-
-function parseArgs(argv: string[]): {
+type ParsedCli = {
+  command: CliCommand;
   query: string;
   role: CallerRole;
   degrade: boolean;
   mode: AgentModeCli;
   embeddings: boolean;
-} {
+  json: boolean;
+};
+
+type AnswerAgent = {
+  answer(query: string, opts?: AgentAnswerOpts): Promise<IknowAnswer>;
+};
+
+function parseArgs(argv: string[]): ParsedCli {
   let role: CallerRole = "employee";
   let degrade = false;
   let mode: AgentModeCli = "deterministic";
   let embeddings = false;
+  let json = false;
   const rest: string[] = [];
+
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--role") {
@@ -66,19 +83,47 @@ function parseArgs(argv: string[]): {
           `Missing value for --mode; expected one of: ${AGENT_MODES.join("|")}`,
         );
       }
-      mode = parseAgentMode(raw);
+      mode = parseAgentModeCli(raw);
     } else if (a === "--embeddings") {
       embeddings = true;
+    } else if (a === "--json") {
+      json = true;
     } else {
       rest.push(a);
     }
   }
+
+  const head = rest[0];
+  if (head === "chat") {
+    return {
+      command: "chat",
+      query: "",
+      role,
+      degrade,
+      mode,
+      embeddings,
+      json,
+    };
+  }
+  if (head === "ask") {
+    return {
+      command: "ask",
+      query: rest.slice(1).join(" ").trim() || "公司的退款政策是什么？",
+      role,
+      degrade,
+      mode,
+      embeddings,
+      json,
+    };
+  }
   return {
+    command: "oneshot",
     query: rest.join(" ").trim() || "公司的退款政策是什么？",
     role,
     degrade,
     mode,
     embeddings,
+    json,
   };
 }
 
@@ -111,97 +156,309 @@ function printCliError(err: unknown): void {
   );
 }
 
-async function main(): Promise<void> {
-  const { query, role, degrade, mode, embeddings } = parseArgs(
-    process.argv.slice(2),
-  );
+function printChatError(err: unknown): void {
+  if (isIknowError(err)) {
+    console.error(`错误 [${err.code}]: ${err.message}`);
+    return;
+  }
+  if (err instanceof Error) {
+    console.error(`错误: ${err.message}`);
+    return;
+  }
+  console.error(`错误: ${String(err)}`);
+}
 
-  // --embeddings forces API mode for this process so createIknowRuntime can
-  // build a vector index when the key named by IKNOW_EMBEDDING_API_KEY_ENV exists.
-  if (embeddings) {
+type RuntimeBundle = {
+  store: InMemoryKnowledgeStore;
+  vectorIndex: VectorIndex | undefined;
+  env: IknowEnv;
+  session: SessionContext;
+};
+
+async function prepareRuntime(opts: {
+  role: CallerRole;
+  degrade: boolean;
+  embeddings: boolean;
+}): Promise<RuntimeBundle> {
+  if (opts.embeddings) {
     process.env.IKNOW_EMBEDDING_MODE = "api";
   }
 
-  // CLI opt-in is authoritative: only true when --embeddings is passed.
   const env = loadIknowEnv();
-  if (embeddings && !env.embedding.apiKey) {
-    console.error(
-      JSON.stringify({
-        error: "embeddings_missing_api_key",
-        message:
-          "Set the env var named by IKNOW_EMBEDDING_API_KEY_ENV, or omit --embeddings.",
-        apiKeyEnv: env.embedding.apiKeyEnv,
-      }),
+  if (opts.embeddings && !env.embedding.apiKey) {
+    throw new Error(
+      `embeddings requested but env var named by IKNOW_EMBEDDING_API_KEY_ENV (${env.embedding.apiKeyEnv}) is unset; omit --embeddings or set the key.`,
     );
-    process.exitCode = 1;
-    return;
   }
 
-  // Seed store + optional vector index when enableEmbeddings and mode=api.
-  // Network embed failures fall back to keyword-only inside createIknowRuntime.
   const { store, vectorIndex, env: runtimeEnv } = await createIknowRuntime({
-    enableEmbeddings: embeddings,
+    enableEmbeddings: opts.embeddings,
     env,
   });
 
-  const agentMode =
-    mode === "llm" || runtimeEnv.agentMode === "llm" ? "llm" : "deterministic";
-
-  // Re-check after CLI --mode may override env.agentMode (createIknowRuntime already checked env).
-  assertOfflineCompatible(runtimeEnv, agentMode);
-
-  const session = {
-    caller_role: role,
-    simulate_governance_timeout: degrade,
+  const session: SessionContext = {
+    caller_role: opts.role,
+    simulate_governance_timeout: opts.degrade,
   };
 
-  if (agentMode === "llm") {
-    // M2 path: requires LLM client env; fails closed with a clear error if not configured.
-    assertToolProtocolSupported(runtimeEnv.llm.toolProtocol);
-    if (!runtimeEnv.llm.apiKey) {
-      console.error(
-        JSON.stringify({
-          error: "llm_mode_missing_api_key",
-          message:
-            "Set the env var named by IKNOW_LLM_API_KEY_ENV, or use --mode deterministic.",
-          apiKeyEnv: runtimeEnv.llm.apiKeyEnv,
-        }),
+  return { store, vectorIndex, env: runtimeEnv, session };
+}
+
+/**
+ * Build agent for an explicit mode (authoritative for /mode and --mode).
+ * Caller merges env default before first build when appropriate.
+ */
+async function buildAgent(
+  bundle: RuntimeBundle,
+  mode: AgentModeCli,
+): Promise<{ agent: AnswerAgent; mode: AgentModeCli }> {
+  assertOfflineCompatible(bundle.env, mode);
+
+  if (mode === "llm") {
+    assertToolProtocolSupported(bundle.env.llm.toolProtocol);
+    if (!bundle.env.llm.apiKey) {
+      throw new Error(
+        `LLM mode needs the env var named by IKNOW_LLM_API_KEY_ENV (${bundle.env.llm.apiKeyEnv}); use --mode deterministic or set the key.`,
       );
-      process.exitCode = 1;
-      return;
     }
     const { LlmIknowAgent } = await import("./agent-loop/llm-agent.js");
     const { OpenAiCompatibleLlmClient } = await import(
       "./agent-loop/llm-client.js"
     );
     const llm = new OpenAiCompatibleLlmClient({
-      baseUrl: runtimeEnv.llm.baseUrl,
-      apiKey: runtimeEnv.llm.apiKey,
-      model: runtimeEnv.llm.model,
-      timeoutMs: runtimeEnv.llm.timeoutMs,
-      temperature: runtimeEnv.llm.temperature,
-      maxTokens: runtimeEnv.llm.maxOutputTokens,
-      contextWindowTokens: runtimeEnv.llm.contextWindowTokens,
+      baseUrl: bundle.env.llm.baseUrl,
+      apiKey: bundle.env.llm.apiKey,
+      model: bundle.env.llm.model,
+      timeoutMs: bundle.env.llm.timeoutMs,
+      temperature: bundle.env.llm.temperature,
+      maxTokens: bundle.env.llm.maxOutputTokens,
+      contextWindowTokens: bundle.env.llm.contextWindowTokens,
     });
     const agent = new LlmIknowAgent({
-      store,
-      session,
+      store: bundle.store,
+      session: bundle.session,
       llm,
-      vectorIndex,
-      toolProtocol: runtimeEnv.llm.toolProtocol,
+      vectorIndex: bundle.vectorIndex,
+      toolProtocol: bundle.env.llm.toolProtocol,
+      contextWindowTokens: bundle.env.llm.contextWindowTokens,
     });
-    const answer = await agent.answer(query);
-    console.log(JSON.stringify(answer, null, 2));
-    return;
+    return { agent, mode: "llm" };
   }
 
   const agent = new IknowAgent({
-    store,
-    session,
-    vectorIndex,
+    store: bundle.store,
+    session: bundle.session,
+    vectorIndex: bundle.vectorIndex,
   });
-  const answer = await agent.answer(query);
-  console.log(JSON.stringify(answer, null, 2));
+  return { agent, mode: "deterministic" };
+}
+
+/** CLI default: explicit --mode llm, or env IKNOW_AGENT_MODE=llm. */
+function resolveStartupMode(
+  cliMode: AgentModeCli,
+  env: IknowEnv,
+): AgentModeCli {
+  if (cliMode === "llm" || env.agentMode === "llm") {
+    return "llm";
+  }
+  return "deterministic";
+}
+
+function printAnswer(answer: IknowAnswer, jsonMode: boolean): void {
+  if (jsonMode) {
+    console.log(formatAnswerJson(answer));
+  } else {
+    console.log(formatAnswerHuman(answer));
+  }
+}
+
+async function runOneShot(parsed: ParsedCli): Promise<void> {
+  let bundle: RuntimeBundle;
+  try {
+    bundle = await prepareRuntime({
+      role: parsed.role,
+      degrade: parsed.degrade,
+      embeddings: parsed.embeddings,
+    });
+  } catch (err) {
+    // Keep script-friendly JSON errors for one-shot.
+    if (err instanceof Error && err.message.includes("embeddings requested")) {
+      console.error(
+        JSON.stringify({
+          error: "embeddings_missing_api_key",
+          message: err.message,
+        }),
+      );
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
+
+  const startupMode = resolveStartupMode(parsed.mode, bundle.env);
+  let built: { agent: AnswerAgent; mode: AgentModeCli };
+  try {
+    built = await buildAgent(bundle, startupMode);
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("LLM mode needs")) {
+      console.error(
+        JSON.stringify({
+          error: "llm_mode_missing_api_key",
+          message: err.message,
+          apiKeyEnv: bundle.env.llm.apiKeyEnv,
+        }),
+      );
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
+
+  const answer = await built.agent.answer(parsed.query);
+  // One-shot stays JSON for scripts/CI (design §4.1).
+  console.log(formatAnswerJson(answer));
+}
+
+async function runChat(parsed: ParsedCli): Promise<void> {
+  let bundle: RuntimeBundle;
+  try {
+    bundle = await prepareRuntime({
+      role: parsed.role,
+      degrade: parsed.degrade,
+      embeddings: parsed.embeddings,
+    });
+  } catch (err) {
+    printChatError(err);
+    process.exitCode = 1;
+    return;
+  }
+
+  // Startup: honor --mode or env; later /mode is authoritative (no env re-merge).
+  let mode: AgentModeCli = resolveStartupMode(parsed.mode, bundle.env);
+  let agent: AnswerAgent;
+  try {
+    const built = await buildAgent(bundle, mode);
+    agent = built.agent;
+    mode = built.mode;
+  } catch (err) {
+    printChatError(err);
+    process.exitCode = 1;
+    return;
+  }
+
+  const state: ConversationState = createConversation(bundle.session, {
+    json_mode: parsed.json,
+  });
+
+  console.error(
+    `iknow chat  mode=${mode}  role=${state.session.caller_role}  json=${state.json_mode ? "on" : "off"}`,
+  );
+  console.error("Type /help for commands. Ctrl+D or /quit to exit.");
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: true,
+  });
+
+  const prompt = (): void => {
+    rl.setPrompt("iknow> ");
+    rl.prompt();
+  };
+
+  const handleLine = async (line: string): Promise<void> => {
+    const parsedLine = parseChatLine(line);
+
+    if (parsedLine.kind === "empty") {
+      prompt();
+      return;
+    }
+
+    if (parsedLine.kind === "slash") {
+      const effect = applySlashCommand(parsedLine.command, parsedLine.args, {
+        state,
+        mode,
+      });
+
+      switch (effect.type) {
+        case "quit":
+          rl.close();
+          return;
+        case "help":
+        case "info":
+        case "error":
+          console.log(effect.text);
+          prompt();
+          return;
+        case "reset":
+          console.log(effect.message);
+          prompt();
+          return;
+        case "mode_change": {
+          try {
+            const built = await buildAgent(bundle, effect.mode);
+            agent = built.agent;
+            mode = built.mode;
+            console.log(effect.message);
+          } catch (err) {
+            printChatError(err);
+            console.error(`(mode stays ${mode})`);
+          }
+          prompt();
+          return;
+        }
+      }
+    }
+
+    // query
+    const query = parsedLine.kind === "query" ? parsedLine.text : "";
+    if (!query) {
+      prompt();
+      return;
+    }
+
+    try {
+      const answer = await agent.answer(query, {
+        prior_chunks: state.last_priors.length
+          ? state.last_priors
+          : undefined,
+        history: state.history_finals.length
+          ? state.history_finals
+          : undefined,
+      });
+      recordTurn(state, query, answer, bundle.store);
+      printAnswer(answer, state.json_mode);
+    } catch (err) {
+      printChatError(err);
+    }
+    prompt();
+  };
+
+  // Serialize async line handlers so paste/burst input cannot interleave turns.
+  let chain: Promise<void> = Promise.resolve();
+  await new Promise<void>((resolve) => {
+    rl.on("line", (line) => {
+      chain = chain
+        .then(() => handleLine(line))
+        .catch((err) => {
+          printChatError(err);
+          prompt();
+        });
+    });
+    rl.on("close", () => {
+      void chain.finally(() => resolve());
+    });
+    prompt();
+  });
+}
+
+async function main(): Promise<void> {
+  const parsed = parseArgs(process.argv.slice(2));
+  if (parsed.command === "chat") {
+    await runChat(parsed);
+    return;
+  }
+  await runOneShot(parsed);
 }
 
 main().catch((err) => {
