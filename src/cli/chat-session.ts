@@ -218,7 +218,6 @@ async function runInteractive(
   let closed = false;
   let busy = false;
   let farewellPrinted = false;
-  let exitCode: number | undefined;
   const sayGoodbye = (): void => {
     if (farewellPrinted) {
       return;
@@ -228,14 +227,16 @@ async function runInteractive(
   };
 
   let sigintCount = 0;
-  let lastSigintAt = 0;
+  /** Coalesce same-tick dual delivery (process + readline) without timed debounce. */
+  let sigintCoalesce = false;
   const onSigint = (): void => {
-    // One physical Ctrl+C can hit both process and readline; debounce dual delivery.
-    const now = Date.now();
-    if (now - lastSigintAt < 80) {
+    if (sigintCoalesce) {
       return;
     }
-    lastSigintAt = now;
+    sigintCoalesce = true;
+    queueMicrotask(() => {
+      sigintCoalesce = false;
+    });
 
     sigintCount += 1;
     if (sigintCount === 1) {
@@ -246,12 +247,18 @@ async function runInteractive(
       }
       return;
     }
-    // Second SIGINT: exit without also printing 再见
+    // Second SIGINT: leave immediately even if a turn is mid-flight.
     farewellPrinted = true;
     writeErr("\n退出。");
     closed = true;
-    exitCode = 130;
-    rl.close();
+    process.off("SIGINT", onSigint);
+    rl.removeListener("SIGINT", onSigint);
+    try {
+      rl.close();
+    } catch {
+      // EXIT: interface may already be closed
+    }
+    process.exit(130);
   };
   // Node may deliver Ctrl+C to process and/or readline depending on platform.
   process.on("SIGINT", onSigint);
@@ -271,19 +278,20 @@ async function runInteractive(
 
   const handle = async (line: string): Promise<void> => {
     busy = true;
-    // Pause input so the next prompt cannot appear mid-turn.
-    rl.pause();
-
-    const looksLikeQuery =
-      line.trim().length > 0 && !line.trim().startsWith("/");
-    // 思考中 only when stderr is a TTY (never spam pipes / redirected logs).
-    const showThinking = looksLikeQuery && Boolean(process.stderr.isTTY);
-
-    if (showThinking) {
-      process.stderr.write("思考中…");
-    }
-
+    let showThinking = false;
     try {
+      // Pause input so the next prompt cannot appear mid-turn.
+      rl.pause();
+
+      const looksLikeQuery =
+        line.trim().length > 0 && !line.trim().startsWith("/");
+      // 思考中 only when stderr is a TTY (never spam pipes / redirected logs).
+      showThinking = looksLikeQuery && Boolean(process.stderr.isTTY);
+
+      if (showThinking) {
+        process.stderr.write("思考中…");
+      }
+
       let result: ProcessChatLineResult;
       try {
         result = await processChatLine(line, ctx);
@@ -327,6 +335,20 @@ async function runInteractive(
         prompt();
         rl.resume();
       }
+    } catch (err) {
+      // EXIT: protect chain from rejections before/around processChatLine
+      if (showThinking) {
+        clearErrLine();
+      }
+      writeErr(formatChatError(err));
+      if (!closed) {
+        try {
+          prompt();
+          rl.resume();
+        } catch {
+          // EXIT: readline may already be closed
+        }
+      }
     } finally {
       busy = false;
     }
@@ -337,16 +359,29 @@ async function runInteractive(
       if (closed) {
         return;
       }
-      chain = chain.then(() => handle(line));
+      chain = chain
+        .then(() => handle(line))
+        .catch((err) => {
+          // EXIT: last-resort so unhandled rejections never kill the process
+          writeErr(formatChatError(err));
+          busy = false;
+          if (!closed) {
+            try {
+              prompt();
+              rl.resume();
+            } catch {
+              // EXIT: readline closed
+            }
+          }
+        });
     });
     rl.on("close", () => {
+      process.off("SIGINT", onSigint);
+      rl.removeListener("SIGINT", onSigint);
+      // Normal /quit or EOF: wait for in-flight turn then farewell.
+      // Forced second Ctrl+C uses process.exit(130) and never reaches here.
       void chain.finally(() => {
-        process.off("SIGINT", onSigint);
-        rl.removeListener("SIGINT", onSigint);
         sayGoodbye();
-        if (exitCode !== undefined) {
-          process.exitCode = exitCode;
-        }
         resolve();
       });
     });

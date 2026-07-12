@@ -39,9 +39,8 @@ export function usageText(): string {
   iknow -V | --version          打印版本 / print version
 
 选项 / Options:
-  --mode deterministic|llm      Agent 模式（默认 deterministic；可被 IKNOW_AGENT_MODE 覆盖）
-                                Agent mode (default: deterministic; env may upgrade)
-  --role employee|manager|admin 调用角色（默认 employee）/ caller role (default: employee)
+  --mode deterministic|llm      Agent 模式，默认 deterministic；显式值优先于 IKNOW_AGENT_MODE / agent mode (default deterministic; explicit --mode wins over env)
+  --role employee|manager|admin 调用角色，默认 employee / caller role (default employee)
   --embeddings                  启用向量检索臂 / enable embedding vector arm
   --json                        聊天开始即用 JSON 输出 / chat starts with JSON answers
   --governance-timeout          模拟治理超时降级路径 / simulate governance timeout degrade
@@ -50,15 +49,11 @@ export function usageText(): string {
   /help  /status  /quit  /json on|off  /role <r>  /mode <m>  /reset
 
 说明 / Notes:
-  • 主入口：TTY 上无参数 → chat；管道/非 TTY 无参数 → 打印用法
-    Primary: no args on TTY → chat; no args when piped → usage
-  • 显式 --mode 优先于 IKNOW_AGENT_MODE / Explicit --mode always wins over env
-  • ask / 裸查询 空文本 → 打印用法并以退出码 1 结束（无默认 demo 问句）
-    Empty ask/query → usage + exit 1 (no default demo query)
-  • 单次 ask 始终 stdout 输出 G2 JSON；chat 默认人类可读视图
-    One-shot always prints G2 JSON on stdout; chat human view is default
-  • 管道 chat 可设 IKNOW_CHAT_QUIET=1 关闭 turn 标记（无「思考中」噪音）
-    Piped chat: IKNOW_CHAT_QUIET=1 suppresses turn markers (no thinking spam)`;
+  • TTY 无参数 → chat；管道/非 TTY 无参数 → 用法 / no args: TTY→chat, piped→usage
+  • 显式 --mode 优先于 IKNOW_AGENT_MODE / explicit --mode wins over env
+  • 空 ask/query → 用法 + exit 1（无默认 demo 问句）/ empty ask → usage + exit 1
+  • ask 输出 G2 JSON；chat 默认人类可读 / ask→JSON, chat→human view
+  • 管道可设 IKNOW_CHAT_QUIET=1 关闭 turn 标记 / pipe: IKNOW_CHAT_QUIET=1 quiet markers`;
 }
 
 /** Print usage to stdout. */
