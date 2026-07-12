@@ -1,0 +1,6 @@
+id: "008"
+description: Vite React web package builds to web/dist (SPA production static)
+test_command: npm run build --prefix web
+success: "built"
+budget:
+  max_turns: 1

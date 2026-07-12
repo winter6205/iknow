@@ -1,7 +1,7 @@
 # iknow 功能现状与展望
 
 > 维护说明：描述产品/工程事实，不替代协议真值（`docs/iknow-spec/`）。  
-> 最后对齐代码线：session HTTP API + web UI（`src/session-api/` + `web/`）。  
+> 最后对齐代码线：session HTTP API + Vite React SPA（`src/session-api/` + `web/` → `web/dist`）。  
 > 协议真值链仍为：`HANDOFF` → `ADR-v0.1` → `tool-schema` → `mapping` → eval。
 
 ---
@@ -53,7 +53,8 @@
 | Slash | `/help` `/quit` `/json` `/role` `/mode` `/reset` | `interaction/slash.ts` |
 | 单次脚本 | `ask "…"` / 裸 query → JSON（CI 兼容） | `cli.ts` |
 | **Session HTTP API** | 进程内多会话：create / message / command / reset；G2 每轮 | `src/session-api/` |
-| **Web 交互页** | 静态 chat UI：空/载入/错/数据四态；侧栏 G2；预留 SSE | `web/` + `iknow serve` |
+| **Web 产品 UI** | Vite + React + TS SPA（`web/`）；build → `web/dist`；`iknow serve` 优先托管 dist（无 dist 时回退 `web/`）；空/载入/错/数据四态 + 侧栏 G2 投影；SSE 路径仍 **501** | `web/` + `iknow serve` |
+| FE 栈决策 | React 选型、组件树、forest cockpit 令牌、非目标 | `docs/design/frontend-stack-upgrade-v1.md` |
 | API 契约 | v0 路由与预留路径 | `docs/design/session-http-api-v0.md` |
 
 ### 1.5 评测与质量门禁
@@ -88,8 +89,8 @@
 | **向量持久化** | 索引进程内；磁盘 cache 路径配置有、生产级缓存/失效策略未齐 |
 | **后台 compile 队列** | 设计允许异步作业；产品级 job/notify 未做 |
 | **鉴权生产化** | 仅 session 角色枚举与敏感拦截默认；完整 ACL/审批流待 ADR 确认后实现 |
-| **Web 生产化** | 有 v0 静态页 + 同进程 API；无独立 SPA 构建链 / 无鉴权 |
-| **流式输出** | SSE 路径预留 `…/events` → 501；无 token streaming |
+| **Web 生产化** | SPA 构建链已定（Vite React → `web/dist` + 同进程 API）；无鉴权 / 无多租户 / 无 CDN 发布流水线 |
+| **流式输出** | SSE 路径预留 `…/events` → **501**；无 token streaming |
 | **多轮 trajectory eval** | 评测仍是单次 input；无 N 轮会话样本与评分器 |
 
 ### 2.2 交互与 Agent 体验
@@ -142,7 +143,7 @@
 2. **向量存储升级**（pgvector 等）与索引增量更新。  
 3. **LLM 护栏硬化**（强制首跳 retrieve、冲突必 governance 等 host 规则可配置）。  
 4. **多轮 eval**（注入 priors 的 N 步样本 + trajectory 扩展）。  
-5. **HTTP/Session API** 或轻量 Web 控制台（仍投影 G2，不另起协议）。
+5. **Session API 增强**（鉴权、SSE、会话持久化）— Web 已走 Vite React SPA，不重开协议。
 
 ### 3.3 远期
 
@@ -168,7 +169,7 @@
 | 可运行 4-tool 引擎 | **有** |
 | 向量 + LLM 接线 | **有**（依赖外部 API） |
 | CLI 多轮交互 | **有**（进程内会话） |
-| HTTP 会话 + Web UI | **有**（v0 内存会话；SSE/鉴权未做） |
+| HTTP 会话 + Web SPA | **有**（v0 内存会话 + Vite React `web/`→`dist`；SSE/鉴权未做） |
 | 生产数据 / 持久化 / 上线 | **无或极弱** |
 
 ---
@@ -182,8 +183,16 @@ npx tsx src/cli.ts chat --mode deterministic
 npx tsx src/cli.ts chat --embeddings
 npx tsx src/cli.ts chat --mode llm
 npx tsx src/cli.ts ask "单次问题"
-npx tsx src/cli.ts serve --port 8787   # Web UI + /api/v1/*
+
+# Session API + static host (prefers web/dist after SPA build)
+npx tsx src/cli.ts serve --port 8787
 # or: npm run serve
+
+# Frontend SPA (package under web/)
+npm install --prefix web
+npm run dev --prefix web      # Vite :5173, proxy /api → :8787 (run serve in another terminal)
+npm run build --prefix web    # → web/dist  (root alias if present: npm run web:build)
+# root alias if present: npm run web:dev
 ```
 
 配置：`.env.local` + 环境变量中的 API Key（见 `docs/integration-materials.env.example`）。
@@ -196,6 +205,7 @@ npx tsx src/cli.ts serve --port 8787   # Web UI + /api/v1/*
 |------|------|
 | `docs/iknow-spec/HANDOFF.md` | 阶段与开放项 |
 | `docs/design/interaction-surface-v0.md` | 交互设计与 I 阶段 |
+| `docs/design/frontend-stack-upgrade-v1.md` | FE 栈决策（Vite React TS） |
 | `docs/architecture.md` | 运行时能力切分 |
 | `docs/CONTEXT.md` | 领域术语 |
 | `docs/CHANGELOG.md` | 版本变更 |

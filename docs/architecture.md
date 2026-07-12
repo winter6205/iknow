@@ -15,8 +15,8 @@ iknow is a **standalone** enterprise knowledge-base agent. Runtime code lives at
 | Shared | `src/shared/` | Schema, errors, hashing helpers |
 | CLI / entry | `src/cli.ts`, `src/index.ts` | Dev/ask + `chat` REPL + `serve` entrypoints |
 | Interaction host | `src/interaction/` | Conversation bag, human/json format, slash parse (no tool schema change) |
-| Session HTTP | `src/session-api/` | Multi-conversation hub + node:http API + static web root |
-| Web UI | `web/` | Same-origin chat page (G2 side panel); no new FE framework |
+| Session HTTP | `src/session-api/` | Multi-conversation hub + node:http API; static root prefers `web/dist` |
+| Web UI | `web/` | Vite + React + TypeScript SPA (product console); build → `web/dist`; G2 side panel projection; see `docs/design/frontend-stack-upgrade-v1.md` |
 
 ```text
 user query
@@ -49,12 +49,14 @@ user query
 
 Multi-turn chat / REPL is a **host-layer** concern (not a 5th tool). See:
 
-- **`docs/design/interaction-surface-v0.md`** — design v0; **I1–I3 + HTTP/web host**
+- **`docs/design/interaction-surface-v0.md`** — design v0; **I1–I3 + HTTP/web host** (I3.5 SPA)
 - **`docs/design/session-http-api-v0.md`** — Session REST contract
+- **`docs/design/frontend-stack-upgrade-v1.md`** — Vite React TS stack decision + component tree
 - **`src/interaction/`** — `ConversationState`, priors/history, format, slash commands
 - **`src/session-api/`** — HTTP host over the same conversation bag
 - **`npx tsx src/cli.ts chat`** — REPL; one-shot `ask` / bare query stay JSON for scripts
-- **`npx tsx src/cli.ts serve`** — Web UI + `/api/v1/*`
+- **`npx tsx src/cli.ts serve`** / **`npm run serve`** — Session API + SPA static (`web/dist`)
+- **`npm run dev --prefix web`** / **`npm run build --prefix web`** — Vite SPA dev / prod build
 
 Cross-turn bridge = protocol `prior_chunks` (+ LLM-only short `history`). No fifth tool.
 

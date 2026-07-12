@@ -2,9 +2,18 @@
 
 ## 0.1.0 (unreleased)
 
+### Frontend stack upgrade (Vite + React + TS)
+
+- Product UI package under **`web/`**: Vite 6 + React 19 + TypeScript SPA (`iknow-web`)
+- Build output **`web/dist`**; `iknow serve` prefers dist (fallback to `web/` when absent)
+- Design language: forest cockpit tokens (`web/src/styles/tokens.css`); API client mirrors Session API DTOs
+- Dev: `npm run dev --prefix web` (proxy `/api` → `:8787`); prod: `npm run build --prefix web` then `npm run serve`
+- Decision record: `docs/design/frontend-stack-upgrade-v1.md` · plan: `plans/frontend-stack-upgrade.md`
+- **Unchanged / not claimed:** Session API contract; SSE still **501**; no production auth
+
 ### Session HTTP API + Web UI (host interaction)
 
-- **`iknow serve`**: in-process Session API (`src/session-api/`) + static `web/` chat page
+- **`iknow serve`**: in-process Session API (`src/session-api/`) + SPA static host (`web/dist` preferred)
 - Routes: `GET /api/v1/health`, `POST/GET /api/v1/sessions`, `…/messages`, `…/commands`, `…/reset`
 - Every message returns full **G2** `IknowAnswer`; human projection optional
 - Reserved: `GET …/sessions/:id/events` → **501** (SSE future)

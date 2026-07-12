@@ -1,9 +1,10 @@
 # iknow 交互方案设计 v0（对齐原协议）
 
-> 状态：**I1–I3 + HTTP/web host**（`iknow chat` + `iknow serve` + Session API + `web/`）  
+> 状态：**I1–I3 + HTTP/web host**（`iknow chat` + `iknow serve` + Session API + Vite React SPA `web/`）  
 > 范围：交互与会话表面，**不改** 4 tool 协议拓扑  
 > 依据：`HANDOFF` → ADR-v0.1 → tool-schema → architecture → analysis-c-auth-async  
-> HTTP 契约：`docs/design/session-http-api-v0.md`
+> HTTP 契约：`docs/design/session-http-api-v0.md`  
+> FE 栈：`docs/design/frontend-stack-upgrade-v1.md`（I3.5 Web = SPA，非零依赖静态壳）
 
 ---
 
@@ -218,7 +219,7 @@ answer(
 | **I1 REPL 壳** | `chat` 循环 + human 渲染 + 单进程复用 store | 多轮输入；每轮仍有 G2 JSON 可选 |
 | **I2 会话袋** | `ConversationState` + priors 注入 `answer` | 续问可带 prior；单测可注入 priors |
 | **I3 LLM 历史** | `history_finals` 短窗 + 截断 | 指代类续问在有 key 时可用 |
-| **I3.5 Session HTTP + Web** | `serve` + `/api/v1/*` + `web/` chat | create+message 返回 G2；UI 展示 snapshot |
+| **I3.5 Session HTTP + Web** | `serve` + `/api/v1/*` + **Vite React TS SPA** (`web/` → `web/dist`) | create+message 返回 G2；UI 展示 snapshot；SSE 仍 **501**（见 frontend-stack-upgrade-v1） |
 | **I4 真机交互冒烟** | 主线程/人工清单：三模式各 ≥3 轮 | 有命令与结果记录（无密钥） |
 | **I5 多轮 eval（可选）** | N 次单轮 + 注入 priors 的样本 | 不阻塞 I1–I4 |
 
@@ -256,8 +257,9 @@ answer(
 - [x] I1 REPL 壳：`npx tsx src/cli.ts chat` + human 默认 / `--json` / slash  
 - [x] I2 会话袋：`ConversationState` + `prior_chunks` 注入 `answer`  
 - [x] I3 LLM 历史：`history_finals` 短窗（LlmIknowAgent）  
+- [x] I3.5 Session HTTP + Web：**Vite React SPA** 栈（`web/`；build → `web/dist`；`serve` 托管）；SSE 未实现（501）  
 - [ ] I4 真机交互冒烟（人工）  
 - [ ] I5 多轮 eval（可选）  
-- [ ] **未** 声称交互主路径已齐（仍缺 I4 冒烟）  
+- [ ] **未** 声称交互主路径已齐（仍缺 I4 冒烟；流式/鉴权未做）  
 
-**成功 =** I1–I3 可本地跑通；I4 真机清单另开。
+**成功 =** I1–I3 可本地跑通；I3.5 SPA 构建与 G2 投影可验收；I4 真机清单另开。
