@@ -23,6 +23,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test tests/**/*.test.ts",
     "dev": "tsx src/cli.ts",
+    "serve": "tsx src/cli.ts serve",
     "eval": "tsx src/eval/cli.ts"
   },
   "devDependencies": {

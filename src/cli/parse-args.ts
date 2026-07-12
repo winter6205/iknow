@@ -12,7 +12,7 @@ import {
   type AgentModeCli,
 } from "../interaction/slash.js";
 
-export type CliCommand = "chat" | "ask" | "oneshot" | "help";
+export type CliCommand = "chat" | "ask" | "oneshot" | "help" | "serve";
 
 export type ParsedCli = {
   command: CliCommand;
@@ -33,6 +33,14 @@ export type ParsedCli = {
    * True when argv was `-V` / `--version` (host prints version only).
    */
   versionOnly: boolean;
+  /**
+   * HTTP listen port for `serve` (default 8787 when command is serve).
+   */
+  port: number;
+  /**
+   * HTTP bind host for `serve` (default 127.0.0.1).
+   */
+  host: string;
 };
 
 export type ParseArgsOptions = {
@@ -59,6 +67,8 @@ export function parseArgs(
   let modeExplicit = false;
   let embeddings = false;
   let json = false;
+  let port = 8787;
+  let host = "127.0.0.1";
   const rest: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
@@ -71,6 +81,8 @@ export function parseArgs(
         modeExplicit,
         embeddings,
         json,
+        port,
+        host,
         query: "",
         missingQuery: false,
         versionOnly: false,
@@ -99,6 +111,22 @@ export function parseArgs(
       embeddings = true;
     } else if (a === "--json") {
       json = true;
+    } else if (a === "--port") {
+      const raw = argv[++i];
+      if (raw === undefined) {
+        throw new Error("Missing value for --port");
+      }
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1 || n > 65535) {
+        throw new Error(`Invalid --port: ${raw}`);
+      }
+      port = n;
+    } else if (a === "--host") {
+      const raw = argv[++i];
+      if (raw === undefined) {
+        throw new Error("Missing value for --host");
+      }
+      host = raw;
     } else if (a === "--version" || a === "-V") {
       return baseParsed("help", {
         role,
@@ -107,6 +135,8 @@ export function parseArgs(
         modeExplicit,
         embeddings,
         json,
+        port,
+        host,
         query: "",
         missingQuery: false,
         versionOnly: true,
@@ -123,12 +153,22 @@ export function parseArgs(
     modeExplicit,
     embeddings,
     json,
+    port,
+    host,
     versionOnly: false,
   };
   const head = rest[0];
 
   if (head === "chat") {
     return baseParsed("chat", {
+      ...flags,
+      query: "",
+      missingQuery: false,
+    });
+  }
+
+  if (head === "serve") {
+    return baseParsed("serve", {
       ...flags,
       query: "",
       missingQuery: false,
