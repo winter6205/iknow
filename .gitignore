@@ -58,4 +58,8 @@ iknow-prototype/
 
 # local archive of files removed/superseded during branch sync
 _archive/
+
+# .claude/ is personal tooling (hooks, rules, skills, settings);
+# this is a personal project, not team-shared
+.claude/
 docs/kb-assistant-guide
