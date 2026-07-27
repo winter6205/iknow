@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "codebase-memory-mcp": {
+      "command": "C:/Users/86152/AppData/Local/Programs/codebase-memory-mcp/codebase-memory-mcp.exe",
+      "args": [],
+      "disabled": false
+    },
+   "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"],
+      "disabled": false
+    }
+  }
+}

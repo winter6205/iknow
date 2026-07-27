@@ -1,11 +1,5 @@
 # Project Instructions for Claude Code
 
-本文件是本项目的团队共享项目级规范。所有会影响代码、Git、测试、提交、发布、项目记忆和工程决策的行为都必须遵守本文件。
-
-个人偏好不得写入本文件。个人偏好写入 `CLAUDE.local.md`，并确保该文件不提交到 Git。
-
----
-
 ## Coding Principles
 
 Use as default bias, not strict checklist.

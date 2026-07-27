@@ -35,7 +35,7 @@ gbrain/**
 .claude/skills/
 .claude/worktrees/
 .serena/
-.kiro/
+.kiro/agents/skills/teach
 .playwright-mcp/
 code-reports/
 harness-lab/
