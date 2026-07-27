@@ -35,7 +35,8 @@ gbrain/**
 .claude/skills/
 .claude/worktrees/
 .serena/
-.kiro/agents/skills/teach
+# .kiro/ is mostly shared, but teach is personal
+.kiro/agents/skills/teachagents/skills/teach
 .playwright-mcp/
 code-reports/
 harness-lab/
