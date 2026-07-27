@@ -12,7 +12,7 @@ iknow is a **rewrite-level** product at the **iknow repository root** (package /
 | `docs/iknow-spec/` | Protocol + eval design truth | tracked; `docs/reference/` read-only |
 | `gbrain/` | Obsolete nested clone (if present) | gitignored; do not edit; delete when convenient |
 
-**Git policy (project `CLAUDE.md` / `.claude/rules/git.md`):**
+**Git policy (project `CLAUDE.md`):**
 
 - **No push** unless the user explicitly authorizes it.
 - No force push / tag / release / deploy without explicit authorization.

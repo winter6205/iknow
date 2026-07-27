@@ -74,14 +74,6 @@ npm run eval      # 32-sample suite → docs/iknow-spec/docs/eval/results/ (giti
 
 硬门禁目标: `hard_pass_rate = 1.0`；Sprint-1 软目标: `mean_trajectory_score ≥ 0.6`。
 
-**模板 scaffold eval**（仓库自带）:
-
-- @.evals/README.md — eval framework 怎么用
-- @.evals/run.sh — bash runner
-- @.evals/tasks/*.yaml — task definitions
-
-跑 template baseline: `bash .evals/run.sh`
-
 ### Runtime map (iknow)
 
 | 路径 | 角色 |
@@ -106,16 +98,16 @@ npm run eval      # 32-sample suite → docs/iknow-spec/docs/eval/results/ (giti
 **9router key**: 环境变量名 `NINE_ROUTER_API_KEY`；`models` 200 ≠ chat/embeddings 必通；探针 `scripts/i4-probe-nine-endpoints.ts`。  
 **I4**: 已归档三模式 + HTTP 冒烟；I5 多轮 eval / 会话持久化仍开。  
 **下阶段焦点**: 多轮质量、消息模型、真实语料 — 不重开 4 tool 协议。  
-**Git**: 无用户明确 `commit`/`push` 授权则不执行。
+**Git**: 无用户明确 `push` 授权则不执行。
 
 ### Domain docs (auto-load on session start)
 
-- @docs/CONTEXT.md — 项目领域语言 + Flagged ambiguities
-- @docs/STATUS.md — 功能现状与展望
-- @docs/architecture.md — 独立 runtime 能力切分
-- @docs/design/interaction-surface-v0.md — 交互方案
-- @docs/iknow-spec/HANDOFF.md — 协议/阶段真值（优先于过时分支叙述）
-- @docs/handoff/<latest>.md — 最近 session 交接
-- @docs/CHANGELOG.md — 版本变更记录（根目录 `CHANGELOG.md` 为真值）
-- @docs/integration-materials.env.example — LLM/向量接入材料占位（只写环境变量名）
+- docs/CONTEXT.md — 项目领域语言 + Flagged ambiguities
+- docs/STATUS.md — 功能现状与展望
+- docs/architecture.md — 独立 runtime 能力切分
+- docs/design/interaction-surface-v0.md — 交互方案
+- docs/iknow-spec/HANDOFF.md — 协议/阶段真值（优先于过时分支叙述）
+- docs/handoff/<latest>.md — 最近 session 交接
+- docs/CHANGELOG.md — 版本变更记录（根目录 `CHANGELOG.md` 为真值）
+- docs/integration-materials.env.example — LLM/向量接入材料占位（只写环境变量名）
 

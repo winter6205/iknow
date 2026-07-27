@@ -1,6 +1,6 @@
 # Architecture — iknow (standalone)
 
-iknow is a **standalone** enterprise knowledge-base agent. Runtime code lives at the repository root under `src/`. It is **not** a nested gbrain workspace and has **no** runtime dependency on gbrain.
+iknow is an independently packaged enterprise knowledge-base agent. Runtime code lives at the repository root under `src/`. It does **not** load the external gbrain package or the read-only `_upstream_gbrain/` checkout at runtime; its architecture and capability design are adapted from gbrain and maintained as iknow-owned code.
 
 ## Capability modules
 
@@ -38,11 +38,11 @@ user query
 | `docs/iknow-spec/docs/protocol/ADR-v0.1-assumptions-p3.md` | Open P3 assumptions (pending ratification) |
 | `_upstream_gbrain/` | **Reference only** — gitignored snapshot of upstream gbrain |
 
-## gbrain is reference-only, not a dependency
+## The upstream checkout is reference-only, not a runtime dependency
 
 - `_upstream_gbrain/` (and obsolete `gbrain/`) are **gitignored** and **READ-ONLY**.
-- Application code must **not** import, symlink, or package-depend on those trees.
-- Capability ideas may be **ported** into `src/*`; runtime behavior is entirely under the `iknow` package.
+- Application code must **not** import, symlink, dynamically load, execute, or package-depend on those trees.
+- Reviewed source, architecture, and capability ideas may be adapted into `src/*`; once adapted, that implementation is maintained as iknow-owned runtime code.
 - See `docs/UPSTREAM_BASELINE.md` for baseline pin and policy.
 
 ## Interaction design (product surface)

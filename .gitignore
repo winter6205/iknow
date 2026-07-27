@@ -33,4 +33,29 @@ gbrain/**
 
 # personal / local tooling (not team-shared)
 .claude/skills/
+.claude/worktrees/
 .serena/
+.kiro/
+.playwright-mcp/
+code-reports/
+harness-lab/
+academy/
+ocr-reports/
+
+# local research dumps and scratch HTML/MD (third-party, not iknow)
+docs/deep_research/
+docs/1.html
+docs/2.html
+docs/20260714-2-gbrain-secondary-dev-guide.md
+
+# session handoff is personal (between sessions of the same author),
+# not team content
+docs/handoff/
+
+# local Next.js prototype (early-stage, not team-shared; built artifacts
+# also covered by node_modules/ etc. above)
+iknow-prototype/
+
+# local archive of files removed/superseded during branch sync
+_archive/
+docs/kb-assistant-guide

@@ -56,6 +56,7 @@
 | **Web 产品 UI** | Vite + React + TS SPA（`web/`）；build → `web/dist`；`iknow serve` 优先托管 dist（无 dist 时回退 `web/`）；空/载入/错/数据四态 + 侧栏 G2 投影；SSE 路径仍 **501** | `web/` + `iknow serve` |
 | FE 栈决策 | React 选型、组件树、forest cockpit 令牌、非目标 | `docs/design/frontend-stack-upgrade-v1.md` |
 | API 契约 | v0 路由与预留路径 | `docs/design/session-http-api-v0.md` |
+| **Web MVP 原型（独立）** | Next.js 15 + React 19 + Tailwind/shadcn + Zustand/TanStack；亮色非 AI 化；**已接真实 Session HTTP API**（mock 已移除）；G2 机器面板（治理/snapshot/工具轨迹/引用）；角色·模式 → `/commands`；6 条 E2E 对真实 `iknow serve` 全绿；UI 栈 A/B 决策（提案 A，待批准） | `iknow-prototype/` + `docs/design/prototype-cli-integration-and-ui-stack-decision-v0.md` |
 
 ### 1.5 评测与质量门禁
 
@@ -135,7 +136,9 @@
 3. **会话小增强**  
    - 可选会话导出/导入 JSON；澄清轮最小状态。  
 4. **观测最小集**  
-   - 结构化日志：conversation_id、turn、hops、tool 耗时、是否 embedding/llm。
+   - 结构化日志：conversation_id、turn、hops、tool 耗时、是否 embedding/llm。  
+5. **Web MVP 原型接入 CLI**  
+   - `iknow-prototype` 前端从 mock 切到真实 Session HTTP API；G2 信封（`tool_calls`/`governance_status`/`snapshot_id`/`source_spans`）可视化；产品 UI 栈 A/B 决策落 `docs/design/`。详见 `docs/handoff/2026-07-21-web-mvp-prototype.md`。
 
 ### 3.2 中期
 

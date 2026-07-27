@@ -1,23 +1,16 @@
 # Code Quality Rules
 
-## 最小变更原则
+## Coding Principles
 
-只修改完成任务所需的最小范围。不得顺手重构无关模块。不得在未授权情况下批量格式化整个仓库。
+Use as default bias, not strict checklist.
 
-## 保持现有风格
-
-优先遵守项目已有模式：
-
-- 文件命名
-- 目录结构
-- 错误处理方式
-- 日志风格
-- 测试风格
-- 依赖注入方式
-- API 返回格式
-- 数据校验方式
-
-如果发现项目内有多个冲突模式，先说明观察结果，再请求用户选择。
+- Principle of Least Astonishment：代码行为可预测，少意外副作用。
+- Follow Existing Conventions：沿用项目既有风格、目录、命名、接口。
+- Keep It Simple：优先最短清楚实现，不提前抽象。
+- Explicit over Implicit：意图、类型、边界、错误路径显式。
+- Single Responsibility Principle：一个函数 / 类 / 模块一个明确职责。
+- Single Source of Truth：业务概念、规则、状态、配置单一权威来源。
+- Comments Explain Why：注释只解释原因、约束、边界，不解释显而易见的代码。
 
 ## 高风险区域
 

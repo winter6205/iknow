@@ -2,6 +2,31 @@
 
 ## 0.1.0 (unreleased)
 
+### Web MVP prototype → CLI integration (iknow-prototype)
+
+- Prototype `/api/chat` **mock removed**; frontend now consumes the real **Session HTTP API** (`iknow serve`)
+- New Session API client with typed DTOs + error envelope + graceful degrade (`src/lib/iknow-api.ts`)
+- Non-streaming chat hook (v0 API returns one full **G2** `IknowAnswer` per turn): lazy session, host-side fake typewriter, abort/reset/commands (`src/hooks/use-iknow-chat.ts`); shared via `chat-provider.tsx`
+- **G2 machine panel** (`src/components/answer-meta.tsx`): governance-status badge, `snapshot_id`, tool-call trajectory, cited `source_spans`, hops, notes — replaces the demo weather card
+- Caller role (`employee|manager|admin`) + mode (`deterministic|llm`) wired to `…/commands` on the live session (`ui-store.ts`, `sidebar.tsx`)
+- Same-origin proxy `/api/v1/*` → `IKNOW_API_PROXY_TARGET` (default `127.0.0.1:8787`); or set `NEXT_PUBLIC_IKNOW_API_BASE` to call a backend directly (CORS-free static-export path)
+- Removed `ai` / `@ai-sdk/react` / `zod` deps + `serverExternalPackages` workaround (were mock-only)
+- E2E rewritten against real `iknow serve` (Playwright dual `webServer`): 6 specs green — G2 envelope (governance=conflict), snapshot, source/tool spans, role switch, new-session reset, sidebar
+- Verified: `typecheck` / `biome check` / `next build` (2 static routes) / `test:e2e` green
+- **Decision (proposed, needs ratification):** product UI stack A (prototype → Next static export, `iknow serve`-hosted) vs B (port look/components back to Vite `web/`) — recommend **A**, flags conflict with `frontend-stack-upgrade-v1`: `docs/design/prototype-cli-integration-and-ui-stack-decision-v0.md`
+
+### Web MVP prototype (iknow-prototype, standalone)
+
+- New **`iknow-prototype/`**: Next.js 15.5 + React 19 App Router MVP, TypeScript strict
+- Stack: Vercel AI SDK (`@ai-sdk/react` `useChat`, streaming + tool-call render), Tailwind 3.4 + shadcn-style `Button`, Zustand (UI state) + TanStack Query (history), Framer Motion, Lucide, react-markdown + rehype-highlight (code copy)
+- Design: light/white base, <=5-color palette, non-AI aesthetic, no emoji
+- Backend is a **key-free mock**: `MockLanguageModelV1` streams a deterministic answer + a `getWeather` tool call (`src/lib/mock-model.ts`); no real LLM/auth
+- E2E: Playwright 6 specs (empty state, streaming+copy, weather tool card, suggestions, sidebar toggle, role switch); uses installed Chrome (`channel: chrome`)
+- Verified: `typecheck` / `biome check` / `next build` / `test:e2e` all green
+- Branch `feat/web-mvp-prototype` (not pushed); commits `66208c4`→`58af68a`
+- **Unchanged / not claimed:** existing `web/` SPA, Session API contract, 4 tool protocol; prototype not yet wired to the CLI backend
+- Handoff + next task (原型接入 CLI): `docs/handoff/2026-07-21-web-mvp-prototype.md`
+
 ### I4 smoke + LLM client resilience
 
 - Full I4 interaction smoke: deterministic / embeddings / llm CLI + Session HTTP (`docs/handoff/i4-smoke/`)

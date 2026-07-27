@@ -4,7 +4,8 @@ Standalone **enterprise knowledge-base Q&A agent** (not a pure RAG pipeline).
 
 - **4 tools**: `kb_retrieve` · `kb_verify_citation` · `kb_compile` · `kb_governance`
 - **Invariants**: dual-index ranking only; verify always on original text; G2 `snapshot_id` required; `max_hops=5`
-- **Runtime**: **zero dependency on gbrain** — no package link, no path import, no symlink to `_upstream_gbrain`
+- **Runtime boundary**: iknow does not load the external gbrain package or the read-only `_upstream_gbrain/` checkout at runtime — no package link, path import, symlink, dynamic loading, or execution
+- **Heritage**: iknow is independently packaged and maintained, while its knowledge-agent architecture and capabilities are adapted from gbrain into iknow-owned `src/` code
 
 Design truth: `docs/iknow-spec/` (HANDOFF → ADR → tool-schema → mapping → eval-set).
 
@@ -148,8 +149,8 @@ If the embedding API fails, the CLI continues with keyword-only retrieve. `npm t
 
 ## Upstream reference
 
-`_upstream_gbrain/` may exist for human/algorithm study (Company Brain patterns).  
-It is **gitignored** and **must not** be imported at runtime. iknow is a rewrite, not a linked fork workspace.
+`_upstream_gbrain/` may exist as a read-only source and algorithm baseline.  
+It is **gitignored** and **must not** be imported or executed at runtime. iknow is an independently packaged and maintained adaptation of gbrain's knowledge-agent architecture; reviewed adaptations live in iknow-owned `src/` code rather than being loaded from this checkout.
 
 Open implementation assumptions (pending ratification):  
 `docs/iknow-spec/docs/protocol/ADR-v0.1-assumptions-p3.md`
