@@ -52,11 +52,11 @@ Use as default bias, not strict checklist.
 
 ## 规范变更流程
 
-本文件是项目级行为规范。修改本文件或 `.claude/rules/*.md` 前必须：
+本文件是项目级行为规范（个人项目，无团队共享规则）。修改本文件前必须：
 
 1. 说明修改原因。
 2. 说明影响范围。
-3. 检查是否与 `.claude/settings.json` / hooks / README / docs 冲突。
+3. 检查是否与 README / docs 冲突。
 4. 单独提交规范变更，不与业务代码混合。
 
 ---

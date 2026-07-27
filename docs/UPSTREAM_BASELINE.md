@@ -147,4 +147,4 @@ _upstream_gbrain/src/
 2. **All product code** is written at **iknow root** under the **iknow** name (rewrite).
 3. **Never push** without explicit user authorization (`CLAUDE.md` NEVER #1).
 4. Design truth stays under `docs/iknow-spec/`; do not edit `docs/reference/`.
-5. Follow project S1–S6 + `.claude/rules/*` and global Grok rules (`~/.grok/AGENTS.md` / `~/.grok/rules/`) — same intent: no secret leaks, no gate bypass, evidence before “done”.
+5. Follow global Grok rules (`~/.grok/AGENTS.md` / `~/.grok/rules/`) - no secret leaks, no gate bypass, evidence before "done".
