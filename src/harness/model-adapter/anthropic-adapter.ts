@@ -163,16 +163,6 @@ export interface AnthropicAdapter extends ModelAdapter {
       readonly toolName?: string;
     }>,
   ) => AnthropicContentBlock[];
-  readonly buildRequestBody: (
-    state: LoopState,
-    request: { system?: string; tools?: unknown },
-  ) => {
-    model: string;
-    max_tokens: number;
-    system?: string;
-    tools?: unknown;
-    messages: AnthropicNativeMessage[];
-  };
 }
 
 /**
@@ -240,36 +230,9 @@ export function createAnthropicAdapter(
     });
   }
 
-  function buildRequestBody(
-    state: LoopState,
-    request: { system?: string; tools?: unknown },
-  ): {
-    model: string;
-    max_tokens: number;
-    system?: string;
-    tools?: unknown;
-    messages: AnthropicNativeMessage[];
-  } {
-    const body: {
-      model: string;
-      max_tokens: number;
-      system?: string;
-      tools?: unknown;
-      messages: AnthropicNativeMessage[];
-    } = {
-      model: options.model,
-      max_tokens: options.maxTokens,
-      messages: [...state.messages],
-    };
-    if (request.system !== undefined) body.system = request.system;
-    if (request.tools !== undefined) body.tools = request.tools;
-    return body;
-  }
-
   return Object.freeze({
     step,
     encodeUserText,
     encodeToolResults,
-    buildRequestBody,
   });
 }
