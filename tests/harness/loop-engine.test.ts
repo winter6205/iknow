@@ -402,6 +402,38 @@ describe("loop engine S10: append-only immutable history", () => {
     // The assistant and user message arrays are distinct references.
     assert.notEqual(result.messages[0], result.messages[1]);
   });
+
+  it("every content block is itself frozen (deep freeze prevents prop mutation)", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel([
+      assistantResult(["hi"], [], "success"),
+    ]);
+    const result = await run("hello", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    // Each block of each message must be Object.frozen.
+    for (const m of result.messages) {
+      for (const b of m.content) {
+        assert.equal(Object.isFrozen(b), true);
+      }
+    }
+    // Strict-mode mutation attempt on block.text throws TypeError.
+    const assistantTextBlock = result.messages[1]!.content[0]! as {
+      type: "text";
+      text: string;
+    };
+    assert.throws(
+      () => {
+        (assistantTextBlock as { text: string }).text = "tampered";
+      },
+      TypeError,
+    );
+  });
 });
 
 describe("loop engine step(): real state-machine transitions", () => {
