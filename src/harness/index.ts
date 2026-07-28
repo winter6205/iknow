@@ -1,8 +1,9 @@
 /**
  * src/harness/ 公共出口 (spec Project Structure 冻)。
  *
- * T1 阶段:仅导出 namespace(无运行时代码),shape 冻结由 types 提供。
- * T12 阶段:补全 `run` / `createLoopEngine` / `createAdapter`。
+ * T12 阶段补全:`run` / `createLoopEngine` / `createAnthropicAdapter` /
+ * `createRegistry` / `createExecutor` / `createStubModel` / `createStubTool`
+ * 等 Foundation 自治运行时入口。spec Success Criteria 16 条全部 yes。
  */
 
 export {
@@ -38,3 +39,20 @@ export type {
   LoopAdapter,
   LoopEngineDeps,
 } from "./loop-engine.js";
+
+export { createRegistry } from "./tools/registry.js";
+export { createExecutor } from "./tools/executor.js";
+export { toAnthropicToolResults } from "./tools/tool-result.js";
+
+export {
+  createAnthropicAdapter,
+} from "./model-adapter/anthropic-adapter.js";
+export type {
+  AnthropicAdapter,
+  AnthropicAdapterOptions,
+} from "./model-adapter/anthropic-adapter.js";
+
+export { createStubModel } from "./stubs/stub-model.js";
+export type { StubModelFull } from "./stubs/stub-model.js";
+
+export { createStubTool } from "./stubs/stub-tool.js";
