@@ -24,10 +24,9 @@ import type {
 } from "./types.js";
 import type {
   Message as SdkMessage,
-  ContentBlock,
   ToolUseBlock,
   TextBlock,
-} from "@anthropic-ai/sdk/resources/messages/messages.js";
+} from "@anthropic-ai/sdk/resources/messages.js";
 
 export interface AnthropicAdapterOptions {
   /** 脚本化响应:每次 step 消费下一条;耗尽抛 ProtocolError(模拟断流)。 */
@@ -57,7 +56,7 @@ function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
   const texts: string[] = [];
   const toolCalls: Array<{ id: string; name: string; input: unknown }> = [];
 
-  for (const block of sdk.content as Array<Record<string, unknown>>) {
+  for (const block of sdk.content as unknown as Array<Record<string, unknown>>) {
     if (!block || typeof block !== "object" || !("type" in block)) {
       throw new ProtocolError(
         "anthropic-adapter: assistant block missing 'type'",
@@ -65,10 +64,10 @@ function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
     }
     const t = block.type;
     if (t === "text") {
-      const tb = block as TextBlock;
+      const tb = block as unknown as TextBlock;
       texts.push(typeof tb.text === "string" ? tb.text : "");
     } else if (t === "tool_use") {
-      const tb = block as ToolUseBlock;
+      const tb = block as unknown as ToolUseBlock;
       if (typeof tb.id !== "string" || tb.id.length === 0) {
         throw new ProtocolError(
           "anthropic-adapter: tool_use block missing non-empty id",
@@ -114,13 +113,13 @@ function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
     toolCalls.length === 0;
 
   const nativeContent: AnthropicContentBlock[] = (
-    sdk.content as Array<Record<string, unknown>>
+    sdk.content as unknown as Array<Record<string, unknown>>
   ).flatMap((b): AnthropicContentBlock[] => {
     if (b.type === "text") {
       return [{ type: "text", text: (b as { text: string }).text }];
     }
     if (b.type === "tool_use") {
-      const tb = b as ToolUseBlock;
+      const tb = b as unknown as ToolUseBlock;
       return [
         {
           type: "tool_use",
