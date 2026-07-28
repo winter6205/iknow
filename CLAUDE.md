@@ -16,16 +16,9 @@ Use as default bias, not strict checklist.
 
 ## 上下文读取顺序
 
-每次开始任务时按需读取：
+每次开始任务时按需读取：只读取与当前任务相关的文件。
 
-1. `README.md`
-2. `docs/architecture.md`
-3. `docs/git-workflow.md`
-4. `docs/testing.md`
-5. 当前任务相关目录下的 `CLAUDE.md`
-6. 当前任务相关代码 / 测试 / 配置文件
-
-只读取与当前任务相关的文件
+定位阶段优先 codebase-memory（`get_architecture` / `search_graph` / `get_code_snippet`），再 `Read` 取具体符号；广扫描交给 `Explore` 子代理。
 
 ---
 
@@ -62,34 +55,26 @@ Use as default bias, not strict checklist.
 **产品 trajectory（主路径）**:
 
 ```bash
-npm test          # unit + eval alignment + trajectory unit tests
-npm run eval      
+npm test          # vitest：unit + eval alignment + trajectory + harness
+npm run eval      # 32-sample trajectory suite
 ```
 
-### Runtime map (iknow)
+### Module boundaries
 
-| 路径 | 角色 |
-|------|------|
-| `src/kb-*` / `src/agent-loop` / `src/knowledge-store` | 产品实现（可独立运行） |
-| `src/interaction/` | 会话袋、slash、人读/JSON 投影（host，非 tool） |
-| `src/session-api/` | Session HTTP API + 静态托管（prefer `web/dist`） |
-| `src/cli.ts` + `src/cli/*` | **产品 CLI**：TTY chat / 管道 chat / ask oneshot / **serve** |
-| `web/` | 产品 SPA（Vite + React + TS）；`npm run web:dev` / `web:build` |
-| `src/eval/` | trajectory scorer + suite runner |
-| `docs/iknow-spec/` | 协议与评测真值 |
-| `docs/design/interaction-surface-v0.md` | 交互设计（协议对齐） |
-| `docs/design/session-http-api-v0.md` | Session HTTP 契约 |
-| `docs/handoff/i4-smoke/` | I4 真机冒烟证据（无密钥） |
-| `docs/STATUS.md` | 已实现 / 未实现 / 展望 |
-| `_upstream_gbrain/` | **只读**参考（gitignore，禁止 runtime 链接） |
+- `src/harness/` - Foundation 运行时（loop-engine / anthropic-adapter / stubs / executor / registry）。**暂不接产品流量；4 tool 协议不动**。
+- `src/interaction/` - host 层（会话袋 / slash / 人读&JSON 投影），**不是**第五个 tool。
+- `_upstream_gbrain/` - 只读参考（gitignore），禁止 runtime 链接 / import / symlink / 动态加载。
+- `src/session-api/` 静态托管 `prefer web/dist`（无 dist 时回退 `web/`）。
+- `src/cli.ts` 是产品 CLI 入口：`chat`（TTY REPL / 管道）/ `ask`（oneshot JSON）/ `serve`（HTTP + SPA）。
+
+完整路径→职责见 `docs/architecture.md` Capability modules 表（真值，SSOT）。
 
 **Agent mode**: `deterministic`（默认 / CI）或 `llm`（`--mode llm` / `IKNOW_AGENT_MODE`；显式 `--mode` 优先）。  
 **Embedding**: 可选 `--embeddings` / `IKNOW_EMBEDDING_MODE=api`（9router 等）；失败回退 overlap。  
 **交互主入口**: TTY `chat`；脚本 `ask`；浏览器 `iknow serve` + `web/dist`（开发可 `web:dev` 代理 `/api`）。  
 **LLM 客户端**: `stream: false` + `parseLlmResponseJson`（容忍 SSE trailer）。  
 **9router key**: 环境变量名 `NINE_ROUTER_API_KEY`；`models` 200 ≠ chat/embeddings 必通；探针 `scripts/i4-probe-nine-endpoints.ts`。  
-**I4**: 已归档三模式 + HTTP 冒烟；I5 多轮 eval / 会话持久化仍开。  
-**下阶段焦点**: 多轮质量、消息模型、真实语料 — 不重开 4 tool 协议。  
+**I4**: 已归档三模式 + HTTP 冒烟证据（`docs/handoff/i4-smoke/`）。  
 **Git**: 无用户明确 `push` 授权则不执行。
 
 ### Domain docs (auto-load on session start)
@@ -100,6 +85,8 @@ npm run eval
 - docs/design/interaction-surface-v0.md — 交互方案
 - docs/iknow-spec/HANDOFF.md — 协议/阶段真值（优先于过时分支叙述）
 - docs/handoff/<latest>.md — 最近 session 交接
-- docs/CHANGELOG.md — 版本变更记录（根目录 `CHANGELOG.md` 为真值）
+- specs/minimum-sequential-agent-loop.md — Foundation（`src/harness/`）权威 spec
+- plans/minimum-sequential-agent-loop.md — 对应实施计划
+- CHANGELOG.md — 版本变更记录（根目录真值）
 - docs/integration-materials.env.example — LLM/向量接入材料占位（只写环境变量名）
 

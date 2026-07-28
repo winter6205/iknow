@@ -10,9 +10,12 @@ iknow is an independently packaged enterprise knowledge-base agent. Runtime code
 | Verify | `src/kb-verify/` | Pure three-state citation support check (`source_span`) |
 | Compile | `src/kb-compile/` | Fact compile + content_hash dedup |
 | Governance | `src/kb-governance/` | Freshness, conflict, `snapshot_id` |
-| Agent loop | `src/agent-loop/` | Tool orchestration, `max_hops`, G2 envelope |
+| Agent loop | `src/agent-loop/` | Tool orchestration, `max_hops`, G2 envelope（**待退役**：016->018 路线由 `src/harness/` Foundation 取代） |
+| Harness (Foundation) | `src/harness/` | Loop Engine + Anthropic adapter + stubs + Executor + Registry；**暂不接产品流量**，4 tool 协议不动（spec: `specs/minimum-sequential-agent-loop.md`） |
+| Runtime / tools / config | `src/runtime/`, `src/tools/`, `src/config/` | 运行时装配 / 工具注册 / `.env`+`process.env` 加载 |
 | Knowledge store | `src/knowledge-store/` | In-memory KB abstraction (replaceable later) |
 | Shared | `src/shared/` | Schema, errors, hashing helpers |
+| Eval | `src/eval/` | Trajectory scorer + suite runner（`npm run eval`） |
 | CLI / entry | `src/cli.ts`, `src/index.ts` | Dev/ask + `chat` REPL + `serve` entrypoints |
 | Interaction host | `src/interaction/` | Conversation bag, human/json format, slash parse (no tool schema change) |
 | Session HTTP | `src/session-api/` | Multi-conversation hub + node:http API; static root prefers `web/dist` |
