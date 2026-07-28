@@ -4,6 +4,8 @@
  * 边界:
  *   - 接收 014 合法有序 tool-call 投影(身份 + 工具名 + 原始 input);
  *   - 串行执行(无并行、无短路、无自动重试);
+ *   - 严格校验走 Registry 暴露的已编译 validator(`registry.getValidator`),
+ *     与构造期同源 schema,绝不二次编译;
  *   - 严格校验失败 / 工具不存在 / 工具运行时异常 三类失败统一形成结构化
  *     ToolExecutionResult,而非抛出(以保证 Assistant 不污染权威历史);
  *   - 工具返回值规范化为 model-facing payload(允许字符串或 JSON-compatible
@@ -11,20 +13,15 @@
  *   - Executor 不读取 / 不构造供应商原生字段,Model Adapter 负责编码。
  */
 
-import Ajv from "ajv";
 import type {
   AnthropicContentBlock,
 } from "../model-adapter/types.js";
-import { type RegistryImpl } from "./registry.js";
+import type { RegistryImpl } from "./registry.js";
 import type {
   Executor,
   ToolCall,
   ToolExecutionResult,
 } from "./types.js";
-
-function makeAjvStrict(): Ajv.default {
-  return new Ajv.default({ strict: true, allErrors: true });
-}
 
 function safeContent(payload: unknown): AnthropicContentBlock[] {
   if (typeof payload === "string") {
@@ -50,12 +47,11 @@ function isJsonCompatible(v: unknown): boolean {
 }
 
 /**
- * 构造 Executor。Executor 持有 Registry + 一个 ajv 实例(用于严格校验)。
- * Registry 不可变,Executor 也不持有任何可变状态。
+ * 构造 Executor。Executor 持有 Registry,通过 `registry.getValidator` 复用
+ * 构造期已编译的 ajv ValidateFunction(015 同源 schema 强制);Executor 本体
+ * 不再创建任何 ajv 实例,Registry 不可变,Executor 也不持有任何可变状态。
  */
 export function createExecutor(registry: RegistryImpl): Executor {
-  const ajv = makeAjvStrict();
-
   async function runOne(call: ToolCall): Promise<ToolExecutionResult> {
     const def = registry.get(call.name);
     if (!def) {
@@ -65,7 +61,15 @@ export function createExecutor(registry: RegistryImpl): Executor {
         toolName: call.name,
       };
     }
-    const validator = ajv.compile(def.inputSchema);
+    const validator = registry.getValidator(call.name);
+    if (!validator) {
+      // Registry 必须为其 get() 的工具暴露 validator;这是契约保证,不可达。
+      return {
+        kind: "validation_failed",
+        toolUseId: call.id,
+        message: "validator not compiled for tool",
+      };
+    }
     if (!validator(call.input)) {
       const msg = formatAjvError(validator.errors);
       return {

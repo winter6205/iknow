@@ -99,4 +99,18 @@ describe("createRegistry (S13)", () => {
       (e: unknown) => e instanceof RegistryConstructionError
     );
   });
+
+  it("registry.getValidator returns compiled validator for registered tool", () => {
+    const reg = createRegistry([echo, sum]);
+    const v = reg.getValidator("echo");
+    assert.equal(typeof v, "function");
+    assert.equal(v!({ value: "hi" }), true);
+    // Strict-mode failure on bad input.
+    assert.equal(v!({ value: 42 }), false);
+  });
+
+  it("registry.getValidator returns undefined for unknown tool", () => {
+    const reg = createRegistry([echo]);
+    assert.equal(reg.getValidator("missing"), undefined);
+  });
 });
