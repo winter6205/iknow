@@ -5,6 +5,18 @@
 
 ## Language
 
+**Loop Engine**: Foundation 的状态机运行内核，驱动模型 → 工具 → 真实结果 → 下一轮模型 → 明确停止；位于 `src/harness/`，并作为 018 退役旧 loop 后的可靠运行时基础。
+_Avoid_: 与旧 `IknowAgent` / `LlmIknowAgent` 混同；将泛称 “agent loop” 当作本项目术语
+
+**append-only messages**: Foundation 的权威 Anthropic 原生会话历史，是唯一事实来源；消息只能以不可变追加（`[...prev, x]`）更新，禁止原地修改或建立第二份权威副本。
+_Avoid_: `ConversationState`（host 层多轮会话袋）；任何第二份权威历史
+
+**turnCount**: Foundation 运行时回合计数，每完成一个 assistant 回合（包括纯文本完成）加一；`maxTurns` 是在调用模型前检查的运行时上限。
+_Avoid_: `max_hops`（产品层仅计 retrieve + verify 的预算）；steps、retries
+
+**stub model / stub tool**: 用于验证 Gate A 最小顺序闭环的确定性测试替身，覆盖真实模型或工具交通之外的完成、失败与停止行为。
+_Avoid_: 声称已接入产品路径；mock agent、stub brain
+
 **Chunk**:
 A retrievable text unit from the enterprise KB, identified and returned by `kb_retrieve` with ranking metadata.
 _Avoid_: Document fragment, passage, snippet (unless speaking of UI display only)
@@ -139,6 +151,7 @@ _Avoid_: renaming the env var for “alignment”; treating `GET /v1/models` 200
 - **--mode vs env**: explicit CLI `--mode` wins over `IKNOW_AGENT_MODE`; env alone may still select llm when flag omitted
 - **9router key vs endpoint**: same `NINE_ROUTER_API_KEY` can yield `models` 200 while `chat/completions` or `embeddings` return 401; agent shell env may differ from operator interactive shell
 - **SSE trailer vs stream flag**: gateway may return `text/event-stream` trailer even when client requested non-stream; use `parseLlmResponseJson`, not only `stream: false`
+- **turnCount vs max_hops**: `turnCount`（Foundation）统计每个已完成的 assistant 回合；`max_hops`（产品 / eval）只统计 retrieve + verify hop（默认 5）；两者属于不同层次，不得混同。
 - **next phase focus**: multi-turn quality / message persistence / real KB data — not reopening the 4-tool protocol; I4 smoke archived
 
 ---
