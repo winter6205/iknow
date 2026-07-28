@@ -164,3 +164,93 @@ describe("loop engine S3: multi-tool-call serial", () => {
     assert.deepEqual(toolResultIds, ["a", "b", "c"]);
   });
 });
+
+describe("loop engine S4: tool failure surfaces in history", () => {
+  it("failed tool call enters as is_error tool_result and model can recover", async () => {
+    const strict = createStubTool({
+      name: "strict",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { n: { type: "integer" } },
+        required: ["n"],
+      },
+      next: () => ({ ok: true }),
+    });
+    const reg = createRegistry([strict]);
+    const exec = createExecutor(reg);
+    const model = createStubModel([
+      assistantResult(
+        [],
+        [{ id: "f1", name: "strict", input: { n: "not-an-int" } }],
+      ),
+      assistantResult(["fixed"], [], "success"),
+    ]);
+    const result = await run("go", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "completed");
+    const trBlock = result.messages[2]!.content[0]!;
+    assert.equal(trBlock.type, "tool_result");
+    const tr = trBlock as { type: "tool_result"; is_error?: boolean; tool_use_id: string };
+    assert.equal(tr.is_error, true);
+    assert.equal(tr.tool_use_id, "f1");
+    assert.equal(result.finalText, "fixed");
+  });
+});
+
+describe("loop engine S5: same-turn partial failure does not short-circuit", () => {
+  it("3 calls, 2nd fails, 3rd still runs; 3 results all enter history", async () => {
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const strict = createStubTool({
+      name: "strict",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { n: { type: "integer" } },
+        required: ["n"],
+      },
+      next: () => ({ ok: true }),
+    });
+    const reg = createRegistry([echo, strict]);
+    const exec = createExecutor(reg);
+    const model = createStubModel([
+      assistantResult(
+        [],
+        [
+          { id: "a", name: "echo", input: { value: "1" } },
+          { id: "b", name: "strict", input: { n: "bad" } },
+          { id: "c", name: "echo", input: { value: "3" } },
+        ],
+      ),
+      assistantResult(["done"], [], "success"),
+    ]);
+    const result = await run("go", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "completed");
+    const blocks = result.messages[2]!.content;
+    assert.equal(blocks.length, 3);
+    const r0 = blocks[0] as { type: "tool_result"; is_error?: boolean };
+    const r1 = blocks[1] as { type: "tool_result"; is_error?: boolean };
+    const r2 = blocks[2] as { type: "tool_result"; is_error?: boolean };
+    assert.equal(r0.is_error, undefined);
+    assert.equal(r1.is_error, true);
+    assert.equal(r2.is_error, undefined);
+  });
+});
