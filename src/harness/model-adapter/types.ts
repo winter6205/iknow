@@ -94,6 +94,6 @@ export interface ModelAdapter {
   /** 014 原子校验 + 投影:返回 AssistantTurnResult 或抛 ProtocolError。 */
   readonly step: (
     state: LoopState,
-    request: { system?: string; tools?: unknown }
+    request: { tools?: unknown }
   ) => Promise<AssistantTurnResult>;
 }

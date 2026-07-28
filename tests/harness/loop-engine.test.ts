@@ -355,7 +355,7 @@ describe("loop engine S9: protocol error turn", () => {
         undefined as never,
       step: async (
         _state: LoopState,
-        _req: { system?: string; tools?: unknown },
+        _req: { tools?: unknown },
       ): Promise<AssistantTurnResult> => {
         throw new ProtocolError("synthetic protocol failure on first step");
       },

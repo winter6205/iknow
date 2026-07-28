@@ -175,7 +175,7 @@ export function createAnthropicAdapter(
 
   async function step(
     _state: LoopState,
-    _request: { system?: string; tools?: unknown },
+    _request: { tools?: unknown },
   ): Promise<AssistantTurnResult> {
     // Stream-interrupted fixture:若 streamEvents 提供且 streamInterrupt=true,
     // 模拟中途断流,抛 ProtocolError,整回合不提交。

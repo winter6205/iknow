@@ -38,7 +38,7 @@ import type { Executor, Registry, ToolExecutionResult } from "./tools/types.js";
 export interface LoopAdapter {
   readonly step: (
     state: LoopState,
-    request: { system?: string; tools?: unknown },
+    request: { tools?: unknown },
   ) => Promise<AssistantTurnResult>;
   readonly encodeUserText: (userText: string) => AnthropicNativeMessage;
   readonly encodeToolResults: (

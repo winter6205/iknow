@@ -34,7 +34,7 @@ export function createStubModel(
   return Object.freeze({
     async step(
       _state: LoopState,
-      _request: { system?: string; tools?: unknown },
+      _request: { tools?: unknown },
     ): Promise<AssistantTurnResult> {
       const next = queue.shift();
       if (!next) {
