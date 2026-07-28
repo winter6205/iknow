@@ -2,7 +2,9 @@
  * Anthropic Model Adapter (014 拥有;spec Code Style 区钉死接口形状)。
  *
  * 边界:
- *   - 完整拥有 Anthropic Messages 协议的请求组装 + 响应解释 + 工具结果编码;
+ *   - 完整拥有 Anthropic Messages 协议的响应解释 + 工具结果编码;
+ *   - 请求组装由 Loop Engine 负责(Adapter 只消费 { tools?: unknown }
+ *     决定是否声明工具);Adapter 不构造外发请求体;
  *   - 把原生 assistant 响应原子校验 + 投影为 AssistantTurnResult;
  *   - 任何 assistant 回合任一 block 存在协议结构错误时抛 ProtocolError,
  *     整回合不进入权威历史,不执行其中工具调用(014 冻);
