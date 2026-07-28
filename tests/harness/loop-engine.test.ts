@@ -347,3 +347,64 @@ describe("loop engine S9: protocol error turn", () => {
     );
   });
 });
+
+describe("loop engine S10: append-only immutable history", () => {
+  it("messages array references never mutated in place; each step returns a new array", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel([
+      assistantResult(["hi"], [], "success"),
+    ]);
+    const result = await run("hello", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    // Object.freeze at every level -> cannot mutate; run produced a frozen tree.
+    assert.equal(Object.isFrozen(result.messages), true);
+    for (const m of result.messages) {
+      assert.equal(Object.isFrozen(m), true);
+      assert.equal(Object.isFrozen(m.content), true);
+    }
+    // The assistant and user message arrays are distinct references.
+    assert.notEqual(result.messages[0], result.messages[1]);
+  });
+});
+
+describe("loop engine S11: cross-run isolation", () => {
+  it("two consecutive run() calls do not leak messages between each other", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    // Two independent stub models so each run gets its own scripted response.
+    const model1 = createStubModel([assistantResult(["first"], [], "success")]);
+    const model2 = createStubModel([assistantResult(["second"], [], "success")]);
+    const r1 = await run("one", {
+      adapter: model1,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    const r2 = await run("two", {
+      adapter: model2,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(r1.finalText, "first");
+    assert.equal(r2.finalText, "second");
+    assert.equal(r1.messages.length, 2);
+    assert.equal(r2.messages.length, 2);
+    // The user text for r2 should be 'two', not 'one'.
+    assert.equal(
+      (r1.messages[0]!.content[0] as { type: "text"; text: string }).text,
+      "one",
+    );
+    assert.equal(
+      (r2.messages[0]!.content[0] as { type: "text"; text: string }).text,
+      "two",
+    );
+  });
+});

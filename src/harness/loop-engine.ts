@@ -45,12 +45,19 @@ export interface LoopEngineDeps {
   readonly maxTurns: number;
 }
 
+function freezeMessage(msg: AnthropicNativeMessage): AnthropicNativeMessage {
+  return Object.freeze({
+    role: msg.role,
+    content: Object.freeze([...msg.content]),
+  });
+}
+
 function appendMessage(
   state: LoopState,
   msg: AnthropicNativeMessage,
 ): LoopState {
   return {
-    messages: Object.freeze([...state.messages, msg]),
+    messages: Object.freeze([...state.messages, freezeMessage(msg)]),
     turnCount: state.turnCount,
   };
 }
@@ -98,7 +105,7 @@ export async function run(
 ): Promise<RunResult> {
   const adapter = deps.adapter;
   let state: LoopState = {
-    messages: Object.freeze([adapter.encodeUserText(userText)]),
+    messages: Object.freeze([freezeMessage(adapter.encodeUserText(userText))]),
     turnCount: 0,
   };
   // Guard maxTurns (S6): check before each model call.
@@ -150,7 +157,7 @@ export async function run(
     const blocks = adapter.encodeToolResults(results);
     const toolResultMsg: AnthropicNativeMessage = {
       role: "user",
-      content: Object.freeze(blocks),
+      content: blocks,
     };
     state = appendMessage(state, toolResultMsg);
   }
