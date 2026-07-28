@@ -329,22 +329,53 @@ describe("loop engine S8: empty final response", () => {
 });
 
 describe("loop engine S9: protocol error turn", () => {
-  it("if adapter.step throws ProtocolError, run surfaces it and bad turn is not appended", async () => {
+  it("ProtocolError surfaces as stopReason=protocolError; bad turn not appended; no tools executed", async () => {
     const { ProtocolError } = await import("../../src/harness/errors.ts");
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
-    const exec = createExecutor(reg);
-    const model = createStubModel([]); // exhausted -> ProtocolError on first step
-    await assert.rejects(
-      () =>
-        run("go", {
-          adapter: model,
-          executor: exec,
-          registry: reg,
-          maxTurns: 5,
-        }),
-      (e: unknown) => e instanceof ProtocolError,
-    );
+
+    // Executor spy: counts executeAll invocations and delegates to a real
+    // executor. S9 严格要求:bad turn 不进历史,且不触发工具执行。
+    let executorCallCount = 0;
+    const realExec = createExecutor(reg);
+    const executorSpy = Object.freeze({
+      executeAll: async (
+        calls: Parameters<typeof realExec.executeAll>[0],
+      ): ReturnType<typeof realExec.executeAll> => {
+        executorCallCount++;
+        return realExec.executeAll(calls);
+      },
+    });
+
+    // Adapter that throws ProtocolError on first step.
+    const failingModel = Object.freeze({
+      encodeUserText: (t: string) => ({ role: "user", content: [{ type: "text", text: t }] }) as AnthropicNativeMessage,
+      encodeToolResults: (_rs: ReadonlyArray<unknown>): ReturnType<typeof realExec.executeAll> extends never ? never : never =>
+        // loop never reaches encode path on this model; signature only.
+        undefined as never,
+      step: async (
+        _state: LoopState,
+        _req: { system?: string; tools?: unknown },
+      ): Promise<AssistantTurnResult> => {
+        throw new ProtocolError("synthetic protocol failure on first step");
+      },
+    });
+
+    const result = await run("go", {
+      adapter: failingModel,
+      executor: executorSpy,
+      registry: reg,
+      maxTurns: 5,
+    });
+
+    assert.equal(result.stopReason, "protocolError");
+    // Bad turn is NOT in history: only the initial user message remains.
+    assert.equal(result.messages.length, 1);
+    assert.equal(result.messages[0]!.role, "user");
+    assert.equal(result.turnCount, 0);
+    assert.equal(result.finalText, null);
+    // Executor was NEVER invoked on the bad-turn path.
+    assert.equal(executorCallCount, 0);
   });
 });
 
