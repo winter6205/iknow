@@ -118,3 +118,49 @@ describe("loop engine S2: single tool call closure", () => {
     assert.equal(result.finalText, "done");
   });
 });
+
+describe("loop engine S3: multi-tool-call serial", () => {
+  it("executes N calls in order; N tool_use + N tool_result in single user msg", async () => {
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const reg = createRegistry([echo]);
+    const exec = createExecutor(reg);
+    const model = createStubModel([
+      assistantResult(
+        [],
+        [
+          { id: "a", name: "echo", input: { value: "1" } },
+          { id: "b", name: "echo", input: { value: "2" } },
+          { id: "c", name: "echo", input: { value: "3" } },
+        ],
+      ),
+      assistantResult(["done"], [], "success"),
+    ]);
+    const result = await run("go", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "completed");
+    assert.equal(result.messages.length, 4);
+    const assistantBlocks = result.messages[1]!.content;
+    const toolUseIds = assistantBlocks
+      .filter((b) => b.type === "tool_use")
+      .map((b) => (b as { type: "tool_use"; id: string }).id);
+    assert.deepEqual(toolUseIds, ["a", "b", "c"]);
+    const resultBlocks = result.messages[2]!.content;
+    const toolResultIds = resultBlocks
+      .filter((b) => b.type === "tool_result")
+      .map((b) => (b as { type: "tool_result"; tool_use_id: string }).tool_use_id);
+    assert.deepEqual(toolResultIds, ["a", "b", "c"]);
+  });
+});
