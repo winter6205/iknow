@@ -4,8 +4,11 @@
  * Success Criteria 16 (spec):
  *   - src/harness/index.ts 公共导出 run / createLoopEngine /
  *     createAnthropicAdapter 等 Foundation 自治运行时入口;
- *   - src/harness/ 不含 Gate B 能力(重试 / 取消 / 超时 / trace /
- *     checkpoint / 并发调度)。
+ *   - 016:src/harness/ 不含 Gate B 能力(当时禁:重试 / 取消 / 超时 /
+ *     trace / checkpoint / 并发调度)。
+ *   - 017:取消 / 超时 / trace / setTimeout / AbortController 经 spec+plan+ACR
+ *     授权为物理必需层,移出禁词表;守门对齐判据 12(条件式修复层)——
+ *     禁止自动重试 / checkpoint / token-cost 护栏 / OTel-span-metric 树提前入内核。
  */
 
 import { describe, it } from "vitest";
@@ -51,27 +54,56 @@ describe("T12 public exports + Gate B gate", () => {
     assert.ok(!(p instanceof harness.RegistryConstructionError));
   });
 
-  it("Gate B capability gate: src/harness/ source has no retry/cancel/timeout/trace/checkpoint/concurrency keywords", () => {
+  it("条件式修复层 gate(判据 12):src/harness/ source has no retry/checkpoint/token-cost/OTel-span-metric keywords", () => {
     const files = listHarnessSource();
     assert.ok(files.length > 0, "expected harness source files");
-    const violations: Array<{ file: string; line: number; keyword: string; snippet: string }> = [];
-    const keywords = ["retry", "cancel", "timeout", "trace", "checkpoint", "AbortController", "setTimeout", "withResolvers"];
+    const violations: Array<{
+      file: string;
+      line: number;
+      keyword: string;
+      snippet: string;
+    }> = [];
+    // 017:禁词表对齐判据 12(条件式修复层)。cancel/timeout/trace/setTimeout/
+    // AbortController 经 spec+plan+ACR 授权为物理必需层,移出禁词表;
+    // retry/checkpoint/token-cost 护栏/OTel-span-metric 树仍禁(推迟到 018 真实接通后)。
+    const keywords = [
+      "retry",
+      "checkpoint",
+      "tokenusage",
+      "costusd",
+      "httpstatus",
+      "requestid",
+      "otel",
+      "span",
+      "metric",
+      "withresolvers",
+    ];
     for (const f of files) {
       const lines = readFileSync(f, "utf8").split(/\r?\n/);
       lines.forEach((line, idx) => {
         const lower = line.toLowerCase();
         for (const kw of keywords) {
-          if (lower.includes(kw.toLowerCase())) {
-            const isDoc = /Gate B|rejects?|deferred|explicitly.*not|never.*build|never.*pre-?build/i.test(line);
+          if (lower.includes(kw)) {
+            const isDoc =
+              /Gate B|判据 12|rejects?|deferred|explicitly.*not|never.*build|never.*pre-?build/i.test(
+                line
+              );
             if (!isDoc) {
-              violations.push({ file: f, line: idx + 1, keyword: kw, snippet: line.trim() });
+              violations.push({
+                file: f,
+                line: idx + 1,
+                keyword: kw,
+                snippet: line.trim(),
+              });
             }
           }
         }
       });
     }
     if (violations.length > 0) {
-      const msg = violations.map((v) => `${v.file}:${v.line} (${v.keyword}) ${v.snippet}`).join("\n");
+      const msg = violations
+        .map((v) => `${v.file}:${v.line} (${v.keyword}) ${v.snippet}`)
+        .join("\n");
       throw new Error(`Gate B capability violations found:\n${msg}`);
     }
   });

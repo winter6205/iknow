@@ -39,6 +39,8 @@ export interface AnthropicAdapterOptions {
   readonly streamInterrupt?: boolean;
   readonly model: string;
   readonly maxTokens: number;
+  /** 017: 模型侧超时(ms)。离线(scripted)模式下无实际效果,签名就位以便 018 接真实 SDK 时零改签名。 */
+  readonly timeoutMs?: number;
 }
 
 /**
@@ -48,7 +50,7 @@ export interface AnthropicAdapterOptions {
 function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
   if (!sdk || sdk.role !== "assistant") {
     throw new ProtocolError(
-      `anthropic-adapter: expected assistant message, got role=${(sdk as { role?: string })?.role ?? "missing"}`,
+      `anthropic-adapter: expected assistant message, got role=${(sdk as { role?: string })?.role ?? "missing"}`
     );
   }
   if (!Array.isArray(sdk.content)) {
@@ -58,10 +60,12 @@ function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
   const texts: string[] = [];
   const toolCalls: Array<{ id: string; name: string; input: unknown }> = [];
 
-  for (const block of sdk.content as unknown as Array<Record<string, unknown>>) {
+  for (const block of sdk.content as unknown as Array<
+    Record<string, unknown>
+  >) {
     if (!block || typeof block !== "object" || !("type" in block)) {
       throw new ProtocolError(
-        "anthropic-adapter: assistant block missing 'type'",
+        "anthropic-adapter: assistant block missing 'type'"
       );
     }
     const t = block.type;
@@ -72,23 +76,20 @@ function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
       const tb = block as unknown as ToolUseBlock;
       if (typeof tb.id !== "string" || tb.id.length === 0) {
         throw new ProtocolError(
-          "anthropic-adapter: tool_use block missing non-empty id",
+          "anthropic-adapter: tool_use block missing non-empty id"
         );
       }
       if (typeof tb.name !== "string" || tb.name.length === 0) {
         throw new ProtocolError(
-          `anthropic-adapter: tool_use ${tb.id} missing tool name`,
+          `anthropic-adapter: tool_use ${tb.id} missing tool name`
         );
       }
       toolCalls.push({ id: tb.id, name: tb.name, input: tb.input });
-    } else if (
-      t === "thinking" ||
-      t === "redacted_thinking"
-    ) {
+    } else if (t === "thinking" || t === "redacted_thinking") {
       // Foundation 不解释 thinking / redacted_thinking,原样保留在历史。
     } else {
       throw new ProtocolError(
-        `anthropic-adapter: unsupported assistant block type '${String(t)}'`,
+        `anthropic-adapter: unsupported assistant block type '${String(t)}'`
       );
     }
   }
@@ -110,9 +111,7 @@ function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
   }
 
   const isEmptyFinalResponse =
-    supplierStop === "success" &&
-    texts.length === 0 &&
-    toolCalls.length === 0;
+    supplierStop === "success" && texts.length === 0 && toolCalls.length === 0;
 
   const nativeContent: AnthropicContentBlock[] = (
     sdk.content as unknown as Array<Record<string, unknown>>
@@ -144,9 +143,7 @@ function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
     projection: {
       nativeMessage,
       texts: Object.freeze([...texts]),
-      toolCalls: Object.freeze(
-        toolCalls.map((c) => Object.freeze({ ...c })),
-      ),
+      toolCalls: Object.freeze(toolCalls.map((c) => Object.freeze({ ...c }))),
     },
     supplierStop,
     needsTools: toolCalls.length > 0,
@@ -158,12 +155,13 @@ export interface AnthropicAdapter extends ModelAdapter {
   readonly encodeUserText: (userText: string) => AnthropicNativeMessage;
   readonly encodeToolResults: (
     results: ReadonlyArray<{
-      readonly kind: "ok" | "validation_failed" | "tool_not_found" | "execution_failed";
+      readonly kind:
+        "ok" | "validation_failed" | "tool_not_found" | "execution_failed";
       readonly toolUseId: string;
       readonly payload?: AnthropicContentBlock[];
       readonly message?: string;
       readonly toolName?: string;
-    }>,
+    }>
   ) => AnthropicContentBlock[];
 }
 
@@ -171,25 +169,27 @@ export interface AnthropicAdapter extends ModelAdapter {
  * 构造 Anthropic Adapter。完全离线:不连真实模型,只消费 responses 数组。
  */
 export function createAnthropicAdapter(
-  options: AnthropicAdapterOptions,
+  options: AnthropicAdapterOptions
 ): AnthropicAdapter {
   const queue = options.responses.slice();
 
   async function step(
     _state: LoopState,
     _request: { tools?: unknown },
+    _signal?: AbortSignal
   ): Promise<AssistantTurnResult> {
+    // 017 离线 scripted 实现不消费 signal/timeout;签名就位,018 接真实 SDK 时绑到 client/fetch。
     // Stream-interrupted fixture:若 streamEvents 提供且 streamInterrupt=true,
     // 模拟中途断流,抛 ProtocolError,整回合不提交。
     if (options.streamEvents && options.streamInterrupt) {
       throw new ProtocolError(
-        "anthropic-adapter: stream interrupted before complete response (no half-turn submit)",
+        "anthropic-adapter: stream interrupted before complete response (no half-turn submit)"
       );
     }
     const next = queue.shift();
     if (!next) {
       throw new ProtocolError(
-        "anthropic-adapter: scripted responses exhausted",
+        "anthropic-adapter: scripted responses exhausted"
       );
     }
     return interpretMessage(next);
@@ -204,12 +204,13 @@ export function createAnthropicAdapter(
 
   function encodeToolResults(
     results: ReadonlyArray<{
-      readonly kind: "ok" | "validation_failed" | "tool_not_found" | "execution_failed";
+      readonly kind:
+        "ok" | "validation_failed" | "tool_not_found" | "execution_failed";
       readonly toolUseId: string;
       readonly payload?: AnthropicContentBlock[];
       readonly message?: string;
       readonly toolName?: string;
-    }>,
+    }>
   ): AnthropicContentBlock[] {
     return results.map((r) => {
       if (r.kind === "ok") {

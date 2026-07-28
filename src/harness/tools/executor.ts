@@ -13,15 +13,16 @@
  *   - Executor 不读取 / 不构造供应商原生字段,Model Adapter 负责编码。
  */
 
-import type {
-  AnthropicContentBlock,
-} from "../model-adapter/types.js";
+import type { AnthropicContentBlock } from "../model-adapter/types.js";
 import type { RegistryImpl } from "./registry.js";
 import type {
   Executor,
   ToolCall,
+  ToolExecutionContext,
   ToolExecutionResult,
 } from "./types.js";
+
+const TIMEOUT = Symbol("executor-timeout");
 
 function safeContent(payload: unknown): AnthropicContentBlock[] {
   if (typeof payload === "string") {
@@ -52,7 +53,11 @@ function isJsonCompatible(v: unknown): boolean {
  * 不再创建任何 ajv 实例,Registry 不可变,Executor 也不持有任何可变状态。
  */
 export function createExecutor(registry: RegistryImpl): Executor {
-  async function runOne(call: ToolCall): Promise<ToolExecutionResult> {
+  async function runOne(
+    call: ToolCall,
+    signal?: AbortSignal,
+    timeoutMs?: number
+  ): Promise<ToolExecutionResult> {
     const def = registry.get(call.name);
     if (!def) {
       return {
@@ -78,8 +83,25 @@ export function createExecutor(registry: RegistryImpl): Executor {
         message: msg,
       };
     }
+    // signal 原样透传,不创建子 signal,以保留调用方的取消身份。
+    const ctx: ToolExecutionContext = { signal };
     try {
-      const out = await def.handler(call.input);
+      let out: unknown;
+      if (timeoutMs === undefined) {
+        out = await def.handler(call.input, ctx);
+      } else {
+        // timeout 在外层约束执行时长,不依赖 handler 内部支持取消。
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const handlerPromise = Promise.resolve(def.handler(call.input, ctx));
+        const timeoutPromise = new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(TIMEOUT), timeoutMs);
+        });
+        try {
+          out = await Promise.race([handlerPromise, timeoutPromise]);
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+      }
       return {
         kind: "ok",
         toolUseId: call.id,
@@ -89,17 +111,23 @@ export function createExecutor(registry: RegistryImpl): Executor {
       return {
         kind: "execution_failed",
         toolUseId: call.id,
-        message: sanitizeFailure(err),
+        message: signal?.aborted
+          ? "cancelled"
+          : err === TIMEOUT
+            ? "timeout"
+            : sanitizeFailure(err),
       };
     }
   }
 
   async function executeAll(
     calls: ReadonlyArray<ToolCall>,
+    signal?: AbortSignal,
+    timeoutMs?: number
   ): Promise<ReadonlyArray<ToolExecutionResult>> {
     const out: ToolExecutionResult[] = [];
     for (const call of calls) {
-      out.push(await runOne(call));
+      out.push(await runOne(call, signal, timeoutMs));
     }
     return out;
   }
@@ -110,7 +138,8 @@ export function createExecutor(registry: RegistryImpl): Executor {
 function formatAjvError(errors: unknown): string {
   if (!Array.isArray(errors) || errors.length === 0) return "invalid input";
   const e = errors[0] as { instancePath?: string; message?: string };
-  const where = e.instancePath && e.instancePath.length > 0 ? e.instancePath : "(root)";
+  const where =
+    e.instancePath && e.instancePath.length > 0 ? e.instancePath : "(root)";
   return `invalid input at ${where}: ${e.message ?? "schema violation"}`;
 }
 

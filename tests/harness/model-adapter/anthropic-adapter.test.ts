@@ -26,7 +26,7 @@ import type {
 
 function adapterFrom(
   responses: ReadonlyArray<SdkMessage>,
-  options?: { model?: string; maxTokens?: number },
+  options?: { model?: string; maxTokens?: number }
 ) {
   return createAnthropicAdapter({
     responses,
@@ -57,7 +57,10 @@ describe("createAnthropicAdapter (T11)", () => {
       usage: { input_tokens: 5, output_tokens: 3 },
     };
     const adapter = adapterFrom([sdkResp]);
-    const result = (await adapter.step(initState([userMsg("hi")]), {})) as AssistantTurnResult;
+    const result = (await adapter.step(
+      initState([userMsg("hi")]),
+      {}
+    )) as AssistantTurnResult;
     assert.equal(result.supplierStop, "success");
     assert.equal(result.needsTools, false);
     assert.equal(result.isEmptyFinalResponse, false);
@@ -85,7 +88,10 @@ describe("createAnthropicAdapter (T11)", () => {
       usage: { input_tokens: 10, output_tokens: 4 },
     };
     const adapter = adapterFrom([sdkResp]);
-    const result = (await adapter.step(initState([userMsg("go")]), {})) as AssistantTurnResult;
+    const result = (await adapter.step(
+      initState([userMsg("go")]),
+      {}
+    )) as AssistantTurnResult;
     assert.equal(result.needsTools, true);
     assert.equal(result.projection.toolCalls.length, 1);
     assert.equal(result.projection.toolCalls[0]!.id, "toolu_1");
@@ -119,12 +125,15 @@ describe("createAnthropicAdapter (T11)", () => {
       usage: { input_tokens: 10, output_tokens: 6 },
     };
     const adapter = adapterFrom([sdkResp]);
-    const result = (await adapter.step(initState([userMsg("go")]), {})) as AssistantTurnResult;
+    const result = (await adapter.step(
+      initState([userMsg("go")]),
+      {}
+    )) as AssistantTurnResult;
     assert.equal(result.needsTools, true);
     assert.equal(result.projection.toolCalls.length, 2);
     assert.deepEqual(
       result.projection.toolCalls.map((c) => c.id),
-      ["a", "b"],
+      ["a", "b"]
     );
   });
 
@@ -140,7 +149,10 @@ describe("createAnthropicAdapter (T11)", () => {
       usage: { input_tokens: 10, output_tokens: 256 },
     };
     const adapter = adapterFrom([sdkResp]);
-    const result = (await adapter.step(initState([userMsg("go")]), {})) as AssistantTurnResult;
+    const result = (await adapter.step(
+      initState([userMsg("go")]),
+      {}
+    )) as AssistantTurnResult;
     assert.equal(result.supplierStop, "truncation");
     assert.equal(result.isEmptyFinalResponse, false);
   });
@@ -157,7 +169,10 @@ describe("createAnthropicAdapter (T11)", () => {
       usage: { input_tokens: 10, output_tokens: 0 },
     };
     const adapter = adapterFrom([sdkResp]);
-    const result = (await adapter.step(initState([userMsg("go")]), {})) as AssistantTurnResult;
+    const result = (await adapter.step(
+      initState([userMsg("go")]),
+      {}
+    )) as AssistantTurnResult;
     assert.equal(result.supplierStop, "success");
     assert.equal(result.isEmptyFinalResponse, true);
   });
@@ -183,7 +198,7 @@ describe("createAnthropicAdapter (T11)", () => {
     const adapter = adapterFrom([bad]);
     await assert.rejects(
       () => adapter.step(initState([userMsg("go")]), {}),
-      (e: unknown) => e instanceof ProtocolError,
+      (e: unknown) => e instanceof ProtocolError
     );
   });
 
@@ -204,7 +219,7 @@ describe("createAnthropicAdapter (T11)", () => {
     });
     await assert.rejects(
       () => adapter.step(initState([userMsg("go")]), {}),
-      (e: unknown) => e instanceof ProtocolError,
+      (e: unknown) => e instanceof ProtocolError
     );
   });
 
@@ -216,7 +231,7 @@ describe("createAnthropicAdapter (T11)", () => {
     assert.equal(userMsg2.content[0]!.type, "text");
     assert.equal(
       (userMsg2.content[0] as { type: "text"; text: string }).text,
-      "hello world",
+      "hello world"
     );
     const toolResultBlocks = adapter.encodeToolResults([
       {
@@ -251,10 +266,86 @@ describe("createAnthropicAdapter (T11)", () => {
       usage: { input_tokens: 5, output_tokens: 8 },
     };
     const adapter = adapterFrom([sdkResp]);
-    const result = (await adapter.step(initState([userMsg("go")]), {})) as AssistantTurnResult;
+    const result = (await adapter.step(
+      initState([userMsg("go")]),
+      {}
+    )) as AssistantTurnResult;
     assert.equal(result.supplierStop, "refusal");
     assert.equal(result.isEmptyFinalResponse, false);
     assert.equal(result.projection.texts.length, 1);
     assert.equal(result.projection.texts[0], "I cannot help with that.");
+  });
+});
+
+describe("createAnthropicAdapter (017 signal/timeout signature)", () => {
+  it("step accepts an AbortSignal third param without error", async () => {
+    const sdkResp: SdkMessage = {
+      id: "sig_1",
+      type: "message",
+      role: "assistant",
+      model: "claude-test-model",
+      content: [{ type: "text", text: "hello" }] as ContentBlock[],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const adapter = adapterFrom([sdkResp]);
+    const controller = new AbortController();
+    const r = (await adapter.step(
+      initState([userMsg("hi")]),
+      { tools: [] },
+      controller.signal
+    )) as AssistantTurnResult;
+    assert.equal(r.supplierStop, "success");
+    assert.equal(r.projection.texts[0], "hello");
+  });
+
+  it("pre-aborted signal still resolves in offline mode (offline ignores signal)", async () => {
+    const sdkResp: SdkMessage = {
+      id: "sig_2",
+      type: "message",
+      role: "assistant",
+      model: "claude-test-model",
+      content: [{ type: "text", text: "still ok" }] as ContentBlock[],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    // Fresh adapter so it consumes the fresh response.
+    const adapter = adapterFrom([sdkResp]);
+    const controller = new AbortController();
+    controller.abort();
+    const r2 = (await adapter.step(
+      initState([userMsg("hi")]),
+      { tools: [] },
+      controller.signal
+    )) as AssistantTurnResult;
+    assert.equal(r2.supplierStop, "success");
+    assert.equal(r2.projection.texts[0], "still ok");
+  });
+
+  it("AnthropicAdapterOptions accepts timeoutMs without error", async () => {
+    const sdkResp: SdkMessage = {
+      id: "sig_3",
+      type: "message",
+      role: "assistant",
+      model: "claude-test-model",
+      content: [{ type: "text", text: "with timeout" }] as ContentBlock[],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const adapter = createAnthropicAdapter({
+      responses: [sdkResp],
+      model: "claude-test-model",
+      maxTokens: 256,
+      timeoutMs: 1000,
+    });
+    const r = (await adapter.step(
+      initState([userMsg("hi")]),
+      {}
+    )) as AssistantTurnResult;
+    assert.equal(r.supplierStop, "success");
+    assert.equal(r.projection.texts[0], "with timeout");
   });
 });

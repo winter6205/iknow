@@ -20,7 +20,15 @@ import type { AnthropicContentBlock } from "../model-adapter/types.js";
  * model-facing payload。允许字符串或结构化 JSON 值;不允许 undefined /
  * BigInt / 循环对象 / Map / Date / class instance。
  */
-export type ToolHandler = (input: unknown) => Promise<unknown> | unknown;
+export type ToolHandler = (
+  input: unknown,
+  ctx?: ToolExecutionContext // 017 新增;015 老 handler (input) => ... 继续合法
+) => Promise<unknown> | unknown;
+
+/** 017: Executor 透传给 handler 的执行上下文;仅含 signal,不含 timeoutMs(超时由 Executor Promise.race 外包;type-only;runtime deferred to T5)。 */
+export interface ToolExecutionContext {
+  readonly signal?: AbortSignal;
+}
 
 /**
  * 工具描述符:模型可见名称 + JSON Schema(给模型与 Executor 同源校验用)
@@ -84,6 +92,8 @@ export type ToolExecutionResult =
 export interface Executor {
   /** 串行执行一序列调用;015 强制:无短路、无自动重试。 */
   readonly executeAll: (
-    calls: ReadonlyArray<ToolCall>
+    calls: ReadonlyArray<ToolCall>,
+    signal?: AbortSignal, // 017: 原样透传到 ctx.signal
+    timeoutMs?: number // 017: 单 handler Promise.race 超时;undefined = 不 race(015 语义;type-only;runtime deferred to T5)
   ) => Promise<ReadonlyArray<ToolExecutionResult>>;
 }

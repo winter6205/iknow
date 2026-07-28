@@ -39,13 +39,15 @@ export interface LoopState {
   readonly turnCount: number;
 }
 
-/** 016 Q3 五类停止原因。 */
+/** 016 Q3 五类停止原因 + 017 新增信号原因(append-only,不重排)。 */
 export type StopReason =
   | "completed" // 成功停止 + 无 tool call + 至少一段非空文本
   | "maxTurns" // turnCount 到达上限
   | "nonSuccessStop" // 截断/拒绝等合法但未完成的供应商结果
   | "protocolError" // assistant 回合协议结构错误,整回合不进入历史
-  | "emptyFinalResponse"; // 供应商报告成功停止但无可展示文本,不进入权威历史
+  | "emptyFinalResponse" // 供应商报告成功停止但无可展示文本,不进入权威历史
+  | "cancelled" // 017: signal abort(type-only;runtime deferred to T5)
+  | "timeout"; // 017: timeoutMs hit(type-only;runtime deferred to T5)
 
 /** 016 Q1 状态机 Transition(判别联合,向后兼容扩展)。 */
 export type Transition =
@@ -94,6 +96,7 @@ export interface ModelAdapter {
   /** 014 原子校验 + 投影:返回 AssistantTurnResult 或抛 ProtocolError。 */
   readonly step: (
     state: LoopState,
-    request: { tools?: unknown }
+    request: { tools?: unknown },
+    signal?: AbortSignal // 017: run 第三参原样透传,离线实现可忽略(type-only;runtime deferred to T5)
   ) => Promise<AssistantTurnResult>;
 }

@@ -101,7 +101,7 @@ describe("createExecutor (T3)", () => {
     assert.equal(
       results[0]!.kind === "execution_failed" &&
         !/kaboom/i.test(results[0]!.message),
-      true,
+      true
     );
   });
 
@@ -116,7 +116,7 @@ describe("createExecutor (T3)", () => {
     const results = await exec.executeAll(calls);
     assert.deepEqual(
       results.map((r) => r.kind === "ok" && r.toolUseId),
-      ["a", "b", "c"],
+      ["a", "b", "c"]
     );
   });
 
@@ -133,6 +133,84 @@ describe("createExecutor (T3)", () => {
     assert.equal(results[0]!.kind, "ok");
     assert.equal(results[1]!.kind, "execution_failed");
     assert.equal(results[2]!.kind, "ok");
+  });
+});
+
+describe("createExecutor (017 signal/timeout)", () => {
+  it("timeout: handler slower than timeoutMs -> execution_failed with message containing timeout", async () => {
+    const slow: ToolDef = {
+      name: "slow",
+      description: "slow",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: () =>
+        new Promise((resolve) => setTimeout(() => resolve({ ok: true }), 100)),
+    };
+    const exec = createExecutor(createRegistry([slow]));
+    const results = await exec.executeAll(
+      [{ id: "c1", name: "slow", input: {} }],
+      undefined,
+      10
+    );
+
+    assert.equal(results[0]!.kind, "execution_failed");
+    assert.equal(
+      results[0]!.kind === "execution_failed" &&
+        /timeout/.test(results[0]!.message),
+      true
+    );
+  });
+
+  it("ctx.signal passthrough: handler receives the exact same signal object (no child signal)", async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const capture: ToolDef = {
+      name: "capture",
+      description: "capture signal",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: (_input, ctx) => {
+        capturedSignal = ctx?.signal;
+        return { ok: true };
+      },
+    };
+    const exec = createExecutor(createRegistry([capture]));
+    const controller = new AbortController();
+
+    await exec.executeAll(
+      [{ id: "c1", name: "capture", input: {} }],
+      controller.signal
+    );
+
+    assert.equal(capturedSignal, controller.signal);
+  });
+
+  it('abort: handler throws AbortError after abort -> execution_failed with message "cancelled"', async () => {
+    const abortable: ToolDef = {
+      name: "abortable",
+      description: "abortable",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: (_input, ctx) =>
+        new Promise((_resolve, reject) => {
+          ctx?.signal?.addEventListener("abort", () => {
+            reject(
+              new DOMException("This operation was aborted", "AbortError")
+            );
+          });
+        }),
+    };
+    const exec = createExecutor(createRegistry([abortable]));
+    const controller = new AbortController();
+    const pending = exec.executeAll(
+      [{ id: "c1", name: "abortable", input: {} }],
+      controller.signal
+    );
+
+    controller.abort();
+    const results = await pending;
+
+    assert.equal(results[0]!.kind, "execution_failed");
+    assert.equal(
+      results[0]!.kind === "execution_failed" && results[0]!.message,
+      "cancelled"
+    );
   });
 });
 
@@ -166,7 +244,7 @@ describe("failure tool_result structural discriminator (Fix D)", () => {
     assert.equal(b.content[0]!.type, "text");
     assert.ok(
       b.content[0]!.text.startsWith("[validation_failed] "),
-      `expected [validation_failed] prefix, got: ${b.content[0]!.text}`,
+      `expected [validation_failed] prefix, got: ${b.content[0]!.text}`
     );
   });
 
@@ -185,7 +263,7 @@ describe("failure tool_result structural discriminator (Fix D)", () => {
     assert.equal(b.is_error, true);
     assert.ok(
       b.content[0]!.text.startsWith("[tool_not_found] "),
-      `expected [tool_not_found] prefix, got: ${b.content[0]!.text}`,
+      `expected [tool_not_found] prefix, got: ${b.content[0]!.text}`
     );
   });
 
@@ -204,7 +282,7 @@ describe("failure tool_result structural discriminator (Fix D)", () => {
     assert.equal(b.is_error, true);
     assert.ok(
       b.content[0]!.text.startsWith("[execution_failed] "),
-      `expected [execution_failed] prefix, got: ${b.content[0]!.text}`,
+      `expected [execution_failed] prefix, got: ${b.content[0]!.text}`
     );
   });
 });
