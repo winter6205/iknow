@@ -25,13 +25,15 @@ Use as default bias, not strict checklist.
 5. 当前任务相关目录下的 `CLAUDE.md`
 6. 当前任务相关代码 / 测试 / 配置文件
 
-不要一次性读取所有文件。只读取与当前任务相关的文件，避免污染上下文。
+只读取与当前任务相关的文件
 
 ---
 
 ## Completion
 
 自动commit
+
+汇报使用中文
 
 完成后简要报告：
 
@@ -40,13 +42,11 @@ Use as default bias, not strict checklist.
 - 未验证内容及原因；
 - 存在时报告风险、阻塞项以及 commit、push、release 等 Git/发布操作。
 
-不要输出空字段或重复显而易见的信息。
-
 ---
 
 ## 规范变更流程
 
-本文件是项目级行为规范（个人项目，无团队共享规则）。修改本文件前必须：
+修改本文件前必须：
 
 1. 说明修改原因。
 2. 说明影响范围。
@@ -63,10 +63,8 @@ Use as default bias, not strict checklist.
 
 ```bash
 npm test          # unit + eval alignment + trajectory unit tests
-npm run eval      # 32-sample suite → docs/iknow-spec/docs/eval/results/ (gitignored)
+npm run eval      
 ```
-
-硬门禁目标: `hard_pass_rate = 1.0`；Sprint-1 软目标: `mean_trajectory_score ≥ 0.6`。
 
 ### Runtime map (iknow)
 
