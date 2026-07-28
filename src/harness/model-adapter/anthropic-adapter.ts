@@ -219,8 +219,10 @@ export function createAnthropicAdapter(
       }
       const text =
         r.kind === "tool_not_found"
-          ? `tool not found: ${r.toolName ?? "unknown"}`
-          : r.message ?? "tool execution failed";
+          ? `[tool_not_found] tool not found: ${r.toolName ?? "unknown"}`
+          : r.kind === "validation_failed"
+            ? `[validation_failed] ${r.message ?? "invalid input"}`
+            : `[execution_failed] ${r.message ?? "tool execution failed"}`;
       return {
         type: "tool_result",
         tool_use_id: r.toolUseId,

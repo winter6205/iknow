@@ -39,10 +39,11 @@ export function toAnthropicToolResults(
 function describeFailure(r: ToolExecutionResult): string {
   switch (r.kind) {
     case "validation_failed":
+      return `[validation_failed] ${r.message}`;
     case "execution_failed":
-      return r.message;
+      return `[execution_failed] ${r.message}`;
     case "tool_not_found":
-      return `tool not found: ${r.toolName}`;
+      return `[tool_not_found] tool not found: ${r.toolName}`;
     case "ok":
       return "ok"; // unreachable
   }

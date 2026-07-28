@@ -10,6 +10,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createRegistry } from "../../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../../src/harness/tools/executor.ts";
+import { toAnthropicToolResults } from "../../../src/harness/tools/tool-result.ts";
 import type { ToolDef } from "../../../src/harness/tools/types.ts";
 
 const echo: ToolDef = {
@@ -132,5 +133,78 @@ describe("createExecutor (T3)", () => {
     assert.equal(results[0]!.kind, "ok");
     assert.equal(results[1]!.kind, "execution_failed");
     assert.equal(results[2]!.kind, "ok");
+  });
+});
+
+describe("failure tool_result structural discriminator (Fix D)", () => {
+  it("validation_failed result encodes with [validation_failed] prefix in tool_result text", async () => {
+    const strict: ToolDef = {
+      name: "strict",
+      description: "strict",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { n: { type: "integer" } },
+        required: ["n"],
+      },
+      handler: () => ({ ok: true }),
+    };
+    const reg = createRegistry([strict]);
+    const exec = createExecutor(reg);
+    const results = await exec.executeAll([
+      { id: "a", name: "strict", input: { n: "not-a-number" } },
+    ]);
+    const blocks = toAnthropicToolResults(results);
+    assert.equal(blocks.length, 1);
+    const b = blocks[0]! as {
+      type: "tool_result";
+      is_error: true;
+      content: Array<{ type: "text"; text: string }>;
+    };
+    assert.equal(b.type, "tool_result");
+    assert.equal(b.is_error, true);
+    assert.equal(b.content[0]!.type, "text");
+    assert.ok(
+      b.content[0]!.text.startsWith("[validation_failed] "),
+      `expected [validation_failed] prefix, got: ${b.content[0]!.text}`,
+    );
+  });
+
+  it("tool_not_found result encodes with [tool_not_found] prefix in tool_result text", async () => {
+    const reg = createRegistry([echo]);
+    const exec = createExecutor(reg);
+    const results = await exec.executeAll([
+      { id: "a", name: "missing", input: {} },
+    ]);
+    const blocks = toAnthropicToolResults(results);
+    const b = blocks[0]! as {
+      type: "tool_result";
+      is_error: true;
+      content: Array<{ type: "text"; text: string }>;
+    };
+    assert.equal(b.is_error, true);
+    assert.ok(
+      b.content[0]!.text.startsWith("[tool_not_found] "),
+      `expected [tool_not_found] prefix, got: ${b.content[0]!.text}`,
+    );
+  });
+
+  it("execution_failed result encodes with [execution_failed] prefix in tool_result text", async () => {
+    const reg = createRegistry([boom]);
+    const exec = createExecutor(reg);
+    const results = await exec.executeAll([
+      { id: "a", name: "boom", input: { x: 1 } },
+    ]);
+    const blocks = toAnthropicToolResults(results);
+    const b = blocks[0]! as {
+      type: "tool_result";
+      is_error: true;
+      content: Array<{ type: "text"; text: string }>;
+    };
+    assert.equal(b.is_error, true);
+    assert.ok(
+      b.content[0]!.text.startsWith("[execution_failed] "),
+      `expected [execution_failed] prefix, got: ${b.content[0]!.text}`,
+    );
   });
 });
