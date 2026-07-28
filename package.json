@@ -14,14 +14,13 @@
       "import": "./dist/index.js"
     }
   },
-
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test tests/**/*.test.ts",
+    "test": "vitest run",
     "dev": "tsx src/cli.ts",
     "serve": "tsx src/cli.ts serve",
     "web:dev": "npm run dev --prefix web",
@@ -32,7 +31,8 @@
   "devDependencies": {
     "@types/node": "^22.13.10",
     "tsx": "^4.19.3",
-    "typescript": "^5.8.2"
+    "typescript": "^5.8.2",
+    "vitest": "^3.2.7"
   },
   "private": true
 }

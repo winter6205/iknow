@@ -1,4 +1,4 @@
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { createSession } from "../src/agent-loop/session.ts";
 import { IknowAgent } from "../src/agent-loop/loop.ts";
