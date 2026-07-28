@@ -236,4 +236,25 @@ describe("createAnthropicAdapter (T11)", () => {
     assert.equal(tr.tool_use_id, "t1");
     assert.equal(tr.is_error, undefined);
   });
+
+  it("class 8 — refusal stop_reason -> supplierStop='refusal' + text in projection, NOT empty", async () => {
+    const sdkResp: SdkMessage = {
+      id: "msg_8",
+      type: "message",
+      role: "assistant",
+      model: "claude-test-model",
+      content: [
+        { type: "text", text: "I cannot help with that." } as TextBlock,
+      ] as ContentBlock[],
+      stop_reason: "refusal",
+      stop_sequence: null,
+      usage: { input_tokens: 5, output_tokens: 8 },
+    };
+    const adapter = adapterFrom([sdkResp]);
+    const result = (await adapter.step(initState([userMsg("go")]), {})) as AssistantTurnResult;
+    assert.equal(result.supplierStop, "refusal");
+    assert.equal(result.isEmptyFinalResponse, false);
+    assert.equal(result.projection.texts.length, 1);
+    assert.equal(result.projection.texts[0], "I cannot help with that.");
+  });
 });
