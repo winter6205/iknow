@@ -34,6 +34,7 @@ tracker: local-markdown
 - [冻结模型回合与 append-only 历史契约](../issues/014-model-turn-and-history-contract.md) — Gate A 采用 Anthropic 原生消息作为权威历史，由协议 Adapter 原子提交完整回合并提供非权威 text/tool-call 投影；OpenAI-compatible 后置。
 - [冻结工具 ACI 与结果回填边界](../issues/015-tool-aci-and-result-boundary.md) — Registry 使用同源 JSON Schema 构造不可变工具集；Executor 严格校验并产生 `ToolExecutionResult`，Anthropic Model Adapter 负责编码原生 `tool_result` 消息。
 - [细化最小顺序 Agent Loop 的实施契约](../issues/016-minimum-sequential-agent-loop.md) — Loop Engine 对外公开 `run()` + `step(state, deps)->Transition` 状态机；无可变实例状态、state 线程化；`turnCount` 每回合 +1、`maxTurns` 调用前检查；消费 014/015 串行/无短路/无重试契约；fixture 矩阵 S1–S11；目标 `src/harness/` + `tests/harness/`，完全不碰旧 `src/agent-loop/`。**2026-07-28 close**：实施落地，`src/harness/` 11 文件 + `tests/harness/` 7 套件全绿；`npm run typecheck` + `npm test`（24 suites / 212 tests）通过；三路并行代码审查（源码 / 测试 / 依赖边界）确认不含 Gate B 能力（重试 / 取消 / 超时 / trace / checkpoint / 并发 / durable memory / 压缩）。017 释放进 frontier。
+- [按迁移需要加固 Agent Loop](../issues/017-loop-hardening-for-migration.md) — 替身闭环下证据真空，把 017 收口为"物理必需层 + 条件式修复层"两层闭合。物理必需层五件套：signal 透传到 adapter+Executor（015 ToolHandler 加可选 `ctx?: { signal }`）+ `LoopEngineDeps` 加可选 `timeoutMs` 默认 60000（模型+工具各自单次超时，不引入自动重试）+ 独立 `LoopTrace` 第二返回面（与 014 messages 唯一权威严格解耦）+ StopReason 扩展两类 `cancelled`/`timeout`（在途收尾：模型中断整回合不进历史、工具中断填 `execution_failed` tool_result 进历史再 stop）+ trace A 层最小集（每回合 supplierStop/toolCall kind/durationMs/timeoutHit/signalAborted + totals）。新增 S12–S17 离线替身验证。条件式修复层（自动重试/token/cost 护栏/trace B 层字段/工具分类超时/错误分类细化/总耗时独立 stop/生产级 tracing 平台）作为 017 out-of-scope 推迟到 018 真实接通后按 013 条件式修复原则补。**2026-07-29 实施落地**（经 PR #29 合并）：`src/harness/` signal/timeout/trace 三件套 + S12–S17 离线替身验证全绿（25 suites / 233 tests）；判据 12 守门确认不含条件式修复层；018 释放进 frontier。
 
 ## Delivery gates
 
@@ -62,7 +63,7 @@ Gate B 不得反向扩大 Gate A，也不得借迁移之名重写知识工具内
                          016 实现并验证 Gate A（closed 2026-07-28）
                                       │
                                       ▼
-                         017 必要加固 Gate B（NEXT，frontier）
+                         017 必要加固 Gate B（已实施 2026-07-29）
                                       │
                                       ▼
                          018 迁移并退役旧 loop
@@ -72,10 +73,10 @@ Gate B 不得反向扩大 Gate A，也不得借迁移之名重写知识工具内
 - [014：冻结模型回合与 append-only 历史契约](../issues/014-model-turn-and-history-contract.md) — 已关闭；冻结 Anthropic 原生历史、Adapter、投影、停止与协议错误边界。
 - [015：冻结工具 ACI 与结果回填边界](../issues/015-tool-aci-and-result-boundary.md) — 已关闭；冻结 Registry、严格校验、Executor、执行结果与多调用顺序。
 - [016：实现并验证最小顺序 Agent Loop](../issues/016-minimum-sequential-agent-loop.md) — 已关闭（2026-07-28）；实施落地 + 三路代码审查确认无 Gate B 能力；Exit condition 全满足。
-- [017：按迁移需要加固 Loop](../issues/017-loop-hardening-for-migration.md) — **frontier（NEXT）**；016 已 close 释放进 frontier，待细化。
-- [018：迁移产品路径并退役旧 Loop](../issues/018-migrate-and-retire-legacy-loop.md) — 被 017 阻塞。
+- [017：按迁移需要加固 Loop](../issues/017-loop-hardening-for-migration.md) — 已细化（Q1–Q7 收口）并已实施（2026-07-29，经 PR #29 合并）；物理必需层 signal/timeout/trace + S12–S17 离线验证全绿；判据 12 守门不含条件式修复层；018 释放进 frontier。
+- [018：迁移产品路径并退役旧 Loop](../issues/018-migrate-and-retire-legacy-loop.md) — **frontier（NEXT）**；017 已实施释放进 frontier，待细化。
 
-014/015 的决策契约已冻结。016 已关闭；017 进 frontier 待细化；018 仍须 017 先细化。
+014/015 的决策契约已冻结。016 已关闭；017 已细化并实施；018 进 frontier 待细化。
 
 ## Explicitly out of scope
 

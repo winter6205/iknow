@@ -6,7 +6,7 @@
 
 现有项目不是空白，但旧 Agent loop 不能继续作为可靠底座。013 已关闭并确定：不完全重启；复用现有工具资产；先做 Gate A 最小顺序 Loop，再做 Gate B 必要加固与迁移。
 
-014/015 的模型与工具契约已经冻结。016 的 5 项 to-refine（接口形状、依赖与状态、轮次语义、多调用策略、fixture 矩阵、目标文件/迁移/证据）已通过 Q1–Q6 逐项细化收口。当前下一步是 016 handoff 至实施（spec-driven-development 或 writing-plans），不再细化；这不等于已经授权代码实施，实施仍须走 handoff 确认。
+014/015 的模型与工具契约已经冻结。016 的 5 项 to-refine（接口形状、依赖与状态、轮次语义、多调用策略、fixture 矩阵、目标文件/迁移/证据）已通过 Q1–Q6 逐项细化收口；017 的 5 项 to-refine 已通过 Q1–Q7 逐项细化收口（取消 / 超时 / 诊断 / 停止语义 / trace 最小集 / 物理必需层 vs 条件式修复层对仗 / 目标文件 + S12–S17 + 证据）。当前下一步是 016、017 handoff 至实施（spec-driven-development 或 writing-plans），不再细化；这不等于已经授权代码实施，实施仍须走 handoff 确认。
 
 ```text
 013 地基与迁移边界（closed）
@@ -33,19 +33,19 @@
 
 ## 二、Map 与 ticket 状态
 
-| 项目 | 状态 | 当前动作 |
-| --- | --- | --- |
-| [Agent Loop Foundation](./maps/agent-loop-foundation.md) | `open` | 完成 016–018 |
-| [013 地基与迁移边界](./issues/013-agent-loop-foundation-and-migration-boundary.md) | `closed` | 不再扩展；细节移交后续票 |
-| [014 模型回合与历史契约](./issues/014-model-turn-and-history-contract.md) | `closed` | Anthropic 原生历史与 Model Adapter 契约已冻结 |
-| [015 工具 ACI 与结果边界](./issues/015-tool-aci-and-result-boundary.md) | `closed` | Registry、Executor 与结果回填契约已冻结 |
-| [016 最小顺序 Agent Loop](./issues/016-minimum-sequential-agent-loop.md) | `refined`（Q1–Q6 收口完成） | 等待 handoff 至 spec-driven-development / writing-plans 实施 |
-| [017 Loop 必要加固](./issues/017-loop-hardening-for-migration.md) | `blocked` | 等待 016 的真实结果 |
-| [018 迁移并退役旧 Loop](./issues/018-migrate-and-retire-legacy-loop.md) | `blocked` | 等待 017 |
-| [Agent Runtime v0](./maps/agent-runtime-v0.md) | 决策 `closed`、实施 `blocked` | 等待 018 |
-| [Knowledge Evidence v0](./maps/evidence-grounded-knowledge-v0.md) | 决策 `closed`、实施 `blocked` | 等待 018 |
-| [Company Brain v0](./maps/company-brain-assistant.md) | `blocked` | 等待 Foundation 与组件实现 |
-| [Production Company Brain](./maps/production-company-brain.md) | `parked` | 等待 v0 接受运行 |
+| 项目                                                                               | 状态                          | 当前动作                                                     |
+| ---------------------------------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------ |
+| [Agent Loop Foundation](./maps/agent-loop-foundation.md)                           | `open`                        | 完成 016–018                                                 |
+| [013 地基与迁移边界](./issues/013-agent-loop-foundation-and-migration-boundary.md) | `closed`                      | 不再扩展；细节移交后续票                                     |
+| [014 模型回合与历史契约](./issues/014-model-turn-and-history-contract.md)          | `closed`                      | Anthropic 原生历史与 Model Adapter 契约已冻结                |
+| [015 工具 ACI 与结果边界](./issues/015-tool-aci-and-result-boundary.md)            | `closed`                      | Registry、Executor 与结果回填契约已冻结                      |
+| [016 最小顺序 Agent Loop](./issues/016-minimum-sequential-agent-loop.md)           | `refined`（Q1–Q6 收口完成）   | 等待 handoff 至 spec-driven-development / writing-plans 实施 |
+| [017 Loop 必要加固](./issues/017-loop-hardening-for-migration.md)                  | `refined`（Q1–Q7 收口完成）   | 等待 handoff 至 spec-driven-development / writing-plans 实施 |
+| [018 迁移并退役旧 Loop](./issues/018-migrate-and-retire-legacy-loop.md)            | `blocked`                     | 等待 017                                                     |
+| [Agent Runtime v0](./maps/agent-runtime-v0.md)                                     | 决策 `closed`、实施 `blocked` | 等待 018                                                     |
+| [Knowledge Evidence v0](./maps/evidence-grounded-knowledge-v0.md)                  | 决策 `closed`、实施 `blocked` | 等待 018                                                     |
+| [Company Brain v0](./maps/company-brain-assistant.md)                              | `blocked`                     | 等待 Foundation 与组件实现                                   |
+| [Production Company Brain](./maps/production-company-brain.md)                     | `parked`                      | 等待 v0 接受运行                                             |
 
 `closed` 只表示对应决策完整，不表示代码或产品完成。
 
@@ -65,7 +65,7 @@ Tool/Registry/Executor 使用同源 JSON Schema 完成不可变注册、严格�
 
 ### 017：Gate B 必要加固
 
-只根据 Gate A 与产品接入暴露的真实失败增加错误、取消、超时、资源护栏和最小 trace；禁止预建成熟 Harness 平台。
+替身闭环下证据真空，把 017 收口为"物理必需层 + 条件式修复层"两层闭合。物理必需层五件套：signal 透传到 adapter+Executor（015 ToolHandler 加可选 `ctx?: { signal }`）、`LoopEngineDeps` 加可选 `timeoutMs` 默认 60000（模型+工具各自单次超时、不引入自动重试）、独立 `LoopTrace` 第二返回面（与 014 messages 唯一权威严格解耦）、StopReason 扩展两类 `cancelled`/`timeout`（在途收尾：模型中断整回合不进历史、工具中断填 `execution_failed` tool_result 进历史再 stop）、trace A 层最小集。新增 S12–S17 离线替身验证。条件式修复层（自动重试 / token/cost 护栏 / trace B 层字段 / 工具分类超时 / 错误分类细化 / 总耗时独立 stop / 生产级 tracing 平台）作为 017 out-of-scope 推迟到 018 真实接通后按 013 条件式修复原则补。
 
 ### 018：迁移与退役
 
@@ -105,4 +105,4 @@ Tool/Registry/Executor 使用同源 JSON Schema 完成不可变注册、严格�
 
 ## 六、下一步
 
-[016：实现并验证最小顺序 Agent Loop](./issues/016-minimum-sequential-agent-loop.md) 的 5 项 to-refine 已通过 Q1–Q6 逐项细化收口（见 016 ticket Resolution）。下一步是 016 handoff 至实施：默认走 `arthurpower:spec-driven-development`（把 Decisions-so-far 折叠成可建 spec），或 `arthurpower:writing-plans`（skip spec，仅当该票 Resolution 已含 Problem / Solution / Implementation / Testing / Out-of-Scope 五段时）。Wayfinder 路由目标由用户通过 AskUserQuestion stop gate 确认；本次会话不自动路由。不得借 016 重开 014/015、接入产品流量或提前建设 Gate B。
+[016：实现并验证最小顺序 Agent Loop](./issues/016-minimum-sequential-agent-loop.md) 的 5 项 to-refine 已通过 Q1–Q6 逐项细化收口（见 016 ticket Resolution）。[017：按迁移需要加固 Loop](./issues/017-loop-hardening-for-migration.md) 的 5 项 to-refine 已通过 Q1–Q7 逐项细化收口（见 017 ticket Resolution）。下一步是 016、017 handoff 至实施：默认走 `arthurpower:spec-driven-development`（把 Decisions-so-far 折叠成可建 spec），或 `arthurpower:writing-plans`（skip spec，仅当该票 Resolution 已含 Problem / Solution / Implementation / Testing / Out-of-Scope 五段时）。Wayfinder 路由目标由用户通过 AskUserQuestion stop gate 确认；本次会话不自动路由。不得借 016/017 重开 014/015、接入产品流量或预建条件式修复层能力。
