@@ -33,7 +33,7 @@ tracker: local-markdown
 - [确定 Agent Loop 地基与旧内核替换边界](../issues/013-agent-loop-foundation-and-migration-boundary.md) — 不完全重启；复用工具资产，以 Gate A 最小顺序 Loop 和 Gate B 必要加固迁移替换旧内核。
 - [冻结模型回合与 append-only 历史契约](../issues/014-model-turn-and-history-contract.md) — Gate A 采用 Anthropic 原生消息作为权威历史，由协议 Adapter 原子提交完整回合并提供非权威 text/tool-call 投影；OpenAI-compatible 后置。
 - [冻结工具 ACI 与结果回填边界](../issues/015-tool-aci-and-result-boundary.md) — Registry 使用同源 JSON Schema 构造不可变工具集；Executor 严格校验并产生 `ToolExecutionResult`，Anthropic Model Adapter 负责编码原生 `tool_result` 消息。
-- [细化最小顺序 Agent Loop 的实施契约](../issues/016-minimum-sequential-agent-loop.md) — Loop Engine 对外公开 `run()` + `step(state, deps)->Transition` 状态机；无可变实例状态、state 线程化；`turnCount` 每回合 +1、`maxTurns` 调用前检查；消费 014/015 串行/无短路/无重试契约；fixture 矩阵 S1–S11；目标 `src/harness/` + `tests/harness/`，完全不碰旧 `src/agent-loop/`。决策细化完成，待 handoff 至实施。
+- [细化最小顺序 Agent Loop 的实施契约](../issues/016-minimum-sequential-agent-loop.md) — Loop Engine 对外公开 `run()` + `step(state, deps)->Transition` 状态机；无可变实例状态、state 线程化；`turnCount` 每回合 +1、`maxTurns` 调用前检查；消费 014/015 串行/无短路/无重试契约；fixture 矩阵 S1–S11；目标 `src/harness/` + `tests/harness/`，完全不碰旧 `src/agent-loop/`。**2026-07-28 close**：实施落地，`src/harness/` 11 文件 + `tests/harness/` 7 套件全绿；`npm run typecheck` + `npm test`（24 suites / 212 tests）通过；三路并行代码审查（源码 / 测试 / 依赖边界）确认不含 Gate B 能力（重试 / 取消 / 超时 / trace / checkpoint / 并发 / durable memory / 压缩）。017 释放进 frontier。
 
 ## Delivery gates
 
@@ -59,10 +59,10 @@ Gate B 不得反向扩大 Gate A，也不得借迁移之名重写知识工具内
  ├── 014 模型回合与历史契约（closed）─┐
  └── 015 工具 ACI 执行边界（closed）───┤
                                       ▼
-                         016 实现并验证 Gate A（NEXT）
+                         016 实现并验证 Gate A（closed 2026-07-28）
                                       │
                                       ▼
-                         017 必要加固 Gate B
+                         017 必要加固 Gate B（NEXT，frontier）
                                       │
                                       ▼
                          018 迁移并退役旧 loop
@@ -71,11 +71,11 @@ Gate B 不得反向扩大 Gate A，也不得借迁移之名重写知识工具内
 - [013：确定 Agent Loop 地基与旧内核替换边界](../issues/013-agent-loop-foundation-and-migration-boundary.md) — 已关闭；冻结非完全重启、Gate A/Gate B 与职责边界。
 - [014：冻结模型回合与 append-only 历史契约](../issues/014-model-turn-and-history-contract.md) — 已关闭；冻结 Anthropic 原生历史、Adapter、投影、停止与协议错误边界。
 - [015：冻结工具 ACI 与结果回填边界](../issues/015-tool-aci-and-result-boundary.md) — 已关闭；冻结 Registry、严格校验、Executor、执行结果与多调用顺序。
-- [016：实现并验证最小顺序 Agent Loop](../issues/016-minimum-sequential-agent-loop.md) — 已细化（Q1–Q6 收口）：接口形状、依赖与状态、轮次语义、多调用策略、fixture 矩阵、目标文件/迁移限制/完成证据均已定。待 handoff 至实施。
-- [017：按迁移需要加固 Loop](../issues/017-loop-hardening-for-migration.md) — 被 016 阻塞。
+- [016：实现并验证最小顺序 Agent Loop](../issues/016-minimum-sequential-agent-loop.md) — 已关闭（2026-07-28）；实施落地 + 三路代码审查确认无 Gate B 能力；Exit condition 全满足。
+- [017：按迁移需要加固 Loop](../issues/017-loop-hardening-for-migration.md) — **frontier（NEXT）**；016 已 close 释放进 frontier，待细化。
 - [018：迁移产品路径并退役旧 Loop](../issues/018-migrate-and-retire-legacy-loop.md) — 被 017 阻塞。
 
-014/015 的决策契约已冻结。016 已细化完成；017–018 仍须逐票细化具体接口、文件与验收后才能实施。
+014/015 的决策契约已冻结。016 已关闭；017 进 frontier 待细化；018 仍须 017 先细化。
 
 ## Explicitly out of scope
 

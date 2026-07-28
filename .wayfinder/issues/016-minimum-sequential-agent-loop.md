@@ -1,12 +1,13 @@
 ---
 title: 实现并验证最小顺序 Agent Loop
 label: wayfinder:implementation
-status: refined
+status: closed
 parent: ../maps/agent-loop-foundation.md
 assignee: null
 blocked_by:
   - 014-model-turn-and-history-contract
   - 015-tool-aci-and-result-boundary
+resolution: 2026-07-28 wayfinder work-through
 ---
 
 ## Intent
@@ -81,3 +82,20 @@ Loop Engine fixture 矩阵 = **S1–S11**：
 ## Exit condition
 
 Gate A 的冻结验收全部通过（S1–S11 + Adapter 7 类 + Registry 构造验收），S10 / S11 显式守门通过，`npm run typecheck` 与完整 `npm test` 通过，append-only 历史可重放（S10 + S11 + 替身确定性），代码审查确认 `src/harness/` 不含 Gate B 或后续 runtime 能力。本票关闭代表决策细化完成，不代表代码或产品路径已实施。
+
+## Resolution comment (2026-07-28)
+
+Gate A 实施已落地并经 work-through 核查，Exit condition 五条逐条满足，本票 close。核查证据如下（三路并行子代理审计，均只读）：
+
+1. **S1–S11 + Adapter 7 类 + Registry 构造验收全过**：`npm test` 24 suites / 212 tests 全绿，含 `tests/harness/loop-engine.test.ts`(15)、`tests/harness/model-adapter/anthropic-adapter.test.ts`(9)、`tests/harness/tools/registry.test.ts`(7)、`tests/harness/tools/executor.test.ts`(9)、`tests/harness/stubs/stub.test.ts`(4)、`tests/harness/skeleton.test.ts`(2)、`tests/harness/public-exports.test.ts`(3)。
+2. **S10 / S11 显式守门通过**：append-only 不可变 + 跨 run 不污染，由 `loop-engine.test.ts` 对应用例覆盖。
+3. **`npm run typecheck` 通过**：`tsc -p tsconfig.json --noEmit` 退出码 0。
+4. **完整 `npm test` 通过**：见第 1 条。
+5. **代码审查 `src/harness/` 不含 Gate B 能力**（三路并行审计，VERDICT 均 CLEAN）：
+   - **源码审计**：11 个 .ts 文件逐文件读 + 关键词扫描；retry / cancel(AbortController) / timeout(setTimeout/Promise.race) / trace(span/trace_id) / checkpoint(fs/writeFile) / 并发调度(Promise.all) / durable memory / 上下文压缩(compress/summary/prune/budget) 八项均无命中。`executor.ts` 的 `for (const call of calls) { await ... }` 是 spec 允许的串行执行，非并发。
+   - **测试审计**：`tests/harness/` 7 个 .test.ts / 51 用例，GATE_B_CASES=0；多工具调用测试验串行顺序（S3/S5），跨 run 测试验消息不泄漏（非 durable memory），stream interruption 验 ProtocolError（非取消信号）。
+   - **依赖与边界审计**：`src/harness/` 无 import 指向 `src/agent-loop/` 或 `kb_*`；外部依赖仅 `@anthropic-ai/sdk`(type-only) / `ajv@^8.17.1` / `ajv-formats@^2.1.1`，无 p-retry / p-timeout / pino / 持久化库等 Gate B 性质依赖；反向隔离也 clean（`src/agent-loop/` 与产品路径无 import `src/harness/`，仅 `tests/harness/` 引用）。
+
+**Scope note**：本票验收范围是替身验证可重放（spec 明确"Gate A 用替身 model / 替身 tool 验证，不接产品流量"）。真实模型 live verification 不在 016 验收范围，留待 017 Gate B 细化时作为"Gate A 暴露的真实失败"输入处理——017 现已释放进 frontier。
+
+阻塞释放：017（按迁移需要加固 Loop）进 frontier，018 仍被 017 阻塞。
