@@ -1,0 +1,1755 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GBrain 向量检索技术栈全景</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <style>
+      :root {
+        --bg: #0f172a;
+        --bg2: #1e293b;
+        --bg3: #334155;
+        --fg: #e2e8f0;
+        --fg2: #94a3b8;
+        --fg3: #64748b;
+        --accent: #38bdf8;
+        --accent2: #818cf8;
+        --green: #4ade80;
+        --yellow: #fbbf24;
+        --pink: #f472b6;
+        --orange: #fb923c;
+        --red: #f87171;
+        --border: #334155;
+        --radius: 10px;
+        --sidebar-w: 260px;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+        line-height: 1.7;
+      }
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+
+      /* Sidebar */
+      .sidebar {
+        position: fixed;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: var(--sidebar-w);
+        background: var(--bg2);
+        border-right: 1px solid var(--border);
+        overflow-y: auto;
+        z-index: 100;
+        padding: 20px 0;
+      }
+      .sidebar h2 {
+        font-size: 14px;
+        color: var(--accent);
+        padding: 0 20px;
+        margin-bottom: 16px;
+        letter-spacing: 1px;
+      }
+      .sidebar .nav-item {
+        display: block;
+        padding: 8px 20px;
+        font-size: 13px;
+        color: var(--fg2);
+        cursor: pointer;
+        border-left: 3px solid transparent;
+        transition: all 0.15s;
+      }
+      .sidebar .nav-item:hover {
+        color: var(--fg);
+        background: var(--bg3);
+      }
+      .sidebar .nav-item.active {
+        color: var(--accent);
+        border-left-color: var(--accent);
+        background: rgba(56, 189, 248, 0.08);
+      }
+      .sidebar .nav-item .num {
+        display: inline-block;
+        width: 22px;
+        color: var(--fg3);
+        font-size: 11px;
+      }
+
+      /* Main */
+      .main {
+        margin-left: var(--sidebar-w);
+        padding: 40px 48px 80px;
+        max-width: 1100px;
+      }
+      .page {
+        display: none;
+      }
+      .page.active {
+        display: block;
+      }
+      h1 {
+        font-size: 28px;
+        margin-bottom: 8px;
+        color: #fff;
+      }
+      h2 {
+        font-size: 22px;
+        margin: 36px 0 12px;
+        color: var(--accent);
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 8px;
+      }
+      h3 {
+        font-size: 17px;
+        margin: 24px 0 8px;
+        color: var(--fg);
+      }
+      p,
+      li {
+        font-size: 14.5px;
+        color: var(--fg);
+        margin-bottom: 8px;
+      }
+      ul,
+      ol {
+        padding-left: 24px;
+      }
+      .subtitle {
+        color: var(--fg2);
+        font-size: 14px;
+        margin-bottom: 24px;
+      }
+
+      /* Cards */
+      .card {
+        background: var(--bg2);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 20px 24px;
+        margin: 16px 0;
+      }
+      .card-title {
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--accent);
+        margin-bottom: 8px;
+      }
+
+      /* Tables */
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 12px 0;
+        font-size: 13px;
+      }
+      th {
+        background: var(--bg3);
+        color: var(--fg);
+        text-align: left;
+        padding: 8px 12px;
+        font-weight: 600;
+      }
+      td {
+        padding: 7px 12px;
+        border-bottom: 1px solid var(--border);
+        color: var(--fg2);
+      }
+      tr:hover td {
+        background: rgba(56, 189, 248, 0.04);
+      }
+
+      /* Code */
+      code {
+        background: var(--bg3);
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 12.5px;
+        font-family: "Cascadia Code", "Fira Code", monospace;
+        color: var(--yellow);
+      }
+      pre {
+        background: var(--bg2);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 16px 20px;
+        overflow-x: auto;
+        margin: 12px 0;
+      }
+      pre code {
+        background: none;
+        padding: 0;
+        color: var(--fg);
+        font-size: 13px;
+      }
+
+      /* Callouts */
+      .callout {
+        border-radius: var(--radius);
+        padding: 14px 18px;
+        margin: 14px 0;
+        font-size: 13.5px;
+      }
+      .callout-warn {
+        background: rgba(251, 191, 36, 0.1);
+        border-left: 4px solid var(--yellow);
+      }
+      .callout-info {
+        background: rgba(56, 189, 248, 0.08);
+        border-left: 4px solid var(--accent);
+      }
+      .callout-dev {
+        background: rgba(74, 222, 128, 0.08);
+        border-left: 4px solid var(--green);
+      }
+      .callout-danger {
+        background: rgba(248, 113, 113, 0.08);
+        border-left: 4px solid var(--red);
+      }
+      .callout strong {
+        color: var(--fg);
+      }
+
+      /* Mermaid */
+      .mermaid {
+        background: var(--bg2);
+        border-radius: var(--radius);
+        padding: 24px;
+        margin: 16px 0;
+        overflow-x: auto;
+      }
+      .mermaid svg {
+        max-width: 100%;
+      }
+
+      /* Badges */
+      .badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: 600;
+      }
+      .badge-green {
+        background: rgba(74, 222, 128, 0.15);
+        color: var(--green);
+      }
+      .badge-yellow {
+        background: rgba(251, 191, 36, 0.15);
+        color: var(--yellow);
+      }
+      .badge-red {
+        background: rgba(248, 113, 113, 0.15);
+        color: var(--red);
+      }
+      .badge-blue {
+        background: rgba(56, 189, 248, 0.15);
+        color: var(--accent);
+      }
+
+      /* Formula */
+      .formula {
+        background: var(--bg2);
+        border: 1px solid var(--accent2);
+        border-radius: var(--radius);
+        padding: 16px 20px;
+        margin: 12px 0;
+        font-family: "Cascadia Code", monospace;
+        font-size: 14px;
+        color: var(--accent2);
+        text-align: center;
+      }
+
+      /* Responsive */
+      @media (max-width: 900px) {
+        .sidebar {
+          display: none;
+        }
+        .main {
+          margin-left: 0;
+          padding: 24px 20px;
+        }
+      }
+      /* Print */
+      @media print {
+        .sidebar {
+          display: none;
+        }
+        .main {
+          margin-left: 0;
+        }
+        .page {
+          display: block !important;
+          page-break-after: always;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <nav class="sidebar">
+      <h2>📐 向量检索技术栈</h2>
+      <div class="nav-item active" onclick="showPage(0)">
+        <span class="num">0</span>总览 Overview
+      </div>
+      <div class="nav-item" onclick="showPage(1)">
+        <span class="num">1</span>写入侧 Ingestion
+      </div>
+      <div class="nav-item" onclick="showPage(2)">
+        <span class="num">2</span>读取侧 18 阶段管线
+      </div>
+      <div class="nav-item" onclick="showPage(3)">
+        <span class="num">3</span>融合与打分公式
+      </div>
+      <div class="nav-item" onclick="showPage(4)">
+        <span class="num">4</span>后处理与重排
+      </div>
+      <div class="nav-item" onclick="showPage(5)">
+        <span class="num">5</span>存储层与向量索引
+      </div>
+      <div class="nav-item" onclick="showPage(6)">
+        <span class="num">6</span>搜索模式 Mode
+      </div>
+      <div class="nav-item" onclick="showPage(7)">
+        <span class="num">7</span>二次开发指南
+      </div>
+    </nav>
+
+    <div class="main">
+      <!-- ==================== PAGE 0: OVERVIEW ==================== -->
+      <div class="page active" id="page-0">
+        <h1>GBrain 向量检索技术栈全景</h1>
+        <p class="subtitle">
+          分析对象：<code>_upstream_gbrain/</code>（garrytan/gbrain
+          v0.42.57.0，commit <code>058f448</code>）· 方法：codebase-memory 图谱
+          + 4 路并行子代理源码深挖 + <code>hybrid.ts</code> 逐段交叉验证
+        </p>
+
+        <div class="callout callout-info">
+          <strong>核心认知：</strong>GBrain 的检索不是"向量搜索"，而是<strong
+            >四路召回 + 多级重排的混合栈</strong
+          >。官方理念：单一策略都会失败，四层叠加才互补——向量（语义）+
+          BM25（词法）+ RRF（融合）+ 知识图谱（关系）。
+        </div>
+
+        <div class="mermaid">
+          flowchart TB subgraph WRITE["写入侧 Ingestion（离线）"] direction LR
+          W1["源文件<br />markdown / 源码 / 图片"] --> W2["分块 Chunker<br />recursive
+          / code(Tree-sitter)"] W2 --> W3["AI Gateway<br />recipes 多 provider"]
+          W3 --> W4["pgvector 落库<br />content_chunks.embedding"] end subgraph
+          READ["读取侧 Query（在线）"] direction TB Q["用户 query"] -->
+          I["意图分类<br />零 LLM 正则"] I --> R1["向量召回<br />HNSW cosine"] I
+          --> R2["关键词召回<br />BM25 tsvector"] I --> R3["关系召回<br />typed-edge
+          图遍历"] I --> R4["源加权<br />SQL CASE"] R1 & R2 & R3 & R4 --> F["RRF
+          加权融合"] F --> C["cosine 重打分<br />0.7·RRF + 0.3·cos"] C -->
+          P["post-fusion 5 级增强"] P --> D["dedup 四层去重"] D -->
+          RK["cross-encoder rerank<br />zerank-2"] RK --> T["autocut +
+          token-budget"] T --> O["结果 + evidence 契约"] end W4
+          -.提供向量与索引.-> R1 W4 -.提供 tsvector.-> R2
+        </div>
+
+        <h2>四个关键数字</h2>
+        <table>
+          <tr>
+            <th>项</th>
+            <th>值</th>
+            <th>出处</th>
+          </tr>
+          <tr>
+            <td>RRF 常数 k</td>
+            <td><code>60</code></td>
+            <td><code>hybrid.ts:47</code> RRF_K</td>
+          </tr>
+          <tr>
+            <td>cosine 重打分混合比</td>
+            <td><code>0.7·normRRF + 0.3·cosine</code></td>
+            <td><code>hybrid.ts:1986</code></td>
+          </tr>
+          <tr>
+            <td>compiled_truth 提升</td>
+            <td><code>×2.0</code>（归一化后）</td>
+            <td><code>hybrid.ts:48</code></td>
+          </tr>
+          <tr>
+            <td>向量距离算子</td>
+            <td>仅 cosine <code>&lt;=&gt;</code>（无 L2/内积）</td>
+            <td><code>postgres-engine.ts:1933</code></td>
+          </tr>
+        </table>
+
+        <h2>官方 BrainBench 基准</h2>
+        <table>
+          <tr>
+            <th>策略</th>
+            <th>P@5</th>
+            <th>R@5</th>
+            <th>说明</th>
+          </tr>
+          <tr>
+            <td>ripgrep BM25 only</td>
+            <td>~18</td>
+            <td>~75</td>
+            <td>纯词法基线</td>
+          </tr>
+          <tr>
+            <td>vector-only RAG</td>
+            <td>~18</td>
+            <td>~80</td>
+            <td>标准 RAG</td>
+          </tr>
+          <tr>
+            <td>hybrid + RRF（无图）</td>
+            <td>~18</td>
+            <td>~85</td>
+            <td>混合但无图</td>
+          </tr>
+          <tr>
+            <td><strong>full stack（含图）</strong></td>
+            <td><strong>49.1</strong></td>
+            <td><strong>97.9</strong></td>
+            <td>+31 P@5 来自图 + 抽取质量</td>
+          </tr>
+        </table>
+        <div class="callout callout-warn">
+          <strong>结论：</strong>图遍历是承重墙（+31
+          P@5），不是边际特性。二次开发如果只看向量部分而忽略图，会丢失最大的质量来源。
+        </div>
+      </div>
+
+      <!-- ==================== PAGE 1: INGESTION ==================== -->
+      <div class="page" id="page-1">
+        <h1>§1 写入侧：文本 → 向量</h1>
+        <p class="subtitle">从源文件到 pgvector 落库的完整链路</p>
+
+        <h2>1.1 分块（Chunking）策略</h2>
+        <p>
+          生产主链路<strong>只有两条</strong>，并非"可配置 chunker 框架"。<code
+            >semantic.ts</code
+          >
+          和 <code>llm.ts</code> 虽然实现完整，但<strong
+            >未接入生产 ingestion</strong
+          >。
+        </p>
+
+        <div class="mermaid">
+          flowchart LR IN["import-file.ts"] -->|markdown/正文|
+          REC["recursive.ts<br />分隔符递归 + 贪心合并"] IN -->|源码文件|
+          CODE["code.ts<br />Tree-sitter AST 语义分块"] CODE -.解析失败/超时.->
+          RECFB["recursive 风格 fallback"] SEM["semantic.ts<br />句向量相似度边界"]
+          -.未接入生产.-> X1["（仅定义）"] LLM["llm.ts<br />LLM 判主题切换点"]
+          -.未接入生产.-> X1
+        </div>
+
+        <table>
+          <tr>
+            <th>Chunker</th>
+            <th>算法</th>
+            <th>默认参数</th>
+            <th>状态</th>
+          </tr>
+          <tr>
+            <td><strong>recursive</strong></td>
+            <td>
+              分隔符优先级（段落→行→句→从句→词→字符）递归切分 + 贪心合并 + 重叠
+              + 6000 字符硬顶
+            </td>
+            <td>
+              <code>chunkSize=300词</code> / <code>overlap=50词</code> /
+              <code>maxChars=6000</code>
+            </td>
+            <td><span class="badge badge-green">✅ 文本默认</span></td>
+          </tr>
+          <tr>
+            <td><strong>code</strong></td>
+            <td>Tree-sitter AST，以函数/类/方法为自然块，同次解析抽取调用边</td>
+            <td>
+              <code>300 tokens</code> / 大节点 <code>1000</code> / 超时
+              <code>30s</code>
+            </td>
+            <td><span class="badge badge-green">✅ 源码默认</span></td>
+          </tr>
+          <tr>
+            <td>semantic</td>
+            <td>句向量 cosine + Savitzky-Golay 一阶导找边界（bottom 20%）</td>
+            <td>边界最小间距 2 句</td>
+            <td><span class="badge badge-yellow">⚠️ 仅定义</span></td>
+          </tr>
+          <tr>
+            <td>llm</td>
+            <td>LLM 在 128 词候选窗口中判主题切换点</td>
+            <td>window=5 / 重试 3</td>
+            <td><span class="badge badge-yellow">⚠️ 仅定义</span></td>
+          </tr>
+        </table>
+
+        <div class="card">
+          <div class="card-title">🔧 开发要点</div>
+          <ul>
+            <li>
+              <code>compiled_truth</code> 与 <code>timeline</code>
+              <strong>分别独立分块</strong>并打
+              <code>chunk_source</code> 标记——这是读取侧 <code>×2.0</code> boost
+              的数据基础。
+            </li>
+            <li>
+              分块带<strong>版本号</strong>（<code
+                >MARKDOWN_CHUNKER_VERSION=3</code
+              >
+              / <code>CHUNKER_VERSION=4</code>），写入
+              page，升级后触发重分块/重嵌。
+            </li>
+            <li>
+              <code>recursive</code> 写入前做<strong>隐私预处理</strong>：剥离
+              takes fence、仅保留 <code>world</code> 可见
+              facts（<code>recursive.ts:58-88</code>）。
+            </li>
+            <li>
+              字符硬切分本身带重叠：<code>overlap = min(500, maxChars/10)</code
+              >，默认 6000 字符时 overlap 500。
+            </li>
+          </ul>
+        </div>
+
+        <h2>1.2 Embedding Provider 抽象（Gateway + Recipes）</h2>
+        <p>
+          这是接 LLM/embedding 的<strong>唯一正确入口</strong>。纯数据配方 +
+          静态工厂模式。
+        </p>
+
+        <div class="mermaid">
+          flowchart TB CALL["embed(texts) / embedQuery(text)"] -->
+          GW["ai/gateway.ts 统一网关"] GW --> RES["recipe 解析 provider:model"]
+          RES --> IMPL{"implementation"} IMPL -->|native-openai| OAI["OpenAI
+          text-embedding-3-large 1536d"] IMPL -->|openai-compatible| VOY["Voyage
+          voyage-multimodal-3 1024d"] IMPL -->|openai-compatible| OLL["Ollama
+          本地 nomic-embed 768d"] IMPL -->|openai-compatible| DASH["DashScope
+          text-embedding-v3 1024d"] IMPL -->|native-google| GOO["Google"] IMPL
+          -->|...| MORE["zhipu / minimax / openrouter / zeroentropy"]
+        </div>
+
+        <div class="card">
+          <div class="card-title">📋 Recipe 声明内容（纯数据）</div>
+          <ul>
+            <li>
+              provider id/name、implementation 类型（<code>native-openai</code>
+              / <code>openai-compatible</code> / <code>native-google</code> /
+              <code>native-anthropic</code>）
+            </li>
+            <li>
+              默认 base URL、API key 环境变量名（如
+              <code>OPENAI_API_KEY</code>）
+            </li>
+            <li>支持的 embedding models、默认维度和可选维度</li>
+            <li>
+              <code>max_batch_tokens</code>、<code>chars_per_token</code>（默认
+              4）、<code>safety_factor</code>（默认 0.8）
+            </li>
+            <li>是否支持 multimodal</li>
+          </ul>
+        </div>
+
+        <h3>非对称编码</h3>
+        <p>
+          ingestion 用 <code>embed()</code>（<code>document</code>
+          编码），查询用 <code>embedQuery()</code>（<code>query</code>
+          编码）。Voyage/ZeroEntropy 等非对称模型靠此区分。
+        </p>
+
+        <h3>维度协商</h3>
+        <div class="formula">
+          opts.dimensions → config.embedding_dimensions → DEFAULT（当前通用
+          1536）
+        </div>
+        <p>
+          provider
+          返回后<strong>逐向量校验长度</strong>，不符即抛配置错误（<code>gateway.ts:1582</code>）。
+        </p>
+
+        <h3>Batch 策略（两层）</h3>
+        <table>
+          <tr>
+            <th>层</th>
+            <th>机制</th>
+            <th>参数</th>
+          </tr>
+          <tr>
+            <td>外层 <code>embedBatch</code></td>
+            <td>每 100 条分页（进度粒度）</td>
+            <td><code>BATCH_SIZE=100</code></td>
+          </tr>
+          <tr>
+            <td>内层 gateway</td>
+            <td>
+              按 provider token 预算 <code>splitByTokenBudget</code>，每条先截
+              8000 字符
+            </td>
+            <td><code>budget = max_batch_tokens × safety_factor</code></td>
+          </tr>
+        </table>
+        <p>
+          provider 报 batch 超限 →
+          <strong>对半递归 + safety_factor×0.5</strong>；连续成功 10 批后 ×1.5
+          恢复。
+        </p>
+
+        <div class="callout callout-warn">
+          <strong>不做统一 L2 归一化：</strong>gateway 仅
+          <code>new Float32Array(e)</code>，是否单位化取决于 provider。cosine
+          算子本身按范数计算，故不依赖归一化不变量。别假设"provider
+          返回单位向量"。
+        </div>
+
+        <h2>1.3 落库与多向量列</h2>
+        <p>
+          主表
+          <code>content_chunks</code>
+          支持<strong>多向量空间并存</strong>（不同空间，不可交叉比较）：
+        </p>
+        <table>
+          <tr>
+            <th>列</th>
+            <th>类型</th>
+            <th>维度</th>
+            <th>默认模型</th>
+            <th>用途</th>
+          </tr>
+          <tr>
+            <td><code>embedding</code></td>
+            <td><code>vector(1536)</code></td>
+            <td>1536</td>
+            <td>text-embedding-3-large</td>
+            <td>主文本空间</td>
+          </tr>
+          <tr>
+            <td><code>embedding_image</code></td>
+            <td><code>vector(1024)</code></td>
+            <td>1024</td>
+            <td>voyage-multimodal-3</td>
+            <td>图片空间（partial HNSW）</td>
+          </tr>
+          <tr>
+            <td><code>embedding_multimodal</code></td>
+            <td><code>vector(1024)</code></td>
+            <td>1024</td>
+            <td>voyage multimodal-3</td>
+            <td>统一 cross-modal 空间</td>
+          </tr>
+        </table>
+        <p>
+          另有
+          <code>takes.embedding</code>(1536)、<code>facts.embedding</code>（按
+          pgvector 版本动态选 <code>halfvec</code>/<code>vector</code>）。
+        </p>
+
+        <h3>写入顺序（markdown）</h3>
+        <pre><code>chunkText()
+  → 可选 contextual-retrieval title 包装（仅包 embedding 输入，不改 canonical chunk_text）
+  → embedBatch()
+  → 事务内：putPage() + upsertChunks() + setPageEmbeddingSignature()</code></pre>
+
+        <h3>源码增量</h3>
+        <p>
+          按 chunk hash
+          比对旧块，<strong>未变化块复用旧向量</strong>，仅对新增/变化块调
+          embedding（<code>import-file.ts:1115-1147</code>）。
+        </p>
+
+        <h2>1.4 Backfill 与 CLI 入口</h2>
+        <table>
+          <tr>
+            <th>命令</th>
+            <th>用途</th>
+          </tr>
+          <tr>
+            <td><code>gbrain capture</code></td>
+            <td>人类统一 ingestion 入口</td>
+          </tr>
+          <tr>
+            <td><code>gbrain sync</code></td>
+            <td>仓库批量（可 deferred 后由 embed-backfill job 补）</td>
+          </tr>
+          <tr>
+            <td><code>gbrain import</code></td>
+            <td>单文件导入</td>
+          </tr>
+          <tr>
+            <td><code>gbrain embed --stale</code></td>
+            <td>
+              显式生成/回填向量（<strong>这才是真正补向量的命令</strong>）
+            </td>
+          </tr>
+        </table>
+        <div class="callout callout-danger">
+          <strong>陷阱：</strong><code>backfill-registry</code> 里的
+          <code>embedding_voyage</code> 是
+          <strong>declared-only no-op</strong>（<code
+            >needsBackfill: '1 = 0'</code
+          >）。别用它补向量。
+        </div>
+      </div>
+
+      <!-- ==================== PAGE 2: PIPELINE ==================== -->
+      <div class="page" id="page-2">
+        <h1>§2 读取侧：18 阶段主管线</h1>
+        <p class="subtitle">
+          以
+          <code>hybridSearch</code>（<code>hybrid.ts:809</code>）源码为准。官方
+          RETRIEVAL.md 的阶段顺序已过时。
+        </p>
+
+        <div class="mermaid">
+          flowchart TB START(["hybridSearch(query, opts)"]) --> M1["1 模式解析
+          resolveSearchMode"] M1 --> M2["2 嵌入列解析 resolveEmbeddingColumn"]
+          M2 --> M3["3 意图分类（零LLM）classifyQuery"] M3 --> M4{"modality
+          模糊且 llm_intent 开?"} M4 -->|是| M5["LLM 模态裁决 Haiku 1s
+          fail-open"] M4 -->|否| KW M5 --> KW["4 关键词召回 searchKeyword"] KW
+          --> EXP{"expansion 开?"} EXP -->|是| EXPQ["LLM 多查询扩展 2-3 变体"]
+          EXP -->|否| VEC EXPQ --> VEC["5 向量召回 searchVector(HNSW)"] VEC -->
+          REL{"relational 开?"} REL -->|是| RELARM["关系召回臂 typed-edge 图"]
+          REL -->|否| FUSE RELARM --> FUSE["6 RRF 加权融合"] FUSE --> COS["7
+          cosine 重打分 0.7·RRF+0.3·cos"] COS --> POST["8 post-fusion 5 级增强"]
+          POST --> EXACT["9 exact-match boost"] EXACT --> TP{"walkDepth>0 或
+          nearSymbol?"} TP -->|是| TWO["two-pass 结构扩展"] TP -->|否| DEDUP TWO
+          --> DEDUP["10 dedup 四层"] DEDUP --> ESC{"detail=low 且 0 命中?"} ESC
+          -->|是| RECUR["递归升级 detail=high"] ESC -->|否| RERANK RECUR -->
+          RERANK["11 cross-encoder rerank"] RERANK --> ALIAS["12 alias hop"]
+          ALIAS --> EV["13 evidence 契约戳"] EV --> ADAPT["14 adaptive return"]
+          ADAPT --> CUT["15 autocut 评分断崖"] CUT --> SLICE["16
+          slice(offset,limit)"] SLICE --> BUDGET["17 token-budget"] BUDGET -->
+          TEL["18 telemetry"] TEL --> END(["SearchResult[]"])
+        </div>
+
+        <div class="callout callout-info">
+          <strong>缓存包装：</strong>公开入口是
+          <code>hybridSearchCached</code
+          >（<code>hybrid.ts:1569</code>）——最前做语义缓存
+          lookup，命中则跳过召回/融合/去重/rerank，仅重跑 slice +
+          budget；未命中跑主线后异步 store。
+        </div>
+
+        <h2>2.1 四路召回详解</h2>
+        <table>
+          <tr>
+            <th>臂</th>
+            <th>实现</th>
+            <th>算子/机制</th>
+            <th>top-k 策略</th>
+          </tr>
+          <tr>
+            <td><strong>向量</strong></td>
+            <td><code>engine.searchVector</code></td>
+            <td>pgvector cosine <code>&lt;=&gt;</code>，HNSW 候选 CTE</td>
+            <td><code>innerLimit = offset + max(limit·5, 100)</code></td>
+          </tr>
+          <tr>
+            <td><strong>关键词</strong></td>
+            <td><code>engine.searchKeyword</code></td>
+            <td>
+              <code>search_vector @@ websearch_to_tsquery</code> 过滤 +
+              <code>ts_rank</code> 打分（<strong>无 trigram</strong>）
+            </td>
+            <td><code>innerLimit = min(limit·3, MAX·3)</code></td>
+          </tr>
+          <tr>
+            <td><strong>关系</strong></td>
+            <td><code>buildRelationalArm</code></td>
+            <td>
+              正则解析关系型 query（who_rel/who_at/connects/intro），走
+              typed-edge 图
+            </td>
+            <td>仅 relational 查询触发</td>
+          </tr>
+          <tr>
+            <td><strong>源加权</strong></td>
+            <td><code>sql-ranking.ts</code></td>
+            <td>
+              <code>CASE WHEN slug LIKE 'prefix%' THEN factor</code
+              >（前缀按长度降序）
+            </td>
+            <td><code>detail='high'</code> 时禁用</td>
+          </tr>
+        </table>
+
+        <h3>向量召回两阶段 CTE</h3>
+        <pre><code>-- postgres-engine.ts:1927
+WITH hnsw_candidates AS (
+  SELECT ..., 1 - (cc."embedding" &lt;=&gt; $1::vector) AS raw_score
+  FROM content_chunks cc JOIN pages p JOIN sources s
+  WHERE cc."embedding" IS NOT NULL AND cc.modality = 'text'
+  ORDER BY cc."embedding" &lt;=&gt; $1::vector   -- 裸距离，让 HNSW 生效
+  LIMIT $innerLimit
+),
+best_per_page AS (
+  SELECT DISTINCT ON (COALESCE(source_id,'default'), slug) *
+  FROM hnsw_candidates
+  ORDER BY ..., score DESC                  -- 按页取最优 chunk（max-pool）
+)
+SELECT ... FROM best_per_page ORDER BY score DESC LIMIT $limit</code></pre>
+
+        <div class="card">
+          <div class="card-title">🔧 开发要点：max-pool 设计</div>
+          <p>
+            <code>DISTINCT ON (source_id, slug)</code> 确保向量侧返回 N
+            个<strong>不同页面</strong>（每页最优 chunk），而非 N 个 chunk
+            在下游折叠成更少页面。复合键含 <code>source_id</code> 防跨源误并。
+          </p>
+        </div>
+
+        <h2>2.2 意图分类（零 LLM）</h2>
+        <p>
+          <code>query-intent.ts:248</code>
+          <code>classifyQuery</code>：纯正则，优先级
+          <code
+            >full_context &gt; temporal &gt; event &gt; entity &gt;
+            general</code
+          >。输出
+          <code
+            >QuerySuggestions { intent, suggestedDetail, suggestedSalience,
+            suggestedRecency, suggestedModality }</code
+          >。
+        </p>
+        <p>
+          仅在 <code>cross_modal_llm_intent: true</code> + 正则返回
+          <code>'text'</code> + 查询模糊时，才触发 Haiku 1s 超时的 LLM
+          模态裁决（<code>llm-intent.ts:37</code>），频率 &lt;1%。
+        </p>
+
+        <h2>2.3 查询扩展（LLM）</h2>
+        <p>
+          <code>expansion.ts:57</code> <code>expandQuery</code>：仅当 mode
+          <code>expansion=true</code>（tokenmax）+ 词数 ≥3 时触发。生成 2-3
+          个同义改写变体，原 query 始终在首项。双向 sanitization 防注入。
+        </p>
+
+        <h2>2.4 关系召回（图遍历）</h2>
+        <p>
+          <code>relational-intent.ts:222</code>
+          <code>parseRelationalQuery</code>：纯正则，4 种
+          kind（who_rel/who_at/connects/intro）。命中后
+          <code>buildRelationalArm</code> +
+          <code>engine.relationalFanout</code> 走 typed-edge
+          图，注入边推导答案到 RRF。非关系查询纯 no-op。
+        </p>
+
+        <h2>2.5 Two-Pass 结构检索</h2>
+        <p>
+          <code>two-pass.ts</code>：仅当 <code>walkDepth&gt;0</code> 或
+          <code>nearSymbol</code> 设置时激活。从锚点集出发，沿
+          <code>code_edges_chunk</code> + <code>code_edges_symbol</code> 表走
+          1~2 跳（<code>MAX_WALK_DEPTH=2</code>，每跳邻居 cap 50）。邻居分数 =
+          <code>anchor.score / (1+hop)</code>。
+        </p>
+      </div>
+
+      <!-- ==================== PAGE 3: SCORING ==================== -->
+      <div class="page" id="page-3">
+        <h1>§3 融合与打分公式</h1>
+        <p class="subtitle">
+          一个 chunk 从 HNSW 候选到最终结果的分数演化全链路
+        </p>
+
+        <div class="mermaid">
+          flowchart LR A["HNSW raw_score<br />= 1 - cosine_dist"] --> B["RRF
+          贡献<br />1/(k+rank)"] B --> C["归一化 /max"] C --> D["×2.0 if
+          compiled_truth"] D --> E["cosine 重打分<br />0.7·RRF+0.3·cos"] E -->
+          F["×backlink ×salience<br />×recency ×title"] F --> G["×graph
+          1.05/1.10/0.95"] G --> H["×alias 1.05/1.10"] H --> I["rerank_score<br />cross-encoder
+          重排"] I --> J["autocut 断崖裁剪"] J --> K["token-budget 截断"]
+        </div>
+
+        <h2>3.1 RRF 加权融合</h2>
+        <div class="formula">
+          score(chunk) = Σ 1/(k_i + rank_i)&nbsp;&nbsp;&nbsp;&nbsp;其中 k_i =
+          RRF_K / weight_i，RRF_K = 60
+        </div>
+        <div class="formula">
+          normalized = raw / max(raw)&nbsp;&nbsp;→&nbsp;&nbsp;boosted =
+          normalized × (2.0 if compiled_truth else 1.0)
+        </div>
+
+        <p>
+          实现：<code>rrfFusionWeighted</code>（<code>hybrid.ts:1860</code>）。每路独立
+          k，intent 权重 &gt;1 → k 降低 → 该路 top 排名更陡。
+        </p>
+
+        <div class="card">
+          <div class="card-title">融合键（防跨源误并）</div>
+          <pre><code>function rrfKey(r: SearchResult): string {
+  return `${r.source_id ?? 'default'}:${r.slug}:${r.chunk_id ?? r.chunk_text.slice(0, 50)}`;
+}</code></pre>
+        </div>
+
+        <h3>Intent 权重表</h3>
+        <table>
+          <tr>
+            <th>Intent</th>
+            <th>keywordW</th>
+            <th>vectorW</th>
+            <th>recency</th>
+            <th>exactMatchBoost</th>
+          </tr>
+          <tr>
+            <td>entity</td>
+            <td>1.15</td>
+            <td>1.0</td>
+            <td>—</td>
+            <td>1.25</td>
+          </tr>
+          <tr>
+            <td>temporal</td>
+            <td>1.0</td>
+            <td>1.0</td>
+            <td>on</td>
+            <td>1.0</td>
+          </tr>
+          <tr>
+            <td>event</td>
+            <td>1.20</td>
+            <td>0.95</td>
+            <td>on</td>
+            <td>1.10</td>
+          </tr>
+          <tr>
+            <td>general</td>
+            <td>1.0</td>
+            <td>1.0</td>
+            <td>—</td>
+            <td>1.0</td>
+          </tr>
+        </table>
+
+        <h2>3.2 Cosine 重打分</h2>
+        <div class="formula">
+          final = 0.7 · normRRF + 0.3 · cosine(query_emb, chunk_emb)
+        </div>
+        <p>
+          实现：<code>cosineReScore</code>（<code>hybrid.ts:1951</code>）。关键：<strong
+            >从 HNSW 实际使用的同一向量列</strong
+          >
+          hydrate embedding
+          重算（<code>getEmbeddingsByChunkIds(col)</code>），避免 Voyage
+          检索却拿 OpenAI 向量重算导致 NaN/错排。
+        </p>
+
+        <h2>3.3 post-fusion 5 级增强</h2>
+        <p>
+          <code>runPostFusionStages</code
+          >（<code>hybrid.ts:432</code>）。入口先<strong>一次性</strong>截存
+          <code>base_score</code> 并计算 floor
+          阈值（单一基线，所有级共享，防弱页越级）：
+        </p>
+
+        <div class="mermaid">
+          flowchart LR B["base_score 截存 + floor 阈值"] --> S1["backlink
+          0.05·log"] S1 --> S2["salience 0.15/0.30·log"] S2 --> S3["recency
+          半衰期衰减 + chronicle"] S3 --> S4["title-phrase ×1.25"] S4 -->
+          S5["graph-signals ×1.05/1.10/0.95"] S5 --> S6["alias_resolved ×1.05"]
+        </div>
+
+        <h3>Recency 半衰期表（按 slug 前缀）</h3>
+        <div class="formula">
+          component = coef · halflife / (halflife +
+          daysOld)&nbsp;&nbsp;→&nbsp;&nbsp;factor = 1 + strength · component
+        </div>
+        <table>
+          <tr>
+            <th>前缀</th>
+            <th>halflifeDays</th>
+            <th>coefficient</th>
+            <th>说明</th>
+          </tr>
+          <tr>
+            <td>concepts</td>
+            <td>0</td>
+            <td>0</td>
+            <td>evergreen 永青</td>
+          </tr>
+          <tr>
+            <td>originals</td>
+            <td>180</td>
+            <td>0.5</td>
+            <td></td>
+          </tr>
+          <tr>
+            <td>writing</td>
+            <td>365</td>
+            <td>0.4</td>
+            <td></td>
+          </tr>
+          <tr>
+            <td>daily</td>
+            <td>14</td>
+            <td>1.5</td>
+            <td>快速衰减</td>
+          </tr>
+          <tr>
+            <td>chat</td>
+            <td>7</td>
+            <td>1.0</td>
+            <td>最快衰减</td>
+          </tr>
+          <tr>
+            <td>people/companies</td>
+            <td>365</td>
+            <td>0.3</td>
+            <td></td>
+          </tr>
+          <tr>
+            <td>fallback</td>
+            <td>90</td>
+            <td>0.5</td>
+            <td></td>
+          </tr>
+        </table>
+
+        <h3>Graph Signals 常数</h3>
+        <table>
+          <tr>
+            <th>信号</th>
+            <th>乘数</th>
+            <th>条件</th>
+          </tr>
+          <tr>
+            <td>邻接命中</td>
+            <td>×1.05</td>
+            <td>hits ≥ 2</td>
+          </tr>
+          <tr>
+            <td>跨源命中</td>
+            <td>×1.10</td>
+            <td>cross_source_hits ≥ 2</td>
+          </tr>
+          <tr>
+            <td>会话去重</td>
+            <td>×0.95</td>
+            <td>同 session prefix ≥ 2，保留最高分者</td>
+          </tr>
+        </table>
+        <p>全部级 <strong>fail-open</strong>（单级异常不破坏整条管线）。</p>
+      </div>
+
+      <!-- ==================== PAGE 4: POST-PROCESSING ==================== -->
+      <div class="page" id="page-4">
+        <h1>§4 后处理与重排</h1>
+        <p class="subtitle">
+          dedup → rerank → alias hop → evidence → adaptive → autocut → budget
+        </p>
+
+        <h2>4.1 Dedup 四层去重</h2>
+        <p>
+          <code>dedup.ts</code> <code>dedupResults</code>，默认
+          <code>cosineThreshold=0.85</code> / <code>maxTypeRatio=0.6</code> /
+          <code>maxPerPage=2</code>：
+        </p>
+        <ol>
+          <li>
+            <strong>每页 top3</strong>：按复合 pageKey
+            <code>(source_id, slug)</code> 每页按 score 保留 top3
+          </li>
+          <li>
+            <strong>Jaccard 去重</strong>：chunk_text lowercase words 的 Jaccard
+            &gt; 0.85 → 删除
+          </li>
+          <li>
+            <strong>type 比例</strong>：<code>maxPerType = ceil(len × 0.6)</code
+            >，超额丢弃
+          </li>
+          <li><strong>每页上限</strong>：maxPerPage=2</li>
+        </ol>
+        <p>
+          末了 <code>guaranteeCompiledTruth</code>：若某页没有 compiled_truth
+          chunk，从 preDedup 同页挑最高 compiled_truth 替换该页最低分 chunk。
+        </p>
+
+        <h2>4.2 Cross-Encoder Rerank</h2>
+        <p>
+          <code>rerank.ts</code> <code>applyReranker</code>：走
+          <code>gatewayRerank</code>（<strong>非本地算法</strong>，是
+          query+document cross-encoder）。
+        </p>
+        <table>
+          <tr>
+            <th>配置</th>
+            <th>conservative</th>
+            <th>balanced</th>
+            <th>tokenmax</th>
+          </tr>
+          <tr>
+            <td>enabled</td>
+            <td>off</td>
+            <td><strong>on</strong></td>
+            <td>on</td>
+          </tr>
+          <tr>
+            <td>model</td>
+            <td>—</td>
+            <td>zeroentropyai:zerank-2</td>
+            <td>同</td>
+          </tr>
+          <tr>
+            <td>topNIn</td>
+            <td>30</td>
+            <td>25</td>
+            <td>50</td>
+          </tr>
+          <tr>
+            <td>timeout</td>
+            <td>5000ms</td>
+            <td>5000ms</td>
+            <td>5000ms</td>
+          </tr>
+        </table>
+        <div class="callout callout-dev">
+          <strong>本地替代：</strong>支持
+          <code>llama-server-reranker</code>
+          recipe（<code>localhost:8081/v1/rerank</code>，默认
+          qwen3-reranker-4b，30s 超时，零成本）。与 embeddings
+          服务互斥需独立部署。
+        </div>
+        <p>
+          全错误 fail-open 原序返回。官方基准：reshuffle
+          <strong>60% 的 top-1</strong>。
+        </p>
+
+        <h2>4.3 Alias Hop</h2>
+        <p>
+          <code>hybrid.ts:636</code> <code>applyAliasHop</code>：query normalize
+          后 exact match（最多 6 tokens），命中已有 canonical → score ×1.10 +
+          <code>alias_hit</code> 标记；缺失则注入 canonical page（score =
+          topScore + 1e-6），最多 3 个。
+        </p>
+
+        <h2>4.4 Evidence 契约</h2>
+        <p>
+          <code>evidence.ts</code>
+          <code>stampEvidence</code>：每条结果带两个字段：
+        </p>
+        <table>
+          <tr>
+            <th>evidence</th>
+            <th>create_safety</th>
+            <th>含义</th>
+          </tr>
+          <tr>
+            <td><code>alias_hit</code></td>
+            <td><code>exists</code></td>
+            <td>别名精确命中</td>
+          </tr>
+          <tr>
+            <td><code>exact_title_match</code></td>
+            <td><code>exists</code></td>
+            <td>标题精确匹配</td>
+          </tr>
+          <tr>
+            <td><code>high_vector_match</code>（≥0.85）</td>
+            <td><code>exists</code></td>
+            <td>高向量相似</td>
+          </tr>
+          <tr>
+            <td><code>keyword_exact</code>（≥0.6）</td>
+            <td><code>probable</code></td>
+            <td>关键词命中</td>
+          </tr>
+          <tr>
+            <td><code>weak_semantic</code></td>
+            <td><code>unknown</code></td>
+            <td>弱语义</td>
+          </tr>
+        </table>
+        <p>
+          agent 判"是否已存在、可否不写重复"靠
+          <code>create_safety</code>，不靠裸分数。
+        </p>
+
+        <h2>4.5 Autocut 评分断崖</h2>
+        <p>
+          <code>autocut.ts</code>：基于 <strong>rerank_score</strong>（非
+          RRF/cosine）找最大归一化分差。<code>gap ≥ 0.2</code
+          >（jumpRatio）则断崖截断，<code>minKeep=1</code>，永不空。
+        </p>
+
+        <h2>4.6 Token Budget</h2>
+        <p>
+          <code>token-budget.ts</code>：<code>tokens = ceil(len/4)</code
+          >，自顶向下贪心，超预算即 break。mode 默认：conservative 4000 /
+          balanced 12000 / tokenmax off。
+        </p>
+
+        <h2>4.7 语义缓存</h2>
+        <p>
+          <code>query-cache.ts</code> <code>SemanticQueryCache</code>：HNSW
+          最近邻查 query embedding，distance &lt; 0.08（即 similarity &gt;
+          0.92）+ TTL 3600s + <code>knobs_hash</code> + 页面 generation gate（防
+          stale）。
+        </p>
+        <div class="callout callout-warn">
+          <strong>缓存跳过条件：</strong>disabled / walkDepth&gt;0 / nearSymbol
+          / 非默认 embedding 列 / adaptiveReturn enabled。
+        </div>
+      </div>
+
+      <!-- ==================== PAGE 5: STORAGE ==================== -->
+      <div class="page" id="page-5">
+        <h1>§5 存储层与向量索引</h1>
+        <p class="subtitle">
+          双引擎 lockstep + HNSW 全 cosine + embedding-column 中央 seam
+        </p>
+
+        <h2>5.1 双引擎架构</h2>
+        <div class="mermaid">
+          flowchart TB EF["engine-factory.ts 按配置 import"] -->
+          PG["postgres-engine.ts<br />真实 Postgres + pgvector（Supabase）"] EF
+          --> PGL["pglite-engine.ts<br />PGLite WASM 内嵌
+          pgvector（零配置默认）"] PG -.同一套 DDL / parity 测试 pin.-> PGL
+          MIG["migrate.ts MIGRATIONS 数组"] --> PG MIG --> PGL
+        </div>
+
+        <div class="callout callout-danger">
+          <strong>陷阱：</strong
+          ><code>src/core/storage/</code
+          >（local/s3/supabase）是<strong>对象存储后端，不是数据库</strong>。数据库引擎是
+          <code>pglite-engine.ts</code> / <code>postgres-engine.ts</code>。
+        </div>
+
+        <ul>
+          <li>
+            <strong>PGLite 自带 pgvector</strong>（WASM bundle 内嵌），与
+            Postgres 共用同一套 DDL，仅剥离 RLS DO-block。
+          </li>
+          <li>
+            两引擎由 <code>test/e2e/engine-parity.test.ts</code> 锁定同步。改
+            SQL/索引<strong>必须双引擎同步</strong>。
+          </li>
+          <li>
+            <code>gbrain init</code> 默认 PGLite；1000+ 文件建议 Supabase。
+          </li>
+        </ul>
+
+        <h2>5.2 向量索引（全部 HNSW + cosine）</h2>
+        <table>
+          <tr>
+            <th>索引</th>
+            <th>表.列</th>
+            <th>opclass</th>
+            <th>谓词</th>
+          </tr>
+          <tr>
+            <td><code>idx_chunks_embedding</code></td>
+            <td>content_chunks.embedding</td>
+            <td><code>vector_cosine_ops</code></td>
+            <td>全表</td>
+          </tr>
+          <tr>
+            <td><code>idx_chunks_embedding_image</code></td>
+            <td>content_chunks.embedding_image</td>
+            <td><code>vector_cosine_ops</code></td>
+            <td><code>WHERE embedding_image IS NOT NULL</code></td>
+          </tr>
+          <tr>
+            <td><code>idx_takes_embedding_hnsw</code></td>
+            <td>takes.embedding</td>
+            <td><code>vector_cosine_ops</code></td>
+            <td><code>WHERE active AND embedding IS NOT NULL</code></td>
+          </tr>
+          <tr>
+            <td><code>idx_facts_embedding_hnsw</code></td>
+            <td>facts.embedding</td>
+            <td><code>vector/halfvec_cosine_ops</code>（动态）</td>
+            <td>
+              <code>WHERE embedding IS NOT NULL AND expired_at IS NULL</code>
+            </td>
+          </tr>
+        </table>
+
+        <div class="card">
+          <div class="card-title">📐 关键约束</div>
+          <ul>
+            <li>
+              <strong>距离算子全用 cosine <code>&lt;=&gt;</code></strong
+              >，无 L2 <code>&lt;-&gt;</code> / 内积 <code>&lt;#&gt;</code>。
+            </li>
+            <li>
+              <code>PGVECTOR_HNSW_VECTOR_MAX_DIMS=2000</code>：&gt;2000
+              维<strong>跳过 HNSW</strong>，回退精确扫描。
+            </li>
+            <li>
+              索引生命周期管理（<code>vector-index.ts</code>）：zombie
+              清理、active build 探测、CONCURRENTLY 重建 + 原子 RENAME 切换。
+            </li>
+          </ul>
+        </div>
+
+        <h2>5.3 embedding-column 抽象（中央 seam）</h2>
+        <p>
+          <code>embedding-column.ts</code>（582 行）是 v0.36+
+          的<strong>列路由单一真相</strong>：
+        </p>
+        <table>
+          <tr>
+            <th>能力</th>
+            <th>说明</th>
+          </tr>
+          <tr>
+            <td>registry</td>
+            <td>
+              内置 <code>embedding</code>/<code>embedding_image</code> + 用户
+              <code>config.embedding_columns</code> 覆盖
+            </td>
+          </tr>
+          <tr>
+            <td>解析链</td>
+            <td>
+              <code
+                >opts.embeddingColumn → config.search_embedding_column →
+                'embedding'</code
+              >
+            </td>
+          </tr>
+          <tr>
+            <td>约束</td>
+            <td>
+              列名正则 <code>^[a-z_][a-z0-9_]*$</code>、dims 1–8192、type ∈
+              {vector, halfvec}、<code>quoteIdentifier</code> 防注入
+            </td>
+          </tr>
+          <tr>
+            <td>cache-safety</td>
+            <td>
+              仅当列名 <code>embedding</code> 且 dims/provider 与 config
+              完全一致才走语义缓存——防跨空间污染
+            </td>
+          </tr>
+        </table>
+        <div class="callout callout-warn">
+          <strong>边界：</strong
+          >当前主要是<strong>搜索侧路由抽象</strong>；通用"写任意自定义列"的
+          write-path 仍是后续工作，<code>gbrain embed</code> 核心仍写主
+          <code>embedding</code> 列。
+        </div>
+
+        <h2>5.4 向量相关迁移</h2>
+        <table>
+          <tr>
+            <th>版本</th>
+            <th>摘要</th>
+          </tr>
+          <tr>
+            <td>v37</td>
+            <td>
+              新建 <code>takes</code>（<code>embedding VECTOR(1536)</code>）+
+              partial HNSW
+            </td>
+          </tr>
+          <tr>
+            <td>v39</td>
+            <td>
+              <code>content_chunks</code> 加 <code>modality</code> +
+              <code>embedding_image vector(1024)</code> + partial HNSW
+            </td>
+          </tr>
+          <tr>
+            <td>v40</td>
+            <td>
+              新建 <code>facts</code>，按 pgvector 版本动态选
+              <code>halfvec</code>/<code>vector</code> + cosine opclass
+            </td>
+          </tr>
+          <tr>
+            <td>v78</td>
+            <td>
+              <code
+                >ALTER TABLE content_chunks ADD COLUMN embedding_multimodal
+                vector(1024)</code
+              >
+            </td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- ==================== PAGE 6: MODES ==================== -->
+      <div class="page" id="page-6">
+        <h1>§6 搜索模式（三档 Bundle）</h1>
+        <p class="subtitle">
+          解析链：<code
+            >perCall → config 单键 → MODE_BUNDLES[mode] → balanced</code
+          >（<code>mode.ts:571</code>，纯函数）
+        </p>
+
+        <table>
+          <tr>
+            <th>Knob</th>
+            <th>conservative</th>
+            <th>balanced</th>
+            <th>tokenmax</th>
+          </tr>
+          <tr>
+            <td>tokenBudget</td>
+            <td>4000</td>
+            <td>12000</td>
+            <td>off</td>
+          </tr>
+          <tr>
+            <td>expansion（LLM）</td>
+            <td>off</td>
+            <td>off</td>
+            <td><strong>on</strong></td>
+          </tr>
+          <tr>
+            <td>relationalRetrieval</td>
+            <td>off</td>
+            <td><strong>on</strong></td>
+            <td>on</td>
+          </tr>
+          <tr>
+            <td>reranker</td>
+            <td>off</td>
+            <td><strong>on</strong></td>
+            <td>on</td>
+          </tr>
+          <tr>
+            <td>graph_signals</td>
+            <td>off</td>
+            <td>on</td>
+            <td>on</td>
+          </tr>
+          <tr>
+            <td>autocut</td>
+            <td>off</td>
+            <td>on</td>
+            <td>on</td>
+          </tr>
+          <tr>
+            <td>contextual_retrieval</td>
+            <td>none</td>
+            <td>title</td>
+            <td>per_chunk_synopsis</td>
+          </tr>
+          <tr>
+            <td>searchLimit 默认</td>
+            <td>10</td>
+            <td>25</td>
+            <td>50</td>
+          </tr>
+          <tr>
+            <td>cache（三档同）</td>
+            <td colspan="3">enabled / similarity 0.92 / TTL 3600s</td>
+          </tr>
+        </table>
+
+        <h2>缓存键 knobs_hash（v=11）</h2>
+        <p>
+          把 mode + 所有 knobs + embedding 列名/provider + relational 深度全折进
+          key，防跨配置污染。改任一 knob 需同步
+          <code>KNOBS_HASH_VERSION</code>（<code>mode.ts:750</code>）。
+        </p>
+
+        <h2>模式切换 UX</h2>
+        <p>
+          <code>mode-switch-ux.ts:94</code>
+          <code>summarizeTransition</code>：分类 no_change / narrowing /
+          broadening / tokenmax_opt_in / invalid。<code>tokenmax_opt_in</code>
+          触发 reindex 提示。<code>GBRAIN_NO_MODE_SWITCH_UX=1</code>
+          全跳过（脚本/CI 用）。
+        </p>
+
+        <h2>成本锚点（官方矩阵）</h2>
+        <table>
+          <tr>
+            <th>Mode \ 下游模型</th>
+            <th>Haiku ($1/M)</th>
+            <th>Sonnet ($3/M)</th>
+            <th>Opus ($5/M)</th>
+          </tr>
+          <tr>
+            <td>conservative (~4K)</td>
+            <td><strong>$40/mo</strong></td>
+            <td>$120/mo</td>
+            <td>$200/mo</td>
+          </tr>
+          <tr>
+            <td>balanced (~10K)</td>
+            <td>$100/mo</td>
+            <td>$300/mo</td>
+            <td>$500/mo</td>
+          </tr>
+          <tr>
+            <td>tokenmax (~20K)</td>
+            <td>$200/mo</td>
+            <td>$600/mo</td>
+            <td><strong>$1,000/mo</strong></td>
+          </tr>
+        </table>
+        <p class="subtitle">
+          @ 10K queries/month，full search payload，无缓存节省。Cache 命中 cut
+          ~50%。
+        </p>
+      </div>
+
+      <!-- ==================== PAGE 7: DEV GUIDE ==================== -->
+      <div class="page" id="page-7">
+        <h1>§7 二次开发指南</h1>
+        <p class="subtitle">接缝（Seam）· 扩展点 · 陷阱清单 · 关键文件速查</p>
+
+        <h2>7.1 二次开发接缝</h2>
+        <table>
+          <tr>
+            <th>想改什么</th>
+            <th>切入 seam</th>
+            <th>说明</th>
+          </tr>
+          <tr>
+            <td><strong>换/加 embedding provider</strong></td>
+            <td><code>ai/recipes/*.ts</code> + <code>gateway.ts</code></td>
+            <td>加一个纯数据 recipe 即可，无需动管线</td>
+          </tr>
+          <tr>
+            <td><strong>换 reranker</strong></td>
+            <td>
+              <code>rerank.ts</code> 的 <code>rerankerFn</code> seam / recipe
+            </td>
+            <td>默认 zerank-2；可接本地 llama.cpp cross-encoder</td>
+          </tr>
+          <tr>
+            <td><strong>调融合权重</strong></td>
+            <td>
+              <code>intent-weights.ts</code> + <code>mode.ts</code> bundle
+            </td>
+            <td>每路 k = 60/weight；三档 bundle 可自定义</td>
+          </tr>
+          <tr>
+            <td><strong>加召回臂</strong></td>
+            <td><code>hybridSearch</code> 的 RRF lists 装配处</td>
+            <td>relational 臂即此模式的新增范例</td>
+          </tr>
+          <tr>
+            <td><strong>自定义向量列/多模型</strong></td>
+            <td><code>embedding-column.ts</code> registry</td>
+            <td>搜索侧已支持；写任意列的 write-path 未完成</td>
+          </tr>
+          <tr>
+            <td><strong>改分块策略</strong></td>
+            <td><code>chunkers/</code></td>
+            <td>semantic/llm 已实现但未接入，可挂到 import-file</td>
+          </tr>
+          <tr>
+            <td><strong>调后处理增强</strong></td>
+            <td><code>runPostFusionStages</code> 各级</td>
+            <td>每级独立 fail-open，可单独开关/替换</td>
+          </tr>
+          <tr>
+            <td><strong>改距离算子/索引</strong></td>
+            <td><code>vector-index.ts</code> + engine SQL</td>
+            <td>当前锁死 cosine；改需双引擎同步</td>
+          </tr>
+        </table>
+
+        <h2>7.2 陷阱清单（必读）</h2>
+        <div class="callout callout-danger">
+          <ol>
+            <li>
+              <strong>官方 RETRIEVAL.md 流程图过时</strong>：真实顺序是
+              <code>dedup → rerank → adaptive/autocut → slice → budget</code
+              >，以 <code>hybrid.ts</code> 为准。
+            </li>
+            <li>
+              <strong><code>src/core/storage/</code> ≠ 数据库</strong
+              >：那是对象存储（local/S3/Supabase）；DB 引擎在
+              <code>pglite/postgres-engine.ts</code>。
+            </li>
+            <li>
+              <strong><code>backfill embedding_voyage</code> 是 no-op</strong
+              >：补主文本向量用 <code>gbrain embed --stale</code>。
+            </li>
+            <li>
+              <strong>embedding-column write-path 未完成</strong>：registry
+              当前主要是搜索侧路由；写任意自定义列不能假设已就绪。
+            </li>
+            <li>
+              <strong>semantic/llm chunker 未接入生产</strong>：仅定义，挂接需改
+              <code>import-file.ts</code>。
+            </li>
+            <li>
+              <strong>不做统一 L2 归一化</strong>：别假设"provider
+              返回单位向量"是强不变量。
+            </li>
+            <li>
+              <strong>缓存污染防御</strong>：<code>knobs_hash</code> 折了
+              mode/列名/provider/relational 深度；改任一 knob 需同步
+              KNOBS_HASH_VERSION。
+            </li>
+            <li>
+              <strong>改 SQL/索引必须双引擎同步</strong>：pglite 与 postgres
+              lockstep，由 parity 测试 pin。
+            </li>
+          </ol>
+        </div>
+
+        <h2>7.3 关键文件速查</h2>
+        <table>
+          <tr>
+            <th>文件</th>
+            <th>职责</th>
+            <th>关键行</th>
+          </tr>
+          <tr>
+            <td><code>src/core/search/hybrid.ts</code></td>
+            <td>主管线编排（2006 行）</td>
+            <td>809 主入口 / 432 post-fusion / 1860 RRF / 1951 cosine</td>
+          </tr>
+          <tr>
+            <td><code>src/core/search/mode.ts</code></td>
+            <td>三档 mode bundle</td>
+            <td>571 resolve / 750 KNOBS_HASH_VERSION</td>
+          </tr>
+          <tr>
+            <td><code>src/core/search/embedding-column.ts</code></td>
+            <td>向量列抽象</td>
+            <td>287 registry / 372 resolve / 480 cache-safe</td>
+          </tr>
+          <tr>
+            <td><code>src/core/search/sql-ranking.ts</code></td>
+            <td>源加权/可见性 SQL</td>
+            <td>62 sourceFactor / 151 visibility</td>
+          </tr>
+          <tr>
+            <td><code>src/core/search/rerank.ts</code></td>
+            <td>cross-encoder 重排</td>
+            <td>applyReranker</td>
+          </tr>
+          <tr>
+            <td><code>src/core/search/dedup.ts</code></td>
+            <td>四层去重</td>
+            <td>dedupResults</td>
+          </tr>
+          <tr>
+            <td><code>src/core/search/autocut.ts</code></td>
+            <td>评分断崖裁剪</td>
+            <td>applyAutocut</td>
+          </tr>
+          <tr>
+            <td><code>src/core/search/query-cache.ts</code></td>
+            <td>语义缓存</td>
+            <td>SemanticQueryCache</td>
+          </tr>
+          <tr>
+            <td><code>src/core/ai/gateway.ts</code></td>
+            <td>embedding/rerank 网关</td>
+            <td>1311 embed / 3215 rerank</td>
+          </tr>
+          <tr>
+            <td><code>src/core/chunkers/recursive.ts</code></td>
+            <td>文本分块</td>
+            <td>72 chunkText</td>
+          </tr>
+          <tr>
+            <td><code>src/core/chunkers/code.ts</code></td>
+            <td>Tree-sitter 分块</td>
+            <td>562 chunkCodeTextFull</td>
+          </tr>
+          <tr>
+            <td><code>src/core/postgres-engine.ts</code></td>
+            <td>Postgres 引擎 SQL</td>
+            <td>1812 searchVector / 1539 searchKeyword</td>
+          </tr>
+          <tr>
+            <td><code>src/core/pglite-engine.ts</code></td>
+            <td>PGLite 引擎（镜像）</td>
+            <td>1929 searchVector</td>
+          </tr>
+          <tr>
+            <td><code>src/core/vector-index.ts</code></td>
+            <td>HNSW 索引策略</td>
+            <td>19 MAX_DIMS=2000</td>
+          </tr>
+          <tr>
+            <td><code>src/core/migrate.ts</code></td>
+            <td>迁移注册表</td>
+            <td>115 MIGRATIONS</td>
+          </tr>
+          <tr>
+            <td><code>src/schema.sql</code></td>
+            <td>参考 schema</td>
+            <td>294 content_chunks / 333 HNSW</td>
+          </tr>
+        </table>
+
+        <h2>7.4 模块依赖总览</h2>
+        <div class="mermaid">
+          flowchart TB subgraph CMD["命令层"] CAPTURE["capture/sync/import"] -->
+          IMPORT["import-file.ts"] EMBEDCMD["embed"] --> EMB["embedding.ts"]
+          QUERYCMD["query/search op"] --> HYB["hybrid.ts"] end subgraph
+          CHUNK["分块层"] IMPORT --> REC["recursive"] IMPORT -->
+          CODE["code(Tree-sitter)"] end subgraph AI["AI 网关层"] EMB -->
+          GW["gateway.ts"] GW --> RECIPES["recipes/*"] end subgraph
+          ENGINE["引擎层"] IMPORT --> ENG["BrainEngine pglite/postgres"] HYB -->
+          ENG end subgraph SEARCH["检索子系统"] HYB --> INTENT["query-intent"]
+          HYB --> RRF["rrfFusion"] HYB --> RERANK["rerank"] HYB -->
+          DEDUP["dedup/autocut/budget"] HYB --> COL["embedding-column"] HYB -->
+          CACHE["query-cache"] end subgraph STORE["存储"] ENG -->
+          SCHEMA["schema.sql + HNSW"] ENG --> VIDX["vector-index"] end
+        </div>
+
+        <div class="card">
+          <div class="card-title">📌 自验证命令</div>
+          <pre><code>gbrain eval longmemeval datasets/longmemeval_s.jsonl   # 公开基准
+gbrain eval replay --against before.ndjson              # A/B 对比
+gbrain search diagnose "&lt;q&gt;" --target &lt;slug&gt;           # 单 query 诊断
+gbrain search modes                                     # 当前 mode + 逐 knob 归因
+gbrain search stats [--days N]                          # 缓存命中率/intent 分布</code></pre>
+        </div>
+      </div>
+    </div>
+    <!-- .main -->
+
+    <script>
+      mermaid.initialize({
+        startOnLoad: true,
+        theme: "dark",
+        themeVariables: {
+          primaryColor: "#334155",
+          primaryTextColor: "#e2e8f0",
+          primaryBorderColor: "#38bdf8",
+          lineColor: "#64748b",
+          secondaryColor: "#1e293b",
+          tertiaryColor: "#0f172a",
+        },
+      });
+
+      function showPage(idx) {
+        document
+          .querySelectorAll(".page")
+          .forEach((p, i) => p.classList.toggle("active", i === idx));
+        document
+          .querySelectorAll(".nav-item")
+          .forEach((n, i) => n.classList.toggle("active", i === idx));
+        window.scrollTo(0, 0);
+      }
+
+      // Keyboard nav
+      document.addEventListener("keydown", (e) => {
+        const active = [...document.querySelectorAll(".nav-item")].findIndex(
+          (n) => n.classList.contains("active")
+        );
+        if (e.key === "ArrowDown" || e.key === "j") {
+          e.preventDefault();
+          showPage(Math.min(active + 1, 7));
+        }
+        if (e.key === "ArrowUp" || e.key === "k") {
+          e.preventDefault();
+          showPage(Math.max(active - 1, 0));
+        }
+      });
+    </script>
+  </body>
+</html>
