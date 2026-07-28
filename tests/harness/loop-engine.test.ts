@@ -6,7 +6,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { run } from "../../src/harness/loop-engine.ts";
+import { run, step } from "../../src/harness/loop-engine.ts";
 import type {
   AnthropicNativeMessage,
   AssistantTurnResult,
@@ -370,6 +370,98 @@ describe("loop engine S10: append-only immutable history", () => {
     }
     // The assistant and user message arrays are distinct references.
     assert.notEqual(result.messages[0], result.messages[1]);
+  });
+});
+
+describe("loop engine step(): real state-machine transitions", () => {
+  it("step() returns continue transition with tool calls", async () => {
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const reg = createRegistry([echo]);
+    const exec = createExecutor(reg);
+    const model = createStubModel([
+      assistantResult([], [
+        { id: "t1", name: "echo", input: { value: "ping" } },
+      ]),
+    ]);
+    const initial: LoopState = {
+      messages: Object.freeze([
+        { role: "user", content: [{ type: "text", text: "go" }] } as AnthropicNativeMessage,
+      ]) as ReadonlyArray<AnthropicNativeMessage>,
+      turnCount: 0,
+    };
+    const transition = await step(initial, {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(transition.kind, "continue");
+    if (transition.kind !== "continue") return;
+    // After step: messages has user + assistant(tool_use) + user(tool_result).
+    assert.equal(transition.nextState.messages.length, 3);
+    assert.equal(transition.nextState.messages[1]!.role, "assistant");
+    assert.equal(transition.nextState.messages[2]!.role, "user");
+    assert.equal(transition.nextState.turnCount, 1);
+  });
+
+  it("step() returns stop transition on maxTurns without calling adapter", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel([
+      assistantResult(["hi"], [], "success"),
+    ]);
+    const initial: LoopState = {
+      messages: Object.freeze([
+        { role: "user", content: [{ type: "text", text: "go" }] } as AnthropicNativeMessage,
+      ]) as ReadonlyArray<AnthropicNativeMessage>,
+      turnCount: 5, // already at maxTurns
+    };
+    const transition = await step(initial, {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(transition.kind, "stop");
+    if (transition.kind !== "stop") return;
+    assert.equal(transition.reason, "maxTurns");
+    assert.equal(transition.finalState.messages.length, 1);
+  });
+
+  it("step() returns completed transition on pure text", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel([
+      assistantResult(["hello"], [], "success"),
+    ]);
+    const initial: LoopState = {
+      messages: Object.freeze([
+        { role: "user", content: [{ type: "text", text: "hi" }] } as AnthropicNativeMessage,
+      ]) as ReadonlyArray<AnthropicNativeMessage>,
+      turnCount: 0,
+    };
+    const transition = await step(initial, {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(transition.kind, "stop");
+    if (transition.kind !== "stop") return;
+    assert.equal(transition.reason, "completed");
+    assert.equal(transition.finalState.messages.length, 2);
+    assert.equal(transition.finalState.turnCount, 1);
   });
 });
 

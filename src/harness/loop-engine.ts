@@ -12,16 +12,20 @@
  *
  * Loop Engine 不读取、不判断、不构造供应商原生字段;Model Adapter 是
  * 唯一允许处理原生历史的模块。
+ *
+ * 016 H1 修复:`step(state, deps)` 真实实现为单步状态机推进;虽然 spec
+ * 原文是 sync 签名,因 `adapter.step` 本身是异步,本 step 实际返回
+ * `Promise<Transition>` 以保证协议契约诚实。`run` 直接复用本 step,避免
+ * 双轨实现漂移。
  */
 
+import { ProtocolError } from "./errors.js";
 import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
   AssistantTurnResult,
   LoopState,
-  ModelAdapter,
   RunResult,
-  StopReason,
   Transition,
 } from "./model-adapter/types.js";
 import type { Executor, Registry, ToolExecutionResult } from "./tools/types.js";
@@ -31,7 +35,11 @@ import type { Executor, Registry, ToolExecutionResult } from "./tools/types.js";
  * 与工具结果(交给历史追加)。Anthropic Adapter / Stub Model 都按
  * 此接口实现。
  */
-export interface LoopAdapter extends ModelAdapter {
+export interface LoopAdapter {
+  readonly step: (
+    state: LoopState,
+    request: { system?: string; tools?: unknown },
+  ) => Promise<AssistantTurnResult>;
   readonly encodeUserText: (userText: string) => AnthropicNativeMessage;
   readonly encodeToolResults: (
     results: ReadonlyArray<ToolExecutionResult>,
@@ -45,10 +53,15 @@ export interface LoopEngineDeps {
   readonly maxTurns: number;
 }
 
+/**
+ * 把消息及其 content blocks 冻结(S10 守门).blocks 是平铺对象({type,
+ * text}/{type,id,name,input}/...);`Object.freeze({ ...b })` 浅冻结块自身
+ * 的可枚举属性已足够(input 由模型给出的不可变快照,不允许回路修改)。
+ */
 function freezeMessage(msg: AnthropicNativeMessage): AnthropicNativeMessage {
   return Object.freeze({
     role: msg.role,
-    content: Object.freeze([...msg.content]),
+    content: Object.freeze(msg.content.map((b) => Object.freeze({ ...b }))),
   });
 }
 
@@ -77,97 +90,114 @@ function deriveFinalText(messages: ReadonlyArray<AnthropicNativeMessage>): strin
 }
 
 /**
- * 单步状态机推进。纯函数:基于当前 state + deps 产出 continue/stop
- * 转换。注意本 step 仅在同步上下文实现"基础占位"——真实 run() 走
- * 异步 Adapter.step;spec 的 step 接口形状被保留以供未来 unit 粒度
- * 测试(对应 Reusable step contract)。
+ * 单步状态机推进。基于当前 state + deps 调用一次 Adapter:
+ *   1. turnCount 已达 maxTurns -> stop maxTurns,不调 Adapter;
+ *   2. 调 Adapter;若抛 ProtocolError -> stop protocolError(整回合不进历史);
+ *   3. emptyFinalResponse -> stop emptyFinalResponse(整回合不进历史);
+ *   4. 纯文本完成 -> stop completed(进历史)或 nonSuccessStop;
+ *   5. 有 tool call -> 执行工具,把 tool_result 编码后追加为一条 user
+ *      message,产出 continue nextState(turnCount + 1)。
+ *
+ * 因 adapter.step 本身异步,本 step 返回 `Promise<Transition>`;spec 原文
+ * 的 sync 签名在本版本诚实化为 async,以避免"双轨实现"漂移。
  */
-export function step(state: LoopState, deps: LoopEngineDeps): Transition {
-  void state;
-  void deps;
-  throw new Error(
-    "loop-engine.step: synchronous step not implemented in Gate A; use run()",
-  );
+export async function step(
+  state: LoopState,
+  deps: LoopEngineDeps,
+): Promise<Transition> {
+  // S6:maxTurns guard,先于 Adapter 调用。
+  if (state.turnCount >= deps.maxTurns) {
+    return {
+      kind: "stop",
+      reason: "maxTurns",
+      finalState: state,
+    };
+  }
+  const adapter = deps.adapter;
+  let turn: AssistantTurnResult;
+  try {
+    turn = await adapter.step(state, { tools: deps.registry.list() });
+  } catch (err) {
+    if (err instanceof ProtocolError) {
+      // S9:整回合不进入历史,不触发任何工具执行。
+      return {
+        kind: "stop",
+        reason: "protocolError",
+        finalState: state,
+      };
+    }
+    throw err;
+  }
+  // S8:empty final response 整回合不进历史。
+  if (
+    turn.projection.toolCalls.length === 0 &&
+    turn.isEmptyFinalResponse
+  ) {
+    return {
+      kind: "stop",
+      reason: "emptyFinalResponse",
+      finalState: state,
+    };
+  }
+  // Assistant 回合原子追加(S10 守门),并 turnCount +1。
+  let nextState = appendMessage(state, turn.nativeMessage);
+  nextState = { messages: nextState.messages, turnCount: state.turnCount + 1 };
+
+  if (turn.projection.toolCalls.length === 0) {
+    // 纯文本完成(S1 / S7)。
+    const reason = turn.supplierStop === "success" ? "completed" : "nonSuccessStop";
+    return {
+      kind: "stop",
+      reason,
+      finalState: nextState,
+    };
+  }
+
+  // 有 tool call:执行 -> 编码 -> 追加为一条 user message -> continue。
+  const toolCallViews = turn.projection.toolCalls.map((c) => ({
+    id: c.id,
+    name: c.name,
+    input: c.input,
+  }));
+  const results = await deps.executor.executeAll(toolCallViews);
+  const blocks = adapter.encodeToolResults(results);
+  const toolResultMsg: AnthropicNativeMessage = {
+    role: "user",
+    content: blocks,
+  };
+  nextState = appendMessage(nextState, toolResultMsg);
+  return { kind: "continue", nextState };
 }
 
-// Avoid unused import warnings for spec-pin only types.
-export type _StepContract = Transition;
-export type _StopReasonPin = StopReason;
-
 /**
- * 整轮运行:模型 -> 工具 -> 真实结果 -> Adapter 原生编码 -> 下一轮 ->
- * 明确停止。无 maxTurns 触顶外的循环调度;遇 protocolError 立即停止且
- * 整回合不进入历史。
+ * 整轮运行:init -> 反复 step -> stop 收尾。S6 / S9 / 全部错误路径
+ * 由 step 一并负责,避免双轨实现漂移。
  */
 export async function run(
   userText: string,
   deps: LoopEngineDeps,
 ): Promise<RunResult> {
-  const adapter = deps.adapter;
   let state: LoopState = {
-    messages: Object.freeze([freezeMessage(adapter.encodeUserText(userText))]),
+    messages: Object.freeze([
+      freezeMessage(deps.adapter.encodeUserText(userText)),
+    ]),
     turnCount: 0,
   };
-  // Guard maxTurns (S6): check before each model call.
-  while (state.turnCount < deps.maxTurns) {
-    const turn: AssistantTurnResult = await adapter.step(state, {
-      tools: deps.registry.list(),
-    });
-    // S9 protocolError path:整回合不进入历史,不执行工具。
-    if (turn.projection.toolCalls.length === 0 && turn.isEmptyFinalResponse) {
-      // Empty final response:整回合丢弃(S8)
+  while (true) {
+    const transition = await step(state, deps);
+    if (transition.kind === "stop") {
+      const { reason, finalState } = transition;
+      const finalText =
+        reason === "completed" ? deriveFinalText(finalState.messages) : null;
       return {
-        finalText: null,
-        messages: state.messages,
-        turnCount: state.turnCount,
-        stopReason: "emptyFinalResponse",
+        finalText,
+        messages: finalState.messages,
+        turnCount: finalState.turnCount,
+        stopReason: reason,
       };
     }
-    // Increment turnCount only when we accept the turn into history.
-    state = appendMessage(state, turn.nativeMessage);
-    state = { messages: state.messages, turnCount: state.turnCount + 1 };
-
-    if (turn.projection.toolCalls.length === 0) {
-      // Pure-text completion.
-      if (turn.supplierStop === "success") {
-        return {
-          finalText: deriveFinalText(state.messages),
-          messages: state.messages,
-          turnCount: state.turnCount,
-          stopReason: "completed",
-        };
-      }
-      // Non-success stop (S7):truncation / refusal / other.
-      return {
-        finalText: null,
-        messages: state.messages,
-        turnCount: state.turnCount,
-        stopReason: "nonSuccessStop",
-      };
-    }
-
-    // Execute tool calls serially (T7 wired here).
-    const toolCallViews = turn.projection.toolCalls.map((c) => ({
-      id: c.id,
-      name: c.name,
-      input: c.input,
-    }));
-    const results = await deps.executor.executeAll(toolCallViews);
-    // Encode tool results via Adapter, append as a single user message.
-    const blocks = adapter.encodeToolResults(results);
-    const toolResultMsg: AnthropicNativeMessage = {
-      role: "user",
-      content: blocks,
-    };
-    state = appendMessage(state, toolResultMsg);
+    state = transition.nextState;
   }
-  // S6:maxTurns hit, no extra model call performed.
-  return {
-    finalText: deriveFinalText(state.messages),
-    messages: state.messages,
-    turnCount: state.turnCount,
-    stopReason: "maxTurns",
-  };
 }
 
 // Re-export spec types for downstream consumers.
