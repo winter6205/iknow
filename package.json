@@ -14,7 +14,6 @@
       "import": "./dist/index.js"
     }
   },
-
   "engines": {
     "node": ">=20"
   },
@@ -34,5 +33,10 @@
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"
   },
-  "private": true
+  "private": true,
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^2.1.1"
+  }
 }
