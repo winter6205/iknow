@@ -32,3 +32,9 @@ export type {
   ToolExecutionResult,
   Executor,
 } from "./tools/types.js";
+
+export { run, step } from "./loop-engine.js";
+export type {
+  LoopAdapter,
+  LoopEngineDeps,
+} from "./loop-engine.js";
