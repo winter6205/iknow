@@ -2,6 +2,16 @@
 
 ## 0.1.0 (unreleased)
 
+### Docs (CLAUDE.md + architecture.md 整理)
+
+- CLAUDE.md 删除 `### Runtime map` 14 行 path 表（~80% 与 `docs/architecture.md` Capability modules 表重复，且漏 `src/harness/` 等新模块），替换为 5 行 `### Module boundaries`（仅保留非显而易见边界 callouts），并指向 architecture.md 为 SSOT
+- `docs/architecture.md` Capability modules 表补 `src/harness/`（Foundation，标注暂不接产品流量）/ `src/runtime/` / `src/tools/` / `src/config/` / `src/eval/`，并标 `src/agent-loop/` 待退役（016->018 路线）
+- CLAUDE.md 删除「下阶段焦点」行（动态路线信息归 `docs/STATUS.md`，避免 always-on 层持有易腐数据）
+- CLAUDE.md 上下文读取顺序：删除两个死引用（`docs/git-workflow.md` / `docs/testing.md` 不存在），加 codebase-memory 定位提示
+- CLAUDE.md Domain docs 补 `specs/minimum-sequential-agent-loop.md` + `plans/minimum-sequential-agent-loop.md`；修正 `CHANGELOG.md` 路径为根目录（原 `docs/CHANGELOG.md` 不存在）
+- CLAUDE.md `npm test` 注释更新：vitest 入口，含 `tests/harness/**`
+- CLAUDE.md「I4」行去掉展望尾巴（I5 退到 STATUS 展望）
+
 ### Web MVP prototype → CLI integration (iknow-prototype)
 
 - Prototype `/api/chat` **mock removed**; frontend now consumes the real **Session HTTP API** (`iknow serve`)
