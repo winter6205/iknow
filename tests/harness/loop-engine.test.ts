@@ -254,3 +254,96 @@ describe("loop engine S5: same-turn partial failure does not short-circuit", () 
     assert.equal(r2.is_error, undefined);
   });
 });
+
+describe("loop engine S6: maxTurns hit", () => {
+  it("loop stops at maxTurns, never invokes model again past the limit", async () => {
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const reg = createRegistry([echo]);
+    const exec = createExecutor(reg);
+    // Each scripted response calls echo again -> infinite loop without cap.
+    const infinite = Array.from({ length: 5 }, (_, i) =>
+      assistantResult(
+        [],
+        [{ id: `t${i}`, name: "echo", input: { value: String(i) } }],
+      ),
+    );
+    const model = createStubModel(infinite);
+    const result = await run("go", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 3,
+    });
+    assert.equal(result.stopReason, "maxTurns");
+    assert.equal(result.turnCount, 3);
+  });
+});
+
+describe("loop engine S7: non-success stop (truncation/refusal)", () => {
+  it("returns nonSuccessStop; finalText is null even if texts present", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel([
+      assistantResult(["partial"], [], "truncation"),
+    ]);
+    const result = await run("go", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "nonSuccessStop");
+    assert.equal(result.finalText, null);
+  });
+});
+
+describe("loop engine S8: empty final response", () => {
+  it("returns emptyFinalResponse; assistant turn with no text/tool is not in history", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel([
+      assistantResult([], [], "success"), // empty + isEmptyFinalResponse=true
+    ]);
+    const result = await run("go", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "emptyFinalResponse");
+    assert.equal(result.turnCount, 0);
+    assert.equal(result.messages.length, 1); // only the user message
+    assert.equal(result.messages[0]!.role, "user");
+  });
+});
+
+describe("loop engine S9: protocol error turn", () => {
+  it("if adapter.step throws ProtocolError, run surfaces it and bad turn is not appended", async () => {
+    const { ProtocolError } = await import("../../src/harness/errors.ts");
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel([]); // exhausted -> ProtocolError on first step
+    await assert.rejects(
+      () =>
+        run("go", {
+          adapter: model,
+          executor: exec,
+          registry: reg,
+          maxTurns: 5,
+        }),
+      (e: unknown) => e instanceof ProtocolError,
+    );
+  });
+});
