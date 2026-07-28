@@ -202,3 +202,17 @@ export async function run(
 
 // Re-export spec types for downstream consumers.
 export type { Executor, Registry } from "./tools/types.js";
+
+/**
+ * 工厂:把 dep 闭包成 runner / stepper 对象(016 T12 spec 出口)。
+ * 返回的 `step` 是闭包版(只需传 state),`run` 接收 userText。
+ */
+export function createLoopEngine(deps: LoopEngineDeps): {
+  readonly run: (userText: string) => Promise<RunResult>;
+  readonly step: (state: LoopState) => Promise<Transition>;
+} {
+  return Object.freeze({
+    run: (userText: string) => run(userText, deps),
+    step: (state: LoopState) => step(state, deps),
+  });
+}

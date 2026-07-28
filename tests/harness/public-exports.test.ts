@@ -31,8 +31,9 @@ function listHarnessSource(): string[] {
 }
 
 describe("T12 public exports + Gate B gate", () => {
-  it("public exports run / createRegistry / createExecutor / createAnthropicAdapter", () => {
+  it("public exports run / createLoopEngine / createRegistry / createExecutor / createAnthropicAdapter", () => {
     assert.equal(typeof harness.run, "function");
+    assert.equal(typeof harness.createLoopEngine, "function");
     assert.equal(typeof harness.createRegistry, "function");
     assert.equal(typeof harness.createExecutor, "function");
     assert.equal(typeof harness.createAnthropicAdapter, "function");
