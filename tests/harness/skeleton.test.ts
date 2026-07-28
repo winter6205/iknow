@@ -3,7 +3,7 @@
  * specs/minimum-sequential-agent-loop.md. The test deliberately does not
  * exercise runtime behavior (T1 only ships the Foundation skeleton).
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   RegistryConstructionError,

@@ -5,7 +5,7 @@
  * 构造成功后 Registry 不可变(Object.freeze);按名定位返回 ToolDef / undefined。
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   RegistryConstructionError,

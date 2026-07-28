@@ -8,7 +8,7 @@
  * client.messages.create。
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { createAnthropicAdapter } from "../../../src/harness/model-adapter/anthropic-adapter.ts";
 import { ProtocolError } from "../../../src/harness/errors.ts";

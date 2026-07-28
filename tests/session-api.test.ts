@@ -1,7 +1,7 @@
 /**
  * Session HTTP API + hub (host surface).
  */
-import { describe, it, before, after } from "node:test";
+import { describe, it, beforeAll, afterAll } from "vitest";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -124,7 +124,7 @@ describe("Session HTTP server", () => {
   let close: (() => Promise<void>) | undefined;
   let base = "";
 
-  before(async () => {
+  beforeAll(async () => {
     const hub = new SessionHub({ bundle: testBundle() });
     const listening = await listenSessionServer({
       hub,
@@ -135,7 +135,7 @@ describe("Session HTTP server", () => {
     base = `http://${listening.host}:${listening.port}`;
   });
 
-  after(async () => {
+  afterAll(async () => {
     if (close) await close();
   });
 

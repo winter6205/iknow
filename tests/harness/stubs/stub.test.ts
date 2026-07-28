@@ -6,7 +6,7 @@
  * IO 依赖;不进生产装配路径(src/cli/runtime.ts、src/session-api/ 不 import)。
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { createStubModel } from "../../../src/harness/stubs/stub-model.ts";
 import { createStubTool } from "../../../src/harness/stubs/stub-tool.ts";

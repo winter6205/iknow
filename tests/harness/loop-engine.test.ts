@@ -4,7 +4,7 @@
  * 每条 fixture 一次确定性 run,行为由 stub-model + stub-tool 驱动。
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { run, step } from "../../src/harness/loop-engine.ts";
 import type {
