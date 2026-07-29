@@ -50,8 +50,10 @@ docs/2.html
 docs/20260714-2-gbrain-secondary-dev-guide.md
 
 # session handoff is personal (between sessions of the same author),
-# not team content
-docs/handoff/
+# not team content - EXCEPT tracked acceptance reports (wayfinder #49
+# decision output), which ARE team deliverables and must be committed.
+docs/handoff/*
+!docs/handoff/*.md
 
 # local Next.js prototype (early-stage, not team-shared; built artifacts
 # also covered by node_modules/ etc. above)
