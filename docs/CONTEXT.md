@@ -140,6 +140,22 @@ _Avoid_: claiming interactive product complete without I4 evidence
 Env name for 9router API key (via `IKNOW_LLM_API_KEY_ENV` / embedding key env defaults). Value must be the active key 9router accepts for the endpoint in use.
 _Avoid_: renaming the env var for “alignment”; treating `GET /v1/models` 200 as proof that chat/embeddings will 200
 
+### Memory vocabulary (GraphRAG backend · wayfinder #34 / T-001)
+
+> 下方旧 4-tool 词条（Chunk / Fact / snapshot_id / source_span / kb_*）在 #40 新 ADR 落地前保持现行运行时语义，不删不改。
+
+**knowledge memory**: GraphRAG 记忆后端（独立 MCP server）承载的跨会话共享语义事实，无身份归属、不随会话消失。
+_Avoid_: `CompiledFact`（4-tool 契约，非后端原生）/ “知识图谱”（缺 valid_window）
+
+**session memory**: per-session 对话状态（turns / `last_priors` / slash / 模式），带身份归属、会话结束可 GC；`ConversationState` 是其 host 层实现（**Deprecated for CLI path since 018；retained for Session API migration ticket**）。
+_Avoid_: 把 `ConversationState` 称“会话记忆后端”（它是 host 多轮袋）；把 host 多轮袋当成 CLI path 的权威状态
+
+**context assembly** (上下文组装): harness 运行时把异构源拼装进下一次推理窗口的动作，不是 MCP tool。
+_Avoid_: “上下文工程”（更大范畴）/ “上下文装配”（统一用“组装”）
+
+**memory unit**: 后端最小语义单元 = D5-style triple（`valid_window tstzrange` + `superseded_by`）；旧 `CompiledFact` / `snapshot_id` / `SourceSpan` 降级为 harness 消费侧投影。
+_Avoid_: `(entity_id, snapshot_id, valid_window)`（仓库无此表述）/ 把 `CompiledFact` 当后端最小单元
+
 ## Relationships
 
 - **Query → kb_retrieve → Chunk[]**: agent issues a retrieve hop; store returns ranked chunks
