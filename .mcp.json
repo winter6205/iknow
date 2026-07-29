@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "graphrag-memory": {
+      "command": "node",
+      "args": ["graphrag-memory/dist/index.js"],
+      "env": {
+        "GRAPHRAG_MEMORY_TRANSPORT": "stdio",
+        "GRAPHRAG_MEMORY_LOG_LEVEL": "info"
+      }
+    }
+  }
+}
