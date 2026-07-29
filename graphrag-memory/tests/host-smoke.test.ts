@@ -59,7 +59,7 @@ function serverParams() {
   return {
     command: process.execPath,
     args: [distEntry],
-    env: { ...process.env, GRAPHRAG_MEMORY_TRANSPORT: "stdio" },
+    env: { ...process.env },
     stderr: "pipe" as const,
   };
 }

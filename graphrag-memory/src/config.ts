@@ -12,7 +12,6 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
-export type Transport = "stdio"; // http deferred until stage 0+ stabilize
 
 const LOG_LEVELS: readonly LogLevel[] = ["debug", "info", "warn", "error"];
 
@@ -22,7 +21,6 @@ function isLogLevel(value: string): value is LogLevel {
 
 export interface GraphragEnv {
   logLevel: LogLevel;
-  transport: Transport;
 }
 
 function parseEnvFile(path: string): Record<string, string> {
@@ -56,11 +54,12 @@ function readEnv(key: string): string | undefined {
 }
 
 export function loadEnv(): GraphragEnv {
+  // Stage 0 is stdio-only (map #33 defers HTTP to T-005/#36). Transport is
+  // hard-coded to stdio at the call site in src/index.ts; it is NOT a config
+  // knob here. The previous `transport` field + no-op ternary was dead code
+  // that silently coerced every value to "stdio" while pretending otherwise.
   const rawLog = readEnv("GRAPHRAG_MEMORY_LOG_LEVEL") ?? "info";
   const logLevel: LogLevel = isLogLevel(rawLog) ? rawLog : "info";
 
-  const rawTransport = readEnv("GRAPHRAG_MEMORY_TRANSPORT") ?? "stdio";
-  const transport: Transport = rawTransport === "stdio" ? "stdio" : "stdio";
-
-  return { logLevel, transport };
+  return { logLevel };
 }

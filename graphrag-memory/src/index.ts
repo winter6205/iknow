@@ -35,20 +35,21 @@ const SERVER_NAME = "graphrag-memory";
 const SERVER_VERSION = "0.0.0";
 
 /**
- * Process exit codes (single source of truth — referenced by both the
- * transport-guard in main() and the fatal-error catch in the isMain
- * block). Anything outside this table is a bug; documenting them here
- * makes host-side scripts (Claude Code, systemd, k8s) able to reason
- * about what kind of failure happened without parsing stderr.
+ * Process exit codes (single source of truth — referenced by the
+ * fatal-error catch in the isMain block). Anything outside this table
+ * is a bug; documenting it here makes host-side scripts (Claude Code,
+ * systemd, k8s) able to reason about what kind of failure happened
+ * without parsing stderr.
  *
- *   OK               0   normal termination (server closed cleanly)
  *   FATAL_RUNTIME    1   uncaught exception in main() — see stderr stack
- *   BAD_CONFIG       2   invalid runtime config (e.g. non-stdio transport)
+ *
+ * `BAD_CONFIG` (2) was removed when stage 0's transport knob went away
+ * (see `tests/config.test.ts` and `docs/handoff/2026-07-29-graphrag-mcp-host-acceptance.md`
+ * for the rationale). It will return if/when T-005 (#36) adds a real
+ * config-rejection surface (e.g. invalid DB URL, missing provider key).
  */
 const EXIT_CODES = {
-  OK: 0,
   FATAL_RUNTIME: 1,
-  BAD_CONFIG: 2,
 } as const;
 
 export function createServer(): McpServer {
@@ -69,7 +70,6 @@ export function createServer(): McpServer {
     name: SERVER_NAME,
     version: SERVER_VERSION,
     tools: Array.from(registry.keys()),
-    transport: env.transport,
   });
   return server;
 }
@@ -109,13 +109,8 @@ export async function main(): Promise<void> {
   const env = loadEnv();
   const logger = createLogger(env.logLevel);
 
-  if (env.transport !== "stdio") {
-    logger.error("only stdio transport is supported in stage 0", {
-      transport: env.transport,
-    });
-    process.exit(EXIT_CODES.BAD_CONFIG);
-  }
-
+  // Stage 0 is stdio-only (map #33 defers HTTP to T-005/#36). Transport is
+  // not a runtime knob, so there is no config-rejection path here.
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
