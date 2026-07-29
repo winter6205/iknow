@@ -13,12 +13,14 @@
  *   - All logging goes to stderr; stdout is reserved for the MCP
  *     stdio JSON-RPC transport.
  *
- * SDK: `@modelcontextprotocol/sdk@^1.30.0` — uses the high-level
- * `McpServer.registerTool` API. The low-level `Server` + `setRequestHandler`
- * and the deprecated `tool(...)` method are deliberately avoided.
+ * SDK: `@modelcontextprotocol/server@^2.0.0` (v2 split-package line) +
+ * `@modelcontextprotocol/client@^2.0.0` (for the host-smoke test harness).
+ * Uses the high-level `McpServer.registerTool` API. The low-level `Server`
+ * + `setRequestHandler` and the deprecated `tool(...)` method are
+ * deliberately avoided.
  */
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 
 import { loadEnv } from "./config.js";
 import { createLogger } from "./logging.js";

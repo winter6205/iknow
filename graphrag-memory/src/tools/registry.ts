@@ -11,10 +11,7 @@
  * translation layer. The adapter only wraps thrown errors.
  */
 import type { z } from "zod";
-import type {
-  CallToolResult,
-  TextContent,
-} from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, TextContent } from "@modelcontextprotocol/server";
 
 export type { CallToolResult, TextContent };
 
