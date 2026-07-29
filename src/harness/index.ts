@@ -43,15 +43,20 @@ export { createExecutor } from "./tools/executor.js";
 export { toAnthropicToolResults } from "./tools/tool-result.js";
 
 export { createAnthropicAdapter } from "./model-adapter/anthropic-adapter.js";
+export { createRealAnthropicAdapter } from "./model-adapter/anthropic-adapter.js";
 export type {
   AnthropicAdapter,
   AnthropicAdapterOptions,
+  RealAnthropicAdapterOptions,
 } from "./model-adapter/anthropic-adapter.js";
 
 export { createStubModel } from "./stubs/stub-model.js";
 export type { StubModelFull } from "./stubs/stub-model.js";
 
 export { createStubTool } from "./stubs/stub-tool.js";
+
+export { createEchoTool } from "./stubs/demo-tools.js";
+export { createGetTimeTool } from "./stubs/demo-tools.js";
 
 // 017 A7 LoopTrace:纯类型 + 一次性 reduce 函数,字段名 SSOT。
 export { computeTotals } from "./loop-trace.js";

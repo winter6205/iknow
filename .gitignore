@@ -54,6 +54,10 @@ docs/20260714-2-gbrain-secondary-dev-guide.md
 # decision output), which ARE team deliverables and must be committed.
 docs/handoff/*
 !docs/handoff/*.md
+# 019: i9 smoke acceptance reports (real-adapter e2e evidence) are team
+# deliverables; without this, lint-staged's force-less git add re-stage
+# fails because docs/handoff/* matches. Mirrors i4-smoke tracked files.
+!docs/handoff/i9-smoke/
 
 # local Next.js prototype (early-stage, not team-shared; built artifacts
 # also covered by node_modules/ etc. above)

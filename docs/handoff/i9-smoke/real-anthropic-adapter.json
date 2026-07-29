@@ -1,0 +1,51 @@
+{
+  "result": "pass",
+  "timestamp": "2026-07-29T11:27:05.740Z",
+  "model": "deepseek-flash-combo",
+  "baseUrl": "localhost:20128",
+  "key_env": "NINE_ROUTER_API_KEY",
+  "maxTurns": 6,
+  "turns": 2,
+  "stopReason": "completed",
+  "finalText_excerpt": "你好！已执行完毕：\n\n- **echo 命令** 返回：`hello harness`\n- **当前时间**：`2026-07-29T11:27:03.965Z`（ISO 8601 格式，UTC 时间）",
+  "toolNames": ["echo", "get_time"],
+  "durationMs": 9777,
+  "assertions": [
+    {
+      "name": "stopReason === completed",
+      "pass": true
+    },
+    {
+      "name": "turnCount >= 2",
+      "pass": true
+    },
+    {
+      "name": "trace.turns.length >= 2",
+      "pass": true
+    },
+    {
+      "name": ">=1 toolCalls[].kind === ok",
+      "pass": true
+    },
+    {
+      "name": "finalText non-empty",
+      "pass": true
+    },
+    {
+      "name": "echo called >=1",
+      "pass": true
+    },
+    {
+      "name": "get_time called >=1",
+      "pass": true
+    },
+    {
+      "name": "every turn supplierStop defined",
+      "pass": true
+    }
+  ],
+  "notes": [
+    "adapter=createRealAnthropicAdapter (SDK client.messages.create, stream:false).",
+    "7-assertion gate (Q5.2) over real multi-step loop."
+  ]
+}

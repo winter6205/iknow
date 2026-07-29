@@ -17,6 +17,7 @@
  */
 
 import { ProtocolError } from "../errors.js";
+import Anthropic from "@anthropic-ai/sdk";
 import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
@@ -26,6 +27,9 @@ import type {
 } from "./types.js";
 import type {
   Message as SdkMessage,
+  MessageCreateParamsNonStreaming,
+  MessageParam,
+  Tool as SdkTool,
   ToolUseBlock,
   TextBlock,
 } from "@anthropic-ai/sdk/resources/messages.js";
@@ -46,8 +50,11 @@ export interface AnthropicAdapterOptions {
 /**
  * 把 Anthropic 原生 SDK Message 解释为 Foundation AssistantTurnResult。
  * 完整原子校验:任一 block 协议错误 -> 抛 ProtocolError,整回合不进入历史。
+ *
+ * 019: 提为模块级 export,供 createAnthropicAdapter(离线)与
+ * createRealAnthropicAdapter(真实 SDK)共享同一解释逻辑(SSOT)。
  */
-function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
+export function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
   if (!sdk || sdk.role !== "assistant") {
     throw new ProtocolError(
       `anthropic-adapter: expected assistant message, got role=${(sdk as { role?: string })?.role ?? "missing"}`
@@ -166,6 +173,58 @@ export interface AnthropicAdapter extends ModelAdapter {
 }
 
 /**
+ * 把用户文本编码为 Anthropic 原生 user message(单 text block)。
+ *
+ * 019: 提为模块级 export,供 createAnthropicAdapter(离线)与
+ * createRealAnthropicAdapter(真实 SDK)共享同一编码逻辑(SSOT)。
+ */
+export function encodeUserText(userText: string): AnthropicNativeMessage {
+  return {
+    role: "user",
+    content: [{ type: "text", text: userText }],
+  };
+}
+
+/**
+ * 把工具执行结果数组编码为 Anthropic 原生 tool_result content blocks。
+ *
+ * 019: 提为模块级 export,供 createAnthropicAdapter(离线)与
+ * createRealAnthropicAdapter(真实 SDK)共享同一编码逻辑(SSOT)。
+ */
+export function encodeToolResults(
+  results: ReadonlyArray<{
+    readonly kind:
+      "ok" | "validation_failed" | "tool_not_found" | "execution_failed";
+    readonly toolUseId: string;
+    readonly payload?: AnthropicContentBlock[];
+    readonly message?: string;
+    readonly toolName?: string;
+  }>
+): AnthropicContentBlock[] {
+  return results.map((r) => {
+    if (r.kind === "ok") {
+      return {
+        type: "tool_result",
+        tool_use_id: r.toolUseId,
+        content: r.payload ?? [],
+      } satisfies AnthropicContentBlock;
+    }
+    const text =
+      r.kind === "tool_not_found"
+        ? `[tool_not_found] tool not found: ${r.toolName ?? "unknown"}`
+        : r.kind === "validation_failed"
+          ? `[validation_failed] ${r.message ?? "invalid input"}`
+          : `[execution_failed] ${r.message ?? "tool execution failed"}`;
+    return {
+      type: "tool_result",
+      tool_use_id: r.toolUseId,
+      is_error: true,
+      content: [{ type: "text", text }],
+    } satisfies AnthropicContentBlock;
+  });
+}
+
+/**
  * 构造 Anthropic Adapter。完全离线:不连真实模型,只消费 responses 数组。
  */
 export function createAnthropicAdapter(
@@ -195,46 +254,87 @@ export function createAnthropicAdapter(
     return interpretMessage(next);
   }
 
-  function encodeUserText(userText: string): AnthropicNativeMessage {
-    return {
-      role: "user",
-      content: [{ type: "text", text: userText }],
+  return Object.freeze({
+    step,
+    encodeUserText,
+    encodeToolResults,
+  });
+}
+
+/**
+ * 019: 真实 Anthropic Adapter 构造选项。
+ *
+ * 与离线的 AnthropicAdapterOptions(需要 responses 脚本化)互不重叠:
+ * 真实 adapter 依赖外部注入的 Anthropic client(019 Q1c 决议:dep injection),
+ * 不在工厂内 new Anthropic。
+ */
+export interface RealAnthropicAdapterOptions {
+  /** 注入的 Anthropic SDK 客户端(默认 baseURL 或 9router 均可)。 */
+  readonly client: Anthropic;
+  /** 模型 id,例如 "claude-3-5-sonnet-20241022"。 */
+  readonly model: string;
+  /** SDK max_tokens(必须 > 0)。 */
+  readonly maxTokens: number;
+}
+
+/**
+ * 把 harness ToolDef[] 映射为 SDK Tool[]。
+ *
+ * - `inputSchema` (camelCase) → `input_schema` (snake_case)
+ * - 空数组/非数组 → undefined,避免给 SDK 下发 `tools: []`
+ * - `Tool.InputSchema` 在 SDK 0.115 是 strict 形状(要求 `type: "object"`),
+ *   harness ToolDef.inputSchema 是 `Record<string, unknown>`;此处用 `as unknown as SdkTool`
+ *   断言,运行时 SDK 仍按 wire shape 发送,真的 schema 校验由 model 自行完成。
+ */
+function toSdkTools(tools: unknown): SdkTool[] | undefined {
+  if (!Array.isArray(tools) || tools.length === 0) return undefined;
+  return tools.map((t) => {
+    const def = t as {
+      name: string;
+      description: string;
+      inputSchema: Record<string, unknown>;
     };
-  }
+    return {
+      name: def.name,
+      description: def.description,
+      input_schema: def.inputSchema,
+    } as unknown as SdkTool;
+  });
+}
 
-  function encodeToolResults(
-    results: ReadonlyArray<{
-      readonly kind:
-        "ok" | "validation_failed" | "tool_not_found" | "execution_failed";
-      readonly toolUseId: string;
-      readonly payload?: AnthropicContentBlock[];
-      readonly message?: string;
-      readonly toolName?: string;
-    }>
-  ): AnthropicContentBlock[] {
-    return results.map((r) => {
-      if (r.kind === "ok") {
-        return {
-          type: "tool_result",
-          tool_use_id: r.toolUseId,
-          content: r.payload ?? [],
-        } satisfies AnthropicContentBlock;
-      }
-      const text =
-        r.kind === "tool_not_found"
-          ? `[tool_not_found] tool not found: ${r.toolName ?? "unknown"}`
-          : r.kind === "validation_failed"
-            ? `[validation_failed] ${r.message ?? "invalid input"}`
-            : `[execution_failed] ${r.message ?? "tool execution failed"}`;
-      return {
-        type: "tool_result",
-        tool_use_id: r.toolUseId,
-        is_error: true,
-        content: [{ type: "text", text }],
-      } satisfies AnthropicContentBlock;
-    });
+/**
+ * 019: 真实 Anthropic Adapter 工厂。
+ *
+ * step 委托 `client.messages.create(params, { signal })`;signal 走 SDK 0.115
+ * 第二参 RequestOptions(不在 MessageCreateParamsBase body,见 toSdkTools 上方签名)。
+ *
+ * 响应经 `interpretMessage` 同一解释逻辑(SSOT)投影为 AssistantTurnResult。
+ * SDK 错误(APIError / AbortError 等)不捕获,让 raceModel 现有 catch 路由处理:
+ *   signal.aborted → "cancelled";MODEL_TIMEOUT → "timeout";
+ *   ProtocolError → "protocolError";其他 → rethrow(`run()` reject)。
+ * 真实失败回流占位见 #54 raceModel abort(#023 engine-timeout HTTP 未取消)。
+ *
+ * 协议不变:`stream:false` 拿非流式 SdkMessage(017 A1 冻);不构造 SdkMessage 队列;
+ * 不重试、不收集 telemetry。
+ */
+export function createRealAnthropicAdapter(
+  opts: RealAnthropicAdapterOptions
+): AnthropicAdapter {
+  async function step(
+    state: LoopState,
+    request: { tools?: unknown },
+    signal?: AbortSignal
+  ): Promise<AssistantTurnResult> {
+    const tools = toSdkTools(request.tools);
+    const params: MessageCreateParamsNonStreaming = {
+      model: opts.model,
+      max_tokens: opts.maxTokens,
+      messages: state.messages as unknown as MessageParam[],
+      ...(tools !== undefined ? { tools } : {}),
+    };
+    const sdkResp = await opts.client.messages.create(params, { signal });
+    return interpretMessage(sdkResp as SdkMessage);
   }
-
   return Object.freeze({
     step,
     encodeUserText,
