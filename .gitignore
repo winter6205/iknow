@@ -66,3 +66,12 @@ _archive/
 # this is a personal project, not team-shared
 .claude/
 docs/kb-assistant-guide
+
+# Narrow exception: project-level .claude/settings.json IS team-shared.
+# The skill-routing-sync hook registration must be visible in every
+# worktree checkout so skill-state stays in sync when working isolated.
+# Git cannot re-include a file under an ignored dir directly, so we
+# un-ignore the dir then re-ignore everything inside except settings.json.
+!.claude/
+.claude/*
+!.claude/settings.json
