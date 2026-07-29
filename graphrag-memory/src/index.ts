@@ -34,6 +34,23 @@ import { echoTool } from "./tools/echo.js";
 const SERVER_NAME = "graphrag-memory";
 const SERVER_VERSION = "0.0.0";
 
+/**
+ * Process exit codes (single source of truth — referenced by both the
+ * transport-guard in main() and the fatal-error catch in the isMain
+ * block). Anything outside this table is a bug; documenting them here
+ * makes host-side scripts (Claude Code, systemd, k8s) able to reason
+ * about what kind of failure happened without parsing stderr.
+ *
+ *   OK               0   normal termination (server closed cleanly)
+ *   FATAL_RUNTIME    1   uncaught exception in main() — see stderr stack
+ *   BAD_CONFIG       2   invalid runtime config (e.g. non-stdio transport)
+ */
+const EXIT_CODES = {
+  OK: 0,
+  FATAL_RUNTIME: 1,
+  BAD_CONFIG: 2,
+} as const;
+
 export function createServer(): McpServer {
   const env = loadEnv();
   const logger = createLogger(env.logLevel);
@@ -75,9 +92,14 @@ function registerOne(
       try {
         return await tool.handler(input);
       } catch (err) {
+        // Mirror v2's internal `createToolError` shape: a plain text
+        // content block with isError:true. v2's SDK would do this for us
+        // (server/src/server/mcp.ts createToolError), but we keep the
+        // try/catch to also surface stderr via the logger — hosts without
+        // structured logging benefit from the observation.
         const message = err instanceof Error ? err.message : String(err);
         logger.error("handler threw", { tool: tool.name, error: message });
-        return textResult(`${tool.name} failed: ${message}`, true);
+        return textResult(message, true);
       }
     }
   );
@@ -91,7 +113,7 @@ export async function main(): Promise<void> {
     logger.error("only stdio transport is supported in stage 0", {
       transport: env.transport,
     });
-    process.exit(2);
+    process.exit(EXIT_CODES.BAD_CONFIG);
   }
 
   const server = createServer();
@@ -115,6 +137,6 @@ if (isMain) {
     process.stderr.write(
       `graphrag-memory fatal: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`
     );
-    process.exit(1);
+    process.exit(EXIT_CODES.FATAL_RUNTIME);
   });
 }
