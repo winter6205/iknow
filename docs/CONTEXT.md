@@ -97,8 +97,8 @@ Shared note markers and answer regexes in `src/eval/lexicon.ts` used by both loo
 _Avoid_: duplicated string literals in loop and score-trajectory
 
 **ConversationState**:
-Host-layer multi-turn bag: turns, `last_priors`, short `history_finals`, json_mode — not part of tool schema.
-_Avoid_: SessionContext (auth only), chat memory tool, stuffing full tool transcripts into session
+Host-layer multi-turn bag: turns, `last_priors`, short `history_finals`, json_mode — not part of tool schema. **Deprecated for CLI path since 018 (refined 2026-07-29); retained for Session API migration ticket — owner: future Session API migration ticket.**
+_Avoid_: SessionContext (auth only), chat memory tool, stuffing full tool transcripts into session; re-introducing as authoritative state on the CLI path
 
 **prior_chunks (cross-turn)**:
 Protocol bridge for the next retrieve: `{ chunk_id, summary }[]` derived from last answer spans (capped/sanitized).
@@ -113,8 +113,8 @@ Script/CI path: single question → full G2 JSON on stdout; empty query → usag
 _Avoid_: inventing a demo Chinese query when args are empty
 
 **processChatLine**:
-Pure-ish turn handler used by REPL and unit tests (slash + agent.answer + format).
-_Avoid_: embedding readline/TTY side effects inside this function
+Pure-ish turn handler used by REPL and unit tests (slash + agent.answer + format). **Deprecated for CLI path since 018 (refined 2026-07-29); retained for Session API migration ticket — owner: future Session API migration ticket.**
+_Avoid_: embedding readline/TTY side effects inside this function; treating the function's CLI-side callers as the authoritative product CLI path
 
 **Session HTTP API** / **session-api**:
 Host multi-conversation surface over `node:http` (`src/session-api/`): create/message/command/reset; every message returns full G2; not tool schema.
