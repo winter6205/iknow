@@ -33,13 +33,13 @@ npx tsx src/cli.ts -h          # bilingual usage (中文 + English)
 
 ### Product defaults
 
-| Invocation | Behavior |
-|------------|----------|
-| `iknow` on a TTY | open **chat** (primary interactive entry) |
-| `iknow` when piped / non-TTY | print usage |
-| `iknow chat` | chat (TTY REPL or line-by-line pipe) |
-| `iknow ask "…"` / `iknow "…"` | **one-shot JSON** (scripts / CI) |
-| empty `ask` / empty query | usage + exit 1 (no demo default query) |
+| Invocation                    | Behavior                                  |
+| ----------------------------- | ----------------------------------------- |
+| `iknow` on a TTY              | open **chat** (primary interactive entry) |
+| `iknow` when piped / non-TTY  | print usage                               |
+| `iknow chat`                  | chat (TTY REPL or line-by-line pipe)      |
+| `iknow ask "…"` / `iknow "…"` | **one-shot JSON** (scripts / CI)          |
+| empty `ask` / empty query     | usage + exit 1 (no demo default query)    |
 
 ### Interactive chat (primary)
 
@@ -60,17 +60,17 @@ printf '公司的退款政策是什么？\n/quit\n' | IKNOW_CHAT_QUIET=1 npx tsx
 
 **Pipe:** no prompts; empty lines skipped; `── turn N ──` on stderr unless `IKNOW_CHAT_QUIET=1`; no `思考中` spam; slash commands still work.
 
-| Input | Behavior |
-|-------|----------|
-| plain text | one `answer` turn (priors + short history injected) |
-| blank line | skipped (pipe and TTY) |
-| `/json on\|off` | toggle full G2 JSON vs human view |
-| `/role <r>` | set `caller_role` (employee\|manager\|admin) |
-| `/mode deterministic\|llm` | rebuild agent when mode changes |
-| `/status` | mode / role / json / turns / priors |
-| `/reset` | clear turns / priors / history (store kept) |
-| `/help` | list commands |
-| `/quit` or `/exit` / Ctrl+D | leave |
+| Input                       | Behavior                                            |
+| --------------------------- | --------------------------------------------------- |
+| plain text                  | one `answer` turn (priors + short history injected) |
+| blank line                  | skipped (pipe and TTY)                              |
+| `/json on\|off`             | toggle full G2 JSON vs human view                   |
+| `/role <r>`                 | set `caller_role` (employee\|manager\|admin)        |
+| `/mode deterministic\|llm`  | rebuild agent when mode changes                     |
+| `/status`                   | mode / role / json / turns / priors                 |
+| `/reset`                    | clear turns / priors / history (store kept)         |
+| `/help`                     | list commands                                       |
+| `/quit` or `/exit` / Ctrl+D | leave                                               |
 
 Human view shows answer + source_spans + governance/snapshot/hops.
 
@@ -103,13 +103,13 @@ npx tsx src/cli.ts --mode llm "公司的退款政策是什么？"
 
 Required env (names only — put real keys in the shell / OS secret store):
 
-| Variable | Role |
-|----------|------|
-| `IKNOW_LLM_API_KEY_ENV` | Name of env var that holds the API key (default `NINE_ROUTER_API_KEY`) |
-| *(that key env)* | Actual secret value (e.g. export `NINE_ROUTER_API_KEY=...`) |
-| `IKNOW_LLM_BASE_URL` | OpenAI-compatible base (default `http://localhost:20128/v1`) |
-| `IKNOW_LLM_MODEL` | Tool-capable model id |
-| `IKNOW_AGENT_MODE` | `deterministic` (default) or `llm` |
+| Variable                | Role                                                                         |
+| ----------------------- | ---------------------------------------------------------------------------- |
+| `IKNOW_LLM_API_KEY_ENV` | Name of env var that holds the API key (default `NINE_ROUTER_KEY`)           |
+| _(that key env)_        | Actual secret value (e.g. export `NINE_ROUTER_KEY=...`)                      |
+| `IKNOW_LLM_BASE_URL`    | OpenAI-compatible base (default `http://localhost:20128/v1` — 9router local) |
+| `IKNOW_LLM_MODEL`       | 9router route id (default `m3-combo`)                                        |
+| `IKNOW_AGENT_MODE`      | `deterministic` (default) or `llm`                                           |
 
 If `--mode llm` is set but the key env is empty, CLI exits with `llm_mode_missing_api_key`.
 
@@ -119,7 +119,7 @@ Default retrieve is keyword + overlap (offline). To enable the real embedding ar
 
 1. Copy `docs/integration-materials.env.example` settings into `.env.local` (never commit secrets).
 2. Set `IKNOW_EMBEDDING_MODE=api` **or** pass `--embeddings` on the CLI.
-3. Point `IKNOW_EMBEDDING_API_KEY_ENV` at the env var that holds the key (default `NINE_ROUTER_API_KEY`).
+3. `IKNOW_EMBEDDING_API_KEY_ENV` defaults to `NINE_ROUTER_KEY` (same as LLM) — override only if you split secrets.
 4. Configure `IKNOW_EMBEDDING_BASE_URL` / `IKNOW_EMBEDDING_MODEL` / dims as needed.
 
 ```bash
@@ -135,17 +135,17 @@ If the embedding API fails, the CLI continues with keyword-only retrieve. `npm t
 
 ## Layout
 
-| Path | Role |
-|------|------|
-| `src/kb-retrieve/` | Dual-arm score + RRF fusion |
-| `src/kb-verify/` | Pure three-state citation verify |
-| `src/kb-compile/` | Fact compile + content_hash dedup |
-| `src/kb-governance/` | Freshness / conflict / snapshot_id |
-| `src/agent-loop/` | Deterministic loop + G2 / hops guards |
-| `src/knowledge-store/` | In-memory KB (standalone) |
-| `src/fixtures/` | Eval-aligned seed corpus |
-| `docs/iknow-spec/` | Protocol + eval assets |
-| `_upstream_gbrain/` | **Read-only reference clone** (gitignored; never import) |
+| Path                   | Role                                                     |
+| ---------------------- | -------------------------------------------------------- |
+| `src/kb-retrieve/`     | Dual-arm score + RRF fusion                              |
+| `src/kb-verify/`       | Pure three-state citation verify                         |
+| `src/kb-compile/`      | Fact compile + content_hash dedup                        |
+| `src/kb-governance/`   | Freshness / conflict / snapshot_id                       |
+| `src/agent-loop/`      | Deterministic loop + G2 / hops guards                    |
+| `src/knowledge-store/` | In-memory KB (standalone)                                |
+| `src/fixtures/`        | Eval-aligned seed corpus                                 |
+| `docs/iknow-spec/`     | Protocol + eval assets                                   |
+| `_upstream_gbrain/`    | **Read-only reference clone** (gitignored; never import) |
 
 ## Upstream reference
 

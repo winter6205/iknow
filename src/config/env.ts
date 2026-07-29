@@ -79,7 +79,7 @@ function parseEnvFile(path: string): Record<string, string> {
 function envGet(
   file: Record<string, string>,
   key: string,
-  fallback = "",
+  fallback = ""
 ): string {
   const fromProc = process.env[key];
   if (fromProc !== undefined && fromProc !== "") return fromProc;
@@ -91,7 +91,7 @@ function envGet(
 function envInt(
   file: Record<string, string>,
   key: string,
-  fallback: number,
+  fallback: number
 ): number {
   const raw = envGet(file, key, "");
   if (!raw) return fallback;
@@ -103,7 +103,7 @@ function envInt(
 function envNumber(
   file: Record<string, string>,
   key: string,
-  fallback: number,
+  fallback: number
 ): number {
   const raw = envGet(file, key, "");
   if (!raw) return fallback;
@@ -121,7 +121,7 @@ function envNumber(
  */
 export function getApiKey(
   envVarName: string,
-  fileMap?: Record<string, string>,
+  fileMap?: Record<string, string>
 ): string | undefined {
   if (!envVarName) return undefined;
   const fromProc = process.env[envVarName];
@@ -143,20 +143,20 @@ export function getApiKey(
  */
 export function assertOfflineCompatible(
   env: IknowEnv,
-  agentMode?: AgentMode,
+  agentMode?: AgentMode
 ): void {
   if (!env.requireOffline) return;
   const mode = agentMode ?? env.agentMode;
   if (mode === "llm") {
     throw new ValidationError(
       "IKNOW_REQUIRE_OFFLINE=true forbids agentMode=llm (requires network LLM)",
-      { agentMode: mode, requireOffline: true },
+      { agentMode: mode, requireOffline: true }
     );
   }
   if (env.embedding.mode === "api") {
     throw new ValidationError(
       "IKNOW_REQUIRE_OFFLINE=true forbids embedding mode=api (requires network embeddings)",
-      { embeddingMode: env.embedding.mode, requireOffline: true },
+      { embeddingMode: env.embedding.mode, requireOffline: true }
     );
   }
 }
@@ -166,12 +166,12 @@ export function assertOfflineCompatible(
  * Call sites: cli LLM branch, LlmIknowAgent ctor (not loadIknowEnv).
  */
 export function assertToolProtocolSupported(
-  protocol: LlmEnv["toolProtocol"],
+  protocol: LlmEnv["toolProtocol"]
 ): void {
   if (protocol === "anthropic_tools") {
     throw new ValidationError(
       "anthropic_tools not implemented; use openai_tools",
-      { toolProtocol: protocol },
+      { toolProtocol: protocol }
     );
   }
 }
@@ -183,11 +183,13 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
     ...parseEnvFile(join(cwd, ".env.local")),
   };
 
-  const llmKeyEnv = envGet(file, "IKNOW_LLM_API_KEY_ENV", "NINE_ROUTER_API_KEY");
+  // SSOT: iknow 钉死 9router 栈 - key 变量名 NINE_ROUTER_KEY、主模型 m3-combo。
+  // .env.local 只需持有密钥值本身，无需再设 IKNOW_LLM_API_KEY_ENV / IKNOW_LLM_MODEL。
+  const llmKeyEnv = envGet(file, "IKNOW_LLM_API_KEY_ENV", "NINE_ROUTER_KEY");
   const embKeyEnv = envGet(
     file,
     "IKNOW_EMBEDDING_API_KEY_ENV",
-    "NINE_ROUTER_API_KEY",
+    "NINE_ROUTER_KEY"
   );
 
   const embModeRaw = envGet(file, "IKNOW_EMBEDDING_MODE", "off").toLowerCase();
@@ -200,13 +202,17 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
     embMode = "off";
   }
 
-  const agentRaw = envGet(file, "IKNOW_AGENT_MODE", "deterministic").toLowerCase();
+  const agentRaw = envGet(
+    file,
+    "IKNOW_AGENT_MODE",
+    "deterministic"
+  ).toLowerCase();
   const agentMode: AgentMode = agentRaw === "llm" ? "llm" : "deterministic";
 
   const toolProto = envGet(
     file,
     "IKNOW_LLM_TOOL_PROTOCOL",
-    "openai_tools",
+    "openai_tools"
   ).toLowerCase();
 
   const dims = envInt(file, "IKNOW_EMBEDDING_DIMS", 2048);
@@ -220,16 +226,17 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
       baseUrl: envGet(
         file,
         "IKNOW_LLM_BASE_URL",
-        "http://localhost:20128/v1",
+        "http://localhost:20128/v1"
       ).replace(/\/$/, ""),
-      model: envGet(file, "IKNOW_LLM_MODEL", "deepseek-flash-combo"),
+      // SSOT: 项目主模型 = m3-combo (9router 路由 ID)
+      model: envGet(file, "IKNOW_LLM_MODEL", "m3-combo"),
       apiKeyEnv: llmKeyEnv,
       apiKey: getApiKey(llmKeyEnv, file),
       maxOutputTokens: envInt(file, "IKNOW_LLM_MAX_OUTPUT_TOKENS", 2048),
       contextWindowTokens: envInt(
         file,
         "IKNOW_LLM_CONTEXT_WINDOW_TOKENS",
-        1_000_000,
+        1_000_000
       ),
       timeoutMs: envInt(file, "IKNOW_LLM_TIMEOUT_MS", 60_000),
       temperature: envNumber(file, "IKNOW_LLM_TEMPERATURE", 0),
@@ -242,7 +249,7 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
       baseUrl: envGet(
         file,
         "IKNOW_EMBEDDING_BASE_URL",
-        "http://localhost:20128/v1",
+        "http://localhost:20128/v1"
       ).replace(/\/$/, ""),
       // Intentional 9router route id (not a typo of "zhipu"/"zhipuai")
       model: envGet(file, "IKNOW_EMBEDDING_MODEL", "zhipueb/embedding-3"),
@@ -254,7 +261,7 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
       cachePath: envGet(
         file,
         "IKNOW_EMBEDDING_CACHE_PATH",
-        ".cache/iknow-embeddings",
+        ".cache/iknow-embeddings"
       ),
     },
   };

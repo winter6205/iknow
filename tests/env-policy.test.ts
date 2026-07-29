@@ -24,6 +24,8 @@ const KEYS = [
   "IKNOW_LLM_TEMPERATURE",
   "IKNOW_LLM_API_KEY_ENV",
   "IKNOW_EMBEDDING_API_KEY_ENV",
+  // SSOT key 变量名 = NINE_ROUTER_KEY（代码默认）。NINE_ROUTER_API_KEY 为历史名，保留以兼容旧 shell 残留。
+  "NINE_ROUTER_KEY",
   "NINE_ROUTER_API_KEY",
   "IKNOW_TEST_EMB_KEY",
   "IKNOW_TEST_LLM_KEY",
@@ -71,7 +73,7 @@ describe("offline + tool protocol policy", () => {
       (e: unknown) =>
         e instanceof ValidationError &&
         e.message.includes("IKNOW_REQUIRE_OFFLINE") &&
-        e.message.includes("agentMode=llm"),
+        e.message.includes("agentMode=llm")
     );
   });
 
@@ -85,8 +87,7 @@ describe("offline + tool protocol policy", () => {
     assert.throws(
       () => assertOfflineCompatible(env),
       (e: unknown) =>
-        e instanceof ValidationError &&
-        e.message.includes("embedding mode=api"),
+        e instanceof ValidationError && e.message.includes("embedding mode=api")
     );
   });
 
@@ -95,7 +96,7 @@ describe("offline + tool protocol policy", () => {
     process.env.IKNOW_AGENT_MODE = "llm";
     await assert.rejects(
       () => createIknowRuntime({ enableEmbeddings: false }),
-      (e: unknown) => e instanceof ValidationError,
+      (e: unknown) => e instanceof ValidationError
     );
   });
 
@@ -104,7 +105,7 @@ describe("offline + tool protocol policy", () => {
       () => assertToolProtocolSupported("anthropic_tools"),
       (e: unknown) =>
         e instanceof ValidationError &&
-        e.message === "anthropic_tools not implemented; use openai_tools",
+        e.message === "anthropic_tools not implemented; use openai_tools"
     );
   });
 
@@ -124,7 +125,7 @@ describe("offline + tool protocol policy", () => {
         }),
       (e: unknown) =>
         e instanceof ValidationError &&
-        e.message === "anthropic_tools not implemented; use openai_tools",
+        e.message === "anthropic_tools not implemented; use openai_tools"
     );
   });
 
@@ -146,7 +147,7 @@ describe("getApiKey + dotenv precedence", () => {
     process.env.IKNOW_TEST_LLM_KEY = "from-process";
     assert.equal(
       getApiKey("IKNOW_TEST_LLM_KEY", { IKNOW_TEST_LLM_KEY: "from-file" }),
-      "from-process",
+      "from-process"
     );
   });
 
@@ -154,7 +155,7 @@ describe("getApiKey + dotenv precedence", () => {
     delete process.env.IKNOW_TEST_LLM_KEY;
     assert.equal(
       getApiKey("IKNOW_TEST_LLM_KEY", { IKNOW_TEST_LLM_KEY: "from-file" }),
-      "from-file",
+      "from-file"
     );
   });
 
@@ -164,7 +165,7 @@ describe("getApiKey + dotenv precedence", () => {
     delete process.env.IKNOW_TEST_LLM_KEY;
     assert.equal(
       getApiKey("IKNOW_TEST_LLM_KEY", { IKNOW_TEST_LLM_KEY: "yes" }),
-      undefined,
+      undefined
     );
   });
 
@@ -179,12 +180,9 @@ describe("getApiKey + dotenv precedence", () => {
     try {
       writeFileSync(
         join(dir, ".env"),
-        "IKNOW_LLM_MODEL=from-env\nIKNOW_LLM_PROVIDER=base\n",
+        "IKNOW_LLM_MODEL=from-env\nIKNOW_LLM_PROVIDER=base\n"
       );
-      writeFileSync(
-        join(dir, ".env.local"),
-        "IKNOW_LLM_MODEL=from-local\n",
-      );
+      writeFileSync(join(dir, ".env.local"), "IKNOW_LLM_MODEL=from-local\n");
       const env = loadIknowEnv(dir);
       assert.equal(env.llm.model, "from-local");
       assert.equal(env.llm.provider, "base");
@@ -214,7 +212,7 @@ describe("getApiKey + dotenv precedence", () => {
           "IKNOW_EMBEDDING_API_KEY_ENV=IKNOW_TEST_EMB_KEY",
           "IKNOW_TEST_EMB_KEY=emb-secret-from-dotenv",
           "",
-        ].join("\n"),
+        ].join("\n")
       );
       delete process.env.IKNOW_TEST_LLM_KEY;
       delete process.env.IKNOW_TEST_EMB_KEY;

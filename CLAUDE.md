@@ -48,8 +48,6 @@ Use as default bias, not strict checklist.
 
 ---
 
-
-
 ### Eval (iknow product + template)
 
 **产品 trajectory（主路径）**:
@@ -73,7 +71,7 @@ npm run eval      # 32-sample trajectory suite
 **Embedding**: 可选 `--embeddings` / `IKNOW_EMBEDDING_MODE=api`（9router 等）；失败回退 overlap。  
 **交互主入口**: TTY `chat`；脚本 `ask`；浏览器 `iknow serve` + `web/dist`（开发可 `web:dev` 代理 `/api`）。  
 **LLM 客户端**: `stream: false` + `parseLlmResponseJson`（容忍 SSE trailer）。  
-**9router key**: 环境变量名 `NINE_ROUTER_API_KEY`；`models` 200 ≠ chat/embeddings 必通；探针 `scripts/i4-probe-nine-endpoints.ts`。  
+**9router key**: 环境变量名 `NINE_ROUTER_KEY`（LLM 与 embedding 共用，env.ts SSOT）；`models` 200 ≠ chat/embeddings 必通；探针 `scripts/i4-probe-nine-endpoints.ts`。  
 **I4**: 已归档三模式 + HTTP 冒烟证据（`docs/handoff/i4-smoke/`）。  
 **Git**: 无用户明确 `push` 授权则不执行。
 
@@ -89,4 +87,3 @@ npm run eval      # 32-sample trajectory suite
 - plans/minimum-sequential-agent-loop.md — 对应实施计划
 - CHANGELOG.md — 版本变更记录（根目录真值）
 - docs/integration-materials.env.example — LLM/向量接入材料占位（只写环境变量名）
-
