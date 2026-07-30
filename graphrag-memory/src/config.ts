@@ -34,11 +34,24 @@ function isStorageMode(value: string): value is StorageMode {
 }
 
 /**
- * Env-var NAME for the embedding provider key. The name lives in source;
- * the value never does. Shared with the root iknow project's convention so
- * an operator sets one key for both (see iknow CLAUDE.md "9router key").
+ * Embedding API key resolution — host-agnostic, no hardcoded provider.
+ *
+ * Two knobs, resolved in order (first non-blank wins):
+ *   1. GRAPHRAG_MEMORY_EMBED_API_KEY     — the secret VALUE itself. Optional.
+ *      Only ever set this in a host-local, untracked MCP registration (e.g.
+ *      Claude Code's `~/.claude.json` local scope). NEVER in a git-tracked
+ *      project `.mcp.json` — that would commit the secret.
+ *   2. GRAPHRAG_MEMORY_EMBED_API_KEY_ENV — the NAME of an env var holding the
+ *      secret. Optional; defaults to NINE_ROUTER_KEY so the iknow 9router
+ *      convention (ADR-0001) keeps working with zero config, while a generic
+ *      host can point at its own key variable.
+ *
+ * Neither resolves → undefined → FakeEmbedder path. The default var NAME
+ * lives in source; the secret VALUE never does.
  */
-const EMBED_API_KEY_VAR = "NINE_ROUTER_KEY";
+const EMBED_API_KEY_VALUE_VAR = "GRAPHRAG_MEMORY_EMBED_API_KEY";
+const EMBED_API_KEY_NAME_VAR = "GRAPHRAG_MEMORY_EMBED_API_KEY_ENV";
+const DEFAULT_EMBED_API_KEY_ENV = "NINE_ROUTER_KEY";
 
 /** Env-var name for the required embedding dimension integer. */
 const EMBED_DIMENSIONS_VAR = "GRAPHRAG_MEMORY_EMBED_DIMENSIONS";
@@ -74,7 +87,10 @@ export interface GraphragEnv {
   embedModel: string | undefined;
   /** Vector dimension. Always set — every code path (real + fake) needs it. */
   embedDimensions: number;
-  /** Value of NINE_ROUTER_KEY; undefined means "fall back to FakeEmbedder". */
+  /**
+   * Resolved embedding API key value; undefined means "fall back to
+   * FakeEmbedder". See the EMBED_API_KEY_* constants for resolution order.
+   */
   embedApiKey: string | undefined;
 }
 
@@ -111,8 +127,8 @@ function readEnv(key: string): string | undefined {
 /**
  * Read an env var and normalize: trim whitespace, treat empty/whitespace-only
  * as absent (undefined). Keeps config.ts and index.ts in agreement — both
- * treat a blank NINE_ROUTER_KEY as "no key" (FakeEmbedder path) without
- * relying on JS truthiness semantics at the consumption site.
+ * treat a blank key as "no key" (FakeEmbedder path) without relying on JS
+ * truthiness semantics at the consumption site.
  */
 function readTrimmed(key: string): string | undefined {
   const raw = readEnv(key);
@@ -178,24 +194,24 @@ export function loadEnv(): GraphragEnv {
   }
 
   // Embedding config: dimensions is ALWAYS required (every backend needs it);
-  // baseUrl and model are only required when NINE_ROUTER_KEY is set, because
-  // the FakeEmbedder path takes the operator offline without one. All three
-  // string fields are normalized through readTrimmed so empty / whitespace-
-  // only values collapse to undefined — a blank key does not silently drag
-  // an operator into the real-embedder path.
+  // baseUrl and model are only required when a key resolves, because the
+  // FakeEmbedder path takes the operator offline without one. All string
+  // fields are normalized through readTrimmed so empty / whitespace-only
+  // values collapse to undefined — a blank key does not silently drag an
+  // operator into the real-embedder path.
   const embedDimensions = parseEmbedDimensions(readEnv(EMBED_DIMENSIONS_VAR));
-  const embedApiKey = readTrimmed(EMBED_API_KEY_VAR);
+  const embedApiKey = resolveEmbedApiKey();
 
   const embedBaseUrl = readTrimmed("GRAPHRAG_MEMORY_EMBED_BASE_URL");
   if (embedApiKey !== undefined && embedBaseUrl === undefined) {
     throw new ConfigError(
-      "GRAPHRAG_MEMORY_EMBED_BASE_URL is required when NINE_ROUTER_KEY is set"
+      "GRAPHRAG_MEMORY_EMBED_BASE_URL is required when an embedding API key is configured (GRAPHRAG_MEMORY_EMBED_API_KEY or the var named by GRAPHRAG_MEMORY_EMBED_API_KEY_ENV)"
     );
   }
   const embedModel = readTrimmed("GRAPHRAG_MEMORY_EMBED_MODEL");
   if (embedApiKey !== undefined && embedModel === undefined) {
     throw new ConfigError(
-      "GRAPHRAG_MEMORY_EMBED_MODEL is required when NINE_ROUTER_KEY is set"
+      "GRAPHRAG_MEMORY_EMBED_MODEL is required when an embedding API key is configured (GRAPHRAG_MEMORY_EMBED_API_KEY or the var named by GRAPHRAG_MEMORY_EMBED_API_KEY_ENV)"
     );
   }
 
@@ -210,4 +226,24 @@ export function loadEnv(): GraphragEnv {
     // environment, never in this file or in any log line.
     embedApiKey,
   };
+}
+
+/**
+ * Resolve the embedding API key value.
+ *
+ * Order (first non-blank wins):
+ *   1. GRAPHRAG_MEMORY_EMBED_API_KEY      — direct secret value
+ *   2. process.env[GRAPHRAG_MEMORY_EMBED_API_KEY_ENV] — indirect by name
+ *      (the NAME var defaults to NINE_ROUTER_KEY, the iknow 9router convention)
+ *   3. undefined → FakeEmbedder path
+ *
+ * Both sources go through readTrimmed, so a blank value or blank var-name
+ * collapses to undefined rather than selecting an empty-string key.
+ */
+function resolveEmbedApiKey(): string | undefined {
+  const direct = readTrimmed(EMBED_API_KEY_VALUE_VAR);
+  if (direct !== undefined) return direct;
+  const keyEnvName =
+    readTrimmed(EMBED_API_KEY_NAME_VAR) ?? DEFAULT_EMBED_API_KEY_ENV;
+  return readTrimmed(keyEnvName);
 }

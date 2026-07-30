@@ -73,8 +73,8 @@ interface ServerDeps {
  * Build the storage + embedding dependencies for one server instance.
  *
  * Embedder selection is key-presence-driven rather than an explicit mode
- * knob: an operator who supplies NINE_ROUTER_KEY wants real embeddings, and
- * one who does not cannot get them anyway. FakeEmbedder is deterministic and
+ * knob: an operator who supplies an embedding API key wants real embeddings,
+ * and one who does not cannot get them anyway. FakeEmbedder is deterministic and
  * offline, which is what dev/test/CI need — but its vectors are meaningless
  * for cross-text semantics, so the choice is logged at construction.
  *
@@ -114,7 +114,7 @@ async function buildDeps(env: GraphragEnv): Promise<ServerDeps> {
     // mirrors the dbUrl check above (buildDeps is also callable from tests).
     if (env.embedBaseUrl === undefined || env.embedModel === undefined) {
       throw new ConfigError(
-        "GRAPHRAG_MEMORY_EMBED_BASE_URL and GRAPHRAG_MEMORY_EMBED_MODEL are required when NINE_ROUTER_KEY is set"
+        "GRAPHRAG_MEMORY_EMBED_BASE_URL and GRAPHRAG_MEMORY_EMBED_MODEL are required when an embedding API key is configured"
       );
     }
     embedder = new NineRouterEmbedder({

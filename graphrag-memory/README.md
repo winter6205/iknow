@@ -16,15 +16,18 @@ npm run build --workspace graphrag-memory   # 产出 graphrag-memory/dist/index.
 
 **local-scope MCP registration 是 endpoint / model / dimensions / apiKey 的唯一真值源。** graphrag-memory 只校验 + 消费这些值，不内置任何生产默认值；必填项缺失时启动失败（`ConfigError` → exit code `BAD_CONFIG` = 2，transport 不会打开）。
 
-| env 变量名                         | 必填性                                           | 说明                                                                                                                                             |
-| ---------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `GRAPHRAG_MEMORY_EMBED_DIMENSIONS` | 必填                                             | int > 0。embedding 向量维度：本地索引大小 + 请求体 `dimensions` 透传 + pgvector DDL 宽度，三处共用这一个值                                       |
-| `GRAPHRAG_MEMORY_EMBED_BASE_URL`   | 真实 embedding 时必填（有 `NINE_ROUTER_KEY` 时） | OpenAI-compatible base URL。约定**已含 `/v1`**（如 `http://localhost:20128/v1`），server 仅追加 `/embeddings`                                    |
-| `GRAPHRAG_MEMORY_EMBED_MODEL`      | 真实 embedding 时必填（有 `NINE_ROUTER_KEY` 时） | embedding 模型的 route id                                                                                                                        |
-| `NINE_ROUTER_KEY`                  | 可选                                             | 9router API key（LLM / embedding 共用，见 iknow ADR-0001）。缺失时回退确定性 FakeEmbedder——仅测试 / 离线开发用，向量无跨文本语义，**非生产路径** |
-| `GRAPHRAG_MEMORY_LOG_LEVEL`        | 可选                                             | `debug` \| `info` \| `warn` \| `error`，默认 `info`                                                                                              |
-| `GRAPHRAG_MEMORY_STORAGE`          | 可选                                             | `memory`（默认，进程内、无持久化）或 `pgvector`（需 `GRAPHRAG_MEMORY_DB_URL` + 可选 `pg` 依赖）                                                  |
-| `GRAPHRAG_MEMORY_DB_URL`           | `pgvector` 时必填                                | Postgres 连接串                                                                                                                                  |
+| env 变量名                          | 必填性                             | 说明                                                                                                                                            |
+| ----------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GRAPHRAG_MEMORY_EMBED_DIMENSIONS`  | 必填                               | int > 0。embedding 向量维度：本地索引大小 + 请求体 `dimensions` 透传 + pgvector DDL 宽度，三处共用这一个值                                      |
+| `GRAPHRAG_MEMORY_EMBED_BASE_URL`    | 真实 embedding 时必填（有 key 时） | OpenAI-compatible base URL。约定**已含 `/v1`**（如 `http://localhost:20128/v1`），server 仅追加 `/embeddings`                                   |
+| `GRAPHRAG_MEMORY_EMBED_MODEL`       | 真实 embedding 时必填（有 key 时） | embedding 模型的 route id                                                                                                                       |
+| `GRAPHRAG_MEMORY_EMBED_API_KEY`     | 可选                               | embedding API key 的**值本身**。只许放 host-local、不进 git 的注册（如 Claude Code `~/.claude.json` local scope）；**禁写进项目级 `.mcp.json`** |
+| `GRAPHRAG_MEMORY_EMBED_API_KEY_ENV` | 可选                               | 持有 key 的环境变量**名**。默认 `NINE_ROUTER_KEY`（iknow 9router 约定，ADR-0001）；通用 host 可指向自己的 key 变量                              |
+| `GRAPHRAG_MEMORY_LOG_LEVEL`         | 可选                               | `debug` \| `info` \| `warn` \| `error`，默认 `info`                                                                                             |
+| `GRAPHRAG_MEMORY_STORAGE`           | 可选                               | `memory`（默认，进程内、无持久化）或 `pgvector`（需 `GRAPHRAG_MEMORY_DB_URL` + 可选 `pg` 依赖）                                                 |
+| `GRAPHRAG_MEMORY_DB_URL`            | `pgvector` 时必填                  | Postgres 连接串                                                                                                                                 |
+
+**key 解析顺序**（首个非空生效）：`GRAPHRAG_MEMORY_EMBED_API_KEY`（直接值）> `GRAPHRAG_MEMORY_EMBED_API_KEY_ENV` 命名的环境变量（默认 `NINE_ROUTER_KEY`）> 无 → 回退确定性 FakeEmbedder（仅测试 / 离线开发，向量无跨文本语义，**非生产路径**）。包内不硬编码任何 provider key 变量名——默认值 `NINE_ROUTER_KEY` 只是 9router 约定的便利缺省，可被 `_API_KEY_ENV` 覆盖。
 
 生产路径（有 key）对任何缺失的 endpoint / model / dimensions 都 fail-fast，无静默默认。
 
@@ -42,7 +45,7 @@ npm run build --workspace graphrag-memory   # 产出 graphrag-memory/dist/index.
         "GRAPHRAG_MEMORY_EMBED_BASE_URL": "http://localhost:20128/v1",
         "GRAPHRAG_MEMORY_EMBED_MODEL": "zhipueb/embedding-3",
         "GRAPHRAG_MEMORY_EMBED_DIMENSIONS": "2048",
-        "NINE_ROUTER_KEY": "<your-9router-key>"
+        "GRAPHRAG_MEMORY_EMBED_API_KEY": "<your-embedding-api-key>"
       }
     }
   }
@@ -52,6 +55,7 @@ npm run build --workspace graphrag-memory   # 产出 graphrag-memory/dist/index.
 - `zhipueb/embedding-3` 是故意的 9router route id，**非 typo**；`2048` 是该 model 的输出维度，两者必须配套。
 - base URL 含 `/v1`（与 iknow 9router 本地栈约定一致），server 只在其后追加 `/embeddings`。
 - `<repo>` 替换为本仓库的绝对路径。
+- `GRAPHRAG_MEMORY_EMBED_API_KEY` 直接给值；若你的 key 已在某个环境变量里（如 `NINE_ROUTER_KEY`），可省略此行——server 默认按 `NINE_ROUTER_KEY` 取，或显式设 `GRAPHRAG_MEMORY_EMBED_API_KEY_ENV=<你的变量名>`。
 - API key 只存 local scope，**不进 Git**。
 
 ### 便利备选
@@ -64,7 +68,7 @@ claude mcp add graphrag-memory \
   --env GRAPHRAG_MEMORY_EMBED_BASE_URL=http://localhost:20128/v1 \
   --env GRAPHRAG_MEMORY_EMBED_MODEL=zhipueb/embedding-3 \
   --env GRAPHRAG_MEMORY_EMBED_DIMENSIONS=2048 \
-  --env NINE_ROUTER_KEY=<your-9router-key> \
+  --env GRAPHRAG_MEMORY_EMBED_API_KEY=<your-embedding-api-key> \
   -- node <repo>/graphrag-memory/dist/index.js
 ```
 
