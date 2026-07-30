@@ -34,24 +34,27 @@ function isStorageMode(value: string): value is StorageMode {
 }
 
 /**
- * Embedding API key resolution — host-agnostic, no hardcoded provider.
+ * Embedding API key resolution — host-agnostic, no provider knowledge.
  *
- * Two knobs, resolved in order (first non-blank wins):
- *   1. GRAPHRAG_MEMORY_EMBED_API_KEY     — the secret VALUE itself. Optional.
- *      Only ever set this in a host-local, untracked MCP registration (e.g.
- *      Claude Code's `~/.claude.json` local scope). NEVER in a git-tracked
- *      project `.mcp.json` — that would commit the secret.
- *   2. GRAPHRAG_MEMORY_EMBED_API_KEY_ENV — the NAME of an env var holding the
- *      secret. Optional; defaults to NINE_ROUTER_KEY so the iknow 9router
- *      convention (ADR-0001) keeps working with zero config, while a generic
- *      host can point at its own key variable.
+ * config.ts is a pure consumer: it decides NOTHING about which key to use.
+ * The choice is declared entirely in the MCP registration layer (the
+ * `.mcp.json` / `~/.claude.json` env block), via two knobs, resolved in
+ * order (first non-blank wins):
+ *   1. GRAPHRAG_MEMORY_EMBED_API_KEY     — the secret VALUE itself. Only
+ *      ever set in a host-local, untracked registration (e.g. Claude Code's
+ *      `~/.claude.json` local scope). NEVER in a git-tracked `.mcp.json`.
+ *   2. GRAPHRAG_MEMORY_EMBED_API_KEY_ENV — the NAME of an env var holding
+ *      the secret (e.g. "NINE_ROUTER_KEY" for the iknow 9router convention,
+ *      or any other var a generic host uses). config.ts just reads whatever
+ *      name it is handed.
  *
- * Neither resolves → undefined → FakeEmbedder path. The default var NAME
- * lives in source; the secret VALUE never does.
+ * Neither set → undefined → FakeEmbedder path. There is deliberately NO
+ * default var name here — a default would re-hardcode a provider choice
+ * into config, which is exactly what this indirection removes. The secret
+ * VALUE never lives in source; the var NAME is supplied by the operator.
  */
 const EMBED_API_KEY_VALUE_VAR = "GRAPHRAG_MEMORY_EMBED_API_KEY";
 const EMBED_API_KEY_NAME_VAR = "GRAPHRAG_MEMORY_EMBED_API_KEY_ENV";
-const DEFAULT_EMBED_API_KEY_ENV = "NINE_ROUTER_KEY";
 
 /** Env-var name for the required embedding dimension integer. */
 const EMBED_DIMENSIONS_VAR = "GRAPHRAG_MEMORY_EMBED_DIMENSIONS";
@@ -233,8 +236,8 @@ export function loadEnv(): GraphragEnv {
  *
  * Order (first non-blank wins):
  *   1. GRAPHRAG_MEMORY_EMBED_API_KEY      — direct secret value
- *   2. process.env[GRAPHRAG_MEMORY_EMBED_API_KEY_ENV] — indirect by name
- *      (the NAME var defaults to NINE_ROUTER_KEY, the iknow 9router convention)
+ *   2. process.env[GRAPHRAG_MEMORY_EMBED_API_KEY_ENV] — indirect by the
+ *      var NAME the operator supplied (no default — see the constant block)
  *   3. undefined → FakeEmbedder path
  *
  * Both sources go through readTrimmed, so a blank value or blank var-name
@@ -243,7 +246,7 @@ export function loadEnv(): GraphragEnv {
 function resolveEmbedApiKey(): string | undefined {
   const direct = readTrimmed(EMBED_API_KEY_VALUE_VAR);
   if (direct !== undefined) return direct;
-  const keyEnvName =
-    readTrimmed(EMBED_API_KEY_NAME_VAR) ?? DEFAULT_EMBED_API_KEY_ENV;
+  const keyEnvName = readTrimmed(EMBED_API_KEY_NAME_VAR);
+  if (keyEnvName === undefined) return undefined;
   return readTrimmed(keyEnvName);
 }

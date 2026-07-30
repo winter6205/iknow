@@ -172,6 +172,7 @@ describe("loadEnv — stage 1 storage + embedding contract", () => {
   it("overrides embedBaseUrl and embedModel from env", () => {
     withEnv(
       {
+        GRAPHRAG_MEMORY_EMBED_API_KEY_ENV: "NINE_ROUTER_KEY",
         NINE_ROUTER_KEY: "test-key",
         GRAPHRAG_MEMORY_EMBED_BASE_URL: "https://example.invalid",
         GRAPHRAG_MEMORY_EMBED_MODEL: "custom-embed-model",
@@ -187,6 +188,7 @@ describe("loadEnv — stage 1 storage + embedding contract", () => {
   it("strips a trailing slash from embedBaseUrl", () => {
     withEnv(
       {
+        GRAPHRAG_MEMORY_EMBED_API_KEY_ENV: "NINE_ROUTER_KEY",
         NINE_ROUTER_KEY: "test-key",
         GRAPHRAG_MEMORY_EMBED_BASE_URL: "https://example.invalid/v1/",
         GRAPHRAG_MEMORY_EMBED_MODEL: "test-model",
@@ -203,9 +205,10 @@ describe("loadEnv — stage 1 storage + embedding contract", () => {
     });
   });
 
-  it("reads embedApiKey from NINE_ROUTER_KEY by name", () => {
+  it("reads embedApiKey from the var named by GRAPHRAG_MEMORY_EMBED_API_KEY_ENV", () => {
     withEnv(
       {
+        GRAPHRAG_MEMORY_EMBED_API_KEY_ENV: "NINE_ROUTER_KEY",
         NINE_ROUTER_KEY: "test-key-not-a-real-secret",
         GRAPHRAG_MEMORY_EMBED_BASE_URL: "https://example.invalid/v1",
         GRAPHRAG_MEMORY_EMBED_MODEL: "test-model",
@@ -216,7 +219,7 @@ describe("loadEnv — stage 1 storage + embedding contract", () => {
     );
   });
 
-  it("leaves embedApiKey undefined when NINE_ROUTER_KEY is unset", () => {
+  it("leaves embedApiKey undefined when no key source is declared", () => {
     withEnv({}, () => {
       expect(loadEnv().embedApiKey).toBeUndefined();
     });
@@ -318,10 +321,11 @@ describe("loadEnv — embed config boundary cases", () => {
     });
   });
 
-  it("throws when NINE_ROUTER_KEY is set but BASE_URL is unset", () => {
+  it("throws when a key is declared but BASE_URL is unset", () => {
     withRawEnv(
       {
         GRAPHRAG_MEMORY_EMBED_DIMENSIONS: "1536",
+        GRAPHRAG_MEMORY_EMBED_API_KEY_ENV: "NINE_ROUTER_KEY",
         NINE_ROUTER_KEY: "test-key",
         GRAPHRAG_MEMORY_EMBED_MODEL: "model-x",
       },
@@ -331,10 +335,11 @@ describe("loadEnv — embed config boundary cases", () => {
     );
   });
 
-  it("throws when NINE_ROUTER_KEY is set but MODEL is unset", () => {
+  it("throws when a key is declared but MODEL is unset", () => {
     withRawEnv(
       {
         GRAPHRAG_MEMORY_EMBED_DIMENSIONS: "1536",
+        GRAPHRAG_MEMORY_EMBED_API_KEY_ENV: "NINE_ROUTER_KEY",
         NINE_ROUTER_KEY: "test-key",
         GRAPHRAG_MEMORY_EMBED_BASE_URL: "http://localhost:20128/v1",
       },
@@ -348,10 +353,11 @@ describe("loadEnv — embed config boundary cases", () => {
   // exactly like an unset var, so a blank key cannot drag an operator into
   // the real-embedder path and a blank BASE_URL/MODEL cannot slip past the
   // key-coupled required check to fail later at request time.
-  it("throws when BASE_URL is an empty string but NINE_ROUTER_KEY is set", () => {
+  it("throws when BASE_URL is an empty string but a key is declared", () => {
     withRawEnv(
       {
         GRAPHRAG_MEMORY_EMBED_DIMENSIONS: "1536",
+        GRAPHRAG_MEMORY_EMBED_API_KEY_ENV: "NINE_ROUTER_KEY",
         NINE_ROUTER_KEY: "test-key",
         GRAPHRAG_MEMORY_EMBED_BASE_URL: "",
         GRAPHRAG_MEMORY_EMBED_MODEL: "model-x",
@@ -362,10 +368,11 @@ describe("loadEnv — embed config boundary cases", () => {
     );
   });
 
-  it("throws when BASE_URL is whitespace-only but NINE_ROUTER_KEY is set", () => {
+  it("throws when BASE_URL is whitespace-only but a key is declared", () => {
     withRawEnv(
       {
         GRAPHRAG_MEMORY_EMBED_DIMENSIONS: "1536",
+        GRAPHRAG_MEMORY_EMBED_API_KEY_ENV: "NINE_ROUTER_KEY",
         NINE_ROUTER_KEY: "test-key",
         GRAPHRAG_MEMORY_EMBED_BASE_URL: "   ",
         GRAPHRAG_MEMORY_EMBED_MODEL: "model-x",
@@ -376,10 +383,11 @@ describe("loadEnv — embed config boundary cases", () => {
     );
   });
 
-  it("throws when MODEL is an empty string but NINE_ROUTER_KEY is set", () => {
+  it("throws when MODEL is an empty string but a key is declared", () => {
     withRawEnv(
       {
         GRAPHRAG_MEMORY_EMBED_DIMENSIONS: "1536",
+        GRAPHRAG_MEMORY_EMBED_API_KEY_ENV: "NINE_ROUTER_KEY",
         NINE_ROUTER_KEY: "test-key",
         GRAPHRAG_MEMORY_EMBED_BASE_URL: "http://localhost:20128/v1",
         GRAPHRAG_MEMORY_EMBED_MODEL: "",
@@ -390,10 +398,11 @@ describe("loadEnv — embed config boundary cases", () => {
     );
   });
 
-  it("treats an empty NINE_ROUTER_KEY as unset (FakeEmbedder path, no baseUrl/model required)", () => {
+  it("treats an empty declared key var as unset (FakeEmbedder path, no baseUrl/model required)", () => {
     withRawEnv(
       {
         GRAPHRAG_MEMORY_EMBED_DIMENSIONS: "1536",
+        GRAPHRAG_MEMORY_EMBED_API_KEY_ENV: "NINE_ROUTER_KEY",
         NINE_ROUTER_KEY: "",
       },
       () => {
@@ -432,10 +441,13 @@ describe("loadEnv — embed config boundary cases", () => {
  * NINE_ROUTER_KEY).
  *
  * Resolution order: GRAPHRAG_MEMORY_EMBED_API_KEY (direct value) >
- * process.env[GRAPHRAG_MEMORY_EMBED_API_KEY_ENV] (indirect by name, default
- * NINE_ROUTER_KEY) > undefined (FakeEmbedder). Every case scrubs all three
- * key-related vars first so a developer machine's real key can't leak into
- * the assertion.
+ * process.env[GRAPHRAG_MEMORY_EMBED_API_KEY_ENV] (indirect by the var name
+ * the operator declared) > undefined (FakeEmbedder). There is NO default
+ * var name: if neither knob is set, the key is undefined even when
+ * NINE_ROUTER_KEY happens to exist in the environment — the choice of key
+ * is declared in the MCP layer, never decided by config. Every case scrubs
+ * all key-related vars first so a developer machine's real key can't leak
+ * into the assertion.
  */
 describe("loadEnv — embedding API key resolution", () => {
   const KEY_VARS = [
@@ -494,6 +506,7 @@ describe("loadEnv — embedding API key resolution", () => {
     withKeyEnv(
       {
         GRAPHRAG_MEMORY_EMBED_API_KEY: "direct-secret",
+        GRAPHRAG_MEMORY_EMBED_API_KEY_ENV: "NINE_ROUTER_KEY",
         NINE_ROUTER_KEY: "env-secret",
         ...ENDPOINT,
       },
@@ -503,9 +516,22 @@ describe("loadEnv — embedding API key resolution", () => {
     );
   });
 
-  it("falls back to NINE_ROUTER_KEY by default when no direct value", () => {
-    withKeyEnv({ NINE_ROUTER_KEY: "env-secret", ...ENDPOINT }, () => {
-      expect(loadEnv().embedApiKey).toBe("env-secret");
+  it("reads NINE_ROUTER_KEY only when the operator declares it via _API_KEY_ENV (no implicit default)", () => {
+    withKeyEnv(
+      {
+        GRAPHRAG_MEMORY_EMBED_API_KEY_ENV: "NINE_ROUTER_KEY",
+        NINE_ROUTER_KEY: "env-secret",
+        ...ENDPOINT,
+      },
+      () => {
+        expect(loadEnv().embedApiKey).toBe("env-secret");
+      }
+    );
+  });
+
+  it("ignores NINE_ROUTER_KEY when no key source is declared (no default)", () => {
+    withKeyEnv({ NINE_ROUTER_KEY: "env-secret" }, () => {
+      expect(loadEnv().embedApiKey).toBeUndefined();
     });
   });
 
@@ -523,10 +549,11 @@ describe("loadEnv — embedding API key resolution", () => {
     );
   });
 
-  it("treats a blank direct value as unset and falls back to the var-name path", () => {
+  it("treats a blank direct value as unset and falls back to the declared var-name", () => {
     withKeyEnv(
       {
         GRAPHRAG_MEMORY_EMBED_API_KEY: "   ",
+        GRAPHRAG_MEMORY_EMBED_API_KEY_ENV: "NINE_ROUTER_KEY",
         NINE_ROUTER_KEY: "env-secret",
         ...ENDPOINT,
       },
@@ -536,15 +563,14 @@ describe("loadEnv — embedding API key resolution", () => {
     );
   });
 
-  it("treats a blank var-name as unset (falls back to the NINE_ROUTER_KEY default)", () => {
+  it("treats a blank var-name as unset (no default, so key is undefined)", () => {
     withKeyEnv(
       {
         GRAPHRAG_MEMORY_EMBED_API_KEY_ENV: "  ",
         NINE_ROUTER_KEY: "env-secret",
-        ...ENDPOINT,
       },
       () => {
-        expect(loadEnv().embedApiKey).toBe("env-secret");
+        expect(loadEnv().embedApiKey).toBeUndefined();
       }
     );
   });
