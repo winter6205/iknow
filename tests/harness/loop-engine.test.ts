@@ -584,6 +584,89 @@ describe("loop engine S11: cross-run isolation", () => {
   });
 });
 
+describe("run() opts.priorMessages", () => {
+  it("no priorMessages defaults to empty array (old behavior)", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel([assistantResult(["hello"], [], "success")]);
+
+    const { result } = await run("hi", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+
+    assert.equal(result.messages.length, 2);
+  });
+
+  it("priorMessages prefix + user text form N+1 starting messages", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel([
+      assistantResult(["B reply"], [], "success"),
+    ]);
+    const userA = makeNative("user", "A");
+    const assistantA = makeNative("assistant", "A reply");
+    const priorMessages = [userA, assistantA];
+
+    const { result } = await run(
+      "B",
+      {
+        adapter: model,
+        executor: exec,
+        registry: reg,
+        maxTurns: 5,
+      },
+      undefined,
+      { priorMessages }
+    );
+
+    assert.deepEqual(result.messages[0], userA);
+    assert.deepEqual(result.messages[1], assistantA);
+    assert.deepEqual(result.messages[2], makeNative("user", "B"));
+  });
+
+  it("priorMessages does not affect turnCount starting at 0", async () => {
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const reg = createRegistry([echo]);
+    const exec = createExecutor(reg);
+    const model = createStubModel([
+      assistantResult([], [{ id: "t1", name: "echo", input: { value: "B" } }]),
+    ]);
+    const priorMessages = [
+      makeNative("user", "A"),
+      makeNative("assistant", "A reply"),
+    ];
+
+    const { result } = await run(
+      "B",
+      {
+        adapter: model,
+        executor: exec,
+        registry: reg,
+        maxTurns: 1,
+      },
+      undefined,
+      { priorMessages }
+    );
+
+    assert.equal(result.stopReason, "maxTurns");
+    assert.equal(result.turnCount, 1);
+  });
+});
+
 describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
   it("S12: signal abort during model in-flight -> cancelled; whole turn NOT in history", async () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });

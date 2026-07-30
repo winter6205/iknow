@@ -3,22 +3,15 @@
  * Core line handling is exported for unit tests (no real TTY required).
  */
 import * as readline from "node:readline";
-import {
-  createConversation,
-  formatAnswerHuman,
-  formatAnswerJson,
-  recordTurn,
-  type ConversationState,
-} from "../interaction/index.js";
+import { run as runHarness, type LoopEngineDeps } from "../harness/index.js";
+import { formatRunHuman, formatRunJson } from "./format.js";
 import {
   applySlashCommand,
   parseChatLine,
-  type AgentModeCli,
-} from "../interaction/slash.js";
+  type CliChatState,
+} from "./slash.js";
 import type { SessionContext } from "../shared/schema.js";
-import type { InMemoryKnowledgeStore } from "../knowledge-store/memory-store.js";
 import { isIknowError } from "../shared/errors.js";
-import type { AnswerAgent } from "./runtime.js";
 import {
   clearErrLine,
   isInteractive,
@@ -30,13 +23,9 @@ import {
 const TTY_ANSWER_SEP = "────────";
 
 export type ChatSessionOpts = {
-  agent: AnswerAgent;
-  store: InMemoryKnowledgeStore;
+  deps: LoopEngineDeps;
   session: SessionContext;
-  initialMode: AgentModeCli;
   jsonMode: boolean;
-  /** Rebuild agent when /mode changes. */
-  buildAgent: (mode: AgentModeCli) => Promise<AnswerAgent>;
   /** Optional note for banner (e.g. embeddings on/off). */
   embeddingsNote?: string;
   /**
@@ -48,11 +37,8 @@ export type ChatSessionOpts = {
 };
 
 export type ChatLineContext = {
-  agent: AnswerAgent;
-  store: InMemoryKnowledgeStore;
-  state: ConversationState;
-  mode: AgentModeCli;
-  buildAgent: (mode: AgentModeCli) => Promise<AnswerAgent>;
+  deps: LoopEngineDeps;
+  state: CliChatState;
 };
 
 export type ProcessChatLineResult = {
@@ -67,11 +53,11 @@ export type ProcessChatLineResult = {
 
 /**
  * Pure-ish one-line handler for tests and both I/O paths.
- * Mutates ctx (state, agent, mode) as needed.
+ * Mutates ctx (state) as needed.
  */
 export async function processChatLine(
   line: string,
-  ctx: ChatLineContext,
+  ctx: ChatLineContext
 ): Promise<ProcessChatLineResult> {
   const parsedLine = parseChatLine(line);
 
@@ -85,18 +71,25 @@ export async function processChatLine(
 
   const query = parsedLine.text;
   try {
-    const answer = await ctx.agent.answer(query, {
-      prior_chunks: ctx.state.last_priors.length
-        ? ctx.state.last_priors
-        : undefined,
-      history: ctx.state.history_finals.length
-        ? ctx.state.history_finals
-        : undefined,
+    const { result, trace } = await runHarness(query, ctx.deps, undefined, {
+      priorMessages: ctx.state.messages,
     });
-    recordTurn(ctx.state, query, answer, ctx.store);
-    const output = ctx.state.json_mode
-      ? formatAnswerJson(answer)
-      : formatAnswerHuman(answer);
+    // Continue the conversation next turn even on maxTurns/cancelled/timeout/
+    // nonSuccessStop (all append an assistant message). protocolError and
+    // emptyFinalResponse return finalState with NO assistant message appended,
+    // so continuing on them would feed a dangling user message to the model
+    // next turn and poison the loop — drop context on those two. CliChatState
+    // owned by host keeps a mutable copy, so a defensive shallow clone is
+    // required before assignment (harness returns ReadonlyArray).
+    if (
+      result.stopReason !== "protocolError" &&
+      result.stopReason !== "emptyFinalResponse"
+    ) {
+      ctx.state.messages = [...result.messages];
+    }
+    const output = ctx.state.jsonMode
+      ? formatRunJson(result, trace)
+      : formatRunHuman(result, trace);
     return { quit: false, output, ranQuery: true };
   } catch (err) {
     return {
@@ -111,12 +104,9 @@ export async function processChatLine(
 async function processSlash(
   command: string,
   args: string[],
-  ctx: ChatLineContext,
+  ctx: ChatLineContext
 ): Promise<ProcessChatLineResult> {
-  const effect = applySlashCommand(command, args, {
-    state: ctx.state,
-    mode: ctx.mode,
-  });
+  const effect = applySlashCommand(command, args, { state: ctx.state });
 
   switch (effect.type) {
     case "quit":
@@ -131,21 +121,6 @@ async function processSlash(
 
     case "reset":
       return { quit: false, output: effect.message };
-
-    case "mode_change": {
-      try {
-        const nextAgent = await ctx.buildAgent(effect.mode);
-        ctx.agent = nextAgent;
-        ctx.mode = effect.mode;
-        return { quit: false, output: effect.message };
-      } catch (err) {
-        return {
-          quit: false,
-          output: "",
-          stderr: `${formatChatError(err)}\n(mode stays ${ctx.mode})`,
-        };
-      }
-    }
   }
 }
 
@@ -170,17 +145,13 @@ function resolveQuiet(optsQuiet: boolean | undefined): boolean {
  * Run a product chat session (TTY REPL or non-interactive pipe).
  */
 export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
-  const state = createConversation(opts.session, {
-    json_mode: opts.jsonMode,
-  });
-
-  const ctx: ChatLineContext = {
-    agent: opts.agent,
-    store: opts.store,
-    state,
-    mode: opts.initialMode,
-    buildAgent: opts.buildAgent,
+  const state: CliChatState = {
+    messages: [],
+    jsonMode: opts.jsonMode,
+    session: opts.session,
   };
+
+  const ctx: ChatLineContext = { deps: opts.deps, state };
 
   const interactive = isInteractive();
   const emb =
@@ -196,18 +167,16 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
   }
 }
 
-function printBanner(mode: AgentModeCli, state: ConversationState, emb: string): void {
-  writeErr(
-    `iknow chat  mode=${mode}  role=${state.session.caller_role}  ${emb}`,
-  );
+function printBanner(state: CliChatState, emb: string): void {
+  writeErr(`iknow chat  role=${state.session.caller_role}  ${emb}`);
   writeErr("输入问题开始对话。/help 查看命令 · /quit 或 Ctrl+D 退出");
 }
 
 async function runInteractive(
   ctx: ChatLineContext,
-  emb: string,
+  emb: string
 ): Promise<void> {
-  printBanner(ctx.mode, ctx.state, emb);
+  printBanner(ctx.state, emb);
 
   const rl = readline.createInterface({
     input: process.stdin,

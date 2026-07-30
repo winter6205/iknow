@@ -1,0 +1,63 @@
+{
+  "result": "pass",
+  "timestamp": "2026-07-30T02:33:43.840Z",
+  "model": "m3-combo",
+  "baseUrl": "localhost:20128",
+  "key_env": "NINE_ROUTER_KEY",
+  "maxTurns": 6,
+  "durationMs": 13657,
+  "ask": {
+    "stopReason": "completed",
+    "turnCount": 2,
+    "finalText_excerpt": "echo 的输出: **`hello harness`**\n\n当前时间 (ISO 8601, UTC): **2026-07-30T02:33:35.353Z**",
+    "jsonKeys": ["finalText", "stopReason", "turnCount", "trace"]
+  },
+  "chat": {
+    "turn1_stopReason": "completed",
+    "turn1_turnCount": 2,
+    "turn1_finalText_excerpt": "Done! Here's what you requested:\n\n1. **Echo:** hi\n2. **Current time:** 2026-07-30T02:33:40.102Z (UTC)",
+    "turn1_traceTurns": 2,
+    "turn1_traceTools": ["echo", "get_time"],
+    "turn2_stopReason": "completed",
+    "turn2_turnCount": 1,
+    "turn2_finalText_excerpt": "The current UTC time was **2026-07-30T02:33:40.102Z** when I called the `get_time` function — which translates to about 2:33:40 AM UTC on July 30, 2026.\n\nLet me know if you'd like it in a different ti",
+    "turn2_traceTurns": 1,
+    "turn2_traceTools": [],
+    "t2Grew": true,
+    "toolsHasEcho": true,
+    "toolsHasGetTime": true,
+    "parsedTurnCount": 2,
+    "exitCode": 0
+  },
+  "assertions": [
+    {
+      "name": "ask.stopReason === completed",
+      "pass": true
+    },
+    {
+      "name": "ask.turnCount >= 2",
+      "pass": true
+    },
+    {
+      "name": "ask.finalText non-empty & ask JSON has 4 keys (finalText/stopReason/turnCount/trace) + no messages",
+      "pass": true
+    },
+    {
+      "name": "chat turn1.stopReason === completed",
+      "pass": true
+    },
+    {
+      "name": "chat turn2 really executed (non-zero trace.turns + non-empty finalText)",
+      "pass": true
+    },
+    {
+      "name": "tool list (parsed from trace.toolCalls) includes both echo and get_time",
+      "pass": true
+    }
+  ],
+  "notes": [
+    "ask + chat-pipe 6-assertion gate (T6): oneshot + priorMessages continuation driven by real CLI subprocess.",
+    "formatRunJson deliberately omits `messages` (CLI projection SSOT).",
+    "chat turn2 growth proven via trace.turns length and toolCalls — CLI projection has no `messages` field so an earlier messagesLen counter would have been a lie."
+  ]
+}

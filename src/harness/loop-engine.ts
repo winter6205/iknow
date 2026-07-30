@@ -544,10 +544,13 @@ export async function step(
 export async function run(
   userText: string,
   deps: LoopEngineDeps,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  opts?: { priorMessages?: ReadonlyArray<AnthropicNativeMessage> }
 ): Promise<{ result: RunResult; trace: LoopTrace }> {
+  // 020 Q2 priorMessages 续传接缝:历史前缀逐条冻结,单次运行 turnCount 仍从 0 起。
   let state: LoopState = {
     messages: Object.freeze([
+      ...(opts?.priorMessages ?? []).map(freezeMessage),
       freezeMessage(deps.adapter.encodeUserText(userText)),
     ]),
     turnCount: 0,

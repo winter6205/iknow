@@ -40,7 +40,6 @@ export function usageText(): string {
   iknow -V | --version          打印版本 / print version
 
 选项 / Options:
-  --mode deterministic|llm      Agent 模式，默认 deterministic；显式值优先于 IKNOW_AGENT_MODE / agent mode (default deterministic; explicit --mode wins over env)
   --role employee|manager|admin 调用角色，默认 employee / caller role (default employee)
   --embeddings                  启用向量检索臂 / enable embedding vector arm
   --json                        聊天开始即用 JSON 输出 / chat starts with JSON answers
@@ -49,11 +48,10 @@ export function usageText(): string {
   --host <addr>                 serve 绑定地址，默认 127.0.0.1 / serve host (default 127.0.0.1)
 
 会话内命令 / In-chat commands:
-  /help  /status  /quit  /json on|off  /role <r>  /mode <m>  /reset
+  /help  /status  /quit  /json on|off  /role <r>  /reset
 
 说明 / Notes:
   • TTY 无参数 → chat；管道/非 TTY 无参数 → 用法 / no args: TTY→chat, piped→usage
-  • 显式 --mode 优先于 IKNOW_AGENT_MODE / explicit --mode wins over env
   • 空 ask/query → 用法 + exit 1（无默认 demo 问句）/ empty ask → usage + exit 1
   • ask 输出 G2 JSON；chat 默认人类可读 / ask→JSON, chat→human view
   • serve 打开 http://host:port/ ；API 见 docs/design/session-http-api-v0.md

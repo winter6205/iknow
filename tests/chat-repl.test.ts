@@ -1,15 +1,14 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { createSession } from "../src/agent-loop/session.ts";
-import { IknowAgent } from "../src/agent-loop/loop.ts";
 import { createSeededStore } from "../src/fixtures/seed-kb.ts";
 import {
   createConversation,
-  formatAnswerHuman,
-  recordTurn,
   applySlashCommand,
   parseChatLine,
 } from "../src/interaction/index.ts";
+import { processChatLine } from "../src/cli/chat-session.ts";
+import { assistantResult, makeCtx } from "./cli/_fixtures.ts";
 
 describe("parseChatLine", () => {
   it("classifies empty / query / slash", () => {
@@ -59,11 +58,11 @@ describe("applySlashCommand", () => {
     const state = createConversation(createSession("employee"));
     assert.equal(
       applySlashCommand("quit", [], { state, mode: "deterministic" }).type,
-      "quit",
+      "quit"
     );
     assert.equal(
       applySlashCommand("exit", [], { state, mode: "deterministic" }).type,
-      "quit",
+      "quit"
     );
     const help = applySlashCommand("help", [], {
       state,
@@ -225,7 +224,7 @@ describe("applySlashCommand", () => {
       assert.ok(!/[\u0000-\u001F\u007F]/.test(effect.text));
       assert.equal(
         effect.text,
-        "Unknown command /evil[2J[Hcmd. Type /help for commands.",
+        "Unknown command /evil[2J[Hcmd. Type /help for commands."
       );
     }
   });
@@ -263,40 +262,72 @@ describe("applySlashCommand", () => {
 });
 
 describe("chat session integration (no readline)", () => {
-  it("multi-turn answer injects last_priors; human format includes snapshot", async () => {
-    const store = createSeededStore();
-    const session = createSession("employee");
-    const agent = new IknowAgent({ store, session });
-    const state = createConversation(session);
+  it("multi-turn: turn 2 receives turn 1 messages as priorMessages; output is harness projection", async () => {
+    // Rewritten from the old IknowAgent/recordTurn path: the live chat session
+    // is now `processChatLine` driving the harness. The guarantee is the same
+    // (second query sees the first query's history as prior context) but
+    // verified through the canonical CLI host path.
+    const ctx = makeCtx([
+      assistantResult(["reply one"], [], "success"),
+      assistantResult(["reply two"], [], "success"),
+    ]);
 
-    const a1 = await agent.answer("公司的退款政策是什么？", {
-      prior_chunks: state.last_priors.length ? state.last_priors : undefined,
-      history: state.history_finals.length ? state.history_finals : undefined,
-    });
-    recordTurn(state, "公司的退款政策是什么？", a1, store);
-    assert.ok(a1.snapshot_id);
-    assert.ok(state.last_priors.length >= 1);
-    assert.equal(state.history_finals.length, 2);
+    const r1 = await processChatLine("公司退款政策?", ctx);
+    assert.equal(r1.quit, false);
+    assert.equal(r1.ranQuery, true);
+    // Output is the harness RunResult projection: human form has a `stop=`
+    // status line so scripts can read stopReason.
+    assert.match(r1.output, /stop=completed/);
 
-    const human = formatAnswerHuman(a1);
-    assert.match(human, /治理:/);
-    assert.match(human, /snapshot:/);
+    // After turn 1, state.messages holds [user1, assistant1].
+    assert.equal(ctx.state.messages.length, 2);
+    assert.equal(ctx.state.messages[0]!.role, "user");
+    assert.equal(ctx.state.messages[1]!.role, "assistant");
+    const turn1Assistant = ctx.state.messages[1]!;
+    const turn1AssistantText = (
+      turn1Assistant.content[0] as { type: "text"; text: string }
+    ).text;
+    assert.equal(turn1AssistantText, "reply one");
 
-    const a2 = await agent.answer("那和旧版差在哪？", {
-      prior_chunks: state.last_priors,
-      history: state.history_finals,
-    });
-    recordTurn(state, "那和旧版差在哪？", a2, store);
-    assert.ok(a2.snapshot_id);
-    assert.equal(state.turns.length, 2);
+    const beforeTurn2 = ctx.state.messages.length;
+    const r2 = await processChatLine("旧版差在哪?", ctx);
+    assert.equal(r2.quit, false);
+    assert.equal(r2.ranQuery, true);
+    assert.match(r2.output, /stop=completed/);
 
-    // first retrieve of turn 2 should have recorded prior_chunks when used
-    const firstRetrieve = a2.tool_calls.find((c) => c.tool === "kb_retrieve");
-    if (firstRetrieve && firstRetrieve.args.prior_chunks) {
-      assert.ok(Array.isArray(firstRetrieve.args.prior_chunks));
-      assert.ok(
-        (firstRetrieve.args.prior_chunks as unknown[]).length >= 1,
-      );
-    }
+    // Turn 2 must have received the previous turn's messages as prior
+    // context — messages strictly grew by 2 (one user, one assistant).
+    assert.ok(
+      ctx.state.messages.length > beforeTurn2,
+      "messages must strictly grow after turn 2"
+    );
+    assert.equal(ctx.state.messages.length, beforeTurn2 + 2);
+
+    // Turn 1's history is preserved at the head; turn 2 is appended after.
+    assert.equal(ctx.state.messages[0]!.role, "user");
+    const turn1UserText = (
+      ctx.state.messages[0]!.content[0] as { type: "text"; text: string }
+    ).text;
+    assert.equal(turn1UserText, "公司退款政策?");
+    assert.equal(ctx.state.messages[1]!.role, "assistant");
+    assert.equal(
+      (ctx.state.messages[1]!.content[0] as { type: "text"; text: string })
+        .text,
+      "reply one",
+      "turn 2 must see turn 1's assistant reply preserved in priorMessages"
+    );
+
+    // Turn 2's own messages are at the tail.
+    const lastIdx = ctx.state.messages.length - 1;
+    assert.equal(ctx.state.messages[lastIdx]!.role, "assistant");
+    assert.equal(
+      (
+        ctx.state.messages[lastIdx]!.content[0] as {
+          type: "text";
+          text: string;
+        }
+      ).text,
+      "reply two"
+    );
   });
 });

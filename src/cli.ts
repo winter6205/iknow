@@ -10,16 +10,15 @@
 import { parseArgs, type ParsedCli } from "./cli/parse-args.js";
 import { runChatSession } from "./cli/chat-session.js";
 import {
-  buildAgent,
+  buildHarnessEngine,
   prepareRuntime,
-  resolveStartupMode,
   type RuntimeBundle,
 } from "./cli/runtime.js";
 import { isInteractive, writeErr } from "./cli/session-io.js";
 import { getVersion, printUsage } from "./cli/usage.js";
-import { formatAnswerJson } from "./interaction/index.js";
+import { formatRunJson } from "./cli/format.js";
+import { run as runHarness, type LoopEngineDeps } from "./harness/index.js";
 import { isIknowError } from "./shared/errors.js";
-import type { AgentModeCli } from "./interaction/slash.js";
 
 function printCliError(err: unknown): void {
   if (isIknowError(err)) {
@@ -29,7 +28,7 @@ function printCliError(err: unknown): void {
         name: err.name,
         message: err.message,
         details: err.details,
-      }),
+      })
     );
     return;
   }
@@ -38,7 +37,7 @@ function printCliError(err: unknown): void {
       JSON.stringify({
         error: "error",
         message: err.message,
-      }),
+      })
     );
     return;
   }
@@ -46,7 +45,7 @@ function printCliError(err: unknown): void {
     JSON.stringify({
       error: "error",
       message: String(err),
-    }),
+    })
   );
 }
 
@@ -82,7 +81,7 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
         JSON.stringify({
           error: "embeddings_missing_api_key",
           message: err.message,
-        }),
+        })
       );
       process.exitCode = 1;
       return;
@@ -90,15 +89,9 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     throw err;
   }
 
-  const startupMode = resolveStartupMode(
-    parsed.mode,
-    bundle.env,
-    parsed.modeExplicit,
-  );
-  let agent;
+  let built: { deps: LoopEngineDeps };
   try {
-    const built = await buildAgent(bundle, startupMode);
-    agent = built.agent;
+    built = await buildHarnessEngine(bundle);
   } catch (err) {
     if (err instanceof Error && err.message.includes("LLM mode needs")) {
       writeErr(
@@ -106,17 +99,15 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
           error: "llm_mode_missing_api_key",
           message: err.message,
           apiKeyEnv: bundle.env.llm.apiKeyEnv,
-        }),
+        })
       );
       process.exitCode = 1;
       return;
     }
     throw err;
   }
-
-  const answer = await agent.answer(parsed.query);
-  // One-shot stays JSON for scripts/CI.
-  process.stdout.write(`${formatAnswerJson(answer)}\n`);
+  const { result, trace } = await runHarness(parsed.query, built.deps);
+  process.stdout.write(`${formatRunJson(result, trace)}\n`);
 }
 
 async function runChat(parsed: ParsedCli): Promise<void> {
@@ -133,16 +124,9 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     return;
   }
 
-  let mode: AgentModeCli = resolveStartupMode(
-    parsed.mode,
-    bundle.env,
-    parsed.modeExplicit,
-  );
-  let agent;
+  let built: { deps: LoopEngineDeps };
   try {
-    const built = await buildAgent(bundle, mode);
-    agent = built.agent;
-    mode = built.mode;
+    built = await buildHarnessEngine(bundle);
   } catch (err) {
     printChatError(err);
     process.exitCode = 1;
@@ -155,16 +139,10 @@ async function runChat(parsed: ParsedCli): Promise<void> {
       : "embeddings=off";
 
   await runChatSession({
-    agent,
-    store: bundle.store,
+    deps: built.deps,
     session: bundle.session,
-    initialMode: mode,
     jsonMode: parsed.json,
     embeddingsNote,
-    buildAgent: async (nextMode) => {
-      const built = await buildAgent(bundle, nextMode);
-      return built.agent;
-    },
   });
 }
 
@@ -199,25 +177,16 @@ async function main(): Promise<void> {
 
 async function runServe(parsed: ParsedCli): Promise<void> {
   const { startSessionServe } = await import("./session-api/serve.js");
-  const { loadIknowEnv } = await import("./config/env.js");
-  let mode: AgentModeCli = parsed.mode;
-  try {
-    const env = loadIknowEnv();
-    mode = resolveStartupMode(parsed.mode, env, parsed.modeExplicit);
-  } catch {
-    // EXIT: env incomplete for serve defaults — keep CLI --mode
-  }
   try {
     const { listening } = await startSessionServe({
       host: parsed.host,
       port: parsed.port,
       role: parsed.role,
-      mode,
       embeddings: parsed.embeddings,
       json_mode: parsed.json,
     });
     writeErr(
-      `iknow serve  http://${listening.host}:${listening.port}/  mode=${mode}  role=${parsed.role}`,
+      `iknow serve  http://${listening.host}:${listening.port}/  role=${parsed.role}`
     );
     writeErr("API: /api/v1/health  ·  UI: /  ·  Ctrl+C to stop");
     await new Promise<void>(() => {
