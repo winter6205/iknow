@@ -2,9 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../api/client";
 import type {
   AgentMode,
-  CallerRole,
-  IknowAnswer,
   SessionSummary,
+  TurnAnswerDto,
   TurnDto,
 } from "../api/types";
 import { SessionApiError } from "../api/types";
@@ -21,7 +20,7 @@ export type ChatUiMessage =
       id: string;
       role: "agent";
       text: string;
-      answer: IknowAnswer;
+      answer: TurnAnswerDto;
     };
 
 export type SessionChatState = {
@@ -29,19 +28,18 @@ export type SessionChatState = {
   error: string | null;
   session: SessionSummary | null;
   messages: ChatUiMessage[];
-  /** Latest agent answer for G2 panel (null before first turn). */
-  lastAnswer: IknowAnswer | null;
+  /** Latest agent answer (null before first turn). */
+  lastAnswer: TurnAnswerDto | null;
   healthLabel: string | null;
   mode: AgentMode;
-  role: CallerRole;
 };
 
 export type SessionChatApi = SessionChatState & {
   sendMessage: (text: string) => Promise<void>;
   reset: () => Promise<void>;
   newSession: () => Promise<void>;
-  setMode: (mode: AgentMode) => Promise<void>;
-  setRole: (role: CallerRole) => Promise<void>;
+  /** Switch to an existing conversation by id (sidebar selection). */
+  setConversation: (id: string) => Promise<void>;
   retryBootstrap: () => void;
   /** Clear mid-session error without resetting conversation. */
   clearError: () => void;
@@ -51,6 +49,28 @@ export type SessionChatApi = SessionChatState & {
 type ApplySessionExtras = {
   healthLabel?: string | null;
 };
+
+/** localStorage key for the active conversation id (SC16 refresh restore). */
+const STORAGE_KEY = "iknow:conversation_id";
+
+function readStoredSessionId(): string | null {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    return localStorage.getItem(STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredSessionId(id: string | null): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    if (id === null) localStorage.removeItem(STORAGE_KEY);
+    else localStorage.setItem(STORAGE_KEY, id);
+  } catch {
+    // localStorage may be disabled (privacy mode, quota); fail closed.
+  }
+}
 
 function errMessage(e: unknown): string {
   if (e instanceof SessionApiError) return e.message;
@@ -71,24 +91,25 @@ function queryIdSlice(query: string): string {
 function turnsToMessages(turns: TurnDto[]): ChatUiMessage[] {
   const out: ChatUiMessage[] = [];
   turns.forEach((t, i) => {
-    const snap = t.answer.snapshot_id || "nosnap";
     const q = queryIdSlice(t.query);
     out.push({
-      id: `u-${i}-${snap}-${q}`,
+      id: `u-${i}-${q}`,
       role: "user",
       text: t.query,
     });
     out.push({
-      id: `a-${i}-${snap}-${q}`,
+      id: `a-${i}-${q}`,
       role: "agent",
-      text: t.answer.text,
+      text: t.answer.finalText,
       answer: t.answer,
     });
   });
   return out;
 }
 
-function lastAnswerFromMessages(messages: ChatUiMessage[]): IknowAnswer | null {
+function lastAnswerFromMessages(
+  messages: ChatUiMessage[]
+): TurnAnswerDto | null {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const m = messages[i];
     if (m.role === "agent") return m.answer;
@@ -104,7 +125,6 @@ const INITIAL: SessionChatState = {
   lastAnswer: null,
   healthLabel: null,
   mode: "deterministic",
-  role: "employee",
 };
 
 export function useSessionChat(): SessionChatApi {
@@ -112,19 +132,17 @@ export function useSessionChat(): SessionChatApi {
   const bootGen = useRef(0);
   const sessionIdRef = useRef<string | null>(null);
   const modeRef = useRef<AgentMode>(INITIAL.mode);
-  const roleRef = useRef<CallerRole>(INITIAL.role);
 
   const applySession = useCallback(
     (
       session: SessionSummary,
       turns: TurnDto[],
-      extras: ApplySessionExtras = {},
+      extras: ApplySessionExtras = {}
     ) => {
       sessionIdRef.current = session.conversation_id;
       modeRef.current = session.mode;
-      roleRef.current = session.caller_role;
       const messages = turnsToMessages(turns);
-      // Spread extras first so derived session/messages/mode/role always win.
+      // Spread extras first so derived session/messages/mode always win.
       setState((prev) => ({
         ...prev,
         ...extras,
@@ -134,10 +152,36 @@ export function useSessionChat(): SessionChatApi {
         messages,
         lastAnswer: lastAnswerFromMessages(messages),
         mode: session.mode,
-        role: session.caller_role,
       }));
     },
-    [],
+    []
+  );
+
+  /**
+   * Fetch a stored session's history and adopt it as the active conversation.
+   * Shared by `bootstrap` (stored-restore branch) and `setConversation` so the
+   * same fetch → writeStorage → applySession sequence lives in exactly one
+   * place — keeps behavior identical on initial restore and sidebar switch.
+   */
+  const adoptSession = useCallback(
+    async (id: string, gen: number, extras: ApplySessionExtras = {}) => {
+      const got = await api.getSessionHistory(id);
+      if (gen !== bootGen.current) return;
+      writeStoredSessionId(got.session.conversation_id);
+      applySession(got.session, got.turns, extras);
+    },
+    [applySession]
+  );
+
+  /** Create a fresh session and adopt it. */
+  const createAndAdopt = useCallback(
+    async (gen: number, extras: ApplySessionExtras = {}) => {
+      const created = await api.createSession({ mode: modeRef.current });
+      if (gen !== bootGen.current) return;
+      writeStoredSessionId(created.session.conversation_id);
+      applySession(created.session, created.turns, extras);
+    },
+    [applySession]
   );
 
   const bootstrap = useCallback(async () => {
@@ -153,14 +197,27 @@ export function useSessionChat(): SessionChatApi {
     try {
       const health = await api.health();
       if (gen !== bootGen.current) return;
-      const created = await api.createSession({
-        role: roleRef.current,
-        mode: modeRef.current,
-      });
-      if (gen !== bootGen.current) return;
-      applySession(created.session, created.turns, {
+      const healthExtras: ApplySessionExtras = {
         healthLabel: `${health.service} ${health.version}`,
-      });
+      };
+      const stored = readStoredSessionId();
+      if (stored) {
+        // Try restoring prior session; on 404 fall back to fresh create.
+        try {
+          await adoptSession(stored, gen, healthExtras);
+        } catch (e) {
+          if (gen !== bootGen.current) return;
+          // Stale id (session deleted server-side): drop and create fresh.
+          if (e instanceof SessionApiError && e.status === 404) {
+            writeStoredSessionId(null);
+            await createAndAdopt(gen, healthExtras);
+          } else {
+            throw e;
+          }
+        }
+      } else {
+        await createAndAdopt(gen, healthExtras);
+      }
     } catch (e) {
       if (gen !== bootGen.current) return;
       setState((prev) => ({
@@ -172,7 +229,7 @@ export function useSessionChat(): SessionChatApi {
         lastAnswer: null,
       }));
     }
-  }, [applySession]);
+  }, [adoptSession, createAndAdopt]);
 
   useEffect(() => {
     void bootstrap();
@@ -204,11 +261,10 @@ export function useSessionChat(): SessionChatApi {
       if (gen !== bootGen.current) return;
       sessionIdRef.current = res.session.conversation_id;
       modeRef.current = res.session.mode;
-      roleRef.current = res.session.caller_role;
       const agentMsg: ChatUiMessage = {
-        id: `a-${res.turn.answer.snapshot_id || Date.now()}-${queryIdSlice(trimmed)}`,
+        id: `a-${Date.now()}-${queryIdSlice(trimmed)}`,
         role: "agent",
-        text: res.turn.answer.text,
+        text: res.turn.answer.finalText,
         answer: res.turn.answer,
       };
       setState((prev) => ({
@@ -217,7 +273,6 @@ export function useSessionChat(): SessionChatApi {
         error: null,
         session: res.session,
         mode: res.session.mode,
-        role: res.session.caller_role,
         messages: [...prev.messages, agentMsg],
         lastAnswer: res.turn.answer,
       }));
@@ -247,6 +302,7 @@ export function useSessionChat(): SessionChatApi {
     try {
       const res = await api.resetSession(id, { new_id: false });
       if (gen !== bootGen.current) return;
+      // reset keeps the same conversation_id; storage entry stays valid.
       applySession(res.session, res.turns);
     } catch (e) {
       if (gen !== bootGen.current) return;
@@ -259,7 +315,7 @@ export function useSessionChat(): SessionChatApi {
   }, [applySession, bootstrap]);
 
   const newSession = useCallback(async () => {
-    // Bump gen so in-flight sendMessage / reset / postCommand cannot clobber.
+    // Bump gen so in-flight sendMessage / reset cannot clobber.
     const gen = ++bootGen.current;
     setState((prev) => ({
       ...prev,
@@ -269,12 +325,7 @@ export function useSessionChat(): SessionChatApi {
       lastAnswer: null,
     }));
     try {
-      const created = await api.createSession({
-        role: roleRef.current,
-        mode: modeRef.current,
-      });
-      if (gen !== bootGen.current) return;
-      applySession(created.session, created.turns);
+      await createAndAdopt(gen);
     } catch (e) {
       if (gen !== bootGen.current) return;
       setState((prev) => ({
@@ -283,31 +334,27 @@ export function useSessionChat(): SessionChatApi {
         error: errMessage(e),
       }));
     }
-  }, [applySession]);
+  }, [createAndAdopt]);
 
-  /** Wait for API confirm before updating mode/role (no optimistic UI). */
-  const postCommand = useCallback(
-    async (command: "mode" | "role", args: string[]) => {
-      const gen = bootGen.current;
-      const id = sessionIdRef.current;
-      if (!id) return;
+  const setConversation = useCallback(
+    async (id: string) => {
+      const trimmed = id.trim();
+      if (!trimmed) return;
+      // Already viewing this conversation: no-op (avoids a redundant fetch).
+      if (trimmed === sessionIdRef.current) return;
+      // Bump gen so in-flight sendMessage / reset cannot clobber the switch.
+      const gen = ++bootGen.current;
+      setState((prev) => ({
+        ...prev,
+        phase: "loading",
+        error: null,
+        messages: [],
+        lastAnswer: null,
+      }));
       try {
-        const res = await api.postCommand(id, command, args);
-        if (gen !== bootGen.current) return;
-        sessionIdRef.current = res.session.conversation_id;
-        modeRef.current = res.session.mode;
-        roleRef.current = res.session.caller_role;
-        setState((prev) => ({
-          ...prev,
-          session: res.session,
-          mode: res.session.mode,
-          role: res.session.caller_role,
-          error: null,
-          phase: prev.phase === "error" ? "ready" : prev.phase,
-        }));
+        await adoptSession(trimmed, gen);
       } catch (e) {
         if (gen !== bootGen.current) return;
-        // Do not write optimistic mode/role — server values stay in refs/state.
         setState((prev) => ({
           ...prev,
           phase: "error",
@@ -315,38 +362,7 @@ export function useSessionChat(): SessionChatApi {
         }));
       }
     },
-    [],
-  );
-
-  const setMode = useCallback(
-    async (mode: AgentMode) => {
-      const gen = bootGen.current;
-      const id = sessionIdRef.current;
-      // No session yet: local preference only (used by next createSession).
-      if (!id) {
-        modeRef.current = mode;
-        if (gen !== bootGen.current) return;
-        setState((prev) => ({ ...prev, mode }));
-        return;
-      }
-      await postCommand("mode", [mode]);
-    },
-    [postCommand],
-  );
-
-  const setRole = useCallback(
-    async (role: CallerRole) => {
-      const gen = bootGen.current;
-      const id = sessionIdRef.current;
-      if (!id) {
-        roleRef.current = role;
-        if (gen !== bootGen.current) return;
-        setState((prev) => ({ ...prev, role }));
-        return;
-      }
-      await postCommand("role", [role]);
-    },
-    [postCommand],
+    [adoptSession]
   );
 
   const retryBootstrap = useCallback(() => {
@@ -359,7 +375,7 @@ export function useSessionChat(): SessionChatApi {
       return {
         ...prev,
         error: null,
-        phase: prev.session ? "ready" : prev.phase === "error" ? "error" : prev.phase,
+        phase: prev.session ? "ready" : prev.phase,
       };
     });
   }, []);
@@ -369,8 +385,7 @@ export function useSessionChat(): SessionChatApi {
     sendMessage,
     reset,
     newSession,
-    setMode,
-    setRole,
+    setConversation,
     retryBootstrap,
     clearError,
   };

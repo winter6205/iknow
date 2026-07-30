@@ -37,10 +37,7 @@ export interface LlmChatResult {
 
 /** Injectable chat surface for unit tests (no network). */
 export interface LlmChatClient {
-  chat(
-    messages: LlmMessage[],
-    tools: LlmToolDef[],
-  ): Promise<LlmChatResult>;
+  chat(messages: LlmMessage[], tools: LlmToolDef[]): Promise<LlmChatResult>;
   /**
    * Optional context window size in tokens (history budgeting).
    * OpenAiCompatibleLlmClient sets this; mocks may omit it.
@@ -91,7 +88,7 @@ export class OpenAiCompatibleLlmClient implements LlmChatClient {
 
   async chat(
     messages: LlmMessage[],
-    tools: LlmToolDef[],
+    tools: LlmToolDef[]
   ): Promise<LlmChatResult> {
     const body: Record<string, unknown> = {
       model: this.model,
@@ -120,10 +117,9 @@ export class OpenAiCompatibleLlmClient implements LlmChatClient {
       });
       const raw = await res.text();
       if (!res.ok) {
-        throw new NetworkError(
-          `llm HTTP ${res.status}: ${raw.slice(0, 200)}`,
-          { status: res.status },
-        );
+        throw new NetworkError(`llm HTTP ${res.status}: ${raw.slice(0, 200)}`, {
+          status: res.status,
+        });
       }
       let json: {
         choices?: Array<{
@@ -139,13 +135,11 @@ export class OpenAiCompatibleLlmClient implements LlmChatClient {
         const detail =
           parseErr instanceof Error ? parseErr.message : String(parseErr);
         throw new NetworkError(
-          `llm response is not valid JSON (${detail}): ${raw.slice(0, 120)}`,
+          `llm response is not valid JSON (${detail}): ${raw.slice(0, 120)}`
         );
       }
       if (!Array.isArray(json.choices) || json.choices.length === 0) {
-        throw new NetworkError(
-          "llm response missing or empty choices array",
-        );
+        throw new NetworkError("llm response missing or empty choices array");
       }
       const msg = json.choices[0]?.message;
       if (!msg || typeof msg !== "object") {
@@ -167,7 +161,7 @@ export class OpenAiCompatibleLlmClient implements LlmChatClient {
       if (isAbortError(err)) {
         throw new NetworkError(
           `llm request timed out after ${this.timeoutMs}ms`,
-          { timeoutMs: this.timeoutMs, cause: "AbortError" },
+          { timeoutMs: this.timeoutMs, cause: "AbortError" }
         );
       }
       const m = err instanceof Error ? err.message : String(err);
@@ -225,12 +219,12 @@ export function parseLlmResponseJson(raw: string): unknown {
           esc = false;
         } else if (ch === "\\") {
           esc = true;
-        } else if (ch === "\"") {
+        } else if (ch === '"') {
           inStr = false;
         }
         continue;
       }
-      if (ch === "\"") {
+      if (ch === '"') {
         inStr = true;
         continue;
       }

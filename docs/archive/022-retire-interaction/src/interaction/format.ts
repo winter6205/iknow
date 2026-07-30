@@ -41,12 +41,12 @@ export function formatAnswerHuman(answer: IknowAnswer): string {
   lines.push("");
   const snapshotShort = shortSnapshot(answer.snapshot_id);
   lines.push(
-    `${UI_LABELS.governance}: ${answer.governance_status}  ·  ${UI_LABELS.snapshot}: ${snapshotShort}`,
+    `${UI_LABELS.governance}: ${answer.governance_status}  ·  ${UI_LABELS.snapshot}: ${snapshotShort}`
   );
   const tools =
     answer.tool_trace.length > 0 ? answer.tool_trace.join(",") : "-";
   lines.push(
-    ` ${UI_LABELS.hops}: ${answer.hops_used}  ·  ${UI_LABELS.tools}: ${tools}`,
+    ` ${UI_LABELS.hops}: ${answer.hops_used}  ·  ${UI_LABELS.tools}: ${tools}`
   );
 
   if (answer.notes && answer.notes.length > 0) {

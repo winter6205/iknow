@@ -79,7 +79,7 @@ export class LlmIknowAgent {
     if (opts.toolProtocol === "anthropic_tools") {
       throw new ValidationError(
         "anthropic_tools not implemented; use openai_tools",
-        { toolProtocol: opts.toolProtocol },
+        { toolProtocol: opts.toolProtocol }
       );
     }
     this.store = opts.store;
@@ -89,8 +89,7 @@ export class LlmIknowAgent {
       vectorIndex: opts.vectorIndex,
     });
     this.contextWindowTokens =
-      opts.contextWindowTokens ??
-      readContextWindowTokens(opts.llm);
+      opts.contextWindowTokens ?? readContextWindowTokens(opts.llm);
   }
 
   /**
@@ -99,7 +98,7 @@ export class LlmIknowAgent {
    */
   private buildInitialMessages(
     query: string,
-    opts?: AgentAnswerOpts,
+    opts?: AgentAnswerOpts
   ): LlmMessage[] {
     const priors = normalizePriors(opts?.prior_chunks);
     const priorsAppendix = priors?.length
@@ -210,7 +209,7 @@ export class LlmIknowAgent {
 
         const { resultJson, args, docHint, spans } = await this.executeTool(
           name,
-          tc,
+          tc
         );
         if (isHop) hops += 1;
         // Only record known kb_* tools on the trajectory; unknown names get a note.
@@ -270,7 +269,7 @@ export class LlmIknowAgent {
 
   private async executeTool(
     name: string,
-    tc: LlmToolCall,
+    tc: LlmToolCall
   ): Promise<{
     resultJson: string;
     args: Record<string, unknown>;
@@ -284,7 +283,8 @@ export class LlmIknowAgent {
       return {
         resultJson: JSON.stringify({
           error: "VALIDATION",
-          message: err instanceof Error ? err.message : "invalid tool arguments",
+          message:
+            err instanceof Error ? err.message : "invalid tool arguments",
         }),
         args: { raw: tc.function?.arguments },
       };
@@ -304,7 +304,7 @@ export class LlmIknowAgent {
       switch (name) {
         case "kb_retrieve": {
           const out = await this.tools.kb_retrieve(
-            args as unknown as Parameters<ToolRegistry["kb_retrieve"]>[0],
+            args as unknown as Parameters<ToolRegistry["kb_retrieve"]>[0]
           );
           const docHint = out.chunks[0]?.doc_id;
           const spans: SourceSpan[] = out.chunks.slice(0, 5).map((c) => ({
@@ -320,13 +320,13 @@ export class LlmIknowAgent {
         }
         case "kb_verify_citation": {
           const out = this.tools.kb_verify_citation(
-            args as unknown as Parameters<ToolRegistry["kb_verify_citation"]>[0],
+            args as unknown as Parameters<ToolRegistry["kb_verify_citation"]>[0]
           );
           return { resultJson: JSON.stringify(out), args };
         }
         case "kb_compile": {
           const out = this.tools.kb_compile(
-            args as unknown as Parameters<ToolRegistry["kb_compile"]>[0],
+            args as unknown as Parameters<ToolRegistry["kb_compile"]>[0]
           );
           const docHint =
             typeof args.doc_id === "string" ? args.doc_id : undefined;
@@ -334,7 +334,7 @@ export class LlmIknowAgent {
         }
         case "kb_governance": {
           const out = this.tools.kb_governance(
-            args as unknown as Parameters<ToolRegistry["kb_governance"]>[0],
+            args as unknown as Parameters<ToolRegistry["kb_governance"]>[0]
           );
           let docHint: string | undefined;
           if (typeof args.doc_id === "string") {
@@ -381,7 +381,7 @@ export class LlmIknowAgent {
 
   private async forceSnapshot(
     docId: string,
-    trace: ToolTrace,
+    trace: ToolTrace
   ): Promise<{
     snapshot_id: string;
     status: GovernanceStatus;
@@ -449,7 +449,7 @@ function parseArgs(raw: string | undefined): Record<string, unknown> {
  */
 export function parseFinalContent(
   content: string,
-  fallbackSpans: SourceSpan[],
+  fallbackSpans: SourceSpan[]
 ): { text: string; source_spans: SourceSpan[] } {
   const trimmed = content.trim();
   if (!trimmed) {
@@ -522,7 +522,7 @@ function governanceStatusFromResult(result: string): GovernanceStatus {
 function localSnapshot(
   store: InMemoryKnowledgeStore,
   docId: string,
-  result: string,
+  result: string
 ): { snapshot_id: string; status: GovernanceStatus } {
   const doc = store.tryGetDocument(docId);
   const ts = new Date().toISOString();
@@ -551,14 +551,14 @@ function readContextWindowTokens(llm: LlmChatClient): number | undefined {
  */
 export function capHistory(
   history: AgentAnswerOpts["history"] | undefined,
-  contextWindowTokens?: number,
+  contextWindowTokens?: number
 ): Array<{ role: "user" | "assistant"; content: string }> {
   if (!history?.length) return [];
   const msgs = history
     .filter(
       (m): m is { role: "user" | "assistant"; content: string } =>
         (m.role === "user" || m.role === "assistant") &&
-        typeof m.content === "string",
+        typeof m.content === "string"
     )
     .slice(-HISTORY_MAX_MESSAGES);
 

@@ -1,18 +1,12 @@
 /**
- * Runtime bootstrap for CLI: env, store, agent build.
+ * Runtime bootstrap for CLI: env, store, harness engine.
  *
- * 两条 build 路径并存(020 决议收口):
- * - `buildHarnessEngine(bundle)`:CLI ask/chat 产品路径,走 harness foundation
- *   (real Anthropic adapter + demo tools + LoopEngine)。020 的新主路径。
- * - `buildAgent(bundle, mode)`:旧 `IknowAgent`/`LlmIknowAgent` → `IknowAnswer`
- *   形态。**仅供 Session API `src/session-api/hub.ts` 消费**(serve 路径),
- *   020 一字不动 hub.ts(D3-CLI 守门),故旧 builder 必须原地保留到 #51 把
- *   serve 也切到 harness 后才能退役。CLI 路径已不再调用它。
+ * 020 决议收口后只剩 `buildHarnessEngine(bundle)` 一条 build 路径:
+ * CLI ask/chat 产品路径,走 harness foundation(real Anthropic adapter +
+ * demo tools + LoopEngine)。
  *
- * 这是 plan Q4 逐符号表的遗漏:Q4 只盘点了 `src/interaction/` 的符号被谁消费,
- * 没盘点 `cli/runtime.ts:buildAgent` 也被 hub.ts 消费。保留旧 builder 是在
- * {typecheck 绿} + {session-api 零改动} + {CLI 路径退役旧 agent} 三个硬约束下
- * 唯一可行的收口(详见 #47 实施记录)。
+ * 旧 agent builder 服务于 Session API serve 路径,在 #51 把 serve 切到
+ * harness 后于 022 归档(见 `docs/archive/022-retire-agent-loop/README.md`)。
  */
 import Anthropic from "@anthropic-ai/sdk";
 import {
@@ -24,36 +18,17 @@ import {
   createLoopEngine,
   type LoopEngineDeps,
 } from "../harness/index.js";
-import {
-  assertOfflineCompatible,
-  assertToolProtocolSupported,
-  loadIknowEnv,
-  type IknowEnv,
-} from "../config/env.js";
-import type {
-  AgentAnswerOpts,
-  CallerRole,
-  IknowAnswer,
-  SessionContext,
-} from "../shared/schema.js";
+import { loadIknowEnv, type IknowEnv } from "../config/env.js";
+import type { CallerRole, SessionContext } from "../shared/schema.js";
 import { createIknowRuntime } from "../runtime/create-runtime.js";
 import type { InMemoryKnowledgeStore } from "../knowledge-store/memory-store.js";
 import type { VectorIndex } from "../kb-retrieve/embedding/vector-index.js";
-import { IknowAgent } from "../agent-loop/loop.js";
-import type { AgentModeCli } from "../interaction/slash.js";
 
 export type RuntimeBundle = {
   store: InMemoryKnowledgeStore;
   vectorIndex: VectorIndex | undefined;
   env: IknowEnv;
   session: SessionContext;
-};
-
-/**
- * 旧 agent 形态(serve 路径 / Session API 消费)。CLI 路径已切到 BuiltEngine。
- */
-export type AnswerAgent = {
-  answer(query: string, opts?: AgentAnswerOpts): Promise<IknowAnswer>;
 };
 
 export async function prepareRuntime(opts: {
@@ -130,55 +105,4 @@ export async function buildHarnessEngine(
     timeoutMs: env.llm.timeoutMs,
   };
   return { deps, engine: createLoopEngine(deps) };
-}
-
-/**
- * 旧 agent builder(serve 路径 / Session API hub.ts 专用)。
- *
- * 020 不动 hub.ts,故本函数签名与返回形态(`{ agent, mode }`)冻结保留;
- * CLI 路径已不再调用。#51 把 serve 切到 harness 后,本函数与 AnswerAgent /
- * IknowAgent / LlmIknowAgent 一并退役。
- */
-export async function buildAgent(
-  bundle: RuntimeBundle,
-  mode: AgentModeCli
-): Promise<{ agent: AnswerAgent; mode: AgentModeCli }> {
-  assertOfflineCompatible(bundle.env, mode);
-
-  if (mode === "llm") {
-    assertToolProtocolSupported(bundle.env.llm.toolProtocol);
-    if (!bundle.env.llm.apiKey) {
-      throw new Error(
-        `LLM mode needs the env var named by IKNOW_LLM_API_KEY_ENV (${bundle.env.llm.apiKeyEnv}); use --mode deterministic or set the key.`
-      );
-    }
-    const { LlmIknowAgent } = await import("../agent-loop/llm-agent.js");
-    const { OpenAiCompatibleLlmClient } =
-      await import("../agent-loop/llm-client.js");
-    const llm = new OpenAiCompatibleLlmClient({
-      baseUrl: bundle.env.llm.baseUrl,
-      apiKey: bundle.env.llm.apiKey,
-      model: bundle.env.llm.model,
-      timeoutMs: bundle.env.llm.timeoutMs,
-      temperature: bundle.env.llm.temperature,
-      maxTokens: bundle.env.llm.maxOutputTokens,
-      contextWindowTokens: bundle.env.llm.contextWindowTokens,
-    });
-    const agent = new LlmIknowAgent({
-      store: bundle.store,
-      session: bundle.session,
-      llm,
-      vectorIndex: bundle.vectorIndex,
-      toolProtocol: bundle.env.llm.toolProtocol,
-      contextWindowTokens: bundle.env.llm.contextWindowTokens,
-    });
-    return { agent, mode: "llm" };
-  }
-
-  const agent = new IknowAgent({
-    store: bundle.store,
-    session: bundle.session,
-    vectorIndex: bundle.vectorIndex,
-  });
-  return { agent, mode: "deterministic" };
 }

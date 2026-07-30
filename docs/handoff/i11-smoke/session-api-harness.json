@@ -1,0 +1,58 @@
+{
+  "result": "pass",
+  "reason": "ran",
+  "timestamp": "2026-07-30T16:43:41.022Z",
+  "model": "m3-combo",
+  "baseUrl": "localhost:20128",
+  "key_env": "NINE_ROUTER_KEY",
+  "maxTurns": 6,
+  "durationMs": 4706,
+  "serve": {
+    "stopReason": "completed",
+    "turnCount": 2,
+    "finalText_excerpt": "完成！以下是结果：\n\n📢 **Echo 输出**：`hello harness`\n\n🕐 **当前时间**：`2026-07-30T16:43:38.474Z`（UTC 时间，ISO 8601 格式）\n\n转换为北京时间（UTC+8）大约是 **2026-07-30 16:43:38** 左右。",
+    "sessionTurnCount": 2,
+    "stopReason_valid": true
+  },
+  "cancel": {
+    "stopReason": "cancelled",
+    "turnCount": 0,
+    "exceptionName": "none"
+  },
+  "timeout": {
+    "stopReason": "timeout",
+    "turnCount": 0,
+    "exceptionName": "none"
+  },
+  "assertions": [
+    {
+      "name": "serve stopReason === completed",
+      "pass": true
+    },
+    {
+      "name": "serve turnCount >= 2 (multi-step)",
+      "pass": true
+    },
+    {
+      "name": "serve multi-step (sessionTurnCount accumulation >= 2)",
+      "pass": true
+    },
+    {
+      "name": "serve finalText non-empty",
+      "pass": true
+    },
+    {
+      "name": "cancelled stopReason === cancelled",
+      "pass": true
+    },
+    {
+      "name": "timeout stopReason === timeout",
+      "pass": true
+    }
+  ],
+  "notes": [
+    "6-assertion gate (SC4) over serve path + hub-level cancelled/timeout.",
+    "serve path: startSessionServe → POST /sessions → POST /sessions/:id/messages (real model).",
+    "cancelled/timeout: SessionHub + injected deps with never-resolving adapter (HTTP layer does not expose signal/signal-typed timeout, so hub-level is the only seam)."
+  ]
+}

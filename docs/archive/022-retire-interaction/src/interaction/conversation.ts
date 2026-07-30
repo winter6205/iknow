@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import type { IknowAnswer, PriorChunk, SessionContext } from "../shared/schema.js";
+import type {
+  IknowAnswer,
+  PriorChunk,
+  SessionContext,
+} from "../shared/schema.js";
 import type { ConversationState } from "./types.js";
 
 /** Minimal store surface used to resolve prior summaries. */
@@ -27,7 +31,7 @@ export type CreateConversationOptions = {
  */
 export function createConversation(
   session: SessionContext,
-  opts?: CreateConversationOptions,
+  opts?: CreateConversationOptions
 ): ConversationState {
   return {
     conversation_id: opts?.conversation_id ?? randomUUID(),
@@ -48,7 +52,7 @@ export function createConversation(
  */
 export function derivePriorsFromAnswer(
   answer: IknowAnswer,
-  store: PriorLookupStore,
+  store: PriorLookupStore
 ): PriorChunk[] {
   const seen = new Set<string>();
   const priors: PriorChunk[] = [];
@@ -88,13 +92,13 @@ export function recordTurn(
   state: ConversationState,
   query: string,
   answer: IknowAnswer,
-  store: PriorLookupStore,
+  store: PriorLookupStore
 ): void {
   state.turns.push({ query, answer });
   state.last_priors = derivePriorsFromAnswer(answer, store);
   state.history_finals.push(
     { role: "user", content: query },
-    { role: "assistant", content: answer.text },
+    { role: "assistant", content: answer.text }
   );
 }
 
@@ -109,7 +113,7 @@ export type ResetConversationOptions = {
  */
 export function resetConversation(
   state: ConversationState,
-  opts?: ResetConversationOptions,
+  opts?: ResetConversationOptions
 ): void {
   state.turns = [];
   state.last_priors = [];

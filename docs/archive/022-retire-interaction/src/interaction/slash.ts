@@ -2,7 +2,11 @@
  * Pure slash-command parse/apply for chat REPL (design §4.1).
  * No I/O — host CLI owns readline and agent rebuild.
  */
-import { CALLER_ROLES, parseCallerRole, type CallerRole } from "../shared/schema.js";
+import {
+  CALLER_ROLES,
+  parseCallerRole,
+  type CallerRole,
+} from "../shared/schema.js";
 import { resetConversation } from "./conversation.js";
 import type { ConversationState } from "./types.js";
 
@@ -88,7 +92,7 @@ export function parseChatLine(line: string): ParsedChatLine {
 export function applySlashCommand(
   command: string,
   args: string[],
-  ctx: SlashContext,
+  ctx: SlashContext
 ): SlashEffect {
   switch (command) {
     case "quit":
@@ -211,6 +215,6 @@ export function parseAgentModeCli(value: unknown): AgentModeCli {
     return value.toLowerCase() as AgentModeCli;
   }
   throw new Error(
-    `Invalid mode: ${JSON.stringify(value)}; expected one of: ${allowedModesList()}`,
+    `Invalid mode: ${JSON.stringify(value)}; expected one of: ${allowedModesList()}`
   );
 }

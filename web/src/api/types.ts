@@ -1,57 +1,34 @@
 /** Mirror of session-http-api-v0 DTOs used by the product UI. */
 
-export type CallerRole = "employee" | "manager" | "admin";
-
-/** Matches AgentModeCli / session-api mode. */
+/** Matches AgentMode in src/config/env.ts. */
 export type AgentMode = "deterministic" | "llm";
 
-/**
- * Mirrors `GovernanceStatus` in `src/shared/schema.ts`.
- * Open string tail keeps unknown wire values type-safe at the edges.
- */
-export type GovernanceStatus =
-  | "ok"
-  | "stale"
-  | "conflict"
-  | "degraded"
-  | "timeout"
-  | (string & {});
+/** Mirrors harness StopReason (7 values). */
+export type StopReason =
+  | "completed"
+  | "maxTurns"
+  | "nonSuccessStop"
+  | "protocolError"
+  | "emptyFinalResponse"
+  | "cancelled"
+  | "timeout";
 
-/** Mirrors `CommandEffectKind` in `src/session-api/contract.ts`. */
-export type CommandEffectKind =
-  | "help"
-  | "info"
-  | "error"
-  | "mode_change"
-  | "reset"
-  | "quit";
-
-export type SourceSpan = {
-  chunk_id: string;
-  quote?: string;
-  offset?: [number, number];
+/** Mirrors TurnAnswerDto in src/session-api/contract.ts. */
+export type TurnAnswerDto = {
+  readonly finalText: string;
+  readonly stopReason: StopReason;
+  readonly turnCount: number;
 };
 
-export type ToolCallLog = {
-  tool: string;
-  args: Record<string, unknown>;
-  ordinal: number;
-};
-
-export type IknowAnswer = {
-  text: string;
-  source_spans: SourceSpan[];
-  snapshot_id: string;
-  governance_status: GovernanceStatus;
-  tool_trace: string[];
-  tool_calls: ToolCallLog[];
-  hops_used: number;
-  notes?: string[];
+/** Mirrors SessionListEntry in src/session-api/store/session-store.ts. */
+export type SessionListItem = {
+  readonly conversation_id: string;
+  readonly updatedAt: string;
+  readonly lastFinalText: string;
 };
 
 export type SessionSummary = {
   conversation_id: string;
-  caller_role: CallerRole;
   mode: AgentMode;
   json_mode: boolean;
   turn_count: number;
@@ -61,7 +38,7 @@ export type SessionSummary = {
 
 export type TurnDto = {
   query: string;
-  answer: IknowAnswer;
+  answer: TurnAnswerDto;
   human_text?: string;
 };
 
@@ -70,15 +47,14 @@ export type CreateSessionResponse = {
   turns: TurnDto[];
 };
 
+export type GetSessionResponse = {
+  session: SessionSummary;
+  turns: TurnDto[];
+};
+
 export type PostMessageResponse = {
   session: SessionSummary;
   turn: TurnDto;
-};
-
-export type PostCommandResponse = {
-  session: SessionSummary;
-  effect: CommandEffectKind;
-  message: string;
 };
 
 export type ResetSessionResponse = {
@@ -92,10 +68,18 @@ export type HealthResponse = {
   version: string;
 };
 
+/**
+ * Wire error body (nested). Mirrors ApiErrorBody in src/session-api/contract.ts.
+ * kind is SessionStoreErrorKind | "validation" | "internal"; kept as string
+ * on the web side to avoid coupling to backend enum evolution.
+ */
 export type ApiErrorBody = {
-  error: string;
-  message: string;
-  details?: Record<string, unknown>;
+  error: {
+    kind: string;
+    message: string;
+    conversation_id?: string;
+    field?: string;
+  };
 };
 
 export class SessionApiError extends Error {
@@ -107,7 +91,7 @@ export class SessionApiError extends Error {
     message: string,
     status: number,
     code: string,
-    body: ApiErrorBody | null,
+    body: ApiErrorBody | null
   ) {
     super(message);
     this.name = "SessionApiError";

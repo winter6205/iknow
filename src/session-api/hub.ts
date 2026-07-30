@@ -1,30 +1,32 @@
 /**
- * In-process multi-conversation host over shared KB runtime.
+ * In-process multi-conversation host over harness foundation runtime.
+ * 022 T4: load → run(priorMessages) → conditional save → wire projection.
+ * Messages single-source is the session file; hub holds no messages copy.
  */
+import { randomUUID } from "node:crypto";
+import Anthropic from "@anthropic-ai/sdk";
 import {
-  createConversation,
-  formatAnswerHuman,
-  recordTurn,
-  resetConversation,
-  type ConversationState,
-} from "../interaction/index.js";
-import {
-  applySlashCommand,
-  type AgentModeCli,
-} from "../interaction/slash.js";
-import {
-  buildAgent,
-  prepareRuntime,
-  type AnswerAgent,
-  type RuntimeBundle,
-} from "../cli/runtime.js";
-import type { CallerRole } from "../shared/schema.js";
-import { NotFoundError, ValidationError } from "../shared/errors.js";
+  run,
+  createRealAnthropicAdapter,
+  createRegistry,
+  createExecutor,
+  createEchoTool,
+  createGetTimeTool,
+  type AnthropicContentBlock,
+  type AnthropicNativeMessage,
+  type LoopEngineDeps,
+  type RunResult,
+} from "../harness/index.js";
+import { loadIknowEnv, type AgentMode } from "../config/env.js";
+import { ValidationError } from "../shared/errors.js";
+import { SessionStore, type SessionListEntry } from "./store/index.js";
+import type { SessionStoreError } from "./store/index.js";
+import type { SessionFileV1 } from "./store/index.js";
 import type {
+  ApiErrorBody,
   CreateSessionRequest,
   CreateSessionResponse,
   GetSessionResponse,
-  PostCommandResponse,
   PostMessageResponse,
   ResetSessionResponse,
   SessionSummary,
@@ -32,105 +34,240 @@ import type {
 } from "./contract.js";
 import { MAX_MESSAGE_CHARS } from "./contract.js";
 
-export type SessionHubOptions = {
-  /** Default role for new sessions. */
-  defaultRole?: CallerRole;
-  defaultMode?: AgentModeCli;
-  defaultEmbeddings?: boolean;
-  defaultJsonMode?: boolean;
-  /**
-   * Injected runtime (tests). When omitted, prepared once on first use.
-   */
-  bundle?: RuntimeBundle;
+// -- error mapping (裁决#10: pure function, http.ts T5 consumes) ---------------
+
+/**
+ * Status + message per SessionStoreError kind. Data table replaces the prior
+ * 6-case switch so mapStoreError stays a flat lookup (SC24 >60 hard-split gate).
+ * retryable is implicit via 5xx status (D1.2: not in wire).
+ */
+type StoreErrorEntry = {
+  status: number;
+  message: (err: SessionStoreError) => string;
 };
 
-type LiveSession = {
-  state: ConversationState;
-  agent: AnswerAgent;
-  mode: AgentModeCli;
-  embeddings: boolean;
+const STORE_ERROR_MAP: Record<SessionStoreError["kind"], StoreErrorEntry> = {
+  not_found: {
+    status: 404,
+    message: (e) => `session not found: ${e.conversation_id}`,
+  },
+  parse_failed: {
+    status: 422,
+    message: (e) => `session file is not valid JSON: ${e.conversation_id}`,
+  },
+  schema_invalid: {
+    status: 422,
+    // schema_invalid carries `field`; narrow via `in` since the param is the
+    // full union (the entry is only invoked for its own kind at runtime).
+    message: (e) =>
+      `session file schema invalid at field: ${"field" in e ? e.field : e.conversation_id}`,
+  },
+  write_failed: {
+    status: 500,
+    message: (e) => `failed to write session file: ${e.conversation_id}`,
+  },
+  concurrent_write: {
+    status: 409,
+    message: (e) => `concurrent write conflict: ${e.conversation_id}`,
+  },
+  io_error: {
+    status: 500,
+    message: (e) => `IO error on session file: ${e.conversation_id}`,
+  },
 };
+
+/**
+ * Map typed SessionStoreError → HTTP status + wire ApiErrorBody.
+ */
+export function mapStoreError(err: SessionStoreError): {
+  status: number;
+  body: ApiErrorBody;
+} {
+  const entry = STORE_ERROR_MAP[err.kind];
+  return {
+    status: entry.status,
+    body: {
+      error: {
+        kind: err.kind,
+        message: entry.message(err),
+        conversation_id: err.conversation_id,
+      },
+    },
+  };
+}
+
+// -- history projection (裁决#11: getSession turns) -----------------------------
+
+/** Extract joined text from text blocks of a native message. */
+function textOf(msg: AnthropicNativeMessage): string {
+  return msg.content
+    .filter(
+      (b): b is Extract<AnthropicContentBlock, { type: "text" }> =>
+        b.type === "text"
+    )
+    .map((b) => b.text)
+    .join(" ");
+}
+
+/**
+ * Project raw AnthropicNativeMessage[] → display-form TurnDto[] for wire.
+ * Pairs each user message with its subsequent assistant message.
+ * Projection is non-authoritative: stopReason/turnCount are lossy (裁决#11).
+ */
+export function projectMessagesToTurns(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): TurnDto[] {
+  const turns: TurnDto[] = [];
+  let turnIndex = 0;
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]!;
+    if (msg.role !== "user") continue;
+    // Skip tool_result user messages (they are continuation, not queries).
+    if (msg.content.some((b) => b.type === "tool_result")) continue;
+    const query = textOf(msg);
+    // Find the next assistant message with text blocks.
+    let finalText = "";
+    for (let j = i + 1; j < messages.length; j++) {
+      const next = messages[j]!;
+      if (next.role === "assistant") {
+        const t = textOf(next);
+        if (t) {
+          finalText = t;
+          break;
+        }
+      }
+    }
+    turnIndex++;
+    turns.push({
+      query,
+      answer: { finalText, stopReason: "completed", turnCount: turnIndex },
+    });
+  }
+  return turns;
+}
+
+// -- hub options ---------------------------------------------------------------
+
+export type SessionHubOptions = {
+  /** Filesystem-backed session store (required). */
+  store: SessionStore;
+  /** Injected harness deps (tests). When omitted, lazily constructed once. */
+  deps?: LoopEngineDeps;
+  defaultMode?: AgentMode;
+  defaultJsonMode?: boolean;
+  defaultEmbeddings?: boolean;
+};
+
+// -- stop reasons that must NOT persist to file (裁决#8) -----------------------
+
+/** cancelled → no-op (spec L237); protocolError/emptyFinalResponse → drop context (chat-session.ts:84-89). */
+const DROP_REASONS: ReadonlySet<string> = new Set([
+  "cancelled",
+  "protocolError",
+  "emptyFinalResponse",
+]);
+
+// -- SessionHub ----------------------------------------------------------------
 
 export class SessionHub {
-  private readonly sessions = new Map<string, LiveSession>();
-  private bundle: RuntimeBundle | undefined;
-  private readonly defaults: Required<
-    Pick<
-      SessionHubOptions,
-      "defaultRole" | "defaultMode" | "defaultEmbeddings" | "defaultJsonMode"
-    >
-  >;
-  private readonly injectedBundle: RuntimeBundle | undefined;
+  private readonly store: SessionStore;
+  private cachedDeps: LoopEngineDeps | undefined;
+  private readonly defaults: {
+    mode: AgentMode;
+    jsonMode: boolean;
+    embeddings: boolean;
+  };
+  /** Per-conversation serialization (spec A15). */
+  private readonly inflight = new Map<string, Promise<void>>();
 
-  constructor(opts?: SessionHubOptions) {
+  constructor(opts: SessionHubOptions) {
+    this.store = opts.store;
+    this.cachedDeps = opts.deps;
     this.defaults = {
-      defaultRole: opts?.defaultRole ?? "employee",
-      defaultMode: opts?.defaultMode ?? "deterministic",
-      defaultEmbeddings: opts?.defaultEmbeddings ?? false,
-      defaultJsonMode: opts?.defaultJsonMode ?? false,
+      mode: opts.defaultMode ?? "deterministic",
+      jsonMode: opts.defaultJsonMode ?? false,
+      embeddings: opts.defaultEmbeddings ?? false,
     };
-    this.injectedBundle = opts?.bundle;
-    this.bundle = opts?.bundle;
   }
 
-  async ensureBundle(embeddings: boolean): Promise<RuntimeBundle> {
-    if (this.injectedBundle) {
-      return this.injectedBundle;
-    }
-    if (this.bundle && !embeddings) {
-      return this.bundle;
-    }
-    // First create or embeddings upgrade: prepare (may set embedding mode).
-    this.bundle = await prepareRuntime({
-      role: this.defaults.defaultRole,
-      degrade: false,
-      embeddings: embeddings || this.defaults.defaultEmbeddings,
-    });
-    return this.bundle;
-  }
+  // -- public API --------------------------------------------------------------
 
   async createSession(
-    req?: CreateSessionRequest,
+    req?: CreateSessionRequest
   ): Promise<CreateSessionResponse> {
-    const role = req?.role ?? this.defaults.defaultRole;
-    const mode = req?.mode ?? this.defaults.defaultMode;
-    const embeddings = req?.embeddings ?? this.defaults.defaultEmbeddings;
-    const json_mode = req?.json_mode ?? this.defaults.defaultJsonMode;
-
-    const bundle = await this.ensureBundle(embeddings);
-    // Per-session auth context (do not share mutable role across sessions).
-    const sessionCtx = {
-      caller_role: role,
-      simulate_governance_timeout: false,
+    const id = randomUUID();
+    const file: SessionFileV1 = {
+      schemaVersion: 1,
+      conversation_id: id,
+      messages: [],
+      jsonMode: req?.json_mode ?? this.defaults.jsonMode,
+      turnCount: 0,
+      updatedAt: new Date().toISOString(),
     };
-    const state = createConversation(sessionCtx, { json_mode });
-    const { agent } = await buildAgent(
-      { ...bundle, session: sessionCtx },
-      mode,
-    );
-
-    const live: LiveSession = { state, agent, mode, embeddings };
-    this.sessions.set(state.conversation_id, live);
-
+    await this.store.save(id, file);
     return {
-      session: this.summarize(live),
+      session: this.summarize(file, req?.mode ?? this.defaults.mode),
       turns: [],
     };
   }
 
-  getSession(conversationId: string): GetSessionResponse {
-    const live = this.require(conversationId);
+  async getSession(conversationId: string): Promise<GetSessionResponse> {
+    const file = await this.store.load(conversationId);
     return {
-      session: this.summarize(live),
-      turns: live.state.turns.map((t) => this.toTurnDto(t.query, t.answer, live)),
+      session: this.summarize(file, this.defaults.mode),
+      turns: projectMessagesToTurns(file.messages),
     };
   }
 
   async postMessage(
     conversationId: string,
     text: string,
+    opts?: { signal?: AbortSignal }
   ): Promise<PostMessageResponse> {
-    const live = this.require(conversationId);
+    this.validateText(text);
+    const query = text.trim();
+    return this.serialize(conversationId, async () => {
+      const session = await this.store.load(conversationId);
+      const deps = await this.ensureDeps();
+      const { result } = await run(query, deps, opts?.signal, {
+        priorMessages: session.messages,
+      });
+      // trace is destructured away → immediate GC (not logged/persisted/wired).
+      await this.conditionalSave(conversationId, session, result);
+      return {
+        session: this.summarize(
+          await this.store.load(conversationId),
+          this.defaults.mode
+        ),
+        turn: this.toTurnDto(query, result),
+      };
+    });
+  }
+
+  async resetSession(
+    conversationId: string,
+    _opts?: { new_id?: boolean }
+  ): Promise<ResetSessionResponse> {
+    return this.serialize(conversationId, async () => {
+      const session = await this.store.load(conversationId);
+      const reset: SessionFileV1 = {
+        ...session,
+        messages: [],
+        turnCount: 0,
+        updatedAt: new Date().toISOString(),
+      };
+      await this.store.save(conversationId, reset);
+      return { session: this.summarize(reset, this.defaults.mode), turns: [] };
+    });
+  }
+
+  async listSessions(): Promise<SessionListEntry[]> {
+    return this.store.list();
+  }
+
+  // -- private helpers ---------------------------------------------------------
+
+  private validateText(text: string): void {
     const query = text.trim();
     if (!query) {
       throw new ValidationError("message text must be non-empty", {
@@ -140,167 +277,97 @@ export class SessionHub {
     if (query.length > MAX_MESSAGE_CHARS) {
       throw new ValidationError(
         `message text exceeds max length ${MAX_MESSAGE_CHARS}`,
-        { field: "text", max: MAX_MESSAGE_CHARS, length: query.length },
+        { field: "text", max: MAX_MESSAGE_CHARS, length: query.length }
       );
     }
-
-    const answer = await live.agent.answer(query, {
-      prior_chunks: live.state.last_priors.length
-        ? live.state.last_priors
-        : undefined,
-      history: live.state.history_finals.length
-        ? live.state.history_finals
-        : undefined,
-    });
-    const bundle = await this.ensureBundle(live.embeddings);
-    recordTurn(live.state, query, answer, bundle.store);
-    return {
-      session: this.summarize(live),
-      turn: this.toTurnDto(query, answer, live),
-    };
   }
 
-  async postCommand(
+  /**
+   * Serialize operations on the same conversation_id (spec A15).
+   * Different ids run in parallel; same id chains sequentially.
+   */
+  private serialize<T>(
     conversationId: string,
-    command: string,
-    args: string[] = [],
-  ): Promise<PostCommandResponse> {
-    const live = this.require(conversationId);
-    const cmd = command.trim().toLowerCase().replace(/^\//, "");
-    if (!cmd) {
-      throw new ValidationError("command must be non-empty", {
-        field: "command",
-      });
-    }
-
-    if (cmd === "quit" || cmd === "exit") {
-      return {
-        session: this.summarize(live),
-        effect: "quit",
-        message: "HTTP session stays open; close the browser tab to leave.",
-      };
-    }
-
-    const effect = applySlashCommand(cmd, args, {
-      state: live.state,
-      mode: live.mode,
-    });
-
-    switch (effect.type) {
-      case "help":
-        return {
-          session: this.summarize(live),
-          effect: "help",
-          message: effect.text,
-        };
-      case "info":
-        return {
-          session: this.summarize(live),
-          effect: "info",
-          message: effect.text,
-        };
-      case "error":
-        return {
-          session: this.summarize(live),
-          effect: "error",
-          message: effect.text,
-        };
-      case "reset":
-        return {
-          session: this.summarize(live),
-          effect: "reset",
-          message: effect.message,
-        };
-      case "mode_change": {
-        try {
-          const bundle = await this.ensureBundle(live.embeddings);
-          const { agent } = await buildAgent(
-            { ...bundle, session: live.state.session },
-            effect.mode,
-          );
-          live.agent = agent;
-          live.mode = effect.mode;
-          return {
-            session: this.summarize(live),
-            effect: "mode_change",
-            message: effect.message,
-          };
-        } catch (err) {
-          const msg =
-            err instanceof Error ? err.message : String(err);
-          return {
-            session: this.summarize(live),
-            effect: "error",
-            message: `${msg}\n(mode stays ${live.mode})`,
-          };
-        }
-      }
-      case "quit":
-        return {
-          session: this.summarize(live),
-          effect: "quit",
-          message: "HTTP session stays open.",
-        };
-    }
+    work: () => Promise<T>
+  ): Promise<T> {
+    const prev = this.inflight.get(conversationId) ?? Promise.resolve();
+    const next = prev.then(() => work());
+    // Swallow rejection in the chain sentinel so subsequent ops still run.
+    this.inflight.set(
+      conversationId,
+      next.then(
+        () => {},
+        () => {}
+      )
+    );
+    return next;
   }
 
-  async resetSession(
+  /** 裁决#8: save condition based on stopReason. */
+  private async conditionalSave(
     conversationId: string,
-    opts?: { new_id?: boolean },
-  ): Promise<ResetSessionResponse> {
-    const live = this.require(conversationId);
-    const oldId = live.state.conversation_id;
-    resetConversation(live.state, { new_id: opts?.new_id });
-    if (opts?.new_id && live.state.conversation_id !== oldId) {
-      this.sessions.delete(oldId);
-      this.sessions.set(live.state.conversation_id, live);
+    session: SessionFileV1,
+    result: RunResult
+  ): Promise<void> {
+    if (DROP_REASONS.has(result.stopReason)) return;
+    const updated: SessionFileV1 = {
+      ...session,
+      messages: result.messages,
+      turnCount: session.turnCount + result.turnCount,
+      updatedAt: new Date().toISOString(),
+    };
+    await this.store.save(conversationId, updated);
+  }
+
+  /** Lazy deps construction (mirrors buildHarnessEngine, no agent-loop import). */
+  private async ensureDeps(): Promise<LoopEngineDeps> {
+    if (this.cachedDeps) return this.cachedDeps;
+    const env = loadIknowEnv();
+    if (!env.llm.apiKey) {
+      throw new ValidationError(
+        `LLM mode needs the env var named by IKNOW_LLM_API_KEY_ENV (${env.llm.apiKeyEnv}); set the key.`
+      );
     }
+    const client = new Anthropic({
+      apiKey: env.llm.apiKey,
+      baseURL: env.llm.baseUrl,
+    });
+    const adapter = createRealAnthropicAdapter({
+      client,
+      model: env.llm.model,
+      maxTokens: env.llm.maxOutputTokens,
+    });
+    const registry = createRegistry([createEchoTool(), createGetTimeTool()]);
+    const executor = createExecutor(registry);
+    this.cachedDeps = {
+      adapter,
+      executor,
+      registry,
+      maxTurns: 6,
+      timeoutMs: env.llm.timeoutMs,
+    };
+    return this.cachedDeps;
+  }
+
+  private summarize(file: SessionFileV1, mode: AgentMode): SessionSummary {
     return {
-      session: this.summarize(live),
-      turns: [],
+      conversation_id: file.conversation_id,
+      mode,
+      json_mode: file.jsonMode,
+      turn_count: file.turnCount,
+      prior_count: 0,
+      embeddings: this.defaults.embeddings,
     };
   }
 
-  /** Test / ops: active conversation count. */
-  size(): number {
-    return this.sessions.size;
-  }
-
-  private require(conversationId: string): LiveSession {
-    const id = conversationId?.trim();
-    if (!id) {
-      throw new ValidationError("conversation id required");
-    }
-    const live = this.sessions.get(id);
-    if (!live) {
-      throw new NotFoundError(`session not found: ${id}`, {
-        conversation_id: id,
-      });
-    }
-    return live;
-  }
-
-  private summarize(live: LiveSession): SessionSummary {
+  private toTurnDto(query: string, result: RunResult): TurnDto {
     return {
-      conversation_id: live.state.conversation_id,
-      caller_role: live.state.session.caller_role,
-      mode: live.mode,
-      json_mode: live.state.json_mode,
-      turn_count: live.state.turns.length,
-      prior_count: live.state.last_priors.length,
-      embeddings: live.embeddings,
+      query,
+      answer: {
+        finalText: result.finalText ?? "",
+        stopReason: result.stopReason,
+        turnCount: result.turnCount,
+      },
     };
-  }
-
-  private toTurnDto(
-    query: string,
-    answer: LiveSession["state"]["turns"][0]["answer"],
-    live: LiveSession,
-  ): TurnDto {
-    const dto: TurnDto = { query, answer };
-    if (!live.state.json_mode) {
-      dto.human_text = formatAnswerHuman(answer);
-    }
-    return dto;
   }
 }

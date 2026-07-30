@@ -1,0 +1,210 @@
+/**
+ * Stateless filesystem-backed session store (022 spec §Session Store).
+ *
+ * Why stateless: concurrency serialization is the hub's responsibility
+ * (spec A15). This class is a thin typed-IO wrapper over data/sessions/*.json.
+ * Every failure path throws a typed SessionStoreError — never a bare Error.
+ */
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { join } from "node:path";
+import type {
+  AnthropicContentBlock,
+  AnthropicNativeMessage,
+} from "../../harness/index.js";
+import type { SessionStoreError } from "./errors.js";
+import type { SessionFileV1 } from "./schema.js";
+import { validateSessionFile } from "./schema.js";
+
+/** Metadata returned by list(); intentionally excludes messages. */
+export interface SessionListEntry {
+  readonly conversation_id: string;
+  readonly updatedAt: string;
+  /** Text excerpt from the most recent assistant turn ("" if none). */
+  readonly lastFinalText: string;
+}
+
+export class SessionStore {
+  private readonly dir: string;
+
+  constructor(baseDir: string) {
+    this.dir = join(baseDir, "sessions");
+  }
+
+  /**
+   * Load and validate a session file.
+   * Throws: not_found | parse_failed | schema_invalid | io_error
+   */
+  async load(id: string): Promise<SessionFileV1> {
+    const raw = await this.readRaw(id);
+    const parsed = this.parseJson(id, raw);
+    const field = validateSessionFile(parsed);
+    if (field !== null) {
+      throw {
+        kind: "schema_invalid",
+        conversation_id: id,
+        field,
+      } satisfies SessionStoreError;
+    }
+    return parsed as SessionFileV1;
+  }
+
+  /**
+   * Atomic write: tmp file then rename, so a crash never leaves a half-written file.
+   * Throws: write_failed
+   */
+  async save(id: string, file: SessionFileV1): Promise<void> {
+    const path = this.filePath(id);
+    const tmp = `${path}.tmp`;
+    try {
+      await mkdir(this.dir, { recursive: true });
+      await writeFile(tmp, JSON.stringify(file, null, 2), "utf8");
+      await rename(tmp, path);
+    } catch (err) {
+      throw {
+        kind: "write_failed",
+        conversation_id: id,
+        cause: errMsg(err),
+      } satisfies SessionStoreError;
+    }
+  }
+
+  /**
+   * List all session files sorted by updatedAt descending.
+   * Corrupt / unreadable files are silently skipped (sidebar must not break).
+   * Throws: io_error (only for directory-level failures)
+   */
+  async list(): Promise<SessionListEntry[]> {
+    const names = await this.readDir();
+    const entries: SessionListEntry[] = [];
+    for (const name of names) {
+      if (!name.endsWith(".json")) continue;
+      const entry = await this.tryListEntry(name);
+      if (entry) entries.push(entry);
+    }
+    entries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return entries;
+  }
+
+  /**
+   * Delete a session file.
+   * Throws: not_found | io_error
+   */
+  async delete(id: string): Promise<void> {
+    try {
+      await unlink(this.filePath(id));
+    } catch (err) {
+      if (isEnoent(err)) {
+        throw {
+          kind: "not_found",
+          conversation_id: id,
+        } satisfies SessionStoreError;
+      }
+      throw {
+        kind: "io_error",
+        conversation_id: id,
+        cause: errMsg(err),
+      } satisfies SessionStoreError;
+    }
+  }
+
+  // -- private helpers -------------------------------------------------------
+
+  private filePath(id: string): string {
+    return join(this.dir, `${id}.json`);
+  }
+
+  private async readRaw(id: string): Promise<string> {
+    try {
+      return await readFile(this.filePath(id), "utf8");
+    } catch (err) {
+      if (isEnoent(err)) {
+        throw {
+          kind: "not_found",
+          conversation_id: id,
+        } satisfies SessionStoreError;
+      }
+      throw {
+        kind: "io_error",
+        conversation_id: id,
+        cause: errMsg(err),
+      } satisfies SessionStoreError;
+    }
+  }
+
+  private parseJson(id: string, raw: string): unknown {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      // Excerpt of the raw content aids debugging without leaking full file.
+      throw {
+        kind: "parse_failed",
+        conversation_id: id,
+        reason: raw.slice(0, 120),
+      } satisfies SessionStoreError;
+    }
+  }
+
+  private async readDir(): Promise<string[]> {
+    try {
+      return await readdir(this.dir);
+    } catch (err) {
+      if (isEnoent(err)) return []; // no sessions yet
+      throw {
+        kind: "io_error",
+        conversation_id: "",
+        cause: errMsg(err),
+      } satisfies SessionStoreError;
+    }
+  }
+
+  private async tryListEntry(name: string): Promise<SessionListEntry | null> {
+    const id = name.slice(0, -".json".length);
+    try {
+      const file = await this.load(id);
+      return {
+        conversation_id: id,
+        updatedAt: file.updatedAt,
+        lastFinalText: lastAssistantText(file.messages),
+      };
+    } catch {
+      return null; // skip corrupt / unreadable files
+    }
+  }
+}
+
+// -- module-level helpers ----------------------------------------------------
+
+function isEnoent(err: unknown): boolean {
+  return (
+    err instanceof Error && (err as NodeJS.ErrnoException).code === "ENOENT"
+  );
+}
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** Extract joined text from the most recent assistant message ("" if none). */
+function lastAssistantText(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "assistant") continue;
+    return msg.content
+      .filter(
+        (b): b is Extract<AnthropicContentBlock, { type: "text" }> =>
+          b.type === "text"
+      )
+      .map((b) => b.text)
+      .join(" ");
+  }
+  return "";
+}

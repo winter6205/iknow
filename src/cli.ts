@@ -181,13 +181,10 @@ async function runServe(parsed: ParsedCli): Promise<void> {
     const { listening } = await startSessionServe({
       host: parsed.host,
       port: parsed.port,
-      role: parsed.role,
       embeddings: parsed.embeddings,
       json_mode: parsed.json,
     });
-    writeErr(
-      `iknow serve  http://${listening.host}:${listening.port}/  role=${parsed.role}`
-    );
+    writeErr(`iknow serve  http://${listening.host}:${listening.port}/`);
     writeErr("API: /api/v1/health  ·  UI: /  ·  Ctrl+C to stop");
     await new Promise<void>(() => {
       /* keep process alive until signal */

@@ -62,6 +62,15 @@ docs/handoff/*
 # evidence) are team artifacts; un-ignore the dir so the reports track even
 # though docs/handoff/* matches. Mirrors the i9-smoke exception above.
 !docs/handoff/i10-smoke/
+# 022: i11 session-api harness smoke acceptance reports (real serve-path
+# e2e evidence) are team artifacts; un-ignore the dir so the reports track.
+# Mirrors the i9-smoke / i10-smoke exceptions above.
+!docs/handoff/i11-smoke/
+
+# 022: session-api runtime JSON store (data/sessions/<id>.json), not team
+# content. The data/ top-level dir is kept via data/.gitkeep so the
+# directory exists in checkout; only the runtime session files are excluded.
+data/sessions/*
 
 # local Next.js prototype (early-stage, not team-shared; built artifacts
 # also covered by node_modules/ etc. above)

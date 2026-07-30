@@ -39,7 +39,8 @@ export const KB_TOOL_DEFS: LlmToolDef[] = [
           },
           prior_chunks: {
             type: "array",
-            description: "Optional prior hits for multi-hop retrieve (summary only).",
+            description:
+              "Optional prior hits for multi-hop retrieve (summary only).",
             items: {
               type: "object",
               additionalProperties: false,

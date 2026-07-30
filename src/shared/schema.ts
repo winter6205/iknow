@@ -18,9 +18,7 @@ export type RetrieveIndex = "chunk" | "fact" | "both";
 export type Verdict = "supported" | "partially_supported" | "unsupported";
 export type CompileStatus = "ok" | "partial" | "failed";
 export type GovernanceAction =
-  | "check_freshness"
-  | "detect_conflict"
-  | "snapshot_status";
+  "check_freshness" | "detect_conflict" | "snapshot_status";
 export type GovernanceStatus = "ok" | "stale" | "conflict";
 
 /** Allowed session caller roles (schema truth; CLI / harness must match). */
@@ -43,7 +41,7 @@ export function parseCallerRole(value: unknown): CallerRole {
     return value;
   }
   throw new Error(
-    `Invalid caller role: ${JSON.stringify(value)}; expected one of: ${CALLER_ROLES.join("|")}`,
+    `Invalid caller role: ${JSON.stringify(value)}; expected one of: ${CALLER_ROLES.join("|")}`
   );
 }
 
@@ -195,28 +193,6 @@ export interface SnapshotPayload {
 // ---------------------------------------------------------------------------
 // Agent answer envelope (G2)
 // ---------------------------------------------------------------------------
-
-/** Structured tool call log (trajectory-eval-spec §1.2). */
-export interface ToolCallLog {
-  tool: string;
-  args: Record<string, unknown>;
-  /** 1-based ordinal in this answer run (not a wall-clock timestamp). */
-  ordinal: number;
-}
-
-export interface IknowAnswer {
-  text: string;
-  source_spans: SourceSpan[];
-  /** G2 required on every final answer. */
-  snapshot_id: string;
-  governance_status: GovernanceStatus;
-  /** Tool names only (compat). Prefer tool_calls for trajectory eval. */
-  tool_trace: string[];
-  /** Structured call log for trajectory scoring. */
-  tool_calls: ToolCallLog[];
-  hops_used: number;
-  notes?: string[];
-}
 
 /**
  * One final user/assistant turn in multi-turn history

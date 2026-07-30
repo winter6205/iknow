@@ -5,6 +5,13 @@
 ### Breaking (internal, pre-release)
 
 - 移除 `src/index.ts` 对旧 `src/agent-loop/` 与 `src/eval/` 的 re-export（13 旧 loop 符号 + 5 EVAL 符号 + `eval/types` type re-export）；包状态 `private: true` + `0.1.0 (unreleased)` 未发布，无外部消费者，仅记录内部 API 变更，审计可追溯。详见 #48（021）Resolution Q3。
+- `TurnDto.answer` 从 `IknowAnswer`（G2 envelope）改为 `TurnAnswerDto {finalText, stopReason, turnCount}`（harness RunResult 投影）；G2 envelope 在 Session API wire 退役。详见 #51（022）Resolution Q1。
+- `SessionSummary` 移除 `caller_role` 字段；wire 不再接受/返回 caller role（harness 路径退役）。详见 #51（022）Resolution Q2-G4。
+- 删除 `POST /api/v1/sessions/:id/commands` slash 端点（404）；slash 命令在 harness 路径退役。详见 #51（022）Resolution Q3。
+- 新增 `GET /api/v1/sessions` 列表端点（`{sessions: SessionListEntry[]}`）+ web 会话历史侧栏（`SessionSidebar`）。详见 #51（022）Resolution Q1。
+- `src/shared/schema.ts` 删除 `IknowAnswer` + `ToolCallLog` 类型定义；公开面经 `export type *` 不再 export（BREAKING for internal consumers）。详见 #51（022）Resolution Q1。
+- 归档 `src/interaction/`（5 文件）→ `docs/archive/022-retire-interaction/` + `src/agent-loop/`（7 文件）→ `docs/archive/022-retire-agent-loop/`；归档非删除，对齐 021 惯例。详见 #51（022）Resolution Q5。
+- Session API 路径切到 harness foundation（`src/session-api/` 零 import 旧 loop）；`SessionHub` 直接调用 `run()` + `priorMessages` 续传。详见 #51（022）Resolution Q1-Q5。
 
 ### Docs (CLAUDE.md + architecture.md 整理)
 

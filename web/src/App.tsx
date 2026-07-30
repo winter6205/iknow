@@ -2,8 +2,8 @@ import { AppShell } from "./components/AppShell";
 import { ChatHeader } from "./components/ChatHeader";
 import { Composer } from "./components/Composer";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { G2Panel } from "./components/G2Panel";
 import { MessageList } from "./components/MessageList";
+import { SessionSidebar } from "./components/SessionSidebar";
 import { StateBlock } from "./components/StateBlock";
 import { useSessionChat } from "./hooks/useSessionChat";
 
@@ -15,14 +15,6 @@ function ChatApp() {
       session={chat.session}
       phase={chat.phase}
       healthLabel={chat.healthLabel}
-      mode={chat.mode}
-      role={chat.role}
-      onModeChange={(m) => {
-        void chat.setMode(m);
-      }}
-      onRoleChange={(r) => {
-        void chat.setRole(r);
-      }}
       onReset={() => {
         void chat.reset();
       }}
@@ -32,7 +24,16 @@ function ChatApp() {
     />
   );
 
-  const side = <G2Panel session={chat.session} answer={chat.lastAnswer} />;
+  // Sidebar lists past conversations and switches the active one. Passes the
+  // current id (or null during pre-bootstrap) so the highlight tracks live.
+  const side = (
+    <SessionSidebar
+      currentConversationId={chat.session?.conversation_id ?? null}
+      onSelect={(id) => {
+        void chat.setConversation(id);
+      }}
+    />
+  );
 
   if (chat.phase === "loading" && !chat.session) {
     return (

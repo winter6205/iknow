@@ -11,7 +11,7 @@ export type MessageListProps = {
 
 export function MessageList({
   messages,
-  emptyHint = "发送问题开始对话。回答将附带 G2 证据包（snapshot / sources / governance / tools）。",
+  emptyHint = "发送问题开始对话。",
 }: MessageListProps) {
   const endRef = useRef<HTMLDivElement | null>(null);
 

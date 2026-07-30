@@ -1,14 +1,15 @@
 /**
  * Minimal node:http router for Session API + static web UI.
+ * 022 T5: nested ApiErrorBody, hub error mapping, GET /sessions list.
  */
 import * as http from "node:http";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isIknowError, ValidationError } from "../shared/errors.js";
-import { parseCallerRole } from "../shared/schema.js";
-import { parseAgentModeCli } from "../interaction/slash.js";
-import type { SessionHub } from "./hub.js";
+import type { AgentMode } from "../config/env.js";
+import { mapStoreError, type SessionHub } from "./hub.js";
+import type { SessionStoreError } from "./store/index.js";
 import type { ApiErrorBody, HealthResponse } from "./contract.js";
 import { getVersion } from "../cli/usage.js";
 
@@ -49,7 +50,7 @@ export function resolveDefaultWebRoot(): string {
 }
 
 export function createSessionHttpServer(
-  opts: SessionHttpServerOptions,
+  opts: SessionHttpServerOptions
 ): http.Server {
   const hub = opts.hub;
   const webRoot = opts.webRoot ?? resolveDefaultWebRoot();
@@ -60,7 +61,7 @@ export function createSessionHttpServer(
 }
 
 export async function listenSessionServer(
-  opts: SessionHttpServerOptions,
+  opts: SessionHttpServerOptions
 ): Promise<ListeningServer> {
   const host = opts.host ?? "127.0.0.1";
   const port = opts.port ?? 8787;
@@ -75,8 +76,7 @@ export async function listenSessionServer(
   });
 
   const addr = server.address();
-  const boundPort =
-    typeof addr === "object" && addr ? addr.port : port;
+  const boundPort = typeof addr === "object" && addr ? addr.port : port;
 
   return {
     server,
@@ -93,106 +93,111 @@ async function handle(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   hub: SessionHub,
-  webRoot: string,
+  webRoot: string
 ): Promise<void> {
   try {
     const method = (req.method ?? "GET").toUpperCase();
-    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    const url = new URL(
+      req.url ?? "/",
+      `http://${req.headers.host ?? "localhost"}`
+    );
     const pathname = decodeURIComponent(url.pathname);
 
-    if (method === "GET" && pathname === "/api/v1/health") {
-      const body: HealthResponse = {
-        ok: true,
-        service: "iknow-session-api",
-        version: getVersion(),
-      };
-      return sendJson(res, 200, body);
-    }
-
-    // Reserved SSE — explicit 501 so UI can detect.
-    if (
-      method === "GET" &&
-      /^\/api\/v1\/sessions\/[^/]+\/events$/.test(pathname)
-    ) {
-      return sendJson(res, 501, {
-        error: "not_implemented",
-        message: "SSE streaming is reserved; not implemented in v0",
-        details: { path: pathname },
-      } satisfies ApiErrorBody);
-    }
+    if (method === "GET" && pathname === "/api/v1/health")
+      return sendHealth(res);
+    if (method === "GET" && isSsePath(pathname)) return sendSseReserved(res);
 
     if (method === "POST" && pathname === "/api/v1/sessions") {
-      const raw = await readJsonBody(req);
-      const createReq = parseCreateBody(raw);
-      const out = await hub.createSession(createReq);
-      return sendJson(res, 201, out);
+      const createReq = parseCreateBody(await readJsonBody(req));
+      return sendJson(res, 201, await hub.createSession(createReq));
+    }
+
+    // List sessions — must precede the /sessions/:id regex (which requires
+    // at least one non-slash char after `/sessions/`, so exact match is safe).
+    if (method === "GET" && pathname === "/api/v1/sessions") {
+      return sendJson(res, 200, { sessions: await hub.listSessions() });
     }
 
     const sessionMatch = pathname.match(
-      /^\/api\/v1\/sessions\/([^/]+)(\/.*)?$/,
+      /^\/api\/v1\/sessions\/([^/]+)(\/.*)?$/
     );
     if (sessionMatch) {
       const id = sessionMatch[1]!;
       const rest = sessionMatch[2] ?? "";
-
-      if (method === "GET" && rest === "") {
-        return sendJson(res, 200, hub.getSession(id));
-      }
-      if (method === "POST" && rest === "/messages") {
-        const raw = await readJsonBody(req);
-        const text =
-          raw && typeof raw === "object" && "text" in raw
-            ? String((raw as { text: unknown }).text ?? "")
-            : "";
-        const out = await hub.postMessage(id, text);
-        return sendJson(res, 200, out);
-      }
-      if (method === "POST" && rest === "/commands") {
-        const raw = await readJsonBody(req);
-        const command =
-          raw && typeof raw === "object" && "command" in raw
-            ? String((raw as { command: unknown }).command ?? "")
-            : "";
-        const args =
-          raw &&
-          typeof raw === "object" &&
-          "args" in raw &&
-          Array.isArray((raw as { args: unknown }).args)
-            ? (raw as { args: unknown[] }).args.map(String)
-            : [];
-        const out = await hub.postCommand(id, command, args);
-        return sendJson(res, 200, out);
-      }
-      if (method === "POST" && rest === "/reset") {
-        const raw = await readJsonBody(req);
-        let new_id = false;
-        if (raw && typeof raw === "object" && "new_id" in raw) {
-          new_id = Boolean((raw as { new_id: unknown }).new_id);
-        }
-        const out = await hub.resetSession(id, { new_id });
-        return sendJson(res, 200, out);
-      }
+      if (await handleSessionRoute({ method, id, rest, req, res, hub })) return;
     }
 
-    if (method === "GET") {
-      const served = tryServeStatic(res, webRoot, pathname);
-      if (served) {
-        return;
-      }
-    }
-
-    sendJson(res, 404, {
-      error: "not_found",
-      message: `no route ${method} ${pathname}`,
-    } satisfies ApiErrorBody);
+    if (method === "GET" && tryServeStatic(res, webRoot, pathname)) return;
+    sendNotFound(res, method, pathname);
   } catch (err) {
     sendError(res, err);
   }
 }
 
+function sendHealth(res: http.ServerResponse): void {
+  const body: HealthResponse = {
+    ok: true,
+    service: "iknow-session-api",
+    version: getVersion(),
+  };
+  sendJson(res, 200, body);
+}
+
+function isSsePath(pathname: string): boolean {
+  return /^\/api\/v1\/sessions\/[^/]+\/events$/.test(pathname);
+}
+
+function sendSseReserved(res: http.ServerResponse): void {
+  sendJson(res, 501, {
+    error: {
+      kind: "internal",
+      message: "SSE streaming is reserved; not implemented in v0",
+    },
+  } satisfies ApiErrorBody);
+}
+
+function sendNotFound(
+  res: http.ServerResponse,
+  method: string,
+  pathname: string
+): void {
+  sendJson(res, 404, {
+    error: { kind: "not_found", message: `no route ${method} ${pathname}` },
+  } satisfies ApiErrorBody);
+}
+
+/** Route context for /sessions/:id(...) dispatch (keeps param count ≤ 4). */
+type RouteContext = {
+  method: string;
+  id: string;
+  rest: string;
+  req: http.IncomingMessage;
+  res: http.ServerResponse;
+  hub: SessionHub;
+};
+
+/** Dispatch a /sessions/:id(...) sub-route. Returns true when handled. */
+async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
+  const { method, id, rest, req, res, hub } = ctx;
+  if (method === "GET" && rest === "") {
+    sendJson(res, 200, await hub.getSession(id));
+    return true;
+  }
+  if (method === "POST" && rest === "/messages") {
+    const text = extractTextField(await readJsonBody(req));
+    sendJson(res, 200, await hub.postMessage(id, text));
+    return true;
+  }
+  if (method === "POST" && rest === "/reset") {
+    const newId = extractBoolField(await readJsonBody(req), "new_id");
+    sendJson(res, 200, await hub.resetSession(id, { new_id: newId }));
+    return true;
+  }
+  return false;
+}
+
 function parseCreateBody(raw: unknown): {
-  role?: ReturnType<typeof parseCallerRole>;
-  mode?: ReturnType<typeof parseAgentModeCli>;
+  mode?: AgentMode;
   json_mode?: boolean;
   embeddings?: boolean;
 } {
@@ -204,21 +209,19 @@ function parseCreateBody(raw: unknown): {
   }
   const o = raw as Record<string, unknown>;
   const out: {
-    role?: ReturnType<typeof parseCallerRole>;
-    mode?: ReturnType<typeof parseAgentModeCli>;
+    mode?: AgentMode;
     json_mode?: boolean;
     embeddings?: boolean;
   } = {};
-  try {
-    if (o.role != null) {
-      out.role = parseCallerRole(String(o.role));
+  if (o.mode != null) {
+    const m = String(o.mode);
+    if (m !== "deterministic" && m !== "llm") {
+      throw new ValidationError(
+        `invalid mode: ${m}; expected deterministic|llm`,
+        { field: "mode" }
+      );
     }
-    if (o.mode != null) {
-      out.mode = parseAgentModeCli(String(o.mode));
-    }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new ValidationError(msg);
+    out.mode = m;
   }
   if (o.json_mode != null) {
     out.json_mode = Boolean(o.json_mode);
@@ -229,9 +232,19 @@ function parseCreateBody(raw: unknown): {
   return out;
 }
 
-async function readJsonBody(
-  req: http.IncomingMessage,
-): Promise<unknown> {
+function extractTextField(raw: unknown): string {
+  if (!raw || typeof raw !== "object") return "";
+  const o = raw as Record<string, unknown>;
+  return "text" in o ? String(o.text ?? "") : "";
+}
+
+function extractBoolField(raw: unknown, key: string): boolean {
+  if (!raw || typeof raw !== "object") return false;
+  const o = raw as Record<string, unknown>;
+  return Boolean(o[key]);
+}
+
+async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -257,7 +270,7 @@ async function readJsonBody(
 function tryServeStatic(
   res: http.ServerResponse,
   webRoot: string,
-  pathname: string,
+  pathname: string
 ): boolean {
   // Never treat /api as static (caller should only invoke for non-API GETs,
   // but double-guard path traversal + SPA scope).
@@ -274,8 +287,7 @@ function tryServeStatic(
   const resolved = path.resolve(webRoot, "." + rel);
   if (!resolved.startsWith(rootAbs + path.sep) && resolved !== rootAbs) {
     sendJson(res, 403, {
-      error: "permission_denied",
-      message: "path not allowed",
+      error: { kind: "internal", message: "path not allowed" },
     } satisfies ApiErrorBody);
     return true;
   }
@@ -310,7 +322,7 @@ function pipeFile(res: http.ServerResponse, filePath: string): void {
 function sendJson(
   res: http.ServerResponse,
   status: number,
-  body: unknown,
+  body: unknown
 ): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
@@ -320,35 +332,53 @@ function sendJson(
   res.end(payload);
 }
 
+/** Type guard for the plain-object SessionStoreError discriminated union. */
+function isSessionStoreError(err: unknown): err is SessionStoreError {
+  if (typeof err !== "object" || err === null) return false;
+  const k = (err as { kind?: unknown }).kind;
+  return (
+    typeof k === "string" &&
+    (k === "not_found" ||
+      k === "parse_failed" ||
+      k === "schema_invalid" ||
+      k === "write_failed" ||
+      k === "concurrent_write" ||
+      k === "io_error")
+  );
+}
+
+/**
+ * Centralized error → nested ApiErrorBody mapping.
+ * Precedence: SessionStoreError → typed store error; ValidationError → 400
+ * validation; IknowError NOT_FOUND → 404 not_found; everything else → 500.
+ */
 function sendError(res: http.ServerResponse, err: unknown): void {
-  if (isIknowError(err)) {
-    const status =
-      err.code === "VALIDATION"
-        ? 400
-        : err.code === "NOT_FOUND"
-          ? 404
-          : err.code === "PERMISSION_DENIED"
-            ? 403
-            : 500;
-    sendJson(res, status, {
-      error: err.code.toLowerCase(),
-      message: err.message,
-      details: err.details,
+  if (isSessionStoreError(err)) {
+    const { status, body } = mapStoreError(err);
+    sendJson(res, status, body);
+    return;
+  }
+  if (err instanceof ValidationError) {
+    const field = err.details?.["field"];
+    sendJson(res, 400, {
+      error: {
+        kind: "validation",
+        message: err.message,
+        field: typeof field === "string" ? field : undefined,
+      },
     } satisfies ApiErrorBody);
     return;
   }
-  if (err instanceof Error) {
-    const validation =
-      err.name === "ValidationError" ||
-      /invalid|must be|too large|required/i.test(err.message);
-    sendJson(res, validation ? 400 : 500, {
-      error: validation ? "validation" : "error",
-      message: err.message,
+  if (isIknowError(err) && err.code === "NOT_FOUND") {
+    sendJson(res, 404, {
+      error: { kind: "not_found", message: err.message },
     } satisfies ApiErrorBody);
     return;
   }
+  // 500 fallback: raw err.message may leak fs paths / library internals, so
+  // only a fixed message goes on the wire; the real error stays server-side.
+  console.error("[session-api] internal error:", err);
   sendJson(res, 500, {
-    error: "error",
-    message: String(err),
+    error: { kind: "internal", message: "internal server error" },
   } satisfies ApiErrorBody);
 }

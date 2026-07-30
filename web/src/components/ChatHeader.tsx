@@ -1,4 +1,4 @@
-import type { AgentMode, CallerRole, SessionSummary } from "../api/types";
+import type { SessionSummary } from "../api/types";
 import type { ChatPhase } from "../hooks/useSessionChat";
 import { shortId } from "../lib/format";
 import styles from "./ChatHeader.module.css";
@@ -7,10 +7,6 @@ export type ChatHeaderProps = {
   session: SessionSummary | null;
   phase: ChatPhase;
   healthLabel: string | null;
-  mode: AgentMode;
-  role: CallerRole;
-  onModeChange: (mode: AgentMode) => void;
-  onRoleChange: (role: CallerRole) => void;
   onReset: () => void;
   onNewSession: () => void;
 };
@@ -29,26 +25,10 @@ function statusLabel(phase: ChatPhase): { text: string; tone: string } {
   }
 }
 
-function parseAgentMode(value: string): AgentMode | null {
-  if (value === "deterministic" || value === "llm") return value;
-  return null;
-}
-
-function parseCallerRole(value: string): CallerRole | null {
-  if (value === "employee" || value === "manager" || value === "admin") {
-    return value;
-  }
-  return null;
-}
-
 export function ChatHeader({
   session,
   phase,
   healthLabel,
-  mode,
-  role,
-  onModeChange,
-  onRoleChange,
   onReset,
   onNewSession,
 }: ChatHeaderProps) {
@@ -84,41 +64,6 @@ export function ChatHeader({
       </div>
 
       <div className={styles.controls}>
-        <label className={styles.field} htmlFor="iknow-mode">
-          <span className={styles.fieldLabel}>模式</span>
-          <select
-            id="iknow-mode"
-            className={styles.select}
-            value={mode}
-            disabled={busy}
-            onChange={(e) => {
-              const next = parseAgentMode(e.target.value);
-              if (next) onModeChange(next);
-            }}
-          >
-            <option value="deterministic">deterministic</option>
-            <option value="llm">llm</option>
-          </select>
-        </label>
-
-        <label className={styles.field} htmlFor="iknow-role">
-          <span className={styles.fieldLabel}>角色</span>
-          <select
-            id="iknow-role"
-            className={styles.select}
-            value={role}
-            disabled={busy}
-            onChange={(e) => {
-              const next = parseCallerRole(e.target.value);
-              if (next) onRoleChange(next);
-            }}
-          >
-            <option value="employee">employee</option>
-            <option value="manager">manager</option>
-            <option value="admin">admin</option>
-          </select>
-        </label>
-
         <button
           type="button"
           className={styles.btnGhost}

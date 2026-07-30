@@ -3,21 +3,25 @@ export {
   RESERVED_PATHS,
   type SessionSummary,
   type TurnDto,
+  type TurnAnswerDto,
   type CreateSessionRequest,
   type CreateSessionResponse,
   type GetSessionResponse,
   type PostMessageRequest,
   type PostMessageResponse,
-  type PostCommandRequest,
-  type PostCommandResponse,
   type ResetSessionRequest,
   type ResetSessionResponse,
   type HealthResponse,
   type ApiErrorBody,
-  type CommandEffectKind,
 } from "./contract.js";
 
-export { SessionHub, type SessionHubOptions } from "./hub.js";
+export {
+  SessionHub,
+  mapStoreError,
+  projectMessagesToTurns,
+  type SessionHubOptions,
+} from "./hub.js";
+export type { SessionListEntry } from "./store/index.js";
 export {
   createSessionHttpServer,
   listenSessionServer,

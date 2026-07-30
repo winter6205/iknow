@@ -10,7 +10,7 @@ export const MAX_PRIOR_CHUNKS = 5;
  * - max MAX_PRIOR_CHUNKS (first-seen order)
  */
 export function normalizePriors(
-  priors: PriorChunk[] | undefined,
+  priors: PriorChunk[] | undefined
 ): PriorChunk[] | undefined {
   if (!priors?.length) return undefined;
   const out: PriorChunk[] = [];
