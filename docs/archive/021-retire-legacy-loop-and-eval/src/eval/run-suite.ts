@@ -27,7 +27,7 @@ const ROOT = resolveRoot();
 
 const DEFAULT_EVAL_SET = join(
   ROOT,
-  "docs/iknow-spec/docs/eval/eval-set.draft.json",
+  "docs/iknow-spec/docs/eval/eval-set.draft.json"
 );
 
 /** Configurable release-gate targets (milestone "sprint1" for now). */
@@ -45,7 +45,7 @@ function warnDraftOnce(path: string, status?: string): void {
   draftWarned = true;
   console.warn(
     `[eval] loading draft eval set: ${path}` +
-      (status ? ` (meta.status=${status})` : ""),
+      (status ? ` (meta.status=${status})` : "")
   );
 }
 
@@ -97,12 +97,14 @@ export function loadEvalSet(path: string = DEFAULT_EVAL_SET): EvalSetFile {
     const mismatches: string[] = [];
     for (const key of ["total", "easy", "hard", "edge"] as const) {
       if (metaCounts[key] !== computed[key]) {
-        mismatches.push(`${key}: meta=${metaCounts[key]} samples=${computed[key]}`);
+        mismatches.push(
+          `${key}: meta=${metaCounts[key]} samples=${computed[key]}`
+        );
       }
     }
     if (mismatches.length > 0) {
       console.warn(
-        `[eval] meta.counts mismatch vs samples at ${path}: ${mismatches.join("; ")}`,
+        `[eval] meta.counts mismatch vs samples at ${path}: ${mismatches.join("; ")}`
       );
     }
   }
@@ -115,7 +117,7 @@ export function loadEvalSet(path: string = DEFAULT_EVAL_SET): EvalSetFile {
  * Never attaches vectorIndex — keyword+overlap only (no embedding API).
  */
 export async function runSample(
-  sample: EvalSample,
+  sample: EvalSample
 ): Promise<{ log: TrajectoryRunLog; score: TrajectoryScoreResult }> {
   const store = createSeededStore();
   const overrides = sample.session_overrides ?? {};
@@ -146,7 +148,7 @@ export async function runSample(
 
 function syntheticRunnerFail(
   sample: EvalSample,
-  err: unknown,
+  err: unknown
 ): TrajectoryScoreResult {
   const msg = err instanceof Error ? err.message : String(err);
   return {
@@ -167,10 +169,11 @@ function syntheticRunnerFail(
 }
 
 export function aggregateResults(
-  results: TrajectoryScoreResult[],
+  results: TrajectoryScoreResult[]
 ): SuiteAggregate {
-  const hard_pass_count = results.filter((r) => r.hard_constraints.all_pass)
-    .length;
+  const hard_pass_count = results.filter(
+    (r) => r.hard_constraints.all_pass
+  ).length;
   const mean_trajectory_score =
     results.length === 0
       ? 0
@@ -210,7 +213,10 @@ export function aggregateResults(
     per_category,
     global_hard_violation_list: results
       .filter((r) => !r.hard_constraints.all_pass)
-      .map((r) => ({ sample_id: r.sample_id, failed: r.hard_constraints.failed })),
+      .map((r) => ({
+        sample_id: r.sample_id,
+        failed: r.hard_constraints.failed,
+      })),
     release_gates: {
       hard_pass_rate_ok: hard_pass_rate >= targets.hard_pass_rate,
       mean_trajectory_ok: mean_trajectory_score >= targets.mean_trajectory,
@@ -235,7 +241,7 @@ export async function runEvalSuite(opts?: {
       } catch (err) {
         return syntheticRunnerFail(sample, err);
       }
-    }),
+    })
   );
   const report: SuiteReport = {
     generated_at: new Date().toISOString(),

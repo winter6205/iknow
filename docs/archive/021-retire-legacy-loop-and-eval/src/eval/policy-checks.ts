@@ -22,7 +22,7 @@ export type PolicyCtx = {
  */
 export function checkPolicy(
   policy: string,
-  ctx: PolicyCtx,
+  ctx: PolicyCtx
 ): boolean | "unknown" {
   const p = policy;
 
@@ -42,11 +42,7 @@ export function checkPolicy(
     return Boolean(ctx.snapshot_id);
   }
 
-  if (
-    p.includes("空结果") ||
-    p.includes("不编造") ||
-    p.includes("graceful")
-  ) {
+  if (p.includes("空结果") || p.includes("不编造") || p.includes("graceful")) {
     const ok =
       ctx.notes.includes(NOTE.EMPTY_RESULT) ||
       ctx.notes.includes(NOTE.NO_HALLUCINATION) ||
@@ -93,11 +89,7 @@ export function checkPolicy(
     );
   }
 
-  if (
-    p.includes("hops") ||
-    p.includes("跳数") ||
-    p.includes("上限")
-  ) {
+  if (p.includes("hops") || p.includes("跳数") || p.includes("上限")) {
     // hop budget already checked; multi-dept may also declare max_hops
     return (
       ctx.hops <= EVAL_MAX_HOPS ||
@@ -121,9 +113,7 @@ export function checkPolicy(
   // compile 补编: when compile runs, sources must be marked; no compile → N/A
   if (p.includes("compile") || p.includes("补编")) {
     if (!ctx.tools.has("kb_compile")) return true;
-    return (
-      ctx.source_span_len > 0 || /来源|溯源|chunk/.test(ctx.text)
-    );
+    return ctx.source_span_len > 0 || /来源|溯源|chunk/.test(ctx.text);
   }
 
   return "unknown";

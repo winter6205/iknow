@@ -17,34 +17,6 @@ export { kbVerifyCitation } from "./kb-verify/verify.js";
 export { kbCompile } from "./kb-compile/compile.js";
 export { kbGovernance } from "./kb-governance/governance.js";
 
-export { IknowAgent, IknowAgentLoop, MAX_HOPS } from "./agent-loop/loop.js";
-export { LlmIknowAgent } from "./agent-loop/llm-agent.js";
-export {
-  OpenAiCompatibleLlmClient,
-  type LlmChatClient,
-  type LlmChatResult,
-  type LlmMessage,
-  type LlmToolCall,
-  type LlmToolDef,
-  type OpenAiCompatibleLlmClientOptions,
-} from "./agent-loop/llm-client.js";
-export {
-  KB_TOOL_DEFS,
-  HOP_TOOLS,
-  TOOL_NAMES,
-  isKbToolName,
-  type KbToolName,
-} from "./agent-loop/tool-defs.js";
-export {
-  createSession,
-  createManagerSession,
-  createAdminSession,
-  createDegradedSession,
-  isPrivilegedRole,
-  withRole,
-} from "./agent-loop/session.js";
-export { ToolTrace } from "./agent-loop/trace.js";
-
 export { createToolRegistry } from "./tools/registry.js";
 export type { ToolRegistry } from "./tools/registry.js";
 
@@ -85,10 +57,6 @@ export type {
   CreateIknowRuntimeOptions,
   IknowRuntime,
 } from "./runtime/create-runtime.js";
-
-export { scoreTrajectory, checkHardConstraints } from "./eval/score-trajectory.js";
-export { runEvalSuite, runSample, loadEvalSet, aggregateResults } from "./eval/run-suite.js";
-export type * from "./eval/types.js";
 
 export type * from "./shared/schema.js";
 export * from "./shared/errors.js";

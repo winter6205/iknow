@@ -22,8 +22,8 @@ async function main(): Promise<void> {
         violations: aggregate.global_hard_violation_list,
       },
       null,
-      2,
-    ),
+      2
+    )
   );
 
   if (

@@ -44,7 +44,7 @@ function roundScore(n: number, digits = 6): number {
  */
 export function checkHardConstraints(
   sample: EvalSample,
-  log: TrajectoryRunLog,
+  log: TrajectoryRunLog
 ): HardConstraintResult {
   const failed: string[] = [];
   const policies = sample.expected.policies ?? [];
@@ -103,11 +103,7 @@ export function checkHardConstraints(
     notes.includes(NOTE.PERMISSION_DENIED) ||
     notes.includes(NOTE.REQUIRE_APPROVAL) ||
     notes.includes(NOTE.EMPTY_RESULT);
-  if (
-    !isDeny &&
-    ANSWER_RX.kbBody.test(text) &&
-    source_span.length === 0
-  ) {
+  if (!isDeny && ANSWER_RX.kbBody.test(text) && source_span.length === 0) {
     failed.push(GATE_ID.SOURCE_SPAN_REQUIRED);
   }
 
@@ -118,7 +114,7 @@ export function checkHardConstraints(
 
 export function scoreTrajectory(
   sample: EvalSample,
-  log: TrajectoryRunLog,
+  log: TrajectoryRunLog
 ): TrajectoryScoreResult {
   const required = sample.expected.required_tools ?? [];
   const recommended = sample.expected.recommended_tools ?? [];
@@ -134,10 +130,7 @@ export function scoreTrajectory(
     recommended.length === 0 ? 1 : recommendedHit / recommended.length;
 
   const steps = log.tool_calls.length;
-  const efficiency = Math.max(
-    0,
-    1 - Math.max(0, steps - maxSteps) / maxSteps,
-  );
+  const efficiency = Math.max(0, 1 - Math.max(0, steps - maxSteps) / maxSteps);
 
   const hard = checkHardConstraints(sample, log);
   const outcome_match = hard.all_pass ? 1 : 0;
@@ -163,8 +156,6 @@ export function scoreTrajectory(
     outcome_match,
     hard_constraints: hard,
     policy_violations,
-    notes: hard.all_pass
-      ? "ok"
-      : `hard_fail:${hard.failed.join(",")}`,
+    notes: hard.all_pass ? "ok" : `hard_fail:${hard.failed.join(",")}`,
   };
 }

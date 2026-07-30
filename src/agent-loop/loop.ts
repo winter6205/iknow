@@ -14,7 +14,23 @@ import type {
   SessionContext,
 } from "../shared/schema.js";
 import { IknowError } from "../shared/errors.js";
-import { NOTE } from "../eval/lexicon.js";
+/**
+ * Inlined from src/eval/lexicon.ts (NOTE only — ANSWER_RX / GATE_ID /
+ * DEFAULT_MAX_STEPS / EVAL_MAX_HOPS were eval-internal and went with the
+ * archive). Preserved verbatim for #51 session-API cutover to consume.
+ * See #48 (021) Resolution Q1 (lexicon NOTE inline).
+ */
+const NOTE = {
+  EMPTY_RESULT: "empty_result",
+  NO_HALLUCINATION: "no_hallucination",
+  PERMISSION_DENIED: "permission_denied",
+  REQUIRE_APPROVAL: "require_approval",
+  DOCUMENT_REVOKED_OR_STALE: "document_revoked_or_stale",
+  MAX_HOPS_EXCEEDED: "max_hops_exceeded",
+  /** Emitted by safeGovernance on GOVERNANCE_TIMEOUT. */
+  GOVERNANCE_TIMEOUT:
+    "governance_timeout: explicit degradation; results marked unverified",
+} as const;
 import { normalizePriors } from "./priors.js";
 import { isPrivilegedRole } from "./session.js";
 import { ToolTrace } from "./trace.js";
@@ -74,7 +90,7 @@ export class IknowAgent {
         notes,
         hopState,
         retrieveOpts,
-        turnPriors,
+        turnPriors
       );
     } catch (err) {
       // G2: never return without snapshot_id, even on unexpected failures.
@@ -97,7 +113,7 @@ export class IknowAgent {
     notes: string[],
     hopState: { n: number },
     retrieveOpts: ReturnType<IknowAgent["retrieveOpts"]>,
-    turnPriors: PriorChunk[] | undefined,
+    turnPriors: PriorChunk[] | undefined
   ): Promise<IknowAnswer> {
     const q = query.trim();
     if (!q) {
@@ -147,7 +163,7 @@ export class IknowAgent {
         this.store,
         firstInput,
         this.session,
-        retrieveOpts,
+        retrieveOpts
       );
       const docId = denied.chunks[0]?.doc_id ?? "crm-contacts";
       trace.record("kb_governance", {
@@ -178,7 +194,7 @@ export class IknowAgent {
       this.store,
       firstInput,
       this.session,
-      retrieveOpts,
+      retrieveOpts
     );
     this.noteRetrieveDegradation(retrieved, notes);
     retrieved = this.applyNonexistentDocFilter(q, retrieved);
@@ -219,7 +235,7 @@ export class IknowAgent {
           this.store,
           { query: q },
           this.session,
-          retrieveOpts,
+          retrieveOpts
         );
         this.noteRetrieveDegradation(retrieved, notes);
       }
@@ -260,7 +276,7 @@ export class IknowAgent {
           this.store,
           { query: q, prior_chunks: [prior] },
           this.session,
-          retrieveOpts,
+          retrieveOpts
         );
         this.noteRetrieveDegradation(retrieved, notes);
         if (retrieved.chunks.length === 0) {
@@ -282,12 +298,10 @@ export class IknowAgent {
 
     const primaryDoc =
       retrieved.chunks.find((c) =>
-        /refund|退款/.test(`${c.doc_id} ${c.summary}`),
+        /refund|退款/.test(`${c.doc_id} ${c.summary}`)
       )?.doc_id ?? top.doc_id;
 
-    const govAction = needsGovernance
-      ? "detect_conflict"
-      : "snapshot_status";
+    const govAction = needsGovernance ? "detect_conflict" : "snapshot_status";
     trace.record("kb_governance", {
       action: govAction,
       doc_id: primaryDoc,
@@ -423,8 +437,7 @@ export class IknowAgent {
           .filter((t) => t.length >= 2);
         return keys.some(
           (k) =>
-            text.includes(k) &&
-            !/公司|有没有|一份|根本|不存在|你们/.test(k),
+            text.includes(k) && !/公司|有没有|一份|根本|不存在|你们/.test(k)
         );
       });
       return !grounded;
@@ -434,12 +447,12 @@ export class IknowAgent {
 
   private applyNonexistentDocFilter(
     query: string,
-    retrieved: RetrieveResult,
+    retrieved: RetrieveResult
   ): RetrieveResult {
     if (
       /根本不存在|不存在的|有没有一份/.test(query) &&
       !retrieved.chunks.some((c) =>
-        /全员持股|持股计划/.test(c.summary + c.doc_id),
+        /全员持股|持股计划/.test(c.summary + c.doc_id)
       )
     ) {
       return {
@@ -453,12 +466,12 @@ export class IknowAgent {
 
   private noteRetrieveDegradation(
     retrieved: RetrieveResult,
-    notes: string[],
+    notes: string[]
   ): void {
     if (retrieved.governance_degraded) {
       notes.push(
         retrieved.degradation_note ??
-          "governance_degraded: explicit degradation declared",
+          "governance_degraded: explicit degradation declared"
       );
     }
   }
@@ -467,7 +480,7 @@ export class IknowAgent {
     trace: ToolTrace,
     hops: number,
     notes: string[],
-    opts?: { noHallucination?: boolean },
+    opts?: { noHallucination?: boolean }
   ): IknowAnswer {
     trace.record("kb_governance", {
       action: "snapshot_status",
@@ -493,7 +506,7 @@ export class IknowAgent {
 
   private safeGovernance(
     docId: string,
-    action: GovernanceAction = "snapshot_status",
+    action: GovernanceAction = "snapshot_status"
   ): {
     snapshot_id: string;
     status: GovernanceStatus;
@@ -503,7 +516,7 @@ export class IknowAgent {
       const out = kbGovernance(
         this.store,
         { action, doc_id: docId },
-        this.session,
+        this.session
       );
       return {
         snapshot_id: out.snapshot_id,
@@ -527,9 +540,7 @@ export class IknowAgent {
       }
       return {
         ...this.localSnapshot(docId, action, "stale"),
-        extraNotes: [
-          err instanceof Error ? err.message : "governance_error",
-        ],
+        extraNotes: [err instanceof Error ? err.message : "governance_error"],
       };
     }
   }
@@ -537,7 +548,7 @@ export class IknowAgent {
   private localSnapshot(
     docId: string,
     checkType: string,
-    result: string,
+    result: string
   ): { snapshot_id: string; status: GovernanceStatus } {
     const doc = this.store.tryGetDocument(docId);
     const ts = new Date().toISOString();
@@ -559,7 +570,7 @@ export class IknowAgent {
     trace: ToolTrace,
     hops: number,
     notes: string[],
-    chunks: Pick<Chunk, "chunk_id">[] = [],
+    chunks: Pick<Chunk, "chunk_id">[] = []
   ): IknowAnswer {
     notes.push(NOTE.MAX_HOPS_EXCEEDED);
     const g = this.localSnapshot("_session", "snapshot_status", "stale");
@@ -582,11 +593,7 @@ export class IknowAgent {
     notes: string[];
     preferredDocId: string;
   }): IknowAnswer {
-    const g = this.localSnapshot(
-      args.preferredDocId,
-      "snapshot_status",
-      "ok",
-    );
+    const g = this.localSnapshot(args.preferredDocId, "snapshot_status", "ok");
     return this.envelope({
       text: args.text,
       source_spans: args.source_spans,
@@ -605,7 +612,7 @@ export { IknowAgent as IknowAgentLoop };
 /** First retrieve of a turn: optional host prior_chunks; hop re-retrieve keeps its own prior. */
 function buildFirstRetrieveInput(
   query: string,
-  turnPriors: PriorChunk[] | undefined,
+  turnPriors: PriorChunk[] | undefined
 ): { query: string; prior_chunks?: PriorChunk[] } {
   if (!turnPriors?.length) return { query };
   return { query, prior_chunks: turnPriors };

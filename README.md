@@ -20,7 +20,7 @@ Design truth: `docs/iknow-spec/` (HANDOFF → ADR → tool-schema → mapping �
 npm install
 npm run typecheck
 npm test
-npm run eval
+# npm run eval 已退役 / 归档于 docs/archive/021-retire-legacy-loop-and-eval/ (see #48)
 ```
 
 ## Run
@@ -84,7 +84,7 @@ npx tsx src/cli.ts ask "公司的退款政策是什么？"
 
 npm run dev -- --role employee "年假天数是怎么规定的？"
 npm run dev -- --governance-timeout "检索时治理服务超时了，你还能正常回答退款政策吗？"
-npm run eval   # 32-sample trajectory suite (hard gates + trajectory_score)
+npm run eval # retired; 32-sample fixture archived at docs/archive/021-retire-legacy-loop-and-eval/docs/iknow-spec/docs/eval/eval-set.draft.json (see #48)
 ```
 
 One-shot always prints G2 JSON on stdout so scripts do not break.
@@ -131,7 +131,7 @@ npm run dev -- "公司的退款政策是什么？"
 npx tsx src/cli.ts --embeddings "公司的退款政策是什么？"
 ```
 
-If the embedding API fails, the CLI continues with keyword-only retrieve. `npm test` / `npm run eval` stay offline and do **not** call the network.
+If the embedding API fails, the CLI continues with keyword-only retrieve. `npm test` stays offline and does **not** call the network. (`npm run eval` retired — see #48).
 
 ## Layout
 

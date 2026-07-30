@@ -2,6 +2,10 @@
 
 ## 0.1.0 (unreleased)
 
+### Breaking (internal, pre-release)
+
+- 移除 `src/index.ts` 对旧 `src/agent-loop/` 与 `src/eval/` 的 re-export（13 旧 loop 符号 + 5 EVAL 符号 + `eval/types` type re-export）；包状态 `private: true` + `0.1.0 (unreleased)` 未发布，无外部消费者，仅记录内部 API 变更，审计可追溯。详见 #48（021）Resolution Q3。
+
 ### Docs (CLAUDE.md + architecture.md 整理)
 
 - CLAUDE.md 删除 `### Runtime map` 14 行 path 表（~80% 与 `docs/architecture.md` Capability modules 表重复，且漏 `src/harness/` 等新模块），替换为 5 行 `### Module boundaries`（仅保留非显而易见边界 callouts），并指向 architecture.md 为 SSOT
