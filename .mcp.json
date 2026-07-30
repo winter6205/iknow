@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "graphrag-memory": {
+      "command": "node",
+      "args": ["graphrag-memory/dist/index.js"],
+      "env": {
+        "GRAPHRAG_MEMORY_EMBED_BASE_URL": "http://localhost:20128/v1",
+        "GRAPHRAG_MEMORY_EMBED_MODEL": "zhipueb/embedding-3",
+        "GRAPHRAG_MEMORY_EMBED_DIMENSIONS": "2048",
+        "GRAPHRAG_MEMORY_LOG_LEVEL": "info"
+      }
+    }
+  }
+}
