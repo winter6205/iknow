@@ -6,11 +6,6 @@ import {
   parseCallerRole,
   type CallerRole,
 } from "../shared/schema.js";
-import {
-  AGENT_MODES,
-  parseAgentModeCli,
-  type AgentModeCli,
-} from "../interaction/slash.js";
 
 export type CliCommand = "chat" | "ask" | "oneshot" | "help" | "serve";
 
@@ -19,9 +14,6 @@ export type ParsedCli = {
   query: string;
   role: CallerRole;
   degrade: boolean;
-  mode: AgentModeCli;
-  /** True when argv contained an explicit `--mode` (overrides env). */
-  modeExplicit: boolean;
   embeddings: boolean;
   json: boolean;
   /**
@@ -56,15 +48,10 @@ export type ParseArgsOptions = {
  * - no positionals + !interactive → help
  * - ask / bare query with empty text → missingQuery (caller exits 1)
  */
-export function parseArgs(
-  argv: string[],
-  opts?: ParseArgsOptions,
-): ParsedCli {
+export function parseArgs(argv: string[], opts?: ParseArgsOptions): ParsedCli {
   const interactive = opts?.interactive ?? false;
   let role: CallerRole = "employee";
   let degrade = false;
-  let mode: AgentModeCli = "deterministic";
-  let modeExplicit = false;
   let embeddings = false;
   let json = false;
   let port = 8787;
@@ -77,8 +64,6 @@ export function parseArgs(
       return baseParsed("help", {
         role,
         degrade,
-        mode,
-        modeExplicit,
         embeddings,
         json,
         port,
@@ -92,21 +77,12 @@ export function parseArgs(
       const raw = argv[++i];
       if (raw === undefined) {
         throw new Error(
-          `Missing value for --role; expected one of: ${CALLER_ROLES.join("|")}`,
+          `Missing value for --role; expected one of: ${CALLER_ROLES.join("|")}`
         );
       }
       role = parseCallerRole(raw);
     } else if (a === "--governance-timeout") {
       degrade = true;
-    } else if (a === "--mode") {
-      const raw = argv[++i];
-      if (raw === undefined) {
-        throw new Error(
-          `Missing value for --mode; expected one of: ${AGENT_MODES.join("|")}`,
-        );
-      }
-      mode = parseAgentModeCli(raw);
-      modeExplicit = true;
     } else if (a === "--embeddings") {
       embeddings = true;
     } else if (a === "--json") {
@@ -131,8 +107,6 @@ export function parseArgs(
       return baseParsed("help", {
         role,
         degrade,
-        mode,
-        modeExplicit,
         embeddings,
         json,
         port,
@@ -149,8 +123,6 @@ export function parseArgs(
   const flags = {
     role,
     degrade,
-    mode,
-    modeExplicit,
     embeddings,
     json,
     port,
@@ -217,7 +189,7 @@ export function parseArgs(
 
 function baseParsed(
   command: CliCommand,
-  fields: Omit<ParsedCli, "command">,
+  fields: Omit<ParsedCli, "command">
 ): ParsedCli {
   return { command, ...fields };
 }

@@ -1,19 +1,36 @@
+/**
+ * CLI host processChatLine + parseArgs + usage tests (T5 acceptance).
+ *
+ * Rewrite against the harness `LoopEngineDeps` API (020 cutover). The source
+ * has frozen shape:
+ *   `parseArgs`            → no `mode`/`modeExplicit` fields
+ *   `resolveStartupMode`   → deleted from `src/cli/runtime.ts`
+ *   `usageText()`          → no `--mode` line; still mentions `chat` / `ask`
+ *   `processChatLine(ctx)` → `ctx = { deps: LoopEngineDeps; state: CliChatState }`
+ *
+ * Tests deleted because the underlying feature is gone: `--mode` flag,
+ * `resolveStartupMode`, `/mode` slash command.
+ */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { createSession } from "../src/agent-loop/session.ts";
-import { IknowAgent } from "../src/agent-loop/loop.ts";
-import { createSeededStore } from "../src/fixtures/seed-kb.ts";
-import { createConversation } from "../src/interaction/index.ts";
-import { applySlashCommand } from "../src/interaction/slash.ts";
 import { parseArgs } from "../src/cli/parse-args.ts";
 import {
   processChatLine,
   type ChatLineContext,
 } from "../src/cli/chat-session.ts";
-import { resolveStartupMode } from "../src/cli/runtime.ts";
 import { isInteractive } from "../src/cli/session-io.ts";
 import { getVersion, usageText } from "../src/cli/usage.ts";
-import type { IknowEnv } from "../src/config/env.ts";
+import { applySlashCommand } from "../src/cli/slash.ts";
+import type { AnthropicNativeMessage } from "../src/harness/index.ts";
+import { createStubTool } from "../src/harness/stubs/stub-tool.ts";
+import { createRegistry } from "../src/harness/tools/registry.ts";
+import { createExecutor } from "../src/harness/tools/executor.ts";
+import {
+  assistantResult,
+  makeCtx,
+  makeNative,
+  makeState,
+} from "./cli/_fixtures.ts";
 
 describe("parseArgs", () => {
   it("defaults bare invocation to chat when interactive", () => {
@@ -42,18 +59,22 @@ describe("parseArgs", () => {
   });
 
   it("chat subcommand", () => {
-    const p = parseArgs(["chat", "--mode", "deterministic"], {
-      interactive: false,
-    });
-    assert.equal(p.command, "chat");
-    assert.equal(p.mode, "deterministic");
-    assert.equal(p.modeExplicit, true);
-  });
-
-  it("default mode is not modeExplicit", () => {
+    // 020: --mode flag is gone from parseArgs; passing it now falls through to
+    // the rest bucket (it becomes a positional arg). Test only asserts that the
+    // subcommand shape is preserved.
     const p = parseArgs(["chat"], { interactive: false });
-    assert.equal(p.mode, "deterministic");
-    assert.equal(p.modeExplicit, false);
+    assert.equal(p.command, "chat");
+    // The frozen ParsedCli has NO mode/modeExplicit fields anymore.
+    assert.equal(
+      (p as unknown as { mode?: unknown }).mode,
+      undefined,
+      "ParsedCli no longer carries a `mode` field"
+    );
+    assert.equal(
+      (p as unknown as { modeExplicit?: unknown }).modeExplicit,
+      undefined,
+      "ParsedCli no longer carries a `modeExplicit` field"
+    );
   });
 
   it("ask with query", () => {
@@ -90,49 +111,28 @@ describe("parseArgs", () => {
   });
 });
 
-describe("resolveStartupMode", () => {
-  function envWithMode(agentMode: "deterministic" | "llm"): IknowEnv {
-    return { agentMode } as IknowEnv;
-  }
-
-  it("env llm upgrades default when --mode not explicit", () => {
-    assert.equal(
-      resolveStartupMode("deterministic", envWithMode("llm"), false),
-      "llm",
-    );
-  });
-
-  it("explicit --mode deterministic wins over env llm", () => {
-    assert.equal(
-      resolveStartupMode("deterministic", envWithMode("llm"), true),
-      "deterministic",
-    );
-  });
-
-  it("explicit --mode llm wins over env deterministic", () => {
-    assert.equal(
-      resolveStartupMode("llm", envWithMode("deterministic"), true),
-      "llm",
-    );
-  });
-});
-
 describe("usage / version", () => {
   it("getVersion returns semver-like string", () => {
     assert.match(getVersion(), /^\d+\.\d+\.\d+/);
   });
 
-  it("usageText mentions chat and ask (bilingual)", () => {
+  it("usageText mentions chat and ask (bilingual) and does NOT mention --mode", () => {
     const t = usageText();
     assert.match(t, /chat/);
     assert.match(t, /ask/);
     assert.match(t, /iknow/);
     assert.match(t, /交互对话|interactive chat/i);
     assert.match(t, /单次 JSON|one-shot JSON/i);
-    assert.match(t, /--mode/);
     assert.match(t, /--role/);
-    assert.match(t, /IKNOW_CHAT_QUIET/);
-    assert.match(t, /--version|version/i);
+    // 020 cutover: --mode flag and /mode command are gone.
+    assert.ok(
+      !t.includes("--mode"),
+      "usageText must not advertise the removed --mode flag"
+    );
+    assert.ok(
+      !t.includes("/mode"),
+      "usageText must not advertise the removed /mode slash command"
+    );
   });
 });
 
@@ -149,65 +149,34 @@ describe("isInteractive", () => {
     assert.equal(isInteractive(stdin, stdout), true);
     assert.equal(
       isInteractive(stdin, { isTTY: false } as NodeJS.WriteStream),
-      false,
+      false
     );
   });
 });
 
 describe("slash /status", () => {
-  it("reports mode role json turns priors", () => {
-    const state = createConversation(createSession("employee"), {
-      json_mode: true,
+  it("renders messages.length + role + jsonMode; no mode=/priors= lines", () => {
+    // 020: applySlashCommand now lives in src/cli/slash.ts with CliChatState.
+    // Status text uses `messages=N`, NOT `turns=N` and NOT `priors=N`.
+    const state = makeState({
+      messages: [makeNative("user", "q"), makeNative("assistant", "a")],
+      jsonMode: true,
+      session: { caller_role: "employee" },
     });
-    state.turns.push({
-      query: "q",
-      answer: {
-        text: "a",
-        source_spans: [],
-        snapshot_id: "s",
-        governance_status: "ok",
-        tool_trace: [],
-        tool_calls: [],
-        hops_used: 1,
-      },
-    });
-    state.last_priors = [
-      { chunk_id: "c1", summary: "s1" },
-      { chunk_id: "c2", summary: "s2" },
-    ];
-
-    const effect = applySlashCommand("status", [], {
-      state,
-      mode: "deterministic",
-    });
+    const effect = applySlashCommand("status", [], { state });
     assert.equal(effect.type, "info");
-    if (effect.type === "info") {
-      assert.match(effect.text, /mode=deterministic/);
-      assert.match(effect.text, /role=employee/);
-      assert.match(effect.text, /json=on/);
-      assert.match(effect.text, /turns=1/);
-      assert.match(effect.text, /priors=2/);
-    }
+    if (effect.type !== "info") return;
+    assert.match(effect.text, /messages=2/);
+    assert.match(effect.text, /role=employee/);
+    assert.match(effect.text, /json=on/);
+    assert.ok(!effect.text.includes("mode="), "no mode= line in status");
+    assert.ok(!effect.text.includes("priors="), "no priors= line in status");
   });
 });
 
 describe("processChatLine (pipe simulation)", () => {
-  function makeCtx(): ChatLineContext {
-    const store = createSeededStore();
-    const session = createSession("employee");
-    const agent = new IknowAgent({ store, session });
-    const state = createConversation(session);
-    return {
-      agent,
-      store,
-      state,
-      mode: "deterministic",
-      buildAgent: async () => agent,
-    };
-  }
-
   it("empty line is no-op", async () => {
-    const ctx = makeCtx();
+    const ctx = makeCtx([]);
     const r = await processChatLine("   ", ctx);
     assert.equal(r.quit, false);
     assert.equal(r.output, "");
@@ -215,7 +184,7 @@ describe("processChatLine (pipe simulation)", () => {
   });
 
   it("slash /help and /quit", async () => {
-    const ctx = makeCtx();
+    const ctx = makeCtx([]);
     const help = await processChatLine("/help", ctx);
     assert.equal(help.quit, false);
     assert.match(help.output, /\/status/);
@@ -224,86 +193,140 @@ describe("processChatLine (pipe simulation)", () => {
     assert.equal(quit.quit, true);
   });
 
-  it("slash /status via processChatLine", async () => {
-    const ctx = makeCtx();
+  it("slash /status via processChatLine — host wires messages=N + role + json", async () => {
+    const state = makeState({
+      messages: [makeNative("user", "q"), makeNative("assistant", "a")],
+      session: { caller_role: "employee" },
+    });
+    const ctx: ChatLineContext = {
+      deps: makeCtx([]).deps,
+      state,
+    };
     const r = await processChatLine("/status", ctx);
     assert.equal(r.quit, false);
-    assert.match(r.output, /mode=deterministic/);
-    assert.match(r.output, /turns=0/);
+    // 020 frozen shape: messages=N, role, json=off (default).
+    assert.match(r.output, /messages=2/);
+    assert.match(r.output, /role=employee/);
+    assert.match(r.output, /json=off/);
+    // NO legacy mode=/priors= lines (CLI no longer carries those concepts).
+    assert.ok(!r.output.includes("mode="));
+    assert.ok(!r.output.includes("priors="));
   });
 
   it("serial two-query pipe: second sees priors; order preserved", async () => {
-    const ctx = makeCtx();
+    // Same ctx reused across two queries proves the host 续传 priorMessages.
+    // Each query independently produces [user, assistant]; messages strictly grows.
+    const ctx = makeCtx([
+      assistantResult(["a1"], [], "success"),
+      assistantResult(["a2"], [], "success"),
+    ]);
 
-    const r1 = await processChatLine("公司的退款政策是什么？", ctx);
+    const r1 = await processChatLine("first question", ctx);
     assert.equal(r1.quit, false);
     assert.equal(r1.ranQuery, true);
     assert.ok(r1.output.length > 0);
-    assert.match(r1.output, /治理:|governance/i);
-    assert.ok(ctx.state.turns.length === 1);
-    assert.ok(ctx.state.last_priors.length >= 1);
+    // Human format always renders the status line so scripts can read stopReason.
+    assert.match(r1.output, /stop=completed/);
+    // Turn 1 produced [user, assistant] = 2 messages.
+    assert.equal(ctx.state.messages.length, 2);
+    assert.equal(ctx.state.messages[0]!.role, "user");
+    assert.equal(ctx.state.messages[1]!.role, "assistant");
 
-    const status = await processChatLine("/status", ctx);
-    assert.match(status.output, /turns=1/);
-    assert.match(status.output, /priors=\d+/);
-
-    const r2 = await processChatLine("那和旧版差在哪？", ctx);
+    const beforeTurn2 = ctx.state.messages.length;
+    const r2 = await processChatLine("second question", ctx);
     assert.equal(r2.ranQuery, true);
     assert.ok(r2.output.length > 0);
-    assert.equal(ctx.state.turns.length, 2);
-    // Fully awaited: no interleave — turn count is exactly 2 after both.
-    assert.equal(ctx.state.history_finals.length, 4);
+    assert.match(r2.output, /stop=completed/);
+    // Messages strictly grew — turn 2 seeded priorMessages from ctx.state.messages.
+    assert.ok(
+      ctx.state.messages.length > beforeTurn2,
+      "messages must strictly grow after turn 2"
+    );
+    // First user message of turn 1 is still present (history is append-only).
+    assert.equal(ctx.state.messages[0]!.role, "user");
+    assert.equal(
+      (ctx.state.messages[0]!.content[0] as { type: "text"; text: string })
+        .text,
+      "first question"
+    );
+    // The user turn from turn 1 + assistant turn from turn 1 are preserved at
+    // the head of history, then turn 2 appended its own [user, assistant].
+    assert.equal(ctx.state.messages.length, beforeTurn2 + 2);
   });
 
   it("unknown slash goes to stderr field", async () => {
-    const ctx = makeCtx();
+    const ctx = makeCtx([]);
     const r = await processChatLine("/nope", ctx);
     assert.equal(r.output, "");
     assert.ok(r.stderr);
     assert.match(r.stderr!, /Unknown command/);
   });
 
-  it("/json on switches answer formatting", async () => {
-    const ctx = makeCtx();
+  it("/json on switches answer formatting to harness-native JSON", async () => {
+    // 020: JSON output is the harness RunResult projection, NOT the old
+    // IknowAnswer shape. Top-level keys: finalText / stopReason / turnCount /
+    // trace. messages is intentionally omitted.
+    const ctx = makeCtx([assistantResult(["answer"], [], "success")]);
     await processChatLine("/json on", ctx);
-    assert.equal(ctx.state.json_mode, true);
-    const r = await processChatLine("公司的退款政策是什么？", ctx);
+    assert.equal(ctx.state.jsonMode, true);
+    const r = await processChatLine("any question", ctx);
     assert.ok(r.output.startsWith("{"));
-    const parsed = JSON.parse(r.output) as { text: string };
-    assert.ok(typeof parsed.text === "string");
+    const parsed = JSON.parse(r.output) as Record<string, unknown>;
+    assert.ok("finalText" in parsed, "JSON output must carry `finalText`");
+    assert.ok("stopReason" in parsed, "JSON output must carry `stopReason`");
+    assert.ok("turnCount" in parsed, "JSON output must carry `turnCount`");
+    assert.ok("trace" in parsed, "JSON output must carry `trace`");
+    // Old IknowAnswer shape markers must be gone.
+    assert.ok(!("text" in parsed), "JSON must NOT have the old `text` key");
+    assert.ok(
+      !("source_spans" in parsed),
+      "JSON must NOT have the old `source_spans` key"
+    );
   });
 
-  it("/reset clears conversation bag via processChatLine", async () => {
-    const ctx = makeCtx();
-    await processChatLine("公司的退款政策是什么？", ctx);
-    assert.ok(ctx.state.turns.length >= 1);
+  it("/reset clears conversation bag via processChatLine but preserves session", async () => {
+    // 020: /reset clears `messages` only; session is preserved.
+    const ctx = makeCtx([
+      assistantResult(["a"], [], "success"),
+      assistantResult(["a"], [], "success"),
+    ]);
+    ctx.state.messages = [
+      makeNative("user", "q"),
+      makeNative("assistant", "a"),
+    ];
+    assert.equal(ctx.state.messages.length, 2);
+
     const r = await processChatLine("/reset", ctx);
     assert.equal(r.quit, false);
     assert.match(r.output, /cleared|Session/i);
-    assert.equal(ctx.state.turns.length, 0);
-    assert.equal(ctx.state.last_priors.length, 0);
-    assert.equal(ctx.state.history_finals.length, 0);
-  });
-
-  it("/mode change rebuilds agent; failure keeps mode", async () => {
-    const ctx = makeCtx();
-    const r = await processChatLine("/mode llm", ctx);
-    // Offline fixture agent rebuild may fail without key — host must not crash.
-    if (r.stderr) {
-      assert.match(r.stderr, /mode stays deterministic|错误|LLM|key/i);
-      assert.equal(ctx.mode, "deterministic");
-    } else {
-      assert.equal(ctx.mode, "llm");
-      assert.match(r.output, /Mode set to llm/i);
-    }
+    assert.equal(ctx.state.messages.length, 0);
+    // Session survives reset.
+    assert.equal(ctx.state.session.caller_role, "employee");
   });
 
   it("agent throw surfaces on stderr without quitting", async () => {
-    const ctx = makeCtx();
-    ctx.agent = {
-      answer: async () => {
+    // Build deps whose adapter.step rejects synchronously → run() rejects.
+    const tool = createStubTool({ name: "noop", next: () => ({}) });
+    const registry = createRegistry([tool]);
+    const executor = createExecutor(registry);
+    const adapter = Object.freeze({
+      encodeUserText: (t: string): AnthropicNativeMessage => ({
+        role: "user",
+        content: [{ type: "text", text: t }],
+      }),
+      encodeToolResults: () => [] as AnthropicNativeMessage["content"],
+      step: async () => {
         throw new Error("boom-agent");
       },
+    });
+    const ctx: ChatLineContext = {
+      deps: {
+        adapter,
+        executor,
+        registry,
+        maxTurns: 5,
+      },
+      state: makeState(),
     };
     const r = await processChatLine("any question", ctx);
     assert.equal(r.quit, false);

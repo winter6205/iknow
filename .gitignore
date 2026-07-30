@@ -58,6 +58,10 @@ docs/handoff/*
 # deliverables; without this, lint-staged's force-less git add re-stage
 # fails because docs/handoff/* matches. Mirrors i4-smoke tracked files.
 !docs/handoff/i9-smoke/
+# 020: i10 CLI-harness smoke acceptance reports (real ask + chat-pipe e2e
+# evidence) are team artifacts; un-ignore the dir so the reports track even
+# though docs/handoff/* matches. Mirrors the i9-smoke exception above.
+!docs/handoff/i10-smoke/
 
 # local Next.js prototype (early-stage, not team-shared; built artifacts
 # also covered by node_modules/ etc. above)
