@@ -16,9 +16,9 @@
  *   (g) host-agnostic decoupling (negative check): the dist artifact's
  *       runtime imports do NOT include anything from the iknow repo.
  *
- * NOT proven yet (gated on T-005 / #36): the full ingest -> retrieve
- * flow (valid_window slicing) - those tools only exist after stage 1 is
- * built. #49 final acceptance Gate cannot close until T-005 lands.
+ * NOT proven yet (gated on T-005 / #36): the HTTP transport equivalent of
+ * every stdio check above. The stdio end-to-end round-trip (a4) is covered
+ * once stage 1 wires ingest + retrieve.
  *
  * Why v2 lets the transport own the child process: in v1 we hand-spawned
  * the server and handed its stdio to StdioClientTransport, but the v1
@@ -46,6 +46,38 @@ const pkgRoot = path.resolve(here, "..");
 const distEntry = path.join(pkgRoot, "dist", "index.js");
 
 /**
+ * Env-var keys whose presence can switch the spawned server to a mode that
+ * is unsafe for the host-smoke harness (pgvector needs a live Postgres,
+ * NINE_ROUTER_KEY triggers paid network calls). The host-smoke suite must
+ * always run in memory + FakeEmbedder mode.
+ */
+const HOST_SMOKE_ENV_KEYS = [
+  "GRAPHRAG_MEMORY_STORAGE",
+  "GRAPHRAG_MEMORY_DB_URL",
+  "GRAPHRAG_MEMORY_EMBED_BASE_URL",
+  "GRAPHRAG_MEMORY_EMBED_MODEL",
+  "NINE_ROUTER_KEY",
+] as const;
+
+/**
+ * Build the child-process env: pinned to memory storage with FakeEmbedder,
+ * inheriting everything else from the parent. Without this, a developer
+ * machine with `NINE_ROUTER_KEY` exported would silently pay for embeddings
+ * during `npm test`, and an accidental `GRAPHRAG_MEMORY_STORAGE=pgvector`
+ * would crash with "no Postgres available" instead of running deterministically.
+ */
+function hostSmokeEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  env["GRAPHRAG_MEMORY_STORAGE"] = "memory";
+  delete env["GRAPHRAG_MEMORY_DB_URL"];
+  delete env["NINE_ROUTER_KEY"];
+  // Keep BASE_URL / MODEL if the parent set them — they are inert without
+  // a key, and a custom value shouldn't surprise the operator by being
+  // silently overridden during smoke tests.
+  return env;
+}
+
+/**
  * Parameters a real reference host (Claude Code, per .mcp.json) would
  * use to launch this server. v2's StdioClientTransport takes these and
  * owns the child process for its full lifecycle.
@@ -59,7 +91,7 @@ function serverParams() {
   return {
     command: process.execPath,
     args: [distEntry],
-    env: { ...process.env },
+    env: hostSmokeEnv(),
     stderr: "pipe" as const,
   };
 }
@@ -204,6 +236,74 @@ describe("host-smoke: real stdio MCP client against built server", () => {
         { minLength?: number; type?: string } | undefined;
       expect(messageProp?.type).toBe("string");
       expect(messageProp?.minLength).toBe(1);
+    }
+  );
+
+  test(
+    "a4: ingest -> retrieve round-trips Chinese content through the real stdio transport",
+    { timeout: 60_000 },
+    async () => {
+      // Closes the remaining gate on #49 (per the file header): a real
+      // reference host (Claude Code per .mcp.json) drives the server, so
+      // the transport-layer protocol survives the full ingest -> retrieve
+      // round-trip. The Chinese text exercises UTF-8 end-to-end: chunker,
+      // FakeEmbedder (char-code-driven), JSON wire framing, and the chunk
+      // content round-trip through the retrieve response.
+      const client = await connectClient();
+      clients.push(client);
+
+      const content = "张三于2024年创办了公司A，公司位于北京。";
+      const sourceRef = "test-bio.md";
+
+      const ingested = await client.callTool({
+        name: "ingest",
+        arguments: { content, source_ref: sourceRef },
+      });
+      expect(ingested.isError).not.toBe(true);
+      const ingestBody = (
+        ingested.content as Array<{ type: string; text?: string }>
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => c.text ?? "")
+        .join("");
+      const ingestPayload = JSON.parse(ingestBody) as { chunk_ids: string[] };
+      expect(Array.isArray(ingestPayload.chunk_ids)).toBe(true);
+      expect(ingestPayload.chunk_ids.length).toBeGreaterThan(0);
+
+      const retrieved = await client.callTool({
+        name: "retrieve",
+        arguments: { query: "张三创办了什么公司" },
+      });
+      expect(retrieved.isError).not.toBe(true);
+      const retrieveBody = (
+        retrieved.content as Array<{ type: string; text?: string }>
+      )
+        .filter((c) => c.type === "text")
+        .map((c) => c.text ?? "")
+        .join("");
+      const retrievePayload = JSON.parse(retrieveBody) as {
+        chunks: Array<{
+          id: string;
+          content: string;
+          source_ref: string;
+          valid_window: [string, string | null];
+          score: number;
+        }>;
+      };
+      expect(Array.isArray(retrievePayload.chunks)).toBe(true);
+      expect(retrievePayload.chunks.length).toBeGreaterThan(0);
+
+      const topHit = retrievePayload.chunks[0]!;
+      // The ingested Chinese text (or, for longer inputs, the chunked
+      // window containing 公司A / 张三) must surface as a retrieved chunk.
+      // Either the top hit's content carries the original phrases, or one
+      // of the other hits does — accept any that mention the substance.
+      const allContent = retrievePayload.chunks
+        .map((c) => c.content)
+        .join("\n");
+      expect(allContent).toMatch(/公司A|张三/);
+      expect(topHit.score).toBeGreaterThan(0);
+      expect(topHit.source_ref).toBe(sourceRef);
     }
   );
 
