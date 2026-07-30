@@ -9,8 +9,8 @@
  * prerequisite before considering sentence-aware splitters in later stages.
  *
  * Token estimation: ≈ 4 chars/token for English. Default chunkSize=2048 chars
- * (≈ 512 tokens), overlap=256 chars (≈ 64 tokens). These match the embedder's
- * context budget (text-embedding-3-small accepts up to 8192 tokens).
+ * (≈ 512 tokens), overlap=256 chars (≈ 64 tokens). These fit comfortably
+ * within the embedding provider's context budget.
  *
  * Pure function — no I/O, no side effects.
  */

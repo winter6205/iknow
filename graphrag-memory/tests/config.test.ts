@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { loadEnv } from "../src/config.ts";
 
 /**
@@ -23,12 +23,40 @@ import { loadEnv } from "../src/config.ts";
  *     GRAPHRAG_MEMORY_FROM_FILE=1; stage 0 has no .env shipped)
  */
 describe("loadEnv — stage 0 stdio-only contract", () => {
+  // GRAPHRAG_MEMORY_EMBED_DIMENSIONS is now always required; scrub
+  // NINE_ROUTER_KEY (and the now-coupled BASE_URL/MODEL fields) for the
+  // whole block so a developer machine with a real key doesn't trip the
+  // key-coupled required-fields check. Set a default dimensions so the
+  // always-required check passes.
+  const SCRUBBED: readonly string[] = [
+    "GRAPHRAG_MEMORY_EMBED_DIMENSIONS",
+    "GRAPHRAG_MEMORY_EMBED_BASE_URL",
+    "GRAPHRAG_MEMORY_EMBED_MODEL",
+    "NINE_ROUTER_KEY",
+  ];
+  const saved = new Map<string, string | undefined>();
+  beforeAll(() => {
+    for (const k of SCRUBBED) {
+      saved.set(k, process.env[k]);
+      delete process.env[k];
+    }
+    process.env["GRAPHRAG_MEMORY_EMBED_DIMENSIONS"] = "1536";
+  });
+  afterAll(() => {
+    for (const k of SCRUBBED) {
+      const v = saved.get(k);
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
   it("returns the stage 1 field set with no transport field", () => {
     const env = loadEnv();
     expect(Object.keys(env).sort()).toEqual([
       "dbUrl",
       "embedApiKey",
       "embedBaseUrl",
+      "embedDimensions",
       "embedModel",
       "logLevel",
       "storage",
@@ -84,19 +112,28 @@ describe("loadEnv — stage 0 stdio-only contract", () => {
 const STAGE1_KEYS = [
   "GRAPHRAG_MEMORY_STORAGE",
   "GRAPHRAG_MEMORY_DB_URL",
+  "GRAPHRAG_MEMORY_EMBED_DIMENSIONS",
   "GRAPHRAG_MEMORY_EMBED_BASE_URL",
   "GRAPHRAG_MEMORY_EMBED_MODEL",
   "NINE_ROUTER_KEY",
 ] as const;
 
-/** Run `fn` with STAGE1_KEYS cleared, then patched by `patch`. */
+/**
+ * Run `fn` with STAGE1_KEYS cleared, then patched by `patch`.
+ * GRAPHRAG_MEMORY_EMBED_DIMENSIONS defaults to "1536" so existing tests
+ * that don't care about dimensions don't need to set it explicitly.
+ */
 function withEnv(patch: Record<string, string | undefined>, fn: () => void) {
   const saved = new Map<string, string | undefined>();
   for (const k of STAGE1_KEYS) {
     saved.set(k, process.env[k]);
     delete process.env[k];
   }
-  for (const [k, v] of Object.entries(patch)) {
+  const effectivePatch = {
+    GRAPHRAG_MEMORY_EMBED_DIMENSIONS: "1536",
+    ...patch,
+  };
+  for (const [k, v] of Object.entries(effectivePatch)) {
     if (!saved.has(k)) saved.set(k, process.env[k]);
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
@@ -120,17 +157,18 @@ describe("loadEnv — stage 1 storage + embedding contract", () => {
     });
   });
 
-  it("defaults embedBaseUrl and embedModel", () => {
+  it("leaves embedBaseUrl and embedModel undefined when no apiKey is set", () => {
     withEnv({}, () => {
       const env = loadEnv();
-      expect(env.embedBaseUrl).toBe("https://api.9router.ai");
-      expect(env.embedModel).toBe("text-embedding-3-small");
+      expect(env.embedBaseUrl).toBeUndefined();
+      expect(env.embedModel).toBeUndefined();
     });
   });
 
   it("overrides embedBaseUrl and embedModel from env", () => {
     withEnv(
       {
+        NINE_ROUTER_KEY: "test-key",
         GRAPHRAG_MEMORY_EMBED_BASE_URL: "https://example.invalid",
         GRAPHRAG_MEMORY_EMBED_MODEL: "custom-embed-model",
       },
@@ -142,10 +180,36 @@ describe("loadEnv — stage 1 storage + embedding contract", () => {
     );
   });
 
-  it("reads embedApiKey from NINE_ROUTER_KEY by name", () => {
-    withEnv({ NINE_ROUTER_KEY: "test-key-not-a-real-secret" }, () => {
-      expect(loadEnv().embedApiKey).toBe("test-key-not-a-real-secret");
+  it("strips a trailing slash from embedBaseUrl", () => {
+    withEnv(
+      {
+        NINE_ROUTER_KEY: "test-key",
+        GRAPHRAG_MEMORY_EMBED_BASE_URL: "https://example.invalid/v1/",
+        GRAPHRAG_MEMORY_EMBED_MODEL: "test-model",
+      },
+      () => {
+        expect(loadEnv().embedBaseUrl).toBe("https://example.invalid/v1");
+      }
+    );
+  });
+
+  it("reads embedDimensions from GRAPHRAG_MEMORY_EMBED_DIMENSIONS as an integer", () => {
+    withEnv({ GRAPHRAG_MEMORY_EMBED_DIMENSIONS: "2048" }, () => {
+      expect(loadEnv().embedDimensions).toBe(2048);
     });
+  });
+
+  it("reads embedApiKey from NINE_ROUTER_KEY by name", () => {
+    withEnv(
+      {
+        NINE_ROUTER_KEY: "test-key-not-a-real-secret",
+        GRAPHRAG_MEMORY_EMBED_BASE_URL: "https://example.invalid/v1",
+        GRAPHRAG_MEMORY_EMBED_MODEL: "test-model",
+      },
+      () => {
+        expect(loadEnv().embedApiKey).toBe("test-key-not-a-real-secret");
+      }
+    );
   });
 
   it("leaves embedApiKey undefined when NINE_ROUTER_KEY is unset", () => {
@@ -179,6 +243,182 @@ describe("loadEnv — stage 1 storage + embedding contract", () => {
     // unrecognized value must fail loudly, not fall back to "memory".
     withEnv({ GRAPHRAG_MEMORY_STORAGE: "sqlite" }, () => {
       expect(() => loadEnv()).toThrow(/GRAPHRAG_MEMORY_STORAGE/);
+    });
+  });
+});
+
+/**
+ * Boundary tests for the embedding-config drift fix: every failure mode on
+ * `GRAPHRAG_MEMORY_EMBED_DIMENSIONS` and the apiKey-coupled BASE_URL/MODEL
+ * fields must throw ConfigError with a message naming the offending env var.
+ *
+ * Why these live in their own describe: they intentionally omit
+ * GRAPHRAG_MEMORY_EMBED_DIMENSIONS so the default "1536" must NOT leak from
+ * withEnv — the boundary is "dimensions missing" specifically. The targeted
+ * patch in each test re-asserts the field so the only thing under test is
+ * the input value.
+ */
+describe("loadEnv — embed config boundary cases", () => {
+  // For these tests we want dimensions to be EXACTLY what the test sets
+  // (including undefined), so we override withEnv with one that doesn't
+  // inject a default.
+  function withRawEnv(
+    patch: Record<string, string | undefined>,
+    fn: () => void
+  ) {
+    const saved = new Map<string, string | undefined>();
+    for (const k of STAGE1_KEYS) {
+      saved.set(k, process.env[k]);
+      delete process.env[k];
+    }
+    for (const [k, v] of Object.entries(patch)) {
+      if (!saved.has(k)) saved.set(k, process.env[k]);
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    try {
+      fn();
+    } finally {
+      for (const [k, v] of saved) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  }
+
+  const DIM_BAD_VALUES: Array<readonly [string, string]> = [
+    ["empty string", ""],
+    ["zero", "0"],
+    ["negative", "-1"],
+    ["decimal", "3.14"],
+    ["non-numeric", "abc"],
+  ];
+
+  for (const [label, value] of DIM_BAD_VALUES) {
+    it(`throws on GRAPHRAG_MEMORY_EMBED_DIMENSIONS = "${value}" (${label})`, () => {
+      withRawEnv({ GRAPHRAG_MEMORY_EMBED_DIMENSIONS: value }, () => {
+        expect(() => loadEnv()).toThrow(/GRAPHRAG_MEMORY_EMBED_DIMENSIONS/);
+      });
+    });
+  }
+
+  it("throws when GRAPHRAG_MEMORY_EMBED_DIMENSIONS is unset", () => {
+    withRawEnv({}, () => {
+      expect(() => loadEnv()).toThrow(/GRAPHRAG_MEMORY_EMBED_DIMENSIONS/);
+    });
+  });
+
+  it("throws when GRAPHRAG_MEMORY_EMBED_DIMENSIONS is whitespace-only", () => {
+    withRawEnv({ GRAPHRAG_MEMORY_EMBED_DIMENSIONS: "   " }, () => {
+      expect(() => loadEnv()).toThrow(/GRAPHRAG_MEMORY_EMBED_DIMENSIONS/);
+    });
+  });
+
+  it("throws when NINE_ROUTER_KEY is set but BASE_URL is unset", () => {
+    withRawEnv(
+      {
+        GRAPHRAG_MEMORY_EMBED_DIMENSIONS: "1536",
+        NINE_ROUTER_KEY: "test-key",
+        GRAPHRAG_MEMORY_EMBED_MODEL: "model-x",
+      },
+      () => {
+        expect(() => loadEnv()).toThrow(/GRAPHRAG_MEMORY_EMBED_BASE_URL/);
+      }
+    );
+  });
+
+  it("throws when NINE_ROUTER_KEY is set but MODEL is unset", () => {
+    withRawEnv(
+      {
+        GRAPHRAG_MEMORY_EMBED_DIMENSIONS: "1536",
+        NINE_ROUTER_KEY: "test-key",
+        GRAPHRAG_MEMORY_EMBED_BASE_URL: "http://localhost:20128/v1",
+      },
+      () => {
+        expect(() => loadEnv()).toThrow(/GRAPHRAG_MEMORY_EMBED_MODEL/);
+      }
+    );
+  });
+
+  // Blank-string normalization: an empty / whitespace-only value must behave
+  // exactly like an unset var, so a blank key cannot drag an operator into
+  // the real-embedder path and a blank BASE_URL/MODEL cannot slip past the
+  // key-coupled required check to fail later at request time.
+  it("throws when BASE_URL is an empty string but NINE_ROUTER_KEY is set", () => {
+    withRawEnv(
+      {
+        GRAPHRAG_MEMORY_EMBED_DIMENSIONS: "1536",
+        NINE_ROUTER_KEY: "test-key",
+        GRAPHRAG_MEMORY_EMBED_BASE_URL: "",
+        GRAPHRAG_MEMORY_EMBED_MODEL: "model-x",
+      },
+      () => {
+        expect(() => loadEnv()).toThrow(/GRAPHRAG_MEMORY_EMBED_BASE_URL/);
+      }
+    );
+  });
+
+  it("throws when BASE_URL is whitespace-only but NINE_ROUTER_KEY is set", () => {
+    withRawEnv(
+      {
+        GRAPHRAG_MEMORY_EMBED_DIMENSIONS: "1536",
+        NINE_ROUTER_KEY: "test-key",
+        GRAPHRAG_MEMORY_EMBED_BASE_URL: "   ",
+        GRAPHRAG_MEMORY_EMBED_MODEL: "model-x",
+      },
+      () => {
+        expect(() => loadEnv()).toThrow(/GRAPHRAG_MEMORY_EMBED_BASE_URL/);
+      }
+    );
+  });
+
+  it("throws when MODEL is an empty string but NINE_ROUTER_KEY is set", () => {
+    withRawEnv(
+      {
+        GRAPHRAG_MEMORY_EMBED_DIMENSIONS: "1536",
+        NINE_ROUTER_KEY: "test-key",
+        GRAPHRAG_MEMORY_EMBED_BASE_URL: "http://localhost:20128/v1",
+        GRAPHRAG_MEMORY_EMBED_MODEL: "",
+      },
+      () => {
+        expect(() => loadEnv()).toThrow(/GRAPHRAG_MEMORY_EMBED_MODEL/);
+      }
+    );
+  });
+
+  it("treats an empty NINE_ROUTER_KEY as unset (FakeEmbedder path, no baseUrl/model required)", () => {
+    withRawEnv(
+      {
+        GRAPHRAG_MEMORY_EMBED_DIMENSIONS: "1536",
+        NINE_ROUTER_KEY: "",
+      },
+      () => {
+        const env = loadEnv();
+        expect(env.embedApiKey).toBeUndefined();
+        expect(env.embedBaseUrl).toBeUndefined();
+        expect(env.embedModel).toBeUndefined();
+      }
+    );
+  });
+
+  it("still requires dimensions even when NINE_ROUTER_KEY is unset", () => {
+    withRawEnv({}, () => {
+      // FakeEmbedder needs dimensions (which are NOT in the patch, so
+      // withRawEnv leaves them absent — this should still throw because
+      // dimensions is the always-required field). Combined with the next
+      // test, this asserts that the FakeEmbedder path only enforces
+      // dimensions, not baseUrl/model.
+      expect(() => loadEnv()).toThrow(/GRAPHRAG_MEMORY_EMBED_DIMENSIONS/);
+    });
+  });
+
+  it("FakeEmbedder path: dimensions alone is enough (no baseUrl, no model, no key)", () => {
+    withRawEnv({ GRAPHRAG_MEMORY_EMBED_DIMENSIONS: "512" }, () => {
+      const env = loadEnv();
+      expect(env.embedDimensions).toBe(512);
+      expect(env.embedApiKey).toBeUndefined();
+      expect(env.embedBaseUrl).toBeUndefined();
+      expect(env.embedModel).toBeUndefined();
     });
   });
 });

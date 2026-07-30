@@ -29,8 +29,8 @@
  * SIGKILL + explicit pipe-handle disposal).
  *
  * Why spawn the compiled dist/index.js (not `tsx src/index.ts`): the
- * compiled artifact is what Claude Code launches in production per
- * .mcp.json. Exercising it exercises the wire contract end-to-end.
+ * compiled artifact is what Claude Code launches in production.
+ * Exercising it exercises the wire contract end-to-end.
  */
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -69,6 +69,9 @@ const HOST_SMOKE_ENV_KEYS = [
 function hostSmokeEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   env["GRAPHRAG_MEMORY_STORAGE"] = "memory";
+  // GRAPHRAG_MEMORY_EMBED_DIMENSIONS is always required; the smoke suite
+  // runs FakeEmbedder (key scrubbed below), so any positive integer works.
+  env["GRAPHRAG_MEMORY_EMBED_DIMENSIONS"] = "1536";
   delete env["GRAPHRAG_MEMORY_DB_URL"];
   delete env["NINE_ROUTER_KEY"];
   // Keep BASE_URL / MODEL if the parent set them — they are inert without
@@ -78,9 +81,9 @@ function hostSmokeEnv(): NodeJS.ProcessEnv {
 }
 
 /**
- * Parameters a real reference host (Claude Code, per .mcp.json) would
- * use to launch this server. v2's StdioClientTransport takes these and
- * owns the child process for its full lifecycle.
+ * Parameters a real reference host (Claude Code) would use to launch this
+ * server. v2's StdioClientTransport takes these and owns the child process
+ * for its full lifecycle.
  */
 function serverParams() {
   if (!existsSync(distEntry)) {
@@ -244,7 +247,7 @@ describe("host-smoke: real stdio MCP client against built server", () => {
     { timeout: 60_000 },
     async () => {
       // Closes the remaining gate on #49 (per the file header): a real
-      // reference host (Claude Code per .mcp.json) drives the server, so
+      // reference host (Claude Code) drives the server, so
       // the transport-layer protocol survives the full ingest -> retrieve
       // round-trip. The Chinese text exercises UTF-8 end-to-end: chunker,
       // FakeEmbedder (char-code-driven), JSON wire framing, and the chunk

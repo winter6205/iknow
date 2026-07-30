@@ -33,18 +33,15 @@ function isStorageMode(value: string): value is StorageMode {
   return (STORAGE_MODES as readonly string[]).includes(value);
 }
 
-/** Default embedding endpoint. Overridable for self-hosted / proxy setups. */
-const DEFAULT_EMBED_BASE_URL = "https://api.9router.ai";
-
-/** Default embedding model. Its output dim must match core/errors.ts EMBEDDING_DIM. */
-const DEFAULT_EMBED_MODEL = "text-embedding-3-small";
-
 /**
  * Env-var NAME for the embedding provider key. The name lives in source;
  * the value never does. Shared with the root iknow project's convention so
  * an operator sets one key for both (see iknow CLAUDE.md "9router key").
  */
 const EMBED_API_KEY_VAR = "NINE_ROUTER_KEY";
+
+/** Env-var name for the required embedding dimension integer. */
+const EMBED_DIMENSIONS_VAR = "GRAPHRAG_MEMORY_EMBED_DIMENSIONS";
 
 /**
  * Startup configuration failure. Distinct from GraphragError (core/errors.ts),
@@ -64,8 +61,19 @@ export interface GraphragEnv {
   storage: StorageMode;
   /** Postgres connection string; required iff storage === "pgvector". */
   dbUrl: string | undefined;
-  embedBaseUrl: string;
-  embedModel: string;
+  /**
+   * Embedding endpoint base URL (trailing slash stripped). Convention
+   * includes /v1 — only /embeddings is appended at call time. Undefined
+   * when no embedding API key is configured (FakeEmbedder path).
+   */
+  embedBaseUrl: string | undefined;
+  /**
+   * Embedding model id (provider-specific, e.g. "zhipueb/embedding-3").
+   * Undefined when no embedding API key is configured.
+   */
+  embedModel: string | undefined;
+  /** Vector dimension. Always set — every code path (real + fake) needs it. */
+  embedDimensions: number;
   /** Value of NINE_ROUTER_KEY; undefined means "fall back to FakeEmbedder". */
   embedApiKey: string | undefined;
 }
@@ -101,12 +109,51 @@ function readEnv(key: string): string | undefined {
 }
 
 /**
+ * Read an env var and normalize: trim whitespace, treat empty/whitespace-only
+ * as absent (undefined). Keeps config.ts and index.ts in agreement — both
+ * treat a blank NINE_ROUTER_KEY as "no key" (FakeEmbedder path) without
+ * relying on JS truthiness semantics at the consumption site.
+ */
+function readTrimmed(key: string): string | undefined {
+  const raw = readEnv(key);
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+/**
+ * Parse and validate GRAPHRAG_MEMORY_EMBED_DIMENSIONS.
+ *
+ * Always required — every code path (real + FakeEmbedder, MemoryBackend,
+ * PgvectorBackend DDL) needs the dimension as a positive integer. We
+ * reject empty strings, 0, negatives, non-integers, and decimal values
+ * at startup rather than letting a surprising 0-length vector hit the
+ * DDL or the embedding provider downstream.
+ */
+function parseEmbedDimensions(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") {
+    throw new ConfigError(
+      `${EMBED_DIMENSIONS_VAR} is required (positive integer)`
+    );
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+    throw new ConfigError(
+      `${EMBED_DIMENSIONS_VAR} must be a positive integer, got "${raw}"`
+    );
+  }
+  return n;
+}
+
+/**
  * Read + validate the runtime environment.
  *
  * Throws ConfigError on any unusable combination. Failing loudly at startup
  * is deliberate: silently coercing an unknown storage mode to "memory" would
  * hand an operator a server that answers queries from an empty in-process
- * store while they believe it is talking to Postgres.
+ * store while they believe it is talking to Postgres. Same logic applies to
+ * missing embedding config: the operator's mental model and the running
+ * server must agree or the server must refuse to start.
  */
 export function loadEnv(): GraphragEnv {
   // Stage 0 is stdio-only (map #33 defers HTTP to T-005/#36). Transport is
@@ -130,15 +177,37 @@ export function loadEnv(): GraphragEnv {
     );
   }
 
+  // Embedding config: dimensions is ALWAYS required (every backend needs it);
+  // baseUrl and model are only required when NINE_ROUTER_KEY is set, because
+  // the FakeEmbedder path takes the operator offline without one. All three
+  // string fields are normalized through readTrimmed so empty / whitespace-
+  // only values collapse to undefined — a blank key does not silently drag
+  // an operator into the real-embedder path.
+  const embedDimensions = parseEmbedDimensions(readEnv(EMBED_DIMENSIONS_VAR));
+  const embedApiKey = readTrimmed(EMBED_API_KEY_VAR);
+
+  const embedBaseUrl = readTrimmed("GRAPHRAG_MEMORY_EMBED_BASE_URL");
+  if (embedApiKey !== undefined && embedBaseUrl === undefined) {
+    throw new ConfigError(
+      "GRAPHRAG_MEMORY_EMBED_BASE_URL is required when NINE_ROUTER_KEY is set"
+    );
+  }
+  const embedModel = readTrimmed("GRAPHRAG_MEMORY_EMBED_MODEL");
+  if (embedApiKey !== undefined && embedModel === undefined) {
+    throw new ConfigError(
+      "GRAPHRAG_MEMORY_EMBED_MODEL is required when NINE_ROUTER_KEY is set"
+    );
+  }
+
   return {
     logLevel,
     storage: rawStorage,
     dbUrl,
-    embedBaseUrl:
-      readEnv("GRAPHRAG_MEMORY_EMBED_BASE_URL") ?? DEFAULT_EMBED_BASE_URL,
-    embedModel: readEnv("GRAPHRAG_MEMORY_EMBED_MODEL") ?? DEFAULT_EMBED_MODEL,
+    embedDimensions,
+    embedBaseUrl: embedBaseUrl?.replace(/\/$/, ""),
+    embedModel,
     // Looked up by NAME — the secret value only ever exists in the process
     // environment, never in this file or in any log line.
-    embedApiKey: readEnv(EMBED_API_KEY_VAR),
+    embedApiKey,
   };
 }

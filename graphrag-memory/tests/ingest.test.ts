@@ -10,6 +10,9 @@ import { MemoryBackend } from "../src/core/storage/memory-backend.js";
 import type { IngestDeps } from "../src/tools/ingest.js";
 import type { RetrievedChunk, SearchOptions } from "../src/core/types.js";
 
+/** Test dimension — injected into FakeEmbedder and MemoryBackend. */
+const TEST_DIM = 1536;
+
 /**
  * Helper: build a fully-wired IngestDeps pair (FakeEmbedder + MemoryBackend).
  * The tests below exercise the real handler pipeline end-to-end; only the
@@ -19,8 +22,8 @@ function makeDeps(): IngestDeps & {
   storage: MemoryBackend;
   embedder: FakeEmbedder;
 } {
-  const embedder = new FakeEmbedder();
-  const storage = new MemoryBackend();
+  const embedder = new FakeEmbedder(TEST_DIM);
+  const storage = new MemoryBackend(TEST_DIM);
   return { embedder, storage };
 }
 
@@ -161,7 +164,9 @@ describe("ingestHandler — normal write", () => {
     // The same embedder was used to embed the content, so the same input
     // produces the same query vector → cosine 1 against the stored chunk.
     const { FakeEmbedder } = await import("../src/core/embedder.js");
-    const queryVec = await new FakeEmbedder().embed(["searchable content"]);
+    const queryVec = await new FakeEmbedder(TEST_DIM).embed([
+      "searchable content",
+    ]);
     const opts: SearchOptions = {
       limit: 10,
       validAt: new Date().toISOString(),
@@ -278,7 +283,7 @@ describe("ingestHandler — stored ChunkRecord shape", () => {
     });
 
     const { FakeEmbedder } = await import("../src/core/embedder.js");
-    const queryVec = await new FakeEmbedder().embed(["tagged content"]);
+    const queryVec = await new FakeEmbedder(TEST_DIM).embed(["tagged content"]);
     const hits = await storage.search(queryVec[0]!, {
       limit: 10,
       validAt: "2099-01-01T00:00:00Z",
@@ -295,7 +300,7 @@ describe("ingestHandler — stored ChunkRecord shape", () => {
     });
 
     const { FakeEmbedder } = await import("../src/core/embedder.js");
-    const queryVec = await new FakeEmbedder().embed(["source-tagged"]);
+    const queryVec = await new FakeEmbedder(TEST_DIM).embed(["source-tagged"]);
     const hits = await storage.search(queryVec[0]!, {
       limit: 10,
       validAt: "2099-01-01T00:00:00Z",
@@ -316,7 +321,9 @@ describe("ingestHandler — stored ChunkRecord shape", () => {
     });
 
     const { FakeEmbedder } = await import("../src/core/embedder.js");
-    const queryVec = await new FakeEmbedder().embed(["windowed content"]);
+    const queryVec = await new FakeEmbedder(TEST_DIM).embed([
+      "windowed content",
+    ]);
     const hits = await storage.search(queryVec[0]!, {
       limit: 10,
       validAt: "2024-06-01T00:00:00Z",
@@ -333,7 +340,9 @@ describe("ingestHandler — stored ChunkRecord shape", () => {
     });
 
     const { FakeEmbedder } = await import("../src/core/embedder.js");
-    const queryVec = await new FakeEmbedder().embed(["forever content"]);
+    const queryVec = await new FakeEmbedder(TEST_DIM).embed([
+      "forever content",
+    ]);
     const hits = await storage.search(queryVec[0]!, {
       limit: 10,
       validAt: "9999-12-31T23:59:59Z",
@@ -352,7 +361,9 @@ describe("ingestHandler — stored ChunkRecord shape", () => {
     const after = Date.now();
 
     const { FakeEmbedder } = await import("../src/core/embedder.js");
-    const queryVec = await new FakeEmbedder().embed(["default-from content"]);
+    const queryVec = await new FakeEmbedder(TEST_DIM).embed([
+      "default-from content",
+    ]);
     // Search at a time comfortably after the ingest → chunk must be in-window.
     const futureIso = new Date(after + 60_000).toISOString();
     const hits = await storage.search(queryVec[0]!, {
@@ -380,7 +391,7 @@ describe("ingestHandler — stored ChunkRecord shape", () => {
     const after = Date.now();
 
     const { FakeEmbedder } = await import("../src/core/embedder.js");
-    const queryVec = await new FakeEmbedder().embed(["fresh content"]);
+    const queryVec = await new FakeEmbedder(TEST_DIM).embed(["fresh content"]);
     const hits = await storage.search(queryVec[0]!, {
       limit: 10,
       validAt: new Date(after + 1000).toISOString(),
@@ -403,7 +414,7 @@ describe("ingestHandler — stored ChunkRecord shape", () => {
     });
 
     const { FakeEmbedder } = await import("../src/core/embedder.js");
-    const embedder = new FakeEmbedder();
+    const embedder = new FakeEmbedder(TEST_DIM);
     const queryVec = await embedder.embed(["vector content"]);
     const hits = await storage.search(queryVec[0]!, {
       limit: 10,

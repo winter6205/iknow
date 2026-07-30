@@ -2,36 +2,55 @@
  * Embedding client abstraction for graphrag-memory.
  *
  * EmbeddingClient is the interface; NineRouterEmbedder is the production impl
- * (calls 9router /v1/embeddings via Node fetch); FakeEmbedder is the test
- * double (deterministic, no network).
+ * (calls an OpenAI-compatible /embeddings endpoint via Node fetch); FakeEmbedder
+ * is the test double (deterministic, no network).
  *
  * Why an interface: the ingest handler depends only on the contract, which
  * lets tests inject FakeEmbedder and skips the network in CI / local dev.
  */
-import { GraphragError, EMBEDDING_DIM } from "./errors.js";
+import { GraphragError } from "./errors.js";
 
 /** Abstraction over any embedding provider. */
 export interface EmbeddingClient {
   embed(texts: string[]): Promise<number[][]>;
 }
 
+/** Options for NineRouterEmbedder — all injected by config.ts, no defaults. */
+export interface NineRouterEmbedderOpts {
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  dimensions: number;
+}
+
 /**
- * Production embedder: calls an OpenAI-compatible /v1/embeddings endpoint
+ * Production embedder: calls an OpenAI-compatible embeddings endpoint
  * over Node's built-in fetch (no SDK dependency).
  *
- * The API key is read from environment by NAME and passed in by the caller
- * (config.ts) — never stored in source. The embedder is otherwise stateless
- * except for the immutable constructor parameters.
+ * The base URL convention includes /v1 (e.g. http://localhost:20128/v1);
+ * only /embeddings is appended. The API key is read from environment by
+ * NAME and passed in by the caller (config.ts) — never stored in source.
  */
 export class NineRouterEmbedder implements EmbeddingClient {
-  constructor(
-    private readonly baseUrl: string,
-    private readonly model: string,
-    private readonly apiKey: string
-  ) {}
+  private readonly baseUrl: string;
+  private readonly model: string;
+  private readonly apiKey: string;
+  private readonly dimensions: number;
+
+  constructor(opts: NineRouterEmbedderOpts) {
+    this.baseUrl = opts.baseUrl;
+    this.model = opts.model;
+    this.apiKey = opts.apiKey;
+    this.dimensions = opts.dimensions;
+  }
 
   async embed(texts: string[]): Promise<number[][]> {
-    const url = `${this.baseUrl.replace(/\/$/, "")}/v1/embeddings`;
+    const url = `${this.baseUrl.replace(/\/$/, "")}/embeddings`;
+
+    const body: Record<string, unknown> = { model: this.model, input: texts };
+    if (this.dimensions > 0) {
+      body["dimensions"] = this.dimensions;
+    }
 
     let response: Response;
     try {
@@ -41,7 +60,7 @@ export class NineRouterEmbedder implements EmbeddingClient {
           "content-type": "application/json",
           authorization: `Bearer ${this.apiKey}`,
         },
-        body: JSON.stringify({ model: this.model, input: texts }),
+        body: JSON.stringify(body),
       });
     } catch (err) {
       // Network/transport errors come back as fetch rejections in Node.
@@ -78,9 +97,9 @@ export class NineRouterEmbedder implements EmbeddingClient {
 
     for (let i = 0; i < embeddings.length; i += 1) {
       const vec = embeddings[i];
-      if (!vec || vec.length !== EMBEDDING_DIM) {
+      if (!vec || vec.length !== this.dimensions) {
         throw new GraphragError(
-          `embedding dim mismatch at index ${i}: expected ${EMBEDDING_DIM}, got ${vec?.length ?? 0}`,
+          `embedding dim mismatch at index ${i}: expected ${this.dimensions}, got ${vec?.length ?? 0}`,
           "EMBEDDING_DIM_MISMATCH"
         );
       }
@@ -95,14 +114,16 @@ export class NineRouterEmbedder implements EmbeddingClient {
  * No network, no randomness. Same text → same vector, always.
  *
  * Derivation: FNV-1a-ish 32-bit accumulator seeded from the text's UTF-8
- * codepoints, spread across 1536 dimensions by repeatedly mixing the
- * accumulator with the index. Values are L2-normalized so cosine is well-
- * behaved. Determinism is the only property callers depend on; the specific
- * distribution is not.
+ * codepoints, spread across the configured dimensions by repeatedly mixing
+ * the accumulator with the index. Values are L2-normalized so cosine is
+ * well-behaved. Determinism is the only property callers depend on; the
+ * specific distribution is not.
  */
 export class FakeEmbedder implements EmbeddingClient {
+  constructor(private readonly dimensions: number) {}
+
   async embed(texts: string[]): Promise<number[][]> {
-    return texts.map((text) => deriveVector(text, EMBEDDING_DIM));
+    return texts.map((text) => deriveVector(text, this.dimensions));
   }
 }
 

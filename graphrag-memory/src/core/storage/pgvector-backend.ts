@@ -2,7 +2,7 @@
  * PostgreSQL + pgvector storage backend (production).
  *
  * Requires: PostgreSQL 16 + pgvector ≥ 0.7.
- * Table: chunks(id uuid PK, content text, embedding vector(1536),
+ * Table: chunks(id uuid PK, content text, embedding vector(dimensions),
  *        valid_from timestamptz, valid_until timestamptz NULL,
  *        source_ref text, metadata jsonb, created_at timestamptz)
  *
@@ -26,7 +26,7 @@ import type {
   SearchOptions,
   StorageBackend,
 } from "../types.js";
-import { GraphragError, EMBEDDING_DIM } from "../errors.js";
+import { GraphragError } from "../errors.js";
 
 /**
  * Minimal structural subset of the `pg` package we use. Declared as an
@@ -89,7 +89,10 @@ export class PgvectorBackend implements StorageBackend {
   private pool: PgPool | undefined;
   private initPromise: Promise<void> | undefined;
 
-  constructor(private readonly dbUrl: string) {}
+  constructor(
+    private readonly dbUrl: string,
+    private readonly dimensions: number
+  ) {}
 
   /**
    * Lazily initialize the pg module + connection pool + schema.
@@ -154,7 +157,7 @@ export class PgvectorBackend implements StorageBackend {
         `CREATE TABLE IF NOT EXISTS chunks (
            id uuid PRIMARY KEY,
            content text NOT NULL,
-           embedding vector(1536) NOT NULL,
+           embedding vector(${this.dimensions}) NOT NULL,
            valid_from timestamptz NOT NULL,
            valid_until timestamptz NULL,
            source_ref text NOT NULL,
@@ -180,9 +183,9 @@ export class PgvectorBackend implements StorageBackend {
     // side. (Postgres would reject with a dimension error, but we'd rather
     // surface a typed GraphragError than a pg driver error.)
     for (const chunk of chunks) {
-      if (chunk.embedding.length !== EMBEDDING_DIM) {
+      if (chunk.embedding.length !== this.dimensions) {
         throw new GraphragError(
-          `PgvectorBackend.upsert: chunk "${chunk.id}" embedding length ${chunk.embedding.length} !== ${EMBEDDING_DIM}`,
+          `PgvectorBackend.upsert: chunk "${chunk.id}" embedding length ${chunk.embedding.length} !== ${this.dimensions}`,
           "EMBEDDING_DIM_MISMATCH"
         );
       }
@@ -236,9 +239,9 @@ export class PgvectorBackend implements StorageBackend {
     queryEmbedding: number[],
     opts: SearchOptions
   ): Promise<RetrievedChunk[]> {
-    if (queryEmbedding.length !== EMBEDDING_DIM) {
+    if (queryEmbedding.length !== this.dimensions) {
       throw new GraphragError(
-        `PgvectorBackend.search: query embedding length ${queryEmbedding.length} !== ${EMBEDDING_DIM}`,
+        `PgvectorBackend.search: query embedding length ${queryEmbedding.length} !== ${this.dimensions}`,
         "EMBEDDING_DIM_MISMATCH"
       );
     }

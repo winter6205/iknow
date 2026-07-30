@@ -101,14 +101,31 @@ async function buildDeps(env: GraphragEnv): Promise<ServerDeps> {
         `GRAPHRAG_MEMORY_STORAGE=pgvector requires the optional "pg" dependency — \`npm install pg\` (${(err as Error).message})`
       );
     }
-    storage = new mod.PgvectorBackend(env.dbUrl);
+    storage = new mod.PgvectorBackend(env.dbUrl, env.embedDimensions);
   } else {
-    storage = new MemoryBackend();
+    storage = new MemoryBackend(env.embedDimensions);
   }
 
-  const embedder: EmbeddingClient = env.embedApiKey
-    ? new NineRouterEmbedder(env.embedBaseUrl, env.embedModel, env.embedApiKey)
-    : new FakeEmbedder();
+  // Both branches always pass `dimensions` through; the dim value is always
+  // required by config so this is just plumbing.
+  let embedder: EmbeddingClient;
+  if (env.embedApiKey) {
+    // loadEnv already enforces both when a key is present; defense-in-depth
+    // mirrors the dbUrl check above (buildDeps is also callable from tests).
+    if (env.embedBaseUrl === undefined || env.embedModel === undefined) {
+      throw new ConfigError(
+        "GRAPHRAG_MEMORY_EMBED_BASE_URL and GRAPHRAG_MEMORY_EMBED_MODEL are required when NINE_ROUTER_KEY is set"
+      );
+    }
+    embedder = new NineRouterEmbedder({
+      baseUrl: env.embedBaseUrl,
+      model: env.embedModel,
+      apiKey: env.embedApiKey,
+      dimensions: env.embedDimensions,
+    });
+  } else {
+    embedder = new FakeEmbedder(env.embedDimensions);
+  }
 
   return { embedder, storage };
 }

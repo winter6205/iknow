@@ -2,18 +2,21 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { createRetrieveHandler, retrieveTool } from "../src/tools/retrieve.js";
 import { FakeEmbedder } from "../src/core/embedder.js";
 import { MemoryBackend } from "../src/core/storage/memory-backend.js";
-import { EMBEDDING_DIM, GraphragError } from "../src/core/errors.js";
+import { GraphragError } from "../src/core/errors.js";
 import type { ChunkRecord } from "../src/core/types.js";
 import type { ToolResult } from "../src/tools/registry.js";
 
+/** Test dimension — injected into FakeEmbedder and MemoryBackend. */
+const TEST_DIM = 1536;
+
 /**
- * Helper: build a deterministic 1536-dim embedding pointing along `axis`.
+ * Helper: build a deterministic TEST_DIM-dim embedding pointing along `axis`.
  * axis=0 => vector is a * unit_e0; cosine between two such vectors =
  * dot(unit_ei, unit_ej) = 1 if i===j else 0. This lets us craft rank-ordered
  * results without needing real embeddings.
  */
 function embeddingAlongAxis(axis: number): number[] {
-  const v = new Array<number>(EMBEDDING_DIM).fill(0);
+  const v = new Array<number>(TEST_DIM).fill(0);
   v[axis] = 1;
   return v;
 }
@@ -54,13 +57,13 @@ describe("createRetrieveHandler", () => {
   let handler: ReturnType<typeof createRetrieveHandler>;
 
   beforeEach(() => {
-    backend = new MemoryBackend();
+    backend = new MemoryBackend(TEST_DIM);
     // FakeEmbedder is deterministic: same text -> same vector.
     // We can craft chunks whose embeddings align with the query axis by
     // upserting with embeddings along axis 0, while still calling the
     // handler with a real query string (which FakeEmbedder hashes).
     handler = createRetrieveHandler({
-      embedder: new FakeEmbedder(),
+      embedder: new FakeEmbedder(TEST_DIM),
       storage: backend,
     });
   });
@@ -70,7 +73,7 @@ describe("createRetrieveHandler", () => {
       // Use the FakeEmbedder to seed chunks whose embeddings are derived
       // from the same query text. Since FakeEmbedder is deterministic,
       // chunk.embedding == queryEmbedding => cosine == 1.
-      const embedder = new FakeEmbedder();
+      const embedder = new FakeEmbedder(TEST_DIM);
       const query = "graphrag knowledge memory";
       const [queryVec] = await embedder.embed([query]);
       // Derive a chunk embedding from the same query text.
@@ -202,7 +205,7 @@ describe("createRetrieveHandler", () => {
     it("two parallel retrieves do not interfere (Promise.all, both return correct results)", async () => {
       // Use distinct embedding axes per chunk so ranking is deterministic
       // and order is unambiguous regardless of FakeEmbedder distribution.
-      const embedder = new FakeEmbedder();
+      const embedder = new FakeEmbedder(TEST_DIM);
       const [v1] = await embedder.embed(["alpha bravo"]);
       const [v2] = await embedder.embed(["charlie delta"]);
       const [v3] = await embedder.embed(["echo foxtrot"]);
@@ -231,7 +234,7 @@ describe("createRetrieveHandler", () => {
     it("each chunk has id, content, source_ref, valid_window (tuple), score (number)", async () => {
       // Derive the chunk embedding from the same text as the query so the
       // chunk is guaranteed to be top-ranked and returned.
-      const embedder = new FakeEmbedder();
+      const embedder = new FakeEmbedder(TEST_DIM);
       const [vec] = await embedder.embed(["hello world"]);
       await backend.upsert([
         makeChunk({
@@ -277,8 +280,8 @@ describe("createRetrieveHandler", () => {
 describe("retrieveTool", () => {
   it("registers under the name 'retrieve' with description and inputSchema", () => {
     const tool = retrieveTool({
-      embedder: new FakeEmbedder(),
-      storage: new MemoryBackend(),
+      embedder: new FakeEmbedder(TEST_DIM),
+      storage: new MemoryBackend(TEST_DIM),
     });
     expect(tool.name).toBe("retrieve");
     expect(typeof tool.description).toBe("string");
@@ -289,8 +292,8 @@ describe("retrieveTool", () => {
 
   it("input schema rejects an empty query", () => {
     const tool = retrieveTool({
-      embedder: new FakeEmbedder(),
-      storage: new MemoryBackend(),
+      embedder: new FakeEmbedder(TEST_DIM),
+      storage: new MemoryBackend(TEST_DIM),
     });
     const result = tool.inputSchema.safeParse({ query: "" });
     expect(result.success).toBe(false);
@@ -298,8 +301,8 @@ describe("retrieveTool", () => {
 
   it("input schema rejects a missing query", () => {
     const tool = retrieveTool({
-      embedder: new FakeEmbedder(),
-      storage: new MemoryBackend(),
+      embedder: new FakeEmbedder(TEST_DIM),
+      storage: new MemoryBackend(TEST_DIM),
     });
     const result = tool.inputSchema.safeParse({});
     expect(result.success).toBe(false);
@@ -307,8 +310,8 @@ describe("retrieveTool", () => {
 
   it("input schema accepts a minimal valid input", () => {
     const tool = retrieveTool({
-      embedder: new FakeEmbedder(),
-      storage: new MemoryBackend(),
+      embedder: new FakeEmbedder(TEST_DIM),
+      storage: new MemoryBackend(TEST_DIM),
     });
     const result = tool.inputSchema.safeParse({ query: "hello" });
     expect(result.success).toBe(true);
@@ -323,8 +326,8 @@ describe("createRetrieveHandler error path", () => {
     // the default. Use a date the storage layer will accept (it uses
     // Date.parse, so a malformed string will throw).
     const handler = createRetrieveHandler({
-      embedder: new FakeEmbedder(),
-      storage: new MemoryBackend(),
+      embedder: new FakeEmbedder(TEST_DIM),
+      storage: new MemoryBackend(TEST_DIM),
     });
     // Zod validation requires valid_at to be an ISO 8601 datetime string,
     // so we cannot pass a malformed one. Instead, verify the happy path
@@ -339,8 +342,8 @@ describe("createRetrieveHandler error path", () => {
 
   it("handler does NOT throw for valid input; returns a ToolResult", async () => {
     const handler = createRetrieveHandler({
-      embedder: new FakeEmbedder(),
-      storage: new MemoryBackend(),
+      embedder: new FakeEmbedder(TEST_DIM),
+      storage: new MemoryBackend(TEST_DIM),
     });
     await expect(handler({ query: "x" })).resolves.toBeDefined();
   });

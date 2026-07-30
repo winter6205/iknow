@@ -9,7 +9,7 @@
 export interface ChunkRecord {
   id: string;
   content: string;
-  embedding: number[]; // 1536-dim vector
+  embedding: number[]; // vector of configured dimensions
   source_ref: string;
   metadata: Record<string, unknown>;
   valid_from: string; // ISO 8601 datetime

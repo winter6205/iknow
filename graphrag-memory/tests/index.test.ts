@@ -16,6 +16,7 @@ import { createServer } from "../src/index.ts";
 const ENV_KEYS = [
   "GRAPHRAG_MEMORY_STORAGE",
   "GRAPHRAG_MEMORY_DB_URL",
+  "GRAPHRAG_MEMORY_EMBED_DIMENSIONS",
   "GRAPHRAG_MEMORY_EMBED_BASE_URL",
   "GRAPHRAG_MEMORY_EMBED_MODEL",
   "NINE_ROUTER_KEY",
@@ -27,6 +28,9 @@ async function createOfflineServer(): Promise<ReturnType<typeof createServer>> {
     saved.set(k, process.env[k]);
     delete process.env[k];
   }
+  // Dimensions is always required; FakeEmbedder path only needs this single
+  // field to construct successfully.
+  process.env["GRAPHRAG_MEMORY_EMBED_DIMENSIONS"] = "1536";
   try {
     return await createServer();
   } finally {

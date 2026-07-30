@@ -1,16 +1,19 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { MemoryBackend } from "../src/core/storage/memory-backend.js";
 import type { ChunkRecord } from "../src/core/types.js";
-import { EMBEDDING_DIM, GraphragError } from "../src/core/errors.js";
+import { GraphragError } from "../src/core/errors.js";
+
+/** Test dimension for MemoryBackend — injected via constructor. */
+const TEST_DIM = 1536;
 
 /**
- * Helper: build a deterministic 1536-dim embedding pointing along `axis`.
+ * Helper: build a deterministic TEST_DIM-dim embedding pointing along `axis`.
  * axis=0 => vector is a * unit_e0; cosine between two such vectors =
  * dot(unit_ei, unit_ej) = 1 if i===j else 0. This lets us craft rank-ordered
  * results without needing real embeddings.
  */
 function embeddingAlongAxis(axis: number): number[] {
-  const v = new Array<number>(EMBEDDING_DIM).fill(0);
+  const v = new Array<number>(TEST_DIM).fill(0);
   v[axis] = 1;
   return v;
 }
@@ -36,7 +39,7 @@ describe("MemoryBackend", () => {
   let backend: MemoryBackend;
 
   beforeEach(() => {
-    backend = new MemoryBackend();
+    backend = new MemoryBackend(TEST_DIM);
   });
 
   describe("upsert", () => {
@@ -66,10 +69,10 @@ describe("MemoryBackend", () => {
       expect(hits[0]?.content).toBe("new");
     });
 
-    it("rejects an embedding whose length does not match EMBEDDING_DIM with GraphragError EMBEDDING_DIM_MISMATCH", async () => {
+    it("rejects an embedding whose length does not match the configured dimensions with GraphragError EMBEDDING_DIM_MISMATCH", async () => {
       const bad = makeChunk({
         id: "bad",
-        embedding: [0.1, 0.2, 0.3], // 3-dim, not 1536
+        embedding: [0.1, 0.2, 0.3], // 3-dim, not TEST_DIM
       });
       await expect(backend.upsert([bad])).rejects.toBeInstanceOf(GraphragError);
       await expect(backend.upsert([bad])).rejects.toMatchObject({
@@ -83,7 +86,7 @@ describe("MemoryBackend", () => {
         makeChunk({ id: "good" }),
         makeChunk({
           id: "bad",
-          embedding: new Array<number>(EMBEDDING_DIM + 1).fill(0),
+          embedding: new Array<number>(TEST_DIM + 1).fill(0),
         }),
       ];
       await expect(backend.upsert(chunks)).rejects.toMatchObject({

@@ -12,16 +12,16 @@ import type {
   StorageBackend,
 } from "../types.js";
 import { cosineSimilarity } from "../cosine.js";
-import { GraphragError, EMBEDDING_DIM } from "../errors.js";
+import { GraphragError } from "../errors.js";
 
 /**
  * In-process StorageBackend. Suitable for unit tests, local dev, and any
  * context where durability is not required (no snapshot_id in stage 1).
  *
  * Indexing strategy: brute-force scan over the entire chunk set on every
- * search. With O(N) chunks this is O(N * 1536) per query — fine for the
- * dev/test workloads stage 1 targets; PgvectorBackend (T8) takes over when
- * N grows past a few thousand.
+ * search. With O(N) chunks this is O(N * dimensions) per query — fine for
+ * the dev/test workloads stage 1 targets; PgvectorBackend (T8) takes over
+ * when N grows past a few thousand.
  *
  * Why `Map<id, ChunkRecord>` and not an array: keyed by id gives us O(1)
  * overwrite semantics for "last write wins" on re-ingestion of the same
@@ -30,21 +30,23 @@ import { GraphragError, EMBEDDING_DIM } from "../errors.js";
 export class MemoryBackend implements StorageBackend {
   private readonly store = new Map<string, ChunkRecord>();
 
+  constructor(private readonly dimensions: number) {}
+
   /**
    * Validate then store each chunk. The whole batch is atomic: if any chunk
    * fails the embedding-dimension check, the batch throws and no chunk is
    * persisted (Map.set has not been called yet for that chunk).
    *
    * Throws GraphragError EMBEDDING_DIM_MISMATCH if a chunk's embedding has
-   * a length other than EMBEDDING_DIM.
+   * a length other than the configured dimensions.
    */
   async upsert(chunks: ChunkRecord[]): Promise<string[]> {
     // Pre-validate all chunks before mutating the store so a bad chunk in
     // position N does not leave the first N-1 chunks half-persisted.
     for (const chunk of chunks) {
-      if (chunk.embedding.length !== EMBEDDING_DIM) {
+      if (chunk.embedding.length !== this.dimensions) {
         throw new GraphragError(
-          `upsert: chunk "${chunk.id}" embedding length ${chunk.embedding.length} !== ${EMBEDDING_DIM}`,
+          `upsert: chunk "${chunk.id}" embedding length ${chunk.embedding.length} !== ${this.dimensions}`,
           "EMBEDDING_DIM_MISMATCH"
         );
       }

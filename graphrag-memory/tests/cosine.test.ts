@@ -34,8 +34,10 @@ describe("cosineSimilarity", () => {
     expect(cosineSimilarity([0, 0, 0], [0, 0, 0])).toBe(0);
   });
 
-  it("handles 1536-dim vectors (text-embedding-3-small dimension)", () => {
-    // Build two 1536-dim vectors with a known dot product.
+  it("handles large-dim vectors (representative dimension)", () => {
+    // Build two vectors at a representative embedding dimension with a
+    // known dot product. cosine logic is dimension-agnostic; this test
+    // exists to catch regressions in any vectorization assumption.
     const dim = 1536;
     const a = new Array<number>(dim);
     const b = new Array<number>(dim);
