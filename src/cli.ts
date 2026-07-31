@@ -17,8 +17,23 @@ import {
 import { isInteractive, writeErr } from "./cli/session-io.js";
 import { getVersion, printUsage } from "./cli/usage.js";
 import { formatRunJson } from "./cli/format.js";
-import { run as runHarness, type LoopEngineDeps } from "./harness/index.js";
+import {
+  run as runHarness,
+  createJsonlTraceService,
+  type LoopEngineDeps,
+} from "./harness/index.js";
 import { isIknowError } from "./shared/errors.js";
+import { randomUUID } from "node:crypto";
+
+const DEFAULT_TRACE_PATH = "./trace.jsonl";
+
+/**
+ * Resolve trace output path: flag > IKNOW_TRACE_OUT env > default.
+ * ADR-0003 D3: default is relative to CWD.
+ */
+function resolveTracePath(flag: string | undefined): string {
+  return flag ?? process.env.IKNOW_TRACE_OUT ?? DEFAULT_TRACE_PATH;
+}
 
 function printCliError(err: unknown): void {
   if (isIknowError(err)) {
@@ -106,8 +121,20 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     }
     throw err;
   }
-  const { result, trace } = await runHarness(parsed.query, built.deps);
-  process.stdout.write(`${formatRunJson(result, trace)}\n`);
+  // ask path: each invocation gets its own conversation_id (ADR-0003 D4).
+  const tracePath = resolveTracePath(parsed.traceOut);
+  const conversationId = randomUUID();
+  const traceService = createJsonlTraceService({
+    filePath: tracePath,
+    conversationId,
+  });
+  // runHarness returns LoopTrace as `trace`; rename to loopTrace to avoid
+  // shadowing the TraceService injected into deps.
+  const { result, trace: loopTrace } = await runHarness(parsed.query, {
+    ...built.deps,
+    trace: traceService,
+  });
+  process.stdout.write(`${formatRunJson(result, loopTrace)}\n`);
 }
 
 async function runChat(parsed: ParsedCli): Promise<void> {
@@ -176,6 +203,7 @@ async function main(): Promise<void> {
 }
 
 async function runServe(parsed: ParsedCli): Promise<void> {
+  const tracePath = resolveTracePath(parsed.traceOut);
   const { startSessionServe } = await import("./session-api/serve.js");
   try {
     const { listening } = await startSessionServe({
@@ -183,6 +211,7 @@ async function runServe(parsed: ParsedCli): Promise<void> {
       port: parsed.port,
       embeddings: parsed.embeddings,
       json_mode: parsed.json,
+      traceOut: tracePath,
     });
     writeErr(`iknow serve  http://${listening.host}:${listening.port}/`);
     writeErr("API: /api/v1/health  ·  UI: /  ·  Ctrl+C to stop");

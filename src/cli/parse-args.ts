@@ -33,6 +33,11 @@ export type ParsedCli = {
    * HTTP bind host for `serve` (default 127.0.0.1).
    */
   host: string;
+  /**
+   * Trace output file path for ask/serve (--trace-out flag).
+   * Resolution: flag > IKNOW_TRACE_OUT env > "./trace.jsonl" (ADR-0003 D3/D4).
+   */
+  traceOut?: string;
 };
 
 export type ParseArgsOptions = {
@@ -56,6 +61,7 @@ export function parseArgs(argv: string[], opts?: ParseArgsOptions): ParsedCli {
   let json = false;
   let port = 8787;
   let host = "127.0.0.1";
+  let traceOut: string | undefined;
   const rest: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
@@ -68,6 +74,7 @@ export function parseArgs(argv: string[], opts?: ParseArgsOptions): ParsedCli {
         json,
         port,
         host,
+        traceOut,
         query: "",
         missingQuery: false,
         versionOnly: false,
@@ -103,6 +110,12 @@ export function parseArgs(argv: string[], opts?: ParseArgsOptions): ParsedCli {
         throw new Error("Missing value for --host");
       }
       host = raw;
+    } else if (a === "--trace-out") {
+      const raw = argv[++i];
+      if (raw === undefined) {
+        throw new Error("--trace-out requires a file path argument");
+      }
+      traceOut = raw;
     } else if (a === "--version" || a === "-V") {
       return baseParsed("help", {
         role,
@@ -111,6 +124,7 @@ export function parseArgs(argv: string[], opts?: ParseArgsOptions): ParsedCli {
         json,
         port,
         host,
+        traceOut,
         query: "",
         missingQuery: false,
         versionOnly: true,
@@ -127,6 +141,7 @@ export function parseArgs(argv: string[], opts?: ParseArgsOptions): ParsedCli {
     json,
     port,
     host,
+    traceOut,
     versionOnly: false,
   };
   const head = rest[0];

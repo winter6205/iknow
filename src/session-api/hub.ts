@@ -2,6 +2,7 @@
  * In-process multi-conversation host over harness foundation runtime.
  * 022 T4: load → run(priorMessages) → conditional save → wire projection.
  * Messages single-source is the session file; hub holds no messages copy.
+ * 064 T5: per-session JSONL trace when traceOut is configured (ADR-0003 D4).
  */
 import { randomUUID } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
@@ -12,6 +13,7 @@ import {
   createExecutor,
   createEchoTool,
   createGetTimeTool,
+  createJsonlTraceService,
   type AnthropicContentBlock,
   type AnthropicNativeMessage,
   type LoopEngineDeps,
@@ -156,6 +158,10 @@ export type SessionHubOptions = {
   defaultMode?: AgentMode;
   defaultJsonMode?: boolean;
   defaultEmbeddings?: boolean;
+  /** JSONL trace file path; when set, postMessage creates a per-session
+   * JsonlTraceService bound to session.conversation_id (ADR-0003 D4).
+   * Per-session instance -> cachedDeps does not cache the trace. */
+  traceOut?: string;
 };
 
 // -- stop reasons that must NOT persist to file (裁决#8) -----------------------
@@ -177,12 +183,15 @@ export class SessionHub {
     jsonMode: boolean;
     embeddings: boolean;
   };
+  /** JSONL trace output path; when set, postMessage creates a per-session trace. */
+  private readonly traceOut: string | undefined;
   /** Per-conversation serialization (spec A15). */
   private readonly inflight = new Map<string, Promise<void>>();
 
   constructor(opts: SessionHubOptions) {
     this.store = opts.store;
     this.cachedDeps = opts.deps;
+    this.traceOut = opts.traceOut;
     this.defaults = {
       mode: opts.defaultMode ?? "deterministic",
       jsonMode: opts.defaultJsonMode ?? false,
@@ -229,7 +238,18 @@ export class SessionHub {
     return this.serialize(conversationId, async () => {
       const session = await this.store.load(conversationId);
       const deps = await this.ensureDeps();
-      const { result } = await run(query, deps, opts?.signal, {
+      // Per-session trace: new JsonlTraceService each postMessage (not cached
+      // in cachedDeps) because conversationId differs per session (ADR-0003 D4).
+      const runDeps: LoopEngineDeps = this.traceOut
+        ? {
+            ...deps,
+            trace: createJsonlTraceService({
+              filePath: this.traceOut,
+              conversationId,
+            }),
+          }
+        : deps;
+      const { result } = await run(query, runDeps, opts?.signal, {
         priorMessages: session.messages,
       });
       // trace is destructured away → immediate GC (not logged/persisted/wired).

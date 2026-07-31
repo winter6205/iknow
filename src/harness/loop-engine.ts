@@ -38,6 +38,47 @@ import type {
 import type { Executor, Registry, ToolExecutionResult } from "./tools/types.js";
 import type { LoopTrace, TurnTrace } from "./loop-trace.js";
 import { computeTotals } from "./loop-trace.js";
+import type { TraceErrorType, TraceService } from "./trace/index.js";
+import { safeTrace } from "./trace/index.js";
+
+/**
+ * 把任意 reason 字符串安全映射为 TraceErrorType (消除 as 强转)。
+ * 已知值直接透传; 未知值 (含 nonSuccessStop / maxTurns / completed) 兜底 "unknown"。
+ */
+function toTraceErrorType(reason: string): TraceErrorType {
+  switch (reason) {
+    case "cancelled":
+    case "timeout":
+    case "protocolError":
+    case "emptyFinalResponse":
+    case "validation_failed":
+    case "tool_not_found":
+    case "execution_failed":
+      return reason;
+    default:
+      return "unknown";
+  }
+}
+
+/**
+ * 把 StopReason 安全映射为 TurnRecord.decision (消除 as 强转)。
+ * maxTurns 早停不记录 turn, 该分支不可达; 兜底 "nonSuccessStop" 保持 total。
+ */
+function toDecision(
+  reason: string
+): import("./trace/types.js").TurnRecord["decision"] {
+  switch (reason) {
+    case "completed":
+    case "nonSuccessStop":
+    case "protocolError":
+    case "emptyFinalResponse":
+    case "cancelled":
+    case "timeout":
+      return reason;
+    default:
+      return "nonSuccessStop";
+  }
+}
 
 /**
  * Loop Engine 需要的完整 Adapter 接口:除 step 外还要能编码用户文本
@@ -67,6 +108,8 @@ export interface LoopEngineDeps {
   readonly modelTimeoutMs?: number;
   /** 017: 工具侧覆盖;生效 = toolTimeoutMs ?? timeoutMs ?? DEFAULT_TIMEOUT_MS */
   readonly toolTimeoutMs?: number;
+  /** 064 T4: optional TraceService injection; byte-identical when absent (criterion 5/17) */
+  readonly trace?: TraceService;
 }
 
 /**
@@ -332,7 +375,12 @@ async function runToolPhase(
   deps: LoopEngineDeps,
   signal: AbortSignal | undefined,
   started: number
-): Promise<{ transition: Transition; turn: TurnTrace }> {
+): Promise<{
+  transition: Transition;
+  turn: TurnTrace;
+  toolResults: ReadonlyArray<ToolExecutionResult>;
+  toolCallViews: ReadonlyArray<{ id: string; name: string; input: unknown }>;
+}> {
   const toolCallViews = turnResult.projection.toolCalls.map((c) => ({
     id: c.id,
     name: c.name,
@@ -367,15 +415,24 @@ async function runToolPhase(
     return {
       transition: { kind: "stop", reason: "cancelled", finalState },
       turn,
+      toolResults: results,
+      toolCallViews,
     };
   }
   if (timedOut) {
     return {
       transition: { kind: "stop", reason: "timeout", finalState },
       turn,
+      toolResults: results,
+      toolCallViews,
     };
   }
-  return { transition: { kind: "continue", nextState: finalState }, turn };
+  return {
+    transition: { kind: "continue", nextState: finalState },
+    turn,
+    toolResults: results,
+    toolCallViews,
+  };
 }
 
 /**
@@ -395,23 +452,20 @@ async function stepWithTrace(
   deps: LoopEngineDeps,
   signal?: AbortSignal
 ): Promise<{ transition: Transition; turn: TurnTrace | null }> {
-  // S6:maxTurns guard,先于 Adapter 调用;不产生 trace entry。
   if (state.turnCount >= deps.maxTurns) {
     return {
-      transition: {
-        kind: "stop",
-        reason: "maxTurns",
-        finalState: state,
-      },
+      transition: { kind: "stop", reason: "maxTurns", finalState: state },
       turn: null,
     };
   }
 
   const started = performance.now();
-  // 017 T5 兜底链:侧覆盖 > 主超时 > DEFAULT_TIMEOUT_MS(最后一次兜底,只在两侧均
-  // 未配置时才落到此值;数值按 phase 每次解析,不在 state 中存储)。
+  const turnStartedAt = new Date().toISOString();
   const modelTimeout =
     deps.modelTimeoutMs ?? deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
+  const llmStartedAt = new Date().toISOString();
+  const llmStartMono = performance.now();
 
   const modelPhase = await runModelPhase(
     state,
@@ -420,17 +474,85 @@ async function stepWithTrace(
     started,
     modelTimeout
   );
+
+  const llmEndedAt = new Date().toISOString();
+  const llmDurationMs = performance.now() - llmStartMono;
+  let llmCallId: string | undefined;
+  if (deps.trace) {
+    if (modelPhase.kind === "stop") {
+      const t = modelPhase.transition;
+      const reason = t.kind === "stop" ? t.reason : "unknown";
+      llmCallId = await safeTrace(() =>
+        deps.trace!.recordLlmCall({
+          startedAt: llmStartedAt,
+          endedAt: llmEndedAt,
+          durationMs: llmDurationMs,
+          stream: false,
+          messagesCaptured: false,
+          status: "error",
+          error: { type: toTraceErrorType(reason), message: reason },
+        })
+      );
+    } else {
+      llmCallId = await safeTrace(() =>
+        deps.trace!.recordLlmCall({
+          startedAt: llmStartedAt,
+          endedAt: llmEndedAt,
+          durationMs: llmDurationMs,
+          supplierStop: modelPhase.result.supplierStop,
+          stream: false,
+          messagesCaptured: false,
+          status: "ok",
+        })
+      );
+    }
+  }
+
   if (modelPhase.kind === "stop") {
+    if (deps.trace) {
+      const t2 = modelPhase.transition;
+      const reason = t2.kind === "stop" ? t2.reason : "unknown";
+      await safeTrace(() =>
+        deps.trace!.recordTurn({
+          turnIndex: state.turnCount,
+          startedAt: turnStartedAt,
+          endedAt: new Date().toISOString(),
+          durationMs: performance.now() - started,
+          llmCallIds: llmCallId ? [llmCallId] : [],
+          toolCallIds: [],
+          decision: toDecision(reason),
+          status: "error",
+          error: { type: toTraceErrorType(reason), message: reason },
+        })
+      );
+    }
     return { transition: modelPhase.transition, turn: modelPhase.turn };
   }
   const turnResult = modelPhase.result;
 
-  // S8:empty final response 整回合不进历史。
   if (
     turnResult.projection.toolCalls.length === 0 &&
     turnResult.isEmptyFinalResponse
   ) {
     const durationMs = performance.now() - started;
+    if (deps.trace) {
+      await safeTrace(() =>
+        deps.trace!.recordTurn({
+          turnIndex: state.turnCount,
+          startedAt: turnStartedAt,
+          endedAt: new Date().toISOString(),
+          durationMs,
+          llmCallIds: llmCallId ? [llmCallId] : [],
+          toolCallIds: [],
+          decision: "emptyFinalResponse",
+          status: "error",
+          error: {
+            type: "emptyFinalResponse",
+            message: "emptyFinalResponse",
+          },
+        })
+      );
+    }
     return {
       transition: {
         kind: "stop",
@@ -448,7 +570,6 @@ async function stepWithTrace(
     };
   }
 
-  // Assistant 回合原子追加(S10 守门),并 turnCount +1。
   const nextState = appendMessage(state, turnResult.nativeMessage);
   const afterAssistantState = {
     messages: nextState.messages,
@@ -456,16 +577,29 @@ async function stepWithTrace(
   };
 
   if (turnResult.projection.toolCalls.length === 0) {
-    // 纯文本完成(S1 / S7)。
     const durationMs = performance.now() - started;
     const reason =
       turnResult.supplierStop === "success" ? "completed" : "nonSuccessStop";
+    if (deps.trace) {
+      await safeTrace(() =>
+        deps.trace!.recordTurn({
+          turnIndex: state.turnCount,
+          startedAt: turnStartedAt,
+          endedAt: new Date().toISOString(),
+          durationMs,
+          llmCallIds: llmCallId ? [llmCallId] : [],
+          toolCallIds: [],
+          decision: reason,
+          status: reason === "completed" ? "ok" : "error",
+          error:
+            reason === "completed"
+              ? undefined
+              : { type: toTraceErrorType("nonSuccessStop"), message: reason },
+        })
+      );
+    }
     return {
-      transition: {
-        kind: "stop",
-        reason,
-        finalState: afterAssistantState,
-      },
+      transition: { kind: "stop", reason, finalState: afterAssistantState },
       turn: mkTurn({
         turnIndex: state.turnCount,
         supplierStop: turnResult.supplierStop,
@@ -477,7 +611,10 @@ async function stepWithTrace(
     };
   }
 
-  return runToolPhase(
+  const toolStartedAt = new Date().toISOString();
+  const toolStartMono = performance.now();
+
+  const toolPhase = await runToolPhase(
     afterAssistantState,
     state.turnCount,
     turnResult,
@@ -485,6 +622,76 @@ async function stepWithTrace(
     signal,
     started
   );
+
+  const toolEndedAt = new Date().toISOString();
+  const toolDurationMs = performance.now() - toolStartMono;
+  const toolCallIds: string[] = [];
+  if (deps.trace) {
+    const nameById = new Map(
+      toolPhase.toolCallViews.map((c) => [c.id, c.name])
+    );
+    for (const result of toolPhase.toolResults) {
+      const toolName =
+        nameById.get(result.toolUseId) ??
+        (result.kind === "tool_not_found" ? result.toolName : "");
+      const toolCallId = await safeTrace(() =>
+        deps.trace!.recordToolCall({
+          parentLlmCallId: llmCallId,
+          toolName,
+          toolKind: result.kind,
+          startedAt: toolStartedAt,
+          endedAt: toolEndedAt,
+          durationMs: toolDurationMs,
+          argumentsCaptured: false,
+          resultCaptured: false,
+          status: result.kind === "ok" ? "ok" : "error",
+          error:
+            result.kind === "ok"
+              ? undefined
+              : {
+                  type: result.kind,
+                  message:
+                    result.kind === "execution_failed" ||
+                    result.kind === "validation_failed"
+                      ? result.message
+                      : result.kind,
+                },
+        })
+      );
+      if (toolCallId) toolCallIds.push(toolCallId);
+    }
+  }
+
+  if (deps.trace) {
+    const toolTransition = toolPhase.transition;
+    const isStop = toolTransition.kind === "stop";
+    const decision = toDecision(isStop ? toolTransition.reason : "completed");
+    await safeTrace(() =>
+      deps.trace!.recordTurn({
+        turnIndex: state.turnCount,
+        startedAt: turnStartedAt,
+        endedAt: new Date().toISOString(),
+        durationMs: performance.now() - started,
+        llmCallIds: llmCallId ? [llmCallId] : [],
+        toolCallIds,
+        decision,
+        status: isStop ? "error" : "ok",
+        error: isStop
+          ? {
+              type: toTraceErrorType(
+                toolTransition.kind === "stop"
+                  ? toolTransition.reason
+                  : "unknown"
+              ),
+              message:
+                toolTransition.kind === "stop" ? toolTransition.reason : "",
+            }
+          : undefined,
+      })
+    );
+  }
+
+  return { transition: toolPhase.transition, turn: toolPhase.turn };
 }
 
 /**

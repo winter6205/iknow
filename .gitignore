@@ -72,6 +72,9 @@ docs/handoff/*
 # directory exists in checkout; only the runtime session files are excluded.
 data/sessions/*
 
+# 064 T5: JSONL trace output (default path ./trace.jsonl)
+trace.jsonl
+
 # local Next.js prototype (early-stage, not team-shared; built artifacts
 # also covered by node_modules/ etc. above)
 iknow-prototype/

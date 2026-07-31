@@ -18,6 +18,8 @@ export type ServeOptions = {
   /** Base dir for session files; defaults to <cwd>/data. */
   dataDir?: string;
   hubOptions?: SessionHubOptions;
+  /** Trace output file path; forwarded to SessionHub for per-session JSONL trace (T5, #64). */
+  traceOut?: string;
 };
 
 export async function startSessionServe(
@@ -33,6 +35,7 @@ export async function startSessionServe(
     defaultMode: opts?.mode ?? "deterministic",
     defaultEmbeddings: opts?.embeddings ?? false,
     defaultJsonMode: opts?.json_mode ?? false,
+    traceOut: opts?.traceOut,
     ...opts?.hubOptions,
   });
 
