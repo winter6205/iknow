@@ -107,74 +107,92 @@ function deriveFinalText(
   return null;
 }
 
-/**
- * 017 T5:模型侧超时哨兵。Symbol 保证不与业务错误混淆;Promise.race
- * reject 时由上层 catch 路由到 stop timeout。clearTimeout 在 settled
- * 后清理。
- */
 /** 017 A3:超时运行时兜底。仅当 side-specific 与主超时字段都缺省时生效;按阶段解析,不存储。 */
 const DEFAULT_TIMEOUT_MS = 60_000;
-const MODEL_TIMEOUT = Symbol("loop-engine-model-timeout");
 
-/**
- * 017 T5:把 adapter.step 与两个外部约束(setTimeout 超时、AbortSignal
- * 中断)同时 race。`settled` 闭包守卫保证:
- *   - 只有一个结果胜出后才会清理 timer / listener(无内存泄漏);
- *   - 同名 throw 不会被多次触发。
- *
- * 优先级:signal abort 与 timeout 各自 reject 一个不同的值,上层 catch
- * 按 signal.aborted 优先判定 cancelled,再判定 timeout。
- */
-function raceModel(
-  adapter: LoopAdapter,
-  state: LoopState,
-  deps: LoopEngineDeps,
-  signal: AbortSignal | undefined,
-  timeoutMs: number
-): Promise<AssistantTurnResult> {
-  return new Promise<AssistantTurnResult>((resolve, reject) => {
+/** 023: raceModel 的结构化胜出来源，避免 SDK abort 错误覆盖原始意图。 */
+export type RaceOutcomeSource =
+  "adapter" | "timerTimeout" | "hostCancel" | "callerAbort";
+
+export interface RaceModelOutcome {
+  readonly result: AssistantTurnResult | undefined;
+  readonly source: RaceOutcomeSource;
+}
+
+export interface RaceModelHandle {
+  readonly outcome: Promise<RaceModelOutcome>;
+  readonly childSignal: AbortSignal;
+  readonly childAbort: () => void;
+}
+
+export interface RaceModelOpts {
+  readonly adapter: LoopAdapter;
+  readonly state: LoopState;
+  readonly deps: LoopEngineDeps;
+  readonly signal: AbortSignal | undefined;
+  readonly timeoutMs: number;
+}
+
+/** 023: settle 共址于 helper，统一 single-wins 与 cleanup。 */
+function createRaceOutcome(
+  opts: RaceModelOpts,
+  child: AbortController,
+  compositeSignal: AbortSignal,
+  setChildAbort: (abort: () => void) => void
+): Promise<RaceModelOutcome> {
+  return new Promise<RaceModelOutcome>((resolve, reject) => {
     let settled = false;
-    const settle = (
-      action: "resolve" | "reject",
-      value: AssistantTurnResult | unknown
-    ): void => {
-      if (settled) return;
-      settled = true;
-      if (timer !== undefined) clearTimeout(timer);
-      if (signal && abortListener) {
-        signal.removeEventListener("abort", abortListener);
-      }
-      if (action === "resolve") resolve(value as AssistantTurnResult);
-      else reject(value);
-    };
-
     let timer: ReturnType<typeof setTimeout> | undefined;
     let abortListener: (() => void) | undefined;
+    const settle = (
+      source: RaceOutcomeSource,
+      result?: AssistantTurnResult,
+      err?: unknown
+    ): void => {
+      if (settled) return; // post-settle SDK error / abort 均丢弃。
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      if (opts.signal && abortListener)
+        opts.signal.removeEventListener("abort", abortListener);
+      child.abort();
+      if (err !== undefined) reject(err);
+      else resolve(Object.freeze({ result, source }));
+    };
+    setChildAbort(() => settle("hostCancel"));
+    if (opts.timeoutMs > 0)
+      timer = setTimeout(() => {
+        child.abort(); // L1': 必须先取消 HTTP，再记录 timer 胜出。
+        settle("timerTimeout");
+      }, opts.timeoutMs);
+    abortListener = (): void => settle("callerAbort");
+    if (opts.signal?.aborted) abortListener();
+    else opts.signal?.addEventListener("abort", abortListener, { once: true });
+    opts.adapter
+      .step(opts.state, { tools: opts.deps.registry.list() }, compositeSignal)
+      .then(
+        (result) => settle("adapter", result),
+        (err) => settle("adapter", undefined, err)
+      );
+  });
+}
 
-    if (timeoutMs > 0) {
-      timer = setTimeout(() => settle("reject", MODEL_TIMEOUT), timeoutMs);
-    }
-
-    if (signal) {
-      if (signal.aborted) {
-        settle(
-          "reject",
-          new DOMException("This operation was aborted", "AbortError")
-        );
-        return;
-      }
-      abortListener = (): void =>
-        settle(
-          "reject",
-          new DOMException("This operation was aborted", "AbortError")
-        );
-      signal.addEventListener("abort", abortListener, { once: true });
-    }
-
-    adapter.step(state, { tools: deps.registry.list() }, signal).then(
-      (result) => settle("resolve", result),
-      (err) => settle("reject", err)
-    );
+/** 023: child 与 caller signal 合并，timer/host 都可取消真实 HTTP。 */
+export function raceModel(opts: RaceModelOpts): RaceModelHandle {
+  const child = new AbortController();
+  const childSignal = AbortSignal.any(
+    opts.signal ? [opts.signal, child.signal] : [child.signal]
+  );
+  let childAbort = (): void => undefined;
+  const outcome = createRaceOutcome(
+    opts,
+    child,
+    childSignal,
+    (abort) => (childAbort = abort)
+  );
+  return Object.freeze({
+    outcome,
+    childSignal,
+    childAbort: () => childAbort(),
   });
 }
 
@@ -204,17 +222,27 @@ function mkTurn(input: {
   });
 }
 
-/**
- * 017 T5:model 阶段封装。把 raceModel 调用 + 失败路由集中在此,避免
- * stepWithTrace 顶层出现 try/catch 与三路守卫分支。返回判别结果:
- *   - { kind: "ok"; result }:Adapter 成功,可继续后续阶段;
- *   - { kind: "stop"; transition; turn }:整回合失败已收敛为 stop,整回合
- *     不进入历史,但仍记一次占位 TurnTrace 供上层累积 trace。
- *
- * 守卫顺序(必须保持):
- *   signal.aborted > MODEL_TIMEOUT > ProtocolError > rethrow
- * 这是 017 S12 / S14 / 016 S9 路径的优先级契约,任何重排都会破坏测试。
- */
+/** 023: 临时把 source 映射回 017 双布尔；#98 enum 落地后移除。 */
+function modelStop(
+  state: LoopState,
+  started: number,
+  reason: "cancelled" | "timeout" | "protocolError"
+): { kind: "stop"; transition: Transition; turn: TurnTrace } {
+  return {
+    kind: "stop",
+    transition: { kind: "stop", reason, finalState: state },
+    turn: mkTurn({
+      turnIndex: state.turnCount,
+      supplierStop: "other",
+      toolCalls: [],
+      durationMs: performance.now() - started,
+      timeoutHit: reason === "timeout",
+      signalAborted: reason === "cancelled",
+    }),
+  };
+}
+
+/** 023: await 结构化 race outcome，并保持 SDK-first 错误 catch 契约。 */
 async function runModelPhase(
   state: LoopState,
   deps: LoopEngineDeps,
@@ -226,73 +254,24 @@ async function runModelPhase(
   | { kind: "stop"; transition: Transition; turn: TurnTrace }
 > {
   try {
-    const result = await raceModel(
-      deps.adapter,
+    const handle = raceModel({
+      adapter: deps.adapter,
       state,
       deps,
       signal,
-      modelTimeoutMs
-    );
-    return { kind: "ok", result };
+      timeoutMs: modelTimeoutMs,
+    });
+    const outcome = await handle.outcome;
+    if (outcome.source === "adapter") {
+      return { kind: "ok", result: outcome.result! };
+    }
+    if (outcome.source === "callerAbort") {
+      return modelStop(state, started, "cancelled");
+    }
+    return modelStop(state, started, "timeout");
   } catch (err) {
-    const durationMs = performance.now() - started;
-    if (signal?.aborted) {
-      // S12:signal 在模型在途触发,整回合不进历史。
-      return {
-        kind: "stop",
-        transition: {
-          kind: "stop",
-          reason: "cancelled",
-          finalState: state,
-        },
-        turn: mkTurn({
-          turnIndex: state.turnCount,
-          supplierStop: "other",
-          toolCalls: [],
-          durationMs,
-          timeoutHit: false,
-          signalAborted: true,
-        }),
-      };
-    }
-    if (err === MODEL_TIMEOUT) {
-      // S14:模型超时,整回合不进历史。
-      return {
-        kind: "stop",
-        transition: {
-          kind: "stop",
-          reason: "timeout",
-          finalState: state,
-        },
-        turn: mkTurn({
-          turnIndex: state.turnCount,
-          supplierStop: "other",
-          toolCalls: [],
-          durationMs,
-          timeoutHit: true,
-          signalAborted: false,
-        }),
-      };
-    }
-    if (err instanceof ProtocolError) {
-      // 016 S9 协议错误路径:整回合不进历史,不触发工具执行。
-      return {
-        kind: "stop",
-        transition: {
-          kind: "stop",
-          reason: "protocolError",
-          finalState: state,
-        },
-        turn: mkTurn({
-          turnIndex: state.turnCount,
-          supplierStop: "other",
-          toolCalls: [],
-          durationMs,
-          timeoutHit: false,
-          signalAborted: false,
-        }),
-      };
-    }
+    if (err instanceof ProtocolError)
+      return modelStop(state, started, "protocolError");
     throw err;
   }
 }

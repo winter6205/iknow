@@ -5,9 +5,10 @@
  * 每条 fixture 一次确定性 run,行为由 stub-model + stub-tool 驱动。
  */
 
+import { APIUserAbortError } from "@anthropic-ai/sdk";
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { run, step } from "../../src/harness/loop-engine.ts";
+import { raceModel, run, step } from "../../src/harness/loop-engine.ts";
 import type {
   AnthropicNativeMessage,
   AssistantTurnResult,
@@ -922,6 +923,114 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     assert.equal(last.signalAborted, true);
     assert.equal(last.toolCalls[0]!.kind, "execution_failed");
     assert.equal(last.toolCalls[0]!.message, "cancelled");
+  });
+
+  it("T2-new-1: SDK abort error does not poison timer timeout routing", async () => {
+    const tool = createStubTool({ name: "noop", next: () => ({}) });
+    const registry = createRegistry([tool]);
+    const executor = createExecutor(registry);
+    const adapter = Object.freeze({
+      encodeUserText: (text: string) => makeNative("user", text),
+      encodeToolResults: () => [],
+      step: async (
+        _state: LoopState,
+        _request: unknown,
+        signal?: AbortSignal
+      ) => {
+        await new Promise<void>((resolve) =>
+          signal?.addEventListener("abort", () => resolve(), { once: true })
+        );
+        throw new APIUserAbortError();
+      },
+    });
+    const state = Object.freeze({ messages: Object.freeze([]), turnCount: 0 });
+    const deps = Object.freeze({ adapter, executor, registry, maxTurns: 1 });
+    const handle = raceModel({
+      adapter,
+      state,
+      deps,
+      signal: undefined,
+      timeoutMs: 20,
+    });
+    assert.equal((await handle.outcome).source, "timerTimeout");
+
+    const { result } = await run("x", {
+      adapter,
+      executor,
+      registry,
+      maxTurns: 1,
+      modelTimeoutMs: 20,
+    });
+    assert.equal(result.stopReason, "timeout");
+  });
+
+  it("T2-new-2: timer aborts the composite adapter signal", async () => {
+    const tool = createStubTool({ name: "noop", next: () => ({}) });
+    const registry = createRegistry([tool]);
+    const executor = createExecutor(registry);
+    let receivedSignal: AbortSignal | undefined;
+    const adapter = Object.freeze({
+      encodeUserText: (text: string) => makeNative("user", text),
+      encodeToolResults: () => [],
+      step: async (
+        _state: LoopState,
+        _request: unknown,
+        signal?: AbortSignal
+      ) => {
+        receivedSignal = signal;
+        await new Promise<void>((resolve) => setTimeout(resolve, 200));
+        return assistantResult(["late"]);
+      },
+    });
+    const { result } = await run("x", {
+      adapter,
+      executor,
+      registry,
+      maxTurns: 1,
+      modelTimeoutMs: 20,
+    });
+    assert.equal(result.stopReason, "timeout");
+    assert.equal(receivedSignal?.aborted, true);
+  });
+
+  it("T2-new-3: caller abort wins before the model timer", async () => {
+    const tool = createStubTool({ name: "noop", next: () => ({}) });
+    const registry = createRegistry([tool]);
+    const executor = createExecutor(registry);
+    const adapter = createStubModel([assistantResult(["late"])], {
+      delayMs: 200,
+    });
+    const controller = new AbortController();
+    const pending = run(
+      "x",
+      { adapter, executor, registry, maxTurns: 1, modelTimeoutMs: 200 },
+      controller.signal
+    );
+    controller.abort();
+    const { result } = await pending;
+    assert.equal(result.stopReason, "cancelled");
+  });
+
+  it("T2-new-4: aborts after adapter settle are idempotent no-ops", async () => {
+    const tool = createStubTool({ name: "noop", next: () => ({}) });
+    const registry = createRegistry([tool]);
+    const executor = createExecutor(registry);
+    const adapter = createStubModel([assistantResult(["done"])]);
+    const controller = new AbortController();
+    const state = Object.freeze({ messages: Object.freeze([]), turnCount: 0 });
+    const deps = Object.freeze({ adapter, executor, registry, maxTurns: 1 });
+    const handle = raceModel({
+      adapter,
+      state,
+      deps,
+      signal: controller.signal,
+      timeoutMs: 200,
+    });
+    const outcome = await handle.outcome;
+    assert.equal(outcome.source, "adapter");
+    assert.doesNotThrow(() => controller.abort());
+    assert.doesNotThrow(() => handle.childAbort());
+    assert.equal((await handle.outcome).source, "adapter");
   });
 });
 
