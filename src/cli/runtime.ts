@@ -22,11 +22,9 @@ import { loadIknowEnv, type IknowEnv } from "../config/env.js";
 import type { CallerRole, SessionContext } from "../shared/schema.js";
 import { createIknowRuntime } from "../runtime/create-runtime.js";
 import type { InMemoryKnowledgeStore } from "../knowledge-store/memory-store.js";
-import type { VectorIndex } from "../kb-retrieve/embedding/vector-index.js";
 
 export type RuntimeBundle = {
   store: InMemoryKnowledgeStore;
-  vectorIndex: VectorIndex | undefined;
   env: IknowEnv;
   session: SessionContext;
 };
@@ -47,21 +45,14 @@ export async function prepareRuntime(opts: {
     );
   }
 
-  const {
-    store,
-    vectorIndex,
-    env: runtimeEnv,
-  } = await createIknowRuntime({
-    enableEmbeddings: opts.embeddings,
-    env,
-  });
+  const { store, env: runtimeEnv } = await createIknowRuntime({ env });
 
   const session: SessionContext = {
     caller_role: opts.role,
     simulate_governance_timeout: opts.degrade,
   };
 
-  return { store, vectorIndex, env: runtimeEnv, session };
+  return { store, env: runtimeEnv, session };
 }
 
 export type BuiltEngine = {

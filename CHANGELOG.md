@@ -4,6 +4,7 @@
 
 ### Breaking (internal, pre-release)
 
+- 归档 `src/kb-*` 4-tool 套件（`kb_retrieve` / `kb_verify_citation` / `kb_compile` / `kb_governance`）+ 装配 facade `src/tools/registry.ts` -> `docs/archive/023-retire-kb-tools/`。CLI 产品路径（`buildHarnessEngine`）在 020 切到 harness 后已不再消费 `kb_*`（只跑 `echo` / `get_time` demo 工具），4-tool 套件仅作为 `src/index.ts` 导出 + 4 个 test 文件存活，零生产消费者。连带修剪：`src/index.ts` 删 13 行 export；`src/shared/schema.ts` 删 `Kb*Input/Output` / `Chunk` / `PriorChunk` / `SourceSpan` / `CompiledFact` / `SnapshotPayload` / `RRF_K` 等类型（保留 `CallerRole` / `SessionContext`，CLI slash 仍用）；`src/runtime/create-runtime.ts` 删 embedding/vector-index 路径，简化为 `store + env`；`src/cli/runtime.ts` 的 `RuntimeBundle` 删 `vectorIndex` 字段；删 4 个 test（`verify` / `compile` / `rrf` / `embedding`）。**保留为孤儿待后续清理**：`SessionContext.simulate_governance_timeout` / `--governance-timeout` flag / `prepareRuntime.degrade`（0 消费者）；`--embeddings` flag（runtime 内 no-op）。归档非删除，对齐 021/022 惯例。
 - 移除 `src/index.ts` 对旧 `src/agent-loop/` 与 `src/eval/` 的 re-export（13 旧 loop 符号 + 5 EVAL 符号 + `eval/types` type re-export）；包状态 `private: true` + `0.1.0 (unreleased)` 未发布，无外部消费者，仅记录内部 API 变更，审计可追溯。详见 #48（021）Resolution Q3。
 - `TurnDto.answer` 从 `IknowAnswer`（G2 envelope）改为 `TurnAnswerDto {finalText, stopReason, turnCount}`（harness RunResult 投影）；G2 envelope 在 Session API wire 退役。详见 #51（022）Resolution Q1。
 - `SessionSummary` 移除 `caller_role` 字段；wire 不再接受/返回 caller role（harness 路径退役）。详见 #51（022）Resolution Q2-G4。

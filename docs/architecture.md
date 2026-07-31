@@ -6,32 +6,35 @@ iknow is an independently packaged enterprise knowledge-base agent. Runtime code
 
 | Module | Path | Responsibility |
 |--------|------|----------------|
-| Retrieve | `src/kb-retrieve/` | Dual-arm ranking, RRF merge, A-filter → ranked chunks |
-| Verify | `src/kb-verify/` | Pure three-state citation support check (`source_span`) |
-| Compile | `src/kb-compile/` | Fact compile + content_hash dedup |
-| Governance | `src/kb-governance/` | Freshness, conflict, `snapshot_id` |
-| Agent loop | `src/agent-loop/` | Tool orchestration, `max_hops`, G2 envelope（**待退役**：016->018 路线由 `src/harness/` Foundation 取代） |
-| Harness (Foundation) | `src/harness/` | Loop Engine + Anthropic adapter + stubs + Executor + Registry；**暂不接产品流量**，4 tool 协议不动（spec: `specs/minimum-sequential-agent-loop.md`） |
-| Runtime / tools / config | `src/runtime/`, `src/tools/`, `src/config/` | 运行时装配 / 工具注册 / `.env`+`process.env` 加载 |
+| ~~Retrieve~~ | `src/kb-retrieve/` (archived 023) | ~~Dual-arm ranking, RRF merge, A-filter → ranked chunks~~ |
+| ~~Verify~~ | `src/kb-verify/` (archived 023) | ~~Pure three-state citation support check (`source_span`)~~ |
+| ~~Compile~~ | `src/kb-compile/` (archived 023) | ~~Fact compile + content_hash dedup~~ |
+| ~~Governance~~ | `src/kb-governance/` (archived 023) | ~~Freshness, conflict, `snapshot_id`~~ |
+| Archived suites | `docs/archive/023-retire-kb-tools/`, `docs/archive/022-retire-agent-loop/` | Retired 4-tool suite + agent-loop facade |
+| Harness (Foundation) | `src/harness/` | Loop Engine + Anthropic adapter + Executor + Registry + ACI decor layer (`src/harness/aci/`); CLI product path runs through `buildHarnessEngine` (spec: `specs/minimum-sequential-agent-loop.md`) |
+| Runtime / config | `src/runtime/`, `src/config/` | Runtime bootstrap (`createIknowRuntime` returns `store + env`); `.env`+`process.env` loading |
 | Knowledge store | `src/knowledge-store/` | In-memory KB abstraction (replaceable later) |
-| Shared | `src/shared/` | Schema, errors, hashing helpers |
-| Eval | `src/eval/` | Trajectory scorer + suite runner（`npm run eval`） |
+| Shared | `src/shared/` | Schema (`CallerRole` / `SessionContext`), errors, hashing helpers |
 | CLI / entry | `src/cli.ts`, `src/index.ts` | Dev/ask + `chat` REPL + `serve` entrypoints |
-| Interaction host | `src/interaction/` | Conversation bag, human/json format, slash parse (no tool schema change) |
 | Session HTTP | `src/session-api/` | Multi-conversation hub + node:http API; static root prefers `web/dist` |
-| Web UI | `web/` | Vite + React + TypeScript SPA (product console); build → `web/dist`; G2 side panel projection; see `docs/design/frontend-stack-upgrade-v1.md` |
+| Web UI | `web/` | Vite + React + TypeScript SPA (product console); build → `web/dist`; see `docs/design/frontend-stack-upgrade-v1.md` |
 
 ```text
 user query
     │
     ▼
- agent-loop  ──max_hops──►  G2 envelope
+ harness (src/harness/)  ──maxTurns──►  Anthropic adapter
     │
-    ├── kb_retrieve ──► knowledge-store (chunks)
-    ├── kb_verify_citation
-    ├── kb_compile ──► facts
-    └── kb_governance ──► snapshot / freshness / conflict
+    ├── fs_search / fs_view / fs_edit (ACI, read-only / write)
+    ├── shell_exec (ACI, allowlist-first shell)
+    └── context_manager (ACI, lazy observability compression)
 ```
+
+> 023 退役说明：`kb_*` 套件与其 vanilla facade `src/tools/registry.ts` 归档于
+> `docs/archive/023-retire-kb-tools/`。CLI 产品路径在 020 切到 harness 后已不再
+> 消费 `kb_*`，agent 执行层改由 harness ACI 装饰层（PR #95，`src/harness/aci/`）
+> 承接。`src/shared/schema.ts` 中的 `Kb*Input/Output` / `Chunk` / `PriorChunk` 等
+> 协议类型同步删除；`CallerRole` / `SessionContext` 保留（CLI slash + banner 仍用）。
 
 ## Design truth vs reference
 

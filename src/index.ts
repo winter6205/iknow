@@ -10,16 +10,6 @@ export type {
   FactRecord,
 } from "./knowledge-store/types.js";
 
-export { kbRetrieve } from "./kb-retrieve/retrieve.js";
-export { rrfFusion, RRF_K } from "./kb-retrieve/rrf.js";
-export { scoreKeyword, scoreOverlap, tokenize } from "./kb-retrieve/keyword.js";
-export { kbVerifyCitation } from "./kb-verify/verify.js";
-export { kbCompile } from "./kb-compile/compile.js";
-export { kbGovernance } from "./kb-governance/governance.js";
-
-export { createToolRegistry } from "./tools/registry.js";
-export type { ToolRegistry } from "./tools/registry.js";
-
 export {
   createSeededStore,
   seedEnterpriseKb,
@@ -39,18 +29,6 @@ export type {
   AgentMode,
   EmbeddingMode,
 } from "./config/env.js";
-
-export {
-  createEmbeddingClientFromEnv,
-  getOrCreateVectorIndex,
-  ensureStoreIndexed,
-  getSharedEmbeddingClient,
-  OpenAiCompatibleEmbeddingClient,
-} from "./kb-retrieve/embedding/index.js";
-export type {
-  EmbeddingClient,
-  ChunkEmbedInput,
-} from "./kb-retrieve/embedding/index.js";
 
 export { createIknowRuntime } from "./runtime/create-runtime.js";
 export type {

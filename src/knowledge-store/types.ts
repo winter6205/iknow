@@ -1,6 +1,6 @@
 /**
  * In-process knowledge store entity shapes.
- * Aligns with tool-schema Chunk/CompiledFact + governance fields.
+ * Independent of tool contracts (kb_* retired 023; tools now via harness ACI).
  */
 
 export type Freshness = "fresh" | "stale" | "revoked";
