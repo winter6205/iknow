@@ -54,21 +54,23 @@ Use as default bias, not strict checklist.
 
 ```bash
 npm test          # vitest：unit + eval alignment + trajectory + harness
-npm run eval      # 32-sample trajectory suite
 ```
+
+> `npm run eval` 已随 021 归档（`docs/archive/021-retire-legacy-loop-and-eval/`），script 已删。
 
 ### Module boundaries
 
-- `src/harness/` - Foundation 运行时（loop-engine / anthropic-adapter / stubs / executor / registry）。**暂不接产品流量；4 tool 协议不动**。
-- `src/interaction/` - host 层（会话袋 / slash / 人读&JSON 投影），**不是**第五个 tool。
+- `src/harness/` - Foundation 运行时（loop-engine / anthropic-adapter / executor / registry）+ ACI 装饰层原型（`src/harness/aci/`，PR #95）。**CLI 产品路径已接入**（020 切 harness，task #14 接 ACI 工具），4-tool 协议类型冻结不动（`src/harness/tools/types.ts`）。
+- `src/harness/stubs/` - 替身 tool/model（仅供测试，i9 smoke + 单元测试装配；CLI 默认装配已用 ACI 工具替换）。
 - `_upstream_gbrain/` - 只读参考（gitignore），禁止 runtime 链接 / import / symlink / 动态加载。
 - `src/session-api/` 静态托管 `prefer web/dist`（无 dist 时回退 `web/`）。
 - `src/cli.ts` 是产品 CLI 入口：`chat`（TTY REPL / 管道）/ `ask`（oneshot JSON）/ `serve`（HTTP + SPA）。
+- 归档：`src/agent-loop/` + `src/interaction/`（`docs/archive/022-retire-agent-loop/`）；`src/kb-retrieve/` + `src/kb-verify/` + `src/kb-compile/` + `src/kb-governance/` + `src/tools/registry.ts`（`docs/archive/023-retire-kb-tools/`）。
 
 完整路径→职责见 `docs/architecture.md` Capability modules 表（真值，SSOT）。
 
 **Agent mode**: `deterministic`（默认 / CI）或 `llm`（`--mode llm` / `IKNOW_AGENT_MODE`；显式 `--mode` 优先）。  
-**Embedding**: 可选 `--embeddings` / `IKNOW_EMBEDDING_MODE=api`（9router 等）；失败回退 overlap。  
+**Embedding**: `--embeddings` / `IKNOW_EMBEDDING_MODE=api` flag 保留为表面兼容（runtime 内 no-op，因 023 归档了 vector index；orphan，待后续 cleanup）。  
 **交互主入口**: TTY `chat`；脚本 `ask`；浏览器 `iknow serve` + `web/dist`（开发可 `web:dev` 代理 `/api`）。  
 **LLM 客户端**: `stream: false` + `parseLlmResponseJson`（容忍 SSE trailer）。  
 **9router key**: 环境变量名 `NINE_ROUTER_KEY`（LLM 与 embedding 共用，env.ts SSOT）；`models` 200 ≠ chat/embeddings 必通；探针 `scripts/i4-probe-nine-endpoints.ts`。  
