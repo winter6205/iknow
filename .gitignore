@@ -92,3 +92,4 @@ docs/kb-assistant-guide
 !.claude/
 .claude/*
 !.claude/settings.json
+.playwright-cli
