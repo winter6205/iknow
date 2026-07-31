@@ -15,8 +15,7 @@
     }
   },
   "workspaces": [
-    "web",
-    "graphrag-memory"
+    "web"
   ],
   "engines": {
     "node": ">=20"

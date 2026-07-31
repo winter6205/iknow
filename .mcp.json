@@ -1,14 +1,14 @@
 {
   "mcpServers": {
-    "graphrag-memory": {
+    "iknow-memory": {
       "command": "node",
-      "args": ["graphrag-memory/dist/index.js"],
+      "args": ["../iknow-memory/dist/index.js"],
       "env": {
-        "GRAPHRAG_MEMORY_EMBED_BASE_URL": "http://localhost:20128/v1",
-        "GRAPHRAG_MEMORY_EMBED_MODEL": "zhipueb/embedding-3",
-        "GRAPHRAG_MEMORY_EMBED_DIMENSIONS": "2048",
-        "GRAPHRAG_MEMORY_EMBED_API_KEY_ENV": "NINE_ROUTER_KEY",
-        "GRAPHRAG_MEMORY_LOG_LEVEL": "info"
+        "IKNOW_MEMORY_EMBED_BASE_URL": "http://localhost:20128/v1",
+        "IKNOW_MEMORY_EMBED_MODEL": "zhipueb/embedding-3",
+        "IKNOW_MEMORY_EMBED_DIMENSIONS": "2048",
+        "IKNOW_MEMORY_EMBED_API_KEY_ENV": "NINE_ROUTER_KEY",
+        "IKNOW_MEMORY_LOG_LEVEL": "info"
       }
     }
   }
