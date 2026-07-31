@@ -89,7 +89,19 @@ export function createSession(
 export function listSessions(
   signal?: AbortSignal
 ): Promise<{ sessions: SessionListItem[] }> {
-  return request(`${API}/sessions`, {}, signal);
+  return request<{ sessions: SessionListItem[] }>(
+    `${API}/sessions`,
+    {},
+    signal
+  ).then((res) => ({
+    // Drop empty sessions: ones whose last assistant text is empty AND
+    // the front-end can't determine otherwise. These are records created
+    // by a partial bootstrap (no user query ever recorded) and clutter the
+    // sidebar. Sessions with any recorded activity are preserved.
+    sessions: res.sessions.filter(
+      (s) => s.lastFinalText && s.lastFinalText.trim().length > 0
+    ),
+  }));
 }
 
 export function getSessionHistory(

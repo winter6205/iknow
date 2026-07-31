@@ -1,66 +1,69 @@
 /**
- * iknow product shell design tokens.
- * Forest cockpit + warm parchment (productized; not purple AI default).
- * Dark theme only (single intentional theme).
+ * iknow product shell design tokens — Variant A「软光 · 圆滑」(issue #92).
+ * Tailwind v4 CSS-first config: the @theme block generates utility classes
+ * (bg-bg, text-ink, rounded-card, shadow-chip, ease-soft, etc.) and outputs
+ * all --color-* / --radius-* / --shadow-* / --font-* / --ease-* vars to :root.
  */
+
+/* Layout constants still referenced via var() in component classNames
+   (no Tailwind utility equivalent). Kept minimal on purpose. */
 :root {
-  --bg-base: #041c1c;
-  --bg-elevated: #0a2828;
-  --bg-panel: #0e2f2f;
-  --bg-input: #062222;
-  --bg-user: #123636;
-  /* Slightly deeper than elevated chrome so agent bubbles read as content, not bar */
-  --bg-agent: #082424;
-
-  --border-subtle: rgba(255, 230, 203, 0.14);
-  --border-strong: rgba(255, 230, 203, 0.28);
-  --border-focus: rgba(255, 189, 56, 0.65);
-
-  --text-primary: #ffe6cb;
-  --text-secondary: rgba(255, 230, 203, 0.72);
-  --text-tertiary: rgba(255, 230, 203, 0.45);
-  --text-on-accent: #041c1c;
-
-  --accent: #d4a04a;
-  --accent-hover: #e0b35e;
-  --accent-muted: rgba(212, 160, 74, 0.18);
-  --glow: rgba(255, 189, 56, 0.22);
-
-  --status-ok: #3d9b6e;
-  --status-warn: #c9a227;
-  --status-danger: #c45c5c;
-  /* Busy tracks accent so re-theme stays coherent */
-  --status-busy: var(--accent);
-
-  --radius-sm: 4px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-
-  --space-1: 0.25rem;
-  --space-2: 0.5rem;
-  --space-3: 0.75rem;
-  --space-4: 1rem;
-  --space-5: 1.5rem;
-  --space-6: 2rem;
-  --space-8: 3rem;
-
-  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
-  --text-xs: 0.75rem;
-  --text-sm: 0.8125rem;
-  --text-md: 0.9375rem;
-  --text-lg: 1.0625rem;
-  --text-xl: 1.25rem;
-
-  --header-h: 56px;
-  --side-w: 20rem;
   --chat-max: 46rem;
-  --z-base: 0;
-  --z-noise: 1;
-  --z-root: 2;
-  --z-header: 10;
+}
 
-  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --dur-fast: 120ms;
-  --dur-med: 220ms;
+/* ink-2/3 alpha 较 Variant A 原型(0.62/0.52)微调至 0.66/0.62 以满足 WCAG AA 小字对比度。
+   accent / ok 调色（issue #92 #2 取向翻转）：松绿 → 雾灰 #7d8a82。
+   #7d8a82 vs bg #f6f3ec 对比度 3.25，最低饱和度雾灰，最克制。按钮文字深字（#2c2820）。*/
+@theme {
+  --color-bg: #f6f3ec;
+  --color-surface: #fffdf8;
+  --color-user: #eef0e6;
+  --color-ink: #23281f;
+  --color-ink-2: rgba(35, 40, 31, 0.66);
+  --color-ink-3: rgba(35, 40, 31, 0.62);
+  --color-accent: #7d8a82;
+  --color-accent-soft: rgba(125, 138, 130, 0.16);
+  --color-line: rgba(35, 40, 31, 0.09);
+  --color-ok: #7d8a82;
+  --color-warn: #a3781f;
+  --color-danger: #b04a3a;
+  --color-warn-soft: rgba(163, 120, 31, 0.12);
+  --color-danger-soft: rgba(176, 74, 58, 0.11);
+  --radius-card: 20px;
+  --radius-panel: 12px;
+  --radius-pill: 999px;
+  --shadow-bubble:
+    0 1px 2px rgba(35, 40, 31, 0.04), 0 5px 14px rgba(35, 40, 31, 0.04);
+  --shadow-card:
+    0 1px 2px rgba(35, 40, 31, 0.05), 0 8px 24px rgba(35, 40, 31, 0.07);
+  --shadow-chip: 0 4px 9px rgba(35, 40, 31, 0.09);
+  --font-sans: "Outfit Variable", "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono:
+    "IBM Plex Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+  --ease-soft: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* 动画 token（issue #92 #20）。stagger 延迟由组件内联 --i 变量驱动。 */
+  --animate-message-in: messageIn 460ms var(--ease-soft) both;
+  --animate-fade-in: fadeIn 180ms ease both;
+}
+
+/* 消息入场 stagger：user --i=idx*2, agent --i=idx*2+1，延迟 = calc(var(--i)*70ms)（组件内联）。 */
+@keyframes messageIn {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }

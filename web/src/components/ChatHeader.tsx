@@ -1,86 +1,52 @@
-import type { SessionSummary } from "../api/types";
 import type { ChatPhase } from "../hooks/useSessionChat";
-import { shortId } from "../lib/format";
-import styles from "./ChatHeader.module.css";
 
 export type ChatHeaderProps = {
-  session: SessionSummary | null;
   phase: ChatPhase;
   healthLabel: string | null;
-  onReset: () => void;
-  onNewSession: () => void;
 };
 
-function statusLabel(phase: ChatPhase): { text: string; tone: string } {
+function statusFor(phase: ChatPhase): { label: string; dotClass: string } {
   switch (phase) {
     case "loading":
-      return { text: "连接中", tone: "busy" };
+      return { label: "连接中", dotClass: "bg-warn" };
     case "sending":
-      return { text: "生成中", tone: "busy" };
+      return { label: "生成中", dotClass: "bg-warn" };
     case "error":
-      return { text: "错误", tone: "danger" };
+      return { label: "连接异常", dotClass: "bg-danger" };
     case "ready":
     default:
-      return { text: "就绪", tone: "ok" };
+      return { label: "已连接", dotClass: "bg-ok" };
   }
 }
 
-export function ChatHeader({
-  session,
-  phase,
-  healthLabel,
-  onReset,
-  onNewSession,
-}: ChatHeaderProps) {
-  const status = statusLabel(phase);
-  const busy = phase === "loading" || phase === "sending";
-  const sessionShort = shortId(session?.conversation_id, 10);
+export function ChatHeader({ phase, healthLabel }: ChatHeaderProps) {
+  const status = statusFor(phase);
 
   return (
-    <header className={styles.header}>
-      <div className={styles.brand}>
-        <span className={styles.mark} aria-hidden="true">
+    <header className="flex h-14 shrink-0 items-center justify-between border-b border-line bg-surface px-5">
+      {/* Brand wordmark — h1 restores page heading hierarchy; m-0 neutralizes
+          the h1 default block margins so the visual footprint matches span. */}
+      <div className="flex items-center gap-2">
+        <span className="text-base leading-none text-accent" aria-hidden="true">
           ◆
         </span>
-        <div className={styles.brandText}>
-          <h1 className={styles.title}>iknow</h1>
-          <p className={styles.subtitle}>企业知识库 Agent</p>
-        </div>
+        <h1 className="m-0 text-base font-medium tracking-[-0.015em] text-ink">
+          iknow
+        </h1>
       </div>
 
-      <div className={styles.meta}>
+      {/* Connection status */}
+      <span
+        className="flex items-center gap-1.5 font-mono text-[11px] tracking-[0.02em] text-ink-3"
+        title={healthLabel ?? undefined}
+        aria-live="polite"
+      >
         <span
-          className={styles.status}
-          data-tone={status.tone}
-          title={healthLabel ?? undefined}
-          aria-live="polite"
-        >
-          <span className={styles.dot} aria-hidden="true" />
-          {status.text}
-        </span>
-        <span className={styles.sessionId} title={session?.conversation_id}>
-          会话 {sessionShort}
-        </span>
-      </div>
-
-      <div className={styles.controls}>
-        <button
-          type="button"
-          className={styles.btnGhost}
-          disabled={busy || !session}
-          onClick={onReset}
-        >
-          重置
-        </button>
-        <button
-          type="button"
-          className={styles.btnPrimary}
-          disabled={busy}
-          onClick={onNewSession}
-        >
-          新会话
-        </button>
-      </div>
+          className={`h-1.5 w-1.5 rounded-full ${status.dotClass}`}
+          aria-hidden="true"
+        />
+        {status.label}
+      </span>
     </header>
   );
 }
