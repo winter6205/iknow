@@ -38,7 +38,7 @@ export function MessageList({
       aria-label="对话记录"
       className="flex h-full min-h-0 flex-1 flex-col overflow-y-auto px-4 py-6"
     >
-      <ul className="m-0 mx-auto flex w-full max-w-[var(--chat-max)] list-none flex-col gap-[26px] p-0">
+      <ul className="m-0 mx-auto flex w-full max-w-[var(--chat-max)] list-none flex-col gap-[18px] p-0">
         {messages.map((m, idx) => (
           <li key={m.id}>
             {m.role === "user" ? (

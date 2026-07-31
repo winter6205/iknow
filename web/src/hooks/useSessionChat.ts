@@ -92,17 +92,25 @@ function turnsToMessages(turns: TurnDto[]): ChatUiMessage[] {
   const out: ChatUiMessage[] = [];
   turns.forEach((t, i) => {
     const q = queryIdSlice(t.query);
-    out.push({
-      id: `u-${i}-${q}`,
-      role: "user",
-      text: t.query,
-    });
-    out.push({
-      id: `a-${i}-${q}`,
-      role: "agent",
-      text: t.answer.finalText,
-      answer: t.answer,
-    });
+    // Skip empty user turns (e.g. backend bootstrap records with no query) —
+    // these render as a blank pill in the timeline.
+    if (t.query.trim()) {
+      out.push({
+        id: `u-${i}-${q}`,
+        role: "user",
+        text: t.query,
+      });
+    }
+    // Agent turns: keep if finalText has content OR if there's a paired user
+    // turn that we just emitted (so the conversation flow stays paired).
+    if (t.answer.finalText.trim()) {
+      out.push({
+        id: `a-${i}-${q}`,
+        role: "agent",
+        text: t.answer.finalText,
+        answer: t.answer,
+      });
+    }
   });
   return out;
 }

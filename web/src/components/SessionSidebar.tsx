@@ -23,6 +23,13 @@ export type SessionSidebarProps = {
   collapsed: boolean;
   onToggleCollapsed: () => void;
   onNewSession: () => void;
+  /**
+   * Bump to force the sidebar to re-fetch the session list. App holds the
+   * counter and increments after lifecycle events (newSession / createAndAdopt
+   * on bootstrap) so the list reflects the current session set without the
+   * user having to click refresh.
+   */
+  refreshSignal?: number;
 };
 
 /** Surface any thrown value as a human-readable string. */
@@ -38,14 +45,16 @@ type SessionListState = {
 };
 
 /**
- * Fetch + cache the session list. `refresh` bumps a key that re-runs the
- * effect; the AbortController cancels any in-flight request on unmount or
- * re-run so a stale response can never overwrite newer state.
+ * Fetch + cache the session list. `refresh` bumps an internal key that
+ * re-runs the effect; an external `externalSignal` (App-owned) also bumps it
+ * so lifecycle events (newSession / bootstrap) refresh the list without the
+ * user clicking. The AbortController cancels any in-flight request on unmount
+ * or re-run so a stale response can never overwrite newer state.
  *
  * #90 contract preserved: listSessions + sortSessionsByUpdatedDesc +
  * error surfacing + refresh bump — only the visual layer changed.
  */
-function useSessionList(): SessionListState {
+function useSessionList(externalSignal?: number): SessionListState {
   const [phase, setPhase] = useState<SidebarPhase>("loading");
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -68,22 +77,11 @@ function useSessionList(): SessionListState {
       }
     );
     return () => ctrl.abort();
-  }, [reloadKey]);
+  }, [reloadKey, externalSignal]);
 
   const refresh = useCallback(() => setReloadKey((k) => k + 1), []);
 
   return { phase, sessions, errorMsg, refresh };
-}
-
-/** Compact timestamp: HH:MM when same calendar day, MM-DD otherwise. */
-function formatWhen(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const sameDay = d.toDateString() === now.toDateString();
-  if (sameDay) return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 function cx(...parts: Array<string | false | null | undefined>): string {
@@ -98,9 +96,8 @@ function PlusIcon() {
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth={2}
+      strokeWidth={1.8}
       strokeLinecap="round"
-      strokeLinejoin="round"
       aria-hidden="true"
     >
       <line x1="12" y1="5" x2="12" y2="19" />
@@ -117,14 +114,13 @@ function RefreshIcon() {
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth={2}
+      strokeWidth={1.8}
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
     >
       <polyline points="23 4 23 10 17 10" />
-      <polyline points="1 20 1 14 7 14" />
-      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
     </svg>
   );
 }
@@ -137,7 +133,7 @@ function ChevronLeftIcon() {
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth={2}
+      strokeWidth={1.8}
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
@@ -155,7 +151,7 @@ function ChevronRightIcon() {
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth={2}
+      strokeWidth={1.8}
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
@@ -200,7 +196,7 @@ function ErrorState({
         onClick={onRetry}
         className={cx(
           "mt-1 rounded-pill border border-accent/30 bg-accent-soft px-3 py-1 text-xs font-medium text-accent",
-          "transition-colors duration-[160ms] ease-soft hover:border-accent hover:bg-accent hover:text-surface",
+          "transition-colors duration-[160ms] ease-soft hover:border-accent hover:bg-accent hover:text-ink",
           FOCUS_RING
         )}
       >
@@ -229,8 +225,11 @@ function SessionItem({
   onSelect: (id: string) => void;
 }) {
   const active = isCurrentSession(session.conversation_id, currentId);
-  const excerpt = truncateExcerpt(session.lastFinalText, 80) || "（无消息）";
-  const when = formatWhen(session.updatedAt);
+  // If the session has no captured final text, fall back to the conversation
+  // id prefix rather than the literal "(无消息)" — looks cleaner in the list.
+  const excerpt =
+    truncateExcerpt(session.lastFinalText, 32) ||
+    shortId(session.conversation_id, 8);
   return (
     <li>
       <button
@@ -239,42 +238,15 @@ function SessionItem({
         title={session.conversation_id}
         onClick={() => onSelect(session.conversation_id)}
         className={cx(
-          "group flex w-full flex-col gap-1 rounded-panel border-l-2 px-3 py-2 text-left",
+          "group flex w-full items-baseline gap-2 truncate rounded-panel px-3 py-1.5 text-left text-[13px]",
           "transition-colors duration-[160ms] ease-soft",
           active
-            ? "border-l-accent bg-accent-soft"
-            : "border-l-transparent text-ink-2 hover:bg-bg hover:text-ink",
+            ? "bg-accent-soft text-accent font-medium"
+            : "text-ink-2 hover:bg-bg hover:text-ink",
           FOCUS_RING
         )}
       >
-        <span className="flex items-baseline justify-between gap-2">
-          <span
-            className={cx(
-              "truncate font-mono text-[11px]",
-              active ? "text-accent" : "text-ink-3"
-            )}
-          >
-            {shortId(session.conversation_id, 10)}
-          </span>
-          {when ? (
-            <span
-              className={cx(
-                "shrink-0 font-mono text-[10px]",
-                active ? "text-accent/80" : "text-ink-3"
-              )}
-            >
-              {when}
-            </span>
-          ) : null}
-        </span>
-        <span
-          className={cx(
-            "line-clamp-2 break-words text-sm leading-snug",
-            active ? "text-ink" : "text-ink-2"
-          )}
-        >
-          {excerpt}
-        </span>
+        <span className="truncate">{excerpt}</span>
       </button>
     </li>
   );
@@ -329,7 +301,7 @@ function ExpandedSidebar({
   const { phase, sessions, errorMsg, refresh, currentConversationId } = data;
   const { onSelect, onNewSession, onToggleCollapsed } = handlers;
   return (
-    <div className="flex h-full w-80 shrink-0 animate-fade-in flex-col">
+    <div className="flex h-full w-72 shrink-0 animate-fade-in flex-col">
       <header className="flex shrink-0 items-center gap-1 px-3 pt-3">
         <h2 className="m-0 flex-1 truncate text-xs font-semibold uppercase tracking-[0.08em] text-ink-3">
           会话
@@ -370,7 +342,7 @@ function ExpandedSidebar({
           onClick={onNewSession}
           className={cx(
             "group flex w-full items-center justify-center gap-2 rounded-pill bg-accent px-4 py-2.5",
-            "text-sm font-semibold text-surface shadow-bubble",
+            "text-sm font-semibold text-ink shadow-bubble",
             "transition-[transform,box-shadow] duration-[160ms] ease-soft",
             "hover:-translate-y-px hover:shadow-chip active:scale-[0.97]",
             FOCUS_RING
@@ -440,8 +412,9 @@ export function SessionSidebar({
   collapsed,
   onToggleCollapsed,
   onNewSession,
+  refreshSignal,
 }: SessionSidebarProps) {
-  const { phase, sessions, errorMsg, refresh } = useSessionList();
+  const { phase, sessions, errorMsg, refresh } = useSessionList(refreshSignal);
   const collapseBtnRef = useRef<HTMLButtonElement>(null);
   const expandBtnRef = useRef<HTMLButtonElement>(null);
 
@@ -467,7 +440,7 @@ export function SessionSidebar({
       className={cx(
         "h-full shrink-0 overflow-hidden border-r border-line bg-surface",
         "transition-[width] duration-[220ms] ease-soft",
-        collapsed ? "w-14" : "w-80"
+        collapsed ? "w-14" : "w-72"
       )}
     >
       {collapsed ? (

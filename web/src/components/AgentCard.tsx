@@ -84,11 +84,11 @@ export function AgentCard({
   return (
     <article
       aria-label="知识库回答"
-      className="w-full self-stretch rounded-card border border-line bg-surface px-6 pt-[22px] pb-[17px] shadow-card animate-message-in"
+      className="w-full self-stretch rounded-card border border-line bg-surface px-5 py-4 shadow-bubble animate-message-in"
       style={staggerStyle(staggerIndex)}
     >
       {/* Claims / body (decision #19: renderBody reserved, default plain text). */}
-      <div className="text-[15.5px] leading-[1.75] text-ink [overflow-wrap:anywhere]">
+      <div className="text-[15px] leading-[1.7] text-ink [overflow-wrap:anywhere]">
         {renderBody ? renderBody(text) : <p className="m-0">{text}</p>}
       </div>
 

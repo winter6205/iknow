@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { ChatHeader } from "./components/ChatHeader";
 import { Composer } from "./components/Composer";
@@ -19,6 +19,11 @@ function ChatApp() {
   const [collapsed, setCollapsed] = useState(
     () => window.matchMedia(NARROW_QUERY).matches
   );
+  // Bumped after lifecycle events (newSession / setConversation to a non-cached
+  // id) so the sidebar re-fetches the list and the new entry shows up without
+  // the user clicking refresh.
+  const [sidebarSignal, setSidebarSignal] = useState(0);
+  const bumpSidebar = useCallback(() => setSidebarSignal((n) => n + 1), []);
 
   // Narrow-screen auto-collapse: track live changes (device rotation, window
   // resize across the breakpoint) after the initial render.
@@ -35,17 +40,31 @@ function ChatApp() {
 
   // Sidebar lists past conversations and switches the active one. Passes the
   // current id (or null during pre-bootstrap) so the highlight tracks live.
+  // refreshSignal is bumped after newSession so the freshly created session
+  // appears without a manual refresh click.
+  const handleNewSession = useCallback(async () => {
+    await chat.newSession();
+    bumpSidebar();
+  }, [chat, bumpSidebar]);
+
+  const handleSelect = useCallback(
+    async (id: string) => {
+      await chat.setConversation(id);
+      // setConversation may switch to a session not yet in the cached list
+      // (e.g. just-created entries still propagating); refresh to be safe.
+      bumpSidebar();
+    },
+    [chat, bumpSidebar]
+  );
+
   const side = (
     <SessionSidebar
       currentConversationId={chat.session?.conversation_id ?? null}
-      onSelect={(id) => {
-        void chat.setConversation(id);
-      }}
+      onSelect={handleSelect}
       collapsed={collapsed}
       onToggleCollapsed={() => setCollapsed((c) => !c)}
-      onNewSession={() => {
-        void chat.newSession();
-      }}
+      onNewSession={handleNewSession}
+      refreshSignal={sidebarSignal}
     />
   );
 

@@ -11,7 +11,9 @@
   --chat-max: 46rem;
 }
 
-/* ink-2/3 alpha 较 Variant A 原型(0.62/0.52)微调至 0.66/0.62 以满足 WCAG AA 小字对比度。*/
+/* ink-2/3 alpha 较 Variant A 原型(0.62/0.52)微调至 0.66/0.62 以满足 WCAG AA 小字对比度。
+   accent / ok 调色（issue #92 #2 取向翻转）：松绿 → 雾灰 #7d8a82。
+   #7d8a82 vs bg #f6f3ec 对比度 3.25，最低饱和度雾灰，最克制。按钮文字深字（#2c2820）。*/
 @theme {
   --color-bg: #f6f3ec;
   --color-surface: #fffdf8;
@@ -19,10 +21,10 @@
   --color-ink: #23281f;
   --color-ink-2: rgba(35, 40, 31, 0.66);
   --color-ink-3: rgba(35, 40, 31, 0.62);
-  --color-accent: #3e6b52;
-  --color-accent-soft: rgba(62, 107, 82, 0.12);
+  --color-accent: #7d8a82;
+  --color-accent-soft: rgba(125, 138, 130, 0.16);
   --color-line: rgba(35, 40, 31, 0.09);
-  --color-ok: #3e6b52;
+  --color-ok: #7d8a82;
   --color-warn: #a3781f;
   --color-danger: #b04a3a;
   --color-warn-soft: rgba(163, 120, 31, 0.12);
