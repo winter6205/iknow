@@ -75,6 +75,10 @@ npm run eval      # 32-sample trajectory suite
 **I4**: 已归档三模式 + HTTP 冒烟证据（`docs/handoff/i4-smoke/`）。  
 **Git**: 无用户明确 `push` 授权则不执行。
 
+### UI 调试
+
+调试 UI 时使用 `.claude/skills/playwright-cli/`。
+
 ### Domain docs (auto-load on session start)
 
 - docs/CONTEXT.md — 项目领域语言 + Flagged ambiguities
