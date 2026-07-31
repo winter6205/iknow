@@ -30,6 +30,7 @@
     "web:dev": "npm run dev --prefix web",
     "web:build": "npm run build --prefix web",
     "web:typecheck": "npm run typecheck --prefix web",
+    "aci:demo": "tsx src/harness/aci/demo.ts",
     "prepare": "husky"
   },
   "devDependencies": {
