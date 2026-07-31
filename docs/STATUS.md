@@ -24,22 +24,28 @@
 
 | 能力             | 说明                                                                                    | 位置                               |
 | ---------------- | --------------------------------------------------------------------------------------- | ---------------------------------- |
-| 4 tools          | `kb_retrieve` / `kb_verify_citation` / `kb_compile` / `kb_governance`                   | `src/kb-*`                         |
+| ~~4 tools~~      | ~~`kb_retrieve` / `kb_verify_citation` / `kb_compile` / `kb_governance`~~ **已归档 023** | `docs/archive/023-retire-kb-tools/` |
+| Agent 执行层     | harness foundation（loop-engine + anthropic-adapter + executor + registry）+ ACI 装饰层原型 | `src/harness/`（含 `src/harness/aci/`） |
 | 内存知识库       | 合成 seed 语料（企业政策/HR/财务等场景）                                                | `src/knowledge-store` / `fixtures` |
-| 确定性 Agent     | 规则 loop，G2、`max_hops=5`、敏感/竞对/冲突等策略                                       | `src/agent-loop/loop.ts`           |
-| LLM Agent        | OpenAI-compatible tool_calls（9router 等），fail-closed 缺 key                          | `llm-agent.ts` / `llm-client.ts`   |
+| ~~确定性 Agent~~ | ~~规则 loop，G2、`max_hops=5`~~ **已归档 022**                                          | `docs/archive/022-retire-agent-loop/` |
+| ~~LLM Agent~~    | ~~OpenAI-compatible tool_calls~~ **已归档 022**，现由 harness anthropic-adapter 承接    | `src/harness/model-adapter/`       |
 | G2 信封          | 每轮答案含 `text` / `source_spans` / `snapshot_id` / `governance_status` / `tool_calls` | `IknowAnswer`                      |
 | Session 鉴权注入 | `caller_role` 等，**不**进 tool 入参                                                    | `SessionContext`                   |
 | 配置加载         | `.env` / `.env.local` + `process.env`；密钥只读 env 名                                  | `src/config/env.ts`                |
 
-### 1.3 检索增强（M1）
+### 1.3 检索增强（M1，已归档 023）
+
+> 双臂排序 / Embedding 客户端 / 内存向量索引随 `kb_retrieve` 一并归档于
+> `docs/archive/023-retire-kb-tools/`。CLI 产品路径不再构建向量索引；
+> `--embeddings` CLI flag 保留为表面兼容（runtime 内 no-op），孤儿字段
+> `simulate_governance_timeout` / `--governance-timeout` 待后续清理。
 
 | 能力             | 说明                                                                     |
 | ---------------- | ------------------------------------------------------------------------ |
-| 双臂排序         | 关键词 +（向量 **或** overlap 回退）→ RRF(k=60)                          |
-| Embedding 客户端 | OpenAI-compatible `/embeddings`（如 `zhipueb/embedding-3` + dimensions） |
-| 内存向量索引     | `VectorIndex`；可选 `--embeddings` / `IKNOW_EMBEDDING_MODE=api`          |
-| 失败回退         | 网络失败时回退 overlap 臂，主路径可继续                                  |
+| ~~双臂排序~~     | ~~关键词 +（向量 **或** overlap 回退）→ RRF(k=60)~~ **已归档**            |
+| ~~Embedding 客户端~~ | ~~OpenAI-compatible `/embeddings`~~ **已归档**                       |
+| ~~内存向量索引~~ | ~~`VectorIndex`；可选 `--embeddings`~~ **已归档**（flag 保留 no-op）     |
+| ~~失败回退~~     | ~~网络失败时回退 overlap 臂~~ **已归档**                                  |
 
 ### 1.4 交互表面（I1–I3，相对设计稿）
 
@@ -169,8 +175,8 @@
 | 层                       | 状态                                                           |
 | ------------------------ | -------------------------------------------------------------- |
 | 协议与评测资产           | **有**（构造数据）                                             |
-| 可运行 4-tool 引擎       | **有**                                                         |
-| 向量 + LLM 接线          | **有**（依赖外部 API）                                         |
+| 可运行 4-tool 引擎       | **已归档 023**（harness ACI 装饰层原型承接，PR #95）          |
+| 向量 + LLM 接线          | **已归档 023**（harness anthropic-adapter 承接）              |
 | CLI 多轮交互             | **有**（进程内会话）                                           |
 | HTTP 会话 + Web SPA      | **有**（v0 内存会话 + Vite React `web/`→`dist`；SSE/鉴权未做） |
 | 生产数据 / 持久化 / 上线 | **无或极弱**                                                   |

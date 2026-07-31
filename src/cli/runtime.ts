@@ -3,30 +3,37 @@
  *
  * 020 决议收口后只剩 `buildHarnessEngine(bundle)` 一条 build 路径:
  * CLI ask/chat 产品路径,走 harness foundation(real Anthropic adapter +
- * demo tools + LoopEngine)。
+ * LoopEngine)。023 归档 kb_* 后,task #14 把 ACI 装饰层工具集(fs_search /
+ * fs_view / fs_edit / shell_exec / context_manager)接到 buildHarnessEngine,
+ * 替换原 echo + get_time demo 工具,让 CLI 默认带 agent 执行能力。
  *
  * 旧 agent builder 服务于 Session API serve 路径,在 #51 把 serve 切到
  * harness 后于 022 归档(见 `docs/archive/022-retire-agent-loop/README.md`)。
  */
 import Anthropic from "@anthropic-ai/sdk";
 import {
-  createEchoTool,
-  createGetTimeTool,
   createRealAnthropicAdapter,
-  createRegistry,
   createExecutor,
   createLoopEngine,
   type LoopEngineDeps,
 } from "../harness/index.js";
+import {
+  createAciRegistry,
+  createAciExecutor,
+  createPermissionPolicy,
+} from "../harness/aci/index.js";
+import { createFsSearchTool } from "../harness/aci/tools/fs-search.js";
+import { createFsViewTool } from "../harness/aci/tools/fs-view.js";
+import { createFsEditTool } from "../harness/aci/tools/fs-edit.js";
+import { createShellExecTool } from "../harness/aci/tools/shell-exec.js";
+import { createContextManagerTool } from "../harness/aci/tools/context-manager.js";
 import { loadIknowEnv, type IknowEnv } from "../config/env.js";
 import type { CallerRole, SessionContext } from "../shared/schema.js";
 import { createIknowRuntime } from "../runtime/create-runtime.js";
 import type { InMemoryKnowledgeStore } from "../knowledge-store/memory-store.js";
-import type { VectorIndex } from "../kb-retrieve/embedding/vector-index.js";
 
 export type RuntimeBundle = {
   store: InMemoryKnowledgeStore;
-  vectorIndex: VectorIndex | undefined;
   env: IknowEnv;
   session: SessionContext;
 };
@@ -47,21 +54,14 @@ export async function prepareRuntime(opts: {
     );
   }
 
-  const {
-    store,
-    vectorIndex,
-    env: runtimeEnv,
-  } = await createIknowRuntime({
-    enableEmbeddings: opts.embeddings,
-    env,
-  });
+  const { store, env: runtimeEnv } = await createIknowRuntime({ env });
 
   const session: SessionContext = {
     caller_role: opts.role,
     simulate_governance_timeout: opts.degrade,
   };
 
-  return { store, vectorIndex, env: runtimeEnv, session };
+  return { store, env: runtimeEnv, session };
 }
 
 export type BuiltEngine = {
@@ -95,12 +95,27 @@ export async function buildHarnessEngine(
     model: env.llm.model,
     maxTokens: env.llm.maxOutputTokens,
   });
-  const registry = createRegistry([createEchoTool(), createGetTimeTool()]);
-  const executor = createExecutor(registry);
+  // ACI 工具集（CH04 装饰层原型，task #14 接线）。沙箱根 = process.cwd()
+  // (CLI 在工程根跑时,agent 工作区与项目一致)。fs tools 的 root 软沙箱
+  // 越界即报 ToolExecutionError;shell_exec 的 cwd 不是安全边界,真实边界
+  // 是 allowlist-first + 黑名单双保险 + (毕业后) OS 级沙箱。
+  const sandboxRoot = process.cwd();
+  const aciTools = [
+    createFsSearchTool(sandboxRoot),
+    createFsViewTool(sandboxRoot),
+    createFsEditTool(sandboxRoot),
+    createShellExecTool(sandboxRoot),
+    createContextManagerTool(),
+  ];
+  const reg = createAciRegistry(aciTools);
+  const baseExecutor = createExecutor(reg.inner);
+  const executor = createAciExecutor(baseExecutor, reg.catalog, {
+    policy: createPermissionPolicy({ denyDangerousExecute: true }),
+  });
   const deps: LoopEngineDeps = {
     adapter,
     executor,
-    registry,
+    registry: reg.inner,
     maxTurns: 6,
     timeoutMs: env.llm.timeoutMs,
   };

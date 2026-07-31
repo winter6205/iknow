@@ -2,8 +2,8 @@
 
 Standalone **enterprise knowledge-base Q&A agent** (not a pure RAG pipeline).
 
-- **4 tools**: `kb_retrieve` · `kb_verify_citation` · `kb_compile` · `kb_governance`
-- **Invariants**: dual-index ranking only; verify always on original text; G2 `snapshot_id` required; `max_hops=5`
+- **Agent execution surface**: harness foundation (`src/harness/`) with ACI decor layer prototype (`src/harness/aci/`, PR #95). The legacy 4-tool suite (`kb_retrieve` / `kb_verify_citation` / `kb_compile` / `kb_governance`) is **archived 023** at `docs/archive/023-retire-kb-tools/`.
+- **Invariants**: dual-index ranking only (archived); verify always on original text (archived); G2 `snapshot_id` required; `max_hops=5`
 - **Runtime boundary**: iknow does not load the external gbrain package or the read-only `_upstream_gbrain/` checkout at runtime — no package link, path import, symlink, dynamic loading, or execution
 - **Heritage**: iknow is independently packaged and maintained, while its knowledge-agent architecture and capabilities are adapted from gbrain into iknow-owned `src/` code
 
@@ -137,14 +137,12 @@ If the embedding API fails, the CLI continues with keyword-only retrieve. `npm t
 
 | Path                   | Role                                                     |
 | ---------------------- | -------------------------------------------------------- |
-| `src/kb-retrieve/`     | Dual-arm score + RRF fusion                              |
-| `src/kb-verify/`       | Pure three-state citation verify                         |
-| `src/kb-compile/`      | Fact compile + content_hash dedup                        |
-| `src/kb-governance/`   | Freshness / conflict / snapshot_id                       |
-| `src/agent-loop/`      | Deterministic loop + G2 / hops guards                    |
+| `src/harness/`         | Agent runtime foundation (loop-engine, anthropic-adapter, executor, registry) + ACI decor layer (`src/harness/aci/`) |
 | `src/knowledge-store/` | In-memory KB (standalone)                                |
 | `src/fixtures/`        | Eval-aligned seed corpus                                 |
 | `docs/iknow-spec/`     | Protocol + eval assets                                   |
+| `docs/archive/023-retire-kb-tools/` | Archived 4-tool suite (`kb_retrieve` / `kb_verify_citation` / `kb_compile` / `kb_governance`) + `src/tools/registry.ts` facade |
+| `docs/archive/022-retire-agent-loop/` | Archived legacy agent loop (deterministic + LLM) |
 | `_upstream_gbrain/`    | **Read-only reference clone** (gitignored; never import) |
 
 ## Upstream reference
