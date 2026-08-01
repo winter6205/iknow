@@ -36,7 +36,7 @@ import type {
   Transition,
 } from "./model-adapter/types.js";
 import type { Executor, Registry, ToolExecutionResult } from "./tools/types.js";
-import type { LoopTrace, TurnTrace } from "./loop-trace.js";
+import type { CancelKind, LoopTrace, TurnTrace } from "./loop-trace.js";
 import { computeTotals } from "./loop-trace.js";
 import type { TraceErrorType, TraceService } from "./trace/index.js";
 import { safeTrace } from "./trace/index.js";
@@ -257,8 +257,7 @@ function mkTurn(input: {
   readonly supplierStop: TurnTrace["supplierStop"];
   readonly toolCalls: TurnTrace["toolCalls"];
   readonly durationMs: number;
-  readonly timeoutHit: boolean;
-  readonly signalAborted: boolean;
+  readonly cancelKind: CancelKind;
 }): TurnTrace {
   return Object.freeze({
     turnIndex: input.turnIndex,
@@ -267,16 +266,20 @@ function mkTurn(input: {
       input.toolCalls.map((c) => Object.freeze({ ...c }))
     ),
     durationMs: input.durationMs,
-    timeoutHit: input.timeoutHit,
-    signalAborted: input.signalAborted,
+    cancelKind: input.cancelKind,
   });
 }
 
-/** 023: 临时把 source 映射回 017 双布尔；#98 enum 落地后移除。 */
+/**
+ * 025 #98:reason 驱动 transition(冻结 StopReason 不变),cancelKind 独立
+ * 驱动 trace 元数据;两者解耦,hostCancel 得以保留 stopReason "timeout"
+ * 的控制流,同时在 trace 记录真实来源。
+ */
 function modelStop(opts: {
   readonly state: LoopState;
   readonly started: number;
   readonly reason: "cancelled" | "timeout" | "protocolError";
+  readonly cancelKind: CancelKind;
 }): { kind: "stop"; transition: Transition; turn: TurnTrace } {
   return {
     kind: "stop",
@@ -286,8 +289,7 @@ function modelStop(opts: {
       supplierStop: "other",
       toolCalls: [],
       durationMs: performance.now() - opts.started,
-      timeoutHit: opts.reason === "timeout",
-      signalAborted: opts.reason === "cancelled",
+      cancelKind: opts.cancelKind,
     }),
   };
 }
@@ -320,12 +322,30 @@ async function runModelPhase(opts: {
         state: opts.state,
         started: opts.started,
         reason: "cancelled",
+        cancelKind: "callerAbort",
+      });
+    }
+    if (outcome.source === "hostCancel") {
+      // hostCancel 保留 stopReason "timeout" 以维持控制流;trace 由 cancelKind
+      // 独立记录真实来源。
+      // 覆盖说明:hostCancel 无公共触发点 — RaceModelHandle 封装于
+      // runModelPhase 内部,run/step/createLoopEngine 均不暴露 childAbort。
+      // 覆盖天花板为 raceModel 层 T2-new-5(直接调 handle.childAbort());
+      // 本映射由 (a) TypeScript 对 4 值 source union 的穷尽性检查 与
+      // (b) callerAbort/timerTimeout 集成测试 S12/S14(走同一 modelStop
+      // 路径)共同钉死。
+      return modelStop({
+        state: opts.state,
+        started: opts.started,
+        reason: "timeout",
+        cancelKind: "hostCancel",
       });
     }
     return modelStop({
       state: opts.state,
       started: opts.started,
       reason: "timeout",
+      cancelKind: "timerTimeout",
     });
   } catch (err) {
     if (err instanceof ProtocolError)
@@ -333,6 +353,7 @@ async function runModelPhase(opts: {
         state: opts.state,
         started: opts.started,
         reason: "protocolError",
+        cancelKind: "none",
       });
     throw err;
   }
@@ -433,8 +454,8 @@ async function runToolPhase(opts: {
     supplierStop: opts.turnResult.supplierStop,
     toolCalls,
     durationMs,
-    timeoutHit: timedOut,
-    signalAborted: cancelled,
+    // 025 #98:cancelled 优先级高于 timeout(与 computeToolStopFlags 注释一致)。
+    cancelKind: cancelled ? "callerAbort" : timedOut ? "timerTimeout" : "none",
   });
   if (cancelled) {
     return {
@@ -593,8 +614,7 @@ async function stepWithTrace(opts: {
         supplierStop: turnResult.supplierStop,
         toolCalls: [],
         durationMs,
-        timeoutHit: false,
-        signalAborted: false,
+        cancelKind: "none",
       }),
     };
   }
@@ -637,8 +657,7 @@ async function stepWithTrace(opts: {
         supplierStop: turnResult.supplierStop,
         toolCalls: [],
         durationMs,
-        timeoutHit: false,
-        signalAborted: false,
+        cancelKind: "none",
       }),
     };
   }
@@ -801,7 +820,7 @@ export async function run(
 
 // Re-export spec types for downstream consumers.
 export type { Executor, Registry } from "./tools/types.js";
-export type { LoopTrace, TurnTrace, Totals } from "./loop-trace.js";
+export type { LoopTrace, TurnTrace, Totals, CancelKind } from "./loop-trace.js";
 
 /**
  * 工厂:把 dep 闭包成 runner / stepper 对象(016 T12 spec 出口)。

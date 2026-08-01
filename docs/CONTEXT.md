@@ -19,7 +19,7 @@ _Avoid_: 声称已接入产品路径；mock agent、stub brain
 **StopReason**: Loop Engine 的七类停止判别联合--016 五类（completed / maxTurns / nonSuccessStop / protocolError / emptyFinalResponse）末尾追加 017 两类 `cancelled`（signal abort）与 `timeout`（超时强制）；追加不重排，Transition 形状随之自动扩展。
 _Avoid_: 把 cancelled 与 timeout 混为一条；把总耗时当作独立 stop 触发器
 
-**LoopTrace** (TurnTrace / Totals): `run()` 的第二返回面 `{ result, trace }`--A 层结构元数据 trace（每回合 supplierStop / toolCall kind / durationMs / timeoutHit / signalAborted + 一次性 reduce 的 totals），严格不含 payload；与 014 messages 唯一权威解耦，immutable 累积。
+**LoopTrace**: `run()` 的第二返回面 `{ result, trace }`（TurnTrace / Totals 两型）--A 层结构元数据 trace（每回合 supplierStop / toolCall kind / durationMs / cancelKind + 一次性 reduce 的 totals），严格不含 payload；与 014 messages 唯一权威解耦，immutable 累积。`cancelKind` 是取消来源四值枚举 `"none" | "callerAbort" | "timerTimeout" | "hostCancel"`（对齐 023 `RaceModelOutcome.source`），取代 017 的 `timeoutHit` / `signalAborted` 双布尔。
 _Avoid_: 在 trace 里塞 input/output/token/cost（B 层字段）；Collector 回调 / onTurn 中途观察点
 
 **ToolExecutionContext**: Executor 透传给 handler 的执行上下文 `{ signal }`；run 第三参 signal 原样透传、不创建子 signal，超时由 Executor `Promise.race` 外包而非 ctx 携带。

@@ -60,7 +60,7 @@ export { createGetTimeTool } from "./stubs/demo-tools.js";
 
 // 017 A7 LoopTrace:纯类型 + 一次性 reduce 函数,字段名 SSOT。
 export { computeTotals } from "./loop-trace.js";
-export type { LoopTrace, TurnTrace, Totals } from "./loop-trace.js";
+export type { LoopTrace, TurnTrace, Totals, CancelKind } from "./loop-trace.js";
 
 // 064 T4: TraceService bounded context public exports.
 export type {

@@ -39,8 +39,7 @@ function mkTurn(opts: {
       kind: "ok" as const,
     })),
     durationMs: 5,
-    timeoutHit: false,
-    signalAborted: false,
+    cancelKind: "none",
     ...over,
   };
 }

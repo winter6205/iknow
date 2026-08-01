@@ -114,10 +114,10 @@ minimal-change-verifier: yes — scope 严格 src/harness/** + tests/harness/**�
   - `src/harness/loop-engine.ts` — step(state, deps, signal?) 内部：performance.now() 计时 + signal.aborted 检查 + 在途收尾分支（模型在途 / 工具在途）；run(userText, deps, signal?) → `{ result, trace }`（immutable 累积 TurnTrace[]，run 结束 computeTotals）；createLoopEngine 透传 signal
   - `tests/harness/loop-engine.test.ts` — 新增 S12–S17（续段或新文件，实施者定）
 - **Acceptance**:
-  - S12：signal abort 模型在途 → stop `cancelled` + 整回合不进历史 + trace 末项 `signalAborted=true` □
-  - S13：signal abort 工具在途 → execution_failed（message "cancelled"）进历史 + stop `cancelled` + trace 末项 `signalAborted=true` □
-  - S14：timeout 模型在途 → stop `timeout` + 整回合不进历史 + trace 末项 `timeoutHit=true` □
-  - S15：timeout 工具在途 → execution_failed（message "timeout"）进历史 + stop `timeout` + trace 末项 `timeoutHit=true` □
+  - S12：signal abort 模型在途 → stop `cancelled` + 整回合不进历史 + trace 末项 `cancelKind="callerAbort"` □
+  - S13：signal abort 工具在途 → execution_failed（message "cancelled"）进历史 + stop `cancelled` + trace 末项 `cancelKind="callerAbort"` □
+  - S14：timeout 模型在途 → stop `timeout` + 整回合不进历史 + trace 末项 `cancelKind="timerTimeout"` □
+  - S15：timeout 工具在途 → execution_failed（message "timeout"）进历史 + stop `timeout` + trace 末项 `cancelKind="timerTimeout"` □
   - S16：多回合 run → trace.turns.length == turnCount + 字段齐全 + totals 正确 + **trace 不含 payload** □
   - S17：stub-signal-tool 接 ctx.signal → abort → AbortError → execution_failed □
   - 016 S1–S11 全过不回归 □

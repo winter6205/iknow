@@ -123,10 +123,10 @@ The function returns a `RaceModelHandle`. Internally it owns a child `AbortContr
 `runModelPhase` destructures `handle.outcome`, awaits it, and maps:
 
 - `source === "adapter"` -> `{ kind: "ok", result }` (existing path)
-- `source === "timerTimeout" || source === "hostCancel"` -> `stopReason: "timeout"`, `TurnTrace.timeoutHit = true`, `signalAborted = false`
-- `source === "callerAbort"` -> `stopReason: "cancelled"`, `TurnTrace.signalAborted = true`, `timeoutHit = false`
+- （已被 #98 消解：runModelPhase 现直接产出 cancelKind，不再映射回双布尔）`source === "timerTimeout"` -> `stopReason: "timeout"`, `cancelKind="timerTimeout"`；`source === "hostCancel"` -> `stopReason: "timeout"`, `cancelKind="hostCancel"`
+- `source === "callerAbort"` -> `stopReason: "cancelled"`, `cancelKind="callerAbort"`
 
-This temporary mapping preserves the 017 `TurnTrace` double-boolean shape (frozen by `specs/loop-hardening-for-migration.md`) and is removed when #98 lands the enum refactor. SDK-thrown errors caught in the `await handle.outcome` try/catch keep the existing `ProtocolError -> protocolError` / rethrow contract.
+This temporary mapping preserved the 017 `TurnTrace` double-boolean shape (frozen by `specs/loop-hardening-for-migration.md`). #98 已落地 enum 重构，此临时映射已移除。SDK-thrown errors caught in the `await handle.outcome` try/catch keep the existing `ProtocolError -> protocolError` / rethrow contract.
 
 ### Naming + formatting
 
@@ -157,7 +157,7 @@ All 4 use stub adapter + `import { APIUserAbortError } from "@anthropic-ai/sdk"`
 | T2-new-3 | caller aborts via `controller.abort()` before timer fires; `outcome.source === "callerAbort"`, `result.stopReason === "cancelled"`                 | caller abort beats timer; not misrouted to `timeout`       |
 | T2-new-4 | adapter resolves quickly; then `controller.abort()` and `handle.childAbort()` are called post-settle; `outcome.source` still `"adapter"`, no throw | idempotency of post-settle aborts                          |
 
-Existing 017 S12 / S14 / S15 / S17 / boundary tests must continue to pass **without modification** - they assert `stopReason` + `TurnTrace.timeoutHit/signalAborted` which the temp mapping preserves.
+Existing 017 S12 / S14 / S15 / S17 / boundary tests have been migrated by #98 to assert `stopReason` + `TurnTrace.cancelKind` directly from `outcome.source` (the temp dual-boolean mapping no longer exists).
 
 ### Integration / smoke (unchanged, regression check)
 
@@ -208,7 +208,7 @@ Binary (yes/no), each maps to a measurable check:
 6. Caller abort wins the race (timer does not also fire in caller-abort path) - verifiable by T2-new-3
 7. SDK throwing `APIUserAbortError` after signal abort does not change `outcome.source` from `"timerTimeout"` to anything else - verifiable by T2-new-1
 8. Post-settle `controller.abort()` and `handle.childAbort()` are no-ops, do not throw - verifiable by T2-new-4
-9. `signalAborted` and `timeoutHit` in `TurnTrace` continue to be correctly set for all 4 raceModel sources, mapped via `runModelPhase` - verifiable by all existing S12/S14/S15/S17 tests passing without modification
+9. `TurnTrace.cancelKind` is set directly from `outcome.source` for all 4 raceModel sources (`adapter`→`"none"`, `timerTimeout`→`"timerTimeout"`, `hostCancel`→`"hostCancel"`, `callerAbort`→`"callerAbort"`) - verifiable by all existing S12/S14/S15/S17 tests passing after #98 migration
 10. `result.stopReason` is `"timeout"` for `timerTimeout` and `hostCancel`, `"cancelled"` for `callerAbort`, `"completed"`/etc for `adapter` - verifiable by existing S12/S14 tests + T2-new-1/3
 11. `npm run typecheck` exits 0
 12. `npm test` exits 0; new tests count = 4; existing test count unchanged
@@ -226,7 +226,7 @@ None. The #54 wayfinder grilling cleared all decisions (Q1 = A / Q2 = L1' + R2-a
 
 - **Loop Engine**: Foundation 状态机运行内核，位于 `src/harness/`；本 spec 修改其内部 `raceModel`。
 - **StopReason**: 七类停止判别联合；本 spec 涉及 `cancelled`（signal abort）与 `timeout`（超时强制）两类，追加不重排。
-- **LoopTrace (TurnTrace / Totals)**: `run()` 第二返回面 A 层结构元数据；本 spec **不动**其 shape（`timeoutHit` / `signalAborted` 双布尔），等 #98。
+- **LoopTrace (TurnTrace / Totals)**: `run()` 第二返回面 A 层结构元数据；#98 已落地：shape 现为 cancelKind 枚举。
 - **in-flight closeout**: abort/timeout 发生时的收尾语义；本 spec 保持 model 在途则整回合不进历史。
 - **required runtime layer / conditional remediation layer**: 017 两层对仗边界；本 spec 属 required runtime layer 边角细化，**不带入** conditional remediation layer（自动重试 / token-cost / OTel 等）。
 

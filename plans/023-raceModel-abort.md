@@ -15,7 +15,7 @@
   - ADR-0001（9router stack as code defaults）：确认 `@anthropic-ai/sdk` 是 runtime dep、9router 是唯一 provider，本 plan 不动 env/stack。不直接相关，无矛盾。
   - ADR-0002（web UI variant A tailwind）：host 层，out of scope，不相关。
   - 无 ADR 矛盾需标注（`> Contradicts ADR-NNNN`）。
-- 冻结契约边界：014（model turn + append-only history）/ 015（tool ACI + result boundary）/ 017（loop hardening，TurnTrace 双布尔 shape）均不动；TurnTrace shape 经 runModelPhase 临时映射保留，等 #98 解冻。
+- 冻结契约边界：014（model turn + append-only history）/ 015（tool ACI + result boundary）/ 017（loop hardening）均不动；TurnTrace shape #98 已解冻并落地 cancelKind 枚举（原双布尔经 runModelPhase 临时映射的历史已终结）。
 - `loop-engine.ts` 实测 610 行（`wc -l`，spec 记 611 为尾行差异），已过 300 行 file soft trigger——file cap 决策见 T1。
 
 ## Section 2 - ACR 5-Verdict Block（引自 spec）
@@ -73,7 +73,7 @@ minimal-change-verifier:            yes - single logical task; 1 commit; 2 files
 - timer-fire branch **必须先 `child.abort()` 再 settle `"timerTimeout"`**（本 spec 修的 bug 本体：当前 loop-engine.ts:155 仅 settle-reject `MODEL_TIMEOUT` 不 abort signal）— spec Success Criteria #5
 - `AbortSignal.any` 为 Node ≥20.3 stable API，repo 实测 v24.14，**不动 `engines.node`** □
 - SDK 错误路由：post-settle 到达的 `APIUserAbortError` / `APIError` 家族由 `settled` guard 丢弃，不污染结构化 outcome；作为 first-event 到达的 SDK 错误走 `runModelPhase` try/catch（`ProtocolError` -> `protocolError` stop，else rethrow）— spec error-handling-enforcer
-- `runModelPhase` 临时映射（**#98 落地 enum 后移除此映射**）：`source === "adapter"` -> `{ kind: "ok", result }`；`timerTimeout | hostCancel` -> `stopReason: "timeout"` + `TurnTrace.timeoutHit = true` + `signalAborted = false`；`callerAbort` -> `stopReason: "cancelled"` + `signalAborted = true` + `timeoutHit = false` — spec Code Style
+- `runModelPhase` 映射（#98 已落地，此临时双布尔映射已移除；runModelPhase 直接产出 cancelKind）：`source === "adapter"` -> `{ kind: "ok", result }`；`timerTimeout` -> `stopReason: "timeout"` + `cancelKind="timerTimeout"`；`hostCancel` -> `stopReason: "timeout"` + `cancelKind="hostCancel"`；`callerAbort` -> `stopReason: "cancelled"` + `cancelKind="callerAbort"` — spec Code Style
 - mock 用 `import { APIUserAbortError } from "@anthropic-ai/sdk"` + stub adapter，**不挂真实 fetch / 真实 Anthropic client** — spec Testing Strategy
 - `LoopAdapter` 公开接口（`step(state, request, signal?)`）**不动**；`run` / `step` / `createLoopEngine` 签名不动 — spec Boundaries / 015 冻结契约
 
@@ -90,4 +90,4 @@ minimal-change-verifier:            yes - single logical task; 1 commit; 2 files
 - **architecture-change-reviewer verdict**: 5/5 yes（引自 spec Section 2 / 本 plan Section 2）
 - **affected S1-S6 skills**: S2（defensive-contract，4 新测试覆盖 exception / concurrent / signal-state / idempotency 4 类边界）/ S5（complexity-anti-drift，T1 硬门槛 + file cap 700）/ S6（minimal-change，1 commit / 2 文件 / 零新依赖 / 冻结契约不动）
 - **parallelization surface**: 无并行——T2 `blockedBy` T1，且本 plan 仅 1 个 implementation bullet（单原子重写）
-- **out-of-scope deferred**: #97（全仓库位置参数 -> options object）/ #98（TurnTrace 双布尔 -> 枚举 cancelKind）/ SDK 错误分类缺口（map #44 Not yet specified）— 均不在本 plan
+- **out-of-scope deferred**: #97（全仓库位置参数 -> options object）/ SDK 错误分类缺口（map #44 Not yet specified）— 均不在本 plan；#98 已落地（TurnTrace 双布尔 -> 枚举 cancelKind），不再 deferred。

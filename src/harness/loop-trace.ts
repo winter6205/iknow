@@ -11,6 +11,9 @@
  * 显式放行;见 public-exports.test.ts。)
  */
 
+/** 025 #98:取消来源四值枚举(原 timeoutHit/signalAborted 双布尔)。值域与 023 RaceModelOutcome.source 对齐(adapter→none)。 */
+export type CancelKind = "none" | "callerAbort" | "timerTimeout" | "hostCancel";
+
 export interface TurnTrace {
   readonly turnIndex: number;
   /** 引用 014 AssistantTurnResult.supplierStop 值域,不新定义。 */
@@ -25,14 +28,17 @@ export interface TurnTrace {
   }>;
   /** step 入口 → 出口 wall-clock。 */
   readonly durationMs: number;
-  readonly timeoutHit: boolean;
-  readonly signalAborted: boolean;
+  readonly cancelKind: CancelKind;
 }
 
 export interface Totals {
   readonly totalDurationMs: number;
-  readonly timeoutHits: number;
-  readonly signalAborteds: number;
+  readonly cancelKindCounts: {
+    readonly none: number;
+    readonly callerAbort: number;
+    readonly timerTimeout: number;
+    readonly hostCancel: number;
+  };
   readonly toolErrorTotals: {
     readonly ok: number;
     readonly validation_failed: number;
@@ -52,16 +58,20 @@ export interface LoopTrace {
  */
 export function computeTotals(turns: ReadonlyArray<TurnTrace>): Totals {
   let totalDurationMs = 0;
-  let timeoutHits = 0;
-  let signalAborteds = 0;
+  let none = 0;
+  let callerAbort = 0;
+  let timerTimeout = 0;
+  let hostCancel = 0;
   let ok = 0;
   let validation_failed = 0;
   let tool_not_found = 0;
   let execution_failed = 0;
   for (const t of turns) {
     totalDurationMs += t.durationMs;
-    if (t.timeoutHit) timeoutHits += 1;
-    if (t.signalAborted) signalAborteds += 1;
+    if (t.cancelKind === "none") none += 1;
+    else if (t.cancelKind === "callerAbort") callerAbort += 1;
+    else if (t.cancelKind === "timerTimeout") timerTimeout += 1;
+    else if (t.cancelKind === "hostCancel") hostCancel += 1;
     for (const c of t.toolCalls) {
       if (c.kind === "ok") ok += 1;
       else if (c.kind === "validation_failed") validation_failed += 1;
@@ -71,8 +81,12 @@ export function computeTotals(turns: ReadonlyArray<TurnTrace>): Totals {
   }
   return {
     totalDurationMs,
-    timeoutHits,
-    signalAborteds,
+    cancelKindCounts: {
+      none,
+      callerAbort,
+      timerTimeout,
+      hostCancel,
+    },
     toolErrorTotals: {
       ok,
       validation_failed,

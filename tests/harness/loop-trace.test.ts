@@ -13,8 +13,10 @@ describe("loop-trace computeTotals", () => {
   it("returns all-zero Totals for empty input", () => {
     const t = computeTotals([]);
     assert.equal(t.totalDurationMs, 0);
-    assert.equal(t.timeoutHits, 0);
-    assert.equal(t.signalAborteds, 0);
+    assert.equal(t.cancelKindCounts.none, 0);
+    assert.equal(t.cancelKindCounts.callerAbort, 0);
+    assert.equal(t.cancelKindCounts.timerTimeout, 0);
+    assert.equal(t.cancelKindCounts.hostCancel, 0);
     assert.equal(t.toolErrorTotals.ok, 0);
     assert.equal(t.toolErrorTotals.validation_failed, 0);
     assert.equal(t.toolErrorTotals.tool_not_found, 0);
@@ -36,8 +38,7 @@ describe("loop-trace computeTotals", () => {
           },
         ],
         durationMs: 120,
-        timeoutHit: false,
-        signalAborted: false,
+        cancelKind: "none",
       },
       {
         turnIndex: 1,
@@ -51,8 +52,7 @@ describe("loop-trace computeTotals", () => {
           },
         ],
         durationMs: 80,
-        timeoutHit: true,
-        signalAborted: false,
+        cancelKind: "timerTimeout",
       },
       {
         turnIndex: 2,
@@ -67,14 +67,15 @@ describe("loop-trace computeTotals", () => {
           { toolUseId: "t5", toolName: "echo", kind: "ok" },
         ],
         durationMs: 200,
-        timeoutHit: false,
-        signalAborted: true,
+        cancelKind: "callerAbort",
       },
     ];
     const totals = computeTotals(turns);
     assert.equal(totals.totalDurationMs, 120 + 80 + 200);
-    assert.equal(totals.timeoutHits, 1);
-    assert.equal(totals.signalAborteds, 1);
+    assert.equal(totals.cancelKindCounts.timerTimeout, 1);
+    assert.equal(totals.cancelKindCounts.callerAbort, 1);
+    assert.equal(totals.cancelKindCounts.none, 1);
+    assert.equal(totals.cancelKindCounts.hostCancel, 0);
     assert.equal(totals.toolErrorTotals.ok, 2);
     assert.equal(totals.toolErrorTotals.validation_failed, 1);
     assert.equal(totals.toolErrorTotals.tool_not_found, 1);

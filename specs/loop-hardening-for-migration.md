@@ -13,7 +13,10 @@
 4. **A4 ToolHandler ctx**：`ToolHandler = (input: unknown, ctx?: ToolExecutionContext) => ...`。`ToolExecutionContext = { readonly signal?: AbortSignal }`，仅含 signal，不含 timeoutMs。ctx 整体可选（015 老 handler 签名 `(input) => ...` 继续合法）。signal 为 run 第三参原样透传，不创建子 signal。017 不强制现有工具响应 ctx.signal。
 5. **A5 StopReason 扩展**：在 016 五类末尾追加 `"cancelled" | "timeout"`，共七类。不重排既有五类。Transition 判别联合形状零变更（reason 字段类型随 StopReason 自动扩展）。触发判定：cancelled 由 Loop Engine 检测 `signal.aborted`；timeout 由 adapter/executor 返回超时结果后 Loop Engine 据此判定。
 6. **A6 在途收尾**：模型在途 → finalState = step 入口时 state（turnCount/messages 不变），整回合不进历史，stop cancelled/timeout。工具在途 → assistant 回合已原子追加（不可回滚）；同回合 N 个 tool call：已完成正常填，在途填 `execution_failed`（message 固定标 "cancelled" 或 "timeout"，不可配置）；所有 tool_result 编码为一条 user message 原子追加后 stop。不存在回滚/悬空分支。判定顺序：signal 优先 → 模型阶段先于工具阶段。
-7. **A7 LoopTrace 字段集**：顶层 `{ turns: ReadonlyArray<TurnTrace>; totals: Totals }`。TurnTrace：turnIndex / supplierStop（引用 014 值域）/ toolCalls（kind 引用 015 值域，不含 payload）/ durationMs（step 入口→出口 wall-clock）/ timeoutHit / signalAborted。Totals：totalDurationMs / timeoutHits / signalAborteds / toolErrorTotals。聚合时机：run 结束时一次性 reduce（非增量累加）。B 层字段（tokenUsage / costUsd / model / httpStatus / requestId）017 不实现。
+7. **A7 LoopTrace 字段集**：顶层 `{ turns: ReadonlyArray<TurnTrace>; totals: Totals }`。TurnTrace：turnIndex / supplierStop（引用 014 值域）/ toolCalls（kind 引用 015 值域，不含 payload）/ durationMs（step 入口→出口 wall-clock）/ cancelKind（"none" | "callerAbort" | "timerTimeout" | "hostCancel"，值域对齐 023 RaceModelOutcome.source）。Totals：totalDurationMs / cancelKindCounts（{ none / callerAbort / timerTimeout / hostCancel }）/ toolErrorTotals。聚合时机：run 结束时一次性 reduce（非增量累加）。B 层字段（tokenUsage / costUsd / model / httpStatus / requestId）017 不实现。
+
+> 025 #98 解冻：A7 TurnTrace 双布尔（timeoutHit/signalAborted）重构为单一枚举 cancelKind，Totals 同步为 cancelKindCounts。操作员显式授权；行为零变更（loop 控制流/StopReason 不动），trace 获得 hostCancel 分辨力（与 023 #54 RaceModelOutcome.source 对齐）。
+
 8. **A8 对仗边界**：Q6 右列 7 项写入 Boundaries-Never。任何右列项进 017 实施 = 违反 Fixed boundary。
 9. **A9 示例 stub**：`src/harness/stubs/` 新增响应 ctx.signal 的示例 stub tool（abort → AbortError → Executor 转 execution_failed）。stub-model 扩展：可注入延迟 + 可绑 signal。stubs 不进生产装配路径。
 10. **A10 验证场景归属**：S12–S17 写在 `tests/harness/` 下（续 loop-engine.test.ts 或新建 loop-hardening.test.ts，writing-plans 微调）。全离线替身可验。016 S1–S11 + Adapter 7 类 + Registry 构造验收不回归。
@@ -190,15 +193,21 @@ export interface TurnTrace {
   }>;
   // 严格不含 input / output / payload（014 边界守门，S16 显式验证）
   readonly durationMs: number; // step 入口 → 出口 wall-clock
-  readonly timeoutHit: boolean;
-  readonly signalAborted: boolean;
+  // #98：替换 017 双布尔 timeoutHit/signalAborted 为单一枚举；行为零变更，
+  // trace 获得 hostCancel 分辨力（与 023 #54 RaceModelOutcome.source 对齐）。
+  readonly cancelKind: "none" | "callerAbort" | "timerTimeout" | "hostCancel";
 }
 
 /** 全局聚合（A 层，Q5 字面）。 */
 export interface Totals {
   readonly totalDurationMs: number;
-  readonly timeoutHits: number;
-  readonly signalAborteds: number;
+  // #98：替换 017 双布尔聚合 timeoutHits/signalAborteds 为枚举计数对象。
+  readonly cancelKindCounts: {
+    readonly none: number;
+    readonly callerAbort: number;
+    readonly timerTimeout: number;
+    readonly hostCancel: number;
+  };
   readonly toolErrorTotals: {
     readonly ok: number;
     readonly validation_failed: number;
@@ -239,11 +248,11 @@ export function computeTotals(turns: ReadonlyArray<TurnTrace>): Totals;
   - Registry 构造验收 — `tests/harness/tools/registry.test.ts`。
 
 - **017 新增 S12–S17**（全离线替身可验证，不需要真实模型/工具/网络）：
-  - **S12 signal abort 在模型在途**：run 启动后 abort signal → stop `cancelled`，整回合不进历史，trace.turns 末项 `signalAborted=true`。
-  - **S13 signal abort 在工具在途**：assistant 回合已进历史，工具执行中被 abort → 被中断 tool call 填 `execution_failed`（message 标 "cancelled"）tool_result 进历史，stop `cancelled`，trace.turns 末项 `signalAborted=true` + 该 toolCall `kind="execution_failed"`。
-  - **S14 timeout 触发（模型在途）**：stub model 延迟 > timeoutMs → stop `timeout`，整回合不进历史，trace.turns 末项 `timeoutHit=true`。
-  - **S15 timeout 触发（工具在途）**：stub tool 延迟 > timeoutMs → 被中断 tool call 填 `execution_failed`（message 标 "timeout"）tool_result 进历史，stop `timeout`，trace.turns 末项 `timeoutHit=true`。
-  - **S16 LoopTrace 完整性**：多回合 run 后 trace.turns.length == turnCount；每回合字段齐全；totals 聚合正确（timeoutHits / signalAborteds / toolErrorTotals）；**trace 不含 payload**（守 014 边界）。
+  - **S12 signal abort 在模型在途**：run 启动后 abort signal → stop `cancelled`，整回合不进历史，trace.turns 末项 `cancelKind="callerAbort"`。
+  - **S13 signal abort 在工具在途**：assistant 回合已进历史，工具执行中被 abort → 被中断 tool call 填 `execution_failed`（message 标 "cancelled"）tool_result 进历史，stop `cancelled`，trace.turns 末项 `cancelKind="callerAbort"` + 该 toolCall `kind="execution_failed"`。
+  - **S14 timeout 触发（模型在途）**：stub model 延迟 > timeoutMs → stop `timeout`，整回合不进历史，trace.turns 末项 `cancelKind="timerTimeout"`。
+  - **S15 timeout 触发（工具在途）**：stub tool 延迟 > timeoutMs → 被中断 tool call 填 `execution_failed`（message 标 "timeout"）tool_result 进历史，stop `timeout`，trace.turns 末项 `cancelKind="timerTimeout"`。
+  - **S16 LoopTrace 完整性**：多回合 run 后 trace.turns.length == turnCount；每回合字段齐全；totals 聚合正确（cancelKindCounts / toolErrorTotals）；**trace 不含 payload**（守 014 边界）。
   - **S17 ctx.signal 机制可用**：示例 stub tool 接 ctx.signal，abort 后该 handler 抛 AbortError → Executor 转 `execution_failed`。证明 015 ToolHandler 扩展的机制可用，不依赖真实工具。
 
 - **测试层**：全 unit（替身 model / 替身 tool + signal/timeout 注入，无真实模型/网络/产品流量）。
@@ -290,10 +299,10 @@ export function computeTotals(turns: ReadonlyArray<TurnTrace>): Totals;
 
 1. `npm run typecheck` 退出码 0？□
 2. `npm test` 退出码 0？□
-3. S12 signal abort 模型在途：stop `cancelled` + 整回合不进历史 + trace 末项 `signalAborted=true`？□
-4. S13 signal abort 工具在途：被中断 tool call 填 `execution_failed`（message "cancelled"）进历史 + stop `cancelled` + trace 末项 `signalAborted=true`？□
-5. S14 timeout 模型在途：stop `timeout` + 整回合不进历史 + trace 末项 `timeoutHit=true`？□
-6. S15 timeout 工具在途：被中断 tool call 填 `execution_failed`（message "timeout"）进历史 + stop `timeout` + trace 末项 `timeoutHit=true`？□
+3. S12 signal abort 模型在途：stop `cancelled` + 整回合不进历史 + trace 末项 `cancelKind="callerAbort"`？□
+4. S13 signal abort 工具在途：被中断 tool call 填 `execution_failed`（message "cancelled"）进历史 + stop `cancelled` + trace 末项 `cancelKind="callerAbort"`？□
+5. S14 timeout 模型在途：stop `timeout` + 整回合不进历史 + trace 末项 `cancelKind="timerTimeout"`？□
+6. S15 timeout 工具在途：被中断 tool call 填 `execution_failed`（message "timeout"）进历史 + stop `timeout` + trace 末项 `cancelKind="timerTimeout"`？□
 7. S16 LoopTrace 完整性：trace.turns.length == turnCount + 每回合字段齐全 + totals 聚合正确 + **trace 不含 payload**？□
 8. S17 ctx.signal 机制可用：示例 stub 接 ctx.signal → abort → AbortError → Executor 转 `execution_failed`？□
 9. 016 S1–S11 全过不回归？□

@@ -816,8 +816,7 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     // Trace has one turn entry (the cancelled model attempt) flagged.
     assert.equal(trace.turns.length, 1);
     const last = trace.turns[0]!;
-    assert.equal(last.signalAborted, true);
-    assert.equal(last.timeoutHit, false);
+    assert.equal(last.cancelKind, "callerAbort");
     assert.equal(last.toolCalls.length, 0);
   });
 
@@ -868,9 +867,9 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     };
     assert.equal(trBlock.is_error, true);
     assert.equal(trBlock.tool_use_id, "u1");
-    // Trace turn: signalAborted=true; toolCalls entry kind=execution_failed.
+    // Trace turn: cancelKind=callerAbort; toolCalls entry kind=execution_failed.
     const last = trace.turns[trace.turns.length - 1]!;
-    assert.equal(last.signalAborted, true);
+    assert.equal(last.cancelKind, "callerAbort");
     assert.equal(last.toolCalls.length, 1);
     const entry = last.toolCalls[0]!;
     assert.equal(entry.kind, "execution_failed");
@@ -878,7 +877,7 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     assert.equal(entry.message, "cancelled");
   });
 
-  it("S14: model timeout -> stop timeout; whole turn NOT in history; trace.timeoutHit=true", async () => {
+  it('S14: model timeout -> stop timeout; whole turn NOT in history; cancelKind="timerTimeout"', async () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
@@ -904,8 +903,7 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     assert.equal(result.messages.length, 1);
     assert.equal(result.messages[0]!.role, "user");
     const last = trace.turns[trace.turns.length - 1]!;
-    assert.equal(last.timeoutHit, true);
-    assert.equal(last.signalAborted, false);
+    assert.equal(last.cancelKind, "timerTimeout");
   });
 
   it("S15: tool timeout -> stop timeout; tool_result is execution_failed timeout", async () => {
@@ -964,7 +962,7 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     assert.equal(trBlock.is_error, true);
     assert.equal(trBlock.tool_use_id, "u1");
     const last = trace.turns[trace.turns.length - 1]!;
-    assert.equal(last.timeoutHit, true);
+    assert.equal(last.cancelKind, "timerTimeout");
     assert.equal(last.toolCalls.length, 1);
     assert.equal(last.toolCalls[0]!.kind, "execution_failed");
     assert.equal(last.toolCalls[0]!.message, "timeout");
@@ -1017,8 +1015,13 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
       assert.ok(Array.isArray(t.toolCalls));
       assert.equal(typeof t.durationMs, "number");
       assert.ok(t.durationMs >= 0);
-      assert.equal(typeof t.timeoutHit, "boolean");
-      assert.equal(typeof t.signalAborted, "boolean");
+      assert.equal(typeof t.cancelKind, "string");
+      assert.ok(
+        ["none", "callerAbort", "timerTimeout", "hostCancel"].includes(
+          t.cancelKind
+        ),
+        `cancelKind must be one of the enum values, got: ${t.cancelKind}`
+      );
     }
     // Totals aggregation.
     const sumDuration = trace.turns.reduce((acc, t) => acc + t.durationMs, 0);
@@ -1073,7 +1076,7 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     assert.equal(trBlock.is_error, true);
     assert.equal(trBlock.tool_use_id, "u1");
     const last = trace.turns[trace.turns.length - 1]!;
-    assert.equal(last.signalAborted, true);
+    assert.equal(last.cancelKind, "callerAbort");
     assert.equal(last.toolCalls[0]!.kind, "execution_failed");
     assert.equal(last.toolCalls[0]!.message, "cancelled");
   });
@@ -1188,6 +1191,36 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     assert.doesNotThrow(() => handle.childAbort());
     assert.equal((await handle.outcome).source, "adapter");
   });
+
+  it("T2-new-5 (#98): childAbort() wins the race -> outcome.source === hostCancel", async () => {
+    // 025 #98:hostCancel 覆盖。adapter.step 永不 settle,childAbort() 先胜出。
+    const tool = createStubTool({ name: "noop", next: () => ({}) });
+    const registry = createRegistry([tool]);
+    const executor = createExecutor(registry);
+    const adapter = Object.freeze({
+      encodeUserText: (text: string) => makeNative({ role: "user", text }),
+      encodeToolResults: () => [],
+      step: async () => {
+        // 永不 resolve:模拟一个挂起的 HTTP 请求。
+        await new Promise<void>(() => undefined);
+        return assistantResult({ texts: ["unreachable"] });
+      },
+    });
+    const state = Object.freeze({ messages: Object.freeze([]), turnCount: 0 });
+    const deps = Object.freeze({ adapter, executor, registry, maxTurns: 1 });
+    const handle = raceModel({
+      adapter,
+      state,
+      deps,
+      signal: undefined,
+      timeoutMs: 5000, // 足够长,确保 timer 不先触发
+    });
+    // childAbort() 在 adapter settle 之前调用 → hostCancel 胜出。
+    handle.childAbort();
+    const outcome = await handle.outcome;
+    assert.equal(outcome.source, "hostCancel");
+    assert.equal(outcome.result, undefined);
+  });
 });
 
 describe("017 timeout boundary: non-positive modelTimeoutMs disables the race", () => {
@@ -1215,10 +1248,9 @@ describe("017 timeout boundary: non-positive modelTimeoutMs disables the race", 
     assert.notEqual(result.stopReason, "timeout");
     assert.equal(result.turnCount, 1);
     assert.equal(result.finalText, "hi");
-    // Trace turn must NOT be marked as a timeout hit.
+    // Trace turn must NOT be marked as a timeout or cancel hit.
     const last = trace.turns[trace.turns.length - 1]!;
-    assert.equal(last.timeoutHit, false);
-    assert.equal(last.signalAborted, false);
+    assert.equal(last.cancelKind, "none");
   });
 
   it("modelTimeoutMs=-1 disables timeout race: pure-text run completes normally", async () => {
@@ -1245,6 +1277,6 @@ describe("017 timeout boundary: non-positive modelTimeoutMs disables the race", 
     assert.notEqual(result.stopReason, "timeout");
     assert.equal(result.finalText, "ok");
     const last = trace.turns[trace.turns.length - 1]!;
-    assert.equal(last.timeoutHit, false);
+    assert.equal(last.cancelKind, "none");
   });
 });
