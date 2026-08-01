@@ -440,12 +440,24 @@ describe("resetSession", () => {
 });
 
 describe("listSessions", () => {
-  it("returns metadata for created sessions", async () => {
+  it("returns metadata for sessions that have a reply", async () => {
+    const deps = makeDeps([assistantResult(["hi"])]);
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    await hub.postMessage(session.conversation_id, "hello");
+    const list = await hub.listSessions();
+    assert.ok(list.some((e) => e.conversation_id === session.conversation_id));
+  });
+
+  it("excludes a freshly created session with no reply (issue #96)", async () => {
     const deps = makeDeps([]);
     const hub = makeHub(deps);
     const { session } = await hub.createSession();
     const list = await hub.listSessions();
-    assert.ok(list.some((e) => e.conversation_id === session.conversation_id));
+    assert.ok(
+      !list.some((e) => e.conversation_id === session.conversation_id),
+      "empty session must not be listed"
+    );
   });
 });
 

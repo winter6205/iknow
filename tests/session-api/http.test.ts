@@ -158,15 +158,32 @@ describe("POST /api/v1/sessions", () => {
 // -- endpoint 3: GET /api/v1/sessions (list, new in T5) -----------------------
 
 describe("GET /api/v1/sessions", () => {
-  it("returns 200 with { sessions: [...] }", async () => {
+  it("returns 200 with { sessions: [...] } for sessions that have a reply", async () => {
     const id = await createSession();
+    // A session only appears in the list once it has an assistant reply
+    // (issue #96) — post a message so the stub model records one.
+    const posted = await postJson(`/api/v1/sessions/${id}/messages`, {
+      text: "hi",
+    });
+    assert.equal(posted.status, 200);
     const { status, body } = await getJson("/api/v1/sessions");
     assert.equal(status, 200);
     const b = body as { sessions: Array<{ conversation_id: string }> };
     assert.ok(Array.isArray(b.sessions));
     assert.ok(
       b.sessions.some((s) => s.conversation_id === id),
-      "list must include the created session"
+      "list must include the session that has a reply"
+    );
+  });
+
+  it("excludes a freshly created session with no reply (issue #96)", async () => {
+    const id = await createSession();
+    const { status, body } = await getJson("/api/v1/sessions");
+    assert.equal(status, 200);
+    const b = body as { sessions: Array<{ conversation_id: string }> };
+    assert.ok(
+      !b.sessions.some((s) => s.conversation_id === id),
+      "empty session must not be listed"
     );
   });
 

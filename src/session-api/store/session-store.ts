@@ -78,6 +78,10 @@ export class SessionStore {
   /**
    * List all session files sorted by updatedAt descending.
    * Corrupt / unreadable files are silently skipped (sidebar must not break).
+   * Sessions with no assistant text are skipped too (issue #96): bootstrap
+   * creates an empty session file before the user ever sends a message, and an
+   * interrupted sendMessage can leave one with no assistant reply — neither has
+   * anything to show in the sidebar. Single-session load()/get() is unaffected.
    * Throws: io_error (only for directory-level failures)
    */
   async list(): Promise<SessionListEntry[]> {
@@ -168,10 +172,16 @@ export class SessionStore {
     const id = name.slice(0, -".json".length);
     try {
       const file = await this.load(id);
+      const lastFinalText = lastAssistantText(file.messages);
+      // issue #96: skip sessions with no assistant text — bootstrap writes an
+      // empty file before the user sends anything, and an interrupted
+      // sendMessage can leave one with no reply. Nothing to show in the
+      // sidebar; single-session load()/get() is unaffected.
+      if (!lastFinalText.trim()) return null;
       return {
         conversation_id: id,
         updatedAt: file.updatedAt,
-        lastFinalText: lastAssistantText(file.messages),
+        lastFinalText,
       };
     } catch {
       return null; // skip corrupt / unreadable files

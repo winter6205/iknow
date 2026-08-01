@@ -163,13 +163,28 @@ describe("SessionStore.list", () => {
     await rm(empty, { recursive: true, force: true });
   });
 
-  it("returns entries sorted by updatedAt descending (no messages)", async () => {
+  it("returns entries sorted by updatedAt descending", async () => {
     const t1 = "2026-01-01T00:00:00.000Z";
     const t2 = "2026-02-01T00:00:00.000Z";
     const t3 = "2026-03-01T00:00:00.000Z";
-    await store.save("list-a", sampleFile("list-a", { updatedAt: t1 }));
-    await store.save("list-b", sampleFile("list-b", { updatedAt: t3 }));
-    await store.save("list-c", sampleFile("list-c", { updatedAt: t2 }));
+    // Each session needs assistant text or list() skips it (issue #96).
+    const withReply = (id: string, updatedAt: string) =>
+      sampleFile(id, {
+        updatedAt,
+        messages: [
+          {
+            role: "user" as const,
+            content: [{ type: "text" as const, text: "q" }],
+          },
+          {
+            role: "assistant" as const,
+            content: [{ type: "text" as const, text: "reply" }],
+          },
+        ],
+      });
+    await store.save("list-a", withReply("list-a", t1));
+    await store.save("list-b", withReply("list-b", t3));
+    await store.save("list-c", withReply("list-c", t2));
 
     const entries = await store.list();
     // Filter to just our three to insulate from other tests.
@@ -185,6 +200,59 @@ describe("SessionStore.list", () => {
       assert.equal(typeof e.lastFinalText, "string");
       assert.ok(!("messages" in e), "list entries must not contain messages");
     }
+  });
+
+  it("skips sessions with no assistant text (issue #96)", async () => {
+    // Empty messages array → bootstrap ghost, nothing to show in the sidebar.
+    await store.save("list-empty", sampleFile("list-empty"));
+    // Assistant message whose text is only whitespace → also treated as empty.
+    await store.save(
+      "list-blank",
+      sampleFile("list-blank", {
+        messages: [
+          {
+            role: "user" as const,
+            content: [{ type: "text" as const, text: "q" }],
+          },
+          {
+            role: "assistant" as const,
+            content: [{ type: "text" as const, text: "   " }],
+          },
+        ],
+      })
+    );
+    // Assistant message with only a tool_use block (no text) → interrupted
+    // mid-tool-use, nothing to show → also treated as empty.
+    await store.save(
+      "list-toolonly",
+      sampleFile("list-toolonly", {
+        messages: [
+          {
+            role: "user" as const,
+            content: [{ type: "text" as const, text: "q" }],
+          },
+          {
+            role: "assistant" as const,
+            content: [
+              { type: "tool_use" as const, id: "t1", name: "noop", input: {} },
+            ],
+          },
+        ],
+      })
+    );
+    const entries = await store.list();
+    assert.ok(
+      !entries.some((e) => e.conversation_id === "list-empty"),
+      "empty session must not be listed"
+    );
+    assert.ok(
+      !entries.some((e) => e.conversation_id === "list-blank"),
+      "whitespace-only session must not be listed"
+    );
+    assert.ok(
+      !entries.some((e) => e.conversation_id === "list-toolonly"),
+      "tool_use-only session must not be listed"
+    );
   });
 
   it("extracts text from the most recent assistant message as lastFinalText", async () => {
