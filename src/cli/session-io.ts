@@ -2,11 +2,15 @@
  * TTY detection and stdout/stderr writers for the product CLI.
  */
 
+export interface IsInteractiveOpts {
+  readonly stdin?: NodeJS.ReadStream;
+  readonly stdout?: NodeJS.WriteStream;
+}
+
 /** True when both stdin and stdout are TTYs (interactive product session). */
-export function isInteractive(
-  stdin: NodeJS.ReadStream = process.stdin,
-  stdout: NodeJS.WriteStream = process.stdout,
-): boolean {
+export function isInteractive(opts: IsInteractiveOpts = {}): boolean {
+  const stdin = opts.stdin ?? process.stdin;
+  const stdout = opts.stdout ?? process.stdout;
   return Boolean(stdin.isTTY && stdout.isTTY);
 }
 

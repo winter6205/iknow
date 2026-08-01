@@ -45,8 +45,8 @@ async function startServer(responses: AssistantTurnResult[]): Promise<void> {
 
 beforeEach(async () => {
   await startServer([
-    assistantResult(["hello"]),
-    assistantResult(["second answer"]),
+    assistantResult({ texts: ["hello"] }),
+    assistantResult({ texts: ["second answer"] }),
   ]);
 });
 
@@ -65,10 +65,11 @@ async function getJson(
   return { status: res.status, body };
 }
 
-async function postJson(
-  path: string,
-  payload: unknown
-): Promise<{ status: number; body: unknown }> {
+async function postJson(opts: {
+  readonly path: string;
+  readonly payload: unknown;
+}): Promise<{ status: number; body: unknown }> {
+  const { path, payload } = opts;
   const res = await fetch(`${origin}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -78,7 +79,11 @@ async function postJson(
   return { status: res.status, body };
 }
 
-function assertNestedError(body: unknown, kind: string): void {
+function assertNestedError(opts: {
+  readonly body: unknown;
+  readonly kind: string;
+}): void {
+  const { body, kind } = opts;
   const b = body as {
     error?: {
       kind?: string;
@@ -94,7 +99,10 @@ function assertNestedError(body: unknown, kind: string): void {
 }
 
 async function createSession(): Promise<string> {
-  const { status, body } = await postJson("/api/v1/sessions", {});
+  const { status, body } = await postJson({
+    path: "/api/v1/sessions",
+    payload: {},
+  });
   assert.equal(status, 201);
   return (body as { session: { conversation_id: string } }).session
     .conversation_id;
@@ -117,9 +125,12 @@ describe("GET /api/v1/health", () => {
 
 describe("POST /api/v1/sessions", () => {
   it("returns 201 with session + empty turns", async () => {
-    const { status, body } = await postJson("/api/v1/sessions", {
-      mode: "deterministic",
-      json_mode: false,
+    const { status, body } = await postJson({
+      path: "/api/v1/sessions",
+      payload: {
+        mode: "deterministic",
+        json_mode: false,
+      },
     });
     assert.equal(status, 201);
     const b = body as {
@@ -134,11 +145,14 @@ describe("POST /api/v1/sessions", () => {
   });
 
   it("returns 400 validation for invalid mode (nested shape)", async () => {
-    const { status, body } = await postJson("/api/v1/sessions", {
-      mode: "bogus",
+    const { status, body } = await postJson({
+      path: "/api/v1/sessions",
+      payload: {
+        mode: "bogus",
+      },
     });
     assert.equal(status, 400);
-    assertNestedError(body, "validation");
+    assertNestedError({ body, kind: "validation" });
     const b = body as { error: { field?: string } };
     assert.equal(b.error.field, "mode");
   });
@@ -151,7 +165,7 @@ describe("POST /api/v1/sessions", () => {
     });
     const body = await res.json();
     assert.equal(res.status, 400);
-    assertNestedError(body, "validation");
+    assertNestedError({ body, kind: "validation" });
   });
 });
 
@@ -162,8 +176,9 @@ describe("GET /api/v1/sessions", () => {
     const id = await createSession();
     // A session only appears in the list once it has an assistant reply
     // (issue #96) — post a message so the stub model records one.
-    const posted = await postJson(`/api/v1/sessions/${id}/messages`, {
-      text: "hi",
+    const posted = await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: { text: "hi" },
     });
     assert.equal(posted.status, 200);
     const { status, body } = await getJson("/api/v1/sessions");
@@ -199,8 +214,11 @@ describe("GET /api/v1/sessions", () => {
 describe("GET /api/v1/sessions/:id", () => {
   it("returns 200 with projected TurnDto after postMessage", async () => {
     const id = await createSession();
-    const posted = await postJson(`/api/v1/sessions/${id}/messages`, {
-      text: "what time is it?",
+    const posted = await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: {
+        text: "what time is it?",
+      },
     });
     assert.equal(posted.status, 200);
 
@@ -235,7 +253,7 @@ describe("GET /api/v1/sessions/:id", () => {
       "/api/v1/sessions/does-not-exist-id"
     );
     assert.equal(status, 404);
-    assertNestedError(body, "not_found");
+    assertNestedError({ body, kind: "not_found" });
     const b = body as { error: { conversation_id?: string } };
     assert.equal(b.error.conversation_id, "does-not-exist-id");
   });
@@ -246,8 +264,11 @@ describe("GET /api/v1/sessions/:id", () => {
 describe("POST /api/v1/sessions/:id/messages", () => {
   it("returns 200 with PostMessageResponse { session, turn }", async () => {
     const id = await createSession();
-    const { status, body } = await postJson(`/api/v1/sessions/${id}/messages`, {
-      text: "hi",
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: {
+        text: "hi",
+      },
     });
     assert.equal(status, 200);
     const b = body as {
@@ -267,11 +288,14 @@ describe("POST /api/v1/sessions/:id/messages", () => {
 
   it("returns 400 validation for empty text (nested shape)", async () => {
     const id = await createSession();
-    const { status, body } = await postJson(`/api/v1/sessions/${id}/messages`, {
-      text: "   ",
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: {
+        text: "   ",
+      },
     });
     assert.equal(status, 400);
-    assertNestedError(body, "validation");
+    assertNestedError({ body, kind: "validation" });
     const b = body as { error: { field?: string } };
     assert.equal(b.error.field, "text");
   });
@@ -282,9 +306,15 @@ describe("POST /api/v1/sessions/:id/messages", () => {
 describe("POST /api/v1/sessions/:id/reset", () => {
   it("returns 200 with cleared session", async () => {
     const id = await createSession();
-    await postJson(`/api/v1/sessions/${id}/messages`, { text: "msg" });
+    await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: { text: "msg" },
+    });
 
-    const { status, body } = await postJson(`/api/v1/sessions/${id}/reset`, {});
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/reset`,
+      payload: {},
+    });
     assert.equal(status, 200);
     const b = body as {
       session: { conversation_id: string; turn_count: number };
@@ -301,11 +331,14 @@ describe("POST /api/v1/sessions/:id/reset", () => {
 describe("POST /api/v1/sessions/:id/commands (removed in T5)", () => {
   it("returns 404 not_found (route physically deleted)", async () => {
     const id = await createSession();
-    const { status, body } = await postJson(`/api/v1/sessions/${id}/commands`, {
-      command: "help",
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/commands`,
+      payload: {
+        command: "help",
+      },
     });
     assert.equal(status, 404);
-    assertNestedError(body, "not_found");
+    assertNestedError({ body, kind: "not_found" });
   });
 });
 
@@ -315,7 +348,7 @@ describe("nested ApiErrorBody shape", () => {
   it("404 fallback for unknown route uses nested shape", async () => {
     const { status, body } = await getJson("/api/v1/totally/unknown");
     assert.equal(status, 404);
-    assertNestedError(body, "not_found");
+    assertNestedError({ body, kind: "not_found" });
   });
 });
 
@@ -326,7 +359,7 @@ describe("GET /api/v1/sessions/:id/events — SSE reserved", () => {
     const id = await createSession();
     const { status, body } = await getJson(`/api/v1/sessions/${id}/events`);
     assert.equal(status, 501);
-    assertNestedError(body, "internal");
+    assertNestedError({ body, kind: "internal" });
     const b = body as { error: { message: string } };
     assert.ok(b.error.message.toLowerCase().includes("sse"));
   });
@@ -350,9 +383,12 @@ describe("POST /api/v1/sessions — parseCreateBody edges", () => {
   });
 
   it("json_mode boolean is coerced and applied to the session", async () => {
-    const { status, body } = await postJson("/api/v1/sessions", {
-      json_mode: true,
-      embeddings: true,
+    const { status, body } = await postJson({
+      path: "/api/v1/sessions",
+      payload: {
+        json_mode: true,
+        embeddings: true,
+      },
     });
     assert.equal(status, 201);
     const b = body as { session: { json_mode: boolean; embeddings: boolean } };
@@ -370,7 +406,7 @@ describe("POST /api/v1/sessions — parseCreateBody edges", () => {
     });
     const body = await res.json();
     assert.equal(res.status, 400);
-    assertNestedError(body, "validation");
+    assertNestedError({ body, kind: "validation" });
   });
 
   it("oversized body (>256KB) → 400 validation", async () => {
@@ -382,7 +418,7 @@ describe("POST /api/v1/sessions — parseCreateBody edges", () => {
     });
     const body = await res.json();
     assert.equal(res.status, 400);
-    assertNestedError(body, "validation");
+    assertNestedError({ body, kind: "validation" });
   });
 });
 

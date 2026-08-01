@@ -76,39 +76,47 @@ function parseEnvFile(path: string): Record<string, string> {
   return out;
 }
 
-function envGet(
-  file: Record<string, string>,
-  key: string,
-  fallback = ""
-): string {
+interface EnvGetOpts {
+  readonly file: Record<string, string>;
+  readonly key: string;
+  readonly fallback?: string;
+}
+
+function envGet(opts: EnvGetOpts): string {
+  const { file, key } = opts;
+  const fallback = opts.fallback ?? "";
   const fromProc = process.env[key];
   if (fromProc !== undefined && fromProc !== "") return fromProc;
   if (file[key] !== undefined && file[key] !== "") return file[key]!;
   return fallback;
 }
 
+interface EnvIntOpts {
+  readonly file: Record<string, string>;
+  readonly key: string;
+  readonly fallback: number;
+}
+
 /** Integer env values (tokens, timeouts, dims). Non-finite → fallback. */
-function envInt(
-  file: Record<string, string>,
-  key: string,
-  fallback: number
-): number {
-  const raw = envGet(file, key, "");
-  if (!raw) return fallback;
+function envInt(opts: EnvIntOpts): number {
+  const raw = envGet({ file: opts.file, key: opts.key });
+  if (!raw) return opts.fallback;
   const n = Number(raw);
-  return Number.isFinite(n) ? Math.trunc(n) : fallback;
+  return Number.isFinite(n) ? Math.trunc(n) : opts.fallback;
+}
+
+interface EnvNumberOpts {
+  readonly file: Record<string, string>;
+  readonly key: string;
+  readonly fallback: number;
 }
 
 /** Float env values (e.g. temperature 0.0–2.0). Non-finite → fallback. */
-function envNumber(
-  file: Record<string, string>,
-  key: string,
-  fallback: number
-): number {
-  const raw = envGet(file, key, "");
-  if (!raw) return fallback;
+function envNumber(opts: EnvNumberOpts): number {
+  const raw = envGet({ file: opts.file, key: opts.key });
+  if (!raw) return opts.fallback;
   const n = Number(raw);
-  return Number.isFinite(n) ? n : fallback;
+  return Number.isFinite(n) ? n : opts.fallback;
 }
 
 /**
@@ -119,10 +127,13 @@ function envNumber(
  * are treated as unset so template/docs defaults like `API_KEY=yes` do not become
  * live credentials.
  */
-export function getApiKey(
-  envVarName: string,
-  fileMap?: Record<string, string>
-): string | undefined {
+export interface GetApiKeyOpts {
+  readonly envVarName: string;
+  readonly fileMap?: Record<string, string>;
+}
+
+export function getApiKey(opts: GetApiKeyOpts): string | undefined {
+  const { envVarName, fileMap } = opts;
   if (!envVarName) return undefined;
   const fromProc = process.env[envVarName];
   const raw =
@@ -138,13 +149,17 @@ export function getApiKey(
 
 /**
  * Fail closed when offline mode forbids network LLM / API embeddings.
- * @param agentMode effective mode (CLI may override env.agentMode)
  * Call sites: create-runtime, cli (not loadIknowEnv — avoids double validation).
  */
+export interface AssertOfflineCompatibleOpts {
+  readonly env: IknowEnv;
+  readonly agentMode?: AgentMode;
+}
+
 export function assertOfflineCompatible(
-  env: IknowEnv,
-  agentMode?: AgentMode
+  opts: AssertOfflineCompatibleOpts
 ): void {
+  const { env, agentMode } = opts;
   if (!env.requireOffline) return;
   const mode = agentMode ?? env.agentMode;
   if (mode === "llm") {
@@ -185,15 +200,23 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
 
   // SSOT: iknow 钉死 9router 栈 - key 变量名 NINE_ROUTER_KEY、主模型 m3-combo。
   // .env.local 只需持有密钥值本身，无需再设 IKNOW_LLM_API_KEY_ENV / IKNOW_LLM_MODEL。
-  const llmKeyEnv = envGet(file, "IKNOW_LLM_API_KEY_ENV", "NINE_ROUTER_KEY");
-  const embKeyEnv = envGet(
+  const llmKeyEnv = envGet({
     file,
-    "IKNOW_EMBEDDING_API_KEY_ENV",
-    "NINE_ROUTER_KEY"
-  );
+    key: "IKNOW_LLM_API_KEY_ENV",
+    fallback: "NINE_ROUTER_KEY",
+  });
+  const embKeyEnv = envGet({
+    file,
+    key: "IKNOW_EMBEDDING_API_KEY_ENV",
+    fallback: "NINE_ROUTER_KEY",
+  });
 
-  const embModeRaw = envGet(file, "IKNOW_EMBEDDING_MODE", "off").toLowerCase();
-  const embApiKey = getApiKey(embKeyEnv, file);
+  const embModeRaw = envGet({
+    file,
+    key: "IKNOW_EMBEDDING_MODE",
+    fallback: "off",
+  }).toLowerCase();
+  const embApiKey = getApiKey({ envVarName: embKeyEnv, fileMap: file });
   // local treated as api HTTP for this project (network API profile)
   let embMode: EmbeddingMode =
     embModeRaw === "api" || embModeRaw === "local" ? "api" : "off";
@@ -202,67 +225,103 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
     embMode = "off";
   }
 
-  const agentRaw = envGet(
+  const agentRaw = envGet({
     file,
-    "IKNOW_AGENT_MODE",
-    "deterministic"
-  ).toLowerCase();
+    key: "IKNOW_AGENT_MODE",
+    fallback: "deterministic",
+  }).toLowerCase();
   const agentMode: AgentMode = agentRaw === "llm" ? "llm" : "deterministic";
 
-  const toolProto = envGet(
+  const toolProto = envGet({
     file,
-    "IKNOW_LLM_TOOL_PROTOCOL",
-    "openai_tools"
-  ).toLowerCase();
+    key: "IKNOW_LLM_TOOL_PROTOCOL",
+    fallback: "openai_tools",
+  }).toLowerCase();
 
-  const dims = envInt(file, "IKNOW_EMBEDDING_DIMS", 2048);
+  const dims = envInt({ file, key: "IKNOW_EMBEDDING_DIMS", fallback: 2048 });
 
   return {
     agentMode,
     requireOffline:
-      envGet(file, "IKNOW_REQUIRE_OFFLINE", "false").toLowerCase() === "true",
+      envGet({
+        file,
+        key: "IKNOW_REQUIRE_OFFLINE",
+        fallback: "false",
+      }).toLowerCase() === "true",
     llm: {
-      provider: envGet(file, "IKNOW_LLM_PROVIDER", "9router"),
-      baseUrl: envGet(
+      provider: envGet({
         file,
-        "IKNOW_LLM_BASE_URL",
-        "http://localhost:20128/v1"
-      ).replace(/\/$/, ""),
+        key: "IKNOW_LLM_PROVIDER",
+        fallback: "9router",
+      }),
+      baseUrl: envGet({
+        file,
+        key: "IKNOW_LLM_BASE_URL",
+        fallback: "http://localhost:20128/v1",
+      }).replace(/\/$/, ""),
       // SSOT: 项目主模型 = m3-combo (9router 路由 ID)
-      model: envGet(file, "IKNOW_LLM_MODEL", "m3-combo"),
+      model: envGet({ file, key: "IKNOW_LLM_MODEL", fallback: "m3-combo" }),
       apiKeyEnv: llmKeyEnv,
-      apiKey: getApiKey(llmKeyEnv, file),
-      maxOutputTokens: envInt(file, "IKNOW_LLM_MAX_OUTPUT_TOKENS", 2048),
-      contextWindowTokens: envInt(
+      apiKey: getApiKey({ envVarName: llmKeyEnv, fileMap: file }),
+      maxOutputTokens: envInt({
         file,
-        "IKNOW_LLM_CONTEXT_WINDOW_TOKENS",
-        1_000_000
-      ),
-      timeoutMs: envInt(file, "IKNOW_LLM_TIMEOUT_MS", 60_000),
-      temperature: envNumber(file, "IKNOW_LLM_TEMPERATURE", 0),
+        key: "IKNOW_LLM_MAX_OUTPUT_TOKENS",
+        fallback: 2048,
+      }),
+      contextWindowTokens: envInt({
+        file,
+        key: "IKNOW_LLM_CONTEXT_WINDOW_TOKENS",
+        fallback: 1_000_000,
+      }),
+      timeoutMs: envInt({
+        file,
+        key: "IKNOW_LLM_TIMEOUT_MS",
+        fallback: 60_000,
+      }),
+      temperature: envNumber({
+        file,
+        key: "IKNOW_LLM_TEMPERATURE",
+        fallback: 0,
+      }),
       toolProtocol:
         toolProto === "anthropic_tools" ? "anthropic_tools" : "openai_tools",
     },
     embedding: {
       mode: embMode,
-      provider: envGet(file, "IKNOW_EMBEDDING_PROVIDER", "9router"),
-      baseUrl: envGet(
+      provider: envGet({
         file,
-        "IKNOW_EMBEDDING_BASE_URL",
-        "http://localhost:20128/v1"
-      ).replace(/\/$/, ""),
+        key: "IKNOW_EMBEDDING_PROVIDER",
+        fallback: "9router",
+      }),
+      baseUrl: envGet({
+        file,
+        key: "IKNOW_EMBEDDING_BASE_URL",
+        fallback: "http://localhost:20128/v1",
+      }).replace(/\/$/, ""),
       // Intentional 9router route id (not a typo of "zhipu"/"zhipuai")
-      model: envGet(file, "IKNOW_EMBEDDING_MODEL", "zhipueb/embedding-3"),
+      model: envGet({
+        file,
+        key: "IKNOW_EMBEDDING_MODEL",
+        fallback: "zhipueb/embedding-3",
+      }),
       apiKeyEnv: embKeyEnv,
       apiKey: embApiKey,
       dims,
-      dimensions: envInt(file, "IKNOW_EMBEDDING_DIMENSIONS", dims),
-      timeoutMs: envInt(file, "IKNOW_EMBEDDING_TIMEOUT_MS", 30_000),
-      cachePath: envGet(
+      dimensions: envInt({
         file,
-        "IKNOW_EMBEDDING_CACHE_PATH",
-        ".cache/iknow-embeddings"
-      ),
+        key: "IKNOW_EMBEDDING_DIMENSIONS",
+        fallback: dims,
+      }),
+      timeoutMs: envInt({
+        file,
+        key: "IKNOW_EMBEDDING_TIMEOUT_MS",
+        fallback: 30_000,
+      }),
+      cachePath: envGet({
+        file,
+        key: "IKNOW_EMBEDDING_CACHE_PATH",
+        fallback: ".cache/iknow-embeddings",
+      }),
     },
   };
 }

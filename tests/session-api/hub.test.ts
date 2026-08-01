@@ -40,10 +40,11 @@ const neverResolvingAdapter: LoopAdapter = {
   encodeToolResults: () => [],
 };
 
-function sampleFile(
-  id: string,
-  overrides: Partial<SessionFileV1> = {}
-): SessionFileV1 {
+function sampleFile(opts: {
+  readonly id: string;
+  readonly overrides?: Partial<SessionFileV1>;
+}): SessionFileV1 {
+  const { id, overrides = {} } = opts;
   return {
     schemaVersion: 1,
     conversation_id: id,
@@ -146,10 +147,13 @@ describe("createSession", () => {
 
 describe("boundary: empty — new session first run", () => {
   it("postMessage on fresh session produces completed turn", async () => {
-    const deps = makeDeps([assistantResult(["hello world"])]);
+    const deps = makeDeps([assistantResult({ texts: ["hello world"] })]);
     const hub = makeHub(deps);
     const { session } = await hub.createSession();
-    const res = await hub.postMessage(session.conversation_id, "hi");
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "hi",
+    });
     assert.equal(res.turn.query, "hi");
     assert.equal(res.turn.answer.finalText, "hello world");
     assert.equal(res.turn.answer.stopReason, "completed");
@@ -165,7 +169,7 @@ describe("boundary: negative", () => {
     const deps = makeDeps([]);
     const hub = makeHub(deps);
     await assert.rejects(
-      () => hub.postMessage("nonexistent-id", "hi"),
+      () => hub.postMessage({ conversationId: "nonexistent-id", text: "hi" }),
       (err: unknown) => {
         const e = err as SessionStoreError;
         assert.equal(e.kind, "not_found");
@@ -184,7 +188,7 @@ describe("boundary: negative", () => {
       "utf8"
     );
     await assert.rejects(
-      () => hub.postMessage("corrupt-conv", "hi"),
+      () => hub.postMessage({ conversationId: "corrupt-conv", text: "hi" }),
       (err: unknown) => {
         const e = err as SessionStoreError;
         assert.equal(e.kind, "parse_failed");
@@ -199,12 +203,18 @@ describe("boundary: negative", () => {
 describe("boundary: overflow — multi-step tool loop", () => {
   it("accumulates messages across tool calls", async () => {
     const deps = makeDeps([
-      assistantResult([], [{ id: "t1", name: "noop", input: {} }]),
-      assistantResult(["done"]),
+      assistantResult({
+        texts: [],
+        toolCalls: [{ id: "t1", name: "noop", input: {} }],
+      }),
+      assistantResult({ texts: ["done"] }),
     ]);
     const hub = makeHub(deps);
     const { session } = await hub.createSession();
-    const res = await hub.postMessage(session.conversation_id, "do stuff");
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "do stuff",
+    });
     assert.equal(res.turn.answer.stopReason, "completed");
     assert.equal(res.turn.answer.turnCount, 2);
     // File should have user + assistant(tool_use) + user(tool_result) + assistant(text) = 4 messages
@@ -222,7 +232,8 @@ describe("boundary: exception — cancelled signal", () => {
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const registry = createRegistry([tool]);
     const executor = createExecutor(registry);
-    const adapter = createStubModel([assistantResult(["should not appear"])], {
+    const adapter = createStubModel({
+      responses: [assistantResult({ texts: ["should not appear"] })],
       delayMs: 500,
     });
     const deps: LoopEngineDeps = { adapter, executor, registry, maxTurns: 5 };
@@ -233,11 +244,11 @@ describe("boundary: exception — cancelled signal", () => {
     // Abort after 50ms
     setTimeout(() => controller.abort(), 50);
 
-    const res = await hub.postMessage(
-      session.conversation_id,
-      "will be cancelled",
-      { signal: controller.signal }
-    );
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "will be cancelled",
+      signal: controller.signal,
+    });
     assert.equal(res.turn.answer.stopReason, "cancelled");
     assert.equal(res.turn.answer.finalText, "");
     // File must NOT be updated (cancelled → no save)
@@ -263,10 +274,10 @@ describe("boundary: exception — run-level timeout", () => {
     };
     const hub = makeHub(deps);
     const { session } = await hub.createSession();
-    const res = await hub.postMessage(
-      session.conversation_id,
-      "trigger timeout"
-    );
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "trigger timeout",
+    });
     assert.equal(res.turn.answer.stopReason, "timeout");
   });
 });
@@ -281,10 +292,15 @@ describe("boundary: exception — tool timeout persists execution_failed", () =>
     });
     const registry = createRegistry([tool]);
     const executor = createExecutor(registry);
-    const adapter = createStubModel([
-      assistantResult([], [{ id: "t1", name: "slow", input: {} }]),
-      assistantResult(["after timeout"]),
-    ]);
+    const adapter = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "slow", input: {} }],
+        }),
+        assistantResult({ texts: ["after timeout"] }),
+      ],
+    });
     const deps: LoopEngineDeps = {
       adapter,
       executor,
@@ -294,7 +310,10 @@ describe("boundary: exception — tool timeout persists execution_failed", () =>
     };
     const hub = makeHub(deps);
     const { session } = await hub.createSession();
-    await hub.postMessage(session.conversation_id, "trigger tool timeout");
+    await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "trigger tool timeout",
+    });
     // File IS saved (timeout → save per 裁决#8)
     const loaded = await store.load(session.conversation_id);
     assert.ok(loaded.messages.length > 0, "file must be saved on tool timeout");
@@ -326,17 +345,25 @@ describe("boundary: concurrent — same-id serialization", () => {
     const registry = createRegistry([tool]);
     const executor = createExecutor(registry);
     // Two responses for two sequential calls
-    const adapter = createStubModel([
-      assistantResult(["first"]),
-      assistantResult(["second"]),
-    ]);
+    const adapter = createStubModel({
+      responses: [
+        assistantResult({ texts: ["first"] }),
+        assistantResult({ texts: ["second"] }),
+      ],
+    });
     const deps: LoopEngineDeps = { adapter, executor, registry, maxTurns: 5 };
     const hub = makeHub(deps);
     const { session } = await hub.createSession();
 
     const [r1, r2] = await Promise.all([
-      hub.postMessage(session.conversation_id, "msg1"),
-      hub.postMessage(session.conversation_id, "msg2"),
+      hub.postMessage({
+        conversationId: session.conversation_id,
+        text: "msg1",
+      }),
+      hub.postMessage({
+        conversationId: session.conversation_id,
+        text: "msg2",
+      }),
     ]);
     // Both succeed (serialized, not concurrent corruption)
     assert.equal(r1.turn.answer.stopReason, "completed");
@@ -352,17 +379,23 @@ describe("boundary: concurrent — same-id serialization", () => {
 describe("turnCount accumulation across multiple postMessage calls", () => {
   it("two rounds → session.turnCount = round1 + round2", async () => {
     const deps = makeDeps([
-      assistantResult(["answer 1"]),
-      assistantResult(["answer 2"]),
+      assistantResult({ texts: ["answer 1"] }),
+      assistantResult({ texts: ["answer 2"] }),
     ]);
     const hub = makeHub(deps);
     const { session } = await hub.createSession();
 
-    const r1 = await hub.postMessage(session.conversation_id, "q1");
+    const r1 = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "q1",
+    });
     assert.equal(r1.session.turn_count, 1);
     assert.equal(r1.turn.answer.turnCount, 1);
 
-    const r2 = await hub.postMessage(session.conversation_id, "q2");
+    const r2 = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "q2",
+    });
     assert.equal(r2.session.turn_count, 2);
     assert.equal(r2.turn.answer.turnCount, 1); // per-run turnCount starts at 0
 
@@ -379,10 +412,10 @@ describe("drop-context stop reasons do not save", () => {
     const deps = makeDeps([]); // no responses → first step throws ProtocolError
     const hub = makeHub(deps);
     const { session } = await hub.createSession();
-    const res = await hub.postMessage(
-      session.conversation_id,
-      "trigger protocol error"
-    );
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "trigger protocol error",
+    });
     assert.equal(res.turn.answer.stopReason, "protocolError");
     const loaded = await store.load(session.conversation_id);
     assert.equal(loaded.messages.length, 0);
@@ -390,10 +423,15 @@ describe("drop-context stop reasons do not save", () => {
   });
 
   it("emptyFinalResponse → file unchanged", async () => {
-    const deps = makeDeps([assistantResult([], [], "success")]); // empty → emptyFinalResponse
+    const deps = makeDeps([
+      assistantResult({ texts: [], toolCalls: [], supplierStop: "success" }),
+    ]); // empty → emptyFinalResponse
     const hub = makeHub(deps);
     const { session } = await hub.createSession();
-    const res = await hub.postMessage(session.conversation_id, "trigger empty");
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "trigger empty",
+    });
     assert.equal(res.turn.answer.stopReason, "emptyFinalResponse");
     const loaded = await store.load(session.conversation_id);
     assert.equal(loaded.messages.length, 0);
@@ -405,10 +443,13 @@ describe("drop-context stop reasons do not save", () => {
 
 describe("getSession", () => {
   it("returns summary with projected turns (no raw messages)", async () => {
-    const deps = makeDeps([assistantResult(["hi"])]);
+    const deps = makeDeps([assistantResult({ texts: ["hi"] })]);
     const hub = makeHub(deps);
     const { session } = await hub.createSession();
-    await hub.postMessage(session.conversation_id, "hello");
+    await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "hello",
+    });
     const res = await hub.getSession(session.conversation_id);
     assert.equal(res.session.conversation_id, session.conversation_id);
     assert.equal(res.session.turn_count, 1);
@@ -427,10 +468,13 @@ describe("getSession", () => {
 
 describe("resetSession", () => {
   it("clears messages and resets turnCount", async () => {
-    const deps = makeDeps([assistantResult(["hi"])]);
+    const deps = makeDeps([assistantResult({ texts: ["hi"] })]);
     const hub = makeHub(deps);
     const { session } = await hub.createSession();
-    await hub.postMessage(session.conversation_id, "hello");
+    await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "hello",
+    });
     const res = await hub.resetSession(session.conversation_id);
     assert.equal(res.session.turn_count, 0);
     const loaded = await store.load(session.conversation_id);
@@ -441,10 +485,13 @@ describe("resetSession", () => {
 
 describe("listSessions", () => {
   it("returns metadata for sessions that have a reply", async () => {
-    const deps = makeDeps([assistantResult(["hi"])]);
+    const deps = makeDeps([assistantResult({ texts: ["hi"] })]);
     const hub = makeHub(deps);
     const { session } = await hub.createSession();
-    await hub.postMessage(session.conversation_id, "hello");
+    await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "hello",
+    });
     const list = await hub.listSessions();
     assert.ok(list.some((e) => e.conversation_id === session.conversation_id));
   });
@@ -469,7 +516,11 @@ describe("postMessage validation", () => {
     const hub = makeHub(deps);
     const { session } = await hub.createSession();
     await assert.rejects(
-      () => hub.postMessage(session.conversation_id, "   "),
+      () =>
+        hub.postMessage({
+          conversationId: session.conversation_id,
+          text: "   ",
+        }),
       (err: unknown) => {
         assert.ok(err instanceof Error);
         assert.ok((err as Error).message.includes("non-empty"));
@@ -484,7 +535,11 @@ describe("postMessage validation", () => {
     const { session } = await hub.createSession();
     const longText = "x".repeat(8001);
     await assert.rejects(
-      () => hub.postMessage(session.conversation_id, longText),
+      () =>
+        hub.postMessage({
+          conversationId: session.conversation_id,
+          text: longText,
+        }),
       (err: unknown) => {
         assert.ok(err instanceof Error);
         assert.ok((err as Error).message.includes("max length"));

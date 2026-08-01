@@ -16,8 +16,13 @@ import { ToolExecutionError } from "../../errors.js";
 const PAGE_SIZE = 100;
 
 /** target 是否在 root 内（含等于 root）。 */
-function isWithinRoot(target: string, root: string): boolean {
-  return target === root || target.startsWith(root + sep);
+interface IsWithinRootOpts {
+  readonly target: string;
+  readonly root: string;
+}
+
+function isWithinRoot(opts: IsWithinRootOpts): boolean {
+  return opts.target === opts.root || opts.target.startsWith(opts.root + sep);
 }
 
 /**
@@ -58,7 +63,7 @@ export function createFsViewTool(root: string): AciToolDef {
         throw new ToolExecutionError("fs_view: path must be string");
       }
       const absPath = resolve(resolvedRoot, rawPath);
-      if (!isWithinRoot(absPath, resolvedRoot)) {
+      if (!isWithinRoot({ target: absPath, root: resolvedRoot })) {
         throw new ToolExecutionError(`fs_view: path escapes root: ${rawPath}`);
       }
       let isFile = false;

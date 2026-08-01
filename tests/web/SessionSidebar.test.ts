@@ -15,20 +15,21 @@ import {
 } from "../../web/src/lib/session-list.ts";
 import type { SessionListItem } from "../../web/src/api/types.ts";
 
-function item(
-  id: string,
-  updatedAt: string,
-  lastFinalText = ""
-): SessionListItem {
+function item(opts: {
+  readonly id: string;
+  readonly updatedAt: string;
+  readonly lastFinalText?: string;
+}): SessionListItem {
+  const { id, updatedAt, lastFinalText = "" } = opts;
   return { conversation_id: id, updatedAt, lastFinalText };
 }
 
 describe("sortSessionsByUpdatedDesc", () => {
   it("sorts most-recent first by ISO updatedAt", () => {
     const input = [
-      item("old", "2026-01-01T00:00:00.000Z"),
-      item("new", "2026-07-30T12:00:00.000Z"),
-      item("mid", "2026-04-15T06:30:00.000Z"),
+      item({ id: "old", updatedAt: "2026-01-01T00:00:00.000Z" }),
+      item({ id: "new", updatedAt: "2026-07-30T12:00:00.000Z" }),
+      item({ id: "mid", updatedAt: "2026-04-15T06:30:00.000Z" }),
     ];
     const out = sortSessionsByUpdatedDesc(input);
     assert.deepEqual(
@@ -39,8 +40,8 @@ describe("sortSessionsByUpdatedDesc", () => {
 
   it("does not mutate the input array", () => {
     const input = [
-      item("a", "2026-01-01T00:00:00.000Z"),
-      item("b", "2026-07-30T00:00:00.000Z"),
+      item({ id: "a", updatedAt: "2026-01-01T00:00:00.000Z" }),
+      item({ id: "b", updatedAt: "2026-07-30T00:00:00.000Z" }),
     ];
     sortSessionsByUpdatedDesc(input);
     assert.deepEqual(
@@ -54,7 +55,7 @@ describe("sortSessionsByUpdatedDesc", () => {
   });
 
   it("keeps a single element unchanged", () => {
-    const only = [item("solo", "2026-07-30T00:00:00.000Z")];
+    const only = [item({ id: "solo", updatedAt: "2026-07-30T00:00:00.000Z" })];
     const out = sortSessionsByUpdatedDesc(only);
     assert.equal(out.length, 1);
     assert.equal(out[0]?.conversation_id, "solo");
@@ -62,8 +63,8 @@ describe("sortSessionsByUpdatedDesc", () => {
 
   it("sinks missing updatedAt to the end", () => {
     const input = [
-      item("missing", ""),
-      item("dated", "2026-07-30T00:00:00.000Z"),
+      item({ id: "missing", updatedAt: "" }),
+      item({ id: "dated", updatedAt: "2026-07-30T00:00:00.000Z" }),
     ];
     const out = sortSessionsByUpdatedDesc(input);
     assert.deepEqual(
@@ -74,8 +75,8 @@ describe("sortSessionsByUpdatedDesc", () => {
 
   it("is stable for equal timestamps (preserves input order)", () => {
     const input = [
-      item("first", "2026-07-30T00:00:00.000Z"),
-      item("second", "2026-07-30T00:00:00.000Z"),
+      item({ id: "first", updatedAt: "2026-07-30T00:00:00.000Z" }),
+      item({ id: "second", updatedAt: "2026-07-30T00:00:00.000Z" }),
     ];
     const out = sortSessionsByUpdatedDesc(input);
     assert.deepEqual(

@@ -21,18 +21,21 @@ import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createStubSignalTool } from "../../src/harness/stubs/stub-signal-tool.ts";
 
-function makeNative(
-  role: "user" | "assistant",
-  text: string
-): AnthropicNativeMessage {
-  return { role, content: [{ type: "text", text }] };
+function makeNative(opts: {
+  readonly role: "user" | "assistant";
+  readonly text: string;
+}): AnthropicNativeMessage {
+  return { role: opts.role, content: [{ type: "text", text: opts.text }] };
 }
 
-function assistantResult(
-  texts: string[],
-  toolCalls: Array<{ id: string; name: string; input: unknown }> = [],
-  supplierStop: "success" | "truncation" | "refusal" | "other" = "success"
-): AssistantTurnResult {
+function assistantResult(opts: {
+  readonly texts: string[];
+  readonly toolCalls?: Array<{ id: string; name: string; input: unknown }>;
+  readonly supplierStop?: "success" | "truncation" | "refusal" | "other";
+}): AssistantTurnResult {
+  const texts = opts.texts;
+  const toolCalls = opts.toolCalls ?? [];
+  const supplierStop = opts.supplierStop ?? "success";
   const blocks: AnthropicNativeMessage["content"] = [];
   for (const t of texts) blocks.push({ type: "text", text: t });
   for (const c of toolCalls) {
@@ -60,9 +63,15 @@ describe("loop engine S1: pure-text completion", () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult(["hi there"], [], "success"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hi there"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const { result } = await run("hello", {
       adapter: model,
       executor: exec,
@@ -92,13 +101,19 @@ describe("loop engine S2: single tool call closure", () => {
     });
     const reg = createRegistry([echo]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult(
-        [],
-        [{ id: "t1", name: "echo", input: { value: "ping" } }]
-      ),
-      assistantResult(["done"], [], "success"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "ping" } }],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const { result } = await run("go", {
       adapter: model,
       executor: exec,
@@ -137,17 +152,23 @@ describe("loop engine S3: multi-tool-call serial", () => {
     });
     const reg = createRegistry([echo]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult(
-        [],
-        [
-          { id: "a", name: "echo", input: { value: "1" } },
-          { id: "b", name: "echo", input: { value: "2" } },
-          { id: "c", name: "echo", input: { value: "3" } },
-        ]
-      ),
-      assistantResult(["done"], [], "success"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            { id: "a", name: "echo", input: { value: "1" } },
+            { id: "b", name: "echo", input: { value: "2" } },
+            { id: "c", name: "echo", input: { value: "3" } },
+          ],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const { result } = await run("go", {
       adapter: model,
       executor: exec,
@@ -185,13 +206,19 @@ describe("loop engine S4: tool failure surfaces in history", () => {
     });
     const reg = createRegistry([strict]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult(
-        [],
-        [{ id: "f1", name: "strict", input: { n: "not-an-int" } }]
-      ),
-      assistantResult(["fixed"], [], "success"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "f1", name: "strict", input: { n: "not-an-int" } }],
+        }),
+        assistantResult({
+          texts: ["fixed"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const { result } = await run("go", {
       adapter: model,
       executor: exec,
@@ -236,17 +263,23 @@ describe("loop engine S5: same-turn partial failure does not short-circuit", () 
     });
     const reg = createRegistry([echo, strict]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult(
-        [],
-        [
-          { id: "a", name: "echo", input: { value: "1" } },
-          { id: "b", name: "strict", input: { n: "bad" } },
-          { id: "c", name: "echo", input: { value: "3" } },
-        ]
-      ),
-      assistantResult(["done"], [], "success"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            { id: "a", name: "echo", input: { value: "1" } },
+            { id: "b", name: "strict", input: { n: "bad" } },
+            { id: "c", name: "echo", input: { value: "3" } },
+          ],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const { result } = await run("go", {
       adapter: model,
       executor: exec,
@@ -281,12 +314,12 @@ describe("loop engine S6: maxTurns hit", () => {
     const exec = createExecutor(reg);
     // Each scripted response calls echo again -> infinite loop without cap.
     const infinite = Array.from({ length: 5 }, (_, i) =>
-      assistantResult(
-        [],
-        [{ id: `t${i}`, name: "echo", input: { value: String(i) } }]
-      )
+      assistantResult({
+        texts: [],
+        toolCalls: [{ id: `t${i}`, name: "echo", input: { value: String(i) } }],
+      })
     );
-    const model = createStubModel(infinite);
+    const model = createStubModel({ responses: infinite });
     const { result } = await run("go", {
       adapter: model,
       executor: exec,
@@ -303,9 +336,15 @@ describe("loop engine S7: non-success stop (truncation/refusal)", () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult(["partial"], [], "truncation"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["partial"],
+          toolCalls: [],
+          supplierStop: "truncation",
+        }),
+      ],
+    });
     const { result } = await run("go", {
       adapter: model,
       executor: exec,
@@ -322,9 +361,11 @@ describe("loop engine S8: empty final response", () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult([], [], "success"), // empty + isEmptyFinalResponse=true
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({ texts: [], toolCalls: [], supplierStop: "success" }),
+      ], // empty + isEmptyFinalResponse=true
+    });
     const { result } = await run("go", {
       adapter: model,
       executor: exec,
@@ -400,7 +441,15 @@ describe("loop engine S10: append-only immutable history", () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([assistantResult(["hi"], [], "success")]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hi"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const { result } = await run("hello", {
       adapter: model,
       executor: exec,
@@ -421,7 +470,15 @@ describe("loop engine S10: append-only immutable history", () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([assistantResult(["hi"], [], "success")]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hi"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const { result } = await run("hello", {
       adapter: model,
       executor: exec,
@@ -459,12 +516,14 @@ describe("loop engine step(): real state-machine transitions", () => {
     });
     const reg = createRegistry([echo]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult(
-        [],
-        [{ id: "t1", name: "echo", input: { value: "ping" } }]
-      ),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "ping" } }],
+        }),
+      ],
+    });
     const initial: LoopState = {
       messages: Object.freeze([
         {
@@ -493,7 +552,15 @@ describe("loop engine step(): real state-machine transitions", () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([assistantResult(["hi"], [], "success")]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hi"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const initial: LoopState = {
       messages: Object.freeze([
         {
@@ -519,7 +586,15 @@ describe("loop engine step(): real state-machine transitions", () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([assistantResult(["hello"], [], "success")]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hello"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const initial: LoopState = {
       messages: Object.freeze([
         {
@@ -549,10 +624,24 @@ describe("loop engine S11: cross-run isolation", () => {
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
     // Two independent stub models so each run gets its own scripted response.
-    const model1 = createStubModel([assistantResult(["first"], [], "success")]);
-    const model2 = createStubModel([
-      assistantResult(["second"], [], "success"),
-    ]);
+    const model1 = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["first"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const model2 = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["second"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const r1 = (
       await run("one", {
         adapter: model1,
@@ -590,7 +679,15 @@ describe("run() opts.priorMessages", () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([assistantResult(["hello"], [], "success")]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hello"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
 
     const { result } = await run("hi", {
       adapter: model,
@@ -606,11 +703,17 @@ describe("run() opts.priorMessages", () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult(["B reply"], [], "success"),
-    ]);
-    const userA = makeNative("user", "A");
-    const assistantA = makeNative("assistant", "A reply");
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["B reply"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const userA = makeNative({ role: "user", text: "A" });
+    const assistantA = makeNative({ role: "assistant", text: "A reply" });
     const priorMessages = [userA, assistantA];
 
     const { result } = await run(
@@ -627,7 +730,10 @@ describe("run() opts.priorMessages", () => {
 
     assert.deepEqual(result.messages[0], userA);
     assert.deepEqual(result.messages[1], assistantA);
-    assert.deepEqual(result.messages[2], makeNative("user", "B"));
+    assert.deepEqual(
+      result.messages[2],
+      makeNative({ role: "user", text: "B" })
+    );
   });
 
   it("priorMessages does not affect turnCount starting at 0", async () => {
@@ -643,12 +749,17 @@ describe("run() opts.priorMessages", () => {
     });
     const reg = createRegistry([echo]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult([], [{ id: "t1", name: "echo", input: { value: "B" } }]),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "B" } }],
+        }),
+      ],
+    });
     const priorMessages = [
-      makeNative("user", "A"),
-      makeNative("assistant", "A reply"),
+      makeNative({ role: "user", text: "A" }),
+      makeNative({ role: "assistant", text: "A reply" }),
     ];
 
     const { result } = await run(
@@ -674,10 +785,16 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
     // Stub model with delay so we can race an abort.
-    const model = createStubModel(
-      [assistantResult(["never arrives"], [], "success")],
-      { delayMs: 200 }
-    );
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["never arrives"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+      delayMs: 200,
+    });
     const controller = new AbortController();
     const p = run(
       "x",
@@ -709,10 +826,19 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     const sigTool = createStubSignalTool({ name: "slow", delayMs: 100 });
     const reg = createRegistry([sigTool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult([], [{ id: "u1", name: "slow", input: { v: 1 } }]),
-      assistantResult(["done"], [], "success"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "u1", name: "slow", input: { v: 1 } }],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const controller = new AbortController();
     const p = run(
       "go",
@@ -756,7 +882,14 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([assistantResult(["never"], [], "success")], {
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["never"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
       delayMs: 200,
     });
     const { result, trace } = await run("x", {
@@ -782,10 +915,19 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     });
     const reg = createRegistry([slow]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult([], [{ id: "u1", name: "slow", input: {} }]),
-      assistantResult(["done"], [], "success"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "u1", name: "slow", input: {} }],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     // Tool handler that resolves slowly -> Executor Promise.race fires first.
     const slowHandler = createStubTool({
       name: "slow",
@@ -841,13 +983,19 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     });
     const reg = createRegistry([echo]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult(
-        [],
-        [{ id: "t1", name: "echo", input: { value: "ping" } }]
-      ),
-      assistantResult(["done"], [], "success"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "ping" } }],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const { result, trace } = await run("go", {
       adapter: model,
       executor: exec,
@@ -894,9 +1042,14 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     const sigTool = createStubSignalTool({ name: "blocking", delayMs: 100 });
     const reg = createRegistry([sigTool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult([], [{ id: "u1", name: "blocking", input: {} }]),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "u1", name: "blocking", input: {} }],
+        }),
+      ],
+    });
     const controller = new AbortController();
     const p = run(
       "go",
@@ -930,7 +1083,7 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     const registry = createRegistry([tool]);
     const executor = createExecutor(registry);
     const adapter = Object.freeze({
-      encodeUserText: (text: string) => makeNative("user", text),
+      encodeUserText: (text: string) => makeNative({ role: "user", text }),
       encodeToolResults: () => [],
       step: async (
         _state: LoopState,
@@ -970,7 +1123,7 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     const executor = createExecutor(registry);
     let receivedSignal: AbortSignal | undefined;
     const adapter = Object.freeze({
-      encodeUserText: (text: string) => makeNative("user", text),
+      encodeUserText: (text: string) => makeNative({ role: "user", text }),
       encodeToolResults: () => [],
       step: async (
         _state: LoopState,
@@ -979,7 +1132,7 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
       ) => {
         receivedSignal = signal;
         await new Promise<void>((resolve) => setTimeout(resolve, 200));
-        return assistantResult(["late"]);
+        return assistantResult({ texts: ["late"] });
       },
     });
     const { result } = await run("x", {
@@ -997,7 +1150,8 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const registry = createRegistry([tool]);
     const executor = createExecutor(registry);
-    const adapter = createStubModel([assistantResult(["late"])], {
+    const adapter = createStubModel({
+      responses: [assistantResult({ texts: ["late"] })],
       delayMs: 200,
     });
     const controller = new AbortController();
@@ -1015,7 +1169,9 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const registry = createRegistry([tool]);
     const executor = createExecutor(registry);
-    const adapter = createStubModel([assistantResult(["done"])]);
+    const adapter = createStubModel({
+      responses: [assistantResult({ texts: ["done"] })],
+    });
     const controller = new AbortController();
     const state = Object.freeze({ messages: Object.freeze([]), turnCount: 0 });
     const deps = Object.freeze({ adapter, executor, registry, maxTurns: 1 });
@@ -1039,7 +1195,15 @@ describe("017 timeout boundary: non-positive modelTimeoutMs disables the race", 
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([assistantResult(["hi"], [], "success")]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hi"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const { result, trace } = await run("hello", {
       adapter: model,
       executor: exec,
@@ -1061,7 +1225,15 @@ describe("017 timeout boundary: non-positive modelTimeoutMs disables the race", 
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([assistantResult(["ok"], [], "success")]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["ok"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const { result, trace } = await run("hello", {
       adapter: model,
       executor: exec,

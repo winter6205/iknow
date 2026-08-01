@@ -19,19 +19,30 @@ const IGNORED_DIRS: ReadonlySet<string> = new Set(["node_modules", ".git"]);
 const MAX_RESULTS = 50;
 
 /** target 是否在 root 内（含等于 root）。 */
-function isWithinRoot(target: string, root: string): boolean {
-  return target === root || target.startsWith(root + sep);
+interface IsWithinRootOpts {
+  readonly target: string;
+  readonly root: string;
+}
+
+function isWithinRoot(opts: IsWithinRootOpts): boolean {
+  return opts.target === opts.root || opts.target.startsWith(opts.root + sep);
 }
 
 /**
  * 在 dir 下递归收集匹配文件（文件名或内容含 pattern，大小写不敏感）。
  * 遍历全树以统计真实 total；matches 收集到 limit 条即停止追加。
  */
-function collectMatches(
-  dir: string,
-  pattern: string,
-  limit: number,
-): { matches: string[]; total: number } {
+interface CollectMatchesOpts {
+  readonly dir: string;
+  readonly pattern: string;
+  readonly limit: number;
+}
+
+function collectMatches(opts: CollectMatchesOpts): {
+  matches: string[];
+  total: number;
+} {
+  const { dir, pattern, limit } = opts;
   const matches: string[] = [];
   let total = 0;
   const lowerPattern = pattern.toLowerCase();
@@ -109,7 +120,11 @@ export function createFsSearchTool(root: string): AciToolDef {
       interruptBehavior: "cancel" as const,
     },
     handler: async (input: unknown) => {
-      const { pattern, path: subPath, limit: rawLimit } = input as {
+      const {
+        pattern,
+        path: subPath,
+        limit: rawLimit,
+      } = input as {
         pattern?: unknown;
         path?: unknown;
         limit?: unknown;
@@ -121,18 +136,22 @@ export function createFsSearchTool(root: string): AciToolDef {
         typeof rawLimit === "number" && rawLimit > 0
           ? Math.floor(rawLimit)
           : MAX_RESULTS,
-        MAX_RESULTS,
+        MAX_RESULTS
       );
       const searchRoot =
         typeof subPath === "string"
           ? resolve(resolvedRoot, subPath)
           : resolvedRoot;
-      if (!isWithinRoot(searchRoot, resolvedRoot)) {
+      if (!isWithinRoot({ target: searchRoot, root: resolvedRoot })) {
         throw new ToolExecutionError(
-          `fs_search: path escapes root: ${String(subPath)}`,
+          `fs_search: path escapes root: ${String(subPath)}`
         );
       }
-      const { matches, total } = collectMatches(searchRoot, pattern, limit);
+      const { matches, total } = collectMatches({
+        dir: searchRoot,
+        pattern,
+        limit,
+      });
       return { matches, truncated: total > matches.length, total };
     },
   });

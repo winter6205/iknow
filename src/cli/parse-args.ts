@@ -41,8 +41,9 @@ export type ParsedCli = {
 };
 
 export type ParseArgsOptions = {
+  readonly argv: string[];
   /** When true, bare invocation (no query) defaults to chat. */
-  interactive?: boolean;
+  readonly interactive?: boolean;
 };
 
 /**
@@ -53,8 +54,9 @@ export type ParseArgsOptions = {
  * - no positionals + !interactive → help
  * - ask / bare query with empty text → missingQuery (caller exits 1)
  */
-export function parseArgs(argv: string[], opts?: ParseArgsOptions): ParsedCli {
-  const interactive = opts?.interactive ?? false;
+export function parseArgs(opts: ParseArgsOptions): ParsedCli {
+  const argv = opts.argv;
+  const interactive = opts.interactive ?? false;
   let role: CallerRole = "employee";
   let degrade = false;
   let embeddings = false;
@@ -67,17 +69,20 @@ export function parseArgs(argv: string[], opts?: ParseArgsOptions): ParsedCli {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "-h" || a === "--help") {
-      return baseParsed("help", {
-        role,
-        degrade,
-        embeddings,
-        json,
-        port,
-        host,
-        traceOut,
-        query: "",
-        missingQuery: false,
-        versionOnly: false,
+      return baseParsed({
+        command: "help",
+        fields: {
+          role,
+          degrade,
+          embeddings,
+          json,
+          port,
+          host,
+          traceOut,
+          query: "",
+          missingQuery: false,
+          versionOnly: false,
+        },
       });
     }
     if (a === "--role") {
@@ -117,17 +122,20 @@ export function parseArgs(argv: string[], opts?: ParseArgsOptions): ParsedCli {
       }
       traceOut = raw;
     } else if (a === "--version" || a === "-V") {
-      return baseParsed("help", {
-        role,
-        degrade,
-        embeddings,
-        json,
-        port,
-        host,
-        traceOut,
-        query: "",
-        missingQuery: false,
-        versionOnly: true,
+      return baseParsed({
+        command: "help",
+        fields: {
+          role,
+          degrade,
+          embeddings,
+          json,
+          port,
+          host,
+          traceOut,
+          query: "",
+          missingQuery: false,
+          versionOnly: true,
+        },
       });
     } else {
       rest.push(a);
@@ -147,64 +155,85 @@ export function parseArgs(argv: string[], opts?: ParseArgsOptions): ParsedCli {
   const head = rest[0];
 
   if (head === "chat") {
-    return baseParsed("chat", {
-      ...flags,
-      query: "",
-      missingQuery: false,
+    return baseParsed({
+      command: "chat",
+      fields: {
+        ...flags,
+        query: "",
+        missingQuery: false,
+      },
     });
   }
 
   if (head === "serve") {
-    return baseParsed("serve", {
-      ...flags,
-      query: "",
-      missingQuery: false,
+    return baseParsed({
+      command: "serve",
+      fields: {
+        ...flags,
+        query: "",
+        missingQuery: false,
+      },
     });
   }
 
   if (head === "ask") {
     const query = rest.slice(1).join(" ").trim();
-    return baseParsed("ask", {
-      ...flags,
-      query,
-      missingQuery: query.length === 0,
+    return baseParsed({
+      command: "ask",
+      fields: {
+        ...flags,
+        query,
+        missingQuery: query.length === 0,
+      },
     });
   }
 
   if (head === "help") {
-    return baseParsed("help", {
-      ...flags,
-      query: "",
-      missingQuery: false,
+    return baseParsed({
+      command: "help",
+      fields: {
+        ...flags,
+        query: "",
+        missingQuery: false,
+      },
     });
   }
 
   const query = rest.join(" ").trim();
   if (query.length === 0) {
     if (interactive) {
-      return baseParsed("chat", {
+      return baseParsed({
+        command: "chat",
+        fields: {
+          ...flags,
+          query: "",
+          missingQuery: false,
+        },
+      });
+    }
+    return baseParsed({
+      command: "help",
+      fields: {
         ...flags,
         query: "",
         missingQuery: false,
-      });
-    }
-    return baseParsed("help", {
-      ...flags,
-      query: "",
-      missingQuery: false,
+      },
     });
   }
 
-  return baseParsed("oneshot", {
-    ...flags,
-    query,
-    missingQuery: false,
+  return baseParsed({
+    command: "oneshot",
+    fields: {
+      ...flags,
+      query,
+      missingQuery: false,
+    },
   });
 }
 
-function baseParsed(
-  command: CliCommand,
-  fields: Omit<ParsedCli, "command">
-): ParsedCli {
-  return { command, ...fields };
+function baseParsed(opts: {
+  readonly command: CliCommand;
+  readonly fields: Omit<ParsedCli, "command">;
+}): ParsedCli {
+  return { command: opts.command, ...opts.fields };
 }

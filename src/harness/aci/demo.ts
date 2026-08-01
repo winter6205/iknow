@@ -35,11 +35,16 @@ import { createContextManagerTool } from "./tools/context-manager.js";
 
 /* ── helper: 构造 AssistantTurnResult（仿 loop-engine.test.ts，demo 自带一份）── */
 
-function assistantResult(
-  texts: string[],
-  toolCalls: Array<{ id: string; name: string; input: unknown }> = [],
-  supplierStop: "success" | "truncation" | "refusal" | "other" = "success",
-): AssistantTurnResult {
+interface AssistantResultOpts {
+  readonly texts: string[];
+  readonly toolCalls?: Array<{ id: string; name: string; input: unknown }>;
+  readonly supplierStop?: "success" | "truncation" | "refusal" | "other";
+}
+
+function assistantResult(opts: AssistantResultOpts): AssistantTurnResult {
+  const texts = opts.texts;
+  const toolCalls = opts.toolCalls ?? [];
+  const supplierStop = opts.supplierStop ?? "success";
   const blocks: AnthropicContentBlock[] = [];
   for (const t of texts) blocks.push({ type: "text", text: t });
   for (const c of toolCalls) {
@@ -61,7 +66,7 @@ function assistantResult(
 /* ── helper: 打印 messages 中全部 tool_result（is_error / payload 摘要）── */
 
 function printToolResults(
-  messages: ReadonlyArray<AnthropicNativeMessage>,
+  messages: ReadonlyArray<AnthropicNativeMessage>
 ): void {
   for (const msg of messages) {
     if (msg.role !== "user") continue;
@@ -74,10 +79,9 @@ function printToolResults(
       } else {
         text = String(block.content);
       }
-      const summary =
-        text.length > 300 ? `${text.slice(0, 300)}…` : text;
+      const summary = text.length > 300 ? `${text.slice(0, 300)}…` : text;
       console.log(
-        `  tool_result [${block.tool_use_id}] is_error=${String(block.is_error ?? false)}: ${summary}`,
+        `  tool_result [${block.tool_use_id}] is_error=${String(block.is_error ?? false)}: ${summary}`
       );
     }
   }
@@ -85,9 +89,10 @@ function printToolResults(
 
 /* ── helper: 打印 run() 返回摘要 + trace.totals ── */
 
-function printRunSummary(result: RunResult, trace: LoopTrace): void {
+function printRunSummary(opts: { result: RunResult; trace: LoopTrace }): void {
+  const { result, trace } = opts;
   console.log(
-    `  run() → stopReason=${result.stopReason} turnCount=${String(result.turnCount)} finalText=${JSON.stringify(result.finalText)}`,
+    `  run() → stopReason=${result.stopReason} turnCount=${String(result.turnCount)} finalText=${JSON.stringify(result.finalText)}`
   );
   console.log(`  trace.totals → ${JSON.stringify(trace.totals)}`);
 }
@@ -112,7 +117,7 @@ async function main(): Promise<void> {
   for (let i = 0; i < 60; i++) {
     writeFileSync(
       join(scratch, `note-${String(i).padStart(3, "0")}.txt`),
-      `needle content ${String(i)}`,
+      `needle content ${String(i)}`
     );
   }
   writeFileSync(join(scratch, "alpha.ts"), "export const alpha = 1;\n");
@@ -120,7 +125,7 @@ async function main(): Promise<void> {
   // 250 行大文件（验证 fs_view 有状态翻页：第一页 0-99，第二页 100-199）
   const bigLines = Array.from(
     { length: 250 },
-    (_, i) => `line ${String(i + 1)}: placeholder content for paging`,
+    (_, i) => `line ${String(i + 1)}: placeholder content for paging`
   );
   writeFileSync(join(scratch, "big-file.txt"), bigLines.join("\n"));
   // 待编辑文件（验证 fs_edit Linter poka-yoke）
@@ -144,16 +149,18 @@ async function main(): Promise<void> {
       ctxMgr,
     ]);
     const innerExec = createExecutor(reg.inner);
-    const exec = createAciExecutor(innerExec, reg.catalog, {
+    const exec = createAciExecutor({
+      inner: innerExec,
+      catalog: reg.catalog,
       onDecision: (call, outcome) => {
         console.log(
-          `  [permission] ${call.name} -> ${outcome.decision} (${outcome.reason})`,
+          `  [permission] ${call.name} -> ${outcome.decision} (${outcome.reason})`
         );
       },
     });
 
     const makeDeps = (
-      model: ReturnType<typeof createStubModel>,
+      model: ReturnType<typeof createStubModel>
     ): LoopEngineDeps => ({
       adapter: model,
       executor: exec,
@@ -163,188 +170,206 @@ async function main(): Promise<void> {
 
     /* ── 场景 1：read-only 并发免确认 ── */
     banner(
-      "场景 1：read-only 并发免确认（fs_search 限 50 + fs_view 有状态翻页）",
+      "场景 1：read-only 并发免确认（fs_search 限 50 + fs_view 有状态翻页）"
     );
     console.log(
-      "  脚本：turn1 fs_search(.ts)+fs_view(offset=0) | turn2 fs_view(无offset,续读) | turn3 文本完成",
+      "  脚本：turn1 fs_search(.ts)+fs_view(offset=0) | turn2 fs_view(无offset,续读) | turn3 文本完成"
     );
     {
-      const model = createStubModel([
-        assistantResult(
-          [],
-          [
-            { id: "s1-search", name: "fs_search", input: { pattern: ".ts" } },
-            {
-              id: "s1-view-1",
-              name: "fs_view",
-              input: { path: "big-file.txt", offset: 0 },
-            },
-          ],
-        ),
-        assistantResult(
-          [],
-          [
-            {
-              id: "s1-view-2",
-              name: "fs_view",
-              input: { path: "big-file.txt" },
-            },
-          ],
-        ),
-        assistantResult(["read-only 场景完成"], [], "success"),
-      ]);
+      const model = createStubModel({
+        responses: [
+          assistantResult({
+            texts: [],
+            toolCalls: [
+              { id: "s1-search", name: "fs_search", input: { pattern: ".ts" } },
+              {
+                id: "s1-view-1",
+                name: "fs_view",
+                input: { path: "big-file.txt", offset: 0 },
+              },
+            ],
+          }),
+          assistantResult({
+            texts: [],
+            toolCalls: [
+              {
+                id: "s1-view-2",
+                name: "fs_view",
+                input: { path: "big-file.txt" },
+              },
+            ],
+          }),
+          assistantResult({
+            texts: ["read-only 场景完成"],
+            toolCalls: [],
+            supplierStop: "success",
+          }),
+        ],
+      });
       const { result, trace } = await run("scenario 1", makeDeps(model));
       printToolResults(result.messages);
-      printRunSummary(result, trace);
+      printRunSummary({ result, trace });
       if (result.stopReason !== "completed") allGreen = false;
     }
 
     /* ── 场景 2：write 需确认 + Linter poka-yoke ── */
-    banner(
-      "场景 2：write + Linter poka-yoke（先坏补丁被拒，再正确补丁成功）",
-    );
+    banner("场景 2：write + Linter poka-yoke（先坏补丁被拒，再正确补丁成功）");
     {
       const before = readFileSync(join(scratch, "edit-me.ts"), "utf8");
       console.log(`  编辑前文件内容: ${JSON.stringify(before)}`);
       console.log(
-        '  脚本：turn1 fs_edit(new_str="const x = foo(1;" 括号不配对) | turn2 fs_edit(正确) | turn3 文本完成',
+        '  脚本：turn1 fs_edit(new_str="const x = foo(1;" 括号不配对) | turn2 fs_edit(正确) | turn3 文本完成'
       );
-      const model = createStubModel([
-        assistantResult(
-          [],
-          [
-            {
-              id: "s2-bad",
-              name: "fs_edit",
-              input: {
-                path: "edit-me.ts",
-                old_str: "const x = 1;",
-                new_str: "const x = foo(1;",
+      const model = createStubModel({
+        responses: [
+          assistantResult({
+            texts: [],
+            toolCalls: [
+              {
+                id: "s2-bad",
+                name: "fs_edit",
+                input: {
+                  path: "edit-me.ts",
+                  old_str: "const x = 1;",
+                  new_str: "const x = foo(1;",
+                },
               },
-            },
-          ],
-        ),
-        assistantResult(
-          [],
-          [
-            {
-              id: "s2-good",
-              name: "fs_edit",
-              input: {
-                path: "edit-me.ts",
-                old_str: "const x = 1;",
-                new_str: "const x = foo(1);",
+            ],
+          }),
+          assistantResult({
+            texts: [],
+            toolCalls: [
+              {
+                id: "s2-good",
+                name: "fs_edit",
+                input: {
+                  path: "edit-me.ts",
+                  old_str: "const x = 1;",
+                  new_str: "const x = foo(1);",
+                },
               },
-            },
-          ],
-        ),
-        assistantResult(["write 场景完成"], [], "success"),
-      ]);
+            ],
+          }),
+          assistantResult({
+            texts: ["write 场景完成"],
+            toolCalls: [],
+            supplierStop: "success",
+          }),
+        ],
+      });
       const { result, trace } = await run("scenario 2", makeDeps(model));
       printToolResults(result.messages);
       const after = readFileSync(join(scratch, "edit-me.ts"), "utf8");
       console.log(`  编辑后文件内容: ${JSON.stringify(after)}`);
-      printRunSummary(result, trace);
+      printRunSummary({ result, trace });
       if (result.stopReason !== "completed") allGreen = false;
     }
 
     /* ── 场景 3：execute 危险命令 deny ── */
     banner(
-      "场景 3：execute 危险命令 deny（allowlist-first: rm -rf / -> command not in allowlist）+ 安全命令放行",
+      "场景 3：execute 危险命令 deny（allowlist-first: rm -rf / -> command not in allowlist）+ 安全命令放行"
     );
     console.log(
-      '  脚本：turn1 shell_exec("rm -rf /") | turn2 shell_exec("echo hello") | turn3 文本完成',
+      '  脚本：turn1 shell_exec("rm -rf /") | turn2 shell_exec("echo hello") | turn3 文本完成'
     );
     {
-      const model = createStubModel([
-        assistantResult(
-          [],
-          [
-            {
-              id: "s3-danger",
-              name: "shell_exec",
-              input: { command: "rm -rf /" },
-            },
-          ],
-        ),
-        assistantResult(
-          [],
-          [
-            {
-              id: "s3-safe",
-              name: "shell_exec",
-              input: { command: "echo hello" },
-            },
-          ],
-        ),
-        assistantResult(["execute 场景完成"], [], "success"),
-      ]);
+      const model = createStubModel({
+        responses: [
+          assistantResult({
+            texts: [],
+            toolCalls: [
+              {
+                id: "s3-danger",
+                name: "shell_exec",
+                input: { command: "rm -rf /" },
+              },
+            ],
+          }),
+          assistantResult({
+            texts: [],
+            toolCalls: [
+              {
+                id: "s3-safe",
+                name: "shell_exec",
+                input: { command: "echo hello" },
+              },
+            ],
+          }),
+          assistantResult({
+            texts: ["execute 场景完成"],
+            toolCalls: [],
+            supplierStop: "success",
+          }),
+        ],
+      });
       const { result, trace } = await run("scenario 3", makeDeps(model));
       printToolResults(result.messages);
-      printRunSummary(result, trace);
+      printRunSummary({ result, trace });
       if (result.stopReason !== "completed") allGreen = false;
     }
 
     /* ── 场景 4：延迟加载 ── */
-    banner(
-      "场景 4：延迟加载（context_manager lazy -> discover() 注入后可用）",
-    );
+    banner("场景 4：延迟加载（context_manager lazy -> discover() 注入后可用）");
     {
       const visible = reg.visibleSchemas().map((t) => t.name);
       console.log(`  visibleSchemas(): [${visible.join(", ")}]`);
       console.log(
-        `  含 context_manager? ${String(visible.includes("context_manager"))}`,
+        `  含 context_manager? ${String(visible.includes("context_manager"))}`
       );
       const discovered = reg.discover("context_manager");
       console.log(
         `  discover("context_manager") -> ${
           discovered ? `命中 (name=${discovered.name})` : "undefined"
-        }`,
+        }`
       );
       console.log(
-        "  脚本：turn1 context_manager(5 条观测, keepRecent=2) | turn2 文本完成",
+        "  脚本：turn1 context_manager(5 条观测, keepRecent=2) | turn2 文本完成"
       );
-      const model = createStubModel([
-        assistantResult(
-          [],
-          [
-            {
-              id: "s4-ctx",
-              name: "context_manager",
-              input: {
-                observations: [
-                  "obs-1: early finding about the codebase structure",
-                  "obs-2: another early observation with some detail",
-                  "obs-3: mid-session note about a pattern",
-                  "obs-4: recent finding about the API layer",
-                  "obs-5: latest observation about test coverage",
-                ],
-                keepRecent: 2,
+      const model = createStubModel({
+        responses: [
+          assistantResult({
+            texts: [],
+            toolCalls: [
+              {
+                id: "s4-ctx",
+                name: "context_manager",
+                input: {
+                  observations: [
+                    "obs-1: early finding about the codebase structure",
+                    "obs-2: another early observation with some detail",
+                    "obs-3: mid-session note about a pattern",
+                    "obs-4: recent finding about the API layer",
+                    "obs-5: latest observation about test coverage",
+                  ],
+                  keepRecent: 2,
+                },
               },
-            },
-          ],
-        ),
-        assistantResult(["延迟加载场景完成"], [], "success"),
-      ]);
+            ],
+          }),
+          assistantResult({
+            texts: ["延迟加载场景完成"],
+            toolCalls: [],
+            supplierStop: "success",
+          }),
+        ],
+      });
       const { result, trace } = await run("scenario 4", makeDeps(model));
       printToolResults(result.messages);
-      printRunSummary(result, trace);
+      printRunSummary({ result, trace });
       if (result.stopReason !== "completed") allGreen = false;
     }
 
     /* ── 总结 ── */
     banner("被验证的决策");
+    console.log("ACI 装饰层可在不改 4-tool 协议前提下注入：");
     console.log(
-      "ACI 装饰层可在不改 4-tool 协议前提下注入：",
+      "  1. 权限检查（read-only 免确认 / execute allowlist-first 危险命令 deny 零副作用）"
     );
     console.log(
-      "  1. 权限检查（read-only 免确认 / execute allowlist-first 危险命令 deny 零副作用）",
+      "  2. 安全标记（fs_edit Linter poka-yoke 拒绝坏补丁，文件不动）"
     );
     console.log(
-      "  2. 安全标记（fs_edit Linter poka-yoke 拒绝坏补丁，文件不动）",
-    );
-    console.log(
-      "  3. 延迟加载（lazy 工具不进 prompt schema，discover() 按需注入）",
+      "  3. 延迟加载（lazy 工具不进 prompt schema，discover() 按需注入）"
     );
     console.log("");
     console.log(allGreen ? "ALL GREEN" : "SOME SCENARIO FAILED");

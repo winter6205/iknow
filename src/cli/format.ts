@@ -20,6 +20,11 @@ const TOOL_LIST_SEP = ",";
 /** Tool-list placeholder when no tool has been called. */
 const NO_TOOLS = "-";
 
+export interface FormatRunOpts {
+  readonly result: RunResult;
+  readonly trace: LoopTrace;
+}
+
 /**
  * Human projection of `RunResult` + `LoopTrace`.
  *
@@ -31,7 +36,8 @@ const NO_TOOLS = "-";
  * `finalText === null` 时,文本部分为空字符串,状态行照常输出。
  * `trace.turns` 中无任何工具调用时,`tools=` 显示 `-`。
  */
-export function formatRunHuman(result: RunResult, trace: LoopTrace): string {
+export function formatRunHuman(opts: FormatRunOpts): string {
+  const { result, trace } = opts;
   const text = result.finalText ?? "";
   const toolNames = flattenToolNames(trace);
   const tools = toolNames.length > 0 ? toolNames.join(TOOL_LIST_SEP) : NO_TOOLS;
@@ -51,7 +57,8 @@ export function formatRunHuman(result: RunResult, trace: LoopTrace): string {
  * + `trace` for downstream parsing. Native messages stay available via
  * `RunResult` for in-process consumers; not for shell consumers.
  */
-export function formatRunJson(result: RunResult, trace: LoopTrace): string {
+export function formatRunJson(opts: FormatRunOpts): string {
+  const { result, trace } = opts;
   return JSON.stringify(
     {
       finalText: result.finalText,

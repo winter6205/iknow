@@ -134,7 +134,7 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     ...built.deps,
     trace: traceService,
   });
-  process.stdout.write(`${formatRunJson(result, loopTrace)}\n`);
+  process.stdout.write(`${formatRunJson({ result, trace: loopTrace })}\n`);
 }
 
 async function runChat(parsed: ParsedCli): Promise<void> {
@@ -174,7 +174,8 @@ async function runChat(parsed: ParsedCli): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const parsed = parseArgs(process.argv.slice(2), {
+  const parsed = parseArgs({
+    argv: process.argv.slice(2),
     interactive: isInteractive(),
   });
 

@@ -51,14 +51,19 @@ export type ProcessChatLineResult = {
   ranQuery?: boolean;
 };
 
+export interface ProcessChatLineOpts {
+  readonly line: string;
+  readonly ctx: ChatLineContext;
+}
+
 /**
  * Pure-ish one-line handler for tests and both I/O paths.
  * Mutates ctx (state) as needed.
  */
 export async function processChatLine(
-  line: string,
-  ctx: ChatLineContext
+  opts: ProcessChatLineOpts
 ): Promise<ProcessChatLineResult> {
+  const { line, ctx } = opts;
   const parsedLine = parseChatLine(line);
 
   if (parsedLine.kind === "empty") {
@@ -66,7 +71,11 @@ export async function processChatLine(
   }
 
   if (parsedLine.kind === "slash") {
-    return processSlash(parsedLine.command, parsedLine.args, ctx);
+    return processSlash({
+      command: parsedLine.command,
+      args: parsedLine.args,
+      ctx,
+    });
   }
 
   const query = parsedLine.text;
@@ -88,8 +97,8 @@ export async function processChatLine(
       ctx.state.messages = [...result.messages];
     }
     const output = ctx.state.jsonMode
-      ? formatRunJson(result, trace)
-      : formatRunHuman(result, trace);
+      ? formatRunJson({ result, trace })
+      : formatRunHuman({ result, trace });
     return { quit: false, output, ranQuery: true };
   } catch (err) {
     return {
@@ -101,12 +110,17 @@ export async function processChatLine(
   }
 }
 
-async function processSlash(
-  command: string,
-  args: string[],
-  ctx: ChatLineContext
-): Promise<ProcessChatLineResult> {
-  const effect = applySlashCommand(command, args, { state: ctx.state });
+async function processSlash(opts: {
+  readonly command: string;
+  readonly args: string[];
+  readonly ctx: ChatLineContext;
+}): Promise<ProcessChatLineResult> {
+  const { command, args, ctx } = opts;
+  const effect = applySlashCommand({
+    command,
+    args,
+    ctx: { state: ctx.state },
+  });
 
   switch (effect.type) {
     case "quit":
@@ -161,22 +175,27 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
       : "embeddings=off");
 
   if (interactive) {
-    await runInteractive(ctx, emb);
+    await runInteractive({ ctx, emb });
   } else {
-    await runPiped(ctx, resolveQuiet(opts.quiet));
+    await runPiped({ ctx, quiet: resolveQuiet(opts.quiet) });
   }
 }
 
-function printBanner(state: CliChatState, emb: string): void {
+function printBanner(opts: {
+  readonly state: CliChatState;
+  readonly emb: string;
+}): void {
+  const { state, emb } = opts;
   writeErr(`iknow chat  role=${state.session.caller_role}  ${emb}`);
   writeErr("输入问题开始对话。/help 查看命令 · /quit 或 Ctrl+D 退出");
 }
 
-async function runInteractive(
-  ctx: ChatLineContext,
-  emb: string
-): Promise<void> {
-  printBanner(ctx.state, emb);
+async function runInteractive(opts: {
+  readonly ctx: ChatLineContext;
+  readonly emb: string;
+}): Promise<void> {
+  const { ctx, emb } = opts;
+  printBanner({ state: ctx.state, emb });
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -263,7 +282,7 @@ async function runInteractive(
 
       let result: ProcessChatLineResult;
       try {
-        result = await processChatLine(line, ctx);
+        result = await processChatLine({ line, ctx });
       } catch (err) {
         if (showThinking) {
           clearErrLine();
@@ -358,7 +377,11 @@ async function runInteractive(
   });
 }
 
-async function runPiped(ctx: ChatLineContext, quiet: boolean): Promise<void> {
+async function runPiped(opts: {
+  readonly ctx: ChatLineContext;
+  readonly quiet: boolean;
+}): Promise<void> {
+  const { ctx, quiet } = opts;
   // Do not force terminal:true — avoids prompt garble on pipes.
   const rl = readline.createInterface({
     input: process.stdin,
@@ -380,7 +403,7 @@ async function runPiped(ctx: ChatLineContext, quiet: boolean): Promise<void> {
     }
 
     // Never print 思考中 on pipe (quiet product / script friendly).
-    const result = await processChatLine(line, ctx);
+    const result = await processChatLine({ line, ctx });
 
     if (result.stderr) {
       writeErr(result.stderr);

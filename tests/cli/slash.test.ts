@@ -53,17 +53,21 @@ describe("parseChatLine", () => {
 describe("applySlashCommand", () => {
   it("quit → {type:quit}", () => {
     const ctx = { state: makeState() };
-    assert.deepEqual(applySlashCommand("quit", [], ctx), { type: "quit" });
+    assert.deepEqual(applySlashCommand({ command: "quit", args: [], ctx }), {
+      type: "quit",
+    });
   });
 
   it("exit → {type:quit}", () => {
     const ctx = { state: makeState() };
-    assert.deepEqual(applySlashCommand("exit", [], ctx), { type: "quit" });
+    assert.deepEqual(applySlashCommand({ command: "exit", args: [], ctx }), {
+      type: "quit",
+    });
   });
 
   it("help → type=help, text mentions /help /status /reset, NOT /mode", () => {
     const ctx = { state: makeState() };
-    const eff = applySlashCommand("help", [], ctx);
+    const eff = applySlashCommand({ command: "help", args: [], ctx });
     assert.strictEqual(eff.type, "help");
     if (eff.type !== "help") return;
     assert.ok(eff.text.includes("/help"));
@@ -74,21 +78,24 @@ describe("applySlashCommand", () => {
 
   it("? → same as help (type=help)", () => {
     const ctx = { state: makeState() };
-    assert.strictEqual(applySlashCommand("?", [], ctx).type, "help");
+    assert.strictEqual(
+      applySlashCommand({ command: "?", args: [], ctx }).type,
+      "help"
+    );
   });
 
   it("status → reflects state (role=manager, json=on, messages=3); NO mode=/priors=", () => {
     const state = makeState({
       messages: [
-        makeNative("user", "a"),
-        makeNative("user", "b"),
-        makeNative("user", "c"),
+        makeNative({ role: "user", text: "a" }),
+        makeNative({ role: "user", text: "b" }),
+        makeNative({ role: "user", text: "c" }),
       ],
       jsonMode: true,
       session: { caller_role: "manager" },
     });
     const ctx = { state };
-    const eff = applySlashCommand("status", [], ctx);
+    const eff = applySlashCommand({ command: "status", args: [], ctx });
     assert.strictEqual(eff.type, "info");
     if (eff.type !== "info") return;
     assert.ok(eff.text.includes("role=manager"));
@@ -101,7 +108,11 @@ describe("applySlashCommand", () => {
   it("json on → flips jsonMode true + info message", () => {
     const state = makeState({ jsonMode: false });
     const ctx = { state };
-    const eff = applySlashCommand("json", ["on"], ctx);
+    const eff = applySlashCommand({
+      command: "json",
+      args: ["on"],
+      ctx,
+    });
     assert.strictEqual(eff.type, "info");
     if (eff.type !== "info") return;
     assert.strictEqual(state.jsonMode, true);
@@ -111,7 +122,11 @@ describe("applySlashCommand", () => {
   it("json off → flips jsonMode false + info message", () => {
     const state = makeState({ jsonMode: true });
     const ctx = { state };
-    const eff = applySlashCommand("json", ["off"], ctx);
+    const eff = applySlashCommand({
+      command: "json",
+      args: ["off"],
+      ctx,
+    });
     assert.strictEqual(eff.type, "info");
     if (eff.type !== "info") return;
     assert.strictEqual(state.jsonMode, false);
@@ -120,13 +135,21 @@ describe("applySlashCommand", () => {
 
   it("json (no arg / bad arg) → error 'Usage: /json on|off'", () => {
     const ctx1 = { state: makeState() };
-    const noArg = applySlashCommand("json", [], ctx1);
+    const noArg = applySlashCommand({
+      command: "json",
+      args: [],
+      ctx: ctx1,
+    });
     assert.strictEqual(noArg.type, "error");
     if (noArg.type !== "error") return;
     assert.strictEqual(noArg.text, "Usage: /json on|off");
 
     const ctx2 = { state: makeState() };
-    const badArg = applySlashCommand("json", ["maybe"], ctx2);
+    const badArg = applySlashCommand({
+      command: "json",
+      args: ["maybe"],
+      ctx: ctx2,
+    });
     assert.strictEqual(badArg.type, "error");
     if (badArg.type !== "error") return;
     assert.strictEqual(badArg.text, "Usage: /json on|off");
@@ -135,7 +158,11 @@ describe("applySlashCommand", () => {
   it("role valid (manager) → mutates caller_role + info 'Role set to manager'", () => {
     const state = makeState({ session: { caller_role: "employee" } });
     const ctx = { state };
-    const eff = applySlashCommand("role", ["manager"], ctx);
+    const eff = applySlashCommand({
+      command: "role",
+      args: ["manager"],
+      ctx,
+    });
     assert.strictEqual(eff.type, "info");
     if (eff.type !== "info") return;
     assert.strictEqual(state.session.caller_role, "manager");
@@ -145,7 +172,11 @@ describe("applySlashCommand", () => {
   it("role invalid (wizard) → error message from parseCallerRole", () => {
     const state = makeState();
     const ctx = { state };
-    const eff = applySlashCommand("role", ["wizard"], ctx);
+    const eff = applySlashCommand({
+      command: "role",
+      args: ["wizard"],
+      ctx,
+    });
     assert.strictEqual(eff.type, "error");
     if (eff.type !== "error") return;
     // parseCallerRole throws with "Invalid caller role:" prefix.
@@ -157,7 +188,11 @@ describe("applySlashCommand", () => {
   it("role missing → error 'Usage: /role <employee|manager|admin>'", () => {
     const state = makeState();
     const ctx = { state };
-    const eff = applySlashCommand("role", [], ctx);
+    const eff = applySlashCommand({
+      command: "role",
+      args: [],
+      ctx,
+    });
     assert.strictEqual(eff.type, "error");
     if (eff.type !== "error") return;
     assert.strictEqual(eff.text, "Usage: /role <employee|manager|admin>");
@@ -165,11 +200,18 @@ describe("applySlashCommand", () => {
 
   it("reset → clears messages to [], preserves session.caller_role", () => {
     const state = makeState({
-      messages: [makeNative("user", "a"), makeNative("user", "b")],
+      messages: [
+        makeNative({ role: "user", text: "a" }),
+        makeNative({ role: "user", text: "b" }),
+      ],
       session: { caller_role: "admin" },
     });
     const ctx = { state };
-    const eff = applySlashCommand("reset", [], ctx);
+    const eff = applySlashCommand({
+      command: "reset",
+      args: [],
+      ctx,
+    });
     assert.strictEqual(eff.type, "reset");
     if (eff.type !== "reset") return;
     assert.deepEqual([...state.messages], []);
@@ -179,7 +221,7 @@ describe("applySlashCommand", () => {
 
   it("unknown command (/foo) → error 'Unknown command /foo'", () => {
     const ctx = { state: makeState() };
-    const eff = applySlashCommand("foo", [], ctx);
+    const eff = applySlashCommand({ command: "foo", args: [], ctx });
     assert.strictEqual(eff.type, "error");
     if (eff.type !== "error") return;
     assert.match(
@@ -190,7 +232,7 @@ describe("applySlashCommand", () => {
 
   it("empty command (\"\") → 'Empty command. Type /help for commands.'", () => {
     const ctx = { state: makeState() };
-    const eff = applySlashCommand("", [], ctx);
+    const eff = applySlashCommand({ command: "", args: [], ctx });
     assert.strictEqual(eff.type, "error");
     if (eff.type !== "error") return;
     assert.strictEqual(eff.text, "Empty command. Type /help for commands.");
@@ -199,7 +241,11 @@ describe("applySlashCommand", () => {
   it("control-char strip: error text does NOT contain raw ESC", () => {
     const ctx = { state: makeState() };
     const esc = String.fromCharCode(27);
-    const eff = applySlashCommand(esc + "foo", [], ctx);
+    const eff = applySlashCommand({
+      command: esc + "foo",
+      args: [],
+      ctx,
+    });
     assert.strictEqual(eff.type, "error");
     if (eff.type !== "error") return;
     assert.ok(

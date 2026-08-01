@@ -213,9 +213,12 @@ export class SessionHub {
       turnCount: 0,
       updatedAt: new Date().toISOString(),
     };
-    await this.store.save(id, file);
+    await this.store.save({ id, file });
     return {
-      session: this.summarize(file, req?.mode ?? this.defaults.mode),
+      session: this.summarize({
+        file,
+        mode: req?.mode ?? this.defaults.mode,
+      }),
       turns: [],
     };
   }
@@ -223,44 +226,48 @@ export class SessionHub {
   async getSession(conversationId: string): Promise<GetSessionResponse> {
     const file = await this.store.load(conversationId);
     return {
-      session: this.summarize(file, this.defaults.mode),
+      session: this.summarize({ file, mode: this.defaults.mode }),
       turns: projectMessagesToTurns(file.messages),
     };
   }
 
-  async postMessage(
-    conversationId: string,
-    text: string,
-    opts?: { signal?: AbortSignal }
-  ): Promise<PostMessageResponse> {
+  async postMessage(opts: {
+    readonly conversationId: string;
+    readonly text: string;
+    readonly signal?: AbortSignal;
+  }): Promise<PostMessageResponse> {
+    const { conversationId, text } = opts;
     this.validateText(text);
     const query = text.trim();
-    return this.serialize(conversationId, async () => {
-      const session = await this.store.load(conversationId);
-      const deps = await this.ensureDeps();
-      // Per-session trace: new JsonlTraceService each postMessage (not cached
-      // in cachedDeps) because conversationId differs per session (ADR-0003 D4).
-      const runDeps: LoopEngineDeps = this.traceOut
-        ? {
-            ...deps,
-            trace: createJsonlTraceService({
-              filePath: this.traceOut,
-              conversationId,
-            }),
-          }
-        : deps;
-      const { result } = await run(query, runDeps, opts?.signal, {
-        priorMessages: session.messages,
-      });
-      // trace is destructured away → immediate GC (not logged/persisted/wired).
-      await this.conditionalSave(conversationId, session, result);
-      return {
-        session: this.summarize(
-          await this.store.load(conversationId),
-          this.defaults.mode
-        ),
-        turn: this.toTurnDto(query, result),
-      };
+    return this.serialize({
+      conversationId,
+      work: async () => {
+        const session = await this.store.load(conversationId);
+        const deps = await this.ensureDeps();
+        // Per-session trace: new JsonlTraceService each postMessage (not cached
+        // in cachedDeps) because conversationId differs per session (ADR-0003 D4).
+        const runDeps: LoopEngineDeps = this.traceOut
+          ? {
+              ...deps,
+              trace: createJsonlTraceService({
+                filePath: this.traceOut,
+                conversationId,
+              }),
+            }
+          : deps;
+        const { result } = await run(query, runDeps, opts.signal, {
+          priorMessages: session.messages,
+        });
+        // trace is destructured away → immediate GC (not logged/persisted/wired).
+        await this.conditionalSave({ conversationId, session, result });
+        return {
+          session: this.summarize({
+            file: await this.store.load(conversationId),
+            mode: this.defaults.mode,
+          }),
+          turn: this.toTurnDto({ query, result }),
+        };
+      },
     });
   }
 
@@ -268,16 +275,22 @@ export class SessionHub {
     conversationId: string,
     _opts?: { new_id?: boolean }
   ): Promise<ResetSessionResponse> {
-    return this.serialize(conversationId, async () => {
-      const session = await this.store.load(conversationId);
-      const reset: SessionFileV1 = {
-        ...session,
-        messages: [],
-        turnCount: 0,
-        updatedAt: new Date().toISOString(),
-      };
-      await this.store.save(conversationId, reset);
-      return { session: this.summarize(reset, this.defaults.mode), turns: [] };
+    return this.serialize({
+      conversationId,
+      work: async () => {
+        const session = await this.store.load(conversationId);
+        const reset: SessionFileV1 = {
+          ...session,
+          messages: [],
+          turnCount: 0,
+          updatedAt: new Date().toISOString(),
+        };
+        await this.store.save({ id: conversationId, file: reset });
+        return {
+          session: this.summarize({ file: reset, mode: this.defaults.mode }),
+          turns: [],
+        };
+      },
     });
   }
 
@@ -306,10 +319,11 @@ export class SessionHub {
    * Serialize operations on the same conversation_id (spec A15).
    * Different ids run in parallel; same id chains sequentially.
    */
-  private serialize<T>(
-    conversationId: string,
-    work: () => Promise<T>
-  ): Promise<T> {
+  private serialize<T>(opts: {
+    readonly conversationId: string;
+    readonly work: () => Promise<T>;
+  }): Promise<T> {
+    const { conversationId, work } = opts;
     const prev = this.inflight.get(conversationId) ?? Promise.resolve();
     const next = prev.then(() => work());
     // Swallow rejection in the chain sentinel so subsequent ops still run.
@@ -324,11 +338,12 @@ export class SessionHub {
   }
 
   /** 裁决#8: save condition based on stopReason. */
-  private async conditionalSave(
-    conversationId: string,
-    session: SessionFileV1,
-    result: RunResult
-  ): Promise<void> {
+  private async conditionalSave(opts: {
+    readonly conversationId: string;
+    readonly session: SessionFileV1;
+    readonly result: RunResult;
+  }): Promise<void> {
+    const { conversationId, session, result } = opts;
     if (DROP_REASONS.has(result.stopReason)) return;
     const updated: SessionFileV1 = {
       ...session,
@@ -336,7 +351,7 @@ export class SessionHub {
       turnCount: session.turnCount + result.turnCount,
       updatedAt: new Date().toISOString(),
     };
-    await this.store.save(conversationId, updated);
+    await this.store.save({ id: conversationId, file: updated });
   }
 
   /** Lazy deps construction (mirrors buildHarnessEngine, no agent-loop import). */
@@ -369,7 +384,11 @@ export class SessionHub {
     return this.cachedDeps;
   }
 
-  private summarize(file: SessionFileV1, mode: AgentMode): SessionSummary {
+  private summarize(opts: {
+    readonly file: SessionFileV1;
+    readonly mode: AgentMode;
+  }): SessionSummary {
+    const { file, mode } = opts;
     return {
       conversation_id: file.conversation_id,
       mode,
@@ -380,7 +399,11 @@ export class SessionHub {
     };
   }
 
-  private toTurnDto(query: string, result: RunResult): TurnDto {
+  private toTurnDto(opts: {
+    readonly query: string;
+    readonly result: RunResult;
+  }): TurnDto {
+    const { query, result } = opts;
     return {
       query,
       answer: {

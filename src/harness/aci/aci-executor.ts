@@ -20,6 +20,8 @@ import type {
 import { checkPermission, createPermissionPolicy } from "./permission.js";
 
 export interface AciExecutorOptions {
+  readonly inner: Executor;
+  readonly catalog: AciCatalog;
   readonly policy?: AciPermissionPolicy;
   /** 观测钩子：每次权限决策回调（demo/测试用，不参与决策）。 */
   readonly onDecision?: (call: ToolCall, outcome: PermissionOutcome) => void;
@@ -34,18 +36,15 @@ export interface AciExecutorOptions {
  *   - allow / pass_through → await inner.executeAll([call], signal, timeoutMs) 取唯一结果。
  * 每次决策调 onDecision（观测用，不影响决策）。
  */
-export function createAciExecutor(
-  inner: Executor,
-  catalog: AciCatalog,
-  opts?: AciExecutorOptions,
-): Executor {
-  const policy: AciPermissionPolicy = opts?.policy ?? createPermissionPolicy();
-  const onDecision = opts?.onDecision;
+export function createAciExecutor(opts: AciExecutorOptions): Executor {
+  const { inner, catalog } = opts;
+  const policy: AciPermissionPolicy = opts.policy ?? createPermissionPolicy();
+  const onDecision = opts.onDecision;
 
   async function executeAll(
     calls: ReadonlyArray<ToolCall>,
     signal?: AbortSignal,
-    timeoutMs?: number,
+    timeoutMs?: number
   ): Promise<ReadonlyArray<ToolExecutionResult>> {
     const out: ToolExecutionResult[] = [];
     for (const call of calls) {
@@ -56,7 +55,7 @@ export function createAciExecutor(
         out.push(result as ToolExecutionResult);
         continue;
       }
-      const outcome = checkPermission(def, call.input, policy);
+      const outcome = checkPermission({ def, input: call.input, policy });
       onDecision?.(call, outcome);
       if (outcome.decision === "deny") {
         // deny：不调 inner，直接产结构化失败（message 带 [permission_denied] 前缀）。

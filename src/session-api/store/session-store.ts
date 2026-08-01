@@ -43,7 +43,7 @@ export class SessionStore {
    */
   async load(id: string): Promise<SessionFileV1> {
     const raw = await this.readRaw(id);
-    const parsed = this.parseJson(id, raw);
+    const parsed = this.parseJson({ id, raw });
     const field = validateSessionFile(parsed);
     if (field !== null) {
       throw {
@@ -59,7 +59,11 @@ export class SessionStore {
    * Atomic write: tmp file then rename, so a crash never leaves a half-written file.
    * Throws: write_failed
    */
-  async save(id: string, file: SessionFileV1): Promise<void> {
+  async save(opts: {
+    readonly id: string;
+    readonly file: SessionFileV1;
+  }): Promise<void> {
+    const { id, file } = opts;
     const path = this.filePath(id);
     const tmp = `${path}.tmp`;
     try {
@@ -142,7 +146,11 @@ export class SessionStore {
     }
   }
 
-  private parseJson(id: string, raw: string): unknown {
+  private parseJson(opts: {
+    readonly id: string;
+    readonly raw: string;
+  }): unknown {
+    const { id, raw } = opts;
     try {
       return JSON.parse(raw);
     } catch {

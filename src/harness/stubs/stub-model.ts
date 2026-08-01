@@ -24,6 +24,7 @@ import type {
 import type { ToolExecutionResult } from "../tools/types.js";
 
 export interface StubModelOptions {
+  readonly responses: ReadonlyArray<AssistantTurnResult>;
   /** 017: step 返回前的可注入延迟(ms)。测试替身允许时间依赖,因为测试控制时间。 */
   readonly delayMs?: number;
 }
@@ -40,33 +41,33 @@ export interface StubModelFull extends ModelAdapter {
  * ("AbortError"),与 Web/Node 平台约定一致,Executor / Promise.race
  * 会把它收敛为统一的失败标签。
  */
-function delay(ms: number, signal?: AbortSignal): Promise<void> {
+function delay(opts: {
+  readonly ms: number;
+  readonly signal?: AbortSignal;
+}): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     // 入口已 abort:立即拒绝,不必启动 timer。
-    if (signal?.aborted) {
+    if (opts.signal?.aborted) {
       reject(new DOMException("This operation was aborted", "AbortError"));
       return;
     }
     const timer = setTimeout(() => {
       // 正常 resolve:主动撤销监听,避免内存泄漏。
-      signal?.removeEventListener("abort", onAbort);
+      opts.signal?.removeEventListener("abort", onAbort);
       resolve();
-    }, ms);
+    }, opts.ms);
     const onAbort = (): void => {
       // 中断:清 timer + 拒绝同样的 AbortError。
       clearTimeout(timer);
       reject(new DOMException("This operation was aborted", "AbortError"));
     };
     // { once: true } 确保监听只触发一次,自然清理。
-    signal?.addEventListener("abort", onAbort, { once: true });
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
-export function createStubModel(
-  responses: ReadonlyArray<AssistantTurnResult>,
-  opts: StubModelOptions = {}
-): StubModelFull {
-  const queue = responses.slice();
+export function createStubModel(opts: StubModelOptions): StubModelFull {
+  const queue = opts.responses.slice();
   const delayMs = opts.delayMs ?? 0;
   return Object.freeze({
     async step(
@@ -76,7 +77,7 @@ export function createStubModel(
     ): Promise<AssistantTurnResult> {
       // 017 S17 守门:可选注入延迟 + abort 透传。
       if (delayMs > 0) {
-        await delay(delayMs, signal);
+        await delay({ ms: delayMs, signal });
       } else if (signal?.aborted) {
         // 无延迟配置但 signal 已 abort:立即拒绝,保持行为一致。
         throw new DOMException("This operation was aborted", "AbortError");

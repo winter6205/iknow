@@ -9,12 +9,7 @@
 
 import { describe, it, beforeEach, afterEach } from "vitest";
 import assert from "node:assert/strict";
-import {
-  mkdtempSync,
-  writeFileSync,
-  rmSync,
-  readFileSync,
-} from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -38,11 +33,16 @@ import { createContextManagerTool } from "../../../src/harness/aci/tools/context
 
 /* ── helper: 构造 AssistantTurnResult（与 demo.ts 同一形状）── */
 
-function assistantResult(
-  texts: string[],
-  toolCalls: Array<{ id: string; name: string; input: unknown }> = [],
-  supplierStop: "success" | "truncation" | "refusal" | "other" = "success",
-): AssistantTurnResult {
+interface AssistantResultOpts {
+  readonly texts: string[];
+  readonly toolCalls?: Array<{ id: string; name: string; input: unknown }>;
+  readonly supplierStop?: "success" | "truncation" | "refusal" | "other";
+}
+
+function assistantResult(opts: AssistantResultOpts): AssistantTurnResult {
+  const texts = opts.texts;
+  const toolCalls = opts.toolCalls ?? [];
+  const supplierStop = opts.supplierStop ?? "success";
   const blocks: AnthropicContentBlock[] = [];
   for (const t of texts) blocks.push({ type: "text", text: t });
   for (const c of toolCalls) {
@@ -75,19 +75,19 @@ function assemble(scratchDir: string): {
     createContextManagerTool(),
   ]);
   const innerExec = createExecutor(reg.inner);
-  const exec = createAciExecutor(innerExec, reg.catalog);
+  const exec = createAciExecutor({ inner: innerExec, catalog: reg.catalog });
   return { reg, exec };
 }
 
 /* ── helper: 在 messages 中按 tool_use_id 查找 tool_result ── */
 
-function findToolResult(
-  messages: ReadonlyArray<AnthropicNativeMessage>,
-  toolUseId: string,
-): Extract<AnthropicContentBlock, { type: "tool_result" }> | undefined {
-  for (const m of messages) {
+function findToolResult(opts: {
+  messages: ReadonlyArray<AnthropicNativeMessage>;
+  toolUseId: string;
+}): Extract<AnthropicContentBlock, { type: "tool_result" }> | undefined {
+  for (const m of opts.messages) {
     for (const b of m.content) {
-      if (b.type === "tool_result" && b.tool_use_id === toolUseId) {
+      if (b.type === "tool_result" && b.tool_use_id === opts.toolUseId) {
         return b;
       }
     }
@@ -106,7 +106,7 @@ beforeEach(() => {
   writeFileSync(join(scratch, "edit-me.ts"), "const x = 1;\nconsole.log(x);\n");
   const bigLines = Array.from(
     { length: 250 },
-    (_, i) => `line ${String(i + 1)}`,
+    (_, i) => `line ${String(i + 1)}`
   );
   writeFileSync(join(scratch, "big-file.txt"), bigLines.join("\n"));
 });
@@ -120,24 +120,36 @@ afterEach(() => {
 describe("demo 端到端 — 经 run() + createAciExecutor", () => {
   it("(a) read-only 场景 stopReason=completed", async () => {
     const { reg, exec } = assemble(scratch);
-    const model = createStubModel([
-      assistantResult(
-        [],
-        [
-          { id: "a-search", name: "fs_search", input: { pattern: ".ts" } },
-          {
-            id: "a-view-1",
-            name: "fs_view",
-            input: { path: "big-file.txt", offset: 0 },
-          },
-        ],
-      ),
-      assistantResult(
-        [],
-        [{ id: "a-view-2", name: "fs_view", input: { path: "big-file.txt" } }],
-      ),
-      assistantResult(["done"], [], "success"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            { id: "a-search", name: "fs_search", input: { pattern: ".ts" } },
+            {
+              id: "a-view-1",
+              name: "fs_view",
+              input: { path: "big-file.txt", offset: 0 },
+            },
+          ],
+        }),
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            {
+              id: "a-view-2",
+              name: "fs_view",
+              input: { path: "big-file.txt" },
+            },
+          ],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const { result } = await run("test-a", {
       adapter: model,
       executor: exec,
@@ -147,48 +159,65 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
     assert.equal(result.stopReason, "completed");
     assert.equal(result.turnCount, 3);
     // fs_search 返回绝对路径且含 alpha.ts / beta.ts
-    const searchResult = findToolResult(result.messages, "a-search");
+    const searchResult = findToolResult({
+      messages: result.messages,
+      toolUseId: "a-search",
+    });
     assert.ok(searchResult);
     assert.equal(searchResult.is_error, undefined);
     // fs_view 第一次翻页 offset=0，from=0，to=100
-    const view1 = findToolResult(result.messages, "a-view-1");
+    const view1 = findToolResult({
+      messages: result.messages,
+      toolUseId: "a-view-1",
+    });
     assert.ok(view1);
-    const view1Text = (view1.content as Array<{ text?: string }>)[0]?.text ?? "";
+    const view1Text =
+      (view1.content as Array<{ text?: string }>)[0]?.text ?? "";
     assert.ok(view1Text.includes('"from":0'));
     assert.ok(view1Text.includes('"to":100'));
     // fs_view 第二次无 offset，stateful 续读，from=100，to=200
-    const view2 = findToolResult(result.messages, "a-view-2");
+    const view2 = findToolResult({
+      messages: result.messages,
+      toolUseId: "a-view-2",
+    });
     assert.ok(view2);
-    const view2Text = (view2.content as Array<{ text?: string }>)[0]?.text ?? "";
+    const view2Text =
+      (view2.content as Array<{ text?: string }>)[0]?.text ?? "";
     assert.ok(view2Text.includes('"from":100'));
     assert.ok(view2Text.includes('"to":200'));
   });
 
   it("(b) 危险命令 deny -> is_error tool_result", async () => {
     const { reg, exec } = assemble(scratch);
-    const model = createStubModel([
-      assistantResult(
-        [],
-        [
-          {
-            id: "b-danger",
-            name: "shell_exec",
-            input: { command: "rm -rf /" },
-          },
-        ],
-      ),
-      assistantResult(
-        [],
-        [
-          {
-            id: "b-safe",
-            name: "shell_exec",
-            input: { command: "echo hello" },
-          },
-        ],
-      ),
-      assistantResult(["done"], [], "success"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            {
+              id: "b-danger",
+              name: "shell_exec",
+              input: { command: "rm -rf /" },
+            },
+          ],
+        }),
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            {
+              id: "b-safe",
+              name: "shell_exec",
+              input: { command: "echo hello" },
+            },
+          ],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const { result } = await run("test-b", {
       adapter: model,
       executor: exec,
@@ -197,7 +226,10 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
     });
 
     // deny 路径产生 is_error tool_result，message 以 [permission_denied] 开头
-    const dangerResult = findToolResult(result.messages, "b-danger");
+    const dangerResult = findToolResult({
+      messages: result.messages,
+      toolUseId: "b-danger",
+    });
     assert.ok(dangerResult, "expected tool_result for b-danger");
     assert.equal(dangerResult.is_error, true);
     const dangerText =
@@ -206,11 +238,14 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
     // allowlist-first：rm 不在白名单,reason 含 "command not in allowlist"。
     assert.ok(
       dangerText.includes("command not in allowlist"),
-      `expected allowlist denial, got: ${dangerText}`,
+      `expected allowlist denial, got: ${dangerText}`
     );
 
     // 安全命令成功（is_error 未设置）
-    const safeResult = findToolResult(result.messages, "b-safe");
+    const safeResult = findToolResult({
+      messages: result.messages,
+      toolUseId: "b-safe",
+    });
     assert.ok(safeResult);
     assert.equal(safeResult.is_error, undefined);
     const safeText =
@@ -225,39 +260,45 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
     const filePath = join(scratch, "edit-me.ts");
     const before = readFileSync(filePath, "utf8");
 
-    const model = createStubModel([
-      // 坏补丁：括号不配对 -> lint rejected
-      assistantResult(
-        [],
-        [
-          {
-            id: "c-bad",
-            name: "fs_edit",
-            input: {
-              path: "edit-me.ts",
-              old_str: "const x = 1;",
-              new_str: "const x = foo(1;",
+    const model = createStubModel({
+      responses: [
+        // 坏补丁：括号不配对 -> lint rejected
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            {
+              id: "c-bad",
+              name: "fs_edit",
+              input: {
+                path: "edit-me.ts",
+                old_str: "const x = 1;",
+                new_str: "const x = foo(1;",
+              },
             },
-          },
-        ],
-      ),
-      // 正确补丁
-      assistantResult(
-        [],
-        [
-          {
-            id: "c-good",
-            name: "fs_edit",
-            input: {
-              path: "edit-me.ts",
-              old_str: "const x = 1;",
-              new_str: "const x = foo(1);",
+          ],
+        }),
+        // 正确补丁
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            {
+              id: "c-good",
+              name: "fs_edit",
+              input: {
+                path: "edit-me.ts",
+                old_str: "const x = 1;",
+                new_str: "const x = foo(1);",
+              },
             },
-          },
-        ],
-      ),
-      assistantResult(["done"], [], "success"),
-    ]);
+          ],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const { result } = await run("test-c", {
       adapter: model,
       executor: exec,
@@ -266,7 +307,10 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
     });
 
     // 坏补丁被拒（is_error=true，message 含 lint rejected）
-    const badResult = findToolResult(result.messages, "c-bad");
+    const badResult = findToolResult({
+      messages: result.messages,
+      toolUseId: "c-bad",
+    });
     assert.ok(badResult, "expected tool_result for c-bad");
     assert.equal(badResult.is_error, true);
     const badText =
@@ -277,7 +321,10 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
     // 注意：此处 readFileSync 在 run() 完成后调用，good 已执行——
     // 所以我们在 good 执行前已无直接观察点。改用 messages 中 good 的
     // tool_result 验证成功，并在 (c) 末尾断言最终文件被改写。
-    const goodResult = findToolResult(result.messages, "c-good");
+    const goodResult = findToolResult({
+      messages: result.messages,
+      toolUseId: "c-good",
+    });
     assert.ok(goodResult, "expected tool_result for c-good");
     assert.equal(goodResult.is_error, undefined);
 

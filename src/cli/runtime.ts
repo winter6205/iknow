@@ -109,7 +109,9 @@ export async function buildHarnessEngine(
   ];
   const reg = createAciRegistry(aciTools);
   const baseExecutor = createExecutor(reg.inner);
-  const executor = createAciExecutor(baseExecutor, reg.catalog, {
+  const executor = createAciExecutor({
+    inner: baseExecutor,
+    catalog: reg.catalog,
     policy: createPermissionPolicy({ denyDangerousExecute: true }),
   });
   const deps: LoopEngineDeps = {

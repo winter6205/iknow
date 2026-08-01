@@ -25,7 +25,11 @@ function mkResult(over: Partial<RunResult> = {}): RunResult {
   };
 }
 
-function mkTurn(toolNames: string[], over: Partial<TurnTrace> = {}): TurnTrace {
+function mkTurn(opts: {
+  toolNames: string[];
+  over?: Partial<TurnTrace>;
+}): TurnTrace {
+  const { toolNames, over = {} } = opts;
   return {
     turnIndex: 0,
     supplierStop: "success",
@@ -47,10 +51,12 @@ function mkTrace(turns: TurnTrace[] = []): LoopTrace {
 
 describe("formatRunHuman", () => {
   it("renders finalText + status line for completed + 1 tool + 1 turn", () => {
-    const out = formatRunHuman(
-      mkResult({ finalText: "hello" }),
-      mkTrace([mkTurn(["echo"], { durationMs: 5 })])
-    );
+    const out = formatRunHuman({
+      result: mkResult({ finalText: "hello" }),
+      trace: mkTrace([
+        mkTurn({ toolNames: ["echo"], over: { durationMs: 5 } }),
+      ]),
+    });
     assert.ok(out.includes("hello"), "should contain finalText");
     assert.ok(out.includes("stop=completed"));
     assert.ok(out.includes("turns=1"));
@@ -60,10 +66,14 @@ describe("formatRunHuman", () => {
   });
 
   it("renders status line even when finalText is null (maxTurns)", () => {
-    const out = formatRunHuman(
-      mkResult({ finalText: null, stopReason: "maxTurns", turnCount: 6 }),
-      mkTrace([])
-    );
+    const out = formatRunHuman({
+      result: mkResult({
+        finalText: null,
+        stopReason: "maxTurns",
+        turnCount: 6,
+      }),
+      trace: mkTrace([]),
+    });
     assert.ok(out.includes("stop=maxTurns"));
     assert.ok(
       !out.includes("hello"),
@@ -74,15 +84,21 @@ describe("formatRunHuman", () => {
   });
 
   it("zero turns → tools shows '-' placeholder", () => {
-    const out = formatRunHuman(mkResult(), mkTrace([]));
+    const out = formatRunHuman({
+      result: mkResult(),
+      trace: mkTrace([]),
+    });
     assert.ok(out.includes("tools=-"));
   });
 
   it("multi-turn multi-tool: dedup preserves first-occurrence order", () => {
-    const out = formatRunHuman(
-      mkResult(),
-      mkTrace([mkTurn(["echo", "get_time"]), mkTurn(["echo"])])
-    );
+    const out = formatRunHuman({
+      result: mkResult(),
+      trace: mkTrace([
+        mkTurn({ toolNames: ["echo", "get_time"] }),
+        mkTurn({ toolNames: ["echo"] }),
+      ]),
+    });
     assert.ok(
       out.includes("tools=echo,get_time"),
       "echo first (first turn), get_time deduped; got: " + out
@@ -90,10 +106,10 @@ describe("formatRunHuman", () => {
   });
 
   it("renders partial finalText for non-completed stopReason (timeout)", () => {
-    const out = formatRunHuman(
-      mkResult({ finalText: "partial", stopReason: "timeout" }),
-      mkTrace([mkTurn([])])
-    );
+    const out = formatRunHuman({
+      result: mkResult({ finalText: "partial", stopReason: "timeout" }),
+      trace: mkTrace([mkTurn({ toolNames: [] })]),
+    });
     assert.ok(out.includes("partial"));
     assert.ok(out.includes("stop=timeout"));
   });
@@ -102,7 +118,10 @@ describe("formatRunHuman", () => {
 describe("formatRunJson", () => {
   it("emits the 4 top-level fields and omits messages", () => {
     const parsed = JSON.parse(
-      formatRunJson(mkResult(), mkTrace([mkTurn(["echo"])]))
+      formatRunJson({
+        result: mkResult(),
+        trace: mkTrace([mkTurn({ toolNames: ["echo"] })]),
+      })
     );
     assert.strictEqual(parsed.finalText, "hello");
     assert.strictEqual(parsed.stopReason, "completed");
@@ -118,10 +137,10 @@ describe("formatRunJson", () => {
 
   it("empty trace round-trips with turns.length === 0", () => {
     const parsed = JSON.parse(
-      formatRunJson(
-        mkResult({ finalText: null, stopReason: "maxTurns" }),
-        mkTrace([])
-      )
+      formatRunJson({
+        result: mkResult({ finalText: null, stopReason: "maxTurns" }),
+        trace: mkTrace([]),
+      })
     );
     assert.strictEqual(parsed.trace.turns.length, 0);
     assert.strictEqual(parsed.finalText, null);

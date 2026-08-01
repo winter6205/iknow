@@ -26,11 +26,14 @@ import type {
   TurnRecord,
 } from "../../../src/harness/trace/types.ts";
 
-function assistantResult(
-  texts: string[],
-  toolCalls: Array<{ id: string; name: string; input: unknown }> = [],
-  supplierStop: "success" | "truncation" | "refusal" | "other" = "success"
-): AssistantTurnResult {
+function assistantResult(opts: {
+  readonly texts: string[];
+  readonly toolCalls?: Array<{ id: string; name: string; input: unknown }>;
+  readonly supplierStop?: "success" | "truncation" | "refusal" | "other";
+}): AssistantTurnResult {
+  const texts = opts.texts;
+  const toolCalls = opts.toolCalls ?? [];
+  const supplierStop = opts.supplierStop ?? "success";
   const blocks: AnthropicNativeMessage["content"] = [];
   for (const t of texts) blocks.push({ type: "text", text: t });
   for (const c of toolCalls) {
@@ -61,8 +64,24 @@ describe("T4 criterion 5: byte-level consistency", () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model1 = createStubModel([assistantResult(["hello"], [], "success")]);
-    const model2 = createStubModel([assistantResult(["hello"], [], "success")]);
+    const model1 = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hello"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const model2 = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hello"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const depsBase = {
       adapter: model1,
       executor: exec,
@@ -92,14 +111,18 @@ describe("T4 criterion 5: byte-level consistency", () => {
     const reg = createRegistry([echo]);
     const exec = createExecutor(reg);
     const responses = [
-      assistantResult(
-        [],
-        [{ id: "t1", name: "echo", input: { value: "ping" } }]
-      ),
-      assistantResult(["done"], [], "success"),
+      assistantResult({
+        texts: [],
+        toolCalls: [{ id: "t1", name: "echo", input: { value: "ping" } }],
+      }),
+      assistantResult({
+        texts: ["done"],
+        toolCalls: [],
+        supplierStop: "success",
+      }),
     ];
-    const model1 = createStubModel(responses);
-    const model2 = createStubModel(responses);
+    const model1 = createStubModel({ responses });
+    const model2 = createStubModel({ responses });
     const depsBase = {
       adapter: model1,
       executor: exec,
@@ -131,13 +154,19 @@ describe("T4 criterion 8/11: JsonlTraceService integration", () => {
     });
     const reg = createRegistry([echo]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult(
-        [],
-        [{ id: "t1", name: "echo", input: { value: "ping" } }]
-      ),
-      assistantResult(["done"], [], "success"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "ping" } }],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const trace = createJsonlTraceService({
       filePath: traceFile,
       conversationId: "test-conv-1",
@@ -186,7 +215,15 @@ describe("T4 criterion 8/11: JsonlTraceService integration", () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([assistantResult(["hi"], [], "success")]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hi"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const trace = createJsonlTraceService({
       filePath: traceFile,
       conversationId: "test-conv-2",
@@ -223,11 +260,23 @@ describe("T4 criterion 11: recordTurn writes at step end", () => {
     });
     const reg = createRegistry([echo]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult([], [{ id: "t1", name: "echo", input: { value: "1" } }]),
-      assistantResult([], [{ id: "t2", name: "echo", input: { value: "2" } }]),
-      assistantResult(["final"], [], "success"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "1" } }],
+        }),
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t2", name: "echo", input: { value: "2" } }],
+        }),
+        assistantResult({
+          texts: ["final"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const trace = createJsonlTraceService({
       filePath: traceFile,
       conversationId: "test-conv-3",
@@ -283,13 +332,19 @@ describe("T4 criterion 11/14: recordLlmCall returns undefined", () => {
     });
     const reg = createRegistry([echo]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult(
-        [],
-        [{ id: "t1", name: "echo", input: { value: "ping" } }]
-      ),
-      assistantResult(["done"], [], "success"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "ping" } }],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const llmCallIds: Array<string | undefined> = [];
     const toolCallRecords: ToolCallRecord[] = [];
     const mockTrace: TraceService = {
@@ -331,10 +386,16 @@ describe("T4 criterion 5/19: error paths", () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel(
-      [assistantResult(["never arrives"], [], "success")],
-      { delayMs: 200 }
-    );
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["never arrives"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+      delayMs: 200,
+    });
     const trace = createJsonlTraceService({
       filePath: traceFile,
       conversationId: "test-conv-cancel",
@@ -376,7 +437,14 @@ describe("T4 criterion 5/19: error paths", () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([assistantResult(["never"], [], "success")], {
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["never"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
       delayMs: 200,
     });
     const trace = createJsonlTraceService({

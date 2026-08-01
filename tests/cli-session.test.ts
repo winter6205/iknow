@@ -34,18 +34,19 @@ import {
 
 describe("parseArgs", () => {
   it("defaults bare invocation to chat when interactive", () => {
-    const p = parseArgs([], { interactive: true });
+    const p = parseArgs({ argv: [], interactive: true });
     assert.equal(p.command, "chat");
     assert.equal(p.missingQuery, false);
   });
 
   it("defaults bare invocation to help when non-interactive", () => {
-    const p = parseArgs([], { interactive: false });
+    const p = parseArgs({ argv: [], interactive: false });
     assert.equal(p.command, "help");
   });
 
   it("flags-only on TTY defaults to chat", () => {
-    const p = parseArgs(["--json", "--role", "manager"], {
+    const p = parseArgs({
+      argv: ["--json", "--role", "manager"],
       interactive: true,
     });
     assert.equal(p.command, "chat");
@@ -54,7 +55,7 @@ describe("parseArgs", () => {
   });
 
   it("flags-only non-TTY defaults to help", () => {
-    const p = parseArgs(["--json"], { interactive: false });
+    const p = parseArgs({ argv: ["--json"], interactive: false });
     assert.equal(p.command, "help");
   });
 
@@ -62,7 +63,7 @@ describe("parseArgs", () => {
     // 020: --mode flag is gone from parseArgs; passing it now falls through to
     // the rest bucket (it becomes a positional arg). Test only asserts that the
     // subcommand shape is preserved.
-    const p = parseArgs(["chat"], { interactive: false });
+    const p = parseArgs({ argv: ["chat"], interactive: false });
     assert.equal(p.command, "chat");
     // The frozen ParsedCli has NO mode/modeExplicit fields anymore.
     assert.equal(
@@ -78,36 +79,36 @@ describe("parseArgs", () => {
   });
 
   it("ask with query", () => {
-    const p = parseArgs(["ask", "公司的退款政策是什么？"]);
+    const p = parseArgs({ argv: ["ask", "公司的退款政策是什么？"] });
     assert.equal(p.command, "ask");
     assert.equal(p.query, "公司的退款政策是什么？");
     assert.equal(p.missingQuery, false);
   });
 
   it("ask without query sets missingQuery (no demo default)", () => {
-    const p = parseArgs(["ask"]);
+    const p = parseArgs({ argv: ["ask"] });
     assert.equal(p.command, "ask");
     assert.equal(p.query, "");
     assert.equal(p.missingQuery, true);
   });
 
   it("oneshot bare query (compat)", () => {
-    const p = parseArgs(["hello world"]);
+    const p = parseArgs({ argv: ["hello world"] });
     assert.equal(p.command, "oneshot");
     assert.equal(p.query, "hello world");
     assert.equal(p.missingQuery, false);
   });
 
   it("-h / --help → help", () => {
-    assert.equal(parseArgs(["-h"]).command, "help");
-    assert.equal(parseArgs(["--help", "ask", "x"]).command, "help");
+    assert.equal(parseArgs({ argv: ["-h"] }).command, "help");
+    assert.equal(parseArgs({ argv: ["--help", "ask", "x"] }).command, "help");
   });
 
   it("-V / --version sets versionOnly", () => {
-    const v = parseArgs(["--version"]);
+    const v = parseArgs({ argv: ["--version"] });
     assert.equal(v.command, "help");
     assert.equal(v.versionOnly, true);
-    assert.equal(parseArgs(["-V"]).versionOnly, true);
+    assert.equal(parseArgs({ argv: ["-V"] }).versionOnly, true);
   });
 });
 
@@ -140,15 +141,15 @@ describe("isInteractive", () => {
   it("is false when streams are not TTYs", () => {
     const stdin = { isTTY: false } as NodeJS.ReadStream;
     const stdout = { isTTY: false } as NodeJS.WriteStream;
-    assert.equal(isInteractive(stdin, stdout), false);
+    assert.equal(isInteractive({ stdin, stdout }), false);
   });
 
   it("is true only when both are TTYs", () => {
     const stdin = { isTTY: true } as NodeJS.ReadStream;
     const stdout = { isTTY: true } as NodeJS.WriteStream;
-    assert.equal(isInteractive(stdin, stdout), true);
+    assert.equal(isInteractive({ stdin, stdout }), true);
     assert.equal(
-      isInteractive(stdin, { isTTY: false } as NodeJS.WriteStream),
+      isInteractive({ stdin, stdout: { isTTY: false } as NodeJS.WriteStream }),
       false
     );
   });
@@ -159,11 +160,18 @@ describe("slash /status", () => {
     // 020: applySlashCommand now lives in src/cli/slash.ts with CliChatState.
     // Status text uses `messages=N`, NOT `turns=N` and NOT `priors=N`.
     const state = makeState({
-      messages: [makeNative("user", "q"), makeNative("assistant", "a")],
+      messages: [
+        makeNative({ role: "user", text: "q" }),
+        makeNative({ role: "assistant", text: "a" }),
+      ],
       jsonMode: true,
       session: { caller_role: "employee" },
     });
-    const effect = applySlashCommand("status", [], { state });
+    const effect = applySlashCommand({
+      command: "status",
+      args: [],
+      ctx: { state },
+    });
     assert.equal(effect.type, "info");
     if (effect.type !== "info") return;
     assert.match(effect.text, /messages=2/);
@@ -176,33 +184,36 @@ describe("slash /status", () => {
 
 describe("processChatLine (pipe simulation)", () => {
   it("empty line is no-op", async () => {
-    const ctx = makeCtx([]);
-    const r = await processChatLine("   ", ctx);
+    const ctx = makeCtx({ responses: [] });
+    const r = await processChatLine({ line: "   ", ctx });
     assert.equal(r.quit, false);
     assert.equal(r.output, "");
     assert.equal(r.ranQuery, undefined);
   });
 
   it("slash /help and /quit", async () => {
-    const ctx = makeCtx([]);
-    const help = await processChatLine("/help", ctx);
+    const ctx = makeCtx({ responses: [] });
+    const help = await processChatLine({ line: "/help", ctx });
     assert.equal(help.quit, false);
     assert.match(help.output, /\/status/);
 
-    const quit = await processChatLine("/quit", ctx);
+    const quit = await processChatLine({ line: "/quit", ctx });
     assert.equal(quit.quit, true);
   });
 
   it("slash /status via processChatLine — host wires messages=N + role + json", async () => {
     const state = makeState({
-      messages: [makeNative("user", "q"), makeNative("assistant", "a")],
+      messages: [
+        makeNative({ role: "user", text: "q" }),
+        makeNative({ role: "assistant", text: "a" }),
+      ],
       session: { caller_role: "employee" },
     });
     const ctx: ChatLineContext = {
-      deps: makeCtx([]).deps,
+      deps: makeCtx({ responses: [] }).deps,
       state,
     };
-    const r = await processChatLine("/status", ctx);
+    const r = await processChatLine({ line: "/status", ctx });
     assert.equal(r.quit, false);
     // 020 frozen shape: messages=N, role, json=off (default).
     assert.match(r.output, /messages=2/);
@@ -216,12 +227,14 @@ describe("processChatLine (pipe simulation)", () => {
   it("serial two-query pipe: second sees priors; order preserved", async () => {
     // Same ctx reused across two queries proves the host 续传 priorMessages.
     // Each query independently produces [user, assistant]; messages strictly grows.
-    const ctx = makeCtx([
-      assistantResult(["a1"], [], "success"),
-      assistantResult(["a2"], [], "success"),
-    ]);
+    const ctx = makeCtx({
+      responses: [
+        assistantResult({ texts: ["a1"] }),
+        assistantResult({ texts: ["a2"] }),
+      ],
+    });
 
-    const r1 = await processChatLine("first question", ctx);
+    const r1 = await processChatLine({ line: "first question", ctx });
     assert.equal(r1.quit, false);
     assert.equal(r1.ranQuery, true);
     assert.ok(r1.output.length > 0);
@@ -233,7 +246,7 @@ describe("processChatLine (pipe simulation)", () => {
     assert.equal(ctx.state.messages[1]!.role, "assistant");
 
     const beforeTurn2 = ctx.state.messages.length;
-    const r2 = await processChatLine("second question", ctx);
+    const r2 = await processChatLine({ line: "second question", ctx });
     assert.equal(r2.ranQuery, true);
     assert.ok(r2.output.length > 0);
     assert.match(r2.output, /stop=completed/);
@@ -255,8 +268,8 @@ describe("processChatLine (pipe simulation)", () => {
   });
 
   it("unknown slash goes to stderr field", async () => {
-    const ctx = makeCtx([]);
-    const r = await processChatLine("/nope", ctx);
+    const ctx = makeCtx({ responses: [] });
+    const r = await processChatLine({ line: "/nope", ctx });
     assert.equal(r.output, "");
     assert.ok(r.stderr);
     assert.match(r.stderr!, /Unknown command/);
@@ -266,10 +279,12 @@ describe("processChatLine (pipe simulation)", () => {
     // 020: JSON output is the harness RunResult projection, NOT the old
     // IknowAnswer shape. Top-level keys: finalText / stopReason / turnCount /
     // trace. messages is intentionally omitted.
-    const ctx = makeCtx([assistantResult(["answer"], [], "success")]);
-    await processChatLine("/json on", ctx);
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["answer"] })],
+    });
+    await processChatLine({ line: "/json on", ctx });
     assert.equal(ctx.state.jsonMode, true);
-    const r = await processChatLine("any question", ctx);
+    const r = await processChatLine({ line: "any question", ctx });
     assert.ok(r.output.startsWith("{"));
     const parsed = JSON.parse(r.output) as Record<string, unknown>;
     assert.ok("finalText" in parsed, "JSON output must carry `finalText`");
@@ -286,17 +301,19 @@ describe("processChatLine (pipe simulation)", () => {
 
   it("/reset clears conversation bag via processChatLine but preserves session", async () => {
     // 020: /reset clears `messages` only; session is preserved.
-    const ctx = makeCtx([
-      assistantResult(["a"], [], "success"),
-      assistantResult(["a"], [], "success"),
-    ]);
+    const ctx = makeCtx({
+      responses: [
+        assistantResult({ texts: ["a"] }),
+        assistantResult({ texts: ["a"] }),
+      ],
+    });
     ctx.state.messages = [
-      makeNative("user", "q"),
-      makeNative("assistant", "a"),
+      makeNative({ role: "user", text: "q" }),
+      makeNative({ role: "assistant", text: "a" }),
     ];
     assert.equal(ctx.state.messages.length, 2);
 
-    const r = await processChatLine("/reset", ctx);
+    const r = await processChatLine({ line: "/reset", ctx });
     assert.equal(r.quit, false);
     assert.match(r.output, /cleared|Session/i);
     assert.equal(ctx.state.messages.length, 0);
@@ -328,7 +345,7 @@ describe("processChatLine (pipe simulation)", () => {
       },
       state: makeState(),
     };
-    const r = await processChatLine("any question", ctx);
+    const r = await processChatLine({ line: "any question", ctx });
     assert.equal(r.quit, false);
     assert.equal(r.output, "");
     assert.equal(r.ranQuery, true);

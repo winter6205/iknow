@@ -128,16 +128,29 @@ export function lintPatch(text: string): { ok: boolean; reason?: string } {
 }
 
 /** 解析路径为绝对且验证落在 root 内。 */
-function resolveWithinRoot(root: string, inputPath: string): string {
+interface ResolveWithinRootOpts {
+  readonly root: string;
+  readonly inputPath: string;
+}
+
+function resolveWithinRoot(opts: ResolveWithinRootOpts): string {
+  const { root, inputPath } = opts;
   const absRoot = resolve(root);
-  const absInput = isAbsolute(inputPath) ? inputPath : resolve(absRoot, inputPath);
+  const absInput = isAbsolute(inputPath)
+    ? inputPath
+    : resolve(absRoot, inputPath);
   // 用 normalize 后比较,防止 ../ 越界
-  const normRoot = absRoot.endsWith("\\") || absRoot.endsWith("/")
-    ? absRoot.slice(0, -1)
-    : absRoot;
-  if (absInput !== normRoot && !absInput.startsWith(normRoot + "\\") && !absInput.startsWith(normRoot + "/")) {
+  const normRoot =
+    absRoot.endsWith("\\") || absRoot.endsWith("/")
+      ? absRoot.slice(0, -1)
+      : absRoot;
+  if (
+    absInput !== normRoot &&
+    !absInput.startsWith(normRoot + "\\") &&
+    !absInput.startsWith(normRoot + "/")
+  ) {
     throw new ToolExecutionError(
-      `path escapes root: ${absInput} not under ${absRoot}`,
+      `path escapes root: ${absInput} not under ${absRoot}`
     );
   }
   return absInput;
@@ -154,22 +167,28 @@ function resolveWithinRoot(root: string, inputPath: string): string {
  */
 export function createFsEditTool(root: string): AciToolDef {
   const handler = async (input: unknown): Promise<unknown> => {
-    const obj = input as { path?: unknown; old_str?: unknown; new_str?: unknown };
+    const obj = input as {
+      path?: unknown;
+      old_str?: unknown;
+      new_str?: unknown;
+    };
     if (
       typeof obj?.path !== "string" ||
       typeof obj?.old_str !== "string" ||
       typeof obj?.new_str !== "string"
     ) {
-      throw new ToolExecutionError("fs_edit: path, old_str, new_str must all be strings");
+      throw new ToolExecutionError(
+        "fs_edit: path, old_str, new_str must all be strings"
+      );
     }
-    const absPath = resolveWithinRoot(root, obj.path);
+    const absPath = resolveWithinRoot({ root, inputPath: obj.path });
 
     let content: string;
     try {
       content = readFileSync(absPath, "utf8");
     } catch (err) {
       throw new ToolExecutionError(
-        `fs_edit: cannot read file: ${(err as Error).message}`,
+        `fs_edit: cannot read file: ${(err as Error).message}`
       );
     }
 
@@ -186,7 +205,7 @@ export function createFsEditTool(root: string): AciToolDef {
     }
     if (occurrences > 1) {
       throw new ToolExecutionError(
-        `fs_edit: old_str ambiguous: ${occurrences} occurrences in ${absPath}`,
+        `fs_edit: old_str ambiguous: ${occurrences} occurrences in ${absPath}`
       );
     }
 

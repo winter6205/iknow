@@ -35,11 +35,14 @@ import { createJsonlTraceService } from "../../../src/harness/trace/jsonl.ts";
 // Helpers (rebuilt per test-file convention)
 // ---------------------------------------------------------------------------
 
-function assistantResult(
-  texts: string[],
-  toolCalls: Array<{ id: string; name: string; input: unknown }> = [],
-  supplierStop: "success" | "truncation" | "refusal" | "other" = "success"
-): AssistantTurnResult {
+function assistantResult(opts: {
+  readonly texts: string[];
+  readonly toolCalls?: Array<{ id: string; name: string; input: unknown }>;
+  readonly supplierStop?: "success" | "truncation" | "refusal" | "other";
+}): AssistantTurnResult {
+  const texts = opts.texts;
+  const toolCalls = opts.toolCalls ?? [];
+  const supplierStop = opts.supplierStop ?? "success";
   const blocks: AnthropicNativeMessage["content"] = [];
   for (const t of texts) blocks.push({ type: "text", text: t });
   for (const c of toolCalls) {
@@ -114,7 +117,15 @@ describe("T6 scenario 1: pure text turn", () => {
   it("JSONL has llm_call + turn records; run completes", async () => {
     const reg = createRegistry([noopTool()]);
     const exec = createExecutor(reg);
-    const model = createStubModel([assistantResult(["hello"], [], "success")]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hello"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const { traceFile, trace } = makeTmpTrace("conv-s1");
 
     const { result } = await run("hi", {
@@ -150,13 +161,19 @@ describe("T6 scenario 2: single tool turn", () => {
   it("JSONL has llm_call + tool_call + turn + llm_call + turn", async () => {
     const reg = createRegistry([echoTool()]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult(
-        [],
-        [{ id: "t1", name: "echo", input: { value: "ping" } }]
-      ),
-      assistantResult(["done"], [], "success"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "ping" } }],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const { traceFile, trace } = makeTmpTrace("conv-s2");
 
     const { result } = await run("go", {
@@ -195,17 +212,23 @@ describe("T6 scenario 3: multi tool turn", () => {
   it("JSONL has multiple tool_call records; parent_llm_call_id all point to same llm_call", async () => {
     const reg = createRegistry([echoTool()]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult(
-        [],
-        [
-          { id: "a", name: "echo", input: { value: "1" } },
-          { id: "b", name: "echo", input: { value: "2" } },
-          { id: "c", name: "echo", input: { value: "3" } },
-        ]
-      ),
-      assistantResult(["done"], [], "success"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            { id: "a", name: "echo", input: { value: "1" } },
+            { id: "b", name: "echo", input: { value: "2" } },
+            { id: "c", name: "echo", input: { value: "3" } },
+          ],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const { traceFile, trace } = makeTmpTrace("conv-s3");
 
     const { result } = await run("go", {
@@ -251,10 +274,16 @@ describe("T6 scenario 4: cancelled", () => {
   it("JSONL has error records with error.type cancelled", async () => {
     const reg = createRegistry([noopTool()]);
     const exec = createExecutor(reg);
-    const model = createStubModel(
-      [assistantResult(["never arrives"], [], "success")],
-      { delayMs: 200 }
-    );
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["never arrives"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+      delayMs: 200,
+    });
     const { traceFile, trace } = makeTmpTrace("conv-s4");
 
     const controller = new AbortController();
@@ -297,7 +326,14 @@ describe("T6 scenario 5: timeout", () => {
   it("JSONL has error records with error.type timeout", async () => {
     const reg = createRegistry([noopTool()]);
     const exec = createExecutor(reg);
-    const model = createStubModel([assistantResult(["never"], [], "success")], {
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["never"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
       delayMs: 200,
     });
     const { traceFile, trace } = makeTmpTrace("conv-s5");
@@ -335,8 +371,24 @@ describe("T6 criterion 5: byte-level consistency", () => {
   it("pure text: result identical with NoopTraceService vs undefined trace", async () => {
     const reg = createRegistry([noopTool()]);
     const exec = createExecutor(reg);
-    const m1 = createStubModel([assistantResult(["hi"], [], "success")]);
-    const m2 = createStubModel([assistantResult(["hi"], [], "success")]);
+    const m1 = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hi"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const m2 = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hi"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const base = { executor: exec, registry: reg, maxTurns: 5 };
 
     const { result: withoutTrace } = await run("hello", {
@@ -355,11 +407,18 @@ describe("T6 criterion 5: byte-level consistency", () => {
     const reg = createRegistry([echoTool()]);
     const exec = createExecutor(reg);
     const responses = [
-      assistantResult([], [{ id: "t1", name: "echo", input: { value: "p" } }]),
-      assistantResult(["done"], [], "success"),
+      assistantResult({
+        texts: [],
+        toolCalls: [{ id: "t1", name: "echo", input: { value: "p" } }],
+      }),
+      assistantResult({
+        texts: ["done"],
+        toolCalls: [],
+        supplierStop: "success",
+      }),
     ];
-    const m1 = createStubModel(responses);
-    const m2 = createStubModel(responses);
+    const m1 = createStubModel({ responses });
+    const m2 = createStubModel({ responses });
     const base = { executor: exec, registry: reg, maxTurns: 5 };
 
     const { result: withoutTrace } = await run("go", { ...base, adapter: m1 });
@@ -375,17 +434,21 @@ describe("T6 criterion 5: byte-level consistency", () => {
     const reg = createRegistry([echoTool()]);
     const exec = createExecutor(reg);
     const responses = [
-      assistantResult(
-        [],
-        [
+      assistantResult({
+        texts: [],
+        toolCalls: [
           { id: "a", name: "echo", input: { value: "1" } },
           { id: "b", name: "echo", input: { value: "2" } },
-        ]
-      ),
-      assistantResult(["done"], [], "success"),
+        ],
+      }),
+      assistantResult({
+        texts: ["done"],
+        toolCalls: [],
+        supplierStop: "success",
+      }),
     ];
-    const m1 = createStubModel(responses);
-    const m2 = createStubModel(responses);
+    const m1 = createStubModel({ responses });
+    const m2 = createStubModel({ responses });
     const base = { executor: exec, registry: reg, maxTurns: 5 };
 
     const { result: withoutTrace } = await run("go", { ...base, adapter: m1 });
@@ -402,7 +465,14 @@ describe("T6 criterion 5: byte-level consistency", () => {
     const exec = createExecutor(reg);
     const base = { executor: exec, registry: reg, maxTurns: 5 };
 
-    const m1 = createStubModel([assistantResult(["x"], [], "success")], {
+    const m1 = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["x"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
       delayMs: 200,
     });
     const c1 = new AbortController();
@@ -410,7 +480,14 @@ describe("T6 criterion 5: byte-level consistency", () => {
     c1.abort();
     const { result: withoutTrace } = await p1;
 
-    const m2 = createStubModel([assistantResult(["x"], [], "success")], {
+    const m2 = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["x"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
       delayMs: 200,
     });
     const c2 = new AbortController();
@@ -435,12 +512,26 @@ describe("T6 criterion 5: byte-level consistency", () => {
       modelTimeoutMs: 1,
     };
 
-    const m1 = createStubModel([assistantResult(["x"], [], "success")], {
+    const m1 = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["x"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
       delayMs: 200,
     });
     const { result: withoutTrace } = await run("x", { ...base, adapter: m1 });
 
-    const m2 = createStubModel([assistantResult(["x"], [], "success")], {
+    const m2 = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["x"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
       delayMs: 200,
     });
     const { result: withNoop } = await run("x", {
@@ -460,11 +551,23 @@ describe("T6 criterion 11: JSONL order, parent chain, real-time write", () => {
   it("multi-step run: llm -> tool(s) -> turn per step; turn precedes next llm", async () => {
     const reg = createRegistry([echoTool()]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult([], [{ id: "t1", name: "echo", input: { value: "1" } }]),
-      assistantResult([], [{ id: "t2", name: "echo", input: { value: "2" } }]),
-      assistantResult(["final"], [], "success"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "1" } }],
+        }),
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t2", name: "echo", input: { value: "2" } }],
+        }),
+        assistantResult({
+          texts: ["final"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const { traceFile, trace } = makeTmpTrace("conv-order");
 
     await run("go", {
@@ -517,10 +620,19 @@ describe("T6 criterion 11: JSONL order, parent chain, real-time write", () => {
   it("JSONL file is non-empty after run (appendFileSync real-time write)", async () => {
     const reg = createRegistry([echoTool()]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult([], [{ id: "t1", name: "echo", input: { value: "x" } }]),
-      assistantResult(["ok"], [], "success"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "x" } }],
+        }),
+        assistantResult({
+          texts: ["ok"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
     const { traceFile, trace } = makeTmpTrace("conv-realtime");
 
     await run("go", {
@@ -546,10 +658,19 @@ describe("T6 criterion 10: always-throw writer", () => {
 
     const reg = createRegistry([echoTool()]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult([], [{ id: "t1", name: "echo", input: { value: "p" } }]),
-      assistantResult(["done"], [], "success"),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "p" } }],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
 
     const throwingWriter = (): void => {
       throw new Error("disk full");
@@ -580,7 +701,15 @@ describe("T6 criterion 10: always-throw writer", () => {
 
     const reg = createRegistry([noopTool()]);
     const exec = createExecutor(reg);
-    const model = createStubModel([assistantResult(["hi"], [], "success")]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hi"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
 
     const trace = createJsonlTraceService({
       filePath: "/dev/null/does-not-matter",

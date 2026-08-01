@@ -56,7 +56,7 @@ export function createSessionHttpServer(
   const webRoot = opts.webRoot ?? resolveDefaultWebRoot();
 
   return http.createServer((req, res) => {
-    void handle(req, res, hub, webRoot);
+    void handle({ req, res, hub, webRoot });
   });
 }
 
@@ -89,12 +89,15 @@ export async function listenSessionServer(
   };
 }
 
-async function handle(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  hub: SessionHub,
-  webRoot: string
-): Promise<void> {
+interface HandleOpts {
+  readonly req: http.IncomingMessage;
+  readonly res: http.ServerResponse;
+  readonly hub: SessionHub;
+  readonly webRoot: string;
+}
+
+async function handle(opts: HandleOpts): Promise<void> {
+  const { req, res, hub, webRoot } = opts;
   try {
     const method = (req.method ?? "GET").toUpperCase();
     const url = new URL(
@@ -109,13 +112,21 @@ async function handle(
 
     if (method === "POST" && pathname === "/api/v1/sessions") {
       const createReq = parseCreateBody(await readJsonBody(req));
-      return sendJson(res, 201, await hub.createSession(createReq));
+      return sendJson({
+        res,
+        status: 201,
+        body: await hub.createSession(createReq),
+      });
     }
 
     // List sessions — must precede the /sessions/:id regex (which requires
     // at least one non-slash char after `/sessions/`, so exact match is safe).
     if (method === "GET" && pathname === "/api/v1/sessions") {
-      return sendJson(res, 200, { sessions: await hub.listSessions() });
+      return sendJson({
+        res,
+        status: 200,
+        body: { sessions: await hub.listSessions() },
+      });
     }
 
     const sessionMatch = pathname.match(
@@ -127,10 +138,10 @@ async function handle(
       if (await handleSessionRoute({ method, id, rest, req, res, hub })) return;
     }
 
-    if (method === "GET" && tryServeStatic(res, webRoot, pathname)) return;
-    sendNotFound(res, method, pathname);
+    if (method === "GET" && tryServeStatic({ res, webRoot, pathname })) return;
+    sendNotFound({ res, method, pathname });
   } catch (err) {
-    sendError(res, err);
+    sendError({ res, err });
   }
 }
 
@@ -140,7 +151,7 @@ function sendHealth(res: http.ServerResponse): void {
     service: "iknow-session-api",
     version: getVersion(),
   };
-  sendJson(res, 200, body);
+  sendJson({ res, status: 200, body });
 }
 
 function isSsePath(pathname: string): boolean {
@@ -148,22 +159,33 @@ function isSsePath(pathname: string): boolean {
 }
 
 function sendSseReserved(res: http.ServerResponse): void {
-  sendJson(res, 501, {
-    error: {
-      kind: "internal",
-      message: "SSE streaming is reserved; not implemented in v0",
-    },
-  } satisfies ApiErrorBody);
+  sendJson({
+    res,
+    status: 501,
+    body: {
+      error: {
+        kind: "internal",
+        message: "SSE streaming is reserved; not implemented in v0",
+      },
+    } satisfies ApiErrorBody,
+  });
 }
 
-function sendNotFound(
-  res: http.ServerResponse,
-  method: string,
-  pathname: string
-): void {
-  sendJson(res, 404, {
-    error: { kind: "not_found", message: `no route ${method} ${pathname}` },
-  } satisfies ApiErrorBody);
+interface SendNotFoundOpts {
+  readonly res: http.ServerResponse;
+  readonly method: string;
+  readonly pathname: string;
+}
+
+function sendNotFound(opts: SendNotFoundOpts): void {
+  const { res, method, pathname } = opts;
+  sendJson({
+    res,
+    status: 404,
+    body: {
+      error: { kind: "not_found", message: `no route ${method} ${pathname}` },
+    } satisfies ApiErrorBody,
+  });
 }
 
 /** Route context for /sessions/:id(...) dispatch (keeps param count ≤ 4). */
@@ -180,17 +202,28 @@ type RouteContext = {
 async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
   const { method, id, rest, req, res, hub } = ctx;
   if (method === "GET" && rest === "") {
-    sendJson(res, 200, await hub.getSession(id));
+    sendJson({ res, status: 200, body: await hub.getSession(id) });
     return true;
   }
   if (method === "POST" && rest === "/messages") {
     const text = extractTextField(await readJsonBody(req));
-    sendJson(res, 200, await hub.postMessage(id, text));
+    sendJson({
+      res,
+      status: 200,
+      body: await hub.postMessage({ conversationId: id, text }),
+    });
     return true;
   }
   if (method === "POST" && rest === "/reset") {
-    const newId = extractBoolField(await readJsonBody(req), "new_id");
-    sendJson(res, 200, await hub.resetSession(id, { new_id: newId }));
+    const newId = extractBoolField({
+      raw: await readJsonBody(req),
+      key: "new_id",
+    });
+    sendJson({
+      res,
+      status: 200,
+      body: await hub.resetSession(id, { new_id: newId }),
+    });
     return true;
   }
   return false;
@@ -238,7 +271,13 @@ function extractTextField(raw: unknown): string {
   return "text" in o ? String(o.text ?? "") : "";
 }
 
-function extractBoolField(raw: unknown, key: string): boolean {
+interface ExtractBoolFieldOpts {
+  readonly raw: unknown;
+  readonly key: string;
+}
+
+function extractBoolField(opts: ExtractBoolFieldOpts): boolean {
+  const { raw, key } = opts;
   if (!raw || typeof raw !== "object") return false;
   const o = raw as Record<string, unknown>;
   return Boolean(o[key]);
@@ -267,11 +306,14 @@ async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
   }
 }
 
-function tryServeStatic(
-  res: http.ServerResponse,
-  webRoot: string,
-  pathname: string
-): boolean {
+interface TryServeStaticOpts {
+  readonly res: http.ServerResponse;
+  readonly webRoot: string;
+  readonly pathname: string;
+}
+
+function tryServeStatic(opts: TryServeStaticOpts): boolean {
+  const { res, webRoot, pathname } = opts;
   // Never treat /api as static (caller should only invoke for non-API GETs,
   // but double-guard path traversal + SPA scope).
   if (pathname === "/api" || pathname.startsWith("/api/")) {
@@ -286,13 +328,17 @@ function tryServeStatic(
   const rootAbs = path.resolve(webRoot);
   const resolved = path.resolve(webRoot, "." + rel);
   if (!resolved.startsWith(rootAbs + path.sep) && resolved !== rootAbs) {
-    sendJson(res, 403, {
-      error: { kind: "internal", message: "path not allowed" },
-    } satisfies ApiErrorBody);
+    sendJson({
+      res,
+      status: 403,
+      body: {
+        error: { kind: "internal", message: "path not allowed" },
+      } satisfies ApiErrorBody,
+    });
     return true;
   }
   if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
-    pipeFile(res, resolved);
+    pipeFile({ res, filePath: resolved });
     return true;
   }
 
@@ -303,13 +349,19 @@ function tryServeStatic(
     fs.existsSync(indexPath) &&
     fs.statSync(indexPath).isFile()
   ) {
-    pipeFile(res, indexPath);
+    pipeFile({ res, filePath: indexPath });
     return true;
   }
   return false;
 }
 
-function pipeFile(res: http.ServerResponse, filePath: string): void {
+interface PipeFileOpts {
+  readonly res: http.ServerResponse;
+  readonly filePath: string;
+}
+
+function pipeFile(opts: PipeFileOpts): void {
+  const { res, filePath } = opts;
   const ext = path.extname(filePath).toLowerCase();
   const type = MIME[ext] ?? "application/octet-stream";
   res.writeHead(200, {
@@ -319,11 +371,14 @@ function pipeFile(res: http.ServerResponse, filePath: string): void {
   fs.createReadStream(filePath).pipe(res);
 }
 
-function sendJson(
-  res: http.ServerResponse,
-  status: number,
-  body: unknown
-): void {
+interface SendJsonOpts {
+  readonly res: http.ServerResponse;
+  readonly status: number;
+  readonly body: unknown;
+}
+
+function sendJson(opts: SendJsonOpts): void {
+  const { res, status, body } = opts;
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
@@ -352,33 +407,51 @@ function isSessionStoreError(err: unknown): err is SessionStoreError {
  * Precedence: SessionStoreError → typed store error; ValidationError → 400
  * validation; IknowError NOT_FOUND → 404 not_found; everything else → 500.
  */
-function sendError(res: http.ServerResponse, err: unknown): void {
+interface SendErrorOpts {
+  readonly res: http.ServerResponse;
+  readonly err: unknown;
+}
+
+function sendError(opts: SendErrorOpts): void {
+  const { res, err } = opts;
   if (isSessionStoreError(err)) {
     const { status, body } = mapStoreError(err);
-    sendJson(res, status, body);
+    sendJson({ res, status, body });
     return;
   }
   if (err instanceof ValidationError) {
     const field = err.details?.["field"];
-    sendJson(res, 400, {
-      error: {
-        kind: "validation",
-        message: err.message,
-        field: typeof field === "string" ? field : undefined,
-      },
-    } satisfies ApiErrorBody);
+    sendJson({
+      res,
+      status: 400,
+      body: {
+        error: {
+          kind: "validation",
+          message: err.message,
+          field: typeof field === "string" ? field : undefined,
+        },
+      } satisfies ApiErrorBody,
+    });
     return;
   }
   if (isIknowError(err) && err.code === "NOT_FOUND") {
-    sendJson(res, 404, {
-      error: { kind: "not_found", message: err.message },
-    } satisfies ApiErrorBody);
+    sendJson({
+      res,
+      status: 404,
+      body: {
+        error: { kind: "not_found", message: err.message },
+      } satisfies ApiErrorBody,
+    });
     return;
   }
   // 500 fallback: raw err.message may leak fs paths / library internals, so
   // only a fixed message goes on the wire; the real error stays server-side.
   console.error("[session-api] internal error:", err);
-  sendJson(res, 500, {
-    error: { kind: "internal", message: "internal server error" },
-  } satisfies ApiErrorBody);
+  sendJson({
+    res,
+    status: 500,
+    body: {
+      error: { kind: "internal", message: "internal server error" },
+    } satisfies ApiErrorBody,
+  });
 }

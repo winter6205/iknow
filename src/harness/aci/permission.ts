@@ -24,7 +24,7 @@ import type {
  * 工厂返回 Object.freeze，与 harness 既有不可变风格一致。
  */
 export function createPermissionPolicy(
-  opts?: Partial<AciPermissionPolicy>,
+  opts?: Partial<AciPermissionPolicy>
 ): AciPermissionPolicy {
   return Object.freeze({
     defaultRule: opts?.defaultRule ?? "ask",
@@ -55,7 +55,7 @@ const ALLOWED_COMMAND_TOKENS: ReadonlySet<string> = Object.freeze(
     "dir", // Windows 友好
     "type", // Windows 友好
     "where", // Windows 友好
-  ]),
+  ])
 );
 
 /**
@@ -91,7 +91,7 @@ function firstToken(command: string): string {
   // 剥掉路径前缀：basename 等价。
   const lastSlash = Math.max(
     firstWord.lastIndexOf("/"),
-    firstWord.lastIndexOf("\\"),
+    firstWord.lastIndexOf("\\")
   );
   const basename = lastSlash >= 0 ? firstWord.slice(lastSlash + 1) : firstWord;
   return basename.toLowerCase();
@@ -188,11 +188,12 @@ export function isDangerousCommand(command: string): boolean {
  *
  * 未知工具（catalog 查不到）由 executor 层处理，不在这里。
  */
-export function checkPermission(
-  def: AciToolDef,
-  input: unknown,
-  policy: AciPermissionPolicy,
-): PermissionOutcome {
+export function checkPermission(opts: {
+  def: AciToolDef;
+  input: unknown;
+  policy: AciPermissionPolicy;
+}): PermissionOutcome {
+  const { def, input, policy } = opts;
   // 层 1：byName always_deny 短路（最高优先级，可关闭工具）
   const byNameRule: PermissionRule | undefined = policy.byName?.[def.name];
   if (byNameRule === "always_deny") {

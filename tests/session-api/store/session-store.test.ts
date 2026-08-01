@@ -15,18 +15,21 @@ import type { SessionStoreError } from "../../../src/session-api/store/index.ts"
 let store: SessionStore;
 let baseDir: string;
 
-const sampleFile = (
-  id: string,
-  overrides: Partial<SessionFileV1> = {}
-): SessionFileV1 => ({
-  schemaVersion: 1,
-  conversation_id: id,
-  messages: [],
-  jsonMode: false,
-  turnCount: 0,
-  updatedAt: new Date().toISOString(),
-  ...overrides,
-});
+const sampleFile = (opts: {
+  readonly id: string;
+  readonly overrides?: Partial<SessionFileV1>;
+}): SessionFileV1 => {
+  const { id, overrides = {} } = opts;
+  return {
+    schemaVersion: 1,
+    conversation_id: id,
+    messages: [],
+    jsonMode: false,
+    turnCount: 0,
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+};
 
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-store-"));
@@ -39,8 +42,8 @@ afterAll(async () => {
 
 describe("SessionStore.load", () => {
   it("returns the saved file when valid", async () => {
-    const file = sampleFile("conv-load-ok");
-    await store.save(file.conversation_id, file);
+    const file = sampleFile({ id: "conv-load-ok" });
+    await store.save({ id: file.conversation_id, file });
     const loaded = await store.load("conv-load-ok");
     assert.equal(loaded.conversation_id, "conv-load-ok");
     assert.equal(loaded.schemaVersion, 1);
@@ -125,15 +128,15 @@ describe("SessionStore.load", () => {
 
 describe("SessionStore.save", () => {
   it("writes the file to data/sessions/<id>.json", async () => {
-    const file = sampleFile("conv-save-ok");
-    await store.save("conv-save-ok", file);
+    const file = sampleFile({ id: "conv-save-ok" });
+    await store.save({ id: "conv-save-ok", file });
     const s = await stat(join(baseDir, "sessions", "conv-save-ok.json"));
     assert.ok(s.isFile());
   });
 
   it("atomic write leaves no .tmp residue on success", async () => {
-    const file = sampleFile("conv-atomic");
-    await store.save("conv-atomic", file);
+    const file = sampleFile({ id: "conv-atomic" });
+    await store.save({ id: "conv-atomic", file });
     // The .tmp file must have been renamed, not left behind.
     await assert.rejects(
       stat(join(baseDir, "sessions", "conv-atomic.json.tmp"))
@@ -141,14 +144,14 @@ describe("SessionStore.save", () => {
   });
 
   it("overwrites an existing file", async () => {
-    await store.save(
-      "conv-overwrite",
-      sampleFile("conv-overwrite", { turnCount: 1 })
-    );
-    await store.save(
-      "conv-overwrite",
-      sampleFile("conv-overwrite", { turnCount: 5 })
-    );
+    await store.save({
+      id: "conv-overwrite",
+      file: sampleFile({ id: "conv-overwrite", overrides: { turnCount: 1 } }),
+    });
+    await store.save({
+      id: "conv-overwrite",
+      file: sampleFile({ id: "conv-overwrite", overrides: { turnCount: 5 } }),
+    });
     const loaded = await store.load("conv-overwrite");
     assert.equal(loaded.turnCount, 5);
   });
@@ -169,22 +172,25 @@ describe("SessionStore.list", () => {
     const t3 = "2026-03-01T00:00:00.000Z";
     // Each session needs assistant text or list() skips it (issue #96).
     const withReply = (id: string, updatedAt: string) =>
-      sampleFile(id, {
-        updatedAt,
-        messages: [
-          {
-            role: "user" as const,
-            content: [{ type: "text" as const, text: "q" }],
-          },
-          {
-            role: "assistant" as const,
-            content: [{ type: "text" as const, text: "reply" }],
-          },
-        ],
+      sampleFile({
+        id,
+        overrides: {
+          updatedAt,
+          messages: [
+            {
+              role: "user" as const,
+              content: [{ type: "text" as const, text: "q" }],
+            },
+            {
+              role: "assistant" as const,
+              content: [{ type: "text" as const, text: "reply" }],
+            },
+          ],
+        },
       });
-    await store.save("list-a", withReply("list-a", t1));
-    await store.save("list-b", withReply("list-b", t3));
-    await store.save("list-c", withReply("list-c", t2));
+    await store.save({ id: "list-a", file: withReply("list-a", t1) });
+    await store.save({ id: "list-b", file: withReply("list-b", t3) });
+    await store.save({ id: "list-c", file: withReply("list-c", t2) });
 
     const entries = await store.list();
     // Filter to just our three to insulate from other tests.
@@ -204,42 +210,56 @@ describe("SessionStore.list", () => {
 
   it("skips sessions with no assistant text (issue #96)", async () => {
     // Empty messages array → bootstrap ghost, nothing to show in the sidebar.
-    await store.save("list-empty", sampleFile("list-empty"));
+    await store.save({
+      id: "list-empty",
+      file: sampleFile({ id: "list-empty" }),
+    });
     // Assistant message whose text is only whitespace → also treated as empty.
-    await store.save(
-      "list-blank",
-      sampleFile("list-blank", {
-        messages: [
-          {
-            role: "user" as const,
-            content: [{ type: "text" as const, text: "q" }],
-          },
-          {
-            role: "assistant" as const,
-            content: [{ type: "text" as const, text: "   " }],
-          },
-        ],
-      })
-    );
+    await store.save({
+      id: "list-blank",
+      file: sampleFile({
+        id: "list-blank",
+        overrides: {
+          messages: [
+            {
+              role: "user" as const,
+              content: [{ type: "text" as const, text: "q" }],
+            },
+            {
+              role: "assistant" as const,
+              content: [{ type: "text" as const, text: "   " }],
+            },
+          ],
+        },
+      }),
+    });
     // Assistant message with only a tool_use block (no text) → interrupted
     // mid-tool-use, nothing to show → also treated as empty.
-    await store.save(
-      "list-toolonly",
-      sampleFile("list-toolonly", {
-        messages: [
-          {
-            role: "user" as const,
-            content: [{ type: "text" as const, text: "q" }],
-          },
-          {
-            role: "assistant" as const,
-            content: [
-              { type: "tool_use" as const, id: "t1", name: "noop", input: {} },
-            ],
-          },
-        ],
-      })
-    );
+    await store.save({
+      id: "list-toolonly",
+      file: sampleFile({
+        id: "list-toolonly",
+        overrides: {
+          messages: [
+            {
+              role: "user" as const,
+              content: [{ type: "text" as const, text: "q" }],
+            },
+            {
+              role: "assistant" as const,
+              content: [
+                {
+                  type: "tool_use" as const,
+                  id: "t1",
+                  name: "noop",
+                  input: {},
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    });
     const entries = await store.list();
     assert.ok(
       !entries.some((e) => e.conversation_id === "list-empty"),
@@ -277,7 +297,10 @@ describe("SessionStore.list", () => {
         ],
       },
     ];
-    await store.save("list-text", sampleFile("list-text", { messages }));
+    await store.save({
+      id: "list-text",
+      file: sampleFile({ id: "list-text", overrides: { messages } }),
+    });
     const entries = await store.list();
     const e = entries.find((x) => x.conversation_id === "list-text");
     assert.equal(e?.lastFinalText, "second answer continued");
@@ -297,7 +320,7 @@ describe("SessionStore.list", () => {
 
 describe("SessionStore.delete", () => {
   it("removes the file and then load() throws not_found", async () => {
-    await store.save("conv-del", sampleFile("conv-del"));
+    await store.save({ id: "conv-del", file: sampleFile({ id: "conv-del" }) });
     await store.delete("conv-del");
     try {
       await store.load("conv-del");
@@ -350,7 +373,7 @@ describe("SessionStoreError kinds (full coverage)", () => {
     await writeFile(blockerPath, "x", "utf8");
     const bad = new SessionStore(blockerPath);
     try {
-      await bad.save("x", sampleFile("x"));
+      await bad.save({ id: "x", file: sampleFile({ id: "x" }) });
       assert.fail("should have thrown");
     } catch (err) {
       const e = err as SessionStoreError;

@@ -124,13 +124,13 @@ function freezeMessage(msg: AnthropicNativeMessage): AnthropicNativeMessage {
   });
 }
 
-function appendMessage(
-  state: LoopState,
-  msg: AnthropicNativeMessage
-): LoopState {
+function appendMessage(opts: {
+  readonly state: LoopState;
+  readonly msg: AnthropicNativeMessage;
+}): LoopState {
   return {
-    messages: Object.freeze([...state.messages, freezeMessage(msg)]),
-    turnCount: state.turnCount,
+    messages: Object.freeze([...opts.state.messages, freezeMessage(opts.msg)]),
+    turnCount: opts.state.turnCount,
   };
 }
 
@@ -177,12 +177,12 @@ export interface RaceModelOpts {
 }
 
 /** 023: settle 共址于 helper，统一 single-wins 与 cleanup。 */
-function createRaceOutcome(
-  opts: RaceModelOpts,
-  child: AbortController,
-  compositeSignal: AbortSignal,
-  setChildAbort: (abort: () => void) => void
-): Promise<RaceModelOutcome> {
+function createRaceOutcome(opts: {
+  readonly raceOpts: RaceModelOpts;
+  readonly child: AbortController;
+  readonly compositeSignal: AbortSignal;
+  readonly setChildAbort: (abort: () => void) => void;
+}): Promise<RaceModelOutcome> {
   return new Promise<RaceModelOutcome>((resolve, reject) => {
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -195,23 +195,30 @@ function createRaceOutcome(
       if (settled) return; // post-settle SDK error / abort 均丢弃。
       settled = true;
       if (timer !== undefined) clearTimeout(timer);
-      if (opts.signal && abortListener)
-        opts.signal.removeEventListener("abort", abortListener);
-      child.abort();
+      if (opts.raceOpts.signal && abortListener)
+        opts.raceOpts.signal.removeEventListener("abort", abortListener);
+      opts.child.abort();
       if (err !== undefined) reject(err);
       else resolve(Object.freeze({ result, source }));
     };
-    setChildAbort(() => settle("hostCancel"));
-    if (opts.timeoutMs > 0)
+    opts.setChildAbort(() => settle("hostCancel"));
+    if (opts.raceOpts.timeoutMs > 0)
       timer = setTimeout(() => {
-        child.abort(); // L1': 必须先取消 HTTP，再记录 timer 胜出。
+        opts.child.abort(); // L1': 必须先取消 HTTP，再记录 timer 胜出。
         settle("timerTimeout");
-      }, opts.timeoutMs);
+      }, opts.raceOpts.timeoutMs);
     abortListener = (): void => settle("callerAbort");
-    if (opts.signal?.aborted) abortListener();
-    else opts.signal?.addEventListener("abort", abortListener, { once: true });
-    opts.adapter
-      .step(opts.state, { tools: opts.deps.registry.list() }, compositeSignal)
+    if (opts.raceOpts.signal?.aborted) abortListener();
+    else
+      opts.raceOpts.signal?.addEventListener("abort", abortListener, {
+        once: true,
+      });
+    opts.raceOpts.adapter
+      .step(
+        opts.raceOpts.state,
+        { tools: opts.raceOpts.deps.registry.list() },
+        opts.compositeSignal
+      )
       .then(
         (result) => settle("adapter", result),
         (err) => settle("adapter", undefined, err)
@@ -226,12 +233,12 @@ export function raceModel(opts: RaceModelOpts): RaceModelHandle {
     opts.signal ? [opts.signal, child.signal] : [child.signal]
   );
   let childAbort = (): void => undefined;
-  const outcome = createRaceOutcome(
-    opts,
+  const outcome = createRaceOutcome({
+    raceOpts: opts,
     child,
-    childSignal,
-    (abort) => (childAbort = abort)
-  );
+    compositeSignal: childSignal,
+    setChildAbort: (abort) => (childAbort = abort),
+  });
   return Object.freeze({
     outcome,
     childSignal,
@@ -266,55 +273,67 @@ function mkTurn(input: {
 }
 
 /** 023: 临时把 source 映射回 017 双布尔；#98 enum 落地后移除。 */
-function modelStop(
-  state: LoopState,
-  started: number,
-  reason: "cancelled" | "timeout" | "protocolError"
-): { kind: "stop"; transition: Transition; turn: TurnTrace } {
+function modelStop(opts: {
+  readonly state: LoopState;
+  readonly started: number;
+  readonly reason: "cancelled" | "timeout" | "protocolError";
+}): { kind: "stop"; transition: Transition; turn: TurnTrace } {
   return {
     kind: "stop",
-    transition: { kind: "stop", reason, finalState: state },
+    transition: { kind: "stop", reason: opts.reason, finalState: opts.state },
     turn: mkTurn({
-      turnIndex: state.turnCount,
+      turnIndex: opts.state.turnCount,
       supplierStop: "other",
       toolCalls: [],
-      durationMs: performance.now() - started,
-      timeoutHit: reason === "timeout",
-      signalAborted: reason === "cancelled",
+      durationMs: performance.now() - opts.started,
+      timeoutHit: opts.reason === "timeout",
+      signalAborted: opts.reason === "cancelled",
     }),
   };
 }
 
 /** 023: await 结构化 race outcome，并保持 SDK-first 错误 catch 契约。 */
-async function runModelPhase(
-  state: LoopState,
-  deps: LoopEngineDeps,
-  signal: AbortSignal | undefined,
-  started: number,
-  modelTimeoutMs: number
-): Promise<
+async function runModelPhase(opts: {
+  readonly state: LoopState;
+  readonly deps: LoopEngineDeps;
+  readonly signal: AbortSignal | undefined;
+  readonly started: number;
+  readonly modelTimeoutMs: number;
+}): Promise<
   | { kind: "ok"; result: AssistantTurnResult }
   | { kind: "stop"; transition: Transition; turn: TurnTrace }
 > {
   try {
     const handle = raceModel({
-      adapter: deps.adapter,
-      state,
-      deps,
-      signal,
-      timeoutMs: modelTimeoutMs,
+      adapter: opts.deps.adapter,
+      state: opts.state,
+      deps: opts.deps,
+      signal: opts.signal,
+      timeoutMs: opts.modelTimeoutMs,
     });
     const outcome = await handle.outcome;
     if (outcome.source === "adapter") {
       return { kind: "ok", result: outcome.result! };
     }
     if (outcome.source === "callerAbort") {
-      return modelStop(state, started, "cancelled");
+      return modelStop({
+        state: opts.state,
+        started: opts.started,
+        reason: "cancelled",
+      });
     }
-    return modelStop(state, started, "timeout");
+    return modelStop({
+      state: opts.state,
+      started: opts.started,
+      reason: "timeout",
+    });
   } catch (err) {
     if (err instanceof ProtocolError)
-      return modelStop(state, started, "protocolError");
+      return modelStop({
+        state: opts.state,
+        started: opts.started,
+        reason: "protocolError",
+      });
     throw err;
   }
 }
@@ -325,13 +344,13 @@ async function runModelPhase(
  * 一次构造);tool_not_found 允许自报 toolName,其他 kind 兜底空串:
  * 该空串分支对良构结果不可达,但保留 total 以满足类型严格性。
  */
-function toTraceToolCalls(
-  results: ReadonlyArray<ToolExecutionResult>,
-  nameById: ReadonlyMap<string, string>
-): TurnTrace["toolCalls"] {
-  return results.map((r) => {
+function toTraceToolCalls(opts: {
+  readonly results: ReadonlyArray<ToolExecutionResult>;
+  readonly nameById: ReadonlyMap<string, string>;
+}): TurnTrace["toolCalls"] {
+  return opts.results.map((r) => {
     const toolName =
-      nameById.get(r.toolUseId) ??
+      opts.nameById.get(r.toolUseId) ??
       (r.kind === "tool_not_found" ? r.toolName : "");
     const message =
       r.kind === "validation_failed" || r.kind === "execution_failed"
@@ -352,60 +371,66 @@ function toTraceToolCalls(
  * 主路径上的判定顺序一致),signal 已 abort 即视为整体取消,即便
  * results 中同时存在 timeout 标签。
  */
-function computeToolStopFlags(
-  results: ReadonlyArray<ToolExecutionResult>,
-  signal: AbortSignal | undefined
-): { timedOut: boolean; cancelled: boolean } {
-  const timedOut = results.some(
+function computeToolStopFlags(opts: {
+  readonly results: ReadonlyArray<ToolExecutionResult>;
+  readonly signal: AbortSignal | undefined;
+}): { timedOut: boolean; cancelled: boolean } {
+  const timedOut = opts.results.some(
     (r) => r.kind === "execution_failed" && r.message === "timeout"
   );
   const cancelled =
-    signal?.aborted === true ||
-    results.some(
+    opts.signal?.aborted === true ||
+    opts.results.some(
       (r) => r.kind === "execution_failed" && r.message === "cancelled"
     );
   return { timedOut, cancelled };
 }
 
 /** 017 T5:工具阶段独立收敛,保持整回合追加与停止优先级不变。 */
-async function runToolPhase(
-  afterAssistantState: LoopState,
-  entryTurnCount: number,
-  turnResult: AssistantTurnResult,
-  deps: LoopEngineDeps,
-  signal: AbortSignal | undefined,
-  started: number
-): Promise<{
+async function runToolPhase(opts: {
+  readonly afterAssistantState: LoopState;
+  readonly entryTurnCount: number;
+  readonly turnResult: AssistantTurnResult;
+  readonly deps: LoopEngineDeps;
+  readonly signal: AbortSignal | undefined;
+  readonly started: number;
+}): Promise<{
   transition: Transition;
   turn: TurnTrace;
   toolResults: ReadonlyArray<ToolExecutionResult>;
   toolCallViews: ReadonlyArray<{ id: string; name: string; input: unknown }>;
 }> {
-  const toolCallViews = turnResult.projection.toolCalls.map((c) => ({
+  const toolCallViews = opts.turnResult.projection.toolCalls.map((c) => ({
     id: c.id,
     name: c.name,
     input: c.input,
   }));
   const toolTimeout =
-    deps.toolTimeoutMs ?? deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const results = await deps.executor.executeAll(
+    opts.deps.toolTimeoutMs ?? opts.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const results = await opts.deps.executor.executeAll(
     toolCallViews,
-    signal,
+    opts.signal,
     toolTimeout
   );
-  const blocks = deps.adapter.encodeToolResults(results);
+  const blocks = opts.deps.adapter.encodeToolResults(results);
   const toolResultMsg: AnthropicNativeMessage = {
     role: "user",
     content: blocks,
   };
-  const finalState = appendMessage(afterAssistantState, toolResultMsg);
-  const durationMs = performance.now() - started;
+  const finalState = appendMessage({
+    state: opts.afterAssistantState,
+    msg: toolResultMsg,
+  });
+  const durationMs = performance.now() - opts.started;
   const nameById = new Map(toolCallViews.map((c) => [c.id, c.name]));
-  const toolCalls = toTraceToolCalls(results, nameById);
-  const { timedOut, cancelled } = computeToolStopFlags(results, signal);
+  const toolCalls = toTraceToolCalls({ results, nameById });
+  const { timedOut, cancelled } = computeToolStopFlags({
+    results,
+    signal: opts.signal,
+  });
   const turn = mkTurn({
-    turnIndex: entryTurnCount,
-    supplierStop: turnResult.supplierStop,
+    turnIndex: opts.entryTurnCount,
+    supplierStop: opts.turnResult.supplierStop,
     toolCalls,
     durationMs,
     timeoutHit: timedOut,
@@ -447,14 +472,18 @@ async function runToolPhase(
  * 内部 Transition 形状与 016 冻结契约一致(judgement union,reason 字段
  * 类型随 StopReason 自动扩展)。
  */
-async function stepWithTrace(
-  state: LoopState,
-  deps: LoopEngineDeps,
-  signal?: AbortSignal
-): Promise<{ transition: Transition; turn: TurnTrace | null }> {
-  if (state.turnCount >= deps.maxTurns) {
+async function stepWithTrace(opts: {
+  readonly state: LoopState;
+  readonly deps: LoopEngineDeps;
+  readonly signal?: AbortSignal;
+}): Promise<{ transition: Transition; turn: TurnTrace | null }> {
+  if (opts.state.turnCount >= opts.deps.maxTurns) {
     return {
-      transition: { kind: "stop", reason: "maxTurns", finalState: state },
+      transition: {
+        kind: "stop",
+        reason: "maxTurns",
+        finalState: opts.state,
+      },
       turn: null,
     };
   }
@@ -462,28 +491,28 @@ async function stepWithTrace(
   const started = performance.now();
   const turnStartedAt = new Date().toISOString();
   const modelTimeout =
-    deps.modelTimeoutMs ?? deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    opts.deps.modelTimeoutMs ?? opts.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   const llmStartedAt = new Date().toISOString();
   const llmStartMono = performance.now();
 
-  const modelPhase = await runModelPhase(
-    state,
-    deps,
-    signal,
+  const modelPhase = await runModelPhase({
+    state: opts.state,
+    deps: opts.deps,
+    signal: opts.signal,
     started,
-    modelTimeout
-  );
+    modelTimeoutMs: modelTimeout,
+  });
 
   const llmEndedAt = new Date().toISOString();
   const llmDurationMs = performance.now() - llmStartMono;
   let llmCallId: string | undefined;
-  if (deps.trace) {
+  if (opts.deps.trace) {
     if (modelPhase.kind === "stop") {
       const t = modelPhase.transition;
       const reason = t.kind === "stop" ? t.reason : "unknown";
       llmCallId = await safeTrace(() =>
-        deps.trace!.recordLlmCall({
+        opts.deps.trace!.recordLlmCall({
           startedAt: llmStartedAt,
           endedAt: llmEndedAt,
           durationMs: llmDurationMs,
@@ -495,7 +524,7 @@ async function stepWithTrace(
       );
     } else {
       llmCallId = await safeTrace(() =>
-        deps.trace!.recordLlmCall({
+        opts.deps.trace!.recordLlmCall({
           startedAt: llmStartedAt,
           endedAt: llmEndedAt,
           durationMs: llmDurationMs,
@@ -509,12 +538,12 @@ async function stepWithTrace(
   }
 
   if (modelPhase.kind === "stop") {
-    if (deps.trace) {
+    if (opts.deps.trace) {
       const t2 = modelPhase.transition;
       const reason = t2.kind === "stop" ? t2.reason : "unknown";
       await safeTrace(() =>
-        deps.trace!.recordTurn({
-          turnIndex: state.turnCount,
+        opts.deps.trace!.recordTurn({
+          turnIndex: opts.state.turnCount,
           startedAt: turnStartedAt,
           endedAt: new Date().toISOString(),
           durationMs: performance.now() - started,
@@ -535,10 +564,10 @@ async function stepWithTrace(
     turnResult.isEmptyFinalResponse
   ) {
     const durationMs = performance.now() - started;
-    if (deps.trace) {
+    if (opts.deps.trace) {
       await safeTrace(() =>
-        deps.trace!.recordTurn({
-          turnIndex: state.turnCount,
+        opts.deps.trace!.recordTurn({
+          turnIndex: opts.state.turnCount,
           startedAt: turnStartedAt,
           endedAt: new Date().toISOString(),
           durationMs,
@@ -557,10 +586,10 @@ async function stepWithTrace(
       transition: {
         kind: "stop",
         reason: "emptyFinalResponse",
-        finalState: state,
+        finalState: opts.state,
       },
       turn: mkTurn({
-        turnIndex: state.turnCount,
+        turnIndex: opts.state.turnCount,
         supplierStop: turnResult.supplierStop,
         toolCalls: [],
         durationMs,
@@ -570,20 +599,23 @@ async function stepWithTrace(
     };
   }
 
-  const nextState = appendMessage(state, turnResult.nativeMessage);
+  const nextState = appendMessage({
+    state: opts.state,
+    msg: turnResult.nativeMessage,
+  });
   const afterAssistantState = {
     messages: nextState.messages,
-    turnCount: state.turnCount + 1,
+    turnCount: opts.state.turnCount + 1,
   };
 
   if (turnResult.projection.toolCalls.length === 0) {
     const durationMs = performance.now() - started;
     const reason =
       turnResult.supplierStop === "success" ? "completed" : "nonSuccessStop";
-    if (deps.trace) {
+    if (opts.deps.trace) {
       await safeTrace(() =>
-        deps.trace!.recordTurn({
-          turnIndex: state.turnCount,
+        opts.deps.trace!.recordTurn({
+          turnIndex: opts.state.turnCount,
           startedAt: turnStartedAt,
           endedAt: new Date().toISOString(),
           durationMs,
@@ -601,7 +633,7 @@ async function stepWithTrace(
     return {
       transition: { kind: "stop", reason, finalState: afterAssistantState },
       turn: mkTurn({
-        turnIndex: state.turnCount,
+        turnIndex: opts.state.turnCount,
         supplierStop: turnResult.supplierStop,
         toolCalls: [],
         durationMs,
@@ -614,19 +646,19 @@ async function stepWithTrace(
   const toolStartedAt = new Date().toISOString();
   const toolStartMono = performance.now();
 
-  const toolPhase = await runToolPhase(
+  const toolPhase = await runToolPhase({
     afterAssistantState,
-    state.turnCount,
+    entryTurnCount: opts.state.turnCount,
     turnResult,
-    deps,
-    signal,
-    started
-  );
+    deps: opts.deps,
+    signal: opts.signal,
+    started,
+  });
 
   const toolEndedAt = new Date().toISOString();
   const toolDurationMs = performance.now() - toolStartMono;
   const toolCallIds: string[] = [];
-  if (deps.trace) {
+  if (opts.deps.trace) {
     const nameById = new Map(
       toolPhase.toolCallViews.map((c) => [c.id, c.name])
     );
@@ -635,7 +667,7 @@ async function stepWithTrace(
         nameById.get(result.toolUseId) ??
         (result.kind === "tool_not_found" ? result.toolName : "");
       const toolCallId = await safeTrace(() =>
-        deps.trace!.recordToolCall({
+        opts.deps.trace!.recordToolCall({
           parentLlmCallId: llmCallId,
           toolName,
           toolKind: result.kind,
@@ -662,13 +694,13 @@ async function stepWithTrace(
     }
   }
 
-  if (deps.trace) {
+  if (opts.deps.trace) {
     const toolTransition = toolPhase.transition;
     const isStop = toolTransition.kind === "stop";
     const decision = toDecision(isStop ? toolTransition.reason : "completed");
     await safeTrace(() =>
-      deps.trace!.recordTurn({
-        turnIndex: state.turnCount,
+      opts.deps.trace!.recordTurn({
+        turnIndex: opts.state.turnCount,
         startedAt: turnStartedAt,
         endedAt: new Date().toISOString(),
         durationMs: performance.now() - started,
@@ -715,7 +747,7 @@ export async function step(
   deps: LoopEngineDeps,
   signal?: AbortSignal
 ): Promise<Transition> {
-  const { transition } = await stepWithTrace(state, deps, signal);
+  const { transition } = await stepWithTrace({ state, deps, signal });
   return transition;
 }
 
@@ -743,7 +775,7 @@ export async function run(
   };
   let turns: ReadonlyArray<TurnTrace> = [];
   while (true) {
-    const { transition, turn } = await stepWithTrace(state, deps, signal);
+    const { transition, turn } = await stepWithTrace({ state, deps, signal });
     if (turn !== null) {
       // immutable append;禁止 push / 原地修改。
       turns = [...turns, turn];

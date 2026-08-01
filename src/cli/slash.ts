@@ -99,16 +99,19 @@ export function parseChatLine(line: string): ParsedChatLine {
   return { kind: "slash", command, args };
 }
 
+export interface ApplySlashCommandOpts {
+  readonly command: string;
+  readonly args: string[];
+  readonly ctx: SlashContext;
+}
+
 /**
  * Apply a slash command. Mutates `ctx.state` for `/json`, `/role`, `/reset`.
  *
  * No `mode_change` variant — CLI no longer has an agent-mode concept (Q3).
  */
-export function applySlashCommand(
-  command: string,
-  args: string[],
-  ctx: SlashContext
-): SlashEffect {
+export function applySlashCommand(opts: ApplySlashCommandOpts): SlashEffect {
+  const { command, args, ctx } = opts;
   switch (command) {
     case "quit":
     case "exit":
@@ -122,10 +125,10 @@ export function applySlashCommand(
       return { type: "info", text: formatStatus(ctx) };
 
     case "json":
-      return applyJson(args, ctx);
+      return applyJson({ args, ctx });
 
     case "role":
-      return applyRole(args, ctx);
+      return applyRole({ args, ctx });
 
     case "reset":
       // Mutate in place so agents holding this state reference see the cleared
@@ -156,7 +159,11 @@ function formatStatus(ctx: SlashContext): string {
   ].join("  ");
 }
 
-function applyJson(args: string[], ctx: SlashContext): SlashEffect {
+function applyJson(opts: {
+  readonly args: string[];
+  readonly ctx: SlashContext;
+}): SlashEffect {
+  const { args, ctx } = opts;
   const raw = (args[0] ?? "").toLowerCase();
   if (raw !== "on" && raw !== "off") {
     return {
@@ -171,7 +178,11 @@ function applyJson(args: string[], ctx: SlashContext): SlashEffect {
   };
 }
 
-function applyRole(args: string[], ctx: SlashContext): SlashEffect {
+function applyRole(opts: {
+  readonly args: string[];
+  readonly ctx: SlashContext;
+}): SlashEffect {
+  const { args, ctx } = opts;
   const raw = args[0];
   if (raw === undefined || raw === "") {
     return {

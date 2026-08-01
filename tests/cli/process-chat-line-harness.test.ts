@@ -24,13 +24,15 @@ import {
 
 describe("processChatLine harness path", () => {
   it("two-turn pipe continuation: same ctx strictly grows messages; priorMessages really 续传", async () => {
-    const ctx = makeCtx([
-      assistantResult(["reply-1"], [], "success"),
-      assistantResult(["reply-2"], [], "success"),
-    ]);
+    const ctx = makeCtx({
+      responses: [
+        assistantResult({ texts: ["reply-1"] }),
+        assistantResult({ texts: ["reply-2"] }),
+      ],
+    });
 
     // Turn 1: empty history → produces [user, assistant] = 2 messages.
-    const r1 = await processChatLine("question one", ctx);
+    const r1 = await processChatLine({ line: "question one", ctx });
     assert.equal(r1.quit, false);
     assert.equal(r1.ranQuery, true);
     assert.equal(ctx.state.messages.length, 2);
@@ -44,7 +46,7 @@ describe("processChatLine harness path", () => {
     const beforeTurn2 = ctx.state.messages.length;
     // Turn 2: priorMessages should contain turn 1's full history → output is
     // [user1, assistant1, user2, assistant2] = 4 messages after run.
-    const r2 = await processChatLine("question two", ctx);
+    const r2 = await processChatLine({ line: "question two", ctx });
     assert.equal(r2.quit, false);
     assert.equal(r2.ranQuery, true);
     assert.ok(
@@ -86,13 +88,19 @@ describe("processChatLine harness path", () => {
 
   it("/reset clears messages but preserves session.caller_role", async () => {
     // Seed messages + a non-default session role.
-    const ctx = makeCtx([], {
-      messages: [makeNative("user", "x"), makeNative("assistant", "y")],
-      session: { caller_role: "admin" },
+    const ctx = makeCtx({
+      responses: [],
+      stateOverrides: {
+        messages: [
+          makeNative({ role: "user", text: "x" }),
+          makeNative({ role: "assistant", text: "y" }),
+        ],
+        session: { caller_role: "admin" },
+      },
     });
     assert.equal(ctx.state.messages.length, 2);
 
-    const r = await processChatLine("/reset", ctx);
+    const r = await processChatLine({ line: "/reset", ctx });
     assert.equal(r.quit, false);
     assert.match(r.output, /cleared|Session/i);
     // /reset clears messages.
@@ -105,18 +113,22 @@ describe("processChatLine harness path", () => {
     // 020 frozen shape: `messages=N`, NOT `turns=N`. No `mode=` / `priors=`.
     const state = makeState({
       messages: [
-        makeNative("user", "a"),
-        makeNative("assistant", "b"),
-        makeNative("user", "c"),
-        makeNative("assistant", "d"),
-        makeNative("user", "e"),
+        makeNative({ role: "user", text: "a" }),
+        makeNative({ role: "assistant", text: "b" }),
+        makeNative({ role: "user", text: "c" }),
+        makeNative({ role: "assistant", text: "d" }),
+        makeNative({ role: "user", text: "e" }),
       ],
       jsonMode: false,
       session: { caller_role: "manager" },
     });
     // Drive through applySlashCommand directly to assert the canonical line
     // (this is the same path processChatLine uses for slash lines).
-    const eff = applySlashCommand("status", [], { state });
+    const eff = applySlashCommand({
+      command: "status",
+      args: [],
+      ctx: { state },
+    });
     assert.equal(eff.type, "info");
     if (eff.type !== "info") return;
     assert.match(eff.text, /messages=5/);
@@ -138,11 +150,13 @@ describe("processChatLine harness path", () => {
     // assistant reply. processChatLine must NOT replace ctx.state.messages
     // with that dangling version — continuing next turn would feed a
     // dangling user message to the model and poison the loop.
-    const ctx = makeCtx([assistantResult([], [], "success")]);
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: [] })],
+    });
     const before = ctx.state.messages.length;
     assert.equal(before, 0);
 
-    const r = await processChatLine("some query", ctx);
+    const r = await processChatLine({ line: "some query", ctx });
     // Empty final response still produced output (the run path took the
     // emptyFinalResponse branch and the formatter rendered something).
     assert.equal(r.quit, false);

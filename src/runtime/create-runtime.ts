@@ -6,7 +6,11 @@
  * retained for surface compatibility but no longer wires a vector index.
  */
 import { createSeededStore } from "../fixtures/seed-kb.js";
-import { assertOfflineCompatible, loadIknowEnv, type IknowEnv } from "../config/env.js";
+import {
+  assertOfflineCompatible,
+  loadIknowEnv,
+  type IknowEnv,
+} from "../config/env.js";
 import type { InMemoryKnowledgeStore } from "../knowledge-store/memory-store.js";
 
 export interface CreateIknowRuntimeOptions {
@@ -20,11 +24,11 @@ export interface IknowRuntime {
 }
 
 export async function createIknowRuntime(
-  opts?: CreateIknowRuntimeOptions,
+  opts?: CreateIknowRuntimeOptions
 ): Promise<IknowRuntime> {
   const env = opts?.env ?? loadIknowEnv();
   // Fail closed: offline CI/eval must not open network LLM.
-  assertOfflineCompatible(env);
+  assertOfflineCompatible({ env });
   const store = createSeededStore();
   return { store, env };
 }

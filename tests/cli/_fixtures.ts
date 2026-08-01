@@ -21,11 +21,19 @@ import { createExecutor } from "../../src/harness/tools/executor.ts";
 import type { ChatLineContext } from "../../src/cli/chat-session.ts";
 import type { CliChatState } from "../../src/cli/slash.ts";
 
-export function makeNative(
-  role: "user" | "assistant",
-  text: string
-): AnthropicNativeMessage {
-  return { role, content: [{ type: "text", text }] };
+export interface MakeNativeOpts {
+  readonly role: "user" | "assistant";
+  readonly text: string;
+}
+
+export function makeNative(opts: MakeNativeOpts): AnthropicNativeMessage {
+  return { role: opts.role, content: [{ type: "text", text: opts.text }] };
+}
+
+export interface AssistantResultOpts {
+  readonly texts: string[];
+  readonly toolCalls?: Array<{ id: string; name: string; input: unknown }>;
+  readonly supplierStop?: "success" | "truncation" | "refusal" | "other";
 }
 
 /**
@@ -33,10 +41,11 @@ export function makeNative(
  * Shape aligned with tests/harness/loop-engine.test.ts.
  */
 export function assistantResult(
-  texts: string[],
-  toolCalls: Array<{ id: string; name: string; input: unknown }> = [],
-  supplierStop: "success" | "truncation" | "refusal" | "other" = "success"
+  opts: AssistantResultOpts
 ): AssistantTurnResult {
+  const texts = opts.texts;
+  const toolCalls = opts.toolCalls ?? [];
+  const supplierStop = opts.supplierStop ?? "success";
   const blocks: AnthropicContentBlock[] = [];
   for (const t of texts) blocks.push({ type: "text", text: t });
   for (const c of toolCalls) {
@@ -59,7 +68,7 @@ export function makeDeps(responses: AssistantTurnResult[]): LoopEngineDeps {
   const tool = createStubTool({ name: "noop", next: () => ({}) });
   const registry = createRegistry([tool]);
   const executor = createExecutor(registry);
-  const adapter = createStubModel(responses);
+  const adapter = createStubModel({ responses });
   return { adapter, executor, registry, maxTurns: 5 };
 }
 
@@ -72,9 +81,14 @@ export function makeState(over: Partial<CliChatState> = {}): CliChatState {
   };
 }
 
-export function makeCtx(
-  responses: AssistantTurnResult[],
-  stateOverrides: Partial<CliChatState> = {}
-): ChatLineContext {
-  return { deps: makeDeps(responses), state: makeState(stateOverrides) };
+export interface MakeCtxOpts {
+  readonly responses: AssistantTurnResult[];
+  readonly stateOverrides?: Partial<CliChatState>;
+}
+
+export function makeCtx(opts: MakeCtxOpts): ChatLineContext {
+  return {
+    deps: makeDeps(opts.responses),
+    state: makeState(opts.stateOverrides ?? {}),
+  };
 }

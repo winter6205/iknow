@@ -34,16 +34,18 @@ import { exec } from "node:child_process";
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
-import {
-  isAllowedCommand,
-  isDangerousCommand,
-} from "../permission.js";
+import { isAllowedCommand, isDangerousCommand } from "../permission.js";
 
 const MAX_OUTPUT_CHARS = 4000;
 
-function truncate(s: string, n: number): string {
-  if (s.length <= n) return s;
-  return `${s.slice(0, n)}\n[truncated ${s.length - n} chars]`;
+interface TruncateOpts {
+  readonly s: string;
+  readonly n: number;
+}
+
+function truncate(opts: TruncateOpts): string {
+  if (opts.s.length <= opts.n) return opts.s;
+  return `${opts.s.slice(0, opts.n)}\n[truncated ${opts.s.length - opts.n} chars]`;
 }
 
 /**
@@ -55,12 +57,12 @@ function truncate(s: string, n: number): string {
 export function createShellExecTool(sandboxDir: string): AciToolDef {
   const handler = (
     input: unknown,
-    ctx?: ToolExecutionContext,
+    ctx?: ToolExecutionContext
   ): Promise<unknown> => {
     const obj = input as { command?: unknown };
     if (typeof obj?.command !== "string" || obj.command.length === 0) {
       return Promise.reject(
-        new ToolExecutionError("shell_exec: command must be a non-empty string"),
+        new ToolExecutionError("shell_exec: command must be a non-empty string")
       );
     }
     const cmd = obj.command;
@@ -68,17 +70,13 @@ export function createShellExecTool(sandboxDir: string): AciToolDef {
     // 主门 allowlist：首 token + 无 shell 元字符
     if (!isAllowedCommand(cmd)) {
       return Promise.reject(
-        new ToolExecutionError(
-          `shell_exec: command not in allowlist: ${cmd}`,
-        ),
+        new ToolExecutionError(`shell_exec: command not in allowlist: ${cmd}`)
       );
     }
     // 黑名单双保险（即便 allowlist 已挡，再扫一次）
     if (isDangerousCommand(cmd)) {
       return Promise.reject(
-        new ToolExecutionError(
-          `shell_exec: dangerous command rejected: ${cmd}`,
-        ),
+        new ToolExecutionError(`shell_exec: dangerous command rejected: ${cmd}`)
       );
     }
 
@@ -93,17 +91,18 @@ export function createShellExecTool(sandboxDir: string): AciToolDef {
         },
         (err, stdout, stderr) => {
           // exec 失败时 err.code 可能是 number；成功时 code = 0。
-          const code = typeof (err as { code?: unknown })?.code === "number"
-            ? ((err as { code: number }).code as number)
-            : err
-              ? 1
-              : 0;
+          const code =
+            typeof (err as { code?: unknown })?.code === "number"
+              ? ((err as { code: number }).code as number)
+              : err
+                ? 1
+                : 0;
           resolveP({
             code,
-            stdout: truncate(String(stdout ?? ""), MAX_OUTPUT_CHARS),
-            stderr: truncate(String(stderr ?? ""), MAX_OUTPUT_CHARS),
+            stdout: truncate({ s: String(stdout ?? ""), n: MAX_OUTPUT_CHARS }),
+            stderr: truncate({ s: String(stderr ?? ""), n: MAX_OUTPUT_CHARS }),
           });
-        },
+        }
       );
     });
   };

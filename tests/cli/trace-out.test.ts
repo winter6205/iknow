@@ -21,38 +21,46 @@ import { assistantResult } from "./_fixtures.ts";
 
 describe("parse-args --trace-out", () => {
   it("parses --trace-out with a file path (ask command)", () => {
-    const parsed = parseArgs(["ask", "hello", "--trace-out", "/tmp/x.jsonl"]);
+    const parsed = parseArgs({
+      argv: ["ask", "hello", "--trace-out", "/tmp/x.jsonl"],
+    });
     assert.equal(parsed.command, "ask");
     assert.equal(parsed.query, "hello");
     assert.equal(parsed.traceOut, "/tmp/x.jsonl");
   });
 
   it("parses --trace-out with a file path (serve command)", () => {
-    const parsed = parseArgs(["serve", "--trace-out", "/tmp/serve.jsonl"]);
+    const parsed = parseArgs({
+      argv: ["serve", "--trace-out", "/tmp/serve.jsonl"],
+    });
     assert.equal(parsed.command, "serve");
     assert.equal(parsed.traceOut, "/tmp/serve.jsonl");
   });
 
   it("parses --trace-out before subcommand positional", () => {
-    const parsed = parseArgs(["--trace-out", "/tmp/early.jsonl", "ask", "hi"]);
+    const parsed = parseArgs({
+      argv: ["--trace-out", "/tmp/early.jsonl", "ask", "hi"],
+    });
     assert.equal(parsed.command, "ask");
     assert.equal(parsed.traceOut, "/tmp/early.jsonl");
   });
 
   it("throws when --trace-out has no argument", () => {
     assert.throws(
-      () => parseArgs(["ask", "hello", "--trace-out"]),
+      () => parseArgs({ argv: ["ask", "hello", "--trace-out"] }),
       /--trace-out requires a file path argument/
     );
   });
 
   it("traceOut is undefined when flag not provided", () => {
-    const parsed = parseArgs(["ask", "hello"]);
+    const parsed = parseArgs({ argv: ["ask", "hello"] });
     assert.equal(parsed.traceOut, undefined);
   });
 
   it("traceOut preserved across early --help return", () => {
-    const parsed = parseArgs(["--trace-out", "/tmp/x.jsonl", "--help"]);
+    const parsed = parseArgs({
+      argv: ["--trace-out", "/tmp/x.jsonl", "--help"],
+    });
     assert.equal(parsed.command, "help");
     assert.equal(parsed.traceOut, "/tmp/x.jsonl");
   });
@@ -100,7 +108,9 @@ describe("ask path: trace service injected into harness", () => {
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([assistantResult(["hello"])]);
+    const model = createStubModel({
+      responses: [assistantResult({ texts: ["hello"] })],
+    });
     const trace = createJsonlTraceService({
       filePath: traceFile,
       conversationId: "ask-conv-1",
@@ -158,7 +168,9 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([assistantResult(["hello from hub"])]);
+    const model = createStubModel({
+      responses: [assistantResult({ texts: ["hello from hub"] })],
+    });
     const hub = new SessionHub({
       store,
       deps: { adapter: model, executor: exec, registry: reg, maxTurns: 5 },
@@ -169,7 +181,7 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
     const convId = created.session.conversation_id;
     assert.ok(convId, "createSession returns a conversation_id");
 
-    await hub.postMessage(convId, "test query");
+    await hub.postMessage({ conversationId: convId, text: "test query" });
 
     assert.ok(
       existsSync(traceFile),
@@ -192,13 +204,18 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([assistantResult(["ok"])]);
+    const model = createStubModel({
+      responses: [assistantResult({ texts: ["ok"] })],
+    });
     const hub = new SessionHub({
       store,
       deps: { adapter: model, executor: exec, registry: reg, maxTurns: 5 },
     });
     const created = await hub.createSession();
-    await hub.postMessage(created.session.conversation_id, "q");
+    await hub.postMessage({
+      conversationId: created.session.conversation_id,
+      text: "q",
+    });
     assert.equal(
       existsSync(join(scratch, "trace.jsonl")),
       false,
@@ -226,10 +243,12 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
-    const model = createStubModel([
-      assistantResult(["reply-1"]),
-      assistantResult(["reply-2"]),
-    ]);
+    const model = createStubModel({
+      responses: [
+        assistantResult({ texts: ["reply-1"] }),
+        assistantResult({ texts: ["reply-2"] }),
+      ],
+    });
     const hub = new SessionHub({
       store,
       deps: { adapter: model, executor: exec, registry: reg, maxTurns: 5 },
@@ -244,8 +263,14 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
       "sessions must have distinct ids"
     );
 
-    await hub.postMessage(s1.session.conversation_id, "q1");
-    await hub.postMessage(s2.session.conversation_id, "q2");
+    await hub.postMessage({
+      conversationId: s1.session.conversation_id,
+      text: "q1",
+    });
+    await hub.postMessage({
+      conversationId: s2.session.conversation_id,
+      text: "q2",
+    });
 
     const content = readFileSync(traceFile, "utf8");
     const lines = content.split("\n").filter((l) => l.trim().length > 0);

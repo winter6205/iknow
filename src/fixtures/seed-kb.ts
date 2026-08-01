@@ -1,11 +1,14 @@
 import { InMemoryKnowledgeStore } from "../knowledge-store/memory-store.js";
 import type { ChunkRecord, DocumentRecord } from "../knowledge-store/types.js";
 
-function addDoc(
-  store: InMemoryKnowledgeStore,
-  doc: DocumentRecord,
-  chunks: Omit<ChunkRecord, "doc_id">[],
-): void {
+interface AddDocOpts {
+  readonly store: InMemoryKnowledgeStore;
+  readonly doc: DocumentRecord;
+  readonly chunks: Omit<ChunkRecord, "doc_id">[];
+}
+
+function addDoc(opts: AddDocOpts): void {
+  const { store, doc, chunks } = opts;
   store.upsertDocument(doc);
   for (const c of chunks) {
     store.upsertChunk({ ...c, doc_id: doc.doc_id });
@@ -18,9 +21,9 @@ function addDoc(
  */
 export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
   // hard-001: dual refund policies (30d vs 60d conflict)
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "refund-v2026",
       document_version: "2026.1",
       doc_type: "policy",
@@ -29,7 +32,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       sensitivity: "normal",
       effective_at: "2026-03-01",
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-refund-30",
         chunk_version: "2026.1@1",
@@ -46,11 +49,11 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         source_ref: "refund-v2026#L4",
       },
     ],
-  );
+  });
 
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "refund-alt",
       document_version: "2026.1-alt",
       doc_type: "policy",
@@ -59,7 +62,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       sensitivity: "normal",
       effective_at: "2026-01-15",
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-refund-60",
         chunk_version: "2026.1-alt@1",
@@ -69,12 +72,12 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         fact_keywords: ["退款", "60天"],
       },
     ],
-  );
+  });
 
   // easy: onboarding / probation / contract renew
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "hr-onboarding",
       document_version: "2026.1",
       doc_type: "hr",
@@ -82,7 +85,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       freshness: "fresh",
       sensitivity: "normal",
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-onboard",
         chunk_version: "2026.1@1",
@@ -92,12 +95,12 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         fact_keywords: ["试用期", "3个月", "入职材料"],
       },
     ],
-  );
+  });
 
   // easy: annual leave / overtime / time-off
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "hr-leave",
       document_version: "2026.2",
       doc_type: "hr",
@@ -106,7 +109,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       sensitivity: "normal",
       effective_at: "2026-06-01",
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-leave",
         chunk_version: "2026.2@1",
@@ -116,12 +119,12 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         fact_keywords: ["年假", "调休", "加班费"],
       },
     ],
-  );
+  });
 
   // hard-002: earlier-2026 leave version for diff (stale vs mid-year)
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "hr-leave-2026-old",
       document_version: "2026.1-old",
       doc_type: "hr",
@@ -130,7 +133,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       sensitivity: "normal",
       effective_at: "2026-01-10",
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-leave-2026-old",
         chunk_version: "2026.1-old@1",
@@ -139,12 +142,12 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         source_ref: "hr-leave-2026-old#L1",
       },
     ],
-  );
+  });
 
   // easy: expense / travel allowance / invoice
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "fin-expense",
       document_version: "2026.1",
       doc_type: "finance",
@@ -152,7 +155,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       freshness: "fresh",
       sensitivity: "normal",
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-expense",
         chunk_version: "2026.1@1",
@@ -162,12 +165,12 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         fact_keywords: ["报销", "出差补贴", "开票"],
       },
     ],
-  );
+  });
 
   // hard-004: approval thresholds
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "fin-approval",
       document_version: "2026.1",
       doc_type: "finance",
@@ -175,7 +178,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       freshness: "fresh",
       sensitivity: "normal",
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-approval",
         chunk_version: "2026.1@1",
@@ -184,12 +187,12 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         source_ref: "fin-approval#L1",
       },
     ],
-  );
+  });
 
   // easy: email reset / VPN / Feishu / warranty / meal card
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "it-access",
       document_version: "2026.1",
       doc_type: "it",
@@ -197,7 +200,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       freshness: "fresh",
       sensitivity: "normal",
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-it",
         chunk_version: "2026.1@1",
@@ -206,12 +209,12 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         source_ref: "it-access#L1",
       },
     ],
-  );
+  });
 
   // easy: physical exam / social insurance
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "hr-benefits",
       document_version: "2026.1",
       doc_type: "hr",
@@ -219,7 +222,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       freshness: "fresh",
       sensitivity: "normal",
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-benefits",
         chunk_version: "2026.1@1",
@@ -228,12 +231,12 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         source_ref: "hr-benefits#L1",
       },
     ],
-  );
+  });
 
   // easy: NDA template
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "legal-nda",
       document_version: "2026.1",
       doc_type: "legal",
@@ -241,7 +244,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       freshness: "fresh",
       sensitivity: "normal",
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-nda",
         chunk_version: "2026.1@1",
@@ -250,12 +253,12 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         source_ref: "legal-nda#L1",
       },
     ],
-  );
+  });
 
   // hard-003: complaint + refund SOP
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "ops-sop",
       document_version: "2026.1",
       doc_type: "ops",
@@ -263,7 +266,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       freshness: "fresh",
       sensitivity: "normal",
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-complaint",
         chunk_version: "2026.1@1",
@@ -272,12 +275,12 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         source_ref: "ops-sop#L1",
       },
     ],
-  );
+  });
 
   // hard-005: retention + deletion
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "compliance-data",
       document_version: "2026.1",
       doc_type: "compliance",
@@ -285,7 +288,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       freshness: "fresh",
       sensitivity: "normal",
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-retention",
         chunk_version: "2026.1@1",
@@ -294,12 +297,12 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         source_ref: "compliance-data#L1",
       },
     ],
-  );
+  });
 
   // hard-006: cross-team tools
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "pm-tools",
       document_version: "2026.1",
       doc_type: "process",
@@ -307,7 +310,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       freshness: "fresh",
       sensitivity: "normal",
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-pm",
         chunk_version: "2026.1@1",
@@ -316,12 +319,12 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         source_ref: "pm-tools#L1",
       },
     ],
-  );
+  });
 
   // hard-007: security remediation
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "sec-incidents",
       document_version: "2026.1",
       doc_type: "security",
@@ -329,7 +332,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       freshness: "fresh",
       sensitivity: "normal",
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-sec",
         chunk_version: "2026.1@1",
@@ -338,12 +341,12 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         source_ref: "sec-incidents#L1",
       },
     ],
-  );
+  });
 
   // hard-008: vendor qualification shared docs
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "procurement",
       document_version: "2026.1",
       doc_type: "finance",
@@ -351,7 +354,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       freshness: "fresh",
       sensitivity: "normal",
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-vendor",
         chunk_version: "2026.1@1",
@@ -360,12 +363,12 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         source_ref: "procurement#L1",
       },
     ],
-  );
+  });
 
   // edge-003: revoked/stale policy (dates inside 2026 H1 window)
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "policy-revoked",
       document_version: "2026.1-revoked",
       doc_type: "policy",
@@ -374,7 +377,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       sensitivity: "normal",
       effective_at: "2026-01-05",
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-revoked",
         chunk_version: "2026.1-revoked@1",
@@ -383,12 +386,12 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         source_ref: "policy-revoked#L1",
       },
     ],
-  );
+  });
 
   // edge-001: sensitive customer contacts (requireApprovalFor)
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "crm-contacts",
       document_version: "2026.1",
       doc_type: "customer-data",
@@ -398,7 +401,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       requires_approval: true,
       roles_allowed: ["manager", "admin"],
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-contacts",
         chunk_version: "2026.1@1",
@@ -407,12 +410,12 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         source_ref: "crm-contacts#L1",
       },
     ],
-  );
+  });
 
   // edge-004: competitor external salary (deny non-admin)
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "competitor-pay",
       document_version: "2026.1",
       doc_type: "external",
@@ -421,7 +424,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       sensitivity: "competitor_external",
       roles_allowed: ["admin"],
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-competitor",
         chunk_version: "2026.1@1",
@@ -430,12 +433,12 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         source_ref: "competitor-pay#L1",
       },
     ],
-  );
+  });
 
   // edge-005: multi-department resolutions (hop pressure)
-  addDoc(
+  addDoc({
     store,
-    {
+    doc: {
       doc_id: "dept-resolutions",
       document_version: "2026.1",
       doc_type: "process",
@@ -443,7 +446,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       freshness: "fresh",
       sensitivity: "normal",
     },
-    [
+    chunks: [
       {
         chunk_id: "chunk-res-1",
         chunk_version: "2026.1@1",
@@ -459,7 +462,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
         source_ref: "dept-resolutions#L2",
       },
     ],
-  );
+  });
 }
 
 /** Create a fresh in-memory store with enterprise seed data. */

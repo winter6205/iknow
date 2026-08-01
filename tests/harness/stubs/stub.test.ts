@@ -60,7 +60,7 @@ describe("createStubModel", () => {
       needsTools: false,
       isEmptyFinalResponse: false,
     };
-    const model = createStubModel([r1]);
+    const model = createStubModel({ responses: [r1] });
     const out = await model.step(initState(), {});
     assert.equal(out.projection.texts[0], "hello");
     assert.equal(out.supplierStop, "success");
@@ -68,7 +68,7 @@ describe("createStubModel", () => {
 
   it("throws ProtocolError when scripted responses are exhausted", async () => {
     const { ProtocolError } = await import("../../../src/harness/errors.ts");
-    const model = createStubModel([]);
+    const model = createStubModel({ responses: [] });
     await assert.rejects(
       () => model.step(initState(), {}),
       (e: unknown) => e instanceof ProtocolError
@@ -99,7 +99,7 @@ const buildR1 = (): AssistantTurnResult => {
 describe("createStubModel (017 signal/delay)", () => {
   it("delayMs: step resolves to the scripted response after the configured delay", async () => {
     const r1 = buildR1();
-    const model = createStubModel([r1], { delayMs: 20 });
+    const model = createStubModel({ responses: [r1], delayMs: 20 });
     const out = await model.step(initState(), {});
     assert.equal(out.projection.texts[0], "hello");
     assert.equal(out.supplierStop, "success");
@@ -108,7 +108,7 @@ describe("createStubModel (017 signal/delay)", () => {
 
   it("signal abort during delay: step rejects with AbortError", async () => {
     const r1 = buildR1();
-    const model = createStubModel([r1], { delayMs: 200 });
+    const model = createStubModel({ responses: [r1], delayMs: 200 });
     const controller = new AbortController();
     const pending = model.step(initState(), {}, controller.signal);
     controller.abort();

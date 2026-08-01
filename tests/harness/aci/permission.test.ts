@@ -13,15 +13,25 @@ import {
   isDangerousCommand,
   checkPermission,
 } from "../../../src/harness/aci/permission.ts";
-import type { AciToolDef, AciCategory } from "../../../src/harness/aci/types.ts";
+import type {
+  AciToolDef,
+  AciCategory,
+} from "../../../src/harness/aci/types.ts";
 
-function makeTool(name: string, category: AciCategory): AciToolDef {
+interface MakeToolOpts {
+  readonly name: string;
+  readonly category: AciCategory;
+}
+
+function makeTool(opts: MakeToolOpts): AciToolDef {
+  const { name, category } = opts;
   const meta = {
     category,
     isReadOnly: category === "read-only",
     isDestructive: category === "execute",
     isConcurrencySafe: category === "read-only",
-    interruptBehavior: category === "write" ? ("block" as const) : ("cancel" as const),
+    interruptBehavior:
+      category === "write" ? ("block" as const) : ("cancel" as const),
   };
   return Object.freeze({
     name,
@@ -136,40 +146,52 @@ describe("checkPermission — 类别默认", () => {
   const policy = createPermissionPolicy();
 
   it("read-only → allow", () => {
-    const out = checkPermission(makeTool("fs_search", "read-only"), {}, policy);
+    const out = checkPermission({
+      def: makeTool({ name: "fs_search", category: "read-only" }),
+      input: {},
+      policy,
+    });
     assert.equal(out.decision, "allow");
     assert.ok(out.reason.includes("read-only"));
   });
 
   it("write → allow，reason 注明 ask→auto-allow in prototype", () => {
-    const out = checkPermission(makeTool("fs_edit", "write"), {}, policy);
+    const out = checkPermission({
+      def: makeTool({ name: "fs_edit", category: "write" }),
+      input: {},
+      policy,
+    });
     assert.equal(out.decision, "allow");
     assert.ok(out.reason.includes("ask→auto-allow in prototype"));
   });
 
   it("collaborate → allow，reason 注明 ask→auto-allow in prototype", () => {
-    const out = checkPermission(makeTool("notify", "collaborate"), {}, policy);
+    const out = checkPermission({
+      def: makeTool({ name: "notify", category: "collaborate" }),
+      input: {},
+      policy,
+    });
     assert.equal(out.decision, "allow");
     assert.ok(out.reason.includes("ask→auto-allow in prototype"));
   });
 
   it("execute + 安全 allowlist 命令 → allow", () => {
-    const out = checkPermission(
-      makeTool("shell_exec", "execute"),
-      { command: "ls -la" },
+    const out = checkPermission({
+      def: makeTool({ name: "shell_exec", category: "execute" }),
+      input: { command: "ls -la" },
       policy,
-    );
+    });
     assert.equal(out.decision, "allow");
     assert.ok(out.reason.includes("execute: safe command allowed"));
   });
 
   it("execute + 危险命令 → deny，reason 指出 not in allowlist", () => {
     // allowlist-first：rm 不在白名单，reason 应包含 "command not in allowlist"
-    const out = checkPermission(
-      makeTool("shell_exec", "execute"),
-      { command: "rm -rf /" },
+    const out = checkPermission({
+      def: makeTool({ name: "shell_exec", category: "execute" }),
+      input: { command: "rm -rf /" },
       policy,
-    );
+    });
     assert.equal(out.decision, "deny");
     assert.ok(out.reason.includes("command not in allowlist"));
   });
@@ -181,12 +203,16 @@ describe("checkPermission — byName 覆盖", () => {
     const policy = createPermissionPolicy({
       byName: { shell_exec: "always_allow" },
     });
-    const out = checkPermission(
-      makeTool("shell_exec", "execute"),
-      { command: "rm -rf /" },
+    const out = checkPermission({
+      def: makeTool({ name: "shell_exec", category: "execute" }),
+      input: { command: "rm -rf /" },
       policy,
+    });
+    assert.equal(
+      out.decision,
+      "deny",
+      "always_allow must not bypass allowlist"
     );
-    assert.equal(out.decision, "deny", "always_allow must not bypass allowlist");
     assert.ok(out.reason.includes("command not in allowlist"));
   });
 
@@ -195,11 +221,11 @@ describe("checkPermission — byName 覆盖", () => {
       byName: { shell_exec: "always_allow" },
     });
     // 不传 execute 命令 → 不走安全兜底 → always_allow 短路放行
-    const out = checkPermission(
-      makeTool("shell_exec", "execute"),
-      { command: "echo hello" },
+    const out = checkPermission({
+      def: makeTool({ name: "shell_exec", category: "execute" }),
+      input: { command: "echo hello" },
       policy,
-    );
+    });
     assert.equal(out.decision, "allow");
     assert.ok(out.reason.includes("byName always_allow"));
   });
@@ -208,7 +234,11 @@ describe("checkPermission — byName 覆盖", () => {
     const policy = createPermissionPolicy({
       byName: { fs_search: "always_deny" },
     });
-    const out = checkPermission(makeTool("fs_search", "read-only"), {}, policy);
+    const out = checkPermission({
+      def: makeTool({ name: "fs_search", category: "read-only" }),
+      input: {},
+      policy,
+    });
     assert.equal(out.decision, "deny");
     assert.ok(out.reason.includes("always_deny"));
   });
@@ -218,11 +248,11 @@ describe("checkPermission — byName 覆盖", () => {
     const policy = createPermissionPolicy({
       byName: { shell_exec: "always_deny" },
     });
-    const out = checkPermission(
-      makeTool("shell_exec", "execute"),
-      { command: "echo hello" },
+    const out = checkPermission({
+      def: makeTool({ name: "shell_exec", category: "execute" }),
+      input: { command: "echo hello" },
       policy,
-    );
+    });
     assert.equal(out.decision, "deny");
     assert.ok(out.reason.includes("always_deny"));
   });
@@ -231,7 +261,11 @@ describe("checkPermission — byName 覆盖", () => {
     const policy = createPermissionPolicy({
       byName: { fs_edit: "ask" },
     });
-    const out = checkPermission(makeTool("fs_edit", "write"), {}, policy);
+    const out = checkPermission({
+      def: makeTool({ name: "fs_edit", category: "write" }),
+      input: {},
+      policy,
+    });
     assert.equal(out.decision, "allow");
     assert.ok(out.reason.includes("ask→auto-allow in prototype"));
   });
@@ -241,60 +275,60 @@ describe("checkPermission — execute 安全兜底细节", () => {
   const policy = createPermissionPolicy();
 
   it("execute + 非字符串 command → deny（不是 allow）", () => {
-    const out = checkPermission(
-      makeTool("shell_exec", "execute"),
-      { command: undefined },
+    const out = checkPermission({
+      def: makeTool({ name: "shell_exec", category: "execute" }),
+      input: { command: undefined },
       policy,
-    );
+    });
     assert.equal(out.decision, "deny");
     assert.ok(out.reason.includes("command must be a string"));
   });
 
   it("execute + 数字 command → deny", () => {
-    const out = checkPermission(
-      makeTool("shell_exec", "execute"),
-      { command: 42 },
+    const out = checkPermission({
+      def: makeTool({ name: "shell_exec", category: "execute" }),
+      input: { command: 42 },
       policy,
-    );
+    });
     assert.equal(out.decision, "deny");
     assert.ok(out.reason.includes("command must be a string"));
   });
 
   it("execute + 对象 command → deny", () => {
-    const out = checkPermission(
-      makeTool("shell_exec", "execute"),
-      { command: { evil: true } },
+    const out = checkPermission({
+      def: makeTool({ name: "shell_exec", category: "execute" }),
+      input: { command: { evil: true } },
       policy,
-    );
+    });
     assert.equal(out.decision, "deny");
     assert.ok(out.reason.includes("command must be a string"));
   });
 
   it("execute + echo 放行", () => {
-    const out = checkPermission(
-      makeTool("shell_exec", "execute"),
-      { command: "echo hello" },
+    const out = checkPermission({
+      def: makeTool({ name: "shell_exec", category: "execute" }),
+      input: { command: "echo hello" },
       policy,
-    );
+    });
     assert.equal(out.decision, "allow");
   });
 
   it("execute + echo a > b（元字符） → deny，reason 含 allowlist", () => {
-    const out = checkPermission(
-      makeTool("shell_exec", "execute"),
-      { command: "echo a > b" },
+    const out = checkPermission({
+      def: makeTool({ name: "shell_exec", category: "execute" }),
+      input: { command: "echo a > b" },
       policy,
-    );
+    });
     assert.equal(out.decision, "deny");
     assert.ok(out.reason.includes("command not in allowlist"));
   });
 
   it("execute + echo $PATH（元字符） → deny", () => {
-    const out = checkPermission(
-      makeTool("shell_exec", "execute"),
-      { command: "echo $PATH" },
+    const out = checkPermission({
+      def: makeTool({ name: "shell_exec", category: "execute" }),
+      input: { command: "echo $PATH" },
       policy,
-    );
+    });
     assert.equal(out.decision, "deny");
   });
 });
@@ -302,22 +336,22 @@ describe("checkPermission — execute 安全兜底细节", () => {
 describe("checkPermission — denyDangerousExecute=false 仅关黑名单双保险，不影响 allowlist", () => {
   it("execute + rm -rf / + denyDangerousExecute=false → 仍 deny（allowlist 拦截）", () => {
     const policy = createPermissionPolicy({ denyDangerousExecute: false });
-    const out = checkPermission(
-      makeTool("shell_exec", "execute"),
-      { command: "rm -rf /" },
+    const out = checkPermission({
+      def: makeTool({ name: "shell_exec", category: "execute" }),
+      input: { command: "rm -rf /" },
       policy,
-    );
+    });
     assert.equal(out.decision, "deny");
     assert.ok(out.reason.includes("command not in allowlist"));
   });
 
   it("execute + 已知安全命令 + denyDangerousExecute=false → allow", () => {
     const policy = createPermissionPolicy({ denyDangerousExecute: false });
-    const out = checkPermission(
-      makeTool("shell_exec", "execute"),
-      { command: "echo hello" },
+    const out = checkPermission({
+      def: makeTool({ name: "shell_exec", category: "execute" }),
+      input: { command: "echo hello" },
       policy,
-    );
+    });
     assert.equal(out.decision, "allow");
   });
 });
