@@ -1,20 +1,12 @@
 /**
  * Pure CLI argument parsing (no I/O).
  */
-import {
-  CALLER_ROLES,
-  parseCallerRole,
-  type CallerRole,
-} from "../shared/schema.js";
 
 export type CliCommand = "chat" | "ask" | "oneshot" | "help" | "serve";
 
 export type ParsedCli = {
   command: CliCommand;
   query: string;
-  role: CallerRole;
-  degrade: boolean;
-  embeddings: boolean;
   json: boolean;
   /**
    * ask/oneshot with empty query text.
@@ -57,9 +49,6 @@ export type ParseArgsOptions = {
 export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   const argv = opts.argv;
   const interactive = opts.interactive ?? false;
-  let role: CallerRole = "employee";
-  let degrade = false;
-  let embeddings = false;
   let json = false;
   let port = 8787;
   let host = "127.0.0.1";
@@ -72,9 +61,6 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
       return baseParsed({
         command: "help",
         fields: {
-          role,
-          degrade,
-          embeddings,
           json,
           port,
           host,
@@ -85,19 +71,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
         },
       });
     }
-    if (a === "--role") {
-      const raw = argv[++i];
-      if (raw === undefined) {
-        throw new Error(
-          `Missing value for --role; expected one of: ${CALLER_ROLES.join("|")}`
-        );
-      }
-      role = parseCallerRole(raw);
-    } else if (a === "--governance-timeout") {
-      degrade = true;
-    } else if (a === "--embeddings") {
-      embeddings = true;
-    } else if (a === "--json") {
+    if (a === "--json") {
       json = true;
     } else if (a === "--port") {
       const raw = argv[++i];
@@ -125,9 +99,6 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
       return baseParsed({
         command: "help",
         fields: {
-          role,
-          degrade,
-          embeddings,
           json,
           port,
           host,
@@ -143,9 +114,6 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   }
 
   const flags = {
-    role,
-    degrade,
-    embeddings,
     json,
     port,
     host,

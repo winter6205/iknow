@@ -19,8 +19,6 @@ export interface DocumentRecord {
   /** ISO8601 when known. */
   effective_at?: string;
   updated_at?: string;
-  /** If set, only listed roles (or admin) may read. */
-  roles_allowed?: string[];
   /** Sensitive surface requires approval before answer. */
   requires_approval?: boolean;
 }

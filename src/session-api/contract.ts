@@ -8,7 +8,6 @@
  * reference the old shapes — they will be rewritten in T4/T5.
  */
 import type { StopReason } from "../harness/index.js";
-import type { AgentMode } from "../config/env.js";
 import type { SessionStoreErrorKind } from "./store/errors.js";
 
 /** Max user message length (code units). */
@@ -31,18 +30,14 @@ export interface TurnDto {
 /** 022 Q2-G4: 移除 caller_role 字段。caller_role 已在 harness 路径退役。 */
 export interface SessionSummary {
   readonly conversation_id: string;
-  readonly mode: AgentMode; // 020 决议保留
   readonly json_mode: boolean;
   readonly turn_count: number;
   readonly prior_count: number;
-  readonly embeddings: boolean;
 }
 
 export interface CreateSessionRequest {
   // caller_role 已在 harness 路径退役（Q2-G4）；wire 不再接受
-  mode?: AgentMode;
   json_mode?: boolean;
-  embeddings?: boolean;
 }
 
 export type CreateSessionResponse = {

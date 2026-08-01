@@ -22,30 +22,30 @@
 
 ### 1.2 运行时核心（独立 `iknow`，无 gbrain 依赖）
 
-| 能力             | 说明                                                                                    | 位置                               |
-| ---------------- | --------------------------------------------------------------------------------------- | ---------------------------------- |
-| ~~4 tools~~      | ~~`kb_retrieve` / `kb_verify_citation` / `kb_compile` / `kb_governance`~~ **已归档 023** | `docs/archive/023-retire-kb-tools/` |
-| Agent 执行层     | harness foundation（loop-engine + anthropic-adapter + executor + registry）+ ACI 装饰层原型 | `src/harness/`（含 `src/harness/aci/`） |
-| 内存知识库       | 合成 seed 语料（企业政策/HR/财务等场景）                                                | `src/knowledge-store` / `fixtures` |
-| ~~确定性 Agent~~ | ~~规则 loop，G2、`max_hops=5`~~ **已归档 022**                                          | `docs/archive/022-retire-agent-loop/` |
-| ~~LLM Agent~~    | ~~OpenAI-compatible tool_calls~~ **已归档 022**，现由 harness anthropic-adapter 承接    | `src/harness/model-adapter/`       |
-| G2 信封          | 每轮答案含 `text` / `source_spans` / `snapshot_id` / `governance_status` / `tool_calls` | `IknowAnswer`                      |
-| Session 鉴权注入 | `caller_role` 等，**不**进 tool 入参                                                    | `SessionContext`                   |
-| 配置加载         | `.env` / `.env.local` + `process.env`；密钥只读 env 名                                  | `src/config/env.ts`                |
+| 能力                  | 说明                                                                                        | 位置                                    |
+| --------------------- | ------------------------------------------------------------------------------------------- | --------------------------------------- |
+| ~~4 tools~~           | ~~`kb_retrieve` / `kb_verify_citation` / `kb_compile` / `kb_governance`~~ **已归档 023**    | `docs/archive/023-retire-kb-tools/`     |
+| Agent 执行层          | harness foundation（loop-engine + anthropic-adapter + executor + registry）+ ACI 装饰层原型 | `src/harness/`（含 `src/harness/aci/`） |
+| 内存知识库            | 合成 seed 语料（企业政策/HR/财务等场景）                                                    | `src/knowledge-store` / `fixtures`      |
+| ~~确定性 Agent~~      | ~~规则 loop，G2、`max_hops=5`~~ **已归档 022**                                              | `docs/archive/022-retire-agent-loop/`   |
+| ~~LLM Agent~~         | ~~OpenAI-compatible tool_calls~~ **已归档 022**，现由 harness anthropic-adapter 承接        | `src/harness/model-adapter/`            |
+| G2 信封               | 每轮答案含 `text` / `source_spans` / `snapshot_id` / `governance_status` / `tool_calls`     | `IknowAnswer`                           |
+| 授权（per-tool-call） | harness ACI 装饰层逐次工具调用授权；`caller_role` 角色枚举已移除                            | `src/harness/aci/`                      |
+| 配置加载              | `.env` / `.env.local` + `process.env`；密钥只读 env 名                                      | `src/config/env.ts`                     |
 
 ### 1.3 检索增强（M1，已归档 023）
 
 > 双臂排序 / Embedding 客户端 / 内存向量索引随 `kb_retrieve` 一并归档于
 > `docs/archive/023-retire-kb-tools/`。CLI 产品路径不再构建向量索引；
-> `--embeddings` CLI flag 保留为表面兼容（runtime 内 no-op），孤儿字段
-> `simulate_governance_timeout` / `--governance-timeout` 待后续清理。
+> `--embeddings` CLI flag 与 `IKNOW_EMBEDDING_MODE` 等 env、孤儿字段
+> `simulate_governance_timeout` / `--governance-timeout` 已随旧 loop residue 一并移除。
 
-| 能力             | 说明                                                                     |
-| ---------------- | ------------------------------------------------------------------------ |
-| ~~双臂排序~~     | ~~关键词 +（向量 **或** overlap 回退）→ RRF(k=60)~~ **已归档**            |
-| ~~Embedding 客户端~~ | ~~OpenAI-compatible `/embeddings`~~ **已归档**                       |
-| ~~内存向量索引~~ | ~~`VectorIndex`；可选 `--embeddings`~~ **已归档**（flag 保留 no-op）     |
-| ~~失败回退~~     | ~~网络失败时回退 overlap 臂~~ **已归档**                                  |
+| 能力                 | 说明                                                             |
+| -------------------- | ---------------------------------------------------------------- |
+| ~~双臂排序~~         | ~~关键词 +（向量 **或** overlap 回退）→ RRF(k=60)~~ **已归档**   |
+| ~~Embedding 客户端~~ | ~~OpenAI-compatible `/embeddings`~~ **已归档**                   |
+| ~~内存向量索引~~     | ~~`VectorIndex`；可选 `--embeddings`~~ **已归档**（flag 已移除） |
+| ~~失败回退~~         | ~~网络失败时回退 overlap 臂~~ **已归档**                         |
 
 ### 1.4 交互表面（I1–I3，相对设计稿）
 
@@ -56,7 +56,7 @@
 | 机器输出                 | `/json on` 或 one-shot JSON                                                                                                                                                                                                                                       | 同上                                                                                     |
 | 会话袋                   | `ConversationState`：turns、`last_priors`、history_finals                                                                                                                                                                                                         | `interaction/conversation.ts`                                                            |
 | 轮间桥                   | `answer(q, { prior_chunks, history })`；priors 统一消毒 cap=5                                                                                                                                                                                                     | `priors.ts` + agents                                                                     |
-| Slash                    | `/help` `/quit` `/json` `/role` `/mode` `/reset`                                                                                                                                                                                                                  | `interaction/slash.ts`                                                                   |
+| Slash                    | `/help` `/quit` `/json` `/mode` `/reset`                                                                                                                                                                                                                          | `interaction/slash.ts`                                                                   |
 | 单次脚本                 | `ask "…"` / 裸 query → JSON（CI 兼容）                                                                                                                                                                                                                            | `cli.ts`                                                                                 |
 | **Session HTTP API**     | 进程内多会话：create / message / command / reset；G2 每轮                                                                                                                                                                                                         | `src/session-api/`                                                                       |
 | **Web 产品 UI**          | Vite + React + TS SPA（`web/`）；build → `web/dist`；`iknow serve` 优先托管 dist（无 dist 时回退 `web/`）；空/载入/错/数据四态 + 侧栏 G2 投影；SSE 路径仍 **501**                                                                                                 | `web/` + `iknow serve`                                                                   |
@@ -93,23 +93,23 @@
 | **真 query 评测集**      | `eval-set.draft.json` 仍为 DRAFT 构造数据；`relevant_chunks` 等未用真实日志回填               |
 | **软门禁校准**           | Hit@5 / Faithfulness 等数字未用真实数据标定                                                   |
 | **持久化存储**           | 仅内存 store；无 DB / 对象存储 / 多租户                                                       |
-| **向量持久化**           | 索引进程内；磁盘 cache 路径配置有、生产级缓存/失效策略未齐                                    |
+| **向量持久化**           | 内存向量索引已随 023 归档；harness 为通用 agent，无向量检索，故无向量持久化需求               |
 | **后台 compile 队列**    | 设计允许异步作业；产品级 job/notify 未做                                                      |
-| **鉴权生产化**           | 仅 session 角色枚举与敏感拦截默认；完整 ACL/审批流待 ADR 确认后实现                           |
+| **鉴权生产化**           | 授权由 harness ACI 装饰层逐次工具调用承接（session 角色枚举已移除）；完整 ACL/审批流待 ADR    |
 | **Web 生产化**           | SPA 构建链已定（Vite React → `web/dist` + 同进程 API）；无鉴权 / 无多租户 / 无 CDN 发布流水线 |
 | **流式输出**             | SSE 路径预留 `…/events` → **501**；无 token streaming                                         |
 | **多轮 trajectory eval** | 评测仍是单次 input；无 N 轮会话样本与评分器                                                   |
 
 ### 2.2 交互与 Agent 体验
 
-| 缺口                    | 说明                                                                                                                 |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| **I4 真机三模式冒烟**   | **已做**（2026-07-12）：`docs/handoff/i4-smoke/`；det/emb/llm/HTTP 全 PASS；shell key 与 9router chat 对齐仍为运维项 |
-| **指代/省略续问鲁棒性** | deterministic 仍偏关键词；LLM 依赖模型与 host priors，未系统评测                                                     |
-| **澄清轮（0 tool）**    | 设计允许「意图不清先问」；未作为一等状态机落地                                                                       |
-| **会话持久化**          | REPL 进程内；无跨进程会话恢复                                                                                        |
-| **anthropic_tools**     | 仅 openai_tools；选 anthropic 会 fail-closed                                                                         |
-| **全量 context 打包**   | history 有字符预算；未从窗口严格扣 system/tools/检索正文                                                             |
+| 缺口                    | 说明                                                                                                            |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------- |
+| **I4 真机 LLM 冒烟**    | **已做**（2026-07-12）：`docs/handoff/i4-smoke/`；LLM/HTTP 证据已归档；shell key 与 9router chat 对齐仍为运维项 |
+| **指代/省略续问鲁棒性** | LLM 依赖模型与 host priors，未系统评测                                                                          |
+| **澄清轮（0 tool）**    | 设计允许「意图不清先问」；未作为一等状态机落地                                                                  |
+| **会话持久化**          | REPL 进程内；无跨进程会话恢复                                                                                   |
+| **anthropic_tools**     | 仅 openai_tools；选 anthropic 会 fail-closed                                                                    |
+| **全量 context 打包**   | history 有字符预算；未从窗口严格扣 system/tools/检索正文                                                        |
 
 ### 2.3 协议开放项（设计未决，禁止静默定稿）
 
@@ -142,7 +142,7 @@
 3. **会话小增强**
    - 可选会话导出/导入 JSON；澄清轮最小状态。
 4. **观测最小集**
-   - 结构化日志：conversation_id、turn、hops、tool 耗时、是否 embedding/llm。
+   - 结构化日志：conversation_id、turn、hops、tool 耗时、是否 llm。
 5. **Web MVP 原型接入 CLI**
    - `iknow-prototype` 前端从 mock 切到真实 Session HTTP API；G2 信封（`tool_calls`/`governance_status`/`snapshot_id`/`source_spans`）可视化；产品 UI 栈 A/B 决策落 `docs/design/`。详见 `docs/handoff/2026-07-21-web-mvp-prototype.md`。
 
@@ -175,8 +175,8 @@
 | 层                       | 状态                                                           |
 | ------------------------ | -------------------------------------------------------------- |
 | 协议与评测资产           | **有**（构造数据）                                             |
-| 可运行 4-tool 引擎       | **已归档 023**（harness ACI 装饰层原型承接，PR #95）          |
-| 向量 + LLM 接线          | **已归档 023**（harness anthropic-adapter 承接）              |
+| 可运行 4-tool 引擎       | **已归档 023**（harness ACI 装饰层原型承接，PR #95）           |
+| 向量 + LLM 接线          | **已归档 023**（harness anthropic-adapter 承接）               |
 | CLI 多轮交互             | **有**（进程内会话）                                           |
 | HTTP 会话 + Web SPA      | **有**（v0 内存会话 + Vite React `web/`→`dist`；SSE/鉴权未做） |
 | 生产数据 / 持久化 / 上线 | **无或极弱**                                                   |
@@ -188,9 +188,7 @@
 ```bash
 npm test
 npm run eval  # retired (#48)
-npx tsx src/cli.ts chat --mode deterministic
-npx tsx src/cli.ts chat --embeddings
-npx tsx src/cli.ts chat --mode llm
+npx tsx src/cli.ts chat
 npx tsx src/cli.ts ask "单次问题"
 
 # Session API + static host (prefers web/dist after SPA build)

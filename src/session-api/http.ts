@@ -7,7 +7,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isIknowError, ValidationError } from "../shared/errors.js";
-import type { AgentMode } from "../config/env.js";
 import { mapStoreError, type SessionHub } from "./hub.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { ApiErrorBody, HealthResponse } from "./contract.js";
@@ -230,9 +229,7 @@ async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
 }
 
 function parseCreateBody(raw: unknown): {
-  mode?: AgentMode;
   json_mode?: boolean;
-  embeddings?: boolean;
 } {
   if (raw == null || raw === "") {
     return {};
@@ -242,25 +239,10 @@ function parseCreateBody(raw: unknown): {
   }
   const o = raw as Record<string, unknown>;
   const out: {
-    mode?: AgentMode;
     json_mode?: boolean;
-    embeddings?: boolean;
   } = {};
-  if (o.mode != null) {
-    const m = String(o.mode);
-    if (m !== "deterministic" && m !== "llm") {
-      throw new ValidationError(
-        `invalid mode: ${m}; expected deterministic|llm`,
-        { field: "mode" }
-      );
-    }
-    out.mode = m;
-  }
   if (o.json_mode != null) {
     out.json_mode = Boolean(o.json_mode);
-  }
-  if (o.embeddings != null) {
-    out.embeddings = Boolean(o.embeddings);
   }
   return out;
 }

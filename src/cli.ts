@@ -83,26 +83,7 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     return;
   }
 
-  let bundle: RuntimeBundle;
-  try {
-    bundle = await prepareRuntime({
-      role: parsed.role,
-      degrade: parsed.degrade,
-      embeddings: parsed.embeddings,
-    });
-  } catch (err) {
-    if (err instanceof Error && err.message.includes("embeddings requested")) {
-      writeErr(
-        JSON.stringify({
-          error: "embeddings_missing_api_key",
-          message: err.message,
-        })
-      );
-      process.exitCode = 1;
-      return;
-    }
-    throw err;
-  }
+  const bundle: RuntimeBundle = await prepareRuntime();
 
   let built: { deps: LoopEngineDeps };
   try {
@@ -140,11 +121,7 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
 async function runChat(parsed: ParsedCli): Promise<void> {
   let bundle: RuntimeBundle;
   try {
-    bundle = await prepareRuntime({
-      role: parsed.role,
-      degrade: parsed.degrade,
-      embeddings: parsed.embeddings,
-    });
+    bundle = await prepareRuntime();
   } catch (err) {
     printChatError(err);
     process.exitCode = 1;
@@ -160,16 +137,10 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     return;
   }
 
-  const embeddingsNote =
-    parsed.embeddings || bundle.env.embedding.mode === "api"
-      ? "embeddings=api"
-      : "embeddings=off";
-
   await runChatSession({
     deps: built.deps,
     session: bundle.session,
     jsonMode: parsed.json,
-    embeddingsNote,
   });
 }
 
@@ -210,7 +181,6 @@ async function runServe(parsed: ParsedCli): Promise<void> {
     const { listening } = await startSessionServe({
       host: parsed.host,
       port: parsed.port,
-      embeddings: parsed.embeddings,
       json_mode: parsed.json,
       traceOut: tracePath,
     });

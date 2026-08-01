@@ -67,11 +67,10 @@ npm test          # vitest：unit + eval alignment + trajectory + harness
 
 完整路径→职责见 `docs/architecture.md` Capability modules 表（真值，SSOT）。
 
-**Agent mode**: `deterministic`（默认 / CI）或 `llm`（`--mode llm` / `IKNOW_AGENT_MODE`；显式 `--mode` 优先）。  
-**Embedding**: `--embeddings` / `IKNOW_EMBEDDING_MODE=api` flag 保留为表面兼容（runtime 内 no-op，因 023 归档了 vector index；orphan，待后续 cleanup）。  
+**Embedding**: `--embeddings` / `IKNOW_EMBEDDING_MODE=api` 等向量检索臂及其 CLI flag / env 已随 023 一并移除（harness 为通用 agent，无向量检索；旧 loop residue cleanup）。  
 **交互主入口**: TTY `chat`；脚本 `ask`；浏览器 `iknow serve` + `web/dist`（开发可 `web:dev` 代理 `/api`）。  
 **LLM 客户端**: `stream: false` + `parseLlmResponseJson`（容忍 SSE trailer）。  
-**9router key**: 环境变量名 `NINE_ROUTER_KEY`（LLM 与 embedding 共用，env.ts SSOT）；`models` 200 ≠ chat/embeddings 必通；探针 `scripts/i4-probe-nine-endpoints.ts`。  
+**9router key**: 环境变量名 `NINE_ROUTER_KEY`（LLM 用，env.ts SSOT；embedding 臂已移除）；`models` 200 ≠ chat 必通；探针 `scripts/i4-probe-nine-endpoints.ts`。  
 **I4**: 已归档三模式 + HTTP 冒烟证据（`docs/handoff/i4-smoke/`）。  
 **Git**: 无用户明确 `push` 授权则不执行。
 

@@ -19,7 +19,7 @@ import {
   type LoopEngineDeps,
   type RunResult,
 } from "../harness/index.js";
-import { loadIknowEnv, type AgentMode } from "../config/env.js";
+import { loadIknowEnv } from "../config/env.js";
 import { ValidationError } from "../shared/errors.js";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
@@ -155,9 +155,7 @@ export type SessionHubOptions = {
   store: SessionStore;
   /** Injected harness deps (tests). When omitted, lazily constructed once. */
   deps?: LoopEngineDeps;
-  defaultMode?: AgentMode;
   defaultJsonMode?: boolean;
-  defaultEmbeddings?: boolean;
   /** JSONL trace file path; when set, postMessage creates a per-session
    * JsonlTraceService bound to session.conversation_id (ADR-0003 D4).
    * Per-session instance -> cachedDeps does not cache the trace. */
@@ -179,9 +177,7 @@ export class SessionHub {
   private readonly store: SessionStore;
   private cachedDeps: LoopEngineDeps | undefined;
   private readonly defaults: {
-    mode: AgentMode;
     jsonMode: boolean;
-    embeddings: boolean;
   };
   /** JSONL trace output path; when set, postMessage creates a per-session trace. */
   private readonly traceOut: string | undefined;
@@ -193,9 +189,7 @@ export class SessionHub {
     this.cachedDeps = opts.deps;
     this.traceOut = opts.traceOut;
     this.defaults = {
-      mode: opts.defaultMode ?? "deterministic",
       jsonMode: opts.defaultJsonMode ?? false,
-      embeddings: opts.defaultEmbeddings ?? false,
     };
   }
 
@@ -215,10 +209,7 @@ export class SessionHub {
     };
     await this.store.save({ id, file });
     return {
-      session: this.summarize({
-        file,
-        mode: req?.mode ?? this.defaults.mode,
-      }),
+      session: this.summarize({ file }),
       turns: [],
     };
   }
@@ -226,7 +217,7 @@ export class SessionHub {
   async getSession(conversationId: string): Promise<GetSessionResponse> {
     const file = await this.store.load(conversationId);
     return {
-      session: this.summarize({ file, mode: this.defaults.mode }),
+      session: this.summarize({ file }),
       turns: projectMessagesToTurns(file.messages),
     };
   }
@@ -263,7 +254,6 @@ export class SessionHub {
         return {
           session: this.summarize({
             file: await this.store.load(conversationId),
-            mode: this.defaults.mode,
           }),
           turn: this.toTurnDto({ query, result }),
         };
@@ -287,7 +277,7 @@ export class SessionHub {
         };
         await this.store.save({ id: conversationId, file: reset });
         return {
-          session: this.summarize({ file: reset, mode: this.defaults.mode }),
+          session: this.summarize({ file: reset }),
           turns: [],
         };
       },
@@ -371,6 +361,7 @@ export class SessionHub {
       client,
       model: env.llm.model,
       maxTokens: env.llm.maxOutputTokens,
+      temperature: env.llm.temperature,
     });
     const registry = createRegistry([createEchoTool(), createGetTimeTool()]);
     const executor = createExecutor(registry);
@@ -384,18 +375,13 @@ export class SessionHub {
     return this.cachedDeps;
   }
 
-  private summarize(opts: {
-    readonly file: SessionFileV1;
-    readonly mode: AgentMode;
-  }): SessionSummary {
-    const { file, mode } = opts;
+  private summarize(opts: { readonly file: SessionFileV1 }): SessionSummary {
+    const { file } = opts;
     return {
       conversation_id: file.conversation_id,
-      mode,
       json_mode: file.jsonMode,
       turn_count: file.turnCount,
       prior_count: 0,
-      embeddings: this.defaults.embeddings,
     };
   }
 

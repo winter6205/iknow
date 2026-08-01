@@ -46,7 +46,6 @@ npx tsx src/cli.ts -h          # bilingual usage (中文 + English)
 ```bash
 npx tsx src/cli.ts              # TTY → chat
 npx tsx src/cli.ts chat
-npx tsx src/cli.ts chat --mode deterministic --role employee
 npx tsx src/cli.ts chat --json  # start with machine JSON output
 
 # Piped multi-turn (no prompt garble; empty lines skipped; turns fully awaited)
@@ -65,9 +64,7 @@ printf '公司的退款政策是什么？\n/quit\n' | IKNOW_CHAT_QUIET=1 npx tsx
 | plain text                  | one `answer` turn (priors + short history injected) |
 | blank line                  | skipped (pipe and TTY)                              |
 | `/json on\|off`             | toggle full G2 JSON vs human view                   |
-| `/role <r>`                 | set `caller_role` (employee\|manager\|admin)        |
-| `/mode deterministic\|llm`  | rebuild agent when mode changes                     |
-| `/status`                   | mode / role / json / turns / priors                 |
+| `/status`                   | json / messages                                     |
 | `/reset`                    | clear turns / priors / history (store kept)         |
 | `/help`                     | list commands                                       |
 | `/quit` or `/exit` / Ctrl+D | leave                                               |
@@ -82,26 +79,15 @@ npm run dev -- "公司的退款政策是什么？"
 npx tsx src/cli.ts "公司的退款政策是什么？"
 npx tsx src/cli.ts ask "公司的退款政策是什么？"
 
-npm run dev -- --role employee "年假天数是怎么规定的？"
-npm run dev -- --governance-timeout "检索时治理服务超时了，你还能正常回答退款政策吗？"
+npm run dev -- "年假天数是怎么规定的？"
 npm run eval # retired; 32-sample fixture archived at docs/archive/021-retire-legacy-loop-and-eval/docs/iknow-spec/docs/eval/eval-set.draft.json (see #48)
 ```
 
 One-shot always prints G2 JSON on stdout so scripts do not break.
 
-### Agent mode (M2 LLM path)
+### LLM configuration
 
-Default is **deterministic** (no network). To use the tool-calling LLM agent:
-
-```bash
-# CLI flag (takes precedence for this process)
-npx tsx src/cli.ts --mode llm "公司的退款政策是什么？"
-
-# or set env (see docs/integration-materials.env.example)
-# IKNOW_AGENT_MODE=llm
-```
-
-Required env (names only — put real keys in the shell / OS secret store):
+The agent runs on a tool-calling LLM (harness anthropic-adapter). Required env (names only — put real keys in the shell / OS secret store):
 
 | Variable                | Role                                                                         |
 | ----------------------- | ---------------------------------------------------------------------------- |
@@ -109,41 +95,20 @@ Required env (names only — put real keys in the shell / OS secret store):
 | _(that key env)_        | Actual secret value (e.g. export `NINE_ROUTER_KEY=...`)                      |
 | `IKNOW_LLM_BASE_URL`    | OpenAI-compatible base (default `http://localhost:20128/v1` — 9router local) |
 | `IKNOW_LLM_MODEL`       | 9router route id (default `m3-combo`)                                        |
-| `IKNOW_AGENT_MODE`      | `deterministic` (default) or `llm`                                           |
 
-If `--mode llm` is set but the key env is empty, CLI exits with `llm_mode_missing_api_key`.
-
-### Optional: embedding vector arm (M1)
-
-Default retrieve is keyword + overlap (offline). To enable the real embedding arm over an OpenAI-compatible HTTP API:
-
-1. Copy `docs/integration-materials.env.example` settings into `.env.local` (never commit secrets).
-2. Set `IKNOW_EMBEDDING_MODE=api` **or** pass `--embeddings` on the CLI.
-3. `IKNOW_EMBEDDING_API_KEY_ENV` defaults to `NINE_ROUTER_KEY` (same as LLM) — override only if you split secrets.
-4. Configure `IKNOW_EMBEDDING_BASE_URL` / `IKNOW_EMBEDDING_MODEL` / dims as needed.
-
-```bash
-# env-based
-export IKNOW_EMBEDDING_MODE=api
-npm run dev -- "公司的退款政策是什么？"
-
-# flag-based (only useful when the key env is set)
-npx tsx src/cli.ts --embeddings "公司的退款政策是什么？"
-```
-
-If the embedding API fails, the CLI continues with keyword-only retrieve. `npm test` stays offline and does **not** call the network. (`npm run eval` retired — see #48).
+If the key env is empty, the runtime exits with `llm_mode_missing_api_key`.
 
 ## Layout
 
-| Path                   | Role                                                     |
-| ---------------------- | -------------------------------------------------------- |
-| `src/harness/`         | Agent runtime foundation (loop-engine, anthropic-adapter, executor, registry) + ACI decor layer (`src/harness/aci/`) |
-| `src/knowledge-store/` | In-memory KB (standalone)                                |
-| `src/fixtures/`        | Eval-aligned seed corpus                                 |
-| `docs/iknow-spec/`     | Protocol + eval assets                                   |
-| `docs/archive/023-retire-kb-tools/` | Archived 4-tool suite (`kb_retrieve` / `kb_verify_citation` / `kb_compile` / `kb_governance`) + `src/tools/registry.ts` facade |
-| `docs/archive/022-retire-agent-loop/` | Archived legacy agent loop (deterministic + LLM) |
-| `_upstream_gbrain/`    | **Read-only reference clone** (gitignored; never import) |
+| Path                                  | Role                                                                                                                           |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `src/harness/`                        | Agent runtime foundation (loop-engine, anthropic-adapter, executor, registry) + ACI decor layer (`src/harness/aci/`)           |
+| `src/knowledge-store/`                | In-memory KB (standalone)                                                                                                      |
+| `src/fixtures/`                       | Eval-aligned seed corpus                                                                                                       |
+| `docs/iknow-spec/`                    | Protocol + eval assets                                                                                                         |
+| `docs/archive/023-retire-kb-tools/`   | Archived 4-tool suite (`kb_retrieve` / `kb_verify_citation` / `kb_compile` / `kb_governance`) + `src/tools/registry.ts` facade |
+| `docs/archive/022-retire-agent-loop/` | Archived legacy agent loop                                                                                                     |
+| `_upstream_gbrain/`                   | **Read-only reference clone** (gitignored; never import)                                                                       |
 
 ## Upstream reference
 

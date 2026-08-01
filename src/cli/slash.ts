@@ -14,12 +14,7 @@
  * 与 `cli.ts` 共引此类型,避免重复定义)。
  */
 import type { AnthropicNativeMessage } from "../harness/index.js";
-import {
-  CALLER_ROLES,
-  parseCallerRole,
-  type CallerRole,
-  type SessionContext,
-} from "../shared/schema.js";
+import type { SessionContext } from "../shared/schema.js";
 
 /**
  * CLI host 维护的最小对话状态。
@@ -51,11 +46,6 @@ export type SlashEffect =
   | { type: "error"; text: string }
   | { type: "reset"; message: string };
 
-/** Pipe-joined allowed caller-role list for `/role` usage text. */
-function allowedRolesList(): string {
-  return CALLER_ROLES.join("|");
-}
-
 /**
  * Strip C0 control chars (incl. ESC) and DEL so reflected command text
  * cannot inject terminal escape sequences when printed.
@@ -67,10 +57,9 @@ function sanitizeCommandForDisplay(command: string): string {
 
 const HELP_TEXT = `命令 / Commands:
   /help                 显示帮助 · show this help
-  /status               会话状态 · role / json / messages
+  /status               会话状态 · json / messages
   /quit  /exit          退出 · leave chat
   /json on|off          切换 JSON 输出 · toggle machine JSON
-  /role <role>          设置角色 · set role (${allowedRolesList()})
   /reset                清空会话 · clear messages (session kept)
 
 其他输入视为问题 · anything else is a question for the agent.`;
@@ -106,7 +95,7 @@ export interface ApplySlashCommandOpts {
 }
 
 /**
- * Apply a slash command. Mutates `ctx.state` for `/json`, `/role`, `/reset`.
+ * Apply a slash command. Mutates `ctx.state` for `/json` and `/reset`.
  *
  * No `mode_change` variant — CLI no longer has an agent-mode concept (Q3).
  */
@@ -127,12 +116,9 @@ export function applySlashCommand(opts: ApplySlashCommandOpts): SlashEffect {
     case "json":
       return applyJson({ args, ctx });
 
-    case "role":
-      return applyRole({ args, ctx });
-
     case "reset":
       // Mutate in place so agents holding this state reference see the cleared
-      // messages. Session is intentionally preserved — `/role` survives reset.
+      // messages. Session is intentionally preserved across reset.
       ctx.state.messages = [];
       return { type: "reset", message: "Session cleared." };
 
@@ -153,7 +139,6 @@ export function applySlashCommand(opts: ApplySlashCommandOpts): SlashEffect {
 function formatStatus(ctx: SlashContext): string {
   const { state } = ctx;
   return [
-    `role=${state.session.caller_role}`,
     `json=${state.jsonMode ? "on" : "off"}`,
     `messages=${state.messages.length}`,
   ].join("  ");
@@ -175,32 +160,5 @@ function applyJson(opts: {
   return {
     type: "info",
     text: `JSON output: ${ctx.state.jsonMode ? "on" : "off"}`,
-  };
-}
-
-function applyRole(opts: {
-  readonly args: string[];
-  readonly ctx: SlashContext;
-}): SlashEffect {
-  const { args, ctx } = opts;
-  const raw = args[0];
-  if (raw === undefined || raw === "") {
-    return {
-      type: "error",
-      text: `Usage: /role <${allowedRolesList()}>`,
-    };
-  }
-  let role: CallerRole;
-  try {
-    role = parseCallerRole(raw);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return { type: "error", text: msg };
-  }
-  // Mutate in place so agents holding this session reference see the new role.
-  ctx.state.session.caller_role = role;
-  return {
-    type: "info",
-    text: `Role set to ${role}`,
   };
 }

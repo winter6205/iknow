@@ -134,7 +134,6 @@ describe("createSession", () => {
     const res = await hub.createSession();
     assert.ok(res.session.conversation_id.length > 0);
     assert.equal(res.session.turn_count, 0);
-    assert.equal(res.session.mode, "deterministic");
     assert.deepEqual(res.turns, []);
     // File exists on disk
     const loaded = await store.load(res.session.conversation_id);

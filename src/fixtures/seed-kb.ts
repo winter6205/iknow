@@ -399,7 +399,6 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       freshness: "fresh",
       sensitivity: "sensitive",
       requires_approval: true,
-      roles_allowed: ["manager", "admin"],
     },
     chunks: [
       {
@@ -412,7 +411,7 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
     ],
   });
 
-  // edge-004: competitor external salary (deny non-admin)
+  // edge-004: competitor external salary (competitor_external sensitivity)
   addDoc({
     store,
     doc: {
@@ -422,7 +421,6 @@ export function seedEnterpriseKb(store: InMemoryKnowledgeStore): void {
       title: "竞对薪酬结构（外部）",
       freshness: "fresh",
       sensitivity: "competitor_external",
-      roles_allowed: ["admin"],
     },
     chunks: [
       {

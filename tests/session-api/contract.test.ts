@@ -61,30 +61,14 @@ describe("SessionSummary (022 Q2-G4 role removal)", () => {
   it("does not carry a caller_role field", () => {
     const summary: SessionSummary = {
       conversation_id: "c1",
-      mode: "deterministic",
       json_mode: false,
       turn_count: 3,
       prior_count: 1,
-      embeddings: false,
     };
     assert.ok(
       !("caller_role" in summary),
       "SessionSummary must not expose caller_role"
     );
-  });
-
-  it("mode is the surviving AgentMode union (deterministic | llm)", () => {
-    const det: SessionSummary = {
-      conversation_id: "c1",
-      mode: "deterministic",
-      json_mode: false,
-      turn_count: 0,
-      prior_count: 0,
-      embeddings: false,
-    };
-    const llm: SessionSummary = { ...det, mode: "llm" };
-    assert.equal(det.mode, "deterministic");
-    assert.equal(llm.mode, "llm");
   });
 });
 

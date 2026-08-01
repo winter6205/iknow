@@ -5,7 +5,7 @@
  * Three guarantees pinned:
  *   1. Multi-turn pipe: same ctx reused across queries strictly grows the
  *      `messages` history (host 续传 priorMessages via `run`'s 4th arg).
- *   2. `/reset` clears `messages` but preserves `session.caller_role`.
+ *   2. `/reset` clears `messages` but preserves the `session` object.
  *   3. `/status` reflects `state.messages.length` (NOT the old `turns.length`).
  *
  * Uses harness stubs (`createStubModel` / `createStubTool` / `createRegistry`
@@ -86,8 +86,9 @@ describe("processChatLine harness path", () => {
     );
   });
 
-  it("/reset clears messages but preserves session.caller_role", async () => {
-    // Seed messages + a non-default session role.
+  it("/reset clears messages but preserves the session object", async () => {
+    // Seed messages + a distinct session object.
+    const session = {};
     const ctx = makeCtx({
       responses: [],
       stateOverrides: {
@@ -95,7 +96,7 @@ describe("processChatLine harness path", () => {
           makeNative({ role: "user", text: "x" }),
           makeNative({ role: "assistant", text: "y" }),
         ],
-        session: { caller_role: "admin" },
+        session,
       },
     });
     assert.equal(ctx.state.messages.length, 2);
@@ -105,12 +106,12 @@ describe("processChatLine harness path", () => {
     assert.match(r.output, /cleared|Session/i);
     // /reset clears messages.
     assert.equal(ctx.state.messages.length, 0);
-    // /reset preserves session.
-    assert.equal(ctx.state.session.caller_role, "admin");
+    // /reset preserves the session object (same reference).
+    assert.equal(ctx.state.session, session);
   });
 
-  it("/status renders state.messages.length (NOT turns.length) + role + json", async () => {
-    // 020 frozen shape: `messages=N`, NOT `turns=N`. No `mode=` / `priors=`.
+  it("/status renders state.messages.length (NOT turns.length) + json", async () => {
+    // 020 frozen shape: `messages=N`, NOT `turns=N`. No `role=` / `mode=` / `priors=`.
     const state = makeState({
       messages: [
         makeNative({ role: "user", text: "a" }),
@@ -120,7 +121,6 @@ describe("processChatLine harness path", () => {
         makeNative({ role: "user", text: "e" }),
       ],
       jsonMode: false,
-      session: { caller_role: "manager" },
     });
     // Drive through applySlashCommand directly to assert the canonical line
     // (this is the same path processChatLine uses for slash lines).
@@ -132,12 +132,12 @@ describe("processChatLine harness path", () => {
     assert.equal(eff.type, "info");
     if (eff.type !== "info") return;
     assert.match(eff.text, /messages=5/);
-    assert.match(eff.text, /role=manager/);
     assert.match(eff.text, /json=off/);
     assert.ok(
       !eff.text.includes("turns="),
       "status must not contain the removed `turns=` line"
     );
+    assert.ok(!eff.text.includes("role="));
     assert.ok(!eff.text.includes("mode="));
     assert.ok(!eff.text.includes("priors="));
   });

@@ -46,12 +46,11 @@ describe("parseArgs", () => {
 
   it("flags-only on TTY defaults to chat", () => {
     const p = parseArgs({
-      argv: ["--json", "--role", "manager"],
+      argv: ["--json"],
       interactive: true,
     });
     assert.equal(p.command, "chat");
     assert.equal(p.json, true);
-    assert.equal(p.role, "manager");
   });
 
   it("flags-only non-TTY defaults to help", () => {
@@ -117,14 +116,13 @@ describe("usage / version", () => {
     assert.match(getVersion(), /^\d+\.\d+\.\d+/);
   });
 
-  it("usageText mentions chat and ask (bilingual) and does NOT mention --mode", () => {
+  it("usageText mentions chat and ask (bilingual) and does NOT mention --mode / --role", () => {
     const t = usageText();
     assert.match(t, /chat/);
     assert.match(t, /ask/);
     assert.match(t, /iknow/);
     assert.match(t, /交互对话|interactive chat/i);
     assert.match(t, /单次 JSON|one-shot JSON/i);
-    assert.match(t, /--role/);
     // 020 cutover: --mode flag and /mode command are gone.
     assert.ok(
       !t.includes("--mode"),
@@ -133,6 +131,19 @@ describe("usage / version", () => {
     assert.ok(
       !t.includes("/mode"),
       "usageText must not advertise the removed /mode slash command"
+    );
+    // caller_role machinery retired: --role flag and --governance-timeout are gone.
+    assert.ok(
+      !t.includes("--role"),
+      "usageText must not advertise the removed --role flag"
+    );
+    assert.ok(
+      !t.includes("/role"),
+      "usageText must not advertise the removed /role slash command"
+    );
+    assert.ok(
+      !t.includes("--governance-timeout"),
+      "usageText must not advertise the removed --governance-timeout flag"
     );
   });
 });
@@ -156,7 +167,7 @@ describe("isInteractive", () => {
 });
 
 describe("slash /status", () => {
-  it("renders messages.length + role + jsonMode; no mode=/priors= lines", () => {
+  it("renders messages.length + jsonMode; no role=/mode=/priors= lines", () => {
     // 020: applySlashCommand now lives in src/cli/slash.ts with CliChatState.
     // Status text uses `messages=N`, NOT `turns=N` and NOT `priors=N`.
     const state = makeState({
@@ -165,7 +176,6 @@ describe("slash /status", () => {
         makeNative({ role: "assistant", text: "a" }),
       ],
       jsonMode: true,
-      session: { caller_role: "employee" },
     });
     const effect = applySlashCommand({
       command: "status",
@@ -175,8 +185,8 @@ describe("slash /status", () => {
     assert.equal(effect.type, "info");
     if (effect.type !== "info") return;
     assert.match(effect.text, /messages=2/);
-    assert.match(effect.text, /role=employee/);
     assert.match(effect.text, /json=on/);
+    assert.ok(!effect.text.includes("role="), "no role= line in status");
     assert.ok(!effect.text.includes("mode="), "no mode= line in status");
     assert.ok(!effect.text.includes("priors="), "no priors= line in status");
   });
@@ -201,13 +211,12 @@ describe("processChatLine (pipe simulation)", () => {
     assert.equal(quit.quit, true);
   });
 
-  it("slash /status via processChatLine — host wires messages=N + role + json", async () => {
+  it("slash /status via processChatLine — host wires messages=N + json", async () => {
     const state = makeState({
       messages: [
         makeNative({ role: "user", text: "q" }),
         makeNative({ role: "assistant", text: "a" }),
       ],
-      session: { caller_role: "employee" },
     });
     const ctx: ChatLineContext = {
       deps: makeCtx({ responses: [] }).deps,
@@ -215,11 +224,11 @@ describe("processChatLine (pipe simulation)", () => {
     };
     const r = await processChatLine({ line: "/status", ctx });
     assert.equal(r.quit, false);
-    // 020 frozen shape: messages=N, role, json=off (default).
+    // 020 frozen shape: messages=N, json=off (default).
     assert.match(r.output, /messages=2/);
-    assert.match(r.output, /role=employee/);
     assert.match(r.output, /json=off/);
-    // NO legacy mode=/priors= lines (CLI no longer carries those concepts).
+    // NO legacy role=/mode=/priors= lines (CLI no longer carries those concepts).
+    assert.ok(!r.output.includes("role="));
     assert.ok(!r.output.includes("mode="));
     assert.ok(!r.output.includes("priors="));
   });
@@ -307,6 +316,7 @@ describe("processChatLine (pipe simulation)", () => {
         assistantResult({ texts: ["a"] }),
       ],
     });
+    const session = ctx.state.session;
     ctx.state.messages = [
       makeNative({ role: "user", text: "q" }),
       makeNative({ role: "assistant", text: "a" }),
@@ -317,8 +327,8 @@ describe("processChatLine (pipe simulation)", () => {
     assert.equal(r.quit, false);
     assert.match(r.output, /cleared|Session/i);
     assert.equal(ctx.state.messages.length, 0);
-    // Session survives reset.
-    assert.equal(ctx.state.session.caller_role, "employee");
+    // Session object survives reset (same reference).
+    assert.equal(ctx.state.session, session);
   });
 
   it("agent throw surfaces on stderr without quitting", async () => {

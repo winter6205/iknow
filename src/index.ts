@@ -16,19 +16,8 @@ export {
   seedDemoKnowledge,
 } from "./fixtures/seed-kb.js";
 
-export {
-  loadIknowEnv,
-  getApiKey,
-  assertOfflineCompatible,
-  assertToolProtocolSupported,
-} from "./config/env.js";
-export type {
-  IknowEnv,
-  EmbeddingEnv,
-  LlmEnv,
-  AgentMode,
-  EmbeddingMode,
-} from "./config/env.js";
+export { loadIknowEnv, getApiKey } from "./config/env.js";
+export type { IknowEnv, LlmEnv } from "./config/env.js";
 
 export { createIknowRuntime } from "./runtime/create-runtime.js";
 export type {
@@ -37,5 +26,11 @@ export type {
 } from "./runtime/create-runtime.js";
 
 export type * from "./shared/schema.js";
-export * from "./shared/errors.js";
+export {
+  IknowError,
+  ValidationError,
+  NotFoundError,
+  isIknowError,
+} from "./shared/errors.js";
+export type { IknowErrorCode } from "./shared/errors.js";
 export { sha256Hex, buildSnapshotId, contentHash } from "./shared/hash.js";

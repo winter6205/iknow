@@ -3,10 +3,10 @@
  *
  * `parseChatLine` mirrors the old `src/interaction/slash.ts` line classifier
  * (case-insensitive command, args preserved). `applySlashCommand` covers the
- * dispatch table: quit/exit/help/?/status/json/role/reset/unknown/empty.
+ * dispatch table: quit/exit/help/?/status/json/reset/unknown/empty.
  *
- * Note: `/mode` is intentionally absent (CLI no longer carries an agent-mode
- * concept; Q3 resolution). Tests must NOT add a `/mode` expectation.
+ * Note: `/mode` and `/role` are intentionally absent (CLI no longer carries an
+ * agent-mode or caller-role concept). Tests must NOT add expectations for them.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -34,10 +34,10 @@ describe("parseChatLine", () => {
   });
 
   it("classifies slash with args (lowercases command, preserves args)", () => {
-    assert.deepEqual(parseChatLine("/role manager"), {
+    assert.deepEqual(parseChatLine("/json ON"), {
       kind: "slash",
-      command: "role",
-      args: ["manager"],
+      command: "json",
+      args: ["ON"],
     });
   });
 
@@ -84,7 +84,7 @@ describe("applySlashCommand", () => {
     );
   });
 
-  it("status → reflects state (role=manager, json=on, messages=3); NO mode=/priors=", () => {
+  it("status → reflects state (json=on, messages=3); NO role=/mode=/priors=", () => {
     const state = makeState({
       messages: [
         makeNative({ role: "user", text: "a" }),
@@ -92,15 +92,14 @@ describe("applySlashCommand", () => {
         makeNative({ role: "user", text: "c" }),
       ],
       jsonMode: true,
-      session: { caller_role: "manager" },
     });
     const ctx = { state };
     const eff = applySlashCommand({ command: "status", args: [], ctx });
     assert.strictEqual(eff.type, "info");
     if (eff.type !== "info") return;
-    assert.ok(eff.text.includes("role=manager"));
     assert.ok(eff.text.includes("json=on"));
     assert.ok(eff.text.includes("messages=3"));
+    assert.ok(!eff.text.includes("role="), "must not contain 'role=' line");
     assert.ok(!eff.text.includes("mode="), "must not contain 'mode=' line");
     assert.ok(!eff.text.includes("priors="), "must not contain 'priors=' line");
   });
@@ -155,56 +154,14 @@ describe("applySlashCommand", () => {
     assert.strictEqual(badArg.text, "Usage: /json on|off");
   });
 
-  it("role valid (manager) → mutates caller_role + info 'Role set to manager'", () => {
-    const state = makeState({ session: { caller_role: "employee" } });
-    const ctx = { state };
-    const eff = applySlashCommand({
-      command: "role",
-      args: ["manager"],
-      ctx,
-    });
-    assert.strictEqual(eff.type, "info");
-    if (eff.type !== "info") return;
-    assert.strictEqual(state.session.caller_role, "manager");
-    assert.strictEqual(eff.text, "Role set to manager");
-  });
-
-  it("role invalid (wizard) → error message from parseCallerRole", () => {
-    const state = makeState();
-    const ctx = { state };
-    const eff = applySlashCommand({
-      command: "role",
-      args: ["wizard"],
-      ctx,
-    });
-    assert.strictEqual(eff.type, "error");
-    if (eff.type !== "error") return;
-    // parseCallerRole throws with "Invalid caller role:" prefix.
-    assert.match(eff.text, /Invalid caller role/);
-    // Caller-role must NOT have changed.
-    assert.strictEqual(state.session.caller_role, "employee");
-  });
-
-  it("role missing → error 'Usage: /role <employee|manager|admin>'", () => {
-    const state = makeState();
-    const ctx = { state };
-    const eff = applySlashCommand({
-      command: "role",
-      args: [],
-      ctx,
-    });
-    assert.strictEqual(eff.type, "error");
-    if (eff.type !== "error") return;
-    assert.strictEqual(eff.text, "Usage: /role <employee|manager|admin>");
-  });
-
-  it("reset → clears messages to [], preserves session.caller_role", () => {
+  it("reset → clears messages to [], preserves session object identity", () => {
+    const session = {};
     const state = makeState({
       messages: [
         makeNative({ role: "user", text: "a" }),
         makeNative({ role: "user", text: "b" }),
       ],
-      session: { caller_role: "admin" },
+      session,
     });
     const ctx = { state };
     const eff = applySlashCommand({
@@ -215,7 +172,7 @@ describe("applySlashCommand", () => {
     assert.strictEqual(eff.type, "reset");
     if (eff.type !== "reset") return;
     assert.deepEqual([...state.messages], []);
-    assert.strictEqual(state.session.caller_role, "admin");
+    assert.strictEqual(state.session, session, "session object preserved");
     assert.match(eff.message, /Session cleared/i);
   });
 

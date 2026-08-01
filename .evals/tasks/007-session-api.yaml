@@ -1,6 +1,6 @@
 id: "007"
 description: Session HTTP API tests pass (hub + routes + static UI shell)
-test_command: npx tsx --test tests/session-api.test.ts
+test_command: npx vitest run tests/session-api/
 success: "pass"
 budget:
   max_turns: 1

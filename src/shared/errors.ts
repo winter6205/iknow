@@ -1,15 +1,6 @@
 /** Typed errors for iknow (S3). */
 
-export type IknowErrorCode =
-  | "VALIDATION"
-  | "NOT_FOUND"
-  | "PERMISSION_DENIED"
-  | "VERSION_STALE"
-  | "GOVERNANCE_TIMEOUT"
-  | "COMPILE_FAILED"
-  | "G2_REQUIRED"
-  | "MAX_HOPS"
-  | "NETWORK";
+export type IknowErrorCode = "VALIDATION" | "NOT_FOUND";
 
 export class IknowError extends Error {
   readonly code: IknowErrorCode;
@@ -18,7 +9,7 @@ export class IknowError extends Error {
   constructor(
     code: IknowErrorCode,
     message: string,
-    details?: Record<string, unknown>,
+    details?: Record<string, unknown>
   ) {
     super(message);
     this.name = "IknowError";
@@ -39,57 +30,6 @@ export class NotFoundError extends IknowError {
   constructor(message: string, details?: Record<string, unknown>) {
     super("NOT_FOUND", message, details);
     this.name = "NotFoundError";
-  }
-}
-
-export class PermissionDeniedError extends IknowError {
-  constructor(message: string, details?: Record<string, unknown>) {
-    super("PERMISSION_DENIED", message, details);
-    this.name = "PermissionDeniedError";
-  }
-}
-
-export class VersionStaleError extends IknowError {
-  constructor(message: string, details?: Record<string, unknown>) {
-    super("VERSION_STALE", message, details);
-    this.name = "VersionStaleError";
-  }
-}
-
-export class GovernanceTimeoutError extends IknowError {
-  constructor(message: string, details?: Record<string, unknown>) {
-    super("GOVERNANCE_TIMEOUT", message, details);
-    this.name = "GovernanceTimeoutError";
-  }
-}
-
-export class CompileFailedError extends IknowError {
-  constructor(message: string, details?: Record<string, unknown>) {
-    super("COMPILE_FAILED", message, details);
-    this.name = "CompileFailedError";
-  }
-}
-
-export class NetworkError extends IknowError {
-  constructor(message: string, details?: Record<string, unknown>) {
-    super("NETWORK", message, details);
-    this.name = "NetworkError";
-  }
-}
-
-/** Thrown when agent hop budget is exhausted. */
-export class MaxHopsError extends IknowError {
-  constructor(message: string, details?: Record<string, unknown>) {
-    super("MAX_HOPS", message, details);
-    this.name = "MaxHopsError";
-  }
-}
-
-/** Thrown when a final answer omits required G2 snapshot_id. */
-export class G2RequiredError extends IknowError {
-  constructor(message: string, details?: Record<string, unknown>) {
-    super("G2_REQUIRED", message, details);
-    this.name = "G2RequiredError";
   }
 }
 

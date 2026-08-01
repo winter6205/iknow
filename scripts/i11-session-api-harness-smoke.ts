@@ -305,7 +305,6 @@ async function runHubWithDeps(
       deps,
       defaultMode: "llm",
       defaultJsonMode: false,
-      defaultEmbeddings: false,
     });
     const created = await hub.createSession();
     const conversationId = created.session.conversation_id;

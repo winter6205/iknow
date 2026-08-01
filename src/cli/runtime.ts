@@ -28,7 +28,7 @@ import { createFsEditTool } from "../harness/aci/tools/fs-edit.js";
 import { createShellExecTool } from "../harness/aci/tools/shell-exec.js";
 import { createContextManagerTool } from "../harness/aci/tools/context-manager.js";
 import { loadIknowEnv, type IknowEnv } from "../config/env.js";
-import type { CallerRole, SessionContext } from "../shared/schema.js";
+import type { SessionContext } from "../shared/schema.js";
 import { createIknowRuntime } from "../runtime/create-runtime.js";
 import type { InMemoryKnowledgeStore } from "../knowledge-store/memory-store.js";
 
@@ -38,28 +38,11 @@ export type RuntimeBundle = {
   session: SessionContext;
 };
 
-export async function prepareRuntime(opts: {
-  role: CallerRole;
-  degrade: boolean;
-  embeddings: boolean;
-}): Promise<RuntimeBundle> {
-  if (opts.embeddings) {
-    process.env.IKNOW_EMBEDDING_MODE = "api";
-  }
-
+export async function prepareRuntime(): Promise<RuntimeBundle> {
   const env = loadIknowEnv();
-  if (opts.embeddings && !env.embedding.apiKey) {
-    throw new Error(
-      `embeddings requested but env var named by IKNOW_EMBEDDING_API_KEY_ENV (${env.embedding.apiKeyEnv}) is unset; omit --embeddings or set the key.`
-    );
-  }
-
   const { store, env: runtimeEnv } = await createIknowRuntime({ env });
 
-  const session: SessionContext = {
-    caller_role: opts.role,
-    simulate_governance_timeout: opts.degrade,
-  };
+  const session: SessionContext = {};
 
   return { store, env: runtimeEnv, session };
 }
@@ -94,6 +77,7 @@ export async function buildHarnessEngine(
     client,
     model: env.llm.model,
     maxTokens: env.llm.maxOutputTokens,
+    temperature: env.llm.temperature,
   });
   // ACI 工具集（CH04 装饰层原型，task #14 接线）。沙箱根 = process.cwd()
   // (CLI 在工程根跑时,agent 工作区与项目一致)。fs tools 的 root 软沙箱

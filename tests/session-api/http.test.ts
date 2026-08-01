@@ -128,7 +128,6 @@ describe("POST /api/v1/sessions", () => {
     const { status, body } = await postJson({
       path: "/api/v1/sessions",
       payload: {
-        mode: "deterministic",
         json_mode: false,
       },
     });
@@ -139,22 +138,8 @@ describe("POST /api/v1/sessions", () => {
     };
     assert.equal(typeof b.session.conversation_id, "string");
     assert.ok(b.session.conversation_id.length > 0);
-    assert.equal(b.session.mode, "deterministic");
     assert.equal(b.session.turn_count, 0);
     assert.deepEqual(b.turns, []);
-  });
-
-  it("returns 400 validation for invalid mode (nested shape)", async () => {
-    const { status, body } = await postJson({
-      path: "/api/v1/sessions",
-      payload: {
-        mode: "bogus",
-      },
-    });
-    assert.equal(status, 400);
-    assertNestedError({ body, kind: "validation" });
-    const b = body as { error: { field?: string } };
-    assert.equal(b.error.field, "mode");
   });
 
   it("returns 400 validation for non-object body", async () => {
@@ -387,15 +372,11 @@ describe("POST /api/v1/sessions — parseCreateBody edges", () => {
       path: "/api/v1/sessions",
       payload: {
         json_mode: true,
-        embeddings: true,
       },
     });
     assert.equal(status, 201);
-    const b = body as { session: { json_mode: boolean; embeddings: boolean } };
+    const b = body as { session: { json_mode: boolean } };
     assert.equal(b.session.json_mode, true);
-    // embeddings is a hub-level default, not taken from the request body
-    // (createSession reads this.defaults.embeddings); assert it stays false.
-    assert.equal(b.session.embeddings, false);
   });
 
   it("invalid JSON body → 400 validation", async () => {
@@ -414,7 +395,7 @@ describe("POST /api/v1/sessions — parseCreateBody edges", () => {
     const res = await fetch(`${origin}/api/v1/sessions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ mode: "deterministic", pad: big }),
+      body: JSON.stringify({ pad: big }),
     });
     const body = await res.json();
     assert.equal(res.status, 400);

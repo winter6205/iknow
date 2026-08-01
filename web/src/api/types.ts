@@ -1,8 +1,5 @@
 /** Mirror of session-http-api-v0 DTOs used by the product UI. */
 
-/** Matches AgentMode in src/config/env.ts. */
-export type AgentMode = "deterministic" | "llm";
-
 /** Mirrors harness StopReason (7 values). */
 export type StopReason =
   | "completed"
@@ -29,11 +26,9 @@ export type SessionListItem = {
 
 export type SessionSummary = {
   conversation_id: string;
-  mode: AgentMode;
   json_mode: boolean;
   turn_count: number;
   prior_count: number;
-  embeddings: boolean;
 };
 
 export type TurnDto = {

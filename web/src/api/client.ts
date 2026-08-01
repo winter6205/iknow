@@ -1,5 +1,4 @@
 import type {
-  AgentMode,
   ApiErrorBody,
   CreateSessionResponse,
   GetSessionResponse,
@@ -70,9 +69,7 @@ export function health(signal?: AbortSignal): Promise<HealthResponse> {
 
 export function createSession(
   body: {
-    mode?: AgentMode;
     json_mode?: boolean;
-    embeddings?: boolean;
   },
   signal?: AbortSignal
 ): Promise<CreateSessionResponse> {

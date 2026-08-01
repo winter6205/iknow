@@ -4,20 +4,20 @@ iknow is an independently packaged enterprise knowledge-base agent. Runtime code
 
 ## Capability modules
 
-| Module | Path | Responsibility |
-|--------|------|----------------|
-| ~~Retrieve~~ | `src/kb-retrieve/` (archived 023) | ~~Dual-arm ranking, RRF merge, A-filter → ranked chunks~~ |
-| ~~Verify~~ | `src/kb-verify/` (archived 023) | ~~Pure three-state citation support check (`source_span`)~~ |
-| ~~Compile~~ | `src/kb-compile/` (archived 023) | ~~Fact compile + content_hash dedup~~ |
-| ~~Governance~~ | `src/kb-governance/` (archived 023) | ~~Freshness, conflict, `snapshot_id`~~ |
-| Archived suites | `docs/archive/023-retire-kb-tools/`, `docs/archive/022-retire-agent-loop/` | Retired 4-tool suite + agent-loop facade |
-| Harness (Foundation) | `src/harness/` | Loop Engine + Anthropic adapter + Executor + Registry + ACI decor layer (`src/harness/aci/`); CLI product path runs through `buildHarnessEngine` (spec: `specs/minimum-sequential-agent-loop.md`) |
-| Runtime / config | `src/runtime/`, `src/config/` | Runtime bootstrap (`createIknowRuntime` returns `store + env`); `.env`+`process.env` loading |
-| Knowledge store | `src/knowledge-store/` | In-memory KB abstraction (replaceable later) |
-| Shared | `src/shared/` | Schema (`CallerRole` / `SessionContext`), errors, hashing helpers |
-| CLI / entry | `src/cli.ts`, `src/index.ts` | Dev/ask + `chat` REPL + `serve` entrypoints |
-| Session HTTP | `src/session-api/` | Multi-conversation hub + node:http API; static root prefers `web/dist` |
-| Web UI | `web/` | Vite + React + TypeScript SPA (product console); build → `web/dist`; see `docs/design/frontend-stack-upgrade-v1.md` |
+| Module               | Path                                                                       | Responsibility                                                                                                                                                                                    |
+| -------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ~~Retrieve~~         | `src/kb-retrieve/` (archived 023)                                          | ~~Dual-arm ranking, RRF merge, A-filter → ranked chunks~~                                                                                                                                         |
+| ~~Verify~~           | `src/kb-verify/` (archived 023)                                            | ~~Pure three-state citation support check (`source_span`)~~                                                                                                                                       |
+| ~~Compile~~          | `src/kb-compile/` (archived 023)                                           | ~~Fact compile + content_hash dedup~~                                                                                                                                                             |
+| ~~Governance~~       | `src/kb-governance/` (archived 023)                                        | ~~Freshness, conflict, `snapshot_id`~~                                                                                                                                                            |
+| Archived suites      | `docs/archive/023-retire-kb-tools/`, `docs/archive/022-retire-agent-loop/` | Retired 4-tool suite + agent-loop facade                                                                                                                                                          |
+| Harness (Foundation) | `src/harness/`                                                             | Loop Engine + Anthropic adapter + Executor + Registry + ACI decor layer (`src/harness/aci/`); CLI product path runs through `buildHarnessEngine` (spec: `specs/minimum-sequential-agent-loop.md`) |
+| Runtime / config     | `src/runtime/`, `src/config/`                                              | Runtime bootstrap (`createIknowRuntime` returns `store + env`); `.env`+`process.env` loading                                                                                                      |
+| Knowledge store      | `src/knowledge-store/`                                                     | In-memory KB abstraction (replaceable later)                                                                                                                                                      |
+| Shared               | `src/shared/`                                                              | Schema (`SessionContext`), errors, hashing helpers                                                                                                                                                |
+| CLI / entry          | `src/cli.ts`, `src/index.ts`                                               | Dev/ask + `chat` REPL + `serve` entrypoints                                                                                                                                                       |
+| Session HTTP         | `src/session-api/`                                                         | Multi-conversation hub + node:http API; static root prefers `web/dist`                                                                                                                            |
+| Web UI               | `web/`                                                                     | Vite + React + TypeScript SPA (product console); build → `web/dist`; see `docs/design/frontend-stack-upgrade-v1.md`                                                                               |
 
 ```text
 user query
@@ -34,15 +34,16 @@ user query
 > `docs/archive/023-retire-kb-tools/`。CLI 产品路径在 020 切到 harness 后已不再
 > 消费 `kb_*`，agent 执行层改由 harness ACI 装饰层（PR #95，`src/harness/aci/`）
 > 承接。`src/shared/schema.ts` 中的 `Kb*Input/Output` / `Chunk` / `PriorChunk` 等
-> 协议类型同步删除；`CallerRole` / `SessionContext` 保留（CLI slash + banner 仍用）。
+> 协议类型同步删除；`SessionContext` 保留为空 harness 注入标记（harness 注入点保留），
+> 授权由 harness ACI 装饰层逐次工具调用承接，`caller_role` 角色枚举已移除。
 
 ## Design truth vs reference
 
-| Asset | Role |
-|-------|------|
-| `docs/iknow-spec/` | **Design truth** — ADR, tool-schema, eval, handoff |
-| `docs/iknow-spec/docs/protocol/ADR-v0.1-assumptions-p3.md` | Open P3 assumptions (pending ratification) |
-| `_upstream_gbrain/` | **Reference only** — gitignored snapshot of upstream gbrain |
+| Asset                                                      | Role                                                        |
+| ---------------------------------------------------------- | ----------------------------------------------------------- |
+| `docs/iknow-spec/`                                         | **Design truth** — ADR, tool-schema, eval, handoff          |
+| `docs/iknow-spec/docs/protocol/ADR-v0.1-assumptions-p3.md` | Open P3 assumptions (pending ratification)                  |
+| `_upstream_gbrain/`                                        | **Reference only** — gitignored snapshot of upstream gbrain |
 
 ## The upstream checkout is reference-only, not a runtime dependency
 

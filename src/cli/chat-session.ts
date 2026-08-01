@@ -26,8 +26,6 @@ export type ChatSessionOpts = {
   deps: LoopEngineDeps;
   session: SessionContext;
   jsonMode: boolean;
-  /** Optional note for banner (e.g. embeddings on/off). */
-  embeddingsNote?: string;
   /**
    * Quiet pipe mode: no turn markers on stderr.
    * Default: true when `IKNOW_CHAT_QUIET=1`, else false.
@@ -168,34 +166,24 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
   const ctx: ChatLineContext = { deps: opts.deps, state };
 
   const interactive = isInteractive();
-  const emb =
-    opts.embeddingsNote ??
-    (process.env.IKNOW_EMBEDDING_MODE === "api"
-      ? "embeddings=api"
-      : "embeddings=off");
 
   if (interactive) {
-    await runInteractive({ ctx, emb });
+    await runInteractive({ ctx });
   } else {
     await runPiped({ ctx, quiet: resolveQuiet(opts.quiet) });
   }
 }
 
-function printBanner(opts: {
-  readonly state: CliChatState;
-  readonly emb: string;
-}): void {
-  const { state, emb } = opts;
-  writeErr(`iknow chat  role=${state.session.caller_role}  ${emb}`);
+function printBanner(): void {
+  writeErr("iknow chat");
   writeErr("输入问题开始对话。/help 查看命令 · /quit 或 Ctrl+D 退出");
 }
 
 async function runInteractive(opts: {
   readonly ctx: ChatLineContext;
-  readonly emb: string;
 }): Promise<void> {
-  const { ctx, emb } = opts;
-  printBanner({ state: ctx.state, emb });
+  const { ctx } = opts;
+  printBanner();
 
   const rl = readline.createInterface({
     input: process.stdin,

@@ -135,9 +135,8 @@ _Avoid_: bare `JSON.parse(raw)` on 9router chat responses
 Documented three-mode + HTTP interaction smoke under `docs/handoff/i4-smoke/` (no secrets in artifacts).
 _Avoid_: claiming interactive product complete without I4 evidence
 
-**NINE_ROUTER_KEY**:
-SSOT env var name for the 9router API key, used by **both** LLM and embedding. Baked into `src/config/env.ts` as the code default of `IKNOW_LLM_API_KEY_ENV` / `IKNOW_EMBEDDING_API_KEY_ENV` (ADR-0001); `.env.local` only needs to hold the secret value, not re-declare the var name. Value must be the active key 9router accepts for the endpoint in use.
-_Avoid_: `NINE_ROUTER_API_KEY` (historical name, retained in test KEYS allowlist for legacy-shell residue only); renaming the env var ad-hoc; treating `GET /v1/models` 200 as proof that chat/embeddings will 200
+**NINE_ROUTER_KEY**: SSOT env var name for the 9router API key, used by the LLM client. Baked into `src/config/env.ts` as the code default of `IKNOW_LLM_API_KEY_ENV` (ADR-0001); `.env.local` only needs to hold the secret value, not re-declare the var name. Value must be the active key 9router accepts for the endpoint in use.
+_Avoid_: `NINE_ROUTER_API_KEY` (historical name, retained in test KEYS allowlist for legacy-shell residue only); renaming the env var ad-hoc; treating `GET /v1/models` 200 as proof that `chat/completions` will 200
 
 **project stack defaults (SSOT boundary)**:
 iknow 的 9router 栈（key 变量名 `NINE_ROUTER_KEY`、主模型 `m3-combo`、provider/baseUrl）是**项目级决策**，焊进 `src/config/env.ts` 代码默认（ADR-0001），而非每机 `.env.local` 配置。`.env.local` 的职责收窄为「持有密钥值 + 机器级覆盖」；若在 `.env.local` 重复声明 `IKNOW_LLM_API_KEY_ENV` / `IKNOW_LLM_MODEL`，会形成第二源并制造 drift。
@@ -182,8 +181,7 @@ _Avoid_: `(entity_id, snapshot_id, valid_window)`（仓库无此表述）/ 把 `
 - **ordinal vs ts**: log field is `ordinal` (1-based sequence); do not use `ts` for tool call order
 - **draft eval set**: `eval-set.draft.json` is DRAFT-EVAL-SET; hard_pass on draft ≠ production gate until real queries replace samples
 - **chat vs test harness**: product CLI is TTY/pipe-aware session code under `src/cli/`; unit tests call `processChatLine` without claiming that is the product UX
-- **--mode vs env**: explicit CLI `--mode` wins over `IKNOW_AGENT_MODE`; env alone may still select llm when flag omitted
-- **9router key vs endpoint**: same `NINE_ROUTER_KEY` can yield `models` 200 while `chat/completions` or `embeddings` return 401; agent shell env may differ from operator interactive shell
+- **9router key vs endpoint**: same `NINE_ROUTER_KEY` can yield `models` 200 while `chat/completions` return 401; agent shell env may differ from operator interactive shell
 - **SSE trailer vs stream flag**: gateway may return `text/event-stream` trailer even when client requested non-stream; use `parseLlmResponseJson`, not only `stream: false`
 - **turnCount vs max_hops**: `turnCount`（Foundation）统计每个已完成的 assistant 回合；`max_hops`（产品 / eval）只统计 retrieve + verify hop（默认 5）；两者属于不同层次，不得混同。
 - **cancelled vs timeout**: 两条独立停止路径--cancelled 由 Loop Engine 检测 `signal.aborted`，timeout 由 adapter/executor 超时结果判定；signal 优先，不在 signal 层合并超时。

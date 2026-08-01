@@ -1,11 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../api/client";
-import type {
-  AgentMode,
-  SessionSummary,
-  TurnAnswerDto,
-  TurnDto,
-} from "../api/types";
+import type { SessionSummary, TurnAnswerDto, TurnDto } from "../api/types";
 import { SessionApiError } from "../api/types";
 
 export type ChatPhase = "loading" | "ready" | "sending" | "error";
@@ -31,7 +26,6 @@ export type SessionChatState = {
   /** Latest agent answer (null before first turn). */
   lastAnswer: TurnAnswerDto | null;
   healthLabel: string | null;
-  mode: AgentMode;
 };
 
 export type SessionChatApi = SessionChatState & {
@@ -132,14 +126,12 @@ const INITIAL: SessionChatState = {
   messages: [],
   lastAnswer: null,
   healthLabel: null,
-  mode: "deterministic",
 };
 
 export function useSessionChat(): SessionChatApi {
   const [state, setState] = useState<SessionChatState>(INITIAL);
   const bootGen = useRef(0);
   const sessionIdRef = useRef<string | null>(null);
-  const modeRef = useRef<AgentMode>(INITIAL.mode);
 
   const applySession = useCallback(
     (
@@ -148,9 +140,8 @@ export function useSessionChat(): SessionChatApi {
       extras: ApplySessionExtras = {}
     ) => {
       sessionIdRef.current = session.conversation_id;
-      modeRef.current = session.mode;
       const messages = turnsToMessages(turns);
-      // Spread extras first so derived session/messages/mode always win.
+      // Spread extras first so derived session/messages always win.
       setState((prev) => ({
         ...prev,
         ...extras,
@@ -159,7 +150,6 @@ export function useSessionChat(): SessionChatApi {
         session,
         messages,
         lastAnswer: lastAnswerFromMessages(messages),
-        mode: session.mode,
       }));
     },
     []
@@ -184,7 +174,7 @@ export function useSessionChat(): SessionChatApi {
   /** Create a fresh session and adopt it. */
   const createAndAdopt = useCallback(
     async (gen: number, extras: ApplySessionExtras = {}) => {
-      const created = await api.createSession({ mode: modeRef.current });
+      const created = await api.createSession({});
       if (gen !== bootGen.current) return;
       writeStoredSessionId(created.session.conversation_id);
       applySession(created.session, created.turns, extras);
@@ -268,7 +258,6 @@ export function useSessionChat(): SessionChatApi {
       const res = await api.postMessage(id, trimmed);
       if (gen !== bootGen.current) return;
       sessionIdRef.current = res.session.conversation_id;
-      modeRef.current = res.session.mode;
       const agentMsg: ChatUiMessage = {
         id: `a-${Date.now()}-${queryIdSlice(trimmed)}`,
         role: "agent",
@@ -280,7 +269,6 @@ export function useSessionChat(): SessionChatApi {
         phase: "ready",
         error: null,
         session: res.session,
-        mode: res.session.mode,
         messages: [...prev.messages, agentMsg],
         lastAnswer: res.turn.answer,
       }));

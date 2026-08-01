@@ -40,15 +40,12 @@ export function usageText(): string {
   iknow -V | --version          打印版本 / print version
 
 选项 / Options:
-  --role employee|manager|admin 调用角色，默认 employee / caller role (default employee)
-  --embeddings                  启用向量检索臂 / enable embedding vector arm
   --json                        聊天开始即用 JSON 输出 / chat starts with JSON answers
-  --governance-timeout          模拟治理超时降级路径 / simulate governance timeout degrade
   --port <n>                    serve 监听端口，默认 8787 / serve port (default 8787)
   --host <addr>                 serve 绑定地址，默认 127.0.0.1 / serve host (default 127.0.0.1)
 
 会话内命令 / In-chat commands:
-  /help  /status  /quit  /json on|off  /role <r>  /reset
+  /help  /status  /quit  /json on|off  /reset
 
 说明 / Notes:
   • TTY 无参数 → chat；管道/非 TTY 无参数 → 用法 / no args: TTY→chat, piped→usage

@@ -22,7 +22,6 @@ async function main(): Promise<void> {
   console.log("loader_fp=" + fp(key));
   console.log("baseUrl=" + e.llm.baseUrl);
   console.log("llm_model=" + e.llm.model);
-  console.log("emb_model=" + e.embedding.model);
 
   if (!key) {
     console.log("no_key");
@@ -35,7 +34,7 @@ async function main(): Promise<void> {
   async function hit(
     label: string,
     path: string,
-    init?: RequestInit,
+    init?: RequestInit
   ): Promise<void> {
     try {
       const res = await fetch(base + path, {
@@ -59,26 +58,16 @@ async function main(): Promise<void> {
           res.status +
           (code ? " code=" + code : "") +
           " body_len=" +
-          text.length,
+          text.length
       );
     } catch (err) {
       console.log(
-        label +
-          "_error=" +
-          (err instanceof Error ? err.message : String(err)),
+        label + "_error=" + (err instanceof Error ? err.message : String(err))
       );
     }
   }
 
   await hit("models", "/models", { method: "GET" });
-  await hit("embeddings", "/embeddings", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: e.embedding.model,
-      input: ["hi"],
-    }),
-  });
   await hit("chat", "/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

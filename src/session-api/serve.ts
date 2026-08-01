@@ -1,19 +1,15 @@
 /**
  * Bootstrap: SessionHub + HTTP listen + static web.
- * 022 T5: SessionStore required (hub needs it); AgentMode replaces
- * AgentModeCli; caller_role retired from wire.
+ * 022 T5: SessionStore required (hub needs it); caller_role retired from wire.
  */
 import * as path from "node:path";
 import { SessionHub, type SessionHubOptions } from "./hub.js";
 import { listenSessionServer, type ListeningServer } from "./http.js";
 import { SessionStore } from "./store/index.js";
-import type { AgentMode } from "../config/env.js";
 
 export type ServeOptions = {
   host?: string;
   port?: number;
-  mode?: AgentMode;
-  embeddings?: boolean;
   json_mode?: boolean;
   /** Base dir for session files; defaults to <cwd>/data. */
   dataDir?: string;
@@ -32,8 +28,6 @@ export async function startSessionServe(
 
   const hub = new SessionHub({
     store,
-    defaultMode: opts?.mode ?? "deterministic",
-    defaultEmbeddings: opts?.embeddings ?? false,
     defaultJsonMode: opts?.json_mode ?? false,
     traceOut: opts?.traceOut,
     ...opts?.hubOptions,

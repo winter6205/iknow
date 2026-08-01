@@ -17,7 +17,6 @@ import {
 } from "../../src/session-api/serve.ts";
 import type { ListeningServer } from "../../src/session-api/http.ts";
 import type { SessionHub } from "../../src/session-api/hub.ts";
-import type { AgentMode } from "../../src/config/env.ts";
 
 // -- per-test cleanup --------------------------------------------------------
 
@@ -107,26 +106,23 @@ describe("startSessionServe — host default", () => {
   });
 });
 
-// -- mode / embeddings / json_mode propagation ------------------------------
+// -- json_mode propagation ---------------------------------------------------
 
 describe("startSessionServe — option propagation", () => {
-  it("passes mode / json_mode / embeddings defaults into hub", async () => {
-    const mode: AgentMode = "deterministic";
+  it("passes json_mode default into hub", async () => {
     const { hub: h, listening: ls } = await start({
       port: 0,
-      mode,
       json_mode: true,
-      embeddings: true,
     });
-    // Verify by hitting POST /api/v1/sessions → session.mode reflects default
+    // Verify by hitting POST /api/v1/sessions → session.json_mode reflects default
     const res = await fetch(`http://${ls.host}:${ls.port}/api/v1/sessions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ mode }),
+      body: JSON.stringify({}),
     });
     assert.equal(res.status, 201);
-    const body = (await res.json()) as { session: { mode: string } };
-    assert.equal(body.session.mode, mode);
+    const body = (await res.json()) as { session: { json_mode: boolean } };
+    assert.equal(body.session.json_mode, true);
     // Reference hub to keep lint happy (not used in this assertion path)
     assert.ok(h);
   });

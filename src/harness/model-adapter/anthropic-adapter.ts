@@ -275,6 +275,8 @@ export interface RealAnthropicAdapterOptions {
   readonly model: string;
   /** SDK max_tokens(必须 > 0)。 */
   readonly maxTokens: number;
+  /** Sampling temperature (0.0–1.0). Omitted → SDK default. */
+  readonly temperature?: number;
 }
 
 /**
@@ -331,6 +333,9 @@ export function createRealAnthropicAdapter(
       max_tokens: opts.maxTokens,
       messages: state.messages as unknown as MessageParam[],
       ...(tools !== undefined ? { tools } : {}),
+      ...(opts.temperature !== undefined
+        ? { temperature: opts.temperature }
+        : {}),
     };
     const sdkResp = await opts.client.messages.create(params, { signal });
     return interpretMessage(sdkResp as SdkMessage);

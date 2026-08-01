@@ -76,7 +76,7 @@ export function makeState(over: Partial<CliChatState> = {}): CliChatState {
   return {
     messages: [],
     jsonMode: false,
-    session: { caller_role: "employee" },
+    session: {},
     ...over,
   };
 }
