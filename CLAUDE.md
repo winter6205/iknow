@@ -10,15 +10,15 @@
 
 ## 代码规范
 
-@.claude\rules\code-quality.md
+@.claude/rules/code-quality.md
 
 ## 测试规范
 
-@.claude\rules\test.md
+@.claude/rules/test.md
 
 ## 安全边界
 
-.claude\rules\security.md
+@.claude/rules/security-boundaries.md
 
 ## Completion
 
@@ -63,7 +63,7 @@ npm test          # vitest：unit + eval alignment + trajectory + harness
 - `_upstream_gbrain/` - 只读参考（gitignore），禁止 runtime 链接 / import / symlink / 动态加载。
 - `src/session-api/` 静态托管 `prefer web/dist`（无 dist 时回退 `web/`）。
 - `src/cli.ts` 是产品 CLI 入口：`chat`（TTY REPL / 管道）/ `ask`（oneshot JSON）/ `serve`（HTTP + SPA）。
-- 归档：`src/agent-loop/` + `src/interaction/`（`docs/archive/022-retire-agent-loop/`）；`src/kb-retrieve/` + `src/kb-verify/` + `src/kb-compile/` + `src/kb-governance/` + `src/tools/registry.ts`（`docs/archive/023-retire-kb-tools/`）。
+- 归档：`src/agent-loop/`（`docs/archive/022-retire-agent-loop/`）+ `src/interaction/`（`docs/archive/022-retire-interaction/`）；`src/kb-retrieve/` + `src/kb-verify/` + `src/kb-compile/` + `src/kb-governance/` + `src/tools/registry.ts`（`docs/archive/023-retire-kb-tools/`）。
 
 完整路径→职责见 `docs/architecture.md` Capability modules 表（真值，SSOT）。
 
