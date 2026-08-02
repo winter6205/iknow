@@ -1,10 +1,12 @@
 # Project Instructions for Claude Code
 
-## 上下文读取顺序
+## 读取规范
 
 每次开始任务时按需读取：只读取与当前任务相关的文件。
 
-定位阶段优先 codebase-memory（`get_architecture` / `search_graph` / `get_code_snippet`），再 `Read` 取具体符号；广扫描交给 `Explore` 子代理。
+定位代码先用codebase-memory建立索引。
+
+广扫描交给 `Explore` 子代理。
 
 ---
 
