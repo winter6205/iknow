@@ -66,6 +66,11 @@ docs/handoff/*
 # e2e evidence) are team artifacts; un-ignore the dir so the reports track.
 # Mirrors the i9-smoke / i10-smoke exceptions above.
 !docs/handoff/i11-smoke/
+# 118→132: i132 9router context-management passthrough probe (#132 wayfinder
+# task resolution: SDK server-side edit reuse is dead because 9router routes
+# to MiniMax M3, not Anthropic Claude; probe evidence is team artifact).
+# Mirrors the i9/i10/i11-smoke exceptions above.
+!docs/handoff/9router-context-mgmt-probe/
 
 # 022: session-api runtime JSON store (data/sessions/<id>.json), not team
 # content. The data/ top-level dir is kept via data/.gitkeep so the
