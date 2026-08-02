@@ -60,7 +60,7 @@ npm test          # vitest：unit + eval alignment + trajectory + harness
 
 ### Module boundaries
 
-- `src/harness/` - Foundation 运行时（loop-engine / anthropic-adapter / executor / registry）+ ACI 装饰层原型（`src/harness/aci/`，PR #95）。**CLI 产品路径已接入**（020 切 harness，task #14 接 ACI 工具），4-tool 协议类型冻结不动（`src/harness/tools/types.ts`）。
+- `src/harness/` - Foundation 运行时（loop-engine / anthropic-adapter / executor / registry）+ ACI 装饰层原型（`src/harness/aci/`，PR #95）。**CLI 产品路径已接入**（020 切 harness，task #14 接 ACI 工具）。
 - `src/harness/stubs/` - 替身 tool/model（仅供测试，i9 smoke + 单元测试装配；CLI 默认装配已用 ACI 工具替换）。
 - `_upstream_gbrain/` - 只读参考（gitignore），禁止 runtime 链接 / import / symlink / 动态加载。
 - `src/session-api/` 静态托管 `prefer web/dist`（无 dist 时回退 `web/`）。
