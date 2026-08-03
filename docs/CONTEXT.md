@@ -31,6 +31,12 @@ _Avoid_: 回滚已追加的 assistant 回合；悬空未回填的 tool call；�
 **required runtime layer / conditional remediation layer**: 017 的两层对仗边界--required runtime layer（signal / timeout / trace / cancelled-timeout 停止 / in-flight closeout）已实施；conditional remediation layer（自动重试、token-cost 护栏、trace B 层字段、工具分类超时、错误分类细化、总耗时独立 stop、OTel-span-metric 树）017 显式禁止，推迟到 018 真实接通后按 013 条件式修复原则补。
 _Avoid_: 把 conditional remediation layer 提前带入 Foundation 内核；以 `物理必需层` / `条件式修复层` 作为 canonical term 或 alias
 
+**executor truncation authority**（契约 X）: executor 是工具结果截断元数据的唯一权威--自测序列化后字符数、自截断、自合成标记；工具返回纯数据、不带 truncated/total 元字段，executor 永不信任工具声称的截断字段（防 MCP 第三方伪造绕过封顶）。#140 裁决，ADR-0004 / ADR-0006。
+_Avoid_: 工具自填 truncated/total 字段；executor 凭工具标记跳过兜底截断；以 `契约 X` 作为 canonical term（正文可作 alias 引用）
+
+**plain-string tool output**（契约 Y1）: 生产工具输出为纯字符串（对齐 OpenHarness wire 形态）；bash 是唯一例外，保留结构化 `{code, stdout, stderr}` 供 eval/trajectory（Y1b）。#140 裁决，ADR-0004。
+_Avoid_: 工具返回结构化 JSON payload + metadata 字段；把 bash 例外推广到其他工具；以 `契约 Y1` 作为 canonical term
+
 **Chunk**:
 A retrievable text unit from the enterprise KB, identified and returned by `kb_retrieve` with ranking metadata.
 _Avoid_: Document fragment, passage, snippet (unless speaking of UI display only)
