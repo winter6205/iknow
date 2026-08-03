@@ -25,9 +25,9 @@ user query
     ▼
  harness (src/harness/)  ──maxTurns──►  Anthropic adapter
     │
-    ├── fs_search / fs_view / fs_edit (ACI, read-only / write)
-    ├── shell_exec (ACI, allowlist-first shell)
-    └── context_manager (ACI, lazy observability compression)
+    ├── bash (ACI, execute; allowlist-first shell, #123 沙箱落地前过渡)
+    ├── read_file / grep / glob (ACI, read-only; 无状态 + 真 glob + 路径:行号:内容)
+    └── edit_file / write_file (ACI, write; poka-yoke linter)
 ```
 
 > 023 退役说明：`kb_*` 套件与其 vanilla facade `src/tools/registry.ts` 归档于

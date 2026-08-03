@@ -72,12 +72,12 @@ function makeSpyExecutor(): {
 describe("createAciExecutor — deny 路径不调 inner", () => {
   it("execute + 危险命令 → execution_failed [permission_denied]，inner 零调用", async () => {
     const { executor: spy, calls } = makeSpyExecutor();
-    const tool = makeTool({ name: "shell_exec", category: "execute" });
+    const tool = makeTool({ name: "bash", category: "execute" });
     const catalog = makeCatalog([tool]);
     const aciExec = createAciExecutor({ inner: spy, catalog });
 
     const results = await aciExec.executeAll([
-      { id: "u1", name: "shell_exec", input: { command: "rm -rf /" } },
+      { id: "u1", name: "bash", input: { command: "rm -rf /" } },
     ]);
 
     assert.equal(results.length, 1);
@@ -100,12 +100,12 @@ describe("createAciExecutor — deny 路径不调 inner", () => {
 describe("createAciExecutor — allow 路径委托 inner", () => {
   it("read-only 工具 → 委托 inner，返回 ok", async () => {
     const { executor: spy, calls } = makeSpyExecutor();
-    const tool = makeTool({ name: "fs_search", category: "read-only" });
+    const tool = makeTool({ name: "grep", category: "read-only" });
     const catalog = makeCatalog([tool]);
     const aciExec = createAciExecutor({ inner: spy, catalog });
 
     const results = await aciExec.executeAll([
-      { id: "u1", name: "fs_search", input: { pattern: "*.ts" } },
+      { id: "u1", name: "grep", input: { pattern: "*.ts" } },
     ]);
 
     assert.equal(results.length, 1);
@@ -116,12 +116,12 @@ describe("createAciExecutor — allow 路径委托 inner", () => {
 
   it("execute + 安全命令 → 委托 inner", async () => {
     const { executor: spy, calls } = makeSpyExecutor();
-    const tool = makeTool({ name: "shell_exec", category: "execute" });
+    const tool = makeTool({ name: "bash", category: "execute" });
     const catalog = makeCatalog([tool]);
     const aciExec = createAciExecutor({ inner: spy, catalog });
 
     const results = await aciExec.executeAll([
-      { id: "u2", name: "shell_exec", input: { command: "ls -la" } },
+      { id: "u2", name: "bash", input: { command: "ls -la" } },
     ]);
 
     assert.equal(results[0]!.kind, "ok");
@@ -133,16 +133,16 @@ describe("createAciExecutor — 顺序保持", () => {
   it("多个 call 按序执行，结果顺序与 calls 一致", async () => {
     const { executor: spy } = makeSpyExecutor();
     const tools = [
-      makeTool({ name: "fs_search", category: "read-only" }),
-      makeTool({ name: "fs_edit", category: "write" }),
+      makeTool({ name: "grep", category: "read-only" }),
+      makeTool({ name: "edit_file", category: "write" }),
     ];
     const catalog = makeCatalog(tools);
     const aciExec = createAciExecutor({ inner: spy, catalog });
 
     const results = await aciExec.executeAll([
-      { id: "a", name: "fs_search", input: {} },
-      { id: "b", name: "fs_edit", input: {} },
-      { id: "c", name: "fs_search", input: {} },
+      { id: "a", name: "grep", input: {} },
+      { id: "b", name: "edit_file", input: {} },
+      { id: "c", name: "grep", input: {} },
     ]);
 
     assert.equal(results.length, 3);
@@ -156,15 +156,15 @@ describe("createAciExecutor — 顺序保持", () => {
   it("混合 deny + allow：deny 不短路，后续 call 继续执行", async () => {
     const { executor: spy, calls } = makeSpyExecutor();
     const tools = [
-      makeTool({ name: "shell_exec", category: "execute" }),
-      makeTool({ name: "fs_search", category: "read-only" }),
+      makeTool({ name: "bash", category: "execute" }),
+      makeTool({ name: "grep", category: "read-only" }),
     ];
     const catalog = makeCatalog(tools);
     const aciExec = createAciExecutor({ inner: spy, catalog });
 
     const results = await aciExec.executeAll([
-      { id: "x", name: "shell_exec", input: { command: "rm -rf /" } },
-      { id: "y", name: "fs_search", input: {} },
+      { id: "x", name: "bash", input: { command: "rm -rf /" } },
+      { id: "y", name: "grep", input: {} },
     ]);
 
     assert.equal(results.length, 2);
@@ -197,7 +197,7 @@ describe("createAciExecutor — 未知工具交 inner", () => {
 describe("createAciExecutor — onDecision 钩子", () => {
   it("每次决策触发 onDecision，不影响决策结果", async () => {
     const { executor: spy } = makeSpyExecutor();
-    const tool = makeTool({ name: "shell_exec", category: "execute" });
+    const tool = makeTool({ name: "bash", category: "execute" });
     const catalog = makeCatalog([tool]);
     const decisions: Array<{ call: ToolCall; outcome: PermissionOutcome }> = [];
     const aciExec = createAciExecutor({
@@ -207,8 +207,8 @@ describe("createAciExecutor — onDecision 钩子", () => {
     });
 
     await aciExec.executeAll([
-      { id: "u1", name: "shell_exec", input: { command: "rm -rf /" } },
-      { id: "u2", name: "shell_exec", input: { command: "ls" } },
+      { id: "u1", name: "bash", input: { command: "rm -rf /" } },
+      { id: "u2", name: "bash", input: { command: "ls" } },
     ]);
 
     assert.equal(decisions.length, 2);
@@ -220,15 +220,15 @@ describe("createAciExecutor — onDecision 钩子", () => {
 describe("createAciExecutor — 自定义 policy", () => {
   it("byName always_deny 覆盖 read-only 默认", async () => {
     const { executor: spy, calls } = makeSpyExecutor();
-    const tool = makeTool({ name: "fs_search", category: "read-only" });
+    const tool = makeTool({ name: "grep", category: "read-only" });
     const catalog = makeCatalog([tool]);
     const policy = createPermissionPolicy({
-      byName: { fs_search: "always_deny" },
+      byName: { grep: "always_deny" },
     });
     const aciExec = createAciExecutor({ inner: spy, catalog, policy });
 
     const results = await aciExec.executeAll([
-      { id: "u1", name: "fs_search", input: {} },
+      { id: "u1", name: "grep", input: {} },
     ]);
 
     assert.equal(results[0]!.kind, "execution_failed");

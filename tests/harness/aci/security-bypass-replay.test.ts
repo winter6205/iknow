@@ -18,7 +18,7 @@ import {
 import type { AciToolDef } from "../../../src/harness/aci/index.ts";
 
 const execDef: AciToolDef = Object.freeze({
-  name: "shell_exec",
+  name: "bash",
   description: "exec",
   inputSchema: {
     type: "object",
@@ -104,7 +104,7 @@ const PAYLOADS: ReadonlyArray<Payload> = [
     label: "C4 always_allow + rm -fr",
     cmd: "rm -fr /tmp/x",
     expect: "deny",
-    policyOverride: { byName: { shell_exec: "always_allow" as const } },
+    policyOverride: { byName: { bash: "always_allow" as const } },
   },
 
   // 正向控制 — 必须放行（这些是 allowlist 的合法 base 命令 + 不含元字符）

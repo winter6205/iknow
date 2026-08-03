@@ -24,27 +24,167 @@ import type {
 
 const TIMEOUT = Symbol("executor-timeout");
 
+/** T3: ADR-0006 — executor 兜底截断阈值。字符级 = 当前唯一可行度量(token 核算等 #136)。 */
+const OUTPUT_HARD_CAP = 20000;
+
+/** T3: ADR-0006 + 计划 T1-1 — 截断标记模板。{original} / {kept} 占位。 */
+const TRUNCATION_MARKER_TEMPLATE =
+  "…[executor: 输出超长已截断，原长 {original} 字符，保留 {kept} 字符；如需更多信息，用更精确的输入重新调用]";
+
 function safeContent(payload: unknown): AnthropicContentBlock[] {
+  let text: string;
   if (typeof payload === "string") {
-    return [{ type: "text", text: payload }];
+    text = payload;
+  } else if (isJsonCompatible(payload)) {
+    text = JSON.stringify(payload);
+  } else {
+    // Tool/Adapter 越界:Executor 兜底,不抛错,只形成可修正信号(ADR-0005 L22)。
+    text = "[executor: payload not JSON-compatible]";
   }
-  if (isJsonCompatible(payload)) {
-    return [{ type: "text", text: JSON.stringify(payload) }];
-  }
-  // Tool/Adapter 越界:Executor 兜底,不抛错,只形成可修正信号。
-  return [{ type: "text", text: "[executor: payload not JSON-compatible]" }];
+  return [{ type: "text", text: applyOutputCap(text) }];
 }
 
+/**
+ * T3: ADR-0006 — 序列化后 > OUTPUT_HARD_CAP 字符 → 硬截断 + 追加 marker。
+ * marker 本身计入 OUTPUT_HARD_CAP 预算(kept = OUTPUT_HARD_CAP - marker.length)。
+ * 不落盘(ADR-0006 L14)。契约 X:executor 永远按实际序列化长度重新测量,
+ * 不信任 payload 内声称字段(truncated / total 等都可能是 MCP 第三方伪造)。
+ *
+ * 注:`kept` 的位数(1~5)会让最终 marker 长度在 ±4 字符内浮动,因此走
+ * "先估 → 验 → 不满足则收敛"的两阶段,保证最终总长严格 <= OUTPUT_HARD_CAP。
+ */
+function applyOutputCap(text: string): string {
+  if (text.length <= OUTPUT_HARD_CAP) return text;
+  const markerTemplate = TRUNCATION_MARKER_TEMPLATE.replace(
+    "{original}",
+    String(text.length)
+  );
+  // 第一阶段:用占位长度估算 kept(把 "{kept}" 视作最长的 5 字符,
+  // 等价于"按最坏情况预留",得到一个不会越界的下界)。
+  const estimateKept =
+    OUTPUT_HARD_CAP - markerTemplate.replace("{kept}", "99999").length;
+  let kept = Math.max(0, estimateKept);
+  // 第二阶段:用真实位数替换并验证;若总长越界则逐步缩减 kept 直到满足。
+  for (let i = 0; i < 8; i++) {
+    const finalMarker = markerTemplate.replace("{kept}", String(kept));
+    const totalLen = kept + finalMarker.length;
+    if (totalLen <= OUTPUT_HARD_CAP) {
+      return text.slice(0, kept) + finalMarker;
+    }
+    kept -= totalLen - OUTPUT_HARD_CAP;
+    if (kept < 0) kept = 0;
+  }
+  // 极端边界兜底(几乎不可达):截断到 OUTPUT_HARD_CAP,不加 marker。
+  return text.slice(0, OUTPUT_HARD_CAP);
+}
+
+/**
+ * T3: ADR-0005 B-2 — JSON 兼容性严格白名单。
+ *   - 放行:null / string / boolean / 有限 number / Array / 纯对象
+ *     (原型 === Object.prototype)。
+ *   - 拒绝:NaN / ±Infinity / Date / Map / Set / 类实例 / 循环引用。
+ *   - 防栈溢出:WeakSet 记录已访问对象,重复访问即拒绝。
+ */
 function isJsonCompatible(v: unknown): boolean {
+  return isJsonCompatibleInner(v, new WeakSet());
+}
+
+function isJsonCompatibleInner(v: unknown, seen: WeakSet<object>): boolean {
   if (v === null) return true;
   const t = typeof v;
-  if (t === "string" || t === "number" || t === "boolean") return true;
-  if (Array.isArray(v)) return v.every(isJsonCompatible);
+  if (t === "string" || t === "boolean") return true;
+  if (t === "number") return Number.isFinite(v as number);
+  if (Array.isArray(v)) {
+    if (seen.has(v)) return false;
+    seen.add(v);
+    return v.every((item) => isJsonCompatibleInner(item, seen));
+  }
   if (t === "object") {
     const o = v as Record<string, unknown>;
-    return Object.values(o).every(isJsonCompatible);
+    if (Object.getPrototypeOf(o) !== Object.prototype) return false;
+    if (seen.has(o)) return false;
+    seen.add(o);
+    return Object.values(o).every((value) =>
+      isJsonCompatibleInner(value, seen)
+    );
   }
   return false;
+}
+
+function buildStopSignal(
+  outerSignal: AbortSignal | undefined,
+  timeoutMs: number | undefined
+): { signal: AbortSignal | undefined; abort: () => void } {
+  const child = new AbortController();
+  const needUnifiedSignal =
+    outerSignal !== undefined || timeoutMs !== undefined;
+  const unifiedSignal = needUnifiedSignal
+    ? outerSignal !== undefined
+      ? AbortSignal.any([outerSignal, child.signal])
+      : child.signal
+    : undefined;
+  return { signal: unifiedSignal, abort: () => child.abort() };
+}
+
+async function raceWithTimeout<T>(
+  handlerPromise: Promise<T>,
+  timeoutMs: number,
+  onTimeout: () => void
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      onTimeout();
+      reject(TIMEOUT);
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([handlerPromise, timeoutPromise]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+type ToolDefinition = NonNullable<ReturnType<RegistryImpl["get"]>>;
+type CallValidation =
+  | { ok: true; def: ToolDefinition }
+  | { ok: false; failure: ToolExecutionResult };
+
+function validateCall(registry: RegistryImpl, call: ToolCall): CallValidation {
+  const def = registry.get(call.name);
+  if (!def) {
+    return {
+      ok: false,
+      failure: {
+        kind: "tool_not_found",
+        toolUseId: call.id,
+        toolName: call.name,
+      },
+    };
+  }
+  const validator = registry.getValidator(call.name);
+  if (!validator) {
+    // Registry 必须为其 get() 的工具暴露 validator;这是契约保证,不可达。
+    return {
+      ok: false,
+      failure: {
+        kind: "validation_failed",
+        toolUseId: call.id,
+        message: "validator not compiled for tool",
+      },
+    };
+  }
+  if (!validator(call.input)) {
+    return {
+      ok: false,
+      failure: {
+        kind: "validation_failed",
+        toolUseId: call.id,
+        message: formatAjvError(validator.errors),
+      },
+    };
+  }
+  return { ok: true, def };
 }
 
 /**
@@ -58,50 +198,19 @@ export function createExecutor(registry: RegistryImpl): Executor {
     signal?: AbortSignal,
     timeoutMs?: number
   ): Promise<ToolExecutionResult> {
-    const def = registry.get(call.name);
-    if (!def) {
-      return {
-        kind: "tool_not_found",
-        toolUseId: call.id,
-        toolName: call.name,
-      };
-    }
-    const validator = registry.getValidator(call.name);
-    if (!validator) {
-      // Registry 必须为其 get() 的工具暴露 validator;这是契约保证,不可达。
-      return {
-        kind: "validation_failed",
-        toolUseId: call.id,
-        message: "validator not compiled for tool",
-      };
-    }
-    if (!validator(call.input)) {
-      const msg = formatAjvError(validator.errors);
-      return {
-        kind: "validation_failed",
-        toolUseId: call.id,
-        message: msg,
-      };
-    }
-    // signal 原样透传,不创建子 signal,以保留调用方的取消身份。
-    const ctx: ToolExecutionContext = { signal };
+    const validation = validateCall(registry, call);
+    if (!validation.ok) return validation.failure;
+    const stop = buildStopSignal(signal, timeoutMs);
+    const ctx: ToolExecutionContext = { signal: stop.signal };
     try {
-      let out: unknown;
-      if (timeoutMs === undefined) {
-        out = await def.handler(call.input, ctx);
-      } else {
-        // timeout 在外层约束执行时长,不依赖 handler 内部支持取消。
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const handlerPromise = Promise.resolve(def.handler(call.input, ctx));
-        const timeoutPromise = new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(TIMEOUT), timeoutMs);
-        });
-        try {
-          out = await Promise.race([handlerPromise, timeoutPromise]);
-        } finally {
-          if (timer !== undefined) clearTimeout(timer);
-        }
-      }
+      const out =
+        timeoutMs === undefined
+          ? await validation.def.handler(call.input, ctx)
+          : await raceWithTimeout(
+              Promise.resolve(validation.def.handler(call.input, ctx)),
+              timeoutMs,
+              stop.abort
+            );
       return {
         kind: "ok",
         toolUseId: call.id,

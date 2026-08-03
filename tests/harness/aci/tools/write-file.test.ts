@@ -1,0 +1,204 @@
+import assert from "node:assert/strict";
+import {
+  access,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, it } from "vitest";
+
+import { ToolExecutionError } from "../../../../src/harness/errors.ts";
+import { createWriteFileTool } from "../../../../src/harness/aci/tools/write-file.ts";
+
+const scratchPaths: string[] = [];
+
+async function makeScratch(prefix: string): Promise<string> {
+  const path = await mkdtemp(join(tmpdir(), prefix));
+  scratchPaths.push(path);
+  return path;
+}
+
+async function doesNotExist(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw error;
+  }
+}
+
+afterEach(async () => {
+  await Promise.all(
+    scratchPaths
+      .splice(0)
+      .map((path) => rm(path, { recursive: true, force: true }))
+  );
+});
+
+describe("createWriteFileTool — schema and metadata", () => {
+  it("exposes the write_file schema with the documented defaults", async () => {
+    const root = await makeScratch("write-file-shape-");
+    const tool = createWriteFileTool(root);
+    const schema = tool.inputSchema as {
+      type: string;
+      properties: Record<string, Record<string, unknown>>;
+      required: string[];
+      additionalProperties: boolean;
+    };
+
+    assert.equal(tool.name, "write_file");
+    assert.equal(schema.type, "object");
+    assert.deepEqual(schema.required, ["path", "content"]);
+    assert.equal(schema.additionalProperties, false);
+    assert.equal(schema.properties.path.type, "string");
+    assert.equal(schema.properties.content.type, "string");
+    assert.equal(schema.properties.create_directories.type, "boolean");
+    assert.equal(schema.properties.create_directories.default, true);
+  });
+
+  it("uses the write metadata and blocking interrupt contract", async () => {
+    const root = await makeScratch("write-file-shape-");
+    const tool = createWriteFileTool(root);
+
+    assert.deepEqual(tool.aci, {
+      category: "write",
+      isReadOnly: false,
+      isDestructive: false,
+      isConcurrencySafe: false,
+      interruptBehavior: "block",
+    });
+  });
+});
+
+describe("write_file — successful writes", () => {
+  it("creates a new file and returns a stable relative-path confirmation", async () => {
+    const root = await makeScratch("write-file-create-");
+    const content = "const answer = 42;\n";
+    const tool = createWriteFileTool(root);
+
+    const result = (await tool.handler({
+      path: "new.ts",
+      content,
+    })) as string;
+
+    assert.equal(
+      result,
+      `[write_file] wrote ${Buffer.byteLength(content, "utf8")} bytes to new.ts`
+    );
+    assert.equal(await readFile(join(root, "new.ts"), "utf8"), content);
+  });
+
+  it("creates missing parent directories by default", async () => {
+    const root = await makeScratch("write-file-mkdir-");
+    const file = join(root, "one", "two", "three.txt");
+    const tool = createWriteFileTool(root);
+
+    await tool.handler({ path: "one/two/three.txt", content: "deep\n" });
+
+    assert.equal(await readFile(file, "utf8"), "deep\n");
+  });
+
+  it("overwrites the complete contents of an existing file", async () => {
+    const root = await makeScratch("write-file-overwrite-");
+    const file = join(root, "existing.txt");
+    await writeFile(file, "old contents\n", "utf8");
+    const tool = createWriteFileTool(root);
+
+    await tool.handler({ path: "existing.txt", content: "new contents\n" });
+
+    assert.equal(await readFile(file, "utf8"), "new contents\n");
+  });
+});
+
+describe("write_file — rejection and containment", () => {
+  it("rejects when create_directories=false and the parent is missing without creating a file", async () => {
+    const root = await makeScratch("write-file-no-mkdir-");
+    const file = join(root, "missing", "parent", "file.txt");
+    const tool = createWriteFileTool(root);
+
+    await assert.rejects(
+      () =>
+        tool.handler({
+          path: "missing/parent/file.txt",
+          content: "content\n",
+          create_directories: false,
+        }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError && error.message.includes("parent")
+    );
+    assert.equal(await doesNotExist(file), true);
+    assert.equal(await doesNotExist(join(root, "missing")), true);
+  });
+
+  it("rejects unbalanced content before creating a new file", async () => {
+    const root = await makeScratch("write-file-lint-new-");
+    const file = join(root, "not-created.ts");
+    const tool = createWriteFileTool(root);
+
+    await assert.rejects(
+      () => tool.handler({ path: "not-created.ts", content: "function f() {" }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("unclosed '{'")
+    );
+    assert.equal(await doesNotExist(file), true);
+  });
+
+  it("rejects unbalanced content without changing an existing file", async () => {
+    const root = await makeScratch("write-file-lint-existing-");
+    const file = join(root, "unchanged.ts");
+    const original = "const value = 1;\n";
+    await writeFile(file, original, "utf8");
+    const tool = createWriteFileTool(root);
+
+    await assert.rejects(
+      () => tool.handler({ path: "unchanged.ts", content: "function f() {" }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("lint rejected")
+    );
+    assert.equal(await readFile(file, "utf8"), original);
+  });
+
+  it("rejects a symlink target outside root before writing outside the workspace", async () => {
+    const root = await makeScratch("write-file-symlink-root-");
+    const outside = await makeScratch("write-file-symlink-outside-");
+    await symlink(outside, join(root, "escape"), "dir");
+    const outsideFile = join(outside, "created.txt");
+    const tool = createWriteFileTool(root);
+
+    await assert.rejects(
+      () => tool.handler({ path: "escape/created.txt", content: "nope\n" }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("outside workspace")
+    );
+    assert.equal(await doesNotExist(outsideFile), true);
+  });
+});
+
+describe("write_file — handler input validation", () => {
+  it("throws ToolExecutionError for missing required fields and unknown fields", async () => {
+    const root = await makeScratch("write-file-input-");
+    const tool = createWriteFileTool(root);
+
+    await assert.rejects(
+      () => tool.handler({ path: "x.txt" }),
+      ToolExecutionError
+    );
+    await assert.rejects(
+      () =>
+        tool.handler({
+          path: "x.txt",
+          content: "ok\n",
+          extra: true,
+        }),
+      ToolExecutionError
+    );
+  });
+});

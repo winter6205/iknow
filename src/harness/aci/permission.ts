@@ -34,11 +34,12 @@ export function createPermissionPolicy(
 }
 
 /**
- * shell_exec allowlist（白名单）—— execute 类别工具的主门。
+ * bash allowlist（白名单）—— execute 类别工具的主门。
  *
- * 仅允许这些首 token（小写、剥掉路径前缀）。任何其他首 token 直接拒绝。
- * 故意保守：原型验证形状用，**真产品应使用 OS 级沙箱 + 完整命令解析**，
- * 而非依赖白名单（毕业约束：见 docs/drafts/aci-prototype-contract.md §7）。
+ * OS 级沙箱（#123）落地前的过渡措施，仅在 #123 落地之前作为主门；
+ * 任何其他首 token 直接拒绝。故意保守：原型验证形状用，**真产品应使用
+ * OS 级沙箱 + 完整命令解析**，而非依赖白名单（毕业约束：见
+ * docs/drafts/aci-prototype-contract.md §7）。
  */
 const ALLOWED_COMMAND_TOKENS: ReadonlySet<string> = Object.freeze(
   new Set([

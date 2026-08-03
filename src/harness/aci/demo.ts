@@ -1,9 +1,10 @@
 /**
  * PROTOTYPE（throwaway）— ACI 原型 Layer 2：一条命令跑通全生命周期演示。
  *
- * 验证问题：Layer 0（契约/权限/装饰执行器/延迟加载 registry）+ Layer 1（5 工具）
- * 能否组装成一条命令跑通、每步打印完整状态的端到端演示，证明 ACI 装饰层
- * 可在不改 4-tool 协议前提下注入权限检查、安全标记（Linter poka-yoke）、延迟加载。
+ * 验证问题：Layer 0（契约/权限/装饰执行器）+ Layer 1（6 工具集，
+ * ADR-0004）能否组装成一条命令跑通、每步打印完整状态的端到端演示，
+ * 证明 ACI 装饰层可在不改 4-tool 协议前提下注入权限检查、安全标记
+ * （Linter poka-yoke）。
  *
  * 运行：npm run aci:demo（= tsx src/harness/aci/demo.ts）
  * 无持久化：scratch 目录在 os.tmpdir() 下创建，结束 rmSync 清理。
@@ -27,11 +28,12 @@ import type {
 import type { LoopTrace } from "../loop-trace.js";
 
 import { createAciRegistry, createAciExecutor } from "./index.js";
-import { createFsSearchTool } from "./tools/fs-search.js";
-import { createFsViewTool } from "./tools/fs-view.js";
-import { createFsEditTool } from "./tools/fs-edit.js";
-import { createShellExecTool } from "./tools/shell-exec.js";
-import { createContextManagerTool } from "./tools/context-manager.js";
+import { createBashTool } from "./tools/bash.js";
+import { createReadFileTool } from "./tools/read-file.js";
+import { createGlobTool } from "./tools/glob.js";
+import { createGrepTool } from "./tools/grep.js";
+import { createEditFileTool } from "./tools/edit-file.js";
+import { createWriteFileTool } from "./tools/write-file.js";
 
 /* ── helper: 构造 AssistantTurnResult（仿 loop-engine.test.ts，demo 自带一份）── */
 
@@ -113,7 +115,7 @@ async function main(): Promise<void> {
   const scratch = mkdtempSync(join(tmpdir(), "iknow-aci-prototype-"));
   console.log(`scratch: ${scratch}`);
 
-  // 60 个 .txt（验证 fs_search 硬截断 50 条）
+  // 60 个 .txt（验证 glob 真匹配 + 字母序）
   for (let i = 0; i < 60; i++) {
     writeFileSync(
       join(scratch, `note-${String(i).padStart(3, "0")}.txt`),
@@ -122,31 +124,33 @@ async function main(): Promise<void> {
   }
   writeFileSync(join(scratch, "alpha.ts"), "export const alpha = 1;\n");
   writeFileSync(join(scratch, "beta.ts"), "export const beta = 2;\n");
-  // 250 行大文件（验证 fs_view 有状态翻页：第一页 0-99，第二页 100-199）
+  // 250 行大文件（验证 read_file 显式 offset 分页 — 无状态）
   const bigLines = Array.from(
     { length: 250 },
     (_, i) => `line ${String(i + 1)}: placeholder content for paging`
   );
   writeFileSync(join(scratch, "big-file.txt"), bigLines.join("\n"));
-  // 待编辑文件（验证 fs_edit Linter poka-yoke）
+  // 待编辑文件（验证 edit_file poka-yoke）
   writeFileSync(join(scratch, "edit-me.ts"), "const x = 1;\nconsole.log(x);\n");
 
   let allGreen = true;
 
   try {
-    // 2. 装配：registry + 装饰执行器
-    const fsSearch = createFsSearchTool(scratch);
-    const fsView = createFsViewTool(scratch);
-    const fsEdit = createFsEditTool(scratch);
-    const shellExec = createShellExecTool(scratch);
-    const ctxMgr = createContextManagerTool();
+    // 2. 装配：registry + 装饰执行器（#141-T11 6 工具集，ADR-0004）
+    const bash = createBashTool(scratch);
+    const readFile = createReadFileTool(scratch);
+    const glob = createGlobTool(scratch);
+    const grep = createGrepTool(scratch);
+    const editFile = createEditFileTool(scratch);
+    const writeFile = createWriteFileTool(scratch);
 
     const reg = createAciRegistry([
-      fsSearch,
-      fsView,
-      fsEdit,
-      shellExec,
-      ctxMgr,
+      bash,
+      readFile,
+      glob,
+      grep,
+      editFile,
+      writeFile,
     ]);
     const innerExec = createExecutor(reg.inner);
     const exec = createAciExecutor({
@@ -170,10 +174,10 @@ async function main(): Promise<void> {
 
     /* ── 场景 1：read-only 并发免确认 ── */
     banner(
-      "场景 1：read-only 并发免确认（fs_search 限 50 + fs_view 有状态翻页）"
+      "场景 1：read-only 并发免确认（glob 真匹配 + read_file 无状态分页）"
     );
     console.log(
-      "  脚本：turn1 fs_search(.ts)+fs_view(offset=0) | turn2 fs_view(无offset,续读) | turn3 文本完成"
+      "  脚本：turn1 glob(*.ts)+read_file(offset=0,limit=50) | turn2 read_file(offset=50,limit=50) | turn3 文本完成"
     );
     {
       const model = createStubModel({
@@ -181,11 +185,15 @@ async function main(): Promise<void> {
           assistantResult({
             texts: [],
             toolCalls: [
-              { id: "s1-search", name: "fs_search", input: { pattern: ".ts" } },
               {
-                id: "s1-view-1",
-                name: "fs_view",
-                input: { path: "big-file.txt", offset: 0 },
+                id: "s1-glob",
+                name: "glob",
+                input: { pattern: "*.ts" },
+              },
+              {
+                id: "s1-read-1",
+                name: "read_file",
+                input: { path: "big-file.txt", offset: 0, limit: 50 },
               },
             ],
           }),
@@ -193,9 +201,10 @@ async function main(): Promise<void> {
             texts: [],
             toolCalls: [
               {
-                id: "s1-view-2",
-                name: "fs_view",
-                input: { path: "big-file.txt" },
+                id: "s1-read-2",
+                name: "read_file",
+                // 续读必须显式 offset=50（契约 Y1 read_file 无状态）
+                input: { path: "big-file.txt", offset: 50, limit: 50 },
               },
             ],
           }),
@@ -218,7 +227,7 @@ async function main(): Promise<void> {
       const before = readFileSync(join(scratch, "edit-me.ts"), "utf8");
       console.log(`  编辑前文件内容: ${JSON.stringify(before)}`);
       console.log(
-        '  脚本：turn1 fs_edit(new_str="const x = foo(1;" 括号不配对) | turn2 fs_edit(正确) | turn3 文本完成'
+        '  脚本：turn1 edit_file(new_str="const x = foo(1;" 括号不配对) | turn2 edit_file(正确) | turn3 文本完成'
       );
       const model = createStubModel({
         responses: [
@@ -227,7 +236,7 @@ async function main(): Promise<void> {
             toolCalls: [
               {
                 id: "s2-bad",
-                name: "fs_edit",
+                name: "edit_file",
                 input: {
                   path: "edit-me.ts",
                   old_str: "const x = 1;",
@@ -241,7 +250,7 @@ async function main(): Promise<void> {
             toolCalls: [
               {
                 id: "s2-good",
-                name: "fs_edit",
+                name: "edit_file",
                 input: {
                   path: "edit-me.ts",
                   old_str: "const x = 1;",
@@ -267,10 +276,10 @@ async function main(): Promise<void> {
 
     /* ── 场景 3：execute 危险命令 deny ── */
     banner(
-      "场景 3：execute 危险命令 deny（allowlist-first: rm -rf / -> command not in allowlist）+ 安全命令放行"
+      "场景 3：execute 危险命令 deny（allowlist-first: rm -rf / -> not in allowlist）+ 安全命令放行"
     );
     console.log(
-      '  脚本：turn1 shell_exec("rm -rf /") | turn2 shell_exec("echo hello") | turn3 文本完成'
+      '  脚本：turn1 bash("rm -rf /") | turn2 bash("echo hello") | turn3 文本完成'
     );
     {
       const model = createStubModel({
@@ -280,7 +289,7 @@ async function main(): Promise<void> {
             toolCalls: [
               {
                 id: "s3-danger",
-                name: "shell_exec",
+                name: "bash",
                 input: { command: "rm -rf /" },
               },
             ],
@@ -290,7 +299,7 @@ async function main(): Promise<void> {
             toolCalls: [
               {
                 id: "s3-safe",
-                name: "shell_exec",
+                name: "bash",
                 input: { command: "echo hello" },
               },
             ],
@@ -308,57 +317,6 @@ async function main(): Promise<void> {
       if (result.stopReason !== "completed") allGreen = false;
     }
 
-    /* ── 场景 4：延迟加载 ── */
-    banner("场景 4：延迟加载（context_manager lazy -> discover() 注入后可用）");
-    {
-      const visible = reg.visibleSchemas().map((t) => t.name);
-      console.log(`  visibleSchemas(): [${visible.join(", ")}]`);
-      console.log(
-        `  含 context_manager? ${String(visible.includes("context_manager"))}`
-      );
-      const discovered = reg.discover("context_manager");
-      console.log(
-        `  discover("context_manager") -> ${
-          discovered ? `命中 (name=${discovered.name})` : "undefined"
-        }`
-      );
-      console.log(
-        "  脚本：turn1 context_manager(5 条观测, keepRecent=2) | turn2 文本完成"
-      );
-      const model = createStubModel({
-        responses: [
-          assistantResult({
-            texts: [],
-            toolCalls: [
-              {
-                id: "s4-ctx",
-                name: "context_manager",
-                input: {
-                  observations: [
-                    "obs-1: early finding about the codebase structure",
-                    "obs-2: another early observation with some detail",
-                    "obs-3: mid-session note about a pattern",
-                    "obs-4: recent finding about the API layer",
-                    "obs-5: latest observation about test coverage",
-                  ],
-                  keepRecent: 2,
-                },
-              },
-            ],
-          }),
-          assistantResult({
-            texts: ["延迟加载场景完成"],
-            toolCalls: [],
-            supplierStop: "success",
-          }),
-        ],
-      });
-      const { result, trace } = await run("scenario 4", makeDeps(model));
-      printToolResults(result.messages);
-      printRunSummary({ result, trace });
-      if (result.stopReason !== "completed") allGreen = false;
-    }
-
     /* ── 总结 ── */
     banner("被验证的决策");
     console.log("ACI 装饰层可在不改 4-tool 协议前提下注入：");
@@ -366,10 +324,10 @@ async function main(): Promise<void> {
       "  1. 权限检查（read-only 免确认 / execute allowlist-first 危险命令 deny 零副作用）"
     );
     console.log(
-      "  2. 安全标记（fs_edit Linter poka-yoke 拒绝坏补丁，文件不动）"
+      "  2. 安全标记（edit_file Linter poka-yoke 拒绝坏补丁，文件不动）"
     );
     console.log(
-      "  3. 延迟加载（lazy 工具不进 prompt schema，discover() 按需注入）"
+      "  3. 工具集（6 工具协作覆盖发现/精读/写/执行/编辑，grep/glob 语义分离）"
     );
     console.log("");
     console.log(allGreen ? "ALL GREEN" : "SOME SCENARIO FAILED");

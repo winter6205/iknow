@@ -1,10 +1,14 @@
 /**
- * PROTOTYPE（throwaway）— ACI 原型 Layer 2：端到端测试。
+ /**
+ * ACI Layer 2：端到端测试。
  *
  * 经 run() + createAciExecutor 端到端验证：
  *   (a) read-only 场景 stopReason=completed；
  *   (b) 危险命令 deny 路径产生 is_error 的 tool_result；
- *   (c) fs_edit 坏补丁被拒（文件内容未变）后正确补丁成功。
+ *   (c) edit_file 坏补丁被拒（文件内容未变）后正确补丁成功。
+ *
+ * #141 工具层重写：用 6 工具集（bash / read_file / glob / grep / edit_file /
+ * write_file），与 demo.ts 装配同步。
  */
 
 import { describe, it, beforeEach, afterEach } from "vitest";
@@ -25,11 +29,12 @@ import type {
 
 import { createAciRegistry } from "../../../src/harness/aci/aci-registry.ts";
 import { createAciExecutor } from "../../../src/harness/aci/aci-executor.ts";
-import { createFsSearchTool } from "../../../src/harness/aci/tools/fs-search.ts";
-import { createFsViewTool } from "../../../src/harness/aci/tools/fs-view.ts";
-import { createFsEditTool } from "../../../src/harness/aci/tools/fs-edit.ts";
-import { createShellExecTool } from "../../../src/harness/aci/tools/shell-exec.ts";
-import { createContextManagerTool } from "../../../src/harness/aci/tools/context-manager.ts";
+import { createBashTool } from "../../../src/harness/aci/tools/bash.ts";
+import { createReadFileTool } from "../../../src/harness/aci/tools/read-file.ts";
+import { createGlobTool } from "../../../src/harness/aci/tools/glob.ts";
+import { createGrepTool } from "../../../src/harness/aci/tools/grep.ts";
+import { createEditFileTool } from "../../../src/harness/aci/tools/edit-file.ts";
+import { createWriteFileTool } from "../../../src/harness/aci/tools/write-file.ts";
 
 /* ── helper: 构造 AssistantTurnResult（与 demo.ts 同一形状）── */
 
@@ -68,11 +73,12 @@ function assemble(scratchDir: string): {
   exec: ReturnType<typeof createAciExecutor>;
 } {
   const reg = createAciRegistry([
-    createFsSearchTool(scratchDir),
-    createFsViewTool(scratchDir),
-    createFsEditTool(scratchDir),
-    createShellExecTool(scratchDir),
-    createContextManagerTool(),
+    createBashTool(scratchDir),
+    createReadFileTool(scratchDir),
+    createGlobTool(scratchDir),
+    createGrepTool(scratchDir),
+    createEditFileTool(scratchDir),
+    createWriteFileTool(scratchDir),
   ]);
   const innerExec = createExecutor(reg.inner);
   const exec = createAciExecutor({ inner: innerExec, catalog: reg.catalog });
@@ -95,6 +101,14 @@ function findToolResult(opts: {
   return undefined;
 }
 
+/* ── helper: 提取 tool_result 的首个 text 块 ── */
+
+function toolResultText(
+  result: Extract<AnthropicContentBlock, { type: "tool_result" }>
+): string {
+  return (result.content as Array<{ text?: string }>)[0]?.text ?? "";
+}
+
 /* ── scratch 生命周期 ── */
 
 let scratch: string;
@@ -103,6 +117,7 @@ beforeEach(() => {
   scratch = mkdtempSync(join(tmpdir(), "iknow-aci-demo-test-"));
   // 基础样例文件（足够覆盖三条断言所需）
   writeFileSync(join(scratch, "alpha.ts"), "export const alpha = 1;\n");
+  writeFileSync(join(scratch, "beta.ts"), "export const beta = 2;\n");
   writeFileSync(join(scratch, "edit-me.ts"), "const x = 1;\nconsole.log(x);\n");
   const bigLines = Array.from(
     { length: 250 },
@@ -119,17 +134,23 @@ afterEach(() => {
 
 describe("demo 端到端 — 经 run() + createAciExecutor", () => {
   it("(a) read-only 场景 stopReason=completed", async () => {
+    // 工作流对齐 ADR-0004：glob 发现 + read_file 精读（无状态、显式 offset）。
     const { reg, exec } = assemble(scratch);
     const model = createStubModel({
       responses: [
         assistantResult({
           texts: [],
           toolCalls: [
-            { id: "a-search", name: "fs_search", input: { pattern: ".ts" } },
             {
-              id: "a-view-1",
-              name: "fs_view",
-              input: { path: "big-file.txt", offset: 0 },
+              id: "a-glob",
+              name: "glob",
+              input: { pattern: "*.ts" },
+            },
+            {
+              id: "a-read-1",
+              name: "read_file",
+              // 续读必须显式 offset=50（契约 Y1 read_file 无状态）
+              input: { path: "big-file.txt", offset: 0, limit: 50 },
             },
           ],
         }),
@@ -137,9 +158,9 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
           texts: [],
           toolCalls: [
             {
-              id: "a-view-2",
-              name: "fs_view",
-              input: { path: "big-file.txt" },
+              id: "a-read-2",
+              name: "read_file",
+              input: { path: "big-file.txt", offset: 50, limit: 50 },
             },
           ],
         }),
@@ -158,33 +179,41 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
     });
     assert.equal(result.stopReason, "completed");
     assert.equal(result.turnCount, 3);
-    // fs_search 返回绝对路径且含 alpha.ts / beta.ts
-    const searchResult = findToolResult({
+
+    // glob 返回字母序相对路径，含 alpha.ts / beta.ts / edit-me.ts
+    const globResult = findToolResult({
       messages: result.messages,
-      toolUseId: "a-search",
+      toolUseId: "a-glob",
     });
-    assert.ok(searchResult);
-    assert.equal(searchResult.is_error, undefined);
-    // fs_view 第一次翻页 offset=0，from=0，to=100
-    const view1 = findToolResult({
+    assert.ok(globResult);
+    assert.equal(globResult.is_error, undefined);
+    const globText = toolResultText(globResult);
+    assert.ok(globText.includes("alpha.ts"));
+    assert.ok(globText.includes("beta.ts"));
+
+    // read_file 第 1 次：offset=0，返回行号格式 `<n>.padStart(6)\t<line>`
+    const read1 = findToolResult({
       messages: result.messages,
-      toolUseId: "a-view-1",
+      toolUseId: "a-read-1",
     });
-    assert.ok(view1);
-    const view1Text =
-      (view1.content as Array<{ text?: string }>)[0]?.text ?? "";
-    assert.ok(view1Text.includes('"from":0'));
-    assert.ok(view1Text.includes('"to":100'));
-    // fs_view 第二次无 offset，stateful 续读，from=100，to=200
-    const view2 = findToolResult({
+    assert.ok(read1);
+    const read1Text = toolResultText(read1);
+    assert.ok(
+      read1Text.startsWith("     1\t"),
+      "expected 1-indexed line numbers"
+    );
+    assert.ok(read1Text.includes("line 1"));
+    assert.ok(read1Text.includes("line 50"));
+
+    // read_file 第 2 次：offset=50，承接上下文，line 51 开始
+    const read2 = findToolResult({
       messages: result.messages,
-      toolUseId: "a-view-2",
+      toolUseId: "a-read-2",
     });
-    assert.ok(view2);
-    const view2Text =
-      (view2.content as Array<{ text?: string }>)[0]?.text ?? "";
-    assert.ok(view2Text.includes('"from":100'));
-    assert.ok(view2Text.includes('"to":200'));
+    assert.ok(read2);
+    const read2Text = toolResultText(read2);
+    assert.ok(read2Text.startsWith("    51\t"));
+    assert.ok(read2Text.includes("line 51"));
   });
 
   it("(b) 危险命令 deny -> is_error tool_result", async () => {
@@ -196,7 +225,7 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
           toolCalls: [
             {
               id: "b-danger",
-              name: "shell_exec",
+              name: "bash",
               input: { command: "rm -rf /" },
             },
           ],
@@ -206,7 +235,7 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
           toolCalls: [
             {
               id: "b-safe",
-              name: "shell_exec",
+              name: "bash",
               input: { command: "echo hello" },
             },
           ],
@@ -225,19 +254,18 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
       maxTurns: 10,
     });
 
-    // deny 路径产生 is_error tool_result，message 以 [permission_denied] 开头
+    // deny 路径产生 is_error tool_result
+    // bash 工具内 throw ToolExecutionError，executor 用 [execution_failed] 信封。
     const dangerResult = findToolResult({
       messages: result.messages,
       toolUseId: "b-danger",
     });
     assert.ok(dangerResult, "expected tool_result for b-danger");
     assert.equal(dangerResult.is_error, true);
-    const dangerText =
-      (dangerResult.content as Array<{ text?: string }>)[0]?.text ?? "";
-    assert.ok(dangerText.includes("[permission_denied]"));
-    // allowlist-first：rm 不在白名单,reason 含 "command not in allowlist"。
+    const dangerText = toolResultText(dangerResult);
+    // bash 工具内 allowlist-first：rm 不在白名单，message 含 "not in allowlist"
     assert.ok(
-      dangerText.includes("command not in allowlist"),
+      dangerText.includes("not in allowlist"),
       `expected allowlist denial, got: ${dangerText}`
     );
 
@@ -248,14 +276,17 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
     });
     assert.ok(safeResult);
     assert.equal(safeResult.is_error, undefined);
-    const safeText =
-      (safeResult.content as Array<{ text?: string }>)[0]?.text ?? "";
-    assert.ok(safeText.includes("hello"));
+    const safeText = toolResultText(safeResult);
+    // bash 输出结构化 {code, stdout, stderr}（Y1b 保结构化）
+    assert.ok(
+      safeText.includes("hello"),
+      `expected safe command output, got: ${safeText}`
+    );
 
     assert.equal(result.stopReason, "completed");
   });
 
-  it("(c) fs_edit 坏补丁被拒（文件不变）+ 正确补丁成功", async () => {
+  it("(c) edit_file 坏补丁被拒（文件不变）+ 正确补丁成功", async () => {
     const { reg, exec } = assemble(scratch);
     const filePath = join(scratch, "edit-me.ts");
     const before = readFileSync(filePath, "utf8");
@@ -268,7 +299,7 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
           toolCalls: [
             {
               id: "c-bad",
-              name: "fs_edit",
+              name: "edit_file",
               input: {
                 path: "edit-me.ts",
                 old_str: "const x = 1;",
@@ -283,7 +314,7 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
           toolCalls: [
             {
               id: "c-good",
-              name: "fs_edit",
+              name: "edit_file",
               input: {
                 path: "edit-me.ts",
                 old_str: "const x = 1;",
@@ -313,8 +344,7 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
     });
     assert.ok(badResult, "expected tool_result for c-bad");
     assert.equal(badResult.is_error, true);
-    const badText =
-      (badResult.content as Array<{ text?: string }>)[0]?.text ?? "";
+    const badText = toolResultText(badResult);
     assert.ok(badText.includes("lint rejected"));
 
     // 坏补丁期间文件内容未变（good 还没执行）

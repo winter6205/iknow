@@ -3,9 +3,9 @@
  *
  * 020 决议收口后只剩 `buildHarnessEngine(bundle)` 一条 build 路径:
  * CLI ask/chat 产品路径,走 harness foundation(real Anthropic adapter +
- * LoopEngine)。023 归档 kb_* 后,task #14 把 ACI 装饰层工具集(fs_search /
- * fs_view / fs_edit / shell_exec / context_manager)接到 buildHarnessEngine,
- * 替换原 echo + get_time demo 工具,让 CLI 默认带 agent 执行能力。
+ * LoopEngine)。#141-T11 把 ACI 装饰层工具集从 5 件 PROTOTYPE 切到 6 件业界通用名
+ * (bash / read_file / grep / glob / edit_file / write_file)，与 permission
+ * policy byName 键 `bash` 对齐（ADR-0004 / ADR-0006）。
  *
  * 旧 agent builder 服务于 Session API serve 路径,在 #51 把 serve 切到
  * harness 后于 022 归档(见 `docs/archive/022-retire-agent-loop/README.md`)。
@@ -22,11 +22,12 @@ import {
   createAciExecutor,
   createPermissionPolicy,
 } from "../harness/aci/index.js";
-import { createFsSearchTool } from "../harness/aci/tools/fs-search.js";
-import { createFsViewTool } from "../harness/aci/tools/fs-view.js";
-import { createFsEditTool } from "../harness/aci/tools/fs-edit.js";
-import { createShellExecTool } from "../harness/aci/tools/shell-exec.js";
-import { createContextManagerTool } from "../harness/aci/tools/context-manager.js";
+import { createBashTool } from "../harness/aci/tools/bash.js";
+import { createReadFileTool } from "../harness/aci/tools/read-file.js";
+import { createGrepTool } from "../harness/aci/tools/grep.js";
+import { createGlobTool } from "../harness/aci/tools/glob.js";
+import { createEditFileTool } from "../harness/aci/tools/edit-file.js";
+import { createWriteFileTool } from "../harness/aci/tools/write-file.js";
 import { loadIknowEnv, type IknowEnv } from "../config/env.js";
 import type { SessionContext } from "../shared/schema.js";
 import { createIknowRuntime } from "../runtime/create-runtime.js";
@@ -79,17 +80,18 @@ export async function buildHarnessEngine(
     maxTokens: env.llm.maxOutputTokens,
     temperature: env.llm.temperature,
   });
-  // ACI 工具集（CH04 装饰层原型，task #14 接线）。沙箱根 = process.cwd()
-  // (CLI 在工程根跑时,agent 工作区与项目一致)。fs tools 的 root 软沙箱
-  // 越界即报 ToolExecutionError;shell_exec 的 cwd 不是安全边界,真实边界
-  // 是 allowlist-first + 黑名单双保险 + (毕业后) OS 级沙箱。
+  // ACI 工具集（#141-T11 6 工具集，对齐 ADR-0004 业界通用名）。沙箱根 =
+  // process.cwd()（CLI 在工程根跑时,agent 工作区与项目一致）。所有工具的
+  // root 软沙箱越界即报 ToolExecutionError；bash 的 cwd 不是安全边界，真实边界
+  // 是 allowlist-first + 黑名单双保险 + (毕业后) OS 级沙箱(#123)。
   const sandboxRoot = process.cwd();
   const aciTools = [
-    createFsSearchTool(sandboxRoot),
-    createFsViewTool(sandboxRoot),
-    createFsEditTool(sandboxRoot),
-    createShellExecTool(sandboxRoot),
-    createContextManagerTool(),
+    createBashTool(sandboxRoot),
+    createReadFileTool(sandboxRoot),
+    createGrepTool(sandboxRoot),
+    createGlobTool(sandboxRoot),
+    createEditFileTool(sandboxRoot),
+    createWriteFileTool(sandboxRoot),
   ];
   const reg = createAciRegistry(aciTools);
   const baseExecutor = createExecutor(reg.inner);

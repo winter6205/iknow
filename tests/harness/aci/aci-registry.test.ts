@@ -38,15 +38,15 @@ function makeTool(opts: MakeToolOpts): AciToolDef {
 describe("createAciRegistry — visibleSchemas 过滤 lazy", () => {
   it("非 lazy 工具出现在 visibleSchemas，lazy 工具不出现", () => {
     const reg = createAciRegistry([
-      makeTool({ name: "fs_search" }),
-      makeTool({ name: "fs_view" }),
-      makeTool({ name: "context_manager", lazy: true }), // lazy
+      makeTool({ name: "bash" }),
+      makeTool({ name: "read_file" }),
+      makeTool({ name: "grep", lazy: true }), // lazy stub — registry 协议
     ]);
     const visible = reg.visibleSchemas();
     const names = visible.map((t) => t.name);
-    assert.ok(names.includes("fs_search"));
-    assert.ok(names.includes("fs_view"));
-    assert.ok(!names.includes("context_manager"));
+    assert.ok(names.includes("bash"));
+    assert.ok(names.includes("read_file"));
+    assert.ok(!names.includes("grep"));
     assert.equal(visible.length, 2);
   });
 
@@ -70,31 +70,31 @@ describe("createAciRegistry — visibleSchemas 过滤 lazy", () => {
 describe("createAciRegistry — discover", () => {
   it("命中已注册工具（含 lazy）", () => {
     const reg = createAciRegistry([
-      makeTool({ name: "fs_search" }),
-      makeTool({ name: "context_manager", lazy: true }),
+      makeTool({ name: "bash" }),
+      makeTool({ name: "grep", lazy: true }),
     ]);
-    const found = reg.discover("context_manager");
+    const found = reg.discover("grep");
     assert.ok(found !== undefined);
-    assert.equal(found!.name, "context_manager");
+    assert.equal(found!.name, "grep");
   });
 
   it("未注册工具 → undefined", () => {
-    const reg = createAciRegistry([makeTool({ name: "fs_search" })]);
+    const reg = createAciRegistry([makeTool({ name: "bash" })]);
     assert.equal(reg.discover("nonexistent"), undefined);
   });
 });
 
 describe("createAciRegistry — catalog", () => {
   it("catalog.get 命中与未命中", () => {
-    const reg = createAciRegistry([makeTool({ name: "fs_search" })]);
-    assert.ok(reg.catalog.get("fs_search") !== undefined);
+    const reg = createAciRegistry([makeTool({ name: "bash" })]);
+    assert.ok(reg.catalog.get("bash") !== undefined);
     assert.equal(reg.catalog.get("nope"), undefined);
   });
 
   it("catalog.all 返回全量（含 lazy）", () => {
     const reg = createAciRegistry([
-      makeTool({ name: "fs_search" }),
-      makeTool({ name: "context_manager", lazy: true }),
+      makeTool({ name: "bash" }),
+      makeTool({ name: "grep", lazy: true }),
     ]);
     assert.equal(reg.catalog.all().length, 2);
   });
@@ -102,10 +102,10 @@ describe("createAciRegistry — catalog", () => {
 
 describe("createAciRegistry — inner 可用", () => {
   it("inner.get 返回 ToolDef（协议 registry 正常工作）", () => {
-    const reg = createAciRegistry([makeTool({ name: "fs_search" })]);
-    const def = reg.inner.get("fs_search");
+    const reg = createAciRegistry([makeTool({ name: "bash" })]);
+    const def = reg.inner.get("bash");
     assert.ok(def !== undefined);
-    assert.equal(def!.name, "fs_search");
+    assert.equal(def!.name, "bash");
   });
 
   it("inner.list 返回所有注册工具", () => {
@@ -117,8 +117,8 @@ describe("createAciRegistry — inner 可用", () => {
   });
 
   it("inner.getValidator 返回已编译 validator（ajv 正常工作）", () => {
-    const reg = createAciRegistry([makeTool({ name: "fs_search" })]);
-    const validator = reg.inner.getValidator("fs_search");
+    const reg = createAciRegistry([makeTool({ name: "bash" })]);
+    const validator = reg.inner.getValidator("bash");
     assert.ok(validator !== undefined);
     // 合法输入通过
     assert.equal(validator!({ q: "hello" }), true);
