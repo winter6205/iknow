@@ -25,11 +25,7 @@ coverage/
 .grok/
 
 # --- Upstream reference ONLY (immutable). Never commit. Never import at runtime. ---
-_upstream_gbrain/
-_upstream_gbrain/**
-# obsolete nested clone name from early Phase 2 experiments
-gbrain/
-gbrain/**
+upstream-openharness/
 
 # personal / local tooling (not team-shared)
 .claude/skills/
@@ -102,3 +98,5 @@ docs/kb-assistant-guide
 !.claude/settings.json
 .playwright-cli
 .codebase-memory/
+
+docs/harness-report
