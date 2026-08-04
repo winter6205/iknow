@@ -29,9 +29,9 @@ const TOOL_LIST_SEP = ",";
 /** Tool-list placeholder when no tool has been called. */
 const NO_TOOLS = "-";
 /** #152 T5:thinking 区隔前缀(开关开启时显示)。 */
-const THINKING_PREFIX = "思考:";
+export const THINKING_PREFIX = "思考:";
 /** #152 T5:redacted_thinking(加密 blob)在开关开启时也按一条占位显示。 */
-const REDACTED_PLACEHOLDER = "[已加密思考]";
+export const REDACTED_PLACEHOLDER = "[已加密思考]";
 
 export interface FormatRunOpts {
   readonly result: RunResult;

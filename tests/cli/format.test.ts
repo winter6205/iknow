@@ -12,6 +12,8 @@ import {
   formatRunHuman,
   formatRunJson,
   renderAssistantAnswer,
+  THINKING_PREFIX,
+  REDACTED_PLACEHOLDER,
 } from "../../src/cli/format.ts";
 import {
   computeTotals,
@@ -194,16 +196,9 @@ describe("renderAssistantAnswer (#152 T5 thinking visibility)", () => {
       ]),
     ];
     const out = renderAssistantAnswer({ messages: msgs, showThinking: true });
-    assert.ok(out.includes("step-by-step reasoning"), "thinking text surfaced");
-    assert.ok(out.includes("answer"), "text block still present");
-    // 区隔:thinking 先于 text(空行分隔)。
-    assert.ok(
-      out.indexOf("step-by-step reasoning") < out.indexOf("answer"),
-      "thinking precedes text in output"
-    );
-    // 精确钉住完整形状:THINKING_PREFIX("思考:") + thinking 文本 + "\n\n" + text 文本。
+    // 精确钉住完整形状:THINKING_PREFIX + thinking 文本 + "\n\n" + text 文本。
     // 防止 THINKING_PREFIX / 分隔符被静默修改。
-    assert.equal(out, "思考:step-by-step reasoning\n\nanswer");
+    assert.equal(out, `${THINKING_PREFIX}step-by-step reasoning\n\nanswer`);
   });
 
   it("showThinking=true 但无 thinking 块:仅显示 text(无前缀噪声)", () => {
@@ -227,14 +222,13 @@ describe("renderAssistantAnswer (#152 T5 thinking visibility)", () => {
       messages: msgs,
       showThinking: true,
     });
-    assert.ok(outOn.includes("answer"));
     assert.ok(
       !outOn.includes("ENCRYPTED_BLOB_DO_NOT_LEAK"),
       "redacted data must not leak to display"
     );
     // 精确钉住 redacted_thinking 占位形状:THINKING_PREFIX + REDACTED_PLACEHOLDER
     // + "\n\n" + text。防止 REDACTED_PLACEHOLDER 常量被静默改动。
-    assert.equal(outOn, "思考:[已加密思考]\n\nanswer");
+    assert.equal(outOn, `${THINKING_PREFIX}${REDACTED_PLACEHOLDER}\n\nanswer`);
     // 开关关闭:同样不出现 redacted 内容。
     const outOff = renderAssistantAnswer({
       messages: msgs,
@@ -291,7 +285,8 @@ describe("renderAssistantAnswer (#152 T5 thinking visibility)", () => {
       messages: msgs,
       showThinking: true,
     });
-    assert.ok(outOn.includes("final answer"));
+    // 精确钉住:last assistant 的 thinking + text 完整形状(含 THINKING_PREFIX)。
+    assert.equal(outOn, `${THINKING_PREFIX}FINAL\n\nfinal answer`);
     assert.ok(!outOn.includes("earlier answer"));
   });
 });
@@ -302,9 +297,8 @@ describe("formatRunHuman — showThinking 开关 (#152 T5)", () => {
       result: mkResult({ finalText: "hello" }),
       trace: mkTrace([]),
     });
-    assert.ok(out.includes("hello"));
-    // 状态行照样有
-    assert.ok(out.includes("stop=completed"));
+    // 精确钉住:走 finalText + 确定状态行(mkTrace([]) -> 0ms, tools=-)。
+    assert.equal(out, "hello\n\nstop=completed · turns=1 · tools=- · 0ms");
   });
 
   it("showThinking=false 显式:走 finalText (与缺省同源)", () => {
@@ -313,7 +307,7 @@ describe("formatRunHuman — showThinking 开关 (#152 T5)", () => {
       trace: mkTrace([]),
       showThinking: false,
     });
-    assert.ok(out.includes("hello"));
+    assert.equal(out, "hello\n\nstop=completed · turns=1 · tools=- · 0ms");
   });
 
   it("showThinking=true 走 renderAssistantAnswer 输出取代 finalText", () => {
@@ -346,8 +340,12 @@ describe("formatRunHuman — showThinking 开关 (#152 T5)", () => {
       trace: mkTrace([]),
       showThinking: true,
     });
-    assert.ok(out.includes("Thinking visible now"), "开关开启应含 thinking");
-    assert.ok(out.includes("final answer text"), "开关开启仍含 text");
+    // 精确钉住:showThinking=true 走 renderAssistantAnswer(含 THINKING_PREFIX
+    // + thinking + "\n\n" + text),后接确定状态行。
+    assert.equal(
+      out,
+      `${THINKING_PREFIX}Thinking visible now\n\nfinal answer text\n\nstop=completed · turns=1 · tools=- · 0ms`
+    );
   });
 
   it("开关不影响 trace / finalText 等其他字段(只影响渲染面)", () => {
