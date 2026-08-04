@@ -33,7 +33,7 @@ import {
   createOutputMask,
   currentSecretValues,
 } from "../harness/sandbox/index.js";
-import { loadIknowEnv } from "../config/env.js";
+import { loadIknowEnv, type LlmEnv } from "../config/env.js";
 import { ValidationError } from "../shared/errors.js";
 import { appendFileSync } from "node:fs";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
@@ -51,6 +51,11 @@ import type {
   TurnDto,
 } from "./contract.js";
 import { MAX_MESSAGE_CHARS } from "./contract.js";
+import { projectThinkingView, projectToolCalls } from "./turn-projection.js";
+import {
+  withThinkingOverride,
+  type ThinkingOverride,
+} from "./thinking-override.js";
 
 /** Best-effort JSON parse: returns the parsed value or the raw string. */
 function safeParse(s: string): unknown {
@@ -140,10 +145,14 @@ function textOf(msg: AnthropicNativeMessage): string {
  * Project raw AnthropicNativeMessage[] → display-form TurnDto[] for wire.
  * Pairs each user message with its subsequent assistant message.
  * Projection is non-authoritative: stopReason/turnCount are lossy (裁决#11).
+ *
+ * T1: also projects thinking/toolCalls per turn (messages between this user
+ * query and the next non-tool_result user message). Mask = SC20 boundary.
  */
 export function projectMessagesToTurns(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): TurnDto[] {
+  const mask = createOutputMask(currentSecretValues()).mask;
   const turns: TurnDto[] = [];
   let turnIndex = 0;
   for (let i = 0; i < messages.length; i++) {
@@ -152,12 +161,24 @@ export function projectMessagesToTurns(
     // Skip tool_result user messages (they are continuation, not queries).
     if (msg.content.some((b) => b.type === "tool_result")) continue;
     const query = textOf(msg);
-    // Find the next assistant message with text blocks.
-    let finalText = "";
+    // Turn slice: from this query until the next non-tool_result user message.
+    let end = messages.length;
     for (let j = i + 1; j < messages.length; j++) {
       const next = messages[j]!;
-      if (next.role === "assistant") {
-        const t = textOf(next);
+      if (
+        next.role === "user" &&
+        !next.content.some((b) => b.type === "tool_result")
+      ) {
+        end = j;
+        break;
+      }
+    }
+    const turnMessages = messages.slice(i, end);
+    // finalText: first assistant message within the slice with text blocks.
+    let finalText = "";
+    for (const m of turnMessages) {
+      if (m.role === "assistant") {
+        const t = textOf(m);
         if (t) {
           finalText = t;
           break;
@@ -165,9 +186,17 @@ export function projectMessagesToTurns(
       }
     }
     turnIndex++;
+    const thinking = projectThinkingView(turnMessages, mask);
+    const toolCalls = projectToolCalls(turnMessages, mask);
     turns.push({
       query,
-      answer: { finalText, stopReason: "completed", turnCount: turnIndex },
+      answer: {
+        finalText,
+        stopReason: "completed",
+        turnCount: turnIndex,
+        ...(thinking !== undefined ? { thinking } : {}),
+        ...(toolCalls !== undefined ? { toolCalls } : {}),
+      },
     });
   }
   return turns;
@@ -189,6 +218,9 @@ export type SessionHubOptions = {
    * construction-time check below throws otherwise (#162 / SC18).
    * Tests injecting `deps` are unaffected. */
   askUser?: AskUser;
+  /** T2: env source for per-turn thinking override (test seam; production
+   * omits it → withThinkingOverride falls back to loadIknowEnv()). */
+  overrideEnv?: { readonly llm: LlmEnv };
 };
 
 // -- stop reasons that must NOT persist to file (裁决#8) -----------------------
@@ -212,6 +244,8 @@ export class SessionHub {
   private readonly traceOut: string | undefined;
   /** askUser inlet (#162); required unless deps are pre-built. */
   private readonly askUser: AskUser | undefined;
+  /** T2: env source for the per-turn thinking override (test seam). */
+  private readonly overrideEnv: { readonly llm: LlmEnv } | undefined;
   /** Per-conversation serialization (spec A15). */
   private readonly inflight = new Map<string, Promise<void>>();
 
@@ -225,6 +259,7 @@ export class SessionHub {
     this.cachedDeps = opts.deps;
     this.traceOut = opts.traceOut;
     this.askUser = opts.askUser;
+    this.overrideEnv = opts.overrideEnv;
     this.defaults = {
       jsonMode: opts.defaultJsonMode ?? false,
     };
@@ -267,6 +302,7 @@ export class SessionHub {
     readonly conversationId: string;
     readonly text: string;
     readonly signal?: AbortSignal;
+    readonly thinking?: ThinkingOverride;
   }): Promise<PostMessageResponse> {
     const { conversationId, text } = opts;
     this.validateText(text);
@@ -275,7 +311,19 @@ export class SessionHub {
       conversationId,
       work: async () => {
         const session = await this.store.load(conversationId);
-        const deps = await this.ensureDeps();
+        const priorCount = session.messages.length;
+        const baseDeps = await this.ensureDeps();
+        // T2: per-turn override — rebuild deps with a one-shot adapter only;
+        // executor / registry / maxTurns / timeoutMs are reused from the
+        // cached deps. When absent, the cached path is unchanged.
+        const deps =
+          opts.thinking !== undefined
+            ? withThinkingOverride({
+                deps: baseDeps,
+                override: opts.thinking,
+                env: this.overrideEnv,
+              })
+            : baseDeps;
         // T6: wrap the executor with the violation kill-session hook. Serve is
         // long-running and multi-conversation, so on kill we (a) write the
         // violation event to the JSONL trace and (b) report `protocolError`
@@ -327,7 +375,11 @@ export class SessionHub {
           session: this.summarize({
             file: await this.store.load(conversationId),
           }),
-          turn: this.toTurnDto({ query, result: finalResult }),
+          turn: this.toTurnDto({
+            query,
+            result: finalResult,
+            turnMessages: finalResult.messages.slice(priorCount),
+          }),
         };
       },
     });
@@ -501,21 +553,30 @@ export class SessionHub {
   private toTurnDto(opts: {
     readonly query: string;
     readonly result: RunResult;
+    /** T1: this run's own messages (priorMessages sliced away); used for
+     * the per-turn thinking/toolCalls projection. */
+    readonly turnMessages?: ReadonlyArray<AnthropicNativeMessage>;
   }): TurnDto {
     const { query, result } = opts;
     // SC20: serve SPA output boundary — mask known secret values in the
     // final text before it leaves the hub. The mask is rebuilt per call so
     // it sees the env snapshot at serve-time (cheap; a few short regexes).
+    const mask = createOutputMask(currentSecretValues()).mask;
     const rawFinalText = result.finalText ?? "";
-    const maskedFinalText = createOutputMask(currentSecretValues()).mask(
-      rawFinalText
-    );
+    const maskedFinalText = mask(rawFinalText);
+    const turnMessages = opts.turnMessages ?? result.messages;
+    const thinking = projectThinkingView(turnMessages, mask);
+    const toolCalls = projectToolCalls(turnMessages, mask);
     return {
       query,
       answer: {
         finalText: maskedFinalText,
         stopReason: result.stopReason,
         turnCount: result.turnCount,
+        // T1: optional fields — omitted entirely when undefined (byte-stable
+        // for turns without thinking or tool use).
+        ...(thinking !== undefined ? { thinking } : {}),
+        ...(toolCalls !== undefined ? { toolCalls } : {}),
       },
     };
   }

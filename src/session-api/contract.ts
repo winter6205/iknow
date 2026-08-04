@@ -18,6 +18,30 @@ export interface TurnAnswerDto {
   readonly finalText: string; // 映射 RunResult.finalText
   readonly stopReason: StopReason; // 复用 harness 7 类 StopReason 类型
   readonly turnCount: number; // 映射 RunResult.turnCount（每次 run() 从 0 起）
+  /** T1: 单回合内所有非空 assistant thinking 文本（按块序）。空 thinking 跳过；无任何 thinking 时整字段省略。 */
+  readonly thinking?: ThinkingView;
+  /** T1: 单回合内所有 tool_use，按 tool_use_id 配对 tool_result。无 tool_use 时整字段省略。 */
+  readonly toolCalls?: readonly ToolCallView[];
+}
+
+/** T1: 单条 thinking 文本视图（redacted_thinking 仅计数，data 永不上 wire）。 */
+export interface ThinkingEntryView {
+  readonly text: string;
+}
+
+export interface ThinkingView {
+  readonly entries: readonly ThinkingEntryView[]; // 按块序，空 thinking 文本跳过
+  readonly redactedCount: number; // redacted_thinking block 计数
+}
+
+/** T1: 工具调用视图（input/output 走 preview + 截断，data 永不暴露原始 input）。 */
+export interface ToolCallView {
+  readonly id: string; // tool_use.id
+  readonly name: string;
+  readonly inputPreview: string; // JSON.stringify(input)，截断 MAX_TOOL_INPUT_PREVIEW_CHARS
+  readonly outputPreview: string; // tool_result text 拼接，截断 MAX_TOOL_OUTPUT_PREVIEW_CHARS
+  readonly isError: boolean; // tool_result.is_error === true
+  readonly truncated: boolean; // output 是否被截断
 }
 
 /** 022 Q1: 单次消息往返的 wire 形状。 */
@@ -52,6 +76,11 @@ export type GetSessionResponse = {
 
 export type PostMessageRequest = {
   text: string;
+  /** T2: 该回合覆盖 harness 的 thinking 控制臂。缺省 → 沿用 ensureDeps 的缓存配置（行为不变）。 */
+  readonly thinking?: {
+    readonly mode: "off" | "adaptive";
+    readonly effort?: "" | "low" | "medium" | "high" | "xhigh" | "max";
+  };
 };
 
 export type PostMessageResponse = {

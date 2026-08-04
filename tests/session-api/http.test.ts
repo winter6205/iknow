@@ -19,7 +19,12 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SessionHub } from "../../src/session-api/hub.ts";
+import * as http from "node:http";
+import type { AddressInfo } from "node:net";
+import {
+  SessionHub,
+  type SessionHubOptions,
+} from "../../src/session-api/hub.ts";
 import {
   listenSessionServer,
   resolveDefaultWebRoot,
@@ -35,10 +40,17 @@ let baseDir: string;
 let listening: ListeningServer;
 let origin: string;
 
-async function startServer(responses: AssistantTurnResult[]): Promise<void> {
+async function startServer(
+  responses: AssistantTurnResult[],
+  hubOpts?: Omit<SessionHubOptions, "store" | "deps">
+): Promise<void> {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-http-"));
   const store = new SessionStore(baseDir);
-  const hub = new SessionHub({ store, deps: makeDeps(responses) });
+  const hub = new SessionHub({
+    store,
+    deps: makeDeps(responses),
+    ...hubOpts,
+  });
   listening = await listenSessionServer({ hub, host: "127.0.0.1", port: 0 });
   origin = `http://${listening.host}:${listening.port}`;
 }
@@ -287,6 +299,149 @@ describe("POST /api/v1/sessions/:id/messages", () => {
     assertNestedError({ body, kind: "validation" });
     const b = body as { error: { field?: string } };
     assert.equal(b.error.field, "text");
+  });
+});
+
+// -- T2: POST /messages thinking override validation -------------------------
+
+describe("POST /api/v1/sessions/:id/messages — thinking override (T2)", () => {
+  // Invalid override values are rejected at the HTTP layer before the hub
+  // runs; no LLM endpoint is involved for these 400 tests.
+
+  it("valid thinking override {mode:'adaptive',effort:'high'} → 200", async () => {
+    // Restart with an overrideEnv backed by a capture server so the override
+    // path's real adapter can complete a turn.
+    await listening.close();
+    await rm(baseDir, { recursive: true, force: true });
+
+    const capturedBodies: unknown[] = [];
+    const captureServer = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        const raw = Buffer.concat(chunks).toString("utf8");
+        if (raw) capturedBodies.push(JSON.parse(raw));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            id: "msg_http_capture",
+            type: "message",
+            role: "assistant",
+            model: "m",
+            content: [{ type: "text", text: "override ok" }],
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            usage: { input_tokens: 1, output_tokens: 1 },
+          })
+        );
+      });
+    });
+    await new Promise<void>((resolve) =>
+      captureServer.listen(0, "127.0.0.1", () => resolve())
+    );
+    const captureAddr = captureServer.address() as AddressInfo;
+    try {
+      await startServer([], {
+        overrideEnv: {
+          llm: {
+            baseUrl: `http://127.0.0.1:${captureAddr.port}`,
+            model: "test-model",
+            apiKeyEnv: "IKNOW_TEST_KEY",
+            apiKey: "test-key",
+            maxOutputTokens: 128,
+            timeoutMs: 5000,
+            temperature: 0,
+            thinking: "off",
+            thinkingEffort: "",
+          },
+        },
+      });
+      const id = await createSession();
+      const { status, body } = await postJson({
+        path: `/api/v1/sessions/${id}/messages`,
+        payload: {
+          text: "think hard",
+          thinking: { mode: "adaptive", effort: "high" },
+        },
+      });
+      assert.equal(status, 200);
+      const b = body as {
+        turn: { answer: { finalText: string; stopReason: string } };
+      };
+      assert.equal(b.turn.answer.finalText, "override ok");
+      assert.equal(b.turn.answer.stopReason, "completed");
+      // The captured LLM request carries the override params.
+      assert.equal(capturedBodies.length, 1);
+      const req = capturedBodies[0] as Record<string, unknown>;
+      assert.deepEqual(req.thinking, { type: "adaptive" });
+      assert.deepEqual(req.output_config, { effort: "high" });
+    } finally {
+      await new Promise<void>((resolve) =>
+        captureServer.close(() => resolve())
+      );
+    }
+  });
+
+  it("invalid thinking.mode → 400 validation envelope", async () => {
+    const id = await createSession();
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: {
+        text: "hi",
+        thinking: { mode: "loud" },
+      },
+    });
+    assert.equal(status, 400);
+    assertNestedError({ body, kind: "validation" });
+    const b = body as { error: { field?: string; message: string } };
+    assert.equal(b.error.field, "thinking.mode");
+    assert.ok(b.error.message.includes("off"));
+    assert.ok(b.error.message.includes("adaptive"));
+  });
+
+  it("invalid thinking.effort → 400 validation envelope", async () => {
+    const id = await createSession();
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: {
+        text: "hi",
+        thinking: { mode: "adaptive", effort: "extreme" },
+      },
+    });
+    assert.equal(status, 400);
+    assertNestedError({ body, kind: "validation" });
+    const b = body as { error: { field?: string } };
+    assert.equal(b.error.field, "thinking.effort");
+  });
+
+  it("thinking as non-object (string) → 400 validation envelope", async () => {
+    const id = await createSession();
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: {
+        text: "hi",
+        thinking: "off",
+      },
+    });
+    assert.equal(status, 400);
+    assertNestedError({ body, kind: "validation" });
+  });
+
+  it("no thinking field → 200, behavior unchanged (no thinking/toolCalls keys)", async () => {
+    const id = await createSession();
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: {
+        text: "hi",
+      },
+    });
+    assert.equal(status, 200);
+    const b = body as {
+      turn: { answer: Record<string, unknown> };
+    };
+    assert.equal(b.turn.answer.finalText, "hello");
+    assert.equal("thinking" in b.turn.answer, false);
+    assert.equal("toolCalls" in b.turn.answer, false);
   });
 });
 
