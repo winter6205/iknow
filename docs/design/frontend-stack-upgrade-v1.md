@@ -32,6 +32,62 @@ already reserves `renderBody` without implementing Markdown.
 
 **UI stack unchanged:** Vite (not Next.js — the prototype-cli-integration proposal A is not adopted).
 
+### 0.0.1 Addendum index
+
+The v1 decisions above cover the SPA shell. Subsequent slices added capability on top of the same stack; each addendum freezes a sub-decision. **SSE remains non-goal for this slice** (`GET …/events` → **501**; see §0.1.5).
+
+- **§0.1** (2026-08-05) — Web thinking / tool-call / markdown rendering decisions: see [§0.1](#01-addendum-2026-08-05-web-thinking--tool--markdown-display).
+
+---
+
+## 0.1 Addendum (2026-08-05): web thinking / tool / markdown display
+
+> Status: **Implemented** (web + session-api wire additive extension). Tracer bullets + ACR 5-verdict gate: `plans/web-thinking-tool-display.md`. Source: user task 2026-08-05.
+
+This addendum freezes four sub-decisions that extend the v1 SPA with thinking / tool-call display + markdown rendering + thinking toggle/intensity, all without changing the SPA shell (Vite + React + TS), the Session HTTP API contract shape (only **additive** extension), or the backend harness. **SSE / token streaming remains non-goal** — see §0.1.5.
+
+### 0.1.1 Markdown rendering — react-markdown + remark-gfm + rehype-highlight
+
+| Option                                             | Pros                                                                                                              | Cons                                                                                                       | Verdict    |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ---------- |
+| **react-markdown + remark-gfm + rehype-highlight** | AST → React component; GFM tables/strikethrough/strikethrough built in; hljs classes injectable; mature + minimal | +3 deps                                                                                                    | **Adopt**  |
+| Hand-rolled GFM parser                             | Zero deps                                                                                                         | High correctness risk (nested lists, fenced-code escapes, GFM tables); large XSS surface; YAGNI violation  | **Reject** |
+| `marked` / `remark-stringify` direct               | Tiny footprint                                                                                                    | No component injection → language label + copy button on code blocks hard; re-implement GFM table handling | Reject     |
+
+**YAGNI argument:** a hand-rolled parser has high correctness risk on GFM edge cases (nested lists, code-fence escapes, autolinks). react-markdown's AST → React component mapping is controllable at the component layer (`CodeBlock` injects language label + copy button; tables & strikethrough are direct pass-through). The three deps form a minimal mature set; lockfile change was explicitly authorized by the user.
+
+`MarkdownBody` consumes plain text; `CodeBlock` swaps the `<pre><code>` element with a `<pre><code class="hljs …">` + action bar (language label + copy button). `tokens.css` carries a `--hljs-*` CSS variable block so hljs' default theme integrates with Variant A.
+
+### 0.1.2 Thinking display strategy
+
+- **Default collapsed** — `ThinkingBlock` starts collapsed (`useState(false)`); `aria-expanded` + keyboard-operable disclosure.
+- **`signature` / `data` never go on the wire** — `TurnAnswerDto.thinking.entries[i].text` is the only field; `redacted_thinking.data` is a replay artifact and is intentionally dropped by `projectThinkingView` (`src/session-api/turn-projection.ts`). Replay material stays server-side only.
+- **Redacted only displays a count placeholder** — when `redactedCount > 0`, `ThinkingBlock` renders `[已加密思考]` rows for the count (no decoding / no display of `data`). This is consistent with `CONTEXT.md` "LoopTrace strictly excludes payload".
+- **Truncation** — `MAX_THINKING_TEXT_CHARS = 2000` per entry (post-mask, pre-truncation) in `src/session-api/turn-projection.ts`; wire field is bounded regardless of model output length.
+
+### 0.1.3 toolCalls preview strategy
+
+- **Truncation constants** (in `src/session-api/turn-projection.ts`):
+  - `MAX_TOOL_INPUT_PREVIEW_CHARS = 500` — `JSON.stringify(input)` → mask → truncate.
+  - `MAX_TOOL_OUTPUT_PREVIEW_CHARS = 1500` — concatenate `tool_result` text blocks → mask → truncate.
+- **Mask wiring** — both previews pass through `createOutputMask(currentSecretValues()).mask` before wire output (SC20 boundary; consistent with the `finalText` mask applied in `toTurnDto`). Same one-shot mask rebuild per call.
+- **`truncated` flag** — `ToolCallView.truncated: boolean` tells the frontend whether the output was truncated; frontend renders `…（已截断）` accordingly.
+- **`tool_use_id` pairing** — `projectToolCalls` pairs `tool_use` with `tool_result` by id; missing result → `outputPreview=""`, `isError=false`, `truncated=false`. Pair order = block order in the assistant message.
+
+### 0.1.4 Per-request thinking override — env remains the SSOT
+
+- **Wire shape (additive only)** — `PostMessageRequest.thinking?: { mode: "off" | "adaptive", effort?: "" | "low" | "medium" | "high" | "xhigh" | "max" }` (`src/session-api/contract.ts`). Field is optional; absence preserves pre-existing byte-identical wire behavior.
+- **Validation** — `parseThinkingOverride` (`src/session-api/thinking-override.ts`): bad shape / unknown mode / unknown effort → `ValidationError` → HTTP 400 with the standard `ApiErrorBody` envelope. **No silent fallback** — wire surface fails loud.
+- **One-shot adapter rebuild** — `withThinkingOverride` rebuilds a per-turn `LoopEngineDeps` whose `adapter` carries the override; `executor` / `registry` / `maxTurns` / `timeoutMs` are reused from the cached deps (`withThinkingOverride` returns a new deps object). The wire `stream:false` protocol is unchanged.
+- **env stays the SSOT for defaults** — `IKNOW_LLM_THINKING` / `IKNOW_LLM_THINKING_EFFORT` (`src/config/env.ts`) set the server default cached in `ensureDeps`. The override only affects that single turn; absent override → cached deps (behavior identical to pre-additive).
+- **Frontend persistence + per-request send** — `web/src/lib/thinking-settings.ts` (pure functions: parse / serialize / toWireOverride / load / save); localStorage key `iknow:thinking`; default `enabled: false` (mode="off"). `ThinkingControls` toggles + intensity segmented selector; `useSessionChat.sendMessage` forwards `toWireOverride(settings)` with each `postMessage`.
+
+### 0.1.5 SSE remains non-goal
+
+The /events reserved route (`GET /api/v1/sessions/:id/events`) still returns **501**. "Thinking state" on the UI means **in-flight request indicator + round-level complete display**, **not** token streaming. A dedicated streaming slice is required to flip this; no implementation in the current addendum.
+
+---
+
 ---
 
 ## 1. Context
