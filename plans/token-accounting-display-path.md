@@ -79,7 +79,7 @@
 
 ### 4. T4. `[implementation]` RunResult.lastUsage（loop-engine 持有最后成功调用的 usage） [blocks: T3]
 
-- **Affects**: `src/harness/model-adapter/types.ts`（`RunResult.lastUsage: TokenUsage | null`——必填字段，null = run 无成功模型调用；Resolution Q4 + ADR-0008 Decision 5 双源裁决）、`src/harness/loop-engine.ts`（run 作用域加 `lastUsage` 可变引用，初值 `null`，stepWithTrace ok 分支在抄 trace 处同步更新；`RunResult` 字面量 explorer 实测 :825-838 + `createLoopEngine` 镜像 :864-873 填入——**仅此两处**）、`tests/harness/loop-engine.test.ts`（S 矩阵新增用例：多轮 run → `lastUsage` = 最后一次成功调用的值；纯 stub 无 usage → `lastUsage === null`）、`tests/cli/_fixtures.ts`（`assistantResult` 工厂增可选 `usage` 参数——向后兼容，不传则字段缺席）。
+- **Affects**: `src/harness/model-adapter/types.ts`（`RunResult.lastUsage: TokenUsage | null`——必填字段，null = run 无成功模型调用；Resolution Q4 + ADR-0008 Decision 5 双源裁决）、`src/harness/loop-engine.ts`（run 作用域加 `lastUsage` 可变引用，初值 `null`，stepWithTrace ok 分支在抄 trace 处同步更新；`RunResult` 生产字面量 explorer 实测仅 :824-829 一处填入——`createLoopEngine` 是工厂闭包无字面量；hub.ts:317-318 spread 自动透传无需改）、`tests/harness/loop-engine.test.ts`（S 矩阵新增用例：多轮 run → `lastUsage` = 最后一次成功调用的值；纯 stub 无 usage → `lastUsage === null`）、`tests/cli/_fixtures.ts`（`assistantResult` 工厂增可选 `usage` 参数——向后兼容，不传则字段缺席）。
 - **Acceptance**: 新测试绿：(a) `assistantResult({..., usage:{inputTokens:7,outputTokens:3,cacheCreationInputTokens:null,cacheReadInputTokens:null}})` 两轮 run → `result.lastUsage.inputTokens` = 第二轮值；(b) 不带 usage 的 stub run → `result.lastUsage === null`；(c) 既有 S1-S17 矩阵零回归（含 loop-engine-trace.test.ts 字节级一致性契约——两侧 lastUsage 同为 null 或同值）。`npm test` 全绿。
 - **Per-ticket loop**: tdd → typecheck+tests → code-review → verification-before-completion → commit on ticket branch
 
