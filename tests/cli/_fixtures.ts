@@ -12,6 +12,7 @@ import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
   AssistantTurnResult,
+  HarnessStreamEvent,
   LoopEngineDeps,
 } from "../../src/harness/index.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
@@ -84,11 +85,30 @@ export function assistantResult(
   };
 }
 
-export function makeDeps(responses: AssistantTurnResult[]): LoopEngineDeps {
+/**
+ * Build LoopEngineDeps backed by stub-model (createStubModel).
+ *
+ * #179 T6: optional `streamEventsByStep` forwards to the stub's
+ * `streamEventsByStep` seam (T4 wiring). When set, each step emits the
+ * scripted events before returning its `responses` entry.
+ */
+export function makeDeps(
+  responses: AssistantTurnResult[],
+  opts: {
+    readonly streamEventsByStep?: ReadonlyArray<
+      ReadonlyArray<HarnessStreamEvent>
+    >;
+  } = {}
+): LoopEngineDeps {
   const tool = createStubTool({ name: "noop", next: () => ({}) });
   const registry = createRegistry([tool]);
   const executor = createExecutor(registry);
-  const adapter = createStubModel({ responses });
+  const adapter = createStubModel({
+    responses,
+    // createStubModel accepts `streamEventsByStep: undefined`; passing through
+    // directly keeps the optional forward trivial (no conditional spread).
+    streamEventsByStep: opts.streamEventsByStep,
+  });
   return { adapter, executor, registry, maxTurns: 5 };
 }
 
@@ -104,11 +124,17 @@ export function makeState(over: Partial<CliChatState> = {}): CliChatState {
 export interface MakeCtxOpts {
   readonly responses: AssistantTurnResult[];
   readonly stateOverrides?: Partial<CliChatState>;
+  /** #179 T6: per-step stream-event script (stub-model streamEventsByStep seam). */
+  readonly streamEventsByStep?: ReadonlyArray<
+    ReadonlyArray<HarnessStreamEvent>
+  >;
 }
 
 export function makeCtx(opts: MakeCtxOpts): ChatLineContext {
   return {
-    deps: makeDeps(opts.responses),
+    deps: makeDeps(opts.responses, {
+      streamEventsByStep: opts.streamEventsByStep,
+    }),
     state: makeState(opts.stateOverrides ?? {}),
   };
 }

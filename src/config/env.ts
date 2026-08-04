@@ -26,6 +26,13 @@ export interface LlmEnv {
    * 非法值 → 视同空。
    */
   thinkingEffort: "" | "low" | "medium" | "high" | "xhigh" | "max";
+  /**
+   * #179 T6 (#147 D0) 流式臂开关:
+   *   - "on"  → adapter 走 `client.messages.stream(...)`(默认)
+   *   - "off" → 非流式回退臂(`messages.create`,017 A1 既有行为)
+   * 非法值 → 回退 "on" 且不崩溃(对齐 thinking flag 的回退纪律,方向相反)。
+   */
+  stream: "on" | "off";
 }
 
 /**
@@ -161,6 +168,17 @@ function envShowThinking(opts: EnvFileKeyOpts): boolean {
 }
 
 /**
+ * #179 T6 (#147 D0): 解析 IKNOW_LLM_STREAM 值域 "on" | "off"(大小写不敏感)。
+ * 默认 on(D0:流式为默认臂);非法值 → 回退 "on",不抛错。
+ * 与 envThinkingMode 先例同构,仅回退方向相反(thinking 默认 off,stream 默认 on)。
+ */
+function envStreamMode(opts: EnvFileKeyOpts): "on" | "off" {
+  const raw = envGet({ file: opts.file, key: opts.key }).toLowerCase();
+  if (raw === "off") return "off";
+  return "on";
+}
+
+/**
  * Resolve an API key by name.
  * Precedence: `process.env[envVarName]` then optional `fileMap` (from dotenv merge).
  *
@@ -236,6 +254,11 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
       thinkingEffort: envThinkingEffort({
         file,
         key: "IKNOW_LLM_THINKING_EFFORT",
+      }),
+      // #179 T6 (D0):流式默认开;非法值回退 on。
+      stream: envStreamMode({
+        file,
+        key: "IKNOW_LLM_STREAM",
       }),
     },
     chat: {

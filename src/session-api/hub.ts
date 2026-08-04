@@ -466,6 +466,10 @@ export class SessionHub {
       temperature: env.llm.temperature,
       // #151 T4 / #156 Low:env → adapter params(去重 single source)。
       thinking: buildThinkingParams(env.llm),
+      // #179 T6 (#147 D0):流式臂开关,env SSOT,默认 on。
+      // serve 入口暂未消费 onStream(D3 预留不接),adapter 在流式臂装配,
+      // finalMessage 仍然交付完整 AssistantTurnResult,行为对 host 透明。
+      stream: env.llm.stream === "on",
     });
     const registry = createRegistry([createEchoTool(), createGetTimeTool()]);
     const inner = createExecutor(registry);

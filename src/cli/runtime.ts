@@ -92,6 +92,8 @@ export async function buildHarnessEngine(
     temperature: env.llm.temperature,
     // #151 T4 / #156 Low:env → adapter params(去重 single source)。
     thinking: buildThinkingParams(env.llm),
+    // #179 T6 (#147 D0):流式臂开关,env SSOT,默认 on(D0)。
+    stream: env.llm.stream === "on",
   });
   // ACI 工具集（#141-T11 6 工具集，对齐 ADR-0004 业界通用名）。沙箱根 =
   // process.cwd()（CLI 在工程根跑时,agent 工作区与项目一致）。所有工具的

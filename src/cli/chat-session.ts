@@ -3,7 +3,11 @@
  * Core line handling is exported for unit tests (no real TTY required).
  */
 import * as readline from "node:readline";
-import { run as runHarness, type LoopEngineDeps } from "../harness/index.js";
+import {
+  run as runHarness,
+  type HarnessStreamEvent,
+  type LoopEngineDeps,
+} from "../harness/index.js";
 import { formatRunHuman, formatRunJson } from "./format.js";
 import {
   applySlashCommand,
@@ -66,6 +70,12 @@ export type ProcessChatLineResult = {
 export interface ProcessChatLineOpts {
   readonly line: string;
   readonly ctx: ChatLineContext;
+  /**
+   * #179 T6 (#147 D3):流式事件观察者回调,原样透传给 run() opts。
+   * 交互 REPL 用它做增量预览(spinner 接缝);pipe/ask 不接(undefined 透传,
+   * 行为零变化)。回调异常在 loop 引擎层吞咽(观察者不破坏回合)。
+   */
+  readonly onStream?: (event: HarnessStreamEvent) => void;
 }
 
 /**
@@ -94,6 +104,8 @@ export async function processChatLine(
   try {
     const { result, trace } = await runHarness(query, ctx.deps, undefined, {
       priorMessages: ctx.state.messages,
+      // #179 T6 (D3):观察者回调透传;undefined = 非流式行为零变化(pipe/ask)。
+      onStream: opts.onStream,
     });
     // Continue the conversation next turn even on maxTurns/cancelled/timeout/
     // nonSuccessStop (all append an assistant message). protocolError and
@@ -169,6 +181,35 @@ function resolveQuiet(optsQuiet: boolean | undefined): boolean {
     return optsQuiet;
   }
   return process.env.IKNOW_CHAT_QUIET === "1";
+}
+
+/**
+ * #179 T6 (#147 D0/D3):TTY 增量预览接缝(spinner 替代面)。
+ *
+ * 返回的 sink 作为 `processChatLine` 的 `onStream`:
+ *   - `text_delta` → 把增量文本直接写给 `write`(交互 REPL 传
+ *     `process.stderr.write.bind(process.stderr)`),滚动替换「思考中…」;
+ *   - `tool_call_start` → 输出工具名提示(保持与 spinner 同样的简洁风格)。
+ *
+ * 写入错误被吞咽(观察者回调不得反向破坏回合;对齐 D3 与 safeTrace 纪律)。
+ * pipe / 非 TTY 路径不构造本 sink(零输出变化回归保护)。
+ */
+export function createStreamPreviewSink(opts: {
+  readonly write: (chunk: string) => void;
+}): (event: HarnessStreamEvent) => void {
+  return (event: HarnessStreamEvent): void => {
+    try {
+      if (event.type === "text_delta") {
+        opts.write(event.text);
+        return;
+      }
+      if (event.type === "tool_call_start") {
+        opts.write(`\n调用工具:${event.name}\n`);
+      }
+    } catch {
+      // 观察者写入失败不得影响回合交付(stderr 断流等;host 断连≠取消,D3)。
+    }
+  };
 }
 
 /**
@@ -312,9 +353,27 @@ async function runInteractive(opts: {
         process.stderr.write("思考中…");
       }
 
+      // #179 T6:流式增量预览(仅 stderr TTY 时;与「思考中…」同门槛)。
+      // 首个 text_delta 到来时先清掉 spinner 行,滚动写增量;回合结束后
+      // clearErrLine() + formatRunHuman 整体输出照常(pipe/非 TTY 零变化)。
+      const onStream = showThinking
+        ? (() => {
+            let previewStarted = false;
+            return createStreamPreviewSink({
+              write: (chunk) => {
+                if (!previewStarted) {
+                  previewStarted = true;
+                  clearErrLine();
+                }
+                process.stderr.write(chunk);
+              },
+            });
+          })()
+        : undefined;
+
       let result: ProcessChatLineResult;
       try {
-        result = await processChatLine({ line, ctx });
+        result = await processChatLine({ line, ctx, onStream });
       } catch (err) {
         if (showThinking) {
           clearErrLine();
