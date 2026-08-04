@@ -29,9 +29,9 @@ const TOOL_LIST_SEP = ",";
 /** Tool-list placeholder when no tool has been called. */
 const NO_TOOLS = "-";
 /** #152 T5:thinking 区隔前缀(开关开启时显示)。 */
-const THINKING_PREFIX = "思考:";
+export const THINKING_PREFIX = "思考:";
 /** #152 T5:redacted_thinking(加密 blob)在开关开启时也按一条占位显示。 */
-const REDACTED_PLACEHOLDER = "[已加密思考]";
+export const REDACTED_PLACEHOLDER = "[已加密思考]";
 
 export interface FormatRunOpts {
   readonly result: RunResult;
@@ -54,6 +54,74 @@ export interface FormatRunHumanOpts extends FormatRunOpts {
 }
 
 /**
+ * 倒序找最后一条 assistant 消息;无则返回 undefined。
+ *
+ * `m &&` 守卫保留:数组元素类型为 `AnthropicNativeMessage | undefined`,
+ * 缺守卫会让 TS 在分支内把 `m` 收窄回 undefined,拒绝后续读取。
+ */
+function findLastAssistantMessage(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): AnthropicNativeMessage | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m && m.role === "assistant") return m;
+  }
+  return undefined;
+}
+
+/**
+ * 把一条 assistant 消息的 content blocks 分拣为三组:
+ * - `thinkingLines`:thinking 文本(按出现顺序,不做 trim 跳空);
+ * - `textLines`:非空 text(trim 后长度 > 0);
+ * - `hasRedacted`:是否存在 redacted_thinking 块。
+ *
+ * tool_use / tool_result / 其他块显式 fall-through(不加 default 吞噬,
+ * 便于后续块类型扩展时 TS 能继续穷尽检查)。
+ */
+function partitionAnswerBlocks(content: AnthropicNativeMessage["content"]): {
+  thinkingLines: string[];
+  textLines: string[];
+  hasRedacted: boolean;
+} {
+  const thinkingLines: string[] = [];
+  const textLines: string[] = [];
+  let hasRedacted = false;
+  for (const block of content) {
+    if (block.type === "thinking") {
+      thinkingLines.push(block.thinking);
+    } else if (block.type === "redacted_thinking") {
+      hasRedacted = true;
+    } else if (block.type === "text") {
+      if (block.text.trim().length > 0) textLines.push(block.text);
+    }
+    // tool_use / tool_result / 其他块:不进展示。
+  }
+  return { thinkingLines, textLines, hasRedacted };
+}
+
+/**
+ * `showThinking=true` 时的可见组装:thinking 前缀 + thinking 文本 + redacted
+ * 占位(任一存在时输出),空行分隔后接 text 块拼接。
+ */
+function assembleVisibleAnswer(
+  thinkingLines: string[],
+  textLines: string[],
+  hasRedacted: boolean
+): string {
+  const visible: string[] = [];
+  if (thinkingLines.length > 0 || hasRedacted) {
+    const pieces: string[] = [];
+    if (thinkingLines.length > 0) pieces.push(...thinkingLines);
+    if (hasRedacted) pieces.push(REDACTED_PLACEHOLDER);
+    visible.push(`${THINKING_PREFIX}${pieces.join("\n")}`);
+  }
+  if (textLines.length > 0) {
+    visible.push(textLines.join("\n"));
+  }
+  return visible.join("\n\n");
+}
+
+/**
  * #152 T5:纯函数 — 从最后成功 assistant 回合抽出可见展示文本。
  *
  * - `showThinking=false`(默认):仅 text block 拼接(thinking 不进
@@ -69,46 +137,16 @@ export function renderAssistantAnswer(opts: {
   readonly messages: ReadonlyArray<AnthropicNativeMessage>;
   readonly showThinking: boolean;
 }): string {
-  let lastAssistant: AnthropicNativeMessage | undefined;
-  for (let i = opts.messages.length - 1; i >= 0; i--) {
-    const m = opts.messages[i];
-    if (m && m.role === "assistant") {
-      lastAssistant = m;
-      break;
-    }
-  }
-  if (!lastAssistant) {
-    return "";
-  }
-  const thinkingLines: string[] = [];
-  const textLines: string[] = [];
-  let hasRedacted = false;
-  for (const block of lastAssistant.content) {
-    if (block.type === "thinking") {
-      thinkingLines.push(block.thinking);
-    } else if (block.type === "redacted_thinking") {
-      hasRedacted = true;
-    } else if (block.type === "text") {
-      if (block.text.trim().length > 0) textLines.push(block.text);
-    }
-    // tool_use / tool_result / 其他块:不进展示。
-  }
+  const lastAssistant = findLastAssistantMessage(opts.messages);
+  if (!lastAssistant) return "";
+  const { thinkingLines, textLines, hasRedacted } = partitionAnswerBlocks(
+    lastAssistant.content
+  );
   if (!opts.showThinking) {
     // thinking / redacted_thinking 在关闭时不输出。
     return textLines.join("\n");
   }
-  // 开关开启:先打印所有 thinking 文本(按出现顺序),redacted 占位,再打印 text。
-  const visible: string[] = [];
-  if (thinkingLines.length > 0 || hasRedacted) {
-    const pieces: string[] = [];
-    if (thinkingLines.length > 0) pieces.push(...thinkingLines);
-    if (hasRedacted) pieces.push(REDACTED_PLACEHOLDER);
-    visible.push(`${THINKING_PREFIX}${pieces.join("\n")}`);
-  }
-  if (textLines.length > 0) {
-    visible.push(textLines.join("\n"));
-  }
-  return visible.join("\n\n");
+  return assembleVisibleAnswer(thinkingLines, textLines, hasRedacted);
 }
 
 /**

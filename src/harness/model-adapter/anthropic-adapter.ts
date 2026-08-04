@@ -9,7 +9,10 @@
  *   - 任何 assistant 回合任一 block 存在协议结构错误时抛 ProtocolError,
  *     整回合不进入权威历史,不执行其中工具调用(014 冻);
  *   - 不读取 / 不判断 / 不构造其它供应商原生字段;
- *   - Loop Engine 只消费 Adapter 交付的原生消息。
+ *   - Loop Engine 只消费 Adapter 交付的原生消息;
+ *   - #150 范围:text / tool_use blocks 原子校验(& 类型 + 必填字段);
+ *     thinking / redacted_thinking blocks 全字段原样保留(pass-through,
+ *     Q2 决议:保留 signature / data 以便权威历史可重放,无校验裁剪)。
  *
  * **T11 离线实现**:本 adapter 在 Foundation 自治模式下接受脚本化
  * SdkMessage 数组作为响应(不连真实模型);支持 stream 中断 fixture;离线
@@ -32,6 +35,8 @@ import type {
   Tool as SdkTool,
   ToolUseBlock,
   TextBlock,
+  ThinkingBlock,
+  RedactedThinkingBlock,
 } from "@anthropic-ai/sdk/resources/messages.js";
 
 export interface AnthropicAdapterOptions {
@@ -49,7 +54,9 @@ export interface AnthropicAdapterOptions {
 
 /**
  * 把 Anthropic 原生 SDK Message 解释为 Foundation AssistantTurnResult。
- * 完整原子校验:任一 block 协议错误 -> 抛 ProtocolError,整回合不进入历史。
+ * text / tool_use blocks 原子校验:任一 block 协议错误 -> 抛 ProtocolError,
+ * 整回合不进入历史。thinking / redacted_thinking 走 pass-through(见模块
+ * 顶部 #150 注释),遇结构错误不入校验(返回时透传,replay 仍有合法签名)。
  *
  * 019: 提为模块级 export,供 createAnthropicAdapter(离线)与
  * createRealAnthropicAdapter(真实 SDK)共享同一解释逻辑(SSOT)。
@@ -141,10 +148,7 @@ export function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
     if (b.type === "thinking") {
       // T3 (#150, closes #134 issue 1): 全字段原样进权威历史。
       // signature 必须回传,裁剪会毁 replay;thinking 文本不进 texts。
-      const tb = b as unknown as {
-        thinking: string;
-        signature: string;
-      };
+      const tb = b as unknown as ThinkingBlock;
       return [
         {
           type: "thinking",
@@ -155,7 +159,7 @@ export function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
     }
     if (b.type === "redacted_thinking") {
       // T3: redacted_thinking.data 原样保留(加密 blob,不可解释也不可裁剪)。
-      const tb = b as unknown as { data: string };
+      const tb = b as unknown as RedactedThinkingBlock;
       return [{ type: "redacted_thinking", data: tb.data }];
     }
     return [];
@@ -388,4 +392,30 @@ export function createRealAnthropicAdapter(
     encodeUserText,
     encodeToolResults,
   });
+}
+
+/**
+ * #151 T4 / #156 Low:thinking 请求侧参数构造工厂。
+ *
+ * 输入形状对齐 LlmEnv.thinking / LlmEnv.thinkingEffort(env SSOT 输出),
+ * 不绑 LlmEnv 类型本身(避免 anthropic-adapter 反向依赖 src/config/)。
+ * 调用点传 env.llm 或任意拥有 thinking / thinkingEffort 字段的对象即可。
+ *
+ * 模式与 effort 原始值照传;模式 → SDK thinkingParam 与 output_config 的条件
+ * 附加仍在 createRealAnthropicAdapter.step 内部按 env 设计走,本函数只单点
+ * 消除"runtime 和 hub 两处字面量搬运"的复制粘贴。
+ */
+export interface ThinkingParams {
+  readonly mode: "off" | "adaptive";
+  readonly effort?: "" | "low" | "medium" | "high" | "xhigh" | "max";
+}
+
+export function buildThinkingParams(env: {
+  readonly thinking: "off" | "adaptive";
+  readonly thinkingEffort: "" | "low" | "medium" | "high" | "xhigh" | "max";
+}): ThinkingParams {
+  return {
+    mode: env.thinking,
+    effort: env.thinkingEffort,
+  };
 }

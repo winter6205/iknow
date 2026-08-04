@@ -134,7 +134,22 @@ function appendMessage(opts: {
   };
 }
 
-function deriveFinalText(
+/**
+ * 从权威历史派生 `result.finalText`(仅 `reason === "completed"` 时调用)。
+ *
+ * 算法:倒序扫 messages,找到**第一条带非空 text 的 assistant** 回合,
+ * 返回其 text 块拼接;越过空 text 的 assistant(如纯 tool_use 回合)继续
+ * 回扫;无则返回 null。
+ *
+ * 与 `src/cli/format.ts` 的 `renderAssistantAnswer({showThinking:false})`
+ * 在边界上存在细微差异:后者停在最后一条 assistant(不回扫空 text)。
+ * 生产路径 `formatRunHuman` 走 `result.finalText`(本函数),分歧仅在
+ * `renderAssistantAnswer(false)` 的直接测试调用暴露;由
+ * `tests/cli/format.test.ts` 的不变量回归测试钉住一致性。
+ *
+ * 导出供测试引用同一真源(`result.finalText` 契约),非通用工具。
+ */
+export function deriveFinalText(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): string | null {
   for (let i = messages.length - 1; i >= 0; i--) {

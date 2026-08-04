@@ -116,15 +116,17 @@ function envNumber(opts: EnvNumberOpts): number {
   return Number.isFinite(n) ? n : opts.fallback;
 }
 
-/**
- * #151 T4: 解析 IKNOW_LLM_THINKING 值域 "off" | "adaptive"。
- * 非法值(除 "off"/"adaptive" 外,含空字符串)→ 回退 "off",不抛错。
- */
-function envThinkingMode(opts: {
+interface EnvFileKeyOpts {
   readonly file: Record<string, string>;
   readonly key: string;
-}): "off" | "adaptive" {
-  const raw = envGet({ file: opts.file, key: opts.key });
+}
+
+/**
+ * #151 T4: 解析 IKNOW_LLM_THINKING 值域 "off" | "adaptive"(大小写不敏感)。
+ * 非法值 → 回退 "off",不抛错。
+ */
+function envThinkingMode(opts: EnvFileKeyOpts): "off" | "adaptive" {
+  const raw = envGet({ file: opts.file, key: opts.key }).toLowerCase();
   if (raw === "off" || raw === "adaptive") return raw;
   return "off";
 }
@@ -133,11 +135,10 @@ function envThinkingMode(opts: {
  * #151 T4: 解析 IKNOW_LLM_THINKING_EFFORT 值域 "" | "low" | "medium" |
  * "high" | "xhigh" | "max"。非法值 → 视同空(不发送 output_config)。
  */
-function envThinkingEffort(opts: {
-  readonly file: Record<string, string>;
-  readonly key: string;
-}): "" | "low" | "medium" | "high" | "xhigh" | "max" {
-  const raw = envGet({ file: opts.file, key: opts.key });
+function envThinkingEffort(
+  opts: EnvFileKeyOpts
+): "" | "low" | "medium" | "high" | "xhigh" | "max" {
+  const raw = envGet({ file: opts.file, key: opts.key }).toLowerCase();
   switch (raw) {
     case "low":
     case "medium":
@@ -154,12 +155,9 @@ function envThinkingEffort(opts: {
  * #152 T5: 解析 IKNOW_CHAT_SHOW_THINKING。合法值 "on" / "off"（大小写不敏感），
  * 非法值 → 回退 false（默认不显示 thinking）。
  */
-function envShowThinking(opts: {
-  readonly file: Record<string, string>;
-  readonly key: string;
-}): boolean {
-  const raw = envGet({ file: opts.file, key: opts.key });
-  return raw.toLowerCase() === "on";
+function envShowThinking(opts: EnvFileKeyOpts): boolean {
+  const raw = envGet({ file: opts.file, key: opts.key }).toLowerCase();
+  return raw === "on";
 }
 
 /**

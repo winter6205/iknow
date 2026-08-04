@@ -15,6 +15,7 @@ import {
   createRealAnthropicAdapter,
   createExecutor,
   createLoopEngine,
+  buildThinkingParams,
   type LoopEngineDeps,
 } from "../harness/index.js";
 import {
@@ -79,11 +80,8 @@ export async function buildHarnessEngine(
     model: env.llm.model,
     maxTokens: env.llm.maxOutputTokens,
     temperature: env.llm.temperature,
-    // #151 T4 请求侧 thinking 控制臂:env → adapter params。
-    thinking: {
-      mode: env.llm.thinking,
-      effort: env.llm.thinkingEffort,
-    },
+    // #151 T4 / #156 Low:env → adapter params(去重 single source)。
+    thinking: buildThinkingParams(env.llm),
   });
   // ACI 工具集（#141-T11 6 工具集，对齐 ADR-0004 业界通用名）。沙箱根 =
   // process.cwd()（CLI 在工程根跑时,agent 工作区与项目一致）。所有工具的
