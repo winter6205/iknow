@@ -6,7 +6,14 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { MessageList } from "./components/MessageList";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { StateBlock } from "./components/StateBlock";
+import { ThinkingControls } from "./components/ThinkingControls";
 import { useSessionChat } from "./hooks/useSessionChat";
+import {
+  loadThinkingSettings,
+  saveThinkingSettings,
+  toWireOverride,
+  type ThinkingSettings,
+} from "./lib/thinking-settings";
 
 /** Viewport width below which the sidebar starts collapsed (decision #7). */
 const NARROW_QUERY = "(max-width: 768px)";
@@ -19,11 +26,25 @@ function ChatApp() {
   const [collapsed, setCollapsed] = useState(
     () => window.matchMedia(NARROW_QUERY).matches
   );
+  // T5: 思考开关 + 强度（localStorage 持久化，每次发送随请求下发 override）。
+  const [thinkingSettings, setThinkingSettings] = useState<ThinkingSettings>(
+    () => loadThinkingSettings()
+  );
+  const handleThinkingChange = useCallback((next: ThinkingSettings) => {
+    setThinkingSettings(next);
+    saveThinkingSettings(next);
+  }, []);
   // Bumped after lifecycle events (newSession / setConversation to a non-cached
   // id) so the sidebar re-fetches the list and the new entry shows up without
   // the user clicking refresh.
   const [sidebarSignal, setSidebarSignal] = useState(0);
   const bumpSidebar = useCallback(() => setSidebarSignal((n) => n + 1), []);
+
+  // Composer 只发文本；thinking override 在 App 层按当前设置合成后透传。
+  const handleSend = useCallback(
+    (text: string) => chat.sendMessage(text, toWireOverride(thinkingSettings)),
+    [chat, thinkingSettings]
+  );
 
   // Narrow-screen auto-collapse: track live changes (device rotation, window
   // resize across the breakpoint) after the initial render.
@@ -124,11 +145,18 @@ function ChatApp() {
         </>
       }
       footer={
-        <Composer
-          disabled={!chat.session || chat.phase === "loading"}
-          sending={chat.phase === "sending"}
-          onSend={chat.sendMessage}
-        />
+        <>
+          <ThinkingControls
+            settings={thinkingSettings}
+            onChange={handleThinkingChange}
+            disabled={!chat.session || chat.phase === "loading"}
+          />
+          <Composer
+            disabled={!chat.session || chat.phase === "loading"}
+            sending={chat.phase === "sending"}
+            onSend={handleSend}
+          />
+        </>
       }
     />
   );

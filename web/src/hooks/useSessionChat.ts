@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../api/client";
-import type { SessionSummary, TurnAnswerDto, TurnDto } from "../api/types";
+import type {
+  SessionSummary,
+  ThinkingOverride,
+  TurnAnswerDto,
+  TurnDto,
+} from "../api/types";
 import { SessionApiError } from "../api/types";
 
 export type ChatPhase = "loading" | "ready" | "sending" | "error";
@@ -29,7 +34,8 @@ export type SessionChatState = {
 };
 
 export type SessionChatApi = SessionChatState & {
-  sendMessage: (text: string) => Promise<void>;
+  /** `thinking` (T5) 为该回合的可选覆盖；未提供时后端走缓存配置。 */
+  sendMessage: (text: string, thinking?: ThinkingOverride) => Promise<void>;
   reset: () => Promise<void>;
   newSession: () => Promise<void>;
   /** Switch to an existing conversation by id (sidebar selection). */
@@ -236,56 +242,59 @@ export function useSessionChat(): SessionChatApi {
     };
   }, [bootstrap]);
 
-  const sendMessage = useCallback(async (text: string) => {
-    const gen = bootGen.current;
-    const id = sessionIdRef.current;
-    const trimmed = text.trim();
-    if (!id || !trimmed) return;
+  const sendMessage = useCallback(
+    async (text: string, thinking?: ThinkingOverride) => {
+      const gen = bootGen.current;
+      const id = sessionIdRef.current;
+      const trimmed = text.trim();
+      if (!id || !trimmed) return;
 
-    const userMsg: ChatUiMessage = {
-      id: `u-local-${Date.now()}-${queryIdSlice(trimmed)}`,
-      role: "user",
-      text: trimmed,
-    };
-    setState((prev) => ({
-      ...prev,
-      phase: "sending",
-      error: null,
-      messages: [...prev.messages, userMsg],
-    }));
-
-    try {
-      const res = await api.postMessage(id, trimmed);
-      if (gen !== bootGen.current) return;
-      sessionIdRef.current = res.session.conversation_id;
-      const agentMsg: ChatUiMessage = {
-        id: `a-${Date.now()}-${queryIdSlice(trimmed)}`,
-        role: "agent",
-        text: res.turn.answer.finalText,
-        answer: res.turn.answer,
+      const userMsg: ChatUiMessage = {
+        id: `u-local-${Date.now()}-${queryIdSlice(trimmed)}`,
+        role: "user",
+        text: trimmed,
       };
       setState((prev) => ({
         ...prev,
-        phase: "ready",
+        phase: "sending",
         error: null,
-        session: res.session,
-        messages: [...prev.messages, agentMsg],
-        lastAnswer: res.turn.answer,
+        messages: [...prev.messages, userMsg],
       }));
-    } catch (e) {
-      if (gen === bootGen.current) {
+
+      try {
+        const res = await api.postMessage(id, trimmed, { thinking });
+        if (gen !== bootGen.current) return;
+        sessionIdRef.current = res.session.conversation_id;
+        const agentMsg: ChatUiMessage = {
+          id: `a-${Date.now()}-${queryIdSlice(trimmed)}`,
+          role: "agent",
+          text: res.turn.answer.finalText,
+          answer: res.turn.answer,
+        };
         setState((prev) => ({
           ...prev,
-          phase: "error",
-          error: errMessage(e),
-          // Intentional: keep optimistic user bubble on failed send so history
-          // still shows what was attempted; Composer keeps draft via rethrow.
+          phase: "ready",
+          error: null,
+          session: res.session,
+          messages: [...prev.messages, agentMsg],
+          lastAnswer: res.turn.answer,
         }));
+      } catch (e) {
+        if (gen === bootGen.current) {
+          setState((prev) => ({
+            ...prev,
+            phase: "error",
+            error: errMessage(e),
+            // Intentional: keep optimistic user bubble on failed send so history
+            // still shows what was attempted; Composer keeps draft via rethrow.
+          }));
+        }
+        // Always rethrow so Composer keeps draft text for retry.
+        throw e instanceof Error ? e : new Error(errMessage(e));
       }
-      // Always rethrow so Composer keeps draft text for retry.
-      throw e instanceof Error ? e : new Error(errMessage(e));
-    }
-  }, []);
+    },
+    []
+  );
 
   const reset = useCallback(async () => {
     const gen = bootGen.current;
