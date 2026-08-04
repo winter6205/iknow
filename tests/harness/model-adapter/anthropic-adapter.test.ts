@@ -59,7 +59,15 @@ describe("createAnthropicAdapter (T11)", () => {
       content: [{ type: "text", text: "hi there" }] as ContentBlock[],
       stop_reason: "end_turn",
       stop_sequence: null,
-      usage: { input_tokens: 5, output_tokens: 3 },
+      // #160 T2 / ADR-0008 Decision 2: 复用既有 usage fixture 用例,
+      // 断言 cache_creation_input_tokens 缺失 → null, cache_read_input_tokens
+      // 出现 → 透传,snake→camel 映射落在 result.usage 上。
+      usage: {
+        input_tokens: 100,
+        output_tokens: 20,
+        cache_creation_input_tokens: null,
+        cache_read_input_tokens: 5,
+      },
     };
     const adapter = adapterFrom([sdkResp]);
     const result = (await adapter.step(
@@ -71,6 +79,14 @@ describe("createAnthropicAdapter (T11)", () => {
     assert.equal(result.isEmptyFinalResponse, false);
     assert.equal(result.projection.texts.length, 1);
     assert.equal(result.projection.texts[0], "hi there");
+    // #160 T2: usage 投影到 AssistantTurnResult;NULL cache_creation 字段
+    // 透传为 null(snake→camel 投影仅此一处)。
+    assert.deepEqual(result.usage, {
+      inputTokens: 100,
+      outputTokens: 20,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: 5,
+    });
   });
 
   it("class 2 — text + single tool call -> needsTools + 1 tool_call", async () => {
@@ -691,5 +707,140 @@ describe("createRealAnthropicAdapter — request-side thinking control (#151 T4)
     const p = captured.params as Record<string, unknown>;
     assert.equal("temperature" in p, false);
     assert.deepEqual(p.thinking, { type: "adaptive" });
+  });
+});
+
+// --- #160 T2 (ADR-0008 Decision 2/4): AssistantTurnResult 透出 usage ----
+describe("anthropic-adapter — #160 T2 usage projection (ADR-0008 Decision 2/4)", () => {
+  it("SDK usage 缺失 → result.usage 字段缺席(=== undefined,Postel)", async () => {
+    // 构造裸 message(故意缺 usage)以模拟 stub / 9router 缺省返回;
+    // SdkMessage 静态类型在那里要求 usage,此处与 class 6/7 同样用 cast 旁路。
+    const noUsage = {
+      id: "msg_no_usage",
+      type: "message",
+      role: "assistant",
+      model: "claude-test-model",
+      content: [{ type: "text", text: "no usage attached" }] as ContentBlock[],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+    } as unknown as SdkMessage;
+    const adapter = adapterFrom([noUsage]);
+    const result = (await adapter.step(
+      initState([userMsg("hi")]),
+      {}
+    )) as AssistantTurnResult;
+    assert.equal(result.supplierStop, "success");
+    // 字段缺席即 Postel 语义:not null,not 占位值,not 包裹 undefined 的 object。
+    assert.equal(result.usage, undefined);
+  });
+
+  it("SDK 周边字段(service_tier / cache_creation / output_tokens_details 等)不进 result.usage", async () => {
+    // 极简 SdkMessage:usage 携带 SDK 0.115 全周边字段(service_tier、cache_creation TTL
+    // 对象、output_tokens_details、server_tool_use、inference_geo),只允许 4 个 token
+    // 字段穿越到域 TokenUsage;ad-hoc 新造最小 fixture,以排除既有测试的其他语义干涉。
+    const sdkResp = {
+      id: "msg_peripheral",
+      type: "message",
+      role: "assistant",
+      model: "claude-test-model",
+      content: [{ type: "text", text: "with extras" }] as ContentBlock[],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: {
+        input_tokens: 7,
+        output_tokens: 2,
+        cache_creation_input_tokens: 3,
+        cache_read_input_tokens: null,
+        cache_creation: {
+          ephemeral_5m_input_tokens: 1,
+          ephemeral_1h_input_tokens: 2,
+        },
+        inference_geo: "us-east-1",
+        output_tokens_details: { reasoning_tokens: 0 },
+        server_tool_use: { web_search_requests: 0 },
+        service_tier: "standard",
+      },
+    } as unknown as SdkMessage;
+    const adapter = adapterFrom([sdkResp]);
+    const result = (await adapter.step(
+      initState([userMsg("hi")]),
+      {}
+    )) as AssistantTurnResult;
+    // deepStrictEqual:在 result.usage 上多出任何周边字段都会失败,所以这一条
+    // 同时锁死「仅 4 字段」与「snake→camel 翻译」两个不变式。
+    assert.deepEqual(result.usage, {
+      inputTokens: 7,
+      outputTokens: 2,
+      cacheCreationInputTokens: 3,
+      cacheReadInputTokens: null,
+    });
+  });
+
+  it("畸形 usage(usage:{} / input_tokens 非 number)→ result.usage 字段缺席(不产垃圾对象)", async () => {
+    // Postel:usage 存在但形状非法 → 整条缺席,绝不产出
+    // {inputTokens: undefined,...} 这类违反 TokenUsage 契约的对象。
+    const malformed = {
+      id: "msg_malformed",
+      type: "message",
+      role: "assistant",
+      model: "claude-test-model",
+      content: [{ type: "text", text: "broken usage" }] as ContentBlock[],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: {},
+    } as unknown as SdkMessage;
+    const adapter = adapterFrom([malformed]);
+    const result = (await adapter.step(
+      initState([userMsg("hi")]),
+      {}
+    )) as AssistantTurnResult;
+    assert.equal(result.supplierStop, "success");
+    assert.equal(result.usage, undefined);
+
+    // input_tokens 非 number → 同样缺席。
+    const wrongType = {
+      id: "msg_malformed2",
+      type: "message",
+      role: "assistant",
+      model: "claude-test-model",
+      content: [{ type: "text", text: "bad type" }] as ContentBlock[],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: "oops", output_tokens: 3 },
+    } as unknown as SdkMessage;
+    const adapter2 = adapterFrom([wrongType]);
+    const result2 = (await adapter2.step(
+      initState([userMsg("hi")]),
+      {}
+    )) as AssistantTurnResult;
+    assert.equal(result2.usage, undefined);
+
+    // cache 两字段非 number → 归一为 null,而非透传垃圾值 / undefined。
+    const garbageCache = {
+      id: "msg_malformed3",
+      type: "message",
+      role: "assistant",
+      model: "claude-test-model",
+      content: [{ type: "text", text: "garbage cache" }] as ContentBlock[],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: {
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_creation_input_tokens: "garbage",
+        cache_read_input_tokens: undefined,
+      },
+    } as unknown as SdkMessage;
+    const adapter3 = adapterFrom([garbageCache]);
+    const result3 = (await adapter3.step(
+      initState([userMsg("hi")]),
+      {}
+    )) as AssistantTurnResult;
+    assert.deepEqual(result3.usage, {
+      inputTokens: 1,
+      outputTokens: 2,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+    });
   });
 });

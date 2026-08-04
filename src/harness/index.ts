@@ -22,6 +22,7 @@ export type {
   RunResult,
   AssistantProjection,
   AssistantTurnResult,
+  TokenUsage,
   ModelAdapter,
 } from "./model-adapter/types.js";
 

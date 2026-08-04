@@ -91,6 +91,22 @@ export interface AssistantTurnResult {
   readonly needsTools: boolean;
   /** 是否为 `EmptyFinalResponse`(成功停止但无 text block)。 */
   readonly isEmptyFinalResponse: boolean;
+  /**
+   * #160 / ADR-0008 Decision 2+4: 一次成功 assistant 回合的 token 使用量投影
+   * (sealed passthrough, 与 `supplierStop` 同构)。SDK usage 整体缺失 → 字段
+   * 缺席(不写 null / 不写 {0,0,...});loop-engine 在 `recordLlmCall` 抄入
+   * `LlmCallRecord`,`RunResult.lastUsage` 持有最后一次成功值。
+   * stub 路径没有 usage,字段缺席是设计语义。
+   */
+  readonly usage?: TokenUsage;
+}
+
+/** 对齐 Anthropic SDK Usage 的 token 四字段(ADR-0008 Decision 2)。 */
+export interface TokenUsage {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheCreationInputTokens: number | null;
+  readonly cacheReadInputTokens: number | null;
 }
 
 /** Model Adapter 接口(014 拥有)。 */
