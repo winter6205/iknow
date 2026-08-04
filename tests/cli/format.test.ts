@@ -15,6 +15,7 @@ import {
   THINKING_PREFIX,
   REDACTED_PLACEHOLDER,
 } from "../../src/cli/format.ts";
+import { deriveFinalText } from "../../src/harness/loop-engine.ts";
 import {
   computeTotals,
   type AnthropicNativeMessage,
@@ -375,5 +376,89 @@ describe("formatRunHuman — showThinking 开关 (#152 T5)", () => {
       !("messages" in parsed),
       "JSON projection must never carry messages regardless of any flag"
     );
+  });
+});
+
+/**
+ * #156 M2:off-path(`renderAssistantAnswer({showThinking:false})`)与
+ * `deriveFinalText`(`result.finalText` 权威派生)的不变量回归测试。
+ *
+ * 两者在非分歧边界(最后一条 assistant 含非空 text)必须一致;
+ * 在分歧边界(最后一条 assistant 空 text,如纯 tool_use 回合)行为有差异
+ * (renderAssistantAnswer 停在最后一条 assistant -> "";deriveFinalText
+ * 越过空 text 继续回扫 -> 前一条 assistant 的 text)。
+ *
+ * 此处显式钉住两者的当前行为,作为 tripwire:任一方被静默改动都会触发,
+ * 强制未来贡献者在改其中一处时 conscious 决定是否同步另一处。
+ * 生产路径 formatRunHuman(false) 走 result.finalText(deriveFinalText),
+ * 故分歧仅在 renderAssistantAnswer(false) 直接测试调用暴露。
+ */
+describe("renderAssistantAnswer(false) vs deriveFinalText 不变量 (#156 M2)", () => {
+  function mkMessage(
+    role: "user" | "assistant",
+    blocks: AnthropicNativeMessage["content"]
+  ): AnthropicNativeMessage {
+    return { role, content: blocks };
+  }
+
+  it("最后一条 assistant 含非空 text:两者一致", () => {
+    const msgs: AnthropicNativeMessage[] = [
+      mkMessage("user", [{ type: "text", text: "q" }]),
+      mkMessage("assistant", [{ type: "text", text: "real answer" }]),
+    ];
+    assert.equal(
+      renderAssistantAnswer({ messages: msgs, showThinking: false }),
+      "real answer"
+    );
+    assert.equal(deriveFinalText(msgs), "real answer");
+  });
+
+  it("多 text block 拼接:两者一致(单 \\n 拼接)", () => {
+    const msgs: AnthropicNativeMessage[] = [
+      mkMessage("user", [{ type: "text", text: "q" }]),
+      mkMessage("assistant", [
+        { type: "text", text: "first" },
+        { type: "text", text: "second" },
+      ]),
+    ];
+    assert.equal(
+      renderAssistantAnswer({ messages: msgs, showThinking: false }),
+      "first\nsecond"
+    );
+    assert.equal(deriveFinalText(msgs), "first\nsecond");
+  });
+
+  it("分歧边界:最后一条 assistant 空 text(纯 tool_use) -> 两者不同(tripwire)", () => {
+    // renderAssistantAnswer 停在最后一条 assistant(空 text -> "");
+    // deriveFinalText 越过空 text 回扫到前一条 assistant -> "real answer"。
+    const msgs: AnthropicNativeMessage[] = [
+      mkMessage("user", [{ type: "text", text: "q" }]),
+      mkMessage("assistant", [{ type: "text", text: "real answer" }]),
+      mkMessage("user", [{ type: "text", text: "tool result" }]),
+      mkMessage("assistant", [
+        { type: "tool_use", id: "t1", name: "echo", input: { x: 1 } },
+      ]),
+    ];
+    assert.equal(
+      renderAssistantAnswer({ messages: msgs, showThinking: false }),
+      "",
+      "renderAssistantAnswer 停在最后一条 assistant(空 text)"
+    );
+    assert.equal(
+      deriveFinalText(msgs),
+      "real answer",
+      "deriveFinalText 越过空 text 回扫到前一条 assistant"
+    );
+  });
+
+  it("无 assistant 回合:两者一致(null / 空字符串)", () => {
+    const msgs: AnthropicNativeMessage[] = [
+      mkMessage("user", [{ type: "text", text: "q" }]),
+    ];
+    assert.equal(
+      renderAssistantAnswer({ messages: msgs, showThinking: false }),
+      ""
+    );
+    assert.equal(deriveFinalText(msgs), null);
   });
 });
