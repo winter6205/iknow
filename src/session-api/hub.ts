@@ -27,8 +27,11 @@ import {
 import { createPermissionExecutor } from "../harness/permission/index.js";
 import { createPermissionPolicy } from "../harness/permission/policy.js";
 import type { AskUser } from "../harness/permission/types.js";
+import { createViolationCounter } from "../harness/sandbox/violation-handling.js";
+import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
 import { loadIknowEnv } from "../config/env.js";
 import { ValidationError } from "../shared/errors.js";
+import { appendFileSync } from "node:fs";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
@@ -44,6 +47,15 @@ import type {
   TurnDto,
 } from "./contract.js";
 import { MAX_MESSAGE_CHARS } from "./contract.js";
+
+/** Best-effort JSON parse: returns the parsed value or the raw string. */
+function safeParse(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return s;
+  }
+}
 
 // -- error mapping (裁决#10: pure function, http.ts T5 consumes) ---------------
 
@@ -260,27 +272,58 @@ export class SessionHub {
       work: async () => {
         const session = await this.store.load(conversationId);
         const deps = await this.ensureDeps();
+        // T6: wrap the executor with the violation kill-session hook. Serve is
+        // long-running and multi-conversation, so on kill we (a) write the
+        // violation event to the JSONL trace and (b) report `protocolError`
+        // as the turn stop reason — we do NOT touch process.exitCode.
+        let killed = false;
+        const counter = createViolationCounter();
+        const onKill = (reason: string): void => {
+          // Latch: the counter fires on every record past threshold; the trace
+          // line is one-shot (mirrors wireKillSessionNotification's latch).
+          if (killed) return;
+          killed = true;
+          this.recordViolationTrace(conversationId, reason);
+        };
+        const wrappedExecutor = wrapWithViolationHook({
+          inner: deps.executor,
+          counter,
+          onKill,
+        });
         // Per-session trace: new JsonlTraceService each postMessage (not cached
         // in cachedDeps) because conversationId differs per session (ADR-0003 D4).
-        const runDeps: LoopEngineDeps = this.traceOut
-          ? {
-              ...deps,
-              trace: createJsonlTraceService({
-                filePath: this.traceOut,
-                conversationId,
-              }),
-            }
-          : deps;
+        const runDeps: LoopEngineDeps = {
+          ...deps,
+          executor: wrappedExecutor,
+          ...(this.traceOut
+            ? {
+                trace: createJsonlTraceService({
+                  filePath: this.traceOut,
+                  conversationId,
+                }),
+              }
+            : {}),
+        };
         const { result } = await run(query, runDeps, opts.signal, {
           priorMessages: session.messages,
         });
+        // Violation kill → surface protocolError so the SPA client can
+        // attribute the stop; DROP_REASONS already drops protocolError
+        // context on save (mirrors the chat-session drop semantics).
+        const finalResult: RunResult = killed
+          ? { ...result, stopReason: "protocolError" }
+          : result;
         // trace is destructured away → immediate GC (not logged/persisted/wired).
-        await this.conditionalSave({ conversationId, session, result });
+        await this.conditionalSave({
+          conversationId,
+          session,
+          result: finalResult,
+        });
         return {
           session: this.summarize({
             file: await this.store.load(conversationId),
           }),
-          turn: this.toTurnDto({ query, result }),
+          turn: this.toTurnDto({ query, result: finalResult }),
         };
       },
     });
@@ -313,6 +356,27 @@ export class SessionHub {
 
   async listSessions(): Promise<SessionListEntry[]> {
     return this.store.list();
+  }
+
+  /**
+   * T6: write a violation kill event to the JSONL trace (serve entry).
+   * Best-effort — a trace write failure must not break the served turn; any
+   * error is swallowed (mirrors JsonlTraceService warn-once semantics).
+   * `reason` is already a JSON string produced by createKillSessionHook.
+   */
+  private recordViolationTrace(conversationId: string, reason: string): void {
+    if (!this.traceOut) return;
+    try {
+      const line = JSON.stringify({
+        conversation_id: conversationId,
+        record_type: "violation",
+        ts: new Date().toISOString(),
+        detail: safeParse(reason),
+      });
+      appendFileSync(this.traceOut, line + "\n", "utf8");
+    } catch {
+      // Best-effort observability; never let trace I/O break the served turn.
+    }
   }
 
   // -- private helpers ---------------------------------------------------------

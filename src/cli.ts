@@ -29,6 +29,7 @@ import {
 } from "./harness/permission/index.js";
 import { isIknowError } from "./shared/errors.js";
 import { randomUUID } from "node:crypto";
+import { buildViolationWiring } from "./harness/sandbox/violation-executor.js";
 
 const DEFAULT_TRACE_PATH = "./trace.jsonl";
 
@@ -117,10 +118,14 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     filePath: tracePath,
     conversationId,
   });
+  // T6: wrap the executor with the violation kill-session hook so the ask
+  // entry point surfaces violation escalations on stderr + exits with code 1.
+  const { executor } = buildViolationWiring(built.deps.executor);
   // runHarness returns LoopTrace as `trace`; rename to loopTrace to avoid
   // shadowing the TraceService injected into deps.
   const { result, trace: loopTrace } = await runHarness(parsed.query, {
     ...built.deps,
+    executor,
     trace: traceService,
   });
   process.stdout.write(`${formatRunJson({ result, trace: loopTrace })}\n`);

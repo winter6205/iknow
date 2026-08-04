@@ -9,6 +9,7 @@ import {
   createNetworkPolicy,
   createResourceLimits,
 } from "../src/harness/sandbox/index.js";
+import { createViolationCounter } from "../src/harness/sandbox/violation-handling.js";
 
 const cwd = process.cwd();
 const fsPolicy = createFsPolicy({ cwd, home: homedir(), tmpDir: tmpdir() });
@@ -41,6 +42,84 @@ const checks = [
   ["node runs", () => run("node -v")],
 ] as const;
 
+// T6 violation handling probe (Node-side; bwrap fence is physical-layer
+// only, the violation counter lives in the application layer). Each entry
+// returns { ok, detail } instead of a SpawnSyncReturns so the print loop
+// can format uniformly.
+type ProbeResult = { ok: boolean; detail: string };
+
+const violationChecks: ReadonlyArray<readonly [string, () => ProbeResult]> = [
+  [
+    "violation mid-escalation",
+    (): ProbeResult => {
+      // Record 3 mid events → shouldKill on the 3rd.
+      const c = createViolationCounter();
+      const r1 = c.record({
+        tier: "mid",
+        tool: "bash",
+        input: {},
+        message: "[hard_wall] dangerous command",
+      });
+      const r2 = c.record({
+        tier: "mid",
+        tool: "bash",
+        input: {},
+        message: "[hard_wall] dangerous command",
+      });
+      const r3 = c.record({
+        tier: "mid",
+        tool: "bash",
+        input: {},
+        message: "[hard_wall] dangerous command",
+      });
+      const ok =
+        r1.shouldKill === false &&
+        r2.shouldKill === false &&
+        r3.shouldKill === true &&
+        r3.count === 3;
+      // Reset and confirm 2 records don't kill (regression check).
+      c.reset();
+      const r4 = c.record({
+        tier: "mid",
+        tool: "bash",
+        input: {},
+        message: "[hard_wall] dangerous command",
+      });
+      const r5 = c.record({
+        tier: "mid",
+        tool: "bash",
+        input: {},
+        message: "[hard_wall] dangerous command",
+      });
+      const resetOk =
+        r4.shouldKill === false &&
+        r5.shouldKill === false &&
+        c.snapshot() === 2;
+      return {
+        ok: ok && resetOk,
+        detail: `3rd-kill=${r3.shouldKill} reset-2-records=${r5.shouldKill} count=${r5.count}`,
+      };
+    },
+  ],
+  [
+    "violation high-immediate",
+    (): ProbeResult => {
+      const c = createViolationCounter();
+      const r = c.record({
+        tier: "high",
+        tool: "bash",
+        input: {},
+        message: "[escape_attempt]",
+      });
+      const ok = r.shouldKill === true;
+      return {
+        ok,
+        detail: `high-kill=${r.shouldKill}`,
+      };
+    },
+  ],
+];
+
 let passed = 0;
 let total = 0;
 console.log("sandbox-probe");
@@ -57,6 +136,14 @@ for (const [name, check] of checks) {
   const detail = `${result.stdout?.trim() ?? ""} | ${result.stderr?.trim() ?? ""}`;
   console.log(
     `${ok ? "✓" : "✗"} ${name}${detail !== " | " ? ` (${detail})` : ""}`
+  );
+}
+for (const [name, check] of violationChecks) {
+  total += 1;
+  const result = check();
+  if (result.ok) passed++;
+  console.log(
+    `${result.ok ? "✓" : "✗"} ${name}${result.detail ? ` (${result.detail})` : ""}`
   );
 }
 console.log(
