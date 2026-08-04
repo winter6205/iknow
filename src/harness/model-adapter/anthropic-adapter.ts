@@ -210,6 +210,13 @@ export function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
 
 export interface AnthropicAdapter extends ModelAdapter {
   readonly encodeUserText: (userText: string) => AnthropicNativeMessage;
+  /**
+   * #178 T5 (#147 D6):本 adapter 实例实际走的调用模式 —— true = 流式臂
+   * (`client.messages.stream`),false/undefined = 非流式臂(`messages.create`)。
+   * loop-engine 的 `recordLlmCall` 用它翻转 trace `stream` 布尔;不读取、不影响
+   * 控制流(模式真值仍以 adapter 内部 arm 路由为准,此处只做申报)。
+   */
+  readonly streamMode?: boolean;
   readonly encodeToolResults: (
     results: ReadonlyArray<{
       readonly kind:
@@ -548,6 +555,8 @@ export function createRealAnthropicAdapter(
     step,
     encodeUserText,
     encodeToolResults,
+    // #178 T5 (D6):adapter 级模式申报(stream 是构造时静态决策,实例内不切换)。
+    streamMode: opts.stream === true,
   });
 }
 

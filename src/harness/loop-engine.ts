@@ -95,6 +95,13 @@ export interface LoopAdapter {
     },
     signal?: AbortSignal // 017 T1 决策:LoopAdapter 是 Loop Engine 直接消费接口,必须能接收 signal
   ) => Promise<AssistantTurnResult>;
+  /**
+   * #178 T5 (#147 D6):实际调用模式申报 —— true = 该 adapter 走流式臂
+   * (SDK `.stream()`),false/undefined = 非流式臂 / 离线替身。loop-engine
+   * 只在 trace `recordLlmCall` 处读取(不读、不判断、不构造其它供应商字段);
+   * 缺省语义让 stub-model / 离线 adapter 零改动保持 `stream: false`。
+   */
+  readonly streamMode?: boolean;
   readonly encodeUserText: (userText: string) => AnthropicNativeMessage;
   readonly encodeToolResults: (
     results: ReadonlyArray<ToolExecutionResult>
@@ -557,6 +564,10 @@ async function stepWithTrace(opts: {
 
   const llmEndedAt = new Date().toISOString();
   const llmDurationMs = performance.now() - llmStartMono;
+  // #178 T5 (D6):trace `stream` 布尔按实际模式翻转。模式由 adapter 经只读
+  // `streamMode` 申报(见 LoopAdapter 注释);两处 recordLlmCall site(ok /
+  // error)共用同一真值,在埋点前取一次。
+  const streamMode = opts.deps.adapter.streamMode === true;
   let llmCallId: string | undefined;
   if (opts.deps.trace) {
     if (modelPhase.kind === "stop") {
@@ -567,7 +578,7 @@ async function stepWithTrace(opts: {
           startedAt: llmStartedAt,
           endedAt: llmEndedAt,
           durationMs: llmDurationMs,
-          stream: false,
+          stream: streamMode,
           messagesCaptured: false,
           status: "error",
           error: { type: toTraceErrorType(reason), message: reason },
@@ -580,7 +591,7 @@ async function stepWithTrace(opts: {
           endedAt: llmEndedAt,
           durationMs: llmDurationMs,
           supplierStop: modelPhase.result.supplierStop,
-          stream: false,
+          stream: streamMode,
           messagesCaptured: false,
           status: "ok",
         })
