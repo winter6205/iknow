@@ -15,6 +15,10 @@
 - 归档 `src/interaction/`（5 文件）→ `docs/archive/022-retire-interaction/` + `src/agent-loop/`（7 文件）→ `docs/archive/022-retire-agent-loop/`；归档非删除，对齐 021 惯例。详见 #51（022）Resolution Q5。
 - Session API 路径切到 harness foundation（`src/session-api/` 零 import 旧 loop）；`SessionHub` 直接调用 `run()` + `priorMessages` 续传。详见 #51（022）Resolution Q1-Q5。
 
+### Added
+
+- ACI Web 类工具 `web_fetch` / `web_search`（`src/harness/aci/tools/web-fetch.ts` / `web-search.ts`，行为真值 upstream-openharness `web_fetch_tool.py` / `web_search_tool.py`）+ 共享 SSRF 出口层 `network-guard.ts`（URL 语法 / 嵌入凭据 / 非公网 IP 字面量与 DNS 结果 / 本地主机名 / 单标签 / ≤5 跳重定向逐跳重验 / 非 2xx 拒绝；fetch + DNS 解析 deps 注入，测试全离线；生产默认出口 `createDefaultGuardDeps` SSOT）+ 共享原语 `html-text.ts`（HTML→文本 / 实体解码）与 `ip-classify.ts`（IPv4/IPv6 非公网分类）。两工具 `aci` 元数据：`category=read-only`（权限默认 allow）/ `isConcurrencySafe=true` / `interruptBehavior=cancel` / `timeoutTier=default`（30s）。`web_fetch` 输出含 `UNTRUSTED_BANNER` 防 prompt injection 横幅 + HTML→文本提取（跳过 script/style + 实体解码）+ `max_chars` 截断（默认 12000，运行时 clamp 500..50000）；`web_search` 默认 DuckDuckGo html 端点（`search_url` 入参或 `IKNOW_WEB_SEARCH_URL` 可覆写，覆写同受 SSRF 校验；env 读取经 `loadIknowEnv` SSOT——`IknowEnv.web.searchUrl`，工具不直读 process.env），`max_results` 默认 5（1..10），`/l/?uddg=` 重定向链接归一。`buildHarnessEngine` 装配 append-only 6 → 8 工具（既有顺序不动，policy byName 键空间稳定）。测试：web 工具 3 文件 66 例 + env 3 例，共新增 69 例（正常 / 失败 / 边界 / 权限 / 空输入 / 并发扇出 6 类）。code-review 双轴审查：Standards 0 High（4 Medium 全整改：decodeEntities/defaultLookup 去重抽共享层、fetchPublicResponse 拆 followGuardedRedirects ≤30 行、env.ts SSOT 接线、clamp 运行时测试补齐）。
+
 ### Changed
 
 - #120 会话持久化：会话池根从 `<cwd>/data` 迁至 `~/.iknow`，项目命名空间采用 `<basename>-<sha1(cwd)[:12]>`（`resolveProjectSessionDir`）；`serve --data-dir` 覆盖保留，旧 `<cwd>/data` 不读、不迁移、不删除。`SessionFileV1` schema 升级为 v2，新增顶层 `summary` / `cwd` / `sanitized_at`；`sanitizeSessionFile` 前向兼容 v1（读取时补齐并零写盘），拒绝 `schemaVersion > 2` 及形状错误的 `messages`，不做修复。`SessionStore.list()` 条目新增 `summary`，既有 `conversation_id` / `updatedAt` / `lastFinalText` 保持不变；CLI `CliChatState.messages` 改为 `ReadonlyArray` + `Object.freeze`（#120 Q3）。详见 `specs/120-session-persistence.md`。
