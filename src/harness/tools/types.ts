@@ -86,6 +86,13 @@ export type ToolExecutionResult =
       readonly toolUseId: string;
       /** 净化后的安全错误摘要(可向模型暴露)。 */
       readonly message: string;
+      /**
+       * 可选 partial stdout/stderr — 由被中断/超时的 handler 在 #124 SC13
+       * 下产出，便于模型在收到 cancelled/timeout 后看到已有输出。仅在
+       * 真实产生过输出时存在;additive，不破坏 `message` 的 strict-equal
+       * 比对契约(loop-engine 仍按 message 判定 stopReason)。
+       */
+      readonly partial?: { readonly stdout?: string; readonly stderr?: string };
     };
 
 /** Executor 接口:接收 014 合法有序 tool-call 投影,返回匹配身份的 ToolExecutionResult。 */

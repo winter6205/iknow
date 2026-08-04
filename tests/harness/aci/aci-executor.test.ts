@@ -34,6 +34,7 @@ function makeTool(opts: MakeToolOpts): AciToolDef {
       category,
       isConcurrencySafe: category === "read-only",
       interruptBehavior: "cancel" as const,
+      timeoutTier: "default" as const,
     },
   });
 }

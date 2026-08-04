@@ -45,6 +45,7 @@ describe("createBashTool — schema and metadata", () => {
       category: "execute",
       isConcurrencySafe: false,
       interruptBehavior: "cancel",
+      timeoutTier: "build",
     });
   });
 });

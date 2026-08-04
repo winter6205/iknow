@@ -121,6 +121,7 @@ export function createGrepTool(root: string, deps?: GrepToolDeps): AciToolDef {
       category: "read-only" as const,
       isConcurrencySafe: true,
       interruptBehavior: "cancel" as const,
+      timeoutTier: "default" as const,
     },
   });
 }

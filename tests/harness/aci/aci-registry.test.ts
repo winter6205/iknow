@@ -28,6 +28,7 @@ function makeTool(opts: MakeToolOpts): AciToolDef {
       category: "read-only" as const,
       isConcurrencySafe: true,
       interruptBehavior: "cancel" as const,
+      timeoutTier: "fast" as const,
       ...(lazy ? { lazy: true } : {}),
     },
   });

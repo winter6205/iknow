@@ -69,6 +69,7 @@ describe("createWriteFileTool — schema and metadata", () => {
       category: "write",
       isConcurrencySafe: false,
       interruptBehavior: "block",
+      timeoutTier: "default",
     });
   });
 });

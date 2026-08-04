@@ -3,7 +3,8 @@
  *
  * 权限三层毕业（#122 Q5）后：删 pass_through（决策改 allow/deny/ask），
  * 删 AciMeta.isReadOnly / isDestructive（category 已是真值单一权威）；
- * 保留 category / isConcurrencySafe / interruptBehavior（#124 中断/超时）。
+ * 保留 category / isConcurrencySafe / interruptBehavior（#124 中断/超时）；
+ * 新增 timeoutTier（T5 接入）：按工具静态分级超时。
  *
  * 决策 / 规则 / 策略对象均移至 `src/harness/permission/` 模块，
  * 见 permission/index.ts 公共出口。
@@ -14,13 +15,37 @@ import type { ToolDef } from "../tools/types.js";
 /** ch04 四类安全级别（category 是 read-only / write / execute / collaborate 真值）。 */
 export type AciCategory = "read-only" | "write" | "execute" | "collaborate";
 
-/** ACI 安全/调度元数据（延迟加载 / 并发安全 / 中断行为）。 */
+/**
+ * 超时分级（T5 / #124）：工具的静态超时档位。
+ *
+ *   fast    = 5 s       单次文件读 / glob 列表（轻量原子操作）
+ *   default = 30 s      写入 / grep 大仓库（常规 IO + 子进程）
+ *   build   = 5 min     bash 长命令（构建 / 测试 / 部署）
+ *   long    = 30 min    罕见大作业
+ *
+ * 由 `TIMEOUT_TIER_MS` 提供毫秒值；`createAciExecutor` 在 #124 决策
+ * 3-4 之下，把工具的 tier 视为权威覆盖 Loop Engine 传入的 timeoutMs。
+ */
+export type TimeoutTier = "fast" | "default" | "build" | "long";
+
+/** 各 tier 的毫秒值（frozen — 实现层 + 测试层共源）。 */
+export const TIMEOUT_TIER_MS: Readonly<Record<TimeoutTier, number>> =
+  Object.freeze({
+    fast: 5_000,
+    default: 30_000,
+    build: 300_000,
+    long: 1_800_000,
+  });
+
+/** ACI 安全/调度元数据（延迟加载 / 并发安全 / 中断行为 / 超时分级）。 */
 export interface AciMeta {
   readonly category: AciCategory;
   readonly isConcurrencySafe: boolean;
   readonly interruptBehavior: "cancel" | "block";
   /** true = 延迟加载：默认不进 prompt schema，需 discover() 检索注入。默认 false（核心常驻）。 */
   readonly lazy?: boolean;
+  /** 静态超时分级；createAciExecutor 据此生成 per-call 超时（覆盖 engine 传入 timeoutMs）。 */
+  readonly timeoutTier: TimeoutTier;
 }
 
 /** ACI 工具定义 = 冻结 ToolDef + aci 元数据（扩展，不改协议）。 */

@@ -30,6 +30,7 @@ function makeTool(opts: MakeToolOpts): AciToolDef {
     isConcurrencySafe: category === "read-only",
     interruptBehavior:
       category === "write" ? ("block" as const) : ("cancel" as const),
+    timeoutTier: "default" as const,
   };
   return Object.freeze({
     name,

@@ -107,6 +107,7 @@ describe("createGlobTool — factory shape", () => {
       category: "read-only",
       isConcurrencySafe: true,
       interruptBehavior: "cancel",
+      timeoutTier: "fast",
     });
   });
 

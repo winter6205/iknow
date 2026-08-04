@@ -45,6 +45,7 @@ export function createReadFileTool(root: string): AciToolDef {
       category: "read-only" as const,
       isConcurrencySafe: true,
       interruptBehavior: "cancel" as const,
+      timeoutTier: "fast" as const,
     },
     handler: async (input: unknown) => {
       const params = parseInput(input);

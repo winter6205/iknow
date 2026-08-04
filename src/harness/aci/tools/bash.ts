@@ -117,6 +117,7 @@ export function createBashTool(cwd: string): AciToolDef {
       category: "execute" as const,
       isConcurrencySafe: false,
       interruptBehavior: "cancel" as const,
+      timeoutTier: "build" as const,
     },
   });
 }

@@ -406,8 +406,11 @@ function toTraceToolCalls(opts: {
  * cancelled / timeout。cancelled 优先级高于 timeout(与 stepWithTrace
  * 主路径上的判定顺序一致),signal 已 abort 即视为整体取消,即便
  * results 中同时存在 timeout 标签。
+ *
+ * 124/T5:导出供 interrupt-routing 验收套件断言严格 strict-equal
+ * 契约(无前缀/后缀宽容,严禁任何 substring / prefix 优化)。
  */
-function computeToolStopFlags(opts: {
+export function computeToolStopFlags(opts: {
   readonly results: ReadonlyArray<ToolExecutionResult>;
   readonly signal: AbortSignal | undefined;
 }): { timedOut: boolean; cancelled: boolean } {

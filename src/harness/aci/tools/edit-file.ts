@@ -158,6 +158,7 @@ export function createEditFileTool(root: string): AciToolDef {
       category: "write" as const,
       isConcurrencySafe: false,
       interruptBehavior: "block" as const,
+      timeoutTier: "default" as const,
     },
   });
 }
