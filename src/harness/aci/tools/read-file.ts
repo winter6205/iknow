@@ -43,8 +43,6 @@ export function createReadFileTool(root: string): AciToolDef {
     },
     aci: {
       category: "read-only" as const,
-      isReadOnly: true,
-      isDestructive: false,
       isConcurrencySafe: true,
       interruptBehavior: "cancel" as const,
     },

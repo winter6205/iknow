@@ -43,8 +43,6 @@ describe("createBashTool — schema and metadata", () => {
     assert.equal("timeout" in schema.properties, false);
     assert.deepEqual(tool.aci, {
       category: "execute",
-      isReadOnly: false,
-      isDestructive: true,
       isConcurrencySafe: false,
       interruptBehavior: "cancel",
     });

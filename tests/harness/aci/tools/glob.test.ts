@@ -105,8 +105,6 @@ describe("createGlobTool — factory shape", () => {
     assert.ok(tool.description.length > 0);
     assert.deepEqual(tool.aci, {
       category: "read-only",
-      isReadOnly: true,
-      isDestructive: false,
       isConcurrencySafe: true,
       interruptBehavior: "cancel",
     });

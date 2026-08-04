@@ -156,8 +156,6 @@ export function createEditFileTool(root: string): AciToolDef {
     handler,
     aci: {
       category: "write" as const,
-      isReadOnly: false,
-      isDestructive: false,
       isConcurrencySafe: false,
       interruptBehavior: "block" as const,
     },

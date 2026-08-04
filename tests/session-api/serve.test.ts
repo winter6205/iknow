@@ -19,6 +19,7 @@ import {
 } from "../../src/session-api/serve.ts";
 import type { ListeningServer } from "../../src/session-api/http.ts";
 import type { SessionHub } from "../../src/session-api/hub.ts";
+import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 
 // -- per-test cleanup --------------------------------------------------------
 
@@ -40,7 +41,11 @@ async function start(opts: ServeOptions = {}): Promise<{
   hub: SessionHub;
 }> {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-serve-"));
-  const out = await startSessionServe({ ...opts, dataDir: baseDir });
+  const out = await startSessionServe({
+    hubOptions: { askUser: createNoAskUser() },
+    ...opts,
+    dataDir: baseDir,
+  });
   listening = out.listening;
   hub = out.hub;
   return out;
@@ -145,6 +150,7 @@ describe("startSessionServe — dataDir resolution", () => {
     const explicit = await mkdtemp(join(tmpdir(), "iknow-serve-explicit-"));
     try {
       const out = await startSessionServe({
+        hubOptions: { askUser: createNoAskUser() },
         dataDir: explicit,
         port: 0,
       });
@@ -172,7 +178,10 @@ describe("startSessionServe — dataDir resolution", () => {
       resolveServeDataDir("/tmp/iknow-serve-explicit"),
       path.resolve("/tmp/iknow-serve-explicit")
     );
-    const out = await startSessionServe({ port: 0 });
+    const out = await startSessionServe({
+      hubOptions: { askUser: createNoAskUser() },
+      port: 0,
+    });
     listening = out.listening;
     assert.ok(listening.port > 0);
     assert.ok(out.hub);
@@ -187,6 +196,7 @@ describe("startSessionServe — port fallback", () => {
     delete process.env.IKNOW_SERVE_PORT;
     try {
       const out = await startSessionServe({
+        hubOptions: { askUser: createNoAskUser() },
         dataDir: await mkdtemp(join(tmpdir(), "iknow-port-fb-")),
         host: "127.0.0.1",
         // No port, no env → defaults to 8787; but 8787 may be in use in CI,
@@ -207,6 +217,7 @@ describe("startSessionServe — port fallback", () => {
     process.env.IKNOW_SERVE_PORT = "not-a-number";
     try {
       const out = await startSessionServe({
+        hubOptions: { askUser: createNoAskUser() },
         dataDir: await mkdtemp(join(tmpdir(), "iknow-port-nan-")),
         host: "127.0.0.1",
       });

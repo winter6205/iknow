@@ -92,8 +92,6 @@ describe("createGrepTool — schema/aci shape", () => {
     const tool = createGrepTool(root);
 
     assert.equal(tool.aci.category, "read-only");
-    assert.equal(tool.aci.isReadOnly, true);
-    assert.equal(tool.aci.isDestructive, false);
     assert.equal(tool.aci.isConcurrencySafe, true);
     assert.equal(tool.aci.interruptBehavior, "cancel");
   });

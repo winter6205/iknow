@@ -3,6 +3,10 @@
  * 022 T4: load → run(priorMessages) → conditional save → wire projection.
  * Messages single-source is the session file; hub holds no messages copy.
  * 064 T5: per-session JSONL trace when traceOut is configured (ADR-0003 D4).
+ *
+ * 162: askUser is required at engine construction. Hub accepts `askUser`
+ * via SessionHubOptions (tests inject createNoAskUser()); production callers
+ * (serve.ts) supply the SPA-channel implementation or a v0 stub.
  */
 import { randomUUID } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
@@ -20,6 +24,9 @@ import {
   type LoopEngineDeps,
   type RunResult,
 } from "../harness/index.js";
+import { createPermissionExecutor } from "../harness/permission/index.js";
+import { createPermissionPolicy } from "../harness/permission/policy.js";
+import type { AskUser } from "../harness/permission/types.js";
 import { loadIknowEnv } from "../config/env.js";
 import { ValidationError } from "../shared/errors.js";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
@@ -162,6 +169,10 @@ export type SessionHubOptions = {
    * JsonlTraceService bound to session.conversation_id (ADR-0003 D4).
    * Per-session instance -> cachedDeps does not cache the trace. */
   traceOut?: string;
+  /** askUser inlet (#162). Required when not injecting `deps`; the
+   * construction-time check below throws otherwise (#162 / SC18).
+   * Tests injecting `deps` are unaffected. */
+  askUser?: AskUser;
 };
 
 // -- stop reasons that must NOT persist to file (裁决#8) -----------------------
@@ -183,13 +194,21 @@ export class SessionHub {
   };
   /** JSONL trace output path; when set, postMessage creates a per-session trace. */
   private readonly traceOut: string | undefined;
+  /** askUser inlet (#162); required unless deps are pre-built. */
+  private readonly askUser: AskUser | undefined;
   /** Per-conversation serialization (spec A15). */
   private readonly inflight = new Map<string, Promise<void>>();
 
   constructor(opts: SessionHubOptions) {
+    if (!opts.askUser && !opts.deps) {
+      throw new Error(
+        "ask_inlet_missing: SessionHub requires AskUser or pre-built deps (#162 / SC18)"
+      );
+    }
     this.store = opts.store;
     this.cachedDeps = opts.deps;
     this.traceOut = opts.traceOut;
+    this.askUser = opts.askUser;
     this.defaults = {
       jsonMode: opts.defaultJsonMode ?? false,
     };
@@ -357,6 +376,11 @@ export class SessionHub {
   /** Lazy deps construction (mirrors buildHarnessEngine, no agent-loop import). */
   private async ensureDeps(): Promise<LoopEngineDeps> {
     if (this.cachedDeps) return this.cachedDeps;
+    if (!this.askUser) {
+      throw new Error(
+        "ask_inlet_missing: SessionHub lazy deps require AskUser (#162)"
+      );
+    }
     const env = loadIknowEnv();
     if (!env.llm.apiKey) {
       throw new ValidationError(
@@ -376,7 +400,16 @@ export class SessionHub {
       thinking: buildThinkingParams(env.llm),
     });
     const registry = createRegistry([createEchoTool(), createGetTimeTool()]);
-    const executor = createExecutor(registry);
+    const inner = createExecutor(registry);
+    // 5-step permission middleware: askUser is guaranteed by the constructor
+    // contract when the hub must build deps lazily.
+    const policy = createPermissionPolicy();
+    const executor = createPermissionExecutor({
+      inner,
+      registry,
+      policy,
+      askUser: this.askUser,
+    });
     this.cachedDeps = {
       adapter,
       executor,

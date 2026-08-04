@@ -1,0 +1,46 @@
+/**
+ * src/harness/permission/ barrel export (plan T2).
+ */
+
+export type {
+  AskUser,
+  PreToolUseHook,
+  PostToolUseHook,
+  PermissionDecision,
+  PermissionOutcome,
+  PermissionSource,
+  ToolCategory,
+  HardRuleSpec,
+  NormalRuleSpec,
+  CodeBuiltInPolicySource,
+  ProjectSettingsPolicySource,
+  SessionGrantsPolicySource,
+} from "./types.js";
+
+export {
+  createPermissionPolicy,
+  checkPermission,
+  DEFAULT_BY_CATEGORY,
+  HARD_WALL_DENY_PREFIX,
+} from "./policy.js";
+export type { PermissionPolicy, CategoryDefault } from "./policy.js";
+
+export { createNoOpHooks, createHooksPair } from "./hooks.js";
+export type { HooksPair, HooksCustom } from "./hooks.js";
+
+export {
+  createTtyAskUser,
+  createFailClosedAskUser,
+  createNoAskUser,
+  createServeAskUser,
+} from "./ask-user.js";
+export type { TtyAskUserOpts, ServeAskUserHandle } from "./ask-user.js";
+
+export { createSessionGrants } from "./session-grants.js";
+export type { SessionGrants } from "./session-grants.js";
+
+export {
+  createPermissionExecutor,
+  createAciCatalog,
+} from "./permission-executor.js";
+export type { PermissionExecutorOptions } from "./permission-executor.js";

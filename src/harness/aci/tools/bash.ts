@@ -67,8 +67,6 @@ export function createBashTool(cwd: string): AciToolDef {
     handler,
     aci: {
       category: "execute" as const,
-      isReadOnly: false,
-      isDestructive: true,
       isConcurrencySafe: false,
       interruptBehavior: "cancel" as const,
     },

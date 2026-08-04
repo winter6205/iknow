@@ -29,6 +29,8 @@ import { createGrepTool } from "../harness/aci/tools/grep.js";
 import { createGlobTool } from "../harness/aci/tools/glob.js";
 import { createEditFileTool } from "../harness/aci/tools/edit-file.js";
 import { createWriteFileTool } from "../harness/aci/tools/write-file.js";
+import { createPermissionExecutor } from "../harness/permission/index.js";
+import type { AskUser } from "../harness/permission/types.js";
 import { loadIknowEnv, type IknowEnv } from "../config/env.js";
 import type { SessionContext } from "../shared/schema.js";
 import { createIknowRuntime } from "../runtime/create-runtime.js";
@@ -61,14 +63,23 @@ export type BuiltEngine = {
  * 何时跑、是否续传 priorMessages。maxTurns 硬编码 6(loadIknowEnv 无 maxTurns
  * 字段,对齐 019 i9 smoke 惯例)。缺 apiKey 抛错,message 含 "LLM mode needs"
  * 子串(cli.ts runOneShot 按此匹配发 llm_mode_missing_api_key 信封)。
+ *
+ * #162 三入口装配 askUser：`askUser: AskUser` 是必传参数；缺则启动 throw
+ * `ask_inlet_missing`。
  */
 export async function buildHarnessEngine(
-  bundle: RuntimeBundle
+  bundle: RuntimeBundle,
+  opts: { askUser: AskUser }
 ): Promise<BuiltEngine> {
   const { env } = bundle;
   if (!env.llm.apiKey) {
     throw new Error(
       `CLI LLM mode needs the env var named by IKNOW_LLM_API_KEY_ENV (${env.llm.apiKeyEnv}); set the key.`
+    );
+  }
+  if (!opts.askUser) {
+    throw new Error(
+      "ask_inlet_missing: buildHarnessEngine requires an AskUser implementation (chat/ask/serve must inject one)"
     );
   }
   const client = new Anthropic({
@@ -98,10 +109,17 @@ export async function buildHarnessEngine(
   ];
   const reg = createAciRegistry(aciTools);
   const baseExecutor = createExecutor(reg.inner);
-  const executor = createAciExecutor({
-    inner: baseExecutor,
-    catalog: reg.catalog,
-    policy: createPermissionPolicy({ denyDangerousExecute: true }),
+  // 5-step permission middleware (delegates to permission-executor).
+  const policy = createPermissionPolicy({ denyDangerousExecute: true });
+  const executor = createPermissionExecutor({
+    inner: createAciExecutor({
+      inner: baseExecutor,
+      catalog: reg.catalog,
+      policy,
+    }),
+    registry: reg.inner,
+    policy,
+    askUser: opts.askUser,
   });
   const deps: LoopEngineDeps = {
     adapter,

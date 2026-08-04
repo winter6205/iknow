@@ -32,8 +32,6 @@ function makeTool(opts: MakeToolOpts): AciToolDef {
     handler: async () => "ok",
     aci: {
       category,
-      isReadOnly: category === "read-only",
-      isDestructive: category === "execute",
       isConcurrencySafe: category === "read-only",
       interruptBehavior: "cancel" as const,
     },
@@ -86,10 +84,10 @@ describe("createAciExecutor — deny 路径不调 inner", () => {
     if (r.kind === "execution_failed") {
       assert.equal(r.toolUseId, "u1");
       assert.ok(r.message.startsWith("[permission_denied]"));
-      // allowlist-first: rm 不在白名单，reason 含 "command not in allowlist"
+      // v0: hard-wall fires; reason carries [hard_wall] marker
       assert.ok(
-        r.message.includes("command not in allowlist"),
-        `expected allowlist denial, got: ${r.message}`
+        r.message.includes("[hard_wall]"),
+        `expected hard-wall denial, got: ${r.message}`
       );
     }
     // inner 从未被调用
@@ -212,18 +210,20 @@ describe("createAciExecutor — onDecision 钩子", () => {
     ]);
 
     assert.equal(decisions.length, 2);
+    // first call: hard-wall fires → deny
     assert.equal(decisions[0]!.outcome.decision, "deny");
-    assert.equal(decisions[1]!.outcome.decision, "allow");
+    // second call: hard-wall pass; bash is "execute" → category default ask
+    assert.equal(decisions[1]!.outcome.decision, "ask");
   });
 });
 
 describe("createAciExecutor — 自定义 policy", () => {
-  it("byName always_deny 覆盖 read-only 默认", async () => {
+  it("byName deny 覆盖 read-only 默认", async () => {
     const { executor: spy, calls } = makeSpyExecutor();
     const tool = makeTool({ name: "grep", category: "read-only" });
     const catalog = makeCatalog([tool]);
     const policy = createPermissionPolicy({
-      byName: { grep: "always_deny" },
+      byName: { grep: "deny" },
     });
     const aciExec = createAciExecutor({ inner: spy, catalog, policy });
 
