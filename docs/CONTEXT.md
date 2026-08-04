@@ -133,9 +133,9 @@ _Avoid_: separate frontend-only server as the production path without proxying `
 Vite + React + TypeScript chat console; same-origin Session client; G2 side panel required.
 _Avoid_: zero-dep static shell as product; dropping `snapshot_id` for “clean UI”
 
-**parseLlmResponseJson**:
-LLM body parser that accepts plain JSON or JSON followed by SSE trailer (`data: [DONE]`); client also sends `stream: false`.
-_Avoid_: bare `JSON.parse(raw)` on 9router chat responses
+**streaming arm**:
+LLM 客户端默认流式臂（`IKNOW_LLM_STREAM` 值域 `on | off`，默认 `on`，`env.ts` SSOT），`off` 回退非流式臂；原生 SSE 事件不出 adapter 边界，收敛为 `HarnessStreamEvent` 最小集（`text_delta` / `tool_call_start`，`src/harness/stream.ts`），终态经 SDK `finalMessage()` -> `interpretMessage`（SSOT）落为同形 `AssistantTurnResult`。
+_Avoid_: 把 `stream: false` + 裸 JSON 解析当默认 LLM 臂；让原生 SSE 事件逸出 adapter 边界
 
 **I4 smoke**:
 Documented three-mode + HTTP interaction smoke under `docs/handoff/i4-smoke/` (no secrets in artifacts).
@@ -176,7 +176,7 @@ _Avoid_: `(entity_id, snapshot_id, valid_window)`（仓库无此表述）/ 把 `
 - **User line -> processChatLine -> answer(opts) -> IknowAnswer -> ConversationState**: multi-turn host path
 - **last_priors -> answer prior_chunks -> kb_retrieve**: cross-turn retrieve bridge only
 - **Browser -> Session HTTP -> ConversationState -> Agent.answer -> G2**: product SPA / API host path
-- **chat/completions body -> parseLlmResponseJson -> tool_calls loop**: LLM agent path
+- **run() messages -> adapter streaming arm -> interpretMessage**: harness LLM path (stream events surface as `HarnessStreamEvent` via `onStream`)
 
 ## Flagged ambiguities
 
@@ -188,7 +188,7 @@ _Avoid_: `(entity_id, snapshot_id, valid_window)`（仓库无此表述）/ 把 `
 - **draft eval set**: `eval-set.draft.json` is DRAFT-EVAL-SET; hard_pass on draft ≠ production gate until real queries replace samples
 - **chat vs test harness**: product CLI is TTY/pipe-aware session code under `src/cli/`; unit tests call `processChatLine` without claiming that is the product UX
 - **9router key vs endpoint**: same `NINE_ROUTER_KEY` can yield `models` 200 while `chat/completions` return 401; agent shell env may differ from operator interactive shell
-- **SSE trailer vs stream flag**: gateway may return `text/event-stream` trailer even when client requested non-stream; use `parseLlmResponseJson`, not only `stream: false`
+- **streaming arm vs native SSE**: LLM 默认 SDK 流式臂（`IKNOW_LLM_STREAM`，默认 `on`，`env.ts` SSOT）；原生 SSE 事件不出 adapter 边界，host 只见 `HarnessStreamEvent`；`off` 回退非流式臂，网关响应由 SDK 统一消化，host 不直接解析 wire
 - **turnCount vs max_hops**: `turnCount`（Foundation）统计每个已完成的 assistant 回合；`max_hops`（产品 / eval）只统计 retrieve + verify hop（默认 5）；两者属于不同层次，不得混同。
 - **cancelled vs timeout**: 两条独立停止路径--cancelled 由 Loop Engine 检测 `signal.aborted`，timeout 由 adapter/executor 超时结果判定；signal 优先，不在 signal 层合并超时。
 - **LoopTrace vs messages**: LoopTrace 是非权威 A 层结构元数据（不含 payload），messages 才是 014 唯一权威历史；trace 只用于诊断聚合，不得作为第二份权威副本。
