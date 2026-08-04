@@ -363,3 +363,123 @@ describe("processChatLine (pipe simulation)", () => {
     assert.match(r.stderr!, /boom-agent/);
   });
 });
+
+/**
+ * #152 T5 可见开关落点集成：chat-session `processChatLine` 尊重 `showThinking`。
+ *
+ * 默认（缺省/`false`）：输出面（`r.output`）不含 thinking 文本；
+ * `ctx.showThinking === true`：输出面含 thinking（区隔前缀由渲染层决定）。
+ * 本测试不直接测渲染函数本身（那在 tests/cli/format.test.ts），只测接线。
+ */
+describe("chat-session thinking 可见开关接线 (#152 T5)", () => {
+  it("showThinking 缺省（false）：output 不含 thinking 文本", async () => {
+    const ctx = makeCtx({
+      responses: [
+        assistantResult({
+          texts: ["answer"],
+          thinkingBlocks: [
+            {
+              type: "thinking",
+              thinking: "HIDDEN_THINKING_MUST_NOT_SHOW",
+              signature: "sig_w1",
+            },
+          ],
+        }),
+      ],
+    });
+    const r = await processChatLine({ line: "any question", ctx });
+    assert.equal(r.ranQuery, true);
+    assert.ok(r.output.includes("answer"));
+    assert.ok(
+      !r.output.includes("HIDDEN_THINKING_MUST_NOT_SHOW"),
+      "default off: thinking must not leak into output"
+    );
+  });
+
+  it("ctx.showThinking === true：output 含 thinking 文本 + 仍含 text", async () => {
+    const ctx = makeCtx({
+      responses: [
+        assistantResult({
+          texts: ["answer"],
+          thinkingBlocks: [
+            {
+              type: "thinking",
+              thinking: "VISIBLE_THINKING_SHOULD_SHOW",
+              signature: "sig_w2",
+            },
+          ],
+        }),
+      ],
+    });
+    ctx.showThinking = true;
+    const r = await processChatLine({ line: "any question", ctx });
+    assert.equal(r.ranQuery, true);
+    assert.ok(r.output.includes("answer"));
+    assert.ok(
+      r.output.includes("VISIBLE_THINKING_SHOULD_SHOW"),
+      "on: thinking must be visible in output"
+    );
+  });
+
+  it("JSON 模式：showThinking 不影响 JSON 输出（machine 通道）", async () => {
+    const ctx = makeCtx({
+      responses: [
+        assistantResult({
+          texts: ["answer"],
+          thinkingBlocks: [
+            {
+              type: "thinking",
+              thinking: "JSON_CHANNEL_MUST_NOT_LEAK",
+              signature: "sig_w3",
+            },
+          ],
+        }),
+      ],
+      stateOverrides: { jsonMode: true },
+    });
+    ctx.showThinking = true;
+    await processChatLine({ line: "/json on", ctx });
+    const r = await processChatLine({ line: "any question", ctx });
+    assert.equal(r.ranQuery, true);
+    // JSON channel never includes thinking regardless of the switch.
+    assert.ok(!r.output.includes("JSON_CHANNEL_MUST_NOT_LEAK"));
+    const parsed = JSON.parse(r.output) as Record<string, unknown>;
+    assert.ok("finalText" in parsed);
+  });
+
+  it("thinking 进 ctx.state.messages（权威历史）但不出现在默认 output（两面分离）", async () => {
+    // 可见面 = 展示通道（output）；保留面 = 权威历史（state.messages）。
+    // 默认开关关闭时：历史仍含 thinking（可被后续 replay），但 output 无 thinking。
+    const ctx = makeCtx({
+      responses: [
+        assistantResult({
+          texts: ["answer"],
+          thinkingBlocks: [
+            {
+              type: "thinking",
+              thinking: "KEEP_IN_HISTORY_BUT_HIDE_FROM_OUTPUT",
+              signature: "sig_w4",
+            },
+          ],
+        }),
+      ],
+    });
+    const r = await processChatLine({ line: "any question", ctx });
+    // output 面：不含 thinking。
+    assert.ok(!r.output.includes("KEEP_IN_HISTORY_BUT_HIDE_FROM_OUTPUT"));
+    // 权威历史：含 thinking 全字段（保留面不被可见开关影响）。
+    const assistantMsg = ctx.state.messages[1]!;
+    assert.equal(assistantMsg.role, "assistant");
+    const thinkingBlock = assistantMsg.content[0] as {
+      type: "thinking";
+      thinking: string;
+      signature: string;
+    };
+    assert.equal(thinkingBlock.type, "thinking");
+    assert.equal(
+      thinkingBlock.thinking,
+      "KEEP_IN_HISTORY_BUT_HIDE_FROM_OUTPUT"
+    );
+    assert.equal(thinkingBlock.signature, "sig_w4");
+  });
+});

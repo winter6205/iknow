@@ -14,10 +14,39 @@ export interface LlmEnv {
   maxOutputTokens: number;
   timeoutMs: number;
   temperature: number;
+  /**
+   * #151 T4 请求侧 thinking 控制臂:
+   *   - "off"      → 不发送 thinking / output_config(默认)
+   *   - "adaptive" → 发送 thinking:{type:'adaptive'};effort 非空时再追加 output_config:{effort:N}
+   * 非法值 → 回退 "off"。
+   */
+  thinking: "off" | "adaptive";
+  /**
+   * #151 T4 effort 档位:空 → 不发送 output_config。
+   * 非法值 → 视同空。
+   */
+  thinkingEffort: "" | "low" | "medium" | "high" | "xhigh" | "max";
+}
+
+/**
+ * #152 T5:thinking 可见面控制臂(env flag → env SSOT)。
+ *
+ * `IKNOW_CHAT_SHOW_THINKING` 值域 `"off" | "on"`(大小写不敏感)。
+ * 非法值 → 回退 `false`。默认 off(thinking 不进答案正文)。
+ */
+export interface ChatEnv {
+  /**
+   * #152 T5:是否在回答中显示模型 thinking 文本。
+   * `false`(默认)= 不显示,保持既有 chat 投影行为不变;
+   * `true` = 在答案文本前以区隔样式显示 thinking。
+   */
+  showThinking: boolean;
 }
 
 export interface IknowEnv {
   llm: LlmEnv;
+  /** #152 T5:thinking 可见面控制臂。 */
+  chat: ChatEnv;
 }
 
 /** Placeholder values treated as "no real secret set" (case-insensitive). */
@@ -88,6 +117,52 @@ function envNumber(opts: EnvNumberOpts): number {
 }
 
 /**
+ * #151 T4: 解析 IKNOW_LLM_THINKING 值域 "off" | "adaptive"。
+ * 非法值(除 "off"/"adaptive" 外,含空字符串)→ 回退 "off",不抛错。
+ */
+function envThinkingMode(opts: {
+  readonly file: Record<string, string>;
+  readonly key: string;
+}): "off" | "adaptive" {
+  const raw = envGet({ file: opts.file, key: opts.key });
+  if (raw === "off" || raw === "adaptive") return raw;
+  return "off";
+}
+
+/**
+ * #151 T4: 解析 IKNOW_LLM_THINKING_EFFORT 值域 "" | "low" | "medium" |
+ * "high" | "xhigh" | "max"。非法值 → 视同空(不发送 output_config)。
+ */
+function envThinkingEffort(opts: {
+  readonly file: Record<string, string>;
+  readonly key: string;
+}): "" | "low" | "medium" | "high" | "xhigh" | "max" {
+  const raw = envGet({ file: opts.file, key: opts.key });
+  switch (raw) {
+    case "low":
+    case "medium":
+    case "high":
+    case "xhigh":
+    case "max":
+      return raw;
+    default:
+      return "";
+  }
+}
+
+/**
+ * #152 T5: 解析 IKNOW_CHAT_SHOW_THINKING。合法值 "on" / "off"（大小写不敏感），
+ * 非法值 → 回退 false（默认不显示 thinking）。
+ */
+function envShowThinking(opts: {
+  readonly file: Record<string, string>;
+  readonly key: string;
+}): boolean {
+  const raw = envGet({ file: opts.file, key: opts.key });
+  return raw.toLowerCase() === "on";
+}
+
+/**
  * Resolve an API key by name.
  * Precedence: `process.env[envVarName]` then optional `fileMap` (from dotenv merge).
  *
@@ -155,6 +230,21 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
         file,
         key: "IKNOW_LLM_TEMPERATURE",
         fallback: 0,
+      }),
+      thinking: envThinkingMode({
+        file,
+        key: "IKNOW_LLM_THINKING",
+      }),
+      thinkingEffort: envThinkingEffort({
+        file,
+        key: "IKNOW_LLM_THINKING_EFFORT",
+      }),
+    },
+    chat: {
+      // #152 T5:默认 off（不显示 thinking，保持现状）。
+      showThinking: envShowThinking({
+        file,
+        key: "IKNOW_CHAT_SHOW_THINKING",
       }),
     },
   };

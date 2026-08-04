@@ -141,6 +141,9 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     deps: built.deps,
     session: bundle.session,
     jsonMode: parsed.json,
+    // #152 T5:thinking 可见面(env flag → chat-session → format-run-human)。
+    // env.ts SSOT;默认 off。
+    showThinking: bundle.env.chat.showThinking,
   });
 }
 

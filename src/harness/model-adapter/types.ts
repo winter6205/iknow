@@ -20,7 +20,9 @@ export type AnthropicContentBlock =
       tool_use_id: string;
       content: unknown;
       is_error?: boolean;
-    };
+    }
+  | { type: "thinking"; thinking: string; signature: string }
+  | { type: "redacted_thinking"; data: string };
 
 /** Anthropic 原生消息角色。 */
 export type AnthropicRole = "user" | "assistant";

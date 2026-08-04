@@ -10,11 +10,15 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { raceModel, run, step } from "../../src/harness/loop-engine.ts";
 import type {
+  AnthropicContentBlock,
   AnthropicNativeMessage,
   AssistantTurnResult,
   LoopState,
 } from "../../src/harness/model-adapter/types.ts";
-import type { ToolDef } from "../../src/harness/tools/types.ts";
+import type {
+  ToolDef,
+  ToolExecutionResult,
+} from "../../src/harness/tools/types.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../src/harness/tools/executor.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
@@ -32,11 +36,31 @@ function assistantResult(opts: {
   readonly texts: string[];
   readonly toolCalls?: Array<{ id: string; name: string; input: unknown }>;
   readonly supplierStop?: "success" | "truncation" | "refusal" | "other";
+  /** #152 T5:optional thinking blocks;full 字段保留进 nativeMessage.content。 */
+  readonly thinkingBlocks?: ReadonlyArray<{
+    readonly type: "thinking" | "redacted_thinking";
+    readonly thinking?: string;
+    readonly signature?: string;
+    readonly data?: string;
+  }>;
 }): AssistantTurnResult {
   const texts = opts.texts;
   const toolCalls = opts.toolCalls ?? [];
   const supplierStop = opts.supplierStop ?? "success";
+  const thinkingBlocks = opts.thinkingBlocks ?? [];
   const blocks: AnthropicNativeMessage["content"] = [];
+  // thinking blocks 必须按块序先于 text / tool_use(Q2 决议:thinking 先于 tool_use)。
+  for (const t of thinkingBlocks) {
+    if (t.type === "thinking") {
+      blocks.push({
+        type: "thinking",
+        thinking: t.thinking ?? "",
+        signature: t.signature ?? "",
+      });
+    } else {
+      blocks.push({ type: "redacted_thinking", data: t.data ?? "" });
+    }
+  }
   for (const t of texts) blocks.push({ type: "text", text: t });
   for (const c of toolCalls) {
     blocks.push({ type: "tool_use", id: c.id, name: c.name, input: c.input });
@@ -1278,5 +1302,417 @@ describe("017 timeout boundary: non-positive modelTimeoutMs disables the race", 
     assert.equal(result.finalText, "ok");
     const last = trace.turns[trace.turns.length - 1]!;
     assert.equal(last.cancelKind, "none");
+  });
+});
+
+/**
+ * #152 T5:loop 级 thinking 保留与回传(规则层 STUB/LOOP)。
+ *
+ * 验收:
+ *   1. 含 thinking 的 assistant 回合 → state.messages(append-only,全字段:thinking 文本 +
+ *      signature;redacted 的 data);
+ *   2. 下一轮 replay 的请求消息原样含 thinking blocks(回传 = 权威历史本身);
+ *   3. LoopTrace 严格不含 payload(上下文词条锁);trace 不塞 thinking 内容;
+ *   4. `projection.texts` 不含 thinking 文本(Q3 决议:thinking 非面向用户正文);
+ *   5. `run().result.finalText` 派生不变。
+ *
+ * 切片:本文件不验证 thinking 展示开关(那是 Part B 的 cmd/format 关注点)。这里只
+ * 断言权威历史层(结果 messages[?].content)的字段级深保留 + 下一次 step 入参
+ * 对原 thinking blocks 的 byte-identical 回传。
+ */
+describe("loop engine T5 #152: thinking 保留与回传", () => {
+  it("thinking + text + tool_use → append-only 进 state.messages 全字段", async () => {
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const reg = createRegistry([echo]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "ping" } }],
+          thinkingBlocks: [
+            {
+              type: "thinking",
+              thinking: "Let me reason about this carefully.",
+              signature: "sig_abc123",
+            },
+          ],
+        }),
+        assistantResult({
+          texts: ["final"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const { result } = await run("hello", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "completed");
+    assert.equal(result.turnCount, 2);
+    // 切到 assistant role 上: messages[1] 是含 thinking 的回合。
+    const assistant1 = result.messages[1]!;
+    assert.equal(assistant1.role, "assistant");
+    // 块序:thinking → text → tool_use(Q2 决议要求)。
+    assert.equal(assistant1.content.length, 3);
+    const b0 = assistant1.content[0] as {
+      type: "thinking";
+      thinking: string;
+      signature: string;
+    };
+    assert.equal(b0.type, "thinking");
+    assert.equal(b0.thinking, "Let me reason about this carefully.");
+    assert.equal(b0.signature, "sig_abc123");
+    const b1 = assistant1.content[1] as { type: "text"; text: string };
+    assert.equal(b1.text, "done");
+    const b2 = assistant1.content[2] as { type: "tool_use"; id: string };
+    assert.equal(b2.type, "tool_use");
+    assert.equal(b2.id, "t1");
+    // result.finalText 派生不变(纯文本拼接)。
+    assert.equal(result.finalText, "final");
+    // 整树仍冻结。
+    assert.equal(Object.isFrozen(result.messages), true);
+    assert.equal(Object.isFrozen(assistant1), true);
+    assert.equal(Object.isFrozen(assistant1.content), true);
+    for (const b of assistant1.content) {
+      assert.equal(Object.isFrozen(b), true);
+    }
+  });
+
+  it("redacted_thinking 的 data 字段也字段级深保留", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["recovered"],
+          toolCalls: [],
+          thinkingBlocks: [
+            { type: "redacted_thinking", data: "encrypted_blob_data_here==" },
+          ],
+        }),
+      ],
+    });
+    const { result } = await run("hi", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "completed");
+    const blocks = result.messages[1]!.content;
+    assert.equal(blocks.length, 2);
+    assert.equal(blocks[0]!.type, "redacted_thinking");
+    assert.equal(
+      (blocks[0] as { type: "redacted_thinking"; data: string }).data,
+      "encrypted_blob_data_here=="
+    );
+    assert.equal(
+      (blocks[1] as { type: "text"; text: string }).text,
+      "recovered"
+    );
+    assert.equal(result.finalText, "recovered");
+  });
+
+  it("回传契约:下一轮 step 收到的 state.messages 原样含 thinking blocks", async () => {
+    // 关键断言:replay 携带的 history 与权威历史 byte-identical。
+    // 用一个 stub-model 包装,捕获每次 step 看到的 state.messages 内容。
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const reg = createRegistry([echo]);
+    const exec = createExecutor(reg);
+    const capturedMessages: ReadonlyArray<AnthropicNativeMessage>[] = [];
+
+    const fakeAdapter = Object.freeze({
+      encodeUserText: (t: string): AnthropicNativeMessage => ({
+        role: "user",
+        content: [{ type: "text", text: t }],
+      }),
+      encodeToolResults: (
+        results: ReadonlyArray<ToolExecutionResult>
+      ): AnthropicContentBlock[] => {
+        return results.map((r) => {
+          const text =
+            r.kind === "ok"
+              ? JSON.stringify(r.payload ?? {})
+              : `[${r.kind}] ${r.message ?? ""}`;
+          return {
+            type: "tool_result" as const,
+            tool_use_id: r.toolUseId,
+            is_error: r.kind !== "ok",
+            content: [{ type: "text" as const, text }],
+          };
+        });
+      },
+      step: async (
+        state: LoopState,
+        _request: { tools?: unknown }
+      ): Promise<AssistantTurnResult> => {
+        // Snapshot the messages the engine is about to send to the model.
+        capturedMessages.push(state.messages);
+        // Two-turn scripted flow: think + tool_use, then plain text.
+        if (capturedMessages.length === 1) {
+          return assistantResult({
+            texts: ["done"],
+            toolCalls: [{ id: "t1", name: "echo", input: { value: "ping" } }],
+            thinkingBlocks: [
+              {
+                type: "thinking",
+                thinking: "First turn reasoning.",
+                signature: "sig_first_turn",
+              },
+            ],
+          });
+        }
+        return assistantResult({
+          texts: ["all good"],
+          toolCalls: [],
+          supplierStop: "success",
+        });
+      },
+    });
+
+    const { result } = await run("go", {
+      adapter: fakeAdapter,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "completed");
+    assert.equal(result.turnCount, 2);
+    assert.equal(capturedMessages.length, 2);
+    // Step 1 看到的初始 messages(还没 +thinking 块)= [user(go)]。
+    assert.equal(capturedMessages[0]!.length, 1);
+    assert.equal(capturedMessages[0]![0]!.role, "user");
+    // Step 2 看到的 messages 应包含第一次 reply 的 thinking block —— 这就是回传契约。
+    // state.messages 在 step 入口是上一步已 append 的全部历史,不含本步正在生成的
+    // assistant 回合(append-after-success)。
+    const turn2Seen = capturedMessages[1]!;
+    // 期望 = [user(go), assistant1(think+text+tool_use), user(tool_result)] = 3 条。
+    assert.equal(turn2Seen.length, 3);
+    const assistantTurn1 = turn2Seen[1]!;
+    assert.equal(assistantTurn1.role, "assistant");
+    // 原样含 thinking block:thinking 文本 + signature byte-identical。
+    const tBlock = assistantTurn1.content[0] as {
+      type: "thinking";
+      thinking: string;
+      signature: string;
+    };
+    assert.equal(tBlock.type, "thinking");
+    assert.equal(tBlock.thinking, "First turn reasoning.");
+    assert.equal(tBlock.signature, "sig_first_turn");
+    // order: thinking 先于 text 先于 tool_use(Q2 块序要求)。
+    const t1 = assistantTurn1.content[1] as { type: "text"; text: string };
+    assert.equal(t1.text, "done");
+    const t2 = assistantTurn1.content[2] as { type: "tool_use"; id: string };
+    assert.equal(t2.type, "tool_use");
+    assert.equal(t2.id, "t1");
+    // turn2 也必须含上一回合的 tool_result(user message)。
+    const toolResultMsg = turn2Seen[2]!;
+    assert.equal(toolResultMsg.role, "user");
+    assert.equal(toolResultMsg.content[0]!.type, "tool_result");
+    // step2 入口看到的 messages 必须是 run.result.messages 的前缀(回传 = 权威历史)。
+    // run 结果多一条 assistant("all good"),所以前缀长度匹配 + 逐条 deepEqual。
+    for (let i = 0; i < turn2Seen.length; i++) {
+      assert.deepEqual(turn2Seen[i], result.messages[i]);
+    }
+  });
+
+  it("replay 与 run().result.messages 对齐(head→head byte-equality of seen vs produced)", async () => {
+    // 设计意图:回传 = 权威历史本身。把 step 看到的消息数组的 deep-snapshot 与
+    // run 返回的 result.messages 进行 deep-equal,确保两者是同一棵冻结树。
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const reg = createRegistry([echo]);
+    const exec = createExecutor(reg);
+    let captured: ReadonlyArray<AnthropicNativeMessage> | undefined;
+
+    const fakeAdapter = Object.freeze({
+      encodeUserText: (t: string): AnthropicNativeMessage => ({
+        role: "user",
+        content: [{ type: "text", text: t }],
+      }),
+      encodeToolResults: (
+        results: ReadonlyArray<ToolExecutionResult>
+      ): AnthropicContentBlock[] =>
+        results.map((r) => ({
+          type: "tool_result" as const,
+          tool_use_id: r.toolUseId,
+          is_error: r.kind !== "ok",
+          content: [
+            {
+              type: "text" as const,
+              text:
+                r.kind === "ok"
+                  ? JSON.stringify(r.payload ?? {})
+                  : (r.message ?? ""),
+            },
+          ],
+        })),
+      step: async (
+        state: LoopState,
+        _req: { tools?: unknown }
+      ): Promise<AssistantTurnResult> => {
+        captured = state.messages;
+        if (state.messages.length === 1) {
+          return assistantResult({
+            texts: ["done"],
+            toolCalls: [{ id: "t1", name: "echo", input: { value: "ping" } }],
+            thinkingBlocks: [
+              {
+                type: "thinking",
+                thinking: "alpha",
+                signature: "sig_alpha",
+              },
+            ],
+          });
+        }
+        return assistantResult({
+          texts: ["final"],
+          toolCalls: [],
+          supplierStop: "success",
+        });
+      },
+    });
+
+    const { result } = await run("go", {
+      adapter: fakeAdapter,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.ok(captured, "captured must be defined");
+    // captured 是 step2 入口的权威历史(step 入口 = 上回合 append 后的状态),
+    // 即 result.messages 的前缀(后者多 step2 自己产出的 assistant 回合)。
+    // 回传 = 权威历史本身:逐条 deepEqual 证明 replay 发送的就是权威历史,
+    // 没有任何裁剪/重排/字段丢失。
+    assert.equal(captured!.length, 3);
+    assert.equal(result.messages.length, 4);
+    for (let i = 0; i < captured!.length; i++) {
+      assert.deepEqual(
+        captured![i],
+        result.messages[i],
+        `replay message ${i} must deep-equal authoritative history entry`
+      );
+    }
+    // 进一步:thinking block 在 captured[1] 头部,完整保留。
+    const assistantTurn = captured![1]!;
+    const t0 = assistantTurn.content[0] as {
+      type: "thinking";
+      thinking: string;
+      signature: string;
+    };
+    assert.equal(t0.type, "thinking");
+    assert.equal(t0.thinking, "alpha");
+    assert.equal(t0.signature, "sig_alpha");
+  });
+
+  it("projection.texts 不含 thinking 文本(Q3:finalText 派生不变)", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["final answer"],
+          toolCalls: [],
+          thinkingBlocks: [
+            {
+              type: "thinking",
+              thinking: "INTERNAL_REASONING_SHOULD_NOT_LEAK",
+              signature: "sig_leak_guard",
+            },
+          ],
+        }),
+      ],
+    });
+    const { result } = await run("hi", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "completed");
+    // finalText 不含 thinking 文本。
+    assert.equal(result.finalText, "final answer");
+    assert.ok(
+      result.finalText !== null &&
+        !result.finalText.includes("INTERNAL_REASONING_SHOULD_NOT_LEAK"),
+      "finalText must NOT include thinking text (Q3 projection invariant)"
+    );
+  });
+
+  it("LoopTrace 严格不含 thinking payload(上下文词条锁)", async () => {
+    // 上下文锁:trace 只记录结构性元数据,绝不进 input/output/text/payload 等字段。
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["ok"],
+          toolCalls: [],
+          thinkingBlocks: [
+            {
+              type: "thinking",
+              thinking: "THIS_SHOULD_NEVER_APPEAR_IN_TRACE",
+              signature: "sig_trace_leak",
+            },
+          ],
+        }),
+      ],
+    });
+    const { trace } = await run("hi", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    const serialized = JSON.stringify(trace);
+    assert.ok(
+      !serialized.includes("THIS_SHOULD_NEVER_APPEAR_IN_TRACE"),
+      "trace JSON must NOT contain thinking text"
+    );
+    assert.ok(
+      !serialized.includes("sig_trace_leak"),
+      "trace JSON must NOT contain thinking signature"
+    );
+    // 每个 turn 仍无 input / output / payload 字段(对照 S16 的硬约束)。
+    for (const t of trace.turns) {
+      for (const tc of t.toolCalls) {
+        assert.equal("input" in tc, false);
+        assert.equal("output" in tc, false);
+        assert.equal("payload" in tc, false);
+      }
+    }
   });
 });

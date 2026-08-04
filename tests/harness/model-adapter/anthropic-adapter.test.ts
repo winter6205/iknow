@@ -10,7 +10,10 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { createAnthropicAdapter } from "../../../src/harness/model-adapter/anthropic-adapter.ts";
+import {
+  createAnthropicAdapter,
+  createRealAnthropicAdapter,
+} from "../../../src/harness/model-adapter/anthropic-adapter.ts";
 import { ProtocolError } from "../../../src/harness/errors.ts";
 import type {
   AnthropicNativeMessage,
@@ -20,6 +23,8 @@ import type {
 import type {
   Message as SdkMessage,
   ContentBlock,
+  ThinkingBlock,
+  RedactedThinkingBlock,
   ToolUseBlock,
   TextBlock,
 } from "@anthropic-ai/sdk/resources/messages/messages.js";
@@ -347,5 +352,344 @@ describe("createAnthropicAdapter (017 signal/timeout signature)", () => {
     )) as AssistantTurnResult;
     assert.equal(r.supplierStop, "success");
     assert.equal(r.projection.texts[0], "with timeout");
+  });
+});
+
+describe("anthropic-adapter T3 thinking/redacted_thinking passthrough (#150, closes #134 issue 1)", () => {
+  it("preserves thinking + redacted_thinking + text + tool_use in nativeMessage.content (full fields, order)", async () => {
+    const sdkResp: SdkMessage = {
+      id: "msg_think_1",
+      type: "message",
+      role: "assistant",
+      model: "claude-test-model",
+      content: [
+        {
+          type: "thinking",
+          thinking: "Let me reason about this carefully.",
+          signature: "sig_abc123",
+        } as ThinkingBlock,
+        {
+          type: "redacted_thinking",
+          data: "encrypted_blob_data_here==",
+        } as RedactedThinkingBlock,
+        { type: "text", text: "final answer" } as TextBlock,
+        {
+          type: "tool_use",
+          id: "toolu_t1",
+          name: "echo",
+          input: { value: "x" },
+        } as ToolUseBlock,
+      ] as ContentBlock[],
+      stop_reason: "tool_use",
+      stop_sequence: null,
+      usage: { input_tokens: 10, output_tokens: 5 },
+    };
+    const adapter = adapterFrom([sdkResp]);
+    const result = (await adapter.step(
+      initState([userMsg("think then act")]),
+      {}
+    )) as AssistantTurnResult;
+
+    // --- 1. nativeMessage.content 字段级深保留,块序保持 ---
+    const nativeContent = result.nativeMessage.content;
+    assert.equal(nativeContent.length, 4);
+
+    // Block 0: thinking (full fields, original order)
+    const b0 = nativeContent[0] as {
+      type: "thinking";
+      thinking: string;
+      signature: string;
+    };
+    assert.equal(b0.type, "thinking");
+    assert.equal(b0.thinking, "Let me reason about this carefully.");
+    assert.equal(b0.signature, "sig_abc123");
+
+    // Block 1: redacted_thinking (data 完整保留)
+    const b1 = nativeContent[1] as { type: "redacted_thinking"; data: string };
+    assert.equal(b1.type, "redacted_thinking");
+    assert.equal(b1.data, "encrypted_blob_data_here==");
+
+    // Block 2: text (顺序仍在 thinking/tool_use 之间)
+    const b2 = nativeContent[2] as { type: "text"; text: string };
+    assert.equal(b2.type, "text");
+    assert.equal(b2.text, "final answer");
+
+    // Block 3: tool_use (顺序在 thinking 之后)
+    const b3 = nativeContent[3] as {
+      type: "tool_use";
+      id: string;
+      name: string;
+      input: unknown;
+    };
+    assert.equal(b3.type, "tool_use");
+    assert.equal(b3.id, "toolu_t1");
+    assert.equal(b3.name, "echo");
+    assert.deepEqual(b3.input, { value: "x" });
+
+    // --- 2. projection.texts 不含 thinking 文本;finalText 派生不变 ---
+    assert.deepEqual(result.projection.texts, ["final answer"]);
+
+    // --- 3. tool_calls 投影正常 ---
+    assert.equal(result.projection.toolCalls.length, 1);
+    assert.equal(result.projection.toolCalls[0]!.id, "toolu_t1");
+    assert.equal(result.projection.toolCalls[0]!.name, "echo");
+
+    // --- 4. supplierStop: tool_use stop_reason 不在 success 分类 -> "other"
+    //         (这是现有 014 投影的既有行为,本测试只确认未因 thinking 引入回归) ---
+    assert.equal(result.supplierStop, "other");
+    assert.equal(result.needsTools, true);
+
+    // --- 5. projection.nativeMessage === nativeMessage (同源引用) ---
+    assert.equal(result.projection.nativeMessage, result.nativeMessage);
+  });
+
+  it("preserves only thinking (no text/tool_use) — native carries signature+thinking, texts empty", async () => {
+    const sdkResp: SdkMessage = {
+      id: "msg_think_2",
+      type: "message",
+      role: "assistant",
+      model: "claude-test-model",
+      content: [
+        {
+          type: "thinking",
+          thinking: "Just thinking...",
+          signature: "sig_xyz",
+        } as ThinkingBlock,
+      ] as ContentBlock[],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 5, output_tokens: 1 },
+    };
+    const adapter = adapterFrom([sdkResp]);
+    const result = (await adapter.step(
+      initState([userMsg("think")]),
+      {}
+    )) as AssistantTurnResult;
+
+    // nativeMessage.content 保留 thinking 全字段
+    assert.equal(result.nativeMessage.content.length, 1);
+    const tBlock = result.nativeMessage.content[0] as {
+      type: "thinking";
+      thinking: string;
+      signature: string;
+    };
+    assert.equal(tBlock.type, "thinking");
+    assert.equal(tBlock.thinking, "Just thinking...");
+    assert.equal(tBlock.signature, "sig_xyz");
+
+    // projection.texts 为空(thinking 不进 texts)
+    assert.deepEqual(result.projection.texts, []);
+    // 仅有 thinking + success stop_reason -> isEmptyFinalResponse 应为 true
+    // (因为成功停止但无 text block)
+    assert.equal(result.isEmptyFinalResponse, true);
+    assert.equal(result.needsTools, false);
+  });
+
+  it("preserves only redacted_thinking — native carries data, texts empty", async () => {
+    const sdkResp: SdkMessage = {
+      id: "msg_think_3",
+      type: "message",
+      role: "assistant",
+      model: "claude-test-model",
+      content: [
+        {
+          type: "redacted_thinking",
+          data: "redacted_blob_v1",
+        } as RedactedThinkingBlock,
+      ] as ContentBlock[],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 5, output_tokens: 1 },
+    };
+    const adapter = adapterFrom([sdkResp]);
+    const result = (await adapter.step(
+      initState([userMsg("think")]),
+      {}
+    )) as AssistantTurnResult;
+
+    assert.equal(result.nativeMessage.content.length, 1);
+    const rBlock = result.nativeMessage.content[0] as {
+      type: "redacted_thinking";
+      data: string;
+    };
+    assert.equal(rBlock.type, "redacted_thinking");
+    assert.equal(rBlock.data, "redacted_blob_v1");
+
+    assert.deepEqual(result.projection.texts, []);
+    assert.equal(result.isEmptyFinalResponse, true);
+  });
+
+  it("unsupported block type still throws ProtocolError (regression: #134 invariant preserved)", async () => {
+    const bad = {
+      id: "msg_bad",
+      type: "message",
+      role: "assistant",
+      model: "claude-test-model",
+      content: [
+        // @ts-expect-error - intentionally invalid block type to test rejection
+        { type: "image", source: { type: "base64", data: "..." } },
+      ],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    } as unknown as SdkMessage;
+    const adapter = adapterFrom([bad]);
+    await assert.rejects(
+      () => adapter.step(initState([userMsg("go")]), {}),
+      (e: unknown) =>
+        e instanceof ProtocolError &&
+        /unsupported assistant block type 'image'/.test((e as Error).message)
+    );
+  });
+});
+
+// --- T4 (#151): RealAnthropicAdapter 请求侧 thinking 控制臂 ---------------
+
+/**
+ * 构造假 Anthropic 客户端:messages.create 捕获 params,返回可被 interpretMessage
+ * 接受的最小 SdkMessage fixture。让请求侧断言落在实际发出的 params 上。
+ */
+function makeFakeClient(opts: {
+  readonly captured: { params: unknown | null };
+}) {
+  const sdkResp: SdkMessage = {
+    id: "msg_capture_1",
+    type: "message",
+    role: "assistant",
+    model: "claude-test-model",
+    content: [{ type: "text", text: "ok" }] as ContentBlock[],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 1, output_tokens: 1 },
+  };
+  // 仅取 messages.create 子集,类型最宽。
+  return {
+    messages: {
+      create: async (
+        params: unknown,
+        _reqOpts?: unknown
+      ): Promise<SdkMessage> => {
+        opts.captured.params = params;
+        return sdkResp;
+      },
+    },
+  };
+}
+
+describe("createRealAnthropicAdapter — request-side thinking control (#151 T4)", () => {
+  it("thinking=off(默认)— params 不含 thinking / output_config", async () => {
+    const captured = { params: null as unknown };
+    const adapter = createRealAnthropicAdapter({
+      client: makeFakeClient({ captured }) as unknown as Parameters<
+        typeof createRealAnthropicAdapter
+      >[0]["client"],
+      model: "claude-test-model",
+      maxTokens: 256,
+    });
+    await adapter.step(initState([userMsg("hi")]), {});
+    const p = captured.params as Record<string, unknown>;
+    assert.equal("thinking" in p, false, "thinking 应不在 params");
+    assert.equal("output_config" in p, false, "output_config 应不在 params");
+    assert.equal(p.model, "claude-test-model");
+    assert.equal(p.max_tokens, 256);
+  });
+
+  it("thinking=adaptive + effort 空 → params 含 thinking:{type:'adaptive'}, 不含 output_config", async () => {
+    const captured = { params: null as unknown };
+    const adapter = createRealAnthropicAdapter({
+      client: makeFakeClient({ captured }) as unknown as Parameters<
+        typeof createRealAnthropicAdapter
+      >[0]["client"],
+      model: "claude-test-model",
+      maxTokens: 256,
+      thinking: { mode: "adaptive" },
+    });
+    await adapter.step(initState([userMsg("hi")]), {});
+    const p = captured.params as Record<string, unknown>;
+    assert.deepEqual(p.thinking, { type: "adaptive" });
+    assert.equal("output_config" in p, false);
+  });
+
+  it("thinking=adaptive + effort=high → params 含 thinking:{type:'adaptive'} + output_config:{effort:'high'}", async () => {
+    const captured = { params: null as unknown };
+    const adapter = createRealAnthropicAdapter({
+      client: makeFakeClient({ captured }) as unknown as Parameters<
+        typeof createRealAnthropicAdapter
+      >[0]["client"],
+      model: "claude-test-model",
+      maxTokens: 256,
+      thinking: { mode: "adaptive", effort: "high" },
+    });
+    await adapter.step(initState([userMsg("hi")]), {});
+    const p = captured.params as Record<string, unknown>;
+    assert.deepEqual(p.thinking, { type: "adaptive" });
+    assert.deepEqual(p.output_config, { effort: "high" });
+  });
+
+  it("thinking=off + effort=high → params 不含 thinking / output_config(effort 单独不发)", async () => {
+    const captured = { params: null as unknown };
+    const adapter = createRealAnthropicAdapter({
+      client: makeFakeClient({ captured }) as unknown as Parameters<
+        typeof createRealAnthropicAdapter
+      >[0]["client"],
+      model: "claude-test-model",
+      maxTokens: 256,
+      thinking: { mode: "off", effort: "high" },
+    });
+    await adapter.step(initState([userMsg("hi")]), {});
+    const p = captured.params as Record<string, unknown>;
+    assert.equal("thinking" in p, false);
+    assert.equal("output_config" in p, false);
+  });
+
+  it("temperature 正交:thinking=off 时, temperature=0.7 仍发送", async () => {
+    const captured = { params: null as unknown };
+    const adapter = createRealAnthropicAdapter({
+      client: makeFakeClient({ captured }) as unknown as Parameters<
+        typeof createRealAnthropicAdapter
+      >[0]["client"],
+      model: "claude-test-model",
+      maxTokens: 256,
+      temperature: 0.7,
+    });
+    await adapter.step(initState([userMsg("hi")]), {});
+    const p = captured.params as Record<string, unknown>;
+    assert.equal(p.temperature, 0.7);
+    assert.equal("thinking" in p, false);
+    assert.equal("output_config" in p, false);
+  });
+
+  it("temperature 正交:thinking=adaptive 时, temperature 仍发送且不被覆盖", async () => {
+    const captured = { params: null as unknown };
+    const adapter = createRealAnthropicAdapter({
+      client: makeFakeClient({ captured }) as unknown as Parameters<
+        typeof createRealAnthropicAdapter
+      >[0]["client"],
+      model: "claude-test-model",
+      maxTokens: 256,
+      temperature: 0.3,
+      thinking: { mode: "adaptive", effort: "medium" },
+    });
+    await adapter.step(initState([userMsg("hi")]), {});
+    const p = captured.params as Record<string, unknown>;
+    assert.equal(p.temperature, 0.3);
+    assert.deepEqual(p.thinking, { type: "adaptive" });
+    assert.deepEqual(p.output_config, { effort: "medium" });
+  });
+
+  it("temperature 未设 → 不出现 temperature 字段(无论 thinking 状态)", async () => {
+    const captured = { params: null as unknown };
+    const adapter = createRealAnthropicAdapter({
+      client: makeFakeClient({ captured }) as unknown as Parameters<
+        typeof createRealAnthropicAdapter
+      >[0]["client"],
+      model: "claude-test-model",
+      maxTokens: 256,
+      thinking: { mode: "adaptive" },
+    });
+    await adapter.step(initState([userMsg("hi")]), {});
+    const p = captured.params as Record<string, unknown>;
+    assert.equal("temperature" in p, false);
+    assert.deepEqual(p.thinking, { type: "adaptive" });
   });
 });

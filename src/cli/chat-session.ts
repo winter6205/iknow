@@ -32,11 +32,20 @@ export type ChatSessionOpts = {
    * Interactive TTY ignores this (still uses prompt + optional 思考中).
    */
   quiet?: boolean;
+  /**
+   * #152 T5:thinking 可见开关(env flag 落点)。默认 false。
+   * 来源 `IKNOW_CHAT_SHOW_THINKING=on|off`(env.ts SSOT)。开启时人类投影
+   * 在答案文本前展示 thinking;`projection.texts` / `finalText` / LoopTrace /
+   * session-store 均不受影响。
+   */
+  showThinking?: boolean;
 };
 
 export type ChatLineContext = {
   deps: LoopEngineDeps;
   state: CliChatState;
+  /** #152 T5:thinking 可见开关(与 ChatSessionOpts.showThinking 同源)。 */
+  showThinking?: boolean;
 };
 
 export type ProcessChatLineResult = {
@@ -96,7 +105,11 @@ export async function processChatLine(
     }
     const output = ctx.state.jsonMode
       ? formatRunJson({ result, trace })
-      : formatRunHuman({ result, trace });
+      : formatRunHuman({
+          result,
+          trace,
+          showThinking: ctx.showThinking === true,
+        });
     return { quit: false, output, ranQuery: true };
   } catch (err) {
     return {
@@ -163,7 +176,11 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     session: opts.session,
   };
 
-  const ctx: ChatLineContext = { deps: opts.deps, state };
+  const ctx: ChatLineContext = {
+    deps: opts.deps,
+    state,
+    showThinking: opts.showThinking === true,
+  };
 
   const interactive = isInteractive();
 

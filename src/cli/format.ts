@@ -12,13 +12,26 @@
  *   oneshot ask 路径下太大,脚本消费者用 finalText + trace 已足够。
  * - 工具名扁平去重顺序:`Set` 行为在 ES2015+ 规范保证按插入顺序枚举,所以
  *   用 `Array.from(new Set(...))` 同时拿到去重 + 保首次出现顺序。
+ * - #152 T5:thinking 展示开关(`formatRunHuman` 的 `opts.showThinking`,
+ *   默认 false)。关闭时输出不含 thinking 文本;开启时前置区隔显示。仅影响
+ *   展示通道;`finalText` / `result.messages` / `LoopTrace` 任何字段不动。
+ *   设计决定:落 env flag `IKNOW_CHAT_SHOW_THINKING` (走 `src/config/env.ts`
+ *   SSOT,默认 off)。
  */
-import type { LoopTrace, RunResult } from "../harness/index.js";
+import type {
+  AnthropicNativeMessage,
+  LoopTrace,
+  RunResult,
+} from "../harness/index.js";
 
 /** Tool-name list separator in status line (CLI script consumers parse this). */
 const TOOL_LIST_SEP = ",";
 /** Tool-list placeholder when no tool has been called. */
 const NO_TOOLS = "-";
+/** #152 T5:thinking 区隔前缀(开关开启时显示)。 */
+const THINKING_PREFIX = "思考:";
+/** #152 T5:redacted_thinking(加密 blob)在开关开启时也按一条占位显示。 */
+const REDACTED_PLACEHOLDER = "[已加密思考]";
 
 export interface FormatRunOpts {
   readonly result: RunResult;
@@ -26,19 +39,101 @@ export interface FormatRunOpts {
 }
 
 /**
+ * #152 T5:thinking 展示开关。默认 false。
+ *
+ * 选择:env flag (`IKNOW_CHAT_SHOW_THINKING`) 而非 REPL 斜杠命令,理由:
+ *   - 与 `IKNOW_LLM_*` 家族 / `src/config/env.ts` SSOT(T4 落地模式)一致;
+ *   - 三面(chat / serve / ask)统一可读;
+ *   - 实现 = 纯渲染函数,便于 TDD;不引入 session 状态可变性;
+ *   - REPL 切换的优势是会话内可切换;此处判断它属于"展示偏好",env 即可。
+ * 若后续确有会话内切换需求,可在 REPL 加 `/show-thinking` 子命令(可逆增量)。
+ */
+export interface FormatRunHumanOpts extends FormatRunOpts {
+  /** #152 T5:thinking 展示开关;默认 false。 */
+  readonly showThinking?: boolean;
+}
+
+/**
+ * #152 T5:纯函数 — 从最后成功 assistant 回合抽出可见展示文本。
+ *
+ * - `showThinking=false`(默认):仅 text block 拼接(thinking 不进
+ *   `finalText`,这是 Q3 决议在投影层的落点)。
+ * - `showThinking=true`:拼接顺序为
+ *   `<THINKING_PREFIX><thinking texts …>\n\n<text blocks …>`;
+ *   redacted_thinking 占位一条(加密 blob 无可见内容);
+ *   tool_use / tool_result 不进展示通道(投影去关注)。
+ *
+ * 输入运行结果为权威历史 + trace;不改 messages,不改 trace,不改 finalText。
+ */
+export function renderAssistantAnswer(opts: {
+  readonly messages: ReadonlyArray<AnthropicNativeMessage>;
+  readonly showThinking: boolean;
+}): string {
+  let lastAssistant: AnthropicNativeMessage | undefined;
+  for (let i = opts.messages.length - 1; i >= 0; i--) {
+    const m = opts.messages[i];
+    if (m && m.role === "assistant") {
+      lastAssistant = m;
+      break;
+    }
+  }
+  if (!lastAssistant) {
+    return "";
+  }
+  const thinkingLines: string[] = [];
+  const textLines: string[] = [];
+  let hasRedacted = false;
+  for (const block of lastAssistant.content) {
+    if (block.type === "thinking") {
+      thinkingLines.push(block.thinking);
+    } else if (block.type === "redacted_thinking") {
+      hasRedacted = true;
+    } else if (block.type === "text") {
+      if (block.text.trim().length > 0) textLines.push(block.text);
+    }
+    // tool_use / tool_result / 其他块:不进展示。
+  }
+  if (!opts.showThinking) {
+    // thinking / redacted_thinking 在关闭时不输出。
+    return textLines.join("\n");
+  }
+  // 开关开启:先打印所有 thinking 文本(按出现顺序),redacted 占位,再打印 text。
+  const visible: string[] = [];
+  if (thinkingLines.length > 0 || hasRedacted) {
+    const pieces: string[] = [];
+    if (thinkingLines.length > 0) pieces.push(...thinkingLines);
+    if (hasRedacted) pieces.push(REDACTED_PLACEHOLDER);
+    visible.push(`${THINKING_PREFIX}${pieces.join("\n")}`);
+  }
+  if (textLines.length > 0) {
+    visible.push(textLines.join("\n"));
+  }
+  return visible.join("\n\n");
+}
+
+/**
  * Human projection of `RunResult` + `LoopTrace`.
  *
  * Layout:
- *   `<finalText>
+ *   `<rendered text>
  *
  *   stop=<stopReason> · turns=<turnCount> · tools=<a,b,c> · <totalDurationMs>ms`
  *
- * `finalText === null` 时,文本部分为空字符串,状态行照常输出。
+ * `result.finalText === null` 或无内容时,文本部分为空字符串,状态行照常输出。
  * `trace.turns` 中无任何工具调用时,`tools=` 显示 `-`。
+ *
+ * #152 T5:thinking 可见面走 `opts.showThinking`(默认 false)。关闭时与原行为
+ * 完全一致(用 `finalText` 派生,thinking 不进答案);开启时改走
+ * `renderAssistantAnswer` 把 thinking 文本前置显示。
  */
-export function formatRunHuman(opts: FormatRunOpts): string {
-  const { result, trace } = opts;
-  const text = result.finalText ?? "";
+export function formatRunHuman(opts: FormatRunHumanOpts): string {
+  const { result, trace, showThinking = false } = opts;
+  const text = showThinking
+    ? renderAssistantAnswer({
+        messages: result.messages,
+        showThinking: true,
+      })
+    : (result.finalText ?? "");
   const toolNames = flattenToolNames(trace);
   const tools = toolNames.length > 0 ? toolNames.join(TOOL_LIST_SEP) : NO_TOOLS;
   const status =
@@ -53,9 +148,12 @@ export function formatRunHuman(opts: FormatRunOpts): string {
  * Machine projection: pretty-printed JSON, deliberately omits `result.messages`.
  *
  * Deliberately excludes `result.messages` (Anthropic-native wire format) because
- * ask / chat oneshot scripts only need `finalText` + `stopReason` + `turnCount`
- * + `trace` for downstream parsing. Native messages stay available via
- * `RunResult` for in-process consumers; not for shell consumers.
+ * ask / chat oneshot scripts only need `finalText` + `stopReason` + `turnCount` +
+ * `trace` for downstream parsing. Native messages stay available via `RunResult`
+ * for in-process consumers; not for shell consumers.
+ *
+ * #152 T5:thinking 展示开关**不影响** JSON 投影(machine readers 自然能从
+ * `result.messages` 提取,或留后续票)。
  */
 export function formatRunJson(opts: FormatRunOpts): string {
   const { result, trace } = opts;

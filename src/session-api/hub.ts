@@ -362,6 +362,11 @@ export class SessionHub {
       model: env.llm.model,
       maxTokens: env.llm.maxOutputTokens,
       temperature: env.llm.temperature,
+      // #151 T4 请求侧 thinking 控制臂:env → adapter params。
+      thinking: {
+        mode: env.llm.thinking,
+        effort: env.llm.thinkingEffort,
+      },
     });
     const registry = createRegistry([createEchoTool(), createGetTimeTool()]);
     const executor = createExecutor(registry);

@@ -1,15 +1,21 @@
 /**
  * CLI `src/cli/format.ts` projection tests (T2 acceptance).
  *
- * `formatRunHuman` / `formatRunJson` consume harness `RunResult` + `LoopTrace`,
- * not the old `IknowAnswer`. Imports go through `../../src/cli/format.ts`
- * directly (test files use `.ts` extension per repo convention).
+ * `formatRunHuman` / `formatRunJson` / `renderAssistantAnswer` consume harness
+ * `RunResult` + `LoopTrace`, not the old `IknowAnswer`. Imports go through
+ * `../../src/cli/format.ts` directly (test files use `.ts` extension per repo
+ * convention).
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { formatRunHuman, formatRunJson } from "../../src/cli/format.ts";
+import {
+  formatRunHuman,
+  formatRunJson,
+  renderAssistantAnswer,
+} from "../../src/cli/format.ts";
 import {
   computeTotals,
+  type AnthropicNativeMessage,
   type LoopTrace,
   type RunResult,
   type TurnTrace,
@@ -143,5 +149,233 @@ describe("formatRunJson", () => {
     );
     assert.strictEqual(parsed.trace.turns.length, 0);
     assert.strictEqual(parsed.finalText, null);
+  });
+});
+
+/**
+ * #152 T5:renderAssistantAnswer — 纯渲染函数,thinking 可见开关落点。
+ *
+ * 切片:此函数读 last assistant回合;开关决定是否暴露 thinking 文本;
+ * projection.texts / finalText / trace 任何字段不动;
+ * tool_use / tool_result 块不进展示通道。
+ */
+describe("renderAssistantAnswer (#152 T5 thinking visibility)", () => {
+  function mkMessage(
+    role: "user" | "assistant",
+    blocks: AnthropicNativeMessage["content"]
+  ): AnthropicNativeMessage {
+    return { role, content: blocks };
+  }
+
+  it("showThinking=false (默认):只用 text blocks", () => {
+    const msgs: AnthropicNativeMessage[] = [
+      mkMessage("user", [{ type: "text", text: "q" }]),
+      mkMessage("assistant", [
+        { type: "thinking", thinking: "hush", signature: "sig_a" },
+        { type: "text", text: "answer" },
+        { type: "tool_use", id: "t1", name: "echo", input: { x: 1 } },
+      ]),
+    ];
+    const out = renderAssistantAnswer({ messages: msgs, showThinking: false });
+    assert.equal(out, "answer");
+    assert.ok(!out.includes("hush"), "no thinking leak");
+  });
+
+  it("showThinking=true: thinking 文本前缀显示在 text 之前", () => {
+    const msgs: AnthropicNativeMessage[] = [
+      mkMessage("user", [{ type: "text", text: "q" }]),
+      mkMessage("assistant", [
+        {
+          type: "thinking",
+          thinking: "step-by-step reasoning",
+          signature: "sig_b",
+        },
+        { type: "text", text: "answer" },
+      ]),
+    ];
+    const out = renderAssistantAnswer({ messages: msgs, showThinking: true });
+    assert.ok(out.includes("step-by-step reasoning"), "thinking text surfaced");
+    assert.ok(out.includes("answer"), "text block still present");
+    // 区隔:thinking 先于 text(空行分隔)。
+    assert.ok(
+      out.indexOf("step-by-step reasoning") < out.indexOf("answer"),
+      "thinking precedes text in output"
+    );
+    // 精确钉住完整形状:THINKING_PREFIX("思考:") + thinking 文本 + "\n\n" + text 文本。
+    // 防止 THINKING_PREFIX / 分隔符被静默修改。
+    assert.equal(out, "思考:step-by-step reasoning\n\nanswer");
+  });
+
+  it("showThinking=true 但无 thinking 块:仅显示 text(无前缀噪声)", () => {
+    const msgs: AnthropicNativeMessage[] = [
+      mkMessage("user", [{ type: "text", text: "q" }]),
+      mkMessage("assistant", [{ type: "text", text: "plain answer" }]),
+    ];
+    const out = renderAssistantAnswer({ messages: msgs, showThinking: true });
+    assert.equal(out, "plain answer");
+  });
+
+  it("redacted_thinking 块:开关开启也只显示占位,不泄露 data", () => {
+    const msgs: AnthropicNativeMessage[] = [
+      mkMessage("user", [{ type: "text", text: "q" }]),
+      mkMessage("assistant", [
+        { type: "redacted_thinking", data: "ENCRYPTED_BLOB_DO_NOT_LEAK" },
+        { type: "text", text: "answer" },
+      ]),
+    ];
+    const outOn = renderAssistantAnswer({
+      messages: msgs,
+      showThinking: true,
+    });
+    assert.ok(outOn.includes("answer"));
+    assert.ok(
+      !outOn.includes("ENCRYPTED_BLOB_DO_NOT_LEAK"),
+      "redacted data must not leak to display"
+    );
+    // 精确钉住 redacted_thinking 占位形状:THINKING_PREFIX + REDACTED_PLACEHOLDER
+    // + "\n\n" + text。防止 REDACTED_PLACEHOLDER 常量被静默改动。
+    assert.equal(outOn, "思考:[已加密思考]\n\nanswer");
+    // 开关关闭:同样不出现 redacted 内容。
+    const outOff = renderAssistantAnswer({
+      messages: msgs,
+      showThinking: false,
+    });
+    assert.equal(outOff, "answer");
+  });
+
+  it("开关关闭时:多 text block 拼接与 finalText 派生一致", () => {
+    const msgs: AnthropicNativeMessage[] = [
+      mkMessage("user", [{ type: "text", text: "q" }]),
+      mkMessage("assistant", [
+        { type: "thinking", thinking: "never", signature: "sig_x" },
+        { type: "text", text: "first" },
+        { type: "text", text: "second" },
+      ]),
+    ];
+    const out = renderAssistantAnswer({ messages: msgs, showThinking: false });
+    assert.equal(out, "first\nsecond");
+  });
+
+  it("无 assistant 回合时:返回空字符串(不抛错)", () => {
+    const msgs: AnthropicNativeMessage[] = [
+      mkMessage("user", [{ type: "text", text: "q" }]),
+    ];
+    assert.equal(
+      renderAssistantAnswer({ messages: msgs, showThinking: false }),
+      ""
+    );
+    assert.equal(
+      renderAssistantAnswer({ messages: msgs, showThinking: true }),
+      ""
+    );
+  });
+
+  it("多 assistant 回合:仅看最后一个", () => {
+    const msgs: AnthropicNativeMessage[] = [
+      mkMessage("user", [{ type: "text", text: "q1" }]),
+      mkMessage("assistant", [
+        { type: "thinking", thinking: "EARLIER", signature: "sig_e" },
+        { type: "text", text: "earlier answer" },
+      ]),
+      mkMessage("user", [{ type: "text", text: "q2" }]),
+      mkMessage("assistant", [
+        { type: "thinking", thinking: "FINAL", signature: "sig_f" },
+        { type: "text", text: "final answer" },
+      ]),
+    ];
+    assert.equal(
+      renderAssistantAnswer({ messages: msgs, showThinking: false }),
+      "final answer"
+    );
+    const outOn = renderAssistantAnswer({
+      messages: msgs,
+      showThinking: true,
+    });
+    assert.ok(outOn.includes("final answer"));
+    assert.ok(!outOn.includes("earlier answer"));
+  });
+});
+
+describe("formatRunHuman — showThinking 开关 (#152 T5)", () => {
+  it("默认 (showThinking 缺省):走 finalText,与原行为一致", () => {
+    const out = formatRunHuman({
+      result: mkResult({ finalText: "hello" }),
+      trace: mkTrace([]),
+    });
+    assert.ok(out.includes("hello"));
+    // 状态行照样有
+    assert.ok(out.includes("stop=completed"));
+  });
+
+  it("showThinking=false 显式:走 finalText (与缺省同源)", () => {
+    const out = formatRunHuman({
+      result: mkResult({ finalText: "hello" }),
+      trace: mkTrace([]),
+      showThinking: false,
+    });
+    assert.ok(out.includes("hello"));
+  });
+
+  it("showThinking=true 走 renderAssistantAnswer 输出取代 finalText", () => {
+    // 构造一个 messages 含 thinking 块,但 finalText 只含 text 拼接过(true 开关下
+    // 显示 thinking 区隔前缀)。
+    const result = {
+      finalText: "final answer text",
+      messages: [
+        {
+          role: "user" as const,
+          content: [{ type: "text" as const, text: "q" }],
+        },
+        {
+          role: "assistant" as const,
+          content: [
+            {
+              type: "thinking" as const,
+              thinking: "Thinking visible now",
+              signature: "sig",
+            },
+            { type: "text" as const, text: "final answer text" },
+          ],
+        },
+      ],
+      turnCount: 1,
+      stopReason: "completed" as const,
+    };
+    const out = formatRunHuman({
+      result,
+      trace: mkTrace([]),
+      showThinking: true,
+    });
+    assert.ok(out.includes("Thinking visible now"), "开关开启应含 thinking");
+    assert.ok(out.includes("final answer text"), "开关开启仍含 text");
+  });
+
+  it("开关不影响 trace / finalText 等其他字段(只影响渲染面)", () => {
+    // 验证实现层:result.finalText 不被修改,trace 不被修改(只读 → 比较前后相等)。
+    const result = mkResult({ finalText: "hello" });
+    const trace = mkTrace([mkTurn({ toolNames: ["echo"] })]);
+    const before = {
+      finalText: result.finalText,
+      traceLength: trace.turns.length,
+    };
+    formatRunHuman({ result, trace, showThinking: true });
+    assert.equal(result.finalText, before.finalText);
+    assert.equal(trace.turns.length, before.traceLength);
+  });
+
+  it("开关不影响 JSON 投影(formatRunJson 不接 showThinking 参数)", () => {
+    // 防御:JSON 路径仍只含 finalText + trace,不含 thinking(供后续票);
+    // 显示通道与机器消费通道正交。
+    const parsed = JSON.parse(
+      formatRunJson({
+        result: mkResult({ finalText: "hello" }),
+        trace: mkTrace([mkTurn({ toolNames: ["echo"] })]),
+      })
+    );
+    assert.equal(parsed.finalText, "hello");
+    assert.ok(
+      !("messages" in parsed),
+      "JSON projection must never carry messages regardless of any flag"
+    );
   });
 });

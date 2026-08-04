@@ -93,7 +93,8 @@ export function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
       }
       toolCalls.push({ id: tb.id, name: tb.name, input: tb.input });
     } else if (t === "thinking" || t === "redacted_thinking") {
-      // Foundation 不解释 thinking / redacted_thinking,原样保留在历史。
+      // Foundation 不解释 thinking / redacted_thinking(不进 texts/toolCalls),
+      // nativeContent 阶段全字段原样保留(signature / data),权威历史可回放。
     } else {
       throw new ProtocolError(
         `anthropic-adapter: unsupported assistant block type '${String(t)}'`
@@ -136,6 +137,26 @@ export function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
           input: tb.input,
         },
       ];
+    }
+    if (b.type === "thinking") {
+      // T3 (#150, closes #134 issue 1): 全字段原样进权威历史。
+      // signature 必须回传,裁剪会毁 replay;thinking 文本不进 texts。
+      const tb = b as unknown as {
+        thinking: string;
+        signature: string;
+      };
+      return [
+        {
+          type: "thinking",
+          thinking: tb.thinking,
+          signature: tb.signature,
+        },
+      ];
+    }
+    if (b.type === "redacted_thinking") {
+      // T3: redacted_thinking.data 原样保留(加密 blob,不可解释也不可裁剪)。
+      const tb = b as unknown as { data: string };
+      return [{ type: "redacted_thinking", data: tb.data }];
     }
     return [];
   });
@@ -277,6 +298,16 @@ export interface RealAnthropicAdapterOptions {
   readonly maxTokens: number;
   /** Sampling temperature (0.0–1.0). Omitted → SDK default. */
   readonly temperature?: number;
+  /**
+   * #151 T4 请求侧 thinking 控制臂。
+   *   - mode="off"      → 不发送 thinking / output_config(默认)
+   *   - mode="adaptive" → 发送 thinking:{type:'adaptive'};effort 非空时再追加 output_config:{effort}
+   * temperature 与 thinking 正交:开/关 flag 不改变 temperature 发送。
+   */
+  readonly thinking?: {
+    readonly mode: "off" | "adaptive";
+    readonly effort?: "" | "low" | "medium" | "high" | "xhigh" | "max";
+  };
 }
 
 /**
@@ -328,6 +359,14 @@ export function createRealAnthropicAdapter(
     signal?: AbortSignal
   ): Promise<AssistantTurnResult> {
     const tools = toSdkTools(request.tools);
+    // #151 T4 请求侧 thinking 控制臂。SDK 0.115.0 在 MessageCreateParamsBase
+    // 已声明 thinking?: ThinkingConfigParam 与 output_config?: OutputConfig,
+    // 此处按 config 条件附加,off/缺省 → 两字段都不出现(默认零行为变化)。
+    const thinkingParam =
+      opts.thinking?.mode === "adaptive"
+        ? { type: "adaptive" as const }
+        : undefined;
+    const effort = opts.thinking?.effort;
     const params: MessageCreateParamsNonStreaming = {
       model: opts.model,
       max_tokens: opts.maxTokens,
@@ -335,6 +374,10 @@ export function createRealAnthropicAdapter(
       ...(tools !== undefined ? { tools } : {}),
       ...(opts.temperature !== undefined
         ? { temperature: opts.temperature }
+        : {}),
+      ...(thinkingParam !== undefined ? { thinking: thinkingParam } : {}),
+      ...(thinkingParam !== undefined && effort
+        ? { output_config: { effort } }
         : {}),
     };
     const sdkResp = await opts.client.messages.create(params, { signal });

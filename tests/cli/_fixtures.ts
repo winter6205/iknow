@@ -34,6 +34,13 @@ export interface AssistantResultOpts {
   readonly texts: string[];
   readonly toolCalls?: Array<{ id: string; name: string; input: unknown }>;
   readonly supplierStop?: "success" | "truncation" | "refusal" | "other";
+  /** #152 T5: optional thinking blocks; full fields kept in nativeMessage.content. */
+  readonly thinkingBlocks?: ReadonlyArray<{
+    readonly type: "thinking" | "redacted_thinking";
+    readonly thinking?: string;
+    readonly signature?: string;
+    readonly data?: string;
+  }>;
 }
 
 /**
@@ -46,7 +53,20 @@ export function assistantResult(
   const texts = opts.texts;
   const toolCalls = opts.toolCalls ?? [];
   const supplierStop = opts.supplierStop ?? "success";
+  const thinkingBlocks = opts.thinkingBlocks ?? [];
   const blocks: AnthropicContentBlock[] = [];
+  // thinking blocks precede text / tool_use (Q2 block-order decision).
+  for (const tb of thinkingBlocks) {
+    if (tb.type === "thinking") {
+      blocks.push({
+        type: "thinking",
+        thinking: tb.thinking ?? "",
+        signature: tb.signature ?? "",
+      });
+    } else {
+      blocks.push({ type: "redacted_thinking", data: tb.data ?? "" });
+    }
+  }
   for (const t of texts) blocks.push({ type: "text", text: t });
   for (const c of toolCalls) {
     blocks.push({ type: "tool_use", id: c.id, name: c.name, input: c.input });
