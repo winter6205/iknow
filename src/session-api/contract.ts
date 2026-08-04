@@ -74,13 +74,27 @@ export type GetSessionResponse = {
   turns: TurnDto[];
 };
 
+/** T2: per-request thinking effort value range (SSOT). */
+export const THINKING_EFFORT_VALUES = [
+  "",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+export type ThinkingEffortWire = (typeof THINKING_EFFORT_VALUES)[number];
+
+/** T2: per-request thinking override (mode + optional effort). */
+export interface WireThinkingOverride {
+  readonly mode: "off" | "adaptive";
+  readonly effort?: ThinkingEffortWire;
+}
+
 export type PostMessageRequest = {
   text: string;
   /** T2: 该回合覆盖 harness 的 thinking 控制臂。缺省 → 沿用 ensureDeps 的缓存配置（行为不变）。 */
-  readonly thinking?: {
-    readonly mode: "off" | "adaptive";
-    readonly effort?: "" | "low" | "medium" | "high" | "xhigh" | "max";
-  };
+  readonly thinking?: WireThinkingOverride;
 };
 
 export type PostMessageResponse = {

@@ -8,8 +8,6 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import * as http from "node:http";
-import type { AddressInfo } from "node:net";
 import { SessionHub, mapStoreError } from "../../src/session-api/hub.ts";
 import {
   resolveProjectSessionDir,
@@ -28,6 +26,11 @@ import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../src/harness/tools/executor.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
+import {
+  makeTestLlmEnv,
+  startLlmCapture,
+  type LlmCapture,
+} from "./_helpers/llm-capture.ts";
 
 // -- helpers -----------------------------------------------------------------
 
@@ -681,69 +684,34 @@ describe("postMessage answer wire fields (T1)", () => {
 describe("postMessage thinking override (T2)", () => {
   // Capture server stands in for the LLM endpoint; withThinkingOverride builds
   // a real adapter against it, so we can observe the actual request params.
-  let capture:
-    { server: http.Server; origin: string; bodies: unknown[] } | undefined;
+  let capture: LlmCapture | undefined;
 
   afterEach(async () => {
     if (capture) {
-      const s = capture.server;
+      await capture.close();
       capture = undefined;
-      await new Promise<void>((resolve) => s.close(() => resolve()));
     }
   });
 
-  async function startCapture(): Promise<{
-    origin: string;
-    bodies: unknown[];
-  }> {
-    const bodies: unknown[] = [];
-    const server = http.createServer((req, res) => {
-      const chunks: Buffer[] = [];
-      req.on("data", (c: Buffer) => chunks.push(c));
-      req.on("end", () => {
-        const raw = Buffer.concat(chunks).toString("utf8");
-        if (raw) bodies.push(JSON.parse(raw));
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(
-          JSON.stringify({
-            id: "msg_capture",
-            type: "message",
-            role: "assistant",
-            model: "m",
-            content: [{ type: "text", text: "override reply" }],
-            stop_reason: "end_turn",
-            stop_sequence: null,
-            usage: { input_tokens: 1, output_tokens: 1 },
-          })
-        );
-      });
-    });
-    await new Promise<void>((resolve) =>
-      server.listen(0, "127.0.0.1", () => resolve())
-    );
-    const addr = server.address() as AddressInfo;
-    capture = { server, origin: `http://127.0.0.1:${addr.port}`, bodies };
-    return capture;
-  }
+  /** The hub tests want a reply whose finalText reads "override reply". */
+  const overrideReplyBody = {
+    id: "msg_capture",
+    type: "message",
+    role: "assistant",
+    model: "m",
+    content: [{ type: "text", text: "override reply" }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 1, output_tokens: 1 },
+  };
 
   it("override → adapter request carries thinking + output_config; reply lands on wire", async () => {
-    const cap = await startCapture();
+    const cap = await startLlmCapture(overrideReplyBody);
+    capture = cap;
     const hub = new SessionHub({
       store,
       deps: makeDeps([]), // stub deps; override path replaces only the adapter
-      overrideEnv: {
-        llm: {
-          baseUrl: cap.origin,
-          model: "test-model",
-          apiKeyEnv: "IKNOW_TEST_KEY",
-          apiKey: "test-key",
-          maxOutputTokens: 128,
-          timeoutMs: 5000,
-          temperature: 0,
-          thinking: "off",
-          thinkingEffort: "",
-        },
-      },
+      overrideEnv: makeTestLlmEnv({ baseUrl: cap.origin }),
     });
     const { session } = await hub.createSession();
     const res = await hub.postMessage({
@@ -762,23 +730,12 @@ describe("postMessage thinking override (T2)", () => {
   });
 
   it("no override → cached stub deps used; no LLM request hits the capture server", async () => {
-    const cap = await startCapture();
+    const cap = await startLlmCapture(overrideReplyBody);
+    capture = cap;
     const hub = new SessionHub({
       store,
       deps: makeDeps([assistantResult({ texts: ["cached reply"] })]),
-      overrideEnv: {
-        llm: {
-          baseUrl: cap.origin,
-          model: "test-model",
-          apiKeyEnv: "IKNOW_TEST_KEY",
-          apiKey: "test-key",
-          maxOutputTokens: 128,
-          timeoutMs: 5000,
-          temperature: 0,
-          thinking: "off",
-          thinkingEffort: "",
-        },
-      },
+      overrideEnv: makeTestLlmEnv({ baseUrl: cap.origin }),
     });
     const { session } = await hub.createSession();
     const res = await hub.postMessage({

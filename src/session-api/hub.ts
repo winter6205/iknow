@@ -162,29 +162,9 @@ export function projectMessagesToTurns(
     if (msg.content.some((b) => b.type === "tool_result")) continue;
     const query = textOf(msg);
     // Turn slice: from this query until the next non-tool_result user message.
-    let end = messages.length;
-    for (let j = i + 1; j < messages.length; j++) {
-      const next = messages[j]!;
-      if (
-        next.role === "user" &&
-        !next.content.some((b) => b.type === "tool_result")
-      ) {
-        end = j;
-        break;
-      }
-    }
+    const end = findTurnSliceEnd(messages, i);
     const turnMessages = messages.slice(i, end);
-    // finalText: first assistant message within the slice with text blocks.
-    let finalText = "";
-    for (const m of turnMessages) {
-      if (m.role === "assistant") {
-        const t = textOf(m);
-        if (t) {
-          finalText = t;
-          break;
-        }
-      }
-    }
+    const finalText = findFinalTextInSlice(turnMessages);
     turnIndex++;
     const thinking = projectThinkingView(turnMessages, mask);
     const toolCalls = projectToolCalls(turnMessages, mask);
@@ -200,6 +180,46 @@ export function projectMessagesToTurns(
     });
   }
   return turns;
+}
+
+/**
+ * End index of the turn slice that starts at `messages[i]` (the query): the
+ * index of the next non-tool_result user message, or `messages.length` when
+ * the turn runs to the end of history. Pulled out to keep
+ * `projectMessagesToTurns` ≤10 cyclomatic and the slice-bounds logic in one
+ * place (M2 / ACR complexity anti-drift).
+ */
+function findTurnSliceEnd(
+  messages: ReadonlyArray<AnthropicNativeMessage>,
+  i: number
+): number {
+  for (let j = i + 1; j < messages.length; j++) {
+    const next = messages[j]!;
+    if (
+      next.role === "user" &&
+      !next.content.some((b) => b.type === "tool_result")
+    ) {
+      return j;
+    }
+  }
+  return messages.length;
+}
+
+/**
+ * first assistant message within the slice whose text blocks are non-empty
+ * — empty assistant replies (e.g. tool-call-only turns) project as "" so
+ * the wire keeps the field but the display path can still render the
+ * thinking/toolCalls trail.
+ */
+function findFinalTextInSlice(
+  turnMessages: ReadonlyArray<AnthropicNativeMessage>
+): string {
+  for (const m of turnMessages) {
+    if (m.role !== "assistant") continue;
+    const t = textOf(m);
+    if (t) return t;
+  }
+  return "";
 }
 
 // -- hub options ---------------------------------------------------------------

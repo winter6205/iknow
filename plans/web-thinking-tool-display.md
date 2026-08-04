@@ -29,14 +29,19 @@
 
 ## 受影响文件清单（affects）
 
+> 实际落盘清单（`git diff 8d9c36a..HEAD --name-status`）— 计划中此处的早期版本与最终 diff 之间的差异以 `code-review` 整改补登在 §post-implementation 内。
+
 - affects: plans/web-thinking-tool-display.md（本文件）
 - affects: src/session-api/contract.ts
 - affects: src/session-api/turn-projection.ts（新增）
 - affects: src/session-api/thinking-override.ts（新增，ACR 整改）
-- affects: src/session-api/hub.ts（仅薄委托，行数不显著增长）
-- affects: src/session-api/http.ts（仅 1 行调用，行数不显著增长）
-- affects: src/config/env.ts（可能：覆盖值校验复用，预期零改动优先）
+- affects: src/session-api/hub.ts
+- affects: src/session-api/http.ts
+- affects: src/session-api/store/schema.ts（接受 `thinking` / `redacted_thinking` 块落盘，配套 #120 v2 schema）
+- affects: src/config/env.ts（无改动）
 - affects: tests/session-api/turn-projection.test.ts（新增）
+- affects: tests/session-api/thinking-override.test.ts（新增）
+- affects: tests/session-api/store/schema.test.ts（新增）
 - affects: tests/session-api/hub.test.ts
 - affects: tests/session-api/contract.test.ts
 - affects: tests/session-api/http.test.ts
@@ -44,21 +49,33 @@
 - affects: package-lock.json（用户已显式授权加依赖）
 - affects: web/src/api/types.ts
 - affects: web/src/api/client.ts
+- affects: web/src/App.tsx（StopNotice 接入 footer；非 ChatHeader 接线）
 - affects: web/src/components/MarkdownBody.tsx（新增）
 - affects: web/src/components/CodeBlock.tsx（新增）
 - affects: web/src/components/ThinkingBlock.tsx（新增）
 - affects: web/src/components/ToolCallList.tsx（新增）
 - affects: web/src/components/ThinkingControls.tsx（新增）
+- affects: web/src/components/SendingIndicator.tsx（新增，状态指示）
+- affects: web/src/components/StopNotice.tsx（新增，T6 元信息）
 - affects: web/src/components/AgentCard.tsx
-- affects: web/src/components/ChatHeader.tsx
+- affects: web/src/components/MessageList.tsx
 - affects: web/src/hooks/useSessionChat.ts
 - affects: web/src/lib/thinking-settings.ts（新增，纯函数）
+- affects: web/src/lib/stop-reason.ts（新增，T6 文案映射纯函数）
 - affects: web/src/styles/tokens.css（hljs 主题变量）
+- affects: web/src/styles/global.css（hljs token CSS 变量补充）
 - affects: tests/web/thinking-settings.test.ts（新增）
-- affects: tests/web/turn-view.test.ts（新增，若抽出纯视图函数）
-- affects: docs/design/frontend-stack-upgrade-v1.md（决策补录）
+- affects: tests/web/stop-reason.test.ts（新增；非 plan 中提到的 `turn-view.test.ts`，因抽出的是 stop-reason 纯函数而非 turn view）
+- affects: docs/design/frontend-stack-upgrade-v1.md（决策补录 §0.1；code-review 整改后再加 §0.1.6）
 - affects: docs/STATUS.md
 - affects: CHANGELOG.md
+
+## 计划与最终 diff 的偏差（post-implementation 补登）
+
+- **`hub.ts` 增量约 50 行**（`projectMessagesToTurns` 新增内嵌于此；含 `findTurnSliceEnd` / `findFinalTextInSlice` 辅助）。计划预估"行数不显著增长"被低估——`hub.ts` 是 thinking/toolCalls 投影在 history-replay 路径上的唯一消费者（http.ts 不做投影），投影职责无法仅由 turn-projection.ts 完全承担。
+- **App.tsx footer 接线**取代了计划中提到的 ChatHeader.tsx。`StopNotice` 接在 `App.tsx` 而非 ChatHeader 是 T6 实施时的小调整，与 `renderBody` 占位实装一并记录。
+- **`turn-view.test.ts` 未创建**。T6 抽出的纯函数是 `web/src/lib/stop-reason.ts`（stopReasonLabel + STOP_REASON_LABELS），相应测试落在 `tests/web/stop-reason.test.ts`。
+- **T2 acceptance**：`hub.ts` 实际增量 ≈ 50 行（与计划中"hub.ts 仅薄委托"的承诺冲突；`projectMessagesToTurns` 是新增在 hub.ts 内的纯函数投影，不属于 http.ts）。
 
 ## ACR 5-verdict（pre-implementation gate）
 
@@ -83,7 +100,7 @@
 - **新模块 `thinking-override.ts`**（ACR complexity 整改）：thinking 覆盖参数的 wire 解析与值域校验（非法 → ValidationError）、按回合构建一次性 adapter（复用 ensureDeps 的其余 deps，仅替换 adapter）。hub.ts / http.ts 只调用，不承载逻辑。
 - hub.toTurnDto / projectMessagesToTurns 消费 turn-projection；postMessage 支持可选 thinking 覆盖。
 - 测试：thinking-override.test.ts（新，校验/构建）+ hub.test.ts（覆盖生效/缺省走 env/历史回放带新字段）+ http.test.ts（非法值 400）。
-- Acceptance：默认（无覆盖）行为与现 wire 字节一致 + 新可选字段；hub.ts / http.ts 行数不显著增长；`npm test` 全绿。
+- Acceptance：默认（无覆盖）行为与现 wire 字节一致 + 新可选字段；http.ts 仅薄接线；hub.ts 实际增量 ~50 行（`projectMessagesToTurns` turn-slice 投影 + T1 投影消费，post-implementation 补登）；`npm test` 全绿。
 
 ### T3 `[impl]` web markdown + 代码块渲染
 

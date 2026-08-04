@@ -19,11 +19,23 @@ import {
 } from "../harness/index.js";
 import { loadIknowEnv, type LlmEnv } from "../config/env.js";
 import { ValidationError } from "../shared/errors.js";
+import {
+  THINKING_EFFORT_VALUES,
+  type ThinkingEffortWire,
+  type WireThinkingOverride,
+} from "./contract.js";
 
-/** Wire override shape (contract.ts PostMessageRequest.thinking). */
-export interface ThinkingOverride {
-  readonly mode: "off" | "adaptive";
-  readonly effort?: "" | "low" | "medium" | "high" | "xhigh" | "max";
+/** Wire override shape — re-exported from contract.ts (SSOT; M1). */
+export type ThinkingOverride = WireThinkingOverride;
+
+/**
+ * Type guard over the SSOT value list. A plain `.includes()` on the readonly
+ * tuple would reject `string` (parameter type is the narrow union), so this
+ * guard keeps the single-source-of-values contract while accepting the raw
+ * wire string for validation.
+ */
+function isThinkingEffortWire(v: string): v is ThinkingEffortWire {
+  return (THINKING_EFFORT_VALUES as readonly string[]).includes(v);
 }
 
 /**
@@ -54,16 +66,15 @@ export function parseThinkingOverride(
   if (effort === undefined) {
     return { mode };
   }
-  if (
-    typeof effort !== "string" ||
-    !["", "low", "medium", "high", "xhigh", "max"].includes(effort)
-  ) {
+  // Validation values come from the SSOT readonly array in contract.ts (M1);
+  // no second hard-coded list lives here.
+  if (typeof effort !== "string" || !isThinkingEffortWire(effort)) {
     throw new ValidationError(
       "thinking.effort must be one of '', 'low', 'medium', 'high', 'xhigh', 'max'",
       { field: "thinking.effort" }
     );
   }
-  return { mode, effort: effort as ThinkingOverride["effort"] };
+  return { mode, effort };
 }
 
 /**

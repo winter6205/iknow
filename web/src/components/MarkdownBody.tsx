@@ -1,29 +1,13 @@
 import "highlight.js/styles/github.css";
-import type { ReactNode } from "react";
 import Markdown, { type Components } from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
+import { hastText } from "../lib/hast";
 import { CodeBlock } from "./CodeBlock";
 
 export type MarkdownBodyProps = {
   text: string;
 };
-
-// Flatten React children back to a plain string. Used to derive the raw code
-// text from the highlighted hljs span tree (rehype-highlight wraps tokens in
-// spans but preserves the original text content).
-function textOf(children: ReactNode): string {
-  if (
-    children === null ||
-    children === undefined ||
-    typeof children === "boolean"
-  )
-    return "";
-  if (typeof children === "string") return children;
-  if (typeof children === "number") return String(children);
-  if (Array.isArray(children)) return children.map(textOf).join("");
-  return "";
-}
 
 // Block-level code carries a language-* class from the markdown fence (or
 // rehype-highlight's auto-detection). Multi-line text also implies a block —
@@ -36,8 +20,14 @@ function isBlockCode(className: string | undefined, text: string): boolean {
 // react-markdown otherwise nests <pre><pre> when code renders its own root.
 const COMPONENTS: Components = {
   pre: ({ children }) => <>{children}</>,
-  code: ({ node: _ignored, className, children }) => {
-    const rawText = textOf(children).replace(/\n$/, "");
+  code: ({ node, className, children }) => {
+    // Raw text comes from react-markdown's hast `node` prop, NOT from the
+    // rendered React children: rehype-highlight wraps tokens in hljs spans
+    // and React's children traversal loses the plain text (the empirical
+    // `const x = 1;` → ` :  = ;` regression was reproduced with
+    // renderToStaticMarkup over the children tree). hastText recovers the
+    // original source byte-for-byte.
+    const rawText = hastText(node).replace(/\n$/, "");
     if (isBlockCode(className, rawText)) {
       return (
         <CodeBlock code={rawText} className={className}>

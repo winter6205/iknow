@@ -19,8 +19,6 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import * as http from "node:http";
-import type { AddressInfo } from "node:net";
 import {
   SessionHub,
   type SessionHubOptions,
@@ -33,6 +31,11 @@ import {
 import { SessionStore } from "../../src/session-api/store/index.ts";
 import type { AssistantTurnResult } from "../../src/harness/index.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
+import {
+  makeTestLlmEnv,
+  startLlmCapture,
+  type LlmCapture,
+} from "./_helpers/llm-capture.ts";
 
 // -- per-test server lifecycle ------------------------------------------------
 
@@ -314,47 +317,21 @@ describe("POST /api/v1/sessions/:id/messages — thinking override (T2)", () => 
     await listening.close();
     await rm(baseDir, { recursive: true, force: true });
 
-    const capturedBodies: unknown[] = [];
-    const captureServer = http.createServer((req, res) => {
-      const chunks: Buffer[] = [];
-      req.on("data", (c: Buffer) => chunks.push(c));
-      req.on("end", () => {
-        const raw = Buffer.concat(chunks).toString("utf8");
-        if (raw) capturedBodies.push(JSON.parse(raw));
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(
-          JSON.stringify({
-            id: "msg_http_capture",
-            type: "message",
-            role: "assistant",
-            model: "m",
-            content: [{ type: "text", text: "override ok" }],
-            stop_reason: "end_turn",
-            stop_sequence: null,
-            usage: { input_tokens: 1, output_tokens: 1 },
-          })
-        );
-      });
-    });
-    await new Promise<void>((resolve) =>
-      captureServer.listen(0, "127.0.0.1", () => resolve())
-    );
-    const captureAddr = captureServer.address() as AddressInfo;
+    const overrideReplyBody = {
+      id: "msg_http_capture",
+      type: "message",
+      role: "assistant",
+      model: "m",
+      content: [{ type: "text", text: "override ok" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    let capture: LlmCapture | undefined;
     try {
+      capture = await startLlmCapture(overrideReplyBody);
       await startServer([], {
-        overrideEnv: {
-          llm: {
-            baseUrl: `http://127.0.0.1:${captureAddr.port}`,
-            model: "test-model",
-            apiKeyEnv: "IKNOW_TEST_KEY",
-            apiKey: "test-key",
-            maxOutputTokens: 128,
-            timeoutMs: 5000,
-            temperature: 0,
-            thinking: "off",
-            thinkingEffort: "",
-          },
-        },
+        overrideEnv: makeTestLlmEnv({ baseUrl: capture.origin }),
       });
       const id = await createSession();
       const { status, body } = await postJson({
@@ -371,14 +348,12 @@ describe("POST /api/v1/sessions/:id/messages — thinking override (T2)", () => 
       assert.equal(b.turn.answer.finalText, "override ok");
       assert.equal(b.turn.answer.stopReason, "completed");
       // The captured LLM request carries the override params.
-      assert.equal(capturedBodies.length, 1);
-      const req = capturedBodies[0] as Record<string, unknown>;
+      assert.equal(capture.bodies.length, 1);
+      const req = capture.bodies[0] as Record<string, unknown>;
       assert.deepEqual(req.thinking, { type: "adaptive" });
       assert.deepEqual(req.output_config, { effort: "high" });
     } finally {
-      await new Promise<void>((resolve) =>
-        captureServer.close(() => resolve())
-      );
+      if (capture) await capture.close();
     }
   });
 

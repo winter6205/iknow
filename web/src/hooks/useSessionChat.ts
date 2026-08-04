@@ -88,7 +88,17 @@ function queryIdSlice(query: string): string {
   return `${raw.length.toString(36)}_${(h >>> 0).toString(36)}`;
 }
 
-function turnsToMessages(turns: TurnDto[]): ChatUiMessage[] {
+/**
+ * Project wire turns → timeline messages (exported for tests/web/).
+ *
+ * Agent-message keep predicate: emit when finalText is non-empty OR when the
+ * turn carries thinking OR tool calls. A maxTurns/timeout turn that ran tools
+ * (or thought) but never produced text is NOT a blank reply — dropping it
+ * loses the tool/thinking trail entirely (H2 regression). AgentCard renders
+ * the empty-text body region as an empty block alongside its thinking /
+ * tool sections, so `text: ""` is safe for the display path.
+ */
+export function turnsToMessages(turns: TurnDto[]): ChatUiMessage[] {
   const out: ChatUiMessage[] = [];
   turns.forEach((t, i) => {
     const q = queryIdSlice(t.query);
@@ -101,9 +111,7 @@ function turnsToMessages(turns: TurnDto[]): ChatUiMessage[] {
         text: t.query,
       });
     }
-    // Agent turns: keep if finalText has content OR if there's a paired user
-    // turn that we just emitted (so the conversation flow stays paired).
-    if (t.answer.finalText.trim()) {
+    if (hasDisplayableAnswer(t.answer)) {
       out.push({
         id: `a-${i}-${q}`,
         role: "agent",
@@ -113,6 +121,16 @@ function turnsToMessages(turns: TurnDto[]): ChatUiMessage[] {
     }
   });
   return out;
+}
+
+/** FinalText content OR any thinking entries OR any tool calls. */
+function hasDisplayableAnswer(answer: TurnAnswerDto): boolean {
+  if (answer.finalText.trim()) return true;
+  if (answer.thinking !== undefined) return true;
+  if (answer.toolCalls !== undefined && answer.toolCalls.length > 0) {
+    return true;
+  }
+  return false;
 }
 
 function lastAnswerFromMessages(

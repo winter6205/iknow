@@ -87,21 +87,44 @@ export function projectToolCalls(
   messages: ReadonlyArray<AnthropicNativeMessage>,
   mask: TextMask
 ): readonly ToolCallView[] | undefined {
+  // M2 / ACR complexity anti-drift: collect + build split keeps each pass
+  // single-purpose and both below the 30-line / ≤10-branch threshold.
+  const resultsById = collectToolResults(messages);
+  return buildToolCallViews(messages, resultsById, mask);
+}
+
+/**
+ * Pass 1: collect `tool_result` blocks by `tool_use_id`. Multiple results
+ * for the same id concatenate their text; `is_error` latches true.
+ */
+function collectToolResults(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): Map<string, { text: string; isError: boolean }> {
   const resultsById = new Map<string, { text: string; isError: boolean }>();
   for (const msg of messages) {
     for (const block of msg.content as ReadonlyArray<AnthropicContentBlock>) {
-      if (block.type === "tool_result") {
-        const text = toolResultText(block.content);
-        const prev = resultsById.get(block.tool_use_id);
-        const isError = (prev?.isError ?? false) || block.is_error === true;
-        resultsById.set(block.tool_use_id, {
-          text: prev ? prev.text + text : text,
-          isError,
-        });
-      }
+      if (block.type !== "tool_result") continue;
+      const text = toolResultText(block.content);
+      const prev = resultsById.get(block.tool_use_id);
+      const isError = (prev?.isError ?? false) || block.is_error === true;
+      resultsById.set(block.tool_use_id, {
+        text: prev ? prev.text + text : text,
+        isError,
+      });
     }
   }
+  return resultsById;
+}
 
+/**
+ * Pass 2: walk assistant `tool_use` blocks in order, pairing each with its
+ * collected result and producing the wire view (mask → truncate).
+ */
+function buildToolCallViews(
+  messages: ReadonlyArray<AnthropicNativeMessage>,
+  resultsById: Map<string, { text: string; isError: boolean }>,
+  mask: TextMask
+): readonly ToolCallView[] | undefined {
   let foundUse = false;
   const views: ToolCallView[] = [];
   for (const msg of messages) {

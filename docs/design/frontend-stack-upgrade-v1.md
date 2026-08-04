@@ -86,6 +86,16 @@ This addendum freezes four sub-decisions that extend the v1 SPA with thinking / 
 
 The /events reserved route (`GET /api/v1/sessions/:id/events`) still returns **501**. "Thinking state" on the UI means **in-flight request indicator + round-level complete display**, **not** token streaming. A dedicated streaming slice is required to flip this; no implementation in the current addendum.
 
+### 0.1.6 Post-review repair notes (2026-08-05)
+
+A code-review 双轴 (spec / standards) pass against the commit stack implementing §0.1.1–§0.1.4 surfaced two findings that warrant explicit decision records so they do not regress under future refactors.
+
+- **`projectMessagesToTurns` uses turn-slice projection (intentional cross-turn tightening).** Each query's slice runs from the user message **to the next non-tool_result user message** (instead of "the next assistant message"). The narrower bound is deliberate: the prior shape leaked subsequent turns' text into the projection whenever the assistant never produced text in a turn (e.g. `maxTurns` runs that ran only tools); the new shape is byte-stable across history replay. The helpers `findTurnSliceEnd` + `findFinalTextInSlice` (extracted during the repair pass) carry the bounds and the text-of-slice logic so the main function stays ≤10 cyclomatic.
+- **`withThinkingOverride` rebuilds an independent Anthropic client per turn.** The override replaces `adapter` only (registry / executor / maxTurns / timeoutMs reuse the cached deps), but the adapter itself carries a fresh `Anthropic` client constructed from the current `env` (via `opts.env ?? loadIknowEnv()`). The trade-off: an env drift mid-session (key rotation, `IKNOW_LLM_BASE_URL` override) takes effect on the **next override turn** instead of being pinned to the cached client. Cost is one lightweight HTTP-client allocation per override turn (no socket open until first request), acceptable given the override is rare and the cached path is untouched.
+- **`WireThinkingOverride` + `THINKING_EFFORT_VALUES` are the SSOT.** `contract.ts` exports both; `thinking-override.ts` validates against the readonly array via a typed guard (no second hard-coded value list).
+- **Code-block copy path:** `web/src/components/MarkdownBody.tsx`'s `code` component now reads the raw text from the hast `node` prop via `web/src/lib/hast.ts`'s `hastText` rather than walking the rendered React children. The old traversal dropped source characters between hljs spans (`const x = 1;` → ` :  = ;`). Acceptance: byte-equal copy in `tests/web/markdown-copy.test.ts` (renderToStaticMarkup) and the live-serve browser check.
+- **Empty-finalText turn visibility:** `web/src/hooks/useSessionChat.ts`'s `turnsToMessages` keeps agent turns whose `finalText` is empty whenever the turn carries thinking entries or tool calls. The old predicate `if (t.answer.finalText.trim())` dropped the entire turn in the `maxTurns` / `timeout` shapes that ran only tools; the new predicate matches `AgentCard`'s display path (text section empty + thinking/toolCalls rendered).
+
 ---
 
 ---
