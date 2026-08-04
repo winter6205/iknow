@@ -9,6 +9,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import {
   run,
   createRealAnthropicAdapter,
+  buildThinkingParams,
   createRegistry,
   createExecutor,
   createEchoTool,
@@ -371,11 +372,8 @@ export class SessionHub {
       model: env.llm.model,
       maxTokens: env.llm.maxOutputTokens,
       temperature: env.llm.temperature,
-      // #151 T4 请求侧 thinking 控制臂:env → adapter params。
-      thinking: {
-        mode: env.llm.thinking,
-        effort: env.llm.thinkingEffort,
-      },
+      // #151 T4 / #156 Low:env → adapter params(去重 single source)。
+      thinking: buildThinkingParams(env.llm),
     });
     const registry = createRegistry([createEchoTool(), createGetTimeTool()]);
     const executor = createExecutor(registry);

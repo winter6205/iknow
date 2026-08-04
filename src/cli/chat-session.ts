@@ -108,7 +108,7 @@ export async function processChatLine(
       : formatRunHuman({
           result,
           trace,
-          showThinking: ctx.showThinking === true,
+          showThinking: ctx.showThinking,
         });
     return { quit: false, output, ranQuery: true };
   } catch (err) {
@@ -179,7 +179,7 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
   const ctx: ChatLineContext = {
     deps: opts.deps,
     state,
-    showThinking: opts.showThinking === true,
+    showThinking: opts.showThinking,
   };
 
   const interactive = isInteractive();

@@ -44,10 +44,12 @@ export { toAnthropicToolResults } from "./tools/tool-result.js";
 
 export { createAnthropicAdapter } from "./model-adapter/anthropic-adapter.js";
 export { createRealAnthropicAdapter } from "./model-adapter/anthropic-adapter.js";
+export { buildThinkingParams } from "./model-adapter/anthropic-adapter.js";
 export type {
   AnthropicAdapter,
   AnthropicAdapterOptions,
   RealAnthropicAdapterOptions,
+  ThinkingParams,
 } from "./model-adapter/anthropic-adapter.js";
 
 export { createStubModel } from "./stubs/stub-model.js";
