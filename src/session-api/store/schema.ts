@@ -174,6 +174,15 @@ function isValidContentBlock(b: unknown): boolean {
       );
     case "tool_result":
       return typeof block["tool_use_id"] === "string" && "content" in block;
+    // thinking / redacted_thinking：harness 权威消息可含（#151 thinking
+    // 启用后 anthropic-adapter 原样保留）；形状对齐 AnthropicContentBlock。
+    case "thinking":
+      return (
+        typeof block["thinking"] === "string" &&
+        typeof block["signature"] === "string"
+      );
+    case "redacted_thinking":
+      return typeof block["data"] === "string";
     default:
       return false;
   }
