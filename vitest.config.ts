@@ -9,7 +9,8 @@ import { defineConfig } from "vitest/config";
  */
 export default defineConfig({
   test: {
-    include: ["tests/**/*.test.ts"],
+    // .tsx: TUI 组件冒烟测试（ink renderToString；#146）。
+    include: ["tests/**/*.test.ts", "tests/**/*.test.tsx"],
     pool: "forks",
     reporter: "default",
   },

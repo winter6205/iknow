@@ -1,0 +1,314 @@
+/**
+ * tests/tui/app.test.tsx
+ *
+ * #146 TuiApp 组件测试（ink render + 假 TTY stdin/stdout 驱动，仓库新增基建）：
+ * 端到端走查 tracer bullet——输入消息 → Enter 提交 → lazy create 建档 →
+ * stub turn 完成 → markdown 渲染 → /sessions 列表 → Esc 返回 → /help →
+ * /quit 退出；另测 turn 运行中第二条消息的排队拒绝。
+ *
+ * ink 输入链路前提：stdin.isTTY && stdout.isTTY 才启 raw mode（ink build
+ * ink.js raw-mode 守卫）；PassThrough 补最小 TTY 假面即可驱动。
+ */
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { PassThrough } from "node:stream";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { render } from "ink";
+import type { Instance } from "ink";
+import { TuiApp, createToolEventSink } from "../../src/tui/app.js";
+import {
+  createInflightRegistry,
+  createTuiBridge,
+  type TuiBridge,
+} from "../../src/tui/hub-bridge.js";
+import { createTuiAskUserBridge } from "../../src/tui/ask-user.js";
+import { assistantResult, makeDeps } from "../cli/_fixtures.js";
+
+const ANSI_RE = /\x1b\[[0-9;?]*[a-zA-Z]/g;
+const strip = (s: string): string => s.replace(ANSI_RE, "");
+
+async function delay(ms: number): Promise<void> {
+  await new Promise((r) => setTimeout(r, ms));
+}
+
+/** 轮询等待条件成立（真实时钟，上限 timeoutMs；支持 async 条件）。 */
+async function waitFor(
+  cond: () => boolean | Promise<boolean>,
+  timeoutMs = 8000,
+  label = ""
+): Promise<void> {
+  const start = Date.now();
+  while (!(await cond())) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`waitFor timeout: ${label}`);
+    }
+    await delay(50);
+  }
+}
+
+/**
+ * 假 TTY 流：ink 输入链路需要 isTTY + columns/rows（窗口尺寸）+
+ * setRawMode + ref/unref（App.tsx 挂 input listener 时调 stdin.ref()，
+ * probe 实测确认四项缺一不可）。
+ */
+function fakeTtyStream(): PassThrough & {
+  isTTY: boolean;
+  columns: number;
+  rows: number;
+  setRawMode: (v: boolean) => void;
+  ref: () => void;
+  unref: () => void;
+} {
+  const stream = new PassThrough() as PassThrough & {
+    isTTY: boolean;
+    columns: number;
+    rows: number;
+    setRawMode: (v: boolean) => void;
+    ref: () => void;
+    unref: () => void;
+  };
+  stream.isTTY = true;
+  stream.columns = 100;
+  stream.rows = 30;
+  stream.setRawMode = (): void => {
+    /* 测试驱动不需要真实 raw mode */
+  };
+  stream.ref = (): void => {
+    /* 测试驱动不保活进程 */
+  };
+  stream.unref = (): void => {
+    /* 测试驱动不保活进程 */
+  };
+  return stream;
+}
+
+interface DrivenApp {
+  readonly bridge: TuiBridge;
+  readonly instance: Instance;
+  readonly lastOutput: () => string;
+  readonly type: (text: string) => Promise<void>;
+  readonly ready: () => Promise<void>;
+}
+
+describe("TuiApp 端到端（tracer bullet）", () => {
+  // 真实时钟轮询 + stub delayMs，放宽单测预算。
+  // eslint-disable-next-line no-magic-numbers
+  const LONG_TIMEOUT = 30_000;
+  let baseDir: string;
+  let stdout: ReturnType<typeof fakeTtyStream>;
+  let stdin: ReturnType<typeof fakeTtyStream>;
+  const instances: Instance[] = [];
+
+  beforeEach(async () => {
+    baseDir = await mkdtemp(join(tmpdir(), "iknow-tui-app-"));
+    stdout = fakeTtyStream();
+    stdin = fakeTtyStream();
+  }, LONG_TIMEOUT);
+  afterEach(async () => {
+    for (const instance of instances) instance.unmount();
+    instances.length = 0;
+    await rm(baseDir, { recursive: true, force: true });
+  }, LONG_TIMEOUT);
+
+  function mountApp(bridge: TuiBridge): DrivenApp {
+    const askBridge = createTuiAskUserBridge();
+    const toolEventSink = createToolEventSink();
+    const out: string[] = [];
+    stdout.on("data", (chunk) => out.push(String(chunk)));
+    const instance = render(
+      <TuiApp
+        bridge={bridge}
+        askBridge={askBridge}
+        toolEventSink={toolEventSink}
+        cwd="/tmp/proj"
+        dataDir={baseDir}
+      />,
+      {
+        stdout,
+        stdin,
+        exitOnCtrlC: false,
+        interactive: true,
+        // 测试驱动无终端应答 kitty 探测；禁用避免 200ms 探测窗口吞输入。
+        kittyKeyboard: { mode: "disabled" },
+      }
+    );
+    instances.push(instance);
+    return {
+      bridge,
+      instance,
+      lastOutput: (): string => strip(out.join("")),
+      type: async (text: string): Promise<void> => {
+        // ink 输入解析按 chunk 处理；逐字符写入并让出事件循环，贴近真实
+        // 键盘逐键节奏（整块写入时 chunk 尾部 \r 不被解析为 return，实测确认）。
+        for (const ch of text) {
+          stdin.write(ch);
+          await delay(10);
+        }
+      },
+      /** 等 ink useInput 监听注册完成（挂载后异步 effect）。 */
+      ready: async (): Promise<void> => {
+        await delay(400);
+      },
+    };
+  }
+
+  function makeApp(responses: Parameters<typeof makeDeps>[0]): DrivenApp {
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      deps: makeDeps(responses),
+      inflight: createInflightRegistry(),
+    });
+    return mountApp(bridge);
+  }
+
+  it(
+    "消息提交 → lazy create 建档 → turn 渲染 → /sessions → /quit 退出",
+    async () => {
+      const app = makeApp([
+        assistantResult({ texts: ["## 答复标题\n\n正文内容"] }),
+      ]);
+      await app.ready();
+
+      // 启动画面：banner 或输入框
+      await waitFor(() => app.lastOutput().includes("iknow"), 8000, "startup");
+
+      // 提交消息（\r = Enter）
+      await app.type("你好\r");
+      // turn 完成 → 建档落盘（lazy create 验证点）
+      await waitFor(
+        () => app.bridge.inflight.ids().size === 0,
+        8000,
+        "turn-done"
+      );
+      await waitFor(async () => {
+        const list = await app.bridge.listSessions();
+        return list.length === 1;
+      });
+      const list = await app.bridge.listSessions();
+      expect(list[0]!.summary).toBe("你好");
+      // 渲染出 assistant 文本（markdown 内容）
+      await waitFor(
+        () => app.lastOutput().includes("答复标题"),
+        8000,
+        "answer-rendered"
+      );
+      expect(app.lastOutput()).toContain("正文内容");
+
+      // /sessions → 列表视图
+      await app.type("/sessions\r");
+      await waitFor(
+        () => app.lastOutput().includes("+ 新建会话"),
+        8000,
+        "list-view"
+      );
+      await waitFor(
+        () => app.lastOutput().includes("你好"),
+        8000,
+        "list-summary"
+      );
+
+      // 等 ListView 的 useInput effect 挂载（渲染后异步生效）
+      await delay(300);
+      // Esc → 返回聊天视图（重新出现输入框占位）
+      await app.type("\u001b");
+      await waitFor(
+        () => app.lastOutput().includes("输入消息"),
+        8000,
+        "esc-back"
+      );
+
+      // 等 PromptInput 重新挂载后 useInput effect 生效
+      await delay(300);
+      // /help → 词表面板
+      await app.type("/help\r");
+      await waitFor(
+        () => app.lastOutput().includes("/new"),
+        8000,
+        "help-panel"
+      );
+
+      // /quit → 退出（无 running-bg，直接退）
+      let exited = false;
+      void app.instance.waitUntilExit().then(() => {
+        exited = true;
+      });
+      await app.type("/quit\r");
+      await waitFor(() => exited, 8000, "quit-exit");
+    },
+    LONG_TIMEOUT
+  );
+
+  it(
+    "未知命令 → 提示行；/info → 元信息（draft 未建档）",
+    async () => {
+      const app = makeApp([]);
+      await app.ready();
+      await app.type("/foobar\r");
+      await waitFor(
+        () => app.lastOutput().includes("未知命令"),
+        8000,
+        "unknown-cmd"
+      );
+      await app.type("/info\r");
+      await waitFor(
+        () => app.lastOutput().includes("conversation_id"),
+        8000,
+        "info-panel"
+      );
+      expect(app.lastOutput()).toContain("draft");
+    },
+    LONG_TIMEOUT
+  );
+
+  it(
+    "turn 运行中发第二条消息 → 提示等待，不重复建档",
+    async () => {
+      const { createStubModel } =
+        await import("../../src/harness/stubs/stub-model.js");
+      const { createStubTool } =
+        await import("../../src/harness/stubs/stub-tool.js");
+      const { createRegistry } =
+        await import("../../src/harness/tools/registry.js");
+      const { createExecutor } =
+        await import("../../src/harness/tools/executor.js");
+      const tool = createStubTool({ name: "noop", next: () => ({}) });
+      const registry = createRegistry([tool]);
+      const executor = createExecutor(registry);
+      const adapter = createStubModel({
+        responses: [
+          assistantResult({ texts: ["慢答复"] }),
+          assistantResult({ texts: ["第二条答复"] }),
+        ],
+        delayMs: 400,
+      });
+      const inflight = createInflightRegistry();
+      const bridge = createTuiBridge({
+        dataDir: baseDir,
+        deps: { adapter, executor, registry, maxTurns: 5 },
+        inflight,
+      });
+      const app = mountApp(bridge);
+      await app.ready();
+
+      await app.type("第一条\r");
+      await waitFor(() => inflight.ids().size === 1, 8000, "running-window");
+      await app.type("第二条\r");
+      await waitFor(
+        () => app.lastOutput().includes("正在运行"),
+        8000,
+        "busy-reject"
+      );
+      // 第一条正常完成
+      await waitFor(
+        () => app.lastOutput().includes("慢答复"),
+        8000,
+        "slow-done"
+      );
+      // 第二条被拒绝未建档第二个会话：池内始终 1 个会话
+      const list = await app.bridge.listSessions();
+      expect(list).toHaveLength(1);
+    },
+    LONG_TIMEOUT
+  );
+});
