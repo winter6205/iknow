@@ -90,12 +90,12 @@ const PAYLOADS: ReadonlyArray<Payload> = [
   // HIGH #6 — chmod -R
   { label: "H6 chmod -R", cmd: "chmod -R 000 /", expect: "deny" },
 
-  // MEDIUM #3 — 关闭黑名单双保险时，allowlist 兜底仍工作
+  // MEDIUM #3 — 危险命令在 default policy 下仍被硬墙 deny（不可被策略开关关闭）。
   {
-    label: "M3 denyDangerousExecute=false + rm",
+    label:
+      "M3 dangerous command denied under default policy (hard walls un-overridable)",
     cmd: "rm -fr /tmp/x",
     expect: "deny",
-    policyOverride: { denyDangerousExecute: false },
   },
 
   // CRITICAL #4 — byName allow 不能绕过硬墙

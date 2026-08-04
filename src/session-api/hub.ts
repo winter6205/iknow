@@ -29,6 +29,10 @@ import { createPermissionPolicy } from "../harness/permission/policy.js";
 import type { AskUser } from "../harness/permission/types.js";
 import { createViolationCounter } from "../harness/sandbox/violation-handling.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
+import {
+  createOutputMask,
+  currentSecretValues,
+} from "../harness/sandbox/index.js";
 import { loadIknowEnv } from "../config/env.js";
 import { ValidationError } from "../shared/errors.js";
 import { appendFileSync } from "node:fs";
@@ -499,10 +503,17 @@ export class SessionHub {
     readonly result: RunResult;
   }): TurnDto {
     const { query, result } = opts;
+    // SC20: serve SPA output boundary — mask known secret values in the
+    // final text before it leaves the hub. The mask is rebuilt per call so
+    // it sees the env snapshot at serve-time (cheap; a few short regexes).
+    const rawFinalText = result.finalText ?? "";
+    const maskedFinalText = createOutputMask(currentSecretValues()).mask(
+      rawFinalText
+    );
     return {
       query,
       answer: {
-        finalText: result.finalText ?? "",
+        finalText: maskedFinalText,
         stopReason: result.stopReason,
         turnCount: result.turnCount,
       },

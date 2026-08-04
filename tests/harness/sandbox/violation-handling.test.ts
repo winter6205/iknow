@@ -368,13 +368,42 @@ describe("wireKillSessionNotification", () => {
     assert.equal(sinkCalls.length, 1);
   });
 
-  it("falls back gracefully on malformed JSON", () => {
+  it("falls back gracefully on malformed JSON (fail-safe: unknown kill reason → high)", () => {
+    // M3 fix: malformed JSON previously downgraded to "mid"; we now treat
+    // an unparseable kill reason as the worst tier ("high"). The line still
+    // carries the raw reason in `message=` for diagnosis.
     const sinkCalls: string[] = [];
     const onKill = wireKillSessionNotification({
       sink: (line) => sinkCalls.push(line),
     });
     onKill("not-json-at-all");
     assert.equal(sinkCalls.length, 1);
+    assert.match(sinkCalls[0] ?? "", /tier=high/);
+    assert.match(sinkCalls[0] ?? "", /message=not-json-at-all/);
+  });
+
+  it("honors parsed.tier when present and valid (low / mid / high)", () => {
+    // The notification is one-shot (latched); each tier branch needs its own
+    // fresh handle so the latch does not swallow later emissions.
+    function fire(tier: string): string {
+      const sinkCalls: string[] = [];
+      const onKill = wireKillSessionNotification({
+        sink: (line) => sinkCalls.push(line),
+      });
+      onKill(JSON.stringify({ tier, tool: "x", message: "y" }));
+      return sinkCalls[0] ?? "";
+    }
+    assert.match(fire("low"), /tier=low/);
+    assert.match(fire("mid"), /tier=mid/);
+    assert.match(fire("high"), /tier=high/);
+  });
+
+  it("parsed.tier outside the low/mid/high union falls back to mid", () => {
+    const sinkCalls: string[] = [];
+    const onKill = wireKillSessionNotification({
+      sink: (line) => sinkCalls.push(line),
+    });
+    onKill(JSON.stringify({ tier: "ultra", tool: "x", message: "y" }));
     assert.match(sinkCalls[0] ?? "", /tier=mid/);
   });
 });

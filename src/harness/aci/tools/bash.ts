@@ -92,7 +92,7 @@ export function createBashTool(cwd: string): AciToolDef {
       cwd,
     });
     const { done } = spawnWithStopSignal(fence.argv[0], fence.argv.slice(1), {
-      cwd: process.cwd(),
+      cwd,
       signal: ctx?.signal,
     });
     const result = await done;

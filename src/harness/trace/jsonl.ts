@@ -15,6 +15,7 @@
 
 import { appendFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { createOutputMask, currentSecretValues } from "../sandbox/index.js";
 import type {
   TraceService,
   LlmCallRecord,
@@ -53,6 +54,22 @@ function toSnakeCaseRecord<T extends object>(
   return out;
 }
 
+/**
+ * SC20 follow-up: mask known secret values in the serialized JSONL line.
+ *
+ * This is intentionally coarse — we serialize the entire line, mask the
+ * resulting string with the current secret values, and emit the masked
+ * string. The mask is built once per factory call (cheap) and re-used
+ * across all record writes for this TraceService instance. If the env
+ * changes mid-run (rare; CLI products don't mutate env mid-run), the mask
+ * is stale until the next createJsonlTraceService call. SC20 spec left a
+ * single-serializer-point mask as the preferred wiring; this is it.
+ */
+function maskJsonLine(line: string): string {
+  const mask = createOutputMask(currentSecretValues());
+  return mask.mask(line);
+}
+
 export function createJsonlTraceService(
   options: JsonlTraceOptions
 ): TraceService {
@@ -73,6 +90,10 @@ export function createJsonlTraceService(
     }
   }
 
+  function writeLine(payload: Record<string, unknown>): void {
+    writer(maskJsonLine(JSON.stringify(payload)));
+  }
+
   return {
     async recordLlmCall(record: LlmCallRecord): Promise<string | undefined> {
       const id = randomUUID();
@@ -83,7 +104,7 @@ export function createJsonlTraceService(
         ...toSnakeCaseRecord(record),
       };
       try {
-        writer(JSON.stringify(line));
+        writeLine(line);
         return id;
       } catch (err) {
         warnOnce(err);
@@ -104,7 +125,7 @@ export function createJsonlTraceService(
         ...snake,
       };
       try {
-        writer(JSON.stringify(line));
+        writeLine(line);
         return id;
       } catch (err) {
         warnOnce(err);
@@ -121,7 +142,7 @@ export function createJsonlTraceService(
         ...toSnakeCaseRecord(record),
       };
       try {
-        writer(JSON.stringify(line));
+        writeLine(line);
         return id;
       } catch (err) {
         warnOnce(err);

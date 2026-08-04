@@ -63,7 +63,6 @@ describe("createPermissionPolicy", () => {
     const p = createPermissionPolicy({
       defaultRule: "allow",
       byName: { bash: "deny" },
-      denyDangerousExecute: false,
     });
     // prototype wrapper injects into the session layer
     assert.equal(p.sources.session?.rules().length ?? 0, 1);
@@ -339,9 +338,11 @@ describe("checkPermission — execute 安全兜底细节", () => {
   });
 });
 
-describe("checkPermission — denyDangerousExecute=false is now a no-op (hard-wall is unconditional)", () => {
-  it("execute + rm -rf / + denyDangerousExecute=false → 仍 deny（hard-wall 拦截）", () => {
-    const policy = createPermissionPolicy({ denyDangerousExecute: false });
+describe("checkPermission — hard-wall is unconditional (no override possible)", () => {
+  it("execute + rm -rf / + default policy → deny（hard-wall 拦截,无法被策略关闭）", () => {
+    // The dangerous-command hard-wall fires unconditionally under the
+    // default policy. The test pins that there is no override knob.
+    const policy = createPermissionPolicy();
     const out = checkPermission({
       def: makeTool({ name: "bash", category: "execute" }),
       input: { command: "rm -rf /" },
@@ -351,11 +352,10 @@ describe("checkPermission — denyDangerousExecute=false is now a no-op (hard-wa
     assert.ok(out.reason.includes("dangerous command pattern"));
   });
 
-  it("execute + 已知安全命令 + denyDangerousExecute=false → ask（v0 default; test seam）", () => {
-    // v0 default for execute is "ask", so this test ensures the override
-    // doesn't accidentally turn safety off. The behavior is "ask" rather than
-    // prototype "allow" because the graduated category defaults differ.
-    const policy = createPermissionPolicy({ denyDangerousExecute: false });
+  it("execute + 已知安全命令 + default policy → ask（v0 default）", () => {
+    // v0 default for execute is "ask"; this case asserts default behavior is
+    // unchanged (no flag, no override).
+    const policy = createPermissionPolicy();
     const out = checkPermission({
       def: makeTool({ name: "bash", category: "execute" }),
       input: { command: "echo hello" },

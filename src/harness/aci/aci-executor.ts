@@ -30,6 +30,7 @@ import {
   type PermissionExecutorOptions,
 } from "../permission/permission-executor.js";
 import { createAciCatalog } from "../permission/permission-executor.js";
+import { checkPermission } from "../permission/policy.js";
 import { createPermissionPolicy } from "./permission.js";
 import { TIMEOUT_TIER_MS, type AciCatalog, type AciToolDef } from "./types.js";
 
@@ -105,7 +106,12 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
           opts.timeoutMsOverride ??
           (def ? TIMEOUT_TIER_MS[def.aci.timeoutTier] : _timeoutMs);
         if (opts.onDecision) {
-          const { checkPermission } = await import("../permission/policy.js");
+          // M2 fix: `checkPermission` is statically imported at the top of
+          // this module. The previous dynamic `await import(...)` was a hot-
+          // path smell (per-call module load) and risked divergence between
+          // this observation and the middleware's authoritative decision.
+          // The middleware remains the decision authority; `onDecision` is
+          // observation-only.
           if (!def) {
             opts.onDecision(call, {
               decision: "allow",

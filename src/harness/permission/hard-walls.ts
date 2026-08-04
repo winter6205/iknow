@@ -1,6 +1,9 @@
 import type { HardRuleSpec } from "./types.js";
+import { VIOLATION_PREFIXES } from "./prefixes.js";
 
-export const HARD_WALL_DENY_PREFIX = "[hard_wall]";
+// Re-export the SSOT hard-wall prefix for callers that historically imported
+// it from here. The authoritative definition lives in `./prefixes.ts`.
+export const HARD_WALL_DENY_PREFIX = VIOLATION_PREFIXES.hardWall;
 
 export type HardWallId =
   "hard-wall:execute-dangerous" | "hard-wall:sensitive-path";

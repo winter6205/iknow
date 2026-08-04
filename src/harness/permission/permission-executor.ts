@@ -20,11 +20,14 @@ import type {
 } from "../tools/types.js";
 import type { AciCatalog, AciToolDef } from "../aci/types.js";
 import { checkPermission, type PermissionPolicy } from "./policy.js";
+import { VIOLATION_PREFIXES } from "./prefixes.js";
 import type { AskUser, PreToolUseHook, PostToolUseHook } from "./types.js";
 
-const USER_DENIED_PREFIX = "[user_denied]";
-const PERMISSION_DENIED_PREFIX = "[permission_denied]";
-const HOOK_BLOCKED_PREFIX = "[hook_blocked]";
+// Permission-executor prefixes consumed from the SSOT table. Keeping a local
+// const alias preserves the call-site ergonomics (no template-literal drift).
+const USER_DENIED_PREFIX = VIOLATION_PREFIXES.userDenied;
+const PERMISSION_DENIED_PREFIX = VIOLATION_PREFIXES.permissionDenied;
+const HOOK_BLOCKED_PREFIX = VIOLATION_PREFIXES.hookBlocked;
 
 /**
  * Build an AciCatalog from a ToolRegistry by name. v0 the catalog is

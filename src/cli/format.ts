@@ -23,6 +23,10 @@ import type {
   LoopTrace,
   RunResult,
 } from "../harness/index.js";
+import {
+  createOutputMask,
+  currentSecretValues,
+} from "../harness/sandbox/index.js";
 
 /** Tool-name list separator in status line (CLI script consumers parse this). */
 const TOOL_LIST_SEP = ",";
@@ -163,15 +167,19 @@ export function renderAssistantAnswer(opts: {
  * #152 T5:thinking 可见面走 `opts.showThinking`(默认 false)。关闭时与原行为
  * 完全一致(用 `finalText` 派生,thinking 不进答案);开启时改走
  * `renderAssistantAnswer` 把 thinking 文本前置显示。
+ *
+ * SC20: 最终文本会被 `createOutputMask(currentSecretValues())` 替换已知密钥
+ * 值为 `***`(消费层输出边界)。
  */
 export function formatRunHuman(opts: FormatRunHumanOpts): string {
   const { result, trace, showThinking = false } = opts;
-  const text = showThinking
+  const rawText = showThinking
     ? renderAssistantAnswer({
         messages: result.messages,
         showThinking: true,
       })
     : (result.finalText ?? "");
+  const text = buildOutputMask().mask(rawText);
   const toolNames = flattenToolNames(trace);
   const tools = toolNames.length > 0 ? toolNames.join(TOOL_LIST_SEP) : NO_TOOLS;
   const status =
@@ -192,12 +200,17 @@ export function formatRunHuman(opts: FormatRunHumanOpts): string {
  *
  * #152 T5:thinking 展示开关**不影响** JSON 投影(machine readers 自然能从
  * `result.messages` 提取,或留后续票)。
+ *
+ * SC20: `finalText` 字段会被 `createOutputMask(currentSecretValues())` 替换已知
+ * 密钥值为 `***`(消费层输出边界)。
  */
 export function formatRunJson(opts: FormatRunOpts): string {
   const { result, trace } = opts;
+  const maskedFinalText =
+    result.finalText === null ? null : buildOutputMask().mask(result.finalText);
   return JSON.stringify(
     {
-      finalText: result.finalText,
+      finalText: maskedFinalText,
       stopReason: result.stopReason,
       turnCount: result.turnCount,
       trace,
@@ -205,6 +218,19 @@ export function formatRunJson(opts: FormatRunOpts): string {
     null,
     2
   );
+}
+
+/**
+ * SC20: Build a fresh output mask from the currently-known secret values.
+ *
+ * Constructed per call (cheap enough — regex compilation on a few short
+ * strings). Module-level memoization would also work but adds a test seam:
+ * a per-call build means each call sees the env snapshot at call time,
+ * which is what CLI invocations want (start-of-run snapshot is fine — env
+ * does not mutate mid-run for CLI products).
+ */
+function buildOutputMask() {
+  return createOutputMask(currentSecretValues());
 }
 
 /**

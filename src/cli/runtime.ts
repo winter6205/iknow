@@ -29,7 +29,6 @@ import { createGrepTool } from "../harness/aci/tools/grep.js";
 import { createGlobTool } from "../harness/aci/tools/glob.js";
 import { createEditFileTool } from "../harness/aci/tools/edit-file.js";
 import { createWriteFileTool } from "../harness/aci/tools/write-file.js";
-import { createPermissionExecutor } from "../harness/permission/index.js";
 import type { AskUser } from "../harness/permission/types.js";
 import { loadIknowEnv, type IknowEnv } from "../config/env.js";
 import type { SessionContext } from "../shared/schema.js";
@@ -109,15 +108,13 @@ export async function buildHarnessEngine(
   ];
   const reg = createAciRegistry(aciTools);
   const baseExecutor = createExecutor(reg.inner);
-  // 5-step permission middleware (delegates to permission-executor).
-  const policy = createPermissionPolicy({ denyDangerousExecute: true });
-  const executor = createPermissionExecutor({
-    inner: createAciExecutor({
-      inner: baseExecutor,
-      catalog: reg.catalog,
-      policy,
-    }),
-    registry: reg.inner,
+  // 5-step permission middleware: 危险命令由硬墙无条件拦截（#122 Q2b），
+  // 无需策略开关。`createAciExecutor` 内部已装配 permission-executor（接受
+  // askUser via `AciExecutorOptions.askUser`），不要再外包一层。
+  const policy = createPermissionPolicy();
+  const executor = createAciExecutor({
+    inner: baseExecutor,
+    catalog: reg.catalog,
     policy,
     askUser: opts.askUser,
   });

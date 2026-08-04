@@ -1,5 +1,6 @@
 import { resolve, relative, sep } from "node:path";
 import { ToolExecutionError } from "../errors.js";
+import { VIOLATION_PREFIXES } from "../permission/prefixes.js";
 
 export const SENSITIVE_PATHS: readonly string[] = Object.freeze([
   "~/.ssh",
@@ -73,7 +74,9 @@ export function createFsPolicy(opts: FsPolicyOpts): FsPolicy {
     const absPath = resolve(target);
     const allowed = roots.some((root) => isWithin(root, absPath));
     if (!allowed || isSensitive(absPath)) {
-      throw new ToolExecutionError(`[fs_denied] path outside fence: ${target}`);
+      throw new ToolExecutionError(
+        `${VIOLATION_PREFIXES.fsDenied} path outside fence: ${target}`
+      );
     }
   };
   return Object.freeze({

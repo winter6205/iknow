@@ -19,6 +19,7 @@
  */
 
 import type { PostToolUseHook } from "../permission/types.js";
+import { VIOLATION_PREFIXES } from "../permission/prefixes.js";
 
 export type ViolationTier = "low" | "mid" | "high";
 
@@ -98,7 +99,9 @@ export interface CategorizedResult {
  * tracked violation (e.g. an `ok` result).
  *
  * Substring policy (matches the prefixes emitted by `permission-executor.ts`
- * and `network-policy.ts`):
+ * and `network-policy.ts`). Prefixes are consumed from
+ * `permission/prefixes.ts` (SSOT) so the recognize side cannot drift from
+ * the emit side:
  *   - `[hard_wall] dangerous command`            → mid (sensitive / dangerous)
  *   - `[hard_wall] sensitive path`               → mid
  *   - `[permission_denied] dangerous`            → mid (dangerous command variant)
@@ -119,25 +122,30 @@ export function categorizeResult(result: {
   }
   const msg = result.message ?? "";
 
+  const { hardWall, permissionDenied, userDenied, networkDenied, fsDenied } =
+    VIOLATION_PREFIXES;
+
   // Order matters: check the more specific dangerous patterns first so
   // "[permission_denied] dangerous command" doesn't fall through to generic
   // permission_denied → low.
-  if (/\[hard_wall\]\s+(dangerous|sensitive)/.test(msg)) {
+  const hardWallRe = new RegExp(`\\${hardWall}\\s+(dangerous|sensitive)`);
+  if (hardWallRe.test(msg)) {
     return { tier: "mid", detail: msg };
   }
-  if (/\[permission_denied\]\s+dangerous/.test(msg)) {
+  const permDangerousRe = new RegExp(`\\${permissionDenied}\\s+dangerous`);
+  if (permDangerousRe.test(msg)) {
     return { tier: "mid", detail: msg };
   }
-  if (/\[network_denied\]/.test(msg)) {
+  if (msg.includes(networkDenied)) {
     return { tier: "mid", detail: msg };
   }
-  if (/\[fs_denied\]/.test(msg)) {
+  if (msg.includes(fsDenied)) {
     return { tier: "mid", detail: msg };
   }
-  if (/\[user_denied\]/.test(msg)) {
+  if (msg.includes(userDenied)) {
     return { tier: "low", detail: msg };
   }
-  if (/\[permission_denied\]/.test(msg)) {
+  if (msg.includes(permissionDenied)) {
     return { tier: "low", detail: msg };
   }
   return { tier: undefined, detail: "untracked failure" };
@@ -210,15 +218,26 @@ export function wireKillSessionNotification(
     let event: ViolationEvent;
     try {
       const parsed = JSON.parse(reason) as Partial<ViolationEvent>;
+      // M3 fix: read `tier` if present and validate against the known union
+      // ("low" | "mid" | "high"). Unknown → fall through to the parser
+      // branches below (default = "mid" for valid but unrecognized tier).
+      const parsedTier = parsed.tier;
+      const tier: ViolationTier =
+        parsedTier === "low" || parsedTier === "mid" || parsedTier === "high"
+          ? parsedTier
+          : "mid";
       event = {
-        tier: (parsed.tier === "high" ? "high" : "mid") as ViolationTier,
+        tier,
         tool: typeof parsed.tool === "string" ? parsed.tool : "",
         input: undefined,
         message: typeof parsed.message === "string" ? parsed.message : reason,
       };
     } catch {
+      // Fail-safe: a kill reason that isn't even JSON is treated as the
+      // worst tier ("high"). We do NOT silently downgrade to "mid" — the
+      // previous behavior masked severity for malformed payloads.
       event = {
-        tier: "mid",
+        tier: "high",
         tool: "",
         input: undefined,
         message: reason,

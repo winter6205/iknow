@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { relative } from "node:path";
+import { ToolExecutionError } from "../errors.js";
 import type { FsPolicy } from "./fs-policy.js";
 import { SENSITIVE_PATHS } from "./fs-policy.js";
 import type { NetworkPolicy } from "./network-policy.js";
@@ -27,9 +28,17 @@ export interface BwrapFence {
 }
 
 function pathForHome(fsPolicy: FsPolicy): string {
-  return (
-    fsPolicy.allowedPaths()[1] ?? fsPolicy.allowedPaths()[0] ?? process.cwd()
-  );
+  const paths = fsPolicy.allowedPaths();
+  // cwd + home are always present by construction in createFsPolicy. An
+  // empty / single-entry list signals a misconfigured caller — fail loud
+  // rather than silently falling back to process.cwd() (which would unbind
+  // the fence from the actual workspace).
+  if (paths.length < 2) {
+    throw new ToolExecutionError(
+      `bwrap: fsPolicy.allowedPaths() must contain at least cwd+home (got ${paths.length}); refusing to bind unknown paths`
+    );
+  }
+  return paths[1] as string;
 }
 
 function isTmpDescendant(cwd: string, tmp: string): boolean {

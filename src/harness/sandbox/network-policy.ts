@@ -1,4 +1,5 @@
 import { ToolExecutionError } from "../errors.js";
+import { VIOLATION_PREFIXES } from "../permission/prefixes.js";
 
 export const STATIC_NETWORK_WHITELIST: ReadonlySet<string> = Object.freeze(
   new Set(["github.com", "registry.npmjs.org", "pypi.org"])
@@ -19,7 +20,8 @@ export class NetworkViolationError extends ToolExecutionError {
 
   constructor(opts: NetworkViolationOptions) {
     super(
-      opts.message ?? `[network_denied] domain not in whitelist: ${opts.host}`
+      opts.message ??
+        `${VIOLATION_PREFIXES.networkDenied} domain not in whitelist: ${opts.host}`
     );
     this.host = opts.host;
   }

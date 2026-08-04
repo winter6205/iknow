@@ -11,7 +11,7 @@
  * 这里 re-export `createPermissionPolicy` / `checkPermission` 的纯函数形态，
  * 与 020 之前的 prototype API 形态保持兼容。
  *
- * 也保留原有 prototype 的 `createPermissionPolicy({defaultRule, byName, denyDangerousExecute})`
+ * 也保留原有 prototype 的 `createPermissionPolicy({defaultRule, byName})`
  * 入参形态作为薄包装（内部映射至新 `createPermissionPolicy`）。
  */
 
@@ -32,16 +32,15 @@ import {
  * Prototype-shape thin wrapper for createPermissionPolicy
  * -------------------------------------------------------------------------- */
 
-/** Projection of the prototype AciPermissionPolicy (defaultRule/byName/denyDangerousExecute). */
+/** Projection of the prototype AciPermissionPolicy (defaultRule/byName). */
 export interface ProtoPermissionPolicy {
   readonly defaultRule?: "allow" | "ask";
   readonly byName?: Readonly<Record<string, "allow" | "deny" | "ask">>;
-  readonly denyDangerousExecute?: boolean;
 }
 
 /**
- * Back-compat: prototype callers passing `{ defaultRule, byName, denyDangerousExecute }`
- * keep working. Internally we map byName into normal session-style rules at
+ * Back-compat: prototype callers passing `{ defaultRule, byName }` keep
+ * working. Internally we map byName into normal session-style rules at
  * codeBuiltInRules slot (highest-precedence normal layer in v0 = code; the
  * wrapper injects into session so they override built-ins consistently).
  */

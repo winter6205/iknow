@@ -51,4 +51,59 @@ describe("createBwrapFence", () => {
     assert.equal(argv.includes("--seccomp"), false);
     assert.deepEqual(argv.slice(-3), ["--", "node", "-v"]);
   });
+
+  it("throws a ToolExecutionError when fsPolicy.allowedPaths() is empty (M4 fail-loud)", () => {
+    // Misconfigured fsPolicy with no roots — must refuse to bind rather than
+    // silently falling back to process.cwd() (which would unbind the fence).
+    const fakeFsPolicy = {
+      allowedPaths: (): readonly string[] => [],
+      isSensitive: () => false,
+      isReadOnlySystem: () => false,
+      assertWithin: () => undefined,
+    };
+    assert.throws(
+      () =>
+        createBwrapFence({
+          command: "node",
+          args: ["-v"],
+          fsPolicy: fakeFsPolicy,
+          networkPolicy: createNetworkPolicy(),
+          resourceLimits: createResourceLimits(),
+          env: { PATH: "/bin" },
+          cwd: "/workspace",
+        }),
+      (err: unknown) => {
+        return (
+          err instanceof Error &&
+          err.message.includes(
+            "fsPolicy.allowedPaths() must contain at least cwd+home"
+          )
+        );
+      }
+    );
+  });
+
+  it("throws a ToolExecutionError when fsPolicy.allowedPaths() has a single entry (M4 fail-loud)", () => {
+    // Even one entry (cwd-only) is treated as misconfiguration: the home bind
+    // would be impossible to synthesize without a guess.
+    const fakeFsPolicy = {
+      allowedPaths: (): readonly string[] => ["/workspace"],
+      isSensitive: () => false,
+      isReadOnlySystem: () => false,
+      assertWithin: () => undefined,
+    };
+    assert.throws(
+      () =>
+        createBwrapFence({
+          command: "node",
+          args: ["-v"],
+          fsPolicy: fakeFsPolicy,
+          networkPolicy: createNetworkPolicy(),
+          resourceLimits: createResourceLimits(),
+          env: { PATH: "/bin" },
+          cwd: "/workspace",
+        }),
+      /fsPolicy\.allowedPaths\(\) must contain at least cwd\+home/
+    );
+  });
 });
