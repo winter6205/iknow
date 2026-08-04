@@ -12,6 +12,7 @@ import { GOV_LABEL, shortSnap } from "./evidence";
 import type { EvidenceProjection, GovernanceStatus } from "./evidence";
 import { EvidencePanel } from "./EvidencePanel";
 import { MarkdownBody } from "./MarkdownBody";
+import { StopNotice } from "./StopNotice";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolCallList } from "./ToolCallList";
 
@@ -101,6 +102,12 @@ export function AgentCard({
       <div className="text-[15px] leading-[1.7] text-ink [overflow-wrap:anywhere]">
         {renderBody ? renderBody(text) : <MarkdownBody text={text} />}
       </div>
+
+      {/* Stop-reason notice (non-completed) + turnCount meta info (T6) — quiet mono row below the body. */}
+      <StopNotice
+        stopReason={answer?.stopReason}
+        turnCount={answer?.turnCount}
+      />
 
       {/* toolCalls（默认折叠，每条 mono chip + 展开看 input/output 预览）。 */}
       {toolCalls && toolCalls.length > 0 ? (
