@@ -55,6 +55,9 @@ export async function startSessionServe(
     hub,
     host,
     port: Number.isFinite(port) ? port : 8787,
+    // Path is resolved relative to CWD so the inspection reader sees the same
+    // file the write side appends to (ADR-0003 D3: relative traceOut paths).
+    traceFilePath: opts?.traceOut ? path.resolve(opts.traceOut) : undefined,
   });
 
   return { listening, hub };

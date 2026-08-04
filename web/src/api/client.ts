@@ -6,6 +6,9 @@ import type {
   PostMessageResponse,
   ResetSessionResponse,
   SessionListItem,
+  TraceFieldDef,
+  TraceQueryParams,
+  TracesResponse,
 } from "./types";
 import { SessionApiError } from "./types";
 
@@ -136,4 +139,30 @@ export function resetSession(
     },
     signal
   );
+}
+
+// -- Trace inspection endpoints -----------------------------------------------
+
+function traceQueryString(params: TraceQueryParams): string {
+  const sp = new URLSearchParams();
+  if (params.conversation_id) sp.set("conversation_id", params.conversation_id);
+  if (params.record_type) sp.set("record_type", params.record_type);
+  if (params.status) sp.set("status", params.status);
+  if (params.limit !== undefined) sp.set("limit", String(params.limit));
+  if (params.offset !== undefined) sp.set("offset", String(params.offset));
+  return sp.toString();
+}
+
+export function getTraces(
+  params: TraceQueryParams = {},
+  signal?: AbortSignal
+): Promise<TracesResponse> {
+  const qs = traceQueryString(params);
+  return request(`${API}/traces${qs ? `?${qs}` : ""}`, {}, signal);
+}
+
+export function getTraceFields(
+  signal?: AbortSignal
+): Promise<{ fields: ReadonlyArray<TraceFieldDef> }> {
+  return request(`${API}/traces/fields`, {}, signal);
 }

@@ -15,6 +15,10 @@
 - 归档 `src/interaction/`（5 文件）→ `docs/archive/022-retire-interaction/` + `src/agent-loop/`（7 文件）→ `docs/archive/022-retire-agent-loop/`；归档非删除，对齐 021 惯例。详见 #51（022）Resolution Q5。
 - Session API 路径切到 harness foundation（`src/session-api/` 零 import 旧 loop）；`SessionHub` 直接调用 `run()` + `priorMessages` 续传。详见 #51（022）Resolution Q1-Q5。
 
+### Added
+
+- Trace inspection panel：新增 `src/traceserver/`（read-only）：同步 JSONL reader（`MAX_TRACE_BYTES = 8 MiB` + 行边界截断 + `TraceReadError` 包裹 fs 错误）+ `GET /api/v1/traces`（filter：conversation_id / record_type / status；pagination：limit 1..200 / offset ≥ 0；坏行计入 `skipped_lines`；snake_case wire）+ `GET /api/v1/traces/fields`（字段声明表 `TRACE_FIELD_DEFS` SSOT，加载时自检 key 唯一性，违则 throw）；`SessionHttpServerOptions.traceFilePath` 接线（`serve --trace-out` 经 `path.resolve` 相对 CWD，对齐 ADR-0003 D3）；未配置 traceFilePath → 404 `not_found`、`TraceReadError` → 500 `internal`、参数非法 → 400 `validation`（含 `field`）。前端：web `TracePanel` 容器 + `TraceStatsBar` / `TraceFilterBar` / `TraceTable` / `TraceExpandedRow` 子组件；`App.tsx` 顶层 view 切换 `对话` / `Trace 面板`，chat view 始终挂载（`useSessionChat` 状态不丢），TracePanel 卸载/挂载可重新拉数；字段列选择 / datetime 格式化 / cell tone 抽到 `web/src/components/traceFields.ts` 供单测。**新增 trace 字段 = `src/harness/trace/types.ts` 加类型 + `TRACE_FIELD_DEFS` 加一行，面板自动生效**；写侧（`src/harness/trace/jsonl.ts` / `loop-engine.ts` / `hub.ts.recordViolationTrace`）未触碰，验证：33 单测 + 集成全绿。
+
 ### Changed
 
 - #120 会话持久化：会话池根从 `<cwd>/data` 迁至 `~/.iknow`，项目命名空间采用 `<basename>-<sha1(cwd)[:12]>`（`resolveProjectSessionDir`）；`serve --data-dir` 覆盖保留，旧 `<cwd>/data` 不读、不迁移、不删除。`SessionFileV1` schema 升级为 v2，新增顶层 `summary` / `cwd` / `sanitized_at`；`sanitizeSessionFile` 前向兼容 v1（读取时补齐并零写盘），拒绝 `schemaVersion > 2` 及形状错误的 `messages`，不做修复。`SessionStore.list()` 条目新增 `summary`，既有 `conversation_id` / `updatedAt` / `lastFinalText` 保持不变；CLI `CliChatState.messages` 改为 `ReadonlyArray` + `Object.freeze`（#120 Q3）。详见 `specs/120-session-persistence.md`。
