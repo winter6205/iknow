@@ -8,6 +8,7 @@ import { staggerStyle } from "../lib/stagger";
 import { GOV_LABEL, shortSnap } from "./evidence";
 import type { EvidenceProjection, GovernanceStatus } from "./evidence";
 import { EvidencePanel } from "./EvidencePanel";
+import { MarkdownBody } from "./MarkdownBody";
 
 export type AgentCardProps = {
   text: string;
@@ -15,7 +16,7 @@ export type AgentCardProps = {
   answer?: TurnAnswerDto;
   /** Evidence projection reserved (see file header). Wire 不携带 G2，当前不渲染。 */
   evidence?: EvidenceProjection;
-  /** Reserved override for body rendering (decision #19); default = plain <p>。 */
+  /** Optional override for body rendering; default = GFM markdown with code highlighting (decision #19/T3). */
   renderBody?: (text: string) => ReactNode;
   staggerIndex?: number;
 };
@@ -87,9 +88,9 @@ export function AgentCard({
       className="w-full self-stretch rounded-card border border-line bg-surface px-5 py-4 shadow-bubble animate-message-in"
       style={staggerStyle(staggerIndex)}
     >
-      {/* Claims / body (decision #19: renderBody reserved, default plain text). */}
+      {/* Claims / body (T3: default = GFM markdown with code highlighting; renderBody overrides for tests). */}
       <div className="text-[15px] leading-[1.7] text-ink [overflow-wrap:anywhere]">
-        {renderBody ? renderBody(text) : <p className="m-0">{text}</p>}
+        {renderBody ? renderBody(text) : <MarkdownBody text={text} />}
       </div>
 
       {/* Notes (quiet, mono). */}
