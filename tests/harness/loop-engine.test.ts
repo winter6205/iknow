@@ -14,6 +14,7 @@ import type {
   AnthropicNativeMessage,
   AssistantTurnResult,
   LoopState,
+  TokenUsage,
 } from "../../src/harness/model-adapter/types.ts";
 import type {
   ToolDef,
@@ -1665,5 +1666,136 @@ describe("loop engine T5 #152: thinking 保留与回传", () => {
         assert.equal("payload" in tc, false);
       }
     }
+  });
+});
+
+/**
+ * #160 T4 (ADR-0008 Decision 5):RunResult.lastUsage = 最后一次成功模型调用的
+ * usage;run 无成功模型调用时为 null。
+ *
+ * 验收锚点(双源裁决 #160 Resolution Q4 + ADR-0008 Decision 5):
+ *   (a) 多轮 run(均带 usage)→ lastUsage = 最后一次成功调用的值;
+ *   (b) 纯 stub 无 usage 的 run → lastUsage === null;
+ *   (c) 首轮成功带 usage、随后失败(ProtocolError)→ lastUsage 保留首轮 usage。
+ */
+describe("loop engine T4 #160: RunResult.lastUsage (ADR-0008 Decision 5)", () => {
+  it("multi-turn run with usage: lastUsage reflects the last successful model call", async () => {
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const reg = createRegistry([echo]);
+    const exec = createExecutor(reg);
+    const usage1: TokenUsage = {
+      inputTokens: 7,
+      outputTokens: 3,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+    };
+    const usage2: TokenUsage = {
+      inputTokens: 42,
+      outputTokens: 5,
+      cacheCreationInputTokens: 1,
+      cacheReadInputTokens: 2,
+    };
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "ping" } }],
+          usage: usage1,
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+          usage: usage2,
+        }),
+      ],
+    });
+    const { result } = await run("go", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "completed");
+    assert.ok(result.lastUsage !== null);
+    assert.equal(result.lastUsage!.inputTokens, 42);
+    assert.equal(result.lastUsage!.outputTokens, 5);
+    assert.equal(result.lastUsage!.cacheCreationInputTokens, 1);
+    assert.equal(result.lastUsage!.cacheReadInputTokens, 2);
+    // 整对象 deepEqual,确保是 usage2(最后成功调用)而非 usage1。
+    assert.deepEqual(result.lastUsage, usage2);
+  });
+
+  it("pure stub run without usage: lastUsage is null", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hi"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const { result } = await run("hello", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "completed");
+    assert.equal(result.lastUsage, null);
+  });
+
+  it("first call succeeds with usage then later call fails: lastUsage keeps the last successful usage", async () => {
+    // 仅 1 个脚本响应(含 usage);第二轮 stub-model 脚本耗尽抛 ProtocolError →
+    // stopReason=protocolError,lastUsage 保留首轮的 usage。
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const reg = createRegistry([echo]);
+    const exec = createExecutor(reg);
+    const usage1: TokenUsage = {
+      inputTokens: 7,
+      outputTokens: 3,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+    };
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "ping" } }],
+          usage: usage1,
+        }),
+      ],
+    });
+    const { result } = await run("go", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "protocolError");
+    assert.ok(result.lastUsage !== null);
+    assert.deepEqual(result.lastUsage, usage1);
   });
 });

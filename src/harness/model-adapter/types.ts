@@ -63,6 +63,14 @@ export interface RunResult {
   readonly messages: ReadonlyArray<AnthropicNativeMessage>;
   readonly turnCount: number;
   readonly stopReason: StopReason;
+  /**
+   * #160 / ADR-0008 Decision 5: 最后一次成功模型调用的 token usage(供显示面
+   * 消费;TUI 经 hub-bridge 直读 RunResult)。必填字段:null = run 无成功模型
+   * 调用(或所有成功调用的 usage 均缺席)。双源裁决(#160 Resolution Q4 +
+   * ADR-0008 Decision 5),不复用 undefined 字段缺席语义——后者仅约束
+   * LlmCallRecord 落盘面(Postel,ADR-0008 Decision 3)。
+   */
+  readonly lastUsage: TokenUsage | null;
 }
 
 /** assistant 回合投影:有序 text + 有序 tool call,保持原生顺序(014 投影)。 */

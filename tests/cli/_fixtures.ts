@@ -13,6 +13,7 @@ import type {
   AnthropicNativeMessage,
   AssistantTurnResult,
   LoopEngineDeps,
+  TokenUsage,
 } from "../../src/harness/index.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
@@ -41,6 +42,11 @@ export interface AssistantResultOpts {
     readonly signature?: string;
     readonly data?: string;
   }>;
+  /**
+   * #160 T4: optional token usage(传入时附带于返回对象;不传则字段缺席,
+   * 保持 stub 路径无 usage 的设计语义)。
+   */
+  readonly usage?: TokenUsage;
 }
 
 /**
@@ -81,6 +87,8 @@ export function assistantResult(
       supplierStop === "success" &&
       texts.length === 0 &&
       toolCalls.length === 0,
+    // 不传 usage 则字段缺席(stub 路径默认语义);传入时原样附带。
+    ...(opts.usage !== undefined && { usage: opts.usage }),
   };
 }
 

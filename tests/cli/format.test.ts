@@ -30,6 +30,8 @@ function mkResult(over: Partial<RunResult> = {}): RunResult {
     messages: [],
     turnCount: 1,
     stopReason: "completed",
+    // #160 T4:RunResult.lastUsage 必填字段;mkResult 默认 null(无 usage 视图)。
+    lastUsage: null,
     ...over,
   };
 }
