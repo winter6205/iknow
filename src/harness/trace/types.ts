@@ -49,6 +49,22 @@ export interface LlmCallRecord {
   messages?: ReadonlyArray<unknown>;
   status: TraceStatus;
   error?: TraceError;
+  /**
+   * #160 / ADR-0008 Decision 2: 顶层平铺的 token 四字段。
+   * 形状对齐 SDK `Usage` 与 model-adapter 域类型 `TokenUsage`,
+   * 但 trace bounded context 遵循先例(文件头注释 + loop-trace.ts:17/22-23)
+   * **不 import** model-adapter 类型 —— 通过字面量联合 + JSDoc 标注源
+   * 文件保持独立松耦合;loop-engine 在 `recordLlmCall` 抄入时做结构赋值。
+   *
+   * Postel 语义(ADR-0003 Decision 9 + ADR-0008 Decision 3):
+   *   - success 分支填全四字段(SDK 保证存在);
+   *   - error 分支(整条缺席)不写任何 *_tokens 键,JSON.stringify
+   *     自然丢弃 undefined,字段缺席 = 调用未产生 token 计数(不可猜测)。
+   */
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheCreationInputTokens?: number | null;
+  cacheReadInputTokens?: number | null;
 }
 
 export interface ToolCallRecord {
