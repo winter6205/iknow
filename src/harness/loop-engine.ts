@@ -572,10 +572,7 @@ async function stepWithTrace(opts: {
         })
       );
     } else {
-      // #160 / ADR-0008 Decision 2+4: 成功分支从 AssistantTurnResult.usage
-      // 解包抄入四 token 字段(顶层平铺,与 supplierStop 同构)。adapter
-      // 投影畸形 usage(T2 钉死语义: 形状畸形 → usage 缺席)在解包处
-      // 自然得到 undefined,JSON.stringify 丢弃 = 字段缺席,符合 Postel。
+      // usage 缺席(error/stub 路径)整条不落盘——Postel(ADR-0008 Decision 3)
       const usage = modelPhase.result.usage;
       llmCallId = await safeTrace(() =>
         opts.deps.trace!.recordLlmCall({
@@ -586,18 +583,7 @@ async function stepWithTrace(opts: {
           stream: false,
           messagesCaptured: false,
           status: "ok",
-          ...(usage?.inputTokens !== undefined && {
-            inputTokens: usage.inputTokens,
-          }),
-          ...(usage?.outputTokens !== undefined && {
-            outputTokens: usage.outputTokens,
-          }),
-          ...(usage?.cacheCreationInputTokens !== undefined && {
-            cacheCreationInputTokens: usage.cacheCreationInputTokens,
-          }),
-          ...(usage?.cacheReadInputTokens !== undefined && {
-            cacheReadInputTokens: usage.cacheReadInputTokens,
-          }),
+          ...(usage !== undefined ? usage : {}),
         })
       );
     }

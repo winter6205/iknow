@@ -22,10 +22,7 @@ import type {
   TurnRecord,
 } from "../../../src/harness/trace/types.ts";
 import { assistantResult } from "../../cli/_fixtures.ts";
-import type {
-  AssistantTurnResult,
-  TokenUsage,
-} from "../../../src/harness/model-adapter/types.ts";
+import type { TokenUsage } from "../../../src/harness/model-adapter/types.ts";
 
 function parseJsonl(filePath: string): Array<Record<string, unknown>> {
   const content = readFileSync(filePath, "utf8");
@@ -33,23 +30,6 @@ function parseJsonl(filePath: string): Array<Record<string, unknown>> {
     .split(String.fromCharCode(10))
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line) as Record<string, unknown>);
-}
-
-/**
- * T3 (#160):构造带 usage 字段的 AssistantTurnResult。
- * 形状与 tests/cli/_fixtures.ts:assistantResult 对齐,
- * 但显式附 usage,触发 loop-engine ok 分支的 recordLlmCall 抄入。
- *
- * 不修改 tests/cli/_fixtures.ts 的默认行为(默认 stub 无 usage = 缺席是设计语义);
- * 单独内联一份最小 helper,避免污染 T5/T6 共享 fixture。
- */
-function assistantResultWithUsage(
-  opts: Parameters<typeof assistantResult>[0] & { usage: TokenUsage }
-): AssistantTurnResult {
-  return {
-    ...assistantResult(opts),
-    usage: opts.usage,
-  };
 }
 describe("T4 criterion 5: byte-level consistency", () => {
   it("pure-text run: result is identical with undefined trace vs NoopTraceService", async () => {
@@ -477,7 +457,7 @@ describe("T3 (#160): token fields — ok-branch projection vs error-branch absen
     };
     const model = createStubModel({
       responses: [
-        assistantResultWithUsage({
+        assistantResult({
           texts: ["hi"],
           toolCalls: [],
           supplierStop: "success",
@@ -526,7 +506,7 @@ describe("T3 (#160): token fields — ok-branch projection vs error-branch absen
     };
     const model = createStubModel({
       responses: [
-        assistantResultWithUsage({
+        assistantResult({
           texts: ["never arrives"],
           toolCalls: [],
           supplierStop: "success",
@@ -580,7 +560,7 @@ describe("T3 (#160): token fields — ok-branch projection vs error-branch absen
       cacheReadInputTokens: null,
     };
     const responses = [
-      assistantResultWithUsage({
+      assistantResult({
         texts: ["hello"],
         toolCalls: [],
         supplierStop: "success",

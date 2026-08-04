@@ -7,7 +7,7 @@ test_command: |
   grep -q "cacheCreationInputTokens" src/harness/model-adapter/types.ts || { echo "FAIL: TokenUsage 缺 cacheCreationInputTokens"; exit 1; }
   grep -q "lastUsage" src/harness/model-adapter/types.ts || { echo "FAIL: RunResult 缺 lastUsage"; exit 1; }
   grep -q "inputTokens" src/harness/trace/types.ts || { echo "FAIL: LlmCallRecord 缺 token 字段"; exit 1; }
-  grep -q "usage" src/harness/model-adapter/anthropic-adapter.ts || { echo "FAIL: adapter 未透出 usage"; exit 1; }
+  grep -q "projectSdkUsage" src/harness/model-adapter/anthropic-adapter.ts || { echo "FAIL: adapter 缺投影函数 projectSdkUsage"; exit 1; }
   grep -q "cacheCreationInputTokens" specs/trace-service.md || { echo "FAIL: spec 未对齐四字段"; exit 1; }
   npx tsc --noEmit || { echo "FAIL: typecheck"; exit 1; }
   echo "PASS: token usage display path shape OK"
