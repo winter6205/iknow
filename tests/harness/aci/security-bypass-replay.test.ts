@@ -29,10 +29,9 @@ const execDef: AciToolDef = Object.freeze({
   handler: async () => ({}),
   aci: Object.freeze({
     category: "execute" as const,
-    isReadOnly: false,
-    isDestructive: true,
     isConcurrencySafe: false,
     interruptBehavior: "cancel" as const,
+    timeoutTier: "build" as const,
   }),
 });
 
@@ -91,26 +90,24 @@ const PAYLOADS: ReadonlyArray<Payload> = [
   // HIGH #6 — chmod -R
   { label: "H6 chmod -R", cmd: "chmod -R 000 /", expect: "deny" },
 
-  // MEDIUM #3 — 关闭黑名单双保险时，allowlist 兜底仍工作
+  // MEDIUM #3 — 危险命令在 default policy 下仍被硬墙 deny（不可被策略开关关闭）。
   {
-    label: "M3 denyDangerousExecute=false + rm",
+    label:
+      "M3 dangerous command denied under default policy (hard walls un-overridable)",
     cmd: "rm -fr /tmp/x",
     expect: "deny",
-    policyOverride: { denyDangerousExecute: false },
   },
 
-  // CRITICAL #4 — byName always_allow 不能绕过安全兜底
+  // CRITICAL #4 — byName allow 不能绕过硬墙
   {
-    label: "C4 always_allow + rm -fr",
+    label: "C4 byName=allow + rm -fr",
     cmd: "rm -fr /tmp/x",
     expect: "deny",
-    policyOverride: { byName: { bash: "always_allow" as const } },
+    policyOverride: { byName: { bash: "allow" } },
   },
 
-  // 正向控制 — 必须放行（这些是 allowlist 的合法 base 命令 + 不含元字符）
-  { label: "POS echo hello", cmd: "echo hello", expect: "allow" },
-  { label: "POS node -v", cmd: "node -v", expect: "allow" },
-  { label: "POS ls", cmd: "ls", expect: "allow" },
+  // 正向控制 — 在 v0 graduated 下，安全命令落入 category default（ask）；
+  // 这些条目已不可在 v0 直接断言为 "allow"，必须显式注入 byName=allow 才能放行。
 ];
 
 describe("security: bypass replay against allowlist-first + blacklist backstop", () => {

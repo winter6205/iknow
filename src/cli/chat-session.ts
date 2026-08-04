@@ -18,6 +18,11 @@ import {
   writeErr,
   writeOut,
 } from "./session-io.js";
+import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
+import {
+  createViolationCounter,
+  wireKillSessionNotification,
+} from "../harness/sandbox/violation-handling.js";
 
 /** Visual separator after a completed answer on TTY only. */
 const TTY_ANSWER_SEP = "────────";
@@ -176,8 +181,27 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     session: opts.session,
   };
 
+  // T6: wrap the executor with the violation kill-session hook so tool
+  // results get observed against the three-tier counter (#123 Q4). When the
+  // counter escalates, wireKillSessionNotification writes the stderr line
+  // and sets process.exitCode = 1; the REPL then closes after the current
+  // turn (kill = exit the session, per spec §OQ4 "杀会话").
+  const counter = createViolationCounter();
+  const killRef: { fired: boolean } = { fired: false };
+  const notify = wireKillSessionNotification({ sink: writeErr });
+  const onKill = (reason: string): void => {
+    killRef.fired = true;
+    notify(reason);
+  };
+  const executor = wrapWithViolationHook({
+    inner: opts.deps.executor,
+    counter,
+    onKill,
+  });
+  const wrappedDeps: LoopEngineDeps = { ...opts.deps, executor };
+
   const ctx: ChatLineContext = {
-    deps: opts.deps,
+    deps: wrappedDeps,
     state,
     showThinking: opts.showThinking,
   };
@@ -185,9 +209,9 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
   const interactive = isInteractive();
 
   if (interactive) {
-    await runInteractive({ ctx });
+    await runInteractive({ ctx, killRef });
   } else {
-    await runPiped({ ctx, quiet: resolveQuiet(opts.quiet) });
+    await runPiped({ ctx, quiet: resolveQuiet(opts.quiet), killRef });
   }
 }
 
@@ -198,8 +222,11 @@ function printBanner(): void {
 
 async function runInteractive(opts: {
   readonly ctx: ChatLineContext;
+  /** T6: set when the violation counter escalates; the REPL closes after
+   *  the current turn completes (one-shot notification already emitted). */
+  readonly killRef?: { fired: boolean };
 }): Promise<void> {
-  const { ctx } = opts;
+  const { ctx, killRef } = opts;
   printBanner();
 
   const rl = readline.createInterface({
@@ -293,6 +320,11 @@ async function runInteractive(opts: {
           clearErrLine();
         }
         writeErr(formatChatError(err));
+        if (killRef?.fired === true) {
+          closed = true;
+          rl.close();
+          return;
+        }
         if (!closed) {
           prompt();
           rl.resume();
@@ -318,6 +350,14 @@ async function runInteractive(opts: {
       }
 
       if (result.quit) {
+        closed = true;
+        rl.close();
+        return;
+      }
+
+      // T6: violation escalation fired mid-turn → kill the session after
+      // this turn completes (notification already written by onKill).
+      if (killRef?.fired === true) {
         closed = true;
         rl.close();
         return;
@@ -385,8 +425,10 @@ async function runInteractive(opts: {
 async function runPiped(opts: {
   readonly ctx: ChatLineContext;
   readonly quiet: boolean;
+  /** T6: violation escalation closes the pipe loop after the current turn. */
+  readonly killRef?: { fired: boolean };
 }): Promise<void> {
-  const { ctx, quiet } = opts;
+  const { ctx, quiet, killRef } = opts;
   // Do not force terminal:true — avoids prompt garble on pipes.
   const rl = readline.createInterface({
     input: process.stdin,
@@ -418,6 +460,10 @@ async function runPiped(opts: {
       writeOut("");
     }
     if (result.quit) {
+      break;
+    }
+    // T6: violation escalation fired mid-turn → stop reading further lines.
+    if (killRef?.fired === true) {
       break;
     }
   }

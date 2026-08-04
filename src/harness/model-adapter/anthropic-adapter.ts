@@ -215,6 +215,10 @@ export function encodeUserText(userText: string): AnthropicNativeMessage {
  *
  * 019: 提为模块级 export,供 createAnthropicAdapter(离线)与
  * createRealAnthropicAdapter(真实 SDK)共享同一编码逻辑(SSOT)。
+ *
+ * 124/T5:execution_failed 若携带 partial stdout/stderr,在错误文本块之后
+ * 追加对应的 `[partial stdout]` / `[partial stderr]` 文本块,以便模型
+ * 看到取消/超时前已经写入的内容(strict-equal 文本驱动 stopReason 的契约不变)。
  */
 export function encodeToolResults(
   results: ReadonlyArray<{
@@ -224,6 +228,7 @@ export function encodeToolResults(
     readonly payload?: AnthropicContentBlock[];
     readonly message?: string;
     readonly toolName?: string;
+    readonly partial?: { readonly stdout?: string; readonly stderr?: string };
   }>
 ): AnthropicContentBlock[] {
   return results.map((r) => {
@@ -240,11 +245,33 @@ export function encodeToolResults(
         : r.kind === "validation_failed"
           ? `[validation_failed] ${r.message ?? "invalid input"}`
           : `[execution_failed] ${r.message ?? "tool execution failed"}`;
+    const blocks: AnthropicContentBlock[] = [{ type: "text", text }];
+    // 124/T5:SC13 — partial 是 additive 字段;只在执行_failed 上、且 stdout/stderr
+    // 真的有内容时才追加(空串跳过,避免噪声)。
+    if (
+      r.kind === "execution_failed" &&
+      r.partial &&
+      (typeof r.partial.stdout === "string" ||
+        typeof r.partial.stderr === "string")
+    ) {
+      if (typeof r.partial.stdout === "string" && r.partial.stdout.length > 0) {
+        blocks.push({
+          type: "text",
+          text: `[partial stdout]\n${r.partial.stdout}`,
+        });
+      }
+      if (typeof r.partial.stderr === "string" && r.partial.stderr.length > 0) {
+        blocks.push({
+          type: "text",
+          text: `[partial stderr]\n${r.partial.stderr}`,
+        });
+      }
+    }
     return {
       type: "tool_result",
       tool_use_id: r.toolUseId,
       is_error: true,
-      content: [{ type: "text", text }],
+      content: blocks,
     } satisfies AnthropicContentBlock;
   });
 }

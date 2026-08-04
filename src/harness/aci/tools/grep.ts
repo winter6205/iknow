@@ -72,7 +72,7 @@ interface CompiledInput {
  * 返回的 AciToolDef 满足：
  *   - name === "grep"
  *   - inputSchema: { pattern 必填 + path? + ignoreCase?(默认 false) + limit?(默认 200, 上限 2000) }
- *   - aci 元数据：read-only / isReadOnly / isDestructive=false / isConcurrencySafe / cancel
+ *   - aci 元数据：category=read-only / isConcurrencySafe=true / interruptBehavior=cancel
  */
 export function createGrepTool(root: string, deps?: GrepToolDeps): AciToolDef {
   // When the test seam (deps.spawn) is provided we use it directly so
@@ -119,10 +119,9 @@ export function createGrepTool(root: string, deps?: GrepToolDeps): AciToolDef {
     handler,
     aci: {
       category: "read-only" as const,
-      isReadOnly: true,
-      isDestructive: false,
       isConcurrencySafe: true,
       interruptBehavior: "cancel" as const,
+      timeoutTier: "default" as const,
     },
   });
 }

@@ -67,10 +67,9 @@ describe("createWriteFileTool — schema and metadata", () => {
 
     assert.deepEqual(tool.aci, {
       category: "write",
-      isReadOnly: false,
-      isDestructive: false,
       isConcurrencySafe: false,
       interruptBehavior: "block",
+      timeoutTier: "default",
     });
   });
 });

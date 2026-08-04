@@ -152,10 +152,9 @@ export function createWriteFileTool(root: string): AciToolDef {
     handler,
     aci: {
       category: "write" as const,
-      isReadOnly: false,
-      isDestructive: false,
       isConcurrencySafe: false,
       interruptBehavior: "block" as const,
+      timeoutTier: "default" as const,
     },
   });
 }

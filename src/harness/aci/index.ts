@@ -1,19 +1,26 @@
 /**
- * PROTOTYPE（throwaway）— ACI 原型工具层：公共出口。
+ * ACI 能力层：公共出口。
  *
- * 独立于 src/harness/index.ts（冻结出口不动）。
- * 重导出 Layer 0 全部类型与工厂；Layer 1/2 由各自文件直接 import。
+ * 重新出口 Layer 0 全部类型与工厂。新模块（permission/）作为决策 / 规则 /
+ * 策略的权威源；本入口继续提供 prototype 兼容 API（createPermissionPolicy /
+ * isAllowedCommand / isDangerousCommand / checkPermission / createAciExecutor）。
  */
 
+export type { AciCategory, AciMeta, AciToolDef, AciCatalog } from "./types.js";
+
+// Re-export the permission type aliases (compatibility surface; canonical
+// definitions live in ../permission/). The aci/types.ts module already
+// re-exports PermissionDecision / PermissionOutcome / PermissionRule /
+// AciPermissionPolicy, so consumers can import either from "./types.js" or
+// from ".. / permission/types.js" — both yield the same type identity.
 export type {
-  AciCategory,
-  AciMeta,
-  AciToolDef,
   PermissionDecision,
   PermissionOutcome,
   PermissionRule,
   AciPermissionPolicy,
-  AciCatalog,
+  AskUser,
+  PreToolUseHook,
+  PostToolUseHook,
 } from "./types.js";
 
 export {
@@ -21,6 +28,7 @@ export {
   isAllowedCommand,
   isDangerousCommand,
   checkPermission,
+  findDangerousPattern,
 } from "./permission.js";
 
 export { createAciExecutor } from "./aci-executor.js";

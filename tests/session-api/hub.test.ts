@@ -83,6 +83,15 @@ function makeHub(deps: LoopEngineDeps): SessionHub {
   return new SessionHub({ store, deps });
 }
 
+describe("askUser inlet", () => {
+  it("throws at construction when neither deps nor askUser is injected", () => {
+    assert.throws(
+      () => new SessionHub({ store }),
+      /ask_inlet_missing: SessionHub requires AskUser or pre-built deps \(#162 \/ SC18\)/
+    );
+  });
+});
+
 // -- mapStoreError (6-row contract table) ------------------------------------
 
 describe("mapStoreError — 6-row error mapping contract", () => {

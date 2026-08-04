@@ -1,26 +1,51 @@
 /**
- * PROTOTYPE（throwaway）— ACI 原型工具层：类型契约。
+ * ACI 能力层：类型契约。
  *
- * 验证问题：ch04 ACI 能力（权限 / 安全标记 / 延迟加载）能否以加法式装饰层
- * 嫁接到已冻结的 4-tool 协议上，而不破坏协议、不碰产品流量。
- * 本文件只定义扩展类型（extends ToolDef），不修改协议文件（只 import，不改）。
- * 原型验证通过后，被验证的决策可折入真代码；本体留档后删除。
+ * 权限三层毕业（#122 Q5）后：删 pass_through（决策改 allow/deny/ask），
+ * 删 AciMeta.isReadOnly / isDestructive（category 已是真值单一权威）；
+ * 保留 category / isConcurrencySafe / interruptBehavior（#124 中断/超时）；
+ * 新增 timeoutTier（T5 接入）：按工具静态分级超时。
+ *
+ * 决策 / 规则 / 策略对象均移至 `src/harness/permission/` 模块，
+ * 见 permission/index.ts 公共出口。
  */
 
 import type { ToolDef } from "../tools/types.js";
 
-/** ch04 四类安全级别。 */
+/** ch04 四类安全级别（category 是 read-only / write / execute / collaborate 真值）。 */
 export type AciCategory = "read-only" | "write" | "execute" | "collaborate";
 
-/** ACI 安全/调度元数据：加在冻结 ToolDef 之外的扩展字段。 */
+/**
+ * 超时分级（T5 / #124）：工具的静态超时档位。
+ *
+ *   fast    = 5 s       单次文件读 / glob 列表（轻量原子操作）
+ *   default = 30 s      写入 / grep 大仓库（常规 IO + 子进程）
+ *   build   = 5 min     bash 长命令（构建 / 测试 / 部署）
+ *   long    = 30 min    罕见大作业
+ *
+ * 由 `TIMEOUT_TIER_MS` 提供毫秒值；`createAciExecutor` 在 #124 决策
+ * 3-4 之下，把工具的 tier 视为权威覆盖 Loop Engine 传入的 timeoutMs。
+ */
+export type TimeoutTier = "fast" | "default" | "build" | "long";
+
+/** 各 tier 的毫秒值（frozen — 实现层 + 测试层共源）。 */
+export const TIMEOUT_TIER_MS: Readonly<Record<TimeoutTier, number>> =
+  Object.freeze({
+    fast: 5_000,
+    default: 30_000,
+    build: 300_000,
+    long: 1_800_000,
+  });
+
+/** ACI 安全/调度元数据（延迟加载 / 并发安全 / 中断行为 / 超时分级）。 */
 export interface AciMeta {
   readonly category: AciCategory;
-  readonly isReadOnly: boolean;
-  readonly isDestructive: boolean;
   readonly isConcurrencySafe: boolean;
   readonly interruptBehavior: "cancel" | "block";
   /** true = 延迟加载：默认不进 prompt schema，需 discover() 检索注入。默认 false（核心常驻）。 */
   readonly lazy?: boolean;
+  /** 静态超时分级；createAciExecutor 据此生成 per-call 超时（覆盖 engine 传入 timeoutMs）。 */
+  readonly timeoutTier: TimeoutTier;
 }
 
 /** ACI 工具定义 = 冻结 ToolDef + aci 元数据（扩展，不改协议）。 */
@@ -28,27 +53,25 @@ export interface AciToolDef extends ToolDef {
   readonly aci: AciMeta;
 }
 
-/** 权限三值决策（ch04 阶段④）。 */
-export type PermissionDecision = "allow" | "deny" | "pass_through";
-
-export interface PermissionOutcome {
-  readonly decision: PermissionDecision;
-  /** 人/模型可读的决策理由（会进 execution_failed message）。 */
-  readonly reason: string;
-}
-
-/** 规则层：always_allow / always_deny / ask（原型里 ask 收敛为 allow + 标记，无人工回路）。 */
-export type PermissionRule = "always_allow" | "always_deny" | "ask";
-
-export interface AciPermissionPolicy {
-  readonly defaultRule: PermissionRule;
-  readonly byName?: Readonly<Record<string, PermissionRule>>;
-  /** execute 类是否拦截危险命令；默认 true。 */
-  readonly denyDangerousExecute?: boolean;
-}
-
 /** ACI 目录：按名定位 AciToolDef（权限层与延迟加载共用）。 */
 export interface AciCatalog {
   readonly get: (name: string) => AciToolDef | undefined;
   readonly all: () => ReadonlyArray<AciToolDef>;
 }
+
+/**
+ * ⚠️ Compatibility re-exports — the prototype layer used PermissionDecision,
+ * PermissionOutcome, PermissionRule, AciPermissionPolicy. Those shapes live in
+ * `src/harness/permission/` now (graduated as part of #122). Re-exporting them
+ * here avoids breaking any prototype-importing tests while the new module
+ * (the new home of these symbols) is the canonical source.
+ */
+export type {
+  PermissionDecision,
+  PermissionOutcome,
+  AskUser,
+  PreToolUseHook,
+  PostToolUseHook,
+} from "../permission/types.js";
+export type { NormalRuleSpec as PermissionRule } from "../permission/types.js";
+export type { PermissionPolicy as AciPermissionPolicy } from "../permission/policy.js";

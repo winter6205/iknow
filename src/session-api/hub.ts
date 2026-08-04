@@ -3,6 +3,10 @@
  * 022 T4: load → run(priorMessages) → conditional save → wire projection.
  * Messages single-source is the session file; hub holds no messages copy.
  * 064 T5: per-session JSONL trace when traceOut is configured (ADR-0003 D4).
+ *
+ * 162: askUser is required at engine construction. Hub accepts `askUser`
+ * via SessionHubOptions (tests inject createNoAskUser()); production callers
+ * (serve.ts) supply the SPA-channel implementation or a v0 stub.
  */
 import { randomUUID } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
@@ -20,8 +24,18 @@ import {
   type LoopEngineDeps,
   type RunResult,
 } from "../harness/index.js";
+import { createPermissionExecutor } from "../harness/permission/index.js";
+import { createPermissionPolicy } from "../harness/permission/policy.js";
+import type { AskUser } from "../harness/permission/types.js";
+import { createViolationCounter } from "../harness/sandbox/violation-handling.js";
+import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
+import {
+  createOutputMask,
+  currentSecretValues,
+} from "../harness/sandbox/index.js";
 import { loadIknowEnv } from "../config/env.js";
 import { ValidationError } from "../shared/errors.js";
+import { appendFileSync } from "node:fs";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
@@ -37,6 +51,15 @@ import type {
   TurnDto,
 } from "./contract.js";
 import { MAX_MESSAGE_CHARS } from "./contract.js";
+
+/** Best-effort JSON parse: returns the parsed value or the raw string. */
+function safeParse(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return s;
+  }
+}
 
 // -- error mapping (裁决#10: pure function, http.ts T5 consumes) ---------------
 
@@ -162,6 +185,10 @@ export type SessionHubOptions = {
    * JsonlTraceService bound to session.conversation_id (ADR-0003 D4).
    * Per-session instance -> cachedDeps does not cache the trace. */
   traceOut?: string;
+  /** askUser inlet (#162). Required when not injecting `deps`; the
+   * construction-time check below throws otherwise (#162 / SC18).
+   * Tests injecting `deps` are unaffected. */
+  askUser?: AskUser;
 };
 
 // -- stop reasons that must NOT persist to file (裁决#8) -----------------------
@@ -183,13 +210,21 @@ export class SessionHub {
   };
   /** JSONL trace output path; when set, postMessage creates a per-session trace. */
   private readonly traceOut: string | undefined;
+  /** askUser inlet (#162); required unless deps are pre-built. */
+  private readonly askUser: AskUser | undefined;
   /** Per-conversation serialization (spec A15). */
   private readonly inflight = new Map<string, Promise<void>>();
 
   constructor(opts: SessionHubOptions) {
+    if (!opts.askUser && !opts.deps) {
+      throw new Error(
+        "ask_inlet_missing: SessionHub requires AskUser or pre-built deps (#162 / SC18)"
+      );
+    }
     this.store = opts.store;
     this.cachedDeps = opts.deps;
     this.traceOut = opts.traceOut;
+    this.askUser = opts.askUser;
     this.defaults = {
       jsonMode: opts.defaultJsonMode ?? false,
     };
@@ -241,27 +276,58 @@ export class SessionHub {
       work: async () => {
         const session = await this.store.load(conversationId);
         const deps = await this.ensureDeps();
+        // T6: wrap the executor with the violation kill-session hook. Serve is
+        // long-running and multi-conversation, so on kill we (a) write the
+        // violation event to the JSONL trace and (b) report `protocolError`
+        // as the turn stop reason — we do NOT touch process.exitCode.
+        let killed = false;
+        const counter = createViolationCounter();
+        const onKill = (reason: string): void => {
+          // Latch: the counter fires on every record past threshold; the trace
+          // line is one-shot (mirrors wireKillSessionNotification's latch).
+          if (killed) return;
+          killed = true;
+          this.recordViolationTrace(conversationId, reason);
+        };
+        const wrappedExecutor = wrapWithViolationHook({
+          inner: deps.executor,
+          counter,
+          onKill,
+        });
         // Per-session trace: new JsonlTraceService each postMessage (not cached
         // in cachedDeps) because conversationId differs per session (ADR-0003 D4).
-        const runDeps: LoopEngineDeps = this.traceOut
-          ? {
-              ...deps,
-              trace: createJsonlTraceService({
-                filePath: this.traceOut,
-                conversationId,
-              }),
-            }
-          : deps;
+        const runDeps: LoopEngineDeps = {
+          ...deps,
+          executor: wrappedExecutor,
+          ...(this.traceOut
+            ? {
+                trace: createJsonlTraceService({
+                  filePath: this.traceOut,
+                  conversationId,
+                }),
+              }
+            : {}),
+        };
         const { result } = await run(query, runDeps, opts.signal, {
           priorMessages: session.messages,
         });
+        // Violation kill → surface protocolError so the SPA client can
+        // attribute the stop; DROP_REASONS already drops protocolError
+        // context on save (mirrors the chat-session drop semantics).
+        const finalResult: RunResult = killed
+          ? { ...result, stopReason: "protocolError" }
+          : result;
         // trace is destructured away → immediate GC (not logged/persisted/wired).
-        await this.conditionalSave({ conversationId, session, result });
+        await this.conditionalSave({
+          conversationId,
+          session,
+          result: finalResult,
+        });
         return {
           session: this.summarize({
             file: await this.store.load(conversationId),
           }),
-          turn: this.toTurnDto({ query, result }),
+          turn: this.toTurnDto({ query, result: finalResult }),
         };
       },
     });
@@ -294,6 +360,27 @@ export class SessionHub {
 
   async listSessions(): Promise<SessionListEntry[]> {
     return this.store.list();
+  }
+
+  /**
+   * T6: write a violation kill event to the JSONL trace (serve entry).
+   * Best-effort — a trace write failure must not break the served turn; any
+   * error is swallowed (mirrors JsonlTraceService warn-once semantics).
+   * `reason` is already a JSON string produced by createKillSessionHook.
+   */
+  private recordViolationTrace(conversationId: string, reason: string): void {
+    if (!this.traceOut) return;
+    try {
+      const line = JSON.stringify({
+        conversation_id: conversationId,
+        record_type: "violation",
+        ts: new Date().toISOString(),
+        detail: safeParse(reason),
+      });
+      appendFileSync(this.traceOut, line + "\n", "utf8");
+    } catch {
+      // Best-effort observability; never let trace I/O break the served turn.
+    }
   }
 
   // -- private helpers ---------------------------------------------------------
@@ -357,6 +444,11 @@ export class SessionHub {
   /** Lazy deps construction (mirrors buildHarnessEngine, no agent-loop import). */
   private async ensureDeps(): Promise<LoopEngineDeps> {
     if (this.cachedDeps) return this.cachedDeps;
+    if (!this.askUser) {
+      throw new Error(
+        "ask_inlet_missing: SessionHub lazy deps require AskUser (#162)"
+      );
+    }
     const env = loadIknowEnv();
     if (!env.llm.apiKey) {
       throw new ValidationError(
@@ -376,7 +468,16 @@ export class SessionHub {
       thinking: buildThinkingParams(env.llm),
     });
     const registry = createRegistry([createEchoTool(), createGetTimeTool()]);
-    const executor = createExecutor(registry);
+    const inner = createExecutor(registry);
+    // 5-step permission middleware: askUser is guaranteed by the constructor
+    // contract when the hub must build deps lazily.
+    const policy = createPermissionPolicy();
+    const executor = createPermissionExecutor({
+      inner,
+      registry,
+      policy,
+      askUser: this.askUser,
+    });
     this.cachedDeps = {
       adapter,
       executor,
@@ -402,10 +503,17 @@ export class SessionHub {
     readonly result: RunResult;
   }): TurnDto {
     const { query, result } = opts;
+    // SC20: serve SPA output boundary — mask known secret values in the
+    // final text before it leaves the hub. The mask is rebuilt per call so
+    // it sees the env snapshot at serve-time (cheap; a few short regexes).
+    const rawFinalText = result.finalText ?? "";
+    const maskedFinalText = createOutputMask(currentSecretValues()).mask(
+      rawFinalText
+    );
     return {
       query,
       answer: {
-        finalText: result.finalText ?? "",
+        finalText: maskedFinalText,
         stopReason: result.stopReason,
         turnCount: result.turnCount,
       },

@@ -17,6 +17,7 @@ import { SessionHub } from "../../src/session-api/hub.ts";
 import { SessionStore } from "../../src/session-api/store/index.ts";
 import type { ListeningServer } from "../../src/session-api/http.ts";
 import { startSessionServe } from "../../src/session-api/serve.ts";
+import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import { assistantResult } from "./_fixtures.ts";
 
 describe("parse-args --trace-out", () => {
@@ -230,6 +231,7 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
       port: 0,
       dataDir: scratch,
       traceOut: traceFile,
+      hubOptions: { askUser: createNoAskUser() },
     });
     listening = out.listening;
     const created = await out.hub.createSession();

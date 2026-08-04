@@ -15,7 +15,7 @@ export type ServeOptions = {
   json_mode?: boolean;
   /** Session pool root; defaults to ~/.iknow (spec #120 SC 1). */
   dataDir?: string;
-  hubOptions?: SessionHubOptions;
+  hubOptions?: Omit<SessionHubOptions, "store">;
   /** Trace output file path; forwarded to SessionHub for per-session JSONL trace (T5, #64). */
   traceOut?: string;
 };

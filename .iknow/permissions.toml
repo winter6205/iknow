@@ -1,0 +1,41 @@
+# [tool-iknow]
+# .iknow/permissions.toml — project settings loader (T6 / #122 Q2b / ticket #169)
+#
+# Schema (informal — enforced by ajv in src/harness/permission/project-settings.ts):
+#
+#   schema_version = 1
+#   [[rule]]
+#   id          = "<unique rule id>"
+#   match_tool  = "<tool name>"               # string equality
+#   match_input = { <predicate> = "<value>" } # optional, see predicate DSL below
+#   decision    = "allow" | "deny" | "ask"
+#   reason      = "<human readable reason>"
+#
+# Supported predicates in match_input (any combination, AND-joined):
+#   command_starts_with | command_ends_with | command_contains | command_equals
+#   path_starts_with   | path_ends_with   | path_contains   | path_equals
+#
+# Unknown predicates are rejected at load time by ajv. The schema_version line
+# is required; v0 only accepts schema_version = 1.
+
+schema_version = 1
+
+# Example 1: explicit allow for `echo` on the bash tool. The rule matcher
+# checks tool name == "bash" and command starts with "echo ".
+[[rule]]
+id = "allow-bash-echo"
+match_tool = "bash"
+match_input = { command_starts_with = "echo " }
+decision = "allow"
+reason = "explicit allow: bash echo"
+
+# Example 2: explicit deny for read_file under any path containing ".ssh/"
+# (note: the hard-wall already denies this — this rule is illustrative of
+# the project layer's deny shape; project rules can layer above the hard-wall
+# only by adding explicit allows, not by relaxing denies).
+[[rule]]
+id = "deny-read-ssh"
+match_tool = "read_file"
+match_input = { path_contains = ".ssh/" }
+decision = "deny"
+reason = "explicit deny: read_file under .ssh"

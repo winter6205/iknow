@@ -22,8 +22,14 @@ import {
   createJsonlTraceService,
   type LoopEngineDeps,
 } from "./harness/index.js";
+import {
+  createTtyAskUser,
+  createFailClosedAskUser,
+  createServeAskUser,
+} from "./harness/permission/index.js";
 import { isIknowError } from "./shared/errors.js";
 import { randomUUID } from "node:crypto";
+import { buildViolationWiring } from "./harness/sandbox/violation-executor.js";
 
 const DEFAULT_TRACE_PATH = "./trace.jsonl";
 
@@ -87,7 +93,10 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
 
   let built: { deps: LoopEngineDeps };
   try {
-    built = await buildHarnessEngine(bundle);
+    // ask oneshot: no interactive user → fail-closed askUser (always deny).
+    built = await buildHarnessEngine(bundle, {
+      askUser: createFailClosedAskUser(),
+    });
   } catch (err) {
     if (err instanceof Error && err.message.includes("LLM mode needs")) {
       writeErr(
@@ -109,10 +118,14 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     filePath: tracePath,
     conversationId,
   });
+  // T6: wrap the executor with the violation kill-session hook so the ask
+  // entry point surfaces violation escalations on stderr + exits with code 1.
+  const { executor } = buildViolationWiring(built.deps.executor);
   // runHarness returns LoopTrace as `trace`; rename to loopTrace to avoid
   // shadowing the TraceService injected into deps.
   const { result, trace: loopTrace } = await runHarness(parsed.query, {
     ...built.deps,
+    executor,
     trace: traceService,
   });
   process.stdout.write(`${formatRunJson({ result, trace: loopTrace })}\n`);
@@ -130,7 +143,10 @@ async function runChat(parsed: ParsedCli): Promise<void> {
 
   let built: { deps: LoopEngineDeps };
   try {
-    built = await buildHarnessEngine(bundle);
+    // chat TTY REPL: interactive y/N prompt via stdin/stdout.
+    built = await buildHarnessEngine(bundle, {
+      askUser: createTtyAskUser(),
+    });
   } catch (err) {
     printChatError(err);
     process.exitCode = 1;
@@ -187,6 +203,7 @@ async function runServe(parsed: ParsedCli): Promise<void> {
       json_mode: parsed.json,
       dataDir: parsed.dataDir,
       traceOut: tracePath,
+      hubOptions: { askUser: createServeAskUser().ask },
     });
     writeErr(`iknow serve  http://${listening.host}:${listening.port}/`);
     writeErr("API: /api/v1/health  ·  UI: /  ·  Ctrl+C to stop");
@@ -205,6 +222,13 @@ export type { ParsedCli, CliCommand } from "./cli/parse-args.js";
 export { processChatLine, runChatSession } from "./cli/chat-session.js";
 export { isInteractive } from "./cli/session-io.js";
 export { printUsage, getVersion, usageText } from "./cli/usage.js";
+export {
+  createTtyAskUser,
+  createFailClosedAskUser,
+  createNoAskUser,
+  createServeAskUser,
+} from "./harness/permission/index.js";
+export type { AskUser } from "./harness/permission/types.js";
 
 main().catch((err) => {
   printCliError(err);

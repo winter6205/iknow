@@ -1,84 +1,20 @@
+import { spawnSync } from "node:child_process";
+import { homedir, tmpdir } from "node:os";
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
 import { isAllowedCommand, isDangerousCommand } from "../permission.js";
+import {
+  BASE_ENV_WHITELIST,
+  createBwrapFence,
+  createEnvIsolation,
+  createFsPolicy,
+  createNetworkPolicy,
+  createResourceLimits,
+} from "../../sandbox/index.js";
 import { spawnWithStopSignal, truncateByCodePoint } from "./helpers.js";
 
 const MAX_OUTPUT_CODE_POINTS = 12_000;
-
-interface BashInput {
-  readonly command?: unknown;
-}
-
-/**
- * Create the model-facing bash tool rooted at cwd.
- *
- * The allowlist is a temporary gate until the OS sandbox in #123 lands; cwd
- * alone is not a security boundary. The cwd factory parameter is the reserved
- * sandbox hook: #123 can supply an isolated workspace without changing the
- * model-visible contract.
- */
-export function createBashTool(cwd: string): AciToolDef {
-  const handler = async (
-    input: unknown,
-    ctx?: ToolExecutionContext
-  ): Promise<unknown> => {
-    const command = (input as BashInput | null)?.command;
-    if (typeof command !== "string" || command.length === 0) {
-      throw new ToolExecutionError("bash: command must be a non-empty string");
-    }
-
-    // Blacklist first preserves the specific rejection while the allowlist
-    // remains the primary temporary gate before #123 provides real isolation.
-    if (isDangerousCommand(command)) {
-      throw new ToolExecutionError(
-        `bash: dangerous command rejected: ${command}`
-      );
-    }
-    if (!isAllowedCommand(command)) {
-      throw new ToolExecutionError(
-        `bash: command not in allowlist: ${command}`
-      );
-    }
-
-    const { done } = spawnWithStopSignal("bash", ["-c", command], {
-      cwd,
-      signal: ctx?.signal,
-    });
-    const result = await done;
-
-    return {
-      code: result.code ?? signalExitCode(result.signal),
-      stdout: truncateByCodePoint(result.stdout, MAX_OUTPUT_CODE_POINTS),
-      stderr: truncateByCodePoint(result.stderr, MAX_OUTPUT_CODE_POINTS),
-    };
-  };
-
-  return Object.freeze({
-    name: "bash",
-    description:
-      "Execute an allowlisted bash command in the configured working directory and return its exit code, stdout, and stderr.",
-    inputSchema: {
-      type: "object",
-      properties: { command: { type: "string" } },
-      required: ["command"],
-      additionalProperties: false,
-    },
-    handler,
-    aci: {
-      category: "execute" as const,
-      isReadOnly: false,
-      isDestructive: true,
-      isConcurrencySafe: false,
-      interruptBehavior: "cancel" as const,
-    },
-  });
-}
-
-// Conventional shell signal → exit-code mapping (128 + signal number).
-// Covers the Linux signal names surfaced by Node's child_process; the map is
-// intentionally narrow — we do not promise fidelity for every platform-specific
-// signal name. Unknown signals fall back to 1 (handled in the caller).
 const SIGNAL_EXIT_CODES: Readonly<Record<string, number>> = Object.freeze({
   SIGHUP: 129,
   SIGINT: 130,
@@ -112,8 +48,76 @@ const SIGNAL_EXIT_CODES: Readonly<Record<string, number>> = Object.freeze({
   SIGPWR: 158,
   SIGSYS: 159,
 });
-
+interface BashInput {
+  readonly command?: unknown;
+}
 function signalExitCode(signal: NodeJS.Signals | null): number {
-  if (signal === null) return 1;
-  return SIGNAL_EXIT_CODES[signal] ?? 1;
+  return signal === null ? 1 : (SIGNAL_EXIT_CODES[signal] ?? 1);
+}
+function requireBwrap(): void {
+  const probe = spawnSync("bwrap", ["--version"], { stdio: "ignore" });
+  if (probe.status !== 0)
+    throw new ToolExecutionError(
+      "bash: bwrap is required; install bwrap (≥ 0.11.1) via apt install bubblewrap or your distro equivalent"
+    );
+}
+export function createBashTool(cwd: string): AciToolDef {
+  requireBwrap();
+  const fsPolicy = createFsPolicy({ cwd, home: homedir(), tmpDir: tmpdir() });
+  const networkPolicy = createNetworkPolicy();
+  const resourceLimits = createResourceLimits();
+  const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
+  const handler = async (
+    input: unknown,
+    ctx?: ToolExecutionContext
+  ): Promise<unknown> => {
+    const command = (input as BashInput | null)?.command;
+    if (typeof command !== "string" || command.length === 0)
+      throw new ToolExecutionError("bash: command must be a non-empty string");
+    if (isDangerousCommand(command))
+      throw new ToolExecutionError(
+        `bash: dangerous command rejected: ${command}`
+      );
+    if (!isAllowedCommand(command))
+      throw new ToolExecutionError(
+        `bash: command not in allowlist: ${command}`
+      );
+    const fence = createBwrapFence({
+      command: "bash",
+      args: ["-c", command],
+      fsPolicy,
+      networkPolicy,
+      resourceLimits,
+      env: envIsolation.filter(process.env),
+      cwd,
+    });
+    const { done } = spawnWithStopSignal(fence.argv[0], fence.argv.slice(1), {
+      cwd,
+      signal: ctx?.signal,
+    });
+    const result = await done;
+    return {
+      code: result.code ?? signalExitCode(result.signal),
+      stdout: truncateByCodePoint(result.stdout, MAX_OUTPUT_CODE_POINTS),
+      stderr: truncateByCodePoint(result.stderr, MAX_OUTPUT_CODE_POINTS),
+    };
+  };
+  return Object.freeze({
+    name: "bash",
+    description:
+      "Execute an allowlisted bash command in the configured working directory and return its exit code, stdout, and stderr.",
+    inputSchema: {
+      type: "object",
+      properties: { command: { type: "string" } },
+      required: ["command"],
+      additionalProperties: false,
+    },
+    handler,
+    aci: {
+      category: "execute" as const,
+      isConcurrencySafe: false,
+      interruptBehavior: "cancel" as const,
+      timeoutTier: "build" as const,
+    },
+  });
 }

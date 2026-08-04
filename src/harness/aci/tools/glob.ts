@@ -73,10 +73,9 @@ export function createGlobTool(root: string, deps?: GlobToolDeps): AciToolDef {
     },
     aci: {
       category: "read-only",
-      isReadOnly: true,
-      isDestructive: false,
       isConcurrencySafe: true,
       interruptBehavior: "cancel",
+      timeoutTier: "fast",
     },
     handler: async (input: unknown, ctx) => {
       const pattern = readPattern(input);

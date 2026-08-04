@@ -52,8 +52,6 @@ describe("createEditFileTool — input schema", () => {
   it("uses the ACI write metadata shape", () => {
     const tool = createEditFileTool(scratch);
     assert.equal(tool.aci.category, "write");
-    assert.equal(tool.aci.isReadOnly, false);
-    assert.equal(tool.aci.isDestructive, false);
     assert.equal(tool.aci.isConcurrencySafe, false);
     assert.equal(tool.aci.interruptBehavior, "block");
   });
