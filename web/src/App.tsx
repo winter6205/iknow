@@ -117,7 +117,10 @@ function ChatApp() {
               retryLabel={chat.session ? "关闭错误" : "重试"}
             />
           ) : null}
-          <MessageList messages={chat.messages} />
+          <MessageList
+            messages={chat.messages}
+            sending={chat.phase === "sending"}
+          />
         </>
       }
       footer={

@@ -1,6 +1,9 @@
 // evidence?: reserved — Session API wire 当前不携带 G2 字段（spec 022 SC6/SC8）。
 // 组件结构预留，G2 重新上 wire 由单独 ticket 闭合。
 // 见 plans/092-web-tailwind-rewrite.md §0 + ADR-0002。
+//
+// thinking/toolCalls（T4）：wire 已携带，组件按视觉层级渲染——
+// thinking 在上（折叠展开），body 居中（GFM markdown），toolCalls 在下（单展开）。
 
 import { useState, type ReactNode } from "react";
 import type { TurnAnswerDto } from "../api/types";
@@ -9,10 +12,12 @@ import { GOV_LABEL, shortSnap } from "./evidence";
 import type { EvidenceProjection, GovernanceStatus } from "./evidence";
 import { EvidencePanel } from "./EvidencePanel";
 import { MarkdownBody } from "./MarkdownBody";
+import { ThinkingBlock } from "./ThinkingBlock";
+import { ToolCallList } from "./ToolCallList";
 
 export type AgentCardProps = {
   text: string;
-  /** Reserved for future wiring; not rendered in Variant A (decision #17/#18). */
+  /** Optional TurnAnswerDto — T4 renders `thinking` + `toolCalls` projections. */
   answer?: TurnAnswerDto;
   /** Evidence projection reserved (see file header). Wire 不携带 G2，当前不渲染。 */
   evidence?: EvidenceProjection;
@@ -62,11 +67,9 @@ function EvidenceBlock({ spans, isConflict }: EvidenceBlockProps) {
   );
 }
 
-// `answer` is accepted (contract) but not rendered — Variant A decisions #17/#18
-// (no tool_calls/tool_trace, no JSON toggle). Left undeclared here to avoid an
-// unused binding; it remains part of AgentCardProps for future wiring.
 export function AgentCard({
   text,
+  answer,
   evidence,
   renderBody,
   staggerIndex = 0,
@@ -82,16 +85,27 @@ export function AgentCard({
     governance !== undefined ||
     (snapshotId !== undefined && hopsUsed !== undefined);
 
+  const thinking = answer?.thinking;
+  const toolCalls = answer?.toolCalls;
+
   return (
     <article
       aria-label="知识库回答"
       className="w-full self-stretch rounded-card border border-line bg-surface px-5 py-4 shadow-bubble animate-message-in"
       style={staggerStyle(staggerIndex)}
     >
+      {/* thinking 折叠展开（默认收起，aria-expanded + 键盘可达）。 */}
+      {thinking ? <ThinkingBlock thinking={thinking} /> : null}
+
       {/* Claims / body (T3: default = GFM markdown with code highlighting; renderBody overrides for tests). */}
       <div className="text-[15px] leading-[1.7] text-ink [overflow-wrap:anywhere]">
         {renderBody ? renderBody(text) : <MarkdownBody text={text} />}
       </div>
+
+      {/* toolCalls（默认折叠，每条 mono chip + 展开看 input/output 预览）。 */}
+      {toolCalls && toolCalls.length > 0 ? (
+        <ToolCallList toolCalls={toolCalls} />
+      ) : null}
 
       {/* Notes (quiet, mono). */}
       {notes && notes.length > 0 ? (
