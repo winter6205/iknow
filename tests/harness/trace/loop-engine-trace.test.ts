@@ -8,10 +8,6 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { run } from "../../../src/harness/loop-engine.ts";
-import type {
-  AnthropicNativeMessage,
-  AssistantTurnResult,
-} from "../../../src/harness/model-adapter/types.ts";
 import type { ToolDef } from "../../../src/harness/tools/types.ts";
 import { createRegistry } from "../../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../../src/harness/tools/executor.ts";
@@ -25,32 +21,7 @@ import type {
   ToolCallRecord,
   TurnRecord,
 } from "../../../src/harness/trace/types.ts";
-
-function assistantResult(opts: {
-  readonly texts: string[];
-  readonly toolCalls?: Array<{ id: string; name: string; input: unknown }>;
-  readonly supplierStop?: "success" | "truncation" | "refusal" | "other";
-}): AssistantTurnResult {
-  const texts = opts.texts;
-  const toolCalls = opts.toolCalls ?? [];
-  const supplierStop = opts.supplierStop ?? "success";
-  const blocks: AnthropicNativeMessage["content"] = [];
-  for (const t of texts) blocks.push({ type: "text", text: t });
-  for (const c of toolCalls) {
-    blocks.push({ type: "tool_use", id: c.id, name: c.name, input: c.input });
-  }
-  const native: AnthropicNativeMessage = { role: "assistant", content: blocks };
-  return {
-    nativeMessage: native,
-    projection: { nativeMessage: native, texts, toolCalls },
-    supplierStop,
-    needsTools: toolCalls.length > 0,
-    isEmptyFinalResponse:
-      supplierStop === "success" &&
-      texts.length === 0 &&
-      toolCalls.length === 0,
-  };
-}
+import { assistantResult } from "../../cli/_fixtures.ts";
 
 function parseJsonl(filePath: string): Array<Record<string, unknown>> {
   const content = readFileSync(filePath, "utf8");

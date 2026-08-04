@@ -24,62 +24,13 @@ import { createExecutor } from "../../src/harness/tools/executor.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createStubSignalTool } from "../../src/harness/stubs/stub-signal-tool.ts";
+import { assistantResult } from "../cli/_fixtures.ts";
 
 function makeNative(opts: {
   readonly role: "user" | "assistant";
   readonly text: string;
 }): AnthropicNativeMessage {
   return { role: opts.role, content: [{ type: "text", text: opts.text }] };
-}
-
-function assistantResult(opts: {
-  readonly texts: string[];
-  readonly toolCalls?: Array<{ id: string; name: string; input: unknown }>;
-  readonly supplierStop?: "success" | "truncation" | "refusal" | "other";
-  /** #152 T5:optional thinking blocks;full 字段保留进 nativeMessage.content。 */
-  readonly thinkingBlocks?: ReadonlyArray<{
-    readonly type: "thinking" | "redacted_thinking";
-    readonly thinking?: string;
-    readonly signature?: string;
-    readonly data?: string;
-  }>;
-}): AssistantTurnResult {
-  const texts = opts.texts;
-  const toolCalls = opts.toolCalls ?? [];
-  const supplierStop = opts.supplierStop ?? "success";
-  const thinkingBlocks = opts.thinkingBlocks ?? [];
-  const blocks: AnthropicNativeMessage["content"] = [];
-  // thinking blocks 必须按块序先于 text / tool_use(Q2 决议:thinking 先于 tool_use)。
-  for (const t of thinkingBlocks) {
-    if (t.type === "thinking") {
-      blocks.push({
-        type: "thinking",
-        thinking: t.thinking ?? "",
-        signature: t.signature ?? "",
-      });
-    } else {
-      blocks.push({ type: "redacted_thinking", data: t.data ?? "" });
-    }
-  }
-  for (const t of texts) blocks.push({ type: "text", text: t });
-  for (const c of toolCalls) {
-    blocks.push({ type: "tool_use", id: c.id, name: c.name, input: c.input });
-  }
-  const native: AnthropicNativeMessage = { role: "assistant", content: blocks };
-  return {
-    nativeMessage: native,
-    projection: {
-      nativeMessage: native,
-      texts,
-      toolCalls,
-    },
-    supplierStop,
-    needsTools: toolCalls.length > 0,
-    isEmptyFinalResponse:
-      supplierStop === "success" &&
-      texts.length === 0 &&
-      toolCalls.length === 0,
-  };
 }
 
 describe("loop engine S1: pure-text completion", () => {
