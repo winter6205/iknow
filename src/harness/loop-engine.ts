@@ -40,6 +40,7 @@ import type { CancelKind, LoopTrace, TurnTrace } from "./loop-trace.js";
 import { computeTotals } from "./loop-trace.js";
 import type { TraceErrorType, TraceService } from "./trace/index.js";
 import { safeTrace } from "./trace/index.js";
+import type { HarnessStreamEvent } from "./stream.js";
 
 /**
  * 把任意 reason 字符串安全映射为 TraceErrorType (消除 as 强转)。
@@ -88,7 +89,10 @@ function toDecision(
 export interface LoopAdapter {
   readonly step: (
     state: LoopState,
-    request: { tools?: unknown },
+    request: {
+      tools?: unknown;
+      onStream?: (event: HarnessStreamEvent) => void;
+    },
     signal?: AbortSignal // 017 T1 决策:LoopAdapter 是 Loop Engine 直接消费接口,必须能接收 signal
   ) => Promise<AssistantTurnResult>;
   readonly encodeUserText: (userText: string) => AnthropicNativeMessage;
@@ -189,6 +193,7 @@ export interface RaceModelOpts {
   readonly deps: LoopEngineDeps;
   readonly signal: AbortSignal | undefined;
   readonly timeoutMs: number;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
 }
 
 /** 023: settle 共址于 helper，统一 single-wins 与 cleanup。 */
@@ -231,7 +236,10 @@ function createRaceOutcome(opts: {
     opts.raceOpts.adapter
       .step(
         opts.raceOpts.state,
-        { tools: opts.raceOpts.deps.registry.list() },
+        {
+          tools: opts.raceOpts.deps.registry.list(),
+          onStream: opts.raceOpts.onStream,
+        },
         opts.compositeSignal
       )
       .then(
@@ -316,6 +324,7 @@ async function runModelPhase(opts: {
   readonly signal: AbortSignal | undefined;
   readonly started: number;
   readonly modelTimeoutMs: number;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
 }): Promise<
   | { kind: "ok"; result: AssistantTurnResult }
   | { kind: "stop"; transition: Transition; turn: TurnTrace }
@@ -327,6 +336,7 @@ async function runModelPhase(opts: {
       deps: opts.deps,
       signal: opts.signal,
       timeoutMs: opts.modelTimeoutMs,
+      onStream: opts.onStream,
     });
     const outcome = await handle.outcome;
     if (outcome.source === "adapter") {
@@ -515,6 +525,7 @@ async function stepWithTrace(opts: {
   readonly state: LoopState;
   readonly deps: LoopEngineDeps;
   readonly signal?: AbortSignal;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
 }): Promise<{ transition: Transition; turn: TurnTrace | null }> {
   if (opts.state.turnCount >= opts.deps.maxTurns) {
     return {
@@ -541,6 +552,7 @@ async function stepWithTrace(opts: {
     signal: opts.signal,
     started,
     modelTimeoutMs: modelTimeout,
+    onStream: opts.onStream,
   });
 
   const llmEndedAt = new Date().toISOString();
@@ -800,7 +812,10 @@ export async function run(
   userText: string,
   deps: LoopEngineDeps,
   signal?: AbortSignal,
-  opts?: { priorMessages?: ReadonlyArray<AnthropicNativeMessage> }
+  opts?: {
+    priorMessages?: ReadonlyArray<AnthropicNativeMessage>;
+    onStream?: (event: HarnessStreamEvent) => void;
+  }
 ): Promise<{ result: RunResult; trace: LoopTrace }> {
   // 020 Q2 priorMessages 续传接缝:历史前缀逐条冻结,单次运行 turnCount 仍从 0 起。
   let state: LoopState = {
@@ -812,7 +827,12 @@ export async function run(
   };
   let turns: ReadonlyArray<TurnTrace> = [];
   while (true) {
-    const { transition, turn } = await stepWithTrace({ state, deps, signal });
+    const { transition, turn } = await stepWithTrace({
+      state,
+      deps,
+      signal,
+      onStream: opts?.onStream,
+    });
     if (turn !== null) {
       // immutable append;禁止 push / 原地修改。
       turns = [...turns, turn];

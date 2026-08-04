@@ -15,6 +15,7 @@ import type {
   AssistantTurnResult,
   LoopState,
 } from "../../src/harness/model-adapter/types.ts";
+import type { HarnessStreamEvent } from "../../src/harness/stream.ts";
 import type {
   ToolDef,
   ToolExecutionResult,
@@ -1665,5 +1666,110 @@ describe("loop engine T5 #152: thinking 保留与回传", () => {
         assert.equal("payload" in tc, false);
       }
     }
+  });
+});
+
+describe("T4 onStream pass-through (D3)", () => {
+  it("delivers the complete stub-emitted event sequence to run() opts.onStream (multi-turn)", async () => {
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const registry = createRegistry([echo]);
+    const executor = createExecutor(registry);
+    // 两个模型回合各自 emit:turn1 = tool_call_start,turn2 = text_delta×2。
+    const expected: ReadonlyArray<HarnessStreamEvent> = [
+      { type: "tool_call_start", name: "echo" },
+      { type: "text_delta", text: "hel" },
+      { type: "text_delta", text: "lo" },
+    ];
+    const adapter = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "ping" } }],
+        }),
+        assistantResult({ texts: ["hello"], toolCalls: [] }),
+      ],
+      streamEventsByStep: [
+        [{ type: "tool_call_start", name: "echo" }],
+        [
+          { type: "text_delta", text: "hel" },
+          { type: "text_delta", text: "lo" },
+        ],
+      ],
+    });
+    const received: HarnessStreamEvent[] = [];
+
+    const { result } = await run(
+      "say hello",
+      { adapter, executor, registry, maxTurns: 5 },
+      undefined,
+      { onStream: (event) => received.push(event) }
+    );
+
+    assert.deepEqual(received, expected);
+    assert.equal(result.stopReason, "completed");
+    assert.equal(result.finalText, "hello");
+  });
+
+  it("swallows onStream observer exceptions and still returns the final result", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const registry = createRegistry([tool]);
+    const executor = createExecutor(registry);
+    const adapter = createStubModel({
+      responses: [assistantResult({ texts: ["done"] })],
+      streamEventsByStep: [[{ type: "text_delta", text: "done" }]],
+    });
+
+    const { result } = await run(
+      "finish",
+      { adapter, executor, registry, maxTurns: 1 },
+      undefined,
+      {
+        onStream: () => {
+          throw new Error("observer failure");
+        },
+      }
+    );
+
+    assert.equal(result.stopReason, "completed");
+    assert.equal(result.finalText, "done");
+  });
+
+  it("keeps the existing result and authoritative history unchanged without onStream", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const registry = createRegistry([tool]);
+    const executor = createExecutor(registry);
+    const adapter = createStubModel({
+      responses: [assistantResult({ texts: ["unchanged"] })],
+      streamEventsByStep: [[{ type: "text_delta", text: "unchanged" }]],
+    });
+
+    const { result } = await run("hello", {
+      adapter,
+      executor,
+      registry,
+      maxTurns: 1,
+    });
+
+    assert.deepEqual(result, {
+      finalText: "unchanged",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hello" }] },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "unchanged" }],
+        },
+      ],
+      turnCount: 1,
+      stopReason: "completed",
+    });
   });
 });

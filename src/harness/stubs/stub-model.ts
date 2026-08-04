@@ -22,11 +22,17 @@ import type {
   ModelAdapter,
 } from "../model-adapter/types.js";
 import type { ToolExecutionResult } from "../tools/types.js";
+import type { HarnessStreamEvent } from "../stream.js";
 
 export interface StubModelOptions {
   readonly responses: ReadonlyArray<AssistantTurnResult>;
   /** 017: step 返回前的可注入延迟(ms)。测试替身允许时间依赖,因为测试控制时间。 */
   readonly delayMs?: number;
+  /** 测试专用:每次 step 在返回 scripted response 前同步 emit 对应事件序列。
+   * 与 `responses` 按 step 下标一一配对;缺省时该 step 不 emit(如队列更短)。 */
+  readonly streamEventsByStep?: ReadonlyArray<
+    ReadonlyArray<HarnessStreamEvent>
+  >;
 }
 
 export interface StubModelFull extends ModelAdapter {
@@ -68,11 +74,15 @@ function delay(opts: {
 
 export function createStubModel(opts: StubModelOptions): StubModelFull {
   const queue = opts.responses.slice();
+  const streamEventsQueue = opts.streamEventsByStep?.slice() ?? [];
   const delayMs = opts.delayMs ?? 0;
   return Object.freeze({
     async step(
       _state: LoopState,
-      _request: { tools?: unknown },
+      request: {
+        tools?: unknown;
+        onStream?: (event: HarnessStreamEvent) => void;
+      },
       signal?: AbortSignal // 017:与 Adapter.step / LoopAdapter.step 对齐,可选。
     ): Promise<AssistantTurnResult> {
       // 017 S17 守门:可选注入延迟 + abort 透传。
@@ -91,6 +101,13 @@ export function createStubModel(opts: StubModelOptions): StubModelFull {
         throw new ProtocolError(
           "stub-model: scripted responses exhausted (no further model reply)"
         );
+      }
+      for (const event of streamEventsQueue.shift() ?? []) {
+        try {
+          request.onStream?.(event);
+        } catch {
+          // 测试替身遵守 D3:观察者异常不得反向破坏模型回合。
+        }
       }
       return next;
     },
