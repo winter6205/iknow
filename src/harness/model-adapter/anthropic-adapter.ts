@@ -409,21 +409,6 @@ function toSdkTools(tools: unknown): SdkTool[] | undefined {
 }
 
 /**
- * 019: 真实 Anthropic Adapter 工厂。
- *
- * step 委托 `client.messages.create(params, { signal })`;signal 走 SDK 0.115
- * 第二参 RequestOptions(不在 MessageCreateParamsBase body,见 toSdkTools 上方签名)。
- *
- * 响应经 `interpretMessage` 同一解释逻辑(SSOT)投影为 AssistantTurnResult。
- * SDK 错误(APIError / AbortError 等)不捕获,让 raceModel 现有 catch 路由处理:
- *   signal.aborted → "cancelled";MODEL_TIMEOUT → "timeout";
- *   ProtocolError → "protocolError";其他 → rethrow(`run()` reject)。
- * 真实失败回流占位见 #54 raceModel abort(#023 engine-timeout HTTP 未取消)。
- *
- * 协议不变:`createRealAnthropicAdapter.step` 根据 `opts.stream` 分两臂(非流式臂 `client.messages.create`,流式臂 `client.messages.stream` + `finalMessage()` → `interpretMessage`,#176 T3 #147 D1),两者交付同一 `AssistantTurnResult` (SSOT);不构造 SdkMessage 队列;
- * 不重试、不收集 telemetry。
- */
-/**
  * #176 T3 流式臂(#147 D1/`stream:true`):
  *   - SDK `client.messages.stream(params, { signal })`,signal 走
  *     RequestOptions 第二参,直挂 raceModel composite signal(023 语义零改造)。
@@ -525,6 +510,21 @@ function buildMessageParams(
   };
 }
 
+/**
+ * 019: 真实 Anthropic Adapter 工厂。
+ *
+ * step 委托 `client.messages.create(params, { signal })`;signal 走 SDK 0.115
+ * 第二参 RequestOptions(不在 MessageCreateParamsBase body,见 toSdkTools 上方签名)。
+ *
+ * 响应经 `interpretMessage` 同一解释逻辑(SSOT)投影为 AssistantTurnResult。
+ * SDK 错误(APIError / AbortError 等)不捕获,让 raceModel 现有 catch 路由处理:
+ *   signal.aborted → "cancelled";MODEL_TIMEOUT → "timeout";
+ *   ProtocolError → "protocolError";其他 → rethrow(`run()` reject)。
+ * 真实失败回流占位见 #54 raceModel abort(#023 engine-timeout HTTP 未取消)。
+ *
+ * 协议不变:`createRealAnthropicAdapter.step` 根据 `opts.stream` 分两臂(非流式臂 `client.messages.create`,流式臂 `client.messages.stream` + `finalMessage()` → `interpretMessage`,#176 T3 #147 D1),两者交付同一 `AssistantTurnResult` (SSOT);不构造 SdkMessage 队列;
+ * 不重试、不收集 telemetry。
+ */
 export function createRealAnthropicAdapter(
   opts: RealAnthropicAdapterOptions
 ): AnthropicAdapter {

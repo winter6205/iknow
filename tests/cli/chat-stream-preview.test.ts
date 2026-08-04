@@ -8,9 +8,9 @@
  *   2. `createStreamPreviewSink` renders text_delta increments + tool_call_start
  *      hints through an injected writer (the TTY spinner-replacement seam).
  *   3. When `onStream` is absent (the `runPiped` path always, and
- *      `runInteractive` when `process.stderr.isTTY` is false), the adapter's
- *      stream events produce **zero** observer activity and the rendered output
- *      is unchanged — this is the structural pipe/non-TTY regression guard.
+ *      `runInteractive` when `process.stderr.isTTY` is false), the rendered
+ *      output is unchanged — this is the structural pipe/non-TTY regression
+ *      guard.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -56,15 +56,14 @@ describe("processChatLine onStream forwarding (#179 T6)", () => {
     assert.equal(r.output.includes("same"), true);
   });
 
-  it("pipe / non-TTY regression: processChatLine without onStream emits no observer activity", async () => {
+  it("pipe / non-TTY regression: processChatLine without onStream leaves output unchanged", async () => {
     // Mirrors the structural guarantee:
     //   - runPiped always calls processChatLine({line, ctx}) (chat-session.ts:512).
     //   - runInteractive calls processChatLine({line, ctx, onStream}) only when
     //     process.stderr.isTTY is true (chat-session.ts:354-372). When stderr
     //     is not a TTY, the ternary collapses to onStream = undefined, matching
     //     this test exactly. So this test is the regression gate for both
-    //     pipe / non-TTY paths: zero observer calls, output unchanged.
-    const observed: HarnessStreamEvent[] = [];
+    //     pipe / non-TTY paths: no onStream → output unchanged.
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["final"] })],
       streamEventsByStep: [
@@ -77,7 +76,6 @@ describe("processChatLine onStream forwarding (#179 T6)", () => {
     });
     const r = await processChatLine({ line: "q", ctx });
     assert.equal(r.ranQuery, true);
-    assert.deepEqual(observed, [], "no observer activity without onStream");
     assert.ok(r.output.includes("final"));
     assert.ok(!r.output.includes("should-not-observe-1"));
   });
