@@ -311,4 +311,78 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     },
     LONG_TIMEOUT
   );
+
+  it(
+    "SC5：turn 运行中切走 → running-bg 后台跑完落盘 + 状态栏后台指示",
+    async () => {
+      // 慢 stub（delayMs）制造可切入的运行窗口；两个会话：先建 A，再在 B
+      // 起跑后切回 A，断言 B 转 running-bg、后台完成落盘、状态栏出现后台指示。
+      const { createStubModel } =
+        await import("../../src/harness/stubs/stub-model.js");
+      const { createStubTool } =
+        await import("../../src/harness/stubs/stub-tool.js");
+      const { createRegistry } =
+        await import("../../src/harness/tools/registry.js");
+      const { createExecutor } =
+        await import("../../src/harness/tools/executor.js");
+      const tool = createStubTool({ name: "noop", next: () => ({}) });
+      const registry = createRegistry([tool]);
+      const executor = createExecutor(registry);
+      const adapter = createStubModel({
+        responses: [
+          assistantResult({ texts: ["第一答复"] }),
+          assistantResult({ texts: ["慢答复"] }),
+        ],
+        delayMs: 1800,
+      });
+      const inflight = createInflightRegistry();
+      const bridge = createTuiBridge({
+        dataDir: baseDir,
+        deps: { adapter, executor, registry, maxTurns: 5 },
+        inflight,
+      });
+      const app = mountApp(bridge);
+      await app.ready();
+
+      // 会话 A：发「hello」，等完成落盘（列表出现 1 条）
+      await app.type("hello\r");
+      await waitFor(() => inflight.ids().size === 0, 8000, "A-turn-done");
+      await waitFor(
+        async () => (await bridge.listSessions()).length === 1,
+        8000,
+        "A-written"
+      );
+
+      // 新会话 B（draft），发慢问题起跑 running-fg
+      await app.type("/new\r");
+      await delay(200);
+      await app.type("慢问题\r");
+      await waitFor(() => inflight.ids().size === 1, 8000, "B-running-fg");
+
+      // 运行中切走：/sessions → ↓ 选中 A（index 1）→ Enter 打开 A
+      await app.type("/sessions\r");
+      await waitFor(
+        () => app.lastOutput().includes("+ 新建会话"),
+        8000,
+        "list-view"
+      );
+      await delay(300); // 等 ListView useInput effect 挂载
+      stdin.write("\u001b[B"); // ↓（整段单 chunk 写，ink 解析为 downArrow）
+      await delay(60);
+      stdin.write("\r"); // Enter → openSessionAt(1)：B running-fg → running-bg
+      // B 转后台：状态栏出现「后台运行中」
+      await waitFor(
+        () => app.lastOutput().includes("后台运行中"),
+        8000,
+        "bg-status"
+      );
+
+      // B 后台跑完落盘：inflight 清空，列表出现 2 条（A + B 均含 summary）
+      await waitFor(() => inflight.ids().size === 0, 8000, "B-bg-done");
+      const list = await bridge.listSessions();
+      expect(list).toHaveLength(2);
+      expect(list.map((e) => e.summary).sort()).toEqual(["hello", "慢问题"]);
+    },
+    LONG_TIMEOUT
+  );
 });

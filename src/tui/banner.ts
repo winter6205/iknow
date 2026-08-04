@@ -6,13 +6,14 @@
  * 来源：原型分支 worktree-tui-design-prototype `tui-prototype/src/logo-braille/banner.ts`
  * 的 renderVariantC（面板布局）+ visualWidth / padEndVisual / padStartVisual。
  * 裁决：#146（V7 布局 + 智慧之眼定案）/ #154（窗口适配：SHORT 档折一行
- * `◆ iknow`）/ #171（docs/DESIGN-BANNER.md：双色分层、图案居左 + info 栏居右
- * 并排、方形图案不可拉宽、窄终端降级）。
+ * `◆ iknow`）/ #171（docs/design/DESIGN-BANNER.md：双色分层、图案居左 +
+ * info 栏居右并排、方形图案不可拉宽、窄终端降级）。
  *
  * 与原型 renderVariantC 的差异（均为正式实现的有意裁剪）：
  *  - info 栏仅 version / cwd / dataDir（sessionId / tools 等运行时项去掉，参数传入）；
  *  - 去掉外框与 header/hint 行（V7 布局：banner 之上还有会话条 / 分隔线，框由
- *    输入框线框承担；DESIGN-BANNER.md 布局核心 = 图案居左 + info 栏居右并排）；
+ *    输入框线框承担；docs/design/DESIGN-BANNER.md 布局核心 = 图案居左 +
+ *    info 栏居右并排）；
  *  - cols < BANNER_MIN_COLS → 返回 []（窄终端降级，#171 落地清单）；
  *  - SHORT 档返回单行 `◆ iknow <version>`（原型 L7 极简 + V7 SHORT 档风格）。
  *

@@ -15,6 +15,7 @@ import type { ReactElement } from "react";
 import { Box, Text, useInput } from "ink";
 import type { SessionListEntry } from "../session-api/store/session-store.js";
 import { tuiPalette } from "./theme.js";
+import { clipOneLine } from "./text.js";
 
 export interface TuiListEntry extends SessionListEntry {
   /** 该会话当前在 TUI 内是否 running-bg（列表行静态标记用）。 */
@@ -58,12 +59,7 @@ export function ListView(props: ListViewProps): ReactElement {
   });
 
   const summaryWidth = Math.max(10, props.cols - 24);
-  const renderSummary = (s: string): string => {
-    const oneLine = s.replace(/\s+/g, " ").trim();
-    return oneLine.length > summaryWidth
-      ? `${oneLine.slice(0, summaryWidth - 1)}…`
-      : oneLine;
-  };
+  const renderSummary = (s: string): string => clipOneLine(s, summaryWidth);
 
   return (
     <Box flexDirection="column">
@@ -91,7 +87,7 @@ export function ListView(props: ListViewProps): ReactElement {
         return (
           <Box key={entry.conversation_id}>
             <Text color={selected ? pal.accent : pal.text}>
-              {marker} {renderSummary(entry.summary || entry.lastFinalText)}
+              {marker} {renderSummary(entry.summary || "(空)")}
             </Text>
             <Text color={pal.dim}> {time}</Text>
             {entry.runningBg && <Text color={pal.dim}> [运行中]</Text>}

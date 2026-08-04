@@ -31,11 +31,11 @@ import { helpLines, parseTuiInput } from "./slash.js";
 import { formatLiveToolEvent } from "./tool-summary.js";
 import type { TuiToolEvent } from "./deps.js";
 import { ChatView } from "./chat-view.js";
-import { ListView, type TuiListEntry } from "./list-view.js";
+import { ListView, relativeTime, type TuiListEntry } from "./list-view.js";
 import { PromptInput, useTick } from "./components.js";
 import { renderBanner } from "./banner.js";
 import { tuiPalette } from "./theme.js";
-import { relativeTime } from "./list-view.js";
+import { clipOneLine } from "./text.js";
 import { VERSION } from "./version.js";
 
 export interface TuiToolEventSink {
@@ -99,7 +99,10 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   const [listEntries, setListEntries] = useState<ReadonlyArray<TuiListEntry>>(
     []
   );
-  useTick(100); // askUser pending / spinner 心跳驱动
+  // 根 tick 仅轮询 askBridge.pending()（组件树外状态）：有 pending 时才
+  // 挂载，idle 且无授权待决时不强制整树 10Hz 重渲染（spinner 自带 tick）。
+  const askTick = askBridge.pending() !== undefined;
+  useTick(askTick ? 100 : 0);
 
   // 工具事件订阅：按 conversationId 归并入 liveToolLines。
   useEffect(
@@ -162,52 +165,79 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     );
     const controller = new AbortController();
     aborters.current.set(targetId, controller);
-    const promise = (async () => {
-      let stopReason: string | undefined;
-      try {
-        const resp = await bridge.postMessage({
-          conversationId: targetId,
-          text,
-          signal: controller.signal,
-        });
-        stopReason = resp.stopReason;
-      } catch (err) {
-        stopReason = "protocolError";
-        setNotice({ lines: [`turn 失败：${describeError(err)}`] });
-      } finally {
-        aborters.current.delete(targetId);
-      }
-      // 落盘后从文件刷新（共享池纪律：磁盘是 SSOT）。cancelled 走
-      // DROP_REASONS 不落盘 → 文件仍是 turn 前状态，UI 与磁盘一致。
-      try {
-        const file = await bridge.loadSessionFile(targetId);
-        setSessions((prev) => {
-          const current = prev[targetId];
-          if (!current) return prev;
-          return {
-            ...prev,
-            [targetId]: turnFinished(current, {
-              conversationId: file.conversation_id,
-              messages: file.messages,
-              turnCount: file.turnCount,
-              updatedAt: file.updatedAt,
-              jsonMode: file.jsonMode,
-              stopReason:
-                (stopReason as TuiSessionState["lastStopReason"]) ??
-                "completed",
-            }),
-          };
-        });
-        setLiveToolLines((prev) => ({ ...prev, [targetId]: [] }));
-        if (stopReason === "cancelled") {
-          setNotice({ lines: ["已打断当前 turn（未落盘）。"] });
-        }
-      } catch (err) {
-        setNotice({ lines: [`刷新会话失败：${describeError(err)}`] });
-      }
-    })();
+    const promise = runTurnOnce(targetId, text, controller);
     inflightPromises.current.add(promise);
     void promise.finally(() => inflightPromises.current.delete(promise));
+  }
+
+  /** 单个 turn 的异步主体：postMessage → 落盘后从文件刷新（磁盘是 SSOT）。
+   *  sendTurn 只做状态编排；turn 完成 / 失败的状态落点都在这里收敛。 */
+  async function runTurnOnce(
+    targetId: string,
+    text: string,
+    controller: AbortController
+  ): Promise<void> {
+    let stopReason: string | undefined;
+    try {
+      const resp = await bridge.postMessage({
+        conversationId: targetId,
+        text,
+        signal: controller.signal,
+      });
+      stopReason = resp.stopReason;
+    } catch (err) {
+      stopReason = "protocolError";
+      setNotice({ lines: [`turn 失败：${describeError(err)}`] });
+    } finally {
+      aborters.current.delete(targetId);
+    }
+    // 落盘后从文件刷新（共享池纪律：磁盘是 SSOT）。cancelled 走
+    // DROP_REASONS 不落盘 → 文件仍是 turn 前状态，UI 与磁盘一致。
+    try {
+      const file = await bridge.loadSessionFile(targetId);
+      setSessions((prev) => {
+        const current = prev[targetId];
+        if (!current) return prev;
+        return {
+          ...prev,
+          [targetId]: turnFinished(current, {
+            conversationId: file.conversation_id,
+            messages: file.messages,
+            turnCount: file.turnCount,
+            updatedAt: file.updatedAt,
+            jsonMode: file.jsonMode,
+            stopReason:
+              (stopReason as TuiSessionState["lastStopReason"]) ?? "completed",
+          }),
+        };
+      });
+      setLiveToolLines((prev) => ({ ...prev, [targetId]: [] }));
+      if (stopReason === "cancelled") {
+        setNotice({ lines: ["已打断当前 turn（未落盘）。"] });
+      }
+    } catch (err) {
+      // 刷新失败也要落回 idle：否则会话卡在 running-fg（aborter 已在
+      // finally 移除 → Ctrl+C 无效，且「正在运行」护栏挡住后续发送）。
+      // messages 保持 turn 前状态（磁盘 SSOT 未读回）；stopReason 记录
+      // turn 本身的停止原因。
+      setSessions((prev) => {
+        const current = prev[targetId];
+        if (!current) return prev;
+        return {
+          ...prev,
+          [targetId]: turnFinished(current, {
+            conversationId: current.conversationId ?? targetId,
+            messages: current.messages,
+            turnCount: current.turnCount,
+            updatedAt: current.updatedAt,
+            jsonMode: current.jsonMode,
+            stopReason:
+              (stopReason as TuiSessionState["lastStopReason"]) ?? "completed",
+          }),
+        };
+      });
+      setNotice({ lines: [`刷新会话失败：${describeError(err)}`] });
+    }
   }
 
   function newSession(): void {
@@ -438,13 +468,14 @@ function StatusBar(props: {
     <Box flexWrap="wrap">
       <Box marginRight={2}>
         <Text color={pal.dim}>
-          {state} · {summary ? clip(summary, 24) : "新会话"}
+          {state} · {summary ? clipOneLine(summary, 24) : "新会话"}
         </Text>
       </Box>
       {props.bgSession && (
         <Box marginRight={2}>
           <Text color={pal.dim}>
-            后台运行中 · {clip(sessionSummary(props.bgSession.messages), 24)}
+            后台运行中 ·{" "}
+            {clipOneLine(sessionSummary(props.bgSession.messages), 24)}
           </Text>
         </Box>
       )}
@@ -473,11 +504,6 @@ function infoLines(
     `jsonMode: ${session.jsonMode}`,
     `runState: ${session.runState}`,
   ];
-}
-
-function clip(s: string, max: number): string {
-  const oneLine = s.replace(/\s+/g, " ").trim();
-  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
 }
 
 function describeError(err: unknown): string {

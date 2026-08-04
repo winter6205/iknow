@@ -17,6 +17,10 @@
  *  - 宽度约束：原型未处理 width——按裁决交给 ink——根 Box `width={width}` +
  *    段落 / 行内 / 列表 / 引用文本 `wrap="wrap"`，超宽折行不溢出。围栏代码与
  *    表格保留原型的等宽 / 边框渲染（结构化内容不再 mid-line 折）。
+ *
+ * 结构（code review 整改）：parseBlocks（文本 → 判别式块 AST）与
+ * renderBlock（块 → ink 节点）分离，各块类型解析独立函数；Markdown 只做
+ * 组装。解析与渲染行为与拆分前逐字节等价。
  */
 import type { ReactElement, ReactNode } from "react";
 import { Box, Text } from "ink";
@@ -71,6 +75,160 @@ function renderInline(text: string, keyPrefix: string): Nodes {
   }
   return nodes;
 }
+
+// -- 块 AST ------------------------------------------------------------------
+
+type MdBlock =
+  | { readonly type: "fence"; readonly lang: string; readonly lines: string[] }
+  | { readonly type: "table"; readonly rows: string[][] }
+  | { readonly type: "heading"; readonly level: number; readonly text: string }
+  | { readonly type: "quote"; readonly lines: string[] }
+  | {
+      readonly type: "list";
+      readonly items: ReadonlyArray<{
+        readonly indent: number;
+        readonly marker: string;
+        readonly content: string;
+      }>;
+    }
+  | { readonly type: "blank" }
+  | { readonly type: "paragraph"; readonly text: string };
+
+const LIST_LINE = /^(\s*)(?:([-*])|(\d+)\.)\s+(.*)$/;
+
+/** 围栏代码块：```lang 起，下一个 ``` 止（未闭合则吞到文末）。 */
+function parseFence(
+  lines: ReadonlyArray<string>,
+  i: number,
+  lang: string
+): { block: MdBlock; next: number } {
+  const buf: string[] = [];
+  i += 1;
+  while (i < lines.length && !(lines[i] as string).startsWith("```")) {
+    buf.push(lines[i] as string);
+    i += 1;
+  }
+  i += 1; // 跳过收尾 ```（未闭合时越界，循环自然结束）
+  return { block: { type: "fence", lang, lines: buf }, next: i };
+}
+
+function splitTableRow(l: string): string[] {
+  return l
+    .split("|")
+    .slice(1, -1)
+    .map((c) => c.trim());
+}
+
+/** 表格：当前行与下一行都以 | 开头，且下一行为分隔行。 */
+function parseTable(
+  lines: ReadonlyArray<string>,
+  i: number
+): { block: MdBlock; next: number } {
+  const rows: string[][] = [splitTableRow(lines[i] as string)];
+  i += 2; // 跳过表头 + 分隔行
+  while (i < lines.length && (lines[i] as string).startsWith("|")) {
+    rows.push(splitTableRow(lines[i] as string));
+    i += 1;
+  }
+  return { block: { type: "table", rows }, next: i };
+}
+
+/** 引用块：连续的 `> ` / `>` 行。 */
+function parseQuote(
+  lines: ReadonlyArray<string>,
+  i: number
+): { block: MdBlock; next: number } {
+  const buf: string[] = [];
+  while (
+    i < lines.length &&
+    ((lines[i] as string).startsWith("> ") || lines[i] === ">")
+  ) {
+    buf.push((lines[i] as string).replace(/^>\s?/, ""));
+    i += 1;
+  }
+  return { block: { type: "quote", lines: buf }, next: i };
+}
+
+/** 列表（有序 / 无序，支持两级缩进）：连续的列表行收拢为一个块。 */
+function parseList(
+  lines: ReadonlyArray<string>,
+  i: number
+): { block: MdBlock; next: number } {
+  const items: { indent: number; marker: string; content: string }[] = [];
+  while (i < lines.length) {
+    const m = (lines[i] as string).match(LIST_LINE);
+    if (!m) break;
+    items.push({
+      indent: Math.floor(m[1].length / 2),
+      marker: m[2] === undefined ? `${m[3]}.` : "•",
+      content: m[4] as string,
+    });
+    i += 1;
+  }
+  return { block: { type: "list", items }, next: i };
+}
+
+/** markdown 文本 → 判别式块序列（纯函数，可单测）。 */
+export function parseBlocks(text: string): ReadonlyArray<MdBlock> {
+  const lines = text.split("\n");
+  const out: MdBlock[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i] as string;
+
+    const fence = line.match(/^```(\S*)/);
+    if (fence) {
+      const r = parseFence(lines, i, fence[1] as string);
+      out.push(r.block);
+      i = r.next;
+      continue;
+    }
+
+    if (
+      line.startsWith("|") &&
+      i + 1 < lines.length &&
+      /^\|[\s:|-]+\|$/.test(lines[i + 1] as string)
+    ) {
+      const r = parseTable(lines, i);
+      out.push(r.block);
+      i = r.next;
+      continue;
+    }
+
+    const h = line.match(/^(#{1,3})\s+(.*)$/);
+    if (h) {
+      out.push({ type: "heading", level: h[1].length, text: h[2] as string });
+      i += 1;
+      continue;
+    }
+
+    if (line.startsWith("> ") || line === ">") {
+      const r = parseQuote(lines, i);
+      out.push(r.block);
+      i = r.next;
+      continue;
+    }
+
+    if (LIST_LINE.test(line)) {
+      const r = parseList(lines, i);
+      out.push(r.block);
+      i = r.next;
+      continue;
+    }
+
+    if (line.trim() === "") {
+      out.push({ type: "blank" });
+      i += 1;
+      continue;
+    }
+
+    out.push({ type: "paragraph", text: line });
+    i += 1;
+  }
+  return out;
+}
+
+// -- 块渲染 ------------------------------------------------------------------
 
 function Heading(props: {
   readonly level: number;
@@ -136,80 +294,20 @@ function Table(props: { readonly rows: string[][] }): ReactElement {
   );
 }
 
-/** 主渲染器：markdown 文本 → ink 节点。 */
-export function Markdown(props: {
-  readonly text: string;
-  readonly width: number;
-}): ReactElement {
-  const lines = props.text.split("\n");
-  const out: ReactNode[] = [];
-  let i = 0;
-  let key = 0;
-
-  while (i < lines.length) {
-    const line = lines[i] as string;
-
-    // 围栏代码块
-    const fence = line.match(/^```(\S*)/);
-    if (fence) {
-      const buf: string[] = [];
-      i += 1;
-      while (i < lines.length && !(lines[i] as string).startsWith("```")) {
-        buf.push(lines[i] as string);
-        i += 1;
-      }
-      i += 1; // 跳过收尾 ```
-      out.push(<CodeBlock key={key++} lang={fence[1] as string} lines={buf} />);
-      continue;
-    }
-
-    // 表格（当前行与下一行都以 | 开头，且下一行为分隔行）
-    if (
-      line.startsWith("|") &&
-      i + 1 < lines.length &&
-      /^\|[\s:|-]+\|$/.test(lines[i + 1] as string)
-    ) {
-      const rows: string[][] = [];
-      const parse = (l: string) =>
-        l
-          .split("|")
-          .slice(1, -1)
-          .map((c) => c.trim());
-      rows.push(parse(line));
-      i += 2; // 跳过表头 + 分隔行
-      while (i < lines.length && (lines[i] as string).startsWith("|")) {
-        rows.push(parse(lines[i] as string));
-        i += 1;
-      }
-      out.push(<Table key={key++} rows={rows} />);
-      continue;
-    }
-
-    // 标题
-    const h = line.match(/^(#{1,3})\s+(.*)$/);
-    if (h) {
-      out.push(
-        <Heading key={key++} level={h[1].length} text={h[2] as string} />
-      );
-      i += 1;
-      continue;
-    }
-
-    // 引用块
-    if (line.startsWith("> ") || line === ">") {
-      const buf: string[] = [];
-      while (
-        i < lines.length &&
-        ((lines[i] as string).startsWith("> ") || lines[i] === ">")
-      ) {
-        buf.push((lines[i] as string).replace(/^>\s?/, ""));
-        i += 1;
-      }
-      out.push(
-        <Box key={key++} flexDirection="row">
+function renderBlock(block: MdBlock, key: number): ReactNode {
+  switch (block.type) {
+    case "fence":
+      return <CodeBlock key={key} lang={block.lang} lines={block.lines} />;
+    case "table":
+      return <Table key={key} rows={block.rows} />;
+    case "heading":
+      return <Heading key={key} level={block.level} text={block.text} />;
+    case "quote":
+      return (
+        <Box key={key} flexDirection="row">
           <Text color={tuiPalette.quote}>│ </Text>
           <Box flexDirection="column">
-            {buf.map((b, bi) => (
+            {block.lines.map((b, bi) => (
               <Text key={bi} dimColor italic wrap="wrap">
                 {b === "" ? " " : b}
               </Text>
@@ -217,32 +315,10 @@ export function Markdown(props: {
           </Box>
         </Box>
       );
-      continue;
-    }
-
-    // 列表（有序 / 无序，支持两级缩进）
-    const li = line.match(/^(\s*)(?:([-*])|(\d+)\.)\s+(.*)$/);
-    if (li) {
-      const items: {
-        indent: number;
-        marker: string;
-        content: string;
-      }[] = [];
-      while (i < lines.length) {
-        const m = (lines[i] as string).match(
-          /^(\s*)(?:([-*])|(\d+)\.)\s+(.*)$/
-        );
-        if (!m) break;
-        items.push({
-          indent: Math.floor(m[1].length / 2),
-          marker: m[2] === undefined ? `${m[3]}.` : "•",
-          content: m[4] as string,
-        });
-        i += 1;
-      }
-      out.push(
-        <Box key={key++} flexDirection="column">
-          {items.map((it, ii) => (
+    case "list":
+      return (
+        <Box key={key} flexDirection="column">
+          {block.items.map((it, ii) => (
             <Box key={ii} paddingLeft={it.indent * 2}>
               <Text color={tuiPalette.bullet}>{it.marker} </Text>
               <Text wrap="wrap">
@@ -252,29 +328,27 @@ export function Markdown(props: {
           ))}
         </Box>
       );
-      continue;
-    }
-
-    // 空行 = 段落间隔
-    if (line.trim() === "") {
-      out.push(<Text key={key++}> </Text>);
-      i += 1;
-      continue;
-    }
-
-    // 普通段落
-    out.push(
-      <Text key={key++} wrap="wrap">
-        {renderInline(line, `p-${key}`)}
-      </Text>
-    );
-    i += 1;
+    case "blank":
+      return <Text key={key}> </Text>;
+    case "paragraph":
+      return (
+        <Text key={key} wrap="wrap">
+          {renderInline(block.text, `p-${key}`)}
+        </Text>
+      );
   }
+}
 
+/** 主渲染器：markdown 文本 → ink 节点。 */
+export function Markdown(props: {
+  readonly text: string;
+  readonly width: number;
+}): ReactElement {
+  const blocks = parseBlocks(props.text);
   // 原型未处理 width：交给 ink——根 Box 限宽 + 文本 wrap="wrap" 折行不溢出。
   return (
     <Box flexDirection="column" width={props.width}>
-      {out}
+      {blocks.map((b, i) => renderBlock(b, i))}
     </Box>
   );
 }

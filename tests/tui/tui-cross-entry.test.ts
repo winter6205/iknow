@@ -17,7 +17,10 @@ import {
   createInflightRegistry,
   createTuiBridge,
 } from "../../src/tui/hub-bridge.js";
-import { SessionStore } from "../../src/session-api/store/session-store.js";
+import {
+  resolveProjectSessionDir,
+  SessionStore,
+} from "../../src/session-api/store/session-store.js";
 import { SessionHub } from "../../src/session-api/hub.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.js";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.js";
@@ -60,16 +63,9 @@ describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 serve 风格 hub 共享�
     const serveView = await serveHub.getSession(id);
     expect(serveView.session.conversation_id).toBe(id);
     expect(serveView.session.turn_count).toBe(2);
-    // 磁盘 JSON 直读交叉核对（SSOT = 文件）
-    const dir = join(
-      baseDir,
-      "sessions",
-      `${cwd.split("/").pop()}-${(await import("node:crypto"))
-        .createHash("sha1")
-        .update(cwd)
-        .digest("hex")
-        .slice(0, 12)}`
-    );
+    // 磁盘 JSON 直读交叉核对（SSOT = 文件；目录命名走 store 的
+    // resolveProjectSessionDir，不在测试里手拼命名策略）
+    const dir = resolveProjectSessionDir(baseDir, cwd);
     const raw = JSON.parse(await readFile(join(dir, `${id}.json`), "utf8")) as {
       schemaVersion: number;
       turnCount: number;

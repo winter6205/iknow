@@ -14,10 +14,13 @@ import { tuiPalette } from "./theme.js";
 
 export const SPINNER_FRAMES: ReadonlyArray<string> = ["|", "/", "-", "\\"];
 
-/** 100ms 心跳：返回自增帧号，驱动 spinner / 动效重渲染。 */
+/** 100ms 心跳：返回自增帧号，驱动 spinner / 动效重渲染。
+ *  periodMs <= 0 = 禁用档（不挂定时器，避免 0ms 忙轮询；hooks 顺序不变，
+ *  调用方可按条件在 0 / 正常周期间切换）。 */
 export function useTick(periodMs = 100): number {
   const [tick, setTick] = useState(0);
   useEffect(() => {
+    if (periodMs <= 0) return undefined;
     const timer = setInterval(() => setTick((t) => t + 1), periodMs);
     return () => clearInterval(timer);
   }, [periodMs]);

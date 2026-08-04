@@ -7,7 +7,8 @@
  *  - `tui-prototype/src/logo-braille/logo-c.art.ts`（主层，墨绿线稿）
  *  - `tui-prototype/src/logo-braille/logo-c-gold.art.ts`（金棕 R 符文强调层）
  * 裁决：#146（V7 布局 + 智慧之眼定案）/ #154（窗口适配）/ #171（banner 支线搬入，
- * docs/DESIGN-BANNER.md：双色分层、两层同几何逐 cell 对齐、方形构图不可拉宽）。
+ * docs/design/DESIGN-BANNER.md：双色分层、两层同几何逐 cell 对齐、方形构图
+ * 不可拉宽）。
  * 预渲染源图 docs/design/1785827453.png @ cols=34 rows=17（threshold=180，
  * trimThreshold=200；金层 mask r>140 ∧ b<80 ∧ r−b>80）。字形原样搬入，勿手改；
  * 如需重生成走原型分支 build-art.ts / gen-gold.ts。

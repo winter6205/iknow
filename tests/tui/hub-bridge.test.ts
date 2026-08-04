@@ -9,7 +9,7 @@
  *  - postMessage 回执投影（finalText / stopReason / turnCount）。
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,8 +17,6 @@ import {
   createTuiBridge,
 } from "../../src/tui/hub-bridge.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.js";
-import { createNoAskUser } from "../../src/harness/permission/ask-user.js";
-import { readdir } from "node:fs/promises";
 import { resolveProjectSessionDir } from "../../src/session-api/store/session-store.js";
 
 describe("inflight registry", () => {
@@ -133,7 +131,7 @@ describe("hub-bridge postMessage", () => {
     });
     await expect(
       bridge.postMessage({ conversationId: "no-such-id", text: "x" })
-    ).rejects.toBeTruthy();
+    ).rejects.toMatchObject({ kind: "not_found" });
     expect(inflight.ids().size).toBe(0);
   });
 

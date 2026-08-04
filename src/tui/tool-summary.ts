@@ -7,6 +7,7 @@
  *    （路径 + 行数；diff 完整形态留实施细化，受无 emoji 约束）。
  */
 import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
+import { clipOneLine } from "./text.js";
 
 export interface ToolSummaryLine {
   readonly toolName: string;
@@ -18,8 +19,7 @@ export interface ToolSummaryLine {
 const MAX_DETAIL = 80;
 
 function clip(s: string, max = MAX_DETAIL): string {
-  const oneLine = s.replace(/\s+/g, " ").trim();
-  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+  return clipOneLine(s, max);
 }
 
 function inputRecord(input: unknown): Record<string, unknown> {

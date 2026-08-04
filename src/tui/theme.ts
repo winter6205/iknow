@@ -51,7 +51,7 @@ export interface TuiPalette {
   readonly bullet: string;
 }
 
-export const tuiPalette: TuiPalette = {
+export const tuiPalette: TuiPalette = Object.freeze({
   accent: "#e8e4d8",
   text: "#e6e4dc",
   dim: "#8a877e",
@@ -66,4 +66,4 @@ export const tuiPalette: TuiPalette = {
   quote: "#8a877e",
   table: "#d9a343",
   bullet: "#7d8a82",
-};
+});
