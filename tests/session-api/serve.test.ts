@@ -9,9 +9,11 @@
 import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
+import * as path from "node:path";
 import { join } from "node:path";
 import {
+  resolveServeDataDir,
   startSessionServe,
   type ServeOptions,
 } from "../../src/session-api/serve.ts";
@@ -157,16 +159,22 @@ describe("startSessionServe — dataDir resolution", () => {
     }
   });
 
-  it("defaults to <cwd>/data when opts.dataDir omitted", async () => {
-    // No opts.dataDir → falls through to path.resolve(process.cwd(), "data").
-    // Use a port-0 ephemeral listener; we only assert the call succeeds and
-    // returns a bound server (the cwd/data branch executed).
+  it("defaults to ~/.iknow when opts.dataDir omitted", async () => {
+    // Deterministic proof of the default root: resolveServeDataDir is the
+    // pure SSOT for the dataDir resolution logic (spec #120 SC 1 + SC 10).
+    // We never write to the real $HOME — the pure-function assert below
+    // never touches disk; the live startSessionServe call below constructs
+    // SessionStore with that path (constructor does no IO; mkdir only fires
+    // inside save() which we never invoke).
+    assert.equal(resolveServeDataDir(), join(homedir(), ".iknow"));
+    assert.equal(resolveServeDataDir(""), join(homedir(), ".iknow"));
+    assert.equal(
+      resolveServeDataDir("/tmp/iknow-serve-explicit"),
+      path.resolve("/tmp/iknow-serve-explicit")
+    );
     const out = await startSessionServe({ port: 0 });
     listening = out.listening;
-    baseDir = await mkdtemp(join(tmpdir(), "iknow-serve-noop-")); // afterEach cleanup placeholder
     assert.ok(listening.port > 0);
-    // A session can be created via the returned hub (cwd/data may not be
-    // writable in CI, so we only verify hub construction, not disk writes).
     assert.ok(out.hub);
   });
 });

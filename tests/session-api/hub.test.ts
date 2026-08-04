@@ -9,7 +9,10 @@ import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionHub, mapStoreError } from "../../src/session-api/hub.ts";
-import { SessionStore } from "../../src/session-api/store/index.ts";
+import {
+  resolveProjectSessionDir,
+  SessionStore,
+} from "../../src/session-api/store/index.ts";
 import type { SessionStoreError } from "../../src/session-api/store/index.ts";
 import type { SessionFileV1 } from "../../src/session-api/store/index.ts";
 import type {
@@ -46,8 +49,11 @@ function sampleFile(opts: {
 }): SessionFileV1 {
   const { id, overrides = {} } = opts;
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     conversation_id: id,
+    summary: "",
+    cwd: "/tmp/test",
+    sanitized_at: new Date().toISOString(),
     messages: [],
     jsonMode: false,
     turnCount: 0,
@@ -59,10 +65,13 @@ function sampleFile(opts: {
 // -- setup -------------------------------------------------------------------
 
 let baseDir: string;
+// Namespaced session dir (default process.cwd()) for direct file manipulation.
+let sessionDir: string;
 let store: SessionStore;
 
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-hub-"));
+  sessionDir = resolveProjectSessionDir(baseDir, process.cwd());
   store = new SessionStore(baseDir);
 });
 
@@ -128,6 +137,20 @@ describe("mapStoreError — 6-row error mapping contract", () => {
 // -- createSession -----------------------------------------------------------
 
 describe("createSession", () => {
+  it("writes v2 metadata to disk", async () => {
+    const hub = makeHub(makeDeps([]));
+    const { session } = await hub.createSession();
+    const raw = JSON.parse(
+      await (
+        await import("node:fs/promises")
+      ).readFile(join(sessionDir, `${session.conversation_id}.json`), "utf8")
+    );
+    assert.equal(raw.schemaVersion, 2);
+    assert.equal(raw.summary, "");
+    assert.equal(typeof raw.cwd, "string");
+    assert.equal(typeof raw.sanitized_at, "string");
+  });
+
   it("creates a session file and returns summary", async () => {
     const deps = makeDeps([]);
     const hub = makeHub(deps);
@@ -180,12 +203,8 @@ describe("boundary: negative", () => {
   it("postMessage on corrupt file → parse_failed", async () => {
     const deps = makeDeps([]);
     const hub = makeHub(deps);
-    await mkdir(join(baseDir, "sessions"), { recursive: true });
-    await writeFile(
-      join(baseDir, "sessions", "corrupt-conv.json"),
-      "{not-json",
-      "utf8"
-    );
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(join(sessionDir, "corrupt-conv.json"), "{not-json", "utf8");
     await assert.rejects(
       () => hub.postMessage({ conversationId: "corrupt-conv", text: "hi" }),
       (err: unknown) => {
@@ -482,6 +501,24 @@ describe("resetSession", () => {
   });
 });
 
+describe("postMessage summary projection", () => {
+  it("recomputes summary instead of preserving a dirty value", async () => {
+    const hub = makeHub(makeDeps([assistantResult({ texts: ["answer"] })]));
+    const { session } = await hub.createSession();
+    const path = join(sessionDir, `${session.conversation_id}.json`);
+    const { readFile, writeFile } = await import("node:fs/promises");
+    const raw = JSON.parse(await readFile(path, "utf8"));
+    raw.summary = "dirty";
+    await writeFile(path, JSON.stringify(raw), "utf8");
+    await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "hello",
+    });
+    const saved = JSON.parse(await readFile(path, "utf8"));
+    assert.equal(saved.summary, "hello");
+  });
+});
+
 describe("listSessions", () => {
   it("returns metadata for sessions that have a reply", async () => {
     const deps = makeDeps([assistantResult({ texts: ["hi"] })]);
@@ -492,7 +529,11 @@ describe("listSessions", () => {
       text: "hello",
     });
     const list = await hub.listSessions();
-    assert.ok(list.some((e) => e.conversation_id === session.conversation_id));
+    const entry = list.find(
+      (e) => e.conversation_id === session.conversation_id
+    );
+    assert.ok(entry);
+    assert.equal(entry.summary, "hello");
   });
 
   it("excludes a freshly created session with no reply (issue #96)", async () => {

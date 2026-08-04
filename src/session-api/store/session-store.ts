@@ -5,6 +5,7 @@
  * (spec A15). This class is a thin typed-IO wrapper over data/sessions/*.json.
  * Every failure path throws a typed SessionStoreError — never a bare Error.
  */
+import { createHash } from "node:crypto";
 import {
   mkdir,
   readFile,
@@ -13,14 +14,14 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
 } from "../../harness/index.js";
 import type { SessionStoreError } from "./errors.js";
 import type { SessionFileV1 } from "./schema.js";
-import { validateSessionFile } from "./schema.js";
+import { sanitizeSessionFile } from "./schema.js";
 
 /** Metadata returned by list(); intentionally excludes messages. */
 export interface SessionListEntry {
@@ -28,13 +29,26 @@ export interface SessionListEntry {
   readonly updatedAt: string;
   /** Text excerpt from the most recent assistant turn ("" if none). */
   readonly lastFinalText: string;
+  readonly summary: string;
+}
+
+/**
+ * Project namespace under the shared pool root (spec #120 SC 1).
+ *
+ * Layout: `<baseDir>/sessions/<basename(cwd)>-<sha1(cwd)[:12]>`.
+ * basename keeps it human-browsable; the sha1 suffix disambiguates same-named
+ * projects at different paths. Pure: no IO.
+ */
+export function resolveProjectSessionDir(baseDir: string, cwd: string): string {
+  const digest = createHash("sha1").update(cwd).digest("hex").slice(0, 12);
+  return join(baseDir, "sessions", `${basename(cwd)}-${digest}`);
 }
 
 export class SessionStore {
   private readonly dir: string;
 
-  constructor(baseDir: string) {
-    this.dir = join(baseDir, "sessions");
+  constructor(baseDir: string, cwd: string = process.cwd()) {
+    this.dir = resolveProjectSessionDir(baseDir, cwd);
   }
 
   /**
@@ -44,15 +58,17 @@ export class SessionStore {
   async load(id: string): Promise<SessionFileV1> {
     const raw = await this.readRaw(id);
     const parsed = this.parseJson({ id, raw });
-    const field = validateSessionFile(parsed);
-    if (field !== null) {
+    try {
+      return sanitizeSessionFile(parsed);
+    } catch (err) {
+      // sanitize is pure and lacks store identity; reattach id for the typed contract.
+      const field = (err as { field?: string }).field;
       throw {
         kind: "schema_invalid",
         conversation_id: id,
-        field,
+        field: field ?? "root",
       } satisfies SessionStoreError;
     }
-    return parsed as SessionFileV1;
   }
 
   /**
@@ -190,6 +206,7 @@ export class SessionStore {
         conversation_id: id,
         updatedAt: file.updatedAt,
         lastFinalText,
+        summary: file.summary,
       };
     } catch {
       return null; // skip corrupt / unreadable files

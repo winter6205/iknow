@@ -185,6 +185,7 @@ async function runServe(parsed: ParsedCli): Promise<void> {
       host: parsed.host,
       port: parsed.port,
       json_mode: parsed.json,
+      dataDir: parsed.dataDir,
       traceOut: tracePath,
     });
     writeErr(`iknow serve  http://${listening.host}:${listening.port}/`);

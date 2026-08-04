@@ -36,6 +36,7 @@ describe("processChatLine harness path", () => {
     assert.equal(r1.quit, false);
     assert.equal(r1.ranQuery, true);
     assert.equal(ctx.state.messages.length, 2);
+    assert.equal(Object.isFrozen(ctx.state.messages), true);
     assert.equal(ctx.state.messages[0]!.role, "user");
     assert.equal(ctx.state.messages[1]!.role, "assistant");
     const turn1UserText = (
@@ -106,6 +107,7 @@ describe("processChatLine harness path", () => {
     assert.match(r.output, /cleared|Session/i);
     // /reset clears messages.
     assert.equal(ctx.state.messages.length, 0);
+    assert.equal(Object.isFrozen(ctx.state.messages), true);
     // /reset preserves the session object (same reference).
     assert.equal(ctx.state.session, session);
   });

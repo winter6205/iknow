@@ -19,15 +19,13 @@ import type { SessionContext } from "../shared/schema.js";
 /**
  * CLI host 维护的最小对话状态。
  *
- * `messages` 维护最近 run 的 append-only 历史(由 host 决定续传策略,
- * slash 模块仅在 `/reset` 时清空)。字段类型是 `AnthropicNativeMessage[]`
- * (可变)而不是 `ReadonlyArray<...>`:host 会在续传/重置时整体重新赋值,
- * 旧 `ReadonlyArray` 强制每次赋值都做 `as unknown as` 双强转,撒谎说"只读"。
- * `jsonMode` 决定 ask/chat 输出走哪一支投影;`session` 透传 harness
+ * grilling #120 Q3 裁决：全链路使用 `ReadonlyArray` + `Object.freeze`。
+ * host 通过整体替换并冻结来维护 append-only 历史，禁止原地修改；这是
+ * append-only 纪律在 host 层的落法。`jsonMode` 决定 ask/chat 输出走哪一支投影;`session` 透传 harness
  * (SessionContext 由 Session API 装配)。
  */
 export type CliChatState = {
-  messages: AnthropicNativeMessage[];
+  messages: ReadonlyArray<AnthropicNativeMessage>;
   jsonMode: boolean;
   session: SessionContext;
 };
@@ -119,7 +117,7 @@ export function applySlashCommand(opts: ApplySlashCommandOpts): SlashEffect {
     case "reset":
       // Mutate in place so agents holding this state reference see the cleared
       // messages. Session is intentionally preserved across reset.
-      ctx.state.messages = [];
+      ctx.state.messages = Object.freeze([]);
       return { type: "reset", message: "Session cleared." };
 
     case "":

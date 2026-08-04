@@ -95,13 +95,13 @@ export async function processChatLine(
     // emptyFinalResponse return finalState with NO assistant message appended,
     // so continuing on them would feed a dangling user message to the model
     // next turn and poison the loop — drop context on those two. CliChatState
-    // owned by host keeps a mutable copy, so a defensive shallow clone is
-    // required before assignment (harness returns ReadonlyArray).
+    // owned by host replaces and freezes the shallow copy so history remains
+    // append-only (harness returns ReadonlyArray).
     if (
       result.stopReason !== "protocolError" &&
       result.stopReason !== "emptyFinalResponse"
     ) {
-      ctx.state.messages = [...result.messages];
+      ctx.state.messages = Object.freeze([...result.messages]);
     }
     const output = ctx.state.jsonMode
       ? formatRunJson({ result, trace })
@@ -171,7 +171,7 @@ function resolveQuiet(optsQuiet: boolean | undefined): boolean {
  */
 export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
   const state: CliChatState = {
-    messages: [],
+    messages: Object.freeze([]),
     jsonMode: opts.jsonMode,
     session: opts.session,
   };

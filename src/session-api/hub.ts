@@ -24,6 +24,7 @@ import { ValidationError } from "../shared/errors.js";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
+import { CURRENT_SCHEMA_VERSION, extractSummary } from "./store/index.js";
 import type {
   ApiErrorBody,
   CreateSessionRequest,
@@ -199,13 +200,17 @@ export class SessionHub {
     req?: CreateSessionRequest
   ): Promise<CreateSessionResponse> {
     const id = randomUUID();
+    const now = new Date().toISOString();
     const file: SessionFileV1 = {
-      schemaVersion: 1,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
       conversation_id: id,
       messages: [],
       jsonMode: req?.json_mode ?? this.defaults.jsonMode,
       turnCount: 0,
-      updatedAt: new Date().toISOString(),
+      updatedAt: now,
+      summary: "",
+      cwd: process.cwd(),
+      sanitized_at: now,
     };
     await this.store.save({ id, file });
     return {
@@ -274,6 +279,8 @@ export class SessionHub {
           messages: [],
           turnCount: 0,
           updatedAt: new Date().toISOString(),
+          schemaVersion: CURRENT_SCHEMA_VERSION,
+          summary: "",
         };
         await this.store.save({ id: conversationId, file: reset });
         return {
@@ -340,6 +347,8 @@ export class SessionHub {
       messages: result.messages,
       turnCount: session.turnCount + result.turnCount,
       updatedAt: new Date().toISOString(),
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      summary: extractSummary(result.messages),
     };
     await this.store.save({ id: conversationId, file: updated });
   }

@@ -43,6 +43,7 @@ export function usageText(): string {
   --json                        聊天开始即用 JSON 输出 / chat starts with JSON answers
   --port <n>                    serve 监听端口，默认 8787 / serve port (default 8787)
   --host <addr>                 serve 绑定地址，默认 127.0.0.1 / serve host (default 127.0.0.1)
+  --data-dir <dir>              会话池根目录，默认 ~/.iknow / session pool root (default ~/.iknow)
 
 会话内命令 / In-chat commands:
   /help  /status  /quit  /json on|off  /reset

@@ -1,11 +1,14 @@
 /**
- * schema.ts direct unit tests (022 SC21 coverage gate).
+ * schema.ts direct unit tests (022 SC21 coverage gate + #120 T1 range check).
  *
  * Why a dedicated file: validateSessionFile branches are not fully exercised
  * by session-store.test.ts (which only hits schemaVersion + messages cases
  * via load()). The 6 field-validation branches must each be covered to clear
  * the 80/70 gate. Each invalid field surfaces the field name in the error,
  * which is what hub.ts → http.ts → wire uses to build the schema_invalid body.
+ *
+ * #120 T1 change: schemaVersion check is now a range (≤ CURRENT accepted →
+ * sanitize, > CURRENT rejected) — old strict-equality-to-1 assertion deleted.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -17,12 +20,15 @@ import {
 import type { SessionFileV1 } from "../../../src/session-api/store/index.ts";
 
 const valid: SessionFileV1 = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   conversation_id: "abc",
   messages: [],
   jsonMode: false,
   turnCount: 0,
   updatedAt: "2026-01-01T00:00:00.000Z",
+  summary: "",
+  cwd: "",
+  sanitized_at: "2026-01-01T00:00:00.000Z",
 };
 
 // -- happy path --------------------------------------------------------------
@@ -32,9 +38,40 @@ describe("validateSessionFile — happy path", () => {
     assert.equal(validateSessionFile(valid), null);
   });
 
-  it("accepts the canonical CURRENT_SCHEMA_VERSION literal (1)", () => {
-    assert.equal(CURRENT_SCHEMA_VERSION, 1);
+  it("CURRENT_SCHEMA_VERSION is the canonical v2 literal (2)", () => {
+    assert.equal(CURRENT_SCHEMA_VERSION, 2);
     assert.equal(validateSessionFile({ ...valid }), null);
+  });
+
+  it("accepts schemaVersion 1 (forward-compat: sanitize fills v2 fields)", () => {
+    // v1 file lacks summary/cwd/sanitized_at but passes the range check;
+    // sanitizeSessionFile is responsible for filling them on load.
+    const v1 = {
+      schemaVersion: 1,
+      conversation_id: "abc",
+      messages: [],
+      jsonMode: false,
+      turnCount: 0,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    assert.equal(validateSessionFile(v1), null);
+  });
+});
+
+// -- range check (#120 T1) ---------------------------------------------------
+
+describe("validateSessionFile — schemaVersion range check (#120)", () => {
+  it("accepts schemaVersion 1 and 2 (≤ CURRENT) and rejects anything above", () => {
+    assert.equal(validateSessionFile({ ...valid, schemaVersion: 1 }), null);
+    assert.equal(validateSessionFile({ ...valid, schemaVersion: 2 }), null);
+    assert.equal(
+      validateSessionFile({ ...valid, schemaVersion: 3 }),
+      "schemaVersion"
+    );
+    assert.equal(
+      validateSessionFile({ ...valid, schemaVersion: 99 }),
+      "schemaVersion"
+    );
   });
 });
 
@@ -56,11 +93,7 @@ describe("validateSessionFile — root guard", () => {
 // -- per-field invalid branches ---------------------------------------------
 
 describe("validateSessionFile — per-field rejection", () => {
-  it("rejects wrong schemaVersion → 'schemaVersion'", () => {
-    assert.equal(
-      validateSessionFile({ ...valid, schemaVersion: 2 }),
-      "schemaVersion"
-    );
+  it("rejects non-number or missing schemaVersion → 'schemaVersion'", () => {
     assert.equal(
       validateSessionFile({ ...valid, schemaVersion: "1" }),
       "schemaVersion"
@@ -143,7 +176,8 @@ describe("isSessionFileV1 — type guard companion", () => {
 
   it("returns false for any rejected value", () => {
     assert.equal(isSessionFileV1(null), false);
-    assert.equal(isSessionFileV1({ ...valid, schemaVersion: 2 }), false);
+    // schemaVersion above CURRENT (was 2 with strict equality; now 3+)
+    assert.equal(isSessionFileV1({ ...valid, schemaVersion: 3 }), false);
     assert.equal(isSessionFileV1({ ...valid, turnCount: "x" }), false);
   });
 });

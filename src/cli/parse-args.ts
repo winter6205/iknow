@@ -30,6 +30,11 @@ export type ParsedCli = {
    * Resolution: flag > IKNOW_TRACE_OUT env > "./trace.jsonl" (ADR-0003 D3/D4).
    */
   traceOut?: string;
+  /**
+   * Session pool root for serve (--data-dir flag).
+   * Undefined → serve defaults to ~/.iknow (spec #120 SC 1).
+   */
+  dataDir?: string;
 };
 
 export type ParseArgsOptions = {
@@ -53,6 +58,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   let port = 8787;
   let host = "127.0.0.1";
   let traceOut: string | undefined;
+  let dataDir: string | undefined;
   const rest: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
@@ -65,6 +71,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           port,
           host,
           traceOut,
+          dataDir,
           query: "",
           missingQuery: false,
           versionOnly: false,
@@ -95,6 +102,12 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
         throw new Error("--trace-out requires a file path argument");
       }
       traceOut = raw;
+    } else if (a === "--data-dir") {
+      const raw = argv[++i];
+      if (raw === undefined) {
+        throw new Error("--data-dir requires a directory argument");
+      }
+      dataDir = raw;
     } else if (a === "--version" || a === "-V") {
       return baseParsed({
         command: "help",
@@ -103,6 +116,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           port,
           host,
           traceOut,
+          dataDir,
           query: "",
           missingQuery: false,
           versionOnly: true,
@@ -118,6 +132,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
     port,
     host,
     traceOut,
+    dataDir,
     versionOnly: false,
   };
   const head = rest[0];

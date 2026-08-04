@@ -172,6 +172,7 @@ describe("applySlashCommand", () => {
     assert.strictEqual(eff.type, "reset");
     if (eff.type !== "reset") return;
     assert.deepEqual([...state.messages], []);
+    assert.equal(Object.isFrozen(state.messages), true);
     assert.strictEqual(state.session, session, "session object preserved");
     assert.match(eff.message, /Session cleared/i);
   });
