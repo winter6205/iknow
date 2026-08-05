@@ -54,8 +54,15 @@ NO_COLOR / 非 TTY：paint 退化为 no-op，纯文本渲染（no-color.org 纪�
 
 - V7 布局：banner 之上无外框（框由输入框线框承担）；info 栏仅 version / cwd /
   dataDir（原型 sessionId / tools 等运行时项不搬）。
-- **窄终端降级**：cols < 78（`BANNER_MIN_COLS`）→ 返回空行集（不渲染 banner），
-  避免断行破碎。
+- **整体水平居中**：图案 + GAP + info 栏组成的整体面板在 `cols` 内左右等量
+  留白（braille 方形图案不拉宽，靠空白对称即可；这修复了"图案 + info 栏
+  挤左边一块"的视觉问题）。cols > `BANNER_MIN_COLS` 时两侧均分余量，
+  cols === `BANNER_MIN_COLS` 时左侧 padding = 0。
+- **图案与 info 栏间距 GAP=3**：原 GAP=1 让两块读作左堆，扩到 3 列给呼吸。
+- **info 栏长值中段截断**：dataDir 等绝对路径超出 `VAL_W=32` 列时，保留首段
+  路径前缀 + 尾段文件名/扩展名，中间 `…` 衔接（中段截断比末尾截断更易识别）。
+- **窄终端降级**：cols < 80（`BANNER_MIN_COLS = 34 + 3 + 43`）→ 返回空行集
+  （不渲染 banner），避免断行破碎。
 - SHORT 档（单行 `◆ iknow`）：原型 V7 矮终端档，随搬入保留渲染能力，
   产品路径未接线（#146 未要求高度自适应；留 #154 后续）。
 - 点阵重生成走原型分支 `build-art.ts` / `gen-gold.ts`（一次性设计期脚本）；

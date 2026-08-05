@@ -164,10 +164,29 @@ export function padStartVisual(s: string, width: number): string {
   return " ".repeat(width - cur) + s;
 }
 
+/**
+ * 中段截断：值超长时保留首尾（首段优先带路径前缀、尾段带文件名/扩展名），
+ * 中间用 `…` 衔接。用于 dataDir 等绝对路径，末尾截断会丢文件名。
+ * 视觉列宽计算（braille/CJK 各 1/2 列都对齐）。
+ */
+export function truncateMiddle(s: string, width: number): string {
+  const cur = visualWidth(s);
+  if (cur <= width) return s;
+  // chars = Array.from(s) 保证码点级切片（braille 在 BMP 单码点 OK，CJK 也单码点）。
+  const chars = [...s];
+  // 偶数宽度优先，否则尾段比首段多 1 列（避免引入额外宽度偏差）。
+  const headLen = Math.max(1, Math.floor((width - 1) / 2));
+  const tailLen = Math.max(1, width - 1 - headLen);
+  const head = chars.slice(0, headLen).join("");
+  const tail = chars.slice(chars.length - tailLen).join("");
+  return head + "…" + tail;
+}
+
 // ── 布局常量 ─────────────────────────────────────────────────────────
 
-/** 图案与 info 栏之间的间距列数（照原型 renderVariantC 的 GAP）。 */
-const GAP = 1;
+/** 图案与 info 栏之间的间距列数（原型 GAP=1 视觉上挤成左堆，#171 体验
+ *  迭代：扩到 3 让两块之间有呼吸）。 */
+const GAP = 3;
 /** key 列相对最长 key 的余量（照原型 KEY_W = max key + 2）。 */
 const KEY_EXTRA = 2;
 /** value 列宽（容纳典型 dataDir 路径如 ~/.local/share/iknow）。 */
@@ -191,6 +210,7 @@ export const BANNER_INFO_WIDTH = KEY_W + 1 + VAL_W;
 /**
  * 窄终端降级阈值（#171）：banner 面板总宽 = 图案宽 + GAP + info 栏宽。
  * cols < BANNER_MIN_COLS → renderBanner 返回 []。
+ * GAP=3 后最小宽度 = 34 + 3 + (10 + 1 + 32) = 80 列。
  */
 export const BANNER_MIN_COLS =
   visualWidth(EYE_LINES[0] ?? "") + GAP + BANNER_INFO_WIDTH;
@@ -209,11 +229,14 @@ function buildInfoLines(info: BannerInfo): string[] {
     dataDir: info.dataDir,
   };
   return KV_KEYS.map(([k, field]) => {
-    // key 列左对齐（dim）+ 1 列间距 + 值左对齐（默认前景，补到 VAL_W 列，
-    // 照原型 valuePainted = padEndVisual(v, VAL_W)）——照原型 kv 上色分配。
+    // key 列左对齐（dim）+ 1 列间距 + 值左对齐（默认前景）。
+    // 值超长走中段截断（保留首段路径前缀 + 尾段文件名/扩展名），比末尾截断更易识别。
     const keyPainted = paint(padEndVisual(k, KEY_W), FG_DIM);
-    const valuePainted = padEndVisual(values[field] ?? "", VAL_W);
-    return keyPainted + " " + valuePainted;
+    const raw = values[field] ?? "";
+    const valuePainted = truncateMiddle(raw, VAL_W);
+    // 截断后右侧补空格到 VAL_W 列（保持 kv 列对齐与边框感）。
+    const valuePad = padEndVisual(valuePainted, VAL_W);
+    return keyPainted + " " + valuePad;
   });
 }
 
@@ -242,12 +265,19 @@ export function renderBanner(
   // info 栏在 logo 高度内垂直居中（照原型 KV_START）。
   const infoStart = Math.max(0, Math.floor((LOGO_H - infoLines.length) / 2));
 
+  // 整体面板在 cols 内水平居中：braille 方形图案不可拉宽，靠两侧等量空白对称。
+  // "挤左边一块"的根因——之前是左对齐贴 0 列，右侧剩余空白读作不平衡。
+  const panelW = LOGO_W + GAP + BANNER_INFO_WIDTH;
+  const totalPad = Math.max(0, opts.cols - panelW);
+  const leftPad = Math.floor(totalPad / 2);
+  const prefix = " ".repeat(leftPad);
+
   const lines: string[] = [];
   for (let i = 0; i < LOGO_H; i++) {
     const left = padEndVisual(logoColored[i] ?? "", LOGO_W + GAP);
     const infoIdx = i - infoStart;
     const right = infoLines[infoIdx] ?? "";
-    lines.push(left + right);
+    lines.push(prefix + left + right);
   }
   return lines;
 }

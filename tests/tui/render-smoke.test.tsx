@@ -50,6 +50,40 @@ describe("banner 渲染（智慧之眼 V7 定案）", () => {
     }
   });
 
+  it("整体面板在 cols 内水平居中（两侧空白对称，#171 体验迭代）", () => {
+    for (const cols of [80, 120, 160]) {
+      const lines = renderBanner(info, { cols, short: false });
+      const plain = lines.map(stripAnsi);
+      // 行宽差来自 info 栏的有无（中间 3 行带 info，最宽；上下只有 logo+GAP）。
+      // 面板逻辑宽 = 含 info 行的视觉宽 = logo(34) + GAP(3) + info(43) = 80。
+      const widths = plain.map(visualWidth);
+      const maxW = Math.max(...widths);
+      const leftPad = (plain[0]!.match(/^( *)/) ?? [""])[0]!.length;
+      const panelW = maxW - leftPad;
+      expect(panelW, "面板逻辑宽应等于 BANNER_MIN_COLS").toBe(BANNER_MIN_COLS);
+      // 左侧 padding 应等于 floor((cols - panelW) / 2)
+      const expectedPad = Math.floor((cols - panelW) / 2);
+      expect(leftPad, `${cols} 列下左侧 padding 应为 ${expectedPad}`).toBe(
+        expectedPad
+      );
+    }
+  });
+
+  it("info 栏长值中段截断：保留首段 + 尾段文件名（#171 体验迭代）", () => {
+    const longInfo = {
+      version: "0.1.0",
+      cwd: "/home/u/proj",
+      dataDir: "/home/u/.local/share/iknow/sessions",
+    };
+    const lines = renderBanner(longInfo, { cols: 80, short: false });
+    const plain = stripAnsi(lines.join("\n"));
+    // 中段截断符 + 末段保留 sessions（文件名）/ .local（路径段）
+    expect(plain).toContain("…");
+    expect(plain).toContain("sessions");
+    // 不能再以"末尾丢文件名"的纯截断形式出现
+    expect(plain).not.toMatch(/share\/iknow\s*$/);
+  });
+
   it("窄终端降级：cols < BANNER_MIN_COLS → []（#171 落地清单）", () => {
     const lines = renderBanner(info, {
       cols: BANNER_MIN_COLS - 1,

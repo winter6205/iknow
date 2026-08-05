@@ -7,6 +7,11 @@
  *
  * 解析规则：输入 trim 后以 "/" 开头先过词表；未命中 → unknown（UI 提示）；
  * 不以 "/" 开头 → message（普通消息）。
+ *
+ * Tab 补全 + 候选提示词（live filtering）：
+ *  - slashSuggestions：按当前输入前缀过滤并保持词表原顺序。
+ *  - slashComplete：唯一匹配 → `/{cmd} `；0 或 ≥2 匹配 → null。
+ *  - slashHintLines：渲染用一行短描述，便于在输入框下方紧凑展示。
  */
 
 export type TuiSlashCommand =
@@ -48,4 +53,59 @@ export function helpLines(): ReadonlyArray<string> {
     "/quit      退出（别名 /exit）",
     "Ctrl+C     打断前台运行中的 turn",
   ];
+}
+
+/** 一行短描述（用于输入框下方紧凑提示）。 */
+const HINT_DESCRIPTIONS: Record<TuiSlashCommand, string> = {
+  sessions: "打开会话列表",
+  new: "新建会话",
+  info: "当前会话元信息",
+  help: "本词表",
+  quit: "退出（别名 /exit）",
+  exit: "同 /quit",
+};
+
+export interface SlashHintLine {
+  readonly command: TuiSlashCommand;
+  readonly description: string;
+}
+
+/**
+ * 给定当前输入，返回所有匹配前缀的候选命令（按词表原顺序）。
+ * 空 / 非 "/" 开头 / 未命中 → 空数组。
+ */
+export function slashSuggestions(
+  input: string
+): ReadonlyArray<TuiSlashCommand> {
+  const text = input.trim();
+  if (!text.startsWith("/")) return [];
+  const head = text.slice(1).split(/\s+/, 1)[0] ?? "";
+  const prefix = head.toLowerCase();
+  const out: TuiSlashCommand[] = [];
+  for (const cmd of VOCABULARY) {
+    if (cmd.startsWith(prefix)) out.push(cmd as TuiSlashCommand);
+  }
+  return out;
+}
+
+/**
+ * 给定当前输入，给出一个 Tab 补全候选：唯一匹配 → `/{cmd} `（带尾随空格 +
+ * 小写），0 或 ≥2 匹配 → null（让候选 UI 自然展示）。
+ */
+export function slashComplete(input: string): string | null {
+  const matches = slashSuggestions(input);
+  if (matches.length !== 1) return null;
+  const cmd = matches[0]!;
+  return `/${cmd} `;
+}
+
+/** 给候选生成一行短描述的「补全提示行」（调用方负责渲染）。 */
+export function slashHintLines(
+  suggestions: ReadonlyArray<TuiSlashCommand>
+): ReadonlyArray<SlashHintLine> {
+  const desc = HINT_DESCRIPTIONS satisfies Record<TuiSlashCommand, string>;
+  return suggestions.map((command) => ({
+    command,
+    description: desc[command],
+  }));
 }

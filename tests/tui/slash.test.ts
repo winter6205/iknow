@@ -5,7 +5,13 @@
  * 6 命令 + 未知 /xxx + 普通消息 + 空输入 + /reset 天然不可达。
  */
 import { describe, expect, it } from "vitest";
-import { helpLines, parseTuiInput } from "../../src/tui/slash.js";
+import {
+  helpLines,
+  parseTuiInput,
+  slashComplete,
+  slashHintLines,
+  slashSuggestions,
+} from "../../src/tui/slash.js";
 
 describe("parseTuiInput: 词表命中", () => {
   it.each([
@@ -82,5 +88,69 @@ describe("helpLines", () => {
     expect(joined).toContain("Ctrl+C");
     // 无 emoji（词表层面自检）：不含常见 emoji 码区字符
     expect(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(joined)).toBe(false);
+  });
+});
+
+describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
+  it("空字符串 → 空数组", () => {
+    expect(slashSuggestions("")).toEqual([]);
+  });
+
+  it('"/" → 全部 6 条（按词表插入顺序）', () => {
+    expect(slashSuggestions("/")).toEqual([
+      "sessions",
+      "new",
+      "quit",
+      "exit",
+      "help",
+      "info",
+    ]);
+  });
+
+  it('"/q" → ["quit"]', () => {
+    expect(slashSuggestions("/q")).toEqual(["quit"]);
+  });
+
+  it('"/e" → ["exit"]', () => {
+    expect(slashSuggestions("/e")).toEqual(["exit"]);
+  });
+
+  it('"/xxx" → 空数组（无匹配）', () => {
+    expect(slashSuggestions("/xxx")).toEqual([]);
+  });
+
+  it('不以 "/" 开头 → 空数组（hello）', () => {
+    expect(slashSuggestions("hello")).toEqual([]);
+  });
+
+  it('trim 后仍以 "/" 开头 → 正常过滤', () => {
+    expect(slashSuggestions("  /q  ")).toEqual(["quit"]);
+  });
+});
+
+describe('slashComplete: 唯一匹配 → "/cmd "；0/多匹配 → null', () => {
+  it('"/q" → "/quit "（唯一匹配 + 尾随空格 + 小写）', () => {
+    expect(slashComplete("/q")).toBe("/quit ");
+  });
+
+  it('"/" → null（6 匹配）', () => {
+    expect(slashComplete("/")).toBeNull();
+  });
+
+  it('"/xxx" → null（0 匹配）', () => {
+    expect(slashComplete("/xxx")).toBeNull();
+  });
+});
+
+describe("slashHintLines: 一行短描述", () => {
+  it('传入 ["sessions", "quit"] → 形状 + 内容', () => {
+    expect(slashHintLines(["sessions", "quit"])).toEqual([
+      { command: "sessions", description: "打开会话列表" },
+      { command: "quit", description: "退出（别名 /exit）" },
+    ]);
+  });
+
+  it("空数组 → 空数组", () => {
+    expect(slashHintLines([])).toEqual([]);
   });
 });

@@ -385,4 +385,49 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     },
     LONG_TIMEOUT
   );
+
+  it(
+    'slash 提示："/" 出现 6 条候选；"/q" + Tab → 提交 /quit 退出',
+    async () => {
+      const app = makeApp([]);
+      await app.ready();
+      await waitFor(() => app.lastOutput().includes("iknow"), 8000, "startup");
+
+      // 输入 \"/\" → 输入框下方出现 6 条候选（按词表顺序）
+      await app.type("/");
+      for (const cmd of ["sessions", "new", "quit", "exit", "help", "info"]) {
+        await waitFor(
+          () => app.lastOutput().includes(`/${cmd}`),
+          8000,
+          `hint-${cmd}`
+        );
+      }
+
+      // Tab 在多匹配下无动作（hint 继续展示）
+      stdin.write("\t");
+      await delay(150);
+      expect(app.lastOutput()).toContain("/quit");
+
+      // 继续输入 \"q\" 缩窄到唯一匹配
+      await app.type("q");
+      await waitFor(
+        () => app.lastOutput().includes("/quit"),
+        8000,
+        "hint-narrowed"
+      );
+
+      // Tab 唯一匹配 → 输入框 value = \"/quit \"（补全 + 尾随空格）
+      stdin.write("\t");
+      await delay(150);
+
+      // 提交后 handleSubmit 收到 \"/quit\"；无 running-bg 直接 exit
+      let exited = false;
+      void app.instance.waitUntilExit().then(() => {
+        exited = true;
+      });
+      stdin.write("\r");
+      await waitFor(() => exited, 8000, "quit-after-tab");
+    },
+    LONG_TIMEOUT
+  );
 });

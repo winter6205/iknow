@@ -4,11 +4,11 @@
  * #146 TUI 共享渲染原子（V7 定案，原型 components.tsx 搬入收口）：
  *  - Spinner：ASCII 轮转 `| / - \` 100ms/帧（Q4a：前台动态指示，无 emoji）；
  *  - PromptInput：圆角线框内单行输入（running 转亮色即分隔，V7 操作员定稿
- *    否决输入框下方全宽分隔线）；行内编辑 = 追加 / 退格 / Enter 提交；
+ *    否决输入框下方全宽分隔线）；行内编辑 = 追加 / 退格 / Enter 提交 / Tab 补全；
  *  - useTick：动画心跳 hook（100ms）。
  */
 import { useEffect, useState } from "react";
-import type { ReactElement } from "react";
+import type { ReactElement, ReactNode } from "react";
 import { Box, Text, useInput } from "ink";
 import { tuiPalette } from "./theme.js";
 
@@ -41,10 +41,16 @@ export function Spinner(props: { readonly label?: string }): ReactElement {
  * 剥除非可打印字符：ink 对同一 chunk 的多字符输入按整串回调（快速打字 /
  * 粘贴 / pty 突发都产生多字符 chunk）；只查首字符会让 chunk 尾部的 \r
  * 等控制字符混入输入缓冲（Enter 语义丢失）。逐字符过滤后追加。
+ *
+ * 保留 `\t`（Tab）：ink 在 kittyKeyboard disabled 模式下会把 Tab 作为
+ * key.tab 单独触发，但 pty/raw 路径偶发把 Tab 当 chunk 字符塞进来；
+ * 保留它让 hint 路径的 useInput 拿到原始字符（filter 在 useInput 内部
+ * 用 key.tab 拦截，不依赖 chunk 内的 `\t`）。
  */
 function stripNonPrintable(input: string): string {
   return [...input]
-    .filter((c) => c.charCodeAt(0) >= 32 && c !== "\x7f")
+    .filter((c) => c.charCodeAt(0) >= 32 || c === "\t")
+    .filter((c) => c !== "\x7f")
     .join("");
 }
 
@@ -57,6 +63,10 @@ export interface PromptInputProps {
   readonly disabled?: boolean;
   readonly onChange: (value: string) => void;
   readonly onSubmit: (value: string) => void;
+  /** Tab 补全：唯一匹配时调用 onChange(completeResult)。返回 null = 不动作。 */
+  readonly onTabComplete?: (value: string) => string | null;
+  /** 输入框下方的轻量提示（不抢输入焦点）。 */
+  readonly hint?: ReactNode;
 }
 
 export function PromptInput(props: PromptInputProps): ReactElement {
@@ -64,6 +74,13 @@ export function PromptInput(props: PromptInputProps): ReactElement {
     (input, key) => {
       if (key.return) {
         props.onSubmit(props.value);
+        return;
+      }
+      if (key.tab) {
+        if (props.onTabComplete) {
+          const completed = props.onTabComplete(props.value);
+          if (completed !== null) props.onChange(completed);
+        }
         return;
       }
       if (key.backspace || key.delete) {
@@ -78,19 +95,24 @@ export function PromptInput(props: PromptInputProps): ReactElement {
   );
   const pal = tuiPalette;
   return (
-    <Box
-      borderStyle="round"
-      borderColor={props.active ? pal.running : pal.border}
-      paddingX={1}
-    >
-      <Text>
-        <Text color={props.active ? pal.running : pal.dim}>❯ </Text>
-        {props.value.length > 0 ? (
-          <Text color={pal.text}>{props.value}</Text>
-        ) : (
-          <Text color={pal.dim}>{props.placeholder ?? ""}</Text>
-        )}
-      </Text>
+    <Box flexDirection="column">
+      <Box
+        borderStyle="round"
+        borderColor={props.active ? pal.running : pal.border}
+        paddingX={1}
+      >
+        <Text>
+          <Text color={props.active ? pal.running : pal.dim}>❯ </Text>
+          {props.value.length > 0 ? (
+            <Text color={pal.text}>{props.value}</Text>
+          ) : (
+            <Text color={pal.dim}>{props.placeholder ?? ""}</Text>
+          )}
+        </Text>
+      </Box>
+      {props.hint !== undefined && props.hint !== null && (
+        <Box marginTop={0}>{props.hint}</Box>
+      )}
     </Box>
   );
 }

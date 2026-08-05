@@ -9,7 +9,7 @@
  * 退出语义（spec OQ3 实施细化）：存在 running-bg 会话时 `/quit` 需二次确认；
  * 确认后等待全部 in-flight turn 落盘再退出（退出不打断后台 turn，Q1a）。
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import { Box, Text, useApp, useInput, useWindowSize } from "ink";
 import type { TuiBridge } from "./hub-bridge.js";
@@ -27,7 +27,14 @@ import {
   type TuiSessionState,
   type TuiView,
 } from "./session-state.js";
-import { helpLines, parseTuiInput } from "./slash.js";
+import {
+  helpLines,
+  parseTuiInput,
+  slashComplete,
+  slashHintLines,
+  slashSuggestions,
+} from "./slash.js";
+import type { SlashHintLine } from "./slash.js";
 import { formatLiveToolEvent } from "./tool-summary.js";
 import type { TuiToolEvent } from "./deps.js";
 import { ChatView } from "./chat-view.js";
@@ -125,6 +132,13 @@ export function TuiApp(props: TuiAppProps): ReactElement {
 
   const active = sessions[activeKey] ?? initial;
   const askPending = askBridge.pending();
+
+  /** 输入框下方候选提示：仅在以 "/" 开头且候选非空时展示。派生而非 state，
+   *  避免双源同步（inputValue 单一来源）。 */
+  const inputHint: ReadonlyArray<SlashHintLine> = useMemo(() => {
+    if (!inputValue.trim().startsWith("/")) return [];
+    return slashHintLines(slashSuggestions(inputValue));
+  }, [inputValue]);
 
   /** 发一个 turn：lazy create → running-fg → postMessage → 落盘后刷新。 */
   async function sendTurn(text: string): Promise<void> {
@@ -438,6 +452,18 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           active={active.runState === "running-fg"}
           onChange={setInputValue}
           onSubmit={(v) => void handleSubmit(v)}
+          onTabComplete={slashComplete}
+          hint={
+            inputHint.length > 0 ? (
+              <Box flexDirection="column">
+                {inputHint.map((line) => (
+                  <Text key={line.command} color={pal.dim}>
+                    {`/${line.command}  ${line.description}`}
+                  </Text>
+                ))}
+              </Box>
+            ) : undefined
+          }
         />
       )}
       <StatusBar
