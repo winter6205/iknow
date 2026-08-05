@@ -157,7 +157,7 @@ async function main(): Promise<void> {
   const apiKey = env.llm.apiKey;
   const keyEnv = env.llm.apiKeyEnv;
   if (!apiKey || apiKey.length === 0) {
-    console.error("set NINE_ROUTER_API_KEY or ANTHROPIC_API_KEY");
+    console.error("set ANTHROPIC_AUTH_TOKEN (or via IKNOW_LLM_API_KEY_ENV)");
     process.exitCode = 1;
     return;
   }

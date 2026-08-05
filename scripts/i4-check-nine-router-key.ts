@@ -1,5 +1,8 @@
 /**
- * Check NINE_ROUTER_API_KEY load path vs chat auth (no secret dump).
+ * Check loader-resolved key load path vs chat auth (no secret dump).
+ * `apiKeyEnv` is the loader's SSOT name (ANTHROPIC_AUTH_TOKEN by default,
+ * overridable via IKNOW_LLM_API_KEY_ENV). We do not also print a raw
+ * process.env line - the loader fingerprint is authoritative (#173).
  */
 import { createHash } from "node:crypto";
 import { loadIknowEnv } from "../src/config/env.js";
@@ -13,24 +16,16 @@ function fingerprint(v: string | undefined): string {
 }
 
 async function main(): Promise<void> {
-  const fromProcess = process.env.NINE_ROUTER_API_KEY;
   const e = loadIknowEnv();
   const fromLoader = e.llm.apiKey;
 
-  console.log("env_name=NINE_ROUTER_API_KEY");
-  console.log("process.env present=" + Boolean(fromProcess?.trim()));
-  console.log("process.env fp=" + fingerprint(fromProcess));
-  console.log("loadIknowEnv.llm.apiKeyEnv=" + e.llm.apiKeyEnv);
-  console.log("loadIknowEnv key present=" + Boolean(fromLoader?.trim()));
-  console.log("loadIknowEnv fp=" + fingerprint(fromLoader));
-  console.log(
-    "process_equals_loader=" +
-      (Boolean(fromProcess && fromLoader) && fromProcess === fromLoader),
-  );
+  console.log("apiKeyEnv=" + e.llm.apiKeyEnv);
+  console.log("loader key present=" + Boolean(fromLoader?.trim()));
+  console.log("loader_fp=" + fingerprint(fromLoader));
   console.log("baseUrl=" + e.llm.baseUrl);
   console.log("model=" + e.llm.model);
 
-  const key = fromLoader || fromProcess;
+  const key = fromLoader;
   if (!key) {
     console.log("chat_probe=skipped_no_key");
     process.exitCode = 1;

@@ -34,7 +34,7 @@ function run(command: string) {
   });
 }
 const checks = [
-  ["env isolation", () => run('test -z "$NINE_ROUTER_KEY"')],
+  ["env isolation", () => run('test -z "$ANTHROPIC_AUTH_TOKEN"')],
   ["fs sensitivity (ssh hidden)", () => run("test ! -e ~/.ssh/id_rsa")],
   ["/etc readonly", () => run("touch /etc/sandbox-probe-write")],
   ["cwd writable", () => run("touch probe-write && rm probe-write && echo ok")],

@@ -71,7 +71,11 @@ const PAYLOADS: ReadonlyArray<Payload> = [
   { label: "C3 newline sep", cmd: "echo safe\nrm -fr /tmp/x", expect: "deny" },
 
   // CRITICAL #5 — 环境变量泄露（allowlist 拒绝 echo $X 含元字符 $）
-  { label: "C5.a echo $SECRET", cmd: "echo $NINE_ROUTER_KEY", expect: "deny" },
+  {
+    label: "C5.a echo $SECRET",
+    cmd: "echo $ANTHROPIC_AUTH_TOKEN",
+    expect: "deny",
+  },
   { label: "C5.b printenv", cmd: "printenv", expect: "deny" },
 
   // HIGH #1 — 反斜杠转义命令名

@@ -55,8 +55,8 @@ export interface ChatEnv {
  *
  * `IKNOW_WEB_SEARCH_URL`：可选 HTML 搜索端点覆写（私网后端 / 测试用）。
  * 空 → undefined（web_search 落默认 DuckDuckGo html 端点）。读取经本模块
- * 统一走 process.env > .env.local > .env 优先级（env.ts SSOT，对齐
- * NINE_ROUTER_KEY 惯例）；工具自身不直读 process.env。
+ * 统一走 process.env > .env.local > .env 优先级（env.ts SSOT，与 LLM key
+ * 同一加载链路）；工具自身不直读 process.env。
  */
 export interface WebEnv {
   searchUrl: string | undefined;
@@ -233,12 +233,13 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
     ...parseEnvFile(join(cwd, ".env.local")),
   };
 
-  // SSOT: iknow 钉死 9router 栈 - key 变量名 NINE_ROUTER_KEY、主模型 m3-combo。
-  // .env.local 只需持有密钥值本身，无需再设 IKNOW_LLM_API_KEY_ENV / IKNOW_LLM_MODEL。
+  // SSOT: key 变量名默认 = ANTHROPIC_AUTH_TOKEN（对齐实际部署 + 通用生态命名）。
+  // 历史 fallback 曾是 NINE_ROUTER_KEY（9router 专属命名），ADR-0001 现态已 superseded。
+  // .env.local 只需持有密钥值本身；如需指向别的变量名，仍可设 IKNOW_LLM_API_KEY_ENV 覆盖。
   const llmKeyEnv = envGet({
     file,
     key: "IKNOW_LLM_API_KEY_ENV",
-    fallback: "NINE_ROUTER_KEY",
+    fallback: "ANTHROPIC_AUTH_TOKEN",
   });
 
   return {

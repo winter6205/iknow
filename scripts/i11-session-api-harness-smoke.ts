@@ -370,7 +370,7 @@ async function main(): Promise<void> {
       assertions: [],
       notes: [
         "key missing, smoke skipped per plan T10 acceptance (CI without key should not fail).",
-        "Run with NINE_ROUTER_KEY (or IKNOW_LLM_API_KEY_ENV) set to exercise real serve path.",
+        "Run with ANTHROPIC_AUTH_TOKEN (or IKNOW_LLM_API_KEY_ENV) set to exercise real serve path.",
       ],
     };
     mkdirSync(OUT_DIR, { recursive: true });

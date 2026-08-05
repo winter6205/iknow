@@ -90,10 +90,10 @@ describe("SC1: hard-walls un-overrideable", () => {
     assert.ok(out.reason.includes("sensitive"));
   });
 
-  it("'echo $NINE_ROUTER_KEY' shell-metachar bypass attempt → hard-wall deny", () => {
+  it("'echo $ANTHROPIC_AUTH_TOKEN' shell-metachar bypass attempt → hard-wall deny", () => {
     const out = checkPermission({
       def: makeTool({ name: "bash", category: "execute" }),
-      input: { command: "echo $NINE_ROUTER_KEY" },
+      input: { command: "echo $ANTHROPIC_AUTH_TOKEN" },
       sources: policy.sources,
       hardWalls: policy.hardWalls,
       defaultByCategory: policy.defaultByCategory,

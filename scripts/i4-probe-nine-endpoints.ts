@@ -1,5 +1,9 @@
 /**
- * Probe 9router endpoints with the same NINE_ROUTER_API_KEY (no secret dump).
+ * Probe 9router endpoints with the loader-resolved key (no secret dump).
+ * `apiKeyEnv` is the SSOT name (ANTHROPIC_AUTH_TOKEN by default, overridable
+ * via IKNOW_LLM_API_KEY_ENV in .env.local). The loader fingerprint is the
+ * authoritative one - we do not also print a raw process.env line because
+ * the env-var name the loader actually reads is what matters (#173).
  */
 import { createHash } from "node:crypto";
 import { loadIknowEnv } from "../src/config/env.js";
@@ -18,7 +22,6 @@ async function main(): Promise<void> {
   const e = loadIknowEnv();
   const key = e.llm.apiKey;
   console.log("apiKeyEnv=" + e.llm.apiKeyEnv);
-  console.log("process_fp=" + fp(process.env.NINE_ROUTER_API_KEY));
   console.log("loader_fp=" + fp(key));
   console.log("baseUrl=" + e.llm.baseUrl);
   console.log("llm_model=" + e.llm.model);

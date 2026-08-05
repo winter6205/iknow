@@ -11,7 +11,7 @@ function readSandboxSource(): string {
 }
 
 describe("sandbox secret literal guard", () => {
-  it("does not hardcode the canonical router key name", () => {
-    assert.equal(readSandboxSource().includes("NINE_ROUTER_KEY"), false);
+  it("does not hardcode the canonical LLM key name", () => {
+    assert.equal(readSandboxSource().includes("ANTHROPIC_AUTH_TOKEN"), false);
   });
 });
