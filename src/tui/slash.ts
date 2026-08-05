@@ -99,6 +99,21 @@ export function slashComplete(input: string): string | null {
   return `/${cmd} `;
 }
 
+/**
+ * 任务 B：按候选列表 + 选中索引补全（PromptInput 内部 hintCursor 用）。
+ * cursor 越界 / suggestions 为空 → null。返回 `/{cmd} ` 形式与
+ * slashComplete 一致，调用方可直接覆盖 inputValue。
+ */
+export function slashCompleteFromList(
+  suggestions: ReadonlyArray<TuiSlashCommand>,
+  cursor: number
+): string | null {
+  if (suggestions.length === 0) return null;
+  if (cursor < 0 || cursor >= suggestions.length) return null;
+  const cmd = suggestions[cursor]!;
+  return `/${cmd} `;
+}
+
 /** 给候选生成一行短描述的「补全提示行」（调用方负责渲染）。 */
 export function slashHintLines(
   suggestions: ReadonlyArray<TuiSlashCommand>
@@ -109,3 +124,11 @@ export function slashHintLines(
     description: desc[command],
   }));
 }
+
+/**
+ * 任务 B：暴露候选短描述（PromptInput 内部渲染 hint 时用；保持外部
+ * 调用方仍可走 slashHintLines 自渲）。
+ */
+export const SLASH_HINT_DESCRIPTIONS: Readonly<
+  Record<TuiSlashCommand, string>
+> = HINT_DESCRIPTIONS;

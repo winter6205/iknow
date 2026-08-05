@@ -6,11 +6,17 @@
  *  - PromptInput：圆角线框内单行输入（running 转亮色即分隔，V7 操作员定稿
  *    否决输入框下方全宽分隔线）；行内编辑 = 追加 / 退格 / Enter 提交 / Tab 补全；
  *  - useTick：动画心跳 hook（100ms）。
+ *
+ * 任务 B：PromptInput 维护内部 hintCursor（候选选中索引），↑/↓ 在 hint
+ * 可见且有候选时调整 cursor；Enter 时若 hint 有候选则触发 onSelectHint 而
+ * 非 onSubmit（路由切换由调用方决定）；Tab 按 cursor 指向的候选补全
+ * （onTabComplete 接受 hintCursor 参数）。
  */
 import { useEffect, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { Box, Text, useInput } from "ink";
 import { tuiPalette } from "./theme.js";
+import { SLASH_HINT_DESCRIPTIONS, type TuiSlashCommand } from "./slash.js";
 
 export const SPINNER_FRAMES: ReadonlyArray<string> = ["|", "/", "-", "\\"];
 
@@ -63,25 +69,68 @@ export interface PromptInputProps {
   readonly disabled?: boolean;
   readonly onChange: (value: string) => void;
   readonly onSubmit: (value: string) => void;
-  /** Tab 补全：唯一匹配时调用 onChange(completeResult)。返回 null = 不动作。 */
-  readonly onTabComplete?: (value: string) => string | null;
+  /**
+   * 任务 B：候选 hint 选中项 Enter 触发。若 hint 可见且 suggestions 非空，
+   * Enter 走 onSelectHint(command) 而非 onSubmit(value)；否则仍走
+   * onSubmit(value)。调用方负责把 command 路由到实际命令。
+   */
+  readonly onSelectHint?: (command: TuiSlashCommand) => void;
+  /**
+   * Tab 补全（任务 B 新签名）：(value, hintCursor) → 补全字符串 / null。
+   * 旧单参形式 (value) → null 仍可工作（cursor 默认 0）。
+   */
+  readonly onTabComplete?: (value: string, hintCursor: number) => string | null;
+  /**
+   * 候选列表（任务 B）。PromptInput 内部维护 hintCursor；↑/↓ 在 hint 可见
+   * 且有候选时调整 cursor，cursor 越界自 clamp。空数组 → 隐藏 hint，cursor
+   * 不动；输入变化（值非 "/" 开头）也重置 cursor。
+   */
+  readonly hintSuggestions?: ReadonlyArray<TuiSlashCommand>;
   /** 输入框下方的轻量提示（不抢输入焦点）。 */
   readonly hint?: ReactNode;
 }
 
 export function PromptInput(props: PromptInputProps): ReactElement {
+  const suggestions = props.hintSuggestions ?? [];
+  const hasHint = suggestions.length > 0;
+  const [hintCursor, setHintCursor] = useState(0);
+  // 输入框内容变化（非候选时）→ cursor 重置为 0
+  useEffect(() => {
+    if (!hasHint) {
+      setHintCursor(0);
+      return;
+    }
+    if (hintCursor >= suggestions.length) setHintCursor(suggestions.length - 1);
+  }, [props.value, hasHint, suggestions.length, hintCursor]);
   useInput(
     (input, key) => {
       if (key.return) {
-        props.onSubmit(props.value);
+        if (hasHint && props.onSelectHint) {
+          const idx = Math.max(0, Math.min(hintCursor, suggestions.length - 1));
+          props.onSelectHint(suggestions[idx]!);
+        } else {
+          props.onSubmit(props.value);
+        }
         return;
       }
       if (key.tab) {
         if (props.onTabComplete) {
-          const completed = props.onTabComplete(props.value);
+          const completed = props.onTabComplete(props.value, hintCursor);
           if (completed !== null) props.onChange(completed);
         }
         return;
+      }
+      // ↑/↓ 仅在 hint 有候选时调整 cursor（无候选时让 keystroke 落入
+      // stripNonPrintable → 走默认追加路径，避免空 inputValue 也能滚）
+      if (hasHint) {
+        if (key.upArrow) {
+          setHintCursor((c) => Math.max(0, c - 1));
+          return;
+        }
+        if (key.downArrow) {
+          setHintCursor((c) => Math.min(suggestions.length - 1, c + 1));
+          return;
+        }
       }
       if (key.backspace || key.delete) {
         props.onChange(props.value.slice(0, -1));
@@ -94,6 +143,10 @@ export function PromptInput(props: PromptInputProps): ReactElement {
     { isActive: !props.disabled }
   );
   const pal = tuiPalette;
+  // 任务 B：hintSuggestions 提供时由 PromptInput 内部渲染（带 cursor
+  // 高亮）；外部 hint prop 仍可单独用（兼容旧用法）。
+  const renderInternalHint =
+    props.hintSuggestions !== undefined && suggestions.length > 0;
   return (
     <Box flexDirection="column">
       <Box
@@ -110,8 +163,25 @@ export function PromptInput(props: PromptInputProps): ReactElement {
           )}
         </Text>
       </Box>
-      {props.hint !== undefined && props.hint !== null && (
-        <Box marginTop={0}>{props.hint}</Box>
+      {renderInternalHint ? (
+        <Box flexDirection="column" marginTop={0}>
+          {suggestions.map((cmd, i) => {
+            const selected = i === hintCursor;
+            const desc = SLASH_HINT_DESCRIPTIONS[cmd];
+            return (
+              <Text
+                key={cmd}
+                color={selected ? pal.selected : pal.dim}
+                inverse={selected}
+              >
+                {`/${cmd}  ${desc}`}
+              </Text>
+            );
+          })}
+        </Box>
+      ) : (
+        props.hint !== undefined &&
+        props.hint !== null && <Box marginTop={0}>{props.hint}</Box>
       )}
     </Box>
   );

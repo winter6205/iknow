@@ -11,9 +11,9 @@
  *
  * 与原型 renderVariantC 的差异（均为正式实现的有意裁剪）：
  *  - info 栏仅 version / cwd / dataDir（sessionId / tools 等运行时项去掉，参数传入）；
- *  - 去掉外框与 header/hint 行（V7 布局：banner 之上还有会话条 / 分隔线，框由
- *    输入框线框承担；docs/design/DESIGN-BANNER.md 布局核心 = 图案居左 +
- *    info 栏居右并排）；
+ *  - V7 早期搬入无外框：#171 落地后给 banner 自身加单线外框
+ *    （borderStyle="single"，与输入框线框 borderStyle="round" 区分），
+ *    顶/底框线内嵌居中 title `◆ iknow`，让启动面板有独立边界；
  *  - cols < BANNER_MIN_COLS → 返回 []（窄终端降级，#171 落地清单）；
  *  - SHORT 档返回单行 `◆ iknow <version>`（原型 L7 极简 + V7 SHORT 档风格）。
  *
@@ -22,6 +22,7 @@
  *    38;2;185;127;28（金棕 ~#b97f1c）；
  *  - 否则 256 色 → 22 #005f00 / 136 #af8700（CIE76 最近候选）；
  *  - NO_COLOR 或非 TTY → 不上色（paint 退化为 no-op）。
+ *  - 外框走独立 dim 上色（与 logo 双色分层解耦，颜色用 FG_BORDER）。
  */
 import { EYE_GOLD_LINES, EYE_LINES } from "./banner-art.js";
 
@@ -37,6 +38,10 @@ const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
 const FG_TITLE = "\x1b[38;5;255m";
 const FG_DIM = "\x1b[38;5;244m";
+/** 外框色（#171 任务 A：banner 自带单线外框，与输入框线框的 round 风格区分；
+ *  走 dim 中性灰，遵循 ink 256 色 244 ≈ #8a877e，与 theme.ts tuiPalette.dim
+ *  同源，避免引入硬编码 hex）。 */
+const FG_BORDER = "\x1b[38;5;244m";
 
 function useColor(): boolean {
   if (process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== "") {
@@ -207,13 +212,33 @@ const KEY_W = Math.max(...KV_KEYS.map(([k]) => visualWidth(k))) + KEY_EXTRA;
  */
 export const BANNER_INFO_WIDTH = KEY_W + 1 + VAL_W;
 
+// ── 外框常量（任务 A：banner 自带单线外框）─────────────────────────
+//
+// 用 ANSI 手写框线字符（保持 renderBanner 是纯函数、返回 string[]，
+// 不依赖 React）。单线风格（borderStyle="single"），与输入框线框
+// borderStyle="round" 区分开。角字符 + 横竖线均为 1 列宽。
+const BOX_TL = "┌";
+const BOX_TR = "┐";
+const BOX_BL = "└";
+const BOX_BR = "┘";
+const BOX_H = "─";
+const BOX_V = "│";
+/** 框顶/框底内嵌 title（◆ 占 1 列宽，居中对称）。 */
+const BOX_TITLE = "◆ iknow tui ◆";
+/** 框宽占用列数（左 +1、右 +1 = 2）。用于 BANNER_MIN_COLS 同步 +2。 */
+const BOX_FRAMING_OVERHEAD = 2;
+
 /**
- * 窄终端降级阈值（#171）：banner 面板总宽 = 图案宽 + GAP + info 栏宽。
+ * 窄终端降级阈值（#171 + 任务 A 加框后）：banner 面板总宽 =
+ * 图案宽 + GAP + info 栏宽 + BOX_FRAMING_OVERHEAD（左右框各 1 列）。
  * cols < BANNER_MIN_COLS → renderBanner 返回 []。
- * GAP=3 后最小宽度 = 34 + 3 + (10 + 1 + 32) = 80 列。
+ * 加框后最小宽度 = 34 + 3 + 43 + 2 = 82 列。
  */
 export const BANNER_MIN_COLS =
-  visualWidth(EYE_LINES[0] ?? "") + GAP + BANNER_INFO_WIDTH;
+  visualWidth(EYE_LINES[0] ?? "") +
+  GAP +
+  BANNER_INFO_WIDTH +
+  BOX_FRAMING_OVERHEAD;
 
 // ── renderBanner ─────────────────────────────────────────────────────
 
@@ -243,9 +268,10 @@ function buildInfoLines(info: BannerInfo): string[] {
 /**
  * 渲染启动 banner（纯函数，不触碰 React）。
  *
- * 返回 ANSI 上色行（无外框）：图案居左 + info 栏居右并排，info 栏在图案高度内
- * 垂直居中。cols < BANNER_MIN_COLS → []（窄终端降级）；short=true → 单行
- * `◆ iknow <version>`（原型 L7 极简 + V7 SHORT 档）。
+ * 返回 ANSI 上色行（含单线外框，任务 A）：图案居左 + info 栏居右并排，
+ * 外框包整体（框顶/框底内嵌居中 title `◆ iknow tui ◆`），info 栏在图案
+ * 高度内垂直居中。cols < BANNER_MIN_COLS → []（窄终端降级）；short=true
+ * → 单行 `◆ iknow <version>`（原型 L7 极简 + V7 SHORT 档，无外框）。
  */
 export function renderBanner(
   info: BannerInfo,
@@ -265,19 +291,39 @@ export function renderBanner(
   // info 栏在 logo 高度内垂直居中（照原型 KV_START）。
   const infoStart = Math.max(0, Math.floor((LOGO_H - infoLines.length) / 2));
 
-  // 整体面板在 cols 内水平居中：braille 方形图案不可拉宽，靠两侧等量空白对称。
-  // "挤左边一块"的根因——之前是左对齐贴 0 列，右侧剩余空白读作不平衡。
-  const panelW = LOGO_W + GAP + BANNER_INFO_WIDTH;
+  // 整体面板（含外框）在 cols 内水平居中：braille 方形图案不可拉宽，
+  // 靠两侧等量空白对称。
+  // panelW = 框内宽（LOGO_W + GAP + BANNER_INFO_WIDTH）+ 框线开销（左右各 1 列）。
+  const innerW = LOGO_W + GAP + BANNER_INFO_WIDTH;
+  const panelW = innerW + BOX_FRAMING_OVERHEAD;
   const totalPad = Math.max(0, opts.cols - panelW);
   const leftPad = Math.floor(totalPad / 2);
   const prefix = " ".repeat(leftPad);
 
+  // 框顶 / 框底（带居中 title）：横线总宽 = innerW，title 居中嵌入。
+  const titleVisualW = visualWidth(BOX_TITLE);
+  const titleSideW = Math.floor((innerW - titleVisualW) / 2);
+  const titleRightW = innerW - titleVisualW - titleSideW;
+  const topBorder =
+    BOX_TL +
+    BOX_H.repeat(titleSideW) +
+    paint(BOX_TITLE, BOLD + FG_TITLE) +
+    BOX_H.repeat(titleRightW) +
+    BOX_TR;
+  const bottomBorder = BOX_BL + BOX_H.repeat(innerW) + BOX_BR;
+
+  const borderPainted = (s: string): string => paint(s, FG_BORDER);
+
   const lines: string[] = [];
+  lines.push(prefix + borderPainted(topBorder));
   for (let i = 0; i < LOGO_H; i++) {
     const left = padEndVisual(logoColored[i] ?? "", LOGO_W + GAP);
     const infoIdx = i - infoStart;
     const right = infoLines[infoIdx] ?? "";
-    lines.push(prefix + left + right);
+    // 中段行：左框线 + 内文 + 右框线；内文视觉宽 = innerW。
+    const inner = padEndVisual(left + right, innerW);
+    lines.push(prefix + borderPainted(BOX_V) + inner + borderPainted(BOX_V));
   }
+  lines.push(prefix + borderPainted(bottomBorder));
   return lines;
 }

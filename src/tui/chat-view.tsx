@@ -8,6 +8,11 @@
  *  - running-fg → 底部 spinner；turn 进行中工具事件尾部（live 摘要流）。
  *
  * 流式（#147）拓展点：turn 完成回调处整段替换渲染；未来增量渲染挂载于此。
+ *
+ * 滚动（任务 A）：消息级切片——`scroll = 0` 展示全部（auto-follow 底），
+ * `scroll = k` 截掉最新 k 条（用户向上滚动查看更早内容时保留早期可见；
+ * 按 End / 新 turn 完成 → scroll 重置为 0）。`scroll > 0` 时顶部加 dim
+ * 提示「↓ N 条新消息」告知可向下滚回底部。
  */
 import type { ReactElement } from "react";
 import { Box, Text } from "ink";
@@ -75,16 +80,35 @@ export interface ChatViewProps {
   readonly liveToolLines: ReadonlyArray<string>;
   /** askUser 待决提示（undefined = 无 pending ask）。 */
   readonly askLine: string | undefined;
+  /**
+   * 消息级滚动偏移（任务 A）：0 = 显示全部（auto-follow 底）；
+   * k = 截掉最新 k 条（用户已向上滚 k 条查看更早内容）。
+   * 负数 / 越界由调用方负责 clamp。
+   */
+  readonly scroll?: number;
 }
 
 export function ChatView(props: ChatViewProps): ReactElement {
   const { session, cols } = props;
   const pal = tuiPalette;
   const statusMap = toolResultStatusMap(session.messages);
+  const total = session.messages.length;
+  const rawScroll = props.scroll ?? 0;
+  // 调用方应已 clamp；此处兜底防越界。
+  const scroll = Math.max(0, Math.min(rawScroll, Math.max(0, total - 1)));
+  const visible = session.messages.slice(0, Math.max(0, total - scroll));
+  const hiddenNew = scroll; // 顶部被截掉的最新消息数
   return (
     <Box flexDirection="column" flexGrow={1}>
+      {hiddenNew > 0 && (
+        <Box marginBottom={1}>
+          <Text
+            color={pal.dim}
+          >{`↓ ${hiddenNew} 条新消息（End 回到底部）`}</Text>
+        </Box>
+      )}
       <Box flexDirection="column">
-        {session.messages.map((m, i) => (
+        {visible.map((m, i) => (
           <MessageBlocks
             key={i}
             message={m}

@@ -31,10 +31,9 @@ import {
   helpLines,
   parseTuiInput,
   slashComplete,
-  slashHintLines,
   slashSuggestions,
+  type TuiSlashCommand,
 } from "./slash.js";
-import type { SlashHintLine } from "./slash.js";
 import { formatLiveToolEvent } from "./tool-summary.js";
 import type { TuiToolEvent } from "./deps.js";
 import { ChatView } from "./chat-view.js";
@@ -100,6 +99,10 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     Record<string, ReadonlyArray<string>>
   >({});
   const [pendingQuit, setPendingQuit] = useState(false);
+  // 任务 A：聊天区域消息级滚动偏移（0 = 底/auto-follow，>0 = 向上滚）。
+  // 新 turn 完成时重置为 0；PgUp/PgDn/Home/End 调整（与 PromptInput 的
+  // ↑/↓ 不冲突，避键）。
+  const [chatScroll, setChatScroll] = useState(0);
 
   const aborters = useRef(new Map<string, AbortController>());
   const inflightPromises = useRef(new Set<Promise<unknown>>());
@@ -134,10 +137,11 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   const askPending = askBridge.pending();
 
   /** 输入框下方候选提示：仅在以 "/" 开头且候选非空时展示。派生而非 state，
-   *  避免双源同步（inputValue 单一来源）。 */
-  const inputHint: ReadonlyArray<SlashHintLine> = useMemo(() => {
+   *  避免双源同步（inputValue 单一来源）。任务 B：候选列表传给 PromptInput
+   *  内部维护 cursor + 渲染。 */
+  const inputHintSuggestions: ReadonlyArray<TuiSlashCommand> = useMemo(() => {
     if (!inputValue.trim().startsWith("/")) return [];
-    return slashHintLines(slashSuggestions(inputValue));
+    return slashSuggestions(inputValue);
   }, [inputValue]);
 
   /** 发一个 turn：lazy create → running-fg → postMessage → 落盘后刷新。 */
@@ -226,6 +230,8 @@ export function TuiApp(props: TuiAppProps): ReactElement {
         };
       });
       setLiveToolLines((prev) => ({ ...prev, [targetId]: [] }));
+      // 任务 A：新 turn 完成 → 滚动重置为底部（auto-follow）
+      setChatScroll(0);
       if (stopReason === "cancelled") {
         setNotice({ lines: ["已打断当前 turn（未落盘）。"] });
       }
@@ -251,6 +257,8 @@ export function TuiApp(props: TuiAppProps): ReactElement {
         };
       });
       setNotice({ lines: [`刷新会话失败：${describeError(err)}`] });
+      // 任务 A：刷新失败也重置滚动（与成功路径保持一致 — turn 已结束）
+      setChatScroll(0);
     }
   }
 
@@ -260,6 +268,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     setActiveKey(DRAFT_SESSION_ID);
     setView("chat");
     setNotice(undefined);
+    setChatScroll(0);
   }
 
   async function openSessionAt(index: number): Promise<void> {
@@ -376,7 +385,9 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     }
   }
 
-  // 全局键盘：Ctrl+C 打断前台 turn（Q1a：running-bg 不受影响）。
+  // 全局键盘：Ctrl+C 打断前台 turn（Q1a：running-bg 不受影响）；
+  // PgUp/PgDn/Home/End 调整聊天区域滚动偏移（任务 A，避开 PromptInput 的
+  // ↑/↓ 防止键位竞争）。仅在 chat 视图下生效（list 视图由 ListView 独占）。
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
       if (canInterrupt(active)) {
@@ -384,6 +395,22 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       } else {
         setNotice({ lines: ["Ctrl+C：无前台运行中的 turn；/quit 退出。"] });
       }
+      return;
+    }
+    if (view !== "chat") return;
+    const total = active.messages.length;
+    if (total === 0) return;
+    if (key.pageUp) {
+      // 单条消息级滚动：PgUp 向上滚 1 条
+      setChatScroll((s) => Math.min(s + 1, total - 1));
+    } else if (key.pageDown) {
+      setChatScroll((s) => Math.max(0, s - 1));
+    } else if (key.home) {
+      // Home = 顶部（隐藏最新 total-1 条，保留最早 1 条）
+      setChatScroll(Math.max(0, total - 1));
+    } else if (key.end) {
+      // End = 底部（auto-follow 重置）
+      setChatScroll(0);
     }
   });
 
@@ -432,6 +459,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
                 } 输入 y/n`
               : undefined
           }
+          scroll={chatScroll}
         />
       )}
       {notice && (
@@ -452,18 +480,13 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           active={active.runState === "running-fg"}
           onChange={setInputValue}
           onSubmit={(v) => void handleSubmit(v)}
-          onTabComplete={slashComplete}
-          hint={
-            inputHint.length > 0 ? (
-              <Box flexDirection="column">
-                {inputHint.map((line) => (
-                  <Text key={line.command} color={pal.dim}>
-                    {`/${line.command}  ${line.description}`}
-                  </Text>
-                ))}
-              </Box>
-            ) : undefined
-          }
+          onSelectHint={(cmd) => void handleSubmit(`/${cmd}`)}
+          // 任务 B：Tab 仍走唯一匹配补全（slashComplete，行为不变以保留
+          // 旧 e2e「Tab 多匹配不动作」语义）；候选选中用 Enter + onSelectHint
+          // 触发。PromptInput 内部维护 cursor，路由 onSelectHint 而非
+          // onSubmit(value)，避免 raw 文本解析绕开 cursor 选中。
+          onTabComplete={(value) => slashComplete(value)}
+          hintSuggestions={inputHintSuggestions}
         />
       )}
       <StatusBar

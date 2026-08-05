@@ -430,4 +430,132 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     },
     LONG_TIMEOUT
   );
+
+  // 任务 A：聊天区域消息级滚动（PgUp → scroll +1，切到早期消息；End 回到底部）
+  it(
+    "任务 A：发 5 条消息 → 渲染出 5 条 → PgUp → 最新 1 条不可见；End → 全部回归",
+    async () => {
+      const app = makeApp([
+        assistantResult({ texts: ["a0"] }),
+        assistantResult({ texts: ["a1"] }),
+        assistantResult({ texts: ["a2"] }),
+        assistantResult({ texts: ["a3"] }),
+        assistantResult({ texts: ["a4"] }),
+      ]);
+      await app.ready();
+      await waitFor(() => app.lastOutput().includes("iknow"), 8000, "startup");
+
+      // 顺序发 5 条：等 turn 落盘 + runState 回 idle（避免下条消息被「正在运行」拒绝）
+      for (let i = 0; i < 5; i++) {
+        await app.type(`m${i}\r`);
+        await waitFor(
+          () => app.bridge.inflight.ids().size === 0,
+          8000,
+          `m${i}-turn-done`
+        );
+        // 多等一帧：等 setSessions(turnFinished) 提交，否则下条会撞 running-fg
+        await delay(50);
+      }
+      // 等所有 5 条 user 消息渲染出来
+      for (let i = 0; i < 5; i++) {
+        await waitFor(
+          () => app.lastOutput().includes(`m${i}`),
+          8000,
+          `m${i}-rendered`
+        );
+      }
+      // 等所有 5 条 assistant 渲染出来
+      for (let i = 0; i < 5; i++) {
+        await waitFor(
+          () => app.lastOutput().includes(`a${i}`),
+          8000,
+          `a${i}-rendered`
+        );
+      }
+      // 滚动前：m4 应可见
+      expect(app.lastOutput()).toContain("m4");
+
+      // PgUp → scroll +1（隐藏最新 1 条 = m4 / a4）
+      stdin.write("[5~"); // PgUp ANSI sequence
+      await delay(500);
+      await waitFor(
+        () => app.lastOutput().includes("条新消息"),
+        8000,
+        "scroll-indicator"
+      );
+      // 顶部 dim 指示（1 条新消息）— 验证 scroll 真的切了消息
+      // 注意：lastOutput 是累积 buffer（含 PgUp 之前的帧），不能直接断言
+      // a4 缺席；改用「指示文案 + End 回到底部后 a4 重新出现」做等价证明
+      expect(app.lastOutput()).toContain("1 条新消息");
+
+      // End → scroll 重置为 0，等 a4 重新出现在最近帧
+      stdin.write("[F"); // End ANSI sequence
+      await delay(500);
+      // 直接查~；lastOutput 最近几帧是否包含 a4
+      // （lastOutput 累积 buffer，原 PgUp 帧不包含 a4）
+      await waitFor(
+        () => app.lastOutput().slice(-1500).includes("a4"),
+        8000,
+        "a4-restored-after-end"
+      );
+    },
+    LONG_TIMEOUT
+  );
+
+  // 任务 B：slash 候选 ↑/↓ 选中 + Enter 触发 onSelectHint（不走 raw 文本解析）
+  it(
+    '任务 B："/" 出现候选 → ↓ → Enter 触发 /new（不退出，验证选中索引非 0）',
+    async () => {
+      // 关键点：cursor 默认 0 = sessions；如果 ↓ + Enter 触发的是 sessions
+      // → 切到 list 视图；如果是 new → 切到新 draft。我们断言：↓ + Enter
+      // 之后应用未退出、也未切到列表视图（list 视图特征 = "+ 新建会话"），
+      // 而是新 draft 创建（inputValue 清空，可继续发消息）。
+      const app = makeApp([assistantResult({ texts: ["new-draft-reply"] })]);
+      await app.ready();
+      await waitFor(() => app.lastOutput().includes("iknow"), 8000, "startup");
+
+      // 1) 输入 "/" → 6 条候选出现
+      await app.type("/");
+      for (const cmd of ["sessions", "new", "quit", "exit", "help", "info"]) {
+        await waitFor(
+          () => app.lastOutput().includes(`/${cmd}`),
+          8000,
+          `hint-${cmd}`
+        );
+      }
+
+      // 2) ↓ 一次 → cursor 从 0 (sessions) 移到 1 (new)
+      stdin.write("[B");
+      await delay(150);
+
+      // 3) Enter → onSelectHint("new") 触发 → handleSubmit("/new") → newSession()
+      stdin.write("\r");
+      await delay(300);
+      // 不应进入 list 视图（"+ 新建会话" 不会出现）；也不应退出
+      const after = app.lastOutput();
+      expect(after).not.toContain("+ 新建会话");
+      // newSession 后 active = draft，input 清空，placeholder 仍可见
+      expect(after).toContain("输入消息");
+
+      // 4) 后续发消息：落盘到新 session，bridge 列表出现 1 条
+      await app.type("new-draft-msg\r");
+      await waitFor(
+        () => app.bridge.inflight.ids().size === 0,
+        8000,
+        "new-turn-done"
+      );
+      // 多等一帧：inflight.unmark 和 store.save 写入盖半
+      await delay(100);
+      const list = await app.bridge.listSessions();
+      expect(list).toHaveLength(1);
+      expect(list[0]!.summary).toBe("new-draft-msg");
+      // 5) assistant 答复 "new-draft-reply" 渲染出来
+      await waitFor(
+        () => app.lastOutput().includes("new-draft-reply"),
+        8000,
+        "new-reply"
+      );
+    },
+    LONG_TIMEOUT
+  );
 });

@@ -3,6 +3,7 @@
  *
  * #146 渲染冒烟（原型 smoke-adaptive 同款模式：renderToString 多宽度断言）：
  *  - banner：40/80/120 列无溢出行；窄终端降级返回 []；SHORT 档单行；
+ *    任务 A 加框后断言 ┌/┐ 角字符、title 文本、外框列宽 +2。
  *  - ListView：列内容（summary + 相对时间 + [运行中]）+ 伪条目；
  *  - ChatView：markdown 渲染 + 无溢出行（40/80/120）。
  * UI 元素层无 emoji 约束（Q4）：对渲染输出断言常见 emoji 码区缺席。
@@ -42,25 +43,27 @@ describe("banner 渲染（智慧之眼 V7 定案）", () => {
     dataDir: "/home/u/.iknow",
   };
 
-  it("80/120 列：多行输出且无溢出行", () => {
-    for (const cols of [80, 120, 160]) {
+  it("82/120 列：多行输出且无溢出行（加框后 BANNER_MIN_COLS=82）", () => {
+    for (const cols of [82, 120, 160]) {
       const lines = renderBanner(info, { cols, short: false });
       expect(lines.length).toBeGreaterThan(1);
       assertNoOverflow(lines.join("\n"), cols);
     }
   });
 
-  it("整体面板在 cols 内水平居中（两侧空白对称，#171 体验迭代）", () => {
-    for (const cols of [80, 120, 160]) {
+  it("整体面板在 cols 内水平居中（两侧空白对称，#171 体验迭代 + 任务 A 加框）", () => {
+    for (const cols of [82, 120, 160]) {
       const lines = renderBanner(info, { cols, short: false });
       const plain = lines.map(stripAnsi);
       // 行宽差来自 info 栏的有无（中间 3 行带 info，最宽；上下只有 logo+GAP）。
-      // 面板逻辑宽 = 含 info 行的视觉宽 = logo(34) + GAP(3) + info(43) = 80。
+      // 面板逻辑宽 = 含 info 行的视觉宽 = logo(34) + GAP(3) + info(43) + 框(2) = 82。
       const widths = plain.map(visualWidth);
       const maxW = Math.max(...widths);
       const leftPad = (plain[0]!.match(/^( *)/) ?? [""])[0]!.length;
       const panelW = maxW - leftPad;
-      expect(panelW, "面板逻辑宽应等于 BANNER_MIN_COLS").toBe(BANNER_MIN_COLS);
+      expect(panelW, "面板逻辑宽应等于 BANNER_MIN_COLS（含外框 +2）").toBe(
+        BANNER_MIN_COLS
+      );
       // 左侧 padding 应等于 floor((cols - panelW) / 2)
       const expectedPad = Math.floor((cols - panelW) / 2);
       expect(leftPad, `${cols} 列下左侧 padding 应为 ${expectedPad}`).toBe(
@@ -69,13 +72,33 @@ describe("banner 渲染（智慧之眼 V7 定案）", () => {
     }
   });
 
+  it("任务 A：banner 外框存在（单线 ┌─┐ + 居中 title + 框宽 +2）", () => {
+    const lines = renderBanner(info, { cols: 120, short: false });
+    const plain = lines.map(stripAnsi);
+    // 首行 = 框顶，含 ┌/┐ 角 + title 文本（可能前置居中 padding）
+    const top = plain[0]!;
+    expect(top).toMatch(/^ *┌─*◆ iknow tui ◆─*┐ *$/);
+    // 末行 = 框底，含 └/┘ 角
+    const bottom = plain[plain.length - 1]!;
+    expect(bottom).toMatch(/^ *└─+┘ *$/);
+    // 中段行 = 居中 padding + │ + 内文 + │（同 padding）
+    for (let i = 1; i < plain.length - 1; i++) {
+      expect(plain[i]).toMatch(/^ *│.*│ *$/);
+    }
+    // 整体面板宽（首行去除居中 padding）= BANNER_MIN_COLS
+    const topLeftPad = (top.match(/^( *)/) ?? [""])[0]!.length;
+    const topRightPad = (top.match(/( *)$/) ?? [""])[0]!.length;
+    expect(visualWidth(top) - topLeftPad - topRightPad).toBe(BANNER_MIN_COLS);
+  });
+
   it("info 栏长值中段截断：保留首段 + 尾段文件名（#171 体验迭代）", () => {
     const longInfo = {
       version: "0.1.0",
       cwd: "/home/u/proj",
       dataDir: "/home/u/.local/share/iknow/sessions",
     };
-    const lines = renderBanner(longInfo, { cols: 80, short: false });
+    // cols=82 是任务 A 加框后的 BANNER_MIN_COLS；≥82 才有 banner 输出。
+    const lines = renderBanner(longInfo, { cols: 82, short: false });
     const plain = stripAnsi(lines.join("\n"));
     // 中段截断符 + 末段保留 sessions（文件名）/ .local（路径段）
     expect(plain).toContain("…");
@@ -93,7 +116,7 @@ describe("banner 渲染（智慧之眼 V7 定案）", () => {
   });
 
   it("SHORT 档（矮终端）：单行简化", () => {
-    const lines = renderBanner(info, { cols: 80, short: true });
+    const lines = renderBanner(info, { cols: 82, short: true });
     expect(lines.length).toBe(1);
     expect(stripAnsi(lines[0]!)).toContain("iknow");
   });

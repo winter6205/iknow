@@ -9,6 +9,7 @@ import {
   helpLines,
   parseTuiInput,
   slashComplete,
+  slashCompleteFromList,
   slashHintLines,
   slashSuggestions,
 } from "../../src/tui/slash.js";
@@ -152,5 +153,28 @@ describe("slashHintLines: 一行短描述", () => {
 
   it("空数组 → 空数组", () => {
     expect(slashHintLines([])).toEqual([]);
+  });
+});
+
+describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
+  const ALL = ["sessions", "new", "quit", "exit", "help", "info"] as const;
+
+  it("cursor=0 → /sessions （首条）", () => {
+    expect(slashCompleteFromList(ALL, 0)).toBe("/sessions ");
+  });
+
+  it("cursor=2 → /quit （按词表顺序第 3 条）", () => {
+    expect(slashCompleteFromList(ALL, 2)).toBe("/quit ");
+  });
+
+  it("cursor 越界上 / 下 / 空列表 → null", () => {
+    expect(slashCompleteFromList(ALL, -1)).toBeNull();
+    expect(slashCompleteFromList(ALL, 6)).toBeNull();
+    expect(slashCompleteFromList(ALL, 999)).toBeNull();
+    expect(slashCompleteFromList([], 0)).toBeNull();
+  });
+
+  it("单元素列表 + cursor=0 → 该元素", () => {
+    expect(slashCompleteFromList(["quit"], 0)).toBe("/quit ");
   });
 });
