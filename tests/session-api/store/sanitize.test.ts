@@ -242,6 +242,51 @@ describe("sanitizeSessionFile — structural rejection", () => {
   });
 });
 
+// -- thinking blocks（#151 真实 adapter 产出）------------------------------
+
+describe("sanitizeSessionFile — thinking / redacted_thinking blocks", () => {
+  // 回归：真实 LLM turn 的 assistant 消息含 thinking block（#151），
+  // 深校验必须放行，否则含 thinking 的会话 load 全部 schema_invalid
+  // （真实 TUI/pty 冒烟抓到的缺陷，2026-08-05）。
+  it("accepts assistant messages with valid thinking blocks", () => {
+    const messages = [
+      userMsg("你好"),
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "让我想想", signature: "sig-1" },
+          text("你好！"),
+        ],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "redacted_thinking", data: "opaque-data" }],
+      },
+    ] as unknown as ReadonlyArray<AnthropicNativeMessage>;
+    const sanitized = sanitizeSessionFile({ ...v1File(), messages });
+    assert.equal(sanitized.messages.length, 3);
+  });
+
+  it("rejects malformed thinking blocks → 'messages'", () => {
+    const cases: unknown[] = [
+      [{ type: "thinking", thinking: "x" }], // missing signature
+      [{ type: "thinking", signature: "s" }], // missing thinking
+      [{ type: "redacted_thinking" }], // missing data
+    ];
+    for (const content of cases) {
+      assert.throws(
+        () =>
+          sanitizeSessionFile({
+            ...v1File(),
+            messages: [{ role: "assistant", content }],
+          }),
+        isSchemaInvalid("messages"),
+        `content ${JSON.stringify(content)} must be rejected`
+      );
+    }
+  });
+});
+
 // -- sanitizeSessionFile — complete v2 passes through -----------------------
 
 describe("sanitizeSessionFile — schemaVersion 2 complete file", () => {

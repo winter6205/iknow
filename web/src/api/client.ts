@@ -3,6 +3,7 @@ import type {
   CreateSessionResponse,
   GetSessionResponse,
   HealthResponse,
+  PostMessageRequest,
   PostMessageResponse,
   ResetSessionResponse,
   SessionListItem,
@@ -24,7 +25,7 @@ const API = "/api/v1";
  * Defaults to `/api/v1/traces` so the existing `iknow serve` reverse-proxy
  * path works without env wiring. Override with VITE_TRACE_API_BASE when the
  * standalone `iknow trace` process lives on a different origin (e.g.
- * `http://127.0.0.1:8788`). Exported pure for unit tests.
+ * `http://127.0.0.1:24881`). Exported pure for unit tests.
  */
 export function resolveTraceApiBase(envValue: string | undefined): string {
   if (typeof envValue === "string" && envValue.trim().length > 0) {
@@ -130,16 +131,27 @@ export function getSessionHistory(
   return request(`${API}/sessions/${encodeURIComponent(id)}`, {}, signal);
 }
 
+export type PostMessageOptions = {
+  /** 每请求 thinking 覆盖（T5）；未提供则 body 不带 thinking 字段（后端走缓存配置）。 */
+  thinking?: PostMessageRequest["thinking"];
+};
+
 export function postMessage(
   id: string,
   text: string,
+  opts: PostMessageOptions = {},
   signal?: AbortSignal
 ): Promise<PostMessageResponse> {
+  const body: PostMessageRequest = {
+    text,
+    // Explicit undefined 省略：JSON.stringify 会丢掉 undefined 字段。
+    ...(opts.thinking !== undefined ? { thinking: opts.thinking } : {}),
+  };
   return request(
     `${API}/sessions/${encodeURIComponent(id)}/messages`,
     {
       method: "POST",
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(body),
     },
     signal
   );

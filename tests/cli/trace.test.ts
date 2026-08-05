@@ -4,7 +4,7 @@
  * Covers:
  *   - parseArgs recognizes the `trace` positional
  *   - flag parsing: --trace-out / --port / --host / --max-bytes
- *   - defaults: port 8788, host 127.0.0.1
+ *   - defaults: port 24881, host 127.0.0.1
  *   - bad --port throws a parse error
  *   - integration: startTraceServe from parsed opts → /api/v1/health live
  */
@@ -36,15 +36,16 @@ describe("parseArgs — `trace` subcommand", () => {
     assert.equal(parsed.host, "127.0.0.1");
   });
 
-  it("defaults port to 8788 when --port omitted", () => {
+  it("defaults port to 24881 when --port omitted", () => {
     const parsed = parseArgs({ argv: ["trace"] });
     assert.equal(parsed.command, "trace");
-    assert.equal(parsed.port, 8788);
+    assert.equal(parsed.port, 24881);
   });
 
   // Sentinel regression: `iknow trace --port 8787` must honor the explicit
-  // value, NOT be silently bumped to 8788 (which would collide with serve).
-  it("honors explicit --port 8787 instead of bumping to 8788", () => {
+  // value, NOT be silently bumped to the default 24881 (which would collide
+  // with serve's 8787 only by user-supplied coincidence).
+  it("honors explicit --port 8787 instead of using default 24881", () => {
     const parsed = parseArgs({ argv: ["trace", "--port", "8787"] });
     assert.equal(parsed.port, 8787);
   });

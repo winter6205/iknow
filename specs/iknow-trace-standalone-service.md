@@ -24,7 +24,7 @@
   映射 `ValidationError -> 400 validation` / `TraceReadError -> 500 internal`
   （不泄漏 fs 细节）；`GET /api/v1/health` -> `{ ok, service: "iknow-trace", version }`。
 - R2 `iknow trace` CLI：`--trace-out <f>`（默认 `./trace.jsonl`，env `IKNOW_TRACE_OUT`）、
-  `--port <n>`（默认 8788，env `IKNOW_TRACE_PORT`）、`--host <addr>`（默认 127.0.0.1）、
+  `--port <n>`（默认 24881，env `IKNOW_TRACE_PORT`）、`--host <addr>`（默认 127.0.0.1）、
   `--max-bytes <n>`（默认 8 MiB）。非法参数 exit 1；bind 失败 exit 1。
 - R3 `src/session-api/`：删 `handleTracesRequest` import + prefix-dispatch；
   `SessionHttpServerOptions` / `ServeOptions` 去掉 `traceFilePath` / `traceOut` 透传。
@@ -32,7 +32,7 @@
   `iknow trace`。
 - R4 前端：`web/src/api/client.ts` 引入 `TRACE_API = import.meta.env.VITE_TRACE_API_BASE
 ?? "/api/v1/traces"`，`getTraces` / `getTraceFields` 走 `TRACE_API`，其余端点仍
-  `/api/v1`。`web/vite.config.ts` dev proxy 加 `/api/v1/traces` -> 8788。
+  `/api/v1`。`web/vite.config.ts` dev proxy 加 `/api/v1/traces` -> 24881。
 - R5 文档：`docs/architecture.md` Capability modules 表 traceserver 行改为"独立
   `iknow trace` 进程"；`src/cli/usage.ts` 加 `iknow trace` 子命令；CHANGELOG 记
   breaking（serve 不再挂读 API）。

@@ -43,7 +43,7 @@ export function startTraceServe(
   opts: TraceServeOptions = {}
 ): Promise<TraceListeningServer> {
   const host = opts.host ?? "127.0.0.1";
-  const port = opts.port ?? 8788;
+  const port = opts.port ?? 24881;
   const traceFilePath = opts.traceOut ? path.resolve(opts.traceOut) : undefined;
 
   const server = http.createServer((req, res) => {

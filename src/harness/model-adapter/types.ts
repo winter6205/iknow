@@ -4,7 +4,13 @@
  * 这些类型构成 016 Gate A 的核心接口形状,Loop Engine 和 Model Adapter
  * 都依赖此处的定义。注意:`AnthropicNativeMessage` 等 wire 协议类型
  * 仅由 Model Adapter 解释并产出,Loop Engine 不读取、不构造供应商原生字段。
+ *
+ * #176 T3：`ModelAdapter.step` 的 `request` 参数含可选 `onStream` 观察者
+ * 回调（流式事件契约 SSOT `../stream.ts`，#147 D3）；仅流式臂消费,非流式
+ * 臂忽略,缺省时行为与现状逐字节一致。
  */
+
+import type { HarnessStreamEvent } from "../stream.js";
 
 /** Anthropic 原生 content block(由 Model Adapter 解释)。 */
 export type AnthropicContentBlock =
@@ -63,6 +69,14 @@ export interface RunResult {
   readonly messages: ReadonlyArray<AnthropicNativeMessage>;
   readonly turnCount: number;
   readonly stopReason: StopReason;
+  /**
+   * #160 / ADR-0008 Decision 5: 最后一次成功模型调用的 token usage(供显示面
+   * 消费;TUI 经 hub-bridge 直读 RunResult)。必填字段:null = run 无成功模型
+   * 调用(或所有成功调用的 usage 均缺席)。双源裁决(#160 Resolution Q4 +
+   * ADR-0008 Decision 5),不复用 undefined 字段缺席语义——后者仅约束
+   * LlmCallRecord 落盘面(Postel,ADR-0008 Decision 3)。
+   */
+  readonly lastUsage: TokenUsage | null;
 }
 
 /** assistant 回合投影:有序 text + 有序 tool call,保持原生顺序(014 投影)。 */
@@ -91,6 +105,22 @@ export interface AssistantTurnResult {
   readonly needsTools: boolean;
   /** 是否为 `EmptyFinalResponse`(成功停止但无 text block)。 */
   readonly isEmptyFinalResponse: boolean;
+  /**
+   * #160 / ADR-0008 Decision 2+4: 一次成功 assistant 回合的 token 使用量投影
+   * (sealed passthrough, 与 `supplierStop` 同构)。SDK usage 整体缺失 → 字段
+   * 缺席(不写 null / 不写 {0,0,...});loop-engine 在 `recordLlmCall` 抄入
+   * `LlmCallRecord`,`RunResult.lastUsage` 持有最后一次成功值。
+   * stub 路径没有 usage,字段缺席是设计语义。
+   */
+  readonly usage?: TokenUsage;
+}
+
+/** 对齐 Anthropic SDK Usage 的 token 四字段(ADR-0008 Decision 2)。 */
+export interface TokenUsage {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheCreationInputTokens: number | null;
+  readonly cacheReadInputTokens: number | null;
 }
 
 /** Model Adapter 接口(014 拥有)。 */
@@ -98,7 +128,12 @@ export interface ModelAdapter {
   /** 014 原子校验 + 投影:返回 AssistantTurnResult 或抛 ProtocolError。 */
   readonly step: (
     state: LoopState,
-    request: { tools?: unknown },
+    // #176 T3:可选 onStream — 流式事件观察者(#147 D3),仅流式臂消费;
+    // 离线 adapter / 非流式臂忽略此字段。
+    request: {
+      tools?: unknown;
+      onStream?: (event: HarnessStreamEvent) => void;
+    },
     signal?: AbortSignal // 017: run 第三参原样透传,离线实现可忽略(type-only;runtime deferred to T5)
   ) => Promise<AssistantTurnResult>;
 }

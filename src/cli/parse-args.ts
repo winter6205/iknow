@@ -3,7 +3,7 @@
  */
 
 export type CliCommand =
-  "chat" | "ask" | "oneshot" | "help" | "serve" | "trace";
+  "chat" | "ask" | "oneshot" | "help" | "serve" | "trace" | "tui";
 
 export type ParsedCli = {
   command: CliCommand;
@@ -41,6 +41,10 @@ export type ParsedCli = {
    * Undefined → serve defaults to ~/.iknow (spec #120 SC 1).
    */
   dataDir?: string;
+  /**
+   * `tui [session-id]` 可选位置参数（#146 SC 2：直连 resume 该会话）。
+   */
+  sessionId?: string;
 };
 
 export type ParseArgsOptions = {
@@ -183,10 +187,10 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   }
 
   if (head === "trace") {
-    // iknow trace: default port 8788 (serve uses 8787). Sentinel-based: only
+    // iknow trace: default port 24881 (serve uses 8787). Sentinel-based: only
     // override when the user did not pass --port, so `iknow trace --port 8787`
-    // is honored verbatim instead of silently bumped to 8788.
-    const tracePort = portSet ? port : 8788;
+    // is honored verbatim instead of silently bumped to 24881.
+    const tracePort = portSet ? port : 24881;
     return baseParsed({
       command: "trace",
       fields: {
@@ -194,6 +198,19 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
         port: tracePort,
         query: "",
         missingQuery: false,
+      },
+    });
+  }
+
+  if (head === "tui") {
+    const sessionId = rest[1];
+    return baseParsed({
+      command: "tui",
+      fields: {
+        ...flags,
+        query: "",
+        missingQuery: false,
+        sessionId: sessionId !== undefined ? sessionId : undefined,
       },
     });
   }

@@ -27,6 +27,7 @@ import type {
   AssistantTurnResult,
   LoopState,
   ModelAdapter,
+  TokenUsage,
 } from "./types.js";
 import type {
   Message as SdkMessage,
@@ -37,7 +38,33 @@ import type {
   TextBlock,
   ThinkingBlock,
   RedactedThinkingBlock,
+  Usage as SdkUsage,
 } from "@anthropic-ai/sdk/resources/messages.js";
+import type { MessageStreamEvent } from "@anthropic-ai/sdk/resources/messages.js";
+import type { HarnessStreamEvent } from "../stream.js";
+
+/**
+ * #176 T3: `client.messages.stream(...)` 返回的 SDK MessageStream 之最小消费面。
+ *
+ * 为什么不直接 import `MessageStream` 类型:NodeNext 下
+ * `@anthropic-ai/sdk/lib/MessageStream.js` (CJS) 与 `.mjs` (ESM) 是两个变体,
+ * 其 `#private` 成员互不相容,显式 import 会与 SDK `.stream()` 返回类型
+ * (ESM 解析)冲突。以结构类型表达本模块实际消费的子集(`on` + `finalMessage`),
+ * 真实 SDK stream 结构兼容,测试假 stream 对象亦按此面装配(不依赖真实网络)。
+ */
+interface AnthropicMessageStream {
+  readonly on: {
+    (
+      event: "text",
+      listener: (textDelta: string, textSnapshot: string) => void
+    ): unknown;
+    (
+      event: "streamEvent",
+      listener: (event: MessageStreamEvent, snapshot: SdkMessage) => void
+    ): unknown;
+  };
+  readonly finalMessage: () => Promise<SdkMessage>;
+}
 
 export interface AnthropicAdapterOptions {
   /** 脚本化响应:每次 step 消费下一条;耗尽抛 ProtocolError(模拟断流)。 */
@@ -50,6 +77,43 @@ export interface AnthropicAdapterOptions {
   readonly maxTokens: number;
   /** 017: 模型侧超时(ms)。离线(scripted)模式下无实际效果,签名就位以便 018 接真实 SDK 时零改签名。 */
   readonly timeoutMs?: number;
+}
+
+/**
+ * #160 / ADR-0008 Decision 2: SDK Usage → 域 TokenUsage 纯函数投影。
+ *
+ * 只透传 4 个 token 字段;周边字段(cache_creation TTL 对象 /
+ * output_tokens_details / server_tool_use / inference_geo / service_tier)
+ * 无消费者,一律丢弃。cache 两字段缺失 / null 均 coalesce 为 null(
+ * SDK 0.115 静态契约本身允许 number|null)。snake→camel 映射在域侧
+ * 仅此一处;jsonl.ts 落盘面由泛型反射自动转换,不另写映射。
+ */
+export function projectSdkUsage(sdk: SdkMessage): TokenUsage | undefined {
+  const u = sdk?.usage as SdkUsage | undefined;
+  // Postel 硬门:usage 存在但 input/output 非 number(含 usage:{} / 整段缺失)
+  // → 整条缺席,绝不产出 {inputTokens: undefined,...} 这类违反 TokenUsage 契约
+  // 的垃圾对象。
+  if (
+    !u ||
+    typeof u.input_tokens !== "number" ||
+    typeof u.output_tokens !== "number"
+  ) {
+    return undefined;
+  }
+  return {
+    inputTokens: u.input_tokens,
+    outputTokens: u.output_tokens,
+    // cache 两字段:非 number(缺失 / null / 供应商垃圾值)统一归一为 null,
+    // 与 SDK 0.115 静态契约(number | null)对齐,不把垃圾值透给下游。
+    cacheCreationInputTokens:
+      typeof u.cache_creation_input_tokens === "number"
+        ? u.cache_creation_input_tokens
+        : null,
+    cacheReadInputTokens:
+      typeof u.cache_read_input_tokens === "number"
+        ? u.cache_read_input_tokens
+        : null,
+  };
 }
 
 /**
@@ -170,6 +234,7 @@ export function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
     content: Object.freeze([...nativeContent]),
   };
 
+  const usage = projectSdkUsage(sdk);
   return {
     nativeMessage,
     projection: {
@@ -180,11 +245,21 @@ export function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
     supplierStop,
     needsTools: toolCalls.length > 0,
     isEmptyFinalResponse,
+    // #160 / ADR-0008 Decision 2+4: usage 字段缺席 = Postel 语义,
+    // SDK 返回无 usage 时整个键不存在(不是 null 占位,不是 undefined 包装)。
+    ...(usage !== undefined ? { usage } : {}),
   };
 }
 
 export interface AnthropicAdapter extends ModelAdapter {
   readonly encodeUserText: (userText: string) => AnthropicNativeMessage;
+  /**
+   * #178 T5 (#147 D6):本 adapter 实例实际走的调用模式 —— true = 流式臂
+   * (`client.messages.stream`),false/undefined = 非流式臂(`messages.create`)。
+   * loop-engine 的 `recordLlmCall` 用它翻转 trace `stream` 布尔;不读取、不影响
+   * 控制流(模式真值仍以 adapter 内部 arm 路由为准,此处只做申报)。
+   */
+  readonly streamMode?: boolean;
   readonly encodeToolResults: (
     results: ReadonlyArray<{
       readonly kind:
@@ -339,6 +414,16 @@ export interface RealAnthropicAdapterOptions {
     readonly mode: "off" | "adaptive";
     readonly effort?: "" | "low" | "medium" | "high" | "xhigh" | "max";
   };
+  /**
+   * #176 T3 (#147 D0/D1):流式臂开关。true → `client.messages.stream(params,
+   * { signal })` → `finalMessage()` → 现有 `interpretMessage` (SSOT,零修改)
+   * → `AssistantTurnResult` 与非流式臂逐字节同形;false/undefined → 既有
+   * `client.messages.create` 臂(017 A1 freeze / D0 回退),行为零变化。
+   *
+   * 信号(signal)直挂 SDK RequestOptions 第二参(023 取消/超时语义零改造继
+   * 承)。生产装配点(env `IKNOW_LLM_STREAM` 默认 on)由 T6 在调用处传入。
+   */
+  readonly stream?: boolean;
 }
 
 /**
@@ -367,6 +452,108 @@ function toSdkTools(tools: unknown): SdkTool[] | undefined {
 }
 
 /**
+ * #176 T3 流式臂(#147 D1/`stream:true`):
+ *   - SDK `client.messages.stream(params, { signal })`,signal 走
+ *     RequestOptions 第二参,直挂 raceModel composite signal(023 语义零改造)。
+ *   - `wireStreamEvents` 装配观察者监听(text → text_delta;
+ *     content_block_start tool_use → tool_call_start),每次 emit try/catch
+ *     吞咽异常(#147 D3,对齐 `safeTrace` MUST NOT throw 先例)。
+ *   - 终态 `await stream.finalMessage()` → 现有 `interpretMessage` SSOT 零改动
+ *     → `AssistantTurnResult` 与非流式臂逐字节同形。
+ *   - 断流(`finalMessage()` reject,如连接中断 / 无 chunk / 静默 EOF / abort)
+ *     → step reject,**不构造 `AssistantTurnResult`**(D8 整回合不提交);
+ *     `stream.currentMessage` 的 partial 快照 v1 不消费(Postel's Law)。
+ *   - 参数体与非流式臂逐字节相同(D2),共享 `buildMessageParams` 一并校验。
+ */
+async function stepStreamArm(deps: {
+  readonly client: Anthropic;
+  readonly params: MessageCreateParamsNonStreaming;
+  readonly signal?: AbortSignal;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
+}): Promise<AssistantTurnResult> {
+  const stream = deps.client.messages.stream(deps.params, {
+    signal: deps.signal,
+  });
+  wireStreamEvents(stream, deps.onStream);
+  // D8:断流 / abort → finalMessage() reject → 不构造 AssistantTurnResult。
+  const final = await stream.finalMessage();
+  return interpretMessage(final);
+}
+
+/**
+ * #176 T3 emit 装配(#147 D1/D3):SDK 原生 SSE 事件(`on("text")` /
+ * `on("streamEvent")`)不出 adapter 边界,翻译为 harness 流式事件契约(
+ * `HarnessStreamEvent`)。每次 emit try/catch 吞咽异常 — 观察者错误必须
+ * 不反流回 stream arm 终态。
+ *
+ * empty-class 决策:`text_delta` 为空字符串(text="")时**不 emit** —
+ * 空文本 delta 不承载渲染信息,跳过以消除 host 渲染噪声;Plan §3 "empty
+ * 类" 给出"不 emit 或 emit 无副作用(实现期二选一)"的选项,本实现选中前者,
+ * 在 `anthropic-adapter-stream.test.ts` 锁定。
+ */
+function wireStreamEvents(
+  stream: AnthropicMessageStream,
+  onStream: ((event: HarnessStreamEvent) => void) | undefined
+): void {
+  if (onStream === undefined) return;
+  const safeEmit = (event: HarnessStreamEvent): void => {
+    try {
+      onStream(event);
+    } catch {
+      // D3:swallow observer exceptions,host faults must not back-flow into
+      // the stream arm (aligned with ADR-0003 `safeTrace` MUST NOT throw).
+    }
+  };
+  stream.on("text", (textDelta) => {
+    if (textDelta === "") return; // empty delta:不 emit(见上方 empty-class 决策注释)
+    safeEmit({ type: "text_delta", text: textDelta });
+  });
+  stream.on("streamEvent", (event: MessageStreamEvent) => {
+    if (event.type !== "content_block_start") return;
+    const block = event.content_block;
+    // D1 最小集:只 tool_use 翻译为 tool_call_start;server_tool_use 等其它
+    // 内容块不在 v1 范围内(interpretMessage 也会因不支持类型 ProtocolError)。
+    if (block.type !== "tool_use") return;
+    safeEmit({ type: "tool_call_start", name: block.name });
+  });
+}
+
+/**
+ * #176 T3 (D2):流式 / 非流式臂之间**共享**的参数体构造 — message 历史 +
+ * tools + thinking + temperature 条件附加逻辑一致,字节级同形(消息历史
+ * 字段不因流式 / 非流式而变化,KV 缓存前缀稳定性不受影响)。此处不引入
+ * `stream: true`,SDK `.stream()` 内部追加。
+ */
+function buildMessageParams(
+  opts: RealAnthropicAdapterOptions,
+  state: LoopState,
+  request: { tools?: unknown }
+): MessageCreateParamsNonStreaming {
+  const tools = toSdkTools(request.tools);
+  // #151 T4 请求侧 thinking 控制臂。SDK 0.115.0 在 MessageCreateParamsBase
+  // 已声明 thinking?: ThinkingConfigParam 与 output_config?: OutputConfig,
+  // 此处按 config 条件附加,off/缺省 → 两字段都不出现(默认零行为变化)。
+  const thinkingParam =
+    opts.thinking?.mode === "adaptive"
+      ? { type: "adaptive" as const }
+      : undefined;
+  const effort = opts.thinking?.effort;
+  return {
+    model: opts.model,
+    max_tokens: opts.maxTokens,
+    messages: state.messages as unknown as MessageParam[],
+    ...(tools !== undefined ? { tools } : {}),
+    ...(opts.temperature !== undefined
+      ? { temperature: opts.temperature }
+      : {}),
+    ...(thinkingParam !== undefined ? { thinking: thinkingParam } : {}),
+    ...(thinkingParam !== undefined && effort
+      ? { output_config: { effort } }
+      : {}),
+  };
+}
+
+/**
  * 019: 真实 Anthropic Adapter 工厂。
  *
  * step 委托 `client.messages.create(params, { signal })`;signal 走 SDK 0.115
@@ -378,7 +565,7 @@ function toSdkTools(tools: unknown): SdkTool[] | undefined {
  *   ProtocolError → "protocolError";其他 → rethrow(`run()` reject)。
  * 真实失败回流占位见 #54 raceModel abort(#023 engine-timeout HTTP 未取消)。
  *
- * 协议不变:`stream:false` 拿非流式 SdkMessage(017 A1 冻);不构造 SdkMessage 队列;
+ * 协议不变:`createRealAnthropicAdapter.step` 根据 `opts.stream` 分两臂(非流式臂 `client.messages.create`,流式臂 `client.messages.stream` + `finalMessage()` → `interpretMessage`,#176 T3 #147 D1),两者交付同一 `AssistantTurnResult` (SSOT);不构造 SdkMessage 队列;
  * 不重试、不收集 telemetry。
  */
 export function createRealAnthropicAdapter(
@@ -386,38 +573,33 @@ export function createRealAnthropicAdapter(
 ): AnthropicAdapter {
   async function step(
     state: LoopState,
-    request: { tools?: unknown },
+    request: {
+      tools?: unknown;
+      onStream?: (event: HarnessStreamEvent) => void;
+    },
     signal?: AbortSignal
   ): Promise<AssistantTurnResult> {
-    const tools = toSdkTools(request.tools);
-    // #151 T4 请求侧 thinking 控制臂。SDK 0.115.0 在 MessageCreateParamsBase
-    // 已声明 thinking?: ThinkingConfigParam 与 output_config?: OutputConfig,
-    // 此处按 config 条件附加,off/缺省 → 两字段都不出现(默认零行为变化)。
-    const thinkingParam =
-      opts.thinking?.mode === "adaptive"
-        ? { type: "adaptive" as const }
-        : undefined;
-    const effort = opts.thinking?.effort;
-    const params: MessageCreateParamsNonStreaming = {
-      model: opts.model,
-      max_tokens: opts.maxTokens,
-      messages: state.messages as unknown as MessageParam[],
-      ...(tools !== undefined ? { tools } : {}),
-      ...(opts.temperature !== undefined
-        ? { temperature: opts.temperature }
-        : {}),
-      ...(thinkingParam !== undefined ? { thinking: thinkingParam } : {}),
-      ...(thinkingParam !== undefined && effort
-        ? { output_config: { effort } }
-        : {}),
-    };
-    const sdkResp = await opts.client.messages.create(params, { signal });
-    return interpretMessage(sdkResp as SdkMessage);
+    const params = buildMessageParams(opts, state, request);
+    // #176 T3:流式臂 / 非流式臂分支路由(ACR hard gate — step 主体的全部分支
+    // 逻辑;业务行为由 `stepStreamArm` 与既有 create 臂各自承载)。
+    if (opts.stream !== true) {
+      // 非流式臂(017 A1 freeze;未开 `stream` 时 byte-identical 既有行为)。
+      const sdkResp = await opts.client.messages.create(params, { signal });
+      return interpretMessage(sdkResp as SdkMessage);
+    }
+    return stepStreamArm({
+      client: opts.client,
+      params,
+      signal,
+      onStream: request.onStream,
+    });
   }
   return Object.freeze({
     step,
     encodeUserText,
     encodeToolResults,
+    // #178 T5 (D6):adapter 级模式申报(stream 是构造时静态决策,实例内不切换)。
+    streamMode: opts.stream === true,
   });
 }
 

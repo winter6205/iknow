@@ -28,14 +28,7 @@ import { createStubTool } from "../../../src/harness/stubs/stub-tool.ts";
 import { createNoopTraceService } from "../../../src/harness/trace/noop.ts";
 import { createJsonlTraceService } from "../../../src/harness/trace/jsonl.ts";
 import { assistantResult } from "../../cli/_fixtures.ts";
-
-function parseJsonl(filePath: string): Array<Record<string, unknown>> {
-  const content = readFileSync(filePath, "utf8");
-  return content
-    .split(String.fromCharCode(10))
-    .filter((line) => line.trim().length > 0)
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-}
+import { parseJsonl } from "./_fixtures.ts";
 
 const tmpDirs: string[] = [];
 

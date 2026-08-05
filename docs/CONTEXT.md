@@ -20,7 +20,10 @@ _Avoid_: 声称已接入产品路径；mock agent、stub brain
 _Avoid_: 把 cancelled 与 timeout 混为一条；把总耗时当作独立 stop 触发器
 
 **LoopTrace**: `run()` 的第二返回面 `{ result, trace }`（TurnTrace / Totals 两型）--A 层结构元数据 trace（每回合 supplierStop / toolCall kind / durationMs / cancelKind + 一次性 reduce 的 totals），严格不含 payload；与 014 messages 唯一权威解耦，immutable 累积。`cancelKind` 是取消来源四值枚举 `"none" | "callerAbort" | "timerTimeout" | "hostCancel"`（对齐 023 `RaceModelOutcome.source`），取代 017 的 `timeoutHit` / `signalAborted` 双布尔。
-_Avoid_: 在 trace 里塞 input/output/token/cost（B 层字段）；Collector 回调 / onTurn 中途观察点
+_Avoid_: 在 trace 里塞 input/output/token/cost（B 层字段）——该禁令仅对 LoopTrace 本体，不外延到 TraceService（`LlmCallRecord` 承载 token usage 是 ADR-0008 裁决的合规落点）；Collector 回调 / onTurn 中途观察点
+
+**usage (token accounting)**: LLM API 每次成功调用回传的 token 计费（`inputTokens`/`outputTokens` 必填 + `cacheCreationInputTokens`/`cacheReadInputTokens` nullable，对齐 SDK `Usage`）；权威落点 = TraceService `LlmCallRecord`（观测真值，错误分支整条缺席），运行时暴露面仅 `RunResult.lastUsage`（TUI 显示读者，017:67 的有记录例外）。chars/N 估算只供压缩决策，永不进核算 / 显示（ADR-0008）。
+_Avoid_: 用估算值顶替 trace 真值；为无读者的账本建运行时承载面；把 usage 塞进 LoopTrace（token 禁令仅对 LoopTrace，不外延到 TraceService）
 
 **ToolExecutionContext**: Executor 透传给 handler 的执行上下文 `{ signal }`；run 第三参 signal 原样透传、不创建子 signal，超时由 Executor `Promise.race` 外包而非 ctx 携带。
 _Avoid_: 在 ctx 里放 timeoutMs；为每个 handler 建子 AbortController
@@ -133,9 +136,9 @@ _Avoid_: separate frontend-only server as the production path without proxying `
 Vite + React + TypeScript chat console; same-origin Session client; G2 side panel required.
 _Avoid_: zero-dep static shell as product; dropping `snapshot_id` for “clean UI”
 
-**parseLlmResponseJson**:
-LLM body parser that accepts plain JSON or JSON followed by SSE trailer (`data: [DONE]`); client also sends `stream: false`.
-_Avoid_: bare `JSON.parse(raw)` on 9router chat responses
+**streaming arm**:
+LLM 客户端默认流式臂（`IKNOW_LLM_STREAM` 值域 `on | off`，默认 `on`，`env.ts` SSOT），`off` 回退非流式臂；原生 SSE 事件不出 adapter 边界，收敛为 `HarnessStreamEvent` 最小集（`text_delta` / `tool_call_start`，`src/harness/stream.ts`），终态经 SDK `finalMessage()` -> `interpretMessage`（SSOT）落为同形 `AssistantTurnResult`。
+_Avoid_: 把 `stream: false` + 裸 JSON 解析当默认 LLM 臂；让原生 SSE 事件逸出 adapter 边界
 
 **I4 smoke**:
 Documented three-mode + HTTP interaction smoke under `docs/handoff/i4-smoke/` (no secrets in artifacts).
@@ -176,7 +179,7 @@ _Avoid_: `(entity_id, snapshot_id, valid_window)`（仓库无此表述）/ 把 `
 - **User line -> processChatLine -> answer(opts) -> IknowAnswer -> ConversationState**: multi-turn host path
 - **last_priors -> answer prior_chunks -> kb_retrieve**: cross-turn retrieve bridge only
 - **Browser -> Session HTTP -> ConversationState -> Agent.answer -> G2**: product SPA / API host path
-- **chat/completions body -> parseLlmResponseJson -> tool_calls loop**: LLM agent path
+- **run() messages -> adapter streaming arm -> interpretMessage**: harness LLM path (stream events surface as `HarnessStreamEvent` via `onStream`)
 
 ## Flagged ambiguities
 
@@ -188,7 +191,7 @@ _Avoid_: `(entity_id, snapshot_id, valid_window)`（仓库无此表述）/ 把 `
 - **draft eval set**: `eval-set.draft.json` is DRAFT-EVAL-SET; hard_pass on draft ≠ production gate until real queries replace samples
 - **chat vs test harness**: product CLI is TTY/pipe-aware session code under `src/cli/`; unit tests call `processChatLine` without claiming that is the product UX
 - **9router key vs endpoint**: same `NINE_ROUTER_KEY` can yield `models` 200 while `chat/completions` return 401; agent shell env may differ from operator interactive shell
-- **SSE trailer vs stream flag**: gateway may return `text/event-stream` trailer even when client requested non-stream; use `parseLlmResponseJson`, not only `stream: false`
+- **streaming arm vs native SSE**: LLM 默认 SDK 流式臂（`IKNOW_LLM_STREAM`，默认 `on`，`env.ts` SSOT）；原生 SSE 事件不出 adapter 边界，host 只见 `HarnessStreamEvent`；`off` 回退非流式臂，网关响应由 SDK 统一消化，host 不直接解析 wire
 - **turnCount vs max_hops**: `turnCount`（Foundation）统计每个已完成的 assistant 回合；`max_hops`（产品 / eval）只统计 retrieve + verify hop（默认 5）；两者属于不同层次，不得混同。
 - **cancelled vs timeout**: 两条独立停止路径--cancelled 由 Loop Engine 检测 `signal.aborted`，timeout 由 adapter/executor 超时结果判定；signal 优先，不在 signal 层合并超时。
 - **LoopTrace vs messages**: LoopTrace 是非权威 A 层结构元数据（不含 payload），messages 才是 014 唯一权威历史；trace 只用于诊断聚合，不得作为第二份权威副本。

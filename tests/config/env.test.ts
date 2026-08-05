@@ -18,6 +18,9 @@ const ENV_KEYS = [
   "IKNOW_LLM_THINKING",
   "IKNOW_LLM_THINKING_EFFORT",
   "IKNOW_CHAT_SHOW_THINKING",
+  // #179 T6: streaming arm env (default on, invalid → on).
+  "IKNOW_LLM_STREAM",
+  "IKNOW_WEB_SEARCH_URL",
 ] as const;
 
 describe("loadIknowEnv — thinking config (#151 T4)", () => {
@@ -111,5 +114,72 @@ describe("loadIknowEnv — chat show-thinking flag (#152 T5)", () => {
     process.env.IKNOW_CHAT_SHOW_THINKING = "garbage";
     const env = loadIknowEnv();
     assert.equal(env.chat.showThinking, false);
+  });
+});
+
+describe("loadIknowEnv — LLM stream flag (#179 T6 / #147 D0)", () => {
+  beforeEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+
+  it("default: stream=on (env 不设时)", () => {
+    const env = loadIknowEnv();
+    assert.equal(env.llm.stream, "on");
+  });
+
+  it("explicit on: 通过", () => {
+    process.env.IKNOW_LLM_STREAM = "on";
+    const env = loadIknowEnv();
+    assert.equal(env.llm.stream, "on");
+  });
+
+  it("explicit off → off", () => {
+    process.env.IKNOW_LLM_STREAM = "off";
+    const env = loadIknowEnv();
+    assert.equal(env.llm.stream, "off");
+  });
+
+  it("大小写不敏感:OFF / On 生效", () => {
+    process.env.IKNOW_LLM_STREAM = "OFF";
+    assert.equal(loadIknowEnv().llm.stream, "off");
+    process.env.IKNOW_LLM_STREAM = "On";
+    assert.equal(loadIknowEnv().llm.stream, "on");
+  });
+
+  it("非法值(yes / 1 / garbage)→ 回退 on,不抛错", () => {
+    for (const v of ["yes", "1", "garbage"]) {
+      process.env.IKNOW_LLM_STREAM = v;
+      const env = loadIknowEnv();
+      assert.equal(env.llm.stream, "on", `stream=${v} 应回退 on`);
+    }
+  });
+});
+
+describe("loadIknowEnv — web.searchUrl (ACI web_search 端点覆写)", () => {
+  beforeEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+
+  it("default: web.searchUrl=undefined (env 不设时)", () => {
+    const env = loadIknowEnv();
+    assert.equal(env.web.searchUrl, undefined);
+  });
+
+  it("explicit 端点原样透传", () => {
+    process.env.IKNOW_WEB_SEARCH_URL = "https://html.duckduckgo.com/html/";
+    const env = loadIknowEnv();
+    assert.equal(env.web.searchUrl, "https://html.duckduckgo.com/html/");
+  });
+
+  it("空串 → undefined（区别于有值）", () => {
+    process.env.IKNOW_WEB_SEARCH_URL = "";
+    const env = loadIknowEnv();
+    assert.equal(env.web.searchUrl, undefined);
   });
 });

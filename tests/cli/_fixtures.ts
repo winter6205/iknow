@@ -12,7 +12,9 @@ import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
   AssistantTurnResult,
+  HarnessStreamEvent,
   LoopEngineDeps,
+  TokenUsage,
 } from "../../src/harness/index.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
@@ -41,6 +43,11 @@ export interface AssistantResultOpts {
     readonly signature?: string;
     readonly data?: string;
   }>;
+  /**
+   * #160 T4: optional token usage(传入时附带于返回对象;不传则字段缺席,
+   * 保持 stub 路径无 usage 的设计语义)。
+   */
+  readonly usage?: TokenUsage;
 }
 
 /**
@@ -81,14 +88,35 @@ export function assistantResult(
       supplierStop === "success" &&
       texts.length === 0 &&
       toolCalls.length === 0,
+    // 不传 usage 则字段缺席(stub 路径默认语义);传入时原样附带。
+    ...(opts.usage !== undefined && { usage: opts.usage }),
   };
 }
 
-export function makeDeps(responses: AssistantTurnResult[]): LoopEngineDeps {
+/**
+ * Build LoopEngineDeps backed by stub-model (createStubModel).
+ *
+ * #179 T6: optional `streamEventsByStep` forwards to the stub's
+ * `streamEventsByStep` seam (T4 wiring). When set, each step emits the
+ * scripted events before returning its `responses` entry.
+ */
+export function makeDeps(
+  responses: AssistantTurnResult[],
+  opts: {
+    readonly streamEventsByStep?: ReadonlyArray<
+      ReadonlyArray<HarnessStreamEvent>
+    >;
+  } = {}
+): LoopEngineDeps {
   const tool = createStubTool({ name: "noop", next: () => ({}) });
   const registry = createRegistry([tool]);
   const executor = createExecutor(registry);
-  const adapter = createStubModel({ responses });
+  const adapter = createStubModel({
+    responses,
+    // createStubModel accepts `streamEventsByStep: undefined`; passing through
+    // directly keeps the optional forward trivial (no conditional spread).
+    streamEventsByStep: opts.streamEventsByStep,
+  });
   return { adapter, executor, registry, maxTurns: 5 };
 }
 
@@ -104,11 +132,17 @@ export function makeState(over: Partial<CliChatState> = {}): CliChatState {
 export interface MakeCtxOpts {
   readonly responses: AssistantTurnResult[];
   readonly stateOverrides?: Partial<CliChatState>;
+  /** #179 T6: per-step stream-event script (stub-model streamEventsByStep seam). */
+  readonly streamEventsByStep?: ReadonlyArray<
+    ReadonlyArray<HarnessStreamEvent>
+  >;
 }
 
 export function makeCtx(opts: MakeCtxOpts): ChatLineContext {
   return {
-    deps: makeDeps(opts.responses),
+    deps: makeDeps(opts.responses, {
+      streamEventsByStep: opts.streamEventsByStep,
+    }),
     state: makeState(opts.stateOverrides ?? {}),
   };
 }

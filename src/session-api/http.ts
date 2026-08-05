@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { isIknowError, ValidationError } from "../shared/errors.js";
 import { mapStoreError, type SessionHub } from "./hub.js";
 import type { SessionStoreError } from "./store/index.js";
+import { parseThinkingOverride } from "./thinking-override.js";
 import type { ApiErrorBody, HealthResponse } from "./contract.js";
 import { getVersion } from "../cli/usage.js";
 
@@ -208,11 +209,15 @@ async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
     return true;
   }
   if (method === "POST" && rest === "/messages") {
-    const text = extractTextField(await readJsonBody(req));
+    const body = await readJsonBody(req);
+    const text = extractTextField(body);
+    // T2: parse + validate the optional per-turn thinking override; invalid
+    // values throw ValidationError → 400 (fail loud, no silent fallback).
+    const thinking = parseThinkingOverride(extractThinkingField(body));
     sendJson({
       res,
       status: 200,
-      body: await hub.postMessage({ conversationId: id, text }),
+      body: await hub.postMessage({ conversationId: id, text, thinking }),
     });
     return true;
   }
@@ -254,6 +259,14 @@ function extractTextField(raw: unknown): string {
   if (!raw || typeof raw !== "object") return "";
   const o = raw as Record<string, unknown>;
   return "text" in o ? String(o.text ?? "") : "";
+}
+
+/** T2: extract the optional `thinking` field raw value (validation happens
+ * in parseThinkingOverride, which throws ValidationError on invalid values). */
+function extractThinkingField(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const o = raw as Record<string, unknown>;
+  return "thinking" in o ? o.thinking : undefined;
 }
 
 interface ExtractBoolFieldOpts {

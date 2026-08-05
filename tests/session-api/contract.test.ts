@@ -11,7 +11,10 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import type {
   ApiErrorBody,
+  PostMessageRequest,
   SessionSummary,
+  ThinkingView,
+  ToolCallView,
   TurnAnswerDto,
   TurnDto,
 } from "../../src/session-api/contract.ts";
@@ -96,5 +99,97 @@ describe("ApiErrorBody (022 D1.1 nested shape)", () => {
     assert.equal(validation.error.kind, "validation");
     assert.equal(validation.error.field, "text");
     assert.equal(internal.error.kind, "internal");
+  });
+});
+
+// -- T1: TurnAnswerDto gains optional thinking / toolCalls fields -------
+
+describe("TurnAnswerDto — T1 additive thinking/toolCalls fields", () => {
+  it("answer with thinking + toolCalls keeps all original keys", () => {
+    const answer: TurnAnswerDto = {
+      finalText: "hi",
+      stopReason: "completed",
+      turnCount: 1,
+      thinking: { entries: [{ text: "plan" }], redactedCount: 0 },
+      toolCalls: [
+        {
+          id: "t1",
+          name: "noop",
+          inputPreview: "{}",
+          outputPreview: "ok",
+          isError: false,
+          truncated: false,
+        },
+      ],
+    };
+    assert.deepEqual(answer.finalText, "hi");
+    assert.deepEqual(answer.thinking?.entries[0]?.text, "plan");
+    assert.equal(answer.toolCalls?.length, 1);
+    assert.equal(answer.toolCalls?.[0]?.id, "t1");
+  });
+
+  it("answer without thinking/toolCalls exposes exactly the original keys (byte-stable)", () => {
+    const answer: TurnAnswerDto = {
+      finalText: "x",
+      stopReason: "maxTurns",
+      turnCount: 1,
+    };
+    assert.deepEqual(Object.keys(answer).sort(), [
+      "finalText",
+      "stopReason",
+      "turnCount",
+    ]);
+  });
+});
+
+describe("ThinkingView / ToolCallView (T1 wire DTO shapes)", () => {
+  it("ThinkingView entries is in block order; redactedCount is a plain number", () => {
+    const view: ThinkingView = {
+      entries: [{ text: "first" }, { text: "second" }],
+      redactedCount: 3,
+    };
+    assert.equal(view.entries.length, 2);
+    assert.equal(view.redactedCount, 3);
+    assert.equal(view.entries[0]?.text, "first");
+  });
+
+  it("ToolCallView exposes id / name / inputPreview / outputPreview / isError / truncated", () => {
+    const call: ToolCallView = {
+      id: "id-1",
+      name: "echo",
+      inputPreview: '{"q":1}',
+      outputPreview: "ok",
+      isError: false,
+      truncated: true,
+    };
+    assert.equal(call.id, "id-1");
+    assert.equal(call.name, "echo");
+    assert.equal(call.inputPreview, '{"q":1}');
+    assert.equal(call.outputPreview, "ok");
+    assert.equal(call.isError, false);
+    assert.equal(call.truncated, true);
+  });
+});
+
+// -- T2: PostMessageRequest gains optional thinking override ------------
+
+describe("PostMessageRequest — T2 optional thinking override", () => {
+  it("accepts {mode:'off'} without effort", () => {
+    const req: PostMessageRequest = { text: "hi", thinking: { mode: "off" } };
+    assert.equal(req.thinking?.mode, "off");
+  });
+
+  it("accepts {mode:'adaptive', effort:'high'}", () => {
+    const req: PostMessageRequest = {
+      text: "hi",
+      thinking: { mode: "adaptive", effort: "high" },
+    };
+    assert.equal(req.thinking?.mode, "adaptive");
+    assert.equal(req.thinking?.effort, "high");
+  });
+
+  it("accepts text-only (no thinking override)", () => {
+    const req: PostMessageRequest = { text: "hi" };
+    assert.equal(req.thinking, undefined);
   });
 });

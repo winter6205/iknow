@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { ChatHeader } from "./components/ChatHeader";
 import { Composer } from "./components/Composer";
@@ -9,6 +9,12 @@ import { StateBlock } from "./components/StateBlock";
 import { TracePanel } from "./components/TracePanel";
 import { useSessionChat } from "./hooks/useSessionChat";
 import { FOCUS_RING } from "./lib/ui";
+import {
+  loadThinkingSettings,
+  saveThinkingSettings,
+  toWireOverride,
+  type ThinkingSettings,
+} from "./lib/thinking-settings";
 
 type ViewId = "chat" | "trace";
 
@@ -88,11 +94,25 @@ function ChatApp() {
   const [collapsed, setCollapsed] = useState(
     () => window.matchMedia(NARROW_QUERY).matches
   );
+  // T5: 思考开关 + 强度（localStorage 持久化，每次发送随请求下发 override）。
+  const [thinkingSettings, setThinkingSettings] = useState<ThinkingSettings>(
+    () => loadThinkingSettings()
+  );
+  const handleThinkingChange = useCallback((next: ThinkingSettings) => {
+    setThinkingSettings(next);
+    saveThinkingSettings(next);
+  }, []);
   // Bumped after lifecycle events (newSession / setConversation to a non-cached
   // id) so the sidebar re-fetches the list and the new entry shows up without
   // the user clicking refresh.
   const [sidebarSignal, setSidebarSignal] = useState(0);
   const bumpSidebar = () => setSidebarSignal((n) => n + 1);
+
+  // Composer 只发文本；thinking override 在 App 层按当前设置合成后透传。
+  const handleSend = useCallback(
+    (text: string) => chat.sendMessage(text, toWireOverride(thinkingSettings)),
+    [chat, thinkingSettings]
+  );
 
   // Narrow-screen auto-collapse: track live changes (device rotation, window
   // resize across the breakpoint) after the initial render.
@@ -180,15 +200,22 @@ function ChatApp() {
               retryLabel={chat.session ? "关闭错误" : "重试"}
             />
           ) : null}
-          <MessageList messages={chat.messages} />
+          <MessageList
+            messages={chat.messages}
+            sending={chat.phase === "sending"}
+          />
         </>
       }
       footer={
-        <Composer
-          disabled={!chat.session || chat.phase === "loading"}
-          sending={chat.phase === "sending"}
-          onSend={chat.sendMessage}
-        />
+        <>
+          <Composer
+            disabled={!chat.session || chat.phase === "loading"}
+            sending={chat.phase === "sending"}
+            thinkingSettings={thinkingSettings}
+            onThinkingChange={handleThinkingChange}
+            onSend={handleSend}
+          />
+        </>
       }
     />
   );

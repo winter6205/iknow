@@ -2,7 +2,7 @@
  * Frontend trace API base resolution (#183 R4).
  *
  * The web client may target a different host/port for the trace API
- * (e.g. `iknow trace --port 8788`) via the Vite env var
+ * (e.g. `iknow trace --port 24881`) via the Vite env var
  * VITE_TRACE_API_BASE. Default falls back to `/api/v1/traces` so the
  * `iknow serve` / API gateway path works without env wiring.
  *
@@ -21,8 +21,8 @@ describe("resolveTraceApiBase", () => {
   });
 
   it("uses VITE_TRACE_API_BASE when set", () => {
-    expect(resolveTraceApiBase("http://127.0.0.1:8788")).toBe(
-      "http://127.0.0.1:8788"
+    expect(resolveTraceApiBase("http://127.0.0.1:24881")).toBe(
+      "http://127.0.0.1:24881"
     );
   });
 

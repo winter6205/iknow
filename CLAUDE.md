@@ -71,7 +71,7 @@ npm test          # vitest：unit + eval alignment + trajectory + harness
 
 **Embedding**: `--embeddings` / `IKNOW_EMBEDDING_MODE=api` 等向量检索臂及其 CLI flag / env 已随 023 一并移除（harness 为通用 agent，无向量检索；旧 loop residue cleanup）。  
 **交互主入口**: TTY `chat`；脚本 `ask`；浏览器 `iknow serve` + `web/dist`（开发可 `web:dev` 代理 `/api`）。  
-**LLM 客户端**: `stream: false` + `parseLlmResponseJson`（容忍 SSE trailer）。  
+**LLM 客户端**: 默认流式臂（`IKNOW_LLM_STREAM` 值域 `on | off`，默认 `on`，env.ts SSOT），`off` 回退非流式臂；原生 SSE 事件不出 adapter 边界，host 侧消费 `HarnessStreamEvent`。  
 **9router key**: 环境变量名 `NINE_ROUTER_KEY`（LLM 用，env.ts SSOT；embedding 臂已移除）；`models` 200 ≠ chat 必通；探针 `scripts/i4-probe-nine-endpoints.ts`。  
 **I4**: 已归档三模式 + HTTP 冒烟证据（`docs/handoff/i4-smoke/`）。  
 **Git**: 无用户明确 `push` 授权则不执行。

@@ -22,6 +22,7 @@ export type {
   RunResult,
   AssistantProjection,
   AssistantTurnResult,
+  TokenUsage,
   ModelAdapter,
 } from "./model-adapter/types.js";
 
@@ -63,6 +64,9 @@ export { createGetTimeTool } from "./stubs/demo-tools.js";
 // 017 A7 LoopTrace:纯类型 + 一次性 reduce 函数,字段名 SSOT。
 export { computeTotals } from "./loop-trace.js";
 export type { LoopTrace, TurnTrace, Totals, CancelKind } from "./loop-trace.js";
+
+// T2 (#175): Harness 流式事件契约 SSOT (D1 最小集)。
+export type { HarnessStreamEvent } from "./stream.js";
 
 // 064 T4: TraceService bounded context public exports.
 export type {

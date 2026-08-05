@@ -26,6 +26,13 @@ export interface LlmEnv {
    * 非法值 → 视同空。
    */
   thinkingEffort: "" | "low" | "medium" | "high" | "xhigh" | "max";
+  /**
+   * #179 T6 (#147 D0) 流式臂开关:
+   *   - "on"  → adapter 走 `client.messages.stream(...)`(默认)
+   *   - "off" → 非流式回退臂(`messages.create`,017 A1 既有行为)
+   * 非法值 → 回退 "on" 且不崩溃(对齐 thinking flag 的回退纪律,方向相反)。
+   */
+  stream: "on" | "off";
 }
 
 /**
@@ -43,10 +50,24 @@ export interface ChatEnv {
   showThinking: boolean;
 }
 
+/**
+ * ACI Web 类工具的 env 配置臂（web_search 端点覆写）。
+ *
+ * `IKNOW_WEB_SEARCH_URL`：可选 HTML 搜索端点覆写（私网后端 / 测试用）。
+ * 空 → undefined（web_search 落默认 DuckDuckGo html 端点）。读取经本模块
+ * 统一走 process.env > .env.local > .env 优先级（env.ts SSOT，对齐
+ * NINE_ROUTER_KEY 惯例）；工具自身不直读 process.env。
+ */
+export interface WebEnv {
+  searchUrl: string | undefined;
+}
+
 export interface IknowEnv {
   llm: LlmEnv;
   /** #152 T5:thinking 可见面控制臂。 */
   chat: ChatEnv;
+  /** ACI Web 类工具配置臂（web_search 端点覆写）。 */
+  web: WebEnv;
 }
 
 /** Placeholder values treated as "no real secret set" (case-insensitive). */
@@ -86,6 +107,12 @@ function envGet(opts: EnvGetOpts): string {
   if (fromProc !== undefined && fromProc !== "") return fromProc;
   if (file[key] !== undefined && file[key] !== "") return file[key]!;
   return fallback;
+}
+
+/** Optional string env: 未设 / 空串 → undefined（区别于 envGet 的 "" 兜底）。 */
+function envOptional(opts: EnvGetOpts): string | undefined {
+  const raw = envGet({ file: opts.file, key: opts.key });
+  return raw.length > 0 ? raw : undefined;
 }
 
 interface EnvIntOpts {
@@ -158,6 +185,17 @@ function envThinkingEffort(
 function envShowThinking(opts: EnvFileKeyOpts): boolean {
   const raw = envGet({ file: opts.file, key: opts.key }).toLowerCase();
   return raw === "on";
+}
+
+/**
+ * #179 T6 (#147 D0): 解析 IKNOW_LLM_STREAM 值域 "on" | "off"(大小写不敏感)。
+ * 默认 on(D0:流式为默认臂);非法值 → 回退 "on",不抛错。
+ * 与 envThinkingMode 先例同构,仅回退方向相反(thinking 默认 off,stream 默认 on)。
+ */
+function envStreamMode(opts: EnvFileKeyOpts): "on" | "off" {
+  const raw = envGet({ file: opts.file, key: opts.key }).toLowerCase();
+  if (raw === "off") return "off";
+  return "on";
 }
 
 /**
@@ -237,6 +275,11 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
         file,
         key: "IKNOW_LLM_THINKING_EFFORT",
       }),
+      // #179 T6 (D0):流式默认开;非法值回退 on。
+      stream: envStreamMode({
+        file,
+        key: "IKNOW_LLM_STREAM",
+      }),
     },
     chat: {
       // #152 T5:默认 off（不显示 thinking，保持现状）。
@@ -244,6 +287,10 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
         file,
         key: "IKNOW_CHAT_SHOW_THINKING",
       }),
+    },
+    web: {
+      // 可选端点覆写：空 → undefined（web_search 落默认 DuckDuckGo html 端点）。
+      searchUrl: envOptional({ file, key: "IKNOW_WEB_SEARCH_URL" }),
     },
   };
 }
