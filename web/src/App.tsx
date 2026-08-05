@@ -6,7 +6,6 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { MessageList } from "./components/MessageList";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { StateBlock } from "./components/StateBlock";
-import { ThinkingControls } from "./components/ThinkingControls";
 import { useSessionChat } from "./hooks/useSessionChat";
 import {
   loadThinkingSettings,
@@ -146,14 +145,11 @@ function ChatApp() {
       }
       footer={
         <>
-          <ThinkingControls
-            settings={thinkingSettings}
-            onChange={handleThinkingChange}
-            disabled={!chat.session || chat.phase === "loading"}
-          />
           <Composer
             disabled={!chat.session || chat.phase === "loading"}
             sending={chat.phase === "sending"}
+            thinkingSettings={thinkingSettings}
+            onThinkingChange={handleThinkingChange}
             onSend={handleSend}
           />
         </>

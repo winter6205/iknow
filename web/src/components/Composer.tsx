@@ -8,12 +8,19 @@ import {
   type KeyboardEvent,
 } from "react";
 import { FOCUS_RING } from "../lib/ui";
+import { ThinkingToggle } from "./ThinkingToggle";
+import {
+  DEFAULT_THINKING_SETTINGS,
+  type ThinkingSettings,
+} from "../lib/thinking-settings";
 
 export type ComposerProps = {
   disabled?: boolean;
   sending?: boolean;
   onSend: (text: string) => void | Promise<void>;
   placeholder?: string;
+  thinkingSettings?: ThinkingSettings;
+  onThinkingChange?: (next: ThinkingSettings) => void;
 };
 
 // Auto-grow cap: ~4 lines of text-sm with leading-snug plus padding. Past
@@ -25,6 +32,8 @@ export function Composer({
   sending = false,
   onSend,
   placeholder = "输入问题…",
+  thinkingSettings = DEFAULT_THINKING_SETTINGS,
+  onThinkingChange = () => {},
 }: ComposerProps) {
   const [value, setValue] = useState("");
   const fieldId = useId();
@@ -71,6 +80,11 @@ export function Composer({
       <label className="sr-only" htmlFor={fieldId}>
         消息
       </label>
+      <ThinkingToggle
+        settings={thinkingSettings}
+        onChange={onThinkingChange}
+        disabled={locked}
+      />
       {/* Pill input — auto-grows, scrolls internally past MAX_HEIGHT_PX. No
           bottom hint, no card chrome. Sends on Enter, newline on Shift+Enter. */}
       <textarea
