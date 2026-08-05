@@ -80,11 +80,6 @@ export function Composer({
       <label className="sr-only" htmlFor={fieldId}>
         消息
       </label>
-      <ThinkingToggle
-        settings={thinkingSettings}
-        onChange={onThinkingChange}
-        disabled={locked}
-      />
       {/* Pill input — auto-grows, scrolls internally past MAX_HEIGHT_PX. No
           bottom hint, no card chrome. Sends on Enter, newline on Shift+Enter. */}
       <textarea
@@ -97,6 +92,11 @@ export function Composer({
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={onKeyDown}
         className="min-w-0 flex-1 resize-none overflow-hidden rounded-pill border border-ink-3/30 bg-surface/70 px-5 py-3 text-sm leading-snug text-ink placeholder:text-ink-3 transition-colors duration-200 ease-[var(--ease-soft)] focus:border-ink-3 focus:outline-none disabled:opacity-60"
+      />
+      <ThinkingToggle
+        settings={thinkingSettings}
+        onChange={onThinkingChange}
+        disabled={locked}
       />
       {/* Send button — sits outside the pill on the right, ghost until typing.
           Minimal round button (40×40), accent fill on idle, ink on hover. */}

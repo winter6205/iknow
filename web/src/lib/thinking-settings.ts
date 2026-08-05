@@ -20,14 +20,14 @@ export const DEFAULT_THINKING_SETTINGS: ThinkingSettings = {
   effort: "",
 };
 
-/** 档位 → 中文标签（"" = 自动）。 */
+/** 档位 → 标签（英文；"" = auto）。 */
 export const EFFORT_LABELS: Record<ThinkingEffort, string> = {
-  "": "自动",
-  low: "低",
-  medium: "中",
-  high: "高",
-  xhigh: "极高",
-  max: "最大",
+  "": "auto",
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "xhigh",
+  max: "max",
 };
 
 /** 分段选择器的档位顺序（自动在前）。 */

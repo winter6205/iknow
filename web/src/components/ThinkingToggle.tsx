@@ -18,7 +18,7 @@ function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
 }
 
-function SparkleIcon() {
+function ChevronIcon({ open }: { open: boolean }) {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -28,10 +28,12 @@ function SparkleIcon() {
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
-      className="h-4 w-4"
+      className={cx(
+        "h-3 w-3 transition-transform duration-150 ease-[var(--ease-soft)]",
+        open && "rotate-180"
+      )}
     >
-      <path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3z" />
-      <path d="M19 16l.7 1.8L21.5 18.5l-1.8.7L19 21l-.7-1.8L16.5 18.5l1.8-.7L19 16z" />
+      <path d="m6 9 6 6 6-6" />
     </svg>
   );
 }
@@ -96,13 +98,24 @@ function EffortOption({
       disabled={disabled}
       onClick={onSelect}
       className={cx(
-        "rounded-pill px-[9px] py-[3px] font-mono text-[11px] leading-[1.5] transition-colors duration-150 ease-[var(--ease-soft)]",
+        "flex items-center gap-2.5 rounded-[8px] px-2 py-1.5 text-left font-mono text-[11px] leading-none transition-colors duration-150 ease-[var(--ease-soft)]",
         selected
-          ? "bg-surface font-medium text-accent shadow-chip"
-          : "text-ink-3 hover:text-ink",
+          ? "bg-bg text-accent"
+          : "text-ink-3 hover:bg-bg hover:text-ink",
         FOCUS_RING
       )}
     >
+      <span
+        aria-hidden="true"
+        className={cx(
+          "inline-flex h-[14px] w-[14px] shrink-0 items-center justify-center rounded-full border transition-colors duration-150 ease-[var(--ease-soft)]",
+          selected ? "border-accent" : "border-ink-3/30"
+        )}
+      >
+        {selected ? (
+          <span className="h-[6px] w-[6px] rounded-full bg-accent" />
+        ) : null}
+      </span>
       {label}
     </button>
   );
@@ -155,15 +168,13 @@ export function ThinkingToggle({
           FOCUS_RING
         )}
       >
-        <SparkleIcon />
-        {enabled ? (
-          <span
-            aria-hidden="true"
-            className="font-mono text-[11px] leading-none text-ink-2"
-          >
-            深度·{EFFORT_LABELS[effort]}
-          </span>
-        ) : null}
+        <span
+          aria-hidden="true"
+          className="text-[12px] font-medium leading-none"
+        >
+          {enabled ? "思考" : "快速"}
+        </span>
+        <ChevronIcon open={open} />
       </button>
       {open ? (
         <div
@@ -185,7 +196,7 @@ export function ThinkingToggle({
             role="radiogroup"
             aria-label="思考强度"
             className={cx(
-              "mt-2.5 flex items-center gap-px rounded-pill border border-line bg-bg p-[2px]",
+              "mt-2.5 flex flex-col gap-0.5",
               !enabled && "pointer-events-none opacity-45"
             )}
           >

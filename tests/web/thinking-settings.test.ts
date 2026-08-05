@@ -167,12 +167,12 @@ describe("toWireOverride", () => {
 describe("EFFORT_LABELS", () => {
   it("defines a label for every effort tier", () => {
     assert.deepEqual(EFFORT_LABELS, {
-      "": "自动",
-      low: "低",
-      medium: "中",
-      high: "高",
-      xhigh: "极高",
-      max: "最大",
+      "": "auto",
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+      max: "max",
     });
   });
 });
