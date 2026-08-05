@@ -14,9 +14,9 @@
  * 用例用永挂 finalMessage 触发 raceModel timerTimeout,证明 error 分支也按实际
  * 模式翻转(该分支无 AssistantTurnResult,AssistantTurnResult 字段方案天然覆盖不到)。
  */
-import { describe, it } from "vitest";
+import { describe, it, afterEach } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Message as SdkMessage } from "@anthropic-ai/sdk/resources/messages.js";
@@ -28,13 +28,21 @@ import { createRegistry } from "../../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../../src/harness/tools/executor.ts";
 import { createStubModel } from "../../../src/harness/stubs/stub-model.ts";
 import { assistantResult } from "../../cli/_fixtures.ts";
+import { parseJsonl } from "./_fixtures.ts";
 
-function parseJsonl(filePath: string): Array<Record<string, unknown>> {
-  return readFileSync(filePath, "utf8")
-    .split(String.fromCharCode(10))
-    .filter((line) => line.trim().length > 0)
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-}
+/**
+ * Register-and-cleanup pattern: each test pushes its tmp dir into this array;
+ * afterEach drains the array. Prevents tmp dir leak when assertions fail before
+ * the inline rmSync would have run (the original 4 sites had no try/finally).
+ */
+const tmpDirs: string[] = [];
+
+afterEach(() => {
+  while (tmpDirs.length > 0) {
+    const dir = tmpDirs.pop();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 /** 良构 SdkMessage(stream arm finalMessage 的终态载体)。 */
 function wellShapedFinalMessage(text: string): SdkMessage {
@@ -96,6 +104,7 @@ function makeHangingStreamClient(): unknown {
 describe("#178 T5: trace stream boolean reflects actual LLM call mode (D6)", () => {
   it("streaming arm → trace JSONL llm_call stream: true (end-to-end)", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-t5-"));
+    tmpDirs.push(tmpDir);
     const traceFile = join(tmpDir, "trace.jsonl");
     const client = makeOneShotStreamClient(wellShapedFinalMessage("hi"));
     const adapter = createRealAnthropicAdapter({
@@ -124,11 +133,11 @@ describe("#178 T5: trace stream boolean reflects actual LLM call mode (D6)", () 
     const llm = lines.find((l) => l["record_type"] === "llm_call");
     assert.ok(llm, "expected llm_call record");
     assert.equal(llm!["stream"], true);
-    rmSync(tmpDir, { recursive: true, force: true });
   });
 
   it("stub model (no streamMode) → trace JSONL llm_call stream: false (regression guard)", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-t5-"));
+    tmpDirs.push(tmpDir);
     const traceFile = join(tmpDir, "trace.jsonl");
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
@@ -156,11 +165,11 @@ describe("#178 T5: trace stream boolean reflects actual LLM call mode (D6)", () 
     const llm = lines.find((l) => l["record_type"] === "llm_call");
     assert.ok(llm);
     assert.equal(llm!["stream"], false);
-    rmSync(tmpDir, { recursive: true, force: true });
   });
 
   it("real adapter with stream=false → trace JSONL llm_call stream: false", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-t5-"));
+    tmpDirs.push(tmpDir);
     const traceFile = join(tmpDir, "trace.jsonl");
     const final = wellShapedFinalMessage("ok");
     const client = {
@@ -196,11 +205,11 @@ describe("#178 T5: trace stream boolean reflects actual LLM call mode (D6)", () 
     const llm = lines.find((l) => l["record_type"] === "llm_call");
     assert.ok(llm);
     assert.equal(llm!["stream"], false);
-    rmSync(tmpDir, { recursive: true, force: true });
   });
 
   it("streaming arm timeout (raceModel timerTimeout) → error record stream: true", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-t5-"));
+    tmpDirs.push(tmpDir);
     const traceFile = join(tmpDir, "trace.jsonl");
     const client = makeHangingStreamClient();
     const adapter = createRealAnthropicAdapter({
@@ -233,6 +242,5 @@ describe("#178 T5: trace stream boolean reflects actual LLM call mode (D6)", () 
     // streaming,记录 stream: true。
     assert.equal(llm!["stream"], true);
     assert.equal(llm!["status"], "error");
-    rmSync(tmpDir, { recursive: true, force: true });
   });
 });
