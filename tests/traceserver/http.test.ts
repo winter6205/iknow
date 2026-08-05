@@ -1,9 +1,9 @@
 /**
- * GET /api/v1/traces (and /api/v1/traces/fields) integration tests.
+ * GET /api/v1/traces (and /api/v1/traces/fields) integration tests (post #183).
  *
- * Boots a real node:http listener with a minimal SessionHub + a populated
- * JSONL trace file; exercises the endpoints with fetch and asserts the
- * nested wire shape (records / total / skipped_lines / truncated).
+ * Boots the standalone trace server via `startTraceServe` on 127.0.0.1:0;
+ * exercises the endpoints with fetch and asserts the nested wire shape
+ * (records / total / skipped_lines / truncated).
  *
  * Categories (S2 defensive contract):
  *   - 200 happy path with snake_case wire keys
@@ -22,38 +22,27 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SessionHub } from "../../src/session-api/hub.ts";
 import {
-  listenSessionServer,
-  type ListeningServer,
-} from "../../src/session-api/http.ts";
-import { SessionStore } from "../../src/session-api/store/index.ts";
-import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
+  startTraceServe,
+  type TraceListeningServer,
+} from "../../src/traceserver/serve.ts";
 
 // -- per-test server lifecycle ------------------------------------------------
 
 const tmpDirs: string[] = [];
-let listening: ListeningServer | undefined;
+let listening: TraceListeningServer | undefined;
 let origin: string;
 
 interface StartOpts {
-  readonly traceFilePath?: string | undefined;
+  readonly traceOut?: string | undefined;
 }
 
 async function startServer(startOpts: StartOpts = {}): Promise<void> {
-  const baseDir = mkdtempSync(join(tmpdir(), "iknow-traces-http-"));
-  tmpDirs.push(baseDir);
-  const store = new SessionStore(baseDir);
-  const hub = new SessionHub({
-    store,
-    deps: makeDeps([assistantResult({ texts: ["stub"] })]),
-  });
-  listening = await listenSessionServer({
-    hub,
+  listening = await startTraceServe({
     host: "127.0.0.1",
     port: 0,
-    ...(startOpts.traceFilePath !== undefined
-      ? { traceFilePath: startOpts.traceFilePath }
+    ...(startOpts.traceOut !== undefined
+      ? { traceOut: startOpts.traceOut }
       : {}),
   });
   origin = `http://${listening.host}:${listening.port}`;
@@ -150,7 +139,7 @@ function assertNestedError(body: unknown, kind: string): void {
 
 // -- 404 when no trace file configured ----------------------------------------
 
-describe("GET /api/v1/traces — no traceFilePath configured", () => {
+describe("GET /api/v1/traces — no traceOut configured", () => {
   beforeEach(async () => {
     await startServer();
   });
@@ -184,9 +173,10 @@ describe("GET /api/v1/traces — no traceFilePath configured", () => {
 describe("GET /api/v1/traces — happy path + filtering + pagination", () => {
   beforeEach(async () => {
     const tmp = mkdtempSync(join(tmpdir(), "iknow-traces-happy-"));
+    tmpDirs.push(tmp);
     const file = join(tmp, "trace.jsonl");
     writeSampleTrace(file);
-    await startServer({ traceFilePath: file });
+    await startServer({ traceOut: file });
   });
 
   it("returns records in descending order with snake_case wire shape", async () => {
@@ -245,9 +235,10 @@ describe("GET /api/v1/traces — happy path + filtering + pagination", () => {
 describe("GET /api/v1/traces — validation errors", () => {
   beforeEach(async () => {
     const tmp = mkdtempSync(join(tmpdir(), "iknow-traces-validation-"));
+    tmpDirs.push(tmp);
     const file = join(tmp, "trace.jsonl");
     writeSampleTrace(file);
-    await startServer({ traceFilePath: file });
+    await startServer({ traceOut: file });
   });
 
   const cases: Array<[string, string]> = [
@@ -278,10 +269,11 @@ describe("GET /api/v1/traces — validation errors", () => {
 // -- 500 internal when traceFilePath is a directory ---------------------------
 
 describe("GET /api/v1/traces — IO error mapping", () => {
-  it("returns 500 internal when traceFilePath points at a directory", async () => {
+  it("returns 500 internal when traceOut points at a directory", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "iknow-traces-io-"));
-    // Use a directory path as the traceFilePath → reader throws TraceReadError.
-    await startServer({ traceFilePath: tmp });
+    tmpDirs.push(tmp);
+    // Use a directory path as the traceOut → reader throws TraceReadError.
+    await startServer({ traceOut: tmp });
     const { status, body } = await getJson("/api/v1/traces");
     assert.equal(status, 500);
     const b = body as { error?: { kind: string; message: string } };
@@ -295,9 +287,10 @@ describe("GET /api/v1/traces — IO error mapping", () => {
 describe("GET /api/v1/traces/fields", () => {
   beforeEach(async () => {
     const tmp = mkdtempSync(join(tmpdir(), "iknow-traces-fields-"));
+    tmpDirs.push(tmp);
     const file = join(tmp, "trace.jsonl");
     writeSampleTrace(file);
-    await startServer({ traceFilePath: file });
+    await startServer({ traceOut: file });
   });
 
   it("returns each field def with key, jsonlKey, type, label, recordTypes", async () => {

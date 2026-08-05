@@ -1,7 +1,9 @@
 /**
  * Minimal node:http router for Session API + static web UI.
  * 022 T5: nested ApiErrorBody, hub error mapping, GET /sessions list.
- * Trace inspection: /api/v1/traces (read-only) delegated to src/traceserver/.
+ * 183 R3: trace inspection read API was moved to `iknow trace`; this server
+ * no longer mounts /api/v1/traces (write-side `--trace-out` on serve/chat/ask
+ * remains unchanged).
  */
 import * as http from "node:http";
 import * as fs from "node:fs";
@@ -12,7 +14,6 @@ import { mapStoreError, type SessionHub } from "./hub.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { ApiErrorBody, HealthResponse } from "./contract.js";
 import { getVersion } from "../cli/usage.js";
-import { handleTracesRequest } from "../traceserver/http.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -22,8 +23,6 @@ export type SessionHttpServerOptions = {
   webRoot?: string;
   host?: string;
   port?: number;
-  /** Absolute path to the JSONL trace file exposed by /api/v1/traces. */
-  traceFilePath?: string;
 };
 
 export type ListeningServer = {
@@ -57,10 +56,9 @@ export function createSessionHttpServer(
 ): http.Server {
   const hub = opts.hub;
   const webRoot = opts.webRoot ?? resolveDefaultWebRoot();
-  const traceFilePath = opts.traceFilePath;
 
   return http.createServer((req, res) => {
-    void handle({ req, res, hub, webRoot, traceFilePath });
+    void handle({ req, res, hub, webRoot });
   });
 }
 
@@ -98,11 +96,10 @@ interface HandleOpts {
   readonly res: http.ServerResponse;
   readonly hub: SessionHub;
   readonly webRoot: string;
-  readonly traceFilePath?: string;
 }
 
 async function handle(opts: HandleOpts): Promise<void> {
-  const { req, res, hub, webRoot, traceFilePath } = opts;
+  const { req, res, hub, webRoot } = opts;
   try {
     const method = (req.method ?? "GET").toUpperCase();
     const url = new URL(
@@ -114,12 +111,6 @@ async function handle(opts: HandleOpts): Promise<void> {
     if (method === "GET" && pathname === "/api/v1/health")
       return sendHealth(res);
     if (method === "GET" && isSsePath(pathname)) return sendSseReserved(res);
-
-    // Trace inspection (read-only) — registered before the sessions router
-    // so its prefix cannot be misinterpreted as a session id path.
-    if (method === "GET" && pathname.startsWith("/api/v1/traces")) {
-      return handleTracesRequest({ res, url, traceFilePath });
-    }
 
     if (method === "POST" && pathname === "/api/v1/sessions") {
       const createReq = parseCreateBody(await readJsonBody(req));

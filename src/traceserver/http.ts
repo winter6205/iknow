@@ -25,6 +25,12 @@ export interface TracesRequestOpts {
   readonly res: http.ServerResponse;
   readonly url: URL;
   readonly traceFilePath?: string;
+  /**
+   * Per-read byte cap forwarded to the JSONL reader. Omit to use the reader
+   * default (`MAX_TRACE_BYTES = 8 MiB`). Out-of-range values fall through to
+   * the reader's own validation.
+   */
+  readonly maxBytes?: number;
 }
 
 // -- query param parsing (each throws ValidationError with a `field` detail) --
@@ -137,7 +143,10 @@ export function handleTracesRequest(opts: TracesRequestOpts): void {
       return;
     }
     const query = parseTraceQuery(url);
-    const reader = createJsonlTraceReader({ filePath: traceFilePath });
+    const reader = createJsonlTraceReader({
+      filePath: traceFilePath,
+      ...(opts.maxBytes !== undefined ? { maxBytes: opts.maxBytes } : {}),
+    });
     const result = reader.query(query);
     sendJson(res, 200, {
       records: result.records,

@@ -15,3 +15,8 @@ export {
   type JsonlTraceReaderOptions,
 } from "./reader.js";
 export { handleTracesRequest, type TracesRequestOpts } from "./http.js";
+export {
+  startTraceServe,
+  type TraceServeOptions,
+  type TraceListeningServer,
+} from "./serve.js";

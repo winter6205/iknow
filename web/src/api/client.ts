@@ -18,6 +18,25 @@ import { SessionApiError } from "./types";
  */
 const API = "/api/v1";
 
+/**
+ * Trace inspection API base path (spec #183).
+ *
+ * Defaults to `/api/v1/traces` so the existing `iknow serve` reverse-proxy
+ * path works without env wiring. Override with VITE_TRACE_API_BASE when the
+ * standalone `iknow trace` process lives on a different origin (e.g.
+ * `http://127.0.0.1:8788`). Exported pure for unit tests.
+ */
+export function resolveTraceApiBase(envValue: string | undefined): string {
+  if (typeof envValue === "string" && envValue.trim().length > 0) {
+    return envValue;
+  }
+  return "/api/v1/traces";
+}
+
+const TRACE_API = resolveTraceApiBase(
+  (import.meta.env.VITE_TRACE_API_BASE ?? undefined) as string | undefined
+);
+
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 function defaultSignal(external?: AbortSignal): AbortSignal | undefined {
@@ -158,11 +177,11 @@ export function getTraces(
   signal?: AbortSignal
 ): Promise<TracesResponse> {
   const qs = traceQueryString(params);
-  return request(`${API}/traces${qs ? `?${qs}` : ""}`, {}, signal);
+  return request(`${TRACE_API}${qs ? `?${qs}` : ""}`, {}, signal);
 }
 
 export function getTraceFields(
   signal?: AbortSignal
 ): Promise<{ fields: ReadonlyArray<TraceFieldDef> }> {
-  return request(`${API}/traces/fields`, {}, signal);
+  return request(`${TRACE_API}/fields`, {}, signal);
 }

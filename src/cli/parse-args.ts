@@ -2,7 +2,8 @@
  * Pure CLI argument parsing (no I/O).
  */
 
-export type CliCommand = "chat" | "ask" | "oneshot" | "help" | "serve";
+export type CliCommand =
+  "chat" | "ask" | "oneshot" | "help" | "serve" | "trace";
 
 export type ParsedCli = {
   command: CliCommand;
@@ -25,6 +26,11 @@ export type ParsedCli = {
    * HTTP bind host for `serve` (default 127.0.0.1).
    */
   host: string;
+  /**
+   * Trace read cap (bytes) for the `trace` subcommand (--max-bytes flag).
+   * Defaults to 8 MiB (MAX_TRACE_BYTES) in the reader when unset.
+   */
+  maxBytes?: number;
   /**
    * Trace output file path for ask/serve (--trace-out flag).
    * Resolution: flag > IKNOW_TRACE_OUT env > "./trace.jsonl" (ADR-0003 D3/D4).
@@ -56,9 +62,11 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   const interactive = opts.interactive ?? false;
   let json = false;
   let port = 8787;
+  let portSet = false;
   let host = "127.0.0.1";
   let traceOut: string | undefined;
   let dataDir: string | undefined;
+  let maxBytes: number | undefined;
   const rest: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
@@ -72,6 +80,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           host,
           traceOut,
           dataDir,
+          maxBytes,
           query: "",
           missingQuery: false,
           versionOnly: false,
@@ -86,10 +95,12 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
         throw new Error("Missing value for --port");
       }
       const n = Number(raw);
-      if (!Number.isInteger(n) || n < 1 || n > 65535) {
+      // Port 0 is allowed → ephemeral (Node http.Server convention).
+      if (!Number.isInteger(n) || n < 0 || n > 65535) {
         throw new Error(`Invalid --port: ${raw}`);
       }
       port = n;
+      portSet = true;
     } else if (a === "--host") {
       const raw = argv[++i];
       if (raw === undefined) {
@@ -102,6 +113,16 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
         throw new Error("--trace-out requires a file path argument");
       }
       traceOut = raw;
+    } else if (a === "--max-bytes") {
+      const raw = argv[++i];
+      if (raw === undefined) {
+        throw new Error("--max-bytes requires an integer argument");
+      }
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1) {
+        throw new Error(`Invalid --max-bytes: ${raw}`);
+      }
+      maxBytes = n;
     } else if (a === "--data-dir") {
       const raw = argv[++i];
       if (raw === undefined) {
@@ -117,6 +138,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           host,
           traceOut,
           dataDir,
+          maxBytes,
           query: "",
           missingQuery: false,
           versionOnly: true,
@@ -133,6 +155,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
     host,
     traceOut,
     dataDir,
+    maxBytes,
     versionOnly: false,
   };
   const head = rest[0];
@@ -153,6 +176,22 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
       command: "serve",
       fields: {
         ...flags,
+        query: "",
+        missingQuery: false,
+      },
+    });
+  }
+
+  if (head === "trace") {
+    // iknow trace: default port 8788 (serve uses 8787). Sentinel-based: only
+    // override when the user did not pass --port, so `iknow trace --port 8787`
+    // is honored verbatim instead of silently bumped to 8788.
+    const tracePort = portSet ? port : 8788;
+    return baseParsed({
+      command: "trace",
+      fields: {
+        ...flags,
+        port: tracePort,
         query: "",
         missingQuery: false,
       },
