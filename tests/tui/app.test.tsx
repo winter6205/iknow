@@ -431,23 +431,29 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     LONG_TIMEOUT
   );
 
-  // 任务 A：聊天区域消息级滚动（PgUp → scroll +1，切到早期消息；End 回到底部）
+  // 任务 A：聊天区域行级滚动（PgUp → scrollRows += viewportRows/2，
+  // 顶部 dim 指示「↑ N 行历史（End 回到底部）」；End → 回到底部）。
   it(
-    "任务 A：发 5 条消息 → 渲染出 5 条 → PgUp → 最新 1 条不可见；End → 全部回归",
+    "任务 A：发 5 条消息 → 渲染出 5 条 → PgUp → 行级滚动指示出现；End → 全部回归",
     async () => {
+      // 用长文本（每条 6 行）确保 totalRows > viewportRows（≈22），PgUp 后
+      // maxScroll > 0 才能验证行级滚动指示。短消息填不满 viewport 会被 clamp 到 0。
+      const longBody = (tag: string) =>
+        `${tag} 行1内容占位\n${tag} 行2内容占位\n${tag} 行3内容占位\n${tag} 行4内容占位\n${tag} 行5内容占位\n${tag} 行6内容占位`;
       const app = makeApp([
-        assistantResult({ texts: ["a0"] }),
-        assistantResult({ texts: ["a1"] }),
-        assistantResult({ texts: ["a2"] }),
-        assistantResult({ texts: ["a3"] }),
-        assistantResult({ texts: ["a4"] }),
+        assistantResult({ texts: [longBody("a0")] }),
+        assistantResult({ texts: [longBody("a1")] }),
+        assistantResult({ texts: [longBody("a2")] }),
+        assistantResult({ texts: [longBody("a3")] }),
+        assistantResult({ texts: [longBody("a4")] }),
       ]);
       await app.ready();
       await waitFor(() => app.lastOutput().includes("iknow"), 8000, "startup");
 
-      // 顺序发 5 条：等 turn 落盘 + runState 回 idle（避免下条消息被「正在运行」拒绝）
+      // 顺序发 5 条（每条多行 user 文本，进一步撑满 viewport）：等 turn 落盘 +
+      // runState 回 idle（避免下条消息被「正在运行」拒绝）
       for (let i = 0; i < 5; i++) {
-        await app.type(`m${i}\r`);
+        await app.type(`m${i} 第一行 m${i} 第二行 m${i} 第三行\r`);
         await waitFor(
           () => app.bridge.inflight.ids().size === 0,
           8000,
@@ -475,18 +481,16 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       // 滚动前：m4 应可见
       expect(app.lastOutput()).toContain("m4");
 
-      // PgUp → scroll +1（隐藏最新 1 条 = m4 / a4）
+      // PgUp → scrollRows += viewportRows/2（行级滚动，按 viewport 半页跳）
       stdin.write("[5~"); // PgUp ANSI sequence
       await delay(500);
       await waitFor(
-        () => app.lastOutput().includes("条新消息"),
+        () => app.lastOutput().includes("行历史"),
         8000,
         "scroll-indicator"
       );
-      // 顶部 dim 指示（1 条新消息）— 验证 scroll 真的切了消息
-      // 注意：lastOutput 是累积 buffer（含 PgUp 之前的帧），不能直接断言
-      // a4 缺席；改用「指示文案 + End 回到底部后 a4 重新出现」做等价证明
-      expect(app.lastOutput()).toContain("1 条新消息");
+      // 顶部 dim 指示「↑ N 行历史（End 回到底部）」— 验证 scrollRows > 0
+      expect(app.lastOutput()).toMatch(/↑ \d+ 行历史/);
 
       // End → scroll 重置为 0，等 a4 重新出现在最近帧
       stdin.write("[F"); // End ANSI sequence
@@ -497,6 +501,87 @@ describe("TuiApp 端到端（tracer bullet）", () => {
         () => app.lastOutput().slice(-1500).includes("a4"),
         8000,
         "a4-restored-after-end"
+      );
+    },
+    LONG_TIMEOUT
+  );
+
+  // 任务 A 行级：鼠标滚轮 SGR 序列 → scrollRows 调整，顶部指示出现。
+  it(
+    "任务 A 行级：SGR 滚轮序列 → 行级滚动指示出现；多次上滚累加行数",
+    async () => {
+      // 用长文本撑满 viewport，滚轮才有滚动余量
+      const longBody = (tag: string) =>
+        `${tag} 行1内容占位\n${tag} 行2内容占位\n${tag} 行3内容占位\n${tag} 行4内容占位\n${tag} 行5内容占位\n${tag} 行6内容占位`;
+      const app = makeApp([
+        assistantResult({ texts: [longBody("a0")] }),
+        assistantResult({ texts: [longBody("a1")] }),
+        assistantResult({ texts: [longBody("a2")] }),
+        assistantResult({ texts: [longBody("a3")] }),
+        assistantResult({ texts: [longBody("a4")] }),
+      ]);
+      await app.ready();
+      await waitFor(() => app.lastOutput().includes("iknow"), 8000, "startup");
+
+      // 发 5 条长消息，保证聊天区域有内容可滚（rows > viewport）
+      for (let i = 0; i < 5; i++) {
+        await app.type(`m${i} 第一行 m${i} 第二行 m${i} 第三行\r`);
+        await waitFor(
+          () => app.bridge.inflight.ids().size === 0,
+          8000,
+          `m${i}-turn-done`
+        );
+        await delay(50);
+      }
+      for (let i = 0; i < 5; i++) {
+        await waitFor(
+          () => app.lastOutput().includes(`m${i}`),
+          8000,
+          `m${i}-rendered`
+        );
+      }
+
+      // 写入 SGR 滚轮上滚序列（每 tick = WHEEL_STEP_ROWS=3 行）
+      // \x1b[<64;10;5M
+      stdin.write("\x1b[<64;10;5M");
+      await delay(300);
+      // 顶部 dim 指示出现，scrollRows = 3
+      // 用最近帧 slice(-1500) 而非累积 buffer，避免被旧帧干扰
+      await waitFor(
+        () => app.lastOutput().slice(-1500).includes("3 行历史"),
+        8000,
+        "wheel-up-indicator-1"
+      );
+
+      // 再写一次上滚 → scrollRows = 6
+      stdin.write("\x1b[<64;10;5M");
+      await delay(300);
+      await waitFor(
+        () => app.lastOutput().slice(-1500).includes("6 行历史"),
+        8000,
+        "wheel-up-indicator-2"
+      );
+
+      // 写一次下滚 → scrollRows = 3
+      stdin.write("\x1b[<65;10;5M");
+      await delay(300);
+      await waitFor(
+        () => app.lastOutput().slice(-1500).includes("3 行历史"),
+        8000,
+        "wheel-down-indicator"
+      );
+
+      // 写两次下滚（多余）→ scrollRows = max(0, 3-6) = 0
+      stdin.write("\x1b[<65;10;5M");
+      stdin.write("\x1b[<65;10;5M");
+      await delay(500);
+      // scrollRows=0 → 最新帧指示消失。看最近 200 字节（够一帧 + 余量），
+      // 避免被旧帧「3 行历史」残留字串干扰。lastOutput 是累积 buffer，
+      // 旧帧仍在历史里，所以不能 slice(-1500)。
+      await waitFor(
+        () => !app.lastOutput().slice(-200).includes("行历史"),
+        8000,
+        "wheel-down-back-to-bottom"
       );
     },
     LONG_TIMEOUT

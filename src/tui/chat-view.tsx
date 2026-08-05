@@ -9,10 +9,19 @@
  *
  * 流式（#147）拓展点：turn 完成回调处整段替换渲染；未来增量渲染挂载于此。
  *
- * 滚动（任务 A）：消息级切片——`scroll = 0` 展示全部（auto-follow 底），
- * `scroll = k` 截掉最新 k 条（用户向上滚动查看更早内容时保留早期可见；
- * 按 End / 新 turn 完成 → scroll 重置为 0）。`scroll > 0` 时顶部加 dim
- * 提示「↓ N 条新消息」告知可向下滚回底部。
+ * 滚动（任务 A 行级重构）：把"消息级切片"换成"行级窗口"。
+ *  - `scrollRows` = 视口向上滚动的物理行数（0 = 底部 auto-follow，>0 = 向上）；
+ *  - `viewportRows` = 聊天区域可视行数（终端总行 - banner - 状态栏 - 输入框
+ *    - ask / notice 槽，动态算；调用方传入）；
+ *  - 每个 message 的物理行数由 `estimateMessageRows` 近似（user 文本按
+ *    cols 折行 + 1 行 prompt 前缀；assistant markdown 用保守估计：每个
+ *    块占 1..N 行 + margin）；
+ *  - 渲染时先累加消息行数，从 `totalRows - scrollRows - viewportRows` 起
+ *    切到 `totalRows - scrollRows`，按行窗口选 messages 渲染；
+ *  - `scrollRows > 0` 顶部 dim 指示「↑ N 行历史（End 回到底部）」。
+ *
+ * 行数估算是保守近似（不算实际折行，宁可多算不可少算），保证窗口不会
+ * 露出"被切掉"的内容；测试时 assert 行数 >= 实际折行（不精确等于）。
  */
 import type { ReactElement } from "react";
 import { Box, Text } from "ink";
@@ -22,6 +31,86 @@ import { toolResultStatusMap, summarizeToolCall } from "./tool-summary.js";
 import { Markdown } from "./markdown.js";
 import { Spinner } from "./components.js";
 import { tuiPalette } from "./theme.js";
+import { wrapText } from "./text.js";
+
+/** 单个 message 渲染估算的物理行数（含 prompt 前缀 / 摘要行 / margin）。 */
+export function estimateMessageRows(
+  message: AnthropicNativeMessage,
+  cols: number
+): number {
+  if (message.role === "user") {
+    const texts = message.content
+      .filter((b): b is { type: "text"; text: string } => b.type === "text")
+      .map((b) => b.text)
+      .join("\n");
+    if (!texts.trim()) return 0; // 纯 tool_result 消息不占行（摘要行已覆盖）
+    // prompt 前缀「❯ 」占 2 列；剩余按 wrap 折行 + 底部 1 行 margin。
+    const wrapCols = Math.max(1, cols - 2);
+    const lines = wrapText(texts, wrapCols);
+    return lines.length + 1; // margin
+  }
+  // assistant：text → markdown 行级估计；tool_use → 1 摘要行；
+  // 每个块之间 marginBottom=1。保守按"每块行数 = max(1, 文本行) + 1"
+  // 算，不细究 markdown 子块（headings / list / fence 是 React 渲染，
+  // 我们只估总行数）。
+  let rows = 0;
+  let blocks = 0;
+  for (const block of message.content) {
+    if (block.type === "text" && block.text.trim().length > 0) {
+      const lines = wrapText(block.text, cols);
+      rows += Math.max(1, lines.length) + 1; // +1 = marginBottom
+      blocks += 1;
+    } else if (block.type === "tool_use") {
+      // 工具摘要单行 + marginBottom（实际无 margin，但给 +1 留视觉余量）。
+      rows += 2;
+      blocks += 1;
+    }
+  }
+  if (blocks === 0) return 0;
+  // 容器自身有 marginBottom=1，已经被加到最后一个块的 +1 上了。
+  return Math.max(1, rows);
+}
+
+/** 把 messages 序列按行级累计，产出每个 message 的「起始行 / 行数」元数据。 */
+export interface MessageRowSpan {
+  readonly message: AnthropicNativeMessage;
+  readonly startRow: number;
+  readonly rows: number;
+}
+
+export function buildMessageRowSpans(
+  messages: ReadonlyArray<AnthropicNativeMessage>,
+  cols: number
+): ReadonlyArray<MessageRowSpan> {
+  const out: MessageRowSpan[] = [];
+  let cursor = 0;
+  for (const m of messages) {
+    const rows = estimateMessageRows(m, cols);
+    if (rows === 0) continue;
+    out.push({ message: m, startRow: cursor, rows });
+    cursor += rows;
+  }
+  return out;
+}
+
+/** live 工具行 + ask 行 + spinner 占位也占行；用于总行数估计。 */
+export interface TailSlot {
+  readonly liveToolRows: number;
+  readonly askRow: number; // 0 / 1
+  readonly spinnerRow: number; // 0 / 1
+}
+
+export function tailSlot(
+  liveToolLines: ReadonlyArray<string>,
+  askLine: string | undefined,
+  running: boolean
+): TailSlot {
+  return {
+    liveToolRows: liveToolLines.length,
+    askRow: askLine !== undefined ? 1 : 0,
+    spinnerRow: running ? 1 : 0,
+  };
+}
 
 function MessageBlocks(props: {
   readonly message: AnthropicNativeMessage;
@@ -38,7 +127,10 @@ function MessageBlocks(props: {
     if (!texts.trim()) return null; // 纯 tool_result 消息：摘要行已覆盖
     return (
       <Box flexDirection="column" marginBottom={1}>
-        <Text color={pal.accent}>❯ {texts}</Text>
+        <Text color={pal.accent} wrap="wrap">
+          {"❯ "}
+          {texts}
+        </Text>
       </Box>
     );
   }
@@ -81,37 +173,55 @@ export interface ChatViewProps {
   /** askUser 待决提示（undefined = 无 pending ask）。 */
   readonly askLine: string | undefined;
   /**
-   * 消息级滚动偏移（任务 A）：0 = 显示全部（auto-follow 底）；
-   * k = 截掉最新 k 条（用户已向上滚 k 条查看更早内容）。
-   * 负数 / 越界由调用方负责 clamp。
+   * 行级滚动偏移（任务 A 行级）：0 = 视口底（auto-follow）；
+   * k = 向上滚 k 行（k 由调用方 clamp 到 [0, totalRows - viewportRows]）。
    */
-  readonly scroll?: number;
+  readonly scrollRows?: number;
+  /**
+   * 视口可视行数（行级窗口高度，含顶部指示行）。调用方负责算：
+   * 终端 rows - banner - 状态栏 - 输入框 - ask / notice 槽。<= 0 = 不限。
+   */
+  readonly viewportRows?: number;
 }
 
 export function ChatView(props: ChatViewProps): ReactElement {
   const { session, cols } = props;
   const pal = tuiPalette;
   const statusMap = toolResultStatusMap(session.messages);
-  const total = session.messages.length;
-  const rawScroll = props.scroll ?? 0;
-  // 调用方应已 clamp；此处兜底防越界。
-  const scroll = Math.max(0, Math.min(rawScroll, Math.max(0, total - 1)));
-  const visible = session.messages.slice(0, Math.max(0, total - scroll));
-  const hiddenNew = scroll; // 顶部被截掉的最新消息数
+  const spans = buildMessageRowSpans(session.messages, cols);
+  const tail = tailSlot(
+    props.liveToolLines,
+    props.askLine,
+    session.runState === "running-fg"
+  );
+  const tailRows = tail.liveToolRows + tail.askRow + tail.spinnerRow;
+  const totalRows = spans.reduce((acc, s) => acc + s.rows, 0) + tailRows;
+  const viewport = props.viewportRows ?? 0;
+  // 行级窗口：[end - viewport - scroll, end - scroll]（end = totalRows，
+  // tail 占底）。scroll=0 → 显示最末 viewport 行（auto-follow 底）。
+  const safeScroll = Math.max(0, props.scrollRows ?? 0);
+  const maxScroll = Math.max(0, totalRows - Math.max(1, viewport));
+  const scroll = Math.min(safeScroll, maxScroll);
+  const endRow = totalRows - scroll;
+  const startRow = viewport > 0 ? Math.max(0, endRow - viewport) : 0;
+  // 选 messages：startRow/endRow 落在哪个 span 范围内就保留。
+  const visibleSpans = spans.filter(
+    (s) => s.startRow + s.rows > startRow && s.startRow < endRow
+  );
+  // 顶部「↑ N 行历史」指示：scroll > 0 时显示 N = scroll 行数。
+  const indicator = scroll > 0 ? `↑ ${scroll} 行历史（End 回到底部）` : "";
   return (
     <Box flexDirection="column" flexGrow={1}>
-      {hiddenNew > 0 && (
+      {indicator.length > 0 && (
         <Box marginBottom={1}>
-          <Text
-            color={pal.dim}
-          >{`↓ ${hiddenNew} 条新消息（End 回到底部）`}</Text>
+          <Text color={pal.dim}>{indicator}</Text>
         </Box>
       )}
       <Box flexDirection="column">
-        {visible.map((m, i) => (
+        {visibleSpans.map((s, i) => (
           <MessageBlocks
             key={i}
-            message={m}
+            message={s.message}
             cols={cols}
             statusMap={statusMap}
           />

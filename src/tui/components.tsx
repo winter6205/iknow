@@ -104,6 +104,11 @@ export function PromptInput(props: PromptInputProps): ReactElement {
   }, [props.value, hasHint, suggestions.length, hintCursor]);
   useInput(
     (input, key) => {
+      // 鼠标滚轮 SGR 序列 \x1b[<64;x;yM（/65 下滚）会被 ink 当成普通
+      // input 字符串整段回调（ink 不识别 mouse CSI）。app 层 mouse
+      // listener 已消费，此处忽略以免泄漏到输入框（会被 stripNonPrintable
+      // 当作 `<64;10;5M` 注入 value）。
+      if (input.startsWith("\x1b[<")) return;
       if (key.return) {
         if (hasHint && props.onSelectHint) {
           const idx = Math.max(0, Math.min(hintCursor, suggestions.length - 1));

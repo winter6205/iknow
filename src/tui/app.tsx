@@ -8,6 +8,14 @@
  *
  * 退出语义（spec OQ3 实施细化）：存在 running-bg 会话时 `/quit` 需二次确认；
  * 确认后等待全部 in-flight turn 落盘再退出（退出不打断后台 turn，Q1a）。
+ *
+ * 行级滚动（任务 A 行级重构）：
+ *  - `chatScroll` 现为行数（>0 = 向上滚多少行），不再是消息计数；
+ *  - 视口高度 = 终端 rows - banner - 状态栏 - 输入框 - 槽位，动态算；
+ *  - PgUp = 视口一半向下滚，PgDn = 视口一半向上滚，Home = 顶，End = 0；
+ *  - 鼠标滚轮（enableMouseScroll + parseMouseEvents）每个 tick = scrollRows
+ *    步长（默认 3，可调 WHEEL_STEP_ROWS），auto-follow 在 turn 完成 / new
+ *    会话触发。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
@@ -43,6 +51,11 @@ import { renderBanner } from "./banner.js";
 import { tuiPalette } from "./theme.js";
 import { clipOneLine } from "./text.js";
 import { VERSION } from "./version.js";
+import { useStdout, useStdin } from "ink";
+import { enableMouseScroll, parseMouseEvents } from "./mouse.js";
+
+/** 鼠标滚轮每个 tick 的行数（每滚一格 = 3 物理行）。 */
+const WHEEL_STEP_ROWS = 3;
 
 export interface TuiToolEventSink {
   readonly emit: (event: TuiToolEvent) => void;
@@ -83,8 +96,11 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   const { bridge, askBridge, toolEventSink } = props;
   const pal = tuiPalette;
   const { exit } = useApp();
-  const { columns } = useWindowSize();
+  const { stdout } = useStdout();
+  const { stdin } = useStdin();
+  const { columns, rows: rawRows } = useWindowSize();
   const cols = Math.max(columns ?? 80, 40);
+  const rows = Math.max(rawRows ?? 24, 10);
 
   const initial = props.initialSession ?? createDraftSession();
   const initialKey = initial.conversationId ?? DRAFT_SESSION_ID;
@@ -99,9 +115,9 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     Record<string, ReadonlyArray<string>>
   >({});
   const [pendingQuit, setPendingQuit] = useState(false);
-  // 任务 A：聊天区域消息级滚动偏移（0 = 底/auto-follow，>0 = 向上滚）。
-  // 新 turn 完成时重置为 0；PgUp/PgDn/Home/End 调整（与 PromptInput 的
-  // ↑/↓ 不冲突，避键）。
+  // 任务 A 行级：聊天区域行级滚动偏移（0 = 底/auto-follow，>0 = 向上滚多少
+  // 物理行）。新 turn 完成 / new 会话 → 0；PgUp/PgDn/Home/End + 鼠标滚轮
+  // 调整（与 PromptInput 的 ↑/↓ 不冲突，避键）。
   const [chatScroll, setChatScroll] = useState(0);
 
   const aborters = useRef(new Map<string, AbortController>());
@@ -113,6 +129,30 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   // 挂载，idle 且无授权待决时不强制整树 10Hz 重渲染（spinner 自带 tick）。
   const askTick = askBridge.pending() !== undefined;
   useTick(askTick ? 100 : 0);
+
+  // 任务 A 行级：计算聊天区域可视行数（终端总行 - banner - 状态栏 - 输入框
+  // - notice 槽 - 顶部分隔）。保守下界 3，避免负数 / 0 导致窗口错乱。
+  // 注意：list 视图整屏占用，chat 视图才走这个分配。
+  const bannerLineCount = useMemo(() => {
+    if (view !== "chat") return 0;
+    const sess = sessions[activeKey] ?? initial;
+    if (sess.messages.length !== 0) return 0;
+    return (
+      renderBanner(
+        { version: VERSION, cwd: props.cwd, dataDir: props.dataDir },
+        { cols, short: false }
+      ).length + 1
+    ); // +1 = 顶部分隔
+  }, [view, activeKey, sessions, initial, cols, props.cwd, props.dataDir]);
+
+  const viewportRows = useMemo(() => {
+    // 固定行扣减：banner / 状态栏（1） / 输入框（2：圆角线框 1 + hint 1 视情况）
+    // / ask 槽（1）/ notice（按 lines）/ 顶部指示（1）。
+    // 为保守给可用区，下界 5。
+    const noticeLines = notice?.lines.length ?? 0;
+    const reserved = 1 + 2 + 1 + noticeLines + 1; // 状态栏 + 输入 + ask + notice + 指示
+    return Math.max(5, rows - bannerLineCount - reserved);
+  }, [rows, bannerLineCount, notice]);
 
   // 工具事件订阅：按 conversationId 归并入 liveToolLines。
   useEffect(
@@ -133,6 +173,29 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     [toolEventSink]
   );
 
+  // 鼠标滚轮支持（任务 A 行级）：挂载时 DECSET 1000/1006 启用 SGR 滚轮
+  // 报告，stdin.data 监听 parseMouseEvents，滚轮事件 → setChatScroll。
+  // 卸载时写 DECRST 关闭序列（必须！否则残留 mouse 报告模式污染终端）。
+  // 关闭序列同时关 stdin listener。
+  useEffect(() => {
+    const disable = enableMouseScroll(stdout);
+    const onData = (chunk: Buffer | string): void => {
+      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      const { wheelUp, wheelDown } = parseMouseEvents(text);
+      if (wheelUp === 0 && wheelDown === 0) return;
+      if (view !== "chat") return; // list 视图不抢鼠标事件
+      setChatScroll((s) => {
+        const delta = (wheelUp - wheelDown) * WHEEL_STEP_ROWS;
+        return Math.max(0, s + delta);
+      });
+    };
+    stdin?.on("data", onData);
+    return () => {
+      stdin?.off("data", onData);
+      disable();
+    };
+  }, [stdout, stdin, view]);
+
   const active = sessions[activeKey] ?? initial;
   const askPending = askBridge.pending();
 
@@ -152,6 +215,9 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       });
       return;
     }
+    // 任务 A 行级：用户发新消息 → 立即回到底部（auto-follow），否则新
+    // 消息会落在视口上方，被 scroll 窗口截掉。
+    setChatScroll(0);
     const startedKey = activeKey;
     let conversationId = active.conversationId;
     try {
@@ -331,6 +397,11 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     }
     // 等待全部 in-flight turn 落盘（退出不打断后台 turn，Q1a）。
     await Promise.allSettled([...inflightPromises.current]);
+    // 防御性：直接同步写 DECRST 关 mouse 序列，不依赖 React effect cleanup。
+    // 真实终端残留 mouse 报告模式会污染粘贴/选择/红点定位。
+    if (stdout.isTTY) {
+      stdout.write("\x1b[?1000l\x1b[?1006l");
+    }
     exit();
   }
 
@@ -386,9 +457,13 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   }
 
   // 全局键盘：Ctrl+C 打断前台 turn（Q1a：running-bg 不受影响）；
-  // PgUp/PgDn/Home/End 调整聊天区域滚动偏移（任务 A，避开 PromptInput 的
-  // ↑/↓ 防止键位竞争）。仅在 chat 视图下生效（list 视图由 ListView 独占）。
+  // PgUp/PgDn/Home/End 调整聊天区域**行级**滚动偏移（任务 A 行级重构）。
+  // 步长 = viewportRows / 2（向下取整，最小 1）。ChatView 内部按
+  // totalRows 兜底 clamp。仅在 chat 视图下生效（list 视图由 ListView 独占）。
   useInput((input, key) => {
+    // 鼠标滚轮 SGR 序列（ink 当普通 input 整段回调）：app 层 mouse
+    // listener 已消费，此处忽略，避免 Ctrl+C 等守卫误判 + 后续泄漏。
+    if (input.startsWith("\x1b[<")) return;
     if (key.ctrl && input === "c") {
       if (canInterrupt(active)) {
         aborters.current.get(active.conversationId ?? "")?.abort();
@@ -398,18 +473,17 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       return;
     }
     if (view !== "chat") return;
-    const total = active.messages.length;
-    if (total === 0) return;
+    if (active.messages.length === 0) return;
+    const step = Math.max(1, Math.floor(viewportRows / 2));
     if (key.pageUp) {
-      // 单条消息级滚动：PgUp 向上滚 1 条
-      setChatScroll((s) => Math.min(s + 1, total - 1));
+      setChatScroll((s) => s + step);
     } else if (key.pageDown) {
-      setChatScroll((s) => Math.max(0, s - 1));
+      setChatScroll((s) => Math.max(0, s - step));
     } else if (key.home) {
-      // Home = 顶部（隐藏最新 total-1 条，保留最早 1 条）
-      setChatScroll(Math.max(0, total - 1));
+      // 顶：scroll 跳到一个大数，由 ChatView 兜底 clamp 到 totalRows
+      setChatScroll(Number.MAX_SAFE_INTEGER);
     } else if (key.end) {
-      // End = 底部（auto-follow 重置）
+      // 底：auto-follow 重置
       setChatScroll(0);
     }
   });
@@ -459,7 +533,8 @@ export function TuiApp(props: TuiAppProps): ReactElement {
                 } 输入 y/n`
               : undefined
           }
-          scroll={chatScroll}
+          scrollRows={chatScroll}
+          viewportRows={viewportRows}
         />
       )}
       {notice && (
