@@ -52,7 +52,11 @@ import { tuiPalette } from "./theme.js";
 import { clipOneLine } from "./text.js";
 import { VERSION } from "./version.js";
 import { useStdout, useStdin } from "ink";
-import { enableMouseScroll, parseMouseEvents } from "./mouse.js";
+import {
+  enableMouseScroll,
+  isSgrMouseSequence,
+  parseMouseEvents,
+} from "./mouse.js";
 
 /** 鼠标滚轮每个 tick 的行数（每滚一格 = 3 物理行）。 */
 const WHEEL_STEP_ROWS = 3;
@@ -122,6 +126,10 @@ export function TuiApp(props: TuiAppProps): ReactElement {
 
   const aborters = useRef(new Map<string, AbortController>());
   const inflightPromises = useRef(new Set<Promise<unknown>>());
+  // view 进 ref 让 mouse listener 等"常驻 + 内过滤"effect 不把它写进 deps，
+  // 避免视图切换瞬间 unregister→register 导致滚轮事件丢失。
+  const viewRef = useRef<TuiView>("chat");
+  viewRef.current = view;
   const [listEntries, setListEntries] = useState<ReadonlyArray<TuiListEntry>>(
     []
   );
@@ -179,11 +187,20 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   // 关闭序列同时关 stdin listener。
   useEffect(() => {
     const disable = enableMouseScroll(stdout);
+    // mouse listener 走 stdin.on('data')：实测 pty + ink setRawMode 后 'data'
+    // 事件仍正常触发（ink 用 'readable' 流式读取，不消费 data 事件），与
+    // ink useInput 并行触发不冲突。之前 hook `internal_eventEmitter` 是
+    // ink 私有 API（StdinContext.Props 下划线前缀），跨 ink 版本不稳定，
+    // 改回 stdlib NodeJS.ReadStream 'data'（公开 API）。SGR 泄漏防护由
+    // PromptInput useInput 守卫承担（匹配剥 ESC 后形态 "[<数字;数字;数字M/m"，
+    // 见 use-input.js:97-99 input.slice(1) 剥 ESC）。
     const onData = (chunk: Buffer | string): void => {
       const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
       const { wheelUp, wheelDown } = parseMouseEvents(text);
       if (wheelUp === 0 && wheelDown === 0) return;
-      if (view !== "chat") return; // list 视图不抢鼠标事件
+      // 视图过滤不放在 deps，避免视图切换瞬间 unregister->register 导致
+      // 滚轮事件丢失；常驻监听 + listener 内用 viewRef 过滤即可。
+      if (viewRef.current !== "chat") return;
       setChatScroll((s) => {
         const delta = (wheelUp - wheelDown) * WHEEL_STEP_ROWS;
         return Math.max(0, s + delta);
@@ -194,7 +211,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       stdin?.off("data", onData);
       disable();
     };
-  }, [stdout, stdin, view]);
+  }, [stdin, stdout]);
 
   const active = sessions[activeKey] ?? initial;
   const askPending = askBridge.pending();
@@ -461,9 +478,11 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   // 步长 = viewportRows / 2（向下取整，最小 1）。ChatView 内部按
   // totalRows 兜底 clamp。仅在 chat 视图下生效（list 视图由 ListView 独占）。
   useInput((input, key) => {
-    // 鼠标滚轮 SGR 序列（ink 当普通 input 整段回调）：app 层 mouse
-    // listener 已消费，此处忽略，避免 Ctrl+C 等守卫误判 + 后续泄漏。
-    if (input.startsWith("\x1b[<")) return;
+    // 鼠标滚轮 SGR 序列：app 层 mouse listener（stdin.on('data')）已消费
+    // 滚轮事件；此处 useInput 也会收到（ink useInput 前 slice(1) 剥 ESC，
+    // input 是 "[<数字;数字;数字M/m" 形态），用 isSgrMouseSequence 守卫丢弃，
+    // 避免后续 Ctrl+C 等守卫误判 + PromptInput 泄漏。
+    if (isSgrMouseSequence(input)) return;
     if (key.ctrl && input === "c") {
       if (canInterrupt(active)) {
         aborters.current.get(active.conversationId ?? "")?.abort();

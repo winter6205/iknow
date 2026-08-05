@@ -15,6 +15,7 @@
 import { useEffect, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { Box, Text, useInput } from "ink";
+import { isSgrMouseSequence } from "./mouse.js";
 import { tuiPalette } from "./theme.js";
 import { SLASH_HINT_DESCRIPTIONS, type TuiSlashCommand } from "./slash.js";
 
@@ -104,11 +105,14 @@ export function PromptInput(props: PromptInputProps): ReactElement {
   }, [props.value, hasHint, suggestions.length, hintCursor]);
   useInput(
     (input, key) => {
-      // 鼠标滚轮 SGR 序列 \x1b[<64;x;yM（/65 下滚）会被 ink 当成普通
-      // input 字符串整段回调（ink 不识别 mouse CSI）。app 层 mouse
-      // listener 已消费，此处忽略以免泄漏到输入框（会被 stripNonPrintable
-      // 当作 `<64;10;5M` 注入 value）。
-      if (input.startsWith("\x1b[<")) return;
+      // 鼠标滚轮 SGR 序列 \x1b[<64;x;yM（/65 下滚）会被 ink 当普通 input
+      // 字符串整段回调。ink 在传 useInput 前会 input.slice(1) 剥 ESC（见
+      // node_modules/ink/build/hooks/use-input.js），所以这里看到的是
+      // "[<数字;数字;数字M/m" 形态（保留 CSI 的 [）。app 层 mouse listener
+      // 也用 stdin.on('data') 收到原始 chunk（mouse.ts parseMouseEvents），
+      // 已消费滚轮；此处再用 isSgrMouseSequence 守卫避免 stripNonPrintable
+      // 把 [<64;10;5M 当 printable 追加到输入框 value。
+      if (isSgrMouseSequence(input)) return;
       if (key.return) {
         if (hasHint && props.onSelectHint) {
           const idx = Math.max(0, Math.min(hintCursor, suggestions.length - 1));

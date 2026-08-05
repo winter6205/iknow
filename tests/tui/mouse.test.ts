@@ -78,6 +78,65 @@ describe("parseMouseEvents（#146 行级滚动）", () => {
     expect(r.rest).toBe("");
   });
 
+  // 跨 chunk SGR 边界：parseMouseEvents 设计是按单 chunk 解析，调用方负责
+  // 跨 chunk 缓冲/拼接。当前实现下，第二段（残缺）落入 rest（被 ink 继续
+  // 解析为可能不完整的 CSI），这是 parseMouseEvents 的责任边界；调用方
+  // app.tsx 用 stdin.on('data') 触发 parseMouseEvents，每个 chunk 独立解析。
+  it("跨 chunk SGR（拆为前导 ESC[ + button + 尾段）→ 第二段不误计", () => {
+    // 第一段：[<64（仅 button 数字，无 M 终止）= 不完整 SGR
+    const r1 = parseMouseEvents("[<64");
+    expect(r1.wheelUp).toBe(0);
+    expect(r1.wheelDown).toBe(0);
+    // 第一段也不被识别为 mouse（regex 必须有 M 终止符才匹配）
+    expect(r1.consumed).toBe("");
+    expect(r1.rest).toBe("[<64");
+    // 第二段：1;1M 单独 = 普通非 mouse 字节
+    const r2 = parseMouseEvents("1;1M");
+    expect(r2.wheelUp).toBe(0);
+    expect(r2.rest).toBe("1;1M");
+  });
+
+  it("chunk 末尾截断：[<64;1;（缺 y 坐标 + M 终止）", () => {
+    const r = parseMouseEvents("[<64;1;");
+    expect(r.wheelUp).toBe(0);
+    expect(r.wheelDown).toBe(0);
+    expect(r.consumed).toBe("");
+    expect(r.rest).toBe("[<64;1;");
+  });
+
+  it("button 极值（0=无按钮 / 255=非法）不误计为滚轮", () => {
+    const r0 = parseMouseEvents("[<0;1;1M");
+    expect(r0.wheelUp).toBe(0);
+    expect(r0.wheelDown).toBe(0);
+    const r255 = parseMouseEvents("[<255;1;1M");
+    expect(r255.wheelUp).toBe(0);
+    expect(r255.wheelDown).toBe(0);
+    // 0 是合法 mouse click，被 consume 但不计 wheel
+    expect(r0.consumed).toBe("[<0;1;1M");
+    expect(r255.consumed).toBe("[<255;1;1M");
+  });
+
+  it("滚轮 + 普通字符 + 滚轮 混合：rest 只保留中间 printable", () => {
+    const r = parseMouseEvents("[<64;1;1Mhi[<65;2;2M");
+    expect(r.wheelUp).toBe(1);
+    expect(r.wheelDown).toBe(1);
+    expect(r.rest).toBe("hi");
+  });
+
+  it("undefined / null / 非字符串输入 → 全零（边界输入类型）", () => {
+    // @ts-expect-error 测试 runtime 防御：传非 string 不应 throw
+    const r1 = parseMouseEvents(undefined);
+    expect(r1.wheelUp).toBe(0);
+    expect(r1.wheelDown).toBe(0);
+    expect(r1.rest).toBe("");
+    // @ts-expect-error 同上
+    const r2 = parseMouseEvents(null);
+    expect(r2.wheelUp).toBe(0);
+    // @ts-expect-error 同上
+    const r3 = parseMouseEvents(123);
+    expect(r3.wheelUp).toBe(0);
+  });
+
   it("SGR 序列中的 button 大数字（如 100/200）不误计为 64/65", () => {
     // 终端有时会发出 button=0 + 32/64 修饰位（如拖动 = 32 + 0 = 32）
     const r = parseMouseEvents("\x1b[<32;1;1M");

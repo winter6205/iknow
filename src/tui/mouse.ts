@@ -48,6 +48,22 @@ export interface MouseParseResult extends MouseWheelCounts {
   readonly rest: string;
 }
 
+/** SGR 鼠标 button code（DECSET 1006 + 1000h 协议）。 */
+const BUTTON_WHEEL_UP = 64;
+const BUTTON_WHEEL_DOWN = 65;
+
+/** DECSET 序列（启用 / 关闭 鼠标报告）。 */
+const DECSET_MOUSE_REPORT_ENABLE = "\x1b[?1000h\x1b[?1006h";
+const DECSET_MOUSE_REPORT_DISABLE = "\x1b[?1000l\x1b[?1006l";
+
+/** ink useInput 守卫：SGR 鼠标序列剥 ESC 后形态（ink use-input.js:97-99 slice(1)
+ * 剥 ESC 前缀，所以 useInput 回调收到 "[<数字;数字;数字M/m"）。
+ * 抽到 mouse.ts 单点维护，避免三处硬编码 regex 漂移（app.tsx 顶层 useInput
+ * 守卫 + PromptInput 守卫）。 */
+export function isSgrMouseSequence(input: string): boolean {
+  return /^\[<\d+;\d+;\d+[Mm]$/.test(input);
+}
+
 // SGR 鼠标序列：\x1b[<button;x;y[Mm]  （button=64 wheel up / 65 wheel down）
 // 1) 转义引入：\x1b[
 // 2) 字面量 <
@@ -58,8 +74,14 @@ export interface MouseParseResult extends MouseWheelCounts {
 // 全局 +g 防止多行匹配遗漏；非捕获分组以保留坐标数值。
 const SGR_MOUSE_RE = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
 
-/** 解析一个 stdin chunk 中的 SGR 鼠标事件（仅滚轮 button=64/65 计入 counts）。 */
+/** 解析一个 stdin chunk 中的 SGR 鼠标事件（仅滚轮 button=64/65 计入 counts）。
+ *  runtime 防御：非 string 输入（undefined / null / number）-> 返回全零，不 throw
+ *  （app.tsx stdin.on('data') 可能传 Buffer，调用方已 toString；但守一层避免外部
+ *  误调用崩溃整个 ink app）。 */
 export function parseMouseEvents(chunk: string): MouseParseResult {
+  if (typeof chunk !== "string" || chunk.length === 0) {
+    return { wheelUp: 0, wheelDown: 0, consumed: "", rest: "" };
+  }
   let wheelUp = 0;
   let wheelDown = 0;
   let consumed = "";
@@ -79,8 +101,11 @@ export function parseMouseEvents(chunk: string): MouseParseResult {
     const terminator = m[4];
     // 滚轮 button 码：64 = up，65 = down。其它 button（0/1/2 鼠标键，32-35
     // 拖动）一律忽略——本项目仅启用滚轮支持，不响应点击 / 拖动 / 选择。
-    if (terminator === "M" && (button === 64 || button === 65)) {
-      if (button === 64) wheelUp += 1;
+    if (
+      terminator === "M" &&
+      (button === BUTTON_WHEEL_UP || button === BUTTON_WHEEL_DOWN)
+    ) {
+      if (button === BUTTON_WHEEL_UP) wheelUp += 1;
       else wheelDown += 1;
       consumed += matched;
     } else {
@@ -107,14 +132,12 @@ export function enableMouseScroll(stdout: NodeJS.WriteStream): () => void {
   // DECSET 1000h = 报告按钮事件；1006h = SGR 编码（100/1000+）。
   // 完整 mouse 模式 1003h 不开（避免 hover 风暴，spinner 渲染会触
   // 大量无意义事件）。
-  stdout.write("\x1b[?1000h");
-  stdout.write("\x1b[?1006h");
+  stdout.write(DECSET_MOUSE_REPORT_ENABLE);
   let called = false;
   return (): void => {
     if (called) return;
     called = true;
     if (!stdout.isTTY) return;
-    stdout.write("\x1b[?1000l");
-    stdout.write("\x1b[?1006l");
+    stdout.write(DECSET_MOUSE_REPORT_DISABLE);
   };
 }
