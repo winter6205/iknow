@@ -22,15 +22,9 @@ import type {
   TurnRecord,
 } from "../../../src/harness/trace/types.ts";
 import { assistantResult } from "../../cli/_fixtures.ts";
+import { parseJsonl } from "./_fixtures.ts";
 import type { TokenUsage } from "../../../src/harness/model-adapter/types.ts";
 
-function parseJsonl(filePath: string): Array<Record<string, unknown>> {
-  const content = readFileSync(filePath, "utf8");
-  return content
-    .split(String.fromCharCode(10))
-    .filter((line) => line.trim().length > 0)
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-}
 describe("T4 criterion 5: byte-level consistency", () => {
   it("pure-text run: result is identical with undefined trace vs NoopTraceService", async () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });

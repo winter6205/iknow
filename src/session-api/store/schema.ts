@@ -176,16 +176,18 @@ function isValidContentBlock(b: unknown): boolean {
       return typeof block["tool_use_id"] === "string" && "content" in block;
     // thinking / redacted_thinking：harness 权威消息可含（#151 thinking
     // 启用后 anthropic-adapter 原样保留）；形状对齐 AnthropicContentBlock。
-    // T1：session store 必须接受并在 replay 时原样回放，否则 wire 上的
-    // thinking 视图在真实 thinking turn 后没有数据可投影。
+    // T1: harness retains thinking blocks (with signature) in the
+    // authoritative history. The session store must accept them on save
+    // and replay them verbatim — otherwise the wire thinking view has
+    // nothing to project after a real thinking turn.
     case "thinking":
       return (
         typeof block["thinking"] === "string" &&
         typeof block["signature"] === "string"
       );
     case "redacted_thinking":
-      // `data` 是加密 blob —— 原样保留以保证 replay 与 LLM 输出历史字节一致
-      // （与 `thinking` 对称）。
+      // `data` is the encrypted blob — kept verbatim so replays stay byte-
+      // identical with the LLM-emitted history (mirror of `thinking`).
       return typeof block["data"] === "string";
     default:
       return false;

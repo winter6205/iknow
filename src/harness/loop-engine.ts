@@ -41,6 +41,7 @@ import type { CancelKind, LoopTrace, TurnTrace } from "./loop-trace.js";
 import { computeTotals } from "./loop-trace.js";
 import type { TraceErrorType, TraceService } from "./trace/index.js";
 import { safeTrace } from "./trace/index.js";
+import type { HarnessStreamEvent } from "./stream.js";
 
 /**
  * 把任意 reason 字符串安全映射为 TraceErrorType (消除 as 强转)。
@@ -89,9 +90,19 @@ function toDecision(
 export interface LoopAdapter {
   readonly step: (
     state: LoopState,
-    request: { tools?: unknown },
+    request: {
+      tools?: unknown;
+      onStream?: (event: HarnessStreamEvent) => void;
+    },
     signal?: AbortSignal // 017 T1 决策:LoopAdapter 是 Loop Engine 直接消费接口,必须能接收 signal
   ) => Promise<AssistantTurnResult>;
+  /**
+   * #178 T5 (#147 D6):实际调用模式申报 —— true = 该 adapter 走流式臂
+   * (SDK `.stream()`),false/undefined = 非流式臂 / 离线替身。loop-engine
+   * 只在 trace `recordLlmCall` 处读取(不读、不判断、不构造其它供应商字段);
+   * 缺省语义让 stub-model / 离线 adapter 零改动保持 `stream: false`。
+   */
+  readonly streamMode?: boolean;
   readonly encodeUserText: (userText: string) => AnthropicNativeMessage;
   readonly encodeToolResults: (
     results: ReadonlyArray<ToolExecutionResult>
@@ -190,6 +201,7 @@ export interface RaceModelOpts {
   readonly deps: LoopEngineDeps;
   readonly signal: AbortSignal | undefined;
   readonly timeoutMs: number;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
 }
 
 /** 023: settle 共址于 helper，统一 single-wins 与 cleanup。 */
@@ -232,7 +244,10 @@ function createRaceOutcome(opts: {
     opts.raceOpts.adapter
       .step(
         opts.raceOpts.state,
-        { tools: opts.raceOpts.deps.registry.list() },
+        {
+          tools: opts.raceOpts.deps.registry.list(),
+          onStream: opts.raceOpts.onStream,
+        },
         opts.compositeSignal
       )
       .then(
@@ -317,6 +332,7 @@ async function runModelPhase(opts: {
   readonly signal: AbortSignal | undefined;
   readonly started: number;
   readonly modelTimeoutMs: number;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
 }): Promise<
   | { kind: "ok"; result: AssistantTurnResult }
   | { kind: "stop"; transition: Transition; turn: TurnTrace }
@@ -328,6 +344,7 @@ async function runModelPhase(opts: {
       deps: opts.deps,
       signal: opts.signal,
       timeoutMs: opts.modelTimeoutMs,
+      onStream: opts.onStream,
     });
     const outcome = await handle.outcome;
     if (outcome.source === "adapter") {
@@ -516,6 +533,7 @@ async function stepWithTrace(opts: {
   readonly state: LoopState;
   readonly deps: LoopEngineDeps;
   readonly signal?: AbortSignal;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
 }): Promise<{
   transition: Transition;
   turn: TurnTrace | null;
@@ -551,10 +569,15 @@ async function stepWithTrace(opts: {
     signal: opts.signal,
     started,
     modelTimeoutMs: modelTimeout,
+    onStream: opts.onStream,
   });
 
   const llmEndedAt = new Date().toISOString();
   const llmDurationMs = performance.now() - llmStartMono;
+  // #178 T5 (D6):trace `stream` 布尔按实际模式翻转。模式由 adapter 经只读
+  // `streamMode` 申报(见 LoopAdapter 注释);两处 recordLlmCall site(ok /
+  // error)共用同一真值,在埋点前取一次。
+  const streamMode = opts.deps.adapter.streamMode === true;
   let llmCallId: string | undefined;
   if (opts.deps.trace) {
     if (modelPhase.kind === "stop") {
@@ -565,7 +588,7 @@ async function stepWithTrace(opts: {
           startedAt: llmStartedAt,
           endedAt: llmEndedAt,
           durationMs: llmDurationMs,
-          stream: false,
+          stream: streamMode,
           messagesCaptured: false,
           status: "error",
           error: { type: toTraceErrorType(reason), message: reason },
@@ -580,7 +603,7 @@ async function stepWithTrace(opts: {
           endedAt: llmEndedAt,
           durationMs: llmDurationMs,
           supplierStop: modelPhase.result.supplierStop,
-          stream: false,
+          stream: streamMode,
           messagesCaptured: false,
           status: "ok",
           ...(usage !== undefined ? usage : {}),
@@ -823,7 +846,10 @@ export async function run(
   userText: string,
   deps: LoopEngineDeps,
   signal?: AbortSignal,
-  opts?: { priorMessages?: ReadonlyArray<AnthropicNativeMessage> }
+  opts?: {
+    priorMessages?: ReadonlyArray<AnthropicNativeMessage>;
+    onStream?: (event: HarnessStreamEvent) => void;
+  }
 ): Promise<{ result: RunResult; trace: LoopTrace }> {
   // 020 Q2 priorMessages 续传接缝:历史前缀逐条冻结,单次运行 turnCount 仍从 0 起。
   let state: LoopState = {
@@ -842,6 +868,7 @@ export async function run(
       state,
       deps,
       signal,
+      onStream: opts?.onStream,
     });
     if (turn !== null) {
       // immutable append;禁止 push / 原地修改。
