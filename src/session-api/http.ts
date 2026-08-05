@@ -4,19 +4,23 @@
  * 183 R3: trace inspection read API was moved to `iknow trace`; this server
  * no longer mounts /api/v1/traces (write-side `--trace-out` on serve/chat/ask
  * remains unchanged).
+ * Static-asset serving extracted to `src/web/serve-static.ts` so traceserver
+ * can host its own SPA with the same guards; `resolveDefaultWebRoot` is
+ * re-exported below for tests that historically imported it from here.
  */
 import * as http from "node:http";
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { isIknowError, ValidationError } from "../shared/errors.js";
 import { mapStoreError, type SessionHub } from "./hub.js";
 import type { SessionStoreError } from "./store/index.js";
 import { parseThinkingOverride } from "./thinking-override.js";
 import type { ApiErrorBody, HealthResponse } from "./contract.js";
 import { getVersion } from "../cli/usage.js";
+import {
+  resolveDefaultWebRoot,
+  serveStaticRequest,
+} from "../web/serve-static.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+export { resolveDefaultWebRoot };
 
 export type SessionHttpServerOptions = {
   hub: SessionHub;
@@ -32,25 +36,6 @@ export type ListeningServer = {
   port: number;
   close: () => Promise<void>;
 };
-
-const MIME: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".ico": "image/x-icon",
-  ".map": "application/json; charset=utf-8",
-};
-
-/** Prefer Vite build output; fall back to web/ source root when dist is absent. */
-export function resolveDefaultWebRoot(): string {
-  const dist = path.resolve(__dirname, "../../web/dist");
-  if (fs.existsSync(dist)) {
-    return dist;
-  }
-  return path.resolve(__dirname, "../../web");
-}
 
 export function createSessionHttpServer(
   opts: SessionHttpServerOptions
@@ -141,7 +126,11 @@ async function handle(opts: HandleOpts): Promise<void> {
       if (await handleSessionRoute({ method, id, rest, req, res, hub })) return;
     }
 
-    if (method === "GET" && tryServeStatic({ res, webRoot, pathname })) return;
+    if (
+      method === "GET" &&
+      serveStaticRequest({ res, webRoot, pathname, fallbackHtml: "index.html" })
+    )
+      return;
     sendNotFound({ res, method, pathname });
   } catch (err) {
     sendError({ res, err });
@@ -302,71 +291,6 @@ async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
   } catch {
     throw new ValidationError("invalid JSON body");
   }
-}
-
-interface TryServeStaticOpts {
-  readonly res: http.ServerResponse;
-  readonly webRoot: string;
-  readonly pathname: string;
-}
-
-function tryServeStatic(opts: TryServeStaticOpts): boolean {
-  const { res, webRoot, pathname } = opts;
-  // Never treat /api as static (caller should only invoke for non-API GETs,
-  // but double-guard path traversal + SPA scope).
-  if (pathname === "/api" || pathname.startsWith("/api/")) {
-    return false;
-  }
-
-  let rel = pathname === "/" ? "/index.html" : pathname;
-  if (rel.startsWith("/web/")) {
-    rel = rel.slice("/web".length);
-  }
-  // Prevent path traversal.
-  const rootAbs = path.resolve(webRoot);
-  const resolved = path.resolve(webRoot, "." + rel);
-  if (!resolved.startsWith(rootAbs + path.sep) && resolved !== rootAbs) {
-    sendJson({
-      res,
-      status: 403,
-      body: {
-        error: { kind: "internal", message: "path not allowed" },
-      } satisfies ApiErrorBody,
-    });
-    return true;
-  }
-  if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
-    pipeFile({ res, filePath: resolved });
-    return true;
-  }
-
-  // SPA fallback: GET non-/api routes with missing file → index.html when present.
-  const indexPath = path.resolve(webRoot, "index.html");
-  if (
-    (indexPath.startsWith(rootAbs + path.sep) || indexPath === rootAbs) &&
-    fs.existsSync(indexPath) &&
-    fs.statSync(indexPath).isFile()
-  ) {
-    pipeFile({ res, filePath: indexPath });
-    return true;
-  }
-  return false;
-}
-
-interface PipeFileOpts {
-  readonly res: http.ServerResponse;
-  readonly filePath: string;
-}
-
-function pipeFile(opts: PipeFileOpts): void {
-  const { res, filePath } = opts;
-  const ext = path.extname(filePath).toLowerCase();
-  const type = MIME[ext] ?? "application/octet-stream";
-  res.writeHead(200, {
-    "Content-Type": type,
-    "Cache-Control": "no-cache",
-  });
-  fs.createReadStream(filePath).pipe(res);
 }
 
 interface SendJsonOpts {

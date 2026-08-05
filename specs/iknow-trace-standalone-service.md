@@ -36,6 +36,15 @@
 - R5 文档：`docs/architecture.md` Capability modules 表 traceserver 行改为"独立
   `iknow trace` 进程"；`src/cli/usage.ts` 加 `iknow trace` 子命令；CHANGELOG 记
   breaking（serve 不再挂读 API）。
+- R6 `iknow trace` 进程同时托管 trace 检测面板 SPA（trace.html）：`/` 路径
+  fallback 到 `webRoot/trace.html`，非 `/api` 未知路径走 SPA fallback，路径穿越
+  -> 403，`/api/*` 路由优先于静态（API 不可被 trace.html 遮蔽）。复用
+  `src/web/serve-static.ts::serveStaticRequest`（chat 与 trace 共用静态托管
+  helper），`webRoot` 默认 `resolveDefaultWebRoot()`（`web/dist` 优先，回落
+  `web/`），`TraceServeOptions.webRoot` 可覆盖。chat 页面（`web/src/App.tsx`）
+  删 `Root` / `ViewTabs` / `TracePanel` 装配块，回到 chat-only 形态；trace
+  SPA 走独立 vite entry `web/src/trace-main.tsx` + `web/trace.html`，两者共享
+  `web/dist/assets/` hashed chunk。
 
 ## 成功判据（SC，二元）
 

@@ -1,6 +1,10 @@
+import { resolve } from "path";
+import { fileURLToPath } from "url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+
+const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
 // Production serves `dist` at site root. A `/web/` prefix is an optional
 // reverse-proxy alias only — do not set `base` to `/web/` (breaks current serve).
@@ -30,5 +34,11 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     sourcemap: process.env.SOURCE_MAP === "true",
+    rollupOptions: {
+      input: {
+        index: resolve(__dirname, "index.html"),
+        trace: resolve(__dirname, "trace.html"),
+      },
+    },
   },
 });

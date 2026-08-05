@@ -1,11 +1,14 @@
 /**
  * `iknow trace` standalone HTTP server (#183).
  *
- * Hosts the read-only trace inspection API on its own process so JSONL reads
- * no longer share a process with the LLM streaming session hub. Routes:
+ * Hosts the read-only trace inspection API + trace inspection SPA on its own
+ * process so JSONL reads no longer share a process with the LLM streaming
+ * session hub. Routes:
  *   GET /api/v1/health            -> { ok, service, version }
  *   GET /api/v1/traces[?...]      -> delegated to handleTracesRequest
  *   GET /api/v1/traces/fields     -> delegated to handleTracesRequest
+ *   GET <other>                   -> static SPA (trace.html) via
+ *                                   ../web/serve-static (API routes win)
  *
  * Error mapping (S3):
  *   ValidationError  -> 400 validation
@@ -18,6 +21,10 @@ import { isIknowError, ValidationError } from "../shared/errors.js";
 import { TraceReadError } from "./types.js";
 import { handleTracesRequest } from "./http.js";
 import { getVersion } from "../cli/usage.js";
+import {
+  resolveDefaultWebRoot,
+  serveStaticRequest,
+} from "../web/serve-static.js";
 
 export interface TraceServeOptions {
   /** Absolute or CWD-relative path to the JSONL trace file (writer side). */
@@ -26,6 +33,8 @@ export interface TraceServeOptions {
   readonly port?: number;
   /** Cap bytes per read; defaults to MAX_TRACE_BYTES. */
   readonly maxBytes?: number;
+  /** Root directory for the trace inspection SPA (trace.html). */
+  readonly webRoot?: string;
 }
 
 export interface TraceListeningServer {
@@ -45,9 +54,16 @@ export function startTraceServe(
   const host = opts.host ?? "127.0.0.1";
   const port = opts.port ?? 24881;
   const traceFilePath = opts.traceOut ? path.resolve(opts.traceOut) : undefined;
+  const webRoot = opts.webRoot ?? resolveDefaultWebRoot();
 
   const server = http.createServer((req, res) => {
-    void handleRequest({ req, res, traceFilePath, maxBytes: opts.maxBytes });
+    void handleRequest({
+      req,
+      res,
+      traceFilePath,
+      maxBytes: opts.maxBytes,
+      webRoot,
+    });
   });
 
   return new Promise((resolve, reject) => {
@@ -74,10 +90,11 @@ interface HandleRequestOpts {
   readonly res: http.ServerResponse;
   readonly traceFilePath?: string;
   readonly maxBytes?: number;
+  readonly webRoot: string;
 }
 
 async function handleRequest(opts: HandleRequestOpts): Promise<void> {
-  const { req, res, traceFilePath, maxBytes } = opts;
+  const { req, res, traceFilePath, maxBytes, webRoot } = opts;
   try {
     const method = (req.method ?? "GET").toUpperCase();
     const url = new URL(
@@ -96,6 +113,12 @@ async function handleRequest(opts: HandleRequestOpts): Promise<void> {
         traceFilePath,
         ...(maxBytes !== undefined ? { maxBytes } : {}),
       });
+    }
+    if (
+      method === "GET" &&
+      serveStaticRequest({ res, webRoot, pathname, fallbackHtml: "trace.html" })
+    ) {
+      return;
     }
     sendJson(res, 404, {
       error: { kind: "not_found", message: `no route GET ${pathname}` },

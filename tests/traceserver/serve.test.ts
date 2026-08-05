@@ -7,12 +7,16 @@
  *   - GET /api/v1/traces      -> { records, total, skipped_lines, truncated }
  *   - GET /api/v1/traces/fields -> { fields: [...] }
  *
+ * Also covers `webRoot` option (trace SPA hosting — separate trace.html
+ * block added when the trace process began hosting its own inspection panel).
+ *
  * Categories (S2 defensive contract):
  *   - 200 happy path on all three endpoints
  *   - 400 validation on bad query params (limit=0)
  *   - 500 internal when traceFilePath points at a directory (TraceReadError)
  *   - 404 not_found when no trace file is configured (traceOut: undefined)
  *   - error shape: { error: { kind, message } } — no fs detail leak on 500
+ *   - webRoot passthrough + default (resolveDefaultWebRoot used when omitted)
  */
 import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -33,6 +37,7 @@ let origin: string;
 interface StartOpts {
   readonly traceOut?: string | undefined;
   readonly maxBytes?: number;
+  readonly webRoot?: string;
 }
 
 async function startServer(startOpts: StartOpts = {}): Promise<void> {
@@ -45,6 +50,7 @@ async function startServer(startOpts: StartOpts = {}): Promise<void> {
     ...(startOpts.maxBytes !== undefined
       ? { maxBytes: startOpts.maxBytes }
       : {}),
+    ...(startOpts.webRoot !== undefined ? { webRoot: startOpts.webRoot } : {}),
   });
   listening = out;
   origin = `http://${listening.host}:${listening.port}`;
@@ -272,5 +278,90 @@ describe("startTraceServe — handle contract", () => {
     assert.equal(typeof out.port, "number");
     assert.ok(out.port > 0, "ephemeral port must be > 0");
     assert.equal(typeof out.close, "function");
+  });
+});
+
+// -- webRoot option (trace SPA hosting) ---------------------------------------
+//
+// The trace process serves its own inspection panel (trace.html) via the
+// shared static-serve helper (src/web/serve-static.ts). These tests confirm
+// that:
+//   - a custom webRoot is honored (passthrough)
+//   - the default webRoot is used when omitted
+//   - API routes still win over static (regression guard for /api priority)
+//   - missing trace.html under webRoot degrades to 404 JSON (caller-404 path)
+// See tests/traceserver/serve-static.test.ts for the broader static-serve
+// coverage (helper direct + MIME + traversal 403 + SPA fallback + asset).
+
+describe("startTraceServe — webRoot option", () => {
+  it("honors a custom webRoot and serves trace.html on GET /", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "iknow-trace-serve-webroot-"));
+    tmpDirs.push(tmp);
+    writeFileSync(
+      join(tmp, "trace.html"),
+      '<!doctype html><title>iknow trace</title><div id="root">trace-spa</div>',
+      "utf8"
+    );
+    await startServer({ webRoot: tmp });
+    const res = await fetch(`${origin}/`);
+    assert.equal(res.status, 200);
+    assert.ok(
+      (res.headers.get("content-type") ?? "").includes("text/html"),
+      `expected text/html, got ${res.headers.get("content-type")}`
+    );
+    const body = await res.text();
+    assert.ok(
+      body.includes("trace-spa") || body.includes('<div id="root">'),
+      `expected trace.html body, got: ${body.slice(0, 80)}`
+    );
+  });
+
+  it("falls back to resolveDefaultWebRoot() when webRoot is omitted", async () => {
+    // No webRoot passed → server should still bind and serve something on
+    // GET / (either trace.html if web/dist contains it, or a 404 JSON if not).
+    // We only assert the API side stays reachable; the static side is covered
+    // by serve-static.test.ts. The contract here is that omitting webRoot
+    // does NOT crash startup.
+    await startServer();
+    const { status } = await getJson("/api/v1/health");
+    assert.equal(
+      status,
+      200,
+      "API routes must remain reachable without webRoot"
+    );
+  });
+
+  it("keeps /api/v1/* priority over static (regression guard)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "iknow-trace-serve-webroot-api-"));
+    tmpDirs.push(tmp);
+    writeFileSync(
+      join(tmp, "trace.html"),
+      '<!doctype html><title>iknow trace</title><div id="root">trace-spa</div>',
+      "utf8"
+    );
+    await startServer({ webRoot: tmp });
+    const res = await fetch(`${origin}/api/v1/health`);
+    assert.equal(res.status, 200);
+    assert.ok(
+      (res.headers.get("content-type") ?? "").includes("application/json"),
+      "health must be JSON even when webRoot + trace.html are present"
+    );
+    const body = (await res.json()) as { ok: boolean; service: string };
+    assert.equal(body.ok, true);
+    assert.equal(body.service, "iknow-trace");
+  });
+
+  it("returns 404 JSON when webRoot has no trace.html (caller-404 path)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "iknow-trace-serve-webroot-empty-"));
+    tmpDirs.push(tmp);
+    // No trace.html under tmp.
+    await startServer({ webRoot: tmp });
+    const res = await fetch(`${origin}/`);
+    assert.equal(res.status, 404);
+    assert.ok(
+      (res.headers.get("content-type") ?? "").includes("application/json")
+    );
+    const body = (await res.json()) as { error?: { kind?: string } };
+    assert.equal(body.error?.kind, "not_found");
   });
 });
