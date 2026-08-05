@@ -117,6 +117,32 @@ export function projectSdkUsage(sdk: SdkMessage): TokenUsage | undefined {
 }
 
 /**
+ * #191 compat: 归一化 thinking 块 signature。
+ *
+ * AnthropicContentBlock 契约要求 `signature: string`(必填,types.ts),session
+ * store 校验(schema.ts isValidContentBlock thinking 分支)同样要求 string。
+ * 但非 Anthropic 模型(deepseek 等经 9router 转发)返回的 thinking 块可缺
+ * signature 字段(实测:deepseek-flash-combo 的 block 仅 {type, thinking})。
+ *
+ * Postel 语义:宽松接受缺字段的供应商输入,归一化到 canonical 契约 —
+ * 非 string(缺失 / null / undefined)→ "";string → 原样透传。与
+ * projectSdkUsage 的 cache 两字段归一化先例同构。
+ *
+ * 回放安全性:9router 接受空 signature 的 thinking 块(实测,"#191"),
+ * 故补空串不破坏多轮对话回放(真 Anthropic 模型的 signature 原样保留,
+ * 不受影响)。
+ *
+ * 注意:此归一化对**所有模型**生效(adapter 在 interpret 时无法区分供应商),
+ * 空 signature 会静默写入历史。这是有意的兼容性放宽 — 代价是真实
+ * Anthropic 模型的 signature 缺失不再被当作协议错误暴露,而是归一为 ""。
+ * 权衡后接受:网关对非 Anthropic 模型用 openai-compatible 通道转发,
+ * signature 语义本身不完整;若未来需要严格校验,应在此函数按 model 分叉。
+ */
+export function normalizeThinkingSignature(signature: unknown): string {
+  return typeof signature === "string" ? signature : "";
+}
+
+/**
  * 把 Anthropic 原生 SDK Message 解释为 Foundation AssistantTurnResult。
  * text / tool_use blocks 原子校验:任一 block 协议错误 -> 抛 ProtocolError,
  * 整回合不进入历史。thinking / redacted_thinking 走 pass-through(见模块
@@ -212,12 +238,17 @@ export function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
     if (b.type === "thinking") {
       // T3 (#150, closes #134 issue 1): 全字段原样进权威历史。
       // signature 必须回传,裁剪会毁 replay;thinking 文本不进 texts。
+      // #191 compat: 非 Anthropic 模型(经 9router 转发的 deepseek 等)的
+      // thinking 块可缺 signature — 此处归一化为空串,保证 AnthropicContentBlock
+      // 契约(signature: string 必填)与 session store 校验(schema.ts
+      // isValidContentBlock thinking 分支)在保存时通过。回放时 9router 接受
+      // 空 signature(实测,`#191`),故不破坏多轮回放。
       const tb = b as unknown as ThinkingBlock;
       return [
         {
           type: "thinking",
           thinking: tb.thinking,
-          signature: tb.signature,
+          signature: normalizeThinkingSignature(tb.signature),
         },
       ];
     }

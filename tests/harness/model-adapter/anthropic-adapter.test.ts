@@ -501,6 +501,54 @@ describe("anthropic-adapter T3 thinking/redacted_thinking passthrough (#150, clo
     assert.equal(result.needsTools, false);
   });
 
+  it("normalizes a thinking block missing signature to empty string (#191 deepseek compat)", async () => {
+    // deepseek-flash-combo 经 9router 转发的 thinking block 无 signature
+    // 字段(实测仅 { type, thinking })— 归一化为 "" 以保住 canonical 契约。
+    const sdkResp: SdkMessage = {
+      id: "msg_think_nosig",
+      type: "message",
+      role: "assistant",
+      model: "deepseek-flash-combo",
+      content: [
+        {
+          type: "thinking",
+          thinking: "We need answer.",
+        } as unknown as ThinkingBlock,
+        { type: "text", text: "final" } as TextBlock,
+      ] as ContentBlock[],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 4, output_tokens: 2 },
+    };
+    const adapter = adapterFrom([sdkResp]);
+    const result = (await adapter.step(
+      initState([userMsg("ping")]),
+      {}
+    )) as AssistantTurnResult;
+
+    const tBlock = result.nativeMessage.content[0] as {
+      type: "thinking";
+      thinking: string;
+      signature: string;
+    };
+    assert.equal(tBlock.type, "thinking");
+    assert.equal(tBlock.thinking, "We need answer.");
+    assert.equal(tBlock.signature, ""); // 缺 signature → 空串
+
+    // 投影不受影响:thinking 不进 texts
+    assert.deepEqual(result.projection.texts, ["final"]);
+  });
+
+  it('normalizeThinkingSignature: null / non-string → "", string → passthrough (#191)', async () => {
+    const { normalizeThinkingSignature } =
+      await import("../../../src/harness/model-adapter/anthropic-adapter.ts");
+    assert.equal(normalizeThinkingSignature("sig_abc"), "sig_abc");
+    assert.equal(normalizeThinkingSignature(undefined), "");
+    assert.equal(normalizeThinkingSignature(null), "");
+    assert.equal(normalizeThinkingSignature(123), "");
+    assert.equal(normalizeThinkingSignature({}), "");
+  });
+
   it("preserves only redacted_thinking — native carries data, texts empty", async () => {
     const sdkResp: SdkMessage = {
       id: "msg_think_3",

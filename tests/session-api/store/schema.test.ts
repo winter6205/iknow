@@ -19,6 +19,13 @@ import {
   validateSessionFile,
 } from "../../../src/session-api/store/index.ts";
 import type { SessionFileV1 } from "../../../src/session-api/store/index.ts";
+import { interpretMessage } from "../../../src/harness/model-adapter/anthropic-adapter.ts";
+import type {
+  Message as SdkMessage,
+  ContentBlock,
+  ThinkingBlock,
+  TextBlock,
+} from "@anthropic-ai/sdk/resources/messages/messages.js";
 
 const valid: SessionFileV1 = {
   schemaVersion: 2,
@@ -247,6 +254,46 @@ describe("validateSessionFile — content blocks accept thinking (T1)", () => {
       (err: unknown) =>
         (err as { kind?: string; field?: string }).kind === "schema_invalid" &&
         (err as { kind?: string; field?: string }).field === "messages"
+    );
+  });
+
+  it('#191 regression: adapter-normalized thinking block (missing signature → "") passes schema', async () => {
+    // deepseek-flash-combo 返回无 signature 的 thinking 块;interpretMessage
+    // 归一化为空串后,session store 校验必须通过 — 这是线上 schema_invalid
+    // (field=messages) 的回归护栏。
+    const sdkResp: SdkMessage = {
+      id: "msg_think_nosig_schema",
+      type: "message",
+      role: "assistant",
+      model: "deepseek-flash-combo",
+      content: [
+        {
+          type: "thinking",
+          thinking: "We need answer.",
+        } as unknown as ThinkingBlock,
+        { type: "text", text: "final" } as TextBlock,
+      ] as ContentBlock[],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 4, output_tokens: 2 },
+    };
+    const result = interpretMessage(sdkResp);
+
+    // 归一化后 signature 存在(空串),可过 schema 校验
+    const file = {
+      ...valid,
+      conversation_id: "schema-regression",
+      messages: [result.nativeMessage],
+    };
+    assert.equal(validateSessionFile(file), null);
+    assert.equal(
+      (
+        result.nativeMessage.content[0] as {
+          type: "thinking";
+          signature: string;
+        }
+      ).signature,
+      ""
     );
   });
 });

@@ -267,6 +267,10 @@ describe("sanitizeSessionFile — thinking / redacted_thinking blocks", () => {
     assert.equal(sanitized.messages.length, 3);
   });
 
+  // 本测试与 #191 的 adapter 归一化**不矛盾**:schema 层仍拒绝手工残缺的
+  // thinking 块(防御边界,store 不猜供应商意图);adapter 层(interpretMessage)
+  // 已在写入历史前把缺 signature 的块归一化为 ""。两条不变量共同成立:
+  // 正常路径(经 adapter)永不产出残缺块,但任何绕过 adapter 的残缺块仍被拒。
   it("rejects malformed thinking blocks → 'messages'", () => {
     const cases: unknown[] = [
       [{ type: "thinking", thinking: "x" }], // missing signature
