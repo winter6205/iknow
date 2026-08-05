@@ -9,23 +9,15 @@
  * (serve.ts) supply the SPA-channel implementation or a v0 stub.
  */
 import { randomUUID } from "node:crypto";
-import Anthropic from "@anthropic-ai/sdk";
 import {
   run,
-  createRealAnthropicAdapter,
-  buildThinkingParams,
-  createRegistry,
-  createExecutor,
-  createEchoTool,
-  createGetTimeTool,
   createJsonlTraceService,
   type AnthropicContentBlock,
   type AnthropicNativeMessage,
   type LoopEngineDeps,
   type RunResult,
 } from "../harness/index.js";
-import { createPermissionExecutor } from "../harness/permission/index.js";
-import { createPermissionPolicy } from "../harness/permission/policy.js";
+import { buildHarnessEngine } from "../harness/build-engine.js";
 import type { AskUser } from "../harness/permission/types.js";
 import { createViolationCounter } from "../harness/sandbox/violation-handling.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
@@ -241,6 +233,15 @@ export type SessionHubOptions = {
   /** T2: env source for per-turn thinking override (test seam; production
    * omits it → withThinkingOverride falls back to loadIknowEnv()). */
   overrideEnv?: { readonly llm: LlmEnv };
+  /**
+   * Sandbox root for fs-tool access (code-review 2026-08-05). When omitted,
+   * `buildHarnessEngine` defaults to `process.cwd()` — see that module's
+   * sandboxRoot note (CLI: project root; serve: server-launch dir, which
+   * is NOT equivalent to user project root). Production callers should pass
+   * an explicit sandboxRoot when the server's cwd is not the intended
+   * workspace; CLI flag wiring is tracked in the backlog.
+   */
+  sandboxRoot?: string;
 };
 
 // -- stop reasons that must NOT persist to file (裁决#8) -----------------------
@@ -266,6 +267,10 @@ export class SessionHub {
   private readonly askUser: AskUser | undefined;
   /** T2: env source for the per-turn thinking override (test seam). */
   private readonly overrideEnv: { readonly llm: LlmEnv } | undefined;
+  /** Sandbox root for fs-tool access (code-review 2026-08-05). Undefined
+   *  → `buildHarnessEngine` defaults to `process.cwd()`. Production callers
+   *  in serve mode should pass an explicit root (CLI flag wiring tracked). */
+  private readonly sandboxRoot: string | undefined;
   /** Per-conversation serialization (spec A15). */
   private readonly inflight = new Map<string, Promise<void>>();
 
@@ -280,6 +285,7 @@ export class SessionHub {
     this.traceOut = opts.traceOut;
     this.askUser = opts.askUser;
     this.overrideEnv = opts.overrideEnv;
+    this.sandboxRoot = opts.sandboxRoot;
     this.defaults = {
       jsonMode: opts.defaultJsonMode ?? false,
     };
@@ -513,7 +519,14 @@ export class SessionHub {
     await this.store.save({ id: conversationId, file: updated });
   }
 
-  /** Lazy deps construction (mirrors buildHarnessEngine, no agent-loop import). */
+  /**
+   * Lazy deps construction. Delegates to the shared harness assembly
+   * (`src/harness/build-engine.ts`) so the serve path picks up the same ACI
+   * 8-tool set as the CLI (bash / read_file / grep / glob / edit_file /
+   * write_file / web_fetch / web_search). Without this delegation the
+   * serve mode was stuck on the echo/get_time stubs and the web SPA could
+   * not exercise the new tools.
+   */
   private async ensureDeps(): Promise<LoopEngineDeps> {
     if (this.cachedDeps) return this.cachedDeps;
     if (!this.askUser) {
@@ -522,45 +535,18 @@ export class SessionHub {
       );
     }
     const env = loadIknowEnv();
-    if (!env.llm.apiKey) {
-      throw new ValidationError(
-        `LLM mode needs the env var named by IKNOW_LLM_API_KEY_ENV (${env.llm.apiKeyEnv}); set the key.`
-      );
-    }
-    const client = new Anthropic({
-      apiKey: env.llm.apiKey,
-      baseURL: env.llm.baseUrl,
-    });
-    const adapter = createRealAnthropicAdapter({
-      client,
-      model: env.llm.model,
-      maxTokens: env.llm.maxOutputTokens,
-      temperature: env.llm.temperature,
-      // #151 T4 / #156 Low:env → adapter params(去重 single source)。
-      thinking: buildThinkingParams(env.llm),
-      // #179 T6 (#147 D0):流式臂开关,env SSOT,默认 on。
-      // serve 入口暂未消费 onStream(D3 预留不接),adapter 在流式臂装配,
-      // finalMessage 仍然交付完整 AssistantTurnResult,行为对 host 透明。
-      stream: env.llm.stream === "on",
-    });
-    const registry = createRegistry([createEchoTool(), createGetTimeTool()]);
-    const inner = createExecutor(registry);
-    // 5-step permission middleware: askUser is guaranteed by the constructor
-    // contract when the hub must build deps lazily.
-    const policy = createPermissionPolicy();
-    const executor = createPermissionExecutor({
-      inner,
-      registry,
-      policy,
+    // Delegate validation and assembly to the SSOT. `buildHarnessEngine`
+    // validates apiKey/askUser through the shared fail-loud path, preserving
+    // the same ValidationError → HTTP 400 mapping for serve callers.
+    // The returned `engine` is built once (code-review 2026-08-05) and
+    // discarded — serve only consumes `deps`, and the cost is a single
+    // `createLoopEngine` allocation, not a per-message re-construction.
+    const { deps } = await buildHarnessEngine({
+      env,
       askUser: this.askUser,
+      ...(this.sandboxRoot ? { sandboxRoot: this.sandboxRoot } : {}),
     });
-    this.cachedDeps = {
-      adapter,
-      executor,
-      registry,
-      maxTurns: 6,
-      timeoutMs: env.llm.timeoutMs,
-    };
+    this.cachedDeps = deps;
     return this.cachedDeps;
   }
 

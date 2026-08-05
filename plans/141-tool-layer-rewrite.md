@@ -152,3 +152,16 @@ L3  旧工具删除 + 引用收口（T12，依赖 L2；contract 完成点）
 5. 每个 `[implementation]` bullet 均带 Per-ticket loop 行
 
 成功 = plan has 12 tracer bullets, each with binary acceptance + one [decision]|[implementation] tag
+
+---
+
+## Serve-path extension（#141 后续记录，code-review 裁决 2026-08-05）
+
+T11 装配只覆盖 CLI（`src/cli/runtime.ts`）；serve 路径 `src/session-api/hub.ts::ensureDeps`
+原停在 echo/get_time stub（022 时 serve 切 harness 的遗留）。本扩展把装配提取到
+`src/harness/build-engine.ts`（SSOT）：CLI `buildHarnessEngine` 与 serve `ensureDeps`
+共享同一份 8 件 ACI 工具集，serve 由此获得 bash/read_file 等文件系统与网络工具。
+
+决策：SSOT 提取 + serve 接入（code-review 记录，非 T11 原声明范围；避免 CLI/serve
+工具集漂移）。sandboxRoot 默认 `process.cwd()` 对 serve 是长驻进程假设——见 ticket
+（serve sandboxRoot 显式化，与 Web 工具清单端点同 backlog）。
