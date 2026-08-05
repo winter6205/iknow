@@ -1,0 +1,18 @@
+id: 015-token-usage-display-path
+tier: fast
+description: "ADR-0008 显示路径形状锚点 — TokenUsage 四字段 + lastUsage + trace 落盘"
+repo: .
+test_command: |
+  set -e
+  grep -q "cacheCreationInputTokens" src/harness/model-adapter/types.ts || { echo "FAIL: TokenUsage 缺 cacheCreationInputTokens"; exit 1; }
+  grep -q "lastUsage" src/harness/model-adapter/types.ts || { echo "FAIL: RunResult 缺 lastUsage"; exit 1; }
+  grep -q "inputTokens" src/harness/trace/types.ts || { echo "FAIL: LlmCallRecord 缺 token 字段"; exit 1; }
+  grep -q "projectSdkUsage" src/harness/model-adapter/anthropic-adapter.ts || { echo "FAIL: adapter 缺投影函数 projectSdkUsage"; exit 1; }
+  grep -q "cacheCreationInputTokens" specs/trace-service.md || { echo "FAIL: spec 未对齐四字段"; exit 1; }
+  npx tsc --noEmit || { echo "FAIL: typecheck"; exit 1; }
+  echo "PASS: token usage display path shape OK"
+prompt: |
+  Run `bash .evals/run.sh --task 015-token-usage-display-path`. Confirms the
+  ADR-0008 display-path shape anchors: TokenUsage 4 fields on
+  AssistantTurnResult/RunResult/LlmCallRecord, adapter usage projection,
+  spec alignment — and that typecheck passes.

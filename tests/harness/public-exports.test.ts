@@ -9,6 +9,9 @@
  *   - 017:取消 / 超时 / trace / setTimeout / AbortController 经 spec+plan+ACR
  *     授权为物理必需层,移出禁词表;守门对齐判据 12(条件式修复层)——
  *     禁止自动重试 / checkpoint / token-cost 护栏 / OTel-span-metric 树提前入内核。
+ *   - #160 / ADR-0008(accepted):tokenusage(TokenUsage 域类型)经
+ *     spec+plan+ACR 授权为显示路径观测字段,移出禁词表(与 017 同一授权先例);
+ *     token-cost 护栏(runtime ledger / CostTracker)仍禁——ADR-0008 Decision 1 明示否决。
  */
 
 import { describe, it } from "vitest";
@@ -65,11 +68,12 @@ describe("T12 public exports + Gate B gate", () => {
     }> = [];
     // 017:禁词表对齐判据 12(条件式修复层)。cancel/timeout/trace/setTimeout/
     // AbortController 经 spec+plan+ACR 授权为物理必需层,移出禁词表;
-    // retry/checkpoint/token-cost 护栏/OTel-span-metric 树仍禁(推迟到 018 真实接通后)。
+    // #160 / ADR-0008(accepted):TokenUsage 域类型经 spec+plan+ACR 授权为显示路径
+    // 必需层,移出禁词表(与 cancel/timeout/trace 同一授权先例)。
+    // retry/checkpoint/costusd 护栏/OTel-span-metric 树仍禁(推迟到 018 真实接通后)。
     const keywords = [
       "retry",
       "checkpoint",
-      "tokenusage",
       "costusd",
       "httpstatus",
       "requestid",
