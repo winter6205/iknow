@@ -16,6 +16,7 @@ import {
   visualWidth,
 } from "../../src/tui/banner.js";
 import { ListView, type TuiListEntry } from "../../src/tui/list-view.js";
+import { EYE_LINES } from "../../src/tui/banner-art.js";
 import { ChatView } from "../../src/tui/chat-view.js";
 import {
   createDraftSession,
@@ -43,8 +44,12 @@ describe("banner 渲染（智慧之眼 V7 定案）", () => {
     dataDir: "/home/u/.iknow",
   };
 
-  it("82/120 列：多行输出且无溢出行（加框后 BANNER_MIN_COLS=82）", () => {
-    for (const cols of [82, 120, 160]) {
+  it("BANNER_MIN_COLS / 120 / 160 列：多行输出且无溢出行（加框后 + 主体整改后）", () => {
+    for (const cols of [
+      BANNER_MIN_COLS,
+      BANNER_MIN_COLS + 24,
+      BANNER_MIN_COLS + 64,
+    ]) {
       const lines = renderBanner(info, { cols, short: false });
       expect(lines.length).toBeGreaterThan(1);
       assertNoOverflow(lines.join("\n"), cols);
@@ -52,11 +57,15 @@ describe("banner 渲染（智慧之眼 V7 定案）", () => {
   });
 
   it("整体面板在 cols 内水平居中（两侧空白对称，#171 体验迭代 + 任务 A 加框）", () => {
-    for (const cols of [82, 120, 160]) {
+    for (const cols of [
+      BANNER_MIN_COLS,
+      BANNER_MIN_COLS + 24,
+      BANNER_MIN_COLS + 64,
+    ]) {
       const lines = renderBanner(info, { cols, short: false });
       const plain = lines.map(stripAnsi);
       // 行宽差来自 info 栏的有无（中间 3 行带 info，最宽；上下只有 logo+GAP）。
-      // 面板逻辑宽 = 含 info 行的视觉宽 = logo(34) + GAP(3) + info(43) + 框(2) = 82。
+      // 面板逻辑宽 = 含 info 行的视觉宽 = logo(COLS) + GAP(3) + info(43) + 框(2) = BANNER_MIN_COLS。
       const widths = plain.map(visualWidth);
       const maxW = Math.max(...widths);
       const leftPad = (plain[0]!.match(/^( *)/) ?? [""])[0]!.length;
@@ -97,8 +106,11 @@ describe("banner 渲染（智慧之眼 V7 定案）", () => {
       cwd: "/home/u/proj",
       dataDir: "/home/u/.local/share/iknow/sessions",
     };
-    // cols=82 是任务 A 加框后的 BANNER_MIN_COLS；≥82 才有 banner 输出。
-    const lines = renderBanner(longInfo, { cols: 82, short: false });
+    // cols = BANNER_MIN_COLS 是任务 A 加框后 + 主体整改后的最小宽度；≥ 此值才有 banner 输出。
+    const lines = renderBanner(longInfo, {
+      cols: BANNER_MIN_COLS,
+      short: false,
+    });
     const plain = stripAnsi(lines.join("\n"));
     // 中段截断符 + 末段保留 sessions（文件名）/ .local（路径段）
     expect(plain).toContain("…");
@@ -116,7 +128,10 @@ describe("banner 渲染（智慧之眼 V7 定案）", () => {
   });
 
   it("SHORT 档（矮终端）：单行简化", () => {
-    const lines = renderBanner(info, { cols: 82, short: true });
+    const lines = renderBanner(info, {
+      cols: BANNER_MIN_COLS,
+      short: true,
+    });
     expect(lines.length).toBe(1);
     expect(stripAnsi(lines[0]!)).toContain("iknow");
   });
@@ -124,6 +139,16 @@ describe("banner 渲染（智慧之眼 V7 定案）", () => {
   it("UI 层无 emoji", () => {
     const lines = renderBanner(info, { cols: 120, short: false });
     expect(EMOJI_RE.test(stripAnsi(lines.join("\n")))).toBe(false);
+  });
+
+  it("任务 B 整改：logo 主体在终端显示为方形（cols/(rows*2) ≈ FACTOR=2.0）", () => {
+    // 点阵按公式 ROWS = round(COLS * sh / (FACTOR * sw)) 补偿终端字符
+    // 宽高比 1:2 → 终端显示比 = COLS / (ROWS * 2) ≈ FACTOR = 2.0（即主体
+    // 宽高比 ≈ 1:1）。精度 0 位小数 = ±0.5 容差。
+    expect(visualWidth(EYE_LINES[0] ?? "") / EYE_LINES.length).toBeCloseTo(
+      2.0,
+      0
+    );
   });
 });
 

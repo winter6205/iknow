@@ -229,10 +229,12 @@ const BOX_TITLE = "◆ iknow tui ◆";
 const BOX_FRAMING_OVERHEAD = 2;
 
 /**
- * 窄终端降级阈值（#171 + 任务 A 加框后）：banner 面板总宽 =
+ * 窄终端降级阈值（#171 + 任务 A 加框后 + 任务 B 主体整改后）：banner 面板总宽 =
  * 图案宽 + GAP + info 栏宽 + BOX_FRAMING_OVERHEAD（左右框各 1 列）。
  * cols < BANNER_MIN_COLS → renderBanner 返回 []。
- * 加框后最小宽度 = 34 + 3 + 43 + 2 = 82 列。
+ * 加框后最小宽度 = 48 + 3 + 43 + 2 = 96 列（任务 B：旧 82 → 96，因为主体
+ * 整改从 34×17 放大到 48×23 让 logo 不再被横向挤压；80-col 终端仍按窄终端
+ * 降级返空，行为与旧 82 一致）。
  */
 export const BANNER_MIN_COLS =
   visualWidth(EYE_LINES[0] ?? "") +
