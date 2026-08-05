@@ -65,6 +65,9 @@ export { createGetTimeTool } from "./stubs/demo-tools.js";
 export { computeTotals } from "./loop-trace.js";
 export type { LoopTrace, TurnTrace, Totals, CancelKind } from "./loop-trace.js";
 
+// T2 (#175): Harness 流式事件契约 SSOT (D1 最小集)。
+export type { HarnessStreamEvent } from "./stream.js";
+
 // 064 T4: TraceService bounded context public exports.
 export type {
   TraceService,

@@ -4,7 +4,13 @@
  * 这些类型构成 016 Gate A 的核心接口形状,Loop Engine 和 Model Adapter
  * 都依赖此处的定义。注意:`AnthropicNativeMessage` 等 wire 协议类型
  * 仅由 Model Adapter 解释并产出,Loop Engine 不读取、不构造供应商原生字段。
+ *
+ * #176 T3：`ModelAdapter.step` 的 `request` 参数含可选 `onStream` 观察者
+ * 回调（流式事件契约 SSOT `../stream.ts`，#147 D3）；仅流式臂消费,非流式
+ * 臂忽略,缺省时行为与现状逐字节一致。
  */
+
+import type { HarnessStreamEvent } from "../stream.js";
 
 /** Anthropic 原生 content block(由 Model Adapter 解释)。 */
 export type AnthropicContentBlock =
@@ -122,7 +128,12 @@ export interface ModelAdapter {
   /** 014 原子校验 + 投影:返回 AssistantTurnResult 或抛 ProtocolError。 */
   readonly step: (
     state: LoopState,
-    request: { tools?: unknown },
+    // #176 T3:可选 onStream — 流式事件观察者(#147 D3),仅流式臂消费;
+    // 离线 adapter / 非流式臂忽略此字段。
+    request: {
+      tools?: unknown;
+      onStream?: (event: HarnessStreamEvent) => void;
+    },
     signal?: AbortSignal // 017: run 第三参原样透传,离线实现可忽略(type-only;runtime deferred to T5)
   ) => Promise<AssistantTurnResult>;
 }
