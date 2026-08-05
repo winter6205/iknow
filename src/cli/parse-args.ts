@@ -2,7 +2,7 @@
  * Pure CLI argument parsing (no I/O).
  */
 
-export type CliCommand = "chat" | "ask" | "oneshot" | "help" | "serve";
+export type CliCommand = "chat" | "ask" | "oneshot" | "help" | "serve" | "tui";
 
 export type ParsedCli = {
   command: CliCommand;
@@ -35,6 +35,10 @@ export type ParsedCli = {
    * Undefined → serve defaults to ~/.iknow (spec #120 SC 1).
    */
   dataDir?: string;
+  /**
+   * `tui [session-id]` 可选位置参数（#146 SC 2：直连 resume 该会话）。
+   */
+  sessionId?: string;
 };
 
 export type ParseArgsOptions = {
@@ -155,6 +159,19 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
         ...flags,
         query: "",
         missingQuery: false,
+      },
+    });
+  }
+
+  if (head === "tui") {
+    const sessionId = rest[1];
+    return baseParsed({
+      command: "tui",
+      fields: {
+        ...flags,
+        query: "",
+        missingQuery: false,
+        sessionId: sessionId !== undefined ? sessionId : undefined,
       },
     });
   }

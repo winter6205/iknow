@@ -34,6 +34,7 @@ export function usageText(): string {
   iknow                         交互对话（仅 TTY）/ interactive chat (TTY only)
   iknow chat [options]          会话：TTY REPL 或按行管道 / chat (TTY REPL or piped lines)
   iknow serve [options]         HTTP 会话 API + Web UI / session API + web UI
+  iknow tui [session-id]        终端多会话交互界面 / multi-session TUI (banners/lists/slash)
   iknow ask "<query>" [options] 单次 JSON 回答（脚本/CI）/ one-shot JSON (scripts/CI)
   iknow "<query>" [options]     同上（兼容写法）/ same as ask (compat)
   iknow -h | --help             显示本帮助 / show this help
@@ -53,6 +54,7 @@ export function usageText(): string {
   • 空 ask/query → 用法 + exit 1（无默认 demo 问句）/ empty ask → usage + exit 1
   • ask 输出 G2 JSON；chat 默认人类可读 / ask→JSON, chat→human view
   • serve 打开 http://host:port/ ；API 见 docs/design/session-http-api-v0.md
+  • tui 与 serve 共享 ~/.iknow 会话池；tui 内 /help 看 slash 词表 / tui shares the pool
   • 管道可设 IKNOW_CHAT_QUIET=1 关闭 turn 标记 / pipe: IKNOW_CHAT_QUIET=1 quiet markers`;
 }
 
