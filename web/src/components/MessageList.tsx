@@ -1,12 +1,15 @@
 import { useEffect, useRef } from "react";
 import type { ChatUiMessage } from "../hooks/useSessionChat";
 import { AgentCard } from "./AgentCard";
+import { SendingIndicator } from "./SendingIndicator";
 import { StateBlock } from "./StateBlock";
 import { UserMessage } from "./UserMessage";
 
 export type MessageListProps = {
   messages: ChatUiMessage[];
   emptyHint?: string;
+  /** True while a request is in flight — renders the in-progress bubble at the bottom (T4). */
+  sending?: boolean;
 };
 
 // Flat per-message render under Turn semantics: user (idx*2) + agent (idx*2+1),
@@ -15,12 +18,13 @@ export type MessageListProps = {
 export function MessageList({
   messages,
   emptyHint = "发送问题开始对话。",
+  sending = false,
 }: MessageListProps) {
   const endRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages.length]);
+  }, [messages.length, sending]);
 
   if (messages.length === 0) {
     return (
@@ -52,6 +56,11 @@ export function MessageList({
             )}
           </li>
         ))}
+        {sending ? (
+          <li key="__sending__">
+            <SendingIndicator staggerIndex={messages.length * 2} />
+          </li>
+        ) : null}
       </ul>
       <div ref={endRef} aria-hidden="true" />
     </div>

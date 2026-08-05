@@ -66,6 +66,16 @@ button:disabled {
   border: 0;
 }
 
+/* hljs 主题（github.css）自带白色底与 1em 内边距；底色置为透明让 CodeBlock
+   的暖色容器透出，内边距清零由 pre 统一控制（避免双重 padding）。
+   token 前景色保留 github 值，贴合浅色暖调 Variant A。 */
+.hljs {
+  background: transparent;
+}
+pre code.hljs {
+  padding: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

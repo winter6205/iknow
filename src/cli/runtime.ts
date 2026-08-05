@@ -5,7 +5,8 @@
  * CLI ask/chat 产品路径,走 harness foundation(real Anthropic adapter +
  * LoopEngine)。#141-T11 把 ACI 装饰层工具集从 5 件 PROTOTYPE 切到 6 件业界通用名
  * (bash / read_file / grep / glob / edit_file / write_file)，与 permission
- * policy byName 键 `bash` 对齐（ADR-0004 / ADR-0006）。
+ * policy byName 键 `bash` 对齐（ADR-0004 / ADR-0006）；后续追加 Web 类
+ * web_fetch / web_search（harness-report p04 ACI 映射），合计 8 件。
  *
  * 旧 agent builder 服务于 Session API serve 路径,在 #51 把 serve 切到
  * harness 后于 022 归档(见 `docs/archive/022-retire-agent-loop/README.md`)。
@@ -29,6 +30,8 @@ import { createGrepTool } from "../harness/aci/tools/grep.js";
 import { createGlobTool } from "../harness/aci/tools/glob.js";
 import { createEditFileTool } from "../harness/aci/tools/edit-file.js";
 import { createWriteFileTool } from "../harness/aci/tools/write-file.js";
+import { createWebFetchTool } from "../harness/aci/tools/web-fetch.js";
+import { createWebSearchTool } from "../harness/aci/tools/web-search.js";
 import type { AskUser } from "../harness/permission/types.js";
 import { loadIknowEnv, type IknowEnv } from "../config/env.js";
 import type { SessionContext } from "../shared/schema.js";
@@ -95,10 +98,13 @@ export async function buildHarnessEngine(
     // #179 T6 (#147 D0):流式臂开关,env SSOT,默认 on(D0)。
     stream: env.llm.stream === "on",
   });
-  // ACI 工具集（#141-T11 6 工具集，对齐 ADR-0004 业界通用名）。沙箱根 =
-  // process.cwd()（CLI 在工程根跑时,agent 工作区与项目一致）。所有工具的
-  // root 软沙箱越界即报 ToolExecutionError；bash 的 cwd 不是安全边界，真实边界
-  // 是 allowlist-first + 黑名单双保险 + (毕业后) OS 级沙箱(#123)。
+  // ACI 工具集（#141-T11 6 工具集 + web_fetch/web_search Web 类扩展，
+  // 对齐 ADR-0004 业界通用名）。沙箱根 = process.cwd()（CLI 在工程根跑时,
+  // agent 工作区与项目一致）。所有工具的 root 软沙箱越界即报 ToolExecutionError；
+  // bash 的 cwd 不是安全边界，真实边界是 allowlist-first + 黑名单双保险 +
+  // (毕业后) OS 级沙箱(#123)。Web 类工具不触文件系统，边界在
+  // network-guard（SSRF 逐跳校验）；category=read-only → 权限默认 allow。
+  // append-only：不重排既有 6 工具（policy byName 键空间与 ADR-0006 稳定）。
   const sandboxRoot = process.cwd();
   const aciTools = [
     createBashTool(sandboxRoot),
@@ -107,6 +113,10 @@ export async function buildHarnessEngine(
     createGlobTool(sandboxRoot),
     createEditFileTool(sandboxRoot),
     createWriteFileTool(sandboxRoot),
+    createWebFetchTool(),
+    // web_search 端点覆写经 loadIknowEnv SSOT 解析（process.env > .env.local > .env），
+    // 工具自身不直读 process.env。
+    createWebSearchTool({ envSearchUrl: env.web.searchUrl }),
   ];
   const reg = createAciRegistry(aciTools);
   const baseExecutor = createExecutor(reg.inner);

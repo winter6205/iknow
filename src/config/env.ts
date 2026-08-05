@@ -50,10 +50,24 @@ export interface ChatEnv {
   showThinking: boolean;
 }
 
+/**
+ * ACI Web 类工具的 env 配置臂（web_search 端点覆写）。
+ *
+ * `IKNOW_WEB_SEARCH_URL`：可选 HTML 搜索端点覆写（私网后端 / 测试用）。
+ * 空 → undefined（web_search 落默认 DuckDuckGo html 端点）。读取经本模块
+ * 统一走 process.env > .env.local > .env 优先级（env.ts SSOT，对齐
+ * NINE_ROUTER_KEY 惯例）；工具自身不直读 process.env。
+ */
+export interface WebEnv {
+  searchUrl: string | undefined;
+}
+
 export interface IknowEnv {
   llm: LlmEnv;
   /** #152 T5:thinking 可见面控制臂。 */
   chat: ChatEnv;
+  /** ACI Web 类工具配置臂（web_search 端点覆写）。 */
+  web: WebEnv;
 }
 
 /** Placeholder values treated as "no real secret set" (case-insensitive). */
@@ -93,6 +107,12 @@ function envGet(opts: EnvGetOpts): string {
   if (fromProc !== undefined && fromProc !== "") return fromProc;
   if (file[key] !== undefined && file[key] !== "") return file[key]!;
   return fallback;
+}
+
+/** Optional string env: 未设 / 空串 → undefined（区别于 envGet 的 "" 兜底）。 */
+function envOptional(opts: EnvGetOpts): string | undefined {
+  const raw = envGet({ file: opts.file, key: opts.key });
+  return raw.length > 0 ? raw : undefined;
 }
 
 interface EnvIntOpts {
@@ -267,6 +287,10 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
         file,
         key: "IKNOW_CHAT_SHOW_THINKING",
       }),
+    },
+    web: {
+      // 可选端点覆写：空 → undefined（web_search 落默认 DuckDuckGo html 端点）。
+      searchUrl: envOptional({ file, key: "IKNOW_WEB_SEARCH_URL" }),
     },
   };
 }

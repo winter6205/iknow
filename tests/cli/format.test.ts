@@ -30,6 +30,8 @@ function mkResult(over: Partial<RunResult> = {}): RunResult {
     messages: [],
     turnCount: 1,
     stopReason: "completed",
+    // #160 T4:RunResult.lastUsage 必填字段;mkResult 默认 null(无 usage 视图)。
+    lastUsage: null,
     ...over,
   };
 }
@@ -335,6 +337,8 @@ describe("formatRunHuman — showThinking 开关 (#152 T5)", () => {
       ],
       turnCount: 1,
       stopReason: "completed" as const,
+      // #160 T4:RunResult.lastUsage 必填字段;此用例未测 token 显示面,默认 null。
+      lastUsage: null,
     };
     const out = formatRunHuman({
       result,
@@ -460,5 +464,91 @@ describe("renderAssistantAnswer(false) vs deriveFinalText 不变量 (#156 M2)", 
       ""
     );
     assert.equal(deriveFinalText(msgs), null);
+  });
+});
+
+/**
+ * #160 T5:显示面接通 `lastUsage`(ADR-0008 显示路径)。
+ *
+ * 形状锚点(ADR-0008 Decision 2 + T1 Resolution):
+ * - 域类型 `TokenUsage` 四字段 camelCase:`inputTokens` / `outputTokens` 必填
+ *   + `cacheCreationInputTokens` / `cacheReadInputTokens: number | null`。
+ * - `RunResult.lastUsage: TokenUsage | null` —— 必填字段,null = run 无成功
+ *   模型调用。投影面锁死:
+ *   - JSON:有 usage → 增 `lastUsage` 键(camelCase 四字段);null → 键缺席
+ *     (与 messages 省略同风格,见 format.ts 设计注释)。
+ *   - Human:有 usage → 状态行追加 `tokens in/out: <in>/<out>`;null → 不显示
+ *     (cache 命中暂不进人类展示面,最小清晰原则)。
+ */
+describe("formatRunJson — lastUsage (#160 T5)", () => {
+  it("lastUsage 非 null:JSON 增 camelCase 四字段", () => {
+    const parsed = JSON.parse(
+      formatRunJson({
+        result: mkResult({
+          lastUsage: {
+            inputTokens: 1234,
+            outputTokens: 56,
+            cacheCreationInputTokens: 7,
+            cacheReadInputTokens: 89,
+          },
+        }),
+        trace: mkTrace([]),
+      })
+    );
+    // 钉死四字段 camelCase 形状;防止 JSON 投影被改回 snake_case。
+    assert.deepEqual(parsed.lastUsage, {
+      inputTokens: 1234,
+      outputTokens: 56,
+      cacheCreationInputTokens: 7,
+      cacheReadInputTokens: 89,
+    });
+  });
+
+  it("lastUsage: null:JSON 无 lastUsage 键(与 messages 省略同风格)", () => {
+    const parsed = JSON.parse(
+      formatRunJson({
+        result: mkResult({ lastUsage: null }),
+        trace: mkTrace([]),
+      })
+    );
+    assert.ok(
+      !("lastUsage" in parsed),
+      "lastUsage 键必须缺席(与 messages 省略同风格)"
+    );
+  });
+});
+
+describe("formatRunHuman — lastUsage token 读数 (#160 T5)", () => {
+  it("有 lastUsage:状态行追加 `tokens in/out: <in>/<out>`,精确钉死完整形状", () => {
+    const out = formatRunHuman({
+      result: mkResult({
+        finalText: "hello",
+        lastUsage: {
+          inputTokens: 1234,
+          outputTokens: 56,
+          cacheCreationInputTokens: null,
+          cacheReadInputTokens: null,
+        },
+      }),
+      trace: mkTrace([]),
+    });
+    // 钉死完整状态行:既有 `<ms>ms` 之后追加 ` · tokens in/out: <in>/<out>`。
+    assert.equal(
+      out,
+      "hello\n\nstop=completed · turns=1 · tools=- · 0ms · tokens in/out: 1234/56"
+    );
+  });
+
+  it("lastUsage: null:状态行不含 token 读数", () => {
+    const out = formatRunHuman({
+      result: mkResult({ finalText: "hello", lastUsage: null }),
+      trace: mkTrace([]),
+    });
+    assert.ok(
+      !out.includes("tokens"),
+      "lastUsage = null 时人类展示不应带 token 读数:got " + out
+    );
+    // 钉死无 token 段的完整状态行(反向兼容既有消费者)。
+    assert.equal(out, "hello\n\nstop=completed · turns=1 · tools=- · 0ms");
   });
 });

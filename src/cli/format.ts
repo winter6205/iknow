@@ -17,11 +17,17 @@
  *   展示通道;`finalText` / `result.messages` / `LoopTrace` 任何字段不动。
  *   设计决定:落 env flag `IKNOW_CHAT_SHOW_THINKING` (走 `src/config/env.ts`
  *   SSOT,默认 off)。
+ * - #160 T5:`lastUsage` 显示面接通(ADR-0008 显示路径)。
+ *   `formatRunJson` 非 null 时增 `lastUsage` 键(camelCase 四字段,沿用
+ *   `TokenUsage` 形状);null = run 无成功模型调用 → 键缺席,与 `messages`
+ *   省略同风格。`formatRunHuman` 状态行追加 ` · tokens in/out: <in>/<out>`
+ *   (仅 input/output;cache 命中暂不进人类展示面,最小清晰原则)。
  */
 import type {
   AnthropicNativeMessage,
   LoopTrace,
   RunResult,
+  TokenUsage,
 } from "../harness/index.js";
 import {
   createOutputMask,
@@ -159,10 +165,14 @@ export function renderAssistantAnswer(opts: {
  * Layout:
  *   `<rendered text>
  *
- *   stop=<stopReason> · turns=<turnCount> · tools=<a,b,c> · <totalDurationMs>ms`
+ *   stop=<stopReason> · turns=<turnCount> · tools=<a,b,c> · <totalDurationMs>ms
+ *   [ · tokens in/out: <inputTokens>/<outputTokens>]`
  *
  * `result.finalText === null` 或无内容时,文本部分为空字符串,状态行照常输出。
  * `trace.turns` 中无任何工具调用时,`tools=` 显示 `-`。
+ *
+ * #160 T5:`lastUsage` 非 null 时状态行追加 `tokens in/out` 读数(仅 input/output;
+ * cache 两字段暂不进人类展示面);null = run 无成功模型调用,不显示。
  *
  * #152 T5:thinking 可见面走 `opts.showThinking`(默认 false)。关闭时与原行为
  * 完全一致(用 `finalText` 派生,thinking 不进答案);开启时改走
@@ -186,8 +196,21 @@ export function formatRunHuman(opts: FormatRunHumanOpts): string {
     `stop=${result.stopReason} · ` +
     `turns=${result.turnCount} · ` +
     `tools=${tools} · ` +
-    `${trace.totals.totalDurationMs}ms`;
+    `${trace.totals.totalDurationMs}ms` +
+    tokenSegment(result.lastUsage);
   return `${text}\n\n${status}`;
+}
+
+/**
+ * #160 T5: 人类状态行的 token 读数段。
+ *
+ * `lastUsage` 是 `RunResult` 必填字段;null = run 无成功模型调用,返回空串
+ * (状态行保持既有形状)。人类展示面只显示 input/output——cache 两字段暂不
+ * 上人类面(最小清晰原则;JSON 投影里仍可完整消费,见 formatRunJson)。
+ */
+function tokenSegment(lastUsage: TokenUsage | null): string {
+  if (lastUsage === null) return "";
+  return ` · tokens in/out: ${lastUsage.inputTokens}/${lastUsage.outputTokens}`;
 }
 
 /**
@@ -197,6 +220,11 @@ export function formatRunHuman(opts: FormatRunHumanOpts): string {
  * ask / chat oneshot scripts only need `finalText` + `stopReason` + `turnCount` +
  * `trace` for downstream parsing. Native messages stay available via `RunResult`
  * for in-process consumers; not for shell consumers.
+ *
+ * #160 T5:`lastUsage` 非 null 时新增 `lastUsage` 键(camelCase 四字段,与
+ * `RunResult` 域类型 `TokenUsage` 形状一致);null = run 无成功模型调用 → 键
+ * 缺席(同 `messages` 省略风格,`JSON.stringify` 自动丢弃 `undefined` 值)。
+ * 域类型 `TokenUsage` 的字段名即为 camelCase,无需在投影层重写映射。
  *
  * #152 T5:thinking 展示开关**不影响** JSON 投影(machine readers 自然能从
  * `result.messages` 提取,或留后续票)。
@@ -208,11 +236,14 @@ export function formatRunJson(opts: FormatRunOpts): string {
   const { result, trace } = opts;
   const maskedFinalText =
     result.finalText === null ? null : buildOutputMask().mask(result.finalText);
+  // null → undefined → JSON.stringify 丢弃(同 messages 省略)。
+  const lastUsage = result.lastUsage === null ? undefined : result.lastUsage;
   return JSON.stringify(
     {
       finalText: maskedFinalText,
       stopReason: result.stopReason,
       turnCount: result.turnCount,
+      lastUsage,
       trace,
     },
     null,

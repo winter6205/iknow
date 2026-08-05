@@ -10,11 +10,48 @@ export type StopReason =
   | "cancelled"
   | "timeout";
 
+/** Mirrors ThinkingEntryView in src/session-api/contract.ts. */
+export type ThinkingEntryView = {
+  readonly text: string;
+};
+
+/** Mirrors ThinkingView in src/session-api/contract.ts. */
+export type ThinkingView = {
+  readonly entries: readonly ThinkingEntryView[];
+  readonly redactedCount: number;
+};
+
+/** Mirrors ToolCallView in src/session-api/contract.ts. */
+export type ToolCallView = {
+  readonly id: string;
+  readonly name: string;
+  readonly inputPreview: string;
+  readonly outputPreview: string;
+  readonly isError: boolean;
+  readonly truncated: boolean;
+};
+
 /** Mirrors TurnAnswerDto in src/session-api/contract.ts. */
 export type TurnAnswerDto = {
   readonly finalText: string;
   readonly stopReason: StopReason;
   readonly turnCount: number;
+  /** 可选：单回合 thinking 文本视图（后端 T1 投影；无 thinking 时省略）。 */
+  readonly thinking?: ThinkingView;
+  /** 可选：单回合工具调用视图（后端 T1 投影；无 tool_use 时省略）。 */
+  readonly toolCalls?: readonly ToolCallView[];
+};
+
+/** Mirrors ThinkingOverride in PostMessageRequest (src/session-api/contract.ts). */
+export type ThinkingOverride = {
+  readonly mode: "off" | "adaptive";
+  readonly effort?: "" | "low" | "medium" | "high" | "xhigh" | "max";
+};
+
+/** Mirrors PostMessageRequest in src/session-api/contract.ts. */
+export type PostMessageRequest = {
+  readonly text: string;
+  readonly thinking?: ThinkingOverride;
 };
 
 /** Mirrors SessionListEntry in src/session-api/store/session-store.ts. */

@@ -33,6 +33,7 @@ import type {
   AssistantTurnResult,
   LoopState,
   RunResult,
+  TokenUsage,
   Transition,
 } from "./model-adapter/types.js";
 import type { Executor, Registry, ToolExecutionResult } from "./tools/types.js";
@@ -533,7 +534,15 @@ async function stepWithTrace(opts: {
   readonly deps: LoopEngineDeps;
   readonly signal?: AbortSignal;
   readonly onStream?: (event: HarnessStreamEvent) => void;
-}): Promise<{ transition: Transition; turn: TurnTrace | null }> {
+}): Promise<{
+  transition: Transition;
+  turn: TurnTrace | null;
+  /**
+   * #160 / ADR-0008 Decision 5: 本步成功模型调用的 usage(undefined = 无成功模型调用
+   * 或成功调用 usage 缺席)。run 累 lastUsage 仅在 !== undefined 时更新。
+   */
+  modelUsage: TokenUsage | undefined;
+}> {
   if (opts.state.turnCount >= opts.deps.maxTurns) {
     return {
       transition: {
@@ -542,6 +551,7 @@ async function stepWithTrace(opts: {
         finalState: opts.state,
       },
       turn: null,
+      modelUsage: undefined,
     };
   }
 
@@ -585,6 +595,8 @@ async function stepWithTrace(opts: {
         })
       );
     } else {
+      // usage 缺席(error/stub 路径)整条不落盘——Postel(ADR-0008 Decision 3)
+      const usage = modelPhase.result.usage;
       llmCallId = await safeTrace(() =>
         opts.deps.trace!.recordLlmCall({
           startedAt: llmStartedAt,
@@ -594,6 +606,7 @@ async function stepWithTrace(opts: {
           stream: streamMode,
           messagesCaptured: false,
           status: "ok",
+          ...(usage !== undefined ? usage : {}),
         })
       );
     }
@@ -617,7 +630,11 @@ async function stepWithTrace(opts: {
         })
       );
     }
-    return { transition: modelPhase.transition, turn: modelPhase.turn };
+    return {
+      transition: modelPhase.transition,
+      turn: modelPhase.turn,
+      modelUsage: undefined,
+    };
   }
   const turnResult = modelPhase.result;
 
@@ -657,6 +674,7 @@ async function stepWithTrace(opts: {
         durationMs,
         cancelKind: "none",
       }),
+      modelUsage: turnResult.usage,
     };
   }
 
@@ -700,6 +718,7 @@ async function stepWithTrace(opts: {
         durationMs,
         cancelKind: "none",
       }),
+      modelUsage: turnResult.usage,
     };
   }
 
@@ -783,7 +802,11 @@ async function stepWithTrace(opts: {
     );
   }
 
-  return { transition: toolPhase.transition, turn: toolPhase.turn };
+  return {
+    transition: toolPhase.transition,
+    turn: toolPhase.turn,
+    modelUsage: turnResult.usage,
+  };
 }
 
 /**
@@ -836,9 +859,12 @@ export async function run(
     ]),
     turnCount: 0,
   };
+  // #160 / ADR-0008 Decision 5: 最后一次成功模型调用的 usage 可变引用。
+  // 初值 null = run 无成功模型调用;仅当 step 成功且 usage 存在时更新。
+  let lastUsage: TokenUsage | null = null;
   let turns: ReadonlyArray<TurnTrace> = [];
   while (true) {
-    const { transition, turn } = await stepWithTrace({
+    const { transition, turn, modelUsage } = await stepWithTrace({
       state,
       deps,
       signal,
@@ -847,6 +873,10 @@ export async function run(
     if (turn !== null) {
       // immutable append;禁止 push / 原地修改。
       turns = [...turns, turn];
+    }
+    // 仅成功模型调用(usage 存在)更新 lastUsage;失败/取消/超时路径不覆盖。
+    if (modelUsage !== undefined) {
+      lastUsage = modelUsage;
     }
     if (transition.kind === "stop") {
       const { reason, finalState } = transition;
@@ -857,6 +887,7 @@ export async function run(
         messages: finalState.messages,
         turnCount: finalState.turnCount,
         stopReason: reason,
+        lastUsage,
       };
       return {
         result,

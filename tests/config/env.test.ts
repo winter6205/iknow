@@ -20,6 +20,7 @@ const ENV_KEYS = [
   "IKNOW_CHAT_SHOW_THINKING",
   // #179 T6: streaming arm env (default on, invalid → on).
   "IKNOW_LLM_STREAM",
+  "IKNOW_WEB_SEARCH_URL",
 ] as const;
 
 describe("loadIknowEnv — thinking config (#151 T4)", () => {
@@ -154,5 +155,31 @@ describe("loadIknowEnv — LLM stream flag (#179 T6 / #147 D0)", () => {
       const env = loadIknowEnv();
       assert.equal(env.llm.stream, "on", `stream=${v} 应回退 on`);
     }
+  });
+});
+
+describe("loadIknowEnv — web.searchUrl (ACI web_search 端点覆写)", () => {
+  beforeEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+
+  it("default: web.searchUrl=undefined (env 不设时)", () => {
+    const env = loadIknowEnv();
+    assert.equal(env.web.searchUrl, undefined);
+  });
+
+  it("explicit 端点原样透传", () => {
+    process.env.IKNOW_WEB_SEARCH_URL = "https://html.duckduckgo.com/html/";
+    const env = loadIknowEnv();
+    assert.equal(env.web.searchUrl, "https://html.duckduckgo.com/html/");
+  });
+
+  it("空串 → undefined（区别于有值）", () => {
+    process.env.IKNOW_WEB_SEARCH_URL = "";
+    const env = loadIknowEnv();
+    assert.equal(env.web.searchUrl, undefined);
   });
 });

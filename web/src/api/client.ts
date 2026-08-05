@@ -3,6 +3,7 @@ import type {
   CreateSessionResponse,
   GetSessionResponse,
   HealthResponse,
+  PostMessageRequest,
   PostMessageResponse,
   ResetSessionResponse,
   SessionListItem,
@@ -108,16 +109,27 @@ export function getSessionHistory(
   return request(`${API}/sessions/${encodeURIComponent(id)}`, {}, signal);
 }
 
+export type PostMessageOptions = {
+  /** 每请求 thinking 覆盖（T5）；未提供则 body 不带 thinking 字段（后端走缓存配置）。 */
+  thinking?: PostMessageRequest["thinking"];
+};
+
 export function postMessage(
   id: string,
   text: string,
+  opts: PostMessageOptions = {},
   signal?: AbortSignal
 ): Promise<PostMessageResponse> {
+  const body: PostMessageRequest = {
+    text,
+    // Explicit undefined 省略：JSON.stringify 会丢掉 undefined 字段。
+    ...(opts.thinking !== undefined ? { thinking: opts.thinking } : {}),
+  };
   return request(
     `${API}/sessions/${encodeURIComponent(id)}/messages`,
     {
       method: "POST",
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(body),
     },
     signal
   );

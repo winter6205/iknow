@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import {
   CURRENT_SCHEMA_VERSION,
   isSessionFileV1,
+  sanitizeSessionFile,
   validateSessionFile,
 } from "../../../src/session-api/store/index.ts";
 import type { SessionFileV1 } from "../../../src/session-api/store/index.ts";
@@ -179,5 +180,73 @@ describe("isSessionFileV1 — type guard companion", () => {
     // schemaVersion above CURRENT (was 2 with strict equality; now 3+)
     assert.equal(isSessionFileV1({ ...valid, schemaVersion: 3 }), false);
     assert.equal(isSessionFileV1({ ...valid, turnCount: "x" }), false);
+  });
+});
+
+// -- T1: thinking / redacted_thinking content blocks -----------------------
+// T1: harness retains thinking blocks in the authoritative history; the
+// session store must accept them on save and replay them verbatim.
+
+describe("validateSessionFile — content blocks accept thinking (T1)", () => {
+  it("accepts a thinking block with thinking + signature", () => {
+    const file = {
+      ...valid,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "thinking",
+              thinking: "deep thought",
+              signature: "sig-1",
+            },
+          ],
+        },
+      ],
+    };
+    assert.equal(validateSessionFile(file), null);
+  });
+
+  it("accepts a redacted_thinking block with data", () => {
+    const file = {
+      ...valid,
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "redacted_thinking", data: "encrypted-blob" }],
+        },
+      ],
+    };
+    assert.equal(validateSessionFile(file), null);
+  });
+
+  it("rejects a thinking block missing thinking field → 'messages'", () => {
+    const file = {
+      ...valid,
+      messages: [
+        { role: "assistant", content: [{ type: "thinking", signature: "x" }] },
+      ],
+    };
+    assert.throws(
+      () => sanitizeSessionFile(file),
+      (err: unknown) =>
+        (err as { kind?: string; field?: string }).kind === "schema_invalid" &&
+        (err as { kind?: string; field?: string }).field === "messages"
+    );
+  });
+
+  it("rejects a redacted_thinking block missing data field → 'messages'", () => {
+    const file = {
+      ...valid,
+      messages: [
+        { role: "assistant", content: [{ type: "redacted_thinking" }] },
+      ],
+    };
+    assert.throws(
+      () => sanitizeSessionFile(file),
+      (err: unknown) =>
+        (err as { kind?: string; field?: string }).kind === "schema_invalid" &&
+        (err as { kind?: string; field?: string }).field === "messages"
+    );
   });
 });

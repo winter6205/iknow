@@ -20,7 +20,10 @@ _Avoid_: 声称已接入产品路径；mock agent、stub brain
 _Avoid_: 把 cancelled 与 timeout 混为一条；把总耗时当作独立 stop 触发器
 
 **LoopTrace**: `run()` 的第二返回面 `{ result, trace }`（TurnTrace / Totals 两型）--A 层结构元数据 trace（每回合 supplierStop / toolCall kind / durationMs / cancelKind + 一次性 reduce 的 totals），严格不含 payload；与 014 messages 唯一权威解耦，immutable 累积。`cancelKind` 是取消来源四值枚举 `"none" | "callerAbort" | "timerTimeout" | "hostCancel"`（对齐 023 `RaceModelOutcome.source`），取代 017 的 `timeoutHit` / `signalAborted` 双布尔。
-_Avoid_: 在 trace 里塞 input/output/token/cost（B 层字段）；Collector 回调 / onTurn 中途观察点
+_Avoid_: 在 trace 里塞 input/output/token/cost（B 层字段）——该禁令仅对 LoopTrace 本体，不外延到 TraceService（`LlmCallRecord` 承载 token usage 是 ADR-0008 裁决的合规落点）；Collector 回调 / onTurn 中途观察点
+
+**usage (token accounting)**: LLM API 每次成功调用回传的 token 计费（`inputTokens`/`outputTokens` 必填 + `cacheCreationInputTokens`/`cacheReadInputTokens` nullable，对齐 SDK `Usage`）；权威落点 = TraceService `LlmCallRecord`（观测真值，错误分支整条缺席），运行时暴露面仅 `RunResult.lastUsage`（TUI 显示读者，017:67 的有记录例外）。chars/N 估算只供压缩决策，永不进核算 / 显示（ADR-0008）。
+_Avoid_: 用估算值顶替 trace 真值；为无读者的账本建运行时承载面；把 usage 塞进 LoopTrace（token 禁令仅对 LoopTrace，不外延到 TraceService）
 
 **ToolExecutionContext**: Executor 透传给 handler 的执行上下文 `{ signal }`；run 第三参 signal 原样透传、不创建子 signal，超时由 Executor `Promise.race` 外包而非 ctx 携带。
 _Avoid_: 在 ctx 里放 timeoutMs；为每个 handler 建子 AbortController
