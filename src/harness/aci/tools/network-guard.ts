@@ -33,6 +33,24 @@ import { classifyIp } from "./ip-classify.js";
 /** 重定向上限（与 upstream MAX_REDIRECTS 对齐）。 */
 export const MAX_REDIRECTS = 5;
 
+/**
+ * 浏览器伪装 UA（web_fetch / web_search 工具生产默认出口共享）。
+ *
+ * 选用 Chrome 130 桌面 UA + iknow 产品后缀，对齐 upstream-openharness 的
+ * `Mozilla/... OpenHarness/0.1.7` 风格——伪装为真实浏览器以通过 Cloudflare
+ * 等反爬 UA 过滤（实测：纯产品 UA "iknow-web-fetch/0.1" 被 Ars Technica
+ * Cloudflare 拦截为 202 challenge；浏览器 UA 通过）。UA 中显式带 `iknow/`
+ * 标识，避免完全伪装为不知名流量。
+ *
+ * 版本号写死是已知偏离（不随 Chrome 版本自动更新），与 upstream 同。
+ * 测试覆盖：此常量导出供工具层引用；测试本身不检查 UA（注入 fetch stub
+ * 不消费 headers）。
+ */
+export const DEFAULT_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) " +
+  "AppleWebKit/537.36 (KHTML, like Gecko) " +
+  "Chrome/130.0.0.0 Safari/537.36 iknow/0.1";
+
 /** 本地主机名黑名单（对齐 upstream _LOCAL_HOSTNAMES）。 */
 const LOCAL_HOSTNAMES: ReadonlySet<string> = new Set([
   "localhost",
@@ -94,10 +112,14 @@ export interface FetchPublicOptions {
 
 /**
  * 生产默认出口 deps（SSOT）：fetch = globalThis.fetch（redirect: manual，
- * UA 由调用方给定）+ lookup = node:dns/promises.lookup(all)。
+ * UA 默认浏览器伪装串）+ lookup = node:dns/promises.lookup(all)。
  * web_fetch / web_search 工厂不再各自复制默认实现（code-review 整改）。
+ *
+ * @param userAgent 可选 UA 覆写；缺省用 {@link DEFAULT_USER_AGENT}。
  */
-export function createDefaultGuardDeps(userAgent: string): GuardDeps {
+export function createDefaultGuardDeps(
+  userAgent: string = DEFAULT_USER_AGENT
+): GuardDeps {
   const fetchFn: GuardFetchFn = async (url, options) => {
     const response = await fetch(url, {
       redirect: "manual",

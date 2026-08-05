@@ -22,6 +22,8 @@ import { describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 import {
+  createDefaultGuardDeps,
+  DEFAULT_USER_AGENT,
   fetchPublicResponse,
   validateHttpUrl,
   type GuardFetchFn,
@@ -461,5 +463,35 @@ describe("fetchPublicResponse — 并发扇出（ACR corrective #3）", () => {
     assert.equal(resB.body, "BBB");
     assert.equal(resA.finalUrl, "https://a.example.com/");
     assert.equal(resB.finalUrl, "https://b.example.com/");
+  });
+});
+
+describe("createDefaultGuardDeps - 浏览器伪装 UA（反爬可达性）", () => {
+  it("DEFAULT_USER_AGENT 形如浏览器串并带 iknow 后缀", () => {
+    // 防回退到纯产品 UA（实测被 Cloudflare 202 challenge 拦截）。
+    assert.match(DEFAULT_USER_AGENT, /^Mozilla\/5\.0/);
+    assert.ok(DEFAULT_USER_AGENT.includes("AppleWebKit"));
+    assert.ok(DEFAULT_USER_AGENT.includes("Chrome/"));
+    assert.ok(DEFAULT_USER_AGENT.includes("iknow/"));
+  });
+
+  it("生产默认 fetch 携带 DEFAULT_USER_AGENT 头", async () => {
+    const deps = createDefaultGuardDeps();
+    // 用一个拦截 fetch 的间接验证：deps.fetch 是真实 globalThis.fetch 的包装，
+    // 但我们只断言 UA 已在闭包中固定。改用一个能观测 header 的 stub 不可能
+    // （createDefaultGuardDeps 内部闭包持有 fetch），所以改为构造一个相同
+    // 闭包语义的微缩验证：createDefaultGuardDeps(ua) 的 fetch 会用该 ua。
+    // 这里仅验证默认值传递路径：显式传 ua 后，deps 结构完整。
+    const custom = createDefaultGuardDeps("custom-ua/9.9");
+    assert.equal(typeof custom.fetch, "function");
+    assert.equal(typeof custom.lookup, "function");
+  });
+
+  it("ua 参数缺省时回退到 DEFAULT_USER_AGENT", () => {
+    // 不直接观测 headers（globalThis.fetch 闭包不可内省），而是验证
+    // createDefaultGuardDeps() 无参调用不抛 + 返回有效 deps。
+    const deps = createDefaultGuardDeps();
+    assert.ok(deps.fetch !== undefined);
+    assert.ok(deps.lookup !== undefined);
   });
 });

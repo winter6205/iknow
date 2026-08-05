@@ -6,7 +6,12 @@
  * 重复 + SSOT 违背，抽到本模块单源（对齐 helpers.ts 共享先例）。
  */
 
-/** HTML → 紧凑文本：跳过 script/style 块，去标签，实体解码，空白折叠。 */
+/** HTML → 紧凑文本：跳过 script/style 块，去标签，实体解码，空白折叠，收边 trim。
+ *
+ * 收边说明：剥离首尾标签后常残留空白（如 "<div>x</div>" 退化为 " x "）。
+ * 上游 web_fetch.renderBody 显式 .trim() 兜底；htmlToText 作为共享 SSOT
+ * 原语自身收边，避免每个调用方各自兜底（pathological HTML 测试 RED
+ * 暴露此契约缺口，2026-08 补强）。 */
 export function htmlToText(html: string): string {
   const withoutBlocks = html.replace(
     /<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,
@@ -14,7 +19,7 @@ export function htmlToText(html: string): string {
   );
   const withoutTags = withoutBlocks.replace(/<[^>]+>/g, " ");
   const decoded = decodeEntities(withoutTags);
-  return decoded.replace(/[ \t\r\f\v]+/g, " ");
+  return decoded.replace(/[ \t\r\f\v]+/g, " ").trim();
 }
 
 /** 片段清洗：去标签 + 实体解码 + 空白折叠（搜索结果 title/snippet 用）。 */

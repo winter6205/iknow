@@ -116,7 +116,7 @@ export function createWebFetchTool(deps?: WebFetchToolDeps): AciToolDef {
 function resolveGuardDeps(deps?: WebFetchToolDeps): GuardDeps {
   if (deps?.fetch && deps?.lookup)
     return { fetch: deps.fetch, lookup: deps.lookup };
-  const production = createDefaultGuardDeps("iknow-web-fetch/0.1");
+  const production = createDefaultGuardDeps();
   return {
     fetch: deps?.fetch ?? production.fetch,
     lookup: deps?.lookup ?? production.lookup,
