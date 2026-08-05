@@ -55,6 +55,8 @@ export async function startSessionServe(
     hub,
     host,
     port: Number.isFinite(port) ? port : 8787,
+    // Note: serve still ACCEPTS --trace-out (write side via hub). The READ-
+    // side reader is now mounted by `iknow trace` (spec #183 R3).
   });
 
   return { listening, hub };

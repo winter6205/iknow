@@ -6,13 +6,82 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { MessageList } from "./components/MessageList";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { StateBlock } from "./components/StateBlock";
+import { TracePanel } from "./components/TracePanel";
 import { useSessionChat } from "./hooks/useSessionChat";
+import { FOCUS_RING } from "./lib/ui";
 import {
   loadThinkingSettings,
   saveThinkingSettings,
   toWireOverride,
   type ThinkingSettings,
 } from "./lib/thinking-settings";
+
+type ViewId = "chat" | "trace";
+
+const VIEW_OPTIONS: ReadonlyArray<{ id: ViewId; label: string }> = [
+  { id: "chat", label: "对话" },
+  { id: "trace", label: "Trace 面板" },
+];
+
+/**
+ * Top-level view switch. The chat view is always mounted so useSessionChat's
+ * local state survives a switch into the trace view; TracePanel mounts /
+ * unmounts on each switch (a refresh is harmless). Switching therefore never
+ * loses the chat history, and toggling back is instant.
+ */
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <Root />
+    </ErrorBoundary>
+  );
+}
+
+function Root() {
+  const [view, setView] = useState<ViewId>("chat");
+  return (
+    <div className="flex h-dvh flex-col overflow-hidden bg-bg">
+      <ViewTabs view={view} onChange={setView} />
+      <div className="min-h-0 flex-1">
+        <div className={view === "chat" ? "h-full" : "hidden"}>
+          <ChatApp />
+        </div>
+        {view === "trace" ? (
+          <div className="h-full">
+            <TracePanel />
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function ViewTabs(props: { view: ViewId; onChange: (v: ViewId) => void }) {
+  const { view, onChange } = props;
+  return (
+    <nav
+      aria-label="视图切换"
+      className="flex shrink-0 items-center gap-1 border-b border-line bg-surface px-4 py-1.5"
+    >
+      {VIEW_OPTIONS.map((v) => {
+        const active = view === v.id;
+        return (
+          <button
+            key={v.id}
+            type="button"
+            aria-pressed={active}
+            onClick={() => onChange(v.id)}
+            className={`rounded-pill px-3 py-1 text-[11.5px] font-medium transition-colors duration-200 ease-[var(--ease-soft)] ${FOCUS_RING} ${
+              active ? "bg-accent text-surface" : "text-ink-2 hover:text-ink"
+            }`}
+          >
+            {v.label}
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
 
 /** Viewport width below which the sidebar starts collapsed (decision #7). */
 const NARROW_QUERY = "(max-width: 768px)";
@@ -37,7 +106,7 @@ function ChatApp() {
   // id) so the sidebar re-fetches the list and the new entry shows up without
   // the user clicking refresh.
   const [sidebarSignal, setSidebarSignal] = useState(0);
-  const bumpSidebar = useCallback(() => setSidebarSignal((n) => n + 1), []);
+  const bumpSidebar = () => setSidebarSignal((n) => n + 1);
 
   // Composer 只发文本；thinking override 在 App 层按当前设置合成后透传。
   const handleSend = useCallback(
@@ -58,24 +127,18 @@ function ChatApp() {
     <ChatHeader phase={chat.phase} healthLabel={chat.healthLabel} />
   );
 
-  // Sidebar lists past conversations and switches the active one. Passes the
-  // current id (or null during pre-bootstrap) so the highlight tracks live.
   // refreshSignal is bumped after newSession so the freshly created session
-  // appears without a manual refresh click.
-  const handleNewSession = useCallback(async () => {
+  // appears in the sidebar without a manual refresh click.
+  const handleNewSession = async () => {
     await chat.newSession();
     bumpSidebar();
-  }, [chat, bumpSidebar]);
-
-  const handleSelect = useCallback(
-    async (id: string) => {
-      await chat.setConversation(id);
-      // setConversation may switch to a session not yet in the cached list
-      // (e.g. just-created entries still propagating); refresh to be safe.
-      bumpSidebar();
-    },
-    [chat, bumpSidebar]
-  );
+  };
+  const handleSelect = async (id: string) => {
+    await chat.setConversation(id);
+    // setConversation may switch to a session not yet in the cached list
+    // (e.g. just-created entries still propagating); refresh to be safe.
+    bumpSidebar();
+  };
 
   const side = (
     <SessionSidebar
@@ -155,13 +218,5 @@ function ChatApp() {
         </>
       }
     />
-  );
-}
-
-export default function App() {
-  return (
-    <ErrorBoundary>
-      <ChatApp />
-    </ErrorBoundary>
   );
 }

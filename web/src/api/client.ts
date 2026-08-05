@@ -7,6 +7,9 @@ import type {
   PostMessageResponse,
   ResetSessionResponse,
   SessionListItem,
+  TraceFieldDef,
+  TraceQueryParams,
+  TracesResponse,
 } from "./types";
 import { SessionApiError } from "./types";
 
@@ -15,6 +18,25 @@ import { SessionApiError } from "./types";
  * @see docs/design/session-http-api-v0.md
  */
 const API = "/api/v1";
+
+/**
+ * Trace inspection API base path (spec #183).
+ *
+ * Defaults to `/api/v1/traces` so the existing `iknow serve` reverse-proxy
+ * path works without env wiring. Override with VITE_TRACE_API_BASE when the
+ * standalone `iknow trace` process lives on a different origin (e.g.
+ * `http://127.0.0.1:24881`). Exported pure for unit tests.
+ */
+export function resolveTraceApiBase(envValue: string | undefined): string {
+  if (typeof envValue === "string" && envValue.trim().length > 0) {
+    return envValue;
+  }
+  return "/api/v1/traces";
+}
+
+const TRACE_API = resolveTraceApiBase(
+  (import.meta.env.VITE_TRACE_API_BASE ?? undefined) as string | undefined
+);
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
@@ -148,4 +170,30 @@ export function resetSession(
     },
     signal
   );
+}
+
+// -- Trace inspection endpoints -----------------------------------------------
+
+function traceQueryString(params: TraceQueryParams): string {
+  const sp = new URLSearchParams();
+  if (params.conversation_id) sp.set("conversation_id", params.conversation_id);
+  if (params.record_type) sp.set("record_type", params.record_type);
+  if (params.status) sp.set("status", params.status);
+  if (params.limit !== undefined) sp.set("limit", String(params.limit));
+  if (params.offset !== undefined) sp.set("offset", String(params.offset));
+  return sp.toString();
+}
+
+export function getTraces(
+  params: TraceQueryParams = {},
+  signal?: AbortSignal
+): Promise<TracesResponse> {
+  const qs = traceQueryString(params);
+  return request(`${TRACE_API}${qs ? `?${qs}` : ""}`, {}, signal);
+}
+
+export function getTraceFields(
+  signal?: AbortSignal
+): Promise<{ fields: ReadonlyArray<TraceFieldDef> }> {
+  return request(`${TRACE_API}/fields`, {}, signal);
 }

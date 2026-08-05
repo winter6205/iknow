@@ -1,6 +1,9 @@
 /**
  * Minimal node:http router for Session API + static web UI.
  * 022 T5: nested ApiErrorBody, hub error mapping, GET /sessions list.
+ * 183 R3: trace inspection read API was moved to `iknow trace`; this server
+ * no longer mounts /api/v1/traces (write-side `--trace-out` on serve/chat/ask
+ * remains unchanged).
  */
 import * as http from "node:http";
 import * as fs from "node:fs";
@@ -382,9 +385,15 @@ function sendJson(opts: SendJsonOpts): void {
   res.end(payload);
 }
 
-/** Type guard for the plain-object SessionStoreError discriminated union. */
+/**
+ * Type guard for the plain-object SessionStoreError discriminated union.
+ * Error instances (e.g. traceserver TraceReadError, which also carries a
+ * `kind` property) are excluded: store errors are plain objects, never
+ * Error subclasses, so a kind collision must not reroute them here.
+ */
 function isSessionStoreError(err: unknown): err is SessionStoreError {
   if (typeof err !== "object" || err === null) return false;
+  if (err instanceof Error) return false;
   const k = (err as { kind?: unknown }).kind;
   return (
     typeof k === "string" &&

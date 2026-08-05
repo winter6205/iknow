@@ -190,6 +190,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (parsed.command === "trace") {
+    await runTrace(parsed);
+    return;
+  }
+
   if (parsed.command === "tui") {
     await runTui(parsed);
     return;
@@ -227,7 +232,41 @@ async function runServe(parsed: ParsedCli): Promise<void> {
       hubOptions: { askUser: createServeAskUser().ask },
     });
     writeErr(`iknow serve  http://${listening.host}:${listening.port}/`);
+    if (parsed.traceOut) {
+      writeErr(
+        `Trace 写入 ${parsed.traceOut}；检测面板请另起 \`iknow trace --trace-out ${parsed.traceOut}\``
+      );
+    }
     writeErr("API: /api/v1/health  ·  UI: /  ·  Ctrl+C to stop");
+    await new Promise<void>(() => {
+      /* keep process alive until signal */
+    });
+  } catch (err) {
+    printChatError(err);
+    process.exitCode = 1;
+  }
+}
+
+async function runTrace(parsed: ParsedCli): Promise<void> {
+  // trace CLI: do NOT resolve to default path. Omitting --trace-out means
+  // "no trace file configured" → startTraceServe returns 404 not_found.
+  // Env IKNOW_TRACE_OUT is write-side (serve/chat/ask), not reader-side.
+  const traceOut = parsed.traceOut;
+  const { startTraceServe } = await import("./traceserver/serve.js");
+  try {
+    const listening = await startTraceServe({
+      traceOut,
+      host: parsed.host,
+      port: parsed.port,
+      ...(parsed.maxBytes !== undefined ? { maxBytes: parsed.maxBytes } : {}),
+    });
+    writeErr(`iknow trace  http://${listening.host}:${listening.port}/`);
+    writeErr(
+      traceOut !== undefined
+        ? `Trace 检测面板：${traceOut}`
+        : "Trace 检测面板：未配置 --trace-out（/api/v1/traces 返回 404）"
+    );
+    writeErr("API: /api/v1/health  ·  /api/v1/traces  ·  Ctrl+C to stop");
     await new Promise<void>(() => {
       /* keep process alive until signal */
     });

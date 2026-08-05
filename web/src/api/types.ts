@@ -132,3 +132,38 @@ export class SessionApiError extends Error {
     this.body = body;
   }
 }
+
+// -- Trace inspection panel (mirrors src/traceserver/) -----------------------
+
+export type TraceRecord = Record<string, unknown>;
+
+export interface TracesResponse {
+  readonly records: ReadonlyArray<TraceRecord>;
+  readonly total: number;
+  readonly skipped_lines: number;
+  readonly truncated: boolean;
+}
+
+export type TraceRecordType = "llm_call" | "tool_call" | "turn" | "violation";
+
+export type TraceFieldType =
+  "string" | "number" | "boolean" | "enum" | "datetime";
+
+export interface TraceFieldDef {
+  readonly key: string;
+  readonly jsonlKey: string;
+  readonly type: TraceFieldType;
+  readonly label: string;
+  readonly recordTypes: ReadonlyArray<TraceRecordType>;
+  readonly options?: ReadonlyArray<string>;
+  /** Declarative render-tone hint; "status" colours the cell by ok/error value. */
+  readonly tone?: "status";
+}
+
+export interface TraceQueryParams {
+  readonly conversation_id?: string;
+  readonly record_type?: TraceRecordType;
+  readonly status?: "ok" | "error";
+  readonly limit?: number;
+  readonly offset?: number;
+}

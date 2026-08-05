@@ -9,7 +9,7 @@ export type AppShellProps = {
 
 export function AppShell({ header, main, side, footer }: AppShellProps) {
   return (
-    <div className="flex h-dvh flex-col overflow-hidden bg-bg">
+    <div className="flex h-full flex-col overflow-hidden bg-bg">
       {header}
       <div className="flex min-h-0 flex-1">
         {side}
