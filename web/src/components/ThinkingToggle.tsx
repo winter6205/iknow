@@ -50,11 +50,11 @@ function Switch({
       type="button"
       role="switch"
       aria-checked={checked}
-      aria-label="深度思考"
+      aria-label="深度思考开关"
       disabled={disabled}
       onClick={() => onToggle(!checked)}
       className={cx(
-        "flex items-center gap-2 rounded-pill text-[12px] leading-none text-ink-2 transition-colors duration-150 ease-[var(--ease-soft)] hover:text-ink disabled:opacity-45",
+        "rounded-pill transition-colors duration-150 ease-[var(--ease-soft)] disabled:opacity-45",
         FOCUS_RING
       )}
     >
@@ -108,9 +108,7 @@ function EffortOption({
   );
 }
 
-// Composer 胶囊左侧内嵌 trigger + 向上弹出 popover。默认收起，点击 / Enter
-// / Space 展开；外点 mousedown / Escape 键 / 再次点击 trigger 关闭。SWR 思想：
-// trigger 不抢焦（保持 textarea 焦点），Escape 时归还焦点给 trigger。
+// SWR rationale: trigger 不抢焦（保持 textarea 焦点），Escape 时归还焦点给 trigger。
 export function ThinkingToggle({
   settings,
   onChange,
@@ -123,7 +121,7 @@ export function ThinkingToggle({
 
   useEffect(() => {
     if (!open) return;
-    const onMouseDown = (e: MouseEvent) => {
+    const onPointerDown = (e: PointerEvent) => {
       if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
     };
     const onKeyDown = (e: KeyboardEvent) => {
@@ -133,10 +131,10 @@ export function ThinkingToggle({
         triggerRef.current?.focus();
       }
     };
-    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
     return () => {
-      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("pointerdown", onPointerDown);
       document.removeEventListener("keydown", onKeyDown);
     };
   }, [open]);
@@ -147,7 +145,7 @@ export function ThinkingToggle({
         ref={triggerRef}
         type="button"
         aria-label="思考模式"
-        aria-haspopup="dialog"
+        aria-haspopup="true"
         aria-expanded={open}
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
