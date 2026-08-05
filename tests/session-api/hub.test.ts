@@ -3,7 +3,7 @@
  * Covers 5 boundary classes (empty/negative/overflow/exception/concurrent),
  * 6-row error mapping table, cancelled/timeout stopReason, turnCount accumulation.
  */
-import { afterAll, beforeAll, describe, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -26,6 +26,11 @@ import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../src/harness/tools/executor.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
+import {
+  makeTestLlmEnv,
+  startLlmCapture,
+  type LlmCapture,
+} from "./_helpers/llm-capture.ts";
 
 // -- helpers -----------------------------------------------------------------
 
@@ -595,5 +600,195 @@ describe("postMessage validation", () => {
         return true;
       }
     );
+  });
+});
+
+// -- T1: wire projection of thinking / toolCalls ------------------------------
+
+describe("postMessage answer wire fields (T1)", () => {
+  it("no thinking parameter + plain text turn → answer has NO thinking/toolCalls keys (byte-stable)", async () => {
+    const deps = makeDeps([assistantResult({ texts: ["plain"] })]);
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "hi",
+    });
+    // Additive fields must be entirely absent, not merely undefined, so the
+    // JSON wire bytes match the pre-T1 shape exactly.
+    assert.equal("thinking" in res.turn.answer, false);
+    assert.equal("toolCalls" in res.turn.answer, false);
+    assert.deepEqual(Object.keys(res.turn.answer).sort(), [
+      "finalText",
+      "stopReason",
+      "turnCount",
+    ]);
+  });
+
+  it("tool-call turn → toolCalls on wire with paired output", async () => {
+    const deps = makeDeps([
+      assistantResult({
+        texts: [],
+        toolCalls: [{ id: "t1", name: "noop", input: { a: 1 } }],
+      }),
+      assistantResult({ texts: ["done"] }),
+    ]);
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "call noop",
+    });
+    const answer = res.turn.answer as unknown as Record<string, unknown>;
+    assert.equal("thinking" in answer, false);
+    assert.ok(Array.isArray(answer.toolCalls));
+    const calls = answer.toolCalls as Array<Record<string, unknown>>;
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.id, "t1");
+    assert.equal(calls[0]!.name, "noop");
+    assert.equal(calls[0]!.inputPreview, '{"a":1}');
+    // stub tool `noop` returns {} → executor serializes to "{}" text block.
+    assert.equal(calls[0]!.outputPreview, "{}");
+    assert.equal(calls[0]!.isError, false);
+    assert.equal(calls[0]!.truncated, false);
+  });
+
+  it("thinking turn → thinking entries on wire; empty thinking text skipped", async () => {
+    const deps = makeDeps([
+      assistantResult({
+        texts: ["answered"],
+        thinkingBlocks: [
+          { type: "thinking", thinking: "step one", signature: "sig1" },
+          { type: "thinking", thinking: "", signature: "sig2" },
+          { type: "redacted_thinking", data: "blob" },
+        ],
+      }),
+    ]);
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "think please",
+    });
+    const answer = res.turn.answer as unknown as Record<string, unknown>;
+    assert.equal("toolCalls" in answer, false);
+    assert.deepEqual(answer.thinking, {
+      entries: [{ text: "step one" }],
+      redactedCount: 1,
+    });
+  });
+});
+
+// -- T2: per-turn thinking override -------------------------------------------
+
+describe("postMessage thinking override (T2)", () => {
+  // Capture server stands in for the LLM endpoint; withThinkingOverride builds
+  // a real adapter against it, so we can observe the actual request params.
+  let capture: LlmCapture | undefined;
+
+  afterEach(async () => {
+    if (capture) {
+      await capture.close();
+      capture = undefined;
+    }
+  });
+
+  /** The hub tests want a reply whose finalText reads "override reply". */
+  const overrideReplyBody = {
+    id: "msg_capture",
+    type: "message",
+    role: "assistant",
+    model: "m",
+    content: [{ type: "text", text: "override reply" }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 1, output_tokens: 1 },
+  };
+
+  it("override → adapter request carries thinking + output_config; reply lands on wire", async () => {
+    const cap = await startLlmCapture(overrideReplyBody);
+    capture = cap;
+    const hub = new SessionHub({
+      store,
+      deps: makeDeps([]), // stub deps; override path replaces only the adapter
+      overrideEnv: makeTestLlmEnv({ baseUrl: cap.origin }),
+    });
+    const { session } = await hub.createSession();
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "think hard",
+      thinking: { mode: "adaptive", effort: "high" },
+    });
+    // The request that reached the LLM endpoint carries the override.
+    assert.equal(cap.bodies.length, 1);
+    const body = cap.bodies[0] as Record<string, unknown>;
+    assert.deepEqual(body.thinking, { type: "adaptive" });
+    assert.deepEqual(body.output_config, { effort: "high" });
+    // Reply flows back through the normal wire projection.
+    assert.equal(res.turn.answer.finalText, "override reply");
+    assert.equal(res.turn.answer.stopReason, "completed");
+  });
+
+  it("no override → cached stub deps used; no LLM request hits the capture server", async () => {
+    const cap = await startLlmCapture(overrideReplyBody);
+    capture = cap;
+    const hub = new SessionHub({
+      store,
+      deps: makeDeps([assistantResult({ texts: ["cached reply"] })]),
+      overrideEnv: makeTestLlmEnv({ baseUrl: cap.origin }),
+    });
+    const { session } = await hub.createSession();
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "no override",
+    });
+    assert.equal(res.turn.answer.finalText, "cached reply");
+    assert.equal(cap.bodies.length, 0);
+  });
+});
+
+// -- T1: history replay (GET session) projects thinking / toolCalls ----------
+
+describe("getSession history replay (T1)", () => {
+  it("replayed turns carry thinking/toolCalls; stopReason stays completed", async () => {
+    const deps = makeDeps([
+      assistantResult({
+        texts: [],
+        toolCalls: [{ id: "h1", name: "noop", input: {} }],
+        thinkingBlocks: [
+          { type: "thinking", thinking: "plan h", signature: "s" },
+        ],
+      }),
+      assistantResult({ texts: ["round one done"] }),
+      assistantResult({ texts: ["round two done"] }),
+    ]);
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "round one",
+    });
+    await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "round two",
+    });
+    const res = await hub.getSession(session.conversation_id);
+    assert.equal(res.turns.length, 2);
+    // Turn 1: tool turn with thinking.
+    const t1 = res.turns[0]!.answer as unknown as Record<string, unknown>;
+    assert.equal(t1.stopReason, "completed");
+    assert.deepEqual(t1.thinking, {
+      entries: [{ text: "plan h" }],
+      redactedCount: 0,
+    });
+    const calls = t1.toolCalls as Array<Record<string, unknown>>;
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.id, "h1");
+    assert.equal(calls[0]!.outputPreview, "{}");
+    // Turn 2: plain text turn → additive fields absent.
+    const t2 = res.turns[1]!.answer as unknown as Record<string, unknown>;
+    assert.equal("thinking" in t2, false);
+    assert.equal("toolCalls" in t2, false);
+    assert.equal(res.turns[1]!.answer.finalText, "round two done");
   });
 });

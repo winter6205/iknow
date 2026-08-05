@@ -27,6 +27,7 @@ import type {
   AssistantTurnResult,
   LoopState,
   ModelAdapter,
+  TokenUsage,
 } from "./types.js";
 import type {
   Message as SdkMessage,
@@ -37,6 +38,7 @@ import type {
   TextBlock,
   ThinkingBlock,
   RedactedThinkingBlock,
+  Usage as SdkUsage,
 } from "@anthropic-ai/sdk/resources/messages.js";
 
 export interface AnthropicAdapterOptions {
@@ -50,6 +52,43 @@ export interface AnthropicAdapterOptions {
   readonly maxTokens: number;
   /** 017: 模型侧超时(ms)。离线(scripted)模式下无实际效果,签名就位以便 018 接真实 SDK 时零改签名。 */
   readonly timeoutMs?: number;
+}
+
+/**
+ * #160 / ADR-0008 Decision 2: SDK Usage → 域 TokenUsage 纯函数投影。
+ *
+ * 只透传 4 个 token 字段;周边字段(cache_creation TTL 对象 /
+ * output_tokens_details / server_tool_use / inference_geo / service_tier)
+ * 无消费者,一律丢弃。cache 两字段缺失 / null 均 coalesce 为 null(
+ * SDK 0.115 静态契约本身允许 number|null)。snake→camel 映射在域侧
+ * 仅此一处;jsonl.ts 落盘面由泛型反射自动转换,不另写映射。
+ */
+export function projectSdkUsage(sdk: SdkMessage): TokenUsage | undefined {
+  const u = sdk?.usage as SdkUsage | undefined;
+  // Postel 硬门:usage 存在但 input/output 非 number(含 usage:{} / 整段缺失)
+  // → 整条缺席,绝不产出 {inputTokens: undefined,...} 这类违反 TokenUsage 契约
+  // 的垃圾对象。
+  if (
+    !u ||
+    typeof u.input_tokens !== "number" ||
+    typeof u.output_tokens !== "number"
+  ) {
+    return undefined;
+  }
+  return {
+    inputTokens: u.input_tokens,
+    outputTokens: u.output_tokens,
+    // cache 两字段:非 number(缺失 / null / 供应商垃圾值)统一归一为 null,
+    // 与 SDK 0.115 静态契约(number | null)对齐,不把垃圾值透给下游。
+    cacheCreationInputTokens:
+      typeof u.cache_creation_input_tokens === "number"
+        ? u.cache_creation_input_tokens
+        : null,
+    cacheReadInputTokens:
+      typeof u.cache_read_input_tokens === "number"
+        ? u.cache_read_input_tokens
+        : null,
+  };
 }
 
 /**
@@ -170,6 +209,7 @@ export function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
     content: Object.freeze([...nativeContent]),
   };
 
+  const usage = projectSdkUsage(sdk);
   return {
     nativeMessage,
     projection: {
@@ -180,6 +220,9 @@ export function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
     supplierStop,
     needsTools: toolCalls.length > 0,
     isEmptyFinalResponse,
+    // #160 / ADR-0008 Decision 2+4: usage 字段缺席 = Postel 语义,
+    // SDK 返回无 usage 时整个键不存在(不是 null 占位,不是 undefined 包装)。
+    ...(usage !== undefined ? { usage } : {}),
   };
 }
 

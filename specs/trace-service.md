@@ -117,13 +117,13 @@ Field names are illustrative; spec only fixes the **shape categories** (ID slots
 
 ### Field shape (categories only — not literal TS)
 
-`recordLlmCall` carries: **id slots** (none required, returns `llmCallId`), **correlation** (`conversationId` required, `turnId` from recordTurn), **model** (`modelRequested` + `modelActual` separate, `provider`), **tokens** (`inputTokens` / `outputTokens` / `cacheReadTokens` nullable), **request params** (`temperature` / `maxTokens` nullable), **response** (`finishReason` enum, `stream` boolean, `firstTokenMs` nullable), **timing** (`startedAt` / `endedAt` / `durationMs`), **content capture** (`messagesCaptured` boolean, `messages` only present when true), **error** (`status` + `error` double-track).
+`recordLlmCall` carries: **id slots** (none required, returns `llmCallId`), **correlation** (`conversationId` required, `turnId` from recordTurn), **model** (`modelRequested` + `modelActual` separate, `provider`), **tokens** (`inputTokens: number` / `outputTokens: number` required + `cacheCreationInputTokens: number | null` / `cacheReadInputTokens: number | null`; whole category absent on error branches — shape settled by `docs/adr/0008-token-accounting-usage-placement.md` Decision 2, superseding the earlier three-field draft), **request params** (`temperature` / `maxTokens` nullable), **response** (`finishReason` enum, `stream` boolean, `firstTokenMs` nullable), **timing** (`startedAt` / `endedAt` / `durationMs`), **content capture** (`messagesCaptured` boolean, `messages` only present when true), **error** (`status` + `error` double-track).
 
 `recordToolCall` carries: **id slots** (`parentLlmCallId` required, returns `toolCallId`), **correlation** (`conversationId` + `turnId`), **tool** (`toolName` required, `toolKind` enum), **content capture** (`argumentsCaptured` + `resultCaptured` booleans, fields only present when true), **timing**, **error** double-track.
 
 `recordTurn` carries: **id slots** (returns `turnId`), **correlation** (`conversationId` + `turnIndex`), **timing**, **children** (`llmCallIds` array + `toolCallIds` array — IDs returned by earlier recordXxx calls in the same turn), **decision** (derived from `StopReason`: `final_answer` / `max_turns_exceeded` / `error` / `cancelled` / `timeout` / `protocol_error`), **status** + **error** double-track.
 
-> **Not** in the schema (A-scope): `guardrail_trigger`, `context_window_usage`, `total_input_tokens` / `total_output_tokens` aggregates, `eval_*` fields. These will be added when the underlying capabilities exist (Postel's Law). See ADR §Decision 10.
+> **Not** in the schema (A-scope): `guardrail_trigger`, `context_window_usage`, `total_input_tokens` / `total_output_tokens` aggregates, `eval_*` fields. These will be added when the underlying capabilities exist (Postel's Law). The exclusion covers these aggregate / derived fields only — the per-call token four fields in §Field shape are settled by ADR-0008 and are in scope. See `docs/adr/0003-trace-service-domain-interface.md` §Decision 9 (Postel's Law schema design).
 
 ### Style要点
 

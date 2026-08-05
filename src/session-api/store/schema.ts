@@ -176,12 +176,16 @@ function isValidContentBlock(b: unknown): boolean {
       return typeof block["tool_use_id"] === "string" && "content" in block;
     // thinking / redacted_thinking：harness 权威消息可含（#151 thinking
     // 启用后 anthropic-adapter 原样保留）；形状对齐 AnthropicContentBlock。
+    // T1：session store 必须接受并在 replay 时原样回放，否则 wire 上的
+    // thinking 视图在真实 thinking turn 后没有数据可投影。
     case "thinking":
       return (
         typeof block["thinking"] === "string" &&
         typeof block["signature"] === "string"
       );
     case "redacted_thinking":
+      // `data` 是加密 blob —— 原样保留以保证 replay 与 LLM 输出历史字节一致
+      // （与 `thinking` 对称）。
       return typeof block["data"] === "string";
     default:
       return false;

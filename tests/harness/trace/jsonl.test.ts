@@ -157,6 +157,50 @@ describe("createJsonlTraceService — snake_case 转换", () => {
     assert.equal(parsed.turnIndex, undefined);
   });
 
+  it("recordLlmCall 带 token 字段: camelCase inputTokens/outputTokens/cacheCreationInputTokens/cacheReadInputTokens → snake_case JSONL key", async () => {
+    const { lines, writer } = captureWriter();
+    const svc = createJsonlTraceService({
+      filePath: join(scratch, "trace.jsonl"),
+      conversationId: "conv-tok",
+      writer,
+    });
+    const llmWithUsage: LlmCallRecord = {
+      ...SAMPLE_LLM,
+      inputTokens: 1234,
+      outputTokens: 56,
+      cacheCreationInputTokens: 7,
+      cacheReadInputTokens: 89,
+    };
+    await svc.recordLlmCall(llmWithUsage);
+    const parsed = JSON.parse(lines[0]!) as Record<string, unknown>;
+    assert.equal(parsed.input_tokens, 1234);
+    assert.equal(parsed.output_tokens, 56);
+    assert.equal(parsed.cache_creation_input_tokens, 7);
+    assert.equal(parsed.cache_read_input_tokens, 89);
+    assert.equal(parsed.inputTokens, undefined);
+    assert.equal(parsed.outputTokens, undefined);
+    assert.equal(parsed.cacheCreationInputTokens, undefined);
+    assert.equal(parsed.cacheReadInputTokens, undefined);
+  });
+
+  it("recordLlmCall 字段缺席: 行内无任何 *_tokens 键 (Postel 语义, undefined 被 JSON.stringify 丢弃)", async () => {
+    const { lines, writer } = captureWriter();
+    const svc = createJsonlTraceService({
+      filePath: join(scratch, "trace.jsonl"),
+      conversationId: "conv-no-tok",
+      writer,
+    });
+    await svc.recordLlmCall(SAMPLE_LLM);
+    const parsed = JSON.parse(lines[0]!) as Record<string, unknown>;
+    const keys = Object.keys(parsed);
+    for (const k of keys) {
+      assert.ok(
+        !k.endsWith("_tokens"),
+        `expected no *_tokens key in JSONL row, found ${k}: ${lines[0]}`
+      );
+    }
+  });
+
   it("不递归进 content payload: messages/arguments/result 内部 key 保持原样", async () => {
     const { lines, writer } = captureWriter();
     const svc = createJsonlTraceService({

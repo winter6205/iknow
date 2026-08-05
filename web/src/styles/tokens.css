@@ -45,6 +45,8 @@
   /* 动画 token（issue #92 #20）。stagger 延迟由组件内联 --i 变量驱动。 */
   --animate-message-in: messageIn 460ms var(--ease-soft) both;
   --animate-fade-in: fadeIn 180ms ease both;
+  /* T4: "思考中…" 三点呼吸动画（1.4s 一次循环，组件用 animationDelay 错峰）。 */
+  --animate-think-pulse: thinkPulse 1.4s var(--ease-soft) infinite;
 }
 
 /* 消息入场 stagger：user --i=idx*2, agent --i=idx*2+1，延迟 = calc(var(--i)*70ms)（组件内联）。 */
@@ -65,5 +67,17 @@
   }
   to {
     opacity: 1;
+  }
+}
+
+@keyframes thinkPulse {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-2px);
   }
 }

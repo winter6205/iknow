@@ -22,6 +22,7 @@ import type {
   TurnRecord,
 } from "../../../src/harness/trace/types.ts";
 import { assistantResult } from "../../cli/_fixtures.ts";
+import type { TokenUsage } from "../../../src/harness/model-adapter/types.ts";
 
 function parseJsonl(filePath: string): Array<Record<string, unknown>> {
   const content = readFileSync(filePath, "utf8");
@@ -439,5 +440,147 @@ describe("T4 criterion 5/19: error paths", () => {
     assert.equal(lines[1]!["decision"], "timeout");
     assert.equal(lines[1]!["status"], "error");
     rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+describe("T3 (#160): token fields — ok-branch projection vs error-branch absence", () => {
+  it("ok branch with usage: llm_call JSONL row carries snake_case *_tokens keys", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "trace-t3-ok-"));
+    const traceFile = join(tmpDir, "trace.jsonl");
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const usage: TokenUsage = {
+      inputTokens: 111,
+      outputTokens: 22,
+      cacheCreationInputTokens: 3,
+      cacheReadInputTokens: 44,
+    };
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hi"],
+          toolCalls: [],
+          supplierStop: "success",
+          usage,
+        }),
+      ],
+    });
+    const trace = createJsonlTraceService({
+      filePath: traceFile,
+      conversationId: "test-conv-t3-ok",
+    });
+    await run("hello", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+      trace,
+    });
+    const lines = parseJsonl(traceFile);
+    assert.equal(lines.length, 2);
+    const llmRecord = lines[0]!;
+    assert.equal(llmRecord["record_type"], "llm_call");
+    assert.equal(llmRecord["input_tokens"], 111);
+    assert.equal(llmRecord["output_tokens"], 22);
+    assert.equal(llmRecord["cache_creation_input_tokens"], 3);
+    assert.equal(llmRecord["cache_read_input_tokens"], 44);
+    assert.equal(llmRecord["inputTokens"], undefined);
+    assert.equal(llmRecord["outputTokens"], undefined);
+    assert.equal(llmRecord["cacheCreationInputTokens"], undefined);
+    assert.equal(llmRecord["cacheReadInputTokens"], undefined);
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("error branch (cancelled): llm_call JSONL row carries NO *_tokens keys (Postel)", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "trace-t3-cancel-"));
+    const traceFile = join(tmpDir, "trace.jsonl");
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    // 即使 stub 自带 usage,error 分支 recordLlmCall 不抄入(ADR-0008 Decision 3)。
+    const usage: TokenUsage = {
+      inputTokens: 999,
+      outputTokens: 888,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+    };
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["never arrives"],
+          toolCalls: [],
+          supplierStop: "success",
+          usage,
+        }),
+      ],
+      delayMs: 200,
+    });
+    const trace = createJsonlTraceService({
+      filePath: traceFile,
+      conversationId: "test-conv-t3-cancel",
+    });
+    const controller = new AbortController();
+    const p = run(
+      "x",
+      {
+        adapter: model,
+        executor: exec,
+        registry: reg,
+        maxTurns: 5,
+        trace,
+      },
+      controller.signal
+    );
+    controller.abort();
+    const { result } = await p;
+    assert.equal(result.stopReason, "cancelled");
+    const lines = parseJsonl(traceFile);
+    assert.equal(lines.length, 2);
+    const llmRecord = lines[0]!;
+    assert.equal(llmRecord["record_type"], "llm_call");
+    assert.equal(llmRecord["status"], "error");
+    const keys = Object.keys(llmRecord);
+    for (const k of keys) {
+      assert.ok(
+        !k.endsWith("_tokens"),
+        `error-branch llm_call row must not carry *_tokens keys; found ${k}: ${JSON.stringify(llmRecord)}`
+      );
+    }
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("ok branch with usage: byte-level result consistency holds (trace vs NoopTraceService)", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const usage: TokenUsage = {
+      inputTokens: 7,
+      outputTokens: 3,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+    };
+    const responses = [
+      assistantResult({
+        texts: ["hello"],
+        toolCalls: [],
+        supplierStop: "success",
+        usage,
+      }),
+    ];
+    const model1 = createStubModel({ responses });
+    const model2 = createStubModel({ responses });
+    const depsBase = {
+      adapter: model1,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    };
+    const { result: resultA } = await run("hi", depsBase);
+    const { result: resultB } = await run("hi", {
+      ...depsBase,
+      adapter: model2,
+      trace: createNoopTraceService(),
+    });
+    assert.deepEqual(resultB, resultA);
   });
 });
