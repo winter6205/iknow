@@ -19,7 +19,10 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SessionHub } from "../../src/session-api/hub.ts";
+import {
+  SessionHub,
+  type SessionHubOptions,
+} from "../../src/session-api/hub.ts";
 import {
   listenSessionServer,
   resolveDefaultWebRoot,
@@ -28,6 +31,11 @@ import {
 import { SessionStore } from "../../src/session-api/store/index.ts";
 import type { AssistantTurnResult } from "../../src/harness/index.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
+import {
+  makeTestLlmEnv,
+  startLlmCapture,
+  type LlmCapture,
+} from "./_helpers/llm-capture.ts";
 
 // -- per-test server lifecycle ------------------------------------------------
 
@@ -35,10 +43,17 @@ let baseDir: string;
 let listening: ListeningServer;
 let origin: string;
 
-async function startServer(responses: AssistantTurnResult[]): Promise<void> {
+async function startServer(
+  responses: AssistantTurnResult[],
+  hubOpts?: Omit<SessionHubOptions, "store" | "deps">
+): Promise<void> {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-http-"));
   const store = new SessionStore(baseDir);
-  const hub = new SessionHub({ store, deps: makeDeps(responses) });
+  const hub = new SessionHub({
+    store,
+    deps: makeDeps(responses),
+    ...hubOpts,
+  });
   listening = await listenSessionServer({ hub, host: "127.0.0.1", port: 0 });
   origin = `http://${listening.host}:${listening.port}`;
 }
@@ -287,6 +302,121 @@ describe("POST /api/v1/sessions/:id/messages", () => {
     assertNestedError({ body, kind: "validation" });
     const b = body as { error: { field?: string } };
     assert.equal(b.error.field, "text");
+  });
+});
+
+// -- T2: POST /messages thinking override validation -------------------------
+
+describe("POST /api/v1/sessions/:id/messages — thinking override (T2)", () => {
+  // Invalid override values are rejected at the HTTP layer before the hub
+  // runs; no LLM endpoint is involved for these 400 tests.
+
+  it("valid thinking override {mode:'adaptive',effort:'high'} → 200", async () => {
+    // Restart with an overrideEnv backed by a capture server so the override
+    // path's real adapter can complete a turn.
+    await listening.close();
+    await rm(baseDir, { recursive: true, force: true });
+
+    const overrideReplyBody = {
+      id: "msg_http_capture",
+      type: "message",
+      role: "assistant",
+      model: "m",
+      content: [{ type: "text", text: "override ok" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    let capture: LlmCapture | undefined;
+    try {
+      capture = await startLlmCapture(overrideReplyBody);
+      await startServer([], {
+        overrideEnv: makeTestLlmEnv({ baseUrl: capture.origin }),
+      });
+      const id = await createSession();
+      const { status, body } = await postJson({
+        path: `/api/v1/sessions/${id}/messages`,
+        payload: {
+          text: "think hard",
+          thinking: { mode: "adaptive", effort: "high" },
+        },
+      });
+      assert.equal(status, 200);
+      const b = body as {
+        turn: { answer: { finalText: string; stopReason: string } };
+      };
+      assert.equal(b.turn.answer.finalText, "override ok");
+      assert.equal(b.turn.answer.stopReason, "completed");
+      // The captured LLM request carries the override params.
+      assert.equal(capture.bodies.length, 1);
+      const req = capture.bodies[0] as Record<string, unknown>;
+      assert.deepEqual(req.thinking, { type: "adaptive" });
+      assert.deepEqual(req.output_config, { effort: "high" });
+    } finally {
+      if (capture) await capture.close();
+    }
+  });
+
+  it("invalid thinking.mode → 400 validation envelope", async () => {
+    const id = await createSession();
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: {
+        text: "hi",
+        thinking: { mode: "loud" },
+      },
+    });
+    assert.equal(status, 400);
+    assertNestedError({ body, kind: "validation" });
+    const b = body as { error: { field?: string; message: string } };
+    assert.equal(b.error.field, "thinking.mode");
+    assert.ok(b.error.message.includes("off"));
+    assert.ok(b.error.message.includes("adaptive"));
+  });
+
+  it("invalid thinking.effort → 400 validation envelope", async () => {
+    const id = await createSession();
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: {
+        text: "hi",
+        thinking: { mode: "adaptive", effort: "extreme" },
+      },
+    });
+    assert.equal(status, 400);
+    assertNestedError({ body, kind: "validation" });
+    const b = body as { error: { field?: string } };
+    assert.equal(b.error.field, "thinking.effort");
+  });
+
+  it("thinking as non-object (string) → 400 validation envelope", async () => {
+    const id = await createSession();
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: {
+        text: "hi",
+        thinking: "off",
+      },
+    });
+    assert.equal(status, 400);
+    assertNestedError({ body, kind: "validation" });
+  });
+
+  it("no thinking field → 200, behavior unchanged (no thinking/toolCalls keys)", async () => {
+    const id = await createSession();
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: {
+        text: "hi",
+      },
+    });
+    assert.equal(status, 200);
+    const b = body as {
+      turn: { answer: Record<string, unknown> };
+    };
+    assert.equal(b.turn.answer.finalText, "hello");
+    assert.equal("thinking" in b.turn.answer, false);
+    assert.equal("toolCalls" in b.turn.answer, false);
   });
 });
 

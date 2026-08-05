@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../api/client";
-import type { SessionSummary, TurnAnswerDto, TurnDto } from "../api/types";
+import type {
+  SessionSummary,
+  ThinkingOverride,
+  TurnAnswerDto,
+  TurnDto,
+} from "../api/types";
 import { SessionApiError } from "../api/types";
 
 export type ChatPhase = "loading" | "ready" | "sending" | "error";
@@ -29,7 +34,8 @@ export type SessionChatState = {
 };
 
 export type SessionChatApi = SessionChatState & {
-  sendMessage: (text: string) => Promise<void>;
+  /** `thinking` (T5) 为该回合的可选覆盖；未提供时后端走缓存配置。 */
+  sendMessage: (text: string, thinking?: ThinkingOverride) => Promise<void>;
   reset: () => Promise<void>;
   newSession: () => Promise<void>;
   /** Switch to an existing conversation by id (sidebar selection). */
@@ -82,7 +88,17 @@ function queryIdSlice(query: string): string {
   return `${raw.length.toString(36)}_${(h >>> 0).toString(36)}`;
 }
 
-function turnsToMessages(turns: TurnDto[]): ChatUiMessage[] {
+/**
+ * Project wire turns → timeline messages (exported for tests/web/).
+ *
+ * Agent-message keep predicate: emit when finalText is non-empty OR when the
+ * turn carries thinking OR tool calls. A maxTurns/timeout turn that ran tools
+ * (or thought) but never produced text is NOT a blank reply — dropping it
+ * loses the tool/thinking trail entirely (H2 regression). AgentCard renders
+ * the empty-text body region as an empty block alongside its thinking /
+ * tool sections, so `text: ""` is safe for the display path.
+ */
+export function turnsToMessages(turns: TurnDto[]): ChatUiMessage[] {
   const out: ChatUiMessage[] = [];
   turns.forEach((t, i) => {
     const q = queryIdSlice(t.query);
@@ -95,9 +111,7 @@ function turnsToMessages(turns: TurnDto[]): ChatUiMessage[] {
         text: t.query,
       });
     }
-    // Agent turns: keep if finalText has content OR if there's a paired user
-    // turn that we just emitted (so the conversation flow stays paired).
-    if (t.answer.finalText.trim()) {
+    if (hasDisplayableAnswer(t.answer)) {
       out.push({
         id: `a-${i}-${q}`,
         role: "agent",
@@ -107,6 +121,16 @@ function turnsToMessages(turns: TurnDto[]): ChatUiMessage[] {
     }
   });
   return out;
+}
+
+/** FinalText content OR any thinking entries OR any tool calls. */
+function hasDisplayableAnswer(answer: TurnAnswerDto): boolean {
+  if (answer.finalText.trim()) return true;
+  if (answer.thinking !== undefined) return true;
+  if (answer.toolCalls !== undefined && answer.toolCalls.length > 0) {
+    return true;
+  }
+  return false;
 }
 
 function lastAnswerFromMessages(
@@ -236,56 +260,59 @@ export function useSessionChat(): SessionChatApi {
     };
   }, [bootstrap]);
 
-  const sendMessage = useCallback(async (text: string) => {
-    const gen = bootGen.current;
-    const id = sessionIdRef.current;
-    const trimmed = text.trim();
-    if (!id || !trimmed) return;
+  const sendMessage = useCallback(
+    async (text: string, thinking?: ThinkingOverride) => {
+      const gen = bootGen.current;
+      const id = sessionIdRef.current;
+      const trimmed = text.trim();
+      if (!id || !trimmed) return;
 
-    const userMsg: ChatUiMessage = {
-      id: `u-local-${Date.now()}-${queryIdSlice(trimmed)}`,
-      role: "user",
-      text: trimmed,
-    };
-    setState((prev) => ({
-      ...prev,
-      phase: "sending",
-      error: null,
-      messages: [...prev.messages, userMsg],
-    }));
-
-    try {
-      const res = await api.postMessage(id, trimmed);
-      if (gen !== bootGen.current) return;
-      sessionIdRef.current = res.session.conversation_id;
-      const agentMsg: ChatUiMessage = {
-        id: `a-${Date.now()}-${queryIdSlice(trimmed)}`,
-        role: "agent",
-        text: res.turn.answer.finalText,
-        answer: res.turn.answer,
+      const userMsg: ChatUiMessage = {
+        id: `u-local-${Date.now()}-${queryIdSlice(trimmed)}`,
+        role: "user",
+        text: trimmed,
       };
       setState((prev) => ({
         ...prev,
-        phase: "ready",
+        phase: "sending",
         error: null,
-        session: res.session,
-        messages: [...prev.messages, agentMsg],
-        lastAnswer: res.turn.answer,
+        messages: [...prev.messages, userMsg],
       }));
-    } catch (e) {
-      if (gen === bootGen.current) {
+
+      try {
+        const res = await api.postMessage(id, trimmed, { thinking });
+        if (gen !== bootGen.current) return;
+        sessionIdRef.current = res.session.conversation_id;
+        const agentMsg: ChatUiMessage = {
+          id: `a-${Date.now()}-${queryIdSlice(trimmed)}`,
+          role: "agent",
+          text: res.turn.answer.finalText,
+          answer: res.turn.answer,
+        };
         setState((prev) => ({
           ...prev,
-          phase: "error",
-          error: errMessage(e),
-          // Intentional: keep optimistic user bubble on failed send so history
-          // still shows what was attempted; Composer keeps draft via rethrow.
+          phase: "ready",
+          error: null,
+          session: res.session,
+          messages: [...prev.messages, agentMsg],
+          lastAnswer: res.turn.answer,
         }));
+      } catch (e) {
+        if (gen === bootGen.current) {
+          setState((prev) => ({
+            ...prev,
+            phase: "error",
+            error: errMessage(e),
+            // Intentional: keep optimistic user bubble on failed send so history
+            // still shows what was attempted; Composer keeps draft via rethrow.
+          }));
+        }
+        // Always rethrow so Composer keeps draft text for retry.
+        throw e instanceof Error ? e : new Error(errMessage(e));
       }
-      // Always rethrow so Composer keeps draft text for retry.
-      throw e instanceof Error ? e : new Error(errMessage(e));
-    }
-  }, []);
+    },
+    []
+  );
 
   const reset = useCallback(async () => {
     const gen = bootGen.current;

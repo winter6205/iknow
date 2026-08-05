@@ -23,6 +23,15 @@
 
 - #120 会话持久化：会话池根从 `<cwd>/data` 迁至 `~/.iknow`，项目命名空间采用 `<basename>-<sha1(cwd)[:12]>`（`resolveProjectSessionDir`）；`serve --data-dir` 覆盖保留，旧 `<cwd>/data` 不读、不迁移、不删除。`SessionFileV1` schema 升级为 v2，新增顶层 `summary` / `cwd` / `sanitized_at`；`sanitizeSessionFile` 前向兼容 v1（读取时补齐并零写盘），拒绝 `schemaVersion > 2` 及形状错误的 `messages`，不做修复。`SessionStore.list()` 条目新增 `summary`，既有 `conversation_id` / `updatedAt` / `lastFinalText` 保持不变；CLI `CliChatState.messages` 改为 `ReadonlyArray` + `Object.freeze`（#120 Q3）。详见 `specs/120-session-persistence.md`。
 
+### Web thinking/tool/markdown 显示（wire 加法式扩展）
+
+- **session-api wire 加法式扩展**：`TurnAnswerDto` 新增可选 `thinking`（entries 文本列表 + `redactedCount` 计数）与 `toolCalls`（name / inputPreview / outputPreview / isError / truncated）投影；新模块 `src/session-api/turn-projection.ts`（纯函数）：thinking 每条目截断 `MAX_THINKING_TEXT_CHARS=2000`，tool input 预览截断 `MAX_TOOL_INPUT_PREVIEW_CHARS=500`、output 预览截断 `MAX_TOOL_OUTPUT_PREVIEW_CHARS=1500`，全部先经 `createOutputMask` mask 再截断（SC20 输出边界，与 finalText mask 一致）；`redacted_thinking.data` / `thinking.signature` 永不上 wire（replay 材料，仅计数）。postMessage 与历史回放（GET session）共用同一投影。
+- **每请求 thinking 覆盖**：`PostMessageRequest` 新增可选 `thinking: { mode: "off" | "adaptive", effort?: "" | low | medium | high | xhigh | max }`；新模块 `src/session-api/thinking-override.ts`：wire 解析 + 值域校验（非法 → `ValidationError` → 400 嵌套 envelope，不静默回退）+ 按回合一次性 adapter 重建（仅替换 adapter，executor/registry/maxTurns/timeoutMs 复用缓存 deps）。无覆盖请求行为与既有 wire 字节一致；env `IKNOW_LLM_THINKING` / `IKNOW_LLM_THINKING_EFFORT` 仍为默认 SSOT。
+- **web 显示**：markdown 渲染（react-markdown + remark-gfm + rehype-highlight；`MarkdownBody` + `CodeBlock` 语言标签 + 复制按钮）；`ThinkingBlock` 思考内容默认折叠（aria-expanded），redacted 仅渲染 `[已加密思考]` 计数占位；`ToolCallList` 工具调用卡片（单展开 + 截断标记「已截断」）；`ThinkingControls` 思考开关 + 强度分段选择（localStorage `iknow:thinking` 持久化，`toWireOverride` 随每次 postMessage 下发）。
+- **web 已有功能完善**：非 completed stopReason 停止原因提示 + turnCount「N 轮」元信息（`StopNotice`；文案映射纯函数 `web/src/lib/stop-reason.ts`，completed / 未知值不显示）。
+- 测试：`tests/session-api/turn-projection.test.ts` / `thinking-override.test.ts` + hub/http 扩展；`tests/web/thinking-settings.test.ts` / `tests/web/stop-reason.test.ts`（根 vitest；web 包禁测试框架的 spec 约束不变）。
+- **不变 / 不声明**：SSE `/events` 仍 **501**（non-goal 不变）；G2 evidence 未回 wire（spec 022 退役，独立票）；`ask` JSON 通道与 CLI 投影零变化；harness 零 diff。决策补录：`docs/design/frontend-stack-upgrade-v1.md` §0.1；计划与 ACR 门禁：`plans/web-thinking-tool-display.md`。
+
 ### Docs (CLAUDE.md + architecture.md 整理)
 
 - CLAUDE.md 删除 `### Runtime map` 14 行 path 表（~80% 与 `docs/architecture.md` Capability modules 表重复，且漏 `src/harness/` 等新模块），替换为 5 行 `### Module boundaries`（仅保留非显而易见边界 callouts），并指向 architecture.md 为 SSOT
