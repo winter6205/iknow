@@ -66,7 +66,7 @@ export async function runTui(opts: RunTuiOptions): Promise<void> {
       cwd={cwd}
       dataDir={dataDir}
     />,
-    { exitOnCtrlC: false } // Ctrl+C 语义自管：打断前台 turn（Q1a）
+    { exitOnCtrlC: false, kittyKeyboard: { mode: "disabled" } } // Ctrl+C 语义自管：打断前台 turn（Q1a）；kittyKeyboard disabled 避免 ink 启动期 kitty probe 的 200ms 窗口吞 stdin data（实测真实 pty 下导致首个 Enter / 滚轮 SGR 事件丢失）
   );
   await app.waitUntilExit();
 }
