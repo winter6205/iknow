@@ -54,7 +54,7 @@
 - affects: web/src/components/CodeBlock.tsx（新增）
 - affects: web/src/components/ThinkingBlock.tsx（新增）
 - affects: web/src/components/ToolCallList.tsx（新增）
-- affects: web/src/components/ThinkingControls.tsx（新增）
+- affects: web/src/components/ThinkingControls.tsx（新增；follow-up 票 commit 3ee87f5 删除，迁移为 `ThinkingToggle.tsx`）
 - affects: web/src/components/SendingIndicator.tsx（新增，状态指示）
 - affects: web/src/components/StopNotice.tsx（新增，T6 元信息）
 - affects: web/src/components/AgentCard.tsx
@@ -76,6 +76,7 @@
 - **App.tsx footer 接线**取代了计划中提到的 ChatHeader.tsx。`StopNotice` 接在 `App.tsx` 而非 ChatHeader 是 T6 实施时的小调整，与 `renderBody` 占位实装一并记录。
 - **`turn-view.test.ts` 未创建**。T6 抽出的纯函数是 `web/src/lib/stop-reason.ts`（stopReasonLabel + STOP_REASON_LABELS），相应测试落在 `tests/web/stop-reason.test.ts`。
 - **T2 acceptance**：`hub.ts` 实际增量 ≈ 50 行（与计划中"hub.ts 仅薄委托"的承诺冲突；`projectMessagesToTurns` 是新增在 hub.ts 内的纯函数投影，不属于 http.ts）。
+- **思考开关形态迁移（follow-up 票，commit 3ee87f5 + 91aeb03）**：T5 原计划的 `ThinkingControls.tsx`（footer 一行：开关 + effort 分段选择器，常驻占位）在 follow-up 票中被替换为 `ThinkingToggle.tsx`（Composer 胶囊左侧内嵌 trigger + 向上弹出 popover，默认收起；sparkle 图标，开启态内联「深度·{label}」标签；popover 含开关 + 6 档 effort picker；外点 pointerdown / Escape / 再点击 trigger 关闭，Escape 归还焦点给 trigger）。`ThinkingControls.tsx` 已删除（单一消费点已迁出）。`thinking-settings.ts` 纯函数层零改动；App.tsx 的 `thinkingSettings` state、`toWireOverride`、持久化接线零改动；Composer 的 auto-grow / Enter / Shift+Enter / sending / disabled 行为零变。双轴 code-review：Spec 0H/0M/2L（plan 补登即本条）+ Standards 0H/4M/5L（整改 commit 91aeb03 修 3 Medium + 2 Low：aria-haspopup="true" / pointerdown 触屏 / 注释清理 / 残留 class / aria-label 去重；M2 Switch 抽取 / L5 cx 抽取留后续）。
 
 ## ACR 5-verdict（pre-implementation gate）
 
@@ -115,8 +116,9 @@
 ### T5 `[impl]` web 思考开关 + 强度控制
 
 - ThinkingControls（开/关 + effort 档位选择，localStorage 持久化，`thinking-settings.ts` 纯函数）；client.ts/useSessionChat 随请求下发覆盖参数。
-- 测试：tests/web/thinking-settings.test.ts。
-- Acceptance：开关/强度变更即时影响下一次请求参数；刷新后持久。
+- **形态迁移（follow-up 票 3ee87f5 + 91aeb03）**：原 footer 一行 `ThinkingControls` 替换为 Composer 胶囊左侧内嵌 `ThinkingToggle`（trigger + 向上弹出 popover，默认收起；sparkle 图标，开启态内联「深度·{label}」标签；popover 含开关 + 6 档 picker；外点 pointerdown / Escape / 再点击 trigger 关闭，Escape 归还焦点给 trigger）。`ThinkingControls.tsx` 删除；`thinking-settings.ts` 纯函数零改；App.tsx state / toWireOverride / 持久化接线零改；Composer 自身行为零变。
+- 测试：tests/web/thinking-settings.test.ts；浏览器实测覆盖 12 交互场景（含 follow-up 13 断言）。
+- Acceptance：开关/强度变更即时影响下一次请求参数；刷新后持久；默认收起，点击展开；外点 / Esc / 再点 trigger 关闭；Escape 归还焦点。
 
 ### T6 `[impl]` 已有功能完善（非 trace）
 
