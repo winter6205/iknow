@@ -272,9 +272,17 @@ export function ChatView(props: ChatViewProps): ReactElement {
   const viewport = props.viewportRows ?? 0;
   // 行级窗口：[end - viewport - scroll, end - scroll]（end = totalRows，
   // tail 占底）。scroll=0 → 显示最末 viewport 行（auto-follow 底）。
-  const safeScroll = Math.max(0, props.scrollRows ?? 0);
-  const maxScroll = Math.max(0, totalRows - Math.max(1, viewport));
-  const scroll = Math.min(safeScroll, maxScroll);
+  // Fix1 (#189 Commit 1)：短内容（totalRows <= viewport 且 >1）也能向上
+  // 滚到顶部边缘（maxScroll = totalRows - 1）；viewport <= 0 = 无限视口
+  // → 全部内容都放得下，没有可滚动量 → maxScroll = 0。
+  const maxScroll =
+    viewport > 0
+      ? Math.max(
+          0,
+          Math.max(totalRows - viewport, totalRows > 1 ? totalRows - 1 : 0)
+        )
+      : 0;
+  const scroll = Math.min(Math.max(0, props.scrollRows ?? 0), maxScroll);
   const endRow = totalRows - scroll;
   const startRow = viewport > 0 ? Math.max(0, endRow - viewport) : 0;
   // 选 messages：startRow/endRow 落在哪个 span 范围内就保留。

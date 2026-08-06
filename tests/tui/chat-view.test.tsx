@@ -206,7 +206,77 @@ describe("ChatView 行级滚动（任务 A 行级）", () => {
     expect(plain).not.toContain("m-9");
   });
 
-  it("scrollRows 越界由 ChatView 兜底 clamp（不报错）", async () => {
+  it("短内容可滚动：3 条短消息 totalRows <= viewport 时 scroll 仍可达顶部（Fix1）", async () => {
+    // 3 条 user 消息，每条 2 行（1 wrap + 1 margin）= 6 行。viewportRows=20
+    // > totalRows(6)。旧逻辑 maxScroll = totalRows - max(1,viewport) = 0，
+    // scroll 被 clamp 到 0 → 指示永不出现。Fix1 后 totalRows>1 时
+    // maxScroll = totalRows - 1 = 5，scrollRows=5 落在允许带内。
+    const session = makeSession(buildUserMessages(3));
+    const output = await renderToString(
+      <ChatView
+        session={session}
+        cols={80}
+        liveToolLines={[]}
+        askLine={undefined}
+        scrollRows={5}
+        viewportRows={20}
+      />,
+      { columns: 80 }
+    );
+    const plain = stripAnsi(output);
+    // 顶部指示出现，且指示与内容之间无空白间隔（内容仍可见）
+    expect(plain).toContain("5 行历史");
+    expect(plain).toContain("End 回到底部");
+    expect(plain).toContain("m-0");
+  });
+
+  it("短内容 scroll 到顶边：viewport < totalRows 且 totalRows > 1 → maxScroll = totalRows - viewport", async () => {
+    // 1 条 user 消息（2 行），viewportRows=1 → totalRows(2) > viewport(1)
+    // → maxScroll = totalRows - viewport = 1。scrollRows=999 clamp 到 1，
+    // 顶部指示「↑ 1 行历史」出现；窗口 [0,1) 露出首行。
+    const session = makeSession(buildUserMessages(1));
+    const output = await renderToString(
+      <ChatView
+        session={session}
+        cols={80}
+        liveToolLines={[]}
+        askLine={undefined}
+        scrollRows={999}
+        viewportRows={1}
+      />,
+      { columns: 80 }
+    );
+    const plain = stripAnsi(output);
+    expect(plain).toContain("1 行历史");
+    expect(plain).toContain("m-0");
+  });
+
+  it("viewportRows=0（无限）：scroll 不 clamp 也无指示消失（回归）", async () => {
+    // viewport=0 → maxScroll = totalRows - 1；scrollRows 大值被 clamp，
+    // 但所有消息仍可见（无窗口限制）。
+    const session = makeSession(buildUserMessages(5));
+    const output = await renderToString(
+      <ChatView
+        session={session}
+        cols={80}
+        liveToolLines={[]}
+        askLine={undefined}
+        scrollRows={999}
+        viewportRows={0}
+      />,
+      { columns: 80 }
+    );
+    const plain = stripAnsi(output);
+    for (let i = 0; i < 5; i++) {
+      expect(plain).toContain(`m-${i}`);
+    }
+  });
+
+  it("scrollRows 越界由 ChatView 兜底 clamp（不报错；Fix1 短内容 scroll 到顶边）", async () => {
+    // Fix1：3 条 user 消息 = 6 行，viewportRows=20 (>= totalRows)。
+    // maxScroll = max(totalRows-viewport, totalRows-1) = max(-14, 5) = 5。
+    // scrollRows=99999 clamp 到 5，窗口 [0, 1) 只露出首行 m-0；
+    // 顶部指示「↑ 5 行历史」出现；不崩溃。
     const session = makeSession(buildUserMessages(3));
     const output = await renderToString(
       <ChatView
@@ -220,11 +290,10 @@ describe("ChatView 行级滚动（任务 A 行级）", () => {
       { columns: 80 }
     );
     const plain = stripAnsi(output);
-    // clamp 到 totalRows - viewport（不会出 viewport 顶部）
-    // 实际窗口落在 [0, totalRows)，全部 3 条可见（最大 scroll 时已顶到
-    // 最早内容）。
+    expect(plain).toContain("5 行历史");
     expect(plain).toContain("m-0");
-    expect(plain).toContain("m-2");
+    // m-2 在 [4,6)，不在窗口 [0,1) → 不应可见
+    expect(plain).not.toContain("m-2");
   });
 
   it("scrollRows=0 + viewportRows=0 → 全部消息可见（无窗口限制）", async () => {

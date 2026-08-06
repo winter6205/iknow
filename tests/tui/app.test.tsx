@@ -515,6 +515,84 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     LONG_TIMEOUT
   );
 
+  // #189 Commit 1: openSessionAt 必须重置行级滚动偏移。
+  it(
+    "#189 Commit 1：openSessionAt → scrollRows 重置为 0（会话切换不再保留旧 scroll）",
+    async () => {
+      const longBody = (tag: string) =>
+        `${tag} 行1内容占位\n${tag} 行2内容占位\n${tag} 行3内容占位\n${tag} 行4内容占位\n${tag} 行5内容占位\n${tag} 行6内容占位`;
+      const app = makeApp([
+        assistantResult({ texts: [longBody("aA")] }),
+        assistantResult({ texts: [longBody("aB")] }),
+      ]);
+      await app.ready();
+      await waitFor(() => app.lastOutput().includes("iknow"), 8000, "startup");
+
+      // 建档会话 A：发 "msg-A"
+      await app.type("msg-A 第一行 msg-A 第二行 msg-A 第三行\r");
+      await waitFor(
+        () => app.bridge.inflight.ids().size === 0,
+        8000,
+        "A-turn-done"
+      );
+      await waitFor(() => app.lastOutput().includes("aA"), 8000, "A-rendered");
+      await delay(50);
+
+      // 建档会话 B：/new 建 draft，再发 "msg-B"
+      await app.type("/new\r");
+      await delay(200);
+      await app.type("msg-B 第一行 msg-B 第二行 msg-B 第三行\r");
+      await waitFor(
+        () => app.bridge.inflight.ids().size === 0,
+        8000,
+        "B-turn-done"
+      );
+      await waitFor(() => app.lastOutput().includes("aB"), 8000, "B-rendered");
+      await delay(50);
+
+      // B 上 PgUp → scrollRows > 0，顶部出现「↑ N 行历史」（看最近帧避免旧帧干扰）
+      stdin.write("[5~"); // PgUp
+      await waitFor(
+        () => app.lastOutput().slice(-1500).includes("行历史"),
+        8000,
+        "B-pgup-scrolled"
+      );
+
+      // 切到 list 视图，↓ 选中 A，Enter 打开 A
+      await app.type("/sessions\r");
+      await waitFor(
+        () => app.lastOutput().includes("+ 新建会话"),
+        8000,
+        "list-view"
+      );
+      await delay(300);
+      // 列表 sorted by updatedAt desc → [B, A]，cursor 0=+新建会话。
+      // ↓↓ 移到 cursor 2 = A（entries[1]），Enter → openSessionAt(2)
+      stdin.write("[B");
+      await delay(80);
+      stdin.write("[B");
+      await delay(80);
+      // 锚定在 Enter 之前：B 的 chat frame（含「↑ 8 行历史」）在进入 list
+      // 视图前已写入，排除在窗口外；list 视图帧与打开 A 后的帧都不含
+      // 「行历史」。
+      const beforeOpen = app.lastOutput().length;
+      stdin.write("\r");
+      await waitFor(
+        () => {
+          const after = app.lastOutput().slice(beforeOpen);
+          return (
+            after.includes("aA") &&
+            after.includes("msg-A") &&
+            !after.includes("行历史")
+          );
+        },
+        8000,
+        "A-active-and-scroll-reset"
+      );
+    },
+    LONG_TIMEOUT
+  );
+
   // 任务 A 行级：鼠标滚轮 SGR 序列 → scrollRows 调整，顶部指示出现。
   it(
     "任务 A 行级：SGR 滚轮序列 → 行级滚动指示出现；多次上滚累加行数",
