@@ -1,27 +1,27 @@
 /**
  * src/tui/banner.ts
  *
- * 启动 banner（智慧之眼变体 C → 2026-08-06 改版二轮）：纯函数，输出 ANSI 上色行。
+ * 启动 banner（智慧之眼变体 C → 2026-08-06 三轮）：纯函数，输出 ANSI 上色行。
  *
  * 改版动机（用户复看裁定）：旧版是「大号方形点阵 + 单线外框 + 整体水平居中」，
  * 眼睛偏大、被挤瘦、面板不占满行宽。首轮改成「占满行宽 + 小眼居左 + info 居右」
  * 后又裁掉了完整眼形（只剩瞳孔/虹膜），二轮用新源图 eyeshape.png 重生成
- * 完整眼，不再裁切。
+ * 完整眼（24×12），三轮扩到 32×13（用户裁定贴图同款）。
  *
  * 当前布局：
  *  - 占满整行宽度的圆角线框（borderStyle="round"，与输入框 PromptInput 同款），
  *    无水平居中，左右边界对齐屏幕；
- *  - 完整眼形（24×12 braille = 24 列 × 12 行终端行）放左侧一小块（用户
- *    "眼睛依旧不要放太大"，但要完整不裁切）；
+ *  - 完整眼形（32×13 braille = 32 列 × 13 行终端行）放左侧（贴图同款）；
  *  - info 栏（Version / Cwd / Data dir）放眼睛右侧，垂直居中；
- *  - 顶框内嵌左对齐 title `◆ iknow tui`，底框为横线。
+ *  - 顶框内嵌**左对齐** title `◆ iknow`（去 tui），底框为横线。
  *
  * 来源：原型分支 worktree-tui-design-prototype `tui-prototype/src/logo-braille/banner.ts`
  * 的 renderVariantC（面板布局）+ visualWidth / padEndVisual / padStartVisual。
  * 裁决：#146（V7 布局 + 智慧之眼定案）/ #154（窗口适配：SHORT 档折一行
  * `◆ iknow`）/ #171（docs/design/DESIGN-BANNER.md：双色分层、图案居左 +
  * info 栏居右并排、窄终端降级）/ 2026-08-06（banner 占满行宽 + 小眼 + info 居右）/
- * 2026-08-06 二轮（eyeshape.png 完整眼，移除裁切）。
+ * 2026-08-06 二轮（eyeshape.png 完整眼，移除裁切）/ 2026-08-06 三轮
+ * （32×13 贴图同款 + title `◆ iknow`；曾试居中、用户复看裁定左对齐）。
  *
  * 色彩策略（照原型，源图实测双色）：
  *  - truecolor（COLORTERM=truecolor/24bit）→ 38;2;24;50;35（墨绿 ~#183223）/
@@ -42,7 +42,9 @@ export interface BannerInfo {
 
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
-const FG_TITLE = "\x1b[38;5;255m";
+/** title 色（顶框 `◆ iknow` + SHORT 档单行）。2026-08-06 三轮+：居中后
+ * 255 纯白太显眼，改 244 与 FG_DIM/FG_BORDER 同级淡灰。 */
+const FG_TITLE = "\x1b[38;5;244m";
 const FG_DIM = "\x1b[38;5;244m";
 /** 外框色（#171 任务 A：banner 自带外框，与输入框线框同风格；
  *  走 dim 中性灰，遵循 ink 256 色 244 ≈ #8a877e，与 theme.ts tuiPalette.dim
@@ -227,15 +229,15 @@ const BOX_BL = "╰";
 const BOX_BR = "╯";
 const BOX_H = "─";
 const BOX_V = "│";
-/** 顶框内嵌 title（◆ 占 1 列宽），左对齐。 */
-const BOX_TITLE = "◆ iknow tui";
+/** 顶框内嵌 title（◆ 占 1 列宽），2026-08-06 三轮改为居中。 */
+const BOX_TITLE = "◆ iknow";
 /** 框宽占用列数（左 +1、右 +1 = 2）。 */
 const BOX_FRAMING_OVERHEAD = 2;
 
 /**
  * 窄终端降级阈值：banner 面板总宽 = 眼睛宽 + GAP + info 栏宽 + 外框开销（2）。
- * 完整眼 24 列 → MIN = 24 + 3 + 43 + 2 = 72 列。cols < 72 → 返回 []。
- * （首轮 16×6 小眼 MIN=64；二轮换完整眼后 24×12 → 72，仍窄于旧大眼档 96。）
+ * 三轮 32 列完整眼 → MIN = 32 + 3 + 43 + 2 = 80 列。cols < 80 → 返回 []。
+ * （首轮 16×6 小眼 MIN=64；二轮 24×12 → 72；三轮 32×13 → 80。）
  */
 export const BANNER_MIN_COLS =
   visualWidth(EYE_LINES[0] ?? "") +
@@ -271,8 +273,8 @@ function buildInfoLines(info: BannerInfo): string[] {
 /**
  * 渲染启动 banner（纯函数，不触碰 React）。
  *
- * 返回 ANSI 上色行（圆角外框占满 cols）：小眼睛居左 + info 栏居右并排，
- * 顶框内嵌左对齐 title `◆ iknow tui`，底框为横线。无水平居中——面板
+ * 返回 ANSI 上色行（圆角外框占满 cols）：完整眼睛居左 + info 栏居右并排，
+ * 顶框内嵌居中 title `◆ iknow`，底框为横线。无水平居中——面板
  * 始终撑满 cols（与输入框 PromptInput 一致）。
  * cols < BANNER_MIN_COLS → []（窄终端降级）；short=true
  * → 单行 `◆ iknow <version>`（原型 L7 极简 + V7 SHORT 档，无外框）。
@@ -301,7 +303,8 @@ export function renderBanner(
     opts.cols - BOX_FRAMING_OVERHEAD
   );
 
-  // 顶框：title 左对齐 + 其余横线铺满。
+  // 顶框：title 左对齐 + 其余横线铺满（2026-08-06：◆ iknow，去 tui；用户
+  // 复看裁定居中不好，改回左对齐）。
   const titleVisualW = visualWidth(BOX_TITLE);
   const topBorder =
     BOX_TL +

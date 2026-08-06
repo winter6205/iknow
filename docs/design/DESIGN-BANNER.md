@@ -9,10 +9,10 @@
 ## 定案一句话
 
 启动 banner = 智慧之眼（braille 变体 C）：**占满整行宽度的圆角线框**（与输入框
-PromptInput 同款 borderStyle="round"，无水平居中）；**完整眼睛**（24×12 braille，
-24 列 × 12 行终端，源图 `docs/design/eyeshape.png`，不裁切）居左，info 栏
-（Version / Cwd / Data dir）居右垂直居中；双色分层（墨绿线稿 + 金棕 R 符文
-强调）；窄终端（cols < 72）降级为不渲染。
+PromptInput 同款 borderStyle="round"，无水平居中）；**完整眼睛**（32×13 braille，
+32 列 × 13 行终端；源图 `docs/design/eyeshape.png`，不裁切）居左，info 栏
+（Version / Cwd / Data dir）居右垂直居中；顶框内嵌**居中** title `◆ iknow`；
+双色分层（墨绿线稿 + 金棕 R 符文强调）；窄终端（cols < 80）降级为不渲染。
 字形 = U+2800-28FF 盲文（非 ASCII、非 emoji）——#146 spec 的「banner 纯 ASCII」
 要求由本定案显式覆盖（specs/146-tui.md Code Style 已按此回填）。
 
@@ -29,6 +29,9 @@ PromptInput 同款 borderStyle="round"，无水平居中）；**完整眼睛**�
 4. 首轮改版：从全构图大眼（48×21 braille）→ **裁瞳孔 ±95px 方窗生成 16×6
    小眼**——眼睛小但完整眼形（眼睑/眼框/R 符文周围）被裁掉了，操作员复看
    裁定 **"把眼睛裁掉了，要完整地显示"**，作废。
+5. 三轮：二轮 24×12 → **32×13**（操作员确认贴图同款），title 去 `tui` 改为
+   **居中** `◆ iknow`。COLS=32, ROWS=13（FACTOR≈2.37），显示比
+   32/(13×2)=1.231 略扁。
 
 **最终方案（操作员"用新图完整显示"）**：操作员提供新源图
 `docs/design/eyeshape.png`（836×836 RGBA 透明底，主体 = 完整眼睛：眼睑 +
@@ -37,8 +40,8 @@ PromptInput 同款 borderStyle="round"，无水平居中）；**完整眼睛**�
 ratio=1.038 近方形）。点阵生成走：
 
 - TH=200 灰度阈值（深绿线稿 RGB≈(24,50,35) 亮度≈43，安全隔离）
-- COLS=24, ROWS=12（终端 24 列 × 12 行；FACTOR=2.0 字符高宽比补偿；显示
-  比 24/(12×2)=1.000 近方形）
+- COLS=32, ROWS=13（终端 32 列 × 13 行；FACTOR≈2.37 = 32×783/(13×813)
+  字符高宽比补偿；显示比 32/(13×2)=1.231 略扁）
 - 主层墨绿（alpha>128 → 主体）+ 金棕 R 符文（RGB mask `r>140 ∧ b<80 ∧
 (r-b)>80`，限定在主体像素内）
 
@@ -67,8 +70,9 @@ NO_COLOR / 非 TTY：paint 退化为 no-op，纯文本渲染（no-color.org 纪�
 ## 3. 布局与降级（正式实现收口）
 
 > **2026-08-06 覆盖**：本节"单线外框 + 整体水平居中 + 96 列降级"为 V7 搬入期
-> 方案，已被 §1 改版（占满行宽圆角框、图案居左 + info 居右、`BANNER_MIN_COLS`
-> 现 = 24 + 3 + 43 + 2 = 72）取代，保留作历史存档。
+> 方案，已被 §1 改版（占满行宽圆角框、图案居左 + info 居右、顶框 title
+> 居中 `◆ iknow`、`BANNER_MIN_COLS` 现 = 32 + 3 + 43 + 2 = 80）取代，保留作
+> 历史存档。
 
 - V7 布局：banner **自带单线外框**（任务 A，borderStyle="single"），框顶 /
   框底内嵌居中 title `◆ iknow tui ◆`；info 栏仅 version / cwd / dataDir
@@ -154,10 +158,10 @@ JetBrains Mono（字符宽高比接近 0.5:1，braille 显示最接近正方形�
 
 ## 5. 验证记录（搬入后 + 二轮改版）
 
-- `tests/tui/render-smoke.test.tsx`：banner 在 72 / 120 / 160 列 renderToString
-  无溢出、每行占满 cols（无水平居中）、窄终端（cols < 72）降级返回空、
-  圆角外框（╭/╰/╮/╯）+ 左对齐 title `◆ iknow tui`、info 栏（Version /
-  Cwd / Data dir）+ 完整眼（24×12 braille，近方形）断言；UI 元素层无 emoji
+- `tests/tui/render-smoke.test.tsx`：banner 在 80 / 120 / 160 列 renderToString
+  无溢出、每行占满 cols（无水平居中）、窄终端（cols < 80）降级返回空、
+  圆角外框（╭/╰/╮/╯）+ 居中 title `◆ iknow`、info 栏（Version /
+  Cwd / Data dir）+ 完整眼（32×13 braille）断言；UI 元素层无 emoji
   （U+1F300-1FAFF 缺席）。
 - pty 冒烟：真实 TTY 下 banner 渲染正常（见
   `docs/handoff/2026-08-05-tui-implementation.md` 手工表）。

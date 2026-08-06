@@ -2,10 +2,11 @@
  * tests/tui/render-smoke.test.tsx
  *
  * #146 渲染冒烟（原型 smoke-adaptive 同款模式：renderToString 多宽度断言）：
- *  - banner（2026-08-06 二轮）：占满行宽圆角线框（╭/╰/╮/╯），完整眼居左
- *    （24×12 braille，不裁切）+ info 栏（Version/Cwd/Data dir）居右；
+ *  - banner（2026-08-06 三轮）：占满行宽圆角线框（╭/╰/╮/╯），完整眼居左
+ *    （32×13 braille，贴图同款）+ info 栏（Version/Cwd/Data dir）居右；
+ *    顶框 title `◆ iknow`（去 tui，**左对齐**；曾试居中、用户复看裁定左对齐）；
  *    多宽度（MIN/120/160）无溢出行；每行占满 cols（无水平居中）；
- *    窄终端降级返回 []；SHORT 档单行；眼睛尺寸断言（24×12 近方形）。
+ *    窄终端降级返回 []；SHORT 档单行；眼睛尺寸断言（32×13 扁）。
  *  - ListView：列内容（summary + 相对时间 + [运行中]）+ 伪条目；
  *  - ChatView：markdown 渲染 + 无溢出行（40/80/120）。
  * UI 元素层无 emoji 约束（Q4）：对渲染输出断言常见 emoji 码区缺席。
@@ -39,7 +40,7 @@ function assertNoOverflow(output: string, cols: number): void {
   }
 }
 
-describe("banner 渲染（2026-08-06 二轮：占满行宽圆角框 + 完整眼居左 24×12 + info 居右）", () => {
+describe("banner 渲染（2026-08-06 三轮：占满行宽圆角框 + 完整眼居左 32×13 + title 左对齐）", () => {
   const info = {
     version: "0.1.0",
     cwd: "/home/u/proj",
@@ -72,12 +73,12 @@ describe("banner 渲染（2026-08-06 二轮：占满行宽圆角框 + 完整眼�
     }
   });
 
-  it("圆角外框：╭/╮ 顶、╰/╯ 底 + 左对齐 title + 竖线 | 边", () => {
+  it("圆角外框：╭/╮ 顶、╰/╯ 底 + 左对齐 title `◆ iknow` + 竖线 | 边", () => {
     const lines = renderBanner(info, { cols: 120, short: false });
     const plain = lines.map(stripAnsi);
     // 首行 = 框顶：╭ + title（左对齐）+ ─… + ╮
     const top = plain[0]!;
-    expect(top).toMatch(/^╭◆ iknow tui─+╮$/);
+    expect(top).toMatch(/^╭◆ iknow─+╮$/);
     // 末行 = 框底：╰─…─╯
     const bottom = plain[plain.length - 1]!;
     expect(bottom).toMatch(/^╰─+╯$/);
@@ -143,15 +144,13 @@ describe("banner 渲染（2026-08-06 二轮：占满行宽圆角框 + 完整眼�
     expect(EMOJI_RE.test(stripAnsi(lines.join("\n")))).toBe(false);
   });
 
-  it("眼睛尺寸：完整眼不裁切（24 列 × 12 行；终端显示比 ≈ COLS/(ROWS*2) ≈ 1.0 近方形）", () => {
-    // 2026-08-06 二轮：首轮 16×6 是「瞳孔/虹膜 ±95px 裁窗」，用户复看裁定
-    // "把眼睛裁掉了"，改用 eyeshape.png 重生成完整眼（24×12 braille，含眼睑/
-    // 眼框/R 符文/下眼睑）。"眼睛依旧不要放太大"——24 列仍是小号，但完整。
+  it("眼睛尺寸：完整眼不裁切（32 列 × 13 行；终端显示比 ≈ COLS/(ROWS*2) ≈ 1.23 略扁）", () => {
+    // 2026-08-06 三轮：用户确认贴图同款 32×13（eyeshape.png 重生成完整眼）。
     const w = visualWidth(EYE_LINES[0] ?? "");
     const h = EYE_LINES.length;
-    expect(w).toBe(24);
-    expect(h).toBe(12);
-    expect(w / (h * 2)).toBeCloseTo(1.0, 1); // 近方形（非瘦高）
+    expect(w).toBe(32);
+    expect(h).toBe(13);
+    expect(w / (h * 2)).toBeCloseTo(1.23, 1); // 略扁
   });
 });
 
