@@ -15,8 +15,9 @@
  * 实现策略：
  *   - tier 测试使用 createAciExecutor 的 `timeoutMsOverride` 测试 seam,
  *     不必等 5 分钟即可验证"工具 tier 是权威"覆盖。
- *   - bash SC13 使用真 spawn;以 100ms 间隔 echo,150ms 后 abort,断言 partial
- *     stdout 含 "line N"。
+ *   - bash SC13 使用真 spawn;fixture 用 fs.writeSync 直写 fd 1(绕过 Node piped
+ *     stdout 的 libuv 用户态缓冲),abort 前用 waitForPidFile 屏障等 fixture
+ *     落 marker,断言 partial stdout 含 "line N"。
  */
 
 import assert from "node:assert/strict";
@@ -28,6 +29,7 @@ import { afterEach, describe, it } from "vitest";
 
 import { createAciExecutor } from "../../../src/harness/aci/aci-executor.ts";
 import { createBashTool } from "../../../src/harness/aci/tools/bash.ts";
+import { waitForPidFile } from "./tools/spawn-test-utils.ts";
 import type {
   AciToolDef,
   TimeoutTier,
@@ -381,21 +383,23 @@ describe("SC17 — interruptBehavior routing", () => {
 
 describe("SC13 — bash real spawn partial output preserved", () => {
   it.skipIf(!hasBwrap())(
-    "abort at ~150ms preserves echoed partial stdout",
+    "abort mid-run preserves partial stdout (deterministic barrier)",
     async () => {
       const cwd = await makeScratch("interrupt-routing-bash-");
       const tool = createBashTool(cwd);
       // 写脚本到 cwd 再 `node <file>` — "node" 在 allowlist,文件内容不进
       // bash 解析,完全规避 shell metachar(`;` / `(` / `|` / `&&`)。
+      // fixture 用 fs.writeSync 直写 fd 1(绕过 Node piped stdout 的 libuv
+      // 用户态缓冲)+ marker 屏障:先等 fixture 把行写出并落 marker,再 abort,
+      // 消除"console.log 缓冲未 flush 就随 SIGTERM 丢失"的时序 flake。
       await writeFile(
         join(cwd, "echo-loop.cjs"),
         [
-          'const { performance } = require("node:perf_hooks");',
-          "for (let i = 1; i <= 5; i++) {",
-          "  console.log('line ' + i);",
-          "  const end = performance.now() + 100;",
-          "  while (performance.now() < end) {}",
+          'const fs = require("node:fs");',
+          "for (let i = 1; i <= 20; i++) {",
+          "  fs.writeSync(1, 'line ' + i + '\\n');",
           "}",
+          `fs.writeFileSync(${JSON.stringify(join(cwd, "started"))}, String(process.pid));`,
           "setInterval(() => {}, 1000);",
         ].join("\n")
       );
@@ -404,7 +408,8 @@ describe("SC13 — bash real spawn partial output preserved", () => {
         { command: "node echo-loop.cjs" },
         { signal: controller.signal }
       );
-      setTimeout(() => controller.abort(), 150);
+      await waitForPidFile(join(cwd, "started"));
+      controller.abort();
       const result = (await execution) as {
         code: number;
         stdout: string;
@@ -427,12 +432,11 @@ describe("SC13 — bash real spawn partial output preserved", () => {
       await writeFile(
         join(cwd, "echo-loop.cjs"),
         [
-          'const { performance } = require("node:perf_hooks");',
-          "for (let i = 1; i <= 5; i++) {",
-          "  console.log('line ' + i);",
-          "  const end = performance.now() + 100;",
-          "  while (performance.now() < end) {}",
+          'const fs = require("node:fs");',
+          "for (let i = 1; i <= 20; i++) {",
+          "  fs.writeSync(1, 'line ' + i + '\\n');",
           "}",
+          `fs.writeFileSync(${JSON.stringify(join(cwd, "started"))}, String(process.pid));`,
           "setInterval(() => {}, 1000);",
         ].join("\n")
       );
@@ -463,8 +467,10 @@ describe("SC13 — bash real spawn partial output preserved", () => {
         timeoutMsOverride: 5_000,
       });
       const controller = new AbortController();
-      setTimeout(() => controller.abort(), 150);
-      const results = await aciExec.executeAll(
+      // executeAll 必须先启动(bash 进程由此产生),fixture 才可能落 marker;
+      // 若先 waitForPidFile 再 executeAll,marker 永远不出现(进程还没 spawn)。
+      // 启动后不 await,等 marker → abort → 再收执行结果,与 test 1 同构。
+      const execution = aciExec.executeAll(
         [
           {
             id: "u1",
@@ -474,6 +480,9 @@ describe("SC13 — bash real spawn partial output preserved", () => {
         ],
         controller.signal
       );
+      await waitForPidFile(join(cwd, "started"));
+      controller.abort();
+      const results = await execution;
       const r = results[0]!;
       assert.equal(r.kind, "execution_failed");
       if (r.kind === "execution_failed") {
@@ -695,11 +704,9 @@ describe("SC13 — bash tier timeout (via timeoutMsOverride seam)", () => {
       await writeFile(
         join(cwd, "echo-loop.cjs"),
         [
-          'const { performance } = require("node:perf_hooks");',
+          'const fs = require("node:fs");',
           "for (let i = 1; i <= 50; i++) {",
-          "  console.log('line ' + i);",
-          "  const end = performance.now() + 100;",
-          "  while (performance.now() < end) {}",
+          "  fs.writeSync(1, 'line ' + i + '\\n');",
           "}",
           "setInterval(() => {}, 1000);",
         ].join("\n")
@@ -722,19 +729,21 @@ describe("SC13 — bash tier timeout (via timeoutMsOverride seam)", () => {
           ];
         },
       });
-      // 真实 bash tier = build(5 min);测试 seam 把它压到 300ms,验证 tier
-      // timeout 权威覆盖 + partial salvage(SC13)。
+      // 真实 bash tier = build(5 min);测试 seam 把它压到 500ms,验证 tier
+      // timeout 权威覆盖 + partial salvage(SC13)。500ms 保留对 bwrap→node
+      // 启动链(p90≈220ms,重载下 max≈310ms)的余量,避免 tier 先于 fixture
+      // 产出就命中 → partial 为空 的时序 flake。
       const aciExec = createAciExecutor({
         inner,
         catalog: makeCatalog([bashTool]),
-        timeoutMsOverride: 300,
+        timeoutMsOverride: 500,
       });
       const start = Date.now();
       const results = await aciExec.executeAll([
         { id: "u1", name: "bash", input: { command: "node echo-loop.cjs" } },
       ]);
       const elapsed = Date.now() - start;
-      // 应在 ~300ms + salvage 内收尾,远小于 50 行 × 100ms = 5s 的自然耗时。
+      // 应在 ~500ms + salvage 内收尾,远小于自然耗时(50 行瞬间写出)。
       assert.ok(
         elapsed < 4_000,
         `expected tier timeout (~300ms + salvage), got ${elapsed}ms`

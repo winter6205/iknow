@@ -143,15 +143,17 @@ describe("bash.timeout.partialOutput", () => {
       const tool = createBashTool(cwd);
       // 写脚本到 cwd 再 `node <file>` — "node" 在 allowlist;脚本内容
       // 不进 bash 解析,完全规避 shell metachar(`;` / `(` / `|`)。
+      // fixture 用 fs.writeSync 直写 fd 1(绕过 Node piped stdout 的 libuv
+      // 用户态缓冲)+ marker 屏障:先等 fixture 把行写出并落 marker,再 abort,
+      // 消除"console.log 缓冲未 flush 就随 SIGTERM 丢失"的时序 flake。
       await writeFile(
         join(cwd, "echo-loop.cjs"),
         [
-          'const { performance } = require("node:perf_hooks");',
-          "for (let i = 1; i <= 5; i++) {",
-          "  console.log('line ' + i);",
-          "  const end = performance.now() + 100;",
-          "  while (performance.now() < end) {}",
+          'const fs = require("node:fs");',
+          "for (let i = 1; i <= 20; i++) {",
+          "  fs.writeSync(1, 'line ' + i + '\\n');",
           "}",
+          `fs.writeFileSync(${JSON.stringify(join(cwd, "started"))}, String(process.pid));`,
           "setInterval(() => {}, 1000);",
         ].join("\n")
       );
@@ -160,8 +162,8 @@ describe("bash.timeout.partialOutput", () => {
         { command: "node echo-loop.cjs" },
         { signal: controller.signal }
       );
-      // 等 ~150ms 让前几行被写出,然后 abort。
-      setTimeout(() => controller.abort(), 150);
+      await waitForPidFile(join(cwd, "started"));
+      controller.abort();
       const result = (await execution) as {
         code: number;
         stdout: string;
