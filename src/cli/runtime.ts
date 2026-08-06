@@ -48,15 +48,22 @@ export type { BuiltEngine } from "../harness/build-engine.js";
  */
 export async function buildHarnessEngine(
   bundle: RuntimeBundle,
-  opts: { askUser: AskUser; surface?: "chat" | "tui" | "ask" | "serve" }
+  opts: {
+    askUser: AskUser;
+    surface?: "chat" | "tui" | "ask" | "serve";
+    /** #194 T6:memory 层开关透传(ask 显式关,chat 显式开;缺席默认 true)。 */
+    memory?: { readonly enabled: boolean };
+  }
 ): Promise<BuiltEngine> {
   // #196 IKNOW T5: eager + idempotent 初始化 ~/.iknow/(initIknowWorkspaceSafe
   // 内部 try/catch+warn,失败不阻塞装配 — 幂等备份,build-engine 内还有一次)。
   await initIknowWorkspaceSafe();
-  // surface 透传到 buildCoreEngine,build-engine 据此判定 BOOTSTRAP 段是否激活
+  // surface 透传到 buildCoreEngine,build-engine 据此判定 BOOTSTRAP 段是否激活;
+  // memory 开关透传,#194 T6 双分支在 buildCoreEngine (build-engine.ts) 内。
   return buildCoreEngine({
     env: bundle.env,
     askUser: opts.askUser,
     surface: opts.surface ?? "chat",
+    ...(opts.memory ? { memory: opts.memory } : {}),
   });
 }

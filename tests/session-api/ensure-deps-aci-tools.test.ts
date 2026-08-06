@@ -6,7 +6,7 @@
  * test in `tests/harness/build-engine.test.ts` covers the SSOT directly;
  * this test covers the *wiring* — that calling `ensureDeps` on a hub
  * constructed without `deps` (the lazy path serve uses) returns the same
- * ACI 8-tool registry the CLI gets.
+ * ACI 10-tool registry the CLI gets.
  *
  * Uses `createNoAskUser` so the permission middleware is bypassed (it is
  * not exercised here; the CLI path has its own coverage). The test
@@ -25,6 +25,7 @@ import { SessionStore } from "../../src/session-api/store/index.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import type { LoopEngineDeps } from "../../src/harness/index.ts";
 
+// #194 T6 (Layer 4 baseline):扩 memory_recall + memory_save 到 10 件。
 const EXPECTED_TOOLS = [
   "bash",
   "read_file",
@@ -34,6 +35,8 @@ const EXPECTED_TOOLS = [
   "write_file",
   "web_fetch",
   "web_search",
+  "memory_recall",
+  "memory_save",
 ];
 
 let baseDir: string;
@@ -49,7 +52,7 @@ afterAll(async () => {
 });
 
 describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
-  it("returns the ACI 8-tool registry when serve constructs without deps", async () => {
+  it("returns the ACI 10-tool registry when serve constructs without deps", async () => {
     const hub = new SessionHub({
       store,
       askUser: createNoAskUser(),

@@ -23,6 +23,7 @@ import {
 } from "./index.js";
 import { createAciExecutor, createPermissionPolicy } from "./aci/index.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
+import type { Registry } from "./tools/types.js";
 import { homedir } from "node:os";
 import type { AskUser } from "./permission/types.js";
 import type { IknowEnv } from "../config/env.js";
@@ -31,6 +32,10 @@ import {
   createIknowSystemResolver,
   initIknowWorkspaceSafe,
 } from "./identity/index.js";
+import {
+  resolveProjectMemoryDir,
+  createSystemResolver,
+} from "./memory/index.js";
 
 export type BuildEngineOpts = {
   readonly env: IknowEnv;
@@ -39,6 +44,9 @@ export type BuildEngineOpts = {
   readonly sandboxRoot?: string;
   /** #196 IKNOW T4:入口 surface(默认 "chat" 守 CLI 主路径;仅 chat/tui 激活 BOOTSTRAP)。 */
   readonly surface?: "chat" | "tui" | "ask" | "serve";
+  /** #194 T6:memory 层开关(默认 true)。ask 入口显式 memory:{enabled:false}
+   *  剥离 memory 工具(registry 8 件)+ memory_layer 段不装配。 */
+  readonly memory?: { readonly enabled: boolean };
 };
 
 export type BuiltEngine = {
@@ -100,10 +108,16 @@ export async function buildHarnessEngine(
   // allowlist-first + 黑名单 + (毕业后) OS 级沙箱(#123)。Web 类工具边界在
   // network-guard(SSRF 逐跳校验);category=read-only → 权限默认 allow。
   // append-only:不重排既有 6 工具(policy byName 键空间与 ADR-0006 稳定)。
+  const surface = opts.surface ?? "chat";
+  // #194 T6:memory 开关(ask 显式关)。memoryDir = 项目命名空间记忆库根。
+  const memoryEnabled = opts.memory?.enabled !== false;
+  const memoryDir = resolveProjectMemoryDir(process.cwd());
   const sandboxRoot = opts.sandboxRoot ?? process.cwd();
-  // 8 件工具集 SSOT 工厂(append-only 顺序;env.web 透传 IKNOW_WEB_PROXY /
+  // 10 件工具集 SSOT 工厂(append-only 顺序;env.web 透传 IKNOW_WEB_PROXY /
   // IKNOW_WEB_SEARCH_URL)。proxyUrl 非法 → 装配期同步抛(见 registry.ts)。
-  const reg = createDefaultAciRegistry({ env, sandboxRoot });
+  // #194 T6:memoryDir 必传,确保 reg.inner 含 memory_recall + memory_save;
+  // ask 入口由 registryTools 过滤剥离(走 opts.memory.enabled=false)。
+  const reg = createDefaultAciRegistry({ env, sandboxRoot, memoryDir });
   const baseExecutor = createExecutor(reg.inner);
   // 5-step permission middleware: 危险命令由硬墙无条件拦截(#122)。
   // `createAciExecutor` 内部已装配 permission-executor,不要再外包一层。
@@ -114,7 +128,25 @@ export async function buildHarnessEngine(
     policy,
     askUser,
   });
-  const surface = opts.surface ?? "chat";
+
+  // registry 双分支(SC9:grep 命中 `memoryEnabled ? ... : undefined`):
+  // enabled → reg.inner(10 件,含 memory_recall + memory_save);
+  // disabled → 剥离 memory 工具 → 8 件。deps.registry 需满足 Registry 形状
+  // ({ list, get }),disabled 分支构造一个过滤视图(list/get 均滤掉 memory 工具;
+  // 冻结副本,不改动 source-of-truth)。
+  const registryTools: Registry = memoryEnabled
+    ? reg.inner
+    : (() => {
+        const kept = reg.inner
+          .list()
+          .filter(
+            (t) => t.name !== "memory_recall" && t.name !== "memory_save"
+          );
+        return {
+          list: () => Object.freeze(kept),
+          get: (name: string) => kept.find((t) => t.name === name),
+        };
+      })();
 
   // #196 IKNOW T4:启动时 eager + idempotent 初始化 ~/.iknow/(initIknowWorkspaceSafe
   // 内部 try/catch + warn,失败不阻塞装配 — 守 spec Boundaries Always 降级契约)。
@@ -122,16 +154,28 @@ export async function buildHarnessEngine(
   const deps: LoopEngineDeps = {
     adapter,
     executor,
-    registry: reg.inner,
+    registry: registryTools,
     maxTurns: 6,
     timeoutMs: env.llm.timeoutMs,
-    // #196 IKNOW T4:每 turn 装配 identity/soul/user_profile/bootstrap + #121 段。
+    // #196 IKNOW T4:每 turn 装配 identity/soul/user_profile/bootstrap + memory_layer。
     // deps.system 注入缝装配点(loop-engine 每 turn 调 deps.system?.() 透传
-    // adapter.step request.system)。
+    // adapter.step request.system)。#194 T6:双层系统缝 — deps.system 始终挂
+    // createIknowSystemResolver;memoryEnabled=true 时注入 memoryResolver 装配
+    // memory_layer 段,false 时 memory_layer 段静默(ask 仍走 identity 4 段)。
     system: createIknowSystemResolver({
       cwd: process.cwd(),
       userHome: homedir(),
       surface,
+      memoryEnabled,
+      ...(memoryEnabled
+        ? {
+            memoryResolver: createSystemResolver({
+              cwd: process.cwd(),
+              userHome: homedir(),
+              memoryDir,
+            }),
+          }
+        : {}),
     }),
   };
   return { deps, engine: createLoopEngine(deps) };
