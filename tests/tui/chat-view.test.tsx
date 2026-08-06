@@ -358,6 +358,124 @@ describe("ChatView 行级滚动（任务 A 行级）", () => {
     expect(plain).toContain("tool2");
     expect(plain).toContain("[ask]");
   });
+
+  it("Fix2 长 user 消息行级裁剪：视口只露前几行（不暴露全段）", async () => {
+    // user text="a"*60, cols=8 → wrapCols=6 → 10 行 + 1 margin = 11 行。
+    // viewportRows=10, scrollRows=15→maxScroll=10 → 窗口 [0,1)。
+    // 第一行折 "aaaaaa"（6 a），加 "❯ " 前缀；不应出现完整 60 a 串。
+    const session = makeSession([
+      { role: "user", content: [{ type: "text", text: "a".repeat(60) }] },
+    ]);
+    const output = await renderToString(
+      <ChatView
+        session={session}
+        cols={8}
+        liveToolLines={[]}
+        askLine={undefined}
+        scrollRows={15}
+        viewportRows={10}
+      />,
+      { columns: 8 }
+    );
+    const plain = stripAnsi(output);
+    // 完整长字符串缺席（被裁掉）
+    expect(plain).not.toContain("a".repeat(60));
+    // 'a' 字符数 ≤ 6（视口只露第一行折 6 a；指示文案不含 a）
+    const aCount = (plain.match(/a/g) ?? []).length;
+    expect(aCount).toBeLessThanOrEqual(6);
+  });
+
+  it("Fix2 长 assistant 消息行级裁剪：首段隐藏，后续段可见", async () => {
+    // 1 user 消息（rows=2）+ 1 assistant 消息（3 text 段，每段 cols=8 折
+    // 5 行 + 1 margin = 6 行/段，3 段 18 行）。totalRows=20。viewport=8,
+    // scroll=4 → 窗口 [8,16)。assistant 段 [2,20) → 段内 slice [6,14)：
+    // 段 1 [0,5) 不重叠，段 2 [6,11) 完整，段 3 [12,17) 取前 2 行。
+    const session = makeSession([
+      { role: "user", content: [{ type: "text", text: "q" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "a".repeat(40) },
+          { type: "text", text: "b".repeat(40) },
+          { type: "text", text: "c".repeat(40) },
+        ],
+      },
+    ]);
+    const output = await renderToString(
+      <ChatView
+        session={session}
+        cols={8}
+        liveToolLines={[]}
+        askLine={undefined}
+        scrollRows={4}
+        viewportRows={8}
+      />,
+      { columns: 8 }
+    );
+    const plain = stripAnsi(output);
+    // 首段 "a" 整段被窗口顶掉 → 无任何 'a'
+    expect(plain).not.toContain("a");
+    // 中段可见（含 'b'）
+    expect(plain).toContain("b");
+    // 末段部分可见（含 'c'）
+    expect(plain).toContain("c");
+  });
+
+  it("Fix3 scroll>0 → tail 折叠：底部指示替代 live 工具/ask/spinner/draft", async () => {
+    // 1 user 消息 + running-fg + liveTool + ask + draft。scroll=2 折叠 tail。
+    // 底部指示 "↓ N 行正在生成（End 回到底部）" 必须出现；live 工具串 /
+    // ask / draft 文案都不能渲染。
+    const session = makeSession([
+      { role: "user", content: [{ type: "text", text: "hello" }] },
+    ]);
+    const running: TuiSessionState = { ...session, runState: "running-fg" };
+    const output = await renderToString(
+      <ChatView
+        session={running}
+        cols={80}
+        liveToolLines={["toolA-LINE", "toolB-LINE"]}
+        askLine="[ask] pending?"
+        draftsMasked="DRAFT-PARTIAL-TEXT"
+        scrollRows={2}
+        viewportRows={6}
+      />,
+      { columns: 80 }
+    );
+    const plain = stripAnsi(output);
+    // 底部折叠指示
+    expect(plain).toContain("↓");
+    expect(plain).toContain("行正在生成");
+    expect(plain).toContain("End 回到底部");
+    // live 工具行 / ask / draft 文案都不可见
+    expect(plain).not.toContain("toolA-LINE");
+    expect(plain).not.toContain("toolB-LINE");
+    expect(plain).not.toContain("[ask]");
+    expect(plain).not.toContain("DRAFT-PARTIAL-TEXT");
+  });
+
+  it("Fix3 顶部 + 底部指示同时渲染（scroll>0 smoke）", async () => {
+    // 短 user + running-fg：tail 1 行 spinner。scroll=2 顶部指示 "↑ 2 行
+    // 历史"；底部 "↓ 1 行正在生成"。两者必须并存。
+    const session = makeSession([
+      { role: "user", content: [{ type: "text", text: "hello" }] },
+    ]);
+    const running: TuiSessionState = { ...session, runState: "running-fg" };
+    const output = await renderToString(
+      <ChatView
+        session={running}
+        cols={80}
+        liveToolLines={[]}
+        askLine={undefined}
+        scrollRows={2}
+        viewportRows={6}
+      />,
+      { columns: 80 }
+    );
+    const plain = stripAnsi(output);
+    expect(plain).toContain("↑ 2 行历史");
+    expect(plain).toContain("↓");
+    expect(plain).toContain("行正在生成");
+  });
 });
 
 /**

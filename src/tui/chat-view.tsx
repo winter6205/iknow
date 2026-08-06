@@ -9,29 +9,37 @@
  *
  * 流式（#147）拓展点：turn 完成回调处整段替换渲染；未来增量渲染挂载于此。
  *
- * 滚动（任务 A 行级重构）：把"消息级切片"换成"行级窗口"。
+ * 滚动（#189 行级窗口）：把"消息级切片"换成"行级窗口 + 块级裁剪"。
  *  - `scrollRows` = 视口向上滚动的物理行数（0 = 底部 auto-follow，>0 = 向上）；
  *  - `viewportRows` = 聊天区域可视行数（终端总行 - banner - 状态栏 - 输入框
  *    - ask / notice 槽，动态算；调用方传入）；
- *  - 每个 message 的物理行数由 `estimateMessageRows` 近似（user 文本按
- *    cols 折行 + 1 行 prompt 前缀；assistant markdown 用保守估计：每个
- *    块占 1..N 行 + margin）；
+ *  - 每个 message 的块级行映射由 `measureMessage`（message-rows.ts SSOT）
+ *    给出（rowsForText 折行 + margin/tool_use 行高）；
  *  - 渲染时先累加消息行数，从 `totalRows - scrollRows - viewportRows` 起
  *    切到 `totalRows - scrollRows`，按行窗口选 messages 渲染；
- *  - `scrollRows > 0` 顶部 dim 指示「↑ N 行历史（End 回到底部）」。
+ *  - 窗口与消息重叠时按块级切片（`MessageBlocksRowRange`）：只渲染落在
+ *    窗口内的块，块内局部裁剪（部分段落 / 部分工具行 / margin 空行）；
+ *  - `scrollRows > 0` 顶部 dim 指示「↑ N 行历史（End 回到底部）」；同窗口
+ *    tail 折叠为单行底部指示「↓ N 行正在生成（End 回到底部）」。
  *
- * 行数估算是保守近似（不算实际折行，宁可多算不可少算），保证窗口不会
- * 露出"被切掉"的内容；测试时 assert 行数 >= 实际折行（不精确等于）。
+ * 行级窗口数学（Fix2）：`estimateMessageRows` 保留做 parity 断言，渲染
+ * 侧行高统一走 `measureMessage`（SSOT，与 markdown.tsx 的 measureBlocks
+ * 坐标对齐，块级切片才能落到块内部）。
  */
 import type { ReactElement } from "react";
 import { Box, Text } from "ink";
-import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
+import type {
+  AnthropicContentBlock,
+  AnthropicNativeMessage,
+} from "../harness/model-adapter/types.js";
 import type { TuiSessionState } from "./session-state.js";
 import { toolResultStatusMap, summarizeToolCall } from "./tool-summary.js";
 import { Markdown } from "./markdown.js";
 import { Spinner } from "./components.js";
 import { tuiPalette } from "./theme.js";
 import { wrapText } from "./text.js";
+import { measureMessage } from "./message-rows.js";
+import type { BlockRowSpan } from "./message-rows.js";
 import {
   REDACTED_PLACEHOLDER,
   summarizeThinkingContent,
@@ -225,6 +233,104 @@ function MessageBlocks(props: {
   );
 }
 
+/**
+ * 行级窗口里的 message 切片渲染（Fix2）。完全可见仍走 `MessageBlocks`
+ * （保留 Markdown 全功能）；本组件仅做块级局部裁剪——按 measureMessage
+ * 的 `blocks` 坐标切块，tool_use 伪块（text === ""）唯一识别，只在内容
+ * 行 0 落在切片时渲染摘要行。裁剪行放弃 inline markdown（可接受取舍）。
+ */
+function MessageBlocksRowRange(props: {
+  readonly message: AnthropicNativeMessage;
+  readonly blocks: ReadonlyArray<BlockRowSpan>;
+  readonly cols: number;
+  readonly statusMap: Map<string, boolean>;
+  readonly sliceStart: number;
+  readonly sliceEnd: number;
+}): ReactElement | null {
+  const { message, blocks, cols, statusMap, sliceStart, sliceEnd } = props;
+  const pal = tuiPalette;
+  // measureMessage 产出全为 paragraph；此处显式收窄拿到 .text（MdBlock 是
+  // 判别联合，非 paragraph 变体无 text）。
+  const paraText = (b: BlockRowSpan): string =>
+    b.block.type === "paragraph" ? b.block.text : "";
+  if (message.role === "user") {
+    const block = blocks[0];
+    if (block === undefined) return null;
+    const clipStart = Math.max(0, sliceStart - block.startRow);
+    const clipEnd = Math.min(block.rows, sliceEnd - block.startRow);
+    if (clipEnd <= clipStart) return null;
+    const lines = wrapText(paraText(block), Math.max(1, cols - 2)).slice(
+      clipStart,
+      clipEnd
+    );
+    return (
+      <Box flexDirection="column" marginBottom={1}>
+        {lines.map((ln, li) => (
+          <Text key={li} color={pal.accent} wrap="wrap">
+            {li === 0 && clipStart === 0 ? `❯ ${ln}` : ln}
+          </Text>
+        ))}
+      </Box>
+    );
+  }
+  // assistant：逐块切片；tool_use pseudo-block（block.text === ""）走
+  // 摘要行分支。
+  const toolUses = message.content.filter(
+    (b): b is Extract<AnthropicContentBlock, { type: "tool_use" }> =>
+      b.type === "tool_use"
+  );
+  let toolIdx = 0;
+  const nodes: ReactElement[] = [];
+  blocks.forEach((block, i) => {
+    // tool_use 伪块 pointer 按出现顺序恒自增，与窗口是否相交无关——
+    // 否则被切片跳过的伪块会让后续索引错位。
+    const isPseudo = paraText(block) === "";
+    if (isPseudo) {
+      toolIdx += 1;
+    }
+    const bcStart = block.startRow;
+    const bcEnd = bcStart + block.rows;
+    if (bcEnd <= sliceStart || bcStart >= sliceEnd) return;
+    const clipStart = Math.max(0, sliceStart - bcStart);
+    const clipEnd = Math.min(block.rows, sliceEnd - bcStart);
+    if (clipEnd <= clipStart) return;
+    if (isPseudo) {
+      const tu = toolUses[toolIdx - 1];
+      if (tu === undefined) return;
+      if (clipStart < 1 && clipEnd > 0) {
+        const { detail } = summarizeToolCall(tu.name, tu.input);
+        const hasResult = statusMap.has(tu.id);
+        const failed = statusMap.get(tu.id) === true;
+        const mark = !hasResult ? "[运行中]" : failed ? "[失败]" : "[完成]";
+        nodes.push(
+          <Box key={`u${i}`}>
+            <Text color={failed ? pal.error : pal.dim}>
+              {mark} {tu.name} · {detail}
+            </Text>
+          </Box>
+        );
+      }
+      return;
+    }
+    const lines = wrapText(paraText(block), cols).slice(clipStart, clipEnd);
+    nodes.push(
+      <Box key={`b${i}`} flexDirection="column">
+        {lines.map((ln, li) => (
+          <Text key={li} wrap="wrap">
+            {ln}
+          </Text>
+        ))}
+      </Box>
+    );
+  });
+  if (nodes.length === 0) return null;
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      {nodes}
+    </Box>
+  );
+}
+
 export interface ChatViewProps {
   readonly session: TuiSessionState;
   readonly cols: number;
@@ -259,16 +365,39 @@ export function ChatView(props: ChatViewProps): ReactElement {
   const { session, cols } = props;
   const pal = tuiPalette;
   const statusMap = toolResultStatusMap(session.messages);
-  const spans = buildMessageRowSpans(session.messages, cols, {
-    thinkingExpanded: props.thinkingExpanded,
-  });
+  // 行级块坐标（Fix2）：行数与块坐标统一走 `measureMessage`（SSOT），
+  // 与 estimateMessageRows 逐字节一致。
+  interface Measured {
+    readonly message: AnthropicNativeMessage;
+    readonly blocks: ReadonlyArray<BlockRowSpan>;
+    readonly totalRows: number;
+    readonly startRow: number;
+  }
+  const measured: Measured[] = [];
+  let messageCursor = 0;
+  for (const m of session.messages) {
+    const mm = measureMessage(m, cols, {
+      thinkingExpanded: props.thinkingExpanded,
+    });
+    if (mm.totalRows === 0) continue;
+    measured.push({
+      message: m,
+      blocks: mm.blocks,
+      totalRows: mm.totalRows,
+      startRow: messageCursor,
+    });
+    messageCursor += mm.totalRows;
+  }
   const tail = tailSlot(
     props.liveToolLines,
     props.askLine,
     session.runState === "running-fg"
   );
-  const tailRows = tail.liveToolRows + tail.askRow + tail.spinnerRow;
-  const totalRows = spans.reduce((acc, s) => acc + s.rows, 0) + tailRows;
+  // masked draft 占 1 行（折叠时不需视觉精度；与 tail 一并参与 totalRows）。
+  const draftRow =
+    props.draftsMasked !== undefined && props.draftsMasked.length > 0 ? 1 : 0;
+  const tailRows = tail.liveToolRows + tail.askRow + tail.spinnerRow + draftRow;
+  const totalRows = messageCursor + tailRows;
   const viewport = props.viewportRows ?? 0;
   // 行级窗口：[end - viewport - scroll, end - scroll]（end = totalRows，
   // tail 占底）。scroll=0 → 显示最末 viewport 行（auto-follow 底）。
@@ -285,11 +414,8 @@ export function ChatView(props: ChatViewProps): ReactElement {
   const scroll = Math.min(Math.max(0, props.scrollRows ?? 0), maxScroll);
   const endRow = totalRows - scroll;
   const startRow = viewport > 0 ? Math.max(0, endRow - viewport) : 0;
-  // 选 messages：startRow/endRow 落在哪个 span 范围内就保留。
-  const visibleSpans = spans.filter(
-    (s) => s.startRow + s.rows > startRow && s.startRow < endRow
-  );
-  // 顶部「↑ N 行历史」指示：scroll > 0 时显示 N = scroll 行数。
+  // Fix3：scroll > 0 折叠 tail（liveTool/ask/draft/spinner 隐藏）为底部单行指示。
+  const foldTail = scroll > 0 && tailRows > 0;
   const indicator = scroll > 0 ? `↑ ${scroll} 行历史（End 回到底部）` : "";
   return (
     <Box flexDirection="column" flexGrow={1}>
@@ -299,38 +425,69 @@ export function ChatView(props: ChatViewProps): ReactElement {
         </Box>
       )}
       <Box flexDirection="column">
-        {visibleSpans.map((s, i) => (
-          <MessageBlocks
-            key={i}
-            message={s.message}
-            cols={cols}
-            statusMap={statusMap}
-            thinkingExpanded={props.thinkingExpanded}
-          />
-        ))}
+        {measured.map((mm, i) => {
+          if (mm.startRow + mm.totalRows <= startRow || mm.startRow >= endRow) {
+            return null;
+          }
+          const sliceStart = Math.max(0, startRow - mm.startRow);
+          const sliceEnd = Math.min(mm.totalRows, endRow - mm.startRow);
+          if (sliceEnd <= sliceStart) return null;
+          // 完全可见走 MessageBlocks 保留 Markdown 全功能；部分切片走
+          // MessageBlocksRowRange 做行级裁剪。
+          const full = sliceStart === 0 && sliceEnd === mm.totalRows;
+          return full ? (
+            <MessageBlocks
+              key={i}
+              message={mm.message}
+              cols={cols}
+              statusMap={statusMap}
+              thinkingExpanded={props.thinkingExpanded}
+            />
+          ) : (
+            <MessageBlocksRowRange
+              key={i}
+              message={mm.message}
+              blocks={mm.blocks}
+              cols={cols}
+              statusMap={statusMap}
+              sliceStart={sliceStart}
+              sliceEnd={sliceEnd}
+            />
+          );
+        })}
       </Box>
-      {props.liveToolLines.length > 0 && (
-        <Box flexDirection="column" marginBottom={1}>
-          {props.liveToolLines.map((line, i) => (
-            <Text key={i} color={pal.dim}>
-              {line}
-            </Text>
-          ))}
-        </Box>
-      )}
-      {props.askLine !== undefined && (
+      {foldTail ? (
         <Box marginBottom={1}>
-          <Text color={pal.running}>{props.askLine}</Text>
+          <Text color={pal.dim}>
+            {`↓ ${tailRows} 行正在生成（End 回到底部）`}
+          </Text>
         </Box>
+      ) : (
+        <>
+          {props.liveToolLines.length > 0 && (
+            <Box flexDirection="column" marginBottom={1}>
+              {props.liveToolLines.map((line, i) => (
+                <Text key={i} color={pal.dim}>
+                  {line}
+                </Text>
+              ))}
+            </Box>
+          )}
+          {props.askLine !== undefined && (
+            <Box marginBottom={1}>
+              <Text color={pal.running}>{props.askLine}</Text>
+            </Box>
+          )}
+          {session.runState === "running-fg" &&
+            props.draftsMasked !== undefined &&
+            props.draftsMasked.length > 0 && (
+              <Box flexDirection="column" marginBottom={1}>
+                <Markdown text={props.draftsMasked} width={cols} />
+              </Box>
+            )}
+          {session.runState === "running-fg" && <Spinner />}
+        </>
       )}
-      {session.runState === "running-fg" &&
-        props.draftsMasked !== undefined &&
-        props.draftsMasked.length > 0 && (
-          <Box flexDirection="column" marginBottom={1}>
-            <Markdown text={props.draftsMasked} width={cols} />
-          </Box>
-        )}
-      {session.runState === "running-fg" && <Spinner />}
     </Box>
   );
 }
