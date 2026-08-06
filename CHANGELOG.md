@@ -2,6 +2,10 @@
 
 ## 0.1.0 (unreleased)
 
+### Changed
+
+- **TUI 启动 banner 改版**（2026-08-06）：从「大号方形点阵 + 单线外框 + 整体水平居中」改为「占满整行宽度的圆角线框（与输入框 PromptInput 同款 borderStyle="round"）+ 小号扁平眼睛居左（16×6 braille，16 列 × 6 行）+ info 栏（Version / Cwd / Data dir）居右垂直居中 + 顶框左对齐 `◆ iknow tui`」。眼睛不再是大号方形（用户复看裁定"不要放太大、放左边一小块"），窄终端降级阈值随小眼 96 → 64 列。`src/tui/banner-art.ts` / `banner.ts` / `tests/tui/render-smoke.test.tsx` / `docs/design/DESIGN-BANNER.md` 同步更新；`scripts/gen-banner-art.py` 保留为旧全构图大眼存档档。
+
 ### Feature
 
 - **Identity assembly (#196)**: 在 `deps.system` 注入缝上装配身份层 — `identity` (Name/Kind/Signature) + `soul` (core truths/boundaries/vibe/continuity) + `~/.iknow/user.md` 用户画像 + 首启 `BOOTSTRAP` 引导。所有 iknow 入口 (chat / tui / ask / serve) 走同一装配层。`state.json` 持久化 `bootstrap_seeded`,二次启动跳过 BOOTSTRAP 段。`initializeIknowWorkspace()` eager + idempotent,在 `build-engine.ts` 与 4 入口(chat / serve / tui / ask)各调一次,失败降级 warn 不阻塞装配。

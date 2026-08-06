@@ -2,8 +2,10 @@
  * tests/tui/render-smoke.test.tsx
  *
  * #146 渲染冒烟（原型 smoke-adaptive 同款模式：renderToString 多宽度断言）：
- *  - banner：40/80/120 列无溢出行；窄终端降级返回 []；SHORT 档单行；
- *    任务 A 加框后断言 ┌/┐ 角字符、title 文本、外框列宽 +2。
+ *  - banner（2026-08-06 改版）：占满行宽圆角线框（╭/╰/╮/╯），小号扁平眼居左
+ *    + info 栏（Version/Cwd/Data dir）居右；多宽度（MIN/120/160）无溢出行；
+ *    每行占满 cols（无水平居中）；窄终端降级返回 []；SHORT 档单行；
+ *    小眼尺寸断言（≤16×6 扁形）。
  *  - ListView：列内容（summary + 相对时间 + [运行中]）+ 伪条目；
  *  - ChatView：markdown 渲染 + 无溢出行（40/80/120）。
  * UI 元素层无 emoji 约束（Q4）：对渲染输出断言常见 emoji 码区缺席。
@@ -37,14 +39,14 @@ function assertNoOverflow(output: string, cols: number): void {
   }
 }
 
-describe("banner 渲染（智慧之眼 V7 定案）", () => {
+describe("banner 渲染（2026-08-06 改版：占满行宽圆角框 + 小眼居左 + info 居右）", () => {
   const info = {
     version: "0.1.0",
     cwd: "/home/u/proj",
     dataDir: "/home/u/.iknow",
   };
 
-  it("BANNER_MIN_COLS / 120 / 160 列：多行输出且无溢出行（加框后 + 主体整改后）", () => {
+  it("BANNER_MIN_COLS / +24 / +64 列：多行输出且无溢出行", () => {
     for (const cols of [
       BANNER_MIN_COLS,
       BANNER_MIN_COLS + 24,
@@ -56,7 +58,7 @@ describe("banner 渲染（智慧之眼 V7 定案）", () => {
     }
   });
 
-  it("整体面板在 cols 内水平居中（两侧空白对称，#171 体验迭代 + 任务 A 加框）", () => {
+  it("banner 占满行宽：每行宽度 == cols（无水平居中，与输入框一致）", () => {
     for (const cols of [
       BANNER_MIN_COLS,
       BANNER_MIN_COLS + 24,
@@ -64,62 +66,62 @@ describe("banner 渲染（智慧之眼 V7 定案）", () => {
     ]) {
       const lines = renderBanner(info, { cols, short: false });
       const plain = lines.map(stripAnsi);
-      // 行宽差来自 info 栏的有无（中间 3 行带 info，最宽；上下只有 logo+GAP）。
-      // 面板逻辑宽 = 含 info 行的视觉宽 = logo(COLS) + GAP(3) + info(43) + 框(2) = BANNER_MIN_COLS。
-      const widths = plain.map(visualWidth);
-      const maxW = Math.max(...widths);
-      const leftPad = (plain[0]!.match(/^( *)/) ?? [""])[0]!.length;
-      const panelW = maxW - leftPad;
-      expect(panelW, "面板逻辑宽应等于 BANNER_MIN_COLS（含外框 +2）").toBe(
-        BANNER_MIN_COLS
-      );
-      // 左侧 padding 应等于 floor((cols - panelW) / 2)
-      const expectedPad = Math.floor((cols - panelW) / 2);
-      expect(leftPad, `${cols} 列下左侧 padding 应为 ${expectedPad}`).toBe(
-        expectedPad
-      );
+      for (const [i, line] of plain.entries()) {
+        expect(visualWidth(line), `第 ${i} 行应占满 ${cols} 列`).toBe(cols);
+      }
     }
   });
 
-  it("任务 A：banner 外框存在（单线 ┌─┐ + 居中 title + 框宽 +2）", () => {
+  it("圆角外框：╭/╮ 顶、╰/╯ 底 + 左对齐 title + 竖线 | 边", () => {
     const lines = renderBanner(info, { cols: 120, short: false });
     const plain = lines.map(stripAnsi);
-    // 首行 = 框顶，含 ┌/┐ 角 + title 文本（可能前置居中 padding）
+    // 首行 = 框顶：╭ + title（左对齐）+ ─… + ╮
     const top = plain[0]!;
-    expect(top).toMatch(/^ *┌─*◆ iknow tui ◆─*┐ *$/);
-    // 末行 = 框底，含 └/┘ 角
+    expect(top).toMatch(/^╭◆ iknow tui─+╮$/);
+    // 末行 = 框底：╰─…─╯
     const bottom = plain[plain.length - 1]!;
-    expect(bottom).toMatch(/^ *└─+┘ *$/);
-    // 中段行 = 居中 padding + │ + 内文 + │（同 padding）
+    expect(bottom).toMatch(/^╰─+╯$/);
+    // 中段行 = │ 内文 │
     for (let i = 1; i < plain.length - 1; i++) {
-      expect(plain[i]).toMatch(/^ *│.*│ *$/);
+      expect(plain[i]).toMatch(/^│.*│$/);
     }
-    // 整体面板宽（首行去除居中 padding）= BANNER_MIN_COLS
-    const topLeftPad = (top.match(/^( *)/) ?? [""])[0]!.length;
-    const topRightPad = (top.match(/( *)$/) ?? [""])[0]!.length;
-    expect(visualWidth(top) - topLeftPad - topRightPad).toBe(BANNER_MIN_COLS);
+    // 每行都占满 120 列（圆角框撑满行宽）
+    for (const line of plain) {
+      expect(visualWidth(line)).toBe(120);
+    }
   });
 
-  it("info 栏长值中段截断：保留首段 + 尾段文件名（#171 体验迭代）", () => {
+  it("小眼睛居左 + info 栏（Version/Cwd/Data dir）渲染在框内", () => {
+    const lines = renderBanner(info, { cols: 120, short: false });
+    const plain = stripAnsi(lines.join("\n"));
+    expect(plain).toContain("Version");
+    expect(plain).toContain("Cwd");
+    expect(plain).toContain("Data dir");
+    expect(plain).toContain("0.1.0");
+    expect(plain).toContain("proj");
+    expect(plain).toContain(".iknow");
+    // 眼睛图标（braille 点阵）必须渲染在框内
+    expect(plain).toContain("⣷"); // EYE_LINES 内任一 braille 码点
+  });
+
+  it("info 栏长值中段截断：保留首段 + 尾段文件名", () => {
     const longInfo = {
       version: "0.1.0",
       cwd: "/home/u/proj",
       dataDir: "/home/u/.local/share/iknow/sessions",
     };
-    // cols = BANNER_MIN_COLS 是任务 A 加框后 + 主体整改后的最小宽度；≥ 此值才有 banner 输出。
     const lines = renderBanner(longInfo, {
       cols: BANNER_MIN_COLS,
       short: false,
     });
     const plain = stripAnsi(lines.join("\n"));
-    // 中段截断符 + 末段保留 sessions（文件名）/ .local（路径段）
+    // 中段截断符 + 末段保留 sessions（文件名）
     expect(plain).toContain("…");
     expect(plain).toContain("sessions");
-    // 不能再以"末尾丢文件名"的纯截断形式出现
     expect(plain).not.toMatch(/share\/iknow\s*$/);
   });
 
-  it("窄终端降级：cols < BANNER_MIN_COLS → []（#171 落地清单）", () => {
+  it("窄终端降级：cols < BANNER_MIN_COLS → []", () => {
     const lines = renderBanner(info, {
       cols: BANNER_MIN_COLS - 1,
       short: false,
@@ -141,14 +143,14 @@ describe("banner 渲染（智慧之眼 V7 定案）", () => {
     expect(EMOJI_RE.test(stripAnsi(lines.join("\n")))).toBe(false);
   });
 
-  it("任务 B 整改：logo 主体在终端显示为方形（cols/(rows*2) ≈ FACTOR=2.0）", () => {
-    // 点阵按公式 ROWS = round(COLS * sh / (FACTOR * sw)) 补偿终端字符
-    // 宽高比 1:2 → 终端显示比 = COLS / (ROWS * 2) ≈ FACTOR = 2.0（即主体
-    // 宽高比 ≈ 1:1）。精度 0 位小数 = ±0.5 容差。
-    expect(visualWidth(EYE_LINES[0] ?? "") / EYE_LINES.length).toBeCloseTo(
-      2.0,
-      0
-    );
+  it("小眼睛尺寸：小号扁平（≤16 列宽、≤6 行；终端显示比 ≈ COLS/(ROWS*2) ≈ 1.33 扁）", () => {
+    // 2026-08-06 改版：眼睛不再是大号方形，而是小号扁平图标（16×6 braille，
+    // 终端 16 列 × 6 行，宽高比 ≈ 1.33）。用户明确"眼睛不要放太大"。
+    const w = visualWidth(EYE_LINES[0] ?? "");
+    const h = EYE_LINES.length;
+    expect(w).toBeLessThanOrEqual(16);
+    expect(h).toBeLessThanOrEqual(6);
+    expect(w / (h * 2)).toBeGreaterThan(1); // 扁
   });
 });
 
