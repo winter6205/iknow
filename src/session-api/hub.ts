@@ -242,6 +242,11 @@ export type SessionHubOptions = {
    * workspace; CLI flag wiring is tracked in the backlog.
    */
   sandboxRoot?: string;
+  /**
+   * #196 IKNOW T5:入口 surface — 决定 BOOTSTRAP 是否激活。serve 路径固定传
+   * "serve"（skip BOOTSTRAP，spec A12 矩阵）；测试可省略 → 默认 "chat"。
+   */
+  surface?: "chat" | "tui" | "ask" | "serve";
 };
 
 // -- stop reasons that must NOT persist to file (裁决#8) -----------------------
@@ -271,6 +276,9 @@ export class SessionHub {
    *  → `buildHarnessEngine` defaults to `process.cwd()`. Production callers
    *  in serve mode should pass an explicit root (CLI flag wiring tracked). */
   private readonly sandboxRoot: string | undefined;
+  /** #196 IKNOW T5: 入口 surface；默认 "chat"（tests 兼容）。serve 路径
+   *  由 serve.ts 显式传 "serve"。 */
+  private readonly surface: "chat" | "tui" | "ask" | "serve" | undefined;
   /** Per-conversation serialization (spec A15). */
   private readonly inflight = new Map<string, Promise<void>>();
 
@@ -286,6 +294,7 @@ export class SessionHub {
     this.askUser = opts.askUser;
     this.overrideEnv = opts.overrideEnv;
     this.sandboxRoot = opts.sandboxRoot;
+    this.surface = opts.surface;
     this.defaults = {
       jsonMode: opts.defaultJsonMode ?? false,
     };
@@ -545,6 +554,7 @@ export class SessionHub {
       env,
       askUser: this.askUser,
       ...(this.sandboxRoot ? { sandboxRoot: this.sandboxRoot } : {}),
+      ...(this.surface ? { surface: this.surface } : {}),
     });
     this.cachedDeps = deps;
     return this.cachedDeps;

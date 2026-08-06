@@ -26,8 +26,10 @@ import { createGrepTool } from "../harness/aci/tools/grep.js";
 import { createGlobTool } from "../harness/aci/tools/glob.js";
 import { createEditFileTool } from "../harness/aci/tools/edit-file.js";
 import { createWriteFileTool } from "../harness/aci/tools/write-file.js";
+import { createIknowSystemResolver } from "../harness/identity/index.js";
 import type { AskUser } from "../harness/permission/types.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
+import { homedir } from "node:os";
 
 /** 工具摘要行事件（postToolUse 投影，observability-only）。 */
 export interface TuiToolEvent {
@@ -111,5 +113,12 @@ export function buildTuiDeps(
     registry: reg.inner,
     maxTurns: 6,
     timeoutMs: env.llm.timeoutMs,
+    // #196 IKNOW T5:tui 入口走 system 注入缝(spec A12:chat/tui 激活
+    // BOOTSTRAP,surface="tui" → bootstrapActive=true)。
+    system: createIknowSystemResolver({
+      cwd: process.cwd(),
+      userHome: homedir(),
+      surface: "tui",
+    }),
   };
 }

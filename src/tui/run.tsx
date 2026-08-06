@@ -18,6 +18,7 @@ import { createTuiAskUserBridge } from "./ask-user.js";
 import { createInflightRegistry, createTuiBridge } from "./hub-bridge.js";
 import { TuiApp, createToolEventSink } from "./app.js";
 import { attachSession } from "./session-state.js";
+import { initIknowWorkspaceSafe } from "../harness/identity/index.js";
 
 export interface RunTuiOptions {
   /** `iknow tui <session-id>` resume；缺省 = draft 新会话（Q2=C）。 */
@@ -32,6 +33,10 @@ export async function runTui(opts: RunTuiOptions): Promise<void> {
   if (!process.stdout.isTTY || !process.stdin.isTTY) {
     throw new Error("iknow tui 需要 TTY（交互界面）；脚本场景用 iknow ask。");
   }
+  // #196 IKNOW T5: eager + idempotent 初始化 ~/.iknow/(initIknowWorkspaceSafe
+  // 内部 try/catch+warn,失败不阻塞装配 — tui 自有 buildTuiDeps 路径不走
+  // build-engine,必须独立 init)。
+  await initIknowWorkspaceSafe();
   const bundle: RuntimeBundle = await prepareRuntime();
   const dataDir = resolveServeDataDir(opts.dataDir);
   const cwd = process.cwd();

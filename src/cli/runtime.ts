@@ -17,6 +17,7 @@ import {
   buildHarnessEngine as buildCoreEngine,
   type BuiltEngine,
 } from "../harness/build-engine.js";
+import { initIknowWorkspaceSafe } from "../harness/identity/index.js";
 import type { AskUser } from "../harness/permission/types.js";
 import { loadIknowEnv, type IknowEnv } from "../config/env.js";
 import type { SessionContext } from "../shared/schema.js";
@@ -55,7 +56,15 @@ export type { BuiltEngine } from "../harness/build-engine.js";
  */
 export async function buildHarnessEngine(
   bundle: RuntimeBundle,
-  opts: { askUser: AskUser }
+  opts: { askUser: AskUser; surface?: "chat" | "tui" | "ask" | "serve" }
 ): Promise<BuiltEngine> {
-  return buildCoreEngine({ env: bundle.env, askUser: opts.askUser });
+  // #196 IKNOW T5: eager + idempotent 初始化 ~/.iknow/(initIknowWorkspaceSafe
+  // 内部 try/catch+warn,失败不阻塞装配 — 幂等备份,build-engine 内还有一次)。
+  await initIknowWorkspaceSafe();
+  // surface 透传到 buildCoreEngine,build-engine 据此判定 BOOTSTRAP 段是否激活
+  return buildCoreEngine({
+    env: bundle.env,
+    askUser: opts.askUser,
+    surface: opts.surface ?? "chat",
+  });
 }

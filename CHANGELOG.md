@@ -2,6 +2,10 @@
 
 ## 0.1.0 (unreleased)
 
+### Feature
+
+- **Identity assembly (#196)**: 在 `deps.system` 注入缝上装配身份层 — `identity` (Name/Kind/Signature) + `soul` (core truths/boundaries/vibe/continuity) + `~/.iknow/user.md` 用户画像 + 首启 `BOOTSTRAP` 引导。所有 iknow 入口 (chat / tui / ask / serve) 走同一装配层。`state.json` 持久化 `bootstrap_seeded`,二次启动跳过 BOOTSTRAP 段。`initializeIknowWorkspace()` eager + idempotent,在 `build-engine.ts` 与 4 入口(chat / serve / tui / ask)各调一次,失败降级 warn 不阻塞装配。
+
 ### Breaking (internal, pre-release)
 
 - `iknow serve` 不再托管 `/api/v1/traces` 读 API；检测面板改由独立 `iknow trace` 子命令进程提供（默认端口 24881；`iknow trace --trace-out <path>` 读 `serve --trace-out <path>` 写入的同一 JSONL）。`--trace-out` 在 `serve` / `chat` / `ask` 上的写语义未变（仍由 hub 写埋点落到 JSONL）。详见 #183。

@@ -95,8 +95,10 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
   let built: { deps: LoopEngineDeps };
   try {
     // ask oneshot: no interactive user → fail-closed askUser (always deny).
+    // #196 A12:ask 跳过 BOOTSTRAP 段(surface="ask" → bootstrapActive=false)。
     built = await buildHarnessEngine(bundle, {
       askUser: createFailClosedAskUser(),
+      surface: "ask",
     });
   } catch (err) {
     if (err instanceof Error && err.message.includes("LLM mode needs")) {
@@ -145,8 +147,10 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   let built: { deps: LoopEngineDeps };
   try {
     // chat TTY REPL: interactive y/N prompt via stdin/stdout.
+    // #196 A12:chat 激活 BOOTSTRAP(surface="chat" → bootstrapActive=true)。
     built = await buildHarnessEngine(bundle, {
       askUser: createTtyAskUser(),
+      surface: "chat",
     });
   } catch (err) {
     printChatError(err);

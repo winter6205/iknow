@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { SessionHub, type SessionHubOptions } from "./hub.js";
 import { listenSessionServer, type ListeningServer } from "./http.js";
 import { SessionStore } from "./store/index.js";
+import { initIknowWorkspaceSafe } from "../harness/identity/index.js";
 
 export type ServeOptions = {
   host?: string;
@@ -33,6 +34,9 @@ export function resolveServeDataDir(dataDir?: string): string {
 export async function startSessionServe(
   opts?: ServeOptions
 ): Promise<{ listening: ListeningServer; hub: SessionHub }> {
+  // #196 IKNOW T5: eager + idempotent 初始化 ~/.iknow/(initIknowWorkspaceSafe
+  // 内部 try/catch+warn,失败不阻塞装配 — 幂等备份,build-engine 内还有一次)。
+  await initIknowWorkspaceSafe();
   const dataDir = resolveServeDataDir(opts?.dataDir);
   // cwd defaults to process.cwd() → the store picks its project namespace.
   const store = new SessionStore(dataDir);
@@ -41,6 +45,8 @@ export async function startSessionServe(
     store,
     defaultJsonMode: opts?.json_mode ?? false,
     traceOut: opts?.traceOut,
+    // #196 A12: serve 跳过 BOOTSTRAP 段（surface="serve" → bootstrapActive=false）。
+    surface: "serve",
     ...opts?.hubOptions,
   });
 
