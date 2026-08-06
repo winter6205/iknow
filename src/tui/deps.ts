@@ -1,9 +1,9 @@
 /**
  * src/tui/deps.ts
  *
- * #146 TUI 的 harness deps 装配：照抄 buildHarnessEngine（src/cli/runtime.ts）
- * 的 ACI 产品装配链——real Anthropic adapter + ACI 6 工具集 + permission
- * policy；差异两点：
+ * #146 TUI 的 harness deps 装配：与 buildHarnessEngine 共用同一 ACI 装配链 —
+ * real Anthropic adapter + 8 件工具集（走 `createDefaultAciRegistry` SSOT 工厂，
+ * 见 src/harness/aci/tools/registry.ts）+ permission policy。与 CLI 入口差异两点：
  *  1. 不建 engine（SessionHub.postMessage 内部直接调 run()，deps 即所需全部）；
  *  2. createAciExecutor 注入 hooks.postToolUse → 工具摘要行事件（Q5b=B；
  *     permission/types.ts:117-128 官方观测挂点，每 call 事后触发）。
@@ -16,16 +16,10 @@ import {
   type LoopEngineDeps,
 } from "../harness/index.js";
 import {
-  createAciRegistry,
   createAciExecutor,
   createPermissionPolicy,
 } from "../harness/aci/index.js";
-import { createBashTool } from "../harness/aci/tools/bash.js";
-import { createReadFileTool } from "../harness/aci/tools/read-file.js";
-import { createGrepTool } from "../harness/aci/tools/grep.js";
-import { createGlobTool } from "../harness/aci/tools/glob.js";
-import { createEditFileTool } from "../harness/aci/tools/edit-file.js";
-import { createWriteFileTool } from "../harness/aci/tools/write-file.js";
+import { createDefaultAciRegistry } from "../harness/aci/tools/registry.js";
 import { createIknowSystemResolver } from "../harness/identity/index.js";
 import type { AskUser } from "../harness/permission/types.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
@@ -75,17 +69,13 @@ export function buildTuiDeps(
     // T3 (D2): TUI 真实走流式臂,与 build-engine SSOT 同源。
     stream: env.llm.stream === "on",
   });
-  // 沙箱根 = process.cwd()（与 buildHarnessEngine 同款）。
+  // 8 件工具集 SSOT 工厂(与 buildHarnessEngine 同源,见 registry.ts)。
+  // 沙箱根 = process.cwd();build-engine 接受 opts.sandboxRoot override,TUI 历史
+  // 就硬编码 process.cwd()(与 #146 TUI 启动目录语义一致),本重构保持行为不变。
+  // 若 TUI 未来接受 sandboxRoot override,在此镜像 build-engine 的 fallback。
+  // env.web 透传 IKNOW_WEB_PROXY / IKNOW_WEB_SEARCH_URL,proxyUrl 非法 → 装配期同步抛。
   const sandboxRoot = process.cwd();
-  const aciTools = [
-    createBashTool(sandboxRoot),
-    createReadFileTool(sandboxRoot),
-    createGrepTool(sandboxRoot),
-    createGlobTool(sandboxRoot),
-    createEditFileTool(sandboxRoot),
-    createWriteFileTool(sandboxRoot),
-  ];
-  const reg = createAciRegistry(aciTools);
+  const reg = createDefaultAciRegistry({ env, sandboxRoot });
   const baseExecutor = createExecutor(reg.inner);
   const policy = createPermissionPolicy();
   const executor = createAciExecutor({

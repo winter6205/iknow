@@ -56,6 +56,10 @@ describe("buildHarnessEngine (SSOT assembly)", () => {
 
     const names = deps.registry.list().map((def) => def.name);
     expect(names).toEqual(EXPECTED_TOOLS);
+    // 显式锁 Web 工具存在(plan-fidelity:SSOT 收敛到 registry.ts 后,
+    // build-engine 路径也必须仍带 web_fetch / web_search)。
+    expect(names).toContain("web_fetch");
+    expect(names).toContain("web_search");
   });
 
   it("throws without the LLM api key set (fail loud, before any async work)", async () => {

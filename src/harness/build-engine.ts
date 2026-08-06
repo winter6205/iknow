@@ -1,11 +1,13 @@
 /**
  * Source-of-truth harness assembly for the LLM + tool-call loop.
  *
- * `buildHarnessEngine({ env, askUser })` is the single assembly point for the
- * 8-tool ACI tool set (bash / read_file / grep / glob / edit_file /
- * write_file / web_fetch / web_search). Both the CLI (chat / ask) and the
- * session server (`iknow serve` → SessionHub.ensureDeps) import this
- * function so the tool set can never drift between the two entry points.
+ * `buildHarnessEngine({ env, askUser })` is the assembly point for the LLM
+ * adapter, permission middleware, executor, and engine — plus the 8-tool
+ * ACI tool set, which it obtains from the SSOT factory
+ * `createDefaultAciRegistry` (`src/harness/aci/tools/registry.ts`). Both the
+ * CLI (chat / ask), the session server (`iknow serve` → SessionHub.ensureDeps),
+ * and the TUI (`iknow tui` → buildTuiDeps) share that factory so the tool set
+ * can never drift between entry points.
  *
  * Bundling rule: this module only depends on `env` (LLM/web config) and a
  * caller-supplied `askUser`. It does not import CLI-runtime bundles
@@ -19,19 +21,8 @@ import {
   createLoopEngine,
   type LoopEngineDeps,
 } from "./index.js";
-import {
-  createAciRegistry,
-  createAciExecutor,
-  createPermissionPolicy,
-} from "./aci/index.js";
-import { createBashTool } from "./aci/tools/bash.js";
-import { createReadFileTool } from "./aci/tools/read-file.js";
-import { createGrepTool } from "./aci/tools/grep.js";
-import { createGlobTool } from "./aci/tools/glob.js";
-import { createEditFileTool } from "./aci/tools/edit-file.js";
-import { createWriteFileTool } from "./aci/tools/write-file.js";
-import { createWebFetchTool } from "./aci/tools/web-fetch.js";
-import { createWebSearchTool } from "./aci/tools/web-search.js";
+import { createAciExecutor, createPermissionPolicy } from "./aci/index.js";
+import { createDefaultAciRegistry } from "./aci/tools/registry.js";
 import { homedir } from "node:os";
 import type { AskUser } from "./permission/types.js";
 import type { IknowEnv } from "../config/env.js";
@@ -110,25 +101,9 @@ export async function buildHarnessEngine(
   // network-guard(SSRF 逐跳校验);category=read-only → 权限默认 allow。
   // append-only:不重排既有 6 工具(policy byName 键空间与 ADR-0006 稳定)。
   const sandboxRoot = opts.sandboxRoot ?? process.cwd();
-  const aciTools = [
-    createBashTool(sandboxRoot),
-    createReadFileTool(sandboxRoot),
-    createGrepTool(sandboxRoot),
-    createGlobTool(sandboxRoot),
-    createEditFileTool(sandboxRoot),
-    createWriteFileTool(sandboxRoot),
-    // 出站代理(IKNOW_WEB_PROXY)经 loadIknowEnv SSOT 解析,透传给两个 Web 工具,
-    // 装配到 network-guard 的 ProxyAgent dispatcher(trust_env=False 语义,
-    // 显式配置才生效;空 → 直连)。
-    createWebFetchTool({ proxyUrl: env.web.proxy }),
-    // web_search 端点覆写经 loadIknowEnv SSOT 解析(process.env > .env.local > .env),
-    // 工具自身不直读 process.env。
-    createWebSearchTool({
-      envSearchUrl: env.web.searchUrl,
-      proxyUrl: env.web.proxy,
-    }),
-  ];
-  const reg = createAciRegistry(aciTools);
+  // 8 件工具集 SSOT 工厂(append-only 顺序;env.web 透传 IKNOW_WEB_PROXY /
+  // IKNOW_WEB_SEARCH_URL)。proxyUrl 非法 → 装配期同步抛(见 registry.ts)。
+  const reg = createDefaultAciRegistry({ env, sandboxRoot });
   const baseExecutor = createExecutor(reg.inner);
   // 5-step permission middleware: 危险命令由硬墙无条件拦截(#122)。
   // `createAciExecutor` 内部已装配 permission-executor,不要再外包一层。

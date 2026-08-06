@@ -6,6 +6,8 @@
 
 - **Identity assembly (#196)**: 在 `deps.system` 注入缝上装配身份层 — `identity` (Name/Kind/Signature) + `soul` (core truths/boundaries/vibe/continuity) + `~/.iknow/user.md` 用户画像 + 首启 `BOOTSTRAP` 引导。所有 iknow 入口 (chat / tui / ask / serve) 走同一装配层。`state.json` 持久化 `bootstrap_seeded`,二次启动跳过 BOOTSTRAP 段。`initializeIknowWorkspace()` eager + idempotent,在 `build-engine.ts` 与 4 入口(chat / serve / tui / ask)各调一次,失败降级 warn 不阻塞装配。
 
+- **ACI 8 工具集 SSOT 注册层 (`createDefaultAciRegistry`)**: 新增 `src/harness/aci/tools/registry.ts`,把 `build-engine.ts` 手写的 8 件工具数组(bash/read_file/grep/glob/edit_file/write_file + web_fetch/web_search)抽成单一装配工厂,并对齐 upstream `create_default_tool_registry()`(`tools/__init__.py:48`)。`build-engine.ts` 与 `tui/deps.ts` 改为共用该工厂,消除 TUI 入口工具集分裂 — 修复 `iknow tui` 漏注册 `web_fetch`/`web_search` 且不消费 `IKNOW_WEB_PROXY` 的历史问题。工厂入参收窄为 `Pick<IknowEnv,"web">` + `sandboxRoot`(不传 LLM key 等敏感字段);`proxyUrl` 非法在装配期 fail-fast;`sandboxRoot` 越界保持执行期由 fs 工具拒绝(装配期不做 fs IO)。测试:`registry.test.ts` 新 7 例(5 边界类)+ `deps-tools.test.ts` 新 3 例(TUI tracer bullet,重构前红后绿);1422 全绿;ask 端到端 web_search 真出结果。
+
 ### Breaking (internal, pre-release)
 
 - `iknow serve` 不再托管 `/api/v1/traces` 读 API；检测面板改由独立 `iknow trace` 子命令进程提供（默认端口 24881；`iknow trace --trace-out <path>` 读 `serve --trace-out <path>` 写入的同一 JSONL）。`--trace-out` 在 `serve` / `chat` / `ask` 上的写语义未变（仍由 hub 写埋点落到 JSONL）。详见 #183。
