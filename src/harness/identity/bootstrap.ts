@@ -1,5 +1,5 @@
 /**
- * IKNOW-196 首启引导脚本 (spec `specs/196-identity-assembly.md` Project
+ * IKNOW-196 首启对话脚本 (spec `specs/196-identity-assembly.md` Project
  * Structure 段,spec.md:82-83 + Code Style 段)。
  *
  * 模块责任:agent 首启时(bootstrap_seeded=false)的对话脚本,
@@ -10,14 +10,31 @@
  * 且 state.json.bootstrap_seeded=false 时装配。完成后由显式
  * `writeIknowState({ bootstrap_seeded: true })` 关闭(装配路径不写)。
  * 本 const 是 SSOT,装配时只引用,绝不复制 / 切片(防 drift)。
+ *
+ * 设计要点(rev 2026-08-06):`~/.iknow/` 在 ACI 工具 workspace 沙箱根
+ * (`process.cwd()`)之外 — read_file / glob / write_file / edit_file 一律
+ * "path outside workspace" 拒绝;bash 单命令可读但复合命令(`&&` `||` `>` `;`)
+ * 被 hard-wall 拦截。所以引导不能诱导 agent 用工具访问该目录,只能做
+ * 纯对话收集。完成路径改为用户**在宿主外**(文本编辑器)直接填
+ * `~/.iknow/user.md`,然后回到对话输入 `/profile done` 翻 bootstrap 旗。
+ * 这条路径必须经宿主斜杠命令才能走通(`writeIknowState` 没有其它 caller)。
  */
 
-/** IKNOW-196 首启对话脚本。引导用户填 user.md(Goals / Style / When done)。 */
+/** IKNOW-196 首启对话脚本。引导用户填 user.md(Goals / Style / When done)。
+ *  修 2026-08-06:不去诱导 agent 用工具读 ~/.iknow/;改宿主斜杠完成钩子
+ *  /profile done 翻 bootstrap_seeded。 */
 export const IKNOW_BOOTSTRAP_PROMPT = `
 # First-run bootstrap
 
 Welcome — this is a one-time setup. I'll help you fill in \`~/.iknow/user.md\`
 so future sessions can speak to your context. Three short rounds.
+
+## Note on tools
+\`~/.iknow/\` lives outside this session's workspace sandbox, so my
+file tools (read_file / glob / write_file / edit_file) and compound
+shell commands will reject paths there. Do **not** try them — you'll
+just get permission errors. Instead, the host owns this directory: you
+write the file in your own editor and tell me when you're done.
 
 ## Goals
 What do you want me to help you with? Name 1-3 recurring workflows
@@ -27,11 +44,11 @@ vague goals lead to vague help.
 ## Style
 How should I sound? Pick a register: terse / standard / thorough.
 Any words or phrases to avoid? Any I should prefer? Tone preferences
-lived here, not in soul — soul is mine, style is yours.
+live here, not in soul — soul is mine, style is yours.
 
 ## When done
-We're done when ~/.iknow/user.md has at least Profile, Defaults, and
-Preferences filled in (Notes can stay empty for now). After you save,
-tell me "done" and I'll flip the bootstrap flag — next session starts
-straight into work, no rehearsal.
+We're done when \`~/.iknow/user.md\` has at least Profile, Defaults, and
+Preferences filled in (Notes can stay empty for now). Edit the file in
+your own editor, then type \`/profile done\` in this session — I'll flip
+the bootstrap flag, and next session starts straight into work.
 `.trim();

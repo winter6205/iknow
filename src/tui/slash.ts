@@ -15,7 +15,14 @@
  */
 
 export type TuiSlashCommand =
-  "sessions" | "new" | "quit" | "exit" | "help" | "info" | "thinking";
+  | "sessions"
+  | "new"
+  | "quit"
+  | "exit"
+  | "help"
+  | "info"
+  | "thinking"
+  | "profile";
 
 export type SlashParseResult =
   | { kind: "command"; command: TuiSlashCommand }
@@ -30,6 +37,7 @@ const VOCABULARY: ReadonlySet<string> = new Set<TuiSlashCommand>([
   "help",
   "info",
   "thinking",
+  "profile",
 ]);
 
 /** 解析输入框内容；空/纯空白 → message（调用方按空输入忽略）。 */
@@ -52,6 +60,7 @@ export function helpLines(): ReadonlyArray<string> {
     "/info      当前会话元信息",
     "/help      本词表",
     "/thinking  切换思考过程折叠",
+    "/profile   标记首启引导完成（先在外侧填好 ~/.iknow/user.md）",
     "/quit      退出（别名 /exit）",
     "Ctrl+C     打断前台运行中的 turn",
   ];
@@ -64,6 +73,7 @@ const HINT_DESCRIPTIONS: Record<TuiSlashCommand, string> = {
   info: "当前会话元信息",
   help: "本词表",
   thinking: "切换思考过程折叠",
+  profile: "标记首启引导完成",
   quit: "退出（别名 /exit）",
   exit: "同 /quit",
 };

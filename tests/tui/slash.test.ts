@@ -23,6 +23,7 @@ describe("parseTuiInput: 词表命中", () => {
     ["/help", "help"],
     ["/info", "info"],
     ["/thinking", "thinking"],
+    ["/profile", "profile"],
   ] as const)("解析 %s → command %s", (input, command) => {
     const parsed = parseTuiInput(input);
     expect(parsed).toEqual({ kind: "command", command });
@@ -75,7 +76,7 @@ describe("parseTuiInput: 普通消息与边界", () => {
 });
 
 describe("helpLines", () => {
-  it("覆盖全部 7 条词表命令 + Ctrl+C 说明，且无 emoji", () => {
+  it("覆盖全部 8 条词表命令 + Ctrl+C 说明，且无 emoji", () => {
     const joined = helpLines().join("\n");
     for (const cmd of [
       "/sessions",
@@ -84,6 +85,7 @@ describe("helpLines", () => {
       "/help",
       "/quit",
       "/exit",
+      "/profile",
     ]) {
       expect(joined).toContain(cmd);
     }
@@ -98,7 +100,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  it('"/" → 全部 7 条（按词表插入顺序）', () => {
+  it('"/" → 全部 8 条（按词表插入顺序）', () => {
     expect(slashSuggestions("/")).toEqual([
       "sessions",
       "new",
@@ -107,6 +109,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
       "help",
       "info",
       "thinking",
+      "profile",
     ]);
   });
 
@@ -167,6 +170,7 @@ describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
     "help",
     "info",
     "thinking",
+    "profile",
   ] as const;
 
   it("cursor=0 → /sessions （首条）", () => {
