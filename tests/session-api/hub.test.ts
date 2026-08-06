@@ -17,6 +17,7 @@ import type { SessionStoreError } from "../../src/session-api/store/index.ts";
 import type { SessionFileV1 } from "../../src/session-api/store/index.ts";
 import type {
   AssistantTurnResult,
+  HarnessStreamEvent,
   LoopAdapter,
   LoopEngineDeps,
   AnthropicNativeMessage,
@@ -790,5 +791,52 @@ describe("getSession history replay (T1)", () => {
     assert.equal("thinking" in t2, false);
     assert.equal("toolCalls" in t2, false);
     assert.equal(res.turns[1]!.answer.finalText, "round two done");
+  });
+});
+
+// -- T3: onStream forwarding from postMessage to run() -----------------------
+
+describe("postMessage onStream forwarding (#188)", () => {
+  it("forwards onStream to run(): stub stream events reach the hub caller", async () => {
+    const received: HarnessStreamEvent[] = [];
+    const hub = makeHub(
+      makeDeps([assistantResult({ texts: ["hello world"] })], {
+        streamEventsByStep: [
+          [
+            { type: "text_delta", text: "hello " },
+            { type: "text_delta", text: "world" },
+          ],
+        ],
+      })
+    );
+    const id = (await hub.createSession()).session.conversation_id;
+    const resp = await hub.postMessage({
+      conversationId: id,
+      text: "hi",
+      onStream: (e) => received.push(e),
+    });
+    assert.equal(resp.turn.answer.finalText, "hello world");
+    assert.deepEqual(received, [
+      { type: "text_delta", text: "hello " },
+      { type: "text_delta", text: "world" },
+    ]);
+  });
+
+  it("without onStream: stub still emits but no caller-side capture (zero behavior change)", async () => {
+    // 没传 onStream → opts.onStream 为 undefined;hub 透传 undefined 给 run();
+    // stub 的 onStream 也是 undefined,emit 被 no-op(side-effect 内部不抛错)。
+    // 此用例守住"无 onStream 时行为零变化"的反向兼容契约。
+    const hub = makeHub(
+      makeDeps([assistantResult({ texts: ["same"] })], {
+        streamEventsByStep: [[{ type: "text_delta", text: "same" }]],
+      })
+    );
+    const id = (await hub.createSession()).session.conversation_id;
+    const resp = await hub.postMessage({
+      conversationId: id,
+      text: "q",
+    });
+    assert.equal(resp.turn.answer.finalText, "same");
+    assert.equal(resp.turn.answer.stopReason, "completed");
   });
 });

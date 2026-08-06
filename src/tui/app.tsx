@@ -18,6 +18,7 @@
  *    会话触发。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { ReactElement } from "react";
 import { Box, Text, useApp, useInput, useWindowSize } from "ink";
 import type { TuiBridge } from "./hub-bridge.js";
@@ -45,6 +46,8 @@ import {
 import { formatLiveToolEvent } from "./tool-summary.js";
 import type { TuiToolEvent } from "./deps.js";
 import { ChatView } from "./chat-view.js";
+import type { StreamDraft } from "../cli/stream-draft.js";
+import { createStreamDraft } from "../cli/stream-draft.js";
 import { ListView, relativeTime, type TuiListEntry } from "./list-view.js";
 import { PromptInput, useTick } from "./components.js";
 import { renderBanner } from "./banner.js";
@@ -119,10 +122,32 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     Record<string, ReadonlyArray<string>>
   >({});
   const [pendingQuit, setPendingQuit] = useState(false);
+  // T6 (D5): thinking 折叠面板展开态 — 全局运行态,会话重启回退折叠(/thinking 切换)。
+  const [thinkingExpanded, setThinkingExpanded] = useState(false);
   // 任务 A 行级：聊天区域行级滚动偏移（0 = 底/auto-follow，>0 = 向上滚多少
   // 物理行）。新 turn 完成 / new 会话 → 0；PgUp/PgDn/Home/End + 鼠标滚轮
   // 调整（与 PromptInput 的 ↑/↓ 不冲突，避键）。
   const [chatScroll, setChatScroll] = useState(0);
+
+  // T4 (#175): 流式草稿单一实例（单会话 in-flight 即可；多会话并发时只有
+  // fg 会话持 streamDraft，bg 由落盘后刷新获得终稿）。state ref 由 React 保证
+  // 引用稳定 — 等价 useSyncExternalStore 的快照语义（getSnapshot 不能每调
+  // 用返新值，避免无限 re-render；我们用 useState 持有 masked 字符串）。
+  const [streamDraft, setStreamDraft] = useState<StreamDraft | null>(null);
+  const [draftsMasked, setDraftsMasked] = useState<string>("");
+  // 当 streamDraft 切换时重订阅；listener 内现取 masked() 推 state。
+  useEffect(() => {
+    if (streamDraft === null) {
+      setDraftsMasked("");
+      return undefined;
+    }
+    const unsubscribe = streamDraft.subscribe(() => {
+      setDraftsMasked(streamDraft.masked());
+    });
+    // 立即同步一次初始值（subscribe 不回调，append 之前 draft 为空也无所谓）
+    setDraftsMasked(streamDraft.masked());
+    return unsubscribe;
+  }, [streamDraft]);
 
   const aborters = useRef(new Map<string, AbortController>());
   const inflightPromises = useRef(new Set<Promise<unknown>>());
@@ -279,11 +304,19 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     controller: AbortController
   ): Promise<void> {
     let stopReason: string | undefined;
+    // T4: 构造草稿 + 装配 onStream；abort 时清空（cancelled 路径 + 异常路径都走）。
+    const draft = createStreamDraft();
+    setStreamDraft(draft);
+    const onStream = (event: HarnessStreamEvent): void => {
+      // 与 chat 侧一致：仅 text_delta 进草稿；tool_call_start 留 v1+。
+      draft.append(event);
+    };
     try {
       const resp = await bridge.postMessage({
         conversationId: targetId,
         text,
         signal: controller.signal,
+        onStream,
       });
       stopReason = resp.stopReason;
     } catch (err) {
@@ -291,6 +324,9 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       setNotice({ lines: [`turn 失败：${describeError(err)}`] });
     } finally {
       aborters.current.delete(targetId);
+      // 草稿收尾：清缓冲 + 解绑 state（draftsMasked useEffect 会自动清空）。
+      draft.reset();
+      setStreamDraft(null);
     }
     // 落盘后从文件刷新（共享池纪律：磁盘是 SSOT）。cancelled 走
     // DROP_REASONS 不落盘 → 文件仍是 turn 前状态，UI 与磁盘一致。
@@ -470,6 +506,20 @@ export function TuiApp(props: TuiAppProps): ReactElement {
         setNotice({ lines: infoLines(active, activeKey) });
         return;
       }
+      case "thinking": {
+        // T6 (D5):切换 thinking 折叠面板展开态;running 态下也允许(不改
+        // streaming 行为,只影响终稿渲染)。
+        const next = !thinkingExpanded;
+        setThinkingExpanded(next);
+        setNotice({
+          lines: [
+            next
+              ? "思考已展开（显示思考全文 + 加密占位）"
+              : "思考已折叠（仅显示摘要行）/thinking 切换",
+          ],
+        });
+        return;
+      }
     }
   }
 
@@ -540,6 +590,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
         <ChatView
           session={active}
           cols={cols}
+          draftsMasked={draftsMasked}
           liveToolLines={
             active.conversationId
               ? (liveToolLines[active.conversationId] ?? [])
@@ -554,6 +605,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           }
           scrollRows={chatScroll}
           viewportRows={viewportRows}
+          thinkingExpanded={thinkingExpanded}
         />
       )}
       {notice && (

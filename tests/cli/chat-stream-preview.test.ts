@@ -166,4 +166,75 @@ describe("createStreamPreviewSink (#179 T6 TTY spinner replacement)", () => {
     sink.feed({ type: "text_delta", text: "b" });
     assert.equal(sink.textStreamed, true);
   });
+
+  it("SC20: stdout never carries a complete secret (masked to ***)", () => {
+    const original = process.env.ANTHROPIC_AUTH_TOKEN;
+    process.env.ANTHROPIC_AUTH_TOKEN = "sk-abc123";
+    try {
+      const { out, writers } = captureStreams();
+      const sink = createStreamPreviewSink(writers);
+      sink.feed({ type: "text_delta", text: "your key is " });
+      sink.feed({ type: "text_delta", text: "sk-abc123 here" });
+      const stdout = out.join("");
+      assert.ok(
+        !stdout.includes("sk-abc123"),
+        "complete secret must not be written"
+      );
+      // The full masked text is streamed incrementally: "sk-abc123" -> "***".
+      assert.ok(stdout.includes("***"), "masked secret must appear as ***");
+      assert.equal(sink.textStreamed, true);
+    } finally {
+      if (original === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
+      else process.env.ANTHROPIC_AUTH_TOKEN = original;
+    }
+  });
+
+  it("documented SC20 boundary: truncated secret split across deltas leaks the first fragment", () => {
+    // streamDraft.masked() is a full re-mask (T2 design) with no trailing
+    // surplus, so a secret split across deltas ("sk-" then "abc123") is written
+    // as the bare fragment "sk-" on the first delta, before the full masking
+    // catches it. This pins the KNOWN behavior (not a bug fix): the complete
+    // secret "sk-abc123" is never emitted, and once both deltas arrive the
+    // accumulated secret is masked.
+    const original = process.env.ANTHROPIC_AUTH_TOKEN;
+    process.env.ANTHROPIC_AUTH_TOKEN = "sk-abc123";
+    try {
+      const { out, writers } = captureStreams();
+      const sink = createStreamPreviewSink(writers);
+      sink.feed({ type: "text_delta", text: "key " });
+      sink.feed({ type: "text_delta", text: "sk-" });
+      assert.ok(
+        out.join("").includes("sk-"),
+        "first fragment is a known bare write"
+      );
+      assert.ok(
+        !out.join("").includes("sk-abc123"),
+        "complete secret never emitted"
+      );
+      sink.feed({ type: "text_delta", text: "abc123" });
+      const stdout = out.join("");
+      assert.ok(!stdout.includes("sk-abc123"), "complete secret never emitted");
+      assert.ok(
+        stdout.includes("sk-"),
+        "truncated fragment leak is documented"
+      );
+      // Once the full secret accumulates, the masked output shrinks (9 chars
+      // -> "***" = 3 chars), so lastWrittenLen already covers the masked
+      // position and no further slice is emitted. The "***" marker therefore
+      // never reaches stdout for this cross-delta split (D4 documented edge).
+      assert.equal(sink.textStreamed, true);
+    } finally {
+      if (original === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
+      else process.env.ANTHROPIC_AUTH_TOKEN = original;
+    }
+  });
+
+  it("empty delta writes nothing extra but textStreamed still flips", () => {
+    const { out, writers } = captureStreams();
+    const sink = createStreamPreviewSink(writers);
+    sink.feed({ type: "text_delta", text: "x" });
+    sink.feed({ type: "text_delta", text: "" });
+    assert.deepEqual(out, ["x"], "empty delta must not produce a second write");
+    assert.equal(sink.textStreamed, true);
+  });
 });

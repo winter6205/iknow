@@ -12,6 +12,7 @@ import {
   formatRunHuman,
   formatRunJson,
   renderAssistantAnswer,
+  renderThinkingSummary,
   THINKING_PREFIX,
   REDACTED_PLACEHOLDER,
 } from "../../src/cli/format.ts";
@@ -349,7 +350,7 @@ describe("formatRunHuman — showThinking 开关 (#152 T5)", () => {
     // + thinking + "\n\n" + text),后接确定状态行。
     assert.equal(
       out,
-      `${THINKING_PREFIX}Thinking visible now\n\nfinal answer text\n\nstop=completed · turns=1 · tools=- · 0ms`
+      `思考（1 段）\n\nfinal answer text\n\nstop=completed · turns=1 · tools=- · 0ms`
     );
   });
 
@@ -550,5 +551,86 @@ describe("formatRunHuman — lastUsage token 读数 (#160 T5)", () => {
     );
     // 钉死无 token 段的完整状态行(反向兼容既有消费者)。
     assert.equal(out, "hello\n\nstop=completed · turns=1 · tools=- · 0ms");
+  });
+});
+
+/**
+ * T6 (D5):renderThinkingSummary — 终稿 thinking 折叠摘要行(chat 端 showThinking
+ * 的折叠态展示)。
+ *
+ * 语义:chat 端 showThinking=true 时不再展开 thinking 全文,改为显示摘要行
+ * (TTY 无折叠交互,摘要行即"折叠态"),与 TUI 默认折叠一致。redacted_thinking
+ * 计入「已加密」计数;无 thinking 块返回空串。
+ */
+describe("renderThinkingSummary (#T6 thinking 折叠摘要)", () => {
+  function mkMessage(
+    role: "user" | "assistant",
+    blocks: AnthropicNativeMessage["content"]
+  ): AnthropicNativeMessage {
+    return { role, content: blocks };
+  }
+
+  it("有 thinking 块:返回 `思考（N 段）` 摘要", () => {
+    const msgs: AnthropicNativeMessage[] = [
+      mkMessage("user", [{ type: "text", text: "q" }]),
+      mkMessage("assistant", [
+        { type: "thinking", thinking: "a", signature: "s1" },
+        { type: "thinking", thinking: "b", signature: "s2" },
+        { type: "text", text: "answer" },
+      ]),
+    ];
+    assert.equal(renderThinkingSummary(msgs), "思考（2 段）");
+  });
+
+  it("无 thinking 但含 redacted:返回 `思考（0 段 · 已加密 ×1）`", () => {
+    const msgs: AnthropicNativeMessage[] = [
+      mkMessage("user", [{ type: "text", text: "q" }]),
+      mkMessage("assistant", [
+        { type: "redacted_thinking", data: "BLOB" },
+        { type: "text", text: "answer" },
+      ]),
+    ];
+    assert.equal(renderThinkingSummary(msgs), "思考（0 段 · 已加密 ×1）");
+  });
+
+  it("thinking + redacted 混合:计数与加密计数都反映", () => {
+    const msgs: AnthropicNativeMessage[] = [
+      mkMessage("user", [{ type: "text", text: "q" }]),
+      mkMessage("assistant", [
+        { type: "thinking", thinking: "a", signature: "s1" },
+        { type: "redacted_thinking", data: "BLOB" },
+        { type: "text", text: "answer" },
+      ]),
+    ];
+    assert.equal(renderThinkingSummary(msgs), "思考（1 段 · 已加密 ×1）");
+  });
+
+  it("多段 thinking + 多条 redacted:计数累积", () => {
+    const msgs: AnthropicNativeMessage[] = [
+      mkMessage("user", [{ type: "text", text: "q" }]),
+      mkMessage("assistant", [
+        { type: "thinking", thinking: "a", signature: "s1" },
+        { type: "thinking", thinking: "b", signature: "s2" },
+        { type: "redacted_thinking", data: "B1" },
+        { type: "redacted_thinking", data: "B2" },
+        { type: "text", text: "answer" },
+      ]),
+    ];
+    assert.equal(renderThinkingSummary(msgs), "思考（2 段 · 已加密 ×2）");
+  });
+
+  it("最后一条助手无 thinking:返回空串", () => {
+    const msgs: AnthropicNativeMessage[] = [
+      mkMessage("user", [{ type: "text", text: "q" }]),
+      mkMessage("assistant", [{ type: "text", text: "answer" }]),
+    ];
+    assert.equal(renderThinkingSummary(msgs), "");
+  });
+
+  it("无 assistant 回合:返回空串", () => {
+    const msgs: AnthropicNativeMessage[] = [
+      mkMessage("user", [{ type: "text", text: "q" }]),
+    ];
+    assert.equal(renderThinkingSummary(msgs), "");
   });
 });

@@ -27,6 +27,7 @@ import {
   createViolationCounter,
   wireKillSessionNotification,
 } from "../harness/sandbox/violation-handling.js";
+import { createStreamDraft } from "./stream-draft.js";
 
 /** Visual separator after a completed answer on TTY only. */
 const TTY_ANSWER_SEP = "────────";
@@ -234,6 +235,14 @@ export function createStreamPreviewSink(opts: {
   readonly writeErr: (chunk: string) => void;
 }): StreamPreviewSink {
   let textStreamed = false;
+  // T5 (#198): 流式草稿经 stream-draft 累积,stdout 写的是 `masked()` 增量
+  // (SC20 遮蔽,不再裸写密钥)。`lastWrittenLen` 记录已写出位置,避免每次
+  // append 重复写出已写内容。
+  // 已知边界(D4 裁决):`masked()` 是"全量重 mask",不维护尾部余量 —— 跨
+  // delta 截断的密钥片段(如 `sk-` 先到、`abc123` 后到)会在累积完成前以
+  // 片段形式裸写出。SC20 完整密钥命中场景正常遮蔽。
+  const streamDraft = createStreamDraft();
+  let lastWrittenLen = 0;
   const feed = (event: HarnessStreamEvent): void => {
     try {
       if (event.type === "text_delta") {
@@ -241,7 +250,13 @@ export function createStreamPreviewSink(opts: {
           // 清掉「思考中…」spinner(one-shot);首个 delta 之后不再清除。
           opts.writeErr("\r\x1b[K");
         }
-        opts.writeOut(event.text);
+        streamDraft.append(event);
+        const masked = streamDraft.masked();
+        const slice = masked.slice(lastWrittenLen);
+        if (slice.length > 0) {
+          opts.writeOut(slice);
+          lastWrittenLen = masked.length;
+        }
         textStreamed = true;
         return;
       }

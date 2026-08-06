@@ -204,20 +204,30 @@ export function formatStatusLine(opts: FormatRunHumanOpts): string {
  * #195: status segment delegates to `formatStatusLine` (DRY with the streaming
  * chat host path which emits only the status line + separator).
  *
- * #152 T5:thinking 可见面走 `opts.showThinking`(默认 false)。关闭时与原行为
- * 完全一致(用 `finalText` 派生,thinking 不进答案);开启时改走
- * `renderAssistantAnswer` 把 thinking 文本前置显示。
+ * #152 T5 + #T6 (D5):thinking 可见面走 `opts.showThinking`(默认 false)。关闭时
+ * 与原行为完全一致(用 `finalText` 派生,thinking 不进答案);开启时切到
+ * `renderThinkingVisible` = 折叠摘要行 + 答案正文(text 块拼接),与 TUI 终稿
+ * 默认折叠态一致(chat 端 TTY 无折叠交互,摘要行即折叠态)。
  *
  * SC20: 最终文本会被 `createOutputMask(currentSecretValues())` 替换已知密钥
  * 值为 `***`(消费层输出边界)。
+ *
+ * T6 (D5): `renderThinkingSummary` / `renderThinkingVisible` 为折叠态组装;
+ * 见 `renderThinkingSummary` 文档。
  */
+function renderThinkingVisible(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): string {
+  const summary = renderThinkingSummary(messages);
+  const text = renderAssistantAnswer({ messages, showThinking: false });
+  if (summary === "") return text;
+  return text === "" ? summary : `${summary}\n\n${text}`;
+}
+
 export function formatRunHuman(opts: FormatRunHumanOpts): string {
   const { result, showThinking = false } = opts;
   const rawText = showThinking
-    ? renderAssistantAnswer({
-        messages: result.messages,
-        showThinking: true,
-      })
+    ? renderThinkingVisible(result.messages)
     : (result.finalText ?? "");
   const text = buildOutputMask().mask(rawText);
   const status = formatStatusLine(opts);
@@ -298,4 +308,41 @@ function flattenToolNames(trace: LoopTrace): string[] {
   return Array.from(
     new Set(trace.turns.flatMap((t) => t.toolCalls.map((c) => c.toolName)))
   );
+}
+
+/**
+ * T6 (D5):终稿 thinking 折叠摘要行(chat 端 `showThinking=true` 的折叠态展示)。
+ *
+ * 返回 `思考（N 段[ · 已加密 ×M]）` 摘要行;无 thinking / redacted → 空串。
+ * TTY 无折叠交互,摘要行即"折叠态"——与 TUI 默认折叠语义一致(两个入口的
+ * thinking 默认折叠状态统一)。redacted_thinking 计入 `已加密` 计数(加密 blob
+ * 无可见内容,只报存在)。
+ */
+export function renderThinkingSummary(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): string {
+  const lastAssistant = findLastAssistantMessage(messages);
+  if (!lastAssistant) return "";
+  return summarizeThinkingContent(lastAssistant.content);
+}
+
+/**
+ * 单消息级 thinking 折叠摘要（SSOT，chat-view 复用同源）。
+ *
+ * 返回 `思考（N 段[ · 已加密 ×M]）` 摘要行;无 thinking / redacted → 空串。
+ * 供 chat 端 `showThinking=true` 折叠态展示与 TUI 折叠面板共用——两入口的
+ * thinking 默认折叠状态与摘要字面保持一致。
+ */
+export function summarizeThinkingContent(
+  content: ReadonlyArray<AnthropicNativeMessage["content"][number]>
+): string {
+  let thinkingCount = 0;
+  let redactedCount = 0;
+  for (const block of content) {
+    if (block.type === "thinking") thinkingCount += 1;
+    else if (block.type === "redacted_thinking") redactedCount += 1;
+  }
+  if (thinkingCount === 0 && redactedCount === 0) return "";
+  const redacted = redactedCount > 0 ? ` · 已加密 ×${redactedCount}` : "";
+  return `思考（${thinkingCount} 段${redacted}）`;
 }

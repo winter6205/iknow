@@ -18,6 +18,7 @@ import { SessionHub } from "../session-api/hub.js";
 import type { PostMessageResponse } from "../session-api/contract.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
 import type { LoopEngineDeps } from "../harness/index.js";
+import type { HarnessStreamEvent } from "../harness/stream.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 
 /**
@@ -66,6 +67,7 @@ export interface TuiBridge {
     readonly conversationId: string;
     readonly text: string;
     readonly signal?: AbortSignal;
+    readonly onStream?: (event: HarnessStreamEvent) => void;
   }) => Promise<TuiPostResult>;
   readonly listSessions: () => ReturnType<SessionHub["listSessions"]>;
   readonly loadSessionFile: (conversationId: string) => Promise<SessionFileV1>;
@@ -100,10 +102,15 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
       const created = await hub.createSession();
       return created.session.conversation_id;
     },
-    postMessage: async ({ conversationId, text, signal }) => {
+    postMessage: async ({ conversationId, text, signal, onStream }) => {
       opts.inflight.mark(conversationId);
       try {
-        const resp = await hub.postMessage({ conversationId, text, signal });
+        const resp = await hub.postMessage({
+          conversationId,
+          text,
+          signal,
+          onStream,
+        });
         return {
           conversationId: resp.session.conversation_id,
           finalText: resp.turn.answer.finalText,

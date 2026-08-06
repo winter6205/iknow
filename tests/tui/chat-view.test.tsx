@@ -290,3 +290,151 @@ describe("ChatView 行级滚动（任务 A 行级）", () => {
     expect(plain).toContain("[ask]");
   });
 });
+
+/**
+ * T6 (D5):assistant thinking 折叠面板 — 终稿从 result.messages 提取 thinking
+ * blocks 渲染 + 折叠控件(默认折叠 = 摘要行;展开 = 全文 + redacted 占位)。
+ * `thinkingExpanded` prop 控制展开态(app 层 /thinking 切换)。
+ */
+describe("T6 thinking 折叠面板", () => {
+  function thinkingSession(
+    blocks: AnthropicNativeMessage["content"]
+  ): TuiSessionState {
+    return makeSession([
+      { role: "user", content: [{ type: "text", text: "q" }] },
+      { role: "assistant", content: blocks },
+    ]);
+  }
+
+  it("默认折叠:显示一行摘要,不展开 thinking 全文", async () => {
+    const session = thinkingSession([
+      { type: "thinking", thinking: "SECRET_REASONING", signature: "s" },
+      { type: "text", text: "answer" },
+    ]);
+    const output = await renderToString(
+      <ChatView
+        session={session}
+        cols={80}
+        liveToolLines={[]}
+        askLine={undefined}
+      />,
+      { columns: 80 }
+    );
+    const plain = stripAnsi(output);
+    expect(plain).toContain("思考（1 段）");
+    expect(plain).not.toContain("SECRET_REASONING");
+    expect(plain).toContain("answer");
+  });
+
+  it("thinkingExpanded=true:展开显示 thinking 全文 + 摘要行带展开标记", async () => {
+    const session = thinkingSession([
+      { type: "thinking", thinking: "VISIBLE_REASONING", signature: "s" },
+      { type: "text", text: "answer" },
+    ]);
+    const output = await renderToString(
+      <ChatView
+        session={session}
+        cols={80}
+        liveToolLines={[]}
+        askLine={undefined}
+        thinkingExpanded
+      />,
+      { columns: 80 }
+    );
+    const plain = stripAnsi(output);
+    expect(plain).toContain("VISIBLE_REASONING");
+    expect(plain).toContain("answer");
+  });
+
+  it("redacted_thinking:折叠摘要计入已加密计数;展开显示占位不泄露 data", async () => {
+    const session = thinkingSession([
+      { type: "redacted_thinking", data: "ENCRYPTED_BLOB" },
+      { type: "text", text: "answer" },
+    ]);
+    // 折叠态
+    const collapsed = await renderToString(
+      <ChatView
+        session={session}
+        cols={80}
+        liveToolLines={[]}
+        askLine={undefined}
+      />,
+      { columns: 80 }
+    );
+    const plainC = stripAnsi(collapsed);
+    expect(plainC).toContain("思考（0 段 · 已加密 ×1）");
+    expect(plainC).not.toContain("ENCRYPTED_BLOB");
+    // 展开态
+    const expanded = await renderToString(
+      <ChatView
+        session={session}
+        cols={80}
+        liveToolLines={[]}
+        askLine={undefined}
+        thinkingExpanded
+      />,
+      { columns: 80 }
+    );
+    const plainE = stripAnsi(expanded);
+    expect(plainE).toContain("已加密思考");
+    expect(plainE).not.toContain("ENCRYPTED_BLOB");
+  });
+
+  it("无 thinking 块:不渲染折叠面板(无摘要噪声)", async () => {
+    const session = thinkingSession([{ type: "text", text: "plain" }]);
+    const output = await renderToString(
+      <ChatView
+        session={session}
+        cols={80}
+        liveToolLines={[]}
+        askLine={undefined}
+      />,
+      { columns: 80 }
+    );
+    const plain = stripAnsi(output);
+    expect(plain).not.toContain("思考（");
+    expect(plain).toContain("plain");
+  });
+
+  it("折叠面板无 emoji(主码区缺席)", async () => {
+    const session = thinkingSession([
+      { type: "thinking", thinking: "r", signature: "s" },
+      { type: "text", text: "answer" },
+    ]);
+    const output = await renderToString(
+      <ChatView
+        session={session}
+        cols={80}
+        liveToolLines={[]}
+        askLine={undefined}
+      />,
+      { columns: 80 }
+    );
+    const plain = stripAnsi(output);
+    expect(/[\u{1F300}-\u{1FAFF}]/u.test(plain)).toBe(false);
+  });
+
+  it("estimateMessageRows:折叠面板占 1 行;展开按 thinking 文本行数累加", () => {
+    // 折叠:thinking 摘要行(1) + text 块(1 + 1 margin) = 3
+    const collapsedMsg: AnthropicNativeMessage = {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "a", signature: "s" },
+        { type: "text", text: "answer" },
+      ],
+    };
+    expect(estimateMessageRows(collapsedMsg, 80)).toBe(3);
+    // 展开:thinking 全文 a(1) + redacted 占位(1) + text(2) = 4
+    const expandedMsg: AnthropicNativeMessage = {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "a", signature: "s" },
+        { type: "redacted_thinking", data: "x" },
+        { type: "text", text: "answer" },
+      ],
+    };
+    expect(
+      estimateMessageRows(expandedMsg, 80, { thinkingExpanded: true })
+    ).toBe(4);
+  });
+});

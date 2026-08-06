@@ -365,13 +365,15 @@ describe("processChatLine (pipe simulation)", () => {
 });
 
 /**
- * #152 T5 可见开关落点集成：chat-session `processChatLine` 尊重 `showThinking`。
+ * #152 T5 + #T6 (D5) 接线：chat-session `processChatLine` 尊重 `showThinking`。
  *
- * 默认（缺省/`false`）：输出面（`r.output`）不含 thinking 文本；
- * `ctx.showThinking === true`：输出面含 thinking（区隔前缀由渲染层决定）。
- * 本测试不直接测渲染函数本身（那在 tests/cli/format.test.ts），只测接线。
+ * 默认（缺省/`false`）：输出面（`r.output`）不含 thinking 文本。
+ * `ctx.showThinking === true`：输出面显示折叠摘要行 + 答案正文
+ * （T6 行为变更 — 之前为展开全文；TTY 无折叠交互，摘要行即折叠态，
+ * 与 TUI 默认折叠一致）。本测试不直接测渲染函数本身（那在
+ * tests/cli/format.test.ts），只测接线。
  */
-describe("chat-session thinking 可见开关接线 (#152 T5)", () => {
+describe("chat-session thinking 可见开关接线 (#152 T5 + #T6 折叠摘要)", () => {
   it("showThinking 缺省（false）：output 不含 thinking 文本", async () => {
     const ctx = makeCtx({
       responses: [
@@ -396,7 +398,9 @@ describe("chat-session thinking 可见开关接线 (#152 T5)", () => {
     );
   });
 
-  it("ctx.showThinking === true：output 含 thinking 文本 + 仍含 text", async () => {
+  it("ctx.showThinking === true：output 含折叠摘要 + 仍含 text（全文不展开）", async () => {
+    // T6 (D5): chat 端 showThinking=true 改为折叠摘要行（不再展开 thinking
+    // 全文），与 TUI 默认折叠一致。
     const ctx = makeCtx({
       responses: [
         assistantResult({
@@ -414,10 +418,11 @@ describe("chat-session thinking 可见开关接线 (#152 T5)", () => {
     ctx.showThinking = true;
     const r = await processChatLine({ line: "any question", ctx });
     assert.equal(r.ranQuery, true);
-    assert.ok(r.output.includes("answer"));
+    assert.ok(r.output.includes("answer"), "正文仍出现");
+    assert.ok(r.output.includes("思考（1 段）"), "折叠摘要行出现（T6 行为）");
     assert.ok(
-      r.output.includes("VISIBLE_THINKING_SHOULD_SHOW"),
-      "on: thinking must be visible in output"
+      !r.output.includes("VISIBLE_THINKING_SHOULD_SHOW"),
+      "折叠态：thinking 全文不展开（防止直接暴露模型内部文本）"
     );
   });
 

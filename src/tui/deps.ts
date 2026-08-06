@@ -72,6 +72,8 @@ export function buildTuiDeps(
     maxTokens: env.llm.maxOutputTokens,
     temperature: env.llm.temperature,
     thinking: buildThinkingParams(env.llm),
+    // T3 (D2): TUI 真实走流式臂,与 build-engine SSOT 同源。
+    stream: env.llm.stream === "on",
   });
   // 沙箱根 = process.cwd()（与 buildHarnessEngine 同款）。
   const sandboxRoot = process.cwd();

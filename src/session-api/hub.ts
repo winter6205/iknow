@@ -14,6 +14,7 @@ import {
   createJsonlTraceService,
   type AnthropicContentBlock,
   type AnthropicNativeMessage,
+  type HarnessStreamEvent,
   type LoopEngineDeps,
   type RunResult,
 } from "../harness/index.js";
@@ -338,6 +339,7 @@ export class SessionHub {
     readonly text: string;
     readonly signal?: AbortSignal;
     readonly thinking?: ThinkingOverride;
+    readonly onStream?: (event: HarnessStreamEvent) => void;
   }): Promise<PostMessageResponse> {
     const { conversationId, text } = opts;
     this.validateText(text);
@@ -393,6 +395,7 @@ export class SessionHub {
         };
         const { result } = await run(query, runDeps, opts.signal, {
           priorMessages: session.messages,
+          onStream: opts.onStream,
         });
         // Violation kill → surface protocolError so the SPA client can
         // attribute the stop; DROP_REASONS already drops protocolError

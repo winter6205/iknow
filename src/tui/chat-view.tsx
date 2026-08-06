@@ -32,11 +32,20 @@ import { Markdown } from "./markdown.js";
 import { Spinner } from "./components.js";
 import { tuiPalette } from "./theme.js";
 import { wrapText } from "./text.js";
+import {
+  REDACTED_PLACEHOLDER,
+  summarizeThinkingContent,
+} from "../cli/format.js";
+
+/** TUI 折叠摘要 SSOT —— `summarizeThinkingContent` 字面(`思考（N 段...）`),
+ *  与 chat 端 `formatRunHuman showThinking=true` 折叠摘要行完全一致;避免
+ *  跨入口字面漂移。*/
 
 /** 单个 message 渲染估算的物理行数（含 prompt 前缀 / 摘要行 / margin）。 */
 export function estimateMessageRows(
   message: AnthropicNativeMessage,
-  cols: number
+  cols: number,
+  opts?: { readonly thinkingExpanded?: boolean }
 ): number {
   if (message.role === "user") {
     const texts = message.content
@@ -49,12 +58,33 @@ export function estimateMessageRows(
     const lines = wrapText(texts, wrapCols);
     return lines.length + 1; // margin
   }
+  // T6 (D5):thinking 折叠面板行数。折叠态 = 1 摘要行(+margin);展开态按
+  // thinking 文本行数 + redacted 占位行累加。判空复用 `summarizeThinkingContent`
+  // (SSOT 摘要字面),行数独立统计不依赖其字符串。
+  let rows = 0;
+  let blocks = 0;
+  const thinkingSummary = summarizeThinkingContent(message.content);
+  if (thinkingSummary !== "") {
+    if (opts?.thinkingExpanded) {
+      for (const block of message.content) {
+        if (block.type === "thinking") {
+          const lines = wrapText(block.thinking, cols);
+          rows += Math.max(1, lines.length);
+          blocks += 1;
+        } else if (block.type === "redacted_thinking") {
+          rows += 1; // 占位行
+          blocks += 1;
+        }
+      }
+    } else {
+      rows += 1; // 折叠摘要单行
+      blocks += 1;
+    }
+  }
   // assistant：text → markdown 行级估计；tool_use → 1 摘要行；
   // 每个块之间 marginBottom=1。保守按"每块行数 = max(1, 文本行) + 1"
   // 算，不细究 markdown 子块（headings / list / fence 是 React 渲染，
   // 我们只估总行数）。
-  let rows = 0;
-  let blocks = 0;
   for (const block of message.content) {
     if (block.type === "text" && block.text.trim().length > 0) {
       const lines = wrapText(block.text, cols);
@@ -80,12 +110,13 @@ export interface MessageRowSpan {
 
 export function buildMessageRowSpans(
   messages: ReadonlyArray<AnthropicNativeMessage>,
-  cols: number
+  cols: number,
+  opts?: { readonly thinkingExpanded?: boolean }
 ): ReadonlyArray<MessageRowSpan> {
   const out: MessageRowSpan[] = [];
   let cursor = 0;
   for (const m of messages) {
-    const rows = estimateMessageRows(m, cols);
+    const rows = estimateMessageRows(m, cols, opts);
     if (rows === 0) continue;
     out.push({ message: m, startRow: cursor, rows });
     cursor += rows;
@@ -116,8 +147,10 @@ function MessageBlocks(props: {
   readonly message: AnthropicNativeMessage;
   readonly cols: number;
   readonly statusMap: Map<string, boolean>;
+  /** T6 (D5):thinking 折叠面板展开态;默认折叠(摘要行)。 */
+  readonly thinkingExpanded?: boolean;
 }): ReactElement | null {
-  const { message, cols, statusMap } = props;
+  const { message, cols, statusMap, thinkingExpanded = false } = props;
   const pal = tuiPalette;
   if (message.role === "user") {
     const texts = message.content
@@ -134,8 +167,35 @@ function MessageBlocks(props: {
       </Box>
     );
   }
-  // assistant：text → markdown；tool_use → 摘要行
+  // T6 (D5):thinking 折叠面板 — 摘要行恒显示;展开态追加 thinking 全文 +
+  // redacted 占位。
   const nodes: ReactElement[] = [];
+  const summary = summarizeThinkingContent(message.content);
+  if (summary !== "") {
+    nodes.push(
+      <Box key="tk-sum" marginBottom={1}>
+        <Text color={pal.dim}>[思考] {summary}</Text>
+      </Box>
+    );
+  }
+  if (summary !== "" && thinkingExpanded) {
+    message.content.forEach((block, i) => {
+      if (block.type === "thinking") {
+        nodes.push(
+          <Box key={`tk-b${i}`} marginBottom={1}>
+            <Text wrap="wrap">{block.thinking}</Text>
+          </Box>
+        );
+      } else if (block.type === "redacted_thinking") {
+        nodes.push(
+          <Box key={`tk-r${i}`} marginBottom={1}>
+            <Text color={pal.dim}>{REDACTED_PLACEHOLDER}</Text>
+          </Box>
+        );
+      }
+    });
+  }
+  // assistant：text → markdown；tool_use → 摘要行
   message.content.forEach((block, i) => {
     if (block.type === "text" && block.text.trim().length > 0) {
       nodes.push(
@@ -170,6 +230,12 @@ export interface ChatViewProps {
   readonly cols: number;
   /** turn 进行中逐条出现的工具事件文案（formatLiveToolEvent 产物）。 */
   readonly liveToolLines: ReadonlyArray<string>;
+  /**
+   * T4 (#175)：当前 turn 流式累积的 masked 助手文本（草稿）。running-fg
+   * 且在迭代中时渲染于 spinner 之前；空串/undefined 不渲染。终稿 commit 后
+   * 由 app 层转进 transcript（messages），此处不再出现。
+   */
+  readonly draftsMasked?: string;
   /** askUser 待决提示（undefined = 无 pending ask）。 */
   readonly askLine: string | undefined;
   /**
@@ -182,13 +248,20 @@ export interface ChatViewProps {
    * 终端 rows - banner - 状态栏 - 输入框 - ask / notice 槽。<= 0 = 不限。
    */
   readonly viewportRows?: number;
+  /**
+   * T6 (D5):thinking 折叠面板展开态;默认折叠(摘要行)。
+   * 由 app 层 /thinking 斜杠命令切换(运行态,会话重启回退折叠)。
+   */
+  readonly thinkingExpanded?: boolean;
 }
 
 export function ChatView(props: ChatViewProps): ReactElement {
   const { session, cols } = props;
   const pal = tuiPalette;
   const statusMap = toolResultStatusMap(session.messages);
-  const spans = buildMessageRowSpans(session.messages, cols);
+  const spans = buildMessageRowSpans(session.messages, cols, {
+    thinkingExpanded: props.thinkingExpanded,
+  });
   const tail = tailSlot(
     props.liveToolLines,
     props.askLine,
@@ -224,6 +297,7 @@ export function ChatView(props: ChatViewProps): ReactElement {
             message={s.message}
             cols={cols}
             statusMap={statusMap}
+            thinkingExpanded={props.thinkingExpanded}
           />
         ))}
       </Box>
@@ -241,6 +315,13 @@ export function ChatView(props: ChatViewProps): ReactElement {
           <Text color={pal.running}>{props.askLine}</Text>
         </Box>
       )}
+      {session.runState === "running-fg" &&
+        props.draftsMasked !== undefined &&
+        props.draftsMasked.length > 0 && (
+          <Box flexDirection="column" marginBottom={1}>
+            <Markdown text={props.draftsMasked} width={cols} />
+          </Box>
+        )}
       {session.runState === "running-fg" && <Spinner />}
     </Box>
   );

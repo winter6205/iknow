@@ -22,6 +22,7 @@ describe("parseTuiInput: 词表命中", () => {
     ["/exit", "exit"],
     ["/help", "help"],
     ["/info", "info"],
+    ["/thinking", "thinking"],
   ] as const)("解析 %s → command %s", (input, command) => {
     const parsed = parseTuiInput(input);
     expect(parsed).toEqual({ kind: "command", command });
@@ -74,7 +75,7 @@ describe("parseTuiInput: 普通消息与边界", () => {
 });
 
 describe("helpLines", () => {
-  it("覆盖全部 6 条词表命令 + Ctrl+C 说明，且无 emoji", () => {
+  it("覆盖全部 7 条词表命令 + Ctrl+C 说明，且无 emoji", () => {
     const joined = helpLines().join("\n");
     for (const cmd of [
       "/sessions",
@@ -97,7 +98,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  it('"/" → 全部 6 条（按词表插入顺序）', () => {
+  it('"/" → 全部 7 条（按词表插入顺序）', () => {
     expect(slashSuggestions("/")).toEqual([
       "sessions",
       "new",
@@ -105,6 +106,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
       "exit",
       "help",
       "info",
+      "thinking",
     ]);
   });
 
@@ -134,7 +136,7 @@ describe('slashComplete: 唯一匹配 → "/cmd "；0/多匹配 → null', () =>
     expect(slashComplete("/q")).toBe("/quit ");
   });
 
-  it('"/" → null（6 匹配）', () => {
+  it('"/" → null（7 匹配）', () => {
     expect(slashComplete("/")).toBeNull();
   });
 
@@ -157,7 +159,15 @@ describe("slashHintLines: 一行短描述", () => {
 });
 
 describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
-  const ALL = ["sessions", "new", "quit", "exit", "help", "info"] as const;
+  const ALL = [
+    "sessions",
+    "new",
+    "quit",
+    "exit",
+    "help",
+    "info",
+    "thinking",
+  ] as const;
 
   it("cursor=0 → /sessions （首条）", () => {
     expect(slashCompleteFromList(ALL, 0)).toBe("/sessions ");
@@ -169,12 +179,50 @@ describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
 
   it("cursor 越界上 / 下 / 空列表 → null", () => {
     expect(slashCompleteFromList(ALL, -1)).toBeNull();
-    expect(slashCompleteFromList(ALL, 6)).toBeNull();
+    expect(slashCompleteFromList(ALL, ALL.length)).toBeNull();
     expect(slashCompleteFromList(ALL, 999)).toBeNull();
     expect(slashCompleteFromList([], 0)).toBeNull();
   });
 
   it("单元素列表 + cursor=0 → 该元素", () => {
     expect(slashCompleteFromList(["quit"], 0)).toBe("/quit ");
+  });
+});
+
+/**
+ * T6 (D5):/thinking — 切换当前会话 thinking 折叠面板展开态。
+ * 词表新增第 7 条;与 IKNOW_CHAT_SHOW_THINKING 对齐(chat 端折叠摘要)。
+ */
+describe("T6 /thinking 词表", () => {
+  it("/thinking → command thinking", () => {
+    expect(parseTuiInput("/thinking")).toEqual({
+      kind: "command",
+      command: "thinking",
+    });
+  });
+
+  it("大小写与空白容忍", () => {
+    expect(parseTuiInput("  /THINKING  ")).toEqual({
+      kind: "command",
+      command: "thinking",
+    });
+  });
+
+  it('"/" 全部候选含 thinking（第 7 条）', () => {
+    expect(slashSuggestions("/")).toContain("thinking");
+  });
+
+  it('"/think" 前缀 → ["thinking"]', () => {
+    expect(slashSuggestions("/think")).toEqual(["thinking"]);
+  });
+
+  it('/thinking 唯一匹配 → 补全 "/thinking "', () => {
+    expect(slashComplete("/think")).toBe("/thinking ");
+  });
+
+  it("/help 覆盖 /thinking 且无 emoji", () => {
+    const joined = helpLines().join("\n");
+    expect(joined).toContain("/thinking");
+    expect(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(joined)).toBe(false);
   });
 });
