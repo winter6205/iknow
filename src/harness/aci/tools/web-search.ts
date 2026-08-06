@@ -2,9 +2,13 @@
  * web_search 工具（ACI Web 类，#141 工具层扩展）：网页搜索并返回紧凑结果列表。
  *
  * 行为真值：upstream-openharness tools/web_search_tool.py（行为对齐，非移植）：
- *   - 默认端点 DuckDuckGo html（search_url 入参或 env.web.searchUrl 可覆写，
- *     env 读取走 loadIknowEnv SSOT——process.env > .env.local > .env）。
- *   - 结果页解析：result__a / result-link 锚点（title + href）+ result__snippet。
+ *   - 默认端点：DuckDuckGo html（upstream 默认）在部分网络环境（本地 DNS
+ *     污染 / egress 阻断，实测 WSL2 + Windows host 解析器把 duckduckgo.com
+ *     解析到 Facebook IP 且直连超时）不可达。B1 决策：默认端点切到 Bing
+ *     （cn.bing.com/search，实测本机 200 + 结果结构完整、中国区可达），
+ *     DDG html 保留为 search_url 覆写 / IKNOW_WEB_SEARCH_URL 可选值。
+ *   - 结果页解析：按端点 hostname 分派解析器 —— DDG html 走 result__a /
+ *     result-link + result__snippet；Bing 走 li.b_algo → h2>a + div.b_caption。
  *   - DuckDuckGo /l/?uddg= 重定向链接归一为目标 URL。
  *   - 输出编号列表 `N. title / URL: / snippet`；零结果 → ToolExecutionError。
  *
@@ -34,7 +38,8 @@ import {
 const DEFAULT_MAX_RESULTS = 5;
 const MAX_MAX_RESULTS = 10;
 const SEARCH_TIMEOUT_MS = 20_000;
-const DEFAULT_SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/";
+/** B1 默认端点:Bing(中国区可达,DDG 在此类网络不可达)。DDG html 仍可经覆写。 */
+const DEFAULT_SEARCH_ENDPOINT = "https://cn.bing.com/search";
 
 /**
  * 依赖注入：覆盖点（默认 = 生产值）。
@@ -42,11 +47,14 @@ const DEFAULT_SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/";
  * - `lookup` 覆盖点：替换 DNS 解析（测试注入固定 IP）。
  * - `envSearchUrl` 覆盖点：装配方（buildHarnessEngine）经 loadIknowEnv 解析的
  *   `IKNOW_WEB_SEARCH_URL` 值；测试可直注。工具自身不读 process.env（env.ts SSOT）。
+ * - `proxyUrl` 覆盖点：把出站代理 URL 透传到 network-guard（IKNOW_WEB_PROXY
+ *   装配路径；非空时 fetch 挂 ProxyAgent dispatcher）。
  */
 export interface WebSearchToolDeps {
   readonly fetch?: GuardFetchFn;
   readonly lookup?: GuardLookupFn;
   readonly envSearchUrl?: string | undefined;
+  readonly proxyUrl?: string;
 }
 
 interface SearchInput {
@@ -70,22 +78,25 @@ interface SearchResult {
  *   - aci 元数据：read-only / concurrency-safe / cancel / default tier
  */
 export function createWebSearchTool(deps?: WebSearchToolDeps): AciToolDef {
+  // fail-fast:代理配置在装配时即过 SSRF 语法校验,坏的 IKNOW_WEB_PROXY
+  // 在 build 期报错,而非首次搜索时才暴露。
+  const guardDeps = resolveGuardDeps(deps);
   const handler = async (
     input: unknown,
     ctx?: ToolExecutionContext
   ): Promise<string> => {
     const parsed = compileSearchInput(input, deps?.envSearchUrl);
     const requestUrl = `${parsed.endpoint}${parsed.endpoint.includes("?") ? "&" : "?"}q=${encodeURIComponent(parsed.query)}`;
-    const response = await fetchPublicResponse(
-      requestUrl,
-      resolveGuardDeps(deps),
-      {
-        tool: "web_search",
-        timeoutMs: SEARCH_TIMEOUT_MS,
-        signal: ctx?.signal,
-      }
+    const response = await fetchPublicResponse(requestUrl, guardDeps, {
+      tool: "web_search",
+      timeoutMs: SEARCH_TIMEOUT_MS,
+      signal: ctx?.signal,
+    });
+    const results = parseSearchResults(
+      response.body,
+      parsed.maxResults,
+      parsed.endpoint
     );
-    const results = parseSearchResults(response.body, parsed.maxResults);
     if (results.length === 0) {
       throw new ToolExecutionError(
         "web_search failed: No search results found."
@@ -97,7 +108,7 @@ export function createWebSearchTool(deps?: WebSearchToolDeps): AciToolDef {
   return Object.freeze({
     name: "web_search",
     description:
-      "Search the web and return compact top results with titles, URLs, and snippets. Defaults to a public HTML search endpoint; an explicit search_url override is validated against the same SSRF guard. Refuses empty queries, private targets, and endpoints with no results.",
+      "Search the web and return compact top results with titles, URLs, and snippets. Defaults to a Bing HTML search endpoint; an explicit search_url override is validated against the same SSRF guard. Refuses empty queries, private targets, and endpoints with no results.",
     inputSchema: {
       type: "object",
       properties: {
@@ -132,7 +143,9 @@ export function createWebSearchTool(deps?: WebSearchToolDeps): AciToolDef {
 function resolveGuardDeps(deps?: WebSearchToolDeps): GuardDeps {
   if (deps?.fetch && deps?.lookup)
     return { fetch: deps.fetch, lookup: deps.lookup };
-  const production = createDefaultGuardDeps();
+  const production = createDefaultGuardDeps(
+    deps?.proxyUrl ? { proxyUrl: deps.proxyUrl } : undefined
+  );
   return {
     fetch: deps?.fetch ?? production.fetch,
     lookup: deps?.lookup ?? production.lookup,
@@ -175,12 +188,39 @@ function clampMaxResults(raw: unknown): number {
   return floored;
 }
 
-/** 解析搜索结果页：锚点（title/href）+ 对齐位置的 snippet，限 maxResults 条。 */
-function parseSearchResults(body: string, maxResults: number): SearchResult[] {
-  const snippets = parseSnippets(body);
+/**
+ * 解析搜索结果页：按端点 hostname 分派解析器（DDG html vs Bing），
+ * 限 maxResults 条。未知端点回退 DDG 解析（向后兼容旧 fixture）。
+ */
+function parseSearchResults(
+  body: string,
+  maxResults: number,
+  endpoint: string
+): SearchResult[] {
+  return isBingEndpoint(endpoint)
+    ? parseBingResults(body, maxResults)
+    : parseDuckDuckGoResults(body, maxResults);
+}
+
+/** 端点是否为 Bing（默认 cn.bing.com，或覆写的 bing.com / cn.bing.com）。 */
+function isBingEndpoint(endpoint: string): boolean {
+  try {
+    const hostname = new URL(endpoint).hostname.toLowerCase();
+    return hostname === "bing.com" || hostname.endsWith(".bing.com");
+  } catch {
+    return false;
+  }
+}
+
+/** DDG html 解析：result__a / result-link 锚点 + 对齐位置的 snippet。 */
+function parseDuckDuckGoResults(
+  body: string,
+  maxResults: number
+): SearchResult[] {
+  const snippets = parseDdgSnippets(body);
   const results: SearchResult[] = [];
   let anchorIndex = 0;
-  for (const anchor of parseAnchors(body)) {
+  for (const anchor of parseDdgAnchors(body)) {
     const snippet = anchorIndex < snippets.length ? snippets[anchorIndex] : "";
     anchorIndex += 1;
     if (anchor.title.length === 0 || anchor.url.length === 0) continue;
@@ -190,10 +230,35 @@ function parseSearchResults(body: string, maxResults: number): SearchResult[] {
   return results;
 }
 
+/** Bing 解析：li.b_algo 结果块 → h2>a（title + href）+ div.b_caption（snippet）。 */
+function parseBingResults(body: string, maxResults: number): SearchResult[] {
+  const results: SearchResult[] = [];
+  const pattern = /<li class="b_algo"[^>]*>([\s\S]*?)<\/li>/gi;
+  for (const match of body.matchAll(pattern)) {
+    const block = match[1] ?? "";
+    const h2Match = /<h2[^>]*>([\s\S]*?)<\/h2>/i.exec(block);
+    if (!h2Match) continue;
+    const anchor = /<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i.exec(
+      h2Match[1]
+    );
+    if (!anchor) continue;
+    const title = cleanHtml(anchor[2] ?? "").trim();
+    const url = decodeEntities(anchor[1] ?? "").trim();
+    const captionMatch = /<div class="b_caption"[^>]*>([\s\S]*?)<\/div>/i.exec(
+      block
+    );
+    const snippet = captionMatch ? cleanHtml(captionMatch[1] ?? "").trim() : "";
+    if (title.length === 0 || url.length === 0) continue;
+    results.push({ title, url, snippet });
+    if (results.length >= maxResults) break;
+  }
+  return results;
+}
+
 /** 提取 class 含 result__snippet / result-snippet 的元素文本。
  * 用 `<(\w+)…<\/\1>` 回溯引用匹配任意同名开闭标签，避免在源码枚举
  * 具体标签名（Gate B 判据 12 禁词含 `span`，与 OTel span-metric 冲突）。 */
-function parseSnippets(body: string): string[] {
+function parseDdgSnippets(body: string): string[] {
   const pattern =
     /<(\w+)[^>]+class="[^"]*(?:result__snippet|result-snippet)[^"]*"[^>]*>([\s\S]*?)<\/\1>/gi;
   const out: string[] = [];
@@ -204,7 +269,7 @@ function parseSnippets(body: string): string[] {
 }
 
 /** 提取 class 含 result__a / result-link 的锚点：title（去 HTML）+ 归一 URL。 */
-function parseAnchors(
+function parseDdgAnchors(
   body: string
 ): ReadonlyArray<{ title: string; url: string }> {
   const pattern = /<a([^>]+)>([\s\S]*?)<\/a>/gi;

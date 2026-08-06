@@ -26,9 +26,19 @@
 
 import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { ProxyAgent } from "undici";
 
 import { ToolExecutionError } from "../../errors.js";
 import { classifyIp } from "./ip-classify.js";
+
+/**
+ * 全局 fetch 的 RequestInit.dispatcher 类型来自 @types/node 捆绑的
+ * undici-types@6(结构旧),而 undici@7 的 ProxyAgent 实现的是 undici@7
+ * Dispatcher(FormData 等类型签名不同)。两套类型签名结构不兼容,但
+ * 运行值是同一代理语义。此处用窄类型断言桥接 —— 只声明"满足全局 fetch
+ * 需要的 dispatcher 形状",不引入 any。
+ */
+type FetchDispatcher = NonNullable<Parameters<typeof fetch>[1]>["dispatcher"];
 
 /** 重定向上限（与 upstream MAX_REDIRECTS 对齐）。 */
 export const MAX_REDIRECTS = 5;
@@ -110,21 +120,58 @@ export interface FetchPublicOptions {
   readonly signal?: AbortSignal;
 }
 
+/** createDefaultGuardDeps 的配置选项。 */
+export interface DefaultGuardDepsOptions {
+  /** 显式出站代理 URL（http/https）。缺省 = 直连（不挂 dispatcher）。 */
+  readonly proxyUrl?: string;
+  /** 可选 UA 覆写；缺省用 {@link DEFAULT_USER_AGENT}。 */
+  readonly userAgent?: string;
+}
+
 /**
  * 生产默认出口 deps（SSOT）：fetch = globalThis.fetch（redirect: manual，
  * UA 默认浏览器伪装串）+ lookup = node:dns/promises.lookup(all)。
  * web_fetch / web_search 工厂不再各自复制默认实现（code-review 整改）。
  *
- * @param userAgent 可选 UA 覆写；缺省用 {@link DEFAULT_USER_AGENT}。
+ * 代理臂（对齐 upstream `fetch_public_http_response` 的 `proxy` 配置，
+ * trust_env=False 语义 —— 显式配置才生效，不读系统 HTTP(S)_PROXY）：
+ *   - `opts.proxyUrl` 提供时，fetch 挂 `undici.ProxyAgent` dispatcher，
+ *     出站流量经代理转发（远端解析 + 出网，绕开本地 DNS 污染 / egress 阻断）。
+ *   - 代理 URL 走与目标 URL 同套 httpUrlViolation 校验（协议 / host / 凭据），
+ *     对齐 upstream `validate_http_url(resolved_proxy)`。
+ *   - 代理主机名不做公网 IP 防线 —— 本地代理（127.0.0.1 / 内网）必须允许，
+ *     否则本地代理装配即失败。
+ *   - 走代理时不改目标 URL 的 SSRF 校验：target 仍逐跳走语法 + IP + DNS 防线
+ *     （代理在远端解析，本地 DNS 结果对 target 校验的语义与直连一致）。
+ *
+ * @param opts 配置：proxyUrl / userAgent；二者均可缺省。
  */
 export function createDefaultGuardDeps(
-  userAgent: string = DEFAULT_USER_AGENT
+  opts?: DefaultGuardDepsOptions | string
 ): GuardDeps {
+  // 向后兼容旧签名 createDefaultGuardDeps(userAgent?: string)。
+  const userAgent =
+    typeof opts === "string" ? opts : (opts?.userAgent ?? DEFAULT_USER_AGENT);
+  const proxyUrl = typeof opts === "string" ? undefined : opts?.proxyUrl;
+  let dispatcher: ProxyAgent | undefined;
+  if (proxyUrl) {
+    // 代理 URL 复用目标 URL 的 SSRF 语法防线（协议 / host / 凭据）。
+    const violation = httpUrlViolation(proxyUrl);
+    if (violation !== null) {
+      throw new ToolExecutionError(violation);
+    }
+    dispatcher = new ProxyAgent(proxyUrl);
+  }
   const fetchFn: GuardFetchFn = async (url, options) => {
     const response = await fetch(url, {
       redirect: "manual",
       signal: options.signal,
       headers: { "User-Agent": userAgent },
+      ...(dispatcher
+        ? // 类型桥接见 FetchDispatcher 注释(undici@7 与全局 fetch 的
+          // undici-types 版本不同,结构不兼容但运行值等价)。
+          { dispatcher: dispatcher as unknown as FetchDispatcher }
+        : {}),
     });
     return {
       status: response.status,

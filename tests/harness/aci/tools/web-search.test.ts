@@ -48,13 +48,35 @@ function ddgBody(count: number): string {
   return `<html><body>${items.join("")}</body></html>`;
 }
 
-function searchDeps(body: string, status = 200): WebSearchToolDeps {
+/** 构造 Bing 风格的结果页（真实 DOM：li.b_algo → h2>a + div.b_caption）。 */
+function bingBody(count: number): string {
+  const items: string[] = [];
+  for (let i = 1; i <= count; i++) {
+    items.push(
+      `<li class="b_algo" data-idx="0"><h2><a target="_blank" href="https://site${i}.example.com/page"><strong>Bing Title ${i}</strong></a></h2>` +
+        `<div class="b_caption"><p class="b_lineclamp2">Bing Snippet ${i} &amp; more</p></div></li>`
+    );
+  }
+  return `<html><body><ol id="b_results">${items.join("")}</ol></body></html>`;
+}
+
+/**
+ * 构造工具 deps。默认端点=Bing(B1),所以显式声明测试端点避免耦合:
+ * - 传 DDG body 的测试应给 DDG endpoint;
+ * - 传 Bing body 的测试应给 Bing endpoint。
+ * `endpoint` 缺省为 DDG(保留旧测试 fixture 的意图)。
+ */
+function searchDeps(
+  body: string,
+  status = 200,
+  endpoint = "https://html.duckduckgo.com/html/"
+): WebSearchToolDeps {
   const fetch: GuardFetchFn = async () => ({
     status,
     contentType: "text/html; charset=UTF-8",
     body,
   });
-  return { fetch, lookup: okLookup };
+  return { fetch, lookup: okLookup, envSearchUrl: endpoint };
 }
 
 async function expectToolError(
@@ -152,7 +174,11 @@ describe("createWebSearchTool — success path", () => {
       seen.push(url);
       return { status: 200, contentType: "text/html", body: ddgBody(1) };
     };
-    const tool = createWebSearchTool({ fetch, lookup: okLookup });
+    const tool = createWebSearchTool({
+      fetch,
+      lookup: okLookup,
+      envSearchUrl: "https://html.duckduckgo.com/html/",
+    });
     await tool.handler({ query: "hello world" });
     assert.ok(
       seen.some((u) => u.includes("q=hello") && u.includes("world")),
@@ -208,6 +234,58 @@ describe("createWebSearchTool — success path", () => {
   });
 });
 
+describe("createWebSearchTool — Bing 解析器（B1 默认端点）", () => {
+  it("默认端点指向 Bing(bing.com)而非 DDG html", async () => {
+    // B1:默认端点切到 Bing,DDG html 不再是默认。
+    const seen: string[] = [];
+    const fetch: GuardFetchFn = async (url) => {
+      seen.push(url);
+      return { status: 200, contentType: "text/html", body: bingBody(1) };
+    };
+    const tool = createWebSearchTool({ fetch, lookup: okLookup });
+    await tool.handler({ query: "x" });
+    assert.ok(
+      seen.length > 0 && /bing\.com\/search/.test(seen[0]),
+      `expected default endpoint to be bing.com/search, got: ${seen.join(",")}`
+    );
+    assert.ok(!seen[0].includes("duckduckgo.com"));
+  });
+
+  it("解析 Bing HTML(b_algo / b_caption)为 title/URL/snippet", async () => {
+    const tool = createWebSearchTool(
+      searchDeps(bingBody(2), 200, "https://cn.bing.com/search")
+    );
+    const out = (await tool.handler({ query: "rust async" })) as string;
+    assert.match(out, /^Search results for: rust async\n/);
+    assert.match(out, /1\. Bing Title 1/);
+    assert.match(out, /URL: https:\/\/site1\.example\.com\/page/);
+    assert.match(out, /Bing Snippet 1 & more/);
+    assert.match(out, /2\. Bing Title 2/);
+  });
+
+  it("max_results 截断同样作用于 Bing 解析器", async () => {
+    const tool = createWebSearchTool(
+      searchDeps(bingBody(8), 200, "https://cn.bing.com/search")
+    );
+    const out = (await tool.handler({
+      query: "x",
+      max_results: 3,
+    })) as string;
+    assert.match(out, /3\. Bing Title 3/);
+    assert.ok(!out.includes("4. Bing Title 4"));
+  });
+
+  it("空结果(无 b_algo) → No search results", async () => {
+    const tool = createWebSearchTool(
+      searchDeps("<html><body><ol id='b_results'></ol></body></html>")
+    );
+    await expectToolError(
+      () => Promise.resolve(tool.handler({ query: "nothing" })),
+      "No search results"
+    );
+  });
+});
+
 describe("createWebSearchTool — failure paths", () => {
   it("rejects empty query", async () => {
     const tool = createWebSearchTool(searchDeps(ddgBody(1)));
@@ -254,7 +332,11 @@ describe("createWebSearchTool — concurrency", () => {
       contentType: "text/html",
       body: ddgBody(2),
     });
-    const toolB = createWebSearchTool({ fetch: fetchB, lookup: okLookup });
+    const toolB = createWebSearchTool({
+      fetch: fetchB,
+      lookup: okLookup,
+      envSearchUrl: "https://html.duckduckgo.com/html/",
+    });
     const [outA, outB] = await Promise.all([
       toolA.handler({ query: "a" }),
       toolB.handler({ query: "b" }),
