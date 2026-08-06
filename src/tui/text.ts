@@ -7,7 +7,7 @@
  * 行级滚动（#146 任务 A → 行级重构）：用 `wrapText` 把单条文本按 cols
  * 拆成物理行数组，供 ChatView 的行级滚动窗口消费（估算 message 物理行数）。
  * wrap 是按字节计数（不接 visualWidth，markdown 子块行级估计由
- * chat-view.tsx 的 `estimateMessageRows` 各自处理）；空文本返回 [""]，
+ * message-rows.ts 的 `measureMessage` 各自处理）；空文本返回 [""]，
  * 不返回 [] —— 保证 message 至少占 1 行。
  */
 

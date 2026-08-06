@@ -730,4 +730,77 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     },
     LONG_TIMEOUT
   );
+
+  // #189 Spec Low：`initialSession`（`iknow tui <id>` resume）恢复路径未测。
+  // 挂载即生成既有会话内容，行级滚动应从 scrollRows=0（auto-follow 底）
+  // 起步：初始无「行历史」顶部指示；模拟滚轮上滚后指示出现且计数正确。
+  it(
+    "Spec Low：initialSession resume 从 scrollRows=0 起步；滚轮上滚后指示出现",
+    async () => {
+      const { attachSession } = await import("../../src/tui/session-state.js");
+      const longBody =
+        "A0 行1内容占位\nA0 行2内容占位\nA0 行3内容占位\nA0 行4内容占位\nA0 行5内容占位\nA0 行6内容占位";
+      const initial = attachSession({
+        conversation_id: "resumed-session",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "resumed-q" }] },
+          { role: "assistant", content: [{ type: "text", text: longBody }] },
+        ],
+        turnCount: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        jsonMode: false,
+      });
+      const bridge = createTuiBridge({
+        dataDir: baseDir,
+        deps: makeDeps([]),
+        inflight: createInflightRegistry(),
+      });
+      const askBridge = createTuiAskUserBridge();
+      const toolEventSink = createToolEventSink();
+      const out: string[] = [];
+      stdout.on("data", (chunk) => out.push(String(chunk)));
+      const instance = render(
+        <TuiApp
+          bridge={bridge}
+          askBridge={askBridge}
+          toolEventSink={toolEventSink}
+          initialSession={initial}
+          cwd="/tmp/proj"
+          dataDir={baseDir}
+        />,
+        {
+          stdout,
+          stdin,
+          exitOnCtrlC: false,
+          interactive: true,
+          kittyKeyboard: { mode: "disabled" },
+        }
+      );
+      instances.push(instance);
+      const lastOutput = (): string => strip(out.join(""));
+      await delay(400); // 等 mount + useInput effect
+
+      // resume 内容渲染出来
+      await waitFor(
+        () => lastOutput().includes("resumed-q"),
+        8000,
+        "resumed-content"
+      );
+      // 初始 scrollRows=0：无「行历史」顶部指示
+      const before = lastOutput();
+      expect(before).not.toContain("行历史");
+
+      // 滚轮上滚（SGR 上滚序列，每 tick = WHEEL_STEP_ROWS=3 行）→ 指示出现
+      stdin.write("\x1b[<64;10;5M");
+      await delay(300);
+      await waitFor(
+        () => lastOutput().slice(-1500).includes("3 行历史"),
+        8000,
+        "resume-wheel-up"
+      );
+      // 从 0 基线计数正确（3 行）
+      expect(lastOutput().slice(-1500)).toContain("3 行历史");
+    },
+    LONG_TIMEOUT
+  );
 });
