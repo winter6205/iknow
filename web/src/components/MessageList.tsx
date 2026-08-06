@@ -13,7 +13,7 @@ export type MessageListProps = {
 };
 
 // Flat per-message render under Turn semantics: user (idx*2) + agent (idx*2+1),
-// single 26px conversation gap (Stage 2 brief). Evidence is reserved — wire 不携带 G2,
+// single 26px conversation gap (Stage 2 brief). Evidence is reserved — wire 不携带,
 // MessageList passes no evidence prop, so evidence UI 当前不触发（见 AgentCard 顶注）。
 export function MessageList({
   messages,

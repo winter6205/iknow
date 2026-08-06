@@ -1,8 +1,7 @@
 /**
- * G2 证据投影类型（issue #92 #13-16）。
- * reserved：当前 Session API wire 不携带这些字段（spec 022 SC6/SC8 已退役 G2，
- * TurnAnswerDto = { finalText, stopReason, turnCount }）。组件经可选 props 预留结构，
- * G2 重新上 wire 由单独 ticket 闭合。见 plans/092-web-tailwind-rewrite.md §0 + ADR-0002。
+ * Evidence 投影类型（保留，供未来 wire 字段扩展时使用）。
+ * 当前 Session API wire（TurnAnswerDto = { finalText, stopReason, turnCount }）
+ * 不携带这些字段；组件经可选 props 预留结构。
  */
 export type GovernanceStatus = "ok" | "stale" | "conflict";
 

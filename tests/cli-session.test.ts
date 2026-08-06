@@ -285,9 +285,8 @@ describe("processChatLine (pipe simulation)", () => {
   });
 
   it("/json on switches answer formatting to harness-native JSON", async () => {
-    // 020: JSON output is the harness RunResult projection, NOT the old
-    // IknowAnswer shape. Top-level keys: finalText / stopReason / turnCount /
-    // trace. messages is intentionally omitted.
+    // JSON output is the harness RunResult projection. Top-level keys:
+    // finalText / stopReason / turnCount / trace. messages is intentionally omitted.
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["answer"] })],
     });
@@ -300,11 +299,14 @@ describe("processChatLine (pipe simulation)", () => {
     assert.ok("stopReason" in parsed, "JSON output must carry `stopReason`");
     assert.ok("turnCount" in parsed, "JSON output must carry `turnCount`");
     assert.ok("trace" in parsed, "JSON output must carry `trace`");
-    // Old IknowAnswer shape markers must be gone.
-    assert.ok(!("text" in parsed), "JSON must NOT have the old `text` key");
-    assert.ok(
-      !("source_spans" in parsed),
-      "JSON must NOT have the old `source_spans` key"
+    // JSON keys must be the harness envelope only (whitelist).
+    const allowed = new Set(["finalText", "stopReason", "turnCount", "trace"]);
+    const extra: string[] = [];
+    for (const k of Object.keys(parsed)) if (!allowed.has(k)) extra.push(k);
+    assert.deepEqual(
+      extra,
+      [],
+      `JSON must have only envelope keys, got extra: ${extra.join(",")}`
     );
   });
 

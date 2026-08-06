@@ -1,7 +1,7 @@
 # 0001. Bake 9router stack (key var + model) into env.ts code defaults
 
 Date: 2026-07-29
-Status: accepted
+Status: deprecated
 
 iknow 钉死 9router 作为唯一 LLM/embedding 提供方 + m3-combo 作为主模型：把 `NINE_ROUTER_KEY`（LLM/embedding 共用 key 变量名）、`m3-combo`（9router 路由 ID）焊进 `src/config/env.ts` 作为代码默认。`.env.local` 只需持有密钥值本身，不再需要重复声明 `IKNOW_LLM_API_KEY_ENV` / `IKNOW_LLM_MODEL` / `IKNOW_EMBEDDING_API_KEY_ENV`。
 
@@ -35,3 +35,9 @@ iknow 钉死 9router 作为唯一 LLM/embedding 提供方 + m3-combo 作为主�
 - `process.env > .env.local > .env` 优先级 -- 保留。
 
 **关联：** issue #173（探针变量名漂移）、PR #190。历史叙事中的 `NINE_ROUTER_KEY` / `NINE_ROUTER_API_KEY` 字面值在 CHANGELOG / handoff / plans 等历史记录中保留不擦（git 可追溯性）。
+
+---
+
+## Update (2026-08-06): Status → deprecated
+
+本 ADR 状态标记为 `deprecated`（非 `superseded by NNNN`——它未被单一新 ADR 取代）。原因：原始决策的 **embedding 臂已随 023 归档**（harness 为通用 agent，无向量检索），**key 变量名默认已由 2026-08-05 Update 段修正为 `ANTHROPIC_AUTH_TOKEN`**。核心机制（「项目栈默认焊进 `env.ts`，`.env.local` 只持值」）仍有效，故保留文件、不删不归档；`docs/archive/024-archive-memory-assistant-era/` 记录了同批归档。读取本 ADR 时以 2026-08-05 Update 段的现态为准。

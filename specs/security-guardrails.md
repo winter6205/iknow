@@ -53,7 +53,7 @@
 
 ```bash
 Build:  npm run build            # tsc -p tsconfig.json
-Test:   npm test                 # vitest run（unit + eval alignment + trajectory + harness）
+Test:   npm test                 # vitest run（unit + harness + integration）
 Type:   npm run typecheck        # tsc --noEmit
 Lint:   npx prettier --check src tests   # 无独立 lint script；pre-commit 走 husky + lint-staged
 Dev:    npm run dev              # tsx src/cli.ts

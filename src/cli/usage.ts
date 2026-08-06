@@ -28,7 +28,7 @@ export function getVersion(): string {
 /** Full usage text (no trailing newline required by caller). */
 export function usageText(): string {
   const v = getVersion();
-  return `iknow ${v} — 企业知识库问答 Agent / enterprise knowledge-base Q&A agent
+  return `iknow ${v} — 工具调用 Agent 运行时 / tool-calling agent runtime
 
 用法 / Usage:
   iknow                         交互对话（仅 TTY）/ interactive chat (TTY only)
@@ -56,8 +56,8 @@ export function usageText(): string {
 说明 / Notes:
   • TTY 无参数 → chat；管道/非 TTY 无参数 → 用法 / no args: TTY→chat, piped→usage
   • 空 ask/query → 用法 + exit 1（无默认 demo 问句）/ empty ask → usage + exit 1
-  • ask 输出 G2 JSON；chat 默认人类可读 / ask→JSON, chat→human view
-  • serve 打开 http://host:port/ ；API 见 docs/design/session-http-api-v0.md
+  • ask 输出 JSON；chat 默认人类可读 / ask→JSON, chat→human view
+  • serve 打开 http://host:port/ ；API 见 src/session-api/contract.ts
 • trace 独立进程读 /api/v1/traces + /fields + /health；写侧仍由 serve/chat/ask 的 --trace-out 负责
     / trace is a separate process; serve/chat/ask still write via --trace-out
   • tui 与 serve 共享 ~/.iknow 会话池；tui 内 /help 看 slash 词表 / tui shares the pool

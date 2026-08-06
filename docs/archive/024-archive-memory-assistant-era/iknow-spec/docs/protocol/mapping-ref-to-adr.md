@@ -1,0 +1,43 @@
+# 原文档 → iknow ADR 映射对照表
+
+> 阶段：Phase 1 收尾（协议雏形打磨），仅做映射记录，不新增协议、不写 eval、不碰实现/源码
+> 源文件：../reference/ref-enterprise-kb.md 现已升级为《企业知识库 Agent 设计基线 v1.0》（以 ADR 为权威重写），本表保留为「历史初稿 → ADR 决策」的追溯记录
+> 状态图例：已采纳 / 已采纳+补充 / 已标注(Phase3) / 历史错误(基线已修正) / 待决
+
+| 原文档章节                 | 原文档要点                                                     | ADR 对应决策                                                                                           | 状态           | 阶段归属 | 备注                                                                                                                                                   |
+| -------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | -------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| §1 项目定位                | 基于 gbrain 改造 RAG 检索与治理，四工程问题                    | 形态判定为 Agent（非 RAG pipeline），A/B/C/D 全成立                                                    | 已采纳+补充    | Phase1   | 原文档定位为 RAG 改造，ADR 升级为 Agent 形态，四问题仍对应 tool 设计                                                                                   |
+| §2 分块策略评测            | 固定/段落/混合三策略，200条QA分层评测，Hit@K/MRR/nDCG          | 未直接纳入 tool 协议；分块属入库 pipeline（后台）                                                      | 已标注(Phase3) | Phase3   | 分块是检索前预处理，Phase1 协议不定义；eval 框架复用 §2.3 的 200 QA 结构                                                                               |
+| §2.4 评测示例              | qa-001 退款政策，relevant_chunks 多标                          | 多跳标所有相关 chunk 与 Agent 多跳 retrieve 同义                                                       | 已采纳         | Phase1   | 作为 Phase2 eval 集模板来源                                                                                                                            |
+| §2.5 预期结果              | 混合策略 Hit@5=0.78 等（假设值）                               | 未采纳为门禁，标"预期待验证"                                                                           | 待决           | Phase2   | ADR 已知缺口：eval 门禁数字 Phase2 定，不锁假设值                                                                                                      |
+| §3 知识编译                | LLM 提取结构化事实，回链原文 span，双索引                      | kb_compile tool（Agent 补编为主+后台 pipeline），facts 带 source_chunk_id+chunk_version                | 已采纳+补充    | Phase1   | ADR 明确 fact 只回 chunk_id 供排序、verify 看原文，比原文档更严格                                                                                      |
+| §3.3 双索引架构            | Index A 原文 / Index B facts，RRF→Rerank→注入LLM               | 双索引 RRF 融合，fact 只影响排序不暴露 Agent                                                           | 已采纳+补充    | Phase1   | 需显式消歧：原文档"注入LLM"含 fact 文本风险，ADR 禁止 fact 进 verify 输出层                                                                            |
+| §3.4 编译幻觉率            | 双索引 Hit@5 提升10-15%，幻觉率<5%                             | 未锁为门禁，hallucination_flag 供 eval/抽检                                                            | 已标注(Phase3) | Phase2/3 | 幻觉率作为 Phase2 eval 指标，非 Phase1 协议内容                                                                                                        |
+| §4.1 混合检索              | BM25+向量+RRF(k=60)+Cross-Encoder Rerank                       | kb_retrieve 内部实现（双索引 RRF），Agent 不感知细节                                                   | 已采纳         | Phase1   | 检索策略封装在 tool 内，符合"tool 实现细节不进协议"                                                                                                    |
+| §4.2 claim-level grounding | NLI 模型判 entailment>0.7→supported，示例 confidence 0.95/0.92 | kb_verify_citation 纯三态（supported/partially_supported/unsupported），不扩 stale，无 confidence 数字 | **错误待修**   | Phase1   | 原文档连续值 confidence 被 ADR 推翻；ADR 决策依据：agent 读不懂 0.95，三段式直接驱动决策。原文档此节需标注"已推翻"。ADR §5.1 已补记                    |
+| §4.3 引用溯源评测          | Citation Coverage>90% / Accuracy>85% / 人工抽检>80%            | 未锁为门禁，Citation Accuracy 作为 Phase2 eval 指标                                                    | 已标注(Phase3) | Phase2   | 数字待 Phase2 真实 eval 回填                                                                                                                           |
+| §5.1 过期检测              | FreshnessPolicy(docType,ttlDays,decayFactor)，降权/移除        | A filter 在线实时检查（读同步视图），C job 退预计算缓存                                                | 已采纳+补充    | Phase1   | ADR 将"后台定时"升级为"检索前实时"，消除延迟窗；原文档 decayFactor 机制待 Phase3 定                                                                    |
+| §5.2 冲突检测              | Hard/Soft conflict，入库提取字段比对                           | kb_governance tool（B 定位），snapshot_id 含 document_version                                          | 已采纳+补充    | Phase1   | 原文档"阻断发布"是入库时拦截；ADR 改为 Agent 查询时实时判定，更灵活                                                                                    |
+| §5.3 增量索引              | contentHash 跳过未变，节省90%                                  | kb_compile 入参强制 content_hash 防重复编译                                                            | 已采纳         | Phase1   | 增量逻辑在后台 pipeline，Agent 补编复用 hash 去重                                                                                                      |
+| §5.4 治理评测              | 过期准确率>90% / 冲突召回>85% / 增量<10%                       | 未锁为门禁                                                                                             | 已标注(Phase3) | Phase2/3 | Phase2 eval 指标                                                                                                                                       |
+| §6 可观测性                | Trace 记录全链路，SQLite/ClickHouse，采样/保留/脱敏            | 未纳入 Phase1 协议                                                                                     | 已标注(Phase3) | Phase3   | 可观测性属生产运维，Phase1 不定义；但 ADR 溯源三层（source_span/snapshot_id）已为 trace 留锚点                                                         |
+| §7 安全设计                | AccessPolicy(role/docType/approval)，审计日志本地文件          | 标 Phase3，tool 预留 role 上下文入口                                                                   | 已标注(Phase3) | Phase3   | **冲突判断零留痕**：原文档 §7.2 的 requireApprovalFor 与 ADR 治理 B 定位如何衔接未记录，Phase3 需补决策                                                |
+| §8.1 成本估算              | 10.5M token × ($10+$30)/2 = $210/月                            | 未采纳该计算                                                                                           | **错误待修**   | Phase1   | 原文档计算有误：输入输出应分开。正确：输入 10.5M×$10/1M=$105 + 输出 10.5M×$30/1M=$315 = **$420/月**。ADR 已知缺口：成本选型 Phase2 定。ADR §5.1 已补记 |
+| §8.2 成本优化              | 模型路由/缓存/批量                                             | 未纳入 Phase1 协议                                                                                     | 已标注(Phase3) | Phase3   | 模型路由与 ADR"不锁模型"假设需 Phase3 协调                                                                                                             |
+| §9.1 编译幻觉              | 30天→3天提取错；修复：回链+引原文+抽检                         | kb_compile 出参 hallucination_flag + verify 看原文                                                     | 已采纳         | Phase1   | 新协议从机制上解决（verify 不引 fact）                                                                                                                 |
+| §9.2 引用格式检查          | [1]但内容不支持；修复：claim-level grounding                   | kb_verify_citation 纯三态 + evidence_span                                                              | 已采纳         | Phase1   | 新协议从机制上解决（NLI 判指定 span 而非格式检查）                                                                                                     |
+| §9.3 过期被检索            | 修复：freshness+降权+移除                                      | A filter 在线实时检查                                                                                  | 已采纳+补充    | Phase1   | ADR 升级为实时检查，比原文档"定时检测"更彻底                                                                                                           |
+| §10 产出物                 | 代码/评测集/报告/CI/Trace/安全/成本/README                     | ADR 阶段产出为协议决策，非代码                                                                         | 已标注(Phase3) | Phase3   | 完整开发方案 Phase3-4 产出                                                                                                                             |
+
+## 汇总
+
+- **表格行数**：24 行（含表头说明与汇总）
+- **错误待修（2 条）**：
+  - §4.2 confidence 连续值 → ADR 已推翻为纯三态，原文档需标注"已推翻"
+  - §8.1 成本计算错误 → 正确约 $420/月（输入输出分开算），原文档需修正
+- **待决（未在此阶段处理，留 Phase2/3）**：
+  - §2.5 预期评测数字（Phase2 真实 eval 回填）
+  - §7 安全冲突判断零留痕（Phase3 补决策）
+  - §3.4/§4.3/§5.4 评测门禁数字（Phase2）
+  - §6 可观测性（Phase3）
+  - §8.2 成本优化与"不锁模型"协调（Phase3）

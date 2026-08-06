@@ -1,7 +1,6 @@
 /**
- * T1 skeleton smoke: src/harness/ exports the type spine declared in
- * specs/minimum-sequential-agent-loop.md. The test deliberately does not
- * exercise runtime behavior (T1 only ships the Foundation skeleton).
+ * T1 skeleton smoke: src/harness/ exports the harness type spine. The test
+ * deliberately does not exercise runtime behavior (T1 only ships the Foundation skeleton).
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";

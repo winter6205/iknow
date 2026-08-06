@@ -10,7 +10,7 @@
 
 ## Section 1 — Context-Loop Pre-Check
 
-- **docs/CONTEXT.md 已读**：`append-only messages`（内存权威历史，唯一事实来源）、`Session HTTP API / session-api`、`iknow serve`、`turnCount`、`ConversationState`（Deprecated for CLI path since 018）、`in-flight closeout`。spec Glossary 原样引用，无新术语引入。
+- **docs/CONTEXT.md 已读**：`append-only messages`（内存权威历史，唯一事实来源）、`Session HTTP API / session-api`、`iknow serve`、`turnCount`、`in-flight closeout`。spec Glossary 原样引用，无新术语引入。
 - **docs/adr/ 已读**：ADR-0001（9router 栈，不动 env/模型配置）、ADR-0003（TraceService，本 spec 不改 trace）、ADR-0004/0005/0006（工具层，正交）。
 - **无 ADR 矛盾**：spec 声明的 ADR-0007 候选（M3 磁盘形态三合一）尚未落档。
   - ⚠️ **落档动作不在本 plan**：`docs/adr/` 写入权归 `domain-modeling`（三条件门槛），writing-plans 不代行决策落档。ADR-0007 内容已由 grilling 裁决齐备（spec L30-32），本 plan 仅消费其结论；落档作为后继项（见 §非目标与后继）。
@@ -20,7 +20,7 @@
 
 ## Section 2 — ACR 5-Verdict Block（引自 spec L120-128）
 
-- bounded-context-guardian: **yes** — 改动限于 store/{schema,session-store}.ts、hub/serve.ts、cli/{slash,chat-session}.ts；无反向依赖 harness 内部；明确排除复活 ConversationState。
+- bounded-context-guardian: **yes** — 改动限于 store/{schema,session-store}.ts、hub/serve.ts、cli/{slash,chat-session}.ts；无反向依赖 harness 内部；明确排除复活 host 多轮袋。
 - defensive-contract-validator: **yes** — sanitize / extractSummary / resolveProjectSessionDir / Q6 集成全覆盖；并发写显式记为已知边界。
 - error-handling-enforcer: **yes** — `schema_invalid` 结构化错误，不静默吞、不修复；load 零写盘副作用。
 - complexity-anti-drift: **yes** — sanitize / extractSummary 顶层纯函数；复用 SessionHub 不发明第二保存路径。
@@ -100,7 +100,7 @@
 - **Affects**: `.evals/tasks/009-session-persistence.yaml`（新）· `CHANGELOG.md`
 - **Acceptance**:
   - □ `.evals/tasks/009-session-persistence.yaml` 存在且 `bash .evals/run.sh --task 009` 退出码 0（test_command 覆盖 store+hub+cross-entry 测试集）
-  - □ CHANGELOG `0.1.0 (unreleased)` 区新增条目：共享池根迁移 + schema v2 + summary + Q3 readonly（对齐 022/023 归档条目的记法密度）
+  - □ CHANGELOG `0.1.0 (unreleased)` 区新增条目：共享池根迁移 + schema v2 + summary + Q3 readonly
   - □ `npm test` 全绿（CHANGELOG 不破坏任何测试）
 - **Per-ticket loop**: tdd → typecheck+tests → code-review → verification-before-completion → commit on ticket branch
 - **实施要点**：约束来源 = writing-plans 闭环 backstop（`.evals/run.sh`）+ 项目 Completion 惯例。eval yaml 格式对齐 007-session-api.yaml（id / description / test_command / success: "pass"）。

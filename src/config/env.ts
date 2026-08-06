@@ -243,7 +243,6 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
   };
 
   // SSOT: key 变量名默认 = ANTHROPIC_AUTH_TOKEN（对齐实际部署 + 通用生态命名）。
-  // 历史 fallback 曾是 NINE_ROUTER_KEY（9router 专属命名），ADR-0001 现态已 superseded。
   // .env.local 只需持有密钥值本身；如需指向别的变量名，仍可设 IKNOW_LLM_API_KEY_ENV 覆盖。
   const llmKeyEnv = envGet({
     file,

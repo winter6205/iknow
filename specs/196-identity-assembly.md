@@ -9,7 +9,7 @@
 1. **A1 spec 路径**：`specs/196-identity-assembly.md`（对齐本仓 spec 命名惯例：`<issue-number>-descriptive-slug.md`）。
 2. **A2 spec 形态**：lean spec。先决决议来自 issue #196 决策点 §1-§5（注入位置 / 触发面 / 与 #121 关系 / 文件归位 / 认知 vs 人格边界），spec 只补实施层细节与决策点未钉死的派生约束。
 3. **A3 spec 不替代 #121 / 014 / 015 / 016 / 017 已落契约**：#121 装配顺序为 `user AGENTS+rules → PRIORITY_DECLARATION → project AGENTS+rules → EXISTENCE_POINTER → promote`（锁定）。本 spec 在第 1/2 步（identity / soul 层）插入新段，第 3-9 步沿用 #121 既有契约，不重排。
-4. **A4 术语 SSOT = `docs/CONTEXT.md`**：loop-engine / append-only messages / LoopTrace / StopReason / in-flight closeout / ToolExecutionContext / agent 真值层 / HarnessStreamEvent / turnCount / caller_role / G2（deprecated） / `deps.system` 注入缝。spec 不重定义，只在 Architectural Constraints 段引用。
+4. **A4 术语 SSOT = `docs/CONTEXT.md`**：loop-engine / append-only messages / LoopTrace / StopReason / in-flight closeout / ToolExecutionContext / agent 真值层 / HarnessStreamEvent / turnCount / caller_role / `deps.system` 注入缝。spec 不重定义，只在 Architectural Constraints 段引用。
 5. **A5 架构 SSOT = `docs/architecture.md` Capability modules 表**（Harness 行 + Session API 行 + CLI 行）。spec 仅引用，不重画架构。
 6. **A6 tech stack 零新增依赖**：继承 016 / 017 / 020 / 022 spec Tech Stack（TypeScript ES2022 / ESM / Node ≥20 / vitest）。本 spec 不引入任何新 runtime / dev 依赖。
 7. **A7 测试框架沿用 vitest**。不引入 jsdom / fs-mock 增强。

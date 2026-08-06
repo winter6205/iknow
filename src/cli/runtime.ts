@@ -1,17 +1,13 @@
 /**
- * Runtime bootstrap for CLI: env, store, harness engine.
+ * Runtime bootstrap for CLI: env + harness engine.
  *
- * 020 决议收口后只剩 `buildHarnessEngine(bundle)` 一条 build 路径:
  * CLI ask/chat 产品路径,走 harness foundation(real Anthropic adapter +
- * LoopEngine)。#141-T11 把 ACI 装饰层工具集从 5 件 PROTOTYPE 切到 6 件业界通用名
- * (bash / read_file / grep / glob / edit_file / write_file)，与 permission
- * policy byName 键 `bash` 对齐（ADR-0004 / ADR-0006）；后续追加 Web 类
- * web_fetch / web_search（harness-report p04 ACI 映射），合计 8 件。
+ * LoopEngine)。ACI 装饰层工具集 8 件（bash / read_file / grep / glob /
+ * edit_file / write_file / web_fetch / web_search），与 permission
+ * policy byName 键对齐（ADR-0004 / ADR-0006）。
  *
  * 工具装配本身已下沉到 `src/harness/build-engine.ts`（SSOT）：CLI 与 serve
- * 共享同一份 8 件工具集,本模块只做 bundle 装配(store/env/session)并转发。
- * 旧 agent builder 服务于 Session API serve 路径,在 #51 把 serve 切到
- * harness 后于 022 归档(见 `docs/archive/022-retire-agent-loop/README.md`)。
+ * 共享同一份 8 件工具集,本模块只做 bundle 装配(env/session)并转发。
  */
 import {
   buildHarnessEngine as buildCoreEngine,
@@ -21,22 +17,18 @@ import { initIknowWorkspaceSafe } from "../harness/identity/index.js";
 import type { AskUser } from "../harness/permission/types.js";
 import { loadIknowEnv, type IknowEnv } from "../config/env.js";
 import type { SessionContext } from "../shared/schema.js";
-import { createIknowRuntime } from "../runtime/create-runtime.js";
-import type { InMemoryKnowledgeStore } from "../knowledge-store/memory-store.js";
 
 export type RuntimeBundle = {
-  store: InMemoryKnowledgeStore;
   env: IknowEnv;
   session: SessionContext;
 };
 
 export async function prepareRuntime(): Promise<RuntimeBundle> {
   const env = loadIknowEnv();
-  const { store, env: runtimeEnv } = await createIknowRuntime({ env });
 
   const session: SessionContext = {};
 
-  return { store, env: runtimeEnv, session };
+  return { env, session };
 }
 
 // Re-export BuiltEngine so existing callers (`cli.ts` / `chat-session.ts` /

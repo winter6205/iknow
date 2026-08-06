@@ -14,8 +14,8 @@ import type {
 import { SessionApiError } from "./types";
 
 /**
- * Session HTTP API base path (session-http-api-v0).
- * @see docs/design/session-http-api-v0.md
+ * Session HTTP API base path.
+ * @see src/session-api/contract.ts
  */
 const API = "/api/v1";
 

@@ -19,8 +19,8 @@
 - **append-only messages**：Foundation 的权威 Anthropic 原生会话历史，是唯一事实来源；消息只能以不可变追加（`[...prev, x]`）更新，禁止原地修改或建立第二份权威副本。
 - **Session HTTP API / session-api**：Host 多会话面（`src/session-api/`），create/message/command/reset。
 - **iknow serve**：承载 Session API + 静态产品 UI 的 CLI host。
-- **turnCount**：Foundation 运行时回合计数，每完成一个 assistant 回合加一；与产品层 `max_hops` 不同层，不得混同。
-- **ConversationState**：host 层多轮袋，**Deprecated for CLI path since 018**；本 spec 不复活它，TUI 直接消费 harness `RunResult.messages`。
+- **turnCount**：Foundation 运行时回合计数，每完成一个 assistant 回合加一；`maxTurns` 是 run() 入口上限，二者不同层，不得混同。
+- **host 多轮袋**：CLI path 不再维护权威多轮袋；本 spec 不引入，TUI 直接消费 harness `RunResult.messages`。
 - **in-flight closeout**：abort/timeout 收尾语义（与 `DROP_REASONS` 存盘行为相关，见 Boundaries）。
 
 ## Architectural Constraints（按编号引用 ADR）
@@ -42,7 +42,7 @@
 ```
 Build:      npm run build
 Typecheck:  npm run typecheck
-Test:       npm test                    # vitest：unit + eval alignment + trajectory + harness
+Test:       npm test                    # vitest：unit + harness + integration
 Serve:      npm run serve               # 默认 ~/.iknow
 Serve 覆盖:  npm run serve -- --data-dir <dir>   # 测试/隔离场景
 ```
@@ -119,7 +119,7 @@ ctx.state.messages = Object.freeze([...result.messages]);
 
 ## ACR 5-verdict（Step 4 · architecture-change-reviewer · 2026-08-04 · OVERALL PASS）
 
-- bounded-context-guardian: **yes** — 改动限于 `src/session-api/store/{schema,session-store}.ts`、`src/session-api/{hub,serve}.ts`、`src/cli/{slash,chat-session}.ts`；无反向依赖 harness 内部，无循环导入；明确排除复活 `ConversationState` 为权威状态。
+- bounded-context-guardian: **yes** — 改动限于 `src/session-api/store/{schema,session-store}.ts`、`src/session-api/{hub,serve}.ts`、`src/cli/{slash,chat-session}.ts`；无反向依赖 harness 内部，无循环导入；明确排除复活 host 多轮袋为权威状态。
 - defensive-contract-validator: **yes** — sanitize（v1 兼容 / 未来版本拒绝 / 坏 messages）、extractSummary（空 / 纯 tool_result / 80 截断 / strip）、resolveProjectSessionDir（碰撞 / 稳定）、跨进程 Q6 集成全覆盖；并发类显式记为已知边界（文件锁 out of scope，9a）而非静默省略。
 - error-handling-enforcer: **yes** — `schema_invalid` 结构化类型错误（version > 2 / messages 形状非法），不静默吞、不修复；"sanitize 永不修复 messages" 是写进 Boundaries 的契约；load 零写盘副作用明示。
 - complexity-anti-drift: **yes** — sanitize / extractSummary 为顶层纯函数（无 IO）；复用 SessionHub 而非发明第二份保存路径；按文件/函数级点名，无超阈值（≤30 行 / ≤4 层嵌套 / ≤3 参数）迹象。

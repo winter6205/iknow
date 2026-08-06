@@ -1,9 +1,8 @@
 /**
  * Session HTTP API DTOs (host surface; not tool schema).
- * See docs/design/session-http-api-v0.md
  *
- * 022 T3 wire DTO rewrite: TurnDto.answer is now the harness RunResult
- * projection (TurnAnswerDto); SessionSummary drops caller_role; ApiErrorBody
+ * TurnDto.answer is the harness RunResult projection (TurnAnswerDto);
+ * ApiErrorBody
  * is nested under { error: { kind, message, ... } }. http.ts / hub.ts still
  * reference the old shapes — they will be rewritten in T4/T5.
  */

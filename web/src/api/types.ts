@@ -1,4 +1,4 @@
-/** Mirror of session-http-api-v0 DTOs used by the product UI. */
+/** Mirror of Session HTTP API DTOs used by the product UI. */
 
 /** Mirrors harness StopReason (7 values). */
 export type StopReason =

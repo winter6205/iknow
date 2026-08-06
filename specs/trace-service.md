@@ -261,7 +261,7 @@ None at the spec layer. The 14 settled decisions (2026-07-31 grilling session) c
 
 - **ADR** (decision layer): `docs/adr/0003-trace-service-domain-interface.md` — written by `domain-modeling`.
 - **Prior decisions (grilling session 2026-07-31)**: GH issue #64 (winter6205/iknow) — 14 settled decisions.
-- **017 spec (LockTrace A7 field-set lock)**: `specs/loop-hardening-for-migration.md`.
+- **LockTrace A7 field-set lock**: enforced by `src/harness/trace/` field declaration table.
 - **LoopTrace source (read-only)**: `src/harness/loop-trace.ts`.
 - **Domain language**: `docs/CONTEXT.md` — `LoopTrace` (A-layer structural metadata, no payload) / `turnCount` / `append-only messages` / `in-flight closeout` / `StopReason` 7-class union.
 - **Environment variable convention**: `docs/adr/0001-9router-stack-as-code-defaults.md` — `IKNOW_*` env var naming.

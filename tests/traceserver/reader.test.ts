@@ -119,7 +119,7 @@ describe("createJsonlTraceReader — happy path", () => {
         startedAt: "2026-08-01T02:00:00.000Z",
         status: "ok",
         durationMs: 5,
-        toolName: "kb_search",
+        toolName: "grep",
         toolKind: "ok",
       }),
       makeLine({

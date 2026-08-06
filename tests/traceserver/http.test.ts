@@ -93,7 +93,7 @@ function writeSampleTrace(path: string): void {
       record_type: "tool_call",
       tool_call_id: "tc-0",
       parent_llm_call_id: null,
-      tool_name: "kb_search",
+      tool_name: "grep",
       tool_kind: "ok",
       started_at: "2026-08-01T02:00:00.000Z",
       ended_at: "2026-08-01T02:00:00.005Z",

@@ -2,9 +2,8 @@
  * CLI `src/cli/format.ts` projection tests (T2 acceptance).
  *
  * `formatRunHuman` / `formatRunJson` / `renderAssistantAnswer` consume harness
- * `RunResult` + `LoopTrace`, not the old `IknowAnswer`. Imports go through
- * `../../src/cli/format.ts` directly (test files use `.ts` extension per repo
- * convention).
+ * `RunResult` + `LoopTrace`. Imports go through `../../src/cli/format.ts`
+ * directly (test files use `.ts` extension per repo convention).
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";

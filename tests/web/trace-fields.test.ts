@@ -184,8 +184,8 @@ describe("formatCell", () => {
   });
 
   it("passes plain values through as strings", () => {
-    assert.deepEqual(formatCell({ tool_name: "kb_search" }, FIELD_B), {
-      text: "kb_search",
+    assert.deepEqual(formatCell({ tool_name: "grep" }, FIELD_B), {
+      text: "grep",
       tone: "neutral",
     });
   });

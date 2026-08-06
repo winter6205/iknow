@@ -1,6 +1,4 @@
-// evidence?: reserved — Session API wire 当前不携带 G2 字段（spec 022 SC6/SC8）。
-// 组件结构预留，G2 重新上 wire 由单独 ticket 闭合。
-// 见 plans/092-web-tailwind-rewrite.md §0 + ADR-0002。
+// evidence?: reserved — Session API wire 当前不携带这些字段，组件结构预留。
 //
 // thinking/toolCalls（T4）：wire 已携带，组件按视觉层级渲染——
 // thinking 在上（折叠展开），body 居中（GFM markdown），toolCalls 在下（单展开）。
@@ -20,7 +18,7 @@ export type AgentCardProps = {
   text: string;
   /** Optional TurnAnswerDto — T4 renders `thinking` + `toolCalls` projections. */
   answer?: TurnAnswerDto;
-  /** Evidence projection reserved (see file header). Wire 不携带 G2，当前不渲染。 */
+  /** Evidence projection reserved (see file header). 当前不渲染。 */
   evidence?: EvidenceProjection;
   /** Optional override for body rendering; default = GFM markdown with code highlighting (decision #19/T3). */
   renderBody?: (text: string) => ReactNode;
