@@ -519,11 +519,18 @@ describe("TuiApp 端到端（tracer bullet）", () => {
   it(
     "#189 Commit 1：openSessionAt → scrollRows 重置为 0（会话切换不再保留旧 scroll）",
     async () => {
-      const longBody = (tag: string) =>
-        `${tag} 行1内容占位\n${tag} 行2内容占位\n${tag} 行3内容占位\n${tag} 行4内容占位\n${tag} 行5内容占位\n${tag} 行6内容占位`;
+      // 新 clamp：maxScroll = max(0, messageCursor - budget(24))。
+      // A 必须 <= 24（切回 A 后 scroll=0 窗口含 msg-A + aA 且无指示）；
+      // B 必须 > 24（PgUp 才真有滚动余量出现指示）。
+      const lines = (tag: string, n: number): string =>
+        Array.from({ length: n }, (_, i) => `${tag} 行${i + 1}内容占位`).join(
+          "\n"
+        );
       const app = makeApp([
-        assistantResult({ texts: [longBody("aA")] }),
-        assistantResult({ texts: [longBody("aB")] }),
+        // A：user(2) + assistant(16+2) = 20 <= 24 → 不可滚
+        assistantResult({ texts: [lines("aA", 16)] }),
+        // B：user(2) + assistant(24+2) = 28 > 24 → maxScroll=4
+        assistantResult({ texts: [lines("aB", 24)] }),
       ]);
       await app.ready();
       await waitFor(() => app.lastOutput().includes("iknow"), 8000, "startup");
@@ -553,7 +560,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       // B 上 PgUp → scrollRows > 0，顶部出现「↑ N 行历史」（看最近帧避免旧帧干扰）
       stdin.write("[5~"); // PgUp
       await waitFor(
-        () => app.lastOutput().slice(-1500).includes("行历史"),
+        () => app.lastOutput().slice(-1500).includes("4 行历史"),
         8000,
         "B-pgup-scrolled"
       );
@@ -572,7 +579,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       await delay(80);
       stdin.write("[B");
       await delay(80);
-      // 锚定在 Enter 之前：B 的 chat frame（含「↑ 8 行历史」）在进入 list
+      // 锚定在 Enter 之前：B 的 chat frame（含「↑ 4 行历史」）在进入 list
       // 视图前已写入，排除在窗口外；list 视图帧与打开 A 后的帧都不含
       // 「行历史」。
       const beforeOpen = app.lastOutput().length;
@@ -738,8 +745,14 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     "Spec Low：initialSession resume 从 scrollRows=0 起步；滚轮上滚后指示出现",
     async () => {
       const { attachSession } = await import("../../src/tui/session-state.js");
-      const longBody =
-        "A0 行1内容占位\nA0 行2内容占位\nA0 行3内容占位\nA0 行4内容占位\nA0 行5内容占位\nA0 行6内容占位";
+      // 新 clamp：budget=24。需 messageCursor > 24 才能滚；user(2) +
+      // assistant(content+2) > 24 → content ≥ 21。用 24 行：messageCursor=28，
+      // maxScroll=4。两轮 wheel(+6) → clamp 4 →「↑ 4 行历史」，滚到顶后
+      // resumed-q 重新进入窗口。
+      const longBody = Array.from(
+        { length: 24 },
+        (_, i) => `A0 resume 内容第${i + 1}行`
+      ).join("\n");
       const initial = attachSession({
         conversation_id: "resumed-session",
         messages: [
@@ -780,9 +793,10 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       const lastOutput = (): string => strip(out.join(""));
       await delay(400); // 等 mount + useInput effect
 
-      // resume 内容渲染出来
+      // resume 内容渲染出来（messageCursor=28 > budget(24)：scroll=0 窗口
+      // [4,28) 顶部裁掉 user 行；末段「A0 resume 内容第24行」作初次锚点）
       await waitFor(
-        () => lastOutput().includes("resumed-q"),
+        () => lastOutput().includes("A0 resume 内容第24行"),
         8000,
         "resumed-content"
       );
@@ -790,16 +804,18 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       const before = lastOutput();
       expect(before).not.toContain("行历史");
 
-      // 滚轮上滚（SGR 上滚序列，每 tick = WHEEL_STEP_ROWS=3 行）→ 指示出现
+      // 滚轮上滚 ×2（SGR 上滚，每 tick = 3 行；累加 6 被 clamp 到 maxScroll=4）
+      stdin.write("\x1b[<64;10;5M");
+      await delay(300);
       stdin.write("\x1b[<64;10;5M");
       await delay(300);
       await waitFor(
-        () => lastOutput().slice(-1500).includes("3 行历史"),
+        () => lastOutput().slice(-1500).includes("4 行历史"),
         8000,
         "resume-wheel-up"
       );
-      // 从 0 基线计数正确（3 行）
-      expect(lastOutput().slice(-1500)).toContain("3 行历史");
+      // 滚到顶 → 顶部 user 内容再次进入窗口
+      expect(lastOutput().slice(-1500)).toContain("resumed-q");
     },
     LONG_TIMEOUT
   );

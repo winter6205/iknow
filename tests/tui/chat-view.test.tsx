@@ -213,11 +213,11 @@ describe("ChatView 行级滚动（任务 A 行级）", () => {
     expect(plain).not.toContain("m-9");
   });
 
-  it("短内容可滚动：3 条短消息 totalRows <= viewport 时 scroll 仍可达顶部（Fix1）", async () => {
-    // 3 条 user 消息，每条 2 行（1 wrap + 1 margin）= 6 行。viewportRows=20
-    // > totalRows(6)。旧逻辑 maxScroll = totalRows - max(1,viewport) = 0，
-    // scroll 被 clamp 到 0 → 指示永不出现。Fix1 后 totalRows>1 时
-    // maxScroll = totalRows - 1 = 5，scrollRows=5 落在允许带内。
+  it("短内容适配视口：无滚动历史 → 全部可见、无指示（不塌缩）", async () => {
+    // 3 条 user 消息 = 6 行，viewportRows=20 > totalRows。messageCursor=6 <=
+    // budget(18) → maxScroll=0，scrollRows=5 被 clamp 回 0：无指示、无塌缩，
+    // 全量可见。Fix1 让短内容也能滚到顶边的语义是塌缩 bug 的源头，必须保留
+    // 「无可滚历史 → 不滚」的契约。
     const session = makeSession(buildUserMessages(3));
     const output = await renderToString(
       <ChatView
@@ -231,10 +231,10 @@ describe("ChatView 行级滚动（任务 A 行级）", () => {
       { columns: 80 }
     );
     const plain = stripAnsi(output);
-    // 顶部指示出现，且指示与内容之间无空白间隔（内容仍可见）
-    expect(plain).toContain("5 行历史");
-    expect(plain).toContain("End 回到底部");
+    expect(plain).not.toContain("行历史");
     expect(plain).toContain("m-0");
+    expect(plain).toContain("m-1");
+    expect(plain).toContain("m-2");
   });
 
   it("短内容 scroll 到顶边：viewport < totalRows 且 totalRows > 1 → maxScroll = totalRows - viewport", async () => {
@@ -280,11 +280,10 @@ describe("ChatView 行级滚动（任务 A 行级）", () => {
     expect(plain).toContain("行历史");
   });
 
-  it("scrollRows 越界由 ChatView 兜底 clamp（不报错；Fix1 短内容 scroll 到顶边）", async () => {
-    // Fix1：3 条 user 消息 = 6 行，viewportRows=20 (>= totalRows)。
-    // maxScroll = max(totalRows-viewport, totalRows-1) = max(-14, 5) = 5。
-    // scrollRows=99999 clamp 到 5，窗口 [0, 1) 只露出首行 m-0；
-    // 顶部指示「↑ 5 行历史」出现；不崩溃。
+  it("scrollRows 越界由 ChatView 兜底 clamp：短内容适配视口 → 全量可见不崩溃", async () => {
+    // 3 条 user 消息 = 6 行，viewportRows=20。messageCursor=6 <= budget(18) →
+    // maxScroll=0，scrollRows=99999 clamp 到 0：无指示、无塌缩，全量可见，不崩溃。
+    // 旧版 clamp 上界是 totalRows-1，会把窗口从 6 行塌缩到 1 行（消息减少 bug）。
     const session = makeSession(buildUserMessages(3));
     const output = await renderToString(
       <ChatView
@@ -298,10 +297,10 @@ describe("ChatView 行级滚动（任务 A 行级）", () => {
       { columns: 80 }
     );
     const plain = stripAnsi(output);
-    expect(plain).toContain("5 行历史");
+    expect(plain).not.toContain("行历史");
     expect(plain).toContain("m-0");
-    // m-2 在 [4,6)，不在窗口 [0,1) → 不应可见
-    expect(plain).not.toContain("m-2");
+    expect(plain).toContain("m-1");
+    expect(plain).toContain("m-2");
   });
 
   it("scrollRows=0 + viewportRows=0 → 全部消息可见（无窗口限制）", async () => {
@@ -367,10 +366,12 @@ describe("ChatView 行级滚动（任务 A 行级）", () => {
     expect(plain).toContain("[ask]");
   });
 
-  it("Fix2 长 user 消息行级裁剪：视口只露前几行（不暴露全段）", async () => {
-    // user text="a"*60, cols=8 → wrapCols=6 → 10 行 + 1 margin = 11 行。
-    // viewportRows=10, scrollRows=15→maxScroll=10 → 窗口 [0,1)。
-    // 第一行折 "aaaaaa"（6 a），加 "❯ " 前缀；不应出现完整 60 a 串。
+  it("Fix2 长 user 消息适配视口：全量可见、折行防全串泄漏（不塌缩）", async () => {
+    // user text="a"*60, cols=8 → wrapVisual("❯ "+60a, 8) = 8 行 + 1 margin = 9 行。
+    // viewportRows=10, messageCursor=9 > budget(8) → maxScroll=1, scroll=15
+    // clamp 到 1：窗口 [0,8) 露出全部 8 个内容行（aCount=60）。完整 60-a 串
+    // 因折行跨行仍不出现（防单串泄漏）。旧版 aCount<=6 的前提是窗口塌缩到
+    // 1 行，与新 clamp 语义冲突，改为断言全量适配 + 折行。
     const session = makeSession([
       { role: "user", content: [{ type: "text", text: "a".repeat(60) }] },
     ]);
@@ -386,11 +387,11 @@ describe("ChatView 行级滚动（任务 A 行级）", () => {
       { columns: 8 }
     );
     const plain = stripAnsi(output);
-    // 完整长字符串缺席（被裁掉）
+    // 完整长字符串缺席（折行跨行，不是被裁剪掉）
     expect(plain).not.toContain("a".repeat(60));
-    // 'a' 字符数 ≤ 6（视口只露第一行折 6 a；指示文案不含 a）
+    // 全部 60 个 a 可见（消息全量适配，未塌缩裁剪）
     const aCount = (plain.match(/a/g) ?? []).length;
-    expect(aCount).toBeLessThanOrEqual(6);
+    expect(aCount).toBe(60);
   });
 
   it("Fix2 长 assistant 消息行级裁剪：首段隐藏，后续段可见", async () => {
@@ -430,11 +431,14 @@ describe("ChatView 行级滚动（任务 A 行级）", () => {
   });
 
   it("Fix3 scroll>0 → tail 折叠：底部指示替代 live 工具/ask/spinner/draft", async () => {
-    // 1 user 消息 + running-fg + liveTool + ask + draft。scroll=2 折叠 tail。
-    // 底部指示 "↓ N 行正在生成（End 回到底部）" 必须出现；live 工具串 /
-    // ask / draft 文案都不能渲染。
+    // 长 user 消息（180x → cols=80 折 3 行 + 1 margin = 4 行）+ running-fg +
+    // liveTool + ask + draft。新 clamp：messageCursor=4 > budgetScrolled(2) →
+    // maxScroll=2，scroll=2 可达 → 折叠 tail(8 行) 为「↓ 8 行正在生成」。
+    // live 工具串 / ask / draft 文案都不能渲染。
+    // （旧 fixture "hello"=2 行 <= budget，新 clamp 下 maxScroll=0 滚不动，
+    //  是 Fix1 短内容可滚语义的残留。）
     const session = makeSession([
-      { role: "user", content: [{ type: "text", text: "hello" }] },
+      { role: "user", content: [{ type: "text", text: "x".repeat(180) }] },
     ]);
     const running: TuiSessionState = { ...session, runState: "running-fg" };
     const output = await renderToString(
@@ -450,7 +454,8 @@ describe("ChatView 行级滚动（任务 A 行级）", () => {
       { columns: 80 }
     );
     const plain = stripAnsi(output);
-    // 底部折叠指示
+    // 顶部 + 底部折叠指示
+    expect(plain).toContain("↑ 2 行历史");
     expect(plain).toContain("↓");
     expect(plain).toContain("行正在生成");
     expect(plain).toContain("End 回到底部");
@@ -462,10 +467,12 @@ describe("ChatView 行级滚动（任务 A 行级）", () => {
   });
 
   it("Fix3 顶部 + 底部指示同时渲染（scroll>0 smoke）", async () => {
-    // 短 user + running-fg：tail 1 行 spinner。scroll=2 顶部指示 "↑ 2 行
-    // 历史"；底部 "↓ 1 行正在生成"。两者必须并存。
+    // 长 user 消息（4 行）+ running-fg：tail 1 行 spinner。新 clamp：
+    // messageCursor=4 > budgetScrolled(2) → scroll=2 可达 → 顶部「↑ 2 行历史」+
+    // 底部「↓ 1 行正在生成」并存。（旧 fixture "hello"=2 行，scroll=2 会被
+    // clamp 回 0，指示消失。）
     const session = makeSession([
-      { role: "user", content: [{ type: "text", text: "hello" }] },
+      { role: "user", content: [{ type: "text", text: "x".repeat(180) }] },
     ]);
     const running: TuiSessionState = { ...session, runState: "running-fg" };
     const output = await renderToString(

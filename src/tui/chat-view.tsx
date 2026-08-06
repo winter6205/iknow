@@ -151,17 +151,29 @@ export function ChatView(props: ChatViewProps): ReactElement {
   // 滚动预算：scroll>0 时 tail 折叠为单指示（INDICATOR_ROWS），否则 tail 原样占行。
   const hasTail = tailRows > 0;
   const requestedScroll = Math.max(0, props.scrollRows ?? 0);
-  // 顶部指示 chrome（scroll>0 时恒在）+ fold 指示 chrome。
-  const scrollClampedMax = messageCursor + (hasTail ? tailRows : 0);
-  const scroll = Math.min(requestedScroll, Math.max(0, scrollClampedMax - 1));
+  const viewport = props.viewportRows ?? 0;
+  // scroll>0 时占用的 chrome：顶部指示（恒在）+ fold 指示（仅 hasTail）。
+  // 先按"将进入 scroll>0 状态"假设预算，反向解 clamp；scroll 被 clamp 回 0
+  // 时 messageCursor 必 <= budget，窗口数学退化为 scroll=0 等价（startRow=0）。
+  const chromeScrolled = INDICATOR_ROWS + (hasTail ? INDICATOR_ROWS : 0);
+  const budgetScrolled =
+    viewport > 0 ? Math.max(1, viewport - chromeScrolled) : 0;
+  // viewport <= 0 → 无限视口：消息窗口不裁剪，scroll 仅驱动指示器文案。
+  const unlimited = budgetScrolled <= 0;
+  // 上界：消息空间内窗口顶边最多到达第 0 行，且必须保高（endRow >= budget
+  // ⇒ scroll <= messageCursor - budget）。超过此值的滚动会让窗口从底部收缩
+  // —— 用户感知为"消息减少"。短内容（messageCursor <= budget）无可上滚历
+  // 史，maxScroll = 0，滚轮无效但不塌缩。tail 已折叠，不算入滚动空间（修
+  // 复前 `+ tailRows` 允许 scroll 把 endRow 压成负数，连带 fold 也消失）。
+  const maxScroll = unlimited
+    ? messageCursor + (hasTail ? tailRows : 0) - 1
+    : Math.max(0, messageCursor - budgetScrolled);
+  const scroll = Math.min(requestedScroll, maxScroll);
   const foldTail = scroll > 0 && hasTail;
   const chromeRows =
     (scroll > 0 ? INDICATOR_ROWS : 0) + (foldTail ? INDICATOR_ROWS : 0);
-  const viewport = props.viewportRows ?? 0;
   // 消息窗口高度 = 视口预算 - chrome（下界 1，避免负窗）。
   const budget = viewport > 0 ? Math.max(1, viewport - chromeRows) : 0;
-  // viewport <= 0 → 无限视口：消息窗口不裁剪，scroll 仅驱动指示器文案。
-  const unlimited = budget <= 0;
   // endRow：unlimited / scroll=0 → 全空间底；scroll>0 → 消息空间内上移
   // scroll（tail 已折叠，fold 指示占 2 行 chrome，不计入 endRow）。
   const endRow =
