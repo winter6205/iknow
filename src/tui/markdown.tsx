@@ -78,7 +78,7 @@ function renderInline(text: string, keyPrefix: string): Nodes {
 
 // -- 块 AST ------------------------------------------------------------------
 
-type MdBlock =
+export type MdBlock =
   | { readonly type: "fence"; readonly lang: string; readonly lines: string[] }
   | { readonly type: "table"; readonly rows: string[][] }
   | { readonly type: "heading"; readonly level: number; readonly text: string }

@@ -515,6 +515,84 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     LONG_TIMEOUT
   );
 
+  // #189 Commit 1: openSessionAt 必须重置行级滚动偏移。
+  it(
+    "#189 Commit 1：openSessionAt → scrollRows 重置为 0（会话切换不再保留旧 scroll）",
+    async () => {
+      const longBody = (tag: string) =>
+        `${tag} 行1内容占位\n${tag} 行2内容占位\n${tag} 行3内容占位\n${tag} 行4内容占位\n${tag} 行5内容占位\n${tag} 行6内容占位`;
+      const app = makeApp([
+        assistantResult({ texts: [longBody("aA")] }),
+        assistantResult({ texts: [longBody("aB")] }),
+      ]);
+      await app.ready();
+      await waitFor(() => app.lastOutput().includes("iknow"), 8000, "startup");
+
+      // 建档会话 A：发 "msg-A"
+      await app.type("msg-A 第一行 msg-A 第二行 msg-A 第三行\r");
+      await waitFor(
+        () => app.bridge.inflight.ids().size === 0,
+        8000,
+        "A-turn-done"
+      );
+      await waitFor(() => app.lastOutput().includes("aA"), 8000, "A-rendered");
+      await delay(50);
+
+      // 建档会话 B：/new 建 draft，再发 "msg-B"
+      await app.type("/new\r");
+      await delay(200);
+      await app.type("msg-B 第一行 msg-B 第二行 msg-B 第三行\r");
+      await waitFor(
+        () => app.bridge.inflight.ids().size === 0,
+        8000,
+        "B-turn-done"
+      );
+      await waitFor(() => app.lastOutput().includes("aB"), 8000, "B-rendered");
+      await delay(50);
+
+      // B 上 PgUp → scrollRows > 0，顶部出现「↑ N 行历史」（看最近帧避免旧帧干扰）
+      stdin.write("[5~"); // PgUp
+      await waitFor(
+        () => app.lastOutput().slice(-1500).includes("行历史"),
+        8000,
+        "B-pgup-scrolled"
+      );
+
+      // 切到 list 视图，↓ 选中 A，Enter 打开 A
+      await app.type("/sessions\r");
+      await waitFor(
+        () => app.lastOutput().includes("+ 新建会话"),
+        8000,
+        "list-view"
+      );
+      await delay(300);
+      // 列表 sorted by updatedAt desc → [B, A]，cursor 0=+新建会话。
+      // ↓↓ 移到 cursor 2 = A（entries[1]），Enter → openSessionAt(2)
+      stdin.write("[B");
+      await delay(80);
+      stdin.write("[B");
+      await delay(80);
+      // 锚定在 Enter 之前：B 的 chat frame（含「↑ 8 行历史」）在进入 list
+      // 视图前已写入，排除在窗口外；list 视图帧与打开 A 后的帧都不含
+      // 「行历史」。
+      const beforeOpen = app.lastOutput().length;
+      stdin.write("\r");
+      await waitFor(
+        () => {
+          const after = app.lastOutput().slice(beforeOpen);
+          return (
+            after.includes("aA") &&
+            after.includes("msg-A") &&
+            !after.includes("行历史")
+          );
+        },
+        8000,
+        "A-active-and-scroll-reset"
+      );
+    },
+    LONG_TIMEOUT
+  );
+
   // 任务 A 行级：鼠标滚轮 SGR 序列 → scrollRows 调整，顶部指示出现。
   it(
     "任务 A 行级：SGR 滚轮序列 → 行级滚动指示出现；多次上滚累加行数",
@@ -649,6 +727,79 @@ describe("TuiApp 端到端（tracer bullet）", () => {
         8000,
         "new-reply"
       );
+    },
+    LONG_TIMEOUT
+  );
+
+  // #189 Spec Low：`initialSession`（`iknow tui <id>` resume）恢复路径未测。
+  // 挂载即生成既有会话内容，行级滚动应从 scrollRows=0（auto-follow 底）
+  // 起步：初始无「行历史」顶部指示；模拟滚轮上滚后指示出现且计数正确。
+  it(
+    "Spec Low：initialSession resume 从 scrollRows=0 起步；滚轮上滚后指示出现",
+    async () => {
+      const { attachSession } = await import("../../src/tui/session-state.js");
+      const longBody =
+        "A0 行1内容占位\nA0 行2内容占位\nA0 行3内容占位\nA0 行4内容占位\nA0 行5内容占位\nA0 行6内容占位";
+      const initial = attachSession({
+        conversation_id: "resumed-session",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "resumed-q" }] },
+          { role: "assistant", content: [{ type: "text", text: longBody }] },
+        ],
+        turnCount: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        jsonMode: false,
+      });
+      const bridge = createTuiBridge({
+        dataDir: baseDir,
+        deps: makeDeps([]),
+        inflight: createInflightRegistry(),
+      });
+      const askBridge = createTuiAskUserBridge();
+      const toolEventSink = createToolEventSink();
+      const out: string[] = [];
+      stdout.on("data", (chunk) => out.push(String(chunk)));
+      const instance = render(
+        <TuiApp
+          bridge={bridge}
+          askBridge={askBridge}
+          toolEventSink={toolEventSink}
+          initialSession={initial}
+          cwd="/tmp/proj"
+          dataDir={baseDir}
+        />,
+        {
+          stdout,
+          stdin,
+          exitOnCtrlC: false,
+          interactive: true,
+          kittyKeyboard: { mode: "disabled" },
+        }
+      );
+      instances.push(instance);
+      const lastOutput = (): string => strip(out.join(""));
+      await delay(400); // 等 mount + useInput effect
+
+      // resume 内容渲染出来
+      await waitFor(
+        () => lastOutput().includes("resumed-q"),
+        8000,
+        "resumed-content"
+      );
+      // 初始 scrollRows=0：无「行历史」顶部指示
+      const before = lastOutput();
+      expect(before).not.toContain("行历史");
+
+      // 滚轮上滚（SGR 上滚序列，每 tick = WHEEL_STEP_ROWS=3 行）→ 指示出现
+      stdin.write("\x1b[<64;10;5M");
+      await delay(300);
+      await waitFor(
+        () => lastOutput().slice(-1500).includes("3 行历史"),
+        8000,
+        "resume-wheel-up"
+      );
+      // 从 0 基线计数正确（3 行）
+      expect(lastOutput().slice(-1500)).toContain("3 行历史");
     },
     LONG_TIMEOUT
   );

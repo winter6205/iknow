@@ -418,6 +418,10 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       if (entering) next[id] = switchedTo(entering);
       return next;
     });
+    // #189 Commit 1：切会话前先重置行级滚动偏移（否则旧会话的 scroll 会
+    // 残留，新会话内容落在视口上方被窗口截掉）。先 set 让其与 setActiveKey
+    // 同批 React render。
+    setChatScroll(0);
     setActiveKey(id);
     setView("chat");
     setNotice(undefined);
