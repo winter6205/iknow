@@ -32,15 +32,22 @@ import { createEditFileTool } from "./aci/tools/edit-file.js";
 import { createWriteFileTool } from "./aci/tools/write-file.js";
 import { createWebFetchTool } from "./aci/tools/web-fetch.js";
 import { createWebSearchTool } from "./aci/tools/web-search.js";
+import { homedir } from "node:os";
 import type { AskUser } from "./permission/types.js";
 import type { IknowEnv } from "../config/env.js";
 import { ValidationError } from "../shared/errors.js";
+import {
+  createIknowSystemResolver,
+  initIknowWorkspaceSafe,
+} from "./identity/index.js";
 
 export type BuildEngineOpts = {
   readonly env: IknowEnv;
   readonly askUser: AskUser;
   /** Process working directory used as the soft sandbox root for fs tools. */
   readonly sandboxRoot?: string;
+  /** #196 IKNOW T4:入口 surface(默认 "chat" 守 CLI 主路径;仅 chat/tui 激活 BOOTSTRAP)。 */
+  readonly surface?: "chat" | "tui" | "ask" | "serve";
 };
 
 export type BuiltEngine = {
@@ -126,12 +133,25 @@ export async function buildHarnessEngine(
     policy,
     askUser,
   });
+  const surface = opts.surface ?? "chat";
+
+  // #196 IKNOW T4:启动时 eager + idempotent 初始化 ~/.iknow/(initIknowWorkspaceSafe
+  // 内部 try/catch + warn,失败不阻塞装配 — 守 spec Boundaries Always 降级契约)。
+  await initIknowWorkspaceSafe();
   const deps: LoopEngineDeps = {
     adapter,
     executor,
     registry: reg.inner,
     maxTurns: 6,
     timeoutMs: env.llm.timeoutMs,
+    // #196 IKNOW T4:每 turn 装配 identity/soul/user_profile/bootstrap + #121 段。
+    // deps.system 注入缝装配点(loop-engine 每 turn 调 deps.system?.() 透传
+    // adapter.step request.system)。
+    system: createIknowSystemResolver({
+      cwd: process.cwd(),
+      userHome: homedir(),
+      surface,
+    }),
   };
   return { deps, engine: createLoopEngine(deps) };
 }

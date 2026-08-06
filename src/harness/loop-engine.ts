@@ -92,6 +92,8 @@ export interface LoopAdapter {
     state: LoopState,
     request: {
       tools?: unknown;
+      /** #196 IKNOW T1:每 turn 由 deps.system?.() 解析,undefined 时不发送 system 字段。 */
+      system?: string;
       onStream?: (event: HarnessStreamEvent) => void;
     },
     signal?: AbortSignal // 017 T1 决策:LoopAdapter 是 Loop Engine 直接消费接口,必须能接收 signal
@@ -114,6 +116,12 @@ export interface LoopEngineDeps {
   readonly executor: Executor;
   readonly registry: Registry;
   readonly maxTurns: number;
+  /**
+   * #196 IKNOW T1:每 turn 系统提示装配器。返回 string → 透传
+   * adapter.step request.system;返回 undefined / 字段缺席 → 跳过注入
+   * (行为零变化,守 #121 装配契约)。
+   */
+  readonly system?: () => Promise<string | undefined>;
   /** 017: 主超时,运行时兜底 DEFAULT_TIMEOUT_MS(不在类型层写死) */
   readonly timeoutMs?: number;
   /** 017: 模型侧覆盖;生效 = modelTimeoutMs ?? timeoutMs ?? DEFAULT_TIMEOUT_MS */
@@ -202,6 +210,8 @@ export interface RaceModelOpts {
   readonly signal: AbortSignal | undefined;
   readonly timeoutMs: number;
   readonly onStream?: (event: HarnessStreamEvent) => void;
+  /** #196 IKNOW T1:runModelPhase 每 turn 解析 deps.system?.() 后透传;undefined 时不发送 system。 */
+  readonly systemText?: string;
 }
 
 /** 023: settle 共址于 helper，统一 single-wins 与 cleanup。 */
@@ -246,6 +256,11 @@ function createRaceOutcome(opts: {
         opts.raceOpts.state,
         {
           tools: opts.raceOpts.deps.registry.list(),
+          // #196 IKNOW T1:system 字段条件附加 — undefined 时不发
+          // (byte-identical 既有 behavior,守 014 附加原则)。
+          ...(opts.raceOpts.systemText !== undefined
+            ? { system: opts.raceOpts.systemText }
+            : {}),
           onStream: opts.raceOpts.onStream,
         },
         opts.compositeSignal
@@ -338,6 +353,9 @@ async function runModelPhase(opts: {
   | { kind: "stop"; transition: Transition; turn: TurnTrace }
 > {
   try {
+    // #196 IKNOW T1:每 turn 解析 deps.system?.();undefined → 字段缺席,
+    // adapter 端条件 spread 不发 system 字段 → KV cache prefix 字节级零变化。
+    const systemText = await opts.deps.system?.();
     const handle = raceModel({
       adapter: opts.deps.adapter,
       state: opts.state,
@@ -345,6 +363,7 @@ async function runModelPhase(opts: {
       signal: opts.signal,
       timeoutMs: opts.modelTimeoutMs,
       onStream: opts.onStream,
+      systemText,
     });
     const outcome = await handle.outcome;
     if (outcome.source === "adapter") {

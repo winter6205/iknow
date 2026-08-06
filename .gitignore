@@ -67,6 +67,9 @@ docs/handoff/*
 # to MiniMax M3, not Anthropic Claude; probe evidence is team artifact).
 # Mirrors the i9/i10/i11-smoke exceptions above.
 !docs/handoff/9router-context-mgmt-probe/
+# 196: identity assembly handoff evidence (smoke output + AC checklist).
+# Team artifact mirroring the i9/i10/i11-smoke exception pattern.
+!docs/handoff/2026-08-06-identity-assembly/
 
 # 022: session-api runtime JSON store (data/sessions/<id>.json), not team
 # content. The data/ top-level dir is kept via data/.gitkeep so the

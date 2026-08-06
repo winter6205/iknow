@@ -558,7 +558,7 @@ function wireStreamEvents(
 function buildMessageParams(
   opts: RealAnthropicAdapterOptions,
   state: LoopState,
-  request: { tools?: unknown }
+  request: { tools?: unknown; system?: string }
 ): MessageCreateParamsNonStreaming {
   const tools = toSdkTools(request.tools);
   // #151 T4 请求侧 thinking 控制臂。SDK 0.115.0 在 MessageCreateParamsBase
@@ -574,6 +574,11 @@ function buildMessageParams(
     max_tokens: opts.maxTokens,
     messages: state.messages as unknown as MessageParam[],
     ...(tools !== undefined ? { tools } : {}),
+    // #196 IKNOW T1:system 字段条件附加 — undefined 或空串都不发
+    // (byte-identical 既有行为 + KV 缓存前缀字节级稳定,对齐 #121 同款过滤)。
+    ...(request.system !== undefined && request.system !== ""
+      ? { system: request.system }
+      : {}),
     ...(opts.temperature !== undefined
       ? { temperature: opts.temperature }
       : {}),
@@ -606,6 +611,8 @@ export function createRealAnthropicAdapter(
     state: LoopState,
     request: {
       tools?: unknown;
+      // #196 IKNOW T1:LoopAdapter.step request.system 透传到 SDK params。
+      system?: string;
       onStream?: (event: HarnessStreamEvent) => void;
     },
     signal?: AbortSignal
