@@ -26,6 +26,12 @@ import type { ReactElement, ReactNode } from "react";
 import { Box, Text } from "ink";
 import { padEndVisual, visualWidth } from "./banner.js";
 import { tuiPalette } from "./theme.js";
+import { wrapText } from "./text.js";
+// 值级 import measureBlocks（SSOT，坐标与 message-rows.ts 对齐）。message-rows.ts
+// 对本模块只做 `import type { MdBlock }`（编译期擦除，无运行时依赖），故此处
+// measureBlocks 的值级 import 不构成运行时循环：ESM 下其为纯函数、仅渲染期调用，
+// 两模块均已加载完毕，良性。
+import { measureBlocks } from "./message-rows.js";
 
 type Nodes = ReadonlyArray<ReactNode>;
 
@@ -78,7 +84,7 @@ function renderInline(text: string, keyPrefix: string): Nodes {
 
 // -- 块 AST ------------------------------------------------------------------
 
-type MdBlock =
+export type MdBlock =
   | { readonly type: "fence"; readonly lang: string; readonly lines: string[] }
   | { readonly type: "table"; readonly rows: string[][] }
   | { readonly type: "heading"; readonly level: number; readonly text: string }
@@ -247,7 +253,21 @@ function Heading(props: {
 function CodeBlock(props: {
   readonly lang: string;
   readonly lines: string[];
+  readonly rowRange?: { readonly startRow: number; readonly endRow: number };
 }): ReactElement {
+  // rowRange 在围栏块局部坐标中：row 0 是 lang 头（仅在 lang !== "" 时存在），
+  // 其后依次为各源码行。空行仍渲染 " "，保留 SSOT 行数。
+  const r = props.rowRange;
+  const headerOffset = props.lang !== "" ? 1 : 0;
+  const showHeader =
+    r === undefined || (headerOffset === 1 && r.startRow <= 0 && r.endRow > 0);
+  const visibleLines =
+    r === undefined
+      ? props.lines
+      : props.lines.filter((_, i) => {
+          const row = headerOffset + i;
+          return row >= r.startRow && row < r.endRow;
+        });
   return (
     <Box
       flexDirection="column"
@@ -256,8 +276,8 @@ function CodeBlock(props: {
       paddingX={1}
       marginTop={0}
     >
-      {props.lang !== "" && <Text dimColor>{props.lang}</Text>}
-      {props.lines.map((l, i) => (
+      {showHeader && <Text dimColor>{props.lang}</Text>}
+      {visibleLines.map((l, i) => (
         <Text key={i} color={tuiPalette.code}>
           {l === "" ? " " : l}
         </Text>
@@ -294,20 +314,89 @@ function Table(props: { readonly rows: string[][] }): ReactElement {
   );
 }
 
-function renderBlock(block: MdBlock, key: number): ReactNode {
+/** 块内可见行的局部坐标（BlockRowSpan.startRow 为全局起点，此处为块内偏移）。 */
+interface RowClip {
+  /** 块内可见起始行（含） */
+  readonly startLocal: number;
+  /** 块内可见结束行（不含） */
+  readonly endLocal: number;
+}
+
+/**
+ * 段落局部裁剪：把段落按 width 折行后只渲染落在 [startLocal, endLocal) 的
+ * 行。段首被裁时首行前缀 "… "（dim），段尾被裁时末行后缀 "…"。
+ */
+function renderParagraph(
+  block: Extract<MdBlock, { type: "paragraph" }>,
+  key: number,
+  clip: RowClip | undefined,
+  width: number
+): ReactNode {
+  if (clip === undefined) {
+    return (
+      <Text key={key} wrap="wrap">
+        {renderInline(block.text, `p-${key}`)}
+      </Text>
+    );
+  }
+  const lines = wrapText(block.text, width);
+  const visible = lines.slice(clip.startLocal, clip.endLocal);
+  const clippedStart = clip.startLocal > 0;
+  const clippedEnd = clip.endLocal < lines.length;
+  return (
+    <Box key={key} flexDirection="column">
+      {visible.map((ln, li) => {
+        const prefix = clippedStart && li === 0 ? "… " : "";
+        const suffix = clippedEnd && li === visible.length - 1 ? "…" : "";
+        return (
+          <Text key={li} wrap="wrap">
+            {prefix}
+            {renderInline(suffix ? `${ln}${suffix}` : ln, `p-${key}-${li}`)}
+          </Text>
+        );
+      })}
+    </Box>
+  );
+}
+
+function renderBlock(
+  block: MdBlock,
+  key: number,
+  clip: RowClip | undefined,
+  width: number
+): ReactNode {
   switch (block.type) {
     case "fence":
-      return <CodeBlock key={key} lang={block.lang} lines={block.lines} />;
-    case "table":
-      return <Table key={key} rows={block.rows} />;
+      return clip === undefined ? (
+        <CodeBlock key={key} lang={block.lang} lines={block.lines} />
+      ) : (
+        <CodeBlock
+          key={key}
+          lang={block.lang}
+          lines={block.lines}
+          rowRange={{ startRow: clip.startLocal, endRow: clip.endLocal }}
+        />
+      );
+    case "table": {
+      const rows =
+        clip === undefined
+          ? block.rows
+          : block.rows.slice(clip.startLocal, clip.endLocal);
+      return <Table key={key} rows={rows} />;
+    }
     case "heading":
+      // 标题仅 1-2 行且含 margin，局部裁剪无意义：在范围内则整渲染。
       return <Heading key={key} level={block.level} text={block.text} />;
-    case "quote":
+    case "quote": {
+      const lines =
+        clip === undefined
+          ? block.lines
+          : block.lines.slice(clip.startLocal, clip.endLocal);
       return (
         <Box key={key} flexDirection="row">
           <Text color={tuiPalette.quote}>│ </Text>
           <Box flexDirection="column">
-            {block.lines.map((b, bi) => (
+            {lines.map((b, bi) => (
               <Text key={bi} dimColor italic wrap="wrap">
                 {b === "" ? " " : b}
               </Text>
@@ -315,10 +404,15 @@ function renderBlock(block: MdBlock, key: number): ReactNode {
           </Box>
         </Box>
       );
-    case "list":
+    }
+    case "list": {
+      const items =
+        clip === undefined
+          ? block.items
+          : block.items.slice(clip.startLocal, clip.endLocal);
       return (
         <Box key={key} flexDirection="column">
-          {block.items.map((it, ii) => (
+          {items.map((it, ii) => (
             <Box key={ii} paddingLeft={it.indent * 2}>
               <Text color={tuiPalette.bullet}>{it.marker} </Text>
               <Text wrap="wrap">
@@ -328,27 +422,45 @@ function renderBlock(block: MdBlock, key: number): ReactNode {
           ))}
         </Box>
       );
+    }
     case "blank":
       return <Text key={key}> </Text>;
     case "paragraph":
-      return (
-        <Text key={key} wrap="wrap">
-          {renderInline(block.text, `p-${key}`)}
-        </Text>
-      );
+      return renderParagraph(block, key, clip, width);
   }
 }
 
-/** 主渲染器：markdown 文本 → ink 节点。 */
+/** 主渲染器：markdown 文本 → ink 节点。rowRange 缺省时行为与旧版逐字节一致。 */
 export function Markdown(props: {
   readonly text: string;
   readonly width: number;
+  readonly rowRange?: { readonly startRow: number; readonly endRow: number };
 }): ReactElement {
   const blocks = parseBlocks(props.text);
+  const r = props.rowRange;
   // 原型未处理 width：交给 ink——根 Box 限宽 + 文本 wrap="wrap" 折行不溢出。
+  if (r === undefined) {
+    return (
+      <Box flexDirection="column" width={props.width}>
+        {blocks.map((b, i) => renderBlock(b, i, undefined, props.width))}
+      </Box>
+    );
+  }
+  // rowRange 存在：用 measureBlocks 的块级坐标筛出与窗口相交的块，并给每个块
+  // 换算块内可见行区间（clip），交给 renderBlock 做部分裁剪。
+  const spans = measureBlocks(blocks, props.width);
+  const visible = spans
+    .filter((s) => s.startRow + s.rows > r.startRow && s.startRow < r.endRow)
+    .map((s) => ({
+      block: s.block,
+      clip: {
+        startLocal: Math.max(0, r.startRow - s.startRow),
+        endLocal: Math.min(s.rows, r.endRow - s.startRow),
+      } as RowClip,
+    }));
   return (
     <Box flexDirection="column" width={props.width}>
-      {blocks.map((b, i) => renderBlock(b, i))}
+      {visible.map((v, i) => renderBlock(v.block, i, v.clip, props.width))}
     </Box>
   );
 }
