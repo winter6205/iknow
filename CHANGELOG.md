@@ -5,6 +5,7 @@
 ### Changed
 
 - **TUI 启动 banner 改版**（2026-08-06）：从「大号方形点阵 + 单线外框 + 整体水平居中」改为「占满整行宽度的圆角线框（与输入框 PromptInput 同款 borderStyle="round"）+ 小号扁平眼睛居左（16×6 braille，16 列 × 6 行）+ info 栏（Version / Cwd / Data dir）居右垂直居中 + 顶框左对齐 `◆ iknow tui`」。眼睛不再是大号方形（用户复看裁定"不要放太大、放左边一小块"），窄终端降级阈值随小眼 96 → 64 列。`src/tui/banner-art.ts` / `banner.ts` / `tests/tui/render-smoke.test.tsx` / `docs/design/DESIGN-BANNER.md` 同步更新；`scripts/gen-banner-art.py` 保留为旧全构图大眼存档档。
+- **TUI 启动 banner 二轮**（2026-08-06，复看裁定）：首轮裁瞳孔 ±95px 方窗生成 16×6 小眼，**把眼睛裁掉了**——完整眼形（眼睑 / 眼框 / R 符文周围）丢失。改用操作员提供的新源图 `docs/design/eyeshape.png`（836×836 RGBA 透明底，主体 = 完整眼睛），alpha 隔离背景后**不裁切**，点阵改为 24×12 braille（24 列 × 12 行终端，显示比 1.000 近方形）。`BANNER_MIN_COLS` 随眼睛宽度 64 → 72；金色 R 符文仍在中间显示。`src/tui/banner-art.ts` / `banner.ts` / `tests/tui/render-smoke.test.tsx` / `docs/design/DESIGN-BANNER.md` 同步更新；旧 `scripts/gen-banner-art.py` 仍为旧全构图大眼存档档。
 
 ### Feature
 

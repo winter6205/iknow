@@ -8,23 +8,17 @@
 
 ## 定案一句话
 
-启动 banner = 智慧之眼（braille 变体 C）：方形全构图图案居左 + info 栏居右并排，
-双色分层（墨绿线稿 + 金棕 R 符文强调），窄终端降级为不渲染。
-字形 = U+2800-28FF 盲文（非 ASCII、非 emoji）——#146 spec 的「banner 纯 ASCII」
-要求由本定案显式覆盖（specs/146-tui.md Code Style 已按此回填）。
-
-## 定案一句话
-
 启动 banner = 智慧之眼（braille 变体 C）：**占满整行宽度的圆角线框**（与输入框
-PromptInput 同款 borderStyle="round"，无水平居中）；**小号扁平眼睛**（16×6 braille，
-16 列 × 6 行终端）居左，info 栏（Version / Cwd / Data dir）居右垂直居中；双色分层
-（墨绿线稿 + 金棕 R 符文强调）；窄终端（cols < 64）降级为不渲染。
+PromptInput 同款 borderStyle="round"，无水平居中）；**完整眼睛**（24×12 braille，
+24 列 × 12 行终端，源图 `docs/design/eyeshape.png`，不裁切）居左，info 栏
+（Version / Cwd / Data dir）居右垂直居中；双色分层（墨绿线稿 + 金棕 R 符文
+强调）；窄终端（cols < 72）降级为不渲染。
 字形 = U+2800-28FF 盲文（非 ASCII、非 emoji）——#146 spec 的「banner 纯 ASCII」
 要求由本定案显式覆盖（specs/146-tui.md Code Style 已按此回填）。
 
 ## 1. 改版（2026-08-06）：占满行宽 + 小眼 + info 居右
 
-诊断过程（三次迭代，留档防回退）：
+诊断过程（四次迭代，留档防回退）：
 
 1. 全构图内容 bbox 实测 816×785（比例 1.04，**本质方形**）——眼 + 环 + 8 个
    符文方框的构图就是方块；源画布 1664×928 的"宽"几乎全是背景留白。
@@ -32,15 +26,21 @@ PromptInput 同款 borderStyle="round"，无水平居中）；**小号扁平眼�
    左右大段空白，观感更差，否决。
 3. 曾试裁主体（只留眼形，bbox 810×431=1.879 天然横宽）——操作员裁定
    **"符文还是需要"**，否决。
+4. 首轮改版：从全构图大眼（48×21 braille）→ **裁瞳孔 ±95px 方窗生成 16×6
+   小眼**——眼睛小但完整眼形（眼睑/眼框/R 符文周围）被裁掉了，操作员复看
+   裁定 **"把眼睛裁掉了，要完整地显示"**，作废。
 
-**最终方案（操作员"向左靠可以吗"）**：保留全构图，按用户给出的「**裁主体 +
-补偿字符比**」公式重新生成点阵。先 `image.crop(mask.getbbox())` 裁掉背景只留
-主体（816×785 ≈ 1.04 方形），再按 `cols = rows × (主体宽 / 主体高) × FACTOR`
-补偿终端 braille 字符高宽比（FACTOR=2.0；选 COLS=48 → ROWS=23，主体在终端
-显示为接近正方形）。具体脚本与诊断见 §4。
-**2026-08-06 扁化覆盖**：用户复看后裁定「被挤瘦了，应该稍微扁一点」，FACTOR
-2.0 → 2.2（ROWS 23→21，显示比 ≈1.14 略扁，高度同步变矮），点阵与脚本已更新，
-见 §4.4 迭代记录。
+**最终方案（操作员"用新图完整显示"）**：操作员提供新源图
+`docs/design/eyeshape.png`（836×836 RGBA 透明底，主体 = 完整眼睛：眼睑 +
+眼框 + 瞳孔 R 符文 + 下眼睑）。RGBA alpha 天然隔离背景，**不再裁切**，直接
+取 alpha>128 像素 = 主体（bbox 实测 (13,27,826,810)，size=813×783，
+ratio=1.038 近方形）。点阵生成走：
+
+- TH=200 灰度阈值（深绿线稿 RGB≈(24,50,35) 亮度≈43，安全隔离）
+- COLS=24, ROWS=12（终端 24 列 × 12 行；FACTOR=2.0 字符高宽比补偿；显示
+  比 24/(12×2)=1.000 近方形）
+- 主层墨绿（alpha>128 → 主体）+ 金棕 R 符文（RGB mask `r>140 ∧ b<80 ∧
+(r-b)>80`，限定在主体像素内）
 
 - info 栏 = 宽矩形，图案自然靠左。**方形图案不可横向拉宽（拉伸会畸变眼睛）。**
 - threshold=180 / trimThreshold=200（点阵生成参数，勿动）。
@@ -65,6 +65,10 @@ PromptInput 同款 borderStyle="round"，无水平居中）；**小号扁平眼�
 NO_COLOR / 非 TTY：paint 退化为 no-op，纯文本渲染（no-color.org 纪律）。
 
 ## 3. 布局与降级（正式实现收口）
+
+> **2026-08-06 覆盖**：本节"单线外框 + 整体水平居中 + 96 列降级"为 V7 搬入期
+> 方案，已被 §1 改版（占满行宽圆角框、图案居左 + info 居右、`BANNER_MIN_COLS`
+> 现 = 24 + 3 + 43 + 2 = 72）取代，保留作历史存档。
 
 - V7 布局：banner **自带单线外框**（任务 A，borderStyle="single"），框顶 /
   框底内嵌居中 title `◆ iknow tui ◆`；info 栏仅 version / cwd / dataDir
@@ -148,10 +152,12 @@ bbox 表证明"不是点阵有留白"，而是"采样基准错了"。
 （braille 1 列 × 2 行），正方形主体仍会略扁。推荐 iTerm + Cascadia Code /
 JetBrains Mono（字符宽高比接近 0.5:1，braille 显示最接近正方形）。
 
-## 5. 验证记录（搬入后）
+## 5. 验证记录（搬入后 + 二轮改版）
 
-- `tests/tui/render-smoke.test.tsx`：banner 在 96 / 120 / 160 列 renderToString
-  无溢出、窄终端降级返回空、UI 元素层无 emoji（U+1F300-1FAFF 缺席断言）、
-  任务 A 加框后 ┌/┐ 角字符 + 居中 title `◆ iknow tui ◆` 断言。
+- `tests/tui/render-smoke.test.tsx`：banner 在 72 / 120 / 160 列 renderToString
+  无溢出、每行占满 cols（无水平居中）、窄终端（cols < 72）降级返回空、
+  圆角外框（╭/╰/╮/╯）+ 左对齐 title `◆ iknow tui`、info 栏（Version /
+  Cwd / Data dir）+ 完整眼（24×12 braille，近方形）断言；UI 元素层无 emoji
+  （U+1F300-1FAFF 缺席）。
 - pty 冒烟：真实 TTY 下 banner 渲染正常（见
   `docs/handoff/2026-08-05-tui-implementation.md` 手工表）。

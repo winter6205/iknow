@@ -1,13 +1,18 @@
 /**
  * src/tui/banner.ts
  *
- * 启动 banner（智慧之眼变体 C → 2026-08-06 改版）：纯函数，输出 ANSI 上色行。
+ * 启动 banner（智慧之眼变体 C → 2026-08-06 改版二轮）：纯函数，输出 ANSI 上色行。
  *
  * 改版动机（用户复看裁定）：旧版是「大号方形点阵 + 单线外框 + 整体水平居中」，
- * 眼睛偏大、被挤瘦、面板不占满行宽。新版改为：
+ * 眼睛偏大、被挤瘦、面板不占满行宽。首轮改成「占满行宽 + 小眼居左 + info 居右」
+ * 后又裁掉了完整眼形（只剩瞳孔/虹膜），二轮用新源图 eyeshape.png 重生成
+ * 完整眼，不再裁切。
+ *
+ * 当前布局：
  *  - 占满整行宽度的圆角线框（borderStyle="round"，与输入框 PromptInput 同款），
  *    无水平居中，左右边界对齐屏幕；
- *  - 小号扁平眼睛（16×6 braille）放左侧一小块（不改大、不挤瘦）；
+ *  - 完整眼形（24×12 braille = 24 列 × 12 行终端行）放左侧一小块（用户
+ *    "眼睛依旧不要放太大"，但要完整不裁切）；
  *  - info 栏（Version / Cwd / Data dir）放眼睛右侧，垂直居中；
  *  - 顶框内嵌左对齐 title `◆ iknow tui`，底框为横线。
  *
@@ -15,7 +20,8 @@
  * 的 renderVariantC（面板布局）+ visualWidth / padEndVisual / padStartVisual。
  * 裁决：#146（V7 布局 + 智慧之眼定案）/ #154（窗口适配：SHORT 档折一行
  * `◆ iknow`）/ #171（docs/design/DESIGN-BANNER.md：双色分层、图案居左 +
- * info 栏居右并排、窄终端降级）/ 2026-08-06（banner 占满行宽 + 小眼 + info 居右）。
+ * info 栏居右并排、窄终端降级）/ 2026-08-06（banner 占满行宽 + 小眼 + info 居右）/
+ * 2026-08-06 二轮（eyeshape.png 完整眼，移除裁切）。
  *
  * 色彩策略（照原型，源图实测双色）：
  *  - truecolor（COLORTERM=truecolor/24bit）→ 38;2;24;50;35（墨绿 ~#183223）/
@@ -227,9 +233,9 @@ const BOX_TITLE = "◆ iknow tui";
 const BOX_FRAMING_OVERHEAD = 2;
 
 /**
- * 窄终端降级阈值：banner 面板总宽 = 小眼宽 + GAP + info 栏宽 + 外框开销（2）。
- * 小眼 16 列 → MIN = 16 + 3 + 43 + 2 = 64 列。cols < 64 → 返回 []。
- * （旧大眼档 48 列 MIN=96；小眼显著更宽窄终端可渲染。）
+ * 窄终端降级阈值：banner 面板总宽 = 眼睛宽 + GAP + info 栏宽 + 外框开销（2）。
+ * 完整眼 24 列 → MIN = 24 + 3 + 43 + 2 = 72 列。cols < 72 → 返回 []。
+ * （首轮 16×6 小眼 MIN=64；二轮换完整眼后 24×12 → 72，仍窄于旧大眼档 96。）
  */
 export const BANNER_MIN_COLS =
   visualWidth(EYE_LINES[0] ?? "") +
