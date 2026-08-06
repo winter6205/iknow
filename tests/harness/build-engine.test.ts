@@ -84,6 +84,39 @@ describe("buildHarnessEngine (SSOT assembly)", () => {
   });
 });
 
+// --- #121 T6 / SC 12: memory opt-out + system wiring ------------------------
+
+describe("buildHarnessEngine — memory opt-out (ask path, SC 12)", () => {
+  it("memory disabled → registry stays at 8 (no memory tools) and memory_layer inactive", async () => {
+    const { deps } = await buildHarnessEngine({
+      env: makeEnv("sk-test-mem-off-1"),
+      askUser: createNoAskUser(),
+      memory: { enabled: false },
+    });
+
+    const names = deps.registry.list().map((def) => def.name);
+    expect(names).toEqual(
+      EXPECTED_TOOLS.filter((n) => n !== "memory_recall" && n !== "memory_save")
+    );
+    expect(names).not.toContain("memory_recall");
+    expect(names).not.toContain("memory_save");
+    // landing 形态：deps.system 始终挂 createIknowSystemResolver（identity 层恒在），
+    // memoryEnabled=false 让 memory_layer slot 返回 undefined。
+    const sys = await deps.system?.();
+    expect(sys).toContain("iknow Identity");
+  });
+
+  it("memory enabled (default) → deps.system is wired as an async assembler", async () => {
+    const { deps } = await buildHarnessEngine({
+      env: makeEnv("sk-test-mem-on-1"),
+      askUser: createNoAskUser(),
+    });
+    // seam 契约：deps.system 是函数（#194 同款断言，不实际调用——
+    // 调用会写 usage.json 进真实 ~/.iknow/memory）
+    expect(typeof deps.system).toBe("function");
+  });
+});
+
 describe("buildHarnessEngine (SSOT passthrough)", () => {
   it("propagates maxTurns and timeoutMs from env (not hard-coded)", async () => {
     const env = makeEnv("sk-test-passthrough-1");

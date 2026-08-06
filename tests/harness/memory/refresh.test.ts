@@ -1,0 +1,135 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createSystemResolver } from "../../../src/harness/memory/refresh.ts";
+
+vi.mock("../../../src/harness/memory/assembly.ts", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("../../../src/harness/memory/assembly.ts")
+    >();
+  return {
+    ...actual,
+    assembleSystemPrompt: vi.fn(actual.assembleSystemPrompt),
+  };
+});
+import { assembleSystemPrompt as spiedAssemble } from "../../../src/harness/memory/assembly.ts";
+
+const roots: string[] = [];
+
+async function makeContext() {
+  const root = await mkdtemp(join(tmpdir(), "iknow-refresh-"));
+  roots.push(root);
+  const cwd = join(root, "project");
+  const userHome = join(root, "home");
+  const memoryDir = join(root, "memory");
+  await Promise.all([mkdir(cwd), mkdir(userHome), mkdir(memoryDir)]);
+  return { cwd, userHome, memoryDir };
+}
+
+async function tick(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+
+afterEach(async () => {
+  vi.clearAllMocks();
+  await Promise.all(
+    roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
+  );
+});
+
+describe("createSystemResolver", () => {
+  it("returns the cached system when tracked mtimes are unchanged (zero reassembly)", async () => {
+    const ctx = await makeContext();
+    await writeFile(join(ctx.cwd, "AGENTS.md"), "project-v1");
+    const resolver = createSystemResolver(ctx);
+    expect(await resolver()).toContain("project-v1");
+    // Second call: no mtime change → schemaREADME cache hit, no disk reassembly.
+    expect(await resolver()).toContain("project-v1");
+    expect(spiedAssemble).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes when a project AGENTS.md mtime changes", async () => {
+    const ctx = await makeContext();
+    const agents = join(ctx.cwd, "AGENTS.md");
+    await writeFile(agents, "project-v1");
+    const resolver = createSystemResolver(ctx);
+    await resolver();
+    await tick();
+    await writeFile(agents, "project-v2");
+    expect(await resolver()).toContain("project-v2");
+  });
+
+  it("keeps system content stable across cache hits", async () => {
+    const ctx = await makeContext();
+    await writeFile(join(ctx.cwd, "AGENTS.md"), "stable-project");
+    const resolver = createSystemResolver(ctx);
+    const first = await resolver();
+    expect(await resolver()).toBe(first);
+  });
+
+  it("tracks rule files independently", async () => {
+    const ctx = await makeContext();
+    const projectRules = join(ctx.cwd, ".iknow", "rules");
+    const userRules = join(ctx.userHome, ".iknow", "rules");
+    await Promise.all([
+      mkdir(projectRules, { recursive: true }),
+      mkdir(userRules, { recursive: true }),
+    ]);
+    const projectRule = join(projectRules, "project.md");
+    const userRule = join(userRules, "user.md");
+    await Promise.all([
+      writeFile(projectRule, "project-rule-v1"),
+      writeFile(userRule, "user-rule-v1"),
+    ]);
+    const resolver = createSystemResolver(ctx);
+    await resolver();
+    await tick();
+    await writeFile(userRule, "user-rule-v2");
+    const refreshed = await resolver();
+    expect(refreshed).toContain("user-rule-v2");
+    expect(refreshed).toContain("project-rule-v1");
+  });
+
+  it("treats a deleted tracked file as absent without throwing", async () => {
+    const ctx = await makeContext();
+    const agents = join(ctx.cwd, "AGENTS.md");
+    await writeFile(agents, "removed-content");
+    const resolver = createSystemResolver(ctx);
+    await resolver();
+    await rm(agents);
+    expect(await resolver()).not.toContain("removed-content");
+  });
+
+  // -- review #121: 并发去重 + 装配失败不毒化缓存 -----------------------------
+
+  it("dedupes concurrent first-call assembly (no duplicate discover/assemble)", async () => {
+    const ctx = await makeContext();
+    await writeFile(join(ctx.cwd, "AGENTS.md"), "concurrent-v1");
+    const resolver = createSystemResolver(ctx);
+    // 同一 tick 内派发多个并发调用 —— serve 多会话共享同一 resolver 时会发生。
+    const results = await Promise.all([
+      resolver(),
+      resolver(),
+      resolver(),
+      resolver(),
+    ]);
+    // 所有并发调用应返回同一字符串,且底层 assemble 只触发一次（in-flight dedupe）。
+    expect(new Set(results).size).toBe(1);
+    expect(spiedAssemble).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not poison the cache when assembleSystemPrompt throws (next call retries)", async () => {
+    const ctx = await makeContext();
+    await writeFile(join(ctx.cwd, "AGENTS.md"), "retry-v1");
+    // 第一次装配失败 + 第二次成功
+    spiedAssemble
+      .mockRejectedValueOnce(new Error("transient failure"))
+      .mockResolvedValueOnce("retry-success-content");
+    const resolver = createSystemResolver(ctx);
+    await expect(resolver()).rejects.toThrow("transient failure");
+    // tracked/lastMtime 已被丢弃 → 下次调用重新 discovery + assemble
+    expect(await resolver()).toBe("retry-success-content");
+  });
+});

@@ -555,7 +555,7 @@ function wireStreamEvents(
  * 字段不因流式 / 非流式而变化,KV 缓存前缀稳定性不受影响)。此处不引入
  * `stream: true`,SDK `.stream()` 内部追加。
  */
-function buildMessageParams(
+export function buildMessageParams(
   opts: RealAnthropicAdapterOptions,
   state: LoopState,
   request: { tools?: unknown; system?: string }
