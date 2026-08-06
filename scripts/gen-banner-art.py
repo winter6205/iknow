@@ -2,7 +2,12 @@
 """
 scripts/gen-banner-art.py
 
-设计期工具：按用户给定的公式重新生成智慧之眼 braille 点阵（主层 + 金棕层）。
+设计期工具：生成智慧之眼 braille 点阵（主层 + 金棕层）——**旧全构图大眼**存档档。
+
+> 2026-08-06 改版后，产品 banner 使用小号扁平眼（见 docs/design/DESIGN-BANNER.md
+> §1/§6），本脚本保留全构图大眼（FACTOR=2.2 扁化档）作为设计期存档/复现工具；
+> 当前 `src/tui/banner-art.ts` 中的 EYE_LINES/EYE_GOLD_LINES 已是小眼，
+> **不要用本脚本输出直接回填**（会覆盖成旧大眼）。
 
 源图：docs/design/1785827453.png（1664x928，含背景）。
 主体 bbox 实测：TH=200 -> bbox=(424,71,1240,856)，size=816x785，ratio=1.039。
@@ -16,7 +21,7 @@ scripts/gen-banner-art.py
      （终端 braille 字符宽高比 1:2）。
 
 只输出，不读不改 banner-art.ts；将 stdout 末尾的 TS 块手动贴入
-src/tui/banner-art.ts。
+src/tui/banner-art.ts（仅当改回大眼时）。
 
 依赖：Pillow（已通过 PEP 668 绕过：python3 -m pip install --user
 --break-system-packages Pillow）。
@@ -26,12 +31,12 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "docs" / "design" / "1785827453.png"
 TH = 200
-# COLS=48：BANNER_MIN_COLS=48+3+43+2=96（vs 旧 82），80-col 终端仍不渲染
-# banner（与旧行为一致：旧 82 已 skip 80-col），但 logo 主体比 34×17 大
-# 41%（更清晰）。若选 60 则 MIN=108 太宽；40（MIN=88）虽然更接近旧行为
-# 但 logo 增长仅 +18%。
+# COLS=48：全构图大眼宽（存档档）。BANNER_MIN_COLS（旧）=48+3+43+2=96。
 COLS = 48
-FACTOR = 2.0
+# FACTOR：终端 braille 字符高宽比补偿（1 字符 = 2×4 点阵）。FACTOR=2.0 时
+# 主体在终端显示为正方形（显示比 ≈1.04）；2026-08-06 曾调至 2.2 → ROWS=21，
+# 显示比 ≈1.14 略扁；随后改版为小眼，本参数仅存档参考。
+FACTOR = 2.2
 
 img_rgb = Image.open(SRC).convert("RGB")
 img = img_rgb.convert("L")
