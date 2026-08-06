@@ -115,9 +115,15 @@ export async function buildHarnessEngine(
   const sandboxRoot = opts.sandboxRoot ?? process.cwd();
   // 10 件工具集 SSOT 工厂(append-only 顺序;env.web 透传 IKNOW_WEB_PROXY /
   // IKNOW_WEB_SEARCH_URL)。proxyUrl 非法 → 装配期同步抛(见 registry.ts)。
-  // #194 T6:memoryDir 必传,确保 reg.inner 含 memory_recall + memory_save;
-  // ask 入口由 registryTools 过滤剥离(走 opts.memory.enabled=false)。
-  const reg = createDefaultAciRegistry({ env, sandboxRoot, memoryDir });
+  // #194 T6:reg 按 memoryEnabled 条件化构造 — enabled 时传 memoryDir(reg.inner 10
+  // 件,含 memory_recall + memory_save);disabled(ask)时不传 memoryDir(reg.inner 8
+  // 件)。registry / executor / catalog 因此三方一致,不再手工过滤(SC9 保留
+  // `memoryEnabled ? ... : undefined` 形态)。
+  const reg = createDefaultAciRegistry({
+    env,
+    sandboxRoot,
+    ...(memoryEnabled ? { memoryDir } : undefined),
+  });
   const baseExecutor = createExecutor(reg.inner);
   // 5-step permission middleware: 危险命令由硬墙无条件拦截(#122)。
   // `createAciExecutor` 内部已装配 permission-executor,不要再外包一层。
@@ -129,24 +135,9 @@ export async function buildHarnessEngine(
     askUser,
   });
 
-  // registry 双分支(SC9:grep 命中 `memoryEnabled ? ... : undefined`):
-  // enabled → reg.inner(10 件,含 memory_recall + memory_save);
-  // disabled → 剥离 memory 工具 → 8 件。deps.registry 需满足 Registry 形状
-  // ({ list, get }),disabled 分支构造一个过滤视图(list/get 均滤掉 memory 工具;
-  // 冻结副本,不改动 source-of-truth)。
-  const registryTools: Registry = memoryEnabled
-    ? reg.inner
-    : (() => {
-        const kept = reg.inner
-          .list()
-          .filter(
-            (t) => t.name !== "memory_recall" && t.name !== "memory_save"
-          );
-        return {
-          list: () => Object.freeze(kept),
-          get: (name: string) => kept.find((t) => t.name === name),
-        };
-      })();
+  // registry 单源:reg.inner 已是按 memoryEnabled 条件化的最终视图(8 或 10 件)。
+  // deps.registry / executor / catalog 三方一致 — ask 入口自然不含 memory 工具。
+  const registryTools: Registry = reg.inner;
 
   // #196 IKNOW T4:启动时 eager + idempotent 初始化 ~/.iknow/(initIknowWorkspaceSafe
   // 内部 try/catch + warn,失败不阻塞装配 — 守 spec Boundaries Always 降级契约)。
