@@ -42,11 +42,14 @@ const DEFAULT_SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/";
  * - `lookup` 覆盖点：替换 DNS 解析（测试注入固定 IP）。
  * - `envSearchUrl` 覆盖点：装配方（buildHarnessEngine）经 loadIknowEnv 解析的
  *   `IKNOW_WEB_SEARCH_URL` 值；测试可直注。工具自身不读 process.env（env.ts SSOT）。
+ * - `proxyUrl` 覆盖点：把出站代理 URL 透传到 network-guard（IKNOW_WEB_PROXY
+ *   装配路径；非空时 fetch 挂 ProxyAgent dispatcher）。
  */
 export interface WebSearchToolDeps {
   readonly fetch?: GuardFetchFn;
   readonly lookup?: GuardLookupFn;
   readonly envSearchUrl?: string | undefined;
+  readonly proxyUrl?: string;
 }
 
 interface SearchInput {
@@ -70,21 +73,20 @@ interface SearchResult {
  *   - aci 元数据：read-only / concurrency-safe / cancel / default tier
  */
 export function createWebSearchTool(deps?: WebSearchToolDeps): AciToolDef {
+  // fail-fast:代理配置在装配时即过 SSRF 语法校验,坏的 IKNOW_WEB_PROXY
+  // 在 build 期报错,而非首次搜索时才暴露。
+  const guardDeps = resolveGuardDeps(deps);
   const handler = async (
     input: unknown,
     ctx?: ToolExecutionContext
   ): Promise<string> => {
     const parsed = compileSearchInput(input, deps?.envSearchUrl);
     const requestUrl = `${parsed.endpoint}${parsed.endpoint.includes("?") ? "&" : "?"}q=${encodeURIComponent(parsed.query)}`;
-    const response = await fetchPublicResponse(
-      requestUrl,
-      resolveGuardDeps(deps),
-      {
-        tool: "web_search",
-        timeoutMs: SEARCH_TIMEOUT_MS,
-        signal: ctx?.signal,
-      }
-    );
+    const response = await fetchPublicResponse(requestUrl, guardDeps, {
+      tool: "web_search",
+      timeoutMs: SEARCH_TIMEOUT_MS,
+      signal: ctx?.signal,
+    });
     const results = parseSearchResults(response.body, parsed.maxResults);
     if (results.length === 0) {
       throw new ToolExecutionError(
@@ -132,7 +134,9 @@ export function createWebSearchTool(deps?: WebSearchToolDeps): AciToolDef {
 function resolveGuardDeps(deps?: WebSearchToolDeps): GuardDeps {
   if (deps?.fetch && deps?.lookup)
     return { fetch: deps.fetch, lookup: deps.lookup };
-  const production = createDefaultGuardDeps();
+  const production = createDefaultGuardDeps(
+    deps?.proxyUrl ? { proxyUrl: deps.proxyUrl } : undefined
+  );
   return {
     fetch: deps?.fetch ?? production.fetch,
     lookup: deps?.lookup ?? production.lookup,

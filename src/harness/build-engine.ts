@@ -117,10 +117,16 @@ export async function buildHarnessEngine(
     createGlobTool(sandboxRoot),
     createEditFileTool(sandboxRoot),
     createWriteFileTool(sandboxRoot),
-    createWebFetchTool(),
+    // 出站代理(IKNOW_WEB_PROXY)经 loadIknowEnv SSOT 解析,透传给两个 Web 工具,
+    // 装配到 network-guard 的 ProxyAgent dispatcher(trust_env=False 语义,
+    // 显式配置才生效;空 → 直连)。
+    createWebFetchTool({ proxyUrl: env.web.proxy }),
     // web_search 端点覆写经 loadIknowEnv SSOT 解析(process.env > .env.local > .env),
     // 工具自身不直读 process.env。
-    createWebSearchTool({ envSearchUrl: env.web.searchUrl }),
+    createWebSearchTool({
+      envSearchUrl: env.web.searchUrl,
+      proxyUrl: env.web.proxy,
+    }),
   ];
   const reg = createAciRegistry(aciTools);
   const baseExecutor = createExecutor(reg.inner);

@@ -43,7 +43,7 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
       stream: "on",
     },
     chat: { showThinking: false },
-    web: { searchUrl: undefined },
+    web: { searchUrl: undefined, proxy: undefined },
   };
 }
 
@@ -89,6 +89,27 @@ describe("buildHarnessEngine (SSOT passthrough)", () => {
     expect(deps.maxTurns).toBe(6);
     // Proves timeoutMs is read through from env, not a hard-coded constant.
     expect(deps.timeoutMs).toBe(12345);
+  });
+
+  it("IKNOW_WEB_PROXY 非法值 → build 时同步抛错,空值 → 不影响装配", async () => {
+    // 验证代理配置在装配时即被 SSRF 防线拦截,避免到 fetch 时才报。
+    const env = makeEnv("sk-test-passthrough-3");
+    env.web.proxy = "ftp://bad-proxy:9999";
+    await expect(
+      buildHarnessEngine({
+        env,
+        askUser: createNoAskUser(),
+      })
+    ).rejects.toThrow(/only http and https|malformed/i);
+
+    // 对照:空代理配置不抛错,装配成功。
+    const envOk = makeEnv("sk-test-passthrough-4");
+    envOk.web.proxy = undefined;
+    const { deps } = await buildHarnessEngine({
+      env: envOk,
+      askUser: createNoAskUser(),
+    });
+    expect(deps.registry.list().map((d) => d.name)).toEqual(EXPECTED_TOOLS);
   });
 
   it("injects sandboxRoot into the read_file tool (out-of-root rejected)", async () => {

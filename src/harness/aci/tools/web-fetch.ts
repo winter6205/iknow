@@ -40,10 +40,13 @@ export const UNTRUSTED_BANNER =
  * 依赖注入：覆盖点（默认 = 生产值）。
  * - `fetch` 覆盖点：替换出口 HTTP 层（测试注入 canned 响应）。
  * - `lookup` 覆盖点：替换 DNS 解析（测试注入固定 IP）。
+ * - `proxyUrl` 覆盖点：把出站代理 URL 透传到 network-guard（IKNOW_WEB_PROXY
+ *   装配路径；非空时 fetch 挂 ProxyAgent dispatcher）。
  */
 export interface WebFetchToolDeps {
   readonly fetch?: GuardFetchFn;
   readonly lookup?: GuardLookupFn;
+  readonly proxyUrl?: string;
 }
 
 interface FetchInput {
@@ -60,20 +63,18 @@ interface FetchInput {
  *   - aci 元数据：read-only / concurrency-safe / cancel / default tier
  */
 export function createWebFetchTool(deps?: WebFetchToolDeps): AciToolDef {
+  // fail-fast:代理配置在装配时即过 SSRF 语法校验(对齐 web_search)。
+  const guardDeps = resolveGuardDeps(deps);
   const handler = async (
     input: unknown,
     ctx?: ToolExecutionContext
   ): Promise<string> => {
     const parsed = compileFetchInput(input);
-    const response = await fetchPublicResponse(
-      parsed.url,
-      resolveGuardDeps(deps),
-      {
-        tool: "web_fetch",
-        timeoutMs: FETCH_TIMEOUT_MS,
-        signal: ctx?.signal,
-      }
-    );
+    const response = await fetchPublicResponse(parsed.url, guardDeps, {
+      tool: "web_fetch",
+      timeoutMs: FETCH_TIMEOUT_MS,
+      signal: ctx?.signal,
+    });
     const text = renderBody(response.body, response.contentType);
     return formatFetchOutput(
       response.finalUrl,
@@ -116,7 +117,9 @@ export function createWebFetchTool(deps?: WebFetchToolDeps): AciToolDef {
 function resolveGuardDeps(deps?: WebFetchToolDeps): GuardDeps {
   if (deps?.fetch && deps?.lookup)
     return { fetch: deps.fetch, lookup: deps.lookup };
-  const production = createDefaultGuardDeps();
+  const production = createDefaultGuardDeps(
+    deps?.proxyUrl ? { proxyUrl: deps.proxyUrl } : undefined
+  );
   return {
     fetch: deps?.fetch ?? production.fetch,
     lookup: deps?.lookup ?? production.lookup,

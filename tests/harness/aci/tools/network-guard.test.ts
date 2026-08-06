@@ -466,6 +466,54 @@ describe("fetchPublicResponse — 并发扇出（ACR corrective #3）", () => {
   });
 });
 
+describe("createDefaultGuardDeps — 代理出口（IKNOW_WEB_PROXY 装配路径）", () => {
+  it("proxyUrl 非法(非 http/https)时构造时同步抛 ToolExecutionError", () => {
+    // SSRF 防线对齐 upstream `validate_http_url(resolved_proxy)`:
+    // proxy URL 在 ProxyAgent 构造前必须通过 httpUrlViolation 校验,
+    // 校验发生在工厂同步路径上,早于 fetch 闭包第一次调用。
+    assert.throws(
+      () => createDefaultGuardDeps({ proxyUrl: "ftp://proxy.local:7897" }),
+      (err: unknown) =>
+        err instanceof ToolExecutionError &&
+        (err.message.includes("only http and https") ||
+          err.message.includes("URL is malformed"))
+    );
+  });
+
+  it("proxyUrl 含凭据时构造时同步抛 ToolExecutionError", () => {
+    assert.throws(
+      () =>
+        createDefaultGuardDeps({
+          proxyUrl: "http://user:pass@proxy.local:7897",
+        }),
+      (err: unknown) =>
+        err instanceof ToolExecutionError && err.message.includes("credentials")
+    );
+  });
+
+  it("proxyUrl 合法时返回的 deps 结构完整", () => {
+    // dispatcher 装配被触发。仅验证返回的 deps 结构合法。
+    // 实网络行为(走 ProxyAgent 出网)在 smoke 脚本里测,避免测试挂代理。
+    const deps = createDefaultGuardDeps({
+      proxyUrl: "http://127.0.0.1:7897",
+    });
+    assert.equal(typeof deps.fetch, "function");
+    assert.equal(typeof deps.lookup, "function");
+  });
+
+  it("proxyUrl 缺省时不挂 dispatcher(回归原路径)", () => {
+    const deps = createDefaultGuardDeps();
+    assert.equal(typeof deps.fetch, "function");
+    assert.equal(typeof deps.lookup, "function");
+  });
+
+  it("向后兼容旧的字符串 userAgent 签名", () => {
+    // createDefaultGuardDeps(ua?: string) 旧调用点不应因新增 opts 形态破坏。
+    const deps = createDefaultGuardDeps("legacy-ua/1.0");
+    assert.equal(typeof deps.fetch, "function");
+  });
+});
+
 describe("createDefaultGuardDeps - 浏览器伪装 UA（反爬可达性）", () => {
   it("DEFAULT_USER_AGENT 形如浏览器串并带 iknow 后缀", () => {
     // 防回退到纯产品 UA（实测被 Cloudflare 202 challenge 拦截）。

@@ -51,15 +51,24 @@ export interface ChatEnv {
 }
 
 /**
- * ACI Web 类工具的 env 配置臂（web_search 端点覆写）。
+ * ACI Web 类工具的 env 配置臂（web_search 端点覆写 + 出站代理）。
  *
  * `IKNOW_WEB_SEARCH_URL`：可选 HTML 搜索端点覆写（私网后端 / 测试用）。
- * 空 → undefined（web_search 落默认 DuckDuckGo html 端点）。读取经本模块
- * 统一走 process.env > .env.local > .env 优先级（env.ts SSOT，与 LLM key
- * 同一加载链路）；工具自身不直读 process.env。
+ * 空 → undefined（web_search 落默认 DuckDuckGo html 端点）。
+ *
+ * `IKNOW_WEB_PROXY`：可选出站 HTTP(S) 代理 URL（对齐 upstream
+ * `OPENHARNESS_WEB_PROXY`，trust_env=False 语义 —— 显式配置才生效，
+ * 不读系统 HTTP(S)_PROXY）。装配方在 network-guard 构造 ProxyAgent
+ * dispatcher；非空时 web_fetch / web_search 出口走代理（远端解析 +
+ * 出网，绕开本地 DNS 污染 / egress 阻断）。代理 URL 仍走与目标同套
+ * 语法校验（协议 / host / 凭据）。
+ *
+ * 读取经本模块统一走 process.env > .env.local > .env 优先级（env.ts
+ * SSOT，与 LLM key 同一加载链路）；工具自身不直读 process.env。
  */
 export interface WebEnv {
   searchUrl: string | undefined;
+  proxy: string | undefined;
 }
 
 export interface IknowEnv {
@@ -292,6 +301,8 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
     web: {
       // 可选端点覆写：空 → undefined（web_search 落默认 DuckDuckGo html 端点）。
       searchUrl: envOptional({ file, key: "IKNOW_WEB_SEARCH_URL" }),
+      // 可选出站代理：空 → undefined（network-guard 直连）。显式配置才生效。
+      proxy: envOptional({ file, key: "IKNOW_WEB_PROXY" }),
     },
   };
 }
