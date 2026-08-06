@@ -160,6 +160,37 @@ export function renderAssistantAnswer(opts: {
 }
 
 /**
+ * Human status line (no answer text) for `RunResult` + `LoopTrace`.
+ *
+ * Layout: `stop=<stopReason> · turns=<turnCount> · tools=<a,b,c> ·
+ * <totalDurationMs>ms [ · tokens in/out: <in>/<out>]`
+ *
+ * #195 (T6 续): extracted from `formatRunHuman` so the streaming chat host
+ * can emit JUST this line as the trailing status, without re-printing the
+ * answer text (which has already been streamed to stdout as the final
+ * output). `formatRunHuman` delegates here to preserve DRY — both the
+ * non-streamed and streamed paths build the same status string.
+ *
+ * `result.finalText === null` 不影响(状态行不读 finalText)。
+ * `trace.turns` 中无任何工具调用时,`tools=` 显示 `-`。
+ *
+ * #160 T5:`lastUsage` 非 null 时追加 `tokens in/out` 读数;null = run 无成功
+ * 模型调用,不显示。
+ */
+export function formatStatusLine(opts: FormatRunHumanOpts): string {
+  const { result, trace } = opts;
+  const toolNames = flattenToolNames(trace);
+  const tools = toolNames.length > 0 ? toolNames.join(TOOL_LIST_SEP) : NO_TOOLS;
+  return (
+    `stop=${result.stopReason} · ` +
+    `turns=${result.turnCount} · ` +
+    `tools=${tools} · ` +
+    `${trace.totals.totalDurationMs}ms` +
+    tokenSegment(result.lastUsage)
+  );
+}
+
+/**
  * Human projection of `RunResult` + `LoopTrace`.
  *
  * Layout:
@@ -169,10 +200,9 @@ export function renderAssistantAnswer(opts: {
  *   [ · tokens in/out: <inputTokens>/<outputTokens>]`
  *
  * `result.finalText === null` 或无内容时,文本部分为空字符串,状态行照常输出。
- * `trace.turns` 中无任何工具调用时,`tools=` 显示 `-`。
  *
- * #160 T5:`lastUsage` 非 null 时状态行追加 `tokens in/out` 读数(仅 input/output;
- * cache 两字段暂不进人类展示面);null = run 无成功模型调用,不显示。
+ * #195: status segment delegates to `formatStatusLine` (DRY with the streaming
+ * chat host path which emits only the status line + separator).
  *
  * #152 T5:thinking 可见面走 `opts.showThinking`(默认 false)。关闭时与原行为
  * 完全一致(用 `finalText` 派生,thinking 不进答案);开启时改走
@@ -182,7 +212,7 @@ export function renderAssistantAnswer(opts: {
  * 值为 `***`(消费层输出边界)。
  */
 export function formatRunHuman(opts: FormatRunHumanOpts): string {
-  const { result, trace, showThinking = false } = opts;
+  const { result, showThinking = false } = opts;
   const rawText = showThinking
     ? renderAssistantAnswer({
         messages: result.messages,
@@ -190,14 +220,7 @@ export function formatRunHuman(opts: FormatRunHumanOpts): string {
       })
     : (result.finalText ?? "");
   const text = buildOutputMask().mask(rawText);
-  const toolNames = flattenToolNames(trace);
-  const tools = toolNames.length > 0 ? toolNames.join(TOOL_LIST_SEP) : NO_TOOLS;
-  const status =
-    `stop=${result.stopReason} · ` +
-    `turns=${result.turnCount} · ` +
-    `tools=${tools} · ` +
-    `${trace.totals.totalDurationMs}ms` +
-    tokenSegment(result.lastUsage);
+  const status = formatStatusLine(opts);
   return `${text}\n\n${status}`;
 }
 

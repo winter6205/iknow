@@ -8,7 +8,7 @@ import {
   type HarnessStreamEvent,
   type LoopEngineDeps,
 } from "../harness/index.js";
-import { formatRunHuman, formatRunJson } from "./format.js";
+import { formatRunHuman, formatRunJson, formatStatusLine } from "./format.js";
 import {
   applySlashCommand,
   parseChatLine,
@@ -61,6 +61,13 @@ export type ProcessChatLineResult = {
   quit: boolean;
   /** Material for stdout (answers, slash info/help/reset). */
   output: string;
+  /**
+   * #195: status line extracted from `formatRunHuman` (human projection only;
+   * `undefined` for JSON projection or slash commands). The streaming chat
+   * host uses this when the answer text has already been streamed to stdout
+   * as the final output — emitting it avoids re-rendering the answer.
+   */
+  statusLine?: string;
   /** Material for stderr (errors). */
   stderr?: string;
   /** True when this line was a user query that ran the agent. */
@@ -120,14 +127,24 @@ export async function processChatLine(
     ) {
       ctx.state.messages = Object.freeze([...result.messages]);
     }
-    const output = ctx.state.jsonMode
-      ? formatRunJson({ result, trace })
-      : formatRunHuman({
+    const human = !ctx.state.jsonMode;
+    const output = human
+      ? formatRunHuman({
           result,
           trace,
           showThinking: ctx.showThinking,
-        });
-    return { quit: false, output, ranQuery: true };
+        })
+      : formatRunJson({ result, trace });
+    return {
+      quit: false,
+      output,
+      // #195:status line for the streaming chat host(non-streamed / pipe /
+      // json paths ignore it — they consume `output` unchanged).
+      statusLine: human
+        ? formatStatusLine({ result, trace, showThinking: ctx.showThinking })
+        : undefined,
+      ranQuery: true,
+    };
   } catch (err) {
     return {
       quit: false,
@@ -184,31 +201,65 @@ function resolveQuiet(optsQuiet: boolean | undefined): boolean {
 }
 
 /**
- * #179 T6 (#147 D0/D3):TTY 增量预览接缝(spinner 替代面)。
+ * #179 T6 + #195:TTY 流式最终输出接缝。
  *
- * 返回的 sink 作为 `processChatLine` 的 `onStream`:
- *   - `text_delta` → 把增量文本直接写给 `write`(交互 REPL 传
- *     `process.stderr.write.bind(process.stderr)`),滚动替换「思考中…」;
- *   - `tool_call_start` → 输出工具名提示(保持与 spinner 同样的简洁风格)。
+ * 返回 `{ feed, textStreamed }`(替代 #195 前的裸回调),作为
+ * `processChatLine` 的 `onStream`:
+ *   - `feed` 把 harness 流式事件按"stdout 直出最终答案 / stderr 工具提示"
+ *     分流路由:
+ *     - `text_delta` → 经 `opts.writeOut` 写为 stdout 的**最终输出**(增量
+ *       滚动);首个 delta 到来时先经 `opts.writeErr` 写 `\r\x1b[K` 清掉
+ *       stderr 上的「思考中…」spinner(one-shot);同时翻转 `textStreamed`
+ *       为 `true`(经 getter 暴露,host 据此决定回合结束只补状态行)。
+ *     - `tool_call_start` → 经 `opts.writeErr` 输出工具名提示(状态行,
+ *       永久留在屏幕);**不**翻转 `textStreamed`(纯提示,不承载答案)。
+ *   - `textStreamed` 反映是否有答案文本已流式(stdout)过。
  *
- * 写入错误被吞咽(观察者回调不得反向破坏回合;对齐 D3 与 safeTrace 纪律)。
+ * #195 修复要点:答案文本只直出一次到 stdout(不再回写 stderr 预览再被
+ * `formatRunHuman` 二次渲染 —— 多行答案双打印的根因)。`textStreamed`
+ * 让 host 知道要不要在回合结束时跳过 `output` 的文本部分。
+ *
+ * 写入错误被吞咽(观察者不得反向破坏回合;D3 与 safeTrace 纪律)。
  * pipe / 非 TTY 路径不构造本 sink(零输出变化回归保护)。
  */
+export interface StreamPreviewSink {
+  readonly feed: (event: HarnessStreamEvent) => void;
+  readonly textStreamed: boolean;
+}
+
 export function createStreamPreviewSink(opts: {
-  readonly write: (chunk: string) => void;
-}): (event: HarnessStreamEvent) => void {
-  return (event: HarnessStreamEvent): void => {
+  /** 答案文本 → stdout 最终输出。交互 REPL 传 `process.stdout.write`。 */
+  readonly writeOut: (chunk: string) => void;
+  /** spinner 清除 + 工具提示 → stderr。交互 REPL 传 `process.stderr.write`。 */
+  readonly writeErr: (chunk: string) => void;
+}): StreamPreviewSink {
+  let textStreamed = false;
+  const feed = (event: HarnessStreamEvent): void => {
     try {
       if (event.type === "text_delta") {
-        opts.write(event.text);
+        if (!textStreamed) {
+          // 清掉「思考中…」spinner(one-shot);首个 delta 之后不再清除。
+          opts.writeErr("\r\x1b[K");
+        }
+        opts.writeOut(event.text);
+        textStreamed = true;
         return;
       }
       if (event.type === "tool_call_start") {
-        opts.write(`\n调用工具:${event.name}\n`);
+        if (!textStreamed) {
+          opts.writeErr("\r\x1b[K");
+        }
+        opts.writeErr(`\n调用工具:${event.name}\n`);
       }
     } catch {
-      // 观察者写入失败不得影响回合交付(stderr 断流等;host 断连≠取消,D3)。
+      // 观察者写入失败不得影响回合交付(stderr/stdout 断流等;D3)。
     }
+  };
+  return {
+    feed,
+    get textStreamed() {
+      return textStreamed;
+    },
   };
 }
 
@@ -340,6 +391,8 @@ async function runInteractive(opts: {
   const handle = async (line: string): Promise<void> => {
     busy = true;
     let showThinking = false;
+    // #195:流式最终输出 sink(函数级作用域,供 try 内赋值、catch 兜底清行)。
+    let preview: StreamPreviewSink | null = null;
     try {
       // Pause input so the next prompt cannot appear mid-turn.
       rl.pause();
@@ -353,29 +406,22 @@ async function runInteractive(opts: {
         process.stderr.write("思考中…");
       }
 
-      // #179 T6:流式增量预览(仅 stderr TTY 时;与「思考中…」同门槛)。
-      // 首个 text_delta 到来时先清掉 spinner 行,滚动写增量;回合结束后
-      // clearErrLine() + formatRunHuman 整体输出照常(pipe/非 TTY 零变化)。
-      const onStream = showThinking
-        ? (() => {
-            let previewStarted = false;
-            return createStreamPreviewSink({
-              write: (chunk) => {
-                if (!previewStarted) {
-                  previewStarted = true;
-                  clearErrLine();
-                }
-                process.stderr.write(chunk);
-              },
-            });
-          })()
-        : undefined;
+      // #179 T6 + #195:流式最终输出(仅 stderr TTY 时;与「思考中…」同门槛)。
+      // 答案文本经 feed 直出 stdout 作为最终输出;首个 delta 自动清 spinner。
+      // textStreamed 供回合结束判断(见下方 #195 分支)。
+      if (showThinking) {
+        preview = createStreamPreviewSink({
+          writeOut: (chunk) => process.stdout.write(chunk),
+          writeErr: (chunk) => process.stderr.write(chunk),
+        });
+      }
+      const onStream = preview ? preview.feed : undefined;
 
       let result: ProcessChatLineResult;
       try {
         result = await processChatLine({ line, ctx, onStream });
       } catch (err) {
-        if (showThinking) {
+        if (preview) {
           clearErrLine();
         }
         writeErr(formatChatError(err));
@@ -391,7 +437,9 @@ async function runInteractive(opts: {
         return;
       }
 
-      if (showThinking) {
+      if (preview) {
+        // Sink 自己管 spinner 清除(首个 delta 时);这里兜底无 delta 的回合
+        // (空响应 / 异常等)。一次即可。
         clearErrLine();
       }
 
@@ -399,12 +447,20 @@ async function runInteractive(opts: {
         writeErr(result.stderr);
       }
       if (result.output) {
-        writeOut(result.output);
-        // Separator after agent answers only (TTY path).
-        if (result.ranQuery) {
+        // #195:已流式 → 答案文本已在 stdout,只补状态行 + 分隔符(避免双打印)。
+        // 未流式(preview=null OR preview 但无 text_delta → 空响应 / 非流式
+        // 臂)→ 整体写 `result.output`,保持 pipe / 非 TTY / ask 零变化。
+        if (preview?.textStreamed && result.statusLine !== undefined) {
+          writeOut(result.statusLine);
           writeOut(TTY_ANSWER_SEP);
         } else {
-          writeOut("");
+          writeOut(result.output);
+          // Separator after agent answers only (TTY path).
+          if (result.ranQuery) {
+            writeOut(TTY_ANSWER_SEP);
+          } else {
+            writeOut("");
+          }
         }
       }
 
@@ -429,7 +485,7 @@ async function runInteractive(opts: {
       }
     } catch (err) {
       // EXIT: protect chain from rejections before/around processChatLine
-      if (showThinking) {
+      if (preview) {
         clearErrLine();
       }
       writeErr(formatChatError(err));

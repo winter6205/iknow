@@ -81,31 +81,89 @@ describe("processChatLine onStream forwarding (#179 T6)", () => {
   });
 });
 
+/** Capture bytes written to a fake stdout / stderr writer pair. */
+function captureStreams() {
+  const out: string[] = [];
+  const err: string[] = [];
+  return {
+    out,
+    err,
+    writers: {
+      writeOut: (s: string) => out.push(s),
+      writeErr: (s: string) => err.push(s),
+    },
+  };
+}
+
 describe("createStreamPreviewSink (#179 T6 TTY spinner replacement)", () => {
-  it("writes each text_delta increment through the writer", () => {
-    const chunks: string[] = [];
-    const sink = createStreamPreviewSink({ write: (s) => chunks.push(s) });
-    sink({ type: "text_delta", text: "he" });
-    sink({ type: "text_delta", text: "llo" });
-    assert.deepEqual(chunks, ["he", "llo"]);
+  it("writes each text_delta increment through the stdout writer", () => {
+    const { out, writers } = captureStreams();
+    const sink = createStreamPreviewSink(writers);
+    sink.feed({ type: "text_delta", text: "he" });
+    sink.feed({ type: "text_delta", text: "llo" });
+    assert.deepEqual(out, ["he", "llo"]);
+    assert.equal(sink.textStreamed, true);
   });
 
-  it("emits a tool-name hint for tool_call_start", () => {
-    const chunks: string[] = [];
-    const sink = createStreamPreviewSink({ write: (s) => chunks.push(s) });
-    sink({ type: "tool_call_start", name: "bash" });
-    assert.equal(chunks.length, 1);
-    assert.equal(chunks[0]!.includes("bash"), true);
+  it("emits a tool-name hint to stderr for tool_call_start", () => {
+    const { err, writers } = captureStreams();
+    const sink = createStreamPreviewSink(writers);
+    sink.feed({ type: "tool_call_start", name: "bash" });
+    // First chunk clears the spinner, second carries the tool hint.
+    const joined = err.join("");
+    assert.ok(joined.includes("bash"));
+    // tool_call_start is a status hint, not answer text.
+    assert.equal(sink.textStreamed, false);
   });
 
   it("writer errors are swallowed (observer must not break the turn)", () => {
     const sink = createStreamPreviewSink({
-      write: () => {
+      writeOut: () => {
+        throw new Error("stdout write failed");
+      },
+      writeErr: () => {
         throw new Error("stderr write failed");
       },
     });
     // Must not throw.
-    sink({ type: "text_delta", text: "x" });
-    sink({ type: "tool_call_start", name: "t" });
+    sink.feed({ type: "text_delta", text: "x" });
+    sink.feed({ type: "tool_call_start", name: "t" });
+  });
+
+  it("#195 regression: multi-line streamed text is not double-printed", () => {
+    const { out, err, writers } = captureStreams();
+    const sink = createStreamPreviewSink(writers);
+    // A multi-line answer delivered as several text_delta chunks.
+    const chunks = ["line1\n", "line2\n", "line3"];
+    for (const c of chunks) sink.feed({ type: "text_delta", text: c });
+    // The FULL multi-line answer must appear on stdout exactly once.
+    const joined = out.join("");
+    assert.equal(out.length, chunks.length);
+    assert.ok(joined.includes("line1\nline2\nline3"));
+    // Count occurrences of a printable substring — must be exactly 1.
+    const occurrences = joined.split("line2").length - 1;
+    assert.equal(occurrences, 1, "answer text must not be duplicated");
+    // Answer text must never land on stderr (only the spinner-clear sequence may).
+    assert.ok(
+      err.every((chunk) => !chunk.includes("line")),
+      "answer text must never land on stderr"
+    );
+    assert.equal(sink.textStreamed, true);
+  });
+
+  it("#195 regression: textStreamed flips once and tool_call_start does not reset it", () => {
+    const { writers } = captureStreams();
+    const sink = createStreamPreviewSink(writers);
+    assert.equal(sink.textStreamed, false);
+    sink.feed({ type: "text_delta", text: "a" });
+    assert.equal(sink.textStreamed, true);
+    sink.feed({ type: "tool_call_start", name: "bash" });
+    assert.equal(
+      sink.textStreamed,
+      true,
+      "tool hint must not clear textStreamed"
+    );
+    sink.feed({ type: "text_delta", text: "b" });
+    assert.equal(sink.textStreamed, true);
   });
 });
