@@ -132,15 +132,24 @@ describe("spawnWithStopSignal", () => {
   }, 5_000);
 
   it("escalates from SIGTERM to SIGKILL after the configurable grace period", async () => {
+    // 触发 SIGTERM 前必须等 sh 装好 `trap '' TERM`,否则在 spawn→exec 的
+    // 启动窗口里,SIGTERM 会先于 trap 装入命中 sh,导致 close 报 SIGTERM(issue #199)。
+    // sh 在 trap 后才写自己的 pid 到 marker,waitForPidFile 充当确定性屏障。
+    const root = await makeScratch("aci-helper-escalate-");
+    const trapReadyFile = join(root, "trap-ready");
     const controller = new AbortController();
     const { child, done } = spawnWithStopSignal(
       "sh",
-      ["-c", "trap '' TERM; while :; do sleep 1; done"],
-      { cwd: tmpdir(), signal: controller.signal, killGraceMs: 25 }
+      [
+        "-c",
+        `trap '' TERM; echo $$ > ${JSON.stringify(trapReadyFile)}; while :; do sleep 1; done`,
+      ],
+      { cwd: root, signal: controller.signal, killGraceMs: 25 }
     );
     const pid = child.pid;
     assert.ok(pid);
 
+    await waitForPidFile(trapReadyFile);
     controller.abort();
     const result = await done;
 
