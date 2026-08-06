@@ -80,26 +80,27 @@ describe("measureMessage（消息行级布局）", () => {
     expect(measureMessage(msg, 80).totalRows).toBe(2);
   });
 
-  it("user 长文本按 cols-2（前缀）折行 + margin", () => {
+  it("user 长文本视觉宽度整体折行 + margin（#189 修复账目）", () => {
     const text = "a".repeat(20);
     const msg: AnthropicNativeMessage = {
       role: "user",
       content: [{ type: "text", text }],
     };
-    // cols=8 → wrapCols=6 → 20 chars → ceil(20/6) = 4 行 + 1 margin = 5
-    expect(measureMessage(msg, 8).totalRows).toBe(5);
+    // 与 MessageBlocks 实际渲染一致：整体 wrapVisual("❯ "+text, cols=8)
+    // → 「❯ aaaaaa」(宽8) + 「aaaaaaaa」+ 「aaaaaa」 = 3 行 + 1 margin = 4
+    expect(measureMessage(msg, 8).totalRows).toBe(4);
   });
 
-  it("assistant text + margin", () => {
+  it("assistant text + self margin + 外层 margin", () => {
     const msg: AnthropicNativeMessage = {
       role: "assistant",
       content: [{ type: "text", text: "hello" }],
     };
-    // text 1 行 + 1 margin = 2
-    expect(measureMessage(msg, 80).totalRows).toBe(2);
+    // markdown 1 行 + self margin 1 + 外层 margin 1 = 3
+    expect(measureMessage(msg, 80).totalRows).toBe(3);
   });
 
-  it("assistant 多个 text 块累加", () => {
+  it("assistant 多个 text 块累加（各含 self margin）", () => {
     const msg: AnthropicNativeMessage = {
       role: "assistant",
       content: [
@@ -107,7 +108,8 @@ describe("measureMessage（消息行级布局）", () => {
         { type: "text", text: "b" },
       ],
     };
-    expect(measureMessage(msg, 80).totalRows).toBe(4); // 2 + 2
+    // (1+1) + (1+1) + 外层 1 = 5
+    expect(measureMessage(msg, 80).totalRows).toBe(5);
   });
 
   it("assistant 纯 tool_use 占 2 行", () => {
@@ -183,9 +185,10 @@ describe("ChatView 行级滚动（任务 A 行级）", () => {
   });
 
   it("scrollRows=k 行级窗口：向上滚 k 行后早期 message 仍可见", async () => {
-    // 10 条 user 消息，每条 2 行（1 wrap + 1 margin）。viewportRows=6
-    // 表示可视 6 行。scrollRows=4 → 窗口 = [totalRows-6-4, totalRows-4]
-    // = [10, 16]。早期 m-0..m-4（rows 0..10）部分在视口内。
+    // 10 条 user 消息，每条 totalRows=2（1 行 + 1 margin）→ messageCursor=20。
+    // viewportRows=6，scrollRows=4：chrome=顶部指示 2 → budget=4。
+    // endRow = 20 - 4 = 16；startRow = 16 - 4 = 12。窗口 = [12, 16)，
+    // m-6 占 [12, 14)、m-7 占 [14, 16) 应可见；m-5 占 [10, 12) 不在窗口内。
     const session = makeSession(buildUserMessages(10));
     const output = await renderToString(
       <ChatView
@@ -202,15 +205,11 @@ describe("ChatView 行级滚动（任务 A 行级）", () => {
     // 顶部指示出现
     expect(plain).toContain("4 行历史");
     expect(plain).toContain("End 回到底部");
-    // m-0 仍可见（startRow=0, rows=2 → 部分 [0,2) 在 [10,16) 之外但 [0,2) ∩
-    // [10,16) = 空？wait, our window logic is [max(0, end-viewport), end)
-    // = [16-6, 16) = [10, 16). m-0 占 [0,2)，不在窗口内。
-    // 调整：测 m-5..m-7 应可见（占 [10,16)）。
-    expect(plain).toContain("m-5");
     expect(plain).toContain("m-6");
     expect(plain).toContain("m-7");
-    // m-0..m-4 不应可见（被截掉）
+    // 窗口外消息被裁掉
     expect(plain).not.toContain("m-0");
+    expect(plain).not.toContain("m-5");
     expect(plain).not.toContain("m-9");
   });
 
@@ -259,9 +258,9 @@ describe("ChatView 行级滚动（任务 A 行级）", () => {
     expect(plain).toContain("m-0");
   });
 
-  it("viewportRows=0（无限）：scroll 不 clamp 也无指示消失（回归）", async () => {
-    // viewport=0 → maxScroll = totalRows - 1；scrollRows 大值被 clamp，
-    // 但所有消息仍可见（无窗口限制）。
+  it("viewportRows=0（无限）：budget=0 → 无窗口限制，scroll 仅显示指示", async () => {
+    // viewport=0 → budget=0 → startRow=0，所有消息渲染（无窗口裁剪）；
+    // scroll clamp 到 messageCursor-1=9，顶部指示「↑ 9 行历史」出现。
     const session = makeSession(buildUserMessages(5));
     const output = await renderToString(
       <ChatView
@@ -278,6 +277,7 @@ describe("ChatView 行级滚动（任务 A 行级）", () => {
     for (let i = 0; i < 5; i++) {
       expect(plain).toContain(`m-${i}`);
     }
+    expect(plain).toContain("行历史");
   });
 
   it("scrollRows 越界由 ChatView 兜底 clamp（不报错；Fix1 短内容 scroll 到顶边）", async () => {
@@ -490,10 +490,11 @@ describe("ChatView 行级滚动（任务 A 行级）", () => {
 // `❯ ` 前缀 / 工具伪块 / 折叠 thinking 块 / 估算与 ink 渲染对齐。
 describe("ChatView 行级裁剪（#189 回归保护）", () => {
   it("❯ 前缀只出现在 partial 切片的可见首行（一次）", async () => {
-    // user 长文本 60a, cols=10 → wrapCols=8 → ceil(60/8) = 8 行 + 1 margin =
-    // 9 行 total。viewportRows=4, scrollRows=5 → 窗口 = [9-4-5, 9-5) = [0,
-    // 4)。slice 覆盖首 4 行（含 margin 的第 0-3 行；slice.start=0）→ 第 1
-    // 行加 `❯ ` 前缀；后续行不加；且 prefix 只出现一次。
+    // user 长文本 60a, cols=10 → wrapVisual("❯ "+60a, 10) → 7 行 + 1 margin
+    // = 8 行 totalRows。viewportRows=4, scrollRows=7：chrome=2 → budget=2，
+    // endRow = 8-7 = 1，window [0, 1) → slice = lines[0] = `❯ aaaaaaaa`，
+    // prefix 出现一次。后续行因窗口不覆盖不渲染（flat 行 SSOT：prefix 在
+    // line 0，不在 slice 内则整行不出现）。
     const session = makeSession([
       { role: "user", content: [{ type: "text", text: "a".repeat(60) }] },
     ]);
@@ -503,17 +504,14 @@ describe("ChatView 行级裁剪（#189 回归保护）", () => {
         cols={10}
         liveToolLines={[]}
         askLine={undefined}
-        scrollRows={5}
+        scrollRows={7}
         viewportRows={4}
       />,
       { columns: 10 }
     );
     const plain = stripAnsi(output);
-    // ❯ 字符只出现一次（首行）。`>` 字符在 ANSI/其它字串里不出现，可作
-    // 前缀占位唯一定位。
     const prefixMatches = plain.match(/❯/g) ?? [];
     expect(prefixMatches.length).toBe(1);
-    // 首行确有前缀
     expect(plain).toMatch(/❯\s*a/);
   });
 
@@ -553,15 +551,14 @@ describe("ChatView 行级裁剪（#189 回归保护）", () => {
     expect(markCount).toBe(1);
   });
 
-  it("thinking 块部分覆盖：展开态下窗口只露最后 2 行（不全文 dump）", async () => {
-    // thinking 展开态 → 每段 thinking 各自占行（按 wrap 折行）。长
-    // thinking 文本在 cols=12 下 wrapCols=12，20 chars → 2 行。redacted
-    // 占位 1 行。text 块 1 行 + 1 margin = 2 行。totalRows = 1 (user) +
-    // 2 (thinking) + 1 (redacted) + 2 (text) = 6。viewportRows=2,
-    // scrollRows=4 → maxScroll = 5, 窗口 = [6-2-4, 6-4) = [0, 2)。暴露
-    // 前 2 行：user + thinking 的首行。thinking 第二行 / redacted /
-    // text 均被裁掉。
-    const longThinking = "a".repeat(20); // cols=12 → 2 行
+  it("thinking 块部分覆盖：展开态下窗口只露 thinking 末行（不全文 dump）", async () => {
+    // 展开态：thinking 2 行（cols=12）+ margin，redacted 1 + margin，
+    // text 1 + margin。user 1 + margin = 2。assistant lines = 2+1+1+1+1+1 = 7，
+    // totalRows = 8。messageCursor = 2 + 8 = 10。
+    // viewportRows=2, scrollRows=7：chrome=2 → budget=1，endRow = 10-7 = 3，
+    // startRow = 2。Window = [2, 3)：assistant slice = [0, 1) = thinking 第
+    // 0 行（12 a's）。redacted / text 均被裁。
+    const longThinking = "a".repeat(20);
     const session = makeSession([
       { role: "user", content: [{ type: "text", text: "Q" }] },
       {
@@ -573,9 +570,6 @@ describe("ChatView 行级裁剪（#189 回归保护）", () => {
         ],
       },
     ]);
-    // totalRows: user 2 + thinking 2 + redacted 1 + text 3 = 8。
-    // viewportRows=2, scrollRows=5 → window [8-2-5, 8-5) = [1, 3)。
-    // assistant 段占 [2, 8)，slice [0, 1) = thinking 第 0 行 = 12 a's。
     const output = await renderToString(
       <ChatView
         session={session}
@@ -583,30 +577,26 @@ describe("ChatView 行级裁剪（#189 回归保护）", () => {
         liveToolLines={[]}
         askLine={undefined}
         thinkingExpanded
-        scrollRows={5}
+        scrollRows={7}
         viewportRows={2}
       />,
       { columns: 12 }
     );
     const plain = stripAnsi(output);
-    // thinking 全文由 20 个 'a' 组成（折成 2 行）。窗口只露 1 行
-    // 折 12 chars → 出现 12 个 'a'，剩余 8 个被裁掉。
     const aCount = (plain.match(/a/g) ?? []).length;
     expect(aCount).toBeLessThanOrEqual(12);
-    // redacted 占位被裁掉
     expect(plain).not.toContain("已加密思考");
-    // text 块被裁掉
     expect(plain).not.toContain("UNIQUE_ANSWER");
-    // 原始 20a 完整串被裁（窗口只露第一折行）
     expect(plain).not.toContain("a".repeat(20));
   });
 
-  it("行数估计与 ink 渲染对齐（±容差，issue 189 estimate vs real）", async () => {
-    // 多块 message（paragraph + fence + list）→ measureMessage 给 totalRows；
-    // ink renderToString 输出非空行数（去掉空行 + 边缘空白）。issue 189
-    // 明确要求 estimate 与实际渲染对齐：本测试做聚合（user + assistant）
-    // 后取绝对差 ≤ 4 的容差。ink 自带 wrap 与 markdown 子结构（标题 /
-    // 列表）会与我们的 wrap 有几行差异；±4 行是合理容差。
+  it("行数估计与 ink 渲染对齐（严格 parity，#189 修复）", async () => {
+    // #189 修复断言（替换旧 ±4 容差）：多块 message（paragraph + fence +
+    // list）→ measureMessage 的 ΣtotalRows 必须严格等于 ChatView 在
+    // scroll=0 / viewportRows=0（无窗口）下的 ink 实际行数。这是行级窗口
+    // SSOT（messageRender）与 MessageBlocks/Markdown 渲染严格对齐的唯一
+    // 防线——任何 markdown 子结构（标题/列表/围栏/quote/blank）或 CJK
+    // 视觉宽度漂移都会让此断言失败。
     const md = [
       "## 标题",
       "",
@@ -641,11 +631,9 @@ describe("ChatView 行级裁剪（#189 回归保护）", () => {
       { columns: 80 }
     );
     const plain = stripAnsi(output);
-    const renderedRows = plain
-      .split("\n")
-      .filter((l) => l.trim().length > 0).length;
-    // 绝对差容差 ±4。estimate 与 real 应对齐（issue 189 明确诉求）。
-    expect(Math.abs(renderedRows - totalRows)).toBeLessThanOrEqual(4);
+    // ChatView 根 Box flexGrow=1，ink 不折叠 trailing margin（实测
+    // rawLines == ΣtotalRows）→ 严格 parity ±0。
+    expect(plain.split("\n").length).toBe(totalRows);
   });
 });
 
@@ -772,8 +760,9 @@ describe("T6 thinking 折叠面板", () => {
     expect(/[\u{1F300}-\u{1FAFF}]/u.test(plain)).toBe(false);
   });
 
-  it("measureMessage:折叠面板占 1 行;展开按 thinking 文本行数累加", () => {
-    // 折叠:thinking 摘要行(1) + text 块(1 + 1 margin) = 3
+  it("measureMessage:折叠面板 + self margin + 外层 margin 累加", () => {
+    // 折叠：thinking 摘要 (1) + self margin (1) + text 块 (1) + self margin
+    // (1) + 外层 margin (1) = 5
     const collapsedMsg: AnthropicNativeMessage = {
       role: "assistant",
       content: [
@@ -781,8 +770,9 @@ describe("T6 thinking 折叠面板", () => {
         { type: "text", text: "answer" },
       ],
     };
-    expect(measureMessage(collapsedMsg, 80).totalRows).toBe(3);
-    // 展开:thinking 全文 a(1) + redacted 占位(1) + text(2) = 4
+    expect(measureMessage(collapsedMsg, 80).totalRows).toBe(5);
+    // 展开：thinking (1) + margin + redacted (1) + margin + text (1) + margin
+    // + 外层 = 7
     const expandedMsg: AnthropicNativeMessage = {
       role: "assistant",
       content: [
@@ -793,6 +783,6 @@ describe("T6 thinking 折叠面板", () => {
     };
     expect(
       measureMessage(expandedMsg, 80, { thinkingExpanded: true }).totalRows
-    ).toBe(4);
+    ).toBe(7);
   });
 });

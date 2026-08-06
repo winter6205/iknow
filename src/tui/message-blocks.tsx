@@ -1,14 +1,15 @@
 /**
  * src/tui/message-blocks.tsx — #189 行级窗口：消息渲染器。
  *
- * 从 chat-view.tsx 拆出（code review：Large Class / Long Method / 重复
- * 工具摘要行）。两块组件：
+ * 两块组件：
  *  - `MessageBlocks`：完整渲染，保留 Markdown 全功能；
- *  - `MessageBlocksClipped`：行级裁剪渲染（partial slice）。
+ *  - `MessageBlocksClipped`：行级裁剪渲染（partial slice）——直接渲染
+ *    `messageRender`（message-rows.ts）的 flat 物理行切片，与全可见路径
+ *    逐行一致（#189 渲染漂移修复：旧实现对 markdown 源码 wrapText 切片，
+ *    产出裸 fence 反引号 / `##` 标记行）。
  *
- * 共享逻辑下沉为子组件 `ToolSummaryRow`（tool_use 摘要行）+ `ThinkingSummary`
- * （折叠摘要行），与 `clipSpan` / `toolUseInSlice` / `clipUserRange` /
- * `clipTextRange`（row-window.ts）共同支撑裁剪路径。
+ * 共享子组件 `ToolSummaryRow`（tool_use 摘要行）+ `ThinkingSummary`（折叠
+ * 摘要行）；tool_use 行在裁剪路径按 `BlockRowSpan.kind` 定位并保留染色。
  */
 import type { ReactElement } from "react";
 import { Box, Text } from "ink";
@@ -24,12 +25,7 @@ import {
   REDACTED_PLACEHOLDER,
   summarizeThinkingContent,
 } from "../cli/format.js";
-import {
-  clipTextRange,
-  clipUserRange,
-  toolUseInSlice,
-  type RowSlice,
-} from "./row-window.js";
+import type { RowSlice } from "./row-window.js";
 
 type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
 
@@ -129,67 +125,55 @@ export function MessageBlocks(props: {
 }
 
 /**
- * 行级窗口里的 message 切片渲染（Fix2）。完全可见仍走 `MessageBlocks`；
- * 本组件仅做块级局部裁剪——按 `BlockRowSpan.kind` 判别（消除旧
- * `text === ""` sentinel 判别 tool_use 的 Primitive Obsession 气味）。
+ * 行级窗口里的 message 切片渲染（#189 修复版）：渲染 `messageRender` flat
+ * 物理行 `[slice.start, slice.end)` 切片。行内容与全可见路径逐行一致
+ * （共享 SSOT），仅 tool_use 行保留染色（按 `BlockRowSpan.kind` 定位，
+ * mark 由 statusMap 决定）。ink 折叠 `<Text>{""}</Text>`，故空行一律用
+ * `" "` 占位（与 messageRender MARGIN_LINE 对齐）。
  */
 export function MessageBlocksClipped(props: {
   readonly message: AnthropicNativeMessage;
+  readonly lines: ReadonlyArray<string>;
   readonly blocks: ReadonlyArray<BlockRowSpan>;
-  readonly cols: number;
   readonly statusMap: Map<string, boolean>;
   readonly slice: RowSlice;
 }): ReactElement | null {
-  const { message, blocks, cols, statusMap, slice } = props;
-  const pal = tuiPalette;
-  if (message.role === "user") {
-    const block = blocks[0];
-    if (block === undefined) return null;
-    const { lines, prefixFirst } = clipUserRange(block.text, cols, slice);
-    if (lines.length === 0) return null;
-    return (
-      <Box flexDirection="column" marginBottom={1}>
-        {lines.map((ln, li) => (
-          <Text key={li} color={pal.accent} wrap="wrap">
-            {li === 0 && prefixFirst ? `❯ ${ln}` : ln}
-          </Text>
-        ))}
-      </Box>
-    );
-  }
-  // assistant：逐块切片；tool_use 伪块按出现顺序恒自增 toolIdx（与窗口
-  // 是否相交无关），否则被切片跳过的伪块会让后续索引错位。
+  const { message, lines, blocks, statusMap, slice } = props;
+  const start = Math.max(0, slice.start);
+  const end = Math.min(lines.length, slice.end);
+  if (end <= start) return null;
+
   const toolUses = message.content.filter(
     (b): b is ToolUseBlock => b.type === "tool_use"
   );
-  let toolIdx = 0;
   const nodes: ReactElement[] = [];
-  blocks.forEach((block, i) => {
-    const isTool = block.kind === "tool_use";
-    if (isTool) toolIdx += 1;
-    if (isTool) {
-      if (!toolUseInSlice(block, slice)) return;
-      const tu = toolUses[toolIdx - 1];
-      if (tu === undefined) return;
-      nodes.push(
-        <Box key={`u${i}`}>
-          <ToolSummaryRow tu={tu} statusMap={statusMap} />
-        </Box>
-      );
-      return;
-    }
-    const lines = clipTextRange(block, cols, slice);
-    if (lines.length === 0) return;
-    nodes.push(
-      <Box key={`b${i}`} flexDirection="column">
-        {lines.map((ln, li) => (
-          <Text key={li} wrap="wrap">
-            {ln}
-          </Text>
-        ))}
-      </Box>
+  for (let row = start; row < end; row++) {
+    // tool_use 块 span 落在该行 → 染色摘要行；其余行纯文本（user 行 accent 色）。
+    const toolBlock = blocks.find(
+      (b) => b.kind === "tool_use" && b.startRow === row
     );
-  });
+    if (toolBlock !== undefined) {
+      const tu = toolUses.find((t) => t.id === toolBlock.toolUseId);
+      if (tu !== undefined) {
+        nodes.push(
+          <Box key={`u${row}`}>
+            <ToolSummaryRow tu={tu} statusMap={statusMap} />
+          </Box>
+        );
+        continue;
+      }
+    }
+    const ln = lines[row] ?? "";
+    nodes.push(
+      <Text
+        key={`l${row}`}
+        wrap="wrap"
+        color={message.role === "user" ? tuiPalette.accent : undefined}
+      >
+        {ln === "" ? " " : ln}
+      </Text>
+    );
+  }
   if (nodes.length === 0) return null;
   return (
     <Box flexDirection="column" marginBottom={1}>

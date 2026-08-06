@@ -1,94 +1,82 @@
 /**
  * tests/tui/message-rows.test.ts
  *
- * #189 Commit 2：message-rows.ts SSOT 单元测试。
- *  - `rowsForText`：纯文本行数 SSOT = max(1, wrapText(text, cols).length)。
- *  - `measureMessage`：消息级 block-row 布局，`totalRows` 与现有
- *    `estimateMessageRows` 严格一致（保证 buildMessageRowSpans 的窗口数学
- *    与本模块的 block-level 切片坐标对齐）；kind 判别字段对每类块
- *    形态（user-text / thinking / redacted / text / tool_use）正确填充。
- *
- * 注：早期 markdown 子块行级高度测试（measureBlocks 套件）已随
- * rowRange 一起移除——该函数从 src/tui/markdown.tsx 反向收回（chat-view
- * 不再按块切片渲染），是孤立 API，无消费方。
+ * #189 修复版：message-rows.ts 行账 SSOT 单元测试。
+ *  - 行账对齐 ink 实测渲染（不再用旧字符数 wrapText 模型）；
+ *  - `messageRender` 的 flat 物理行数组与 `<MessageBlocks>` 渲染行数一致
+ *    （由 chat-view parity 测试交叉验证）；
+ *  - kind 判别字段对每类块形态（user-text / thinking / redacted / text /
+ *    tool_use）正确填充（空 thinking 与 tool_use 碰撞回归）。
  */
 import { describe, expect, it } from "vitest";
-import { measureMessage, rowsForText } from "../../src/tui/message-rows.js";
+import { measureMessage, messageRender } from "../../src/tui/message-rows.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 
-describe("rowsForText（纯文本行数 SSOT）", () => {
-  it("空文本占 1 行", () => {
-    expect(rowsForText("", 80)).toBe(1);
-  });
-
-  it("短文本 1 行", () => {
-    expect(rowsForText("hello", 80)).toBe(1);
-  });
-
-  it("按 cols 折行（bytes）", () => {
-    // 20 chars at cols=6 → ceil(20/6)=4 行
-    expect(rowsForText("a".repeat(20), 6)).toBe(4);
-  });
-
-  it("显式换行算独立行", () => {
-    expect(rowsForText("a\nb\nc", 80)).toBe(3);
-  });
-});
-
-describe("measureMessage（消息级 block-row 布局）", () => {
-  it("user 空文本：totalRows=0，无 blocks", () => {
+describe("messageRender（flat 物理行 SSOT）", () => {
+  it("user 空文本：totalRows=0，无 blocks，lines 空", () => {
     const msg: AnthropicNativeMessage = {
       role: "user",
       content: [{ type: "text", text: "   " }],
     };
-    const r = measureMessage(msg, 80);
+    const r = messageRender(msg, 80);
     expect(r.totalRows).toBe(0);
     expect(r.blocks).toHaveLength(0);
+    expect(r.lines).toHaveLength(0);
   });
 
-  it("user 短文本：rows=1 + margin = 2", () => {
+  it("user 短文本：1 行内容 + margin = totalRows 2", () => {
     const msg: AnthropicNativeMessage = {
       role: "user",
       content: [{ type: "text", text: "hi" }],
     };
-    const r = measureMessage(msg, 80);
+    const r = messageRender(msg, 80);
+    expect(r.lines).toEqual(["❯ hi"]);
     expect(r.totalRows).toBe(2);
-    expect(r.blocks[0]?.rows).toBe(1);
   });
 
-  it("user 长文本折行：20a at cols=8 → rows=4 + margin = 5", () => {
+  it("user 长文本：视觉宽度折行（首行 ❯ 前缀在 cols 内）", () => {
     const msg: AnthropicNativeMessage = {
       role: "user",
-      content: [{ type: "text", text: "a".repeat(20) }],
+      content: [{ type: "text", text: "abcdefghij" }],
     };
-    expect(measureMessage(msg, 8).totalRows).toBe(5);
+    const r = messageRender(msg, 8);
+    // cols=8：整体 wrapVisual("❯ abcdefghij", 8)，❯ 占 1 列 → 「❯ abcdef」
+    // (宽 8) + 「ghij」 = 2 行 + 1 margin
+    expect(r.lines).toEqual(["❯ abcdef", "ghij"]);
+    expect(r.totalRows).toBe(3);
   });
 
-  it("assistant 简单文本：1 row + margin = 2", () => {
+  it("assistant 简单文本：markdownToLines 1 行 + margin = totalRows 3", () => {
     const msg: AnthropicNativeMessage = {
       role: "assistant",
       content: [{ type: "text", text: "hello" }],
     };
-    expect(measureMessage(msg, 80).totalRows).toBe(2);
+    const r = messageRender(msg, 80);
+    expect(r.lines).toEqual(["hello", " "]);
+    expect(r.totalRows).toBe(3);
   });
 
-  it("assistant 多 text 块：各 +margin = 4", () => {
+  it("assistant fence：边框行计入行账（markdownToLines parity）", () => {
     const msg: AnthropicNativeMessage = {
       role: "assistant",
-      content: [
-        { type: "text", text: "a" },
-        { type: "text", text: "b" },
-      ],
+      content: [{ type: "text", text: "```ts\nconst x = 1;\n```" }],
     };
-    expect(measureMessage(msg, 80).totalRows).toBe(4);
+    const r = messageRender(msg, 80);
+    // fence 行账：┌┐ 1 + lang 1 + 内容 1 + └┘ 1 + margin = 5 行内容 + 1 margin
+    expect(r.lines.length).toBe(5);
+    expect(r.lines[0]).toMatch(/^┌─/);
+    expect(r.totalRows).toBe(6);
   });
 
-  it("assistant 纯 tool_use：summary row + margin = 2", () => {
+  it("assistant 纯 tool_use：1 行摘要（无 own margin）+ 外层 margin", () => {
     const msg: AnthropicNativeMessage = {
       role: "assistant",
       content: [{ type: "tool_use", id: "x", name: "bash", input: {} }],
     };
-    expect(measureMessage(msg, 80).totalRows).toBe(2);
+    const r = messageRender(msg, 80);
+    expect(r.lines.length).toBe(1);
+    expect(r.lines[0]).toMatch(/^bash · /);
+    expect(r.totalRows).toBe(2);
   });
 
   it("assistant 空 content：totalRows=0", () => {
@@ -96,50 +84,64 @@ describe("measureMessage（消息级 block-row 布局）", () => {
       role: "assistant",
       content: [],
     };
-    expect(measureMessage(msg, 80).totalRows).toBe(0);
+    expect(messageRender(msg, 80).totalRows).toBe(0);
   });
 
-  it("thinking 折叠：summary row + text + margin = 3", () => {
+  it("thinking 折叠 + text：[思考] 行 + margin + text + margin", () => {
     const msg: AnthropicNativeMessage = {
       role: "assistant",
       content: [
-        { type: "thinking", thinking: "a", signature: "s" },
+        { type: "thinking", thinking: "raw", signature: "s" },
         { type: "text", text: "answer" },
       ],
     };
-    expect(measureMessage(msg, 80).totalRows).toBe(3);
+    const r = messageRender(msg, 80);
+    expect(r.lines).toEqual(["[思考] 思考（1 段）", " ", "answer", " "]);
+    expect(r.totalRows).toBe(5);
   });
 
-  it("thinking 展开 + redacted + text：1+1+1+margin = 4", () => {
+  it("thinking 展开：每段 thinking 原文行 + margin", () => {
     const msg: AnthropicNativeMessage = {
       role: "assistant",
       content: [
-        { type: "thinking", thinking: "a", signature: "s" },
-        { type: "redacted_thinking", data: "x" },
-        { type: "text", text: "answer" },
+        { type: "thinking", thinking: "first", signature: "s1" },
+        { type: "thinking", thinking: "second", signature: "s2" },
+        { type: "text", text: "ok" },
       ],
     };
-    expect(measureMessage(msg, 80, { thinkingExpanded: true }).totalRows).toBe(
-      4
+    const r = messageRender(msg, 80, { thinkingExpanded: true });
+    expect(r.lines).toEqual(["first", " ", "second", " ", "ok", " "]);
+    expect(r.totalRows).toBe(7);
+  });
+
+  it("CJK 文本按视觉宽度折行（2 列/字，不按字符数低估）", () => {
+    const msg: AnthropicNativeMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "一二三四五六七八九十" }],
+    };
+    const r = messageRender(msg, 10);
+    // 10 个 CJK × 2 列 = 20 列，cols=10 → 2 行
+    expect(r.lines.filter((l) => l !== " ")).toEqual([
+      "一二三四五",
+      "六七八九十",
+    ]);
+  });
+});
+
+describe("measureMessage（向后兼容入口）", () => {
+  it("totalRows = messageRender.totalRows", () => {
+    const msg: AnthropicNativeMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "hello world" }],
+    };
+    expect(measureMessage(msg, 80).totalRows).toBe(
+      messageRender(msg, 80).totalRows
     );
-  });
-
-  it("user blocks 的 startRow 累加（单 unit：contentStart=0）", () => {
-    const msg: AnthropicNativeMessage = {
-      role: "user",
-      content: [{ type: "text", text: "hi" }],
-    };
-    const r = measureMessage(msg, 80);
-    expect(r.blocks).toHaveLength(1);
-    expect(r.blocks[0]?.startRow).toBe(0);
-    expect(r.blocks[0]?.rows).toBe(1);
-    // 文本块总行 = contentRows + 1 margin
-    expect(r.totalRows).toBe(2);
   });
 });
 
 describe("measureMessage（kind 判别字段）", () => {
-  it("user 文本块：kind=user-text, text=原文, rows=rowsForText(joined, cols-2)", () => {
+  it("user 文本块：kind=user-text, text=原文", () => {
     const msg: AnthropicNativeMessage = {
       role: "user",
       content: [
@@ -152,11 +154,10 @@ describe("measureMessage（kind 判别字段）", () => {
     const span = r.blocks[0];
     expect(span?.kind).toBe("user-text");
     expect(span?.text).toBe("hello\nworld");
-    expect(span?.rows).toBe(2); // join("\n") 显式换行算独立行
     expect(span?.startRow).toBe(0);
   });
 
-  it("assistant thinking 折叠：kind=thinking, text=summarizeThinkingContent(...), rows=1", () => {
+  it("assistant thinking 折叠：kind=thinking, text=摘要, rows=1", () => {
     const msg: AnthropicNativeMessage = {
       role: "assistant",
       content: [
@@ -165,14 +166,13 @@ describe("measureMessage（kind 判别字段）", () => {
       ],
     };
     const r = measureMessage(msg, 80);
-    // 第一个 span 是折叠 thinking 摘要（synthesized by summarizeThinkingContent）
     const thinking = r.blocks[0];
     expect(thinking?.kind).toBe("thinking");
     expect(thinking?.rows).toBe(1);
     expect(thinking?.text).toBe("思考（1 段）");
   });
 
-  it("assistant thinking 展开：每段 thinking 各自 kind=thinking, text=原文", () => {
+  it("assistant thinking 展开：每段 kind=thinking, text=原文", () => {
     const msg: AnthropicNativeMessage = {
       role: "assistant",
       content: [
@@ -184,13 +184,11 @@ describe("measureMessage（kind 判别字段）", () => {
     const r = measureMessage(msg, 80, { thinkingExpanded: true });
     expect(r.blocks[0]?.kind).toBe("thinking");
     expect(r.blocks[0]?.text).toBe("first");
-    expect(r.blocks[0]?.rows).toBe(1);
     expect(r.blocks[1]?.kind).toBe("thinking");
     expect(r.blocks[1]?.text).toBe("second");
-    expect(r.blocks[1]?.startRow).toBe(1);
   });
 
-  it("assistant redacted_thinking：kind=redacted, text=REDACTED_PLACEHOLDER, rows=1", () => {
+  it("assistant redacted_thinking：kind=redacted, text=REDACTED_PLACEHOLDER", () => {
     const msg: AnthropicNativeMessage = {
       role: "assistant",
       content: [
@@ -205,7 +203,7 @@ describe("measureMessage（kind 判别字段）", () => {
     expect(r.blocks[1]?.rows).toBe(1);
   });
 
-  it("assistant text 块：kind=text, text=原文, rows=rowsForText(text, cols)", () => {
+  it("assistant text 块：kind=text, text=原文", () => {
     const msg: AnthropicNativeMessage = {
       role: "assistant",
       content: [{ type: "text", text: "hello world" }],
@@ -215,10 +213,9 @@ describe("measureMessage（kind 判别字段）", () => {
     const span = r.blocks[0];
     expect(span?.kind).toBe("text");
     expect(span?.text).toBe("hello world");
-    expect(span?.rows).toBe(1);
   });
 
-  it("assistant tool_use：kind=tool_use, text='', rows=2（含 1 margin）", () => {
+  it("assistant tool_use：kind=tool_use, rows=1, toolUseId=id", () => {
     const msg: AnthropicNativeMessage = {
       role: "assistant",
       content: [{ type: "tool_use", id: "x", name: "bash", input: {} }],
@@ -227,13 +224,11 @@ describe("measureMessage（kind 判别字段）", () => {
     expect(r.blocks).toHaveLength(1);
     const span = r.blocks[0];
     expect(span?.kind).toBe("tool_use");
-    expect(span?.text).toBe("");
-    expect(span?.rows).toBe(2);
+    expect(span?.rows).toBe(1);
+    expect(span?.toolUseId).toBe("x");
   });
 
-  it("kind 判别：text 块与 tool_use 块不会与空 thinking 串碰撞", () => {
-    // Primitive Obsession 气味（伪 MdBlock + text==="" 判别）的回归保护：
-    // 显式空 thinking 不应被误判为 tool_use。
+  it("kind 判别：空 thinking 与 tool_use 不碰撞（Primitive Obsession 回归）", () => {
     const msg: AnthropicNativeMessage = {
       role: "assistant",
       content: [
@@ -243,7 +238,6 @@ describe("measureMessage（kind 判别字段）", () => {
     };
     const r = measureMessage(msg, 80, { thinkingExpanded: true });
     expect(r.blocks[0]?.kind).toBe("thinking");
-    expect(r.blocks[0]?.text).toBe("");
     expect(r.blocks[1]?.kind).toBe("text");
   });
 

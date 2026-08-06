@@ -1,175 +1,187 @@
 /**
- * src/tui/message-rows.ts — 消息 / markdown 块行级高度 SSOT（#189 Commit 2）。
+ * src/tui/message-rows.ts — 消息行级高度 SSOT（#189 修复版）。
  *
- * 目标：把 ChatView 行级滚动的「消息 → 物理行」映射做成单一权威来源，
- * 供窗口选消息（totalRows 累加）以及行级裁剪（message-blocks.tsx 的
- * `MessageBlocksClipped` 块内裁剪，坐标经 row-window.ts 的
- * `clipSpan` / `toolUseInSlice` 消费）共同使用。
+ * 动机（PR #219 合入后实测仍不达标的根因）：旧实现用 `wrapText(text, cols)`
+ * 按**字符数**估 assistant 行数，但实际渲染走 `<Markdown>`（parseBlocks：
+ * heading/fence/table/quote/list/blank/paragraph），行账系统性错位——
+ *  1. fence 边框行、h1 marginTop、bullet 记号全未计入 → 窗口起点漂移；
+ *  2. CJK 字符按 2 列显示，`wrapText` 按字节数低估近 2×；
+ *  3. tool_use 估 2 行（实际 1，无 margin）→ 每条工具 +1 漂移。
  *
- * 行高规则必须与 src/tui/markdown.tsx 的实际渲染严格对齐（见各块注释）。
- * 纯文本折行统一走 `rowsForText`（max(1, wrapText).SSOT）。
+ * 修复：assistant 文本走 `markdownToLines`（与 `<Markdown>` 渲染逐行对齐），
+ * user 文本走 `wrapTextVisual`（视觉宽度折行），tool_use=1，thinking/redacted
+ * 各自 margin 显式。flat 物理行数组（含 self margin " " 占位行）由
+ * `messageRender` 暴露给裁剪路径 `MessageBlocksClipped`，保证 measure / clip
+ * 行账一致。
  *
- * 块类型现在以 `kind` 判别字段表达，取代了此前「伪 MdBlock」的写法——
- * 早期 measureMessage 把 tool_use / thinking / redacted 都铸成
- * `{type:"paragraph", text:""|"..."}` 块，渲染端再用 `text === ""` 反推
- * tool_use，但与空 thinking 串碰撞（Primitive Obsession 气味）。`kind` 显式
- * 收窄五种形态，渲染端用 `b.kind === "tool_use"` 直接判别。
+ * 行账（与 ChatView 实测对齐）：
+ *  - `messageRender.lines` = content + self margins（不含外层 margin），
+ *    例如 text 块 = [...content, " "]，tool_use 块 = [...content]；
+ *  - `totalRows = lines.length + 1`（外层 margin，渲染为「到下一条消息 / 尾
+ *    部的间隔行」）。ChatView 用 `ΣtotalRows + tailRows` 作为总行空间 —
+ *    ink 在 flexGrow 根下不折叠 trailing margin（实测 rawLines = ΣtotalRows
+ *    完全相等），故无需在行账中做末端 −1 修正。
  */
 import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
-import { wrapText } from "./text.js";
 import {
   REDACTED_PLACEHOLDER,
   summarizeThinkingContent,
 } from "../cli/format.js";
+import { summarizeToolCall } from "./tool-summary.js";
+import { markdownToLines } from "./markdown-lines.js";
+import { wrapTextVisual } from "./text.js";
 
-/** 纯文本按 cols 折行的物理行数 SSOT：max(1, wrapText(text, cols).length)。 */
-export function rowsForText(text: string, cols: number): number {
-  return Math.max(1, wrapText(text, cols).length);
+/** 块行级跨度。`rows` = 块内容行（不含块尾 margin）；坐标对齐 `lines` 数组。 */
+export interface BlockRowSpan {
+  readonly kind: BlockRowKind;
+  readonly startRow: number;
+  readonly rows: number;
+  /** user-text / thinking / text：原文；tool_use：空串（仅 kind 判别）。 */
+  readonly text: string;
+  /** tool_use 专用：tool_use.id（供裁剪路径从 statusMap 取运行态 mark）。 */
+  readonly toolUseId?: string;
 }
 
-/** 一个 message 块在行级窗口中的形态判别字段。 */
 export type BlockRowKind =
   "user-text" | "thinking" | "redacted" | "text" | "tool_use";
-
-/** 单个 message 块的行级跨度（块内部坐标，从 message 顶部累计）。 */
-export interface BlockRowSpan {
-  /** 块类型判别，渲染端据此选摘要/段落/折叠等分支。 */
-  readonly kind: BlockRowKind;
-  /** 块在 message content 内的起始物理行（相对 message 顶部，不含块前 margin）。 */
-  readonly startRow: number;
-  /**
-   * 块内容物理行数。
-   *  - user-text / thinking / text：内容行数（不含块尾 margin，margin 由
-   *    消费方按 +1 补齐，或由 cursor 步长隐式承担）。
-   *  - tool_use：占位 2 行（1 行摘要 + 1 行视觉余量），与 cursor += 2
-   *    的累计步长一致。
-   */
-  readonly rows: number;
-  /**
-   * 块内文本。
-   *  - user-text / thinking / text：原文，供消费方按 cols 折行渲染。
-   *  - redacted：固定占位串 REDACTED_PLACEHOLDER。
-   *  - tool_use：空串（仅 kind 判别，不消费 text）。
-   */
-  readonly text: string;
-}
 
 /** 一条消息的块级行映射。 */
 export interface MessageBlockRowSpans {
   readonly message: AnthropicNativeMessage;
   readonly blocks: ReadonlyArray<BlockRowSpan>;
+  /** 内容行 + self margin + 1（外层 margin）。 */
   readonly totalRows: number;
 }
 
-/**
- * 组装纯文本消息（user 或 assistant 的裸 text 折叠）为单一块行映射。
- * text 块：rowsForText(text, cols-2)（❯ 前缀占 2 列）+ 尾 margin 1。
- */
-function measureTextMessage(
+/** flat 物理行数组（与 MessageBlocks 渲染行数逐行对齐；含 self margin）。 */
+export interface MessageRender {
+  readonly message: AnthropicNativeMessage;
+  readonly lines: ReadonlyArray<string>;
+  /** block 跨度（content-only rows），与 lines 数组下标对齐。 */
+  readonly blocks: ReadonlyArray<BlockRowSpan>;
+  readonly totalRows: number;
+}
+
+const MARGIN_LINE = " "; // ink 折叠 `<Text>{""}</Text>`，空行用空格占位
+
+function thinkingFoldLine(summary: string): string {
+  return `[思考] ${summary}`;
+}
+
+/** 顶层：消息 → flat 物理行（SSOT，给 measureMessage / MessageBlocksClipped 共享）。 */
+export function messageRender(
   message: AnthropicNativeMessage,
-  texts: ReadonlyArray<string>,
-  cols: number
-): MessageBlockRowSpans {
-  const joined = texts.join("\n");
-  const rows = rowsForText(joined, Math.max(1, cols - 2));
-  const block: BlockRowSpan = {
-    kind: "user-text",
-    text: joined,
-    startRow: 0,
-    rows,
-  };
-  return {
-    message,
-    blocks: [block],
-    totalRows: rows + 1, // +1 尾 margin
-  };
+  cols: number,
+  opts?: { readonly thinkingExpanded?: boolean }
+): MessageRender {
+  const lines: string[] = [];
+  const blocks: BlockRowSpan[] = [];
+  const width = Math.max(1, cols);
+
+  if (message.role === "user") {
+    const texts = message.content
+      .filter((b): b is { type: "text"; text: string } => b.type === "text")
+      .map((b) => b.text);
+    const joined = texts.join("\n");
+    if (!joined.trim()) {
+      return { message, lines: [], blocks: [], totalRows: 0 };
+    }
+    // 与 `<MessageBlocks>` 实际渲染一致：单 `<Text wrap="wrap">{"❯ "}{texts}</Text>`
+    // 在 cols 内整体折行，ink 默认 wrap 按视觉宽度。故首行容量 = cols−2（"❯ "），
+    // 续行容量 = cols。这里整体 wrapVisual("❯ "+joined, cols) 直接还原。
+    const wrapped = wrapTextVisual(`❯ ${joined}`, width);
+    for (const l of wrapped) lines.push(l);
+    blocks.push({
+      kind: "user-text",
+      text: joined,
+      startRow: 0,
+      rows: wrapped.length,
+    });
+    return { message, lines, blocks, totalRows: wrapped.length + 1 };
+  }
+
+  // assistant
+  const summary = summarizeThinkingContent(message.content);
+  if (summary !== "") {
+    if (opts?.thinkingExpanded) {
+      for (const block of message.content) {
+        if (block.type === "thinking") {
+          const blockLines = wrapTextVisual(block.thinking, width);
+          const startRow = lines.length;
+          for (const l of blockLines) lines.push(l);
+          lines.push(MARGIN_LINE);
+          blocks.push({
+            kind: "thinking",
+            text: block.thinking,
+            startRow,
+            rows: blockLines.length,
+          });
+        } else if (block.type === "redacted_thinking") {
+          const startRow = lines.length;
+          lines.push(REDACTED_PLACEHOLDER);
+          lines.push(MARGIN_LINE);
+          blocks.push({
+            kind: "redacted",
+            text: REDACTED_PLACEHOLDER,
+            startRow,
+            rows: 1,
+          });
+        }
+      }
+    } else {
+      const startRow = lines.length;
+      lines.push(thinkingFoldLine(summary));
+      lines.push(MARGIN_LINE);
+      blocks.push({
+        kind: "thinking",
+        text: summary,
+        startRow,
+        rows: 1,
+      });
+    }
+  }
+
+  for (const block of message.content) {
+    if (block.type === "text" && block.text.trim().length > 0) {
+      const blockLines = markdownToLines(block.text, width);
+      const startRow = lines.length;
+      for (const l of blockLines) lines.push(l);
+      lines.push(MARGIN_LINE);
+      blocks.push({
+        kind: "text",
+        text: block.text,
+        startRow,
+        rows: blockLines.length,
+      });
+    } else if (block.type === "tool_use") {
+      const startRow = lines.length;
+      const { detail } = summarizeToolCall(block.name, block.input);
+      // 摘要行文本：与 ToolSummaryRow 内容一致（无颜色 / mark 标记），mark
+      // 由裁剪路径根据 statusMap 注入。
+      lines.push(`${block.name} · ${detail}`);
+      blocks.push({
+        kind: "tool_use",
+        text: "",
+        startRow,
+        rows: 1,
+        toolUseId: block.id,
+      });
+    }
+  }
+
+  if (lines.length === 0) return { message, lines, blocks, totalRows: 0 };
+  return { message, lines, blocks, totalRows: lines.length + 1 };
 }
 
 /**
- * 顶层入口：一条 AnthropicNativeMessage → 块级行映射（SSOT，行级窗口
- * 与块内裁剪统一消费）。totalRows 是消息所占物理行数的唯一权威来源。
- *
- * 行数账目：
- *  - thinking 折叠摘要 / 展开 thinking / redacted 占位均**不加** margin
- *    （text 块才 +1）；这保证窗口坐标与块内切片坐标对齐（thinking margin
- *    是保守近似，此处不引入第二套账目）。
+ * 顶层入口（向后兼容）：返回块级行映射，totalRows 含外层 margin。
+ * 行账与 `messageRender` 等价。
  */
 export function measureMessage(
   message: AnthropicNativeMessage,
   cols: number,
   opts?: { readonly thinkingExpanded?: boolean }
 ): MessageBlockRowSpans {
-  if (message.role === "user") {
-    const texts = message.content
-      .filter((b): b is { type: "text"; text: string } => b.type === "text")
-      .map((b) => b.text);
-    if (!texts.join("").trim()) {
-      return { message, blocks: [], totalRows: 0 };
-    }
-    return measureTextMessage(message, texts, cols);
-  }
-
-  // assistant：thinking 折叠面板 + text/tool_use 块。
-  const blocks: BlockRowSpan[] = [];
-  let cursor = 0;
-  const summary = summarizeThinkingContent(message.content);
-  if (summary !== "") {
-    if (opts?.thinkingExpanded) {
-      for (const block of message.content) {
-        if (block.type === "thinking") {
-          const rows = rowsForText(block.thinking, cols);
-          blocks.push({
-            kind: "thinking",
-            text: block.thinking,
-            startRow: cursor,
-            rows,
-          });
-          cursor += rows;
-        } else if (block.type === "redacted_thinking") {
-          blocks.push({
-            kind: "redacted",
-            text: REDACTED_PLACEHOLDER,
-            startRow: cursor,
-            rows: 1,
-          });
-          cursor += 1;
-        }
-      }
-    } else {
-      blocks.push({
-        kind: "thinking",
-        text: summary,
-        startRow: cursor,
-        rows: 1,
-      });
-      cursor += 1;
-    }
-  }
-
-  for (const block of message.content) {
-    if (block.type === "text" && block.text.trim().length > 0) {
-      const rows = rowsForText(block.text, cols);
-      blocks.push({
-        kind: "text",
-        text: block.text,
-        startRow: cursor,
-        rows,
-      });
-      cursor += rows + 1; // +1 marginBottom
-    } else if (block.type === "tool_use") {
-      // 工具摘要单行 + 视觉余量 1（与 estimate 的 rows+=2 一致）。rows
-      // 包含 1 行 margin，与 cursor += 2 步长一一对应。
-      blocks.push({
-        kind: "tool_use",
-        text: "",
-        startRow: cursor,
-        rows: 2,
-      });
-      cursor += 2;
-    }
-  }
-
-  const totalRows = cursor;
-  if (totalRows === 0) return { message, blocks: [], totalRows: 0 };
-  return { message, blocks, totalRows };
+  const r = messageRender(message, cols, opts);
+  return { message: r.message, blocks: r.blocks, totalRows: r.totalRows };
 }

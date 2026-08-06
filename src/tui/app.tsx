@@ -181,10 +181,12 @@ export function TuiApp(props: TuiAppProps): ReactElement {
 
   const viewportRows = useMemo(() => {
     // 固定行扣减：banner / 状态栏（1） / 输入框（2：圆角线框 1 + hint 1 视情况）
-    // / ask 槽（1）/ notice（按 lines）/ 顶部指示（1）。
-    // 为保守给可用区，下界 5。
+    // / ask 槽（1）/ notice（按 lines）。滚动指示器（顶部 / fold）的行账由
+    // ChatView 内部从 viewportRows 扣除（INDICATOR_ROWS，SSOT）——调用方
+    // 传入的是聊天区域总预算，不再预扣指示行（旧实现预扣 1 但指示实测占
+    // 2 行，是 #189 渲染漂移的 chrome 账目根因）。
     const noticeLines = notice?.lines.length ?? 0;
-    const reserved = 1 + 2 + 1 + noticeLines + 1; // 状态栏 + 输入 + ask + notice + 指示
+    const reserved = 1 + 2 + 1 + noticeLines; // 状态栏 + 输入 + ask + notice
     return Math.max(5, rows - bannerLineCount - reserved);
   }, [rows, bannerLineCount, notice]);
 
