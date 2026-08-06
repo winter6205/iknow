@@ -54,6 +54,7 @@ import { renderBanner } from "./banner.js";
 import { tuiPalette } from "./theme.js";
 import { clipOneLine } from "./text.js";
 import { VERSION } from "./version.js";
+import { writeIknowState } from "../harness/identity/index.js";
 import { useStdout, useStdin } from "ink";
 import {
   enableMouseScroll,
@@ -518,6 +519,35 @@ export function TuiApp(props: TuiAppProps): ReactElement {
               : "思考已折叠（仅显示摘要行）/thinking 切换",
           ],
         });
+        return;
+      }
+      case "profile": {
+        // #196 首启完成钩子:用户已在外侧填好 ~/.iknow/user.md,执行
+        // /profile done 翻 bootstrap_seeded。TUI 槽位是 async,直接 await
+        // writeIknowState;写失败走 typed IknowIdentityError → notice。
+        if (
+          text
+            .replace(/^\s*\/profile\s*/i, "")
+            .trim()
+            .toLowerCase() !== "done"
+        ) {
+          setNotice({
+            lines: [
+              "Usage: /profile done（已在外侧填好 ~/.iknow/user.md 后执行）",
+            ],
+          });
+          return;
+        }
+        try {
+          await writeIknowState({ bootstrap_seeded: true });
+          setNotice({ lines: ["首启引导已完成，下次会话直接进入工作。"] });
+        } catch (err) {
+          setNotice({
+            lines: [
+              `首启完成标记失败：${err instanceof Error ? err.message : String(err)}`,
+            ],
+          });
+        }
         return;
       }
     }

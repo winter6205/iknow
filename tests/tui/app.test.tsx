@@ -387,15 +387,24 @@ describe("TuiApp 端到端（tracer bullet）", () => {
   );
 
   it(
-    'slash 提示："/" 出现 6 条候选；"/q" + Tab → 提交 /quit 退出',
+    'slash 提示："/" 出现 8 条候选；"/q" + Tab → 提交 /quit 退出',
     async () => {
       const app = makeApp([]);
       await app.ready();
       await waitFor(() => app.lastOutput().includes("iknow"), 8000, "startup");
 
-      // 输入 \"/\" → 输入框下方出现 6 条候选（按词表顺序）
+      // 输入 \"/\" → 输入框下方出现 8 条候选（按词表顺序）
       await app.type("/");
-      for (const cmd of ["sessions", "new", "quit", "exit", "help", "info"]) {
+      for (const cmd of [
+        "sessions",
+        "new",
+        "quit",
+        "exit",
+        "help",
+        "info",
+        "thinking",
+        "profile",
+      ]) {
         await waitFor(
           () => app.lastOutput().includes(`/${cmd}`),
           8000,

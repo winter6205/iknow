@@ -70,3 +70,19 @@ describe("file-level boundary check (drift guard)", () => {
     expect(body).not.toContain("signature");
   });
 });
+
+/**
+ * Soul Continuity must NOT direct the agent to read/update `~/.iknow/user.md`
+ * via tool calls — the workspace root isolates read_file/glob, and bash
+ * hard-wall rejects compound commands, so any such instruction triggers a
+ * cascade of [失败] rows and the agent never answers the user. Continuity
+ * must point at the host-managed profile instead.
+ */
+describe("soul Continuity: does not direct agent to read/update ~/.iknow", () => {
+  it("does not say 'Read user.md. Update it'", () => {
+    expect(constTemplateBody("soul.ts")).not.toMatch(/read\s+user\.md/i);
+  });
+  it("does not say 'update' as an agent action against user.md", () => {
+    expect(constTemplateBody("soul.ts")).not.toMatch(/update\s+it\s+when/i);
+  });
+});

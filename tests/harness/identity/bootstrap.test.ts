@@ -10,6 +10,7 @@ import {
   initializeIknowWorkspace,
   readIknowState,
   writeIknowState,
+  IKNOW_BOOTSTRAP_PROMPT,
 } from "../../../src/harness/identity/index.ts";
 
 let workDir: string;
@@ -50,5 +51,53 @@ describe("bootstrap state machine", () => {
     const first = await initializeIknowWorkspace({ workspace: workDir });
     const second = await initializeIknowWorkspace({ workspace: workDir });
     expect(first.state.bootstrap_seeded).toBe(second.state.bootstrap_seeded);
+  });
+});
+
+/**
+ * BOOTSTRAP prompt must not direct the agent to use file/bash tools against
+ * `~/.iknow/` (the workspace root-isolates read_file/glob; bash hard-wall
+ * rejects compound commands; write_file also stays inside workspace root).
+ * Without this guarantee, first-launch turns cascade [失败] tool rows and
+ * never produce an answer. The completion hook `/profile` (cli + tui) flips
+ * bootstrap_seeded so bootstrap terminates when the user has filled user.md.
+ *
+ * Allowable: the prompt may *name* read_file / glob / compound commands in
+ * a "do not use these" warning. The assertion below forbids *instructional*
+ * phrasing — "use read_file", "run cat", "execute X on user.md".
+ */
+describe("IKNOW_BOOTSTRAP_PROMPT: pure-conversation guide", () => {
+  it("does NOT instruct 'use read_file' / 'read it with' against ~/.iknow", () => {
+    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/use\s+read_file/i);
+    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(
+      /read\s+(it\s+)?with\s+read_file/i
+    );
+  });
+
+  it("does NOT instruct 'use glob' against ~/.iknow", () => {
+    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/use\s+glob/i);
+  });
+
+  it("does NOT instruct agent to use bash cat / sed / printf against ~/.iknow", () => {
+    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/\bcat\s+~?\/?home/);
+    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/\bcat\s+~?\/?\.iknow/);
+    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/run\s+cat/i);
+    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/use\s+sed/i);
+  });
+
+  it("does NOT instruct agent to write to ~/.iknow/user.md via shell", () => {
+    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/>>?\s*~\/?\.iknow/);
+    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/use\s+tee/i);
+    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/use\s+printf/i);
+  });
+
+  it("points the user at the /profile completion hook so bootstrap terminates", () => {
+    expect(IKNOW_BOOTSTRAP_PROMPT).toMatch(/\/profile\s+done/);
+  });
+
+  it("warns (not instructs) the agent that file/bash tools are out-of-sandbox", () => {
+    // Permissive presence check: the prompt names these tools only to forbid
+    // them, not to direct their use. This is the *good* shape.
+    expect(IKNOW_BOOTSTRAP_PROMPT).toMatch(/do\s+\*\*not\*\*\s+try\s+them/i);
   });
 });
