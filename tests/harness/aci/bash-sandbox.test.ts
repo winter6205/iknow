@@ -104,6 +104,19 @@ describe("bash.bwrap.argvHasUnshareNet", () => {
     );
     const sshIdx = argv.indexOf(`${homedir()}/.ssh`);
     assert.equal(argv[sshIdx - 1], "--tmpfs");
+    // --clearenv precedes every --setenv so the fence inherits only the
+    // whitelisted entries, never the host env (#225).
+    const clearenvIdx = argv.indexOf("--clearenv");
+    assert.notEqual(clearenvIdx, -1, "expected --clearenv in argv");
+    const setenvIdxs = argv
+      .map((a, i) => (a === "--setenv" ? i : -1))
+      .filter((i) => i !== -1);
+    for (const i of setenvIdxs) {
+      assert.ok(
+        clearenvIdx < i,
+        `--clearenv (${clearenvIdx}) must precede --setenv (${i})`
+      );
+    }
   });
 });
 

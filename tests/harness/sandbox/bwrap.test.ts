@@ -49,6 +49,25 @@ describe("createBwrapFence", () => {
     ]);
     assert.ok(bindCwdIndex < tmpfsIndex);
     assert.equal(argv.includes("--seccomp"), false);
+    // --clearenv must precede --dev-bind and every --setenv so the sandbox
+    // inherits only whitelisted entries (env leak fix, #225).
+    const clearenvIndex = argv.indexOf("--clearenv");
+    assert.notEqual(clearenvIndex, -1, "expected --clearenv in argv");
+    const devBindIndex = argv.indexOf("--dev-bind");
+    assert.ok(
+      clearenvIndex > devBindIndex,
+      "--clearenv must come after --dev-bind"
+    );
+    const setenvIndices = argv
+      .map((arg, index) => (arg === "--setenv" ? index : -1))
+      .filter((index) => index !== -1);
+    assert.ok(setenvIndices.length > 0, "expected at least one --setenv");
+    for (const idx of setenvIndices) {
+      assert.ok(
+        clearenvIndex < idx,
+        `--clearenv (${clearenvIndex}) must precede --setenv (${idx})`
+      );
+    }
     assert.deepEqual(argv.slice(-3), ["--", "node", "-v"]);
   });
 

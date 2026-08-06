@@ -127,6 +127,10 @@ export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {
       opts.resourceLimits,
       opts.overlaySensitivePaths ?? true
     ),
+    // --clearenv must precede every --setenv so the sandbox inherits only the
+    // whitelisted entries, never the host env (bwrap otherwise copies the whole
+    // environment of the process that launches it). #225.
+    "--clearenv",
     ...envArgs,
     "--chdir",
     opts.cwd,

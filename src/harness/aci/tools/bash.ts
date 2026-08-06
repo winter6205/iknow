@@ -82,18 +82,20 @@ export function createBashTool(cwd: string): AciToolDef {
       throw new ToolExecutionError(
         `bash: command not in allowlist: ${command}`
       );
+    const fenceEnv = envIsolation.filter(process.env);
     const fence = createBwrapFence({
       command: "bash",
       args: ["-c", command],
       fsPolicy,
       networkPolicy,
       resourceLimits,
-      env: envIsolation.filter(process.env),
+      env: fenceEnv,
       cwd,
     });
     const { done } = spawnWithStopSignal(fence.argv[0], fence.argv.slice(1), {
       cwd,
       signal: ctx?.signal,
+      env: fenceEnv,
     });
     const result = await done;
     return {

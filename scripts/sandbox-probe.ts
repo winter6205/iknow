@@ -31,6 +31,7 @@ function run(command: string) {
   return spawnSync(fence.argv[0], fence.argv.slice(1), {
     cwd,
     encoding: "utf8",
+    env,
   });
 }
 const checks = [

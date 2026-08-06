@@ -9,6 +9,14 @@ const DEFAULT_KILL_GRACE_MS = 2_000;
 export interface SpawnWithStopSignalOptions {
   readonly cwd: string;
   readonly signal?: AbortSignal;
+  /**
+   * Explicit env forwarded to `spawn`. When omitted, child inherits the full
+   * process env (used by tests that don't care about isolation). Production
+   * callers must pass a pre-filtered env so a leaked host secret can't reach
+   * the child via the parent — bwrap's --clearenv covers the in-sandbox half,
+   * this covers the outside half (#225).
+   */
+  readonly env?: NodeJS.ProcessEnv;
   /** Test seam; production callers should use the two-second default. */
   readonly killGraceMs?: number;
 }
@@ -69,6 +77,7 @@ export function spawnWithStopSignal(
 ): SpawnWithStopSignalResult {
   const child = spawn(command, args, {
     cwd: options.cwd,
+    ...(options.env !== undefined ? { env: options.env } : {}),
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   });

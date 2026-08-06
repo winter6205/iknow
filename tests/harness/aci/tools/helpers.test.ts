@@ -172,6 +172,23 @@ describe("spawnWithStopSignal", () => {
       stderr: "err",
     });
   });
+
+  it("forwards an explicit env to the child so host secrets don't leak (env leak fix, #225)", async () => {
+    const root = await makeScratch("aci-helper-env-");
+    const { done } = spawnWithStopSignal(
+      "sh",
+      [
+        "-c",
+        'test -z "$HOST_SECRET" && echo "secret-absent" && echo "explicit=$EXPLICIT"',
+      ],
+      { cwd: root, env: { PATH: process.env.PATH ?? "", EXPLICIT: "yes" } }
+    );
+
+    const result = await done;
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /secret-absent/);
+    assert.match(result.stdout, /explicit=yes/);
+  });
 });
 
 describe("lintPatch", () => {
