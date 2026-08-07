@@ -14,6 +14,7 @@
 import type {
   AnthropicNativeMessage,
   StopReason,
+  TokenUsage,
 } from "../harness/model-adapter/types.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
 import { extractSummary } from "../session-api/store/schema.js";
@@ -36,6 +37,8 @@ export interface TuiSessionState {
   readonly runState: SessionRunState;
   /** 最近一次 turn 的停止原因（展示用）。 */
   readonly lastStopReason: StopReason | undefined;
+  /** T3: 最近一次 turn 的 token usage（上下文用量显示；只来自运行时回执）。 */
+  readonly lastUsage: TokenUsage | null;
 }
 
 /** 新建 draft 会话（启动直达新会话聊天界面，Q2=C；不触盘）。 */
@@ -48,6 +51,7 @@ export function createDraftSession(): TuiSessionState {
     jsonMode: false,
     runState: "idle",
     lastStopReason: undefined,
+    lastUsage: null,
   });
 }
 
@@ -61,6 +65,8 @@ export function attachSession(file: SessionFileV1): TuiSessionState {
     jsonMode: file.jsonMode,
     runState: "idle",
     lastStopReason: undefined,
+    // lastUsage 只来自运行时回执，不从会话文件携带（初值 null）。
+    lastUsage: null,
   });
 }
 
@@ -99,6 +105,10 @@ export interface TurnFinishedInput {
   readonly updatedAt: string;
   readonly jsonMode: boolean;
   readonly stopReason: StopReason;
+  /** T3: 该回合的 token usage（bridge.postMessage 回执透传；缺省/无 → null）。
+   *  可选既是「省略即 null」的显式语义，也保留既有调用面（app.tsx 的 T4
+   *  接线前不传 lastUsage 也能编译）。 */
+  readonly lastUsage?: TokenUsage | null;
 }
 
 /** turn 结束（自然完成 / cancelled / timeout 均走此）：落回 idle + 整体冻结替换。 */
@@ -115,6 +125,7 @@ export function turnFinished(
     jsonMode: input.jsonMode,
     runState: "idle",
     lastStopReason: input.stopReason,
+    lastUsage: input.lastUsage ?? null,
   });
 }
 

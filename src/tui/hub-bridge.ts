@@ -19,7 +19,15 @@ import type { PostMessageResponse } from "../session-api/contract.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
 import type { LoopEngineDeps } from "../harness/index.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
+import type { TokenUsage } from "../harness/model-adapter/types.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
+
+/**
+ * T3: TUI contextWindow 显示配置默认值（与 loop-engine.ts:152 的
+ * `deps.compress.contextWindow` 默认 200000 同源；env var
+ * `IKNOW_MODEL_CONTEXT_WINDOW`）。仅作显示，不启用压缩（本计划裁决 5）。
+ */
+export const DEFAULT_CONTEXT_WINDOW = 200_000;
 
 /**
  * in-flight 会话登记簿：postMessage 进出登记；deps.ts 的 postToolUse 钩子
@@ -53,6 +61,8 @@ export interface TuiPostResult {
   readonly stopReason: PostMessageResponse["turn"]["answer"]["stopReason"];
   readonly turnCount: number;
   readonly jsonMode: boolean;
+  /** T3: 最近一次成功模型调用的 token usage（wire 字段缺席 → null，与 RunResult 同语义）。 */
+  readonly lastUsage: TokenUsage | null;
 }
 
 export interface TuiBridge {
@@ -72,6 +82,8 @@ export interface TuiBridge {
   readonly listSessions: () => ReturnType<SessionHub["listSessions"]>;
   readonly loadSessionFile: (conversationId: string) => Promise<SessionFileV1>;
   readonly inflight: InflightRegistry;
+  /** T3: 上下文窗口容量（tokens）。仅显示用，不触发压缩。 */
+  readonly contextWindow: number;
 }
 
 export interface CreateTuiBridgeOptions {
@@ -83,6 +95,8 @@ export interface CreateTuiBridgeOptions {
   readonly traceOut?: string;
   /** in-flight 登记簿（deps.ts 的 soleInflightId 同源，归因一致）。 */
   readonly inflight: InflightRegistry;
+  /** T3: 上下文窗口容量（tokens）。缺省 `DEFAULT_CONTEXT_WINDOW = 200_000`。 */
+  readonly contextWindow?: number;
 }
 
 export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
@@ -117,6 +131,8 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
           stopReason: resp.turn.answer.stopReason,
           turnCount: resp.session.turn_count,
           jsonMode: resp.session.json_mode,
+          // T3: wire 字段缺席等价 null（与 RunResult.lastUsage 语义一致）。
+          lastUsage: resp.turn.answer.lastUsage ?? null,
         };
       } finally {
         opts.inflight.unmark(conversationId);
@@ -125,6 +141,7 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     listSessions: () => hub.listSessions(),
     loadSessionFile: (conversationId) => store.load(conversationId),
     inflight: opts.inflight,
+    contextWindow: opts.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
   };
   return Object.freeze(bridge);
 }
