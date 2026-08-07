@@ -350,20 +350,27 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       );
       await delay(200); // 等 setSessions(turnFinished) 落地
 
+      // 锚定 turn 完成时刻：之前累积的输出含 Spinner 帧 `| 运行中…`（ChatView
+      // 消息流尾部，turn 运行中渲染；与 StatusBar 文本同为「运行中」，无法靠
+      // 文本区分）。StatusBar 移除的真正验证 = turn 完成后无运行态显示——
+      // Spinner 在 running=false 时自然消失，StatusBar 已移除不再写入。
+      // 锚定后取 idle 帧断言，避免累积 out 中 turn 期间 spinner 帧的污染
+      // （既有 flaky 根因：stub 慢时必含、快时偶然不含）。
+      const afterTurn = app.since();
+      await delay(200); // 等 running→idle 的 re-render 帧 + 可能的 ContextBar 刷新帧写入
+
       const out = app.lastOutput();
       // 移除：空闲 / 运行中 / 后台等运行态（不在底部显示）
       expect(out).not.toContain("空闲");
-      expect(out).not.toContain("运行中");
-      // 移除：版本号 vVERSION（banner 已有）
       expect(out).not.toContain(`v${VERSION}`);
-      // 移除：会话计数段（不再出现 `会话 N` 拼接）
       expect(out).not.toMatch(/会话\s+\d+/);
-      // 移除：主界面摘要（新会话兜底字样）
       expect(out).not.toContain("新会话");
-      // 无 bg 会话时，「后台运行中」bg 标记不显示
       expect(out).not.toContain("后台运行中");
       // ContextBar 始终显示（首轮已完成 → 1%）
       expect(out).toContain("ctx ");
+      // 「运行中」用 turn 后锚定帧断言（见 since() 上方注释）
+      const idleOut = afterTurn();
+      expect(idleOut).not.toContain("运行中");
     },
     LONG_TIMEOUT
   );
@@ -702,12 +709,15 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       stdin.write("\r");
       // openSessionAt 必须重置 scroll → A 的 scroll=0 窗口贴 A 内容底显示
       // 末尾若干行（"aA 行16…"）。STICKY banner 后消息窗口预算 = viewport -
-      // bannerRows（更小），user 消息可能被切出窗口；只需断言 aA 行16 可见
-      // 即证明 scroll 已重置，B 的上移状态不会残留在 A 上。
+      // STICKY banner 已恢复方案 B：banner + 消息共 row window，viewport=27
+      // 完整看见 A 内容（19 行）+ 末行 aA 行16 可见。
+      // openSessionAt 必须重置 scroll → A 的 scroll=0 窗口 [8,34) 露出 aA 末尾
+      // 行（"aA 行16…"）。若残留 B 的 scroll=13，窗口 [0,21) 只露 aA 前 4 行，
+      // 末尾行会被裁掉 → 断言 aA 末行可见即证明 scroll 已重置。
       await waitFor(
         () => {
           const after = openFrames();
-          return after.includes("aA 行16内容占位");
+          return after.includes("aA 行16内容占位") && after.includes("msg-A");
         },
         8000,
         "A-active-and-scroll-reset"

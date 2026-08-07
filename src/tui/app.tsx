@@ -210,13 +210,14 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   const askTick = askBridge.pending() !== undefined;
   useTick(askTick ? 100 : 0);
 
-  // STICKY banner：banner 是 ChatView 的独立 sticky 头，**任何时候都保持完整
-  // 眼**，独立于消息 row window —— 包括有消息之后。banner 不参与消息滚动数学，
-  // 消息区窗口高 = viewport - bannerRows（ChatView 内部扣，app 层不变）。
-  // 底部输入框 + 状态栏固定（在 app.tsx JSX 中 ChatView 之外）始终在底部。
+  // 方案 B（最终定稿）：banner 归 ChatView 内部 row window，**任何时候都保持
+  // 完整眼** —— 包括有消息之后。banner 与消息共用同一滚动空间，用户向上滚
+  // 能翻回完整 banner，向下滚与消息一起滚出。底部输入框 + 状态栏固定
+  // （在 app.tsx JSX 中 ChatView 之外）始终在底部。
   // 窄终端（cols < BANNER_MIN_COLS）完整眼放不下 → 退化为单行 short=true。
   // 空会话额外加一行顶部分隔线，区分 banner 和下方空白；消息存在时由消息
   // 自身提供分隔（避免重复加线）。
+  // 用户 2026-08-07 复看：「下面对话框要固定，消息跟图标可以向上滚动」。
   // 注：之前的"有消息后塌成单行"理解错了——logo 字符保留不够，向上滚应
   // 看到完整 banner。
   const bannerLines = useMemo(() => {
@@ -244,13 +245,15 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     // 固定行扣减：输入框（2：圆角线框 1 + hint 1 视情况）/ ask 槽（1）/
     // notice（按 lines）。状态栏已于用户 2026-08-07 反馈移除（空闲/版本号/
     // 运行态全部不需要——版本号 banner 已有，运行态 ContextBar 脉动承担，
-    // 「后台运行中」bg 标记保留为独立条件行 +1）。滚动指示器已删（2026-08-07），
-    // 不再预扣指示行（INDICATOR_ROWS 随方案 B 定稿一并弃用）。
+    // 「后台运行中」bg 标记保留为独立条件行 +1）。滚动指示器（顶部 / fold）
+    // 的行账由 ChatView 内部从 viewportRows 扣除（INDICATOR_ROWS，SSOT）。
     //
-    // STICKY banner：banner 是 ChatView 内部独立 sticky 头，**不参与**消息
-    // row window 滚动数学。app 层仍传入整个内容区高度（含 banner），由
-    // ChatView 内部 `viewport - bannerRows` 得消息窗口高（双源 SSOT 在 ChatView
-    // 内部，单点修改不会越界影响 app）。app 层不变保持封装边界。
+    // 方案 B（最终定稿）：banner 已归入 ChatView 内部 row window 作为第一段
+    // content，**不再从 viewport 扣减**——否则空会话完整 banner（≈16 行）会
+    // 双重扣账把视口压扁，矮终端 banner 顶部被窗口裁掉、滚不回去。
+    // 消息区高度 = 终端总行 - 固定 chrome；banner 和消息共享这个视口并一起
+    // 滚动（用户 2026-08-07 复看：「下面对话框要固定，消息跟图标可以向上
+    // 滚动」）。ChatView 内部对 banner/message 的行窗口做 clamp 兜底。
     const noticeLines = notice?.lines.length ?? 0;
     const reserved = 2 + 1 + noticeLines; // 输入 + ask + notice（状态栏移除）
     return Math.max(5, rows - reserved);

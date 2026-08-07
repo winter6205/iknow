@@ -27,25 +27,14 @@ export interface Selection {
   readonly active: CellPos;
 }
 
-/**
- * content 视口窗口（ChatView 计算后透传；用于 SGR → 内容的行映射）。
- *
- * 坐标口径（STICKY banner）：`[startRow, endRow)` 只覆盖**消息段**（不含
- * banner），0-based 消息区坐标。`bannerRows` = sticky banner 高度：
- *  - banner 段恒完整渲染，占据终端 y ∈ [1, bannerRows]；
- *  - 消息区窗口占据终端 y ∈ [bannerRows+1, bannerRows + (endRow-startRow)]。
- * `terminalToCellPos` 依据 `bannerRows` 把 SGR y 映射到**内容流行号**（=
- * banner + 消息 + tail，与 flatContentLines / HighlightedLine 同口径）。
- */
+/** content 视口窗口（ChatView 计算后透传；用于 SGR → 内容的行映射）。 */
 export interface ContentWindow {
-  /** 消息区窗口起始行（含），0-based 消息坐标（不含 banner）。 */
+  /** contentRows 视角下当前可见的起始行（含）。 */
   readonly startRow: number;
   /** 结束行（不含）。 */
   readonly endRow: number;
   /** 视口宽度（terminal cols，与 markdownToLines 折行宽度一致）。 */
   readonly cols: number;
-  /** sticky banner 高度（占终端 y=[1, bannerRows]，不参与消息滚动）。 */
-  readonly bannerRows: number;
 }
 
 /** 比较两个 CellPos，按 row 先 col 后（用于规范化与排序）。 */
@@ -74,12 +63,12 @@ export function rowRange(sel: Selection): { from: number; to: number } {
 /**
  * SGR (1-based x,y, 内容区相对终端 1-based 行) → 内容 CellPos（0-based row, col）。
  *
- * y 是**内容区相对坐标**（ChatView 内容区从终端行 1 起）。STICKY banner：
- *  - y ∈ [1, bannerRows] 落在 banner 段 → row = y - 1（banner 0-based 内容行号）；
- *  - y ∈ [bannerRows+1, bannerRows + (endRow-startRow)] 落在消息段 → row =
- *    bannerRows + startRow + (y - bannerRows - 1)（内容流行号，与
- *    flatContentLines 下标、`MessageBlocksClipped` 的 absRow 同口径）；
- *  - 越界 → null（视口外不更新选区）。
+ * y 是**内容区相对坐标**：ChatView 内容区占据终端第 1 行起的 `viewportRows` 行
+ *（无顶部 chrome；方案 B 指示器已删，banner 入 row window）。调用方只需把
+ * `y = SGR_y - 0` 直接传入（当 ChatView 起点 = 终端行 1）—— 或在 app 层减
+ * 去 banner 前的终端行偏移后传入。
+ *
+ *  - y 落在 `[1, endRow - startRow]` 之外 → null（视口外不更新选区）；
  *  - x 落在 `[1, win.cols+1]` 之内 → col = x-1；越界则 clamp 到最近合法值
  *    （拖到右边出窗口时按右端计算，反之亦然）。
  */
@@ -89,13 +78,8 @@ export function terminalToCellPos(
   win: ContentWindow
 ): CellPos | null {
   const visibleRows = win.endRow - win.startRow;
-  if (y < 1 || y > win.bannerRows + visibleRows) return null;
-  let row: number;
-  if (y <= win.bannerRows) {
-    row = y - 1;
-  } else {
-    row = win.bannerRows + win.startRow + (y - win.bannerRows - 1);
-  }
+  if (y < 1 || y > visibleRows) return null;
+  const row = win.startRow + (y - 1);
   const col = Math.max(0, Math.min(win.cols - 1, x - 1));
   return { row, col };
 }
