@@ -7,6 +7,8 @@ import { MessageList } from "./components/MessageList";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { StateBlock } from "./components/StateBlock";
 import { useSessionChat } from "./hooks/useSessionChat";
+import { useAsksPolling } from "./hooks/useAsksPolling";
+import { PermissionDialog } from "./components/PermissionDialog";
 import {
   loadThinkingSettings,
   saveThinkingSettings,
@@ -44,6 +46,23 @@ function ChatApp() {
     (text: string) => chat.sendMessage(text, toWireOverride(thinkingSettings)),
     [chat, thinkingSettings]
   );
+
+  // Permission polling is only active while a turn is in flight AND we have a
+  // session id. When the dialog appears, it sits at the top of the message
+  // stream (decided by the ChatView composition order — rendered above the
+  // list so users cannot miss it).
+  const conversationId = chat.session?.conversation_id ?? null;
+  const isSending = chat.phase === "sending";
+  const askPolling = useAsksPolling(conversationId, isSending);
+  const permissionDialog =
+    askPolling.pendingAsk && conversationId ? (
+      <PermissionDialog
+        ask={askPolling.pendingAsk}
+        conversationId={conversationId}
+        onDecide={askPolling.decide}
+        pollError={askPolling.pollError}
+      />
+    ) : null;
 
   // Narrow-screen auto-collapse: track live changes (device rotation, window
   // resize across the breakpoint) after the initial render.
@@ -137,6 +156,7 @@ function ChatApp() {
               retryLabel={chat.session ? "关闭错误" : "重试"}
             />
           ) : null}
+          {permissionDialog}
           <MessageList
             messages={chat.messages}
             sending={chat.phase === "sending"}

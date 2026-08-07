@@ -112,7 +112,14 @@ export interface ServeAskUserOpts {
   readonly timeoutMs?: number;
 }
 
-interface PendingAsk {
+/** Lightweight view of a pending ask — exposed via `pendingAll()` to web/SPA. */
+export interface PendingAskView {
+  readonly id: string;
+  readonly tool: string;
+  readonly summaryHint: string;
+}
+
+interface PendingAsk extends PendingAskView {
   readonly ctx: Parameters<AskUser>[0];
   readonly resolve: (v: boolean) => void;
   readonly reject: (e: unknown) => void;
@@ -129,6 +136,10 @@ export interface ServeAskUserHandle {
   resolveAsk: (id: string, approved: boolean) => boolean;
   /** Pending count — mainly for diagnostics / tests. */
   pendingCount: () => number;
+  /** Snapshot of all pending asks (id + context). Process-global: the serving
+   *  process owns a single in-flight turn at a time in v0, so no conversation
+   *  scope is needed at this layer (hub can filter if desired). */
+  pendingAll: () => ReadonlyArray<PendingAskView>;
 }
 
 const DEFAULT_SERVE_TIMEOUT_MS = 5_000;
@@ -159,6 +170,14 @@ export function createServeAskUser(
     return true;
   }
 
+  function snapshot(): PendingAskView[] {
+    const out: PendingAskView[] = [];
+    for (const p of pending.values()) {
+      out.push({ id: p.id, tool: p.ctx.tool, summaryHint: p.ctx.summaryHint });
+    }
+    return out;
+  }
+
   const askImpl: AskUser = (ctx) => {
     counter += 1;
     const id = `ask-${counter}`;
@@ -169,7 +188,15 @@ export function createServeAskUser(
         settle(id, false);
       }, timeoutMs);
       if (timer.unref) timer.unref();
-      pending.set(id, { ctx, resolve, reject: () => undefined, timer });
+      pending.set(id, {
+        id,
+        tool: ctx.tool,
+        summaryHint: ctx.summaryHint,
+        ctx,
+        resolve,
+        reject: () => undefined,
+        timer,
+      });
     });
   };
 
@@ -178,5 +205,6 @@ export function createServeAskUser(
     resolveAsk: (id: string, approved: boolean): boolean =>
       settle(id, approved),
     pendingCount: () => pending.size,
+    pendingAll: () => snapshot(),
   });
 }
