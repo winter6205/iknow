@@ -92,6 +92,12 @@ interface DrivenApp {
   readonly ready: () => Promise<void>;
   /** 锚定当前 raw buffer 位置，返回取「此锚点之后写出的帧」的函数。 */
   readonly since: () => () => string;
+  /** 最近一次 ink 写入的帧（最后一个 chunk，stripped）。用于断言
+   *  settled idle 帧内容，避免 `out.join("")` 累积的中间帧（running spinner
+   *  等瞬态文本）误导 `not.toContain` 类断言。ink 单次 render 通常落在
+   *  同一个 write 里，但若最后帧跨 chunk 写入，则取最后两个 chunk 拼接
+   *  兜底（实测确认一次 render 一 chunk，但跨 chunk 拼接安全无害）。 */
+  readonly lastFrame: () => string;
 }
 
 describe("TuiApp 端到端（tracer bullet）", () => {
@@ -147,6 +153,9 @@ describe("TuiApp 端到端（tracer bullet）", () => {
         const anchor = out.join("").length;
         return () => strip(out.join("").slice(anchor));
       },
+      lastFrame: (): string =>
+        // 兜底拼接最后两个 chunk：跨 chunk 渲染安全；单 chunk 渲染时后者为空。
+        strip(out.slice(-2).join("")),
       type: async (text: string): Promise<void> => {
         // ink 输入解析按 chunk 处理；逐字符写入并让出事件循环，贴近真实
         // 键盘逐键节奏（整块写入时 chunk 尾部 \r 不被解析为 return，实测确认）。
@@ -305,20 +314,30 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       );
       expect(app.lastOutput()).toContain("0% ok");
 
-      // 提交消息 → turn 完成，ContextBar 显示真值（1% → ok）
+      // 提交消息 → turn 完成。`ctx ░` 与 null 状态（空带）撞字（test
+      // 设计缺陷：null 时也是 `ctx ░░░…`），改用 assistant 答复文本作为
+      // turn-完成 + ContextBar 真值落定的真值信号——答复文本出现 ⟹ turn
+      // 已落盘 + lastUsage 已抄入 + ContextBar 渲染了 1% 真值。
       await app.type("你好\r");
       await waitFor(
         () => app.bridge.inflight.ids().size === 0,
         8000,
         "usage-turn-done"
       );
-      // 等 ContextBar 刷新出已用值（1200/200000 = 1% → ok）
+      // 等 assistant 答复渲染（turn 落盘 + ContextBar 真值带刷新）
       await waitFor(
-        () => app.lastOutput().includes("ctx ░"),
+        () => app.lastOutput().includes("答复"),
         8000,
-        "contextbar-band"
+        "answer-rendered-after-usage"
       );
-      expect(app.lastOutput()).toContain("ok");
+      // 等 ContextBar 刷新出已用值：1200/200000 = 1% → `1% ok` + `1.2k/200.0k`
+      //（`ctx ░` 空带在 null 状态也出现，不能当真值信号）。
+      await waitFor(
+        () => app.lastOutput().includes("1% ok"),
+        8000,
+        "contextbar-real-band"
+      );
+      expect(app.lastOutput()).toContain("1.2k/200.0k");
 
       // /info → token 明细行（tokens in/out + cache read + window）
       await app.type("/info\r");
@@ -342,15 +361,20 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       const app = makeApp([assistantResult({ texts: ["hi"] })]);
       await app.ready();
       await waitFor(() => app.lastOutput().includes("iknow"), 8000, "startup");
+      // 注意：`lastOutput()` 是 out.join("") 累积帧，turn 运行中 spinner 的
+      // 「运行中…」会永久残留，`not.toContain("运行中")` 必然误报。本测试的
+      // 本意是「settled idle 帧底部无运行态指示」——断言 lastFrame()（最近
+      // 一次 ink render 帧），不含 running 瞬态。
       await app.type("hi\r");
       await waitFor(
         () => app.bridge.inflight.ids().size === 0,
         8000,
         "first-turn-done"
       );
-      await delay(200); // 等 setSessions(turnFinished) 落地
-
-      const out = app.lastOutput();
+      // 等 assistant 答复渲染（idle 帧已落地：turnFinished + 消息渲染完成）
+      await waitFor(() => app.lastOutput().includes("hi"), 8000, "answer-in");
+      await waitFor(() => app.lastFrame().includes("hi"), 8000, "idle-frame");
+      const out = app.lastFrame();
       // 移除：空闲 / 运行中 / 后台等运行态（不在底部显示）
       expect(out).not.toContain("空闲");
       expect(out).not.toContain("运行中");
@@ -790,62 +814,8 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     LONG_TIMEOUT
   );
 
-  // 任务 B：slash 候选 ↑/↓ 选中 + Enter 触发 onSelectHint（不走 raw 文本解析）
-  it(
-    '任务 B："/" 出现候选 → ↓ → Enter 触发 /new（不退出，验证选中索引非 0）',
-    async () => {
-      // 关键点：cursor 默认 0 = sessions；如果 ↓ + Enter 触发的是 sessions
-      // → 切到 list 视图；如果是 new → 切到新 draft。我们断言：↓ + Enter
-      // 之后应用未退出、也未切到列表视图（list 视图特征 = "+ 新建会话"），
-      // 而是新 draft 创建（inputValue 清空，可继续发消息）。
-      const app = makeApp([assistantResult({ texts: ["new-draft-reply"] })]);
-      await app.ready();
-      await waitFor(() => app.lastOutput().includes("iknow"), 8000, "startup");
-
-      // 1) 输入 "/" → 6 条候选出现
-      await app.type("/");
-      for (const cmd of ["sessions", "new", "quit", "exit", "help", "info"]) {
-        await waitFor(
-          () => app.lastOutput().includes(`/${cmd}`),
-          8000,
-          `hint-${cmd}`
-        );
-      }
-
-      // 2) ↓ 一次 → cursor 从 0 (sessions) 移到 1 (new)
-      stdin.write("[B");
-      await delay(150);
-
-      // 3) Enter → onSelectHint("new") 触发 → handleSubmit("/new") → newSession()
-      stdin.write("\r");
-      await delay(300);
-      // 不应进入 list 视图（"+ 新建会话" 不会出现）；也不应退出
-      const after = app.lastOutput();
-      expect(after).not.toContain("+ 新建会话");
-      // newSession 后 active = draft，input 清空，placeholder 仍可见
-      expect(after).toContain("输入消息");
-
-      // 4) 后续发消息：落盘到新 session，bridge 列表出现 1 条
-      await app.type("new-draft-msg\r");
-      await waitFor(
-        () => app.bridge.inflight.ids().size === 0,
-        8000,
-        "new-turn-done"
-      );
-      // 多等一帧：inflight.unmark 和 store.save 写入盖半
-      await delay(100);
-      const list = await app.bridge.listSessions();
-      expect(list).toHaveLength(1);
-      expect(list[0]!.summary).toBe("new-draft-msg");
-      // 5) assistant 答复 "new-draft-reply" 渲染出来
-      await waitFor(
-        () => app.lastOutput().includes("new-draft-reply"),
-        8000,
-        "new-reply"
-      );
-    },
-    LONG_TIMEOUT
-  );
+  // 任务 B 已移到独立文件 tests/tui/slash-hint-new-session.test.tsx（hint
+  // Enter → onSelectHint race 在本文件全量 suite CPU 竞争下偶发 flake）。
 
   // #189 Spec Low：`initialSession`（`iknow tui <id>` resume）恢复路径未测。
   // 挂载即生成既有会话内容，行级滚动应从 scrollRows=0（auto-follow 底）
