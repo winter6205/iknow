@@ -700,13 +700,14 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       // 视图前已写入，排除在窗口外。since() 锚定避免 stripped 索引错位。
       const openFrames = app.since();
       stdin.write("\r");
-      // openSessionAt 必须重置 scroll → A 的 scroll=0 窗口 [8,34) 露出 aA 末尾
-      // 行（"aA 行16…"）。若残留 B 的 scroll=13，窗口 [0,21) 只露 aA 前 4 行，
-      // 末尾行会被裁掉 → 断言 aA 末行可见即证明 scroll 已重置。
+      // openSessionAt 必须重置 scroll → A 的 scroll=0 窗口贴 A 内容底显示
+      // 末尾若干行（"aA 行16…"）。STICKY banner 后消息窗口预算 = viewport -
+      // bannerRows（更小），user 消息可能被切出窗口；只需断言 aA 行16 可见
+      // 即证明 scroll 已重置，B 的上移状态不会残留在 A 上。
       await waitFor(
         () => {
           const after = openFrames();
-          return after.includes("aA 行16内容占位") && after.includes("msg-A");
+          return after.includes("aA 行16内容占位");
         },
         8000,
         "A-active-and-scroll-reset"
