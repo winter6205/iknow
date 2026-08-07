@@ -98,6 +98,58 @@ describe("banner + scroll 修复回归（2026-08-07）", () => {
     }
   }, 15_000);
 
+  // Bug A 回归（2026-08-08）：用户反馈「进消息后最顶 iknow 图标被截断，
+  // TUI 对终端顶部没对齐」——ChatView 顶层 Box 加 marginTop=1 headroom，banner
+  // 顶端从终端行 1 下移到行 2，避免被标题栏/字体边缘裁切。
+  it("Bug A：24 行终端 chat 视图顶端留 1 行 headroom（banner ╭◆ iknow 不在终端行 1）", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "iknow-banner-"));
+    const stdin = fakeTty(24, 80);
+    const stdout = fakeTty(24, 80);
+    const out: string[] = [];
+    stdout.on("data", (c) => out.push(String(c)));
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      deps: makeDeps([]),
+      inflight: createInflightRegistry(),
+    });
+    const instance = render(
+      <TuiApp
+        bridge={bridge}
+        askBridge={createTuiAskUserBridge()}
+        toolEventSink={createToolEventSink()}
+        cwd="/tmp/proj"
+        dataDir={baseDir}
+      />,
+      { stdout, stdin, exitOnCtrlC: false, patchConsole: false }
+    );
+    try {
+      // 等 banner ╭◆ iknow 渲染完成。
+      await waitFor(
+        () => strip(out.join("")).includes("╭◆ iknow"),
+        5000,
+        "banner-rendered"
+      );
+      const plain = strip(out.join(""));
+      const lines = plain.replace(/\n+$/, "").split("\n");
+      // 终端行 1 必须是 headroom 空行（marginTop 占位），不是 banner 顶。
+      // banner 顶 ╭◆ iknow 出现在行 2 及之后 → 避免行 1 被标题栏/字体边缘裁。
+      expect(lines[0], "终端行 1 是 headroom（不含 ╭◆ iknow）").not.toContain(
+        "╭◆ iknow"
+      );
+      // 整段里 banner 顶行仍存在（向下移动而非消失）
+      expect(plain).toContain("╭◆ iknow");
+      // headroom 行 + banner 顶至少隔 1 行（行 1 空 / 行 2 banner 顶）
+      const bannerLineIdx = lines.findIndex((l) => l.includes("╭◆ iknow"));
+      expect(
+        bannerLineIdx,
+        "banner 顶出现在 headroom 之后"
+      ).toBeGreaterThanOrEqual(1);
+    } finally {
+      instance.unmount();
+      await rm(baseDir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   it("24 行终端 + initialSession 长会话：PgUp 窗口上移 → 顶部老内容进入；End 回到底", async () => {
     const baseDir = await mkdtemp(join(tmpdir(), "iknow-banner-"));
     const stdin = fakeTty(24, 80);

@@ -102,8 +102,9 @@ describe("banner 行级窗口语义：banner 与消息共享 scroll space", () =
     // 内容顶段可见
     expect(plain).toContain("banner-row-0");
     expect(plain).toContain("m-0");
-    // 窗口盖住一屏（viewport-1：末尾 margin 行 ink 折叠）；最新消息在屏外
-    expect(plain.replace(/\n+$/, "").split("\n").length).toBe(VP - 1);
+    // 窗口盖住一屏（viewport：顶部 marginTop headroom 1 行 + 窗口内容
+    // viewport-1 行，末尾 margin 行 ink 折叠）；最新消息在屏外
+    expect(plain.replace(/\n+$/, "").split("\n").length).toBe(VP);
     expect(plain).not.toContain("m-39");
   });
 
@@ -127,8 +128,9 @@ describe("banner 行级窗口语义：banner 与消息共享 scroll space", () =
   it("banner 缺省（未传 bannerLines）：滚动行为完全不变", () => {
     // header 缺省 → bannerRows=0，contentRows = 80。viewport=20。
     // 对任意 scroll 档窗口始终高 viewport 行（scroll 越界 clamp 到 60），
-    // 渲染行数恒等于 viewport-1（末尾 margin 行 ink 折叠，split-line count
-    // 比 raw length 准）。回归断言：各 scroll 档行数 = 基线行数。
+    // 渲染行数恒等于 viewport（顶部 marginTop headroom 1 行 + 窗口内容
+    // viewport-1 行，末尾 margin 行 ink 折叠，split-line count 比 raw length
+    // 准）。回归断言：各 scroll 档行数 = 基线行数。
     const linesOf = (s: number): string[] =>
       strip(render({ scrollRows: s, msgCount: 40 }))
         .replace(/\n+$/, "")
@@ -137,6 +139,6 @@ describe("banner 行级窗口语义：banner 与消息共享 scroll space", () =
     for (const s of [3, 6, 12, 24, 999]) {
       expect(linesOf(s).length, `scroll=${s} 行数`).toBe(baseline.length);
     }
-    expect(baseline.length).toBe(VP - 1);
+    expect(baseline.length).toBe(VP);
   });
 });

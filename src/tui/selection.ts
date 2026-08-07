@@ -35,6 +35,12 @@ export interface ContentWindow {
   readonly endRow: number;
   /** 视口宽度（terminal cols，与 markdownToLines 折行宽度一致）。 */
   readonly cols: number;
+  /**
+   * 内容区在终端里的起始行偏移（1-based 减 1）。
+   * 默认 0 = ChatView 内容从终端行 1 起算；有 marginTop headroom 时 = 1，
+   * SGR y 落在 headroom 行（y=1）落在 `terminalToCellPos` 范围外返回 null。
+   */
+  readonly topOffset?: number;
 }
 
 /** 比较两个 CellPos，按 row 先 col 后（用于规范化与排序）。 */
@@ -77,9 +83,11 @@ export function terminalToCellPos(
   y: number,
   win: ContentWindow
 ): CellPos | null {
+  const topOffset = win.topOffset ?? 0;
   const visibleRows = win.endRow - win.startRow;
-  if (y < 1 || y > visibleRows) return null;
-  const row = win.startRow + (y - 1);
+  const yLocal = y - topOffset; // headroom margin 行（y ≤ topOffset）落到范围外
+  if (yLocal < 1 || yLocal > visibleRows) return null;
+  const row = win.startRow + (yLocal - 1);
   const col = Math.max(0, Math.min(win.cols - 1, x - 1));
   return { row, col };
 }

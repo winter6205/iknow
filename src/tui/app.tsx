@@ -255,7 +255,11 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     // 滚动（用户 2026-08-07 复看：「下面对话框要固定，消息跟图标可以向上
     // 滚动」）。ChatView 内部对 banner/message 的行窗口做 clamp 兜底。
     const noticeLines = notice?.lines.length ?? 0;
-    const reserved = 2 + 1 + noticeLines; // 输入 + ask + notice（状态栏移除）
+    // +1 headroom：用户 2026-08-08 反馈「进消息后最顶 iknow 图标被截断、
+    // TUI 对终端顶部没对齐」，ChatView 顶层 Box 加 marginTop=1，把这 1 行
+    // 从 viewport 预先扣账，保证 margin + 窗口内容 ≤ ChatView flexGrow 分配
+    // 不溢出。
+    const reserved = 2 + 1 + noticeLines + 1; // 输入 + ask + notice + headroom
     return Math.max(5, rows - reserved);
   }, [rows, notice]);
 

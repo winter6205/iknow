@@ -280,6 +280,8 @@ export interface ChatViewProps {
     readonly startRow: number;
     readonly endRow: number;
     readonly cols: number;
+    /** 内容区在终端里的起始行偏移（marginTop headroom 行数）。 */
+    readonly topOffset?: number;
   }) => void;
 }
 
@@ -351,13 +353,19 @@ export function ChatView(props: ChatViewProps): ReactElement {
   // 的 ref（无 setState），React 允许多次调用；移到 useEffect 会引入事件时序
   // 风险（mouse listener 可能比 effect 早拿到陈旧 window）。注：依赖稳定，
   // commit 期重复调用会写同一个值。
+  // topOffset = marginTop headroom 行数（用户 2026-08-08 下移一行）；SGR y 落
+  // 在 headroom 行（≤ topOffset）→ terminalToCellPos 范围外，drag 高亮只命中
+  // 内容区。banner 前的终端行偏移：headroom 1 行 = SGR y 需减 1 再映射。
   props.onWindow?.({
     startRow,
     endRow,
     cols,
+    topOffset: 1,
   });
   return (
-    <Box flexDirection="column" flexGrow={1}>
+    <Box flexDirection="column" flexGrow={1} marginTop={1}>
+      {/* marginTop=1 给 banner 顶端留 1 行 headroom：用户 2026-08-08 反馈
+          进消息后最顶 iknow 图标被截断、TUI 对终端顶部没对齐，下移一行。 */}
       <Box flexDirection="column">
         {/* banner 段（内容流第一段）：按窗口行区间裁剪，selection 存在时高亮命中行。 */}
         {bannerRows > 0 &&
