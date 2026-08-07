@@ -6,7 +6,7 @@
  * is nested under { error: { kind, message, ... } }. http.ts / hub.ts still
  * reference the old shapes — they will be rewritten in T4/T5.
  */
-import type { StopReason } from "../harness/index.js";
+import type { StopReason, TokenUsage } from "../harness/index.js";
 import type { SessionStoreErrorKind } from "./store/errors.js";
 
 /** Max user message length (code units). */
@@ -21,6 +21,10 @@ export interface TurnAnswerDto {
   readonly thinking?: ThinkingView;
   /** T1: 单回合内所有 tool_use，按 tool_use_id 配对 tool_result。无 tool_use 时整字段省略。 */
   readonly toolCalls?: readonly ToolCallView[];
+  /** 上下文用量显示：该回合最后一次成功模型调用的 token usage。
+   *  映射 RunResult.lastUsage（ADR-0008 D5）；null → 字段缺席（byte-stable，
+   *  与 thinking/toolCalls 同模式）。contextWindow 经 HealthResponse 下发。 */
+  readonly lastUsage?: TokenUsage;
 }
 
 /** T1: 单条 thinking 文本视图（redacted_thinking 仅计数，data 永不上 wire）。 */
@@ -114,6 +118,9 @@ export type HealthResponse = {
   ok: true;
   service: "iknow-session-api";
   version: string;
+  /** 上下文窗口大小（token）。来源 env.compress.contextWindow（IKNOW_MODEL_CONTEXT_WINDOW），
+   *  默认 200000。上下文用量显示的百分比分母。 */
+  contextWindow: number;
 };
 
 /**

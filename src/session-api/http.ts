@@ -22,12 +22,18 @@ import {
 
 export { resolveDefaultWebRoot };
 
+/** 上下文窗口缺省（token）：与 loop-engine 默认同源（200000）。 */
+export const DEFAULT_CONTEXT_WINDOW = 200_000;
+
 export type SessionHttpServerOptions = {
   hub: SessionHub;
   /** Absolute path to web/ static root. */
   webRoot?: string;
   host?: string;
   port?: number;
+  /** 上下文窗口大小（token）。缺省 200000（与 loop-engine 默认同源）。
+   *  HealthResponse 字段；由 serve.ts 从 loadIknowEnv().compress.contextWindow 透传。 */
+  contextWindow?: number;
 };
 
 export type ListeningServer = {
@@ -42,9 +48,10 @@ export function createSessionHttpServer(
 ): http.Server {
   const hub = opts.hub;
   const webRoot = opts.webRoot ?? resolveDefaultWebRoot();
+  const contextWindow = opts.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
 
   return http.createServer((req, res) => {
-    void handle({ req, res, hub, webRoot });
+    void handle({ req, res, hub, webRoot, contextWindow });
   });
 }
 
@@ -82,10 +89,11 @@ interface HandleOpts {
   readonly res: http.ServerResponse;
   readonly hub: SessionHub;
   readonly webRoot: string;
+  readonly contextWindow: number;
 }
 
 async function handle(opts: HandleOpts): Promise<void> {
-  const { req, res, hub, webRoot } = opts;
+  const { req, res, hub, webRoot, contextWindow } = opts;
   try {
     const method = (req.method ?? "GET").toUpperCase();
     const url = new URL(
@@ -95,7 +103,7 @@ async function handle(opts: HandleOpts): Promise<void> {
     const pathname = decodeURIComponent(url.pathname);
 
     if (method === "GET" && pathname === "/api/v1/health")
-      return sendHealth(res);
+      return sendHealth(res, contextWindow);
     if (method === "GET" && isSsePath(pathname)) return sendSseReserved(res);
 
     if (method === "POST" && pathname === "/api/v1/sessions") {
@@ -137,11 +145,12 @@ async function handle(opts: HandleOpts): Promise<void> {
   }
 }
 
-function sendHealth(res: http.ServerResponse): void {
+function sendHealth(res: http.ServerResponse, contextWindow: number): void {
   const body: HealthResponse = {
     ok: true,
     service: "iknow-session-api",
     version: getVersion(),
+    contextWindow,
   };
   sendJson({ res, status: 200, body });
 }

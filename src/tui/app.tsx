@@ -18,6 +18,7 @@
  */
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import type { HarnessStreamEvent } from "../harness/stream.js";
+import type { TokenUsage } from "../harness/model-adapter/types.js";
 import type { ReactElement } from "react";
 import {
   Box,
@@ -35,7 +36,6 @@ import {
   attachSession,
   canInterrupt,
   createDraftSession,
-  sessionSummary,
   switchedAwayFrom,
   switchedTo,
   turnFinished,
@@ -58,10 +58,10 @@ import { ChatView, flatContentLines } from "./chat-view.js";
 import type { StreamDraft } from "../cli/stream-draft.js";
 import { createStreamDraft } from "../cli/stream-draft.js";
 import { ListView, relativeTime, type TuiListEntry } from "./list-view.js";
+import { ContextBar } from "./context-bar.js";
 import { PromptInput, useTick } from "./components.js";
 import { renderBanner } from "./banner.js";
 import { tuiPalette } from "./theme.js";
-import { clipOneLine } from "./text.js";
 import { VERSION } from "./version.js";
 import { writeIknowState } from "../harness/identity/index.js";
 import {
@@ -242,11 +242,11 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   }, [view, activeKey, sessions, initial, cols, props.cwd, props.dataDir]);
 
   const viewportRows = useMemo(() => {
-    // 固定行扣减：状态栏（1） / 输入框（2：圆角线框 1 + hint 1 视情况）
-    // / ask 槽（1）/ notice（按 lines）。滚动指示器（顶部 / fold）的行账由
-    // ChatView 内部从 viewportRows 扣除（INDICATOR_ROWS，SSOT）——调用方
-    // 传入的是聊天区域总预算，不再预扣指示行（旧实现预扣 1 但指示实测占
-    // 2 行，是 #189 渲染漂移的 chrome 账目根因）。
+    // 固定行扣减：输入框（2：圆角线框 1 + hint 1 视情况）/ ask 槽（1）/
+    // notice（按 lines）。状态栏已于用户 2026-08-07 反馈移除（空闲/版本号/
+    // 运行态全部不需要——版本号 banner 已有，运行态 ContextBar 脉动承担，
+    // 「后台运行中」bg 标记保留为独立条件行 +1）。滚动指示器（顶部 / fold）
+    // 的行账由 ChatView 内部从 viewportRows 扣除（INDICATOR_ROWS，SSOT）。
     //
     // 方案 B（最终定稿）：banner 已归入 ChatView 内部 row window 作为第一段
     // content，**不再从 viewport 扣减**——否则空会话完整 banner（≈16 行）会
@@ -255,7 +255,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     // 滚动（用户 2026-08-07 复看：「下面对话框要固定，消息跟图标可以向上
     // 滚动」）。ChatView 内部对 banner/message 的行窗口做 clamp 兜底。
     const noticeLines = notice?.lines.length ?? 0;
-    const reserved = 1 + 2 + 1 + noticeLines; // 状态栏 + 输入 + ask + notice
+    const reserved = 2 + 1 + noticeLines; // 输入 + ask + notice（状态栏移除）
     return Math.max(5, rows - reserved);
   }, [rows, notice]);
 
@@ -474,6 +474,8 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     controller: AbortController
   ): Promise<void> {
     let stopReason: string | undefined;
+    // T4: 桥接回执的 lastUsage（成功才抄入；cancelled/异常路径保持 null）。
+    let lastUsage: TokenUsage | null = null;
     // T4: 构造草稿 + 装配 onStream；abort 时清空（cancelled 路径 + 异常路径都走）。
     const draft = createStreamDraft();
     setStreamDraft(draft);
@@ -500,6 +502,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
         onStream,
       });
       stopReason = resp.stopReason;
+      lastUsage = resp.lastUsage;
     } catch (err) {
       stopReason = "protocolError";
       setNotice({ lines: [`turn 失败：${describeError(err)}`] });
@@ -526,6 +529,8 @@ export function TuiApp(props: TuiAppProps): ReactElement {
             jsonMode: file.jsonMode,
             stopReason:
               (stopReason as TuiSessionState["lastStopReason"]) ?? "completed",
+            // T4: 透传 lastUsage 给 ContextBar /info 用；wire 缺席等价 null。
+            lastUsage,
           }),
         };
       });
@@ -541,7 +546,8 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       // 刷新失败也要落回 idle：否则会话卡在 running-fg（aborter 已在
       // finally 移除 → Ctrl+C 无效，且「正在运行」护栏挡住后续发送）。
       // messages 保持 turn 前状态（磁盘 SSOT 未读回）；stopReason 记录
-      // turn 本身的停止原因。
+      // turn 本身的停止原因。lastUsage 已抄入 → 仍透传（turn 已跑过，
+      // 不因刷新失败抹除）。
       setSessions((prev) => {
         const current = prev[targetId];
         if (!current) return prev;
@@ -555,6 +561,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
             jsonMode: current.jsonMode,
             stopReason:
               (stopReason as TuiSessionState["lastStopReason"]) ?? "completed",
+            lastUsage,
           }),
         };
       });
@@ -751,7 +758,9 @@ export function TuiApp(props: TuiAppProps): ReactElement {
         setNotice({ lines: helpLines() });
         return;
       case "info": {
-        setNotice({ lines: infoLines(active, activeKey) });
+        setNotice({
+          lines: infoLines(active, activeKey, bridge.contextWindow),
+        });
         return;
       }
       case "thinking": {
@@ -924,61 +933,45 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           hintSuggestions={inputHintSuggestions}
         />
       )}
-      <StatusBar
-        cols={cols}
-        active={active}
-        bgSession={bgSession}
-        sessionCount={Object.keys(sessions).length}
-      />
-    </Box>
-  );
-}
-
-function StatusBar(props: {
-  readonly cols: number;
-  readonly active: TuiSessionState;
-  readonly bgSession: TuiSessionState | undefined;
-  readonly sessionCount: number;
-}): ReactElement {
-  const pal = tuiPalette;
-  const state =
-    props.active.runState === "idle"
-      ? "空闲"
-      : props.active.runState === "running-fg"
-        ? "运行中"
-        : "后台";
-  const summary = sessionSummary(props.active.messages);
-  return (
-    <Box flexWrap="wrap">
-      <Box marginRight={2}>
-        <Text color={pal.dim}>
-          {state} · {summary ? clipOneLine(summary, 24) : "新会话"}
-        </Text>
-      </Box>
-      {props.bgSession && (
-        <Box marginRight={2}>
-          <Text color={pal.dim}>
-            后台运行中 ·{" "}
-            {clipOneLine(sessionSummary(props.bgSession.messages), 24)}
-          </Text>
+      {/* ContextBar 仅聊天视图挂载（T4）：上下文用量条，输入框下方
+          （用户 2026-08-07 反馈：放输入框下方）。list 视图不挂。 */}
+      {view === "chat" && (
+        <ContextBar
+          lastUsage={active.lastUsage}
+          contextWindow={bridge.contextWindow}
+          running={active.runState === "running-fg"}
+          cols={cols}
+        />
+      )}
+      {/* 后台会话运行标记（SC5）：存在 running-bg 会话时单行 dim 提示。原
+          StatusBar 的空闲/版本号/运行态已按用户 2026-08-07 反馈移除（版本号
+          banner 已有，前台运行态由 ContextBar 脉动承担），仅保留这一条信息
+          承载 —— 后台 turn 在 UI 别处无显示。 */}
+      {bgSession && (
+        <Box>
+          <Text color={pal.dim}>后台运行中</Text>
         </Box>
       )}
-      <Box marginRight={2}>
-        <Text color={pal.dim}>会话 {props.sessionCount}</Text>
-      </Box>
-      <Box>
-        <Text color={pal.dim}>
-          v{VERSION} · {props.active.conversationId ?? "draft"}
-        </Text>
-      </Box>
     </Box>
   );
 }
 
 function infoLines(
   session: TuiSessionState,
-  key: string
+  key: string,
+  contextWindow: number
 ): ReadonlyArray<string> {
+  const lu = session.lastUsage;
+  // T4: token 明细（CLI `tokens in/out` 同语义 + cache read + window）。
+  // lastUsage === null → tokens: —（无成功调用）。
+  const tokenLines =
+    lu === null
+      ? ["tokens: —"]
+      : [
+          `tokens in/out: ${lu.inputTokens}/${lu.outputTokens}`,
+          `cache read: ${lu.cacheReadInputTokens}`,
+          `window: ${contextWindow}`,
+        ];
   return [
     `conversation_id: ${session.conversationId ?? key}（${
       session.conversationId ? "已建档" : "draft，首条消息后建档"
@@ -987,6 +980,7 @@ function infoLines(
     `updatedAt: ${session.updatedAt ? relativeTime(session.updatedAt) : "—"}`,
     `jsonMode: ${session.jsonMode}`,
     `runState: ${session.runState}`,
+    ...tokenLines,
   ];
 }
 

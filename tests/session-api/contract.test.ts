@@ -11,6 +11,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import type {
   ApiErrorBody,
+  HealthResponse,
   PostMessageRequest,
   SessionSummary,
   ThinkingView,
@@ -191,5 +192,79 @@ describe("PostMessageRequest — T2 optional thinking override", () => {
   it("accepts text-only (no thinking override)", () => {
     const req: PostMessageRequest = { text: "hi" };
     assert.equal(req.thinking, undefined);
+  });
+});
+
+// -- Context usage display (context-usage-display): lastUsage + contextWindow --
+
+describe("TurnAnswerDto — context usage lastUsage field", () => {
+  it("accepts lastUsage when present (camelCase 4 fields)", () => {
+    const answer: TurnAnswerDto = {
+      finalText: "hi",
+      stopReason: "completed",
+      turnCount: 1,
+      lastUsage: {
+        inputTokens: 1234,
+        outputTokens: 56,
+        cacheCreationInputTokens: 100,
+        cacheReadInputTokens: null,
+      },
+    };
+    assert.equal(answer.lastUsage?.inputTokens, 1234);
+    assert.equal(answer.lastUsage?.outputTokens, 56);
+    assert.equal(answer.lastUsage?.cacheCreationInputTokens, 100);
+    assert.equal(answer.lastUsage?.cacheReadInputTokens, null);
+  });
+
+  it("omits lastUsage key when absent (byte-stable)", () => {
+    const answer: TurnAnswerDto = {
+      finalText: "x",
+      stopReason: "maxTurns",
+      turnCount: 1,
+    };
+    assert.deepEqual(Object.keys(answer).sort(), [
+      "finalText",
+      "stopReason",
+      "turnCount",
+    ]);
+  });
+
+  it("keeps all keys when lastUsage present alongside thinking/toolCalls", () => {
+    const answer: TurnAnswerDto = {
+      finalText: "hi",
+      stopReason: "completed",
+      turnCount: 1,
+      thinking: { entries: [{ text: "plan" }], redactedCount: 0 },
+      toolCalls: [],
+      lastUsage: {
+        inputTokens: 7,
+        outputTokens: 3,
+        cacheCreationInputTokens: null,
+        cacheReadInputTokens: 2,
+      },
+    };
+    assert.deepEqual(Object.keys(answer).sort(), [
+      "finalText",
+      "lastUsage",
+      "stopReason",
+      "thinking",
+      "toolCalls",
+      "turnCount",
+    ]);
+    assert.equal(answer.lastUsage?.cacheReadInputTokens, 2);
+  });
+});
+
+describe("HealthResponse — contextWindow", () => {
+  it("carries a positive contextWindow", () => {
+    const health: HealthResponse = {
+      ok: true,
+      service: "iknow-session-api",
+      version: "0.1.0",
+      contextWindow: 200000,
+    };
+    assert.equal(health.ok, true);
+    assert.equal(health.contextWindow, 200000);
+    assert.ok(health.contextWindow > 0);
   });
 });

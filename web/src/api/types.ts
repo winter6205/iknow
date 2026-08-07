@@ -1,5 +1,13 @@
 /** Mirror of Session HTTP API DTOs used by the product UI. */
 
+/** Mirrors harness TokenUsage (src/harness/model-adapter/types.ts). */
+export type TokenUsage = {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheCreationInputTokens: number | null;
+  readonly cacheReadInputTokens: number | null;
+};
+
 /** Mirrors harness StopReason (7 values). */
 export type StopReason =
   | "completed"
@@ -40,6 +48,8 @@ export type TurnAnswerDto = {
   readonly thinking?: ThinkingView;
   /** 可选：单回合工具调用视图（后端 T1 投影；无 tool_use 时省略）。 */
   readonly toolCalls?: readonly ToolCallView[];
+  /** 可选：camelCase token usage；仅在后端值非 null 时存在。 */
+  readonly lastUsage?: TokenUsage;
 };
 
 /** Mirrors ThinkingOverride in PostMessageRequest (src/session-api/contract.ts). */
@@ -98,6 +108,7 @@ export type HealthResponse = {
   ok: true;
   service: string;
   version: string;
+  readonly contextWindow: number;
 };
 
 /**

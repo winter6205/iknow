@@ -31,6 +31,7 @@ export type SessionChatState = {
   /** Latest agent answer (null before first turn). */
   lastAnswer: TurnAnswerDto | null;
   healthLabel: string | null;
+  contextWindow: number | null;
 };
 
 export type SessionChatApi = SessionChatState & {
@@ -48,6 +49,7 @@ export type SessionChatApi = SessionChatState & {
 /** Safe extras for applySession — cannot override derived session fields. */
 type ApplySessionExtras = {
   healthLabel?: string | null;
+  contextWindow?: number | null;
 };
 
 /** localStorage key for the active conversation id (SC16 refresh restore). */
@@ -150,6 +152,7 @@ const INITIAL: SessionChatState = {
   messages: [],
   lastAnswer: null,
   healthLabel: null,
+  contextWindow: null,
 };
 
 export function useSessionChat(): SessionChatApi {
@@ -221,6 +224,7 @@ export function useSessionChat(): SessionChatApi {
       if (gen !== bootGen.current) return;
       const healthExtras: ApplySessionExtras = {
         healthLabel: `${health.service} ${health.version}`,
+        contextWindow: health.contextWindow,
       };
       const stored = readStoredSessionId();
       if (stored) {

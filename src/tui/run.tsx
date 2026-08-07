@@ -54,6 +54,8 @@ export async function runTui(opts: RunTuiOptions): Promise<void> {
     deps,
     traceOut: opts.traceOut,
     inflight,
+    // T3: 透传上下文窗口容量（仅显示用，不启用压缩——本计划裁决 5）。
+    contextWindow: bundle.env.compress.contextWindow,
   });
 
   let initialSession;

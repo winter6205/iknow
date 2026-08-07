@@ -666,6 +666,9 @@ export class SessionHub {
         // for turns without thinking or tool use).
         ...(thinking !== undefined ? { thinking } : {}),
         ...(toolCalls !== undefined ? { toolCalls } : {}),
+        // 上下文用量显示：result.lastUsage 非 null 时透传；null → 字段缺席
+        // (byte-stable；与 thinking/toolCalls 同模式；ADR-0008 D5)。
+        ...(result.lastUsage !== null ? { lastUsage: result.lastUsage } : {}),
       },
     };
   }
