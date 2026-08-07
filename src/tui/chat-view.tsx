@@ -188,8 +188,11 @@ export function ChatView(props: ChatViewProps): ReactElement {
   const statusMap = toolResultStatusMap(session.messages);
   const measured: Measured[] = [];
   let messageCursor = 0;
-  // banner 占 content top：[0, bannerRows)；消息从 bannerRows 起算。
-  // 两者共 contentRows 一同被 row window 滚动窗口覆盖。
+  // Sticky 头语义：banner 在 ChatView 顶部单独渲染（不受 row window 滚动影
+  // 响 —— 用户复看裁定「对话跟logo应在同一个窗口」= 同一个聊天区，logo 常驻
+  // 顶部不滚走，消息在下面的独立 row window 里滚动）。bannerRows 仅用于
+  // viewport 预算扣减（app.tsx 的 bannerRowSpan）；此处不影响 messageCursor
+  // 或 contentRows。
   const bannerRows = props.bannerLines?.length ?? 0;
   for (const m of session.messages) {
     const mm = messageRender(m, cols, {
@@ -201,7 +204,7 @@ export function ChatView(props: ChatViewProps): ReactElement {
       lines: mm.lines,
       blocks: [...mm.blocks],
       totalRows: mm.totalRows,
-      startRow: bannerRows + messageCursor,
+      startRow: messageCursor,
     });
     messageCursor += mm.totalRows;
   }
@@ -229,8 +232,9 @@ export function ChatView(props: ChatViewProps): ReactElement {
     viewport > 0 ? Math.max(1, viewport - chromeScrolled) : 0;
   // viewport <= 0 → 无限视口：消息窗口不裁剪，scroll 仅驱动指示器文案。
   const unlimited = budgetScrolled <= 0;
-  // 内容总高 = banner 段 + 消息段；tail 在底部不算入 scroll 上界（折叠成指示）。
-  const contentRows = bannerRows + messageCursor;
+  // Sticky 头：banner 不参与 row window，contentRows 只算消息段；tail 在底
+  // 部不算入 scroll 上界（折叠成指示）。
+  const contentRows = messageCursor;
   // 上界：窗口顶边最多到达第 0 行（含 banner 顶），且必须保高（endRow >= budget
   // ⇒ scroll <= contentRows - budget）。超过此值的滚动会让窗口从底部收缩
   // —— 用户感知为"消息减少"。短内容（contentRows <= budget）无可上滚历史，
@@ -252,26 +256,21 @@ export function ChatView(props: ChatViewProps): ReactElement {
   const indicator = scroll > 0 ? `↑ ${scroll} 行历史（End 回到底部）` : "";
   return (
     <Box flexDirection="column" flexGrow={1}>
+      {/* Sticky 头：banner 常驻聊天区顶部（不参与 row window 滚动，用户复看
+          裁定「对话跟logo应在同一个窗口」= 同一聊天区、logo 不滚走）。 */}
+      {bannerRows > 0 && props.bannerLines && (
+        <Box flexDirection="column">
+          {props.bannerLines.map((line, i) => (
+            <Text key={`banner-${i}`}>{line}</Text>
+          ))}
+        </Box>
+      )}
       {indicator.length > 0 && (
         <Box marginBottom={1}>
           <Text color={pal.dim}>{indicator}</Text>
         </Box>
       )}
       <Box flexDirection="column">
-        {/* banner 段（row window 第一段，与消息同 scroll space）：按窗口行
-            区间裁剪。scroll=0 时窗口顶 = bannerRows 上方 → banner 首屏可见。 */}
-        {bannerRows > 0 &&
-          props.bannerLines &&
-          (() => {
-            const bStart = Math.max(0, startRow);
-            const bEnd = Math.min(bannerRows, endRow);
-            if (bEnd <= bStart) return null;
-            return props.bannerLines
-              .slice(bStart, bEnd)
-              .map((line, i) => (
-                <Text key={`banner-${bStart + i}`}>{line}</Text>
-              ));
-          })()}
         {measured.map((mm, i) => {
           if (mm.startRow + mm.totalRows <= startRow || mm.startRow >= endRow) {
             return null;

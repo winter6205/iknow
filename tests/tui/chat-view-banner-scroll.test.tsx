@@ -1,10 +1,12 @@
 /**
  * tests/tui/chat-view-banner-scroll.test.tsx
  *
- * 滚动对齐（方案 B）：banner = row window 第一段，与消息同 scroll space。
- *  - scroll=0 满屏底 → 长内容时 banner 滚出顶部（窗口底显示最新消息 + tail）；
- *  - 滚到 maxScroll → banner 完整回到顶部（行 0..bannerRows-1）；
- *  - 中段滚动 → banner 按窗口行区间裁剪；
+ * Sticky 头语义回归电池（2026-08-07 用户复看裁定）：
+ *  - banner 常驻 ChatView 顶部（不参与 row window 滚动），消息在下面独立
+ *    row window 滚动；
+ *  - 「对话跟logo应在同一个窗口」= 同一聊天区，logo 不滚走；
+ *  - scroll>0 时「↑ N 行历史」指示出现且 clamp 到 maxScroll；scroll=0 时
+ *    banner + 最新消息均可见，banner 永远不滚出窗口；
  *  - banner 缺省（未传）→ 行为与之前完全一致（回归电池）。
  *
  * 输入框 / 状态栏由 app.tsx 在 ChatView 之外固定挂载，本组件测只覆盖内容窗。
@@ -30,26 +32,6 @@ function users(n: number): AnthropicNativeMessage[] {
   }));
 }
 
-function linesOf(args: {
-  scrollRows: number;
-  msgCount: number;
-  bannerLines?: ReadonlyArray<string>;
-}): string[] {
-  const output = renderToString(
-    React.createElement(ChatView, {
-      session: { ...createDraftSession(), messages: users(args.msgCount) },
-      cols,
-      liveToolLines: [],
-      askLine: undefined,
-      scrollRows: args.scrollRows,
-      viewportRows: VP,
-      bannerLines: args.bannerLines,
-    }),
-    { columns: cols }
-  );
-  return strip(output).replace(/\n+$/, "").split("\n");
-}
-
 function render(args: {
   scrollRows: number;
   msgCount: number;
@@ -69,64 +51,54 @@ function render(args: {
   );
 }
 
-describe("banner 与消息同 scroll space（输入框固定在底部）", () => {
-  it("空会话 scroll=0：banner 完整可见，无消息时 maxScroll=0", () => {
-    const plain = strip(
-      render({ scrollRows: 0, msgCount: 0, bannerLines: BANNER })
-    );
-    // 14 行 banner 全在窗口内
-    for (let i = 0; i < BANNER.length; i++) {
-      expect(plain, `banner row ${i}`).toContain(`banner-row-${i}`);
-    }
-    expect(plain).not.toContain("行历史");
-  });
-
-  it("scroll=max → banner 完整回到顶部，后面是消息", () => {
-    // 每条 user 消息 1 行 + 1 行外层 margin → totalRows = 2。
-    // messageCursor = 40 × 2 = 80；contentRows = 14 + 80 = 94；
-    // budgetScrolled = 18（VP=20 - INDICATOR_ROWS=2）；maxScroll = 94 - 18 = 76。
-    const plain = strip(
-      render({ scrollRows: 999, msgCount: 40, bannerLines: BANNER })
-    );
-    // scroll=999 → clamp 76 → endRow=18, startRow=0 → banner 14 行 + 头几条消息
-    expect(plain).toContain("banner-row-0");
-    expect(plain).toContain("banner-row-13");
-    expect(plain).toContain("行历史");
-  });
-
-  it("scroll=0 长会话：banner 已被滚出顶部，仅显示底部消息", () => {
+describe("sticky 头语义：banner 常驻顶部（不参与 row window 滚动）", () => {
+  it("scroll=0：banner 永远全见 + 最新消息全见，无指示", () => {
     const plain = strip(
       render({ scrollRows: 0, msgCount: 40, bannerLines: BANNER })
     );
-    // scroll=0 → endRow=94; startRow = max(0, 94 - budget). budget=18（chrome=2）,
-    // startRow = 76。banner 段 [0,14) 全部 < 76 → banner 不渲染
-    expect(plain).not.toContain("banner-row-0");
-    // 最新消息（m-39）可见（行 14+78=92 ≤ 94）
+    // Sticky 头：banner 14 行全部在 ChatView 顶部渲染，不随消息滚出。
+    for (let i = 0; i < BANNER.length; i++) {
+      expect(plain, `banner row ${i}`).toContain(`banner-row-${i}`);
+    }
+    // 最新消息（m-39）也可见（消息 row window 仍按原逻辑跑）
     expect(plain).toContain("m-39");
+    // scroll=0 无指示
     expect(plain).not.toContain("行历史");
   });
 
-  it("中段滚动：banner 按窗口行区间裁剪（不全见、也不全隐）", () => {
-    // contentRows=94, maxScroll=76. scroll=70 → endRow=24, startRow=6.
-    // banner 段 [0,14) → 裁剪 [6,14) → banner-row-6..13 可见。
+  it("scroll>0：banner 仍全见（sticky），顶部出现「↑ N 行历史」指示", () => {
     const plain = strip(
-      render({ scrollRows: 70, msgCount: 40, bannerLines: BANNER })
+      render({ scrollRows: 999, msgCount: 40, bannerLines: BANNER })
     );
-    expect(plain).toContain("banner-row-6");
-    expect(plain).toContain("banner-row-13");
-    // 滚出去的 banner 行不渲染
-    expect(plain).not.toContain("banner-row-0");
-    expect(plain).not.toContain("banner-row-5");
+    // Sticky 头：无论 scroll 多大，banner 14 行始终在顶部渲染。
+    for (let i = 0; i < BANNER.length; i++) {
+      expect(plain, `banner row ${i}`).toContain(`banner-row-${i}`);
+    }
+    // 滚到顶 → 顶部 dim「↑ N 行历史」指示出现（消息行 window 反映历史）
+    expect(plain).toContain("行历史");
+  });
+
+  it("scroll=999：clamp 到 maxScroll；指示数字 = maxScroll（消息行 window 行为不变）", () => {
+    // 每条 user 消息 1 content + 1 margin = 2 rows。messageCursor=80。
+    // viewport=20, chromeScrolled=2 (no tail) → budgetScrolled=18。
+    // maxScroll=max(0, 80-18)=62；scroll=999 → clamp 62 → 指示「↑ 62 行历史」。
+    const plain = strip(
+      render({ scrollRows: 999, msgCount: 40, bannerLines: BANNER })
+    );
+    expect(plain).toMatch(/↑ 62 行历史/);
   });
 
   it("banner 缺省（未传 bannerLines）：滚动行为完全不变", () => {
-    // 回归：未传 bannerLines 时等价于 bannerRows=0，旧 chat-view 数学。
-    const baseline = linesOf({ scrollRows: 0, msgCount: 40 });
+    // 回归：未传 bannerLines 时等价于 bannerRows=0，消息行 window 行为与原
+    // 一致——所有 scroll 档渲染行数都等于 scroll=0 基线（指示器换内容，行数
+    // 不变；用 split-line count 比 raw length 准）。
+    const linesOf = (s: number): string[] =>
+      strip(render({ scrollRows: s, msgCount: 40 }))
+        .replace(/\n+$/, "")
+        .split("\n");
+    const baseline = linesOf(0);
     for (const s of [3, 6, 12, 24, 999]) {
-      expect(
-        linesOf({ scrollRows: s, msgCount: 40 }).length,
-        `scroll=${s} 行数`
-      ).toBe(baseline.length);
+      expect(linesOf(s).length, `scroll=${s} 行数`).toBe(baseline.length);
     }
   });
 });
