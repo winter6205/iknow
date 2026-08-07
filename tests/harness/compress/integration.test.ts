@@ -211,6 +211,13 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
       placeholderCount <= Math.floor(TURNS / 2),
       `压缩次数 ${placeholderCount} 应 ≤ ${Math.floor(TURNS / 2)}(turnCount 锚点守约)`
     );
+    // S10 freeze gate:压缩结果与 appendMessage 一样冻结每条 + content 块,
+    // 后续回路修改应静默失败(strict mode)。
+    assert.ok(Object.isFrozen(result.messages), "messages 数组应被冻结");
+    for (const m of result.messages) {
+      assert.ok(Object.isFrozen(m), `message ${m.role} 应被冻结`);
+      assert.ok(Object.isFrozen(m.content), `${m.role}.content 应被冻结`);
+    }
   });
 
   it("thresholdTokens=undefined → 缺省推导(window-33000);极大 window 不触发,极小 window 触发", async () => {

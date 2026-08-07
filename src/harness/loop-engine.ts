@@ -930,7 +930,12 @@ export async function run(
         const compacted = compactMessages(state.messages);
         if (compacted !== state.messages) {
           // immutable 重建(SC7/Q5);不 mutate,原 messages 引用不变。
-          state = { ...state, messages: compacted };
+          // S10 freeze gate:压缩结果须与 appendMessage 一样冻结每一条,
+          // 否则可变普通对象进入权威历史,违反 append-only immutable 不变式。
+          state = {
+            ...state,
+            messages: Object.freeze(compacted.map((m) => freezeMessage(m))),
+          };
           lastCompactTurn = state.turnCount;
         }
       }
