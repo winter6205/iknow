@@ -27,7 +27,22 @@ export const DEFAULT_BY_CATEGORY: Readonly<
 });
 
 function codeBuiltInRules(): ReadonlyArray<NormalRuleSpec> {
-  return Object.freeze([]);
+  return Object.freeze([
+    {
+      // `memory_save` writes into `~/.iknow/memory/<id>.md` — the agent's own
+      // memory library, not the user's workspace. Treating it like a generic
+      // write tool caused the agent to be fail-closed at every non-interactive
+      // inlet (ask / serve, or chat TTY with no prompt available), producing
+      // `[user_denied] user declined tool call: memory_save` even when the user
+      // never saw a prompt. The project / session layers can still escalate to
+      // ask or deny; hard-walls remain un-overrideable.
+      id: "code-allow-memory-save",
+      match: ({ tool }) => tool === "memory_save",
+      decision: "allow",
+      reason:
+        "code built-in: memory_save writes into the agent memory library, not user workspace",
+    },
+  ]);
 }
 
 export interface PermissionPolicy {
