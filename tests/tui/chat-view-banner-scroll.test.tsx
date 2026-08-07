@@ -36,6 +36,7 @@ function render(args: {
   scrollRows: number;
   msgCount: number;
   bannerLines?: ReadonlyArray<string>;
+  viewportRows?: number;
 }): string {
   return renderToString(
     React.createElement(ChatView, {
@@ -44,7 +45,7 @@ function render(args: {
       liveToolLines: [],
       askLine: undefined,
       scrollRows: args.scrollRows,
-      viewportRows: VP,
+      viewportRows: args.viewportRows ?? VP,
       bannerLines: args.bannerLines,
     }),
     { columns: cols }
@@ -222,5 +223,65 @@ describe("banner STICKY 边界（新语义，当前实现应 RED）", () => {
       expect(linesOf(s).length, `scroll=${s} 行数`).toBe(baseline.length);
     }
     expect(baseline.length).toBe(VP - 1);
+  });
+
+  /**
+   * ── gate-fix：矮终端 banner sticky 溢出（2026-08-08） ──
+   *
+   * STICKY 承诺「banner 永完整可见」vs viewport 上限冲突。当 bannerRows > viewport
+   * （rows=10 终端，viewport=5，banner=15）时，当前实现仍恒完整渲染 banner 15 行
+   * + 消息区 ≥1 行 → 总渲染 ≥16 行 / viewport 5 → 溢出 11 行，banner 顶部被遮。
+   *
+   * 修复：bannerRows > viewport 时 banner 自身进入 row window，底对齐（banner
+   * 底贴 viewport 底）显示 `viewport - messageViewport` 行；正常终端
+   * bannerRows ≤ viewport 时 sticky 行为不变（banner 仍恒完整）。
+   */
+  it("gate-fix 1. 矮终端 rows=10 viewport=5 banner=15：banner 顶部贴顶可见 + 不溢出", () => {
+    // 降级：banner 显示 viewport - messageViewport = 5 - max(1, 5-15) = 4 行，
+    // 底对齐 → slice [bannerRows-4, bannerRows) = [11,15) = banner-row-11..14。
+    // 空会话 0 消息 → 总渲染 4 行 ≤ viewport 5，不溢出。banner 顶部贴顶：
+    // banner-row-11（顶部）可见；banner-row-0（被裁）不可见。
+    const plain = strip(
+      render({ scrollRows: 0, msgCount: 0, bannerLines: B15, viewportRows: 5 })
+    );
+    const lines = plain.replace(/\n+$/, "").split("\n");
+    expect(lines.length).toBe(4);
+    expect(plain).toContain("banner-row-14"); // 底对齐：banner 底行可见
+    expect(plain).toContain("banner-row-11"); // 顶部贴顶：可见首行
+    expect(plain).not.toContain("banner-row-0"); // 顶部裁剪（矮终端）
+  });
+
+  it("gate-fix 2. 正常终端 rows=30 viewport=25 banner=15：banner 仍恒完整（sticky 行为）", () => {
+    // bannerRows(15) ≤ viewport(25) → 不溢出，sticky 行为不变 → banner 全 15 行。
+    // messageViewport = 25 - 15 = 10；空会话 → 总渲染 = 15 行。
+    const plain = strip(
+      render({ scrollRows: 0, msgCount: 0, bannerLines: B15, viewportRows: 25 })
+    );
+    const lines = plain.replace(/\n+$/, "").split("\n");
+    expect(lines.length).toBe(15);
+    for (let i = 0; i < B15.length; i++) {
+      expect(plain, `normal-terminal banner row ${i}`).toContain(
+        `banner-row-${i}`
+      );
+    }
+  });
+
+  it("gate-fix 3. 矮终端 + 消息：banner 顶部贴顶 + 消息可见 1 行（不溢出）", () => {
+    // viewport=5, banner=15。降级：banner 显示 4 行 [11,15)；messageViewport=1。
+    // 1 消息（user m-0 = 2 行）→ messageRows=2，maxScroll=1。
+    // scroll=999 → clamp 1 → 消息窗口 [0,1) 显示 m-0 内容行 "❯ m-0"。
+    // 总渲染 = banner 4 + 消息 1 = 5 ≤ viewport，不溢出。
+    const plain = strip(
+      render({
+        scrollRows: 999,
+        msgCount: 1,
+        bannerLines: B15,
+        viewportRows: 5,
+      })
+    );
+    const lines = plain.replace(/\n+$/, "").split("\n");
+    expect(lines.length).toBe(5);
+    expect(plain).toContain("banner-row-14");
+    expect(plain).toContain("m-0"); // 消息内容可见
   });
 });

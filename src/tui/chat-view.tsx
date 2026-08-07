@@ -348,6 +348,23 @@ export function ChatView(props: ChatViewProps): ReactElement {
     : Math.max(1, viewport - bannerRows);
   // 滚动上界：消息段贴顶时 segStart=0（banner 恒见，不制造虚构滚动空间）。
   const maxScroll = unlimited ? 0 : Math.max(0, messageRows - messageViewport);
+  // ── STICKY banner 溢出降级（gate-fix 矮终端，2026-08-08）──
+  // 矮终端（bannerRows > viewport）时 STICKY「永完整」vs viewport 上限冲突 —
+  // 当前 banner 仍恒完整渲染 bannerRows 行 + 消息区 ≥1 行 → 总渲染 > viewport，
+  // banner 顶部被遮。降级：banner 进入 row window，底对齐（banner 底贴 viewport
+  // 底），显示 `viewport - messageViewport` 行（预留消息区，保证
+  // banner + 消息 ≤ viewport 不溢出）。`unlimited`（viewport ≤ 0）或
+  // bannerRows ≤ viewport 时 sticky 行为不变（banner 仍恒完整）。
+  // 坐标映射：banner 占 [0, bannerRows) 内容流行号不变（terminalToCellPos /
+  // props.onWindow / mm.startRow 不变），仅渲染时 slice。
+  const bannerOverflow = !unlimited && bannerRows > viewport;
+  const bannerVisibleRows = bannerOverflow
+    ? Math.max(0, viewport - messageViewport)
+    : bannerRows;
+  const bannerStart = bannerOverflow
+    ? Math.max(0, bannerRows - bannerVisibleRows)
+    : 0;
+  const bannerSlice = props.bannerLines?.slice(bannerStart, bannerRows) ?? [];
   const scroll = Math.min(requestedScroll, maxScroll);
   // 消息段窗口（0-based 消息坐标，不含 banner）：
   //   scroll=0 → [messageRows - messageViewport, messageRows)（贴底）
@@ -372,17 +389,17 @@ export function ChatView(props: ChatViewProps): ReactElement {
   return (
     <Box flexDirection="column" flexGrow={1}>
       <Box flexDirection="column">
-        {/* banner 段（STICKY）：恒完整渲染，不参与消息 row window 裁剪。 */}
-        {bannerRows > 0 &&
-          props.bannerLines &&
-          props.bannerLines.map((line, i) => (
-            <HighlightedLine
-              key={`banner-${i}`}
-              line={line}
-              row={i}
-              selection={props.selection}
-            />
-          ))}
+        {/* banner 段（STICKY）：恒完整渲染，不参与消息 row window 裁剪。
+            gate-fix 矮终端：bannerRows > viewport 时降级为 row window（底对齐
+            slice），banner 顶部可被裁但整体不溢出；无限视口 / 正常终端仍完整。 */}
+        {bannerSlice.map((line, i) => (
+          <HighlightedLine
+            key={`banner-${bannerStart + i}`}
+            line={line}
+            row={bannerStart + i}
+            selection={props.selection}
+          />
+        ))}
         {measured.map((mm, i) => {
           if (mm.startRow + mm.totalRows <= startRow || mm.startRow >= endRow) {
             return null;
