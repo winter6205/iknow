@@ -48,8 +48,14 @@ export function NearestRoot(
   exclude: readonly string[]
 ): (file: string, ctx: LspCtx) => Promise<string | undefined> {
   return async (file: string, ctx: LspCtx): Promise<string | undefined> => {
-    // 从 file 所在目录开始向上爬；stop 边界（ctx.directory）本身查一次但不再向上。
-    let dir = path.dirname(file);
+    // 上界 stop = ctx.directory：file 必须在 ctx.directory 之内(spec #247 Q6
+    // security-boundary)。入口先拒绝跨出工作目录的 file,避免 walk 越过
+    // 上界之后才 break(那样会读 ctx.directory 之外的祖先并可能在外部 spawn)。
+    const stop = path.resolve(ctx.directory);
+    const startDir = path.resolve(path.dirname(file));
+    if (!isInsideOrEqual(startDir, stop)) return undefined;
+
+    let dir = startDir;
     while (true) {
       const entries = await readdir(dir).catch(() => [] as string[]);
       const hasExclude = exclude.some((name) => entries.includes(name));
@@ -57,13 +63,25 @@ export function NearestRoot(
         const hasLockfile = lockfiles.some((name) => entries.includes(name));
         if (hasLockfile) return dir;
       }
-      if (dir === ctx.directory) break; // 触到上界 stop，不再向上
+      if (dir === stop) break; // 触到上界 stop,不再向上
       const parent = path.dirname(dir);
       if (parent === dir) break; // 文件系统根兜底
       dir = parent;
     }
     return undefined;
   };
+}
+
+/**
+ * `child` 是否等于或在 `stop` 之下(prefix 关系,处理 path.sep 与边界)。
+ * 路径字面相等视为 inside(允许停在 stop 本身);
+ * `stop` 是 `child` 的祖先目录才视为 inside;其他视为 outside。
+ */
+function isInsideOrEqual(child: string, stop: string): boolean {
+  if (child === stop) return true;
+  const rel = path.relative(stop, child);
+  // path.relative 不以 `..` 起头(且非空) ⇒ child 在 stop 之下或其内。
+  return rel.length > 0 && !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
 /** 解析 typescript-language-server 可执行文件（未安装 / 解析失败 → undefined）。 */

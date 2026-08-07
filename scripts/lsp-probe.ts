@@ -26,9 +26,12 @@ const TARGET_FILE = resolve(
   fileURLToPath(new URL("..", import.meta.url)),
   "src/harness/lsp/client.ts"
 );
-/** 定义探针：getClient 在 client.ts 第 63 行（1-based），character 指向 getClient 标识符。 */
-const TARGET_LINE = 63;
-const TARGET_CHAR = 21;
+/**
+ * 定义探针：`getClient` 函数定义在 client.ts 第 78 行（1-based）,
+ * `export async function getClient(`,character 指向 `getClient` 标识符起始。
+ */
+const TARGET_LINE = 78;
+const TARGET_CHAR = 23;
 /** diagnostics 探针目标：本仓真实 TS 文件。 */
 const DIAG_FILE = resolve(
   fileURLToPath(new URL("..", import.meta.url)),

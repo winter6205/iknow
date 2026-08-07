@@ -128,8 +128,11 @@ export async function buildHarnessEngine(
   // `memoryEnabled ? ... : undefined` 形态)。
   // #251 LSP 联动缝:edit_file 写盘成功后由装配层注入 lspNotifier.invalidate
   // 作为 registry 的 onEdit 回调(notifier 内部 fire-and-forget + 失败降级,
-  // 详见 src/harness/lsp/notifier.ts)。
-  const lspNotifier = createLspNotifier({ directory: process.cwd() });
+  // 详见 src/harness/lsp/notifier.ts)。SSOT:LspCtx.directory 必须等于
+  // sandboxRoot(LS 工具的 NearestRoot 上界 stop 与 fs 软沙箱同根语义),
+  // 否则两者分叉会让同一边界出现两个值。
+  const lspCtx = { directory: sandboxRoot };
+  const lspNotifier = createLspNotifier(lspCtx);
   const reg = createDefaultAciRegistry({
     env,
     sandboxRoot,

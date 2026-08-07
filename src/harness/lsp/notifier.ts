@@ -60,8 +60,13 @@ async function notifyInvalidation(ctx: LspCtx, file: string): Promise<void> {
     await client.sendNotification("workspace/xrefs", {
       uri: pathToFileURL(file).href,
     });
-  } catch {
+  } catch (err) {
     // 降级：notifier 失败不影响 edit_file 主路径（spec Open Question 决议）。
     // 文件已写盘成功；失效通知失败只是 tsserver 侧短暂陈旧，可自愈。
+    // stderr 留痕便于诊断,S3 禁空 catch → 必须有可观测面。
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(
+      `[lsp-notifier] invalidate failed for ${file}: ${msg}\n`
+    );
   }
 }

@@ -15,7 +15,11 @@
 import { pathToFileURL } from "node:url";
 import type { ChildProcess } from "node:child_process";
 
-import { createMessageConnection } from "vscode-jsonrpc/node";
+import {
+  createMessageConnection,
+  CancellationTokenSource,
+  CancellationToken,
+} from "vscode-jsonrpc/node";
 import type { MessageConnection } from "vscode-jsonrpc/node";
 
 import type { LspCtx, LspServerInfo } from "./types.js";
@@ -27,8 +31,17 @@ export interface LspClient {
   readonly connection: MessageConnection;
   /** tsserver 子进程句柄（仅诊断/生命周期观测用；不得终止进程）。 */
   readonly process: ChildProcess;
-  /** JSON-RPC request：透传 method/params，返回未知 payload。 */
-  sendRequest(method: string, params: unknown): Promise<unknown>;
+  /**
+   * JSON-RPC request：透传 method/params，返回未知 payload。
+   * 可选 `token`（vscode-jsonrpc `CancellationToken`）用于取消 — token 被
+   * cancel 时 vscode-jsonrpc 自动发 `$/cancelRequest` 通知(Q2/A9),
+   * 不杀 tsserver 子进程(spec §S)。
+   */
+  sendRequest(
+    method: string,
+    params: unknown,
+    token?: CancellationToken
+  ): Promise<unknown>;
   /** JSON-RPC notification：透传 method/params。 */
   sendNotification(method: string, params: unknown): Promise<void>;
   /** 取某文件最近一次 push diagnostics（latest-wins；无 → undefined）。 */
@@ -143,11 +156,40 @@ async function spawnClient(
   return {
     connection,
     process: child,
-    sendRequest: (method, params) => connection.sendRequest(method, params),
+    sendRequest: (method, params, token) =>
+      connection.sendRequest(method, params, token),
     sendNotification: (method, params) =>
       connection.sendNotification(method, params),
     getDiagnostics: (uri: string) => diagStore.get(uri),
     dispose: () => connection.dispose(),
+  };
+}
+
+/**
+ * 把 Node.js `AbortSignal` 桥接到 vscode-jsonrpc `CancellationToken` —
+ * 用 `CancellationTokenSource` 包一层:signal abort 时 cancel source,
+ * source token 在 vscode-jsonrpc 内部被 cancel 时自动发 `$/cancelRequest`。
+ *
+ * 用法：handler 拿到 executor 透传的 `ctx.signal`,通过本 helper 转 token
+ * 传给 `client.sendRequest`;这样 `interruptBehavior: "cancel"` 的 LSP 工
+ * 具中断真正走 JSON-RPC 取消通道(Q2/A9),不杀 tsserver。
+ */
+export function signalToCancellationToken(signal: AbortSignal): {
+  token: CancellationToken;
+  dispose: () => void;
+} {
+  const source = new CancellationTokenSource();
+  const onAbort = (): void => {
+    source.cancel();
+  };
+  if (signal.aborted) {
+    source.cancel();
+  } else {
+    signal.addEventListener("abort", onAbort, { once: true });
+  }
+  return {
+    token: source.token,
+    dispose: () => signal.removeEventListener("abort", onAbort),
   };
 }
 

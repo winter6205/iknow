@@ -29,8 +29,9 @@ import { pathToFileURL } from "node:url";
 import Ajv from "ajv";
 import type { ValidateFunction } from "ajv";
 
-import { getClient } from "../../lsp/client.js";
+import { getClient, signalToCancellationToken } from "../../lsp/client.js";
 import type { LspCtx } from "../../lsp/types.js";
+import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
 import type { AciToolDef } from "../types.js";
 
@@ -184,14 +185,25 @@ function makeOperationTool(ctx: LspCtx, spec: OperationSpec): AciToolDef {
     description: `LSP operation ${spec.method}. Read-only symbol lookup; 1-based line, 0-based character.`,
     inputSchema: spec.schema,
     aci: LSP_ACI_META,
-    handler: async (input: unknown): Promise<unknown> => {
+    handler: async (
+      input: unknown,
+      execCtx?: ToolExecutionContext
+    ): Promise<unknown> => {
       const params = validate(input) as PositionInput | FileOnlyInput;
       const client = await getClient(ctx, params.file);
       if (!client) return "(no LSP server available for file)";
+      // interruptBehavior="cancel":把 executor 的 AbortSignal 桥接成
+      // vscode-jsonrpc CancellationToken,abort 时走 $/cancelRequest,
+      // 不杀 tsserver(Q2/A9)。
+      const cancel = execCtx?.signal
+        ? signalToCancellationToken(execCtx.signal)
+        : undefined;
       const result = await client.sendRequest(
         spec.method,
-        spec.buildParams(params)
+        spec.buildParams(params),
+        cancel?.token
       );
+      cancel?.dispose();
       return stringifyResult(result);
     },
   });
@@ -216,31 +228,55 @@ function makeCallHierarchyCallTool(
     description: `LSP operation ${method}. Multi-step: resolves call hierarchy items via textDocument/prepareCallHierarchy first, then forwards ${method} with the first item.`,
     inputSchema: POSITION_SCHEMA,
     aci: LSP_ACI_META,
-    handler: async (input: unknown): Promise<unknown> => {
+    handler: async (
+      input: unknown,
+      execCtx?: ToolExecutionContext
+    ): Promise<unknown> => {
       const params = validate(input) as PositionInput;
       const client = await getClient(ctx, params.file);
       if (!client) return "(no LSP server available for file)";
-      const prepared = await client.sendRequest(
-        "textDocument/prepareCallHierarchy",
-        positionParams(params.file, params.line, params.character)
-      );
-      const items = extractCallHierarchyItems(prepared);
-      const item = items[0];
-      if (!item) return stringifyResult([]);
-      const result = await client.sendRequest(method, { item });
-      return stringifyResult(result);
+      const cancel = execCtx?.signal
+        ? signalToCancellationToken(execCtx.signal)
+        : undefined;
+      try {
+        const prepared = await client.sendRequest(
+          "textDocument/prepareCallHierarchy",
+          positionParams(params.file, params.line, params.character),
+          cancel?.token
+        );
+        const items = extractCallHierarchyItems(prepared);
+        const item = items[0];
+        if (!item) return stringifyResult([]);
+        const result = await client.sendRequest(
+          method,
+          { item },
+          cancel?.token
+        );
+        return stringifyResult(result);
+      } finally {
+        cancel?.dispose();
+      }
     },
   });
 }
 
-/** tsserver 返回的 prepareCallHierarchy 形态归一化：取 items 数组。 */
-function extractCallHierarchyItems(prepared: unknown): ReadonlyArray<unknown> {
-  if (Array.isArray(prepared)) return prepared;
-  if (prepared && typeof prepared === "object") {
-    const candidate = (prepared as { items?: unknown }).items;
+/**
+ * LSP 响应的「数组」或「包了 `{items}` 的对象」两种形态归一化(tsserver
+ * prepareCallHierarchy 返回前者或后者均存在;diagnostics 推送是数组)。
+ * 失败/非对象返回空数组。共享 normalizer 避免重复(DRY)。
+ */
+function unwrapItems(raw: unknown): ReadonlyArray<unknown> {
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === "object") {
+    const candidate = (raw as { items?: unknown }).items;
     if (Array.isArray(candidate)) return candidate;
   }
   return [];
+}
+
+/** tsserver 返回的 prepareCallHierarchy 形态归一化：取 items 数组。 */
+function extractCallHierarchyItems(prepared: unknown): ReadonlyArray<unknown> {
+  return unwrapItems(prepared);
 }
 
 /**
@@ -272,7 +308,7 @@ function makeDiagnosticsTool(ctx: LspCtx): AciToolDef {
 
 /** 诊断归一化 + 过滤 + 封顶 + 纯字符串摘要（spec S6）。 */
 function renderDiagnostics(file: string, raw: unknown): string {
-  const items = extractDiagnostics(raw);
+  const items = unwrapItems(raw);
   const filtered = items.filter((d) => {
     if (!d || typeof d !== "object") return false;
     const severity = (d as { severity?: unknown }).severity;
@@ -288,15 +324,6 @@ function renderDiagnostics(file: string, raw: unknown): string {
     ? `\n...(${filtered.length - cap} more issue(s) truncated, total ${filtered.length})`
     : "";
   return `${header}\n${lines.join("\n")}${footer}\n</diagnostics>`;
-}
-
-function extractDiagnostics(raw: unknown): ReadonlyArray<unknown> {
-  if (Array.isArray(raw)) return raw;
-  if (raw && typeof raw === "object") {
-    const items = (raw as { items?: unknown }).items;
-    if (Array.isArray(items)) return items;
-  }
-  return [];
 }
 
 function formatOne(d: unknown): string {

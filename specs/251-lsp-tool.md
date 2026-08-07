@@ -1,7 +1,7 @@
 # Spec: 251-lsp-tool — ACI LSP 工具（代码跳转 · TS 首期 · 自建客户端）
 
 > 输入 = [map #245 Decisions so far](https://github.com/winter6205/iknow/issues/245)（#246/#247/#248/#249/#250 已 close）+ #251（本票）复核决议。
-> 范围 = ACI 工具层加 9 件 LSP 工具（8 operation + `lsp_diagnostics`），自建 LSP 客户端，TS 单语言首期。
+> 范围 = ACI 工具层加 10 件 LSP 工具（9 operation + `lsp_diagnostics`），自建 LSP 客户端，TS 单语言首期。
 > 落地 = spec → ACR → writing-plans，本 spec 不含实施代码。
 
 ## Objective
@@ -13,9 +13,10 @@
 **要建什么**：
 
 1. **自建 LSP 客户端**（对标 opencode `packages/opencode/src/lsp/`）——`src/harness/lsp/` 新目录，TS 单语言首期。
-2. **9 件 LSP 工具 append**（11 → 20 件 ACI 工具）：
-   - 8 件 operation 工具：`lsp_definition` / `lsp_references` / `lsp_hover` / `lsp_document_symbol` / `lsp_workspace_symbol` / `lsp_go_to_implementation` / `lsp_prepare_call_hierarchy` / `lsp_incoming_calls` / `lsp_outgoing_calls`（#248 B 档决议；shared position schema）
-   - `lsp_diagnostics` 独立顶层工具（#250 决议，不在 8 件内）
+2. **LSP 工具 append**（11 → 21 件 ACI 工具，10 件新增）：
+   - 9 件 operation 工具：`lsp_definition` / `lsp_references` / `lsp_hover` / `lsp_document_symbol` / `lsp_workspace_symbol` / `lsp_go_to_implementation` / `lsp_prepare_call_hierarchy` / `lsp_incoming_calls` / `lsp_outgoing_calls`（#248 B 档决议；shared position schema）
+   - `lsp_diagnostics` 独立顶层工具（#250 决议，不在 9 件内）
+   - > **计数勘误（2026-08-08 实施确认）**：早期草稿写「9 件 = 8 operation + lsp_diagnostics」且「11 → 20」，但 operation 清单实际列出 9 个名字。实施按清单全量导出 9 operation + lsp_diagnostics = 10 件，总量 11 → 21。S1/S4/S5/Glossary/ADR-0004 引用已同步为 9 件 operation / 21 件总量。
 3. **引擎内部联动**：`edit_file` 成功后自动给 tsserver 发 invalidation，agent 无需感知（Q2 决议）。
 
 **成功形态**：agent 在 loop 内可对 TS/JS 文件做符号定位（定义跳转/找引用/悬停/大纲/实现/调用图/诊断拉取），tsserver 常驻复用消除 cold start，`permission/` 零改动，9 件全走契约 X/Y1。
@@ -46,7 +47,7 @@ npm test                # vitest: unit + harness + integration
 npm run lint            # 项目根 lint 入口
 
 # LSP 探针（真实 tsserver 烟测）
-npm run probe:lsp       # 脚本化 spawn tsserver + 8 operation 烟测（对照 sandbox-probe.ts）
+npm run probe:lsp       # 脚本化 spawn tsserver + 9 operation 烟测（对照 sandbox-probe.ts）
 ```
 
 ## Project Structure
@@ -59,7 +60,7 @@ npm run probe:lsp       # 脚本化 spawn tsserver + 8 operation 烟测（对照
 | `src/harness/lsp/server.ts`            | **新**      | LSP server 声明（`Info` 类型 + TS 单语言：`id`/`extensions`/`root`/`spawn`），保留扁平结构（#247 Q2 决议不拆）；`NearestRoot`（#247 Q6 决议保留，TS lockfile pattern + deno.json exclude，上界 stop=`ctx.directory`） |
 | `src/harness/lsp/client.ts`            | **新**      | JSON-RPC over stdio（`vscode-jsonrpc/node`）；`getClient(root,id)` 缓存 + broken + inflight 三件套（Q1/Q8 决议）                                                                                                      |
 | `src/harness/lsp/notifier.ts`          | **新**      | edit_file 联动：`invalidate(file)` 给 tsserver 发 `workspace/xrefs`（Q2/A13 决议）                                                                                                                                    |
-| `src/harness/aci/tools/lsp.ts`         | **新**      | 9 件 LSP 工具工厂（8 operation + `lsp_diagnostics`）；handler 极薄（Q3 决议）                                                                                                                                         |
+| `src/harness/aci/tools/lsp.ts`         | **新**      | 10 件 LSP 工具工厂（9 operation + `lsp_diagnostics`）；handler 极薄（Q3 决议）                                                                                                                                        |
 | `src/harness/aci/tools/registry.ts`    | 改动        | `ACI_TOOLSET_NAMES` append 9 件；`createDefaultAciRegistry` 注册；`CreateDefaultAciRegistryOptions` 加可选 `onEdit` 透传给 `createEditFileTool`                                                                       |
 | `src/harness/aci/tools/edit-file.ts`   | 改动        | 工厂签名扩参：`createEditFileTool(root, opts?: { onEdit?: (file: string) => void })`；handler 成功路径 `opts.onEdit?.(absPath)`；handler 返回仍是纯字符串（守契约 Y1）（Q2/A13 决议）                                 |
 | `src/harness/build-engine.ts`          | 改动        | 装配 `lsp` 工具集 + 构造 `notifier.invalidate` 作为 `onEdit` 透传给 `createDefaultAciRegistry`                                                                                                                        |
@@ -67,8 +68,8 @@ npm run probe:lsp       # 脚本化 spawn tsserver + 8 operation 烟测（对照
 | `src/harness/aci/tools/tool-search.ts` | **不动**    | 保持现状（lsp 不与 tool_search 同名）                                                                                                                                                                                 |
 | `tests/harness/lsp/client.test.ts`     | **新**      | vscode-jsonrpc mock：requestId/响应路由/cancel                                                                                                                                                                        |
 | `tests/harness/aci/lsp.test.ts`        | **新**      | 9 件 handler 单测：输入校验/无匹配/共享 schema                                                                                                                                                                        |
-| `tests/harness/aci/registry.test.ts`   | 改          | `ACI_TOOLSET_NAMES` 锁 20 件                                                                                                                                                                                          |
-| `scripts/lsp-probe.ts`                 | **新**      | 真实 tsserver 烟测：spawn + 8 operation + diagnostics                                                                                                                                                                 |
+| `tests/harness/aci/registry.test.ts`   | 改          | `ACI_TOOLSET_NAMES` 锁 21 件                                                                                                                                                                                          |
+| `scripts/lsp-probe.ts`                 | **新**      | 真实 tsserver 烟测：spawn + 9 operation + diagnostics                                                                                                                                                                 |
 | `specs/251-lsp-tool.md`                | **本 spec** | —                                                                                                                                                                                                                     |
 
 ## Code Style
@@ -145,7 +146,7 @@ export async function getClient(
 ```ts
 // #247 Q3（MCP 无状态思路）：handler 只做参数校验 + await client.sendRequest，
 // per-request 状态归 vscode-jsonrpc（requestId + 响应路由）。
-// 8 件共享同一 position schema {file, line, character}（#248 决议）。
+// 9 件共享同一 position schema {file, line, character}（#248 决议）。
 const POSITION_SCHEMA = {
   type: "object",
   properties: {
@@ -181,7 +182,7 @@ function makeOperationTool(
     },
   });
 }
-// 9 件 = 8 operation + lsp_diagnostics（#250）
+// 10 件 = 9 operation + lsp_diagnostics（#250）
 ```
 
 ### `aci/tools/edit-file.ts` — `onEdit` opts 注入（Q2/A13 决议）
@@ -235,13 +236,13 @@ const registry = createDefaultAciRegistry({
 
 | 等级        | 范围                                                                                                                           | 工具                    |
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------- |
-| Unit        | 8 件 operation handler：输入校验（缺 line/character）、ajv 拒非法类型、无 client 返回 `"(no LSP server available)"`、wire 形态 | vitest stub             |
+| Unit        | 9 件 operation handler：输入校验（缺 line/character）、ajv 拒非法类型、无 client 返回 `"(no LSP server available)"`、wire 形态 | vitest stub             |
 | Unit        | `lsp_diagnostics` handler：latest-wins map、severity 过滤、每文件封顶 20、`<diagnostics file>` XML                             | vitest                  |
 | Unit        | `client.ts`：vscode-jsonrpc mock 验证 requestId 唯一 + 响应路由（MCP 无状态契约）                                              | vitest mock             |
 | Unit        | 三件套缓存：同 root 复用 / broken 记忆不重试 / inflight 并发去重                                                               | vitest                  |
 | Unit        | 契约 X 反例：mock handler 返回 `{truncated:false,total:100}`，断言 executor 自截 20000 不信字段                                | vitest（对齐 ADR-0006） |
 | Unit        | 契约 Y1 反例：mock handler 返回对象，断言 executor 按 plain-string 处理                                                        | vitest                  |
-| Integration | `scripts/lsp-probe.ts`：真实 spawn tsserver + 8 operation 烟测 + diagnostics                                                   | tsx script              |
+| Integration | `scripts/lsp-probe.ts`：真实 spawn tsserver + 9 operation 烟测 + diagnostics                                                   | tsx script              |
 | Integration | edit_file 联动：edit 后 `onEdit` 被调 + notifier 发 invalidation                                                               | vitest                  |
 
 **覆盖率门槛**：handler 单测 + 契约 X/Y1 反例行覆盖 ≥ 90%；integration 覆盖完整「按需 spawn → operation → 复用」路径。
@@ -280,18 +281,18 @@ const registry = createDefaultAciRegistry({
 
 | #   | Criterion                         | Check                                                                                                              |
 | --- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| S1  | 9 件 LSP 工具全量进 prompt        | `tests/harness/aci/registry.test.ts` 锁 `ACI_TOOLSET_NAMES.length === 20` 含 11 件原工具                           |
+| S1  | 10 件 LSP 工具全量进 prompt       | `tests/harness/aci/registry.test.ts` 锁 `ACI_TOOLSET_NAMES.length === 21` 含 11 件原工具                           |
 | S2  | `server.ts` 保留扁平结构          | 无 `registry.ts` / `spawn.ts` 拆分文件；`server.ts` 含 `Info` + spawn 内联                                         |
 | S3  | `NearestRoot` 保留                | `server.ts` 含 `NearestRoot(TS_LOCKFILES, TS_EXCLUDE)` 且上界 stop=ctx.directory                                   |
-| S4  | 8 件 operation handler 输入校验   | 单测：缺 line/character → 拒；ajv 拒非法类型；无 client → `"(no LSP server available)"`                            |
-| S5  | 8 件共享 position schema          | 单测：`lsp_definition` / `lsp_references` 等 inputSchema 含 `{file,line,character}`                                |
+| S4  | 9 件 operation handler 输入校验   | 单测：缺 line/character → 拒；ajv 拒非法类型；无 client → `"(no LSP server available)"`                            |
+| S5  | 9 件共享 position schema          | 单测：`lsp_definition` / `lsp_references` 等 inputSchema 含 `{file,line,character}`                                |
 | S6  | `lsp_diagnostics` wire = 纯字符串 | 单测：返回 `<diagnostics file>` XML；severity=1 过滤；每文件封顶 20                                                |
 | S7  | 契约 X 反例被锁                   | 单测：mock handler 输出 `{truncated:false,total:100,text:"x".repeat(25000)}`，断言 executor 自截 20000（ADR-0006） |
 | S8  | 契约 Y1 反例被锁                  | 单测：mock handler 返回对象 `{code,stdout,stderr}`，断言 executor 按 plain-string 处理                             |
 | S9  | 复用三件套                        | 单测：同 root 复用不重 spawn / broken 记忆不重试 / inflight 并发去重                                               |
 | S10 | `permission/` 零改动              | `git diff --stat src/harness/permission/` 输出空                                                                   |
 | S11 | edit_file 联动                    | 单测：edit_file 成功后 `onEdit` 被调 + notifier 发 invalidation                                                    |
-| S12 | 真实 tsserver 烟测                | `npm run probe:lsp` 退出 0：spawn + 8 operation + diagnostics 全通                                                 |
+| S12 | 真实 tsserver 烟测                | `npm run probe:lsp` 退出 0：spawn + 9 operation + diagnostics 全通                                                 |
 | S13 | CI 主路径全绿                     | `npm test` 退出 0；`npm run typecheck` 退出 0                                                                      |
 | S14 | LSP client 缓存同进程同生         | 无跨 session 持久化代码路径；进程退出 → client dispose                                                             |
 
@@ -311,7 +312,7 @@ const registry = createDefaultAciRegistry({
 
 > 来自 `docs/CONTEXT.md`（spec 引用，不重定义）。
 
-- **ACI tool set**：Harness 装配层（`src/harness/aci/`）注册的工具集；SSOT 工厂 = `src/harness/aci/tools/registry.ts:createDefaultAciRegistry`；当前 11 件，本 spec 后 20 件。
+- **ACI tool set**：Harness 装配层（`src/harness/aci/`）注册的工具集；SSOT 工厂 = `src/harness/aci/tools/registry.ts:createDefaultAciRegistry`；当前 11 件，本 spec 后 21 件。
 - **Loop Engine**：Foundation 的状态机运行内核，驱动模型 → 工具 → 真实结果 → 下一轮模型 → 明确停止；位于 `src/harness/`。
 - **executor truncation authority**（契约 X，ADR-0004 / ADR-0006）：executor 是工具结果截断元数据的唯一权威——自测序列化后字符数、自截断、自合成标记；工具返回纯数据、不带 truncated/total 元字段。
 - **plain-string tool output**（契约 Y1，ADR-0004）：生产工具输出为纯字符串；bash 是唯一例外保留结构化 `{code, stdout, stderr}`（Y1b）。
@@ -327,10 +328,10 @@ const registry = createDefaultAciRegistry({
 
 ## Architectural Constraints
 
-| ADR                              | 引用形式                                                                          |
-| -------------------------------- | --------------------------------------------------------------------------------- |
-| ADR-0004（6 工具集 + 契约 X/Y1） | 9 件 LSP 工具作为第 12-20 件 append；wire 守契约 Y1；handler 不带截断字段守契约 X |
-| ADR-0006（封顶 20000）           | 9 件输出也受 20000 字符封顶；不为 LSP 单独立例外                                  |
+| ADR                              | 引用形式                                                                           |
+| -------------------------------- | ---------------------------------------------------------------------------------- |
+| ADR-0004（6 工具集 + 契约 X/Y1） | 10 件 LSP 工具作为第 12-21 件 append；wire 守契约 Y1；handler 不带截断字段守契约 X |
+| ADR-0006（封顶 20000）           | 9 件输出也受 20000 字符封顶；不为 LSP 单独立例外                                   |
 
 ## ACR Verdict（architecture-change-reviewer · 5-verdict gate）
 
