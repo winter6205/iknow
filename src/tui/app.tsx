@@ -190,18 +190,22 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       { cols, short: true }
     );
   }, [view, activeKey, sessions, initial, cols, props.cwd, props.dataDir]);
-  const bannerRowSpan = bannerLines.length;
 
   const viewportRows = useMemo(() => {
-    // 固定行扣减：banner / 状态栏（1） / 输入框（2：圆角线框 1 + hint 1 视情况）
+    // 固定行扣减：状态栏（1） / 输入框（2：圆角线框 1 + hint 1 视情况）
     // / ask 槽（1）/ notice（按 lines）。滚动指示器（顶部 / fold）的行账由
     // ChatView 内部从 viewportRows 扣除（INDICATOR_ROWS，SSOT）——调用方
     // 传入的是聊天区域总预算，不再预扣指示行（旧实现预扣 1 但指示实测占
     // 2 行，是 #189 渲染漂移的 chrome 账目根因）。
+    //
+    // banner 已移入 ChatView row window 作为第一段内容（方案 B，滚动对齐），
+    // 占行是 content 而非 chrome —— 不再从 viewport 扣除，否则空会话完整
+    // banner（≈16 行）会双重扣账把视口压到 5 行，矮终端上 banner 顶部被
+    // 裁、滚不回去（2026-08-07 复现根因 #2）。
     const noticeLines = notice?.lines.length ?? 0;
     const reserved = 1 + 2 + 1 + noticeLines; // 状态栏 + 输入 + ask + notice
-    return Math.max(5, rows - bannerRowSpan - reserved);
-  }, [rows, bannerRowSpan, notice]);
+    return Math.max(5, rows - reserved);
+  }, [rows, notice]);
 
   // 工具事件订阅：T4 (#175) 优先按 tool_use_id 配对入结构化运行状态;
   // 缺 toolUseId 时落回 legacy 字符串行追加(向后兼容)。
@@ -598,7 +602,10 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       return;
     }
     if (view !== "chat") return;
-    if (active.messages.length === 0) return;
+    // 滚动允许在空会话生效：banner 移入 ChatView row window（方案 B）后，
+    // 矮终端空会话完整 banner 可能超过 viewport，PgUp 应能滚回顶部看见
+    // logo（之前 `messages.length === 0` 守卫会卡死 → 2026-08-07 复现根因 #2）。
+    // 高终端 maxScroll 自动为 0，PgUp 是无害 no-op。
     const step = Math.max(1, Math.floor(viewportRows / 2));
     if (key.pageUp) {
       setChatScroll((s) => s + step);

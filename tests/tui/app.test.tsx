@@ -537,7 +537,11 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       const app = makeApp([
         // A：user(2) + assistant(16+2) = 20 <= 24 → 不可滚
         assistantResult({ texts: [lines("aA", 16)] }),
-        // B：banner(1) + user(2) + assistant(24+2) = 31；budgetScrolled=23 → maxScroll=6
+        // B：banner(1) + user(2) + assistant(24+2) = 29；viewportRows=26（rows=30
+        // - reserved=4，不再扣 banner）；budgetScrolled=24 → maxScroll=5。
+        // 旧账 bannerRowSpan=1 被 app.tsx 从 viewport 扣 → viewport=25 → 6
+        // 行；新账 banner 已在 ChatView row window 内作为 content，不再 chrome
+        // 扣减（2026-08-07 滚动冻结根因 #2）。PgUp step=floor(26/2)=13 → clamp 5。
         assistantResult({ texts: [lines("aB", 24)] }),
       ]);
       await app.ready();
@@ -568,7 +572,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       // B 上 PgUp → scrollRows > 0，顶部出现「↑ N 行历史」（看最近帧避免旧帧干扰）
       stdin.write("[5~"); // PgUp
       await waitFor(
-        () => app.lastOutput().slice(-1500).includes("6 行历史"),
+        () => app.lastOutput().slice(-1500).includes("5 行历史"),
         8000,
         "B-pgup-scrolled"
       );
@@ -587,7 +591,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       await delay(80);
       stdin.write("[B");
       await delay(80);
-      // 锚定在 Enter 之前：B 的 chat frame（含「↑ 6 行历史」）在进入 list
+      // 锚定在 Enter 之前：B 的 chat frame（含「↑ 5 行历史」）在进入 list
       // 视图前已写入，排除在窗口外；list 视图帧与打开 A 后的帧都不含
       // 「行历史」。
       const beforeOpen = app.lastOutput().length;
@@ -730,9 +734,10 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     async () => {
       const { attachSession } = await import("../../src/tui/session-state.js");
       // banner-in-scroll：compact 单行 banner 占 1 行（contentRows = 1 + 28 = 29）。
-      // viewportRows = max(5, 30 - 1 - 4) = 25；budgetScrolled = 25 - 2 = 23；
-      // maxScroll = 29 - 23 = 6。PgUp step = floor(25/2)=12，clamp 到 6
-      // →「↑ 6 行历史」。user(2) + assistant(24+2)=28 rows。
+      // viewportRows = 30 - 4 = 26（banner 已进 ChatView row window 当 content，
+      // 不再从 viewport 扣 —— 2026-08-07 滚动冻结根因 #2）；budgetScrolled = 24；
+      // maxScroll = 29 - 24 = 5。PgUp step = floor(26/2)=13，clamp 到 5
+      // →「↑ 5 行历史」。user(2) + assistant(24+2)=28 rows。
       const longBody = Array.from(
         { length: 24 },
         (_, i) => `A0 resume 内容第${i + 1}行`
@@ -788,11 +793,11 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       const before = lastOutput();
       expect(before).not.toContain("行历史");
 
-      // PgUp → scrollRows += 12，clamp 到 maxScroll=6 →「↑ 6 行历史」
+      // PgUp → scrollRows += 13，clamp 到 maxScroll=5 →「↑ 5 行历史」
       stdin.write("[5~"); // PgUp ANSI sequence
       await delay(300);
       await waitFor(
-        () => lastOutput().slice(-1500).includes("6 行历史"),
+        () => lastOutput().slice(-1500).includes("5 行历史"),
         8000,
         "resume-pgup"
       );
