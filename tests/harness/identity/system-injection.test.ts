@@ -84,12 +84,12 @@ describe("buildHarnessEngine surface → deps.system", () => {
     expect(out).not.toContain("First-run bootstrap");
   });
 
-  it("serve: same as ask (bootstrap inactive)", async () => {
+  it("serve: bootstrap active (same as chat/tui; 2026-08-08 裁定对话型入口共享身份状态机)", async () => {
     const out = await buildSystem("serve");
     expect(out).toContain("iknow Identity");
     expect(out).toContain("iknow Soul");
     expect(out).toContain("User Profile");
-    expect(out).not.toContain("First-run bootstrap");
+    expect(out).toContain("First-run bootstrap");
   });
 
   it("order: identity < soul < user_profile < bootstrap", async () => {
