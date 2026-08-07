@@ -31,6 +31,8 @@ export interface LspClient {
   sendRequest(method: string, params: unknown): Promise<unknown>;
   /** JSON-RPC notification：透传 method/params。 */
   sendNotification(method: string, params: unknown): Promise<void>;
+  /** 取某文件最近一次 push diagnostics（latest-wins；无 → undefined）。 */
+  getDiagnostics(uri: string): ReadonlyArray<unknown> | undefined;
   /** 释放连接（不杀进程；进程随宿主进程同生同灭，spec S14）。 */
   dispose(): void;
 }
@@ -113,13 +115,30 @@ async function spawnClient(
   child.stderr?.resume();
 
   // LSP initialize 握手：tsserver 透传 path 放 initializationOptions。
+  // 必须先 connection.listen() 启动 reader 环，否则 sendRequest 抛
+  // "Call listen() first."（vscode-jsonrpc 要求）。
+  connection.listen();
   await connection.sendRequest("initialize", {
     processId: child.pid ?? null,
     rootUri: pathToFileURL(root).href,
     capabilities: {},
     initializationOptions: initialization,
   });
-  connection.listen();
+
+  // 订阅 push diagnostics：tsserver / typescript-language-server 不实现
+  // pull 的 textDocument/diagnostic（LSP 3.16+），用 publishDiagnostics 通知
+  // 累积最近一次 per-uri 的诊断列表。latest-wins:同一 uri 多次推送覆盖。
+  const diagStore = new Map<string, ReadonlyArray<unknown>>();
+  connection.onNotification(
+    "textDocument/publishDiagnostics",
+    (params: unknown) => {
+      if (!params || typeof params !== "object") return;
+      const p = params as { uri?: unknown; diagnostics?: unknown };
+      if (typeof p.uri !== "string") return;
+      const items = Array.isArray(p.diagnostics) ? p.diagnostics : [];
+      diagStore.set(p.uri, items);
+    }
+  );
 
   return {
     connection,
@@ -127,6 +146,7 @@ async function spawnClient(
     sendRequest: (method, params) => connection.sendRequest(method, params),
     sendNotification: (method, params) =>
       connection.sendNotification(method, params),
+    getDiagnostics: (uri: string) => diagStore.get(uri),
     dispose: () => connection.dispose(),
   };
 }

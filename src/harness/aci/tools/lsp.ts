@@ -244,29 +244,28 @@ function extractCallHierarchyItems(prepared: unknown): ReadonlyArray<unknown> {
 }
 
 /**
- * lsp_diagnostics 工具：拉取文件级 diagnostics（textDocument/diagnostic LSP 3.16），
+ * lsp_diagnostics 工具：读文件级 push diagnostics（tsserver 走
+ * `textDocument/publishDiagnostics` 通知，client.ts 已订阅 latest-wins 累积）。
  * severity 过滤（忽略 severity=0 hint；保留 1=error / 2=warning / 3=information /
  * 4=deprecated）+ 每文件封顶 20（spec S6 摘要形式）。
  *
- * 输出：纯字符串（契约 Y1）。tsserver 把 diagnostics 包装在 `{kind,items}` 或
- * 直接 `Diagnostic[]`，本 handler 归一化二者。
+ * 输出：纯字符串（契约 Y1）。
  */
 function makeDiagnosticsTool(ctx: LspCtx): AciToolDef {
   const validate = compileValidator(FILE_ONLY_SCHEMA, "lsp_diagnostics");
   return Object.freeze({
     name: "lsp_diagnostics",
     description:
-      "Pull LSP diagnostics for a file (textDocument/diagnostic). Filters severity 0 (Hint); caps at 20 entries per file. Returns a plain-text summary.",
+      "Read push LSP diagnostics for a file (textDocument/publishDiagnostics, latest-wins). Filters severity 0 (Hint); caps at 20 entries per file. Returns a plain-text summary.",
     inputSchema: FILE_ONLY_SCHEMA,
     aci: LSP_ACI_META,
     handler: async (input: unknown): Promise<unknown> => {
       const params = validate(input) as FileOnlyInput;
       const client = await getClient(ctx, params.file);
       if (!client) return "(no LSP server available for file)";
-      const raw = await client.sendRequest("textDocument/diagnostic", {
-        textDocument: { uri: pathToFileURL(params.file).href },
-      });
-      return renderDiagnostics(params.file, raw);
+      const uri = pathToFileURL(params.file).href;
+      const items = client.getDiagnostics(uri);
+      return renderDiagnostics(params.file, items ?? []);
     },
   });
 }

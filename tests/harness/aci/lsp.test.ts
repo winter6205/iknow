@@ -46,6 +46,9 @@ function makeFakeClient(
         return responder(method, params);
       },
       sendNotification: async () => undefined,
+      // #251:lsp_diagnostics 读 push 缓存(latest-wins),fake 默认空数组;
+      // 需要覆盖时在测试里 `client.getDiagnostics = () => items`。
+      getDiagnostics: (_uri: string) => [] as ReadonlyArray<unknown>,
       dispose: () => undefined,
     },
   };
@@ -367,27 +370,29 @@ describe("call hierarchy multi-step forwarding", () => {
 
 describe("lsp_diagnostics", () => {
   it("filters severity 0 (hint) and renders <diagnostics> XML summary", async () => {
-    const { client } = makeFakeClient(() => ({
-      kind: "full",
-      resultId: "x",
-      items: [
-        {
-          severity: 1,
-          range: { start: { line: 0, character: 0 } },
-          message: "err msg",
-        },
-        {
-          severity: 2,
-          range: { start: { line: 1, character: 4 } },
-          message: "warn msg",
-        },
-        {
-          severity: 0,
-          range: { start: { line: 2, character: 0 } },
-          message: "hint msg",
-        },
-      ],
-    }));
+    const items = [
+      {
+        severity: 1,
+        range: { start: { line: 0, character: 0 } },
+        message: "err msg",
+      },
+      {
+        severity: 2,
+        range: { start: { line: 1, character: 4 } },
+        message: "warn msg",
+      },
+      {
+        severity: 0,
+        range: { start: { line: 2, character: 0 } },
+        message: "hint msg",
+      },
+    ];
+    const { client } = makeFakeClient(() => undefined);
+    (
+      client as unknown as {
+        getDiagnostics: (uri: string) => ReadonlyArray<unknown>;
+      }
+    ).getDiagnostics = () => items;
     mockGetClient.mockResolvedValue(client);
     const tools = createLspToolSet(ctx);
     const out = await byName(tools, "lsp_diagnostics").handler({
@@ -407,7 +412,12 @@ describe("lsp_diagnostics", () => {
       range: { start: { line: i, character: 0 } },
       message: `msg ${i}`,
     }));
-    const { client } = makeFakeClient(() => items);
+    const { client } = makeFakeClient(() => undefined);
+    (
+      client as unknown as {
+        getDiagnostics: (uri: string) => ReadonlyArray<unknown>;
+      }
+    ).getDiagnostics = () => items;
     mockGetClient.mockResolvedValue(client);
     const tools = createLspToolSet(ctx);
     const out = await byName(tools, "lsp_diagnostics").handler({
