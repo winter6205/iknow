@@ -8,19 +8,13 @@
  *
  * 流式（#147）拓展点：turn 完成回调处整段替换渲染；未来增量渲染挂载于此。
  *
- * 滚动（#189 行级窗口，修复版）：行账 SSOT = `messageRender`（message-rows.ts，
- * flat 物理行，与 `<Markdown>` 渲染逐行对齐 + 视觉宽度折行）。修复点：
- *  1. 窗口数学：`endRow = totalSpace - scroll`，窗口高 = `viewport - chrome`
- *     （chrome = 顶部指示 2 行 + fold 指示 2 行；指示器 `<Box mb=1><Text>` 实测
- *     各占 2 行，旧实现未扣 → 内容溢出 viewport，滚动区渲染漂移）；
- *  2. tail 行数精确化（liveTool/ask/draft/spinner 的 margin 按「后随兄弟」计）；
- *  3. 裁剪路径渲染 flat 行切片（MessageBlocksClipped），与全可见路径逐行一致。
- *
- * 渲染规则：
- *  - scroll=0：窗口 = [totalSpace - budget, totalSpace)，tail 原样渲染；
- *  - scroll>0：窗口 = [msgSpace - scroll - budget, msgSpace - scroll)，
- *    tail 折叠为底部「↓ N 行正在生成」指示；
- *  - 顶部 dim 指示「↑ N 行历史（End 回到底部）」恒在 scroll>0 时出现。
+ * STICKY banner：banner 是 ChatView 的独立 sticky 段（恒完整渲染），消息段
+ * 用独立 row window（高 = viewport - bannerRows）。banner 永远在顶部完整可见，
+ * 消息区独立滚动；输入框 / 状态栏在 app 底部固定。
+ *  - scroll=0：消息窗口底 = 消息段底（auto-follow 最新消息）；
+ *  - scroll>0：消息窗口上移 scroll 行（clamp 到 maxScroll = messageRows - messageViewport）；
+ *  - 无「↑ N 行历史」指示、无「↓ N 行正在生成」折叠（2026-08-07 移除）；
+ *  - banner 缺省（未传）→ bannerRows=0 → 消息窗口 = 全 viewport（回归兼容）。
  */
 import { useDeferredValue, type ReactElement } from "react";
 import { Box, Text } from "ink";
@@ -131,8 +125,10 @@ const MARGIN_LINE_CHAT = " ";
 /**
  * #238：把当前 ChatView 内容流（banner + 消息 flat 行 + tail 行）拼成一份
  * flat 字符串数组（行号即内容行号 0-based）。用于 extractSelectionText：
- *  - banner 段占 [0, bannerLines.length)；
- *  - 消息段按 measure 顺序拼接（messageRender.lines 与全可见路径逐行一致）；
+ *  - banner 段占 [0, bannerLines.length)——STICKY：banner 永远在 [0,bannerRows)
+ *    占位，但**不参与** ChatView 的 row-window 滚动数学，行号仍是真实内容行；
+ *  - 消息段按 measure 顺序拼接（messageRender.lines 与全可见路径逐行一致），
+ *    行号从 bannerRows 起（与 MessageBlocksClipped 的 absRow 同口径）；
  *  - tail 行（liveToolRuns + liveToolLines + ask + thinkingDraft + draft）
  *    按 ChatView JSX 渲染顺序追加（spinner 是 1 行非字符 "<spinner>"，留空）。
  *
@@ -260,9 +256,11 @@ export interface ChatViewProps {
    */
   readonly thinkingExpanded?: boolean;
   /**
-   * 滚动对齐（方案 B）：banner 是 row window 的第一段内容（与消息同 scroll
-   * space）。空会话 = 完整眼 + 顶部分隔；有消息后 = 单行 `◆ iknow`。
-   * 上滚可见 logo、下滚一起滚出；输入框 / 状态栏固定在 app 底部不受影响。
+   * STICKY banner（完整眼永不裁剪）：banner 是 ChatView 的独立 sticky 头，
+   * 占据 `[0, bannerRows)` 恒完整渲染，**不参与**消息 row window 滚动数学。
+   * bannerRows = `bannerLines.length`。消息区窗口高 = viewport - bannerRows。
+   * banner 缺省（未传）→ bannerRows=0，消息区 = 全 viewport（回归兼容）。
+   * 输入框 / 状态栏在 app 底部固定不受影响。
    */
   readonly bannerLines?: ReadonlyArray<string>;
   /**
@@ -273,13 +271,20 @@ export interface ChatViewProps {
   readonly selection?: Selection;
   /**
    * #238 内容视口窗口回调（effect 同步给 app 层坐标映射）：ChatView 每帧
-   * 计算 startRow/endRow/cols 后回调，app 层据此把 SGR (x,y) 映射成
-   * 内容 CellPos。不传 = 无选区（纯键盘滚动场景）。
+   * 计算 startRow/endRow/cols/bannerRows 后回调，app 层据此把 SGR (x,y)
+   * 映射成内容 CellPos。
+   *
+   * STICKY：`startRow`/`endRow` 仅覆盖**消息段**（0-based 消息坐标，不含
+   * banner）。`bannerRows` = sticky banner 高度，app 层 `terminalToCellPos`
+   * 用它把 SGR y 映射回内容流行号；banner 行与消息一样可被拖选（用户
+   * 决策 b：banner 也是内容，复制 logo/眼睛文本允许）。
+   * 不传 = 无选区（纯键盘滚动场景）。
    */
   readonly onWindow?: (win: {
     readonly startRow: number;
     readonly endRow: number;
     readonly cols: number;
+    readonly bannerRows: number;
   }) => void;
 }
 
@@ -294,10 +299,10 @@ export function ChatView(props: ChatViewProps): ReactElement {
   const statusMap = toolResultStatusMap(session.messages);
   const measured: Measured[] = [];
   let messageCursor = 0;
-  // 方案 B（最终定稿）：banner 在 ChatView row window 内作为第一段，与
-  // 消息共享同一 scroll space。向上滚能翻回完整 banner，向下滚 banner 与
-  // 消息一起滚出（输入框 + 状态栏在 ChatView 之外固定挂载）。用户 2026-08-07
-  // 复看：「下面对话框要固定，消息跟图标可以向上滚动」。
+  // STICKY banner：banner 是独立 sticky 段，恒完整渲染，**不参与**消息 row
+  // window 滚动数学。`mm.startRow` 用**消息段 0-based 坐标**（= messageCursor，
+  // 与消息窗口 startRow/endRow 同口径，slice 裁剪判断直接成立）；选区高亮
+  // 用的内容流行号在渲染循环里另加 bannerRows（见 MessageBlocksClipped）。
   const bannerRows = props.bannerLines?.length ?? 0;
   for (const m of session.messages) {
     const mm = messageRender(m, cols, {
@@ -309,7 +314,7 @@ export function ChatView(props: ChatViewProps): ReactElement {
       lines: mm.lines,
       blocks: [...mm.blocks],
       totalRows: mm.totalRows,
-      startRow: bannerRows + messageCursor,
+      startRow: messageCursor,
     });
     messageCursor += mm.totalRows;
   }
@@ -326,57 +331,77 @@ export function ChatView(props: ChatViewProps): ReactElement {
   );
   const tailRows = tail.total;
   // ── 朴素滚动（2026-08-07 定稿：用户「第二种」，去所有折叠/指示器）──
-  // 语义：banner + 消息 + tail 是同一内容流。`scrollRows` = 向上翻了多少
-  // 物理行。窗口固定高度 = viewport（不含指示器/折叠 chrome）。scroll=0
-  // 时窗口底 = 内容底（auto-follow）；scroll>0 时窗口上移 scroll 行。
-  // 无「↑ N 行历史」指示、无「↓ N 行正在生成」折叠、无 maxScroll 文案。
+  // STICKY banner：banner 是独立 sticky 段，恒完整渲染，**不参与**消息 row
+  // window 滚动数学。`scrollRows` = 消息段向上翻了多少物理行。消息窗口固定
+  // 高 = viewport - bannerRows（下限 1）。scroll=0 时消息窗口底 = 消息段底
+  // （auto-follow）；scroll>0 时消息窗口上移 scroll 行。无「↑ N 行历史」指示、
+  // 无「↓ N 行正在生成」折叠。
   const requestedScroll = Math.max(0, props.scrollRows ?? 0);
   const viewport = props.viewportRows ?? 0;
   // viewport <= 0 → 无限视口：不裁剪，直接渲染全部内容。
   const unlimited = viewport <= 0;
-  // 内容总高 = banner + 消息 + tail（tail 原样渲染，不折叠）。
-  const contentRows = bannerRows + messageCursor + tailRows;
-  // 滚动上界：窗口底最多上移到 contentRows - viewport（保留至少一屏）。
-  // viewport 由 app 传入（含输入框/状态栏预留后剩余行数）。
-  const maxScroll = unlimited
-    ? 0
-    : Math.max(0, contentRows - Math.max(1, viewport));
+  // 消息段内容总高 = 消息 + tail（**不含 banner**；banner 是 sticky 占位）。
+  const messageRows = messageCursor + tailRows;
+  // 消息区可视高 = 总 viewport - bannerRows（下限 1；banner 缺省 bannerRows=0
+  // → = 全 viewport，回归兼容）。
+  const messageViewport = unlimited
+    ? messageRows
+    : Math.max(1, viewport - bannerRows);
+  // 滚动上界：消息段贴顶时 segStart=0（banner 恒见，不制造虚构滚动空间）。
+  const maxScroll = unlimited ? 0 : Math.max(0, messageRows - messageViewport);
+  // ── STICKY banner 溢出降级（gate-fix 矮终端，2026-08-08）──
+  // 矮终端（bannerRows > viewport）时 STICKY「永完整」vs viewport 上限冲突 —
+  // 当前 banner 仍恒完整渲染 bannerRows 行 + 消息区 ≥1 行 → 总渲染 > viewport，
+  // banner 顶部被遮。降级：banner 进入 row window，底对齐（banner 底贴 viewport
+  // 底），显示 `viewport - messageViewport` 行（预留消息区，保证
+  // banner + 消息 ≤ viewport 不溢出）。`unlimited`（viewport ≤ 0）或
+  // bannerRows ≤ viewport 时 sticky 行为不变（banner 仍恒完整）。
+  // 坐标映射：banner 占 [0, bannerRows) 内容流行号不变（terminalToCellPos /
+  // props.onWindow / mm.startRow 不变），仅渲染时 slice。
+  const bannerOverflow = !unlimited && bannerRows > viewport;
+  const bannerVisibleRows = bannerOverflow
+    ? Math.max(0, viewport - messageViewport)
+    : bannerRows;
+  const bannerStart = bannerOverflow
+    ? Math.max(0, bannerRows - bannerVisibleRows)
+    : 0;
+  const bannerSlice = props.bannerLines?.slice(bannerStart, bannerRows) ?? [];
   const scroll = Math.min(requestedScroll, maxScroll);
-  // 窗口：scroll=0 → [contentRows - viewport, contentRows)；
-  // scroll>0 → [contentRows - viewport - scroll, contentRows - scroll)。
-  // startRow/endRow 都是内容流内的行号（banner 段从 0 起算）。
-  const endRow = unlimited ? contentRows : contentRows - scroll;
-  const startRow = unlimited ? 0 : Math.max(0, endRow - viewport);
+  // 消息段窗口（0-based 消息坐标，不含 banner）：
+  //   scroll=0 → [messageRows - messageViewport, messageRows)（贴底）
+  //   scroll>0 → 上移 scroll 行 → [messageRows - messageViewport - scroll, …)
+  // startRow/endRow 都是消息段内行号（0 起算，与 mm.startRow=messageCursor
+  // 同口径，渲染循环裁剪判断直接成立）。
+  const endRow = unlimited ? messageRows : messageRows - scroll;
+  const startRow = unlimited ? 0 : Math.max(0, endRow - messageViewport);
   // #238:窗口同步回调（app 层坐标映射用）。在渲染体内直接调用：只写 parent
   // 的 ref（无 setState），React 允许多次调用；移到 useEffect 会引入事件时序
   // 风险（mouse listener 可能比 effect 早拿到陈旧 window）。注：依赖稳定，
   // commit 期重复调用会写同一个值。
+  // STICKY：窗口范围仅覆盖消息段 [startRow, endRow)（0-based 消息坐标，不含
+  // banner）。app 层 terminalToCellPos 依 bannerRows 把 SGR y 映射回内容流行号；
+  // banner 行可拖选（决策 b）：terminalToCellPos 对 banner 段返回 row=y-1，
+  // 选区复制时把 banner/logo 字符一并纳入（用户允许）。
   props.onWindow?.({
     startRow,
     endRow,
     cols,
+    bannerRows,
   });
   return (
     <Box flexDirection="column" flexGrow={1}>
       <Box flexDirection="column">
-        {/* banner 段（内容流第一段）：按窗口行区间裁剪，selection 存在时高亮命中行。 */}
-        {bannerRows > 0 &&
-          props.bannerLines &&
-          (() => {
-            const bStart = Math.max(0, startRow);
-            const bEnd = Math.min(bannerRows, endRow);
-            if (bEnd <= bStart) return null;
-            return props.bannerLines
-              .slice(bStart, bEnd)
-              .map((line, i) => (
-                <HighlightedLine
-                  key={`banner-${bStart + i}`}
-                  line={line}
-                  row={bStart + i}
-                  selection={props.selection}
-                />
-              ));
-          })()}
+        {/* banner 段（STICKY）：恒完整渲染，不参与消息 row window 裁剪。
+            gate-fix 矮终端：bannerRows > viewport 时降级为 row window（底对齐
+            slice），banner 顶部可被裁但整体不溢出；无限视口 / 正常终端仍完整。 */}
+        {bannerSlice.map((line, i) => (
+          <HighlightedLine
+            key={`banner-${bannerStart + i}`}
+            line={line}
+            row={bannerStart + i}
+            selection={props.selection}
+          />
+        ))}
         {measured.map((mm, i) => {
           if (mm.startRow + mm.totalRows <= startRow || mm.startRow >= endRow) {
             return null;
@@ -410,7 +435,10 @@ export function ChatView(props: ChatViewProps): ReactElement {
               statusMap={statusMap}
               slice={slice}
               selection={props.selection}
-              messageStartRow={mm.startRow}
+              // STICKY：messageStartRow = bannerRows + mm.startRow（内容流行号，
+              // 与 CellPos.row / flatContentLines 下标同口径）。mm.startRow 自身
+              // 仍是消息段 0-based（slice 裁剪用），加 bannerRows 偏移对齐内容流。
+              messageStartRow={bannerRows + mm.startRow}
             />
           );
         })}
