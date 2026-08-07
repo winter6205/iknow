@@ -63,7 +63,8 @@ describe("wheel-up slides the window, never collapses messages", () => {
     const plain = strip(renderToStringAt(999, 40));
     expect(plain).toContain("m-0");
     expect(plain).toContain("m-1");
-    expect(plain).toContain("行历史");
+    // 朴素滚动无「↑ N 行历史」指示（2026-08-07 移除）。
+    expect(plain).not.toContain("行历史");
     expect(linesOf(999, 40).length).toBe(linesOf(0, 40).length);
   });
 
