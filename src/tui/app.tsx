@@ -18,6 +18,7 @@
  */
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import type { HarnessStreamEvent } from "../harness/stream.js";
+import type { TokenUsage } from "../harness/model-adapter/types.js";
 import type { ReactElement } from "react";
 import {
   Box,
@@ -35,7 +36,6 @@ import {
   attachSession,
   canInterrupt,
   createDraftSession,
-  sessionSummary,
   switchedAwayFrom,
   switchedTo,
   turnFinished,
@@ -58,10 +58,10 @@ import { ChatView, flatContentLines } from "./chat-view.js";
 import type { StreamDraft } from "../cli/stream-draft.js";
 import { createStreamDraft } from "../cli/stream-draft.js";
 import { ListView, relativeTime, type TuiListEntry } from "./list-view.js";
+import { ContextBar } from "./context-bar.js";
 import { PromptInput, useTick } from "./components.js";
 import { renderBanner } from "./banner.js";
 import { tuiPalette } from "./theme.js";
-import { clipOneLine } from "./text.js";
 import { VERSION } from "./version.js";
 import { writeIknowState } from "../harness/identity/index.js";
 import {
@@ -474,6 +474,8 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     controller: AbortController
   ): Promise<void> {
     let stopReason: string | undefined;
+    // T4: 桥接回执的 lastUsage（成功才抄入；cancelled/异常路径保持 null）。
+    let lastUsage: TokenUsage | null = null;
     // T4: 构造草稿 + 装配 onStream；abort 时清空（cancelled 路径 + 异常路径都走）。
     const draft = createStreamDraft();
     setStreamDraft(draft);
@@ -500,6 +502,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
         onStream,
       });
       stopReason = resp.stopReason;
+      lastUsage = resp.lastUsage;
     } catch (err) {
       stopReason = "protocolError";
       setNotice({ lines: [`turn 失败：${describeError(err)}`] });
@@ -526,6 +529,8 @@ export function TuiApp(props: TuiAppProps): ReactElement {
             jsonMode: file.jsonMode,
             stopReason:
               (stopReason as TuiSessionState["lastStopReason"]) ?? "completed",
+            // T4: 透传 lastUsage 给 ContextBar /info 用；wire 缺席等价 null。
+            lastUsage,
           }),
         };
       });
@@ -541,7 +546,8 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       // 刷新失败也要落回 idle：否则会话卡在 running-fg（aborter 已在
       // finally 移除 → Ctrl+C 无效，且「正在运行」护栏挡住后续发送）。
       // messages 保持 turn 前状态（磁盘 SSOT 未读回）；stopReason 记录
-      // turn 本身的停止原因。
+      // turn 本身的停止原因。lastUsage 已抄入 → 仍透传（turn 已跑过，
+      // 不因刷新失败抹除）。
       setSessions((prev) => {
         const current = prev[targetId];
         if (!current) return prev;
@@ -555,6 +561,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
             jsonMode: current.jsonMode,
             stopReason:
               (stopReason as TuiSessionState["lastStopReason"]) ?? "completed",
+            lastUsage,
           }),
         };
       });
@@ -751,7 +758,9 @@ export function TuiApp(props: TuiAppProps): ReactElement {
         setNotice({ lines: helpLines() });
         return;
       case "info": {
-        setNotice({ lines: infoLines(active, activeKey) });
+        setNotice({
+          lines: infoLines(active, activeKey, bridge.contextWindow),
+        });
         return;
       }
       case "thinking": {
@@ -906,6 +915,16 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           ))}
         </Box>
       )}
+      {/* ContextBar 仅聊天视图挂载（T4）：上下文用量条，ChatView 与 PromptInput
+          之间（原型 variant3-single 视觉挂点）。list 视图不挂。 */}
+      {view === "chat" && (
+        <ContextBar
+          lastUsage={active.lastUsage}
+          contextWindow={bridge.contextWindow}
+          running={active.runState === "running-fg"}
+          cols={cols}
+        />
+      )}
       {/* 输入框仅聊天视图挂载：列表视图纯导航（Q4b），避免两个 useInput
           同时监听 stdin 产生键位竞争。 */}
       {view === "chat" && (
@@ -924,12 +943,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           hintSuggestions={inputHintSuggestions}
         />
       )}
-      <StatusBar
-        cols={cols}
-        active={active}
-        bgSession={bgSession}
-        sessionCount={Object.keys(sessions).length}
-      />
+      <StatusBar cols={cols} active={active} bgSession={bgSession} />
     </Box>
   );
 }
@@ -938,7 +952,6 @@ function StatusBar(props: {
   readonly cols: number;
   readonly active: TuiSessionState;
   readonly bgSession: TuiSessionState | undefined;
-  readonly sessionCount: number;
 }): ReactElement {
   const pal = tuiPalette;
   const state =
@@ -947,29 +960,21 @@ function StatusBar(props: {
       : props.active.runState === "running-fg"
         ? "运行中"
         : "后台";
-  const summary = sessionSummary(props.active.messages);
+  // 用户设计反馈（T4 实施中追加）：主界面底部仅保留运行态 + 版本号 +
+  // ContextBar。会话计数 / uuid / active 摘要迁入 list-view（list-view.tsx
+  // 已是 summary 显示面）。后台运行中保留轻量标记（不带摘要）。
   return (
     <Box flexWrap="wrap">
       <Box marginRight={2}>
-        <Text color={pal.dim}>
-          {state} · {summary ? clipOneLine(summary, 24) : "新会话"}
-        </Text>
+        <Text color={pal.dim}>{state}</Text>
       </Box>
       {props.bgSession && (
         <Box marginRight={2}>
-          <Text color={pal.dim}>
-            后台运行中 ·{" "}
-            {clipOneLine(sessionSummary(props.bgSession.messages), 24)}
-          </Text>
+          <Text color={pal.dim}>后台运行中</Text>
         </Box>
       )}
-      <Box marginRight={2}>
-        <Text color={pal.dim}>会话 {props.sessionCount}</Text>
-      </Box>
       <Box>
-        <Text color={pal.dim}>
-          v{VERSION} · {props.active.conversationId ?? "draft"}
-        </Text>
+        <Text color={pal.dim}>v{VERSION}</Text>
       </Box>
     </Box>
   );
@@ -977,8 +982,20 @@ function StatusBar(props: {
 
 function infoLines(
   session: TuiSessionState,
-  key: string
+  key: string,
+  contextWindow: number
 ): ReadonlyArray<string> {
+  const lu = session.lastUsage;
+  // T4: token 明细（CLI `tokens in/out` 同语义 + cache read + window）。
+  // lastUsage === null → tokens: —（无成功调用）。
+  const tokenLines =
+    lu === null
+      ? ["tokens: —"]
+      : [
+          `tokens in/out: ${lu.inputTokens}/${lu.outputTokens}`,
+          `cache read: ${lu.cacheReadInputTokens}`,
+          `window: ${contextWindow}`,
+        ];
   return [
     `conversation_id: ${session.conversationId ?? key}（${
       session.conversationId ? "已建档" : "draft，首条消息后建档"
@@ -987,6 +1004,7 @@ function infoLines(
     `updatedAt: ${session.updatedAt ? relativeTime(session.updatedAt) : "—"}`,
     `jsonMode: ${session.jsonMode}`,
     `runState: ${session.runState}`,
+    ...tokenLines,
   ];
 }
 

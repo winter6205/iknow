@@ -23,6 +23,7 @@ import {
   type TuiBridge,
 } from "../../src/tui/hub-bridge.js";
 import { createTuiAskUserBridge } from "../../src/tui/ask-user.js";
+import { VERSION } from "../../src/tui/version.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.js";
 
 const ANSI_RE = /\x1b\[[0-9;?]*[a-zA-Z]/g;
@@ -257,7 +258,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
   );
 
   it(
-    "未知命令 → 提示行；/info → 元信息（draft 未建档）",
+    "未知命令 → 提示行；/info → 元信息（draft 未建档、无 usage → tokens: —）",
     async () => {
       const app = makeApp([]);
       await app.ready();
@@ -274,6 +275,90 @@ describe("TuiApp 端到端（tracer bullet）", () => {
         "info-panel"
       );
       expect(app.lastOutput()).toContain("draft");
+      // T4: draft 无 usage → /info tokens 兜底 `tokens: —`
+      expect(app.lastOutput()).toContain("tokens: —");
+    },
+    LONG_TIMEOUT
+  );
+
+  // T4: ContextBar 挂载 + 一轮含 usage 的 turn → 状态栏收敛 + /info token 明细。
+  it(
+    "T4: 聊天视图挂 ContextBar（`│ 上下文`）+ 一轮 usage → /info 显示 token 明细",
+    async () => {
+      const app = makeApp([
+        assistantResult({
+          texts: ["答复"],
+          usage: {
+            inputTokens: 1200,
+            outputTokens: 40,
+            cacheReadInputTokens: null,
+            cacheCreationInputTokens: null,
+          },
+        }),
+      ]);
+      await app.ready();
+      // ContextBar 兜底行（null usage）：`│ 上下文 — 待首轮`
+      await waitFor(
+        () => app.lastOutput().includes("│ 上下文"),
+        8000,
+        "contextbar-null"
+      );
+      expect(app.lastOutput()).toContain("待首轮");
+
+      // 提交消息 → turn 完成，ContextBar 显示真值（12% 安全）
+      await app.type("你好\r");
+      await waitFor(
+        () => app.bridge.inflight.ids().size === 0,
+        8000,
+        "usage-turn-done"
+      );
+      // 等 ContextBar 刷新出已用值（1200/200000 = 1% → 安全）
+      await waitFor(
+        () => app.lastOutput().includes("上下文 ░"),
+        8000,
+        "contextbar-band"
+      );
+      expect(app.lastOutput()).toContain("安全");
+
+      // /info → token 明细行（tokens in/out + cache read + window）
+      await app.type("/info\r");
+      await waitFor(
+        () => app.lastOutput().includes("tokens in/out: 1200/40"),
+        8000,
+        "info-tokens-in-out"
+      );
+      expect(app.lastOutput()).toContain("cache read: null");
+      expect(app.lastOutput()).toContain("window: 200000");
+    },
+    LONG_TIMEOUT
+  );
+
+  // T4 用户设计反馈：StatusBar 收敛（state + 版本 + 后台标记保留；
+  // 会话计数 / uuid / 主界面摘要移除）。
+  it(
+    "T4: StatusBar 收敛 — 空闲 + 版本保留；会话计数/uuid/新会话摘要移除",
+    async () => {
+      const app = makeApp([assistantResult({ texts: ["hi"] })]);
+      await app.ready();
+      await waitFor(() => app.lastOutput().includes("iknow"), 8000, "startup");
+      await app.type("hi\r");
+      await waitFor(
+        () => app.bridge.inflight.ids().size === 0,
+        8000,
+        "first-turn-done"
+      );
+      await delay(200); // 等 setSessions(turnFinished) 落地
+
+      const out = app.lastOutput();
+      // 保留：state（idle → 空闲）+ 版本号
+      expect(out).toContain("空闲");
+      expect(out).toContain(`v${VERSION}`);
+      // 移除：会话计数段（不再出现 `会话 N` 拼接）
+      expect(out).not.toMatch(/会话\s+\d+/);
+      // 移除：uuid 段（StatusBar 不再展示 `vVERSION · <uuid>`）
+      expect(out).not.toMatch(new RegExp(`v${VERSION}\\s+·\\s+\\S{20,}`));
+      // 移除：主界面摘要（新会话兜底字样）
+      expect(out).not.toContain("新会话");
     },
     LONG_TIMEOUT
   );
