@@ -347,7 +347,10 @@ export function ChatView(props: ChatViewProps): ReactElement {
   // startRow/endRow 都是内容流内的行号（banner 段从 0 起算）。
   const endRow = unlimited ? contentRows : contentRows - scroll;
   const startRow = unlimited ? 0 : Math.max(0, endRow - viewport);
-  // #238:窗口同步回调（app 层坐标映射用）。effect 内调用避免渲染期 setState。
+  // #238:窗口同步回调（app 层坐标映射用）。在渲染体内直接调用：只写 parent
+  // 的 ref（无 setState），React 允许多次调用；移到 useEffect 会引入事件时序
+  // 风险（mouse listener 可能比 effect 早拿到陈旧 window）。注：依赖稳定，
+  // commit 期重复调用会写同一个值。
   props.onWindow?.({
     startRow,
     endRow,

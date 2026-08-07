@@ -65,12 +65,13 @@ import { clipOneLine } from "./text.js";
 import { VERSION } from "./version.js";
 import { writeIknowState } from "../harness/identity/index.js";
 import {
-  enableMouseScroll,
+  enableSgrMouseReport,
   isSgrMouseSequence,
   parseMouseAllEvents,
   parseMouseEvents,
+  disableMouseReport,
 } from "./mouse.js";
-import { copyToClipboard } from "./clipboard.js";
+import { copyToClipboard, type CopyResult } from "./clipboard.js";
 import type { Selection, ContentWindow } from "./selection.js";
 import {
   extractSelectionText,
@@ -156,6 +157,13 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   // 更新；mouseup 时若非空 → 调 copyToClipboard，并清空。滚动 / 切会话 / new
   // 会话 → 一律清空，避免 stale 状态。
   const [selection, setSelection] = useState<Selection | null>(null);
+  // #238 selection 镜像 ref：mouseup stale 闭包路径读最新值；clearSelection
+  // 双清（state + ref），避免 setState updater 内做副作用。
+  const selectionRef = useRef<Selection | null>(null);
+  // #238 键盘逃生口：最近一次非空选区（mouseup 自动复制后保留，供 Ctrl+Y
+  // 重新复制）。mouseup 不写这里（自动复制已发生）；Ctrl+Y 读它。
+  const lastSelectionRef = useRef<Selection | null>(null);
+  selectionRef.current = selection;
 
   // T4 (#175): 流式草稿单一实例（单会话 in-flight 即可；多会话并发时只有
   // fg 会话持 streamDraft，bg 由落盘后刷新获得终稿）。state ref 由 React 保证
@@ -300,10 +308,16 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   // 用 'readable' 流式读取，不消费 data 事件），与 ink useInput 并行不冲突。
   const contentWindowRef = useRef<ContentWindow | null>(null);
   const dragActiveRef = useRef(false);
-  // #238 选区在视图非 chat / 滚动 / 切会话时清空。
-  const clearSelection = (): void => setSelection(null);
+  // #238 选区在视图非 chat / 滚动 / 切会话时清空（state + ref 双清，ref 供
+  // mouseup stale 闭包读最新值；lastSelectionRef 同清，避免 Ctrl+Y 跨会话
+  // 复活旧选区）。
+  const clearSelection = (): void => {
+    selectionRef.current = null;
+    lastSelectionRef.current = null;
+    setSelection(null);
+  };
   useEffect(() => {
-    const disable = enableMouseScroll(stdout);
+    const disable = enableSgrMouseReport(stdout);
     const onData = (chunk: Buffer | string): void => {
       const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
       // 滚轮：独立路径（不参与选区）。
@@ -327,14 +341,19 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           dragActiveRef.current = true;
           setSelection({ anchor: pos, active: pos });
         } else if (ev.button === 3 && !ev.pressed) {
-          // 释放（任意键）→ 若有选区则复制
+          // 释放（任意键）→ 若本帧有过 drag 才复制；裸 release（无 press）
+          // 不消费已存选区（防止 Ctrl+Y 之间杂散 release 误复制）。
+          const wasDragging = dragActiveRef.current;
           dragActiveRef.current = false;
-          setSelection((prev) => {
-            if (prev === null) return prev;
-            if (isEmpty(prev)) return null; // 纯点击不复制
+          if (!wasDragging) continue;
+          // side effect（复制+notice）放 setSelection 之外：updater 必须纯
+          //（StrictMode 下会双调用）。
+          const prev = selectionRef.current;
+          setSelection(null);
+          if (prev !== null && !isEmpty(prev)) {
+            lastSelectionRef.current = prev; // Ctrl+Y 逃生口
             void doCopySelection(prev);
-            return null;
-          });
+          }
         } else if (ev.button === 32 && ev.pressed) {
           // 左键拖动 → 扩展选区 active
           if (!dragActiveRef.current) continue;
@@ -358,6 +377,33 @@ export function TuiApp(props: TuiAppProps): ReactElement {
 
   const active = sessions[activeKey] ?? initial;
   const askPending = askBridge.pending();
+
+  // #238 stale-closure 修复：stdin 的 mouse listener 用 useEffect + 稳定 deps
+  // 注册一次（不随每次 render 重绑，避免丢事件），但它捕获首帧闭包。mouseup
+  // 复制路径必须读到「当前」live state（流式 turn / 工具事件 / 切会话后都会变），
+  // 故把复制需要的 live 值镜像进 ref（每 render 更新 current），doCopySelection
+  // 读 ref 而非闭包。view/contentWindow 已是 ref 模式，这里补齐其余字段。
+  const bannerLinesRef = useRef<ReadonlyArray<string>>([]);
+  const activeRef = useRef(active);
+  const colsRef = useRef(cols);
+  const liveToolLinesRef = useRef(liveToolLines);
+  const liveToolRunsRef = useRef(liveToolRuns);
+  const askPendingRef = useRef(askPending);
+  const draftsMaskedRef = useRef(draftsMasked);
+  const thinkingDraftMaskedRef = useRef(thinkingDraftMasked);
+  const thinkingExpandedRef = useRef(thinkingExpanded);
+  const dataDirRef = useRef(props.dataDir);
+  bannerLinesRef.current = bannerLines;
+  activeRef.current = active;
+  colsRef.current = cols;
+  liveToolLinesRef.current = liveToolLines;
+  liveToolRunsRef.current = liveToolRuns;
+  askPendingRef.current = askPending;
+  draftsMaskedRef.current = draftsMasked;
+  thinkingDraftMaskedRef.current = thinkingDraftMasked;
+  thinkingExpandedRef.current = thinkingExpanded;
+  dataDirRef.current = props.dataDir;
+  selectionRef.current = selection;
 
   /** 输入框下方候选提示：仅在以 "/" 开头且候选非空时展示。派生而非 state，
    *  避免双源同步（inputValue 单一来源）。任务 B：候选列表传给 PromptInput
@@ -580,33 +626,49 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     }
   }
 
-  /** #238：根据当前 ChatView 内容行，把选区文本提取并复制。 */
+  /** #238：根据当前 ChatView 内容行，把选区文本提取并复制。
+   *  读 *Ref.current 而非闭包变量：mouseup 是 useEffect 注册的 stale 闭包
+   *  路径，必须读到最新 live state（流式 turn / 工具事件 / 切会话都更新）。 */
   async function doCopySelection(sel: Selection): Promise<void> {
+    const sess = activeRef.current;
+    const pending = askPendingRef.current;
     const lines = flatContentLines({
-      bannerLines,
-      session: active,
-      cols,
-      liveToolLines: active.conversationId
-        ? (liveToolLines[active.conversationId] ?? [])
+      bannerLines: bannerLinesRef.current,
+      session: sess,
+      cols: colsRef.current,
+      liveToolLines: sess.conversationId
+        ? (liveToolLinesRef.current[sess.conversationId] ?? [])
         : [],
-      liveToolRuns: active.conversationId
-        ? (liveToolRuns[active.conversationId] ?? [])
+      liveToolRuns: sess.conversationId
+        ? (liveToolRunsRef.current[sess.conversationId] ?? [])
         : [],
-      askLine: askPending
-        ? `[ask] 允许 ${askPending.tool}？${
-            askPending.summaryHint ? ` ${askPending.summaryHint}` : ""
+      askLine: pending
+        ? `[ask] 允许 ${pending.tool}？${
+            pending.summaryHint ? ` ${pending.summaryHint}` : ""
           } 输入 y/n`
         : undefined,
-      draftsMasked,
-      thinkingDraftMasked,
-      thinkingExpanded,
+      draftsMasked: draftsMaskedRef.current,
+      thinkingDraftMasked: thinkingDraftMaskedRef.current,
+      thinkingExpanded: thinkingExpandedRef.current,
     });
     const text = extractSelectionText(normalize(sel), lines);
     if (text.length === 0) {
       setNotice({ lines: ["选中区域为空。"] });
       return;
     }
-    const result = await copyToClipboard(text, { dataDir: props.dataDir });
+    let result: CopyResult;
+    try {
+      result = await copyToClipboard(text, { dataDir: dataDirRef.current });
+    } catch (err) {
+      // copyToClipboard 内部不 throw（返回 typed kind），但 spawn/writeFile
+      // 的意外异常仍防御性兜底，避免 void 调用产生 unhandled rejection。
+      setNotice({
+        lines: [
+          `复制失败：${err instanceof Error ? err.message : String(err)}`,
+        ],
+      });
+      return;
+    }
     if (result.kind === "ok") {
       setNotice({
         lines: [`已复制（${result.method}，${text.length} 字）。`],
@@ -638,10 +700,9 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     // 等待全部 in-flight turn 落盘（退出不打断后台 turn，Q1a）。
     await Promise.allSettled([...inflightPromises.current]);
     // 防御性：同步写 DECRST 关 mouse 序列，不依赖 React effect cleanup（真实
-    // 终端残留 mouse 报告模式会污染粘贴/选择/红点定位）。
-    if (stdout.isTTY) {
-      stdout.write("\x1b[?1000l\x1b[?1006l");
-    }
+    // 终端残留 mouse 报告模式会污染粘贴/选择/红点定位）。SSOT 在 mouse.ts
+    // （1000l/1006l/1002l 全关），避免漏关 drag mode。
+    disableMouseReport(stdout);
     exit();
   }
 
@@ -750,12 +811,13 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     // 污染后续 Ctrl+C 等守卫与输入链。
     if (isSgrMouseSequence(input)) return;
     if (key.ctrl && input === "y") {
-      // Ctrl+Y：复制当前选区（无选区时提示用户拖选；与 drag-mouseup 同一
-      // 路径，键盘逃生口）。
-      if (selection === null) {
+      // Ctrl+Y：键盘逃生口。当前有选区（drag 进行中）→ 直接复制；否则用
+      // 最近一次非空选区（mouseup 自动复制后保留）实现"重新复制"。
+      const active = selection ?? lastSelectionRef.current;
+      if (active === null) {
         setNotice({ lines: ["无选区：先按住鼠标左键拖选文本。"] });
       } else {
-        void doCopySelection(selection);
+        void doCopySelection(active);
       }
       return;
     }

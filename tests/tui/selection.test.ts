@@ -140,6 +140,14 @@ describe("extractSelectionText", () => {
       "a\nb"
     );
   });
+  it("纯空白行（消息间 MARGIN_LINE ' '）→ 跳过（#238 fidelity）", () => {
+    // messageRender 在每条消息后追加 " " 作为 self margin；跨消息边界选区
+    // 不应把这些视觉无内容的"行"混入复制结果。
+    const lines = ["first", " ", "second"];
+    expect(extractSelectionText(selection(cell(0, 0), cell(2, 6)), lines)).toBe(
+      "first\nsecond"
+    );
+  });
   it("边界越界行 → null 截断", () => {
     const lines = ["abc"]; // 仅 1 行
     // row=5 越界 → lines[5]=undefined → 跳过；row=0 是首/尾 → 按 col 截取

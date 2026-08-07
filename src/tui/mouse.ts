@@ -99,9 +99,9 @@ export function parseMouseEvents(chunk: string): MouseWheelCounts {
   return { wheelUp, wheelDown };
 }
 
-/** 启用鼠标报告（SGR：按钮 + 滚轮 + drag）。非 TTY stdout = no-op（测试 fs stream），
- *  返回空 cleanup。 */
-export function enableMouseScroll(stdout: NodeJS.WriteStream): () => void {
+/** 启用 SGR 鼠标报告（按钮 + 滚轮 + drag）。DECSET 1000h+1006h+1002h。
+ *  非 TTY stdout = no-op（测试 fs stream），返回空 cleanup。 */
+export function enableSgrMouseReport(stdout: NodeJS.WriteStream): () => void {
   if (!stdout.isTTY) return (): void => undefined;
   stdout.write(DECSET_MOUSE_REPORT_ENABLE);
   let called = false;
@@ -111,4 +111,11 @@ export function enableMouseScroll(stdout: NodeJS.WriteStream): () => void {
     if (!stdout.isTTY) return;
     stdout.write(DECSET_MOUSE_REPORT_DISABLE);
   };
+}
+
+/** 同步写 DECRST 关鼠标报告序列。quit() 防御路径用（不依赖 effect cleanup）：
+ *  与 enableMouseScroll 共用一个 SSOT，避免漏关 1002l（drag mode）污染终端。 */
+export function disableMouseReport(stdout: NodeJS.WriteStream): void {
+  if (!stdout.isTTY) return;
+  stdout.write(DECSET_MOUSE_REPORT_DISABLE);
 }

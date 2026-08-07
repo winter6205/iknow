@@ -206,6 +206,38 @@ describe("TuiApp 鼠标拖选复制（#238）", () => {
   );
 
   it(
+    "Ctrl+Y 重复制：拖选复制后（选区已清）再 Ctrl+Y → 复制最近选区",
+    async () => {
+      const { out } = mountResumedApp();
+      await delay(400);
+      await waitFor(
+        () => out().includes("请讲个故事"),
+        8000,
+        "resumed-session-visible"
+      );
+      // 拖选 → 自动复制
+      stdin.write("\x1b[<0;3;2M");
+      await delay(50);
+      stdin.write("\x1b[<32;10;2M");
+      await delay(50);
+      stdin.write("\x1b[<3;10;2m");
+      await waitFor(
+        () => /(已复制|文本已写入|复制失败)/.test(out()),
+        8000,
+        "drag-copy-notice"
+      );
+      // 选区已清；Ctrl+Y 应命中 lastSelectionRef → 再次复制
+      stdin.write("\x19");
+      await waitFor(
+        () => /(已复制|文本已写入|复制失败)/.test(out()),
+        8000,
+        "ctrl-y-recopy"
+      );
+    },
+    LONG_TIMEOUT
+  );
+
+  it(
     "Ctrl+Y 无选区 → 提示先拖选（不复制、无 \x1b[7m）",
     async () => {
       const { out, rawOut } = mountResumedApp();

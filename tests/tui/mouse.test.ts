@@ -15,7 +15,7 @@
 import { describe, expect, it } from "vitest";
 import { PassThrough } from "node:stream";
 import {
-  enableMouseScroll,
+  enableSgrMouseReport,
   isSgrMouseSequence,
   parseMouseAllEvents,
   parseMouseEvents,
@@ -79,13 +79,13 @@ describe("parseMouseEvents（SGR 滚轮解析）", () => {
   });
 });
 
-describe("enableMouseScroll（DECSET 1000/1006/1002）", () => {
+describe("enableSgrMouseReport（DECSET 1000/1006/1002）", () => {
   it("TTY stdout：写启用序列 1000h+1006h+1002h；cleanup 写关闭", () => {
     const out = fakeStdout();
     const writes: string[] = [];
     out.on("data", (c) => writes.push(String(c)));
 
-    const disable = enableMouseScroll(out);
+    const disable = enableSgrMouseReport(out);
     const enableJoined = writes.join("");
     expect(enableJoined).toContain("\x1b[?1000h");
     expect(enableJoined).toContain("\x1b[?1006h");
@@ -104,7 +104,7 @@ describe("enableMouseScroll（DECSET 1000/1006/1002）", () => {
     const writes: string[] = [];
     out.on("data", (c) => writes.push(String(c)));
 
-    const disable = enableMouseScroll(out);
+    const disable = enableSgrMouseReport(out);
     disable();
     disable();
     disable();
@@ -117,7 +117,7 @@ describe("enableMouseScroll（DECSET 1000/1006/1002）", () => {
     s.isTTY = false;
     const writes: string[] = [];
     s.on("data", (c) => writes.push(String(c)));
-    const disable = enableMouseScroll(s as unknown as NodeJS.WriteStream);
+    const disable = enableSgrMouseReport(s as unknown as NodeJS.WriteStream);
     expect(writes.join("")).toBe("");
     disable();
     expect(writes.join("")).toBe("");

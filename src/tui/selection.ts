@@ -120,8 +120,10 @@ export function highlightRangeForLine(
  * `lines` 为内容流 flat 数组（与 ChatView 中 banner + messageRender.lines
  * + tail 行顺序逐行对齐），其下标即内容行号。传入方负责保证一致性。
  *
- * 列偏移（首 / 尾行）按 visual col 截取（substrVisual）。空行 / 边距行
- * （" " 占位）按字面留 — 调用方可在拼好后 trim。
+ * 列偏移（首 / 尾行）按 visual col 截取（substrVisual）。纯空白行
+ * （空串 / 边距占位 " " / 全空白）跳过：跨消息边界 + tail padding 引入的
+ * 视觉无内容行不应进入复制结果。这是针对 messageRender 的 MARGIN_LINE +
+ * flatContentLines 的 tail padding 的特定修复。
  */
 export function extractSelectionText(
   sel: Selection,
@@ -131,7 +133,7 @@ export function extractSelectionText(
   const out: string[] = [];
   for (let r = n.anchor.row; r <= n.active.row; r += 1) {
     const ln = lines[r] ?? "";
-    if (ln.length === 0) continue;
+    if (ln.trim().length === 0) continue;
     const totalCols = visualWidthOf(ln);
     if (totalCols === 0) continue;
     if (r === n.anchor.row && r === n.active.row) {

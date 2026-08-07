@@ -73,10 +73,14 @@ function tryCommand(
     let settled = false;
     const child = spawn(candidate.cmd, [...candidate.args], {
       stdio: ["pipe", "pipe", "pipe"],
-      // detached: false → child 随父进程清理
+      // detached: false → child 不脱离父进程
       windowsHide: true,
       env,
     });
+    // unref：挂起的剪贴板 daemon（wl-copy 等阻塞在 compositor）忽略 SIGTERM
+    // 时，不持有事件循环 — 否则 /quit 后 Node 永不退出（exit() 只 unmount 不
+    // process.exit）。写系统剪贴板是 fire-and-forget，不阻塞 TUI 关闭。
+    child.unref();
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;

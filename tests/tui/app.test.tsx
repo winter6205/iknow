@@ -673,18 +673,28 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       await waitFor(() => bridge.inflight.ids().size === 0, 8000, "turn-done");
       await delay(300);
       const joined = rawWrites.join("");
-      // mount 写一次 1000h/1006h；不应被 effect 多次触发。
+      // mount 写一次 1000h/1006h/1002h（drag mode #238）；不应被 effect
+      // 多次触发。
       const enableCount = (joined.match(/\x1b\[\?1000h/g) ?? []).length;
       expect(enableCount, "mount 写一次 1000h").toBe(1);
-      // unmount 会再写 DECRST（effect cleanup 写 1000l/1006l）—— 但 listener
-      // 仍挂着，理应看到。instances.push 已经挂了 afterEach，instance 此时
-      // 仍在这里，手动 unmount 即可。
+      const dragEnable = (joined.match(/\x1b\[\?1002h/g) ?? []).length;
+      expect(dragEnable, "mount 写一次 1002h（drag 模式）").toBe(1);
+      // unmount 会再写 DECRST（effect cleanup 写 1000l/1006l/1002l）—— 但
+      // listener 仍挂着，理应看到。instances.push 已经挂了 afterEach，
+      // instance 此时仍在这里，手动 unmount 即可。
       instance.unmount();
       await delay(150);
       stdout.removeListener("data", rawListener);
       const joinedFull = rawWrites.join("");
       const disableCount = (joinedFull.match(/\x1b\[\?1006l/g) ?? []).length;
       expect(disableCount, "unmount 写一次 1006l").toBeGreaterThanOrEqual(1);
+      // #238 quit 路径 / leak guard：drag mode 1002l 也必须出现（不依赖
+      // effect cleanup；quit() 防御性同步写全序列）。
+      const dragDisable = (joinedFull.match(/\x1b\[\?1002l/g) ?? []).length;
+      expect(
+        dragDisable,
+        "unmount 写一次 1002l（drag mode 关闭）"
+      ).toBeGreaterThanOrEqual(1);
     },
     LONG_TIMEOUT
   );
