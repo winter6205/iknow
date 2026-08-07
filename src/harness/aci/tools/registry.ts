@@ -31,6 +31,7 @@ import { createWebSearchTool } from "./web-search.js";
 import { createMemoryRecallTool } from "../../memory/tools/recall.js";
 import { createMemorySaveTool } from "../../memory/tools/save.js";
 import { createToolSearchTool } from "./tool-search.js";
+import { createLspToolSet } from "./lsp.js";
 import { RegistryConstructionError, ToolExecutionError } from "../../errors.js";
 
 /**
@@ -67,6 +68,19 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   "memory_recall", // #228 layer 3（条件化:memoryDir 缺席时不装配）
   "memory_save", // #228 layer 3（同上）
   "tool_search", // #224 扩展路径
+  // #251 LSP 工具集 append-only：10 件（9 operation + lsp_diagnostics）。
+  // spec 写「8 operation + lsp_diagnostics = 9 件」但列了 9 个 operation 名
+  // → 实为 10 件；总量 11→21。append-only 纪律：不重排既有 11 件。
+  "lsp_definition", // #251 LSP operation
+  "lsp_references", // #251
+  "lsp_hover", // #251
+  "lsp_document_symbol", // #251
+  "lsp_workspace_symbol", // #251
+  "lsp_go_to_implementation", // #251
+  "lsp_prepare_call_hierarchy", // #251
+  "lsp_incoming_calls", // #251
+  "lsp_outgoing_calls", // #251
+  "lsp_diagnostics", // #251
 ] as const);
 
 /**
@@ -108,6 +122,22 @@ export interface CreateDefaultAciRegistryOptions {
  * `getRegistry: () => AciRegistry` 惰性闭包,装配完成后由 `assembled.reg`
  * 解引用。装配未完成即被调用 → 抛 ToolExecutionError（fail-fast）。
  */
+/**
+ * 把 LSP 工具集展开成 factories 记录（10 件:lsp_definition / lsp_references
+ * / lsp_hover / lsp_document_symbol / lsp_workspace_symbol /
+ * lsp_go_to_implementation / lsp_prepare_call_hierarchy / lsp_incoming_calls
+ * / lsp_outgoing_calls / lsp_diagnostics）。createLspToolSet(ctx) 返回冻结
+ * AciToolDef 列表；每件按 ACI_TOOLSET_NAMES 中的 key 索引。
+ */
+function lspTools(directory: string): Record<string, () => AciToolDef> {
+  const tools = createLspToolSet({ directory });
+  const map: Record<string, () => AciToolDef> = {};
+  for (const t of tools) {
+    map[t.name] = () => t;
+  }
+  return map;
+}
+
 export function createDefaultAciRegistry(
   opts: CreateDefaultAciRegistryOptions
 ): AciRegistry {
@@ -152,6 +182,9 @@ export function createDefaultAciRegistry(
           return r;
         },
       }),
+    // #251 LSP 工具集：NearestRoot 上界 stop=ctx.directory=sandboxRoot
+    // （build-engine 传 process.cwd()，与 fs 工具软沙箱同根语义一致）。
+    ...lspTools(sandboxRoot),
   };
 
   // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。

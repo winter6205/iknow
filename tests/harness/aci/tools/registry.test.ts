@@ -70,8 +70,8 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(reg.catalog.get("memory_save")).toBeUndefined();
   });
 
-  it("Gate 3:ACI_TOOLSET_NAMES 长度 11,前 8 原序 + memory_recall + memory_save + tool_search", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(11);
+  it("Gate 3:ACI_TOOLSET_NAMES 长度 21,前 8 原序 + memory_recall + memory_save + tool_search + 10 LSP", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(21);
     // 前 8 件原序不变(append-only 纪律)。
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
@@ -86,6 +86,19 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(ACI_TOOLSET_NAMES[8]).toBe("memory_recall");
     expect(ACI_TOOLSET_NAMES[9]).toBe("memory_save");
     expect(ACI_TOOLSET_NAMES[10]).toBe("tool_search");
+    // #251 LSP 工具集 append-only:11→21,10 件在末尾,不重排既有 11 件。
+    expect(ACI_TOOLSET_NAMES.slice(11)).toEqual([
+      "lsp_definition",
+      "lsp_references",
+      "lsp_hover",
+      "lsp_document_symbol",
+      "lsp_workspace_symbol",
+      "lsp_go_to_implementation",
+      "lsp_prepare_call_hierarchy",
+      "lsp_incoming_calls",
+      "lsp_outgoing_calls",
+      "lsp_diagnostics",
+    ]);
   });
 });
 
