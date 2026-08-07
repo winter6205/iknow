@@ -112,114 +112,179 @@ async function executeScript(
   opts: RunHostInitScriptOpts
 ): Promise<HostInitScriptResult> {
   if (!(await fileExists(scriptPath))) {
-    return {
-      ran: false,
-      scriptPath,
+    return skipResult(scriptPath);
+  }
+  const { cwd, timeoutMs, env } = resolveSpawnOpts(opts);
+  return runScript(scriptPath, { cwd, timeoutMs, env });
+}
+
+/** Result factory for the "script absent" path. */
+function skipResult(scriptPath: string): HostInitScriptResult {
+  return {
+    ran: false,
+    scriptPath,
+    exitCode: null,
+    stdout: "",
+    stderr: "",
+  };
+}
+
+/** Normalize spawn options from the public API. */
+function resolveSpawnOpts(opts: RunHostInitScriptOpts): {
+  cwd: string;
+  timeoutMs: number;
+  env: NodeJS.ProcessEnv;
+} {
+  return {
+    cwd: opts.cwd ?? process.cwd(),
+    timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    env: opts.env ?? process.env,
+  };
+}
+
+/** Spawn the script and return a single settled result via the lifecycle helpers. */
+function runScript(
+  scriptPath: string,
+  spawnOpts: { cwd: string; timeoutMs: number; env: NodeJS.ProcessEnv }
+): Promise<HostInitScriptResult> {
+  const { cwd, timeoutMs, env } = spawnOpts;
+  const child = spawn("/bin/bash", [scriptPath], {
+    cwd,
+    env,
+    detached: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const buf = createOutputBuffer();
+  collectOutput(child, buf);
+  return new Promise<HostInitScriptResult>((resolve) => {
+    const ctx: LifecycleCtx = { child, scriptPath, buf, resolve };
+    armTimeout(ctx, timeoutMs);
+    wireErrorHandler(ctx);
+    wireCloseHandler(ctx);
+  });
+}
+
+/** Mutable buffer that caps collected stdout / stderr at OUTPUT_TRUNCATE bytes.
+ *  Internal mutable state via closure — the returned object exposes append and
+ *  snapshot but no live strings (avoids getter reactivity footguns). */
+interface OutputBuffer {
+  readonly append: (stream: "stdout" | "stderr", chunk: string) => void;
+  readonly snapshot: () => { stdout: string; stderr: string };
+}
+
+function createOutputBuffer(): OutputBuffer {
+  let stdout = "";
+  let stderr = "";
+  return {
+    append: (stream, chunk) => {
+      if (stream === "stdout" && stdout.length < OUTPUT_TRUNCATE) {
+        stdout += chunk;
+      } else if (stream === "stderr" && stderr.length < OUTPUT_TRUNCATE) {
+        stderr += chunk;
+      }
+    },
+    snapshot: () => ({
+      stdout: stdout.slice(0, OUTPUT_TRUNCATE),
+      stderr: stderr.slice(0, OUTPUT_TRUNCATE),
+    }),
+  };
+}
+
+function collectOutput(
+  child: ReturnType<typeof spawn>,
+  buf: OutputBuffer
+): void {
+  child.stdout?.setEncoding("utf8");
+  child.stderr?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk: string) => buf.append("stdout", chunk));
+  child.stderr?.on("data", (chunk: string) => buf.append("stderr", chunk));
+}
+
+/** Lifecycle state passed through spawn event handlers — single object so each
+ *  handler stays short (≤30 lines per ACR complexity anti-drift). */
+interface LifecycleCtx {
+  readonly child: ReturnType<typeof spawn>;
+  readonly scriptPath: string;
+  readonly buf: ReturnType<typeof createOutputBuffer>;
+  readonly resolve: (r: HostInitScriptResult) => void;
+  // Mutable bookkeeping — settled prevents double-resolve; timer is the
+  // pending timeout handle that armTimeout may install. Both fields start
+  // undefined on the freshly constructed object and are populated by the
+  // first call to settle / armTimeout.
+  settled?: boolean;
+  timer?: NodeJS.Timeout;
+}
+
+function settle(ctx: LifecycleCtx, result: HostInitScriptResult): void {
+  if (ctx.settled) return;
+  ctx.settled = true;
+  if (ctx.timer !== undefined) clearTimeout(ctx.timer);
+  ctx.resolve(result);
+}
+
+function armTimeout(ctx: LifecycleCtx, timeoutMs: number): void {
+  if (timeoutMs <= 0) return;
+  ctx.timer = setTimeout(() => {
+    const pid = ctx.child.pid;
+    if (pid !== undefined) {
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        /* ESRCH 等忽略 */
+      }
+    }
+    const snap = ctx.buf.snapshot();
+    settle(ctx, {
+      ran: true,
+      scriptPath: ctx.scriptPath,
+      exitCode: null,
+      stdout: snap.stdout,
+      stderr: snap.stderr,
+      warn: `host init: timed out after ${timeoutMs}ms; killed`,
+    });
+  }, timeoutMs);
+  if (ctx.timer.unref) ctx.timer.unref();
+}
+
+function wireErrorHandler(ctx: LifecycleCtx): void {
+  ctx.child.once("error", (err) => {
+    settle(ctx, {
+      ran: true,
+      scriptPath: ctx.scriptPath,
       exitCode: null,
       stdout: "",
       stderr: "",
-    };
-  }
-  const cwd = opts.cwd ?? process.cwd();
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const env = opts.env ?? process.env;
-
-  return new Promise<HostInitScriptResult>((resolve) => {
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    let timer: NodeJS.Timeout | undefined;
-
-    const child = spawn("/bin/bash", [scriptPath], {
-      cwd,
-      env,
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    const finish = (result: HostInitScriptResult): void => {
-      if (settled) return;
-      settled = true;
-      if (timer !== undefined) clearTimeout(timer);
-      resolve(result);
-    };
-
-    child.stdout?.setEncoding("utf8");
-    child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => {
-      if (stdout.length < OUTPUT_TRUNCATE) stdout += chunk;
-    });
-    child.stderr?.on("data", (chunk: string) => {
-      if (stderr.length < OUTPUT_TRUNCATE) stderr += chunk;
-    });
-
-    if (timeoutMs > 0) {
-      timer = setTimeout(() => {
-        const pid = child.pid;
-        if (pid !== undefined) {
-          try {
-            process.kill(-pid, "SIGKILL");
-          } catch {
-            /* ESRCH 等忽略 */
-          }
-        }
-        finish({
-          ran: true,
-          scriptPath,
-          exitCode: null,
-          stdout: stdout.slice(0, OUTPUT_TRUNCATE),
-          stderr: stderr.slice(0, OUTPUT_TRUNCATE),
-          warn: `host init: timed out after ${timeoutMs}ms; killed`,
-        });
-      }, timeoutMs);
-      if (timer.unref) timer.unref();
-    }
-
-    child.once("error", (err) => {
-      finish({
-        ran: true,
-        scriptPath,
-        exitCode: null,
-        stdout: "",
-        stderr: "",
-        warn: `host init: spawn failed: ${err.message}`,
-      });
-    });
-
-    child.once("close", (code, signal) => {
-      const truncatedStdout = stdout.slice(0, OUTPUT_TRUNCATE);
-      const truncatedStderr = stderr.slice(0, OUTPUT_TRUNCATE);
-      if (signal !== null) {
-        finish({
-          ran: true,
-          scriptPath,
-          exitCode: null,
-          stdout: truncatedStdout,
-          stderr: truncatedStderr,
-          warn: `host init: terminated by signal ${signal}`,
-        });
-        return;
-      }
-      if (code !== 0) {
-        finish({
-          ran: true,
-          scriptPath,
-          exitCode: code,
-          stdout: truncatedStdout,
-          stderr: truncatedStderr,
-          warn: `host init: exit code ${code}`,
-        });
-        return;
-      }
-      finish({
-        ran: true,
-        scriptPath,
-        exitCode: code,
-        stdout: truncatedStdout,
-        stderr: truncatedStderr,
-      });
+      warn: `host init: spawn failed: ${err.message}`,
     });
   });
+}
+
+function wireCloseHandler(ctx: LifecycleCtx): void {
+  ctx.child.once("close", (code, signal) => {
+    const snap = ctx.buf.snapshot();
+    settle(ctx, {
+      ran: true,
+      scriptPath: ctx.scriptPath,
+      exitCode: signal === null ? code : null,
+      stdout: snap.stdout,
+      stderr: snap.stderr,
+      ...closeReason(signal, code),
+    });
+  });
+}
+
+/** Map child-process close outcome to the warn / silent piece of the result. */
+function closeReason(
+  signal: NodeJS.Signals | null,
+  code: number | null
+): { warn?: string } {
+  if (signal !== null) {
+    return { warn: `host init: terminated by signal ${signal}` };
+  }
+  if (code !== 0) {
+    return { warn: `host init: exit code ${code}` };
+  }
+  return {};
 }
 
 /**
