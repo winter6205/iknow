@@ -297,12 +297,13 @@ describe("TuiApp 端到端（tracer bullet）", () => {
         }),
       ]);
       await app.ready();
-      // ContextBar 兜底行（null usage）：`│ ctx —`
+      // ContextBar 首轮前（null usage）：始终显示 0% 框（`│ ctx ░░… 0% ok`）
       await waitFor(
         () => app.lastOutput().includes("│ ctx"),
         8000,
         "contextbar-null"
       );
+      expect(app.lastOutput()).toContain("0% ok");
 
       // 提交消息 → turn 完成，ContextBar 显示真值（1% → ok）
       await app.type("你好\r");
@@ -332,10 +333,11 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     LONG_TIMEOUT
   );
 
-  // T4 用户设计反馈：StatusBar 收敛（state + 版本 + 后台标记保留；
-  // 会话计数 / uuid / 主界面摘要移除）。
+  // 用户 2026-08-07 设计反馈：底部 StatusBar 整条移除（空闲/版本号/运行态
+  // 全部不需要——版本号 banner 已有，前台运行态 ContextBar 脉动承担，
+  // 「后台运行中」bg 标记保留为独立条件行，无 bg 会话时不显示）。
   it(
-    "T4: StatusBar 收敛 — 空闲 + 版本保留；会话计数/uuid/新会话摘要移除",
+    "StatusBar 移除 — 底部无空闲/版本号/运行态；sessionCount/uuid/新会话摘要本就不出现",
     async () => {
       const app = makeApp([assistantResult({ texts: ["hi"] })]);
       await app.ready();
@@ -349,15 +351,19 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       await delay(200); // 等 setSessions(turnFinished) 落地
 
       const out = app.lastOutput();
-      // 保留：state（idle → 空闲）+ 版本号
-      expect(out).toContain("空闲");
-      expect(out).toContain(`v${VERSION}`);
+      // 移除：空闲 / 运行中 / 后台等运行态（不在底部显示）
+      expect(out).not.toContain("空闲");
+      expect(out).not.toContain("运行中");
+      // 移除：版本号 vVERSION（banner 已有）
+      expect(out).not.toContain(`v${VERSION}`);
       // 移除：会话计数段（不再出现 `会话 N` 拼接）
       expect(out).not.toMatch(/会话\s+\d+/);
-      // 移除：uuid 段（StatusBar 不再展示 `vVERSION · <uuid>`）
-      expect(out).not.toMatch(new RegExp(`v${VERSION}\\s+·\\s+\\S{20,}`));
       // 移除：主界面摘要（新会话兜底字样）
       expect(out).not.toContain("新会话");
+      // 无 bg 会话时，「后台运行中」bg 标记不显示
+      expect(out).not.toContain("后台运行中");
+      // ContextBar 始终显示（首轮已完成 → 1%）
+      expect(out).toContain("ctx ");
     },
     LONG_TIMEOUT
   );

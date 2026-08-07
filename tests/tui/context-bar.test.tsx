@@ -3,13 +3,15 @@
  *
  * T4 (#TBD): ContextBar 渲染冒烟（ink `renderToString` 同 render-smoke 模式）。
  * 数值语义（裁决 1）：used = input + cacheRead + cacheCreation，cache null → 0；
- * pct = round(used / contextWindow * 100)。三档色阈值 <50% bgRunning /
+ * pct = round(used / contextWindow * 100)。三档色阈值 <50% CTX_BLUE 淡蓝 /
  * 50-80% running / >80% error。narrow (cols<40) 降级仅 `ctx NN%`。
  * 标签 `ctx` / 状态 ok / warn / alert（用户 2026-08-07 反馈：不用中文）。
+ * 始终显示框：lastUsage null（首轮前）也渲染完整 0% 框（不是横线）。
  */
 import { describe, expect, it } from "vitest";
 import { renderToString } from "ink";
 import {
+  CTX_BLUE,
   ContextBar,
   ctxUsed,
   contextColor,
@@ -75,8 +77,8 @@ describe("ContextBar 纯函数（裁决 1 数值语义）", () => {
   });
 
   it("contextColor：阈值边界 <50/=50/>80", () => {
-    expect(contextColor(0)).toBe(tuiPalette.bgRunning);
-    expect(contextColor(49)).toBe(tuiPalette.bgRunning);
+    expect(contextColor(0)).toBe(CTX_BLUE);
+    expect(contextColor(49)).toBe(CTX_BLUE);
     expect(contextColor(50)).toBe(tuiPalette.running);
     expect(contextColor(80)).toBe(tuiPalette.running);
     expect(contextColor(81)).toBe(tuiPalette.error);
@@ -85,7 +87,7 @@ describe("ContextBar 纯函数（裁决 1 数值语义）", () => {
 });
 
 describe("ContextBar 渲染（ink renderToString）", () => {
-  it("null lastUsage → `ctx —` 兜底（无 band / 无 %）", async () => {
+  it("null lastUsage → 始终显示 0% 框（完整 band + ok + 0.0k/window，不是横线）", async () => {
     const out = await renderToString(
       <ContextBar
         lastUsage={null}
@@ -95,20 +97,19 @@ describe("ContextBar 渲染（ink renderToString）", () => {
       />
     );
     const plain = stripAnsi(out);
-    expect(plain).toContain("│ ctx —");
-    expect(plain).not.toContain("%");
-    expect(plain).not.toContain("k/");
+    expect(plain).toContain("│ ctx ░░░░░░░░░░ 0% ok 0.0k/10.0k");
+    expect(plain).not.toContain("—");
   });
 
-  it("三档色：0% / 49% ok(bgRunning) / 50% / 80% warn(running) / 81% alert(error)", async () => {
+  it("三档色：0% / 49% ok(淡蓝 CTX_BLUE) / 50% / 80% warn(running) / 81% alert(error)", async () => {
     // window=10000，构造 used 0/4900/5000/8000/8100 命中阈值。
     const cases: Array<{
       readonly used: number;
       readonly expectStatus: string;
       readonly expectHex: string;
     }> = [
-      { used: 0, expectStatus: "ok", expectHex: tuiPalette.bgRunning },
-      { used: 4900, expectStatus: "ok", expectHex: tuiPalette.bgRunning },
+      { used: 0, expectStatus: "ok", expectHex: CTX_BLUE },
+      { used: 4900, expectStatus: "ok", expectHex: CTX_BLUE },
       { used: 5000, expectStatus: "warn", expectHex: tuiPalette.running },
       { used: 8000, expectStatus: "warn", expectHex: tuiPalette.running },
       { used: 8100, expectStatus: "alert", expectHex: tuiPalette.error },

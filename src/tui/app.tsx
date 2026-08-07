@@ -242,11 +242,11 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   }, [view, activeKey, sessions, initial, cols, props.cwd, props.dataDir]);
 
   const viewportRows = useMemo(() => {
-    // 固定行扣减：状态栏（1） / 输入框（2：圆角线框 1 + hint 1 视情况）
-    // / ask 槽（1）/ notice（按 lines）。滚动指示器（顶部 / fold）的行账由
-    // ChatView 内部从 viewportRows 扣除（INDICATOR_ROWS，SSOT）——调用方
-    // 传入的是聊天区域总预算，不再预扣指示行（旧实现预扣 1 但指示实测占
-    // 2 行，是 #189 渲染漂移的 chrome 账目根因）。
+    // 固定行扣减：输入框（2：圆角线框 1 + hint 1 视情况）/ ask 槽（1）/
+    // notice（按 lines）。状态栏已于用户 2026-08-07 反馈移除（空闲/版本号/
+    // 运行态全部不需要——版本号 banner 已有，运行态 ContextBar 脉动承担，
+    // 「后台运行中」bg 标记保留为独立条件行 +1）。滚动指示器（顶部 / fold）
+    // 的行账由 ChatView 内部从 viewportRows 扣除（INDICATOR_ROWS，SSOT）。
     //
     // 方案 B（最终定稿）：banner 已归入 ChatView 内部 row window 作为第一段
     // content，**不再从 viewport 扣减**——否则空会话完整 banner（≈16 行）会
@@ -255,7 +255,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     // 滚动（用户 2026-08-07 复看：「下面对话框要固定，消息跟图标可以向上
     // 滚动」）。ChatView 内部对 banner/message 的行窗口做 clamp 兜底。
     const noticeLines = notice?.lines.length ?? 0;
-    const reserved = 1 + 2 + 1 + noticeLines; // 状态栏 + 输入 + ask + notice
+    const reserved = 2 + 1 + noticeLines; // 输入 + ask + notice（状态栏移除）
     return Math.max(5, rows - reserved);
   }, [rows, notice]);
 
@@ -943,38 +943,15 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           cols={cols}
         />
       )}
-      <StatusBar active={active} bgSession={bgSession} />
-    </Box>
-  );
-}
-
-function StatusBar(props: {
-  readonly active: TuiSessionState;
-  readonly bgSession: TuiSessionState | undefined;
-}): ReactElement {
-  const pal = tuiPalette;
-  const state =
-    props.active.runState === "idle"
-      ? "空闲"
-      : props.active.runState === "running-fg"
-        ? "运行中"
-        : "后台";
-  // 用户设计反馈（T4 实施中追加）：主界面底部仅保留运行态 + 版本号 +
-  // ContextBar。会话计数 / uuid / active 摘要迁入 list-view（list-view.tsx
-  // 已是 summary 显示面）。后台运行中保留轻量标记（不带摘要）。
-  return (
-    <Box flexWrap="wrap">
-      <Box marginRight={2}>
-        <Text color={pal.dim}>{state}</Text>
-      </Box>
-      {props.bgSession && (
-        <Box marginRight={2}>
+      {/* 后台会话运行标记（SC5）：存在 running-bg 会话时单行 dim 提示。原
+          StatusBar 的空闲/版本号/运行态已按用户 2026-08-07 反馈移除（版本号
+          banner 已有，前台运行态由 ContextBar 脉动承担），仅保留这一条信息
+          承载 —— 后台 turn 在 UI 别处无显示。 */}
+      {bgSession && (
+        <Box>
           <Text color={pal.dim}>后台运行中</Text>
         </Box>
       )}
-      <Box>
-        <Text color={pal.dim}>v{VERSION}</Text>
-      </Box>
     </Box>
   );
 }

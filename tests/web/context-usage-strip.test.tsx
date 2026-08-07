@@ -3,13 +3,14 @@
  *
  * T6 (#TBD): ContextUsageStrip 渲染断言 — 三档色阈值 × null 兜底 × cache null。
  * 标签 `ctx` / 状态 ok / warn / alert（用户 2026-08-07 反馈：不用中文）。
+ * 始终显示框：usage 或 contextWindow null（首轮前）也渲染完整 0% 框。
  *
  * 复刻 TUI context-bar.test.tsx 的 renderToString 模式：使用
  * react-dom/server 的 renderToStaticMarkup（tests/web/markdown-copy.test.ts 同款，
  * H1 acceptance 显式允许；web 包不带测试框架，root vitest 跑 node env）。
  *
- * 三档色阈值（本计划裁决 7）：<50% #7d8a82 安全 / 50-80% #d9a343 注意 /
- * >80% #c95d47 告警，与 TUI theme.ts:61-62 同值。
+ * 三档色阈值（本计划裁决 7 + 用户 2026-08-07 反馈淡蓝）：<50% #7ab8ff ok /
+ * 50-80% #d9a343 warn / >80% #c95d47 alert，与 TUI context-bar.tsx 同值。
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
@@ -51,8 +52,8 @@ describe("ContextUsageStrip — 三档色阈值", () => {
     readonly status: string;
     readonly color: string;
   }> = [
-    { name: "pct 0 — ok", pct: 0, status: "ok", color: "#7d8a82" },
-    { name: "pct 49 — ok", pct: 49, status: "ok", color: "#7d8a82" },
+    { name: "pct 0 — ok", pct: 0, status: "ok", color: "#7ab8ff" },
+    { name: "pct 49 — ok", pct: 49, status: "ok", color: "#7ab8ff" },
     { name: "pct 50 — warn", pct: 50, status: "warn", color: "#d9a343" },
     { name: "pct 80 — warn", pct: 80, status: "warn", color: "#d9a343" },
     { name: "pct 81 — alert", pct: 81, status: "alert", color: "#c95d47" },
@@ -75,22 +76,25 @@ describe("ContextUsageStrip — 三档色阈值", () => {
   }
 });
 
-describe("ContextUsageStrip — null 兜底", () => {
-  it("usage === null → `ctx —`", () => {
+describe("ContextUsageStrip — null 兜底（始终显示 0% 框）", () => {
+  it("usage === null → 完整 0% 框（不是横线）", () => {
     const html = render({ usage: null, contextWindow: 200000 });
-    assert.ok(html.includes("ctx —"));
-    assert.ok(!html.includes("ok"));
-    assert.ok(!html.includes("warn"));
-    assert.ok(!html.includes("alert"));
+    assert.ok(html.includes("0%"));
+    assert.ok(html.includes("ok"));
+    assert.ok(html.includes("0.0k/200.0k"));
+    assert.ok(html.includes("█".repeat(0)));
+    assert.ok(!html.includes("—"));
   });
 
-  it("contextWindow === null → `ctx —`", () => {
+  it("contextWindow === null → 完整 0% 框", () => {
     const html = render({
       usage: usage(1234),
       contextWindow: null,
     });
-    assert.ok(html.includes("ctx —"));
-    assert.ok(!html.includes("ok"));
+    assert.ok(html.includes("0%"));
+    assert.ok(html.includes("ok"));
+    assert.ok(html.includes("0.0k/0.0k"));
+    assert.ok(!html.includes("—"));
   });
 });
 
@@ -135,6 +139,6 @@ describe("ContextUsageStrip — sending prop", () => {
       sending: true,
     });
     assert.ok(html.includes("ok"));
-    assert.ok(html.includes("#7d8a82"));
+    assert.ok(html.includes("#7ab8ff"));
   });
 });
