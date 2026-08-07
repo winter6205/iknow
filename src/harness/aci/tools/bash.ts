@@ -4,6 +4,7 @@ import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
 import { isAllowedCommand, isDangerousCommand } from "../permission.js";
+import { commandContainsSensitivePath } from "../../permission/hard-walls.js";
 import {
   BASE_ENV_WHITELIST,
   createBwrapFence,
@@ -77,6 +78,10 @@ export function createBashTool(cwd: string): AciToolDef {
     if (isDangerousCommand(command))
       throw new ToolExecutionError(
         `bash: dangerous command rejected: ${command}`
+      );
+    if (commandContainsSensitivePath(command))
+      throw new ToolExecutionError(
+        `bash: command targets a sensitive path: ${command}`
       );
     if (!isAllowedCommand(command))
       throw new ToolExecutionError(

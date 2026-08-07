@@ -100,6 +100,7 @@ export {
   isDangerousCommand,
   findDangerousPattern,
   firstToken,
+  commandContainsSensitivePath,
 } from "../permission/hard-walls.js";
 
 /* -----------------------------------------------------------------------------
