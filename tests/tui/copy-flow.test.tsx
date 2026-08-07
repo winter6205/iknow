@@ -158,11 +158,15 @@ describe("TuiApp 鼠标拖选复制（#238）", () => {
         8000,
         "resumed-session-visible"
       );
-      // 在 assistant 文本行上按下并拖动（x=5..20, y 取消息区域）。
-      // 内容流起始 = 终端行 1；空会话 banner 完整，这里 resume 有消息后
-      // banner = 单行短 banner，消息区紧跟其后。
-      const pressY = 2; // 尽量选消息区（内容流第 1 行附近）
-      const dragY = 2;
+      // 在 assistant 文本行上按下并拖动（x=5..20, y 取**消息区**）。
+      // STICKY：banner 是独立 sticky 头恒完整（≈15 行），占据终端 y=[1,15]；
+      // 消息区窗口从终端 y=bannerRows+1 起。pressY/dragY 必须落在消息区
+      // **文本行**（不是 message margin 空白行，否则 highlightRangeForLine
+      // 因 anchor.col > visualWidth 返回 null，无 \x1b[7m）。实测 resume
+      // 会话行账：y=16 = ❯ 请讲个故事，y=17 = " " margin，y=18 = 第一行故事内容，
+      // y=19 = " " margin，y=20 = 第二行故事结尾。y=18 命中助理文本。
+      const pressY = 18; // banner 15 + 3 = 助理文本首行
+      const dragY = 18;
       stdin.write(`\x1b[<0;5;${pressY}M`);
       await delay(50);
       stdin.write(`\x1b[<32;20;${dragY}M`);
@@ -189,12 +193,12 @@ describe("TuiApp 鼠标拖选复制（#238）", () => {
         8000,
         "resumed-session-visible"
       );
-      // 按下 → 拖动 → 释放
-      stdin.write("\x1b[<0;3;2M");
+      // 按下 → 拖动 → 释放（落在消息区文本行：y=18 = 助理文本首行）
+      stdin.write("\x1b[<0;3;18M");
       await delay(50);
-      stdin.write("\x1b[<32;10;2M");
+      stdin.write("\x1b[<32;10;18M");
       await delay(50);
-      stdin.write("\x1b[<3;10;2m");
+      stdin.write("\x1b[<3;10;18m");
       // notice 文案三态（ok → "已复制"；fallback → "文本已写入"；error → "复制失败"）
       await waitFor(
         () => /(已复制|文本已写入|复制失败)/.test(out()),
@@ -215,12 +219,12 @@ describe("TuiApp 鼠标拖选复制（#238）", () => {
         8000,
         "resumed-session-visible"
       );
-      // 拖选 → 自动复制
-      stdin.write("\x1b[<0;3;2M");
+      // 拖选 → 自动复制（落在消息区文本行：y=18 = 助理文本首行）
+      stdin.write("\x1b[<0;3;18M");
       await delay(50);
-      stdin.write("\x1b[<32;10;2M");
+      stdin.write("\x1b[<32;10;18M");
       await delay(50);
-      stdin.write("\x1b[<3;10;2m");
+      stdin.write("\x1b[<3;10;18m");
       await waitFor(
         () => /(已复制|文本已写入|复制失败)/.test(out()),
         8000,

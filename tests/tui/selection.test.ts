@@ -58,7 +58,13 @@ describe("normalize / isEmpty / rowRange", () => {
 });
 
 describe("terminalToCellPos", () => {
-  const win: ContentWindow = { startRow: 10, endRow: 20, cols: 80 };
+  // 回归：bannerRows=0 → 与旧语义逐位等价（banner 不参与 y 上界）。
+  const win: ContentWindow = {
+    startRow: 10,
+    endRow: 20,
+    cols: 80,
+    bannerRows: 0,
+  };
 
   it("(1, y=1) → (row=10, col=0)（窗口第一可见行）", () => {
     expect(terminalToCellPos(1, 1, win)).toEqual(cell(10, 0));
@@ -77,6 +83,38 @@ describe("terminalToCellPos", () => {
   });
   it("x 越左界（<1）→ clamp 到 0", () => {
     expect(terminalToCellPos(0, 5, win)).toEqual(cell(14, 0));
+  });
+});
+
+describe("terminalToCellPos（STICKY banner 偏移）", () => {
+  // STICKY：bannerRows=14，消息窗口 startRow=0（消息段 0-based）。
+  // 终端 y ∈ [1, 14] 落 banner → row = y - 1（banner 0-based）；
+  // 终端 y ∈ [15, 14 + (endRow-startRow)] 落消息段 → row = bannerRows +
+  // startRow + (y - bannerRows - 1) = 内容流行号（与 flatContentLines 同口径）。
+  const win: ContentWindow = {
+    startRow: 0,
+    endRow: 6,
+    cols: 80,
+    bannerRows: 14,
+  };
+
+  it("y=1（banner 顶）→ row=0（banner 段 0-based）", () => {
+    expect(terminalToCellPos(5, 1, win)).toEqual(cell(0, 4));
+  });
+  it("y=14（banner 底）→ row=13（banner 段最后一行）", () => {
+    expect(terminalToCellPos(5, 14, win)).toEqual(cell(13, 4));
+  });
+  it("y=15（消息段首行）→ row=14（内容流 banner+0 = bannerRows + startRow）", () => {
+    expect(terminalToCellPos(5, 15, win)).toEqual(cell(14, 4));
+  });
+  it("y=20（消息段末行）→ row=19（bannerRows + (endRow-1)）", () => {
+    expect(terminalToCellPos(5, 20, win)).toEqual(cell(19, 4));
+  });
+  it("y=21（越上界 = bannerRows + visibleRows）→ null", () => {
+    expect(terminalToCellPos(5, 21, win)).toBeNull();
+  });
+  it("y=0（越下界）→ null", () => {
+    expect(terminalToCellPos(5, 0, win)).toBeNull();
   });
 });
 

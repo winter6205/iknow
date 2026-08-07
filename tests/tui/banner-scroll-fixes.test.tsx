@@ -136,9 +136,11 @@ describe("banner + scroll 修复回归（2026-08-07）", () => {
     );
     try {
       await delay(400);
-      // 等 mount + initialSession 渲染完。contentRows = banner(15~16) + user(2) +
-      // assistant(40 + 1 = 41) ≈ 58~59。viewportRows = 24 - reserved(4) = 20。
-      // maxScroll ≈ 38。scroll=0：窗口 [~38, 58)，最新末段「内容第40行」可见。
+      // 等 mount + initialSession 渲染完。STICKY banner：banner ≈15（resume 后
+      // banner = 完整眼 15 行），消息段 messageRows = user(2) + assistant(40 + 1
+      // = 41) = 43。viewportRows = 24 - reserved(4) = 20 → messageViewport =
+      // 20 - 15 = 5。maxScroll = 43 - 5 = 38。scroll=0：消息窗口 [38, 43) 贴底，
+      // 最新末段「内容第40行」可见（banner 恒见 15 行，不进窗口数学）。
       // 用 assistant 内容行作窗口 sentinel（「内容第40行」只出现在 assistant
       // 内容里，状态栏会话摘要 = user 文本，不冲突）。
       await waitFor(
