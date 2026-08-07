@@ -276,7 +276,8 @@ export interface ChatViewProps {
    *
    * STICKY：`startRow`/`endRow` 仅覆盖**消息段**（0-based 消息坐标，不含
    * banner）。`bannerRows` = sticky banner 高度，app 层 `terminalToCellPos`
-   * 用它把 SGR y 映射回内容流行号；banner 行锁定不可被拖选。
+   * 用它把 SGR y 映射回内容流行号；banner 行与消息一样可被拖选（用户
+   * 决策 b：banner 也是内容，复制 logo/眼睛文本允许）。
    * 不传 = 无选区（纯键盘滚动场景）。
    */
   readonly onWindow?: (win: {
@@ -379,7 +380,8 @@ export function ChatView(props: ChatViewProps): ReactElement {
   // commit 期重复调用会写同一个值。
   // STICKY：窗口范围仅覆盖消息段 [startRow, endRow)（0-based 消息坐标，不含
   // banner）。app 层 terminalToCellPos 依 bannerRows 把 SGR y 映射回内容流行号；
-  // banner 行锁定不可被拖选（固定 chrome）。
+  // banner 行可拖选（决策 b）：terminalToCellPos 对 banner 段返回 row=y-1，
+  // 选区复制时把 banner/logo 字符一并纳入（用户允许）。
   props.onWindow?.({
     startRow,
     endRow,
