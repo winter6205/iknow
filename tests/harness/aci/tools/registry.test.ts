@@ -19,7 +19,10 @@
  * 故只锁正向一致;分歧在装配期 by-construction 失败。memory 工具是条件
  * 装配的(对照名单按 memoryDir 镜像过滤)。
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   createDefaultAciRegistry,
   ACI_TOOLSET_NAMES,
@@ -130,6 +133,62 @@ describe("createDefaultAciRegistry — 溢出/边界", () => {
         sandboxRoot: "/nonexistent/does/not/exist",
       })
     ).not.toThrow();
+  });
+});
+
+describe("createDefaultAciRegistry — onEdit 透传(#251)", () => {
+  let scratch: string;
+
+  beforeEach(async () => {
+    scratch = await mkdtemp(join(tmpdir(), "aci-reg-onedit-"));
+  });
+
+  afterEach(async () => {
+    await rm(scratch, { recursive: true, force: true });
+  });
+
+  it("onEdit → edit_file 写盘后回调被调一次,参数为被修改文件的绝对路径", async () => {
+    const file = join(scratch, "a.ts");
+    await writeFile(file, "const a = 1;\n", "utf8");
+    const calls: string[] = [];
+    const reg = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: scratch,
+      onEdit: (f) => calls.push(f),
+    });
+    const tool = reg.catalog.get("edit_file");
+    expect(tool).toBeDefined();
+    const result = (await tool!.handler({
+      path: file,
+      old_str: "const a = 1;",
+      new_str: "const a = 2;",
+    })) as string;
+    expect(calls.length).toBe(1);
+    expect(calls[0]).toBe(file);
+    expect(result).toBe(
+      `[edit_file] replaced 1 occurrence(s) in ${join(scratch, "a.ts")}`
+    );
+    expect(await readFile(file, "utf8")).toBe("const a = 2;\n");
+  });
+
+  it("onEdit 未传 → edit_file byte-identical(行为与改动前一致)", async () => {
+    const file = join(scratch, "b.ts");
+    await writeFile(file, "x = 1\n", "utf8");
+    const reg = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: scratch,
+    });
+    const tool = reg.catalog.get("edit_file");
+    expect(tool).toBeDefined();
+    const result = (await tool!.handler({
+      path: file,
+      old_str: "x = 1",
+      new_str: "x = 2",
+    })) as string;
+    expect(result).toBe(
+      `[edit_file] replaced 1 occurrence(s) in ${join(scratch, "b.ts")}`
+    );
+    expect(await readFile(file, "utf8")).toBe("x = 2\n");
   });
 });
 

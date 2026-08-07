@@ -79,6 +79,8 @@ export interface CreateDefaultAciRegistryOptions {
   readonly sandboxRoot: string;
   /** 记忆库根目录(#228 layer 3)。缺席时 memory_recall / memory_save 不入注册表。 */
   readonly memoryDir?: string;
+  /** #251 onEdit 接缝:edit_file 写盘成功后回调(装配层接 LSP notifier)。 */
+  readonly onEdit?: (file: string) => void;
 }
 
 /**
@@ -110,6 +112,7 @@ export function createDefaultAciRegistry(
   opts: CreateDefaultAciRegistryOptions
 ): AciRegistry {
   const { env, sandboxRoot } = opts;
+  const onEdit = opts.onEdit;
   const proxyUrl = env.web.proxy;
   const searchUrl = env.web.searchUrl;
   const memoryDir = opts.memoryDir;
@@ -128,7 +131,7 @@ export function createDefaultAciRegistry(
     read_file: () => createReadFileTool(sandboxRoot),
     grep: () => createGrepTool(sandboxRoot),
     glob: () => createGlobTool(sandboxRoot),
-    edit_file: () => createEditFileTool(sandboxRoot),
+    edit_file: () => createEditFileTool(sandboxRoot, { onEdit }),
     write_file: () => createWriteFileTool(sandboxRoot),
     web_fetch: () => createWebFetchTool({ proxyUrl }),
     web_search: () =>

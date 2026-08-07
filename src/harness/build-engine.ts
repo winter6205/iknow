@@ -24,6 +24,7 @@ import {
 import { createAciExecutor } from "./aci/index.js";
 import { createPermissionPolicy } from "./permission/policy.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
+import { createLspNotifier } from "./lsp/notifier.js";
 import type { Registry } from "./tools/types.js";
 import { homedir } from "node:os";
 import type { AskUser } from "./permission/types.js";
@@ -125,10 +126,15 @@ export async function buildHarnessEngine(
   // 件,含 memory_recall + memory_save);disabled(ask)时不传 memoryDir(reg.inner 8
   // 件)。registry / executor / catalog 因此三方一致,不再手工过滤(SC9 保留
   // `memoryEnabled ? ... : undefined` 形态)。
+  // #251 LSP 联动缝:edit_file 写盘成功后由装配层注入 lspNotifier.invalidate
+  // 作为 registry 的 onEdit 回调(notifier 内部 fire-and-forget + 失败降级,
+  // 详见 src/harness/lsp/notifier.ts)。
+  const lspNotifier = createLspNotifier({ directory: process.cwd() });
   const reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
     ...(memoryEnabled ? { memoryDir } : undefined),
+    onEdit: (file) => lspNotifier.invalidate(file),
   });
   const baseExecutor = createExecutor(reg.inner);
   // 5-step permission middleware: 危险命令由硬墙无条件拦截(#122)。
