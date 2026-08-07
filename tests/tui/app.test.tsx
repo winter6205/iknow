@@ -625,22 +625,20 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     LONG_TIMEOUT
   );
 
-  // #189 行为反转回归保险：app 已移除鼠标捕获（DECSET 1000/1006），鼠标
-  // 滚轮交由终端原生 scrollback 接管。在 render 前就挂 raw 监听，断言
-  // stdout 从挂载到一次交互全过程中从未收到 DECSET 启用序列
-  // \x1b[?1000h / \x1b[?1006h（旧实现会在挂载 useEffect 里写）。
+  // 滚轮支持回归：app 挂载 useEffect 启用 DECSET 1000/1006 SGR 滚轮报告（让
+  // 滚轮驱动 chatScroll，与 PgUp/PgDn 同条滚动状态）。在 render 前就挂 raw
+  // 监听，断言 stdout 出现 DECSET 启用序列（mount 阶段一次，不是每次 re-render）。
   it(
-    "#189：鼠标截胡已移除 —— stdout 不写 DECSET 1000/1006 启用序列",
+    "滚轮捕获：mount 写一次 DECSET 1000/1006 启用序列（不重复）",
     async () => {
       const bridge = createTuiBridge({
         dataDir: baseDir,
-        deps: makeDeps([assistantResult({ texts: ["no-mouse"] })]),
+        deps: makeDeps([assistantResult({ texts: ["mouse-on"] })]),
         inflight: createInflightRegistry(),
       });
       const askBridge = createTuiAskUserBridge();
       const toolEventSink = createToolEventSink();
       const rawWrites: string[] = [];
-      // render 前挂 raw 监听（保留 ESC 序列，不用 strip）
       const rawListener = (chunk: Buffer | string): void =>
         rawWrites.push(typeof chunk === "string" ? chunk : chunk.toString());
       stdout.on("data", rawListener);
@@ -661,23 +659,32 @@ describe("TuiApp 端到端（tracer bullet）", () => {
         }
       );
       instances.push(instance);
-      await delay(400); // 等 mount + useEffect（旧代码在此阶段写 DECSET）
+      await delay(400); // 等 mount + useEffect
       await waitFor(
         () => strip(rawWrites.join("")).includes("iknow"),
         8000,
         "startup"
       );
-      // 触发一次提交，覆盖交互路径（旧代码 stdin.on('data') 常驻监听）
+      // 触发一次提交（验证 useEffect 不因 re-render 再写 DECSET）
       for (const ch of "hi\r") {
         stdin.write(ch);
         await delay(10);
       }
       await waitFor(() => bridge.inflight.ids().size === 0, 8000, "turn-done");
       await delay(300);
-      stdout.removeListener("data", rawListener);
       const joined = rawWrites.join("");
-      expect(joined).not.toContain("\x1b[?1000h");
-      expect(joined).not.toContain("\x1b[?1006h");
+      // mount 写一次 1000h/1006h；不应被 effect 多次触发。
+      const enableCount = (joined.match(/\x1b\[\?1000h/g) ?? []).length;
+      expect(enableCount, "mount 写一次 1000h").toBe(1);
+      // unmount 会再写 DECRST（effect cleanup 写 1000l/1006l）—— 但 listener
+      // 仍挂着，理应看到。instances.push 已经挂了 afterEach，instance 此时
+      // 仍在这里，手动 unmount 即可。
+      instance.unmount();
+      await delay(150);
+      stdout.removeListener("data", rawListener);
+      const joinedFull = rawWrites.join("");
+      const disableCount = (joinedFull.match(/\x1b\[\?1006l/g) ?? []).length;
+      expect(disableCount, "unmount 写一次 1006l").toBeGreaterThanOrEqual(1);
     },
     LONG_TIMEOUT
   );
@@ -824,6 +831,90 @@ describe("TuiApp 端到端（tracer bullet）", () => {
         () => strip(out.join("").slice(endA)).includes("A0 resume 内容第24行"),
         8000,
         "resume-end-restores-tail"
+      );
+    },
+    LONG_TIMEOUT
+  );
+
+  // 滚轮驱动 chatScroll（朴素滚动）：SGR 上滚 → 窗口上移（末段被裁）；
+  // SGR 下滚 → 窗口回滚（末段恢复）。与 PgUp/PgDn 同一条滚动状态。
+  it(
+    "滚轮：SGR 上滚 → 末段被裁；SGR 下滚 → 末段恢复（同 chatScroll）",
+    async () => {
+      const { attachSession } = await import("../../src/tui/session-state.js");
+      const longBody = Array.from(
+        { length: 24 },
+        (_, i) => `WHEEL 内容第${i + 1}行`
+      ).join("\n");
+      const initial = attachSession({
+        conversation_id: "wheel-session",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "wheel-q" }] },
+          { role: "assistant", content: [{ type: "text", text: longBody }] },
+        ],
+        turnCount: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        jsonMode: false,
+      });
+      const bridge = createTuiBridge({
+        dataDir: baseDir,
+        deps: makeDeps([]),
+        inflight: createInflightRegistry(),
+      });
+      const askBridge = createTuiAskUserBridge();
+      const toolEventSink = createToolEventSink();
+      const out: string[] = [];
+      stdout.on("data", (chunk) => out.push(String(chunk)));
+      const instance = render(
+        <TuiApp
+          bridge={bridge}
+          askBridge={askBridge}
+          toolEventSink={toolEventSink}
+          initialSession={initial}
+          cwd="/tmp/proj"
+          dataDir={baseDir}
+        />,
+        {
+          stdout,
+          stdin,
+          exitOnCtrlC: false,
+          interactive: true,
+          kittyKeyboard: { mode: "disabled" },
+        }
+      );
+      instances.push(instance);
+      const lastOutput = (): string => strip(out.join(""));
+      await delay(400); // 等 mount + useInput + mouse listener effect
+
+      await waitFor(
+        () => lastOutput().includes("WHEEL 内容第24行"),
+        8000,
+        "wheel-bottom-visible"
+      );
+
+      // 滚轮上滚 ×3（每格 +3 行）→ 窗口上移，末段被裁。
+      const wheelUpA = out.join("").length;
+      for (let i = 0; i < 3; i++) {
+        stdin.write("\x1b[<64;10;5M");
+        await delay(50);
+      }
+      await waitFor(
+        () => !strip(out.join("").slice(wheelUpA)).includes("WHEEL 内容第24行"),
+        8000,
+        "wheel-up-clips-tail"
+      );
+
+      // 滚轮下滚 ×5 → 回到底，末段恢复。
+      const wheelDownA = out.join("").length;
+      for (let i = 0; i < 5; i++) {
+        stdin.write("\x1b[<65;10;5M");
+        await delay(50);
+      }
+      await waitFor(
+        () =>
+          strip(out.join("").slice(wheelDownA)).includes("WHEEL 内容第24行"),
+        8000,
+        "wheel-down-restores-tail"
       );
     },
     LONG_TIMEOUT

@@ -13,13 +13,21 @@
  *  - `chatScroll` 现为行数（>0 = 向上滚多少行），不再是消息计数；
  *  - 视口高度 = 终端 rows - banner - 状态栏 - 输入框 - 槽位，动态算；
  *  - PgUp = 视口一半向下滚，PgDn = 视口一半向上滚，Home = 顶，End = 0；
- *  - 鼠标滚轮不再由 app 截胡（跟随 upstream：移除 DECSET 1000/1006 捕获），
- *    交给终端原生 scrollback 翻历史；auto-follow 在 turn 完成 / new 会话触发。
+ *  - 鼠标滚轮（DECSET 1000/1006 SGR）同样驱动 `chatScroll`，与 PgUp/PgDn 同一条
+ *    滚动状态；auto-follow 在 turn 完成 / new 会话触发。
  */
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { ReactElement } from "react";
-import { Box, Text, useApp, useInput, useWindowSize } from "ink";
+import {
+  Box,
+  Text,
+  useApp,
+  useInput,
+  useStdin,
+  useStdout,
+  useWindowSize,
+} from "ink";
 import type { TuiBridge } from "./hub-bridge.js";
 import type { TuiAskUserBridge } from "./ask-user.js";
 import {
@@ -57,6 +65,10 @@ import { clipOneLine } from "./text.js";
 import { VERSION } from "./version.js";
 import { writeIknowState } from "../harness/identity/index.js";
 import { isSgrMouseSequence } from "./mouse.js";
+import { enableMouseScroll, parseMouseEvents } from "./mouse.js";
+
+/** 鼠标滚轮每个 tick 调整的行数。 */
+const WHEEL_STEP_ROWS = 3;
 
 export interface TuiToolEventSink {
   readonly emit: (event: TuiToolEvent) => void;
@@ -97,6 +109,8 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   const { bridge, askBridge, toolEventSink } = props;
   const pal = tuiPalette;
   const { exit } = useApp();
+  const { stdout } = useStdout();
+  const { stdin } = useStdin();
   const { columns, rows: rawRows } = useWindowSize();
   const cols = Math.max(columns ?? 80, 40);
   const rows = Math.max(rawRows ?? 24, 10);
@@ -160,6 +174,10 @@ export function TuiApp(props: TuiAppProps): ReactElement {
 
   const aborters = useRef(new Map<string, AbortController>());
   const inflightPromises = useRef(new Set<Promise<unknown>>());
+  // view 进 ref 让 mouse listener 跨视图切换不丢事件：不把 view 写进 effect deps，
+  // 避免 view 切换瞬间 unregister/register 丢滚轮。
+  const viewRef = useRef<TuiView>("chat");
+  viewRef.current = view;
   const [listEntries, setListEntries] = useState<ReadonlyArray<TuiListEntry>>(
     []
   );
@@ -256,10 +274,30 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     [toolEventSink]
   );
 
-  // 鼠标滚轮已不再由 app 截胡：跟随 upstream（`frontend/terminal` 无任何
-  // DECSET 写入，ink 7.x `alternateScreen: false` 默认）让终端原生
-  // scrollback 接管滚轮翻历史。键盘 PgUp/PgDn/Home/End 行级滚动保留，
-  // 与 native scrollback 并存不冲突。
+  // 鼠标滚轮支持（朴素滚动）：ink 渲染到 normal buffer，原生 scrollback 全是
+  // 中间帧垃圾，滚轮翻历史不可用。挂载时 DECSET 1000/1006 启用 SGR 滚轮报告，
+  // stdin.data 监听 parseMouseEvents，滚轮事件 → setChatScroll（与 PgUp/PgDn 同
+  // 一条滚动状态）。卸载时写 DECRST 关闭序列（必须！否则残留 mouse 报告模式
+  // 污染终端）。mouse listener 走 stdin.on('data')：实测 pty + ink setRawMode 后
+  // 'data' 事件仍正常触发（ink 用 'readable' 流式读取，不消费 data 事件），与
+  // ink useInput 并行触发不冲突。
+  useEffect(() => {
+    const disable = enableMouseScroll(stdout);
+    const onData = (chunk: Buffer | string): void => {
+      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      const { wheelUp, wheelDown } = parseMouseEvents(text);
+      if (wheelUp === 0 && wheelDown === 0) return;
+      // 视图过滤放 listener 内（不进 deps）：跨视图切换不丢滚轮事件。
+      if (viewRef.current !== "chat") return;
+      const delta = (wheelUp - wheelDown) * WHEEL_STEP_ROWS;
+      setChatScroll((s) => Math.max(0, s + delta));
+    };
+    stdin?.on("data", onData);
+    return () => {
+      stdin?.off("data", onData);
+      disable();
+    };
+  }, [stdin, stdout]);
 
   const active = sessions[activeKey] ?? initial;
   const askPending = askBridge.pending();
@@ -496,6 +534,11 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     }
     // 等待全部 in-flight turn 落盘（退出不打断后台 turn，Q1a）。
     await Promise.allSettled([...inflightPromises.current]);
+    // 防御性：同步写 DECRST 关 mouse 序列，不依赖 React effect cleanup（真实
+    // 终端残留 mouse 报告模式会污染粘贴/选择/红点定位）。
+    if (stdout.isTTY) {
+      stdout.write("\x1b[?1000l\x1b[?1006l");
+    }
     exit();
   }
 
