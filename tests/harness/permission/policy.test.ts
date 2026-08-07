@@ -168,6 +168,86 @@ describe("SC2: category defaults", () => {
 });
 
 /* -----------------------------------------------------------------------------
+ * SC2.5 — code-layer allow for memory_save (self-write to agent memory lib)
+ *
+ * Why: `memory_save` writes into `~/.iknow/memory/<id>.md` — the agent's own
+ * memory library, not the user's workspace. Treating it like `edit_file` /
+ * `write_file` (write → ask) caused the agent to be fail-closed at every
+ * non-interactive inlet (ask / serve, or chat TTY with no prompt available),
+ * producing `[user_denied] user declined tool call: memory_save` even when
+ * the user never saw a prompt. Hard-walls remain un-overrideable, and the
+ * project / session layers can still escalate to ask or deny.
+ * -------------------------------------------------------------------------- */
+
+describe("SC2.5: code-layer allow for memory_save (agent self-write)", () => {
+  const policy = createPermissionPolicy();
+
+  it("memory_save → allow (default policy, no project/session overrides)", () => {
+    const out = checkPermission({
+      def: makeTool({ name: "memory_save", category: "write" }),
+      input: { title: "t", body: "b" },
+      sources: policy.sources,
+      hardWalls: policy.hardWalls,
+      defaultByCategory: policy.defaultByCategory,
+    });
+    assert.equal(out.decision, "allow");
+    assert.ok(out.reason.includes("memory_save"));
+  });
+
+  it("memory_recall is unaffected (still read-only → allow)", () => {
+    const out = checkPermission({
+      def: makeTool({ name: "memory_recall", category: "read-only" }),
+      input: { query: "x" },
+      sources: policy.sources,
+      hardWalls: policy.hardWalls,
+      defaultByCategory: policy.defaultByCategory,
+    });
+    assert.equal(out.decision, "allow");
+  });
+
+  it("project layer can still escalate memory_save to ask", () => {
+    const project = {
+      kind: "project" as const,
+      filePath: "/tmp/perm.toml",
+      rules: [
+        {
+          id: "project-ask-memory-save",
+          match: ({ tool }: { tool: string }) => tool === "memory_save",
+          decision: "ask" as const,
+          reason: "project says ask for memory_save",
+        },
+      ],
+    };
+    const out = checkPermission({
+      def: makeTool({ name: "memory_save", category: "write" }),
+      input: { title: "t", body: "b" },
+      sources: { code: policy.sources.code, project },
+      hardWalls: policy.hardWalls,
+      defaultByCategory: policy.defaultByCategory,
+    });
+    assert.equal(out.decision, "ask");
+  });
+
+  it("session layer can still deny memory_save (upper overrides lower)", () => {
+    const session = createSessionGrants();
+    session.add({
+      id: "session-deny-memory-save",
+      match: ({ tool }) => tool === "memory_save",
+      decision: "deny",
+      reason: "session says deny",
+    });
+    const out = checkPermission({
+      def: makeTool({ name: "memory_save", category: "write" }),
+      input: { title: "t", body: "b" },
+      sources: { code: policy.sources.code, session },
+      hardWalls: policy.hardWalls,
+      defaultByCategory: policy.defaultByCategory,
+    });
+    assert.equal(out.decision, "deny");
+  });
+});
+
+/* -----------------------------------------------------------------------------
  * SC3 — Override order + hard-wall un-overrideable
  * -------------------------------------------------------------------------- */
 

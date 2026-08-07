@@ -47,7 +47,18 @@ describe("createPermissionPolicy", () => {
     // three-layer shape). defaults: read-only → allow, write/execute/collaborate → ask.
     const p = createPermissionPolicy();
     assert.equal(p.sources.code.kind, "code");
-    assert.deepEqual(p.sources.code.rules, []);
+    // The code layer ships with a single built-in allow rule for `memory_save`
+    // (agent self-write into its own memory library, not user workspace). This
+    // unblocks the agent's memory persistence at non-interactive inlets
+    // (ask / serve, or chat TTY with no prompt available) that would otherwise
+    // fail-closed via `[user_denied]`. Project / session layers can still
+    // escalate to ask or deny; hard-walls remain un-overrideable.
+    assert.equal(p.sources.code.rules.length, 1);
+    const only = p.sources.code.rules[0]!;
+    assert.equal(only.id, "code-allow-memory-save");
+    assert.equal(only.decision, "allow");
+    assert.ok(only.match({ tool: "memory_save", input: {} }));
+    assert.equal(only.match({ tool: "edit_file", input: {} }), false);
     assert.equal(Object.isFrozen(p), true);
     assert.equal(p.defaultByCategory["read-only"], "allow");
     assert.equal(p.defaultByCategory.write, "ask");
