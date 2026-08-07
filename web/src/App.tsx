@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { ChatHeader } from "./components/ChatHeader";
 import { Composer } from "./components/Composer";
+import { ContextUsageStrip } from "./components/ContextUsageStrip";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { MessageList } from "./components/MessageList";
 import { SessionSidebar } from "./components/SessionSidebar";
@@ -165,6 +166,11 @@ function ChatApp() {
       }
       footer={
         <>
+          <ContextUsageStrip
+            usage={chat.lastAnswer?.lastUsage ?? null}
+            contextWindow={chat.contextWindow}
+            sending={chat.phase === "sending"}
+          />
           <Composer
             disabled={!chat.session || chat.phase === "loading"}
             sending={chat.phase === "sending"}
