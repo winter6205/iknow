@@ -2,8 +2,10 @@
  * ACI Layer 1: write_file — create or replace a complete file.
  *
  * The target is resolved through the shared workspace containment helper before
- * any filesystem mutation. Content is checked with the same poka-yoke linter
- * used by edit_file, so malformed patches cannot create or alter a file.
+ * any filesystem mutation. Whole-file content is written verbatim — the
+ * patch-level poka-yoke linter is only applied by edit_file, not here, so
+ * legitimately-balanced content containing `{`, `]`, or unclosed quotes inside
+ * comments/strings is accepted.
  */
 
 import { mkdir, stat, writeFile } from "node:fs/promises";
@@ -11,11 +13,7 @@ import { dirname, relative, resolve } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
 import type { AciToolDef } from "../types.js";
-import {
-  asToolExecutionError,
-  lintPatch,
-  resolveWithinRoot,
-} from "./helpers.js";
+import { asToolExecutionError, resolveWithinRoot } from "./helpers.js";
 
 const TOOL_NAME = "write_file";
 const ALLOWED_KEYS = new Set(["path", "content", "create_directories"]);
@@ -85,13 +83,6 @@ export function createWriteFileTool(root: string): AciToolDef {
       throw asToolExecutionError("[write_file] cannot resolve path", error);
     }
 
-    const lint = lintPatch(params.content);
-    if (!lint.ok) {
-      throw new ToolExecutionError(
-        `[write_file] lint rejected: ${lint.reason}`
-      );
-    }
-
     const parent = dirname(target);
     if (params.createDirectories) {
       try {
@@ -138,7 +129,7 @@ export function createWriteFileTool(root: string): AciToolDef {
   return Object.freeze({
     name: TOOL_NAME,
     description:
-      "Create or completely overwrite a UTF-8 file under root. Parent directories are created by default and content is linted before writing.",
+      "Create or completely overwrite a UTF-8 file under root. Parent directories are created by default and the file is written verbatim.",
     inputSchema: {
       type: "object",
       properties: {

@@ -134,36 +134,6 @@ describe("write_file — rejection and containment", () => {
     assert.equal(await doesNotExist(join(root, "missing")), true);
   });
 
-  it("rejects unbalanced content before creating a new file", async () => {
-    const root = await makeScratch("write-file-lint-new-");
-    const file = join(root, "not-created.ts");
-    const tool = createWriteFileTool(root);
-
-    await assert.rejects(
-      () => tool.handler({ path: "not-created.ts", content: "function f() {" }),
-      (error: unknown) =>
-        error instanceof ToolExecutionError &&
-        error.message.includes("unclosed '{'")
-    );
-    assert.equal(await doesNotExist(file), true);
-  });
-
-  it("rejects unbalanced content without changing an existing file", async () => {
-    const root = await makeScratch("write-file-lint-existing-");
-    const file = join(root, "unchanged.ts");
-    const original = "const value = 1;\n";
-    await writeFile(file, original, "utf8");
-    const tool = createWriteFileTool(root);
-
-    await assert.rejects(
-      () => tool.handler({ path: "unchanged.ts", content: "function f() {" }),
-      (error: unknown) =>
-        error instanceof ToolExecutionError &&
-        error.message.includes("lint rejected")
-    );
-    assert.equal(await readFile(file, "utf8"), original);
-  });
-
   it("rejects a symlink target outside root before writing outside the workspace", async () => {
     const root = await makeScratch("write-file-symlink-root-");
     const outside = await makeScratch("write-file-symlink-outside-");
@@ -178,6 +148,53 @@ describe("write_file — rejection and containment", () => {
         error.message.includes("outside workspace")
     );
     assert.equal(await doesNotExist(outsideFile), true);
+  });
+});
+
+describe("write_file — no patch-level lint (W4: whole-file content written verbatim)", () => {
+  it("accepts content with balanced braces/brackets and unclosed chars inside comments and strings", async () => {
+    // 整文件写入不需要 patch 级 lint;只有 edit_file 才走 lintPatch
+    // 这里含合法代码片段(平衡括号)+ 注释/字符串里看似不闭合的字符(实为字面量)
+    const root = await makeScratch("write-file-allow-");
+    const file = join(root, "ok.ts");
+    const content = [
+      "function f() {",
+      "  // TODO: refine { still inside comment",
+      "  const arr = [1, 2, 3];",
+      "  const s = 'unclosed would-be quote inside literal';",
+      "  return arr;",
+      "}",
+      "",
+    ].join("\n");
+    const tool = createWriteFileTool(root);
+
+    await tool.handler({ path: "ok.ts", content });
+    assert.equal(await readFile(file, "utf8"), content);
+  });
+
+  it("accepts content with unclosed-looking bracket inside a string literal", async () => {
+    const root = await makeScratch("write-file-string-");
+    const file = join(root, "str.ts");
+    const content = 'const x = "this } looks unbalanced";\n';
+    const tool = createWriteFileTool(root);
+
+    await tool.handler({ path: "str.ts", content });
+    assert.equal(await readFile(file, "utf8"), content);
+  });
+
+  it("does not emit 'lint rejected' messages for legitimate whole-file content", async () => {
+    // 整文件通过 - 不抛 ToolExecutionError
+    const root = await makeScratch("write-file-no-lint-");
+    const tool = createWriteFileTool(root);
+
+    await assert.doesNotReject(
+      () =>
+        tool.handler({
+          path: "x.ts",
+          content: "if (true) {\n  console.log('hi');\n}\n",
+        }),
+      ToolExecutionError
+    );
   });
 });
 

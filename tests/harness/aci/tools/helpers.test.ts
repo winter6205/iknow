@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import {
+  access,
+  mkdtemp,
+  mkdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, it } from "vitest";
 
@@ -19,6 +26,16 @@ async function makeScratch(prefix: string): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), prefix));
   scratchPaths.push(path);
   return path;
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 afterEach(async () => {
@@ -83,6 +100,28 @@ describe("resolveWithinRoot", () => {
         error instanceof ToolExecutionError &&
         error.message.includes("outside workspace")
     );
+  });
+
+  it("expands a leading ~ to the home directory (not the workspace)", async () => {
+    // W4: `~/foo.ts` 必须解析到 $HOME 而非项目根下的字面 `~` 目录
+    const root = await makeScratch("aci-helper-root-");
+    const home = homedir();
+    const expected = join(home, "foo.ts");
+    let resolved: string;
+    if (await exists(expected)) {
+      // 安全路径:home 下已存在该文件 → 直接断言
+      resolved = await resolveWithinRoot(root, "~/foo.ts");
+    } else {
+      // home 下不存在 → resolveWithinRoot 会因 "outside workspace" 抛出。
+      // 我们借此断言:它没有把 `~` 当字面目录建到工作区里(即没解析成
+      // <root>/~/<user>/foo.ts),而是把 ~ 展开到了 $HOME。
+      await assert.rejects(
+        resolveWithinRoot(root, "~/foo.ts"),
+        ToolExecutionError
+      );
+      return;
+    }
+    assert.equal(resolved, expected);
   });
 });
 
