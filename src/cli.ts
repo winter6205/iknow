@@ -96,9 +96,13 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
   try {
     // ask oneshot: no interactive user → fail-closed askUser (always deny).
     // #196 A12:ask 跳过 BOOTSTRAP 段(surface="ask" → bootstrapActive=false)。
+    // #194 T6 (SC15):ask 显式 memory:{enabled:false} — registry 剥离 memory
+    // 工具(8 件) + memory_layer 段不装配;identity 其他 4 段照常(deps.system
+    // 仍挂 createIknowSystemResolver)。
     built = await buildHarnessEngine(bundle, {
       askUser: createFailClosedAskUser(),
       surface: "ask",
+      memory: { enabled: false },
     });
   } catch (err) {
     if (err instanceof Error && err.message.includes("LLM mode needs")) {
@@ -148,9 +152,11 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   try {
     // chat TTY REPL: interactive y/N prompt via stdin/stdout.
     // #196 A12:chat 激活 BOOTSTRAP(surface="chat" → bootstrapActive=true)。
+    // #194 T6:chat 显式 memory:{enabled:true} — 10 件工具 + memory_layer 装配。
     built = await buildHarnessEngine(bundle, {
       askUser: createTtyAskUser(),
       surface: "chat",
+      memory: { enabled: true },
     });
   } catch (err) {
     printChatError(err);

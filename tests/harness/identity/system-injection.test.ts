@@ -102,13 +102,13 @@ describe("buildHarnessEngine surface → deps.system", () => {
     );
   });
 
-  it("user_agents / priority_dec / project_agents / existence_pointer / promote absent (#121 not on master)", async () => {
+  it("memory_layer slot: no raw #121 segment tokens leak; empty tmp workspace → memory content absent", async () => {
     const out = await buildSystem("chat");
     expect(out).not.toContain("user_agents");
     expect(out).not.toContain("priority_dec");
     expect(out).not.toContain("project_agents");
     expect(out).not.toContain("existence_pointer");
-    expect(out).not.toContain("promote");
+    expect(out).not.toContain("memory_recall(query)");
   });
 
   it("second skip: bootstrap_seeded=true → system excludes bootstrap", async () => {
@@ -131,5 +131,20 @@ describe("buildHarnessEngine surface → deps.system", () => {
     const out =
       (await (deps.system as () => Promise<string | undefined>)()) ?? "";
     expect(out).toContain("First-run bootstrap");
+  });
+
+  it("ask: memory_layer inactive — deps.system still carries identity layers", async () => {
+    const { deps } = await buildHarnessEngine({
+      env: makeEnv("sk-test-identity-ask-mem"),
+      askUser: createNoAskUser(),
+      surface: "ask",
+      memory: { enabled: false },
+    });
+    expect(typeof deps.system).toBe("function");
+    const out = (await deps.system?.()) ?? "";
+    expect(out).toContain("iknow Identity");
+    expect(out).toContain("iknow Soul");
+    expect(out).toContain("User Profile");
+    expect(out).not.toContain("memory_recall(query)");
   });
 });

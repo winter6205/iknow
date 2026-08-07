@@ -21,6 +21,10 @@ import {
 } from "../harness/aci/index.js";
 import { createDefaultAciRegistry } from "../harness/aci/tools/registry.js";
 import { createIknowSystemResolver } from "../harness/identity/index.js";
+import {
+  resolveProjectMemoryDir,
+  createSystemResolver,
+} from "../harness/memory/index.js";
 import type { AskUser } from "../harness/permission/types.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
 import { homedir } from "node:os";
@@ -75,7 +79,13 @@ export function buildTuiDeps(
   // 若 TUI 未来接受 sandboxRoot override,在此镜像 build-engine 的 fallback。
   // env.web 透传 IKNOW_WEB_PROXY / IKNOW_WEB_SEARCH_URL,proxyUrl 非法 → 装配期同步抛。
   const sandboxRoot = process.cwd();
-  const reg = createDefaultAciRegistry({ env, sandboxRoot });
+  // #194 T6:tui 与 build-engine chat 对齐 → memoryDir 必传(10 件工具集含
+  // memory_recall + memory_save)。
+  const reg = createDefaultAciRegistry({
+    env,
+    sandboxRoot,
+    memoryDir: resolveProjectMemoryDir(process.cwd()),
+  });
   const baseExecutor = createExecutor(reg.inner);
   const policy = createPermissionPolicy();
   const executor = createAciExecutor({
@@ -107,10 +117,18 @@ export function buildTuiDeps(
     timeoutMs: env.llm.timeoutMs,
     // #196 IKNOW T5:tui 入口走 system 注入缝(spec A12:chat/tui 激活
     // BOOTSTRAP,surface="tui" → bootstrapActive=true)。
+    // #194 T6 (ACR 缺口补):tui 装配 memory 层 — memoryEnabled=true +
+    // memoryResolver 注入,与 build-engine 的 chat 路径对齐(10 件工具 + memory_layer)。
     system: createIknowSystemResolver({
       cwd: process.cwd(),
       userHome: homedir(),
       surface: "tui",
+      memoryEnabled: true,
+      memoryResolver: createSystemResolver({
+        cwd: process.cwd(),
+        userHome: homedir(),
+        memoryDir: resolveProjectMemoryDir(process.cwd()),
+      }),
     }),
   };
 }

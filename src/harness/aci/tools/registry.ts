@@ -1,5 +1,5 @@
 /**
- * ACI 工具集注册层 — 8 件 SSOT。
+ * ACI 工具集注册层 — 10 件 SSOT。
  *
  * **目的**:让所有 harness 入口(CLI `ask` / `chat` / `serve`、TUI `iknow tui`)
  * 共享同一份"工具有哪些 + 怎么注入 env"的装配函数,避免工具集分裂
@@ -25,16 +25,18 @@ import { createEditFileTool } from "./edit-file.js";
 import { createWriteFileTool } from "./write-file.js";
 import { createWebFetchTool } from "./web-fetch.js";
 import { createWebSearchTool } from "./web-search.js";
+import { createMemoryRecallTool } from "../../memory/tools/recall.js";
+import { createMemorySaveTool } from "../../memory/tools/save.js";
 
 /**
- * 8 件生产工具的命名常量 — SSOT。
+ * 10 件生产工具的命名常量 — SSOT。
  *
- * 这是给 LLM agent 调的 8 个生产工具(bash / read_file / grep / glob /
- * edit_file / write_file / web_fetch / web_search)的命名真值,不是测试
- * fixture。导出它让两个层分工:
- *   - 装配层:`createDefaultAciRegistry()` 实际把 8 个工具工厂拼起来,
+ * 这是给 LLM agent 调的 10 个生产工具(bash / read_file / grep / glob /
+ * edit_file / write_file / web_fetch / web_search / memory_recall /
+ * memory_save)的命名真值,不是测试 fixture。导出它让两个层分工:
+ *   - 装配层:`createDefaultAciRegistry()` 实际把 10 个工具工厂拼起来,
  *     返回 AciRegistry;生产入口(build-engine / TUI)只跟工厂交互
- *   - 命名层:本常量承载「这 8 个名字是 iknow 工具集」的声明真值,
+ *   - 命名层:本常量承载「这 10 个名字是 iknow 工具集」的声明真值,
  *     被测试断言消费(`registry.test.ts` 用它锁工具集不变),也给未来
  *     诊断 / tool_search 类 hook 按名查工具用
  *
@@ -50,6 +52,8 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   "write_file",
   "web_fetch",
   "web_search",
+  "memory_recall", // #228 layer 3
+  "memory_save", // #228 layer 3
 ] as const);
 
 /**
@@ -60,10 +64,12 @@ export interface CreateDefaultAciRegistryOptions {
   readonly env: Pick<IknowEnv, "web">;
   /** 软沙箱根(传入 process.cwd() 或调用方显式路径;fs 工具据此越界拒绝)。 */
   readonly sandboxRoot: string;
+  /** 记忆库根目录(#228 layer 3)。缺席时记忆工具不入注册表。 */
+  readonly memoryDir?: string;
 }
 
 /**
- * 默认 8 件工具注册工厂 — SSOT。
+ * 默认 10 件工具注册工厂 — SSOT。
  *
  * **装配期 fail-fast**:
  *   - proxyUrl 非法(非 http/https / 含凭据)→ `createWebFetchTool` /
@@ -91,5 +97,9 @@ export function createDefaultAciRegistry(
     createWebFetchTool({ proxyUrl }),
     createWebSearchTool({ envSearchUrl: searchUrl, proxyUrl }),
   ];
+  if (opts.memoryDir) {
+    tools.push(createMemoryRecallTool({ memoryDir: opts.memoryDir }));
+    tools.push(createMemorySaveTool({ memoryDir: opts.memoryDir }));
+  }
   return createAciRegistry(tools);
 }

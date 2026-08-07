@@ -1,0 +1,139 @@
+/**
+ * #121 T4: assembly.ts (assembleSystemPrompt — thin layer composer).
+ *
+ * Spec: specs/121-memory-injection.md (Project Structure assembly.ts, Testing
+ * Strategy assembly half, SC 1/3/4/5/10, Boundaries Always — append-only 纪律,
+ * 文件截断不丢字符).
+ *
+ * Order locked (ADR-0009 Decision 1+3+4):
+ *   user AGENTS + user rules
+ *   ↓ [PRIORITY_DECLARATION] — exactly once, between user and project
+ *   project AGENTS + project rules
+ *   ↓ [EXISTENCE_POINTER] — only when the memory library is non-empty
+ *   promote 段 (if any) — <= 4000 chars, importance desc
+ *
+ * The function is a pure thin composer (≤30 lines, append-only on messages via
+ * out-params — here simply returns a string): it reads static-layer files with
+ * readFile fallback (discovery is metadata-only), reads promote entries from
+ * disk when no cache is provided, and NEVER mutates ctx or writes to disk.
+ */
+import { readFile, opendir } from "node:fs/promises";
+import {
+  findProjectAgents,
+  findUserAgents,
+  listRulesFiles,
+} from "./discovery.js";
+import { listPromotableEntries, PROMOTE_SEGMENT_CAP } from "./promote.js";
+import type { MemoryEntryV1 } from "./schema.js";
+
+/** Locked by spec SC 4 (must appear exactly once, between user and project). */
+export const PRIORITY_DECLARATION =
+  "Project-level instructions take precedence over user-level instructions.";
+
+/** Locked by spec SC 5 (only when the memory library holds ≥1 entry). */
+export const EXISTENCE_POINTER =
+  "A memory library is available. Use memory_recall(query) to retrieve past experience.";
+
+/** Per-file cap (spec SC 3 + Boundaries Always). Measured against UTF-16 length. */
+const FILE_CAP = 12000;
+
+/**
+ * Inputs needed to compose the layered system prompt.
+ *   cwd + userHome: discovery roots for the static layer (AGENTS.md + rules).
+ *   memoryDir: project-namespaced memory root (~/.iknow/memory/<base>-<hash>).
+ *   promoteEntries: optional injection — used by tests + per-turn refresh hook.
+ */
+export interface AssemblyContext {
+  readonly cwd: string;
+  readonly userHome: string;
+  readonly memoryDir: string;
+  readonly promoteEntries?: ReadonlyArray<MemoryEntryV1>;
+}
+
+/** Compose the layered system prompt per the locked order (see file header). */
+export async function assembleSystemPrompt(
+  ctx: AssemblyContext
+): Promise<string> {
+  const user = await loadStaticLayer(ctx.userHome, "user");
+  const project = await loadStaticLayer(ctx.cwd, "project");
+  const hasMemory = await memoryLibraryNonEmpty(ctx.memoryDir);
+  const promote =
+    ctx.promoteEntries ?? (await listPromotableEntries(ctx.memoryDir));
+  const parts: string[] = [];
+  if (user) parts.push(user);
+  if (project) {
+    if (user) parts.push(PRIORITY_DECLARATION);
+    parts.push(project);
+  }
+  if (hasMemory) parts.push(EXISTENCE_POINTER);
+  if (promote.length > 0) parts.push(formatPromote(promote));
+  return parts.join("\n\n");
+}
+
+// -- helpers (each thin, nested ≤4) -----------------------------------------
+
+/** Read AGENTS.md + sorted rules for one scope; return joined, truncated text. */
+async function loadStaticLayer(
+  root: string,
+  scope: "user" | "project"
+): Promise<string> {
+  const agents =
+    scope === "user"
+      ? await findUserAgents(root)
+      : await findProjectAgents(root);
+  const rules = await listRulesFiles(root, scope);
+  const chunks: string[] = [];
+  if (agents) {
+    const text = await readOrEmpty(agents.path);
+    if (text) chunks.push(truncate(text));
+  }
+  for (const r of rules) {
+    const text = await readOrEmpty(r.path);
+    if (text) chunks.push(truncate(text));
+  }
+  return chunks.join("\n\n");
+}
+
+/** True when memoryDir contains any *.md entry (excluding the MEMORY.md index). */
+async function memoryLibraryNonEmpty(memoryDir: string): Promise<boolean> {
+  let dir;
+  try {
+    dir = await opendir(memoryDir);
+  } catch {
+    return false;
+  }
+  for await (const e of dir) {
+    if (e.name.endsWith(".md") && e.name !== "MEMORY.md") return true;
+  }
+  return false;
+}
+
+/** Format sorted-by-importance entries as a promote segment, capped to 4000. */
+function formatPromote(entries: ReadonlyArray<MemoryEntryV1>): string {
+  const sorted = [...entries].sort(
+    (a, b) => b.importance - a.importance || a.id.localeCompare(b.id)
+  );
+  const text = sorted
+    .map(
+      (e) =>
+        `### ${e.title}\nupdated_at: ${e.updated_at}\nimportance: ${e.importance}\n${e.body}`
+    )
+    .join("\n\n");
+  return truncate(text, PROMOTE_SEGMENT_CAP);
+}
+
+/** Read a UTF-8 file; return "" on ENOENT/read failure (Boundaries Always 跳过). */
+async function readOrEmpty(path: string): Promise<string> {
+  try {
+    return await readFile(path, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+/** Truncate to cap + `[truncated N chars]` marker if over; preserve prefix verbatim. */
+function truncate(text: string, cap = FILE_CAP): string {
+  if (text.length <= cap) return text;
+  const dropped = text.length - cap;
+  return `${text.slice(0, cap)}[truncated ${dropped} chars]`;
+}

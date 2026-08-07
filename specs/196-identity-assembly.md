@@ -23,7 +23,7 @@
 
 ## Objective
 
-**What**: 在 harness 的 `deps.system` 注入缝上挂一个**身份认知装配层**——为 iknow agent 装上"我是 iknow"的自指认知（identity / soul 段），并通过 user.md + BOOTSTRAP 完成"用户画像 + 首启引导"两个动作。装配沿 `deps.system` 同一缝按 9 段顺序注入；不分缝。
+**What**: 在 harness 的 `deps.system` 注入缝上挂一个**身份认知装配层**——为 iknow agent 装上"我是 iknow"的自指认知（identity / soul 段），并通过 user.md + BOOTSTRAP 完成"用户画像 + 首启引导"两个动作。装配沿 `deps.system` 同一缝按 5 段顺序注入；不分缝。
 
 **Why**: issue #196 当前问题——`AGENTS.md` 里写"我是 iknow"是**指示性**的（prompt 层），模型不一定遵守（Claude 训练身份倾向强）。需要在 #121 既有 7 段装配之前插入**结构性强制**的认知/人格段（identity + soul 代码锁死），让"我是 iknow"从"提示词"上升到"运行时结构事实"。同时引入 user.md 完成用户画像交互，BOOTSTRAP 完成首次引导，state.json 追踪引导完成状态。
 
@@ -118,26 +118,22 @@ docs/
 ```ts
 // src/harness/identity/index.ts — assembleIdentityContext(ctx) 约束（实施期微调实现，顺序不可变）
 
-/** IKNOW-196 装配顺序（9 段，逐步锁死）。 */
+/** IKNOW-196 装配顺序（5 段，#228 收敛后）。 */
 export const IKNOW_ASSEMBLY_ORDER = [
   "identity", // 1. 认知层（代码 LOCKED）：Name/Kind/Signature
   "soul", // 2. 人格层（代码 LOCKED）：core truths/boundaries/vibe/continuity
   "user_profile", // 3. 用户画像（~/.iknow/user.md）— 用户可改
   "bootstrap", // 4. 首启引导（仅当 bootstrap_seeded=false 注入）
-  "user_agents", // 5. user AGENTS.md（#121 既有）
-  "priority_dec", // 6. PRIORITY_DECLARATION（#121 既有）
-  "project_agents", // 7. project AGENTS.md（#121 既有）
-  "existence_pointer", // 8. EXISTENCE_POINTER（#121 既有，memory non-empty）
-  "promote", // 9. promote 段（#121 既有）
+  "memory_layer", // 5. 记忆层单 slot（#121/#228 收敛：委托 createSystemResolver）
 ] as const;
 ```
 
 **关键不变量**：
 
 - `identity` / `soul` 是**绝对权威**（代码锁死，最高优先级，所有用户统一）
-- `user_profile` / `user_agents` 是**用户级**（被 PRIORITY 压过）
-- `project_agents` 是**项目级**（最高用户级权威，盖过 user_agents）
-- `existence_pointer` / `promote` 是**记忆层**（最弱权威）
+- `user_profile` 是**用户级**（被记忆层优先级语义约束）
+- `bootstrap` 是**首启唯一一次注入**（`bootstrap_seeded=false` 时挂上，后续 turn 永久缺席）
+- `memory_layer` 是**记忆层单 slot**（最弱权威，#121/#228 收敛后委托 `createSystemResolver`，内部拼接顺序由 ADR-0009 锁定）
 
 ### Identity vs Soul 边界（代码层硬约束）
 
@@ -242,7 +238,7 @@ export async function writeIknowState(
 
 /** IKNOW-196 装配流水线入口。buildHarnessEngine 在 deps.system 注册此函数（每 turn 调）。
  *  返回 string → 透传 adapter.step request.system；undefined → 跳过注入（行为零变化）。
- *  0 规格：9 段顺序 + 各段存在性条件 + 错误降级。 */
+ *  0 规格：5 段顺序 + 各段存在性条件 + 错误降级。 */
 export async function assembleIdentityContext(ctx: {
   cwd: string;
   userHome: string;
@@ -345,7 +341,7 @@ export type IknowIdentityError =
   - **Branch coverage ≥ 70%** for 同上文件
   - **认知 vs 人格边界必测**：`identity.test.ts` 至少 1 个测试 assert identity.ts 不含 core truths / boundaries / vibe / continuity 段；soul 段（融入 identity.test.ts 或独立）assert soul.ts 不含 Name / Kind / Signature 段
   - **入口覆盖矩阵每行至少 1 个测试**：`shouldIncludeBootstrap` 4 个 case（chat / tui / ask / serve）
-  - **9 段装配顺序必测**：固定拼接测试，assert 9 段顺序字符串索引（identity 在 soul 之前；user AGENTS 在 PRIORITY 之前；project AGENTS 在 EXISTENCE_POINTER 之前）
+  - **5 段装配顺序必测**：固定拼接测试，assert 5 段顺序字符串索引（identity 在 soul 之前；user AGENTS 在 PRIORITY 之前；project AGENTS 在 EXISTENCE_POINTER 之前）
   - **state.json 状态机必测**：bootstrap_seeded false → true 唯一迁移路径；schema_version 字段必写
   - **回归套件**（016 / 017 / 020 / 022 / #121）coverage 不下降（基线 = 当前 master vitest coverage，实施前 `npm test -- --coverage` 留底）
 
@@ -443,7 +439,7 @@ export type IknowIdentityError =
 
 ### 装配顺序（3 条）
 
-28. `npm test -- tests/harness/identity/system-injection.test.ts -t "order"` 退出 0 → 9 段顺序固定
+28. `npm test -- tests/harness/identity/system-injection.test.ts -t "order"` 退出 0 → 5 段顺序固定
 29. `npm test -- tests/harness/identity/identity.test.ts -t "identity before soul"` 退出 0 → identity 在 soul 之前（用测试 fixture 控制 cwd/userHome，不用真实 `/tmp`）
 30. `npm test -- tests/harness/identity/system-injection.test.ts -t "user agents before priority"` 退出 0 → user AGENTS 在 PRIORITY 之前（守 #121）
 
@@ -494,14 +490,14 @@ export type IknowIdentityError =
 bounded-context-guardian: yes — src/harness/identity/ 是独立 bounded context（spec.md:80-87 列 6 文件归属该模块）；唯一跨 context 边缘是 `deps.system` 注入缝（spec.md:19 A11、spec.md:238-256）；Boundaries 明令 "identity 段混入 soul 内容" 为 Never do（spec.md:396），且 `state.messages` 不缓存 identity 字符串（spec.md:275 守 014 附加原则）。
 defensive-contract-validator: yes — Testing Strategy 列出全部 5 边界类 empty/negative/overflow/exception/concurrent（spec.md:337-341）；覆盖率目标 80/70 显式声明（spec.md:344-345）；SC31-33 覆盖 JSON corrupt / schema invalid / user.md missing 三类降级（spec.md:452-454）；SC16/24-27/29-30 覆盖入口 + 状态机 + 装配顺序；认知/人格边界 11-14（spec.md:417-420）防 drift。
 error-handling-enforcer: yes — `IknowIdentityError` discriminated union 四种 kind 定义（spec.md:308-312）；降级契约表覆盖 6 类失败（spec.md:317-325）；写入路径显式 allowed-throw（spec.md:326）；Never do 栏禁止裸 `throw new Error(...)`（spec.md:389）；构造 logger 路径虽留给 writing-plans（spec.md:388），但 read path 已 typed + skip + log warning 双轨。疑点：user.md 读 IO 失败（行 324）与 `~/.iknow/` lazy init（行 325）未显式要求 log warning，建议 writing-plans 阶段在对应日志策略里补回 log；不阻塞 spec 推进。
-complexity-anti-drift: yes — 阈值全项钉死 cyclomatic≤10 / nesting≤4 / fn≤40 / file≤500 / params≤4 / clone≤3%（spec.md:282-287）；适用对象 6 文件 + 3 改动段 + 4 测试文件全部列出（spec.md:290-296）；`assembleIdentityContext` 9 段装配走 `IKNOW_ASSEMBLY_ORDER` const array table-driven dispatch（spec.md:122-132），单函数易守 ≤40 行；超阈值强制拆函数（spec.md:298）。建议 writing-plans 把每段装配拆成独立小函数（如 `identitySegment()` / `soulSegment()`），避免单函数内联 9 段。
+complexity-anti-drift: yes — 阈值全项钉死 cyclomatic≤10 / nesting≤4 / fn≤40 / file≤500 / params≤4 / clone≤3%（spec.md:282-287）；适用对象 6 文件 + 3 改动段 + 4 测试文件全部列出（spec.md:290-296）；`assembleIdentityContext` 5 段装配走 `IKNOW_ASSEMBLY_ORDER` const array table-driven dispatch（spec.md:122-132），单函数易守 ≤40 行；超阈值强制拆函数（spec.md:298）。建议 writing-plans 把每段装配拆成独立小函数（如 `identitySegment()` / `soulSegment()`），避免单函数内联 5 段。
 minimal-change-verifier: yes — 依赖声明显式零新增（spec.md:507-513）；不修改 lockfile/tsconfig（spec.md:510-511）；不引入新 npm 依赖（spec.md:373 守 A6、spec.md:14）；frozen contracts 双重禁令：Ask first 拦 014/015/016/017/020/022/#121 形状改（spec.md:380），Never do 拦"重开已冻契约"（spec.md:394）+ "超阈值不拆函数"（spec.md:395）+ identity/soul 混段（spec.md:396）；锁 1 commit = 1 逻辑任务（CLAUDE.md 全局规则）。
 ```
 
 > **ACR 复检结论（2026-08-06）**：5 闸门全部 `yes`，spec 可推进到 writing-plans。两条非阻塞建议已记入 writing-plans 消费清单：
 >
 > 1. **logger 缺口补回**：user.md IO 失败（spec.md:324）与 `~/.iknow/` lazy init（spec.md:325）走降级但未显式标 log warning；writing-plans 阶段在 logger policy 里补成 `log warning + skip`。
-> 2. **`assembleIdentityContext` 实现策略**：9 段装配走表驱动（spec.md:122-132），单函数 ≤40 行需拆为 `identitySegment()` / `soulSegment()` / `userProfileSegment()` / `bootstrapSegment()` 等 helper，writing-plans 设计为 `for (const seg of IKNOW_ASSEMBLY_ORDER) yield await resolveSegment(seg, ctx)` 形态。
+> 2. **`assembleIdentityContext` 实现策略**：5 段装配走表驱动（spec.md:122-132），单函数 ≤40 行需拆为 `identitySegment()` / `soulSegment()` / `userProfileSegment()` / `bootstrapSegment()` 等 helper，writing-plans 设计为 `for (const seg of IKNOW_ASSEMBLY_ORDER) yield await resolveSegment(seg, ctx)` 形态。
 
 > 5 闸门全部 `yes` 或 `N/A with reason` 后 spec 进入 Step 5 writing-plans；任一 `no` / `unclear` → 回到本 spec 修订。
 
@@ -542,7 +538,7 @@ minimal-change-verifier: yes — 依赖声明显式零新增（spec.md:507-513�
 | `bootstrap.ts` (首启脚本)                | `ohmo/BOOTSTRAP.md`                                     | 移到代码（非工作区）                                                             |
 | `user-template.ts` (user.md seed)        | `ohmo/user.md` USER_TEMPLATE                            | 带位置（用户工作区）                                                             |
 | `workspace.ts` (eager + idempotent init) | `ohmo/initialize_workspace`                             | 改 JSON（state.json 替代 marker 文件） + 精简 scope（只写 user.md + state.json） |
-| `assembleIdentityContext` 9 段顺序       | `ohmo/build_ohmo_system_prompt` 8 段顺序                | 保持一致（identity 在 soul 之前）                                                |
+| `assembleIdentityContext` 5 段顺序       | `ohmo/build_ohmo_system_prompt` 8 段顺序                | 保持一致（identity 在 soul 之前）                                                |
 | `state.json` 状态机                      | `state.json` `bootstrap_seeded` 字段                    | 保持一致（OHMO 风格）                                                            |
 
 > 行为真值参考 `upstream-openharness/ohmo/{workspace,prompts}.py`。本 spec 不 import / 不依赖 / 不 symlink。

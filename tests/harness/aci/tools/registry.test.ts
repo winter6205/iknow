@@ -1,12 +1,12 @@
 /**
  * tests/harness/aci/tools/registry.test.ts
  *
- * `createDefaultAciRegistry` — 8 件 SSOT 工具注册层单元测试。
+ * `createDefaultAciRegistry` — 10 件 SSOT 工具注册层单元测试。
  *
  * 对齐 upstream `create_default_tool_registry()`(tools/__init__.py:48):
  * 单一装配函数返回注册表,所有入口共享。本测试锁 5 边界类:
  *
- *   - 正常路径:返回 AciRegistry,list() 8 工具,顺序 append-only
+ *   - 正常路径:返回 AciRegistry,list() 10 工具,顺序 append-only
  *   - 空输入:env.web 全空(undefined)→ 直连不抛;sandboxRoot:"" → 不抛
  *   - 非法输入:proxy 非 http/https / 含凭据 → 装配期同步抛 ToolExecutionError
  *   - 溢出/边界:sandboxRoot 指向不存在路径 → 装配期不抛(执行期由 fs 工具越界逻辑拒绝)
@@ -29,15 +29,18 @@ function makeWebEnv(
 const EXPECTED_TOOLS: readonly string[] = ACI_TOOLSET_NAMES;
 
 describe("createDefaultAciRegistry — 正常路径", () => {
-  it("返回 AciRegistry,list() 8 工具,顺序 append-only", () => {
+  it("返回 AciRegistry,list() 10 工具,顺序 append-only", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
+      memoryDir: "/tmp/root/memory",
     });
     const names = reg.inner.list().map((def) => def.name);
     expect(names).toEqual([...EXPECTED_TOOLS]);
     expect(reg.catalog.get("web_fetch")).toBeDefined();
     expect(reg.catalog.get("web_search")).toBeDefined();
+    expect(reg.catalog.get("memory_recall")).toBeDefined();
+    expect(reg.catalog.get("memory_save")).toBeDefined();
   });
 });
 
@@ -93,10 +96,12 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
     const a = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root-a",
+      memoryDir: "/tmp/root-a/memory",
     });
     const b = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root-b",
+      memoryDir: "/tmp/root-b/memory",
     });
     expect(a).not.toBe(b);
     expect(a.catalog).not.toBe(b.catalog);

@@ -2,7 +2,7 @@
  * `src/harness/build-engine.ts` — the single harness assembly point shared by
  * the CLI (chat / ask) and the session server (serve → SessionHub.ensureDeps).
  *
- * These tests pin the ACI 8-tool set so a future tool-set change cannot drift
+ * These tests pin the ACI 10-tool set so a future tool-set change cannot drift
  * between the two entry points silently: if a tool is added/renamed/removed,
  * this test forces an explicit decision at the single assembly point.
  */
@@ -15,7 +15,8 @@ import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 
 // Order is load-bearing: it must match the `aciTools` array in
-// `src/harness/build-engine.ts` (policy byName key-space, ADR-0006).
+// `src/harness/build-engine.ts` (policy byName key-space, ADR-0006)。
+// #194 T6 (Layer 4 baseline):扩 memory_recall + memory_save 到 10 件。
 const EXPECTED_TOOLS = [
   "bash",
   "read_file",
@@ -25,6 +26,8 @@ const EXPECTED_TOOLS = [
   "write_file",
   "web_fetch",
   "web_search",
+  "memory_recall",
+  "memory_save",
 ];
 
 /** Deterministic env: never read process.env / .env files (env.ts SSOT). */
@@ -48,7 +51,7 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
 }
 
 describe("buildHarnessEngine (SSOT assembly)", () => {
-  it("registers the full ACI 8-tool set on the returned registry", async () => {
+  it("registers the full ACI 10-tool set on the returned registry", async () => {
     const { deps } = await buildHarnessEngine({
       env: makeEnv("sk-test-sentinel-1"),
       askUser: createNoAskUser(),
@@ -78,6 +81,39 @@ describe("buildHarnessEngine (SSOT assembly)", () => {
         askUser: undefined as never,
       })
     ).rejects.toThrow(/ask_inlet_missing/);
+  });
+});
+
+// --- #121 T6 / SC 12: memory opt-out + system wiring ------------------------
+
+describe("buildHarnessEngine — memory opt-out (ask path, SC 12)", () => {
+  it("memory disabled → registry stays at 8 (no memory tools) and memory_layer inactive", async () => {
+    const { deps } = await buildHarnessEngine({
+      env: makeEnv("sk-test-mem-off-1"),
+      askUser: createNoAskUser(),
+      memory: { enabled: false },
+    });
+
+    const names = deps.registry.list().map((def) => def.name);
+    expect(names).toEqual(
+      EXPECTED_TOOLS.filter((n) => n !== "memory_recall" && n !== "memory_save")
+    );
+    expect(names).not.toContain("memory_recall");
+    expect(names).not.toContain("memory_save");
+    // landing 形态：deps.system 始终挂 createIknowSystemResolver（identity 层恒在），
+    // memoryEnabled=false 让 memory_layer slot 返回 undefined。
+    const sys = await deps.system?.();
+    expect(sys).toContain("iknow Identity");
+  });
+
+  it("memory enabled (default) → deps.system is wired as an async assembler", async () => {
+    const { deps } = await buildHarnessEngine({
+      env: makeEnv("sk-test-mem-on-1"),
+      askUser: createNoAskUser(),
+    });
+    // seam 契约：deps.system 是函数（#194 同款断言，不实际调用——
+    // 调用会写 usage.json 进真实 ~/.iknow/memory）
+    expect(typeof deps.system).toBe("function");
   });
 });
 
