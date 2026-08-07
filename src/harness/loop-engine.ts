@@ -47,6 +47,11 @@ import { computeTotals } from "./loop-trace.js";
 import type { TraceErrorType, TraceService } from "./trace/index.js";
 import { safeTrace } from "./trace/index.js";
 import type { HarnessStreamEvent } from "./stream.js";
+import {
+  compactMessages,
+  getAutoCompactThreshold,
+  shouldAutoCompact,
+} from "./compress/index.js";
 
 /**
  * 把任意 reason 字符串安全映射为 TraceErrorType (消除 as 强转)。
@@ -142,6 +147,15 @@ export interface LoopEngineDeps {
    * 缺省回退 deps.registry.list()(行为中性,守 S2 byte-identical)。
    */
   readonly promptTools?: () => ReadonlyArray<ToolDef>;
+  /**
+   * #119 T7:压缩配置缝。字段缺席 = 压缩关闭(行为零变化,守 byte-identical 纪律)。
+   * contextWindow 默认 200000,thresholdTokens 缺省推导 `window - 33000`
+   * (见 harness/compress/threshold.ts)。
+   */
+  readonly compress?: {
+    readonly contextWindow: number;
+    readonly thresholdTokens: number | undefined;
+  };
 }
 
 /**
@@ -896,7 +910,36 @@ export async function run(
   // 初值 null = run 无成功模型调用;仅当 step 成功且 usage 存在时更新。
   let lastUsage: TokenUsage | null = null;
   let turns: ReadonlyArray<TurnTrace> = [];
+  // #119 T7:proactive auto-compact check(Q3 决议)。闭包变量 lastCompactTurn
+  // 不入 LoopState(Q4 决议),仅作 turnCount 锚点防止重复扫描。
+  let lastCompactTurn: number = 0;
   while (true) {
+    // #119 T7:compress 缝缺省(字段缺席)→ 跳过检查,行为零变化(byte-identical)。
+    // 仅 turnCount 自增(>lastCompactTurn)后扫一次,避免每轮重复 estimate。
+    if (deps.compress !== undefined && state.turnCount > lastCompactTurn) {
+      const threshold = getAutoCompactThreshold(
+        deps.compress.contextWindow,
+        deps.compress.thresholdTokens
+      );
+      if (
+        shouldAutoCompact(state.messages, {
+          contextWindow: deps.compress.contextWindow,
+          threshold,
+        })
+      ) {
+        const compacted = compactMessages(state.messages);
+        if (compacted !== state.messages) {
+          // immutable 重建(SC7/Q5);不 mutate,原 messages 引用不变。
+          // S10 freeze gate:压缩结果须与 appendMessage 一样冻结每一条,
+          // 否则可变普通对象进入权威历史,违反 append-only immutable 不变式。
+          state = {
+            ...state,
+            messages: Object.freeze(compacted.map((m) => freezeMessage(m))),
+          };
+          lastCompactTurn = state.turnCount;
+        }
+      }
+    }
     const { transition, turn, modelUsage } = await stepWithTrace({
       state,
       deps,

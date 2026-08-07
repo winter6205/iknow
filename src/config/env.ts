@@ -71,12 +71,30 @@ export interface WebEnv {
   proxy: string | undefined;
 }
 
+/**
+ * #119 T1: 自动压缩配置臂(env SSOT, 透传至 harness/compress/)。
+ *
+ * `IKNOW_MODEL_CONTEXT_WINDOW`:模型上下文窗口大小(整数)。默认 200000,
+ * 非数字 → 回退 200000(对齐 envInt 既有纪律, 不抛错)。
+ *
+ * `IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS`:proactive auto-compact 阈值(可选整数)。
+ * 未设 / 空串 / 非数字 → undefined(由 threshold.ts 在 derive 时缺省推导
+ * `window - 33000`, 硬校验 `threshold < window`)。提前校验归 T4 不归 env loader。
+ */
+export interface IknowCompressEnv {
+  // 字段访问形如 `env.compress.contextWindow` / `env.compress.thresholdTokens`。
+  contextWindow: number;
+  thresholdTokens: number | undefined;
+}
+
 export interface IknowEnv {
   llm: LlmEnv;
   /** #152 T5:thinking 可见面控制臂。 */
   chat: ChatEnv;
   /** ACI Web 类工具配置臂（web_search 端点覆写）。 */
   web: WebEnv;
+  /** #119 T1: 自动压缩配置臂(透传至 harness/compress/)。 */
+  compress: IknowCompressEnv;
 }
 
 /** Placeholder values treated as "no real secret set" (case-insensitive). */
@@ -136,6 +154,23 @@ function envInt(opts: EnvIntOpts): number {
   if (!raw) return opts.fallback;
   const n = Number(raw);
   return Number.isFinite(n) ? Math.trunc(n) : opts.fallback;
+}
+
+interface EnvOptionalIntOpts {
+  readonly file: Record<string, string>;
+  readonly key: string;
+}
+
+/**
+ * #119 T1: 可选整数 env values(如 auto-compact 阈值)。
+ * 未设 / 空串 → undefined;否则 Number + isFinite + trunc 后返回,
+ * 非数字 → undefined(回退纪律对齐 envInt, 不抛错)。
+ */
+function envOptionalInt(opts: EnvOptionalIntOpts): number | undefined {
+  const raw = envGet({ file: opts.file, key: opts.key });
+  if (!raw) return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.trunc(n) : undefined;
 }
 
 interface EnvNumberOpts {
@@ -302,6 +337,20 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
       searchUrl: envOptional({ file, key: "IKNOW_WEB_SEARCH_URL" }),
       // 可选出站代理：空 → undefined（network-guard 直连）。显式配置才生效。
       proxy: envOptional({ file, key: "IKNOW_WEB_PROXY" }),
+    },
+    // #119 T1: 自动压缩配置臂(透传至 harness/compress/ via LoopEngineDeps.compress)。
+    // thresholdTokens 阈值合理性校验(threshold >= window 拒绝)归 T4 threshold.ts,
+    // 本 loader 仅承载 raw env 解析, 不抛错。
+    compress: {
+      contextWindow: envInt({
+        file,
+        key: "IKNOW_MODEL_CONTEXT_WINDOW",
+        fallback: 200000,
+      }),
+      thresholdTokens: envOptionalInt({
+        file,
+        key: "IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS",
+      }),
     },
   };
 }

@@ -34,6 +34,9 @@ function makeBundle(
       proxy: undefined,
       ...envOverrides,
     },
+    // #119 T7: IknowCompressEnv 必填(T1 接入),build-engine 透传。test fixture
+    // 默认 contextWindow=200000, thresholdTokens 缺省推导。
+    compress: { contextWindow: 200_000, thresholdTokens: undefined },
   };
   // buildTuiDeps 解构 { env } = bundle; 其余字段不读。
   return { env } as unknown as RuntimeBundle;

@@ -21,6 +21,9 @@ const ENV_KEYS = [
   // #179 T6: streaming arm env (default on, invalid → on).
   "IKNOW_LLM_STREAM",
   "IKNOW_WEB_SEARCH_URL",
+  // #119 T1: compression config env keys.
+  "IKNOW_MODEL_CONTEXT_WINDOW",
+  "IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS",
 ] as const;
 
 describe("loadIknowEnv — thinking config (#151 T4)", () => {
@@ -181,5 +184,58 @@ describe("loadIknowEnv — web.searchUrl (ACI web_search 端点覆写)", () => {
     process.env.IKNOW_WEB_SEARCH_URL = "";
     const env = loadIknowEnv();
     assert.equal(env.web.searchUrl, undefined);
+  });
+});
+
+describe("loadIknowEnv — compress config (#119 T1)", () => {
+  beforeEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+
+  it("default: contextWindow=200000, thresholdTokens=undefined(均未设 env)", () => {
+    const env = loadIknowEnv();
+    assert.equal(env.compress.contextWindow, 200000);
+    assert.equal(env.compress.thresholdTokens, undefined);
+  });
+
+  it("显式 IKNOW_MODEL_CONTEXT_WINDOW=300000 → env.compress.contextWindow=300000", () => {
+    process.env.IKNOW_MODEL_CONTEXT_WINDOW = "300000";
+    const env = loadIknowEnv();
+    assert.equal(env.compress.contextWindow, 300000);
+  });
+
+  it("显式 IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS=150000 → env.compress.thresholdTokens=150000", () => {
+    process.env.IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS = "150000";
+    const env = loadIknowEnv();
+    assert.equal(env.compress.thresholdTokens, 150000);
+  });
+
+  it("非数字字符串（如 'abc'）→ contextWindow 回退 200000（对齐 envInt 既有纪律）", () => {
+    process.env.IKNOW_MODEL_CONTEXT_WINDOW = "abc";
+    const env = loadIknowEnv();
+    assert.equal(env.compress.contextWindow, 200000);
+  });
+
+  it("IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS 非数字 → undefined（可选 int 非法回退）", () => {
+    process.env.IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS = "not-a-number";
+    const env = loadIknowEnv();
+    assert.equal(env.compress.thresholdTokens, undefined);
+  });
+
+  it("IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS 空串 → undefined（与未设同义）", () => {
+    process.env.IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS = "";
+    const env = loadIknowEnv();
+    assert.equal(env.compress.thresholdTokens, undefined);
+  });
+
+  it("阈值 vs 窗口独立:显式 thresholdTokens 不影响 contextWindow", () => {
+    process.env.IKNOW_MODEL_CONTEXT_WINDOW = "500000";
+    process.env.IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS = "100000";
+    const env = loadIknowEnv();
+    assert.equal(env.compress.contextWindow, 500000);
+    assert.equal(env.compress.thresholdTokens, 100000);
   });
 });
