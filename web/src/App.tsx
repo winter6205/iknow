@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { ChatHeader } from "./components/ChatHeader";
 import { Composer } from "./components/Composer";
+import { ContextUsageStrip } from "./components/ContextUsageStrip";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { MessageList } from "./components/MessageList";
 import { SessionSidebar } from "./components/SessionSidebar";
@@ -171,6 +172,12 @@ function ChatApp() {
             thinkingSettings={thinkingSettings}
             onThinkingChange={handleThinkingChange}
             onSend={handleSend}
+          />
+          {/* 上下文用量条：输入框下方（用户 2026-08-07 反馈：放输入框下方）。 */}
+          <ContextUsageStrip
+            usage={chat.lastAnswer?.lastUsage ?? null}
+            contextWindow={chat.contextWindow}
+            sending={chat.phase === "sending"}
           />
         </>
       }

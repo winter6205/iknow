@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { SessionHub, type SessionHubOptions } from "./hub.js";
 import { listenSessionServer, type ListeningServer } from "./http.js";
 import { SessionStore } from "./store/index.js";
+import { loadIknowEnv } from "../config/env.js";
 import {
   initIknowWorkspaceSafe,
   runHostInitScriptSafe,
@@ -80,11 +81,15 @@ export async function startSessionServe(
       ? Number(process.env.IKNOW_SERVE_PORT)
       : 8787);
   const host = opts?.host ?? "127.0.0.1";
+  // 上下文窗口：走 env SSOT（loadIknowEnv），供 HealthResponse 下发
+  // （context-usage-display 计划：百分比分母）。与 hub.ensureDeps 同源。
+  const env = loadIknowEnv();
 
   const listening = await listenSessionServer({
     hub,
     host,
     port: Number.isFinite(port) ? port : 8787,
+    contextWindow: env.compress.contextWindow,
     // Note: serve still ACCEPTS --trace-out (write side via hub). The READ-
     // side reader is now mounted by `iknow trace` (spec #183 R3).
   });

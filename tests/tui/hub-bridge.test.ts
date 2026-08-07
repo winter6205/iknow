@@ -6,7 +6,9 @@
  *    ensureSession(id) 原样返回；启动即退出不留空壳（SC 1）；
  *  - in-flight 登记簿：soleId 归因语义（0/1/N）；postMessage 进出登记、
  *    失败路径也 unmark；
- *  - postMessage 回执投影（finalText / stopReason / turnCount）。
+ *  - postMessage 回执投影（finalText / stopReason / turnCount）；
+ *  - T3 上下文用量：bridge.contextWindow 默认 200000、可 override；postMessage
+ *    回执的 lastUsage 透传（wire 有 → state 有；wire 无 → null）。
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
@@ -150,5 +152,73 @@ describe("hub-bridge postMessage", () => {
     const list = await bridge.listSessions();
     expect(list).toHaveLength(1);
     expect(list[0]!.summary).toBe("第一个问题");
+  });
+});
+
+describe("hub-bridge contextWindow（T3）", () => {
+  it("默认 200000（与 loop-engine compress 默认同源）", () => {
+    const bridge = createTuiBridge({
+      deps: makeDeps([]),
+      inflight: createInflightRegistry(),
+    });
+    expect(bridge.contextWindow).toBe(200_000);
+  });
+
+  it("override 生效", () => {
+    const bridge = createTuiBridge({
+      deps: makeDeps([]),
+      inflight: createInflightRegistry(),
+      contextWindow: 128_000,
+    });
+    expect(bridge.contextWindow).toBe(128_000);
+  });
+});
+
+describe("hub-bridge postMessage lastUsage（T3）", () => {
+  let baseDir: string;
+
+  beforeEach(async () => {
+    baseDir = await mkdtemp(join(tmpdir(), "iknow-tui-bridge-usage-"));
+  });
+  afterEach(async () => {
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
+  it("wire 带 lastUsage → bridge.postMessage 透传；其它字段不变", async () => {
+    const usage = {
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheCreationInputTokens: 200,
+      cacheReadInputTokens: 300,
+    };
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      deps: makeDeps([assistantResult({ texts: ["你好"], usage })]),
+      inflight: createInflightRegistry(),
+    });
+    const id = await bridge.ensureSession(undefined);
+    const result = await bridge.postMessage({
+      conversationId: id,
+      text: "你好",
+    });
+    expect(result.lastUsage).toEqual(usage);
+    // 既有字段不受影响。
+    expect(result.finalText).toBe("你好");
+    expect(result.stopReason).toBe("completed");
+    expect(result.turnCount).toBe(1);
+  });
+
+  it("wire 无 lastUsage → null（等价 RunResult.lastUsage=null 语义）", async () => {
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      deps: makeDeps([assistantResult({ texts: ["你好"] })]),
+      inflight: createInflightRegistry(),
+    });
+    const id = await bridge.ensureSession(undefined);
+    const result = await bridge.postMessage({
+      conversationId: id,
+      text: "你好",
+    });
+    expect(result.lastUsage).toBeNull();
   });
 });

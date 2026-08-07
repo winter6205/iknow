@@ -13,13 +13,22 @@
  *  - `chatScroll` 现为行数（>0 = 向上滚多少行），不再是消息计数；
  *  - 视口高度 = 终端 rows - banner - 状态栏 - 输入框 - 槽位，动态算；
  *  - PgUp = 视口一半向下滚，PgDn = 视口一半向上滚，Home = 顶，End = 0；
- *  - 鼠标滚轮不再由 app 截胡（跟随 upstream：移除 DECSET 1000/1006 捕获），
- *    交给终端原生 scrollback 翻历史；auto-follow 在 turn 完成 / new 会话触发。
+ *  - 鼠标滚轮（DECSET 1000/1006 SGR）同样驱动 `chatScroll`，与 PgUp/PgDn 同一条
+ *    滚动状态；auto-follow 在 turn 完成 / new 会话触发。
  */
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import type { HarnessStreamEvent } from "../harness/stream.js";
+import type { TokenUsage } from "../harness/model-adapter/types.js";
 import type { ReactElement } from "react";
-import { Box, Text, useApp, useInput, useWindowSize } from "ink";
+import {
+  Box,
+  Text,
+  useApp,
+  useInput,
+  useStdin,
+  useStdout,
+  useWindowSize,
+} from "ink";
 import type { TuiBridge } from "./hub-bridge.js";
 import type { TuiAskUserBridge } from "./ask-user.js";
 import {
@@ -27,7 +36,6 @@ import {
   attachSession,
   canInterrupt,
   createDraftSession,
-  sessionSummary,
   switchedAwayFrom,
   switchedTo,
   turnFinished,
@@ -46,17 +54,34 @@ import {
 import { formatLiveToolEvent, summarizeToolCall } from "./tool-summary.js";
 import type { TuiToolEvent } from "./deps.js";
 import { liveToolReduce, type LiveToolRun } from "./live-tool-state.js";
-import { ChatView } from "./chat-view.js";
+import { ChatView, flatContentLines } from "./chat-view.js";
 import type { StreamDraft } from "../cli/stream-draft.js";
 import { createStreamDraft } from "../cli/stream-draft.js";
 import { ListView, relativeTime, type TuiListEntry } from "./list-view.js";
+import { ContextBar } from "./context-bar.js";
 import { PromptInput, useTick } from "./components.js";
 import { renderBanner } from "./banner.js";
 import { tuiPalette } from "./theme.js";
-import { clipOneLine } from "./text.js";
 import { VERSION } from "./version.js";
 import { writeIknowState } from "../harness/identity/index.js";
-import { isSgrMouseSequence } from "./mouse.js";
+import {
+  enableSgrMouseReport,
+  isSgrMouseSequence,
+  parseMouseAllEvents,
+  parseMouseEvents,
+  disableMouseReport,
+} from "./mouse.js";
+import { copyToClipboard, type CopyResult } from "./clipboard.js";
+import type { Selection, ContentWindow } from "./selection.js";
+import {
+  extractSelectionText,
+  isEmpty,
+  normalize,
+  terminalToCellPos,
+} from "./selection.js";
+
+/** 鼠标滚轮每个 tick 调整的行数。 */
+const WHEEL_STEP_ROWS = 3;
 
 export interface TuiToolEventSink {
   readonly emit: (event: TuiToolEvent) => void;
@@ -97,6 +122,8 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   const { bridge, askBridge, toolEventSink } = props;
   const pal = tuiPalette;
   const { exit } = useApp();
+  const { stdout } = useStdout();
+  const { stdin } = useStdin();
   const { columns, rows: rawRows } = useWindowSize();
   const cols = Math.max(columns ?? 80, 40);
   const rows = Math.max(rawRows ?? 24, 10);
@@ -126,6 +153,17 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   // 物理行）。新 turn 完成 / new 会话 → 0；PgUp/PgDn/Home/End 调整
   // （与 PromptInput 的 ↑/↓ 不冲突，避键）；鼠标滚轮交由终端原生 scrollback。
   const [chatScroll, setChatScroll] = useState(0);
+  // #238 鼠标拖选选区（未 normalize）：null = 无活动选区。drag 期间不断
+  // 更新；mouseup 时若非空 → 调 copyToClipboard，并清空。滚动 / 切会话 / new
+  // 会话 → 一律清空，避免 stale 状态。
+  const [selection, setSelection] = useState<Selection | null>(null);
+  // #238 selection 镜像 ref：mouseup stale 闭包路径读最新值；clearSelection
+  // 双清（state + ref），避免 setState updater 内做副作用。
+  const selectionRef = useRef<Selection | null>(null);
+  // #238 键盘逃生口：最近一次非空选区（mouseup 自动复制后保留，供 Ctrl+Y
+  // 重新复制）。mouseup 不写这里（自动复制已发生）；Ctrl+Y 读它。
+  const lastSelectionRef = useRef<Selection | null>(null);
+  selectionRef.current = selection;
 
   // T4 (#175): 流式草稿单一实例（单会话 in-flight 即可；多会话并发时只有
   // fg 会话持 streamDraft，bg 由落盘后刷新获得终稿）。state ref 由 React 保证
@@ -160,6 +198,10 @@ export function TuiApp(props: TuiAppProps): ReactElement {
 
   const aborters = useRef(new Map<string, AbortController>());
   const inflightPromises = useRef(new Set<Promise<unknown>>());
+  // view 进 ref 让 mouse listener 跨视图切换不丢事件：不把 view 写进 effect deps，
+  // 避免 view 切换瞬间 unregister/register 丢滚轮。
+  const viewRef = useRef<TuiView>("chat");
+  viewRef.current = view;
   const [listEntries, setListEntries] = useState<ReadonlyArray<TuiListEntry>>(
     []
   );
@@ -168,40 +210,54 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   const askTick = askBridge.pending() !== undefined;
   useTick(askTick ? 100 : 0);
 
-  // 任务 A 行级 + 滚动对齐：banner 归 ChatView 内部 row window（与消息同
-  // scroll space，滚轮/键盘一起滚；输入框 + 状态栏固定在 app 底部）。
-  // 单一计算源：`bannerLines`（渲染行）与 `bannerRowSpan`（占行数）同派生，
-  // 避免两处各算各的漂移。空会话 = 完整眼 + 顶部分隔；有消息 = 单行短档。
-  // list 视图独占整屏，banner 不渲染。
+  // 方案 B（最终定稿）：banner 归 ChatView 内部 row window，**任何时候都保持
+  // 完整眼** —— 包括有消息之后。banner 与消息共用同一滚动空间，用户向上滚
+  // 能翻回完整 banner，向下滚与消息一起滚出。底部输入框 + 状态栏固定
+  // （在 app.tsx JSX 中 ChatView 之外）始终在底部。
+  // 窄终端（cols < BANNER_MIN_COLS）完整眼放不下 → 退化为单行 short=true。
+  // 空会话额外加一行顶部分隔线，区分 banner 和下方空白；消息存在时由消息
+  // 自身提供分隔（避免重复加线）。
+  // 用户 2026-08-07 复看：「下面对话框要固定，消息跟图标可以向上滚动」。
+  // 注：之前的"有消息后塌成单行"理解错了——logo 字符保留不够，向上滚应
+  // 看到完整 banner。
   const bannerLines = useMemo(() => {
     if (view !== "chat") return [];
     const sess = sessions[activeKey] ?? initial;
-    if (sess.messages.length === 0) {
-      const full = renderBanner(
+    const full = renderBanner(
+      { version: VERSION, cwd: props.cwd, dataDir: props.dataDir },
+      { cols, short: false }
+    );
+    if (full.length === 0) {
+      // 窄终端：完整眼放不下 → 单行 short（任意 ≥15 列都能放下）
+      return renderBanner(
         { version: VERSION, cwd: props.cwd, dataDir: props.dataDir },
-        { cols, short: false }
+        { cols, short: true }
       );
-      // 完整眼下方加顶部分隔（dim 外框色，与 banner 边框同阶）。
-      if (full.length === 0) return [];
+    }
+    if (sess.messages.length === 0) {
+      // 空会话：完整眼 + 顶部分隔
       return [...full, `\x1b[38;5;244m${"─".repeat(cols)}\x1b[0m`];
     }
-    return renderBanner(
-      { version: VERSION, cwd: props.cwd, dataDir: props.dataDir },
-      { cols, short: true }
-    );
+    return full;
   }, [view, activeKey, sessions, initial, cols, props.cwd, props.dataDir]);
-  const bannerRowSpan = bannerLines.length;
 
   const viewportRows = useMemo(() => {
-    // 固定行扣减：banner / 状态栏（1） / 输入框（2：圆角线框 1 + hint 1 视情况）
-    // / ask 槽（1）/ notice（按 lines）。滚动指示器（顶部 / fold）的行账由
-    // ChatView 内部从 viewportRows 扣除（INDICATOR_ROWS，SSOT）——调用方
-    // 传入的是聊天区域总预算，不再预扣指示行（旧实现预扣 1 但指示实测占
-    // 2 行，是 #189 渲染漂移的 chrome 账目根因）。
+    // 固定行扣减：输入框（2：圆角线框 1 + hint 1 视情况）/ ask 槽（1）/
+    // notice（按 lines）。状态栏已于用户 2026-08-07 反馈移除（空闲/版本号/
+    // 运行态全部不需要——版本号 banner 已有，运行态 ContextBar 脉动承担，
+    // 「后台运行中」bg 标记保留为独立条件行 +1）。滚动指示器（顶部 / fold）
+    // 的行账由 ChatView 内部从 viewportRows 扣除（INDICATOR_ROWS，SSOT）。
+    //
+    // 方案 B（最终定稿）：banner 已归入 ChatView 内部 row window 作为第一段
+    // content，**不再从 viewport 扣减**——否则空会话完整 banner（≈16 行）会
+    // 双重扣账把视口压扁，矮终端 banner 顶部被窗口裁掉、滚不回去。
+    // 消息区高度 = 终端总行 - 固定 chrome；banner 和消息共享这个视口并一起
+    // 滚动（用户 2026-08-07 复看：「下面对话框要固定，消息跟图标可以向上
+    // 滚动」）。ChatView 内部对 banner/message 的行窗口做 clamp 兜底。
     const noticeLines = notice?.lines.length ?? 0;
-    const reserved = 1 + 2 + 1 + noticeLines; // 状态栏 + 输入 + ask + notice
-    return Math.max(5, rows - bannerRowSpan - reserved);
-  }, [rows, bannerRowSpan, notice]);
+    const reserved = 2 + 1 + noticeLines; // 输入 + ask + notice（状态栏移除）
+    return Math.max(5, rows - reserved);
+  }, [rows, notice]);
 
   // 工具事件订阅：T4 (#175) 优先按 tool_use_id 配对入结构化运行状态;
   // 缺 toolUseId 时落回 legacy 字符串行追加(向后兼容)。
@@ -242,13 +298,112 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     [toolEventSink]
   );
 
-  // 鼠标滚轮已不再由 app 截胡：跟随 upstream（`frontend/terminal` 无任何
-  // DECSET 写入，ink 7.x `alternateScreen: false` 默认）让终端原生
-  // scrollback 接管滚轮翻历史。键盘 PgUp/PgDn/Home/End 行级滚动保留，
-  // 与 native scrollback 并存不冲突。
+  // 鼠标支持（朴素滚动 + #238 拖选）：ink 渲染到 normal buffer，原生 scrollback
+  // 全是中间帧垃圾，滚轮翻历史不可用。挂载时 DECSET 1000/1006 启用 SGR 滚轮
+  // 报告 + 1002h（drag 模式）启用拖动上报；stdin.data 监听 parseMouseAllEvents。
+  // 滚轮 → setChatScroll（与 PgUp/PgDn 同一条滚动状态）；左键按下/拖动/释放 →
+  // 更新选区，释放时非空选区 → copyToClipboard + 清空。卸载时写 DECRST 关闭
+  // 序列（必须！否则残留 mouse 报告模式污染终端）。mouse listener 走
+  // stdin.on('data')：实测 pty + ink setRawMode 后 'data' 事件仍正常触发（ink
+  // 用 'readable' 流式读取，不消费 data 事件），与 ink useInput 并行不冲突。
+  const contentWindowRef = useRef<ContentWindow | null>(null);
+  const dragActiveRef = useRef(false);
+  // #238 选区在视图非 chat / 滚动 / 切会话时清空（state + ref 双清，ref 供
+  // mouseup stale 闭包读最新值；lastSelectionRef 同清，避免 Ctrl+Y 跨会话
+  // 复活旧选区）。
+  const clearSelection = (): void => {
+    selectionRef.current = null;
+    lastSelectionRef.current = null;
+    setSelection(null);
+  };
+  useEffect(() => {
+    const disable = enableSgrMouseReport(stdout);
+    const onData = (chunk: Buffer | string): void => {
+      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      // 滚轮：独立路径（不参与选区）。
+      const { wheelUp, wheelDown } = parseMouseEvents(text);
+      if (wheelUp > 0 || wheelDown > 0) {
+        if (viewRef.current !== "chat") return;
+        const delta = (wheelUp - wheelDown) * WHEEL_STEP_ROWS;
+        clearSelection();
+        setChatScroll((s) => Math.max(0, s + delta));
+        return;
+      }
+      // 视图过滤放 listener 内（不进 deps）：跨视图切换不丢事件。
+      if (viewRef.current !== "chat") return;
+      const win = contentWindowRef.current;
+      if (win === null) return;
+      for (const ev of parseMouseAllEvents(text)) {
+        if (ev.button === 0 && ev.pressed) {
+          // 左键按下 → 选区起点（清除之前选区）
+          const pos = terminalToCellPos(ev.x, ev.y, win);
+          if (pos === null) continue;
+          dragActiveRef.current = true;
+          setSelection({ anchor: pos, active: pos });
+        } else if (ev.button === 3 && !ev.pressed) {
+          // 释放（任意键）→ 若本帧有过 drag 才复制；裸 release（无 press）
+          // 不消费已存选区（防止 Ctrl+Y 之间杂散 release 误复制）。
+          const wasDragging = dragActiveRef.current;
+          dragActiveRef.current = false;
+          if (!wasDragging) continue;
+          // side effect（复制+notice）放 setSelection 之外：updater 必须纯
+          //（StrictMode 下会双调用）。
+          const prev = selectionRef.current;
+          setSelection(null);
+          if (prev !== null && !isEmpty(prev)) {
+            lastSelectionRef.current = prev; // Ctrl+Y 逃生口
+            void doCopySelection(prev);
+          }
+        } else if (ev.button === 32 && ev.pressed) {
+          // 左键拖动 → 扩展选区 active
+          if (!dragActiveRef.current) continue;
+          const pos = terminalToCellPos(ev.x, ev.y, win);
+          if (pos === null) continue;
+          setSelection((prev) =>
+            prev === null
+              ? { anchor: pos, active: pos }
+              : { ...prev, active: pos }
+          );
+        }
+      }
+    };
+    stdin?.on("data", onData);
+    return () => {
+      stdin?.off("data", onData);
+      dragActiveRef.current = false;
+      disable();
+    };
+  }, [stdin, stdout]);
 
   const active = sessions[activeKey] ?? initial;
   const askPending = askBridge.pending();
+
+  // #238 stale-closure 修复：stdin 的 mouse listener 用 useEffect + 稳定 deps
+  // 注册一次（不随每次 render 重绑，避免丢事件），但它捕获首帧闭包。mouseup
+  // 复制路径必须读到「当前」live state（流式 turn / 工具事件 / 切会话后都会变），
+  // 故把复制需要的 live 值镜像进 ref（每 render 更新 current），doCopySelection
+  // 读 ref 而非闭包。view/contentWindow 已是 ref 模式，这里补齐其余字段。
+  const bannerLinesRef = useRef<ReadonlyArray<string>>([]);
+  const activeRef = useRef(active);
+  const colsRef = useRef(cols);
+  const liveToolLinesRef = useRef(liveToolLines);
+  const liveToolRunsRef = useRef(liveToolRuns);
+  const askPendingRef = useRef(askPending);
+  const draftsMaskedRef = useRef(draftsMasked);
+  const thinkingDraftMaskedRef = useRef(thinkingDraftMasked);
+  const thinkingExpandedRef = useRef(thinkingExpanded);
+  const dataDirRef = useRef(props.dataDir);
+  bannerLinesRef.current = bannerLines;
+  activeRef.current = active;
+  colsRef.current = cols;
+  liveToolLinesRef.current = liveToolLines;
+  liveToolRunsRef.current = liveToolRuns;
+  askPendingRef.current = askPending;
+  draftsMaskedRef.current = draftsMasked;
+  thinkingDraftMaskedRef.current = thinkingDraftMasked;
+  thinkingExpandedRef.current = thinkingExpanded;
+  dataDirRef.current = props.dataDir;
+  selectionRef.current = selection;
 
   /** 输入框下方候选提示：仅在以 "/" 开头且候选非空时展示。派生而非 state，
    *  避免双源同步（inputValue 单一来源）。任务 B：候选列表传给 PromptInput
@@ -319,6 +474,8 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     controller: AbortController
   ): Promise<void> {
     let stopReason: string | undefined;
+    // T4: 桥接回执的 lastUsage（成功才抄入；cancelled/异常路径保持 null）。
+    let lastUsage: TokenUsage | null = null;
     // T4: 构造草稿 + 装配 onStream；abort 时清空（cancelled 路径 + 异常路径都走）。
     const draft = createStreamDraft();
     setStreamDraft(draft);
@@ -345,6 +502,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
         onStream,
       });
       stopReason = resp.stopReason;
+      lastUsage = resp.lastUsage;
     } catch (err) {
       stopReason = "protocolError";
       setNotice({ lines: [`turn 失败：${describeError(err)}`] });
@@ -371,6 +529,8 @@ export function TuiApp(props: TuiAppProps): ReactElement {
             jsonMode: file.jsonMode,
             stopReason:
               (stopReason as TuiSessionState["lastStopReason"]) ?? "completed",
+            // T4: 透传 lastUsage 给 ContextBar /info 用；wire 缺席等价 null。
+            lastUsage,
           }),
         };
       });
@@ -386,7 +546,8 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       // 刷新失败也要落回 idle：否则会话卡在 running-fg（aborter 已在
       // finally 移除 → Ctrl+C 无效，且「正在运行」护栏挡住后续发送）。
       // messages 保持 turn 前状态（磁盘 SSOT 未读回）；stopReason 记录
-      // turn 本身的停止原因。
+      // turn 本身的停止原因。lastUsage 已抄入 → 仍透传（turn 已跑过，
+      // 不因刷新失败抹除）。
       setSessions((prev) => {
         const current = prev[targetId];
         if (!current) return prev;
@@ -400,6 +561,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
             jsonMode: current.jsonMode,
             stopReason:
               (stopReason as TuiSessionState["lastStopReason"]) ?? "completed",
+            lastUsage,
           }),
         };
       });
@@ -416,6 +578,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     setView("chat");
     setNotice(undefined);
     setChatScroll(0);
+    clearSelection();
   }
 
   async function openSessionAt(index: number): Promise<void> {
@@ -452,6 +615,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     setActiveKey(id);
     setView("chat");
     setNotice(undefined);
+    clearSelection();
   }
 
   async function safeList(): Promise<ReadonlyArray<TuiListEntry>> {
@@ -469,6 +633,66 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     }
   }
 
+  /** #238：根据当前 ChatView 内容行，把选区文本提取并复制。
+   *  读 *Ref.current 而非闭包变量：mouseup 是 useEffect 注册的 stale 闭包
+   *  路径，必须读到最新 live state（流式 turn / 工具事件 / 切会话都更新）。 */
+  async function doCopySelection(sel: Selection): Promise<void> {
+    const sess = activeRef.current;
+    const pending = askPendingRef.current;
+    const lines = flatContentLines({
+      bannerLines: bannerLinesRef.current,
+      session: sess,
+      cols: colsRef.current,
+      liveToolLines: sess.conversationId
+        ? (liveToolLinesRef.current[sess.conversationId] ?? [])
+        : [],
+      liveToolRuns: sess.conversationId
+        ? (liveToolRunsRef.current[sess.conversationId] ?? [])
+        : [],
+      askLine: pending
+        ? `[ask] 允许 ${pending.tool}？${
+            pending.summaryHint ? ` ${pending.summaryHint}` : ""
+          } 输入 y/n`
+        : undefined,
+      draftsMasked: draftsMaskedRef.current,
+      thinkingDraftMasked: thinkingDraftMaskedRef.current,
+      thinkingExpanded: thinkingExpandedRef.current,
+    });
+    const text = extractSelectionText(normalize(sel), lines);
+    if (text.length === 0) {
+      setNotice({ lines: ["选中区域为空。"] });
+      return;
+    }
+    let result: CopyResult;
+    try {
+      result = await copyToClipboard(text, { dataDir: dataDirRef.current });
+    } catch (err) {
+      // copyToClipboard 内部不 throw（返回 typed kind），但 spawn/writeFile
+      // 的意外异常仍防御性兜底，避免 void 调用产生 unhandled rejection。
+      setNotice({
+        lines: [
+          `复制失败：${err instanceof Error ? err.message : String(err)}`,
+        ],
+      });
+      return;
+    }
+    if (result.kind === "ok") {
+      setNotice({
+        lines: [`已复制（${result.method}，${text.length} 字）。`],
+      });
+    } else if (result.kind === "fallback") {
+      setNotice({
+        lines: [
+          `剪贴板命令不可用，文本已写入 ${result.path}（${result.bytes} bytes）。`,
+        ],
+      });
+    } else if (result.kind === "error") {
+      setNotice({
+        lines: [`复制失败：${result.message}`],
+      });
+    }
+  }
+
   async function quit(): Promise<void> {
     const hasBg = Object.values(sessions).some(
       (s) => s.runState === "running-bg"
@@ -482,6 +706,10 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     }
     // 等待全部 in-flight turn 落盘（退出不打断后台 turn，Q1a）。
     await Promise.allSettled([...inflightPromises.current]);
+    // 防御性：同步写 DECRST 关 mouse 序列，不依赖 React effect cleanup（真实
+    // 终端残留 mouse 报告模式会污染粘贴/选择/红点定位）。SSOT 在 mouse.ts
+    // （1000l/1006l/1002l 全关），避免漏关 drag mode。
+    disableMouseReport(stdout);
     exit();
   }
 
@@ -530,7 +758,9 @@ export function TuiApp(props: TuiAppProps): ReactElement {
         setNotice({ lines: helpLines() });
         return;
       case "info": {
-        setNotice({ lines: infoLines(active, activeKey) });
+        setNotice({
+          lines: infoLines(active, activeKey, bridge.contextWindow),
+        });
         return;
       }
       case "thinking": {
@@ -589,6 +819,17 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     // 是 "[<数字;数字;数字M/m" 形态），用 isSgrMouseSequence 丢弃，避免
     // 污染后续 Ctrl+C 等守卫与输入链。
     if (isSgrMouseSequence(input)) return;
+    if (key.ctrl && input === "y") {
+      // Ctrl+Y：键盘逃生口。当前有选区（drag 进行中）→ 直接复制；否则用
+      // 最近一次非空选区（mouseup 自动复制后保留）实现"重新复制"。
+      const active = selection ?? lastSelectionRef.current;
+      if (active === null) {
+        setNotice({ lines: ["无选区：先按住鼠标左键拖选文本。"] });
+      } else {
+        void doCopySelection(active);
+      }
+      return;
+    }
     if (key.ctrl && input === "c") {
       if (canInterrupt(active)) {
         aborters.current.get(active.conversationId ?? "")?.abort();
@@ -598,17 +839,23 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       return;
     }
     if (view !== "chat") return;
-    if (active.messages.length === 0) return;
+    // 方案 B：banner + 消息共用 row window，空会话也可滚动（矮终端 banner
+    // 超视口时 PgUp 能翻回 banner 顶部；高终端 maxScroll=0 自动 no-op）。
+    // 不设 messages.length===0 守卫——banner 就是可滚动内容。
     const step = Math.max(1, Math.floor(viewportRows / 2));
     if (key.pageUp) {
+      clearSelection();
       setChatScroll((s) => s + step);
     } else if (key.pageDown) {
+      clearSelection();
       setChatScroll((s) => Math.max(0, s - step));
     } else if (key.home) {
       // 顶：scroll 跳到一个大数，由 ChatView 兜底 clamp 到 totalRows
+      clearSelection();
       setChatScroll(Number.MAX_SAFE_INTEGER);
     } else if (key.end) {
       // 底：auto-follow 重置
+      clearSelection();
       setChatScroll(0);
     }
   });
@@ -653,6 +900,10 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           viewportRows={viewportRows}
           thinkingExpanded={thinkingExpanded}
           bannerLines={bannerLines}
+          selection={selection ?? undefined}
+          onWindow={(w) => {
+            contentWindowRef.current = w;
+          }}
         />
       )}
       {notice && (
@@ -682,61 +933,45 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           hintSuggestions={inputHintSuggestions}
         />
       )}
-      <StatusBar
-        cols={cols}
-        active={active}
-        bgSession={bgSession}
-        sessionCount={Object.keys(sessions).length}
-      />
-    </Box>
-  );
-}
-
-function StatusBar(props: {
-  readonly cols: number;
-  readonly active: TuiSessionState;
-  readonly bgSession: TuiSessionState | undefined;
-  readonly sessionCount: number;
-}): ReactElement {
-  const pal = tuiPalette;
-  const state =
-    props.active.runState === "idle"
-      ? "空闲"
-      : props.active.runState === "running-fg"
-        ? "运行中"
-        : "后台";
-  const summary = sessionSummary(props.active.messages);
-  return (
-    <Box flexWrap="wrap">
-      <Box marginRight={2}>
-        <Text color={pal.dim}>
-          {state} · {summary ? clipOneLine(summary, 24) : "新会话"}
-        </Text>
-      </Box>
-      {props.bgSession && (
-        <Box marginRight={2}>
-          <Text color={pal.dim}>
-            后台运行中 ·{" "}
-            {clipOneLine(sessionSummary(props.bgSession.messages), 24)}
-          </Text>
+      {/* ContextBar 仅聊天视图挂载（T4）：上下文用量条，输入框下方
+          （用户 2026-08-07 反馈：放输入框下方）。list 视图不挂。 */}
+      {view === "chat" && (
+        <ContextBar
+          lastUsage={active.lastUsage}
+          contextWindow={bridge.contextWindow}
+          running={active.runState === "running-fg"}
+          cols={cols}
+        />
+      )}
+      {/* 后台会话运行标记（SC5）：存在 running-bg 会话时单行 dim 提示。原
+          StatusBar 的空闲/版本号/运行态已按用户 2026-08-07 反馈移除（版本号
+          banner 已有，前台运行态由 ContextBar 脉动承担），仅保留这一条信息
+          承载 —— 后台 turn 在 UI 别处无显示。 */}
+      {bgSession && (
+        <Box>
+          <Text color={pal.dim}>后台运行中</Text>
         </Box>
       )}
-      <Box marginRight={2}>
-        <Text color={pal.dim}>会话 {props.sessionCount}</Text>
-      </Box>
-      <Box>
-        <Text color={pal.dim}>
-          v{VERSION} · {props.active.conversationId ?? "draft"}
-        </Text>
-      </Box>
     </Box>
   );
 }
 
 function infoLines(
   session: TuiSessionState,
-  key: string
+  key: string,
+  contextWindow: number
 ): ReadonlyArray<string> {
+  const lu = session.lastUsage;
+  // T4: token 明细（CLI `tokens in/out` 同语义 + cache read + window）。
+  // lastUsage === null → tokens: —（无成功调用）。
+  const tokenLines =
+    lu === null
+      ? ["tokens: —"]
+      : [
+          `tokens in/out: ${lu.inputTokens}/${lu.outputTokens}`,
+          `cache read: ${lu.cacheReadInputTokens}`,
+          `window: ${contextWindow}`,
+        ];
   return [
     `conversation_id: ${session.conversationId ?? key}（${
       session.conversationId ? "已建档" : "draft，首条消息后建档"
@@ -745,6 +980,7 @@ function infoLines(
     `updatedAt: ${session.updatedAt ? relativeTime(session.updatedAt) : "—"}`,
     `jsonMode: ${session.jsonMode}`,
     `runState: ${session.runState}`,
+    ...tokenLines,
   ];
 }
 

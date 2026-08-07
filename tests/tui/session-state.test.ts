@@ -6,13 +6,15 @@
  *  - 切回 running-bg → running-fg；idle 不变；
  *  - Ctrl+C 仅 running-fg 可打断（canInterrupt）；
  *  - turnFinished 落回 idle + 消息整体冻结替换（ReadonlyArray 纪律）。
+ *
+ * T3：TuiSessionState / TurnFinishedInput 增 lastUsage 字段（上下文用量显示）。
+ * 字段缺席（init）= null；turnFinished 把 hub 回执透传；Object.freeze 纪律保持。
  */
 import { describe, expect, it } from "vitest";
 import {
   attachSession,
   canInterrupt,
   createDraftSession,
-  sessionSummary,
   switchedAwayFrom,
   switchedTo,
   turnFinished,
@@ -56,6 +58,10 @@ describe("session-state: draft / attach", () => {
     expect(Object.isFrozen(draft.messages)).toBe(true);
   });
 
+  it("createDraftSession：lastUsage 初值 null（无首轮 usage）", () => {
+    expect(createDraftSession().lastUsage).toBeNull();
+  });
+
   it("attachSession：从文件恢复（消息冻结拷贝，不与源共享引用）", () => {
     const file = sampleFile();
     const attached = attachSession(file);
@@ -67,11 +73,8 @@ describe("session-state: draft / attach", () => {
     expect(attached.messages).not.toBe(file.messages);
   });
 
-  it("sessionSummary：首条 user 文本（#120 SSOT extractSummary）", () => {
-    expect(sessionSummary([msg("第一个问题"), msg("回答", "assistant")])).toBe(
-      "第一个问题"
-    );
-    expect(sessionSummary([])).toBe("");
+  it("attachSession：lastUsage 初值 null（lastUsage 只来自运行时回执，不从文件读）", () => {
+    expect(attachSession(sampleFile()).lastUsage).toBeNull();
   });
 });
 
@@ -140,9 +143,50 @@ describe("session-state: 三态转换表（Q1a）", () => {
       updatedAt: "",
       jsonMode: false,
       stopReason: "cancelled",
+      lastUsage: null,
     });
     expect(done.runState).toBe("idle");
     expect(done.lastStopReason).toBe("cancelled");
+  });
+});
+
+describe("session-state: lastUsage（T3，上下文用量显示）", () => {
+  it("turnFinished 传 lastUsage → state.lastUsage 命中 + 冻结纪律保持", () => {
+    const lastUsage = {
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheCreationInputTokens: 200,
+      cacheReadInputTokens: 300,
+    };
+    const messages: ReadonlyArray<AnthropicNativeMessage> = [
+      msg("问"),
+      msg("答", "assistant"),
+    ];
+    const done = turnFinished(createDraftSession(), {
+      conversationId: "conv-t3",
+      messages,
+      turnCount: 1,
+      updatedAt: "2026-08-05T00:00:00.000Z",
+      jsonMode: false,
+      stopReason: "completed",
+      lastUsage,
+    });
+    expect(done.lastUsage).toEqual(lastUsage);
+    expect(Object.isFrozen(done)).toBe(true);
+    expect(Object.isFrozen(done.messages)).toBe(true);
+  });
+
+  it("turnFinished 无 lastUsage（null）→ state.lastUsage 为 null", () => {
+    const done = turnFinished(createDraftSession(), {
+      conversationId: "conv-t3",
+      messages: [],
+      turnCount: 0,
+      updatedAt: "",
+      jsonMode: false,
+      stopReason: "completed",
+      lastUsage: null,
+    });
+    expect(done.lastUsage).toBeNull();
   });
 });
 

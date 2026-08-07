@@ -682,6 +682,77 @@ describe("postMessage answer wire fields (T1)", () => {
   });
 });
 
+// -- context-usage-display: lastUsage wire projection -------------------------
+
+describe("postMessage answer wire fields — lastUsage (context-usage-display)", () => {
+  it("assistantResult with usage → answer.lastUsage present (camelCase)", async () => {
+    const deps = makeDeps([
+      assistantResult({
+        texts: ["done"],
+        usage: {
+          inputTokens: 111,
+          outputTokens: 22,
+          cacheCreationInputTokens: 5,
+          cacheReadInputTokens: 9,
+        },
+      }),
+    ]);
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "x",
+    });
+    const answer = res.turn.answer as unknown as Record<string, unknown>;
+    assert.ok("lastUsage" in answer, "lastUsage key must be present");
+    const usage = answer.lastUsage as Record<string, unknown>;
+    assert.equal(usage.inputTokens, 111);
+    assert.equal(usage.outputTokens, 22);
+    assert.equal(usage.cacheCreationInputTokens, 5);
+    assert.equal(usage.cacheReadInputTokens, 9);
+  });
+
+  it("assistantResult without usage → answer.lastUsage key absent (byte-stable)", async () => {
+    const deps = makeDeps([assistantResult({ texts: ["plain"] })]);
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "hi",
+    });
+    assert.equal("lastUsage" in res.turn.answer, false);
+    assert.deepEqual(Object.keys(res.turn.answer).sort(), [
+      "finalText",
+      "stopReason",
+      "turnCount",
+    ]);
+  });
+
+  it("cache nulls on usage survive to wire", async () => {
+    const deps = makeDeps([
+      assistantResult({
+        texts: ["x"],
+        usage: {
+          inputTokens: 7,
+          outputTokens: 3,
+          cacheCreationInputTokens: null,
+          cacheReadInputTokens: null,
+        },
+      }),
+    ]);
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "x",
+    });
+    const answer = res.turn.answer as unknown as Record<string, unknown>;
+    const usage = answer.lastUsage as Record<string, unknown>;
+    assert.equal(usage.cacheCreationInputTokens, null);
+    assert.equal(usage.cacheReadInputTokens, null);
+  });
+});
+
 // -- T2: per-turn thinking override -------------------------------------------
 
 describe("postMessage thinking override (T2)", () => {

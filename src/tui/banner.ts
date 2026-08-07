@@ -276,18 +276,24 @@ function buildInfoLines(info: BannerInfo): string[] {
  * 返回 ANSI 上色行（圆角外框占满 cols）：完整眼睛居左 + info 栏居右并排，
  * 顶框内嵌居中 title `◆ iknow`，底框为横线。无水平居中——面板
  * 始终撑满 cols（与输入框 PromptInput 一致）。
- * cols < BANNER_MIN_COLS → []（窄终端降级）；short=true
- * → 单行 `◆ iknow <version>`（原型 L7 极简 + V7 SHORT 档，无外框）。
+ *
+ * 分支顺序（窄终端契约）：
+ *  - short=true → 单行 `◆ iknow <version>`，不检查 BANNER_MIN_COLS
+ *    （窄终端也保留 logo，用户复看裁定：宁可一行不要消失）；
+ *  - short=false 且 cols < BANNER_MIN_COLS → []（完整眼无可压缩版，
+ *    避免溢出；compact 单行已经在前一支返回）。
  */
 export function renderBanner(
   info: BannerInfo,
   opts: { cols: number; short: boolean }
 ): string[] {
-  if (opts.cols < BANNER_MIN_COLS) return [];
-
+  // 紧凑档在窄终端也保留 —— 单行 `◆ iknow <version>` 占 ~15 列，
+  // 任何能用 iknow 的终端都放得下。完整眼放不下时退化为零（下方门控），
+  // 因为 32×13 面板无法压成单行不带歧义。
   if (opts.short) {
     return [paint(`◆ iknow ${info.version}`, BOLD + FG_TITLE)];
   }
+  if (opts.cols < BANNER_MIN_COLS) return [];
 
   const LOGO_W = visualWidth(EYE_LINES[0] ?? "");
   const LOGO_H = EYE_LINES.length;

@@ -139,6 +139,19 @@ describe("banner 渲染（2026-08-06 三轮：占满行宽圆角框 + 完整眼�
     expect(stripAnsi(lines[0]!)).toContain("iknow");
   });
 
+  it("窄终端 SHORT 档也保留单行：cols < BANNER_MIN_COLS 仍返 `◆ iknow`（用户复看裁定，不让 logo 消失）", () => {
+    // 2026-08-07 修复：short 分支在 BANNER_MIN_COLS 门控之前——完整眼放不下
+    // 时降级成单行，而不是整块消失（此前短档也被窄终端挡掉 → 用户"窄终端
+    // 也显示单行"诉求）。
+    for (const cols of [40, 60, BANNER_MIN_COLS - 1]) {
+      const lines = renderBanner(info, { cols, short: true });
+      expect(lines.length, `cols=${cols} 单行`).toBe(1);
+      expect(stripAnsi(lines[0]!), `cols=${cols} 内容`).toContain("iknow");
+      // 单行不溢出（视觉宽 <= cols）
+      expect(visualWidth(lines[0]!)).toBeLessThanOrEqual(cols);
+    }
+  });
+
   it("UI 层无 emoji", () => {
     const lines = renderBanner(info, { cols: 120, short: false });
     expect(EMOJI_RE.test(stripAnsi(lines.join("\n")))).toBe(false);

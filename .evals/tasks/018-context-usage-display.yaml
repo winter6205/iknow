@@ -1,0 +1,28 @@
+id: 018-context-usage-display
+tier: fast
+description: "上下文用量显示闭环 — TUI ContextBar + Web ContextUsageStrip 消费 lastUsage / contextWindow"
+repo: .
+test_command: |
+  set -e
+  grep -q "lastUsage" src/session-api/contract.ts || { echo "FAIL: contract.ts 缺 lastUsage"; exit 1; }
+  grep -q "contextWindow" src/session-api/contract.ts || { echo "FAIL: contract.ts 缺 contextWindow"; exit 1; }
+  grep -q "lastUsage" src/session-api/hub.ts || { echo "FAIL: hub.ts 未投影 lastUsage"; exit 1; }
+  grep -q "contextWindow" src/session-api/http.ts || { echo "FAIL: http.ts 缺 contextWindow"; exit 1; }
+  grep -q "lastUsage" src/tui/hub-bridge.ts || { echo "FAIL: hub-bridge.ts 缺 lastUsage"; exit 1; }
+  grep -q "contextWindow" src/tui/hub-bridge.ts || { echo "FAIL: hub-bridge.ts 缺 contextWindow"; exit 1; }
+  test -f src/tui/context-bar.tsx || { echo "FAIL: src/tui/context-bar.tsx 缺失"; exit 1; }
+  grep -q "export function ContextBar" src/tui/context-bar.tsx || { echo "FAIL: context-bar.tsx 未导出 ContextBar"; exit 1; }
+  grep -q "<ContextBar" src/tui/app.tsx || { echo "FAIL: app.tsx 未引用 <ContextBar"; exit 1; }
+  test -f web/src/components/ContextUsageStrip.tsx || { echo "FAIL: web/src/components/ContextUsageStrip.tsx 缺失"; exit 1; }
+  grep -q "lastUsage" web/src/api/types.ts || { echo "FAIL: web types 缺 lastUsage"; exit 1; }
+  grep -q "contextWindow" web/src/api/types.ts || { echo "FAIL: web types 缺 contextWindow"; exit 1; }
+  grep -q "<ContextUsageStrip" web/src/App.tsx || { echo "FAIL: web App.tsx 未引用 <ContextUsageStrip"; exit 1; }
+  npx tsc --noEmit || { echo "FAIL: root typecheck"; exit 1; }
+  npm run web:typecheck || { echo "FAIL: web typecheck"; exit 1; }
+  echo "PASS: context usage display path fully wired"
+prompt: |
+  Run `bash .evals/run.sh --task 018-context-usage-display`. Confirms the
+  context-usage display path is fully wired end-to-end: wire fields
+  (TurnAnswerDto.lastUsage + HealthResponse.contextWindow projection),
+  TUI ContextBar mount, Web ContextUsageStrip mount — and that both
+  root and web typechecks pass.
