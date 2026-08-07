@@ -66,6 +66,7 @@ import { VERSION } from "./version.js";
 import { writeIknowState } from "../harness/identity/index.js";
 import { isSgrMouseSequence } from "./mouse.js";
 import { enableMouseScroll, parseMouseEvents } from "./mouse.js";
+import { copyToClipboard, extractLastAssistantText } from "./clipboard.js";
 
 /** 鼠标滚轮每个 tick 调整的行数。 */
 const WHEEL_STEP_ROWS = 3;
@@ -521,6 +522,31 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     }
   }
 
+  /** /copy 或 Ctrl+Y：复制最近一轮 assistant 全文到系统剪贴板。 */
+  async function copyLastAssistant(): Promise<void> {
+    const text = extractLastAssistantText(active.messages);
+    if (text.length === 0) {
+      setNotice({ lines: ["当前会话还没有 assistant 回复。"] });
+      return;
+    }
+    const result = await copyToClipboard(text, { dataDir: props.dataDir });
+    if (result.kind === "ok") {
+      setNotice({
+        lines: [`/copy 已复制（${result.method}，${text.length} 字）。`],
+      });
+    } else if (result.kind === "fallback") {
+      setNotice({
+        lines: [
+          `/copy 剪贴板命令不可用，文本已写入 ${result.path}（${result.bytes} bytes）。`,
+        ],
+      });
+    } else if (result.kind === "error") {
+      setNotice({
+        lines: [`/copy 复制失败：${result.message}`],
+      });
+    }
+  }
+
   async function quit(): Promise<void> {
     const hasBg = Object.values(sessions).some(
       (s) => s.runState === "running-bg"
@@ -586,6 +612,9 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       case "help":
         setNotice({ lines: helpLines() });
         return;
+      case "copy":
+        await copyLastAssistant();
+        return;
       case "info": {
         setNotice({ lines: infoLines(active, activeKey) });
         return;
@@ -646,6 +675,12 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     // 是 "[<数字;数字;数字M/m" 形态），用 isSgrMouseSequence 丢弃，避免
     // 污染后续 Ctrl+C 等守卫与输入链。
     if (isSgrMouseSequence(input)) return;
+    if (key.ctrl && input === "y") {
+      // Ctrl+Y：同 /copy —— 复制最近一轮 assistant 全文（显式复制路径，
+      // DECSET 1000h 启用后鼠标拖选不可用，见 clipboard.ts）。
+      void copyLastAssistant();
+      return;
+    }
     if (key.ctrl && input === "c") {
       if (canInterrupt(active)) {
         aborters.current.get(active.conversationId ?? "")?.abort();
