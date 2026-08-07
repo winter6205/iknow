@@ -25,6 +25,7 @@ import type {
   PendingAskView,
 } from "../harness/permission/ask-user.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
+import type { PermissionModeContext } from "../harness/permission/modes.js";
 import { createViolationCounter } from "../harness/sandbox/violation-handling.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
 import {
@@ -242,6 +243,9 @@ export type SessionHubOptions = {
   /** Session allow-list source. "always-allow" decisions from the web UI land
    * here so subsequent identical tool calls are not re-confirmed. Memory-only. */
   sessionGrants?: SessionGrants;
+  /** W2: permission mode context (default / plan / full_auto). Absent →
+   *  buildHarnessEngine defaults to "default". */
+  permissionMode?: PermissionModeContext;
   /** T2: env source for per-turn thinking override (test seam; production
    * omits it → withThinkingOverride falls back to loadIknowEnv()). */
   overrideEnv?: { readonly llm: LlmEnv };
@@ -286,6 +290,7 @@ export class SessionHub {
   private readonly askHandle: ServeAskUserHandle | undefined;
   /** Session allow-list source ("always-allow" from web UI lands here). */
   private readonly sessionGrants: SessionGrants | undefined;
+  private readonly permissionMode: PermissionModeContext | undefined;
   /** T2: env source for the per-turn thinking override (test seam). */
   private readonly overrideEnv: { readonly llm: LlmEnv } | undefined;
   /** Sandbox root for fs-tool access (code-review 2026-08-05). Undefined
@@ -310,6 +315,7 @@ export class SessionHub {
     this.askUser = opts.askUser;
     this.askHandle = opts.askHandle;
     this.sessionGrants = opts.sessionGrants;
+    this.permissionMode = opts.permissionMode;
     this.overrideEnv = opts.overrideEnv;
     this.sandboxRoot = opts.sandboxRoot;
     this.surface = opts.surface;
@@ -624,6 +630,7 @@ export class SessionHub {
       ...(this.sandboxRoot ? { sandboxRoot: this.sandboxRoot } : {}),
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
+      ...(this.permissionMode ? { permissionMode: this.permissionMode } : {}),
     });
     this.cachedDeps = deps;
     return this.cachedDeps;

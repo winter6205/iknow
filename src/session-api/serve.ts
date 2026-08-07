@@ -8,8 +8,15 @@ import { join } from "node:path";
 import { SessionHub, type SessionHubOptions } from "./hub.js";
 import { listenSessionServer, type ListeningServer } from "./http.js";
 import { SessionStore } from "./store/index.js";
-import { initIknowWorkspaceSafe } from "../harness/identity/index.js";
+import {
+  initIknowWorkspaceSafe,
+  runHostInitScriptSafe,
+} from "../harness/identity/index.js";
 import type { ServeAskUserHandle } from "../harness/permission/ask-user.js";
+import {
+  parsePermissionMode,
+  createPermissionModeContext,
+} from "../harness/permission/modes.js";
 
 export type ServeOptions = {
   host?: string;
@@ -41,6 +48,9 @@ export async function startSessionServe(
   // #196 IKNOW T5: eager + idempotent 初始化 ~/.iknow/(initIknowWorkspaceSafe
   // 内部 try/catch+warn,失败不阻塞装配 — 幂等备份,build-engine 内还有一次)。
   await initIknowWorkspaceSafe();
+  // W1: serve 入口也执行宿主侧 init 脚本(默认 ~/.iknow/init.sh)。
+  // 与 chat/ask 共用 runHostInitScriptSafe;文件不存在则 skip,失败不阻塞。
+  await runHostInitScriptSafe();
   const dataDir = resolveServeDataDir(opts?.dataDir);
   // cwd defaults to process.cwd() → the store picks its project namespace.
   const store = new SessionStore(dataDir);
@@ -51,6 +61,11 @@ export async function startSessionServe(
     traceOut: opts?.traceOut,
     // #196 A12: serve 跳过 BOOTSTRAP 段（surface="serve" → bootstrapActive=false）。
     surface: "serve",
+    // W2: serve 从 env IKNOW_PERMISSION_MODE 读初始 mode(可选);不暴露
+    // 运行时切换(context 不被 set,等同于静态)。
+    permissionMode: createPermissionModeContext(
+      parsePermissionMode(process.env.IKNOW_PERMISSION_MODE) ?? "default"
+    ),
     ...opts?.hubOptions,
     // Prefer the full handle when provided so web can resolve asks; fall back
     // to the bare askUser (back-compat for callers that only wire `.ask`).

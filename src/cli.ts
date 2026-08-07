@@ -27,7 +27,9 @@ import {
   createTtyAskUser,
   createFailClosedAskUser,
   createServeAskUser,
+  createPermissionModeContext,
 } from "./harness/permission/index.js";
+import type { PermissionMode } from "./harness/permission/modes.js";
 import { isIknowError } from "./shared/errors.js";
 import { randomUUID } from "node:crypto";
 import { buildViolationWiring } from "./harness/sandbox/violation-executor.js";
@@ -99,10 +101,16 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     // #194 T6 (SC15):ask 显式 memory:{enabled:false} — registry 剥离 memory
     // 工具(8 件) + memory_layer 段不装配;identity 其他 4 段照常(deps.system
     // 仍挂 createIknowSystemResolver)。
+    // W2: ask 入口从 env IKNOW_PERMISSION_MODE 读静态 mode;oneshot 不暴露
+    // 切换(context 不会被 set,等同于静态)。
     built = await buildHarnessEngine(bundle, {
       askUser: createFailClosedAskUser(),
       surface: "ask",
       memory: { enabled: false },
+      permissionMode: createPermissionModeContext(
+        (process.env.IKNOW_PERMISSION_MODE as PermissionMode | undefined) ??
+          "default"
+      ),
     });
   } catch (err) {
     if (err instanceof Error && err.message.includes("LLM mode needs")) {
@@ -149,6 +157,13 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   }
 
   let built: { deps: LoopEngineDeps };
+  // W2: chat REPL 持一个可变 PermissionModeContext —— /permissions 命令在
+  // REPL 里就地翻转它,引擎不重建。初始值走 env IKNOW_PERMISSION_MODE(可
+  // 选),缺省 default。
+  const permissionMode = createPermissionModeContext(
+    (process.env.IKNOW_PERMISSION_MODE as PermissionMode | undefined) ??
+      "default"
+  );
   try {
     // chat TTY REPL: interactive y/N prompt via stdin/stdout.
     // #196 A12:chat 激活 BOOTSTRAP(surface="chat" → bootstrapActive=true)。
@@ -157,6 +172,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
       askUser: createTtyAskUser(),
       surface: "chat",
       memory: { enabled: true },
+      permissionMode,
     });
   } catch (err) {
     printChatError(err);
@@ -171,6 +187,8 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // #152 T5:thinking 可见面(env flag → chat-session → format-run-human)。
     // env.ts SSOT;默认 off。
     showThinking: bundle.env.chat.showThinking,
+    // W2: 传给 REPL host,host 的 /permissions 斜杠命令就地翻 mode。
+    permissionMode,
   });
 }
 
