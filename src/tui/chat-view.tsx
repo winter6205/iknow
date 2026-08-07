@@ -174,9 +174,6 @@ export interface ChatViewProps {
   readonly bannerLines?: ReadonlyArray<string>;
 }
 
-/** 指示器实际占用行（`<Box mb=1><Text>` 实测各 2 行）。 */
-const INDICATOR_ROWS = 2;
-
 export function ChatView(props: ChatViewProps): ReactElement {
   const { session, cols } = props;
   const pal = tuiPalette;
@@ -188,11 +185,10 @@ export function ChatView(props: ChatViewProps): ReactElement {
   const statusMap = toolResultStatusMap(session.messages);
   const measured: Measured[] = [];
   let messageCursor = 0;
-  // Sticky 头语义：banner 在 ChatView 顶部单独渲染（不受 row window 滚动影
-  // 响 —— 用户复看裁定「对话跟logo应在同一个窗口」= 同一个聊天区，logo 常驻
-  // 顶部不滚走，消息在下面的独立 row window 里滚动）。bannerRows 仅用于
-  // viewport 预算扣减（app.tsx 的 bannerRowSpan）；此处不影响 messageCursor
-  // 或 contentRows。
+  // 方案 B（最终定稿）：banner 在 ChatView row window 内作为第一段，与
+  // 消息共享同一 scroll space。向上滚能翻回完整 banner，向下滚 banner 与
+  // 消息一起滚出（输入框 + 状态栏在 ChatView 之外固定挂载）。用户 2026-08-07
+  // 复看：「下面对话框要固定，消息跟图标可以向上滚动」。
   const bannerRows = props.bannerLines?.length ?? 0;
   for (const m of session.messages) {
     const mm = messageRender(m, cols, {
@@ -204,7 +200,7 @@ export function ChatView(props: ChatViewProps): ReactElement {
       lines: mm.lines,
       blocks: [...mm.blocks],
       totalRows: mm.totalRows,
-      startRow: messageCursor,
+      startRow: bannerRows + messageCursor,
     });
     messageCursor += mm.totalRows;
   }
@@ -220,57 +216,44 @@ export function ChatView(props: ChatViewProps): ReactElement {
     props.liveToolRuns ?? []
   );
   const tailRows = tail.total;
-  // 滚动预算：scroll>0 时 tail 折叠为单指示（INDICATOR_ROWS），否则 tail 原样占行。
-  const hasTail = tailRows > 0;
+  // ── 朴素滚动（2026-08-07 定稿：用户「第二种」，去所有折叠/指示器）──
+  // 语义：banner + 消息 + tail 是同一内容流。`scrollRows` = 向上翻了多少
+  // 物理行。窗口固定高度 = viewport（不含指示器/折叠 chrome）。scroll=0
+  // 时窗口底 = 内容底（auto-follow）；scroll>0 时窗口上移 scroll 行。
+  // 无「↑ N 行历史」指示、无「↓ N 行正在生成」折叠、无 maxScroll 文案。
   const requestedScroll = Math.max(0, props.scrollRows ?? 0);
   const viewport = props.viewportRows ?? 0;
-  // scroll>0 时占用的 chrome：顶部指示（恒在）+ fold 指示（仅 hasTail）。
-  // 先按"将进入 scroll>0 状态"假设预算，反向解 clamp；scroll 被 clamp 回 0
-  // 时 messageCursor 必 <= budget，窗口数学退化为 scroll=0 等价（startRow=0）。
-  const chromeScrolled = INDICATOR_ROWS + (hasTail ? INDICATOR_ROWS : 0);
-  const budgetScrolled =
-    viewport > 0 ? Math.max(1, viewport - chromeScrolled) : 0;
-  // viewport <= 0 → 无限视口：消息窗口不裁剪，scroll 仅驱动指示器文案。
-  const unlimited = budgetScrolled <= 0;
-  // Sticky 头：banner 不参与 row window，contentRows 只算消息段；tail 在底
-  // 部不算入 scroll 上界（折叠成指示）。
-  const contentRows = messageCursor;
-  // 上界：窗口顶边最多到达第 0 行（含 banner 顶），且必须保高（endRow >= budget
-  // ⇒ scroll <= contentRows - budget）。超过此值的滚动会让窗口从底部收缩
-  // —— 用户感知为"消息减少"。短内容（contentRows <= budget）无可上滚历史，
-  // maxScroll = 0，滚轮无效但不塌缩。
+  // viewport <= 0 → 无限视口：不裁剪，直接渲染全部内容。
+  const unlimited = viewport <= 0;
+  // 内容总高 = banner + 消息 + tail（tail 原样渲染，不折叠）。
+  const contentRows = bannerRows + messageCursor + tailRows;
+  // 滚动上界：窗口底最多上移到 contentRows - viewport（保留至少一屏）。
+  // viewport 由 app 传入（含输入框/状态栏预留后剩余行数）。
   const maxScroll = unlimited
-    ? contentRows + (hasTail ? tailRows : 0) - 1
-    : Math.max(0, contentRows - budgetScrolled);
+    ? 0
+    : Math.max(0, contentRows - Math.max(1, viewport));
   const scroll = Math.min(requestedScroll, maxScroll);
-  const foldTail = scroll > 0 && hasTail;
-  const chromeRows =
-    (scroll > 0 ? INDICATOR_ROWS : 0) + (foldTail ? INDICATOR_ROWS : 0);
-  // 消息窗口高度 = 视口预算 - chrome（下界 1，避免负窗）。
-  const budget = viewport > 0 ? Math.max(1, viewport - chromeRows) : 0;
-  // endRow：unlimited / scroll=0 → 全空间底；scroll>0 → 内容空间内上移
-  // scroll（tail 已折叠，fold 指示占 2 行 chrome，不计入 endRow）。
-  const endRow =
-    scroll === 0 || unlimited ? contentRows + tailRows : contentRows - scroll;
-  const startRow = unlimited ? 0 : Math.max(0, endRow - budget);
-  const indicator = scroll > 0 ? `↑ ${scroll} 行历史（End 回到底部）` : "";
+  // 窗口：scroll=0 → [contentRows - viewport, contentRows)；
+  // scroll>0 → [contentRows - viewport - scroll, contentRows - scroll)。
+  // startRow/endRow 都是内容流内的行号（banner 段从 0 起算）。
+  const endRow = unlimited ? contentRows : contentRows - scroll;
+  const startRow = unlimited ? 0 : Math.max(0, endRow - viewport);
   return (
     <Box flexDirection="column" flexGrow={1}>
-      {/* Sticky 头：banner 常驻聊天区顶部（不参与 row window 滚动，用户复看
-          裁定「对话跟logo应在同一个窗口」= 同一聊天区、logo 不滚走）。 */}
-      {bannerRows > 0 && props.bannerLines && (
-        <Box flexDirection="column">
-          {props.bannerLines.map((line, i) => (
-            <Text key={`banner-${i}`}>{line}</Text>
-          ))}
-        </Box>
-      )}
-      {indicator.length > 0 && (
-        <Box marginBottom={1}>
-          <Text color={pal.dim}>{indicator}</Text>
-        </Box>
-      )}
       <Box flexDirection="column">
+        {/* banner 段（内容流第一段）：按窗口行区间裁剪。 */}
+        {bannerRows > 0 &&
+          props.bannerLines &&
+          (() => {
+            const bStart = Math.max(0, startRow);
+            const bEnd = Math.min(bannerRows, endRow);
+            if (bEnd <= bStart) return null;
+            return props.bannerLines
+              .slice(bStart, bEnd)
+              .map((line, i) => (
+                <Text key={`banner-${bStart + i}`}>{line}</Text>
+              ));
+          })()}
         {measured.map((mm, i) => {
           if (mm.startRow + mm.totalRows <= startRow || mm.startRow >= endRow) {
             return null;
@@ -303,63 +286,52 @@ export function ChatView(props: ChatViewProps): ReactElement {
           );
         })}
       </Box>
-      {foldTail ? (
-        <Box marginBottom={1}>
-          <Text color={pal.dim}>
-            {`↓ ${tailRows} 行正在生成（End 回到底部）`}
-          </Text>
+      {/* tail 原样渲染（不折叠、无「↓ N 行正在生成」指示）。 */}
+      {(props.liveToolRuns?.length ?? 0) > 0 ||
+      props.liveToolLines.length > 0 ? (
+        <Box flexDirection="column" marginBottom={1}>
+          {(props.liveToolRuns ?? []).map((run) => (
+            <Text key={run.id} color={pal.dim}>
+              {run.status === "running"
+                ? formatRunningToolLine(run)
+                : formatCompletedToolLine(run)}
+            </Text>
+          ))}
+          {props.liveToolLines.map((line, i) => (
+            <Text key={`legacy-${i}`} color={pal.dim}>
+              {line}
+            </Text>
+          ))}
         </Box>
       ) : (
-        <>
-          {(props.liveToolRuns?.length ?? 0) > 0 ||
-          props.liveToolLines.length > 0 ? (
-            <Box flexDirection="column" marginBottom={1}>
-              {(props.liveToolRuns ?? []).map((run) => (
-                <Text key={run.id} color={pal.dim}>
-                  {run.status === "running"
-                    ? formatRunningToolLine(run)
-                    : formatCompletedToolLine(run)}
-                </Text>
-              ))}
-              {props.liveToolLines.map((line, i) => (
-                <Text key={`legacy-${i}`} color={pal.dim}>
-                  {line}
-                </Text>
-              ))}
-            </Box>
-          ) : (
-            <></>
-          )}
-          {props.askLine !== undefined && (
-            <Box marginBottom={1}>
-              <Text color={pal.running}>{props.askLine}</Text>
-            </Box>
-          )}
-          {/* T3 (#175): 流式 thinking 面板。折叠态 = [思考] 思考中…(1 行); */}
-          {/* 展开态渲染 deferredThinkingDrafts 全文。turn 结束 stream-draft 复位 */}
-          {/* → 此条件失败 → 流式面板消失,接棒终稿 thinking blocks 面板。 */}
-          {/* T5: 渲染走 deferred value — 高频更新低优先级,React 并发防御。 */}
-          {running &&
-            deferredThinkingDrafts !== undefined &&
-            deferredThinkingDrafts.length > 0 && (
-              <Box flexDirection="column" marginBottom={1}>
-                {props.thinkingExpanded ? (
-                  <Markdown text={deferredThinkingDrafts} width={cols} />
-                ) : (
-                  <Text color={pal.dim}>[思考] 思考中…</Text>
-                )}
-              </Box>
-            )}
-          {running &&
-            deferredDrafts !== undefined &&
-            deferredDrafts.length > 0 && (
-              <Box flexDirection="column" marginBottom={1}>
-                <Markdown text={deferredDrafts} width={cols} />
-              </Box>
-            )}
-          {running && <Spinner />}
-        </>
+        <></>
       )}
+      {props.askLine !== undefined && (
+        <Box marginBottom={1}>
+          <Text color={pal.running}>{props.askLine}</Text>
+        </Box>
+      )}
+      {/* T3 (#175): 流式 thinking 面板。折叠态 = [思考] 思考中…(1 行); */}
+      {/* 展开态渲染 deferredThinkingDrafts 全文。turn 结束 stream-draft 复位 */}
+      {/* → 此条件失败 → 流式面板消失,接棒终稿 thinking blocks 面板。 */}
+      {/* T5: 渲染走 deferred value — 高频更新低优先级,React 并发防御。 */}
+      {running &&
+        deferredThinkingDrafts !== undefined &&
+        deferredThinkingDrafts.length > 0 && (
+          <Box flexDirection="column" marginBottom={1}>
+            {props.thinkingExpanded ? (
+              <Markdown text={deferredThinkingDrafts} width={cols} />
+            ) : (
+              <Text color={pal.dim}>[思考] 思考中…</Text>
+            )}
+          </Box>
+        )}
+      {running && deferredDrafts !== undefined && deferredDrafts.length > 0 && (
+        <Box flexDirection="column" marginBottom={1}>
+          <Markdown text={deferredDrafts} width={cols} />
+        </Box>
+      )}
+      {running && <Spinner />}
     </Box>
   );
 }

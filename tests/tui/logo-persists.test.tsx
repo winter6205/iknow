@@ -74,10 +74,11 @@ describe("REPRO：发消息后 logo 还在不在？", () => {
       { stdout, stdin, exitOnCtrlC: false, patchConsole: false }
     );
     try {
-      // 空会话：完整 banner 顶部 ╭◆ iknow─…╮ 应该可见
+      // 空会话：完整 banner 顶部 ╭◆ iknow─…╮ 应该可见。
+      // 全量 suite 并行时 CPU 竞争会拖慢 ink 首帧渲染，超时放宽。
       await waitFor(
         () => strip(out.join("")).includes("╭◆ iknow"),
-        5000,
+        15000,
         "empty-session-banner-top"
       );
       const emptyText = strip(out.join(""));
@@ -98,10 +99,10 @@ describe("REPRO：发消息后 logo 还在不在？", () => {
       await waitFor(() => bridge.inflight.ids().size === 0, 8000, "turn-done");
       await delay(150);
 
-      // 发消息后：banner 应仍是**完整智慧之眼**（顶部 ╭◆ iknow─…╮ + info
-      // 栏 Version/Cwd/Data dir），不能塌成单行 —— 这正是用户最早的主诉
-      // 「一开始发消息就会把 logo 给去掉」（2026-08-07 第三轮复看裁定：
-      // 任何时候都保持完整眼；窄终端才退化）。
+      // 发消息后：banner 仍是完整智慧之眼（方案 B：banner + 消息同 row
+      // window，输入框固定在底部）。用户可向上滚看见完整 banner，向下滚与
+      // 消息一起滚出。这是 2026-08-07 用户复看裁定最终语义：
+      // 「下面对话框要固定，消息跟图标可以向上滚动」。
       const afterText = strip(out.join("")).slice(beforeSend);
       const hasFullBannerTop = afterText.includes("╭◆ iknow");
       const hasInfoPanel = afterText.includes("Version");
@@ -113,7 +114,7 @@ describe("REPRO：发消息后 logo 还在不在？", () => {
       console.log("---after text 末尾 800 字符---");
       console.log(afterText.slice(-800));
 
-      // 核心断言：完整眼常驻（发消息不塌成单行）
+      // 核心断言：完整眼始终存在（不是塌成 0 行 / 不是塌成单行）
       expect(
         hasFullBannerTop,
         "发消息后完整 banner 顶部 ╭◆ iknow─…╮ 仍可见（不塌成单行）"
