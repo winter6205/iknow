@@ -933,15 +933,18 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           hintSuggestions={inputHintSuggestions}
         />
       )}
-      {/* ContextBar 仅聊天视图挂载（T4）：上下文用量条，输入框下方
-          （用户 2026-08-07 反馈：放输入框下方）。list 视图不挂。 */}
+      {/* ContextBar 仅聊天视图挂载（T4）：上下文用量条，输入框正下方
+          **右对齐**，紧贴输入框右下角（用户 2026-08-08 反馈：离输入框更近）。
+          list 视图不挂。 */}
       {view === "chat" && (
-        <ContextBar
-          lastUsage={active.lastUsage}
-          contextWindow={bridge.contextWindow}
-          running={active.runState === "running-fg"}
-          cols={cols}
-        />
+        <Box alignItems="flex-end">
+          <ContextBar
+            lastUsage={active.lastUsage}
+            contextWindow={bridge.contextWindow}
+            running={active.runState === "running-fg"}
+            cols={cols}
+          />
+        </Box>
       )}
       {/* 后台会话运行标记（SC5）：存在 running-bg 会话时单行 dim 提示。原
           StatusBar 的空闲/版本号/运行态已按用户 2026-08-07 反馈移除（版本号
