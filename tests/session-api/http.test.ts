@@ -126,13 +126,44 @@ async function createSession(): Promise<string> {
 // -- endpoint 1: health -------------------------------------------------------
 
 describe("GET /api/v1/health", () => {
-  it("returns 200 with service + version", async () => {
+  it("returns 200 with service + version + contextWindow", async () => {
     const { status, body } = await getJson("/api/v1/health");
     assert.equal(status, 200);
-    const b = body as { ok: boolean; service: string; version: string };
+    const b = body as {
+      ok: boolean;
+      service: string;
+      version: string;
+      contextWindow: number;
+    };
     assert.equal(b.ok, true);
     assert.equal(b.service, "iknow-session-api");
     assert.equal(typeof b.version, "string");
+    // contextWindow: positive integer (default 200_000 unless env overridden).
+    assert.equal(typeof b.contextWindow, "number");
+    assert.ok(Number.isInteger(b.contextWindow));
+    assert.ok(b.contextWindow > 0);
+  });
+
+  it("respects listenSessionServer contextWindow override", async () => {
+    // Stop the default server, restart with an override, assert.
+    await listening.close();
+    await rm(baseDir, { recursive: true, force: true });
+    baseDir = await mkdtemp(join(tmpdir(), "iknow-http-cw-"));
+    const store = new SessionStore(baseDir);
+    const hub = new SessionHub({
+      store,
+      deps: makeDeps([assistantResult({ texts: ["x"] })]),
+    });
+    listening = await listenSessionServer({
+      hub,
+      host: "127.0.0.1",
+      port: 0,
+      contextWindow: 128_000,
+    });
+    origin = `http://${listening.host}:${listening.port}`;
+    const { body } = await getJson("/api/v1/health");
+    const b = body as { contextWindow: number };
+    assert.equal(b.contextWindow, 128_000);
   });
 });
 
