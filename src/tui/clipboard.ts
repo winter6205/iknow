@@ -1,7 +1,7 @@
 /**
  * src/tui/clipboard.ts
  *
- * 多平台复制到系统剪贴板（#237 /copy + Ctrl+Y 显示式复制路径）。
+ * 多平台复制到系统剪贴板（#238 鼠标拖选复制路径）。
  *
  * 设计：openharness `_copy_to_clipboard` 同款 fallback 链（参照
  * upstream-openharness/src/openharness/commands/registry.py:223）。我们
@@ -14,44 +14,17 @@
  *  5. Windows clip.exe
  *  6. 退化：写 <dataDir>/last_copy.txt
  *
- * 协议现实：DECSET 1000h 启用后，鼠标拖选不可用（本会话已有说明），
- * 故提供 `/copy` 显示式命令 + Ctrl+Y 快捷键复制最近一段 assistant
- * 全文。零 mouse 协议修改，保留键盘滚动 + 滚轮 SGR。
+ * 调用入口：app.tsx 的 `doCopySelection`（mouseup + Ctrl+Y 都走这里）。
+ * 选区文本由 selection.ts 的 `extractSelectionText` 提供；本模块只负责
+ * 文本 → 系统剪贴板。
  *
  * 不引外部依赖：复制实现 100 行出头可控，pyperclip 倒退在 ts-paths
- * 之外、对单仓库 lockfile 还要加一依赖，违反 #237 的最小改动目标。
+ * 之外、对单仓库 lockfile 还要加一依赖，违反 #238 的最小改动目标。
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type {
-  AnthropicContentBlock,
-  AnthropicNativeMessage,
-} from "../harness/model-adapter/types.js";
-
-/**
- * 提取最近的 assistant 消息的完整文本（连接其 text blocks）。
- * 会话消息中可能有 thinking / tool_result 等非 text 块；只取 text。
- * 若无 assistant 消息或全空 → 空串（调用方应 show notice 空结果）。
- */
-export function extractLastAssistantText(
-  messages: ReadonlyArray<AnthropicNativeMessage>
-): string {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const msg = messages[i];
-    if (!msg || msg.role !== "assistant") continue;
-    const text = msg.content
-      .filter(
-        (b): b is Extract<AnthropicContentBlock, { type: "text" }> =>
-          b.type === "text"
-      )
-      .map((b) => b.text)
-      .join(" ");
-    if (text.trim().length > 0) return text;
-  }
-  return "";
-}
 
 export type CopyResult =
   | { kind: "ok"; method: ClipboardMethod }

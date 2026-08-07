@@ -17,6 +17,7 @@ import { PassThrough } from "node:stream";
 import {
   enableMouseScroll,
   isSgrMouseSequence,
+  parseMouseAllEvents,
   parseMouseEvents,
 } from "../../src/tui/mouse.js";
 
@@ -78,8 +79,8 @@ describe("parseMouseEvents（SGR 滚轮解析）", () => {
   });
 });
 
-describe("enableMouseScroll（DECSET 1000/1006）", () => {
-  it("TTY stdout：写启用序列 1000h+1006h；cleanup 写关闭 1000l+1006l", () => {
+describe("enableMouseScroll（DECSET 1000/1006/1002）", () => {
+  it("TTY stdout：写启用序列 1000h+1006h+1002h；cleanup 写关闭", () => {
     const out = fakeStdout();
     const writes: string[] = [];
     out.on("data", (c) => writes.push(String(c)));
@@ -88,11 +89,14 @@ describe("enableMouseScroll（DECSET 1000/1006）", () => {
     const enableJoined = writes.join("");
     expect(enableJoined).toContain("\x1b[?1000h");
     expect(enableJoined).toContain("\x1b[?1006h");
+    // #238 drag 模式（1002h）让 app 捕获鼠标拖动事件。
+    expect(enableJoined).toContain("\x1b[?1002h");
 
     disable();
     const fullJoined = writes.join("");
     expect(fullJoined).toContain("\x1b[?1000l");
     expect(fullJoined).toContain("\x1b[?1006l");
+    expect(fullJoined).toContain("\x1b[?1002l");
   });
 
   it("cleanup 幂等：多次调用只写一次 DECRST", () => {
@@ -117,6 +121,52 @@ describe("enableMouseScroll（DECSET 1000/1006）", () => {
     expect(writes.join("")).toBe("");
     disable();
     expect(writes.join("")).toBe("");
+  });
+});
+
+describe("parseMouseAllEvents（SGR 全解析：#238 drag）", () => {
+  it("左键按下（button=0, M）→ 事件含坐标 + pressed=true", () => {
+    expect(parseMouseAllEvents("\x1b[<0;10;5M")).toEqual([
+      { button: 0, x: 10, y: 5, pressed: true },
+    ]);
+  });
+
+  it("左键拖动（button=32, M）→ 坐标更新 + pressed=true", () => {
+    expect(parseMouseAllEvents("\x1b[<32;20;8M")).toEqual([
+      { button: 32, x: 20, y: 8, pressed: true },
+    ]);
+  });
+
+  it("释放（button=3, m 终止）→ pressed=false", () => {
+    expect(parseMouseAllEvents("\x1b[<3;20;8m")).toEqual([
+      { button: 3, x: 20, y: 8, pressed: false },
+    ]);
+  });
+
+  it("一次 chunk 多个事件 → 全量累计（顺序保留）", () => {
+    const events = parseMouseAllEvents(
+      "\x1b[<0;10;5M\x1b[<32;11;5M\x1b[<32;13;7M\x1b[<3;13;7m"
+    );
+    expect(events).toEqual([
+      { button: 0, x: 10, y: 5, pressed: true },
+      { button: 32, x: 11, y: 5, pressed: true },
+      { button: 32, x: 13, y: 7, pressed: true },
+      { button: 3, x: 13, y: 7, pressed: false },
+    ]);
+  });
+
+  it("滚轮事件也全量返回（不丢弃 button=64/65）", () => {
+    expect(parseMouseAllEvents("\x1b[<64;1;1M")).toEqual([
+      { button: 64, x: 1, y: 1, pressed: true },
+    ]);
+  });
+
+  it("非 string / 空串 → []", () => {
+    expect(parseMouseAllEvents("")).toEqual([]);
+  });
+
+  it("普通键盘 ANSI 不误判 → []", () => {
+    expect(parseMouseAllEvents("\x1b[5~\x1b[A")).toEqual([]);
   });
 });
 

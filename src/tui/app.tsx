@@ -54,7 +54,7 @@ import {
 import { formatLiveToolEvent, summarizeToolCall } from "./tool-summary.js";
 import type { TuiToolEvent } from "./deps.js";
 import { liveToolReduce, type LiveToolRun } from "./live-tool-state.js";
-import { ChatView } from "./chat-view.js";
+import { ChatView, flatContentLines } from "./chat-view.js";
 import type { StreamDraft } from "../cli/stream-draft.js";
 import { createStreamDraft } from "../cli/stream-draft.js";
 import { ListView, relativeTime, type TuiListEntry } from "./list-view.js";
@@ -64,9 +64,20 @@ import { tuiPalette } from "./theme.js";
 import { clipOneLine } from "./text.js";
 import { VERSION } from "./version.js";
 import { writeIknowState } from "../harness/identity/index.js";
-import { isSgrMouseSequence } from "./mouse.js";
-import { enableMouseScroll, parseMouseEvents } from "./mouse.js";
-import { copyToClipboard, extractLastAssistantText } from "./clipboard.js";
+import {
+  enableMouseScroll,
+  isSgrMouseSequence,
+  parseMouseAllEvents,
+  parseMouseEvents,
+} from "./mouse.js";
+import { copyToClipboard } from "./clipboard.js";
+import type { Selection, ContentWindow } from "./selection.js";
+import {
+  extractSelectionText,
+  isEmpty,
+  normalize,
+  terminalToCellPos,
+} from "./selection.js";
 
 /** 鼠标滚轮每个 tick 调整的行数。 */
 const WHEEL_STEP_ROWS = 3;
@@ -141,6 +152,10 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   // 物理行）。新 turn 完成 / new 会话 → 0；PgUp/PgDn/Home/End 调整
   // （与 PromptInput 的 ↑/↓ 不冲突，避键）；鼠标滚轮交由终端原生 scrollback。
   const [chatScroll, setChatScroll] = useState(0);
+  // #238 鼠标拖选选区（未 normalize）：null = 无活动选区。drag 期间不断
+  // 更新；mouseup 时若非空 → 调 copyToClipboard，并清空。滚动 / 切会话 / new
+  // 会话 → 一律清空，避免 stale 状态。
+  const [selection, setSelection] = useState<Selection | null>(null);
 
   // T4 (#175): 流式草稿单一实例（单会话 in-flight 即可；多会话并发时只有
   // fg 会话持 streamDraft，bg 由落盘后刷新获得终稿）。state ref 由 React 保证
@@ -275,27 +290,68 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     [toolEventSink]
   );
 
-  // 鼠标滚轮支持（朴素滚动）：ink 渲染到 normal buffer，原生 scrollback 全是
-  // 中间帧垃圾，滚轮翻历史不可用。挂载时 DECSET 1000/1006 启用 SGR 滚轮报告，
-  // stdin.data 监听 parseMouseEvents，滚轮事件 → setChatScroll（与 PgUp/PgDn 同
-  // 一条滚动状态）。卸载时写 DECRST 关闭序列（必须！否则残留 mouse 报告模式
-  // 污染终端）。mouse listener 走 stdin.on('data')：实测 pty + ink setRawMode 后
-  // 'data' 事件仍正常触发（ink 用 'readable' 流式读取，不消费 data 事件），与
-  // ink useInput 并行触发不冲突。
+  // 鼠标支持（朴素滚动 + #238 拖选）：ink 渲染到 normal buffer，原生 scrollback
+  // 全是中间帧垃圾，滚轮翻历史不可用。挂载时 DECSET 1000/1006 启用 SGR 滚轮
+  // 报告 + 1002h（drag 模式）启用拖动上报；stdin.data 监听 parseMouseAllEvents。
+  // 滚轮 → setChatScroll（与 PgUp/PgDn 同一条滚动状态）；左键按下/拖动/释放 →
+  // 更新选区，释放时非空选区 → copyToClipboard + 清空。卸载时写 DECRST 关闭
+  // 序列（必须！否则残留 mouse 报告模式污染终端）。mouse listener 走
+  // stdin.on('data')：实测 pty + ink setRawMode 后 'data' 事件仍正常触发（ink
+  // 用 'readable' 流式读取，不消费 data 事件），与 ink useInput 并行不冲突。
+  const contentWindowRef = useRef<ContentWindow | null>(null);
+  const dragActiveRef = useRef(false);
+  // #238 选区在视图非 chat / 滚动 / 切会话时清空。
+  const clearSelection = (): void => setSelection(null);
   useEffect(() => {
     const disable = enableMouseScroll(stdout);
     const onData = (chunk: Buffer | string): void => {
       const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      // 滚轮：独立路径（不参与选区）。
       const { wheelUp, wheelDown } = parseMouseEvents(text);
-      if (wheelUp === 0 && wheelDown === 0) return;
-      // 视图过滤放 listener 内（不进 deps）：跨视图切换不丢滚轮事件。
+      if (wheelUp > 0 || wheelDown > 0) {
+        if (viewRef.current !== "chat") return;
+        const delta = (wheelUp - wheelDown) * WHEEL_STEP_ROWS;
+        clearSelection();
+        setChatScroll((s) => Math.max(0, s + delta));
+        return;
+      }
+      // 视图过滤放 listener 内（不进 deps）：跨视图切换不丢事件。
       if (viewRef.current !== "chat") return;
-      const delta = (wheelUp - wheelDown) * WHEEL_STEP_ROWS;
-      setChatScroll((s) => Math.max(0, s + delta));
+      const win = contentWindowRef.current;
+      if (win === null) return;
+      for (const ev of parseMouseAllEvents(text)) {
+        if (ev.button === 0 && ev.pressed) {
+          // 左键按下 → 选区起点（清除之前选区）
+          const pos = terminalToCellPos(ev.x, ev.y, win);
+          if (pos === null) continue;
+          dragActiveRef.current = true;
+          setSelection({ anchor: pos, active: pos });
+        } else if (ev.button === 3 && !ev.pressed) {
+          // 释放（任意键）→ 若有选区则复制
+          dragActiveRef.current = false;
+          setSelection((prev) => {
+            if (prev === null) return prev;
+            if (isEmpty(prev)) return null; // 纯点击不复制
+            void doCopySelection(prev);
+            return null;
+          });
+        } else if (ev.button === 32 && ev.pressed) {
+          // 左键拖动 → 扩展选区 active
+          if (!dragActiveRef.current) continue;
+          const pos = terminalToCellPos(ev.x, ev.y, win);
+          if (pos === null) continue;
+          setSelection((prev) =>
+            prev === null
+              ? { anchor: pos, active: pos }
+              : { ...prev, active: pos }
+          );
+        }
+      }
     };
     stdin?.on("data", onData);
     return () => {
       stdin?.off("data", onData);
+      dragActiveRef.current = false;
       disable();
     };
   }, [stdin, stdout]);
@@ -469,6 +525,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     setView("chat");
     setNotice(undefined);
     setChatScroll(0);
+    clearSelection();
   }
 
   async function openSessionAt(index: number): Promise<void> {
@@ -505,6 +562,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     setActiveKey(id);
     setView("chat");
     setNotice(undefined);
+    clearSelection();
   }
 
   async function safeList(): Promise<ReadonlyArray<TuiListEntry>> {
@@ -522,27 +580,46 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     }
   }
 
-  /** /copy 或 Ctrl+Y：复制最近一轮 assistant 全文到系统剪贴板。 */
-  async function copyLastAssistant(): Promise<void> {
-    const text = extractLastAssistantText(active.messages);
+  /** #238：根据当前 ChatView 内容行，把选区文本提取并复制。 */
+  async function doCopySelection(sel: Selection): Promise<void> {
+    const lines = flatContentLines({
+      bannerLines,
+      session: active,
+      cols,
+      liveToolLines: active.conversationId
+        ? (liveToolLines[active.conversationId] ?? [])
+        : [],
+      liveToolRuns: active.conversationId
+        ? (liveToolRuns[active.conversationId] ?? [])
+        : [],
+      askLine: askPending
+        ? `[ask] 允许 ${askPending.tool}？${
+            askPending.summaryHint ? ` ${askPending.summaryHint}` : ""
+          } 输入 y/n`
+        : undefined,
+      draftsMasked,
+      thinkingDraftMasked,
+      thinkingExpanded,
+    });
+    const text = extractSelectionText(normalize(sel), lines);
     if (text.length === 0) {
-      setNotice({ lines: ["当前会话还没有 assistant 回复。"] });
+      setNotice({ lines: ["选中区域为空。"] });
       return;
     }
     const result = await copyToClipboard(text, { dataDir: props.dataDir });
     if (result.kind === "ok") {
       setNotice({
-        lines: [`/copy 已复制（${result.method}，${text.length} 字）。`],
+        lines: [`已复制（${result.method}，${text.length} 字）。`],
       });
     } else if (result.kind === "fallback") {
       setNotice({
         lines: [
-          `/copy 剪贴板命令不可用，文本已写入 ${result.path}（${result.bytes} bytes）。`,
+          `剪贴板命令不可用，文本已写入 ${result.path}（${result.bytes} bytes）。`,
         ],
       });
     } else if (result.kind === "error") {
       setNotice({
-        lines: [`/copy 复制失败：${result.message}`],
+        lines: [`复制失败：${result.message}`],
       });
     }
   }
@@ -612,9 +689,6 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       case "help":
         setNotice({ lines: helpLines() });
         return;
-      case "copy":
-        await copyLastAssistant();
-        return;
       case "info": {
         setNotice({ lines: infoLines(active, activeKey) });
         return;
@@ -676,9 +750,13 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     // 污染后续 Ctrl+C 等守卫与输入链。
     if (isSgrMouseSequence(input)) return;
     if (key.ctrl && input === "y") {
-      // Ctrl+Y：同 /copy —— 复制最近一轮 assistant 全文（显式复制路径，
-      // DECSET 1000h 启用后鼠标拖选不可用，见 clipboard.ts）。
-      void copyLastAssistant();
+      // Ctrl+Y：复制当前选区（无选区时提示用户拖选；与 drag-mouseup 同一
+      // 路径，键盘逃生口）。
+      if (selection === null) {
+        setNotice({ lines: ["无选区：先按住鼠标左键拖选文本。"] });
+      } else {
+        void doCopySelection(selection);
+      }
       return;
     }
     if (key.ctrl && input === "c") {
@@ -695,14 +773,18 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     // 不设 messages.length===0 守卫——banner 就是可滚动内容。
     const step = Math.max(1, Math.floor(viewportRows / 2));
     if (key.pageUp) {
+      clearSelection();
       setChatScroll((s) => s + step);
     } else if (key.pageDown) {
+      clearSelection();
       setChatScroll((s) => Math.max(0, s - step));
     } else if (key.home) {
       // 顶：scroll 跳到一个大数，由 ChatView 兜底 clamp 到 totalRows
+      clearSelection();
       setChatScroll(Number.MAX_SAFE_INTEGER);
     } else if (key.end) {
       // 底：auto-follow 重置
+      clearSelection();
       setChatScroll(0);
     }
   });
@@ -747,6 +829,10 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           viewportRows={viewportRows}
           thinkingExpanded={thinkingExpanded}
           bannerLines={bannerLines}
+          selection={selection ?? undefined}
+          onWindow={(w) => {
+            contentWindowRef.current = w;
+          }}
         />
       )}
       {notice && (

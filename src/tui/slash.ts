@@ -22,8 +22,7 @@ export type TuiSlashCommand =
   | "help"
   | "info"
   | "thinking"
-  | "profile"
-  | "copy";
+  | "profile";
 
 export type SlashParseResult =
   | { kind: "command"; command: TuiSlashCommand }
@@ -39,7 +38,6 @@ const VOCABULARY: ReadonlySet<string> = new Set<TuiSlashCommand>([
   "info",
   "thinking",
   "profile",
-  "copy",
 ]);
 
 /** 解析输入框内容；空/纯空白 → message（调用方按空输入忽略）。 */
@@ -63,10 +61,10 @@ export function helpLines(): ReadonlyArray<string> {
     "/help      本词表",
     "/thinking  切换思考过程折叠",
     "/profile   标记首启引导完成（先在外侧填好 ~/.iknow/user.md）",
-    "/copy      复制最近一轮 assistant 全文到剪贴板",
     "/quit      退出（别名 /exit）",
     "Ctrl+C     打断前台运行中的 turn",
-    "Ctrl+Y     同 /copy",
+    "Ctrl+Y     复制当前鼠标选区",
+    "鼠标拖选    选中文本 → 松开自动复制到剪贴板",
   ];
 }
 
@@ -78,7 +76,6 @@ const HINT_DESCRIPTIONS: Record<TuiSlashCommand, string> = {
   help: "本词表",
   thinking: "切换思考过程折叠",
   profile: "标记首启引导完成",
-  copy: "复制最近一轮 assistant 全文到剪贴板",
   quit: "退出（别名 /exit）",
   exit: "同 /quit",
 };

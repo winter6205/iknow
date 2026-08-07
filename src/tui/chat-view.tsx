@@ -38,6 +38,8 @@ import { messageRender } from "./message-rows.js";
 import { markdownToLines } from "./markdown-lines.js";
 import type { RowSlice } from "./row-window.js";
 import { MessageBlocks, MessageBlocksClipped } from "./message-blocks.js";
+import type { Selection } from "./selection.js";
+import { HighlightedLine } from "./selection-render.js";
 
 /** live 工具行 + ask 行 + spinner 占位也占行；用于总行数估计。 */
 export interface TailSlot {
@@ -123,6 +125,97 @@ interface Measured {
   readonly startRow: number;
 }
 
+/** margin 占位（与 message-rows.ts MARGIN_LINE 一致）。 */
+const MARGIN_LINE_CHAT = " ";
+
+/**
+ * #238：把当前 ChatView 内容流（banner + 消息 flat 行 + tail 行）拼成一份
+ * flat 字符串数组（行号即内容行号 0-based）。用于 extractSelectionText：
+ *  - banner 段占 [0, bannerLines.length)；
+ *  - 消息段按 measure 顺序拼接（messageRender.lines 与全可见路径逐行一致）；
+ *  - tail 行（liveToolRuns + liveToolLines + ask + thinkingDraft + draft）
+ *    按 ChatView JSX 渲染顺序追加（spinner 是 1 行非字符 "<spinner>"，留空）。
+ *
+ * 调用方必须保证本函数与 ChatView JSX 行账同步；只读 SessionState props，
+ * 不接受 props.selection。
+ */
+export function flatContentLines(args: {
+  readonly bannerLines: ReadonlyArray<string>;
+  readonly session: TuiSessionState;
+  readonly cols: number;
+  readonly liveToolLines: ReadonlyArray<string>;
+  readonly liveToolRuns: ReadonlyArray<LiveToolRun>;
+  readonly askLine: string | undefined;
+  readonly draftsMasked: string;
+  readonly thinkingDraftMasked: string;
+  readonly thinkingExpanded: boolean;
+}): ReadonlyArray<string> {
+  const out: string[] = [];
+  for (const ln of args.bannerLines) out.push(ln);
+  for (const m of args.session.messages) {
+    const mm = messageRender(m, args.cols, {
+      thinkingExpanded: args.thinkingExpanded,
+    });
+    for (const ln of mm.lines) out.push(ln);
+    if (mm.lines.length > 0) out.push(MARGIN_LINE_CHAT);
+  }
+  const running = args.session.runState === "running-fg";
+  const tail = tailSlot(
+    args.liveToolLines,
+    args.askLine,
+    running,
+    running ? args.thinkingDraftMasked : undefined,
+    running ? args.draftsMasked : undefined,
+    args.cols,
+    args.thinkingExpanded,
+    args.liveToolRuns
+  );
+  const tailTotal = tail.total;
+  for (const run of args.liveToolRuns) {
+    out.push(
+      run.status === "running"
+        ? formatRunningToolLine(run)
+        : formatCompletedToolLine(run)
+    );
+  }
+  for (const ln of args.liveToolLines) out.push(ln);
+  if (args.askLine !== undefined) out.push(args.askLine);
+  if (running && args.thinkingDraftMasked.length > 0) {
+    if (args.thinkingExpanded) {
+      for (const ln of markdownToLines(args.thinkingDraftMasked, args.cols)) {
+        out.push(ln);
+      }
+    } else {
+      out.push("[思考] 思考中…");
+    }
+  }
+  if (running && args.draftsMasked.length > 0) {
+    for (const ln of markdownToLines(args.draftsMasked, args.cols)) {
+      out.push(ln);
+    }
+  }
+  // tail 与 ChatView tailSlot 行账对齐：spinner 1 行 + 各 margin 行以占位补齐，
+  // 保证 flatContentLines 长度 === ChatView 的 contentRows（窗口映射才一致）。
+  while (out.length < tailTarget(args, tailTotal)) out.push(MARGIN_LINE_CHAT);
+  return out;
+}
+
+/** 计算 flat 行数目标 = banner + 消息（含 margin）+ tail.total（对齐 ChatView）。 */
+function tailTarget(
+  args: {
+    readonly bannerLines: ReadonlyArray<string>;
+    readonly session: TuiSessionState;
+    readonly cols: number;
+  },
+  tailTotal: number
+): number {
+  let n = args.bannerLines.length;
+  for (const m of args.session.messages) {
+    n += messageRender(m, args.cols).totalRows;
+  }
+  return n + tailTotal;
+}
+
 export interface ChatViewProps {
   readonly session: TuiSessionState;
   readonly cols: number;
@@ -172,6 +265,22 @@ export interface ChatViewProps {
    * 上滚可见 logo、下滚一起滚出；输入框 / 状态栏固定在 app 底部不受影响。
    */
   readonly bannerLines?: ReadonlyArray<string>;
+  /**
+   * #238 鼠标拖选选区（已 normalize 由 app 层保证）。undefined = 无选区。
+   * 存在时消息路径强制走 MessageBlocksClipped（高亮注入唯一入口）；
+   * banner 走 HighlightedLine。
+   */
+  readonly selection?: Selection;
+  /**
+   * #238 内容视口窗口回调（effect 同步给 app 层坐标映射）：ChatView 每帧
+   * 计算 startRow/endRow/cols 后回调，app 层据此把 SGR (x,y) 映射成
+   * 内容 CellPos。不传 = 无选区（纯键盘滚动场景）。
+   */
+  readonly onWindow?: (win: {
+    readonly startRow: number;
+    readonly endRow: number;
+    readonly cols: number;
+  }) => void;
 }
 
 export function ChatView(props: ChatViewProps): ReactElement {
@@ -238,10 +347,16 @@ export function ChatView(props: ChatViewProps): ReactElement {
   // startRow/endRow 都是内容流内的行号（banner 段从 0 起算）。
   const endRow = unlimited ? contentRows : contentRows - scroll;
   const startRow = unlimited ? 0 : Math.max(0, endRow - viewport);
+  // #238:窗口同步回调（app 层坐标映射用）。effect 内调用避免渲染期 setState。
+  props.onWindow?.({
+    startRow,
+    endRow,
+    cols,
+  });
   return (
     <Box flexDirection="column" flexGrow={1}>
       <Box flexDirection="column">
-        {/* banner 段（内容流第一段）：按窗口行区间裁剪。 */}
+        {/* banner 段（内容流第一段）：按窗口行区间裁剪，selection 存在时高亮命中行。 */}
         {bannerRows > 0 &&
           props.bannerLines &&
           (() => {
@@ -251,7 +366,12 @@ export function ChatView(props: ChatViewProps): ReactElement {
             return props.bannerLines
               .slice(bStart, bEnd)
               .map((line, i) => (
-                <Text key={`banner-${bStart + i}`}>{line}</Text>
+                <HighlightedLine
+                  key={`banner-${bStart + i}`}
+                  line={line}
+                  row={bStart + i}
+                  selection={props.selection}
+                />
               ));
           })()}
         {measured.map((mm, i) => {
@@ -263,9 +383,13 @@ export function ChatView(props: ChatViewProps): ReactElement {
             end: Math.min(mm.lines.length, endRow - mm.startRow),
           };
           if (slice.end <= slice.start) return null;
-          // 完全可见走 MessageBlocks 保留 Markdown 全功能；部分切片走
-          // MessageBlocksClipped（flat 行切片，与全可见路径逐行一致）。
-          const full = slice.start === 0 && slice.end >= mm.lines.length;
+          // #238：selection 存在时强制走 Clipped 路径（高亮唯一入口）。
+          // 无 selection 时保留原策略：完全可见 → MessageBlocks（Markdown
+          // 全功能）；部分切片 → MessageBlocksClipped（flat 行切片）。
+          const full =
+            props.selection === undefined &&
+            slice.start === 0 &&
+            slice.end >= mm.lines.length;
           return full ? (
             <MessageBlocks
               key={i}
@@ -282,6 +406,8 @@ export function ChatView(props: ChatViewProps): ReactElement {
               blocks={mm.blocks}
               statusMap={statusMap}
               slice={slice}
+              selection={props.selection}
+              messageStartRow={mm.startRow}
             />
           );
         })}

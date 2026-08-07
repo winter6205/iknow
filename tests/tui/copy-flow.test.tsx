@@ -1,14 +1,20 @@
 /**
  * tests/tui/copy-flow.test.tsx
  *
- * #237 /copy + Ctrl+Y 端到端：mount 一个 resume 会话（assistant 有内容），
- * type "/copy" + Enter → notice 出现 /copy 已复制（kind: "ok"）；外加
- * Ctrl+Y → 同样触发。Ctrl+Y 串 = "\x19"（EtX）。
+ * #238 鼠标拖选复制端到端：mount 一个 resume 会话（assistant 有内容），
+ * 向 stdin 注入 SGR 鼠标序列（左键按下 → 拖动 → 释放），断言：
+ *  1. 拖选期间 stdout 出现反色高亮（\x1b[7m…\x1b[27m）；
+ *  2. 释放后自动调用 copyToClipboard → notice 出现"已复制"。
  *
- * 路径：app.tsx handleSubmit switch case "copy" → copyLastAssistant
- *   → extractLastAssistantText + copyToClipboard → setNotice。
- * 我们不依赖本机剪贴板命令是否在 PATH（自动化测试环境常缺），允许
- * notice 文案是 "ok" / "fallback" 之一。
+ * SGR 序列（DECSET 1002h drag 模式）：
+ *  - 按下：\x1b[<0;x;yM
+ *  - 拖动：\x1b[<32;x;yM
+ *  - 释放：\x1b[<3;x;ym
+ *
+ * 坐标口径：内容流（banner + 消息）从终端第 1 行起；fake stream 终端
+ * 100 列 × 30 行。窗口 = 终端全高（viewport = rows - 状态栏 - 输入框…），
+ * 因 fake stream 无真实渲染，靠 ChatView onWindow 回调提供 startRow/endRow
+ *（startRow=0 通常；endRow = viewport）。
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PassThrough } from "node:stream";
@@ -21,7 +27,6 @@ import { TuiApp, createToolEventSink } from "../../src/tui/app.js";
 import {
   createInflightRegistry,
   createTuiBridge,
-  type TuiBridge,
 } from "../../src/tui/hub-bridge.js";
 import { createTuiAskUserBridge } from "../../src/tui/ask-user.js";
 import { attachSession } from "../../src/tui/session-state.js";
@@ -73,14 +78,14 @@ function fakeTtyStream(): PassThrough & {
 
 const LONG_TIMEOUT = 30_000;
 
-describe("TuiApp /copy + Ctrl+Y 流程", () => {
+describe("TuiApp 鼠标拖选复制（#238）", () => {
   let baseDir: string;
   let stdout: ReturnType<typeof fakeTtyStream>;
   let stdin: ReturnType<typeof fakeTtyStream>;
   const instances: Instance[] = [];
 
   beforeEach(async () => {
-    baseDir = await mkdtemp(join(tmpdir(), "iknow-tui-copy-"));
+    baseDir = await mkdtemp(join(tmpdir(), "iknow-tui-drag-"));
     stdout = fakeTtyStream();
     stdin = fakeTtyStream();
   }, LONG_TIMEOUT);
@@ -90,18 +95,19 @@ describe("TuiApp /copy + Ctrl+Y 流程", () => {
     await rm(baseDir, { recursive: true, force: true });
   }, LONG_TIMEOUT);
 
-  function mountResumedApp(): ((text: string) => Promise<void>) & {
+  function mountResumedApp(): {
     readonly out: () => string;
+    readonly rawOut: () => string;
   } {
     const initial = attachSession({
-      conversation_id: "copy-target",
+      conversation_id: "drag-target",
       messages: [
         { role: "user", content: [{ type: "text", text: "请讲个故事" }] },
         {
           role: "assistant",
           content: [
-            { type: "text", text: "SENTINEL_COPY_BODY_START" },
-            { type: "text", text: "SENTINEL_COPY_BODY_END" },
+            { type: "text", text: "第一行故事内容" },
+            { type: "text", text: "第二行故事结尾" },
           ],
         },
       ],
@@ -136,106 +142,87 @@ describe("TuiApp /copy + Ctrl+Y 流程", () => {
       }
     );
     instances.push(instance);
-    const type = async (text: string): Promise<void> => {
-      for (const ch of text) {
-        stdin.write(ch);
-        await delay(10);
-      }
+    return {
+      out: (): string => strip(out.join("")),
+      rawOut: (): string => out.join(""),
     };
-    return Object.assign(type, { out: (): string => strip(out.join("")) });
   }
 
   it(
-    "/copy 命令：mount resume 会话 → type /copy ⏎ → notice 出现 /copy 已复制",
+    "拖选高亮：注入 按下→拖动→释放，stdout 出现反色 \x1b[7m 且非空",
     async () => {
-      const type = mountResumedApp();
-      await delay(400); // 等 mount + useInput effect
-      // 锚点：assistant 文本可见（确认会话已显示）
+      const { out, rawOut } = mountResumedApp();
+      await delay(400);
       await waitFor(
-        () => type.out().includes("请讲个故事"),
+        () => out().includes("请讲个故事"),
         8000,
         "resumed-session-visible"
       );
-      // 输入 /copy + Enter
-      await type("/copy\r");
-      // 断言 copyLastAssistant 触发 notice（不依赖本机剪贴板命令是否在 PATH）：
-      //   ok → "/copy 已复制 (...)"
-      //   fallback → "/copy 剪贴板命令不可用，文本已写入 ..."
-      //   error → "/copy 复制失败: ..."
+      // 在 assistant 文本行上按下并拖动（x=5..20, y 取消息区域）。
+      // 内容流起始 = 终端行 1；空会话 banner 完整，这里 resume 有消息后
+      // banner = 单行短 banner，消息区紧跟其后。
+      const pressY = 2; // 尽量选消息区（内容流第 1 行附近）
+      const dragY = 2;
+      stdin.write(`\x1b[<0;5;${pressY}M`);
+      await delay(50);
+      stdin.write(`\x1b[<32;20;${dragY}M`);
+      await delay(50);
+      stdin.write(`\x1b[<3;20;${dragY}m`);
       await waitFor(
-        () => /\/copy (已复制|剪贴板命令不可用|复制失败)/.test(type.out()),
+        () => rawOut().includes("\x1b[7m") && rawOut().includes("\x1b[27m"),
         8000,
-        "copy-notice"
+        "inverse-highlight"
+      );
+      await delay(100);
+      expect(rawOut().includes("\x1b[7m")).toBe(true);
+    },
+    LONG_TIMEOUT
+  );
+
+  it(
+    "拖选后释放 → 自动复制（notice 出现 已复制/写入/失败 任一）",
+    async () => {
+      const { out } = mountResumedApp();
+      await delay(400);
+      await waitFor(
+        () => out().includes("请讲个故事"),
+        8000,
+        "resumed-session-visible"
+      );
+      // 按下 → 拖动 → 释放
+      stdin.write("\x1b[<0;3;2M");
+      await delay(50);
+      stdin.write("\x1b[<32;10;2M");
+      await delay(50);
+      stdin.write("\x1b[<3;10;2m");
+      // notice 文案三态（ok → "已复制"；fallback → "文本已写入"；error → "复制失败"）
+      await waitFor(
+        () => /(已复制|文本已写入|复制失败)/.test(out()),
+        8000,
+        "drag-copy-notice"
       );
     },
     LONG_TIMEOUT
   );
 
   it(
-    "/copy 命令：空会话（draft，无 assistant）→ notice 提示无回复",
+    "Ctrl+Y 无选区 → 提示先拖选（不复制、无 \x1b[7m）",
     async () => {
-      // initialSession 缺省 → draft；messages 空。
-      const bridge = createTuiBridge({
-        dataDir: baseDir,
-        deps: makeDeps([]),
-        inflight: createInflightRegistry(),
-      });
-      const askBridge = createTuiAskUserBridge();
-      const toolEventSink = createToolEventSink();
-      const out: string[] = [];
-      stdout.on("data", (chunk) => out.push(String(chunk)));
-      const instance = render(
-        <TuiApp
-          bridge={bridge}
-          askBridge={askBridge}
-          toolEventSink={toolEventSink}
-          cwd="/tmp/proj"
-          dataDir={baseDir}
-        />,
-        {
-          stdout,
-          stdin,
-          exitOnCtrlC: false,
-          interactive: true,
-          kittyKeyboard: { mode: "disabled" },
-        }
-      );
-      instances.push(instance);
-      const type = async (text: string): Promise<void> => {
-        for (const ch of text) {
-          stdin.write(ch);
-          await delay(10);
-        }
-      };
-      const lastOutput = (): string => strip(out.join(""));
-      await delay(400);
-      await type("/copy\r");
-      await waitFor(
-        () => lastOutput().includes("还没有 assistant 回复"),
-        8000,
-        "empty-copy-notice"
-      );
-    },
-    LONG_TIMEOUT
-  );
-
-  it(
-    "Ctrl+Y 快捷键：mount resume 会话 → 写 \\x19 → 触发 copyLastAssistant",
-    async () => {
-      const type = mountResumedApp();
+      const { out, rawOut } = mountResumedApp();
       await delay(400);
       await waitFor(
-        () => type.out().includes("请讲个故事"),
+        () => out().includes("请讲个故事"),
         8000,
         "resumed-session-visible"
       );
-      // Ctrl+Y = ASCII 0x19 (EtX)
-      stdin.write("\x19");
+      stdin.write("\x19"); // Ctrl+Y
       await waitFor(
-        () => /\/copy (已复制|剪贴板命令不可用|复制失败)/.test(type.out()),
+        () => out().includes("无选区"),
         8000,
-        "ctrl-y-copy-notice"
+        "no-selection-notice"
       );
+      await delay(100);
+      expect(rawOut().includes("\x1b[7m")).toBe(false);
     },
     LONG_TIMEOUT
   );

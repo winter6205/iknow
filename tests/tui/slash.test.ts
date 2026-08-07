@@ -24,7 +24,6 @@ describe("parseTuiInput: 词表命中", () => {
     ["/info", "info"],
     ["/thinking", "thinking"],
     ["/profile", "profile"],
-    ["/copy", "copy"],
   ] as const)("解析 %s → command %s", (input, command) => {
     const parsed = parseTuiInput(input);
     expect(parsed).toEqual({ kind: "command", command });
@@ -77,7 +76,7 @@ describe("parseTuiInput: 普通消息与边界", () => {
 });
 
 describe("helpLines", () => {
-  it("覆盖全部 9 条词表命令 + Ctrl+C 说明 + Ctrl+Y，且无 emoji", () => {
+  it("覆盖全部 8 条词表命令 + Ctrl+C 说明 + Ctrl+Y + 鼠标拖选提示，且无 emoji", () => {
     const joined = helpLines().join("\n");
     for (const cmd of [
       "/sessions",
@@ -87,12 +86,13 @@ describe("helpLines", () => {
       "/quit",
       "/exit",
       "/profile",
-      "/copy",
     ]) {
       expect(joined).toContain(cmd);
     }
     expect(joined).toContain("Ctrl+C");
     expect(joined).toContain("Ctrl+Y");
+    // #238 鼠标拖选提示（拖选 → 释放自动复制）。
+    expect(joined).toContain("鼠标拖选");
     // 无 emoji（词表层面自检）：不含常见 emoji 码区字符
     expect(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(joined)).toBe(false);
   });
@@ -103,7 +103,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  it('"/" → 全部 9 条（按词表插入顺序）', () => {
+  it('"/" → 全部 8 条（按词表插入顺序）', () => {
     expect(slashSuggestions("/")).toEqual([
       "sessions",
       "new",
@@ -113,7 +113,6 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
       "info",
       "thinking",
       "profile",
-      "copy",
     ]);
   });
 
@@ -123,10 +122,6 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
 
   it('"/e" → ["exit"]', () => {
     expect(slashSuggestions("/e")).toEqual(["exit"]);
-  });
-
-  it('"/c" → ["copy"]', () => {
-    expect(slashSuggestions("/c")).toEqual(["copy"]);
   });
 
   it('"/xxx" → 空数组（无匹配）', () => {
@@ -147,7 +142,7 @@ describe('slashComplete: 唯一匹配 → "/cmd "；0/多匹配 → null', () =>
     expect(slashComplete("/q")).toBe("/quit ");
   });
 
-  it('"/" → null（9 匹配）', () => {
+  it('"/" → null（8 匹配）', () => {
     expect(slashComplete("/")).toBeNull();
   });
 
@@ -179,7 +174,6 @@ describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
     "info",
     "thinking",
     "profile",
-    "copy",
   ] as const;
 
   it("cursor=0 → /sessions （首条）", () => {
@@ -190,8 +184,8 @@ describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
     expect(slashCompleteFromList(ALL, 2)).toBe("/quit ");
   });
 
-  it("cursor=8 → /copy （末条）", () => {
-    expect(slashCompleteFromList(ALL, 8)).toBe("/copy ");
+  it("cursor=7 → /profile （末条）", () => {
+    expect(slashCompleteFromList(ALL, 7)).toBe("/profile ");
   });
 
   it("cursor 越界上 / 下 / 空列表 → null", () => {
@@ -245,43 +239,23 @@ describe("T6 /thinking 词表", () => {
 });
 
 /**
- * #237 /copy — 复制最近一轮 assistant 全文到系统剪贴板（显示式复制，
- * DECSET 1000h 启用下鼠标拖选不可用，故提供命令式入口）。
- * 词表新增第 9 条;UI 接线由 application code（app.tsx copyLastAssistant
- * + handleSubmit case "copy" + useInput Ctrl+Y）执行，词表解析只管
- * /copy → command: "copy"。
+ * #238 鼠标拖选复制 — 移除 /copy 命令（#237 取消）。
+ * 词表 8 条；Ctrl+Y 改为"复制当前鼠标选区"（无选区时提示先拖选）。
+ * helpLines 增加鼠标拖选说明。
  */
-describe("#237 /copy 词表", () => {
-  it("/copy → command copy", () => {
-    expect(parseTuiInput("/copy")).toEqual({
-      kind: "command",
-      command: "copy",
-    });
+describe("#238 鼠标拖选：词表移除 /copy", () => {
+  it("/copy → unknown（不在词表）", () => {
+    expect(parseTuiInput("/copy")).toEqual({ kind: "unknown", raw: "/copy" });
   });
 
-  it("大小写与空白容忍", () => {
-    expect(parseTuiInput("  /COPY  ")).toEqual({
-      kind: "command",
-      command: "copy",
-    });
+  it('"/co" 前缀 → []（无匹配）', () => {
+    expect(slashSuggestions("/co")).toEqual([]);
   });
 
-  it('"/" 全部候选含 copy（末条）', () => {
-    expect(slashSuggestions("/")).toContain("copy");
-  });
-
-  it('"/co" 前缀 → ["copy"]', () => {
-    expect(slashSuggestions("/co")).toEqual(["copy"]);
-  });
-
-  it('/copy 唯一匹配 → 补全 "/copy "', () => {
-    expect(slashComplete("/co")).toBe("/copy ");
-  });
-
-  it("/help 覆盖 /copy + Ctrl+Y 说明，且无 emoji", () => {
+  it("/help 增加鼠标拖选提示，且无 /copy", () => {
     const joined = helpLines().join("\n");
-    expect(joined).toContain("/copy");
+    expect(joined).not.toContain("/copy");
+    expect(joined).toContain("鼠标拖选");
     expect(joined).toContain("Ctrl+Y");
-    expect(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(joined)).toBe(false);
   });
 });
