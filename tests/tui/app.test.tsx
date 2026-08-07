@@ -154,8 +154,21 @@ describe("TuiApp 端到端（tracer bullet）", () => {
         return () => strip(out.join("").slice(anchor));
       },
       lastFrame: (): string =>
-        // 兜底拼接最后两个 chunk：跨 chunk 渲染安全；单 chunk 渲染时后者为空。
-        strip(out.slice(-2).join("")),
+        // 最近一次 ink 写入的「可视」chunk — 回退规则:从后往前找第一个
+        // strip(去 ANSI)后非空的 chunk。**不**按原始字节长度判断:ink
+        // 常发纯 ANSI 控制序列(cursor / clear-line)作为末片,raw 长度
+        // > 0 但 strip 后为空,被误当作「最后帧」,idle 断言因此读到
+        // 空串。strip 后非空才是真正的可视内容帧。
+        strip(
+          (() => {
+            for (let i = out.length - 1; i >= 0; i--) {
+              const raw = out[i] ?? "";
+              const visible = strip(raw);
+              if (visible.length > 0) return raw;
+            }
+            return "";
+          })()
+        ),
       type: async (text: string): Promise<void> => {
         // ink 输入解析按 chunk 处理；逐字符写入并让出事件循环，贴近真实
         // 键盘逐键节奏（整块写入时 chunk 尾部 \r 不被解析为 return，实测确认）。
@@ -373,7 +386,26 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       );
       // 等 assistant 答复渲染（idle 帧已落地：turnFinished + 消息渲染完成）
       await waitFor(() => app.lastOutput().includes("hi"), 8000, "answer-in");
-      await waitFor(() => app.lastFrame().includes("hi"), 8000, "idle-frame");
+      // 锚定 settled idle 帧。原 `waitFor(lastFrame().includes("hi"))`
+      // 在 running 帧（含键入 "hi"）即过 → 之后断言误捕「运行中…」瞬态。
+      // 改用:最近一次非空 ink 写入必须同时含 ctx 带且不含运行态指示,
+      // 此条件只在真正的 idle 帧上成立。Condition 取全部底部 not.toContain
+      // + 含 ctx,实现 idle 帧的多重指纹。
+      await waitFor(
+        () => {
+          const frame = app.lastFrame();
+          if (!frame.includes("ctx ")) return false;
+          if (frame.includes("运行中")) return false;
+          if (frame.includes("空闲")) return false;
+          if (frame.includes(`v${VERSION}`)) return false;
+          if (frame.includes("后台运行中")) return false;
+          if (/会话\s+\d+/.test(frame)) return false;
+          if (frame.includes("新会话")) return false;
+          return true;
+        },
+        8000,
+        "idle-frame-settled"
+      );
       const out = app.lastFrame();
       // 移除：空闲 / 运行中 / 后台等运行态（不在底部显示）
       expect(out).not.toContain("空闲");
