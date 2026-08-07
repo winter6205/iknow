@@ -97,7 +97,13 @@ describe("REPRO：发消息后 logo 还在不在？", () => {
       }
       // 等 turn 落盘（userMessageEchoed → turnFinished 后 banner 应切到 compact）
       await waitFor(() => bridge.inflight.ids().size === 0, 8000, "turn-done");
-      await delay(150);
+      // 等 assistant 答复渲染进 since-window —— 不用固定 delay(150)：全量
+      // suite 并行时 CPU 竞争可能拖慢 re-render 帧，内容出现才是真值信号。
+      await waitFor(
+        () => strip(out.join("")).slice(beforeSend).includes("hi back"),
+        8000,
+        "assistant-in-window"
+      );
 
       // 发消息后：banner 仍是完整智慧之眼（方案 B：banner + 消息同 row
       // window，输入框固定在底部）。用户可向上滚看见完整 banner，向下滚与
