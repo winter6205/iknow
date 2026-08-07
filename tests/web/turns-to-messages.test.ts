@@ -125,6 +125,32 @@ describe("turnsToMessages — empty finalText with thinking/toolCalls (H2)", () 
     assert.equal(msgs.filter((m) => m.role === "agent").length, 1);
   });
 
+  it("keeps answer.lastUsage on the projected agent message", () => {
+    const lastUsage = {
+      inputTokens: 120,
+      outputTokens: 30,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: 90,
+    };
+    const msgs = turnsToMessages([
+      turn({
+        query: "usage",
+        answer: {
+          finalText: "done",
+          stopReason: "completed",
+          turnCount: 1,
+          lastUsage,
+        },
+      }),
+    ]);
+    const agent = msgs.find((m) => m.role === "agent");
+    assert.ok(agent, "agent message must be emitted");
+    assert.deepEqual(
+      agent!.role === "agent" && agent.answer.lastUsage,
+      lastUsage
+    );
+  });
+
   it("still drops a turn with empty finalText AND no thinking AND no toolCalls", () => {
     const msgs = turnsToMessages([
       turn({
