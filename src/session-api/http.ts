@@ -222,7 +222,47 @@ async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
     });
     return true;
   }
+  // GET pending ask requests (process-global snapshot). The SPA polls this
+  // every ~2s to surface a permission dialog when the harness emits a decision
+  // of `ask`.
+  if (method === "GET" && rest === "/asks") {
+    sendJson({ res, status: 200, body: { asks: hub.listPendingAsks() } });
+    return true;
+  }
+  // POST /asks/:askId/resolve — body {decision} ∈ {allow-once|always-allow|deny}.
+  // Always 200 with `{resolved}`: true when the ask was still pending and got
+  // resolved; false when the id is unknown / already resolved / timed out
+  // (fail-closed). `resolved:false` lets the SPA treat the ask as expired
+  // without a 404 that would look like a routing error.
+  if (
+    method === "POST" &&
+    rest.startsWith("/asks/") &&
+    rest.endsWith("/resolve")
+  ) {
+    const askId = decodeURIComponent(
+      rest.slice("/asks/".length, -"/resolve".length)
+    );
+    const body = await readJsonBody(req);
+    const decision = extractDecisionField(body);
+    const ok = hub.resolveAsk(askId, decision);
+    sendJson({ res, status: 200, body: { resolved: ok } });
+    return true;
+  }
   return false;
+}
+
+function extractDecisionField(
+  raw: unknown
+): "allow-once" | "always-allow" | "deny" {
+  if (!raw || typeof raw !== "object") {
+    throw new ValidationError("body must be a JSON object");
+  }
+  const o = raw as Record<string, unknown>;
+  const d = o.decision;
+  if (d === "allow-once" || d === "always-allow" || d === "deny") return d;
+  throw new ValidationError(
+    "decision must be one of allow-once | always-allow | deny"
+  );
 }
 
 function parseCreateBody(raw: unknown): {

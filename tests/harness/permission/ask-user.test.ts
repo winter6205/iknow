@@ -180,3 +180,64 @@ describe("createServeAskUser (#115 H3: fail-closed)", () => {
     assert.equal(result, false);
   });
 });
+
+describe("ServeAskUserHandle.pendingAll (commit B: web ask UI)", () => {
+  it("empty when no asks in flight", () => {
+    const h = createServeAskUser({ timeoutMs: 100 });
+    assert.deepEqual([...h.pendingAll()], []);
+  });
+
+  it("lists pending ask with id + tool + summaryHint", async () => {
+    const h = createServeAskUser({ timeoutMs: 1_000 });
+    const p = h.ask({
+      tool: "bash",
+      input: { command: "ls -la" },
+      summaryHint: 'bash "ls -la"',
+    });
+    // Yield so the setTimeout is scheduled and the pending Map is populated.
+    await Promise.resolve();
+    const list = h.pendingAll();
+    assert.equal(list.length, 1);
+    const first = list[0]!;
+    assert.match(first.id, /^ask-\d+$/);
+    assert.equal(first.tool, "bash");
+    assert.equal(first.summaryHint, 'bash "ls -la"');
+    // Settle so the test process does not leak the timer.
+    h.resolveAsk(first.id, true);
+    await p;
+  });
+
+  it("clears entry after resolveAsk", async () => {
+    const h = createServeAskUser({ timeoutMs: 1_000 });
+    const p = h.ask({ tool: "write_file", input: {}, summaryHint: "wf" });
+    await Promise.resolve();
+    const id = h.pendingAll()[0]!.id;
+    assert.equal(h.pendingCount(), 1);
+    const ok = h.resolveAsk(id, true);
+    assert.equal(ok, true);
+    assert.equal(h.pendingCount(), 0);
+    assert.equal(h.pendingAll().length, 0);
+    await p;
+  });
+
+  it("returns empty after timeout settles (fail-closed)", async () => {
+    const h = createServeAskUser({ timeoutMs: 10 });
+    const p = h.ask({ tool: "edit_file", input: {}, summaryHint: "e" });
+    await Promise.resolve();
+    assert.equal(h.pendingAll().length, 1);
+    // Wait past the timeout.
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(h.pendingAll().length, 0);
+    assert.equal(await p, false);
+  });
+
+  it("resolveAsk after timeout returns false (no resurrection)", async () => {
+    const h = createServeAskUser({ timeoutMs: 10 });
+    const p = h.ask({ tool: "grep", input: {}, summaryHint: "g" });
+    await Promise.resolve();
+    const id = h.pendingAll()[0]!.id;
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(h.resolveAsk(id, true), false);
+    assert.equal(await p, false);
+  });
+});

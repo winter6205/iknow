@@ -172,6 +172,41 @@ export function resetSession(
   );
 }
 
+export interface PendingAsk {
+  readonly id: string;
+  readonly tool: string;
+  readonly summaryHint: string;
+}
+
+export type AskDecision = "allow-once" | "always-allow" | "deny";
+
+export function listPendingAsks(
+  id: string,
+  signal?: AbortSignal
+): Promise<{ readonly asks: ReadonlyArray<PendingAsk> }> {
+  return request(
+    `${API}/sessions/${encodeURIComponent(id)}/asks`,
+    { method: "GET" },
+    signal
+  );
+}
+
+export function resolveAsk(
+  id: string,
+  askId: string,
+  decision: AskDecision,
+  signal?: AbortSignal
+): Promise<{ readonly resolved: boolean }> {
+  return request(
+    `${API}/sessions/${encodeURIComponent(id)}/asks/${encodeURIComponent(askId)}/resolve`,
+    {
+      method: "POST",
+      body: JSON.stringify({ decision }),
+    },
+    signal
+  );
+}
+
 // -- Trace inspection endpoints -----------------------------------------------
 
 function traceQueryString(params: TraceQueryParams): string {

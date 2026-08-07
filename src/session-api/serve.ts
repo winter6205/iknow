@@ -9,6 +9,7 @@ import { SessionHub, type SessionHubOptions } from "./hub.js";
 import { listenSessionServer, type ListeningServer } from "./http.js";
 import { SessionStore } from "./store/index.js";
 import { initIknowWorkspaceSafe } from "../harness/identity/index.js";
+import type { ServeAskUserHandle } from "../harness/permission/ask-user.js";
 
 export type ServeOptions = {
   host?: string;
@@ -19,6 +20,9 @@ export type ServeOptions = {
   hubOptions?: Omit<SessionHubOptions, "store">;
   /** Trace output file path; forwarded to SessionHub for per-session JSONL trace (T5, #64). */
   traceOut?: string;
+  /** Optional serve AskUser handle so the SPA can list + resolve pending
+   *  permission requests. When omitted, hubOptions.askUser is used verbatim. */
+  askHandle?: ServeAskUserHandle;
 };
 
 /**
@@ -48,6 +52,11 @@ export async function startSessionServe(
     // #196 A12: serve 跳过 BOOTSTRAP 段（surface="serve" → bootstrapActive=false）。
     surface: "serve",
     ...opts?.hubOptions,
+    // Prefer the full handle when provided so web can resolve asks; fall back
+    // to the bare askUser (back-compat for callers that only wire `.ask`).
+    ...(opts?.askHandle
+      ? { askUser: opts.askHandle.ask, askHandle: opts.askHandle }
+      : {}),
   });
 
   const port =

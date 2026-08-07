@@ -21,7 +21,8 @@ import {
   createLoopEngine,
   type LoopEngineDeps,
 } from "./index.js";
-import { createAciExecutor, createPermissionPolicy } from "./aci/index.js";
+import { createAciExecutor } from "./aci/index.js";
+import { createPermissionPolicy } from "./permission/policy.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
 import type { Registry } from "./tools/types.js";
 import { homedir } from "node:os";
@@ -47,6 +48,11 @@ export type BuildEngineOpts = {
   /** #194 T6:memory 层开关(默认 true)。ask 入口显式 memory:{enabled:false}
    *  剥离 memory 工具(registry 8 件)+ memory_layer 段不装配。 */
   readonly memory?: { readonly enabled: boolean };
+  /** Optional session-level policy source. When provided, served sessions can
+   *  accumulate "always-allow" rules via the web SPA so the user does not have
+   *  to re-confirm the same tool each turn. Memory-only (no disk persistence);
+   *  cleared when the server restarts. */
+  readonly session?: import("./permission/types.js").SessionGrantsPolicySource;
 };
 
 export type BuiltEngine = {
@@ -127,7 +133,9 @@ export async function buildHarnessEngine(
   const baseExecutor = createExecutor(reg.inner);
   // 5-step permission middleware: 危险命令由硬墙无条件拦截(#122)。
   // `createAciExecutor` 内部已装配 permission-executor,不要再外包一层。
-  const policy = createPermissionPolicy();
+  const policy = createPermissionPolicy({
+    ...(opts.session ? { session: opts.session } : {}),
+  });
   const executor = createAciExecutor({
     inner: baseExecutor,
     catalog: reg.catalog,

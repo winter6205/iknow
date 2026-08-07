@@ -20,6 +20,11 @@ import {
 } from "../harness/index.js";
 import { buildHarnessEngine } from "../harness/build-engine.js";
 import type { AskUser } from "../harness/permission/types.js";
+import type {
+  ServeAskUserHandle,
+  PendingAskView,
+} from "../harness/permission/ask-user.js";
+import type { SessionGrants } from "../harness/permission/session-grants.js";
 import { createViolationCounter } from "../harness/sandbox/violation-handling.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
 import {
@@ -231,6 +236,12 @@ export type SessionHubOptions = {
    * construction-time check below throws otherwise (#162 / SC18).
    * Tests injecting `deps` are unaffected. */
   askUser?: AskUser;
+  /** Full serve AskUser handle (ask + resolveAsk + pendingAll). When provided,
+   * the web SPA can list + resolve pending permission requests. */
+  askHandle?: ServeAskUserHandle;
+  /** Session allow-list source. "always-allow" decisions from the web UI land
+   * here so subsequent identical tool calls are not re-confirmed. Memory-only. */
+  sessionGrants?: SessionGrants;
   /** T2: env source for per-turn thinking override (test seam; production
    * omits it → withThinkingOverride falls back to loadIknowEnv()). */
   overrideEnv?: { readonly llm: LlmEnv };
@@ -271,6 +282,10 @@ export class SessionHub {
   private readonly traceOut: string | undefined;
   /** askUser inlet (#162); required unless deps are pre-built. */
   private readonly askUser: AskUser | undefined;
+  /** Full serve AskUser handle (when provided, SPA can list + resolve asks). */
+  private readonly askHandle: ServeAskUserHandle | undefined;
+  /** Session allow-list source ("always-allow" from web UI lands here). */
+  private readonly sessionGrants: SessionGrants | undefined;
   /** T2: env source for the per-turn thinking override (test seam). */
   private readonly overrideEnv: { readonly llm: LlmEnv } | undefined;
   /** Sandbox root for fs-tool access (code-review 2026-08-05). Undefined
@@ -293,6 +308,8 @@ export class SessionHub {
     this.cachedDeps = opts.deps;
     this.traceOut = opts.traceOut;
     this.askUser = opts.askUser;
+    this.askHandle = opts.askHandle;
+    this.sessionGrants = opts.sessionGrants;
     this.overrideEnv = opts.overrideEnv;
     this.sandboxRoot = opts.sandboxRoot;
     this.surface = opts.surface;
@@ -302,6 +319,54 @@ export class SessionHub {
   }
 
   // -- public API --------------------------------------------------------------
+
+  /**
+   * Snapshot of pending ask requests (process-global; v0 serve hosts one
+   * turn at a time). Returns an empty list when the full handle was not
+   * wired (no SPA capability).
+   */
+  listPendingAsks(): ReadonlyArray<PendingAskView> {
+    return this.askHandle?.pendingAll() ?? [];
+  }
+
+  /**
+   * Resolve a pending ask with one of three decisions.
+   *
+   *   - `allow-once`    → release the waiter as approved, no persist.
+   *   - `deny`          → release the waiter as denied (matches fail-closed).
+   *   - `always-allow`  → release the waiter as approved, AND add a
+   *                        per-tool allow rule to the session grants so the
+   *                        next identical tool call is auto-approved.
+   *
+   * Ordering: for `always-allow` the rule is added AFTER settle() succeeds;
+   * if the ask already timed out, settle returns false and no rule is added
+   * (defensive contract — no orphan rules from a UI click that lost the race).
+   *
+   * Returns true iff the ask was still pending at resolve time.
+   */
+  resolveAsk(
+    id: string,
+    decision: "allow-once" | "always-allow" | "deny"
+  ): boolean {
+    if (!this.askHandle) return false;
+    // Capture the tool name BEFORE settle: settle() empties the pending Map,
+    // so pendingAll() after it would find nothing.
+    const tool =
+      decision === "always-allow"
+        ? this.askHandle.pendingAll().find((p) => p.id === id)?.tool
+        : undefined;
+    if (decision === "deny") return this.askHandle.resolveAsk(id, false);
+    const approved = this.askHandle.resolveAsk(id, true);
+    if (decision === "always-allow" && approved && tool && this.sessionGrants) {
+      this.sessionGrants.add({
+        id: `session-allow-${tool}`,
+        match: ({ tool: t }) => t === tool,
+        decision: "allow",
+        reason: `always-allow from session: ${tool}`,
+      });
+    }
+    return approved;
+  }
 
   async createSession(
     req?: CreateSessionRequest
@@ -558,6 +623,7 @@ export class SessionHub {
       askUser: this.askUser,
       ...(this.sandboxRoot ? { sandboxRoot: this.sandboxRoot } : {}),
       ...(this.surface ? { surface: this.surface } : {}),
+      ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
     });
     this.cachedDeps = deps;
     return this.cachedDeps;

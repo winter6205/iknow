@@ -232,6 +232,13 @@ async function runTui(parsed: ParsedCli): Promise<void> {
 async function runServe(parsed: ParsedCli): Promise<void> {
   const tracePath = resolveTracePath(parsed.traceOut);
   const { startSessionServe } = await import("./session-api/serve.js");
+  const { createSessionGrants } =
+    await import("./harness/permission/session-grants.js");
+  // Single shared handle — `.ask` is what the harness consumes; the full
+  // handle is also passed so the SPA can list + resolve pending requests
+  // and the hub can accumulate "always-allow" rules.
+  const askHandle = createServeAskUser();
+  const sessionGrants = createSessionGrants();
   try {
     const { listening } = await startSessionServe({
       host: parsed.host,
@@ -239,7 +246,11 @@ async function runServe(parsed: ParsedCli): Promise<void> {
       json_mode: parsed.json,
       dataDir: parsed.dataDir,
       traceOut: tracePath,
-      hubOptions: { askUser: createServeAskUser().ask },
+      askHandle,
+      hubOptions: {
+        askUser: askHandle.ask,
+        sessionGrants,
+      },
     });
     writeErr(`iknow serve  http://${listening.host}:${listening.port}/`);
     if (parsed.traceOut) {

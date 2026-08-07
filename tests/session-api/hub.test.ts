@@ -23,6 +23,8 @@ import type {
   AnthropicNativeMessage,
 } from "../../src/harness/index.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
+import { createServeAskUser } from "../../src/harness/permission/ask-user.ts";
+import { createSessionGrants } from "../../src/harness/permission/session-grants.ts";
 import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../src/harness/tools/executor.ts";
@@ -838,5 +840,162 @@ describe("postMessage onStream forwarding (#188)", () => {
     });
     assert.equal(resp.turn.answer.finalText, "same");
     assert.equal(resp.turn.answer.stopReason, "completed");
+  });
+});
+
+// -- commit B: listPendingAsks + resolveAsk (three-option web ask UI) --------
+//
+// These tests construct a SessionHub directly with `deps` (skipping the LLM
+// stack) plus an `askHandle` + `sessionGrants`. The hub APIs under test do not
+// invoke any LLM or executor, so deps only need to satisfy the constructor
+// type — `makeDeps([])` returns a valid LoopEngineDeps.
+describe("commit B: SessionHub.listPendingAsks + resolveAsk", () => {
+  function makeHubWithHandle(opts: { askTimeoutMs?: number }): {
+    hub: SessionHub;
+    handle: ReturnType<typeof createServeAskUser>;
+    grants: ReturnType<typeof createSessionGrants>;
+  } {
+    const handle = createServeAskUser({
+      timeoutMs: opts.askTimeoutMs ?? 1_000,
+    });
+    const grants = createSessionGrants();
+    const hub = new SessionHub({
+      store,
+      deps: makeDeps([]),
+      askUser: handle.ask,
+      askHandle: handle,
+      sessionGrants: grants,
+    });
+    return { hub, handle, grants };
+  }
+
+  it("listPendingAsks returns empty array when no asks in flight", () => {
+    const { hub } = makeHubWithHandle({});
+    assert.deepEqual([...hub.listPendingAsks()], []);
+  });
+
+  it("listPendingAsks surfaces active asks", async () => {
+    const { hub, handle } = makeHubWithHandle({});
+    const pending = handle.ask({
+      tool: "bash",
+      input: { command: "ls -la" },
+      summaryHint: 'bash "ls -la"',
+    });
+    await Promise.resolve();
+    const list = hub.listPendingAsks();
+    assert.equal(list.length, 1);
+    assert.equal(list[0]!.tool, "bash");
+    // Settle so the timer does not leak.
+    handle.resolveAsk(list[0]!.id, true);
+    await pending;
+  });
+
+  it("resolveAsk(allow-once) releases the waiter without mutating session grants", async () => {
+    const { hub, handle, grants } = makeHubWithHandle({});
+    const pending = handle.ask({
+      tool: "edit_file",
+      input: {},
+      summaryHint: "e",
+    });
+    await Promise.resolve();
+    const id = hub.listPendingAsks()[0]!.id;
+    assert.equal(hub.resolveAsk(id, "allow-once"), true);
+    assert.equal(grants.list().length, 0);
+    assert.equal(await pending, true);
+  });
+
+  it("resolveAsk(deny) releases the waiter with false (fail-closed)", async () => {
+    const { hub, handle, grants } = makeHubWithHandle({});
+    const pending = handle.ask({
+      tool: "write_file",
+      input: {},
+      summaryHint: "w",
+    });
+    await Promise.resolve();
+    const id = hub.listPendingAsks()[0]!.id;
+    assert.equal(hub.resolveAsk(id, "deny"), true);
+    assert.equal(grants.list().length, 0);
+    assert.equal(await pending, false);
+  });
+
+  it("resolveAsk(always-allow) writes a session-grants rule scoped to the tool", async () => {
+    const { hub, handle, grants } = makeHubWithHandle({});
+    const pending = handle.ask({
+      tool: "grep",
+      input: { pattern: "x" },
+      summaryHint: "g",
+    });
+    await Promise.resolve();
+    const id = hub.listPendingAsks()[0]!.id;
+    assert.equal(hub.resolveAsk(id, "always-allow"), true);
+    const rules = grants.list();
+    assert.equal(rules.length, 1);
+    const rule = rules[0]!;
+    assert.equal(rule.decision, "allow");
+    assert.equal(rule.match({ tool: "grep", input: {} }), true);
+    assert.equal(rule.match({ tool: "bash", input: {} }), false);
+    assert.equal(await pending, true);
+  });
+
+  it("resolveAsk with unknown id returns false and does not add a rule", () => {
+    const { hub, grants } = makeHubWithHandle({});
+    assert.equal(hub.resolveAsk("ask-999", "always-allow"), false);
+    assert.equal(grants.list().length, 0);
+    assert.equal(hub.resolveAsk("ask-999", "allow-once"), false);
+    assert.equal(hub.resolveAsk("ask-999", "deny"), false);
+  });
+
+  it("resolveAsk after timeout returns false and does not resurrect the rule", async () => {
+    const { hub, handle, grants } = makeHubWithHandle({ askTimeoutMs: 10 });
+    const pending = handle.ask({ tool: "bash", input: {}, summaryHint: "b" });
+    await Promise.resolve();
+    const id = hub.listPendingAsks()[0]!.id;
+    // Wait past the fail-closed timeout.
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(hub.resolveAsk(id, "always-allow"), false);
+    assert.equal(grants.list().length, 0);
+    assert.equal(await pending, false);
+  });
+
+  it("session-grants allow rule flips checkPermission(grep) → allow", async () => {
+    // End-to-end: write the rule through the hub, then verify it is observed
+    // by checkPermission (the policy engine reads sources.session?.rules()
+    // fresh per call — no cached invalidation required).
+    const { hub, handle, grants } = makeHubWithHandle({});
+    const pending = handle.ask({ tool: "grep", input: {}, summaryHint: "g" });
+    await Promise.resolve();
+    const id = hub.listPendingAsks()[0]!.id;
+    hub.resolveAsk(id, "always-allow");
+    await pending;
+
+    const rule = grants.list()[0]!;
+    const { checkPermission } =
+      await import("../../src/harness/permission/policy.ts");
+    const out = checkPermission({
+      def: {
+        name: "grep",
+        description: "test",
+        inputSchema: { type: "object", additionalProperties: false },
+        handler: async () => "ok",
+        aci: {
+          category: "read-only",
+          isConcurrencySafe: true,
+          interruptBehavior: "cancel",
+          timeoutTier: "default",
+        },
+      },
+      input: { pattern: "x" },
+      sources: { code: { kind: "code", rules: [] }, session: grants },
+      hardWalls: [],
+      defaultByCategory: {
+        "read-only": "allow",
+        write: "ask",
+        execute: "ask",
+        collaborate: "ask",
+      },
+    });
+    assert.equal(out.decision, "allow");
+    assert.ok(out.reason.includes("session"));
+    assert.ok(rule.id.startsWith("session-allow-grep"));
   });
 });

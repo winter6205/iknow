@@ -11,6 +11,7 @@ import {
   createPermissionPolicy,
   isAllowedCommand,
   isDangerousCommand,
+  commandContainsSensitivePath,
   checkPermission,
 } from "../../../src/harness/aci/permission.ts";
 import type {
@@ -100,11 +101,15 @@ describe("isAllowedCommand (allowlist-first 主门)", () => {
     assert.equal(isAllowedCommand("python -c 'x'"), false);
   });
 
-  it("含 shell 元字符 → false（即便首 token 在白名单）", () => {
-    assert.equal(isAllowedCommand("echo a > b"), false); // 重定向
-    assert.equal(isAllowedCommand("echo a | grep x"), false); // 管道
-    assert.equal(isAllowedCommand("echo a; rm"), false); // 链
-    assert.equal(isAllowedCommand("echo a && b"), false); // &&
+  it("分段 + 重定向豁免后判定 → 白名单段 allow / 危险段 deny", () => {
+    // 重定向已豁免：> / >> / < 是只读工具标准用法，不再是 isAllowed 的拒因。
+    assert.equal(isAllowedCommand("echo a > b"), true); // 重定向豁免
+    assert.equal(isAllowedCommand("echo a >> b"), true); // 重定向豁免
+    assert.equal(isAllowedCommand("echo a | grep x"), false); // 管道（grep 段非白名单）
+    assert.equal(isAllowedCommand("echo a | head -1"), true); // 管道（head 段在白名单）
+    assert.equal(isAllowedCommand("echo a; echo b"), true); // 分号分段（echo 段白名单）
+    assert.equal(isAllowedCommand("echo a; rm -rf /"), false); // 分段后 rm 段危险
+    assert.equal(isAllowedCommand("echo a && echo b"), true); // && 分段（echo 段白名单）
     assert.equal(isAllowedCommand("echo $PATH"), false); // 变量展开
     assert.equal(isAllowedCommand("echo `whoami`"), false); // 反引号
     assert.equal(isAllowedCommand("echo $(whoami)"), false); // 命令替换
@@ -138,8 +143,6 @@ describe("isDangerousCommand (黑名单双保险层)", () => {
     "echo a; rm -rf /",
     "echo `whoami`",
     "echo $(whoami)",
-    "echo a > b",
-    "echo a >> b",
     "echo a\nrm",
     "echo $X",
   ];
@@ -155,12 +158,67 @@ describe("isDangerousCommand (黑名单双保险层)", () => {
     "cat README.md",
     "node --version",
     "git status",
+    // 用户初始化脚本原 case（误伤修复的核心场景）
+    'ls -la ~/.iknow 2>/dev/null; echo "---"; ls -la ~ 2>/dev/null | head -30',
+    // 仅白名单段组合 + 重定向 / 管道 / 分号
+    "ls -la ~ 2>/dev/null",
+    "echo a > b",
+    "echo a >> b",
+    "git status && echo done",
+    "ls; ls; ls",
+    "echo a | head -1",
   ];
   for (const cmd of safe) {
     it(`allows safe: ${JSON.stringify(cmd)}`, () => {
       assert.equal(isDangerousCommand(cmd), false);
     });
   }
+});
+
+describe("axis2 skeptic findings — regression guards", () => {
+  it("bare metachars are still dangerous (no command body)", () => {
+    assert.equal(isDangerousCommand(";"), true);
+    assert.equal(isDangerousCommand(">"), true);
+    assert.equal(isDangerousCommand("|"), true);
+    assert.equal(isDangerousCommand("&"), true);
+    assert.equal(isDangerousCommand("&&"), true);
+    assert.equal(isDangerousCommand("||"), true);
+  });
+
+  it("backslash-escaped dangerous pattern still detected", () => {
+    assert.equal(isDangerousCommand("r\\m -rf /tmp/x"), true);
+    assert.equal(isDangerousCommand("r\\m\\ -rf /tmp/x"), true);
+    assert.equal(isDangerousCommand("echo r\\m -rf /tmp/x"), true);
+  });
+
+  it("redirect to sensitive path is still denied (command-level scan)", () => {
+    // commandContainsSensitivePath mirrors matchSensitivePath for command strings
+    assert.equal(commandContainsSensitivePath("echo a > ~/.ssh/x"), true);
+    assert.equal(commandContainsSensitivePath("echo a > /etc/passwd"), true);
+    assert.equal(commandContainsSensitivePath("echo a; cat /etc/passwd"), true);
+    assert.equal(commandContainsSensitivePath("echo a >> /etc/shadow"), true);
+    assert.equal(commandContainsSensitivePath("echo a > /tmp/ok.txt"), false);
+  });
+
+  it("here-string is read-only stdin feed — allowed", () => {
+    assert.equal(isAllowedCommand("echo <<< hello"), true);
+    assert.equal(isDangerousCommand("echo <<< hello"), false);
+  });
+
+  it("bash tool rejects sensitive-path command at handler", async () => {
+    const { createBashTool } =
+      await import("../../../src/harness/aci/tools/bash.js");
+    const { ToolExecutionError } =
+      await import("../../../src/harness/errors.js");
+    const cwd = "/tmp";
+    const tool = createBashTool(cwd);
+    await assert.rejects(
+      tool.handler({ command: "echo a >> /etc/shadow" }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("sensitive path")
+    );
+  });
 });
 
 describe("checkPermission — 类别默认", () => {
@@ -329,14 +387,13 @@ describe("checkPermission — execute 安全兜底细节", () => {
     assert.equal(out.decision, "ask");
   });
 
-  it("execute + echo a > b（元字符） → deny (hard-wall)", () => {
+  it("execute + echo a > b（重定向已豁免）→ ask（hard-wall 不命中，category default）", () => {
     const out = checkPermission({
       def: makeTool({ name: "bash", category: "execute" }),
       input: { command: "echo a > b" },
       policy,
     });
-    assert.equal(out.decision, "deny");
-    assert.ok(out.reason.includes("dangerous command pattern"));
+    assert.equal(out.decision, "ask");
   });
 
   it("execute + echo $PATH（元字符） → deny (hard-wall)", () => {
