@@ -105,13 +105,12 @@ export function PromptInput(props: PromptInputProps): ReactElement {
   }, [props.value, hasHint, suggestions.length, hintCursor]);
   useInput(
     (input, key) => {
-      // 鼠标滚轮 SGR 序列 \x1b[<64;x;yM（/65 下滚）会被 ink 当普通 input
-      // 字符串整段回调。ink 在传 useInput 前会 input.slice(1) 剥 ESC（见
+      // 鼠标 SGR 序列（\x1b[<64;x;yM 等）会被 ink 当普通 input 字符串整段
+      // 回调。ink 在传 useInput 前会 input.slice(1) 剥 ESC（见
       // node_modules/ink/build/hooks/use-input.js），所以这里看到的是
-      // "[<数字;数字;数字M/m" 形态（保留 CSI 的 [）。app 层 mouse listener
-      // 也用 stdin.on('data') 收到原始 chunk（mouse.ts parseMouseEvents），
-      // 已消费滚轮；此处再用 isSgrMouseSequence 守卫避免 stripNonPrintable
-      // 把 [<64;10;5M 当 printable 追加到输入框 value。
+      // "[<数字;数字;数字M/m" 形态（保留 CSI 的 [）。app 已不做鼠标捕获，
+      // 但守卫保留（防御性）：避免 stripNonPrintable 把 [<64;10;5M 当
+      // printable 追加到输入框 value。
       if (isSgrMouseSequence(input)) return;
       if (key.return) {
         if (hasHint && props.onSelectHint) {

@@ -2,7 +2,7 @@
  * `src/harness/build-engine.ts` — the single harness assembly point shared by
  * the CLI (chat / ask) and the session server (serve → SessionHub.ensureDeps).
  *
- * These tests pin the ACI 10-tool set so a future tool-set change cannot drift
+ * These tests pin the ACI 11-tool set so a future tool-set change cannot drift
  * between the two entry points silently: if a tool is added/renamed/removed,
  * this test forces an explicit decision at the single assembly point.
  */
@@ -16,7 +16,8 @@ import type { IknowEnv } from "../../src/config/env.ts";
 
 // Order is load-bearing: it must match the `aciTools` array in
 // `src/harness/build-engine.ts` (policy byName key-space, ADR-0006)。
-// #194 T6 (Layer 4 baseline):扩 memory_recall + memory_save 到 10 件。
+// #194 T6 (Layer 4 baseline):扩 memory_recall + memory_save 到 10 件;
+// #224 在 10 件基础上末尾追加 tool_search(11 件,memoryDir 默认存在)。
 const EXPECTED_TOOLS = [
   "bash",
   "read_file",
@@ -28,6 +29,7 @@ const EXPECTED_TOOLS = [
   "web_search",
   "memory_recall",
   "memory_save",
+  "tool_search",
 ];
 
 /** Deterministic env: never read process.env / .env files (env.ts SSOT). */
@@ -51,7 +53,7 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
 }
 
 describe("buildHarnessEngine (SSOT assembly)", () => {
-  it("registers the full ACI 10-tool set on the returned registry", async () => {
+  it("registers the full ACI 11-tool set on the returned registry", async () => {
     const { deps } = await buildHarnessEngine({
       env: makeEnv("sk-test-sentinel-1"),
       askUser: createNoAskUser(),
@@ -63,6 +65,22 @@ describe("buildHarnessEngine (SSOT assembly)", () => {
     // build-engine 路径也必须仍带 web_fetch / web_search)。
     expect(names).toContain("web_fetch");
     expect(names).toContain("web_search");
+  });
+
+  it("wires promptTools to reg.visibleSchemas (all 11 tools, no lazy)", async () => {
+    const { deps } = await buildHarnessEngine({
+      env: makeEnv("sk-test-sentinel-2"),
+      askUser: createNoAskUser(),
+    });
+
+    // #224 注入缝：buildHarnessEngine 把 reg.visibleSchemas 注入 promptTools。
+    expect(typeof deps.promptTools).toBe("function");
+    const promptNames = deps.promptTools!()
+      .map((d) => d.name)
+      .sort();
+    expect(promptNames).toEqual([...EXPECTED_TOOLS].sort());
+    // 默认 registry 无 lazy 工具 → visibleSchemas ≡ registry.list()
+    expect(deps.promptTools!().map((d) => d.name)).toEqual(EXPECTED_TOOLS);
   });
 
   it("throws without the LLM api key set (fail loud, before any async work)", async () => {

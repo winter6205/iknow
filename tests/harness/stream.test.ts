@@ -20,16 +20,27 @@ describe("HarnessStreamEvent contract (D1 minimal set)", () => {
     assert.equal(e.text, "hello");
   });
 
-  it("tool_call_start event carries name field and discriminates on type", () => {
-    const e: HarnessStreamEvent = { type: "tool_call_start", name: "echo" };
+  it("tool_call_start event carries name + id fields and discriminates on type", () => {
+    const e: HarnessStreamEvent = {
+      type: "tool_call_start",
+      name: "echo",
+      id: "toolu_1",
+    };
     assert.equal(e.type, "tool_call_start");
     assert.equal(e.name, "echo");
+    assert.equal(e.id, "toolu_1");
+  });
+
+  it("thinking_delta event carries text field and discriminates on type", () => {
+    const e: HarnessStreamEvent = { type: "thinking_delta", text: "思考中…" };
+    assert.equal(e.type, "thinking_delta");
+    assert.equal(e.text, "思考中…");
   });
 
   it("discriminated union narrows text_delta to its text payload", () => {
     const events: HarnessStreamEvent[] = [
       { type: "text_delta", text: "a" },
-      { type: "tool_call_start", name: "echo" },
+      { type: "tool_call_start", name: "echo", id: "toolu_1" },
       { type: "text_delta", text: "b" },
     ];
     const textPieces: string[] = [];
@@ -42,19 +53,22 @@ describe("HarnessStreamEvent contract (D1 minimal set)", () => {
     assert.deepEqual(textPieces, ["a", "b"]);
   });
 
-  it("discriminated union narrows tool_call_start to its name payload", () => {
+  it("discriminated union narrows tool_call_start to its name + id payload", () => {
     const events: HarnessStreamEvent[] = [
-      { type: "tool_call_start", name: "echo" },
+      { type: "tool_call_start", name: "echo", id: "toolu_1" },
       { type: "text_delta", text: "x" },
-      { type: "tool_call_start", name: "get_time" },
+      { type: "tool_call_start", name: "get_time", id: "toolu_2" },
     ];
     const names: string[] = [];
+    const ids: string[] = [];
     for (const e of events) {
       if (e.type === "tool_call_start") {
-        // 编译期正确:窄化后只有 name 字段,没有 text
+        // 编译期正确:窄化后同时持有 name + id
         names.push(e.name);
+        ids.push(e.id);
       }
     }
     assert.deepEqual(names, ["echo", "get_time"]);
+    assert.deepEqual(ids, ["toolu_1", "toolu_2"]);
   });
 });

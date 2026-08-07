@@ -243,3 +243,100 @@ describe("createAciExecutor — 自定义 policy", () => {
     assert.equal(calls.length, 0);
   });
 });
+
+describe("createAciExecutor — #224 W5 S7b: partial salvage 仅 bash（契约 Y1b 例外）", () => {
+  // inner spy 返回 bash 形态 ok payload（{stdout, stderr} JSON 文本），
+  // 模拟被中断前已 flush 的 partial。partial salvage 只对 name==="bash" 的
+  // 工具生效（extractBashPartial def?.name !== "bash" → undefined）。
+  function makePartialSpy(): {
+    executor: Executor;
+    calls: ToolCall[][];
+  } {
+    const calls: ToolCall[][] = [];
+    const executor: Executor = Object.freeze({
+      executeAll: async (
+        batch: ReadonlyArray<ToolCall>
+      ): Promise<ReadonlyArray<ToolExecutionResult>> => {
+        calls.push([...batch]);
+        return batch.map((c) => ({
+          kind: "ok" as const,
+          toolUseId: c.id,
+          payload: [
+            { type: "text" as const, text: '{"stdout":"partial","stderr":""}' },
+          ],
+        }));
+      },
+    });
+    return { executor, calls };
+  }
+
+  it("S7b 反例：非 bash 工具被 cancel → execution_failed cancelled，无 partial（extractBashPartial 拒非 bash）", async () => {
+    const { executor: spy } = makePartialSpy();
+    const tool = Object.freeze({
+      name: "non_bash_tool",
+      description: "非 bash 工具返回 bash 形态 payload",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: async () => '{"stdout":"partial","stderr":""}',
+      aci: {
+        category: "read-only" as const,
+        isConcurrencySafe: true,
+        interruptBehavior: "cancel" as const,
+        timeoutTier: "fast" as const,
+      },
+    });
+    const catalog = makeCatalog([tool]);
+    const aciExec = createAciExecutor({ inner: spy, catalog });
+
+    const controller = new AbortController();
+    controller.abort(); // 调用前已 abort
+    const results = await aciExec.executeAll(
+      [{ id: "u1", name: "non_bash_tool", input: {} }],
+      controller.signal
+    );
+
+    assert.equal(results.length, 1);
+    const r = results[0]!;
+    assert.equal(r.kind, "execution_failed");
+    if (r.kind === "execution_failed") {
+      assert.equal(r.message, "cancelled");
+      // 决定性：非 bash 工具不产 partial（即便 payload 是 bash 形态）
+      assert.equal(
+        (r as { partial?: unknown }).partial,
+        undefined,
+        "non-bash tool must NOT be augmented with partial"
+      );
+    }
+  });
+
+  it("S7b 正例（对照）：bash 工具被 cancel → 保留 partial（stdout 被 salvage）", async () => {
+    const { executor: spy } = makePartialSpy();
+    const tool: AciToolDef = Object.freeze({
+      name: "bash",
+      description: "bash 工具",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: async () => '{"stdout":"partial","stderr":""}',
+      aci: {
+        category: "execute" as const,
+        isConcurrencySafe: false,
+        interruptBehavior: "cancel" as const,
+        timeoutTier: "build" as const,
+      },
+    });
+    const catalog = makeCatalog([tool]);
+    const aciExec = createAciExecutor({ inner: spy, catalog });
+
+    const controller = new AbortController();
+    controller.abort();
+    const results = await aciExec.executeAll(
+      [{ id: "u1", name: "bash", input: {} }],
+      controller.signal
+    );
+
+    const r = results[0]!;
+    assert.equal(r.kind, "execution_failed");
+    if (r.kind === "execution_failed") {
+      assert.equal(r.message, "cancelled");
+      assert.deepEqual(r.partial, { stdout: "partial" });
+    }
+  });
+});

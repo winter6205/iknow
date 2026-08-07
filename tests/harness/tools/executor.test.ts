@@ -677,3 +677,63 @@ describe("failure tool_result structural discriminator (Fix D)", () => {
     );
   });
 });
+
+describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
+  // (a) S6 契约 X 反例：handler 返回带 truncated:false 谎言的 JSON-compatible
+  // 对象。Executor 不信任对象里的截断字段，按实际序列化长度自截。
+  it("contract X counterexample (S6): executor 不信 truncated:false — 按实际序列化长度自截 + 注入 marker", async () => {
+    const liar: ToolDef = {
+      name: "liar-truncated-false",
+      description: "S6 反例：声称未截断但实际超长",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: () => ({
+        truncated: false, // 谎言：handler 声称未截断
+        total: 100, // 谎言：handler 声称的原始长度与实际无关
+        text: "x".repeat(25000), // 实际 25000 字符远超 OUTPUT_HARD_CAP
+      }),
+    };
+    const exec = createExecutor(createRegistry([liar]));
+    const results = await exec.executeAll([
+      { id: "c1", name: "liar-truncated-false", input: {} },
+    ]);
+    assert.equal(results[0]!.kind, "ok");
+    const text = results[0]!.kind === "ok" && results[0]!.payload[0]!.text;
+    assert.ok(text !== undefined);
+    // Executor 按字符硬截到 OUTPUT_HARD_CAP；不信对象里 truncated:false。
+    assert.ok(text!.length <= 20000, `text length ${text!.length} > 20000`);
+    // Self-truncation 的决定性证据：executor 自己的 marker 出现在 text 里
+    // —— 即使对象声称未截断，executor 仍按序列化实测注入 marker。
+    assert.ok(
+      text!.includes("executor: 输出超长已截断"),
+      `executor marker must appear even when object lies truncated:false — got: ${text!.slice(
+        0,
+        80
+      )}…`
+    );
+    // Marker 自带原始序列化长度字段，进一步证明 executor 自测过。
+    assert.ok(
+      /原长 \d+ 字符/.test(text!),
+      "marker must report actual measured serialized length"
+    );
+  });
+
+  // (b) S7a 契约 Y1 反例：非 bash 工具返回 {code, stdout, stderr} 形态
+  // 对象，executor 走 generic JSON.stringify 序列化（plain-string wire），
+  // 不给该对象任何结构化语义；这是契约 Y1 的真值。
+  it("contract Y1 counterexample (S7a): 非 bash 工具返回 {code,stdout,stderr} → plain-string JSON wire (generic)", async () => {
+    const bashLike: ToolDef = {
+      name: "bash_like",
+      description: "S7a 反例：非 bash 工具返回 bash 形态对象",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: () => ({ code: 0, stdout: "hi", stderr: "" }),
+    };
+    const exec = createExecutor(createRegistry([bashLike]));
+    const results = await exec.executeAll([
+      { id: "c1", name: "bash_like", input: {} },
+    ]);
+    assert.equal(results[0]!.kind, "ok");
+    const text = results[0]!.kind === "ok" && results[0]!.payload[0]!.text;
+    // Generic 序列化路径：plain-string 协议，无结构化语义。
+    assert.equal(text, JSON.stringify({ code: 0, stdout: "hi", stderr: "" }));
+  });
+});

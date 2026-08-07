@@ -234,6 +234,15 @@ function makeStreamingClientFactory(opts: {
   };
 }
 
+/** SDK content_block_delta with thinking_delta — 阶段二 T1 夹具。 */
+function thinkingDelta(text: string): unknown {
+  return {
+    type: "content_block_delta",
+    index: 0,
+    delta: { type: "thinking_delta", thinking: text },
+  };
+}
+
 function toolUseStart(name: string, id: string): unknown {
   return {
     type: "content_block_start",
@@ -315,7 +324,7 @@ describe("RealAnthropicAdapter — streaming arm normal flow (T3 #176, D1)", () 
     assert.deepEqual(events, [
       { type: "text_delta", text: "Hello" },
       { type: "text_delta", text: " world" },
-      { type: "tool_call_start", name: "echo" },
+      { type: "tool_call_start", name: "echo", id: "toolu_1" },
     ]);
     // — signal 直挂 RequestOptions 第 2 参（D1） —
     assert.equal(captured.length, 1);
@@ -949,5 +958,129 @@ describe("RealAnthropicAdapter — stream-under-race 专测 (T3 #176, 023 语义
     streamHandle!.pushText("late-after-timeout");
     assert.equal(emitted.length, 0);
     // 测试能走到这里 = finalMessage reject 已被 settle 链吞咽,无悬挂 promise。
+  });
+});
+
+// ─── 10. thinking_delta + tool_call_start.id (T1 阶段二扩展) ────────────────
+//
+// 阶段二 (plans/tui-stream-phase2.md T1): harness 协议扩 thinking_delta,
+// tool_call_start 加 id 字段 (供 T4 实时状态配对)。
+// - thinking_delta 仅从 content_block_delta (delta.type="thinking_delta") 透传;
+// - 空 thinking_delta 不 emit (对齐 text_delta 既有纪律);
+// - tool_call_start 必须带 block.id (anchor 给 postToolUse 配对)。
+
+describe("RealAnthropicAdapter — T1 streaming arm extension (phase 2)", () => {
+  it("thinking_delta content_block_delta → emit thinking_delta with text in wire order", async () => {
+    const final = wellShapedFinal({
+      text: "ok",
+      stop_reason: "end_turn",
+    });
+    const events: HarnessStreamEvent[] = [];
+    const client = makeStreamingClientFactory({
+      captured: [],
+      streamFactory: () =>
+        makeFakeStream({
+          ops: [
+            { kind: "streamEvent", event: thinkingDelta("先想 ") },
+            { kind: "streamEvent", event: thinkingDelta("后做") },
+            { kind: "text", text: "ok" },
+            { kind: "complete", message: final },
+          ],
+          partial: final,
+        }).stream,
+    });
+    const adapter = createRealAnthropicAdapter({
+      client: client as unknown as Parameters<
+        typeof createRealAnthropicAdapter
+      >[0]["client"],
+      model: "claude-stream-test",
+      maxTokens: 256,
+      stream: true,
+    });
+    await adapter.step(initState([userMsg("hi")]), {
+      onStream: (e) => events.push(e),
+    });
+    assert.deepEqual(
+      events.filter((e) => e.type === "thinking_delta"),
+      [
+        { type: "thinking_delta", text: "先想 " },
+        { type: "thinking_delta", text: "后做" },
+      ]
+    );
+  });
+
+  it("empty thinking_delta (thinking='') is NOT emitted — 对齐 text_delta 纪律", async () => {
+    const final = wellShapedFinal({
+      text: "ok",
+      stop_reason: "end_turn",
+    });
+    const events: HarnessStreamEvent[] = [];
+    const client = makeStreamingClientFactory({
+      captured: [],
+      streamFactory: () =>
+        makeFakeStream({
+          ops: [
+            { kind: "streamEvent", event: thinkingDelta("") },
+            { kind: "streamEvent", event: thinkingDelta("") },
+            { kind: "text", text: "ok" },
+            { kind: "complete", message: final },
+          ],
+          partial: final,
+        }).stream,
+    });
+    const adapter = createRealAnthropicAdapter({
+      client: client as unknown as Parameters<
+        typeof createRealAnthropicAdapter
+      >[0]["client"],
+      model: "claude-stream-test",
+      maxTokens: 256,
+      stream: true,
+    });
+    await adapter.step(initState([userMsg("hi")]), {
+      onStream: (e) => events.push(e),
+    });
+    assert.equal(
+      events.some((e) => e.type === "thinking_delta"),
+      false,
+      "空 thinking_delta 不引发 thinking_delta emit"
+    );
+  });
+
+  it("tool_call_start 携带 block.id — 与 postToolUse 配对的 anchor (T4 依赖)", async () => {
+    const final = wellShapedFinal({
+      text: "ok",
+      toolUse: { id: "toolu_42", name: "echo", input: { value: "x" } },
+      stop_reason: "end_turn",
+    });
+    const events: HarnessStreamEvent[] = [];
+    const client = makeStreamingClientFactory({
+      captured: [],
+      streamFactory: () =>
+        makeFakeStream({
+          ops: [
+            { kind: "text", text: "ok" },
+            { kind: "streamEvent", event: toolUseStart("echo", "toolu_42") },
+            { kind: "complete", message: final },
+          ],
+          partial: final,
+        }).stream,
+    });
+    const adapter = createRealAnthropicAdapter({
+      client: client as unknown as Parameters<
+        typeof createRealAnthropicAdapter
+      >[0]["client"],
+      model: "claude-stream-test",
+      maxTokens: 256,
+      stream: true,
+    });
+    await adapter.step(initState([userMsg("hi")]), {
+      onStream: (e) => events.push(e),
+    });
+    const toolStart = events.find((e) => e.type === "tool_call_start");
+    assert.deepEqual(toolStart, {
+      type: "tool_call_start",
+      name: "echo",
+      id: "toolu_42",
+    });
   });
 });

@@ -33,6 +33,9 @@ import { homedir } from "node:os";
 export interface TuiToolEvent {
   readonly conversationId: string;
   readonly toolName: string;
+  /** T4 (#175): tool_use_id — TUI 用此与流式 tool_call_start 配对转 ok/failed
+   * 摘要行;缺省时(host 未注入 / 旧版回放) 落回 legacy 字符串行追加。 */
+  readonly toolUseId?: string;
   /** ok | validation_failed | tool_not_found | execution_failed */
   readonly kind: string;
   readonly input: unknown;
@@ -102,6 +105,9 @@ export function buildTuiDeps(
         opts.onToolEvent({
           conversationId,
           toolName: result.name,
+          // T4 (#175): 把 tool_use_id 透传,TUI 据此与流式 tool_call_start 配对
+          // (result.toolUseId 是必填字段,见 permission/types.ts PostToolUseHook)。
+          toolUseId: result.toolUseId,
           kind: result.kind,
           input: result.input,
           message: result.message,

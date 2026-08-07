@@ -108,13 +108,27 @@ export function projectToolLines(
   return lines;
 }
 
-/** 运行时 postToolUse 事件的摘要行文案（turn 进行中逐条出现）。 */
+/** 运行时 postToolUse 事件的摘要行文案（turn 进行中逐条出现）。
+ *  SSOT — 完整运行（postToolUse 已完成 + legacy 字符串行）共用单源，
+ *  文本拼接全部落在此处,禁止复制 `${name} · ${detail} · ${status}` 模板。
+ *
+ *  字节规则:
+ *   - detail 非空 → `${toolName} · ${detail} · ${status}`
+ *   - detail 空   → `${toolName} · ${status}`（省去中间分隔符，避免 `name ·  · status` 残 留）
+ *
+ *  `detail` 可选 override: 装配层已完成事件携带 precomputed detail
+ *  (如 liveToolReducer 落地) 时, 通过显式 detail 跳过 summarizeToolCall 重算,
+ *  保证完成事件渲染与 reducer state.detail 字节一致。 */
 export function formatLiveToolEvent(opts: {
   readonly toolName: string;
   readonly input: unknown;
   readonly kind: string;
+  /** 显式 detail override;提供时跳过 summarizeToolCall 重算。 */
+  readonly detail?: string;
 }): string {
-  const { detail } = summarizeToolCall(opts.toolName, opts.input);
+  const detail =
+    opts.detail ?? summarizeToolCall(opts.toolName, opts.input).detail;
   const status = opts.kind === "ok" ? "ok" : "failed";
+  if (detail.length === 0) return `${opts.toolName} · ${status}`;
   return `${opts.toolName} · ${detail} · ${status}`;
 }

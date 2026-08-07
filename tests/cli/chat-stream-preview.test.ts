@@ -70,7 +70,11 @@ describe("processChatLine onStream forwarding (#179 T6)", () => {
         [
           { type: "text_delta", text: "should-not-observe-1" },
           { type: "text_delta", text: "should-not-observe-2" },
-          { type: "tool_call_start", name: "should-not-observe" },
+          {
+            type: "tool_call_start",
+            name: "should-not-observe",
+            id: "toolu_obs_1",
+          },
         ],
       ],
     });
@@ -108,7 +112,11 @@ describe("createStreamPreviewSink (#179 T6 TTY spinner replacement)", () => {
   it("emits a tool-name hint to stderr for tool_call_start", () => {
     const { err, writers } = captureStreams();
     const sink = createStreamPreviewSink(writers);
-    sink.feed({ type: "tool_call_start", name: "bash" });
+    sink.feed({
+      type: "tool_call_start",
+      name: "bash",
+      id: "toolu_bash_remaining",
+    });
     // First chunk clears the spinner, second carries the tool hint.
     const joined = err.join("");
     assert.ok(joined.includes("bash"));
@@ -127,7 +135,7 @@ describe("createStreamPreviewSink (#179 T6 TTY spinner replacement)", () => {
     });
     // Must not throw.
     sink.feed({ type: "text_delta", text: "x" });
-    sink.feed({ type: "tool_call_start", name: "t" });
+    sink.feed({ type: "tool_call_start", name: "t", id: "toolu_t_1" });
   });
 
   it("#195 regression: multi-line streamed text is not double-printed", () => {
@@ -157,7 +165,11 @@ describe("createStreamPreviewSink (#179 T6 TTY spinner replacement)", () => {
     assert.equal(sink.textStreamed, false);
     sink.feed({ type: "text_delta", text: "a" });
     assert.equal(sink.textStreamed, true);
-    sink.feed({ type: "tool_call_start", name: "bash" });
+    sink.feed({
+      type: "tool_call_start",
+      name: "bash",
+      id: "toolu_bash_remaining",
+    });
     assert.equal(
       sink.textStreamed,
       true,

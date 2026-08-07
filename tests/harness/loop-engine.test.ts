@@ -1686,7 +1686,7 @@ describe("T4 onStream pass-through (D3)", () => {
     const executor = createExecutor(registry);
     // 两个模型回合各自 emit:turn1 = tool_call_start,turn2 = text_delta×2。
     const expected: ReadonlyArray<HarnessStreamEvent> = [
-      { type: "tool_call_start", name: "echo" },
+      { type: "tool_call_start", name: "echo", id: "t1" },
       { type: "text_delta", text: "hel" },
       { type: "text_delta", text: "lo" },
     ];
@@ -1699,7 +1699,7 @@ describe("T4 onStream pass-through (D3)", () => {
         assistantResult({ texts: ["hello"], toolCalls: [] }),
       ],
       streamEventsByStep: [
-        [{ type: "tool_call_start", name: "echo" }],
+        [{ type: "tool_call_start", name: "echo", id: "t1" }],
         [
           { type: "text_delta", text: "hel" },
           { type: "text_delta", text: "lo" },
@@ -1904,5 +1904,117 @@ describe("loop engine T4 #160: RunResult.lastUsage (ADR-0008 Decision 5)", () =>
     assert.equal(result.stopReason, "protocolError");
     assert.ok(result.lastUsage !== null);
     assert.deepEqual(result.lastUsage, usage1);
+  });
+});
+
+/**
+ * #224 W1: LoopEngineDeps.promptTools 注入缝(S2 行为中性)。
+ *
+ * 用 spy-adapter 包住 stub-model,记录每次 step 收到的 request.tools:
+ *   - 未传 promptTools → adapter.step 收到 registry.list()(同顺同内容);
+ *   - 传 subset promptTools → adapter.step 收到的就是该数组。
+ */
+describe("loop engine #224 W1: promptTools injection seam", () => {
+  it("promptTools absent -> tools deep-equal registry.list() (same order + content)", async () => {
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const noop: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([echo, noop]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const capturedTools: unknown[] = [];
+    const spyAdapter = Object.freeze({
+      ...model,
+      step: async (
+        state: LoopState,
+        request: { tools?: unknown }
+      ): Promise<AssistantTurnResult> => {
+        capturedTools.push(request.tools);
+        return model.step(state, request);
+      },
+    });
+    const { result } = await run("go", {
+      adapter: spyAdapter,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "completed");
+    assert.equal(capturedTools.length, 1);
+    assert.deepEqual(
+      capturedTools[0],
+      reg.list(),
+      "tools must deep-equal registry.list() when promptTools is absent"
+    );
+  });
+
+  it("promptTools provided -> adapter.step receives exactly that array", async () => {
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const noop: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([echo, noop]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    // subset 数组:只暴露 echo,不暴露 noop(模拟"当前 turn 应进 prompt 的工具集")。
+    const subsetTools: ReadonlyArray<ToolDef> = [echo];
+    const capturedTools: unknown[] = [];
+    const spyAdapter = Object.freeze({
+      ...model,
+      step: async (
+        state: LoopState,
+        request: { tools?: unknown }
+      ): Promise<AssistantTurnResult> => {
+        capturedTools.push(request.tools);
+        return model.step(state, request);
+      },
+    });
+    const { result } = await run("go", {
+      adapter: spyAdapter,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+      promptTools: () => subsetTools,
+    });
+    assert.equal(result.stopReason, "completed");
+    assert.equal(capturedTools.length, 1);
+    assert.deepEqual(
+      capturedTools[0],
+      subsetTools,
+      "tools must be exactly the promptTools() array when provided"
+    );
+    // 与 registry.list() 不同:验证注入确被消费,而非回退全量。
+    assert.notDeepEqual(capturedTools[0], reg.list());
   });
 });

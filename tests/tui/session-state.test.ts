@@ -17,6 +17,7 @@ import {
   switchedTo,
   turnFinished,
   turnStarted,
+  userMessageEchoed,
 } from "../../src/tui/session-state.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
@@ -142,5 +143,49 @@ describe("session-state: 三态转换表（Q1a）", () => {
     });
     expect(done.runState).toBe("idle");
     expect(done.lastStopReason).toBe("cancelled");
+  });
+});
+
+describe("session-state: userMessageEchoed (T2 即时回显)", () => {
+  it("正常追加：messages 末尾新增 user text 消息，其余字段不变", () => {
+    const draft = createDraftSession();
+    const echoed = userMessageEchoed(draft, "你好");
+    expect(echoed.messages).toHaveLength(1);
+    expect(echoed.messages[0]).toEqual({
+      role: "user",
+      content: [{ type: "text", text: "你好" }],
+    });
+    // 其余会话字段原样保留。
+    expect(echoed.conversationId).toBe(draft.conversationId);
+    expect(echoed.turnCount).toBe(draft.turnCount);
+    expect(echoed.runState).toBe(draft.runState);
+  });
+
+  it("空文本不追加（返回原状态）", () => {
+    const draft = createDraftSession();
+    expect(userMessageEchoed(draft, "")).toBe(draft);
+    expect(userMessageEchoed(draft, "   ")).toBe(draft);
+    expect(draft.messages).toHaveLength(0);
+  });
+
+  it("冻结纪律：返回新冻结状态，不 mutate 原状态", () => {
+    const draft = createDraftSession();
+    const echoed = userMessageEchoed(draft, "冻结测试");
+    expect(Object.isFrozen(echoed)).toBe(true);
+    expect(Object.isFrozen(echoed.messages)).toBe(true);
+    expect(Object.isFrozen(echoed.messages[0]!)).toBe(true);
+    // 原状态未被突变。
+    expect(draft.messages).toHaveLength(0);
+  });
+
+  it("在既有消息后追加（不覆盖历史）", () => {
+    const started = turnStarted(createDraftSession());
+    const first = userMessageEchoed(started, "第一条");
+    const second = userMessageEchoed(first, "第二条");
+    expect(second.messages).toHaveLength(2);
+    expect(second.messages[1]).toEqual({
+      role: "user",
+      content: [{ type: "text", text: "第二条" }],
+    });
   });
 });

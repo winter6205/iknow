@@ -148,6 +148,10 @@ export async function buildHarnessEngine(
     registry: registryTools,
     maxTurns: 6,
     timeoutMs: env.llm.timeoutMs,
+    // #224 注入装配 — 把 reg.visibleSchemas（含 discovered lazy 工具）注入到
+    // promptTools；fallback 路径（缺省回退 deps.registry.list()）由 loop-engine
+    // 处理；本期 visibleSchemas ≡ 全量（无 lazy 工具），字节级零变化。
+    promptTools: reg.visibleSchemas,
     // #196 IKNOW T4:每 turn 装配 identity/soul/user_profile/bootstrap + memory_layer。
     // deps.system 注入缝装配点(loop-engine 每 turn 调 deps.system?.() 透传
     // adapter.step request.system)。#194 T6:双层系统缝 — deps.system 始终挂

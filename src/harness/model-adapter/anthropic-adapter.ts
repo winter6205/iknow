@@ -540,12 +540,30 @@ function wireStreamEvents(
     safeEmit({ type: "text_delta", text: textDelta });
   });
   stream.on("streamEvent", (event: MessageStreamEvent) => {
+    // 阶段二扩展:thinking_delta 从 content_block_delta 路径透传
+    // (thinking 块专属 delta,不与 text_delta 路径混淆 — SDK 对 text 块用
+    // `on("text")` 短路,thinking 块只在 content_block_delta 流到)。
+    if (event.type === "content_block_delta") {
+      const delta = (event as { delta?: { type?: string; thinking?: string } })
+        .delta;
+      if (delta?.type !== "thinking_delta") return;
+      const text = delta.thinking ?? "";
+      if (text === "") return; // empty delta 不 emit — 对齐 text_delta 纪律
+      safeEmit({ type: "thinking_delta", text });
+      return;
+    }
     if (event.type !== "content_block_start") return;
     const block = event.content_block;
     // D1 最小集:只 tool_use 翻译为 tool_call_start;server_tool_use 等其它
     // 内容块不在 v1 范围内(interpretMessage 也会因不支持类型 ProtocolError)。
     if (block.type !== "tool_use") return;
-    safeEmit({ type: "tool_call_start", name: block.name });
+    // 阶段二扩展:tool_use block.id 透传,host 据此与 postToolUse 完成事件
+    // 配对(T4 实时状态依赖);id 缺失时回退空串(向后兼容 legacy)。
+    safeEmit({
+      type: "tool_call_start",
+      name: block.name,
+      id: typeof block.id === "string" ? block.id : "",
+    });
   });
 }
 

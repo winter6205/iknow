@@ -1,7 +1,7 @@
 /**
  * tests/tui/deps-tools.test.ts
  *
- * Tracer bullet: 锁定 TUI 入口工具集必须与 buildHarnessEngine 对齐(10 件)。
+ * Tracer bullet: 锁定 TUI 入口工具集必须与 buildHarnessEngine 对齐(11 件)。
  * 失败先行(failing-test-first):重构前是红的(只有 6 件),重构后变绿。
  * 任何入口漏注册的工具都让此测试立即报警。
  */
@@ -39,7 +39,8 @@ function makeBundle(
   return { env } as unknown as RuntimeBundle;
 }
 
-// #194 T6 (Layer 4 baseline):TUI 与 build-engine 对齐 → 10 件(含 memory 工具)。
+// #194 T6 (Layer 4 baseline):TUI 与 build-engine 对齐 → 10 件(含 memory);
+// #224 末尾追加 tool_search(11 件)。
 const EXPECTED_TOOLSET = [
   "bash",
   "read_file",
@@ -51,10 +52,11 @@ const EXPECTED_TOOLSET = [
   "web_search",
   "memory_recall",
   "memory_save",
+  "tool_search",
 ];
 
-describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(10 件)", () => {
-  it("装配出完整 10 件工具(含 web_fetch + web_search + memory_recall + memory_save)", () => {
+describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(11 件)", () => {
+  it("装配出完整 11 件工具(含 web_fetch + web_search + memory_recall + memory_save + tool_search)", () => {
     const deps = buildTuiDeps(makeBundle(), { askUser: createNoAskUser() });
     const names = deps.registry
       .list()

@@ -36,7 +36,12 @@ import type {
   TokenUsage,
   Transition,
 } from "./model-adapter/types.js";
-import type { Executor, Registry, ToolExecutionResult } from "./tools/types.js";
+import type {
+  Executor,
+  Registry,
+  ToolDef,
+  ToolExecutionResult,
+} from "./tools/types.js";
 import type { CancelKind, LoopTrace, TurnTrace } from "./loop-trace.js";
 import { computeTotals } from "./loop-trace.js";
 import type { TraceErrorType, TraceService } from "./trace/index.js";
@@ -130,6 +135,13 @@ export interface LoopEngineDeps {
   readonly toolTimeoutMs?: number;
   /** 064 T4: optional TraceService injection; byte-identical when absent (criterion 5/17) */
   readonly trace?: TraceService;
+  /**
+   * #224 注入缝 — 装配层注入"当前 turn 应进 prompt 的工具集"。
+   * 每轮模型调用前由 loop-engine 通过 deps.promptTools?.() 取值；
+   * 返回 ReadonlyArray<ToolDef>(Foundation 工具描述符形态)。
+   * 缺省回退 deps.registry.list()(行为中性,守 S2 byte-identical)。
+   */
+  readonly promptTools?: () => ReadonlyArray<ToolDef>;
 }
 
 /**
@@ -255,7 +267,9 @@ function createRaceOutcome(opts: {
       .step(
         opts.raceOpts.state,
         {
-          tools: opts.raceOpts.deps.registry.list(),
+          tools:
+            opts.raceOpts.deps.promptTools?.() ??
+            opts.raceOpts.deps.registry.list(),
           // #196 IKNOW T1:system 字段条件附加 — undefined 时不发
           // (byte-identical 既有 behavior,守 014 附加原则)。
           ...(opts.raceOpts.systemText !== undefined

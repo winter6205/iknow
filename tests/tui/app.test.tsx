@@ -600,83 +600,59 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     LONG_TIMEOUT
   );
 
-  // 任务 A 行级：鼠标滚轮 SGR 序列 → scrollRows 调整，顶部指示出现。
+  // #189 行为反转回归保险：app 已移除鼠标捕获（DECSET 1000/1006），鼠标
+  // 滚轮交由终端原生 scrollback 接管。在 render 前就挂 raw 监听，断言
+  // stdout 从挂载到一次交互全过程中从未收到 DECSET 启用序列
+  // \x1b[?1000h / \x1b[?1006h（旧实现会在挂载 useEffect 里写）。
   it(
-    "任务 A 行级：SGR 滚轮序列 → 行级滚动指示出现；多次上滚累加行数",
+    "#189：鼠标截胡已移除 —— stdout 不写 DECSET 1000/1006 启用序列",
     async () => {
-      // 用长文本撑满 viewport，滚轮才有滚动余量
-      const longBody = (tag: string) =>
-        `${tag} 行1内容占位\n${tag} 行2内容占位\n${tag} 行3内容占位\n${tag} 行4内容占位\n${tag} 行5内容占位\n${tag} 行6内容占位`;
-      const app = makeApp([
-        assistantResult({ texts: [longBody("a0")] }),
-        assistantResult({ texts: [longBody("a1")] }),
-        assistantResult({ texts: [longBody("a2")] }),
-        assistantResult({ texts: [longBody("a3")] }),
-        assistantResult({ texts: [longBody("a4")] }),
-      ]);
-      await app.ready();
-      await waitFor(() => app.lastOutput().includes("iknow"), 8000, "startup");
-
-      // 发 5 条长消息，保证聊天区域有内容可滚（rows > viewport）
-      for (let i = 0; i < 5; i++) {
-        await app.type(`m${i} 第一行 m${i} 第二行 m${i} 第三行\r`);
-        await waitFor(
-          () => app.bridge.inflight.ids().size === 0,
-          8000,
-          `m${i}-turn-done`
-        );
-        await delay(50);
+      const bridge = createTuiBridge({
+        dataDir: baseDir,
+        deps: makeDeps([assistantResult({ texts: ["no-mouse"] })]),
+        inflight: createInflightRegistry(),
+      });
+      const askBridge = createTuiAskUserBridge();
+      const toolEventSink = createToolEventSink();
+      const rawWrites: string[] = [];
+      // render 前挂 raw 监听（保留 ESC 序列，不用 strip）
+      const rawListener = (chunk: Buffer | string): void =>
+        rawWrites.push(typeof chunk === "string" ? chunk : chunk.toString());
+      stdout.on("data", rawListener);
+      const instance = render(
+        <TuiApp
+          bridge={bridge}
+          askBridge={askBridge}
+          toolEventSink={toolEventSink}
+          cwd="/tmp/proj"
+          dataDir={baseDir}
+        />,
+        {
+          stdout,
+          stdin,
+          exitOnCtrlC: false,
+          interactive: true,
+          kittyKeyboard: { mode: "disabled" },
+        }
+      );
+      instances.push(instance);
+      await delay(400); // 等 mount + useEffect（旧代码在此阶段写 DECSET）
+      await waitFor(
+        () => strip(rawWrites.join("")).includes("iknow"),
+        8000,
+        "startup"
+      );
+      // 触发一次提交，覆盖交互路径（旧代码 stdin.on('data') 常驻监听）
+      for (const ch of "hi\r") {
+        stdin.write(ch);
+        await delay(10);
       }
-      for (let i = 0; i < 5; i++) {
-        await waitFor(
-          () => app.lastOutput().includes(`m${i}`),
-          8000,
-          `m${i}-rendered`
-        );
-      }
-
-      // 写入 SGR 滚轮上滚序列（每 tick = WHEEL_STEP_ROWS=3 行）
-      // \x1b[<64;10;5M
-      stdin.write("\x1b[<64;10;5M");
+      await waitFor(() => bridge.inflight.ids().size === 0, 8000, "turn-done");
       await delay(300);
-      // 顶部 dim 指示出现，scrollRows = 3
-      // 用最近帧 slice(-1500) 而非累积 buffer，避免被旧帧干扰
-      await waitFor(
-        () => app.lastOutput().slice(-1500).includes("3 行历史"),
-        8000,
-        "wheel-up-indicator-1"
-      );
-
-      // 再写一次上滚 → scrollRows = 6
-      stdin.write("\x1b[<64;10;5M");
-      await delay(300);
-      await waitFor(
-        () => app.lastOutput().slice(-1500).includes("6 行历史"),
-        8000,
-        "wheel-up-indicator-2"
-      );
-
-      // 写一次下滚 → scrollRows = 3
-      stdin.write("\x1b[<65;10;5M");
-      await delay(300);
-      await waitFor(
-        () => app.lastOutput().slice(-1500).includes("3 行历史"),
-        8000,
-        "wheel-down-indicator"
-      );
-
-      // 写两次下滚（多余）→ scrollRows = max(0, 3-6) = 0
-      stdin.write("\x1b[<65;10;5M");
-      stdin.write("\x1b[<65;10;5M");
-      await delay(500);
-      // scrollRows=0 → 最新帧指示消失。看最近 200 字节（够一帧 + 余量），
-      // 避免被旧帧「3 行历史」残留字串干扰。lastOutput 是累积 buffer，
-      // 旧帧仍在历史里，所以不能 slice(-1500)。
-      await waitFor(
-        () => !app.lastOutput().slice(-200).includes("行历史"),
-        8000,
-        "wheel-down-back-to-bottom"
-      );
+      stdout.removeListener("data", rawListener);
+      const joined = rawWrites.join("");
+      expect(joined).not.toContain("\x1b[?1000h");
+      expect(joined).not.toContain("\x1b[?1006h");
     },
     LONG_TIMEOUT
   );
@@ -740,15 +716,15 @@ describe("TuiApp 端到端（tracer bullet）", () => {
 
   // #189 Spec Low：`initialSession`（`iknow tui <id>` resume）恢复路径未测。
   // 挂载即生成既有会话内容，行级滚动应从 scrollRows=0（auto-follow 底）
-  // 起步：初始无「行历史」顶部指示；模拟滚轮上滚后指示出现且计数正确。
+  // 起步：初始无「行历史」顶部指示；PgUp 后指示出现且 clamp 到 maxScroll。
   it(
-    "Spec Low：initialSession resume 从 scrollRows=0 起步；滚轮上滚后指示出现",
+    "Spec Low：initialSession resume 从 scrollRows=0 起步；PgUp 后指示出现",
     async () => {
       const { attachSession } = await import("../../src/tui/session-state.js");
       // 新 clamp：budget=24。需 messageCursor > 24 才能滚；user(2) +
       // assistant(content+2) > 24 → content ≥ 21。用 24 行：messageCursor=28，
-      // maxScroll=4。两轮 wheel(+6) → clamp 4 →「↑ 4 行历史」，滚到顶后
-      // resumed-q 重新进入窗口。
+      // maxScroll=4。viewportRows ≈ 26 → PgUp step = floor(26/2)=13，clamp 到
+      // maxScroll=4 →「↑ 4 行历史」，滚到顶后 resumed-q 重新进入窗口。
       const longBody = Array.from(
         { length: 24 },
         (_, i) => `A0 resume 内容第${i + 1}行`
@@ -804,15 +780,13 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       const before = lastOutput();
       expect(before).not.toContain("行历史");
 
-      // 滚轮上滚 ×2（SGR 上滚，每 tick = 3 行；累加 6 被 clamp 到 maxScroll=4）
-      stdin.write("\x1b[<64;10;5M");
-      await delay(300);
-      stdin.write("\x1b[<64;10;5M");
+      // PgUp → scrollRows += 13，clamp 到 maxScroll=4 →「↑ 4 行历史」
+      stdin.write("[5~"); // PgUp ANSI sequence
       await delay(300);
       await waitFor(
         () => lastOutput().slice(-1500).includes("4 行历史"),
         8000,
-        "resume-wheel-up"
+        "resume-pgup"
       );
       // 滚到顶 → 顶部 user 内容再次进入窗口
       expect(lastOutput().slice(-1500)).toContain("resumed-q");

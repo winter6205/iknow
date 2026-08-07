@@ -122,3 +122,28 @@ export function turnFinished(
 export function canInterrupt(session: TuiSessionState): boolean {
   return session.runState === "running-fg";
 }
+
+/**
+ * T2 (#175): 用户消息即时回显 — 提交后、任何 delta 到达前把用户文本追加进
+ * messages,让对话立刻可见(不必等 turn 结束重读文件)。
+ *
+ * 为什么在 turnStarted 之后调用:runState 保持 running-fg(即时回显不改变
+ * 会话运行态),且不改变 conversationId / turnCount 等其余字段。turn 结束 /
+ * abort 后由落盘 messages 原子替换(中间态自动消失)。
+ *
+ * 空文本(trim 后)不追加,返回原状态 — 防空白输入污染 messages。
+ */
+export function userMessageEchoed(
+  session: TuiSessionState,
+  text: string
+): TuiSessionState {
+  if (text.trim().length === 0) return session;
+  const userMessage: AnthropicNativeMessage = Object.freeze({
+    role: "user",
+    content: Object.freeze([{ type: "text" as const, text }]),
+  });
+  return Object.freeze({
+    ...session,
+    messages: Object.freeze([...session.messages, userMessage]),
+  });
+}

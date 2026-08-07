@@ -13,11 +13,10 @@
  *  - `chatScroll` 现为行数（>0 = 向上滚多少行），不再是消息计数；
  *  - 视口高度 = 终端 rows - banner - 状态栏 - 输入框 - 槽位，动态算；
  *  - PgUp = 视口一半向下滚，PgDn = 视口一半向上滚，Home = 顶，End = 0；
- *  - 鼠标滚轮（enableMouseScroll + parseMouseEvents）每个 tick = scrollRows
- *    步长（默认 3，可调 WHEEL_STEP_ROWS），auto-follow 在 turn 完成 / new
- *    会话触发。
+ *  - 鼠标滚轮不再由 app 截胡（跟随 upstream：移除 DECSET 1000/1006 捕获），
+ *    交给终端原生 scrollback 翻历史；auto-follow 在 turn 完成 / new 会话触发。
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { ReactElement } from "react";
 import { Box, Text, useApp, useInput, useWindowSize } from "ink";
@@ -33,6 +32,7 @@ import {
   switchedTo,
   turnFinished,
   turnStarted,
+  userMessageEchoed,
   type TuiSessionState,
   type TuiView,
 } from "./session-state.js";
@@ -43,8 +43,9 @@ import {
   slashSuggestions,
   type TuiSlashCommand,
 } from "./slash.js";
-import { formatLiveToolEvent } from "./tool-summary.js";
+import { formatLiveToolEvent, summarizeToolCall } from "./tool-summary.js";
 import type { TuiToolEvent } from "./deps.js";
+import { liveToolReduce, type LiveToolRun } from "./live-tool-state.js";
 import { ChatView } from "./chat-view.js";
 import type { StreamDraft } from "../cli/stream-draft.js";
 import { createStreamDraft } from "../cli/stream-draft.js";
@@ -55,15 +56,7 @@ import { tuiPalette } from "./theme.js";
 import { clipOneLine } from "./text.js";
 import { VERSION } from "./version.js";
 import { writeIknowState } from "../harness/identity/index.js";
-import { useStdout, useStdin } from "ink";
-import {
-  enableMouseScroll,
-  isSgrMouseSequence,
-  parseMouseEvents,
-} from "./mouse.js";
-
-/** 鼠标滚轮每个 tick 的行数（每滚一格 = 3 物理行）。 */
-const WHEEL_STEP_ROWS = 3;
+import { isSgrMouseSequence } from "./mouse.js";
 
 export interface TuiToolEventSink {
   readonly emit: (event: TuiToolEvent) => void;
@@ -104,8 +97,6 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   const { bridge, askBridge, toolEventSink } = props;
   const pal = tuiPalette;
   const { exit } = useApp();
-  const { stdout } = useStdout();
-  const { stdin } = useStdin();
   const { columns, rows: rawRows } = useWindowSize();
   const cols = Math.max(columns ?? 80, 40);
   const rows = Math.max(rawRows ?? 24, 10);
@@ -122,12 +113,18 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   const [liveToolLines, setLiveToolLines] = useState<
     Record<string, ReadonlyArray<string>>
   >({});
+  // T4 (#175): 结构化工具调用实时状态 — 按 conversationId 持有 LiveToolRun[];
+  // tool_call_start 追加 "running";postToolUse 按 tool_use_id 配对转 ok/failed;
+  // 缺 tool_use_id 的 postToolUse 事件落回 liveToolLines(legacy 字符串行)。
+  const [liveToolRuns, setLiveToolRuns] = useState<
+    Record<string, ReadonlyArray<LiveToolRun>>
+  >({});
   const [pendingQuit, setPendingQuit] = useState(false);
   // T6 (D5): thinking 折叠面板展开态 — 全局运行态,会话重启回退折叠(/thinking 切换)。
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
   // 任务 A 行级：聊天区域行级滚动偏移（0 = 底/auto-follow，>0 = 向上滚多少
-  // 物理行）。新 turn 完成 / new 会话 → 0；PgUp/PgDn/Home/End + 鼠标滚轮
-  // 调整（与 PromptInput 的 ↑/↓ 不冲突，避键）。
+  // 物理行）。新 turn 完成 / new 会话 → 0；PgUp/PgDn/Home/End 调整
+  // （与 PromptInput 的 ↑/↓ 不冲突，避键）；鼠标滚轮交由终端原生 scrollback。
   const [chatScroll, setChatScroll] = useState(0);
 
   // T4 (#175): 流式草稿单一实例（单会话 in-flight 即可；多会话并发时只有
@@ -136,26 +133,33 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   // 用返新值，避免无限 re-render；我们用 useState 持有 masked 字符串）。
   const [streamDraft, setStreamDraft] = useState<StreamDraft | null>(null);
   const [draftsMasked, setDraftsMasked] = useState<string>("");
+  // T3 (#175): thinking 流式草稿 masked 文本(独立于 answer draft)。
+  const [thinkingDraftMasked, setThinkingDraftMasked] = useState<string>("");
   // 当 streamDraft 切换时重订阅；listener 内现取 masked() 推 state。
   useEffect(() => {
     if (streamDraft === null) {
       setDraftsMasked("");
+      setThinkingDraftMasked("");
       return undefined;
     }
     const unsubscribe = streamDraft.subscribe(() => {
-      setDraftsMasked(streamDraft.masked());
+      // T5 (#175): 订阅回调包 React.startTransition — 流式 high-frequency
+      // 更新标记为低优先级 transition,React 可中断并让出主线程(输入框 /
+      // 键盘保持响应),与前端的 50ms 批处理构成双端防御。
+      startTransition(() => {
+        setDraftsMasked(streamDraft.masked());
+        // T3: thinking 与 answer 同源订阅,一次 notify 双推。
+        setThinkingDraftMasked(streamDraft.thinkingMasked());
+      });
     });
     // 立即同步一次初始值（subscribe 不回调，append 之前 draft 为空也无所谓）
     setDraftsMasked(streamDraft.masked());
+    setThinkingDraftMasked(streamDraft.thinkingMasked());
     return unsubscribe;
   }, [streamDraft]);
 
   const aborters = useRef(new Map<string, AbortController>());
   const inflightPromises = useRef(new Set<Promise<unknown>>());
-  // view 进 ref 让 mouse listener 等"常驻 + 内过滤"effect 不把它写进 deps，
-  // 避免视图切换瞬间 unregister→register 导致滚轮事件丢失。
-  const viewRef = useRef<TuiView>("chat");
-  viewRef.current = view;
   const [listEntries, setListEntries] = useState<ReadonlyArray<TuiListEntry>>(
     []
   );
@@ -190,10 +194,30 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     return Math.max(5, rows - bannerLineCount - reserved);
   }, [rows, bannerLineCount, notice]);
 
-  // 工具事件订阅：按 conversationId 归并入 liveToolLines。
+  // 工具事件订阅：T4 (#175) 优先按 tool_use_id 配对入结构化运行状态;
+  // 缺 toolUseId 时落回 legacy 字符串行追加(向后兼容)。
   useEffect(
     () =>
       toolEventSink.subscribe((event) => {
+        if (event.toolUseId !== undefined) {
+          const { detail } = summarizeToolCall(event.toolName, event.input);
+          setLiveToolRuns((prev) => ({
+            ...prev,
+            [event.conversationId]: liveToolReduce(
+              prev[event.conversationId] ?? [],
+              {
+                kind: "post_tool_use",
+                id: event.toolUseId!,
+                name: event.toolName,
+                input: event.input,
+                ok: event.kind === "ok",
+                detail,
+                message: event.message,
+              }
+            ),
+          }));
+          return;
+        }
         setLiveToolLines((prev) => ({
           ...prev,
           [event.conversationId]: [
@@ -209,37 +233,10 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     [toolEventSink]
   );
 
-  // 鼠标滚轮支持（任务 A 行级）：挂载时 DECSET 1000/1006 启用 SGR 滚轮
-  // 报告，stdin.data 监听 parseMouseEvents，滚轮事件 → setChatScroll。
-  // 卸载时写 DECRST 关闭序列（必须！否则残留 mouse 报告模式污染终端）。
-  // 关闭序列同时关 stdin listener。
-  useEffect(() => {
-    const disable = enableMouseScroll(stdout);
-    // mouse listener 走 stdin.on('data')：实测 pty + ink setRawMode 后 'data'
-    // 事件仍正常触发（ink 用 'readable' 流式读取，不消费 data 事件），与
-    // ink useInput 并行触发不冲突。之前 hook `internal_eventEmitter` 是
-    // ink 私有 API（StdinContext.Props 下划线前缀），跨 ink 版本不稳定，
-    // 改回 stdlib NodeJS.ReadStream 'data'（公开 API）。SGR 泄漏防护由
-    // PromptInput useInput 守卫承担（匹配剥 ESC 后形态 "[<数字;数字;数字M/m"，
-    // 见 use-input.js:97-99 input.slice(1) 剥 ESC）。
-    const onData = (chunk: Buffer | string): void => {
-      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-      const { wheelUp, wheelDown } = parseMouseEvents(text);
-      if (wheelUp === 0 && wheelDown === 0) return;
-      // 视图过滤不放在 deps，避免视图切换瞬间 unregister->register 导致
-      // 滚轮事件丢失；常驻监听 + listener 内用 viewRef 过滤即可。
-      if (viewRef.current !== "chat") return;
-      setChatScroll((s) => {
-        const delta = (wheelUp - wheelDown) * WHEEL_STEP_ROWS;
-        return Math.max(0, s + delta);
-      });
-    };
-    stdin?.on("data", onData);
-    return () => {
-      stdin?.off("data", onData);
-      disable();
-    };
-  }, [stdin, stdout]);
+  // 鼠标滚轮已不再由 app 截胡：跟随 upstream（`frontend/terminal` 无任何
+  // DECSET 写入，ink 7.x `alternateScreen: false` 默认）让终端原生
+  // scrollback 接管滚轮翻历史。键盘 PgUp/PgDn/Home/End 行级滚动保留，
+  // 与 native scrollback 并存不冲突。
 
   const active = sessions[activeKey] ?? initial;
   const askPending = askBridge.pending();
@@ -287,9 +284,15 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     }
     const targetId = conversationId;
     if (targetId === undefined) return;
+    // T2 (#175): 提交即即时回显用户消息 — turnStarted 后立刻把用户文本追加进
+    // messages,任何 delta 到达前对话已可见。turn 结束/abort 后由落盘 messages
+    // 原子替换(中间态自动消失)。
     setSessions((prev) =>
       prev[targetId]
-        ? { ...prev, [targetId]: turnStarted(prev[targetId]!) }
+        ? {
+            ...prev,
+            [targetId]: userMessageEchoed(turnStarted(prev[targetId]!), text),
+          }
         : prev
     );
     const controller = new AbortController();
@@ -311,8 +314,19 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     const draft = createStreamDraft();
     setStreamDraft(draft);
     const onStream = (event: HarnessStreamEvent): void => {
-      // 与 chat 侧一致：仅 text_delta 进草稿；tool_call_start 留 v1+。
+      // T3 (#175): thinking_delta 进 thinking buffer; text_delta 进 answer buffer。
       draft.append(event);
+      // T4 (#175): tool_call_start 追加结构化"运行中"条目(实时状态)。
+      if (event.type === "tool_call_start") {
+        setLiveToolRuns((prev) => ({
+          ...prev,
+          [targetId]: liveToolReduce(prev[targetId] ?? [], {
+            kind: "tool_call_start",
+            id: event.id,
+            name: event.name,
+          }),
+        }));
+      }
     };
     try {
       const resp = await bridge.postMessage({
@@ -352,6 +366,8 @@ export function TuiApp(props: TuiAppProps): ReactElement {
         };
       });
       setLiveToolLines((prev) => ({ ...prev, [targetId]: [] }));
+      // T4: turn 结束清空结构化实时工具状态(落盘后终稿 tool_use blocks 接管)。
+      setLiveToolRuns((prev) => ({ ...prev, [targetId]: [] }));
       // 任务 A：新 turn 完成 → 滚动重置为底部（auto-follow）
       setChatScroll(0);
       if (stopReason === "cancelled") {
@@ -457,11 +473,6 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     }
     // 等待全部 in-flight turn 落盘（退出不打断后台 turn，Q1a）。
     await Promise.allSettled([...inflightPromises.current]);
-    // 防御性：直接同步写 DECRST 关 mouse 序列，不依赖 React effect cleanup。
-    // 真实终端残留 mouse 报告模式会污染粘贴/选择/红点定位。
-    if (stdout.isTTY) {
-      stdout.write("\x1b[?1000l\x1b[?1006l");
-    }
     exit();
   }
 
@@ -564,10 +575,10 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   // 步长 = viewportRows / 2（向下取整，最小 1）。ChatView 内部按
   // totalRows 兜底 clamp。仅在 chat 视图下生效（list 视图由 ListView 独占）。
   useInput((input, key) => {
-    // 鼠标滚轮 SGR 序列：app 层 mouse listener（stdin.on('data')）已消费
-    // 滚轮事件；此处 useInput 也会收到（ink useInput 前 slice(1) 剥 ESC，
-    // input 是 "[<数字;数字;数字M/m" 形态），用 isSgrMouseSequence 守卫丢弃，
-    // 避免后续 Ctrl+C 等守卫误判 + PromptInput 泄漏。
+    // 鼠标 SGR 序列守卫（保留，防御性）：app 已不做鼠标捕获，但若终端
+    // 仍以 SGR 编码上报鼠标事件（ink useInput 前 slice(1) 剥 ESC，input
+    // 是 "[<数字;数字;数字M/m" 形态），用 isSgrMouseSequence 丢弃，避免
+    // 污染后续 Ctrl+C 等守卫与输入链。
     if (isSgrMouseSequence(input)) return;
     if (key.ctrl && input === "c") {
       if (canInterrupt(active)) {
@@ -627,9 +638,15 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           session={active}
           cols={cols}
           draftsMasked={draftsMasked}
+          thinkingDraftMasked={thinkingDraftMasked}
           liveToolLines={
             active.conversationId
               ? (liveToolLines[active.conversationId] ?? [])
+              : []
+          }
+          liveToolRuns={
+            active.conversationId
+              ? (liveToolRuns[active.conversationId] ?? [])
               : []
           }
           askLine={

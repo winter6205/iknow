@@ -43,13 +43,17 @@ export type IdentitySegmentKind = (typeof IKNOW_ASSEMBLY_ORDER)[number];
 
 /** IKNOW-196 装配上下文 (build-engine 每 turn 注入)。
  *  #194 T6:新增 `memoryEnabled` 与 `memoryResolver` 字段,memory_layer 段据
- *  此开关降级:enabled=false → 跳过;resolver 抛错 → warn + 跳过。 */
+ *  此开关降级:enabled=false → 跳过;resolver 抛错 → warn + 跳过。
+ *  #224 工具名录段注入缝(本期空壳):提供时且返回非空名录才追加一个
+ *  "Available tools:" 名录段;缺席或返回 undefined/空数组 → 跳过,
+ *  输出与无此缝完全一致 (KV 缓存字节级稳定契约,字段缺席 → 不写空 system)。 */
 export interface AssemblyContext {
   readonly cwd: string;
   readonly userHome: string;
   readonly bootstrapActive: boolean;
   readonly memoryEnabled: boolean;
   readonly memoryResolver?: () => Promise<string | undefined>;
+  readonly toolList?: () => ReadonlyArray<string> | undefined;
 }
 
 /** IKNOW-196 入口范围判定。仅 chat / tui 激活 BOOTSTRAP;ask / serve 跳过。 */
@@ -70,6 +74,8 @@ export function createIknowSystemResolver(opts: {
   readonly surface: "chat" | "tui" | "ask" | "serve";
   readonly memoryEnabled: boolean;
   readonly memoryResolver?: () => Promise<string | undefined>;
+  /** #224 工具名录段注入缝 (可选):见 AssemblyContext.toolList 注释。 */
+  readonly toolList?: () => ReadonlyArray<string> | undefined;
 }): () => Promise<string | undefined> {
   const bootstrapActive = shouldIncludeBootstrap(opts.surface);
   return () =>
@@ -79,6 +85,7 @@ export function createIknowSystemResolver(opts: {
       bootstrapActive,
       memoryEnabled: opts.memoryEnabled,
       ...(opts.memoryResolver ? { memoryResolver: opts.memoryResolver } : {}),
+      ...(opts.toolList ? { toolList: opts.toolList } : {}),
     });
 }
 
@@ -91,6 +98,12 @@ export async function assembleIdentityContext(
   for (const seg of IKNOW_ASSEMBLY_ORDER) {
     const text = await resolveSegment(seg, ctx);
     if (text !== undefined) segments.push(text);
+  }
+  // #224 工具名录段注入缝:仅在提供且返回非空名录时追加,否则不追加
+  // (字节级零变化,守 KV 缓存稳定契约)。加性段,不触碰 LOCKED 顺序。
+  const toolList = ctx.toolList?.();
+  if (toolList !== undefined && toolList.length > 0) {
+    segments.push(toolListSegment(toolList));
   }
   if (segments.length === 0) return undefined;
   return segments.join("\n\n");
@@ -165,4 +178,11 @@ async function readBootstrapIfNeeded(
     );
     return undefined;
   }
+}
+
+/** #224 工具名录段渲染:小标题 + 名录(每行一个工具名)。
+ *  本期仅在装配层被调用;build-engine 暂不传 toolList,
+ *  故真实路径上不会渲染。函数独立封装便于后续测试断言文本形态。 */
+function toolListSegment(names: ReadonlyArray<string>): string {
+  return `Available tools:\n${names.join("\n")}`;
 }

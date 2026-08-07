@@ -22,10 +22,15 @@
  *    tail 折叠为底部「↓ N 行正在生成」指示；
  *  - 顶部 dim 指示「↑ N 行历史（End 回到底部）」恒在 scroll>0 时出现。
  */
-import type { ReactElement } from "react";
+import { useDeferredValue, type ReactElement } from "react";
 import { Box, Text } from "ink";
 import type { TuiSessionState } from "./session-state.js";
 import { toolResultStatusMap } from "./tool-summary.js";
+import {
+  formatCompletedToolLine,
+  formatRunningToolLine,
+  type LiveToolRun,
+} from "./live-tool-state.js";
 import { Markdown } from "./markdown.js";
 import { Spinner } from "./components.js";
 import { tuiPalette } from "./theme.js";
@@ -39,6 +44,7 @@ export interface TailSlot {
   readonly liveToolRows: number;
   readonly askRow: number; // 0 / 1
   readonly spinnerRow: number; // 0 / 1
+  readonly thinkingDraftRows: number;
   readonly draftRows: number;
   /** 实际渲染行数合计（含「后随兄弟」时的 marginBottom）。 */
   readonly total: number;
@@ -47,34 +53,64 @@ export interface TailSlot {
 /**
  * tail 行账（精确）：各元素按渲染顺序排布，marginBottom 仅在后随兄弟存在
  * 时计 1（ink 折叠末尾子元素 margin）。draft 行数 = markdownToLines 实测。
+ *
+ * T3: thinking 草稿排在 answer 草稿之前（与下方 JSX 渲染顺序一致）；
+ * 折叠态永远 = 1 行摘要（[思考] 思考中…），展开态走 markdownToLines 实测。
+ * `thinkingExpanded` 必传 — 调用方从 ChatViewProps 注入，不引入新 React 路径。
+ *
+ * T4: liveToolRuns 与 liveToolLines 同块渲染（结构化运行状态先,
+ * legacy 字符串后),行账合并。两路之一存在才渲染该 Box。
  */
 export function tailSlot(
   liveToolLines: ReadonlyArray<string>,
   askLine: string | undefined,
   running: boolean,
+  thinkingDraft: string | undefined,
   draft: string | undefined,
-  cols: number
+  cols: number,
+  thinkingExpanded: boolean,
+  liveToolRuns: ReadonlyArray<LiveToolRun> = []
 ): TailSlot {
-  const liveToolRows = liveToolLines.length;
+  // T4: 结构化运行状态每条目 1 行,合并计入 liveToolRows。
+  const liveToolRows = liveToolLines.length + liveToolRuns.length;
   const askRow = askLine !== undefined ? 1 : 0;
   const spinnerRow = running ? 1 : 0;
+  const hasThinking =
+    running && thinkingDraft !== undefined && thinkingDraft.length > 0;
+  // 折叠态固定 1 行([思考] 思考中…);展开态走 markdownToLines 实测。
+  const thinkingDraftRows = hasThinking
+    ? thinkingExpanded
+      ? markdownToLines(thinkingDraft!, cols).length
+      : 1
+    : 0;
   const draftRows =
     draft !== undefined && draft.length > 0
       ? markdownToLines(draft, cols).length
       : 0;
-  // 渲染顺序：liveTool → ask → draft → spinner（与下方 JSX 一致）。
-  const liveToolMargin = askRow + draftRows + spinnerRow > 0 ? 1 : 0;
-  const askMargin = draftRows + spinnerRow > 0 ? 1 : 0;
+  // 渲染顺序：liveTool → ask → thinkingDraft → draft → spinner。
+  const liveToolMargin =
+    askRow + thinkingDraftRows + draftRows + spinnerRow > 0 ? 1 : 0;
+  const askMargin = thinkingDraftRows + draftRows + spinnerRow > 0 ? 1 : 0;
+  const thinkingMargin = draftRows + spinnerRow > 0 ? 1 : 0;
   const draftMargin = spinnerRow > 0 ? 1 : 0;
   const total =
     liveToolRows +
     liveToolMargin +
     askRow +
     askMargin +
+    thinkingDraftRows +
+    thinkingMargin +
     draftRows +
     draftMargin +
     spinnerRow;
-  return { liveToolRows, askRow, spinnerRow, draftRows, total };
+  return {
+    liveToolRows,
+    askRow,
+    spinnerRow,
+    thinkingDraftRows,
+    draftRows,
+    total,
+  };
 }
 
 /** 一条已测消息及其 flat 物理行 / 块坐标的窗口坐标。 */
@@ -93,11 +129,27 @@ export interface ChatViewProps {
   /** turn 进行中逐条出现的工具事件文案（formatLiveToolEvent 产物）。 */
   readonly liveToolLines: ReadonlyArray<string>;
   /**
+   * T4 (#175): 结构化工具调用实时状态。运行中条目按 `[运行中] name` 渲染,
+   * 已完成条目按 `formatCompletedToolLine` 渲染。两类按 `liveToolReduce` 维护
+   * 顺序;缺失时退化为 liveToolLines 字符串行追加(向后兼容)。
+   *
+   * 缺省 = 空(老调用方兼容);app.tsx 必传。
+   */
+  readonly liveToolRuns?: ReadonlyArray<
+    import("./live-tool-state.js").LiveToolRun
+  >;
+  /**
    * T4 (#175)：当前 turn 流式累积的 masked 助手文本（草稿）。running-fg
    * 且在迭代中时渲染于 spinner 之前；空串/undefined 不渲染。终稿 commit 后
    * 由 app 层转进 transcript（messages），此处不再出现。
    */
   readonly draftsMasked?: string;
+  /**
+   * T3 (#175): 流式 thinking 草稿 masked 文本。turn 进行中按 `thinkingExpanded`
+   * 渲染折叠摘要/展开全文;turn 结束 stream-draft.reset 清空后面板自然消失,
+   * 交棒给终稿 thinking blocks 面板。
+   */
+  readonly thinkingDraftMasked?: string;
   /** askUser 待决提示（undefined = 无 pending ask）。 */
   readonly askLine: string | undefined;
   /**
@@ -122,6 +174,11 @@ const INDICATOR_ROWS = 2;
 export function ChatView(props: ChatViewProps): ReactElement {
   const { session, cols } = props;
   const pal = tuiPalette;
+  // T5 (#175): useDeferredValue 是 React 并发防御的消费端 — 消费高频更新
+  // 时延后(draft 文本变化快,最终态稳定),让低优先级渲染排到 transition
+  // 之后,与 app 层 startTransition 构成双向防御。
+  const deferredDrafts = useDeferredValue(props.draftsMasked);
+  const deferredThinkingDrafts = useDeferredValue(props.thinkingDraftMasked);
   const statusMap = toolResultStatusMap(session.messages);
   const measured: Measured[] = [];
   let messageCursor = 0;
@@ -144,8 +201,11 @@ export function ChatView(props: ChatViewProps): ReactElement {
     props.liveToolLines,
     props.askLine,
     running,
-    running ? props.draftsMasked : undefined,
-    cols
+    running ? deferredThinkingDrafts : undefined,
+    running ? deferredDrafts : undefined,
+    cols,
+    props.thinkingExpanded ?? false,
+    props.liveToolRuns ?? []
   );
   const tailRows = tail.total;
   // 滚动预算：scroll>0 时 tail 折叠为单指示（INDICATOR_ROWS），否则 tail 原样占行。
@@ -230,25 +290,50 @@ export function ChatView(props: ChatViewProps): ReactElement {
         </Box>
       ) : (
         <>
-          {props.liveToolLines.length > 0 && (
+          {(props.liveToolRuns?.length ?? 0) > 0 ||
+          props.liveToolLines.length > 0 ? (
             <Box flexDirection="column" marginBottom={1}>
+              {(props.liveToolRuns ?? []).map((run) => (
+                <Text key={run.id} color={pal.dim}>
+                  {run.status === "running"
+                    ? formatRunningToolLine(run)
+                    : formatCompletedToolLine(run)}
+                </Text>
+              ))}
               {props.liveToolLines.map((line, i) => (
-                <Text key={i} color={pal.dim}>
+                <Text key={`legacy-${i}`} color={pal.dim}>
                   {line}
                 </Text>
               ))}
             </Box>
+          ) : (
+            <></>
           )}
           {props.askLine !== undefined && (
             <Box marginBottom={1}>
               <Text color={pal.running}>{props.askLine}</Text>
             </Box>
           )}
+          {/* T3 (#175): 流式 thinking 面板。折叠态 = [思考] 思考中…(1 行); */}
+          {/* 展开态渲染 deferredThinkingDrafts 全文。turn 结束 stream-draft 复位 */}
+          {/* → 此条件失败 → 流式面板消失,接棒终稿 thinking blocks 面板。 */}
+          {/* T5: 渲染走 deferred value — 高频更新低优先级,React 并发防御。 */}
           {running &&
-            props.draftsMasked !== undefined &&
-            props.draftsMasked.length > 0 && (
+            deferredThinkingDrafts !== undefined &&
+            deferredThinkingDrafts.length > 0 && (
               <Box flexDirection="column" marginBottom={1}>
-                <Markdown text={props.draftsMasked} width={cols} />
+                {props.thinkingExpanded ? (
+                  <Markdown text={deferredThinkingDrafts} width={cols} />
+                ) : (
+                  <Text color={pal.dim}>[思考] 思考中…</Text>
+                )}
+              </Box>
+            )}
+          {running &&
+            deferredDrafts !== undefined &&
+            deferredDrafts.length > 0 && (
+              <Box flexDirection="column" marginBottom={1}>
+                <Markdown text={deferredDrafts} width={cols} />
               </Box>
             )}
           {running && <Spinner />}
