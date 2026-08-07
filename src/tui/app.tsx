@@ -80,9 +80,6 @@ import {
   terminalToCellPos,
 } from "./selection.js";
 
-/** 鼠标滚轮每个 tick 调整的行数。 */
-const WHEEL_STEP_ROWS = 3;
-
 export interface TuiToolEventSink {
   readonly emit: (event: TuiToolEvent) => void;
   readonly subscribe: (cb: (event: TuiToolEvent) => void) => () => void;
@@ -324,13 +321,16 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     const disable = enableSgrMouseReport(stdout);
     const onData = (chunk: Buffer | string): void => {
       const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-      // 滚轮：独立路径（不参与选区）。
+      // 滚轮：独立路径（不参与选区）。用户 2026-08-08 反馈「滚轮第3次才有
+      // 反应」：旧实现每格 3 行（密集 markdown 肉眼无感）。改为滚轮即
+      // clamp 到顶/底（同 Home/End 语义）：wheel-up → 顶（MAX_SAFE_INTEGER，
+      // ChatView clamp 到 maxScroll），wheel-down → 底（0，auto-follow）。
+      // 单格即决断，不再「滚几次才看到变化」。
       const { wheelUp, wheelDown } = parseMouseEvents(text);
       if (wheelUp > 0 || wheelDown > 0) {
         if (viewRef.current !== "chat") return;
-        const delta = (wheelUp - wheelDown) * WHEEL_STEP_ROWS;
         clearSelection();
-        setChatScroll((s) => Math.max(0, s + delta));
+        setChatScroll(wheelDown > 0 ? 0 : Number.MAX_SAFE_INTEGER);
         return;
       }
       // 视图过滤放 listener 内（不进 deps）：跨视图切换不丢事件。

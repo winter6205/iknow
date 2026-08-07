@@ -1003,24 +1003,21 @@ describe("TuiApp 端到端（tracer bullet）", () => {
         "wheel-bottom-visible"
       );
 
-      // 滚轮上滚 ×3（每格 +3 行）→ 窗口上移，末段被裁。
+      // 滚轮上滚 ×1 → clamp 到顶（用户 2026-08-08：滚轮第3次才有反应 →
+      // 改为 wheel-up/wheel-down 即 clamp 到顶/底，单格即决断），末段被裁。
       const wheelUpA = out.join("").length;
-      for (let i = 0; i < 3; i++) {
-        stdin.write("\x1b[<64;10;5M");
-        await delay(50);
-      }
+      stdin.write("\x1b[<64;10;5M");
+      await delay(150);
       await waitFor(
         () => !strip(out.join("").slice(wheelUpA)).includes("WHEEL 内容第24行"),
         8000,
         "wheel-up-clips-tail"
       );
 
-      // 滚轮下滚 ×5 → 回到底，末段恢复。
+      // 滚轮下滚 ×1 → clamp 回底（auto-follow），末段恢复。
       const wheelDownA = out.join("").length;
-      for (let i = 0; i < 5; i++) {
-        stdin.write("\x1b[<65;10;5M");
-        await delay(50);
-      }
+      stdin.write("\x1b[<65;10;5M");
+      await delay(150);
       await waitFor(
         () =>
           strip(out.join("").slice(wheelDownA)).includes("WHEEL 内容第24行"),
