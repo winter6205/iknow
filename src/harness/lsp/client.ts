@@ -1,0 +1,147 @@
+/**
+ * LSP 客户端层 — spec 251-lsp-tool（§ client.ts：getClient() 三件套缓存）。
+ *
+ * 职责：把 `server.ts` 的 `LspServerInfo` 句柄包成 vscode-jsonrpc 的
+ * `MessageConnection`，并对同一 (root, server.id) 复用连接（S9 三件套：
+ * clients 缓存 / broken 记忆 / inflight 并发去重）。
+ *
+ * 与 opencode lsp.ts:208-297 的复用三件套同源（#247 Q8），但 iknow 无
+ * InstanceContext：ctx 由调用方（handler 层）持有 `{ directory }`。
+ *
+ * **取消语义（Q2/A9）**：中断走 JSON-RPC `$/cancelRequest`，**绝不终止
+ * tsserver 子进程**。本模块不存在任何进程终止调用（唯一终止操作是
+ * `connection.dispose()`，仅释放连接，不涉子进程信号）。
+ */
+import { pathToFileURL } from "node:url";
+import type { ChildProcess } from "node:child_process";
+
+import { createMessageConnection } from "vscode-jsonrpc/node";
+import type { MessageConnection } from "vscode-jsonrpc/node";
+
+import type { LspCtx, LspServerInfo } from "./types.js";
+import { Typescript } from "./server.js";
+
+/** 客户端包装：对上层（handler）暴露薄透传的 sendRequest / sendNotification / dispose。 */
+export interface LspClient {
+  /** 底层 vscode-jsonrpc `MessageConnection`（cancel 等进阶用法可直达）。 */
+  readonly connection: MessageConnection;
+  /** tsserver 子进程句柄（仅诊断/生命周期观测用；不得终止进程）。 */
+  readonly process: ChildProcess;
+  /** JSON-RPC request：透传 method/params，返回未知 payload。 */
+  sendRequest(method: string, params: unknown): Promise<unknown>;
+  /** JSON-RPC notification：透传 method/params。 */
+  sendNotification(method: string, params: unknown): Promise<void>;
+  /** 释放连接（不杀进程；进程随宿主进程同生同灭，spec S14）。 */
+  dispose(): void;
+}
+
+/** 三件套缓存 —— 模块级状态（spec S14：同进程同生，不跨 session 持久化）。 */
+
+/** key = `${root}:${server.id}` → 已建立并复用的客户端。 */
+const clients = new Map<string, LspClient>();
+/** 已确认 spawn 失败（不可用）的 key；记忆后不再重试。 */
+const broken = new Set<string>();
+/** 正在 spawn 中的 key → in-flight Promise；并发请求共享一次 spawn。 */
+const inflight = new Map<string, Promise<LspClient | undefined>>();
+
+/**
+ * 按 (file, ctx) 取得（或建立）对应 LSP 客户端。
+ *
+ * 流程（spec § client.ts）：
+ *   1. `root = await server.root(file, ctx)`；undefined → 本文件无 LSP 服务。
+ *   2. `key = root + ":" + server.id`。
+ *   3. `broken.has(key)` → 已知不可用，不重试。
+ *   4. `clients.has(key)` → 复用缓存。
+ *   5. `inflight.has(key)` → 共享 in-flight spawn Promise（并发去重）。
+ *   6. 否则发起 `spawnClient` 任务：失败标 `broken`；成功存 `clients`；
+ *      `.finally` 释放 `inflight`。
+ *
+ * `opts.server` 可注入测试替身（默认 `Typescript`，TS 单语言首期）。
+ *
+ * @returns 客户端；`undefined` 表示该文件无可用 LSP server（host 转纯字符串）。
+ */
+export async function getClient(
+  ctx: LspCtx,
+  file: string,
+  opts?: { readonly server?: LspServerInfo }
+): Promise<LspClient | undefined> {
+  const server = opts?.server ?? Typescript;
+  const root = await server.root(file, ctx);
+  if (!root) return undefined;
+
+  const key = `${root}:${server.id}`;
+  if (broken.has(key)) return undefined;
+  if (clients.has(key)) return clients.get(key);
+  if (inflight.has(key)) return inflight.get(key);
+
+  const task = spawnClient(server, root, ctx)
+    .then((client) => {
+      if (client) {
+        clients.set(key, client);
+        return client;
+      }
+      broken.add(key);
+      return undefined;
+    })
+    .finally(() => {
+      inflight.delete(key);
+    });
+  inflight.set(key, task);
+  return task;
+}
+
+/**
+ * 建立单个 server 连接：spawn 子进程 → pipe stdio 建 MessageConnection →
+ * 发 `initialize` 握手 → `listen()` → 包成 `LspClient`。
+ *
+ * `server.spawn` 返回 `undefined`（bin 缺失等）→ 返回 `undefined`，
+ * 由调用方标记 broken；不抛错、不静默吞。
+ * stdio 未 pipe（stdout/stdin 缺失）同样视为不可用 → `undefined`。
+ */
+async function spawnClient(
+  server: LspServerInfo,
+  root: string,
+  ctx: LspCtx
+): Promise<LspClient | undefined> {
+  const handle = await server.spawn(root, ctx);
+  if (!handle) return undefined;
+
+  const { process: child, initialization } = handle;
+  if (!child.stdout || !child.stdin) return undefined;
+
+  const connection = createMessageConnection(child.stdout, child.stdin);
+  child.stderr?.resume();
+
+  // LSP initialize 握手：tsserver 透传 path 放 initializationOptions。
+  await connection.sendRequest("initialize", {
+    processId: child.pid ?? null,
+    rootUri: pathToFileURL(root).href,
+    capabilities: {},
+    initializationOptions: initialization,
+  });
+  connection.listen();
+
+  return {
+    connection,
+    process: child,
+    sendRequest: (method, params) => connection.sendRequest(method, params),
+    sendNotification: (method, params) =>
+      connection.sendNotification(method, params),
+    dispose: () => connection.dispose(),
+  };
+}
+
+/**
+ * 取消一个 in-flight 请求 —— 走 JSON-RPC `$/cancelRequest` 通知。
+ *
+ * **绝不终止 tsserver 子进程**（Q2/A9 决议）：终止会破坏常驻复用、
+ * 并让后续请求失去共享连接。取消信号由 tsserver 自行处理。
+ *
+ * @param client 目标客户端（其 `connection` 发送取消通知）。
+ * @param reqId 要取消的请求 id（vscode-jsonrpc 分配的 id）。
+ */
+export function cancelRequest(client: LspClient, reqId: number): Promise<void> {
+  return client.connection.sendNotification("$/cancelRequest", {
+    id: reqId,
+  });
+}
