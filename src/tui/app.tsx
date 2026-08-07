@@ -168,20 +168,29 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   const askTick = askBridge.pending() !== undefined;
   useTick(askTick ? 100 : 0);
 
-  // 任务 A 行级：计算聊天区域可视行数（终端总行 - banner - 状态栏 - 输入框
-  // - notice 槽 - 顶部分隔）。保守下界 3，避免负数 / 0 导致窗口错乱。
-  // 注意：list 视图整屏占用，chat 视图才走这个分配。
-  const bannerLineCount = useMemo(() => {
-    if (view !== "chat") return 0;
+  // 任务 A 行级 + 滚动对齐：banner 归 ChatView 内部 row window（与消息同
+  // scroll space，滚轮/键盘一起滚；输入框 + 状态栏固定在 app 底部）。
+  // 单一计算源：`bannerLines`（渲染行）与 `bannerRowSpan`（占行数）同派生，
+  // 避免两处各算各的漂移。空会话 = 完整眼 + 顶部分隔；有消息 = 单行短档。
+  // list 视图独占整屏，banner 不渲染。
+  const bannerLines = useMemo(() => {
+    if (view !== "chat") return [];
     const sess = sessions[activeKey] ?? initial;
-    if (sess.messages.length !== 0) return 0;
-    return (
-      renderBanner(
+    if (sess.messages.length === 0) {
+      const full = renderBanner(
         { version: VERSION, cwd: props.cwd, dataDir: props.dataDir },
         { cols, short: false }
-      ).length + 1
-    ); // +1 = 顶部分隔
+      );
+      // 完整眼下方加顶部分隔（dim 外框色，与 banner 边框同阶）。
+      if (full.length === 0) return [];
+      return [...full, `\x1b[38;5;244m${"─".repeat(cols)}\x1b[0m`];
+    }
+    return renderBanner(
+      { version: VERSION, cwd: props.cwd, dataDir: props.dataDir },
+      { cols, short: true }
+    );
   }, [view, activeKey, sessions, initial, cols, props.cwd, props.dataDir]);
+  const bannerRowSpan = bannerLines.length;
 
   const viewportRows = useMemo(() => {
     // 固定行扣减：banner / 状态栏（1） / 输入框（2：圆角线框 1 + hint 1 视情况）
@@ -191,8 +200,8 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     // 2 行，是 #189 渲染漂移的 chrome 账目根因）。
     const noticeLines = notice?.lines.length ?? 0;
     const reserved = 1 + 2 + 1 + noticeLines; // 状态栏 + 输入 + ask + notice
-    return Math.max(5, rows - bannerLineCount - reserved);
-  }, [rows, bannerLineCount, notice]);
+    return Math.max(5, rows - bannerRowSpan - reserved);
+  }, [rows, bannerRowSpan, notice]);
 
   // 工具事件订阅：T4 (#175) 优先按 tool_use_id 配对入结构化运行状态;
   // 缺 toolUseId 时落回 legacy 字符串行追加(向后兼容)。
@@ -604,28 +613,12 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     }
   });
 
-  const bannerLines =
-    view === "chat" && active.messages.length === 0
-      ? renderBanner(
-          { version: VERSION, cwd: props.cwd, dataDir: props.dataDir },
-          { cols, short: false }
-        )
-      : [];
-
   const bgSession = Object.values(sessions).find(
     (s) => s.runState === "running-bg"
   );
 
   return (
     <Box flexDirection="column">
-      {bannerLines.length > 0 && (
-        <Box flexDirection="column">
-          {bannerLines.map((line, i) => (
-            <Text key={i}>{line}</Text>
-          ))}
-          <Text color={pal.border}>{"─".repeat(cols)}</Text>
-        </Box>
-      )}
       {view === "list" ? (
         <ListView
           entries={listEntries}
@@ -659,6 +652,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           scrollRows={chatScroll}
           viewportRows={viewportRows}
           thinkingExpanded={thinkingExpanded}
+          bannerLines={bannerLines}
         />
       )}
       {notice && (

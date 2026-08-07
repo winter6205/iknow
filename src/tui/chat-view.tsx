@@ -166,6 +166,12 @@ export interface ChatViewProps {
    * 由 app 层 /thinking 斜杠命令切换(运行态,会话重启回退折叠)。
    */
   readonly thinkingExpanded?: boolean;
+  /**
+   * 滚动对齐（方案 B）：banner 是 row window 的第一段内容（与消息同 scroll
+   * space）。空会话 = 完整眼 + 顶部分隔；有消息后 = 单行 `◆ iknow`。
+   * 上滚可见 logo、下滚一起滚出；输入框 / 状态栏固定在 app 底部不受影响。
+   */
+  readonly bannerLines?: ReadonlyArray<string>;
 }
 
 /** 指示器实际占用行（`<Box mb=1><Text>` 实测各 2 行）。 */
@@ -182,6 +188,9 @@ export function ChatView(props: ChatViewProps): ReactElement {
   const statusMap = toolResultStatusMap(session.messages);
   const measured: Measured[] = [];
   let messageCursor = 0;
+  // banner 占 content top：[0, bannerRows)；消息从 bannerRows 起算。
+  // 两者共 contentRows 一同被 row window 滚动窗口覆盖。
+  const bannerRows = props.bannerLines?.length ?? 0;
   for (const m of session.messages) {
     const mm = messageRender(m, cols, {
       thinkingExpanded: props.thinkingExpanded,
@@ -192,7 +201,7 @@ export function ChatView(props: ChatViewProps): ReactElement {
       lines: mm.lines,
       blocks: [...mm.blocks],
       totalRows: mm.totalRows,
-      startRow: messageCursor,
+      startRow: bannerRows + messageCursor,
     });
     messageCursor += mm.totalRows;
   }
@@ -220,26 +229,25 @@ export function ChatView(props: ChatViewProps): ReactElement {
     viewport > 0 ? Math.max(1, viewport - chromeScrolled) : 0;
   // viewport <= 0 → 无限视口：消息窗口不裁剪，scroll 仅驱动指示器文案。
   const unlimited = budgetScrolled <= 0;
-  // 上界：消息空间内窗口顶边最多到达第 0 行，且必须保高（endRow >= budget
-  // ⇒ scroll <= messageCursor - budget）。超过此值的滚动会让窗口从底部收缩
-  // —— 用户感知为"消息减少"。短内容（messageCursor <= budget）无可上滚历
-  // 史，maxScroll = 0，滚轮无效但不塌缩。tail 已折叠，不算入滚动空间（修
-  // 复前 `+ tailRows` 允许 scroll 把 endRow 压成负数，连带 fold 也消失）。
+  // 内容总高 = banner 段 + 消息段；tail 在底部不算入 scroll 上界（折叠成指示）。
+  const contentRows = bannerRows + messageCursor;
+  // 上界：窗口顶边最多到达第 0 行（含 banner 顶），且必须保高（endRow >= budget
+  // ⇒ scroll <= contentRows - budget）。超过此值的滚动会让窗口从底部收缩
+  // —— 用户感知为"消息减少"。短内容（contentRows <= budget）无可上滚历史，
+  // maxScroll = 0，滚轮无效但不塌缩。
   const maxScroll = unlimited
-    ? messageCursor + (hasTail ? tailRows : 0) - 1
-    : Math.max(0, messageCursor - budgetScrolled);
+    ? contentRows + (hasTail ? tailRows : 0) - 1
+    : Math.max(0, contentRows - budgetScrolled);
   const scroll = Math.min(requestedScroll, maxScroll);
   const foldTail = scroll > 0 && hasTail;
   const chromeRows =
     (scroll > 0 ? INDICATOR_ROWS : 0) + (foldTail ? INDICATOR_ROWS : 0);
   // 消息窗口高度 = 视口预算 - chrome（下界 1，避免负窗）。
   const budget = viewport > 0 ? Math.max(1, viewport - chromeRows) : 0;
-  // endRow：unlimited / scroll=0 → 全空间底；scroll>0 → 消息空间内上移
+  // endRow：unlimited / scroll=0 → 全空间底；scroll>0 → 内容空间内上移
   // scroll（tail 已折叠，fold 指示占 2 行 chrome，不计入 endRow）。
   const endRow =
-    scroll === 0 || unlimited
-      ? messageCursor + tailRows
-      : messageCursor - scroll;
+    scroll === 0 || unlimited ? contentRows + tailRows : contentRows - scroll;
   const startRow = unlimited ? 0 : Math.max(0, endRow - budget);
   const indicator = scroll > 0 ? `↑ ${scroll} 行历史（End 回到底部）` : "";
   return (
@@ -250,6 +258,20 @@ export function ChatView(props: ChatViewProps): ReactElement {
         </Box>
       )}
       <Box flexDirection="column">
+        {/* banner 段（row window 第一段，与消息同 scroll space）：按窗口行
+            区间裁剪。scroll=0 时窗口顶 = bannerRows 上方 → banner 首屏可见。 */}
+        {bannerRows > 0 &&
+          props.bannerLines &&
+          (() => {
+            const bStart = Math.max(0, startRow);
+            const bEnd = Math.min(bannerRows, endRow);
+            if (bEnd <= bStart) return null;
+            return props.bannerLines
+              .slice(bStart, bEnd)
+              .map((line, i) => (
+                <Text key={`banner-${bStart + i}`}>{line}</Text>
+              ));
+          })()}
         {measured.map((mm, i) => {
           if (mm.startRow + mm.totalRows <= startRow || mm.startRow >= endRow) {
             return null;
