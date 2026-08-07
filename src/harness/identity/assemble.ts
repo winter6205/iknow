@@ -56,11 +56,13 @@ export interface AssemblyContext {
   readonly toolList?: () => ReadonlyArray<string> | undefined;
 }
 
-/** IKNOW-196 入口范围判定。仅 chat / tui 激活 BOOTSTRAP;ask / serve 跳过。 */
+/** IKNOW-196 入口范围判定。对话型入口(chat / tui / serve)激活 BOOTSTRAP;
+ *  仅脚本型(ask)跳过。serve 是同一主体的浏览器交互面(iknow serve + SPA),
+ *  与 chat/tui 共享同一 identity 状态机,不再单独降级(用户 2026-08-08 裁定)。 */
 export function shouldIncludeBootstrap(
   surface: "chat" | "tui" | "ask" | "serve"
 ): boolean {
-  return surface === "chat" || surface === "tui";
+  return surface !== "ask";
 }
 
 /** IKNOW-196 deps.system 工厂。build-engine / tui-deps 两处装配层用同一

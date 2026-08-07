@@ -50,7 +50,9 @@ export async function startSessionServe(
     store,
     defaultJsonMode: opts?.json_mode ?? false,
     traceOut: opts?.traceOut,
-    // #196 A12: serve 跳过 BOOTSTRAP 段（surface="serve" → bootstrapActive=false）。
+    // #196 A12（用户 2026-08-08 裁定）：serve 与 chat/tui 同属对话型入口，
+    // 激活 BOOTSTRAP（surface="serve" → bootstrapActive=true），共享同一
+    // ~/.iknow/state.json bootstrap_seeded 状态机；ask（oneshot 脚本）唯一例外。
     surface: "serve",
     ...opts?.hubOptions,
     // Prefer the full handle when provided so web can resolve asks; fall back

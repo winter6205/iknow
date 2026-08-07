@@ -17,7 +17,7 @@
 9. **A9 既有 8 工具集（ACI 0004 / 141-T11 + Web 扩展）路径不动**：本 spec 不注册新工具、不动工具目录、不动 `createAciRegistry` 拓扑。identity 注入 = `deps.system` 缝的 hook，不新增工具。
 10. **A10 reference 关系**：`upstream-openharness/ohmo/{workspace,prompts}.py` 是行为真值（issue #196 决策点 §1）。本 spec 引用其 4 文件模式 + 装配顺序 + 状态机结构，但**不用 import / 不依赖 `upstream-openharness` runtime**（按 CLAUDE.md / `docs/CONTEXT.md` 规则）。
 11. **A11 架构改造范围**：`master` 分支当前 `buildHarnessEngine` 产物 `LoopEngineDeps` **没有** `system` 字段（identity 注入缝在 #121 worktree 分支已存在但未合入 master）。本 spec 确认改造范围 = **把 `deps.system` 缝从 #121 worktree 提升到 master baseline**（不是只在 #121 分支上挂，是 harness 本身补齐）。触发 / 装配 / 测试逻辑直接走基线缝。
-12. **A12 入口覆盖**：4 入口走 `buildHarnessEngine`（chat / serve / tui / ask），都注入身份；对话型入口（chat / tui）激活 BOOTSTRAP；脚本型（ask）与长驻服务（serve）跳过 BOOTSTRAP 段（按 `bootstrapActive` 开关）。`trace` 入口走 `src/traceserver/`，不调 `buildHarnessEngine`，与本 spec 无关。
+12. **A12 入口覆盖**：4 入口走 `buildHarnessEngine`（chat / serve / tui / ask），都注入身份；对话型入口（chat / tui / serve）激活 BOOTSTRAP；仅脚本型（ask）跳过 BOOTSTRAP 段（按 `bootstrapActive` 开关）。serve 是同一主体的浏览器交互面（iknow serve + SPA），与 chat / tui 共享同一 `~/.iknow/state.json` 状态机，不再单独降级（用户 2026-08-08 裁定）。`trace` 入口走 `src/traceserver/`，不调 `buildHarnessEngine`，与本 spec 无关。
 13. **A13 认知 vs 人格边界**：identity（认知层 / 本体性事实）只放 Name / Kind / Signature；soul（人格层 / 行为风格）放 core truths / boundaries / **vibe** / continuity。判断标准 "删掉后 agent 是不是 iknow"：identity 删了 = 认知崩塌；soul 删了 = 还是 iknow 但行为不可预测。**Vibe 归 soul**（行为风格）。
 14. **A14 Open Questions 默认空**：所有 5 个决策点已收敛；任何 unresolved 项必须先 grill 再写 spec，不允许"先写 plan 后盘"。
 
@@ -245,7 +245,7 @@ export async function assembleIdentityContext(ctx: {
   bootstrapActive: boolean;
 }): Promise<string | undefined>;
 
-/** IKNOW-196 入口范围判定。仅 chat / tui 激活 BOOTSTRAP；ask / serve 跳过。 */
+/** IKNOW-196 入口范围判定。对话型入口（chat / tui / serve）激活 BOOTSTRAP；仅 ask 跳过。 */
 export function shouldIncludeBootstrap(
   surface: "chat" | "tui" | "ask" | "serve"
 ): boolean;
@@ -258,7 +258,7 @@ export function shouldIncludeBootstrap(
 | `chat`  | ✅                         | ✅        | ✅           | ✅（首启）     | ✅               | ✅                  |
 | `tui`   | ✅                         | ✅        | ✅           | ✅（首启）     | ✅               | ✅                  |
 | `ask`   | ✅                         | ✅        | ✅           | ❌ 跳过        | ✅               | ✅                  |
-| `serve` | ✅                         | ✅        | ✅           | ❌ 跳过        | ✅               | ✅                  |
+| `serve` | ✅                         | ✅        | ✅           | ✅（首启）     | ✅               | ✅                  |
 | `trace` | ❌ 不调 buildHarnessEngine | —         | —            | —              | —                | —                   |
 
 ### 风格要点
@@ -358,7 +358,7 @@ export type IknowIdentityError =
   - 严格遵守 014 append-only messages：deferred 段（identity / soul / user.md / BOOTSTRAP / AGENTS.md / memory）**不进入** `state.messages`，仅透传 `request.system`（守 014 附加原则）。
   - 装配路径**只读**（除 `initializeIknowWorkspace` 显式 seed + `writeIknowState` 显式 PATCH 外，**不写盘**）。
   - `initializeIknowWorkspace` 走 **eager + idempotent**（4 入口都调）：mkdir / 写 user.md / 写 state.json 三类操作都用 `if not exists` 守卫。
-  - `bootstrap_seeded` 状态机仅在 `bootstrapActive: true` 的入口（chat / tui）激活；ask / serve 跳过。
+  - `bootstrap_seeded` 状态机仅在 `bootstrapActive: true` 的入口（chat / tui / serve）激活；ask 跳过（用户 2026-08-08 裁定：serve 不再单独降级）。
   - identity / soul / bootstrap 三个 const string 是 SSOT；装配时只能引用，绝不复制 / 切片（防 drift）。
   - user.md 行为：对**用户可改**段（Profile / Defaults / Ongoing / Preferences / Notes）纯净读；首启时通过 USER_TEMPLATE 占位 seed。
   - state.json 写 atomic write（write to temp + rename）—— 防止半写导致 JSON 损坏。
@@ -417,7 +417,7 @@ export type IknowIdentityError =
 
 ### 入口覆盖（5 条）
 
-15. `node -e "import('./src/harness/identity/index.js').then(m => console.log(m.shouldIncludeBootstrap('chat') === true && m.shouldIncludeBootstrap('tui') === true && m.shouldIncludeBootstrap('ask') === false && m.shouldIncludeBootstrap('serve') === false))"` 退出码 0 → 入口矩阵正确
+15. `node -e "import('./src/harness/identity/index.js').then(m => console.log(m.shouldIncludeBootstrap('chat') === true && m.shouldIncludeBootstrap('tui') === true && m.shouldIncludeBootstrap('ask') === false && m.shouldIncludeBootstrap('serve') === true))"` 退出码 0 → 入口矩阵正确
 16. `npm test -- tests/harness/identity/system-injection.test.ts` 退出 0 → 4 入口 mock 覆盖
 17. `grep -c "initializeIknowWorkspace" src/cli/runtime.ts` ≥ 1 → CLI 入口接 init
 18. `grep -c "initializeIknowWorkspace" src/session-api/serve.ts` ≥ 1 → serve 入口接 init
