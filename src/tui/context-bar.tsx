@@ -28,6 +28,9 @@ export interface ContextBarProps {
   readonly cols: number;
 }
 
+// 数值语义 SSOT（本计划裁决 1）：下述纯函数与
+// web/src/components/ContextUsageStrip.tsx 镜像保持逐字一致 —— 修改任一侧
+// 必须同步另一侧（裁决 1 公式 / 三档色阈值变更需双改）。
 /** 容量条：█ 填充 + ░ 空余（原型 variant3-single.tsx:91-95 同签名同输出）。 */
 export function valueBand(pct: number, width = 10): string {
   const clamped = Math.max(0, Math.min(100, pct));
@@ -67,9 +70,14 @@ export function ContextBar(props: ContextBarProps): ReactElement {
   const { lastUsage, contextWindow, running, cols } = props;
   // 钩子无条件前置调用（Rules of Hooks）：lastUsage null 与非 null 的两
   // 条渲染分支 hook 顺序必须一致，否则 React 19 dev 会报 static flag 警告。
+  // 分母 ≤ 0（envInt 返回 0 / 负数）→ 视为无效，按 null 兜底渲染，防止 NaN/Infinity。
+  const denomOk = contextWindow > 0;
   const used = lastUsage === null ? 0 : ctxUsed(lastUsage);
-  const pct = lastUsage === null ? 0 : Math.round((used / contextWindow) * 100);
-  const warm = lastUsage !== null && running && pct > 0;
+  const pct =
+    lastUsage === null || !denomOk
+      ? 0
+      : Math.round((used / contextWindow) * 100);
+  const warm = lastUsage !== null && running && pct > 0 && denomOk;
   const leftBorder = usePulse(!warm) ? pal.border : pal.running;
   if (lastUsage === null) {
     return (

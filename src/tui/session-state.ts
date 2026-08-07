@@ -17,7 +17,6 @@ import type {
   TokenUsage,
 } from "../harness/model-adapter/types.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
-import { extractSummary } from "../session-api/store/schema.js";
 
 export type SessionRunState = "idle" | "running-fg" | "running-bg";
 export type TuiView = "chat" | "list";
@@ -68,13 +67,6 @@ export function attachSession(file: SessionFileV1): TuiSessionState {
     // lastUsage 只来自运行时回执，不从会话文件携带（初值 null）。
     lastUsage: null,
   });
-}
-
-/** 会话列表行 + 状态栏共用的 summary 投影（#120 SSOT：extractSummary）。 */
-export function sessionSummary(
-  messages: ReadonlyArray<AnthropicNativeMessage>
-): string {
-  return extractSummary(messages);
 }
 
 /** turn 起跑：仅 idle 可起跑（重复起跑视为调用方 bug，保持原状态不抛错）。 */

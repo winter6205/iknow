@@ -29,6 +29,10 @@ const COLOR_SAFE = "#7d8a82";
 const COLOR_WARN = "#d9a343";
 const COLOR_ALERT = "#c95d47";
 
+// 数值语义 SSOT（本计划裁决 1）：下述纯函数与 src/tui/context-bar.tsx 镜像
+// 保持逐字一致 —— 修改任一侧必须同步另一侧（裁决 1 公式 / 三档色阈值变更
+// 需双改）。Web ↔ src 不直接跨 package 边界（web/tsconfig.json 自包含
+// "include":["src"]），故以镜像复制替代 shared module。
 /** 容量条：█ 填充 + ░ 空余（与 TUI context-bar.tsx valueBand 同公式）。 */
 function valueBand(pct: number, width = 10): string {
   const clamped = Math.max(0, Math.min(100, pct));

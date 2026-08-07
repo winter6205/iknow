@@ -15,7 +15,6 @@ import {
   attachSession,
   canInterrupt,
   createDraftSession,
-  sessionSummary,
   switchedAwayFrom,
   switchedTo,
   turnFinished,
@@ -76,13 +75,6 @@ describe("session-state: draft / attach", () => {
 
   it("attachSession：lastUsage 初值 null（lastUsage 只来自运行时回执，不从文件读）", () => {
     expect(attachSession(sampleFile()).lastUsage).toBeNull();
-  });
-
-  it("sessionSummary：首条 user 文本（#120 SSOT extractSummary）", () => {
-    expect(sessionSummary([msg("第一个问题"), msg("回答", "assistant")])).toBe(
-      "第一个问题"
-    );
-    expect(sessionSummary([])).toBe("");
   });
 });
 

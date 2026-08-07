@@ -943,13 +943,12 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           hintSuggestions={inputHintSuggestions}
         />
       )}
-      <StatusBar cols={cols} active={active} bgSession={bgSession} />
+      <StatusBar active={active} bgSession={bgSession} />
     </Box>
   );
 }
 
 function StatusBar(props: {
-  readonly cols: number;
   readonly active: TuiSessionState;
   readonly bgSession: TuiSessionState | undefined;
 }): ReactElement {
