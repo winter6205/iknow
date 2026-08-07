@@ -1,10 +1,13 @@
 /**
  * tests/tui/chat-view-banner-scroll.test.tsx
  *
- * 滚动对齐（方案 B）：banner = row window 第一段，与消息同 scroll space。
- *  - scroll=0 满屏底 → 长内容时 banner 滚出顶部（窗口底显示最新消息 + tail）；
- *  - 滚到 maxScroll → banner 完整回到顶部（行 0..bannerRows-1）；
- *  - 中段滚动 → banner 按窗口行区间裁剪；
+ * Banner + 行级窗口回归电池（2026-08-07 用户复看定稿）：
+ *  - banner 是 ChatView row window 的第一段内容（与消息同一 scroll space）；
+ *  - scroll=0 窗口底 = 内容底（auto-follow）：最新消息可见，banner 在长会话
+ *    里随内容滚出顶部；
+ *  - scroll>0 窗口上移：banner 段重新进入窗口，较早消息可见；
+ *  - scroll 越界由 ChatView clamp 到 maxScroll = contentRows - viewport；
+ *  - 无「↑ N 行历史」指示、无「↓ N 行正在生成」折叠（2026-08-07 移除）；
  *  - banner 缺省（未传）→ 行为与之前完全一致（回归电池）。
  *
  * 输入框 / 状态栏由 app.tsx 在 ChatView 之外固定挂载，本组件测只覆盖内容窗。
@@ -30,26 +33,6 @@ function users(n: number): AnthropicNativeMessage[] {
   }));
 }
 
-function linesOf(args: {
-  scrollRows: number;
-  msgCount: number;
-  bannerLines?: ReadonlyArray<string>;
-}): string[] {
-  const output = renderToString(
-    React.createElement(ChatView, {
-      session: { ...createDraftSession(), messages: users(args.msgCount) },
-      cols,
-      liveToolLines: [],
-      askLine: undefined,
-      scrollRows: args.scrollRows,
-      viewportRows: VP,
-      bannerLines: args.bannerLines,
-    }),
-    { columns: cols }
-  );
-  return strip(output).replace(/\n+$/, "").split("\n");
-}
-
 function render(args: {
   scrollRows: number;
   msgCount: number;
@@ -69,64 +52,91 @@ function render(args: {
   );
 }
 
-describe("banner 与消息同 scroll space（输入框固定在底部）", () => {
-  it("空会话 scroll=0：banner 完整可见，无消息时 maxScroll=0", () => {
-    const plain = strip(
-      render({ scrollRows: 0, msgCount: 0, bannerLines: BANNER })
-    );
-    // 14 行 banner 全在窗口内
-    for (let i = 0; i < BANNER.length; i++) {
-      expect(plain, `banner row ${i}`).toContain(`banner-row-${i}`);
-    }
-    expect(plain).not.toContain("行历史");
-  });
+describe("banner 行级窗口语义：banner 与消息共享 scroll space", () => {
+  // 40 条 user 消息 × 2 rows = 80；banner 14 行。contentRows = 94。
+  // viewport = 20。maxScroll = 94 - 20 = 74。
 
-  it("scroll=max → banner 完整回到顶部，后面是消息", () => {
-    // 每条 user 消息 1 行 + 1 行外层 margin → totalRows = 2。
-    // messageCursor = 40 × 2 = 80；contentRows = 14 + 80 = 94；
-    // budgetScrolled = 18（VP=20 - INDICATOR_ROWS=2）；maxScroll = 94 - 18 = 76。
-    const plain = strip(
-      render({ scrollRows: 999, msgCount: 40, bannerLines: BANNER })
-    );
-    // scroll=999 → clamp 76 → endRow=18, startRow=0 → banner 14 行 + 头几条消息
-    expect(plain).toContain("banner-row-0");
-    expect(plain).toContain("banner-row-13");
-    expect(plain).toContain("行历史");
-  });
-
-  it("scroll=0 长会话：banner 已被滚出顶部，仅显示底部消息", () => {
+  it("scroll=0：auto-follow 底，最新消息可见，长会话中 banner 滚出顶部", () => {
+    // 窗口 = [94-20, 94) = [74, 94)。消息 startRow = 14 + 2i：
+    // m-37 @88, m-38 @90, m-39 @92 在窗口内；banner 行 [0,14) < 74 → 被顶掉。
     const plain = strip(
       render({ scrollRows: 0, msgCount: 40, bannerLines: BANNER })
     );
-    // scroll=0 → endRow=94; startRow = max(0, 94 - budget). budget=18（chrome=2）,
-    // startRow = 76。banner 段 [0,14) 全部 < 76 → banner 不渲染
-    expect(plain).not.toContain("banner-row-0");
-    // 最新消息（m-39）可见（行 14+78=92 ≤ 94）
+    // 最新消息可见（auto-follow 底）
     expect(plain).toContain("m-39");
+    expect(plain).toContain("m-38");
+    // banner 段在长会话滚动下被窗口顶掉（与消息共享同一 scroll space）
+    expect(plain).not.toContain("banner-row-0");
+    expect(plain).not.toContain("banner-row-13");
+    // 无滚动指示
     expect(plain).not.toContain("行历史");
+    expect(plain).not.toContain("行正在生成");
   });
 
-  it("中段滚动：banner 按窗口行区间裁剪（不全见、也不全隐）", () => {
-    // contentRows=94, maxScroll=76. scroll=70 → endRow=24, startRow=6.
-    // banner 段 [0,14) → 裁剪 [6,14) → banner-row-6..13 可见。
+  it("scroll>0：窗口上移，banner 段重新进入窗口（滚到顶见完整 banner）", () => {
+    // scroll=999 → clamp 74 → 窗口 = [94-20-74, 94-74) = [0, 20)。
+    // banner [0,14) 全见 + m-0 @14, m-1 @16, m-2 @18 进入窗口。
     const plain = strip(
-      render({ scrollRows: 70, msgCount: 40, bannerLines: BANNER })
+      render({ scrollRows: 999, msgCount: 40, bannerLines: BANNER })
     );
-    expect(plain).toContain("banner-row-6");
-    expect(plain).toContain("banner-row-13");
-    // 滚出去的 banner 行不渲染
+    // 完整 banner 可见
+    for (let i = 0; i < BANNER.length; i++) {
+      expect(plain, `banner row ${i}`).toContain(`banner-row-${i}`);
+    }
+    // 较早消息可见
+    expect(plain).toContain("m-0");
+    expect(plain).toContain("m-1");
+    // 最新消息被窗口底切
+    expect(plain).not.toContain("m-39");
+    // 无滚动指示
+    expect(plain).not.toContain("行历史");
+    expect(plain).not.toContain("行正在生成");
+  });
+
+  it("scroll=999：clamp 到 maxScroll=74；窗口上移 74 行至内容顶", () => {
+    // contentRows = 14 + 80 = 94，viewport = 20 → maxScroll = 74。
+    // scroll=999 → clamp 74 → 窗口 [0, 20)：露出内容流顶段（banner + 早消息）。
+    const plain = strip(
+      render({ scrollRows: 999, msgCount: 40, bannerLines: BANNER })
+    );
+    // 内容顶段可见
+    expect(plain).toContain("banner-row-0");
+    expect(plain).toContain("m-0");
+    // 窗口盖住一屏（viewport-1：末尾 margin 行 ink 折叠）；最新消息在屏外
+    expect(plain.replace(/\n+$/, "").split("\n").length).toBe(VP - 1);
+    expect(plain).not.toContain("m-39");
+  });
+
+  it("scroll 中间档：窗口夹在中间，顶部与底部内容均被裁", () => {
+    // scroll=30：endRow = 94-30 = 64, startRow = 64-20 = 44。
+    // 消息 startRow = 14+2i：m-15 @44, …, m-24 @62。banner [0,14) < 44 被顶掉；
+    // m-25 @64+ 在窗口底之下被切。
+    const plain = strip(
+      render({ scrollRows: 30, msgCount: 40, bannerLines: BANNER })
+    );
+    // 中间窗口可见
+    expect(plain).toContain("m-15");
+    expect(plain).toContain("m-24");
+    // 顶部被裁：banner + 早消息
     expect(plain).not.toContain("banner-row-0");
-    expect(plain).not.toContain("banner-row-5");
+    expect(plain).not.toContain("m-0");
+    // 底部被裁：最新消息
+    expect(plain).not.toContain("m-39");
   });
 
   it("banner 缺省（未传 bannerLines）：滚动行为完全不变", () => {
-    // 回归：未传 bannerLines 时等价于 bannerRows=0，旧 chat-view 数学。
-    const baseline = linesOf({ scrollRows: 0, msgCount: 40 });
+    // header 缺省 → bannerRows=0，contentRows = 80。viewport=20。
+    // 对任意 scroll 档窗口始终高 viewport 行（scroll 越界 clamp 到 60），
+    // 渲染行数恒等于 viewport-1（末尾 margin 行 ink 折叠，split-line count
+    // 比 raw length 准）。回归断言：各 scroll 档行数 = 基线行数。
+    const linesOf = (s: number): string[] =>
+      strip(render({ scrollRows: s, msgCount: 40 }))
+        .replace(/\n+$/, "")
+        .split("\n");
+    const baseline = linesOf(0);
     for (const s of [3, 6, 12, 24, 999]) {
-      expect(
-        linesOf({ scrollRows: s, msgCount: 40 }).length,
-        `scroll=${s} 行数`
-      ).toBe(baseline.length);
+      expect(linesOf(s).length, `scroll=${s} 行数`).toBe(baseline.length);
     }
+    expect(baseline.length).toBe(VP - 1);
   });
 });

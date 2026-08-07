@@ -63,6 +63,8 @@ export function helpLines(): ReadonlyArray<string> {
     "/profile   标记首启引导完成（先在外侧填好 ~/.iknow/user.md）",
     "/quit      退出（别名 /exit）",
     "Ctrl+C     打断前台运行中的 turn",
+    "Ctrl+Y     复制当前鼠标选区",
+    "鼠标拖选    选中文本 → 松开自动复制到剪贴板",
   ];
 }
 

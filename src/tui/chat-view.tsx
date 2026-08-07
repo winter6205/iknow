@@ -38,6 +38,8 @@ import { messageRender } from "./message-rows.js";
 import { markdownToLines } from "./markdown-lines.js";
 import type { RowSlice } from "./row-window.js";
 import { MessageBlocks, MessageBlocksClipped } from "./message-blocks.js";
+import type { Selection } from "./selection.js";
+import { HighlightedLine } from "./selection-render.js";
 
 /** live 工具行 + ask 行 + spinner 占位也占行；用于总行数估计。 */
 export interface TailSlot {
@@ -123,6 +125,97 @@ interface Measured {
   readonly startRow: number;
 }
 
+/** margin 占位（与 message-rows.ts MARGIN_LINE 一致）。 */
+const MARGIN_LINE_CHAT = " ";
+
+/**
+ * #238：把当前 ChatView 内容流（banner + 消息 flat 行 + tail 行）拼成一份
+ * flat 字符串数组（行号即内容行号 0-based）。用于 extractSelectionText：
+ *  - banner 段占 [0, bannerLines.length)；
+ *  - 消息段按 measure 顺序拼接（messageRender.lines 与全可见路径逐行一致）；
+ *  - tail 行（liveToolRuns + liveToolLines + ask + thinkingDraft + draft）
+ *    按 ChatView JSX 渲染顺序追加（spinner 是 1 行非字符 "<spinner>"，留空）。
+ *
+ * 调用方必须保证本函数与 ChatView JSX 行账同步；只读 SessionState props，
+ * 不接受 props.selection。
+ */
+export function flatContentLines(args: {
+  readonly bannerLines: ReadonlyArray<string>;
+  readonly session: TuiSessionState;
+  readonly cols: number;
+  readonly liveToolLines: ReadonlyArray<string>;
+  readonly liveToolRuns: ReadonlyArray<LiveToolRun>;
+  readonly askLine: string | undefined;
+  readonly draftsMasked: string;
+  readonly thinkingDraftMasked: string;
+  readonly thinkingExpanded: boolean;
+}): ReadonlyArray<string> {
+  const out: string[] = [];
+  for (const ln of args.bannerLines) out.push(ln);
+  for (const m of args.session.messages) {
+    const mm = messageRender(m, args.cols, {
+      thinkingExpanded: args.thinkingExpanded,
+    });
+    for (const ln of mm.lines) out.push(ln);
+    if (mm.lines.length > 0) out.push(MARGIN_LINE_CHAT);
+  }
+  const running = args.session.runState === "running-fg";
+  const tail = tailSlot(
+    args.liveToolLines,
+    args.askLine,
+    running,
+    running ? args.thinkingDraftMasked : undefined,
+    running ? args.draftsMasked : undefined,
+    args.cols,
+    args.thinkingExpanded,
+    args.liveToolRuns
+  );
+  const tailTotal = tail.total;
+  for (const run of args.liveToolRuns) {
+    out.push(
+      run.status === "running"
+        ? formatRunningToolLine(run)
+        : formatCompletedToolLine(run)
+    );
+  }
+  for (const ln of args.liveToolLines) out.push(ln);
+  if (args.askLine !== undefined) out.push(args.askLine);
+  if (running && args.thinkingDraftMasked.length > 0) {
+    if (args.thinkingExpanded) {
+      for (const ln of markdownToLines(args.thinkingDraftMasked, args.cols)) {
+        out.push(ln);
+      }
+    } else {
+      out.push("[思考] 思考中…");
+    }
+  }
+  if (running && args.draftsMasked.length > 0) {
+    for (const ln of markdownToLines(args.draftsMasked, args.cols)) {
+      out.push(ln);
+    }
+  }
+  // tail 与 ChatView tailSlot 行账对齐：spinner 1 行 + 各 margin 行以占位补齐，
+  // 保证 flatContentLines 长度 === ChatView 的 contentRows（窗口映射才一致）。
+  while (out.length < tailTarget(args, tailTotal)) out.push(MARGIN_LINE_CHAT);
+  return out;
+}
+
+/** 计算 flat 行数目标 = banner + 消息（含 margin）+ tail.total（对齐 ChatView）。 */
+function tailTarget(
+  args: {
+    readonly bannerLines: ReadonlyArray<string>;
+    readonly session: TuiSessionState;
+    readonly cols: number;
+  },
+  tailTotal: number
+): number {
+  let n = args.bannerLines.length;
+  for (const m of args.session.messages) {
+    n += messageRender(m, args.cols).totalRows;
+  }
+  return n + tailTotal;
+}
+
 export interface ChatViewProps {
   readonly session: TuiSessionState;
   readonly cols: number;
@@ -172,10 +265,23 @@ export interface ChatViewProps {
    * 上滚可见 logo、下滚一起滚出；输入框 / 状态栏固定在 app 底部不受影响。
    */
   readonly bannerLines?: ReadonlyArray<string>;
+  /**
+   * #238 鼠标拖选选区（已 normalize 由 app 层保证）。undefined = 无选区。
+   * 存在时消息路径强制走 MessageBlocksClipped（高亮注入唯一入口）；
+   * banner 走 HighlightedLine。
+   */
+  readonly selection?: Selection;
+  /**
+   * #238 内容视口窗口回调（effect 同步给 app 层坐标映射）：ChatView 每帧
+   * 计算 startRow/endRow/cols 后回调，app 层据此把 SGR (x,y) 映射成
+   * 内容 CellPos。不传 = 无选区（纯键盘滚动场景）。
+   */
+  readonly onWindow?: (win: {
+    readonly startRow: number;
+    readonly endRow: number;
+    readonly cols: number;
+  }) => void;
 }
-
-/** 指示器实际占用行（`<Box mb=1><Text>` 实测各 2 行）。 */
-const INDICATOR_ROWS = 2;
 
 export function ChatView(props: ChatViewProps): ReactElement {
   const { session, cols } = props;
@@ -188,8 +294,10 @@ export function ChatView(props: ChatViewProps): ReactElement {
   const statusMap = toolResultStatusMap(session.messages);
   const measured: Measured[] = [];
   let messageCursor = 0;
-  // banner 占 content top：[0, bannerRows)；消息从 bannerRows 起算。
-  // 两者共 contentRows 一同被 row window 滚动窗口覆盖。
+  // 方案 B（最终定稿）：banner 在 ChatView row window 内作为第一段，与
+  // 消息共享同一 scroll space。向上滚能翻回完整 banner，向下滚 banner 与
+  // 消息一起滚出（输入框 + 状态栏在 ChatView 之外固定挂载）。用户 2026-08-07
+  // 复看：「下面对话框要固定，消息跟图标可以向上滚动」。
   const bannerRows = props.bannerLines?.length ?? 0;
   for (const m of session.messages) {
     const mm = messageRender(m, cols, {
@@ -217,49 +325,41 @@ export function ChatView(props: ChatViewProps): ReactElement {
     props.liveToolRuns ?? []
   );
   const tailRows = tail.total;
-  // 滚动预算：scroll>0 时 tail 折叠为单指示（INDICATOR_ROWS），否则 tail 原样占行。
-  const hasTail = tailRows > 0;
+  // ── 朴素滚动（2026-08-07 定稿：用户「第二种」，去所有折叠/指示器）──
+  // 语义：banner + 消息 + tail 是同一内容流。`scrollRows` = 向上翻了多少
+  // 物理行。窗口固定高度 = viewport（不含指示器/折叠 chrome）。scroll=0
+  // 时窗口底 = 内容底（auto-follow）；scroll>0 时窗口上移 scroll 行。
+  // 无「↑ N 行历史」指示、无「↓ N 行正在生成」折叠、无 maxScroll 文案。
   const requestedScroll = Math.max(0, props.scrollRows ?? 0);
   const viewport = props.viewportRows ?? 0;
-  // scroll>0 时占用的 chrome：顶部指示（恒在）+ fold 指示（仅 hasTail）。
-  // 先按"将进入 scroll>0 状态"假设预算，反向解 clamp；scroll 被 clamp 回 0
-  // 时 messageCursor 必 <= budget，窗口数学退化为 scroll=0 等价（startRow=0）。
-  const chromeScrolled = INDICATOR_ROWS + (hasTail ? INDICATOR_ROWS : 0);
-  const budgetScrolled =
-    viewport > 0 ? Math.max(1, viewport - chromeScrolled) : 0;
-  // viewport <= 0 → 无限视口：消息窗口不裁剪，scroll 仅驱动指示器文案。
-  const unlimited = budgetScrolled <= 0;
-  // 内容总高 = banner 段 + 消息段；tail 在底部不算入 scroll 上界（折叠成指示）。
-  const contentRows = bannerRows + messageCursor;
-  // 上界：窗口顶边最多到达第 0 行（含 banner 顶），且必须保高（endRow >= budget
-  // ⇒ scroll <= contentRows - budget）。超过此值的滚动会让窗口从底部收缩
-  // —— 用户感知为"消息减少"。短内容（contentRows <= budget）无可上滚历史，
-  // maxScroll = 0，滚轮无效但不塌缩。
+  // viewport <= 0 → 无限视口：不裁剪，直接渲染全部内容。
+  const unlimited = viewport <= 0;
+  // 内容总高 = banner + 消息 + tail（tail 原样渲染，不折叠）。
+  const contentRows = bannerRows + messageCursor + tailRows;
+  // 滚动上界：窗口底最多上移到 contentRows - viewport（保留至少一屏）。
+  // viewport 由 app 传入（含输入框/状态栏预留后剩余行数）。
   const maxScroll = unlimited
-    ? contentRows + (hasTail ? tailRows : 0) - 1
-    : Math.max(0, contentRows - budgetScrolled);
+    ? 0
+    : Math.max(0, contentRows - Math.max(1, viewport));
   const scroll = Math.min(requestedScroll, maxScroll);
-  const foldTail = scroll > 0 && hasTail;
-  const chromeRows =
-    (scroll > 0 ? INDICATOR_ROWS : 0) + (foldTail ? INDICATOR_ROWS : 0);
-  // 消息窗口高度 = 视口预算 - chrome（下界 1，避免负窗）。
-  const budget = viewport > 0 ? Math.max(1, viewport - chromeRows) : 0;
-  // endRow：unlimited / scroll=0 → 全空间底；scroll>0 → 内容空间内上移
-  // scroll（tail 已折叠，fold 指示占 2 行 chrome，不计入 endRow）。
-  const endRow =
-    scroll === 0 || unlimited ? contentRows + tailRows : contentRows - scroll;
-  const startRow = unlimited ? 0 : Math.max(0, endRow - budget);
-  const indicator = scroll > 0 ? `↑ ${scroll} 行历史（End 回到底部）` : "";
+  // 窗口：scroll=0 → [contentRows - viewport, contentRows)；
+  // scroll>0 → [contentRows - viewport - scroll, contentRows - scroll)。
+  // startRow/endRow 都是内容流内的行号（banner 段从 0 起算）。
+  const endRow = unlimited ? contentRows : contentRows - scroll;
+  const startRow = unlimited ? 0 : Math.max(0, endRow - viewport);
+  // #238:窗口同步回调（app 层坐标映射用）。在渲染体内直接调用：只写 parent
+  // 的 ref（无 setState），React 允许多次调用；移到 useEffect 会引入事件时序
+  // 风险（mouse listener 可能比 effect 早拿到陈旧 window）。注：依赖稳定，
+  // commit 期重复调用会写同一个值。
+  props.onWindow?.({
+    startRow,
+    endRow,
+    cols,
+  });
   return (
     <Box flexDirection="column" flexGrow={1}>
-      {indicator.length > 0 && (
-        <Box marginBottom={1}>
-          <Text color={pal.dim}>{indicator}</Text>
-        </Box>
-      )}
       <Box flexDirection="column">
-        {/* banner 段（row window 第一段，与消息同 scroll space）：按窗口行
-            区间裁剪。scroll=0 时窗口顶 = bannerRows 上方 → banner 首屏可见。 */}
+        {/* banner 段（内容流第一段）：按窗口行区间裁剪，selection 存在时高亮命中行。 */}
         {bannerRows > 0 &&
           props.bannerLines &&
           (() => {
@@ -269,7 +369,12 @@ export function ChatView(props: ChatViewProps): ReactElement {
             return props.bannerLines
               .slice(bStart, bEnd)
               .map((line, i) => (
-                <Text key={`banner-${bStart + i}`}>{line}</Text>
+                <HighlightedLine
+                  key={`banner-${bStart + i}`}
+                  line={line}
+                  row={bStart + i}
+                  selection={props.selection}
+                />
               ));
           })()}
         {measured.map((mm, i) => {
@@ -281,9 +386,13 @@ export function ChatView(props: ChatViewProps): ReactElement {
             end: Math.min(mm.lines.length, endRow - mm.startRow),
           };
           if (slice.end <= slice.start) return null;
-          // 完全可见走 MessageBlocks 保留 Markdown 全功能；部分切片走
-          // MessageBlocksClipped（flat 行切片，与全可见路径逐行一致）。
-          const full = slice.start === 0 && slice.end >= mm.lines.length;
+          // #238：selection 存在时强制走 Clipped 路径（高亮唯一入口）。
+          // 无 selection 时保留原策略：完全可见 → MessageBlocks（Markdown
+          // 全功能）；部分切片 → MessageBlocksClipped（flat 行切片）。
+          const full =
+            props.selection === undefined &&
+            slice.start === 0 &&
+            slice.end >= mm.lines.length;
           return full ? (
             <MessageBlocks
               key={i}
@@ -300,67 +409,58 @@ export function ChatView(props: ChatViewProps): ReactElement {
               blocks={mm.blocks}
               statusMap={statusMap}
               slice={slice}
+              selection={props.selection}
+              messageStartRow={mm.startRow}
             />
           );
         })}
       </Box>
-      {foldTail ? (
-        <Box marginBottom={1}>
-          <Text color={pal.dim}>
-            {`↓ ${tailRows} 行正在生成（End 回到底部）`}
-          </Text>
+      {/* tail 原样渲染（不折叠、无「↓ N 行正在生成」指示）。 */}
+      {(props.liveToolRuns?.length ?? 0) > 0 ||
+      props.liveToolLines.length > 0 ? (
+        <Box flexDirection="column" marginBottom={1}>
+          {(props.liveToolRuns ?? []).map((run) => (
+            <Text key={run.id} color={pal.dim}>
+              {run.status === "running"
+                ? formatRunningToolLine(run)
+                : formatCompletedToolLine(run)}
+            </Text>
+          ))}
+          {props.liveToolLines.map((line, i) => (
+            <Text key={`legacy-${i}`} color={pal.dim}>
+              {line}
+            </Text>
+          ))}
         </Box>
       ) : (
-        <>
-          {(props.liveToolRuns?.length ?? 0) > 0 ||
-          props.liveToolLines.length > 0 ? (
-            <Box flexDirection="column" marginBottom={1}>
-              {(props.liveToolRuns ?? []).map((run) => (
-                <Text key={run.id} color={pal.dim}>
-                  {run.status === "running"
-                    ? formatRunningToolLine(run)
-                    : formatCompletedToolLine(run)}
-                </Text>
-              ))}
-              {props.liveToolLines.map((line, i) => (
-                <Text key={`legacy-${i}`} color={pal.dim}>
-                  {line}
-                </Text>
-              ))}
-            </Box>
-          ) : (
-            <></>
-          )}
-          {props.askLine !== undefined && (
-            <Box marginBottom={1}>
-              <Text color={pal.running}>{props.askLine}</Text>
-            </Box>
-          )}
-          {/* T3 (#175): 流式 thinking 面板。折叠态 = [思考] 思考中…(1 行); */}
-          {/* 展开态渲染 deferredThinkingDrafts 全文。turn 结束 stream-draft 复位 */}
-          {/* → 此条件失败 → 流式面板消失,接棒终稿 thinking blocks 面板。 */}
-          {/* T5: 渲染走 deferred value — 高频更新低优先级,React 并发防御。 */}
-          {running &&
-            deferredThinkingDrafts !== undefined &&
-            deferredThinkingDrafts.length > 0 && (
-              <Box flexDirection="column" marginBottom={1}>
-                {props.thinkingExpanded ? (
-                  <Markdown text={deferredThinkingDrafts} width={cols} />
-                ) : (
-                  <Text color={pal.dim}>[思考] 思考中…</Text>
-                )}
-              </Box>
-            )}
-          {running &&
-            deferredDrafts !== undefined &&
-            deferredDrafts.length > 0 && (
-              <Box flexDirection="column" marginBottom={1}>
-                <Markdown text={deferredDrafts} width={cols} />
-              </Box>
-            )}
-          {running && <Spinner />}
-        </>
+        <></>
       )}
+      {props.askLine !== undefined && (
+        <Box marginBottom={1}>
+          <Text color={pal.running}>{props.askLine}</Text>
+        </Box>
+      )}
+      {/* T3 (#175): 流式 thinking 面板。折叠态 = [思考] 思考中…(1 行); */}
+      {/* 展开态渲染 deferredThinkingDrafts 全文。turn 结束 stream-draft 复位 */}
+      {/* → 此条件失败 → 流式面板消失,接棒终稿 thinking blocks 面板。 */}
+      {/* T5: 渲染走 deferred value — 高频更新低优先级,React 并发防御。 */}
+      {running &&
+        deferredThinkingDrafts !== undefined &&
+        deferredThinkingDrafts.length > 0 && (
+          <Box flexDirection="column" marginBottom={1}>
+            {props.thinkingExpanded ? (
+              <Markdown text={deferredThinkingDrafts} width={cols} />
+            ) : (
+              <Text color={pal.dim}>[思考] 思考中…</Text>
+            )}
+          </Box>
+        )}
+      {running && deferredDrafts !== undefined && deferredDrafts.length > 0 && (
+        <Box flexDirection="column" marginBottom={1}>
+          <Markdown text={deferredDrafts} width={cols} />
+        </Box>
+      )}
+      {running && <Spinner />}
     </Box>
   );
 }

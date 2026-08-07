@@ -76,7 +76,7 @@ describe("parseTuiInput: 普通消息与边界", () => {
 });
 
 describe("helpLines", () => {
-  it("覆盖全部 8 条词表命令 + Ctrl+C 说明，且无 emoji", () => {
+  it("覆盖全部 8 条词表命令 + Ctrl+C 说明 + Ctrl+Y + 鼠标拖选提示，且无 emoji", () => {
     const joined = helpLines().join("\n");
     for (const cmd of [
       "/sessions",
@@ -90,6 +90,9 @@ describe("helpLines", () => {
       expect(joined).toContain(cmd);
     }
     expect(joined).toContain("Ctrl+C");
+    expect(joined).toContain("Ctrl+Y");
+    // #238 鼠标拖选提示（拖选 → 释放自动复制）。
+    expect(joined).toContain("鼠标拖选");
     // 无 emoji（词表层面自检）：不含常见 emoji 码区字符
     expect(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(joined)).toBe(false);
   });
@@ -139,7 +142,7 @@ describe('slashComplete: 唯一匹配 → "/cmd "；0/多匹配 → null', () =>
     expect(slashComplete("/q")).toBe("/quit ");
   });
 
-  it('"/" → null（7 匹配）', () => {
+  it('"/" → null（8 匹配）', () => {
     expect(slashComplete("/")).toBeNull();
   });
 
@@ -179,6 +182,10 @@ describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
 
   it("cursor=2 → /quit （按词表顺序第 3 条）", () => {
     expect(slashCompleteFromList(ALL, 2)).toBe("/quit ");
+  });
+
+  it("cursor=7 → /profile （末条）", () => {
+    expect(slashCompleteFromList(ALL, 7)).toBe("/profile ");
   });
 
   it("cursor 越界上 / 下 / 空列表 → null", () => {
@@ -228,5 +235,27 @@ describe("T6 /thinking 词表", () => {
     const joined = helpLines().join("\n");
     expect(joined).toContain("/thinking");
     expect(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(joined)).toBe(false);
+  });
+});
+
+/**
+ * #238 鼠标拖选复制 — 移除 /copy 命令（#237 取消）。
+ * 词表 8 条；Ctrl+Y 改为"复制当前鼠标选区"（无选区时提示先拖选）。
+ * helpLines 增加鼠标拖选说明。
+ */
+describe("#238 鼠标拖选：词表移除 /copy", () => {
+  it("/copy → unknown（不在词表）", () => {
+    expect(parseTuiInput("/copy")).toEqual({ kind: "unknown", raw: "/copy" });
+  });
+
+  it('"/co" 前缀 → []（无匹配）', () => {
+    expect(slashSuggestions("/co")).toEqual([]);
+  });
+
+  it("/help 增加鼠标拖选提示，且无 /copy", () => {
+    const joined = helpLines().join("\n");
+    expect(joined).not.toContain("/copy");
+    expect(joined).toContain("鼠标拖选");
+    expect(joined).toContain("Ctrl+Y");
   });
 });

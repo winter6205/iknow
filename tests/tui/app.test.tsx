@@ -89,6 +89,8 @@ interface DrivenApp {
   readonly lastOutput: () => string;
   readonly type: (text: string) => Promise<void>;
   readonly ready: () => Promise<void>;
+  /** 锚定当前 raw buffer 位置，返回取「此锚点之后写出的帧」的函数。 */
+  readonly since: () => () => string;
 }
 
 describe("TuiApp 端到端（tracer bullet）", () => {
@@ -138,6 +140,12 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       bridge,
       instance,
       lastOutput: (): string => strip(out.join("")),
+      // raw 字节锚点 + 随后按帧切片 + strip。用 raw 长度作为索引比用 stripped
+      // 长度更稳定（stripped 索引会因 ANSI 序列在帧间被截断而错位）。
+      since: (): (() => string) => {
+        const anchor = out.join("").length;
+        return () => strip(out.join("").slice(anchor));
+      },
       type: async (text: string): Promise<void> => {
         // ink 输入解析按 chunk 处理；逐字符写入并让出事件循环，贴近真实
         // 键盘逐键节奏（整块写入时 chunk 尾部 \r 不被解析为 return，实测确认）。
@@ -195,12 +203,13 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       );
       expect(app.lastOutput()).toContain("正文内容");
 
-      // 方案 B banner 常驻：发消息后 logo 不消失，收成单行 `◆ iknow`。
-      // （空会话完整眼标题也含 `◆ iknow`；有消息后短档行仍含 `iknow`。）
+      // sticky 头 + 单行 logo 常驻：发消息后 banner 自动收成单行 `◆ iknow`。
+      // 空会话完整眼 → 发消息后单行（2026-08-07 真实 pty 复现定稿：完整眼
+      // 永久常驻把消息区压扁；单行保留 logo 字符、腾出消息区）。
       await waitFor(
         () => app.lastOutput().includes("◆ iknow"),
         8000,
-        "banner-persistent"
+        "banner-persistent-compact"
       );
 
       // /sessions → 列表视图
@@ -448,13 +457,14 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     LONG_TIMEOUT
   );
 
-  // 任务 A：聊天区域行级滚动（PgUp → scrollRows += viewportRows/2，
-  // 顶部 dim 指示「↑ N 行历史（End 回到底部）」；End → 回到底部）。
+  // 任务 A：聊天区域行级滚动（PgUp → scrollRows += viewportRows/2，窗口上移
+  // 使底部内容被裁；End → 回到底部）。新语义无「↑ N 行历史」指示，验证窗口
+  // 滑动行为：PgUp 后最新消息被裁、End 后回归。
   it(
-    "任务 A：发 5 条消息 → 渲染出 5 条 → PgUp → 行级滚动指示出现；End → 全部回归",
+    "任务 A：发 5 条消息 → 渲染出 5 条 → PgUp → 最新消息被裁；End → 全部回归",
     async () => {
-      // 用长文本（每条 6 行）确保 totalRows > viewportRows（≈22），PgUp 后
-      // maxScroll > 0 才能验证行级滚动指示。短消息填不满 viewport 会被 clamp 到 0。
+      // 用长文本（每条 6 行）确保 totalRows > viewportRows（≈26），PgUp 后
+      // maxScroll > 0 才能让窗口真正上移。短消息填不满 viewport 会被 clamp 到 0。
       const longBody = (tag: string) =>
         `${tag} 行1内容占位\n${tag} 行2内容占位\n${tag} 行3内容占位\n${tag} 行4内容占位\n${tag} 行5内容占位\n${tag} 行6内容占位`;
       const app = makeApp([
@@ -495,27 +505,31 @@ describe("TuiApp 端到端（tracer bullet）", () => {
           `a${i}-rendered`
         );
       }
-      // 滚动前：m4 应可见
+      // 滚动前（scroll=0，auto-follow 底）：最新消息 m4 / a4 可见
       expect(app.lastOutput()).toContain("m4");
+      expect(app.lastOutput()).toContain("a4");
 
-      // PgUp → scrollRows += viewportRows/2（行级滚动，按 viewport 半页跳）
+      // PgUp → scrollRows += viewportRows/2（行级滚动，按 viewport 半页跳）。
+      // 窗口上移 → 底部最新消息 a4 被裁出窗口。
+      // 关键：PgUp 后必须稳定（等 800ms 让 ink 把所有 re-render 帧写完），
+      // 然后 anchor since()，再 End。否则中间帧可能误导 waitFor（瞬态帧
+      // 偶然不含 a4 让 clip 检查假阳性通过，但 End 时 anchor 已过完所有帧）。
+      const pgupFrames = app.since();
       stdin.write("[5~"); // PgUp ANSI sequence
-      await delay(500);
       await waitFor(
-        () => app.lastOutput().includes("行历史"),
+        () => !pgupFrames().includes("a4"),
         8000,
-        "scroll-indicator"
+        "a4-clipped-after-pgup"
       );
-      // 顶部 dim 指示「↑ N 行历史（End 回到底部）」— 验证 scrollRows > 0
-      expect(app.lastOutput()).toMatch(/↑ \d+ 行历史/);
+      await delay(800); // 等 PgUp 后所有 re-render 帧稳定写入
+      // 再次确认 clip（滚动窗口稳定后无 a4）
+      expect(pgupFrames()).not.toContain("a4");
 
-      // End → scroll 重置为 0，等 a4 重新出现在最近帧
+      // End → scroll 重置为 0（auto-follow 底），a4 恢复。
+      const endFrames = app.since();
       stdin.write("[F"); // End ANSI sequence
-      await delay(500);
-      // 直接查~；lastOutput 最近几帧是否包含 a4
-      // （lastOutput 累积 buffer，原 PgUp 帧不包含 a4）
       await waitFor(
-        () => app.lastOutput().slice(-1500).includes("a4"),
+        () => endFrames().includes("a4"),
         8000,
         "a4-restored-after-end"
       );
@@ -527,17 +541,20 @@ describe("TuiApp 端到端（tracer bullet）", () => {
   it(
     "#189 Commit 1：openSessionAt → scrollRows 重置为 0（会话切换不再保留旧 scroll）",
     async () => {
-      // 新 clamp：maxScroll = max(0, messageCursor - budget(24))。
-      // A 必须 <= 24（切回 A 后 scroll=0 窗口含 msg-A + aA 且无指示）；
-      // B 必须 > 24（PgUp 才真有滚动余量出现指示）。
+      // 方案 B 最终定稿：banner(15 完整眼) 与消息共享 row window。
+      // A：user(2) + assistant(16+1=17) = 19 + banner 15 = 34 contentRows，
+      // viewportRows=26 → maxScroll=8。B：user(2) + assistant(24+1=25) = 27 +
+      // banner 15 = 42 contentRows → maxScroll=16。两会话在 PgUp 后窗口都
+      // 能上移（最新消息被裁）。切回 A 时若 scroll 未重置会残留 B 的偏移，
+      // A 的底部消息会被错误裁掉。
       const lines = (tag: string, n: number): string =>
         Array.from({ length: n }, (_, i) => `${tag} 行${i + 1}内容占位`).join(
           "\n"
         );
       const app = makeApp([
-        // A：user(2) + assistant(16+2) = 20 <= 24 → 不可滚
+        // A：user(2) + assistant(17) + banner(15) = 34
         assistantResult({ texts: [lines("aA", 16)] }),
-        // B：banner(1) + user(2) + assistant(24+2) = 31；budgetScrolled=23 → maxScroll=6
+        // B（方案 B 最终定稿）：user(2) + assistant(25) + banner(15) = 42
         assistantResult({ texts: [lines("aB", 24)] }),
       ]);
       await app.ready();
@@ -565,10 +582,12 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       await waitFor(() => app.lastOutput().includes("aB"), 8000, "B-rendered");
       await delay(50);
 
-      // B 上 PgUp → scrollRows > 0，顶部出现「↑ N 行历史」（看最近帧避免旧帧干扰）
+      // B 上 PgUp → scrollRows > 0（scroll = step = floor(26/2) = 13），
+      // 窗口上移 → 最新消息 aB 被裁出窗口。since() 用 raw 字节锚定 + strip。
+      const pgupFramesB = app.since();
       stdin.write("[5~"); // PgUp
       await waitFor(
-        () => app.lastOutput().slice(-1500).includes("6 行历史"),
+        () => !pgupFramesB().includes("aB"),
         8000,
         "B-pgup-scrolled"
       );
@@ -587,19 +606,17 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       await delay(80);
       stdin.write("[B");
       await delay(80);
-      // 锚定在 Enter 之前：B 的 chat frame（含「↑ 6 行历史」）在进入 list
-      // 视图前已写入，排除在窗口外；list 视图帧与打开 A 后的帧都不含
-      // 「行历史」。
-      const beforeOpen = app.lastOutput().length;
+      // 锚定在 Enter 之前：B 的 chat frame（含 msg-B / aB 被裁）在进入 list
+      // 视图前已写入，排除在窗口外。since() 锚定避免 stripped 索引错位。
+      const openFrames = app.since();
       stdin.write("\r");
+      // openSessionAt 必须重置 scroll → A 的 scroll=0 窗口 [8,34) 露出 aA 末尾
+      // 行（"aA 行16…"）。若残留 B 的 scroll=13，窗口 [0,21) 只露 aA 前 4 行，
+      // 末尾行会被裁掉 → 断言 aA 末行可见即证明 scroll 已重置。
       await waitFor(
         () => {
-          const after = app.lastOutput().slice(beforeOpen);
-          return (
-            after.includes("aA") &&
-            after.includes("msg-A") &&
-            !after.includes("行历史")
-          );
+          const after = openFrames();
+          return after.includes("aA 行16内容占位") && after.includes("msg-A");
         },
         8000,
         "A-active-and-scroll-reset"
@@ -608,22 +625,20 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     LONG_TIMEOUT
   );
 
-  // #189 行为反转回归保险：app 已移除鼠标捕获（DECSET 1000/1006），鼠标
-  // 滚轮交由终端原生 scrollback 接管。在 render 前就挂 raw 监听，断言
-  // stdout 从挂载到一次交互全过程中从未收到 DECSET 启用序列
-  // \x1b[?1000h / \x1b[?1006h（旧实现会在挂载 useEffect 里写）。
+  // 滚轮支持回归：app 挂载 useEffect 启用 DECSET 1000/1006 SGR 滚轮报告（让
+  // 滚轮驱动 chatScroll，与 PgUp/PgDn 同条滚动状态）。在 render 前就挂 raw
+  // 监听，断言 stdout 出现 DECSET 启用序列（mount 阶段一次，不是每次 re-render）。
   it(
-    "#189：鼠标截胡已移除 —— stdout 不写 DECSET 1000/1006 启用序列",
+    "滚轮捕获：mount 写一次 DECSET 1000/1006 启用序列（不重复）",
     async () => {
       const bridge = createTuiBridge({
         dataDir: baseDir,
-        deps: makeDeps([assistantResult({ texts: ["no-mouse"] })]),
+        deps: makeDeps([assistantResult({ texts: ["mouse-on"] })]),
         inflight: createInflightRegistry(),
       });
       const askBridge = createTuiAskUserBridge();
       const toolEventSink = createToolEventSink();
       const rawWrites: string[] = [];
-      // render 前挂 raw 监听（保留 ESC 序列，不用 strip）
       const rawListener = (chunk: Buffer | string): void =>
         rawWrites.push(typeof chunk === "string" ? chunk : chunk.toString());
       stdout.on("data", rawListener);
@@ -644,23 +659,42 @@ describe("TuiApp 端到端（tracer bullet）", () => {
         }
       );
       instances.push(instance);
-      await delay(400); // 等 mount + useEffect（旧代码在此阶段写 DECSET）
+      await delay(400); // 等 mount + useEffect
       await waitFor(
         () => strip(rawWrites.join("")).includes("iknow"),
         8000,
         "startup"
       );
-      // 触发一次提交，覆盖交互路径（旧代码 stdin.on('data') 常驻监听）
+      // 触发一次提交（验证 useEffect 不因 re-render 再写 DECSET）
       for (const ch of "hi\r") {
         stdin.write(ch);
         await delay(10);
       }
       await waitFor(() => bridge.inflight.ids().size === 0, 8000, "turn-done");
       await delay(300);
-      stdout.removeListener("data", rawListener);
       const joined = rawWrites.join("");
-      expect(joined).not.toContain("\x1b[?1000h");
-      expect(joined).not.toContain("\x1b[?1006h");
+      // mount 写一次 1000h/1006h/1002h（drag mode #238）；不应被 effect
+      // 多次触发。
+      const enableCount = (joined.match(/\x1b\[\?1000h/g) ?? []).length;
+      expect(enableCount, "mount 写一次 1000h").toBe(1);
+      const dragEnable = (joined.match(/\x1b\[\?1002h/g) ?? []).length;
+      expect(dragEnable, "mount 写一次 1002h（drag 模式）").toBe(1);
+      // unmount 会再写 DECRST（effect cleanup 写 1000l/1006l/1002l）—— 但
+      // listener 仍挂着，理应看到。instances.push 已经挂了 afterEach，
+      // instance 此时仍在这里，手动 unmount 即可。
+      instance.unmount();
+      await delay(150);
+      stdout.removeListener("data", rawListener);
+      const joinedFull = rawWrites.join("");
+      const disableCount = (joinedFull.match(/\x1b\[\?1006l/g) ?? []).length;
+      expect(disableCount, "unmount 写一次 1006l").toBeGreaterThanOrEqual(1);
+      // #238 quit 路径 / leak guard：drag mode 1002l 也必须出现（不依赖
+      // effect cleanup；quit() 防御性同步写全序列）。
+      const dragDisable = (joinedFull.match(/\x1b\[\?1002l/g) ?? []).length;
+      expect(
+        dragDisable,
+        "unmount 写一次 1002l（drag mode 关闭）"
+      ).toBeGreaterThanOrEqual(1);
     },
     LONG_TIMEOUT
   );
@@ -724,15 +758,15 @@ describe("TuiApp 端到端（tracer bullet）", () => {
 
   // #189 Spec Low：`initialSession`（`iknow tui <id>` resume）恢复路径未测。
   // 挂载即生成既有会话内容，行级滚动应从 scrollRows=0（auto-follow 底）
-  // 起步：初始无「行历史」顶部指示；PgUp 后指示出现且 clamp 到 maxScroll。
+  // 起步：初始末段可见；PgUp 后窗口上移，末段被裁；End → 末段恢复。
   it(
-    "Spec Low：initialSession resume 从 scrollRows=0 起步；PgUp 后指示出现",
+    "Spec Low：initialSession resume 从 scrollRows=0 起步；PgUp → 末段被裁；End → 恢复",
     async () => {
       const { attachSession } = await import("../../src/tui/session-state.js");
-      // banner-in-scroll：compact 单行 banner 占 1 行（contentRows = 1 + 28 = 29）。
-      // viewportRows = max(5, 30 - 1 - 4) = 25；budgetScrolled = 25 - 2 = 23；
-      // maxScroll = 29 - 23 = 6。PgUp step = floor(25/2)=12，clamp 到 6
-      // →「↑ 6 行历史」。user(2) + assistant(24+2)=28 rows。
+      // 方案 B 最终定稿：banner + user(2) + assistant(25) ≈ 42；viewportRows≈26；
+      // maxScroll ≈ 16。PgUp step = 13。
+      // 使用末段 sentinel「A0 resume 内容第24行」— 只在 assistant 内容里出现，
+      // 状态栏会话摘要不冲突（摘要 = user 文本「resumed-q」）。
       const longBody = Array.from(
         { length: 24 },
         (_, i) => `A0 resume 内容第${i + 1}行`
@@ -777,27 +811,121 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       const lastOutput = (): string => strip(out.join(""));
       await delay(400); // 等 mount + useInput effect
 
-      // resume 内容渲染出来（contentRows=29 > budget(23)：scroll=0 窗口
-      // [4,28) 顶部裁掉 user 行；末段「A0 resume 内容第24行」作初次锚点）
+      // scrollRows=0（auto-follow 底）：末段可见作初次锚点
       await waitFor(
         () => lastOutput().includes("A0 resume 内容第24行"),
         8000,
-        "resumed-content"
+        "resumed-bottom-visible"
       );
-      // 初始 scrollRows=0：无「行历史」顶部指示
-      const before = lastOutput();
-      expect(before).not.toContain("行历史");
 
-      // PgUp → scrollRows += 12，clamp 到 maxScroll=6 →「↑ 6 行历史」
+      // PgUp → scrollRows += 13，窗口上移 → 末段被裁出可视窗。raw 字节锚定 + strip。
+      // 必须等 PgUp 后 ink re-render 稳定（800ms）再 anchor End，否则中间帧会
+      // 让 End anchor 错过 a4 恢复帧。
+      const pgupA = out.join("").length;
       stdin.write("[5~"); // PgUp ANSI sequence
-      await delay(300);
       await waitFor(
-        () => lastOutput().slice(-1500).includes("6 行历史"),
+        () =>
+          !strip(out.join("").slice(pgupA)).includes("A0 resume 内容第24行"),
         8000,
-        "resume-pgup"
+        "resume-pgup-clips-tail"
       );
-      // 滚到顶 → 顶部 user 内容再次进入窗口
-      expect(lastOutput().slice(-1500)).toContain("resumed-q");
+      await delay(800); // 等 PgUp re-render 稳定
+      expect(strip(out.join("").slice(pgupA))).not.toContain(
+        "A0 resume 内容第24行"
+      );
+
+      // End → scrollRows=0（auto-follow 底）：末段恢复
+      const endA = out.join("").length;
+      stdin.write("[F"); // End ANSI sequence
+      await waitFor(
+        () => strip(out.join("").slice(endA)).includes("A0 resume 内容第24行"),
+        8000,
+        "resume-end-restores-tail"
+      );
+    },
+    LONG_TIMEOUT
+  );
+
+  // 滚轮驱动 chatScroll（朴素滚动）：SGR 上滚 → 窗口上移（末段被裁）；
+  // SGR 下滚 → 窗口回滚（末段恢复）。与 PgUp/PgDn 同一条滚动状态。
+  it(
+    "滚轮：SGR 上滚 → 末段被裁；SGR 下滚 → 末段恢复（同 chatScroll）",
+    async () => {
+      const { attachSession } = await import("../../src/tui/session-state.js");
+      const longBody = Array.from(
+        { length: 24 },
+        (_, i) => `WHEEL 内容第${i + 1}行`
+      ).join("\n");
+      const initial = attachSession({
+        conversation_id: "wheel-session",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "wheel-q" }] },
+          { role: "assistant", content: [{ type: "text", text: longBody }] },
+        ],
+        turnCount: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        jsonMode: false,
+      });
+      const bridge = createTuiBridge({
+        dataDir: baseDir,
+        deps: makeDeps([]),
+        inflight: createInflightRegistry(),
+      });
+      const askBridge = createTuiAskUserBridge();
+      const toolEventSink = createToolEventSink();
+      const out: string[] = [];
+      stdout.on("data", (chunk) => out.push(String(chunk)));
+      const instance = render(
+        <TuiApp
+          bridge={bridge}
+          askBridge={askBridge}
+          toolEventSink={toolEventSink}
+          initialSession={initial}
+          cwd="/tmp/proj"
+          dataDir={baseDir}
+        />,
+        {
+          stdout,
+          stdin,
+          exitOnCtrlC: false,
+          interactive: true,
+          kittyKeyboard: { mode: "disabled" },
+        }
+      );
+      instances.push(instance);
+      const lastOutput = (): string => strip(out.join(""));
+      await delay(400); // 等 mount + useInput + mouse listener effect
+
+      await waitFor(
+        () => lastOutput().includes("WHEEL 内容第24行"),
+        8000,
+        "wheel-bottom-visible"
+      );
+
+      // 滚轮上滚 ×3（每格 +3 行）→ 窗口上移，末段被裁。
+      const wheelUpA = out.join("").length;
+      for (let i = 0; i < 3; i++) {
+        stdin.write("\x1b[<64;10;5M");
+        await delay(50);
+      }
+      await waitFor(
+        () => !strip(out.join("").slice(wheelUpA)).includes("WHEEL 内容第24行"),
+        8000,
+        "wheel-up-clips-tail"
+      );
+
+      // 滚轮下滚 ×5 → 回到底，末段恢复。
+      const wheelDownA = out.join("").length;
+      for (let i = 0; i < 5; i++) {
+        stdin.write("\x1b[<65;10;5M");
+        await delay(50);
+      }
+      await waitFor(
+        () =>
+          strip(out.join("").slice(wheelDownA)).includes("WHEEL 内容第24行"),
+        8000,
+        "wheel-down-restores-tail"
+      );
     },
     LONG_TIMEOUT
   );

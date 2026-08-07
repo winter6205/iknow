@@ -10,6 +10,8 @@
 
 ### Feature
 
+- **TUI 鼠标拖选复制 (#238)**: 应用内选区层 — DECSET 1002h drag 模式上报拖动坐标，app 维护 anchor/active 选区并渲染反色高亮（ink `<Text inverse>`），mouseup 自动把选中文本复制到系统剪贴板（复用 `copyToClipboard` 多平台 fallback 链）。Ctrl+Y 作为键盘逃生口（复制当前选区；无选区提示先拖选）。移除 `/copy` 命令与 `extractLastAssistantText`（#237 取消，词表 9→8 条）。新模块 `src/tui/selection.ts`（选区模型/坐标映射/文本提取纯函数）、`src/tui/selection-render.tsx`（反色高亮组件）；`mouse.ts` 扩展 `parseMouseAllEvents` 全 SGR 解析 + DECSET 1002h。测试：`selection.test.ts`（29 例）、`mouse.test.ts` 扩展（23 例）、`copy-flow.test.tsx` 重写为拖选 e2e（3 例）。
+
 - **Memory injection v0 (#121/#228, ADR-0009/0010)**: 记忆文件分层注入着陆 — `src/harness/memory/` 模块（paths/schema/frontmatter/errors/discovery/bm25/promote/assembly/refresh）+ `memory_recall` / `memory_save` 工具入 `createDefaultAciRegistry` SSOT（8→10）。`IKNOW_ASSEMBLY_ORDER` 9 段收敛为 5 段（identity/soul/user_profile/bootstrap/memory_layer），memory_layer 单 slot 委托 `createSystemResolver`（mtime 缓存 + inflight 去重 + 装配失败不毒化）。surface split：ask 入口剥离 memory 工具 + memory_layer 不挂（identity 层恒在）；chat/tui/serve 默认开启。
 - **Identity assembly (#196)**: 在 `deps.system` 注入缝上装配身份层 — `identity` (Name/Kind/Signature) + `soul` (core truths/boundaries/vibe/continuity) + `~/.iknow/user.md` 用户画像 + 首启 `BOOTSTRAP` 引导。所有 iknow 入口 (chat / tui / ask / serve) 走同一装配层。`state.json` 持久化 `bootstrap_seeded`,二次启动跳过 BOOTSTRAP 段。`initializeIknowWorkspace()` eager + idempotent,在 `build-engine.ts` 与 4 入口(chat / serve / tui / ask)各调一次,失败降级 warn 不阻塞装配。
 

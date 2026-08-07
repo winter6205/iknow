@@ -26,6 +26,8 @@ import {
   summarizeThinkingContent,
 } from "../cli/format.js";
 import type { RowSlice } from "./row-window.js";
+import type { Selection } from "./selection.js";
+import { HighlightedLine } from "./selection-render.js";
 
 type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
 
@@ -137,8 +139,20 @@ export function MessageBlocksClipped(props: {
   readonly blocks: ReadonlyArray<BlockRowSpan>;
   readonly statusMap: Map<string, boolean>;
   readonly slice: RowSlice;
+  /** #238 选区（normalize 由调用方保证）。undefined = 无选区，高亮空走。 */
+  readonly selection?: Selection;
+  /** 该消息在内容流中的首行行号（0-based；与 ChatView 透传的 measured[i].startRow 对齐）。 */
+  readonly messageStartRow: number;
 }): ReactElement | null {
-  const { message, lines, blocks, statusMap, slice } = props;
+  const {
+    message,
+    lines,
+    blocks,
+    statusMap,
+    slice,
+    selection,
+    messageStartRow,
+  } = props;
   const start = Math.max(0, slice.start);
   const end = Math.min(lines.length, slice.end);
   if (end <= start) return null;
@@ -148,6 +162,7 @@ export function MessageBlocksClipped(props: {
   );
   const nodes: ReactElement[] = [];
   for (let row = start; row < end; row++) {
+    const absRow = messageStartRow + row;
     // tool_use 块 span 落在该行 → 染色摘要行；其余行纯文本（user 行 accent 色）。
     const toolBlock = blocks.find(
       (b) => b.kind === "tool_use" && b.startRow === row
@@ -165,13 +180,13 @@ export function MessageBlocksClipped(props: {
     }
     const ln = lines[row] ?? "";
     nodes.push(
-      <Text
+      <HighlightedLine
         key={`l${row}`}
-        wrap="wrap"
+        line={ln}
+        row={absRow}
+        selection={selection}
         color={message.role === "user" ? tuiPalette.accent : undefined}
-      >
-        {ln === "" ? " " : ln}
-      </Text>
+      />
     );
   }
   if (nodes.length === 0) return null;
