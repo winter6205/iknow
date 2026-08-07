@@ -195,12 +195,14 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       );
       expect(app.lastOutput()).toContain("正文内容");
 
-      // 方案 B banner 常驻：发消息后 logo 不消失，收成单行 `◆ iknow`。
-      // （空会话完整眼标题也含 `◆ iknow`；有消息后短档行仍含 `iknow`。）
+      // sticky 头 + 完整眼常驻：发消息后 logo 不能塌成单行。空会话完整眼
+      // 顶部 ╭◆ iknow─…╮ 在有消息之后仍可见（任何时候都保持完整眼，窄终端
+      // 才退化 —— 用户 2026-08-07 第三轮复看裁定：「任何时候都保持完整
+      // banner」，修「一开始发消息就把 logo 给去掉」根因）。
       await waitFor(
-        () => app.lastOutput().includes("◆ iknow"),
+        () => app.lastOutput().includes("╭◆ iknow"),
         8000,
-        "banner-persistent"
+        "banner-persistent-full-eye"
       );
 
       // /sessions → 列表视图

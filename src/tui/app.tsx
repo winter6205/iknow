@@ -168,27 +168,32 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   const askTick = askBridge.pending() !== undefined;
   useTick(askTick ? 100 : 0);
 
-  // 任务 A 行级 + 滚动对齐：banner 归 ChatView 内部 row window（与消息同
-  // scroll space，滚轮/键盘一起滚；输入框 + 状态栏固定在 app 底部）。
-  // 单一计算源：`bannerLines`（渲染行）与 `bannerRowSpan`（占行数）同派生，
-  // 避免两处各算各的漂移。空会话 = 完整眼 + 顶部分隔；有消息 = 单行短档。
-  // list 视图独占整屏，banner 不渲染。
+  // Sticky 头语义：banner 常驻 ChatView 顶部，**任何时候都保持完整眼**——
+  // 包括有消息之后。发消息后塌成单行 `◆ iknow` 的旧行为正是用户主诉
+  // 「一开始发消息就会把 logo 给去掉」（2026-08-07 第三轮复看裁定）。
+  // 窄终端（cols < BANNER_MIN_COLS）完整眼放不下 → 退化为单行（short=true
+  // 在窄终端也保留，2026-08-07 第二轮 short 分支顺序 fix）。
+  // 空会话额外加一行顶部分隔，区分 banner 和下方空白；消息存在时由消息
+  // 自身提供分隔，不重复加线。
   const bannerLines = useMemo(() => {
     if (view !== "chat") return [];
     const sess = sessions[activeKey] ?? initial;
-    if (sess.messages.length === 0) {
-      const full = renderBanner(
+    const full = renderBanner(
+      { version: VERSION, cwd: props.cwd, dataDir: props.dataDir },
+      { cols, short: false }
+    );
+    if (full.length === 0) {
+      // 窄终端：完整眼放不下 → 单行短档（任意 ≥15 列都能放下）
+      return renderBanner(
         { version: VERSION, cwd: props.cwd, dataDir: props.dataDir },
-        { cols, short: false }
+        { cols, short: true }
       );
-      // 完整眼下方加顶部分隔（dim 外框色，与 banner 边框同阶）。
-      if (full.length === 0) return [];
+    }
+    if (sess.messages.length === 0) {
+      // 空会话：完整眼 + 顶部分隔（dim 外框色，区分与下方空白）
       return [...full, `\x1b[38;5;244m${"─".repeat(cols)}\x1b[0m`];
     }
-    return renderBanner(
-      { version: VERSION, cwd: props.cwd, dataDir: props.dataDir },
-      { cols, short: true }
-    );
+    return full;
   }, [view, activeKey, sessions, initial, cols, props.cwd, props.dataDir]);
   const bannerRowSpan = bannerLines.length;
 
