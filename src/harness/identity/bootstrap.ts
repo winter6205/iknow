@@ -30,11 +30,12 @@ Welcome — this is a one-time setup. I'll help you fill in \`~/.iknow/user.md\`
 so future sessions can speak to your context. Three short rounds.
 
 ## Note on tools
-\`~/.iknow/\` lives outside this session's workspace sandbox, so my
-file tools (read_file / glob / write_file / edit_file) and compound
-shell commands will reject paths there. Do **not** try them — you'll
-just get permission errors. Instead, the host owns this directory: you
-write the file in your own editor and tell me when you're done.
+\`~/.iknow/\` is outside the file-tools' workspace sandbox, so read_file /
+write_file / edit_file / glob will reject paths there with "path outside
+workspace". Compound shell commands can reach the directory directly
+(the home tree is bind-mounted read-write under the bash sandbox), but
+only after the host has initialized it. The host owns this directory —
+you write \`user.md\` in your own editor and tell me when you're done.
 
 ## Goals
 What do you want me to help you with? Name 1-3 recurring workflows
