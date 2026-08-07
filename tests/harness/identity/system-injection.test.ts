@@ -30,6 +30,8 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
     },
     chat: { showThinking: false },
     web: { searchUrl: undefined },
+    // #119 T7: IknowCompressEnv 必填(T1 接入),build-engine 透传给 deps.compress。
+    compress: { contextWindow: 200_000, thresholdTokens: undefined },
   };
 }
 
