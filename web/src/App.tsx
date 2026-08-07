@@ -166,17 +166,18 @@ function ChatApp() {
       }
       footer={
         <>
-          <ContextUsageStrip
-            usage={chat.lastAnswer?.lastUsage ?? null}
-            contextWindow={chat.contextWindow}
-            sending={chat.phase === "sending"}
-          />
           <Composer
             disabled={!chat.session || chat.phase === "loading"}
             sending={chat.phase === "sending"}
             thinkingSettings={thinkingSettings}
             onThinkingChange={handleThinkingChange}
             onSend={handleSend}
+          />
+          {/* 上下文用量条：输入框下方（用户 2026-08-07 反馈：放输入框下方）。 */}
+          <ContextUsageStrip
+            usage={chat.lastAnswer?.lastUsage ?? null}
+            contextWindow={chat.contextWindow}
+            sending={chat.phase === "sending"}
           />
         </>
       }

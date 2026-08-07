@@ -915,16 +915,6 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           ))}
         </Box>
       )}
-      {/* ContextBar 仅聊天视图挂载（T4）：上下文用量条，ChatView 与 PromptInput
-          之间（原型 variant3-single 视觉挂点）。list 视图不挂。 */}
-      {view === "chat" && (
-        <ContextBar
-          lastUsage={active.lastUsage}
-          contextWindow={bridge.contextWindow}
-          running={active.runState === "running-fg"}
-          cols={cols}
-        />
-      )}
       {/* 输入框仅聊天视图挂载：列表视图纯导航（Q4b），避免两个 useInput
           同时监听 stdin 产生键位竞争。 */}
       {view === "chat" && (
@@ -941,6 +931,16 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           // onSubmit(value)，避免 raw 文本解析绕开 cursor 选中。
           onTabComplete={(value) => slashComplete(value)}
           hintSuggestions={inputHintSuggestions}
+        />
+      )}
+      {/* ContextBar 仅聊天视图挂载（T4）：上下文用量条，输入框下方
+          （用户 2026-08-07 反馈：放输入框下方）。list 视图不挂。 */}
+      {view === "chat" && (
+        <ContextBar
+          lastUsage={active.lastUsage}
+          contextWindow={bridge.contextWindow}
+          running={active.runState === "running-fg"}
+          cols={cols}
         />
       )}
       <StatusBar active={active} bgSession={bgSession} />

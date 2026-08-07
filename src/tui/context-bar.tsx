@@ -2,7 +2,8 @@
  * src/tui/context-bar.tsx
  *
  * T4 (#TBD): 上下文用量条 — 三档色容量条（原型 f3afc37 variant3-single.tsx
- * 视觉 `│ 上下文 █░ band NN% 状态 X.Xk/Y.Yk`）。
+ * 视觉 `│ ctx █░ band NN% 状态 X.Xk/Y.Yk`）。标签用 `ctx`（用户 2026-08-07
+ * 反馈：不用中文），状态词 ok / warn / alert 对应三档色。
  *
  * 数值语义（本计划裁决 1）：used = inputTokens + cacheReadInputTokens +
  * cacheCreationInputTokens（cache null → 0，Anthropic 三类 token 互不相交，
@@ -12,7 +13,7 @@
  * 三档色阈值 <50% bgRunning / 50-80% running / >80% error（theme.ts:61-62，
  * 与原型的 bgRunning/running/danger 数值一致）。running 时左 border 600ms
  * 脉动（pal.border ↔ pal.running，原型 usePulse 钩子形态）。
- * 窄列（cols < 40）降级仅 `上下文 NN%`；NO_COLOR 由 ink chalk 自动去色，
+ * 窄列（cols < 40）降级仅 `ctx NN%`；NO_COLOR 由 ink chalk 自动去色，
  * `█░` 形状 + 数字兜底可读（原型 theme.ts:19-21 同约定）。
  */
 import { useEffect, useState } from "react";
@@ -82,17 +83,17 @@ export function ContextBar(props: ContextBarProps): ReactElement {
   if (lastUsage === null) {
     return (
       <Box>
-        <Text color={pal.dim}>│ 上下文 — 待首轮</Text>
+        <Text color={pal.dim}>│ ctx —</Text>
       </Box>
     );
   }
   const color = contextColor(pct);
-  // 窄列（cols < 40）：仅 `上下文 NN%`（省略状态词与 k/k 数字）。
+  // 窄列（cols < 40）：仅 `ctx NN%`（省略状态词与 k/k 数字）。
   if (cols < 40) {
     return (
       <Box>
         <Text color={leftBorder}>│</Text>
-        <Text color={color}> 上下文 {pct}%</Text>
+        <Text color={color}> ctx {pct}%</Text>
       </Box>
     );
   }
@@ -100,12 +101,12 @@ export function ContextBar(props: ContextBarProps): ReactElement {
     <Box>
       <Text color={leftBorder}>│</Text>
       <Text>
-        <Text> 上下文 </Text>
+        <Text> ctx </Text>
         <Text color={color}>{valueBand(pct, 10)}</Text>
         <Text color={color}> {pct}%</Text>
         <Text color={color}>
           {" "}
-          {pct > 80 ? "告警" : pct >= 50 ? "注意" : "安全"}
+          {pct > 80 ? "alert" : pct >= 50 ? "warn" : "ok"}
         </Text>
         <Text color={pal.dim}>
           {" "}

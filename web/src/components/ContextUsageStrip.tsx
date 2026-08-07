@@ -2,7 +2,8 @@
  * web/src/components/ContextUsageStrip.tsx
  *
  * T6 (#TBD): Web 上下文用量条 — 三档色容量条（与 TUI ContextBar 同视觉，
- * 原型 f3afc37 variant3-single.tsx 形态 `上下文 █░ band NN% 状态 X.Xk/Y.Yk`）。
+ * 原型 f3afc37 variant3-single.tsx 形态 `ctx █░ band NN% 状态 X.Xk/Y.Yk`）。
+ * 标签用 `ctx`（用户 2026-08-07 反馈：不用中文），状态词 ok / warn / alert。
  *
  * 数值语义（本计划裁决 1）：used = inputTokens + cacheReadInputTokens +
  * cacheCreationInputTokens（cache null → 0，Anthropic 三类 token 互不相交，
@@ -11,7 +12,7 @@
  * 三档色阈值 <50% 安全 / 50-80% 注意 / >80% 告警，与 TUI theme.ts:61-62 同
  * hex（#7d8a82 / #d9a343 / #c95d47，inline；tokens.css 现有 --color-warn /
  * --color-danger 与 TUI 数值不一致，未复用以保证 TUI / Web 颜色严格对齐）。
- * usage 或 contextWindow 为 null → 单行 `上下文 — 待首轮`（dim）。
+ * usage 或 contextWindow 为 null → 单行 `ctx —`（dim）。
  * 纯组件：useMemo 算 pct/used；无 effect；窄屏不折叠（AppShell footer 已是
  * flex column，按 container 宽度自适应）。
  */
@@ -73,13 +74,13 @@ export function ContextUsageStrip({
         className="mx-auto flex w-full max-w-[var(--chat-max)] items-center gap-2 px-4 pb-1 pt-2 text-xs"
         style={{ color: "var(--color-ink-3)" }}
       >
-        <span>上下文 — 待首轮</span>
+        <span>ctx —</span>
       </div>
     );
   }
 
   const color = pct > 80 ? COLOR_ALERT : pct >= 50 ? COLOR_WARN : COLOR_SAFE;
-  const status = pct > 80 ? "告警" : pct >= 50 ? "注意" : "安全";
+  const status = pct > 80 ? "alert" : pct >= 50 ? "warn" : "ok";
   // sending 时轻微透明，反映「正在跑、读数滞后」一帧（无 effect，与 TUI
   // 600ms 脉动同语义但 web 侧不依赖定时器，避免污染纯组件约束）。
   const rowStyle = sending ? { opacity: 0.85 } : undefined;

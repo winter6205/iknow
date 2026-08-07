@@ -2,6 +2,7 @@
  * tests/web/context-usage-strip.test.tsx
  *
  * T6 (#TBD): ContextUsageStrip 渲染断言 — 三档色阈值 × null 兜底 × cache null。
+ * 标签 `ctx` / 状态 ok / warn / alert（用户 2026-08-07 反馈：不用中文）。
  *
  * 复刻 TUI context-bar.test.tsx 的 renderToString 模式：使用
  * react-dom/server 的 renderToStaticMarkup（tests/web/markdown-copy.test.ts 同款，
@@ -50,11 +51,11 @@ describe("ContextUsageStrip — 三档色阈值", () => {
     readonly status: string;
     readonly color: string;
   }> = [
-    { name: "pct 0 — 安全", pct: 0, status: "安全", color: "#7d8a82" },
-    { name: "pct 49 — 安全", pct: 49, status: "安全", color: "#7d8a82" },
-    { name: "pct 50 — 注意", pct: 50, status: "注意", color: "#d9a343" },
-    { name: "pct 80 — 注意", pct: 80, status: "注意", color: "#d9a343" },
-    { name: "pct 81 — 告警", pct: 81, status: "告警", color: "#c95d47" },
+    { name: "pct 0 — ok", pct: 0, status: "ok", color: "#7d8a82" },
+    { name: "pct 49 — ok", pct: 49, status: "ok", color: "#7d8a82" },
+    { name: "pct 50 — warn", pct: 50, status: "warn", color: "#d9a343" },
+    { name: "pct 80 — warn", pct: 80, status: "warn", color: "#d9a343" },
+    { name: "pct 81 — alert", pct: 81, status: "alert", color: "#c95d47" },
   ];
   for (const { name, pct, status, color } of cases) {
     it(`${name} 渲染状态词与档色 hex`, () => {
@@ -75,21 +76,21 @@ describe("ContextUsageStrip — 三档色阈值", () => {
 });
 
 describe("ContextUsageStrip — null 兜底", () => {
-  it("usage === null → 待首轮", () => {
+  it("usage === null → `ctx —`", () => {
     const html = render({ usage: null, contextWindow: 200000 });
-    assert.ok(html.includes("待首轮"));
-    assert.ok(!html.includes("安全"));
-    assert.ok(!html.includes("注意"));
-    assert.ok(!html.includes("告警"));
+    assert.ok(html.includes("ctx —"));
+    assert.ok(!html.includes("ok"));
+    assert.ok(!html.includes("warn"));
+    assert.ok(!html.includes("alert"));
   });
 
-  it("contextWindow === null → 待首轮", () => {
+  it("contextWindow === null → `ctx —`", () => {
     const html = render({
       usage: usage(1234),
       contextWindow: null,
     });
-    assert.ok(html.includes("待首轮"));
-    assert.ok(!html.includes("安全"));
+    assert.ok(html.includes("ctx —"));
+    assert.ok(!html.includes("ok"));
   });
 });
 
@@ -106,7 +107,7 @@ describe("ContextUsageStrip — cache nulls 当 0", () => {
       contextWindow: 100,
     });
     assert.ok(html.includes("30%"));
-    assert.ok(html.includes("安全"));
+    assert.ok(html.includes("ok"));
     assert.ok(html.includes("0.0k/0.1k"));
   });
 
@@ -122,7 +123,7 @@ describe("ContextUsageStrip — cache nulls 当 0", () => {
       contextWindow: 200,
     });
     assert.ok(html.includes("25%"));
-    assert.ok(html.includes("安全"));
+    assert.ok(html.includes("ok"));
   });
 });
 
@@ -133,7 +134,7 @@ describe("ContextUsageStrip — sending prop", () => {
       contextWindow: 100,
       sending: true,
     });
-    assert.ok(html.includes("安全"));
+    assert.ok(html.includes("ok"));
     assert.ok(html.includes("#7d8a82"));
   });
 });

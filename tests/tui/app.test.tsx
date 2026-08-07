@@ -283,7 +283,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
 
   // T4: ContextBar 挂载 + 一轮含 usage 的 turn → 状态栏收敛 + /info token 明细。
   it(
-    "T4: 聊天视图挂 ContextBar（`│ 上下文`）+ 一轮 usage → /info 显示 token 明细",
+    "T4: 聊天视图挂 ContextBar（`│ ctx`）+ 一轮 usage → /info 显示 token 明细",
     async () => {
       const app = makeApp([
         assistantResult({
@@ -297,28 +297,27 @@ describe("TuiApp 端到端（tracer bullet）", () => {
         }),
       ]);
       await app.ready();
-      // ContextBar 兜底行（null usage）：`│ 上下文 — 待首轮`
+      // ContextBar 兜底行（null usage）：`│ ctx —`
       await waitFor(
-        () => app.lastOutput().includes("│ 上下文"),
+        () => app.lastOutput().includes("│ ctx"),
         8000,
         "contextbar-null"
       );
-      expect(app.lastOutput()).toContain("待首轮");
 
-      // 提交消息 → turn 完成，ContextBar 显示真值（12% 安全）
+      // 提交消息 → turn 完成，ContextBar 显示真值（1% → ok）
       await app.type("你好\r");
       await waitFor(
         () => app.bridge.inflight.ids().size === 0,
         8000,
         "usage-turn-done"
       );
-      // 等 ContextBar 刷新出已用值（1200/200000 = 1% → 安全）
+      // 等 ContextBar 刷新出已用值（1200/200000 = 1% → ok）
       await waitFor(
-        () => app.lastOutput().includes("上下文 ░"),
+        () => app.lastOutput().includes("ctx ░"),
         8000,
         "contextbar-band"
       );
-      expect(app.lastOutput()).toContain("安全");
+      expect(app.lastOutput()).toContain("ok");
 
       // /info → token 明细行（tokens in/out + cache read + window）
       await app.type("/info\r");

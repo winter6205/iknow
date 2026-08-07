@@ -4,7 +4,8 @@
  * T4 (#TBD): ContextBar 渲染冒烟（ink `renderToString` 同 render-smoke 模式）。
  * 数值语义（裁决 1）：used = input + cacheRead + cacheCreation，cache null → 0；
  * pct = round(used / contextWindow * 100)。三档色阈值 <50% bgRunning /
- * 50-80% running / >80% error。narrow (cols<40) 降级仅 `上下文 NN%`。
+ * 50-80% running / >80% error。narrow (cols<40) 降级仅 `ctx NN%`。
+ * 标签 `ctx` / 状态 ok / warn / alert（用户 2026-08-07 反馈：不用中文）。
  */
 import { describe, expect, it } from "vitest";
 import { renderToString } from "ink";
@@ -84,7 +85,7 @@ describe("ContextBar 纯函数（裁决 1 数值语义）", () => {
 });
 
 describe("ContextBar 渲染（ink renderToString）", () => {
-  it("null lastUsage → `待首轮` 兜底（无 band / 无 %）", async () => {
+  it("null lastUsage → `ctx —` 兜底（无 band / 无 %）", async () => {
     const out = await renderToString(
       <ContextBar
         lastUsage={null}
@@ -94,24 +95,23 @@ describe("ContextBar 渲染（ink renderToString）", () => {
       />
     );
     const plain = stripAnsi(out);
-    expect(plain).toContain("待首轮");
-    expect(plain).toContain("│ 上下文");
+    expect(plain).toContain("│ ctx —");
     expect(plain).not.toContain("%");
     expect(plain).not.toContain("k/");
   });
 
-  it("三档色：0% / 49% 安全(bgRunning) / 50% / 80% 注意(running) / 81% 告警(error)", async () => {
+  it("三档色：0% / 49% ok(bgRunning) / 50% / 80% warn(running) / 81% alert(error)", async () => {
     // window=10000，构造 used 0/4900/5000/8000/8100 命中阈值。
     const cases: Array<{
       readonly used: number;
       readonly expectStatus: string;
       readonly expectHex: string;
     }> = [
-      { used: 0, expectStatus: "安全", expectHex: tuiPalette.bgRunning },
-      { used: 4900, expectStatus: "安全", expectHex: tuiPalette.bgRunning },
-      { used: 5000, expectStatus: "注意", expectHex: tuiPalette.running },
-      { used: 8000, expectStatus: "注意", expectHex: tuiPalette.running },
-      { used: 8100, expectStatus: "告警", expectHex: tuiPalette.error },
+      { used: 0, expectStatus: "ok", expectHex: tuiPalette.bgRunning },
+      { used: 4900, expectStatus: "ok", expectHex: tuiPalette.bgRunning },
+      { used: 5000, expectStatus: "warn", expectHex: tuiPalette.running },
+      { used: 8000, expectStatus: "warn", expectHex: tuiPalette.running },
+      { used: 8100, expectStatus: "alert", expectHex: tuiPalette.error },
     ];
     for (const c of cases) {
       const out = await renderToString(
@@ -131,8 +131,8 @@ describe("ContextBar 渲染（ink renderToString）", () => {
   });
 
   it("宽度 40 / 80 / 120 无溢出行（视觉宽 ≤ cols）", async () => {
-    // window=10000 时最宽 case（99%）= `│ 上下文 ██████████ 99% 告警 9.9k/10.0k`
-    // 视觉宽 ≈ 39 ≤ 40；中段 case 也都 ≤ 40。
+    // window=10000 时最宽 case（99%）= `│ ctx ██████████ 99% alert 9.9k/10.0k`
+    // 视觉宽 ≈ 37 ≤ 40；中段 case 也都 ≤ 40。
     for (const cols of [40, 80, 120]) {
       const out = await renderToString(
         <ContextBar
@@ -164,7 +164,7 @@ describe("ContextBar 渲染（ink renderToString）", () => {
       />
     );
     // 左 border 字符存在（形状兜底，NO_COLOR 仍可读）
-    expect(stripAnsi(out)).toContain("│ 上下文");
+    expect(stripAnsi(out)).toContain("│ ctx");
     // band 用 running 色（warm 时 band 色冻结，不随 border 切回 border）
     const runningTuple = ansiRgbTuple(tuiPalette.running);
     expect(out).toContain(runningTuple);
@@ -185,7 +185,7 @@ describe("ContextBar 渲染（ink renderToString）", () => {
     expect(out).not.toContain(`${runningTuple}m│`);
   });
 
-  it("窄列 cols<40：仅 `上下文 NN%`，省略状态词 / k/k 数字", async () => {
+  it("窄列 cols<40：仅 `ctx NN%`，省略状态词 / k/k 数字", async () => {
     const out = await renderToString(
       <ContextBar
         lastUsage={makeUsage(8100)}
@@ -196,19 +196,19 @@ describe("ContextBar 渲染（ink renderToString）", () => {
     );
     const plain = stripAnsi(out);
     expect(plain).toContain("│");
-    expect(plain).toContain("上下文");
+    expect(plain).toContain("ctx");
     expect(plain).toContain("81%");
-    // 省略：状态词、安全/注意/告警；k/k 数字
-    expect(plain).not.toContain("告警");
-    expect(plain).not.toContain("注意");
-    expect(plain).not.toContain("安全");
+    // 省略：状态词、ok/warn/alert；k/k 数字
+    expect(plain).not.toContain("alert");
+    expect(plain).not.toContain("warn");
+    expect(plain).not.toContain("ok");
     expect(plain).not.toContain("k/");
     // 窄列不渲染 band 形状（仅 NN%）
     expect(plain).not.toContain("█");
     expect(plain).not.toContain("░");
   });
 
-  it("完整行：pct=50 注意 时输出形如 `│ 上下文 █████░░░░░ 50% 注意 5.0k/10.0k`", async () => {
+  it("完整行：pct=50 warn 时输出形如 `│ ctx █████░░░░░ 50% warn 5.0k/10.0k`", async () => {
     const out = await renderToString(
       <ContextBar
         lastUsage={makeUsage(5000)}
@@ -218,6 +218,6 @@ describe("ContextBar 渲染（ink renderToString）", () => {
       />
     );
     const plain = stripAnsi(out);
-    expect(plain).toContain("│ 上下文 █████░░░░░ 50% 注意 5.0k/10.0k");
+    expect(plain).toContain("│ ctx █████░░░░░ 50% warn 5.0k/10.0k");
   });
 });
