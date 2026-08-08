@@ -86,14 +86,18 @@ export function createJsonlTraceService(
   // 可能未建)。仅默认 writer 时建目录 —— 注入自定义 writer (测试用 always-throw)
   // 时调用方掌控写盘, 目录创建由调用方负责, 不在工厂内强加 IO 副作用。
   const sessionFile = join(filePath, `${conversationId}.jsonl`);
+  // mkdir 延迟到首次写入: 构造期不做 IO —— 目标路径被同名文件占据等失败由
+  // recordXxx 的 try/catch warn-once 兜底 (ADR-0003 D13), 不在构造时抛错打挂 turn。
+  let dirReady = false;
   const writer: (line: string) => void =
     options.writer ??
-    (() => {
-      mkdirSync(filePath, { recursive: true });
-      return (line: string): void => {
-        appendFileSync(sessionFile, line + "\n", "utf8");
-      };
-    })();
+    ((line: string): void => {
+      if (!dirReady) {
+        mkdirSync(filePath, { recursive: true });
+        dirReady = true;
+      }
+      appendFileSync(sessionFile, line + "\n", "utf8");
+    });
 
   // 实例级去重: 首次写盘失败 warn 一次, 后续静默 (ADR Decision 13)。
   let warnedOnce = false;

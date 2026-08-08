@@ -23,6 +23,7 @@ import {
   statSync,
   existsSync,
   readdirSync,
+  writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -427,6 +428,27 @@ describe("createJsonlTraceService — 写盘失败处理", () => {
       await a.recordLlmCall(SAMPLE_LLM);
       await b.recordLlmCall(SAMPLE_LLM);
       assert.equal(warnSpy.mock.calls.length, 2);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("filePath 被同名文件占据 (旧 ./trace.jsonl) → 构造不抛, recordXxx 返回 undefined 不炸 turn", async () => {
+    // 回归: 写侧默认曾是 ./trace.jsonl 单文件; T2 目录语义后 mkdirSync 撞旧文件
+    // EEXIST 曾在构造期抛出打挂 TUI turn。
+    const legacyFile = join(scratch, "trace.jsonl");
+    writeFileSync(legacyFile, '{"legacy":"single-file"}\n', "utf8");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const svc = createJsonlTraceService({
+        filePath: legacyFile,
+        conversationId: "conv-eexist",
+      });
+      const turnId = await svc.recordTurn(SAMPLE_TURN);
+      assert.equal(turnId, undefined, "EEXIST 走 warn-once, 返回 undefined");
+      const llmId = await svc.recordLlmCall(SAMPLE_LLM);
+      assert.equal(llmId, undefined, "后续记录同样降级, 不抛");
+      assert.ok(warnSpy.mock.calls.length >= 1, "失败应 warn 一次");
     } finally {
       warnSpy.mockRestore();
     }

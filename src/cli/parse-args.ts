@@ -32,8 +32,9 @@ export type ParsedCli = {
    */
   maxBytes?: number;
   /**
-   * Trace output file path for ask/serve (--trace-out flag).
-   * Resolution: flag > IKNOW_TRACE_OUT env > "./trace.jsonl" (ADR-0003 D3/D4).
+   * Trace output directory for ask/serve/tui (--trace-out flag).
+   * Resolution: flag > IKNOW_TRACE_OUT env > "./trace/" (ADR-0003 D3/D4).
+   * T2 后语义为目录：实际写 <traceOut>/<conversationId>.jsonl。
    */
   traceOut?: string;
   /**

@@ -70,7 +70,7 @@ describe("parse-args --trace-out", () => {
 
 describe("trace path priority resolution", () => {
   function resolveTracePath(flag: string | undefined): string {
-    return flag ?? process.env.IKNOW_TRACE_OUT ?? "./trace.jsonl";
+    return flag ?? process.env.IKNOW_TRACE_OUT ?? "./trace/";
   }
 
   let savedEnv: string | undefined;
@@ -91,10 +91,10 @@ describe("trace path priority resolution", () => {
     assert.equal(resolveTracePath(undefined), "/tmp/env.jsonl");
   });
 
-  it("default ./trace.jsonl when no flag and no env", () => {
+  it("default ./trace/ when no flag and no env", () => {
     savedEnv = process.env.IKNOW_TRACE_OUT;
     delete process.env.IKNOW_TRACE_OUT;
-    assert.equal(resolveTracePath(undefined), "./trace.jsonl");
+    assert.equal(resolveTracePath(undefined), "./trace/");
   });
 });
 

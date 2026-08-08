@@ -40,11 +40,10 @@ import { buildViolationWiring } from "./harness/sandbox/violation-executor.js";
 import { openBrowser } from "./cli/open-browser.js";
 import type { TraceServeOptions } from "./traceserver/serve.js";
 
-const DEFAULT_TRACE_PATH = "./trace.jsonl";
 /**
- * T7: `iknow trace` 的默认读目录 —— 每会话独立文件（`<traceDir>/<convId>.jsonl`）。
- * 与写侧默认 DEFAULT_TRACE_PATH（./trace.jsonl 单文件）分开：trace CLI 读目录，
- * serve/chat/ask 写路径。两者不冲突（一个是文件、一个是目录）。
+ * T7: 写侧与读侧共用的默认 trace 目录 —— 每会话独立文件
+ * （`<traceDir>/<convId>.jsonl`）。T2 后写侧语义即目录，默认值必须与读侧
+ * 一致；旧单文件 `./trace.jsonl`（LEGACY_TRACE_FILE）只用于迁移 fail-fast 检测。
  */
 const DEFAULT_TRACE_DIR = "./trace/";
 /**
@@ -54,11 +53,11 @@ const DEFAULT_TRACE_DIR = "./trace/";
 const LEGACY_TRACE_FILE = "./trace.jsonl";
 
 /**
- * Resolve trace output path: flag > IKNOW_TRACE_OUT env > default.
- * ADR-0003 D3: default is relative to CWD.
+ * Resolve trace output path: flag > IKNOW_TRACE_OUT env > default directory.
+ * ADR-0003 D3: default is relative to CWD. T2 后语义为目录。
  */
 function resolveTracePath(flag: string | undefined): string {
-  return flag ?? process.env.IKNOW_TRACE_OUT ?? DEFAULT_TRACE_PATH;
+  return flag ?? process.env.IKNOW_TRACE_OUT ?? DEFAULT_TRACE_DIR;
 }
 
 function printCliError(err: unknown): void {
