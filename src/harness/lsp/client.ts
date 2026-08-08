@@ -162,6 +162,13 @@ async function spawnClient(
     initializationOptions: initialization,
   });
 
+  // LSP initialized 通知（生产正确性，spec 302-lsp-multilang § T6）：initialize
+  // 响应后必须补发 `initialized` 通知，server 才算进入 ready 态。pyright 实测
+  // 不 gate——收不到 initialized 则忽略后续所有请求；tsserver 不 gate 所以 TS
+  // 原本正常，补发对 tsserver 兼容（幂等，重复发送无害）。此修复后，探针侧
+  // （scripts/lsp-probe.ts）不再另行补发，避免 double-init。
+  await connection.sendNotification("initialized", {});
+
   // 订阅 push diagnostics：tsserver / typescript-language-server 不实现
   // pull 的 textDocument/diagnostic（LSP 3.16+），用 publishDiagnostics 通知
   // 累积最近一次 per-uri 的诊断列表。latest-wins:同一 uri 多次推送覆盖。

@@ -165,6 +165,28 @@ describe("getClient same-root reuse", () => {
   });
 });
 
+// ── 1b. initialized 通知（T6 生产正确性修复）──────────────────────────────
+//
+// 锚点 client.ts spawnClient：initialize 响应后必须补发 `initialized` 通知，
+// pyright 实测不 gate——收不到 initialized 则忽略后续所有请求；tsserver 不 gate
+// 所以 TS 原本正常，补发对 tsserver 兼容。断言：spawnClient 发 initialize 后
+// 恰好补发一次 initialized 通知（探针不再另行补发，避免 double-init）。
+
+describe("spawnClient sends initialized after initialize", () => {
+  it("sends exactly one `initialized` notification after the initialize handshake", async () => {
+    const { server } = makeFakeServer("initialized");
+
+    const client = await getClient(ctx, "/root/init.ts", { server });
+    expect(client).toBeDefined();
+
+    const initCalls = mockSendNotification.mock.calls.filter(
+      (c) => c[0] === "initialized"
+    );
+    expect(initCalls).toHaveLength(1); // 恰好一次，不 double-init
+    expect(initCalls[0][1]).toEqual({});
+  });
+});
+
 // ── 2. broken memory ──────────────────────────────────────────────────────────
 
 describe("getClient broken memory", () => {
@@ -448,9 +470,13 @@ describe("cancelRequest NaN id", () => {
 
     await cancelRequest(client, NaN);
 
-    expect(mockSendNotification).toHaveBeenCalledTimes(1);
-    expect(mockSendNotification.mock.calls[0][0]).toBe("$/cancelRequest");
-    expect(mockSendNotification.mock.calls[0][1]).toEqual({ id: NaN });
+    // spawnClient 握手先发一次 `initialized` 通知（T6 生产正确性修复），
+    // 这里只断言 `$/cancelRequest` 那次（过滤掉握手通知）。
+    const cancelCalls = mockSendNotification.mock.calls.filter(
+      (c) => c[0] === "$/cancelRequest"
+    );
+    expect(cancelCalls).toHaveLength(1);
+    expect(cancelCalls[0][1]).toEqual({ id: NaN });
   });
 });
 
