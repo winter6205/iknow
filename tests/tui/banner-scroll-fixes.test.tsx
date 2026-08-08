@@ -20,6 +20,7 @@ import { render } from "ink";
 import {
   TuiApp,
   createToolEventSink,
+  chromeReserveRows,
   noticeRenderRows,
 } from "../../src/tui/app.js";
 import {
@@ -193,8 +194,9 @@ describe("banner + scroll 修复回归（2026-08-07）", () => {
     try {
       await delay(400);
       // 等 mount + initialSession 渲染完。contentRows = banner(15~16) + user(2) +
-      // assistant(40 + 1 = 41) ≈ 58~59。viewportRows = 24 - reserved(4) = 20。
-      // maxScroll ≈ 38。scroll=0：窗口 [~38, 58)，最新末段「内容第40行」可见。
+      // assistant(40 + 1 = 41) ≈ 58~59。viewportRows = 24 - chromeReserveRows(7)
+      // = 17。maxScroll ≈ 41。scroll=0：窗口 [~41, 58)，最新末段「内容第40行」
+      // 可见。
       // 用 assistant 内容行作窗口 sentinel（「内容第40行」只出现在 assistant
       // 内容里，状态栏会话摘要 = user 文本，不冲突）。
       await waitFor(
@@ -251,4 +253,97 @@ describe("banner + scroll 修复回归（2026-08-07）", () => {
     // undefined → 0（无 notice）。
     expect(noticeRenderRows(undefined, 44)).toBe(0);
   });
+
+  // #268 同类回归（2026-08-08 下午）：用户反馈「进消息后顶部 logo 又看不
+  // 见」。根因：viewport 预算只扣 4 行（输入 2 + ask 1 + headroom 1），实际
+  // chrome 是 输入框 3 行（圆角线框顶框 + 内容 + 底框）+ mode 指示行 1 +
+  // ContextBar 1 + headroom 1 + ask 1 = 7 → 帧高 = 终端行数 + 2 → 终端上卷
+  // 把 banner 顶出屏幕。机制守卫：chromeReserveRows 逐项入账（fake-tty 能测
+  // 帧高但测不了真实上卷，故守行账函数本身 + 帧高 e2e 双保险）。
+  it("chromeReserveRows：固定 chrome 逐项入账（输入框 3 行 + mode + ctx + headroom + ask）", () => {
+    // 稳态基线 = 1 headroom + 1 mode + 3 输入框 + 1 ctx + 1 ask = 7。
+    expect(
+      chromeReserveRows({ noticeRows: 0, inputHintRows: 0, bgLine: false })
+    ).toBe(7);
+    // notice 按折行后行数 + 自身尾 margin 1。
+    expect(
+      chromeReserveRows({ noticeRows: 3, inputHintRows: 0, bgLine: false })
+    ).toBe(11);
+    // 输入候选每行 +1。
+    expect(
+      chromeReserveRows({ noticeRows: 0, inputHintRows: 4, bgLine: false })
+    ).toBe(11);
+    // 后台运行标记行 +1。
+    expect(
+      chromeReserveRows({ noticeRows: 0, inputHintRows: 0, bgLine: true })
+    ).toBe(8);
+  });
+
+  it("帧高守卫：16 行矮终端 + 消息，整帧不超过终端行数（banner 不被上卷顶走）", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "iknow-banner-"));
+    const stdin = fakeTty(16, 100);
+    const stdout = fakeTty(16, 100);
+    const out: string[] = [];
+    stdout.on("data", (c) => out.push(String(c)));
+    const { attachSession } = await import("../../src/tui/session-state.js");
+    const initial = attachSession({
+      conversation_id: "short-terminal-session",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "今天星期几" }] },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "text",
+              text: "今天是 2026 年 8 月 8 日，星期六。",
+            },
+          ],
+        },
+      ],
+      turnCount: 1,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      jsonMode: false,
+    });
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      deps: makeDeps([]),
+      inflight: createInflightRegistry(),
+    });
+    const instance = render(
+      <TuiApp
+        bridge={bridge}
+        askBridge={createTuiAskUserBridge()}
+        toolEventSink={createToolEventSink()}
+        initialSession={initial}
+        cwd="/tmp/proj"
+        dataDir={baseDir}
+      />,
+      { stdout, stdin, exitOnCtrlC: false, patchConsole: false }
+    );
+    try {
+      await waitFor(
+        () => strip(out.join("")).includes("今天星期几"),
+        5000,
+        "message-rendered"
+      );
+      await delay(300);
+      // 取最后一个可视帧：行数必须 ≤ 终端行数（旧实现帧高 18 > 16 →
+      // 真实终端上卷 2 行，banner 顶被顶出屏幕）。
+      let last = "";
+      for (let i = out.length - 1; i >= 0; i--) {
+        const v = strip(out[i] ?? "");
+        if (v.length > 0) {
+          last = v;
+          break;
+        }
+      }
+      const frameRows = last.replace(/\n+$/, "").split("\n").length;
+      expect(frameRows, `帧高 ${frameRows} ≤ 终端 16 行`).toBeLessThanOrEqual(
+        16
+      );
+    } finally {
+      instance.unmount();
+      await rm(baseDir, { recursive: true, force: true });
+    }
+  }, 15_000);
 });

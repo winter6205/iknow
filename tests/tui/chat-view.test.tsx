@@ -566,13 +566,14 @@ describe("ChatView 行级裁剪（#189 回归保护）", () => {
 
   it("thinking 块部分覆盖：窗口只露 thinking 行（redacted/answer 裁掉）", async () => {
     // 展开态：thinking "a".repeat(20), cols=12 → wrapTextVisual 2 行（12 + 8）
-    // + MARGIN_LINE = 3 行；redacted 占位 + margin = 2 行；text 1 行 + margin
-    // = 2 行。assistant lines = 7，totalRows = 8。user "Q" totalRows = 2。
-    // contentRows = 10，viewportRows=2, scrollRows=7：
-    // maxScroll = 10-2 = 8, scroll = 7, endRow = 3, startRow = 1。
-    // 窗口 [1, 3)：user [0,2) → slice [1,2) 空（end<=start）→ 不渲染；
-    // assistant [2,10) → slice [max(0,1-2), min(7,3-2)) = [0,1) = thinking 第 0 行
-    // （12 a's）+ 第 1 行（8 a's）= 完整 thinking 内容（20 a's）。
+    // + MARGIN_LINE = 3 行；redacted 占位 + margin = 2 行；text UNIQUE_ANSWER
+    // 13 列折 2 行 + margin = 3 行。assistant lines = 8，totalRows = 9。
+    // user "Q" totalRows = 2。末条尾 margin 收口（tail 为空 → pop 末尾 self
+    // margin）：assistant totalRows 9 → 8。contentRows = 2 + 8 = 10。
+    // viewportRows=2, scrollRows=6：maxScroll = 10-2 = 8, scroll = 6,
+    // endRow = 4, startRow = 2。窗口 [2, 4)：user [0,2) 整段在窗口上方不渲染；
+    // assistant [2,10) → slice [0, min(8,4-2)) = [0,2) = thinking 两行
+    // （12 a's + 8 a's）= 完整 thinking 内容（20 a's）。
     // redacted 占位 / text 答案均在窗口下方被裁。
     const longThinking = "a".repeat(20);
     const session = makeSession([
@@ -593,7 +594,7 @@ describe("ChatView 行级裁剪（#189 回归保护）", () => {
         liveToolLines={[]}
         askLine={undefined}
         thinkingExpanded
-        scrollRows={7}
+        scrollRows={6}
         viewportRows={2}
       />,
       { columns: 12 }
@@ -632,10 +633,15 @@ describe("ChatView 行级裁剪（#189 回归保护）", () => {
       { role: "assistant", content: [{ type: "text", text: md }] },
     ];
     const session = makeSession(messages);
-    const totalRows = messages.reduce(
-      (acc, m) => acc + measureMessage(m, 80).totalRows,
-      0
-    );
+    // 末条尾 margin 收口（tail 为空 → ChatView pop 末条末尾 self margin）：
+    // parity 基准同样用 omitTrailingSelfMargin 测末条，与 ChatView 行账同源。
+    const totalRows =
+      messages
+        .slice(0, -1)
+        .reduce((acc, m) => acc + measureMessage(m, 80).totalRows, 0) +
+      measureMessage(messages[messages.length - 1]!, 80, {
+        omitTrailingSelfMargin: true,
+      }).totalRows;
     const output = await renderToString(
       <ChatView
         session={session}

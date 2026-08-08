@@ -3,6 +3,7 @@
  *
  * 复现用户最早的主诉：「一开始发消息就会把logo给去掉」。
  * 直接对比空会话 / 发一条消息 后 TUI 输出。
+ * 2026-08-08 定稿语义：空会话完整眼；有消息后塌成单行 ◆ iknow 常驻。
  */
 import { describe, it, expect } from "vitest";
 import { PassThrough } from "node:stream";
@@ -52,7 +53,7 @@ function fakeTty(rows = 24, cols = 80) {
 }
 
 describe("REPRO：发消息后 logo 还在不在？", () => {
-  it("空会话 → 发一条消息 → banner 仍可见（sticky 头语义验证）", async () => {
+  it("空会话 → 发一条消息 → logo 仍可见（塌成单行 ◆ iknow 常驻）", async () => {
     const baseDir = await mkdtemp(join(tmpdir(), "logo-repro-"));
     const stdin = fakeTty(30, 80);
     const stdout = fakeTty(30, 80);
@@ -105,30 +106,26 @@ describe("REPRO：发消息后 logo 还在不在？", () => {
         "assistant-in-window"
       );
 
-      // 发消息后：banner 仍是完整智慧之眼（方案 B：banner + 消息同 row
-      // window，输入框固定在底部）。用户可向上滚看见完整 banner，向下滚与
-      // 消息一起滚出。这是 2026-08-07 用户复看裁定最终语义：
-      // 「下面对话框要固定，消息跟图标可以向上滚动」。
+      // 发消息后：banner 塌成单行 `◆ iknow <version>`（2026-08-08 用户裁定
+      // 「必须做到完整修复」：矮终端下完整眼 ≈15 行与消息放同一滚动区永远
+      // 放不下同一屏，logo 会被顶出屏幕 → 单行常驻保留 logo 标识、把视口
+      // 让给消息区。空会话仍是完整眼（见上方 empty-session 断言）。
       const afterText = strip(out.join("")).slice(beforeSend);
+      const hasShortBanner = afterText.includes("◆ iknow");
       const hasFullBannerTop = afterText.includes("╭◆ iknow");
-      const hasInfoPanel = afterText.includes("Version");
       const hasUserMsg = afterText.includes("hello");
       const hasAssistant = afterText.includes("hi back");
       console.log(
-        `[发消息后] has╭◆iknow=${hasFullBannerTop} hasVersion=${hasInfoPanel} hasHello=${hasUserMsg} hasAssistant=${hasAssistant}`
+        `[发消息后] has◆iknow=${hasShortBanner} has╭◆iknow=${hasFullBannerTop} hasHello=${hasUserMsg} hasAssistant=${hasAssistant}`
       );
-      console.log("---after text 末尾 800 字符---");
-      console.log(afterText.slice(-800));
 
-      // 核心断言：完整眼始终存在（不是塌成 0 行 / 不是塌成单行）
-      expect(
-        hasFullBannerTop,
-        "发消息后完整 banner 顶部 ╭◆ iknow─…╮ 仍可见（不塌成单行）"
-      ).toBe(true);
-      expect(
-        hasInfoPanel,
-        "发消息后完整 banner 的 Version/Cwd/Data dir info 栏仍可见"
-      ).toBe(true);
+      // 核心断言：单行 logo 常驻（不是塌成 0 行），完整眼不再常驻。
+      expect(hasShortBanner, "发消息后单行 ◆ iknow 仍可见（logo 不消失）").toBe(
+        true
+      );
+      expect(hasFullBannerTop, "发消息后完整 banner 顶框塌掉（单行语义）").toBe(
+        false
+      );
       expect(hasUserMsg).toBe(true);
       expect(hasAssistant).toBe(true);
     } finally {

@@ -154,6 +154,33 @@ export function noticeRenderRows(
   return lines?.reduce((n, l) => n + wrapTextVisual(l, cols).length, 0) ?? 0;
 }
 
+/** ChatView 之外的固定 chrome 行数（viewport 行账 SSOT，可单测）。
+ *  2026-08-08 用户反馈「进消息后顶部 logo 又看不见」：旧预算只扣 4 行
+ *  （输入 2 + ask 1 + headroom 1），实际 chrome 更高——输入框圆角线框是
+ *  **3 行**（顶框 + 内容 + 底框），且 mode 指示行 / ContextBar 各 1 行未
+ *  入账 → 帧高 > 终端行数 → 终端上卷把 banner 顶出屏幕（#268 同类回归）。
+ *  收敛到这里：逐项入账，新增底部行必须同步本函数。 */
+export function chromeReserveRows(opts: {
+  /** notice 折行后行数（0 = 无 notice）。 */
+  readonly noticeRows: number;
+  /** 输入框下方 slash 候选行数（0 = 无候选）。 */
+  readonly inputHintRows: number;
+  /** 后台运行中标记行是否显示。 */
+  readonly bgLine: boolean;
+}): number {
+  return (
+    1 + // ChatView marginTop headroom（顶部留白 1 行）
+    1 + // 权限 mode 指示行
+    3 + // 输入框圆角线框：顶框线 + 内容行 + 底框线
+    opts.inputHintRows +
+    1 + // ContextBar 用量条
+    1 + // ask 槽（ChatView tail，恒预留）
+    // notice 本体 + 自身 marginBottom=1（notice 非末位子，margin 不折叠）
+    (opts.noticeRows > 0 ? opts.noticeRows + 1 : 0) +
+    (opts.bgLine ? 1 : 0)
+  );
+}
+
 export function TuiApp(props: TuiAppProps): ReactElement {
   const { bridge, askBridge, toolEventSink } = props;
   // W2 扩展：permissionMode 缺省 → 内部 default context（测试兼容；
@@ -254,19 +281,24 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   const askTick = askBridge.pending() !== undefined;
   useTick(askTick ? 100 : 0);
 
-  // 方案 B（最终定稿）：banner 归 ChatView 内部 row window，**任何时候都保持
-  // 完整眼** —— 包括有消息之后。banner 与消息共用同一滚动空间，用户向上滚
-  // 能翻回完整 banner，向下滚与消息一起滚出。底部输入框 + 状态栏固定
-  // （在 app.tsx JSX 中 ChatView 之外）始终在底部。
-  // 窄终端（cols < BANNER_MIN_COLS）完整眼放不下 → 退化为单行 short=true。
-  // 空会话额外加一行顶部分隔线，区分 banner 和下方空白；消息存在时由消息
-  // 自身提供分隔（避免重复加线）。
-  // 用户 2026-08-07 复看：「下面对话框要固定，消息跟图标可以向上滚动」。
-  // 注：之前的"有消息后塌成单行"理解错了——logo 字符保留不够，向上滚应
-  // 看到完整 banner。
+  // 方案 B + 单行塌缩（2026-08-08 用户裁定「必须做到完整修复」）：
+  //  - 空会话：完整眼 banner + 顶部分隔线；
+  //  - 有消息后：塌成单行 `◆ iknow <version>`——矮终端下完整眼（≈15 行）
+  //    与消息放进同一滚动区永远放不下同一屏，logo 会被顶出屏幕；单行
+  //    常驻保留 logo 标识、把视口让给消息区（2026-08-07 真实 pty 复现定稿
+  //    的语义回归；54e4a8a 的「任何时候完整 banner」在矮终端造成用户
+  //    「进消息后 logo 看不见」的再次反馈）。
+  // 窄终端（cols < BANNER_MIN_COLS）完整眼本来就放不下 → 同样单行。
+  // 底部输入框 + 状态栏固定（ChatView 之外）始终在底部。
   const bannerLines = useMemo(() => {
     if (view !== "chat") return [];
     const sess = sessions[activeKey] ?? initial;
+    if (sess.messages.length > 0) {
+      return renderBanner(
+        { version: VERSION, cwd: props.cwd, dataDir: props.dataDir },
+        { cols, short: true }
+      );
+    }
     const full = renderBanner(
       { version: VERSION, cwd: props.cwd, dataDir: props.dataDir },
       { cols, short: false }
@@ -278,19 +310,17 @@ export function TuiApp(props: TuiAppProps): ReactElement {
         { cols, short: true }
       );
     }
-    if (sess.messages.length === 0) {
-      // 空会话：完整眼 + 顶部分隔
-      return [...full, `\x1b[38;5;244m${"─".repeat(cols)}\x1b[0m`];
-    }
-    return full;
+    // 空会话：完整眼 + 顶部分隔
+    return [...full, `\x1b[38;5;244m${"─".repeat(cols)}\x1b[0m`];
   }, [view, activeKey, sessions, initial, cols, props.cwd, props.dataDir]);
 
   const viewportRows = useMemo(() => {
-    // 固定行扣减：输入框（2：圆角线框 1 + hint 1 视情况）/ ask 槽（1）/
-    // notice（按 lines）。状态栏已于用户 2026-08-07 反馈移除（空闲/版本号/
-    // 运行态全部不需要——版本号 banner 已有，运行态 ContextBar 脉动承担，
-    // 「后台运行中」bg 标记保留为独立条件行 +1）。滚动指示器（顶部 / fold）
-    // 的行账由 ChatView 内部从 viewportRows 扣除（INDICATOR_ROWS，SSOT）。
+    // 固定 chrome 逐行入账（chromeReserveRows SSOT）：输入框 3 行 + mode
+    // 指示行 + ContextBar + headroom + ask 槽（+ notice 折行行数及其尾
+    // margin + 输入候选行 + 后台运行标记）。状态栏已于用户 2026-08-07
+    // 反馈移除（空闲/版本号/运行态全部不需要——版本号 banner 已有，运行态
+    // ContextBar 脉动承担）。滚动指示器的行账由 ChatView 内部从 viewportRows
+    // 扣除（INDICATOR_ROWS，SSOT）。
     //
     // 方案 B（最终定稿）：banner 已归入 ChatView 内部 row window 作为第一段
     // content，**不再从 viewport 扣减**——否则空会话完整 banner（≈16 行）会
@@ -302,13 +332,19 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     // 只数 lines.length 会在窄终端低估 → 整帧溢出，正是 #268 banner 截断的
     // 同类回归）。
     const noticeLines = noticeRenderRows(notice?.lines, cols);
-    // +1 headroom：用户 2026-08-08 反馈「进消息后最顶 iknow 图标被截断、
-    // TUI 对终端顶部没对齐」，ChatView 顶层 Box 加 marginTop=1，把这 1 行
-    // 从 viewport 预先扣账，保证 margin + 窗口内容 ≤ ChatView flexGrow 分配
-    // 不溢出。
-    const reserved = 2 + 1 + noticeLines + 1; // 输入 + ask + notice + headroom
+    const hintRows = inputValue.trim().startsWith("/")
+      ? slashSuggestions(inputValue).length
+      : 0;
+    const bgLine = Object.values(sessions).some(
+      (s) => s.runState === "running-bg"
+    );
+    const reserved = chromeReserveRows({
+      noticeRows: noticeLines,
+      inputHintRows: hintRows,
+      bgLine,
+    });
     return Math.max(5, rows - reserved);
-  }, [rows, notice, cols]);
+  }, [rows, notice, cols, inputValue, sessions]);
 
   // 工具事件订阅：T4 (#175) 优先按 tool_use_id 配对入结构化运行状态;
   // 缺 toolUseId 时落回 legacy 字符串行追加(向后兼容)。detail 按 cols 收口

@@ -160,15 +160,6 @@ export function flatContentLines(args: {
   readonly thinkingDraftMasked: string;
   readonly thinkingExpanded: boolean;
 }): ReadonlyArray<string> {
-  const out: string[] = [];
-  for (const ln of args.bannerLines) out.push(ln);
-  for (const m of args.session.messages) {
-    const mm = messageRender(m, args.cols, {
-      thinkingExpanded: args.thinkingExpanded,
-    });
-    for (const ln of mm.lines) out.push(ln);
-    if (mm.lines.length > 0) out.push(MARGIN_LINE_CHAT);
-  }
   const running = args.session.runState === "running-fg";
   const tail = tailSlot(
     args.liveToolLines,
@@ -181,6 +172,31 @@ export function flatContentLines(args: {
     args.liveToolRuns
   );
   const tailTotal = tail.total;
+  const out: string[] = [];
+  for (const ln of args.bannerLines) out.push(ln);
+  // 镜像 ChatView 末条消息尾 margin 收口：tail 为空时最后一条非空消息 pop
+  // 末尾 self margin（行账同源，选区坐标映射才不错位）。
+  const renders = args.session.messages.map((m) =>
+    messageRender(m, args.cols, { thinkingExpanded: args.thinkingExpanded })
+  );
+  if (tailTotal === 0) {
+    for (let i = renders.length - 1; i >= 0; i--) {
+      const r = renders[i]!;
+      if (r.lines.length === 0) continue;
+      renders[i] = messageRender(r.message, args.cols, {
+        thinkingExpanded: args.thinkingExpanded,
+        omitTrailingSelfMargin: true,
+      });
+      break;
+    }
+  }
+  for (const mm of renders) {
+    for (const ln of mm.lines) out.push(ln);
+    if (mm.lines.length > 0) out.push(MARGIN_LINE_CHAT);
+  }
+  // 目标长度 = banner + 消息行账 + tail.total；tail 的文本行先实推，
+  // margin / spinner 占位行由末尾补齐（长度对齐 ChatView contentRows）。
+  const target = out.length + tailTotal;
   for (const run of args.liveToolRuns) {
     out.push(
       run.status === "running"
@@ -211,24 +227,8 @@ export function flatContentLines(args: {
   }
   // tail 与 ChatView tailSlot 行账对齐：spinner 1 行 + 各 margin 行以占位补齐，
   // 保证 flatContentLines 长度 === ChatView 的 contentRows（窗口映射才一致）。
-  while (out.length < tailTarget(args, tailTotal)) out.push(MARGIN_LINE_CHAT);
+  while (out.length < target) out.push(MARGIN_LINE_CHAT);
   return out;
-}
-
-/** 计算 flat 行数目标 = banner + 消息（含 margin）+ tail.total（对齐 ChatView）。 */
-function tailTarget(
-  args: {
-    readonly bannerLines: ReadonlyArray<string>;
-    readonly session: TuiSessionState;
-    readonly cols: number;
-  },
-  tailTotal: number
-): number {
-  let n = args.bannerLines.length;
-  for (const m of args.session.messages) {
-    n += messageRender(m, args.cols).totalRows;
-  }
-  return n + tailTotal;
 }
 
 export interface ChatViewProps {
@@ -275,9 +275,11 @@ export interface ChatViewProps {
    */
   readonly thinkingExpanded?: boolean;
   /**
-   * 滚动对齐（方案 B）：banner 是 row window 的第一段内容（与消息同 scroll
-   * space）。空会话 = 完整眼 + 顶部分隔；有消息后 = 单行 `◆ iknow`。
-   * 上滚可见 logo、下滚一起滚出；输入框 / 状态栏固定在 app 底部不受影响。
+   * 滚动对齐（方案 B + 单行塌缩）：banner 是 row window 的第一段内容（与消息
+   * 同 scroll space）。空会话 = 完整眼 + 顶部分隔；有消息后 = 单行 `◆ iknow`
+   * （app 层 bannerLines 决定，2026-08-08 用户裁定：矮终端完整眼与消息
+   * 放不下同一屏，单行常驻保留 logo、腾出消息区）。输入框 / 状态栏固定在
+   * app 底部不受影响。
    */
   readonly bannerLines?: ReadonlyArray<string>;
   /**
@@ -309,13 +311,27 @@ export function ChatView(props: ChatViewProps): ReactElement {
   const deferredDrafts = useDeferredValue(props.draftsMasked);
   const deferredThinkingDrafts = useDeferredValue(props.thinkingDraftMasked);
   const statusMap = toolResultStatusMap(session.messages);
-  const measured: Measured[] = [];
-  let messageCursor = 0;
+  const running = session.runState === "running-fg";
+  // tail 先行：末条消息的尾 margin 收口依赖 tailRows（tail 为空时末条
+  // 消息与输入框之间只留 1 行外层 margin，去掉块尾 self margin 的双空行）。
+  const tail = tailSlot(
+    props.liveToolLines,
+    props.askLine,
+    running,
+    running ? deferredThinkingDrafts : undefined,
+    running ? deferredDrafts : undefined,
+    cols,
+    props.thinkingExpanded ?? false,
+    props.liveToolRuns ?? []
+  );
+  const tailRows = tail.total;
   // 方案 B（最终定稿）：banner 在 ChatView row window 内作为第一段，与
   // 消息共享同一 scroll space。向上滚能翻回完整 banner，向下滚 banner 与
   // 消息一起滚出（输入框 + 状态栏在 ChatView 之外固定挂载）。用户 2026-08-07
   // 复看：「下面对话框要固定，消息跟图标可以向上滚动」。
   const bannerRows = props.bannerLines?.length ?? 0;
+  const measured: Measured[] = [];
+  let messageCursor = 0;
   for (const m of session.messages) {
     const mm = messageRender(m, cols, {
       thinkingExpanded: props.thinkingExpanded,
@@ -330,18 +346,27 @@ export function ChatView(props: ChatViewProps): ReactElement {
     });
     messageCursor += mm.totalRows;
   }
-  const running = session.runState === "running-fg";
-  const tail = tailSlot(
-    props.liveToolLines,
-    props.askLine,
-    running,
-    running ? deferredThinkingDrafts : undefined,
-    running ? deferredDrafts : undefined,
-    cols,
-    props.thinkingExpanded ?? false,
-    props.liveToolRuns ?? []
-  );
-  const tailRows = tail.total;
+  // 末条消息尾 margin 收口：tail 为空时重测最后一条 measured（pop 末尾
+  // self margin），行账随 totalRows −1 同步收缩。lastTrimmed = true 时全
+  // 可见路径的 MessageBlocks 也要抹掉最后一个块的 marginBottom（同源）。
+  let lastTrimmed = false;
+  if (tailRows === 0 && measured.length > 0) {
+    const lastM = measured[measured.length - 1]!;
+    const trimmed = messageRender(lastM.message, cols, {
+      thinkingExpanded: props.thinkingExpanded,
+      omitTrailingSelfMargin: true,
+    });
+    lastTrimmed = trimmed.totalRows < lastM.totalRows;
+    if (lastTrimmed) {
+      measured[measured.length - 1] = {
+        ...lastM,
+        lines: trimmed.lines,
+        blocks: [...trimmed.blocks],
+        totalRows: trimmed.totalRows,
+      };
+      messageCursor -= lastM.totalRows - trimmed.totalRows;
+    }
+  }
   // ── 朴素滚动（2026-08-07 定稿：用户「第二种」，去所有折叠/指示器）──
   // 语义：banner + 消息 + tail 是同一内容流。`scrollRows` = 向上翻了多少
   // 物理行。窗口固定高度 = viewport（不含指示器/折叠 chrome）。scroll=0
@@ -423,6 +448,7 @@ export function ChatView(props: ChatViewProps): ReactElement {
               cols={cols}
               statusMap={statusMap}
               thinkingExpanded={props.thinkingExpanded}
+              noTrailingSelfMargin={lastTrimmed && i === measured.length - 1}
             />
           ) : (
             <MessageBlocksClipped

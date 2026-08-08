@@ -72,11 +72,18 @@ export function thinkingFoldLine(): string {
   return "[思考]";
 }
 
-/** 顶层：消息 → flat 物理行（SSOT，给 measureMessage / MessageBlocksClipped 共享）。 */
+/** 顶层：消息 → flat 物理行（SSOT，给 measureMessage / MessageBlocksClipped 共享）。
+ *  opts.omitTrailingSelfMargin：该消息是内容流最后一条且 tail 为空时置 true —
+ *  去掉末尾块的 self margin 行（外层 margin 仍保留 1 行），把「末条消息 ↔
+ *  输入框」之间的双空行收成 1 行（用户 2026-08-08 反馈空白块碍眼）。
+ *  lines 不以 margin 结尾（user 消息 / tool_use 收尾）时无操作。 */
 export function messageRender(
   message: AnthropicNativeMessage,
   cols: number,
-  opts?: { readonly thinkingExpanded?: boolean }
+  opts?: {
+    readonly thinkingExpanded?: boolean;
+    readonly omitTrailingSelfMargin?: boolean;
+  }
 ): MessageRender {
   const lines: string[] = [];
   const blocks: BlockRowSpan[] = [];
@@ -180,6 +187,14 @@ export function messageRender(
   }
 
   if (lines.length === 0) return { message, lines, blocks, totalRows: 0 };
+  // 末条消息 + tail 为空：去掉末尾 self margin（外层 margin 保留 1 行），
+  // 双空行 → 单空行。块跨度不含 margin 行，无需调整 blocks。
+  if (
+    opts?.omitTrailingSelfMargin === true &&
+    lines[lines.length - 1] === MARGIN_LINE
+  ) {
+    lines.pop();
+  }
   return { message, lines, blocks, totalRows: lines.length + 1 };
 }
 
@@ -190,7 +205,10 @@ export function messageRender(
 export function measureMessage(
   message: AnthropicNativeMessage,
   cols: number,
-  opts?: { readonly thinkingExpanded?: boolean }
+  opts?: {
+    readonly thinkingExpanded?: boolean;
+    readonly omitTrailingSelfMargin?: boolean;
+  }
 ): MessageBlockRowSpans {
   const r = messageRender(message, cols, opts);
   return { message: r.message, blocks: r.blocks, totalRows: r.totalRows };

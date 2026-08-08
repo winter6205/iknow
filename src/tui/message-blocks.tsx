@@ -11,7 +11,7 @@
  * 共享子组件 `ToolSummaryRow`（tool_use 摘要行）+ `ThinkingSummary`（折叠
  * 摘要行）；tool_use 行在裁剪路径按 `BlockRowSpan.kind` 定位并保留染色。
  */
-import type { ReactElement } from "react";
+import { cloneElement, type ReactElement } from "react";
 import { Box, Text } from "ink";
 import type {
   AnthropicContentBlock,
@@ -93,6 +93,9 @@ export function MessageBlocks(props: {
   readonly statusMap: Map<string, boolean>;
   /** T6 (D5):thinking 折叠面板展开态;默认折叠(摘要行)。 */
   readonly thinkingExpanded?: boolean;
+  /** 末条消息 + tail 为空（ChatView 行账已 pop 末尾 self margin）：抹掉
+   *  最后一个块的 marginBottom，渲染与 flat 行账逐行一致（双空行 → 1 行）。 */
+  readonly noTrailingSelfMargin?: boolean;
 }): ReactElement | null {
   const { message, cols, statusMap, thinkingExpanded = false } = props;
   const pal = tuiPalette;
@@ -150,6 +153,13 @@ export function MessageBlocks(props: {
     }
   });
   if (nodes.length === 0) return null;
+  if (props.noTrailingSelfMargin === true) {
+    const lastIndex = nodes.length - 1;
+    nodes[lastIndex] = cloneElement(
+      nodes[lastIndex]! as ReactElement<{ marginBottom?: number }>,
+      { marginBottom: 0 }
+    );
+  }
   return (
     <Box flexDirection="column" marginBottom={1}>
       {nodes}
