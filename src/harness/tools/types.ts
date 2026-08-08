@@ -64,11 +64,23 @@ export interface ToolCall {
  *
  * 不携带 Anthropic 原生编码;由 Model Adapter 负责原生 tool_result 编码。
  */
+/**
+ * ToolExecutionResult `ok` 变体的可选 side-channel (#298):不改模型可见
+ * payload 的前提下,为宿主携带 diff 类的 old/new 内容。仅在有内容时存在;
+ * additive，不破坏既有 `payload` 契约。
+ */
+export interface ToolResultMeta {
+  readonly oldContent?: string;
+  readonly newContent?: string;
+}
+
 export type ToolExecutionResult =
   | {
       readonly kind: "ok";
       readonly toolUseId: string;
       readonly payload: AnthropicContentBlock[];
+      /** 可选 typed envelope(#298):宿主侧消费 diff old/new;模型不可见。 */
+      readonly meta?: ToolResultMeta;
     }
   | {
       readonly kind: "validation_failed";
