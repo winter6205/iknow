@@ -14,6 +14,8 @@
  * SGR 坐标 → CellPos、把 CellPos → 调用 copyToClipboard；ChatView 负责把
  * CellPos → ink `<Text inverse>` 高亮。
  */
+import stringWidth from "string-width";
+import { visualWidth } from "./banner.js";
 
 /** 选区单元坐标（content-row / visual-col，0-based）。 */
 export interface CellPos {
@@ -101,8 +103,8 @@ export function terminalToCellPos(
  *  - `end` 恒为 exclusive（切片用 `substrVisual(line, start, end)`）。
  *
  * visualWidth 计：CJK/Emoji/宽字符 = 2 列，剩余 = 1 列。ANSI 序列不计列
- * （line 由 messageRender / banner 产出，不含 SGR）；如调用方传入的 line
- * 含 SGR，应预先 strip 掉。
+ * （string-width 默认剥 SGR；line 由 messageRender / banner 产出，本来
+ * 也不含 SGR）。
  */
 export function highlightRangeForLine(
   row: number,
@@ -162,46 +164,20 @@ export function extractSelectionText(
   return out.join("\n");
 }
 
-// ── visual 宽度 + 子串（CJK 宽字符计 2 列；与 banner.js / text.ts 同款） ──
+// ── visual 宽度 + 子串（SSOT：banner.js visualWidth → npm string-width） ──
 
-const WIDE_RANGES: ReadonlyArray<readonly [number, number]> = [
-  [0x1100, 0x115f],
-  [0x2e80, 0x303e],
-  [0x3041, 0x33ff],
-  [0x3400, 0x4dbf],
-  [0x4e00, 0x9fff],
-  [0xa000, 0xa4cf],
-  [0xac00, 0xd7a3],
-  [0xf900, 0xfaff],
-  [0xfe30, 0xfe4f],
-  [0xff00, 0xff60],
-  [0xffe0, 0xffe6],
-  [0x1f300, 0x1f9ff],
-  [0x20000, 0x2fffd],
-  [0x30000, 0x3fffd],
-];
-
-function isWide(cp: number): boolean {
-  for (const [lo, hi] of WIDE_RANGES) {
-    if (cp >= lo && cp <= hi) return true;
-  }
-  return false;
-}
-
-/** visual 列宽（CJK/Emoji = 2，其余 = 1）。与 banner.js visualWidth 等价。 */
+/** visual 列宽（CJK/Emoji = 2，其余 = 1）。#279 项 2：删本地重复的
+ *  WIDE_RANGES 表，收敛到 banner.js visualWidth（string-width 口径，
+ *  与 ink 渲染一致；额外剥 ANSI，行内不含 SGR 时结果不变）。 */
 export function visualWidthOf(s: string): number {
-  let w = 0;
-  for (const ch of s) {
-    w += isWide(ch.codePointAt(0) ?? 0) ? 2 : 1;
-  }
-  return w;
+  return visualWidth(s);
 }
 
 /**
  * 按 visual 列切子串（`[colStart, colEnd)`，闭开）。
- * 实现：从左扫，累加 visual 宽度；起始 col 之前丢弃；结束 col 之后丢弃；
- * 不做 unicode normalization — 字符按 UTF-16 code unit 切，对 BMP 与代理对
- * 均一致（emoji 代理对整体 = 2 列，与 CJK 同口径）。
+ * 实现：从左扫，逐码点累加 string-width；起始 col 之前丢弃；结束 col
+ * 之后丢弃；宽字符（CJK/Emoji 代理对 = 2 列）跨越切点时整字丢弃，
+ * 不做 unicode normalization。
  */
 export function substrVisual(
   s: string,
@@ -213,8 +189,7 @@ export function substrVisual(
   let out = "";
   let started = false;
   for (const ch of s) {
-    const cp = ch.codePointAt(0) ?? 0;
-    const cw = isWide(cp) ? 2 : 1;
+    const cw = stringWidth(ch);
     if (w + cw > colEnd) break;
     if (started) {
       out += ch;

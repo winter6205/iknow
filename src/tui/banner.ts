@@ -30,6 +30,7 @@
  *  - NO_COLOR 或非 TTY → 不上色（paint 退化为 no-op）。
  *  - 外框走独立 dim 上色（与 logo 双色分层解耦，颜色用 FG_BORDER）。
  */
+import stringWidth from "string-width";
 import { EYE_GOLD_LINES, EYE_LINES } from "./banner-art.js";
 
 export interface BannerInfo {
@@ -115,52 +116,21 @@ function mergeDualColor(
 //
 // 等宽终端里"一个码点 = 一列"不成立：CJK 占 2 列，组合标记占 0 列，
 // ANSI 转义序列不占位。用码点数做对齐，框线会突出、居中会偏移。
-
-const ANSI_RE = /\x1b\[[0-9;]*m/g;
-
-/** East Asian Wide / Fullwidth 常用子集：落在区间内的码点占 2 列。 */
-const WIDE_RANGES: ReadonlyArray<readonly [number, number]> = [
-  [0x1100, 0x115f], // Hangul Jamo 初声
-  [0x2e80, 0x303e], // CJK 部首补充 … 康熙部首 … CJK 符号标点
-  [0x3041, 0x33ff], // 平假名 / 片假名 / 注音 / 谚文兼容 / CJK 兼容
-  [0x3400, 0x4dbf], // CJK 扩展 A
-  [0x4e00, 0x9fff], // CJK 统一表意文字
-  [0xa000, 0xa4cf], // 彝文音节
-  [0xac00, 0xd7a3], // 谚文音节
-  [0xf900, 0xfaff], // CJK 兼容表意文字
-  [0xfe10, 0xfe19], // 竖排标点
-  [0xfe30, 0xfe6f], // CJK 兼容形式 / 小写变体
-  [0xff00, 0xff60], // 全角 ASCII 变体
-  [0xffe0, 0xffe6], // 全角符号
-  [0x1f300, 0x1f64f], // 杂项符号与图形 / 表情
-  [0x1f900, 0x1f9ff], // 补充符号与图形
-  [0x20000, 0x3fffd], // CJK 扩展 B 及以上
-];
-
-/** 单个码点的视觉列宽。 */
-function codePointWidth(cp: number): number {
-  // 组合标记叠加在前一个字符上，不单独占列。
-  if (cp >= 0x0300 && cp <= 0x036f) return 0;
-  // Braille U+2800–U+28FF 是窄字符，占 1 列。它落在下面第一个 CJK 区间
-  // (0x2e80) 之前，天然不冲突；显式前置是防止后续扩表时被误并进宽区间
-  // —— 智慧之眼的点阵全靠它对齐。
-  if (cp >= 0x2800 && cp <= 0x28ff) return 1;
-  for (const [lo, hi] of WIDE_RANGES) {
-    if (cp >= lo && cp <= hi) return 2;
-  }
-  return 1;
-}
+//
+// SSOT：全部走 npm 包 string-width（#279 项 2：替换手写 WIDE_RANGES 表，
+// 与 ink 内部同款口径，行账与渲染不漂移）。默认行为：剥 ANSI 转义、
+// CJK/Emoji/全角计 2、组合标记计 0、braille U+2800–U+28FF 计 1（智慧之眼
+// 点阵对齐依赖，回归测试 tests/tui/visual-width.test.ts 钉死）。
+// 与旧手写实现的已知差异：控制字符（\t/\n 等）旧计 1 列、现计 0 列
+// （上游调用处 clipOneLine* 已先把 \s+ 压成空格，无实际影响）。
 
 /**
  * 视觉列宽：等宽终端里这个字符串占多少列。
- * 先剥掉 ANSI 转义序列（否则上色后对齐全乱），再逐码点累加。
+ * string-width 默认剥 ANSI 转义序列（否则上色后对齐全乱），逐码点按
+ * Unicode 宽度表累加。导出名/签名保持不变（#279：仅换底层实现）。
  */
 export function visualWidth(s: string): number {
-  let w = 0;
-  for (const ch of s.replace(ANSI_RE, "")) {
-    w += codePointWidth(ch.codePointAt(0)!);
-  }
-  return w;
+  return stringWidth(s);
 }
 
 /** 视觉列宽版 padEnd：按缺的列数补空格，不是按码点数。 */
@@ -180,18 +150,33 @@ export function padStartVisual(s: string, width: number): string {
 /**
  * 中段截断：值超长时保留首尾（首段优先带路径前缀、尾段带文件名/扩展名），
  * 中间用 `…` 衔接。用于 dataDir 等绝对路径，末尾截断会丢文件名。
- * 视觉列宽计算（braille/CJK 各 1/2 列都对齐）。
+ * 按视觉列宽累加（braille/CJK 各 1/2 列都对齐），保证结果不超 width 列
+ * （#279：旧实现按码点数切首尾段，CJK 值会超宽溢出 banner 框）。
  */
 export function truncateMiddle(s: string, width: number): string {
   const cur = visualWidth(s);
   if (cur <= width) return s;
-  // chars = Array.from(s) 保证码点级切片（braille 在 BMP 单码点 OK，CJK 也单码点）。
-  const chars = [...s];
   // 偶数宽度优先，否则尾段比首段多 1 列（避免引入额外宽度偏差）。
-  const headLen = Math.max(1, Math.floor((width - 1) / 2));
-  const tailLen = Math.max(1, width - 1 - headLen);
-  const head = chars.slice(0, headLen).join("");
-  const tail = chars.slice(chars.length - tailLen).join("");
+  const headBudget = Math.max(1, Math.floor((width - 1) / 2));
+  const tailBudget = Math.max(1, width - 1 - headBudget);
+  // 首段：从左按列宽预算累加（宽字符放不下预算时整字丢弃）。
+  let head = "";
+  let hw = 0;
+  for (const ch of s) {
+    const cw = visualWidth(ch);
+    if (hw + cw > headBudget) break;
+    head += ch;
+    hw += cw;
+  }
+  // 尾段：从右按列宽预算累加。
+  let tail = "";
+  let tw = 0;
+  for (const ch of [...s].reverse()) {
+    const cw = visualWidth(ch);
+    if (tw + cw > tailBudget) break;
+    tail = ch + tail;
+    tw += cw;
+  }
   return head + "…" + tail;
 }
 
