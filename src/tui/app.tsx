@@ -226,6 +226,9 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   const [activeKey, setActiveKey] = useState(initialKey);
   const [view, setView] = useState<TuiView>("chat");
   const [inputValue, setInputValue] = useState("");
+  // #279 项5：输入历史（内存态，会话内有效不落盘）。提交追加在 onSubmit
+  // 包装里做（连续重复去重）；PromptInput 仅在 hint 不可见时用 ↑/↓ 召回。
+  const [inputHistory, setInputHistory] = useState<ReadonlyArray<string>>([]);
   const [notice, setNotice] = useState<Notice | undefined>(undefined);
   const [liveToolLines, setLiveToolLines] = useState<
     Record<string, ReadonlyArray<string>>
@@ -958,6 +961,15 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     }
     const parsed = parseTuiInput(text);
     if (parsed.kind === "message") {
+      // #279 项5（review 修复：历史污染）：入历史移到路由后——仅真实消息
+      // 进召回列表（y/n 回复、slash 命令、未知命令已在上方分支排除）；
+      // 且 busy guard 拒绝的消息不入库（与 sendTurn 内守卫同条件）。
+      // 连续重复去重：召回后原样再提交只保留一条。
+      if (!askPending && active.runState === "idle" && parsed.text.length > 0) {
+        setInputHistory((h) =>
+          h[h.length - 1] === parsed.text ? h : [...h, parsed.text]
+        );
+      }
       setNotice(undefined);
       await sendTurn(parsed.text);
       return;
@@ -1255,6 +1267,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           // onSubmit(value)，避免 raw 文本解析绕开 cursor 选中。
           onTabComplete={(value) => slashComplete(value)}
           hintSuggestions={inputHintSuggestions}
+          history={inputHistory}
         />
       )}
       {/* ContextBar 仅聊天视图挂载（T4）：上下文用量条，输入框正下方
