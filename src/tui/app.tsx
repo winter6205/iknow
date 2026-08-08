@@ -89,6 +89,7 @@ import {
   parseMouseAllEvents,
   parseMouseEvents,
   disableMouseReport,
+  wheelScrollStep,
 } from "./mouse.js";
 import { copyToClipboard, type CopyResult } from "./clipboard.js";
 import type { Selection, ContentWindow } from "./selection.js";
@@ -399,6 +400,11 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     askModalDismissed,
     askPending,
   ]);
+  // 滚轮 listener 的闭包捕获 mount 时的旧 viewportRows（effect deps 只有
+  // [stdin, stdout]），不随 resize 更新。用 ref 镜像最新值，滚轮步长才能跟随
+  // 当前视口（与 PgUp/PgDn 的 useMemo 内 step 保持一致）。
+  const viewportRowsRef = useRef(viewportRows);
+  viewportRowsRef.current = viewportRows;
 
   // 工具事件订阅：T4 (#175) 优先按 tool_use_id 配对入结构化运行状态;
   // 缺 toolUseId 时落回 legacy 字符串行追加(向后兼容)。detail 按 cols 收口
@@ -469,16 +475,23 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     const disable = enableSgrMouseReport(stdout);
     const onData = (chunk: Buffer | string): void => {
       const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-      // 滚轮：独立路径（不参与选区）。用户 2026-08-08 反馈「滚轮第3次才有
-      // 反应」：旧实现每格 3 行（密集 markdown 肉眼无感）。改为滚轮即
-      // clamp 到顶/底（同 Home/End 语义）：wheel-up → 顶（MAX_SAFE_INTEGER，
-      // ChatView clamp 到 maxScroll），wheel-down → 底（0，auto-follow）。
-      // 单格即决断，不再「滚几次才看到变化」。
+      // 滚轮：独立路径（不参与选区）。与 PgUp/PgDn 同一条滚动状态：
+      // 步长 = max(1, floor(viewportRows / 2))，wheel-up 累加、wheel-down 累减；
+      // ChatView 内部把 scroll clamp 到 [0, maxScroll]，到顶/底自然 no-op。
+      // 注：旧 commit 88f4ac5 改成 clamp 到顶/底（用户 2026-08-08 反馈：「滚
+      // 上去只能看到第一页，滚下来只能看到当前页，中间完全看不到」——典型
+      // 跳态），本 fix 恢复渐进滚动。
       const { wheelUp, wheelDown } = parseMouseEvents(text);
       if (wheelUp > 0 || wheelDown > 0) {
         if (viewRef.current !== "chat") return;
         clearSelection();
-        setChatScroll(wheelDown > 0 ? 0 : Number.MAX_SAFE_INTEGER);
+        const step = wheelScrollStep(viewportRowsRef.current);
+        if (wheelUp > 0) {
+          setChatScroll((s) => s + wheelUp * step);
+        }
+        if (wheelDown > 0) {
+          setChatScroll((s) => Math.max(0, s - wheelDown * step));
+        }
         return;
       }
       // 视图过滤放 listener 内（不进 deps）：跨视图切换不丢事件。

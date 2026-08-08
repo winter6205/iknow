@@ -119,3 +119,20 @@ export function disableMouseReport(stdout: NodeJS.WriteStream): void {
   if (!stdout.isTTY) return;
   stdout.write(DECSET_MOUSE_REPORT_DISABLE);
 }
+
+/**
+ * 滚轮单格步长（行数）：max(1, floor(viewportRows / 2))。
+ *
+ * 与 PgUp/PgDn 步长保持一致（app.tsx 键盘 handler 共享同一公式），所以
+ * 一次 wheel-up 等价于一次 PgUp 的视口位移。viewportRows = 0（无测得视口）
+ * → 1（最小防呆，防 0 步长让滚轮完全无反应）。
+ *
+ * 注：旧 commit 88f4ac5 把 wheel 改成 clamp 到顶/底（wheel-up → maxScroll，
+ * wheel-down → 0），用户反馈「滚上去只能看到第一页，滚下来只能看到当前
+ * 页，中间完全看不到」。本函数是该 clamp 回归的恢复锚点——导出供测试锁
+ * 死行为，单格 = 半屏 floor，绝不是端点跳变。
+ */
+export function wheelScrollStep(viewportRows: number): number {
+  if (!Number.isFinite(viewportRows) || viewportRows < 0) return 1;
+  return Math.max(1, Math.floor(viewportRows / 2));
+}

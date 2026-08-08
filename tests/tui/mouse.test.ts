@@ -19,6 +19,7 @@ import {
   isSgrMouseSequence,
   parseMouseAllEvents,
   parseMouseEvents,
+  wheelScrollStep,
 } from "../../src/tui/mouse.js";
 
 function fakeStdout(): NodeJS.WriteStream & { isTTY: boolean } {
@@ -198,5 +199,32 @@ describe("isSgrMouseSequence（#189 输入守卫）", () => {
     expect(isSgrMouseSequence("[<64;10;5")).toBe(false);
     expect(isSgrMouseSequence("[<64;10")).toBe(false);
     expect(isSgrMouseSequence("[<64")).toBe(false);
+  });
+});
+
+describe("wheelScrollStep（滚轮步长 SSOT）", () => {
+  it("viewportRows=30 → 15（floor(30/2)）", () => {
+    expect(wheelScrollStep(30)).toBe(15);
+  });
+
+  it("viewportRows=31 → 15（floor 截断）", () => {
+    expect(wheelScrollStep(31)).toBe(15);
+  });
+
+  it("viewportRows=1 → 1（下限防呆，防 0 步长）", () => {
+    expect(wheelScrollStep(1)).toBe(1);
+  });
+
+  it("viewportRows=0 / 负数 / NaN → 1（无测得视口时最小步长）", () => {
+    expect(wheelScrollStep(0)).toBe(1);
+    expect(wheelScrollStep(-5)).toBe(1);
+    expect(wheelScrollStep(Number.NaN)).toBe(1);
+  });
+
+  it("回归锁：#88f4ac5 clamp 端点回归——步长永远是半屏 floor，非 MAX_SAFE", () => {
+    // 顶部跳变（MAX_SAFE_INTEGER）已由 Home 键承担；滚轮步长必须是有界小步。
+    expect(wheelScrollStep(30)).toBeLessThan(30);
+    // floor(MAX_SAFE_INTEGER / 2) = 4503599627370495（JS 浮点截断）
+    expect(wheelScrollStep(Number.MAX_SAFE_INTEGER)).toBe(4503599627370495);
   });
 });
