@@ -25,6 +25,7 @@ import type { MessageConnection } from "vscode-jsonrpc/node";
 
 import type { LspCtx, LspServerInfo } from "./types.js";
 import { Typescript } from "./server.js";
+import { languageIdFor } from "./language.js";
 
 /** 客户端包装：对上层（handler）暴露薄透传的 sendRequest / sendNotification / dispose。 */
 export interface LspClient {
@@ -215,19 +216,6 @@ async function spawnClient(
     },
     dispose: () => connection.dispose(),
   };
-}
-
-/**
- * 扩展名 → LSP languageId（tsserver 用 languageId 决定 TS / TSX / JS 服务的
- * 哪一种建 project）。当前 iknow LSP 仅接 TS 系列（server.ts extensions），
- * 其它扩展名一律回退 typescript：与 probe `lsp-probe.ts:130` 的固定值一致，
- * 避免误判扩展名后语言识别失败导致符号查询仍空。
- */
-function languageIdFor(file: string): string {
-  if (/\.(ts|mts|cts)$/i.test(file)) return "typescript";
-  if (/\.(tsx)$/i.test(file)) return "typescriptreact";
-  if (/\.(jsx)$/i.test(file)) return "javascriptreact";
-  return "typescript";
 }
 
 /**
