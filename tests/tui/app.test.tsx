@@ -1102,4 +1102,46 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     },
     LONG_TIMEOUT
   );
+
+  it(
+    "Ctrl+O 切换思考折叠/展开（与 /thinking 同语义）",
+    async () => {
+      const app = makeApp([
+        assistantResult({
+          texts: ["最终答复文本"],
+          thinkingBlocks: [
+            { type: "thinking", thinking: "THINK-CTRL-O-MARKER" },
+          ],
+        }),
+      ]);
+      await app.ready();
+      await app.type("你好\r");
+      await waitFor(
+        () => app.lastOutput().includes("最终答复文本"),
+        8000,
+        "answer-rendered"
+      );
+      // 默认折叠：摘要行可见，thinking 全文不裸出。
+      expect(app.lastFrame()).toContain("[思考]");
+      expect(app.lastFrame()).not.toContain("THINK-CTRL-O-MARKER");
+
+      // Ctrl+O（\x0f）→ 展开：thinking 全文可见。
+      stdin.write("\x0f");
+      await waitFor(
+        () => app.lastFrame().includes("THINK-CTRL-O-MARKER"),
+        4000,
+        "ctrl-o-expands-thinking"
+      );
+
+      // 再按一次 → 折回。
+      stdin.write("\x0f");
+      await waitFor(
+        () => !app.lastFrame().includes("THINK-CTRL-O-MARKER"),
+        4000,
+        "ctrl-o-folds-thinking"
+      );
+      expect(app.lastFrame()).toContain("[思考]");
+    },
+    LONG_TIMEOUT
+  );
 });

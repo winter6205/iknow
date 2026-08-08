@@ -8,7 +8,9 @@ import {
   formatLiveToolEvent,
   projectToolLines,
   summarizeToolCall,
+  toolPreviewLines,
 } from "../../src/tui/tool-summary.js";
+import { visualWidth } from "../../src/tui/banner.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 
 describe("summarizeToolCall: 参数摘要（生成/编辑类增强）", () => {
@@ -123,5 +125,110 @@ describe("formatLiveToolEvent", () => {
       kind: "execution_failed",
     });
     expect(line.endsWith("· failed")).toBe(true);
+  });
+});
+
+describe("summarizeToolCall(cols): 窄终端宽度收口（行账不漂移）", () => {
+  it("窄终端：终稿形态 [运行中] name · detail 单行放得下", () => {
+    const cols = 60;
+    const { detail } = summarizeToolCall(
+      "bash",
+      { command: "x".repeat(300) },
+      cols
+    );
+    const finalLine = `[运行中] bash · ${detail}`;
+    expect(visualWidth(finalLine)).toBeLessThanOrEqual(cols);
+  });
+
+  it("窄终端：live 完成形态 name · detail · failed 单行放得下", () => {
+    const cols = 60;
+    const { detail } = summarizeToolCall(
+      "bash",
+      { command: "x".repeat(300) },
+      cols
+    );
+    const liveLine = `bash · ${detail} · failed`;
+    expect(visualWidth(liveLine)).toBeLessThanOrEqual(cols);
+  });
+
+  it("CJK 内容按视觉宽度收口（字符数截断会低估列数 → 折行）", () => {
+    const cols = 50;
+    const { detail } = summarizeToolCall(
+      "bash",
+      { command: "测".repeat(200) },
+      cols
+    );
+    expect(visualWidth(`[运行中] bash · ${detail}`)).toBeLessThanOrEqual(cols);
+  });
+
+  it("宽终端：不超过 legacy 80 上限", () => {
+    const { detail } = summarizeToolCall(
+      "bash",
+      { command: "x".repeat(300) },
+      200
+    );
+    expect(visualWidth(detail)).toBeLessThanOrEqual(80);
+  });
+
+  it("不传 cols → legacy 行为不变（80 字符截断）", () => {
+    const { detail } = summarizeToolCall("bash", { command: "x".repeat(300) });
+    expect(detail.length).toBeLessThanOrEqual(80);
+  });
+});
+
+describe("toolPreviewLines: 写/改文件内容可见", () => {
+  it("write_file → 逐行预览（│ 前缀），内容可见", () => {
+    const lines = toolPreviewLines(
+      "write_file",
+      { path: "a.ts", content: "const a = 1;\nconst b = 2;" },
+      80
+    );
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("const a = 1;");
+    expect(lines[1]).toContain("const b = 2;");
+    for (const l of lines) expect(l.startsWith("  │ ")).toBe(true);
+  });
+
+  it("write_file 超 30 行 → 封顶 + 余行提示", () => {
+    const content = Array.from({ length: 78 }, (_, i) => `l${i}`).join("\n");
+    const lines = toolPreviewLines("write_file", { path: "a.ts", content }, 80);
+    expect(lines).toHaveLength(31);
+    expect(lines[30]).toContain("余 48 行未显示");
+  });
+
+  it("edit_file → old（-）/ new（+）片段", () => {
+    const lines = toolPreviewLines(
+      "edit_file",
+      { path: "a.ts", old_str: "foo", new_str: "bar" },
+      80
+    );
+    expect(lines.some((l) => l.includes("- foo"))).toBe(true);
+    expect(lines.some((l) => l.includes("+ bar"))).toBe(true);
+  });
+
+  it("edit_file old/new 各封顶 10 行 + 余行提示", () => {
+    const big = Array.from({ length: 25 }, (_, i) => `l${i}`).join("\n");
+    const lines = toolPreviewLines(
+      "edit_file",
+      { path: "a.ts", old_str: big, new_str: big },
+      80
+    );
+    // 10 内容 + 1 余行提示，old/new 各一份 = 22
+    expect(lines).toHaveLength(22);
+    expect(lines.filter((l) => l.includes("余 15 行"))).toHaveLength(2);
+  });
+
+  it("其余工具 / 空内容 → 无预览行", () => {
+    expect(toolPreviewLines("bash", { command: "ls" }, 80)).toHaveLength(0);
+    expect(toolPreviewLines("write_file", { path: "a" }, 80)).toHaveLength(0);
+  });
+
+  it("长内容行按视觉宽度截断到 cols 内（预览行不折行）", () => {
+    const lines = toolPreviewLines(
+      "write_file",
+      { path: "a.ts", content: "x".repeat(300) },
+      60
+    );
+    for (const l of lines) expect(visualWidth(l)).toBeLessThanOrEqual(60);
   });
 });

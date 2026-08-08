@@ -18,7 +18,7 @@ import type {
   AnthropicNativeMessage,
 } from "../harness/model-adapter/types.js";
 import { tuiPalette } from "./theme.js";
-import { summarizeToolCall } from "./tool-summary.js";
+import { summarizeToolCall, toolPreviewLines } from "./tool-summary.js";
 import { Markdown } from "./markdown.js";
 import type { BlockRowSpan } from "./message-rows.js";
 import {
@@ -31,12 +31,18 @@ import { HighlightedLine } from "./selection-render.js";
 
 type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
 
-/** tool_use 摘要行：`[运行中]|[失败]|[完成] name · detail`。 */
+/** tool_use 摘要行：`[运行中]|[失败]|[完成] name · detail`。
+ *  cols 收口（tool-summary.ts）：装饰 + 名 + detail 单行不折。 */
 function ToolSummaryRow(props: {
   readonly tu: ToolUseBlock;
   readonly statusMap: Map<string, boolean>;
+  readonly cols: number;
 }): ReactElement {
-  const { detail } = summarizeToolCall(props.tu.name, props.tu.input);
+  const { detail } = summarizeToolCall(
+    props.tu.name,
+    props.tu.input,
+    props.cols
+  );
   const hasResult = props.statusMap.has(props.tu.id);
   const failed = props.statusMap.get(props.tu.id) === true;
   const mark = !hasResult ? "[运行中]" : failed ? "[失败]" : "[完成]";
@@ -44,6 +50,25 @@ function ToolSummaryRow(props: {
     <Text color={failed ? tuiPalette.error : tuiPalette.dim}>
       {mark} {props.tu.name} · {detail}
     </Text>
+  );
+}
+
+/** 工具内容预览行（write_file/edit_file）：dim 逐行渲染；行数与
+ *  messageRender 行账共用 toolPreviewLines 单源，全可见/裁剪路径一致。 */
+function ToolPreviewRows(props: {
+  readonly tu: ToolUseBlock;
+  readonly cols: number;
+}): ReactElement | null {
+  const lines = toolPreviewLines(props.tu.name, props.tu.input, props.cols);
+  if (lines.length === 0) return null;
+  return (
+    <>
+      {lines.map((l, i) => (
+        <Text key={`tp-${i}`} color={tuiPalette.dim}>
+          {l}
+        </Text>
+      ))}
+    </>
   );
 }
 
@@ -112,8 +137,9 @@ export function MessageBlocks(props: {
       );
     } else if (block.type === "tool_use") {
       nodes.push(
-        <Box key={`u${i}`}>
-          <ToolSummaryRow tu={block} statusMap={statusMap} />
+        <Box key={`u${i}`} flexDirection="column">
+          <ToolSummaryRow tu={block} statusMap={statusMap} cols={cols} />
+          <ToolPreviewRows tu={block} cols={cols} />
         </Box>
       );
     }
@@ -139,6 +165,8 @@ export function MessageBlocksClipped(props: {
   readonly blocks: ReadonlyArray<BlockRowSpan>;
   readonly statusMap: Map<string, boolean>;
   readonly slice: RowSlice;
+  /** 终端列宽：透传 ToolSummaryRow 的宽度收口（与 messageRender 行账同源）。 */
+  readonly cols: number;
   /** #238 选区（normalize 由调用方保证）。undefined = 无选区，高亮空走。 */
   readonly selection?: Selection;
   /** 该消息在内容流中的首行行号（0-based；与 ChatView 透传的 measured[i].startRow 对齐）。 */
@@ -150,6 +178,7 @@ export function MessageBlocksClipped(props: {
     blocks,
     statusMap,
     slice,
+    cols,
     selection,
     messageStartRow,
   } = props;
@@ -172,7 +201,7 @@ export function MessageBlocksClipped(props: {
       if (tu !== undefined) {
         nodes.push(
           <Box key={`u${row}`}>
-            <ToolSummaryRow tu={tu} statusMap={statusMap} />
+            <ToolSummaryRow tu={tu} statusMap={statusMap} cols={cols} />
           </Box>
         );
         continue;

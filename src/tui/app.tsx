@@ -296,12 +296,17 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   }, [rows, notice]);
 
   // 工具事件订阅：T4 (#175) 优先按 tool_use_id 配对入结构化运行状态;
-  // 缺 toolUseId 时落回 legacy 字符串行追加(向后兼容)。
+  // 缺 toolUseId 时落回 legacy 字符串行追加(向后兼容)。detail 按 cols 收口
+  // （窄终端单行不折，行账不漂移 — tool-summary.ts）。
   useEffect(
     () =>
       toolEventSink.subscribe((event) => {
         if (event.toolUseId !== undefined) {
-          const { detail } = summarizeToolCall(event.toolName, event.input);
+          const { detail } = summarizeToolCall(
+            event.toolName,
+            event.input,
+            cols
+          );
           setLiveToolRuns((prev) => ({
             ...prev,
             [event.conversationId]: liveToolReduce(
@@ -327,11 +332,14 @@ export function TuiApp(props: TuiAppProps): ReactElement {
               toolName: event.toolName,
               input: event.input,
               kind: event.kind,
+              // cols 收口 detail（窄终端单行不折）；显式 override 跳过内部重算。
+              detail: summarizeToolCall(event.toolName, event.input, cols)
+                .detail,
             }),
           ],
         }));
       }),
-    [toolEventSink]
+    [toolEventSink, cols]
   );
 
   // 鼠标支持（朴素滚动 + #238 拖选）：ink 渲染到 normal buffer，原生 scrollback
@@ -752,6 +760,21 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     exit();
   }
 
+  /** T6 (D5) + Ctrl+O：切换 thinking 折叠面板展开态的共享 helper。
+   *  /thinking 斜杠命令与全局 Ctrl+O 键位共用，避免双份实现漂移。
+   *  running 态下也允许（不改 streaming 行为，只影响终稿渲染）。 */
+  function toggleThinking(): void {
+    const next = !thinkingExpanded;
+    setThinkingExpanded(next);
+    setNotice({
+      lines: [
+        next
+          ? "思考已展开（显示思考全文 + 加密占位）/ Ctrl+O 或 /thinking 切换"
+          : "思考已折叠（仅显示摘要行）/ Ctrl+O 或 /thinking 切换",
+      ],
+    });
+  }
+
   async function handleSubmit(raw: string): Promise<void> {
     setInputValue("");
     const text = raw.trim();
@@ -803,17 +826,8 @@ export function TuiApp(props: TuiAppProps): ReactElement {
         return;
       }
       case "thinking": {
-        // T6 (D5):切换 thinking 折叠面板展开态;running 态下也允许(不改
-        // streaming 行为,只影响终稿渲染)。
-        const next = !thinkingExpanded;
-        setThinkingExpanded(next);
-        setNotice({
-          lines: [
-            next
-              ? "思考已展开（显示思考全文 + 加密占位）"
-              : "思考已折叠（仅显示摘要行）/thinking 切换",
-          ],
-        });
+        // T6 (D5):切换 thinking 折叠面板展开态（与 Ctrl+O 同 helper）。
+        toggleThinking();
         return;
       }
       case "profile": {
@@ -903,6 +917,12 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       return;
     }
     if (view !== "chat") return;
+    // Ctrl+O：切换思考折叠/展开（与 /thinking 同 helper）。PromptInput 对
+    // ctrl 组合键早返回让出（components.tsx `key.ctrl → return`），不吞键。
+    if (key.ctrl && input === "o") {
+      toggleThinking();
+      return;
+    }
     // 方案 B：banner + 消息共用 row window，空会话也可滚动（矮终端 banner
     // 超视口时 PgUp 能翻回 banner 顶部；高终端 maxScroll=0 自动 no-op）。
     // 不设 messages.length===0 守卫——banner 就是可滚动内容。

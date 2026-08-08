@@ -25,7 +25,7 @@
 import { useDeferredValue, type ReactElement } from "react";
 import { Box, Text } from "ink";
 import type { TuiSessionState } from "./session-state.js";
-import { toolResultStatusMap } from "./tool-summary.js";
+import { toolPreviewLines, toolResultStatusMap } from "./tool-summary.js";
 import {
   formatCompletedToolLine,
   formatRunningToolLine,
@@ -73,8 +73,18 @@ export function tailSlot(
   thinkingExpanded: boolean,
   liveToolRuns: ReadonlyArray<LiveToolRun> = []
 ): TailSlot {
-  // T4: 结构化运行状态每条目 1 行,合并计入 liveToolRows。
-  const liveToolRows = liveToolLines.length + liveToolRuns.length;
+  // T4: 结构化运行状态每条目 1 行,合并计入 liveToolRows;已完成条目的内容
+  // 预览行(write_file/edit_file,toolPreviewLines 单源)同样入账,防行账漂移。
+  const liveToolPreviewRows = liveToolRuns.reduce(
+    (n, run) =>
+      n +
+      (run.status === "running"
+        ? 0
+        : toolPreviewLines(run.name, run.input, cols).length),
+    0
+  );
+  const liveToolRows =
+    liveToolLines.length + liveToolRuns.length + liveToolPreviewRows;
   const askRow = askLine !== undefined ? 1 : 0;
   const spinnerRow = running ? 1 : 0;
   const hasThinking =
@@ -177,6 +187,11 @@ export function flatContentLines(args: {
         ? formatRunningToolLine(run)
         : formatCompletedToolLine(run)
     );
+    if (run.status !== "running") {
+      for (const ln of toolPreviewLines(run.name, run.input, args.cols)) {
+        out.push(ln);
+      }
+    }
   }
   for (const ln of args.liveToolLines) out.push(ln);
   if (args.askLine !== undefined) out.push(args.askLine);
@@ -417,6 +432,7 @@ export function ChatView(props: ChatViewProps): ReactElement {
               blocks={mm.blocks}
               statusMap={statusMap}
               slice={slice}
+              cols={cols}
               selection={props.selection}
               messageStartRow={mm.startRow}
             />
@@ -428,11 +444,19 @@ export function ChatView(props: ChatViewProps): ReactElement {
       props.liveToolLines.length > 0 ? (
         <Box flexDirection="column" marginBottom={1}>
           {(props.liveToolRuns ?? []).map((run) => (
-            <Text key={run.id} color={pal.dim}>
-              {run.status === "running"
-                ? formatRunningToolLine(run)
-                : formatCompletedToolLine(run)}
-            </Text>
+            <Box key={run.id} flexDirection="column">
+              <Text color={pal.dim}>
+                {run.status === "running"
+                  ? formatRunningToolLine(run)
+                  : formatCompletedToolLine(run)}
+              </Text>
+              {run.status !== "running" &&
+                toolPreviewLines(run.name, run.input, cols).map((ln, li) => (
+                  <Text key={`pv-${run.id}-${li}`} color={pal.dim}>
+                    {ln}
+                  </Text>
+                ))}
+            </Box>
           ))}
           {props.liveToolLines.map((line, i) => (
             <Text key={`legacy-${i}`} color={pal.dim}>
