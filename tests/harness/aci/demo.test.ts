@@ -263,9 +263,8 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
     assert.ok(dangerResult, "expected tool_result for b-danger");
     assert.equal(dangerResult.is_error, true);
     const dangerText = toolResultText(dangerResult);
-    // v0 graduated: hard-wall fires BEFORE allowlist check; reason carries
-    // [hard_wall] marker (the prototype's "not in allowlist" text moved into
-    // bash.ts's secondary check; the executor wrapper attaches [permission_denied]
+    // v0 graduated: hard-wall fires on the dangerous pattern; reason carries
+    // [hard_wall] marker (the executor wrapper attaches [permission_denied]
     // and [execution_failed] prefixes).
     assert.ok(
       dangerText.includes("[hard_wall]") ||

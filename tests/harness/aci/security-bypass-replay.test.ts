@@ -38,7 +38,7 @@ const execDef: AciToolDef = Object.freeze({
 interface Payload {
   readonly label: string;
   readonly cmd: string;
-  readonly expect: "allow" | "deny";
+  readonly expect: "allow" | "ask" | "deny";
   readonly policyOverride?: Parameters<typeof createPermissionPolicy>[0];
 }
 
@@ -76,7 +76,12 @@ const PAYLOADS: ReadonlyArray<Payload> = [
     cmd: "echo ${ANTHROPIC_AUTH_TOKEN}",
     expect: "deny",
   },
-  { label: "C5.b printenv", cmd: "printenv", expect: "deny" },
+  {
+    label: "C5.b printenv",
+    cmd: "printenv",
+    // 白名单不再作 hard-wall：非危险命令落入 ask，由用户决定（env 隔离在沙箱层）
+    expect: "ask",
+  },
 
   // HIGH #1 — 反斜杠转义命令名
   { label: "H1 r\\m -rf /", cmd: "r\\m -rf /tmp/x", expect: "deny" },
@@ -125,7 +130,7 @@ describe("security: bypass replay against allowlist-first + blacklist backstop",
         input: { command: p.cmd },
         policy,
       });
-      const got = out.decision === "deny" ? "deny" : "allow";
+      const got = out.decision;
 
       // 诊断信号（失败时一并打印两个层级的判定）
       const allowed = isAllowedCommand(p.cmd);

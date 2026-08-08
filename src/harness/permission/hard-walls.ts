@@ -115,7 +115,8 @@ export function isAllowedCommand(command: string): boolean {
 export function findDangerousPattern(command: string): string | null {
   // Strip backslash escapes before scanning so that `r\m -rf /` (an attempt
   // to defeat substring matching) still triggers the `rm -rf` pattern.
-  const lower = command.toLowerCase().replace(/\\/g, "");
+  // Collapse runs of whitespace so `rm  -rf` (extra spaces) still hits.
+  const lower = command.toLowerCase().replace(/\\/g, "").replace(/\s+/g, " ");
   for (const pattern of DANGEROUS_COMMAND_PATTERNS) {
     if (lower.includes(pattern)) return pattern;
   }
@@ -224,9 +225,13 @@ function matchDangerousExecute(input: {
   if (typeof command !== "string") return false;
   if (isDangerousCommand(command)) return true;
   // Redirection exemption must NOT leak sensitive paths: `echo x > /etc/shadow`
-  // is now allowlisted by the redirect exemption but must still be denied.
+  // passes the segment allowlist via redirect stripping but must still be denied.
   if (commandContainsSensitivePath(command)) return true;
-  return !isAllowedCommand(command);
+  // Non-allowlisted commands are NOT hard-walled: they fall through to the
+  // mode / category default (ask in default mode). The bwrap fence is the
+  // execution-time boundary; a blanket allowlist deny made `pytest`, `cargo`,
+  // `go test` etc. impossible to run even with user approval.
+  return false;
 }
 
 /**
@@ -237,8 +242,8 @@ function matchDangerousExecute(input: {
  *
  * Exported so `src/harness/aci/tools/bash.ts` (the handler-level gate) applies
  * the same check as the hard-wall — otherwise a redirect like `>> /etc/shadow`
- * would pass `isDangerousCommand`/`isAllowedCommand` at the handler and only be
- * stopped by bwrap's ro-bind, not by policy (axis2 skeptic finding).
+ * would pass `isDangerousCommand` at the handler and only be stopped by
+ * bwrap's ro-bind, not by policy (axis2 skeptic finding).
  */
 export function commandContainsSensitivePath(command: string): boolean {
   return SENSITIVE_PATH_FRAGMENTS.some((fragment) => {

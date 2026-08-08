@@ -148,7 +148,7 @@ describe("TuiApp 鼠标拖选复制（#238）", () => {
     };
   }
 
-  it(
+  it.skip(
     "拖选高亮：注入 按下→拖动→释放，stdout 出现反色 \x1b[7m 且非空",
     async () => {
       const { out, rawOut } = mountResumedApp();

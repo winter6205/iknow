@@ -3,8 +3,8 @@
  *
  * 决策与决策对象已迁至 `src/harness/permission/`（#122）；
  * 本文件保留 allowlist / 危险命令识别工具（`isAllowedCommand` /
- * `isDangerousCommand` / `firstToken` / `SHELL_METACHARS`）作为沙箱落地前的
- * 纵深双保险（仍由 `permission/policy.ts` 的硬墙引用）。
+ * `isDangerousCommand` / `firstToken` / `SHELL_METACHARS`）作为纵深双保险
+ * （硬墙只引用危险模式 + 敏感路径；非白名单命令落入 ask，执行期边界由 bwrap 承担）。
  *
  * `checkPermission` 现已迁出至 `permission/checkPermission`（5 步中间件链在
  * `permission/permission-executor.ts`）。为避免破坏既有测试 / 工具代码，

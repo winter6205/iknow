@@ -3,7 +3,7 @@ import { homedir, tmpdir } from "node:os";
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
-import { isAllowedCommand, isDangerousCommand } from "../permission.js";
+import { isDangerousCommand } from "../permission.js";
 import { commandContainsSensitivePath } from "../../permission/hard-walls.js";
 import {
   BASE_ENV_WHITELIST,
@@ -83,10 +83,6 @@ export function createBashTool(cwd: string): AciToolDef {
       throw new ToolExecutionError(
         `bash: command targets a sensitive path: ${command}`
       );
-    if (!isAllowedCommand(command))
-      throw new ToolExecutionError(
-        `bash: command not in allowlist: ${command}`
-      );
     const fenceEnv = envIsolation.filter(process.env);
     const fence = createBwrapFence({
       command: "bash",
@@ -112,7 +108,7 @@ export function createBashTool(cwd: string): AciToolDef {
   return Object.freeze({
     name: "bash",
     description:
-      "Execute an allowlisted bash command in the configured working directory and return its exit code, stdout, and stderr.",
+      "Execute a bash command inside the bwrap sandbox in the configured working directory and return its exit code, stdout, and stderr. Dangerous patterns and sensitive paths are rejected; other commands go through the normal permission flow.",
     inputSchema: {
       type: "object",
       properties: { command: { type: "string" } },
