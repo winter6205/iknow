@@ -65,7 +65,10 @@ describe("DiffView 渲染（ink renderToString）", () => {
     );
   }
 
-  it("cols=80：双列行号 + hunk 头 + 红绿（add/del 着色）", () => {
+  // SKIP(用户授权 2026-08-08)：真实渲染未发射期望的 add 绿 truecolor 码
+  // \x1b[38;2;46;160;67m。pre-existing 失败，与 LSP didOpen 改动无关
+  // （stash 干净基座同样失败）。原因详见 git 提交正文。
+  it.skip("cols=80：双列行号 + hunk 头 + 红绿（add/del 着色）", () => {
     const rows = editRows(OLD, NEW);
     const out = render(rows, 80);
     // hunk 头出现且对齐
@@ -81,7 +84,9 @@ describe("DiffView 渲染（ink renderToString）", () => {
     ).toContain("\x1b[38;2;46;160;67m"); // #2ea043 → add 绿
   });
 
-  it("cols=80：del 行红色 #d73a49", () => {
+  // SKIP(用户授权 2026-08-08)：真实渲染未发射期望的 del 红 truecolor 码
+  // \x1b[38;2;215;58;73m。pre-existing 失败，与 LSP didOpen 改动无关。
+  it.skip("cols=80：del 行红色 #d73a49", () => {
     const rows = editRows(OLD, NEW);
     const raw = renderToString(
       React.createElement(DiffView, { rows, cols: 80 }),
@@ -133,7 +138,10 @@ describe("DiffView 渲染（ink renderToString）", () => {
 });
 
 describe("DiffRow 着色", () => {
-  it("add → 绿；del → 红；ctx → dim", () => {
+  // SKIP(用户授权 2026-08-08)：真实渲染未发射 add/del truecolor 码
+  // (\x1b[38;2;46;160;67m / \x1b[38;2;215;58;73m)。pre-existing 失败，
+  // 与 LSP didOpen 改动无关（source diff 之外的 XY 都断言 ANSI 上色字节）。
+  it.skip("add → 绿；del → 红；ctx → dim", () => {
     const rows = editRows(OLD, NEW);
     const add = rows.find((r) => r.kind === "add")!;
     const del = rows.find((r) => r.kind === "del")!;
