@@ -575,3 +575,136 @@ describe("T3 (#160): token fields — ok-branch projection vs error-branch absen
     assert.deepEqual(resultB, resultA);
   });
 });
+describe("T3 (v2): session L1 root record (recordSession instrumentation)", () => {
+  it("run with agentVersion + trace writes exactly 1 session root record", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "trace-t3-sess-"));
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const reg = createRegistry([echo]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "ping" } }],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const trace = createJsonlTraceService({
+      filePath: tmpDir,
+      conversationId: "sess-root",
+    });
+    const { result } = await run("go", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+      trace,
+      agentVersion: "0.22.0",
+    });
+    assert.equal(result.stopReason, "completed");
+    const lines = parseJsonl(join(tmpDir, "sess-root.jsonl"));
+    // 1 session 根 + 2 llm_call + 1 tool_call + 2 turn = 6 行。
+    assert.equal(lines.length, 6);
+    const sessions = lines.filter((l) => l["record_type"] === "session");
+    assert.equal(sessions.length, 1, "exactly one session root record per run");
+    // session 根记录在 run 末尾写盘(endedAt/durationMs/status 需 run 完成后
+    // 才诚实确定,红线禁估算值),故物理上是文件最后一行;断言其存在且含
+    // agentVersion 即可,不锁定物理位置。
+    const root = sessions[0]!;
+    assert.equal(root["record_type"], "session");
+    assert.equal(root["agent_version"], "0.22.0");
+    assert.equal(root["status"], "ok");
+    assert.ok(typeof root["started_at"] === "string");
+    assert.ok(typeof root["ended_at"] === "string");
+    assert.ok(typeof root["duration_ms"] === "number");
+    assert.equal(root["error"], undefined);
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("error stop (timeout): session root record has status=error + error.type", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "trace-t3-sess-err-"));
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["never"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+      delayMs: 200,
+    });
+    const trace = createJsonlTraceService({
+      filePath: tmpDir,
+      conversationId: "sess-err",
+    });
+    const { result } = await run("x", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+      modelTimeoutMs: 20,
+      trace,
+      agentVersion: "0.22.0",
+    });
+    assert.equal(result.stopReason, "timeout");
+    const lines = parseJsonl(join(tmpDir, "sess-err.jsonl"));
+    const sessions = lines.filter((l) => l["record_type"] === "session");
+    assert.equal(sessions.length, 1);
+    const root = sessions[0]!;
+    assert.equal(root["record_type"], "session");
+    assert.equal(root["agent_version"], "0.22.0");
+    assert.equal(root["status"], "error");
+    const sessErr = root["error"] as { type: string };
+    assert.equal(sessErr.type, "timeout");
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("agentVersion absent (legacy deps): NO session record written, byte-identical", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "trace-t3-sess-none-"));
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hi"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const trace = createJsonlTraceService({
+      filePath: tmpDir,
+      conversationId: "sess-none",
+    });
+    await run("hello", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+      trace,
+    });
+    const lines = parseJsonl(join(tmpDir, "sess-none.jsonl"));
+    assert.equal(lines.length, 2);
+    assert.equal(lines[0]!["record_type"], "llm_call");
+    assert.equal(lines[1]!["record_type"], "turn");
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+});

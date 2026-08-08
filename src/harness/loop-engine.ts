@@ -54,7 +54,12 @@ import type {
 } from "./tools/types.js";
 import type { CancelKind, LoopTrace, TurnTrace } from "./loop-trace.js";
 import { computeTotals } from "./loop-trace.js";
-import type { TraceErrorType, TraceService } from "./trace/index.js";
+import type {
+  TraceErrorType,
+  TraceService,
+  TraceStatus,
+  TraceError,
+} from "./trace/index.js";
 import { safeTrace } from "./trace/index.js";
 import type { HarnessStreamEvent } from "./stream.js";
 import {
@@ -161,6 +166,13 @@ export interface LoopEngineDeps {
   readonly summaryTimeoutMs?: number;
   /** 064 T4: optional TraceService injection; byte-identical when absent (criterion 5/17) */
   readonly trace?: TraceService;
+  /**
+   * T3 / v2 (spec Open Q4):可选 agent 版本(由 caller/CLI 侧注入 getVersion() 值)。
+   * 仅当 `trace` 与 `agentVersion` 同时存在时,run 末尾才落一条 session L1 根记录
+   * (Loop Engine 不 import cli/usage.ts,避免写侧←cli 反向依赖)。
+   * 字段缺席 → 不埋 session 记录,行为 byte-identical(既有测试零改动)。
+   */
+  readonly agentVersion?: string;
   /**
    * #224 注入缝 — 装配层注入"当前 turn 应进 prompt 的工具集"。
    * 每轮模型调用前由 loop-engine 通过 deps.promptTools?.() 取值；
@@ -1220,6 +1232,11 @@ export async function run(
   // 初值 null = run 无成功模型调用;仅当 step 成功且 usage 存在时更新。
   let lastUsage: TokenUsage | null = null;
   let turns: ReadonlyArray<TurnTrace> = [];
+  // plan T3 / v2:run 级 L1 根记录的起止锚点(诚实值:不前置估算)。
+  // endedAt / durationMs / status 只有在 run 收尾后才能确定,故 session 记录
+  // 必须写在整个 run 末尾(Never-do:"用估算值顶替 trace 真值"红线)。
+  const sessionStartedAt = new Date().toISOString();
+  const sessionStartMono = performance.now();
   // #119 T7:proactive auto-compact check(Q3 决议)。闭包变量 lastCompactTurn
   // 不入 LoopState(Q4 决议),仅作 turnCount 锚点防止重复扫描。
   let lastCompactTurn: number = 0;
@@ -1310,6 +1327,30 @@ export async function run(
           onStream: opts?.onStream,
           signal,
         });
+      }
+      // plan T3 / v2:run 末尾落一条 session L1 根记录(仅当 caller 注入
+      // agentVersion 且启用了 trace)。status 由 result.stopReason 派生:
+      // completed → ok,其余(nonSuccessStop/protocolError/cancelled/...)
+      // → error。埋点走 safeTrace,失败绝不中断业务(@throws never)。
+      if (deps.trace && deps.agentVersion !== undefined) {
+        const sessionEndedAt = new Date().toISOString();
+        const sessionDurationMs = performance.now() - sessionStartMono;
+        const sessionStatus: TraceStatus =
+          reason === "completed" ? "ok" : "error";
+        const sessionError: TraceError | undefined =
+          reason === "completed"
+            ? undefined
+            : { type: toTraceErrorType(reason), message: reason };
+        await safeTrace(() =>
+          deps.trace!.recordSession({
+            startedAt: sessionStartedAt,
+            endedAt: sessionEndedAt,
+            durationMs: sessionDurationMs,
+            agentVersion: deps.agentVersion!,
+            status: sessionStatus,
+            ...(sessionError !== undefined ? { error: sessionError } : {}),
+          })
+        );
       }
       return {
         result,
