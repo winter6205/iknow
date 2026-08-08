@@ -2,8 +2,9 @@
  * src/tui/message-rows.ts — 消息行级高度 SSOT（#189 修复版）。
  *
  * 动机（PR #219 合入后实测仍不达标的根因）：旧实现用 `wrapText(text, cols)`
- * 按**字符数**估 assistant 行数，但实际渲染走 `<Markdown>`（parseBlocks：
- * heading/fence/table/quote/list/blank/paragraph），行账系统性错位——
+ * 按**字符数**估 assistant 行数，但实际渲染走 `<Markdown>`（块级解析
+ * heading/fence/table/quote/list/blank/paragraph，#279 起走 marked.lexer），
+ * 行账系统性错位——
  *  1. fence 边框行、h1 marginTop、bullet 记号全未计入 → 窗口起点漂移；
  *  2. CJK 字符按 2 列显示，`wrapText` 按字节数低估近 2×；
  *  3. tool_use 估 2 行（实际 1，无 margin）→ 每条工具 +1 漂移。
