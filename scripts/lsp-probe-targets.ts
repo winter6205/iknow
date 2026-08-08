@@ -68,12 +68,20 @@ export const PROBE_TARGETS: Record<string, ProbeTarget> = {
   },
   yaml: {
     serverId: "yaml-language-server",
-    targetFile: resolve(
-      REPO_ROOT,
-      ".github/workflows/s4-red-test-first.yml"
-    ),
-    line: 9,
-    char: 4,
+    targetFile: "probe.yml",
+    line: 5,
+    char: 9,
+    // yaml-language-server 对仓库 .github/workflows/*.yml 的 definition/hover
+    // 实测为空（无锚点）。改用运行时夹具（同 python/dockerfile），在
+    // `.iknow/probe-lsp/yaml/probe.yml` 写入含 YAML 锚点的源 —— anchor
+    // reference `*defaults` 的 definition 实测返回非空（跳到锚点定义处）。
+    rootMarkers: [],
+    fixture:
+      "defaults: &defaults\n" +
+      "  runs-on: ubuntu-latest\n" +
+      "jobs:\n" +
+      "  build:\n" +
+      "    <<: *defaults\n",
   },
   json: {
     serverId: "json-language-server",
@@ -85,7 +93,17 @@ export const PROBE_TARGETS: Record<string, ProbeTarget> = {
     serverId: "dockerfile-language-server-nodejs",
     targetFile: "Dockerfile",
     line: 1,
-    char: 0,
-    fixture: 'FROM node:20-alpine\nRUN echo "hello" && echo "world"\n',
+    char: 5,
+    // dockerfile-language-server-nodejs 对 FROM 镜像名 / ARG 引用的 definition
+    // 实测为 null；但对 `ARG NAME=value` 的**变量名**（本例 `BASE_VERSION`，
+    // line 1 char 4-16）definition 返非空（自指 range），hover 返回 value
+    // （`{"contents":"20"}`）。夹具带 ARG 引用 + 变量名定位，让 definition/hover
+    // 真实非空；references / implementation / workspaceSymbol / callHierarchy
+    // 该 server 未声明 provider（见 probe 能力裁剪日志）。
+    rootMarkers: [],
+    fixture:
+      "ARG BASE_VERSION=20\n" +
+      "FROM node:${BASE_VERSION}-alpine\n" +
+      'RUN echo "hello" && echo "world"\n',
   },
 };
