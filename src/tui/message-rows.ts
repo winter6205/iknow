@@ -64,11 +64,12 @@ export interface MessageRender {
 
 const MARGIN_LINE = " "; // ink 折叠 `<Text>{""}</Text>`，空行用空格占位
 
-/** 折叠态摘要行：`[思考] ` 标记 + `(Ctrl+O)` 键位提示（行账 1 行）。
- *  用户反馈（2026-08-08）：「N 段」计数无意义，去掉。导出供 MessageBlocks
- *  全量路径共用同一文案（SSOT，避免两条渲染路径漂移）。 */
+/** 折叠态摘要行：`[思考] ` 标记（行账 1 行）。
+ *  用户反馈（2026-08-08）：「N 段」计数无意义去掉；`(Ctrl+O)` 键位提示
+ *  也嫌碍眼一并去掉（键位说明见 /help）。导出供 MessageBlocks 全量路径
+ *  共用同一文案（SSOT，避免两条渲染路径漂移）。 */
 export function thinkingFoldLine(): string {
-  return "[思考] (Ctrl+O)";
+  return "[思考]";
 }
 
 /** 顶层：消息 → flat 物理行（SSOT，给 measureMessage / MessageBlocksClipped 共享）。 */

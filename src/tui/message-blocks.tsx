@@ -75,7 +75,7 @@ function ToolPreviewRows(props: {
 }
 
 /** 折叠态 thinking 摘要行（dim 配色）。文案走 message-rows thinkingFoldLine
- *  SSOT（`[思考] (Ctrl+O)`），并 clip 到视觉宽度保持 1 行。 */
+ *  SSOT（`[思考]`），并 clip 到视觉宽度保持 1 行。 */
 function ThinkingSummary(props: { readonly cols: number }): ReactElement {
   return (
     <Box marginBottom={1}>
