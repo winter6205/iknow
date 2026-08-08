@@ -66,4 +66,23 @@ describe("createTuiAskUserBridge", () => {
     bridge.resolveAsk(id2, false);
     await p2;
   });
+
+  it("subscribe：enqueue / settle 各推送一次；退订后不再通知（#279 项3）", async () => {
+    const bridge = createTuiAskUserBridge();
+    let calls = 0;
+    const unsub = bridge.subscribe(() => {
+      calls += 1;
+    });
+    const promise = bridge.ask(ctx); // enqueue → +1
+    expect(calls).toBe(1);
+    const id = bridge.pending()!.id;
+    bridge.resolveAsk(id, true); // settle → +1
+    await promise;
+    expect(calls).toBe(2);
+    unsub();
+    const p2 = bridge.ask(ctx); // 退订后不再通知
+    bridge.resolveAsk(bridge.pending()!.id, false);
+    await p2;
+    expect(calls).toBe(2);
+  });
 });
