@@ -427,12 +427,16 @@ describe("T4 criterion 5/19: error paths", () => {
     });
     assert.equal(result.stopReason, "timeout");
     const lines = parseJsonl(traceFile);
-    assert.equal(lines.length, 2);
+    // plan T4 / ADR-0011:异常停后跑一轮 best-effort 收尾摘要,usage 照落
+    // 一条独立的 status=ok llm_call(stub 无 usage → 不抄 *_tokens,Postel)。
+    assert.equal(lines.length, 3);
     assert.equal(lines[0]!["status"], "error");
     const llmError = lines[0]!["error"] as { type: string };
     assert.equal(llmError.type, "timeout");
     assert.equal(lines[1]!["decision"], "timeout");
     assert.equal(lines[1]!["status"], "error");
+    assert.equal(lines[2]!["record_type"], "llm_call");
+    assert.equal(lines[2]!["status"], "ok");
     rmSync(tmpDir, { recursive: true, force: true });
   });
 });

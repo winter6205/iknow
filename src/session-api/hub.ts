@@ -34,6 +34,7 @@ import {
 } from "../harness/sandbox/index.js";
 import { loadIknowEnv, type LlmEnv } from "../config/env.js";
 import { ValidationError } from "../shared/errors.js";
+import { MaxTurnsExceeded } from "../harness/errors.js";
 import { writeIknowState } from "../harness/identity/index.js";
 import type { IknowIdentityError } from "../harness/identity/index.js";
 import { appendFileSync } from "node:fs";
@@ -497,16 +498,53 @@ export class SessionHub {
               }
             : {}),
         };
-        const { result } = await run(query, runDeps, opts.signal, {
-          priorMessages: session.messages,
-          onStream: opts.onStream,
-        });
-        // Violation kill → surface protocolError so the SPA client can
-        // attribute the stop; DROP_REASONS already drops protocolError
-        // context on save (mirrors the chat-session drop semantics).
-        const finalResult: RunResult = killed
-          ? { ...result, stopReason: "protocolError" }
-          : result;
+        // plan T6 / ADR-0011:异常停前 loop-engine 通过 onStream emit
+        // stop_summary。包一层 wrapper 捕获 stop_summary 文本(无条件 — 即使
+        // 宿主没传 onStream,DTO 也要带 stopSummary;byte-stable 有则进、无则缺)
+        // 并**原样转发**给宿主 onStream(TUI 用它做 notice 呈现,见 app.tsx)。
+        let capturedStopSummary: string | undefined;
+        const wrappedOnStream = (event: HarnessStreamEvent): void => {
+          if (event.type === "stop_summary") {
+            capturedStopSummary = event.text;
+          }
+          opts.onStream?.(event);
+        };
+        let finalResult: RunResult;
+        try {
+          const { result } = await run(query, runDeps, opts.signal, {
+            priorMessages: session.messages,
+            onStream: wrappedOnStream,
+          });
+          // Violation kill → surface protocolError so the SPA client can
+          // attribute the stop; DROP_REASONS already drops protocolError
+          // context on save (mirrors the chat-session drop semantics).
+          finalResult = killed
+            ? { ...result, stopReason: "protocolError" }
+            : result;
+        } catch (err) {
+          if (err instanceof MaxTurnsExceeded) {
+            // ADR-0011:不 save — run 前 session 已在盘上,throw 路径不产出
+            // 可落盘的新 messages,故不调 conditionalSave(否则会写空 messages
+            // 把已被 disk-SSOT 守门的不变式擦掉)。turnCount 透传 err.turnsRan
+            // (已跑轮数);finalText 用空串(没有 completed 文本)。摘要若有则
+            // 附 TurnAnswerDto.stopSummary(additive, byte-stable)。
+            return {
+              session: this.summarize({ file: session }),
+              turn: {
+                query,
+                answer: {
+                  finalText: "",
+                  stopReason: "maxTurns",
+                  turnCount: err.turnsRan,
+                  ...(capturedStopSummary !== undefined && capturedStopSummary.length > 0
+                    ? { stopSummary: capturedStopSummary }
+                    : {}),
+                },
+              },
+            };
+          }
+          throw err;
+        }
         // trace is destructured away → immediate GC (not logged/persisted/wired).
         await this.conditionalSave({
           conversationId,
@@ -521,6 +559,9 @@ export class SessionHub {
             query,
             result: finalResult,
             turnMessages: finalResult.messages.slice(priorCount),
+            ...(capturedStopSummary !== undefined && capturedStopSummary.length > 0
+              ? { stopSummary: capturedStopSummary }
+              : {}),
           }),
         };
       },
@@ -716,6 +757,8 @@ export class SessionHub {
     /** T1: this run's own messages (priorMessages sliced away); used for
      * the per-turn thinking/toolCalls projection. */
     readonly turnMessages?: ReadonlyArray<AnthropicNativeMessage>;
+    /** T6: best-effort 收尾摘要文本(异常停时由 postMessage 捕获)。 */
+    readonly stopSummary?: string;
   }): TurnDto {
     const { query, result } = opts;
     // SC20: serve SPA output boundary — mask known secret values in the
@@ -740,6 +783,13 @@ export class SessionHub {
         // 上下文用量显示：result.lastUsage 非 null 时透传；null → 字段缺席
         // (byte-stable；与 thinking/toolCalls 同模式；ADR-0008 D5)。
         ...(result.lastUsage !== null ? { lastUsage: result.lastUsage } : {}),
+        // T6: 收尾摘要仅在异常停时挂上;completed 永不 emit stop_summary,
+        // 即使宿主传了 stopSummary 也不会误附(byte-stable,正常停缺席)。
+        ...(opts.stopSummary !== undefined &&
+        opts.stopSummary.length > 0 &&
+        result.stopReason !== "completed"
+          ? { stopSummary: opts.stopSummary }
+          : {}),
       },
     };
   }

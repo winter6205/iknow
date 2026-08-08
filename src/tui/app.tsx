@@ -581,6 +581,14 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           }),
         }));
       }
+      // plan T6 / ADR-0011:loop-engine 在异常停前 emit stop_summary。bridge
+      // 永远不看到抛出的 MaxTurnsExceeded(hub 侧 catch),但它把 stop_summary
+      // 事件原样转发给 host;此处把它落到 notice,作为"已达上限 + 收尾摘要"
+      // 的用户面呈现(stopReason="maxTurns" 由 turnFinished 单独挂上,session
+      // 文件不被 touch;notice 保留到下一次 sendTurn setNotice(undefined))。
+      if (event.type === "stop_summary") {
+        setNotice({ lines: [event.text] });
+      }
     };
     try {
       const resp = await bridge.postMessage({

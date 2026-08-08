@@ -312,7 +312,8 @@ describe("T6 scenario 5: timeout", () => {
     assert.equal(result.turnCount, 0);
 
     const lines = parseJsonl(traceFile);
-    assert.equal(lines.length, 2);
+    // plan T4 / ADR-0011:异常停收尾摘要额外落一条 status=ok llm_call。
+    assert.equal(lines.length, 3);
     assert.equal(lines[0]!["record_type"], "llm_call");
     assert.equal(lines[0]!["status"], "error");
     const llmErr = lines[0]!["error"] as { type: string };
@@ -322,6 +323,8 @@ describe("T6 scenario 5: timeout", () => {
     assert.equal(lines[1]!["decision"], "timeout");
     const turnErr = lines[1]!["error"] as { type: string };
     assert.equal(turnErr.type, "timeout");
+    assert.equal(lines[2]!["record_type"], "llm_call");
+    assert.equal(lines[2]!["status"], "ok");
   });
 });
 // ---------------------------------------------------------------------------

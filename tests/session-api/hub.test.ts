@@ -384,6 +384,9 @@ describe("boundary: exception — run-level timeout", () => {
       registry,
       maxTurns: 5,
       timeoutMs: 1,
+      // plan T4:异常停收尾摘要 re-uses 同一 never-resolving adapter;缩短摘要
+      // 独立超时,避免该测试被 15s default 拖成超时。
+      summaryTimeoutMs: 1,
     };
     const hub = makeHub(deps);
     const { session } = await hub.createSession();

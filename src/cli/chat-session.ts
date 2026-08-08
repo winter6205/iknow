@@ -16,6 +16,8 @@ import {
 } from "./slash.js";
 import type { SessionContext } from "../shared/schema.js";
 import { isIknowError } from "../shared/errors.js";
+import { MaxTurnsExceeded } from "../harness/errors.js";
+import { maxTurnsNotice } from "./max-turns.js";
 import {
   clearErrLine,
   isInteractive,
@@ -124,19 +126,36 @@ export async function processChatLine(
   }
 
   const query = parsedLine.text;
+  // plan T6:stop_summary 事件观察 — 经 wrapper 包一层,捕获异常停的收尾
+  // 摘要文本。host 的 onStream(若有)只接到 text_delta / tool_call_start 等
+  // 业务事件,避免预览 sink 双打印。摘要由 loop-engine run() 在返回/重抛前
+  // emit,故摘要轮不计 maxTurns。变量提到 try 外:catch 块也要读它。
+  let stopSummary: string | undefined;
+  const wrappedOnStream:
+    | ((event: import("../harness/index.js").HarnessStreamEvent) => void)
+    | undefined =
+    opts.onStream === undefined
+      ? undefined
+      : (event) => {
+          if (event.type === "stop_summary") stopSummary = event.text;
+          else opts.onStream!(event);
+        };
   try {
     const { result, trace } = await runHarness(query, ctx.deps, undefined, {
       priorMessages: ctx.state.messages,
       // #179 T6 (D3):观察者回调透传;undefined = 非流式行为零变化(pipe/ask)。
-      onStream: opts.onStream,
+      // T6:wrap 后仅转发非 stop_summary 事件(摘要单独捕获,见上)。
+      onStream: wrappedOnStream,
     });
-    // Continue the conversation next turn even on maxTurns/cancelled/timeout/
-    // nonSuccessStop (all append an assistant message). protocolError and
-    // emptyFinalResponse return finalState with NO assistant message appended,
-    // so continuing on them would feed a dangling user message to the model
-    // next turn and poison the loop — drop context on those two. CliChatState
-    // owned by host replaces and freezes the shallow copy so history remains
-    // append-only (harness returns ReadonlyArray).
+    // Continue the conversation next turn on cancelled/timeout/nonSuccessStop
+    // (all append an assistant message). maxTurns no longer returns here —
+    // plan T3 / ADR-0011 upgraded it to `throw MaxTurnsExceeded`, caught below
+    // (T6) without appending anything. protocolError and emptyFinalResponse
+    // return finalState with NO assistant message appended, so continuing on
+    // them would feed a dangling user message to the model next turn and
+    // poison the loop — drop context on those two. CliChatState owned by host
+    // replaces and freezes the shallow copy so history remains append-only
+    // (harness returns ReadonlyArray).
     if (
       result.stopReason !== "protocolError" &&
       result.stopReason !== "emptyFinalResponse"
@@ -162,6 +181,18 @@ export async function processChatLine(
       ranQuery: true,
     };
   } catch (err) {
+    if (err instanceof MaxTurnsExceeded) {
+      // plan T3 + T6 / ADR-0011:maxTurns 超限是强制感知信号 — 接住 throw,
+      // 呈现「已达上限」stderr + 收尾摘要(若有)。摘要经上面的 wrapper 捕获
+      // (loop-engine 在重抛前 emit stop_summary)。
+      const notice = maxTurnsNotice(err, stopSummary);
+      return {
+        quit: false,
+        output: notice.output,
+        stderr: notice.stderr,
+        ranQuery: true,
+      };
+    }
     return {
       quit: false,
       output: "",

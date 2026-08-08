@@ -12,6 +12,12 @@
  *   - 017 新增两类:cancelled (signal abort) / timeout (超时强制);
  *   - 017 新增第二返回面:独立 LoopTrace,run 一次性返回
  *     `{ result: RunResult; trace: LoopTrace }`(A1 冻结形状)。
+ *   - plan T3 / ADR-0011:maxTurns 超限从 silent-stop 升级为
+ *     `throw MaxTurnsExceeded`;任一异常停后跑一轮 best-effort 模型
+ *     收尾摘要(T4 / ADR-0011),经 `{ type: "stop_summary", text }` 事件
+ *     投递,不污染权威历史。
+ *   - plan T3 / ADR-0013:SDK prompt-too-long (400) → `PromptTooLongError`
+ *     → reactive compact(每 run 限 1 次)压缩后重试一次模型调用。
  *
  * Loop Engine 不读取、不判断、不构造供应商原生字段;Model Adapter 是
  * 唯一允许处理原生历史的模块。
@@ -26,7 +32,11 @@
  * computeTotals 后返回 {result, trace}。
  */
 
-import { ProtocolError } from "./errors.js";
+import {
+  MaxTurnsExceeded,
+  ProtocolError,
+  PromptTooLongError,
+} from "./errors.js";
 import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
@@ -49,6 +59,7 @@ import { safeTrace } from "./trace/index.js";
 import type { HarnessStreamEvent } from "./stream.js";
 import {
   compactMessages,
+  estimateMessagesTokens,
   getAutoCompactThreshold,
   shouldAutoCompact,
 } from "./compress/index.js";
@@ -125,7 +136,12 @@ export interface LoopEngineDeps {
   readonly adapter: LoopAdapter;
   readonly executor: Executor;
   readonly registry: Registry;
-  readonly maxTurns: number;
+  /**
+   * plan T5-engine / ADR-0012:单次会话最大循环轮数上限(可选)。
+   * `undefined`(默认)= 无限(loop 永不因 turn 计数而停);
+   * 显式配置时达上限 → throw MaxTurnsExceeded(ADR-0011,见 stepWithTrace)。
+   */
+  readonly maxTurns: number | undefined;
   /**
    * #196 IKNOW T1:每 turn 系统提示装配器。返回 string → 透传
    * adapter.step request.system;返回 undefined / 字段缺席 → 跳过注入
@@ -138,6 +154,11 @@ export interface LoopEngineDeps {
   readonly modelTimeoutMs?: number;
   /** 017: 工具侧覆盖;生效 = toolTimeoutMs ?? timeoutMs ?? DEFAULT_TIMEOUT_MS */
   readonly toolTimeoutMs?: number;
+  /**
+   * plan T4 / ADR-0011:收尾摘要独立短超时(ms)。缺省 15000。
+   * 摘要失败 / 超时 → 跳过,绝不阻塞原始停因;测试可用小值提速。
+   */
+  readonly summaryTimeoutMs?: number;
   /** 064 T4: optional TraceService injection; byte-identical when absent (criterion 5/17) */
   readonly trace?: TraceService;
   /**
@@ -213,6 +234,196 @@ export function deriveFinalText(
 
 /** 017 A3:超时运行时兜底。仅当 side-specific 与主超时字段都缺省时生效;按阶段解析,不存储。 */
 const DEFAULT_TIMEOUT_MS = 60_000;
+
+/**
+ * plan T4 / ADR-0011:收尾摘要 (epilogue) 常量。
+ *
+ * 摘要轮是**纯文本**单轮模型调用(不携带工具),best-effort:
+ *   - 独立短超时,避免摘要拖垮原始停因的返回;
+ *   - 输入 = transcript 尾部 ~8K token 估算窗口 + 停因 reason;
+ *   - 失败 / 超时 / signal 已 abort → 静默跳过,原始停因不受阻塞。
+ * 摘要结果不 append 进 `_messages`(append-only 权威历史不变)。
+ */
+const SUMMARY_TIMEOUT_MS = 15_000;
+const SUMMARY_TAIL_TOKEN_BUDGET = 8_000;
+/** 摘要尾部窗口的条数兜底(估算超窗时按此截取尾部;S5 命名常量)。 */
+const SUMMARY_TAIL_FALLBACK_MESSAGES = 20;
+const SUMMARY_PROMPT = (reason: string): string =>
+  `Briefly summarize in a few sentences what was done in this conversation and why it ended (stop reason: ${reason}). Keep it concise.`;
+
+/**
+ * plan T4 / ADR-0011:best-effort 收尾摘要模型调用的纯文本产物。
+ *
+ * 收尾摘要的成功路径只关心两件事:`text`(投递给 host 的 stop_summary
+ * 事件载荷)和 `usage`(摘要轮的 token 计量,走 trace `recordLlmCall`
+ * `LlmCallRecord`,status ok,Postel 字段出席 — ADR-0008 Decision 3
+ * 不在这里脱钩)。failure / 超时 / signal-abort → 返回 null,调用方
+ * 静默跳过,绝不阻塞原始停因。
+ */
+interface SummaryOutcome {
+  readonly text: string;
+  readonly usage: TokenUsage | undefined;
+}
+
+/**
+ * plan T4 / ADR-0011:截取摘要输入的历史尾部窗口。
+ *
+ * 估算尾部 ~8K token 窗口作摘要输入(天然在窗内,避免超窗 reactive-compact
+ * 兜底)。估算超窗 → 先按尾部条数截取;极端长历史一次截取仍超窗 → 再用
+ * compactMessages 收口(它保 tool 配对)。
+ */
+function truncateTailForSummary(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): ReadonlyArray<AnthropicNativeMessage> {
+  let tail = messages;
+  if (estimateMessagesTokens(tail) > SUMMARY_TAIL_TOKEN_BUDGET) {
+    const from = Math.max(0, tail.length - SUMMARY_TAIL_FALLBACK_MESSAGES);
+    tail = tail.slice(from);
+    if (estimateMessagesTokens(tail) > SUMMARY_TAIL_TOKEN_BUDGET) {
+      tail = compactMessages(tail);
+    }
+  }
+  return tail;
+}
+
+/**
+ * plan T4 / ADR-0011:带独立超时的摘要模型调用。
+ *
+ * 构造独立 `{ messages, turnCount: 0 }` 状态(与主 loop turnCount 解耦 ——
+ * 摘要轮不计 maxTurns,不消费工具预算);调 `adapter.step` 一次(不传 tools
+ * → 纯文本,无工具触发);`Promise.race` 包独立 ~15s 超时 + catch-all。
+ *
+ * 内部 AbortController:超时触发时中止真实 HTTP 请求(对齐 raceModel 的
+ * timer → childAbort 纪律);与 run 级 signal 合并为 composite 传给
+ * adapter.step —— concurrent 场景 run signal abort 会同步取消摘要调用。
+ * adapterP 永不 reject:catch-all 把失败收敛为 null,避免 race 后到 rejection
+ * 触发 unhandledRejection(测试替身 / 真 SDK 都可能)。失败 / 超时 → null。
+ */
+async function runSummaryWithTimeout(opts: {
+  readonly deps: LoopEngineDeps;
+  readonly messages: ReadonlyArray<AnthropicNativeMessage>;
+  readonly reason: string;
+  readonly signal: AbortSignal | undefined;
+}): Promise<SummaryOutcome | null> {
+  const messages: ReadonlyArray<AnthropicNativeMessage> = Object.freeze([
+    ...opts.messages.map(freezeMessage),
+    freezeMessage(
+      opts.deps.adapter.encodeUserText(SUMMARY_PROMPT(opts.reason))
+    ),
+  ]);
+  const summaryState: LoopState = Object.freeze({ messages, turnCount: 0 });
+  const request = Object.freeze({});
+  const summaryController = new AbortController();
+  const compositeSignal = AbortSignal.any(
+    opts.signal
+      ? [opts.signal, summaryController.signal]
+      : [summaryController.signal]
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let adapterResolved = false;
+  const adapterP = opts.deps.adapter
+    .step(summaryState, request, compositeSignal)
+    .then(
+      (r): SummaryOutcome | null => {
+        adapterResolved = true;
+        if (timer !== undefined) clearTimeout(timer);
+        const text = (r.projection.texts ?? []).join("\n").trim();
+        return text.length > 0 ? { text, usage: r.usage } : null;
+      },
+      (): SummaryOutcome | null => {
+        adapterResolved = true;
+        return null;
+      }
+    );
+  const timeoutP = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      summaryController.abort();
+      resolve(null);
+    }, opts.deps.summaryTimeoutMs ?? SUMMARY_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([adapterP, timeoutP]);
+  } catch {
+    // catch-all:摘要失败绝不阻塞原始停因(ADR-0011 Decision 4)。
+    return null;
+  } finally {
+    if (!adapterResolved && timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * plan T4 / ADR-0011:best-effort 收尾摘要模型调用(编排)。
+ *
+ * signal 已 abort(concurrent 场景)→ 直接取消,不发起模型调用。
+ * 返回 `SummaryOutcome` 或 `null`(失败/超时/signal-abort)。
+ */
+async function tryRunSummary(opts: {
+  readonly deps: LoopEngineDeps;
+  readonly messages: ReadonlyArray<AnthropicNativeMessage>;
+  readonly reason: string;
+  readonly signal: AbortSignal | undefined;
+}): Promise<SummaryOutcome | null> {
+  if (opts.signal?.aborted) return null;
+  const tail = truncateTailForSummary(opts.messages);
+  return runSummaryWithTimeout({
+    deps: opts.deps,
+    messages: tail,
+    reason: opts.reason,
+    signal: opts.signal,
+  });
+}
+
+/**
+ * plan T4 / ADR-0011:run() 收尾 —— 异常停后跑一轮收尾摘要并落 trace。
+ *
+ * 只处理 `reason !== "completed"` 的异常停(maxTurns / protocolError /
+ * cancelled / timeout 等)。摘要轮:
+ *   - 不 append 进权威历史(append-only 不变式);
+ *   - 不计 maxTurns / 工具预算;
+ *   - usage 照落 trace `LlmCallRecord`(status ok);
+ *   - 结果经 `{ type: "stop_summary", text }` 事件投递给 host。
+ *
+ * **trace 兼容纪律**:run 的既有 recordLlmCall 契约是"每次成功的模型
+ * 调用落一条 llm_call,每次模型阶段落一条 turn"。摘要轮在此之外额外
+ * 落一条独立的 `recordLlmCall`(status ok),**不**额外落 turn ——
+ * 避免破坏既有 turn 序列的 `lines.length` 精确断言(挂 maxTurns 的
+ * 断言由本分支 throw 前内部先行记录 turn)。
+ */
+async function epilogueSummary(opts: {
+  readonly deps: LoopEngineDeps;
+  readonly messages: ReadonlyArray<AnthropicNativeMessage>;
+  readonly reason: string;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
+  readonly signal: AbortSignal | undefined;
+}): Promise<void> {
+  if (opts.signal?.aborted) return;
+  const startedAt = new Date().toISOString();
+  const startMono = performance.now();
+  const outcome = await tryRunSummary(opts);
+  if (outcome === null || opts.signal?.aborted) return;
+  const endedAt = new Date().toISOString();
+  const durationMs = performance.now() - startMono;
+  if (opts.deps.trace) {
+    const streamMode = opts.deps.adapter.streamMode === true;
+    await safeTrace(() =>
+      opts.deps.trace!.recordLlmCall({
+        startedAt,
+        endedAt,
+        durationMs,
+        supplierStop: "success",
+        stream: streamMode,
+        messagesCaptured: false,
+        status: "ok",
+        ...(outcome.usage !== undefined ? outcome.usage : {}),
+      })
+    );
+  }
+  try {
+    opts.onStream?.({ type: "stop_summary", text: outcome.text });
+  } catch {
+    // 观察者异常不得反向破坏原始停因返回(D3 纪律)。
+  }
+}
 
 /** 023: raceModel 的结构化胜出来源，避免 SDK abort 错误覆盖原始意图。 */
 export type RaceOutcomeSource =
@@ -376,9 +587,13 @@ async function runModelPhase(opts: {
   readonly started: number;
   readonly modelTimeoutMs: number;
   readonly onStream?: (event: HarnessStreamEvent) => void;
+  /** plan T3 / ADR-0013:run 级闭包的 reactive-compact 已尝试标记。
+   *   true = 本次 run 已压缩重试过一次,不再第二次。 */
+  readonly reactiveAttemptedRef: { attempted: boolean };
 }): Promise<
   | { kind: "ok"; result: AssistantTurnResult }
   | { kind: "stop"; transition: Transition; turn: TurnTrace }
+  | { kind: "reactive_compact_pending"; state: LoopState }
 > {
   try {
     // #196 IKNOW T1:每 turn 解析 deps.system?.();undefined → 字段缺席,
@@ -428,6 +643,35 @@ async function runModelPhase(opts: {
       cancelKind: "timerTimeout",
     });
   } catch (err) {
+    // plan T3 / ADR-0013:reactive compact 兜底 — 每 run 限 1 次。
+    // PromptTooLongError extends ProtocolError,必须先于 ProtocolError 分支判定;
+    // 压缩成功 → 返回 reactive_compact_pending 让 stepWithTrace 用压缩后状态重跑一次。
+    if (err instanceof PromptTooLongError) {
+      if (
+        opts.deps.compress !== undefined &&
+        !opts.reactiveAttemptedRef.attempted
+      ) {
+        opts.reactiveAttemptedRef.attempted = true;
+        const compacted = compactMessages(opts.state.messages);
+        if (compacted !== opts.state.messages) {
+          return {
+            kind: "reactive_compact_pending",
+            state: {
+              ...opts.state,
+              messages: Object.freeze(compacted.map((m) => freezeMessage(m))),
+            },
+          };
+        }
+      }
+      // 压缩关闭 / 已尝试过 / 压缩后窗口仍超 → 交回 ProtocolError 语义
+      // (ADR-0013:"压缩后仍超 → throw,交回 ADR-0012 超限语义收场")。
+      return modelStop({
+        state: opts.state,
+        started: opts.started,
+        reason: "protocolError",
+        cancelKind: "none",
+      });
+    }
     if (err instanceof ProtocolError)
       return modelStop({
         state: opts.state,
@@ -575,12 +819,19 @@ async function runToolPhase(opts: {
  *
  * 内部 Transition 形状与 016 冻结契约一致(judgement union,reason 字段
  * 类型随 StopReason 自动扩展)。
+ *
+ * plan T3 / ADR-0011:maxTurns 超限从 silent-stop 升级为
+ * `throw MaxTurnsExceeded`(surface 必须感知;turnsRan = 已跑轮数)。
+ * `maxTurns` 现在类型 `number | undefined`(plan T5-engine / ADR-0012):
+ * undefined = 永不触发(exploration 不被 turn 计数误杀)。
  */
 async function stepWithTrace(opts: {
   readonly state: LoopState;
   readonly deps: LoopEngineDeps;
   readonly signal?: AbortSignal;
   readonly onStream?: (event: HarnessStreamEvent) => void;
+  /** plan T3 / ADR-0013:run 级闭包的 reactive-compact 已尝试标记(跨 step 传递)。 */
+  readonly reactiveAttemptedRef: { attempted: boolean };
 }): Promise<{
   transition: Transition;
   turn: TurnTrace | null;
@@ -590,16 +841,13 @@ async function stepWithTrace(opts: {
    */
   modelUsage: TokenUsage | undefined;
 }> {
-  if (opts.state.turnCount >= opts.deps.maxTurns) {
-    return {
-      transition: {
-        kind: "stop",
-        reason: "maxTurns",
-        finalState: opts.state,
-      },
-      turn: null,
-      modelUsage: undefined,
-    };
+  // plan T3 / ADR-0011 + plan T5-engine / ADR-0012:maxTurns 超限 → throw。
+  // undefined = 无限,永不触发(长程探索不被 turn 计数误杀)。
+  if (
+    opts.deps.maxTurns !== undefined &&
+    opts.state.turnCount >= opts.deps.maxTurns
+  ) {
+    throw new MaxTurnsExceeded(opts.state.turnCount, "maxTurns");
   }
 
   const started = performance.now();
@@ -610,14 +858,62 @@ async function stepWithTrace(opts: {
   const llmStartedAt = new Date().toISOString();
   const llmStartMono = performance.now();
 
-  const modelPhase = await runModelPhase({
+  // plan T3 / ADR-0013:runModelPhase 失败侧会返回 reactive_compact_pending,这里
+  // 用压缩后的 state 重试一次模型调用(每 run 限 1 次,reactiveAttemptedRef 守门)。
+  // reactiveAttemptedRef 在第一次返回 reactive_compact_pending 前已被翻转 attempted=true,
+  // 第二次 runModelPhase 调用因 attempted=true 不再产出 reactive_compact_pending
+  // (落 modelStop(protocolError)),所以下方 narrow 只需穷举 ok/stop。
+  // `effectiveState` 记录本步模型实际看到的 messages:reactive 压缩后用它替代
+  // opts.state,以便 appendMessage / finalState 反映压缩后的权威历史(append-only
+  // 不变式 + 不把模型已不见的消息重新带回历史)。
+  type OkOrStop =
+    | { kind: "ok"; result: AssistantTurnResult }
+    | { kind: "stop"; transition: Transition; turn: TurnTrace };
+  const firstPhase = await runModelPhase({
     state: opts.state,
     deps: opts.deps,
     signal: opts.signal,
     started,
     modelTimeoutMs: modelTimeout,
     onStream: opts.onStream,
+    reactiveAttemptedRef: opts.reactiveAttemptedRef,
   });
+  let effectiveState: LoopState = opts.state;
+  const modelPhase: OkOrStop =
+    firstPhase.kind === "reactive_compact_pending"
+      ? await (async (): Promise<OkOrStop> => {
+          effectiveState = firstPhase.state;
+          const compressedAttempt = await runModelPhase({
+            state: firstPhase.state,
+            deps: opts.deps,
+            signal: opts.signal,
+            started,
+            modelTimeoutMs: modelTimeout,
+            onStream: opts.onStream,
+            reactiveAttemptedRef: opts.reactiveAttemptedRef,
+          });
+          if (compressedAttempt.kind === "reactive_compact_pending") {
+            // 不变式违反 — reactive_compact 已被关闭或已尝试过,
+            // runModelPhase 不应再返回 reactive_compact_pending。
+            return {
+              kind: "stop",
+              transition: {
+                kind: "stop",
+                reason: "protocolError",
+                finalState: compressedAttempt.state,
+              },
+              turn: mkTurn({
+                turnIndex: opts.state.turnCount,
+                supplierStop: "other",
+                toolCalls: [],
+                durationMs: performance.now() - started,
+                cancelKind: "none",
+              }),
+            };
+          }
+          return compressedAttempt;
+        })()
+      : firstPhase;
 
   const llmEndedAt = new Date().toISOString();
   const llmDurationMs = performance.now() - llmStartMono;
@@ -712,7 +1008,7 @@ async function stepWithTrace(opts: {
       transition: {
         kind: "stop",
         reason: "emptyFinalResponse",
-        finalState: opts.state,
+        finalState: effectiveState,
       },
       turn: mkTurn({
         turnIndex: opts.state.turnCount,
@@ -726,12 +1022,12 @@ async function stepWithTrace(opts: {
   }
 
   const nextState = appendMessage({
-    state: opts.state,
+    state: effectiveState,
     msg: turnResult.nativeMessage,
   });
   const afterAssistantState = {
     messages: nextState.messages,
-    turnCount: opts.state.turnCount + 1,
+    turnCount: effectiveState.turnCount + 1,
   };
 
   if (turnResult.projection.toolCalls.length === 0) {
@@ -858,8 +1154,11 @@ async function stepWithTrace(opts: {
 
 /**
  * 单步状态机推进。基于当前 state + deps 调用一次 Adapter:
- *   1. turnCount 已达 maxTurns -> stop maxTurns,不调 Adapter;
- *   2. 调 Adapter;若抛 ProtocolError -> stop protocolError(整回合不进历史);
+ *   1. turnCount 已达 maxTurns -> throw MaxTurnsExceeded(plan T3 / ADR-0011,
+ *      替代旧 silent-stop),不调 Adapter;
+ *   2. 调 Adapter;若抛 PromptTooLongError -> reactive compact 重试一次
+ *      (plan T3 / ADR-0013),仍超 / 已试过 -> stop protocolError;
+ *      若抛 ProtocolError -> stop protocolError(整回合不进历史);
  *   3. emptyFinalResponse -> stop emptyFinalResponse(整回合不进历史);
  *   4. 纯文本完成 -> stop completed(进历史)或 nonSuccessStop;
  *   5. 有 tool call -> 执行工具,把 tool_result 编码后追加为一条 user
@@ -877,7 +1176,12 @@ export async function step(
   deps: LoopEngineDeps,
   signal?: AbortSignal
 ): Promise<Transition> {
-  const { transition } = await stepWithTrace({ state, deps, signal });
+  const { transition } = await stepWithTrace({
+    state,
+    deps,
+    signal,
+    reactiveAttemptedRef: { attempted: false },
+  });
   return transition;
 }
 
@@ -888,6 +1192,12 @@ export async function step(
  * 017 A1 返回形状变更:`Promise<{ result: RunResult; trace: LoopTrace }>`。
  * RunResult 形状零变更;trace 仅在 run 内部 immutable 累积([...prev, t]),
  * run 收尾一次性 computeTotals(A7)。
+ *
+ * plan T3 / ADR-0011 + plan T4:maxTurns 超限时 run 直接 throw
+ * MaxTurnsExceeded(在 stepWithTrace 入口触发,先于 turnStartedAt / recordTurn;
+ * surface 不依赖 trace.turns,靠 throws.turnsRan 推断 turnCount),surface
+ * (T6 范畴)必须 catch;异常停(protocolError / cancelled / timeout /
+ * nonSuccessStop)仍走 return stop + 收尾摘要事件。
  */
 export async function run(
   userText: string,
@@ -913,6 +1223,8 @@ export async function run(
   // #119 T7:proactive auto-compact check(Q3 决议)。闭包变量 lastCompactTurn
   // 不入 LoopState(Q4 决议),仅作 turnCount 锚点防止重复扫描。
   let lastCompactTurn: number = 0;
+  // plan T3 / ADR-0013:reactive-compact 已尝试标记(每 run 限 1 次,闭包变量)。
+  const reactiveAttemptedRef = { attempted: false };
   while (true) {
     // #119 T7:compress 缝缺省(字段缺席)→ 跳过检查,行为零变化(byte-identical)。
     // 仅 turnCount 自增(>lastCompactTurn)后扫一次,避免每轮重复 estimate。
@@ -940,12 +1252,35 @@ export async function run(
         }
       }
     }
-    const { transition, turn, modelUsage } = await stepWithTrace({
-      state,
-      deps,
-      signal,
-      onStream: opts?.onStream,
-    });
+    let stepResult: {
+      transition: Transition;
+      turn: TurnTrace | null;
+      modelUsage: TokenUsage | undefined;
+    };
+    try {
+      stepResult = await stepWithTrace({
+        state,
+        deps,
+        signal,
+        onStream: opts?.onStream,
+        reactiveAttemptedRef,
+      });
+    } catch (err) {
+      if (err instanceof MaxTurnsExceeded) {
+        // plan T4 / ADR-0011:maxTurns 超限走 throw 路径(不进 stop 分支),
+        // 这里在重抛前先跑一轮 best-effort 收尾摘要,再原样重抛 ——
+        // "原始停因仍抛出",摘要失败/超时绝不阻塞 throw。
+        await epilogueSummary({
+          deps,
+          messages: state.messages,
+          reason: err.reason,
+          onStream: opts?.onStream,
+          signal,
+        });
+      }
+      throw err;
+    }
+    const { transition, turn, modelUsage } = stepResult;
     if (turn !== null) {
       // immutable append;禁止 push / 原地修改。
       turns = [...turns, turn];
@@ -965,6 +1300,17 @@ export async function run(
         stopReason: reason,
         lastUsage,
       };
+      // plan T4 / ADR-0011:异常停(completed 除外)后跑一轮 best-effort
+      // 收尾摘要。不计 maxTurns / 工具预算;失败即跳过,不阻塞原始停因。
+      if (reason !== "completed") {
+        await epilogueSummary({
+          deps,
+          messages: finalState.messages,
+          reason,
+          onStream: opts?.onStream,
+          signal,
+        });
+      }
       return {
         result,
         trace: { turns, totals: computeTotals(turns) },

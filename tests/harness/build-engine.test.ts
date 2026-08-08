@@ -159,9 +159,20 @@ describe("buildHarnessEngine (SSOT passthrough)", () => {
       askUser: createNoAskUser(),
     });
 
-    expect(deps.maxTurns).toBe(6);
+    // plan T5-engine / ADR-0012:默认 env 不设 IKNOW_LLM_MAX_TURNS → undefined(无限)。
+    expect(deps.maxTurns).toBeUndefined();
     // Proves timeoutMs is read through from env, not a hard-coded constant.
     expect(deps.timeoutMs).toBe(12345);
+  });
+
+  it("plan T5-engine: env.llm.maxTurns=3 → deps.maxTurns === 3", async () => {
+    const env = makeEnv("sk-test-passthrough-maxTurns");
+    env.llm.maxTurns = 3;
+    const { deps } = await buildHarnessEngine({
+      env,
+      askUser: createNoAskUser(),
+    });
+    expect(deps.maxTurns).toBe(3);
   });
 
   it("IKNOW_WEB_PROXY 非法值 → build 时同步抛错,空值 → 不影响装配", async () => {

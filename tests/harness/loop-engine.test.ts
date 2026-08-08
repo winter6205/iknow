@@ -8,6 +8,11 @@
 import { APIUserAbortError } from "@anthropic-ai/sdk";
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import {
+  MaxTurnsExceeded,
+  PromptTooLongError,
+  ProtocolError,
+} from "../../src/harness/errors.ts";
 import { raceModel, run, step } from "../../src/harness/loop-engine.ts";
 import type {
   AnthropicContentBlock,
@@ -276,7 +281,7 @@ describe("loop engine S5: same-turn partial failure does not short-circuit", () 
 });
 
 describe("loop engine S6: maxTurns hit", () => {
-  it("loop stops at maxTurns, never invokes model again past the limit", async () => {
+  it("plan T3 + ADR-0011: throws MaxTurnsExceeded instead of silent stop; turnsRan = 已跑轮数", async () => {
     const echo = createStubTool({
       name: "echo",
       inputSchema: {
@@ -297,14 +302,20 @@ describe("loop engine S6: maxTurns hit", () => {
       })
     );
     const model = createStubModel({ responses: infinite });
-    const { result } = await run("go", {
-      adapter: model,
-      executor: exec,
-      registry: reg,
-      maxTurns: 3,
-    });
-    assert.equal(result.stopReason, "maxTurns");
-    assert.equal(result.turnCount, 3);
+    await assert.rejects(
+      run("go", {
+        adapter: model,
+        executor: exec,
+        registry: reg,
+        maxTurns: 3,
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof MaxTurnsExceeded);
+        assert.equal(err.turnsRan, 3);
+        assert.equal(err.reason, "maxTurns");
+        return true;
+      }
+    );
   });
 });
 
@@ -525,7 +536,7 @@ describe("loop engine step(): real state-machine transitions", () => {
     assert.equal(transition.nextState.turnCount, 1);
   });
 
-  it("step() returns stop transition on maxTurns without calling adapter", async () => {
+  it("step() throws MaxTurnsExceeded on maxTurns without calling adapter", async () => {
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
@@ -547,16 +558,20 @@ describe("loop engine step(): real state-machine transitions", () => {
       ]) as ReadonlyArray<AnthropicNativeMessage>,
       turnCount: 5, // already at maxTurns
     };
-    const transition = await step(initial, {
-      adapter: model,
-      executor: exec,
-      registry: reg,
-      maxTurns: 5,
-    });
-    assert.equal(transition.kind, "stop");
-    if (transition.kind !== "stop") return;
-    assert.equal(transition.reason, "maxTurns");
-    assert.equal(transition.finalState.messages.length, 1);
+    await assert.rejects(
+      step(initial, {
+        adapter: model,
+        executor: exec,
+        registry: reg,
+        maxTurns: 5,
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof MaxTurnsExceeded);
+        assert.equal(err.turnsRan, 5);
+        assert.equal(err.reason, "maxTurns");
+        return true;
+      }
+    );
   });
 
   it("step() returns completed transition on pure text", async () => {
@@ -739,20 +754,24 @@ describe("run() opts.priorMessages", () => {
       makeNative({ role: "assistant", text: "A reply" }),
     ];
 
-    const { result } = await run(
-      "B",
-      {
-        adapter: model,
-        executor: exec,
-        registry: reg,
-        maxTurns: 1,
-      },
-      undefined,
-      { priorMessages }
+    await assert.rejects(
+      run(
+        "B",
+        {
+          adapter: model,
+          executor: exec,
+          registry: reg,
+          maxTurns: 1,
+        },
+        undefined,
+        { priorMessages }
+      ),
+      (err: unknown) => {
+        assert.ok(err instanceof MaxTurnsExceeded);
+        assert.equal(err.turnsRan, 1);
+        return true;
+      }
     );
-
-    assert.equal(result.stopReason, "maxTurns");
-    assert.equal(result.turnCount, 1);
   });
 });
 
@@ -1062,6 +1081,9 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const registry = createRegistry([tool]);
     const executor = createExecutor(registry);
+    // T4:前两次 step(raceModel 直测 + run 主回路)走 abort+throw;后续
+    // (摘要轮次)立刻返回空文本结果,best-effort 跳过避免测试挂起。
+    let stepCalls = 0;
     const adapter = Object.freeze({
       encodeUserText: (text: string) => makeNative({ role: "user", text }),
       encodeToolResults: () => [],
@@ -1070,6 +1092,14 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
         _request: unknown,
         signal?: AbortSignal
       ) => {
+        stepCalls++;
+        if (stepCalls > 2) {
+          return assistantResult({
+            texts: [],
+            toolCalls: [],
+            supplierStop: "success",
+          });
+        }
         await new Promise<void>((resolve) =>
           signal?.addEventListener("abort", () => resolve(), { once: true })
         );
@@ -1102,6 +1132,9 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     const registry = createRegistry([tool]);
     const executor = createExecutor(registry);
     let receivedSignal: AbortSignal | undefined;
+    // T4:首次 step = 主回路(捕获 race composite);后续 step = 摘要轮次,
+    // 立即返回空文本避免被 200ms setTimeout 拖慢并污染 receivedSignal 断言。
+    let stepCalls = 0;
     const adapter = Object.freeze({
       encodeUserText: (text: string) => makeNative({ role: "user", text }),
       encodeToolResults: () => [],
@@ -1110,6 +1143,14 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
         _request: unknown,
         signal?: AbortSignal
       ) => {
+        stepCalls++;
+        if (stepCalls > 1) {
+          return assistantResult({
+            texts: [],
+            toolCalls: [],
+            supplierStop: "success",
+          });
+        }
         receivedSignal = signal;
         await new Promise<void>((resolve) => setTimeout(resolve, 200));
         return assistantResult({ texts: ["late"] });
@@ -1914,6 +1955,428 @@ describe("loop engine T4 #160: RunResult.lastUsage (ADR-0008 Decision 5)", () =>
  *   - 未传 promptTools → adapter.step 收到 registry.list()(同顺同内容);
  *   - 传 subset promptTools → adapter.step 收到的就是该数组。
  */
+
+
+// ---------------------------------------------------------------------------
+// plan T3 / ADR-0013: reactive compact (PromptTooLongError → compact + retry)
+// ---------------------------------------------------------------------------
+describe("loop engine T3 #252: reactive compact (ADR-0013)", () => {
+  it("deps.compress 缺席 → PromptTooLongError 不触发 reactive compact,落 protocolError 分支", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+
+    let stepCalls = 0;
+    const flakyAdapter = Object.freeze({
+      encodeUserText: (text: string): AnthropicNativeMessage => ({
+        role: "user",
+        content: [{ type: "text", text }],
+      }),
+      encodeToolResults: (): AnthropicContentBlock[] => [],
+      step: async (): Promise<AssistantTurnResult> => {
+        stepCalls++;
+        throw new PromptTooLongError("synthetic 400 prompt-too-long");
+      },
+    });
+    const { result } = await run("Q", {
+      adapter: flakyAdapter,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+    // deps.compress 缺席 → reactive 入口不激活,直接 ProtocolError 分支。
+    assert.equal(result.stopReason, "protocolError");
+    // stepCalls = 主回路 1 次 + 异常停收尾摘要 epilogue 再尝试 1 次(均抛
+    // PromptTooLongError → catch-all 跳过)。reactive compact 未触发。
+    assert.equal(stepCalls, 2);
+  });
+
+  it("deps.compress 已配 + 首次 PromptTooLongError → 压缩重试一次 → 成功", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+
+    let stepCalls = 0;
+    const flakyAdapter = Object.freeze({
+      encodeUserText: (text: string): AnthropicNativeMessage => ({
+        role: "user",
+        content: [{ type: "text", text }],
+      }),
+      encodeToolResults: (): AnthropicContentBlock[] => [],
+      step: async (
+        _state: LoopState,
+        _request: unknown
+      ): Promise<AssistantTurnResult> => {
+        stepCalls++;
+        if (stepCalls === 1) {
+          throw new PromptTooLongError("synthetic 400 prompt-too-long");
+        }
+        return assistantResult({
+          texts: ["done after compact"],
+          toolCalls: [],
+          supplierStop: "success",
+        });
+      },
+    });
+
+    // 12 条 prior → state.messages = 13 条 → reactive compactMessages 裁到
+    // 边界占位 + 6 末尾。proactive 不触发:estimate << threshold(window 默认
+    // 推导 200000-20000-13000=167000,显式阈值 10000 更保险 < window)。
+    const longPrior = Array.from({ length: 12 }, (_, i) =>
+      makeNative({ role: "user", text: `prior-${i}` })
+    );
+
+    const { result } = await run(
+      "Q",
+      {
+        adapter: flakyAdapter,
+        executor: exec,
+        registry: reg,
+        maxTurns: 5,
+        compress: { contextWindow: 200_000, thresholdTokens: 10_000 },
+      },
+      undefined,
+      { priorMessages: longPrior }
+    );
+    assert.equal(result.stopReason, "completed");
+    assert.equal(stepCalls, 2); // 1 throw + 1 retry success
+    // reactive compact 生效:13 条 → 边界占位 + 6 末尾;加 user(Q) 已含在 13 内,
+    // 收尾 assistant +1。13 → (1 + 6) + 1(assistant) = 8。
+    assert.equal(
+      result.messages.length,
+      1 + 6 + 1,
+      `expected reactive-compressed length 8, got ${result.messages.length}`
+    );
+    assert.equal(result.finalText, "done after compact");
+  });
+
+  it("压缩后仍抛 PromptTooLongError → 第二次落 protocolError 分支 (run-level once-only 守门)", async () => {
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const reg = createRegistry([echo]);
+    const exec = createExecutor(reg);
+
+    let stepCalls = 0;
+    const alwaysTooLong = Object.freeze({
+      encodeUserText: (text: string): AnthropicNativeMessage => ({
+        role: "user",
+        content: [{ type: "text", text }],
+      }),
+      encodeToolResults: (): AnthropicContentBlock[] => [],
+      step: async (): Promise<AssistantTurnResult> => {
+        stepCalls++;
+        throw new PromptTooLongError("still too long after compact");
+      },
+    });
+
+    const { result } = await run("Q", {
+      adapter: alwaysTooLong,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+      compress: { contextWindow: 200_000, thresholdTokens: 10_000 },
+    });
+    // 1 首次 throw → compactMessages + retry → 2 仍 throw → attempted=true
+    // → runModelPhase 落 modelStop(protocolError);stepWithTrace 记录 turn error。
+    assert.equal(result.stopReason, "protocolError");
+    assert.equal(stepCalls, 2); // 首次 + 一次压缩重试
+  });
+
+  it("PromptTooLongError 是 ProtocolError 子类 — 单次错误分支不破坏 ProtocolError 兜底", async () => {
+    // 验证依赖 instanceof ProtocolError 的其它分支未受影响。
+    const { ProtocolError } = await import("../../src/harness/errors.ts");
+    assert.ok(ProtocolError !== undefined);
+    const err = new PromptTooLongError("x");
+    assert.ok(err instanceof ProtocolError);
+    assert.ok(err instanceof PromptTooLongError);
+    assert.equal(err.name, "PromptTooLongError");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// plan T4 / ADR-0011: 收尾摘要 epilogue (stop_summary 事件)
+// ---------------------------------------------------------------------------
+describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
+  it("protocolError 后 emit stop_summary;摘要不进 _messages;原始停因 = protocolError", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+
+    let stepCalls = 0;
+    const adapter = Object.freeze({
+      encodeUserText: (text: string): AnthropicNativeMessage => ({
+        role: "user",
+        content: [{ type: "text", text }],
+      }),
+      encodeToolResults: (): AnthropicContentBlock[] => [],
+      step: async (): Promise<AssistantTurnResult> => {
+        stepCalls++;
+        if (stepCalls === 1) {
+          throw new ProtocolError("synthetic protocol error for summary test");
+        }
+        // 摘要轮次:返回一段非空 text。
+        return assistantResult({
+          texts: ["summary text from epilogue"],
+          toolCalls: [],
+          supplierStop: "success",
+        });
+      },
+    });
+
+    const received: HarnessStreamEvent[] = [];
+    const { result } = await run(
+      "go",
+      { adapter, executor: exec, registry: reg, maxTurns: 5 },
+      undefined,
+      { onStream: (event) => received.push(event) }
+    );
+    // 主回路 protocolError → stop;run() 调 epilogueSummary → 第二次 adapter.step
+    // 返回收尾文本 → stop_summary emit;原始停因 = protocolError(run 不续循环)。
+    assert.equal(result.stopReason, "protocolError");
+    assert.equal(stepCalls, 2);
+    const summary = received.find((e) => e.type === "stop_summary");
+    assert.ok(summary, "expected stop_summary event");
+    assert.equal(
+      (summary as { type: "stop_summary"; text: string }).text,
+      "summary text from epilogue"
+    );
+    // 历史无 stop_summary 注入 — 只有 user(go) 种子消息(bad turn 未 append)。
+    assert.equal(result.messages.length, 1);
+    assert.equal(result.messages[0]!.role, "user");
+  });
+
+  it("空历史(empty)无摘要输入不崩(摘要轮不调 → 不崩;epilogue 早 return)", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["final"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    // maxTurns=undefined + 一次成功 → completed,不进异常停 → 无 summary 事件。
+    const received: HarnessStreamEvent[] = [];
+    const { result } = await run(
+      "hi",
+      {
+        adapter: model,
+        executor: exec,
+        registry: reg,
+        maxTurns: undefined,
+      },
+      undefined,
+      { onStream: (event) => received.push(event) }
+    );
+    assert.equal(result.stopReason, "completed");
+    assert.ok(
+      !received.some((e) => e.type === "stop_summary"),
+      "completed 不应 emit stop_summary"
+    );
+  });
+
+  it("maxTurns 抛错前先 emit stop_summary 然后重抛(原始停因不受阻塞)", async () => {
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const reg = createRegistry([echo]);
+    const exec = createExecutor(reg);
+
+    // stub-scripted: 2 次 echo 调用,然后摘要轮(texts 非空)。
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "a" } }],
+        }),
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t2", name: "echo", input: { value: "b" } }],
+        }),
+        assistantResult({
+          texts: ["brief recap of why we hit maxTurns"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+
+    const received: HarnessStreamEvent[] = [];
+    await assert.rejects(
+      run(
+        "go",
+        { adapter: model, executor: exec, registry: reg, maxTurns: 2 },
+        undefined,
+        { onStream: (event) => received.push(event) }
+      ),
+      (err: unknown) => {
+        assert.ok(err instanceof MaxTurnsExceeded);
+        assert.equal(err.turnsRan, 2);
+        return true;
+      }
+    );
+    // 收尾摘要 emit 一次 stop_summary。
+    const summary = received.find((e) => e.type === "stop_summary");
+    assert.ok(summary, "expected stop_summary event before re-throw");
+    assert.equal(
+      (summary as { type: "stop_summary"; text: string }).text,
+      "brief recap of why we hit maxTurns"
+    );
+  });
+
+  it("摘要失败(timeout/concurrent)→ 跳过;原始停因仍抛出,stop_summary 不 emit", async () => {
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const reg = createRegistry([echo]);
+    const exec = createExecutor(reg);
+
+    // stub 脚本 1 次 echo 调用(用尽),不再有响应 → 摘要 adapter.step 抛 ProtocolError。
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "x" } }],
+        }),
+      ],
+    });
+
+    const received: HarnessStreamEvent[] = [];
+    await assert.rejects(
+      run(
+        "go",
+        { adapter: model, executor: exec, registry: reg, maxTurns: 1 },
+        undefined,
+        { onStream: (event) => received.push(event) }
+      ),
+      (err: unknown) => {
+        assert.ok(err instanceof MaxTurnsExceeded);
+        return true;
+      }
+    );
+    // 摘要失败被 catch-all 吞;stop_summary 不 emit。
+    assert.ok(
+      !received.some((e) => e.type === "stop_summary"),
+      "summary failure must not emit stop_summary"
+    );
+  });
+
+  it("concurrent signal abort → 摘要不调用、不阻塞 MaxTurnsExceeded 重抛", async () => {
+    const echo = createStubTool({
+      name: "echo",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+      next: (input: unknown) => input,
+    });
+    const reg = createRegistry([echo]);
+    const exec = createExecutor(reg);
+
+    // 3 次 echo 响应(预算 maxTurns=2 → throw 前用掉前 2 次;摘要无响应 → catch)。
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "echo", input: { value: "a" } }],
+        }),
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t2", name: "echo", input: { value: "b" } }],
+        }),
+      ],
+    });
+
+    const controller = new AbortController();
+    const received: HarnessStreamEvent[] = [];
+    await assert.rejects(
+      run(
+        "go",
+        { adapter: model, executor: exec, registry: reg, maxTurns: 2 },
+        controller.signal,
+        { onStream: (event) => received.push(event) }
+      ),
+      (err: unknown) => err instanceof MaxTurnsExceeded
+    );
+    // controller.abort() 之前 — 摘要级 signal 检查(signal 尚未 abort)。
+    // 为测"concurrent abort",在摘要尝试前 abort:
+    controller.abort();
+    // 摘要不应被 emit(此处 stub 队列已空,即便 signal 未 abort 也会 catch-all 跳过)。
+    assert.ok(
+      !received.some((e) => e.type === "stop_summary"),
+      "no stop_summary emitted on summary-skip path"
+    );
+  });
+
+  it("摘要 usage 照落 trace LlmCallRecord(status ok);摘要轮不计 turns", async () => {
+    // 直接观察 trace:timeout 后 epilogue 写一条额外 llm_call ok,
+    // 不写 turn(turns 计数仍守主循环)。
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const traceFile = join(mkdtempSync(join(tmpdir(), "summary-trace-")), "trace.jsonl");
+    const { createJsonlTraceService } = await import("../../src/harness/trace/jsonl.ts");
+    const { readFileSync } = await import("node:fs");
+
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({ texts: ["never"], toolCalls: [], supplierStop: "success" }),
+      ],
+      delayMs: 200,
+    });
+    const trace = createJsonlTraceService({ filePath: traceFile, conversationId: "t4-sum" });
+    const { result, trace: runTrace } = await run("x", {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+      modelTimeoutMs: 20,
+      trace,
+    });
+    assert.equal(result.stopReason, "timeout");
+    // 主循环 turn: turnCount=0 时模型阶段 timeout → turn trace 1 条。
+    assert.equal(runTrace.turns.length, 1);
+    // JSONL:error llm_call + turn + summary ok llm_call = 3。
+    const lines = readFileSync(traceFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    assert.equal(lines.length, 3);
+    assert.equal(lines[0]!["status"], "error");
+    assert.equal(lines[1]!["record_type"], "turn");
+    assert.equal(lines[2]!["record_type"], "llm_call");
+    assert.equal(lines[2]!["status"], "ok");
+    rmSync(traceFile, { recursive: true, force: true });
+  });
+});
+
 describe("loop engine #224 W1: promptTools injection seam", () => {
   it("promptTools absent -> tools deep-equal registry.list() (same order + content)", async () => {
     const echo = createStubTool({

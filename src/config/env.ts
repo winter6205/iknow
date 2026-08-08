@@ -33,6 +33,14 @@ export interface LlmEnv {
    * 非法值 → 回退 "on" 且不崩溃(对齐 thinking flag 的回退纪律,方向相反)。
    */
   stream: "on" | "off";
+  /**
+   * plan T5: 单次会话最大循环轮数上限(可选正整数)。
+   * `undefined`(默认)= 无限(loop-engine 无轮数上限);
+   * 显式配置时 loop-engine 达上限即停(超限 throw + reactive compact 分支归 loop-engine)。
+   * 值域校验:非整数 / < 1 由 CLI `--max-turns` 解析层拒绝(parse-args.ts),
+   * env 侧走 envOptionalInt(未设 / 空 / 非数字 → undefined,不抛错)。
+   */
+  maxTurns?: number;
 }
 
 /**
@@ -323,6 +331,11 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
       stream: envStreamMode({
         file,
         key: "IKNOW_LLM_STREAM",
+      }),
+      // plan T5: 可选正整数;未设 / 空 / 非数字 → undefined(= 无限)。
+      maxTurns: envOptionalInt({
+        file,
+        key: "IKNOW_LLM_MAX_TURNS",
       }),
     },
     chat: {

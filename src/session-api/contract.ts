@@ -25,6 +25,12 @@ export interface TurnAnswerDto {
    *  映射 RunResult.lastUsage（ADR-0008 D5）；null → 字段缺席（byte-stable，
    *  与 thinking/toolCalls 同模式）。contextWindow 经 HealthResponse 下发。 */
   readonly lastUsage?: TokenUsage;
+  /**
+   * plan T6 / ADR-0011：异常停（maxTurns 等）后的 best-effort 收尾摘要文本。
+   * 仅 hub 捕获 MaxTurnsExceeded 时填充；无摘要 / 正常停 → 字段缺席
+   * （byte-stable，与 thinking/toolCalls/lastUsage 同模式）。
+   */
+  readonly stopSummary?: string;
 }
 
 /** T1: 单条 thinking 文本视图（redacted_thinking 仅计数，data 永不上 wire）。 */

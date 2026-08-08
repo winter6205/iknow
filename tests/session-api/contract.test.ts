@@ -268,3 +268,67 @@ describe("HealthResponse — contextWindow", () => {
     assert.ok(health.contextWindow > 0);
   });
 });
+
+// -- T6: TurnAnswerDto gains optional stopSummary field -----
+
+describe("TurnAnswerDto — T6 optional stopSummary field", () => {
+  it("answer with stopSummary keeps all original keys", () => {
+    const answer: TurnAnswerDto = {
+      finalText: "",
+      stopReason: "maxTurns",
+      turnCount: 3,
+      stopSummary: "brief recap of the conversation",
+    };
+    assert.equal(answer.stopReason, "maxTurns");
+    assert.equal(answer.turnCount, 3);
+    assert.equal(answer.stopSummary, "brief recap of the conversation");
+    assert.deepEqual(Object.keys(answer).sort(), [
+      "finalText",
+      "stopReason",
+      "stopSummary",
+      "turnCount",
+    ]);
+  });
+
+  it("answer without stopSummary exposes exactly the original keys (byte-stable)", () => {
+    const answer: TurnAnswerDto = {
+      finalText: "x",
+      stopReason: "maxTurns",
+      turnCount: 1,
+    };
+    assert.equal("stopSummary" in answer, false);
+    assert.deepEqual(Object.keys(answer).sort(), [
+      "finalText",
+      "stopReason",
+      "turnCount",
+    ]);
+  });
+
+  it("stopSummary alongside thinking/toolCalls keeps all five keys", () => {
+    const answer: TurnAnswerDto = {
+      finalText: "",
+      stopReason: "maxTurns",
+      turnCount: 2,
+      thinking: { entries: [{ text: "plan" }], redactedCount: 0 },
+      toolCalls: [
+        {
+          id: "t1",
+          name: "noop",
+          inputPreview: "{}",
+          outputPreview: "ok",
+          isError: false,
+          truncated: false,
+        },
+      ],
+      stopSummary: "summary after maxTurns",
+    };
+    assert.deepEqual(Object.keys(answer).sort(), [
+      "finalText",
+      "stopReason",
+      "stopSummary",
+      "thinking",
+      "toolCalls",
+      "turnCount",
+    ]);
+  });
+});

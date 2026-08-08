@@ -9,6 +9,8 @@
 export {
   RegistryConstructionError,
   ProtocolError,
+  PromptTooLongError,
+  MaxTurnsExceeded,
   ToolExecutionError,
 } from "./errors.js";
 

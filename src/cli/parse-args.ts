@@ -45,6 +45,13 @@ export type ParsedCli = {
    * `tui [session-id]` 可选位置参数（#146 SC 2：直连 resume 该会话）。
    */
   sessionId?: string;
+  /**
+   * plan T5: 单次会话最大循环轮数上限(可选正整数)。
+   * `undefined`(默认)= 无限;
+   * 显式配置时由 host(loop-engine 等)按需解释。
+   * 缺失值 / 非整数 / < 1 抛错。
+   */
+  maxTurns?: number;
 };
 
 export type ParseArgsOptions = {
@@ -71,6 +78,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   let traceOut: string | undefined;
   let dataDir: string | undefined;
   let maxBytes: number | undefined;
+  let maxTurns: number | undefined;
   const rest: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
@@ -85,6 +93,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           traceOut,
           dataDir,
           maxBytes,
+          maxTurns,
           query: "",
           missingQuery: false,
           versionOnly: false,
@@ -127,6 +136,16 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
         throw new Error(`Invalid --max-bytes: ${raw}`);
       }
       maxBytes = n;
+    } else if (a === "--max-turns") {
+      const raw = argv[++i];
+      if (raw === undefined) {
+        throw new Error("--max-turns requires an integer argument");
+      }
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1) {
+        throw new Error(`Invalid --max-turns: ${raw}`);
+      }
+      maxTurns = n;
     } else if (a === "--data-dir") {
       const raw = argv[++i];
       if (raw === undefined) {
@@ -143,6 +162,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           traceOut,
           dataDir,
           maxBytes,
+          maxTurns,
           query: "",
           missingQuery: false,
           versionOnly: true,
@@ -160,6 +180,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
     traceOut,
     dataDir,
     maxBytes,
+    maxTurns,
     versionOnly: false,
   };
   const head = rest[0];

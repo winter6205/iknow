@@ -126,7 +126,9 @@ export function buildTuiDeps(
     adapter,
     executor,
     registry: reg.inner,
-    maxTurns: 6,
+    // plan T5-engine / ADR-0012:env 优先(IKNOW_LLM_MAX_TURNS);
+    // undefined = 无限。TUI 独立装配点,不经过 buildHarnessEngine。
+    maxTurns: env.llm.maxTurns,
     timeoutMs: env.llm.timeoutMs,
     // #196 IKNOW T5:tui 入口走 system 注入缝(spec A12:chat/tui 激活
     // BOOTSTRAP,surface="tui" → bootstrapActive=true)。

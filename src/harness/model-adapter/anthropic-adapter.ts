@@ -19,8 +19,8 @@
  * 7 类样例全过。
  */
 
-import { ProtocolError } from "../errors.js";
-import Anthropic from "@anthropic-ai/sdk";
+import { ProtocolError, PromptTooLongError } from "../errors.js";
+import Anthropic, { APIError } from "@anthropic-ai/sdk";
 import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
@@ -496,6 +496,24 @@ function toSdkTools(tools: unknown): SdkTool[] | undefined {
  *     `stream.currentMessage` 的 partial 快照 v1 不消费(Postel's Law)。
  *   - 参数体与非流式臂逐字节相同(D2),共享 `buildMessageParams` 一并校验。
  */
+/**
+ * #252 T2 (reactive compact 地基):SDK 400 prompt-too-long → 翻译为
+ * PromptTooLongError (extends ProtocolError,loop-engine instanceof
+ * ProtocolError 分支能命中 — T3 reactive compact 入口)。其余错误
+ * (其他 400 / 非 400 / 非 APIError) 原样 rethrow,raceModel 现有 catch
+ * 路由不变。流式 / 非流式两臂共用此翻译,避免别名重复。
+ */
+function translatePromptTooLong(e: unknown): never {
+  if (
+    e instanceof APIError &&
+    e.status === 400 &&
+    /prompt.*length|too long/i.test(e.message)
+  ) {
+    throw new PromptTooLongError(e.message);
+  }
+  throw e;
+}
+
 async function stepStreamArm(deps: {
   readonly client: Anthropic;
   readonly params: MessageCreateParamsNonStreaming;
@@ -507,8 +525,14 @@ async function stepStreamArm(deps: {
   });
   wireStreamEvents(stream, deps.onStream);
   // D8:断流 / abort → finalMessage() reject → 不构造 AssistantTurnResult。
-  const final = await stream.finalMessage();
-  return interpretMessage(final);
+  try {
+    const final = await stream.finalMessage();
+    return interpretMessage(final);
+  } catch (e) {
+    // wireStreamEvents 已 emit 的部分不受影响 — D8 整回合不提交语义由 step
+    // reject 不构造 AssistantTurnResult 保证,翻译只是改变异常类。
+    translatePromptTooLong(e);
+  }
 }
 
 /**
@@ -640,8 +664,12 @@ export function createRealAnthropicAdapter(
     // 逻辑;业务行为由 `stepStreamArm` 与既有 create 臂各自承载)。
     if (opts.stream !== true) {
       // 非流式臂(017 A1 freeze;未开 `stream` 时 byte-identical 既有行为)。
-      const sdkResp = await opts.client.messages.create(params, { signal });
-      return interpretMessage(sdkResp as SdkMessage);
+      try {
+        const sdkResp = await opts.client.messages.create(params, { signal });
+        return interpretMessage(sdkResp as SdkMessage);
+      } catch (e) {
+        translatePromptTooLong(e);
+      }
     }
     return stepStreamArm({
       client: opts.client,

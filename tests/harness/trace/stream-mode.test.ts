@@ -229,6 +229,8 @@ describe("#178 T5: trace stream boolean reflects actual LLM call mode (D6)", () 
       registry: reg,
       maxTurns: 5,
       modelTimeoutMs: 20,
+      // plan T4:fake 流永挂 — 缩短摘要独立超时,避免 run() 被 15s default 拖住。
+      summaryTimeoutMs: 20,
       trace: createJsonlTraceService({
         filePath: traceFile,
         conversationId: "conv-t5-stream-timeout",

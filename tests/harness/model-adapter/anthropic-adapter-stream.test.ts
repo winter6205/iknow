@@ -867,12 +867,15 @@ function streamingRunDeps(opts: {
     reqOptions: unknown
   ) => FakeStreamHandle;
   readonly modelTimeoutMs?: number;
+  /** plan T4:让测试可缩短收尾摘要独立超时(避免 fake 永挂流把测试拖死)。 */
+  readonly summaryTimeoutMs?: number;
 }): {
   adapter: ReturnType<typeof createRealAnthropicAdapter>;
   executor: ReturnType<typeof createExecutor>;
   registry: ReturnType<typeof createRegistry>;
   maxTurns: number;
   modelTimeoutMs: number;
+  summaryTimeoutMs?: number;
 } {
   const client = makeStreamingClientFactory({
     captured: [],
@@ -895,6 +898,9 @@ function streamingRunDeps(opts: {
     registry,
     maxTurns: 1,
     modelTimeoutMs: opts.modelTimeoutMs ?? 20,
+    ...(opts.summaryTimeoutMs !== undefined
+      ? { summaryTimeoutMs: opts.summaryTimeoutMs }
+      : {}),
   };
 }
 
@@ -908,6 +914,8 @@ describe("RealAnthropicAdapter — stream-under-race 专测 (T3 #176, 023 语义
           signal: (reqOptions as { signal?: AbortSignal }).signal,
         }).stream,
       modelTimeoutMs: 20,
+      // plan T4:fake 流永挂 — 缩短摘要独立超时,让 run() 不被 15s default 拖住。
+      summaryTimeoutMs: 20,
     });
     const { result } = await run("x", deps);
     assert.equal(result.stopReason, "timeout");
@@ -950,6 +958,7 @@ describe("RealAnthropicAdapter — stream-under-race 专测 (T3 #176, 023 语义
         return stream;
       },
       modelTimeoutMs: 20,
+      summaryTimeoutMs: 20,
     });
     const { result } = await run("x", deps);
     assert.equal(result.stopReason, "timeout");

@@ -31,6 +31,8 @@ import {
 } from "./harness/permission/index.js";
 import type { PermissionMode } from "./harness/permission/modes.js";
 import { isIknowError } from "./shared/errors.js";
+import { MaxTurnsExceeded } from "./harness/errors.js";
+import { maxTurnsEnvelope } from "./cli/max-turns.js";
 import { randomUUID } from "node:crypto";
 import { buildViolationWiring } from "./harness/sandbox/violation-executor.js";
 
@@ -136,13 +138,36 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
   // T6: wrap the executor with the violation kill-session hook so the ask
   // entry point surfaces violation escalations on stderr + exits with code 1.
   const { executor } = buildViolationWiring(built.deps.executor);
-  // runHarness returns LoopTrace as `trace`; rename to loopTrace to avoid
-  // shadowing the TraceService injected into deps.
-  const { result, trace: loopTrace } = await runHarness(parsed.query, {
+  // plan T6:--max-turns flag 优先,未设时回退装配层 env 值(undefined = 无限)。
+  const askDeps: LoopEngineDeps = {
     ...built.deps,
     executor,
     trace: traceService,
-  });
+    maxTurns: parsed.maxTurns ?? built.deps.maxTurns,
+  };
+  let stopSummary: string | undefined;
+  const onStream = (event: import("./harness/index.js").HarnessStreamEvent): void => {
+    if (event.type === "stop_summary") stopSummary = event.text;
+  };
+  // runHarness returns LoopTrace as `trace`; rename to loopTrace to avoid
+  // shadowing the TraceService injected into deps.
+  let result: import("./harness/index.js").RunResult;
+  let loopTrace: import("./harness/index.js").LoopTrace;
+  try {
+    const out = await runHarness(parsed.query, askDeps, undefined, { onStream });
+    result = out.result;
+    loopTrace = out.trace;
+  } catch (err) {
+    if (err instanceof MaxTurnsExceeded) {
+      // plan T3 + T6 / ADR-0011:maxTurns 超限 → JSON envelope(stderr) +
+      // exitCode=1。stopSummary 由上面的 onStream wrapper 捕获(loop-engine 在
+      // 重抛前 emit stop_summary;摘要轮不计 maxTurns)。
+      writeErr(maxTurnsEnvelope(err, stopSummary));
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
   process.stdout.write(`${formatRunJson({ result, trace: loopTrace })}\n`);
 }
 
@@ -180,8 +205,13 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     return;
   }
 
+  // plan T6:--max-turns flag 优先,未设时回退装配层 env 值(undefined = 无限)。
+  const chatDeps: LoopEngineDeps = {
+    ...built.deps,
+    maxTurns: parsed.maxTurns ?? built.deps.maxTurns,
+  };
   await runChatSession({
-    deps: built.deps,
+    deps: chatDeps,
     session: bundle.session,
     jsonMode: parsed.json,
     // #152 T5:thinking 可见面(env flag → chat-session → format-run-human)。

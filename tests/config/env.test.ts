@@ -24,6 +24,8 @@ const ENV_KEYS = [
   // #119 T1: compression config env keys.
   "IKNOW_MODEL_CONTEXT_WINDOW",
   "IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS",
+  // plan T5: maxTurns env (optional int; unset → undefined = 无限).
+  "IKNOW_LLM_MAX_TURNS",
 ] as const;
 
 describe("loadIknowEnv — thinking config (#151 T4)", () => {
@@ -237,5 +239,59 @@ describe("loadIknowEnv — compress config (#119 T1)", () => {
     const env = loadIknowEnv();
     assert.equal(env.compress.contextWindow, 500000);
     assert.equal(env.compress.thresholdTokens, 100000);
+  });
+});
+
+describe("loadIknowEnv — maxTurns (plan T5)", () => {
+  beforeEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+
+  it("default: llm.maxTurns=undefined(env 不设时 = 无限)", () => {
+    const env = loadIknowEnv();
+    assert.equal(env.llm.maxTurns, undefined);
+  });
+
+  it("IKNOW_LLM_MAX_TURNS=3 → llm.maxTurns=3", () => {
+    process.env.IKNOW_LLM_MAX_TURNS = "3";
+    const env = loadIknowEnv();
+    assert.equal(env.llm.maxTurns, 3);
+  });
+
+  it("IKNOW_LLM_MAX_TURNS=120 → llm.maxTurns=120", () => {
+    process.env.IKNOW_LLM_MAX_TURNS = "120";
+    const env = loadIknowEnv();
+    assert.equal(env.llm.maxTurns, 120);
+  });
+
+  it("IKNOW_LLM_MAX_TURNS 空串 → undefined(与未设同义)", () => {
+    process.env.IKNOW_LLM_MAX_TURNS = "";
+    const env = loadIknowEnv();
+    assert.equal(env.llm.maxTurns, undefined);
+  });
+
+  it("IKNOW_LLM_MAX_TURNS 非数字 (abc) → undefined(envOptionalInt 回退纪律)", () => {
+    process.env.IKNOW_LLM_MAX_TURNS = "abc";
+    const env = loadIknowEnv();
+    assert.equal(env.llm.maxTurns, undefined);
+  });
+
+  it("IKNOW_LLM_MAX_TURNS 小数 (3.7) → trunc 为 3(envOptionalInt 用 trunc)", () => {
+    process.env.IKNOW_LLM_MAX_TURNS = "3.7";
+    const env = loadIknowEnv();
+    assert.equal(env.llm.maxTurns, 3);
+  });
+
+  it("maxTurns 与其它 LLM env 字段独立(不影响 maxOutputTokens / timeoutMs / temperature)", () => {
+    process.env.IKNOW_LLM_MAX_TURNS = "5";
+    process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = "1024";
+    process.env.IKNOW_LLM_TIMEOUT_MS = "30000";
+    const env = loadIknowEnv();
+    assert.equal(env.llm.maxTurns, 5);
+    assert.equal(env.llm.maxOutputTokens, 1024);
+    assert.equal(env.llm.timeoutMs, 30000);
   });
 });
