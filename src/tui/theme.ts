@@ -49,6 +49,10 @@ export interface TuiPalette {
   readonly table: string;
   /** markdown：列表项符号。 */
   readonly bullet: string;
+  /** unified diff：新增行（git 风格绿）。 */
+  readonly add: string;
+  /** unified diff：删除行（git 风格红）。 */
+  readonly del: string;
 }
 
 export const tuiPalette: TuiPalette = Object.freeze({
@@ -66,4 +70,6 @@ export const tuiPalette: TuiPalette = Object.freeze({
   quote: "#8a877e",
   table: "#d9a343",
   bullet: "#7d8a82",
+  add: "#2ea043",
+  del: "#d73a49",
 });

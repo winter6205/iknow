@@ -9,227 +9,33 @@
  * 流式（#147）拓展点：turn 完成回调处整段替换渲染；未来增量渲染挂载于此。
  *
  * 滚动（#189 行级窗口，修复版）：行账 SSOT = `messageRender`（message-rows.ts，
- * flat 物理行，与 `<Markdown>` 渲染逐行对齐 + 视觉宽度折行）。修复点：
- *  1. 窗口数学：`endRow = totalSpace - scroll`，窗口高 = `viewport - chrome`
- *     （chrome = 顶部指示 2 行 + fold 指示 2 行；指示器 `<Box mb=1><Text>` 实测
- *     各占 2 行，旧实现未扣 → 内容溢出 viewport，滚动区渲染漂移）；
- *  2. tail 行数精确化（liveTool/ask/draft/spinner 的 margin 按「后随兄弟」计）；
- *  3. 裁剪路径渲染 flat 行切片（MessageBlocksClipped），与全可见路径逐行一致。
+ * flat 物理行，与 `<Markdown>` 渲染逐行对齐 + 视觉宽度折行）。行账/窗口数学
+ * 在 chat-flow.ts（T5 拆分，行数预算内）：
+ *  - `tailSlot`：tail（liveTool/ask/draft/spinner）行数精确化；
+ *  - `computeMeasured`：消息 flat 行 + 块坐标 + 末条尾 margin 收口；
+ *  - `computeWindow`：朴素滚动窗口（scroll=0 锚底，scroll>0 上移）。
  *
  * 渲染规则：
- *  - scroll=0：窗口 = [totalSpace - budget, totalSpace)，tail 原样渲染；
- *  - scroll>0：窗口 = [msgSpace - scroll - budget, msgSpace - scroll)，
- *    tail 折叠为底部「↓ N 行正在生成」指示；
- *  - 顶部 dim 指示「↑ N 行历史（End 回到底部）」恒在 scroll>0 时出现。
+ *  - scroll=0：窗口 = [contentRows - viewport, contentRows)，tail 原样渲染；
+ *  - scroll>0：窗口上移 scroll 行，老消息进入窗口、底部消息被裁；
+ *  - 无「↑ N 行历史」指示、无「↓ N 行正在生成」折叠、无 maxScroll 文案。
  */
 import { useDeferredValue, type ReactElement } from "react";
 import { Box, Text } from "ink";
 import type { TuiSessionState } from "./session-state.js";
-import { toolPreviewLines, toolResultStatusMap } from "./tool-summary.js";
-import {
-  formatCompletedToolLine,
-  formatRunningToolLine,
-  type LiveToolRun,
-} from "./live-tool-state.js";
+import { toolResultStatusMap } from "./tool-summary.js";
+import type { LiveToolRun } from "./live-tool-state.js";
+import { liveToolPreviewBox } from "./live-tool-preview.js";
 import { Markdown } from "./markdown.js";
 import { Spinner } from "./components.js";
 import { tuiPalette } from "./theme.js";
-import { messageRender } from "./message-rows.js";
-import { markdownToLines } from "./markdown-lines.js";
 import type { RowSlice } from "./row-window.js";
 import { MessageBlocks, MessageBlocksClipped } from "./message-blocks.js";
 import type { Selection } from "./selection.js";
 import { HighlightedLine } from "./selection-render.js";
+import { computeMeasured, computeWindow, tailSlot } from "./chat-flow.js";
 
-/** live 工具行 + ask 行 + spinner 占位也占行；用于总行数估计。 */
-export interface TailSlot {
-  readonly liveToolRows: number;
-  readonly askRow: number; // 0 / 1
-  readonly spinnerRow: number; // 0 / 1
-  readonly thinkingDraftRows: number;
-  readonly draftRows: number;
-  /** 实际渲染行数合计（含「后随兄弟」时的 marginBottom）。 */
-  readonly total: number;
-}
-
-/**
- * tail 行账（精确）：各元素按渲染顺序排布，marginBottom 仅在后随兄弟存在
- * 时计 1（ink 折叠末尾子元素 margin）。draft 行数 = markdownToLines 实测。
- *
- * T3: thinking 草稿排在 answer 草稿之前（与下方 JSX 渲染顺序一致）；
- * 折叠态永远 = 1 行摘要（[思考] 思考中…），展开态走 markdownToLines 实测。
- * `thinkingExpanded` 必传 — 调用方从 ChatViewProps 注入，不引入新 React 路径。
- *
- * T4: liveToolRuns 与 liveToolLines 同块渲染（结构化运行状态先,
- * legacy 字符串后),行账合并。两路之一存在才渲染该 Box。
- */
-export function tailSlot(
-  liveToolLines: ReadonlyArray<string>,
-  askLine: string | undefined,
-  running: boolean,
-  thinkingDraft: string | undefined,
-  draft: string | undefined,
-  cols: number,
-  thinkingExpanded: boolean,
-  liveToolRuns: ReadonlyArray<LiveToolRun> = []
-): TailSlot {
-  // T4: 结构化运行状态每条目 1 行,合并计入 liveToolRows;已完成条目的内容
-  // 预览行(write_file/edit_file,toolPreviewLines 单源)同样入账,防行账漂移。
-  const liveToolPreviewRows = liveToolRuns.reduce(
-    (n, run) =>
-      n +
-      (run.status === "running"
-        ? 0
-        : toolPreviewLines(run.name, run.input, cols).length),
-    0
-  );
-  const liveToolRows =
-    liveToolLines.length + liveToolRuns.length + liveToolPreviewRows;
-  const askRow = askLine !== undefined ? 1 : 0;
-  const spinnerRow = running ? 1 : 0;
-  const hasThinking =
-    running && thinkingDraft !== undefined && thinkingDraft.length > 0;
-  // 折叠态固定 1 行([思考] 思考中…);展开态走 markdownToLines 实测。
-  const thinkingDraftRows = hasThinking
-    ? thinkingExpanded
-      ? markdownToLines(thinkingDraft!, cols).length
-      : 1
-    : 0;
-  const draftRows =
-    draft !== undefined && draft.length > 0
-      ? markdownToLines(draft, cols).length
-      : 0;
-  // 渲染顺序：liveTool → ask → thinkingDraft → draft → spinner。
-  const liveToolMargin =
-    askRow + thinkingDraftRows + draftRows + spinnerRow > 0 ? 1 : 0;
-  const askMargin = thinkingDraftRows + draftRows + spinnerRow > 0 ? 1 : 0;
-  const thinkingMargin = draftRows + spinnerRow > 0 ? 1 : 0;
-  const draftMargin = spinnerRow > 0 ? 1 : 0;
-  const total =
-    liveToolRows +
-    liveToolMargin +
-    askRow +
-    askMargin +
-    thinkingDraftRows +
-    thinkingMargin +
-    draftRows +
-    draftMargin +
-    spinnerRow;
-  return {
-    liveToolRows,
-    askRow,
-    spinnerRow,
-    thinkingDraftRows,
-    draftRows,
-    total,
-  };
-}
-
-/** 一条已测消息及其 flat 物理行 / 块坐标的窗口坐标。 */
-interface Measured {
-  readonly message: import("../harness/model-adapter/types.js").AnthropicNativeMessage;
-  readonly lines: ReadonlyArray<string>;
-  readonly blocks: import("./message-rows.js").BlockRowSpan[];
-  /** 内容行 + self margin + 1（外层 margin）= 非末尾位置渲染高度。 */
-  readonly totalRows: number;
-  readonly startRow: number;
-}
-
-/** margin 占位（与 message-rows.ts MARGIN_LINE 一致）。 */
-const MARGIN_LINE_CHAT = " ";
-
-/**
- * #238：把当前 ChatView 内容流（banner + 消息 flat 行 + tail 行）拼成一份
- * flat 字符串数组（行号即内容行号 0-based）。用于 extractSelectionText：
- *  - banner 段占 [0, bannerLines.length)；
- *  - 消息段按 measure 顺序拼接（messageRender.lines 与全可见路径逐行一致）；
- *  - tail 行（liveToolRuns + liveToolLines + ask + thinkingDraft + draft）
- *    按 ChatView JSX 渲染顺序追加（spinner 是 1 行非字符 "<spinner>"，留空）。
- *
- * 调用方必须保证本函数与 ChatView JSX 行账同步；只读 SessionState props，
- * 不接受 props.selection。
- */
-export function flatContentLines(args: {
-  readonly bannerLines: ReadonlyArray<string>;
-  readonly session: TuiSessionState;
-  readonly cols: number;
-  readonly liveToolLines: ReadonlyArray<string>;
-  readonly liveToolRuns: ReadonlyArray<LiveToolRun>;
-  readonly askLine: string | undefined;
-  readonly draftsMasked: string;
-  readonly thinkingDraftMasked: string;
-  readonly thinkingExpanded: boolean;
-}): ReadonlyArray<string> {
-  const running = args.session.runState === "running-fg";
-  const tail = tailSlot(
-    args.liveToolLines,
-    args.askLine,
-    running,
-    running ? args.thinkingDraftMasked : undefined,
-    running ? args.draftsMasked : undefined,
-    args.cols,
-    args.thinkingExpanded,
-    args.liveToolRuns
-  );
-  const tailTotal = tail.total;
-  const out: string[] = [];
-  for (const ln of args.bannerLines) out.push(ln);
-  // 镜像 ChatView 末条消息尾 margin 收口：tail 为空时最后一条非空消息 pop
-  // 末尾 self margin（行账同源，选区坐标映射才不错位）。
-  const renders = args.session.messages.map((m) =>
-    messageRender(m, args.cols, { thinkingExpanded: args.thinkingExpanded })
-  );
-  if (tailTotal === 0) {
-    for (let i = renders.length - 1; i >= 0; i--) {
-      const r = renders[i]!;
-      if (r.lines.length === 0) continue;
-      renders[i] = messageRender(r.message, args.cols, {
-        thinkingExpanded: args.thinkingExpanded,
-        omitTrailingSelfMargin: true,
-      });
-      break;
-    }
-  }
-  for (const mm of renders) {
-    for (const ln of mm.lines) out.push(ln);
-    if (mm.lines.length > 0) out.push(MARGIN_LINE_CHAT);
-  }
-  // 目标长度 = banner + 消息行账 + tail.total；tail 的文本行先实推，
-  // margin / spinner 占位行由末尾补齐（长度对齐 ChatView contentRows）。
-  const target = out.length + tailTotal;
-  for (const run of args.liveToolRuns) {
-    out.push(
-      run.status === "running"
-        ? formatRunningToolLine(run)
-        : formatCompletedToolLine(run)
-    );
-    if (run.status !== "running") {
-      for (const ln of toolPreviewLines(run.name, run.input, args.cols)) {
-        out.push(ln);
-      }
-    }
-  }
-  for (const ln of args.liveToolLines) out.push(ln);
-  if (args.askLine !== undefined) out.push(args.askLine);
-  if (running && args.thinkingDraftMasked.length > 0) {
-    if (args.thinkingExpanded) {
-      for (const ln of markdownToLines(args.thinkingDraftMasked, args.cols)) {
-        out.push(ln);
-      }
-    } else {
-      out.push("[思考] 思考中…");
-    }
-  }
-  if (running && args.draftsMasked.length > 0) {
-    for (const ln of markdownToLines(args.draftsMasked, args.cols)) {
-      out.push(ln);
-    }
-  }
-  // tail 与 ChatView tailSlot 行账对齐：spinner 1 行 + 各 margin 行以占位补齐，
-  // 保证 flatContentLines 长度 === ChatView 的 contentRows（窗口映射才一致）。
-  while (out.length < target) out.push(MARGIN_LINE_CHAT);
-  return out;
-}
+export { flatContentLines, type TailSlot } from "./chat-flow.js";
 
 export interface ChatViewProps {
   readonly session: TuiSessionState;
@@ -243,9 +49,7 @@ export interface ChatViewProps {
    *
    * 缺省 = 空(老调用方兼容);app.tsx 必传。
    */
-  readonly liveToolRuns?: ReadonlyArray<
-    import("./live-tool-state.js").LiveToolRun
-  >;
+  readonly liveToolRuns?: ReadonlyArray<LiveToolRun>;
   /**
    * T4 (#175)：当前 turn 流式累积的 masked 助手文本（草稿）。running-fg
    * 且在迭代中时渲染于 spinner 之前；空串/undefined 不渲染。终稿 commit 后
@@ -330,65 +134,21 @@ export function ChatView(props: ChatViewProps): ReactElement {
   // 消息一起滚出（输入框 + 状态栏在 ChatView 之外固定挂载）。用户 2026-08-07
   // 复看：「下面对话框要固定，消息跟图标可以向上滚动」。
   const bannerRows = props.bannerLines?.length ?? 0;
-  const measured: Measured[] = [];
-  let messageCursor = 0;
-  for (const m of session.messages) {
-    const mm = messageRender(m, cols, {
-      thinkingExpanded: props.thinkingExpanded,
-    });
-    if (mm.totalRows === 0) continue;
-    measured.push({
-      message: mm.message,
-      lines: mm.lines,
-      blocks: [...mm.blocks],
-      totalRows: mm.totalRows,
-      startRow: bannerRows + messageCursor,
-    });
-    messageCursor += mm.totalRows;
-  }
-  // 末条消息尾 margin 收口：tail 为空时重测最后一条 measured（pop 末尾
-  // self margin），行账随 totalRows −1 同步收缩。lastTrimmed = true 时全
-  // 可见路径的 MessageBlocks 也要抹掉最后一个块的 marginBottom（同源）。
-  let lastTrimmed = false;
-  if (tailRows === 0 && measured.length > 0) {
-    const lastM = measured[measured.length - 1]!;
-    const trimmed = messageRender(lastM.message, cols, {
-      thinkingExpanded: props.thinkingExpanded,
-      omitTrailingSelfMargin: true,
-    });
-    lastTrimmed = trimmed.totalRows < lastM.totalRows;
-    if (lastTrimmed) {
-      measured[measured.length - 1] = {
-        ...lastM,
-        lines: trimmed.lines,
-        blocks: [...trimmed.blocks],
-        totalRows: trimmed.totalRows,
-      };
-      messageCursor -= lastM.totalRows - trimmed.totalRows;
-    }
-  }
+  const { measured, messageCursor, lastTrimmed } = computeMeasured({
+    session,
+    cols,
+    bannerRows,
+    tailRows,
+    thinkingExpanded: props.thinkingExpanded,
+  });
   // ── 朴素滚动（2026-08-07 定稿：用户「第二种」，去所有折叠/指示器）──
-  // 语义：banner + 消息 + tail 是同一内容流。`scrollRows` = 向上翻了多少
-  // 物理行。窗口固定高度 = viewport（不含指示器/折叠 chrome）。scroll=0
-  // 时窗口底 = 内容底（auto-follow）；scroll>0 时窗口上移 scroll 行。
-  // 无「↑ N 行历史」指示、无「↓ N 行正在生成」折叠、无 maxScroll 文案。
-  const requestedScroll = Math.max(0, props.scrollRows ?? 0);
-  const viewport = props.viewportRows ?? 0;
-  // viewport <= 0 → 无限视口：不裁剪，直接渲染全部内容。
-  const unlimited = viewport <= 0;
-  // 内容总高 = banner + 消息 + tail（tail 原样渲染，不折叠）。
-  const contentRows = bannerRows + messageCursor + tailRows;
-  // 滚动上界：窗口底最多上移到 contentRows - viewport（保留至少一屏）。
-  // viewport 由 app 传入（含输入框/状态栏预留后剩余行数）。
-  const maxScroll = unlimited
-    ? 0
-    : Math.max(0, contentRows - Math.max(1, viewport));
-  const scroll = Math.min(requestedScroll, maxScroll);
-  // 窗口：scroll=0 → [contentRows - viewport, contentRows)；
-  // scroll>0 → [contentRows - viewport - scroll, contentRows - scroll)。
-  // startRow/endRow 都是内容流内的行号（banner 段从 0 起算）。
-  const endRow = unlimited ? contentRows : contentRows - scroll;
-  const startRow = unlimited ? 0 : Math.max(0, endRow - viewport);
+  const { startRow, endRow } = computeWindow({
+    bannerRows,
+    messageCursor,
+    tailRows,
+    scrollRows: props.scrollRows,
+    viewportRows: props.viewportRows,
+  });
   // #238:窗口同步回调（app 层坐标映射用）。在渲染体内直接调用：只写 parent
   // 的 ref（无 setState），React 允许多次调用；移到 useEffect 会引入事件时序
   // 风险（mouse listener 可能比 effect 早拿到陈旧 window）。注：依赖稳定，
@@ -396,12 +156,7 @@ export function ChatView(props: ChatViewProps): ReactElement {
   // topOffset = marginTop headroom 行数（用户 2026-08-08 下移一行）；SGR y 落
   // 在 headroom 行（≤ topOffset）→ terminalToCellPos 范围外，drag 高亮只命中
   // 内容区。banner 前的终端行偏移：headroom 1 行 = SGR y 需减 1 再映射。
-  props.onWindow?.({
-    startRow,
-    endRow,
-    cols,
-    topOffset: 1,
-  });
+  props.onWindow?.({ startRow, endRow, cols, topOffset: 1 });
   return (
     <Box flexDirection="column" flexGrow={1} marginTop={1}>
       {/* marginTop=1 给 banner 顶端留 1 行 headroom：用户 2026-08-08 反馈
@@ -469,21 +224,9 @@ export function ChatView(props: ChatViewProps): ReactElement {
       {(props.liveToolRuns?.length ?? 0) > 0 ||
       props.liveToolLines.length > 0 ? (
         <Box flexDirection="column" marginBottom={1}>
-          {(props.liveToolRuns ?? []).map((run) => (
-            <Box key={run.id} flexDirection="column">
-              <Text color={pal.dim}>
-                {run.status === "running"
-                  ? formatRunningToolLine(run)
-                  : formatCompletedToolLine(run)}
-              </Text>
-              {run.status !== "running" &&
-                toolPreviewLines(run.name, run.input, cols).map((ln, li) => (
-                  <Text key={`pv-${run.id}-${li}`} color={pal.dim}>
-                    {ln}
-                  </Text>
-                ))}
-            </Box>
-          ))}
+          {(props.liveToolRuns ?? []).map((run) =>
+            liveToolPreviewBox(run, cols)
+          )}
           {props.liveToolLines.map((line, i) => (
             <Text key={`legacy-${i}`} color={pal.dim}>
               {line}

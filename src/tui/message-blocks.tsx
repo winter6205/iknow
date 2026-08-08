@@ -18,7 +18,8 @@ import type {
   AnthropicNativeMessage,
 } from "../harness/model-adapter/types.js";
 import { tuiPalette } from "./theme.js";
-import { summarizeToolCall, toolPreviewLines } from "./tool-summary.js";
+import { summarizeToolCall, toolPreviewRows } from "./tool-summary.js";
+import { DiffView } from "./diff-view.js";
 import { Markdown } from "./markdown.js";
 import type { BlockRowSpan } from "./message-rows.js";
 import { thinkingFoldLine } from "./message-rows.js";
@@ -55,23 +56,15 @@ function ToolSummaryRow(props: {
   );
 }
 
-/** 工具内容预览行（write_file/edit_file）：dim 逐行渲染；行数与
- *  messageRender 行账共用 toolPreviewLines 单源，全可见/裁剪路径一致。 */
+/** 工具内容预览（write_file/edit_file）：统一 diff 红绿渲染（diff-view.tsx）；
+ *  行数与 messageRender 行账共用 toolPreviewRows 单源，全可见/裁剪路径一致。 */
 function ToolPreviewRows(props: {
   readonly tu: ToolUseBlock;
   readonly cols: number;
 }): ReactElement | null {
-  const lines = toolPreviewLines(props.tu.name, props.tu.input, props.cols);
-  if (lines.length === 0) return null;
-  return (
-    <>
-      {lines.map((l, i) => (
-        <Text key={`tp-${i}`} color={tuiPalette.dim}>
-          {l}
-        </Text>
-      ))}
-    </>
-  );
+  const rows = toolPreviewRows(props.tu.name, props.tu.input, props.cols);
+  if (rows.length === 0) return null;
+  return <DiffView rows={rows} cols={props.cols} />;
 }
 
 /** 折叠态 thinking 摘要行（dim 配色）。文案走 message-rows thinkingFoldLine
