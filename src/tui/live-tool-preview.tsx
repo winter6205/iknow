@@ -18,12 +18,12 @@ import {
   formatRunningToolLine,
 } from "./live-tool-state.js";
 import { toolPreviewRows } from "./tool-summary.js";
-import { DiffView, diffRowText } from "./diff-view.js";
+import { DiffView, diffRowTexts } from "./diff-view.js";
 import { tuiPalette } from "./theme.js";
 
 /**
  * live 工具 box 的纯文本行（[状态行, ...预览行]），供行账 + flatContentLines
- * 共用。预览行 = diff 行按宽度折叠后可见的行（diffRowText 非空），与
+ * 共用。预览行 = diff 行按宽度折叠后可见的行（diffRowTexts 非空），与
  * `<DiffView>` 渲染行数逐行一致（空行渲染为 `<></>` 不占行）。
  */
 export function liveToolPreviewTextLines(
@@ -38,10 +38,8 @@ export function liveToolPreviewTextLines(
     oldContent: run.oldContent,
     newContent: run.newContent,
   });
-  for (const r of rows) {
-    const t = diffRowText(r, cols);
-    if (t !== "") out.push(t);
-  }
+  const previewText = diffRowTexts(rows, cols);
+  for (const l of previewText) out.push(l);
   return out;
 }
 

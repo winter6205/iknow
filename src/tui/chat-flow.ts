@@ -17,7 +17,11 @@ import {
   liveToolPreviewRows,
   liveToolPreviewTextLines,
 } from "./live-tool-preview.js";
-import { messageRender, type BlockRowSpan } from "./message-rows.js";
+import {
+  MARGIN_LINE,
+  messageRender,
+  type BlockRowSpan,
+} from "./message-rows.js";
 import { markdownToLines } from "./markdown-lines.js";
 import type { TuiSessionState } from "./session-state.js";
 
@@ -194,9 +198,6 @@ export function computeWindow(args: {
   return { startRow, endRow, contentRows };
 }
 
-/** margin 占位（与 message-rows.ts MARGIN_LINE 一致）。 */
-const MARGIN_LINE_CHAT = " ";
-
 /**
  * #238：把当前 ChatView 内容流（banner + 消息 flat 行 + tail 行）拼成一份
  * flat 字符串数组（行号即内容行号 0-based）。用于 extractSelectionText：
@@ -251,7 +252,7 @@ export function flatContentLines(args: {
   }
   for (const mm of renders) {
     for (const ln of mm.lines) out.push(ln);
-    if (mm.lines.length > 0) out.push(MARGIN_LINE_CHAT);
+    if (mm.lines.length > 0) out.push(MARGIN_LINE);
   }
   // 目标长度 = banner + 消息行账 + tail.total；tail 的文本行先实推，
   // margin / spinner 占位行由末尾补齐（长度对齐 ChatView contentRows）。
@@ -279,6 +280,6 @@ export function flatContentLines(args: {
   }
   // tail 与 ChatView tailSlot 行账对齐：spinner 1 行 + 各 margin 行以占位补齐，
   // 保证 flatContentLines 长度 === ChatView 的 contentRows（窗口映射才一致）。
-  while (out.length < target) out.push(MARGIN_LINE_CHAT);
+  while (out.length < target) out.push(MARGIN_LINE);
   return out;
 }

@@ -44,6 +44,21 @@ export function diffRowText(line: DiffLine, cols: number): string {
   return `${num} │ ${line.text}`;
 }
 
+/**
+ * DiffLine[] → 可见平文本行（按 cols 折叠；空文本 drop）。
+ *
+ * 行账 SSOT：message-rows（裁剪路径）与 live-tool-preview（live tail）都
+ * 用本函数做「预测览行数」，`<DiffView>` 渲染同一套折叠规则 —— 折叠规则
+ * 只在此汇聚，杜绝 3 处内联 `.map(diffRowText).filter(t !== "")` 分叉
+ * （#298 review-Medium：#189 行账 parity 风险）。
+ */
+export function diffRowTexts(
+  rows: readonly DiffLine[],
+  cols: number
+): string[] {
+  return rows.map((r) => diffRowText(r, cols)).filter((t) => t !== "");
+}
+
 /** 单行颜色（按 kind + hunk 头）。 */
 function rowColor(line: DiffLine): string {
   if (isHunkHeader(line)) return tuiPalette.dim;

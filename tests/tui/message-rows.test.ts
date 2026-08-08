@@ -9,8 +9,15 @@
  *    tool_use）正确填充（空 thinking 与 tool_use 碰撞回归）。
  */
 import { describe, expect, it } from "vitest";
+import { renderToString } from "ink";
+import React from "react";
 import { measureMessage, messageRender } from "../../src/tui/message-rows.js";
+import { DiffView, diffRowTexts } from "../../src/tui/diff-view.js";
+import { toolPreviewRows } from "../../src/tui/tool-summary.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
+
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+const strip = (s: string): string => s.replace(ANSI_RE, "");
 
 describe("messageRender（flat 物理行 SSOT）", () => {
   it("user 空文本：totalRows=0，无 blocks，lines 空", () => {
@@ -249,5 +256,63 @@ describe("measureMessage（kind 判别字段）", () => {
     const r = measureMessage(msg, 80);
     expect(r.blocks).toHaveLength(0);
     expect(r.totalRows).toBe(0);
+  });
+});
+
+describe("窄终端（cols<40）diff 折叠：行账与渲染 parity（#298 review-Medium）", () => {
+  // 多 kind diff 的 edit_file 预览：只含 1 个 add 行（其余 del/ctx 折叠掉）。
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "tu-edit",
+        name: "edit_file",
+        input: {
+          path: "a.ts",
+          old_str: "one\ntwo\nthree\nfour\nfive",
+          new_str: "one\nTWO\nthree\nFOUR\nfive",
+        },
+      },
+    ],
+  };
+  const cols = 32;
+
+  it("row 账：totalRows = 1（摘要）+ add-only 预览行数 + 外层 margin", () => {
+    const r = messageRender(msg, cols);
+    const previewRows = diffRowTexts(
+      toolPreviewRows("edit_file", msg.content[0]!.input, cols),
+      cols
+    );
+    // 仅 add 行保留；del / ctx（含 hunk 头）在 cols<40 全被折叠。
+    expect(previewRows.filter((t) => t.startsWith("+"))).toHaveLength(
+      previewRows.length
+    );
+    expect(previewRows.length).toBeGreaterThan(0);
+    // 行账 = 摘要 1 + 折叠后可见预览行 + 外层 margin 1。
+    expect(r.totalRows).toBe(1 + previewRows.length + 1);
+    // tool_use 块 lines = [摘要行, ...折叠后可见预览行]（无 self margin）。
+    expect(r.lines[0]).toMatch(/^edit_file · /);
+    expect(r.lines.slice(1)).toEqual(previewRows);
+  });
+
+  it("渲染 parity：DiffView 在 cols=32 产出的 add-only 集合与行账一致", () => {
+    const rows = toolPreviewRows("edit_file", msg.content[0]!.input, cols);
+    const rendered = strip(
+      renderToString(React.createElement(DiffView, { rows, cols }), {
+        columns: cols,
+      })
+    )
+      .split("\n")
+      .filter((l) => l.length > 0);
+    // 窄终端：del / ctx（hunk 头）不进渲染，只留 add 行；与行账同源。
+    expect(rendered.every((l) => l.startsWith("+"))).toBe(true);
+    expect(rendered.some((l) => l.startsWith("+TWO"))).toBe(true);
+    expect(rendered.some((l) => l.startsWith("+FOUR"))).toBe(true);
+    expect(rendered.some((l) => l.startsWith("-"))).toBe(false);
+    expect(rendered.some((l) => l.startsWith("@@"))).toBe(false);
+    // 与行账的可见预览行逐行一致（同一折叠规则 → 同一 add-only 集合）。
+    const accounted = diffRowTexts(rows, cols);
+    expect(rendered).toEqual(accounted);
   });
 });

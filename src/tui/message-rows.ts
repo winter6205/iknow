@@ -29,7 +29,7 @@ import {
   summarizeThinkingContent,
 } from "../cli/format.js";
 import { summarizeToolCall, toolPreviewRows } from "./tool-summary.js";
-import { diffRowText } from "./diff-view.js";
+import { diffRowTexts } from "./diff-view.js";
 import { markdownToLines } from "./markdown-lines.js";
 import { clipOneLineVisual, wrapTextVisual } from "./text.js";
 
@@ -64,7 +64,9 @@ export interface MessageRender {
   readonly totalRows: number;
 }
 
-const MARGIN_LINE = " "; // ink 折叠 `<Text>{""}</Text>`，空行用空格占位
+/** ink 折叠 `<Text>{""}</Text>`，空行用空格占位。导出供 chat-flow 等
+ *  需要「与行账同源 margin 占位」的调用方共用（SSOT，杜绝常量漂移）。 */
+export const MARGIN_LINE = " ";
 
 /** 折叠态摘要行：`[思考] ` 标记（行账 1 行）。
  *  用户反馈（2026-08-08）：「N 段」计数无意义去掉；`(Ctrl+O)` 键位提示
@@ -175,12 +177,10 @@ export function messageRender(
       // 由裁剪路径根据 statusMap 注入。
       lines.push(`${block.name} · ${detail}`);
       // 内容可见性：write_file/edit_file 追加 diff 预览行（镜像 MessageBlocks
-      // 全可见路径的 diffRowText 折叠，行账逐行一致；历史持久化消息无
+      // 全可见路径的 diffRowTexts 折叠，行账逐行一致；历史持久化消息无
       // side-channel meta → toolPreviewRows 回退 intent-diff）。
       const preview = toolPreviewRows(block.name, block.input, width);
-      const previewText = preview
-        .map((r) => diffRowText(r, width))
-        .filter((t) => t !== "");
+      const previewText = diffRowTexts(preview, width);
       for (const l of previewText) lines.push(l);
       blocks.push({
         kind: "tool_use",
