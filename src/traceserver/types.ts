@@ -31,8 +31,15 @@ export interface TraceQuery {
   readonly conversationId?: string;
   readonly recordType?: TraceRecordType;
   readonly status?: "ok" | "error";
+  /** Row-based pagination offset (limit 1..200, offset >= 0). */
   readonly limit?: number;
   readonly offset?: number;
+  /**
+   * 增量轮询恢复字节偏移 (SC-R 14): 只读文件 resumeOffset 之后的追加行。
+   * 与行分页 `offset` 正交 — 行分页是「从第 N 行开始」, 这是「从第 N 字节之后读新增」。
+   * 缺省 0 = 从文件头全读。由前端把上一轮响应里的 `offset` 原样传回。
+   */
+  readonly resumeOffset?: number;
 }
 
 export interface TraceQueryResult {
@@ -43,6 +50,11 @@ export interface TraceQueryResult {
   readonly skippedLines: number;
   /** True when the file was truncated by the byte cap. */
   readonly truncated: boolean;
+  /**
+   * 本次读取结束的字节偏移 (按行边界对齐)。前端下一轮轮询把它作为
+   * `resume_offset` 传回, 只拉新增行。0 = 本次读到空文件 / 文件头。
+   */
+  readonly offset: number;
 }
 
 /**

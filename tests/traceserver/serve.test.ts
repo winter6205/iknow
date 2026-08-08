@@ -1,8 +1,8 @@
 /**
- * `startTraceServe` HTTP integration tests (spec #183 R1).
+ * `startTraceServe` HTTP integration tests (spec #183 R1 + v2 目录语义).
  *
  * Boots the standalone trace inspection server on 127.0.0.1:0 (ephemeral),
- * exercises the three endpoints with fetch, and asserts wire shape:
+ * exercises the endpoints with fetch, and asserts wire shape:
  *   - GET /api/v1/health     -> { ok: true, service: "iknow-trace", version: <nonempty> }
  *   - GET /api/v1/traces      -> { records, total, skipped_lines, truncated }
  *   - GET /api/v1/traces/fields -> { fields: [...] }
@@ -13,14 +13,14 @@
  * Categories (S2 defensive contract):
  *   - 200 happy path on all three endpoints
  *   - 400 validation on bad query params (limit=0)
- *   - 500 internal when traceFilePath points at a directory (TraceReadError)
- *   - 404 not_found when no trace file is configured (traceOut: undefined)
+ *   - 500 internal when traceOut points at a regular file (TraceReadError)
+ *   - 404 not_found when no trace out is configured (traceOut: undefined)
  *   - error shape: { error: { kind, message } } — no fs detail leak on 500
  *   - webRoot passthrough + default (resolveDefaultWebRoot used when omitted)
  */
 import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -65,7 +65,11 @@ afterEach(async () => {
 
 // -- helpers ------------------------------------------------------------------
 
-function writeSampleTrace(path: string): void {
+/**
+ * 写一个单会话 trace 目录 (v2 每会话一文件): `<dir>/c1.jsonl` 含 2 好行 + 2 坏行。
+ * 缺省 /api/v1/traces 路由到唯一会话。
+ */
+function writeSampleTraceDir(dir: string): void {
   const lines: string[] = [
     JSON.stringify({
       conversation_id: "c1",
@@ -95,7 +99,7 @@ function writeSampleTrace(path: string): void {
     "{not-json",
     "42",
   ];
-  writeFileSync(path, lines.join("\n") + "\n", "utf8");
+  writeFileSync(join(dir, "c1.jsonl"), lines.join("\n") + "\n", "utf8");
 }
 
 async function getJson(p: string): Promise<{ status: number; body: unknown }> {
@@ -118,7 +122,7 @@ describe("startTraceServe — GET /api/v1/health", () => {
   it("returns 200 with service=iknow-trace and a non-empty version", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "iknow-trace-serve-health-"));
     tmpDirs.push(tmp);
-    await startServer({ traceOut: join(tmp, "trace.jsonl") });
+    await startServer({ traceOut: tmp });
     const { status, body } = await getJson("/api/v1/health");
     assert.equal(status, 200);
     const b = body as { ok: boolean; service: string; version: string };
@@ -144,9 +148,8 @@ describe("startTraceServe — GET /api/v1/traces", () => {
   it("returns 200 with snake_case body when a populated JSONL is readable", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "iknow-trace-serve-happy-"));
     tmpDirs.push(tmp);
-    const file = join(tmp, "trace.jsonl");
-    writeSampleTrace(file);
-    await startServer({ traceOut: file });
+    writeSampleTraceDir(tmp);
+    await startServer({ traceOut: tmp });
     const { status, body } = await getJson("/api/v1/traces");
     assert.equal(status, 200);
     const b = body as {
@@ -164,7 +167,7 @@ describe("startTraceServe — GET /api/v1/traces", () => {
     assert.equal(b.records[1]?.["record_type"], "turn");
   });
 
-  it("returns 404 not_found when no trace file is configured", async () => {
+  it("returns 404 not_found when no trace out is configured", async () => {
     await startServer();
     const { status, body } = await getJson("/api/v1/traces");
     assert.equal(status, 404);
@@ -173,15 +176,14 @@ describe("startTraceServe — GET /api/v1/traces", () => {
 
   // End-to-end regression for review finding: `--max-bytes` must reach the
   // JSONL reader (not be silently dropped at the serve layer). With a 200-byte
-  // cap and a 3-row JSONL whose lines are ~50 bytes, the response must report
-  // truncated=true and drop at least one record.
+  // cap and a session file whose lines are ~90 bytes, the response must report
+  // truncated=true and drop at least one record. maxBytes 作用于按会话文件
+  // (SC-R 16)。
   it("honors maxBytes (truncates + drops records past the cap)", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "iknow-trace-serve-mb-"));
     tmpDirs.push(tmp);
-    const file = join(tmp, "trace.jsonl");
-    writeSampleTrace(file);
-    const beforeStat = statSync(file).size;
-    await startServer({ traceOut: file, maxBytes: 200 });
+    writeSampleTraceDir(tmp);
+    await startServer({ traceOut: tmp, maxBytes: 200 });
     const { status, body } = await getJson("/api/v1/traces");
     assert.equal(status, 200);
     const b = body as {
@@ -189,13 +191,9 @@ describe("startTraceServe — GET /api/v1/traces", () => {
       total: number;
       truncated: boolean;
     };
-    assert.equal(
-      b.truncated,
-      true,
-      `truncated flag set (file was ${beforeStat}B)`
-    );
+    assert.equal(b.truncated, true, `truncated flag set under a 200-byte cap`);
     assert.ok(
-      b.records.length < 3,
+      b.records.length < 2,
       `some rows dropped (got ${b.records.length})`
     );
   });
@@ -203,9 +201,8 @@ describe("startTraceServe — GET /api/v1/traces", () => {
   it("returns 400 validation for limit=0", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "iknow-trace-serve-400-"));
     tmpDirs.push(tmp);
-    const file = join(tmp, "trace.jsonl");
-    writeSampleTrace(file);
-    await startServer({ traceOut: file });
+    writeSampleTraceDir(tmp);
+    await startServer({ traceOut: tmp });
     const { status, body } = await getJson("/api/v1/traces?limit=0");
     assert.equal(status, 400);
     const b = body as { error: { kind: string; field?: string } };
@@ -213,10 +210,12 @@ describe("startTraceServe — GET /api/v1/traces", () => {
     assert.equal(b.error.field, "limit");
   });
 
-  it("returns 500 internal when traceFilePath points at a directory (no fs leak)", async () => {
+  it("returns 500 internal when traceOut points at a regular file (no fs leak)", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "iknow-trace-serve-eisdir-"));
     tmpDirs.push(tmp);
-    await startServer({ traceOut: tmp });
+    const file = join(tmp, "not-a-dir.jsonl");
+    writeFileSync(file, "{}\n", "utf8");
+    await startServer({ traceOut: file });
     const { status, body } = await getJson("/api/v1/traces");
     assert.equal(status, 500);
     const b = body as { error: { kind: string; message: string } };
@@ -229,7 +228,7 @@ describe("startTraceServe — GET /api/v1/traces", () => {
     );
     assert.ok(b.error.message.length > 0);
     assert.equal(
-      b.error.message.toLowerCase().includes(tmp.toLowerCase()),
+      b.error.message.toLowerCase().includes(file.toLowerCase()),
       false,
       "500 message must not leak the absolute trace file path"
     );

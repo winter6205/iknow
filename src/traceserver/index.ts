@@ -14,7 +14,12 @@ export {
   type JsonlTraceReader,
   type JsonlTraceReaderOptions,
 } from "./reader.js";
-export { handleTracesRequest, type TracesRequestOpts } from "./http.js";
+export {
+  handleTracesRequest,
+  handleSessionsRequest,
+  type TracesRequestOpts,
+} from "./http.js";
+export { listSessions, type SessionSummary } from "./sessions.js";
 export {
   startTraceServe,
   type TraceServeOptions,
