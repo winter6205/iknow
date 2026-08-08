@@ -98,6 +98,13 @@ export async function getClient(
       broken.add(key);
       return undefined;
     })
+    .catch(() => {
+      // spawn 意外 throw（如 spawnProcess ENOENT）归一为不可用：记 broken、
+      // 返回 undefined，避免 rejection 逃逸成 unhandled、每次调用重试 spawn。
+      // 与 spawn return undefined 同路径（契约 types.ts:Handle | undefined）。
+      broken.add(key);
+      return undefined;
+    })
     .finally(() => {
       inflight.delete(key);
     });
@@ -156,8 +163,17 @@ async function spawnClient(
   return {
     connection,
     process: child,
+    // vscode-jsonrpc `sendRequest(method, ...args)` 靠实参数目推断参数结构：
+    // 若传 3 个实参（params + token），即便 token 为 undefined，`numberOfParams=2`
+    // 也会把 named params 包成位置数组 `[params, null]` 发出 → tsserver 返回
+    // -32602 "defines parameters by name but received parameters by position"。
+    // token 仅在确实存在时作为第 3 个实参传入。
     sendRequest: (method, params, token) =>
-      connection.sendRequest(method, params, token),
+      connection.sendRequest(
+        method,
+        params,
+        ...(token !== undefined ? [token] : [])
+      ),
     sendNotification: (method, params) =>
       connection.sendNotification(method, params),
     getDiagnostics: (uri: string) => diagStore.get(uri),

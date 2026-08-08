@@ -57,6 +57,33 @@ function checkString(name: string, result: unknown, extra?: string): void {
 }
 
 /**
+ * 断言 helper：RPC error 归一化的 detail 字符串 → **恒 FAIL**。
+ *
+ * 修复探针假阳性（#265 回归）：此前 `else checkString(name, def.detail)` 把
+ * safeCall 包出来的错误消息当普通字符串判，而 checkString 只认「非空 + 非
+ * 哨兵」即 pass → 真实返回 -32602 等错误被误报为 ✓。RPC error 必须显式判
+ * FAIL，否则探针无法捕获「请求实际失败」。
+ */
+function checkError(name: string, detail: string): void {
+  total++;
+  console.log(`✗ ${name} (ERROR: ${detail})`);
+}
+
+/**
+ * 统一 report 分发：safeCall 的 ok/err 结果 → checkString / checkError。
+ * 消除 10 处重复的 `if (x.kind === "ok") checkString(...) else checkError(...)`。
+ */
+function report(
+  name: string,
+  result: { kind: "ok"; value: unknown } | { kind: "err"; detail: string },
+  extra?: (value: unknown) => string | undefined
+): void {
+  if (result.kind === "ok")
+    checkString(name, result.value, extra?.(result.value));
+  else checkError(name, result.detail);
+}
+
+/**
  * 包一层 try/catch 把单件操作的 RPC error 归一化为哨兵字符串，
  * 让后续 checkString 判 FAIL 并打印原因（避免 ResponseError 把探针整进程打挂）。
  */
@@ -114,17 +141,11 @@ async function run(): Promise<void> {
       character: TARGET_CHAR,
     })
   );
-  if (def.kind === "ok") {
-    checkString(
-      "lsp_definition",
-      def.value,
-      typeof def.value === "string" && def.value.includes("client.ts")
-        ? "hit client.ts"
-        : "no client.ts"
-    );
-  } else {
-    checkString("lsp_definition", def.detail);
-  }
+  report("lsp_definition", def, (value) =>
+    typeof value === "string" && value.includes("client.ts")
+      ? "hit client.ts"
+      : "no client.ts"
+  );
 
   // 2) lsp_references — getClient 被 handler 层引用。
   const refs = await safeCall("lsp_references", () =>
@@ -134,8 +155,7 @@ async function run(): Promise<void> {
       character: TARGET_CHAR,
     })
   );
-  if (refs.kind === "ok") checkString("lsp_references", refs.value);
-  else checkString("lsp_references", refs.detail);
+  report("lsp_references", refs);
 
   // 3) lsp_hover — getClient 定义处应返回类型签名。
   const hover = await safeCall("lsp_hover", () =>
@@ -145,22 +165,19 @@ async function run(): Promise<void> {
       character: TARGET_CHAR,
     })
   );
-  if (hover.kind === "ok") checkString("lsp_hover", hover.value);
-  else checkString("lsp_hover", hover.detail);
+  report("lsp_hover", hover);
 
   // 4) lsp_document_symbol — 文件级符号应有返回。
   const docSym = await safeCall("lsp_document_symbol", () =>
     get("lsp_document_symbol").handler({ file: TARGET_FILE })
   );
-  if (docSym.kind === "ok") checkString("lsp_document_symbol", docSym.value);
-  else checkString("lsp_document_symbol", docSym.detail);
+  report("lsp_document_symbol", docSym);
 
   // 5) lsp_workspace_symbol — 空 query 拉全量符号。
   const wsSym = await safeCall("lsp_workspace_symbol", () =>
     get("lsp_workspace_symbol").handler({ file: TARGET_FILE })
   );
-  if (wsSym.kind === "ok") checkString("lsp_workspace_symbol", wsSym.value);
-  else checkString("lsp_workspace_symbol", wsSym.detail);
+  report("lsp_workspace_symbol", wsSym);
 
   // 6) lsp_go_to_implementation — getClient 应有实现。
   const impl = await safeCall("lsp_go_to_implementation", () =>
@@ -170,8 +187,7 @@ async function run(): Promise<void> {
       character: TARGET_CHAR,
     })
   );
-  if (impl.kind === "ok") checkString("lsp_go_to_implementation", impl.value);
-  else checkString("lsp_go_to_implementation", impl.detail);
+  report("lsp_go_to_implementation", impl);
 
   // 7) lsp_prepare_call_hierarchy — 函数定义处可建调用层级。
   const prep = await safeCall("lsp_prepare_call_hierarchy", () =>
@@ -181,8 +197,7 @@ async function run(): Promise<void> {
       character: TARGET_CHAR,
     })
   );
-  if (prep.kind === "ok") checkString("lsp_prepare_call_hierarchy", prep.value);
-  else checkString("lsp_prepare_call_hierarchy", prep.detail);
+  report("lsp_prepare_call_hierarchy", prep);
 
   // 8) lsp_incoming_calls — 多步：prepare 后 forward incomingCalls。
   const inc = await safeCall("lsp_incoming_calls", () =>
@@ -192,8 +207,7 @@ async function run(): Promise<void> {
       character: TARGET_CHAR,
     })
   );
-  if (inc.kind === "ok") checkString("lsp_incoming_calls", inc.value);
-  else checkString("lsp_incoming_calls", inc.detail);
+  report("lsp_incoming_calls", inc);
 
   // 9) lsp_outgoing_calls — 多步：prepare 后 forward outgoingCalls。
   const out = await safeCall("lsp_outgoing_calls", () =>
@@ -203,8 +217,7 @@ async function run(): Promise<void> {
       character: TARGET_CHAR,
     })
   );
-  if (out.kind === "ok") checkString("lsp_outgoing_calls", out.value);
-  else checkString("lsp_outgoing_calls", out.detail);
+  report("lsp_outgoing_calls", out);
 
   // 10) lsp_diagnostics — 真实文件诊断。tsserver 层经 typescript-language-server
   //     可能不实现 pull-diagnostics（Error -32601 Unhandled method），
@@ -212,17 +225,11 @@ async function run(): Promise<void> {
   const diag = await safeCall("lsp_diagnostics", () =>
     get("lsp_diagnostics").handler({ file: DIAG_FILE })
   );
-  if (diag.kind === "ok") {
-    checkString(
-      "lsp_diagnostics",
-      diag.value,
-      typeof diag.value === "string" && diag.value.includes("<diagnostics")
-        ? "diagnostics XML"
-        : "empty"
-    );
-  } else {
-    checkString("lsp_diagnostics", diag.detail);
-  }
+  report("lsp_diagnostics", diag, (value) =>
+    typeof value === "string" && value.includes("<diagnostics")
+      ? "diagnostics XML"
+      : "empty"
+  );
 
   console.log(
     `\n${passed === total ? "all green" : "failures"} (${passed}/${total})`
