@@ -44,8 +44,11 @@ _Avoid_: 把 conditional remediation layer 提前带入 Foundation 内核
 **executor truncation authority**（契约 X）: executor 是工具结果截断元数据的唯一权威——自测序列化后字符数、自截断、自合成标记；工具返回纯数据、不带 truncated/total 元字段，executor 永不信任工具声称的截断字段（防 MCP 第三方伪造绕过封顶）。#140 裁决，ADR-0004 / ADR-0006。
 _Avoid_: 工具自填 truncated/total 字段；executor 凭工具标记跳过兜底截断
 
-**plain-string tool output**（契约 Y1）: 生产工具输出为纯字符串（对齐 OpenHarness wire 形态）；bash 是唯一例外，保留结构化 `{code, stdout, stderr}` 供轨迹/调试（Y1b）。#140 裁决，ADR-0004。
-_Avoid_: 工具返回结构化 JSON payload + metadata 字段；把 bash 例外推广到其他工具
+**plain-string tool output**: (契约 Y1, deprecated→#298) 原生产工具输出为纯字符串（对齐 OpenHarness wire 形态）；bash 例外保留 `{code, stdout, stderr}`（Y1b）。#298 起 Y1「纯字符串」读法被 observability side-channel 取代——model-facing tool_result 仍纯字符串（Y1 精神保留），但 handler 可返 envelope `{ output, meta? }`，`meta` 走观测旁路，永不进模型视野。#140 裁决，ADR-0004。
+_Avoid_: 工具自填 structured metadata 进 model tool_result；把 bash 例外推广到其他工具
+
+**observability side-channel**: (#298) 工具观测旁路——handler 返 envelope `{ output, meta? }`；executor 拆分后仅 `output` 字符串化进 model-facing tool_result，`meta`（典型如 edit_file/write_file 的 `oldContent`/`newContent`）经 `PostToolUseHook.payload` → `TuiToolEvent.payload` → `LiveToolRun` 字段供 TUI diff 预览等观测消费者，永不进模型视野。ADR-0004（supersede Y1）。
+_Avoid_: 把 meta 拼入 model tool_result；让 TUI / Web 直接读 handler 原始返回对象
 
 **ACI tool set**: Harness 装配层（`src/harness/aci/`）注册的工具集；当前 8 件：`bash` / `read_file` / `grep` / `glob` / `edit_file` / `write_file` / `web_fetch` / `web_search`，SSOT 工厂 = `src/harness/aci/tools/registry.ts:createDefaultAciRegistry`，所有入口（`build-engine` / `tui/deps`）从这里取，工具数永不同步漂移（#141 / #191 / a277f68）。每次工具调用经 permission middleware（ADR-0004）与 timeout tier 装饰。
 _Avoid_: 在 harness 之外另起 tool 注册表；在 entry point 手写工具数组（#228 决议 D4——`memory_recall` / `memory_save` 入 SSOT 8+2=10）；让工具返回结构化 metadata
