@@ -327,3 +327,59 @@ describe("createEditFileTool — directory support", () => {
     assert.equal(await readFile(nested, "utf8"), "after\n");
   });
 });
+
+describe("createEditFileTool — onEdit seam", () => {
+  it("调用方传 opts.onEdit → 写盘成功后回调被调一次,参数为绝对路径", async () => {
+    const file = join(scratch, "a.ts");
+    await writeFile(file, "hello world\n", "utf8");
+    const calls: string[] = [];
+    const tool = createEditFileTool(scratch, {
+      onEdit: (f) => {
+        calls.push(f);
+      },
+    });
+    const result = (await tool.handler({
+      path: file,
+      old_str: "world",
+      new_str: "earth",
+    })) as string;
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0], join(scratch, "a.ts"));
+    assert.equal(
+      result,
+      `[edit_file] replaced 1 occurrence(s) in ${join(scratch, "a.ts")}`
+    );
+    assert.equal(await readFile(file, "utf8"), "hello earth\n");
+  });
+
+  it("onEdit 不传时 行为与改动前 byte-identical", async () => {
+    const file = join(scratch, "b.ts");
+    await writeFile(file, "const a = 1;\n", "utf8");
+    const tool = createEditFileTool(scratch);
+    const result = (await tool.handler({
+      path: file,
+      old_str: "const a = 1;",
+      new_str: "const a = 2;",
+    })) as string;
+    assert.equal(
+      result,
+      `[edit_file] replaced 1 occurrence(s) in ${join(scratch, "b.ts")}`
+    );
+    assert.equal(await readFile(file, "utf8"), "const a = 2;\n");
+  });
+
+  it("onEdit 抛错时不吞错 → handler 仍走 execution_failed", async () => {
+    const file = join(scratch, "c.ts");
+    await writeFile(file, "x = 1\n", "utf8");
+    const tool = createEditFileTool(scratch, {
+      onEdit: () => {
+        throw new Error("notifier disposed");
+      },
+    });
+    await assert.rejects(
+      tool.handler({ path: file, old_str: "x = 1", new_str: "x = 2" }),
+      (err: unknown) =>
+        err instanceof ToolExecutionError || err instanceof Error
+    );
+  });
+});

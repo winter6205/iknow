@@ -31,6 +31,7 @@
     "web:typecheck": "npm run typecheck --prefix web",
     "aci:demo": "tsx src/harness/aci/demo.ts",
     "probe:sandbox": "tsx scripts/sandbox-probe.ts",
+    "probe:lsp": "tsx scripts/lsp-probe.ts",
     "prepare": "husky"
   },
   "devDependencies": {
@@ -42,6 +43,7 @@
     "prettier": "^3.9.6",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",
+    "typescript-language-server": "^5.3.0",
     "vitest": "^3.2.7"
   },
   "private": true,
@@ -52,6 +54,7 @@
     "ink": "^7.1.1",
     "react": "^19.2.8",
     "smol-toml": "^1.7.1",
-    "undici": "^7.29.0"
+    "undici": "^7.29.0",
+    "vscode-jsonrpc": "^9.0.1"
   }
 }
