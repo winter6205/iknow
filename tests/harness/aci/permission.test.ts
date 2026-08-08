@@ -1,7 +1,7 @@
 /**
  * ACI 原型 Layer 0：permission 单元测试。
  * 覆盖：类别默认 / byName 覆盖 / 危险命令 deny / 安全命令 allow /
- * **allowlist-first 模型**（execute 必须 isAllowedCommand 放行才走黑名单双保险）/
+ * **危险模式 + 敏感路径硬墙**（非白名单但非危险的命令落入 ask，执行期边界由 bwrap 承担）/
  * **always_allow 不能绕过 execute 安全兜底**。
  */
 

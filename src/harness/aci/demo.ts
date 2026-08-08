@@ -276,7 +276,7 @@ async function main(): Promise<void> {
 
     /* ── 场景 3：execute 危险命令 deny ── */
     banner(
-      "场景 3：execute 危险命令 deny（allowlist-first: rm -rf / -> not in allowlist）+ 安全命令放行"
+      "场景 3：execute 危险命令 deny（hard-wall: rm -rf / -> dangerous pattern）+ 安全命令放行"
     );
     console.log(
       '  脚本：turn1 bash("rm -rf /") | turn2 bash("echo hello") | turn3 文本完成'
@@ -321,7 +321,7 @@ async function main(): Promise<void> {
     banner("被验证的决策");
     console.log("ACI 装饰层可在不改 4-tool 协议前提下注入：");
     console.log(
-      "  1. 权限检查（read-only 免确认 / execute allowlist-first 危险命令 deny 零副作用）"
+      "  1. 权限检查（read-only 免确认 / execute 危险命令 hard-wall deny 零副作用）"
     );
     console.log(
       "  2. 安全标记（edit_file Linter poka-yoke 拒绝坏补丁，文件不动）"

@@ -86,16 +86,11 @@ describe("bash — execution", () => {
 });
 
 describe("bash — permission gates", () => {
-  it("rejects a command outside the transitional allowlist", async () => {
+  it("no longer rejects non-allowlist commands at handler level (ask flow + bwrap)", async () => {
+    // 白名单降级为 ask：handler 不再拦截非白名单命令，执行期边界由 bwrap 承担。
     const cwd = await makeScratch("bash-allowlist-");
-    const tool = createBashTool(cwd);
-
-    await assert.rejects(
-      tool.handler({ command: "sh -c true" }),
-      (error: unknown) =>
-        error instanceof ToolExecutionError &&
-        error.message.includes("bash: command not in allowlist")
-    );
+    const result = await runBash(cwd, "sh -c true");
+    assert.equal(result.code, 0);
   });
 
   it("rejects a dangerous command through the blacklist defense", async () => {

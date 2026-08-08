@@ -103,16 +103,20 @@ describe("SC1: hard-walls un-overrideable", () => {
     assert.ok(out.reason.includes("[hard_wall]"));
   });
 
-  it("execute with non-allowlist command (printenv) hard-wall denies", () => {
+  it("execute with non-allowlist command (printenv) falls through to ask", () => {
+    // 非白名单但非危险的命令不再 hard-wall：落入 execute 类别默认 ask，
+    // 由用户决定是否放行（bwrap 沙箱是执行期边界）。
+    // 注意：SC1 的 policy 带 allow-all session 规则会直接放行，这里用默认 policy。
+    const plain = createPermissionPolicy();
     const out = checkPermission({
       def: makeTool({ name: "bash", category: "execute" }),
       input: { command: "printenv" },
-      sources: policy.sources,
-      hardWalls: policy.hardWalls,
-      defaultByCategory: policy.defaultByCategory,
+      sources: plain.sources,
+      hardWalls: plain.hardWalls,
+      defaultByCategory: plain.defaultByCategory,
     });
-    assert.equal(out.decision, "deny");
-    assert.ok(out.reason.includes("[hard_wall]"));
+    assert.equal(out.decision, "ask");
+    assert.ok(out.reason.includes("ask user"));
   });
 });
 
