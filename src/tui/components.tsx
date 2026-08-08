@@ -12,7 +12,7 @@
  * 非 onSubmit（路由切换由调用方决定）；Tab 按 cursor 指向的候选补全
  * （onTabComplete 接受 hintCursor 参数）。
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { Box, Text, useInput } from "ink";
 import { isSgrMouseSequence } from "./mouse.js";
@@ -87,6 +87,12 @@ export interface PromptInputProps {
    * 不动；输入变化（值非 "/" 开头）也重置 cursor。
    */
   readonly hintSuggestions?: ReadonlyArray<TuiSlashCommand>;
+  /**
+   * #279 项5：命令历史（内存态，app 持有并传入，会话内有效不落盘）。
+   * 仅在 hint 不可见时生效：↑ 从最新一条向前召回，↓ 向后回到输入现场；
+   * hint 可见时 ↑/↓ 仍走候选 cursor（hint 优先）。空数组 = 无历史，↑↓ no-op。
+   */
+  readonly history?: ReadonlyArray<string>;
   /** 输入框下方的轻量提示（不抢输入焦点）。 */
   readonly hint?: ReactNode;
 }
@@ -95,6 +101,23 @@ export function PromptInput(props: PromptInputProps): ReactElement {
   const suggestions = props.hintSuggestions ?? [];
   const hasHint = suggestions.length > 0;
   const [hintCursor, setHintCursor] = useState(0);
+  // #279 项5：历史导航游标。-1 = 未在浏览历史（↑ 从 length-1 最新条起步）；
+  // ↓ 越过最新条 → 回到 -1 并恢复草稿（回到输入现场）。
+  const history = props.history ?? [];
+  const [historyCursor, setHistoryCursor] = useState(-1);
+  // review 修复（项5 草稿丢失）：首次 ↑ 离开输入现场（cursor 从 -1 起步）
+  // 时把当前 props.value 存入 draftRef；↓ 越过最新条时恢复该草稿（原本
+  // 为空则恢复 ""），不再无条件清空覆盖用户正在输入的内容。
+  const draftRef = useRef("");
+  // review 修复（项5 陈旧 historyCursor）：记录最近一次 ↑↓ 导航写入的值；
+  // props.value 偏离它 = 外部写入（打字 / Tab 补全 / 提交后清空）→ 游标
+  // 归位 -1，下次 ↑ 重新从最新条起步（替代旧的仅 value==="" 重置）。
+  const navValueRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (navValueRef.current === props.value) return;
+    navValueRef.current = null;
+    if (historyCursor !== -1) setHistoryCursor(-1);
+  }, [props.value, historyCursor]);
   // 输入框内容变化（非候选时）→ cursor 重置为 0
   useEffect(() => {
     if (!hasHint) {
@@ -136,8 +159,10 @@ export function PromptInput(props: PromptInputProps): ReactElement {
         }
         return;
       }
-      // ↑/↓ 仅在 hint 有候选时调整 cursor（无候选时让 keystroke 落入
-      // stripNonPrintable → 走默认追加路径，避免空 inputValue 也能滚）
+      // ↑/↓：hint 有候选时调整候选 cursor（hint 优先）；无 hint 时走
+      // #279 项5 历史召回（↑ 最新向前 / ↓ 向后回现场）。两者都无 → 让
+      // keystroke 落入 stripNonPrintable → 走默认追加路径（箭头无可打印字符，
+      // 实际 no-op），避免空 inputValue 也能滚。
       if (hasHint) {
         if (key.upArrow) {
           setHintCursor((c) => Math.max(0, c - 1));
@@ -145,6 +170,35 @@ export function PromptInput(props: PromptInputProps): ReactElement {
         }
         if (key.downArrow) {
           setHintCursor((c) => Math.min(suggestions.length - 1, c + 1));
+          return;
+        }
+      } else {
+        if (key.upArrow) {
+          if (history.length === 0) return; // 空历史 no-op
+          // 首次离开输入现场：先存草稿，↓ 越过最新条时原样恢复
+          if (historyCursor === -1) draftRef.current = props.value;
+          const next =
+            historyCursor === -1
+              ? history.length - 1
+              : Math.max(0, historyCursor - 1);
+          navValueRef.current = history[next]!;
+          setHistoryCursor(next);
+          props.onChange(history[next]!);
+          return;
+        }
+        if (key.downArrow) {
+          if (historyCursor === -1) return; // 未在浏览历史 → no-op
+          const next = historyCursor + 1;
+          if (next >= history.length) {
+            // 越过最新条：回到输入现场（恢复草稿），游标归位
+            setHistoryCursor(-1);
+            navValueRef.current = draftRef.current;
+            props.onChange(draftRef.current);
+          } else {
+            navValueRef.current = history[next]!;
+            setHistoryCursor(next);
+            props.onChange(history[next]!);
+          }
           return;
         }
       }
