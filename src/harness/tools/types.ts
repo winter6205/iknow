@@ -74,6 +74,19 @@ export interface ToolResultMeta {
   readonly newContent?: string;
 }
 
+/**
+ * #298 handler 可返回的结构化 envelope 形状（T4 side-channel SSOT）：
+ * `{ output: string, meta?: ToolResultMeta }`。Executor 仅取 `output` 进
+ * model-facing tool_result；`meta` 走观测侧信道，不进模型可见 payload。
+ *
+ * 单一权威形状：executor 落址此处（不再在各处内联重写 shape-check），
+ * 类型守卫与取值共用同一接口（#298 review-Low：3 处独立 shape-check 收敛）。
+ */
+export interface ToolOutputEnvelope {
+  readonly output: string;
+  readonly meta?: ToolResultMeta;
+}
+
 export type ToolExecutionResult =
   | {
       readonly kind: "ok";

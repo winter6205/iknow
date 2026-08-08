@@ -773,6 +773,82 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
     assert.ok(!b.content[0]!.text.includes("newContent"));
   });
 
+  // (a4) review-Low:envelope 守卫 reject-fast — meta 形状非法时整体不算
+  // envelope（meta 丢弃，整个对象走 generic JSON.stringify 序列化）。
+  it("reject-fast: meta.oldContent 非 string → 不算 envelope，meta 丢弃、整体序列化", async () => {
+    const badMeta: ToolDef = {
+      name: "bad-meta-old",
+      description: "meta.oldContent non-string",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: () => ({
+        output: "plain text",
+        meta: { oldContent: 123 }, // 非法：oldContent 非 string
+      }),
+    };
+    const exec = createExecutor(createRegistry([badMeta]));
+    const results = await exec.executeAll([
+      { id: "c1", name: "bad-meta-old", input: {} },
+    ]);
+    assert.equal(results[0]!.kind, "ok");
+    const r = results[0];
+    if (r.kind !== "ok") throw new Error("expected ok");
+    // 非 envelope → meta 侧信道不产生（undefined，未提升）。
+    assert.equal(r.meta, undefined);
+    // 整体对象走 generic JSON.stringify（不是只取 output 的 envelope 路径）。
+    const text = r.payload[0]!.text;
+    assert.equal(
+      text,
+      JSON.stringify({ output: "plain text", meta: { oldContent: 123 } })
+    );
+  });
+
+  it("reject-fast: meta 为数组 → 不算 envelope，整体序列化", async () => {
+    const arrMeta: ToolDef = {
+      name: "bad-meta-arr",
+      description: "meta is array",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: () => ({
+        output: "plain text",
+        meta: [1, 2], // 非法：meta 必须是纯对象
+      }),
+    };
+    const exec = createExecutor(createRegistry([arrMeta]));
+    const results = await exec.executeAll([
+      { id: "c1", name: "bad-meta-arr", input: {} },
+    ]);
+    assert.equal(results[0]!.kind, "ok");
+    const r = results[0];
+    if (r.kind !== "ok") throw new Error("expected ok");
+    assert.equal(r.meta, undefined);
+    const text = r.payload[0]!.text;
+    assert.equal(text, JSON.stringify({ output: "plain text", meta: [1, 2] }));
+  });
+
+  it("reject-fast: meta.newContent 非 string → 不算 envelope（双字段守卫）", async () => {
+    const badNew: ToolDef = {
+      name: "bad-meta-new",
+      description: "meta.newContent non-string",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: () => ({
+        output: "plain text",
+        meta: { newContent: 99 }, // 非法：newContent 非 string
+      }),
+    };
+    const exec = createExecutor(createRegistry([badNew]));
+    const results = await exec.executeAll([
+      { id: "c1", name: "bad-meta-new", input: {} },
+    ]);
+    assert.equal(results[0]!.kind, "ok");
+    const r = results[0];
+    if (r.kind !== "ok") throw new Error("expected ok");
+    assert.equal(r.meta, undefined);
+    const text = r.payload[0]!.text;
+    assert.equal(
+      text,
+      JSON.stringify({ output: "plain text", meta: { newContent: 99 } })
+    );
+  });
+
   // (b) S7a 契约 Y1 反例：非 bash 工具返回 {code, stdout, stderr} 形态
   // 对象，executor 走 generic JSON.stringify 序列化（plain-string wire），
   // 不给该对象任何结构化语义；这是契约 Y1 的真值。

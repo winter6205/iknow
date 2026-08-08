@@ -20,6 +20,7 @@ import type {
   ToolCall,
   ToolExecutionContext,
   ToolExecutionResult,
+  ToolOutputEnvelope,
   ToolResultMeta,
 } from "./types.js";
 
@@ -50,33 +51,32 @@ function safeContent(payload: unknown): AnthropicContentBlock[] {
   return [{ type: "text", text: applyOutputCap(text) }];
 }
 
-/** T4 #298:envelope 判别 — 必须是纯对象且带 string `output` 字段。 */
-function isEnvelope(v: unknown): v is { output: string } {
+/**
+ * T4 #298 + review-Low:envelope 单一判别 — 必须是纯对象、带 string `output`，
+ * 且可选 `meta` 必须为纯对象（字段仅限 string oldContent / newContent）。
+ * 形状以 `ToolOutputEnvelope`（types.ts SSOT）为准，杜绝 3 处独立 shape-check
+ * 各自漂移；reject-fast：meta 形状非法 → 整体不算 envelope（meta 被丢弃）。
+ */
+function isEnvelope(v: unknown): v is ToolOutputEnvelope {
   if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
   const o = v as Record<string, unknown>;
-  return typeof o.output === "string";
+  if (typeof o.output !== "string") return false;
+  const m = o.meta;
+  if (m === undefined) return true; // envelope with no meta
+  if (m === null || typeof m !== "object" || Array.isArray(m)) return false;
+  const meta = m as Record<string, unknown>;
+  return (
+    (meta.oldContent === undefined || typeof meta.oldContent === "string") &&
+    (meta.newContent === undefined || typeof meta.newContent === "string")
+  );
 }
 
-/** T4 #298:从 envelope 提取 side-channel meta(仅为 string 字段;缺则 undefined)。 */
-function extractMeta(v: { output: string }): ToolResultMeta | undefined {
-  const raw = (v as Record<string, unknown>).meta;
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-    return undefined;
-  }
-  const m = raw as Record<string, unknown>;
-  const oldContent =
-    typeof m.oldContent === "string" ? m.oldContent : undefined;
-  const newContent =
-    typeof m.newContent === "string" ? m.newContent : undefined;
-  return oldContent !== undefined || newContent !== undefined
-    ? Object.freeze(
-        oldContent !== undefined
-          ? newContent !== undefined
-            ? { oldContent, newContent }
-            : { oldContent }
-          : { newContent }
-      )
-    : undefined;
+/** T4 #298:从已通过 isEnvelope 判别的 envelope 提取 side-channel meta。
+ *  meta 形状已由守卫验证，此处仅做平凡取值（单次遍历收敛）。 */
+function extractMeta(v: ToolOutputEnvelope): ToolResultMeta | undefined {
+  const m = (v as unknown as Record<string, unknown>).meta as
+    ToolResultMeta | undefined;
+  return m;
 }
 
 /**
@@ -251,11 +251,12 @@ export function createExecutor(registry: RegistryImpl): Executor {
       const meta: ToolResultMeta | undefined = isEnvelope(out)
         ? extractMeta(out)
         : undefined;
+      // meta 为可选字段：`{ meta }`（含 undefined）与条件展开等价，收敛为直写。
       return {
         kind: "ok",
         toolUseId: call.id,
         payload: safeContent(out),
-        ...(meta !== undefined ? { meta } : {}),
+        meta,
       };
     } catch (err) {
       return {
