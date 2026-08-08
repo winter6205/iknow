@@ -775,8 +775,9 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     exit();
   }
 
-  /** T6 (D5) + Ctrl+O：切换 thinking 折叠面板展开态的共享 helper。
-   *  /thinking 斜杠命令与全局 Ctrl+O 键位共用，避免双份实现漂移。
+  /** T6 (D5)：/thinking 斜杠命令切换 thinking 折叠面板展开态。
+   *  注意语义分工（用户 2026-08-08 澄清）：切换只归 /thinking；
+   *  Ctrl+O 是「展示思考」（只展开，见 useInput 分支）。
    *  running 态下也允许（不改 streaming 行为，只影响终稿渲染）。 */
   function toggleThinking(): void {
     setThinkingExpanded((prev) => !prev);
@@ -926,10 +927,11 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       return;
     }
     if (view !== "chat") return;
-    // Ctrl+O：切换思考折叠/展开（与 /thinking 同 helper）。PromptInput 对
-    // ctrl 组合键早返回让出（components.tsx `key.ctrl → return`），不吞键。
+    // Ctrl+O：展示思考（只展开，不折叠；用户 2026-08-08 澄清语义——折叠/
+    // 切换归 /thinking）。已展开时保持 no-op。PromptInput 对 ctrl 组合键
+    // 早返回让出（components.tsx `key.ctrl → return`），不吞键。
     if (key.ctrl && input === "o") {
-      toggleThinking();
+      setThinkingExpanded(true);
       return;
     }
     // 方案 B：banner + 消息共用 row window，空会话也可滚动（矮终端 banner

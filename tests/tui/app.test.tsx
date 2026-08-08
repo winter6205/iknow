@@ -1104,7 +1104,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
   );
 
   it(
-    "Ctrl+O 切换思考折叠/展开（与 /thinking 同语义）",
+    "Ctrl+O 只展示思考（只展开不折叠）；折叠/切换归 /thinking",
     async () => {
       const app = makeApp([
         assistantResult({
@@ -1125,26 +1125,38 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       expect(app.lastFrame()).toContain("[思考]");
       expect(app.lastFrame()).not.toContain("THINK-CTRL-O-MARKER");
 
-      // Ctrl+O（\x0f）→ 展开：thinking 全文可见。
+      // Ctrl+O（\x0f）→ 展示：thinking 全文可见。
       stdin.write("\x0f");
       await waitFor(
         () => app.lastFrame().includes("THINK-CTRL-O-MARKER"),
         4000,
         "ctrl-o-expands-thinking"
       );
-      // 切换不产生持久 notice（长 notice 在窄终端折行会撑爆 #268 viewport
+      // 展示不产生持久 notice（长 notice 在窄终端折行会撑爆 #268 viewport
       // 行账）；键位提示挂折叠摘要行右侧「(Ctrl+O)」。
       expect(app.lastFrame()).not.toContain("思考已展开");
       expect(app.lastFrame()).not.toContain("思考已折叠");
 
-      // 再按一次 → 折回。
+      // 再按一次 Ctrl+O → 保持展开（Ctrl+O 不是切换，语义只负责展示）。
       stdin.write("\x0f");
+      await delay(400);
+      expect(app.lastFrame()).toContain("THINK-CTRL-O-MARKER");
+
+      // /thinking 才是切换：折回。
+      await app.type("/thinking\r");
       await waitFor(
         () => !app.lastFrame().includes("THINK-CTRL-O-MARKER"),
         4000,
-        "ctrl-o-folds-thinking"
+        "slash-thinking-folds"
       );
       expect(app.lastFrame()).toContain("[思考]");
+      // /thinking 再切一次 → 重新展开。
+      await app.type("/thinking\r");
+      await waitFor(
+        () => app.lastFrame().includes("THINK-CTRL-O-MARKER"),
+        4000,
+        "slash-thinking-expands-again"
+      );
     },
     LONG_TIMEOUT
   );
