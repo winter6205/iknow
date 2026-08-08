@@ -25,6 +25,7 @@ import { useEffect, useState } from "react";
 import type { ReactElement } from "react";
 import { Box, Text } from "ink";
 import type { TokenUsage } from "../harness/model-adapter/types.js";
+import { visualWidth } from "./banner.js";
 import { tuiPalette } from "./theme.js";
 
 export interface ContextBarProps {
@@ -32,6 +33,10 @@ export interface ContextBarProps {
   readonly contextWindow: number;
   readonly running: boolean;
   readonly cols: number;
+  /** #279 项 4：当前运行中工具名（app.tsx 从 liveToolRuns 派生）。
+   *  undefined = 无工具运行 → 不渲染指示器。渲染在本行尾缀（不新增
+   *  chrome 行，#189 行账不变）。 */
+  readonly activeToolName?: string;
 }
 
 /** 淡蓝（用户 2026-08-07 反馈）；与 Web ContextUsageStrip COLOR_SAFE 镜像同值。
@@ -75,6 +80,25 @@ function usePulse(frozen: boolean, periodMs = 600): boolean {
   return n % 2 === 0;
 }
 
+/** 活动工具指示器（#279 项 4）：`⚙ name` 截断到 budgetCols 视觉列宽内
+ *  （banner.ts visualWidth 口径，CJK/emoji 安全）；放不下前缀 → 空串。
+ *  超宽名字尾部截断补 `…`。纯函数，供单测直驱。 */
+export function toolIndicator(name: string, budgetCols: number): string {
+  const PREFIX = "⚙ ";
+  const prefixW = visualWidth(PREFIX);
+  if (budgetCols <= prefixW) return "";
+  const nameBudget = budgetCols - prefixW;
+  if (visualWidth(name) <= nameBudget) return PREFIX + name;
+  // 尾部截断：逐码点累加直到再放一个字符就超过（预留 `…` 位）。
+  const ellW = visualWidth("…");
+  let acc = "";
+  for (const ch of name) {
+    if (visualWidth(acc + ch) > nameBudget - ellW) break;
+    acc += ch;
+  }
+  return PREFIX + acc + "…";
+}
+
 export function ContextBar(props: ContextBarProps): ReactElement {
   const pal = tuiPalette;
   const { lastUsage, contextWindow, running, cols } = props;
@@ -90,15 +114,36 @@ export function ContextBar(props: ContextBarProps): ReactElement {
   const warm = lastUsage !== null && running && pct > 0 && denomOk;
   const leftBorder = usePulse(!warm) ? pal.border : pal.running;
   const color = contextColor(pct);
+  const activeToolName = props.activeToolName;
+  // #279 项 4：活动工具指示器追加在**本行尾缀**（不新增 chrome 行，
+  // #189 行账不变）。预算 = cols − 已渲染基线宽 − 1（前导空格），
+  // visualWidth 口径保证窄终端不溢行。
+  const narrowBase = `│ ctx ${pct}%`;
+  const narrowIndicator =
+    activeToolName === undefined
+      ? ""
+      : toolIndicator(activeToolName, cols - visualWidth(narrowBase) - 1);
   // 窄列（cols < 40）：仅 `ctx NN%`（省略状态词与 k/k 数字）。
   if (cols < 40) {
     return (
       <Box>
         <Text color={leftBorder}>│</Text>
         <Text color={color}> ctx {pct}%</Text>
+        {narrowIndicator !== "" && (
+          <Text color={pal.dim}> {narrowIndicator}</Text>
+        )}
       </Box>
     );
   }
+  const statusWord = pct > 80 ? "alert" : pct >= 50 ? "warn" : "ok";
+  const tokensText = `${(used / 1000).toFixed(1)}k/${(
+    contextWindow / 1000
+  ).toFixed(1)}k`;
+  const wideBase = `│ ctx ${valueBand(pct, 10)} ${pct}% ${statusWord} ${tokensText}`;
+  const wideIndicator =
+    activeToolName === undefined
+      ? ""
+      : toolIndicator(activeToolName, cols - visualWidth(wideBase) - 1);
   return (
     <Box>
       <Text color={leftBorder}>│</Text>
@@ -106,14 +151,11 @@ export function ContextBar(props: ContextBarProps): ReactElement {
         <Text> ctx </Text>
         <Text color={color}>{valueBand(pct, 10)}</Text>
         <Text color={color}> {pct}%</Text>
-        <Text color={color}>
-          {" "}
-          {pct > 80 ? "alert" : pct >= 50 ? "warn" : "ok"}
-        </Text>
-        <Text color={pal.dim}>
-          {" "}
-          {(used / 1000).toFixed(1)}k/{(contextWindow / 1000).toFixed(1)}k
-        </Text>
+        <Text color={color}> {statusWord}</Text>
+        <Text color={pal.dim}> {tokensText}</Text>
+        {wideIndicator !== "" && (
+          <Text color={pal.dim}> {wideIndicator}</Text>
+        )}
       </Text>
     </Box>
   );

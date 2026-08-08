@@ -15,6 +15,7 @@ import {
   ContextBar,
   ctxUsed,
   contextColor,
+  toolIndicator,
   valueBand,
 } from "../../src/tui/context-bar.js";
 import { tuiPalette } from "../../src/tui/theme.js";
@@ -220,5 +221,110 @@ describe("ContextBar 渲染（ink renderToString）", () => {
     );
     const plain = stripAnsi(out);
     expect(plain).toContain("│ ctx █████░░░░░ 50% warn 5.0k/10.0k");
+  });
+});
+
+describe("ContextBar activeToolName（#279 项 4 状态栏活动工具名）", () => {
+  it("toolIndicator：放得下 → `⚙ name` 原样", () => {
+    expect(toolIndicator("Bash", 10)).toBe("⚙ Bash");
+    // 边界：恰好等于 name 宽 + 前缀宽
+    expect(toolIndicator("Bash", visualWidth("⚙ Bash"))).toBe("⚙ Bash");
+  });
+
+  it("toolIndicator：预算放不下前缀 → 空串（不渲染）", () => {
+    expect(toolIndicator("Bash", 0)).toBe("");
+    expect(toolIndicator("Bash", 1)).toBe("");
+    expect(toolIndicator("Bash", visualWidth("⚙ "))).toBe("");
+  });
+
+  it("toolIndicator：CJK 超宽名 → 尾截断补 …，且视觉宽 ≤ 预算", () => {
+    const out = toolIndicator("读写文件工具名很长", 8);
+    expect(out.startsWith("⚙ ")).toBe(true);
+    expect(out.endsWith("…")).toBe(true);
+    expect(visualWidth(out)).toBeLessThanOrEqual(8);
+    expect(visualWidth(out)).toBeGreaterThan(visualWidth("⚙ "));
+  });
+
+  it("tool start → 状态栏内显示 `⚙ 工具名`（宽列）", async () => {
+    const out = await renderToString(
+      <ContextBar
+        lastUsage={makeUsage(5000)}
+        contextWindow={10000}
+        running={true}
+        cols={80}
+        activeToolName="Bash"
+      />
+    );
+    const plain = stripAnsi(out);
+    expect(plain).toContain("⚙ Bash");
+    // 仍在同一行（ContextBar 单行 chrome，#189 行账不变）
+    expect(plain.split("\n").filter((l) => l.length > 0)).toHaveLength(1);
+  });
+
+  it("tool end（activeToolName undefined）→ 不渲染 `⚙`", async () => {
+    const out = await renderToString(
+      <ContextBar
+        lastUsage={makeUsage(5000)}
+        contextWindow={10000}
+        running={true}
+        cols={80}
+      />
+    );
+    expect(stripAnsi(out)).not.toContain("⚙");
+  });
+
+  it("窄列 cols<40：仍显示活动工具名（尾缀，不新增行）", async () => {
+    const out = await renderToString(
+      <ContextBar
+        lastUsage={makeUsage(8100)}
+        contextWindow={10000}
+        running={true}
+        cols={30}
+        activeToolName="Bash"
+      />
+    );
+    const plain = stripAnsi(out);
+    expect(plain).toContain("⚙ Bash");
+    expect(plain.split("\n").filter((l) => l.length > 0)).toHaveLength(1);
+  });
+
+  it("窄列超宽工具名：visualWidth 截断，每行 ≤ cols（banner.ts 口径）", async () => {
+    const cols = 30;
+    const out = await renderToString(
+      <ContextBar
+        lastUsage={makeUsage(8100)}
+        contextWindow={10000}
+        running={true}
+        cols={cols}
+        activeToolName="读写文件工具名字特别特别特别长"
+      />
+    );
+    const lines = stripAnsi(out).split("\n").filter((l) => l.length > 0);
+    expect(lines).toHaveLength(1);
+    for (const line of lines) {
+      expect(visualWidth(line), `窄列溢行：${JSON.stringify(line)}`).toBeLessThanOrEqual(cols);
+    }
+    // 截断后仍带 ⚙ 前缀与省略号
+    expect(lines[0] ?? "").toContain("⚙");
+    expect(lines[0] ?? "").toContain("…");
+  });
+
+  it("宽列超宽工具名：visualWidth 截断，每行 ≤ cols", async () => {
+    const cols = 40;
+    const out = await renderToString(
+      <ContextBar
+        lastUsage={makeUsage(5000)}
+        contextWindow={10000}
+        running={true}
+        cols={cols}
+        activeToolName="读写文件工具名很长"
+      />
+    );
+    const lines = stripAnsi(out).split("\n").filter((l) => l.length > 0);
+    expect(lines).toHaveLength(1);
+    for (const line of lines) {
+      expect(visualWidth(line), `宽列溢行：${JSON.stringify(line)}`).toBeLessThanOrEqual(cols);
+    }
+    expect(lines[0] ?? "").toContain("⚙");
   });
 });
