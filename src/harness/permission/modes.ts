@@ -79,3 +79,45 @@ export function asModeContext(
   }
   return mode;
 }
+
+/**
+ * Human-readable label for a permission mode (used by TUI / REPL UI).
+ *
+ * Mirrors upstream openharness `_MODE_LABELS` in `ui/protocol.py`:
+ *   - default   → "Default"
+ *   - plan      → "Plan Mode"
+ *   - full_auto → "Auto"
+ *
+ * Display-only — `IKNOW_PERMISSION_MODE` env + `parsePermissionMode` SSOT
+ * remain pinned to the canonical enum values. Adding an alias here would
+ * silently widen the parser surface.
+ */
+export function modeLabel(
+  mode: PermissionMode
+): "Default" | "Plan Mode" | "Auto" {
+  switch (mode) {
+    case "default":
+      return "Default";
+    case "plan":
+      return "Plan Mode";
+    case "full_auto":
+      return "Auto";
+  }
+}
+
+/**
+ * Shift+Tab cycle for the permission mode (TUI / REPL quick toggle).
+ *
+ * Sequence: plan → full_auto → default → full_auto → default → …
+ *   - `plan` is deliberately NOT in the cycle target list: a quick toggle
+ *     must never silently flip a planning session into full-auto mutating
+ *     tools. Plan mode is entered/exited only via `/permissions plan`.
+ *   - Pressing Shift+Tab while in `plan` jumps straight to `full_auto`
+ *     (the "go" mode); from `default` it goes to `full_auto` (opt-in auto).
+ *   - Pressing Shift+Tab while in `full_auto` drops back to `default` —
+ *     the human can always pull the handbrake.
+ */
+export function nextShiftTabMode(current: PermissionMode): PermissionMode {
+  if (current === "full_auto") return "default";
+  return "full_auto";
+}

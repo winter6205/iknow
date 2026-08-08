@@ -19,6 +19,11 @@ import { createInflightRegistry, createTuiBridge } from "./hub-bridge.js";
 import { TuiApp, createToolEventSink } from "./app.js";
 import { attachSession } from "./session-state.js";
 import { initIknowWorkspaceSafe } from "../harness/identity/index.js";
+import {
+  createPermissionModeContext,
+  parsePermissionMode,
+  type PermissionModeContext,
+} from "../harness/permission/index.js";
 
 export interface RunTuiOptions {
   /** `iknow tui <session-id>` resume；缺省 = draft 新会话（Q2=C）。 */
@@ -44,10 +49,17 @@ export async function runTui(opts: RunTuiOptions): Promise<void> {
   const inflight = createInflightRegistry();
   const toolEventSink = createToolEventSink();
   const askBridge = createTuiAskUserBridge();
+  // W2 扩展：TUI 也持可变 PermissionModeContext —— Shift+Tab 在 TUI/REPL
+  // 就地翻 mode,引擎不重建。初始值走 env IKNOW_PERMISSION_MODE(可选),
+  // 缺省 default。chat REPL 同源(cli.ts runChat)。
+  const permissionMode: PermissionModeContext = createPermissionModeContext(
+    parsePermissionMode(process.env.IKNOW_PERMISSION_MODE) ?? "default"
+  );
   const deps = buildTuiDeps(bundle, {
     askUser: askBridge.ask,
     onToolEvent: (event) => toolEventSink.emit(event),
     soleInflightId: () => inflight.soleId(),
+    permissionMode,
   });
   const bridge = createTuiBridge({
     dataDir: opts.dataDir,
@@ -72,6 +84,7 @@ export async function runTui(opts: RunTuiOptions): Promise<void> {
       initialSession={initialSession}
       cwd={cwd}
       dataDir={dataDir}
+      permissionMode={permissionMode}
     />,
     { exitOnCtrlC: false, kittyKeyboard: { mode: "disabled" } } // Ctrl+C 语义自管：打断前台 turn（Q1a）；kittyKeyboard disabled 避免 ink 启动期 kitty probe 的 200ms 窗口吞 stdin data（实测真实 pty 下导致首个 Enter / 滚轮 SGR 事件丢失）
   );

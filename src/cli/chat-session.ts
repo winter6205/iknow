@@ -31,12 +31,43 @@ import { writeIknowState } from "../harness/identity/index.js";
 import { createStreamDraft } from "./stream-draft.js";
 import {
   parsePermissionMode,
+  modeLabel,
+  nextShiftTabMode,
   type PermissionMode,
   type PermissionModeContext,
 } from "../harness/permission/modes.js";
 
 /** Visual separator after a completed answer on TTY only. */
 const TTY_ANSWER_SEP = "────────";
+
+/**
+ * W2 扩展：Shift+Tab 按键事件 → 翻权限模式。读进程 stdin keypress 事件
+ * 触发，调 `nextShiftTabMode` 算 next 并落 mode context；ctx 缺省（ask/
+ * serve 路径）短路返回。
+ *
+ * 抽出供单测独立覆盖（无需真实 TTY）；REPL runInteractive 用它在
+ * keypress 监听里就地调。
+ *
+ * 守卫：`key.name === "tab" && key.shift && !key.ctrl && !key.meta`。
+ * 任何条件不满足 → 不消费（no-op；其它 handler 继续处理）。
+ */
+export function applyShiftTabModeFlip(opts: {
+  readonly key:
+    | { name?: string; shift?: boolean; ctrl?: boolean; meta?: boolean }
+    | undefined;
+  readonly ctx: PermissionModeContext | undefined;
+  readonly onFlip: (next: PermissionMode) => void;
+}): boolean {
+  const k = opts.key;
+  if (!k) return false;
+  if (k.name !== "tab" || !k.shift || k.ctrl || k.meta) return false;
+  const modeCtx = opts.ctx;
+  if (!modeCtx) return false; // 防御性：不传 ctx 的调用方（ask/serve）零回归
+  const next = nextShiftTabMode(modeCtx.get());
+  modeCtx.set(next);
+  opts.onFlip(next);
+  return true;
+}
 
 export type ChatSessionOpts = {
   deps: LoopEngineDeps;
@@ -598,6 +629,25 @@ async function runInteractive(opts: {
       busy = false;
     }
   };
+
+  // W2 扩展：Shift+Tab 切换权限模式（default ↔ full_auto；plan 走
+  // /permissions plan 命令不进循环）。REPL 用 readline：terminal:true 时
+  // stdin 已 emit keypress，keypress 里 shift+tab = key.name==="tab" &&
+  // key.shift。busy 时也允许翻 mode（只动 mode 不打断 turn）。
+  // 守卫 `!key.ctrl && !key.meta`：避免误触（Ctrl+Tab / Meta+Tab 各有用途）。
+  // 在 terminal:true 时 readline 已对 process.stdin emit keypress 事件，
+  // 直接监听 process.stdin（rl.input 非公开类型字段，避免访问私有）。
+  process.stdin.on("keypress", (_ch, key) => {
+    if (closed) return;
+    applyShiftTabModeFlip({
+      key,
+      ctx: opts.ctx.permissionMode,
+      onFlip: (next) => {
+        writeErr(`\n权限模式: ${modeLabel(next)}`);
+        rl.prompt(true);
+      },
+    });
+  });
 
   await new Promise<void>((resolve) => {
     rl.on("line", (line) => {

@@ -45,6 +45,8 @@ export {
   parsePermissionMode,
   createPermissionModeContext,
   asModeContext,
+  modeLabel,
+  nextShiftTabMode,
 } from "./modes.js";
 export type { PermissionMode, PermissionModeContext } from "./modes.js";
 

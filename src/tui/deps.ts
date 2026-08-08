@@ -15,10 +15,8 @@ import {
   buildThinkingParams,
   type LoopEngineDeps,
 } from "../harness/index.js";
-import {
-  createAciExecutor,
-  createPermissionPolicy,
-} from "../harness/aci/index.js";
+import { createAciExecutor } from "../harness/aci/index.js";
+import { createPermissionPolicy } from "../harness/permission/policy.js";
 import { createDefaultAciRegistry } from "../harness/aci/tools/registry.js";
 import { createIknowSystemResolver } from "../harness/identity/index.js";
 import {
@@ -26,6 +24,7 @@ import {
   createSystemResolver,
 } from "../harness/memory/index.js";
 import type { AskUser } from "../harness/permission/types.js";
+import type { PermissionModeContext } from "../harness/permission/modes.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
 import { homedir } from "node:os";
 
@@ -51,6 +50,12 @@ export interface BuildTuiDepsOptions {
    * 多会话并发时事件抑制（宁缺勿错归，见 hub-bridge.ts 已知边界）。
    */
   readonly soleInflightId?: () => string | undefined;
+  /**
+   * 可变权限模式上下文（TUI 按 Shift+Tab 翻转它）。
+   * 缺省 = 静态 default 上下文（保留历史行为；hub 内 ToolExecutionContext
+   * 仍走 asModeContext 自适配）。
+   */
+  readonly permissionMode?: PermissionModeContext;
 }
 
 export function buildTuiDeps(
@@ -90,7 +95,9 @@ export function buildTuiDeps(
     memoryDir: resolveProjectMemoryDir(process.cwd()),
   });
   const baseExecutor = createExecutor(reg.inner);
-  const policy = createPermissionPolicy();
+  const policy = createPermissionPolicy({
+    ...(opts.permissionMode ? { mode: opts.permissionMode } : {}),
+  });
   const executor = createAciExecutor({
     inner: baseExecutor,
     catalog: reg.catalog,

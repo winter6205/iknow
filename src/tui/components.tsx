@@ -122,6 +122,14 @@ export function PromptInput(props: PromptInputProps): ReactElement {
         return;
       }
       if (key.tab) {
+        // W2 扩展：Shift+Tab 由 app.tsx 全局 useInput 接管（权限模式
+        // 切换）；PromptInput 不消费，**不 return**——继续往下走到
+        // `key.ctrl/meta/escape` 早返回路径，让广播给其它 handler。
+        // ink useInput 是 broadcast 语义：多个 handler 都会收到同一按键；
+        // 本 handler 选择"不消费"即可让 app.tsx 同步处理 shift+tab。
+        if (key.shift) {
+          return; // 让出：app.tsx 处理 mode 切换
+        }
         if (props.onTabComplete) {
           const completed = props.onTabComplete(props.value, hintCursor);
           if (completed !== null) props.onChange(completed);

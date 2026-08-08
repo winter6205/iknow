@@ -63,6 +63,12 @@ import { PromptInput, useTick } from "./components.js";
 import { renderBanner } from "./banner.js";
 import { tuiPalette } from "./theme.js";
 import { VERSION } from "./version.js";
+import {
+  createPermissionModeContext,
+  modeLabel,
+  nextShiftTabMode,
+  type PermissionModeContext,
+} from "../harness/permission/index.js";
 import { writeIknowState } from "../harness/identity/index.js";
 import {
   enableSgrMouseReport,
@@ -98,8 +104,16 @@ export function createToolEventSink(): TuiToolEventSink {
       };
     },
   };
-  return Object.freeze(sink);
+  return sink;
 }
+
+/**
+ * W2 扩展：TuiAppProps.permissionMode 缺省时的 fallback context。
+ * 仅供测试套件历史 mount 使用；product 路径（run.tsx → TuiApp）必须
+ * 显式创建并透传，使 Shift+Tab 翻它能被真实观察。
+ */
+export const defaultPermissionModeContext: PermissionModeContext =
+  createPermissionModeContext("default");
 
 export interface TuiAppProps {
   readonly bridge: TuiBridge;
@@ -109,6 +123,15 @@ export interface TuiAppProps {
   readonly initialSession?: TuiSessionState;
   readonly cwd: string;
   readonly dataDir: string;
+  /**
+   * W2 扩展：TUI 持一个可变 PermissionModeContext —— Shift+Tab 在这里就地
+   * 翻 mode(不动 ask 桥接 / 不重建 engine)。run.tsx 创建并透传。
+   *
+   * 可选：测试套件历史 mount 不传（保留旧断言）；缺省时内部 fallback
+   * 到静态 default context，Shift+Tab 翻它无 observer 收益但零回归。
+   * product 路径（run.tsx → TuiApp）必须显式传。
+   */
+  readonly permissionMode?: PermissionModeContext;
 }
 
 interface Notice {
@@ -117,6 +140,9 @@ interface Notice {
 
 export function TuiApp(props: TuiAppProps): ReactElement {
   const { bridge, askBridge, toolEventSink } = props;
+  // W2 扩展：permissionMode 缺省 → 内部 default context（测试兼容；
+  // product 路径由 run.tsx 显式创建并透传）。
+  const permissionMode = props.permissionMode ?? defaultPermissionModeContext;
   const pal = tuiPalette;
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -150,6 +176,11 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   // 物理行）。新 turn 完成 / new 会话 → 0；PgUp/PgDn/Home/End 调整
   // （与 PromptInput 的 ↑/↓ 不冲突，避键）；鼠标滚轮交由终端原生 scrollback。
   const [chatScroll, setChatScroll] = useState(0);
+  // W2 扩展：权限模式镜像（仅用于驱动模式指示 row re-render）。
+  // 真值由 permissionMode context 持有；handler 翻 mode 时同步 setState。
+  // 不走轮询：TUI 当前无其它改 mode 路径（/permissions 在 TUI 词表里没有），
+  // 单一触发源（Shift+Tab）直接 set，省一个常驻 tick。
+  const [permMode, setPermMode] = useState(() => permissionMode.get());
   // #238 鼠标拖选选区（未 normalize）：null = 无活动选区。drag 期间不断
   // 更新；mouseup 时若非空 → 调 copyToClipboard，并清空。滚动 / 切会话 / new
   // 会话 → 一律清空，避免 stale 状态。
@@ -823,6 +854,19 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     // 是 "[<数字;数字;数字M/m" 形态），用 isSgrMouseSequence 丢弃，避免
     // 污染后续 Ctrl+C 等守卫与输入链。
     if (isSgrMouseSequence(input)) return;
+    // W2 扩展：Shift+Tab 切换权限模式（default ↔ full_auto；plan 走
+    // /permissions 命令不进循环）。ink 在 pty 收到 CSI `Z`（`\x1b[Z`）
+    // 时把 key.tab && key.shift 一起置位。注意：不放在 view === "chat"
+    // 守卫后——list 视图也允许切 mode（与 Ctrl+Y / Ctrl+C 同层）。
+    // PromptInput 让出 shift+tab：见 components.tsx 注释（components.tsx:124
+    // `key.tab && key.shift` 不 return → 本 handler 同步捕获）。
+    if (key.tab && key.shift && !key.ctrl && !key.meta) {
+      const next = nextShiftTabMode(permissionMode.get());
+      permissionMode.set(next);
+      setPermMode(next);
+      setNotice({ lines: [`权限模式: ${modeLabel(next)}`] });
+      return;
+    }
     if (key.ctrl && input === "y") {
       // Ctrl+Y：键盘逃生口。当前有选区（drag 进行中）→ 直接复制；否则用
       // 最近一次非空选区（mouseup 自动复制后保留）实现"重新复制"。
@@ -917,6 +961,18 @@ export function TuiApp(props: TuiAppProps): ReactElement {
               {line}
             </Text>
           ))}
+        </Box>
+      )}
+      {/* W2 扩展：权限模式指示行（仅聊天视图；list 视图顶部已有表头不重复）。
+          右对齐、dim；窄列（cols < 40）降级为简短形态。Shift+Tab 切换后
+          permMode state 驱动 re-render。 */}
+      {view === "chat" && (
+        <Box justifyContent="flex-end">
+          <Text color={pal.dim}>
+            {cols < 40
+              ? `[${permMode === "full_auto" ? "auto" : "def"}]`
+              : `mode: ${modeLabel(permMode)}`}
+          </Text>
         </Box>
       )}
       {/* 输入框仅聊天视图挂载：列表视图纯导航（Q4b），避免两个 useInput
