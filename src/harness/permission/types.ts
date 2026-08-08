@@ -21,6 +21,7 @@
  */
 
 import type { AciCategory } from "../aci/types.js";
+import type { ToolResultMeta } from "../tools/types.js";
 
 /** Decision triple (spec Q1). Replaces prototype "pass_through". */
 export type PermissionDecision = "allow" | "deny" | "ask";
@@ -124,5 +125,7 @@ export interface PostToolUseHook {
       "ok" | "validation_failed" | "tool_not_found" | "execution_failed";
     readonly message?: string;
     readonly payload?: unknown;
+    /** T4 #298:ok 变体的观测 side-channel；模型不可见。 */
+    readonly meta?: ToolResultMeta;
   }): void | undefined;
 }

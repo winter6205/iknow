@@ -8,7 +8,7 @@
  * comments/strings is accepted.
  */
 
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
@@ -116,6 +116,16 @@ export function createWriteFileTool(root: string): AciToolDef {
       }
     }
 
+    // T4 #298 side-channel:写盘前读旧内容(oldContent);文件不存在 → 空串。
+    // 读失败不阻断写入(写盘才是主路径),仅降级 oldContent 为空,保证既有
+    // 拒绝语义(父目录缺失 / symlink 逃逸)不受影响 — 此刻 containment 已通过。
+    let oldContent = "";
+    try {
+      oldContent = await readFile(target, "utf8");
+    } catch {
+      oldContent = "";
+    }
+
     try {
       await writeFile(target, params.content, "utf8");
     } catch (error) {
@@ -123,7 +133,10 @@ export function createWriteFileTool(root: string): AciToolDef {
     }
 
     const pathForMessage = displayPath(root, target);
-    return `[write_file] wrote ${Buffer.byteLength(params.content, "utf8")} bytes to ${pathForMessage}`;
+    return {
+      output: `[write_file] wrote ${Buffer.byteLength(params.content, "utf8")} bytes to ${pathForMessage}`,
+      meta: { oldContent, newContent: params.content },
+    };
   };
 
   return Object.freeze({

@@ -14,12 +14,14 @@
  * 分隔 ` · ` 3 列），保证三种形态单行不折。
  *
  * 内容可见性（写代码不展示修复）：write_file / edit_file 完成后仅一行摘要，
- * 用户看不到写了什么代码。`toolPreviewLines` 产出封顶预览行（write 30 /
- * edit old+new 各 10），message-rows 与 MessageBlocks 共用单源保持行账一致。
+ * 用户看不到写了什么代码。`toolPreviewRows` 产出统一 diff 预览行
+ * （computeDiff 单源，T5），message-rows、MessageBlocks、live-tool-preview
+ * 共用单源保持行账一致。
  */
 import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
 import { visualWidth } from "./banner.js";
 import { clipOneLine, clipOneLineVisual } from "./text.js";
+import { computeDiff, type DiffLine } from "./diff-unified.js";
 
 export interface ToolSummaryLine {
   readonly toolName: string;
@@ -89,57 +91,47 @@ export function summarizeToolCall(
   }
 }
 
-/** write_file 预览封顶行数。 */
-const WRITE_PREVIEW_MAX = 30;
-/** edit_file old/new 各自预览封顶行数。 */
-const EDIT_PREVIEW_MAX = 10;
-
 /**
- * 工具内容预览行（内容可见性）：write_file → 所写代码封顶预览；
- * edit_file → old（`-`）/ new（`+`）片段。每行按视觉宽度截断到 cols-4
- * （`  │ `/`  - ` 前缀 4 列），保证单行不折、行账逐行一致。
- * 其余工具 / 无内容 → 空数组。
+ * 工具内容预览行（内容可见性，#298 T5 统一 diff 版）：edit_file / write_file
+ * 调用 `computeDiff`（diff-unified.ts）产出逐行 `DiffLine[]`（带行号 + kind，
+ * 供 diff-view.tsx 上色/排行号）。其余工具 / 无内容 → 空数组。
+ *
+ * `opts.oldContent / opts.newContent`（T4 side-channel）：live 运行完成事件
+ * 携带读盘前后全文（与 model tool_result 严格分离）→ 精确 diff。缺省（历史
+ * 持久化消息，meta 在 model 边界被丢弃）回退 intent-diff：
+ *  - edit_file：input.old_str / input.new_str 片段 diff；
+ *  - write_file：old 视为空串 → 纯 add；
+ *  - 其余工具：空数组（无 diff 预览，保持历史行账）。
  *
  * SSOT：message-rows.ts（行账 + 裁剪路径）与 message-blocks.tsx（全可见
- * 路径）、chat-view.tsx（live tail）共用本函数，行账与渲染不漂移。
+ * 路径）、live-tool-preview.tsx（live tail）共用本函数，行账与渲染不漂移。
  */
-export function toolPreviewLines(
+export function toolPreviewRows(
   name: string,
   input: unknown,
-  cols: number
-): string[] {
+  _cols: number,
+  opts?: { readonly oldContent?: string; readonly newContent?: string }
+): readonly DiffLine[] {
   const rec = inputRecord(input);
-  const inner = Math.max(1, cols - 4);
-  const cap = (s: string): string => `  │ ${clipOneLineVisual(s, inner)}`;
-  if (name === "write_file") {
-    const content = typeof rec.content === "string" ? rec.content : "";
-    if (content.length === 0) return [];
-    const srcLines = content.split("\n");
-    const out: string[] = [];
-    for (const l of srcLines.slice(0, WRITE_PREVIEW_MAX)) {
-      out.push(cap(l === "" ? " " : l));
-    }
-    if (srcLines.length > WRITE_PREVIEW_MAX) {
-      out.push(`  └ 余 ${srcLines.length - WRITE_PREVIEW_MAX} 行未显示`);
-    }
-    return out;
-  }
-  if (name === "edit_file") {
-    const out: string[] = [];
-    const pushPart = (prefix: string, raw: unknown): void => {
-      if (typeof raw !== "string" || raw.length === 0) return;
-      const srcLines = raw.split("\n").slice(0, EDIT_PREVIEW_MAX);
-      for (const l of srcLines) {
-        out.push(`  ${prefix} ${clipOneLineVisual(l === "" ? " " : l, inner)}`);
+  if (name === "edit_file" || name === "write_file") {
+    let oldContent = opts?.oldContent;
+    let newContent = opts?.newContent;
+    if (oldContent === undefined || newContent === undefined) {
+      if (name === "edit_file") {
+        const o = rec.old_str;
+        const n = rec.new_str;
+        if (typeof o !== "string" || typeof n !== "string") return [];
+        oldContent = o;
+        newContent = n;
+      } else {
+        // write_file：old 视为空串（新文件 / 覆盖写都按纯新增展示）。
+        const c = rec.content;
+        if (typeof c !== "string") return [];
+        oldContent = "";
+        newContent = c;
       }
-      const total = raw.split("\n").length;
-      if (total > EDIT_PREVIEW_MAX) {
-        out.push(`  ${prefix} …（余 ${total - EDIT_PREVIEW_MAX} 行）`);
-      }
-    };
-    pushPart("-", rec.old_str);
-    pushPart("+", rec.new_str);
-    return out;
+    }
+    return computeDiff(name, oldContent, newContent);
   }
   return [];
 }

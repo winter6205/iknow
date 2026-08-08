@@ -66,12 +66,53 @@ describe("createEditFileTool — single-replacement success", () => {
       path: file,
       old_str: "const a = 1;",
       new_str: "const a = 99;",
-    })) as string;
+    })) as {
+      output: string;
+      meta: { oldContent: string; newContent: string };
+    };
     assert.equal(
-      result,
+      result.output,
       `[edit_file] replaced 1 occurrence(s) in ${join(scratch, "a.ts")}`
     );
     assert.equal(await readFile(file, "utf8"), "const a = 99;\nconst b = 2;\n");
+  });
+
+  it("returns an envelope with meta.oldContent = pre-write full and meta.newContent = post-replace full", async () => {
+    const file = join(scratch, "env.ts");
+    const before = "const a = 1;\nconst b = 2;\n";
+    await writeFile(file, before, "utf8");
+    const tool = createEditFileTool(scratch);
+    const result = (await tool.handler({
+      path: file,
+      old_str: "const a = 1;",
+      new_str: "const a = 99;",
+    })) as {
+      output: string;
+      meta: { oldContent: string; newContent: string };
+    };
+    assert.equal(result.meta.oldContent, before);
+    assert.equal(result.meta.newContent, "const a = 99;\nconst b = 2;\n");
+    // 模型无关的验证:output 是纯文案,不含 meta JSON。
+    assert.equal(
+      result.output,
+      `[edit_file] replaced 1 occurrence(s) in ${join(scratch, "env.ts")}`
+    );
+    assert.ok(!result.output.includes("oldContent"));
+    assert.ok(!result.output.includes("newContent"));
+  });
+
+  it("envelope meta reflects replace_all=multi-occurrence full rewrite", async () => {
+    const file = join(scratch, "env-all.ts");
+    await writeFile(file, "x = 1\nx = 1\n", "utf8");
+    const tool = createEditFileTool(scratch);
+    const result = (await tool.handler({
+      path: file,
+      old_str: "x = 1",
+      new_str: "x = 2",
+      replace_all: true,
+    })) as { output: string; meta: { oldContent: string; newContent: string } };
+    assert.equal(result.meta.oldContent, "x = 1\nx = 1\n");
+    assert.equal(result.meta.newContent, "x = 2\nx = 2\n");
   });
 
   it("accepts an empty new_str — acts as a literal deletion of old_str", async () => {
@@ -114,9 +155,9 @@ describe("createEditFileTool — replace_all", () => {
       old_str: "x = 1",
       new_str: "x = 2",
       replace_all: true,
-    })) as string;
+    })) as { output: string; meta: { oldContent: string; newContent: string } };
     assert.equal(
-      result,
+      result.output,
       `[edit_file] replaced 3 occurrence(s) in ${join(scratch, "d.ts")}`
     );
     assert.equal(await readFile(file, "utf8"), "x = 2\nx = 2\nx = 2\n");
@@ -131,9 +172,9 @@ describe("createEditFileTool — replace_all", () => {
       path: file,
       old_str: "unique_marker = 42",
       new_str: "unique_marker = 100",
-    })) as string;
+    })) as { output: string };
     assert.equal(
-      result,
+      result.output,
       `[edit_file] replaced 1 occurrence(s) in ${join(scratch, "e.ts")}`
     );
     assert.equal(
@@ -342,11 +383,11 @@ describe("createEditFileTool — onEdit seam", () => {
       path: file,
       old_str: "world",
       new_str: "earth",
-    })) as string;
+    })) as { output: string };
     assert.equal(calls.length, 1);
     assert.equal(calls[0], join(scratch, "a.ts"));
     assert.equal(
-      result,
+      result.output,
       `[edit_file] replaced 1 occurrence(s) in ${join(scratch, "a.ts")}`
     );
     assert.equal(await readFile(file, "utf8"), "hello earth\n");
@@ -360,9 +401,9 @@ describe("createEditFileTool — onEdit seam", () => {
       path: file,
       old_str: "const a = 1;",
       new_str: "const a = 2;",
-    })) as string;
+    })) as { output: string };
     assert.equal(
-      result,
+      result.output,
       `[edit_file] replaced 1 occurrence(s) in ${join(scratch, "b.ts")}`
     );
     assert.equal(await readFile(file, "utf8"), "const a = 2;\n");

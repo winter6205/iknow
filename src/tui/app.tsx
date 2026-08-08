@@ -430,6 +430,12 @@ export function TuiApp(props: TuiAppProps): ReactElement {
                 ok: event.kind === "ok",
                 detail,
                 message: event.message,
+                // T4 (#298): 透传观测 side-channel — deps.ts:139 已把
+                // result.meta 落入 event.payload,此处补上消费点,否则
+                // liveToolReduce 写 oldContent/newContent = undefined,
+                // live-tool-preview.tsx:37-40 落回 intent-diff 兜底。
+                oldContent: event.payload?.oldContent,
+                newContent: event.payload?.newContent,
               }
             ),
           }));

@@ -121,7 +121,7 @@ describe("write_file 内容可见：预览行渲染", () => {
     expect(joined).toContain("write_file");
   });
 
-  it("超长 write_file → 封顶预览 + 余行提示", () => {
+  it("超长 write_file → 完整 diff 渲染（#298 T5，无封顶）", () => {
     const content = Array.from({ length: 60 }, (_, i) => `line-${i}`).join(
       "\n"
     );
@@ -140,9 +140,9 @@ describe("write_file 内容可见：预览行渲染", () => {
     ];
     const joined = frame(msgs, { cols: 80, viewportRows: 100 }).join("\n");
     expect(joined).toContain("line-0");
-    expect(joined).toContain("line-29");
-    expect(joined).not.toContain("line-30");
-    expect(joined).toContain("余 30 行未显示");
+    expect(joined).toContain("line-59");
+    // 完整 60 行 add diff 全部可见（hunk 头出现）
+    expect(joined).toContain("@@ -1,0 +1,60 @@");
   });
 });
 

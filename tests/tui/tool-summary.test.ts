@@ -8,7 +8,7 @@ import {
   formatLiveToolEvent,
   projectToolLines,
   summarizeToolCall,
-  toolPreviewLines,
+  toolPreviewRows,
 } from "../../src/tui/tool-summary.js";
 import { visualWidth } from "../../src/tui/banner.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
@@ -176,59 +176,92 @@ describe("summarizeToolCall(cols): 窄终端宽度收口（行账不漂移）", 
   });
 });
 
-describe("toolPreviewLines: 写/改文件内容可见", () => {
-  it("write_file → 逐行预览（│ 前缀），内容可见", () => {
-    const lines = toolPreviewLines(
+describe("toolPreviewRows: 写/改文件内容可见（#298 T5 unified diff）", () => {
+  it("write_file → 纯 add diff（kind 全 add，newNo 单调，hunk 头出现）", () => {
+    const rows = toolPreviewRows(
       "write_file",
       { path: "a.ts", content: "const a = 1;\nconst b = 2;" },
       80
     );
-    expect(lines).toHaveLength(2);
-    expect(lines[0]).toContain("const a = 1;");
-    expect(lines[1]).toContain("const b = 2;");
-    for (const l of lines) expect(l.startsWith("  │ ")).toBe(true);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((r) => r.kind === "add" || r.kind === "ctx")).toBe(true);
+    expect(rows.filter((r) => r.kind === "add").length).toBe(2);
+    const adds = rows.filter((r) => r.kind === "add");
+    expect(adds.map((r) => r.newNo)).toEqual([1, 2]);
+    expect(rows[0]?.text).toMatch(/^@@ -1,0 \+1,2 @@$/);
   });
 
-  it("write_file 超 30 行 → 封顶 + 余行提示", () => {
-    const content = Array.from({ length: 78 }, (_, i) => `l${i}`).join("\n");
-    const lines = toolPreviewLines("write_file", { path: "a.ts", content }, 80);
-    expect(lines).toHaveLength(31);
-    expect(lines[30]).toContain("余 48 行未显示");
+  it("write_file 60 行 → diff 行数 = 60 + 1 hunk 头 + 1 尾部标记（无封顶）", () => {
+    const content = Array.from({ length: 60 }, (_, i) => `line-${i}`).join(
+      "\n"
+    );
+    const rows = toolPreviewRows("write_file", { path: "a.ts", content }, 80);
+    // 60 add + 1 hunk 头 + 1 `\ No newline` 标记 = 62
+    expect(rows).toHaveLength(62);
+    expect(rows.filter((r) => r.kind === "add")).toHaveLength(60);
+    expect(rows[0]?.text).toMatch(/^@@ -1,0 \+1,60 @@$/);
   });
 
-  it("edit_file → old（-）/ new（+）片段", () => {
-    const lines = toolPreviewLines(
+  it("edit_file → old（del）/ new（add）diff", () => {
+    const rows = toolPreviewRows(
       "edit_file",
       { path: "a.ts", old_str: "foo", new_str: "bar" },
       80
     );
-    expect(lines.some((l) => l.includes("- foo"))).toBe(true);
-    expect(lines.some((l) => l.includes("+ bar"))).toBe(true);
+    const del = rows.find((r) => r.kind === "del");
+    const add = rows.find((r) => r.kind === "add");
+    expect(del?.text).toBe("-foo");
+    expect(add?.text).toBe("+bar");
+    expect(del?.oldNo).toBe(1);
+    expect(add?.newNo).toBe(1);
   });
 
-  it("edit_file old/new 各封顶 10 行 + 余行提示", () => {
+  it("edit_file 25 行片段 → 只 diff 实际变更（1 hunk，无封顶提示）", () => {
     const big = Array.from({ length: 25 }, (_, i) => `l${i}`).join("\n");
-    const lines = toolPreviewLines(
+    const rows = toolPreviewRows(
       "edit_file",
       { path: "a.ts", old_str: big, new_str: big },
       80
     );
-    // 10 内容 + 1 余行提示，old/new 各一份 = 22
-    expect(lines).toHaveLength(22);
-    expect(lines.filter((l) => l.includes("余 15 行"))).toHaveLength(2);
+    // old == new → 无差异 → computeDiff 返回空（jsdiff 行为）
+    expect(rows).toHaveLength(0);
   });
 
-  it("其余工具 / 空内容 → 无预览行", () => {
-    expect(toolPreviewLines("bash", { command: "ls" }, 80)).toHaveLength(0);
-    expect(toolPreviewLines("write_file", { path: "a" }, 80)).toHaveLength(0);
+  it("其余工具 → 无预览行", () => {
+    expect(toolPreviewRows("bash", { command: "ls" }, 80)).toHaveLength(0);
+    expect(toolPreviewRows("read_file", { path: "a.ts" }, 80)).toHaveLength(0);
   });
 
-  it("长内容行按视觉宽度截断到 cols 内（预览行不折行）", () => {
-    const lines = toolPreviewLines(
-      "write_file",
-      { path: "a.ts", content: "x".repeat(300) },
-      60
+  it("write_file 空 content → 空 diff（无预览行）", () => {
+    expect(
+      toolPreviewRows("write_file", { path: "a.ts", content: "" }, 80)
+    ).toHaveLength(0);
+  });
+
+  it("side-channel 路径：opts.oldContent/newContent 精确 diff", () => {
+    const rows = toolPreviewRows(
+      "edit_file",
+      { path: "a.ts", old_str: "stale", new_str: "stale" },
+      80,
+      { oldContent: "v1\nv2\nv3\n", newContent: "v1\nv2\nv3b\n" }
     );
-    for (const l of lines) expect(visualWidth(l)).toBeLessThanOrEqual(60);
+    const del = rows.find((r) => r.kind === "del");
+    const add = rows.find((r) => r.kind === "add");
+    expect(del?.text).toBe("-v3");
+    expect(add?.text).toBe("+v3b");
+  });
+
+  it("side-channel write_file：old 空串 → 纯 add", () => {
+    const rows = toolPreviewRows(
+      "write_file",
+      { path: "a.ts", content: "ignored" },
+      80,
+      { oldContent: "", newContent: "x\ny\n" }
+    );
+    expect(rows.filter((r) => r.kind === "add")).toHaveLength(2);
+  });
+
+  it("edit_file 无 old_str/new_str → 空数组", () => {
+    expect(toolPreviewRows("edit_file", { path: "a.ts" }, 80)).toHaveLength(0);
   });
 });

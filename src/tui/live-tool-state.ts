@@ -26,6 +26,10 @@ export interface LiveToolRun {
   readonly detail?: string;
   /** 完成事件的 message(失败原因);运行中无。 */
   readonly message?: string;
+  /** T4 (#298):观测 side-channel — 写盘前旧内容;运行中无。 */
+  readonly oldContent?: string;
+  /** T4 (#298):观测 side-channel — 写盘后新内容;运行中无。 */
+  readonly newContent?: string;
 }
 
 export type LiveToolEvent =
@@ -42,6 +46,10 @@ export type LiveToolEvent =
       readonly ok: boolean;
       readonly detail?: string;
       readonly message?: string;
+      /** T4 (#298):观测 side-channel — 写盘前旧内容。 */
+      readonly oldContent?: string;
+      /** T4 (#298):观测 side-channel — 写盘后新内容。 */
+      readonly newContent?: string;
     };
 
 /** reducer: append running / set completed → 新冻结 array。 */
@@ -77,6 +85,8 @@ export function liveToolReduce(
                 input: event.input,
                 detail: event.detail,
                 message: event.message,
+                oldContent: event.oldContent,
+                newContent: event.newContent,
               })
             : r
         )
@@ -92,6 +102,8 @@ export function liveToolReduce(
         input: event.input,
         detail: event.detail,
         message: event.message,
+        oldContent: event.oldContent,
+        newContent: event.newContent,
       }),
     ]);
   }

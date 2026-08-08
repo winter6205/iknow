@@ -21,7 +21,7 @@ GH issue #140（winter6205/iknow，`[wayfinder:grilling]` 工具层重写设计�
 **跨工具契约**：
 
 - **契约 X（截断元数据单一权威）**：工具返回纯数据，不带 `truncated`/`total` 元字段；executor 是唯一权威——自测序列化字符数、自截断、自合成标记、永不信任工具声称字段。防 MCP 第三方伪造面。
-- **契约 Y1（输出纯字符串）**：对齐 OpenHarness（其 wire 边界 `serialize_content_block` 丢弃 metadata）。bash 例外（Y1b 保结构化 code）。
+- **契约 Y1（输出纯字符串，deprecated→#298）**：对齐 OpenHarness（其 wire 边界 `serialize_content_block` 丢弃 metadata）。bash 例外（Y1b 保结构化 code）。**#298 起 Y1「纯字符串」读法被 observability side-channel 取代**——model-facing tool_result 仍为纯字符串（Y1 精神保留），但 handler 可返回 envelope `{ output, meta? }`，executor 拆分后仅 `output` 串行化进 model tool_result，`meta`（典型如 edit_file/write_file 的 `oldContent`/`newContent`）经 `PostToolUseHook.payload` → `TuiToolEvent.payload` → `LiveToolRun` 走观测旁路，永不进模型视野。
 - **symlink**：resolve + containment 本期落地；挂载边界 OS 隔离归 #123。
 
 **工作流语义**：grep/glob 发现 → read_file 精读；大文件永不整体进上下文。
@@ -44,6 +44,7 @@ GH issue #140（winter6205/iknow，`[wayfinder:grilling]` 工具层重写设计�
 - (−) bash 生产路径阻塞于 #123 沙箱（allowlist 仅过渡）；5 条沙箱痕迹清单留 #140 评论区 + #123 已留指针。
 - (−) edit_file/write_file 的 poka-yoke linter 对"合法但不配对"内容（如 markdown 代码块）有误报风险——先应用，真实误报再放宽（记录在案）。
 - (−) 契约 Y1 使模型失去结构化 `total`（"200/347 matches"），靠截断标记 + "re-invoke with narrower input" 引导——OpenHarness 已验证模型可读文本 marker 正确决策。
+- (+→−) 契约 Y1 在 #298 被 observability side-channel 取代：model-facing tool_result 仍纯字符串（Y1 精神保留），但 handler envelope 的 `meta` 字段经独立旁路供 TUI 等观测消费者，模型视野不被结构化字段污染。
 
 **Evidence pointers**:
 

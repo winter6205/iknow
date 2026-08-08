@@ -64,11 +64,36 @@ export interface ToolCall {
  *
  * 不携带 Anthropic 原生编码;由 Model Adapter 负责原生 tool_result 编码。
  */
+/**
+ * ToolExecutionResult `ok` 变体的可选 side-channel (#298):不改模型可见
+ * payload 的前提下,为宿主携带 diff 类的 old/new 内容。仅在有内容时存在;
+ * additive，不破坏既有 `payload` 契约。
+ */
+export interface ToolResultMeta {
+  readonly oldContent?: string;
+  readonly newContent?: string;
+}
+
+/**
+ * #298 handler 可返回的结构化 envelope 形状（T4 side-channel SSOT）：
+ * `{ output: string, meta?: ToolResultMeta }`。Executor 仅取 `output` 进
+ * model-facing tool_result；`meta` 走观测侧信道，不进模型可见 payload。
+ *
+ * 单一权威形状：executor 落址此处（不再在各处内联重写 shape-check），
+ * 类型守卫与取值共用同一接口（#298 review-Low：3 处独立 shape-check 收敛）。
+ */
+export interface ToolOutputEnvelope {
+  readonly output: string;
+  readonly meta?: ToolResultMeta;
+}
+
 export type ToolExecutionResult =
   | {
       readonly kind: "ok";
       readonly toolUseId: string;
       readonly payload: AnthropicContentBlock[];
+      /** 可选 typed envelope(#298):宿主侧消费 diff old/new;模型不可见。 */
+      readonly meta?: ToolResultMeta;
     }
   | {
       readonly kind: "validation_failed";
