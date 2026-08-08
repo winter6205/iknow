@@ -68,7 +68,7 @@ export function Spinner(props: { readonly label?: string }): ReactElement {
  * 保留它让 hint 路径的 useInput 拿到原始字符（filter 在 useInput 内部
  * 用 key.tab 拦截，不依赖 chunk 内的 `\t`）。
  */
-function stripNonPrintable(input: string): string {
+export function stripNonPrintable(input: string): string {
   return [...input]
     .filter((c) => c.charCodeAt(0) >= 32 || c === "\t")
     .filter((c) => c !== "\x7f")

@@ -406,6 +406,15 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   const viewportRowsRef = useRef(viewportRows);
   viewportRowsRef.current = viewportRows;
 
+  // 会话列表视图的视口行数预算：ListView 只渲染「搜索框 + 表头 + 行」，
+  // 底部 notice 盒子（若有）由 app 挂在 ListView 之下，故从终端总行扣
+  // notice 折行行数 + 底部余量，避免列表 + notice 合帧溢出（#268 同类回归）。
+  // 列表视图无输入框 / mode 行 / ContextBar，故只扣 notice 与 headroom。
+  const listViewRows = useMemo(() => {
+    const noticeLines = noticeRenderRows(notice?.lines, cols);
+    return Math.max(5, rows - 2 - noticeLines);
+  }, [rows, notice, cols]);
+
   // 工具事件订阅：T4 (#175) 优先按 tool_use_id 配对入结构化运行状态;
   // 缺 toolUseId 时落回 legacy 字符串行追加(向后兼容)。detail 按 cols 收口
   // （窄终端单行不折，行账不漂移 — tool-summary.ts）。
@@ -1186,6 +1195,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
         <ListView
           entries={listEntries}
           cols={cols}
+          rows={listViewRows}
           onOpen={(i) => void openSessionAt(i)}
           onBack={() => setView("chat")}
         />
