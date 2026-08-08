@@ -156,8 +156,17 @@ async function spawnClient(
   return {
     connection,
     process: child,
+    // vscode-jsonrpc `sendRequest(method, ...args)` 靠实参数目推断参数结构：
+    // 若传 3 个实参（params + token），即便 token 为 undefined，`numberOfParams=2`
+    // 也会把 named params 包成位置数组 `[params, null]` 发出 → tsserver 返回
+    // -32602 "defines parameters by name but received parameters by position"。
+    // token 仅在确实存在时作为第 3 个实参传入。
     sendRequest: (method, params, token) =>
-      connection.sendRequest(method, params, token),
+      connection.sendRequest(
+        method,
+        params,
+        ...(token !== undefined ? [token] : [])
+      ),
     sendNotification: (method, params) =>
       connection.sendNotification(method, params),
     getDiagnostics: (uri: string) => diagStore.get(uri),

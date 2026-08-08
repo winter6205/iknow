@@ -45,10 +45,14 @@ const {
   mockSpawn: vi.fn(),
 }));
 
-vi.mock("vscode-jsonrpc/node", () => ({
-  createMessageConnection: (...args: unknown[]) =>
-    mockCreateConnection(...args),
-}));
+vi.mock("vscode-jsonrpc/node", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("vscode-jsonrpc/node")>();
+  return {
+    ...actual,
+    createMessageConnection: (...args: unknown[]) =>
+      mockCreateConnection(...args),
+  };
+});
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
@@ -59,7 +63,11 @@ vi.mock("node:child_process", async (importOriginal) => {
 });
 
 // 动态导入 —— 必须在 mock 安装之后。
-import { getClient, cancelRequest } from "../../../src/harness/lsp/client.ts";
+import {
+  getClient,
+  cancelRequest,
+  signalToCancellationToken,
+} from "../../../src/harness/lsp/client.ts";
 
 // ── fakeServer + fake child 工厂 ──────────────────────────────────────────────
 
@@ -215,5 +223,73 @@ describe("cancelRequest", () => {
       id: 42,
     });
     expect(killSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ── 5. sendRequest 实参数目（回归 #-32602）──────────────────────────────────
+//
+// 复现：lsp.ts handler 调 `client.sendRequest(method, params, token)`，token 来自
+// `signalToCancellationToken(execCtx.signal).token`（可能为 undefined）。改动前
+// 包装层 `sendRequest: (method, params, token) => connection.sendRequest(method,
+// params, token)` **总是**传 3 个实参 → vscode-jsonrpc `numberOfParams=2` → 把
+// named params 包成位置数组 `[params, null]` 发出 → tsserver 返 -32602。
+// 修复：token 缺席时只传 2 个实参（named params 单参）。
+
+describe("client sendRequest param arity (regression -32602)", () => {
+  function makeParams() {
+    return {
+      textDocument: { uri: "file:///x.ts" },
+      position: { line: 0, character: 0 },
+    };
+  }
+
+  it("forwards 2 args (no token) when token is undefined", async () => {
+    const { server } = makeFakeServer("arity-notoken");
+
+    const client = await getClient(ctx, "/root/arity.ts", { server });
+    expect(client).toBeDefined();
+    if (!client) throw new Error("expected client");
+
+    mockSendRequest.mockReset();
+    mockSendRequest.mockResolvedValue([]);
+
+    await client.sendRequest("textDocument/definition", makeParams());
+
+    // 关键断言：只有 2 个实参（method + params），**没有**第 3 个 token 实参。
+    expect(mockSendRequest).toHaveBeenCalledTimes(1);
+    const call = mockSendRequest.mock.calls[0];
+    expect(call).toHaveLength(2);
+    expect(call[0]).toBe("textDocument/definition");
+    expect(call[1]).toEqual(makeParams());
+  });
+
+  it("forwards 3 args (method, params, token) when token is present", async () => {
+    const { server } = makeFakeServer("arity-token");
+
+    const client = await getClient(ctx, "/root/arity.ts", { server });
+    expect(client).toBeDefined();
+    if (!client) throw new Error("expected client");
+
+    mockSendRequest.mockReset();
+    mockSendRequest.mockResolvedValue([]);
+
+    // 真实 token：signalToCancellationToken 返回的 source.token（Q2/A9 cancel 路径）。
+    const cancel = signalToCancellationToken(new AbortController().signal);
+    try {
+      await client.sendRequest(
+        "textDocument/definition",
+        makeParams(),
+        cancel.token
+      );
+    } finally {
+      cancel.dispose();
+    }
+
+    expect(mockSendRequest).toHaveBeenCalledTimes(1);
+    const call = mockSendRequest.mock.calls[0];
+    expect(call).toHaveLength(3);
+    expect(call[0]).toBe("textDocument/definition");
+    expect(call[1]).toEqual(makeParams());
+    expect(call[2]).toBe(cancel.token);
   });
 });
