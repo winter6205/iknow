@@ -63,10 +63,17 @@ describe("PR #219 渲染漂移回归：scroll fit + 无裸 markdown 泄漏", () 
         { columns: cols }
       );
       const lines = strip(output).replace(/\n+$/, "").split("\n");
+      // 渲染行数 - VP：standalone renderToString 没有父容器高度约束，ink
+      // flexGrow 根在内容稀疏时收缩（= -1）、内容填满时撑满（= 0）。Bug A
+      // headroom 加 1 行 margin → 上界 +1。真实终端下 app 层 reserved 已扣
+      // headroom（app.tsx：viewport = rows - reserved - 1），margin 与窗口
+      // 内容共 viewport 预算，不溢出。
       const overflow = lines.length - VP;
+      expect(overflow).toBeLessThanOrEqual(1);
       const hasRawFence = lines.some((l) => l.trim() === "```ts");
       const hasRawHeading = lines.some((l) => l.startsWith("## "));
-      expect(overflow).toBeLessThanOrEqual(0);
+      expect(hasRawFence).toBe(false);
+      expect(hasRawHeading).toBe(false);
       expect(hasRawFence).toBe(false);
       expect(hasRawHeading).toBe(false);
     }

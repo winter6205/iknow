@@ -263,8 +263,8 @@ describe("ChatView 行级窗口（任务 A 行级：朴素滚动）", () => {
     const plain = stripAnsi(output);
     // 首行（"❯ m-0"）可见
     expect(plain).toContain("m-0");
-    // 行数恰好 1：窗口高 = 1，只渲染首行
-    expect(plain.replace(/\n+$/, "").split("\n").length).toBe(1);
+    // 行数 = 2：顶部 marginTop headroom 1 行 + 窗口 1 行（只渲染首行）
+    expect(plain.replace(/\n+$/, "").split("\n").length).toBe(2);
   });
 
   it("viewportRows=0（无限）：无视口限制，全部消息渲染", async () => {
@@ -649,8 +649,9 @@ describe("ChatView 行级裁剪（#189 回归保护）", () => {
     );
     const plain = stripAnsi(output);
     // ChatView 根 Box flexGrow=1，ink 不折叠 trailing margin（实测
-    // rawLines == ΣtotalRows）→ 严格 parity ±0。
-    expect(plain.split("\n").length).toBe(totalRows);
+    // rawLines == ΣtotalRows）→ 严格 parity。Bug A headroom：marginTop=1
+    // 加 1 行 = totalRows + 1（顶部 headroom 行 + 内容行）。
+    expect(plain.split("\n").length).toBe(totalRows + 1);
   });
 });
 
