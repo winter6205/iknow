@@ -60,6 +60,8 @@ async function main(): Promise<void> {
       },
       chat: { showThinking: false },
       web: { searchUrl: undefined },
+      // IknowEnv.compress 必填字段（build-engine 无条件解引用 env.compress，缺失即 TypeError）。
+      compress: { contextWindow: 200000, thresholdTokens: undefined },
     };
   }
 
