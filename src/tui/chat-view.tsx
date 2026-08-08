@@ -275,11 +275,11 @@ export interface ChatViewProps {
    */
   readonly thinkingExpanded?: boolean;
   /**
-   * 滚动对齐（方案 B + 单行塌缩）：banner 是 row window 的第一段内容（与消息
-   * 同 scroll space）。空会话 = 完整眼 + 顶部分隔；有消息后 = 单行 `◆ iknow`
-   * （app 层 bannerLines 决定，2026-08-08 用户裁定：矮终端完整眼与消息
-   * 放不下同一屏，单行常驻保留 logo、腾出消息区）。输入框 / 状态栏固定在
-   * app 底部不受影响。
+   * 滚动对齐（方案 B + 完整眼常驻）：banner 是 row window 的第一段内容（与消息
+   * 同 scroll space）。完整眼 + 顶部分隔常驻历史，默认锚底看最新消息，
+   * PgUp/Home 上滚可见完整眼（app 层 bannerLines 决定，2026-08-08 用户二次
+   * 裁定「不坍塌，完整历史」；窄终端 cols < BANNER_MIN_COLS 退单行）。
+   * 输入框 / 状态栏固定在 app 底部不受影响。
    */
   readonly bannerLines?: ReadonlyArray<string>;
   /**

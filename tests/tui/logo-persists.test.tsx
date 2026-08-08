@@ -3,7 +3,7 @@
  *
  * 复现用户最早的主诉：「一开始发消息就会把logo给去掉」。
  * 直接对比空会话 / 发一条消息 后 TUI 输出。
- * 2026-08-08 定稿语义：空会话完整眼；有消息后塌成单行 ◆ iknow 常驻。
+ * 2026-08-08 二次裁定语义：完整眼常驻滚动区（不塌单行），发消息后仍可见。
  */
 import { describe, it, expect } from "vitest";
 import { PassThrough } from "node:stream";
@@ -53,7 +53,7 @@ function fakeTty(rows = 24, cols = 80) {
 }
 
 describe("REPRO：发消息后 logo 还在不在？", () => {
-  it("空会话 → 发一条消息 → logo 仍可见（塌成单行 ◆ iknow 常驻）", async () => {
+  it("空会话 → 发一条消息 → logo 仍可见（完整眼常驻滚动区）", async () => {
     const baseDir = await mkdtemp(join(tmpdir(), "logo-repro-"));
     const stdin = fakeTty(30, 80);
     const stdout = fakeTty(30, 80);
@@ -96,7 +96,7 @@ describe("REPRO：发消息后 logo 还在不在？", () => {
         stdin.write(ch);
         await delay(10);
       }
-      // 等 turn 落盘（userMessageEchoed → turnFinished 后 banner 应切到 compact）
+      // 等 turn 落盘（userMessageEchoed → turnFinished；banner 保持完整眼）
       await waitFor(() => bridge.inflight.ids().size === 0, 8000, "turn-done");
       // 等 assistant 答复渲染进 since-window —— 不用固定 delay(150)：全量
       // suite 并行时 CPU 竞争可能拖慢 re-render 帧，内容出现才是真值信号。
@@ -106,26 +106,28 @@ describe("REPRO：发消息后 logo 还在不在？", () => {
         "assistant-in-window"
       );
 
-      // 发消息后：banner 塌成单行 `◆ iknow <version>`（2026-08-08 用户裁定
-      // 「必须做到完整修复」：矮终端下完整眼 ≈15 行与消息放同一滚动区永远
-      // 放不下同一屏，logo 会被顶出屏幕 → 单行常驻保留 logo 标识、把视口
-      // 让给消息区。空会话仍是完整眼（见上方 empty-session 断言）。
+      // 发消息后：完整眼 banner 常驻滚动区（2026-08-08 用户二次裁定
+      // 「不坍塌，完整历史」）——banner 与消息同处一个滚动区，默认锚底，
+      // 矮终端内容超视口时 PgUp/Home 上滚可见完整眼。帧高溢出根因已由
+      // chromeReserveRows 行账修复 + 帧高守卫测试兜底。
       const afterText = strip(out.join("")).slice(beforeSend);
-      const hasShortBanner = afterText.includes("◆ iknow");
       const hasFullBannerTop = afterText.includes("╭◆ iknow");
+      const hasInfoPanel = afterText.includes("Version");
       const hasUserMsg = afterText.includes("hello");
       const hasAssistant = afterText.includes("hi back");
       console.log(
-        `[发消息后] has◆iknow=${hasShortBanner} has╭◆iknow=${hasFullBannerTop} hasHello=${hasUserMsg} hasAssistant=${hasAssistant}`
+        `[发消息后] has╭◆iknow=${hasFullBannerTop} hasVersion=${hasInfoPanel} hasHello=${hasUserMsg} hasAssistant=${hasAssistant}`
       );
 
-      // 核心断言：单行 logo 常驻（不是塌成 0 行），完整眼不再常驻。
-      expect(hasShortBanner, "发消息后单行 ◆ iknow 仍可见（logo 不消失）").toBe(
-        true
-      );
-      expect(hasFullBannerTop, "发消息后完整 banner 顶框塌掉（单行语义）").toBe(
-        false
-      );
+      // 核心断言：完整眼不塌、不消失（logo 常驻历史）。
+      expect(
+        hasFullBannerTop,
+        "发消息后完整 banner 顶框 ╭◆ iknow 仍可见（不塌成单行）"
+      ).toBe(true);
+      expect(
+        hasInfoPanel,
+        "发消息后完整 banner 的 Version/Cwd/Data dir info 栏仍可见"
+      ).toBe(true);
       expect(hasUserMsg).toBe(true);
       expect(hasAssistant).toBe(true);
     } finally {

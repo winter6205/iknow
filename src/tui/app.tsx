@@ -281,24 +281,14 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   const askTick = askBridge.pending() !== undefined;
   useTick(askTick ? 100 : 0);
 
-  // 方案 B + 单行塌缩（2026-08-08 用户裁定「必须做到完整修复」）：
-  //  - 空会话：完整眼 banner + 顶部分隔线；
-  //  - 有消息后：塌成单行 `◆ iknow <version>`——矮终端下完整眼（≈15 行）
-  //    与消息放进同一滚动区永远放不下同一屏，logo 会被顶出屏幕；单行
-  //    常驻保留 logo 标识、把视口让给消息区（2026-08-07 真实 pty 复现定稿
-  //    的语义回归；54e4a8a 的「任何时候完整 banner」在矮终端造成用户
-  //    「进消息后 logo 看不见」的再次反馈）。
-  // 窄终端（cols < BANNER_MIN_COLS）完整眼本来就放不下 → 同样单行。
+  // 方案 B + 完整眼常驻（2026-08-08 用户二次裁定「不坍塌，完整历史」）：
+  // banner 与消息同处一个滚动区——默认锚底看最新消息，PgUp/Home 上滚可见
+  // 完整眼。帧高溢出（曾把 banner 顶出屏幕的根因）已由 chromeReserveRows
+  // 行账修复 + 帧高守卫测试兜底，不再需要塌单行回避。
+  // 窄终端（cols < BANNER_MIN_COLS）完整眼本来就放不下 → 退单行 short。
   // 底部输入框 + 状态栏固定（ChatView 之外）始终在底部。
   const bannerLines = useMemo(() => {
     if (view !== "chat") return [];
-    const sess = sessions[activeKey] ?? initial;
-    if (sess.messages.length > 0) {
-      return renderBanner(
-        { version: VERSION, cwd: props.cwd, dataDir: props.dataDir },
-        { cols, short: true }
-      );
-    }
     const full = renderBanner(
       { version: VERSION, cwd: props.cwd, dataDir: props.dataDir },
       { cols, short: false }
@@ -310,9 +300,9 @@ export function TuiApp(props: TuiAppProps): ReactElement {
         { cols, short: true }
       );
     }
-    // 空会话：完整眼 + 顶部分隔
+    // 完整眼 + 顶部分隔
     return [...full, `\x1b[38;5;244m${"─".repeat(cols)}\x1b[0m`];
-  }, [view, activeKey, sessions, initial, cols, props.cwd, props.dataDir]);
+  }, [view, cols, props.cwd, props.dataDir]);
 
   const viewportRows = useMemo(() => {
     // 固定 chrome 逐行入账（chromeReserveRows SSOT）：输入框 3 行 + mode
