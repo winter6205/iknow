@@ -26,7 +26,10 @@ import {
   createTuiBridge,
   type TuiBridge,
 } from "../../src/tui/hub-bridge.js";
-import { createTuiAskUserBridge, type TuiAskUserBridge } from "../../src/tui/ask-user.js";
+import {
+  createTuiAskUserBridge,
+  type TuiAskUserBridge,
+} from "../../src/tui/ask-user.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.js";
 
 const ANSI_RE = /\x1b\[[0-9;?]*[a-zA-Z]/g;
@@ -248,7 +251,9 @@ describe("#279 项5：输入历史 ↑/↓ 导航", () => {
         .filter((m) => m.role === "user")
         .flatMap((m) =>
           m.content
-            .filter((b): b is { type: "text"; text: string } => b.type === "text")
+            .filter(
+              (b): b is { type: "text"; text: string } => b.type === "text"
+            )
             .map((b) => b.text)
         );
       expect(userTexts).toEqual(["first", "second", "second"]);
@@ -442,7 +447,13 @@ describe("#279 项5：输入历史 ↑/↓ 导航", () => {
         summaryHint: "rm -rf /tmp/x",
       });
       await app.type(" ");
-      await waitFor(() => app.lastFrame().includes("[ask]"), 8000, "ask-line");
+      // #279 项3 合入后权限 ask 走 ModalHost + SelectModal（渲染选项 label
+      // 「本次允许」等），不再有旧 `[ask]` 文本——断言对齐新 modal。
+      await waitFor(
+        () => app.lastFrame().includes("本次允许"),
+        8000,
+        "ask-line"
+      );
 
       // 3) 退格掉触发键空格，y 确认授权（不是对话消息，不得进历史）
       stdin.write("\x7f");
@@ -493,14 +504,22 @@ describe("#279 项5：输入历史 ↑/↓ 导航", () => {
         "t-one-inflight"
       );
       await app.type("dup\r");
-      await waitFor(() => app.lastOutput().includes("r-dup-1"), 8000, "t-dup-1");
+      await waitFor(
+        () => app.lastOutput().includes("r-dup-1"),
+        8000,
+        "t-dup-1"
+      );
       await waitFor(
         () => app.bridge.inflight.ids().size === 0,
         8000,
         "t-dup-1-inflight"
       );
       await app.type("dup\r");
-      await waitFor(() => app.lastOutput().includes("r-dup-2"), 8000, "t-dup-2");
+      await waitFor(
+        () => app.lastOutput().includes("r-dup-2"),
+        8000,
+        "t-dup-2"
+      );
       await waitFor(
         () => app.bridge.inflight.ids().size === 0,
         8000,
@@ -529,7 +548,11 @@ describe("#279 项5：输入历史 ↑/↓ 导航", () => {
         "down-dup"
       );
       stdin.write("\r");
-      await waitFor(() => app.lastOutput().includes("r-dup-3"), 8000, "t-dup-3");
+      await waitFor(
+        () => app.lastOutput().includes("r-dup-3"),
+        8000,
+        "t-dup-3"
+      );
       await waitFor(
         () => app.bridge.inflight.ids().size === 0,
         8000,
