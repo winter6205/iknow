@@ -25,6 +25,14 @@ import {
 
 const TOOL_NAME = "edit_file";
 
+/**
+ * 可选接缝:写盘成功后回调,参数为被修改文件的绝对路径。
+ * 供外层(如 LSP notifier)做失效通知;仅成功路径触发,失败不触发避免误通知。
+ */
+export interface EditFileOpts {
+  readonly onEdit?: (file: string) => void;
+}
+
 const ALLOWED_KEYS = new Set(["path", "old_str", "new_str", "replace_all"]);
 
 interface EditFileInput {
@@ -100,7 +108,10 @@ function replaceOnce(haystack: string, oldStr: string, newStr: string): string {
  *   5. replace_all=false 且 >1 次 → 失败文案`[edit_file] old_str matched N times, provide more context or set replace_all`;
  *   6. 替换(split-join / split+slice)→ 写回 → 返回确认纯字符串。
  */
-export function createEditFileTool(root: string): AciToolDef {
+export function createEditFileTool(
+  root: string,
+  opts?: EditFileOpts
+): AciToolDef {
   const handler = async (input: unknown): Promise<unknown> => {
     const validated = asEditFileInput(input);
     const absPath = await resolveWithinRoot(root, validated.path);
@@ -134,6 +145,10 @@ export function createEditFileTool(root: string): AciToolDef {
       ? content.split(validated.old_str).join(validated.new_str)
       : replaceOnce(content, validated.old_str, validated.new_str);
     await writeFile(absPath, replaced, "utf8");
+
+    // 成功路径接缝:仅在写盘成功后回调。失败路径不触发,避免误通知
+    // (例如 LSP notifier 已 dispose 但我们仍误告其刷新)。
+    opts?.onEdit?.(absPath);
 
     return `[edit_file] replaced ${occurrences} occurrence(s) in ${absPath}`;
   };

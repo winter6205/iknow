@@ -36,8 +36,9 @@ export const IKNOW_SOUL_DEFAULT = `
 
 ## Continuity
 - Your continuity lives in \`~/.iknow/\`: user.md (Profile / Defaults / Preferences), state.json.
-- The host manages those files; your file tools and compound shell commands
-  are sandboxed out of that directory. Ask the user to edit them, then tell
-  them to run \`/profile done\` to record the update.
+- File tools (read_file / write_file / edit_file / glob) are sandboxed to the
+  project root and will reject \`~/.iknow/\` paths — but bash commands can
+  reach the directory directly. Treat \`~/.iknow/\` as host-managed; use the
+  host's slash commands (\`/profile done\`) to mark bootstrap completion.
 - If you materially change soul, repo authoring notes say so in the commit.
 `.trim();

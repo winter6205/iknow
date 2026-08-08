@@ -56,10 +56,21 @@ const EXPECTED_TOOLSET = [
   "memory_recall",
   "memory_save",
   "tool_search",
+  // #251 LSP 工具集 append-only:11→21,10 件在末尾。
+  "lsp_definition",
+  "lsp_references",
+  "lsp_hover",
+  "lsp_document_symbol",
+  "lsp_workspace_symbol",
+  "lsp_go_to_implementation",
+  "lsp_prepare_call_hierarchy",
+  "lsp_incoming_calls",
+  "lsp_outgoing_calls",
+  "lsp_diagnostics",
 ];
 
-describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(11 件)", () => {
-  it("装配出完整 11 件工具(含 web_fetch + web_search + memory_recall + memory_save + tool_search)", () => {
+describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(21 件)", () => {
+  it("装配出完整 21 件工具(含 web_fetch + web_search + memory_recall + memory_save + tool_search + 10 LSP)", () => {
     const deps = buildTuiDeps(makeBundle(), { askUser: createNoAskUser() });
     const names = deps.registry
       .list()

@@ -98,6 +98,58 @@ describe("banner + scroll 修复回归（2026-08-07）", () => {
     }
   }, 15_000);
 
+  // Bug A 回归（2026-08-08）：用户反馈「进消息后最顶 iknow 图标被截断，
+  // TUI 对终端顶部没对齐」——ChatView 顶层 Box 加 marginTop=1 headroom，banner
+  // 顶端从终端行 1 下移到行 2，避免被标题栏/字体边缘裁切。
+  it("Bug A：24 行终端 chat 视图顶端留 1 行 headroom（banner ╭◆ iknow 不在终端行 1）", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "iknow-banner-"));
+    const stdin = fakeTty(24, 80);
+    const stdout = fakeTty(24, 80);
+    const out: string[] = [];
+    stdout.on("data", (c) => out.push(String(c)));
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      deps: makeDeps([]),
+      inflight: createInflightRegistry(),
+    });
+    const instance = render(
+      <TuiApp
+        bridge={bridge}
+        askBridge={createTuiAskUserBridge()}
+        toolEventSink={createToolEventSink()}
+        cwd="/tmp/proj"
+        dataDir={baseDir}
+      />,
+      { stdout, stdin, exitOnCtrlC: false, patchConsole: false }
+    );
+    try {
+      // 等 banner ╭◆ iknow 渲染完成。
+      await waitFor(
+        () => strip(out.join("")).includes("╭◆ iknow"),
+        5000,
+        "banner-rendered"
+      );
+      const plain = strip(out.join(""));
+      const lines = plain.replace(/\n+$/, "").split("\n");
+      // 终端行 1 必须是 headroom 空行（marginTop 占位），不是 banner 顶。
+      // banner 顶 ╭◆ iknow 出现在行 2 及之后 → 避免行 1 被标题栏/字体边缘裁。
+      expect(lines[0], "终端行 1 是 headroom（不含 ╭◆ iknow）").not.toContain(
+        "╭◆ iknow"
+      );
+      // 整段里 banner 顶行仍存在（向下移动而非消失）
+      expect(plain).toContain("╭◆ iknow");
+      // headroom 行 + banner 顶至少隔 1 行（行 1 空 / 行 2 banner 顶）
+      const bannerLineIdx = lines.findIndex((l) => l.includes("╭◆ iknow"));
+      expect(
+        bannerLineIdx,
+        "banner 顶出现在 headroom 之后"
+      ).toBeGreaterThanOrEqual(1);
+    } finally {
+      instance.unmount();
+      await rm(baseDir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   it("24 行终端 + initialSession 长会话：PgUp 窗口上移 → 顶部老内容进入；End 回到底", async () => {
     const baseDir = await mkdtemp(join(tmpdir(), "iknow-banner-"));
     const stdin = fakeTty(24, 80);
@@ -136,11 +188,9 @@ describe("banner + scroll 修复回归（2026-08-07）", () => {
     );
     try {
       await delay(400);
-      // 等 mount + initialSession 渲染完。STICKY banner：banner ≈15（resume 后
-      // banner = 完整眼 15 行），消息段 messageRows = user(2) + assistant(40 + 1
-      // = 41) = 43。viewportRows = 24 - reserved(4) = 20 → messageViewport =
-      // 20 - 15 = 5。maxScroll = 43 - 5 = 38。scroll=0：消息窗口 [38, 43) 贴底，
-      // 最新末段「内容第40行」可见（banner 恒见 15 行，不进窗口数学）。
+      // 等 mount + initialSession 渲染完。contentRows = banner(15~16) + user(2) +
+      // assistant(40 + 1 = 41) ≈ 58~59。viewportRows = 24 - reserved(4) = 20。
+      // maxScroll ≈ 38。scroll=0：窗口 [~38, 58)，最新末段「内容第40行」可见。
       // 用 assistant 内容行作窗口 sentinel（「内容第40行」只出现在 assistant
       // 内容里，状态栏会话摘要 = user 文本，不冲突）。
       await waitFor(

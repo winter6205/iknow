@@ -154,8 +154,21 @@ describe("TuiApp 端到端（tracer bullet）", () => {
         return () => strip(out.join("").slice(anchor));
       },
       lastFrame: (): string =>
-        // 兜底拼接最后两个 chunk：跨 chunk 渲染安全；单 chunk 渲染时后者为空。
-        strip(out.slice(-2).join("")),
+        // 最近一次 ink 写入的「可视」chunk — 回退规则:从后往前找第一个
+        // strip(去 ANSI)后非空的 chunk。**不**按原始字节长度判断:ink
+        // 常发纯 ANSI 控制序列(cursor / clear-line)作为末片,raw 长度
+        // > 0 但 strip 后为空,被误当作「最后帧」,idle 断言因此读到
+        // 空串。strip 后非空才是真正的可视内容帧。
+        strip(
+          (() => {
+            for (let i = out.length - 1; i >= 0; i--) {
+              const raw = out[i] ?? "";
+              const visible = strip(raw);
+              if (visible.length > 0) return raw;
+            }
+            return "";
+          })()
+        ),
       type: async (text: string): Promise<void> => {
         // ink 输入解析按 chunk 处理；逐字符写入并让出事件循环，贴近真实
         // 键盘逐键节奏（整块写入时 chunk 尾部 \r 不被解析为 return，实测确认）。
@@ -373,18 +386,32 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       );
       // 等 assistant 答复渲染（idle 帧已落地：turnFinished + 消息渲染完成）
       await waitFor(() => app.lastOutput().includes("hi"), 8000, "answer-in");
-      await waitFor(() => app.lastFrame().includes("hi"), 8000, "idle-frame");
+      // 锚定 settled idle 帧。原 `waitFor(lastFrame().includes("hi"))`
+      // 在 running 帧（含键入 "hi"）即过 → 之后断言误捕「运行中…」瞬态。
+      // 改用:最近一次非空 ink 写入必须同时含 ctx 带且不含运行态指示,
+      // 此条件只在真正的 idle 帧上成立。Condition 取全部底部 not.toContain
+      // + 含 ctx,实现 idle 帧的多重指纹。
+      await waitFor(
+        () => {
+          const frame = app.lastFrame();
+          if (!frame.includes("ctx ")) return false;
+          if (frame.includes("运行中")) return false;
+          if (frame.includes("空闲")) return false;
+          if (frame.includes(`v${VERSION}`)) return false;
+          if (frame.includes("后台运行中")) return false;
+          if (/会话\s+\d+/.test(frame)) return false;
+          if (frame.includes("新会话")) return false;
+          return true;
+        },
+        8000,
+        "idle-frame-settled"
+      );
       const out = app.lastFrame();
       // 移除：空闲 / 运行中 / 后台等运行态（不在底部显示）
       expect(out).not.toContain("空闲");
-      expect(out).not.toContain("运行中");
-      // 移除：版本号 vVERSION（banner 已有）
       expect(out).not.toContain(`v${VERSION}`);
-      // 移除：会话计数段（不再出现 `会话 N` 拼接）
       expect(out).not.toMatch(/会话\s+\d+/);
-      // 移除：主界面摘要（新会话兜底字样）
       expect(out).not.toContain("新会话");
-      // 无 bg 会话时，「后台运行中」bg 标记不显示
       expect(out).not.toContain("后台运行中");
       // ContextBar 始终显示（首轮已完成 → 1%）
       expect(out).toContain("ctx ");
@@ -726,12 +753,15 @@ describe("TuiApp 端到端（tracer bullet）", () => {
       stdin.write("\r");
       // openSessionAt 必须重置 scroll → A 的 scroll=0 窗口贴 A 内容底显示
       // 末尾若干行（"aA 行16…"）。STICKY banner 后消息窗口预算 = viewport -
-      // bannerRows（更小），user 消息可能被切出窗口；只需断言 aA 行16 可见
-      // 即证明 scroll 已重置，B 的上移状态不会残留在 A 上。
+      // STICKY banner 已恢复方案 B：banner + 消息共 row window，viewport=27
+      // 完整看见 A 内容（19 行）+ 末行 aA 行16 可见。
+      // openSessionAt 必须重置 scroll → A 的 scroll=0 窗口 [8,34) 露出 aA 末尾
+      // 行（"aA 行16…"）。若残留 B 的 scroll=13，窗口 [0,21) 只露 aA 前 4 行，
+      // 末尾行会被裁掉 → 断言 aA 末行可见即证明 scroll 已重置。
       await waitFor(
         () => {
           const after = openFrames();
-          return after.includes("aA 行16内容占位");
+          return after.includes("aA 行16内容占位") && after.includes("msg-A");
         },
         8000,
         "A-active-and-scroll-reset"
@@ -963,24 +993,21 @@ describe("TuiApp 端到端（tracer bullet）", () => {
         "wheel-bottom-visible"
       );
 
-      // 滚轮上滚 ×3（每格 +3 行）→ 窗口上移，末段被裁。
+      // 滚轮上滚 ×1 → clamp 到顶（用户 2026-08-08：滚轮第3次才有反应 →
+      // 改为 wheel-up/wheel-down 即 clamp 到顶/底，单格即决断），末段被裁。
       const wheelUpA = out.join("").length;
-      for (let i = 0; i < 3; i++) {
-        stdin.write("\x1b[<64;10;5M");
-        await delay(50);
-      }
+      stdin.write("\x1b[<64;10;5M");
+      await delay(150);
       await waitFor(
         () => !strip(out.join("").slice(wheelUpA)).includes("WHEEL 内容第24行"),
         8000,
         "wheel-up-clips-tail"
       );
 
-      // 滚轮下滚 ×5 → 回到底，末段恢复。
+      // 滚轮下滚 ×1 → clamp 回底（auto-follow），末段恢复。
       const wheelDownA = out.join("").length;
-      for (let i = 0; i < 5; i++) {
-        stdin.write("\x1b[<65;10;5M");
-        await delay(50);
-      }
+      stdin.write("\x1b[<65;10;5M");
+      await delay(150);
       await waitFor(
         () =>
           strip(out.join("").slice(wheelDownA)).includes("WHEEL 内容第24行"),

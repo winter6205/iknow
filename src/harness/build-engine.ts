@@ -23,7 +23,9 @@ import {
 } from "./index.js";
 import { createAciExecutor } from "./aci/index.js";
 import { createPermissionPolicy } from "./permission/policy.js";
+import type { PermissionModeContext } from "./permission/modes.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
+import { createLspNotifier } from "./lsp/notifier.js";
 import type { Registry } from "./tools/types.js";
 import { homedir } from "node:os";
 import type { AskUser } from "./permission/types.js";
@@ -53,6 +55,9 @@ export type BuildEngineOpts = {
    *  to re-confirm the same tool each turn. Memory-only (no disk persistence);
    *  cleared when the server restarts. */
   readonly session?: import("./permission/types.js").SessionGrantsPolicySource;
+  /** W2: permission mode context (default / plan / full_auto). REPL slash
+   *  command flips this in place without rebuilding the engine. */
+  readonly permissionMode?: PermissionModeContext;
 };
 
 export type BuiltEngine = {
@@ -125,16 +130,26 @@ export async function buildHarnessEngine(
   // 件,含 memory_recall + memory_save);disabled(ask)时不传 memoryDir(reg.inner 8
   // 件)。registry / executor / catalog 因此三方一致,不再手工过滤(SC9 保留
   // `memoryEnabled ? ... : undefined` 形态)。
+  // #251 LSP 联动缝:edit_file 写盘成功后由装配层注入 lspNotifier.invalidate
+  // 作为 registry 的 onEdit 回调(notifier 内部 fire-and-forget + 失败降级,
+  // 详见 src/harness/lsp/notifier.ts)。SSOT:LspCtx.directory 必须等于
+  // sandboxRoot(LS 工具的 NearestRoot 上界 stop 与 fs 软沙箱同根语义),
+  // 否则两者分叉会让同一边界出现两个值。
+  const lspCtx = { directory: sandboxRoot };
+  const lspNotifier = createLspNotifier(lspCtx);
   const reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
     ...(memoryEnabled ? { memoryDir } : undefined),
+    onEdit: (file) => lspNotifier.invalidate(file),
   });
   const baseExecutor = createExecutor(reg.inner);
   // 5-step permission middleware: 危险命令由硬墙无条件拦截(#122)。
   // `createAciExecutor` 内部已装配 permission-executor,不要再外包一层。
   const policy = createPermissionPolicy({
     ...(opts.session ? { session: opts.session } : {}),
+    // W2: mode context — REPL toggles this via /permissions; absent → default.
+    ...(opts.permissionMode ? { mode: opts.permissionMode } : {}),
   });
   const executor = createAciExecutor({
     inner: baseExecutor,

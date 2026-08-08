@@ -40,6 +40,17 @@ const EXPECTED_TOOLS = [
   "memory_recall",
   "memory_save",
   "tool_search",
+  // #251 LSP 工具集 append-only:11→21,10 件在末尾。
+  "lsp_definition",
+  "lsp_references",
+  "lsp_hover",
+  "lsp_document_symbol",
+  "lsp_workspace_symbol",
+  "lsp_go_to_implementation",
+  "lsp_prepare_call_hierarchy",
+  "lsp_incoming_calls",
+  "lsp_outgoing_calls",
+  "lsp_diagnostics",
 ];
 
 let baseDir: string;
