@@ -99,9 +99,8 @@ describe("output mask wiring (SC20)", () => {
   it("jsonl trace writer masks secret values in serialized records", () => {
     const scratch = mkdtempSync(join(tmpdir(), "sc20-mask-"));
     try {
-      const traceFile = join(scratch, "trace.jsonl");
       const trace = createJsonlTraceService({
-        filePath: traceFile,
+        filePath: scratch,
         conversationId: "conv-mask-1",
       });
       // recordToolCall is the carrier most likely to embed tool payloads
@@ -118,6 +117,7 @@ describe("output mask wiring (SC20)", () => {
         startedAt: 0,
         durationMs: 1,
       });
+      const traceFile = join(scratch, "conv-mask-1.jsonl");
       assert.ok(existsSync(traceFile));
       const content = readFileSync(traceFile, "utf8");
       assert.ok(

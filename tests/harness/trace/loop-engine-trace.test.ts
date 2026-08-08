@@ -107,7 +107,6 @@ describe("T4 criterion 5: byte-level consistency", () => {
 describe("T4 criterion 8/11: JsonlTraceService integration", () => {
   it("writes llm, tool, turn records in order with parent_llm_call_id chain", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-t4-"));
-    const traceFile = join(tmpDir, "trace.jsonl");
     const echo = createStubTool({
       name: "echo",
       inputSchema: {
@@ -134,7 +133,7 @@ describe("T4 criterion 8/11: JsonlTraceService integration", () => {
       ],
     });
     const trace = createJsonlTraceService({
-      filePath: traceFile,
+      filePath: tmpDir,
       conversationId: "test-conv-1",
     });
     const { result } = await run("go", {
@@ -146,7 +145,7 @@ describe("T4 criterion 8/11: JsonlTraceService integration", () => {
     });
     assert.equal(result.stopReason, "completed");
     assert.equal(result.turnCount, 2);
-    const lines = parseJsonl(traceFile);
+    const lines = parseJsonl(join(tmpDir, "test-conv-1.jsonl"));
     assert.equal(lines.length, 5);
     const types = lines.map((l) => l["record_type"]);
     assert.deepEqual(types, [
@@ -177,7 +176,6 @@ describe("T4 criterion 8/11: JsonlTraceService integration", () => {
 
   it("pure-text run: writes llm and turn only", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-t4-"));
-    const traceFile = join(tmpDir, "trace.jsonl");
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
@@ -191,7 +189,7 @@ describe("T4 criterion 8/11: JsonlTraceService integration", () => {
       ],
     });
     const trace = createJsonlTraceService({
-      filePath: traceFile,
+      filePath: tmpDir,
       conversationId: "test-conv-2",
     });
     await run("hello", {
@@ -201,7 +199,7 @@ describe("T4 criterion 8/11: JsonlTraceService integration", () => {
       maxTurns: 5,
       trace,
     });
-    const lines = parseJsonl(traceFile);
+    const lines = parseJsonl(join(tmpDir, "test-conv-2.jsonl"));
     assert.equal(lines.length, 2);
     assert.equal(lines[0]!["record_type"], "llm_call");
     assert.equal(lines[1]!["record_type"], "turn");
@@ -213,7 +211,6 @@ describe("T4 criterion 8/11: JsonlTraceService integration", () => {
 describe("T4 criterion 11: recordTurn writes at step end", () => {
   it("multi-turn run: each turn record precedes the next turn llm record", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-t4-"));
-    const traceFile = join(tmpDir, "trace.jsonl");
     const echo = createStubTool({
       name: "echo",
       inputSchema: {
@@ -244,7 +241,7 @@ describe("T4 criterion 11: recordTurn writes at step end", () => {
       ],
     });
     const trace = createJsonlTraceService({
-      filePath: traceFile,
+      filePath: tmpDir,
       conversationId: "test-conv-3",
     });
     await run("go", {
@@ -254,7 +251,7 @@ describe("T4 criterion 11: recordTurn writes at step end", () => {
       maxTurns: 5,
       trace,
     });
-    const lines = parseJsonl(traceFile);
+    const lines = parseJsonl(join(tmpDir, "test-conv-3.jsonl"));
     assert.equal(lines.length, 8);
     const types = lines.map((l) => l["record_type"]);
     assert.deepEqual(types, [
@@ -348,7 +345,6 @@ describe("T4 criterion 11/14: recordLlmCall returns undefined", () => {
 describe("T4 criterion 5/19: error paths", () => {
   it("cancelled mid-model: recordLlmCall and recordTurn have status=error, error.type=cancelled", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-t4-"));
-    const traceFile = join(tmpDir, "trace.jsonl");
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
@@ -363,7 +359,7 @@ describe("T4 criterion 5/19: error paths", () => {
       delayMs: 200,
     });
     const trace = createJsonlTraceService({
-      filePath: traceFile,
+      filePath: tmpDir,
       conversationId: "test-conv-cancel",
     });
     const controller = new AbortController();
@@ -381,7 +377,7 @@ describe("T4 criterion 5/19: error paths", () => {
     controller.abort();
     const { result } = await p;
     assert.equal(result.stopReason, "cancelled");
-    const lines = parseJsonl(traceFile);
+    const lines = parseJsonl(join(tmpDir, "test-conv-cancel.jsonl"));
     assert.equal(lines.length, 2);
     const llmRecord = lines[0]!;
     const turnRecord = lines[1]!;
@@ -399,7 +395,6 @@ describe("T4 criterion 5/19: error paths", () => {
 
   it("timeout mid-model: recordLlmCall and recordTurn have status=error, error.type=timeout", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-t4-"));
-    const traceFile = join(tmpDir, "trace.jsonl");
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
@@ -414,7 +409,7 @@ describe("T4 criterion 5/19: error paths", () => {
       delayMs: 200,
     });
     const trace = createJsonlTraceService({
-      filePath: traceFile,
+      filePath: tmpDir,
       conversationId: "test-conv-timeout",
     });
     const { result } = await run("x", {
@@ -426,7 +421,7 @@ describe("T4 criterion 5/19: error paths", () => {
       trace,
     });
     assert.equal(result.stopReason, "timeout");
-    const lines = parseJsonl(traceFile);
+    const lines = parseJsonl(join(tmpDir, "test-conv-timeout.jsonl"));
     // plan T4 / ADR-0011:异常停后跑一轮 best-effort 收尾摘要,usage 照落
     // 一条独立的 status=ok llm_call(stub 无 usage → 不抄 *_tokens,Postel)。
     assert.equal(lines.length, 3);
@@ -443,7 +438,6 @@ describe("T4 criterion 5/19: error paths", () => {
 describe("T3 (#160): token fields — ok-branch projection vs error-branch absence", () => {
   it("ok branch with usage: llm_call JSONL row carries snake_case *_tokens keys", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-t3-ok-"));
-    const traceFile = join(tmpDir, "trace.jsonl");
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
@@ -464,7 +458,7 @@ describe("T3 (#160): token fields — ok-branch projection vs error-branch absen
       ],
     });
     const trace = createJsonlTraceService({
-      filePath: traceFile,
+      filePath: tmpDir,
       conversationId: "test-conv-t3-ok",
     });
     await run("hello", {
@@ -474,7 +468,7 @@ describe("T3 (#160): token fields — ok-branch projection vs error-branch absen
       maxTurns: 5,
       trace,
     });
-    const lines = parseJsonl(traceFile);
+    const lines = parseJsonl(join(tmpDir, "test-conv-t3-ok.jsonl"));
     assert.equal(lines.length, 2);
     const llmRecord = lines[0]!;
     assert.equal(llmRecord["record_type"], "llm_call");
@@ -491,7 +485,6 @@ describe("T3 (#160): token fields — ok-branch projection vs error-branch absen
 
   it("error branch (cancelled): llm_call JSONL row carries NO *_tokens keys (Postel)", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-t3-cancel-"));
-    const traceFile = join(tmpDir, "trace.jsonl");
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
@@ -514,7 +507,7 @@ describe("T3 (#160): token fields — ok-branch projection vs error-branch absen
       delayMs: 200,
     });
     const trace = createJsonlTraceService({
-      filePath: traceFile,
+      filePath: tmpDir,
       conversationId: "test-conv-t3-cancel",
     });
     const controller = new AbortController();
@@ -532,7 +525,7 @@ describe("T3 (#160): token fields — ok-branch projection vs error-branch absen
     controller.abort();
     const { result } = await p;
     assert.equal(result.stopReason, "cancelled");
-    const lines = parseJsonl(traceFile);
+    const lines = parseJsonl(join(tmpDir, "test-conv-t3-cancel.jsonl"));
     assert.equal(lines.length, 2);
     const llmRecord = lines[0]!;
     assert.equal(llmRecord["record_type"], "llm_call");

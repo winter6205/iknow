@@ -21,6 +21,8 @@ import type {
   LlmCallRecord,
   ToolCallRecord,
   TurnRecord,
+  SessionRecord,
+  SandboxCmdRecord,
 } from "../../../src/harness/trace/types.ts";
 
 const SAMPLE_LLM: LlmCallRecord = {
@@ -56,6 +58,25 @@ const SAMPLE_TURN: TurnRecord = {
   status: "ok",
 };
 
+const SAMPLE_SESSION: SessionRecord = {
+  startedAt: "2026-07-31T00:00:00.000Z",
+  endedAt: "2026-07-31T00:01:00.000Z",
+  durationMs: 60000,
+  agentVersion: "0.20.0",
+  status: "ok",
+};
+
+const SAMPLE_CMD: SandboxCmdRecord = {
+  parentTurnId: "turn-1",
+  command: "ls -la",
+  exitCode: 0,
+  stdoutCaptured: true,
+  startedAt: "2026-07-31T00:00:00.000Z",
+  endedAt: "2026-07-31T00:00:00.100Z",
+  durationMs: 100,
+  status: "ok",
+};
+
 describe("createNoopTraceService", () => {
   const consoleSpies = [
     vi.spyOn(console, "log").mockImplementation(() => {}),
@@ -68,14 +89,18 @@ describe("createNoopTraceService", () => {
     for (const spy of consoleSpies) spy.mockClear();
   });
 
-  it("returns a TraceService with exactly 3 public methods", () => {
+  it("returns a TraceService with exactly 5 public methods", () => {
     const svc = createNoopTraceService();
     expect(typeof svc.recordLlmCall).toBe("function");
     expect(typeof svc.recordToolCall).toBe("function");
     expect(typeof svc.recordTurn).toBe("function");
+    expect(typeof svc.recordSession).toBe("function");
+    expect(typeof svc.recordSandboxCmd).toBe("function");
     const ownKeys = Object.keys(svc).sort();
     assert.deepEqual(ownKeys, [
       "recordLlmCall",
+      "recordSandboxCmd",
+      "recordSession",
       "recordToolCall",
       "recordTurn",
     ]);
@@ -107,6 +132,8 @@ describe("createNoopTraceService", () => {
       await svc.recordLlmCall(SAMPLE_LLM);
       await svc.recordToolCall(SAMPLE_TOOL);
       await svc.recordTurn(SAMPLE_TURN);
+      await svc.recordSession(SAMPLE_SESSION);
+      await svc.recordSandboxCmd(SAMPLE_CMD);
       const after = new Set(readdirSync(scratch));
       assert.deepEqual(
         [...after].sort(),

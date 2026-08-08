@@ -26,14 +26,16 @@ import { assistantResult } from "../cli/_fixtures.ts";
 
 let baseDir: string;
 let store: SessionStore;
-let tracePath: string;
+let traceDir: string;
+let convId: string;
 
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-hub-violation-"));
   // Reference the namespaced dir so the store is rooted under baseDir.
   resolveProjectSessionDir(baseDir, process.cwd());
   store = new SessionStore(baseDir);
-  tracePath = join(baseDir, "violation-trace.jsonl");
+  // T2 每会话独立文件: traceOut 是目录, violation 写 <traceDir>/<convId>.jsonl。
+  traceDir = baseDir;
 });
 
 afterAll(async () => {
@@ -77,18 +79,20 @@ describe("SessionHub violation kill (serve entry)", () => {
       const hub = new SessionHub({
         store,
         deps: makeViolationDeps(),
-        traceOut: tracePath,
+        traceOut: traceDir,
       });
       const { session } = await hub.createSession();
+      convId = session.conversation_id;
       const res = await hub.postMessage({
-        conversationId: session.conversation_id,
+        conversationId: convId,
         text: "do something dangerous",
       });
       // The kill must propagate protocolError as the stop reason (OQ4 shape).
       assert.equal(res.turn.answer.stopReason, "protocolError");
       // Serve must never kill the process: exitCode stays 0.
       assert.equal(process.exitCode, 0);
-      // The violation event is written to the JSONL trace.
+      // The violation event is written to the per-session JSONL trace.
+      const tracePath = join(traceDir, `${convId}.jsonl`);
       assert.equal(existsSync(tracePath), true);
       const raw = await readFile(tracePath, "utf8");
       const lines = raw

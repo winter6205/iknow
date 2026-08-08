@@ -103,18 +103,17 @@ describe("ask path: trace service injected into harness", () => {
     if (scratch) rmSync(scratch, { recursive: true, force: true });
   });
 
-  it("runHarness with JsonlTraceService writes trace.jsonl (pure-text turn)", async () => {
+  it("runHarness with JsonlTraceService writes <convId>.jsonl (pure-text turn)", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-t5-ask-"));
-    const traceFile = join(scratch, "trace.jsonl");
+    const trace = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "ask-conv-1",
+    });
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
     const model = createStubModel({
       responses: [assistantResult({ texts: ["hello"] })],
-    });
-    const trace = createJsonlTraceService({
-      filePath: traceFile,
-      conversationId: "ask-conv-1",
     });
     const { result } = await run("test question", {
       adapter: model,
@@ -125,7 +124,8 @@ describe("ask path: trace service injected into harness", () => {
     });
     assert.equal(result.stopReason, "completed");
     assert.equal(result.turnCount, 1);
-    assert.ok(existsSync(traceFile), "trace.jsonl must exist after run");
+    const traceFile = join(scratch, "ask-conv-1.jsonl");
+    assert.ok(existsSync(traceFile), "<convId>.jsonl must exist after run");
     const content = readFileSync(traceFile, "utf8");
     const lines = content.split("\n").filter((l) => l.trim().length > 0);
     assert.ok(lines.length >= 2, "expected >=2 records (llm + turn)");
@@ -162,9 +162,8 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
     listening = undefined;
   });
 
-  it("SessionHub with traceOut writes trace.jsonl on postMessage with session conversation_id", async () => {
+  it("SessionHub with traceOut writes <convId>.jsonl on postMessage with session conversation_id", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-t5-hub-"));
-    const traceFile = join(scratch, "trace.jsonl");
     const store = new SessionStore(scratch);
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
@@ -175,7 +174,7 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
     const hub = new SessionHub({
       store,
       deps: { adapter: model, executor: exec, registry: reg, maxTurns: 5 },
-      traceOut: traceFile,
+      traceOut: scratch,
     });
 
     const created = await hub.createSession();
@@ -184,9 +183,10 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
 
     await hub.postMessage({ conversationId: convId, text: "test query" });
 
+    const traceFile = join(scratch, `${convId}.jsonl`);
     assert.ok(
       existsSync(traceFile),
-      "trace.jsonl must exist after postMessage"
+      "<convId>.jsonl must exist after postMessage"
     );
     const content = readFileSync(traceFile, "utf8");
     const lines = content.split("\n").filter((l) => l.trim().length > 0);
@@ -226,11 +226,11 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
 
   it("startSessionServe accepts traceOut option (type + passthrough)", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-t5-serve-"));
-    const traceFile = join(scratch, "trace.jsonl");
+    const traceDir = scratch;
     const out = await startSessionServe({
       port: 0,
       dataDir: scratch,
-      traceOut: traceFile,
+      traceOut: traceDir,
       hubOptions: { askUser: createNoAskUser() },
     });
     listening = out.listening;
@@ -240,7 +240,7 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
 
   it("postMessage creates a NEW trace instance per session (not cached in deps)", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-t5-multi-"));
-    const traceFile = join(scratch, "trace.jsonl");
+    const traceDir = scratch;
     const store = new SessionStore(scratch);
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
@@ -254,7 +254,7 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
     const hub = new SessionHub({
       store,
       deps: { adapter: model, executor: exec, registry: reg, maxTurns: 5 },
-      traceOut: traceFile,
+      traceOut: traceDir,
     });
 
     const s1 = await hub.createSession();
@@ -274,20 +274,23 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
       text: "q2",
     });
 
-    const content = readFileSync(traceFile, "utf8");
-    const lines = content.split("\n").filter((l) => l.trim().length > 0);
-    assert.ok(lines.length >= 4, "both sessions appended to the same file");
-
-    const ids = new Set([
+    const ids = [
       s1.session.conversation_id,
       s2.session.conversation_id,
-    ]);
-    for (const line of lines) {
-      const rec = JSON.parse(line) as Record<string, unknown>;
-      assert.ok(
-        ids.has(rec["conversation_id"] as string),
-        "conversation_id must belong to one of the two sessions"
-      );
-    }
+    ];
+    // T2 每会话独立文件: 每个 session 各自一个 <convId>.jsonl, 不共写单文件。
+    const total = ids.reduce((acc, id) => {
+      const file = join(traceDir, `${id}.jsonl`);
+      assert.equal(existsSync(file), true, `session file must exist: ${file}`);
+      const content = readFileSync(file, "utf8");
+      const lines = content.split("\n").filter((l) => l.trim().length > 0);
+      assert.ok(lines.length >= 2, `expected >=2 records in ${file}`);
+      for (const line of lines) {
+        const rec = JSON.parse(line) as Record<string, unknown>;
+        assert.equal(rec["conversation_id"], id, "file content belongs to its session");
+      }
+      return acc + lines.length;
+    }, 0);
+    assert.ok(total >= 4, "two sessions across two files");
   });
 });
