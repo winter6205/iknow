@@ -155,7 +155,8 @@ export interface TracesResponse {
   readonly truncated: boolean;
 }
 
-export type TraceRecordType = "llm_call" | "tool_call" | "turn" | "violation";
+export type TraceRecordType =
+  "llm_call" | "tool_call" | "turn" | "violation" | "session" | "sandbox_cmd";
 
 export type TraceFieldType =
   "string" | "number" | "boolean" | "enum" | "datetime";

@@ -18,5 +18,11 @@ export function createNoopTraceService(): TraceService {
     async recordTurn(_record) {
       return undefined;
     },
+    async recordSession(_record) {
+      return undefined;
+    },
+    async recordSandboxCmd(_record) {
+      return undefined;
+    },
   };
 }

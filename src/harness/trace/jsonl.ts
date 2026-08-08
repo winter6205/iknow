@@ -21,6 +21,8 @@ import type {
   LlmCallRecord,
   ToolCallRecord,
   TurnRecord,
+  SessionRecord,
+  SandboxCmdRecord,
 } from "./types.js";
 
 export interface JsonlTraceOptions {
@@ -139,6 +141,42 @@ export function createJsonlTraceService(
         conversation_id: conversationId,
         record_type: "turn",
         turn_id: id,
+        ...toSnakeCaseRecord(record),
+      };
+      try {
+        writeLine(line);
+        return id;
+      } catch (err) {
+        warnOnce(err);
+        return undefined;
+      }
+    },
+
+    async recordSession(record: SessionRecord): Promise<string | undefined> {
+      const id = randomUUID();
+      const line: Record<string, unknown> = {
+        conversation_id: conversationId,
+        record_type: "session",
+        session_id: id,
+        ...toSnakeCaseRecord(record),
+      };
+      try {
+        writeLine(line);
+        return id;
+      } catch (err) {
+        warnOnce(err);
+        return undefined;
+      }
+    },
+
+    async recordSandboxCmd(
+      record: SandboxCmdRecord
+    ): Promise<string | undefined> {
+      const id = randomUUID();
+      const line: Record<string, unknown> = {
+        conversation_id: conversationId,
+        record_type: "sandbox_cmd",
+        sandbox_cmd_id: id,
         ...toSnakeCaseRecord(record),
       };
       try {

@@ -11,13 +11,16 @@
  * the per-field level via TRACE_FIELD_DEFS in fields.ts.
  */
 
-export type TraceRecordType = "llm_call" | "tool_call" | "turn" | "violation";
+export type TraceRecordType =
+  "llm_call" | "tool_call" | "turn" | "violation" | "session" | "sandbox_cmd";
 
 export const TRACE_RECORD_TYPES: ReadonlyArray<TraceRecordType> = [
   "llm_call",
   "tool_call",
   "turn",
   "violation",
+  "session",
+  "sandbox_cmd",
 ];
 
 /** Raw JSONL row, snake_case keys preserved. Read-only to discourage mutation. */
