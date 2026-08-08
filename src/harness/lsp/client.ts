@@ -13,6 +13,7 @@
  * `connection.dispose()`，仅释放连接，不涉子进程信号）。
  */
 import { pathToFileURL } from "node:url";
+import { readFile } from "node:fs/promises";
 import type { ChildProcess } from "node:child_process";
 
 import {
@@ -44,6 +45,12 @@ export interface LspClient {
   ): Promise<unknown>;
   /** JSON-RPC notification：透传 method/params。 */
   sendNotification(method: string, params: unknown): Promise<void>;
+  /**
+   * 幂等打开文件（textDocument/didOpen）：tsserver 对未打开文件不建 project，
+   * 符号类操作全返空。同一文件重复调用只发一次 didOpen（per-connection 缓存）。
+   * handler 层在每次请求前调用本方法，保证目标文件已建 project。
+   */
+  ensureOpen(file: string): Promise<void>;
   /** 取某文件最近一次 push diagnostics（latest-wins；无 → undefined）。 */
   getDiagnostics(uri: string): ReadonlyArray<unknown> | undefined;
   /** 释放连接（不杀进程；进程随宿主进程同生同灭，spec S14）。 */
@@ -160,6 +167,11 @@ async function spawnClient(
     }
   );
 
+  // opened URIs cache：同一 connection 内 ensureOpen(file) 幂等。
+  // tsserver per-project 维护打开文件表；重复 didOpen 同 uri 会触发版本断言，
+  // 因此本地缓存去重。仅作为同连接内的短缓存，进程退出即释放。
+  const openedUris = new Set<string>();
+
   return {
     connection,
     process: child,
@@ -177,8 +189,45 @@ async function spawnClient(
     sendNotification: (method, params) =>
       connection.sendNotification(method, params),
     getDiagnostics: (uri: string) => diagStore.get(uri),
+    ensureOpen: async (file: string) => {
+      const uri = pathToFileURL(file).href;
+      if (openedUris.has(uri)) return;
+      // 先占位再加 await 再读文件：防止并发调用同文件时都通过 has 检查、
+      // 各发一次 didOpen(version:1 重复 → tsserver 版本断言)。readFile 失败
+      // 时回滚占位,保留"失败可重试"语义;didOpen 发送失败 → 仍认为已告知
+      // server,下次 sendRequest 由 tsserver 以"未打开"状态回退。
+      openedUris.add(uri);
+      let text: string;
+      try {
+        text = await readFile(file, "utf8");
+      } catch (err) {
+        openedUris.delete(uri);
+        throw err;
+      }
+      await connection.sendNotification("textDocument/didOpen", {
+        textDocument: {
+          uri,
+          languageId: languageIdFor(file),
+          version: 1,
+          text,
+        },
+      });
+    },
     dispose: () => connection.dispose(),
   };
+}
+
+/**
+ * 扩展名 → LSP languageId（tsserver 用 languageId 决定 TS / TSX / JS 服务的
+ * 哪一种建 project）。当前 iknow LSP 仅接 TS 系列（server.ts extensions），
+ * 其它扩展名一律回退 typescript：与 probe `lsp-probe.ts:130` 的固定值一致，
+ * 避免误判扩展名后语言识别失败导致符号查询仍空。
+ */
+function languageIdFor(file: string): string {
+  if (/\.(ts|mts|cts)$/i.test(file)) return "typescript";
+  if (/\.(tsx)$/i.test(file)) return "typescriptreact";
+  if (/\.(jsx)$/i.test(file)) return "javascriptreact";
+  return "typescript";
 }
 
 /**

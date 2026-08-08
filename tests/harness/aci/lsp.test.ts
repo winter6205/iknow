@@ -42,11 +42,18 @@ function makeFakeClient(
   responder: (method: string, params: unknown) => unknown
 ) {
   const calls: Array<{ method: string; params: unknown }> = [];
+  const opened: string[] = [];
   return {
     calls,
+    opened,
     client: {
       connection: {} as never,
       process: {} as never,
+      // #251:handler 层在每次请求前先 ensureOpen(发 didOpen) 建 tsserver
+      // project。fake 记录打开的文件,供「先打开再请求」断言使用。
+      ensureOpen: async (file: string) => {
+        opened.push(file);
+      },
       sendRequest: async (method: string, params: unknown) => {
         calls.push({ method, params });
         return responder(method, params);
@@ -510,6 +517,7 @@ describe("handler cancel token wiring", () => {
     const fakeClient = {
       connection: {} as never,
       process: {} as never,
+      ensureOpen: async () => undefined,
       sendRequest: async (method: string, params: unknown, token?: unknown) => {
         gotMethod.push(method);
         sentArgs.push(token);
@@ -546,6 +554,7 @@ describe("handler cancel token wiring", () => {
     const fakeClient = {
       connection: {} as never,
       process: {} as never,
+      ensureOpen: async () => undefined,
       sendRequest: async (
         method: string,
         _params: unknown,
@@ -705,5 +714,123 @@ describe("initialize handshake failure propagates as tool error (exception)", ()
     expect(typeof out).toBe("string");
     expect(out).toContain("<diagnostics");
     expect(out).toContain("</diagnostics>");
+  });
+});
+
+// ── handler 层 ensureOpen（textDocument/didOpen）布线 ──────────────────────
+//
+// 锚点 client.ts:LspClient.ensureOpen + lsp.ts 各 handler：tsserver 对未打开
+// 文件不建 project,符号类操作(definition/document_symbol/workspace_symbol/
+// hover/implementation/call_hierarchy/diagnostics)全返空。handler 必须在
+// 每次 sendRequest / getDiagnostics 前 ensureOpen(file),fake 客户端的
+// ensureOpen 推入 opened[] 用于断言。
+//
+// 覆盖:
+//   - 各 handler 调 ensureOpen(file) 一次
+//   - 同一 handler 调两次：第二次不发新 didOpen(fake 自身做了去重)
+//   - 跨 handler 同一 file：第一次打开后,第二次走 fake 的去重缓存
+//   - ensureOpen 在 sendRequest 之前(handler await 顺序)
+
+describe("handler ensureOpen before request (textDocument/didOpen)", () => {
+  it("lsp_definition calls ensureOpen with the file", async () => {
+    const { client, opened } = makeFakeClient(() => []);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    await byName(tools, "lsp_definition").handler({
+      file: "/work/src/a.ts",
+      line: 1,
+      character: 0,
+    });
+    expect(opened).toEqual(["/work/src/a.ts"]);
+  });
+
+  it("lsp_hover calls ensureOpen with the file", async () => {
+    const { client, opened } = makeFakeClient(() => ({}));
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    await byName(tools, "lsp_hover").handler({
+      file: "/work/src/a.ts",
+      line: 1,
+      character: 0,
+    });
+    expect(opened).toEqual(["/work/src/a.ts"]);
+  });
+
+  it("lsp_document_symbol calls ensureOpen with the file", async () => {
+    const { client, opened } = makeFakeClient(() => []);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    await byName(tools, "lsp_document_symbol").handler({
+      file: "/work/src/a.ts",
+    });
+    expect(opened).toEqual(["/work/src/a.ts"]);
+  });
+
+  it("lsp_workspace_symbol calls ensureOpen with the file", async () => {
+    const { client, opened } = makeFakeClient(() => []);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    await byName(tools, "lsp_workspace_symbol").handler({
+      file: "/work/src/a.ts",
+    });
+    expect(opened).toEqual(["/work/src/a.ts"]);
+  });
+
+  it("lsp_diagnostics calls ensureOpen with the file", async () => {
+    const { client, opened } = makeFakeClient(() => undefined);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    await byName(tools, "lsp_diagnostics").handler({
+      file: "/work/src/a.ts",
+    });
+    expect(opened).toEqual(["/work/src/a.ts"]);
+  });
+
+  it("call-hierarchy tools (incoming/outgoing) call ensureOpen with the file", async () => {
+    const item = { name: "x", uri: "file:///work/src/a.ts", range: {} };
+    const { client, opened } = makeFakeClient((method) =>
+      method === "textDocument/prepareCallHierarchy" ? [item] : []
+    );
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    await byName(tools, "lsp_incoming_calls").handler({
+      file: "/work/src/a.ts",
+      line: 2,
+      character: 1,
+    });
+    await byName(tools, "lsp_outgoing_calls").handler({
+      file: "/work/src/a.ts",
+      line: 2,
+      character: 1,
+    });
+    // 两次调用 → 两次 ensureOpen(fake 是空 opened 累加器,自身去重属 client.ts)。
+    // 此处断言：handler 把 ensureOpen 嵌入到流程中,不被 call-hierarchy 多步吞掉。
+    expect(opened).toEqual(["/work/src/a.ts", "/work/src/a.ts"]);
+  });
+
+  it("ensureOpen runs before sendRequest (sequence)", async () => {
+    const sequence: string[] = [];
+    const fakeClient = {
+      connection: {} as never,
+      process: {} as never,
+      ensureOpen: async (_file: string) => {
+        sequence.push("didOpen");
+      },
+      sendRequest: async (_method: string, _params: unknown) => {
+        sequence.push("sendRequest");
+        return [];
+      },
+      sendNotification: async () => undefined,
+      getDiagnostics: () => [] as ReadonlyArray<unknown>,
+      dispose: () => undefined,
+    };
+    mockGetClient.mockResolvedValue(fakeClient);
+    const tools = createLspToolSet(ctx);
+    await byName(tools, "lsp_definition").handler({
+      file: "/work/src/a.ts",
+      line: 1,
+      character: 0,
+    });
+    expect(sequence).toEqual(["didOpen", "sendRequest"]);
   });
 });

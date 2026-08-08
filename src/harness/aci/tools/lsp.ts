@@ -192,6 +192,9 @@ function makeOperationTool(ctx: LspCtx, spec: OperationSpec): AciToolDef {
       const params = validate(input) as PositionInput | FileOnlyInput;
       const client = await getClient(ctx, params.file);
       if (!client) return "(no LSP server available for file)";
+      // tsserver 对未打开文件不建 project → 符号类操作返空。先 ensureOpen
+      // 把目标文件加进 server 的 project，再发请求（per-connection 幂等）。
+      await client.ensureOpen(params.file);
       // interruptBehavior="cancel":把 executor 的 AbortSignal 桥接成
       // vscode-jsonrpc CancellationToken,abort 时走 $/cancelRequest,
       // 不杀 tsserver(Q2/A9)。
@@ -235,6 +238,8 @@ function makeCallHierarchyCallTool(
       const params = validate(input) as PositionInput;
       const client = await getClient(ctx, params.file);
       if (!client) return "(no LSP server available for file)";
+      // 同 makeOperationTool：先 ensureOpen 建 project，再 prepare + forward。
+      await client.ensureOpen(params.file);
       const cancel = execCtx?.signal
         ? signalToCancellationToken(execCtx.signal)
         : undefined;
@@ -299,6 +304,9 @@ function makeDiagnosticsTool(ctx: LspCtx): AciToolDef {
       const params = validate(input) as FileOnlyInput;
       const client = await getClient(ctx, params.file);
       if (!client) return "(no LSP server available for file)";
+      // push diagnostics 只在文件打开后才到达 → 必须先 ensureOpen,否则
+      // getDiagnostics 永远取到 undefined、render 出空 <diagnostics/> 标签。
+      await client.ensureOpen(params.file);
       const uri = pathToFileURL(params.file).href;
       const items = client.getDiagnostics(uri);
       return renderDiagnostics(params.file, items ?? []);

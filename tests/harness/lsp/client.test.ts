@@ -596,3 +596,171 @@ describe("signalToCancellationToken live abort (exception)", () => {
     expect(token.isCancellationRequested).toBe(false);
   });
 });
+
+// ── 17. ensureOpen 幂等（textDocument/didOpen 只发一次/文件）───────────────
+//
+// 锚点 client.ts:LspClient.ensureOpen。tsserver 对未打开文件不建 project,
+// 符号类操作全返空;handler 每次请求前 ensureOpen。本测试验证 client.ts 的
+// 幂等缓存:同文件重复 ensureOpen 只发一次 didOpen;不同文件各自发一次。
+// 用真实 spawnClient 链路(置 fake spawn 返回可读 .ts 文件 child)。
+
+describe("ensureOpen idempotency", () => {
+  it("dedupes same-file ensureOpen but didOpens distinct files", async () => {
+    // 真实文件：mkdtempSync 写两个 .ts 文件,ensureOpen 必须能读到。
+    // handler 层经 client.ensureOpen(file) → readFile(file),因此文件必须
+    // 在 disk 上存在(EACCES 会让 readFile 拒绝)。
+    const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-ensure-open-"));
+    const fileA = join(dir, "a.ts");
+    const fileB = join(dir, "b.ts");
+    writeFileSync(fileA, "export const a = 1;\n", "utf8");
+    writeFileSync(fileB, "export const b = 2;\n", "utf8");
+    try {
+      const { server } = makeFakeServer("ensure-open", {
+        spawn: async (_root) => {
+          const stdin = new PassThrough();
+          const stdout = new PassThrough();
+          const child = Object.assign(new EventEmitter(), {
+            stdin,
+            stdout,
+            stderr: new PassThrough(),
+            pid: 99,
+            kill: () => true,
+          });
+          return {
+            process:
+              child as unknown as import("node:child_process").ChildProcess,
+            initialization: { tsserver: { path: "/tsserver.js" } },
+          };
+        },
+      });
+
+      const client = await getClient(ctx, fileA, { server });
+      expect(client).toBeDefined();
+      if (!client) throw new Error("expected client");
+
+      mockSendNotification.mockReset();
+      mockSendNotification.mockResolvedValue(undefined);
+
+      // 同一文件 ensureOpen 两次 → 只发一次 didOpen(幂等缓存)。
+      await client.ensureOpen(fileA);
+      await client.ensureOpen(fileA);
+      // 不同文件 → 各自发一次。
+      await client.ensureOpen(fileB);
+
+      const didOpenCalls = mockSendNotification.mock.calls.filter(
+        (c) => c[0] === "textDocument/didOpen"
+      );
+      expect(didOpenCalls).toHaveLength(2);
+      const uris = didOpenCalls.map((c) => {
+        const p = c[1] as { textDocument: { uri: string } };
+        return p.textDocument.uri;
+      });
+      // pathToFileURL 编码空格/特殊字符;此处只有 ASCII,直接断言后缀。
+      expect(uris[0]).toMatch(/\/a\.ts$/);
+      expect(uris[1]).toMatch(/\/b\.ts$/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("100 concurrent ensureOpen on same never-opened file sends didOpen only once", async () => {
+    // 回归:ensureOpen 早期实现 check-then-act 跨 await readFile → 并发 100
+    // 次同文件调用,各通过 has 检查、各发一次 didOpen(version:1 重复)。
+    // 修复:openedUris.add(uri) 在 await 之前占位;readFile 失败回滚。
+    const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-ensure-race-"));
+    const file = join(dir, "x.ts");
+    writeFileSync(file, "export const x = 1;\n", "utf8");
+    try {
+      const { server } = makeFakeServer("ensure-race", {
+        spawn: async (_root) => {
+          const stdin = new PassThrough();
+          const stdout = new PassThrough();
+          const child = Object.assign(new EventEmitter(), {
+            stdin,
+            stdout,
+            stderr: new PassThrough(),
+            pid: 1,
+            kill: () => true,
+          });
+          return {
+            process:
+              child as unknown as import("node:child_process").ChildProcess,
+            initialization: { tsserver: { path: "/tsserver.js" } },
+          };
+        },
+      });
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+      mockSendNotification.mockReset();
+      mockSendNotification.mockResolvedValue(undefined);
+
+      const N = 100;
+      await Promise.all(
+        Array.from({ length: N }, () => client.ensureOpen(file))
+      );
+      const didOpens = mockSendNotification.mock.calls.filter(
+        (c) => c[0] === "textDocument/didOpen"
+      );
+      expect(didOpens).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("readFile failure rolls back openedUris (next call retries)", async () => {
+    // 锚点 client.ts:ensureOpen 先 add 占位 → readFile 失败 → delete 回滚。
+    // 不回滚则失败文件永久 cache 污染,后续 ensureOpen 早返,handler 走假阳性。
+    const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-ensure-rollback-"));
+    const file = join(dir, "y.ts");
+    writeFileSync(file, "export const y = 1;\n", "utf8");
+    try {
+      const { server } = makeFakeServer("ensure-rollback", {
+        spawn: async (_root) => {
+          const stdin = new PassThrough();
+          const stdout = new PassThrough();
+          const child = Object.assign(new EventEmitter(), {
+            stdin,
+            stdout,
+            stderr: new PassThrough(),
+            pid: 1,
+            kill: () => true,
+          });
+          return {
+            process:
+              child as unknown as import("node:child_process").ChildProcess,
+            initialization: { tsserver: { path: "/tsserver.js" } },
+          };
+        },
+      });
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+
+      mockSendNotification.mockReset();
+      mockSendNotification.mockResolvedValue(undefined);
+
+      // 删文件 → readFile 抛 ENOENT → ensureOpen reject 且 cache 回滚。
+      rmSync(file, { force: true });
+      await expect(client.ensureOpen(file)).rejects.toThrow();
+
+      // 写回文件 → 再次 ensureOpen 应真发 didOpen(非占位命中)。
+      writeFileSync(file, "export const y = 2;\n", "utf8");
+      await client.ensureOpen(file);
+
+      const didOpens = mockSendNotification.mock.calls.filter(
+        (c) => c[0] === "textDocument/didOpen"
+      );
+      expect(didOpens).toHaveLength(1); // 回滚后真的发了一次
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

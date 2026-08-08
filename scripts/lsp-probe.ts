@@ -8,14 +8,15 @@
  *     `"(no LSP server available for file)"`（该哨兵 = tsserver 未 spawn，探针判 FAIL）。
  *   - lsp_definition 指向本仓真实函数 `getClient`，断言结果含目标文件路径。
  *
+ * 不再做手工 didOpen：handler 层（client.ensureOpen）已内置 per-file 幂等
+ * didOpen，探针只用工具工厂与真实 client 完成全链路校验。
+ *
  * 退出码：passed === total ? 0 : 1（对照 sandbox-probe.ts）。
  */
-import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import { createLspToolSet } from "../src/harness/aci/tools/lsp.js";
-import { getClient } from "../src/harness/lsp/client.js";
 import type { AciToolDef } from "../src/harness/aci/types.js";
 
 /** 无可用 LSP server 时 handler 返回的哨兵纯字符串（探针据此判 FAIL）。 */
@@ -27,10 +28,10 @@ const TARGET_FILE = resolve(
   "src/harness/lsp/client.ts"
 );
 /**
- * 定义探针：`getClient` 函数定义在 client.ts 第 78 行（1-based）,
+ * 定义探针：`getClient` 函数定义在 client.ts 第 85 行（1-based）,
  * `export async function getClient(`,character 指向 `getClient` 标识符起始。
  */
-const TARGET_LINE = 78;
+const TARGET_LINE = 85;
 const TARGET_CHAR = 23;
 /** diagnostics 探针目标：本仓真实 TS 文件。 */
 const DIAG_FILE = resolve(
@@ -119,21 +120,8 @@ async function run(): Promise<void> {
     return t as AciToolDef;
   };
 
-  // 0) 打开目标文件（textDocument/didOpen）：tsserver 需先有打开文件才建 project，
-  //    否则 workspace/symbol 抛 "No Project."。走真实 getClient 层发 didOpen。
-  const opened = await getClient(ctx, TARGET_FILE);
-  if (opened) {
-    await opened.sendNotification("textDocument/didOpen", {
-      textDocument: {
-        uri: pathToFileURL(TARGET_FILE).href,
-        languageId: "typescript",
-        version: 1,
-        text: await readFile(TARGET_FILE, "utf8"),
-      },
-    });
-  }
-
   // 1) lsp_definition — 指向真实函数 getClient，断言含目标文件路径。
+  // 注：不再手工 didOpen；handler 层 ensureOpen 负责打开目标文件建 project。
   const def = await safeCall("lsp_definition", () =>
     get("lsp_definition").handler({
       file: TARGET_FILE,
