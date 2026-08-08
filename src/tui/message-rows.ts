@@ -27,7 +27,7 @@ import {
   REDACTED_PLACEHOLDER,
   summarizeThinkingContent,
 } from "../cli/format.js";
-import { summarizeToolCall } from "./tool-summary.js";
+import { summarizeToolCall, toolPreviewLines } from "./tool-summary.js";
 import { markdownToLines } from "./markdown-lines.js";
 import { wrapTextVisual } from "./text.js";
 
@@ -155,15 +155,20 @@ export function messageRender(
       });
     } else if (block.type === "tool_use") {
       const startRow = lines.length;
-      const { detail } = summarizeToolCall(block.name, block.input);
+      // cols 收口：摘要行保证单行不折（窄终端行账不漂移，tool-summary.ts）。
+      const { detail } = summarizeToolCall(block.name, block.input, width);
       // 摘要行文本：与 ToolSummaryRow 内容一致（无颜色 / mark 标记），mark
       // 由裁剪路径根据 statusMap 注入。
       lines.push(`${block.name} · ${detail}`);
+      // 内容可见性：write_file/edit_file 追加封顶预览行（SSOT 与
+      // MessageBlocks 全可见路径共用 toolPreviewLines，行账逐行一致）。
+      const preview = toolPreviewLines(block.name, block.input, width);
+      for (const l of preview) lines.push(l);
       blocks.push({
         kind: "tool_use",
         text: "",
         startRow,
-        rows: 1,
+        rows: 1 + preview.length,
         toolUseId: block.id,
       });
     }

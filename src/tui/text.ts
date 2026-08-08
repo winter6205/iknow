@@ -20,6 +20,28 @@ export function clipOneLine(s: string, max: number): string {
 }
 
 /**
+ * 按**视觉宽度**截断单行（visualWidth SSOT：CJK 占 2 列）。clipOneLine 按
+ * 字符数切，中文内容实际显示宽度 ≈ 2× 字符数 → 窄终端折行，行级窗口账目
+ * 漂移（渲染行多于计账，底部内容被顶出可视区）。保证结果
+ * `visualWidth <= maxWidth`；省略号预留 1 列。maxWidth <= 0 返回空串。
+ */
+export function clipOneLineVisual(s: string, maxWidth: number): string {
+  const oneLine = s.replace(/\s+/g, " ").trim();
+  if (maxWidth <= 0) return "";
+  if (visualWidth(oneLine) <= maxWidth) return oneLine;
+  const budget = maxWidth - 1;
+  let acc = "";
+  let w = 0;
+  for (const ch of oneLine) {
+    const cw = visualWidth(ch);
+    if (w + cw > budget) break;
+    acc += ch;
+    w += cw;
+  }
+  return `${acc}…`;
+}
+
+/**
  * 按**视觉宽度**把 s 折行（visualWidth SSOT：CJK / 全角按 2 列）。
  * ink 的 `wrap="wrap"` 按终端列数折（CJK 占 2 列），故行级窗口账目必须用
  * 视觉宽度而非字符数——`wrapText`（字符数）对中文内容低估近 2×，是 #189
