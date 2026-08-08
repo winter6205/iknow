@@ -34,9 +34,24 @@ import { isIknowError } from "./shared/errors.js";
 import { MaxTurnsExceeded } from "./harness/errors.js";
 import { maxTurnsEnvelope } from "./cli/max-turns.js";
 import { randomUUID } from "node:crypto";
+import { existsSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { buildViolationWiring } from "./harness/sandbox/violation-executor.js";
+import { openBrowser } from "./cli/open-browser.js";
+import type { TraceServeOptions } from "./traceserver/serve.js";
 
 const DEFAULT_TRACE_PATH = "./trace.jsonl";
+/**
+ * T7: `iknow trace` 的默认读目录 —— 每会话独立文件（`<traceDir>/<convId>.jsonl`）。
+ * 与写侧默认 DEFAULT_TRACE_PATH（./trace.jsonl 单文件）分开：trace CLI 读目录，
+ * serve/chat/ask 写路径。两者不冲突（一个是文件、一个是目录）。
+ */
+const DEFAULT_TRACE_DIR = "./trace/";
+/**
+ * 旧单文件格式（v2 写侧升级前）。若存在 → runTrace fail-fast 提示迁移，
+ * 不静默把它当目录读（SC-C 21）。
+ */
+const LEGACY_TRACE_FILE = "./trace.jsonl";
 
 /**
  * Resolve trace output path: flag > IKNOW_TRACE_OUT env > default.
@@ -146,7 +161,9 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     maxTurns: parsed.maxTurns ?? built.deps.maxTurns,
   };
   let stopSummary: string | undefined;
-  const onStream = (event: import("./harness/index.js").HarnessStreamEvent): void => {
+  const onStream = (
+    event: import("./harness/index.js").HarnessStreamEvent
+  ): void => {
     if (event.type === "stop_summary") stopSummary = event.text;
   };
   // runHarness returns LoopTrace as `trace`; rename to loopTrace to avoid
@@ -154,7 +171,9 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
   let result: import("./harness/index.js").RunResult;
   let loopTrace: import("./harness/index.js").LoopTrace;
   try {
-    const out = await runHarness(parsed.query, askDeps, undefined, { onStream });
+    const out = await runHarness(parsed.query, askDeps, undefined, {
+      onStream,
+    });
     result = out.result;
     loopTrace = out.trace;
   } catch (err) {
@@ -317,31 +336,89 @@ async function runServe(parsed: ParsedCli): Promise<void> {
 }
 
 async function runTrace(parsed: ParsedCli): Promise<void> {
-  // trace CLI: do NOT resolve to default path. Omitting --trace-out means
-  // "no trace file configured" → startTraceServe returns 404 not_found.
-  // Env IKNOW_TRACE_OUT is write-side (serve/chat/ask), not reader-side.
-  const traceOut = parsed.traceOut;
-  const { startTraceServe } = await import("./traceserver/serve.js");
-  try {
-    const listening = await startTraceServe({
-      traceOut,
-      host: parsed.host,
-      port: parsed.port,
-      ...(parsed.maxBytes !== undefined ? { maxBytes: parsed.maxBytes } : {}),
-    });
-    writeErr(`iknow trace  http://${listening.host}:${listening.port}/`);
+  // T7: trace CLI 默认读 ./trace/ 目录（无需 --trace-out），并把该目录传给
+  // startTraceServe（读侧 v2 目录语义）。--trace-out 显式提供时覆盖默认。
+  // 注意：这里不复用写侧 resolveTracePath —— env IKNOW_TRACE_OUT 是写侧
+  // (serve/chat/ask) 的，不是读侧；trace 只认 flag 或默认目录。
+  const traceOut = parsed.traceOut ?? DEFAULT_TRACE_DIR;
+
+  // SC-C 21 fail-fast：检测到旧单文件格式 trace → 提示迁移，不静默当目录读。
+  // 两种情形：
+  //   1) 显式 --trace-out 指向一个已存在的「文件」（旧单文件或误传单文件）。
+  //   2) 用默认 ./trace/ 目录，但 CWD 里还留着未迁移的旧 ./trace.jsonl
+  //      （默认目录与旧文件路径不冲突，但用户数据还没迁 → 面板会空，需提示）。
+  const legacyConflict = detectLegacyTrace(
+    traceOut,
+    parsed.traceOut === undefined
+  );
+  if (legacyConflict) {
     writeErr(
-      traceOut !== undefined
-        ? `Trace 检测面板：${traceOut}`
-        : "Trace 检测面板：未配置 --trace-out（/api/v1/traces 返回 404）"
+      `错误: 检测到旧单文件格式的 trace。请先运行迁移脚本：\n` +
+        `  npx tsx scripts/trace-migrate.ts\n` +
+        `(把 ${LEGACY_TRACE_FILE} 转成 ${DEFAULT_TRACE_DIR}<convId>.jsonl 目录)`
     );
-    writeErr("API: /api/v1/health  ·  /api/v1/traces  ·  Ctrl+C to stop");
+    process.exitCode = 1;
+    return;
+  }
+
+  const { startTraceServe } = await import("./traceserver/serve.js");
+  const serveOpts: TraceServeOptions = {
+    traceOut,
+    host: parsed.host,
+    port: parsed.port,
+    ...(parsed.maxBytes !== undefined ? { maxBytes: parsed.maxBytes } : {}),
+  };
+  try {
+    const listening = await startTraceServe(serveOpts);
+    const url = `http://${listening.host}:${listening.port}/`;
+    writeErr(`iknow trace  ${url}`);
+    writeErr(`Trace 检测面板：${traceOut}`);
+    writeErr(
+      "API: /api/v1/health  ·  /api/v1/sessions  ·  /api/v1/traces  ·  Ctrl+C to stop"
+    );
+    // SC-C 19: 默认自动打开浏览器；--no-open 关闭（CI/headless）。
+    if (!parsed.noOpen) {
+      openBrowser(url);
+    }
     await new Promise<void>(() => {
       /* keep process alive until signal */
     });
   } catch (err) {
     printChatError(err);
     process.exitCode = 1;
+  }
+}
+
+/**
+ * 检测旧单文件 trace（SC-C 21）：
+ *   - traceOut 已存在但不是目录（文件）→ 冲突（单文件无法按目录读）。
+ *   - 用默认目录且 CWD 下旧 ./trace.jsonl 存在 → 冲突（数据未迁移）。
+ * stat 失败（目标不存在）→ 不算冲突，按「目录尚未创建」正常启动。
+ */
+function detectLegacyTrace(
+  traceOut: string,
+  usingDefaultDir: boolean
+): boolean {
+  const resolvedDir = resolve(traceOut);
+  if (existsSync(resolvedDir) && !isDirectoryPath(resolvedDir)) {
+    return true;
+  }
+  if (usingDefaultDir && existsSync(resolve(LEGACY_TRACE_FILE))) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 判断路径是否指向「目录」。用 stat isDirectory 区分 ./trace.jsonl（文件）
+ * 与 ./trace/（目录）—— 两者共存不冲突（SC-C 21）。stat 失败（目标不存在）
+ * 按目录处理：后续 startTraceServe 的 readdir 会自然返回空列表。
+ */
+function isDirectoryPath(p: string): boolean {
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return true;
   }
 }
 
