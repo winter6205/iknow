@@ -52,9 +52,11 @@
     "ajv": "^8.17.1",
     "ajv-formats": "^2.1.1",
     "ink": "^7.1.1",
+    "marked": "^18.0.9",
     "react": "^19.2.8",
     "smol-toml": "^1.7.1",
     "undici": "^7.29.0",
-    "vscode-jsonrpc": "^9.0.1"
+    "vscode-jsonrpc": "^9.0.1",
+    "wrap-ansi": "^8.1.0"
   }
 }
