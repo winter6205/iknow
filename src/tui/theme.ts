@@ -53,6 +53,10 @@ export interface TuiPalette {
   readonly add: string;
   /** unified diff：删除行（git 风格红）。 */
   readonly del: string;
+  /** unified diff：新增行整行背景遮罩（GitHub dark add-bg 风格淡绿）。 */
+  readonly bgAdd: string;
+  /** unified diff：删除行整行背景遮罩（GitHub dark del-bg 风格淡红）。 */
+  readonly bgDel: string;
 }
 
 export const tuiPalette: TuiPalette = Object.freeze({
@@ -72,4 +76,6 @@ export const tuiPalette: TuiPalette = Object.freeze({
   bullet: "#7d8a82",
   add: "#2ea043",
   del: "#d73a49",
+  bgAdd: "#1f3d2b",
+  bgDel: "#3d1f24",
 });
