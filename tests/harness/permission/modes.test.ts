@@ -20,6 +20,8 @@ import {
   parsePermissionMode,
   createPermissionModeContext,
   asModeContext,
+  modeLabel,
+  nextShiftTabMode,
 } from "../../../src/harness/permission/modes.js";
 import {
   checkPermission,
@@ -87,6 +89,28 @@ describe("createPermissionModeContext (W2)", () => {
   it("context object is frozen (cannot reassign get/set)", () => {
     const ctx = createPermissionModeContext();
     assert.ok(Object.isFrozen(ctx));
+  });
+});
+
+describe("modeLabel (W2 扩展)", () => {
+  it("maps canonical modes to human-readable labels", () => {
+    assert.equal(modeLabel("default"), "Default");
+    assert.equal(modeLabel("plan"), "Plan Mode");
+    assert.equal(modeLabel("full_auto"), "Auto");
+  });
+});
+
+describe("nextShiftTabMode (W2 扩展)", () => {
+  it("default → full_auto (opt-in auto)", () => {
+    assert.equal(nextShiftTabMode("default"), "full_auto");
+  });
+
+  it("full_auto → default (handbrake)", () => {
+    assert.equal(nextShiftTabMode("full_auto"), "default");
+  });
+
+  it("plan → full_auto (jumps straight to go-mode, never default)", () => {
+    assert.equal(nextShiftTabMode("plan"), "full_auto");
   });
 });
 

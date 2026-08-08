@@ -31,6 +31,8 @@ import { writeIknowState } from "../harness/identity/index.js";
 import { createStreamDraft } from "./stream-draft.js";
 import {
   parsePermissionMode,
+  modeLabel,
+  applyShiftTabModeFlip,
   type PermissionMode,
   type PermissionModeContext,
 } from "../harness/permission/modes.js";
@@ -599,6 +601,37 @@ async function runInteractive(opts: {
     }
   };
 
+  // W2 扩展：Shift+Tab 切换权限模式（default ↔ full_auto；plan 走
+  // /permissions plan 命令不进循环）。REPL 用 readline：terminal:true 时
+  // stdin 已 emit keypress，keypress 里 shift+tab = key.name==="tab" &&
+  // key.shift。
+  //
+  // busy 期间（turn in-flight）readline 会调 `rl.pause()` 暂停 stdin，
+  // 此时 keypress 不会送达 — 仅空闲期（prompt 等待输入时）按 Shift+Tab
+  // 生效。busy-time 模式切换仅在 TUI 入口可达（ink useInput 不走
+  // readline，不受 pause 影响）。这是已知边界、注释诚实记录。
+  //
+  // 守卫 `!key.ctrl && !key.meta`：避免误触（Ctrl+Tab / Meta+Tab 各有
+  // 用途）。守卫 + flip 副作用走共享 helper `applyShiftTabModeFlip`
+  // （modes.ts；TUI 也用它），避免双份实现。
+  //
+  // handler 捕获到命名常量以便 rl.close 时 off（不积攒）。
+  const keypressHandler = (
+    _ch: unknown,
+    key?: { name?: string; shift?: boolean; ctrl?: boolean; meta?: boolean }
+  ): void => {
+    if (closed) return;
+    applyShiftTabModeFlip({
+      key,
+      ctx: opts.ctx.permissionMode,
+      onFlip: (next) => {
+        writeErr(`\n权限模式: ${modeLabel(next)}`);
+        rl.prompt(true);
+      },
+    });
+  };
+  process.stdin.on("keypress", keypressHandler);
+
   await new Promise<void>((resolve) => {
     rl.on("line", (line) => {
       if (closed) {
@@ -623,6 +656,8 @@ async function runInteractive(opts: {
     rl.on("close", () => {
       process.off("SIGINT", onSigint);
       rl.removeListener("SIGINT", onSigint);
+      // 卸载 Shift+Tab keypress 监听；与 SIGINT cleanup 同位（不积攒）。
+      process.stdin.off("keypress", keypressHandler);
       // Normal /quit or EOF: wait for in-flight turn then farewell.
       // Forced second Ctrl+C uses process.exit(130) and never reaches here.
       void chain.finally(() => {

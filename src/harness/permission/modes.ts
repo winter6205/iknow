@@ -79,3 +79,88 @@ export function asModeContext(
   }
   return mode;
 }
+
+/**
+ * Human-readable label for a permission mode (used by TUI / REPL UI).
+ *
+ * Mirrors upstream openharness `_MODE_LABELS` in `ui/protocol.py`:
+ *   - default   → "Default"
+ *   - plan      → "Plan Mode"
+ *   - full_auto → "Auto"
+ *
+ * Display-only — `IKNOW_PERMISSION_MODE` env + `parsePermissionMode` SSOT
+ * remain pinned to the canonical enum values. Adding an alias here would
+ * silently widen the parser surface.
+ */
+export function modeLabel(
+  mode: PermissionMode
+): "Default" | "Plan Mode" | "Auto" {
+  switch (mode) {
+    case "default":
+      return "Default";
+    case "plan":
+      return "Plan Mode";
+    case "full_auto":
+      return "Auto";
+  }
+}
+
+/**
+ * Shift+Tab cycle for the permission mode (TUI / REPL quick toggle).
+ *
+ * Stable cycle:
+ *   - default   → full_auto
+ *   - full_auto → default
+ *   - plan      → full_auto
+ *   - full_auto → default
+ *
+ * `plan` is deliberately NOT a cycle target — pressing Shift+Tab in `plan`
+ * jumps straight to `full_auto` (the "go" mode) and never silently re-enters
+ * `default`. Plan mode is entered/exited only via `/permissions plan` so the
+ * planning session cannot be flushed by an accidental Shift+Tab.
+ */
+export function nextShiftTabMode(current: PermissionMode): PermissionMode {
+  if (current === "full_auto") return "default";
+  return "full_auto";
+}
+
+/**
+ * The shape of a key event consumed by `applyShiftTabModeFlip`. Loose enough
+ * to accept both ink's `Key.tab/ctrl/...` boolean and node:readline's
+ * `Key.name/shift/...` shape, so TUI and REPL can share the helper.
+ */
+export interface ShiftTabKeyShape {
+  readonly name?: string | undefined;
+  readonly shift?: boolean | undefined;
+  readonly ctrl?: boolean | undefined;
+  readonly meta?: boolean | undefined;
+}
+
+/**
+ * Apply a Shift+Tab keystroke to the permission mode.
+ *
+ * Guards: `key.name === "tab" && key.shift && !key.ctrl && !key.meta`.
+ * Anything else is a no-op (returns `false`). When the guard passes,
+ * `ctx.set(nextShiftTabMode(ctx.get()))` is invoked and `onFlip(next)`
+ * fires. `ctx === undefined` (ask/serve paths) short-circuits.
+ *
+ * Single source of truth for the keystroke → mode-flip mapping; both the
+ * TUI `useInput` handler (ink `Key`) and the REPL stdin keypress listener
+ * (node:readline `Key`) call into this — change the guard policy here and
+ * both surfaces update in lockstep.
+ */
+export function applyShiftTabModeFlip(opts: {
+  readonly key: ShiftTabKeyShape | undefined;
+  readonly ctx: PermissionModeContext | undefined;
+  readonly onFlip: (next: PermissionMode) => void;
+}): boolean {
+  const k = opts.key;
+  if (!k) return false;
+  if (k.name !== "tab" || !k.shift || k.ctrl || k.meta) return false;
+  const modeCtx = opts.ctx;
+  if (!modeCtx) return false;
+  const next = nextShiftTabMode(modeCtx.get());
+  modeCtx.set(next);
+  opts.onFlip(next);
+  return true;
+}

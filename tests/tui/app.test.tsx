@@ -10,6 +10,7 @@
  * ink.js raw-mode 守卫）；PassThrough 补最小 TTY 假面即可驱动。
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -24,6 +25,10 @@ import {
 } from "../../src/tui/hub-bridge.js";
 import { createTuiAskUserBridge } from "../../src/tui/ask-user.js";
 import { VERSION } from "../../src/tui/version.js";
+import {
+  createPermissionModeContext,
+  type PermissionModeContext,
+} from "../../src/harness/permission/index.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.js";
 
 const ANSI_RE = /\x1b\[[0-9;?]*[a-zA-Z]/g;
@@ -120,7 +125,12 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     await rm(baseDir, { recursive: true, force: true });
   }, LONG_TIMEOUT);
 
-  function mountApp(bridge: TuiBridge): DrivenApp {
+  function mountApp(
+    bridge: TuiBridge,
+    permissionMode: PermissionModeContext = createPermissionModeContext(
+      "default"
+    )
+  ): DrivenApp {
     const askBridge = createTuiAskUserBridge();
     const toolEventSink = createToolEventSink();
     const out: string[] = [];
@@ -132,6 +142,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
         toolEventSink={toolEventSink}
         cwd="/tmp/proj"
         dataDir={baseDir}
+        permissionMode={permissionMode}
       />,
       {
         stdout,
@@ -794,6 +805,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
           toolEventSink={toolEventSink}
           cwd="/tmp/proj"
           dataDir={baseDir}
+          permissionMode={createPermissionModeContext("default")}
         />,
         {
           stdout,
@@ -889,6 +901,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
           initialSession={initial}
           cwd="/tmp/proj"
           dataDir={baseDir}
+          permissionMode={createPermissionModeContext("default")}
         />,
         {
           stdout,
@@ -974,6 +987,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
           initialSession={initial}
           cwd="/tmp/proj"
           dataDir={baseDir}
+          permissionMode={createPermissionModeContext("default")}
         />,
         {
           stdout,
@@ -1013,6 +1027,77 @@ describe("TuiApp 端到端（tracer bullet）", () => {
           strip(out.join("").slice(wheelDownA)).includes("WHEEL 内容第24行"),
         8000,
         "wheel-down-restores-tail"
+      );
+    },
+    LONG_TIMEOUT
+  );
+
+  it(
+    "W2 扩展：Shift+Tab 切换权限模式 default ↔ full_auto；模式指示 row 可见",
+    async () => {
+      const permissionMode = createPermissionModeContext("default");
+      const bridge = createTuiBridge({
+        dataDir: baseDir,
+        deps: makeDeps([]),
+        inflight: createInflightRegistry(),
+      });
+      const out: string[] = [];
+      stdout.on("data", (chunk) => out.push(String(chunk)));
+      const instance = render(
+        <TuiApp
+          bridge={bridge}
+          askBridge={createTuiAskUserBridge()}
+          toolEventSink={createToolEventSink()}
+          cwd="/tmp/proj"
+          dataDir={baseDir}
+          permissionMode={permissionMode}
+        />,
+        {
+          stdout,
+          stdin,
+          exitOnCtrlC: false,
+          interactive: true,
+          kittyKeyboard: { mode: "disabled" },
+        }
+      );
+      instances.push(instance);
+      const lastOutput = (): string => strip(out.join(""));
+      await delay(400); // mount + useInput effect
+
+      // 初始 default：模式指示行显示 "mode: Default"
+      await waitFor(
+        () => lastOutput().includes("mode: Default"),
+        4000,
+        "initial-mode-label"
+      );
+      assert.equal(permissionMode.get(), "default");
+
+      // Shift+Tab → full_auto；模式指示行更新；context 同步翻。
+      const beforeFull = out.join("").length;
+      stdin.write("\x1b[Z"); // CSI Z = shift+tab
+      await waitFor(
+        () => permissionMode.get() === "full_auto",
+        2000,
+        "shift-tab-to-full-auto"
+      );
+      await waitFor(
+        () => lastOutput().slice(beforeFull).includes("mode: Auto"),
+        2000,
+        "mode-label-updates-to-auto"
+      );
+
+      // 再 Shift+Tab → default
+      const beforeDef = out.join("").length;
+      stdin.write("\x1b[Z");
+      await waitFor(
+        () => permissionMode.get() === "default",
+        2000,
+        "shift-tab-back-to-default"
+      );
+      await waitFor(
+        () => lastOutput().slice(beforeDef).includes("mode: Default"),
+        2000,
+        "mode-label-updates-to-default"
       );
     },
     LONG_TIMEOUT
