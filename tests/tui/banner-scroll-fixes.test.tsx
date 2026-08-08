@@ -17,7 +17,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { render } from "ink";
-import { TuiApp, createToolEventSink } from "../../src/tui/app.js";
+import {
+  TuiApp,
+  createToolEventSink,
+  noticeRenderRows,
+} from "../../src/tui/app.js";
 import {
   createInflightRegistry,
   createTuiBridge,
@@ -228,4 +232,23 @@ describe("banner + scroll 修复回归（2026-08-07）", () => {
       await rm(baseDir, { recursive: true, force: true });
     }
   }, 15_000);
+
+  // #268 同类回归（2026-08-08）：notice 行账曾只数 `lines.length`，长行在窄
+  // 终端被 ink 按视觉宽度折成多行 → viewport 预算低估 → 整帧高于终端，
+  // 终端上卷把 banner 顶框顶出屏幕（与 #268 banner 截断同根因，曾由 Ctrl+O
+  // 切换思考的长 notice 再次触发）。修复：行账收敛到 noticeRenderRows
+  // （wrapTextVisual 折行后实际行数）。fake-tty 无法复现真实终端上卷，
+  // 故直接对行账函数做机制守卫。
+  it("noticeRenderRows：长行按视觉宽度折行计数（窄终端不漏行）", () => {
+    // 44 列：CJK 行「/sessions  打开会话列表（↑↓ 选择，Enter 打开，Esc 返回）」
+    // 视觉宽度 ≈ 53 → 折 2 行；旧实现只计 1 行。
+    const longCjk = "/sessions  打开会话列表（↑↓ 选择，Enter 打开，Esc 返回）";
+    expect(noticeRenderRows([longCjk], 44)).toBe(2);
+    // 多行累加：短行各 1 + 长行折行。
+    expect(noticeRenderRows(["/new 新建", longCjk], 44)).toBe(3);
+    // 宽终端不折 → 按行计。
+    expect(noticeRenderRows([longCjk, "/help 本词表"], 100)).toBe(2);
+    // undefined → 0（无 notice）。
+    expect(noticeRenderRows(undefined, 44)).toBe(0);
+  });
 });

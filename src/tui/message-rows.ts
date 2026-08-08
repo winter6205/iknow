@@ -29,7 +29,7 @@ import {
 } from "../cli/format.js";
 import { summarizeToolCall, toolPreviewLines } from "./tool-summary.js";
 import { markdownToLines } from "./markdown-lines.js";
-import { wrapTextVisual } from "./text.js";
+import { clipOneLineVisual, wrapTextVisual } from "./text.js";
 
 /** 块行级跨度。`rows` = 块内容行（不含块尾 margin）；坐标对齐 `lines` 数组。 */
 export interface BlockRowSpan {
@@ -64,8 +64,11 @@ export interface MessageRender {
 
 const MARGIN_LINE = " "; // ink 折叠 `<Text>{""}</Text>`，空行用空格占位
 
-function thinkingFoldLine(summary: string): string {
-  return `[思考] ${summary}`;
+/** 折叠态摘要行：`[思考] ` 标记 + `(Ctrl+O)` 键位提示（行账 1 行）。
+ *  用户反馈（2026-08-08）：「N 段」计数无意义，去掉。导出供 MessageBlocks
+ *  全量路径共用同一文案（SSOT，避免两条渲染路径漂移）。 */
+export function thinkingFoldLine(): string {
+  return "[思考] (Ctrl+O)";
 }
 
 /** 顶层：消息 → flat 物理行（SSOT，给 measureMessage / MessageBlocksClipped 共享）。 */
@@ -130,7 +133,8 @@ export function messageRender(
       }
     } else {
       const startRow = lines.length;
-      lines.push(thinkingFoldLine(summary));
+      // clip 到视觉宽度：极窄终端下防止折行破坏「折叠态 = 1 行」行账。
+      lines.push(clipOneLineVisual(thinkingFoldLine(), width));
       lines.push(MARGIN_LINE);
       blocks.push({
         kind: "thinking",

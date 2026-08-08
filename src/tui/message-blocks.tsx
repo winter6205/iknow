@@ -21,6 +21,7 @@ import { tuiPalette } from "./theme.js";
 import { summarizeToolCall, toolPreviewLines } from "./tool-summary.js";
 import { Markdown } from "./markdown.js";
 import type { BlockRowSpan } from "./message-rows.js";
+import { thinkingFoldLine } from "./message-rows.js";
 import {
   REDACTED_PLACEHOLDER,
   summarizeThinkingContent,
@@ -28,6 +29,7 @@ import {
 import type { RowSlice } from "./row-window.js";
 import type { Selection } from "./selection.js";
 import { HighlightedLine } from "./selection-render.js";
+import { clipOneLineVisual } from "./text.js";
 
 type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
 
@@ -72,11 +74,14 @@ function ToolPreviewRows(props: {
   );
 }
 
-/** 折叠态 thinking 摘要行（dim 配色 + `[思考] ` 前缀）。 */
-function ThinkingSummary(props: { readonly summary: string }): ReactElement {
+/** 折叠态 thinking 摘要行（dim 配色）。文案走 message-rows thinkingFoldLine
+ *  SSOT（`[思考] (Ctrl+O)`），并 clip 到视觉宽度保持 1 行。 */
+function ThinkingSummary(props: { readonly cols: number }): ReactElement {
   return (
     <Box marginBottom={1}>
-      <Text color={tuiPalette.dim}>[思考] {props.summary}</Text>
+      <Text color={tuiPalette.dim}>
+        {clipOneLineVisual(thinkingFoldLine(), props.cols)}
+      </Text>
     </Box>
   );
 }
@@ -109,7 +114,7 @@ export function MessageBlocks(props: {
   const nodes: ReactElement[] = [];
   const summary = summarizeThinkingContent(message.content);
   if (summary !== "") {
-    nodes.push(<ThinkingSummary key="tk-sum" summary={summary} />);
+    nodes.push(<ThinkingSummary key="tk-sum" cols={cols} />);
   }
   if (summary !== "" && thinkingExpanded) {
     message.content.forEach((block, i) => {

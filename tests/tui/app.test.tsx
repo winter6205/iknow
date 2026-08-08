@@ -1132,6 +1132,10 @@ describe("TuiApp 端到端（tracer bullet）", () => {
         4000,
         "ctrl-o-expands-thinking"
       );
+      // 切换不产生持久 notice（长 notice 在窄终端折行会撑爆 #268 viewport
+      // 行账）；键位提示挂折叠摘要行右侧「(Ctrl+O)」。
+      expect(app.lastFrame()).not.toContain("思考已展开");
+      expect(app.lastFrame()).not.toContain("思考已折叠");
 
       // 再按一次 → 折回。
       stdin.write("\x0f");

@@ -685,7 +685,7 @@ describe("T6 thinking 折叠面板", () => {
       { columns: 80 }
     );
     const plain = stripAnsi(output);
-    expect(plain).toContain("思考（1 段）");
+    expect(plain).toContain("[思考] (Ctrl+O)");
     expect(plain).not.toContain("SECRET_REASONING");
     expect(plain).toContain("answer");
   });
@@ -726,7 +726,7 @@ describe("T6 thinking 折叠面板", () => {
       { columns: 80 }
     );
     const plainC = stripAnsi(collapsed);
-    expect(plainC).toContain("思考（0 段 · 已加密 ×1）");
+    expect(plainC).toContain("[思考] (Ctrl+O)");
     expect(plainC).not.toContain("ENCRYPTED_BLOB");
     // 展开态
     const expanded = await renderToString(
