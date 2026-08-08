@@ -108,6 +108,12 @@ export async function assembleIdentityContext(
     segments.push(toolListSegment(toolList));
   }
   if (segments.length === 0) return undefined;
+  // Additive (non-LOCKED) — project path awareness. Mirrors the toolList
+  // additive segment: does not touch IKNOW_ASSEMBLY_ORDER. Renders the cwd so
+  // the agent can sense which project it is operating in without running
+  // `pwd` (which is `execute` → ask by default). Cwd is constant per process,
+  // so output stays byte-stable across turns (KV cache contract).
+  segments.push(projectPathSegment(ctx.cwd));
   return segments.join("\n\n");
 }
 
@@ -187,4 +193,11 @@ async function readBootstrapIfNeeded(
  *  故真实路径上不会渲染。函数独立封装便于后续测试断言文本形态。 */
 function toolListSegment(names: ReadonlyArray<string>): string {
   return `Available tools:\n${names.join("\n")}`;
+}
+
+/** 当前项目路径段渲染:小标题 + cwd。加性段,不触碰 LOCKED 顺序。
+ *  让 agent 感知当前项目路径(无需 `pwd` → execute→ask)。cwd 在进程内稳定,
+ *  字节级稳定契约保留(KV 缓存不抖动)。 */
+function projectPathSegment(cwd: string): string {
+  return `## Project path\n${cwd}`;
 }
