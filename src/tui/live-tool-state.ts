@@ -98,6 +98,19 @@ export function liveToolReduce(
   return prev;
 }
 
+/** 活动工具名派生（#279 项 4）：取最后一个 status=running 条目的 name；
+ *  无运行中条目 → undefined。纯派生（无新 state），harness loop 串行下
+ *  末尾 running 即当前工具。供 app.tsx 状态栏（ContextBar 尾缀）使用。 */
+export function activeToolNameOf(
+  runs: ReadonlyArray<LiveToolRun>
+): string | undefined {
+  for (let i = runs.length - 1; i >= 0; i--) {
+    const run = runs[i];
+    if (run !== undefined && run.status === "running") return run.name;
+  }
+  return undefined;
+}
+
 /** 运行中条目格式化 —— `[运行中] name`。 */
 export function formatRunningToolLine(run: LiveToolRun): string {
   return `[运行中] ${run.name}`;

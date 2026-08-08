@@ -53,7 +53,11 @@ import {
 } from "./slash.js";
 import { formatLiveToolEvent, summarizeToolCall } from "./tool-summary.js";
 import type { TuiToolEvent } from "./deps.js";
-import { liveToolReduce, type LiveToolRun } from "./live-tool-state.js";
+import {
+  activeToolNameOf,
+  liveToolReduce,
+  type LiveToolRun,
+} from "./live-tool-state.js";
 import { ChatView, flatContentLines } from "./chat-view.js";
 import type { StreamDraft } from "../cli/stream-draft.js";
 import { createStreamDraft } from "../cli/stream-draft.js";
@@ -465,6 +469,12 @@ export function TuiApp(props: TuiAppProps): ReactElement {
 
   const active = sessions[activeKey] ?? initial;
   const askPending = askBridge.pending();
+
+  // #279 项 4：活动工具名派生（无新 state）—— 当前会话 liveToolRuns 末尾
+  // running 条目即当前工具；无运行中 → undefined（ContextBar 不渲染指示器）。
+  const activeToolName = active.conversationId
+    ? activeToolNameOf(liveToolRuns[active.conversationId] ?? [])
+    : undefined;
 
   // #238 stale-closure 修复：stdin 的 mouse listener 用 useEffect + 稳定 deps
   // 注册一次（不随每次 render 重绑，避免丢事件），但它捕获首帧闭包。mouseup
@@ -1084,6 +1094,7 @@ export function TuiApp(props: TuiAppProps): ReactElement {
             contextWindow={bridge.contextWindow}
             running={active.runState === "running-fg"}
             cols={cols}
+            activeToolName={activeToolName}
           />
         </Box>
       )}

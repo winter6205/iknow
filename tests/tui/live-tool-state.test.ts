@@ -6,6 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  activeToolNameOf,
   formatCompletedToolLine,
   formatRunningToolLine,
   liveToolReduce,
@@ -115,6 +116,76 @@ describe("liveToolReduce (T4 工具实时状态)", () => {
     });
     expect(Object.isFrozen(b)).toBe(true);
     expect(Object.isFrozen(b[0]!)).toBe(true);
+  });
+});
+
+describe("activeToolNameOf (#279 项 4 活动工具名派生)", () => {
+  it("空 runs → undefined（无工具运行）", () => {
+    expect(activeToolNameOf([])).toBeUndefined();
+  });
+
+  it("tool start → 返回该工具名（显示）", () => {
+    const runs = liveToolReduce([], {
+      kind: "tool_call_start",
+      id: "toolu_1",
+      name: "Bash",
+    });
+    expect(activeToolNameOf(runs)).toBe("Bash");
+  });
+
+  it("tool end（post_tool_use ok）→ undefined（隐藏）", () => {
+    let runs = liveToolReduce([], {
+      kind: "tool_call_start",
+      id: "toolu_1",
+      name: "Bash",
+    });
+    runs = liveToolReduce(runs, {
+      kind: "post_tool_use",
+      id: "toolu_1",
+      name: "Bash",
+      input: { command: "ls" },
+      ok: true,
+      detail: "ls",
+    });
+    expect(activeToolNameOf(runs)).toBeUndefined();
+  });
+
+  it("tool end（failed）→ undefined（隐藏）", () => {
+    let runs = liveToolReduce([], {
+      kind: "tool_call_start",
+      id: "toolu_1",
+      name: "Bash",
+    });
+    runs = liveToolReduce(runs, {
+      kind: "post_tool_use",
+      id: "toolu_1",
+      name: "Bash",
+      input: {},
+      ok: false,
+      message: "exit 1",
+    });
+    expect(activeToolNameOf(runs)).toBeUndefined();
+  });
+
+  it("前一个已完成 + 当前 running → 返回当前（末尾 running 优先）", () => {
+    let runs = liveToolReduce([], {
+      kind: "tool_call_start",
+      id: "toolu_1",
+      name: "Read",
+    });
+    runs = liveToolReduce(runs, {
+      kind: "post_tool_use",
+      id: "toolu_1",
+      name: "Read",
+      input: {},
+      ok: true,
+    });
+    runs = liveToolReduce(runs, {
+      kind: "tool_call_start",
+      id: "toolu_2",
+      name: "Bash",
+    });
+    expect(activeToolNameOf(runs)).toBe("Bash");
   });
 });
 
