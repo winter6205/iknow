@@ -15,18 +15,18 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   applyShiftTabModeFlip,
-  type ChatLineContext,
-} from "../../src/cli/chat-session.js";
-import { createPermissionModeContext } from "../../src/harness/permission/modes.js";
+  createPermissionModeContext,
+  type PermissionMode,
+  type PermissionModeContext,
+} from "../../src/harness/permission/modes.js";
 
-/** 构造一个具备 permissionMode 的最小 ChatLineContext 形状。 */
-function ctxWithMode(initial: "default" | "plan" | "full_auto"): {
-  ctx: Pick<ChatLineContext, "permissionMode">;
-  get: () => string;
+function ctxWithMode(initial: PermissionMode): {
+  ctx: PermissionModeContext;
+  get: () => PermissionMode;
 } {
   const mode = createPermissionModeContext(initial);
   return {
-    ctx: { permissionMode: mode },
+    ctx: mode,
     get: () => mode.get(),
   };
 }
@@ -34,15 +34,15 @@ function ctxWithMode(initial: "default" | "plan" | "full_auto"): {
 describe("applyShiftTabModeFlip (REPL Shift+Tab)", () => {
   it("shift+tab: default → full_auto → default", () => {
     const { ctx, get } = ctxWithMode("default");
-    const flips: string[] = [];
-    const onFlip = (next: string): void => {
+    const flips: PermissionMode[] = [];
+    const onFlip = (next: PermissionMode): void => {
       flips.push(next);
     };
 
     assert.equal(
       applyShiftTabModeFlip({
         key: { name: "tab", shift: true },
-        ctx: ctx.permissionMode,
+        ctx,
         onFlip,
       }),
       true
@@ -54,7 +54,7 @@ describe("applyShiftTabModeFlip (REPL Shift+Tab)", () => {
     assert.equal(
       applyShiftTabModeFlip({
         key: { name: "tab", shift: true },
-        ctx: ctx.permissionMode,
+        ctx,
         onFlip,
       }),
       true
@@ -67,7 +67,7 @@ describe("applyShiftTabModeFlip (REPL Shift+Tab)", () => {
     const { ctx, get } = ctxWithMode("plan");
     applyShiftTabModeFlip({
       key: { name: "tab", shift: true },
-      ctx: ctx.permissionMode,
+      ctx,
       onFlip: () => {},
     });
     assert.equal(get(), "full_auto");
@@ -77,7 +77,7 @@ describe("applyShiftTabModeFlip (REPL Shift+Tab)", () => {
     const { ctx, get } = ctxWithMode("default");
     const consumed = applyShiftTabModeFlip({
       key: { name: "tab", shift: false },
-      ctx: ctx.permissionMode,
+      ctx,
       onFlip: () => {},
     });
     assert.equal(consumed, false);
@@ -88,7 +88,7 @@ describe("applyShiftTabModeFlip (REPL Shift+Tab)", () => {
     const { ctx, get } = ctxWithMode("default");
     const consumed = applyShiftTabModeFlip({
       key: { name: "tab", shift: true, ctrl: true },
-      ctx: ctx.permissionMode,
+      ctx,
       onFlip: () => {},
     });
     assert.equal(consumed, false);
@@ -99,7 +99,7 @@ describe("applyShiftTabModeFlip (REPL Shift+Tab)", () => {
     const { ctx, get } = ctxWithMode("default");
     const consumed = applyShiftTabModeFlip({
       key: undefined,
-      ctx: ctx.permissionMode,
+      ctx,
       onFlip: () => {},
     });
     assert.equal(consumed, false);
@@ -107,7 +107,7 @@ describe("applyShiftTabModeFlip (REPL Shift+Tab)", () => {
   });
 
   it("ctx missing (ask/serve path) → no-op, zero regression", () => {
-    const flips: string[] = [];
+    const flips: PermissionMode[] = [];
     const consumed = applyShiftTabModeFlip({
       key: { name: "tab", shift: true },
       ctx: undefined,

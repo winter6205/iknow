@@ -68,18 +68,18 @@
 
 ## Files expected to change
 
-| 文件                                     | 变更摘要                                                                 |
-| ---------------------------------------- | ------------------------------------------------------------------------ |
-| `src/harness/permission/modes.ts`        | 新增 `modeLabel()` helper（导出）                                        |
-| `src/tui/deps.ts`                        | `BuildTuiDepsOptions.permissionMode` + 构造 policy 透传                  |
-| `src/tui/run.tsx`                        | 创建 `permissionMode` context，传给 `<TuiApp>` + `buildTuiDeps`          |
-| `src/tui/app.tsx`                        | `TuiAppProps.permissionMode`；全局 useInput shift+tab 分支；模式指示 row |
-| `src/tui/components.tsx`                 | PromptInput useInput 让出 `key.tab && key.shift`（不 return）            |
-| `src/cli/chat-session.ts`                | `runInteractive` 加 keypress 监听 shift+tab                              |
-| `tests/harness/permission/modes.test.ts` | `modeLabel()` 单测                                                       |
-| `tests/tui/app.test.tsx`                 | 新增 shift+tab 用例：mode 翻 full_auto / default、模式标签可见           |
-| `tests/cli/cli-session.test.ts`          | 新增用例：mock keypress `tab + shift` → mode 翻转 + stderr 输出          |
-| `CHANGELOG.md`                           | W2 扩展：shift+tab 切换 auto / Auto 显示标签                             |
+| 文件                                     | 变更摘要                                                                                                              |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `src/harness/permission/modes.ts`        | 新增 `modeLabel()` helper（导出）                                                                                     |
+| `src/tui/deps.ts`                        | `BuildTuiDepsOptions.permissionMode` + 构造 policy 透传                                                               |
+| `src/tui/run.tsx`                        | 创建 `permissionMode` context，传给 `<TuiApp>` + `buildTuiDeps`                                                       |
+| `src/tui/app.tsx`                        | `TuiAppProps.permissionMode`；全局 useInput shift+tab 分支；模式指示 row                                              |
+| `src/tui/components.tsx`                 | PromptInput useInput 让出 `key.tab && key.shift`（不 return）                                                         |
+| `src/cli/chat-session.ts`                | `runInteractive` 加 keypress 监听 shift+tab                                                                           |
+| `tests/harness/permission/modes.test.ts` | `modeLabel()` 单测                                                                                                    |
+| `tests/tui/app.test.tsx`                 | 新增 shift+tab 用例：mode 翻 full_auto / default、模式标签可见                                                        |
+| `tests/cli/chat-mode-shift-tab.test.ts`  | 新增 6 例：抽出 helper `applyShiftTabModeFlip`（键守卫 + mode 翻转 + ctx 缺省短路）；REPL keypress 监听薄壳不另行 e2e |
+| `CHANGELOG.md`                           | W2 扩展：shift+tab 切换 auto / Auto 显示标签                                                                          |
 
 不动：`ask` / `serve` 入口；modes.ts 枚举；policy.ts 决策；hard-walls；`/permissions` 命令。
 

@@ -47,8 +47,13 @@ export {
   asModeContext,
   modeLabel,
   nextShiftTabMode,
+  applyShiftTabModeFlip,
 } from "./modes.js";
-export type { PermissionMode, PermissionModeContext } from "./modes.js";
+export type {
+  PermissionMode,
+  PermissionModeContext,
+  ShiftTabKeyShape,
+} from "./modes.js";
 
 export {
   createPermissionExecutor,

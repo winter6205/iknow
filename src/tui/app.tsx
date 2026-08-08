@@ -66,7 +66,7 @@ import { VERSION } from "./version.js";
 import {
   createPermissionModeContext,
   modeLabel,
-  nextShiftTabMode,
+  applyShiftTabModeFlip,
   type PermissionModeContext,
 } from "../harness/permission/index.js";
 import { writeIknowState } from "../harness/identity/index.js";
@@ -104,15 +104,19 @@ export function createToolEventSink(): TuiToolEventSink {
       };
     },
   };
-  return sink;
+  return Object.freeze(sink);
 }
 
 /**
  * W2 扩展：TuiAppProps.permissionMode 缺省时的 fallback context。
- * 仅供测试套件历史 mount 使用；product 路径（run.tsx → TuiApp）必须
- * 显式创建并透传，使 Shift+Tab 翻它能被真实观察。
+ * 模块私有 — 仅本文件内 TuiApp fallback 用；product 路径（run.tsx →
+ * TuiApp）必须显式创建并透传，使 Shift+Tab 翻它能被真实观察。tests/tui
+ * 历史 mount 不传 prop 也走 fallback（行为等价 default）。
+ *
+ * 不导出：避免跨 mount 共享可变单例（一个 mount 的 Shift+Tab 翻到全
+ * 局、影响另一 mount 的"看到"的 mode）。
  */
-export const defaultPermissionModeContext: PermissionModeContext =
+const defaultPermissionModeContext: PermissionModeContext =
   createPermissionModeContext("default");
 
 export interface TuiAppProps {
@@ -858,13 +862,25 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     // /permissions 命令不进循环）。ink 在 pty 收到 CSI `Z`（`\x1b[Z`）
     // 时把 key.tab && key.shift 一起置位。注意：不放在 view === "chat"
     // 守卫后——list 视图也允许切 mode（与 Ctrl+Y / Ctrl+C 同层）。
-    // PromptInput 让出 shift+tab：见 components.tsx 注释（components.tsx:124
-    // `key.tab && key.shift` 不 return → 本 handler 同步捕获）。
-    if (key.tab && key.shift && !key.ctrl && !key.meta) {
-      const next = nextShiftTabMode(permissionMode.get());
-      permissionMode.set(next);
-      setPermMode(next);
-      setNotice({ lines: [`权限模式: ${modeLabel(next)}`] });
+    // PromptInput 让出 shift+tab（见 `PromptInput` 让出分支 `if
+    // (key.tab && key.shift) return`）→ ink useInput 广播给本 handler。
+    // 守卫 + mode-flip 副作用走共享 helper `applyShiftTabModeFlip`
+    // （chat-session.ts 同款），避免双份实现 lockstep。
+    if (
+      applyShiftTabModeFlip({
+        key: {
+          name: key.tab ? "tab" : undefined,
+          shift: key.shift,
+          ctrl: key.ctrl,
+          meta: key.meta,
+        },
+        ctx: permissionMode,
+        onFlip: (next) => {
+          setPermMode(next);
+          setNotice({ lines: [`权限模式: ${modeLabel(next)}`] });
+        },
+      })
+    ) {
       return;
     }
     if (key.ctrl && input === "y") {
