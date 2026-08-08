@@ -70,10 +70,10 @@ const PAYLOADS: ReadonlyArray<Payload> = [
   // CRITICAL #3 — 换行作为命令分隔
   { label: "C3 newline sep", cmd: "echo safe\nrm -fr /tmp/x", expect: "deny" },
 
-  // CRITICAL #5 — 环境变量泄露（allowlist 拒绝 echo $X 含元字符 $）
+  // CRITICAL #5 — 环境变量泄露（W4:纯 $VAR 放行 → 通过 ${ } 间接引用仍被硬墙拦下）
   {
-    label: "C5.a echo $SECRET",
-    cmd: "echo $ANTHROPIC_AUTH_TOKEN",
+    label: "C5.a echo ${SECRET} via indirect expansion",
+    cmd: "echo ${ANTHROPIC_AUTH_TOKEN}",
     expect: "deny",
   },
   { label: "C5.b printenv", cmd: "printenv", expect: "deny" },

@@ -10,16 +10,35 @@ export type HardWallId =
 
 const ALLOWED_COMMAND_TOKENS: ReadonlySet<string> = Object.freeze(
   new Set([
+    "mkdir",
+    "cp",
+    "mv",
+    "touch",
+    "tee",
+    "sed",
+    "chmod",
+    "chown",
+    "diff",
+    "file",
+    "base64",
+    "jq",
+    "curl",
+    "env",
+    "export",
+    "unset",
+    "true",
+    "false",
     "echo",
+    "pwd",
+    "printf",
+    "wc",
+    "cat",
+    "head",
+    "tail",
+    "ls",
     "node",
     "npm",
     "git",
-    "ls",
-    "cat",
-    "pwd",
-    "wc",
-    "head",
-    "tail",
     "dir",
     "type",
     "where",
@@ -44,7 +63,6 @@ const DANGEROUS_COMMAND_PATTERNS: readonly string[] = Object.freeze([
   "rd /s",
   " -delete",
   "chmod -r",
-  "chown",
 ]);
 
 const SENSITIVE_PATH_FRAGMENTS: readonly string[] = Object.freeze([
@@ -103,7 +121,6 @@ export function findDangerousPattern(command: string): string | null {
   }
   if (/\$\(/.test(command)) return "$(";
   if (/\$\{/.test(command)) return "${";
-  if (/\$[A-Za-z_]/.test(command)) return "$VAR";
   if (/`/.test(command)) return "`";
   if (/<\s?\(/.test(command)) return "<(";
   if (/\r|\n/.test(command)) return "\\n";
@@ -185,8 +202,11 @@ function isSegmentAllowed(segment: string): boolean {
 // `<<<` is a here-string (read-only stdin feed), no file write — safe.
 const REDIRECTION_PATTERN = /(?:<<<?|>>?|2>>?|2?>)\s*\S+/g;
 
+// `$` is deliberately NOT a segment metachar: a plain `$VAR` read (e.g.
+// `echo $HOME`) is safe and must be allowed. Command substitution / expansion
+// is still blocked — `$(...)` and `${...}` are upstream hard-walled in
+// `findDangerousPattern`, and subshell parens `(`/`)` reject `$(...)` here too.
 const NON_REDIRECT_METACHARS: readonly string[] = Object.freeze([
-  "$",
   "`",
   "\n",
   "\r",

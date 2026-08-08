@@ -23,6 +23,7 @@ import {
 } from "./index.js";
 import { createAciExecutor } from "./aci/index.js";
 import { createPermissionPolicy } from "./permission/policy.js";
+import type { PermissionModeContext } from "./permission/modes.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
 import { createLspNotifier } from "./lsp/notifier.js";
 import type { Registry } from "./tools/types.js";
@@ -54,6 +55,9 @@ export type BuildEngineOpts = {
    *  to re-confirm the same tool each turn. Memory-only (no disk persistence);
    *  cleared when the server restarts. */
   readonly session?: import("./permission/types.js").SessionGrantsPolicySource;
+  /** W2: permission mode context (default / plan / full_auto). REPL slash
+   *  command flips this in place without rebuilding the engine. */
+  readonly permissionMode?: PermissionModeContext;
 };
 
 export type BuiltEngine = {
@@ -144,6 +148,8 @@ export async function buildHarnessEngine(
   // `createAciExecutor` 内部已装配 permission-executor,不要再外包一层。
   const policy = createPermissionPolicy({
     ...(opts.session ? { session: opts.session } : {}),
+    // W2: mode context — REPL toggles this via /permissions; absent → default.
+    ...(opts.permissionMode ? { mode: opts.permissionMode } : {}),
   });
   const executor = createAciExecutor({
     inner: baseExecutor,

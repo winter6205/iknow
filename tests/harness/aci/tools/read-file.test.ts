@@ -70,7 +70,7 @@ describe("createReadFileTool — schema/aci shape", () => {
     assert.equal(schema.properties.offset.minimum, 0);
     assert.equal(schema.properties.limit.type, "integer");
     assert.equal(schema.properties.limit.default, 200);
-    assert.equal(schema.properties.limit.minimum, 0);
+    assert.equal(schema.properties.limit.minimum, 1);
     assert.equal(schema.properties.limit.maximum, 2000);
   });
 
@@ -193,17 +193,95 @@ describe("read_file — offset/limit paging", () => {
     assert.equal(resultLines[1999], "  2000\tn1999");
   });
 
-  it("offset beyond file length yields an empty string (no error)", async () => {
+  it("offset == lines.length throws ToolExecutionError (no silent empty)", async () => {
     const root = await makeScratch("read-file-paging-");
     await writeFile(join(root, "tiny.txt"), "a\nb\n");
 
     const tool = createReadFileTool(root);
+    await assert.rejects(
+      () => tool.handler({ path: "tiny.txt", offset: 2 }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message ===
+          "[read_file] offset 2 past end of file (2 lines); use a smaller offset"
+    );
+  });
+
+  it("offset far past end of file throws ToolExecutionError", async () => {
+    const root = await makeScratch("read-file-paging-");
+    await writeFile(join(root, "tiny.txt"), "a\nb\n");
+
+    const tool = createReadFileTool(root);
+    await assert.rejects(
+      () => tool.handler({ path: "tiny.txt", offset: 100 }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message ===
+          "[read_file] offset 100 past end of file (2 lines); use a smaller offset"
+    );
+  });
+
+  it("limit=0 throws ToolExecutionError (must be ≥ 1)", async () => {
+    const root = await makeScratch("read-file-paging-");
+    await writeFile(join(root, "tiny.txt"), "a\nb\n");
+
+    const tool = createReadFileTool(root);
+    await assert.rejects(
+      () => tool.handler({ path: "tiny.txt", limit: 0 }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message === "[read_file] limit must be a positive integer"
+    );
+  });
+
+  it("limit=-1 throws ToolExecutionError", async () => {
+    const root = await makeScratch("read-file-paging-");
+    await writeFile(join(root, "tiny.txt"), "a\nb\n");
+
+    const tool = createReadFileTool(root);
+    await assert.rejects(
+      () => tool.handler({ path: "tiny.txt", limit: -1 }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message === "[read_file] limit must be a positive integer"
+    );
+  });
+
+  it("limit=1.5 throws ToolExecutionError (not an integer)", async () => {
+    const root = await makeScratch("read-file-paging-");
+    await writeFile(join(root, "tiny.txt"), "a\nb\n");
+
+    const tool = createReadFileTool(root);
+    await assert.rejects(
+      () => tool.handler({ path: "tiny.txt", limit: 1.5 }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message === "[read_file] limit must be a positive integer"
+    );
+  });
+
+  it("empty file returns the [read_file] ok (empty file) marker", async () => {
+    const root = await makeScratch("read-file-paging-");
+    await writeFile(join(root, "blank.txt"), "");
+
+    const tool = createReadFileTool(root);
+    const result = (await tool.handler({ path: "blank.txt" })) as string;
+
+    assert.equal(result, "[read_file] ok (empty file)");
+  });
+
+  it("empty file with offset/limit still returns the empty-file marker", async () => {
+    const root = await makeScratch("read-file-paging-");
+    await writeFile(join(root, "blank.txt"), "");
+
+    const tool = createReadFileTool(root);
     const result = (await tool.handler({
-      path: "tiny.txt",
-      offset: 100,
+      path: "blank.txt",
+      offset: 5,
+      limit: 50,
     })) as string;
 
-    assert.equal(result, "");
+    assert.equal(result, "[read_file] ok (empty file)");
   });
 });
 

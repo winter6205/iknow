@@ -21,6 +21,12 @@ export {
 } from "./workspace.js";
 export type { IknowStateV1, IknowIdentityError } from "./workspace.js";
 
+export { runHostInitScript, runHostInitScriptSafe } from "./host-init.js";
+export type {
+  HostInitScriptResult,
+  RunHostInitScriptOpts,
+} from "./host-init.js";
+
 export { IKNOW_IDENTITY_DEFAULT } from "./identity.js";
 export { IKNOW_SOUL_DEFAULT } from "./soul.js";
 export { IKNOW_BOOTSTRAP_PROMPT } from "./bootstrap.js";

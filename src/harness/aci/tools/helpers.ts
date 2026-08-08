@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { realpath } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
@@ -39,14 +40,20 @@ export interface SpawnWithStopSignalResult {
  * the nearest existing ancestor, then appending the unresolved suffix before
  * the same containment check.
  */
+function expandHome(p: string): string {
+  if (p === "~" || p.startsWith("~/")) return homedir() + p.slice(1);
+  return p;
+}
+
 export async function resolveWithinRoot(
   root: string,
   target: string
 ): Promise<string> {
   const realRoot = await realpath(resolve(root));
-  const absoluteTarget = isAbsolute(target)
-    ? resolve(target)
-    : resolve(realRoot, target);
+  const expandedTarget = expandHome(target);
+  const absoluteTarget = isAbsolute(expandedTarget)
+    ? resolve(expandedTarget)
+    : resolve(realRoot, expandedTarget);
   const resolvedTarget = await realpathWithMissingSuffix(absoluteTarget);
 
   if (!isWithinRoot(realRoot, resolvedTarget)) {

@@ -119,13 +119,16 @@ export function createPermissionExecutor(
         continue;
       }
 
-      // Step 2: checkPermission (hard walls → layers → default)
+      // Step 2: checkPermission (hard walls → layers → mode + default)
       const outcome = checkPermission({
         def,
         input: call.input,
         sources: policy.sources,
         hardWalls: policy.hardWalls,
         defaultByCategory: policy.defaultByCategory,
+        // W2: mode is resolved inside checkPermission — REPL can flip it
+        // without rebuilding the engine.
+        mode: policy.mode,
       });
 
       // Step 3: ask path

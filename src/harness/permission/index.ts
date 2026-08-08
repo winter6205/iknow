@@ -40,6 +40,15 @@ export { createSessionGrants } from "./session-grants.js";
 export type { SessionGrants } from "./session-grants.js";
 
 export {
+  PERMISSION_MODES,
+  DEFAULT_PERMISSION_MODE,
+  parsePermissionMode,
+  createPermissionModeContext,
+  asModeContext,
+} from "./modes.js";
+export type { PermissionMode, PermissionModeContext } from "./modes.js";
+
+export {
   createPermissionExecutor,
   createAciCatalog,
 } from "./permission-executor.js";

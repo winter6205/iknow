@@ -14,6 +14,11 @@ import type {
   SessionGrantsPolicySource,
   ToolCategory,
 } from "./types.js";
+import {
+  asModeContext,
+  type PermissionMode,
+  type PermissionModeContext,
+} from "./modes.js";
 
 export type CategoryDefault = "allow" | "ask" | "ask+hardwall";
 
@@ -53,12 +58,17 @@ export interface PermissionPolicy {
   };
   readonly hardWalls: ReadonlyArray<HardRuleSpec>;
   readonly defaultByCategory: Readonly<Record<ToolCategory, CategoryDefault>>;
+  /** W2: process-level permission mode (default / plan / full_auto). */
+  readonly mode: PermissionModeContext;
 }
 
 export interface CreatePermissionPolicyOpts {
   readonly project?: ProjectSettingsPolicySource;
   readonly session?: SessionGrantsPolicySource;
   readonly defaultByCategory?: Readonly<Record<ToolCategory, CategoryDefault>>;
+  /** W2: Permission mode. Either a static value or a mutable context (REPL
+   *  can flip via `/permissions full_auto` without rebuilding the engine). */
+  readonly mode?: PermissionMode | PermissionModeContext;
 }
 
 export function createPermissionPolicy(
@@ -77,6 +87,7 @@ export function createPermissionPolicy(
     defaultByCategory: opts?.defaultByCategory
       ? Object.freeze({ ...opts.defaultByCategory })
       : DEFAULT_BY_CATEGORY,
+    mode: asModeContext(opts?.mode),
   });
 }
 
@@ -86,12 +97,17 @@ export interface CheckPermissionInput {
   readonly sources: PermissionPolicy["sources"];
   readonly hardWalls: ReadonlyArray<HardRuleSpec>;
   readonly defaultByCategory: Readonly<Record<ToolCategory, CategoryDefault>>;
+  /** W2: mode context — resolved at call time so a REPL `/permissions`
+   *  toggle takes effect for subsequent tool calls without rebuilding. */
+  readonly mode?: PermissionModeContext;
 }
 
 export function checkPermission(opts: CheckPermissionInput): PermissionOutcome {
   const { def, input } = opts;
   const ctx = { tool: def.name, input };
 
+  // 1. Hard-walls FIRST — un-overrideable in any mode. This is the security
+  //    backstop and must run before mode resolution.
   for (const hardWall of opts.hardWalls) {
     if (hardWall.match(ctx)) {
       return {
@@ -101,6 +117,8 @@ export function checkPermission(opts: CheckPermissionInput): PermissionOutcome {
     }
   }
 
+  // 2. Layered rules (session > project > code). First match wins per layer
+  //    priority. Mode does NOT relax layer rules — only fills the gap.
   const layerOrder: ReadonlyArray<PermissionSource> = [
     "session",
     "project",
@@ -114,7 +132,27 @@ export function checkPermission(opts: CheckPermissionInput): PermissionOutcome {
     }
   }
 
+  // 3. Mode + category default resolution.
+  const mode: PermissionMode = opts.mode?.get() ?? "default";
   const category = def.aci.category;
+
+  if (mode === "full_auto") {
+    // Full-auto allows every non-hard-walled tool. The user opted in
+    // explicitly; sensitive paths / dangerous commands are still blocked by
+    // step 1 above.
+    return {
+      decision: "allow",
+      reason: `mode: full_auto → allow (${category})`,
+    };
+  }
+  if (mode === "plan" && category !== "read-only") {
+    // Plan mode treats mutating tools as denied without asking — useful for
+    // "只看不改" planning sessions.
+    return {
+      decision: "deny",
+      reason: `mode: plan blocks mutating tools (${category})`,
+    };
+  }
   if (opts.defaultByCategory[category] === "allow") {
     return {
       decision: "allow",
