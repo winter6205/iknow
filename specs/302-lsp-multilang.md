@@ -129,7 +129,7 @@ export const Pyright: LspServerInfo = {
 
 export const SERVERS = [Typescript, Pyright, YamlLS, JsonLS, DockerfileLS] as const;
 export function resolveServer(file: string): LspServerInfo | undefined {
-  const ext = path.extname(file) || file;   // 无扩展名用全文件名（Dockerfile）
+  const ext = path.extname(file) || path.basename(file); // basename：handler 传全路径
   return SERVERS.find(s => s.extensions.includes(ext));
 }
 ```
@@ -149,10 +149,11 @@ export const LANGUAGE_EXTENSIONS: Record<string, string> = {
   ".yml": "yaml",
   ".json": "json",
   ".dockerfile": "dockerfile",
+  Dockerfile: "dockerfile", // 无扩展名全文件名（与 resolveServer basename 回退一致）
 } as const;
 
 export function languageIdFor(file: string): string {
-  const ext = path.extname(file) || file;
+  const ext = path.extname(file) || path.basename(file); // basename：handler 传全路径
   return LANGUAGE_EXTENSIONS[ext] ?? "typescript"; // 回退 typescript（守现有 TS 行为）
 }
 ```

@@ -46,8 +46,9 @@ describe("languageIdFor", () => {
     ["a.yml", "yaml"],
     ["a.json", "json"],
     ["a.dockerfile", "dockerfile"],
-    // 回退 typescript
-    ["Dockerfile", "typescript"],
+    // Dockerfile（无扩展名全文件名）→ dockerfile；与 resolveServer basename 路由一致
+    ["Dockerfile", "dockerfile"],
+    ["/proj/Dockerfile", "dockerfile"],
     [".dockerfile", "dockerfile"],
     ["Makefile", "typescript"],
     ["a.txt", "typescript"],
