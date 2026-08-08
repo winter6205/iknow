@@ -23,6 +23,11 @@ export interface TuiAskUserBridge {
   readonly resolveAsk: (id: string, approved: boolean) => boolean;
   readonly pending: () => TuiPendingAsk | undefined;
   readonly pendingCount: () => number;
+  /** #279 项3：pending 变化通知（enqueue / settle 各触发一次）。TUI 据此
+   *  即时 re-render 挂/摘 modal——此前 pending 只能靠「恰好的」re-render
+   *  被看见（turn 流式刷新兜底；idle 直发 ask 会延迟到下一次无关渲染）。
+   *  返回退订函数。 */
+  readonly subscribe: (cb: () => void) => () => void;
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -40,6 +45,10 @@ export function createTuiAskUserBridge(opts?: {
     }
   >();
   let counter = 0;
+  const subs = new Set<() => void>();
+  const notify = (): void => {
+    for (const cb of subs) cb();
+  };
 
   function settle(id: string, approved: boolean): boolean {
     const entry = queue.get(id);
@@ -47,6 +56,7 @@ export function createTuiAskUserBridge(opts?: {
     queue.delete(id);
     clearTimeout(entry.timer);
     entry.resolve(approved);
+    notify();
     return true;
   }
 
@@ -64,6 +74,7 @@ export function createTuiAskUserBridge(opts?: {
         resolve,
         timer,
       });
+      notify();
     });
   };
 
@@ -73,5 +84,11 @@ export function createTuiAskUserBridge(opts?: {
       settle(id, approved),
     pending: (): TuiPendingAsk | undefined => queue.values().next().value?.info,
     pendingCount: () => queue.size,
+    subscribe: (cb: () => void): (() => void) => {
+      subs.add(cb);
+      return () => {
+        subs.delete(cb);
+      };
+    },
   });
 }

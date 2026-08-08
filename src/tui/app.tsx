@@ -30,7 +30,15 @@ import {
   useWindowSize,
 } from "ink";
 import type { TuiBridge } from "./hub-bridge.js";
-import type { TuiAskUserBridge } from "./ask-user.js";
+import type { TuiAskUserBridge, TuiPendingAsk } from "./ask-user.js";
+import type { SessionGrants } from "../harness/permission/session-grants.js";
+import {
+  ModalHost,
+  PERMISSION_ANSWERS,
+  permissionModalRows,
+  reduceModalKey,
+  type PermissionAnswer,
+} from "./modal.js";
 import {
   DRAFT_SESSION_ID,
   attachSession,
@@ -137,6 +145,13 @@ export interface TuiAppProps {
    * product 路径（run.tsx → TuiApp）必须显式传。
    */
   readonly permissionMode?: PermissionModeContext;
+  /**
+   * #279 项3：权限 modal「总是允许」的落点 —— 会话级授权登记表（session
+   * 层规则最高优先，后续同工具调用不再触发 ask）。run.tsx 创建并同时注入
+   * buildTuiDeps（policy session 源）与 TuiApp；测试 mount 可缺省（缺省时
+   * 「总是允许」等价「本次允许」，零回归）。
+   */
+  readonly sessionGrants?: SessionGrants;
 }
 
 interface Notice {
@@ -167,7 +182,10 @@ export function chromeReserveRows(opts: {
   readonly inputHintRows: number;
   /** 后台运行中标记行是否显示。 */
   readonly bgLine: boolean;
+  /** #279 项3：活动 modal 盒子行数（selectModalRows 折行预测；0/缺省 = 无 modal）。 */
+  readonly modalRows?: number;
 }): number {
+  const modalRows = opts.modalRows ?? 0;
   return (
     1 + // ChatView marginTop headroom（顶部留白 1 行）
     1 + // 权限 mode 指示行
@@ -177,6 +195,8 @@ export function chromeReserveRows(opts: {
     1 + // ask 槽（ChatView tail，恒预留）
     // notice 本体 + 自身 marginBottom=1（notice 非末位子，margin 不折叠）
     (opts.noticeRows > 0 ? opts.noticeRows + 1 : 0) +
+    // #279 项3：modal 本体 + 自身 marginBottom=1（盒子非末位，margin 不折叠）
+    (modalRows > 0 ? modalRows + 1 : 0) +
     (opts.bgLine ? 1 : 0)
   );
 }
@@ -224,6 +244,12 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   // 不走轮询：TUI 当前无其它改 mode 路径（/permissions 在 TUI 词表里没有），
   // 单一触发源（Shift+Tab）直接 set，省一个常驻 tick。
   const [permMode, setPermMode] = useState(() => permissionMode.get());
+  // #279 项3：权限 modal 槽状态。dismissed = Esc 收起后退回旧的「输入框 y/n」
+  // 路径（向后兼容）；permissionIndex = ↑↓/Enter 导航的选中项。新 ask id 到来
+  // 时 render-body 复位（见 askPending 后的 lastAskIdRef 守卫）——hooks 声明
+  // 必须在 viewportRows useMemo 之前（modal 行数入账依赖 dismissed）。
+  const [askModalDismissed, setAskModalDismissed] = useState(false);
+  const [permissionIndex, setPermissionIndex] = useState(0);
   // #238 鼠标拖选选区（未 normalize）：null = 无活动选区。drag 期间不断
   // 更新；mouseup 时若非空 → 调 copyToClipboard，并清空。滚动 / 切会话 / new
   // 会话 → 一律清空，避免 stale 状态。
@@ -276,9 +302,22 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   const [listEntries, setListEntries] = useState<ReadonlyArray<TuiListEntry>>(
     []
   );
-  // 根 tick 仅轮询 askBridge.pending()（组件树外状态）：有 pending 时才
-  // 挂载，idle 且无授权待决时不强制整树 10Hz 重渲染（spinner 自带 tick）。
-  const askTick = askBridge.pending() !== undefined;
+  // #279 项3：pending 变化推送（subscribe）——enqueue/settle 即时 re-render，
+  // modal 挂/摘不再依赖「恰好的」re-render（idle 直发 ask 也能立刻见 modal）。
+  // pending 本体存 state（而非版本号）：viewportRows useMemo 需要它做依赖——
+  // 只 bump 版本计数器时 render-body 复位值不变、React bail，memo 返回不含
+  // modalRows 的旧缓存而 ModalHost 已渲盒子 → 整帧溢出 modalRows+1。
+  const [askPending, setAskPending] = useState<TuiPendingAsk | undefined>(
+    askBridge.pending()
+  );
+  useEffect(() => {
+    setAskPending(askBridge.pending());
+    return askBridge.subscribe(() => setAskPending(askBridge.pending()));
+  }, [askBridge]);
+  // 根 tick 仅轮询 pending（超时 settle 兜底）：有 pending 时才挂载，idle
+  // 且无授权待决时不强制整树 10Hz 重渲染（spinner 自带 tick）。
+  // subscribe 已推送变更，tick 仅作超时 settle 等边缘场景的兜底。
+  const askTick = askPending !== undefined;
   useTick(askTick ? 100 : 0);
 
   // 方案 B + 完整眼常驻（2026-08-08 用户二次裁定「不坍塌，完整历史」）：
@@ -328,13 +367,31 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     const bgLine = Object.values(sessions).some(
       (s) => s.runState === "running-bg"
     );
+    // #279 项3：权限 modal 活动时盒子行数入账（selectModalRows 视觉宽度折行
+    // 预测 SSOT）——漏账会让整帧高于终端行数、上卷顶走 banner（#268 同类回归）。
+    // 读 askPending state（subscribe 回调写入）而非直调 askBridge.pending()：
+    // state 入 deps，ask 到达/结束时 memo 才会重算把 modalRows 入账。
+    const modalAsk =
+      view === "chat" && !askModalDismissed ? askPending : undefined;
+    const modalRows =
+      modalAsk !== undefined ? permissionModalRows(modalAsk, cols) : 0;
     const reserved = chromeReserveRows({
       noticeRows: noticeLines,
       inputHintRows: hintRows,
       bgLine,
+      modalRows,
     });
     return Math.max(5, rows - reserved);
-  }, [rows, notice, cols, inputValue, sessions]);
+  }, [
+    rows,
+    notice,
+    cols,
+    inputValue,
+    sessions,
+    view,
+    askModalDismissed,
+    askPending,
+  ]);
 
   // 工具事件订阅：T4 (#175) 优先按 tool_use_id 配对入结构化运行状态;
   // 缺 toolUseId 时落回 legacy 字符串行追加(向后兼容)。detail 按 cols 收口
@@ -464,7 +521,56 @@ export function TuiApp(props: TuiAppProps): ReactElement {
   }, [stdin, stdout]);
 
   const active = sessions[activeKey] ?? initial;
-  const askPending = askBridge.pending();
+
+  // #279 项3：新 ask id 到来 → render-body 复位 modal 状态（React 允许渲染期
+  // setState 并立即重渲染本组件，不会出现一帧陈旧 modal；ask 结束 id 变
+  // undefined 时只更新 ref，不动状态）。
+  const askId = askPending?.id;
+  const lastAskIdRef = useRef<string | undefined>(undefined);
+  if (askId !== lastAskIdRef.current) {
+    lastAskIdRef.current = askId;
+    if (askId !== undefined) {
+      setAskModalDismissed(false);
+      setPermissionIndex(0);
+    }
+  }
+  // modal 活跃 = chat 视图 + 有 pending ask + 未被 Esc 收起。活跃时输入框
+  // 让出键位（disabled），y/a/n / ↑↓+Enter / Esc 全走 modal 键路由。
+  const askModalActive =
+    view === "chat" && askPending !== undefined && !askModalDismissed;
+
+  /** #279 项3：权限 modal 应答落点。once/always → 放行；always 追加 session
+   *  层 allow 规则（后续同工具不再 ask）；reject → 拒绝。resolveAsk 返回
+   *  false（60s 超时已先 settle 的竞态）时不做任何副作用——授权/提示不能
+   *  落在一个并未真正放行的 ask 上。 */
+  function resolvePermissionAsk(
+    pending: TuiPendingAsk,
+    answer: PermissionAnswer
+  ): void {
+    const settled = askBridge.resolveAsk(pending.id, answer !== "reject");
+    if (!settled) return;
+    if (answer === "always") {
+      const tool = pending.tool;
+      props.sessionGrants?.add({
+        // Map.set 同 id 覆盖 → 重复授权天然去重。
+        id: `tui-always-${tool}`,
+        match: ({ tool: t }) => t === tool,
+        decision: "allow",
+        reason: `TUI 用户在权限确认 modal 选择「总是允许」（${tool}）`,
+      });
+      setNotice({
+        lines: [
+          props.sessionGrants !== undefined
+            ? `已允许 ${tool}（本会话总是允许）`
+            : `已允许 ${tool}`,
+        ],
+      });
+      return;
+    }
+    if (answer === "reject") {
+      setNotice({ lines: [`已拒绝 ${pending.tool}`] });
+    }
+  }
 
   // #238 stale-closure 修复：stdin 的 mouse listener 用 useEffect + 稳定 deps
   // 注册一次（不随每次 render 重绑，避免丢事件），但它捕获首帧闭包。mouseup
@@ -823,15 +929,20 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     setInputValue("");
     const text = raw.trim();
     if (text.length === 0) return;
-    // askUser 待决：y/n 优先于普通输入（权限确认高于对话）。
+    // askUser 待决：y/n/a 优先于普通输入（权限确认高于对话）。modal 收起
+    // （Esc）后的兼容路径——与 modal 键路由同一 resolvePermissionAsk 落点。
     if (askPending) {
       const lower = text.toLowerCase();
       if (lower === "y" || lower === "yes") {
-        askBridge.resolveAsk(askPending.id, true);
+        resolvePermissionAsk(askPending, "once");
+        return;
+      }
+      if (lower === "a" || lower === "always") {
+        resolvePermissionAsk(askPending, "always");
         return;
       }
       if (lower === "n" || lower === "no") {
-        askBridge.resolveAsk(askPending.id, false);
+        resolvePermissionAsk(askPending, "reject");
         return;
       }
     }
@@ -961,6 +1072,41 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       return;
     }
     if (view !== "chat") return;
+    // #279 项3：权限 modal 活跃时独占键位（PromptInput 已 disabled 让出）：
+    // y/a/n 直选、↑↓+Enter 导航确认、Esc 收起退回输入框 y/n 兼容路径；
+    // 其余键全吞（openharness permission modal 同语义，防误滚动/误输入）。
+    // Ctrl+C / Ctrl+Y / Shift+Tab 在本分支之前已处理，不受影响。
+    if (askModalActive && askPending !== undefined) {
+      const action = reduceModalKey(
+        {
+          input,
+          key: {
+            upArrow: key.upArrow,
+            downArrow: key.downArrow,
+            return: key.return,
+            escape: key.escape,
+            ctrl: key.ctrl,
+            meta: key.meta,
+          },
+        },
+        { options: PERMISSION_ANSWERS, selectedIndex: permissionIndex }
+      );
+      switch (action.type) {
+        case "move":
+          setPermissionIndex(action.index);
+          break;
+        case "select":
+          resolvePermissionAsk(askPending, action.value as PermissionAnswer);
+          break;
+        case "dismiss":
+          // Esc：收起 modal，ask 提示行回 ChatView tail，输入框 y/n 兜底。
+          setAskModalDismissed(true);
+          break;
+        case "ignore":
+          break;
+      }
+      return;
+    }
     // Ctrl+O：展示思考（只展开，不折叠；用户 2026-08-08 澄清语义——折叠/
     // 切换归 /thinking）。已展开时保持 no-op。PromptInput 对 ctrl 组合键
     // 早返回让出（components.tsx `key.ctrl → return`），不吞键。
@@ -1019,10 +1165,12 @@ export function TuiApp(props: TuiAppProps): ReactElement {
               : []
           }
           askLine={
-            askPending
+            // #279 项3：modal 活跃时提示由 modal 承载（避免双份渲染）；
+            // Esc 收起后退回 ChatView tail 文本行（旧路径，输入框 y/n 兜底）。
+            askPending !== undefined && !askModalActive
               ? `[ask] 允许 ${askPending.tool}？${
                   askPending.summaryHint ? ` ${askPending.summaryHint}` : ""
-                } 输入 y/n`
+                } 输入 y/a/n（a=总是允许）`
               : undefined
           }
           scrollRows={chatScroll}
@@ -1044,6 +1192,24 @@ export function TuiApp(props: TuiAppProps): ReactElement {
           ))}
         </Box>
       )}
+      {/* #279 项3：modal 渲染槽（ModalHost 分派）——权限 ask 待决且未收起时
+          渲染 y/a/n 确认盒子，位于输入框上方。行数由 viewportRows 的
+          chromeReserveRows modalRows 入账（行账 SSOT），窄终端不溢出。 */}
+      {view === "chat" && (
+        <ModalHost
+          modal={
+            askModalActive && askPending !== undefined
+              ? {
+                  kind: "permission",
+                  tool: askPending.tool,
+                  summaryHint: askPending.summaryHint,
+                  selectedIndex: permissionIndex,
+                }
+              : undefined
+          }
+          cols={cols}
+        />
+      )}
       {/* W2 扩展：权限模式指示行（仅聊天视图；list 视图顶部已有表头不重复）。
           右对齐、dim；窄列（cols < 40）降级为简短形态。Shift+Tab 切换后
           permMode state 驱动 re-render。 */}
@@ -1061,8 +1227,15 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       {view === "chat" && (
         <PromptInput
           value={inputValue}
-          placeholder={askPending ? "y/n 确认工具授权" : "输入消息或 /help"}
+          placeholder={
+            askPending
+              ? askModalActive
+                ? "modal 键位接管中（Esc 退回输入）"
+                : "y/a/n 确认工具授权（a=总是允许）"
+              : "输入消息或 /help"
+          }
           active={active.runState === "running-fg"}
+          disabled={askModalActive}
           onChange={setInputValue}
           onSubmit={(v) => void handleSubmit(v)}
           onSelectHint={(cmd) => void handleSubmit(`/${cmd}`)}

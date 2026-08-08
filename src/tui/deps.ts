@@ -25,6 +25,7 @@ import {
 } from "../harness/memory/index.js";
 import type { AskUser } from "../harness/permission/types.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
+import type { SessionGrants } from "../harness/permission/session-grants.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
 import { homedir } from "node:os";
 
@@ -56,6 +57,12 @@ export interface BuildTuiDepsOptions {
    * 仍走 asModeContext 自适配）。
    */
   readonly permissionMode?: PermissionModeContext;
+  /**
+   * #279 项3：会话级授权登记表 —— 权限 modal「总是允许」写入 session 层
+   * allow 规则（最高优先 normal 层），后续同工具调用 checkPermission 直接
+   * 放行不再 ask。缺省 = 无 session 层（历史行为）。
+   */
+  readonly sessionGrants?: SessionGrants;
 }
 
 export function buildTuiDeps(
@@ -97,6 +104,7 @@ export function buildTuiDeps(
   const baseExecutor = createExecutor(reg.inner);
   const policy = createPermissionPolicy({
     ...(opts.permissionMode ? { mode: opts.permissionMode } : {}),
+    ...(opts.sessionGrants ? { session: opts.sessionGrants } : {}),
   });
   const executor = createAciExecutor({
     inner: baseExecutor,

@@ -18,6 +18,7 @@ import { createTuiAskUserBridge } from "./ask-user.js";
 import { createInflightRegistry, createTuiBridge } from "./hub-bridge.js";
 import { TuiApp, createToolEventSink } from "./app.js";
 import { attachSession } from "./session-state.js";
+import { createSessionGrants } from "../harness/permission/session-grants.js";
 import { initIknowWorkspaceSafe } from "../harness/identity/index.js";
 import {
   createPermissionModeContext,
@@ -55,11 +56,15 @@ export async function runTui(opts: RunTuiOptions): Promise<void> {
   const permissionMode: PermissionModeContext = createPermissionModeContext(
     parsePermissionMode(process.env.IKNOW_PERMISSION_MODE) ?? "default"
   );
+  // #279 项3：会话级授权登记表 —— 权限 modal「总是允许」写入这里；deps policy
+  // 的 session 层读它（同一实例），后续同工具调用不再 ask。
+  const sessionGrants = createSessionGrants();
   const deps = buildTuiDeps(bundle, {
     askUser: askBridge.ask,
     onToolEvent: (event) => toolEventSink.emit(event),
     soleInflightId: () => inflight.soleId(),
     permissionMode,
+    sessionGrants,
   });
   const bridge = createTuiBridge({
     dataDir: opts.dataDir,
@@ -85,6 +90,7 @@ export async function runTui(opts: RunTuiOptions): Promise<void> {
       cwd={cwd}
       dataDir={dataDir}
       permissionMode={permissionMode}
+      sessionGrants={sessionGrants}
     />,
     { exitOnCtrlC: false, kittyKeyboard: { mode: "disabled" } } // Ctrl+C 语义自管：打断前台 turn（Q1a）；kittyKeyboard disabled 避免 ink 启动期 kitty probe 的 200ms 窗口吞 stdin data（实测真实 pty 下导致首个 Enter / 滚轮 SGR 事件丢失）
   );
