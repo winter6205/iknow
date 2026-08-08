@@ -7,6 +7,7 @@ import type {
   PostMessageResponse,
   ResetSessionResponse,
   SessionListItem,
+  SessionsResponse,
   TraceFieldDef,
   TraceQueryParams,
   TracesResponse,
@@ -216,6 +217,7 @@ function traceQueryString(params: TraceQueryParams): string {
   if (params.status) sp.set("status", params.status);
   if (params.limit !== undefined) sp.set("limit", String(params.limit));
   if (params.offset !== undefined) sp.set("offset", String(params.offset));
+  if (params.poll !== undefined) sp.set("poll", String(params.poll));
   return sp.toString();
 }
 
@@ -231,4 +233,33 @@ export function getTraceFields(
   signal?: AbortSignal
 ): Promise<{ fields: ReadonlyArray<TraceFieldDef> }> {
   return request(`${TRACE_API}/fields`, {}, signal);
+}
+
+// -- Trace session list (spec v2: 会话列表 → 下钻) ----------------------------
+
+/**
+ * Trace 会话列表（读侧 trace 进程 `GET /api/v1/sessions`，spec SC-R 10）。
+ * 与 session-api 的 `listSessions`（chat 会话）不同——这是 trace 面板自己的
+ * 会话目录列表（conversation_id / mtime / size / agent_version）。
+ *
+ * spec Open Q3: 端点定在 `/api/v1/sessions`（与 `/api/v1/traces` 平级），由
+ * trace 进程提供。trace 页面由该进程托管，其 origin 与 TRACE_API 相同
+ * （TRACE_API = <origin>/api/v1/traces），故从 TRACE_API 提取 origin 后拼
+ * `<origin>/api/v1/sessions`。VITE_TRACE_API_BASE 覆盖 origin 时同样生效。
+ */
+function traceSessionsBase(): string {
+  if (TRACE_API.startsWith("http://") || TRACE_API.startsWith("https://")) {
+    try {
+      return new URL(TRACE_API).origin + "/api/v1/sessions";
+    } catch {
+      return "/api/v1/sessions";
+    }
+  }
+  return "/api/v1/sessions";
+}
+
+export function getTraceSessions(
+  signal?: AbortSignal
+): Promise<SessionsResponse> {
+  return request(traceSessionsBase(), {}, signal);
 }
