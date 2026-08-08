@@ -93,9 +93,7 @@ async function resolveNpmBin(
     );
     const binField = JSON.parse(readFileSync(pkgJson, "utf8")).bin;
     const binRel: string | undefined =
-      typeof binField === "string"
-        ? binField
-        : binField?.[binName];
+      typeof binField === "string" ? binField : binField?.[binName];
     if (typeof binRel === "string") {
       const bin = createRequire(import.meta.url).resolve(
         `${pkgName}/${binRel}`
@@ -362,11 +360,13 @@ export const SERVERS = [
 /**
  * resolveServer(file) — 从 file 扩展名选择 LSP server（#304 决策1/2）。
  *
- * `const ext = path.extname(file) || file;`：无扩展名（如根目录 `Dockerfile`）用全
- * 文件名匹配。在 `SERVERS` 里按声明序找第一个 `extensions.includes(ext)` 的 server
+ * `const ext = path.extname(file) || path.basename(file);`：无扩展名（如根目录
+ * `Dockerfile`）用 basename 匹配——handler 层传 `params.file` 是完整路径，回退
+ * 若用全路径则 `"/proj/Dockerfile"` 永不命中 `Dockerfile`（#302 修复）。在
+ * `SERVERS` 里按声明序找第一个 `extensions.includes(ext)` 的 server
  * （单命中，无并集）；空数组或无匹配 → `undefined`（不 throw）。
  */
 export function resolveServer(file: string): LspServerInfo | undefined {
-  const ext = path.extname(file) || file;
+  const ext = path.extname(file) || path.basename(file);
   return SERVERS.find((s) => s.extensions.includes(ext));
 }

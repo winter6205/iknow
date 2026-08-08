@@ -218,8 +218,19 @@ describe("resolveServer", () => {
     assert.equal(resolveServer("Dockerfile"), DockerfileLS);
   });
 
+  it("routes extension-less Dockerfile with full path → DockerfileLS", () => {
+    // handler 层传 `params.file` 是完整路径（如 `/proj/Dockerfile`）。
+    // `path.extname("/proj/Dockerfile")` 为空 → 回退用 basename 命中
+    // `Dockerfile`（不能回退全路径，否则 `"/proj/Dockerfile"` 永不匹配）。
+    assert.equal(resolveServer("/proj/Dockerfile"), DockerfileLS);
+    assert.equal(resolveServer("/a/b/c/Dockerfile"), DockerfileLS);
+  });
+
   it("routes .dockerfile → DockerfileLS", () => {
-    assert.equal(resolveServer("container/Dockerfile.dev.dockerfile"), DockerfileLS);
+    assert.equal(
+      resolveServer("container/Dockerfile.dev.dockerfile"),
+      DockerfileLS
+    );
   });
 
   it("routes .ts → Typescript (保底不回归)", () => {
