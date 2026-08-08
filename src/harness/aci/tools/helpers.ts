@@ -45,9 +45,24 @@ function expandHome(p: string): string {
   return p;
 }
 
+/**
+ * Resolve a target through symlinks and require its real location to stay under
+ * the real workspace root. Missing write targets are supported by realpathing
+ * the nearest existing ancestor, then appending the unresolved suffix before
+ * the same containment check.
+ *
+ * `extraReadRoots` (optional) adds additional containment roots for read-only
+ * tools that legitimately need to reach outside the primary sandbox root —
+ * e.g. the user profile at `~/.iknow/user.md`, which the assembly layer
+ * already injects every turn but which the agent may also want to re-read
+ * directly. A target is allowed if it falls under `root` OR any extra root.
+ * Write tools (`edit_file` / `write_file`) do NOT pass extraReadRoots, so
+ * the write containment stays cwd-scoped.
+ */
 export async function resolveWithinRoot(
   root: string,
-  target: string
+  target: string,
+  extraReadRoots?: readonly string[]
 ): Promise<string> {
   const realRoot = await realpath(resolve(root));
   const expandedTarget = expandHome(target);
@@ -56,7 +71,11 @@ export async function resolveWithinRoot(
     : resolve(realRoot, expandedTarget);
   const resolvedTarget = await realpathWithMissingSuffix(absoluteTarget);
 
-  if (!isWithinRoot(realRoot, resolvedTarget)) {
+  const withinPrimary = isWithinRoot(realRoot, resolvedTarget);
+  const withinExtras = (extraReadRoots ?? []).some((r) =>
+    isWithinRoot(resolve(r), resolvedTarget)
+  );
+  if (!withinPrimary && !withinExtras) {
     throw new ToolExecutionError(
       `path outside workspace: ${resolvedTarget} not under ${realRoot}`
     );
