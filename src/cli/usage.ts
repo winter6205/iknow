@@ -49,6 +49,7 @@ export function usageText(): string {
                                 / serve/trace host (default 127.0.0.1)
   --data-dir <dir>              会话池根目录，默认 ~/.iknow / session pool root (default ~/.iknow)
   --max-bytes <n>               trace 单次读取字节上限，默认 8 MiB / trace read cap (default 8 MiB)
+  --no-open                     trace 不自动打开浏览器（CI/headless）/ trace: do not auto-open browser (CI/headless)
 
 会话内命令 / In-chat commands:
   /help  /status  /quit  /json on|off  /reset
@@ -58,6 +59,9 @@ export function usageText(): string {
   • 空 ask/query → 用法 + exit 1（无默认 demo 问句）/ empty ask → usage + exit 1
   • ask 输出 JSON；chat 默认人类可读 / ask→JSON, chat→human view
   • serve 打开 http://host:port/ ；API 见 src/session-api/contract.ts
+• trace 默认读 ./trace/ 目录并自动开浏览器（--no-open 关闭）；检测到旧 ./trace.jsonl 需先跑迁移脚本
+    / trace defaults to ./trace/ and auto-opens the browser (--no-open disables);
+    if an old ./trace.jsonl exists, run npx tsx scripts/trace-migrate.ts first
 • trace 独立进程读 /api/v1/traces + /fields + /health；写侧仍由 serve/chat/ask 的 --trace-out 负责
     / trace is a separate process; serve/chat/ask still write via --trace-out
   • tui 与 serve 共享 ~/.iknow 会话池；tui 内 /help 看 slash 词表 / tui shares the pool

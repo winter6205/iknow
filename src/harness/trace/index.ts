@@ -11,6 +11,8 @@ export type {
   LlmCallRecord,
   ToolCallRecord,
   TurnRecord,
+  SessionRecord,
+  SandboxCmdRecord,
 } from "./types.js";
 
 export { createNoopTraceService } from "./noop.js";

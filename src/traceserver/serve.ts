@@ -5,10 +5,15 @@
  * process so JSONL reads no longer share a process with the LLM streaming
  * session hub. Routes:
  *   GET /api/v1/health            -> { ok, service, version }
+ *   GET /api/v1/sessions          -> 会话目录列表 (v2, delegated to http.ts)
  *   GET /api/v1/traces[?...]      -> delegated to handleTracesRequest
  *   GET /api/v1/traces/fields     -> delegated to handleTracesRequest
  *   GET <other>                   -> static SPA (trace.html) via
  *                                   ../web/serve-static (API routes win)
+ *
+ * v2 目录语义: traceOut 是「每会话一文件」的目录 `<traceDir>/<convId>.jsonl`
+ * (写侧 T2 jsonl.ts 目录语义)。serve 仅解析并透传 traceDir, 路由/解析都在
+ * http.ts。
  *
  * Error mapping (S3):
  *   ValidationError  -> 400 validation
@@ -19,7 +24,7 @@ import * as http from "node:http";
 import * as path from "node:path";
 import { isIknowError, ValidationError } from "../shared/errors.js";
 import { TraceReadError } from "./types.js";
-import { handleTracesRequest } from "./http.js";
+import { handleTracesRequest, handleSessionsRequest } from "./http.js";
 import { getVersion } from "../cli/usage.js";
 import {
   resolveDefaultWebRoot,
@@ -27,7 +32,7 @@ import {
 } from "../web/serve-static.js";
 
 export interface TraceServeOptions {
-  /** Absolute or CWD-relative path to the JSONL trace file (writer side). */
+  /** Absolute or CWD-relative path to the trace directory (writer side). */
   readonly traceOut?: string;
   readonly host?: string;
   readonly port?: number;
@@ -53,14 +58,14 @@ export function startTraceServe(
 ): Promise<TraceListeningServer> {
   const host = opts.host ?? "127.0.0.1";
   const port = opts.port ?? 24881;
-  const traceFilePath = opts.traceOut ? path.resolve(opts.traceOut) : undefined;
+  const traceDir = opts.traceOut ? path.resolve(opts.traceOut) : undefined;
   const webRoot = opts.webRoot ?? resolveDefaultWebRoot();
 
   const server = http.createServer((req, res) => {
     void handleRequest({
       req,
       res,
-      traceFilePath,
+      traceDir,
       maxBytes: opts.maxBytes,
       webRoot,
     });
@@ -88,13 +93,13 @@ export function startTraceServe(
 interface HandleRequestOpts {
   readonly req: http.IncomingMessage;
   readonly res: http.ServerResponse;
-  readonly traceFilePath?: string;
+  readonly traceDir?: string;
   readonly maxBytes?: number;
   readonly webRoot: string;
 }
 
 async function handleRequest(opts: HandleRequestOpts): Promise<void> {
-  const { req, res, traceFilePath, maxBytes, webRoot } = opts;
+  const { req, res, traceDir, maxBytes, webRoot } = opts;
   try {
     const method = (req.method ?? "GET").toUpperCase();
     const url = new URL(
@@ -106,11 +111,19 @@ async function handleRequest(opts: HandleRequestOpts): Promise<void> {
     if (method === "GET" && pathname === "/api/v1/health") {
       return sendHealth(res);
     }
+    if (method === "GET" && pathname === "/api/v1/sessions") {
+      return handleSessionsRequest({
+        res,
+        url,
+        traceDir,
+        ...(maxBytes !== undefined ? { maxBytes } : {}),
+      });
+    }
     if (method === "GET" && pathname.startsWith("/api/v1/traces")) {
       return handleTracesRequest({
         res,
         url,
-        traceFilePath,
+        traceDir,
         ...(maxBytes !== undefined ? { maxBytes } : {}),
       });
     }

@@ -52,6 +52,11 @@ export type ParsedCli = {
    * 缺失值 / 非整数 / < 1 抛错。
    */
   maxTurns?: number;
+  /**
+   * T7: `--no-open` 关闭 `iknow trace` 启动后的自动开浏览器（CI/headless）。
+   * 缺省 false = 默认自动 open。
+   */
+  noOpen: boolean;
 };
 
 export type ParseArgsOptions = {
@@ -79,6 +84,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   let dataDir: string | undefined;
   let maxBytes: number | undefined;
   let maxTurns: number | undefined;
+  let noOpen = false;
   const rest: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
@@ -94,6 +100,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           dataDir,
           maxBytes,
           maxTurns,
+          noOpen,
           query: "",
           missingQuery: false,
           versionOnly: false,
@@ -146,6 +153,9 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
         throw new Error(`Invalid --max-turns: ${raw}`);
       }
       maxTurns = n;
+    } else if (a === "--no-open") {
+      // T7: 布尔 flag（无实参），关闭 trace 自动开浏览器（CI/headless）。
+      noOpen = true;
     } else if (a === "--data-dir") {
       const raw = argv[++i];
       if (raw === undefined) {
@@ -163,6 +173,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           dataDir,
           maxBytes,
           maxTurns,
+          noOpen,
           query: "",
           missingQuery: false,
           versionOnly: true,
@@ -181,6 +192,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
     dataDir,
     maxBytes,
     maxTurns,
+    noOpen,
     versionOnly: false,
   };
   const head = rest[0];

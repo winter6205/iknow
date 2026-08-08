@@ -16,7 +16,14 @@
 
 import { describe, it, beforeEach, afterEach, vi } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  existsSync,
+  readdirSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createJsonlTraceService } from "../../../src/harness/trace/jsonl.ts";
@@ -24,6 +31,8 @@ import type {
   LlmCallRecord,
   ToolCallRecord,
   TurnRecord,
+  SessionRecord,
+  SandboxCmdRecord,
 } from "../../../src/harness/trace/types.ts";
 
 const UUID_RE =
@@ -62,6 +71,26 @@ const SAMPLE_TURN: TurnRecord = {
   llmCallIds: ["llm-1"],
   toolCallIds: ["tool-1"],
   decision: "completed",
+  status: "ok",
+};
+
+const SAMPLE_SESSION: SessionRecord = {
+  startedAt: "2026-07-31T00:00:00.000Z",
+  endedAt: "2026-07-31T00:01:00.000Z",
+  durationMs: 60000,
+  agentVersion: "0.20.0",
+  status: "ok",
+};
+
+const SAMPLE_CMD: SandboxCmdRecord = {
+  parentTurnId: "turn-1",
+  command: "ls -la",
+  exitCode: 0,
+  stdoutCaptured: true,
+  stdout: "total 0",
+  startedAt: "2026-07-31T00:00:00.000Z",
+  endedAt: "2026-07-31T00:00:00.100Z",
+  durationMs: 100,
   status: "ok",
 };
 
@@ -455,28 +484,28 @@ describe("createJsonlTraceService — ID 生成", () => {
   });
 });
 
-describe("createJsonlTraceService — 真实 FS", () => {
-  it("默认 writer: appendFileSync 实际写盘, statSync size > 0", async () => {
-    const filePath = join(scratch, "trace.jsonl");
+describe("createJsonlTraceService — 真实 FS (T2 每会话独立文件)", () => {
+  it("默认 writer: 写 <dir>/<conversationId>.jsonl, statSync size > 0", async () => {
     const svc = createJsonlTraceService({
-      filePath,
+      filePath: scratch,
       conversationId: "conv-fs",
     });
     const id = await svc.recordLlmCall(SAMPLE_LLM);
     assert.ok(typeof id === "string");
+    const filePath = join(scratch, "conv-fs.jsonl");
     const stat = statSync(filePath);
     assert.ok(stat.size > 0, "expected file size > 0, got " + stat.size);
   });
 
-  it("多条记录追加到同一文件", async () => {
-    const filePath = join(scratch, "trace.jsonl");
+  it("多条记录追加到同一会话文件", async () => {
     const svc = createJsonlTraceService({
-      filePath,
+      filePath: scratch,
       conversationId: "conv-multi",
     });
     await svc.recordLlmCall(SAMPLE_LLM);
     await svc.recordToolCall(SAMPLE_TOOL);
     await svc.recordTurn(SAMPLE_TURN);
+    const filePath = join(scratch, "conv-multi.jsonl");
     const content = readFileSync(filePath, "utf8");
     const lines = content.trim().split("\n");
     assert.equal(lines.length, 3);
@@ -487,5 +516,155 @@ describe("createJsonlTraceService — 真实 FS", () => {
       (l) => (JSON.parse(l) as Record<string, unknown>).record_type
     );
     assert.deepEqual(types, ["llm_call", "tool_call", "turn"]);
+  });
+
+  it("filePath 是目录: 不生成裸 trace.jsonl, 目录下仅 <convId>.jsonl", async () => {
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-dir-sem",
+    });
+    await svc.recordLlmCall(SAMPLE_LLM);
+    assert.equal(existsSync(join(scratch, "conv-dir-sem.jsonl")), true);
+    assert.equal(
+      existsSync(join(scratch, "trace.jsonl")),
+      false,
+      "no bare trace.jsonl under directory semantics"
+    );
+  });
+
+  it("不同 conversationId 写到各自独立文件", async () => {
+    const a = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-a",
+    });
+    const b = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-b",
+    });
+    await a.recordLlmCall(SAMPLE_LLM);
+    await b.recordLlmCall(SAMPLE_LLM);
+    assert.equal(existsSync(join(scratch, "conv-a.jsonl")), true);
+    assert.equal(existsSync(join(scratch, "conv-b.jsonl")), true);
+    const files = readdirSync(scratch).sort();
+    assert.deepEqual(files, ["conv-a.jsonl", "conv-b.jsonl"]);
+  });
+
+  it("目录不存在时 mkdirSync recursive 自动创建", async () => {
+    const nested = join(scratch, "nested", "trace");
+    const svc = createJsonlTraceService({
+      filePath: nested,
+      conversationId: "conv-mkdir",
+    });
+    await svc.recordLlmCall(SAMPLE_LLM);
+    assert.equal(
+      existsSync(join(nested, "conv-mkdir.jsonl")),
+      true,
+      "nested dir must be created recursively"
+    );
+  });
+});
+
+describe("createJsonlTraceService — recordSession (T2)", () => {
+  it("成功 → 返回 UUID v4 session_id, 行含 conversation_id + record_type=session", async () => {
+    const { lines, writer } = captureWriter();
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-sess",
+      writer,
+    });
+    const id = await svc.recordSession(SAMPLE_SESSION);
+    assert.ok(typeof id === "string");
+    assert.match(id, UUID_RE);
+    const parsed = JSON.parse(lines[0]!) as Record<string, unknown>;
+    assert.equal(parsed.session_id, id);
+    assert.equal(parsed.conversation_id, "conv-sess");
+    assert.equal(parsed.record_type, "session");
+    assert.equal(parsed.agent_version, "0.20.0");
+    assert.equal(parsed.status, "ok");
+    assert.equal(parsed.started_at, SAMPLE_SESSION.startedAt);
+    assert.equal(parsed.ended_at, SAMPLE_SESSION.endedAt);
+    assert.equal(parsed.duration_ms, SAMPLE_SESSION.durationMs);
+  });
+
+  it("@throws never: always-throw writer → 返回 undefined, 不抛", async () => {
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-sess-fail",
+      writer: (): void => {
+        throw new Error("simulated disk failure");
+      },
+    });
+    const result = await svc.recordSession(SAMPLE_SESSION);
+    assert.equal(result, undefined);
+  });
+
+  it("真实 FS: 写 <dir>/<convId>.jsonl", async () => {
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-sess-fs",
+    });
+    const id = await svc.recordSession(SAMPLE_SESSION);
+    assert.ok(typeof id === "string");
+    const filePath = join(scratch, "conv-sess-fs.jsonl");
+    assert.equal(existsSync(filePath), true);
+    const parsed = JSON.parse(readFileSync(filePath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    assert.equal(parsed["record_type"], "session");
+    assert.equal(parsed["conversation_id"], "conv-sess-fs");
+  });
+});
+
+describe("createJsonlTraceService — recordSandboxCmd (T2, schema 就位埋点留 pendingRuntime)", () => {
+  it("成功 → 返回 UUID v4 sandbox_cmd_id, 行含 parent_turn_id 单值", async () => {
+    const { lines, writer } = captureWriter();
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-cmd",
+      writer,
+    });
+    const id = await svc.recordSandboxCmd(SAMPLE_CMD);
+    assert.ok(typeof id === "string");
+    assert.match(id, UUID_RE);
+    const parsed = JSON.parse(lines[0]!) as Record<string, unknown>;
+    assert.equal(parsed.sandbox_cmd_id, id);
+    assert.equal(parsed.conversation_id, "conv-cmd");
+    assert.equal(parsed.record_type, "sandbox_cmd");
+    assert.equal(parsed.parent_turn_id, "turn-1");
+    assert.equal(parsed.command, "ls -la");
+    assert.equal(parsed.exit_code, 0);
+    assert.equal(parsed.stdout_captured, true);
+    assert.equal(parsed.stdout, "total 0");
+    assert.equal(parsed.status, "ok");
+  });
+
+  it("@throws never: always-throw writer → 返回 undefined, 不抛", async () => {
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-cmd-fail",
+      writer: (): void => {
+        throw new Error("simulated disk failure");
+      },
+    });
+    const result = await svc.recordSandboxCmd(SAMPLE_CMD);
+    assert.equal(result, undefined);
+  });
+
+  it("真实 FS: 写 <dir>/<convId>.jsonl", async () => {
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-cmd-fs",
+    });
+    const id = await svc.recordSandboxCmd(SAMPLE_CMD);
+    assert.ok(typeof id === "string");
+    const filePath = join(scratch, "conv-cmd-fs.jsonl");
+    assert.equal(existsSync(filePath), true);
+    const parsed = JSON.parse(readFileSync(filePath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    assert.equal(parsed["record_type"], "sandbox_cmd");
+    assert.equal(parsed["conversation_id"], "conv-cmd-fs");
   });
 });

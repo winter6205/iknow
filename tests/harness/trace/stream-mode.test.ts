@@ -105,7 +105,6 @@ describe("#178 T5: trace stream boolean reflects actual LLM call mode (D6)", () 
   it("streaming arm → trace JSONL llm_call stream: true (end-to-end)", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-t5-"));
     tmpDirs.push(tmpDir);
-    const traceFile = join(tmpDir, "trace.jsonl");
     const client = makeOneShotStreamClient(wellShapedFinalMessage("hi"));
     const adapter = createRealAnthropicAdapter({
       client: client as unknown as Parameters<
@@ -124,12 +123,12 @@ describe("#178 T5: trace stream boolean reflects actual LLM call mode (D6)", () 
       registry: reg,
       maxTurns: 5,
       trace: createJsonlTraceService({
-        filePath: traceFile,
+        filePath: tmpDir,
         conversationId: "conv-t5-stream-ok",
       }),
     });
     assert.equal(result.stopReason, "completed");
-    const lines = parseJsonl(traceFile);
+    const lines = parseJsonl(join(tmpDir, "conv-t5-stream-ok.jsonl"));
     const llm = lines.find((l) => l["record_type"] === "llm_call");
     assert.ok(llm, "expected llm_call record");
     assert.equal(llm!["stream"], true);
@@ -138,7 +137,6 @@ describe("#178 T5: trace stream boolean reflects actual LLM call mode (D6)", () 
   it("stub model (no streamMode) → trace JSONL llm_call stream: false (regression guard)", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-t5-"));
     tmpDirs.push(tmpDir);
-    const traceFile = join(tmpDir, "trace.jsonl");
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const reg = createRegistry([tool]);
     const exec = createExecutor(reg);
@@ -157,11 +155,11 @@ describe("#178 T5: trace stream boolean reflects actual LLM call mode (D6)", () 
       registry: reg,
       maxTurns: 5,
       trace: createJsonlTraceService({
-        filePath: traceFile,
+        filePath: tmpDir,
         conversationId: "conv-t5-stub-false",
       }),
     });
-    const lines = parseJsonl(traceFile);
+    const lines = parseJsonl(join(tmpDir, "conv-t5-stub-false.jsonl"));
     const llm = lines.find((l) => l["record_type"] === "llm_call");
     assert.ok(llm);
     assert.equal(llm!["stream"], false);
@@ -170,7 +168,6 @@ describe("#178 T5: trace stream boolean reflects actual LLM call mode (D6)", () 
   it("real adapter with stream=false → trace JSONL llm_call stream: false", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-t5-"));
     tmpDirs.push(tmpDir);
-    const traceFile = join(tmpDir, "trace.jsonl");
     const final = wellShapedFinalMessage("ok");
     const client = {
       messages: {
@@ -197,11 +194,11 @@ describe("#178 T5: trace stream boolean reflects actual LLM call mode (D6)", () 
       registry: reg,
       maxTurns: 5,
       trace: createJsonlTraceService({
-        filePath: traceFile,
+        filePath: tmpDir,
         conversationId: "conv-t5-nonstream",
       }),
     });
-    const lines = parseJsonl(traceFile);
+    const lines = parseJsonl(join(tmpDir, "conv-t5-nonstream.jsonl"));
     const llm = lines.find((l) => l["record_type"] === "llm_call");
     assert.ok(llm);
     assert.equal(llm!["stream"], false);
@@ -210,7 +207,6 @@ describe("#178 T5: trace stream boolean reflects actual LLM call mode (D6)", () 
   it("streaming arm timeout (raceModel timerTimeout) → error record stream: true", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-t5-"));
     tmpDirs.push(tmpDir);
-    const traceFile = join(tmpDir, "trace.jsonl");
     const client = makeHangingStreamClient();
     const adapter = createRealAnthropicAdapter({
       client: client as unknown as Parameters<
@@ -232,12 +228,12 @@ describe("#178 T5: trace stream boolean reflects actual LLM call mode (D6)", () 
       // plan T4:fake 流永挂 — 缩短摘要独立超时,避免 run() 被 15s default 拖住。
       summaryTimeoutMs: 20,
       trace: createJsonlTraceService({
-        filePath: traceFile,
+        filePath: tmpDir,
         conversationId: "conv-t5-stream-timeout",
       }),
     });
     assert.equal(result.stopReason, "timeout");
-    const lines = parseJsonl(traceFile);
+    const lines = parseJsonl(join(tmpDir, "conv-t5-stream-timeout.jsonl"));
     const llm = lines.find((l) => l["record_type"] === "llm_call");
     assert.ok(llm);
     // error site 也按实际模式翻转:流式臂 in-flight 被 timer 终止 → 实际模式是

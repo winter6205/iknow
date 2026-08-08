@@ -84,3 +84,228 @@ pre code.hljs {
     transition: none !important;
   }
 }
+
+/* ===== FlowTree 可视化面板样式（移植自 trace-prototype/src/styles） =======
+   节点卡 / 画布 / 右侧详情面板。token 复用 tokens.css 的 --color-* / --radius-*
+   / --shadow-* / --ease-soft（主 web 工程已含，无需新增）。 */
+
+/* 中流程图主区 */
+.tp-canvas {
+  position: relative;
+  padding: 24px;
+  overflow: auto;
+  background: var(--color-bg);
+}
+.tp-canvas-inner {
+  position: relative;
+  width: 100%;
+  min-height: 720px;
+}
+
+/* 右侧详情面板 */
+.tp-side-r {
+  border-left: 1px solid var(--color-line);
+  background: var(--color-surface);
+  padding: 18px 18px;
+  overflow: auto;
+  width: 320px;
+  flex-shrink: 0;
+}
+.tp-side-r .placeholder {
+  color: var(--color-ink-3);
+  font-size: 12px;
+  padding: 80px 0;
+  text-align: center;
+}
+.tp-side-r .placeholder .hint {
+  margin-top: 6px;
+  font-size: 11px;
+  opacity: 0.7;
+}
+.tp-side-r .eyebrow {
+  font-size: 10px;
+  color: var(--color-ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+.tp-side-r .title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 2px;
+}
+.tp-side-r .sub {
+  font-size: 11px;
+  color: var(--color-ink-3);
+  font-family: var(--font-mono);
+  margin-bottom: 14px;
+}
+.tp-side-r .stat-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.tp-side-r .stat {
+  flex: 1;
+  padding: 8px 10px;
+  background: var(--color-bg);
+  border-radius: 8px;
+  border: 1px solid var(--color-line);
+}
+.tp-side-r .stat .k {
+  font-size: 10px;
+  color: var(--color-ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.tp-side-r .stat .v {
+  font-size: 13px;
+  font-weight: 600;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.tp-side-r .stat .v.ok {
+  color: var(--color-ok);
+}
+.tp-side-r .stat .v.warn {
+  color: var(--color-warn);
+}
+.tp-side-r .stat .v.danger {
+  color: var(--color-danger);
+}
+.tp-side-r h3 {
+  font-size: 10px;
+  color: var(--color-ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin: 14px 0 8px;
+  font-weight: 600;
+}
+.tp-side-r dl.fields {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 6px 14px;
+  font-size: 12px;
+}
+.tp-side-r dl.fields dt {
+  color: var(--color-ink-3);
+}
+.tp-side-r dl.fields dd {
+  margin: 0;
+  color: var(--color-ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  word-break: break-word;
+}
+.tp-side-r pre.raw {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--color-ink-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+}
+
+/* 节点卡（FlowTree） */
+.tp-node {
+  position: absolute;
+  width: 152px;
+  padding: 8px 10px;
+  background: var(--color-surface);
+  border: 1.5px solid var(--color-line);
+  border-radius: 10px;
+  box-shadow: var(--shadow-bubble);
+  cursor: pointer;
+  transition:
+    transform 0.18s var(--ease-soft),
+    box-shadow 0.18s,
+    border-color 0.18s;
+  z-index: 3;
+}
+.tp-node:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-card);
+}
+.tp-node.is-active {
+  border-color: var(--color-ink);
+  box-shadow: var(--shadow-card);
+}
+.tp-node.status-ok {
+  border-color: var(--color-ok);
+}
+.tp-node.status-warn {
+  border-color: var(--color-warn);
+}
+.tp-node.status-danger {
+  border-color: var(--color-danger);
+  border-width: 2px;
+}
+.tp-node .r1 {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9.5px;
+  color: var(--color-ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 500;
+}
+.tp-node .r1 .ic {
+  width: 11px;
+  height: 11px;
+  color: var(--color-ink-2);
+  display: inline-flex;
+}
+.tp-node .r1 .ic svg {
+  width: 100%;
+  height: 100%;
+}
+.tp-node.status-danger .r1 .ic {
+  color: var(--color-danger);
+}
+.tp-node .name {
+  margin-top: 4px;
+  font-weight: 600;
+  font-size: 12px;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tp-node .r3 {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10.5px;
+  color: var(--color-ink-2);
+}
+.tp-node .r3 .dur {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+}
+.tp-node .r3 .stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.tp-node .r3 .stat .d {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-ok);
+}
+.tp-node.status-warn .r3 .stat .d {
+  background: var(--color-warn);
+}
+.tp-node.status-danger .r3 .stat .d {
+  background: var(--color-danger);
+}

@@ -13,18 +13,25 @@
  * 无 token-cost 护栏 / 无外部观测后端导出, B-scope 留位由 observability-bridge 桩负责)。
  */
 
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { createOutputMask, currentSecretValues } from "../sandbox/index.js";
 import type {
   TraceService,
   LlmCallRecord,
   ToolCallRecord,
   TurnRecord,
+  SessionRecord,
+  SandboxCmdRecord,
 } from "./types.js";
 
 export interface JsonlTraceOptions {
-  /** JSONL 文件路径 (绝对或相对 CWD)。 */
+  /**
+   * trace 目录 (绝对或相对 CWD)。
+   * T2 每会话独立文件: 实际写入 <filePath>/<conversationId>.jsonl,
+   * 目录不存在时 mkdirSync recursive 创建 (ADR-0003 D4: conversation_id 仍实例绑定)。
+   */
   filePath: string;
   /** 实例绑定的 conversation_id, 每条记录都写入 (ADR Decision 4)。 */
   conversationId: string;
@@ -74,11 +81,19 @@ export function createJsonlTraceService(
   options: JsonlTraceOptions
 ): TraceService {
   const { filePath, conversationId } = options;
+  // T2 每会话独立文件: filePath 是目录, 实际写 <filePath>/<conversationId>.jsonl。
+  // mkdirSync recursive 兜底, 目录不存在时先建 (产品路径 traceOut 首次使用时目录
+  // 可能未建)。仅默认 writer 时建目录 —— 注入自定义 writer (测试用 always-throw)
+  // 时调用方掌控写盘, 目录创建由调用方负责, 不在工厂内强加 IO 副作用。
+  const sessionFile = join(filePath, `${conversationId}.jsonl`);
   const writer: (line: string) => void =
     options.writer ??
-    ((line: string): void => {
-      appendFileSync(filePath, line + "\n", "utf8");
-    });
+    (() => {
+      mkdirSync(filePath, { recursive: true });
+      return (line: string): void => {
+        appendFileSync(sessionFile, line + "\n", "utf8");
+      };
+    })();
 
   // 实例级去重: 首次写盘失败 warn 一次, 后续静默 (ADR Decision 13)。
   let warnedOnce = false;
@@ -139,6 +154,42 @@ export function createJsonlTraceService(
         conversation_id: conversationId,
         record_type: "turn",
         turn_id: id,
+        ...toSnakeCaseRecord(record),
+      };
+      try {
+        writeLine(line);
+        return id;
+      } catch (err) {
+        warnOnce(err);
+        return undefined;
+      }
+    },
+
+    async recordSession(record: SessionRecord): Promise<string | undefined> {
+      const id = randomUUID();
+      const line: Record<string, unknown> = {
+        conversation_id: conversationId,
+        record_type: "session",
+        session_id: id,
+        ...toSnakeCaseRecord(record),
+      };
+      try {
+        writeLine(line);
+        return id;
+      } catch (err) {
+        warnOnce(err);
+        return undefined;
+      }
+    },
+
+    async recordSandboxCmd(
+      record: SandboxCmdRecord
+    ): Promise<string | undefined> {
+      const id = randomUUID();
+      const line: Record<string, unknown> = {
+        conversation_id: conversationId,
+        record_type: "sandbox_cmd",
+        sandbox_cmd_id: id,
         ...toSnakeCaseRecord(record),
       };
       try {

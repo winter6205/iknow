@@ -16,7 +16,7 @@
 
 import { describe, it, afterEach, vi } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { run } from "../../../src/harness/loop-engine.ts";
@@ -33,17 +33,19 @@ import { parseJsonl } from "./_fixtures.ts";
 const tmpDirs: string[] = [];
 
 function makeTmpTrace(conversationId: string): {
+  traceDir: string;
   traceFile: string;
   trace: ReturnType<typeof createJsonlTraceService>;
 } {
   const dir = mkdtempSync(join(tmpdir(), "iknow-trace-integration-"));
   tmpDirs.push(dir);
-  const traceFile = join(dir, "trace.jsonl");
+  // T2 每会话独立文件: filePath 是目录, 实际写 <dir>/<conversationId>.jsonl。
   const trace = createJsonlTraceService({
-    filePath: traceFile,
+    filePath: dir,
     conversationId,
   });
-  return { traceFile, trace };
+  const traceFile = join(dir, `${conversationId}.jsonl`);
+  return { traceDir: dir, traceFile, trace };
 }
 
 afterEach(() => {
@@ -87,7 +89,7 @@ describe("T6 scenario 1: pure text turn", () => {
         }),
       ],
     });
-    const { traceFile, trace } = makeTmpTrace("conv-s1");
+    const { traceDir, traceFile, trace } = makeTmpTrace("conv-s1");
 
     const { result } = await run("hi", {
       adapter: model,
@@ -100,6 +102,14 @@ describe("T6 scenario 1: pure text turn", () => {
     assert.equal(result.stopReason, "completed");
     assert.equal(result.turnCount, 1);
     assert.equal(result.finalText, "hello");
+
+    // T2 每会话独立文件: 目录下生成 <convId>.jsonl, 而非裸 trace.jsonl。
+    assert.equal(existsSync(traceFile), true, "per-session file must exist");
+    assert.equal(
+      existsSync(join(traceDir, "trace.jsonl")),
+      false,
+      "no bare trace.jsonl when per-session file semantics"
+    );
 
     const lines = parseJsonl(traceFile);
     assert.equal(lines.length, 2);

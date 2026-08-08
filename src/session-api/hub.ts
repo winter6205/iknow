@@ -19,6 +19,7 @@ import {
   type RunResult,
 } from "../harness/index.js";
 import { buildHarnessEngine } from "../harness/build-engine.js";
+import { getVersion } from "../cli/usage.js"; // SC-W 6/7: agentVersion 注入(与 session-api/http.ts 同向 import,无循环)
 import type { AskUser } from "../harness/permission/types.js";
 import type {
   ServeAskUserHandle,
@@ -37,7 +38,8 @@ import { ValidationError } from "../shared/errors.js";
 import { MaxTurnsExceeded } from "../harness/errors.js";
 import { writeIknowState } from "../harness/identity/index.js";
 import type { IknowIdentityError } from "../harness/identity/index.js";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
@@ -486,9 +488,15 @@ export class SessionHub {
         });
         // Per-session trace: new JsonlTraceService each postMessage (not cached
         // in cachedDeps) because conversationId differs per session (ADR-0003 D4).
+        // T2: traceOut 是目录, JsonlTraceService 写 <traceOut>/<conversationId>.jsonl。
+        // SC-W 6/7 (v2 spec):serve 路径注入 agentVersion。runDeps 只在
+        // traceOut 配置时落 session 根记录(与既有 trace 注入同条件);
+        // agentVersion 恒定注入,loop-engine 要求 trace 与 agentVersion
+        // 同时存在才写,故未配 traceOut 时无副作用。
         const runDeps: LoopEngineDeps = {
           ...deps,
           executor: wrappedExecutor,
+          agentVersion: getVersion(),
           ...(this.traceOut
             ? {
                 trace: createJsonlTraceService({
@@ -536,7 +544,8 @@ export class SessionHub {
                   finalText: "",
                   stopReason: "maxTurns",
                   turnCount: err.turnsRan,
-                  ...(capturedStopSummary !== undefined && capturedStopSummary.length > 0
+                  ...(capturedStopSummary !== undefined &&
+                  capturedStopSummary.length > 0
                     ? { stopSummary: capturedStopSummary }
                     : {}),
                 },
@@ -559,7 +568,8 @@ export class SessionHub {
             query,
             result: finalResult,
             turnMessages: finalResult.messages.slice(priorCount),
-            ...(capturedStopSummary !== undefined && capturedStopSummary.length > 0
+            ...(capturedStopSummary !== undefined &&
+            capturedStopSummary.length > 0
               ? { stopSummary: capturedStopSummary }
               : {}),
           }),
@@ -606,13 +616,21 @@ export class SessionHub {
   private recordViolationTrace(conversationId: string, reason: string): void {
     if (!this.traceOut) return;
     try {
+      // T2 每会话独立文件: violation 与 JsonlTraceService 同域, 写
+      // <traceOut>/<conversationId>.jsonl (不再 append 到 traceOut 文件本身)。
+      // mkdir recursive 与 JsonlTraceService 构造一致兜底。
+      mkdirSync(this.traceOut, { recursive: true });
       const line = JSON.stringify({
         conversation_id: conversationId,
         record_type: "violation",
         ts: new Date().toISOString(),
         detail: safeParse(reason),
       });
-      appendFileSync(this.traceOut, line + "\n", "utf8");
+      appendFileSync(
+        join(this.traceOut, `${conversationId}.jsonl`),
+        line + "\n",
+        "utf8"
+      );
     } catch {
       // Best-effort observability; never let trace I/O break the served turn.
     }

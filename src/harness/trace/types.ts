@@ -65,6 +65,17 @@ export interface LlmCallRecord {
   outputTokens?: number;
   cacheCreationInputTokens?: number | null;
   cacheReadInputTokens?: number | null;
+  /**
+   * #286 补字段（spec 欠账）。
+   * 模型调用经适配器路由到实际供应商模型时记录：
+   *   - modelRequested — 请求侧申报的模型（resolve 到实际路由模型）；
+   *   - modelActual — 响应侧实际模型（request.model ≠ response.model 双字段）；
+   *   - provider — 供应商名（= gen_ai.provider.name 类比）。
+   * Postel（ADR-0003 D9 + ADR-0008 D3）:成功分支填，错误分支缺席。
+   */
+  modelRequested?: string;
+  modelActual?: string;
+  provider?: string;
 }
 
 export interface ToolCallRecord {
@@ -100,6 +111,45 @@ export interface TurnRecord {
   error?: TraceError;
 }
 
+/**
+ * #285/#286 会话级 L1 根记录（v2）。
+ * loop-engine 入口埋点，表示一次完整运行的根；所有 turn/llm/tool 记录
+ * 通过 conversation_id 关联到它。
+ */
+export interface SessionRecord {
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  /**
+   * 由 writer/CLI 侧在构造时注入（C2 决议：注入而非 harness 层 import
+   * cli/usage.ts，避免写侧←cli 反向依赖，遵循 ADR-0003 文件头先例）。
+   */
+  agentVersion: string;
+  status: TraceStatus;
+  error?: TraceError;
+}
+
+/**
+ * #285/#286 沙箱命令执行记录（v2）。
+ * schema 就位、埋点留 pendingRuntime（sandbox 只有 violation，无独立命令
+ * 执行记录能力；Postel 例外论证见 spec）。当前不产生任何 JSONL 行。
+ */
+export interface SandboxCmdRecord {
+  /** 单值 parent（#286 决议：新 record 统一 parent_*_id 单值）。 */
+  parentTurnId: string;
+  command: string;
+  exitCode: number;
+  /** Postel：布尔开关，内容仅 true 时落盘。 */
+  stdoutCaptured: boolean;
+  /** 限长（C 方案：IKNOW_TRACE_MAX_CONTENT_BYTES）。 */
+  stdout?: string;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  status: TraceStatus;
+  error?: TraceError;
+}
+
 export interface TraceService {
   /**
    * 记录一次 LLM 调用; 由实现生成 llmCallId。
@@ -116,4 +166,14 @@ export interface TraceService {
    * @throws never.
    */
   recordTurn(record: TurnRecord): Promise<string | undefined>;
+  /**
+   * 记录一次会话根 (L1, v2); 由实现生成 sessionId。
+   * @throws never.
+   */
+  recordSession(record: SessionRecord): Promise<string | undefined>;
+  /**
+   * 记录一次沙箱命令执行 (v2, schema 就位埋点留 pendingRuntime)。
+   * @throws never.
+   */
+  recordSandboxCmd(record: SandboxCmdRecord): Promise<string | undefined>;
 }

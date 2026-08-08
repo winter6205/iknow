@@ -2341,7 +2341,7 @@ describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
     const { mkdtempSync, rmSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
-    const traceFile = join(mkdtempSync(join(tmpdir(), "summary-trace-")), "trace.jsonl");
+    const tmpDir = mkdtempSync(join(tmpdir(), "summary-trace-"));
     const { createJsonlTraceService } = await import("../../src/harness/trace/jsonl.ts");
     const { readFileSync } = await import("node:fs");
 
@@ -2354,7 +2354,7 @@ describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
       ],
       delayMs: 200,
     });
-    const trace = createJsonlTraceService({ filePath: traceFile, conversationId: "t4-sum" });
+    const trace = createJsonlTraceService({ filePath: tmpDir, conversationId: "t4-sum" });
     const { result, trace: runTrace } = await run("x", {
       adapter: model,
       executor: exec,
@@ -2367,13 +2367,13 @@ describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
     // 主循环 turn: turnCount=0 时模型阶段 timeout → turn trace 1 条。
     assert.equal(runTrace.turns.length, 1);
     // JSONL:error llm_call + turn + summary ok llm_call = 3。
-    const lines = readFileSync(traceFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const lines = readFileSync(join(tmpDir, "t4-sum.jsonl"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
     assert.equal(lines.length, 3);
     assert.equal(lines[0]!["status"], "error");
     assert.equal(lines[1]!["record_type"], "turn");
     assert.equal(lines[2]!["record_type"], "llm_call");
     assert.equal(lines[2]!["status"], "ok");
-    rmSync(traceFile, { recursive: true, force: true });
+    rmSync(tmpDir, { recursive: true, force: true });
   });
 });
 

@@ -44,7 +44,7 @@ export type TurnAnswerDto = {
   readonly finalText: string;
   readonly stopReason: StopReason;
   readonly turnCount: number;
-  /** 可选：单回合 thinking 文本视图（后端 T1 投影；无 thinking 时省略）。 */
+  /** 可选：单回合 thinking 文本（后端 T1 投影；无 thinking 时省略）。 */
   readonly thinking?: ThinkingView;
   /** 可选：单回合工具调用视图（后端 T1 投影；无 tool_use 时省略）。 */
   readonly toolCalls?: readonly ToolCallView[];
@@ -155,7 +155,23 @@ export interface TracesResponse {
   readonly truncated: boolean;
 }
 
-export type TraceRecordType = "llm_call" | "tool_call" | "turn" | "violation";
+/**
+ * Trace 会话列表条目（读侧 `GET /api/v1/sessions`，spec v2 SC-R 10）。
+ * Mirrors `SessionSummary` in src/traceserver/sessions.ts.
+ */
+export interface TraceSessionSummary {
+  readonly conversation_id: string;
+  readonly mtime: number;
+  readonly size: number;
+  readonly agent_version?: string;
+}
+
+export interface SessionsResponse {
+  readonly sessions: ReadonlyArray<TraceSessionSummary>;
+}
+
+export type TraceRecordType =
+  "llm_call" | "tool_call" | "turn" | "violation" | "session" | "sandbox_cmd";
 
 export type TraceFieldType =
   "string" | "number" | "boolean" | "enum" | "datetime";
@@ -177,4 +193,6 @@ export interface TraceQueryParams {
   readonly status?: "ok" | "error";
   readonly limit?: number;
   readonly offset?: number;
+  /** 前端轮询间隔（缺省 1000ms，0 关闭）。spec v2 SC-R 14 / SC-V 26. */
+  readonly poll?: number;
 }
