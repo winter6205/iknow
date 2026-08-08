@@ -96,7 +96,6 @@ describe("isAllowedCommand (allowlist-first 主门)", () => {
 
   it("首 token 不在白名单 → false", () => {
     assert.equal(isAllowedCommand("rm -rf /"), false);
-    assert.equal(isAllowedCommand("curl http://x"), false);
     assert.equal(isAllowedCommand("wget x"), false);
     assert.equal(isAllowedCommand("python -c 'x'"), false);
   });
@@ -110,12 +109,34 @@ describe("isAllowedCommand (allowlist-first 主门)", () => {
     assert.equal(isAllowedCommand("echo a; echo b"), true); // 分号分段（echo 段白名单）
     assert.equal(isAllowedCommand("echo a; rm -rf /"), false); // 分段后 rm 段危险
     assert.equal(isAllowedCommand("echo a && echo b"), true); // && 分段（echo 段白名单）
-    assert.equal(isAllowedCommand("echo $PATH"), false); // 变量展开
+    assert.equal(isAllowedCommand("echo $PATH"), true); // 纯 $VAR 读取放行（不再拒）
+    assert.equal(isAllowedCommand("echo $HOME"), true); // 纯 $VAR 读取放行
     assert.equal(isAllowedCommand("echo `whoami`"), false); // 反引号
     assert.equal(isAllowedCommand("echo $(whoami)"), false); // 命令替换
     assert.equal(isAllowedCommand("echo (a)"), false); // subshell
     assert.equal(isAllowedCommand("echo a\nrm -rf /"), false); // 换行
     assert.equal(isAllowedCommand("echo a\rb"), false); // 回车
+  });
+
+  it("扩写白名单原语 → 写/工具命令 isAllowed", () => {
+    assert.equal(isAllowedCommand("mkdir -p ~/.iknow/sub"), true);
+    assert.equal(isAllowedCommand("cp a.ts b.ts"), true);
+    assert.equal(isAllowedCommand("mv a b"), true);
+    assert.equal(isAllowedCommand("touch file"), true);
+    assert.equal(isAllowedCommand("tee -a log"), true);
+    assert.equal(isAllowedCommand("sed -i s/x/y/g f"), true);
+    assert.equal(isAllowedCommand("chmod +x run.sh"), true);
+    assert.equal(isAllowedCommand("chown user file"), true); // chown 已离开危险列表
+    assert.equal(isAllowedCommand("diff a b"), true);
+    assert.equal(isAllowedCommand("file x"), true);
+    assert.equal(isAllowedCommand("base64 -d x"), true);
+    assert.equal(isAllowedCommand("jq . file"), true);
+    assert.equal(isAllowedCommand("curl -s http://x"), true);
+    assert.equal(isAllowedCommand("env | head"), true);
+    assert.equal(isAllowedCommand("export FOO=1"), true);
+    assert.equal(isAllowedCommand("true"), true);
+    assert.equal(isAllowedCommand("false"), true);
+    assert.equal(isAllowedCommand("printf 'x'"), true);
   });
 });
 
@@ -138,13 +159,13 @@ describe("isDangerousCommand (黑名单双保险层)", () => {
     "rd /s /q C:\\",
     "find / -delete",
     "chmod -R 777 /",
-    "chown root /tmp",
     "echo a && rm -rf /",
     "echo a; rm -rf /",
     "echo `whoami`",
     "echo $(whoami)",
+    "echo ${PATH}",
+    "echo $(rm -rf /)",
     "echo a\nrm",
-    "echo $X",
   ];
   for (const cmd of dangerous) {
     it(`detects dangerous: ${JSON.stringify(cmd)}`, () => {
@@ -167,6 +188,18 @@ describe("isDangerousCommand (黑名单双保险层)", () => {
     "git status && echo done",
     "ls; ls; ls",
     "echo a | head -1",
+    // 纯 $VAR 读取放行（W4）
+    "echo $HOME",
+    "echo $PATH",
+    "echo $X",
+    "ls $PWD/src",
+    // chown 已离开危险列表
+    "chown user file",
+    // 扩写白名单原语（mkdir/cp/mv/...）
+    "mkdir -p ~/.iknow/sub",
+    "cp a.ts b.ts",
+    "mv a b",
+    "curl -s http://x",
   ];
   for (const cmd of safe) {
     it(`allows safe: ${JSON.stringify(cmd)}`, () => {
@@ -396,10 +429,20 @@ describe("checkPermission — execute 安全兜底细节", () => {
     assert.equal(out.decision, "ask");
   });
 
-  it("execute + echo $PATH（元字符） → deny (hard-wall)", () => {
+  it("execute + echo $HOME（纯 $VAR 读取）→ ask（hard-wall 不命中，category default）", () => {
     const out = checkPermission({
       def: makeTool({ name: "bash", category: "execute" }),
-      input: { command: "echo $PATH" },
+      input: { command: "echo $HOME" },
+      policy,
+    });
+    // 纯 $VAR 读取放行：isAllowedCommand true 且 findDangerousPattern 不命中
+    assert.equal(out.decision, "ask");
+  });
+
+  it("execute + echo $(whoami)（命令替换）→ deny (hard-wall $()", () => {
+    const out = checkPermission({
+      def: makeTool({ name: "bash", category: "execute" }),
+      input: { command: "echo $(whoami)" },
       policy,
     });
     assert.equal(out.decision, "deny");

@@ -90,10 +90,11 @@ describe("SC1: hard-walls un-overrideable", () => {
     assert.ok(out.reason.includes("sensitive"));
   });
 
-  it("'echo $ANTHROPIC_AUTH_TOKEN' shell-metachar bypass attempt → hard-wall deny", () => {
+  it("'echo ${ANTHROPIC_AUTH_TOKEN}' indirect-expansion bypass attempt → hard-wall deny", () => {
+    // W4: 纯 $VAR 读取放行，但 ${...} 间接引用仍是危险模式 → hard-wall deny
     const out = checkPermission({
       def: makeTool({ name: "bash", category: "execute" }),
-      input: { command: "echo $ANTHROPIC_AUTH_TOKEN" },
+      input: { command: "echo ${ANTHROPIC_AUTH_TOKEN}" },
       sources: policy.sources,
       hardWalls: policy.hardWalls,
       defaultByCategory: policy.defaultByCategory,

@@ -33,7 +33,7 @@ export function createReadFileTool(root: string): AciToolDef {
         offset: { type: "integer", minimum: 0, default: 0 },
         limit: {
           type: "integer",
-          minimum: 0,
+          minimum: 1,
           default: DEFAULT_LIMIT,
           maximum: MAX_LIMIT,
         },
@@ -104,7 +104,7 @@ function parseInput(input: unknown): ParsedInput {
   const limit =
     raw.limit === undefined
       ? DEFAULT_LIMIT
-      : requireNonNegativeInteger(raw.limit, "limit");
+      : requirePositiveInteger(raw.limit, "limit");
   return {
     path: raw.path,
     offset,
@@ -121,13 +121,26 @@ function requireNonNegativeInteger(value: unknown, name: string): number {
   return value;
 }
 
+function requirePositiveInteger(value: unknown, name: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new ToolExecutionError(
+      `[read_file] ${name} must be a positive integer`
+    );
+  }
+  return value;
+}
+
 function sliceLines(text: string, offset: number, limit: number): string {
-  if (text.length === 0) return "";
+  if (text.length === 0) return "[read_file] ok (empty file)";
   const lines = text.split("\n");
   // Drop trailing empty element produced by a trailing newline so the
   // "last line" displayed matches the file's last newline position.
   if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-  if (offset >= lines.length) return "";
+  if (offset >= lines.length) {
+    throw new ToolExecutionError(
+      `[read_file] offset ${offset} past end of file (${lines.length} lines); use a smaller offset`
+    );
+  }
   const window = lines.slice(offset, offset + limit);
   return window
     .map((line, idx) => `${String(offset + idx + 1).padStart(6)}\t${line}`)

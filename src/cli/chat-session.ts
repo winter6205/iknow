@@ -29,6 +29,11 @@ import {
 } from "../harness/sandbox/violation-handling.js";
 import { writeIknowState } from "../harness/identity/index.js";
 import { createStreamDraft } from "./stream-draft.js";
+import {
+  parsePermissionMode,
+  type PermissionMode,
+  type PermissionModeContext,
+} from "../harness/permission/modes.js";
 
 /** Visual separator after a completed answer on TTY only. */
 const TTY_ANSWER_SEP = "────────";
@@ -50,6 +55,11 @@ export type ChatSessionOpts = {
    * session-store 均不受影响。
    */
   showThinking?: boolean;
+  /**
+   * W2: 权限模式上下文。`/permissions` 斜杠命令通过它就地翻 mode,
+   * 不重建引擎。ask/serve 不传。
+   */
+  permissionMode?: PermissionModeContext;
 };
 
 export type ChatLineContext = {
@@ -57,6 +67,8 @@ export type ChatLineContext = {
   state: CliChatState;
   /** #152 T5:thinking 可见开关(与 ChatSessionOpts.showThinking 同源)。 */
   showThinking?: boolean;
+  /** W2: 权限模式上下文(由 runChatSession 透传,/permissions 翻它)。 */
+  permissionMode?: PermissionModeContext;
 };
 
 export type ProcessChatLineResult = {
@@ -210,6 +222,46 @@ async function processSlash(opts: {
         output: "首启引导已完成，下次会话直接进入工作。",
       };
     }
+
+    case "permissions": {
+      // W2: 权限模式查询/切换。无 ctx.permissionMode(ask/serve 不传)→
+      // 显示 "not available"。空 args / "status" → 显示当前 mode;
+      // 合法 mode → set;非法 → 错误文案。
+      const modeCtx = ctx.permissionMode;
+      const target = (effect.args[0] ?? "").toLowerCase();
+      if (!modeCtx) {
+        return {
+          quit: false,
+          output: "",
+          stderr: "/permissions: 当前入口不提供权限模式上下文（ask/serve）",
+        };
+      }
+      if (target === "" || target === "status" || target === "help") {
+        const current = modeCtx.get();
+        const hint =
+          target === "help"
+            ? "  · 用法: /permissions [default|plan|full_auto]"
+            : "";
+        return {
+          quit: false,
+          output: `权限模式: ${current}${hint}`,
+        };
+      }
+      const parsed: PermissionMode | undefined = parsePermissionMode(target);
+      if (parsed === undefined) {
+        return {
+          quit: false,
+          output: "",
+          stderr:
+            "Usage: /permissions [default|plan|full_auto]（或空 / status 查看当前）",
+        };
+      }
+      modeCtx.set(parsed);
+      return {
+        quit: false,
+        output: `权限模式已切换: ${parsed}`,
+      };
+    }
   }
 }
 
@@ -340,6 +392,7 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     deps: wrappedDeps,
     state,
     showThinking: opts.showThinking,
+    permissionMode: opts.permissionMode,
   };
 
   const interactive = isInteractive();

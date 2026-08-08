@@ -13,8 +13,16 @@ import {
   buildHarnessEngine as buildCoreEngine,
   type BuiltEngine,
 } from "../harness/build-engine.js";
-import { initIknowWorkspaceSafe } from "../harness/identity/index.js";
+import {
+  initIknowWorkspaceSafe,
+  runHostInitScriptSafe,
+} from "../harness/identity/index.js";
 import type { AskUser } from "../harness/permission/types.js";
+import {
+  parsePermissionMode,
+  createPermissionModeContext,
+  type PermissionModeContext,
+} from "../harness/permission/modes.js";
 import { loadIknowEnv, type IknowEnv } from "../config/env.js";
 import type { SessionContext } from "../shared/schema.js";
 
@@ -22,6 +30,23 @@ export type RuntimeBundle = {
   env: IknowEnv;
   session: SessionContext;
 };
+
+/**
+ * Resolve the initial permission mode for CLI entry points.
+ * Priority: explicit > env IKNOW_PERMISSION_MODE > default.
+ *
+ * The returned context is always mutable (PermissionModeContext exposes
+ * `set`); ask/serve callers simply don't call it. Only the chat REPL's
+ * `/permissions` slash command actually flips it.
+ */
+export function resolvePermissionMode(
+  explicit: unknown
+): PermissionModeContext {
+  const parsed =
+    parsePermissionMode(explicit) ??
+    parsePermissionMode(process.env.IKNOW_PERMISSION_MODE);
+  return createPermissionModeContext(parsed ?? "default");
+}
 
 export async function prepareRuntime(): Promise<RuntimeBundle> {
   const env = loadIknowEnv();
@@ -53,17 +78,28 @@ export async function buildHarnessEngine(
     surface?: "chat" | "tui" | "ask" | "serve";
     /** #194 T6:memory 层开关透传(ask 显式关,chat 显式开;缺席默认 true)。 */
     memory?: { readonly enabled: boolean };
+    /** W2: 权限模式上下文。chat REPL 传可变 context(可被 /permissions 翻);
+     *  ask/serve 传静态 context(不可变但类型相同)。缺省 → 引擎内 default。 */
+    permissionMode?: PermissionModeContext;
   }
 ): Promise<BuiltEngine> {
   // #196 IKNOW T5: eager + idempotent 初始化 ~/.iknow/(initIknowWorkspaceSafe
   // 内部 try/catch+warn,失败不阻塞装配 — 幂等备份,build-engine 内还有一次)。
   await initIknowWorkspaceSafe();
+  // W1: 宿主侧执行用户初始化脚本(默认 ~/.iknow/init.sh,可被
+  // IKNOW_HOST_INIT_SCRIPT 覆盖)。spawn 由宿主进程发起,不经过 agent
+  // bash 工具 → 无权限确认、无 allowlist 限制。文件不存在则 skip;
+  // 失败 warn + 不阻塞装配(降级契约)。先后顺序:先 initIknowWorkspaceSafe
+  // (seed 模板),再 runHostInitScriptSafe(用户脚本),用户脚本可读模板。
+  await runHostInitScriptSafe();
   // surface 透传到 buildCoreEngine,build-engine 据此判定 BOOTSTRAP 段是否激活;
-  // memory 开关透传,#194 T6 双分支在 buildCoreEngine (build-engine.ts) 内。
+  // memory 开关透传,#194 T6 双分支在 buildCoreEngine (build-engine.ts) 内;
+  // permissionMode (W2) 透传到 policy.mode,chat REPL 持 context 翻 /permissions。
   return buildCoreEngine({
     env: bundle.env,
     askUser: opts.askUser,
     surface: opts.surface ?? "chat",
     ...(opts.memory ? { memory: opts.memory } : {}),
+    ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}),
   });
 }
