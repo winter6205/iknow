@@ -61,6 +61,7 @@ import { ListView, relativeTime, type TuiListEntry } from "./list-view.js";
 import { ContextBar } from "./context-bar.js";
 import { PromptInput, useTick } from "./components.js";
 import { renderBanner } from "./banner.js";
+import { wrapTextVisual } from "./text.js";
 import { tuiPalette } from "./theme.js";
 import { VERSION } from "./version.js";
 import {
@@ -140,6 +141,17 @@ export interface TuiAppProps {
 
 interface Notice {
   readonly lines: ReadonlyArray<string>;
+}
+
+/** notice 实际占用的终端行数（viewport 行账 SSOT，可单测）。
+ *  ink 按视觉宽度折行：一行长文案在窄终端折成多行，只数 `lines.length`
+ *  会低估 → viewport 预算漏 → 整帧高于终端上卷（#268 banner 截断同根因，
+ *  2026-08-08 由长 notice 再次触发后收敛到这里）。 */
+export function noticeRenderRows(
+  lines: ReadonlyArray<string> | undefined,
+  cols: number
+): number {
+  return lines?.reduce((n, l) => n + wrapTextVisual(l, cols).length, 0) ?? 0;
 }
 
 export function TuiApp(props: TuiAppProps): ReactElement {
@@ -286,14 +298,17 @@ export function TuiApp(props: TuiAppProps): ReactElement {
     // 消息区高度 = 终端总行 - 固定 chrome；banner 和消息共享这个视口并一起
     // 滚动（用户 2026-08-07 复看：「下面对话框要固定，消息跟图标可以向上
     // 滚动」）。ChatView 内部对 banner/message 的行窗口做 clamp 兜底。
-    const noticeLines = notice?.lines.length ?? 0;
+    // notice 行账按**视觉宽度折行后**的实际行数计（noticeRenderRows SSOT；
+    // 只数 lines.length 会在窄终端低估 → 整帧溢出，正是 #268 banner 截断的
+    // 同类回归）。
+    const noticeLines = noticeRenderRows(notice?.lines, cols);
     // +1 headroom：用户 2026-08-08 反馈「进消息后最顶 iknow 图标被截断、
     // TUI 对终端顶部没对齐」，ChatView 顶层 Box 加 marginTop=1，把这 1 行
     // 从 viewport 预先扣账，保证 margin + 窗口内容 ≤ ChatView flexGrow 分配
     // 不溢出。
     const reserved = 2 + 1 + noticeLines + 1; // 输入 + ask + notice + headroom
     return Math.max(5, rows - reserved);
-  }, [rows, notice]);
+  }, [rows, notice, cols]);
 
   // 工具事件订阅：T4 (#175) 优先按 tool_use_id 配对入结构化运行状态;
   // 缺 toolUseId 时落回 legacy 字符串行追加(向后兼容)。detail 按 cols 收口
@@ -764,15 +779,9 @@ export function TuiApp(props: TuiAppProps): ReactElement {
    *  /thinking 斜杠命令与全局 Ctrl+O 键位共用，避免双份实现漂移。
    *  running 态下也允许（不改 streaming 行为，只影响终稿渲染）。 */
   function toggleThinking(): void {
-    const next = !thinkingExpanded;
-    setThinkingExpanded(next);
-    setNotice({
-      lines: [
-        next
-          ? "思考已展开（显示思考全文 + 加密占位）/ Ctrl+O 或 /thinking 切换"
-          : "思考已折叠（仅显示摘要行）/ Ctrl+O 或 /thinking 切换",
-      ],
-    });
+    setThinkingExpanded((prev) => !prev);
+    // 不再 setNotice：长 notice 在窄终端折行会超出行账（#268 viewport 预算），
+    // 键位提示改挂折叠摘要行右侧「(Ctrl+O)」（message-rows / message-blocks）。
   }
 
   async function handleSubmit(raw: string): Promise<void> {

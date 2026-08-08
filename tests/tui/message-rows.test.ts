@@ -96,7 +96,7 @@ describe("messageRender（flat 物理行 SSOT）", () => {
       ],
     };
     const r = messageRender(msg, 80);
-    expect(r.lines).toEqual(["[思考] 思考（1 段）", " ", "answer", " "]);
+    expect(r.lines).toEqual(["[思考] (Ctrl+O)", " ", "answer", " "]);
     expect(r.totalRows).toBe(5);
   });
 
