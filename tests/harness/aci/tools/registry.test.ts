@@ -175,10 +175,10 @@ describe("createDefaultAciRegistry — onEdit 透传(#251)", () => {
       path: file,
       old_str: "const a = 1;",
       new_str: "const a = 2;",
-    })) as string;
+    })) as { output: string };
     expect(calls.length).toBe(1);
     expect(calls[0]).toBe(file);
-    expect(result).toBe(
+    expect(result.output).toBe(
       `[edit_file] replaced 1 occurrence(s) in ${join(scratch, "a.ts")}`
     );
     expect(await readFile(file, "utf8")).toBe("const a = 2;\n");
@@ -197,8 +197,8 @@ describe("createDefaultAciRegistry — onEdit 透传(#251)", () => {
       path: file,
       old_str: "x = 1",
       new_str: "x = 2",
-    })) as string;
-    expect(result).toBe(
+    })) as { output: string };
+    expect(result.output).toBe(
       `[edit_file] replaced 1 occurrence(s) in ${join(scratch, "b.ts")}`
     );
     expect(await readFile(file, "utf8")).toBe("x = 2\n");

@@ -83,13 +83,48 @@ describe("write_file — successful writes", () => {
     const result = (await tool.handler({
       path: "new.ts",
       content,
-    })) as string;
+    })) as { output: string; meta: { oldContent: string; newContent: string } };
 
     assert.equal(
-      result,
+      result.output,
       `[write_file] wrote ${Buffer.byteLength(content, "utf8")} bytes to new.ts`
     );
     assert.equal(await readFile(join(root, "new.ts"), "utf8"), content);
+  });
+
+  it("envelope meta.newContent === params.content; meta.oldContent === '' when file did not exist", async () => {
+    const root = await makeScratch("write-file-envelope-");
+    const content = "const answer = 42;\n";
+    const tool = createWriteFileTool(root);
+
+    const result = (await tool.handler({
+      path: "new.ts",
+      content,
+    })) as { output: string; meta: { oldContent: string; newContent: string } };
+
+    assert.equal(result.meta.newContent, content);
+    assert.equal(result.meta.oldContent, "");
+    // output 是纯文案,不含 meta JSON(oldContent / newContent 不进 model 面)。
+    assert.ok(!result.output.includes("oldContent"));
+    assert.ok(!result.output.includes("newContent"));
+  });
+
+  it("envelope meta.oldContent = pre-write full content when file already exists", async () => {
+    const root = await makeScratch("write-file-overwrite-meta-");
+    const file = join(root, "existing.txt");
+    const oldContent = "old contents\n";
+    await writeFile(file, oldContent, "utf8");
+    const tool = createWriteFileTool(root);
+    const newContent = "new contents\n";
+
+    const result = (await tool.handler({
+      path: "existing.txt",
+      content: newContent,
+    })) as { output: string; meta: { oldContent: string; newContent: string } };
+
+    assert.equal(result.meta.oldContent, oldContent);
+    assert.equal(result.meta.newContent, newContent);
+    assert.equal(await readFile(file, "utf8"), newContent);
   });
 
   it("creates missing parent directories by default", async () => {

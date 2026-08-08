@@ -150,7 +150,12 @@ export function createEditFileTool(
     // (例如 LSP notifier 已 dispose 但我们仍误告其刷新)。
     opts?.onEdit?.(absPath);
 
-    return `[edit_file] replaced ${occurrences} occurrence(s) in ${absPath}`;
+    // T4 #298 side-channel:envelope 的 output 进 model tool_result,meta
+    // (old/new 全文)只走观测侧信道,不进模型可见 payload。
+    return {
+      output: `[edit_file] replaced ${occurrences} occurrence(s) in ${absPath}`,
+      meta: { oldContent: content, newContent: replaced },
+    };
   };
 
   return Object.freeze({

@@ -144,6 +144,42 @@ describe("createPermissionExecutor — 5-step chain order", () => {
     assert.equal(calls[0]![0]!.name, "grep");
   });
 
+  it("postToolUse 收到 meta(ok 变体) — side-channel 透传(#298)", async () => {
+    const tool = makeAciTool({ name: "edit_file", category: "write" });
+    const reg = makeRegistry([tool]);
+    let capturedMeta: unknown;
+    const post: PostToolUseHook = (result) => {
+      capturedMeta = result.meta;
+    };
+    const { executor: inner } = makeInnerSpy();
+    // inner 返回带 meta 的 ok result(模拟 executor 从 handler envelope 填充)。
+    const innerWithMeta: Executor = Object.freeze({
+      executeAll: async (
+        batch: ReadonlyArray<ToolCall>
+      ): Promise<ReadonlyArray<ToolExecutionResult>> =>
+        batch.map((c) => ({
+          kind: "ok" as const,
+          toolUseId: c.id,
+          payload: [{ type: "text" as const, text: "done" }],
+          meta: { oldContent: "old\n", newContent: "new\n" },
+        })),
+    });
+    const ex = createPermissionExecutor({
+      inner: innerWithMeta,
+      registry: reg,
+      policy: createPermissionPolicy(),
+      askUser: async () => true,
+      postToolUse: post,
+    });
+    await ex.executeAll([
+      { id: "u1", name: "edit_file", input: { path: "a.ts" } },
+    ]);
+    assert.deepEqual(capturedMeta, {
+      oldContent: "old\n",
+      newContent: "new\n",
+    });
+  });
+
   it("hook_blocked short-circuits with prefix; inner never called", async () => {
     const tool = makeAciTool({ name: "grep", category: "read-only" });
     const reg = makeRegistry([tool]);

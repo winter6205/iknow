@@ -169,6 +169,7 @@ export function createPermissionExecutor(
           ? r.message
           : undefined;
       const payload = r.kind === "ok" ? r.payload : undefined;
+      const meta = r.kind === "ok" ? r.meta : undefined;
       post({
         toolUseId: r.toolUseId,
         name: def.name,
@@ -176,6 +177,7 @@ export function createPermissionExecutor(
         kind: r.kind,
         message,
         payload,
+        meta,
       });
     }
     return out;

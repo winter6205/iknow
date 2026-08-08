@@ -20,6 +20,7 @@ import type {
   ToolCall,
   ToolExecutionContext,
   ToolExecutionResult,
+  ToolResultMeta,
 } from "./types.js";
 
 const TIMEOUT = Symbol("executor-timeout");
@@ -35,6 +36,11 @@ function safeContent(payload: unknown): AnthropicContentBlock[] {
   let text: string;
   if (typeof payload === "string") {
     text = payload;
+  } else if (isEnvelope(payload)) {
+    // T4 #298:handler 返回结构化 envelope `{ output, meta? }` — 仅取 output
+    // 字符串进 model tool_result;meta 走观测侧信道,不进模型可见 payload。
+    // 其余调用面(普通 JSON-compatible 对象)不受影响。
+    text = payload.output;
   } else if (isJsonCompatible(payload)) {
     text = JSON.stringify(payload);
   } else {
@@ -42,6 +48,35 @@ function safeContent(payload: unknown): AnthropicContentBlock[] {
     text = "[executor: payload not JSON-compatible]";
   }
   return [{ type: "text", text: applyOutputCap(text) }];
+}
+
+/** T4 #298:envelope 判别 — 必须是纯对象且带 string `output` 字段。 */
+function isEnvelope(v: unknown): v is { output: string } {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.output === "string";
+}
+
+/** T4 #298:从 envelope 提取 side-channel meta(仅为 string 字段;缺则 undefined)。 */
+function extractMeta(v: { output: string }): ToolResultMeta | undefined {
+  const raw = (v as Record<string, unknown>).meta;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return undefined;
+  }
+  const m = raw as Record<string, unknown>;
+  const oldContent =
+    typeof m.oldContent === "string" ? m.oldContent : undefined;
+  const newContent =
+    typeof m.newContent === "string" ? m.newContent : undefined;
+  return oldContent !== undefined || newContent !== undefined
+    ? Object.freeze(
+        oldContent !== undefined
+          ? newContent !== undefined
+            ? { oldContent, newContent }
+            : { oldContent }
+          : { newContent }
+      )
+    : undefined;
 }
 
 /**
@@ -211,10 +246,16 @@ export function createExecutor(registry: RegistryImpl): Executor {
               timeoutMs,
               stop.abort
             );
+      // T4 #298:envelope 的 meta 提升为 ok result 的可选 side-channel(类型已
+      // 由 T2 在 ToolExecutionResult.ok 声明);非 envelope 路径 meta 缺席。
+      const meta: ToolResultMeta | undefined = isEnvelope(out)
+        ? extractMeta(out)
+        : undefined;
       return {
         kind: "ok",
         toolUseId: call.id,
         payload: safeContent(out),
+        ...(meta !== undefined ? { meta } : {}),
       };
     } catch (err) {
       return {

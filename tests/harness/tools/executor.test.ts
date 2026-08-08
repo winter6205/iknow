@@ -717,6 +717,62 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
     );
   });
 
+  // (a2) T4 #298 side-channel: handler 返回 envelope `{ output, meta }` —
+  // executor 仅取 output 字符串进 model tool_result;meta 永不进模型面。
+  it("T4 envelope: handler returns { output, meta } → model tool_result text is exactly output, meta 不进 payload", async () => {
+    const envelope: ToolDef = {
+      name: "envelope",
+      description: "T4 envelope",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: () => ({
+        output: "[edit_file] replaced 1 occurrence(s) in a.ts",
+        meta: { oldContent: "const a = 1;\n", newContent: "const a = 2;\n" },
+      }),
+    };
+    const exec = createExecutor(createRegistry([envelope]));
+    const results = await exec.executeAll([
+      { id: "c1", name: "envelope", input: {} },
+    ]);
+    assert.equal(results[0]!.kind, "ok");
+    const payload = results[0]!.kind === "ok" ? results[0]!.payload : [];
+    assert.deepEqual(payload, [
+      { type: "text", text: "[edit_file] replaced 1 occurrence(s) in a.ts" },
+    ]);
+    // 决定性反证:meta 里没有一处泄漏进 model-facing payload 序列化文本。
+    assert.ok(!payload[0]!.text.includes("oldContent"));
+    assert.ok(!payload[0]!.text.includes("newContent"));
+    assert.ok(!payload[0]!.text.includes("const a = 1"));
+  });
+
+  // (a3) T4 #298: 相同 envelope 走 toAnthropicToolResults — tool_result content
+  // 只含 output 字符串,不含 meta JSON(模型路径回归)。
+  it("T4 envelope: toAnthropicToolResults tool_result content is only output, no meta", async () => {
+    const envelope: ToolDef = {
+      name: "envelope2",
+      description: "T4 envelope2",
+      inputSchema: { type: "object", additionalProperties: false },
+      handler: () => ({
+        output: "[write_file] wrote 4 bytes to new.ts",
+        meta: { oldContent: "", newContent: "abc\n" },
+      }),
+    };
+    const exec = createExecutor(createRegistry([envelope]));
+    const results = await exec.executeAll([
+      { id: "c1", name: "envelope2", input: {} },
+    ]);
+    const blocks = toAnthropicToolResults(results);
+    const b = blocks[0]! as {
+      type: "tool_result";
+      content: Array<{ type: "text"; text: string }>;
+    };
+    assert.equal(b.type, "tool_result");
+    assert.deepEqual(b.content, [
+      { type: "text", text: "[write_file] wrote 4 bytes to new.ts" },
+    ]);
+    assert.ok(!b.content[0]!.text.includes("oldContent"));
+    assert.ok(!b.content[0]!.text.includes("newContent"));
+  });
+
   // (b) S7a 契约 Y1 反例：非 bash 工具返回 {code, stdout, stderr} 形态
   // 对象，executor 走 generic JSON.stringify 序列化（plain-string wire），
   // 不给该对象任何结构化语义；这是契约 Y1 的真值。

@@ -65,6 +65,51 @@ describe("liveToolReduce (T4 工具实时状态)", () => {
     });
   });
 
+  it("post_tool_use 携带 oldContent / newContent → reducer 写入 run(#298 side-channel)", () => {
+    const started: ReadonlyArray<LiveToolRun> = liveToolReduce([], {
+      kind: "tool_call_start",
+      id: "toolu_edit",
+      name: "edit_file",
+    });
+    const done = liveToolReduce(started, {
+      kind: "post_tool_use",
+      id: "toolu_edit",
+      name: "edit_file",
+      input: { path: "a.ts" },
+      ok: true,
+      detail: "编辑 a.ts",
+      oldContent: "const a = 1;\n",
+      newContent: "const a = 2;\n",
+    });
+    expect(done[0]).toMatchObject({
+      id: "toolu_edit",
+      name: "edit_file",
+      status: "ok",
+      oldContent: "const a = 1;\n",
+      newContent: "const a = 2;\n",
+    });
+  });
+
+  it("post_tool_use 缺匹配 id → append 条目也写入 old/new(#298)", () => {
+    const next = liveToolReduce([], {
+      kind: "post_tool_use",
+      id: "toolu_other",
+      name: "write_file",
+      input: {},
+      ok: true,
+      oldContent: "",
+      newContent: "new\n",
+    });
+    expect(next).toHaveLength(1);
+    expect(next[0]).toMatchObject({
+      id: "toolu_other",
+      name: "write_file",
+      status: "ok",
+      oldContent: "",
+      newContent: "new\n",
+    });
+  });
+
   it("post_tool_use 配对失败 → status=failed", () => {
     const started: ReadonlyArray<LiveToolRun> = liveToolReduce([], {
       kind: "tool_call_start",

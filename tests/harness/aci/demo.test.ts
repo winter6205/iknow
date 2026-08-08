@@ -362,6 +362,17 @@ describe("demo 端到端 — 经 run() + createAciExecutor", () => {
     assert.ok(goodResult, "expected tool_result for c-good");
     assert.equal(goodResult.is_error, undefined);
 
+    // T4 #298 集成回归:append-only messages 里 good 的 tool_result 文本
+    // 只含 output 文案,不含 meta JSON(oldContent / newContent 决不漏进模型面)。
+    const goodText = toolResultText(goodResult);
+    assert.ok(goodText.includes("occurrence(s)"), "output text present");
+    assert.ok(!goodText.includes("oldContent"), "meta must NOT leak");
+    assert.ok(!goodText.includes("newContent"), "meta must NOT leak");
+    assert.ok(
+      !goodText.includes("const x = 1;"),
+      "old full content NOT in model"
+    );
+
     // 最终断言：文件已被正确补丁改写（说明坏补丁被拒后才执行 good）
     const after = readFileSync(filePath, "utf8");
     assert.notEqual(after, before, "file should be modified by good patch");

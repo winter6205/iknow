@@ -40,6 +40,15 @@ export interface TuiToolEvent {
   readonly kind: string;
   readonly input: unknown;
   readonly message?: string;
+  /**
+   * T4 (#298):观测 side-channel 载体 — handler envelope 的 meta(old/new 全文)。
+   * 注意与模型面(MCP/Anthropic)的 `payload` 概念无关:此字段只承载 diff 的
+   * old/new 内容,绝不进模型 tool_result。仅在 ok 且有 meta 时存在。
+   */
+  readonly payload?: {
+    readonly oldContent?: string;
+    readonly newContent?: string;
+  };
 }
 
 export interface BuildTuiDepsOptions {
@@ -126,6 +135,8 @@ export function buildTuiDeps(
           kind: result.kind,
           input: result.input,
           message: result.message,
+          // T4 (#298): meta 透传 → TuiToolEvent.payload(观测 side-channel)。
+          payload: result.meta,
         });
       },
     },
