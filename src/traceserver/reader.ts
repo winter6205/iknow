@@ -16,12 +16,12 @@
  */
 import { openSync, readSync, closeSync, statSync } from "node:fs";
 import {
-  TraceReadError,
   type TraceQuery,
   type TraceQueryResult,
   type TraceRecordRow,
 } from "./types.js";
 import { TRACE_FIELD_DEFS } from "./fields.js";
+import { isEnoent, wrapIoError } from "./io.js";
 
 /** Default byte cap for a single read (8 MiB). Overridable via factory opts. */
 export const MAX_TRACE_BYTES = 8 * 1024 * 1024;
@@ -127,24 +127,6 @@ function splitLines(
     nextOffset,
     truncated,
   };
-}
-
-function isEnoent(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    (err as { code?: unknown }).code === "ENOENT"
-  );
-}
-
-function wrapIoError(err: unknown): TraceReadError {
-  const code =
-    typeof err === "object" &&
-    err !== null &&
-    typeof (err as { code?: unknown }).code === "string"
-      ? (err as { code: string }).code
-      : "IO";
-  return new TraceReadError(`trace file read failed: ${code}`);
 }
 
 // -- parseLines ----------------------------------------------------------------

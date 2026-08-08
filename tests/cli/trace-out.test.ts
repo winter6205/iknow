@@ -14,6 +14,7 @@ import { createRegistry } from "../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../src/harness/tools/executor.ts";
 import { createJsonlTraceService } from "../../src/harness/trace/jsonl.ts";
 import { SessionHub } from "../../src/session-api/hub.ts";
+import { getVersion } from "../../src/cli/usage.ts";
 import { SessionStore } from "../../src/session-api/store/index.ts";
 import type { ListeningServer } from "../../src/session-api/http.ts";
 import { startSessionServe } from "../../src/session-api/serve.ts";
@@ -199,6 +200,41 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
     );
   });
 
+  it("SessionHub with traceOut writes a session root record with agent_version at run end", async () => {
+    scratch = mkdtempSync(join(tmpdir(), "trace-t5-hub-sessroot-"));
+    const store = new SessionStore(scratch);
+    const tool = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [assistantResult({ texts: ["hello sess root"] })],
+    });
+    const hub = new SessionHub({
+      store,
+      deps: { adapter: model, executor: exec, registry: reg, maxTurns: 5 },
+      traceOut: scratch,
+    });
+
+    const created = await hub.createSession();
+    const convId = created.session.conversation_id;
+    await hub.postMessage({ conversationId: convId, text: "hi" });
+
+    const traceFile = join(scratch, `${convId}.jsonl`);
+    const content = readFileSync(traceFile, "utf8");
+    const lines = content.split("\n").filter((l) => l.trim().length > 0);
+    const roots = lines.filter((l) => l.includes('"record_type":"session"'));
+    // SC-W 6/7:serve 产品路径注入 agentVersion → run 末尾写 session 根记录。
+    assert.equal(
+      roots.length,
+      1,
+      `expected exactly 1 session root record, got: ${lines.join(" | ")}`
+    );
+    const root = JSON.parse(roots[0]!) as Record<string, unknown>;
+    assert.equal(root["conversation_id"], convId);
+    assert.equal(root["agent_version"], getVersion());
+    assert.equal(root["status"], "ok");
+  });
+
   it("SessionHub without traceOut does NOT write any trace file", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-t5-noop-"));
     const store = new SessionStore(scratch);
@@ -274,10 +310,7 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
       text: "q2",
     });
 
-    const ids = [
-      s1.session.conversation_id,
-      s2.session.conversation_id,
-    ];
+    const ids = [s1.session.conversation_id, s2.session.conversation_id];
     // T2 每会话独立文件: 每个 session 各自一个 <convId>.jsonl, 不共写单文件。
     const total = ids.reduce((acc, id) => {
       const file = join(traceDir, `${id}.jsonl`);
@@ -287,7 +320,11 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
       assert.ok(lines.length >= 2, `expected >=2 records in ${file}`);
       for (const line of lines) {
         const rec = JSON.parse(line) as Record<string, unknown>;
-        assert.equal(rec["conversation_id"], id, "file content belongs to its session");
+        assert.equal(
+          rec["conversation_id"],
+          id,
+          "file content belongs to its session"
+        );
       }
       return acc + lines.length;
     }, 0);

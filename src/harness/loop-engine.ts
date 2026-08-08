@@ -425,6 +425,7 @@ async function epilogueSummary(opts: {
         supplierStop: "success",
         stream: streamMode,
         messagesCaptured: false,
+        // SC-W 5:摘要轮同样无可填 model 字段(adapter 不暴露,见 ok 分支注释)。
         status: "ok",
         ...(outcome.usage !== undefined ? outcome.usage : {}),
       })
@@ -945,6 +946,8 @@ async function stepWithTrace(opts: {
           durationMs: llmDurationMs,
           stream: streamMode,
           messagesCaptured: false,
+          // SC-W 5:错误分支 model 三字段整体缺席(Postel,ADR-0008 D3 同构)——
+          // 且 adapter 本就不暴露 model,无论成功失败都无可填。
           status: "error",
           error: { type: toTraceErrorType(reason), message: reason },
         })
@@ -952,6 +955,11 @@ async function stepWithTrace(opts: {
     } else {
       // usage 缺席(error/stub 路径)整条不落盘——Postel(ADR-0008 Decision 3)
       const usage = modelPhase.result.usage;
+      // SC-W 5 (v2 spec):modelRequested/modelActual/provider 缺席(Postel)。
+      // LoopAdapter/AssistantTurnResult 不暴露 model 字段(见 model-adapter/types.ts
+      // AssistantTurnResult:仅 nativeMessage/projection/supplierStop/usage)——
+      // model 是 adapter 内部 opts.model 的私有细节,bounded context 边界禁止
+      // loop-engine import adapter 的构造选项。能力不存在就不声明字段(ADR-0003 D9)。
       llmCallId = await safeTrace(() =>
         opts.deps.trace!.recordLlmCall({
           startedAt: llmStartedAt,

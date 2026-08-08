@@ -3,7 +3,8 @@
  *
  * Categories covered (S2 defensive contract):
  *   - happy path: readdir + stat → conversation_id / mtime / size / agent_version.
- *   - agent_version extraction: from the session root record (first line).
+ *   - agent_version extraction: from the session root record (written at run end = last line).
+ *   - root-not-first test: agent_version still extracted when the session root is the last line.
  *   - no directory: readdir ENOENT → empty list, no throw.
  *   - stat ENOENT: session deleted between readdir and stat → skipped.
  *   - bad/missing root record: agent_version absent, list does not fail overall.
@@ -21,13 +22,19 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listSessions, type SessionSummary } from "../../src/traceserver/sessions.ts";
+import {
+  listSessions,
+  type SessionSummary,
+} from "../../src/traceserver/sessions.ts";
 import { TraceReadError } from "../../src/traceserver/types.ts";
 
 // -- helpers ------------------------------------------------------------------
 
 /** Build a session root JSONL line mirroring the snake_case wire format. */
-function sessionLine(agentVersion?: string, extra?: Record<string, unknown>): string {
+function sessionLine(
+  agentVersion?: string,
+  extra?: Record<string, unknown>
+): string {
   const obj: Record<string, unknown> = {
     conversation_id: "conv-uuid",
     record_type: "session",
@@ -56,10 +63,14 @@ afterEach(() => {
 
 describe("listSessions — happy path", () => {
   it("returns conversation_id / mtime / size / agent_version per session file", () => {
-    writeFileSync(join(tmpDir, "uuid-a.jsonl"), sessionLine("1.2.3") + "\n", "utf8");
+    writeFileSync(
+      join(tmpDir, "uuid-a.jsonl"),
+      sessionLine("1.2.3") + "\n",
+      "utf8"
+    );
     writeFileSync(
       join(tmpDir, "uuid-b.jsonl"),
-      sessionLine("2.0.0") + "\n" + "{\"record_type\":\"turn\"}\n",
+      sessionLine("2.0.0") + "\n" + '{"record_type":"turn"}\n',
       "utf8"
     );
 
@@ -79,9 +90,17 @@ describe("listSessions — happy path", () => {
   });
 
   it("reports mtime as the file's last-modified time", () => {
-    writeFileSync(join(tmpDir, "uuid-a.jsonl"), sessionLine("1.2.3") + "\n", "utf8");
+    writeFileSync(
+      join(tmpDir, "uuid-a.jsonl"),
+      sessionLine("1.2.3") + "\n",
+      "utf8"
+    );
     // Re-write with new content to advance mtime deterministically.
-    writeFileSync(join(tmpDir, "uuid-a.jsonl"), sessionLine("1.2.4") + "\n", "utf8");
+    writeFileSync(
+      join(tmpDir, "uuid-a.jsonl"),
+      sessionLine("1.2.4") + "\n",
+      "utf8"
+    );
 
     const sessions = listSessions(tmpDir);
     assert.equal(sessions.length, 1);
@@ -90,7 +109,11 @@ describe("listSessions — happy path", () => {
   });
 
   it("reports size as the file's byte length without reading full content", () => {
-    writeFileSync(join(tmpDir, "uuid-a.jsonl"), sessionLine("1.2.3") + "\n", "utf8");
+    writeFileSync(
+      join(tmpDir, "uuid-a.jsonl"),
+      sessionLine("1.2.3") + "\n",
+      "utf8"
+    );
 
     const sessions = listSessions(tmpDir);
     assert.equal(sessions.length, 1);
@@ -105,7 +128,7 @@ describe("listSessions — agent_version extraction", () => {
   it("reads agent_version from the session root record (first line)", () => {
     writeFileSync(
       join(tmpDir, "uuid-a.jsonl"),
-      sessionLine("0.9.1") + "\n" + "{\"record_type\":\"llm_call\"}\n",
+      sessionLine("0.9.1") + "\n" + '{"record_type":"llm_call"}\n',
       "utf8"
     );
 
@@ -113,12 +136,45 @@ describe("listSessions — agent_version extraction", () => {
     assert.equal(s.agent_version, "0.9.1");
   });
 
+  it("extracts agent_version when the session root is the LAST line (run-end write)", () => {
+    // 真实 writer(loop-engine run 末尾 recordSession)把 session 根写在最后一行,
+    // 首行是 llm_call/turn。读首行会使 agent_version 恒 absent —— 这是 SC-R 18
+    // 修复的回归靶:必须扫描全文件找 record_type==="session"。
+    writeFileSync(
+      join(tmpDir, "uuid-last.jsonl"),
+      '{"record_type":"llm_call","llm_call_id":"l1"}\n' +
+        '{"record_type":"turn","turn_id":"t1"}\n' +
+        sessionLine("3.4.5") +
+        "\n",
+      "utf8"
+    );
+
+    const [s] = listSessions(tmpDir);
+    assert.ok(s, "session list must include the file");
+    assert.equal(s.agent_version, "3.4.5");
+  });
+
+  it("extracts agent_version when a corrupt line precedes the session root", () => {
+    writeFileSync(
+      join(tmpDir, "uuid-corrupt.jsonl"),
+      "{broken-json\n" + sessionLine("2.2.2") + "\n",
+      "utf8"
+    );
+
+    const [s] = listSessions(tmpDir);
+    assert.ok(s);
+    assert.equal(s.agent_version, "2.2.2");
+  });
+
   it("agent_version absent when the root record lacks the field", () => {
     writeFileSync(join(tmpDir, "uuid-a.jsonl"), sessionLine() + "\n", "utf8");
 
     const [s] = listSessions(tmpDir);
     assert.ok(s);
-    assert.ok(!("agent_version" in s), "agent_version must be absent, not undefined-valued");
+    assert.ok(
+      !("agent_version" in s),
+      "agent_version must be absent, not undefined-valued"
+    );
   });
 
   it("agent_version absent when the root record line is corrupt JSON", () => {
@@ -132,7 +188,7 @@ describe("listSessions — agent_version extraction", () => {
   it("agent_version absent when the first line is not a session record", () => {
     writeFileSync(
       join(tmpDir, "uuid-a.jsonl"),
-      "{\"record_type\":\"turn\",\"agent_version\":\"9.9.9\"}\n",
+      '{"record_type":"turn","agent_version":"9.9.9"}\n',
       "utf8"
     );
 
@@ -155,7 +211,11 @@ describe("listSessions — agent_version extraction", () => {
 
   it("a corrupt root record in one session does not fail the whole list", () => {
     writeFileSync(join(tmpDir, "uuid-a.jsonl"), "{broken\n", "utf8");
-    writeFileSync(join(tmpDir, "uuid-b.jsonl"), sessionLine("1.0.0") + "\n", "utf8");
+    writeFileSync(
+      join(tmpDir, "uuid-b.jsonl"),
+      sessionLine("1.0.0") + "\n",
+      "utf8"
+    );
 
     const sessions = listSessions(tmpDir);
     assert.equal(sessions.length, 2);
@@ -181,7 +241,11 @@ describe("listSessions — boundary", () => {
   });
 
   it("non-.jsonl files are ignored", () => {
-    writeFileSync(join(tmpDir, "uuid-a.jsonl"), sessionLine("1.2.3") + "\n", "utf8");
+    writeFileSync(
+      join(tmpDir, "uuid-a.jsonl"),
+      sessionLine("1.2.3") + "\n",
+      "utf8"
+    );
     writeFileSync(join(tmpDir, "README.txt"), "not a session\n", "utf8");
     writeFileSync(join(tmpDir, ".DS_Store"), "nope\n", "utf8");
 
@@ -209,15 +273,18 @@ describe("listSessions — boundary", () => {
 
     assert.throws(
       () => listSessions(file),
-      (err: unknown) =>
-        err instanceof TraceReadError && err.kind === "io_error"
+      (err: unknown) => err instanceof TraceReadError && err.kind === "io_error"
     );
   });
 
   it("traceDir pointing at a directory that got removed → empty list (no throw)", () => {
     const dir = join(tmpDir, "trace-sub");
     mkdirSync(dir);
-    writeFileSync(join(dir, "uuid-a.jsonl"), sessionLine("1.2.3") + "\n", "utf8");
+    writeFileSync(
+      join(dir, "uuid-a.jsonl"),
+      sessionLine("1.2.3") + "\n",
+      "utf8"
+    );
     rmSync(dir, { recursive: true, force: true });
 
     assert.deepEqual(listSessions(dir), []);
@@ -228,7 +295,11 @@ describe("listSessions — boundary", () => {
 
 describe("listSessions — wire shape", () => {
   it("returns SessionSummary objects with exactly the contract fields", () => {
-    writeFileSync(join(tmpDir, "uuid-a.jsonl"), sessionLine("1.2.3") + "\n", "utf8");
+    writeFileSync(
+      join(tmpDir, "uuid-a.jsonl"),
+      sessionLine("1.2.3") + "\n",
+      "utf8"
+    );
 
     const [s] = listSessions(tmpDir) as [SessionSummary];
     assert.deepEqual(Object.keys(s).sort(), [

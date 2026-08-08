@@ -154,10 +154,14 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
   // entry point surfaces violation escalations on stderr + exits with code 1.
   const { executor } = buildViolationWiring(built.deps.executor);
   // plan T6:--max-turns flag 优先,未设时回退装配层 env 值(undefined = 无限)。
+  // SC-W 6/7 (v2 spec):agentVersion 由 CLI 侧注入 getVersion() 值,run 末尾才会
+  // 落 session L1 根记录。Loop Engine 不 import cli/usage.ts(C2 决议:注入而非
+  // harness 层 import,避免写侧←cli 反向依赖)。
   const askDeps: LoopEngineDeps = {
     ...built.deps,
     executor,
     trace: traceService,
+    agentVersion: getVersion(),
     maxTurns: parsed.maxTurns ?? built.deps.maxTurns,
   };
   let stopSummary: string | undefined;
@@ -225,8 +229,11 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   }
 
   // plan T6:--max-turns flag 优先,未设时回退装配层 env 值(undefined = 无限)。
+  // SC-W 6/7 (v2 spec):chat 路径同样注入 agentVersion,与 ask/serve 一致,
+  // 使 chat 会话文件也产出 session 根记录。
   const chatDeps: LoopEngineDeps = {
     ...built.deps,
+    agentVersion: getVersion(),
     maxTurns: parsed.maxTurns ?? built.deps.maxTurns,
   };
   await runChatSession({
