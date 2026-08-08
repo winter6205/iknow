@@ -96,11 +96,15 @@ describe("IKNOW_BOOTSTRAP_PROMPT: pure-conversation guide", () => {
   });
 
   it("warns (not instructs) the agent that file/bash tools are out-of-sandbox", () => {
-    // W5: 文案已改为与真实执行对齐 — file-tools 拒绝 ~/.iknow/ 路径,但
+    // W5 → W6: 文案已改为与真实执行对齐 — read_file 默认允许读 ~/.iknow/(用户画像);
+    // write_file / edit_file / glob 仍然 cwd-scoping 拒绝 ~/.iknow/;
     // compound shell commands 可直达;host 拥有该目录,agent 不诱导用工具。
-    // 断言承诺:file-tools 拒绝路径(而非"全部工具被沙箱隔离"),且 host
-    // 拥有目录、用户在外侧编辑。
-    expect(IKNOW_BOOTSTRAP_PROMPT).toMatch(/file-tools' workspace sandbox/i);
+    // 断言承诺:write-file 子集拒绝、read_file 显式可读、host 拥有目录、用户在外侧编辑。
+    expect(IKNOW_BOOTSTRAP_PROMPT).toMatch(/project-root sandbox/i);
+    expect(IKNOW_BOOTSTRAP_PROMPT).toMatch(/read_file\s+can\s+read/i);
+    expect(IKNOW_BOOTSTRAP_PROMPT).toMatch(
+      /write_file\s*\/\s*edit_file\s*\/\s*glob/i
+    );
     expect(IKNOW_BOOTSTRAP_PROMPT).toMatch(/host owns this directory/i);
     expect(IKNOW_BOOTSTRAP_PROMPT).toMatch(/in your own editor/i);
     // 不允许回归到旧的"compound shell commands will reject"错误声明。

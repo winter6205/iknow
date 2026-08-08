@@ -12,6 +12,8 @@
  */
 
 import { readFile, stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
 import type { AciToolDef } from "../types.js";
@@ -21,7 +23,17 @@ const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 2000;
 const MAX_FILE_BYTES = 1_048_576; // 1 MiB
 
+/** `~/.iknow/` — the agent's own profile directory (readUserProfile in the
+ *  assembly layer already reads `user.md` from here every turn). */
+function iknowProfileRoot(): string {
+  return join(homedir(), ".iknow");
+}
+
 export function createReadFileTool(root: string): AciToolDef {
+  // read_file is a read-only tool. Beyond the primary sandbox root (cwd) it
+  // may also read the agent's own profile at `~/.iknow/` — the user asked for
+  // this to be allowed by default. Write tools stay cwd-scoped.
+  const extraReadRoots = Object.freeze([iknowProfileRoot()]);
   return Object.freeze({
     name: "read_file",
     description:
@@ -49,7 +61,11 @@ export function createReadFileTool(root: string): AciToolDef {
     },
     handler: async (input: unknown) => {
       const params = parseInput(input);
-      const resolved = await resolveWithinRoot(root, params.path);
+      const resolved = await resolveWithinRoot(
+        root,
+        params.path,
+        extraReadRoots
+      );
       let info;
       try {
         info = await stat(resolved);
