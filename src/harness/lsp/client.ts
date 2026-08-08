@@ -98,6 +98,13 @@ export async function getClient(
       broken.add(key);
       return undefined;
     })
+    .catch(() => {
+      // spawn 意外 throw（如 spawnProcess ENOENT）归一为不可用：记 broken、
+      // 返回 undefined，避免 rejection 逃逸成 unhandled、每次调用重试 spawn。
+      // 与 spawn return undefined 同路径（契约 types.ts:Handle | undefined）。
+      broken.add(key);
+      return undefined;
+    })
     .finally(() => {
       inflight.delete(key);
     });
