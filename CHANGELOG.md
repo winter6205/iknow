@@ -10,6 +10,8 @@
 
 ### Feature
 
+- **手动压缩会话（TUI `/compact` + web 压缩按钮）**: harness 层已有的 `compactMessages`（proactive/reactive 双保险共用收口）补手动入口。后端：`compactMessages` 从 `src/harness/index.ts` 公共出口导出；`SessionHub.compactSession` 走 serialize → load → compact → save（幂等 no-op：低于阈值不落盘、不 bump updatedAt），`POST /api/v1/sessions/:id/compact` 路由 + `CompactSessionResponse` wire 类型（session + turns + compacted + before/afterCount）。TUI：词表新增第 9 条 `/compact`（running 拒绝 / draft 提示无上下文 / 压缩后从磁盘刷新并保留 lastUsage 读数）。Web：`ContextUsageStrip` 右侧压缩按钮 + `useSessionChat.compact()`（轻操作不置 loading/error 全屏，失败局部提示）。测试：hub 4 边界 + http 2 例 + web hook 3 例 + strip 4 例 + slash 6 例 + session-state 2 例 + hub-bridge 2 例 + app 端到端 2 例。
+
 - **TUI 鼠标拖选复制 (#238)**: 应用内选区层 — DECSET 1002h drag 模式上报拖动坐标，app 维护 anchor/active 选区并渲染反色高亮（ink `<Text inverse>`），mouseup 自动把选中文本复制到系统剪贴板（复用 `copyToClipboard` 多平台 fallback 链）。Ctrl+Y 作为键盘逃生口（复制当前选区；无选区提示先拖选）。移除 `/copy` 命令与 `extractLastAssistantText`（#237 取消，词表 9→8 条）。新模块 `src/tui/selection.ts`（选区模型/坐标映射/文本提取纯函数）、`src/tui/selection-render.tsx`（反色高亮组件）；`mouse.ts` 扩展 `parseMouseAllEvents` 全 SGR 解析 + DECSET 1002h。测试：`selection.test.ts`（29 例）、`mouse.test.ts` 扩展（23 例）、`copy-flow.test.tsx` 重写为拖选 e2e（3 例）。
 
 - **Memory injection v0 (#121/#228, ADR-0009/0010)**: 记忆文件分层注入着陆 — `src/harness/memory/` 模块（paths/schema/frontmatter/errors/discovery/bm25/promote/assembly/refresh）+ `memory_recall` / `memory_save` 工具入 `createDefaultAciRegistry` SSOT（8→10）。`IKNOW_ASSEMBLY_ORDER` 9 段收敛为 5 段（identity/soul/user_profile/bootstrap/memory_layer），memory_layer 单 slot 委托 `createSystemResolver`（mtime 缓存 + inflight 去重 + 装配失败不毒化）。surface split：ask 入口剥离 memory 工具 + memory_layer 不挂（identity 层恒在）；chat/tui/serve 默认开启。
