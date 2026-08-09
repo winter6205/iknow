@@ -28,6 +28,12 @@ export type ContextUsageStripProps = {
   readonly usage: TokenUsage | null;
   readonly contextWindow: number | null;
   readonly sending: boolean;
+  /** 手动压缩会话。调用方（App）负责反馈「已压缩/无需压缩」与错误提示。 */
+  readonly onCompact?: () => void;
+  /** true = 压缩请求已发出，按钮禁用防重复提交。 */
+  readonly compacting?: boolean;
+  /** true = 无活跃会话，按钮禁用。 */
+  readonly compactDisabled?: boolean;
 };
 
 // 三档色（与 TUI context-bar.tsx CTX_BLUE / theme.ts:60-62 同值，inline 保
@@ -60,6 +66,9 @@ export function ContextUsageStrip({
   usage,
   contextWindow,
   sending,
+  onCompact,
+  compacting = false,
+  compactDisabled = false,
 }: ContextUsageStripProps) {
   // useMemo 兜底：null 场景也走同一 memo，仅 used/pct 返回零值；windowTokens
   // 即使无 usage 也保留真值（始终显示 0.0k/<window>，与 0% 框语义一致）。
@@ -92,6 +101,22 @@ export function ContextUsageStrip({
       <span style={{ color: "var(--color-ink-3)" }}>
         {(used / 1000).toFixed(1)}k/{(windowTokens / 1000).toFixed(1)}k
       </span>
+      {onCompact ? (
+        <button
+          type="button"
+          onClick={onCompact}
+          disabled={compacting || compactDisabled || sending}
+          aria-label="压缩会话"
+          title="压缩会话：裁剪早期消息，仅保留尾部上下文"
+          className={`ml-auto rounded-pill border px-2 py-0.5 font-mono text-[10px] leading-none transition-colors duration-200 ease-[var(--ease-soft)] ${
+            compacting || compactDisabled || sending
+              ? "cursor-not-allowed border-ink-3/20 text-ink-3/50"
+              : "border-ink-3/30 text-ink-2 hover:border-accent hover:text-accent"
+          }`}
+        >
+          {compacting ? "压缩中…" : "压缩"}
+        </button>
+      ) : null}
     </div>
   );
 }

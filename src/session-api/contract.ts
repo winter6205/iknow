@@ -120,6 +120,22 @@ export type ResetSessionResponse = {
   turns: TurnDto[];
 };
 
+/**
+ * 手动压缩会话响应（web 按钮 / TUI /compact 共用 wire 形状）。
+ * 压缩后 session 保持同一 conversation_id；turns 为压缩后消息投影。
+ * `compacted`：true 表示实际发生了裁剪（消息数减少）；false 表示消息已
+ * 低于压缩阈值、无变化（幂等 no-op，客户端据此提示“无需压缩”）。
+ */
+export type CompactSessionResponse = {
+  session: SessionSummary;
+  turns: TurnDto[];
+  compacted: boolean;
+  /** 压缩前的消息条数（DEFAULT_KEEP_RECENT 尾窗保留判定用）。 */
+  beforeCount: number;
+  /** 压缩后的消息条数（no-op 时 === beforeCount）。 */
+  afterCount: number;
+};
+
 export type HealthResponse = {
   ok: true;
   service: "iknow-session-api";

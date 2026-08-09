@@ -1,5 +1,6 @@
 import type {
   ApiErrorBody,
+  CompactSessionResponse,
   CreateSessionResponse,
   GetSessionResponse,
   HealthResponse,
@@ -168,6 +169,20 @@ export function resetSession(
     {
       method: "POST",
       body: JSON.stringify(opts),
+    },
+    signal
+  );
+}
+
+export function compactSession(
+  id: string,
+  signal?: AbortSignal
+): Promise<CompactSessionResponse> {
+  return request(
+    `${API}/sessions/${encodeURIComponent(id)}/compact`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
     },
     signal
   );

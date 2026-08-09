@@ -15,6 +15,7 @@ import {
   attachSession,
   canInterrupt,
   createDraftSession,
+  sessionCompacted,
   switchedAwayFrom,
   switchedTo,
   turnFinished,
@@ -231,5 +232,72 @@ describe("session-state: userMessageEchoed (T2 即时回显)", () => {
       role: "user",
       content: [{ type: "text", text: "第二条" }],
     });
+  });
+});
+
+describe("session-state: sessionCompacted（/compact 落盘后刷新）", () => {
+  const compactedMessages: ReadonlyArray<AnthropicNativeMessage> = [
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: "[compaction boundary — earlier messages cleared]",
+        },
+      ],
+    },
+    msg("尾部消息"),
+  ];
+
+  it("压缩后：消息/turnCount/updatedAt 替换，runState 归 idle", () => {
+    const lastUsage = {
+      inputTokens: 100,
+      outputTokens: 20,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+    };
+    // 构造一个已跑过 turn、持有 lastUsage 的 idle 会话。
+    const afterTurn = turnFinished(turnStarted(createDraftSession()), {
+      conversationId: "conv-1",
+      messages: [msg("问"), msg("答", "assistant")],
+      turnCount: 1,
+      updatedAt: "2026-08-05T00:00:00.000Z",
+      jsonMode: false,
+      stopReason: "completed",
+      lastUsage,
+    });
+    const compacted = sessionCompacted(afterTurn, {
+      messages: compactedMessages,
+      turnCount: 1,
+      updatedAt: "2026-08-06T00:00:00.000Z",
+      jsonMode: false,
+    });
+    expect(compacted.runState).toBe("idle");
+    expect(compacted.messages).toHaveLength(2);
+    expect(compacted.messages[0]).toEqual({
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: "[compaction boundary — earlier messages cleared]",
+        },
+      ],
+    });
+    expect(compacted.updatedAt).toBe("2026-08-06T00:00:00.000Z");
+    // 关键语义：压缩不是 turn，lastUsage / lastStopReason 保留。
+    expect(compacted.lastUsage).toEqual(lastUsage);
+    expect(compacted.lastStopReason).toBe("completed");
+    expect(Object.isFrozen(compacted.messages)).toBe(true);
+  });
+
+  it("非 idle（running-fg）→ 保持原状态（与 turnStarted 同护栏语义）", () => {
+    const running = turnStarted(createDraftSession());
+    const result = sessionCompacted(running, {
+      messages: compactedMessages,
+      turnCount: 99,
+      updatedAt: "2026-08-06T00:00:00.000Z",
+      jsonMode: false,
+    });
+    expect(result).toBe(running); // 原对象引用，无替换
   });
 });

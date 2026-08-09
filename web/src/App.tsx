@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { ChatHeader } from "./components/ChatHeader";
 import { Composer } from "./components/Composer";
@@ -41,6 +41,35 @@ function ChatApp() {
   // the user clicking refresh.
   const [sidebarSignal, setSidebarSignal] = useState(0);
   const bumpSidebar = useCallback(() => setSidebarSignal((n) => n + 1), []);
+
+  // 压缩按钮反馈：working 时按钮显示「压缩中…」；完成后短暂显示结果提示。
+  const [compacting, setCompacting] = useState(false);
+  const [compactNotice, setCompactNotice] = useState<string | null>(null);
+  const compactNoticeTimer = useRef<number | null>(null);
+
+  const handleCompact = useCallback(async () => {
+    if (compacting) return;
+    setCompacting(true);
+    setCompactNotice(null);
+    try {
+      const didCompact = await chat.compact();
+      setCompactNotice(didCompact ? "已压缩上下文" : "上下文未达压缩阈值");
+    } catch (e) {
+      setCompactNotice(
+        `压缩失败：${e instanceof Error ? e.message : String(e)}`
+      );
+    } finally {
+      setCompacting(false);
+      // 提示停留 3s 后自动消失。
+      if (compactNoticeTimer.current !== null) {
+        window.clearTimeout(compactNoticeTimer.current);
+      }
+      compactNoticeTimer.current = window.setTimeout(() => {
+        setCompactNotice(null);
+        compactNoticeTimer.current = null;
+      }, 3000);
+    }
+  }, [compacting, chat]);
 
   // Composer 只发文本；thinking override 在 App 层按当前设置合成后透传。
   const handleSend = useCallback(
@@ -173,12 +202,25 @@ function ChatApp() {
             onThinkingChange={handleThinkingChange}
             onSend={handleSend}
           />
-          {/* 上下文用量条：输入框下方（用户 2026-08-07 反馈：放输入框下方）。 */}
+          {/* 上下文用量条：输入框下方（用户 2026-08-07 反馈：放输入框下方）。
+              右侧压缩按钮：手动触发 compactSession（后端幂等，低于阈值 no-op）。 */}
           <ContextUsageStrip
             usage={chat.lastAnswer?.lastUsage ?? null}
             contextWindow={chat.contextWindow}
             sending={chat.phase === "sending"}
+            onCompact={handleCompact}
+            compacting={compacting}
+            compactDisabled={!chat.session}
           />
+          {compactNotice ? (
+            <p
+              role="status"
+              aria-live="polite"
+              className="mx-auto w-full max-w-[var(--chat-max)] px-4 pb-1 pt-0 text-center font-mono text-[10px] text-ink-3"
+            >
+              {compactNotice}
+            </p>
+          ) : null}
         </>
       }
     />

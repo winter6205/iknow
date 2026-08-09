@@ -104,6 +104,16 @@ export type ResetSessionResponse = {
   turns: TurnDto[];
 };
 
+/** 手动压缩会话响应（镜像 src/session-api/contract.ts CompactSessionResponse）。 */
+export type CompactSessionResponse = {
+  session: SessionSummary;
+  turns: TurnDto[];
+  /** true 表示实际发生了裁剪；false 表示已低于阈值、无变化。 */
+  compacted: boolean;
+  beforeCount: number;
+  afterCount: number;
+};
+
 export type HealthResponse = {
   ok: true;
   service: string;

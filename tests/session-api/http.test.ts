@@ -476,6 +476,42 @@ describe("POST /api/v1/sessions/:id/reset", () => {
   });
 });
 
+// -- endpoint 6b: POST /api/v1/sessions/:id/compact --------------------------
+
+describe("POST /api/v1/sessions/:id/compact", () => {
+  it("空 body → 200；短会话 → compacted=false（幂等 no-op）", async () => {
+    const id = await createSession();
+    await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: { text: "msg" },
+    });
+
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/compact`,
+      payload: {},
+    });
+    assert.equal(status, 200);
+    const b = body as {
+      session: { conversation_id: string; turn_count: number };
+      compacted: boolean;
+      beforeCount: number;
+      afterCount: number;
+    };
+    assert.equal(b.session.conversation_id, id);
+    assert.equal(b.compacted, false);
+    assert.equal(b.beforeCount, b.afterCount);
+  });
+
+  it("missing session → 404 not_found（nested ApiErrorBody）", async () => {
+    const { status, body } = await postJson({
+      path: "/api/v1/sessions/does-not-exist/compact",
+      payload: {},
+    });
+    assert.equal(status, 404);
+    assertNestedError({ body, kind: "not_found" });
+  });
+});
+
 // -- endpoint 7: POST /api/v1/sessions/:id/commands (REMOVED) ----------------
 
 describe("POST /api/v1/sessions/:id/commands (removed in T5)", () => {

@@ -222,3 +222,48 @@ describe("hub-bridge postMessage lastUsage（T3）", () => {
     expect(result.lastUsage).toBeNull();
   });
 });
+
+describe("hub-bridge compactSession（/compact）", () => {
+  let baseDir: string;
+
+  beforeEach(async () => {
+    baseDir = await mkdtemp(join(tmpdir(), "iknow-tui-bridge-compact-"));
+  });
+  afterEach(async () => {
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
+  it("长会话 → compacted=true；短会话 → compacted=false（幂等）", async () => {
+    // 4 个 assistant 应答 → 8 条消息 > DEFAULT_KEEP_RECENT=6 → 实际压缩。
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      deps: makeDeps(
+        Array.from({ length: 4 }, (_, i) =>
+          assistantResult({ texts: [`answer ${i}`] })
+        )
+      ),
+      inflight: createInflightRegistry(),
+    });
+    const id = await bridge.ensureSession(undefined);
+    for (let i = 0; i < 4; i++) {
+      await bridge.postMessage({ conversationId: id, text: `q${i}` });
+    }
+
+    const compacted = await bridge.compactSession(id);
+    expect(compacted).toBe(true);
+
+    // 短会话（1 turn = 2 条）→ 无需压缩。
+    const id2 = await bridge.ensureSession(undefined);
+    await bridge.postMessage({ conversationId: id2, text: "hi" });
+    expect(await bridge.compactSession(id2)).toBe(false);
+  });
+
+  it("missing session → 抛错（not_found 透传）", async () => {
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      deps: makeDeps([]),
+      inflight: createInflightRegistry(),
+    });
+    await expect(bridge.compactSession("no-such-id")).rejects.toThrow();
+  });
+});

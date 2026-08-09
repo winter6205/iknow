@@ -81,6 +81,8 @@ export interface TuiBridge {
   }) => Promise<TuiPostResult>;
   readonly listSessions: () => ReturnType<SessionHub["listSessions"]>;
   readonly loadSessionFile: (conversationId: string) => Promise<SessionFileV1>;
+  /** 手动压缩会话（/compact）。返回是否实际发生裁剪（false = 无需压缩）。 */
+  readonly compactSession: (conversationId: string) => Promise<boolean>;
   readonly inflight: InflightRegistry;
   /** T3: 上下文窗口容量（tokens）。仅显示用，不触发压缩。 */
   readonly contextWindow: number;
@@ -140,6 +142,10 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     },
     listSessions: () => hub.listSessions(),
     loadSessionFile: (conversationId) => store.load(conversationId),
+    compactSession: async (conversationId) => {
+      const res = await hub.compactSession(conversationId);
+      return res.compacted;
+    },
     inflight: opts.inflight,
     contextWindow: opts.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
   };

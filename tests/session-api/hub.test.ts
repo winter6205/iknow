@@ -599,6 +599,87 @@ describe("resetSession", () => {
   });
 });
 
+// -- compactSession ----------------------------------------------------------
+// 边界类覆盖：正常压缩（> keepRecent 触发裁剪）、幂等 no-op（低于阈值不落盘）、
+// 空会话 no-op、missing session → not_found。DEFAULT_KEEP_RECENT=6，每 turn 2
+// 条消息（user+assistant），4 turns = 8 条 → 触发裁剪。
+
+describe("compactSession", () => {
+  async function seedTurns(hub: SessionHub, id: string, n: number) {
+    for (let i = 0; i < n; i++) {
+      await hub.postMessage({ conversationId: id, text: `q${i}` });
+    }
+  }
+
+  it("实际压缩：8 条消息 → 压缩后消息更少，落盘", async () => {
+    const deps = makeDeps(
+      Array.from({ length: 4 }, (_, i) =>
+        assistantResult({ texts: [`answer ${i}`] })
+      )
+    );
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    await seedTurns(hub, session.conversation_id, 4);
+
+    const loaded = await store.load(session.conversation_id);
+    assert.equal(loaded.messages.length, 8);
+
+    const res = await hub.compactSession(session.conversation_id);
+    assert.equal(res.compacted, true);
+    // keepRecent=6 尾窗 + 1 条边界占位符 = 7 条 < 8。
+    assert.equal(res.beforeCount, 8);
+    assert.equal(res.afterCount, 7);
+    // same conversation id，turnCount 不重置。
+    assert.equal(res.session.conversation_id, session.conversation_id);
+    assert.equal(res.session.turn_count, 4);
+
+    const after = await store.load(session.conversation_id);
+    assert.equal(after.messages.length, 7);
+    assert.equal(after.turnCount, 4);
+  });
+
+  it("幂等 no-op：消息低于压缩窗口 → compacted=false，不落盘、不 bump updatedAt", async () => {
+    const deps = makeDeps([assistantResult({ texts: ["hi"] })]);
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "hello",
+    });
+    const before = await store.load(session.conversation_id);
+    assert.equal(before.messages.length, 2);
+
+    const res = await hub.compactSession(session.conversation_id);
+    assert.equal(res.compacted, false);
+    assert.equal(res.beforeCount, 2);
+    assert.equal(res.afterCount, 2);
+
+    const after = await store.load(session.conversation_id);
+    assert.equal(after.updatedAt, before.updatedAt); // 未 touch
+    assert.equal(after.messages.length, 2);
+  });
+
+  it("空会话 → compacted=false no-op", async () => {
+    const hub = makeHub(makeDeps([]));
+    const { session } = await hub.createSession();
+    const res = await hub.compactSession(session.conversation_id);
+    assert.equal(res.compacted, false);
+    assert.equal(res.beforeCount, 0);
+    assert.equal(res.afterCount, 0);
+  });
+
+  it("missing session → not_found（mapStoreError 契约）", async () => {
+    const hub = makeHub(makeDeps([]));
+    await assert.rejects(
+      () => hub.compactSession("no-such-id"),
+      (err: unknown) => {
+        const e = err as { kind?: string };
+        return e.kind === "not_found";
+      }
+    );
+  });
+});
+
 describe("postMessage summary projection", () => {
   it("recomputes summary instead of preserving a dirty value", async () => {
     const hub = makeHub(makeDeps([assistantResult({ texts: ["answer"] })]));

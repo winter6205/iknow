@@ -11,6 +11,7 @@ export {
   type PostMessageResponse,
   type ResetSessionRequest,
   type ResetSessionResponse,
+  type CompactSessionResponse,
   type HealthResponse,
   type ApiErrorBody,
 } from "./contract.js";
