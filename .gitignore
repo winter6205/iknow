@@ -78,6 +78,10 @@ data/sessions/*
 
 # 064 T5: JSONL trace output (default path ./trace.jsonl)
 trace.jsonl
+# runtime trace service output directory (per-session JSONL files)
+trace/
+# clipboard fallback artifact when no clipboard is available (src/tui/clipboard.ts)
+last_copy.txt
 
 # local Next.js prototype (early-stage, not team-shared; built artifacts
 # also covered by node_modules/ etc. above)
@@ -106,3 +110,5 @@ docs/harness-report
 
 .reference/
 .iknow/
+.qoder/
+AGENTS.md
