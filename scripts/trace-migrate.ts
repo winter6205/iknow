@@ -17,7 +17,7 @@
  * 依赖；CLI main 只做 argv 解析 + 报告打印。与 reader.ts parseOneLine 的
  * 坏行判据对齐（无效 JSON / 标量 / 数组 / null 均跳过）。
  */
-import { readFileSync, appendFileSync, mkdirSync } from "node:fs";
+import { readFileSync, appendFileSync, mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -31,6 +31,8 @@ export interface TraceMigrateReport {
   readonly skippedLines: number;
   /** 迁移到的会话 id 列表（按其首次出现顺序）。 */
   readonly conversationIds: ReadonlyArray<string>;
+  /** 是否在迁移成功后删除了旧单文件（干净迁移才删除，见 migrateTraceFile）。 */
+  readonly removedInput: boolean;
 }
 
 /** conversation_id 字段名（写侧 ADR-0003 D4 蛇形键）。 */
@@ -59,6 +61,10 @@ function parseOneLine(line: string): Record<string, unknown> | undefined {
  * 保留原行：appendFileSync 写入与输入完全一致的原始行（含原有换行缺失时
  * 由调用方补充），不修改内容。坏行跳过并计数。输出目录不存在时创建。
  *
+ * 删除输入：干净迁移（skippedLines === 0）后 unlink 旧单文件，保证 CLI 的
+ * fail-fast 检测（./trace.jsonl 存在即提示迁移）在迁移完成后不再触发 ——
+ * 否则跑完迁移仍被挡。存在坏行时保留输入文件，供人工核对/重试后再删。
+ *
  * 一次迁移以 inputPath 不存在视为空输入（0 行 0 会话），不抛错 —— 与
  * reader 对 ENOENT 的静默处理一致，便于在无旧文件的仓库里安全执行。
  */
@@ -76,6 +82,7 @@ export function migrateTraceFile(
         totalLines: 0,
         skippedLines: 0,
         conversationIds: [],
+        removedInput: false,
       };
     }
     throw err;
@@ -109,11 +116,27 @@ export function migrateTraceFile(
     appendFileSync(join(outputDir, `${convId}.jsonl`), line + "\n", "utf8");
   }
 
+  // 干净迁移后删除旧单文件，避免 CLI fail-fast 在迁移完成后仍被旧文件挡住。
+  // 有坏行时保留输入（数据可能未完整迁移，删了无法恢复），返回 removedInput: false。
+  // 空文件也算干净（无数据可丢）：删除它同样解除 fail-fast 的残留触发。
+  let removedInput = false;
+  if (skippedLines === 0) {
+    try {
+      rmSync(inputPath, { force: true });
+      removedInput = true;
+    } catch (err) {
+      // 删除失败不阻断迁移结果：文件留着，fail-fast 会继续提示，下次再删。
+      // 删除失败时静默（坏行路径保留文件是契约，unlink 失败保留文件也安全）。
+      void err;
+    }
+  }
+
   return {
     sessions: conversationIds.length,
     totalLines,
     skippedLines,
     conversationIds,
+    removedInput,
   };
 }
 
@@ -168,6 +191,9 @@ function printReport(report: TraceMigrateReport, outputDir: string): void {
   console.log(`  处理会话数: ${report.sessions}`);
   console.log(`  总行数: ${report.totalLines}`);
   console.log(`  跳过坏行: ${report.skippedLines}`);
+  if (report.removedInput) {
+    console.log("  已删除旧单文件（干净迁移完成）。");
+  }
   if (report.sessions === 0) {
     console.log("  无旧 trace 可迁移（输入为空或不存在）。");
   }

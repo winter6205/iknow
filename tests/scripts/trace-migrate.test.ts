@@ -9,10 +9,13 @@
  *   - 空文件 / 输入不存在 → 空结果不抛错。
  *   - 输出目录不存在时自动创建。
  *   - 报告计数（sessions / totalLines / skippedLines / conversationIds）。
+ *   - 删除旧输入：干净迁移后 unlink 旧单文件（CLI fail-fast 不残留触发）；
+ *     有坏行 / 输入不存在 / 空输入时不删除。
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
+  existsSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -187,6 +190,7 @@ describe("migrateTraceFile — 空 / 缺失输入", () => {
       totalLines: 0,
       skippedLines: 0,
       conversationIds: [],
+      removedInput: true,
     });
   });
 
@@ -197,6 +201,7 @@ describe("migrateTraceFile — 空 / 缺失输入", () => {
       totalLines: 0,
       skippedLines: 0,
       conversationIds: [],
+      removedInput: false,
     });
   });
 });
@@ -220,5 +225,57 @@ describe("migrateTraceFile — 报告计数", () => {
     assert.equal(report.totalLines, 4);
     assert.equal(report.skippedLines, 0);
     assert.deepEqual(report.conversationIds, ["b", "a"]);
+  });
+});
+
+// -- 删除旧输入 -----------------------------------------------------------------
+
+describe("migrateTraceFile — 删除旧输入", () => {
+  it("deletes the legacy single-file after a clean migration", () => {
+    writeFileSync(
+      inputPath,
+      [makeLine("c1"), makeLine("c2")].join("\n") + "\n",
+      "utf8"
+    );
+    const report = migrateTraceFile(inputPath, outputDir);
+    assert.equal(report.skippedLines, 0);
+    assert.equal(report.removedInput, true);
+    assert.equal(existsSync(inputPath), false);
+  });
+
+  it("keeps the input when any line is skipped (data may be lost)", () => {
+    writeFileSync(
+      inputPath,
+      [makeLine("c1"), "{bad-json", makeLine("c1")].join("\n") + "\n",
+      "utf8"
+    );
+    const report = migrateTraceFile(inputPath, outputDir);
+    assert.equal(report.skippedLines, 1);
+    assert.equal(report.removedInput, false);
+    assert.equal(existsSync(inputPath), true);
+    // 迁移结果照常落盘，只是不删输入。
+    const out = readFileSync(join(outputDir, "c1.jsonl"), "utf8");
+    assert.equal(out.split("\n").filter((l) => l.length > 0).length, 2);
+  });
+
+  it("does not delete an absent input (removedInput false, no throw)", () => {
+    const report = migrateTraceFile(join(tmpDir, "absent.jsonl"), outputDir);
+    assert.equal(report.removedInput, false);
+    assert.deepEqual(report, {
+      sessions: 0,
+      totalLines: 0,
+      skippedLines: 0,
+      conversationIds: [],
+      removedInput: false,
+    });
+  });
+
+  it("deletes an empty input file after a clean (trivial) migration", () => {
+    writeFileSync(inputPath, "", "utf8");
+    const report = migrateTraceFile(inputPath, outputDir);
+    assert.equal(report.sessions, 0);
+    assert.equal(report.skippedLines, 0);
+    assert.equal(report.removedInput, true);
+    assert.equal(existsSync(inputPath), false);
   });
 });

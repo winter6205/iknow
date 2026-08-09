@@ -361,7 +361,8 @@ async function runTrace(parsed: ParsedCli): Promise<void> {
     writeErr(
       `错误: 检测到旧单文件格式的 trace。请先运行迁移脚本：\n` +
         `  npx tsx scripts/trace-migrate.ts\n` +
-        `(把 ${LEGACY_TRACE_FILE} 转成 ${DEFAULT_TRACE_DIR}<convId>.jsonl 目录)`
+        `(把 ${LEGACY_TRACE_FILE} 转成 ${DEFAULT_TRACE_DIR}<convId>.jsonl 目录；` +
+        `干净迁移完成后脚本会自动删除旧文件)`
     );
     process.exitCode = 1;
     return;
