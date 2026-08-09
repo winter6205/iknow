@@ -5,6 +5,13 @@
  * `MessageConnection`，并对同一 (root, server.id) 复用连接（S9 三件套：
  * clients 缓存 / broken 记忆 / inflight 并发去重）。
  *
+ * **多语言 dispatch（spec 302-lsp-multilang § client.ts，#304 决策1）**：
+ * `getClient` 不再硬编默认 `Typescript`，改按 `file` 扩展名经
+ * `server.ts` 的 `resolveServer(file)` 路由到对应 server（`.py`→Pyright、
+ * `.yaml`→YamlLS、`.json`→JsonLS、`Dockerfile`→DockerfileLS、`.ts`→
+ * Typescript）；无匹配 → early-return `undefined`（`"(no LSP server)"`）。
+ * `opts.server` 测试注入点保留，语义从「默认 server」变「覆盖 dispatch 结果」。
+ *
  * 与 opencode lsp.ts:208-297 的复用三件套同源（#247 Q8），但 iknow 无
  * InstanceContext：ctx 由调用方（handler 层）持有 `{ directory }`。
  *
@@ -24,7 +31,8 @@ import {
 import type { MessageConnection } from "vscode-jsonrpc/node";
 
 import type { LspCtx, LspServerInfo } from "./types.js";
-import { Typescript } from "./server.js";
+import { resolveServer } from "./server.js";
+import { languageIdFor } from "./language.js";
 
 /** 客户端包装：对上层（handler）暴露薄透传的 sendRequest / sendNotification / dispose。 */
 export interface LspClient {
@@ -78,7 +86,8 @@ const inflight = new Map<string, Promise<LspClient | undefined>>();
  *   6. 否则发起 `spawnClient` 任务：失败标 `broken`；成功存 `clients`；
  *      `.finally` 释放 `inflight`。
  *
- * `opts.server` 可注入测试替身（默认 `Typescript`，TS 单语言首期）。
+ * `opts.server` 可注入测试替身，**覆盖** `resolveServer(file)` 的 dispatch
+ * 结果（默认按扩展名路由到对应 server）。
  *
  * @returns 客户端；`undefined` 表示该文件无可用 LSP server（host 转纯字符串）。
  */
@@ -87,7 +96,8 @@ export async function getClient(
   file: string,
   opts?: { readonly server?: LspServerInfo }
 ): Promise<LspClient | undefined> {
-  const server = opts?.server ?? Typescript;
+  const server = opts?.server ?? resolveServer(file);
+  if (!server) return undefined; // 无匹配扩展名 → 本文件无 LSP server（graceful）
   const root = await server.root(file, ctx);
   if (!root) return undefined;
 
@@ -152,6 +162,13 @@ async function spawnClient(
     initializationOptions: initialization,
   });
 
+  // LSP initialized 通知（生产正确性，spec 302-lsp-multilang § T6）：initialize
+  // 响应后必须补发 `initialized` 通知，server 才算进入 ready 态。pyright 实测
+  // 不 gate——收不到 initialized 则忽略后续所有请求；tsserver 不 gate 所以 TS
+  // 原本正常，补发对 tsserver 兼容（幂等，重复发送无害）。此修复后，探针侧
+  // （scripts/lsp-probe.ts）不再另行补发，避免 double-init。
+  await connection.sendNotification("initialized", {});
+
   // 订阅 push diagnostics：tsserver / typescript-language-server 不实现
   // pull 的 textDocument/diagnostic（LSP 3.16+），用 publishDiagnostics 通知
   // 累积最近一次 per-uri 的诊断列表。latest-wins:同一 uri 多次推送覆盖。
@@ -215,19 +232,6 @@ async function spawnClient(
     },
     dispose: () => connection.dispose(),
   };
-}
-
-/**
- * 扩展名 → LSP languageId（tsserver 用 languageId 决定 TS / TSX / JS 服务的
- * 哪一种建 project）。当前 iknow LSP 仅接 TS 系列（server.ts extensions），
- * 其它扩展名一律回退 typescript：与 probe `lsp-probe.ts:130` 的固定值一致，
- * 避免误判扩展名后语言识别失败导致符号查询仍空。
- */
-function languageIdFor(file: string): string {
-  if (/\.(ts|mts|cts)$/i.test(file)) return "typescript";
-  if (/\.(tsx)$/i.test(file)) return "typescriptreact";
-  if (/\.(jsx)$/i.test(file)) return "javascriptreact";
-  return "typescript";
 }
 
 /**

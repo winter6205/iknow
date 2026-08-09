@@ -19,6 +19,16 @@ import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
 
 import type { LspServerInfo } from "../../../src/harness/lsp/types.ts";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  Pyright,
+  YamlLS,
+  JsonLS,
+  DockerfileLS,
+  Typescript,
+} from "../../../src/harness/lsp/server.ts";
 
 // ── 模块级 mock（vi.hoisted 保证 mock 工厂能引用这些） ────────────────────────
 
@@ -152,6 +162,28 @@ describe("getClient same-root reuse", () => {
         rootUri: expect.stringContaining("/root"),
       })
     );
+  });
+});
+
+// ── 1b. initialized 通知（T6 生产正确性修复）──────────────────────────────
+//
+// 锚点 client.ts spawnClient：initialize 响应后必须补发 `initialized` 通知，
+// pyright 实测不 gate——收不到 initialized 则忽略后续所有请求；tsserver 不 gate
+// 所以 TS 原本正常，补发对 tsserver 兼容。断言：spawnClient 发 initialize 后
+// 恰好补发一次 initialized 通知（探针不再另行补发，避免 double-init）。
+
+describe("spawnClient sends initialized after initialize", () => {
+  it("sends exactly one `initialized` notification after the initialize handshake", async () => {
+    const { server } = makeFakeServer("initialized");
+
+    const client = await getClient(ctx, "/root/init.ts", { server });
+    expect(client).toBeDefined();
+
+    const initCalls = mockSendNotification.mock.calls.filter(
+      (c) => c[0] === "initialized"
+    );
+    expect(initCalls).toHaveLength(1); // 恰好一次，不 double-init
+    expect(initCalls[0][1]).toEqual({});
   });
 });
 
@@ -438,9 +470,13 @@ describe("cancelRequest NaN id", () => {
 
     await cancelRequest(client, NaN);
 
-    expect(mockSendNotification).toHaveBeenCalledTimes(1);
-    expect(mockSendNotification.mock.calls[0][0]).toBe("$/cancelRequest");
-    expect(mockSendNotification.mock.calls[0][1]).toEqual({ id: NaN });
+    // spawnClient 握手先发一次 `initialized` 通知（T6 生产正确性修复），
+    // 这里只断言 `$/cancelRequest` 那次（过滤掉握手通知）。
+    const cancelCalls = mockSendNotification.mock.calls.filter(
+      (c) => c[0] === "$/cancelRequest"
+    );
+    expect(cancelCalls).toHaveLength(1);
+    expect(cancelCalls[0][1]).toEqual({ id: NaN });
   });
 });
 
@@ -761,6 +797,179 @@ describe("ensureOpen idempotency", () => {
       expect(didOpens).toHaveLength(1); // 回滚后真的发了一次
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+// ── 18. getClient dispatch（spec 302-lsp-multilang § client.ts，#304 决策1）───
+//
+// `getClient` 不再硬编默认 `Typescript`，改按 `file` 扩展名经 `resolveServer`
+// 路由到对应 server；`opts.server` 注入点语义从「默认 server」变「覆盖 dispatch
+// 结果」；无匹配扩展名 → early-return `undefined`。
+//
+// 策略：路由测试用**真实 server**（Pyright/YamlLS/JsonLS/DockerfileLS/Typescript）
+// 但对其 `spawn` 用 `vi.spyOn` 替换——返回值走 spawnClient 的 initialize 握手，
+// 需要真实 `child.stdout`/`child.stdin` 可读流，因此 spy 用 `makeFakeChildProcess()`
+// 伪造。`mockSpawn`（node:child_process 拦截）验证 dispatch 正确走到 spawn，
+// 且**不 fork**（每次调用 spy 计数恒定）。
+//
+// 三件套缓存跨测试共享：Pyright/Typescript 的 NearestRoot 需要磁盘标记文件，
+// 每个测试用 `mkdtempSync` 独立目录（root 唯一 → key 唯一），避开 cross-test
+// 缓存命中污染。
+
+describe("getClient dispatch by extension (spec 302)", () => {
+  // real server 的 root 需要磁盘标记文件（Pyright/Typescript 的 NearestRoot）；
+  // 每个测试用 mkdtempSync 独立目录（root 唯一 → key 唯一），避开三件套
+  // cross-test 缓存命中污染。spawn 用 vi.spyOn 拦截 → 不触真实 bin。
+  function fakeSpawnFor() {
+    const impl = async () => {
+      const child = makeFakeChildProcess(9000 + Math.floor(Math.random() * 100));
+      return {
+        process: child as unknown as import("node:child_process").ChildProcess,
+        initialization: { tsserver: { path: "/tsserver.js" } },
+      };
+    };
+    return vi.fn(impl);
+  }
+
+  // 断言：getClient 经 resolveServer 路由到 expected，spawn 只调一次，
+  // initialize 握手 rootUri 命中该 server 的 root。
+  async function assertRoutesTo(
+    file: string,
+    expected: LspServerInfo,
+    dir: string,
+    ctxDir: string
+  ) {
+    const spawnStub = fakeSpawnFor();
+    const spy = vi.spyOn(expected, "spawn").mockImplementation(spawnStub);
+    try {
+      const client = await getClient({ directory: ctxDir }, file);
+      expect(client).toBeDefined();
+      if (!client) throw new Error("expected client from dispatched server");
+      expect(mockSendRequest).toHaveBeenCalledWith(
+        "initialize",
+        expect.objectContaining({
+          rootUri: expect.stringContaining(dir),
+        })
+      );
+      expect(spawnStub).toHaveBeenCalledTimes(1); // dispatch 正确且只 spawn 一次
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  it("routes .py to Pyright (NearestRoot pyproject.toml)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-dispatch-py-"));
+    writeFileSync(join(dir, "pyproject.toml"), "\n", "utf8");
+    try {
+      await assertRoutesTo(join(dir, "app.py"), Pyright, dir, join(dir, ".."));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("routes .yaml to YamlLS (root = ctx.directory)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-dispatch-yaml-"));
+    try {
+      await assertRoutesTo(join(dir, "k8s.yaml"), YamlLS, dir, dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("routes .json to JsonLS (root = ctx.directory)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-dispatch-json-"));
+    try {
+      await assertRoutesTo(join(dir, "tsconfig.json"), JsonLS, dir, dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("routes Dockerfile (no ext) to DockerfileLS (root = ctx.directory)", async () => {
+    // 注：`resolveServer` 用 `path.extname(file) || file` 回退——无扩展名时用
+    // **全文件名**当 key。`path.extname("/proj/Dockerfile")` 为 `""` → 回退全路径
+    // `/proj/Dockerfile`，不匹配 DockerfileLS.extensions["Dockerfile"]。当前
+    // 契约只支持裸文件名 `"Dockerfile"`（T2 resolveServer 行为，见 server.test.ts
+    // 217 行）；全路径 Dockerfile 路由缺口见汇报。此处测真实契约（裸名）。
+    const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-dispatch-docker-"));
+    try {
+      await assertRoutesTo("Dockerfile", DockerfileLS, dir, dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("routes .ts to Typescript (NearestRoot package-lock.json)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-dispatch-ts-"));
+    writeFileSync(join(dir, "package-lock.json"), "{}", "utf8");
+    try {
+      await assertRoutesTo(join(dir, "index.ts"), Typescript, dir, join(dir, ".."));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("no matching extension → getClient returns undefined without spawning", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-dispatch-none-"));
+    try {
+      const result = await getClient({ directory: dir }, join(dir, "a.xyz"));
+      expect(result).toBeUndefined();
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(mockCreateConnection).not.toHaveBeenCalled();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("opts.server overrides dispatch result (fakeServer wins over pyright)", async () => {
+    const { server, calls } = makeFakeServer("override-dispatch");
+    const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-dispatch-override-"));
+    writeFileSync(join(dir, "pyproject.toml"), "\n", "utf8");
+    try {
+      // file 按扩展名本会路由到 Pyright，但 opts.server 覆盖 → fakeServer 生效。
+      const client = await getClient(
+        { directory: join(dir, "..") },
+        join(dir, "app.py"),
+        { server }
+      );
+      expect(client).toBeDefined();
+      expect(calls.spawn).toBe(1); // fakeServer.spawn 被调用（而非 Pyright）
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("dispatch layer does not fork spawn: concurrent same file dedupes into one spawn", async () => {
+    // 与 187-210 行 inflight 去重同源，但走 dispatch 路径（不传 opts.server）：
+    // 同 .py 文件并发两次 → Pyright.spawn 只一次，返回同一 client 实例。
+    const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-dispatch-conc-"));
+    writeFileSync(join(dir, "pyproject.toml"), "\n", "utf8");
+    const file = join(dir, "app.py");
+    let resolveSpawn: ((value: unknown) => void) | undefined;
+    const spawnStub = fakeSpawnFor();
+    spawnStub.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSpawn = resolve;
+        })
+    );
+    const spy = vi.spyOn(Pyright, "spawn").mockImplementation(spawnStub);
+    try {
+      const ctxL = { directory: join(dir, "..") };
+      const p1 = getClient(ctxL, file);
+      const p2 = getClient(ctxL, file);
+      await vi.waitFor(() => expect(spawnStub).toHaveBeenCalledTimes(1));
+      const child = makeFakeChildProcess();
+      resolveSpawn?.({
+        process: child,
+        initialization: { pythonPath: undefined },
+      });
+      const [c1, c2] = await Promise.all([p1, p2]);
+      expect(c1).toBeDefined();
+      expect(c2).toBe(c1); // 同一实例（dispatch 层共享一次 spawn）
+      expect(spawnStub).toHaveBeenCalledTimes(1); // 不 fork
+    } finally {
+      spy.mockRestore();
     }
   });
 });

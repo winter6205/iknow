@@ -57,6 +57,13 @@ export interface LspServerInfo {
 /** spawn 返回的 server 句柄:子进程 + initializationOptions(typescript-language-server 透传 tsserver.path)。 */
 export interface LspServerHandle {
   readonly process: import("node:child_process").ChildProcess;
-  /** typescript-language-server 透传给 tsserver 的初始化参数(spec §S server.ts 范例)。 */
-  readonly initialization: { readonly tsserver: { readonly path: string } };
+  /**
+   * LSP initialize 握手透传的 initializationOptions（spec 302-lsp-multilang §
+   * types.ts 决策1）。
+   *
+   * 原（spec 251）必填 `{ tsserver: { path } }` 仅适用 TS 单语言；多语言后按
+   * server 各自声明——pyright 透传 `{ pythonPath }`，yaml/json/dockerfile 无
+   * 必需初始化（省略合法）。泛化可选项后现有 TS fixture 零迁移。
+   */
+  readonly initialization?: Record<string, unknown>;
 }
