@@ -38,6 +38,12 @@ export type SessionChatApi = SessionChatState & {
   /** `thinking` (T5) 为该回合的可选覆盖；未提供时后端走缓存配置。 */
   sendMessage: (text: string, thinking?: ThinkingOverride) => Promise<void>;
   reset: () => Promise<void>;
+  /**
+   * 手动压缩会话。返回 true 表示实际发生裁剪（消息变少），false 表示已低于
+   * 阈值无需压缩。失败抛错（调用方提示）；成功路径保留 phase=ready（无 loading
+   * 闪烁），刷新 messages/lastAnswer 为压缩后投影。
+   */
+  compact: () => Promise<boolean>;
   newSession: () => Promise<void>;
   /** Switch to an existing conversation by id (sidebar selection). */
   setConversation: (id: string) => Promise<void>;
@@ -341,6 +347,24 @@ export function useSessionChat(): SessionChatApi {
     }
   }, [applySession, bootstrap]);
 
+  const compact = useCallback(async (): Promise<boolean> => {
+    const gen = bootGen.current;
+    const id = sessionIdRef.current;
+    if (!id) return false;
+    // 保持 phase=ready（不置 loading），避免压缩这种轻操作引起全屏闪烁。
+    // 失败不落全局 error StateBlock（那会盖住整个消息区）——rethrow 交由调用方
+    // （App handleCompact）做局部提示，避免与 sendMessage 的大幅错误 UI 混淆。
+    try {
+      const res = await api.compactSession(id);
+      if (gen !== bootGen.current) return false;
+      applySession(res.session, res.turns);
+      return res.compacted;
+    } catch (e) {
+      if (gen !== bootGen.current) return false;
+      throw e instanceof Error ? e : new Error(errMessage(e));
+    }
+  }, [applySession]);
+
   const newSession = useCallback(async () => {
     // Bump gen so in-flight sendMessage / reset cannot clobber.
     const gen = ++bootGen.current;
@@ -411,6 +435,7 @@ export function useSessionChat(): SessionChatApi {
     ...state,
     sendMessage,
     reset,
+    compact,
     newSession,
     setConversation,
     retryBootstrap,

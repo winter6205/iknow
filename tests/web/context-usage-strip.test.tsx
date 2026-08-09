@@ -142,3 +142,47 @@ describe("ContextUsageStrip — sending prop", () => {
     assert.ok(html.includes("#7ab8ff"));
   });
 });
+
+describe("ContextUsageStrip — 压缩按钮", () => {
+  it("无 onCompact → 不渲染按钮（保持纯展示组件）", () => {
+    const html = render({ usage: usage(10), contextWindow: 100 });
+    assert.ok(!html.includes("压缩"));
+  });
+
+  it("有 onCompact → 渲染「压缩」按钮", () => {
+    const html = renderToStaticMarkup(
+      <ContextUsageStrip
+        usage={usage(10)}
+        contextWindow={100}
+        onCompact={() => {}}
+      />
+    );
+    assert.ok(html.includes("压缩"));
+    assert.ok(html.includes('aria-label="压缩会话"'));
+  });
+
+  it("compacting=true → 显示「压缩中…」", () => {
+    const html = renderToStaticMarkup(
+      <ContextUsageStrip
+        usage={usage(10)}
+        contextWindow={100}
+        onCompact={() => {}}
+        compacting
+      />
+    );
+    assert.ok(html.includes("压缩中…"));
+    assert.ok(html.includes("disabled"));
+  });
+
+  it("compactDisabled → disabled（无活跃会话）", () => {
+    const html = renderToStaticMarkup(
+      <ContextUsageStrip
+        usage={usage(10)}
+        contextWindow={100}
+        onCompact={() => {}}
+        compactDisabled
+      />
+    );
+    assert.ok(html.includes("disabled"));
+  });
+});
