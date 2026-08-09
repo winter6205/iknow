@@ -12,6 +12,7 @@ import { randomUUID } from "node:crypto";
 import {
   run,
   createJsonlTraceService,
+  compactMessages,
   type AnthropicContentBlock,
   type AnthropicNativeMessage,
   type HarnessStreamEvent,
@@ -46,6 +47,7 @@ import type { SessionFileV1 } from "./store/index.js";
 import { CURRENT_SCHEMA_VERSION, extractSummary } from "./store/index.js";
 import type {
   ApiErrorBody,
+  CompactSessionResponse,
   CreateSessionRequest,
   CreateSessionResponse,
   GetSessionResponse,
@@ -605,6 +607,54 @@ export class SessionHub {
 
   async listSessions(): Promise<SessionListEntry[]> {
     return this.store.list();
+  }
+
+  /**
+   * 手动压缩会话（TUI /compact、web 压缩按钮共用落点）。
+   * 与 resetSession 同模式走 serialize 队列：load → compactMessages → save。
+   * compactMessages 是纯函数（保留尾部 DEFAULT_KEEP_RECENT 条 + tool 配对补全，
+   * 前置裁剪以边界占位符单消息替代）。
+   *
+   * 幂等 no-op：消息条数未减少（已低于压缩窗口或本就 ≤ keepRecent）时不落盘、
+   * 不 bump updatedAt（避免会话在列表里凭空“更新”），返回 compacted=false 供
+   * 客户端提示。实际压缩 → 落盘并重算 summary（extractSummary 取首条用户文本）。
+   */
+  async compactSession(
+    conversationId: string
+  ): Promise<CompactSessionResponse> {
+    return this.serialize({
+      conversationId,
+      work: async () => {
+        const session = await this.store.load(conversationId);
+        const before = session.messages;
+        const compacted = compactMessages(before);
+        if (compacted.length >= before.length) {
+          return {
+            session: this.summarize({ file: session }),
+            turns: projectMessagesToTurns(before),
+            compacted: false,
+            beforeCount: before.length,
+            afterCount: before.length,
+          };
+        }
+        const updated: SessionFileV1 = {
+          ...session,
+          messages: compacted,
+          turnCount: session.turnCount,
+          updatedAt: new Date().toISOString(),
+          schemaVersion: CURRENT_SCHEMA_VERSION,
+          summary: extractSummary(compacted),
+        };
+        await this.store.save({ id: conversationId, file: updated });
+        return {
+          session: this.summarize({ file: updated }),
+          turns: projectMessagesToTurns(compacted),
+          compacted: true,
+          beforeCount: before.length,
+          afterCount: compacted.length,
+        };
+      },
+    });
   }
 
   /**

@@ -231,6 +231,17 @@ async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
     });
     return true;
   }
+  // POST /compact — 手动压缩会话（web 压缩按钮 / TUI /compact 的 HTTP 侧）。
+  // body 可空；无 body / 空 body 等价 {}（压缩无参数）。
+  if (method === "POST" && rest === "/compact") {
+    await readJsonBody(req); // 消费 body（允许空），压缩本身无参数
+    sendJson({
+      res,
+      status: 200,
+      body: await hub.compactSession(id),
+    });
+    return true;
+  }
   // GET pending ask requests (process-global snapshot). The SPA polls this
   // every ~2s to surface a permission dialog when the harness emits a decision
   // of `ask`.
