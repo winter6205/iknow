@@ -2,7 +2,9 @@
  * src/tui/components.tsx
  *
  * #146 TUI 共享渲染原子（V7 定案，原型 components.tsx 搬入收口）：
- *  - Spinner：ASCII 轮转 `| / - \` 100ms/帧（Q4a：前台动态指示，无 emoji）；
+ *  - Spinner：opencode 同款 braille-dot 轮转 `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`
+ *    80ms/帧（Q4a：前台动态指示，无 emoji；帧序来自 opencode
+ *    packages/tui/src/component/spinner.tsx 的 SPINNER_FRAMES）；
  *  - PromptInput：圆角线框内单行输入（running 转亮色即分隔，V7 操作员定稿
  *    否决输入框下方全宽分隔线）；行内编辑 = 追加 / 退格 / Enter 提交 / Tab 补全；
  *  - useTick：动画心跳 hook（100ms）。
@@ -19,7 +21,18 @@ import { isSgrMouseSequence } from "./mouse.js";
 import { tuiPalette } from "./theme.js";
 import { SLASH_HINT_DESCRIPTIONS, type TuiSlashCommand } from "./slash.js";
 
-export const SPINNER_FRAMES: ReadonlyArray<string> = ["|", "/", "-", "\\"];
+export const SPINNER_FRAMES: ReadonlyArray<string> = [
+  "⠋",
+  "⠙",
+  "⠹",
+  "⠸",
+  "⠼",
+  "⠴",
+  "⠦",
+  "⠧",
+  "⠇",
+  "⠏",
+];
 
 /** 100ms 心跳：返回自增帧号，驱动 spinner / 动效重渲染。
  *  periodMs <= 0 = 禁用档（不挂定时器，避免 0ms 忙轮询；hooks 顺序不变，
@@ -35,8 +48,9 @@ export function useTick(periodMs = 100): number {
 }
 
 export function Spinner(props: { readonly label?: string }): ReactElement {
-  const tick = useTick();
-  const frame = SPINNER_FRAMES[tick % SPINNER_FRAMES.length] ?? "|";
+  // opencode 同期 80ms/帧（SPINNER_FRAMES 同源）。
+  const tick = useTick(80);
+  const frame = SPINNER_FRAMES[tick % SPINNER_FRAMES.length] ?? "⠋";
   return (
     <Text color={tuiPalette.running}>
       {frame} {props.label ?? "运行中…"}
