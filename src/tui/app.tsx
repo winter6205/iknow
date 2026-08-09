@@ -1095,8 +1095,9 @@ export function TuiApp(props: TuiAppProps): ReactElement {
         },
         ctx: permissionMode,
         onFlip: (next) => {
+          // 不弹 notice：模式状态由输入框上方左对齐的模式指示行持续承载
+          // （2026-08-09 用户反馈：切换时弹出提示属多余，常驻指示即可）。
           setPermMode(next);
-          setNotice({ lines: [`权限模式: ${modeLabel(next)}`] });
         },
       })
     ) {
@@ -1262,11 +1263,13 @@ export function TuiApp(props: TuiAppProps): ReactElement {
         />
       )}
       {/* W2 扩展：权限模式指示行（仅聊天视图；list 视图顶部已有表头不重复）。
-          右对齐、dim；窄列（cols < 40）降级为简短形态。Shift+Tab 切换后
-          permMode state 驱动 re-render。 */}
+          左对齐；颜色按模式区分：full_auto 金黄（running），其余 dim。
+          2026-08-09 用户反馈：右上方 → 左上方，且切换不再弹提示（本行即常驻
+          指示）。窄列（cols < 40）降级为简短形态。Shift+Tab 切换后 permMode
+          state 驱动 re-render。 */}
       {view === "chat" && (
-        <Box justifyContent="flex-end">
-          <Text color={pal.dim}>
+        <Box>
+          <Text color={permMode === "full_auto" ? pal.running : pal.dim}>
             {cols < 40
               ? `[${permMode === "full_auto" ? "auto" : "def"}]`
               : `mode: ${modeLabel(permMode)}`}
