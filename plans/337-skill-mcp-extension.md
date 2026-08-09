@@ -2,7 +2,7 @@
 
 > **Spec**: `specs/337-skill-mcp-extension.md`（ACR Round 2 五裁决 5/5 yes，2026-08-10）
 > **Map**: wayfinder:map #337；决策出典 R1 #338 / R2 #339 / G1 #340 / G2 #341 / G3 #342
-> **Tracker**: GitHub issue（`ready-for-agent` 标签，**单 issue 承载全部 12 bullets——操作员裁决不拆票**，同 #321/#343 先例）；blocked-by 以本文件依赖图为真值。
+> **Tracker**: GitHub issue #344（`ready-for-agent` 标签，**单 issue 承载全部 12 bullets——操作员裁决不拆票**，同 #321/#343 先例）；blocked-by 以本文件依赖图为真值。
 > **前置隔离**（spec 假设 15）：工作树已存在的 `package.json` / `package-lock.json` 未提交漂移与本 plan 无关——执行第一票前先单独提交或 stash 隔离，此后每票 diff 只含 Affects 所列文件。
 
 ## 依赖图
