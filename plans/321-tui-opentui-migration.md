@@ -3,7 +3,7 @@
 > **Spec**: `specs/321-tui-opentui-migration.md`（ACR 五裁决 5/5 PASS，2026-08-09）
 > **Map**: wayfinder:map #321；决策出典 #322（布局）/ #323（输入）/ #324（测试）/ #325（markdown + scrollbox）
 > **落地形态**: 一次性大 PR（操作员裁决）= 单分支堆叠提交，每 bullet 1 commit，PR 合并即完成替换。
-> **Tracker**: GitHub issues（`ready-for-agent` 标签）——发布动作待操作员确认后执行。
+> **Tracker**: GitHub issue #343（`ready-for-agent` 标签，单 issue 承载全部 12 bullets——操作员裁决不拆票）；D1 = 既有 #327。
 
 ## 归档先行策略（操作员裁决：不落旁路）
 
