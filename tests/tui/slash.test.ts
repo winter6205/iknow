@@ -24,6 +24,7 @@ describe("parseTuiInput: 词表命中", () => {
     ["/info", "info"],
     ["/thinking", "thinking"],
     ["/profile", "profile"],
+    ["/compact", "compact"],
   ] as const)("解析 %s → command %s", (input, command) => {
     const parsed = parseTuiInput(input);
     expect(parsed).toEqual({ kind: "command", command });
@@ -76,7 +77,7 @@ describe("parseTuiInput: 普通消息与边界", () => {
 });
 
 describe("helpLines", () => {
-  it("覆盖全部 8 条词表命令 + Ctrl+C 说明 + Ctrl+Y + 鼠标拖选提示，且无 emoji", () => {
+  it("覆盖全部 9 条词表命令 + Ctrl+C 说明 + Ctrl+Y + 鼠标拖选提示，且无 emoji", () => {
     const joined = helpLines().join("\n");
     for (const cmd of [
       "/sessions",
@@ -86,6 +87,7 @@ describe("helpLines", () => {
       "/quit",
       "/exit",
       "/profile",
+      "/compact",
     ]) {
       expect(joined).toContain(cmd);
     }
@@ -103,7 +105,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  it('"/" → 全部 8 条（按词表插入顺序）', () => {
+  it('"/" → 全部 9 条（按词表插入顺序）', () => {
     expect(slashSuggestions("/")).toEqual([
       "sessions",
       "new",
@@ -113,6 +115,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
       "info",
       "thinking",
       "profile",
+      "compact",
     ]);
   });
 
@@ -142,7 +145,7 @@ describe('slashComplete: 唯一匹配 → "/cmd "；0/多匹配 → null', () =>
     expect(slashComplete("/q")).toBe("/quit ");
   });
 
-  it('"/" → null（8 匹配）', () => {
+  it('"/" → null（9 匹配）', () => {
     expect(slashComplete("/")).toBeNull();
   });
 
@@ -174,6 +177,7 @@ describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
     "info",
     "thinking",
     "profile",
+    "compact",
   ] as const;
 
   it("cursor=0 → /sessions （首条）", () => {
@@ -184,8 +188,8 @@ describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
     expect(slashCompleteFromList(ALL, 2)).toBe("/quit ");
   });
 
-  it("cursor=7 → /profile （末条）", () => {
-    expect(slashCompleteFromList(ALL, 7)).toBe("/profile ");
+  it("cursor=8 → /compact （末条）", () => {
+    expect(slashCompleteFromList(ALL, 8)).toBe("/compact ");
   });
 
   it("cursor 越界上 / 下 / 空列表 → null", () => {
@@ -248,8 +252,8 @@ describe("#238 鼠标拖选：词表移除 /copy", () => {
     expect(parseTuiInput("/copy")).toEqual({ kind: "unknown", raw: "/copy" });
   });
 
-  it('"/co" 前缀 → []（无匹配）', () => {
-    expect(slashSuggestions("/co")).toEqual([]);
+  it('"/com" 前缀 → ["compact"]（/copy 移除后唯一候选）', () => {
+    expect(slashSuggestions("/com")).toEqual(["compact"]);
   });
 
   it("/help 增加鼠标拖选提示，且无 /copy", () => {
@@ -257,5 +261,42 @@ describe("#238 鼠标拖选：词表移除 /copy", () => {
     expect(joined).not.toContain("/copy");
     expect(joined).toContain("鼠标拖选");
     expect(joined).toContain("Ctrl+Y");
+  });
+});
+
+/** /compact — 手动压缩当前会话上下文（保留尾部，裁剪早期消息）。 */
+describe("/compact 词表", () => {
+  it("/compact → command compact", () => {
+    expect(parseTuiInput("/compact")).toEqual({
+      kind: "command",
+      command: "compact",
+    });
+  });
+
+  it("大小写与空白容忍", () => {
+    expect(parseTuiInput("  /COMPACT  ")).toEqual({
+      kind: "command",
+      command: "compact",
+    });
+  });
+
+  it('"/com" 前缀 → ["compact"]', () => {
+    expect(slashSuggestions("/com")).toEqual(["compact"]);
+  });
+
+  it('/compact 唯一匹配 → 补全 "/compact "', () => {
+    expect(slashComplete("/comp")).toBe("/compact ");
+  });
+
+  it("hint 描述：压缩上下文", () => {
+    expect(slashHintLines(["compact"])).toEqual([
+      { command: "compact", description: "压缩上下文" },
+    ]);
+  });
+
+  it("/help 覆盖 /compact 且无 emoji", () => {
+    const joined = helpLines().join("\n");
+    expect(joined).toContain("/compact");
+    expect(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(joined)).toBe(false);
   });
 });

@@ -44,6 +44,7 @@ import {
   attachSession,
   canInterrupt,
   createDraftSession,
+  sessionCompacted,
   switchedAwayFrom,
   switchedTo,
   turnFinished,
@@ -1033,6 +1034,47 @@ export function TuiApp(props: TuiAppProps): ReactElement {
       case "thinking": {
         // T6 (D5):切换 thinking 折叠面板展开态（与 Ctrl+O 同 helper）。
         toggleThinking();
+        return;
+      }
+      case "compact": {
+        // 手动压缩当前会话上下文。与 sendTurn 同护栏：running 中拒绝；
+        // draft（未建档）无盘上消息 → 提示先发消息。压缩后从磁盘刷新
+        // （磁盘是 SSOT），保留 lastUsage 读数。
+        if (active.runState !== "idle") {
+          setNotice({
+            lines: ["当前会话正在运行；压缩等本轮结束后再执行。"],
+          });
+          return;
+        }
+        const targetId = active.conversationId;
+        if (targetId === undefined) {
+          setNotice({ lines: ["当前是空会话，还没有可压缩的上下文。"] });
+          return;
+        }
+        try {
+          const compacted = await bridge.compactSession(targetId);
+          const file = await bridge.loadSessionFile(targetId);
+          setSessions((prev) => {
+            const current = prev[targetId];
+            if (!current) return prev;
+            return {
+              ...prev,
+              [targetId]: sessionCompacted(current, {
+                messages: file.messages,
+                turnCount: file.turnCount,
+                updatedAt: file.updatedAt,
+                jsonMode: file.jsonMode,
+              }),
+            };
+          });
+          setNotice({
+            lines: compacted
+              ? ["已压缩上下文（保留尾部，裁剪早期消息）。"]
+              : ["上下文未达压缩阈值，无需压缩。"],
+          });
+        } catch (err) {
+          setNotice({ lines: [`压缩失败：${describeError(err)}`] });
+        }
         return;
       }
       case "profile": {

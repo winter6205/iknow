@@ -314,6 +314,54 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     LONG_TIMEOUT
   );
 
+  // /compact 手动压缩：4 轮（8 条消息）> DEFAULT_KEEP_RECENT=6 → 实际裁剪。
+  it(
+    "/compact：长会话 → 压缩成功提示；draft 会话 → 提示无上下文",
+    async () => {
+      const app = makeApp(
+        Array.from({ length: 4 }, (_, i) =>
+          assistantResult({ texts: [`答复${i}`] })
+        )
+      );
+      await app.ready();
+      await waitFor(() => app.lastOutput().includes("iknow"), 8000, "startup");
+
+      // 4 轮消息 → 8 条 messages > keepRecent=6。
+      for (let i = 0; i < 4; i++) {
+        await app.type(`q${i}\r`);
+        await waitFor(
+          () => app.bridge.inflight.ids().size === 0,
+          8000,
+          `turn-${i}-done`
+        );
+      }
+
+      await app.type("/compact\r");
+      await waitFor(
+        () => app.lastOutput().includes("已压缩上下文"),
+        8000,
+        "compact-notice"
+      );
+    },
+    LONG_TIMEOUT
+  );
+
+  it(
+    "/compact 在 draft（未建档）会话 → 提示无上下文",
+    async () => {
+      const app = makeApp([]);
+      await app.ready();
+      await waitFor(() => app.lastOutput().includes("iknow"), 8000, "startup");
+      await app.type("/compact\r");
+      await waitFor(
+        () => app.lastOutput().includes("还没有可压缩的上下文"),
+        8000,
+        "compact-draft"
+      );
+    },
+    LONG_TIMEOUT
+  );
+
   // T4: ContextBar 挂载 + 一轮含 usage 的 turn → 状态栏收敛 + /info token 明细。
   it(
     "T4: 聊天视图挂 ContextBar（`│ ctx`）+ 一轮 usage → /info 显示 token 明细",
@@ -556,13 +604,13 @@ describe("TuiApp 端到端（tracer bullet）", () => {
   );
 
   it(
-    'slash 提示："/" 出现 8 条候选；"/q" + Tab → 提交 /quit 退出',
+    'slash 提示："/" 出现候选（含 /compact）；"/q" + Tab → 提交 /quit 退出',
     async () => {
       const app = makeApp([]);
       await app.ready();
       await waitFor(() => app.lastOutput().includes("iknow"), 8000, "startup");
 
-      // 输入 \"/\" → 输入框下方出现 8 条候选（按词表顺序）
+      // 输入 \"/\" → 输入框下方出现候选（按词表顺序；compact 在第 9 位）
       await app.type("/");
       for (const cmd of [
         "sessions",
@@ -573,6 +621,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
         "info",
         "thinking",
         "profile",
+        "compact",
       ]) {
         await waitFor(
           () => app.lastOutput().includes(`/${cmd}`),

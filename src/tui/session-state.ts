@@ -150,3 +150,29 @@ export function userMessageEchoed(
     messages: Object.freeze([...session.messages, userMessage]),
   });
 }
+
+/**
+ * 手动压缩（/compact）落盘后的会话刷新：以压缩后文件内容替换 messages /
+ * turnCount / updatedAt，但**保留** lastStopReason / lastUsage（压缩不是 turn，
+ * 不应清掉上下文用量读数），runState 归 idle。仅 idle 会话可压缩（running 时
+ * 由命令侧护栏拒绝，这里同 turnStarted 语义：非 idle 保持原状态）。
+ */
+export function sessionCompacted(
+  session: TuiSessionState,
+  input: {
+    readonly messages: ReadonlyArray<AnthropicNativeMessage>;
+    readonly turnCount: number;
+    readonly updatedAt: string;
+    readonly jsonMode: boolean;
+  }
+): TuiSessionState {
+  if (session.runState !== "idle") return session;
+  return Object.freeze({
+    ...session,
+    messages: Object.freeze([...input.messages]),
+    turnCount: input.turnCount,
+    updatedAt: input.updatedAt,
+    jsonMode: input.jsonMode,
+    runState: "idle",
+  });
+}
