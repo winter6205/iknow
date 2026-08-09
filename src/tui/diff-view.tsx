@@ -59,6 +59,29 @@ export function diffRowTexts(
   return rows.map((r) => diffRowText(r, cols)).filter((t) => t !== "");
 }
 
+/**
+ * 单行整行背景遮罩色（按 kind + hunk 头）。
+ *
+ * 只作用于 JSX 渲染层：add/del 返回淡色底，ctx/hunk 头返回 undefined
+ * （透明、不产 `48` 背景序列）。**不**经 diffRowText / diffRowTexts 文本
+ * 投影（那是 message-rows / live-tool-preview 的行账 SSOT，#189 parity，
+ * 绝不能改）。
+ *
+ * 任何终端宽度都生效：遮罩是纯渲染层产物，不影响行账文本；窄终端
+ * （cols<40）折叠为 add-only 行时 add 行同样上绿底。
+ */
+function rowBgColor(line: DiffLine): string | undefined {
+  if (isHunkHeader(line)) return undefined;
+  switch (line.kind) {
+    case "add":
+      return tuiPalette.bgAdd;
+    case "del":
+      return tuiPalette.bgDel;
+    default:
+      return undefined;
+  }
+}
+
 /** 单行颜色（按 kind + hunk 头）。 */
 function rowColor(line: DiffLine): string {
   if (isHunkHeader(line)) return tuiPalette.dim;
@@ -79,10 +102,13 @@ export function DiffRow(props: {
 }): ReactElement {
   const text = diffRowText(props.line, props.cols);
   if (text === "") return <></>;
+  const bg = rowBgColor(props.line);
   return (
-    <Text color={rowColor(props.line)} wrap="truncate">
-      {text}
-    </Text>
+    <Box width={bg === undefined ? undefined : props.cols} backgroundColor={bg}>
+      <Text color={rowColor(props.line)} wrap="truncate" backgroundColor={bg}>
+        {text}
+      </Text>
+    </Box>
   );
 }
 

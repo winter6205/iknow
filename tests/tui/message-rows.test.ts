@@ -304,6 +304,9 @@ describe("窄终端（cols<40）diff 折叠：行账与渲染 parity（#298 revi
       })
     )
       .split("\n")
+      // 背景遮罩（<Box width> 铺满行尾）会注入尾随空格，trimEnd 掉——那是
+      // 渲染层外观产物，不是真实文本，不应计入折叠 parity。
+      .map((l) => l.trimEnd())
       .filter((l) => l.length > 0);
     // 窄终端：del / ctx（hunk 头）不进渲染，只留 add 行；与行账同源。
     expect(rendered.every((l) => l.startsWith("+"))).toBe(true);

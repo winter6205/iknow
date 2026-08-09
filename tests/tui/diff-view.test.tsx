@@ -123,6 +123,17 @@ describe("DiffView 渲染（ink renderToString）", () => {
     expect(out).not.toContain("│");
   });
 
+  it("cols=32（<40）：add 行同样整行绿底（背景遮罩任何宽度都生效）", () => {
+    // 窄终端（VSCode 集成终端窄窗口）折叠为 add-only 行，add 行仍上淡绿底。
+    const rows = editRows(OLD, NEW);
+    const raw = renderToString(
+      React.createElement(DiffView, { rows, cols: 32 }),
+      { columns: 32 }
+    );
+    expect(raw).toContain("\x1b[48;2;31;61;43m"); // #1f3d2b → bgAdd 淡绿底
+    expect(raw).not.toContain("\x1b[48;2;61;31;36m"); // 折叠无 del，故无 bgDel
+  });
+
   it("纯新增（write_file）：全 add", () => {
     const rows = editRows("", "a\nb\nc\n");
     const out = render(rows, 80);
@@ -152,5 +163,34 @@ describe("DiffRow 着色", () => {
     expect(raw(del)).toContain("\x1b[38;2;215;58;73m");
     expect(raw(ctx)).not.toContain("\x1b[38;2;46;160;67m");
     expect(raw(ctx)).not.toContain("\x1b[38;2;215;58;73m");
+  });
+
+  // #298 T6 整行背景遮罩：#1f3d2b（bgAdd）= R31 G61 B43，#3d1f24（bgDel）
+  // = R61 G31 B36。字符区上底 + 外层 Box width 铺满到行尾。
+  it("add → 整行淡绿底（bgAdd 背景序列）", () => {
+    const rows = editRows(OLD, NEW);
+    const add = rows.find((r) => r.kind === "add")!;
+    const raw = renderToString(
+      React.createElement(DiffRow, { line: add, cols: 80 })
+    );
+    expect(raw).toContain("\x1b[48;2;31;61;43m"); // #1f3d2b → bgAdd 淡绿底
+  });
+
+  it("del → 整行淡红底（bgDel 背景序列）", () => {
+    const rows = editRows(OLD, NEW);
+    const del = rows.find((r) => r.kind === "del")!;
+    const raw = renderToString(
+      React.createElement(DiffRow, { line: del, cols: 80 })
+    );
+    expect(raw).toContain("\x1b[48;2;61;31;36m"); // #3d1f24 → bgDel 淡红底
+  });
+
+  it("ctx → 无背景序列（保持透明）", () => {
+    const rows = editRows(OLD, NEW);
+    const ctx = rows.find((r) => r.kind === "ctx")!;
+    const raw = renderToString(
+      React.createElement(DiffRow, { line: ctx, cols: 80 })
+    );
+    expect(raw).not.toContain("\x1b[48;2;");
   });
 });
