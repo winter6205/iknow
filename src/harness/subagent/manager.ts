@@ -69,13 +69,15 @@ interface Task {
   child?: ChildProcess;
   envelope?: SubAgentEnvelope;
   abortCtrl?: AbortController;
+  /**
+   * #356 High #2 fix: per-task timeout handle (def.timeoutMs expiry -> SIGTERM
+   * + 5s fallback SIGKILL -> reason:"timeout"). shutdown / child exit /
+   * terminal state must clear it to avoid leaks or stray SIGKILL.
+   */
+  timeoutTimer?: NodeJS.Timeout;
+  /** #356 High #2 fix: SIGKILL 兜底 timer(exit / shutdown 需与 timeoutTimer 一并清)。 */
+  timeoutKillFallback?: NodeJS.Timeout;
 }
-
-/** 本地 SubAgentDefinition 未含 task / sandboxRoot(WorkerEnvelope 必填),T6 接线时由调用方在 def 上补齐。 */
-type SpawnableDefinition = SubAgentDefinition & {
-  readonly task?: string;
-  readonly sandboxRoot?: string;
-};
 
 const WAIT_POLL_MS = 25;
 const SHUTDOWN_SIGKILL_GRACE_MS = 5000;
@@ -111,6 +113,45 @@ export function createSubAgentManager(opts: {
     task.state = "running";
     task.abortCtrl = new AbortController();
 
+    // #356 High #2 fix: per-task timeout (SC6 / assumption 14).
+    // def.timeoutMs expiry -> mark failed reason:"timeout" + SIGTERM;
+    // 5s fallback SIGKILL against workers that ignore SIGTERM. timer.unref so
+    // it does not block process exit.
+    if (def.timeoutMs !== undefined && def.timeoutMs > 0) {
+      const killFallback = setTimeout(() => {
+        if (task.child && task.child.exitCode === null) {
+          try {
+            task.child.kill("SIGKILL");
+          } catch {
+            /* ESRCH et al. ignore */
+          }
+        }
+      }, 5000);
+      killFallback.unref?.();
+      task.timeoutKillFallback = killFallback;
+      task.timeoutTimer = setTimeout(() => {
+        // Already terminated (child exit / stdout envelope) -> do not overwrite.
+        if (task.state === "completed" || task.state === "failed") return;
+        task.state = "failed";
+        task.envelope = {
+          status: "failed",
+          reason: "timeout",
+          summary: `timeout after ${def.timeoutMs}ms`,
+          result: "",
+        };
+        if (task.child) {
+          try {
+            task.child.kill("SIGTERM");
+          } catch {
+            /* ESRCH et al. ignore */
+          }
+        }
+        killFallback.unref?.();
+        task.timeoutKillFallback = undefined;
+      }, def.timeoutMs);
+      task.timeoutTimer.unref?.();
+    }
+
     // 写 payload(stdin JSON-line)。worker 侧 for-await stdin 读到 EOF 才开始跑;
     // 写完即 end(),否则 worker 永远等 stdin。
     if (child.stdin) {
@@ -145,8 +186,23 @@ export function createSubAgentManager(opts: {
     });
 
     child.on("exit", (code, signal) => {
+      // #356 High #2 fix: child exited -> clear timeoutTimer + killFallback to
+      // avoid stray SIGKILL on already-dead children.
+      if (task.timeoutTimer) {
+        clearTimeout(task.timeoutTimer);
+        task.timeoutTimer = undefined;
+      }
+      if (task.timeoutKillFallback) {
+        clearTimeout(task.timeoutKillFallback);
+        task.timeoutKillFallback = undefined;
+      }
       // SC16:非 0 退出码 / 被信号杀死 → crashed,覆盖先前 envelope(即使已 completed)。
-      if (code !== 0 || signal !== null) {
+      // #356 High #2 fix: 主动 timeout 后我们 SIGTERM child,child 以信号退出
+      // 会走到这里 —— 保留 reason:"timeout",不被 crashed 覆盖(否则 waitFor /
+      // queryBuffer 的 timeout 语义丢失)。
+      const timedOut =
+        task.state === "failed" && task.envelope?.reason === "timeout";
+      if (!timedOut && (code !== 0 || signal !== null)) {
         task.state = "failed";
         task.envelope = {
           status: "failed",
@@ -173,13 +229,12 @@ export function createSubAgentManager(opts: {
   }
 
   function buildWorkerPayload(def: SubAgentDefinition): WorkerEnvelope {
-    // task / sandboxRoot 是 WorkerEnvelope 必填;本地 SubAgentDefinition 未含。
-    // T6 接线时调用方在 def 上补齐(如 spawn_subagent 工具的 task 输入)。此处缺省空串,
-    // 保证 manager 自身永远是合法 WorkerEnvelope 形态(worker 侧 schema 可过)。
-    const spawnable = def as SpawnableDefinition;
+    // #356 High #1 fix: task / sandboxRoot live on SubAgentDefinition (role.ts);
+    // read directly. Empty-string fallback keeps manager output as a valid
+    // WorkerEnvelope that satisfies worker-side schema.
     return {
-      task: spawnable.task ?? "",
-      sandboxRoot: spawnable.sandboxRoot ?? "",
+      task: def.task ?? "",
+      sandboxRoot: def.sandboxRoot ?? "",
       ...(def.systemPrompt !== undefined && { systemPrompt: def.systemPrompt }),
       ...(def.disallowedTools !== undefined && {
         disallowedTools: [...def.disallowedTools],
@@ -249,10 +304,26 @@ export function createSubAgentManager(opts: {
   }
 
   async function shutdown(): Promise<void> {
-    const runningChildren = [...tasks.values()]
-      .filter((t) => t.state === "starting" || t.state === "running")
+    const runningTasks = [...tasks.values()].filter(
+      (t) => t.state === "starting" || t.state === "running"
+    );
+    const runningChildren = runningTasks
       .map((t) => t.child)
       .filter((c): c is ChildProcess => c !== undefined);
+
+    // #356 High #2 fix: shutdown clears all timeoutTimers so the manager
+    // process does not hold dangling timers nor fire SIGKILL on already-
+    // SIGTERM'd children.
+    for (const t of runningTasks) {
+      if (t.timeoutTimer) {
+        clearTimeout(t.timeoutTimer);
+        t.timeoutTimer = undefined;
+      }
+      if (t.timeoutKillFallback) {
+        clearTimeout(t.timeoutKillFallback);
+        t.timeoutKillFallback = undefined;
+      }
+    }
 
     // 1. abort in-flight(预留:当前 spec 未把 abortCtrl 接到具体调用)。
     for (const t of tasks.values()) t.abortCtrl?.abort();

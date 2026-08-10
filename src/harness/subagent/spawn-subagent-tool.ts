@@ -105,7 +105,10 @@ export function createSpawnSubAgentTool(
       }
       // 装配 SubAgentDefinition：可选字段透传，缺失字段从 def 上省略（manager
       // 端按 SubAgentDefinition 自身字段约束走 default deny / 默认 maxTurns 等）。
+      // #356 High #1 修复：task 必填透传进 def（此前漏掉 → buildWorkerPayload
+      // 读到 def.task ?? "" 永远空串 → 子代理跑空任务）。
       const def: SubAgentDefinition = {
+        task,
         ...(typeof obj.systemPrompt === "string"
           ? { systemPrompt: obj.systemPrompt }
           : {}),

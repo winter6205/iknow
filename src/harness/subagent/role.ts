@@ -24,6 +24,18 @@ export interface SubAgentDefinition {
   readonly model?: string;
   readonly maxTurns?: number;
   readonly timeoutMs?: number;
+  /**
+   * #356 High #1 修复:子代理任务文本(WorkerEnvelope.task 必填,本地定义
+   * 兼容可选)。spawn_subagent 工具负责写入 def.task(此前漏掉 → 子进程
+   * 收到 task:"")。manager.buildWorkerPayload 用 def.task ?? "" 兜底。
+   */
+  readonly task?: string;
+  /**
+   * #356 High #1 修复:子代理软沙箱根(WorkerEnvelope.sandboxRoot 必填)。
+   * spawn_subagent 工具不直接采集 —— 由 manager 装配期根据父 cwd 补齐;
+   * 本地定义为可选,缺省空串兜底。
+   */
+  readonly sandboxRoot?: string;
 }
 
 /** 默认 deny-list: 子代理禁止再派生子代理 (防递归爆炸)。frozen。 */
