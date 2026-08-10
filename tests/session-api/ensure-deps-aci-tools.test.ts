@@ -28,6 +28,8 @@ import type { LoopEngineDeps } from "../../src/harness/index.ts";
 // #194 T6 (Layer 4 baseline):扩 memory_recall + memory_save 到 10 件;
 // #224 末尾追加 tool_search(11 件;与 tests/harness/build-engine.test.ts
 // EXPECTED_TOOLS 同形)。
+// #356 T6:build-engine 全装配(surface 默认 chat)自建 subagentManager →
+// registry 末尾追加 spawn_subagent / subagent_result(→ 25 件)。
 const EXPECTED_TOOLS = [
   "bash",
   "read_file",
@@ -55,6 +57,10 @@ const EXPECTED_TOOLS = [
   // 静态名单;与 ACI_TOOLSET_NAMES 对齐)。
   "skill",
   "skill_search",
+  // #356 T6 subagent 工具集 append-only:23→25,末尾两件(serve 走 build-engine
+  // 全装配,subagentManager 自建 → 两件在场)。
+  "spawn_subagent",
+  "subagent_result",
 ];
 
 let baseDir: string;
@@ -70,7 +76,7 @@ afterAll(async () => {
 });
 
 describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
-  it("returns the ACI 23-tool registry when serve constructs without deps", async () => {
+  it("returns the ACI 25-tool registry when serve constructs without deps", async () => {
     const hub = new SessionHub({
       store,
       askUser: createNoAskUser(),
