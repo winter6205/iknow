@@ -10,6 +10,8 @@
  */
 import { parseArgs, type ParsedCli } from "./cli/parse-args.js";
 import { runChatSession } from "./cli/chat-session.js";
+// #356 subagent worker headless 重入: 子代理进程 main dispatch 早返回。
+import { runSubagentWorker } from "./harness/subagent/worker.js";
 import {
   buildHarnessEngine,
   prepareRuntime,
@@ -252,6 +254,25 @@ async function main(): Promise<void> {
     argv: process.argv.slice(2),
     interactive: isInteractive(),
   });
+
+  // #356 subagent worker: 子代理进程 headless 重入 —— stdin 信封 → run() →
+  // stdout envelope。早于产品形态 dispatch (chat/ask/serve/tui/oneshot)，
+  // 该命令只由父代理 child_process.spawn 触发,operator 不直调。
+  //
+  // 协议层崩溃 → exit 2 (assumption 16 / SC13: JSON parse 失败 / 信封字段
+  // 缺失, reason=protocolError at 父代理)。模块级 main().catch 兜所有产品
+  // 形态错误 → exit 1, worker 必须自己 exit 2 区分协议错误与产品错误。
+  if (parsed.command === "__subagent_worker__") {
+    try {
+      await runSubagentWorker();
+    } catch (err) {
+      const msg =
+        err instanceof Error ? (err.stack ?? err.message) : String(err);
+      process.stderr.write(`[subagent-worker] fatal: ${msg}\n`);
+      process.exit(2);
+    }
+    return;
+  }
 
   if (parsed.versionOnly) {
     process.stdout.write(`${getVersion()}\n`);
