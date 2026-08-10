@@ -29,8 +29,6 @@ export function iknowWorkspaceRoot(): string {
 export interface IknowStateV1 {
   readonly schema_version: 1;
   readonly bootstrap_seeded: boolean;
-  readonly created_at: string;
-  readonly updated_at: string;
 }
 
 /** IKNOW-196 装配错误分类(降级契约 spec.md:300-326)。 */
@@ -45,13 +43,7 @@ function defaultState(): IknowStateV1 {
   return {
     schema_version: 1,
     bootstrap_seeded: false,
-    created_at: "",
-    updated_at: "",
   };
-}
-
-function nowIso(): string {
-  return new Date().toISOString();
 }
 
 function stateFilePath(workspace: string): string {
@@ -93,28 +85,19 @@ function validateStateFields(
     );
     return undefined;
   }
-  if (typeof obj.created_at !== "string") {
-    console.warn(
-      `[iknow-identity] state.json schema invalid (${p}): created_at`
-    );
-    return undefined;
-  }
-  if (typeof obj.updated_at !== "string") {
-    console.warn(
-      `[iknow-identity] state.json schema invalid (${p}): updated_at`
-    );
-    return undefined;
-  }
   return {
     schema_version: 1,
     bootstrap_seeded: obj.bootstrap_seeded,
-    created_at: obj.created_at,
-    updated_at: obj.updated_at,
   };
 }
 
 /** 把磁盘内容解析成 state;JSON 损坏 / schema 不匹配 → warn + 默认 state。 */
 function parseStateOrDefault(content: string, p: string): IknowStateV1 {
+  return tryParseState(content, p) ?? defaultState();
+}
+
+/** 解析失败 / schema 不匹配 → undefined(便于写路径判断是否需要 self-heal)。 */
+function tryParseState(content: string, p: string): IknowStateV1 | undefined {
   let raw: unknown;
   try {
     raw = JSON.parse(content);
@@ -123,15 +106,13 @@ function parseStateOrDefault(content: string, p: string): IknowStateV1 {
     console.warn(
       `[iknow-identity] state.json parse failed (${p}): ${e.message}`
     );
-    return defaultState();
+    return undefined;
   }
   if (raw === null || typeof raw !== "object") {
     console.warn(`[iknow-identity] state.json schema invalid (${p}): root`);
-    return defaultState();
+    return undefined;
   }
-  return (
-    validateStateFields(raw as Record<string, unknown>, p) ?? defaultState()
-  );
+  return validateStateFields(raw as Record<string, unknown>, p);
 }
 
 /** 读取 state.json;不存在 / JSON 损坏 / schema 不匹配 → 默认 state。 */
@@ -166,22 +147,17 @@ async function atomicWriteJson(p: string, data: string): Promise<void> {
   }
 }
 
-/** 写 state.json:PATCH 单字段 + updated_at 自动同步;atomic write。 */
+/** 写 state.json:PATCH 单字段 + atomic write。 */
 export async function writeIknowState(
-  patch: Partial<
-    Omit<IknowStateV1, "schema_version" | "created_at" | "updated_at">
-  >,
+  patch: Partial<Omit<IknowStateV1, "schema_version">>,
   workspace?: string
 ): Promise<IknowStateV1> {
   const ws = workspace ?? iknowWorkspaceRoot();
   const p = stateFilePath(ws);
   const current = await readIknowState(ws);
-  const ts = nowIso();
   const next: IknowStateV1 = {
     schema_version: 1,
     bootstrap_seeded: patch.bootstrap_seeded ?? current.bootstrap_seeded,
-    created_at: current.created_at || ts,
-    updated_at: ts,
   };
   await atomicWriteJson(p, JSON.stringify(next, null, 2));
   return next;
@@ -234,17 +210,40 @@ export async function initializeIknowWorkspace(opts?: {
   const sp = stateFilePath(root);
   const stateExisting = await readIfExists(sp);
   if (stateExisting === undefined) {
-    const ts = nowIso();
     const seed: IknowStateV1 = {
       schema_version: 1,
       bootstrap_seeded: false,
-      created_at: ts,
-      updated_at: ts,
     };
     await atomicWriteJson(sp, JSON.stringify(seed, null, 2));
     return { root, state: seed };
   }
 
-  const state = parseStateOrDefault(stateExisting, sp);
-  return { root, state };
+  // 文件存在但 JSON 损坏 / schema 不匹配 → self-heal:
+  // 备份原文件到 .corrupt.<random>,写入新的合法 seed,返回 seed。
+  // 合法文件保留不动(idempotent;不抹掉已 seeded 的状态)。
+  const parsed = tryParseState(stateExisting, sp);
+  if (parsed === undefined) {
+    console.warn(
+      `[iknow-identity] state.json invalid, backing up and re-seeding (${sp})`
+    );
+    const backup = `${sp}.corrupt.${randomBytes(6).toString("hex")}`;
+    try {
+      await fs.rename(sp, backup);
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      throw {
+        kind: "io_error",
+        path: sp,
+        cause: e.message ?? String(err),
+      } satisfies IknowIdentityError;
+    }
+    const seed: IknowStateV1 = {
+      schema_version: 1,
+      bootstrap_seeded: false,
+    };
+    await atomicWriteJson(sp, JSON.stringify(seed, null, 2));
+    return { root, state: seed };
+  }
+
+  return { root, state: parsed };
 }

@@ -3,7 +3,14 @@
  * (SC 32) + user.md missing (SC 33) + eager/idempotent。
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtemp, rm, writeFile, mkdir, unlink } from "node:fs/promises";
+import {
+  mkdtemp,
+  rm,
+  writeFile,
+  mkdir,
+  unlink,
+  readdir,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -91,5 +98,60 @@ describe("initializeIknowWorkspace roundtrip", () => {
     const final = await readIknowState(fresh);
     expect(final.schema_version).toBe(1);
     expect(final.bootstrap_seeded).toBe(false);
+  });
+
+  it("self-heal: corrupt JSON is backed up + re-seeded", async () => {
+    const ws = join(workDir, "heal-corrupt");
+    await mkdir(ws, { recursive: true });
+    await writeFile(join(ws, "state.json"), "{ broken json");
+
+    const init = await initializeIknowWorkspace({ workspace: ws });
+    expect(init.state.schema_version).toBe(1);
+    expect(init.state.bootstrap_seeded).toBe(false);
+
+    // 重新读取应当也是合法 seed
+    const reread = await readIknowState(ws);
+    expect(reread.schema_version).toBe(1);
+    expect(reread.bootstrap_seeded).toBe(false);
+
+    // 备份文件 .corrupt.<hex> 存在
+    const entries = await readdir(ws);
+    const backups = entries.filter((e) => e.startsWith("state.json.corrupt."));
+    expect(backups.length).toBe(1);
+  });
+
+  it("self-heal: schema-invalid content is backed up + re-seeded", async () => {
+    const ws = join(workDir, "heal-schema");
+    await mkdir(ws, { recursive: true });
+    await writeFile(
+      join(ws, "state.json"),
+      JSON.stringify({ schema_version: 99 })
+    );
+
+    const init = await initializeIknowWorkspace({ workspace: ws });
+    expect(init.state.schema_version).toBe(1);
+    expect(init.state.bootstrap_seeded).toBe(false);
+
+    const reread = await readIknowState(ws);
+    expect(reread.schema_version).toBe(1);
+    expect(reread.bootstrap_seeded).toBe(false);
+
+    const entries = await readdir(ws);
+    const backups = entries.filter((e) => e.startsWith("state.json.corrupt."));
+    expect(backups.length).toBe(1);
+  });
+
+  it("self-heal: valid file with bootstrap_seeded:true is NOT overwritten", async () => {
+    const ws = join(workDir, "heal-valid");
+    await initializeIknowWorkspace({ workspace: ws });
+    await writeIknowState({ bootstrap_seeded: true }, ws);
+
+    const re = await initializeIknowWorkspace({ workspace: ws });
+    expect(re.state.bootstrap_seeded).toBe(true);
+
+    // 不应有 .corrupt.* 备份(文件本来就合法)
+    const entries = await readdir(ws);
+    const backups = entries.filter((e) => e.startsWith("state.json.corrupt."));
+    expect(backups.length).toBe(0);
   });
 });
