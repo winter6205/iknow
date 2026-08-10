@@ -25,6 +25,12 @@ T5（subagent_result）──┘                                   │
 
 ### D1. `[decision]` worker 协议信封 ajv 兼容性探针 + envelope schema 冻结 `[blocks: T1]`
 
+**裁决（D1 探针实跑 2026-08-10）**：**全 pass → T1 直连**，无前置 schema 归一化子步骤。
+
+- `scripts/subagent-envelope-probe.ts` 实跑：`PASS  worker envelope schema` / `PASS  parent envelope schema` / 5 个 fixture 验证 PASS（含 parent 三类 ok / failed+reason / illegal 缺 status；worker 合法最小 / 缺必填 task）。
+- ajv 配置 = 仓库同款 `strict:true + allErrors + ajv-formats`，与 `src/harness/tools/registry.ts makeAjv` 一致；两组 schema 编译 exit 0。
+- 落点 `src/harness/subagent/envelope.ts` 导出 `parseWorkerEnvelope` / `parseParentEnvelope` / `truncateEnvelopeResult` + 类型 `WorkerEnvelope` / `SubAgentEnvelope` + schemas（`Record<string, unknown>` 形态，对齐 `ToolDef.inputSchema`），错误用既有 `ProtocolError`。
+
 - **Affects**: `scripts/subagent-envelope-probe.ts`（新，一次性探针）、`src/harness/subagent/envelope.ts`（schema 冻结落点）
 - **Acceptance**:
   1. 探针用仓库同款 ajv 配置（`strict: true` + ajv-formats，同 `src/harness/tools/registry.ts`）编译两组 envelope schema（父→子：`{task, systemPrompt?, disallowedTools?, maxTurns?, timeoutMs?, sandboxRoot, env}`；子→父：`{status, summary, result, fileRefs, usage}`，status ∈ {ok, failed} + reason 四值），输出每组 pass/fail
