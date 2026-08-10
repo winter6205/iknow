@@ -195,18 +195,32 @@ describe("startSessionServe — port fallback", () => {
     const prev = process.env.IKNOW_SERVE_PORT;
     delete process.env.IKNOW_SERVE_PORT;
     try {
-      const out = await startSessionServe({
-        hubOptions: { askUser: createNoAskUser() },
-        dataDir: await mkdtemp(join(tmpdir(), "iknow-port-fb-")),
-        host: "127.0.0.1",
-        // No port, no env → defaults to 8787; but 8787 may be in use in CI,
-        // so we just assert the call resolved and port is a finite number.
-      });
-      listening = out.listening;
-      // If 8787 was free we get 8787; if it was taken, EADDRINUSE would throw.
-      // The branch we wanted (env falsy → 8787) executed either way.
-      assert.equal(typeof listening.port, "number");
-      assert.ok(listening.port > 0);
+      // 8787 是真实绑定端口：forks 池下多个测试进程并发时，另一个进程
+      // 可能恰好也 fallback 到 8787 → EADDRINUSE（偶发失败，非真失败）。
+      // 重试 2 次 + 退避，让瞬态端口占用不影响断言。
+      let lastErr: unknown;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const out = await startSessionServe({
+            hubOptions: { askUser: createNoAskUser() },
+            dataDir: await mkdtemp(join(tmpdir(), "iknow-port-fb-")),
+            host: "127.0.0.1",
+            // No port, no env → defaults to 8787; but 8787 may be in use in CI,
+            // so we just assert the call resolved and port is a finite number.
+          });
+          listening = out.listening;
+          // If 8787 was free we get 8787; if it was taken, EADDRINUSE would throw.
+          // The branch we wanted (env falsy → 8787) executed either way.
+          assert.equal(typeof listening.port, "number");
+          assert.ok(listening.port > 0);
+          lastErr = undefined;
+          break;
+        } catch (err) {
+          lastErr = err;
+          await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+        }
+      }
+      if (lastErr !== undefined) throw lastErr;
     } finally {
       if (prev !== undefined) process.env.IKNOW_SERVE_PORT = prev;
     }

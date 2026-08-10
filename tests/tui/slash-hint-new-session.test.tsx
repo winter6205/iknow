@@ -178,7 +178,13 @@ describe('任务 B："/" 出现候选 → ↓ → Enter 触发 /new', () => {
         8000,
         "new-turn-done"
       );
-      await delay(100);
+      // inflight 清空后 session 落盘仍有一个调度窗口：固定 sleep 在
+      // CPU 争用下会过早断言导致偶发 flake，改用轮询等待落盘完成。
+      await waitFor(
+        async () => (await app.bridge.listSessions()).length === 1,
+        8000,
+        "session-persisted"
+      );
       const list = await app.bridge.listSessions();
       expect(list).toHaveLength(1);
       expect(list[0]!.summary).toBe("new-draft-msg");

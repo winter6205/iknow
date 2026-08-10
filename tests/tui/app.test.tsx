@@ -334,6 +334,9 @@ describe("TuiApp 端到端（tracer bullet）", () => {
           8000,
           `turn-${i}-done`
         );
+        // 多等一帧：等 setSessions(turnFinished) 提交、runState 回 idle，
+        // 否则紧跟 /compact 会撞「正在运行」守卫（与下方 m0..m4 同习语）。
+        await delay(50);
       }
 
       await app.type("/compact\r");

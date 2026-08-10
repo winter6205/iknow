@@ -1,3 +1,6 @@
 npx lint-staged
 npm run typecheck
-npm run test
+# 只跑与本次变更相关的测试（vitest --changed 基于 git HEAD 差异）。
+# 全量交给 pre-push 与 CI —— 本地 commit 全量 6.5min 且受 CPU 争用
+# 影响易偶发失败，不应阻塞提交。
+npm run test:changed

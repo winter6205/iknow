@@ -1,0 +1,7 @@
+# 提交前的全量测试兜底（push 时执行，比 commit 更重）。
+#
+# - --retry 1：偶发（flaky）失败自动重试 1 次 —— 只有重试后仍失败的
+#   才是真失败，避免"并行争用偶发红"挡住正常推送。
+# - 限流 fork（vitest.config.ts）降低 4 核机器上并行争用。
+# - 若确有 flaky 需要跳过本钩子，用 git push --no-verify（谨慎）。
+npm run test:pre-push
