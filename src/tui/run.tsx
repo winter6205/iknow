@@ -11,7 +11,11 @@
  * JsonlTraceService（ADR-0003 D4 / #146 决策 5=10a，TUI 自动继承）。
  */
 import { render } from "ink";
-import { prepareRuntime, type RuntimeBundle } from "../cli/runtime.js";
+import {
+  prepareRuntime,
+  registerShutdown,
+  type RuntimeBundle,
+} from "../cli/runtime.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import { buildTuiDeps } from "./deps.js";
 import { createTuiAskUserBridge } from "./ask-user.js";
@@ -19,6 +23,8 @@ import { createInflightRegistry, createTuiBridge } from "./hub-bridge.js";
 import { TuiApp, createToolEventSink } from "./app.js";
 import { attachSession } from "./session-state.js";
 import { createSessionGrants } from "../harness/permission/session-grants.js";
+import { createSubAgentManager } from "../harness/subagent/manager.js";
+import { defaultSubAgentSpawn } from "../harness/subagent/spawn.js";
 import { initIknowWorkspaceSafe } from "../harness/identity/index.js";
 import {
   createPermissionModeContext,
@@ -59,13 +65,25 @@ export async function runTui(opts: RunTuiOptions): Promise<void> {
   // #279 项3：会话级授权登记表 —— 权限 modal「总是允许」写入这里；deps policy
   // 的 session 层读它（同一实例），后续同工具调用不再 ask。
   const sessionGrants = createSessionGrants();
+  // #356 High#4 (SC12/SC3):TUI 长程入口 —— buildTuiDeps 内部 default
+  // createSubAgentManager 不返回句柄,这里自建并经测试缝透传(测试可注入覆盖),
+  // 保证进程退出时 registerShutdown 触发 subagentManager.shutdown —— 关闭
+  // stdio 子进程(SC11/SC16),否则 ink render 退出后 spawn 的子进程不被
+  // SIGTERM 清理(SC12)。MCP 在 TUI 路径不装配(registry 缺 mcp__* 工具),
+  // 故只挂 subagentManager.shutdown;与 chat/serve built.shutdown(组合句柄)
+  // 同语义,但语义面更窄 —— 本路径无 mcp。
+  const subagentManager = createSubAgentManager({
+    spawn: defaultSubAgentSpawn,
+  });
   const deps = buildTuiDeps(bundle, {
     askUser: askBridge.ask,
     onToolEvent: (event) => toolEventSink.emit(event),
     soleInflightId: () => inflight.soleId(),
     permissionMode,
     sessionGrants,
+    subagentManager,
   });
+  registerShutdown({ shutdown: () => subagentManager.shutdown() });
   const bridge = createTuiBridge({
     dataDir: opts.dataDir,
     deps,

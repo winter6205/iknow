@@ -341,6 +341,8 @@ export class SessionHub {
   private readonly surface: "chat" | "tui" | "ask" | "serve" | undefined;
   /** #356 T7: subagent manager（host drain 消费面；懒取见 ensureDeps）。 */
   private subagentManager: SubAgentManager | undefined;
+  /** #356 High#4: built.shutdown 缓存（组合句柄；ensureDeps 懒取，hub.shutdown 触发）。 */
+  private cachedShutdown: (() => Promise<void>) | undefined;
   /** Per-conversation serialization (spec A15). */
   private readonly inflight = new Map<string, Promise<void>>();
 
@@ -375,6 +377,17 @@ export class SessionHub {
    */
   listPendingAsks(): ReadonlyArray<PendingAskView> {
     return this.askHandle?.pendingAll() ?? [];
+  }
+
+  /**
+   * #356 High#4 (SC12/SC3):serve 长程入口的清理句柄 —— 转发 ensureDeps 缓存
+   * 的 built.shutdown（组合句柄 mcpManager first → subagentManager second）。
+   * cli.ts runServe 用 registerShutdown(hub) 把本方法挂到 SIGINT/SIGTERM,
+   * 进程退出前关闭 MCP 后台连接 + SIGTERM subagent stdio 子进程(SC11/SC16)。
+   * ask/deps-injected 形态无 built → 缓存缺席 → no-op(行为零变化)。
+   */
+  async shutdown(): Promise<void> {
+    await this.cachedShutdown?.();
   }
 
   /**
@@ -801,6 +814,12 @@ export class SessionHub {
     // #356 T7: serve 懒取 subagent manager — buildHarnessEngine 在 surface !==
     // "ask" 时自建;constructor 注入优先 (测试缝),未注入则取 built 的。
     this.subagentManager = this.subagentManager ?? built.subagentManager;
+    // #356 High#4 (SC12/SC3):缓存 built.shutdown(组合句柄 mcpManager first →
+    // subagentManager second)。serve 入口退出前经 hub.shutdown() 触发 —
+    // cli.ts runServe 挂 registerShutdown(hub),进程退出时清理 MCP 连接 +
+    // subagent stdio 子进程(SC11/SC16)。测试注入 deps 路径无 built →
+    // shutdown 缺席 → hub.shutdown() no-op。
+    this.cachedShutdown = this.cachedShutdown ?? built.shutdown;
     return this.cachedDeps;
   }
 

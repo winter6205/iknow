@@ -15,6 +15,7 @@ import { runSubagentWorker } from "./harness/subagent/worker.js";
 import {
   buildHarnessEngine,
   prepareRuntime,
+  registerShutdown,
   type RuntimeBundle,
 } from "./cli/runtime.js";
 import { isInteractive, writeErr } from "./cli/session-io.js";
@@ -237,6 +238,12 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     agentVersion: getVersion(),
     maxTurns: parsed.maxTurns ?? built.deps.maxTurns,
   };
+  // #356 High#4 (SC12/SC3):chat REPL 是长程入口 —— SIGINT/SIGTERM 前必须
+  // 触发 built.shutdown(组合句柄:mcpManager first → subagentManager second),
+  // 否则父死子继,subagent 子进程不被 SIGTERM 清理(SC11/SC16)。chat-session
+  // 自身的二次 SIGINT process.exit(130) 保留(用户强杀语义):首次信号走本钩子
+  // dispose,二次直接 exit。
+  registerShutdown(built);
   await runChatSession({
     deps: chatDeps,
     session: bundle.session,
@@ -313,6 +320,9 @@ async function main(): Promise<void> {
 
 async function runTui(parsed: ParsedCli): Promise<void> {
   // 动态 import：与 serve 同款 lazy 路径，chat/ask 不背 ink/react 依赖树。
+  // #356 High#4 (SC12/SC3):TUI 退出链由 tui/run.tsx 自管 —— buildTuiDeps
+  // 不经 buildHarnessEngine(独立装配),run.tsx 本地自建 subagentManager 并把
+  // 其 shutdown 挂 registerShutdown(built),进程退出时清理子进程(见 run.tsx)。
   const { runTui: startTui } = await import("./tui/run.js");
   try {
     await startTui({
@@ -337,7 +347,7 @@ async function runServe(parsed: ParsedCli): Promise<void> {
   const askHandle = createServeAskUser();
   const sessionGrants = createSessionGrants();
   try {
-    const { listening } = await startSessionServe({
+    const { listening, hub } = await startSessionServe({
       host: parsed.host,
       port: parsed.port,
       json_mode: parsed.json,
@@ -356,6 +366,11 @@ async function runServe(parsed: ParsedCli): Promise<void> {
       );
     }
     writeErr("API: /api/v1/health  ·  UI: /  ·  Ctrl+C to stop");
+    // #356 High#4 (SC12/SC3):serve 是长程入口 —— hub.ensureDeps 内
+    // buildHarnessEngine 自建 MCP + subagent manager,built.shutdown 缓存在
+    // hub 上(SC12 顺序 mcpManager first → subagentManager second)。进程退出前
+    // 挂 registerShutdown(hub) → 触发同一组合清理,不留下 stdio 子进程。
+    registerShutdown(hub);
     await new Promise<void>(() => {
       /* keep process alive until signal */
     });
