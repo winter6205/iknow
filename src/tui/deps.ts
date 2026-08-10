@@ -28,6 +28,9 @@ import type { PermissionModeContext } from "../harness/permission/modes.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
 import { homedir } from "node:os";
+import { createSubAgentManager } from "../harness/subagent/manager.js";
+import { defaultSubAgentSpawn } from "../harness/subagent/spawn.js";
+import type { SubAgentManager } from "../harness/subagent/manager.js";
 
 /** 工具摘要行事件（postToolUse 投影，observability-only）。 */
 export interface TuiToolEvent {
@@ -72,6 +75,13 @@ export interface BuildTuiDepsOptions {
    * 放行不再 ask。缺省 = 无 session 层（历史行为）。
    */
   readonly sessionGrants?: SessionGrants;
+  /**
+   * #356 T6:测试缝——覆盖注入 SubAgentManager（生产默认自建 defaultSubAgentSpawn）。
+   * 与 buildHarnessEngine 同语义：subagentManager 缺席时 spawn_subagent /
+   * subagent_result 两件工具不在 registry（surface 门控不删，但 TUI 不传 →
+   * 23 件；本票默认自建 → 25 件）。
+   */
+  readonly subagentManager?: SubAgentManager;
 }
 
 export function buildTuiDeps(
@@ -105,10 +115,17 @@ export function buildTuiDeps(
   const sandboxRoot = process.cwd();
   // #194 T6:tui 与 build-engine chat 对齐 → memoryDir 必传(10 件工具集含
   // memory_recall + memory_save)。
+  // #356 T6:subagent manager — TUI 入口与 build-engine chat 同门(surface ∈
+  // {chat, tui, serve} 挂载 spawn_subagent / subagent_result)。测试缝可注入
+  // 覆盖,生产默认 defaultSubAgentSpawn。
+  const subagentManager =
+    opts.subagentManager ??
+    createSubAgentManager({ spawn: defaultSubAgentSpawn });
   const reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
     memoryDir: resolveProjectMemoryDir(process.cwd()),
+    subagentManager,
   });
   const baseExecutor = createExecutor(reg.inner);
   const policy = createPermissionPolicy({

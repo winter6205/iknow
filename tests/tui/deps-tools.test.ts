@@ -44,6 +44,10 @@ function makeBundle(
 
 // #194 T6 (Layer 4 baseline):TUI 与 build-engine 对齐 → 10 件(含 memory);
 // #224 末尾追加 tool_search(11 件)。
+// #356 T6 (TUI 接线):buildTuiDeps 与 build-engine chat 同门(surface ∈
+// {chat, tui, serve}) → 默认自建 subagentManager → 工具集含
+// spawn_subagent + subagent_result 两件 (21→23)。TUI 不装 skill 工具(无
+// skillCatalog),所以总数 23 而非 25。
 const EXPECTED_TOOLSET = [
   "bash",
   "read_file",
@@ -67,10 +71,13 @@ const EXPECTED_TOOLSET = [
   "lsp_incoming_calls",
   "lsp_outgoing_calls",
   "lsp_diagnostics",
+  // #356 T6 spawn 工具集 append-only:21→23。
+  "spawn_subagent",
+  "subagent_result",
 ];
 
-describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(21 件)", () => {
-  it("装配出完整 21 件工具(含 web_fetch + web_search + memory_recall + memory_save + tool_search + 10 LSP)", () => {
+describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(23 件)", () => {
+  it("装配出完整 23 件工具(含 web + memory + tool_search + 10 LSP + 2 subagent)", () => {
     const deps = buildTuiDeps(makeBundle(), { askUser: createNoAskUser() });
     const names = deps.registry
       .list()
@@ -79,12 +86,14 @@ describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(21 件)"
     expect(names).toEqual([...EXPECTED_TOOLSET].sort());
   });
 
-  it("显式断言 web_fetch 与 web_search 都在注册表里", () => {
+  it("显式断言 web_fetch / web_search / spawn_subagent / subagent_result 都在注册表里", () => {
     // 比 list() 顺序断言更强 — 即使将来顺序变了也不会漏报。
     const deps = buildTuiDeps(makeBundle(), { askUser: createNoAskUser() });
     const names = new Set(deps.registry.list().map((def) => def.name));
     expect(names.has("web_fetch")).toBe(true);
     expect(names.has("web_search")).toBe(true);
+    expect(names.has("spawn_subagent")).toBe(true);
+    expect(names.has("subagent_result")).toBe(true);
   });
 
   it("IKNOW_WEB_PROXY 非空时,web 工具装配不抛错(fail-fast 在装配时)", () => {
