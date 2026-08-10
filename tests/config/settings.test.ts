@@ -1,0 +1,214 @@
+/**
+ * #353: settings 文件机制 —— user/project 双层加载 + 逐层合并 + 非法值回退。
+ *
+ * 覆盖：
+ *  - 文件不存在 → 空对象（不抛错）；
+ *  - user 值读取 / project 覆盖 user（同字段替换，非 merge 残留）；
+ *  - 逐层合并（project 只覆盖 llm.maxTurns，保留 user 的 llm.compress）；
+ *  - 坏 JSON → 空对象（user / project 分别测）；
+ *  - 非法值丢弃（maxTurns 0 / -5 / "abc" / 1.5；contextWindow 0 / "bad"；
+ *    thresholdTokens 0）；
+ *  - 非法字段不覆盖 user 合法值（project 非法 → 保留 user 值）；
+ *  - llm 是数组 / 字符串 → 丢弃该层；
+ *  - 返回对象深 frozen。
+ *
+ * 每个用例独立 tmp dir，通过 opts.home / opts.cwd 隔离，不碰真实 ~/.iknow。
+ */
+import { describe, it, beforeAll, afterAll } from "vitest";
+import assert from "node:assert/strict";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadIknowSettings } from "../../src/config/settings.ts";
+
+let workDir: string;
+beforeAll(async () => {
+  workDir = await mkdtemp(join(tmpdir(), "iknow-settings-test-"));
+});
+afterAll(async () => {
+  await rm(workDir, { recursive: true, force: true });
+});
+
+/**
+ * 写 user / project 各一个 settings 文件，返回隔离的 LoadSettingsOpts。
+ * 始终创建 .iknow 目录（空对象用例也保证目录存在，避免 writeFile ENOENT）。
+ */
+async function makeSettings(
+  user: Record<string, unknown>,
+  project: Record<string, unknown>
+): Promise<{ home: string; cwd: string }> {
+  const home = join(workDir, "home", `${Math.random().toString(36).slice(2)}`);
+  const cwd = join(workDir, "cwd", `${Math.random().toString(36).slice(2)}`);
+  await mkdir(join(home, ".iknow"), { recursive: true });
+  await mkdir(join(cwd, ".iknow"), { recursive: true });
+  if (Object.keys(user).length > 0) {
+    await writeFile(
+      join(home, ".iknow", "settings.json"),
+      JSON.stringify(user)
+    );
+  }
+  if (Object.keys(project).length > 0) {
+    await writeFile(
+      join(cwd, ".iknow", "settings.json"),
+      JSON.stringify(project)
+    );
+  }
+  return { home, cwd };
+}
+
+describe("loadIknowSettings — settings 文件机制 (#353)", () => {
+  it("两个文件都不存在 → 返回空对象（不抛错）", async () => {
+    const { home, cwd } = await makeSettings({}, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("user 有 settings → 读到 user 值", async () => {
+    const { home, cwd } = await makeSettings({ llm: { maxTurns: 20 } }, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { maxTurns: 20 },
+    });
+  });
+
+  it("project 覆盖 user（同字段替换，非 merge 残留）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { maxTurns: 20 } },
+      { llm: { maxTurns: 5 } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { maxTurns: 5 },
+    });
+  });
+
+  it("逐层合并：project 只覆盖 llm.maxTurns，保留 user 的 llm.compress", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { maxTurns: 20, compress: { contextWindow: 200000 } } },
+      { llm: { maxTurns: 5 } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { maxTurns: 5, compress: { contextWindow: 200000 } },
+    });
+  });
+
+  it("压缩字段逐层合并：project 只覆盖 compress.thresholdTokens，保留 user 的 contextWindow", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { compress: { contextWindow: 200000, thresholdTokens: 150000 } } },
+      { llm: { compress: { thresholdTokens: 100000 } } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { compress: { contextWindow: 200000, thresholdTokens: 100000 } },
+    });
+  });
+
+  it("坏 JSON（user）→ 返回空对象不抛错", async () => {
+    const { home, cwd } = await makeSettings({}, {});
+    await writeFile(join(home, ".iknow", "settings.json"), "{ broken json");
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("坏 JSON（project）→ 返回空对象不抛错", async () => {
+    const { home, cwd } = await makeSettings({}, {});
+    await writeFile(join(cwd, ".iknow", "settings.json"), "{ broken json");
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("坏 JSON（project）+ 合法 user → 保留 user 值", async () => {
+    const { home, cwd } = await makeSettings({ llm: { maxTurns: 20 } }, {});
+    await writeFile(join(cwd, ".iknow", "settings.json"), "{ broken json");
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { maxTurns: 20 },
+    });
+  });
+
+  it('非法值丢弃：maxTurns 0 / -5 / "abc" / 1.5 → 丢弃', async () => {
+    for (const bad of [0, -5, "abc", 1.5]) {
+      const { home, cwd } = await makeSettings({ llm: { maxTurns: bad } }, {});
+      assert.deepEqual(loadIknowSettings({ home, cwd }), {}, `maxTurns=${bad}`);
+    }
+  });
+
+  it('非法值丢弃：contextWindow 0 / "bad" → 丢弃', async () => {
+    for (const bad of [0, "bad"]) {
+      const { home, cwd } = await makeSettings(
+        { llm: { compress: { contextWindow: bad } } },
+        {}
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `contextWindow=${bad}`
+      );
+    }
+  });
+
+  it("非法值丢弃：thresholdTokens 0 → 丢弃", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { compress: { thresholdTokens: 0 } } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("project 非法值不覆盖 user 合法值（保留 user 值）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { maxTurns: 20 } },
+      { llm: { maxTurns: "bad" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { maxTurns: 20 },
+    });
+  });
+
+  it("project compress 非法不覆盖 user compress（user 的 compress 完整保留）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { compress: { contextWindow: 200000, thresholdTokens: 150000 } } },
+      { llm: { compress: { contextWindow: 0, thresholdTokens: "bad" } } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { compress: { contextWindow: 200000, thresholdTokens: 150000 } },
+    });
+  });
+
+  it("llm 是数组 → 丢弃该层", async () => {
+    const { home, cwd } = await makeSettings({ llm: [] }, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("llm 是字符串 → 丢弃该层", async () => {
+    const { home, cwd } = await makeSettings({ llm: "garbage" }, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("顶层是数组 → 空对象", async () => {
+    const { home, cwd } = await makeSettings({}, {});
+    await writeFile(join(home, ".iknow", "settings.json"), JSON.stringify([]));
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("顶层是字符串 → 空对象", async () => {
+    const { home, cwd } = await makeSettings({}, {});
+    await writeFile(join(cwd, ".iknow", "settings.json"), JSON.stringify("x"));
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("返回对象深 frozen（含嵌套）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { maxTurns: 20, compress: { contextWindow: 200000 } } },
+      {}
+    );
+    const s = loadIknowSettings({ home, cwd });
+    assert.ok(Object.isFrozen(s));
+    assert.ok(Object.isFrozen(s.llm));
+    assert.ok(Object.isFrozen(s.llm!.compress));
+    assert.throws(() => {
+      (s.llm as { maxTurns: number }).maxTurns = 99;
+    }, TypeError);
+    assert.throws(() => {
+      (s.llm!.compress as { contextWindow: number }).contextWindow = 1;
+    }, TypeError);
+  });
+
+  it("空对象也 frozen", async () => {
+    const { home, cwd } = await makeSettings({}, {});
+    assert.ok(Object.isFrozen(loadIknowSettings({ home, cwd })));
+  });
+});

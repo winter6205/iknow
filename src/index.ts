@@ -6,6 +6,13 @@
 export { loadIknowEnv, getApiKey } from "./config/env.js";
 export type { IknowEnv, LlmEnv } from "./config/env.js";
 
+export { loadIknowSettings } from "./config/settings.js";
+export type {
+  IknowSettings,
+  IknowSettingsLlm,
+  IknowSettingsLlmCompress,
+} from "./config/settings.js";
+
 export type * from "./shared/schema.js";
 export {
   IknowError,

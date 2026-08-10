@@ -12,7 +12,18 @@
 
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { loadIknowEnv } from "../../src/config/env.ts";
+import type { IknowSettings } from "../../src/config/settings.ts";
+
+/**
+ * #353 review: 既有 env 测试不测 settings，统一注入空 settings 以隔离
+ * 真实 `~/.iknow/settings.json` / `<cwd>/.iknow/settings.json`（避免本地配置
+ * 污染导致断言非确定）。loadIknowEnv 传 settings 时跳过文件读取。
+ */
+const EMPTY_SETTINGS: IknowSettings = {};
 
 const ENV_KEYS = [
   "IKNOW_LLM_THINKING",
@@ -37,48 +48,48 @@ describe("loadIknowEnv — thinking config (#151 T4)", () => {
   });
 
   it("default: thinking=off, effort=空(均未设 env)", () => {
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.thinking, "off");
     assert.equal(env.llm.thinkingEffort, "");
   });
 
   it("explicit adaptive 通过", () => {
     process.env.IKNOW_LLM_THINKING = "adaptive";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.thinking, "adaptive");
     assert.equal(env.llm.thinkingEffort, "");
   });
 
   it("explicit off 仍 off", () => {
     process.env.IKNOW_LLM_THINKING = "off";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.thinking, "off");
   });
 
   it("THINKING 非法值 → 回退 off 且不崩溃", () => {
     process.env.IKNOW_LLM_THINKING = "garbage";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.thinking, "off");
   });
 
   it("EFFORT 五个合法值均原样透传", () => {
     for (const v of ["low", "medium", "high", "xhigh", "max"]) {
       process.env.IKNOW_LLM_THINKING_EFFORT = v;
-      const env = loadIknowEnv();
+      const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
       assert.equal(env.llm.thinkingEffort, v, `effort=${v} 应透传`);
     }
   });
 
   it("EFFORT 非法值 → 视同空(不发送)", () => {
     process.env.IKNOW_LLM_THINKING_EFFORT = "extreme";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.thinkingEffort, "");
   });
 
   it("THINKING 与 EFFORT 独立:off + 合法 effort 不报错,但 effort 不发送(adapter 决定)", () => {
     process.env.IKNOW_LLM_THINKING = "off";
     process.env.IKNOW_LLM_THINKING_EFFORT = "high";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.thinking, "off");
     assert.equal(env.llm.thinkingEffort, "high");
   });
@@ -93,31 +104,31 @@ describe("loadIknowEnv — chat show-thinking flag (#152 T5)", () => {
   });
 
   it("default: chat.showThinking=false (env 不设时)", () => {
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.chat.showThinking, false);
   });
 
   it("explicit on: 通过", () => {
     process.env.IKNOW_CHAT_SHOW_THINKING = "on";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.chat.showThinking, true);
   });
 
   it("explicit off: 仍 off", () => {
     process.env.IKNOW_CHAT_SHOW_THINKING = "off";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.chat.showThinking, false);
   });
 
   it("大小写不敏感:ON / On 同 ON", () => {
     process.env.IKNOW_CHAT_SHOW_THINKING = "ON";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.chat.showThinking, true);
   });
 
   it("非法值 → 回退 off (不抛错)", () => {
     process.env.IKNOW_CHAT_SHOW_THINKING = "garbage";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.chat.showThinking, false);
   });
 });
@@ -131,33 +142,33 @@ describe("loadIknowEnv — LLM stream flag (#179 T6 / #147 D0)", () => {
   });
 
   it("default: stream=on (env 不设时)", () => {
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.stream, "on");
   });
 
   it("explicit on: 通过", () => {
     process.env.IKNOW_LLM_STREAM = "on";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.stream, "on");
   });
 
   it("explicit off → off", () => {
     process.env.IKNOW_LLM_STREAM = "off";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.stream, "off");
   });
 
   it("大小写不敏感:OFF / On 生效", () => {
     process.env.IKNOW_LLM_STREAM = "OFF";
-    assert.equal(loadIknowEnv().llm.stream, "off");
+    assert.equal(loadIknowEnv(process.cwd(), EMPTY_SETTINGS).llm.stream, "off");
     process.env.IKNOW_LLM_STREAM = "On";
-    assert.equal(loadIknowEnv().llm.stream, "on");
+    assert.equal(loadIknowEnv(process.cwd(), EMPTY_SETTINGS).llm.stream, "on");
   });
 
   it("非法值(yes / 1 / garbage)→ 回退 on,不抛错", () => {
     for (const v of ["yes", "1", "garbage"]) {
       process.env.IKNOW_LLM_STREAM = v;
-      const env = loadIknowEnv();
+      const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
       assert.equal(env.llm.stream, "on", `stream=${v} 应回退 on`);
     }
   });
@@ -172,19 +183,19 @@ describe("loadIknowEnv — web.searchUrl (ACI web_search 端点覆写)", () => {
   });
 
   it("default: web.searchUrl=undefined (env 不设时)", () => {
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.web.searchUrl, undefined);
   });
 
   it("explicit 端点原样透传", () => {
     process.env.IKNOW_WEB_SEARCH_URL = "https://html.duckduckgo.com/html/";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.web.searchUrl, "https://html.duckduckgo.com/html/");
   });
 
   it("空串 → undefined（区别于有值）", () => {
     process.env.IKNOW_WEB_SEARCH_URL = "";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.web.searchUrl, undefined);
   });
 });
@@ -198,45 +209,45 @@ describe("loadIknowEnv — compress config (#119 T1)", () => {
   });
 
   it("default: contextWindow=200000, thresholdTokens=undefined(均未设 env)", () => {
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.compress.contextWindow, 200000);
     assert.equal(env.compress.thresholdTokens, undefined);
   });
 
   it("显式 IKNOW_MODEL_CONTEXT_WINDOW=300000 → env.compress.contextWindow=300000", () => {
     process.env.IKNOW_MODEL_CONTEXT_WINDOW = "300000";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.compress.contextWindow, 300000);
   });
 
   it("显式 IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS=150000 → env.compress.thresholdTokens=150000", () => {
     process.env.IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS = "150000";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.compress.thresholdTokens, 150000);
   });
 
   it("非数字字符串（如 'abc'）→ contextWindow 回退 200000（对齐 envInt 既有纪律）", () => {
     process.env.IKNOW_MODEL_CONTEXT_WINDOW = "abc";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.compress.contextWindow, 200000);
   });
 
   it("IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS 非数字 → undefined（可选 int 非法回退）", () => {
     process.env.IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS = "not-a-number";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.compress.thresholdTokens, undefined);
   });
 
   it("IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS 空串 → undefined（与未设同义）", () => {
     process.env.IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS = "";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.compress.thresholdTokens, undefined);
   });
 
   it("阈值 vs 窗口独立:显式 thresholdTokens 不影响 contextWindow", () => {
     process.env.IKNOW_MODEL_CONTEXT_WINDOW = "500000";
     process.env.IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS = "100000";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.compress.contextWindow, 500000);
     assert.equal(env.compress.thresholdTokens, 100000);
   });
@@ -251,37 +262,37 @@ describe("loadIknowEnv — maxTurns (plan T5)", () => {
   });
 
   it("default: llm.maxTurns=undefined(env 不设时 = 无限)", () => {
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.maxTurns, undefined);
   });
 
   it("IKNOW_LLM_MAX_TURNS=3 → llm.maxTurns=3", () => {
     process.env.IKNOW_LLM_MAX_TURNS = "3";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.maxTurns, 3);
   });
 
   it("IKNOW_LLM_MAX_TURNS=120 → llm.maxTurns=120", () => {
     process.env.IKNOW_LLM_MAX_TURNS = "120";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.maxTurns, 120);
   });
 
   it("IKNOW_LLM_MAX_TURNS 空串 → undefined(与未设同义)", () => {
     process.env.IKNOW_LLM_MAX_TURNS = "";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.maxTurns, undefined);
   });
 
   it("IKNOW_LLM_MAX_TURNS 非数字 (abc) → undefined(envOptionalInt 回退纪律)", () => {
     process.env.IKNOW_LLM_MAX_TURNS = "abc";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.maxTurns, undefined);
   });
 
   it("IKNOW_LLM_MAX_TURNS 小数 (3.7) → trunc 为 3(envOptionalInt 用 trunc)", () => {
     process.env.IKNOW_LLM_MAX_TURNS = "3.7";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.maxTurns, 3);
   });
 
@@ -289,9 +300,191 @@ describe("loadIknowEnv — maxTurns (plan T5)", () => {
     process.env.IKNOW_LLM_MAX_TURNS = "5";
     process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = "1024";
     process.env.IKNOW_LLM_TIMEOUT_MS = "30000";
-    const env = loadIknowEnv();
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.maxTurns, 5);
     assert.equal(env.llm.maxOutputTokens, 1024);
     assert.equal(env.llm.timeoutMs, 30000);
+  });
+});
+
+describe("loadIknowEnv — settings merge (#353)", () => {
+  beforeEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+
+  it("settings 提供 maxTurns / compress → env 反映", () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: {
+        maxTurns: 25,
+        compress: { contextWindow: 300000, thresholdTokens: 200000 },
+      },
+    });
+    assert.equal(env.llm.maxTurns, 25);
+    assert.equal(env.compress.contextWindow, 300000);
+    assert.equal(env.compress.thresholdTokens, 200000);
+  });
+
+  it("env 覆盖 settings", () => {
+    process.env.IKNOW_LLM_MAX_TURNS = "10";
+    process.env.IKNOW_MODEL_CONTEXT_WINDOW = "250000";
+    process.env.IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS = "180000";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: {
+        maxTurns: 25,
+        compress: { contextWindow: 300000, thresholdTokens: 200000 },
+      },
+    });
+    assert.equal(env.llm.maxTurns, 10);
+    assert.equal(env.compress.contextWindow, 250000);
+    assert.equal(env.compress.thresholdTokens, 180000);
+  });
+
+  it("settings 只提供部分字段，其余保持默认", () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { maxTurns: 15 },
+    });
+    assert.equal(env.llm.maxTurns, 15);
+    assert.equal(env.compress.contextWindow, 200000);
+    assert.equal(env.compress.thresholdTokens, undefined);
+  });
+
+  it("未传 settings 时自动读取 .iknow/settings.json（真实文件集成）", async () => {
+    const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-settings-"));
+    const settingsDir = join(tmpCwd, ".iknow");
+    await mkdir(settingsDir, { recursive: true });
+    await writeFile(
+      join(settingsDir, "settings.json"),
+      JSON.stringify({
+        llm: { maxTurns: 42, compress: { contextWindow: 400000 } },
+      })
+    );
+
+    try {
+      const env = loadIknowEnv(tmpCwd);
+      assert.equal(env.llm.maxTurns, 42);
+      assert.equal(env.compress.contextWindow, 400000);
+      assert.equal(env.compress.thresholdTokens, undefined);
+    } finally {
+      await rm(tmpCwd, { recursive: true, force: true });
+    }
+  });
+
+  it("非法 env 值视为未设，回退到 settings", () => {
+    process.env.IKNOW_LLM_MAX_TURNS = "abc";
+    process.env.IKNOW_MODEL_CONTEXT_WINDOW = "bad";
+    process.env.IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS = "not-a-number";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: {
+        maxTurns: 33,
+        compress: { contextWindow: 330000, thresholdTokens: 220000 },
+      },
+    });
+    // 非法 env = 未设（envOptionalInt/envInt 回退纪律），继续走 settings 回退。
+    assert.equal(env.llm.maxTurns, 33);
+    assert.equal(env.compress.contextWindow, 330000);
+    assert.equal(env.compress.thresholdTokens, 220000);
+  });
+
+  it("settings 值经 loadIknowEnv 进入装配入口（serve/hub/runtime 同源）", async () => {
+    // serve.ts:88 / hub.ts:762 / runtime.ts:52 均直接调 loadIknowEnv()，
+    // settings 自动读取后经同一链路流入 LoopEngineDeps / HealthResponse。
+    const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-serve-settings-"));
+    await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
+    await writeFile(
+      join(tmpCwd, ".iknow", "settings.json"),
+      JSON.stringify({
+        llm: { maxTurns: 9, compress: { contextWindow: 900000 } },
+      })
+    );
+    try {
+      const env = loadIknowEnv(tmpCwd);
+      assert.equal(env.llm.maxTurns, 9);
+      assert.equal(env.compress.contextWindow, 900000);
+      // thresholdTokens 未设 → undefined（proactive compact 关）。
+      assert.equal(env.compress.thresholdTokens, undefined);
+    } finally {
+      await rm(tmpCwd, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("loadIknowEnv — subagent inheritance (#353)", () => {
+  const ENV_KEYS_SUBAGENT = [
+    "IKNOW_LLM_MAX_TURNS",
+    "IKNOW_MODEL_CONTEXT_WINDOW",
+    "IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS",
+  ] as const;
+  beforeEach(() => {
+    for (const k of ENV_KEYS_SUBAGENT) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS_SUBAGENT) delete process.env[k];
+  });
+
+  it("子代理在相同 project cwd 自装配时继承 settings（跨进程模拟）", async () => {
+    // 主代理 project settings 写入 tmpCwd/.iknow/settings.json；
+    // 子代理进程重新走 loadIknowEnv(同 cwd) → 自动读同一文件，天然继承。
+    const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-subagent-inherit-"));
+    const emptyHome = await mkdtemp(join(tmpdir(), "iknow-subagent-home-"));
+    await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
+    await writeFile(
+      join(tmpCwd, ".iknow", "settings.json"),
+      JSON.stringify({
+        llm: { maxTurns: 77, compress: { contextWindow: 600000 } },
+      })
+    );
+    try {
+      // 模拟子代理进程：隔离 HOME（避免真实 ~/.iknow/settings.json 干扰），
+      // 以 project cwd 自装配。
+      const prevHome = process.env.HOME;
+      process.env.HOME = emptyHome;
+      try {
+        const env = loadIknowEnv(tmpCwd);
+        assert.equal(env.llm.maxTurns, 77);
+        assert.equal(env.compress.contextWindow, 600000);
+      } finally {
+        if (prevHome === undefined) delete process.env.HOME;
+        else process.env.HOME = prevHome;
+      }
+    } finally {
+      await rm(tmpCwd, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
+    }
+  });
+
+  it("子代理在隔离 cwd（无 settings）自装配时不继承 project settings", async () => {
+    // 主代理 project settings 在 tmpCwdWith，但子代理被 spawn 到 tmpCwdEmpty
+    // （隔离 cwd）→ loadIknowEnv(tmpCwdEmpty) 读不到 project settings，
+    // 回退默认值（不继承）。
+    const tmpWith = await mkdtemp(join(tmpdir(), "iknow-subagent-with-"));
+    const tmpEmpty = await mkdtemp(join(tmpdir(), "iknow-subagent-empty-"));
+    const emptyHome = await mkdtemp(join(tmpdir(), "iknow-subagent-home2-"));
+    await mkdir(join(tmpWith, ".iknow"), { recursive: true });
+    await writeFile(
+      join(tmpWith, ".iknow", "settings.json"),
+      JSON.stringify({
+        llm: { maxTurns: 77, compress: { contextWindow: 600000 } },
+      })
+    );
+    try {
+      const prevHome = process.env.HOME;
+      process.env.HOME = emptyHome;
+      try {
+        const env = loadIknowEnv(tmpEmpty);
+        assert.equal(env.llm.maxTurns, undefined);
+        assert.equal(env.compress.contextWindow, 200000);
+        assert.equal(env.compress.thresholdTokens, undefined);
+      } finally {
+        if (prevHome === undefined) delete process.env.HOME;
+        else process.env.HOME = prevHome;
+      }
+    } finally {
+      await rm(tmpWith, { recursive: true, force: true });
+      await rm(tmpEmpty, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
+    }
   });
 });

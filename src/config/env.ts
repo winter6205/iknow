@@ -1,10 +1,16 @@
 /**
- * Load iknow runtime config from process.env + optional `.env` / `.env.local` (cwd).
- * Precedence: process.env > `.env.local` > `.env`.
+ * Load iknow runtime config from process.env + optional `.env` / `.env.local` (cwd)
+ * + `.iknow/settings.json` (#353, loop 配置的单一事实源)。
+ *
+ * #353 loop-config 三个字段的 precedence:
+ * `process.env > .env.local > .env > settings.json (project > user) > hardcoded defaults`
+ * （其它字段保持既有 `process.env > .env.local > .env > hardcoded defaults`，不引入 settings 回退）。
+ *
  * Never logs secret values.
  */
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { loadIknowSettings, type IknowSettings } from "./settings.js";
 
 export interface LlmEnv {
   baseUrl: string;
@@ -278,8 +284,14 @@ export function getApiKey(opts: GetApiKeyOpts): string | undefined {
   return trimmed;
 }
 
-export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
-  // process.env still wins via envGet / getApiKey; among files, .env.local overrides .env
+export function loadIknowEnv(
+  cwd: string = process.cwd(),
+  settings?: IknowSettings
+): IknowEnv {
+  // process.env still wins via envGet / getApiKey; among files, .env.local overrides .env.
+  // settings 参数是测试注入缝；不传时自动读取真实 settings 文件（project > user 合并）。
+  const mergedSettings = settings ?? loadIknowSettings({ cwd });
+
   const file = {
     ...parseEnvFile(join(cwd, ".env")),
     ...parseEnvFile(join(cwd, ".env.local")),
@@ -333,10 +345,12 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
         key: "IKNOW_LLM_STREAM",
       }),
       // plan T5: 可选正整数;未设 / 空 / 非数字 → undefined(= 无限)。
-      maxTurns: envOptionalInt({
-        file,
-        key: "IKNOW_LLM_MAX_TURNS",
-      }),
+      // #353: settings.llm.maxTurns 回退（env > settings）。
+      maxTurns:
+        envOptionalInt({
+          file,
+          key: "IKNOW_LLM_MAX_TURNS",
+        }) ?? mergedSettings.llm?.maxTurns,
     },
     chat: {
       // #152 T5:默认 off（不显示 thinking，保持现状）。
@@ -355,15 +369,18 @@ export function loadIknowEnv(cwd: string = process.cwd()): IknowEnv {
     // thresholdTokens 阈值合理性校验(threshold >= window 拒绝)归 T4 threshold.ts,
     // 本 loader 仅承载 raw env 解析, 不抛错。
     compress: {
+      // #353: settings.llm.compress.contextWindow 回退（env > settings > 200000 默认）。
       contextWindow: envInt({
         file,
         key: "IKNOW_MODEL_CONTEXT_WINDOW",
-        fallback: 200000,
+        fallback: mergedSettings.llm?.compress?.contextWindow ?? 200000,
       }),
-      thresholdTokens: envOptionalInt({
-        file,
-        key: "IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS",
-      }),
+      // #353: settings.llm.compress.thresholdTokens 回退（env > settings）。
+      thresholdTokens:
+        envOptionalInt({
+          file,
+          key: "IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS",
+        }) ?? mergedSettings.llm?.compress?.thresholdTokens,
     },
   };
 }
