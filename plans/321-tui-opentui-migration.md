@@ -112,9 +112,9 @@ D1 (#327 已 open) ── T0（归档）
 
 - **Affects**: `src/tui/` 输入接线（OpenTUI 键盘/鼠标事件）, `src/tui/clipboard.ts`（保留读取）, `tests/tui/{copy-flow,keyboard}.test.tsx`
 - **Acceptance**:
-  1. `mockMouse` 拖选 → `<text selectable>` 选区 → 剪贴板写入成功（D3 结论 2/3 决定 CJK 范围与写入通道）
+  1. `mockMouse` 拖选 → `<text selectable>` 选区 → **高亮（不再自动复制）**；`mockMouse` 右键 down+up → 复制当前选区（D3 结论 2/3 决定 CJK 范围与写入通道；fix-session 2026-08-10 **B1 决策** supersede 原「拖选松键自动复制」）
   2. `mockInput` 修饰键 / 组合键 / bracketed paste 测试绿（Kitty 协议走 OpenTUI 解析器；无自实现 mouse.ts / selection.ts 复发）
-  3. Ctrl+Y 重复制 + 无选区提示行为保持（copy-flow 语义不变）
+  3. ~~Ctrl+Y 重复制 + 无选区提示行为保持~~（已删除——B1 决策 supersede，见 acceptance #1 右键复制 + fix-session handoff 2026-08-10）
 - **Per-ticket loop**: tdd → typecheck+tests → code-review → verification-before-completion → commit on ticket branch
 
 #### T6. `[implementation]` 流式并发 + message-blocks + session/slash/hub 接线
@@ -153,15 +153,16 @@ D1 (#327 已 open) ── T0（归档）
 
 ### D1 裁决
 
-> 待执行：@opentui/react 版本 = ___；@opentui/core 版本 = ___；原生二进制体积 = ___
+> **已裁决（2026-08-09, D1 commit）**：@opentui/react 版本 = 0.5.1；@opentui/core 版本 = 0.5.1（精确锁版）；原生二进制体积 = node_modules/@opentui 共 33M（<50MB，通过 OQ5）。
+> 运行时约束：Node 22 无 `node:ffi`，原生渲染器 FFI 仅 bun（Linux，`~/.bun/bin/bun` 1.3.14）可驱动；`/usr/local/bin/bun` 为坏软链（Windows 版）禁用。smoke API：`createTestRenderer` from `@opentui/core/testing`。
 
 ### D2 裁决
 
-> 待执行：运行器 = ___（A vitest 单运行器 / B tests/tui 切 bun:test 聚合）
+> **已裁决（2026-08-09）：B** — vitest（Node 22）无 `node:ffi` 无法驱动原生渲染器（`OpenTUI native FFI is not available for this runtime yet`）；`tests/tui/` 切 bun:test，`npm test` = `vitest run && $HOME/.bun/bin/bun test tests/tui/`（实测聚合 exit 0）。固化坑：bun 位置参数是子串过滤必须带尾斜杠；空目录 bun exit 1，保留占位 smoke；PATH 上的 bun 是 Windows shim，硬编码 `$HOME/.bun/bin/bun`。测试 API：`testRender` from `@opentui/react/test-utils`，setup 含 `mockInput/mockMouse/captureCharFrame/captureSpans/renderOnce/flush`。
 
 ### D3 裁决
 
-> 待执行：stickyScroll 智能模式 = ___；selectable CJK = ___；selection 剪贴板通道 = ___
+> **已裁决（2026-08-09，探针 `scripts/otui-capability-probe.ts` 3×yes exit 0）**：stickyScroll 智能模式 = yes（但**默认 false，必须显式 `stickyScroll:true + stickyStart:"bottom"`**；机制 `_hasManualScroll` 暂停 + reengage point ±1 行恢复）；selectable CJK = yes（双宽对齐、半字起点自动吸附整字，T5 selection 验收按全 CJK 标准）；selection 剪贴板通道 = 需应用层接线（`renderer.on("selection", sel => renderer.copyToClipboardOSC52(sel.getSelectedText()))`，非自动 OSC52；观测 OSC52 字节需 `stdout + bufferedOutput:"stdout"`）。
 
 ## ACR Cross-Check（plan 完成前核对）
 

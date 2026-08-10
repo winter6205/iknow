@@ -1,16 +1,19 @@
 /**
  * tests/tui/tui-cross-entry.test.ts
  *
- * #146 SC 8：Q6 验收 TUI 半边（镜像 tests/session-api/cross-entry-consistency.test.ts）：
- * tmpdir 池 + stub deps，两个独立装配（TUI bridge vs serve 风格独立 hub）
- * 共享同一 SessionStore 池：
+ * #343 T6-C：SC 8 Q6 验收 TUI 半边（镜像 tests/session-api/cross-entry-consistency
+ * 的 serve 半边）。TUI bridge ↔ 独立 serve 风格 hub 共享同一 SessionStore
+ * 池：
  *   Step 1  TUI bridge 建档 + postMessage N 轮
- *   Step 2  独立 hub load：messages/turnCount/summary/schemaVersion 一致
+ *   Step 2  独立 hub load：messages / turnCount / summary / schemaVersion 一致
  *   Step 3  独立 hub 续跑第 N+1 轮保存
  *   Step 4  TUI bridge 再读：N+1 可见
+ *
+ * 纯逻辑（不依赖 React/TUI 渲染），仅 exercises hub-bridge + SessionHub
+ * 跨进程一致语义。bun:test（D2 裁决）。
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -22,21 +25,21 @@ import {
   SessionStore,
 } from "../../src/session-api/store/session-store.js";
 import { SessionHub } from "../../src/session-api/hub.js";
-import { assistantResult, makeDeps } from "../cli/_fixtures.js";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.js";
+import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 
-describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 serve 风格 hub 共享池", () => {
+describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 hub 共享池", () => {
   let baseDir: string;
   const cwd = process.cwd();
 
-  beforeEach(async () => {
-    baseDir = await mkdtemp(join(tmpdir(), "iknow-tui-cross-"));
+  beforeEach(() => {
+    baseDir = mkdtempSync(join(tmpdir(), "iknow-tui-cross-"));
   });
-  afterEach(async () => {
-    await rm(baseDir, { recursive: true, force: true });
+  afterEach(() => {
+    rmSync(baseDir, { recursive: true, force: true });
   });
 
-  it("TUI 写入的会话，独立入口读回并续跑，反之亦然（SC 8）", async () => {
+  test("TUI 写入的会话，独立入口读回并续跑，反之亦然（SC 8）", async () => {
     // TUI 侧：bridge（α 直连，注入 stub deps）
     const tuiDeps = makeDeps([
       assistantResult({ texts: ["第一轮答复"] }),
@@ -53,7 +56,7 @@ describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 serve 风格 hub 共享�
     await bridge.postMessage({ conversationId: id, text: "第一个问题" });
     await bridge.postMessage({ conversationId: id, text: "第二个问题" });
 
-    // Step 2：独立 serve 风格 hub（模拟另一进程）load 断言一致
+    // Step 2：独立 hub（模拟另一进程）load 断言一致
     const serveStore = new SessionStore(baseDir, cwd);
     const serveHub = new SessionHub({
       store: serveStore,
@@ -63,10 +66,9 @@ describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 serve 风格 hub 共享�
     const serveView = await serveHub.getSession(id);
     expect(serveView.session.conversation_id).toBe(id);
     expect(serveView.session.turn_count).toBe(2);
-    // 磁盘 JSON 直读交叉核对（SSOT = 文件；目录命名走 store 的
-    // resolveProjectSessionDir，不在测试里手拼命名策略）
+    // 磁盘 JSON 直读交叉核对（SSOT = 文件）。
     const dir = resolveProjectSessionDir(baseDir, cwd);
-    const raw = JSON.parse(await readFile(join(dir, `${id}.json`), "utf8")) as {
+    const raw = JSON.parse(readFileSync(join(dir, `${id}.json`), "utf8")) as {
       schemaVersion: number;
       turnCount: number;
       summary: string;

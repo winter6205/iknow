@@ -1,7 +1,11 @@
 /**
  * src/tui/session-state.ts
  *
- * #146 TUI 会话状态机（Q1/Q1a 裁决）：
+ * #343 T6-A 迁移：从 archive/tui-ink/src/session-state.ts 迁回 src/tui/。
+ * 逻辑与原版一致（#146 TUI 会话状态机，Q1/Q1a 裁决）；仅文件头注释更新
+ * 为本次迁移说明。纯 TS 模块，无 ink / OpenTUI 依赖。
+ *
+ * 业务约束（沿用 #146 + #120 纪律）：
  *  - 会话运行三态 `idle` / `running-fg` / `running-bg`（分时切换 active-one；
  *    turn 运行中切走 → 后台继续执行）；
  *  - 视图两态 `chat` / `list`；
@@ -11,6 +15,7 @@
  * 全部转换为纯函数（discriminated state in → new state out），UI 层
  * （app.tsx 的 hook）只做编排。
  */
+
 import type {
   AnthropicNativeMessage,
   StopReason,

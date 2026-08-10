@@ -1,7 +1,10 @@
 /**
  * src/tui/hub-bridge.ts
  *
- * #146 TUI ↔ SessionHub 桥接（α 直连，与 serve 同款装配）。
+ * #343 T6-A 迁移：从 archive/tui-ink/src/hub-bridge.ts 迁回 src/tui/。逻辑与
+ * 原版一致（#146 TUI ↔ SessionHub 桥接 α 直连）；仅文件头注释更新为本次迁移
+ * 说明。纯 TS 模块，无 ink / OpenTUI 依赖。
+ *
  * 职责：
  *  - 装配 SessionStore（~/.iknow + sha1(cwd)[:12] 命名空间，#120）+ SessionHub；
  *  - lazy create（Q4 裁决）：draft 会话首条消息发出才 createSession 建档，

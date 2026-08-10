@@ -29,6 +29,8 @@
 | Web thinking/工具/markdown | markdown 渲染（react-markdown + remark-gfm + rehype-highlight）+ 代码块高亮复制；thinking 折叠显示（默认收起 + redacted 计数占位）；工具调用卡片（截断预览 + mask）；思考开关与强度（localStorage 持久化，随请求下发 override，env `IKNOW_LLM_THINKING*` 为默认 SSOT）；非 completed stopReason 提示 + turnCount 元信息；SSE 仍 **501**。注：`turnCount` 双语义——`POST /messages` 返回该次 `run()` 内层 loop 轮次（`RunResult.turnCount`，每次 run 从 0 起）；`GET /sessions/:id` 历史回放返回会话回合序号（`projectMessagesToTurns` 按 query 顺序计数） | `web/src/components/` + `src/session-api/turn-projection.ts` + `src/session-api/thinking-override.ts` |
 | **Web MVP 原型（独立）**   | Next.js 15 + React 19 + Tailwind/shadcn + Zustand/TanStack；亮色非 AI 化；已接真实 Session HTTP API（mock 已移除）；JSON 机器面板（工具轨迹/引用）；角色·模式 → `/commands`                                                                                                                                                                                                                                                                                                                                                                              | `iknow-prototype/`                                                                                    |
 
+**TUI 渲染后端平台声明（#321/#343，2026-08-10）**：TUI 已从 ink 迁移到 @opentui/react 0.5.1（Zig 原生渲染器，仅 bun 可驱动 FFI）。**Linux（含 WSL2）实测验收通过；macOS / Windows 未验证**（原生二进制跨平台行为属上游责任）。旧 ink 实现归档 `archive/tui-ink/`（只读参考）。
+
 ### 1.3 评测与质量门禁
 
 | 能力          | 说明                                                     |

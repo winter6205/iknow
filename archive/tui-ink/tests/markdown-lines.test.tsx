@@ -159,12 +159,7 @@ describe("markdownToLines（markdown → 物理行 SSOT）", () => {
 
   it("窄终端 CJK fence：内容宽 cols-4 按视觉宽度折", () => {
     const out = markdownToLines("```\n一二三四五六\n```", 10);
-    expect(out).toEqual([
-      "┌────────┐",
-      "│ 一二三",
-      "│ 四五六",
-      "└────────┘",
-    ]);
+    expect(out).toEqual(["┌────────┐", "│ 一二三", "│ 四五六", "└────────┘"]);
   });
 
   it("ASCII 段落词感知折行（wrap-ansi 整词换行，非硬切）", () => {

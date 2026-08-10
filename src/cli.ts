@@ -288,18 +288,27 @@ async function main(): Promise<void> {
 }
 
 async function runTui(parsed: ParsedCli): Promise<void> {
-  // 动态 import：与 serve 同款 lazy 路径，chat/ask 不背 ink/react 依赖树。
-  const { runTui: startTui } = await import("./tui/run.js");
-  try {
-    await startTui({
-      sessionId: parsed.sessionId,
-      dataDir: parsed.dataDir,
-      traceOut: resolveTracePath(parsed.traceOut),
-    });
-  } catch (err) {
-    printChatError(err);
+  // 动态 import：与 serve 同款 lazy 路径，chat/ask 不背 opentui 依赖树。
+  // #343 T1：OpenTUI 渲染入口；runTui 返回退出码（E1/E2 类型化错误在
+  // tui/run.tsx 单一 catch 点收口，这里不再包 try/catch）。
+  // 运行时守卫：OpenTUI 0.5.1 仅在 Bun（~/.bun/bin/bun）下可用；Node 无
+  // node:ffi（Node 26 才有），tsx+Node 跑 tui 必然 FFI 失败。提前拦截并
+  // 指引 npm run dev:tui，避免绕 FFI 报错（#321 实测）。
+  if (process.versions.bun === undefined) {
+    process.stderr.write(
+      `TUI 需用 Bun 运行（OpenTUI 原生 FFI 仅 Bun 支持，Node 22 无 node:ffi）。\n` +
+        `请改用：npm run dev:tui\n`
+    );
     process.exitCode = 1;
+    return;
   }
+  const { runTui: startTui } = await import("./tui/run.js");
+  const exitCode = await startTui({
+    sessionId: parsed.sessionId,
+    dataDir: parsed.dataDir,
+    traceOut: resolveTracePath(parsed.traceOut),
+  });
+  process.exitCode = exitCode;
 }
 
 async function runServe(parsed: ParsedCli): Promise<void> {

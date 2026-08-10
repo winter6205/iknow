@@ -153,7 +153,7 @@ state.messages = Object.freeze([...result.messages]);
 
 ## Boundaries
 
-- **Always**：保留 `marked.lexer` 解析（只重写渲染映射）；保留 `clipboard.ts` 原生读取；`ContextBar` 数据路径不变（ADR-0008）；交互语义不变（specs/146-tui.md）；精确锁 `@opentui/*` 版本 + lockfile 更新；删除测试在 commit 正文说明原因。
+- **Always**：保留 `marked.lexer` 解析（只重写渲染映射）；保留 `clipboard.ts` 原生读取；`ContextBar` 数据路径不变（ADR-0008）；交互语义不变（specs/146-tui.md）；精确锁 `@opentui/*` 版本 + lockfile 更新；删除测试在 commit 正文说明原因；**copy 触发 = 右键 down+up（不再是拖选松键自动复制 + Ctrl+Y 重复制键位）——fix-session 2026-08-10 B1 决策 supersede commit `0508ac3` 原 T5 selection 自动复制 + Ctrl+Y 接线（supersede 部分为 fix-session 单独定义；其余 T5 接线保留）**。
 - **Ask first**：`@opentui/*` 版本升级或换版本；测试运行器从 vitest 切 bun:test 的最终触发（先验证 vitest 可用性，实测不兼容才切并汇报）；`serve` / `ask` 出现任何连带改动的迹象（立即停下汇报）；剪贴板写入路径从原生工具切 OSC 52。
 - **Never**：保留 ink 依赖或双轨渲染路径（一次性替换）；重新引入行计数 / 镜像渲染树；把 `meta`（observability side-channel）拼进 model tool_result；为迁移改动 SessionHub / session-api / harness 任何代码；在非 Linux 平台做验收承诺。
 

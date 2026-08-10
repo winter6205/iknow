@@ -1,15 +1,20 @@
+/** @jsxImportSource @opentui/react */
 /**
  * tests/tui/context-bar.test.tsx
  *
- * T4 (#TBD): ContextBar 渲染冒烟（ink `renderToString` 同 render-smoke 模式）。
- * 数值语义（裁决 1）：used = input + cacheRead + cacheCreation，cache null → 0；
- * pct = round(used / contextWindow * 100)。三档色阈值 <50% CTX_BLUE 淡蓝 /
- * 50-80% running / >80% error。narrow (cols<40) 降级仅 `ctx NN%`。
- * 标签 `ctx` / 状态 ok / warn / alert（用户 2026-08-07 反馈：不用中文）。
- * 始终显示框：lastUsage null（首轮前）也渲染完整 0% 框（不是横线）。
+ * #343 T4：ContextBar（OpenTUI 版）——只读展示 RunResult.lastUsage
+ * （ADR-0008 D5：数据路径不变，只换渲染组件；本组件不写 token 账本）。
+ *  - 数值语义：used = input + cacheRead + cacheCreation（cache null → 0）；
+ *    pct = round(used / contextWindow * 100)；tokens 数字 `X.Xk/Y.Yk` 渲染；
+ *  - 三档色阈值 <50% CTX_BLUE / 50-80% running / >80% error（captureSpans）；
+ *  - lastUsage null（首轮前）→ 完整 0% 框；窄列 cols<40 降级仅 `ctx NN%`；
+ *  - activeToolName 尾缀指示器（[tool] name，不新增 chrome 行）；
+ *  - 组件本身按 flex-start 左对齐渲染（父容器 justifyContent 由 app.tsx
+ *    控制，组件内不右对齐）。
  */
-import { describe, expect, it } from "vitest";
-import { renderToString } from "ink";
+import { describe, expect, test } from "bun:test";
+import { testRender } from "@opentui/react/test-utils";
+import type { CapturedFrame } from "@opentui/core";
 import {
   CTX_BLUE,
   ContextBar,
@@ -19,19 +24,9 @@ import {
   valueBand,
 } from "../../src/tui/context-bar.js";
 import { tuiPalette } from "../../src/tui/theme.js";
-import { visualWidth } from "../../src/tui/banner.js";
+import { TuiHarness } from "./_fixtures.js";
 import type { TokenUsage } from "../../src/harness/model-adapter/types.js";
-
-const ANSI_RE = /\x1b\[[0-9;]*m/g;
-const stripAnsi = (s: string): string => s.replace(ANSI_RE, "");
-
-/** ink truecolor → `\x1b[38;2;r;g;b m` 段；按 hex 找 RGB tuple。 */
-function ansiRgbTuple(hex: string): string {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return `${r};${g};${b}`;
-}
+import stringWidth from "string-width";
 
 function makeUsage(input: number): TokenUsage {
   return {
@@ -42,31 +37,55 @@ function makeUsage(input: number): TokenUsage {
   };
 }
 
-describe("ContextBar 纯函数（裁决 1 数值语义）", () => {
-  it("valueBand：pct 0/50/100 → 全空/半填/全填", () => {
+function hex01(hex: string): [number, number, number] {
+  return [
+    parseInt(hex.slice(1, 3), 16) / 255,
+    parseInt(hex.slice(3, 5), 16) / 255,
+    parseInt(hex.slice(5, 7), 16) / 255,
+  ];
+}
+
+/** 帧中是否存在含 needle 的 span 且 fg = hex（±1/255）。 */
+function hasFg(frame: CapturedFrame, needle: string, hex: string): boolean {
+  const [r, g, b] = hex01(hex);
+  const eps = 1.5 / 255;
+  return frame.lines.some((line) =>
+    line.spans.some(
+      (span) =>
+        span.text.includes(needle) &&
+        Math.abs(span.fg.r - r) < eps &&
+        Math.abs(span.fg.g - g) < eps &&
+        Math.abs(span.fg.b - b) < eps
+    )
+  );
+}
+
+async function renderBar(props: {
+  lastUsage: TokenUsage | null;
+  contextWindow: number;
+  running: boolean;
+  cols: number;
+  activeToolName?: string;
+}) {
+  const setup = await testRender(<ContextBar {...props} />, {
+    width: props.cols,
+    height: 5,
+  });
+  await setup.renderOnce();
+  return setup;
+}
+
+describe("纯函数（数值语义 SSOT）", () => {
+  test("valueBand：pct 0/50/100 → 全空/半填/全填；越界截断", () => {
     expect(valueBand(0, 10)).toBe("░░░░░░░░░░");
     expect(valueBand(50, 10)).toBe("█████░░░░░");
     expect(valueBand(100, 10)).toBe("██████████");
-  });
-
-  it("valueBand：pct 截断到 [0, 100]", () => {
     expect(valueBand(-20, 10)).toBe("░░░░░░░░░░");
     expect(valueBand(150, 10)).toBe("██████████");
   });
 
-  it("ctxUsed：cache null 按 0；input 单独计", () => {
+  test("ctxUsed：cache null 按 0；非 null 合计", () => {
     expect(ctxUsed(makeUsage(100))).toBe(100);
-    expect(
-      ctxUsed({
-        inputTokens: 100,
-        outputTokens: 50,
-        cacheCreationInputTokens: null,
-        cacheReadInputTokens: null,
-      })
-    ).toBe(100);
-  });
-
-  it("ctxUsed：cache 两字段非 null 合计", () => {
     expect(
       ctxUsed({
         inputTokens: 100,
@@ -77,254 +96,224 @@ describe("ContextBar 纯函数（裁决 1 数值语义）", () => {
     ).toBe(600);
   });
 
-  it("contextColor：阈值边界 <50/=50/>80", () => {
+  test("contextColor：阈值边界 <50/=50/>80", () => {
     expect(contextColor(0)).toBe(CTX_BLUE);
     expect(contextColor(49)).toBe(CTX_BLUE);
     expect(contextColor(50)).toBe(tuiPalette.running);
     expect(contextColor(80)).toBe(tuiPalette.running);
     expect(contextColor(81)).toBe(tuiPalette.error);
-    expect(contextColor(100)).toBe(tuiPalette.error);
+  });
+
+  test("toolIndicator：放得下原样；放不下前缀 → 空串；超宽 CJK 尾截断补 …", () => {
+    // "[tool] " 前缀 7 列；name budget = cols - 7。
+    expect(toolIndicator("Bash", 11)).toBe("[tool] Bash");
+    expect(toolIndicator("Bash", stringWidth("[tool] Bash"))).toBe(
+      "[tool] Bash"
+    );
+    expect(toolIndicator("Bash", 0)).toBe("");
+    expect(toolIndicator("Bash", stringWidth("[tool] "))).toBe("");
+    const out = toolIndicator("读写文件工具名很长", 13);
+    expect(out.startsWith("[tool] ")).toBe(true);
+    expect(out.endsWith("…")).toBe(true);
+    expect(stringWidth(out)).toBeLessThanOrEqual(13);
   });
 });
 
-describe("ContextBar 渲染（ink renderToString）", () => {
-  it("null lastUsage → 始终显示 0% 框（完整 band + ok + 0.0k/window，不是横线）", async () => {
-    const out = await renderToString(
-      <ContextBar
-        lastUsage={null}
-        contextWindow={10000}
-        running={false}
-        cols={80}
-      />
-    );
-    const plain = stripAnsi(out);
-    expect(plain).toContain("│ ctx ░░░░░░░░░░ 0% ok 0.0k/10.0k");
-    expect(plain).not.toContain("—");
+describe("渲染（只读 lastUsage）", () => {
+  test("null lastUsage → 完整 0% 框（band + ok + 0.0k/window）", async () => {
+    const setup = await renderBar({
+      lastUsage: null,
+      contextWindow: 10000,
+      running: false,
+      cols: 80,
+    });
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("│ ctx ░░░░░░░░░░ 0% ok 0.0k/10.0k");
+    await setup.renderer.destroy();
   });
 
-  it.skip("三档色：0% / 49% ok(淡蓝 CTX_BLUE) / 50% / 80% warn(running) / 81% alert(error)", async () => {
-    // window=10000，构造 used 0/4900/5000/8000/8100 命中阈值。
-    const cases: Array<{
-      readonly used: number;
-      readonly expectStatus: string;
-      readonly expectHex: string;
-    }> = [
-      { used: 0, expectStatus: "ok", expectHex: CTX_BLUE },
-      { used: 4900, expectStatus: "ok", expectHex: CTX_BLUE },
-      { used: 5000, expectStatus: "warn", expectHex: tuiPalette.running },
-      { used: 8000, expectStatus: "warn", expectHex: tuiPalette.running },
-      { used: 8100, expectStatus: "alert", expectHex: tuiPalette.error },
+  test("tokens 数字渲染：pct=50 warn → `5.0k/10.0k`", async () => {
+    const setup = await renderBar({
+      lastUsage: makeUsage(5000),
+      contextWindow: 10000,
+      running: false,
+      cols: 80,
+    });
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("│ ctx █████░░░░░ 50% warn 5.0k/10.0k");
+    await setup.renderer.destroy();
+  });
+
+  test("cache 字段计入 used（只读投影，不改写）", async () => {
+    const usage: TokenUsage = {
+      inputTokens: 1000,
+      outputTokens: 10,
+      cacheCreationInputTokens: 2000,
+      cacheReadInputTokens: 2000,
+    };
+    const setup = await renderBar({
+      lastUsage: usage,
+      contextWindow: 10000,
+      running: false,
+      cols: 80,
+    });
+    expect(setup.captureCharFrame()).toContain("50% warn 5.0k/10.0k");
+    // 只读契约：组件不修改传入的 usage 对象。
+    expect(usage.inputTokens).toBe(1000);
+    expect(usage.cacheReadInputTokens).toBe(2000);
+    await setup.renderer.destroy();
+  });
+
+  test("contextWindow ≤ 0 → 按 0% 兜底（不 NaN）", async () => {
+    const setup = await renderBar({
+      lastUsage: makeUsage(5000),
+      contextWindow: 0,
+      running: false,
+      cols: 80,
+    });
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("0% ok");
+    expect(frame).not.toContain("NaN");
+    await setup.renderer.destroy();
+  });
+
+  test("三档色（captureSpans）：ok 淡蓝 / warn running / alert error", async () => {
+    const cases: Array<{ used: number; hex: string }> = [
+      { used: 4900, hex: CTX_BLUE },
+      { used: 5000, hex: tuiPalette.running },
+      { used: 8100, hex: tuiPalette.error },
     ];
     for (const c of cases) {
-      const out = await renderToString(
-        <ContextBar
-          lastUsage={makeUsage(c.used)}
-          contextWindow={10000}
-          running={false}
-          cols={80}
-        />
-      );
-      const plain = stripAnsi(out);
-      expect(plain, `used=${c.used} status word`).toContain(c.expectStatus);
-      // raw output 含该档 RGB tuple（band/pct/status 同色 — 至少出现一次）。
-      const tuple = ansiRgbTuple(c.expectHex);
-      expect(out, `used=${c.used} hex=${c.expectHex}`).toContain(tuple);
+      const setup = await renderBar({
+        lastUsage: makeUsage(c.used),
+        contextWindow: 10000,
+        running: false,
+        cols: 80,
+      });
+      const spans = setup.captureSpans();
+      // band 字符（█/░）与 pct 数字同档色，取 band 首字符断言。
+      const bandChar = c.used >= 5000 ? "█" : "░";
+      expect(
+        hasFg(spans, bandChar, c.hex),
+        `used=${c.used} band 色 ${c.hex}`
+      ).toBe(true);
+      await setup.renderer.destroy();
     }
   });
 
-  it("宽度 40 / 80 / 120 无溢出行（视觉宽 ≤ cols）", async () => {
-    // window=10000 时最宽 case（99%）= `│ ctx ██████████ 99% alert 9.9k/10.0k`
-    // 视觉宽 ≈ 37 ≤ 40；中段 case 也都 ≤ 40。
+  test("窄列 cols<40：仅 `ctx NN%`，省略状态词 / k/k / band", async () => {
+    const setup = await renderBar({
+      lastUsage: makeUsage(8100),
+      contextWindow: 10000,
+      running: true,
+      cols: 30,
+    });
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("│");
+    expect(frame).toContain("ctx");
+    expect(frame).toContain("81%");
+    expect(frame).not.toContain("alert");
+    expect(frame).not.toContain("warn");
+    expect(frame).not.toContain("k/");
+    expect(frame).not.toContain("█");
+    expect(frame).not.toContain("░");
+    await setup.renderer.destroy();
+  });
+
+  test("宽度 40 / 80 / 120 单行不溢出（视觉宽 ≤ cols）", async () => {
     for (const cols of [40, 80, 120]) {
-      const out = await renderToString(
-        <ContextBar
-          lastUsage={makeUsage(9900)}
-          contextWindow={10000}
-          running={false}
-          cols={cols}
-        />
-      );
-      for (const line of stripAnsi(out).split("\n")) {
-        expect(
-          visualWidth(line),
-          `cols=${cols} 行超出：${JSON.stringify(line)}`
-        ).toBeLessThanOrEqual(cols);
-      }
+      const setup = await renderBar({
+        lastUsage: makeUsage(9900),
+        contextWindow: 10000,
+        running: false,
+        cols,
+      });
+      const lines = setup
+        .captureCharFrame()
+        .split("\n")
+        .filter((l) => l.trim().length > 0);
+      expect(lines.length, `cols=${cols} 应单行`).toBe(1);
+      expect(stringWidth((lines[0] ?? "").trimEnd())).toBeLessThanOrEqual(cols);
+      await setup.renderer.destroy();
     }
   });
 
-  it.skip("running + pct>0 → 左 border 存在 + band 走 running 色（静态帧）", async () => {
-    // renderToString 不跑 useEffect → 脉动冻结在首帧（pulseWarm=false →
-    // 左 border 初始为 border 色）。脉动是时序行为，单测只能断言静态帧：
-    // 左 border `│` 存在 + band/pct/status 用 running 色（warm 冻结 band 色）。
-    const out = await renderToString(
-      <ContextBar
-        lastUsage={makeUsage(5000)}
-        contextWindow={10000}
-        running={true}
-        cols={80}
-      />
+  test("activeToolName → 行尾 `⚙ name`（单行）；undefined → 不渲染 ⚙", async () => {
+    const withTool = await renderBar({
+      lastUsage: makeUsage(5000),
+      contextWindow: 10000,
+      running: true,
+      cols: 80,
+      activeToolName: "Bash",
+    });
+    const frame = withTool.captureCharFrame();
+    expect(frame).toContain("[tool] Bash");
+    expect(frame.split("\n").filter((l) => l.trim().length > 0)).toHaveLength(
+      1
     );
-    // 左 border 字符存在（形状兜底，NO_COLOR 仍可读）
-    expect(stripAnsi(out)).toContain("│ ctx");
-    // band 用 running 色（warm 时 band 色冻结，不随 border 切回 border）
-    const runningTuple = ansiRgbTuple(tuiPalette.running);
-    expect(out).toContain(runningTuple);
+    await withTool.renderer.destroy();
+
+    const noTool = await renderBar({
+      lastUsage: makeUsage(5000),
+      contextWindow: 10000,
+      running: true,
+      cols: 80,
+    });
+    expect(noTool.captureCharFrame()).not.toContain("[tool]");
+    await noTool.renderer.destroy();
   });
 
-  it.skip("running=false + pct>0 → 左 border 静态走 border 色（不脉动）", async () => {
-    const out = await renderToString(
-      <ContextBar
-        lastUsage={makeUsage(5000)}
-        contextWindow={10000}
-        running={false}
-        cols={80}
-      />
-    );
-    const borderTuple = ansiRgbTuple(tuiPalette.border);
-    expect(out).toContain(`${borderTuple}m│`);
-    const runningTuple = ansiRgbTuple(tuiPalette.running);
-    expect(out).not.toContain(`${runningTuple}m│`);
-  });
-
-  it("窄列 cols<40：仅 `ctx NN%`，省略状态词 / k/k 数字", async () => {
-    const out = await renderToString(
-      <ContextBar
-        lastUsage={makeUsage(8100)}
-        contextWindow={10000}
-        running={true}
-        cols={30}
-      />
-    );
-    const plain = stripAnsi(out);
-    expect(plain).toContain("│");
-    expect(plain).toContain("ctx");
-    expect(plain).toContain("81%");
-    // 省略：状态词、ok/warn/alert；k/k 数字
-    expect(plain).not.toContain("alert");
-    expect(plain).not.toContain("warn");
-    expect(plain).not.toContain("ok");
-    expect(plain).not.toContain("k/");
-    // 窄列不渲染 band 形状（仅 NN%）
-    expect(plain).not.toContain("█");
-    expect(plain).not.toContain("░");
-  });
-
-  it("完整行：pct=50 warn 时输出形如 `│ ctx █████░░░░░ 50% warn 5.0k/10.0k`", async () => {
-    const out = await renderToString(
-      <ContextBar
-        lastUsage={makeUsage(5000)}
-        contextWindow={10000}
-        running={false}
-        cols={80}
-      />
-    );
-    const plain = stripAnsi(out);
-    expect(plain).toContain("│ ctx █████░░░░░ 50% warn 5.0k/10.0k");
-  });
-});
-
-describe("ContextBar activeToolName（#279 项 4 状态栏活动工具名）", () => {
-  it("toolIndicator：放得下 → `⚙ name` 原样", () => {
-    expect(toolIndicator("Bash", 10)).toBe("⚙ Bash");
-    // 边界：恰好等于 name 宽 + 前缀宽
-    expect(toolIndicator("Bash", visualWidth("⚙ Bash"))).toBe("⚙ Bash");
-  });
-
-  it("toolIndicator：预算放不下前缀 → 空串（不渲染）", () => {
-    expect(toolIndicator("Bash", 0)).toBe("");
-    expect(toolIndicator("Bash", 1)).toBe("");
-    expect(toolIndicator("Bash", visualWidth("⚙ "))).toBe("");
-  });
-
-  it("toolIndicator：CJK 超宽名 → 尾截断补 …，且视觉宽 ≤ 预算", () => {
-    const out = toolIndicator("读写文件工具名很长", 8);
-    expect(out.startsWith("⚙ ")).toBe(true);
-    expect(out.endsWith("…")).toBe(true);
-    expect(visualWidth(out)).toBeLessThanOrEqual(8);
-    expect(visualWidth(out)).toBeGreaterThan(visualWidth("⚙ "));
-  });
-
-  it("tool start → 状态栏内显示 `⚙ 工具名`（宽列）", async () => {
-    const out = await renderToString(
-      <ContextBar
-        lastUsage={makeUsage(5000)}
-        contextWindow={10000}
-        running={true}
-        cols={80}
-        activeToolName="Bash"
-      />
-    );
-    const plain = stripAnsi(out);
-    expect(plain).toContain("⚙ Bash");
-    // 仍在同一行（ContextBar 单行 chrome，#189 行账不变）
-    expect(plain.split("\n").filter((l) => l.length > 0)).toHaveLength(1);
-  });
-
-  it("tool end（activeToolName undefined）→ 不渲染 `⚙`", async () => {
-    const out = await renderToString(
-      <ContextBar
-        lastUsage={makeUsage(5000)}
-        contextWindow={10000}
-        running={true}
-        cols={80}
-      />
-    );
-    expect(stripAnsi(out)).not.toContain("⚙");
-  });
-
-  it("窄列 cols<40：仍显示活动工具名（尾缀，不新增行）", async () => {
-    const out = await renderToString(
-      <ContextBar
-        lastUsage={makeUsage(8100)}
-        contextWindow={10000}
-        running={true}
-        cols={30}
-        activeToolName="Bash"
-      />
-    );
-    const plain = stripAnsi(out);
-    expect(plain).toContain("⚙ Bash");
-    expect(plain.split("\n").filter((l) => l.length > 0)).toHaveLength(1);
-  });
-
-  it("窄列超宽工具名：visualWidth 截断，每行 ≤ cols（banner.ts 口径）", async () => {
+  test("窄列超宽工具名：截断补 …，单行 ≤ cols", async () => {
     const cols = 30;
-    const out = await renderToString(
-      <ContextBar
-        lastUsage={makeUsage(8100)}
-        contextWindow={10000}
-        running={true}
-        cols={cols}
-        activeToolName="读写文件工具名字特别特别特别长"
-      />
-    );
-    const lines = stripAnsi(out).split("\n").filter((l) => l.length > 0);
+    const setup = await renderBar({
+      lastUsage: makeUsage(8100),
+      contextWindow: 10000,
+      running: true,
+      cols,
+      activeToolName: "读写文件工具名字特别特别特别长",
+    });
+    const lines = setup
+      .captureCharFrame()
+      .split("\n")
+      .filter((l) => l.trim().length > 0);
     expect(lines).toHaveLength(1);
-    for (const line of lines) {
-      expect(visualWidth(line), `窄列溢行：${JSON.stringify(line)}`).toBeLessThanOrEqual(cols);
-    }
-    // 截断后仍带 ⚙ 前缀与省略号
-    expect(lines[0] ?? "").toContain("⚙");
+    expect(stringWidth((lines[0] ?? "").trimEnd())).toBeLessThanOrEqual(cols);
+    expect(lines[0] ?? "").toContain("[tool]");
     expect(lines[0] ?? "").toContain("…");
+    await setup.renderer.destroy();
   });
 
-  it("宽列超宽工具名：visualWidth 截断，每行 ≤ cols", async () => {
-    const cols = 40;
-    const out = await renderToString(
-      <ContextBar
-        lastUsage={makeUsage(5000)}
-        contextWindow={10000}
-        running={true}
-        cols={cols}
-        activeToolName="读写文件工具名很长"
-      />
-    );
-    const lines = stripAnsi(out).split("\n").filter((l) => l.length > 0);
-    expect(lines).toHaveLength(1);
-    for (const line of lines) {
-      expect(visualWidth(line), `宽列溢行：${JSON.stringify(line)}`).toBeLessThanOrEqual(cols);
-    }
-    expect(lines[0] ?? "").toContain("⚙");
+  test("组件自身左对齐：首行以 │ 开头，无 leading 空格", async () => {
+    const setup = await renderBar({
+      lastUsage: makeUsage(5000),
+      contextWindow: 10000,
+      running: false,
+      cols: 80,
+    });
+    const firstNonEmpty = setup
+      .captureCharFrame()
+      .split("\n")
+      .find((l) => l.trim().length > 0);
+    expect(firstNonEmpty).toBeDefined();
+    expect(firstNonEmpty?.startsWith("│")).toBe(true);
+    await setup.renderer.destroy();
+  });
+
+  test("app 级左对齐：TuiHarness 父容器 justify-content=flex-start 下 ContextBar 首列于 frame 首列", async () => {
+    // 集成视角（app.tsx 的 `<box flexDirection="row" justifyContent="flex-start">`
+    // 包裹 ContextBar）：用 TuiHarness 全装配渲染，ContextBar 行贴左——
+    // 该行首字符（左 border │）落在 frame 首列（无 leading 空格）。
+    const setup = await testRender(<TuiHarness />, {
+      width: 80,
+      height: 30,
+      exitOnCtrlC: false,
+      consoleMode: "disabled",
+    });
+    await setup.waitForVisualIdle();
+    const frame = setup.captureCharFrame();
+    const ctxLine = frame.split("\n").find((l) => l.includes("ctx"));
+    expect(ctxLine).toBeDefined();
+    expect(ctxLine?.startsWith("│")).toBe(true);
+    await setup.renderer.destroy();
   });
 });

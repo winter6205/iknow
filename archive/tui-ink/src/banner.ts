@@ -1,0 +1,321 @@
+/**
+ * src/tui/banner.ts
+ *
+ * 启动 banner（智慧之眼变体 C → 2026-08-06 三轮）：纯函数，输出 ANSI 上色行。
+ *
+ * 改版动机（用户复看裁定）：旧版是「大号方形点阵 + 单线外框 + 整体水平居中」，
+ * 眼睛偏大、被挤瘦、面板不占满行宽。首轮改成「占满行宽 + 小眼居左 + info 居右」
+ * 后又裁掉了完整眼形（只剩瞳孔/虹膜），二轮用新源图 eyeshape.png 重生成
+ * 完整眼（24×12），三轮扩到 32×13（用户裁定贴图同款）。
+ *
+ * 当前布局：
+ *  - 占满整行宽度的圆角线框（borderStyle="round"，与输入框 PromptInput 同款），
+ *    无水平居中，左右边界对齐屏幕；
+ *  - 完整眼形（32×13 braille = 32 列 × 13 行终端行）放左侧（贴图同款）；
+ *  - info 栏（Version / Cwd / Data dir）放眼睛右侧，垂直居中；
+ *  - 顶框内嵌**左对齐** title `◆ iknow`（去 tui），底框为横线。
+ *
+ * 来源：原型分支 worktree-tui-design-prototype `tui-prototype/src/logo-braille/banner.ts`
+ * 的 renderVariantC（面板布局）+ visualWidth / padEndVisual / padStartVisual。
+ * 裁决：#146（V7 布局 + 智慧之眼定案）/ #154（窗口适配：SHORT 档折一行
+ * `◆ iknow`）/ #171（docs/design/DESIGN-BANNER.md：双色分层、图案居左 +
+ * info 栏居右并排、窄终端降级）/ 2026-08-06（banner 占满行宽 + 小眼 + info 居右）/
+ * 2026-08-06 二轮（eyeshape.png 完整眼，移除裁切）/ 2026-08-06 三轮
+ * （32×13 贴图同款 + title `◆ iknow`；曾试居中、用户复看裁定左对齐）。
+ *
+ * 色彩策略（照原型，源图实测双色）：
+ *  - truecolor（COLORTERM=truecolor/24bit）→ 38;2;24;50;35（墨绿 ~#183223）/
+ *    38;2;185;127;28（金棕 ~#b97f1c）；
+ *  - 否则 256 色 → 22 #005f00 / 136 #af8700（CIE76 最近候选）；
+ *  - NO_COLOR 或非 TTY → 不上色（paint 退化为 no-op）。
+ *  - 外框走独立 dim 上色（与 logo 双色分层解耦，颜色用 FG_BORDER）。
+ */
+import stringWidth from "string-width";
+import { EYE_GOLD_LINES, EYE_LINES } from "./banner-art.js";
+
+export interface BannerInfo {
+  readonly version: string;
+  readonly cwd: string;
+  readonly dataDir: string;
+}
+
+// ── 颜色 / ANSI ───────────────────────────────────────────────────────
+
+const RESET = "\x1b[0m";
+const BOLD = "\x1b[1m";
+/** title 色（顶框 `◆ iknow` + SHORT 档单行）。2026-08-06 三轮+：居中后
+ * 255 纯白太显眼，改 244 与 FG_DIM/FG_BORDER 同级淡灰。 */
+const FG_TITLE = "\x1b[38;5;244m";
+const FG_DIM = "\x1b[38;5;244m";
+/** 外框色（#171 任务 A：banner 自带外框，与输入框线框同风格；
+ *  走 dim 中性灰，遵循 ink 256 色 244 ≈ #8a877e，与 theme.ts tuiPalette.dim
+ *  同源，避免引入硬编码 hex）。 */
+const FG_BORDER = "\x1b[38;5;244m";
+
+function useColor(): boolean {
+  if (process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== "") {
+    return false;
+  }
+  return Boolean(process.stdout.isTTY);
+}
+
+function useTruecolor(): boolean {
+  const ct = process.env.COLORTERM ?? "";
+  return ct === "truecolor" || ct === "24bit";
+}
+
+// 源图实测双色（智慧之眼 1785827453.png）：
+// - 墨绿线稿 ~#183223（眼轮廓 / 环带 / 8 符文方框同色），256 回退 22 #005f00
+// - 金棕强调 ~#b97f1c（仅瞳孔内 R 符文），256 回退 136 #af8700
+// 背景暖白 #f7f7f1 不渲染（用户裁定：只上色主体，背景留终端承担）。
+function fgLogoInk(): string {
+  return useTruecolor() ? "\x1b[38;2;24;50;35m" : "\x1b[38;5;22m";
+}
+
+function fgLogoGold(): string {
+  return useTruecolor() ? "\x1b[38;2;185;127;28m" : "\x1b[38;5;136m";
+}
+
+function paint(s: string, open: string): string {
+  if (!useColor()) return s;
+  return `${open}${s}${RESET}`;
+}
+
+/**
+ * 双色合并：墨绿主层 + 金棕强调层。逐 cell：金层非空 cell 整体用金色
+ * （少量绿点被金覆盖，原型可接受），其余绿色。未开色时 paint 是 no-op，
+ * 整行按主色走（即纯文本）。
+ */
+function mergeDualColor(
+  inkLines: ReadonlyArray<string>,
+  goldLines: ReadonlyArray<string>
+): string[] {
+  return inkLines.map((inkLine, r) => {
+    const goldLine = goldLines[r];
+    if (!goldLine || !useColor()) return paint(inkLine, fgLogoInk());
+    let out = "";
+    const inkChars = [...inkLine];
+    const goldChars = [...goldLine];
+    for (let c = 0; c < inkChars.length; c++) {
+      const goldCell = goldChars[c] ?? "⠀";
+      const inkCell = inkChars[c] ?? " ";
+      if (goldCell !== "⠀" && goldCell !== " ") {
+        out += paint(goldCell, fgLogoGold());
+      } else if (inkCell !== "⠀" && inkCell !== " ") {
+        out += paint(inkCell, fgLogoInk());
+      } else {
+        // 空格 cell：两层的空白 cell 码点一致，原样保留以保持宽度。
+        out += inkCell === "⠀" ? "⠀" : inkCell;
+      }
+    }
+    return out;
+  });
+}
+
+// ── 视觉列宽辅助 ─────────────────────────────────────────────────────
+//
+// 等宽终端里"一个码点 = 一列"不成立：CJK 占 2 列，组合标记占 0 列，
+// ANSI 转义序列不占位。用码点数做对齐，框线会突出、居中会偏移。
+//
+// SSOT：全部走 npm 包 string-width（#279 项 2：替换手写 WIDE_RANGES 表，
+// 与 ink 内部同款口径，行账与渲染不漂移）。默认行为：剥 ANSI 转义、
+// CJK/Emoji/全角计 2、组合标记计 0、braille U+2800–U+28FF 计 1（智慧之眼
+// 点阵对齐依赖，回归测试 tests/tui/visual-width.test.ts 钉死）。
+// 与旧手写实现的已知差异：控制字符（\t/\n 等）旧计 1 列、现计 0 列
+// （上游调用处 clipOneLine* 已先把 \s+ 压成空格，无实际影响）。
+
+/**
+ * 视觉列宽：等宽终端里这个字符串占多少列。
+ * string-width 默认剥 ANSI 转义序列（否则上色后对齐全乱），逐码点按
+ * Unicode 宽度表累加。导出名/签名保持不变（#279：仅换底层实现）。
+ */
+export function visualWidth(s: string): number {
+  return stringWidth(s);
+}
+
+/** 视觉列宽版 padEnd：按缺的列数补空格，不是按码点数。 */
+export function padEndVisual(s: string, width: number): string {
+  const cur = visualWidth(s);
+  if (cur >= width) return s;
+  return s + " ".repeat(width - cur);
+}
+
+/** 视觉列宽版 padStart。 */
+export function padStartVisual(s: string, width: number): string {
+  const cur = visualWidth(s);
+  if (cur >= width) return s;
+  return " ".repeat(width - cur) + s;
+}
+
+/**
+ * 中段截断：值超长时保留首尾（首段优先带路径前缀、尾段带文件名/扩展名），
+ * 中间用 `…` 衔接。用于 dataDir 等绝对路径，末尾截断会丢文件名。
+ * 按视觉列宽累加（braille/CJK 各 1/2 列都对齐），保证结果不超 width 列
+ * （#279：旧实现按码点数切首尾段，CJK 值会超宽溢出 banner 框）。
+ */
+export function truncateMiddle(s: string, width: number): string {
+  const cur = visualWidth(s);
+  if (cur <= width) return s;
+  // 偶数宽度优先，否则尾段比首段多 1 列（避免引入额外宽度偏差）。
+  const headBudget = Math.max(1, Math.floor((width - 1) / 2));
+  const tailBudget = Math.max(1, width - 1 - headBudget);
+  // 首段：从左按列宽预算累加（宽字符放不下预算时整字丢弃）。
+  let head = "";
+  let hw = 0;
+  for (const ch of s) {
+    const cw = visualWidth(ch);
+    if (hw + cw > headBudget) break;
+    head += ch;
+    hw += cw;
+  }
+  // 尾段：从右按列宽预算累加。
+  let tail = "";
+  let tw = 0;
+  for (const ch of [...s].reverse()) {
+    const cw = visualWidth(ch);
+    if (tw + cw > tailBudget) break;
+    tail = ch + tail;
+    tw += cw;
+  }
+  return head + "…" + tail;
+}
+
+// ── 布局常量 ─────────────────────────────────────────────────────────
+
+/** 眼睛图标与 info 栏之间的间距列数（#171 体验迭代 GAP=3 语义保留）。 */
+const GAP = 3;
+/** key 列相对最长 key 的余量。 */
+const KEY_EXTRA = 2;
+/** value 列宽（容纳典型 dataDir 路径如 ~/.local/share/iknow）。 */
+const VAL_W = 32;
+/** info 栏标签。 */
+const KV_KEYS: readonly [string, string][] = [
+  ["Version", "version"],
+  ["Cwd", "cwd"],
+  ["Data dir", "dataDir"],
+];
+
+/** key 列宽 = 最长 key 文本宽 + KEY_EXTRA。 */
+const KEY_W = Math.max(...KV_KEYS.map(([k]) => visualWidth(k))) + KEY_EXTRA;
+
+/**
+ * info 栏总宽 = key 列 + 1 列间隔 + value 列。
+ */
+export const BANNER_INFO_WIDTH = KEY_W + 1 + VAL_W;
+
+// ── 外框常量（2026-08-06 改版：与输入框同款圆角线框，占满行宽）──────
+//
+// 用 ANSI 手写框线字符（保持 renderBanner 是纯函数、返回 string[]，
+// 不依赖 React）。圆角风格（borderStyle="round"，与输入框 PromptInput 相同）。
+// 角字符 + 横竖线均为 1 列宽。
+const BOX_TL = "╭";
+const BOX_TR = "╮";
+const BOX_BL = "╰";
+const BOX_BR = "╯";
+const BOX_H = "─";
+const BOX_V = "│";
+/** 顶框内嵌 title（◆ 占 1 列宽），2026-08-06 三轮改为居中。 */
+const BOX_TITLE = "◆ iknow";
+/** 框宽占用列数（左 +1、右 +1 = 2）。 */
+const BOX_FRAMING_OVERHEAD = 2;
+
+/**
+ * 窄终端降级阈值：banner 面板总宽 = 眼睛宽 + GAP + info 栏宽 + 外框开销（2）。
+ * 三轮 32 列完整眼 → MIN = 32 + 3 + 43 + 2 = 80 列。cols < 80 → 返回 []。
+ * （首轮 16×6 小眼 MIN=64；二轮 24×12 → 72；三轮 32×13 → 80。）
+ */
+export const BANNER_MIN_COLS =
+  visualWidth(EYE_LINES[0] ?? "") +
+  GAP +
+  BANNER_INFO_WIDTH +
+  BOX_FRAMING_OVERHEAD;
+
+// ── renderBanner ─────────────────────────────────────────────────────
+
+function basenameOf(p: string): string {
+  const segs = p.split("/").filter((s) => s !== "");
+  return segs[segs.length - 1] ?? p;
+}
+
+function buildInfoLines(info: BannerInfo): string[] {
+  const values: Record<string, string> = {
+    version: info.version,
+    cwd: basenameOf(info.cwd),
+    dataDir: info.dataDir,
+  };
+  return KV_KEYS.map(([k, field]) => {
+    // key 列左对齐（dim）+ 1 列间距 + 值左对齐（默认前景）。
+    // 值超长走中段截断（保留首段路径前缀 + 尾段文件名/扩展名），比末尾截断更易识别。
+    const keyPainted = paint(padEndVisual(k, KEY_W), FG_DIM);
+    const raw = values[field] ?? "";
+    const valuePainted = truncateMiddle(raw, VAL_W);
+    // 截断后右侧补空格到 VAL_W 列（保持 kv 列对齐与边框感）。
+    const valuePad = padEndVisual(valuePainted, VAL_W);
+    return keyPainted + " " + valuePad;
+  });
+}
+
+/**
+ * 渲染启动 banner（纯函数，不触碰 React）。
+ *
+ * 返回 ANSI 上色行（圆角外框占满 cols）：完整眼睛居左 + info 栏居右并排，
+ * 顶框内嵌居中 title `◆ iknow`，底框为横线。无水平居中——面板
+ * 始终撑满 cols（与输入框 PromptInput 一致）。
+ *
+ * 分支顺序（窄终端契约）：
+ *  - short=true → 单行 `◆ iknow <version>`，不检查 BANNER_MIN_COLS
+ *    （窄终端也保留 logo，用户复看裁定：宁可一行不要消失）；
+ *  - short=false 且 cols < BANNER_MIN_COLS → []（完整眼无可压缩版，
+ *    避免溢出；compact 单行已经在前一支返回）。
+ */
+export function renderBanner(
+  info: BannerInfo,
+  opts: { cols: number; short: boolean }
+): string[] {
+  // 紧凑档在窄终端也保留 —— 单行 `◆ iknow <version>` 占 ~15 列，
+  // 任何能用 iknow 的终端都放得下。完整眼放不下时退化为零（下方门控），
+  // 因为 32×13 面板无法压成单行不带歧义。
+  if (opts.short) {
+    return [paint(`◆ iknow ${info.version}`, BOLD + FG_TITLE)];
+  }
+  if (opts.cols < BANNER_MIN_COLS) return [];
+
+  const LOGO_W = visualWidth(EYE_LINES[0] ?? "");
+  const LOGO_H = EYE_LINES.length;
+  const logoColored = mergeDualColor(EYE_LINES, EYE_GOLD_LINES);
+  const infoLines = buildInfoLines(info);
+
+  // info 栏在 logo 高度内垂直居中。
+  const infoStart = Math.max(0, Math.floor((LOGO_H - infoLines.length) / 2));
+
+  // 面板撑满 cols：框内宽 = cols - 2（左右框线各 1 列）。
+  const innerW = Math.max(
+    BANNER_MIN_COLS - BOX_FRAMING_OVERHEAD,
+    opts.cols - BOX_FRAMING_OVERHEAD
+  );
+
+  // 顶框：title 左对齐 + 其余横线铺满（2026-08-06：◆ iknow，去 tui；用户
+  // 复看裁定居中不好，改回左对齐）。
+  const titleVisualW = visualWidth(BOX_TITLE);
+  const topBorder =
+    BOX_TL +
+    paint(BOX_TITLE, BOLD + FG_TITLE) +
+    BOX_H.repeat(Math.max(0, innerW - titleVisualW)) +
+    BOX_TR;
+  const bottomBorder = BOX_BL + BOX_H.repeat(innerW) + BOX_BR;
+
+  const borderPainted = (s: string): string => paint(s, FG_BORDER);
+
+  const lines: string[] = [];
+  lines.push(borderPainted(topBorder));
+  for (let i = 0; i < LOGO_H; i++) {
+    const left = padEndVisual(logoColored[i] ?? "", LOGO_W + GAP);
+    const infoIdx = i - infoStart;
+    const right = infoLines[infoIdx] ?? "";
+    // 中段行：左框线 + 内文 + 右框线；内文视觉宽 = innerW。
+    const inner = padEndVisual(left + right, innerW);
+    lines.push(borderPainted(BOX_V) + inner + borderPainted(BOX_V));
+  }
+  lines.push(borderPainted(bottomBorder));
+  return lines;
+}

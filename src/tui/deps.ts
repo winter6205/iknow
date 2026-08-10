@@ -1,9 +1,12 @@
 /**
  * src/tui/deps.ts
  *
- * #146 TUI 的 harness deps 装配：与 buildHarnessEngine 共用同一 ACI 装配链 —
- * real Anthropic adapter + 8 件工具集（走 `createDefaultAciRegistry` SSOT 工厂，
- * 见 src/harness/aci/tools/registry.ts）+ permission policy。与 CLI 入口差异两点：
+ * #343 T6-A 迁移：从 archive/tui-ink/src/deps.ts 迁回 src/tui/。逻辑与原版
+ * 一致（#146 TUI 的 harness deps 装配，与 buildHarnessEngine 共用同一 ACI
+ * 装配链）；仅文件头注释更新为本次迁移说明。纯 TS 模块，无 ink / OpenTUI
+ * 依赖。
+ *
+ * 与 CLI 入口差异两点：
  *  1. 不建 engine（SessionHub.postMessage 内部直接调 run()，deps 即所需全部）；
  *  2. createAciExecutor 注入 hooks.postToolUse → 工具摘要行事件（Q5b=B；
  *     permission/types.ts:117-128 官方观测挂点，每 call 事后触发）。

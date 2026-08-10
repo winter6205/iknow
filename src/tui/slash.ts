@@ -1,9 +1,12 @@
 /**
  * src/tui/slash.ts
  *
- * #146 TUI 自建 slash 词表（SC 12：不复用 chat 的 processChatLine）。
- * 词表 6 条（Q3/Q5c 裁决）：/sessions /new /quit /exit /help /info。
- * `/reset` 不在词表内即天然不可达（Q5c 废除）。
+ * #343 T6-A 迁移：从 archive/tui-ink/src/slash.ts 迁回 src/tui/。逻辑与原版
+ * 一致（#146 TUI 自建 slash 词表 + 解析 + Tab 补全 + hint 行）；仅文件头注释
+ * 更新为本次迁移说明。纯 TS 模块，无 ink / OpenTUI 依赖。
+ *
+ * 词表 9 条：/sessions /new /quit /exit /help /info /thinking /profile /compact。
+ * /reset 不在词表内即天然不可达（Q5c 废除）。
  *
  * 解析规则：输入 trim 后以 "/" 开头先过词表；未命中 → unknown（UI 提示）；
  * 不以 "/" 开头 → message（普通消息）。
@@ -67,8 +70,7 @@ export function helpLines(): ReadonlyArray<string> {
     "/quit      退出（别名 /exit）",
     "Ctrl+C     打断前台运行中的 turn",
     "Ctrl+O     展示思考内容（只展开；折叠回 /thinking）",
-    "Ctrl+Y     复制当前鼠标选区",
-    "鼠标拖选    选中文本 → 松开自动复制到剪贴板",
+    "鼠标拖选    选中文本 → 右键复制到剪贴板",
   ];
 }
 

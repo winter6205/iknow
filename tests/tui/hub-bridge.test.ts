@@ -1,6 +1,9 @@
 /**
  * tests/tui/hub-bridge.test.ts
  *
+ * #343 T6-A 测试：从 archive/tui-ink/tests/hub-bridge.test.ts 迁回 tests/tui/，
+ * 改写为 bun:test（D2 裁决：tests/tui/ 由 bun:test 驱动）。
+ *
  * #146 hub-bridge（α 直连）：
  *  - lazy create：draft 首条消息前不建档；ensureSession(undefined) 建档、
  *    ensureSession(id) 原样返回；启动即退出不留空壳（SC 1）；
@@ -10,7 +13,7 @@
  *  - T3 上下文用量：bridge.contextWindow 默认 200000、可 override；postMessage
  *    回执的 lastUsage 透传（wire 有 → state 有；wire 无 → null）。
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,7 +25,7 @@ import { assistantResult, makeDeps } from "../cli/_fixtures.js";
 import { resolveProjectSessionDir } from "../../src/session-api/store/session-store.js";
 
 describe("inflight registry", () => {
-  it("soleId：空 → undefined；单会话 → 该 id；多会话 → undefined", () => {
+  test("soleId：空 → undefined；单会话 → 该 id；多会话 → undefined", () => {
     const reg = createInflightRegistry();
     expect(reg.soleId()).toBeUndefined();
     reg.mark("a");
@@ -35,7 +38,7 @@ describe("inflight registry", () => {
     expect(reg.soleId()).toBeUndefined();
   });
 
-  it("ids() 返回快照副本", () => {
+  test("ids() 返回快照副本", () => {
     const reg = createInflightRegistry();
     reg.mark("x");
     const snap = reg.ids();
@@ -64,7 +67,7 @@ describe("hub-bridge lazy create（SC 1）", () => {
     });
   }
 
-  it("启动（仅构造 bridge）不建档：池目录为空", async () => {
+  test("启动（仅构造 bridge）不建档：池目录为空", async () => {
     makeBridge([]);
     const dir = resolveProjectSessionDir(baseDir, process.cwd());
     let entries: string[] = [];
@@ -76,14 +79,14 @@ describe("hub-bridge lazy create（SC 1）", () => {
     expect(entries).toHaveLength(0);
   });
 
-  it("ensureSession(undefined) → 建档返回 conversation_id", async () => {
+  test("ensureSession(undefined) → 建档返回 conversation_id", async () => {
     const bridge = makeBridge([]);
     const id = await bridge.ensureSession(undefined);
     expect(id).toMatch(/[0-9a-f-]{36}/);
     expect(await bridge.ensureSession(id)).toBe(id);
   });
 
-  it("ensureSession(已建档 id) → 原样返回，不新建", async () => {
+  test("ensureSession(已建档 id) → 原样返回，不新建", async () => {
     const bridge = makeBridge([]);
     const created = await bridge.hub.createSession();
     const id = created.session.conversation_id;
@@ -101,7 +104,7 @@ describe("hub-bridge postMessage", () => {
     await rm(baseDir, { recursive: true, force: true });
   });
 
-  it("回执投影：finalText / stopReason / turnCount；inflight 进出自清", async () => {
+  test("回执投影：finalText / stopReason / turnCount；inflight 进出自清", async () => {
     const inflight = createInflightRegistry();
     const bridge = createTuiBridge({
       dataDir: baseDir,
@@ -124,7 +127,7 @@ describe("hub-bridge postMessage", () => {
     expect(file.summary).toBe("你好");
   });
 
-  it("postMessage 失败也 unmark（异常路径不留 inflight）", async () => {
+  test("postMessage 失败也 unmark（异常路径不留 inflight）", async () => {
     const inflight = createInflightRegistry();
     const bridge = createTuiBridge({
       dataDir: baseDir,
@@ -137,7 +140,7 @@ describe("hub-bridge postMessage", () => {
     expect(inflight.ids().size).toBe(0);
   });
 
-  it("listSessions 代理 store.list()（过滤空会话）", async () => {
+  test("listSessions 代理 store.list()（过滤空会话）", async () => {
     const bridge = createTuiBridge({
       dataDir: baseDir,
       deps: makeDeps([assistantResult({ texts: ["答复"] })]),
@@ -156,7 +159,7 @@ describe("hub-bridge postMessage", () => {
 });
 
 describe("hub-bridge contextWindow（T3）", () => {
-  it("默认 200000（与 loop-engine compress 默认同源）", () => {
+  test("默认 200000（与 loop-engine compress 默认同源）", () => {
     const bridge = createTuiBridge({
       deps: makeDeps([]),
       inflight: createInflightRegistry(),
@@ -164,7 +167,7 @@ describe("hub-bridge contextWindow（T3）", () => {
     expect(bridge.contextWindow).toBe(200_000);
   });
 
-  it("override 生效", () => {
+  test("override 生效", () => {
     const bridge = createTuiBridge({
       deps: makeDeps([]),
       inflight: createInflightRegistry(),
@@ -184,7 +187,7 @@ describe("hub-bridge postMessage lastUsage（T3）", () => {
     await rm(baseDir, { recursive: true, force: true });
   });
 
-  it("wire 带 lastUsage → bridge.postMessage 透传；其它字段不变", async () => {
+  test("wire 带 lastUsage → bridge.postMessage 透传；其它字段不变", async () => {
     const usage = {
       inputTokens: 100,
       outputTokens: 50,
@@ -208,7 +211,7 @@ describe("hub-bridge postMessage lastUsage（T3）", () => {
     expect(result.turnCount).toBe(1);
   });
 
-  it("wire 无 lastUsage → null（等价 RunResult.lastUsage=null 语义）", async () => {
+  test("wire 无 lastUsage → null（等价 RunResult.lastUsage=null 语义）", async () => {
     const bridge = createTuiBridge({
       dataDir: baseDir,
       deps: makeDeps([assistantResult({ texts: ["你好"] })]),
@@ -233,7 +236,7 @@ describe("hub-bridge compactSession（/compact）", () => {
     await rm(baseDir, { recursive: true, force: true });
   });
 
-  it("长会话 → compacted=true；短会话 → compacted=false（幂等）", async () => {
+  test("长会话 → compacted=true；短会话 → compacted=false（幂等）", async () => {
     // 4 个 assistant 应答 → 8 条消息 > DEFAULT_KEEP_RECENT=6 → 实际压缩。
     const bridge = createTuiBridge({
       dataDir: baseDir,
@@ -258,7 +261,7 @@ describe("hub-bridge compactSession（/compact）", () => {
     expect(await bridge.compactSession(id2)).toBe(false);
   });
 
-  it("missing session → 抛错（not_found 透传）", async () => {
+  test("missing session → 抛错（not_found 透传）", async () => {
     const bridge = createTuiBridge({
       dataDir: baseDir,
       deps: makeDeps([]),

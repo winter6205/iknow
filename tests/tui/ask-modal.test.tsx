@@ -1,323 +1,403 @@
+/** @jsxImportSource @opentui/react */
 /**
  * tests/tui/ask-modal.test.tsx
  *
- * #279 项3：权限 ask 走 modal 槽（y/a/n = once/always/reject）的 TuiApp
- * 端到端回归（ink render + 假 TTY stdin/stdout 驱动，与 app.test.tsx 同基建）：
- *  - modal 渲染（pending ask 出现时）+ y/n 直选 resolve；
- *  - a「总是允许」→ resolve true + sessionGrants 登记 session 层 allow 规则，
- *    且该规则在 checkPermission 层真正放行（policy 级断言）；
- *  - ↑↓ + Enter 导航确认；
- *  - Esc 收起 → 退回输入框 y/n 兼容路径（向后兼容语义）；
- *  - 窄终端 modal 活跃时整帧不超终端行数（行账 modalRows 入账守卫）。
+ * #343 T4：权限 ask modal 安全契约（specs/security-guardrails —— y/n/a =
+ * once/always/reject，行为与归档版一致）。T4 层覆盖组件 + 桥接接线：
+ *  - y/n/a 三键直选 → resolveAsk 真放行/拒绝（promise 落值断言）；
+ *  - a → resolve true + always 信号上抛（宿主登记 session 层规则的接缝）；
+ *  - ↑↓ 移动选中标记 + Enter 选中当前项（每个分支的回调与选中态断言）；
+ *  - Esc 收起 → modal 消失、ask 保持 pending（退回兼容路径仍可 resolve）；
+ *  - ask-user 桥接纯语义：approve/deny、超时 fail-closed、未知 id、FIFO、
+ *    subscribe 通知计数。
+ *
+ * 注：sessionGrants 登记 + policy 级放行在 app.tsx 接线（T6），此处断言
+ * always 信号到达宿主回调（契约接缝不漂移）。
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { PassThrough } from "node:stream";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { render } from "ink";
-import type { Instance } from "ink";
-import { TuiApp, createToolEventSink } from "../../src/tui/app.js";
+import { describe, expect, test } from "bun:test";
+import { useEffect, useRef, useState } from "react";
+import { useKeyboard } from "@opentui/react";
+import { testRender } from "@opentui/react/test-utils";
 import {
-  createInflightRegistry,
-  createTuiBridge,
-} from "../../src/tui/hub-bridge.js";
-import { createTuiAskUserBridge } from "../../src/tui/ask-user.js";
-import { createSessionGrants } from "../../src/harness/permission/session-grants.js";
+  ModalHost,
+  PERMISSION_ANSWERS,
+  modalKeyEventOf,
+  reduceModalKey,
+  type PermissionAnswer,
+} from "../../src/tui/modal.js";
 import {
-  createPermissionPolicy,
-  checkPermission,
-} from "../../src/harness/permission/policy.js";
-import type { AciToolDef } from "../../src/harness/aci/types.js";
-import { createPermissionModeContext } from "../../src/harness/permission/index.js";
-import { makeDeps } from "../cli/_fixtures.js";
+  createTuiAskUserBridge,
+  type TuiAskUserBridge,
+} from "../../src/tui/ask-user.js";
 
-const ANSI_RE = /\x1b\[[0-9;?]*[a-zA-Z]/g;
-const strip = (s: string): string => s.replace(ANSI_RE, "");
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** 轮询式帧等待（mockInput 字节经 stdin 异步解析）。 */
+async function untilFrame(
+  setup: Awaited<ReturnType<typeof testRender>>,
+  pred: (frame: string) => boolean,
+  ms = 3000
+): Promise<string> {
+  const start = Date.now();
+  while (Date.now() - start < ms) {
+    await new Promise((r) => setTimeout(r, 15));
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    if (pred(frame)) return frame;
+  }
+  throw new Error(`untilFrame timeout:\n${setup.captureCharFrame()}`);
+}
 
-async function waitFor(
-  cond: () => boolean,
-  ms = 8000,
-  label = ""
-): Promise<void> {
+/** 非 React 断言等待（promise 落值 / 回调计数）。 */
+async function until(cond: () => boolean, ms = 3000): Promise<void> {
   const start = Date.now();
   while (!cond()) {
-    if (Date.now() - start > ms) throw new Error(`waitFor timeout: ${label}`);
-    await delay(40);
+    if (Date.now() - start > ms) throw new Error("until timeout");
+    await new Promise((r) => setTimeout(r, 10));
   }
 }
 
-function fakeTty(rows = 30, cols = 100) {
-  const s = new PassThrough() as PassThrough & {
-    isTTY: boolean;
-    columns: number;
-    rows: number;
-    setRawMode: (v: boolean) => void;
-    ref: () => void;
-    unref: () => void;
-  };
-  s.isTTY = true;
-  s.columns = cols;
-  s.rows = rows;
-  s.setRawMode = (): void => {};
-  s.ref = (): void => {};
-  s.unref = (): void => {};
-  return s;
+/** 等 ask promise 落值：必须边等边 renderOnce —— mock stdin 字节只在渲染
+ *  pass 里被解析派发，裸 await promise 会让按键永远送不到 handler。 */
+async function awaitAsk(
+  setup: Awaited<ReturnType<typeof testRender>>,
+  promise: Promise<boolean>,
+  ms = 3000
+): Promise<boolean> {
+  let done = false;
+  let value = false;
+  void promise.then((v) => {
+    done = true;
+    value = v;
+  });
+  const start = Date.now();
+  while (!done) {
+    if (Date.now() - start > ms) throw new Error("awaitAsk timeout");
+    await new Promise((r) => setTimeout(r, 15));
+    await setup.renderOnce();
+  }
+  return value;
 }
 
-const bashTool: AciToolDef = Object.freeze({
-  name: "bash",
-  description: "test bash",
-  inputSchema: { type: "object", additionalProperties: false },
-  handler: async () => "ok",
-  aci: Object.freeze({
-    category: "execute" as const,
-    isConcurrencySafe: false,
-    interruptBehavior: "cancel" as const,
-    timeoutTier: "default" as const,
-  }),
+export interface AskRecorder {
+  readonly resolved: Array<{ approved: boolean; answer: PermissionAnswer }>;
+  readonly alwaysTools: string[];
+}
+
+function makeRecorder(): AskRecorder {
+  return { resolved: [], alwaysTools: [] };
+}
+
+/**
+ * 权限 ask modal 接线 harness（T6 app 接线的同构缩小版）：
+ * bridge.pending → ModalHost(permission)，键路由走 reduceModalKey 纯函数，
+ * select 分支按 once/always/reject 落 resolveAsk。
+ */
+function AskHarness(props: {
+  readonly bridge: TuiAskUserBridge;
+  readonly recorder: AskRecorder;
+}) {
+  const [, setTick] = useState(0);
+  const [selected, setSelected] = useState(0);
+  const [dismissed, setDismissed] = useState(false);
+  const lastId = useRef<string | undefined>(undefined);
+
+  useEffect(
+    () => props.bridge.subscribe(() => setTick((t) => t + 1)),
+    [props.bridge]
+  );
+
+  const pending = props.bridge.pending();
+  // 新 ask 出现 → 选中态 / 收起态复位（useEffect 保证不破坏渲染期纯净）。
+  useEffect(() => {
+    if (pending?.id !== lastId.current) {
+      lastId.current = pending?.id;
+      setSelected(0);
+      setDismissed(false);
+    }
+  }, [pending?.id]);
+
+  useKeyboard((e) => {
+    const ask = props.bridge.pending();
+    if (ask === undefined || dismissed) return;
+    const action = reduceModalKey(modalKeyEventOf(e), {
+      options: PERMISSION_ANSWERS,
+      selectedIndex: selected,
+    });
+    if (action.type === "move") {
+      setSelected(action.index);
+      return;
+    }
+    if (action.type === "select") {
+      const answer = action.value as PermissionAnswer;
+      const approved = answer !== "reject";
+      props.bridge.resolveAsk(ask.id, approved);
+      props.recorder.resolved.push({ approved, answer });
+      if (answer === "always") props.recorder.alwaysTools.push(ask.tool);
+      return;
+    }
+    if (action.type === "dismiss") setDismissed(true);
+  });
+
+  if (pending === undefined || dismissed) {
+    return (
+      <text fg="#8a877e">{pending === undefined ? "" : "输入 y/a/n"}</text>
+    );
+  }
+  return (
+    <ModalHost
+      modal={{
+        kind: "permission",
+        tool: pending.tool,
+        summaryHint: pending.summaryHint,
+        selectedIndex: selected,
+      }}
+      cols={80}
+    />
+  );
+}
+
+const askCtx = { tool: "bash", input: { command: "ls" }, summaryHint: "ls" };
+
+async function mount(recorder: AskRecorder, bridge = createTuiAskUserBridge()) {
+  const setup = await testRender(
+    <AskHarness bridge={bridge} recorder={recorder} />,
+    { width: 80, height: 24, exitOnCtrlC: false }
+  );
+  await setup.renderOnce();
+  return { setup, bridge };
+}
+
+async function askAndWaitModal(
+  setup: Awaited<ReturnType<typeof testRender>>,
+  bridge: TuiAskUserBridge
+): Promise<{ readonly promise: Promise<boolean> }> {
+  // 注意：不能把 ask promise 直接作为 async 返回值让调用方 await ——
+  // await 会展平 Promise<Promise<boolean>>，在按键落值前就死等 resolve。
+  const promise = bridge.ask(askCtx);
+  await untilFrame(setup, (f) => f.includes("允许执行 bash？"));
+  return { promise };
+}
+
+describe("权限 ask modal：y/n/a 三键直选（安全契约）", () => {
+  test("y 直选 → ask 放行（resolve true），modal 消失", async () => {
+    const recorder = makeRecorder();
+    const { setup, bridge } = await mount(recorder);
+    const { promise } = await askAndWaitModal(setup, bridge);
+    await setup.mockInput.typeText("y");
+    expect(await awaitAsk(setup, promise)).toBe(true);
+    expect(recorder.resolved).toEqual([{ approved: true, answer: "once" }]);
+    await untilFrame(setup, (f) => !f.includes("允许执行 bash？"));
+    await setup.renderer.destroy();
+  });
+
+  test("n 直选 → ask 拒绝（resolve false）", async () => {
+    const recorder = makeRecorder();
+    const { setup, bridge } = await mount(recorder);
+    const { promise } = await askAndWaitModal(setup, bridge);
+    await setup.mockInput.typeText("n");
+    expect(await awaitAsk(setup, promise)).toBe(false);
+    expect(recorder.resolved).toEqual([{ approved: false, answer: "reject" }]);
+    await setup.renderer.destroy();
+  });
+
+  test("a 直选 → 放行 + always 信号上抛（session 层规则接缝）", async () => {
+    const recorder = makeRecorder();
+    const { setup, bridge } = await mount(recorder);
+    const { promise } = await askAndWaitModal(setup, bridge);
+    await setup.mockInput.typeText("a");
+    expect(await awaitAsk(setup, promise)).toBe(true);
+    expect(recorder.resolved).toEqual([{ approved: true, answer: "always" }]);
+    expect(recorder.alwaysTools).toEqual(["bash"]);
+    await setup.renderer.destroy();
+  });
+
+  test("大写 hotkey 同样生效（Y → once）", async () => {
+    const recorder = makeRecorder();
+    const { setup, bridge } = await mount(recorder);
+    const { promise } = await askAndWaitModal(setup, bridge);
+    await setup.mockInput.typeText("Y");
+    expect(await awaitAsk(setup, promise)).toBe(true);
+    expect(recorder.resolved).toEqual([{ approved: true, answer: "once" }]);
+    await setup.renderer.destroy();
+  });
+
+  test("无匹配字符 → ignore，modal 保持且未 resolve", async () => {
+    const recorder = makeRecorder();
+    const { setup, bridge } = await mount(recorder);
+    const { promise } = await askAndWaitModal(setup, bridge);
+    await setup.mockInput.typeText("x");
+    await untilFrame(setup, (f) => f.includes("允许执行 bash？"));
+    expect(recorder.resolved).toHaveLength(0);
+    expect(bridge.pendingCount()).toBe(1);
+    // 之后仍可用 n 拒绝（ignore 不污染状态）。
+    await setup.mockInput.typeText("n");
+    expect(await awaitAsk(setup, promise)).toBe(false);
+    await setup.renderer.destroy();
+  });
 });
 
-describe("TuiApp 权限 ask modal（#279 项3）", () => {
-  const LONG_TIMEOUT = 30_000;
-  let baseDir: string;
-  const instances: Instance[] = [];
+describe("权限 ask modal：↑↓ + Enter 导航选择", () => {
+  test("↓ 移动选中标记（❯ [y] → ❯ [a] → ❯ [n]），↑ 回移且顶端 clamp", async () => {
+    const recorder = makeRecorder();
+    const { setup, bridge } = await mount(recorder);
+    await askAndWaitModal(setup, bridge);
+    let frame = setup.captureCharFrame();
+    expect(frame).toContain("❯ [y]");
+    setup.mockInput.pressArrow("down");
+    frame = await untilFrame(setup, (f) => f.includes("❯ [a]"));
+    expect(frame).not.toContain("❯ [y]");
+    setup.mockInput.pressArrow("down");
+    frame = await untilFrame(setup, (f) => f.includes("❯ [n]"));
+    // 底端 clamp：再 ↓ 仍在 [n]。
+    setup.mockInput.pressArrow("down");
+    await new Promise((r) => setTimeout(r, 50));
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).toContain("❯ [n]");
+    // ↑ 回移到 [a]，连续 ↑ 在 [y] clamp。
+    setup.mockInput.pressArrow("up");
+    await untilFrame(setup, (f) => f.includes("❯ [a]"));
+    setup.mockInput.pressArrow("up");
+    await untilFrame(setup, (f) => f.includes("❯ [y]"));
+    setup.mockInput.pressArrow("up");
+    await new Promise((r) => setTimeout(r, 50));
+    await setup.renderOnce();
+    expect(setup.captureCharFrame()).toContain("❯ [y]");
+    await bridge.resolveAsk(bridge.pending()!.id, false);
+    await setup.renderer.destroy();
+  });
 
-  beforeEach(async () => {
-    baseDir = await mkdtemp(join(tmpdir(), "iknow-tui-ask-modal-"));
-  }, LONG_TIMEOUT);
-  afterEach(async () => {
-    for (const instance of instances) instance.unmount();
-    instances.length = 0;
-    await rm(baseDir, { recursive: true, force: true });
-  }, LONG_TIMEOUT);
+  test("↓↓ + Enter → 选中「拒绝」（resolve false）", async () => {
+    const recorder = makeRecorder();
+    const { setup, bridge } = await mount(recorder);
+    const { promise } = await askAndWaitModal(setup, bridge);
+    setup.mockInput.pressArrow("down");
+    await untilFrame(setup, (f) => f.includes("❯ [a]"));
+    setup.mockInput.pressArrow("down");
+    await untilFrame(setup, (f) => f.includes("❯ [n]"));
+    setup.mockInput.pressEnter();
+    expect(await awaitAsk(setup, promise)).toBe(false);
+    expect(recorder.resolved).toEqual([{ approved: false, answer: "reject" }]);
+    await setup.renderer.destroy();
+  });
 
-  function mount(opts?: {
-    readonly rows?: number;
-    readonly cols?: number;
-    readonly sessionGrants?: ReturnType<typeof createSessionGrants>;
-  }) {
-    const stdout = fakeTty(opts?.rows ?? 30, opts?.cols ?? 100);
-    const stdin = fakeTty(opts?.rows ?? 30, opts?.cols ?? 100);
-    const out: string[] = [];
-    stdout.on("data", (c) => out.push(String(c)));
-    const askBridge = createTuiAskUserBridge();
-    const bridge = createTuiBridge({
-      dataDir: baseDir,
-      deps: makeDeps([]),
-      inflight: createInflightRegistry(),
+  test("↓ + Enter → 选中「总是允许」（resolve true + always 信号）", async () => {
+    const recorder = makeRecorder();
+    const { setup, bridge } = await mount(recorder);
+    const { promise } = await askAndWaitModal(setup, bridge);
+    setup.mockInput.pressArrow("down");
+    await untilFrame(setup, (f) => f.includes("❯ [a]"));
+    setup.mockInput.pressEnter();
+    expect(await awaitAsk(setup, promise)).toBe(true);
+    expect(recorder.resolved).toEqual([{ approved: true, answer: "always" }]);
+    expect(recorder.alwaysTools).toEqual(["bash"]);
+    await setup.renderer.destroy();
+  });
+
+  test("初始 Enter（无导航）→ 选中默认第一项 once", async () => {
+    const recorder = makeRecorder();
+    const { setup, bridge } = await mount(recorder);
+    const { promise } = await askAndWaitModal(setup, bridge);
+    setup.mockInput.pressEnter();
+    expect(await awaitAsk(setup, promise)).toBe(true);
+    expect(recorder.resolved).toEqual([{ approved: true, answer: "once" }]);
+    await setup.renderer.destroy();
+  });
+});
+
+describe("权限 ask modal：Esc 收起（兼容路径）", () => {
+  test("Esc → modal 消失、ask 保持 pending；后续 resolveAsk 仍生效", async () => {
+    const recorder = makeRecorder();
+    const { setup, bridge } = await mount(recorder);
+    const { promise } = await askAndWaitModal(setup, bridge);
+    setup.mockInput.pressEscape();
+    await untilFrame(setup, (f) => !f.includes("允许执行 bash？"));
+    // modal 收起：三选项行消失，兼容提示出现。
+    expect(setup.captureCharFrame()).not.toContain("总是允许（本会话）");
+    expect(setup.captureCharFrame()).toContain("输入 y/a/n");
+    // ask 未被 resolve（fail-closed 前宿主仍可走兼容路径）。
+    expect(bridge.pendingCount()).toBe(1);
+    expect(recorder.resolved).toHaveLength(0);
+    const id = bridge.pending()!.id;
+    expect(bridge.resolveAsk(id, true)).toBe(true);
+    await expect(promise).resolves.toBe(true);
+    await setup.renderer.destroy();
+  });
+
+  test("Esc 收起后不再响应 y/n/a（modal 已摘除）", async () => {
+    const recorder = makeRecorder();
+    const { setup, bridge } = await mount(recorder);
+    const { promise } = await askAndWaitModal(setup, bridge);
+    setup.mockInput.pressEscape();
+    await untilFrame(setup, (f) => f.includes("输入 y/a/n"));
+    await setup.mockInput.typeText("y");
+    await new Promise((r) => setTimeout(r, 80));
+    await setup.renderOnce();
+    expect(recorder.resolved).toHaveLength(0);
+    expect(bridge.pendingCount()).toBe(1);
+    await bridge.resolveAsk(bridge.pending()!.id, false);
+    await expect(promise).resolves.toBe(false);
+    await setup.renderer.destroy();
+  });
+});
+
+describe("createTuiAskUserBridge（queue-based + fail-closed）", () => {
+  test("resolveAsk(true/false) 显式放行 / 拒绝", async () => {
+    const bridge = createTuiAskUserBridge();
+    const p1 = bridge.ask(askCtx);
+    expect(bridge.pendingCount()).toBe(1);
+    expect(bridge.pending()?.tool).toBe("bash");
+    expect(bridge.resolveAsk(bridge.pending()!.id, true)).toBe(true);
+    await expect(p1).resolves.toBe(true);
+    const p2 = bridge.ask(askCtx);
+    expect(bridge.resolveAsk(bridge.pending()!.id, false)).toBe(true);
+    await expect(p2).resolves.toBe(false);
+    expect(bridge.pendingCount()).toBe(0);
+  });
+
+  test("超时 fail-closed（无显式 resolve → false）", async () => {
+    const bridge = createTuiAskUserBridge({ timeoutMs: 30 });
+    const promise = bridge.ask(askCtx);
+    await expect(promise).resolves.toBe(false);
+    expect(bridge.pendingCount()).toBe(0);
+  });
+
+  test("未知 / 已决 id → resolveAsk 返回 false", async () => {
+    const bridge = createTuiAskUserBridge();
+    const promise = bridge.ask(askCtx);
+    const id = bridge.pending()!.id;
+    bridge.resolveAsk(id, true);
+    await promise;
+    expect(bridge.resolveAsk(id, true)).toBe(false);
+    expect(bridge.resolveAsk("ask-nope", true)).toBe(false);
+  });
+
+  test("多个 ask 排队：pending() 返回最早一个（FIFO）", async () => {
+    const bridge = createTuiAskUserBridge();
+    const p1 = bridge.ask(askCtx);
+    const p2 = bridge.ask({ ...askCtx, tool: "write_file" });
+    expect(bridge.pendingCount()).toBe(2);
+    expect(bridge.pending()?.tool).toBe("bash");
+    bridge.resolveAsk(bridge.pending()!.id, true);
+    await p1;
+    expect(bridge.pending()?.tool).toBe("write_file");
+    bridge.resolveAsk(bridge.pending()!.id, false);
+    await p2;
+  });
+
+  test("subscribe：enqueue / settle 各通知一次；退订后不再通知", async () => {
+    const bridge = createTuiAskUserBridge();
+    let calls = 0;
+    const unsub = bridge.subscribe(() => {
+      calls += 1;
     });
-    const instance = render(
-      <TuiApp
-        bridge={bridge}
-        askBridge={askBridge}
-        toolEventSink={createToolEventSink()}
-        cwd="/tmp/proj"
-        dataDir={baseDir}
-        permissionMode={createPermissionModeContext("default")}
-        {...(opts?.sessionGrants ? { sessionGrants: opts.sessionGrants } : {})}
-      />,
-      {
-        stdout,
-        stdin,
-        exitOnCtrlC: false,
-        interactive: true,
-        kittyKeyboard: { mode: "disabled" },
-      }
-    );
-    instances.push(instance);
-    return {
-      stdin,
-      askBridge,
-      lastOutput: (): string => strip(out.join("")),
-      since: (): (() => string) => {
-        const anchor = out.join("").length;
-        return () => strip(out.join("").slice(anchor));
-      },
-      lastFrame: (): string => {
-        for (let i = out.length - 1; i >= 0; i--) {
-          const visible = strip(out[i] ?? "");
-          if (visible.length > 0) return visible;
-        }
-        return "";
-      },
-      type: async (text: string): Promise<void> => {
-        for (const ch of text) {
-          stdin.write(ch);
-          await delay(10);
-        }
-      },
-      ready: async (): Promise<void> => {
-        await delay(400);
-      },
-    };
-  }
-
-  const askCtx = {
-    tool: "bash",
-    input: { command: "ls" },
-    summaryHint: "ls",
-  };
-
-  it(
-    "pending ask → modal 渲染；y 直选 → ask 放行，modal 消失",
-    async () => {
-      const app = mount();
-      await app.ready();
-      const promise = app.askBridge.ask(askCtx);
-      await waitFor(
-        () => app.lastOutput().includes("允许执行 bash？"),
-        8000,
-        "modal-rendered"
-      );
-      expect(app.lastOutput()).toContain("本次允许");
-      expect(app.lastOutput()).toContain("总是允许（本会话）");
-      expect(app.lastOutput()).toContain("拒绝");
-
-      await app.type("y");
-      await expect(promise).resolves.toBe(true);
-      const after = app.since();
-      await waitFor(
-        () => !after().includes("允许执行 bash？"),
-        8000,
-        "modal-gone"
-      );
-    },
-    LONG_TIMEOUT
-  );
-
-  it(
-    "n 直选 → ask 拒绝",
-    async () => {
-      const app = mount();
-      await app.ready();
-      const promise = app.askBridge.ask(askCtx);
-      await waitFor(
-        () => app.lastOutput().includes("允许执行 bash？"),
-        8000,
-        "modal-rendered"
-      );
-      await app.type("n");
-      await expect(promise).resolves.toBe(false);
-    },
-    LONG_TIMEOUT
-  );
-
-  it(
-    "a 直选 → 放行 + sessionGrants 登记「总是允许」（policy 层真放行）",
-    async () => {
-      const sessionGrants = createSessionGrants();
-      const app = mount({ sessionGrants });
-      await app.ready();
-      const promise = app.askBridge.ask(askCtx);
-      await waitFor(
-        () => app.lastOutput().includes("允许执行 bash？"),
-        8000,
-        "modal-rendered"
-      );
-      await app.type("a");
-      await expect(promise).resolves.toBe(true);
-      // 授权登记：session 层 allow 规则（同 id 去重）。
-      const rules = sessionGrants.list();
-      expect(rules.length).toBe(1);
-      expect(rules[0]!.decision).toBe("allow");
-      expect(rules[0]!.match({ tool: "bash", input: {} })).toBe(true);
-      expect(rules[0]!.match({ tool: "write_file", input: {} })).toBe(false);
-      // policy 级：同 grants 实例接入 checkPermission → execute 类工具
-      // 原本 default=ask，登记后直接 allow（后续调用不再弹 modal）。
-      const policy = createPermissionPolicy({ session: sessionGrants });
-      const outcome = checkPermission({
-        def: bashTool,
-        input: { command: "ls" },
-        sources: policy.sources,
-        hardWalls: policy.hardWalls,
-        defaultByCategory: policy.defaultByCategory,
-        mode: policy.mode,
-      });
-      expect(outcome.decision).toBe("allow");
-      // notice 提示「总是允许」。
-      await waitFor(
-        () => app.lastOutput().includes("本会话总是允许"),
-        8000,
-        "always-notice"
-      );
-    },
-    LONG_TIMEOUT
-  );
-
-  it(
-    "↑↓ + Enter 导航：↓↓ + Enter → 选中「拒绝」",
-    async () => {
-      const app = mount();
-      await app.ready();
-      const promise = app.askBridge.ask(askCtx);
-      await waitFor(
-        () => app.lastOutput().includes("允许执行 bash？"),
-        8000,
-        "modal-rendered"
-      );
-      app.stdin.write("\u001b[B"); // ↓
-      await delay(80);
-      app.stdin.write("\u001b[B"); // ↓
-      await delay(150);
-      app.stdin.write("\r");
-      await expect(promise).resolves.toBe(false);
-    },
-    LONG_TIMEOUT
-  );
-
-  it(
-    "Esc 收起 → 退回输入框 y/n 兼容路径（typed y + Enter 放行）",
-    async () => {
-      const app = mount();
-      await app.ready();
-      const promise = app.askBridge.ask(askCtx);
-      await waitFor(
-        () => app.lastOutput().includes("允许执行 bash？"),
-        8000,
-        "modal-rendered"
-      );
-      await app.type("\u001b"); // Esc
-      const after = app.since();
-      await waitFor(
-        () => after().includes("输入 y/a/n"),
-        8000,
-        "dismissed-ask-line"
-      );
-      // modal 已收起（新帧不再出现 modal 盒子标题的粗框样式文本：三选项行消失）
-      expect(after()).not.toContain("总是允许（本会话）");
-      // 兼容路径：输入框 typed y + Enter。
-      await app.type("y\r");
-      await expect(promise).resolves.toBe(true);
-    },
-    LONG_TIMEOUT
-  );
-
-  it(
-    "窄终端（44 列）modal 活跃：整帧行数 ≤ 终端行数（行账不溢出）",
-    async () => {
-      const app = mount({ rows: 24, cols: 44 });
-      await app.ready();
-      void app.askBridge.ask({
-        ...askCtx,
-        summaryHint: "写入 src/some/long/path/file.ts（覆盖既有内容）",
-      });
-      await waitFor(
-        () => app.lastOutput().includes("允许执行 bash？"),
-        8000,
-        "modal-rendered-narrow"
-      );
-      await delay(300); // 等行账稳定帧
-      const frame = app.lastFrame().replace(/\n+$/, "");
-      const frameRows = frame.split("\n").length;
-      expect(
-        frameRows,
-        `窄终端帧高 ${frameRows} ≤ 24（modal 行数已入 chromeReserveRows）`
-      ).toBeLessThanOrEqual(24);
-      // modal 内容完整可见（折行不截断选项）。
-      expect(app.lastFrame()).toContain("拒绝");
-    },
-    LONG_TIMEOUT
-  );
+    const promise = bridge.ask(askCtx); // enqueue → +1
+    expect(calls).toBe(1);
+    bridge.resolveAsk(bridge.pending()!.id, true); // settle → +1
+    await promise;
+    expect(calls).toBe(2);
+    unsub();
+    const p2 = bridge.ask(askCtx);
+    bridge.resolveAsk(bridge.pending()!.id, false);
+    await p2;
+    expect(calls).toBe(2);
+  });
 });

@@ -1,27 +1,57 @@
 /**
  * src/tui/tool-summary.ts
  *
- * #146 Q5b=B 工具调用摘要行（纯格式化，可单测）：
+ * #343 T4（自 archive/tui-ink/src/tool-summary.ts 迁移，语义不变）：
+ * 工具调用摘要行（纯格式化，可单测）：
  *  - 摘要行 = 工具名 + 参数摘要 + 状态；
- *  - 生成/编辑类增强：write_file/edit_file 显示「生成了什么」
- *    （路径 + 行数；diff 完整形态留实施细化，受无 emoji 约束）。
+ *  - 生成/编辑类增强：write_file/edit_file 显示「生成了什么」（路径 + 行数）。
  *
- * 宽度纪律（窄终端修复）：摘要行渲染形态有三种——终稿 `[完成] name · detail`、
+ * 宽度纪律（窄终端修复）：摘要行渲染形态有三种——终稿 `[运行中] name · detail`、
  * live 完成行 `name · detail · ok`、live 运行行——行级窗口账目一律按 1 行计。
- * 旧实现 detail 固定按 80 字符截断，窄终端下超宽被 ink 折行 → 渲染行多于
- * 账目 → 底部内容被顶出可视区（用户观感「内容跟着工具行折叠进去」）。
- * 现传 `cols` 时按视觉宽度收口（预留最宽装饰：mark `[运行中] ` 9 列 +
- * 分隔 ` · ` 3 列），保证三种形态单行不折。
+ * 传 `cols` 时按视觉宽度收口（预留最宽装饰），保证三种形态单行不折。
  *
- * 内容可见性（写代码不展示修复）：write_file / edit_file 完成后仅一行摘要，
- * 用户看不到写了什么代码。`toolPreviewRows` 产出统一 diff 预览行
- * （computeDiff 单源，T5），message-rows、MessageBlocks、live-tool-preview
- * 共用单源保持行账一致。
+ * 内容可见性：write_file / edit_file 完成后 `toolPreviewRows` 产出统一 diff
+ * 预览行（computeDiff 单源），`MessageBlocks` 渲染与 `live-tool-preview`
+ * 共用本函数作为单源——行账与渲染不漂移。
+ *
+ * 文本收口助手（visualWidth / clipOneLine / clipOneLineVisual）：归档时代
+ * SSOT 在 text.ts（未入 T4 迁移清单），T4 范围内收敛在本文件导出，供
+ * context-bar / list-view 共用；后续弹如需独立 text.ts 再整体搬移。
  */
+import stringWidth from "string-width";
 import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
-import { visualWidth } from "./banner.js";
-import { clipOneLine, clipOneLineVisual } from "./text.js";
 import { computeDiff, type DiffLine } from "./diff-unified.js";
+
+/** 视觉列宽（CJK / 全角按 2 列，string-width 口径）。 */
+export function visualWidth(s: string): number {
+  return stringWidth(s);
+}
+
+/** 单行裁剪（字符数口径）：折叠空白，超长按字符数截断补 `…`。 */
+export function clipOneLine(s: string, max: number): string {
+  const oneLine = s.replace(/\s+/g, " ").trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+}
+
+/**
+ * 按**视觉宽度**截断单行（CJK 占 2 列）。保证结果 `visualWidth <= maxWidth`；
+ * 省略号预留 1 列。maxWidth <= 0 返回空串。
+ */
+export function clipOneLineVisual(s: string, maxWidth: number): string {
+  const oneLine = s.replace(/\s+/g, " ").trim();
+  if (maxWidth <= 0) return "";
+  if (visualWidth(oneLine) <= maxWidth) return oneLine;
+  const budget = maxWidth - 1;
+  let acc = "";
+  let w = 0;
+  for (const ch of oneLine) {
+    const cw = visualWidth(ch);
+    if (w + cw > budget) break;
+    acc += ch;
+    w += cw;
+  }
+  return `${acc}…`;
+}
 
 export interface ToolSummaryLine {
   readonly toolName: string;
@@ -92,19 +122,19 @@ export function summarizeToolCall(
 }
 
 /**
- * 工具内容预览行（内容可见性，#298 T5 统一 diff 版）：edit_file / write_file
- * 调用 `computeDiff`（diff-unified.ts）产出逐行 `DiffLine[]`（带行号 + kind，
+ * 工具内容预览行（内容可见性，统一 diff 版）：edit_file / write_file 调用
+ * `computeDiff`（diff-unified.ts）产出逐行 `DiffLine[]`（带行号 + kind，
  * 供 diff-view.tsx 上色/排行号）。其余工具 / 无内容 → 空数组。
  *
- * `opts.oldContent / opts.newContent`（T4 side-channel）：live 运行完成事件
+ * `opts.oldContent / opts.newContent`（side-channel）：live 运行完成事件
  * 携带读盘前后全文（与 model tool_result 严格分离）→ 精确 diff。缺省（历史
  * 持久化消息，meta 在 model 边界被丢弃）回退 intent-diff：
  *  - edit_file：input.old_str / input.new_str 片段 diff；
  *  - write_file：old 视为空串 → 纯 add；
  *  - 其余工具：空数组（无 diff 预览，保持历史行账）。
  *
- * SSOT：message-rows.ts（行账 + 裁剪路径）与 message-blocks.tsx（全可见
- * 路径）、live-tool-preview.tsx（live tail）共用本函数，行账与渲染不漂移。
+ * SSOT：`MessageBlocks`（全可见路径渲染）与 `live-tool-preview`（live tail）
+ * 共用本函数产 diff 行——行账与渲染不漂移。
  */
 export function toolPreviewRows(
   name: string,
@@ -179,20 +209,20 @@ export function projectToolLines(
 
 /** 运行时 postToolUse 事件的摘要行文案（turn 进行中逐条出现）。
  *  SSOT — 完整运行（postToolUse 已完成 + legacy 字符串行）共用单源，
- *  文本拼接全部落在此处,禁止复制 `${name} · ${detail} · ${status}` 模板。
+ *  文本拼接全部落在此处，禁止复制 `${name} · ${detail} · ${status}` 模板。
  *
  *  字节规则:
  *   - detail 非空 → `${toolName} · ${detail} · ${status}`
- *   - detail 空   → `${toolName} · ${status}`（省去中间分隔符，避免 `name ·  · status` 残 留）
+ *   - detail 空   → `${toolName} · ${status}`（省去中间分隔符，避免残留）
  *
- *  `detail` 可选 override: 装配层已完成事件携带 precomputed detail
- *  (如 liveToolReducer 落地) 时, 通过显式 detail 跳过 summarizeToolCall 重算,
- *  保证完成事件渲染与 reducer state.detail 字节一致。 */
+ *  `detail` 可选 override：装配层已完成事件携带 precomputed detail
+ *  （如 liveToolReducer 落地）时，通过显式 detail 跳过 summarizeToolCall
+ *  重算，保证完成事件渲染与 reducer state.detail 字节一致。 */
 export function formatLiveToolEvent(opts: {
   readonly toolName: string;
   readonly input: unknown;
   readonly kind: string;
-  /** 显式 detail override;提供时跳过 summarizeToolCall 重算。 */
+  /** 显式 detail override；提供时跳过 summarizeToolCall 重算。 */
   readonly detail?: string;
 }): string {
   const detail =
