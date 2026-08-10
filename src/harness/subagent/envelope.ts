@@ -42,7 +42,8 @@ export interface SubAgentEnvelope {
   readonly summary: string;
   readonly result: string;
   readonly fileRefs?: readonly string[];
-  readonly usage?: Readonly<Record<string, unknown>>;
+  /** 子代理 run 的 usage 快照 (TokenUsage 形态, JSON 可序列化; 与 schema `usage?: object` 对齐)。 */
+  readonly usage?: object;
   readonly reason?:
     "crashed" | "maxTurnsExceeded" | "timeout" | "protocolError";
   readonly truncated?: boolean;
