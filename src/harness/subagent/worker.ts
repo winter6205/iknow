@@ -255,8 +255,16 @@ export async function runWorkerOnce(opts: {
   readonly deps: LoopEngineDeps;
 }): Promise<SubAgentEnvelope> {
   const { workerEnvelope: env, deps } = opts;
+  // #356 High #2 fix: envelope.maxTurns / envelope.timeoutMs 优先覆盖 deps
+  // 默认(与 maxTurns 既有覆盖同形态);任一字段缺失保留 deps 默认。
   const runDeps: LoopEngineDeps =
-    env.maxTurns !== undefined ? { ...deps, maxTurns: env.maxTurns } : deps;
+    env.maxTurns !== undefined || env.timeoutMs !== undefined
+      ? {
+          ...deps,
+          ...(env.maxTurns !== undefined && { maxTurns: env.maxTurns }),
+          ...(env.timeoutMs !== undefined && { timeoutMs: env.timeoutMs }),
+        }
+      : deps;
   try {
     const { result } = await run(env.task, runDeps);
     // run() 正常返回 ≠ 成功: harness 协议层错误 / 空最终回应以 stopReason

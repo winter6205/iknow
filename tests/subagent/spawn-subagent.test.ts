@@ -47,7 +47,9 @@ describe("spawn_subagent — 正常路径", () => {
     const tool = createSpawnSubAgentTool({ manager });
     const out = tool.handler({ task: "explore the repo" });
     expect(spawn).toHaveBeenCalledTimes(1);
-    expect(spawn).toHaveBeenCalledWith({});
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ task: "explore the repo" })
+    );
     expect(out).toBe(JSON.stringify({ task_id: "fixed-task-id-1" }));
   });
 
@@ -108,37 +110,48 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
       task: "t",
       disallowedTools: ["edit_file", "write_file"],
     });
-    expect(spawn).toHaveBeenCalledWith({
-      disallowedTools: ["edit_file", "write_file"],
-    });
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        task: "t",
+        disallowedTools: ["edit_file", "write_file"],
+      })
+    );
   });
 
   it("systemPrompt 字符串透传", () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     tool.handler({ task: "t", systemPrompt: "be a verifier" });
-    expect(spawn).toHaveBeenCalledWith({ systemPrompt: "be a verifier" });
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ task: "t", systemPrompt: "be a verifier" })
+    );
   });
 
   it("model 字符串透传", () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     tool.handler({ task: "t", model: "opus" });
-    expect(spawn).toHaveBeenCalledWith({ model: "opus" });
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ task: "t", model: "opus" })
+    );
   });
 
   it("maxTurns 整数透传", () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     tool.handler({ task: "t", maxTurns: 5 });
-    expect(spawn).toHaveBeenCalledWith({ maxTurns: 5 });
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ task: "t", maxTurns: 5 })
+    );
   });
 
   it("timeoutMs 整数透传", () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     tool.handler({ task: "t", timeoutMs: 60000 });
-    expect(spawn).toHaveBeenCalledWith({ timeoutMs: 60000 });
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ task: "t", timeoutMs: 60000 })
+    );
   });
 
   it("全字段组合透传(含默认缺省)", () => {
@@ -152,13 +165,16 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
       maxTurns: 7,
       timeoutMs: 90000,
     });
-    expect(spawn).toHaveBeenCalledWith({
-      systemPrompt: "be concise",
-      disallowedTools: ["spawn_subagent"],
-      model: "opus",
-      maxTurns: 7,
-      timeoutMs: 90000,
-    });
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        task: "t",
+        systemPrompt: "be concise",
+        disallowedTools: ["spawn_subagent"],
+        model: "opus",
+        maxTurns: 7,
+        timeoutMs: 90000,
+      })
+    );
   });
 });
 

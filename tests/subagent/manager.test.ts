@@ -289,6 +289,95 @@ describe("SubAgentManager queryBuffer 四态 (SC5)", () => {
   });
 });
 
+// ── fixture 6b:per-task timeout (High #2 / SC6 / 假设 14) ────────────────────────
+
+describe("SubAgentManager per-task timeout (def.timeoutMs)", () => {
+  it("timeoutMs 到期且 child 未完成 → failed reason=timeout + SIGTERM", async () => {
+    vi.useFakeTimers();
+    try {
+      const { manager, spawned } = makeHarness();
+      const { taskId } = manager.spawn({ timeoutMs: 50 });
+      // 初始 running
+      assert.deepEqual(manager.queryBuffer(taskId), { status: "running" });
+
+      // 50ms 后 timer 触发 → failed reason=timeout + SIGTERM
+      await vi.advanceTimersByTimeAsync(50);
+      const q = manager.queryBuffer(taskId);
+      assert.equal(q.status, "failed");
+      if (q.status === "failed") {
+        assert.equal(q.reason, "timeout");
+        assert.match(q.summary, /timeout after 50ms/);
+      }
+      // child 收到 SIGTERM(第一击)
+      const signals = spawned[0]!.kill.mock.calls.map((c) => c[0]);
+      assert.deepEqual(signals, ["SIGTERM"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("child 以 SIGTERM 退出不覆盖 timeout envelope(保持 reason=timeout)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { manager, spawned } = makeHarness();
+      const { taskId } = manager.spawn({ timeoutMs: 50 });
+      await vi.advanceTimersByTimeAsync(50);
+      // timeout 已标 failed;child 随后以信号退出 → 不覆盖为 crashed
+      spawned[0]!.emit("exit", null, "SIGTERM");
+      const q = manager.queryBuffer(taskId);
+      assert.equal(q.status, "failed");
+      if (q.status === "failed") {
+        assert.equal(q.reason, "timeout");
+        assert.match(q.summary, /timeout after 50ms/);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("timeout 前 child 正常完成 → 不标 timeout,timer 被 exit handler 清理", async () => {
+    vi.useFakeTimers();
+    try {
+      const { manager, spawned } = makeHarness();
+      const { taskId } = manager.spawn({ timeoutMs: 50 });
+      emitEnvelope(spawned[0]!, okEnvelope("fast done"));
+      assert.equal(
+        (manager.queryBuffer(taskId) as SubAgentEnvelope).status,
+        "ok"
+      );
+      // 越过 timeout 窗口:已 completed,timer 回调应被 exit 清理 / 不再覆写
+      await vi.advanceTimersByTimeAsync(100);
+      const q = manager.queryBuffer(taskId);
+      assert.equal(q.status, "ok");
+      assert.equal((q as SubAgentEnvelope).result, "fast done");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shutdown 清掉 timeoutTimer,timeout 不再触发 SIGTERM(只 shutdown 自己的 SIGTERM)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { manager, spawned } = makeHarness();
+      const { taskId } = manager.spawn({ timeoutMs: 50 });
+      // 立即 shutdown(timeoutTimer 尚未到期)
+      const done = manager.shutdown();
+      // 越过 50ms timeout 窗口 + shutdown 5s 兜底
+      await vi.advanceTimersByTimeAsync(5000);
+      await done;
+      // 若 timeoutTimer 未清,50ms 时会再发一次 SIGTERM。
+      // shutdown 兜底会再发 SIGKILL(fake 不退),不计入 SIGTERM 计数。
+      const sigtermCount = spawned[0]!.kill.mock.calls.filter(
+        (c) => c[0] === "SIGTERM"
+      ).length;
+      assert.equal(sigtermCount, 1);
+      assert.deepEqual(manager.queryBuffer(taskId), { status: "not_found" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 // ── fixture 8:waitFor timeout ─────────────────────────────────────────────────
 
 describe("SubAgentManager waitFor timeout", () => {
