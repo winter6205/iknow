@@ -20,6 +20,8 @@ import {
   type RunResult,
 } from "../harness/index.js";
 import { buildHarnessEngine } from "../harness/build-engine.js";
+import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
+import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { getVersion } from "../cli/usage.js"; // SC-W 6/7: agentVersion 注入(与 session-api/http.ts 同向 import,无循环)
 import type { AskUser } from "../harness/permission/types.js";
 import type {
@@ -293,6 +295,13 @@ export type SessionHubOptions = {
    * "serve"（skip BOOTSTRAP，spec A12 矩阵）；测试可省略 → 默认 "chat"。
    */
   surface?: "chat" | "tui" | "ask" | "serve";
+  /**
+   * #356 T7:subagent manager — host drain 消费面。serve 入口经
+   * buildHarnessEngine 自建 (surface !== "ask");hub 构造时未注入时,
+   * ensureDeps() 后从 built.subagentManager 懒取。未配置 (ask 形态) →
+   * 无 drain,行为零变化。
+   */
+  readonly subagentManager?: SubAgentManager;
 };
 
 // -- stop reasons that must NOT persist to file (裁决#8) -----------------------
@@ -330,6 +339,8 @@ export class SessionHub {
   /** #196 IKNOW T5: 入口 surface；默认 "chat"（tests 兼容）。serve 路径
    *  由 serve.ts 显式传 "serve"。 */
   private readonly surface: "chat" | "tui" | "ask" | "serve" | undefined;
+  /** #356 T7: subagent manager（host drain 消费面；懒取见 ensureDeps）。 */
+  private subagentManager: SubAgentManager | undefined;
   /** Per-conversation serialization (spec A15). */
   private readonly inflight = new Map<string, Promise<void>>();
 
@@ -349,6 +360,7 @@ export class SessionHub {
     this.overrideEnv = opts.overrideEnv;
     this.sandboxRoot = opts.sandboxRoot;
     this.surface = opts.surface;
+    this.subagentManager = opts.subagentManager;
     this.defaults = {
       jsonMode: opts.defaultJsonMode ?? false,
     };
@@ -519,10 +531,21 @@ export class SessionHub {
           }
           opts.onStream?.(event);
         };
+        // #356 T7 (SC7):host drain — serve 入口每轮 run() 前,把 manager 内
+        // completed 子代理结果浓缩成 user message,拼入 priorMessages 末尾。
+        // 空 manager / 无 completed → priorMessages 不变 (行为零变化)。
+        const drained = drainPendingSubagents(this.subagentManager);
+        const drainedMsg: AnthropicNativeMessage = {
+          role: "user",
+          content: [{ type: "text", text: drained }],
+        };
+        const priorMessages = drained
+          ? [...session.messages, drainedMsg]
+          : session.messages;
         let finalResult: RunResult;
         try {
           const { result } = await run(query, runDeps, opts.signal, {
-            priorMessages: session.messages,
+            priorMessages,
             onStream: wrappedOnStream,
           });
           // Violation kill → surface protocolError so the SPA client can
@@ -766,7 +789,7 @@ export class SessionHub {
     // The returned `engine` is built once (code-review 2026-08-05) and
     // discarded — serve only consumes `deps`, and the cost is a single
     // `createLoopEngine` allocation, not a per-message re-construction.
-    const { deps } = await buildHarnessEngine({
+    const built = await buildHarnessEngine({
       env,
       askUser: this.askUser,
       ...(this.sandboxRoot ? { sandboxRoot: this.sandboxRoot } : {}),
@@ -774,7 +797,10 @@ export class SessionHub {
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
       ...(this.permissionMode ? { permissionMode: this.permissionMode } : {}),
     });
-    this.cachedDeps = deps;
+    this.cachedDeps = built.deps;
+    // #356 T7: serve 懒取 subagent manager — buildHarnessEngine 在 surface !==
+    // "ask" 时自建;constructor 注入优先 (测试缝),未注入则取 built 的。
+    this.subagentManager = this.subagentManager ?? built.subagentManager;
     return this.cachedDeps;
   }
 

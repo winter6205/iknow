@@ -205,7 +205,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     return;
   }
 
-  let built: { deps: LoopEngineDeps };
+  let built: import("./harness/build-engine.js").BuiltEngine;
   // W2: chat REPL 持一个可变 PermissionModeContext —— /permissions 命令在
   // REPL 里就地翻转它,引擎不重建。初始值走 env IKNOW_PERMISSION_MODE(可
   // 选),缺省 default。
@@ -246,6 +246,9 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     showThinking: bundle.env.chat.showThinking,
     // W2: 传给 REPL host,host 的 /permissions 斜杠命令就地翻 mode。
     permissionMode,
+    // #356 T7:host drain — chat 入口每轮 runHarness 前把 completed 子代理
+    // 结果拼入 priorMessages。ask 入口无 manager(surface 门控),不传。
+    subagentManager: built.subagentManager,
   });
 }
 
