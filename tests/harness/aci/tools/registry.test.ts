@@ -1,15 +1,15 @@
 /**
  * tests/harness/aci/tools/registry.test.ts
  *
- * `createDefaultAciRegistry` — 24 件 SSOT 工具注册层单元测试
+ * `createDefaultAciRegistry` — 25 件 SSOT 工具注册层单元测试
  * （三条件键 memoryDir / skillCatalog / subagentManager 全部缺席 → 19 件
  * = 8 基线 + tool_search + 10 LSP；只 memoryDir → 21 件；memoryDir+skillCatalog → 23 件；
- * 三者皆在场 → 24 件 = 全量）。
+ * 三者皆在场 → 25 件 = 全量）。
  *
  * 对齐 upstream `create_default_tool_registry()`(tools/__init__.py:48):
  * 单一装配函数返回注册表,所有入口共享。本测试锁 5 边界类:
  *
- *   - 正常路径:返回 AciRegistry,list() 24 工具(三条件键全在场),顺序 append-only
+ *   - 正常路径:返回 AciRegistry,list() 25 工具(三条件键全在场),顺序 append-only
  *   - 空输入:env.web 全空(undefined)→ 直连不抛;sandboxRoot:"" → 不抛
  *   - 非法输入:proxy 非 http/https / 含凭据 → 装配期同步抛 ToolExecutionError
  *   - 溢出/边界:sandboxRoot 指向不存在路径 → 装配期不抛(执行期由 fs 工具越界逻辑拒绝)
@@ -18,8 +18,9 @@
  * 另锁 Gate 3(SSOT append-only 纪律,S1/D12):`createDefaultAciRegistry()`
  * 实际装配出的工具名与 `ACI_TOOLSET_NAMES` 严格一致(长度 + 顺序 + 成员)。
  * Gate 3 的抛错路径是结构性(derived-from-map),不重构无法从外部触发,
- * 故只锁正向一致;分歧在装配期 by-construction 失败。memory / skill 工具
- * 是条件装配的(对照名单按 memoryDir / skillCatalog 镜像过滤)。
+ * 故只锁正向一致;分歧在装配期 by-construction 失败。memory / skill /
+ * subagent 工具是条件装配的(对照名单按 memoryDir / skillCatalog /
+ * subagentManager 镜像过滤)。
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
@@ -42,8 +43,9 @@ function makeWebEnv(
 
 const EXPECTED_TOOLS: readonly string[] = ACI_TOOLSET_NAMES;
 
-/** #356 T4 fake subagentManager（仅用于 createDefaultAciRegistry 装配期断言
- * spawn_subagent 在场；handler 路径单测在 tests/subagent/spawn-subagent.test.ts）。 */
+/** #356 T4/T5 fake subagentManager（仅用于 createDefaultAciRegistry 装配期断言
+ * spawn_subagent / subagent_result 在场；handler 路径单测在
+ * tests/subagent/spawn-subagent.test.ts 与 tests/subagent/subagent-result.test.ts）。 */
 const fakeSubagentManager: SubAgentManager = {
   spawn: () => ({ taskId: "fake-id" }),
   queryBuffer: () => ({ status: "not_found" }),
@@ -71,6 +73,7 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(reg.catalog.get("skill")).toBeDefined();
     expect(reg.catalog.get("skill_search")).toBeDefined();
     expect(reg.catalog.get("spawn_subagent")).toBeDefined();
+    expect(reg.catalog.get("subagent_result")).toBeDefined();
   });
 
   it("memoryDir + skillCatalog + subagentManager 都缺席 → list() 19 件(8 基线 + tool_search + 10 LSP,无 memory/skill/spawn 工具)", () => {
@@ -86,7 +89,8 @@ describe("createDefaultAciRegistry — 正常路径", () => {
           n !== "memory_save" &&
           n !== "skill" &&
           n !== "skill_search" &&
-          n !== "spawn_subagent"
+          n !== "spawn_subagent" &&
+          n !== "subagent_result"
       )
     );
     expect(reg.catalog.get("tool_search")).toBeDefined();
@@ -95,10 +99,11 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(reg.catalog.get("skill")).toBeUndefined();
     expect(reg.catalog.get("skill_search")).toBeUndefined();
     expect(reg.catalog.get("spawn_subagent")).toBeUndefined();
+    expect(reg.catalog.get("subagent_result")).toBeUndefined();
   });
 
-  it("Gate 3:ACI_TOOLSET_NAMES 长度 24,前 8 原序 + memory_* + tool_search + 10 LSP + skill + skill_search + spawn_subagent", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(24);
+  it("Gate 3:ACI_TOOLSET_NAMES 长度 25,前 8 原序 + memory_* + tool_search + 10 LSP + skill + skill_search + spawn_subagent + subagent_result", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(25);
     // 前 8 件原序不变(append-only 纪律)。
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
@@ -129,7 +134,9 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     // #337 T5 skill 工具集 append-only:21→23,2 件在末尾,不重排既有 21 件。
     expect(ACI_TOOLSET_NAMES.slice(21, 23)).toEqual(["skill", "skill_search"]);
     // #356 T4 spawn_subagent append-only:23→24,末位 1 件,不重排既有 23 件。
-    expect(ACI_TOOLSET_NAMES.slice(23)).toEqual(["spawn_subagent"]);
+    expect(ACI_TOOLSET_NAMES.slice(23, 24)).toEqual(["spawn_subagent"]);
+    // #356 T5 subagent_result append-only:24→25,末位 1 件,不重排既有 24 件。
+    expect(ACI_TOOLSET_NAMES.slice(24)).toEqual(["subagent_result"]);
   });
 });
 

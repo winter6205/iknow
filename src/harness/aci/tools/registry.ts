@@ -35,6 +35,7 @@ import { createLspToolSet } from "./lsp.js";
 import { createSkillTool } from "./skill.js";
 import { createSkillSearchTool } from "./skill-search.js";
 import { createSpawnSubAgentTool } from "../../subagent/spawn-subagent-tool.js";
+import { createSubAgentResultTool } from "../../subagent/subagent-result-tool.js";
 import type { SubAgentManager } from "../../subagent/manager.js";
 import { RegistryConstructionError, ToolExecutionError } from "../../errors.js";
 import type { SkillCatalog } from "../../skill/catalog.js";
@@ -95,6 +96,10 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   // 缺席时不入注册表，与 skillCatalog / memoryDir 同形态：Gate 3 在
   // toolsetNames 端镜像过滤，见工厂尾部注释）。
   "spawn_subagent", // #356 T4 主代理派发子代理（异步返 task_id）
+  // #356 T5 subagent_result append-only：24→25。条件化装配（subagentManager
+  // 缺席时不入注册表，与 spawn_subagent / skillCatalog / memoryDir 同形态：
+  // Gate 3 在 toolsetNames 端镜像过滤，见工厂尾部注释）。
+  "subagent_result", // #356 T5 主代理轮询子代理四态（not_found/running/completed/failed）
 ] as const);
 
 /**
@@ -223,6 +228,14 @@ export function createDefaultAciRegistry(
             createSpawnSubAgentTool({ manager: subagentManager }),
         }
       : {}),
+    // #356 T5 subagent_result 工具集（条件化装配：subagentManager 缺席时
+    // 不入注册表，与 spawn_subagent 同形态；Gate 3 镜像过滤，见下）。
+    ...(subagentManager
+      ? {
+          subagent_result: () =>
+            createSubAgentResultTool({ manager: subagentManager }),
+        }
+      : {}),
   };
 
   // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。
@@ -233,7 +246,7 @@ export function createDefaultAciRegistry(
   const excluded: ReadonlyArray<string> = [
     ...(memoryDir ? [] : ["memory_recall", "memory_save"]),
     ...(skillCatalog ? [] : ["skill", "skill_search"]),
-    ...(subagentManager ? [] : ["spawn_subagent"]),
+    ...(subagentManager ? [] : ["spawn_subagent", "subagent_result"]),
   ];
   const toolsetNames = (ACI_TOOLSET_NAMES as ReadonlyArray<string>).filter(
     (n) => !excluded.includes(n)
