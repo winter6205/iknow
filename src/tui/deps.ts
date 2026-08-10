@@ -87,7 +87,7 @@ export interface BuildTuiDepsOptions {
 export function buildTuiDeps(
   bundle: RuntimeBundle,
   opts: BuildTuiDepsOptions
-): LoopEngineDeps {
+): LoopEngineDeps & { subagentManager?: SubAgentManager } {
   const { env } = bundle;
   if (!env.llm.apiKey) {
     throw new Error(
@@ -181,5 +181,9 @@ export function buildTuiDeps(
         memoryDir: resolveProjectMemoryDir(process.cwd()),
       }),
     }),
+    // #356 T7 (SC7):TUI 入口与 build-engine chat 同门 — subagentManager 透出,
+    // createTuiBridge 把它传给 SessionHub options → host drain 生效(TUI 上
+    // spawn_subagent 完成的子代理结果进入下一轮 run)。
+    subagentManager,
   };
 }
