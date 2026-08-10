@@ -83,6 +83,12 @@ _Avoid_: 把 `stream: false` + 裸 JSON 解析当默认 LLM 臂；让原生 SSE 
 **project stack defaults (SSOT boundary)**: iknow 的 LLM 栈（key 变量名默认 `ANTHROPIC_AUTH_TOKEN`、主模型 `m3-combo`、provider/baseUrl `http://localhost:20128/v1`）是**项目级决策**，焊进 `src/config/env.ts` 代码默认（ADR-0001），而非每机 `.env.local` 配置。`.env.local` 的职责收窄为「持有密钥值 + 机器级覆盖」；若在 `.env.local` 重复声明 `IKNOW_LLM_API_KEY_ENV` / `IKNOW_LLM_MODEL`，会形成第二源并制造 drift。
 _Avoid_: 在 `.env.local` 重复声明已与代码默认一致的非密项；把 model 切换当「每机配置」而非「项目栈决策」
 
+**前景 spawn / 后景 spawn**: `spawn_subagent` 的两种结果契约（#361 裁决，ADR-0014）——前景（`wait:true`，默认）= handler 同步等 worker 到终态、envelope 直接作 tool_result 返回，当回合闭环；后景（`wait:false`，显式选项）= 立即返回 task_id，结果经 host 唤醒/drain 通道回传。worker 恒为独立进程，与前景/后景正交。
+_Avoid_: 把前景/后景与进程隔离混同；泛化的"同步/异步"；把 V1"立即返回 task_id"当默认契约（已被反转）
+
+**host drain**: host 侧把 completed 子代理 envelope 浓缩成一条消息、注入下一轮 run() priorMessages 的机制（#356 V1，`src/harness/subagent/host-drain.ts`）；只 drain completed，不修改 buffer 状态。#361 裁决后仅在异步臂（`wait:false`）生效，且须阻塞轮询至至少一个 worker 到终态；终态被 V2 事件驱动唤醒取代。
+_Avoid_: 把 drain 与"结果获取"混同（前景 spawn 不经 drain）；让 agent 侧直接消费 manager buffer；把 drain 被动挂"下一轮用户输入"当作可靠唤醒源
+
 ## Relationships
 
 - **run() messages -> adapter streaming arm -> interpretMessage**: harness LLM path（流事件以 `HarnessStreamEvent` 经 `onStream` 暴露）
