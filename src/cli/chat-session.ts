@@ -25,6 +25,8 @@ import {
   writeOut,
 } from "./session-io.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
+import type { SubAgentManager } from "../harness/subagent/manager.js";
+import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
 import {
   createViolationCounter,
   wireKillSessionNotification,
@@ -64,6 +66,12 @@ export type ChatSessionOpts = {
    * 不重建引擎。ask/serve 不传。
    */
   permissionMode?: PermissionModeContext;
+  /**
+   * #356 T7:host drain — chat 入口每轮 runHarness 之前,调
+   * `drainPendingSubagents(subagentManager)` 把 completed 浓缩 envelope
+   * 拼入 next turn 的 priorMessages。ask 入口无 manager → 不传。
+   */
+  readonly subagentManager?: SubAgentManager;
 };
 
 export type ChatLineContext = {
@@ -73,6 +81,11 @@ export type ChatLineContext = {
   showThinking?: boolean;
   /** W2: 权限模式上下文(由 runChatSession 透传,/permissions 翻它)。 */
   permissionMode?: PermissionModeContext;
+  /**
+   * #356 T7:同 ChatSessionOpts.subagentManager,runChatSession 透传。
+   * 缺席(undefined)= 不调 drain,行为零变化。
+   */
+  readonly subagentManager?: SubAgentManager;
 };
 
 export type ProcessChatLineResult = {
@@ -140,9 +153,24 @@ export async function processChatLine(
           if (event.type === "stop_summary") stopSummary = event.text;
           else opts.onStream!(event);
         };
+  // #356 T7 (SC7):host drain — 把 manager 内 completed 子代理结果浓缩成
+  // user message,拼入本次 run 的 priorMessages 末尾。空 manager / 无
+  // completed → priorMessages 不变 (行为零变化)。
+  const drained = drainPendingSubagents(ctx.subagentManager);
+  const priorMessages = drained
+    ? Object.freeze([
+        ...ctx.state.messages,
+        Object.freeze({
+          role: "user" as const,
+          content: Object.freeze([
+            Object.freeze({ type: "text" as const, text: drained }),
+          ]),
+        }),
+      ])
+    : ctx.state.messages;
   try {
     const { result, trace } = await runHarness(query, ctx.deps, undefined, {
-      priorMessages: ctx.state.messages,
+      priorMessages,
       // #179 T6 (D3):观察者回调透传;undefined = 非流式行为零变化(pipe/ask)。
       // T6:wrap 后仅转发非 stop_summary 事件(摘要单独捕获,见上)。
       onStream: wrappedOnStream,
@@ -426,6 +454,7 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     state,
     showThinking: opts.showThinking,
     permissionMode: opts.permissionMode,
+    subagentManager: opts.subagentManager,
   };
 
   const interactive = isInteractive();
