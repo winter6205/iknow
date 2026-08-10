@@ -37,4 +37,8 @@ export {
   createIknowSystemResolver,
   assembleIdentityContext,
 } from "./assemble.js";
-export type { IdentitySegmentKind, AssemblyContext } from "./assemble.js";
+export type {
+  IdentitySegmentKind,
+  AssemblyContext,
+  SkillSummary,
+} from "./assemble.js";

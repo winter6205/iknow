@@ -1,0 +1,723 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Agent 项目简历撰写指南 · 知识卡</title>
+    <style>
+      :root {
+        --ink: #1a1a1a;
+        --muted: #555;
+        --rule: #e2e2e2;
+        --bg: #fffdf8;
+        --accent: #8a5a2b;
+        --soft: #f4ede2;
+        --code: #f3f0ea;
+        --warn: #9a3b2e;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          15px/1.7 "Georgia",
+          "Songti SC",
+          "Noto Serif CJK SC",
+          serif;
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 48px 28px 96px;
+      }
+      h1 {
+        font-size: 30px;
+        margin: 0 0 4px;
+        letter-spacing: 0.5px;
+      }
+      h2 {
+        font-size: 21px;
+        margin: 42px 0 10px;
+        padding-bottom: 6px;
+        border-bottom: 2px solid var(--accent);
+      }
+      h3 {
+        font-size: 17px;
+        margin: 24px 0 6px;
+        color: var(--accent);
+      }
+      p {
+        margin: 8px 0;
+      }
+      .sub {
+        color: var(--muted);
+        font-style: italic;
+        margin-bottom: 8px;
+      }
+      .meta {
+        font-size: 12px;
+        color: var(--muted);
+        border-left: 3px solid var(--rule);
+        padding-left: 10px;
+        margin: 18px 0;
+      }
+      .card {
+        background: var(--soft);
+        border: 1px solid var(--rule);
+        border-radius: 8px;
+        padding: 14px 18px;
+        margin: 16px 0;
+      }
+      .card .t {
+        font-weight: bold;
+        color: var(--accent);
+        display: block;
+        margin-bottom: 4px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 12px 0;
+        font-size: 13.5px;
+      }
+      th,
+      td {
+        border: 1px solid var(--rule);
+        padding: 7px 9px;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: var(--soft);
+        font-weight: bold;
+      }
+      code {
+        background: var(--code);
+        padding: 1px 5px;
+        border-radius: 4px;
+        font-size: 12.5px;
+        font-family: "SFMono-Regular", Consolas, monospace;
+      }
+      pre {
+        background: var(--code);
+        border: 1px solid var(--rule);
+        border-radius: 8px;
+        padding: 12px 14px;
+        overflow: auto;
+        font-size: 12.5px;
+        line-height: 1.5;
+        font-family: "SFMono-Regular", Consolas, monospace;
+      }
+      .cite {
+        color: var(--muted);
+        font-size: 11.5px;
+        font-style: italic;
+      }
+      .pill {
+        display: inline-block;
+        background: var(--accent);
+        color: #fff;
+        font-size: 11px;
+        padding: 1px 8px;
+        border-radius: 10px;
+        margin-right: 4px;
+        vertical-align: middle;
+      }
+      .warn {
+        color: var(--warn);
+      }
+      .copy {
+        background: var(--code);
+        border: 1px dashed var(--accent);
+        border-radius: 8px;
+        padding: 10px 14px;
+        margin: 12px 0;
+        font-size: 13.5px;
+      }
+      ul {
+        margin: 6px 0 6px 0;
+        padding-left: 22px;
+      }
+      li {
+        margin: 3px 0;
+      }
+      @media print {
+        body {
+          padding: 0;
+          max-width: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>13 · AI Agent 项目简历撰写指南</h1>
+    <p class="sub">小白向 · 详细版：可直接复制的模板、句式与模块描述</p>
+    <p class="meta">
+      来源：PDF 第 263–279 页《AI Agent
+      项目简历撰写指南》。卡片为压缩提炼，<span class="cite">[原文 Pxxx]</span>
+      标注出处页码，供教学引用。
+    </p>
+
+    <h2>0. 使用方式建议</h2>
+    <ol>
+      <li>先通读「总原则」与「常见简历问题诊断」，建立标准。</li>
+      <li>
+        按主语言（Python / Java / Go）复制「项目经历模板」，填数字与职责。
+        <span class="cite">[P263]</span>
+      </li>
+      <li>
+        从「各模块描述示例」里挑与项目相符的句子，拼进「核心职责 / 技术亮点」。
+      </li>
+      <li>
+        对照「技能清单写法」整理一页纸技能区，最后做一遍文末「三问自检」。
+      </li>
+    </ol>
+
+    <h2>1. 简历撰写总原则</h2>
+
+    <h3>1.1 STAR 法则在简历中的应用</h3>
+    <table>
+      <tr>
+        <th>字母</th>
+        <th>英文</th>
+        <th>含义</th>
+      </tr>
+      <tr>
+        <td>S</td>
+        <td>Situation</td>
+        <td>情境：业务背景、用户是谁、数据/流量规模</td>
+      </tr>
+      <tr>
+        <td>T</td>
+        <td>Task</td>
+        <td>任务：要达成的目标、要解决的矛盾（延迟、成本、准确率等）</td>
+      </tr>
+      <tr>
+        <td>A</td>
+        <td>Action</td>
+        <td>行动：你具体做了什么技术决策与实现</td>
+      </tr>
+      <tr>
+        <td>R</td>
+        <td>Result</td>
+        <td>结果：可验证的指标、上线效果、复盘结论</td>
+      </tr>
+    </table>
+    <p>
+      <b>简历与面试的区别：</b>面试可按 STAR 慢慢讲；简历篇幅极短，通常把 STAR
+      压缩成 1～3 句话，不出现「STAR」字样，也不写小说式前因后果。
+      <span class="cite">[P263]</span>
+    </p>
+
+    <div class="card">
+      <span class="t">简历里的推荐压缩方式</span>
+      <table>
+        <tr>
+          <th>STAR 要素</th>
+          <th>简历里怎么写</th>
+          <th>劣质写法</th>
+        </tr>
+        <tr>
+          <td>S</td>
+          <td>半句到一句：场景 + 规模（用户/请求量/文档量）</td>
+          <td>「做了一个系统」</td>
+        </tr>
+        <tr>
+          <td>T</td>
+          <td>嵌入动词：为降低/为提升/为满足 SLA</td>
+          <td>「负责开发」</td>
+        </tr>
+        <tr>
+          <td>A</td>
+          <td>关键技术名 + 你的动作（设计/实现/推动/排障）</td>
+          <td>「使用各种技术」</td>
+        </tr>
+        <tr>
+          <td>R</td>
+          <td>数字或前后对比</td>
+          <td>「效果很好」「显著提升」</td>
+        </tr>
+      </table>
+      <span class="cite">[P264]</span>
+    </div>
+
+    <div class="copy">
+      <b>万能句式（可直接套用）：</b><br />
+      在 <code>[场景与规模]</code> 下，为 <code>[目标指标]</code>，采用
+      <code>[方案 A + 关键技术名]</code
+      >，<code>[你本人主导的动作]</code>，最终实现
+      <code>[量化结果 / 明确对比]</code>。 <span class="cite">[P264]</span>
+    </div>
+
+    <div class="card">
+      <span class="t">「一条 bullet 里塞满 STAR」范例</span> 差：负责 RAG
+      模块，使用了向量数据库。<br />
+      好：在日均 1 万+ 问答请求的内部知识库场景下，为降低幻觉与尾延迟，采用
+      <b>混合检索（向量+BM25）+ Cross-Encoder 重排</b>，并落地 Redis 热点缓存 与
+      批量向量化配置，将 P95 端到端延迟从 800ms 降至 320ms，人工抽检回答准确率从
+      72% 提升至 86%。 <span class="cite">[P264]</span>
+    </div>
+    <p>
+      多写几条时的节奏：第一条偏「整体职责与结果」，后面几条分别写「编排 / RAG /
+      记忆 / 工具 / 观测」中的深度点，避免每条同一句式开头。
+      <span class="cite">[P264]</span>
+    </p>
+
+    <h3>1.2 数字量化的重要性</h3>
+    <p>
+      面试官默认：<b>没有数字 ≈ 没做过、或记不清、或不敢验证。</b>
+      <span class="cite">[P264]</span>
+    </p>
+    <table>
+      <tr>
+        <th>类别</th>
+        <th>可写内容</th>
+      </tr>
+      <tr>
+        <td>性能</td>
+        <td>QPS、RPS、P95/P99 延迟、首字延迟（TTFT）、单次请求成本</td>
+      </tr>
+      <tr>
+        <td>质量</td>
+        <td>准确率、召回率、F1、MRR、nDCG、用户评分、bad case 占比</td>
+      </tr>
+      <tr>
+        <td>规模</td>
+        <td>文档条数、向量维度、索引分片、日活、会话轮次、工具调用次数</td>
+      </tr>
+      <tr>
+        <td>效率与成本</td>
+        <td>
+          Token 消耗下降%、GPU 占用、人力节省、迭代周期缩短（Agent 岗很吃香）
+        </td>
+      </tr>
+      <tr>
+        <td>稳定性</td>
+        <td>
+          可用性 99.X%、错误率、熔断次数、事故复盘后的改进（偏工程岗必写）
+        </td>
+      </tr>
+    </table>
+    <p class="warn">
+      若暂时没有线上指标，可诚实写：「在自建 200 条问答集上，F1 从 0.61 →
+      0.79」；「压测单机 X req/s 时 P95 Y ms」。避免虚构业务数据。
+      <span class="cite">[P265]</span>
+    </p>
+
+    <h3>1.3 技术深度 &gt; 广度</h3>
+    <p>
+      广度：一行写「会 Python、会 LangChain、会 Milvus、会
+      K8s」——读者无法区分你和「看过教程的人」。
+    </p>
+    <div class="card">
+      <span class="t">对比范例</span> 浅：熟悉 RAG 与 Agent 开发。<br />
+      深：针对多跳问答中「检索漂移」问题，对比 仅向量检索 与 HyDE +
+      混合检索，在业务测试集上选择后者，Recall@5 从 0.58 提升至
+      0.81，并记录失败样本用于周度迭代。 <span class="cite">[P265]</span>
+    </div>
+    <p>
+      简历结构建议：技能清单/技术栈一行体现广度（与 JD 关键词对齐）；项目经历
+      bullet 体现深度（每个点尽量有「方案 + 结果」）。
+      <span class="cite">[P266]</span>
+    </p>
+
+    <h3>1.4 避免的常见错误</h3>
+    <table>
+      <tr>
+        <th>错误类型</th>
+        <th>说明</th>
+        <th>改进方向</th>
+      </tr>
+      <tr>
+        <td>泛泛动词</td>
+        <td>「参与」「协助」「熟悉」无下文</td>
+        <td>改为「设计并实现」「将 X 从 A 优化到 B」「推动上线」</td>
+      </tr>
+      <tr>
+        <td>只堆名词</td>
+        <td>只写技术栈，不写动作</td>
+        <td>每个技术栈词后跟「用来解决了什么问题」</td>
+      </tr>
+      <tr>
+        <td>抢功</td>
+        <td>把团队成果全写成「我」</td>
+        <td>写清「在 X 人团队中负责 Y 子系统」，面试可自洽</td>
+      </tr>
+      <tr>
+        <td>无关堆砌</td>
+        <td>大段传统 CRUD，与 Agent 无关</td>
+        <td>Agent 岗优先：编排、工具、RAG、评测、成本、延迟、可观测</td>
+      </tr>
+      <tr>
+        <td>泄密</td>
+        <td>写真实客户名、未公开数据</td>
+        <td>用「某金融客户」「Top3 互联网」；数字用区间或同比</td>
+      </tr>
+      <tr>
+        <td>口语与 emoji</td>
+        <td>「很厉害」「🔥」</td>
+        <td>全文书面语，专业、克制</td>
+      </tr>
+      <tr>
+        <td>过长段落</td>
+        <td>HR 10 秒扫一份简历</td>
+        <td>多用短句、分号列表；核心数字加粗（若投递系统支持）</td>
+      </tr>
+    </table>
+    <span class="cite">[P266]</span>
+
+    <h2>2. 技术栈展示</h2>
+    <p>
+      原则：按
+      <b
+        >「语言/运行时 → Web 框架 → Agent/模型 → 检索与数据 → 消息与任务 →
+        可观测与部署」</b
+      >
+      分组，每组一行或一行半；不要把 30 个词无结构地堆成一行。
+      <span class="cite">[P266]</span>
+    </p>
+    <p>
+      三个「不要」：① 不要写「精通」除非真能经得住深挖；② 不要写已废弃或只复制过
+      Demo 的版本号；③ JD 里强调的词往前放、写全拼（如对方写 LangGraph，别只写
+      LC）。 <span class="cite">[P267]</span>
+    </p>
+
+    <h3>2.1 Python 版一句话技术栈</h3>
+    <pre>
+Python · FastAPI · LangGraph · RAG（Milvus + ES 混合检索）· Redis · PostgreSQL · Docker · OTel</pre>
+    <p>
+      分组：语言 Python 3.11+（类型注解/asyncio）｜Web
+      FastAPI、Uvicorn、Pydantic v2｜Agent LangChain、LangGraph（或
+      AutoGen、自研状态机）｜模型 OpenAI 兼容 API、vLLM/Ollama、提示词与工具
+      Schema 治理｜检索
+      Milvus/Qdrant/Weaviate、ES（BM25）、混合检索、bge-reranker｜数据
+      Redis、PostgreSQL｜消息 Celery、Kafka、RabbitMQ｜可观测
+      OTel、LangSmith/Langfuse、结构化日志｜部署 Docker、K8s、CI。
+      <span class="cite">[P267]</span>
+    </p>
+
+    <h3>2.2 Java 版一句话技术栈</h3>
+    <pre>
+Java 17 · Spring Boot 3 · WebFlux/SSE · OpenFeign · Resilience4j · Elasticsearch · Redis · PostgreSQL · K8s</pre>
+    <p>
+      与 Python Agent 服务协作时务必写清边界（避免面试穿帮）：「Java
+      侧负责会话、鉴权、网关、B 端编排与检索结果合并；Python 侧负责 LangGraph
+      与重模型推理（如实调整）。」 <span class="cite">[P268]</span>
+    </p>
+
+    <h3>2.3 Go 版一句话技术栈</h3>
+    <pre>
+Go · Gin · gRPC · LLM 网关与流式代理 · Redis · PostgreSQL · OTel · Prometheus · K8s</pre>
+    <p>
+      分组：语言 Go 1.22+｜Web/RPC Gin/Fiber/Echo、gRPC、protobuf｜Agent 相关
+      高性能 LLM 代理、流式 chunk 转发、工具执行器、连接池与背压｜检索
+      Redis、PostgreSQL(pgx)、ES 客户端｜可观测 OTel
+      Go、Prometheus、Grafana、zap/slog｜部署 Docker、K8s、健康检查与优雅退出。
+      <span class="cite">[P268]</span>
+    </p>
+
+    <h2>3. 项目经历模板（三个版本）</h2>
+    <p>
+      每个版本都建议包含：项目名称、项目描述、技术栈、核心职责、技术亮点、项目成果。按需补充：起止时间、你的角色（独立/核心开发/成员）、团队规模、是否已上线。
+      <span class="cite">[P269]</span>
+    </p>
+
+    <h3>3.1 Python 版（完整可复制模板）</h3>
+    <div class="card">
+      <span class="t">项目定位</span> <b>项目名称：</b>企业级 AI Agent
+      智能助手平台<br />
+      <b>项目描述：</b
+      >基于大模型的企业级智能客服与知识助手系统，支持多轮对话、知识库检索、工具调用与人工兜底；面向内部员工或外部客户，对接企业文档与工单系统，满足合规与审计要求。<br />
+      <b>技术栈：</b>Python, FastAPI, LangChain, LangGraph, Milvus, Redis,
+      PostgreSQL
+    </div>
+    <p><b>核心职责（填你的数字）：</b></p>
+    <ol>
+      <li>
+        设计并实现 Agent
+        多步编排与状态持久化，支持工具失败重试与人工介入节点，日均稳定处理 X
+        万轮对话。
+      </li>
+      <li>
+        搭建 RAG 流水线：文档解析、分块、向量化与增量更新，并实现混合检索 +
+        重排序，将 Top-5 命中率从 X% 提升至 Y%。
+      </li>
+      <li>
+        落地会话级记忆与业务记忆分层策略，结合 Redis TTL 与 PostgreSQL
+        归档，将长会话上下文成本降低约 Z%。
+      </li>
+      <li>
+        与模型网关联调流式输出与限流熔断，将端到端 P95 延迟控制在 X ms 内。
+      </li>
+    </ol>
+    <p>
+      <b>技术亮点：</b>① 用
+      LangGraph（或自研状态机）显式建模「规划→工具→反思→输出」，配置循环与步数上限避免无限
+      ReAct；② RAG 侧「向量+关键词」混合检索 + Cross-Encoder 重排，对 PDF 表格与
+      FAQ 做结构化解析与路由。 <span class="cite">[P269]</span>
+    </p>
+
+    <h3>3.2 Java 版（完整可复制模板）</h3>
+    <div class="card">
+      <span class="t">项目定位</span> <b>项目名称：</b>企业级智能问答与 Agent
+      编排服务平台<br />
+      <b>技术栈：</b>Java 17, Spring Boot 3, Spring WebFlux, OpenFeign,
+      Resilience4j, Elasticsearch, Redis, PostgreSQL, Kafka（可选）
+    </div>
+    <p><b>核心职责：</b></p>
+    <ol>
+      <li>
+        设计并实现模型网关调用层：流式
+        SSE、超时重试、熔断与配额，保障大促期间核心链路可用性达 X%。
+      </li>
+      <li>
+        封装工具执行与权限校验（角色、数据域），与内部 CRM/工单 API
+        集成；工具失败时降级为纯 RAG 回答。
+      </li>
+      <li>
+        主导检索策略在 Java
+        侧的编排：查询改写请求发送、结果合并与重排结果融合，将业务相关问题的
+        Top-3 命中率提升 X%。
+      </li>
+      <li>
+        使用 Micrometer + Prometheus 搭建核心指标大盘，缩短平均故障定位时间。
+      </li>
+    </ol>
+    <p>
+      <b>技术亮点：</b>WebFlux + SSE
+      低延迟流式体验，线程池隔离与背压避免阻塞扩大；Resilience4j
+      按租户限流与多模型供应商切换，单点故障自动降级备用模型；与向量/Agent
+      服务通过 gRPC/HTTP 明确契约与 SLA，前后端 Trace ID 贯通。
+      <span class="cite">[P270]</span>
+    </p>
+
+    <h3>3.3 Go 版（完整可复制模板）</h3>
+    <div class="card">
+      <span class="t">项目定位</span> <b>项目名称：</b>高并发 LLM 网关与 Agent
+      执行引擎<br />
+      <b>技术栈：</b>Go, Gin（或 Fiber）, gRPC, Redis, PostgreSQL,
+      OpenTelemetry, Prometheus, Kubernetes
+    </div>
+    <p><b>核心职责：</b></p>
+    <ol>
+      <li>
+        实现高性能流式代理：chunk 转发、连接复用、优雅关闭，单机压测支撑 X k
+        QPS（写明环境）。
+      </li>
+      <li>
+        设计工具执行沙箱与超时控制，隔离用户输入与下游 HTTP 调用，降低 SSRF
+        与资源耗尽风险。
+      </li>
+      <li>
+        基于 Redis 的令牌桶与滑动窗口限流，按租户与模型维度配额，保障核心客户
+        SLA。
+      </li>
+      <li>
+        全链路 Trace ID 贯通网关、工具与向量检索，可观测数据在 P95 X ms
+        内完成上报。
+      </li>
+    </ol>
+    <p>
+      <b>技术亮点：</b>连接池与内存分配优化降低 GC
+      压力与尾延迟；多模型路由策略（成本/延迟/质量优先可配置，失败自动切换）；与
+      Python Agent 编排服务职责分离（Go 负责 IO 密集与网关）。
+      <span class="cite">[P271]</span>
+    </p>
+
+    <h2>4. 各模块的简历描述示例（可直接复制）</h2>
+    <p>
+      每个模块选 1～2 条写进简历，避免堆砌。 <span class="cite">[P272]</span>
+    </p>
+    <table>
+      <tr>
+        <th>模块</th>
+        <th>能力点关键词</th>
+        <th>可直接使用的描述（节选）</th>
+      </tr>
+      <tr>
+        <td>Agent 编排</td>
+        <td>状态机、LangGraph、ReAct、防死循环、检查点</td>
+        <td>
+          基于 LangGraph / 自研有向图
+          将业务拆成「意图识别→规划→工具调用→反思→回复」多节点流程，状态持久化至
+          Redis/DB，支持断点续跑与人工接管。
+        </td>
+      </tr>
+      <tr>
+        <td>RAG 检索</td>
+        <td>解析、分块、Embedding、混合检索、重排、增量索引</td>
+        <td>
+          搭建 解析→清洗→分块→向量化→索引 全链路；采用 稠密向量 + BM25 混合召回
+          + 重排，Recall@5 从 X 提升至 Y（Z 条标注集）。
+        </td>
+      </tr>
+      <tr>
+        <td>记忆系统</td>
+        <td>短期/长期、摘要、滑动窗口、TTL、合规</td>
+        <td>
+          会话级短期记忆（Redis）+
+          用户级长期偏好（PostgreSQL）分层存储；摘要压缩 + 滑动窗口 平均每轮
+          token 消耗降低 X%。
+        </td>
+      </tr>
+      <tr>
+        <td>工具系统</td>
+        <td>JSON Schema、OpenAPI、权限、限流、超时、幂等、降级</td>
+        <td>
+          基于 OpenAPI/JSON Schema
+          统一工具描述与入参校验；工具调用加鉴权/租户隔离/超时/重试/幂等键，失败时降级，成功率从
+          X% 提升至 Y%。
+        </td>
+      </tr>
+      <tr>
+        <td>模型路由与容错</td>
+        <td>多供应商、主备、熔断、429、退避、缓存、成本</td>
+        <td>
+          主备模型与多供应商路由，故障时自动切换；对 429/5xx/超时
+          实施指数退避+熔断+舱壁隔离+热点缓存。
+        </td>
+      </tr>
+      <tr>
+        <td>ETL 流水线</td>
+        <td>Airflow、队列、批处理、embedding 成本、数据质量</td>
+        <td>
+          用 Airflow/自研 Cron+队列
+          调度文档拉取、清洗、向量化，支持失败重试、死信队列与告警；大文件分片批量
+          embedding，单位处理成本降低 X%。
+        </td>
+      </tr>
+      <tr>
+        <td>全链路追踪</td>
+        <td>OpenTelemetry、Trace、Span、LangSmith、SLO、告警</td>
+        <td>
+          接入 OTel 生成 Trace ID
+          贯通网关/Agent/检索/工具/模型；关联对话与评测集，bad case 定位时间从 X
+          分钟缩短至 Y 分钟。
+        </td>
+      </tr>
+    </table>
+    <span class="cite">[P272–275]</span>
+
+    <h2>5. 技能清单写法</h2>
+    <p>
+      目标：让 HR 与面试官在 10 秒内判断「是否匹配 JD」，并给你面试追问入口。
+      <span class="cite">[P275]</span>
+    </p>
+    <ul>
+      <li>JD 出现的关键词往前放（岗位写「LangGraph」就显眼写 LangGraph）。</li>
+      <li>每一行 2～5 个具体词，不要一行 20 个。</li>
+      <li>
+        少用「熟悉/了解」；若用，必须跟具体事实：「了解 LoRA，曾用 X
+        数据集跑通过一次微调实验」。
+      </li>
+      <li>不要单列「ChatGPT」；可写「大模型 API 集成与流式对话」。</li>
+      <li>证书与语言：外企或海外团队可写 CET/雅思/托福；与岗无关可省略。</li>
+    </ul>
+
+    <h2>6. 常见简历问题诊断（修改前 → 修改后）</h2>
+    <table>
+      <tr>
+        <th>问题</th>
+        <th>修改前</th>
+        <th>修改后</th>
+      </tr>
+      <tr>
+        <td>太笼统</td>
+        <td>负责公司 AI 项目开发。</td>
+        <td>
+          负责企业知识库问答子系统：基于 FastAPI + Milvus
+          实现混合检索与重排，覆盖 X 业务线、Y 万份文档，日均 Z 万次查询。
+        </td>
+      </tr>
+      <tr>
+        <td>无量化</td>
+        <td>显著降低了延迟。</td>
+        <td>
+          将检索链路 P95 延迟从 650ms 降至 280ms（含 Redis
+          缓存与批量向量优化）。
+        </td>
+      </tr>
+      <tr>
+        <td>堆技术栈</td>
+        <td>使用 Python、LangChain、向量数据库、Redis。</td>
+        <td>
+          使用 Python+LangChain 搭建 Agent；向量检索采用 Milvus HNSW 索引，Redis
+          缓存热点 query 检索结果，命中后延迟 &lt; 50ms。
+        </td>
+      </tr>
+      <tr>
+        <td>像说明文档</td>
+        <td>本系统是基于大模型的智能问答系统……</td>
+        <td>
+          面向一线客服场景，打通多轮对话与工单检索；本人负责检索与重排，通过混合检索+Cross-Encoder
+          将 Top-1 准确率从 52% 提升至 71%。
+        </td>
+      </tr>
+    </table>
+    <span class="cite">[P276–277]</span>
+
+    <h2>7. 针对不同背景的简历建议</h2>
+    <h3>7.1 应届生 / 小白</h3>
+    <ul>
+      <li>
+        侧重点：学习能力、完整闭环、诚实、可验证（代码/数据集/实验记录）。
+      </li>
+      <li>
+        项目数量：1～2 个深挖远好于 5
+        个浅尝；每个项目能讲清「数据从哪来、指标怎么算、失败怎么改」。
+      </li>
+      <li>
+        深度来源：课设、毕设、开源贡献、天池/Kaggle、个人
+        GitHub；写明复现了哪篇/哪个仓库，你的增量是什么。
+      </li>
+      <li>
+        没有线上数据：明确写「自建 N 条评测集」「离线 F1 /
+        Recall@k」「本地/云主机压测」，不要装成大规模生产。
+      </li>
+    </ul>
+    <span class="cite">[P278]</span>
+
+    <h3>7.2 1～3 年经验</h3>
+    <ul>
+      <li>侧重点：ownership、线上结果、协作边界、技术权衡。</li>
+      <li>
+        每条经历写清：你负责的模块、与谁协作（前端/算法/运维）、上线后的指标。
+      </li>
+      <li>主动写 1 条与事故、评测、成本、延迟相关的内容，区分度明显。</li>
+      <li>
+        权衡示例：「在延迟敏感场景放弃重型重排模型，改用轻量双塔+规则后处理，P95
+        达标且 Recall@5 仅降 2 个点，业务接受。」
+      </li>
+    </ul>
+    <span class="cite">[P278]</span>
+
+    <h3>7.3 转行人员</h3>
+    <ul>
+      <li>侧重点：可迁移能力、学习路径、项目与目标岗的重叠度。</li>
+      <li>
+        过去工作翻译：后端 → 稳定性/性能/接口契约；数据 →
+        ETL/质量/评测集；产品运营 → 需求拆解/指标体系。
+      </li>
+      <li>
+        简历上写清投入：例如「6 个月系统学习 + 2
+        个完整项目」，减少「只培训过」印象。
+      </li>
+    </ul>
+    <span class="cite">[P279]</span>
+
+    <h2>结语 · 投递前三问自检</h2>
+    <ol>
+      <li>
+        这条经历能否在面试里展开讲满 8～10
+        分钟？（背景、方案、取舍、数据、复盘）
+      </li>
+      <li>简历上的数字是否经得起追问？（口径、采样时间、环境）</li>
+      <li>关键词是否与目标 JD 对齐？（可适当同义替换，但不要造假经历）</li>
+    </ol>
+    <p>
+      <b>好简历 = 真实经历 + 清晰结构 + 可验证结果。</b>
+      <span class="cite">[P279]</span>
+    </p>
+  </body>
+</html>

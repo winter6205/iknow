@@ -1,13 +1,14 @@
 /**
  * tests/harness/aci/tools/registry.test.ts
  *
- * `createDefaultAciRegistry` — 11 件 SSOT 工具注册层单元测试
- * （memoryDir 缺席 → 9 件；memoryDir 存在 → 11 件）。
+ * `createDefaultAciRegistry` — 23 件 SSOT 工具注册层单元测试
+ * （memoryDir + skillCatalog 都缺席 → 21 件；只 memoryDir → 23 件；
+ * 两者皆在场 → 25 件）。
  *
  * 对齐 upstream `create_default_tool_registry()`(tools/__init__.py:48):
  * 单一装配函数返回注册表,所有入口共享。本测试锁 5 边界类:
  *
- *   - 正常路径:返回 AciRegistry,list() 11 工具(带 memoryDir),顺序 append-only
+ *   - 正常路径:返回 AciRegistry,list() 25 工具(带 memoryDir+skillCatalog),顺序 append-only
  *   - 空输入:env.web 全空(undefined)→ 直连不抛;sandboxRoot:"" → 不抛
  *   - 非法输入:proxy 非 http/https / 含凭据 → 装配期同步抛 ToolExecutionError
  *   - 溢出/边界:sandboxRoot 指向不存在路径 → 装配期不抛(执行期由 fs 工具越界逻辑拒绝)
@@ -16,8 +17,8 @@
  * 另锁 Gate 3(SSOT append-only 纪律,S1/D12):`createDefaultAciRegistry()`
  * 实际装配出的工具名与 `ACI_TOOLSET_NAMES` 严格一致(长度 + 顺序 + 成员)。
  * Gate 3 的抛错路径是结构性(derived-from-map),不重构无法从外部触发,
- * 故只锁正向一致;分歧在装配期 by-construction 失败。memory 工具是条件
- * 装配的(对照名单按 memoryDir 镜像过滤)。
+ * 故只锁正向一致;分歧在装配期 by-construction 失败。memory / skill 工具
+ * 是条件装配的(对照名单按 memoryDir / skillCatalog 镜像过滤)。
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
@@ -27,6 +28,7 @@ import {
   createDefaultAciRegistry,
   ACI_TOOLSET_NAMES,
 } from "../../../../src/harness/aci/tools/registry.js";
+import { createSkillCatalog } from "../../../../src/harness/skill/catalog.js";
 import type { IknowEnv } from "../../../../src/config/env.js";
 
 /** 合法最小 env(仅 web 字段;LLM 字段工厂不消费)。 */
@@ -39,11 +41,12 @@ function makeWebEnv(
 const EXPECTED_TOOLS: readonly string[] = ACI_TOOLSET_NAMES;
 
 describe("createDefaultAciRegistry — 正常路径", () => {
-  it("memoryDir 存在 → list() 11 工具,顺序 append-only", () => {
+  it("memoryDir + skillCatalog 同时在场 → list() 23 件,顺序 append-only", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
       memoryDir: "/tmp/root/memory",
+      skillCatalog: createSkillCatalog([]),
     });
     const names = reg.inner.list().map((def) => def.name);
     expect(names).toEqual([...EXPECTED_TOOLS]);
@@ -52,9 +55,11 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(reg.catalog.get("memory_recall")).toBeDefined();
     expect(reg.catalog.get("memory_save")).toBeDefined();
     expect(reg.catalog.get("tool_search")).toBeDefined();
+    expect(reg.catalog.get("skill")).toBeDefined();
+    expect(reg.catalog.get("skill_search")).toBeDefined();
   });
 
-  it("memoryDir 缺席 → list() 9 工具(8 基线 + tool_search,无 memory 工具)", () => {
+  it("memoryDir 缺席 + skillCatalog 缺席 → list() 21 件(8 基线 + tool_search + 10 LSP,无 memory/skill 工具)", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -62,16 +67,22 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     const names = reg.inner.list().map((d) => d.name);
     expect(names).toEqual(
       [...ACI_TOOLSET_NAMES].filter(
-        (n) => n !== "memory_recall" && n !== "memory_save"
+        (n) =>
+          n !== "memory_recall" &&
+          n !== "memory_save" &&
+          n !== "skill" &&
+          n !== "skill_search"
       )
     );
     expect(reg.catalog.get("tool_search")).toBeDefined();
     expect(reg.catalog.get("memory_recall")).toBeUndefined();
     expect(reg.catalog.get("memory_save")).toBeUndefined();
+    expect(reg.catalog.get("skill")).toBeUndefined();
+    expect(reg.catalog.get("skill_search")).toBeUndefined();
   });
 
-  it("Gate 3:ACI_TOOLSET_NAMES 长度 21,前 8 原序 + memory_recall + memory_save + tool_search + 10 LSP", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(21);
+  it("Gate 3:ACI_TOOLSET_NAMES 长度 23,前 8 原序 + memory_* + tool_search + 10 LSP + skill + skill_search", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(23);
     // 前 8 件原序不变(append-only 纪律)。
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
@@ -87,7 +98,7 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(ACI_TOOLSET_NAMES[9]).toBe("memory_save");
     expect(ACI_TOOLSET_NAMES[10]).toBe("tool_search");
     // #251 LSP 工具集 append-only:11→21,10 件在末尾,不重排既有 11 件。
-    expect(ACI_TOOLSET_NAMES.slice(11)).toEqual([
+    expect(ACI_TOOLSET_NAMES.slice(11, 21)).toEqual([
       "lsp_definition",
       "lsp_references",
       "lsp_hover",
@@ -99,6 +110,8 @@ describe("createDefaultAciRegistry — 正常路径", () => {
       "lsp_outgoing_calls",
       "lsp_diagnostics",
     ]);
+    // #337 T5 skill 工具集 append-only:21→23,2 件在末尾,不重排既有 21 件。
+    expect(ACI_TOOLSET_NAMES.slice(21)).toEqual(["skill", "skill_search"]);
   });
 });
 
@@ -211,11 +224,13 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root-a",
       memoryDir: "/tmp/root-a/memory",
+      skillCatalog: createSkillCatalog([]),
     });
     const b = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root-b",
       memoryDir: "/tmp/root-b/memory",
+      skillCatalog: createSkillCatalog([]),
     });
     expect(a).not.toBe(b);
     expect(a.catalog).not.toBe(b.catalog);

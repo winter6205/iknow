@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <title>03 · 核心框架</title>
+    <link rel="stylesheet" href="../assets/base.css" />
+    <style>
+      main {
+        max-width: 820px;
+        margin: 0 auto;
+        padding: 48px 24px;
+        font-family:
+          -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+        line-height: 1.75;
+      }
+      h1 {
+        font-size: 28px;
+      }
+      h2 {
+        border-bottom: 1px solid #e3ded5;
+        padding-bottom: 0.2em;
+        color: #b5482e;
+      }
+      .cite {
+        color: #6b6b6b;
+        font-size: 0.82em;
+      }
+      .checkpoint {
+        background: #f6f3ee;
+        border: 1px solid #e3ded5;
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin: 1.6em 0;
+      }
+      code {
+        background: #f3f0ea;
+        padding: 0.1em 0.4em;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>03 · 核心框架</h1>
+      <p class="cite">来源：海云手册 v1.0.2 · 原文 P26 起</p>
+      <h2>核心框架（模块二）</h2>
+      <ul>
+        <li>
+          <b>ReAct</b>：Reason + Act 交织，Thought/Action/Observation 循环 [原文
+          P26]
+        </li>
+        <li>
+          <b>Plan-and-Execute</b
+          >：先整体规划(Planner)，再逐步执行(Executor)，支持 re-planning [原文
+          P26]
+        </li>
+        <li>
+          <b>Reflexion</b>：Actor/Evaluator/Reflector 三角色，基于反馈反思 [原文
+          P26]
+        </li>
+        <li><b>LATS</b>：结合 MCTS 的树搜索 Agent [原文 P26]</li>
+        <li><b>LangChain AgentExecutor</b>：经典同步执行器 [原文 P26]</li>
+        <li>
+          <b>LangGraph</b>：StateGraph + 条件边，支持循环/人工介入 [原文 P26]
+        </li>
+        <li><b>AutoGen / CrewAI</b>：多智能体对话/角色协作框架 [原文 P26]</li>
+      </ul>
+      <p>
+        关键设计权衡：ReAct 简单但易陷入无效循环；Plan-and-Execute
+        适合长任务；LangGraph 适合需状态控制的复杂流 [原文 P26-53]。
+      </p>
+      <p class="cite">[原文 P26-53]</p>
+      <div class="checkpoint">
+        <h3>学习检查点</h3>
+        <p>
+          1. ReAct 与 Plan-and-Execute 的本质区别？<br />2. 什么场景该用
+          LangGraph 而非 AgentExecutor？<br />3. 多智能体框架解决什么问题？
+        </p>
+      </div>
+    </main>
+  </body>
+</html>

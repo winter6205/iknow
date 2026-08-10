@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>企业招聘需求分析 · AI Agent 知识卡</title>
+    <style>
+      :root {
+        --ink: #1a1a1a;
+        --muted: #555;
+        --rule: #e2e2e2;
+        --bg: #fffdf8;
+        --accent: #2b8a5a;
+        --soft: #eaf6ef;
+        --code: #f3f0ea;
+        --warn: #9a3b2e;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          15px/1.7 "Georgia",
+          "Songti SC",
+          "Noto Serif CJK SC",
+          serif;
+        max-width: 780px;
+        margin: 0 auto;
+        padding: 48px 28px 96px;
+      }
+      h1 {
+        font-size: 29px;
+        margin: 0 0 4px;
+        letter-spacing: 0.5px;
+      }
+      h2 {
+        font-size: 21px;
+        margin: 42px 0 10px;
+        padding-bottom: 6px;
+        border-bottom: 2px solid var(--accent);
+      }
+      h3 {
+        font-size: 17px;
+        margin: 24px 0 6px;
+        color: var(--accent);
+      }
+      p {
+        margin: 8px 0;
+      }
+      .sub {
+        color: var(--muted);
+        font-style: italic;
+        margin-bottom: 8px;
+      }
+      .meta {
+        font-size: 12px;
+        color: var(--muted);
+        border-left: 3px solid var(--rule);
+        padding-left: 10px;
+        margin: 18px 0;
+      }
+      .card {
+        background: var(--soft);
+        border: 1px solid var(--rule);
+        border-radius: 8px;
+        padding: 14px 18px;
+        margin: 16px 0;
+      }
+      .card .t {
+        font-weight: bold;
+        color: var(--accent);
+        display: block;
+        margin-bottom: 4px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 12px 0;
+        font-size: 13px;
+      }
+      th,
+      td {
+        border: 1px solid var(--rule);
+        padding: 6px 8px;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: var(--soft);
+        font-weight: bold;
+      }
+      code {
+        background: var(--code);
+        padding: 1px 5px;
+        border-radius: 4px;
+        font-size: 12px;
+        font-family: "SFMono-Regular", Consolas, monospace;
+      }
+      .cite {
+        color: var(--muted);
+        font-size: 11.5px;
+        font-style: italic;
+      }
+      .qa {
+        margin: 10px 0;
+        padding-left: 14px;
+        border-left: 3px solid var(--accent);
+      }
+      .qa b {
+        color: var(--accent);
+      }
+      .pill {
+        display: inline-block;
+        background: var(--accent);
+        color: #fff;
+        font-size: 11px;
+        padding: 1px 8px;
+        border-radius: 10px;
+        margin-right: 4px;
+        vertical-align: middle;
+      }
+      .must {
+        background: #2b8a5a;
+      }
+      .nice {
+        background: #8a7a2b;
+      }
+      .diff {
+        background: #8a2b5a;
+      }
+      ul {
+        margin: 6px 0 6px 0;
+        padding-left: 22px;
+      }
+      li {
+        margin: 3px 0;
+      }
+      .key {
+        background: #fff6e0;
+        border: 1px solid #e8c97a;
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin: 14px 0;
+      }
+      .key b {
+        color: var(--warn);
+      }
+      @media print {
+        body {
+          padding: 0;
+          max-width: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>招聘需求分析</h1>
+    <p class="sub">
+      2026 年 AI Agent 企业招聘：岗位要求、技能矩阵与「初级 vs 合格」分水岭
+    </p>
+    <p class="meta">
+      来源：PDF 第 233–246 页《2026 年 AI Agent
+      企业招聘需求分析》。卡片为压缩提炼，<span class="cite">[原文 Pxxx]</span>
+      标注出处。本卡是「 readiness（就绪度）」判定的主要输入——下方标注
+      <span class="pill must">就绪输入</span> 的项将进入教学评测 rubric。
+    </p>
+
+    <div class="key">
+      <b>核心结论 [P234]：</b>2026 年 AI Agent
+      岗位需求增速高于传统后端，但门槛同步提高——企业更倾向「能落地、能扛线上」的工程师，而非仅会
+      Prompt 的爱好者。纯「调 API」经验过剩，具备「分布式工程 + Agent
+      全链路（规划/工具/记忆/观测）」的候选人仍稀缺。
+    </div>
+
+    <h2>1. 招聘市场概况</h2>
+    <ul>
+      <li>
+        <b>岗位命名</b>：AI Agent 工程师 / 智能体开发 / LLM 应用工程师 / AI
+        后台（Agent 方向）并存，内核高度重叠。<span class="cite">[P234]</span>
+      </li>
+      <li>
+        <b>技术栈收敛</b>：Python/Go 为主力；编排层向
+        LangGraph/自研状态机靠拢；RAG、工具调用、记忆与评测成标配面试题。<span
+          class="cite"
+          >[P234]</span
+        >
+      </li>
+      <li>
+        <b>BOSS 直聘数据</b>：AI 相关岗位月均新发职位数同比增长约
+        <b>74.1%</b>（显著扩张区间，但≠录用人数；简历差异化更重要）。<span
+          class="cite"
+          >[P234-235]</span
+        >
+      </li>
+    </ul>
+
+    <h3>
+      薪资范围（一线城市大厂/准一线，税前年包归纳）<span class="cite"
+        >[P235]</span
+      >
+    </h3>
+    <table>
+      <tr>
+        <th>职级/经验</th>
+        <th>区间</th>
+        <th>说明</th>
+      </tr>
+      <tr>
+        <td>1–3 年（应用向）</td>
+        <td>约 35–70 万</td>
+        <td>偏 API 集成、简单 RAG、业务后台；仅有教程级项目常落下限</td>
+      </tr>
+      <tr>
+        <td>3–5 年（工程+Agent）</td>
+        <td>约 55–100 万+</td>
+        <td>
+          要求分布式/观测/Agent 编排/评测闭环；腾讯资深、小红书 Agent
+          工程师多落此带
+        </td>
+      </tr>
+      <tr>
+        <td>5 年+/高级专家</td>
+        <td>约 80–150 万+</td>
+        <td>SFT/对齐、复杂多 Agent、成本与稳定性；股权与签字费个体差异大</td>
+      </tr>
+    </table>
+    <p class="cite">
+      影响薪资的关键因素：业务结果（延迟/成本/准确率/事故率）、技术深度（独立
+      RAG 迭代/Agent
+      状态机/评测回归）、学历论文（硕博在算法/对齐岗有溢价，工程岗重 Git
+      与线上）。[P235]
+    </p>
+
+    <h2>2. 大厂岗位详细分析</h2>
+
+    <div class="card">
+      <span class="t"
+        >腾讯 · 智能运维 AI Agent 平台 资深软件开发（北京）<span class="cite"
+          >[P236]</span
+        ></span
+      >
+      要求 3 年+，本科+；技术栈 Go/Java/C++/Python
+      至少一种熟练。核心技能：分布式系统、LLM、AI Agent、RAG、Prompt
+      Engineering。主要职责：异常检测、根因分析、任务规划、智能修复（路径推荐与执行编排）。加分：硕博、公有云实践、可验证开源贡献（PR/Issue/维护项目）。
+    </div>
+
+    <div class="card">
+      <span class="t"
+        >腾讯 · AI Agent 后台开发（深圳）<span class="cite"
+          >[P236-237]</span
+        ></span
+      >
+      本科+，Python/Go/C++ 3 年+ 后端。核心：LangChain/LangGraph/AutoGen
+      生态、RAG、Planning、Tool Calling。需讲清：何时用 RAG、何时用工具、何时纯
+      CoT，以及失败重试与超时策略。
+    </div>
+
+    <div class="card">
+      <span class="t"
+        >腾讯 · 高级 AI Agent 开发（深圳）<span class="cite">[P237]</span></span
+      >
+      5 年+，具备 LLM 应用或 Agent
+      实际开发经验（非仅调用演示）。核心：SFT/RLHF/DPO 对齐与微调、ReAct
+      范式、Fine-tuning、K8s/Docker。偏模型侧+工程侧结合：理解数据构造、训练/对齐流程、评估指标。
+    </div>
+
+    <div class="card">
+      <span class="t"
+        >小红书 · AI Agent 工程师（智能体系统与上下文工程）<span class="cite"
+          >[P238]</span
+        ></span
+      >
+      3 年+ 后端或 AI
+      工程。核心：意图识别、任务分解、工具调用、记忆管理、失败恢复。加分：Agent/Workflow
+      系统建设、RAG
+      工程、多模态。「上下文工程」解读：会话状态、长期记忆、检索片段裁剪、多轮一致性、工具结果再注入。<b
+        >失败恢复（重规划/降级/澄清）是高级岗分水岭。</b
+      >
+    </div>
+
+    <div class="card">
+      <span class="t"
+        >字节跳动 · 剪映 AI Agent 后端开发<span class="cite"
+          >[P238-239]</span
+        ></span
+      >
+      架构与编排：LangGraph 状态机、节点跳转、并行与同步。记忆：记忆槽位 schema
+      设计（短期/长期、用户偏好、会话级与跨会话隔离）。成本与性能：Token
+      优化（摘要/缓存/模型路由/小模型兜底）。多 Agent：子 Agent
+      动态分配（按任务类型或负载），需考虑调度与上下文传递。
+    </div>
+
+    <h2>3. 共性技能需求矩阵</h2>
+    <h3>编程语言<span class="cite">[P239]</span></h3>
+    <table>
+      <tr>
+        <th>语言</th>
+        <th>出现</th>
+        <th>典型用途</th>
+      </tr>
+      <tr>
+        <td>Python</td>
+        <td>高</td>
+        <td>LLM 应用、Agent 编排、脚本与评测、多数开源框架首选</td>
+      </tr>
+      <tr>
+        <td>Go</td>
+        <td>高（腾讯/字节后端）</td>
+        <td>高并发服务、平台侧</td>
+      </tr>
+      <tr>
+        <td>Java</td>
+        <td>中–高（腾讯等）</td>
+        <td>企业级后台、存量系统互通</td>
+      </tr>
+      <tr>
+        <td>C++</td>
+        <td>中</td>
+        <td>性能敏感模块、基础设施</td>
+      </tr>
+    </table>
+
+    <h3>框架<span class="cite">[P239]</span></h3>
+    <table>
+      <tr>
+        <th>框架/生态</th>
+        <th>出现</th>
+        <th>备注</th>
+      </tr>
+      <tr>
+        <td>LangChain</td>
+        <td>高</td>
+        <td>入门与原型常见</td>
+      </tr>
+      <tr>
+        <td>LangGraph</td>
+        <td>高</td>
+        <td>字节剪映等强调图编排与状态</td>
+      </tr>
+      <tr>
+        <td>AutoGen</td>
+        <td>中–高</td>
+        <td>多 Agent 对话与角色分工</td>
+      </tr>
+      <tr>
+        <td>自研编排/状态机</td>
+        <td>中</td>
+        <td>大厂线上常 partially 自研</td>
+      </tr>
+    </table>
+
+    <h3>核心技术要求分布<span class="cite">[P240]</span></h3>
+    <table>
+      <tr>
+        <th>技术点</th>
+        <th>腾讯</th>
+        <th>小红书</th>
+        <th>字节(剪映)</th>
+        <th>综合</th>
+      </tr>
+      <tr>
+        <td>LLM 基础与 Prompt</td>
+        <td>●●●</td>
+        <td>●●●</td>
+        <td>●●●</td>
+        <td>全员必备</td>
+      </tr>
+      <tr>
+        <td>RAG</td>
+        <td>●●●</td>
+        <td>●●(加分)</td>
+        <td>●●</td>
+        <td>极高</td>
+      </tr>
+      <tr>
+        <td>Agent/Planning</td>
+        <td>●●●</td>
+        <td>●●●</td>
+        <td>●●●</td>
+        <td>极高</td>
+      </tr>
+      <tr>
+        <td>Tool Calling</td>
+        <td>●●●</td>
+        <td>●●●</td>
+        <td>●●●</td>
+        <td>极高</td>
+      </tr>
+      <tr>
+        <td>记忆与上下文</td>
+        <td>●●</td>
+        <td>●●●</td>
+        <td>●●●(槽位设计)</td>
+        <td>高</td>
+      </tr>
+      <tr>
+        <td>分布式系统</td>
+        <td>●●●(运维岗)</td>
+        <td>●●</td>
+        <td>●●●</td>
+        <td>高</td>
+      </tr>
+      <tr>
+        <td>SFT/RLHF/DPO</td>
+        <td>●●●(高级岗)</td>
+        <td>○</td>
+        <td>○</td>
+        <td>中(偏高级/算法)</td>
+      </tr>
+      <tr>
+        <td>K8s/Docker</td>
+        <td>●●●(高级岗)</td>
+        <td>●●</td>
+        <td>●●</td>
+        <td>中高</td>
+      </tr>
+    </table>
+    <p class="cite">说明：●●● 高，●● 中，○ 低或岗位特定。[P240]</p>
+
+    <h3>工程能力要求分布<span class="cite">[P241]</span></h3>
+    <table>
+      <tr>
+        <th>能力</th>
+        <th>说明</th>
+        <th>频次</th>
+      </tr>
+      <tr>
+        <td>线上稳定性</td>
+        <td>超时、重试、熔断、降级、幂等</td>
+        <td>高</td>
+      </tr>
+      <tr>
+        <td>可观测性</td>
+        <td>日志、Tracing、Agent 步骤级指标</td>
+        <td>高</td>
+      </tr>
+      <tr>
+        <td>评测与回归</td>
+        <td>数据集、自动评测、Bad case 迭代</td>
+        <td>中高</td>
+      </tr>
+      <tr>
+        <td>安全与权限</td>
+        <td>工具鉴权、敏感操作审批</td>
+        <td>中高</td>
+      </tr>
+      <tr>
+        <td>成本意识</td>
+        <td>Token、GPU、调用 QPS</td>
+        <td>高（字节等显式）</td>
+      </tr>
+    </table>
+
+    <h3>学历与经验<span class="cite">[P241-242]</span></h3>
+    <ul>
+      <li>
+        本科及以上为绝大多数 JD 基准线；硕博加分（腾讯运维
+        Agent、对齐/研究岗常见）。
+      </li>
+      <li>工程岗强项目与经验可弥补学历；算法/对齐岗更卡论文与理论基础。</li>
+      <li>
+        经验：3 年+（腾讯资深/小红书/字节视 JD）；5 年+（腾讯高级 AI Agent）。
+      </li>
+    </ul>
+
+    <h2>
+      4. 技能优先级排序（6–12 月学习计划）<span class="cite">[P242-243]</span>
+    </h2>
+
+    <div class="card">
+      <span class="t"
+        ><span class="pill must">就绪输入</span>必备技能 Must Have</span
+      >
+      1. Python 后端：异步 IO、API
+      设计、依赖注入与模块化；能独立部署「带工具调用的 Agent 服务」。<br />
+      2. LLM 应用基础：消息格式、流式输出、常见参数、限流与重试。<br />
+      3. RAG 全流程：切分、embedding、向量库、重排序、幻觉与引用溯源对策。<br />
+      4. Tool Calling：JSON schema、函数描述、错误处理、并行与串行工具策略。<br />
+      5. Agent 范式：ReAct/Plan-and-Execute
+      能口述+能画图；理解「何时结束」与「状态」。<br />
+      6. 基础 Prompt
+      Engineering：角色、约束、Few-shot、输出格式（JSON/XML）结合自动解析。<br />
+      7. Git 与工程习惯：可审查仓库结构、最小可运行示例、README 与复现步骤。
+    </div>
+
+    <div class="card">
+      <span class="t"
+        ><span class="pill nice">就绪输入</span>加分技能 Nice to Have</span
+      >
+      1. LangGraph（或同类）：状态图、子图、持久化 checkpoint。<br />
+      2. 公有云：AWS/GCP/Azure
+      任一，对象存储、密钥管理、托管向量库或推理网关。<br />
+      3. K8s/Docker：部署、ConfigMap、滚动发布、资源限制。<br />
+      4. 对齐与微调入门：SFT 数据格式、DPO/RLHF 名词与适用边界（高级岗）。<br />
+      5. 开源贡献：可点击的 PR、Issue 讨论、文档改进。<br />
+      6. 多模态：图文理解、嵌入选择与延迟 trade-off。
+    </div>
+
+    <div class="card">
+      <span class="t"
+        ><span class="pill diff">就绪输入</span>差异化技能 Differentiator</span
+      >
+      1. 领域结合的
+      RAG：运维日志/指标、剪映类创作链路——能讲「数据从哪来、如何评测」。<br />
+      2. 记忆槽位与上下文工程：显式 schema、压缩策略、用户级隔离与合规。<br />
+      3. Token 与成本优化：可量化前后对比（节省比例、延迟变化）。<br />
+      4. 子 Agent 动态调度：任务分类路由、负载与上下文切片。<br />
+      5. 评测体系：离线集+线上采样+人工抽检闭环。<br />
+      6. 硕博或论文：算法/对齐岗强信号。
+    </div>
+
+    <div class="key">
+      <b>「初级 vs 合格」分水岭（从岗位文案提炼）：</b>
+      <span class="cite">[P237-239,242]</span>
+      <ul>
+        <li>
+          初级：会「调 API + 简单 RAG + 教程级项目」→ 投递落薪资下限，易被淹没。
+        </li>
+        <li>
+          合格/资深信号：① 能讲清 RAG/工具/CoT 的取舍与失败重试超时策略；②
+          失败恢复（重规划/降级/澄清）——小红书明确为高级岗分水岭；③ 记忆槽位
+          schema 与上下文工程；④ Token 优化有 2–3 个可量化手段；⑤ 能画 LangGraph
+          风格状态图（入口/工具节点/结束条件/错误边）；⑥
+          评测与回归闭环、线上稳定性（熔断/降级/幂等）。
+        </li>
+      </ul>
+    </div>
+
+    <h2>5. 针对不同背景的建议<span class="cite">[P243-245]</span></h2>
+    <ul>
+      <li>
+        <b>Java 后端转</b>：用 Python 实现最小 RAG+Tool Calling
+        服务（FastAPI）与 Java 网关 HTTP/gRPC 对接；把限流/熔断/幂等经验映射到
+        Agent 多步调用；简历突出高并发+可靠性+模型集成。
+      </li>
+      <li>
+        <b>Python 后端转</b>：给项目加观测（请求 ID/每步耗时/Token
+        计数）与评测集；补 K8s 或 Docker Compose 一键部署；深入 LangGraph
+        或自研状态机其一，讲清状态持久化与回放。
+      </li>
+      <li>
+        <b>Go 后端转</b>：常见架构 Go 网关 + Python 模型/Agent worker；补 RAG
+        与编排 Python 原型再 gRPC
+        服务化；投递强调低延迟链路/连接池/并发控制+Token 预算。
+      </li>
+      <li>
+        <b>应届生/小白</b>：3 年+
+        岗位占比高，需用实习/竞赛/开源/高质量毕设缩小差距；一条完整链路（数据→RAG→Agent→前端/CLI→Docker）；可展示仓库含
+        CI/类型检查/测试/评测；优先校招/实习/助理级 JD。
+      </li>
+      <li>
+        <b>前端转</b>：用 Next.js/Vite 做 Agent
+        控制台（步骤可视化/工具调用日志/Token 显示）；补 Node 或 Python
+        BFF；目标岗位侧重 AI 应用/全栈/Agent 前端工程化。
+      </li>
+    </ul>
+
+    <h2>6. 薪资与发展前景<span class="cite">[P245-246]</span></h2>
+    <ul>
+      <li>
+        <b>城市梯队</b
+        >：一线（北京/上海/深圳）岗位多上限高；新一线（杭州/成都）薪资略低但性价比因人而异。同公司
+        Base 不同薪资带宽可能不同，需横向对比签字费/房补/股权。
+      </li>
+      <li>
+        <b>职业发展路径</b>：初级（LLM 应用开发：API/Prompt/简单 RAG）→
+        中级（Agent 工程化：编排/记忆/评测/观测/稳定性）→ 高级（平台/多
+        Agent/对齐：架构/成本/数据飞轮）→ 专家/架构（跨业务 Agent
+        平台：标准组件/安全合规/组织级复用）。
+      </li>
+      <li>
+        <b>长期趋势</b
+        >：岗位名称会收敛，但「模型+系统+数据」三角能力不变；评测与数据权重继续上升，纯「套壳」空间被压缩。
+      </li>
+    </ul>
+
+    <div class="key">
+      <b>教学就绪度 rubric 输入小结：</b
+      >把「必备/加分/差异化」三档技能、各公司核心技能点、以及「分水岭」信号，作为判断学习者
+      readiness 的评分维度——达标必备=可投应用岗；具备差异化 2–3
+      项=可冲资深/高级。
+    </div>
+
+    <p class="meta">
+      教材出处：PDF《2026 年 AI Agent
+      企业招聘需求分析》P233–246，作者「小番薯资料铺 /
+      海云日记」。薪资为归纳性参考，投递与谈薪以实时 JD 与 offer 为准。
+    </p>
+  </body>
+</html>

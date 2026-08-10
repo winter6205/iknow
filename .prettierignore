@@ -1,0 +1,4 @@
+# teach skill 的手工教学材料（HTML/JS 交互页）非 prettier 管理内容：
+# 30+ 手写 HTML 含非规范闭合标签，prettier HTML parser 无法解析。
+# 作为迁移 skill 原样入库（T9），排除在 prettier 格式化之外（lint-staged 不碰）。
+.iknow/skills/teach/

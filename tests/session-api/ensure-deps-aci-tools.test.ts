@@ -51,6 +51,10 @@ const EXPECTED_TOOLS = [
   "lsp_incoming_calls",
   "lsp_outgoing_calls",
   "lsp_diagnostics",
+  // #337 T5 skill 工具集 append-only:21→23,末尾两件(skillCatalog 装配后
+  // 静态名单;与 ACI_TOOLSET_NAMES 对齐)。
+  "skill",
+  "skill_search",
 ];
 
 let baseDir: string;
@@ -66,7 +70,7 @@ afterAll(async () => {
 });
 
 describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
-  it("returns the ACI 11-tool registry when serve constructs without deps", async () => {
+  it("returns the ACI 23-tool registry when serve constructs without deps", async () => {
     const hub = new SessionHub({
       store,
       askUser: createNoAskUser(),

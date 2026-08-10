@@ -17,6 +17,7 @@ import type {
   ToolCall,
   ToolExecutionResult,
   Registry,
+  ToolDef,
 } from "../tools/types.js";
 import type { AciCatalog, AciToolDef } from "../aci/types.js";
 import { checkPermission, type PermissionPolicy } from "./policy.js";
@@ -33,6 +34,10 @@ const HOOK_BLOCKED_PREFIX = VIOLATION_PREFIXES.hookBlocked;
  * Build an AciCatalog from a ToolRegistry by name. v0 the catalog is
  * "ACI-aware" only via category / interruptBehavior / isConcurrencySafe;
  * tools lacking AciMeta are treated as read-only safe-by-default.
+ *
+ * `get` 动态委托 registry.get — 兼容构造后通过 `reg.registerExternal`
+ * 动态注册的 mcp__ 工具（#337）。`all()` 仍返回构造期快照，供权限层
+ * 遍历 enumerate 用。
  */
 export function createAciCatalog(registry: Registry): AciCatalog {
   const list = registry.list();
@@ -40,25 +45,40 @@ export function createAciCatalog(registry: Registry): AciCatalog {
   for (const def of list) {
     const aci = (def as { aci?: AciToolDef["aci"] }).aci;
     if (!aci) continue;
-    byName.set(
-      def.name,
-      Object.freeze({
-        name: def.name,
-        description: def.description,
-        inputSchema: def.inputSchema,
-        handler: def.handler,
-        aci: Object.freeze({
-          category: aci.category,
-          isConcurrencySafe: aci.isConcurrencySafe,
-          interruptBehavior: aci.interruptBehavior,
-        }),
-      }) as AciToolDef
-    );
+    byName.set(def.name, project(def));
   }
   return Object.freeze({
-    get: (name: string) => byName.get(name),
+    get: (name: string) => {
+      const hit = byName.get(name);
+      if (hit !== undefined) return hit;
+      // 动态源兜底：registerExternal 注册的 mcp__ 工具不在构造期快照里
+      const dynamic = registry.get(name);
+      if (!dynamic) return undefined;
+      const aci = (dynamic as { aci?: AciToolDef["aci"] }).aci;
+      if (!aci) return undefined;
+      return project(dynamic);
+    },
     all: () => Object.freeze([...byName.values()]) as ReadonlyArray<AciToolDef>,
   });
+}
+
+/**
+ * ToolDef → AciToolDef 投影(SSOT)。构造期快照路径与动态 get 兜底共用,
+ * 避免投影字段漂移(注释、name/description/inputSchema/handler + aci 三元组)。
+ */
+function project(def: ToolDef): AciToolDef {
+  const aci = (def as { aci?: AciToolDef["aci"] }).aci!;
+  return Object.freeze({
+    name: def.name,
+    description: def.description,
+    inputSchema: def.inputSchema,
+    handler: def.handler,
+    aci: Object.freeze({
+      category: aci.category,
+      isConcurrencySafe: aci.isConcurrencySafe,
+      interruptBehavior: aci.interruptBehavior,
+    }),
+  }) as AciToolDef;
 }
 
 export interface PermissionExecutorOptions {

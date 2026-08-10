@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <title>0003 · Chunking 切分——最影响召回质量的一步</title>
+    <link rel="stylesheet" href="../assets/base.css" />
+    <style>
+      .pros-cons {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin: 1em 0;
+      }
+      @media (max-width: 640px) {
+        .pros-cons {
+          grid-template-columns: 1fr;
+        }
+      }
+      .pros-cons > div {
+        border-radius: 8px;
+        padding: 12px 16px;
+        font-size: 0.92em;
+      }
+      .pros-cons .pro {
+        background: #e5f0e5;
+        border: 1px solid #b8d4b8;
+      }
+      .pros-cons .con {
+        background: #f6e2e2;
+        border: 1px solid #d4b8b8;
+      }
+      .pros-cons h4 {
+        margin: 0 0 6px;
+      }
+      table.striped {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 0.9em;
+        margin: 1em 0;
+      }
+      table.striped th,
+      td {
+        border: 1px solid var(--rule);
+        padding: 8px 12px;
+        text-align: left;
+      }
+      table.striped th {
+        background: #f6f3ee;
+      }
+      .eq {
+        font-size: 1.05em;
+        margin: 1em 0;
+        padding: 8px 14px;
+        background: #f6f3ee;
+        border-radius: 8px;
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Chunking 切分——为什么它最影响召回质量</h1>
+      <p class="meta">
+        第三课 · RAG 基础原理系列 |
+        <a href="../reference/05-rag.html">参考：RAG 技术卡</a> |
+        <a href="0002-embedding-cosine-similarity.html">上一课：Embedding</a>
+      </p>
+
+      <h2>先回答一个直觉问题</h2>
+
+      <p>
+        上节课你知道了"把文本切成 K 段 → 每段变成一个向量 →
+        查询时找最像的那段"。那"每段切多大"就变成了一个尖锐的问题：
+      </p>
+      <ul>
+        <li>
+          <strong>切太大了</strong>（比如一整个章节作为一个
+          chunk）：向量包含太多信息，语义被稀释——就像一张照片里既有猫又有狗还有车，embedding
+          找不到"重点在猫"的精确方向。
+        </li>
+        <li>
+          <strong>切太小了</strong>（一个句子一个
+          chunk）：向量方向很明确，但<strong>丢失了上下文</strong>——"退款将在 3
+          个工作日内原路返回"这句话如果没有前面的"退货条件"，回答可能不完整。
+        </li>
+      </ul>
+
+      <p>
+        这就是 chunking 的本质困境：<strong
+          >语义精度 vs 上下文完整，不可兼得，只能找平衡点。</strong
+        >
+      </p>
+
+      <hr />
+
+      <h2>交互感受：chunk 大小 + overlap 的影响</h2>
+
+      <p>
+        下面是一个模拟文档的 8 个句子。拖动滑块，观察 chunk 大小和 overlap
+        决定哪些句子"被召回到一起"：
+      </p>
+
+      <div id="chunkdemo"></div>
+      <script src="../assets/chunk-viz.js"></script>
+      <script>
+        mountChunkViz("chunkdemo");
+      </script>
+
+      <h3>你试一下：</h3>
+      <ol>
+        <li>
+          <strong>设 chunk=1、overlap=0</strong> →
+          只召回命中句本身，零噪声零上下文——如果你的问题恰好是"退款几天到"，那回答正确；如果问的是"退货的退款时间"，LLM
+          没看到前面的"退货条件"。
+        </li>
+        <li>
+          <strong>设 chunk=4、overlap=0</strong> → 召回了命中句+额外 3
+          句上下文，但可能带上无关主题句。
+        </li>
+        <li>
+          <strong>设 chunk=3、overlap=1</strong> → 每次滑动窗口重叠 1
+          句。同一个句子在多份 chunk 中出现，召回概率增加，但存储量也增加（约
+          overlap/size × 100%）。
+        </li>
+      </ol>
+
+      <hr />
+
+      <h2>三种主流切分策略</h2>
+
+      <table class="striped">
+        <tr>
+          <th>策略</th>
+          <th>怎么做</th>
+          <th>适用场景</th>
+          <th>代价</th>
+        </tr>
+        <tr>
+          <td><strong>固定长度</strong>（最常用）</td>
+          <td>每 N 个 token/字符一刀切</td>
+          <td>通用，作为 baseline</td>
+          <td>可能切断语义完整的段落</td>
+        </tr>
+        <tr>
+          <td><strong>语义切割</strong></td>
+          <td>按段落/句子边界停，或 NLP 判定"这一段意思说完"再切</td>
+          <td>文章结构清晰的文档（带标题/分段）</td>
+          <td>实现更复杂，依赖分句/分割模型</td>
+        </tr>
+        <tr>
+          <td><strong>递归切分</strong></td>
+          <td>先按大块段落切 → 大块超过上限再递归往下切到句子级</td>
+          <td>多种长度文档混合的场景</td>
+          <td>速度稍慢（需多粒度切分）</td>
+        </tr>
+      </table>
+
+      <p class="cite">
+        来源：<a href="../reference/05-rag.html">知识卡 05-RAG 技术</a> [原文
+        P54-85]；社区实践：LlamaIndex 官方 chunk_size 评测
+      </p>
+
+      <hr />
+
+      <h2>Overlap 重叠：为什么需要？</h2>
+
+      <p>
+        如果你把一个句子的"前半段"落在 chunk A 末尾、"后半段"落在 chunk B
+        开头——这两段各自向量化后，谁都不包含完整的含义。查询时可能哪个都召不回。
+      </p>
+      <p>
+        <strong>Overlap 解决这个问题</strong>：相邻 chunk
+        共享一些文本，即使边界切得不巧，至少有一份 chunk 保留了完整语义。
+      </p>
+
+      <div class="pros-cons">
+        <div class="pro">
+          <h4>✅ 好处</h4>
+          边界附近的语义不丢失；召回率显著上升（尤其对于问句和关键词跨 chunk
+          的情况）。
+        </div>
+        <div class="con">
+          <h4>⚠️ 代价</h4>
+          同样的文档存储更多的向量（chunk 数膨胀约
+          10-20%）；检索稍慢、存储增加。
+        </div>
+      </div>
+
+      <p class="cite">
+        社区共识：overlap 设为 chunk 长度的 10-20% 是推荐起点 [LlamaIndex docs /
+        Reddit r/LocalLLaMA]。
+      </p>
+
+      <hr />
+
+      <h2>Chunk 大小不够选、"不测不知道"</h2>
+
+      <p>这是 RAG 里最反直觉的一点：没有绝对的"最佳 chunk 大小"，它取决于：</p>
+      <ul>
+        <li>
+          <strong>你的文档风格</strong>：小说（长段上下文依赖）→ 大
+          chunk；知识库 FAQ（一问一答）→ 小 chunk。
+        </li>
+        <li>
+          <strong>你的常见查询</strong>：问"具体数值"→ 小
+          chunk（精确命中）；问"整体策略"→ 大 chunk（需要综合上下文）。
+        </li>
+        <li>
+          <strong>你的 embedding 模型</strong>：模型的最大上下文长度（比如 512
+          tokens vs 8192 tokens）直接影响 chunk 上限。
+        </li>
+      </ul>
+
+      <div class="checkpoint">
+        <h3>实操唯一正确方法：</h3>
+        <p>
+          建 200 条评测集 → 试 chunk_size=256/512/1024 → 跑 Recall@k →
+          看曲线选最优。RAG
+          是一个<strong>工程实验过程</strong>，不是一劳永逸的配置项。下一课的手搭
+          RAG CLI 里你会亲手验证这一点。
+        </p>
+      </div>
+
+      <hr />
+
+      <h2>总结 &amp; 下节预告</h2>
+
+      <table class="striped">
+        <tr>
+          <th>这一课你学会了</th>
+          <th>之前你不知道（只看过参数名）</th>
+        </tr>
+        <tr>
+          <td>chunk 大小 = 语义精度 vs 上下文的平衡</td>
+          <td>只在 Dify 里填过一个数字</td>
+        </tr>
+        <tr>
+          <td>overlap 解决边界切分问题</td>
+          <td>不知道 overlap 干啥的</td>
+        </tr>
+        <tr>
+          <td>三种策略（固定/语义/递归）的取舍</td>
+          <td>以为所有切分都一样</td>
+        </tr>
+        <tr>
+          <td>chunk 大小必须用评测数据来选</td>
+          <td>以为"越大越好"或"越细越好"</td>
+        </tr>
+      </table>
+
+      <p>
+        下一课：<strong>手搭一个最简 RAG CLI</strong>（约 100 行 Python）——把
+        embedding + chunking + 向量检索 + LLM 生成串成一整条管线。你会亲手看到
+        chunk_size 从 256 切到 1024 时，检索结果是怎么变化的。
+      </p>
+
+      <div class="checkpoint">
+        <h3>学完后自测</h3>
+        <p>
+          1. 为什么大 chunk 会"语义稀释"？从向量角度解释。<br />
+          2. overlap 解决了哪个具体的工程问题？（你可以画图辅助说明）<br />
+          3. 如果你有一个 FAQ 型知识库（一问一答），你倾向于用大 chunk 还是小
+          chunk？为什么？
+        </p>
+      </div>
+
+      <p class="cite">
+        <strong>推荐阅读：</strong>
+        <a
+          href="https://www.llamaindex.ai/blog/evaluating-the-ideal-chunk-size-for-a-rag-system-using-llamaindex-6207e5d3fec5"
+          >LlamaIndex: Evaluating the Ideal Chunk Size for RAG</a
+        >（用数据选 chunk 的标准方法）
+      </p>
+
+      <p class="cite">下课，你预习下一课的时候遇到任何问题直接扔过来就行。</p>
+    </main>
+  </body>
+</html>

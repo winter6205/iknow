@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>企业级 AI Agent 项目面试问答集 · 知识卡</title>
+    <style>
+      :root {
+        --ink: #1a1a1a;
+        --muted: #555;
+        --rule: #e2e2e2;
+        --bg: #fffdf8;
+        --accent: #8a5a2b;
+        --soft: #f4ede2;
+        --code: #f3f0ea;
+        --warn: #9a3b2e;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          15px/1.7 "Georgia",
+          "Songti SC",
+          "Noto Serif CJK SC",
+          serif;
+        max-width: 780px;
+        margin: 0 auto;
+        padding: 48px 28px 96px;
+      }
+      h1 {
+        font-size: 30px;
+        margin: 0 0 4px;
+        letter-spacing: 0.5px;
+      }
+      h2 {
+        font-size: 21px;
+        margin: 38px 0 10px;
+        padding-bottom: 6px;
+        border-bottom: 2px solid var(--accent);
+      }
+      h3 {
+        font-size: 17px;
+        margin: 22px 0 6px;
+        color: var(--accent);
+      }
+      p {
+        margin: 8px 0;
+      }
+      .sub {
+        color: var(--muted);
+        font-style: italic;
+        margin-bottom: 8px;
+      }
+      .meta {
+        font-size: 12px;
+        color: var(--muted);
+        border-left: 3px solid var(--rule);
+        padding-left: 10px;
+        margin: 18px 0;
+      }
+      .qa {
+        margin: 14px 0;
+        padding: 12px 16px;
+        border-left: 3px solid var(--accent);
+        background: var(--soft);
+        border-radius: 0 8px 8px 0;
+      }
+      .qa .q {
+        font-weight: bold;
+        color: var(--accent);
+        display: block;
+        margin-bottom: 6px;
+      }
+      .qa .star {
+        font-size: 13px;
+        line-height: 1.75;
+      }
+      .qa .star b {
+        color: var(--accent);
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 12px 0;
+        font-size: 13px;
+      }
+      th,
+      td {
+        border: 1px solid var(--rule);
+        padding: 6px 9px;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: var(--soft);
+        font-weight: bold;
+      }
+      code {
+        background: var(--code);
+        padding: 1px 5px;
+        border-radius: 4px;
+        font-size: 12.5px;
+        font-family: "SFMono-Regular", Consolas, monospace;
+      }
+      pre {
+        background: var(--code);
+        border: 1px solid var(--rule);
+        border-radius: 8px;
+        padding: 10px 12px;
+        overflow: auto;
+        font-size: 12px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        font-family: "SFMono-Regular", Consolas, monospace;
+      }
+      .cite {
+        color: var(--muted);
+        font-size: 11.5px;
+        font-style: italic;
+      }
+      .cat {
+        display: inline-block;
+        background: var(--accent);
+        color: #fff;
+        font-size: 11px;
+        padding: 1px 9px;
+        border-radius: 10px;
+        margin: 0 0 4px;
+        vertical-align: middle;
+      }
+      .num {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      ul {
+        margin: 6px 0 6px 0;
+        padding-left: 22px;
+      }
+      li {
+        margin: 3px 0;
+      }
+      @media print {
+        body {
+          padding: 0;
+          max-width: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>15 · 企业级 AI Agent 项目面试问答集</h1>
+    <p class="sub">100+ 项目面试题及 STAR 回答 · 精选高价值 18 题</p>
+    <p class="meta">
+      来源：PDF 第 300–313 页《企业级 AI Agent 项目面试问答集》。全集 7 大类共
+      92 题（架构设计 18 / 技术实现 18 / 性能优化 12 / 故障处理 12 / 工程质量 12
+      / 业务理解 8 / 基础知识追问
+      12）。以下为架构设计类与性能/实现类代表性题目，逐题 STAR 法回答。
+      <span class="cite">[原文 P300–313]</span>
+    </p>
+
+    <h2>第一类：架构设计类（精选）</h2>
+
+    <div class="qa">
+      <span class="q">Q1 为什么选择 ReAct 模式而不是 Plan-and-Execute？</span>
+      <span class="star"
+        ><b>S：</b>设计企业级 Agent 系统时需在 ReAct（Reasoning+Acting）和
+        Plan-and-Execute 间做架构决策，场景含客服问答、知识检索、工具调用。<br />
+        <b>T：</b>选一种既满足实时交互、又能处理复杂多步任务的范式。<br />
+        <b>A：</b>① ReAct 每步基于当前观察决策，强交互动态适应；Plan-and-Execute
+        先定完整计划再执行，适合步骤可预见场景。②
+        客服意图常在对话中变化（查订单→退款），ReAct 实时调整；Plan
+        一旦中间失败需重做。③ ReAct 流式天然支持「边思考边输出」。④ 设
+        max_iterations=10 与超时机制防死循环。<br />
+        <b>R：</b>平均响应从纯 Plan 的 8s 降到 3.2s；任务完成率从 78% 升到
+        91%；满意度 +15%。实际落地采用
+        <b>ReAct 为主、Plan 为辅的混合</b>：单步任务直接走 ReAct，复杂任务先 LLM
+        生成粗粒度 Plan、每步内部用 ReAct。
+        <span class="cite">[P300–301]</span></span
+      >
+    </div>
+
+    <div class="qa">
+      <span class="q">Q2 为什么采用多路检索而不是单一向量检索？</span>
+      <span class="star"
+        ><b>S：</b
+        >企业知识库含大量结构化+非结构化数据，单一向量检索某些场景召回不足（如「工单号
+        WO-20240315-001」纯语义检索很差）。<br />
+        <b>T：</b
+        >设计兼顾语义理解和精确匹配的检索架构，提升准确率与召回率。<br />
+        <b>A：</b>① 三路召回：向量（Milvus, top_k=20）/ 关键词 BM25（ES,
+        精确编号匹配）/ 知识图谱（Neo4j, 实体关系）。② 融合用 RRF：<code
+          >RRF_score = Σ 1/(k+rank_i)</code
+        >，k=60。③
+        意图识别路由：精确查询→关键词通道；概念问题→向量；关系查询→图谱。<br />
+        <b>R：</b>Precision@5 从 72%→89%；Recall@20 从 65%→93%；精确编号命中率从
+        30%→98%。 <span class="cite">[P301–302]</span></span
+      >
+    </div>
+
+    <div class="qa">
+      <span class="q">Q3 Agent 编排器是怎么设计的？为什么这样设计？</span>
+      <span class="star"
+        ><b>S：</b
+        >系统需协调多个组件（意图识别、检索、生成、工具调用）的执行流程，需要灵活可扩展的编排机制。<br />
+        <b>T：</b>设计支持顺序/并行/条件分支且易扩展的编排器。<br />
+        <b>A：</b>① 核心架构：<b>状态机 + 事件驱动</b>，7 个核心状态
+        INIT→INTENT_PARSED→PLANNED→EXECUTING→TOOL_CALLED→SYNTHESIZING→COMPLETED，状态转换由事件触发。②
+        组件：AgentOrchestrator / TaskPlanner（子任务 DAG）/ ToolDispatcher /
+        ContextManager。③ 设计决策：状态机便于 debug
+        与异常；事件驱动解耦、支持并行；DAG 支持并行子任务。④ 可扩展：新工具实现
+        BaseTool 注册，新 Agent 定义状态转换规则，配置化管理流程。<br />
+        <b>R：</b>支持 12 种业务流程编排，每种仅配置不改代码；新工具接入从 2
+        天→2 小时；并行工具调用使复杂任务执行时间缩短 40%。
+        <span class="cite">[P303–304]</span></span
+      >
+    </div>
+
+    <div class="qa">
+      <span class="q">Q4 多 Agent 协作和单 Agent 有什么区别？你怎么选择？</span>
+      <span class="star"
+        ><b>S：</b>业务变复杂后单 Agent 的 Prompt
+        越来越长、工具越来越多，出现能力退化和维护困难。<br />
+        <b>T：</b>评估是否从单 Agent 迁移到多 Agent，并设计协作机制。<br />
+        <b>A：</b>① 单 Agent 瓶颈：系统 Prompt 超 4000 tokens
+        后指令遵循明显下降；工具超 15 个时 LLM 选工具准确率从
+        95%→78%；逻辑耦合难维护。② 多
+        Agent：Supervisor（意图识别/路由，不直接执行）/ RAG Agent / Tool Agent /
+        Summary Agent。③ 协作：Agent 间用 JSON Schema 结构化消息传递；Supervisor
+        分派，支持顺序/并行；结果由 Supervisor 整合。④ 选择标准：<b
+          >工具数 ≤ 8 且简单→单 Agent；&gt; 8 或需专业分工 / 跨域协作→多
+          Agent</b
+        >。<br />
+        <b>R：</b>迁移后工具选择准确率回 96%；每个 Agent Prompt 控 2000 tokens
+        内；新场景只加专业 Agent；整体完成率 85%→93%。
+        <span class="cite">[P304–305]</span></span
+      >
+    </div>
+
+    <div class="qa">
+      <span class="q">Q5 意图识别模块是怎么实现的？</span>
+      <span class="star"
+        ><b>S：</b
+        >客服场景意图多样且有隐含/多意图混合（「订单怎么还没到，我要退款」含查询+操作）。<br />
+        <b>T：</b>设计准确率高、可扩展、能处理多意图和隐含意图的模块。<br />
+        <b>A：</b>① 两阶段：粗分类（正则+FastText 轻量分类器，延迟&lt;5ms，覆盖
+        80% 查询）→ 精细分类（LLM，结构化输出 JSON，支持多意图+实体）。②
+        三级意图体系 L1 咨询/操作/投诉/闲聊 → L2 产品/技术/订单/退款 → L3
+        具体线。③ 置信度阈值：≥0.85 直接执行；0.6–0.85 向用户确认；&lt;0.6
+        追问澄清。<br />
+        <b>R：</b>意图识别准确率 94%（5000 条标注）；多意图 F1
+        0.89；第一阶段处理 80% 查询，LLM 调用减 80%，省大量 token。
+        <span class="cite">[P305–306]</span></span
+      >
+    </div>
+
+    <div class="qa">
+      <span class="q">Q6 为什么选择 Milvus 而不是其他向量数据库？</span>
+      <span class="star"
+        ><b>S：</b>需向量库存文档 embedding，候选含
+        Milvus/Pinecone/Weaviate/Qdrant/Chroma/FAISS。<br />
+        <b>T：</b>综合性能、功能、运维成本选最适合企业级的方案。<br />
+        <b>A：</b>①
+        排除：FAISS（单机不支持分布式/持久化）、Chroma（轻量不适合生产）、Pinecone（全托管，数据出境合规问题）。②
+        对比 Milvus vs Weaviate vs Qdrant：Milvus 千万级 QPS 2000+（Qdrant
+        1500/Weaviate 1200）；原生分布式计算存储分离；支持
+        IVF_FLAT/IVF_SQ8/HNSW/DiskANN 多索引；2.x
+        支持标量过滤+向量混合查询；LangChain/LlamaIndex 官方集成；LF AI & Data
+        毕业项目。③ POC（200 万文档真实数据）：Milvus P99 45ms/召回 98.2%/内存
+        16GB，Qdrant P99 62ms/97.8%/14GB。<br />
+        <b>R：</b>最终选 Milvus 部署 3 节点集群，线上稳定 8 个月 P99
+        &lt;50ms，数据从 200 万增至 800 万文档水平扩展平滑支撑。
+        <span class="cite">[P306–307]</span></span
+      >
+    </div>
+
+    <div class="qa">
+      <span class="q">Q7 系统的可扩展性是怎么设计的？</span>
+      <span class="star"
+        ><b>S：</b>需支持快速迭代（新增工具/知识源/Agent
+        类型/模型），不能每次改核心代码。<br />
+        <b>T：</b>设计可扩展架构，让新功能接入边际成本趋零。<br />
+        <b>A：</b>① 插件化工具：所有工具继承
+        BaseTool（name/description/parameters_schema/execute），ToolRegistry
+        自动注册，描述自动生成 JSON Schema。② 可配置检索管道（YAML
+        定义通道与权重、reranker）。③ 模型抽象层 LLMProvider 统一接口支持
+        OpenAI/Anthropic/本地模型，配置切换。④
+        事件总线解耦，新功能监听事件扩展。<br />
+        <b>R：</b>新工具接入平均 2
+        小时；新检索通道半天；切底层模型改一行配置零代码；6 个月新增 8 工具 3
+        检索通道核心代码零修改。 <span class="cite">[P307–309]</span></span
+      >
+    </div>
+
+    <div class="qa">
+      <span class="q">Q8 如果让你重新设计这个系统，你会怎么改进？</span>
+      <span class="star"
+        ><b>A：</b>① 评估驱动开发（EDD）：从一开始就建 RAGAS/DeepEval
+        自动评估，CI 跑 500+ case 防回归。② 可观测性增强：第一行代码就接
+        LangSmith/LangFuse，每步有 span。③ Streaming 优先：从设计阶段就以
+        SSE/WebSocket 流式默认通信。④
+        更细粒度模型路由（按分类/生成/推理/摘要、输入长度、质量要求）。⑤ Agent
+        记忆系统重构（分层：工作/情景/语义记忆 + 记忆索引检索）。
+        <span class="cite">[P309]</span></span
+      >
+    </div>
+
+    <h2>第二类：性能优化 / 技术实现类（精选）</h2>
+
+    <div class="qa">
+      <span class="q">Q9 你的系统能支持多少并发？怎么评估的？</span>
+      <span class="star"
+        ><b>A：</b>用 Locust 分布式压测，场景按比例混合（简单问答 40%/RAG
+        30%/多轮 20%/工具 10%）。配置：API 4 Pod(4C8G)、Milvus 3
+        节点(8C32G)、Redis 3 节点 Sentinel、LLM 云端 API(QPS 200)。<br />
+        结果：50 并发 P99 2.8s/QPS 48/错误 0%；100 并发 4.2s/85/0.1%；200 并发
+        8.5s/120/2.3%；300 并发 15s+/110/8.7%。瓶颈在 LLM API 的 QPS
+        限制与延迟（Milvus 在 200 并发仍 &lt;80ms 轻松）。<br />
+        <b>R：</b>安全容量定 150 并发（P99&lt;5s，错误&lt;0.5%），日常高峰约 80
+        并发有余量；超 120 自动扩容 API Pod。
+        <span class="cite">[P310–311]</span></span
+      >
+    </div>
+
+    <div class="qa">
+      <span class="q">Q10 为什么要做模型路由？直接用一个模型不行吗？</span>
+      <span class="star"
+        ><b>S：</b>月 LLM API 费数万元，查询对模型能力需求差异大：简单查询用
+        GPT-4 浪费，复杂用小模型不够。<br />
+        <b>A：</b>① 查询分布：60% 简单（事实检索/FAQ）、25% 中等、15% 高复杂。②
+        路由维度：任务复杂度/上下文长度/质量要求/用户等级。③
+        模型矩阵：轻量(GPT-4o-mini/Haiku)→标准(GPT-4o/Sonnet)→强力(GPT-4/Opus)。④
+        轻量分类器（规则+FastText，延迟&lt;3ms）+
+        动态降级（强力超时自动降级标准）。<br />
+        <b>R：</b>月 token 成本降 62%（5 万→1.9 万）；满意度仅降
+        1.2%；整体延迟降 35%。 <span class="cite">[P311–312]</span></span
+      >
+    </div>
+
+    <div class="qa">
+      <span class="q">Q11 怎么设计的对话管理和上下文维护？</span>
+      <span class="star"
+        ><b>A：</b>① 分层上下文：系统层(System Prompt 固定
+        ~800t)/会话层(滑动窗口最近 N 轮)/检索层(RAG
+        相关度排序)/工具层(用完即清)。② 窗口：维护最近 10 轮完整记录，超 10
+        轮前面对话自动摘要压缩（保留意图/决策/未解决）。③ Token 预算（8K
+        总窗）：System 10% / 历史+摘要 30% / 检索 40% / 预留输出 20%。<br />
+        <b>R：</b>多轮上下文一致性 76%→94%；无超限截断；支持最长 50
+        轮不丢关键上下文。 <span class="cite">[P312–313]</span></span
+      >
+    </div>
+
+    <div class="qa">
+      <span class="q">Q12 你的系统支持哪些模型？怎么做模型适配的？</span>
+      <span class="star"
+        ><b>A：</b>统一模型抽象层 LLMProvider(ABC)，方法
+        chat/stream_chat/count_tokens/get_model_info；适配器：OpenAIProvider /
+        AnthropicProvider / QwenProvider（通义千问兼容 OpenAI
+        格式）等，让系统无缝切换不同 LLM 提供商（含本地部署）。
+        <span class="cite">[P313]</span></span
+      >
+    </div>
+
+    <div class="qa">
+      <span class="q">Q13 如何处理长文档输入？上下文窗口不够怎么办？</span>
+      <span class="star"
+        ><span class="num">（技术实现类 · 详见原文 P314–334 题库）</span>
+        抓手：分块检索而非全量塞入；摘要压缩历史；RAG 按需注入；用分层记忆与引用
+        chunk id 控制窗口。 <span class="cite">[P314]</span></span
+      >
+    </div>
+
+    <div class="qa">
+      <span class="q">Q14 系统的安全架构是怎么设计的？</span>
+      <span class="star"
+        ><span class="num">（技术实现类）</span>
+        抓手：工具最小权限+写操作二次确认/审批链；PII 脱敏与可删除设计；多租户
+        isolation（collection/namespace）；trace 采样与日志脱敏平衡。
+        <span class="cite">[P314]</span></span
+      >
+    </div>
+
+    <div class="qa">
+      <span class="q"
+        >Q15 你怎么看待 MCP（Model Context Protocol）？系统中怎么用？</span
+      >
+      <span class="star"
+        ><span class="num">（技术实现类）</span> 抓手：MCP
+        让工具可发现、可授权、可观测地接入；客户端连接管理、工具列表同步、调用隔离，每次调用映射到
+        trace；旧系统用适配层统一成同一工具接口。
+        <span class="cite">[P315]</span></span
+      >
+    </div>
+
+    <div class="qa">
+      <span class="q">Q16 如何设计 Agent 的错误恢复和重试机制？</span>
+      <span class="star"
+        ><span class="num">（故障处理类）</span>
+        抓手：超时预算+指数退避+上限；重试仅对幂等安全环节；工具返回结构化错误码；步数预算+强制切换策略；trace
+        标记循环类型；离线回放复现。 <span class="cite">[P316]</span></span
+      >
+    </div>
+
+    <div class="qa">
+      <span class="q">Q17 你的系统支持多租户吗？怎么实现的？</span>
+      <span class="star"
+        ><span class="num">（工程质量类）</span> 抓手：检索层
+        collection/namespace 隔离；工具权限按数据域；模型路由按租户配额；Redis
+        令牌桶/滑动窗口限流按租户+模型维度。
+        <span class="cite">[P317]</span></span
+      >
+    </div>
+
+    <div class="qa">
+      <span class="q">Q18 你怎么看 Agent 架构的未来发展？</span>
+      <span class="star"
+        ><span class="num">（业务理解类）</span>
+        抓手：从「套壳」走向评测驱动与数据飞轮；多 Agent
+        协作与平台化；成本/效果/延迟可运营；安全合规划入一等需求。
+        <span class="cite">[P317]</span></span
+      >
+    </div>
+
+    <h2>其余大类题库范围（供按图索骥）</h2>
+    <table>
+      <tr>
+        <th>大类</th>
+        <th>题数</th>
+        <th>典型问法（原文示例）</th>
+      </tr>
+      <tr>
+        <td>技术实现类</td>
+        <td>18</td>
+        <td>
+          向量库选型与分块、ReAct Prompt 设计、熔断器三状态、Function Calling vs
+          MCP、RRF 公式与权重、Embedding 选型、Guardrails、Streaming 实现
+        </td>
+      </tr>
+      <tr>
+        <td>性能优化类</td>
+        <td>12</td>
+        <td>
+          并发压测、模型路由、上下文压缩、长文档处理、检索延迟优化、成本治理
+        </td>
+      </tr>
+      <tr>
+        <td>故障处理类</td>
+        <td>12</td>
+        <td>
+          模型超时不稳定、死循环排查、工具失败恢复、重试机制、多租户隔离失效
+        </td>
+      </tr>
+      <tr>
+        <td>工程质量类</td>
+        <td>12</td>
+        <td>可扩展性、测试与评测闭环、CI/CD、监控告警、代码可维护性</td>
+      </tr>
+      <tr>
+        <td>业务理解类</td>
+        <td>8</td>
+        <td>Agent 价值、ROI、未来架构演进、与业务指标对齐</td>
+      </tr>
+      <tr>
+        <td>基础知识追问</td>
+        <td>12</td>
+        <td>Transformer/注意力/Tokenization/微调/量化/推理优化 等八股延伸</td>
+      </tr>
+    </table>
+    <span class="cite">[P300, P314–334]</span>
+
+    <p class="meta">
+      注：本卡精选自全集 92
+      题，覆盖架构设计（Q1–Q8）与性能/实现/故障/质量/业务代表题（Q9–Q18）。其余技术实现类
+      10 题、性能/故障/质量/业务/基础每类详见原始 PDF 对应页（P314
+      起）。全部回答以 STAR
+      结构组织，数据口径均来自原文示例，面试中请替换为自己的真实数字。
+    </p>
+  </body>
+</html>

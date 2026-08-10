@@ -54,6 +54,15 @@ export interface AssemblyContext {
   readonly memoryEnabled: boolean;
   readonly memoryResolver?: () => Promise<string | undefined>;
   readonly toolList?: () => ReadonlyArray<string> | undefined;
+  readonly skills?: () => ReadonlyArray<SkillSummary> | undefined;
+}
+
+/** #337 T6 `<available_skills>` 段元素形态(最小投影:name + description + disabled)。
+ *  disabled=true → 装配层跳过(SC3),与 catalog.available() 语义一致。 */
+export interface SkillSummary {
+  readonly name: string;
+  readonly description: string;
+  readonly disabled?: boolean;
 }
 
 /** IKNOW-196 入口范围判定。对话型入口(chat / tui / serve)激活 BOOTSTRAP;
@@ -78,6 +87,8 @@ export function createIknowSystemResolver(opts: {
   readonly memoryResolver?: () => Promise<string | undefined>;
   /** #224 工具名录段注入缝 (可选):见 AssemblyContext.toolList 注释。 */
   readonly toolList?: () => ReadonlyArray<string> | undefined;
+  /** #337 T6 skills 注入缝 (可选):见 AssemblyContext.skills 注释。 */
+  readonly skills?: () => ReadonlyArray<SkillSummary> | undefined;
 }): () => Promise<string | undefined> {
   const bootstrapActive = shouldIncludeBootstrap(opts.surface);
   return () =>
@@ -88,6 +99,7 @@ export function createIknowSystemResolver(opts: {
       memoryEnabled: opts.memoryEnabled,
       ...(opts.memoryResolver ? { memoryResolver: opts.memoryResolver } : {}),
       ...(opts.toolList ? { toolList: opts.toolList } : {}),
+      ...(opts.skills ? { skills: opts.skills } : {}),
     });
 }
 
@@ -114,6 +126,13 @@ export async function assembleIdentityContext(
   // `pwd` (which is `execute` → ask by default). Cwd is constant per process,
   // so output stays byte-stable across turns (KV cache contract).
   segments.push(projectPathSegment(ctx.cwd));
+  // #337 T6 加性段 `<available_skills>`:append 在最末,不触碰 LOCKED 顺序。
+  // 缺席(seam 未注入)→ 跳过(字节级零变化);提供且经 disabled 过滤后为空 →
+  // 渲染空清单显式语句;提供且非空 → 渲染名字序列表。
+  const skills = ctx.skills?.();
+  if (skills !== undefined) {
+    segments.push(skillsSegment(skills));
+  }
   return segments.join("\n\n");
 }
 
@@ -200,4 +219,19 @@ function toolListSegment(names: ReadonlyArray<string>): string {
  *  字节级稳定契约保留(KV 缓存不抖动)。 */
 function projectPathSegment(cwd: string): string {
   return `## Project path\n${cwd}`;
+}
+
+/** #337 T6 `<available_skills>` 段渲染:XML 风格标签 + 名字序列表 +
+ *  description 同行 + 空清单显式 "No skills installed"。
+ *  加性段,不触碰 IKNOW_ASSEMBLY_ORDER;disabled 在调用前已被装配层过滤。 */
+export function skillsSegment(skills: ReadonlyArray<SkillSummary>): string {
+  const visible = skills
+    .filter((s) => !s.disabled)
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name));
+  if (visible.length === 0) {
+    return "<available_skills>\nNo skills installed\n</available_skills>";
+  }
+  const body = visible.map((s) => `${s.name}: ${s.description}`).join("\n");
+  return `<available_skills>\n${body}\n</available_skills>`;
 }

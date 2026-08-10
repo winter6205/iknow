@@ -110,5 +110,8 @@ docs/harness-report
 
 .reference/
 .iknow/
+!.iknow/
+!.iknow/skills/
+.iknow/permissions.toml
 .qoder/
 AGENTS.md

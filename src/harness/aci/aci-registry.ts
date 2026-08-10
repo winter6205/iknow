@@ -7,6 +7,8 @@
  * aci 字段对 ajv 编译无害（additionalProperties 约束在 inputSchema 内，不在顶层）。
  */
 
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
 import { createRegistry } from "../tools/registry.js";
 import type { RegistryImpl } from "../tools/registry.js";
 import type { ToolDef } from "../tools/types.js";
@@ -17,6 +19,8 @@ export interface AciRegistry {
   /** 冻结协议 registry（交给 createExecutor）。 */
   readonly inner: RegistryImpl;
   readonly catalog: AciCatalog;
+  /** 动态追加 MCP 扩展源工具，不改变 inner 的构造期快照。 */
+  readonly registerExternal: (defs: ReadonlyArray<AciToolDef>) => void;
   /** 核心（非 lazy）工具 schema —— 默认进 prompt 的集合。 */
   readonly visibleSchemas: () => ReadonlyArray<ToolDef>;
   /** 延迟加载：按需检索某工具 schema（含 lazy 的），未注册返回 undefined。 */
@@ -65,17 +69,54 @@ export function createAciRegistry(
   }
 
   const inner = createRegistry(tools);
+  const externalAjv = new Ajv.default({ strict: true, allErrors: true });
+  addFormats.default(externalAjv);
 
   const byName = new Map<string, AciToolDef>();
   for (const t of tools) {
     byName.set(t.name, t);
   }
   const allList = Object.freeze([...tools]) as ReadonlyArray<AciToolDef>;
+  const externalByExt = new Map<string, AciToolDef>();
 
   const catalog: AciCatalog = Object.freeze({
-    get: (name: string) => byName.get(name),
-    all: () => allList,
+    get: (name: string) => byName.get(name) ?? externalByExt.get(name),
+    all: () =>
+      Object.freeze([
+        ...allList,
+        ...externalByExt.values(),
+      ]) as ReadonlyArray<AciToolDef>,
   });
+
+  const registerExternal = (defs: ReadonlyArray<AciToolDef>): void => {
+    const pending = new Map<string, AciToolDef>();
+    for (const def of defs) {
+      if (!def.name.startsWith("mcp__")) {
+        throw new RegistryConstructionError(
+          `external tool name '${def.name}' must use mcp__ namespace`
+        );
+      }
+      if (
+        byName.has(def.name) ||
+        externalByExt.has(def.name) ||
+        pending.has(def.name)
+      ) {
+        throw new RegistryConstructionError(`duplicate tool name: ${def.name}`);
+      }
+      try {
+        externalAjv.compile(def.inputSchema);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new RegistryConstructionError(
+          `validator compile failed for ${def.name}: ${msg}`
+        );
+      }
+      pending.set(def.name, def);
+    }
+    for (const [name, def] of pending) {
+      externalByExt.set(name, def);
+    }
+  };
 
   // #224 discovered set：本 run 内被检索过的工具名（闭包状态，不跨 session
   // 持久化）。discover() 命中时 add；visibleSchemas() 按 tools 顺序拼
@@ -83,15 +124,23 @@ export function createAciRegistry(
   const discovered = new Set<string>();
 
   const visibleSchemas = (): ReadonlyArray<ToolDef> =>
-    tools.filter((t) => !t.aci.lazy || discovered.has(t.name));
+    [...tools, ...externalByExt.values()].filter(
+      (t) => !t.aci.lazy || discovered.has(t.name)
+    );
 
   const discover = (name: string): ToolDef | undefined => {
-    const hit = byName.get(name);
+    const hit = byName.get(name) ?? externalByExt.get(name);
     if (hit !== undefined) {
       discovered.add(name);
     }
     return hit;
   };
 
-  return Object.freeze({ inner, catalog, visibleSchemas, discover });
+  return Object.freeze({
+    inner,
+    catalog,
+    registerExternal,
+    visibleSchemas,
+    discover,
+  });
 }

@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>实战项目 · Python/Java/Go 三版 · 知识卡</title>
+    <style>
+      :root {
+        --ink: #1a1a1a;
+        --muted: #555;
+        --rule: #e2e2e2;
+        --bg: #fffdf8;
+        --accent: #8a5a2b;
+        --soft: #f4ede2;
+        --code: #f3f0ea;
+        --warn: #9a3b2e;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          15px/1.7 "Georgia",
+          "Songti SC",
+          "Noto Serif CJK SC",
+          serif;
+        max-width: 780px;
+        margin: 0 auto;
+        padding: 48px 28px 96px;
+      }
+      h1 {
+        font-size: 30px;
+        margin: 0 0 4px;
+        letter-spacing: 0.5px;
+      }
+      h2 {
+        font-size: 21px;
+        margin: 38px 0 10px;
+        padding-bottom: 6px;
+        border-bottom: 2px solid var(--accent);
+      }
+      h3 {
+        font-size: 17px;
+        margin: 22px 0 6px;
+        color: var(--accent);
+      }
+      p {
+        margin: 8px 0;
+      }
+      .sub {
+        color: var(--muted);
+        font-style: italic;
+        margin-bottom: 8px;
+      }
+      .meta {
+        font-size: 12px;
+        color: var(--muted);
+        border-left: 3px solid var(--rule);
+        padding-left: 10px;
+        margin: 18px 0;
+      }
+      .card {
+        background: var(--soft);
+        border: 1px solid var(--rule);
+        border-radius: 8px;
+        padding: 14px 18px;
+        margin: 14px 0;
+      }
+      .card .t {
+        font-weight: bold;
+        color: var(--accent);
+        display: block;
+        margin-bottom: 4px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 12px 0;
+        font-size: 13px;
+      }
+      th,
+      td {
+        border: 1px solid var(--rule);
+        padding: 6px 9px;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: var(--soft);
+        font-weight: bold;
+      }
+      code {
+        background: var(--code);
+        padding: 1px 5px;
+        border-radius: 4px;
+        font-size: 12.5px;
+        font-family: "SFMono-Regular", Consolas, monospace;
+      }
+      pre {
+        background: var(--code);
+        border: 1px solid var(--rule);
+        border-radius: 8px;
+        padding: 10px 12px;
+        overflow: auto;
+        font-size: 12px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        font-family: "SFMono-Regular", Consolas, monospace;
+      }
+      .cite {
+        color: var(--muted);
+        font-size: 11.5px;
+        font-style: italic;
+      }
+      .pill {
+        display: inline-block;
+        background: var(--accent);
+        color: #fff;
+        font-size: 11px;
+        padding: 1px 8px;
+        border-radius: 10px;
+        margin-right: 4px;
+        vertical-align: middle;
+      }
+      .tier {
+        border-left: 4px solid var(--accent);
+        background: var(--soft);
+        border-radius: 0 8px 8px 0;
+        padding: 12px 16px;
+        margin: 14px 0;
+      }
+      .tier .lv {
+        font-weight: bold;
+        color: var(--accent);
+      }
+      ul {
+        margin: 6px 0 6px 0;
+        padding-left: 22px;
+      }
+      li {
+        margin: 3px 0;
+      }
+      @media print {
+        body {
+          padding: 0;
+          max-width: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>16 · 实战项目：Python / Java / Go 三版</h1>
+    <p class="sub">
+      对标 nageoffer/ragent 架构复杂度的企业级 Agent 平台 · 项目分级与三语言落地
+    </p>
+    <p class="meta">
+      来源：PDF 第 4 页（实战项目路线图/技术栈）、第 236–245
+      页（企业招聘分析：岗位、技能矩阵、分层建议）、第 263–271
+      页（三语言项目经历模板）。卡片为压缩提炼，<span class="cite"
+        >[原文 Pxxx]</span
+      >
+      标注出处。
+    </p>
+
+    <h2>1. 实战项目总览与技术栈</h2>
+    <table>
+      <tr>
+        <th>版本</th>
+        <th>技术栈</th>
+        <th>目标人群</th>
+      </tr>
+      <tr>
+        <td><b>Python 版</b><br />（推荐首选）</td>
+        <td>FastAPI + LangChain + Milvus + Redis</td>
+        <td>AI/算法岗、Python 后端</td>
+      </tr>
+      <tr>
+        <td><b>Java 版</b></td>
+        <td>Spring Boot 3 + Spring AI + MyBatis Plus + Milvus</td>
+        <td>Java 后端开发</td>
+      </tr>
+      <tr>
+        <td><b>Go 版</b></td>
+        <td>Gin + 自研框架 + Milvus + Redis</td>
+        <td>Go 后端、云原生岗</td>
+      </tr>
+    </table>
+    <span class="cite">[P4]</span>
+
+    <h3>技术架构概览（三版共享）</h3>
+    <p>企业级智能客服/知识助手 Agent 平台，核心架构：</p>
+    <pre>
+用户请求 → API 网关 → 意图识别 → Agent 编排器
+                                    ├── ReAct Agent（思考-行动-观察循环）
+                                    ├── 规划 Agent（任务分解与执行）
+                                    ├── RAG Agent（知识检索与生成）
+                                    └── 反思 Agent（质量校验）
+支撑层：
+├── 多路检索引擎（向量 + BM25 + 混合检索 + RRF 融合）
+├── 记忆系统（短期：Redis 滑窗 + 长期：向量数据库）
+├── 工具系统（搜索、计算器、数据库查询 + MCP）
+├── 模型路由（多模型候选 + 三态熔断器 + 自动降级）
+├── 全链路追踪（每步操作的 Trace 记录）
+└── 文档 ETL（PDF/Word 解析 → 分块 → 向量化 → 入库）</pre>
+    <span class="cite">[P5]</span>
+
+    <h3>快速开始（最简命令）</h3>
+    <pre>
+Python 版（推荐首选）：
+  cd project-python
+  cp .env.example .env        # 填入 API Key
+  pip install -r requirements.txt
+  uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+Java 版：
+  cd project-java
+  mvn clean package -DskipTests
+  java -jar target/agent-platform-1.0.0.jar
+
+Go 版：
+  cd project-go
+  go build -o agent-server ./cmd/server
+  ./agent-server</pre>
+    <span class="cite">[P4–5]</span>
+
+    <h2>2. 项目分级（按能力深度，决定「能否过面试」）</h2>
+    <p class="cite">
+      以下分级综合 PDF 第 245 页职业发展路径、第 260 页工程能力要求、第 864–868
+      页各背景转岗建议归纳，为教学用「通关阶梯」。
+    </p>
+
+    <div class="tier">
+      <span class="lv">Tier 0 · 入门 Demo（不足以过面试，仅练手）</span>
+      <ul>
+        <li>
+          单文件 LangChain/Spring AI 调通一个 RAG +
+          单轮问答；无观测、无评测、无部署。
+        </li>
+        <li>
+          判定：能跑通「问→检索→答」，但讲不清状态、失败重试、成本。仅用于建立直觉。
+        </li>
+        <li>
+          出处信号：小白「5 个浅尝不如 1～2 个深挖」[P278]；「项目易停留在
+          Demo」[P8657]。
+        </li>
+      </ul>
+    </div>
+
+    <div class="tier">
+      <span class="lv">Tier 1 · 完整链路（校招 / 实习 / 助理级可投）</span>
+      <ul>
+        <li>
+          一条完整链路：数据 → RAG → Agent → 简单前端或 CLI → Docker
+          部署；可展示仓库（CI、类型检查、测试、评测脚本）。
+        </li>
+        <li>
+          核心能力：API、Prompt、简单 RAG、脚本与工具（对应「初级 LLM
+          应用开发」[P8728]）。
+        </li>
+        <li>
+          加分动作：自建 200 条评测集，离线 F1 达 0.78，代码与实验记录开源
+          GitHub [P9972–9974]。
+        </li>
+        <li>
+          passes_interview_if：能讲清「数据从哪来、指标怎么算、失败怎么改」，覆盖
+          8～10 分钟自我介绍。
+        </li>
+      </ul>
+    </div>
+
+    <div class="tier">
+      <span class="lv">Tier 2 · Agent 工程化（1～3 年经验 / 社招主流）</span>
+      <ul>
+        <li>
+          编排、记忆、评测、观测、稳定性（对应「中级 Agent 工程化」[P8730]）。
+        </li>
+        <li>
+          主动写 1 条与事故/评测/成本/延迟相关的内容；区分度明显 [P9966]。
+        </li>
+        <li>
+          技术权衡示例：「延迟敏感场景放弃重型重排，改用轻量双塔+规则后处理，P95
+          达标且 Recall@5 仅降 2 个点，业务接受」[P9967]。
+        </li>
+        <li>
+          passes_interview_if：讲清
+          ownership、线上结果、协作边界、技术权衡，每条经历含可量化指标。
+        </li>
+      </ul>
+    </div>
+
+    <div class="tier">
+      <span class="lv">Tier 3 · 平台 / 多 Agent / 对齐（高级 / 专家）</span>
+      <ul>
+        <li>
+          架构、成本、数据飞轮、团队规范（对应「高级
+          平台/多Agent/对齐」「专家/架构 跨业务平台」[P8732–8736]）。
+        </li>
+        <li>
+          需 SFT/RLHF/DPO 理解、复杂多 Agent、成本与稳定性、K8s/Docker
+          训练推理服务化（腾讯高级岗 [P237–238]）。
+        </li>
+        <li>
+          passes_interview_if：能设计可扩展架构（插件化工具/配置化管道/事件总线，新工具接入
+          2 小时 [P307–309]），并有评测驱动与可观测体系。
+        </li>
+      </ul>
+    </div>
+
+    <h2>3. 三语言项目落地要点（来自简历模板）</h2>
+
+    <h3>Python 版 · 企业级 AI Agent 智能助手平台</h3>
+    <div class="card">
+      <span class="t">技术栈 & 边界</span> Python, FastAPI, LangChain,
+      LangGraph, Milvus, Redis, PostgreSQL。<br />
+      职责边界：对话编排、ReAct 循环、工具执行、RAG
+      客户端、记忆读写、与模型网关异步调用；用异步 IO 支撑高并发。
+      <span class="cite">[P269, P285]</span>
+    </div>
+    <ul>
+      <li>
+        核心职责：多步编排与状态持久化（工具失败重试+人工介入，日均 X
+        万轮）；RAG 流水线（混合检索+重排，Top-5 命中
+        X%→Y%）；会话级+业务记忆分层（Redis TTL+PG 归档，成本降
+        Z%）；模型网关联调流式与熔断（P95&lt;X ms）。
+      </li>
+      <li>
+        工程重点（面试话术）：会话隔离与并发安全、全链路 timeout
+        与重试、结构化日志+ trace id 贯通、与 Java/Go 团队 HTTP/gRPC 契约对齐
+        [P285]。
+      </li>
+    </ul>
+
+    <h3>Java 版 · 企业级智能问答与 Agent 编排服务平台</h3>
+    <div class="card">
+      <span class="t">技术栈 & 边界</span> Java 17, Spring Boot 3, Spring
+      WebFlux, OpenFeign, Resilience4j, Elasticsearch, Redis, PostgreSQL,
+      Kafka（可选）。<br />
+      边界：会话、鉴权、网关、B 端编排与检索结果合并；Python 侧负责 LangGraph
+      与重模型推理 [P268]。 <span class="cite">[P270]</span>
+    </div>
+    <ul>
+      <li>
+        核心职责：模型网关调用层（流式 SSE、超时重试、熔断配额，大促可用性
+        X%）；工具执行与权限校验（角色/数据域，失败降级纯 RAG）；Java
+        侧检索策略编排（查询改写+结果融合，Top-3 命中
+        +X%）；Micrometer+Prometheus 指标大盘。
+      </li>
+      <li>
+        亮点：WebFlux+SSE 低延迟；Resilience4j 按租户限流+多模型切换；gRPC/HTTP
+        契约+SLA+Trace ID 贯通。
+      </li>
+    </ul>
+
+    <h3>Go 版 · 高并发 LLM 网关与 Agent 执行引擎</h3>
+    <div class="card">
+      <span class="t">技术栈 & 边界</span> Go, Gin（或 Fiber）, gRPC, Redis,
+      PostgreSQL, OpenTelemetry, Prometheus, Kubernetes。<br />
+      边界：高性能基础设施——模型网关、流式 SSE/gRPC 转发、检索代理、高 QPS
+      接入层，部分 sidecar 形态 [P268]。 <span class="cite">[P271]</span>
+    </div>
+    <ul>
+      <li>
+        核心职责：高性能流式代理（chunk 转发、连接复用、优雅关闭，单机 X k
+        QPS）；工具执行沙箱与超时控制（隔离用户输入+下游 HTTP，降
+        SSRF/资源耗尽）；Redis 令牌桶+滑动窗口限流（按租户/模型配额）；全链路
+        Trace ID 贯通。
+      </li>
+      <li>
+        亮点：连接池与内存分配优化降
+        GC/尾延迟；多模型路由（成本/延迟/质量优先可配置，失败自动切换）；与
+        Python 编排服务职责分离。
+      </li>
+    </ul>
+
+    <h2>4. 按背景的最短补全路径（来自招聘分析）</h2>
+    <table>
+      <tr>
+        <th>背景</th>
+        <th>Gap</th>
+        <th>可执行路径</th>
+      </tr>
+      <tr>
+        <td>Java 后端转</td>
+        <td>Python 生态、LLM 调试、向量与评测流水线</td>
+        <td>
+          用 Python 写最小 RAG+Tool Calling 服务（FastAPI）与 Java 网关
+          HTTP/gRPC 对接；把限流/熔断/幂等映射到 Agent
+          多步调用；简历突出高并发+可靠性+模型集成 [P8651]
+        </td>
+      </tr>
+      <tr>
+        <td>Python 后端转</td>
+        <td>分布式与线上叙事、易停 Demo</td>
+        <td>
+          每个项目加观测（请求 ID/每步耗时/Token 计数）+评测集；补 K8s 或 Docker
+          Compose 一键部署；深入 LangGraph
+          或自研状态机其一，讲清状态持久化与回放 [P8659]
+        </td>
+      </tr>
+      <tr>
+        <td>Go 后端转</td>
+        <td>LLM 生态多在 Python</td>
+        <td>
+          常见架构 Go 网关+Python 模型/Agent worker；补 RAG 与编排的 Python
+          原型再 gRPC 服务化；强调低延迟链路、连接池、并发控制+Token 预算
+          [P8662]
+        </td>
+      </tr>
+      <tr>
+        <td>应届生/小白</td>
+        <td>3 年+ 岗位占比高</td>
+        <td>
+          一条完整链路 +
+          一个可展示仓库（CI/类型检查/测试/评测）；优先投校招/实习/助理级 JD
+          [P8680]
+        </td>
+      </tr>
+      <tr>
+        <td>前端转</td>
+        <td>后端、向量、评测、线上运维</td>
+        <td>
+          用 Next.js/Vite 做 Agent 控制台（步骤可视化、工具日志、Token
+          显示）；补 Node/Python 一层 BFF [P8685]
+        </td>
+      </tr>
+    </table>
+    <span class="cite">[P864–869]</span>
+
+    <h2>5. 必备 / 加分 / 差异化技能清单（学习计划优先级）</h2>
+    <p class="cite">
+      依据岗位出现频次、面试追问深度与落地难度整理，适合 6–12 个月学习计划
+      [P8608]。
+    </p>
+    <div class="card">
+      <span class="t">Must Have（必备）</span> 1. Python 后端能力：异步 IO、API
+      设计、依赖注入与模块化，能独立部署带工具调用的 Agent 服务。<br />
+      2. LLM
+      应用基础：消息格式、流式输出、常见参数（temperature/max_tokens）、限流与重试。<br />
+      3. RAG 全流程：切分、embedding、向量库、重排序、幻觉与引用溯源对策。<br />
+      4. Tool Calling：JSON schema、函数描述、错误处理、并行/串行策略。<br />
+      5. Agent 范式：ReAct / Plan-and-Execute
+      能口述+画图，理解「何时结束」与「状态」。<br />
+      6. 基础 Prompt Engineering：角色/约束/Few-shot/输出格式（JSON/XML）。<br />
+      7. Git 与工程习惯：可审查仓库、最小可运行示例、README 与复现步骤。
+    </div>
+    <div class="card">
+      <span class="t">Nice to Have（加分）</span>
+      LangGraph（或同类）、公有云（AWS/GCP/Azure）、K8s/Docker、对齐与微调入门（SFT/DPO/RLHF
+      名词与边界）、开源贡献、多模态。
+    </div>
+    <div class="card">
+      <span class="t">Differentiator（差异化）</span> 领域结合的
+      RAG（能讲数据从哪来、如何评测）、记忆槽位与上下文工程、Token
+      与成本优化（可量化前后对比）。 <span class="cite">[P8611–8632]</span>
+    </div>
+
+    <h2>6. 工程能力要求分布（面试高频）</h2>
+    <table>
+      <tr>
+        <th>能力</th>
+        <th>频次/权重</th>
+      </tr>
+      <tr>
+        <td>线上稳定性（超时/重试/熔断/降级/幂等）</td>
+        <td>高</td>
+      </tr>
+      <tr>
+        <td>可观测性（日志/Tracing/Agent 步骤级指标）</td>
+        <td>高</td>
+      </tr>
+      <tr>
+        <td>评测与回归（数据集/自动评测/Bad case 迭代）</td>
+        <td>中高</td>
+      </tr>
+      <tr>
+        <td>安全与权限（工具鉴权/敏感操作审批）</td>
+        <td>中高</td>
+      </tr>
+      <tr>
+        <td>成本意识（Token/GPU/调用 QPS）</td>
+        <td>高（字节等显式）</td>
+      </tr>
+    </table>
+    <span class="cite">[P8564–8578]</span>
+
+    <p class="meta">
+      落地建议：先按 Tier 1 把一条完整链路 + 评测集 + Docker 部署跑通（Python
+      版首选），再用 Tier 2
+      的工程化要点（观测/评测/成本/稳定性）回填简历与面试稿，对应
+      13-resume-guide.html 与 14-star-script.html。
+    </p>
+  </body>
+</html>

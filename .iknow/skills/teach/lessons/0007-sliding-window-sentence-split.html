@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>0007 · chunk_size 与 overlap 的交叉算法 + 句子切分器原理</title>
+    <link rel="stylesheet" href="../assets/base.css" />
+    <style>
+      .sv-block {
+        margin: 0.4em 0;
+        padding: 0.4em 0.7em;
+        background: #fff;
+        border: 1px solid var(--rule);
+        border-radius: 6px;
+        font-family: monospace;
+        font-size: 1em;
+        line-height: 1.5;
+      }
+      .sv-idx {
+        color: var(--muted);
+        font-size: 0.8em;
+        background: #f3f0ea;
+        padding: 0.1em 0.35em;
+        border-radius: 3px;
+      }
+      .sv-pre {
+        color: #999;
+      }
+      .sv-hit {
+        background: #fce4d6;
+        font-weight: 600;
+      }
+      .sv-post {
+        color: #999;
+      }
+      .sv-pos {
+        color: var(--muted);
+        font-size: 0.78em;
+      }
+      .sv-ruler {
+        overflow-x: auto;
+        white-space: nowrap;
+        font-family: monospace;
+        font-size: 1.15em;
+        padding: 0.8em 0.5em;
+        letter-spacing: 2px;
+        background: #fff;
+        border: 1px solid var(--rule);
+        border-radius: 8px;
+      }
+      .sv-char {
+        display: inline-block;
+        min-width: 1.2em;
+        text-align: center;
+        padding: 0.15em 0;
+      }
+      .sv-boundary {
+        background: #cce5ff;
+        border-radius: 4px;
+        font-weight: 700;
+      }
+      #sv-size,
+      #sv-overlap {
+        width: 60px;
+        padding: 0.3em 0.5em;
+        border: 1px solid var(--rule);
+        border-radius: 6px;
+        font-size: 0.95em;
+      }
+      #sv-apply {
+        padding: 0.3em 0.8em;
+        border: none;
+        border-radius: 6px;
+        background: var(--accent);
+        color: #fff;
+        cursor: pointer;
+      }
+      .sv-tabs {
+        display: flex;
+        gap: 0;
+        margin-bottom: 1em;
+      }
+      .sv-tab {
+        padding: 0.5em 1.2em;
+        border: 1px solid var(--rule);
+        border-bottom: none;
+        border-radius: 8px 8px 0 0;
+        background: #f6f3ee;
+        cursor: pointer;
+        font-size: 0.9em;
+      }
+      .sv-tab.sv-active {
+        background: #fff;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>chunk_size × overlap 的交叉算法 + 句子切分器原理</h1>
+      <p class="sub">
+        你之前一直问的"它们到底怎么交叉算的"，以及"句子迭代器怎么识别一段"——这两件事用一张图就能讲清
+      </p>
+
+      <div class="checkpoint">
+        <b>这节课解决两个具体问题：</b><br />
+        1.
+        <strong>滑动窗口数学</strong
+        >：chunk_size=15，overlap=3，"交叉"到底是怎么算的？下一块从哪里开始？<br />
+        2. <strong>句子切分器</strong>：`doc.sents`
+        或正则是怎么"知道"哪里是句子边界的？它不是 AI 识别的，是规则静态切分。
+      </div>
+
+      <h2>1. chunk_size 和 overlap 的交叉计算（滑动窗口）</h2>
+
+      <p>
+        字符切的本质是<b>滑动窗口</b>，和"我每读 N 个字，就往前挪 N—O
+        个字"是同一件事。
+      </p>
+
+      <p><strong>公式只有一条：</strong></p>
+      <pre>下一块起始位置 = 当前块起始位置 + (chunk_size − overlap)</pre>
+
+      <p>
+        举例：文本 <code>退款将在3个工作日内原路返回。</code>（15字，位置
+        0–14），size=10，overlap=2：
+      </p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>块</th>
+            <th>起始</th>
+            <th>内容</th>
+            <th>公式</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>[0]</td>
+            <td>0</td>
+            <td>退款将在3个工作日</td>
+            <td>从 0 开始取 10 字（位置 0–9）</td>
+          </tr>
+          <tr>
+            <td>[1]</td>
+            <td>8</td>
+            <td>日内原路返回。</td>
+            <td>0 + (10−2) = 8（位置 8–14）</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="rg-note">
+        下一块应从 16 (=8+8) 开始，已越界（&gt;14），循环结束 →
+        <b>共 2 块</b>。越界即停止，不会无限切。
+      </p>
+
+      <p>
+        <strong>「交叉」的意思是</strong
+        >：块[0]的末尾"日内"也出现在块[1]的开头（位置 8、9
+        在两块里各出现一次）。overlap=2 就是每块有 2
+        个字和上一块重复——不是"断裂后粘合"，是同一段字在相邻两块里各出现一次。系统检索时只要命中任何一块就行。
+      </p>
+
+      <h2>2. 亲手滑一次</h2>
+
+      <div id="slideviz">
+        <div class="sv-tabs">
+          <div class="sv-tab sv-active" id="sv-slide-tab">
+            滑动窗口（字符切）
+          </div>
+          <div class="sv-tab" id="sv-sent-tab">句子切分器</div>
+        </div>
+
+        <div id="sv-sliding-area">
+          <div class="rg-stage">
+            <label
+              >chunk_size:
+              <input type="number" id="sv-size" value="10" min="3" max="30"
+            /></label>
+            <label
+              >overlap:
+              <input type="number" id="sv-overlap" value="2" min="0" max="9"
+            /></label>
+            <button id="sv-apply">重算</button>
+            <div id="sv-sliding" class="sv-blocks"></div>
+          </div>
+        </div>
+
+        <div id="sv-sent-area" style="display: none">
+          <div class="rg-stage">
+            <p>下面展示的是同一个文本的句子边界检测结果：</p>
+            <div id="sv-sentence"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="checkpoint">
+        <b>你会看到：</b>滑动窗口模式下，overlap 增大 →
+        块数变多、相邻块共享的字变多、完整句出现在某一块的概率变大。<br />
+        句子切分器模式下，框定边界后直接把文本拆成"退款将在3个工作日内原路返回。"和"会员可享受免运费特权。"两个完整块——overlap=0，零冗余。
+      </div>
+
+      <h2>3. 句子切分器：它到底怎么"认"出句子边界？</h2>
+
+      <p>不是 AI，不是 embedding——就是一行正则规则：</p>
+
+      <pre>
+import re
+chunks = re.split(r'(?<=[。？！.!?])\s*', text)</pre>
+
+      <p>
+        <code>(?<=[。？！.!?])</code> 叫「正向后顾」——正则引擎在扫描时，每遇到
+        <code>。？！.!?</code>
+        中任何一个字符，就在它<b>后面</b>切一刀。不破坏原文（保留标点）。<code
+          >\s*</code
+        >
+        吃掉句尾可能有的空格/换行。
+      </p>
+
+      <p>
+        这就是你 0004
+        课里学的「离线静态规则」——<b>切分器不"理解"句子，它只是看见了句尾标点就切</b>。
+      </p>
+
+      <p>
+        spaCy 的
+        <code>doc.sents</code> 本质也是干同一件事，只不过用了更复杂的规则（处理
+        Mr. Smith
+        这类带点但不表示句末的缩写），中文版额外处理引号配对。但核心仍然是「预定义规则」，不是模型推理。
+      </p>
+
+      <h2>4. 回到 FAQ 场景</h2>
+
+      <p>
+        <b>对于一问一答一句的 FAQ，最优解一直是句子切分 + overlap=0。</b><br />
+        字符切 + overlap 是为了<b>长文档</b>准备的——当你有一段 5000
+        字的说明文档时，不能等句号出现，必须按固定大小切才能控制 chunk 数量。
+      </p>
+
+      <p>你的直觉是对的（"一般就一句"），但现在你知道了选择的理论基础：</p>
+      <ul>
+        <li><b>问答对按句分：</b>句子切分 + overlap=0（零冗余，每块完整）</li>
+        <li>
+          <b>长文档统一切：</b>字符切 + overlap=chunk_size 的 10%~20%（防腰斩）
+        </li>
+      </ul>
+
+      <h2>5. 一句话钉死</h2>
+      <div class="checkpoint">
+        <strong>滑动窗口：</strong>下一块起点 = 当前起点 + (chunk_size −
+        overlap)。overlap 是相邻块共享的字数，不是"补丁"。<br />
+        <strong>句子切分器：</strong>是静态规则（正向后顾匹配句尾标点），不是 AI
+        推理。`doc.sents` 也是类似原理。<br />
+        <strong>选择原则：</strong>短句/FAQ 用句子切 + overlap=0；长文档用字符切
+        + overlap=10~20%。
+      </div>
+
+      <h2>6. 自测</h2>
+      <div class="quiz">
+        <div
+          class="q"
+          data-feedback="下一块 = 当前起始 + (chunk_size − overlap)。8 + (10−3)=15。"
+        >
+          <p>
+            Q1：chunk_size=10，overlap=3，当前块起始位置=8。下一块从哪里开始？
+          </p>
+          <button class="q-opt">11</button>
+          <button class="q-opt" data-correct="1">15</button>
+          <button class="q-opt">18</button>
+          <button class="q-opt">13</button>
+          <button class="q-check">检查</button>
+          <div class="q-fb" style="display: none"></div>
+        </div>
+        <div
+          class="q"
+          data-feedback="句尾标点。后切 = 正向后顾 (lookbehind)，不破坏原文。"
+        >
+          <p>Q2：`(?<=[。？！.!?])` 中的 `?<=` 表示什么？</p>
+          <button class="q-opt">可选的标点</button>
+          <button class="q-opt">零次或一次匹配</button>
+          <button class="q-opt" data-correct="1">正向后顾——在标点后面切</button>
+          <button class="q-opt">反向引用</button>
+          <button class="q-check">检查</button>
+          <div class="q-fb" style="display: none"></div>
+        </div>
+        <div
+          class="q"
+          data-feedback="句子切分器是静态规则（正则/spaCy 规则），不是模型推理，也不是向量。"
+        >
+          <p>Q3：句子切分器是靠什么来"认出"句子边界的？</p>
+          <button class="q-opt">embedding 向量余弦</button>
+          <button class="q-opt" data-correct="1">
+            静态规则（匹配句尾标点）
+          </button>
+          <button class="q-opt">LLM 读取文字后判断</button>
+          <button class="q-opt">用户手动标注</button>
+          <button class="q-check">检查</button>
+          <div class="q-fb" style="display: none"></div>
+        </div>
+      </div>
+
+      <h2>推荐源</h2>
+      <ul>
+        <li>
+          <a href="../reference/05-rag.html">reference/05-rag.html</a>（RAG
+          知识卡）
+        </li>
+        <li>
+          外部：<a
+            href="https://docs.llamaindex.ai/en/stable/module_guides/loading/node_parsers/"
+            >LlamaIndex · Node Parsers</a
+          >（含 sentence_splitter 源码）
+        </li>
+      </ul>
+
+      <p class="foot">
+        关联：<a href="0003-chunking-strategies.html">0003 Chunking</a> ·
+        <a href="0004-offline-online-two-stages.html">0004 离线/在线</a> ·
+        <a href="0006-minimal-rag-cli.html">0006 手搭 RAG CLI</a>
+      </p>
+      <p class="ask">
+        ❓ 现在你亲手调整滑块看过"交叉"过程，再去看 overlap=0
+        在句子切分下零冗余、在字符切下 62%
+        半截句——这个视觉对比能帮你追平那个"一直绕不过去"的点了吗？
+      </p>
+    </main>
+    <script src="../assets/quiz.js"></script>
+    <script src="../assets/slide-viz.js"></script>
+  </body>
+</html>

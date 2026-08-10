@@ -1,0 +1,696 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <title>0011 · 三层架构：Harness · Agent 记忆 · 外置知识库</title>
+    <link rel="stylesheet" href="../assets/base.css" />
+    <style>
+      .layer-stack {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        margin: 1.6em 0;
+      }
+      .layer {
+        padding: 18px 20px;
+        border-radius: 10px;
+        border: 1px solid var(--rule);
+      }
+      .layer strong {
+        display: block;
+        font-size: 1.05em;
+        margin-bottom: 4px;
+      }
+      .layer .desc {
+        font-size: 0.92em;
+        color: var(--muted);
+      }
+      .layer .examples {
+        font-size: 0.85em;
+        color: var(--fg);
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px dashed var(--rule);
+      }
+      .layer-harness {
+        background: #e8f0fe;
+        border-color: #b3d1f7;
+      }
+      .layer-memory {
+        background: #fef7e0;
+        border-color: #f0d98c;
+      }
+      .layer-kb {
+        background: #e8f5e9;
+        border-color: #a5d6a7;
+      }
+      .flow-box {
+        background: var(--code-bg);
+        border: 1px solid var(--rule);
+        border-radius: 10px;
+        padding: 18px 22px;
+        margin: 1.4em 0;
+        font-family: "SF Mono", Menlo, Consolas, monospace;
+        font-size: 13.5px;
+        line-height: 1.8;
+        overflow-x: auto;
+        white-space: pre;
+      }
+      .flow-box .comment {
+        color: #6a9955;
+      }
+      .flow-box .arrow {
+        color: var(--accent);
+        font-weight: 600;
+      }
+      .flow-box .highlight {
+        background: #fff3cd;
+        padding: 1px 4px;
+        border-radius: 3px;
+      }
+      .compare-table {
+        font-size: 0.9em;
+      }
+      .compare-table td:first-child {
+        font-weight: 600;
+        width: 22%;
+        white-space: nowrap;
+      }
+      .misconception {
+        background: #fff3e0;
+        border: 1px solid #ffcc80;
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin: 1em 0;
+      }
+      .misconception .wrong {
+        color: #c0392b;
+        font-weight: 600;
+      }
+      .misconception .right {
+        color: #2e7d32;
+        font-weight: 600;
+      }
+      .analogy {
+        background: #f3e5f5;
+        border: 1px solid #ce93d8;
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin: 1.2em 0;
+        font-size: 0.95em;
+      }
+      .analogy strong {
+        color: #7b1fa2;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>三层架构 · Harness · Agent 记忆 · 外置知识库</h1>
+      <p class="meta">
+        第十一课 · 搞清楚三个最容易混淆的概念 |
+        <a href="0010-reading-unknown-codebase-gbrain-tools.html">← 上一课</a> |
+        <a href="../reference/19-three-layer-architecture.html">参考卡</a>
+      </p>
+
+      <h2>先做一个诊断</h2>
+
+      <p>在开始之前，请判断下面三个说法对不对：</p>
+
+      <div class="quiz">
+        <div class="q" id="q1">
+          <p>
+            <strong>说法 1</strong>：「Agent 的记忆能力来自 LLM
+            本身——模型越强，记忆越好。」
+          </p>
+          <button class="q-opt" onclick="answer(this, 'q1', 'wrong')">
+            对
+          </button>
+          <button class="q-opt" onclick="answer(this, 'q1', 'correct')">
+            错
+          </button>
+          <div class="q-fb" id="q1-fb" style="display: none"></div>
+        </div>
+
+        <div class="q" id="q2">
+          <p>
+            <strong>说法 2</strong>：「gbrain 没有接入
+            LLM，所以它只是一个数据库。」
+          </p>
+          <button class="q-opt" onclick="answer(this, 'q2', 'wrong')">
+            对
+          </button>
+          <button class="q-opt" onclick="answer(this, 'q2', 'correct')">
+            错
+          </button>
+          <div class="q-fb" id="q2-fb" style="display: none"></div>
+        </div>
+
+        <div class="q" id="q3">
+          <p>
+            <strong>说法 3</strong>：「Harness 和 Agent Loop 是同一个东西。」
+          </p>
+          <button class="q-opt" onclick="answer(this, 'q3', 'wrong')">
+            对
+          </button>
+          <button class="q-opt" onclick="answer(this, 'q3', 'correct')">
+            错
+          </button>
+          <div class="q-fb" id="q3-fb" style="display: none"></div>
+        </div>
+      </div>
+
+      <script>
+        var feedbacks = {
+          q1: {
+            correct:
+              '✅ 错。LLM 是无状态的——每次调用它都"不记得"上一轮。所谓"记忆"是 Harness 把对话历史重新拼回上下文窗口的结果。记忆是 Harness 的能力，不是模型的。',
+            wrong:
+              '❌ 这是一个最常见的误解。LLM 每次调用都是无状态的（stateless），它不保存任何对话历史。你看到的"多轮记忆"其实是 Harness 在下一轮把历史消息又拼回上下文窗口的结果。',
+          },
+          q2: {
+            correct:
+              "✅ 错。gbrain 通过一个统一的 AI Gateway（gateway.ts）接入了 17+ 个 embedding provider 和 Anthropic Claude（用于合成）。它不只是数据库，而是一个有 LLM 合成能力的知识库引擎。",
+            wrong:
+              "❌ gbrain 确实接入了 LLM。它有一个统一的 AI Gateway，支持 17+ 个 embedding provider（OpenAI / ZeroEntropy / Voyage 等），并且用 Anthropic Claude 做知识合成（gbrain think 命令）。",
+          },
+          q3: {
+            correct:
+              '✅ 错。Harness 是整个运行时壳（工具、权限、上下文、会话），Agent Loop 只是 Harness 里的一个组件——负责"调 LLM → 执行工具 → 再调 LLM"的循环。',
+            wrong:
+              '❌ Harness 比 Agent Loop 大得多。Agent Loop 只是 Harness 里负责"调 LLM → 执行工具 → 循环"的那个子系统。Harness 还包括工具注册、权限控制、Hook 生命周期、会话持久化、子代理管理等。',
+          },
+        };
+        function answer(btn, qid, result) {
+          var q = document.getElementById(qid);
+          var btns = q.querySelectorAll(".q-opt");
+          btns.forEach(function (b) {
+            b.classList.add("answered");
+            b.disabled = true;
+          });
+          btn.classList.add(result === "correct" ? "correct" : "wrong");
+          var fb = document.getElementById(qid + "-fb");
+          fb.textContent = feedbacks[qid][result];
+          fb.style.display = "block";
+        }
+      </script>
+
+      <hr />
+
+      <h2>核心模型：Agent = Model + Harness</h2>
+
+      <p>
+        这是整套课程最重要的一个等式。来自
+        <a href="https://code.claude.com/docs/en/how-claude-code-works"
+          >Claude Code 官方文档</a
+        >：
+      </p>
+
+      <blockquote>
+        <strong>Claude Code is the agentic harness around Claude.</strong><br />
+        The model reasons; the harness supplies tools, context management, and
+        execution environment.
+      </blockquote>
+
+      <p>
+        翻译：Claude Code 是 Claude
+        模型的<strong>智能体外壳（harness）</strong>。模型负责推理；harness
+        提供工具、上下文管理和执行环境。
+      </p>
+
+      <div class="analogy">
+        <strong>🍳 厨房类比</strong><br />
+        把 Agent 想象成一家餐厅：<br /><br />
+        <strong>LLM = 厨师</strong
+        >——能读菜谱、能做决策、能判断味道，但自己不能出门买菜、不能记住昨天的客人点了什么。<br />
+        <strong>Harness = 厨房</strong
+        >——有灶台（工具执行）、有冰箱（上下文管理）、有服务员（权限和
+        Hook）、有记事板（会话记录）。<br />
+        <strong>Agent Memory = 今天的订单记录</strong
+        >——写在厨房的白板上，下班就擦掉。<br />
+        <strong>External Knowledge Base = 菜谱档案馆</strong
+        >——在另一个房间，通过传菜窗口（MCP / Tool 接口）递进来。
+      </div>
+
+      <h2>三层各自的职责</h2>
+
+      <div class="layer-stack">
+        <div class="layer layer-harness">
+          <strong>🔧 Layer 1 · Harness（运行时壳）</strong>
+          <div class="desc">
+            有状态的编排层。控制工具执行、权限、上下文注入、会话持久化、子代理。每次
+            LLM 调用前，Harness 负责把"所有需要的信息"拼成上下文窗口。
+          </div>
+          <div class="examples">
+            <strong>iknow 的 Harness</strong
+            >：<code>agent-loop/</code>（循环调度）+
+            <code>tools/registry.ts</code>（工具注册）+ <code>cli/</code>（TTY
+            REPL）+ <code>session-api/hub.ts</code>（HTTP 多会话）<br />
+            <strong>Claude Code 的 Harness</strong>：内置 Bash/Read/Write/Edit
+            工具 + PreToolUse Hook + CLAUDE.md 注入 + JSONL 会话持久化 + MCP
+            server 管理
+          </div>
+        </div>
+
+        <div class="layer layer-memory">
+          <strong>🧠 Layer 2 · Agent Memory（会话记忆）</strong>
+          <div class="desc">
+            单次会话内的上下文管理。包括对话历史、当前轮次状态、跨轮先验（prior
+            chunks）。<strong>不持久化</strong>——会话结束就消失。
+          </div>
+          <div class="examples">
+            <strong>iknow 的 Agent Memory</strong
+            >：<code>ConversationState</code>（<code>interaction/conversation.ts</code>）=
+            turns[] + last_priors[] + history_finals[]<br />
+            <strong>Claude Code 的 Agent Memory</strong>：对话
+            transcript（JSONL）+ CLAUDE.md 每次会话重新加载 + auto
+            memory（MEMORY.md 前 200 行）
+          </div>
+        </div>
+
+        <div class="layer layer-kb">
+          <strong>📚 Layer 3 · External Knowledge Base（外置知识库）</strong>
+          <div class="desc">
+            跨会话持久化的结构化知识。通过 Tool 接口（MCP
+            或函数调用）按需检索，<strong>不自动出现在上下文中</strong>。
+          </div>
+          <div class="examples">
+            <strong>iknow 的 KB</strong
+            >：<code>InMemoryKnowledgeStore</code>（纯内存，进程重启消失）+ 4 个
+            kb_* 工具<br />
+            <strong>gbrain</strong>：Postgres + pgvector + TSVECTOR + Anthropic
+            Claude 合成（gateway.ts）+ 17+ embedding provider<br />
+            <strong>你的目标</strong>：把 iknow 的 InMemoryKnowledgeStore 升级为
+            gbrain 级别的持久化
+          </div>
+        </div>
+      </div>
+
+      <hr />
+
+      <h2>一条完整请求的数据流</h2>
+
+      <p>当用户问「公司年假制度是什么？」，三层如何协作？</p>
+
+      <div class="flow-box">
+        <span class="comment">// Step 1: Harness 组装上下文</span> context =
+        systemPrompt <span class="comment">// 系统指令（不变的）</span> +
+        claudeMd <span class="comment">// 项目记忆（每次会话加载）</span> +
+        transcript <span class="comment">// 对话历史（Agent Memory）</span> +
+        toolSchemas
+        <span class="comment">// kb_retrieve 等工具的 JSON Schema</span> +
+        latestUserMessage <span class="comment">// "公司年假制度是什么？"</span>
+
+        <span class="arrow">→</span> LLM(context)
+
+        <span class="comment">// Step 2: LLM 决定调用工具</span>
+        LLM <span class="arrow">→</span>
+        <span class="highlight"
+          >tool_call: kb_retrieve({ query: "年假制度", doc_type: "hr_policy"
+          })</span
+        >
+
+        <span class="comment"
+          >// Step 3: Harness 执行工具（访问 External KB）</span
+        >
+        results = kb_retrieve.execute(...)
+        <span class="comment">// 关键词臂 + 向量臂 + RRF 融合</span>
+        <span class="arrow">→</span> 5 个 chunks，带 citation 元数据
+
+        <span class="comment">// Step 4: Harness 把结果注入上下文</span>
+        context += tool_result(results)
+
+        <span class="arrow">→</span> LLM(context)
+        <span class="comment">// 第二次调用——这次 LLM "看到"了检索结果</span>
+
+        <span class="comment">// Step 5: LLM 生成有引用的答案</span>
+        LLM <span class="arrow">→</span> "根据公司 HR 政策
+        [来源:doc-hr-001]，年假为 15 天..."
+
+        <span class="comment">// Step 6: Harness 更新 Agent Memory</span>
+        transcript += [user_msg, tool_call, tool_result, assistant_msg]
+        last_priors = derivePriorsFromAnswer(answer, store)
+        <span class="comment">// 提取 5 个 source_spans 供下轮用</span>
+      </div>
+
+      <p class="cite">
+        来源：iknow 源码 <code>src/agent-loop/llm-agent.ts:152-247</code>（LLM
+        循环）+ <code>src/interaction/conversation.ts:49-82</code>（先验推导）
+      </p>
+
+      <h3>关键洞察：外置知识库不在上下文中</h3>
+
+      <p>
+        Step 2-4 是整个架构的核心。gbrain 的几十万条知识、iknow 的几百个
+        chunks——它们<strong>永远不自动出现在 LLM 的上下文窗口里</strong>。只有当
+        LLM 决定调用 <code>kb_retrieve</code> 工具时，Harness
+        才执行检索，把结果注入下一轮上下文。
+      </p>
+
+      <p>
+        这就是你的调研材料里说的那句话（<code>gbrain-world-memory.html</code> 第
+        177 行）：
+      </p>
+
+      <blockquote>
+        gbrain 里的几十万条事实，永远不在模型的上下文里。<br />gbrain
+        与模型之间隔着一条硬边界：MCP 工具面。
+      </blockquote>
+
+      <p>
+        这个边界叫<strong>工具面（tool surface）</strong>。iknow
+        用的是函数调用（<code>kb_retrieve</code> 等 4 个工具），gbrain 用的是
+        MCP
+        协议——但本质一样：<strong>外置知识库通过工具接口按需"换页"（page-in）到上下文</strong>。
+      </p>
+
+      <hr />
+
+      <h2>iknow vs gbrain vs Claude Code 对比</h2>
+
+      <table class="compare-table">
+        <tr>
+          <th>维度</th>
+          <th>iknow</th>
+          <th>gbrain</th>
+          <th>Claude Code</th>
+        </tr>
+        <tr>
+          <td>LLM 接入</td>
+          <td>
+            有<br /><code>OpenAiCompatibleLlmClient</code><br />（OpenAI
+            兼容协议）
+          </td>
+          <td>
+            有<br />统一 Gateway（gateway.ts）<br />Embedding 17+ provider<br />Synthesis
+            用 Anthropic Claude
+          </td>
+          <td>有<br />Anthropic Claude API<br />（核心产品）</td>
+        </tr>
+        <tr>
+          <td>Harness</td>
+          <td>agent-loop + cli + session-api<br />（自写，TypeScript）</td>
+          <td>CLI + MCP server<br />（operations.ts 生成 ~90 个操作）</td>
+          <td>内置工具 + Hook + 权限 + 子代理<br />（Anthropic 官方）</td>
+        </tr>
+        <tr>
+          <td>Agent Memory</td>
+          <td>
+            ConversationState<br />（turns + priors + history）<br /><strong
+              >不持久化</strong
+            >
+          </td>
+          <td>通过 MCP 宿主管理<br />（gbrain 自身不管 agent memory）</td>
+          <td>JSONL transcript<br />+ CLAUDE.md<br />+ auto memory</td>
+        </tr>
+        <tr>
+          <td>External KB</td>
+          <td>InMemoryKnowledgeStore<br />（纯内存，进程重启消失）</td>
+          <td>
+            Postgres + pgvector<br />+ TSVECTOR + HNSW<br />（真正持久化）
+          </td>
+          <td>文件系统 + MCP server<br />（外接）</td>
+        </tr>
+        <tr>
+          <td>持久化</td>
+          <td>❌ 无</td>
+          <td>✅ Postgres</td>
+          <td>✅ JSONL + 文件系统</td>
+        </tr>
+        <tr>
+          <td>多用户</td>
+          <td>❌ 无</td>
+          <td>✅ OAuth 2.1 + source scope</td>
+          <td>✅ 多 session + subagent</td>
+        </tr>
+      </table>
+
+      <hr />
+
+      <h2>回答你的四个核心问题</h2>
+
+      <h3>Q1：gbrain 的 company brain 是什么？</h3>
+
+      <p>
+        <strong>它不是一个代码模式，是一个部署拓扑。</strong>代码里没有任何
+        <code>isCompanyBrain</code> 开关。
+      </p>
+
+      <p>gbrain 本身是个人知识库工具。把它变成"公司脑"需要三步部署：</p>
+
+      <ol>
+        <li>
+          <strong>换存储</strong>：从 PGLite（单机 WASM Postgres）迁移到
+          Supabase Postgres
+        </li>
+        <li>
+          <strong>分 source</strong>：把数据库分成多个
+          <code>source</code>（shared / customers / internal），每个 source 用
+          OAuth 控制谁能读/写
+        </li>
+        <li>
+          <strong>开 HTTP MCP</strong>：暴露 HTTP 端点 + OAuth
+          2.1，每个同事注册一个 OAuth client
+        </li>
+      </ol>
+
+      <p>
+        运行时代码完全不变——同一个
+        <code>gbrain serve --http</code>
+        二进制。这就是为什么代码里找不到"company brain mode"。
+      </p>
+
+      <p class="cite">
+        来源：<code>_upstream_gbrain/docs/tutorials/company-brain.md</code>（558
+        行，完整的部署教程）
+      </p>
+
+      <h3>Q2：gbrain 没有接入 LLM 吗？</h3>
+
+      <p>
+        <strong>接入了，而且接得很深。</strong>gbrain 有一个统一的 AI
+        Gateway（<code>src/core/ai/gateway.ts</code>），支持：
+      </p>
+
+      <ul>
+        <li>
+          <strong>Embedding</strong>：17+ 个 provider（OpenAI / ZeroEntropy /
+          Voyage / Anthropic / Cohere / DashScope / Zhipu / Groq / DeepSeek /
+          OpenRouter / Together / Ollama / llama.cpp / LiteLLM / MiniMax / Azure
+          / Google）
+        </li>
+        <li>
+          <strong>知识合成</strong>：用 <strong>Anthropic Claude</strong>（默认
+          Opus 4.7，'deep' 层级）做
+          <code>gbrain think</code>——从检索结果生成带引用的综合答案
+        </li>
+        <li>
+          <strong>Query 扩展</strong>：用 OpenAI 做 LLM multi-query（<code
+            >search.mode=tokenmax</code
+          >
+          时）
+        </li>
+      </ul>
+
+      <p>
+        所以 <strong>gbrain 不只是数据库</strong>。它是：Postgres 存储 +
+        向量检索 + 关键词检索 + 图谱检索 + LLM 合成引擎。
+      </p>
+
+      <h3>Q3：我是不是需要自己做一个 LLM？</h3>
+
+      <p><strong>不需要。</strong>iknow 已经有 LLM 客户端了：</p>
+
+      <p>
+        文件：<code>src/agent-loop/llm-client.ts</code>，类
+        <code>OpenAiCompatibleLlmClient</code>。它通过 OpenAI 兼容协议调用
+        LLM（默认连接 <code>http://localhost:20128/v1</code>，模型
+        <code>deepseek-flash-combo</code>）。
+      </p>
+
+      <p>
+        iknow 的 LLM agent loop 在
+        <code>src/agent-loop/llm-agent.ts</code> 里完整实现了：
+      </p>
+      <ul>
+        <li>构建 system prompt + tool schemas</li>
+        <li>调用 LLM → 解析 tool_calls</li>
+        <li>执行工具 → 注入 tool_result</li>
+        <li>循环直到 LLM 输出最终文本（或达到 max_hops + 8 extra rounds）</li>
+      </ul>
+
+      <p class="cite">
+        来源：<code>src/agent-loop/llm-agent.ts:152-247</code>（循环主体）
+      </p>
+
+      <h3>Q4：Agent 自身记忆和外置知识库如何协作？</h3>
+
+      <p>它们的协作方式是<strong>读写分离 + 工具接口</strong>：</p>
+
+      <table>
+        <tr>
+          <th></th>
+          <th>Agent Memory（会话记忆）</th>
+          <th>External KB（外置知识库）</th>
+        </tr>
+        <tr>
+          <td><strong>读取</strong></td>
+          <td>自动注入上下文<br />（每轮都在 transcript 里）</td>
+          <td>按需检索<br />（LLM 必须主动调用 kb_retrieve）</td>
+        </tr>
+        <tr>
+          <td><strong>写入</strong></td>
+          <td>Harness 自动追加<br />（每轮结束后 recordTurn）</td>
+          <td>LLM 主动写入<br />（通过 kb_compile 提取 fact）</td>
+        </tr>
+        <tr>
+          <td><strong>生命周期</strong></td>
+          <td>会话内<br />（关掉就没了）</td>
+          <td>跨会话持久<br />（如果后端支持持久化）</td>
+        </tr>
+        <tr>
+          <td><strong>iknow 的桥梁</strong></td>
+          <td>
+            <code>derivePriorsFromAnswer()</code><br />把 KB 检索结果的关键
+            chunks<br />存入下轮的 last_priors
+          </td>
+          <td>
+            <code>kb_compile</code> 提取 fact<br />写回 KnowledgeStore<br />（目前内存，重启消失）
+          </td>
+        </tr>
+      </table>
+
+      <p>
+        iknow 的
+        <code>derivePriorsFromAnswer</code
+        >（<code>interaction/conversation.ts:49-82</code>）是一个精巧的桥梁：它从
+        LLM 的答案中提取 <code>source_spans</code>（引用来源），把对应的 chunks
+        存入 <code>last_priors</code>，这样<strong
+          >下一轮检索时这些 chunks 会被 boost +0.15 分</strong
+        >，形成"上下文连贯性"。
+      </p>
+
+      <hr />
+
+      <h2>你现有调研的评价</h2>
+
+      <p>
+        你收集的
+        <code>agent-memory-harness-guide</code>
+        两份材料质量不错，但存在明显的<strong>深度错位</strong>：
+      </p>
+
+      <table>
+        <tr>
+          <th>领域</th>
+          <th>评分</th>
+          <th>说明</th>
+        </tr>
+        <tr>
+          <td>Agent 记忆分层架构</td>
+          <td>⭐⭐⭐⭐</td>
+          <td>最强项——四层模型、读写路径、compaction、多代理隔离讲得系统</td>
+        </tr>
+        <tr>
+          <td>gbrain 架构级分析</td>
+          <td>⭐⭐⭐</td>
+          <td>文档级覆盖好，但缺少源码路径、schema、事务和实际工具协议</td>
+        </tr>
+        <tr>
+          <td>LLM 集成模式</td>
+          <td>⭐⭐</td>
+          <td>
+            有概念但无 SDK/API 级细节（streaming、stop reasons、tool result
+            contract）
+          </td>
+        </tr>
+        <tr>
+          <td>Claude Code Harness</td>
+          <td>⭐</td>
+          <td>
+            讲的是通用 harness，不是 Claude
+            Code。没有工具注册、权限、hooks、sessions 的内部实现
+          </td>
+        </tr>
+      </table>
+
+      <p>
+        你的直觉是对的——<strong>概念层够用，实现层不够深</strong>。特别是标题写着"Harness
+        底层原理"，实际深度是架构抽象，不是产品内部机制。本节课补的就是这个缺口。
+      </p>
+
+      <hr />
+
+      <h2>本课的核心收获</h2>
+
+      <div class="checkpoint">
+        <h3>三句话记住三层</h3>
+        <p>
+          1.
+          <strong>Harness</strong>
+          是有状态的编排层——它拼上下文、执行工具、管权限、持久化会话。LLM
+          是被它调用的无状态预测器。
+        </p>
+        <p>
+          2.
+          <strong>Agent Memory</strong>
+          是会话内的上下文管理——对话历史、当前状态、跨轮先验。会话结束就消失。
+        </p>
+        <p>
+          3.
+          <strong>External KB</strong>
+          是跨会话的持久化知识库——通过工具接口按需检索，<strong
+            >不自动出现在 LLM 上下文里</strong
+          >。
+        </p>
+      </div>
+
+      <h3>面试问答示范</h3>
+
+      <blockquote>
+        <strong>面试官</strong>：你的 iknow 项目里，Agent
+        的记忆是怎么工作的？<br /><br />
+        <strong>你的回答</strong>：iknow 的记忆分三层。第一层是 Harness，也就是
+        agent-loop，负责编排整个执行流程——组装上下文、执行 kb_* 工具、控制
+        max_hops 预算。第二层是会话记忆，存在 ConversationState 里，包含
+        turns（对话轮次）、last_priors（上一轮检索命中的 chunks，供下轮
+        boost）、history_finals（最近 6 条最终消息，给 LLM
+        看）。第三层是外置知识库 InMemoryKnowledgeStore，通过 kb_retrieve
+        工具按需检索——关键词臂用 CJK n-gram + IDF，向量臂用 cosine，RRF 融合取
+        top-5。关键设计是外置知识库不自动出现在 LLM 上下文里，只有 LLM 主动调用
+        kb_retrieve 时才检索，这避免了上下文污染。
+      </blockquote>
+
+      <hr />
+
+      <h2>推荐深入阅读</h2>
+      <p>
+        <strong>首要来源</strong>：<a
+          href="https://code.claude.com/docs/en/how-claude-code-works"
+          >How Claude Code Works</a
+        >
+        — Claude Code 官方架构文档，明确定义了 Model vs Harness 的职责边界。
+      </p>
+      <p>
+        <strong>补充</strong>：<a href="https://code.claude.com/docs/en/memory"
+          >Claude Code Memory</a
+        >
+        — 解释 CLAUDE.md 是 conversation injection 而非 system prompt，以及四层
+        CLAUDE.md 的加载层级。
+      </p>
+
+      <p class="ask">
+        💡
+        有任何不清楚的地方，随时问我。我是你的老师，可以帮你把任何概念再拆细。
+      </p>
+
+      <div class="foot">
+        <p>
+          下一课预告：<strong>iknow 的 ConversationState 代码导读</strong
+          >——带你逐行读 <code>interaction/conversation.ts</code>，理解
+          derivePriorsFromAnswer 如何把 KB 检索结果转化为会话记忆。
+        </p>
+      </div>
+    </main>
+  </body>
+</html>

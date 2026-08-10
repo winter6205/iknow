@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>0009 · Agent Loop 代码导读：一个问题的完整生命周期</title>
+<link rel="stylesheet" href="../assets/base.css">
+<style>
+.step{border:1px solid var(--rule);border-radius:10px;padding:14px 18px;margin:1.2em 0;background:#fff;position:relative}
+.step::before{content:attr(data-n);position:absolute;top:-12px;left:14px;background:var(--accent);color:#fff;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:.8em;font-weight:700}
+.step h3{margin:.4em 0 .3em;padding-left:20px}
+.step .file{font-family:"SF Mono",Menlo,Consolas,monospace;font-size:.8em;color:var(--muted)}
+.step pre{margin:.6em 0;font-size:.82em;line-height:1.5;overflow-x:auto}
+.ts-note{background:#e5ecf3;border-radius:6px;padding:8px 12px;margin:.6em 0;font-size:.85em}
+.ts-note strong{color:#2c5282}
+.flow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:1.2em 0;font-size:.88em}
+.flow .node{background:#f6f3ee;border:1px solid var(--rule);border-radius:6px;padding:6px 10px}
+.flow .arrow{color:var(--muted)}
+.flow .node.active{border-color:var(--accent);background:#fff8e1}
+.qa{border-left:3px solid var(--accent);padding:.8em 1.2em;margin:1.2em 0;background:#f6f3ee}
+.qa .q{font-weight:600;color:var(--accent);margin-bottom:.4em}
+.tip{background:#fff8e1;border:1px solid #f9e076;border-radius:8px;padding:12px 16px;margin:1em 0;font-size:.92em}
+</style>
+</head>
+<body>
+<main>
+
+<h1>Agent Loop 代码导读：一个问题的完整生命周期</h1>
+<p class="meta">第 9 课 · 代码导读 + TypeScript 入门 + 面试素材三合一 | 关联 <a href="0008-iknow-4tools-rag-mapping.html">0008 锚定课</a></p>
+
+<h2>这节课的 tiny win</h2>
+<p>读完这课，你能向面试官画出 iknow agent loop 的<strong>正常路径流程图</strong>，并解释每一步为什么存在。</p>
+
+<div class="tip">
+<strong>读法</strong>：下面每一步都是 <code>src/agent-loop/loop.ts</code> 里真实代码的简化版。蓝色框是 TypeScript 语法注解——你不需要"学会 TS"，只需要看到 <code>async</code>、<code>await</code>、<code>interface</code> 时不慌。
+</div>
+
+<h2>正常路径全景（happy path）</h2>
+<p>假设用户问「公司的退款政策是什么？」，没有触发任何边界情况（不是竞对、不是敏感、不需要 compile）。代码走的路径是：</p>
+
+<div class="flow">
+<span class="node active">answer(query)</span><span class="arrow">→</span>
+<span class="node active">answerInner()</span><span class="arrow">→</span>
+<span class="node active">① kb_retrieve</span><span class="arrow">→</span>
+<span class="node active">② kb_verify_citation</span><span class="arrow">→</span>
+<span class="node active">③ kb_governance</span><span class="arrow">→</span>
+<span class="node active">④ envelope() → G2</span>
+</div>
+
+<p>就这四步。下面逐步看代码。</p>
+
+<hr>
+
+<h2>入口：answer() 方法</h2>
+<div class="step" data-n="0">
+<h3>answer(query, opts?) — 公开入口</h3>
+<div class="file">src/agent-loop/loop.ts:60-92</div>
+<pre><code>async answer(query: string, opts?: AgentAnswerOpts): Promise&lt;IknowAnswer&gt; {
+  const trace = new ToolTrace();       // 记录本次调了哪些 tool
+  const notes: string[] = [];          // 收集备注（降级/超时/权限等）
+  const hopState = { n: 0 };           // hop 计数器（可变对象）
+
+  try {
+    return await this.answerInner(query, trace, notes, hopState, ...);
+  } catch (err) {
+    // G2 铁律：即使崩了也必须返回带 snapshot_id 的信封
+    notes.push(`unexpected_error: ${msg}`);
+    return this.finalize({ text: "处理请求时发生意外错误...", ... });
+  }
+}</code></pre>
+<div class="ts-note">
+<strong>TS 注解</strong>：<br>
+• <code>async answer(...): Promise&lt;IknowAnswer&gt;</code> — 这是一个异步方法，返回一个"未来会拿到 IknowAnswer 的承诺"。调用方用 <code>await agent.answer(q)</code> 等结果。<br>
+• <code>opts?: AgentAnswerOpts</code> — <code>?</code> 表示这个参数可选（可以不传）。<br>
+• <code>const hopState = { n: 0 }</code> — 用一个对象包一个数字，是因为 JS 里数字是值传递，对象是引用传递。这样内部函数改 <code>hopState.n</code> 外面能看到。
+</div>
+<p><strong>面试要点</strong>：注意 <code>try/catch</code> 里的 <code>finalize()</code>——即使整个 loop 崩了，也<strong>必须</strong>返回一个带 <code>snapshot_id</code> 的 G2 信封。这是"G2 铁律：never return without snapshot_id"（loop.ts:80 注释）。</p>
+</div>
+
+<hr>
+
+<h2>Step ①：kb_retrieve（第 1 跳）</h2>
+<div class="step" data-n="1">
+<h3>第一次检索</h3>
+<div class="file">src/agent-loop/loop.ts:170-184</div>
+<pre><code>// 1) retrieve (hop) — first retrieve merges turn prior_chunks when provided
+if (hopState.n >= this.maxHops) {
+  return this.hopLimit(trace, hopState.n, notes);  // 预算用完，强制退出
+}
+hopState.n += 1;                                    // 消耗 1 hop
+const firstInput = buildFirstRetrieveInput(q, turnPriors);
+trace.record("kb_retrieve", { ...firstInput });     // 记录到 tool_calls 日志
+let retrieved = await kbRetrieve(
+  this.store, firstInput, this.session, retrieveOpts
+);</code></pre>
+<div class="ts-note">
+<strong>TS 注解</strong>：<br>
+• <code>await kbRetrieve(...)</code> — <code>await</code> 意思是"等这个异步操作完成再往下走"。因为 kb_retrieve 可能要调 embedding API（网络请求），所以是 async 的。<br>
+• <code>let retrieved</code> — 用 <code>let</code> 不用 <code>const</code>，因为后面可能重新赋值（比如 verify 失败后 re-retrieve）。<br>
+• <code>{ ...firstInput }</code> — 展开运算符，把 firstInput 对象的字段复制一份传给 trace.record（避免 trace 持有引用后被后续修改污染）。
+</div>
+<p><strong>面试要点</strong>：<code>hopState.n >= this.maxHops</code> 是预算检查——如果 5 跳用完了，直接返回"探索步数已达上限"的 G2，不再继续。这防止 agent 无限循环。</p>
+</div>
+
+<hr>
+
+<h2>Step ②：kb_verify_citation（第 2 跳）</h2>
+<div class="step" data-n="2">
+<h3>引用校验</h3>
+<div class="file">src/agent-loop/loop.ts:232-273</div>
+<pre><code>let top = retrieved.chunks[0]!;              // 取排名第一的 chunk
+const claim = this.deriveClaim(q, top.summary);  // 构造待校验的"声明"
+
+if (hopState.n < this.maxHops) {
+  hopState.n += 1;                           // 消耗 1 hop
+  const full = this.store.getChunk(top.chunk_id).text;  // 拿原文
+  const v = kbVerifyCitation(this.store, {
+    claim,
+    source_span: { chunk_id: top.chunk_id, quote: full.slice(0, 120) },
+  });
+  verifyNote = `verify=${v.verdict}`;        // "verify=supported" 之类
+
+  if (v.verdict === "unsupported" && hopState.n < this.maxHops) {
+    // 校验不通过 → 用当前 chunk 作 prior 再检索一次（第 3 跳）
+    hopState.n += 1;
+    retrieved = await kbRetrieve(this.store,
+      { query: q, prior_chunks: [{ chunk_id: top.chunk_id, summary: top.summary }] },
+      this.session, retrieveOpts
+    );
+    top = retrieved.chunks[0]!;              // 更新 top
+  }
+}</code></pre>
+<div class="ts-note">
+<strong>TS 注解</strong>：<br>
+• <code>retrieved.chunks[0]!</code> — 末尾的 <code>!</code> 是"非空断言"，告诉 TypeScript"我确定这里不是 undefined"。如果真的是 undefined 运行时会崩。<br>
+• <code>full.slice(0, 120)</code> — 只取原文前 120 字符作为引用片段（verify 只需要看一小段就够判断覆盖率）。<br>
+• <code>v.verdict === "unsupported"</code> — 三态之一。如果是 unsupported，说明 top chunk 的原文撑不起这个声明，需要换一块。
+</div>
+<p><strong>面试要点</strong>：verify 失败后不是直接说"不知道"，而是<strong>用当前 chunk 作 prior 再检索一次</strong>——这就是 <code>prior_chunks</code> 的轮内用途（不是轮间，是同一轮里的"换一块试试"）。</p>
+</div>
+
+<hr>
+
+<h2>Step ③：kb_governance（不计 hop）</h2>
+<div class="step" data-n="3">
+<h3>治理快照</h3>
+<div class="file">src/agent-loop/loop.ts:288-304</div>
+<pre><code>const govAction = needsGovernance ? "detect_conflict" : "snapshot_status";
+trace.record("kb_governance", { action: govAction, doc_id: primaryDoc });
+let g = this.safeGovernance(primaryDoc, govAction);
+
+// 如果 detect_conflict 返回 ok，再补一次 snapshot_status 拿正式水印
+if (needsGovernance && g.status === "ok") {
+  trace.record("kb_governance", { action: "snapshot_status", doc_id: primaryDoc });
+  g = this.safeGovernance(primaryDoc, "snapshot_status");
+}</code></pre>
+<div class="ts-note">
+<strong>TS 注解</strong>：<br>
+• <code>needsGovernance ? "detect_conflict" : "snapshot_status"</code> — 三元表达式：如果问题涉及"冲突/对比/最新吗"就用 detect_conflict，否则直接 snapshot_status。<br>
+• <code>this.safeGovernance(...)</code> — 包了一层 try/catch 的 governance 调用（loop.ts:494-535），超时/权限拒绝都不会崩，而是降级返回本地 snapshot。
+</div>
+<p><strong>面试要点</strong>：governance <strong>不消耗 hop</strong>（loop.ts:23 注释："Only kb_retrieve + kb_verify_citation count as hops"）。为什么？因为 governance 是"盖章"动作，不是"探索"动作——它不产生新信息，只是给已有信息打治理标签。</p>
+</div>
+
+<hr>
+
+<h2>Step ④：envelope() → G2 信封</h2>
+<div class="step" data-n="4">
+<h3>组装最终答案</h3>
+<div class="file">src/agent-loop/loop.ts:331-367 + 369-388</div>
+<pre><code>// 取前 3 个 chunk 的原文片段作为引用
+const spans = retrieved.chunks.slice(0, 3).map((c) => ({
+  chunk_id: c.chunk_id,
+  quote: this.store.getChunk(c.chunk_id).text.slice(0, 160),
+}));
+
+// 拼装人读文本
+let text = `根据企业知识库：\n${body}`;
+if (g.status === "conflict") text += "\n\n【治理】检测到冲突状态...";
+if (g.status === "stale")    text += "\n\n【治理】相关文档可能已过期...";
+
+// 组装 G2 信封
+return this.envelope({
+  text,
+  source_spans: spans,
+  snapshot_id: g.snapshot_id,
+  governance_status: g.status,
+  trace,
+  hops: hopState.n,
+  notes: notes.length ? notes : undefined,
+});</code></pre>
+<div class="ts-note">
+<strong>TS 注解</strong>：<br>
+• <code>.map((c) => ({...}))</code> — 箭头函数返回对象时必须加括号 <code>({...})</code>，否则 JS 会把 <code>{}</code> 当成代码块。<br>
+• <code>notes.length ? notes : undefined</code> — 如果没有备注就不传这个字段（JSON 序列化时 undefined 会被忽略，保持输出干净）。
+</div>
+<p><strong>面试要点</strong>：G2 信封的 6 个字段（text / source_spans / snapshot_id / governance_status / tool_calls / hops_used）<strong>每个都有存在理由</strong>——text 给用户看、source_spans 给审计追问、snapshot_id 给合规追溯、governance_status 告诉用户"这条答案现在还可不可信"、tool_calls 给评测脚本、hops_used 说明探索深度。</p>
+</div>
+
+<hr>
+
+<h2>完整流程图（闭卷画出来就过关）</h2>
+<pre><code>用户问题
+    │
+    ▼
+answer(query) ─── try/catch 保护（崩了也返回 G2）
+    │
+    ▼
+answerInner()
+    │
+    ├── 边界检查（竞对？敏感？空查询？）──→ 提前返回特殊 G2
+    │
+    ▼
+① kb_retrieve（hop+1）──→ 拿到 ranked chunks
+    │
+    ├── chunks 为空？──→ emptyAnswer（"未找到，不编造"）
+    │
+    ▼
+② kb_verify_citation（hop+1）──→ verdict
+    │
+    ├── unsupported？──→ re-retrieve with prior（hop+1）
+    │
+    ▼
+③ kb_governance（不计 hop）──→ snapshot_id + status
+    │
+    ▼
+④ envelope() ──→ G2 信封返回给用户</code></pre>
+
+<hr>
+
+<h2>面试 Q&A（本课素材）</h2>
+<div class="qa">
+<div class="q">Q：你的 agent loop 是怎么工作的？</div>
+<div class="a">
+正常路径四步：先 <code>kb_retrieve</code> 双臂检索拿候选 chunk，然后 <code>kb_verify_citation</code> 校验 top chunk 的原文能不能撑起回答（三态），接着 <code>kb_governance</code> 打治理快照（freshness + conflict + snapshot_id），最后组装 G2 信封返回。整个过程有 <code>max_hops=5</code> 的硬预算，只有 retrieve 和 verify 消耗 hop，compile 和 governance 不计。如果 verify 不通过，会用当前 chunk 作 prior 再检索一次——这是轮内的"换一块试试"机制。
+</div>
+</div>
+
+<div class="qa">
+<div class="q">Q：为什么 governance 不计 hop？</div>
+<div class="a">
+因为 governance 是"盖章"动作，不是"探索"动作。它不产生新信息（不检索新 chunk、不校验新声明），只是给已有信息打治理标签（freshness / conflict / snapshot_id）。如果把它也算 hop，那每次回答都要额外消耗 1-2 跳预算在"盖章"上，真正的探索空间就被压缩了。
+</div>
+</div>
+
+<div class="qa">
+<div class="q">Q：如果整个 loop 崩了怎么办？</div>
+<div class="a">
+<code>answer()</code> 方法有 try/catch 兜底（loop.ts:79-91）。即使 <code>answerInner</code> 里任何一步抛异常，catch 里也会调 <code>finalize()</code> 返回一个带 <code>snapshot_id</code> 的 G2 信封，text 是"处理请求时发生意外错误"。这是 G2 铁律：<strong>never return without snapshot_id</strong>——企业场景下，即使失败也要有审计水印。
+</div>
+</div>
+
+<hr>
+
+<h2>自测</h2>
+<div class="quiz">
+<div class="q" data-feedback="hopState 是一个对象 { n: 0 }，用对象包数字是因为 JS 里数字是值传递、对象是引用传递。内部函数改 hopState.n 外面能看到。">
+<p>1. 为什么 hopState 用 <code>{ n: 0 }</code> 而不是直接 <code>let hops = 0</code>？</p>
+<button class="q-opt">TypeScript 语法要求</button>
+<button class="q-opt" data-correct="1">对象是引用传递，内部函数改了外面能看到</button>
+<button class="q-opt">为了 JSON 序列化方便</button>
+<button class="q-check">Check</button>
+<div class="q-fb"></div>
+</div>
+<div class="q" data-feedback="verify 返回 unsupported 时，loop 用当前 top chunk 作 prior_chunks 再调一次 kb_retrieve（loop.ts:249-272）。这是轮内的"换一块试试"，不是轮间的多轮对话。">
+<p>2. verify 返回 unsupported 后，loop 做了什么？</p>
+<button class="q-opt">直接返回"不知道"</button>
+<button class="q-opt" data-correct="1">用当前 chunk 作 prior 再检索一次</button>
+<button class="q-opt">跳过 verify 直接出答案</button>
+<button class="q-check">Check</button>
+<div class="q-fb"></div>
+</div>
+<div class="q" data-feedback="G2 铁律：never return without snapshot_id。即使崩了，catch 里的 finalize() 也会生成一个本地 snapshot（loop.ts:537-556 的 localSnapshot），保证信封完整。">
+<p>3. 如果 answerInner 里某一步抛异常，用户会收到什么？</p>
+<button class="q-opt">一个 HTTP 500 错误</button>
+<button class="q-opt">一个没有 snapshot_id 的纯文本错误</button>
+<button class="q-opt" data-correct="1">一个带 snapshot_id 的 G2 信封（text 是错误说明）</button>
+<button class="q-check">Check</button>
+<div class="q-fb"></div>
+</div>
+</div>
+<script src="../assets/quiz.js"></script>
+
+<div class="checkpoint">
+<h3>学完后你该能</h3>
+<p>
+1. 闭卷画出上面的流程图（4 步 + 2 个分支）。<br>
+2. 向面试官解释"为什么 verify 失败后不是直接说不知道，而是 re-retrieve"。<br>
+3. 解释 <code>hopState = { n: 0 }</code> 为什么用对象不用数字（TS/JS 值传递 vs 引用传递）。
+</p>
+</div>
+
+<p class="cite"><strong>源码</strong>：<code>src/agent-loop/loop.ts</code>（613 行，本课覆盖 60-388 的 happy path）。边界情况（竞对/敏感/compile/governance 超时降级）在 loop.ts:114-168 和 494-535，下节课讲。</p>
+
+<p class="ask">有任何一行代码看不懂、任何一个 TS 语法不确定的，直接问。这节课的目标是"读完不慌"——你不需要会写 TS，只需要看到它时能说出"这行在做什么"。</p>
+
+</main>
+</body>
+</html>

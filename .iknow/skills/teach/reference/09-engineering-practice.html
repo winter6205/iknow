@@ -1,0 +1,716 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>工程化实践 · AI Agent 知识卡</title>
+    <style>
+      :root {
+        --ink: #1a1a1a;
+        --muted: #555;
+        --rule: #e2e2e2;
+        --bg: #fffdf8;
+        --accent: #8a5a2b;
+        --soft: #f4ede2;
+        --code: #f3f0ea;
+        --warn: #9a3b2e;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          15px/1.7 "Georgia",
+          "Songti SC",
+          "Noto Serif CJK SC",
+          serif;
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 48px 28px 96px;
+      }
+      h1 {
+        font-size: 30px;
+        margin: 0 0 4px;
+        letter-spacing: 0.5px;
+      }
+      h2 {
+        font-size: 21px;
+        margin: 42px 0 10px;
+        padding-bottom: 6px;
+        border-bottom: 2px solid var(--accent);
+      }
+      h3 {
+        font-size: 17px;
+        margin: 24px 0 6px;
+        color: var(--accent);
+      }
+      p {
+        margin: 8px 0;
+      }
+      .sub {
+        color: var(--muted);
+        font-style: italic;
+        margin-bottom: 8px;
+      }
+      .meta {
+        font-size: 12px;
+        color: var(--muted);
+        border-left: 3px solid var(--rule);
+        padding-left: 10px;
+        margin: 18px 0;
+      }
+      .card {
+        background: var(--soft);
+        border: 1px solid var(--rule);
+        border-radius: 8px;
+        padding: 14px 18px;
+        margin: 16px 0;
+      }
+      .card .t {
+        font-weight: bold;
+        color: var(--accent);
+        display: block;
+        margin-bottom: 4px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 12px 0;
+        font-size: 13.5px;
+      }
+      th,
+      td {
+        border: 1px solid var(--rule);
+        padding: 7px 9px;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: var(--soft);
+        font-weight: bold;
+      }
+      code {
+        background: var(--code);
+        padding: 1px 5px;
+        border-radius: 4px;
+        font-size: 12.5px;
+        font-family: "SFMono-Regular", Consolas, monospace;
+      }
+      pre {
+        background: var(--code);
+        border: 1px solid var(--rule);
+        border-radius: 8px;
+        padding: 12px 14px;
+        overflow: auto;
+        font-size: 12.5px;
+        line-height: 1.5;
+        font-family: "SFMono-Regular", Consolas, monospace;
+      }
+      .cite {
+        color: var(--muted);
+        font-size: 11.5px;
+        font-style: italic;
+      }
+      .qa {
+        margin: 10px 0;
+        padding-left: 14px;
+        border-left: 3px solid var(--accent);
+      }
+      .qa b {
+        color: var(--accent);
+      }
+      .pill {
+        display: inline-block;
+        background: var(--accent);
+        color: #fff;
+        font-size: 11px;
+        padding: 1px 8px;
+        border-radius: 10px;
+        margin-right: 4px;
+        vertical-align: middle;
+      }
+      .check {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      ul {
+        margin: 6px 0 6px 0;
+        padding-left: 22px;
+      }
+      li {
+        margin: 3px 0;
+      }
+      @media print {
+        body {
+          padding: 0;
+          max-width: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>09 · 工程化实践</h1>
+    <p class="sub">
+      AI Agent 从「能跑」做成「可观测、可容错、可计费、可审计、可上线」
+    </p>
+    <p class="meta">
+      来源：PDF 第 178–203 页《08
+      工程化实践（面试八股文）》。卡片为压缩提炼，<span class="cite"
+        >[原文 Pxxx]</span
+      >
+      标注出处页码，供教学引用。
+    </p>
+
+    <h2>1. 模型路由与容错</h2>
+
+    <div class="card">
+      <span class="t">模型路由 Model Routing</span>
+      像快递分拣中心——按「任务类型、成本预算、延迟要求、合规区域」决定请求走哪家模型，而不是所有流量打同一端点。
+      <span class="cite">[P178]</span>
+    </div>
+
+    <div class="card">
+      <span class="t">容错 Fault Tolerance</span>
+      某家模型超时/限流/报错/质量异常时，系统自动切换、重试或降级，对用户表现为「慢一点」或「差一点但可用」，而非整站不可用。
+      <span class="cite">[P178]</span>
+    </div>
+
+    <h3>多模型管理（统一抽象）<span class="cite">[P179]</span></h3>
+    <ul>
+      <li>
+        <b>Provider Adapter</b>：每厂商一个适配器，统一接口
+        <code>chat(messages, tools, model_id) -> Completion</code>。
+      </li>
+      <li>
+        <b>配置中心</b>：维护
+        <code>model_id → endpoint / 密钥 / RPM-TPM 限额 / 区域 / 价格表</code>。
+      </li>
+      <li>
+        <b>能力矩阵</b>：标注是否支持 JSON Mode / 函数调用 / 视觉 /
+        长上下文，路由时做能力匹配。
+      </li>
+      <li>
+        <b>密钥与合规</b
+        >：国产与海外模型涉及数据出境与行业合规，路由也是合规路由。
+      </li>
+    </ul>
+
+    <h3>优先级调度策略<span class="cite">[P179]</span></h3>
+    <table>
+      <tr>
+        <th>策略</th>
+        <th>含义</th>
+        <th>适用</th>
+      </tr>
+      <tr>
+        <td>固定优先级</td>
+        <td>列表顺序尝试</td>
+        <td>简单可靠</td>
+      </tr>
+      <tr>
+        <td>成本优先</td>
+        <td>满足质量阈值下选最便宜</td>
+        <td>批处理、非实时</td>
+      </tr>
+      <tr>
+        <td>延迟优先</td>
+        <td>SLA 内选最快</td>
+        <td>交互式产品</td>
+      </tr>
+      <tr>
+        <td>负载感知</td>
+        <td>结合队列深度、429 率动态调整</td>
+        <td>大规模生产</td>
+      </tr>
+      <tr>
+        <td>任务分类路由</td>
+        <td>代码类→A，摘要类→B</td>
+        <td>提高性价比</td>
+      </tr>
+    </table>
+    <p class="cite">
+      优先级不是「永远用大模型」，而是在约束下最优化（成本/延迟/质量/可用性）。[P179]
+    </p>
+
+    <h3>三态熔断器 Circuit Breaker<span class="cite">[P180]</span></h3>
+    <ul>
+      <li><b>Closed</b>：正常转发；统计失败率/连续失败次数。</li>
+      <li><b>Open</b>：失败超阈值，快速失败（不再调下游），进入冷却。</li>
+      <li>
+        <b>Half-Open</b>：冷却结束，放行少量探测请求；成功回 Closed，失败回
+        Open。
+      </li>
+    </ul>
+    <p>
+      与重试的关系：熔断解决「系统性故障时的雪崩」；重试解决「偶发网络抖动」。二者常一起用：熔断打开时不再重试下游，改为降级。<span
+        class="cite"
+        >[P180]</span
+      >
+    </p>
+
+    <h3>自动降级<span class="cite">[P180]</span></h3>
+    <ul>
+      <li><b>模型降级</b>：强模型→弱模型。</li>
+      <li><b>功能降级</b>：关多步 Agent 改单轮问答；减少工具数量。</li>
+      <li><b>输出降级</b>：长文→要点列表。</li>
+    </ul>
+    <p>
+      关键：降级要可观测（<code>degraded=true</code>），最好对用户透明提示。<span
+        class="cite"
+        >[P180]</span
+      >
+    </p>
+
+    <h3>重试与指数退避<span class="cite">[P180]</span></h3>
+    <p>
+      公式：<code>wait = min(cap, base * 2^attempt + jitter)</code>，jitter
+      避免惊群效应。可重试：超时/连接错误/429/部分
+      5xx；不可重试：401·403·400·内容政策拒绝。<span class="cite">[P180]</span>
+    </p>
+
+    <div class="qa">
+      <b>Q1</b> 为什么做模型路由而非全量用最强模型？<br />
+      <b>A</b>
+      最强模型更贵更慢，且并非所有子任务都需要；路由在质量/成本/延迟/可用性/合规间权衡，多供应商提高容灾。<span
+        class="cite"
+        >[P181]</span
+      >
+    </div>
+    <div class="qa">
+      <b>Q2</b> 熔断器和重试分别解决什么？一起用注意什么？<br />
+      <b>A</b> 熔断防故障扩散和雪崩；重试提高偶发成功率。熔断 Open
+      阶段停止盲目重试同一下游，改降级/切供应商；对 429
+      用限流+退避避免放大拥堵。<span class="cite">[P181]</span>
+    </div>
+
+    <pre>
+@dataclass
+class CircuitBreaker:
+    failure_threshold: int = 5
+    success_threshold: int = 2   # 半开阶段连续成功次数
+    open_seconds: float = 30.0
+    half_open_max_calls: int = 3
+    # 状态机: CLOSED -&gt; (失败超阈值)-&gt; OPEN
+    #        OPEN -(冷却结束)-&gt; HALF_OPEN
+    #        HALF_OPEN -(连续成功)-&gt; CLOSED
+    # 退避: wait=min(cap, base*2**attempt + jitter)   [P181-183]</pre>
+
+    <h2>2. Token 成本控制</h2>
+    <p>
+      Agent
+      多轮多工具，上下文膨胀极快；目标是让每次会话/任务/租户支出可预测、可优化、可告警。<span
+        class="cite"
+        >[P184]</span
+      >
+    </p>
+    <ul>
+      <li>
+        <b>计数</b>：tiktoken 按
+        <code>encoding_for_model</code> 选编码；本地计数只是估算，应与 API
+        返回的 <code>usage</code> 对账。<span class="cite">[P184]</span>
+      </li>
+      <li>
+        <b>精简 Prompt</b
+        >：删冗余/合并系统提示；结构化输出减少澄清；长文档先摘要或 RAG 取
+        Top-K；消息裁剪保留 system+最近 N 轮+关键摘要。<span class="cite"
+          >[P184]</span
+        >
+      </li>
+      <li>
+        <b>缓存策略</b
+        >：精确缓存（哈希完全一致命中，实现简单命中率低）；语义缓存（embedding
+        相似度复用，命中率高但需防「相似但意图不同」）；结果分层（热问题走缓存冷问题走模型）。<span
+          class="cite"
+          >[P184]</span
+        >
+      </li>
+      <li>
+        <b>模型选择/批量</b>：小模型做分类/路由/摘要，大模型做生成；Batch API
+        非实时更便宜；合并短任务。<span class="cite">[P185]</span>
+      </li>
+      <li>
+        <b>监控告警</b>：维度=租户/功能/模型/Agent 步骤；指标=日均 Token、单次
+        P95 成本、异常飙升；预算封顶硬限制。<span class="cite">[P185]</span>
+      </li>
+    </ul>
+    <div class="qa">
+      <b>Q3</b> 为什么 tiktoken 计数只能「估算」？<br /><b>A</b>
+      实际计费依赖服务商分词器版本、特殊
+      token、多模态输入；本地计数用于预算控制与截断，应以 API usage
+      与账单对账。<span class="cite">[P185]</span>
+    </div>
+    <div class="qa">
+      <b>Q4</b> 语义缓存和精确缓存怎么选？<br /><b>A</b> 低成本高 QPS
+      重复咨询适合语义缓存；强合规强正确性场景需提高阈值、加业务校验或禁用；精确缓存适合幂等调用。<span
+        class="cite"
+        >[P185]</span
+      >
+    </div>
+
+    <h2>3. 全链路可观测性</h2>
+    <p>
+      Agent 路径依赖模型决策，分支多、偶现问题多，没有 Trace 很难排障。<span
+        class="cite"
+        >[P187]</span
+      >
+    </p>
+    <ul>
+      <li>
+        <b>结构化日志</b>：JSON 一行一条（ELK/Loki/ClickHouse）；字段含
+        <code
+          >timestamp/level/trace_id/span_id/tenant_id/agent_name/step/model/latency_ms/token_usage/error_code</code
+        >。切忌只打一大段自然语言。<span class="cite">[P187]</span>
+      </li>
+      <li>
+        <b>链路追踪</b>：Trace=一次请求从头到尾；Span=一个单元（一次 LLM
+        调用/工具执行/检索）；span_id/parent_span_id 构成树。<span class="cite"
+          >[P187]</span
+        >
+      </li>
+      <li>
+        <b>每步记录</b>：step_index、thought
+        摘要、tool_name、tool_args（脱敏）、observation
+        摘要、耗时、重试次数、是否降级。<span class="cite">[P187]</span>
+      </li>
+      <li>
+        <b>工具</b>：LangSmith（与 LangChain
+        结合紧）；LangFuse（开源可自托管，偏产品分析+成本+质量）。<span
+          class="cite"
+          >[P187]</span
+        >
+      </li>
+    </ul>
+    <div class="qa">
+      <b>Q5</b> Agent 为什么比传统服务更需要 Trace？<br /><b>A</b>
+      传统调用链相对固定；Agent 路径依赖模型决策，分支多。Trace
+      能把「哪一步选了哪个工具、参数是什么、返回多长」串起来。<span class="cite"
+        >[P188]</span
+      >
+    </div>
+    <div class="qa">
+      <b>Q6</b> 结构化日志和 Trace 区别？<br /><b>A</b>
+      日志是事件流，适合检索告警；Trace 是因果树，适合分析延迟与依赖。二者通过
+      trace_id 关联，互补而非二选一。<span class="cite">[P188]</span>
+    </div>
+
+    <h2>4. 安全与权限</h2>
+    <p>
+      默认假设「模型不可信」：输入可能恶意、输出可能有害、工具调用必须经权限与校验。<span
+        class="cite"
+        >[P189]</span
+      >
+    </p>
+    <ul>
+      <li>
+        <b>Prompt 注入</b
+        >：用户自然语言覆盖系统指令；缓解=分层指令、特权数据与用户原文不同上下文、输出结构化由代码校验、最小权限工具。<span
+          class="cite"
+          >[P190]</span
+        >
+      </li>
+      <li>
+        <b>越狱 Jailbreak</b
+        >：绕过安全对齐；缓解=安全分类器、输入输出策略、关键操作
+        HITL、审计。<span class="cite">[P190]</span>
+      </li>
+      <li>
+        <b>输出过滤</b
+        >：PII/身份证/信用卡正则；二次分类；敏感词与行业合规列表。<span
+          class="cite"
+          >[P190]</span
+        >
+      </li>
+      <li>
+        <b>工具调用权限</b>：白名单（每租户/角色可用工具）；参数校验（JSON
+        Schema、范围、SQL
+        参数化）；两步授权（模型提议→策略引擎批准→执行）。<span class="cite"
+          >[P190]</span
+        >
+      </li>
+      <li>
+        <b>数据脱敏</b>：日志/Trace 中手机号邮箱地址打码；RAG
+        结果按权限过滤。<span class="cite">[P190]</span>
+      </li>
+      <li>
+        <b>审计日志</b>：谁在何时、对什么资源、通过哪个
+        Agent、执行什么工具，不可被普通用户删除。<span class="cite"
+          >[P190]</span
+        >
+      </li>
+    </ul>
+    <div class="qa">
+      <b>Q7</b> 为什么「永远不信任模型输出的工具调用」？<br /><b>A</b>
+      模型可能被诱导产生危险参数；应对工具调用做 schema
+      校验、权限检查、速率限制，必要时人工确认，不能把模型当安全边界。<span
+        class="cite"
+        >[P190]</span
+      >
+    </div>
+    <div class="qa">
+      <b>Q8</b> Prompt 注入和越狱区别？<br /><b>A</b>
+      注入侧重篡改指令/上下文改变行为；越狱侧重绕过安全对齐输出违规内容；防护需多层（输入/模型/工具/输出/审计）。<span
+        class="cite"
+        >[P191]</span
+      >
+    </div>
+
+    <h2>5. 部署与运维</h2>
+    <p>
+      容器化+K8s 为主；自托管需 GPU 与专用推理栈。<span class="cite"
+        >[P192]</span
+      >
+    </p>
+    <ul>
+      <li>
+        <b>Docker</b>：镜像环境一致；env 放密钥/路由/开关；/health 探活。<span
+          class="cite"
+          >[P192]</span
+        >
+      </li>
+      <li>
+        <b>K8s</b>：Deployment 副本滚动更新；HPA 按 CPU/QPS
+        扩容；Service/Ingress 暴露+TLS；ConfigMap/Secret 配置密钥分离。<span
+          class="cite"
+          >[P192]</span
+        >
+      </li>
+      <li>
+        <b>CI/CD</b
+        >：CI=lint/单测/镜像构建/漏洞扫描；CD=灰度发布/自动回滚。<span
+          class="cite"
+          >[P192]</span
+        >
+      </li>
+      <li>
+        <b>蓝绿 vs 金丝雀</b
+        >：蓝绿两套环境切换、回滚快、资源占用高；金丝雀小流量新版本，指标异常即回滚，风险更可控。<span
+          class="cite"
+          >[P192-193]</span
+        >
+      </li>
+      <li>
+        <b>模型版本管理</b>：Prompt/模型名/工具清单版本一并记录到 Trace
+        与配置；不可变发布标签（如 v20260401）。<span class="cite">[P193]</span>
+      </li>
+      <li>
+        <b>A/B 测试</b>：对
+        Prompt/模型/工具策略分流，比较任务成功率/成本/延迟/满意度，需统计显著性。<span
+          class="cite"
+          >[P193]</span
+        >
+      </li>
+    </ul>
+    <div class="qa">
+      <b>Q9</b> 金丝雀发布关注哪些指标？<br /><b>A</b> 错误率、P95 延迟、Token
+      成本、业务指标（任务完成率、投诉）；Agent
+      还看工具失败率/重试率/熔断率。<span class="cite">[P193]</span>
+    </div>
+
+    <h2>6. 性能优化</h2>
+    <p>
+      瓶颈常在串行 LLM 调用、工具
+      RTT、过大上下文；方向：并行、流式、限流、缓存、连接复用。<span
+        class="cite"
+        >[P195]</span
+      >
+    </p>
+    <ul>
+      <li>
+        <b>异步</b>：asyncio/消息队列，I/O 等待不阻塞线程；无依赖工具并行。<span
+          class="cite"
+          >[P195]</span
+        >
+      </li>
+      <li>
+        <b>流式</b>：边生成边 SSE，TTFB
+        下降；注意中间状态与最终答案一致性。<span class="cite">[P195]</span>
+      </li>
+      <li>
+        <b>并发控制</b>：Semaphore 限制同时 LLM 调用数，防 429。<span
+          class="cite"
+          >[P195]</span
+        >
+      </li>
+      <li>
+        <b>连接池</b>：HTTP keep-alive；DB 连接池。<span class="cite"
+          >[P195]</span
+        >
+      </li>
+      <li>
+        <b>缓存分层</b>：L1 进程内 LRU（极低延迟）；L2 Redis（多实例共享，需 TTL
+        序列化）；读路径 L1→L2→回源模型。<span class="cite">[P195]</span>
+      </li>
+    </ul>
+    <div class="qa">
+      <b>Q10</b> Streaming 影响计费或日志吗？<br /><b>A</b> 计费仍以 Token
+      为准；日志需聚合完整响应再记一条，或记增量 chunk 并关联
+      trace_id；注意流式中途断开的部分结果处理。<span class="cite"
+        >[P195-196]</span
+      >
+    </div>
+
+    <h2>7. 评估与测试</h2>
+    <p>
+      没有度量就没有优化。覆盖：对不对（准确性）、稳不稳（鲁棒性）、快不快与贵不贵（效率）。<span
+        class="cite"
+        >[P197]</span
+      >
+    </p>
+    <table>
+      <tr>
+        <th>维度</th>
+        <th>含义</th>
+        <th>示例指标</th>
+      </tr>
+      <tr>
+        <td>准确性</td>
+        <td>任务完成、答案正确</td>
+        <td>人工标注、LLM-as-judge（谨慎）</td>
+      </tr>
+      <tr>
+        <td>鲁棒性</td>
+        <td>噪声/对抗/边界</td>
+        <td>成功率方差、最坏 case</td>
+      </tr>
+      <tr>
+        <td>效率</td>
+        <td>步数/延迟/费用</td>
+        <td>平均工具调用次数、Token</td>
+      </tr>
+    </table>
+    <ul>
+      <li>
+        <b>测试框架</b>：单测（工具解析/路由/熔断状态机）；集成（Mock LLM
+        固定输出）；端到端（沙箱+小型真实调用）。<span class="cite"
+          >[P197]</span
+        >
+      </li>
+      <li>
+        <b>Benchmark</b>：固定数据集+评分器，注意数据泄漏与评分器偏差。<span
+          class="cite"
+          >[P197]</span
+        >
+      </li>
+      <li>
+        <b>人工 vs 自动</b>：自动跑大规模筛选，人工抽审争议样本。<span
+          class="cite"
+          >[P197]</span
+        >
+      </li>
+    </ul>
+    <div class="qa">
+      <b>Q11</b> 用 LLM 给 LLM 打分有啥坑？<br /><b>A</b>
+      可能偏好冗长、格式讨好，与裁判模型强相关；应对=人机混合、多裁判投票、规则评分结合、对抗样本集。<span
+        class="cite"
+        >[P198]</span
+      >
+    </div>
+    <div class="qa">
+      <b>Q12</b> 如何设计 Agent 回归测试集？<br /><b>A</b>
+      覆盖主路径、典型失败、工具错误、长上下文、多语言；每条含输入、期望工具或答案要点、不可出现项；版本化并与
+      CI 集成。<span class="cite">[P198]</span>
+    </div>
+
+    <h2>8. 幻觉问题的工程解决方案</h2>
+    <p>事前—事中—事后三层治理。<span class="cite">[P200]</span></p>
+    <ul>
+      <li>
+        <b>事前</b>：RAG 用可靠片段 grounding；结构化
+        Prompt「仅依据引用回答」；限定领域与数据源。<span class="cite"
+          >[P200]</span
+        >
+      </li>
+      <li>
+        <b>事中</b>：置信度过滤；工具验证（计算/查询/代码执行以外部为准）。<span
+          class="cite"
+          >[P200]</span
+        >
+      </li>
+      <li>
+        <b>事后</b
+        >：事实核查（检索交叉验证/数据库比对）；引用标注（逐句带来源编号）。<span
+          class="cite"
+          >[P200]</span
+        >
+      </li>
+    </ul>
+    <div class="qa">
+      <b>Q14</b> RAG 一定能降幻觉吗？<br /><b>A</b>
+      不一定。若检索质量差、重排失败、模型忽略上下文仍可能错答；需检索评估、重排序、引用约束、拒答策略。<span
+        class="cite"
+        >[P200]</span
+      >
+    </div>
+    <div class="qa">
+      追问：工具结果与检索矛盾听谁的？ → 定义优先级（权威数据库 &gt; 实时工具
+      &gt; 检索片段）；矛盾时输出不确定并建议人工。<span class="cite"
+        >[P200]</span
+      >
+    </div>
+
+    <h2>9. 综合面试题库（节选 15+）</h2>
+    <div class="qa">
+      <b>Q15</b> 多模型网关架构？ → 统一
+      Adapter；配置中心维护能力与配额；入口鉴权+租户路由；优先级调度+熔断+重试退避+降级链；全链路
+      Trace+usage 计费；密钥按租户环境隔离。<span class="cite">[P201]</span>
+    </div>
+    <div class="qa">
+      <b>Q16</b> 指数退避为何加 jitter？ →
+      避免大量客户端同一时刻齐刷刷重试造成重试风暴。<span class="cite"
+        >[P201]</span
+      >
+    </div>
+    <div class="qa">
+      <b>Q17</b> 语义缓存如何保证安全？ → 分租户隔离、键含模型与 Prompt
+      版本、相似度阈值保守、敏感任务禁用或二次确认、TTL 与主动失效。<span
+        class="cite"
+        >[P201]</span
+      >
+    </div>
+    <div class="qa">
+      <b>Q18</b> OTel 在 Agent 里打哪些 Span？ → 顶层请求 Span；子 Span 含每次
+      LLM/检索/工具/重试/降级；属性 model/token/tool.name/error.type。<span
+        class="cite"
+        >[P201]</span
+      >
+    </div>
+    <div class="qa">
+      <b>Q19</b> 工具「两步授权」？ → 模型仅生成意图与参数 →
+      策略服务校验角色/资源 ID/速率 → 执行器真正调用。<span class="cite"
+        >[P201]</span
+      >
+    </div>
+    <div class="qa">
+      <b>Q20</b> 蓝绿 vs 金丝雀？ →
+      蓝绿适合二进制切换、快速回滚、可接受双倍资源；金丝雀适合渐进验证、对错误更敏感的生产流量。<span
+        class="cite"
+        >[P201]</span
+      >
+    </div>
+    <div class="qa">
+      <b>Q21–Q29</b> 含 HPA
+      指标、异步吞吐、真实成本监控、评估集泄露、幻觉排查、最小可观测方案、关键/非关键路径分级、Semaphore
+      设多大、为何 Prompt 需版本化。<span class="cite">[P201-203]</span>
+    </div>
+
+    <h3 class="check">面试前自测清单<span class="cite">[P203]</span></h3>
+    <p class="check">
+      [ ] 能画出：路由→熔断→重试→降级→计费 闭环<br />
+      [ ] 能解释 Closed/Open/Half-Open 与探测流量<br />
+      [ ] 能说出 Token 估算与账单对账的差异<br />
+      [ ] 能列举 Trace 上应挂的 Span 类型<br />
+      [ ] 能描述工具调用的权限与校验分层<br />
+      [ ] 能说清金丝雀与蓝绿的适用场景<br />
+      [ ] 能说明 L1/L2 缓存与语义缓存风险<br />
+      [ ] 能口述幻觉治理的事前—事中—事后
+    </p>
+
+    <p class="meta">
+      教材出处：PDF《08 工程化实践》P178–203，作者「小番薯资料铺 /
+      海云日记」系列。本卡为教学压缩，引用请以原书页数为准。
+    </p>
+  </body>
+</html>

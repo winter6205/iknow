@@ -32,7 +32,10 @@ import { createMemoryRecallTool } from "../../memory/tools/recall.js";
 import { createMemorySaveTool } from "../../memory/tools/save.js";
 import { createToolSearchTool } from "./tool-search.js";
 import { createLspToolSet } from "./lsp.js";
+import { createSkillTool } from "./skill.js";
+import { createSkillSearchTool } from "./skill-search.js";
 import { RegistryConstructionError, ToolExecutionError } from "../../errors.js";
+import type { SkillCatalog } from "../../skill/catalog.js";
 
 /**
  * 11 件生产工具的命名常量 — SSOT（8 基线 + memory_recall + memory_save + tool_search）。
@@ -81,6 +84,11 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   "lsp_incoming_calls", // #251
   "lsp_outgoing_calls", // #251
   "lsp_diagnostics", // #251
+  // #337 T5 skill 工具集 append-only：21→23。
+  // 两件工具都条件化装配（skillCatalog 缺席时不入注册表,与 memoryDir
+  // 同形态：Gate 3 在 toolsetNames 端镜像过滤,见工厂尾部注释）。
+  "skill", // #337 T5 直呼取 skill 正文
+  "skill_search", // #337 T5 大小写不敏感子串检索
 ] as const);
 
 /**
@@ -93,6 +101,8 @@ export interface CreateDefaultAciRegistryOptions {
   readonly sandboxRoot: string;
   /** 记忆库根目录(#228 layer 3)。缺席时 memory_recall / memory_save 不入注册表。 */
   readonly memoryDir?: string;
+  /** #337 T5 skill 索引层(catalog)。缺席时 skill / skill_search 不入注册表。 */
+  readonly skillCatalog?: SkillCatalog;
   /** #251 onEdit 接缝:edit_file 写盘成功后回调(装配层接 LSP notifier)。 */
   readonly onEdit?: (file: string) => void;
 }
@@ -146,6 +156,7 @@ export function createDefaultAciRegistry(
   const proxyUrl = env.web.proxy;
   const searchUrl = env.web.searchUrl;
   const memoryDir = opts.memoryDir;
+  const skillCatalog = opts.skillCatalog;
 
   // holder:tool_search 自引用的惰性解引用点(装配完成前闭包返回 undefined,
   // tool-search.ts:resolveRegistry 触发 ToolExecutionError 兜底)。
@@ -154,8 +165,10 @@ export function createDefaultAciRegistry(
   // append-only:顺序与 build-engine.ts 既有策略(policy byName 键空间)一致。
   // memoryDir 缺席 → memory_recall / memory_save 从 factories 剔除
   // (memoryEnabled=false 的 ask 路径;见 build-engine.ts 条件构造)。
+  // skillCatalog 缺席 → skill / skill_search 从 factories 剔除
+  // (#337 T5 T8 装配时才真接;装配未启用 skill 源时与 memory 同形态)。
   // 键顺序必须与 ACI_TOOLSET_NAMES 逐项一致(Gate 3):memory_* 在
-  // tool_search 之前。
+  // tool_search 之前,skill / skill_search 在末尾。
   const factories: Record<string, () => AciToolDef> = {
     bash: () => createBashTool(sandboxRoot),
     read_file: () => createReadFileTool(sandboxRoot),
@@ -185,17 +198,27 @@ export function createDefaultAciRegistry(
     // #251 LSP 工具集：NearestRoot 上界 stop=ctx.directory=sandboxRoot
     // （build-engine 传 process.cwd()，与 fs 工具软沙箱同根语义一致）。
     ...lspTools(sandboxRoot),
+    // #337 T5 skill 工具集（条件化装配：skillCatalog 缺席时不入注册表）。
+    ...(skillCatalog
+      ? {
+          skill: () => createSkillTool({ catalog: skillCatalog }),
+          skill_search: () => createSkillSearchTool({ catalog: skillCatalog }),
+        }
+      : {}),
   };
 
   // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。
-  // memoryDir 缺席时 memory_recall/memory_save 不装配,故对照名单需先剔除
-  // 这两个条件键。任何不一致均装配期失败,不留到运行期。
+  // memoryDir 缺席时 memory_recall/memory_save 不装配,skillCatalog 缺席时
+  // skill/skill_search 不装配,故对照名单需先剔除这两个条件键。任何不一致
+  // 均装配期失败,不留到运行期。
   const factoryNames = Object.keys(factories);
-  const toolsetNames = memoryDir
-    ? (ACI_TOOLSET_NAMES as ReadonlyArray<string>)
-    : (ACI_TOOLSET_NAMES as ReadonlyArray<string>).filter(
-        (n) => n !== "memory_recall" && n !== "memory_save"
-      );
+  const excluded: ReadonlyArray<string> = [
+    ...(memoryDir ? [] : ["memory_recall", "memory_save"]),
+    ...(skillCatalog ? [] : ["skill", "skill_search"]),
+  ];
+  const toolsetNames = (ACI_TOOLSET_NAMES as ReadonlyArray<string>).filter(
+    (n) => !excluded.includes(n)
+  );
   if (
     factoryNames.length !== toolsetNames.length ||
     factoryNames.some((n, i) => n !== toolsetNames[i])

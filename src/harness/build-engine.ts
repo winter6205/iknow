@@ -14,6 +14,8 @@
  * (`store` / `session`) nor the session-server HTTP/session layer.
  */
 import Anthropic from "@anthropic-ai/sdk";
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
 import {
   createRealAnthropicAdapter,
   buildThinkingParams,
@@ -27,6 +29,8 @@ import type { PermissionModeContext } from "./permission/modes.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
 import { createLspNotifier } from "./lsp/notifier.js";
 import type { Registry } from "./tools/types.js";
+import type { RegistryImpl } from "./tools/registry.js";
+import type { ValidateFunction } from "ajv";
 import { homedir } from "node:os";
 import type { AskUser } from "./permission/types.js";
 import type { IknowEnv } from "../config/env.js";
@@ -39,6 +43,11 @@ import {
   resolveProjectMemoryDir,
   createSystemResolver,
 } from "./memory/index.js";
+import { createSkillScanner } from "./skill/scanner.js";
+import { createSkillCatalog } from "./skill/catalog.js";
+import type { SkillCatalog } from "./skill/catalog.js";
+import { loadMcpConfig } from "./mcp/config.js";
+import { createMcpManager, type McpManager } from "./mcp/manager.js";
 
 export type BuildEngineOpts = {
   readonly env: IknowEnv;
@@ -58,11 +67,20 @@ export type BuildEngineOpts = {
   /** W2: permission mode context (default / plan / full_auto). REPL slash
    *  command flips this in place without rebuilding the engine. */
   readonly permissionMode?: PermissionModeContext;
+  /** #337 T8 测试缝:userHome / cwd 覆盖(默认 homedir() / process.cwd())。 */
+  readonly userHome?: string;
+  readonly cwd?: string;
+  /** #337 T8 测试缝:MCP client 工厂覆盖(注入 stub,SC8 慢 connect 断言)。 */
+  readonly createMcpClient?: (
+    server: import("./mcp/config.js").McpServerConfig
+  ) => import("./mcp/manager.js").McpClientHandle;
 };
 
 export type BuiltEngine = {
   readonly deps: LoopEngineDeps;
   readonly engine: ReturnType<typeof createLoopEngine>;
+  /** #337 T8:MCP manager shutdown 句柄(ask surface 不创建 manager 时缺席)。 */
+  readonly shutdown?: () => Promise<void>;
 };
 
 /**
@@ -122,14 +140,25 @@ export async function buildHarnessEngine(
   const surface = opts.surface ?? "chat";
   // #194 T6:memory 开关(ask 显式关)。memoryDir = 项目命名空间记忆库根。
   const memoryEnabled = opts.memory?.enabled !== false;
-  const memoryDir = resolveProjectMemoryDir(process.cwd());
-  const sandboxRoot = opts.sandboxRoot ?? process.cwd();
+  // #337 T8:userHome / cwd 测试缝(默认 = 真实 homedir() / process.cwd())。
+  // 装配期 skill scanner + mcp config 都从这里取 userHome / cwd。
+  // 单测用 tmp fixture 注入空 home 隔离真实用户目录,不污染 ~/.iknow。
+  const userHome = opts.userHome ?? homedir();
+  const cwd = opts.cwd ?? process.cwd();
+  const memoryDir = resolveProjectMemoryDir(cwd);
+  const sandboxRoot = opts.sandboxRoot ?? cwd;
   // 10 件工具集 SSOT 工厂(append-only 顺序;env.web 透传 IKNOW_WEB_PROXY /
   // IKNOW_WEB_SEARCH_URL)。proxyUrl 非法 → 装配期同步抛(见 registry.ts)。
   // #194 T6:reg 按 memoryEnabled 条件化构造 — enabled 时传 memoryDir(reg.inner 10
   // 件,含 memory_recall + memory_save);disabled(ask)时不传 memoryDir(reg.inner 8
   // 件)。registry / executor / catalog 因此三方一致,不再手工过滤(SC9 保留
   // `memoryEnabled ? ... : undefined` 形态)。
+  // #337 T8:skill catalog 装配 — scanSkillDirs 读三级目录
+  // (~/.iknow/skills → <cwd>/.iknow/skills → IKNOW_SKILL_DIRS),createSkillCatalog
+  // 装好后注入 reg 的 skillCatalog opt → registry 含 skill / skill_search 两件
+  // (全 surface,ask 也装配 — SC12 守门)。
+  // **降级契约**:scanner 自身 try/catch + warn(目录缺失跳过),scan 抛错被
+  // createSkillScanner 的 warn 吞掉,build 不阻塞装配。
   // #251 LSP 联动缝:edit_file 写盘成功后由装配层注入 lspNotifier.invalidate
   // 作为 registry 的 onEdit 回调(notifier 内部 fire-and-forget + 失败降级,
   // 详见 src/harness/lsp/notifier.ts)。SSOT:LspCtx.directory 必须等于
@@ -137,13 +166,29 @@ export async function buildHarnessEngine(
   // 否则两者分叉会让同一边界出现两个值。
   const lspCtx = { directory: sandboxRoot };
   const lspNotifier = createLspNotifier(lspCtx);
+  const skillCatalog: SkillCatalog = createSkillCatalog(
+    await createSkillScanner({
+      userHome,
+      cwd,
+      env: process.env,
+    }).scan()
+  );
   const reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
     ...(memoryEnabled ? { memoryDir } : undefined),
+    skillCatalog,
     onEdit: (file) => lspNotifier.invalidate(file),
   });
-  const baseExecutor = createExecutor(reg.inner);
+  // #337:动态 registry 包装 —— 让 inner executor 能解析 registerExternal
+  // 动态注册的 mcp__ 工具。`reg.inner` 是构造期快照（aci-registry.ts:71），
+  // 本身的 `get/getValidator/list` 契约不变（T1 已锁 inner.list() 快照）。
+  // 这里我们新建一个 RegistryImpl 视图，list() 仍返回 reg.inner.list()，
+  // get()/getValidator() 优先 reg.inner，miss 时查 reg.catalog（动态源）。
+  // 动态 def 的 validator 用与 registry.makeAjv 同配置的 ajv 实例现场编译
+  // 一次并缓存（Map），避免每次调用重复编译。
+  const dynamicExecutorRegistry = createDynamicExecutorRegistry(reg);
+  const baseExecutor = createExecutor(dynamicExecutorRegistry);
   // 5-step permission middleware: 危险命令由硬墙无条件拦截(#122)。
   // `createAciExecutor` 内部已装配 permission-executor,不要再外包一层。
   const policy = createPermissionPolicy({
@@ -165,6 +210,34 @@ export async function buildHarnessEngine(
   // #196 IKNOW T4:启动时 eager + idempotent 初始化 ~/.iknow/(initIknowWorkspaceSafe
   // 内部 try/catch + warn,失败不阻塞装配 — 守 spec Boundaries Always 降级契约)。
   await initIknowWorkspaceSafe();
+  // #337 T8:MCP 条件化装配。四入口判定:
+  //   - surface === "ask" → 不创建 manager(SC12 守门,ask 三方视图零 mcp__*)。
+  //     ask oneshot 进程即用即抛,无长连接,无需关闭句柄。
+  //   - surface ∈ {chat, tui, serve} → loadMcpConfig 两级合并 + createMcpManager
+  //     + start() **不 await**(SC8 守门:慢 connect 不阻塞 buildHarnessEngine
+  //     返回)。manager.start() 内部 void Promise.allSettled,fire-and-forget;
+  //     我们 capture 但不 await,确保返回时间只取决于 registry 装配期(快)。
+  //   shutdown 句柄透出 BuiltEngine.shutdown,RuntimeBundle 生命周期钩子
+  //   (cli.ts SIGINT/SIGTERM 接线)在进程退出前调它,manager 关闭所有 client +
+  //   取消 in-flight + SIGTERM stdio 子孙(SC11)。
+  let mcpManager: McpManager | undefined;
+  if (surface !== "ask") {
+    const config = await loadMcpConfig({ home: userHome, cwd });
+    mcpManager = createMcpManager({
+      config: config.servers,
+      registerExternal: reg.registerExternal,
+      ...(opts.createMcpClient ? { createClient: opts.createMcpClient } : {}),
+    });
+    // start() 返回的 promise 仅作错误兜底(start 内部 void allSettled,
+    // 但保留 promise 引用便于未来加 await + timeout 收尾)。
+    void mcpManager.start().catch((err) => {
+      console.warn(
+        `[build-engine] MCP manager start failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    });
+  }
   const deps: LoopEngineDeps = {
     adapter,
     executor,
@@ -182,20 +255,30 @@ export async function buildHarnessEngine(
     // adapter.step request.system)。#194 T6:双层系统缝 — deps.system 始终挂
     // createIknowSystemResolver;memoryEnabled=true 时注入 memoryResolver 装配
     // memory_layer 段,false 时 memory_layer 段静默(ask 仍走 identity 4 段)。
+    // #337 T6:skills 注入缝(catalog.available() → SkillSummary 投影)。
+    // 全 surface 注入(ask 也注入,SC12 守门:skill 工具在场就该让模型知道
+    // available skills)。deps.system 内部 disabled 过滤后渲染 <available_skills>
+    // 段。
     system: createIknowSystemResolver({
-      cwd: process.cwd(),
-      userHome: homedir(),
+      cwd,
+      userHome,
       surface,
       memoryEnabled,
       ...(memoryEnabled
         ? {
             memoryResolver: createSystemResolver({
-              cwd: process.cwd(),
-              userHome: homedir(),
+              cwd,
+              userHome,
               memoryDir,
             }),
           }
         : {}),
+      skills: () =>
+        skillCatalog.available().map((entry) => ({
+          name: entry.name,
+          description: entry.description ?? "",
+          ...(entry.disabled ? { disabled: true } : {}),
+        })),
     }),
     // #119 T7:env.compress 透传 → deps.compress(LoopEngineDeps.compress 可选缝)。
     // IknowCompressEnv 必填(contextWindow / thresholdTokens),缺失即压缩关闭由
@@ -205,5 +288,66 @@ export async function buildHarnessEngine(
       thresholdTokens: env.compress.thresholdTokens,
     },
   };
-  return { deps, engine: createLoopEngine(deps) };
+  const engine = createLoopEngine(deps);
+  return {
+    deps,
+    engine,
+    ...(mcpManager ? { shutdown: () => mcpManager!.shutdown() } : {}),
+  };
+}
+
+/**
+ * #337:动态 registry 包装 —— 给 createExecutor 喂一个能解析 registerExternal
+ * 动态注册的 mcp__ 工具的 RegistryImpl 视图。
+ *
+ * 约束:
+ *   - 构造后 reg.inner 冻结（T1 契约，aci-registry-external.test.ts 断言
+ *     registerExternal 后 inner.list() 不变）。本包装不修改 inner，仅在
+ *     内层 miss 时向上查 reg.catalog（动态源）。
+ *   - list() 仍返回 reg.inner.list() 快照（与 T1 一致；createExecutor
+ *     内部不依赖 list() 的动态性，验证见 executor.ts 只用 get/getValidator）。
+ *   - get()/getValidator() 优先 reg.inner（构造期冻结、零开销），miss 时
+ *     走 reg.catalog.get(name)（动态源）；动态 def 的 validator 用与
+ *     registry.makeAjv 同配置（strict + allErrors + formats）的 ajv 实例
+ *     现场编译一次并缓存。
+ *
+ * 仅在 build-engine 这一处装配；aci-registry.ts 与 permission-executor.ts
+ * 都不动。
+ */
+function createDynamicExecutorRegistry(
+  reg: import("./aci/aci-registry.js").AciRegistry
+): RegistryImpl {
+  // ajv **惰性**初始化：Ajv.default + addFormats 实例化在构造期很重
+  // （实测 ~300ms+），而 SC8 要求 buildHarnessEngine 装配不因 MCP 变慢
+  // （慢 connect 不阻塞，单测容差 <200ms）。首次命中动态源才创建。
+  let externalAjv: Ajv.default | undefined;
+  const dynamicValidatorCache = new Map<string, ValidateFunction>();
+
+  function ensureAjv(): Ajv.default {
+    if (externalAjv === undefined) {
+      externalAjv = new Ajv.default({ strict: true, allErrors: true });
+      addFormats.default(externalAjv);
+    }
+    return externalAjv;
+  }
+
+  return Object.freeze({
+    list: () => reg.inner.list(),
+    get: (name: string) => reg.inner.get(name) ?? reg.catalog.get(name),
+    getValidator: (name: string) => {
+      const inner = reg.inner.getValidator(name);
+      if (inner !== undefined) return inner;
+      // 动态源：仅当 reg.catalog 真有这名字（且 reg.inner 没注册）才编译。
+      // reg.catalog.get 已做 byName ∪ externalByExt fallback。
+      if (reg.inner.get(name) !== undefined) return undefined;
+      const dyn = reg.catalog.get(name);
+      if (dyn === undefined) return undefined;
+      let v = dynamicValidatorCache.get(name);
+      if (v === undefined) {
+        v = ensureAjv().compile(dyn.inputSchema);
+        dynamicValidatorCache.set(name, v);
+      }
+      return v;
+    },
+  });
 }

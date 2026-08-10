@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <title>参考卡 · 三层架构：Harness · Agent 记忆 · 外置知识库</title>
+    <link rel="stylesheet" href="../assets/base.css" />
+    <style>
+      .cheatsheet {
+        font-size: 0.95em;
+      }
+      .cheatsheet table {
+        font-size: 0.92em;
+      }
+      .def {
+        background: #f6f3ee;
+        border: 1px solid var(--rule);
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin: 1em 0;
+      }
+      .def strong {
+        color: var(--accent);
+        display: block;
+        margin-bottom: 4px;
+      }
+      .boundary {
+        background: #fff8e1;
+        border: 1px solid #f9e076;
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin: 1em 0;
+        font-size: 0.95em;
+      }
+      .boundary strong {
+        color: #e65100;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="cheatsheet">
+      <h1>参考卡 · 三层架构</h1>
+      <p class="meta">
+        快速查阅 ·
+        <a href="../lessons/0011-three-layer-architecture.html">← 回到课</a>
+      </p>
+
+      <h2>核心定义</h2>
+
+      <div class="def">
+        <strong>Harness（运行时壳）</strong>
+        有状态的编排层。负责：拼上下文窗口、执行工具、权限检查、Hook
+        触发、会话持久化、子代理调度。<br />
+        <strong>关键属性</strong>：每次 LLM 调用前由 Harness 重组上下文；Harness
+        拥有控制权，LLM 没有。
+      </div>
+
+      <div class="def">
+        <strong>Agent Memory（会话记忆）</strong>
+        单次会话内的上下文管理。包括：对话历史
+        transcript、当前状态、跨轮先验（prior chunks）。<br />
+        <strong>关键属性</strong
+        >：会话结束消失；自动注入上下文窗口；不需要工具调用就能被 LLM 看到。
+      </div>
+
+      <div class="def">
+        <strong>External Knowledge Base（外置知识库）</strong>
+        跨会话持久化的结构化知识。通过工具接口（MCP /
+        函数调用）按需检索，<strong>不自动出现在上下文中</strong>。<br />
+        <strong>关键属性</strong>：LLM 必须主动调用工具才能"换页"进来；是 LLM
+        上下文与持久化世界的硬边界。
+      </div>
+
+      <h2>职责对照表</h2>
+
+      <table>
+        <tr>
+          <th>职责</th>
+          <th>Harness</th>
+          <th>Agent Memory</th>
+          <th>External KB</th>
+        </tr>
+        <tr>
+          <td>拼上下文窗口</td>
+          <td>✅ 主导</td>
+          <td>提供数据</td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>执行工具</td>
+          <td>✅ 主导</td>
+          <td>—</td>
+          <td>提供检索接口</td>
+        </tr>
+        <tr>
+          <td>会话状态</td>
+          <td>✅ 主导</td>
+          <td>数据存储</td>
+          <td>—</td>
+        </tr>
+        <tr>
+          <td>跨轮先验</td>
+          <td>调度</td>
+          <td>✅ 存储 last_priors</td>
+          <td>提供 source_spans</td>
+        </tr>
+        <tr>
+          <td>长期知识</td>
+          <td>—</td>
+          <td>—</td>
+          <td>✅ 主导</td>
+        </tr>
+        <tr>
+          <td>权限/安全</td>
+          <td>✅ 主导</td>
+          <td>—</td>
+          <td>辅助（ACL）</td>
+        </tr>
+      </table>
+
+      <h2>关键边界</h2>
+
+      <div class="boundary">
+        <strong>🔴 工具面（Tool Surface）</strong>
+        External KB 与 LLM 之间的硬边界。LLM 只能通过工具调用（kb_retrieve /
+        kb_compile / MCP 等）访问 KB，不能直接读取。即使 KB 有 10 万条事实，LLM
+        也"看不到"，除非主动检索。
+      </div>
+
+      <div class="boundary">
+        <strong>🔴 上下文窗口（Context Window）</strong>
+        LLM 每次调用能看到的全部内容。由 Harness 拼装：system prompt + CLAUDE.md
+        + conversation transcript + tool schemas + 最新
+        tool_result。窗口外的知识对 LLM 等于不存在。
+      </div>
+
+      <div class="boundary">
+        <strong>🔴 会话边界（Session Boundary）</strong>
+        Agent Memory 与 External KB 的分水岭。会话结束 = Agent Memory 消失；KB
+        持久化就保留，不持久化就消失（iknow 就是不持久化，重启全清空）。
+      </div>
+
+      <h2>iknow 的具体实现</h2>
+
+      <table>
+        <tr>
+          <th>层</th>
+          <th>iknow 代码位置</th>
+          <th>关键类/函数</th>
+        </tr>
+        <tr>
+          <td>Harness</td>
+          <td><code>src/agent-loop/</code></td>
+          <td>
+            <code>LlmIknowAgent</code>（<code>llm-agent.ts:71</code>）— LLM
+            agent loop<br />
+            <code>IknowAgent</code>（<code>loop.ts:43</code>）— deterministic
+            agent loop<br />
+            <code>ToolRegistry</code>（<code>tools/registry.ts:24</code>）—
+            工具注册表
+          </td>
+        </tr>
+        <tr>
+          <td>Agent Memory</td>
+          <td><code>src/interaction/</code></td>
+          <td>
+            <code>createConversation</code
+            >（<code>conversation.ts:28</code>）<br />
+            <code>derivePriorsFromAnswer</code
+            >（<code>conversation.ts:49</code>）<br />
+            <code>recordTurn</code>（<code>conversation.ts:87</code>）
+          </td>
+        </tr>
+        <tr>
+          <td>External KB</td>
+          <td><code>src/knowledge-store/</code><br /><code>src/kb-*/</code></td>
+          <td>
+            <code>InMemoryKnowledgeStore</code
+            >（<code>memory-store.ts:9</code>）<br />
+            <code>kbRetrieve</code
+            >（<code>kb-retrieve/retrieve.ts:65</code>）<br />
+            <code>kbCompile</code>（<code>kb-compile/compile.ts:55</code>）
+          </td>
+        </tr>
+      </table>
+
+      <h2>iknow 的具体缺陷</h2>
+
+      <ul>
+        <li>
+          <strong>无持久化</strong>：<code>InMemoryKnowledgeStore</code>
+          是纯内存对象，进程重启全部丢失（<code>docs/architecture.md:65</code>
+          明确列为 non-goal）
+        </li>
+        <li>
+          <strong>无跨会话记忆</strong>：每次启动 CLI 都是空白状态，需要重新
+          seed
+        </li>
+        <li>
+          <strong>无外部 LLM 知识</strong>：只有 seed-kb.ts 硬编码的
+          HR/IT/财务文档
+        </li>
+      </ul>
+
+      <h2>你接下来想做的：把 iknow 升级到 gbrain 级别</h2>
+
+      <p>
+        这意味着给 iknow 加一个<strong>持久化的 External KB</strong
+        >。最低成本的路径：
+      </p>
+
+      <ol>
+        <li>
+          把 <code>InMemoryKnowledgeStore</code> 替换成 SQLite +
+          sqlite-vec（轻量、单文件）
+        </li>
+        <li>
+          或者把 gbrain 作为 MCP server 接进来（<code>gbrain serve --http</code>
+          + MCP client）
+        </li>
+        <li>
+          保留 iknow 的 4 个 kb_* 工具作为"统一接口"——内部实现换成 gbrain 的
+          hybridSearch
+        </li>
+      </ol>
+
+      <p>
+        无论选哪条路，<strong>三层架构不变</strong>：iknow 的 Harness
+        继续拼上下文；Agent Memory 继续管会话；External KB 变成持久的。
+      </p>
+
+      <hr />
+
+      <p class="meta">
+        维护：每次课程迭代后，更新 iknow 代码位置（行号可能漂移）。
+      </p>
+    </main>
+  </body>
+</html>

@@ -6,18 +6,23 @@
  * between the two entry points silently: if a tool is added/renamed/removed,
  * this test forces an explicit decision at the single assembly point.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildHarnessEngine } from "../../src/harness/build-engine.ts";
+import {
+  buildHarnessEngine,
+  type BuiltEngine,
+} from "../../src/harness/build-engine.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
+import type { McpClientHandle } from "../../src/harness/mcp/manager.ts";
 
 // Order is load-bearing: it must match the `aciTools` array in
 // `src/harness/build-engine.ts` (policy byName key-space, ADR-0006)。
 // #194 T6 (Layer 4 baseline):扩 memory_recall + memory_save 到 10 件;
 // #224 在 10 件基础上末尾追加 tool_search(11 件,memoryDir 默认存在)。
+// #337 T8 (skill 装配):catalog 装配后末尾追加 skill / skill_search(→ 23 件)。
 const EXPECTED_TOOLS = [
   "bash",
   "read_file",
@@ -41,6 +46,9 @@ const EXPECTED_TOOLS = [
   "lsp_incoming_calls",
   "lsp_outgoing_calls",
   "lsp_diagnostics",
+  // #337 T8 skill 工具集 append-only:21→23,2 件在末尾。
+  "skill",
+  "skill_search",
 ];
 
 /** Deterministic env: never read process.env / .env files (env.ts SSOT). */
@@ -226,5 +234,146 @@ describe("buildHarnessEngine (SSOT passthrough)", () => {
       await rm(root, { recursive: true, force: true });
       await rm(outside, { recursive: true, force: true });
     }
+  });
+});
+
+// --- #337 T8: skill catalog + MCP manager 装配 / 四入口条件化 / SC12 --------
+
+/** 在 tmp 目录铺一个 skill fixture（SKILL.md 含合法 frontmatter）。 */
+async function plantSkill(
+  root: string,
+  skillName: string,
+  description: string
+): Promise<void> {
+  const dir = join(root, skillName);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, "SKILL.md"),
+    `---\nname: ${skillName}\ndescription: ${description}\n---\nbody`,
+    "utf8"
+  );
+}
+
+describe("buildHarnessEngine — #337 T8 skill 装配", () => {
+  const roots: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      roots.splice(0).map((r) => rm(r, { recursive: true, force: true }))
+    );
+  });
+
+  it("chat surface：skill catalog 装配后 skill / skill_search 两件工具在场", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t8-chat-skill-"));
+    roots.push(root);
+    await plantSkill(root, "echo", "echoes your message");
+
+    const built: BuiltEngine = await buildHarnessEngine({
+      env: makeEnv("sk-test-t8-chat-1"),
+      askUser: createNoAskUser(),
+      surface: "chat",
+      userHome: join(root, "home"),
+      cwd: root,
+    });
+
+    expect(built.deps.registry.get("skill")).toBeDefined();
+    expect(built.deps.registry.get("skill_search")).toBeDefined();
+    const names = built.deps.registry.list().map((d) => d.name);
+    expect(names).toContain("skill");
+    expect(names).toContain("skill_search");
+
+    // cleanup:manager 在场则调用 shutdown 不抛（即使无 MCP server）
+    if (built.shutdown) await built.shutdown();
+  });
+
+  it("ask surface：skill 两件在场 + 无 shutdown 句柄（manager 未创建，SC12）", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t8-ask-skill-"));
+    roots.push(root);
+    await plantSkill(root, "ask-skill", "ask-only skill");
+
+    const built: BuiltEngine = await buildHarnessEngine({
+      env: makeEnv("sk-test-t8-ask-1"),
+      askUser: createNoAskUser(),
+      surface: "ask",
+      memory: { enabled: false },
+      userHome: join(root, "home"),
+      cwd: root,
+    });
+
+    // skill 两件仍装配（ask 也含 skill 工具）
+    expect(built.deps.registry.get("skill")).toBeDefined();
+    expect(built.deps.registry.get("skill_search")).toBeDefined();
+
+    // ask 不创建 MCP manager → shutdown 句柄缺席
+    expect(built.shutdown).toBeUndefined();
+
+    // 三方视图零 mcp__*（SC12）：registry.list()（= executor 可见视图）
+    // + deps 视图（registry = executor 的输入，registry 是真实三方视图锚点）。
+    const names = built.deps.registry.list().map((d) => d.name);
+    expect(names.filter((n) => n.startsWith("mcp__"))).toEqual([]);
+  });
+});
+
+describe("buildHarnessEngine — #337 T8 MCP manager 装配", () => {
+  const roots: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      roots.splice(0).map((r) => rm(r, { recursive: true, force: true }))
+    );
+  });
+
+  it("chat surface：mcp config 缺席时 manager 在场 + shutdown 句柄透出", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t8-chat-mcp-"));
+    roots.push(root);
+
+    const built: BuiltEngine = await buildHarnessEngine({
+      env: makeEnv("sk-test-t8-chat-mcp-1"),
+      askUser: createNoAskUser(),
+      surface: "chat",
+      userHome: join(root, "home"),
+      cwd: root,
+    });
+
+    // 即使 mcp config 两级都缺席,manager 仍创建(只是 slot=空 map)。
+    expect(typeof built.shutdown).toBe("function");
+    // 不阻塞装配：调用 shutdown 不抛
+    await built.shutdown!();
+  });
+
+  it("SC8：慢 connect stub 不阻塞 buildHarnessEngine 返回", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t8-sc8-"));
+    roots.push(root);
+
+    // 一个永远不 resolve 的 connect —— 验证 buildHarnessEngine 不 await 即可返回。
+    // 返回时间 < 慢 connect 的剩余时间(无穷大,实质:返回即可)。
+    const slowClient: McpClientHandle = {
+      connect: () => new Promise<void>(() => {}),
+      listTools: async () => [],
+      callTool: async () => ({ result: { content: [] } }),
+      close: async () => {},
+      onListChanged: () => {},
+      onClose: () => {},
+    };
+
+    const start = Date.now();
+    const built: BuiltEngine = await buildHarnessEngine({
+      env: makeEnv("sk-test-t8-sc8-1"),
+      askUser: createNoAskUser(),
+      surface: "chat",
+      userHome: join(root, "home"),
+      cwd: root,
+      // T8 测试缝：注入慢 client。manager.start() 不 await,该 client
+      // 永远挂着,build 必须早就返回。
+      createMcpClient: () => slowClient,
+    });
+    const elapsed = Date.now() - start;
+
+    // 返回时间应 < 200ms(单测容差)。慢 connect 是 ∞ → 必须早返回。
+    expect(elapsed).toBeLessThan(200);
+    expect(typeof built.shutdown).toBe("function");
+    // cleanup:触发 shutdown,manager 关闭慢 client(connect 永不 resolve,
+    // close 仅清状态,不 await connect)。
+    if (built.shutdown) await built.shutdown();
   });
 });

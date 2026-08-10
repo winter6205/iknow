@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <title>参考卡 17 · gbrain 工具地图 + iknow 4-tool 对照</title>
+    <link rel="stylesheet" href="../assets/base.css" />
+    <style>
+      table {
+        font-size: 0.85em;
+      }
+      td,
+      th {
+        padding: 0.4em 0.6em;
+      }
+      .mono {
+        font-family: "SF Mono", Menlo, Consolas, monospace;
+        font-size: 0.9em;
+      }
+      .tag-new {
+        background: #edf7ed;
+        color: #2e7d32;
+        border-radius: 4px;
+        padding: 0.05em 0.4em;
+        font-size: 0.8em;
+      }
+      .tag-narrow {
+        background: #fff8e1;
+        color: #b5482e;
+        border-radius: 4px;
+        padding: 0.05em 0.4em;
+        font-size: 0.8em;
+      }
+      .tag-merge {
+        background: #e5ecf3;
+        color: #2c5282;
+        border-radius: 4px;
+        padding: 0.05em 0.4em;
+        font-size: 0.8em;
+      }
+      .hub {
+        background: #fbf3f0;
+        border: 1px solid var(--accent);
+        border-radius: 8px;
+        padding: 10px 14px;
+        margin: 1em 0;
+        font-size: 0.9em;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>参考卡 17 · gbrain 工具地图 + iknow 4-tool 对照</h1>
+      <p class="meta">
+        可贴墙 / 可打印 | 对象：<code>_upstream_gbrain/</code>（只读）+
+        <code>iknow/src/</code> | 关联
+        <a href="../lessons/0010-reading-unknown-codebase-gbrain-tools.html"
+          >第 10 课</a
+        >
+      </p>
+
+      <h2>三个枢纽（读陌生库先找这些）</h2>
+      <div class="hub">
+        <strong>① 工具总目录（枢纽）</strong>：<code
+          >_upstream_gbrain/src/core/operations.ts:5316</code
+        >
+        — <code>export const operations: Operation[]</code>，<strong
+          >102 个工具</strong
+        >全在这一个数组。<br />
+        <strong>② 工具形状</strong>：<code>operations.ts:589-619</code> —
+        <code
+          >interface Operation { name, description, params, handler, scope?, ...
+          }</code
+        >。一个工具 = 菜单(name/description/params) + 厨房(handler)。<br />
+        <strong>③ LLM 白名单</strong>：<code
+          >src/core/minions/tools/brain-allowlist.ts:48</code
+        >
+        — LLM 子代理实际只见 <strong>14 个</strong>（定义 102 ≠ 暴露 102）。<br />
+        <strong>打印命令</strong>：<code>gbrain --tools-json</code> →
+        <code>src/commands/tools-json.ts:3</code>（遍历 operations）。
+      </div>
+
+      <h2>iknow 4-tool ↔ gbrain 对照（核心）</h2>
+      <table>
+        <tr>
+          <th>iknow 工具</th>
+          <th>iknow 定义处</th>
+          <th>对应上游</th>
+          <th>上游定义处</th>
+          <th>关系</th>
+        </tr>
+        <tr>
+          <td class="mono">kb_retrieve</td>
+          <td class="mono">
+            src/kb-retrieve/retrieve.ts<br />协议 tool-defs.ts:26-80
+          </td>
+          <td class="mono">query / search</td>
+          <td class="mono">operations.ts:1478 / 1419</td>
+          <td><span class="tag-narrow">收窄</span></td>
+        </tr>
+        <tr>
+          <td class="mono">kb_compile</td>
+          <td class="mono">
+            src/kb-compile/compile.ts<br />协议 tool-defs.ts:115-143
+          </td>
+          <td class="mono">extract_facts</td>
+          <td class="mono">operations.ts:3869</td>
+          <td><span class="tag-narrow">收窄</span></td>
+        </tr>
+        <tr>
+          <td class="mono">kb_governance</td>
+          <td class="mono">
+            src/kb-governance/governance.ts<br />协议 tool-defs.ts:144-164
+          </td>
+          <td class="mono">（散落：get_versions 等）</td>
+          <td class="mono">operations.ts:2487</td>
+          <td><span class="tag-merge">收敛</span></td>
+        </tr>
+        <tr>
+          <td class="mono">kb_verify_citation</td>
+          <td class="mono">
+            src/kb-verify/verify.ts<br />协议 tool-defs.ts:81-114
+          </td>
+          <td class="mono">（无）</td>
+          <td class="mono">—</td>
+          <td><span class="tag-new">原创</span></td>
+        </tr>
+      </table>
+      <p class="cite">
+        iknow
+        工具注册表：<code>src/tools/registry.ts:24-41</code>（运行时绑定）+
+        <code>src/agent-loop/tool-defs.ts:25</code>（LLM 协议
+        KB_TOOL_DEFS）。LLM
+        真正看到工具的那一行：<code>src/agent-loop/llm-agent.ts:155</code>。hop
+        白名单：<code>tool-defs.ts:8</code>（只有 kb_retrieve /
+        kb_verify_citation 消耗 hop）。
+      </p>
+
+      <h2>gbrain 102 工具分组（行号见 operations.ts:5316-5401）</h2>
+      <table>
+        <tr>
+          <th>组</th>
+          <th>工具</th>
+        </tr>
+        <tr>
+          <td>A 页面 CRUD</td>
+          <td class="mono">
+            get_page put_page delete_page list_pages restore_page
+            purge_deleted_pages
+          </td>
+        </tr>
+        <tr>
+          <td>B 搜索</td>
+          <td class="mono">search query search_by_image</td>
+        </tr>
+        <tr>
+          <td>C 观点/思考</td>
+          <td class="mono">
+            takes_list takes_search takes_scorecard takes_calibration think
+          </td>
+        </tr>
+        <tr>
+          <td>D 标签/链接/时间线</td>
+          <td class="mono">
+            add_tag remove_tag get_tags add_link remove_link get_links
+            get_backlinks list_link_sources traverse_graph add_timeline_entry
+            get_timeline
+          </td>
+        </tr>
+        <tr>
+          <td>E 管理/版本</td>
+          <td class="mono">
+            get_stats get_health get_brain_identity list_skills get_skill
+            list_brain_skillpack advisor get_status_snapshot run_doctor
+            get_versions revert_version sync_brain
+          </td>
+        </tr>
+        <tr>
+          <td>F 原始数据/分块</td>
+          <td class="mono">
+            put_raw_data get_raw_data resolve_slugs get_chunks log_ingest
+            get_ingest_log
+          </td>
+        </tr>
+        <tr>
+          <td>G 文件</td>
+          <td class="mono">file_list file_upload file_url</td>
+        </tr>
+        <tr>
+          <td>H 后台任务</td>
+          <td class="mono">
+            submit_job submit_agent get_job list_jobs cancel_job retry_job
+            get_job_progress pause_job resume_job replay_job send_job_message
+          </td>
+        </tr>
+        <tr>
+          <td>I 洞察读取</td>
+          <td class="mono">
+            find_orphans get_calibration_profile get_recent_salience
+            volunteer_context find_anomalies find_experts find_contradictions
+            find_trajectory get_recent_transcripts
+          </td>
+        </tr>
+        <tr>
+          <td>J 身份/来源</td>
+          <td class="mono">
+            whoami sources_add sources_list sources_remove sources_status
+          </td>
+        </tr>
+        <tr>
+          <td>K 事实(热记忆)</td>
+          <td class="mono">extract_facts recall forget_fact</td>
+        </tr>
+        <tr>
+          <td>L 代码智能</td>
+          <td class="mono">
+            code_callers code_callees code_def code_refs code_blast code_flow
+            code_traversal_cache_clear
+          </td>
+        </tr>
+        <tr>
+          <td>M Schema</td>
+          <td class="mono">
+            get_active_schema_pack list_schema_packs schema_stats schema_lint
+            schema_graph schema_explain_type schema_review_orphans
+            schema_apply_mutations reload_schema_pack
+          </td>
+        </tr>
+        <tr>
+          <td>N 引导/优化</td>
+          <td class="mono">run_onboard run_skillopt</td>
+        </tr>
+        <tr>
+          <td>O 编年史/本体</td>
+          <td class="mono">
+            chronicle_day chronicle_on_this_day chronicle_since
+            chronicle_last_seen ontology_get ontology_propose
+            ontology_dimensions ontology_conflicts volunteer_chronicle
+            chronicle_backfill
+          </td>
+        </tr>
+      </table>
+
+      <h2>读陌生代码库三招（方法卡）</h2>
+      <table>
+        <tr>
+          <th>招</th>
+          <th>问自己</th>
+          <th>gbrain 实例</th>
+        </tr>
+        <tr>
+          <td>1 找枢纽</td>
+          <td>所有功能被收集成哪个列表？</td>
+          <td class="mono">operations.ts:5316</td>
+        </tr>
+        <tr>
+          <td>2 搞清形状</td>
+          <td>最小单元由什么构成？</td>
+          <td class="mono">Operation = 菜单+厨房</td>
+        </tr>
+        <tr>
+          <td>3 顺藤摸瓜</td>
+          <td>这列表最终喂给谁？被筛选了吗？</td>
+          <td class="mono">brain-allowlist.ts:48（102→14）</td>
+        </tr>
+      </table>
+
+      <div class="hub">
+        <strong>铁律</strong>：代码是 ground truth，文档会滞后。gbrain CLAUDE.md
+        写「~90 operations」，实际数出来
+        <strong>102</strong>。文档与代码冲突时，信代码。
+      </div>
+
+      <p class="cite">
+        生成于 2026-07-25 · 数据来自对 <code>_upstream_gbrain</code>（v0.42.57.0
+        树）与 <code>iknow/src</code> 的源码侦察，全部行号可回溯。
+      </p>
+    </main>
+  </body>
+</html>

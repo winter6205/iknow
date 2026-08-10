@@ -103,3 +103,53 @@ export async function buildHarnessEngine(
     ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}),
   });
 }
+
+/**
+ * #337 T8 生命周期钩子 — 把 `BuiltEngine.shutdown` 挂到进程退出事件上。
+ *
+ * 长程 CLI 入口（chat REPL / serve）持有 MCP manager 后台连接，进程退出
+ * 前必须显式关闭 stdio 子进程 + 取消 in-flight 调用（SC11 / SC16）。
+ * ask 入口 manager 未创建 → shutdown 缺席 → 本函数直接返回 no-op 句柄,
+ * 调用方无需特判。
+ *
+ * 用法:
+ *   const built = await buildHarnessEngine(...);
+ *   registerShutdown(built);  // chat / serve:hook 一次即可
+ *   await runChatSession(...);
+ *
+ * `dispose()` 用于测试或一次性清理场景主动调用（不影响已经绑定的进程
+ * 信号监听器,后者由进程退出触发）。
+ */
+export function registerShutdown(built: BuiltEngine): {
+  readonly dispose: () => Promise<void>;
+} {
+  let shuttingDown = false;
+  const dispose = async (): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    if (built.shutdown) {
+      try {
+        await built.shutdown();
+      } catch (err) {
+        console.warn(
+          `[runtime] shutdown hook failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      }
+    }
+  };
+  const onSignal = (sig: NodeJS.Signals): void => {
+    void dispose().finally(() => {
+      // 第二次信号直接退出(用户强杀语义),不等待 close 兜底。
+      process.kill(process.pid, sig);
+    });
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  // once:true — process.beforeExit 每轮触发,我们只在最后一刻跑一次。
+  process.once("beforeExit", () => {
+    void dispose();
+  });
+  return Object.freeze({ dispose });
+}
