@@ -37,6 +37,8 @@ function makeEnv(apiKey: string): IknowEnv {
     chat: { showThinking: false },
     web: { searchUrl: undefined, proxy: undefined },
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
+    // #378 根因 B: MCP 连接超时(默认 60_000)。
+    mcp: { connectTimeoutMs: 60_000 },
   };
 }
 
