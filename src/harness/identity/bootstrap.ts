@@ -43,11 +43,3 @@ yourself with your tools, then delete this file.
 This file can be deleted when done. If it is gone later, do not assume it
 should come back.
 `.trim();
-
-/**
- * @deprecated rev 2026-08-11:首启引导已从"对话脚本 + /profile done"改为
- * "种子文件 `~/.iknow/BOOTSTRAP.md` + agent 自己 rm"。`IKNOW_BOOTSTRAP_PROMPT`
- * 保留为 `BOOTSTRAP_TEMPLATE` 的兼容别名,仅供 T4 删之前的 caller 使用,
- * 不再有新 caller。T4 删除。
- */
-export const IKNOW_BOOTSTRAP_PROMPT = BOOTSTRAP_TEMPLATE;
