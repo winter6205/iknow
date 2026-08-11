@@ -14,6 +14,8 @@
  */
 
 import { readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 import type { AciToolDef } from "../types.js";
 import { ToolExecutionError } from "../../errors.js";
@@ -98,10 +100,19 @@ function replaceOnce(haystack: string, oldStr: string, newStr: string): string {
   );
 }
 
+/** `~/.iknow/` — the agent's own profile directory. Mirror of read-file.ts
+ *  (extraReadRoots) and write-file.ts (T8): edit_file can now modify files in
+ *  `~/.iknow/`, so the agent can update `user.md` directly (rev 2026-08-11,
+ *  replaces the old `/profile done` host hook). */
+function iknowProfileRoot(): string {
+  return join(homedir(), ".iknow");
+}
+
 /**
  * 工厂:createEditFileTool(root) — 写入工具,带 poka-yoke linter。
  * 行为:
- *   1. resolveWithinRoot(root, path)(symlink 逃逸拒绝);
+ *   1. resolveWithinRoot(root, path, undefined, extraWriteRoots)(symlink 逃逸拒绝;
+ *      ~/.iknow/ 作为额外可写根,rev 2026-08-11);
  *   2. 读文件(必须存在,否则报错);
  *   3. lintPatch(new_str) 失败 → 拒绝且不落盘;
  *   4. old_str 出现 0 次 → 失败文案`[edit_file] old_str not found: <path>`;
@@ -112,9 +123,15 @@ export function createEditFileTool(
   root: string,
   opts?: EditFileOpts
 ): AciToolDef {
+  const extraWriteRoots = Object.freeze([iknowProfileRoot()]);
   const handler = async (input: unknown): Promise<unknown> => {
     const validated = asEditFileInput(input);
-    const absPath = await resolveWithinRoot(root, validated.path);
+    const absPath = await resolveWithinRoot(
+      root,
+      validated.path,
+      undefined,
+      extraWriteRoots
+    );
 
     let content: string;
     try {
