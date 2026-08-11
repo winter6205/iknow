@@ -44,6 +44,10 @@ partial optional-deps install):
 npm run probe:tui-binding   # 6/6 passed → exit 0; any FAIL → exit 1
 ```
 
+`npm ci` (clean install) 自动安装 `optionalDependencies`,无需 `--include=optional` flag;
+缺失时 TUI 启动即崩 — 探针可前置兜底。`npm install` 第一次拉依赖则**必须**带
+`--include=optional`(npm 默认行为是跳过 optionalDependencies)。
+
 ## Run
 
 **Primary interactive entry is `chat`.** Use one-shot `ask` / bare query only for scripts and CI.
