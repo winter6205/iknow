@@ -3,7 +3,21 @@
  */
 
 export type CliCommand =
-  "chat" | "ask" | "oneshot" | "help" | "serve" | "trace" | "tui";
+  | "chat"
+  | "ask"
+  | "oneshot"
+  | "help"
+  | "serve"
+  | "trace"
+  | "tui"
+  /**
+   * #356 subagent worker headless 重入 (双下划线前缀区别产品形态,spec
+   * Boundaries Never)。本命令不暴露在 printUsage / getVersion 公共展示路径;
+   * 仅由父代理通过 child_process.spawn 触发,operator 不直调。
+   * argv 早 flag `--subagent-worker` 在 parseArgs for-loop 最前面检测,
+   * 一旦命中立即返回 baseParsed,不再走任何产品分支。
+   */
+  | "__subagent_worker__";
 
 export type ParsedCli = {
   command: CliCommand;
@@ -79,6 +93,12 @@ export type ParseArgsOptions = {
  * - no positionals + interactive → chat
  * - no positionals + !interactive → help
  * - ask / bare query with empty text → missingQuery (caller exits 1)
+ *
+ * #356 early flag: `--subagent-worker` 在 for-loop 最前面检测(早于
+ * `-h` / `--version` / 既有 flag 分支)。一旦命中立即返回
+ * `baseParsed({command:"__subagent_worker__", fields:{...defaults}})`,
+ * 不进入任何产品形态分支。子代理由父进程 spawn 后 stdin 喂 envelope,
+ * CLI argv 不再包含 chat/ask/serve/tui 等 sub-command。
  */
 export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   const argv = opts.argv;
@@ -97,6 +117,28 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
+    // #356 early flag:在 for-loop 最前面检测,一旦命中 → 立即返回 worker
+    // command。早 flag 语义覆盖后续任何 argv 项(即便用户同时塞了
+    // chat/ask/serve/tui 也以 worker 优先,operator 不直调,只为父进程 spawn)。
+    // 不在 printUsage / getVersion 公共展示路径露出。
+    if (a === "--subagent-worker") {
+      return baseParsed({
+        command: "__subagent_worker__",
+        fields: {
+          json: false,
+          port: 8787,
+          host: "127.0.0.1",
+          traceOut: undefined,
+          dataDir: undefined,
+          maxBytes: undefined,
+          maxTurns: undefined,
+          noOpen: false,
+          query: "",
+          missingQuery: false,
+          versionOnly: false,
+        },
+      });
+    }
     if (a === "-h" || a === "--help") {
       return baseParsed({
         command: "help",

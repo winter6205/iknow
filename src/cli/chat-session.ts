@@ -27,6 +27,8 @@ import {
   writeOut,
 } from "./session-io.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
+import type { SubAgentManager } from "../harness/subagent/manager.js";
+import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
 import {
   createViolationCounter,
   wireKillSessionNotification,
@@ -86,6 +88,12 @@ export type ChatSessionOpts = {
    * UUID,行为与 T2 完全相同。
    */
   resumeId?: string;
+  /**
+   * #356 T7:host drain — chat 入口每轮 runHarness 之前,调
+   * `drainPendingSubagents(subagentManager)` 把 completed 浓缩 envelope
+   * 拼入 next turn 的 priorMessages。ask 入口无 manager → 不传。
+   */
+  readonly subagentManager?: SubAgentManager;
 };
 
 export type ChatLineContext = {
@@ -108,6 +116,11 @@ export type ChatLineContext = {
    * 跳过持久化,行为零变化。
    */
   checkpointStore?: SessionStore;
+  /**
+   * #356 T7:同 ChatSessionOpts.subagentManager,runChatSession 透传。
+   * 缺席(undefined)= 不调 drain,行为零变化。
+   */
+  readonly subagentManager?: SubAgentManager;
 };
 
 export type ProcessChatLineResult = {
@@ -175,18 +188,28 @@ export async function processChatLine(
           if (event.type === "stop_summary") stopSummary = event.text;
           else opts.onStream!(event);
         };
-  // T2: prior 快照(run 前 state.messages 引用;append-only 冻结已保证该引用
-  // 不会就地变更,run 后若 host 整体替换 messages 也不会影响 prior)。throw
-  // 路径用同一 prior 引用(protocolError/emptyFinalResponse 不替换;MaxTurnsExceeded
-  // catch 也不替换 — 抛异常路径不进此处 if-块,见 catch 分支)。
-  const prior = ctx.state.messages;
+  // #356 T7 (SC7):host drain — 把 manager 内 completed 子代理结果浓缩成
+  // user message,拼入本次 run 的 priorMessages 末尾。空 manager / 无
+  // completed → priorMessages 不变 (行为零变化)。
+  const drained = await drainPendingSubagents(ctx.subagentManager);
+  const priorMessages = drained
+    ? Object.freeze([
+        ...ctx.state.messages,
+        Object.freeze({
+          role: "user" as const,
+          content: Object.freeze([
+            Object.freeze({ type: "text" as const, text: drained }),
+          ]),
+        }),
+      ])
+    : ctx.state.messages;
   try {
     const { result, trace } = await runHarness(
       query,
       ctx.deps,
       ctx.abortController?.signal,
       {
-        priorMessages: prior,
+        priorMessages,
         // #179 T6 (D3):观察者回调透传;undefined = 非流式行为零变化(pipe/ask)。
         // T6:wrap 后仅转发非 stop_summary 事件(摘要单独捕获,见上)。
         onStream: wrappedOnStream,
@@ -203,7 +226,7 @@ export async function processChatLine(
         conversationId: ctx.state.conversationId,
         jsonMode: ctx.state.jsonMode,
         result,
-        priorMessages: prior,
+        priorMessages,
       });
     }
     // Continue the conversation next turn on cancelled/timeout/nonSuccessStop
@@ -668,6 +691,7 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     permissionMode: opts.permissionMode,
     abortController,
     checkpointStore,
+    subagentManager: opts.subagentManager,
   };
 
   const interactive = isInteractive();

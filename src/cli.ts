@@ -10,6 +10,8 @@
  */
 import { parseArgs, type ParsedCli } from "./cli/parse-args.js";
 import { runChatSession } from "./cli/chat-session.js";
+// #356 subagent worker headless 重入: 子代理进程 main dispatch 早返回。
+import { runSubagentWorker } from "./harness/subagent/worker.js";
 import {
   buildHarnessEngine,
   prepareRuntime,
@@ -203,7 +205,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     return;
   }
 
-  let built: { deps: LoopEngineDeps };
+  let built: import("./harness/build-engine.js").BuiltEngine;
   // W2: chat REPL 持一个可变 PermissionModeContext —— /permissions 命令在
   // REPL 里就地翻转它,引擎不重建。初始值走 env IKNOW_PERMISSION_MODE(可
   // 选),缺省 default。
@@ -247,6 +249,9 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // T4: `--resume <id>` 续跑锚点。仅 chat 消费;ask/serve/tui 入口
     // 不传(解析虽 command-agnostic,host 各自决策)。undefined = 新开会话。
     resumeId: parsed.resumeId,
+    // #356 T7:host drain — chat 入口每轮 runHarness 前把 completed 子代理
+    // 结果拼入 priorMessages。ask 入口无 manager(surface 门控),不传。
+    subagentManager: built.subagentManager,
   });
 }
 
@@ -255,6 +260,25 @@ async function main(): Promise<void> {
     argv: process.argv.slice(2),
     interactive: isInteractive(),
   });
+
+  // #356 subagent worker: 子代理进程 headless 重入 —— stdin 信封 → run() →
+  // stdout envelope。早于产品形态 dispatch (chat/ask/serve/tui/oneshot)，
+  // 该命令只由父代理 child_process.spawn 触发,operator 不直调。
+  //
+  // 协议层崩溃 → exit 2 (assumption 16 / SC13: JSON parse 失败 / 信封字段
+  // 缺失, reason=protocolError at 父代理)。模块级 main().catch 兜所有产品
+  // 形态错误 → exit 1, worker 必须自己 exit 2 区分协议错误与产品错误。
+  if (parsed.command === "__subagent_worker__") {
+    try {
+      await runSubagentWorker();
+    } catch (err) {
+      const msg =
+        err instanceof Error ? (err.stack ?? err.message) : String(err);
+      process.stderr.write(`[subagent-worker] fatal: ${msg}\n`);
+      process.exit(2);
+    }
+    return;
+  }
 
   if (parsed.versionOnly) {
     process.stdout.write(`${getVersion()}\n`);

@@ -39,6 +39,7 @@ import {
   createIknowSystemResolver,
   initIknowWorkspaceSafe,
 } from "./identity/index.js";
+import { IKNOW_COORDINATOR_TEXT } from "./identity/assemble.js";
 import {
   resolveProjectMemoryDir,
   createSystemResolver,
@@ -48,6 +49,11 @@ import { createSkillCatalog } from "./skill/catalog.js";
 import type { SkillCatalog } from "./skill/catalog.js";
 import { loadMcpConfig } from "./mcp/config.js";
 import { createMcpManager, type McpManager } from "./mcp/manager.js";
+import {
+  createSubAgentManager,
+  type SubAgentManager,
+} from "./subagent/manager.js";
+import { defaultSubAgentSpawn } from "./subagent/spawn.js";
 
 export type BuildEngineOpts = {
   readonly env: IknowEnv;
@@ -74,12 +80,18 @@ export type BuildEngineOpts = {
   readonly createMcpClient?: (
     server: import("./mcp/config.js").McpServerConfig
   ) => import("./mcp/manager.js").McpClientHandle;
+  /** #356 T6 测试缝:subagent manager 覆盖注入(生产默认不传则内部自建)。 */
+  readonly subagentManager?: SubAgentManager;
 };
 
 export type BuiltEngine = {
   readonly deps: LoopEngineDeps;
   readonly engine: ReturnType<typeof createLoopEngine>;
-  /** #337 T8:MCP manager shutdown 句柄(ask surface 不创建 manager 时缺席)。 */
+  /** #356 T6:subagent manager 句柄(ask surface 不创建时缺席;T7 host-drain 消费)。 */
+  readonly subagentManager?: SubAgentManager;
+  /** #337 T8 / #356 T6:MCP + subagent 组合 shutdown 句柄(ask surface 两者皆缺席时
+   * 无句柄)。顺序:mcpManager first → subagentManager second(两者无共享可变状态,
+   * Promise.all 并发;顺序仅语义标注)。 */
   readonly shutdown?: () => Promise<void>;
 };
 
@@ -173,11 +185,25 @@ export async function buildHarnessEngine(
       env: process.env,
     }).scan()
   );
+  // #356 T6:subagent manager 条件装配 — 与 MCP 同门(surface !== "ask"):
+  //   - chat/tui/serve 自建 createSubAgentManager({ spawn: defaultSubAgentSpawn });
+  //     opts.subagentManager 测试缝覆盖注入。
+  //   - ask 不创建(SC8 守门,oneshot 即用即抛,registry 缺 spawn_subagent /
+  //     subagent_result 两件 = 23 件,三方视图一致)。
+  // 注:TUI 产品入口 buildTuiDeps 独立装配(不经 build-engine),不在此受控。
+  // 位置在 registry 装配之前:registry 的 subagentManager opt 在此消费,故放
+  // MCP 条件装配段之前(同 surface 条件,语义同形)。
+  const subagentManager: SubAgentManager | undefined =
+    surface !== "ask"
+      ? (opts.subagentManager ??
+        createSubAgentManager({ spawn: defaultSubAgentSpawn }))
+      : undefined;
   const reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
     ...(memoryEnabled ? { memoryDir } : undefined),
     skillCatalog,
+    ...(subagentManager ? { subagentManager } : undefined),
     onEdit: (file) => lspNotifier.invalidate(file),
   });
   // #337:动态 registry 包装 —— 让 inner executor 能解析 registerExternal
@@ -279,6 +305,11 @@ export async function buildHarnessEngine(
           description: entry.description ?? "",
           ...(entry.disabled ? { disabled: true } : {}),
         })),
+      // #361 T8 subagent coordinator 引导层 — 条件与 registry 同源:
+      // subagentManager 装配 (surface !== "ask") 时注入 IKNOW_COORDINATOR_TEXT,
+      // ask (无 manager) 不注入 → 装配层段缺席 (字节级零变化)。文案含验收6
+      // 关键词 proactive / parallelizable / blocks until finished。
+      ...(subagentManager ? { coordinatorText: IKNOW_COORDINATOR_TEXT } : {}),
     }),
     // #119 T7:env.compress 透传 → deps.compress(LoopEngineDeps.compress 可选缝)。
     // IknowCompressEnv 必填(contextWindow / thresholdTokens),缺失即压缩关闭由
@@ -292,7 +323,20 @@ export async function buildHarnessEngine(
   return {
     deps,
     engine,
-    ...(mcpManager ? { shutdown: () => mcpManager!.shutdown() } : {}),
+    ...(subagentManager ? { subagentManager } : {}),
+    // #356 T6:shutdown 组合 MCP + subagent 两清理。SC12 顺序:mcpManager first →
+    // subagentManager second(两者无共享可变状态,Promise.all 并发触发;顺序仅
+    // 语义标注,非严格串行 — ask 入口两者都缺席时 shutdown 也缺席)。
+    ...(mcpManager || subagentManager
+      ? {
+          shutdown: async (): Promise<void> => {
+            await Promise.all([
+              mcpManager?.shutdown(),
+              subagentManager?.shutdown(),
+            ]);
+          },
+        }
+      : {}),
   };
 }
 
