@@ -37,6 +37,8 @@ const ENV_KEYS = [
   "IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS",
   // plan T5: maxTurns env (optional int; unset → undefined = 无限).
   "IKNOW_LLM_MAX_TURNS",
+  // #378 根因 B: MCP 连接超时 env (int; 非法 → fallback 60_000)。
+  "IKNOW_MCP_CONNECT_TIMEOUT_MS",
 ] as const;
 
 describe("loadIknowEnv — thinking config (#151 T4)", () => {
@@ -486,5 +488,63 @@ describe("loadIknowEnv — subagent inheritance (#353)", () => {
       await rm(tmpEmpty, { recursive: true, force: true });
       await rm(emptyHome, { recursive: true, force: true });
     }
+  });
+});
+
+describe("loadIknowEnv — mcp connect timeout (#378 根因 B)", () => {
+  beforeEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+
+  it("default: mcp.connectTimeoutMs=60000 (env 不设时)", () => {
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.mcp.connectTimeoutMs, 60_000);
+  });
+
+  it("合法值 90000 透传", () => {
+    process.env.IKNOW_MCP_CONNECT_TIMEOUT_MS = "90000";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.mcp.connectTimeoutMs, 90000);
+  });
+
+  it("合法值 1 透传（极小正数不误伤）", () => {
+    process.env.IKNOW_MCP_CONNECT_TIMEOUT_MS = "1";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.mcp.connectTimeoutMs, 1);
+  });
+
+  it("非法值 'abc' → 回退 60000", () => {
+    process.env.IKNOW_MCP_CONNECT_TIMEOUT_MS = "abc";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.mcp.connectTimeoutMs, 60_000);
+  });
+
+  it("非法值 '-5000'（负数）→ 回退 60000", () => {
+    process.env.IKNOW_MCP_CONNECT_TIMEOUT_MS = "-5000";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.mcp.connectTimeoutMs, 60_000);
+  });
+
+  it("非法值 '0'（零超时无意义）→ 回退 60000", () => {
+    process.env.IKNOW_MCP_CONNECT_TIMEOUT_MS = "0";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.mcp.connectTimeoutMs, 60_000);
+  });
+
+  it("空串 → 回退 60000（与未设同义）", () => {
+    process.env.IKNOW_MCP_CONNECT_TIMEOUT_MS = "";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.mcp.connectTimeoutMs, 60_000);
+  });
+
+  it("与 llm.timeoutMs 独立：互不影响", () => {
+    process.env.IKNOW_MCP_CONNECT_TIMEOUT_MS = "120000";
+    process.env.IKNOW_LLM_TIMEOUT_MS = "30000";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.mcp.connectTimeoutMs, 120000);
+    assert.equal(env.llm.timeoutMs, 30000);
   });
 });

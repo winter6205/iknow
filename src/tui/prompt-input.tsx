@@ -20,7 +20,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { KeyEvent } from "@opentui/core";
-import { SLASH_HINT_DESCRIPTIONS, type TuiSlashCommand } from "./slash.js";
+import { SLASH_HINT_DESCRIPTIONS, type SlashCandidate } from "./slash.js";
+import { clipOneLineVisual, visualWidth } from "./tool-summary.js";
 import { tuiPalette } from "./theme.js";
 
 export interface PromptInputProps {
@@ -32,14 +33,18 @@ export interface PromptInputProps {
    *  disabled 态：focused={false} 触发 blur 摘 keypressHandler；此 onKeyDown
    *  兜底（仅在 re-render 竞态窗口可达）。 */
   readonly disabled?: boolean;
+  /** 终端列宽（描述按视觉列宽截断，#377 E 修复）。 */
+  readonly cols: number;
   readonly onChange: (value: string) => void;
   readonly onSubmit: (value: string) => void;
-  /** 候选 hint 选中项 Enter 触发（不走 raw 文本解析）。 */
-  readonly onSelectHint?: (command: TuiSlashCommand) => void;
+  /** 候选 hint 选中项 Enter 触发（不走 raw 文本解析）。#337 Phase C：
+   *  candidate 为整个 SlashCandidate（静态命令 | skill），调用方按 kind 分流。 */
+  readonly onSelectHint?: (candidate: SlashCandidate) => void;
   /** Tab 补全：调用方返回 null = 不动作；返补全串则覆盖 value。 */
   readonly onTabComplete?: (value: string, hintCursor: number) => string | null;
-  /** 候选列表（任务 B）；PromptInput 内部维护 hintCursor + 渲染。 */
-  readonly hintSuggestions?: ReadonlyArray<TuiSlashCommand>;
+  /** 候选列表（任务 B）；PromptInput 内部维护 hintCursor + 渲染。
+   *  #337 Phase C：类型放宽为 SlashCandidate（静态命令 | skill）。 */
+  readonly hintSuggestions?: ReadonlyArray<SlashCandidate>;
   /** 命令历史（内存态，会话内有效不落盘）。仅在 hint 不可见时生效。 */
   readonly history?: ReadonlyArray<string>;
 }
@@ -197,16 +202,28 @@ export function PromptInput(props: PromptInputProps): ReactNode {
       </box>
       {hasHint && (
         <box flexDirection="column" marginTop={0}>
-          {suggestions.map((cmd, i) => {
+          {suggestions.map((candidate, i) => {
             const selected = i === hintCursor;
-            const desc = SLASH_HINT_DESCRIPTIONS[cmd];
+            const label =
+              candidate.kind === "command" ? candidate.command : candidate.name;
+            const desc =
+              candidate.kind === "command"
+                ? SLASH_HINT_DESCRIPTIONS[candidate.command]
+                : (candidate.description ?? "加载技能");
+            // #377 E：描述按视觉列宽截断（尾部 …），防止 skill 长描述撑爆
+            // 屏外。预算 = cols − `/${label}  ` 前缀 − 3 列余量。
+            const budget = Math.max(
+              4,
+              props.cols - visualWidth(`/${label}  `) - 3
+            );
+            const descShown = clipOneLineVisual(desc, budget);
             return (
               <text
-                key={cmd}
+                key={`${candidate.kind}-${label}`}
                 fg={selected ? pal.selected : pal.dim}
                 attributes={selected ? 1 : 0}
               >
-                {`/${cmd}  ${desc}`}
+                {`/${label}  ${descShown}`}
               </text>
             );
           })}

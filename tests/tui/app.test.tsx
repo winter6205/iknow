@@ -275,7 +275,12 @@ describe("TuiApp 端到端（tracer bullet）", () => {
 
     // Esc 返回聊天视图
     await app.pressEscape();
-    await untilFrame(app.setup, (f) => f.includes("输入消息"), 8000, "back");
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("输入消息"),
+      8000,
+      "back"
+    );
 
     await app.destroy();
   }, 30_000);

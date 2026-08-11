@@ -35,6 +35,8 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
     // #119 T7: IknowCompressEnv 必填(T1 接入),build-engine 透传。test fixture
     // 默认 contextWindow=200000, thresholdTokens=undefined(由 threshold.ts 推)。
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
+    // #378 根因 B: MCP 连接超时(默认 60_000)。
+    mcp: { connectTimeoutMs: 60_000 },
   };
 }
 

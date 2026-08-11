@@ -27,6 +27,7 @@ import { createAciExecutor } from "./aci/index.js";
 import { createPermissionPolicy } from "./permission/policy.js";
 import type { PermissionModeContext } from "./permission/modes.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
+import type { AciCatalog } from "./aci/types.js";
 import { createLspNotifier } from "./lsp/notifier.js";
 import type { Registry } from "./tools/types.js";
 import type { RegistryImpl } from "./tools/registry.js";
@@ -81,6 +82,11 @@ export type BuildEngineOpts = {
   readonly createMcpClient?: (
     server: import("./mcp/config.js").McpServerConfig
   ) => import("./mcp/manager.js").McpClientHandle;
+  /**
+   * #378 测试缝:createMcpManager 工厂覆盖。与 deps.ts 对偶——测试经此
+   * 捕获 createMcpManager 入参(如 timeoutMsOverride 透传)。
+   */
+  readonly createMcpManager?: typeof import("./mcp/manager.js").createMcpManager;
   /** #356 T6 测试缝:subagent manager 覆盖注入(生产默认不传则内部自建)。 */
   readonly subagentManager?: SubAgentManager;
   /** TUI 工具摘要观测缝:透传给 createAciExecutor hooks.postToolUse(chat/serve 不传 → 零变化)。 */
@@ -96,6 +102,23 @@ export type BuiltEngine = {
    * 无句柄)。顺序:mcpManager first → subagentManager second(两者无共享可变状态,
    * Promise.all 并发;顺序仅语义标注)。 */
   readonly shutdown?: () => Promise<void>;
+  /**
+   * #337 T8:skill catalog(全 surface 装配;ask 也装配——SC12 skill 两件在场)。
+   * TUI deps 消费其 available()/get() 派生 slash 候选 + 加载正文(deps.ts
+   * TuiExtensions.skillCatalog)。chat/serve 缺省不读。
+   */
+  readonly skillCatalog?: SkillCatalog;
+  /**
+   * #337 T8 / #361 Phase D:MCP manager 句柄(surface === "ask" 时缺席)。
+   * TUI deps 消费 status()/reload() 构建 /mcp 看板扩展面;ask 零 mcp__*。
+   */
+  readonly mcpManager?: McpManager;
+  /**
+   * #361 Phase D:动态 MCP 工具全量源(reg.catalog.all() 含 registerExternal
+   * 追加的 mcp__* 工具;inner 冻结快照不含)。TUI deps 据此平铺
+   * `{ server, tool }[]`(listMcpTools);server 名反解在 deps.ts。
+   */
+  readonly catalog?: AciCatalog;
 };
 
 /**
@@ -263,9 +286,15 @@ export async function buildHarnessEngine(
   let mcpManager: McpManager | undefined;
   if (surface !== "ask") {
     const config = await loadMcpConfig({ home: userHome, cwd });
-    mcpManager = createMcpManager({
+    mcpManager = (opts.createMcpManager ?? createMcpManager)({
       config: config.servers,
       registerExternal: reg.registerExternal,
+      // #337 reload 缝:manager.reload 先按名撤回旧 server 已注册的 mcp__* 工具,
+      // 再重建——不注入则 reload 后 stale 名残留 externalByExt,重名 register
+      // 触发 Gate2 duplicate,新 server 工具静默注册失败(与 TUI deps 同款装配)。
+      unregisterExternal: reg.unregisterExternal,
+      // #378 根因 B: env 注入连接超时(默认 60_000, 缓解 npx -y cold start)。
+      timeoutMsOverride: env.mcp.connectTimeoutMs,
       ...(opts.createMcpClient ? { createClient: opts.createMcpClient } : {}),
     });
     // start() 返回的 promise 仅作错误兜底(start 内部 void allSettled,
@@ -338,6 +367,12 @@ export async function buildHarnessEngine(
     deps,
     engine,
     ...(subagentManager ? { subagentManager } : {}),
+    // #337 T8 / #361 Phase D:透出 skillCatalog + mcpManager + catalog,供
+    // TUI deps 构建扩展面(TuiExtensions.skillCatalog / mcp.status / mcp.reload /
+    // listMcpTools)。全 surface 通用装配件,非 TUI 专用 — 不改变既有消费方。
+    skillCatalog,
+    ...(mcpManager ? { mcpManager } : {}),
+    catalog: reg.catalog,
     // #356 T6:shutdown 组合 MCP + subagent 两清理。SC12 顺序:mcpManager first →
     // subagentManager second(两者无共享可变状态,Promise.all 并发触发;顺序仅
     // 语义标注,非严格串行 — ask 入口两者都缺席时 shutdown 也缺席)。

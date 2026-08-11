@@ -30,7 +30,7 @@ test("空会话帧含 banner 与输入框且无崩溃", async () => {
   const frame = setup.captureCharFrame();
   // banner 外框与输入框都是圆角线框（borderStyle="rounded"）。
   expect(frame).toContain("╭");
-  // 输入框占位提示存在。
+  // 输入框占位提示存在（#377 起全 ASCII/CJK 占位，中文「输入消息」）。
   expect(frame).toContain("输入消息");
   await setup.renderer.destroy();
 });

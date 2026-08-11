@@ -7,7 +7,7 @@
  *
  * 状态机（per server）：
  *   pending → connected   connect + 首次 listTools 完成，registerExternal(defs)
- *   pending → failed      connect/listTools 抛错或超时（30s）
+ *   pending → failed      connect/listTools 抛错或超时（默认 60s，可注入）
  *   pending → disabled    config.status === "disabled"，不建 client
  *   connected → failed    onclose 回调命中（不重连）
  *   connected → connected list_changed 触发增量重注册
@@ -90,8 +90,14 @@ export interface McpManagerOptions {
   /** T1 的 registerExternal 缝，把 mcp__ 工具追加进 ACI registry。 */
   readonly registerExternal: (defs: readonly AciToolDef[]) => void;
   /**
-   * 连接超时毫秒（spec 假设 9：30s）。测试可注入短超时。
-   * 默认 30_000。
+   * reload 缝：按名撤回旧 slot 已注册的 mcp__* 工具。缺席时 reload
+   * 静默跳过 unregister（stale 名会残留 externalByExt，重名 register
+   * 触发 Gate2 duplicate —— 生产装配必须注入）。
+   */
+  readonly unregisterExternal?: (names: readonly string[]) => void;
+  /**
+   * 连接超时毫秒（#378 根因 B：默认 60_000，缓解 npx cold start；生产装配点
+   * 经 env 注入）。测试可注入短超时。
    */
   readonly timeoutMsOverride?: number;
   /** 工具调用超时（adapter 把 tier=long 映射到 30 min，这里给单测覆盖口）。 */
@@ -103,6 +109,13 @@ export interface McpManagerOptions {
 export interface McpManager {
   /** 后台化启动连接；早于 connect 完成返回。 */
   readonly start: () => Promise<void>;
+  /**
+   * 重载 server 集：收集旧 slots 已注册工具名 → unregisterExternal 撤回 →
+   * shutdown 现有全部 → 清 slots → 用新 config 重建 → start()。
+   * 幂等：未 start / 已 shutdown 也能调用。reload 返回前不阻塞在连接上
+   * （内部 start() fire-and-forget，与既有 start 同语义）。
+   */
+  readonly reload: (config: readonly McpServerConfig[]) => Promise<void>;
   /** 关闭所有 client + 取消 in-flight + SIGTERM stdio 子孙。 */
   readonly shutdown: () => Promise<void>;
   /** 当前状态拍快照（按 name 字母序）。 */
@@ -117,6 +130,13 @@ interface Slot {
   readonly config: McpServerConfig;
   state: McpServerState;
   error?: string;
+  /**
+   * 超时标记（#378 根因 A）：仅 connect 超时路径（L-setTimeout 回调）设置。
+   * 用于把"超时后迟到成功"与"真失败"区分开：bootSlot 在
+   * 同一任务内允许把 failed 翻回 connected（flip-back），真失败不可翻。
+   * flip-back 成功或正常 connected 后必须清除（见 bootSlot）。
+   */
+  timedOut?: boolean;
   handle?: McpClientHandle;
   /** shutdown 时 abort 所有在途 callTool。 */
   callAbort?: AbortController;
@@ -130,7 +150,10 @@ interface Slot {
 // 工厂
 // ---------------------------------------------------------------------------
 
-const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
+// 与 src/config/env.ts 的 IKNOW_MCP_CONNECT_TIMEOUT_MS 默认(60_000)对齐——
+// 生产装配点(deps.ts / build-engine.ts)均经 env 注入 timeoutMsOverride,
+// 此处兜底给独立调用 createMcpManager 且未注入的测试/脚本用, 避免双默认漂移。
+const DEFAULT_CONNECT_TIMEOUT_MS = 60_000;
 const DEFAULT_CALL_TIMEOUT_MS = 1_800_000; // long 档（参见 aci/types.ts TIMEOUT_TIER_MS）
 
 export function createMcpManager(opts: McpManagerOptions): McpManager {
@@ -140,15 +163,24 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
   /** 按 name 索引 slot。 */
   const slots = new Map<string, Slot>();
 
-  // 排序保证测试稳定性
-  for (const cfg of [...opts.config].sort((a, b) =>
-    a.name.localeCompare(b.name)
-  )) {
-    slots.set(cfg.name, {
-      config: cfg,
-      state: cfg.status === "disabled" ? "disabled" : "pending",
-    });
+  /**
+   * 按 config 重置 slots —— 构造器 + reload 共用（reload 先 await
+   * shutdown 终结旧 slots，再调本函数清空 + 重建）。字母序保证
+   * 测试稳定性。
+   */
+  function rebuildSlots(config: readonly McpServerConfig[]): void {
+    slots.clear();
+    for (const cfg of [...config].sort((a, b) =>
+      a.name.localeCompare(b.name)
+    )) {
+      slots.set(cfg.name, {
+        config: cfg,
+        state: cfg.status === "disabled" ? "disabled" : "pending",
+      });
+    }
   }
+
+  rebuildSlots(opts.config);
 
   /** 把 slot 的工具列表通过 registerExternal 追加（增量 diff）。 */
   function registerTools(slot: Slot, tools: readonly SdkTool[]): void {
@@ -189,9 +221,16 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
   function markFailed(slot: Slot, reason: string): void {
     if (slot.state === "failed" || slot.state === "disabled") return;
     slot.state = "failed";
-    slot.error = reason;
+    // 如果 createRealClient 接管了子进程 stderr（stderr: "pipe"），失败时
+    // 把缓冲尾段附进 error —— 便于排查 server 启动失败/协议异常根因。
+    // stub client（manager.test.ts 用）无 _stderrTail，保持纯 reason。
+    const tail = (
+      slot.handle as unknown as { _stderrTail?: () => string } | undefined
+    )?._stderrTail?.();
+    slot.error =
+      tail && tail.length > 0 ? `${reason}\n[server stderr]\n${tail}` : reason;
     console.warn(
-      `[mcp/manager] server '${slot.config.name}' failed: ${reason}`
+      `[mcp/manager] server '${slot.config.name}' failed: ${slot.error}`
     );
   }
 
@@ -204,6 +243,9 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
     slot.callAbort = new AbortController();
 
     const timeoutHandle = setTimeout(() => {
+      // 超时先设标记再标 failed：bootSlot 靠它判断"迟到成功可否翻回"（#378）。
+      // 真抛错路径不设此标记 —— 失败即定型，不翻。
+      slot.timedOut = true;
       markFailed(slot, "connect timeout");
     }, timeoutMs);
 
@@ -234,15 +276,33 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
         markFailed(slot, err instanceof Error ? err.message : String(err));
         return;
       }
-      // connect 期间可能已被超时器标 failed
+      // connect 期间可能已被超时器标 failed。仅"超时后迟到成功"允许继续走
+      // listTools（flip-back 入口，#378 根因 A）；真失败（无 timedOut 标记）
+      // 一律 return —— failed 定型。
       if (slot.state !== "pending") {
-        clearTimeout(timeoutHandle);
-        return;
+        if (slot.state !== "failed" || !slot.timedOut) {
+          clearTimeout(timeoutHandle);
+          return;
+        }
+        // timedOut 标记不清除：flip-back 成功由第二守卫负责清除，
+        // 若 listTools 真抛错则 catch 保持 failed（标记残留无影响）。
       }
       try {
         const tools = await created.listTools();
         clearTimeout(timeoutHandle);
-        if (slot.state !== "pending") return;
+        if (slot.state !== "pending") {
+          // 超时后迟到成功：同一 bootSlot 任务内翻回 connected。
+          // registerTools 由 `registered` 集合去重，重复调用幂等。
+          if (slot.state === "failed" && slot.timedOut) {
+            registerTools(slot, tools);
+            slot.state = "connected";
+            delete slot.timedOut;
+            // 恢复 connected 时清掉 error：status() 只在 failed+error 时
+            // 填 error，避免把超时残因带到已恢复的连接上。
+            delete slot.error;
+          }
+          return;
+        }
         registerTools(slot, tools);
         slot.state = "connected";
       } catch (err) {
@@ -252,15 +312,40 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
     })();
   }
 
-  async function start(): Promise<void> {
+  /**
+   * 后台启动所有非 disabled slot。start / reload 共用。
+   * 不 await —— 返回的 tasks 仅用于静默吞错，连接在后台完成（SC8）。
+   */
+  function bootstrapAll(): void {
     const tasks: Promise<void>[] = [];
     for (const slot of slots.values()) {
       if (slot.state === "disabled") continue;
       slot.bg = bootSlot(slot);
       tasks.push(slot.bg);
     }
-    // 不 await —— start() 必须早返回。tasks 仅用于静默吞错。
     void Promise.allSettled(tasks);
+  }
+
+  async function start(): Promise<void> {
+    bootstrapAll();
+  }
+
+  async function reload(config: readonly McpServerConfig[]): Promise<void> {
+    // 先在 shutdown/rebuild 前抓旧 slots 已注册工具全名（mcp__<server>__<tool>）：
+    // slot.registered 属于 slot，rebuildSlots 的 slots.clear() 会把它一并清掉，
+    // 漏抓将导致外部 registry 残留 stale 名（重名 register 触发 Gate2 duplicate）。
+    // disabled / 未连接过的 slot 无 registered，flat 后为空，unregister 幂等忽略。
+    const oldNames: string[] = [];
+    for (const slot of slots.values()) {
+      if (slot.registered) oldNames.push(...slot.registered);
+    }
+    // shutdown 取消 in-flight + close + 标 failed —— 旧状态彻底终结后，撤回
+    // 这些名字的外部注册（此后不再有 call 穿过 stale 名）。unregisterExternal
+    // 缺席（未注入装配）静默跳过，保证幂等。
+    await shutdown();
+    opts.unregisterExternal?.(oldNames);
+    rebuildSlots(config);
+    bootstrapAll();
   }
 
   async function shutdown(): Promise<void> {
@@ -328,7 +413,7 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
     return out;
   }
 
-  const manager: McpManager = { start, shutdown, status };
+  const manager: McpManager = { start, reload, shutdown, status };
 
   // 测试钩子：暴露 slot 内 handle 数组（用于 in-flight callTool + 触发 list_changed）。
   // 生产路径由 createRealClient 实现，无副作用。
@@ -375,12 +460,27 @@ export function createRealClient(server: McpServerConfig): McpClientHandle {
     );
   }
 
+  // stderr: "pipe"（默认 "inherit"）—— 见下：MCP server 子进程的结构化日志
+  // （如 codebase-memory-mcp 的 slog 行 `level=info msg=mcp.request ...`）默认
+  // 直通父进程 stderr，TUI 运行期会把父进程 stderr 画进渲染区/底栏。接管后
+  // 缓冲尾段，正常状态丢弃，仅 markFailed 时附进 error 保留诊断价值。
   const transport = new SdkStdioTransport({
     command: (server as McpStdioServer).entry.command,
     args: [...((server as McpStdioServer).entry.args ?? [])],
     env: (server as McpStdioServer).entry.env
       ? { ...(server as McpStdioServer).entry.env }
       : undefined,
+    stderr: "pipe",
+  });
+
+  // stderr 环形缓冲：仅保留最近一段（2KB），失败时供 markFailed 附尾段。
+  // SDK 在 stderr:"pipe" 时于构造器立即创建 PassThrough（_stderrStream），
+  // 这里可以直接挂 data 监听器，无需等 spawn。
+  const MAX_STDERR_TAIL = 2048;
+  let stderrTail = "";
+  transport.stderr?.on("data", (chunk: unknown) => {
+    const s = Buffer.isBuffer(chunk) ? chunk.toString() : String(chunk);
+    stderrTail = (stderrTail + s).slice(-MAX_STDERR_TAIL);
   });
 
   // SDK 内部通过 Client._onclose 触发 transport close；这里再 hook 一次保险。
@@ -467,6 +567,9 @@ export function createRealClient(server: McpServerConfig): McpClientHandle {
   // 暴露 pid 以便 manager.shutdown 兜底（再次 SIGTERM）
   (handle as unknown as { _stdioPid: number | undefined })._stdioPid =
     transport.pid ?? undefined;
+  // 暴露 stderr 尾段，供 manager 在 markFailed 时附进 error（诊断价值）。
+  (handle as unknown as { _stderrTail: () => string })._stderrTail = () =>
+    stderrTail;
 
   return handle;
 }

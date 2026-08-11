@@ -236,6 +236,29 @@ describe("session-state: userMessageEchoed (T2 即时回显)", () => {
       content: [{ type: "text", text: "第二条" }],
     });
   });
+
+  test("#377 D：displayText 与 sent 分离 —— echo 仅追加 displayText，不含 sent 正文", () => {
+    // skill-load 场景：sent 含技能正文，displayText 是精简占位。
+    const draft = createDraftSession();
+    const sent = '[skill-load name="echo"]\n# 回声技能\nfull body\n\n帮我做 X';
+    const displayText = "[加载技能 echo] 帮我做 X";
+    const echoed = userMessageEchoed(draft, displayText);
+    expect(echoed.messages).toHaveLength(1);
+    const only = echoed.messages[0]!;
+    expect(only).toEqual({
+      role: "user",
+      content: [{ type: "text", text: displayText }],
+    });
+    // 显式断言：echo 形态不含 sent 正文（核心去耦保证）。
+    expect(
+      only.content[0]!.type === "text" ? only.content[0]!.text : ""
+    ).not.toContain("# 回声技能");
+    expect(
+      only.content[0]!.type === "text" ? only.content[0]!.text : ""
+    ).not.toContain("full body");
+    // 与 sent 不共享（sent 仍由 sendTurn 走 postMessage → 模型历史）。
+    expect(sent).not.toBe(displayText);
+  });
 });
 
 describe("session-state: sessionCompacted（/compact 落盘后刷新）", () => {

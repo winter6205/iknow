@@ -62,6 +62,8 @@ async function main(): Promise<void> {
       web: { searchUrl: undefined },
       // IknowEnv.compress 必填字段（build-engine 无条件解引用 env.compress，缺失即 TypeError）。
       compress: { contextWindow: 200000, thresholdTokens: undefined },
+      // #378 根因 B: MCP 连接超时必填字段（build-engine 无条件解引用 env.mcp）。
+      mcp: { connectTimeoutMs: 60_000 },
     };
   }
 

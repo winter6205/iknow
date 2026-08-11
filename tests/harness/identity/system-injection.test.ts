@@ -32,6 +32,8 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
     web: { searchUrl: undefined },
     // #119 T7: IknowCompressEnv 必填(T1 接入),build-engine 透传给 deps.compress。
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
+    // #378 根因 B: MCP 连接超时(默认 60_000)。
+    mcp: { connectTimeoutMs: 60_000 },
   };
 }
 

@@ -33,7 +33,11 @@ import {
   type RuntimeBundle,
 } from "../cli/runtime.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
-import { buildTuiDeps, type BuildTuiDepsOptions } from "./deps.js";
+import {
+  buildTuiDeps,
+  type BuildTuiDepsOptions,
+  type TuiExtensions,
+} from "./deps.js";
 import { createTuiAskUserBridge } from "./ask-user.js";
 import { createInflightRegistry, createTuiBridge } from "./hub-bridge.js";
 import { createToolEventSink, TuiApp } from "./app.js";
@@ -76,6 +80,30 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   const factory = options.createRenderer ?? createCliRenderer;
   let renderer: CliRenderer | undefined;
   let onQuitBridge: { destroy: () => void } | undefined;
+  // #337 Phase B:TUI 扩展面透出(skillCatalog / mcp.status / mcp.reload / shutdown),
+  // 由 buildTuiDeps 的 onExtensions 回调同步注入。退出路径调用 shutdownExtensions()
+  // 关闭 MCP manager(避免 stdio 子进程泄漏);幂等封装保证 onQuit 与 whenDestroyed
+  // 兜底路径共享同一 shutdown promise,不会重复关闭产生 spurious warn。
+  let tuiExtensions: TuiExtensions | undefined;
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdownExtensions = (): Promise<void> => {
+    if (shutdownPromise === undefined) {
+      shutdownPromise = (async () => {
+        const ext = tuiExtensions;
+        if (!ext) return;
+        try {
+          await ext.shutdown();
+        } catch (err) {
+          process.stderr.write(
+            `[tui] MCP shutdown failed: ${
+              err instanceof Error ? err.message : String(err)
+            }\n`
+          );
+        }
+      })();
+    }
+    return shutdownPromise;
+  };
   try {
     renderer = await factory(RENDERER_CONFIG);
     // 装配链：runtime → deps → bridge/ask/tool 桥接 → TuiApp
@@ -98,6 +126,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       soleInflightId: () => inflight.soleId(),
       permissionMode,
       sessionGrants,
+      onExtensions: (ext) => {
+        tuiExtensions = ext;
+      },
     };
     // T2 返回平铺的 LoopEngineDeps & { subagentManager?, shutdown? }(非嵌套
     // { deps, ... }),rest 解构剥离两个句柄后 deps 即 LoopEngineDeps。
@@ -130,7 +161,13 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
 
     onQuitBridge = {
       destroy: (): void => {
-        if (!renderer!.isDestroyed) renderer!.destroy();
+        // #337 Phase B:/quit 二次确认 → 等 in-flight 落盘 → onQuit 触发。
+        // shutdown 收口 MCP(关闭 client + 取消 in-flight + SIGTERM stdio),
+        // 完成后 destroy 渲染器。fire-and-forget:app 接着自己 destroy(见
+        // app.tsx quit() 末尾),不会挂起;whenDestroyed 兜底 await 同一 shutdown。
+        void shutdownExtensions().finally(() => {
+          if (!renderer!.isDestroyed) renderer!.destroy();
+        });
       },
     };
 
@@ -145,10 +182,29 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         dataDir={dataDir}
         permissionMode={permissionMode}
         sessionGrants={sessionGrants}
+        // #337 Phase C：TuiApp 消费 skillCatalog（slash 候选 + /skill 加载发送）。
+        // onExtensions 在 buildTuiDeps 装配期同步注入（Phase B seam）；此处
+        // 可选缺省 = 空清单（测试 / 装配异常路径安全降级）。
+        skillCatalog={tuiExtensions?.skillCatalog}
+        // #361 Phase D：TuiApp 消费 MCP 看板扩展面（status / reload /
+        // listMcpTools），缺省 = undefined → /mcp 提示「MCP 未装配」。
+        mcp={
+          tuiExtensions
+            ? {
+                status: tuiExtensions.mcp.status,
+                reload: tuiExtensions.mcp.reload,
+                listMcpTools: tuiExtensions.listMcpTools,
+              }
+            : undefined
+        }
         onQuit={onQuitBridge.destroy}
       />
     );
     await whenDestroyed(renderer);
+    // #337 Phase B:兜底 —— onQuit 未接管的退出路径(信号 / E4 直接 destroy),
+    // shutdownExtensions 已启动则 no-op,未启动则确保 MCP 关闭在 runTui 返回
+    // 前完成,避免 stdio 子孙泄漏。
+    await shutdownExtensions();
     return 0;
   } catch (err) {
     // 唯一 catch 点（E1/E2）：类型化消息写 stderr，destroy 收口于此。
@@ -159,6 +215,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     if (renderer && !renderer.isDestroyed) {
       renderer.destroy();
     }
+    // #337 Phase B:错误路径也尽力收口 MCP(若 buildTuiDeps 完成后才抛错,
+    // tuiExtensions 已注入;若 buildTuiDeps 自身抛错则 no-op)。不阻塞退出码。
+    await shutdownExtensions();
     void onQuitBridge;
     return 1;
   }

@@ -11,6 +11,11 @@
  * 包装成 BuildEngineOpts.hooks(PostToolUseHook),经 build-engine 透传进
  * createAciExecutor —— postToolUse 触发 → soleInflightId 归因 → onToolEvent
  * (工具摘要行事件,Q5b=B;permission/types.ts:118-131 官方观测挂点,每 call 事后触发)。
+ *
+ * #337 Phase B / #361 Phase D / #378:装配完成后用 build-engine 透出的
+ * skillCatalog + mcpManager + catalog 构建 TUI 扩展面(TuiExtensions),经
+ * opts.onExtensions 同步回调消费(slash 候选 / MCP 看板 / 退出收口)。MCP 连接
+ * 超时由 env.mcp.connectTimeoutMs 经 build-engine 透传(默认 60_000)。
  * 纯 TS 模块,无 ink / OpenTUI 依赖。
  */
 import type { LoopEngineDeps } from "../harness/index.js";
@@ -21,6 +26,11 @@ import type { SessionGrants } from "../harness/permission/session-grants.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
 import type { AskUser } from "../harness/permission/types.js";
+import { homedir } from "node:os";
+import type { SkillCatalog } from "../harness/skill/catalog.js";
+import type { McpServerStatus } from "../harness/mcp/manager.js";
+import { loadMcpConfig } from "../harness/mcp/config.js";
+import type { AciToolDef } from "../harness/aci/types.js";
 
 /** 工具摘要行事件（postToolUse 投影，observability-only）。 */
 export interface TuiToolEvent {
@@ -65,6 +75,69 @@ export interface BuildTuiDepsOptions {
    * 放行不再 ask。缺省 = 无 session 层（历史行为）。
    */
   readonly sessionGrants?: SessionGrants;
+  /** #337 Phase B 测试缝：userHome 覆盖（默认 homedir()）。 */
+  readonly userHome?: string;
+  /** #337 Phase B 测试缝：cwd 覆盖（默认 process.cwd()）。 */
+  readonly cwd?: string;
+  /** #337 Phase B 测试缝：MCP client 工厂覆盖（注入 stub 避免真实 stdio 启动）。 */
+  readonly createMcpClient?: (
+    server: import("../harness/mcp/config.js").McpServerConfig
+  ) => import("../harness/mcp/manager.js").McpClientHandle;
+  /**
+   * #378 测试缝：createMcpManager 工厂覆盖。与 createMcpClient 对偶——
+   * 测试经此捕获 createMcpManager 入参（如 timeoutMsOverride 透传），
+   * 避免 mock.module 触发 bun require 死锁（bun 1.3.14 已知问题）。
+   */
+  readonly createMcpManager?: typeof import("../harness/mcp/manager.js").createMcpManager;
+  /**
+   * #337 Phase B：装配完成同步回调，透出扩展面（skillCatalog / mcp / shutdown）。
+   * Phase C/D 消费（slash 候选派生、MCP 状态显示、退出路径收口）。
+   */
+  readonly onExtensions?: (ext: TuiExtensions) => void;
+}
+
+/**
+ * #337 Phase B：装配完成透出的 TUI 扩展面（Phase C/D 消费）。
+ *  - skillCatalog：Phase C 读 available()/get() 派生 slash 候选 + 加载正文；
+ *  - mcp.status / reload：MCP server 连接状态快照 + 重读两级 config 后重载；
+ *  - listMcpTools（#361 Phase D）：一次拉全量 mcp__* 工具 → 平铺
+ *    `{ server, tool }[]`，detail view 按 server 过滤（避免 N 次过滤）。
+ *    只追加 readonly 字段，不改 Phase B 既有逻辑；
+ *  - shutdown：TUI 退出路径调用，关闭所有 MCP client + 取消 in-flight + SIGTERM stdio。
+ */
+export interface TuiExtensions {
+  readonly skillCatalog: SkillCatalog;
+  readonly mcp: {
+    readonly status: () => readonly McpServerStatus[];
+    readonly reload: () => Promise<void>;
+  };
+  readonly listMcpTools: () => ReadonlyArray<McpToolExtEntry>;
+  readonly shutdown: () => Promise<void>;
+}
+
+/** MCP 看板消费的最小扩展面（TuiAppProps.mcp 用；deps.ts SSOT）。 */
+export interface TuiMcpViewExt {
+  readonly status: () => readonly McpServerStatus[];
+  readonly reload: () => Promise<void>;
+  readonly listMcpTools: () => ReadonlyArray<McpToolExtEntry>;
+}
+
+export interface McpToolExtEntry {
+  readonly server: string;
+  readonly tool: AciToolDef;
+}
+
+/**
+ * 从动态工具名反解 server 名：`mcp__<server>__<tool>`（server / tool 段都
+ * 可能含 `__` —— manager 的 sanitizeSegment 只把非 `[A-Za-z0-9_]` 替换成 `_`，
+ * 连字符 / 点保留）。返回中间段 `server`；段数不足（非标准形态）返回原名。
+ * 纯函数 + exported 供单测直接断言。
+ */
+export function mcpServerOfToolName(name: string): string {
+  const body = name.startsWith("mcp__") ? name.slice("mcp__".length) : name;
+  const sep = body.indexOf("__");
+  if (sep === -1) return name;
+  return body.slice(0, sep);
 }
 
 /**
@@ -108,6 +181,10 @@ export async function buildTuiDeps(
       `CLI LLM mode needs the env var named by IKNOW_LLM_API_KEY_ENV (${bundle.env.llm.apiKeyEnv}); set the key.`
     );
   }
+  // #337 Phase B：userHome / cwd 测试缝（默认 = 真实 homedir() / process.cwd()），
+  // 与 build-engine #337 T8 同款。装配期 skill scanner + mcp config 都从这里取。
+  const userHome = opts.userHome ?? homedir();
+  const cwd = opts.cwd ?? process.cwd();
   const built = await buildHarnessEngine({
     env: bundle.env,
     askUser: opts.askUser,
@@ -120,7 +197,64 @@ export async function buildTuiDeps(
     ...(opts.sessionGrants ? { session: opts.sessionGrants } : {}),
     // T1 观测缝:#175 T4 工具摘要行 — postToolUse 投影为 TuiToolEvent。
     ...(opts.onToolEvent ? { hooks: wrapTuiHook(opts) } : {}),
+    // #337 Phase B 测试缝:userHome / cwd 覆盖(与 build-engine 同款)。
+    ...(opts.userHome ? { userHome } : {}),
+    ...(opts.cwd ? { cwd } : {}),
+    // #378 测试缝:createMcpManager 工厂覆盖(透传,捕获入参断言)。
+    ...(opts.createMcpManager ? { createMcpManager: opts.createMcpManager } : {}),
+    // #337 Phase B 测试缝:MCP client 工厂覆盖。
+    ...(opts.createMcpClient ? { createMcpClient: opts.createMcpClient } : {}),
   });
+
+  // #337 Phase B / #361 Phase D：用 build-engine 透出的装配件构建 TUI 扩展面。
+  // skillCatalog / mcpManager / catalog 均来自 buildHarnessEngine 单一装配点
+  // (surface="tui" 全装配;mcpManager 仅在 manager 缺席时缺省防御)。
+  const mcpManager = built.mcpManager;
+  const skillCatalog = built.skillCatalog;
+  const catalog = built.catalog;
+
+  // reload 实现：重读两级 config（可被用户改 ~/.iknow/mcp.json 或项目级
+  // mcp.json 后触发）,manager.reload 内部 shutdown + 重建 + 后台 start。
+  // 幂等：无 mcp.json → servers 空 → reload 空集。
+  const reload = async (): Promise<void> => {
+    if (!mcpManager) return;
+    const cfg = await loadMcpConfig({ home: userHome, cwd });
+    await mcpManager.reload(cfg.servers);
+  };
+
+  // #361 Phase D：listMcpTools 实现 — 从 catalog.all() 取全部 mcp__* 动态
+  // 工具，按 server 名反解（mcp__<server>__<tool>），平铺成 {server, tool}[]。
+  // reload 后工具集变化（unregister + register），detail view 每次进入重拉最新
+  // 即可（TuiApp 侧缓存 policy：看板首次进入拉一次，reload 后刷新）。
+  const listMcpTools = (): ReadonlyArray<McpToolExtEntry> => {
+    if (!catalog) return [];
+    const out: McpToolExtEntry[] = [];
+    for (const def of catalog.all()) {
+      if (!def.name.startsWith("mcp__")) continue;
+      out.push({ server: mcpServerOfToolName(def.name), tool: def });
+    }
+    out.sort((a, b) => a.server.localeCompare(b.server));
+    return out;
+  };
+
+  // 装配完成后同步回调透出扩展面（Phase C/D 消费）。shutdown 收口于
+  // build-engine 组合 shutdown（MCP 关闭 client + 取消 in-flight + SIGTERM
+  // stdio 子孙 + subagent drain）。surface="tui" 全装配:skillCatalog /
+  // mcpManager / shutdown 均在 ask 之外必建(T6 + T8 契约),此处以必达断言
+  // 收窄类型;极端防御缺省(空 catalog / no-op shutdown)保证回调不抛。
+  opts.onExtensions?.({
+    skillCatalog: skillCatalog!,
+    mcp: {
+      status: () => mcpManager?.status() ?? [],
+      reload,
+    },
+    listMcpTools,
+    shutdown: async () => {
+      // surface="tui" 必建 shutdown(T8 + T6 契约);极端防御缺省 no-op。
+      if (built.shutdown) await built.shutdown();
+    },
+  });
+
   return {
     ...built.deps,
     ...(built.subagentManager

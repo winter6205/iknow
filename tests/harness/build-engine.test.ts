@@ -16,6 +16,7 @@ import {
 } from "../../src/harness/build-engine.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
+import { createMcpManager } from "../../src/harness/mcp/manager.ts";
 import type { McpClientHandle } from "../../src/harness/mcp/manager.ts";
 import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
 
@@ -80,6 +81,8 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
     // LoopEngineDeps.compress。test fixture 默认值:contextWindow=200000,
     // thresholdTokens=undefined(由 threshold.ts 推 window-33000)。
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
+    // #378 根因 B: MCP 连接超时(默认 60_000)。
+    mcp: { connectTimeoutMs: 60_000 },
   };
 }
 
@@ -420,6 +423,32 @@ describe("buildHarnessEngine — #337 T8 MCP manager 装配", () => {
     // cleanup:触发 shutdown,manager 关闭慢 client(connect 永不 resolve,
     // close 仅清状态,不 await connect)。
     if (built.shutdown) await built.shutdown();
+  });
+
+  it("#378 根因 B: buildHarnessEngine 装配把 env.mcp.connectTimeoutMs 透传为 timeoutMsOverride", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-be-timeout-"));
+    const captured: Array<Record<string, unknown>> = [];
+    try {
+      await buildHarnessEngine({
+        env: {
+          ...makeEnv("sk-test-t8-timeout-1"),
+          mcp: { connectTimeoutMs: 90_000 },
+        },
+        askUser: createNoAskUser(),
+        surface: "chat",
+        userHome: join(root, "home"),
+        cwd: root,
+        createMcpManager: (opts) => {
+          captured.push(opts as Record<string, unknown>);
+          return createMcpManager(opts);
+        },
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+    const last = captured.at(-1);
+    expect(last).toBeDefined();
+    expect(last!.timeoutMsOverride).toBe(90_000);
   });
 });
 

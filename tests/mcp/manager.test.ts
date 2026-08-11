@@ -344,7 +344,10 @@ describe("MCP manager — 30s connect timeout (SC9)", () => {
             handle as unknown as { listTools: () => Promise<McpTool[]> }
           ).listTools = async () => {
             await new Promise((r) => setTimeout(r, 5));
-            return [];
+            // 释放后是"超时 + 迟到 listTools **真抛错**"——保持 failed。
+            // flip-back 只对"超时 + 迟到成功"生效（#378 根因 A），
+            // 迟到失败不翻。这个用例即"失败路径"的固定锚点。
+            throw new Error("stub: listTools rejected after timeout");
           };
           return handle;
         }
@@ -368,7 +371,8 @@ describe("MCP manager — 30s connect timeout (SC9)", () => {
       warnCalls.some((w) => w.includes("slow") && w.includes("timeout"))
     ).toBe(true);
 
-    // 释放 slow 后不能让它再转 connected（已经失败 = 不重连）
+    // 释放 slow：迟到 listTools 会真抛错 → 保持 failed（超时 + 迟到失败不翻）。
+    // 对照 #378 根因 A：只有"超时 + 迟到成功"才会 flip-back 到 connected。
     slowConnectResolve?.();
     await new Promise((r) => setTimeout(r, 50));
     expect(mgr.status().find((s) => s.name === "slow")?.state).toBe("failed");
@@ -376,6 +380,300 @@ describe("MCP manager — 30s connect timeout (SC9)", () => {
     await mgr.shutdown();
     expect(createCalls).toContain("slow");
     expect(createCalls).toContain("fast");
+  });
+});
+
+// =========================================================================
+// #378 根因 A — 连接超时后"迟到成功"的 flip-back 语义
+// =========================================================================
+
+describe("MCP manager — connect timeout late-success flip-back (#378)", () => {
+  it("flips a timed-out slot back to connected when connect+listTools late-succeed (root cause A)", async () => {
+    // 慢 connect：超时先 fire（failed + timedOut）→ 释放后 connect 成功 →
+    // listTools 迟到成功 → 同一 bootSlot 任务内 flip-back 到 connected。
+    let slowConnectResolve!: () => void;
+    let registered: AciToolDef[] = [];
+
+    const mgr = createMcpManager({
+      config: [makeStdio("slow")],
+      timeoutMsOverride: 60,
+      registerExternal: (defs) => {
+        registered = [...registered, ...defs];
+      },
+      createClient: () => {
+        const handle = makeStubClient({
+          listChangedHandlers: [],
+          closeHandlers: [],
+        });
+        (handle as unknown as { connect: () => Promise<void> }).connect = () =>
+          new Promise<void>((res) => {
+            slowConnectResolve = res;
+          });
+        (
+          handle as unknown as { listTools: () => Promise<McpTool[]> }
+        ).listTools = async () => {
+          await new Promise((r) => setTimeout(r, 5));
+          return [sampleTool("echo")];
+        };
+        return handle;
+      },
+    });
+
+    await mgr.start();
+
+    // 1) 超时先 fire → 标 failed + warn
+    await waitForStatus(mgr, "slow", "failed", 2000);
+    expect(
+      warnCalls.some((w) => w.includes("slow") && w.includes("timeout"))
+    ).toBe(true);
+
+    // 2) 迟到成功 → 同一 boot 任务 flip-back 到 connected + 工具注册
+    slowConnectResolve();
+    await waitForStatus(mgr, "slow", "connected", 2000);
+    expect(registered.map((d) => d.name)).toEqual(["mcp__slow__echo"]);
+
+    await mgr.shutdown();
+  });
+
+  it("does NOT flip back when connect fails before any timeout (true failure, error wins)", async () => {
+    // 失败路径：connect 真抛错先于超时 → timedOut 从未设置 → failed 定型，
+    // 即便超时窗口过后也不翻（catch 里 clearTimeout 取消了超时器）。
+    let rejectConnect!: (err: Error) => void;
+    const mgr = createMcpManager({
+      config: [makeStdio("slow")],
+      timeoutMsOverride: 200,
+      registerExternal: () => {},
+      createClient: () => {
+        const handle = makeStubClient({
+          listChangedHandlers: [],
+          closeHandlers: [],
+        });
+        (handle as unknown as { connect: () => Promise<void> }).connect = () =>
+          new Promise<void>((_res, rej) => {
+            rejectConnect = rej;
+          });
+        return handle;
+      },
+    });
+
+    await mgr.start();
+    rejectConnect(new Error("stub: hard connect failure"));
+    await waitForStatus(mgr, "slow", "failed", 2000);
+
+    // 等待超过超时窗口：若超时器未清除会 fire markFailed —— 断言未发生（不误翻、不覆盖 error）
+    await new Promise((r) => setTimeout(r, 300));
+    const s = mgr.status().find((x) => x.name === "slow")!;
+    expect(s.state).toBe("failed");
+    expect(s.error).toContain("hard connect failure");
+    expect(s.error).not.toContain("timeout");
+
+    await mgr.shutdown();
+  });
+
+  it("keeps failed when listTools itself throws after a timeout (exception path)", async () => {
+    // 超时已 fire（failed + timedOut）→ listTools 迟到抛错 → catch 的
+    // markFailed 被"failed 不重复标记"守卫挡住：保持 failed，不翻。
+    // error 停在超时原因（markFailed 不重复标记，不覆盖）。
+    let slowConnectResolve!: () => void;
+    const mgr = createMcpManager({
+      config: [makeStdio("slow")],
+      timeoutMsOverride: 60,
+      registerExternal: () => {},
+      createClient: () => {
+        const handle = makeStubClient({
+          listChangedHandlers: [],
+          closeHandlers: [],
+        });
+        (handle as unknown as { connect: () => Promise<void> }).connect = () =>
+          new Promise<void>((res) => {
+            slowConnectResolve = res;
+          });
+        (
+          handle as unknown as { listTools: () => Promise<McpTool[]> }
+        ).listTools = async () => {
+          await new Promise((r) => setTimeout(r, 5));
+          throw new Error("stub: listTools exploded");
+        };
+        return handle;
+      },
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "slow", "failed", 2000);
+
+    slowConnectResolve();
+    await new Promise((r) => setTimeout(r, 80));
+    const s = mgr.status().find((x) => x.name === "slow")!;
+    expect(s.state).toBe("failed");
+    expect(s.error).toContain("connect timeout");
+    expect(s.error).not.toContain("listTools exploded");
+
+    await mgr.shutdown();
+  });
+
+  it("flips back even when the timeout fires while listTools is still in flight (boundary: timeout ~ listTools completion)", async () => {
+    // 边界：connect 立即成功，listTools 很慢（100ms）；超时（60ms）在
+    // listTools 在途时 fire → failed + timedOut → listTools 迟到成功 →
+    // 第二守卫 flip-back 到 connected + 工具注册。
+    let registered: AciToolDef[] = [];
+    const mgr = createMcpManager({
+      config: [makeStdio("slow")],
+      timeoutMsOverride: 60,
+      registerExternal: (defs) => {
+        registered = [...registered, ...defs];
+      },
+      createClient: () => {
+        const handle = makeStubClient({
+          listChangedHandlers: [],
+          closeHandlers: [],
+        });
+        (
+          handle as unknown as { listTools: () => Promise<McpTool[]> }
+        ).listTools = async () => {
+          await new Promise((r) => setTimeout(r, 100));
+          return [sampleTool("echo")];
+        };
+        return handle;
+      },
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "slow", "failed", 2000);
+    expect(
+      warnCalls.some((w) => w.includes("slow") && w.includes("timeout"))
+    ).toBe(true);
+
+    await waitForStatus(mgr, "slow", "connected", 2000);
+    expect(registered.map((d) => d.name)).toEqual(["mcp__slow__echo"]);
+
+    await mgr.shutdown();
+  });
+
+  it("does not wrongly flip back when a timeout lands after a genuine failure (concurrent markFailed)", async () => {
+    // 并发：真失败先定型（timedOut 从未设置）→ 超时随后 fire 的 markFailed
+    // 被"failed 不重复标记"守卫挡住 —— 状态保持 failed、error 保持真错误、
+    // 不误翻（timedOut 未被置位，因此不存在 flip-back 通道）。
+    let rejectConnect!: (err: Error) => void;
+    const mgr = createMcpManager({
+      config: [makeStdio("slow")],
+      timeoutMsOverride: 200,
+      registerExternal: () => {},
+      createClient: () => {
+        const handle = makeStubClient({
+          listChangedHandlers: [],
+          closeHandlers: [],
+        });
+        (handle as unknown as { connect: () => Promise<void> }).connect = () =>
+          new Promise<void>((_res, rej) => {
+            rejectConnect = rej;
+          });
+        return handle;
+      },
+    });
+
+    await mgr.start();
+    rejectConnect(new Error("stub: hard connect failure"));
+    await waitForStatus(mgr, "slow", "failed", 2000);
+
+    // 等待跨过超时窗口 —— 超时 fire 的 markFailed 必须被守卫挡住
+    await new Promise((r) => setTimeout(r, 300));
+    const s = mgr.status().find((x) => x.name === "slow")!;
+    expect(s.state).toBe("failed");
+    expect(s.error).toContain("hard connect failure");
+    expect(s.error).not.toContain("timeout");
+
+    await mgr.shutdown();
+  });
+
+  it("still moves to failed when the connection closes after flip-back (connected → failed)", async () => {
+    let slowConnectResolve!: () => void;
+    const mgr = createMcpManager({
+      config: [makeStdio("slow")],
+      timeoutMsOverride: 60,
+      registerExternal: () => {},
+      createClient: () => {
+        const handle = makeStubClient({
+          listChangedHandlers: [],
+          closeHandlers: [],
+        });
+        (handle as unknown as { connect: () => Promise<void> }).connect = () =>
+          new Promise<void>((res) => {
+            slowConnectResolve = res;
+          });
+        (
+          handle as unknown as { listTools: () => Promise<McpTool[]> }
+        ).listTools = async () => {
+          await new Promise((r) => setTimeout(r, 5));
+          return [sampleTool("echo")];
+        };
+        return handle;
+      },
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "slow", "failed", 2000);
+    slowConnectResolve();
+    await waitForStatus(mgr, "slow", "connected", 2000);
+
+    // flip-back 后 onclose → failed（不重连；onclose 不设 timedOut → 不翻）
+    const handle = (mgr as unknown as { _handles: McpClientHandle[] })
+      ._handles[0]!;
+    const triggers = handle as unknown as { _triggerClose: () => void };
+    triggers._triggerClose();
+    await waitForStatus(mgr, "slow", "failed", 2000);
+    expect(mgr.status().find((s) => s.name === "slow")?.error).toContain(
+      "connection closed by server"
+    );
+
+    await mgr.shutdown();
+  });
+
+  it("empty: 空 config → 无 slot、status 空、start/shutdown 幂等", async () => {
+    const mgr = createMcpManager({
+      config: [],
+      registerExternal: () => {},
+      createClient: () => makeStubClient({}),
+    });
+    await mgr.start();
+    expect(mgr.status()).toEqual([]);
+    await mgr.shutdown();
+    // 二次 shutdown 幂等（不抛、不悬挂）。
+    await mgr.shutdown();
+  });
+
+  it("negative: timeoutMsOverride 负数 → 立即超时标 failed（envPositiveInt 上游已过滤，此处验证 manager 兜底）", async () => {
+    const mgr = createMcpManager({
+      config: [makeStdio("neg")],
+      registerExternal: () => {},
+      timeoutMsOverride: -1,
+      createClient: () =>
+        makeStubClient({
+          connectDelayMs: 100,
+          listChangedHandlers: [],
+          closeHandlers: [],
+        }),
+    });
+    await mgr.start();
+    // 负数超时 → setTimeout(0) 语义 → 立即 failed；迟到 connect 仍可 flip-back。
+    await waitForStatus(mgr, "neg", "failed", 2000);
+    await mgr.shutdown();
+  });
+
+  it("overflow: 极大 timeoutMsOverride（Number.MAX_SAFE_INTEGER）→ 慢 connect 在窗口内正常 connected", async () => {
+    const mgr = createMcpManager({
+      config: [makeStdio("big")],
+      registerExternal: () => {},
+      timeoutMsOverride: Number.MAX_SAFE_INTEGER,
+      createClient: () =>
+        makeStubClient({
+          connectDelayMs: 30,
+          listChangedHandlers: [],
+          closeHandlers: [],
+        }),
+    });
+    await mgr.start();
+    await waitForStatus(mgr, "big", "connected", 2000);
+    await mgr.shutdown();
   });
 });
 
@@ -642,6 +940,233 @@ describe("MCP manager — onclose semantics", () => {
     triggers._triggerClose();
     await new Promise((r) => setTimeout(r, 50));
     expect(mgr.status().find((s) => s.name === "svc")?.state).toBe("failed");
+
+    await mgr.shutdown();
+  });
+});
+
+// =========================================================================
+// reload — Phase A harness seam（TUI 看板 refresh）
+// =========================================================================
+
+describe("MCP manager — reload", () => {
+  it("reload replaces server set: renamed / added / removed servers reflected in status()", async () => {
+    const mgr = createMcpManager({
+      config: [makeStdio("alpha")],
+      registerExternal: () => {},
+      createClient: () =>
+        makeStubClient({
+          initialTools: [],
+          listChangedHandlers: [],
+          closeHandlers: [],
+        }),
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "alpha", "connected", 2000);
+    expect(mgr.status().map((s) => s.name)).toEqual(["alpha"]);
+
+    // 重载：改名 alpha → gamma，新增 beta，删除原 alpha 对应 server
+    await mgr.reload([makeStdio("beta"), makeStdio("gamma")]);
+
+    // reload 不阻塞在连接上（SC8）——状态立即反映新 server 集
+    expect(mgr.status().map((s) => s.name)).toEqual(["beta", "gamma"]);
+    // 后台 connect 完成后转 connected
+    await waitForStatus(mgr, "beta", "connected", 2000);
+    await waitForStatus(mgr, "gamma", "connected", 2000);
+    expect(mgr.status().every((s) => s.state === "connected")).toBe(true);
+
+    await mgr.shutdown();
+  });
+
+  it("reload aborts an in-flight callTool (reject, never resolve)", async () => {
+    let registered: AciToolDef[] = [];
+    const mgr = createMcpManager({
+      config: [makeStdio("svc")],
+      registerExternal: (defs) => {
+        registered = [...defs, ...registered];
+      },
+      createClient: () =>
+        makeStubClient({
+          initialTools: [sampleTool("slowOp")],
+          callToolDelayMs: 5000,
+          listChangedHandlers: [],
+          closeHandlers: [],
+        }),
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "svc", "connected", 2000);
+
+    const handler = registered.find((d) => d.name === "mcp__svc__slowOp");
+    expect(handler).toBeDefined();
+    const callP = handler!.handler!({}, {});
+    await new Promise((r) => setTimeout(r, 30));
+
+    // reload 内部先 shutdown → 取消 in-flight（复用 SC16 语义）
+    const reloadP = mgr.reload([makeStdio("svc")]);
+
+    let rejected = false;
+    let resolved: unknown = undefined;
+    try {
+      resolved = await callP;
+    } catch (err) {
+      rejected = true;
+      expect(err).toBeDefined();
+    }
+    await reloadP;
+
+    expect(rejected).toBe(true);
+    expect(resolved).toBeUndefined();
+  });
+
+  it("reload with a disabled server does not construct a client and status reflects disabled", async () => {
+    const handles: McpClientHandle[] = [];
+    const mgr = createMcpManager({
+      config: [makeStdio("svc")],
+      registerExternal: () => {},
+      createClient: () => {
+        const h = makeStubClient({
+          initialTools: [],
+          listChangedHandlers: [],
+          closeHandlers: [],
+        });
+        handles.push(h);
+        return h;
+      },
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "svc", "connected", 2000);
+    expect(handles).toHaveLength(1);
+
+    // 重载为 disabled —— 不建 client，状态直接 disabled
+    await mgr.reload([makeStdio("svc", "disabled")]);
+
+    expect(handles).toHaveLength(1); // 未新增 client
+    expect(mgr.status()).toHaveLength(1);
+    expect(mgr.status()[0]).toMatchObject({ name: "svc", state: "disabled" });
+
+    await mgr.shutdown();
+  });
+
+  it("reload unregisters stale tool names of a removed server (case A)", async () => {
+    const unregistered: string[][] = [];
+    const mgr = createMcpManager({
+      config: [makeStdio("alpha")],
+      registerExternal: () => {},
+      unregisterExternal: (names) => {
+        unregistered.push([...names]);
+      },
+      createClient: () =>
+        makeStubClient({
+          initialTools: [sampleTool("echo"), sampleTool("ping")],
+          listChangedHandlers: [],
+          closeHandlers: [],
+        }),
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "alpha", "connected", 2000);
+
+    // reload 到只剩 beta —— alpha 已注册的工具名必须被撤回
+    await mgr.reload([makeStdio("beta")]);
+
+    expect(unregistered).toHaveLength(1);
+    expect(unregistered[0]!.sort()).toEqual([
+      "mcp__alpha__echo",
+      "mcp__alpha__ping",
+    ]);
+
+    await mgr.shutdown();
+  });
+
+  it("reload purges stale names and allows same-name re-register without Gate2 duplicate (case B)", async () => {
+    // 真 AciRegistry 装配：registerExternal / unregisterExternal 双闭包直连。
+    // 两个 server 都暴露同名工具 lookup —— 旧名不撤回则重注册触发 duplicate。
+    const reg = createAciRegistry([]);
+    let mgr: McpManager | undefined;
+    const createClientFor = (): McpClientHandle =>
+      makeStubClient({
+        initialTools: [sampleTool("lookup")],
+        listChangedHandlers: [],
+        closeHandlers: [],
+      });
+    mgr = createMcpManager({
+      config: [makeStdio("old")],
+      registerExternal: (defs) => reg.registerExternal(defs),
+      unregisterExternal: (names) => reg.unregisterExternal(names),
+      createClient: createClientFor,
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "old", "connected", 2000);
+    expect(reg.catalog.get("mcp__old__lookup")).toBeDefined();
+
+    // 重载：old → new（同名工具 lookup）。旧名未撤回会触发 duplicate。
+    await mgr.reload([makeStdio("new")]);
+    await waitForStatus(mgr, "new", "connected", 2000);
+
+    // stale 名从 catalog 消失，新名成功注册（未抛 RegistryConstructionError）
+    expect(reg.catalog.get("mcp__old__lookup")).toBeUndefined();
+    expect(reg.catalog.get("mcp__new__lookup")).toBeDefined();
+
+    await mgr.shutdown();
+  });
+
+  it("reload without unregisterExternal still works (idempotent, case C)", async () => {
+    const mgr = createMcpManager({
+      config: [makeStdio("alpha")],
+      registerExternal: () => {},
+      // 故意不注入 unregisterExternal
+      createClient: () =>
+        makeStubClient({
+          initialTools: [sampleTool("echo")],
+          listChangedHandlers: [],
+          closeHandlers: [],
+        }),
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "alpha", "connected", 2000);
+
+    await expect(mgr.reload([makeStdio("beta")])).resolves.toBeUndefined();
+    await waitForStatus(mgr, "beta", "connected", 2000);
+    expect(mgr.status().map((s) => s.name)).toEqual(["beta"]);
+
+    await mgr.shutdown();
+  });
+
+  it("reload → 新 server 慢 connect 超时 → failed 且 error 含 connect timeout（T4 #378 reload 冷启动场景）", async () => {
+    // createClient 按 server 名分派：cold 慢（悬挂），fast 快（立即成功）。
+    const mgr = createMcpManager({
+      config: [makeStdio("alpha")],
+      registerExternal: () => {},
+      timeoutMsOverride: 60,
+      createClient: (server) => {
+        if (server.name === "cold") {
+          const handle = makeStubClient({
+            listChangedHandlers: [],
+            closeHandlers: [],
+          });
+          (handle as unknown as { connect: () => Promise<void> }).connect =
+            () => new Promise<void>(() => {});
+          return handle;
+        }
+        return makeStubClient({ listChangedHandlers: [], closeHandlers: [] });
+      },
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "alpha", "connected", 2000);
+
+    // reload 换 cold：reload 内部 shutdown 旧 + 重建 + 后台 start（SC8 不阻塞）。
+    await mgr.reload([makeStdio("cold")]);
+    // 慢 connect 永不 resolve → 超时 → failed + error 含 connect timeout
+    await waitForStatus(mgr, "cold", "failed", 2000);
+    expect(mgr.status().find((s) => s.name === "cold")?.error).toContain(
+      "connect timeout"
+    );
 
     await mgr.shutdown();
   });

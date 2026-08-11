@@ -127,7 +127,7 @@ async function renderAppWithThinking() {
 test("首帧渲染：占位「输入消息…」可见，notice 区域为空", async () => {
   const setup = await renderApp();
   const frame = setup.captureCharFrame();
-  // 输入框（PromptInput）边框可见 + 占位符存在。
+  // 输入框（PromptInput）边框可见 + 占位符存在（#377 起中文占位）。
   expect(frame).toContain("╭");
   expect(frame).toContain("输入消息");
   await setup.renderer.destroy();

@@ -47,7 +47,8 @@ import type {
   AnthropicNativeMessage,
   TokenUsage,
 } from "../harness/model-adapter/types.js";
-import type { TuiToolEvent } from "./deps.js";
+import type { TuiToolEvent, TuiMcpViewExt } from "./deps.js";
+import type { McpServerStatus } from "../harness/mcp/manager.js";
 import { isDoubleEsc, type TuiBridge } from "./hub-bridge.js";
 import type { TuiAskUserBridge, TuiPendingAsk } from "./ask-user.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
@@ -85,11 +86,12 @@ import {
 } from "./rewind-picker.js";
 import {
   helpLines,
+  parseSkillLoad,
   parseTuiInput,
   slashComplete,
-  slashCompleteFromList,
+  slashCompleteFromCandidates,
   slashSuggestions,
-  type TuiSlashCommand,
+  type SlashCandidate,
 } from "./slash.js";
 import { activeToolNameOf, liveToolReduce } from "./live-tool-state.js";
 import type { LiveToolRun } from "./live-tool-state.js";
@@ -97,6 +99,7 @@ import { ChatView } from "./chat-view.js";
 import type { StreamDraft } from "../cli/stream-draft.js";
 import { createStreamDraft } from "../cli/stream-draft.js";
 import { ListView, relativeTime, type TuiListEntry } from "./list-view.js";
+import { McpView, type McpToolEntry } from "./mcp-view.js";
 import { ContextBar } from "./context-bar.js";
 import { PromptInput } from "./prompt-input.js";
 import { renderBannerLines, VERSION } from "./banner.js";
@@ -108,6 +111,8 @@ import {
   createPermissionModeContext,
   modeLabel,
 } from "../harness/permission/index.js";
+import { createSkillBody } from "../harness/skill/body.js";
+import type { SkillCatalog } from "../harness/skill/catalog.js";
 import { extractSummary } from "../session-api/store/schema.js";
 
 /**
@@ -197,6 +202,16 @@ export function createToolEventSink(): TuiToolEventSink {
 const defaultPermissionModeContext: PermissionModeContext =
   createPermissionModeContext("default");
 
+/** #337 Phase C：skillCatalog 缺省 fallback（空清单 — 兼容 fixture / 测试；
+ *  product 路径由 run.tsx 经 TuiExtensions.skillCatalog 注入）。模块私有。 */
+const emptySkillCatalog: SkillCatalog = Object.freeze({
+  search: () => [],
+  get: () => undefined,
+  all: () => [],
+  available: () => [],
+  getBodyPath: () => undefined,
+});
+
 export interface TuiAppProps {
   readonly bridge: TuiBridge;
   readonly askBridge: TuiAskUserBridge;
@@ -212,6 +227,14 @@ export interface TuiAppProps {
   readonly initialView?: TuiView;
   /** 测试 / mock 注入口：触发 renderer.destroy 的回调；缺省 = no-op。 */
   readonly onQuit?: () => void;
+  /** #337 Phase C：skill 清单（slash 候选混显 + /skill-name 加载发送）。
+   *  可选：缺省 = 空清单（兼容 fixture / 测试；产品路径由 run.tsx 经
+   *  TuiExtensions.skillCatalog 注入）。 */
+  readonly skillCatalog?: SkillCatalog;
+  /** #361 Phase D：MCP 看板扩展面（TuiMcpViewExt 最小依赖）。缺省 =
+   *  undefined → /mcp 切 view 时提示「MCP 未装配」。产品路径由 run.tsx 经
+   *  TuiExtensions 注入；fixture / 测试可选 stub。 */
+  readonly mcp?: TuiMcpViewExt;
 }
 
 interface Notice {
@@ -420,10 +443,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
 
   // ── 派生：active 会话 + 输入候选 + permissionIndex/active ──────
   const active = sessions[activeKey] ?? initial;
-  const inputHintSuggestions = useMemo<ReadonlyArray<TuiSlashCommand>>(() => {
+  // #337 Phase C：skillCatalog 可选（缺省 = 空清单）；available() = 非 disabled
+  // + 有 description、名字序。slash 候选混显「静态命令 + skill」。
+  const skillCatalog = props.skillCatalog ?? emptySkillCatalog;
+  const skillList = useMemo(() => skillCatalog.available(), [skillCatalog]);
+  const inputHintSuggestions = useMemo<ReadonlyArray<SlashCandidate>>(() => {
     if (!inputValue.trim().startsWith("/")) return [];
-    return slashSuggestions(inputValue);
-  }, [inputValue]);
+    return slashSuggestions(inputValue, skillList);
+  }, [inputValue, skillList]);
   // 新 ask id 到来 → render-body 复位 modal 状态。
   const askId = askPending?.id;
   const lastAskIdRef = useRef<string | undefined>(undefined);
@@ -486,6 +513,36 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const [listEntries, setListEntries] = useState<ReadonlyArray<TuiListEntry>>(
     []
   );
+
+  // ── #361 Phase D：/mcp 看板数据（首次进入拉一次，reload 后刷新）──────
+  const [mcpStatuses, setMcpStatuses] = useState<readonly McpServerStatus[]>(
+    () => props.mcp?.status() ?? []
+  );
+  const [mcpTools, setMcpTools] = useState<readonly McpToolEntry[]>(
+    () => props.mcp?.listMcpTools?.() ?? []
+  );
+  async function enterMcpView(): Promise<void> {
+    if (!props.mcp) {
+      setNotice({ lines: ["MCP 未装配（buildTuiDeps 未注入 mcp 扩展）。"] });
+      return;
+    }
+    // 看板首次进入拉一次最新（status + 全量工具），保留缓存避免重拉。
+    setMcpStatuses(props.mcp.status());
+    setMcpTools(props.mcp.listMcpTools?.() ?? []);
+    setView("mcp");
+  }
+  async function reloadMcpView(): Promise<void> {
+    const ext = props.mcp;
+    if (!ext) return;
+    try {
+      await ext.reload();
+    } catch (err) {
+      setNotice({ lines: [`MCP 重载失败：${describeError(err)}`] });
+    }
+    // reload 后工具集变化（unregister + register）→ 刷新状态与工具列表。
+    setMcpStatuses(ext.status());
+    setMcpTools(ext.listMcpTools?.() ?? []);
+  }
   async function safeList(): Promise<ReadonlyArray<TuiListEntry>> {
     try {
       const raw = await props.bridge.listSessions();
@@ -548,7 +605,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   }
 
   // ── turn 发送 ───────────────────────────────────────────────────
-  async function sendTurn(text: string): Promise<void> {
+  // #377 项 D（#337 Phase C 决定撤销）：echo 与发送文本可分离 —— displayText
+  // 控制用户可见会话中的临时代理，text 仍原样经 run() 进模型历史。skill-load
+  // 路径传 displayText 为「[加载技能 X] [remainder]」精简占位，避免技能正文
+  // 泄漏进会话显示。turn 结束 turnFinished 用落盘权威消息原子替换中间态——
+  // skill-load 会话仍会显示完整正文（落盘历史可见），这是用户接受的取舍：
+  // 运行中可见精简占位，完成后与会话文件一致。
+  async function sendTurn(text: string, displayText?: string): Promise<void> {
     if (active.runState !== "idle") {
       setNotice({
         lines: ["当前会话正在运行；导航命令仍可用，消息请等本轮结束。"],
@@ -583,7 +646,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       if (!current) return prev;
       return {
         ...prev,
-        [targetId]: userMessageEchoed(turnStarted(current), text),
+        [targetId]: userMessageEchoed(
+          turnStarted(current),
+          displayText ?? text
+        ),
       };
     });
     const controller = new AbortController();
@@ -788,6 +854,37 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         return;
       }
     }
+    // #337 Phase C：/skill-name [提示词] 精确命中 → 确定性 skill-load 发送
+    // （静态命令优先：parseSkillLoad 命中词表返回 undefined，落回原分流）。
+    if (skillList.length > 0) {
+      const skillLoad = parseSkillLoad(text, skillList);
+      if (skillLoad !== undefined) {
+        const entry = skillCatalog.get(skillLoad.name);
+        if (entry === undefined || entry.disabled) {
+          setNotice({
+            lines: [`技能 ${skillLoad.name} 不可用（已禁用或不存在）。`],
+          });
+          return;
+        }
+        try {
+          const body = await createSkillBody({ entry, dir: entry.dir });
+          const sendText = `[skill-load name="${skillLoad.name}"]\n${body}${
+            skillLoad.remainder.length > 0 ? `\n\n${skillLoad.remainder}` : ""
+          }`;
+          // #377 项 D：发送文本含技能正文（进模型历史确定性生效），显示形态
+          // 用精简占位 —— 用户会话中只见「[加载技能 X] [remainder]」，正文不
+          // 泄漏。turn 完成后落盘权威消息原子替换（正文可见于会话文件）。
+          const displayText = `[加载技能 ${skillLoad.name}]${
+            skillLoad.remainder.length > 0 ? ` ${skillLoad.remainder}` : ""
+          }`;
+          setNotice(undefined);
+          await sendTurn(sendText, displayText);
+        } catch (err) {
+          setNotice({ lines: [`加载技能失败：${describeError(err)}`] });
+        }
+        return;
+      }
+    }
     const parsed = parseTuiInput(text);
     if (parsed.kind === "message") {
       // 真实消息进历史（避免 y/n / slash / busy-guard 消息污染）。
@@ -812,6 +909,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         setView("list");
         return;
       }
+      case "mcp": {
+        await enterMcpView();
+        return;
+      }
       case "new":
         newSession();
         return;
@@ -820,7 +921,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         await quit();
         return;
       case "help":
-        setNotice({ lines: helpLines() });
+        setNotice({
+          lines: helpLines(
+            skillList.length > 0
+              ? skillList.map((entry) => entry.name)
+              : undefined
+          ),
+        });
         return;
       case "info": {
         setNotice({
@@ -1029,7 +1136,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // + ContextBar 1 行 + ask 槽 1 行 + headroom 1 行 + slash 候选行 + notice
   // 折行 + modal 折行 + bgLine。
   const hintRows = inputValue.trim().startsWith("/")
-    ? slashSuggestions(inputValue).length
+    ? slashSuggestions(inputValue, skillList).length
     : 0;
   const bgSession = Object.values(sessions).find(
     (s) => s.runState === "running-bg"
@@ -1058,6 +1165,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     5,
     rows - 2 - noticeRenderRows(notice?.lines, cols)
   );
+  // #361 Phase D：MCP 看板视图 — 输入框 / mode 行 / ContextBar 均不渲染
+  // （view !== "chat"），底部仅 notice 占用 + 空行隔离，与列表同款预算。
+  const mcpViewRows = Math.max(
+    5,
+    rows - 2 - noticeRenderRows(notice?.lines, cols)
+  );
 
   return (
     <box
@@ -1073,6 +1186,15 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           cols={cols}
           rows={listViewRows}
           onOpen={(i) => void openSessionAt(i)}
+          onBack={() => setView("chat")}
+        />
+      ) : view === "mcp" ? (
+        <McpView
+          statuses={mcpStatuses}
+          tools={mcpTools}
+          cols={cols}
+          rows={mcpViewRows}
+          onReload={reloadMcpView}
           onBack={() => setView("chat")}
         />
       ) : (
@@ -1151,6 +1273,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       {view === "chat" && (
         <PromptInput
           value={inputValue}
+          cols={cols}
           placeholder={
             rewindTargets !== undefined
               ? "回退选择器中（↑↓ 选择 · Enter 确认 · Esc 关闭）"
@@ -1164,14 +1287,32 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           disabled={askModalActive || rewindTargets !== undefined}
           onChange={setInputValue}
           onSubmit={(v) => void handleSubmit(v)}
-          onSelectHint={(cmd) => void handleSubmit(`/${cmd}`)}
+          onSelectHint={(candidate) => {
+            // #337 Phase C：candidate 为 SlashCandidate 判别联合。
+            // 静态命令 → 走 handleSubmit(`/${cmd}`) 原路由（含 /new 等）；
+            // skill → 发送 skill-load。hint 可见时 Enter 走本回调而非 onSubmit
+            // （PromptInput 语义），故要保留用户已输入的 remainder：若当前
+            // inputValue 首 token 精确命中同 skill → 提整个 raw（含 remainder）；
+            // 否则（部分输入如 /ec，或 hint 选中非当前 token 的 skill）→
+            // 补全 `/name ` 形态发送。
+            if (candidate.kind === "command") {
+              void handleSubmit(`/${candidate.command}`);
+            } else {
+              const load = parseSkillLoad(inputValue, skillList);
+              if (load !== undefined && load.name === candidate.name) {
+                void handleSubmit(inputValue);
+              } else {
+                void handleSubmit(`/${candidate.name}`);
+              }
+            }
+          }}
           onTabComplete={(value, cursor) => {
             // 多匹配（suggestions > 1）→ null 不动作；唯一匹配 → 补全串；
             // 当 cursor 越过 0 时按 selected hint 补全（任务 B 兼容）。
             if (inputHintSuggestions.length === 1 && cursor === 0) {
-              return slashCompleteFromList(inputHintSuggestions, 0);
+              return slashCompleteFromCandidates(inputHintSuggestions, 0);
             }
-            return slashComplete(value);
+            return slashComplete(value, skillList);
           }}
           hintSuggestions={inputHintSuggestions}
           history={inputHistory}

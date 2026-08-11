@@ -9,8 +9,15 @@
  * (与 tests/harness/build-engine.test.ts 的 EXPECTED_TOOLS 对齐),且 onToolEvent
  * 钩子经 deps.executor 在 executor 层真实触发(T1 观测缝验收)。
  * 任何入口漏注册的工具都让此测试立即报警。
+ *
+ * #337 Phase B：buildTuiDeps 装配 skill catalog → 21→23 件（追加 skill /
+ * skill_search，静态装配经 reg.inner.list() 透出）。skill catalog 即便为空
+ * 也会通过 createDefaultAciRegistry 注入 skill / skill_search 两件
+ * （ACI_TOOLSET_NAMES Gate 3 锁）。本测试注入 tmp userHome/cwd（mkdtemp）
+ * 隔离真实 ~/.iknow / cwd——worktree 已提交的 .iknow/mcp.json 含真实
+ * stdio server，不隔离会触发 subprocess 启动、拖慢且污染测试环境。
  */
-import { describe, expect, test, it } from "bun:test";
+import { afterEach, describe, expect, test, it } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,6 +52,8 @@ function makeBundle(
     // #119 T7: IknowCompressEnv 必填(T1 接入),build-engine 透传。test fixture
     // 默认 contextWindow=200000, thresholdTokens 缺省推导。
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
+    // #378 根因 B: MCP 连接超时(默认 60_000)。
+    mcp: { connectTimeoutMs: 60_000 },
   };
   // buildTuiDeps 委托 buildHarnessEngine,只需 env 字段;其余 bundle 字段不读。
   return { env } as unknown as RuntimeBundle;
@@ -89,9 +98,26 @@ const EXPECTED_TOOLSET_25 = [
 ];
 
 describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(25 件)", () => {
+  // #337 Phase B:tmp fixture 隔离真实 ~/.iknow / cwd(避免 worktree 已提交
+  // 的 .iknow/mcp.json 触发真实 stdio subprocess 启动,以及 .iknow/skills
+  // 污染 skill scanner 降级行为)。skill/skill_search 静态装配(Gate 3 锁:
+  // skillCatalog 提供即装两件),tmp 即使无 skills/mcp.json 仍产 25 件
+  // (surface="tui" 全装配含 subagent 2 件)。
+  const roots: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      roots.splice(0).map((r) => rm(r, { recursive: true, force: true }))
+    );
+  });
+
   test("装配出完整 25 件工具(surface=tui 全装配:11 base + 10 LSP + skill 2 + subagent 2)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-tui-deps-toolset-"));
+    roots.push(root);
     const deps = await buildTuiDeps(makeBundle(), {
       askUser: createNoAskUser(),
+      userHome: join(root, "home"),
+      cwd: root,
     });
     const names = deps.registry
       .list()
@@ -100,22 +126,31 @@ describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(25 件)"
     expect(names).toEqual([...EXPECTED_TOOLSET_25].sort());
   });
 
-  test("显式断言 web_fetch 与 web_search 都在注册表里", async () => {
-    // 比 list() 顺序断言更强 — 即使将来顺序变了也不会漏报。
+  test("显式断言 web_fetch / web_search / skill / skill_search 都在注册表里", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-tui-deps-explicit-"));
+    roots.push(root);
     const deps = await buildTuiDeps(makeBundle(), {
       askUser: createNoAskUser(),
+      userHome: join(root, "home"),
+      cwd: root,
     });
     const names = new Set(deps.registry.list().map((def) => def.name));
     expect(names.has("web_fetch")).toBe(true);
     expect(names.has("web_search")).toBe(true);
+    expect(names.has("skill")).toBe(true);
+    expect(names.has("skill_search")).toBe(true);
   });
 
   test("IKNOW_WEB_PROXY 非空时,web 工具装配抛错(fail-fast 在装配时)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-tui-deps-proxy-"));
+    roots.push(root);
     // 镜像 build-engine.test.ts 的同形断言 — TUI 也需 fail-fast 在装配时。
-    // buildTuiDeps 现在 async,装配期抛错以 rejects 呈现。
+    // #337 Phase B:buildTuiDeps 现在 async,失败经 await 转 rejection。
     await expect(
       buildTuiDeps(makeBundle({ proxy: "ftp://bad-proxy:9999" }), {
         askUser: createNoAskUser(),
+        userHome: join(root, "home"),
+        cwd: root,
       })
     ).rejects.toThrow(/only http and https|malformed/i);
   });
@@ -155,6 +190,11 @@ describe("buildTuiDeps — onToolEvent 钩子经 executor 触发(T1 观测缝)",
       onToolEvent: (event) => {
         events.push(event);
       },
+      // #337 Phase B:userHome/cwd 注入 tmp 隔离真实 ~/.iknow + worktree 已提交
+      // 的 .iknow/mcp.json(避免 npx subprocess 启动)。fixture 文件仍在 root
+      // 内(read_file 的 cwd 语义 = root)。
+      userHome: join(root, "home"),
+      cwd: root,
     });
 
     try {
@@ -182,6 +222,8 @@ describe("buildTuiDeps — onToolEvent 钩子经 executor 触发(T1 观测缝)",
 
     const deps = await buildTuiDeps(makeBundle(), {
       askUser: createNoAskUser(),
+      userHome: join(root, "home"),
+      cwd: root,
     });
 
     try {

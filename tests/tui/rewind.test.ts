@@ -153,7 +153,11 @@ describe("slash: /rewind 词表四触点", () => {
 
   test('"/r" 前缀候选含 rewind', async () => {
     const { slashSuggestions } = await import("../../src/tui/slash.js");
-    expect(slashSuggestions("/r")).toContain("rewind");
+    // #337 Phase C: slashSuggestions 返回 SlashCandidate 判别联合对象。
+    expect(slashSuggestions("/r")).toContainEqual({
+      kind: "command",
+      command: "rewind",
+    });
   });
 });
 

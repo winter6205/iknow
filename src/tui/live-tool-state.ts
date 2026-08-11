@@ -113,15 +113,36 @@ export function liveToolReduce(
 
 /** 活动工具名派生：取最后一个 status=running 条目的 name；无运行中条目 →
  *  undefined。纯派生（无新 state），harness loop 串行下末尾 running 即当前
- *  工具。供 app.tsx 状态栏（ContextBar 尾缀）使用。 */
+ *  工具。供 app.tsx 状态栏（ContextBar 尾缀）使用。
+ *
+ *  MCP 工具名特殊处理：`mcp__<server>__<tool>` 在底栏展示意义不大
+ *  （server 已在 MCP 看板可见，工具名又含冗余前缀），派生阶段剥为
+ *  `<server>/<tool>` 短形态 —— 单一渲染面（ContextBar）通过 activeToolNameOf
+ *  取值，不需要让上游知道 MCP 协议形态。 */
 export function activeToolNameOf(
   runs: ReadonlyArray<LiveToolRun>
 ): string | undefined {
   for (let i = runs.length - 1; i >= 0; i--) {
     const run = runs[i];
-    if (run !== undefined && run.status === "running") return run.name;
+    if (run !== undefined && run.status === "running") {
+      return shortenMcpToolName(run.name);
+    }
   }
   return undefined;
+}
+
+/**
+ * 把 `mcp__<server>__<tool>` 缩为 `<server>/<tool>`；非 MCP 工具名原样返回。
+ * 保持纯函数语义（slice/indexOf，O(n)），供单测直驱。
+ */
+export function shortenMcpToolName(name: string): string {
+  if (!name.startsWith("mcp__")) return name;
+  const body = name.slice("mcp__".length);
+  const sep = body.indexOf("__");
+  if (sep === -1) return name;
+  const server = body.slice(0, sep);
+  const tool = body.slice(sep + "__".length);
+  return `${server}/${tool}`;
 }
 
 /** 运行中条目格式化 —— `[运行中] name`。 */
