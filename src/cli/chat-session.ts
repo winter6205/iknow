@@ -5,8 +5,10 @@
 import * as readline from "node:readline";
 import {
   run as runHarness,
+  type AnthropicNativeMessage,
   type HarnessStreamEvent,
   type LoopEngineDeps,
+  type RunResult,
 } from "../harness/index.js";
 import { formatRunHuman, formatRunJson, formatStatusLine } from "./format.js";
 import {
@@ -38,6 +40,18 @@ import {
   type PermissionMode,
   type PermissionModeContext,
 } from "../harness/permission/modes.js";
+import {
+  SessionStore,
+  type SessionStoreError,
+  type SessionFileV1,
+  CURRENT_SCHEMA_VERSION,
+  extractSummary,
+  appendCheckpoint,
+  shouldPersistCheckpoint,
+  toInterruptReason,
+} from "../session-api/store/index.js";
+import { resolveServeDataDir } from "../session-api/serve.js";
+import { randomUUID } from "node:crypto";
 
 /** Visual separator after a completed answer on TTY only. */
 const TTY_ANSWER_SEP = "────────";
@@ -73,6 +87,19 @@ export type ChatLineContext = {
   showThinking?: boolean;
   /** W2: 权限模式上下文(由 runChatSession 透传,/permissions 翻它)。 */
   permissionMode?: PermissionModeContext;
+  /**
+   * T2: REPL 级 AbortController。run() 的 signal 由此接线 —— SIGINT 第一次
+   * busy 时 abort() 打断 in-flight,run 以 stopReason "cancelled" resolve。
+   * 缺省(pipe / tests)→ signal=undefined,行为零变化。
+   */
+  abortController?: AbortController;
+  /**
+   * T2: checkpoint 落盘的 SessionStore(默认 ~/.iknow 池,与 serve/TUI 同池
+   * — #120 Q6 精神)。与 `state.conversationId` 同时存在时,post-run 走
+   * shouldPersistCheckpoint → appendCheckpoint → 原子写。缺省(ask/tests)→
+   * 跳过持久化,行为零变化。
+   */
+  checkpointStore?: SessionStore;
 };
 
 export type ProcessChatLineResult = {
@@ -140,13 +167,37 @@ export async function processChatLine(
           if (event.type === "stop_summary") stopSummary = event.text;
           else opts.onStream!(event);
         };
+  // T2: prior 快照(run 前 state.messages 引用;append-only 冻结已保证该引用
+  // 不会就地变更,run 后若 host 整体替换 messages 也不会影响 prior)。throw
+  // 路径用同一 prior 引用(protocolError/emptyFinalResponse 不替换;MaxTurnsExceeded
+  // catch 也不替换 — 抛异常路径不进此处 if-块,见 catch 分支)。
+  const prior = ctx.state.messages;
   try {
-    const { result, trace } = await runHarness(query, ctx.deps, undefined, {
-      priorMessages: ctx.state.messages,
-      // #179 T6 (D3):观察者回调透传;undefined = 非流式行为零变化(pipe/ask)。
-      // T6:wrap 后仅转发非 stop_summary 事件(摘要单独捕获,见上)。
-      onStream: wrappedOnStream,
-    });
+    const { result, trace } = await runHarness(
+      query,
+      ctx.deps,
+      ctx.abortController?.signal,
+      {
+        priorMessages: prior,
+        // #179 T6 (D3):观察者回调透传;undefined = 非流式行为零变化(pipe/ask)。
+        // T6:wrap 后仅转发非 stop_summary 事件(摘要单独捕获,见上)。
+        onStream: wrappedOnStream,
+      }
+    );
+    // T2: post-run checkpoint 落盘(mirrors hub.ts conditionalSave)。Ask/serve/
+    // tests 没接 checkpointStore → 跳过,行为零变化(pipe / ask 一支不动)。
+    // run resolve 后才落盘 —— throw 路径(下文 catch)不进此处,刻意保持 #120
+    // 裁决("MaxTurnsExceeded 不 save"由 catch 分支自然实现:run 没 resolve 即
+    // 没有可用的 turnCount / messages,appendCheckpoint 也不可能产生 delta>0)。
+    if (ctx.checkpointStore && ctx.state.conversationId !== null) {
+      await persistChatSessionCheckpoint({
+        store: ctx.checkpointStore,
+        conversationId: ctx.state.conversationId,
+        jsonMode: ctx.state.jsonMode,
+        result,
+        priorMessages: prior,
+      });
+    }
     // Continue the conversation next turn on cancelled/timeout/nonSuccessStop
     // (all append an assistant message). maxTurns no longer returns here —
     // plan T3 / ADR-0011 upgraded it to `throw MaxTurnsExceeded`, caught below
@@ -308,6 +359,114 @@ function formatChatError(err: unknown): string {
   return `错误: ${String(err)}`;
 }
 
+/**
+ * T2: chat REPL 的 post-run checkpoint 落盘 —— `src/session-api/hub.ts`
+ * conditionalSave(#120 T1)的 chat 侧镜像。纯 IO(load/save 原子写),决策全权
+ * 委托 T1 纯函数:
+ *
+ *   - `shouldPersistCheckpoint(result, priorMessages)` 决定本次 run 是否值得
+ *     落盘(cancelled+delta>0 / timeout / completed 等 → true;protocolError /
+ *     emptyFinalResponse / turn-0 空 cancelled → false 返回,不写文件)。
+ *   - `toInterruptReason` 把 StopReason 映射为 checkpoint label(cancelled /
+ *     timeout / protocolError / maxTurns;completed 等 → null,不 append 记录)。
+ *   - `appendCheckpoint` 内建 delta=0/负值 no-op 守门(records.messagesCount >
+ *     session.messages.length 才 append)。
+ *
+ * **累计 turnCount**:镜像 hub.ts:739 的 `session.turnCount + result.turnCount`
+ * 约定 —— 若该 conversationId 已有盘上文件,新记录从既有 turnCount 继续编号,
+ * T4 --resume 才能读到连续的快照序列。
+ *
+ * **错误处理**(ACR):所有失败复用 SessionStore 既有 typed kinds(write_failed /
+ * not_found / parse_failed / schema_invalid),绝不新造 kind;失败经
+ * `opts.warn?.(line)` 到 stderr 并 continue,绝不 crash REPL、绝不阻塞退出
+ * (第二次 Ctrl+C 只 bounded-wait 1s)。
+ *
+ * 空 messages 的 turn-0 cancelled → shouldPersist 返回 false,本函数早退不写盘。
+ */
+export async function persistChatSessionCheckpoint(opts: {
+  readonly store: SessionStore;
+  readonly conversationId: string;
+  readonly jsonMode: boolean;
+  readonly result: RunResult;
+  readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
+  /** 落盘失败 / 读坏文件时的 stderr 通知(缺省静默 — 观察者纪律)。 */
+  readonly warn?: (line: string) => void;
+}): Promise<void> {
+  const { store, conversationId, jsonMode, result, priorMessages, warn } = opts;
+  try {
+    if (!shouldPersistCheckpoint(result, priorMessages)) return;
+    let session: SessionFileV1;
+    try {
+      session = await store.load(conversationId);
+    } catch (err) {
+      // not_found → 首次落盘,以当前文件构造全新 v3 文件(#120 v2 字段齐备);
+      // parse_failed / schema_invalid → 该 conversationId 的既有文件不可用,
+      // 以当前进度重建(不可用文件不应阻断本次 turn 落盘)。
+      session = {
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversation_id: conversationId,
+        messages: [],
+        jsonMode,
+        turnCount: 0,
+        updatedAt: new Date().toISOString(),
+        summary: "",
+        cwd: process.cwd(),
+        sanitized_at: new Date().toISOString(),
+        checkpoints: [],
+      };
+    }
+    const now = new Date().toISOString();
+    const turnCount = session.turnCount + result.turnCount;
+    const interruptReason = toInterruptReason(result.stopReason);
+    // appendCheckpoint 的 delta=0 守门比较 record.messagesCount 与
+    // session.messages.length —— 必须在把 post-run messages 合入**之前**计算
+    // (否则 delta=0 永远 false、守门永不触发;镜像 hub.ts:758-782 同序)。
+    const withCheckpoint =
+      interruptReason === null
+        ? session
+        : appendCheckpoint(session, {
+            turnIndex: turnCount,
+            messagesCount: result.messages.length,
+            interruptedAt: now,
+            interruptReason,
+            ...(result.lastUsage !== null
+              ? { lastUsage: result.lastUsage }
+              : {}),
+          });
+    const updated: SessionFileV1 = {
+      ...withCheckpoint,
+      messages: result.messages,
+      turnCount,
+      updatedAt: now,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      summary: extractSummary(result.messages),
+    };
+    await store.save({ id: conversationId, file: updated });
+  } catch (err) {
+    // 失败即警告,绝不重抛 / 绝不 crash REPL。typed kind 原样透出供排查。
+    const kind = isSessionStoreErrorKind(err)
+      ? `[${(err as SessionStoreError).kind}]`
+      : "";
+    warn?.(
+      `会话检查点写入失败 ${kind}（${err instanceof Error ? err.message : String(err)}），本次进度未持久化`
+    );
+  }
+}
+
+/** Narrow a throw to SessionStoreError (typed-kind member) vs other failures. */
+function isSessionStoreErrorKind(err: unknown): boolean {
+  if (err === null || typeof err !== "object") return false;
+  const kind = (err as { kind?: unknown }).kind;
+  return (
+    kind === "write_failed" ||
+    kind === "not_found" ||
+    kind === "parse_failed" ||
+    kind === "schema_invalid" ||
+    kind === "io_error" ||
+    kind === "concurrent_write"
+  );
+}
+
 function resolveQuiet(optsQuiet: boolean | undefined): boolean {
   if (typeof optsQuiet === "boolean") {
     return optsQuiet;
@@ -396,10 +555,14 @@ export function createStreamPreviewSink(opts: {
  * Run a product chat session (TTY REPL or non-interactive pipe).
  */
 export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
+  // T2: REPL 级 conversationId(随机 UUID,固定一次)。`randomUUID` 与 cli.ts
+  // ask 入口同源,确保 token 形态一致。T4 --resume 会复用此字段锚定同一文件。
+  const conversationId = randomUUID();
   const state: CliChatState = {
     messages: Object.freeze([]),
     jsonMode: opts.jsonMode,
     session: opts.session,
+    conversationId,
   };
 
   // T6: wrap the executor with the violation kill-session hook so tool
@@ -421,11 +584,20 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
   });
   const wrappedDeps: LoopEngineDeps = { ...opts.deps, executor };
 
+  // T2: REPL 级 AbortController + SessionStore 注入 ctx;ask/pipe 入口仍
+  // 共享同一 ctx,缺省情况下 signal/store 不会走持久化路径(向 ask 开放零变化)。
+  // store 默认池 = ~/.iknow,与 serve/TUI 同池(#120 Q6 精神);tests / ask
+  // 入口传 opts.deps 不带 store 路径,持久化天然跳过。
+  const abortController = new AbortController();
+  const checkpointStore = new SessionStore(resolveServeDataDir());
+
   const ctx: ChatLineContext = {
     deps: wrappedDeps,
     state,
     showThinking: opts.showThinking,
     permissionMode: opts.permissionMode,
+    abortController,
+    checkpointStore,
   };
 
   const interactive = isInteractive();
@@ -483,8 +655,13 @@ async function runInteractive(opts: {
     sigintCount += 1;
     if (sigintCount === 1) {
       writeErr("\n再次 Ctrl+C 退出，或输入 /quit");
-      // Re-show prompt only when idle (never stack prompts mid-turn).
-      if (!closed && !busy) {
+      // T2: busy 时第一次 Ctrl+C 打断 in-flight turn。controller.signal 由
+      // processChatLine 透传到 run(),signal.abort → run 以 stopReason
+      // "cancelled" resolve → post-run 路径落 checkpoint(recoverable)。
+      // 空闲时不 abort(避免污染下一次 turn),直接重绘 prompt。
+      if (busy) {
+        ctx.abortController?.abort();
+      } else if (!closed) {
         rl.prompt(true);
       }
       return;
@@ -500,7 +677,14 @@ async function runInteractive(opts: {
     } catch {
       // EXIT: interface may already be closed
     }
-    process.exit(130);
+    // T2: bounded 1s 等在飞的 turn(含 processChatLine 内已 await 的
+    // persistChatSessionCheckpoint)完成,再 process.exit(130)。绝不在
+    // 退出钩子上阻塞(save 失败由 persist 内部 warn+continue)。
+    // 1s 上限 —— 即便 turn 卡住也强制退出,REPL 不挂。
+    void Promise.race([
+      chain.catch(() => undefined),
+      new Promise<void>((resolve) => setTimeout(resolve, 1000)),
+    ]).then(() => process.exit(130));
   };
   // Node may deliver Ctrl+C to process and/or readline depending on platform.
   process.on("SIGINT", onSigint);
