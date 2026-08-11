@@ -384,6 +384,60 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
     assert.equal(file.conversation_id, id, "写回同一 <id>.json,锚点保留");
   });
 
+  it("resume 文件 checkpoints=null(畸形)→ seed 空 + warn [schema_invalid] + 锚点保留", async () => {
+    // 5-category boundary:exception 的深树 —— v3 文件 `checkpoints: null`
+    // 是畸形(生产裁决「never silently coerce」,schema.ts:94-96,绝不归一化)。
+    // load 抛 typed schema_invalid(field="checkpoints")→ seed 走 typed
+    // 守卫:空 messages + warn 触发且含 [schema_invalid] + 锚点保留(id 不丢)。
+    // 绝不裸 Error、绝不静默吞。
+    const tmp = await mkdtemp(join(tmpdir(), "iknow-chat-resume-cpnull-"));
+    tempDirs.push(tmp);
+    const s = new SessionStore(tmp, process.cwd());
+    const id = "cp-null";
+    const dir = resolveProjectSessionDir(tmp, process.cwd());
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, `${id}.json`),
+      JSON.stringify({
+        schemaVersion: 3,
+        conversation_id: id,
+        messages: [userMsg("q1"), assistantMsg("a1")],
+        jsonMode: false,
+        turnCount: 1,
+        updatedAt: "2026-08-11T00:00:00.000Z",
+        summary: "q1",
+        cwd: "",
+        sanitized_at: "2026-08-11T00:00:00.000Z",
+        checkpoints: null,
+      }),
+      "utf8"
+    );
+
+    const seeded = await seedResumeMessages({ store: s, id });
+    assert.deepEqual(seeded.messages, []);
+    assert.equal(typeof seeded.warn, "function");
+    seeded.warn!();
+    const text = capturedStderr();
+    assert.match(text, new RegExp(`恢复会话 ${id} 失败`));
+    assert.match(text, /\[schema_invalid\]/);
+    assert.match(text, new RegExp(`仍锚定 ${id}`));
+
+    // 锚点保留:后续 completed 写回同一 <id>.json,重建为干净 v3 文件。
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["hello"] })],
+      checkpointStore: s,
+      stateOverrides: {
+        conversationId: id,
+        messages: Object.freeze([...seeded.messages]),
+      },
+    });
+    await processChatLine({ line: "hi", ctx });
+    const file = await s.load(id);
+    assert.equal(file.conversation_id, id, "写回同一 <id>.json,锚点保留");
+    assert.equal(file.turnCount, 1);
+    assert.deepEqual(file.checkpoints, [], "重建文件 checkpoints 归一为 []");
+  });
+
   it("concurrent / duplicate commit:resume → 2 completed turns → turnCount = prior + 2", async () => {
     const s = await storeFor();
     const id = "repeat-after-resume";
