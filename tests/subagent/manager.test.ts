@@ -494,6 +494,62 @@ describe("SubAgentManager drainCompleted (T7 host-drain 最小枚举)", () => {
   });
 });
 
+// ── fixture 11:#361 T5 abortTask ─────────────────────────────────────────────
+
+describe("SubAgentManager abortTask (#361 T5)", () => {
+  it("running task → SIGTERM 一次(arm SIGKILL 兜底复用同一 armKillFallback 路径)", () => {
+    const { manager, spawned } = makeHarness();
+    const { taskId } = manager.spawn({});
+    // 初始 running
+    assert.deepEqual(manager.queryBuffer(taskId), { status: "running" });
+
+    const ok = manager.abortTask(taskId);
+    assert.equal(ok, true);
+    // 第一击 SIGTERM
+    const signals = spawned[0]!.kill.mock.calls.map((c) => c[0]);
+    assert.deepEqual(signals, ["SIGTERM"]);
+  });
+
+  it("arm SIGKILL 兜底:fake child 不退出 → 5s 后 SIGKILL 强杀", async () => {
+    vi.useFakeTimers();
+    try {
+      const { manager, spawned } = makeHarness();
+      const { taskId } = manager.spawn({});
+      manager.abortTask(taskId);
+      // 5s 后 killFallback 兜底 SIGKILL
+      await vi.advanceTimersByTimeAsync(5000);
+      const signals = spawned[0]!.kill.mock.calls.map((c) => c[0]);
+      assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+      // 防止后续 spawn 留下 stray timer
+      spawned[0]!.emit("exit", null, "SIGKILL");
+      await manager.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 10000);
+
+  it("running task → abortCtrl 已 abort(传播到 in-flight)", () => {
+    const { manager } = makeHarness();
+    const { taskId } = manager.spawn({});
+    manager.abortTask(taskId);
+    // 无直接断言面:确保不抛 + 状态仍 running(buffer 不变,等待 exit handler)。
+    assert.deepEqual(manager.queryBuffer(taskId), { status: "running" });
+  });
+
+  it("未知 taskId → no-op 返回 false", () => {
+    const { manager } = makeHarness();
+    assert.equal(manager.abortTask("nope"), false);
+  });
+
+  it("已终态(completed)task → no-op 返回 false,不再 SIGTERM", () => {
+    const { manager, spawned } = makeHarness();
+    const { taskId } = manager.spawn({});
+    emitEnvelope(spawned[0]!, okEnvelope("done"));
+    assert.equal(manager.abortTask(taskId), false);
+    assert.equal(spawned[0]!.kill.mock.calls.length, 0);
+  });
+});
+
 // ── fixture 10:SubAgentDefinition 本地定义 typecheck ─────────────────────────
 
 describe("SubAgentDefinition local definition typecheck", () => {

@@ -547,7 +547,7 @@ export class SessionHub {
         // #356 T7 (SC7):host drain — serve 入口每轮 run() 前,把 manager 内
         // completed 子代理结果浓缩成 user message,拼入 priorMessages 末尾。
         // 空 manager / 无 completed → priorMessages 不变 (行为零变化)。
-        const drained = drainPendingSubagents(this.subagentManager);
+        const drained = await drainPendingSubagents(this.subagentManager);
         const drainedMsg: AnthropicNativeMessage = {
           role: "user",
           content: [{ type: "text", text: drained }],
