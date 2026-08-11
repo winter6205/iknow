@@ -44,7 +44,13 @@ import { join } from "node:path";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
-import { CURRENT_SCHEMA_VERSION, extractSummary } from "./store/index.js";
+import {
+  appendCheckpoint,
+  CURRENT_SCHEMA_VERSION,
+  extractSummary,
+  shouldPersistCheckpoint,
+  toInterruptReason,
+} from "./store/index.js";
 import type {
   ApiErrorBody,
   CompactSessionResponse,
@@ -295,14 +301,17 @@ export type SessionHubOptions = {
   surface?: "chat" | "tui" | "ask" | "serve";
 };
 
-// -- stop reasons that must NOT persist to file (裁决#8) -----------------------
-
-/** cancelled → no-op (spec L237); protocolError/emptyFinalResponse → drop context (chat-session.ts:84-89). */
-const DROP_REASONS: ReadonlySet<string> = new Set([
-  "cancelled",
-  "protocolError",
-  "emptyFinalResponse",
-]);
+// -- stop-reason persistence decision (T1: replaced DROP_REASONS set) ---------
+//
+// The previous design used a static DROP_REASONS set to skip certain stop
+// reasons (cancelled / protocolError / emptyFinalResponse). T1 replaces that
+// with `shouldPersistCheckpoint(result, priorMessages)` from
+// ./store/checkpoint.ts. Nuance preserved:
+//   - `cancelled` WITH delta>0 now persists (the user query landed; record a
+//     checkpoint so the interrupted turn is recoverable / rewind-able).
+//   - `protocolError` / `emptyFinalResponse` never persist (维持 #120 裁决).
+//   - every other stopReason (completed / maxTurns / timeout / nonSuccessStop)
+//     persists as-is.
 
 // -- SessionHub ----------------------------------------------------------------
 
@@ -419,6 +428,7 @@ export class SessionHub {
       summary: "",
       cwd: process.cwd(),
       sanitized_at: now,
+      checkpoints: [],
     };
     await this.store.save({ id, file });
     return {
@@ -526,8 +536,9 @@ export class SessionHub {
             onStream: wrappedOnStream,
           });
           // Violation kill → surface protocolError so the SPA client can
-          // attribute the stop; DROP_REASONS already drops protocolError
-          // context on save (mirrors the chat-session drop semantics).
+          // attribute the stop; shouldPersistCheckpoint still drops
+          // protocolError context on save (mirrors the chat-session drop
+          // semantics, 维持 #120 裁决).
           finalResult = killed
             ? { ...result, stopReason: "protocolError" }
             : result;
@@ -561,6 +572,9 @@ export class SessionHub {
           conversationId,
           session,
           result: finalResult,
+          // priorMessages = the file BEFORE this run; only the messages THIS
+          // run appended count as progress for the cancelled-delta decision.
+          priorMessages: session.messages,
         });
         return {
           session: this.summarize({
@@ -595,6 +609,11 @@ export class SessionHub {
           updatedAt: new Date().toISOString(),
           schemaVersion: CURRENT_SCHEMA_VERSION,
           summary: "",
+          // Reset wipes conversation history; prior checkpoint records
+          // reference turns that no longer exist (messagesCount would also
+          // falsely satisfy `appendCheckpoint`'s delta<=0 no-op guard and
+          // silently drop the next interrupt save). Clear defensively.
+          checkpoints: [],
         };
         await this.store.save({ id: conversationId, file: reset });
         return {
@@ -725,19 +744,44 @@ export class SessionHub {
     return next;
   }
 
-  /** 裁决#8: save condition based on stopReason. */
+  /** 裁决#8 + T1: save condition based on stopReason and progress delta.
+   *  `priorMessages` = session.messages BEFORE this run (postMessage already
+   *  holds it); shouldPersistCheckpoint decides whether to save. Interrupting
+   *  stops (cancelled with delta>0) also append a checkpoint record so the
+   *  interrupted turn is recoverable / rewind-able. */
   private async conditionalSave(opts: {
     readonly conversationId: string;
     readonly session: SessionFileV1;
     readonly result: RunResult;
+    readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
   }): Promise<void> {
-    const { conversationId, session, result } = opts;
-    if (DROP_REASONS.has(result.stopReason)) return;
+    const { conversationId, session, result, priorMessages } = opts;
+    if (!shouldPersistCheckpoint(result, priorMessages)) return;
+    const now = new Date().toISOString();
+    const turnCount = session.turnCount + result.turnCount;
+    const interruptReason = toInterruptReason(result.stopReason);
+    // appendCheckpoint compares record.messagesCount to session.messages.length
+    // for its delta=0 guard, so it must receive the session BEFORE new messages
+    // are merged in (otherwise delta = 0 would always be false and the guard
+    // never fires). Compute the checkpointed session first, then merge the
+    // post-run messages / turnCount / metadata on top.
+    const withCheckpoint =
+      interruptReason === null
+        ? session
+        : appendCheckpoint(session, {
+            turnIndex: turnCount,
+            messagesCount: result.messages.length,
+            interruptedAt: now,
+            interruptReason,
+            ...(result.lastUsage !== null
+              ? { lastUsage: result.lastUsage }
+              : {}),
+          });
     const updated: SessionFileV1 = {
-      ...session,
+      ...withCheckpoint,
       messages: result.messages,
-      turnCount: session.turnCount + result.turnCount,
-      updatedAt: new Date().toISOString(),
+      turnCount,
+      updatedAt: now,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       summary: extractSummary(result.messages),
     };
