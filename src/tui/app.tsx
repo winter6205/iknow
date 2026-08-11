@@ -1107,9 +1107,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           placeholder={
             askPending
               ? askModalActive
-                ? "modal 键位接管中（Esc 退回输入）"
-                : "y/a/n 确认工具授权（a=总是允许）"
-              : "输入消息或 /help"
+                ? "modal active (Esc to dismiss)"
+                : "y/a/n to authorize tool (a = always allow)"
+              : "type message or /help"
           }
           active={active.runState === "running-fg"}
           disabled={askModalActive}

@@ -31,7 +31,7 @@ test("空会话帧含 banner 与输入框且无崩溃", async () => {
   // banner 外框与输入框都是圆角线框（borderStyle="rounded"）。
   expect(frame).toContain("╭");
   // 输入框占位提示存在。
-  expect(frame).toContain("输入消息");
+  expect(frame).toContain("type message");
   await setup.renderer.destroy();
 });
 
@@ -45,6 +45,6 @@ test("窄终端 banner 降级为单行不崩", async () => {
   await setup.renderOnce();
   const frame = setup.captureCharFrame();
   expect(frame).toContain("╭");
-  expect(frame).toContain("输入消息");
+  expect(frame).toContain("type message");
   await setup.renderer.destroy();
 });

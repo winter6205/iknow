@@ -142,7 +142,7 @@ describe('任务 B："/" 出现候选 → ↓ → Enter 触发 /new', () => {
     await app.pressEnter();
     const frame = app.setup.captureCharFrame();
     expect(frame).not.toContain("+ 新建会话");
-    expect(frame).toContain("输入消息");
+    expect(frame).toContain("type message");
 
     // 4) 后续发消息：落盘到新 session
     await app.typeText("new-draft-msg");

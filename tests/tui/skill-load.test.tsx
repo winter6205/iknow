@@ -204,7 +204,7 @@ describe("Phase C: /skill-name 加载发送", () => {
       assistantResult({ texts: ["回声完成"] }),
     ]);
     await untilFrame(app.setup, (f) => f.includes("Version"));
-    await untilFrame(app.setup, (f) => f.includes("输入消息"));
+    await untilFrame(app.setup, (f) => f.includes("type message"));
 
     await app.typeText("/echo 帮我做 X");
     await app.pressEnter();
@@ -254,7 +254,7 @@ describe("Phase C: /skill-name 加载发送", () => {
     const fx = await plantSkillFixture();
     const app = await mountAppAsync(fx.catalog, []);
     await untilFrame(app.setup, (f) => f.includes("Version"));
-    await untilFrame(app.setup, (f) => f.includes("输入消息"));
+    await untilFrame(app.setup, (f) => f.includes("type message"));
 
     await app.typeText("/ec");
     await app.pressTab();
@@ -269,7 +269,7 @@ describe("Phase C: /skill-name 加载发送", () => {
     const fx = await plantSkillFixture();
     const app = await mountAppAsync(fx.catalog, []);
     await untilFrame(app.setup, (f) => f.includes("Version"));
-    await untilFrame(app.setup, (f) => f.includes("输入消息"));
+    await untilFrame(app.setup, (f) => f.includes("type message"));
 
     await app.typeText("/unknown");
     await app.pressEnter();
