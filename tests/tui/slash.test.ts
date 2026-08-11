@@ -164,7 +164,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
     ]);
   });
 
-  test('"/" 且传 skills → 静态在前、skill 在后（确定性顺序，保持传入序）', () => {
+  test('"/" 且传 skills → 仅静态命令（#377 E：空前缀不展开 skill，避免 popup 过载）', () => {
     expect(
       slashSuggestions("/", [
         { name: "echo", description: "回声" },
@@ -181,9 +181,26 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       { kind: "command", command: "profile" },
       { kind: "command", command: "compact" },
       { kind: "command", command: "mcp" },
-      { kind: "skill", name: "echo", description: "回声" },
-      { kind: "skill", name: "code-review", description: "代码审查" },
     ]);
+  });
+
+  test('"/" + 1 字符前缀（如 /c）→ skill 才入场（#377 E）', () => {
+    expect(
+      slashSuggestions("/c", [
+        { name: "echo", description: "回声" },
+        { name: "code-review", description: "代码审查" },
+      ])
+    ).toContainEqual({
+      kind: "skill",
+      name: "code-review",
+      description: "代码审查",
+    });
+    expect(
+      slashSuggestions("/c", [
+        { name: "echo", description: "回声" },
+        { name: "code-review", description: "代码审查" },
+      ])
+    ).not.toContainEqual({ kind: "skill", name: "echo", description: "回声" });
   });
 
   test("skill 名前缀过滤大小写不敏感（/CO 同时命中静态 compact + 两个 skill）", () => {

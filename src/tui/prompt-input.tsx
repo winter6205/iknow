@@ -21,6 +21,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { KeyEvent } from "@opentui/core";
 import { SLASH_HINT_DESCRIPTIONS, type SlashCandidate } from "./slash.js";
+import { clipOneLineVisual, visualWidth } from "./tool-summary.js";
 import { tuiPalette } from "./theme.js";
 
 export interface PromptInputProps {
@@ -32,6 +33,8 @@ export interface PromptInputProps {
    *  disabled 态：focused={false} 触发 blur 摘 keypressHandler；此 onKeyDown
    *  兜底（仅在 re-render 竞态窗口可达）。 */
   readonly disabled?: boolean;
+  /** 终端列宽（描述按视觉列宽截断，#377 E 修复）。 */
+  readonly cols: number;
   readonly onChange: (value: string) => void;
   readonly onSubmit: (value: string) => void;
   /** 候选 hint 选中项 Enter 触发（不走 raw 文本解析）。#337 Phase C：
@@ -207,13 +210,20 @@ export function PromptInput(props: PromptInputProps): ReactNode {
               candidate.kind === "command"
                 ? SLASH_HINT_DESCRIPTIONS[candidate.command]
                 : (candidate.description ?? "加载技能");
+            // #377 E：描述按视觉列宽截断（尾部 …），防止 skill 长描述撑爆
+            // 屏外。预算 = cols − `/${label}  ` 前缀 − 3 列余量。
+            const budget = Math.max(
+              4,
+              props.cols - visualWidth(`/${label}  `) - 3
+            );
+            const descShown = clipOneLineVisual(desc, budget);
             return (
               <text
                 key={`${candidate.kind}-${label}`}
                 fg={selected ? pal.selected : pal.dim}
                 attributes={selected ? 1 : 0}
               >
-                {`/${label}  ${desc}`}
+                {`/${label}  ${descShown}`}
               </text>
             );
           })}

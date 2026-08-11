@@ -139,6 +139,10 @@ function slashPrefix(text: string): string {
  * 给定当前输入，返回所有匹配前缀的候选（静态命令在前、skill 在后，确定性
  * 顺序）。skill 名匹配为大小写不敏感前缀过滤。空 / 非 "/" 开头 / 未命中
  * → 空数组。静态命令仍按词表原顺序（slashHintLines 等既有契约不变）。
+ *
+ * #377 E（提示过载修复）：空前缀（输入恰为 "/"）只返回静态命令，skill 必须
+ * 用户至少打 1 字符前缀（/c /ar …）才进列表 —— 防止 bare `/` 弹出 N 条 skill
+ * 长描述撑爆屏外。Tab 补全 `slashComplete` 同契约（"/" 永远 null —— 多匹配）。
  */
 export function slashSuggestions(
   input: string,
@@ -154,7 +158,9 @@ export function slashSuggestions(
       out.push({ kind: "command", command: cmd as TuiSlashCommand });
     }
   }
-  if (skills !== undefined) {
+  // 空前缀 → skill 不入场；用户至少打 1 字符前缀才混入（避免 popup 一次性
+  // 弹出全部 skill 长描述）。
+  if (skills !== undefined && prefix.length > 0) {
     for (const skill of skills) {
       if (skill.name.toLowerCase().startsWith(prefix)) {
         out.push({

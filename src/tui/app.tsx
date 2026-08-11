@@ -1110,6 +1110,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       {view === "chat" && (
         <PromptInput
           value={inputValue}
+          cols={cols}
           placeholder={
             askPending
               ? askModalActive
