@@ -22,7 +22,6 @@ import { createAciExecutor } from "../harness/aci/index.js";
 import { createPermissionPolicy } from "../harness/permission/policy.js";
 import { createDefaultAciRegistry } from "../harness/aci/tools/registry.js";
 import { createIknowSystemResolver } from "../harness/identity/index.js";
-import { IKNOW_COORDINATOR_TEXT } from "../harness/identity/assemble.js";
 import {
   resolveProjectMemoryDir,
   createSystemResolver,
@@ -81,7 +80,7 @@ export interface BuildTuiDepsOptions {
 export function buildTuiDeps(
   bundle: RuntimeBundle,
   opts: BuildTuiDepsOptions
-): LoopEngineDeps & { subagentManager?: SubAgentManager } {
+): LoopEngineDeps {
   const { env } = bundle;
   if (!env.llm.apiKey) {
     throw new Error(
@@ -157,11 +156,6 @@ export function buildTuiDeps(
     // BOOTSTRAP,surface="tui" → bootstrapActive=true)。
     // #194 T6 (ACR 缺口补):tui 装配 memory 层 — memoryEnabled=true +
     // memoryResolver 注入,与 build-engine 的 chat 路径对齐(10 件工具 + memory_layer)。
-    // #361 T8 (review-fix S4):TUI 路径走自建 subagentManager(见上),与
-    // build-engine 同门 — 同步注入 coordinatorText: IKNOW_COORDINATOR_TEXT,
-    // 与 registry 装配条件同源(subagentManager 存在即注入)。ask 无 manager
-    // 不注入 → 装配层段缺席(字节级零变化)。文案含验收6 关键词
-    // proactive / parallelizable / blocks until finished。
     system: createIknowSystemResolver({
       cwd: process.cwd(),
       userHome: homedir(),
@@ -172,13 +166,6 @@ export function buildTuiDeps(
         userHome: homedir(),
         memoryDir: resolveProjectMemoryDir(process.cwd()),
       }),
-      // #361 T8 (review-fix S4):coordinator 引导层注入缝 — subagentManager
-      // 装配 (tui surface) 时注入 IKNOW_COORDINATOR_TEXT。
-      ...(subagentManager ? { coordinatorText: IKNOW_COORDINATOR_TEXT } : {}),
     }),
-    // #356 T7 (SC7):TUI 入口与 build-engine chat 同门 — subagentManager 透出,
-    // createTuiBridge 把它传给 SessionHub options → host drain 生效(TUI 上
-    // spawn_subagent 完成的子代理结果进入下一轮 run)。
-    subagentManager,
   };
 }

@@ -23,8 +23,10 @@ import type { SessionFileV1 } from "../session-api/store/schema.js";
 import type { LoopEngineDeps } from "../harness/index.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { TokenUsage } from "../harness/model-adapter/types.js";
-// #356 T7:host drain — buildTuiDeps 返回值携带 subagentManager,hub 构造时
-// 透传(SessionHub 内部 drainCompleted → 下轮 run priorMessages 末尾)。
+// #361 TUI 入口 subagent 接线待清理:本次 cherry-pick 跳过 V1 TUI 自建 manager
+// commits (9a745ff/a2be099),29c01fc 残留暂存,TUI 不装配 subagentManager →
+// drain 走空字符串路径 → spawn_subagent 在 TUI 下不工作。chat/serve 路径由
+// build-engine 装配完整,功能可用。issue 跟踪整段清理。
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 
@@ -98,10 +100,9 @@ export interface CreateTuiBridgeOptions {
   /** 会话池根目录；缺省 ~/.iknow（与 serve 同款 resolveServeDataDir）。 */
   readonly dataDir?: string;
   /** harness deps（产品路径传 buildTuiDeps 结果；测试注入 stub deps）。
-   *  #356 T7:buildTuiDeps 返回 `LoopEngineDeps & { subagentManager? }`，
-   *  createTuiBridge 取该字段透传给 SessionHub(SC7 三入口 drain)。
-   *  测试 stub(makeDeps)返回纯 LoopEngineDeps → 该字段缺席 = 无 drain,
-   *  行为零变化。 */
+   *  #361 TUI 入口 subagent 接线暂存:字段 subagentManager? 类型保留但 TUI
+   * 路径当前未装配 manager（29c01fc 残留由 buildTuiDeps 注释 + issue #364
+   * 跟踪）。chat/serve 路径 build-engine 装配完整。 */
   readonly deps: LoopEngineDeps & { subagentManager?: SubAgentManager };
   readonly defaultJsonMode?: boolean;
   readonly traceOut?: string;
@@ -118,11 +119,10 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     deps: opts.deps,
     defaultJsonMode: opts.defaultJsonMode ?? false,
     traceOut: opts.traceOut,
-    // #356 T7 (SC7):TUI 入口 host drain 修复 — buildTuiDeps 自建 subagentManager
-    // 经 deps 透传给 SessionHub(构造期注入;buildTuiDeps → createTuiBridge 链
-    // cachedDeps 总 set → ensureDeps 早返回 → 懒取路径永不触发 → 必须构造期传)。
-    // 此前 TUI 未传 → hub.subagentManager undefined → drainPendingSubagents("") →
-    // spawn_subagent 完成结果永不进入下一轮 run。
+    // #361 TUI 入口 subagent 接线待清理:TUI 当前未装配 manager,
+    // opts.deps.subagentManager 为 undefined → SessionHub 走无 manager 路径
+    // (drain 返空字符串)。issue #364 跟踪整段回退 29c01fc TUI 接线 + 补
+    // 9a745ff/a2be099(若需要)。chat/serve 路径 build-engine 装配完整。
     subagentManager: opts.deps.subagentManager,
   });
 
