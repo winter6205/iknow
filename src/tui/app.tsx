@@ -712,9 +712,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       const targets = buildRewindTargets(file);
       if (targets.length === 0) {
         // L0 空态：无完成 turn / 空会话 → notice，零 store IO（load 已发生，
-        // 但无任何截断落盘）。
+        // 但无任何截断落盘）。对标 baseline §2 "Nothing to rewind to yet."。
         setNotice({
-          lines: ["还没有可回退的点（尚无完整回合）。"],
+          lines: ["Nothing to rewind to yet."],
         });
         return;
       }
@@ -726,15 +726,17 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
   }
 
-  /** T6：确认后执行回退（盘上截断 + UI 状态反射）。 */
+  /** T6：确认后执行回退（盘上截断 + UI 状态反射）。anchorText = 回退锚点的
+   *  用户消息真实文本，用于 notice（对齐真值「回退到 ［锚点消息］ 之前」）。 */
   async function executeRewind(
     targetId: string,
-    keepTurns: number
+    keepTurns: number,
+    anchorText: string
   ): Promise<void> {
     setRewindTargets(undefined);
     setRewindConfirming(false);
     try {
-      const file = await props.bridge.rewindSession(targetId, keepTurns);
+      await props.bridge.rewindSession(targetId, keepTurns);
       const fresh = await props.bridge.loadSessionFile(targetId);
       setSessions((prev) => {
         const current = prev[targetId];
@@ -750,10 +752,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         };
       });
       setNotice({
-        lines:
-          keepTurns === 0
-            ? ["已回退到会话起点（清空全部消息与检查点）。"]
-            : [`已回退：保留前 ${file.turnCount} 轮。`],
+        lines: [`已回退到 ［${anchorText || "(无文本)"}］ 之前。`],
       });
     } catch (err) {
       setNotice({ lines: [`回退失败：${describeError(err)}`] });
@@ -965,8 +964,15 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           break;
         case "execute": {
           const targetId = active.conversationId;
+          // 确认态 Enter 时 rewindIndex 未被 reducer 移动（见 reduceRewindKey：
+          // 确认态 Enter 只产 execute 不产 move），此处索引安全。
+          const t = rewindTargets[rewindIndex];
           if (targetId !== undefined) {
-            void executeRewind(targetId, action.keepTurns);
+            void executeRewind(
+              targetId,
+              action.keepTurns,
+              t?.userMessageText ?? ""
+            );
           }
           break;
         }

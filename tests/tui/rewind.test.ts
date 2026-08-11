@@ -24,6 +24,7 @@ import {
 import {
   buildRewindTargets,
   reduceRewindKey,
+  rewindPickerContent,
   type RewindTarget,
 } from "../../src/tui/rewind-picker.js";
 import { makeDeps } from "../cli/_fixtures.ts";
@@ -231,23 +232,58 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
     ).toEqual([]);
   });
 
-  test("turnCount ≤ 1 → 仅「回到会话起点」条目", () => {
+  test("turnCount ≤ 1 → 空数组（L0 空态，无可回退点）", () => {
+    // 1-turn 会话：keepTurns=0 与当前状态重合（rewindFile no-op 分支，
+    // checkpoint.ts:174），不再作为误导条目列出；走宿主 L0 空态 notice。
+    expect(
+      buildRewindTargets({
+        ...sampleFile(),
+        messages: [userMsg("q1"), assistantMsg([text("a1")])],
+        turnCount: 1,
+      })
+    ).toEqual([]);
+    // 单条用户消息无 assistant 回复也属同一空态。
+    expect(
+      buildRewindTargets({
+        ...sampleFile(),
+        messages: [userMsg("q1")],
+        turnCount: 1,
+      })
+    ).toEqual([]);
+  });
+
+  test("2-turn 会话 → [首条消息之前, q2 之前]（available=2 边界）", () => {
+    // available=2 ≥ 2：起点锚点合法；i=1（q2 之前）也与当前 turn 不同——只有
+    // 索引 == total 才与当前重合，所以两个锚点都列出。
     const targets = buildRewindTargets({
       ...sampleFile(),
-      messages: [userMsg("q1"), assistantMsg([text("a1")])],
-      turnCount: 1,
+      messages: [userMsg("q1"), assistantMsg([text("a1")]), userMsg("q2")],
+      turnCount: 2,
     });
-    expect(targets).toHaveLength(1);
+    expect(targets.map((t) => t.keepTurns)).toEqual([0, 1]);
     expect(targets[0]).toMatchObject({
       keepTurns: 0,
-      userMessageText: "回到会话起点",
+      anchorTurnIndex: 0,
+      userMessageText: "q1",
       anchoredAt: "",
+    });
+    expect(targets[1]).toMatchObject({
+      keepTurns: 1,
+      anchorTurnIndex: 1,
+      userMessageText: "q2",
     });
   });
 
-  test("3-turn 会话 → [起点, 保留前1轮, 保留前2轮]；当前 turn(3) 不列出", () => {
+  test("3-turn 会话 → [回到首条消息之前, 保留到 q2 之前, 保留到 q3 之前]；当前 turn(3) 不列出", () => {
     const targets = buildRewindTargets(sampleFile());
     expect(targets.map((t) => t.keepTurns)).toEqual([0, 1, 2]);
+    // 起点锚点 = 首条用户消息（"q1"），不再是「回到会话起点」抽象标签。
+    expect(targets[0]).toMatchObject({
+      keepTurns: 0,
+      anchorTurnIndex: 0,
+      userMessageText: "q1",
+      anchoredAt: "",
+    });
     expect(targets[1]).toMatchObject({
       keepTurns: 1,
       anchorTurnIndex: 1,
@@ -282,7 +318,7 @@ describe("reduceRewindKey（选择器键路由）", () => {
   const targets: ReadonlyArray<RewindTarget> = [
     {
       keepTurns: 0,
-      userMessageText: "回到会话起点",
+      userMessageText: "q1",
       anchorTurnIndex: 0,
       anchoredAt: "",
     },
@@ -390,6 +426,54 @@ describe("reduceRewindKey（选择器键路由）", () => {
         }
       )
     ).toEqual({ type: "ignore" });
+  });
+});
+
+// -- rewindPickerContent（picker 渲染形状 — 锁真值 parity） -------------------
+
+describe("rewindPickerContent（picker 渲染形状）", () => {
+  test("3-turn 会话：选项 label = 锚点用户消息真实文本（不再用「保留前 N 轮」抽象标签）", () => {
+    const targets = buildRewindTargets(sampleFile());
+    const content = rewindPickerContent(targets, 0, false);
+    // 3 个锚点（首条消息之前 + q2 之前 + q3 之前），主 label 必须是真实文本
+    expect(content.options.map((o) => o.label)).toEqual(["q1", "q2", "q3"]);
+    // 不含「回到会话起点」或「保留前」字面
+    for (const opt of content.options) {
+      expect(opt.label).not.toContain("回到会话起点");
+      expect(opt.label).not.toMatch(/保留前/);
+    }
+  });
+
+  test("确认态 keepTurns=0：desc 引用「首条用户消息」+「之前」+「不可恢复」", () => {
+    const targets = buildRewindTargets(sampleFile());
+    const content = rewindPickerContent(targets, 0, true);
+    expect(content.title).toBe("确认回退？");
+    expect(content.description).toContain("恢复到");
+    expect(content.description).toContain("之前");
+    expect(content.description).toContain("不可恢复");
+    // options 固定 [execute / cancel]
+    expect(content.options.map((o) => o.value)).toEqual(["execute", "cancel"]);
+  });
+
+  test("确认态 keepTurns>0：desc 引用锚点消息内容（q2）", () => {
+    const targets = buildRewindTargets(sampleFile());
+    // targets[1] = {keepTurns:1, userMessageText:"q2"}
+    const content = rewindPickerContent(targets, 1, true);
+    expect(content.description).toContain("恢复到");
+    expect(content.description).toContain("q2");
+    expect(content.description).toContain("之前");
+  });
+
+  test("turnCount≤1 → buildRewindTargets 空数组：宿主走 L0 空态不进入本函数", () => {
+    // turnCount≤1 picker 永不打开（spec 规则 1），不需要测渲染；
+    // 这里只锁 buildRewindTargets 在该场景返回 []。
+    expect(
+      buildRewindTargets({
+        ...sampleFile(),
+        messages: [userMsg("q1")],
+        turnCount: 1,
+      })
+    ).toEqual([]);
   });
 });
 
