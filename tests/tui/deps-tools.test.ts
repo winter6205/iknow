@@ -98,4 +98,18 @@ describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(21 件)"
       })
     ).toThrow(/only http and https|malformed/i);
   });
+
+  it("coordinatorText 注入(与 build-engine chat 同门):deps.system 含 coordinator 段关键词", async () => {
+    // review-fix S4:TUI 路径自建 subagentManager 且透传 coordinatorText
+    // (IKNOW_COORDINATOR_TEXT)—— 与 build-engine 的 chat/tui/serve 注入
+    // 条件同源(subagentManager 装配即注入),验收6 关键词 model 实际可见。
+    const deps = buildTuiDeps(makeBundle(), { askUser: createNoAskUser() });
+    expect(deps.subagentManager).toBeDefined();
+    const systemText =
+      (await (deps.system as () => Promise<string | undefined>)()) ?? "";
+    expect(systemText).toContain("## Sub-agent coordination");
+    expect(systemText).toContain("proactively");
+    expect(systemText).toContain("parallelizable");
+    expect(systemText).toContain("blocks until finished");
+  });
 });

@@ -1,9 +1,10 @@
 /**
- * #356 T4 — spawn_subagent ACI 工具单测（fake SubAgentManager，不真启子进程）。
+ * #356 T4 / #361 V1.5 — spawn_subagent ACI 工具单测（fake SubAgentManager，
+ * 不真启子进程）。
  *
- * 覆盖票面 9 断言：
- *   1. handler 返回 JSON {task_id:"..."}，manager.spawn 被调一次（spy）
- *   2. handler ≤50ms 返回（performance.now() 前后差）
+ * 覆盖票面（#361 前景契约反转后）：
+ *   1. wait:false → handler 解析为 {task_id} JSON，manager.spawn 被调一次
+ *   2. wait:true(默认) → handler 解析为 envelope（fake waitFor 立即 resolve）
  *   3. background:true → 抛 ToolExecutionError，message 含 "background:true"
  *   4. task 缺失 → 抛 ToolExecutionError
  *   5. task:123（非 string）→ 抛 ToolExecutionError
@@ -11,13 +12,14 @@
  *   7. systemPrompt 字符串透传
  *   8. model 字符串透传
  *   9. maxTurns 整数透传
+ *  10. wait:false → waitFor 不被调用
+ *  11. aci 元数据（timeoutTier=long，前景臂 ≥ PER_TASK_TIMEOUT_MS）
  *
  * 超字段 {task:"x", foo:"bar"} 的严格性由 registry 的 ajv strict 校验守门
  * （createAciRegistry 装配时编译 inputSchema，additionalProperties:false），
  * 工具 handler 收的是已校验 input——此处不重复测（依赖 registry 严校验）。
  */
 import { describe, expect, it, vi } from "vitest";
-import { performance } from "node:perf_hooks";
 
 import { createSpawnSubAgentTool } from "../../src/harness/subagent/spawn-subagent-tool.ts";
 import type { SubAgentDefinition } from "../../src/harness/subagent/manager.ts";
@@ -31,21 +33,30 @@ function makeFakeManager() {
       taskId: "fixed-task-id-1",
     })
   );
+  const waitFor = vi.fn(
+    async (): Promise<{ status: "ok"; summary: string; result: string }> => ({
+      status: "ok",
+      summary: "from-fake",
+      result: "fake-result",
+    })
+  );
   const manager: SubAgentManager = {
     spawn,
     queryBuffer: () => ({ status: "not_found" }) as const,
-    waitFor: () => Promise.reject(new Error("not used")),
+    waitFor,
     shutdown: () => Promise.resolve(),
     drainCompleted: () => [],
+    listActive: () => [],
+    abortTask: () => false,
   };
-  return { manager, spawn };
+  return { manager, spawn, waitFor };
 }
 
 describe("spawn_subagent — 正常路径", () => {
-  it("返回 JSON {task_id},manager.spawn 被调一次,传入 def 含 task", () => {
+  it("wait:false → 返回 JSON {task_id},manager.spawn 被调一次,传入 def 含 task", async () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    const out = tool.handler({ task: "explore the repo" });
+    const out = await tool.handler({ task: "explore the repo", wait: false });
     expect(spawn).toHaveBeenCalledTimes(1);
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({ task: "explore the repo" })
@@ -53,62 +64,79 @@ describe("spawn_subagent — 正常路径", () => {
     expect(out).toBe(JSON.stringify({ task_id: "fixed-task-id-1" }));
   });
 
-  it("handler 同步 ≤50ms 返回", () => {
+  // #361 前景契约（原 sync ≤50ms 断言已删；与 wait:true 默认互斥）。
+  it("wait:true(默认)handler 解析为 envelope (foreground contract)", async () => {
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    const t0 = performance.now();
-    tool.handler({ task: "t" });
-    const elapsed = performance.now() - t0;
-    expect(elapsed).toBeLessThanOrEqual(50);
+    // C5：前景臂 tool_result = envelope（对象直返，executor 20000 截断天然复用）。
+    const out = await tool.handler({ task: "wait-me" });
+    const parsed = out as { status: string; summary: string; result: string };
+    expect(parsed.status).toBe("ok");
+    expect(parsed.summary).toBe("from-fake");
+    expect(parsed.result).toBe("fake-result");
+  });
+
+  it("wait:false → waitFor 不被调用", async () => {
+    const { manager, waitFor } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    await tool.handler({ task: "async-arm", wait: false });
+    expect(waitFor).not.toHaveBeenCalled();
   });
 });
 
 describe("spawn_subagent — 非法输入(抛 ToolExecutionError)", () => {
-  it("background:true → message 含 'background:true'", () => {
+  it("background:true → message 含 'background:true'", async () => {
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    expect(() => tool.handler({ task: "t", background: true })).toThrow(
+    await expect(tool.handler({ task: "t", background: true })).rejects.toThrow(
       ToolExecutionError
     );
-    expect(() => tool.handler({ task: "t", background: true })).toThrow(
+    await expect(tool.handler({ task: "t", background: true })).rejects.toThrow(
       /background:true/
     );
   });
 
-  it("task 缺失 → message 含 'missing or invalid'", () => {
+  it("task 缺失 → message 含 'missing or invalid'", async () => {
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    expect(() => tool.handler({})).toThrow(ToolExecutionError);
-    expect(() => tool.handler({})).toThrow(/missing or invalid/);
+    await expect(tool.handler({})).rejects.toThrow(ToolExecutionError);
+    await expect(tool.handler({})).rejects.toThrow(/missing or invalid/);
   });
 
-  it("task:123（非 string）→ 抛", () => {
+  it("task:123（非 string）→ 抛", async () => {
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    expect(() => tool.handler({ task: 123 })).toThrow(ToolExecutionError);
-    expect(() => tool.handler({ task: 123 })).toThrow(/missing or invalid/);
+    await expect(tool.handler({ task: 123 })).rejects.toThrow(
+      ToolExecutionError
+    );
+    await expect(tool.handler({ task: 123 })).rejects.toThrow(
+      /missing or invalid/
+    );
   });
 
-  it("task 空串 → 抛", () => {
+  it("task 空串 → 抛", async () => {
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    expect(() => tool.handler({ task: "" })).toThrow(ToolExecutionError);
+    await expect(tool.handler({ task: "" })).rejects.toThrow(
+      ToolExecutionError
+    );
   });
 
-  it("input 为 null → 按空对象处理,抛 missing task", () => {
+  it("input 为 null → 按空对象处理,抛 missing task", async () => {
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    expect(() => tool.handler(null)).toThrow(ToolExecutionError);
+    await expect(tool.handler(null)).rejects.toThrow(ToolExecutionError);
   });
 });
 
 describe("spawn_subagent — 可选字段透传到 def", () => {
-  it("disallowedTools 数组透传", () => {
+  it("disallowedTools 数组透传", async () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    tool.handler({
+    await tool.handler({
       task: "t",
       disallowedTools: ["edit_file", "write_file"],
+      wait: false,
     });
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -118,52 +146,57 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
     );
   });
 
-  it("systemPrompt 字符串透传", () => {
+  it("systemPrompt 字符串透传", async () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    tool.handler({ task: "t", systemPrompt: "be a verifier" });
+    await tool.handler({
+      task: "t",
+      systemPrompt: "be a verifier",
+      wait: false,
+    });
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({ task: "t", systemPrompt: "be a verifier" })
     );
   });
 
-  it("model 字符串透传", () => {
+  it("model 字符串透传", async () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    tool.handler({ task: "t", model: "opus" });
+    await tool.handler({ task: "t", model: "opus", wait: false });
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({ task: "t", model: "opus" })
     );
   });
 
-  it("maxTurns 整数透传", () => {
+  it("maxTurns 整数透传", async () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    tool.handler({ task: "t", maxTurns: 5 });
+    await tool.handler({ task: "t", maxTurns: 5, wait: false });
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({ task: "t", maxTurns: 5 })
     );
   });
 
-  it("timeoutMs 整数透传", () => {
+  it("timeoutMs 整数透传", async () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    tool.handler({ task: "t", timeoutMs: 60000 });
+    await tool.handler({ task: "t", timeoutMs: 60000, wait: false });
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({ task: "t", timeoutMs: 60000 })
     );
   });
 
-  it("全字段组合透传(含默认缺省)", () => {
+  it("全字段组合透传(含默认缺省)", async () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
-    tool.handler({
+    await tool.handler({
       task: "t",
       systemPrompt: "be concise",
       disallowedTools: ["spawn_subagent"],
       model: "opus",
       maxTurns: 7,
       timeoutMs: 90000,
+      wait: false,
     });
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -179,12 +212,14 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
 });
 
 describe("spawn_subagent — AciToolDef 元数据", () => {
-  it("name = spawn_subagent,aci read-only/fast/cancel/concurrencySafe", () => {
+  it("name = spawn_subagent,aci read-only/long/cancel/concurrencySafe", () => {
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     expect(tool.name).toBe("spawn_subagent");
     expect(tool.aci.category).toBe("read-only");
-    expect(tool.aci.timeoutTier).toBe("fast");
+    // #361 前景臂：wait:true 阻塞至子代理终态（≤5min），tier 必须 ≥
+    // PER_TASK_TIMEOUT_MS（fast 5s 会提前砍前景）。
+    expect(tool.aci.timeoutTier).toBe("long");
     expect(tool.aci.interruptBehavior).toBe("cancel");
     expect(tool.aci.isConcurrencySafe).toBe(true);
     expect(tool.aci.lazy).toBe(false);

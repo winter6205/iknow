@@ -78,6 +78,8 @@ function makeFakeManager(): SubAgentManager {
     waitFor: () => Promise.reject(new Error("not used")),
     shutdown: () => Promise.resolve(),
     drainCompleted: () => [],
+    listActive: () => [],
+    abortTask: () => false,
   };
 }
 
