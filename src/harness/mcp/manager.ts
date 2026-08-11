@@ -211,9 +211,16 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
   function markFailed(slot: Slot, reason: string): void {
     if (slot.state === "failed" || slot.state === "disabled") return;
     slot.state = "failed";
-    slot.error = reason;
+    // 如果 createRealClient 接管了子进程 stderr（stderr: "pipe"），失败时
+    // 把缓冲尾段附进 error —— 便于排查 server 启动失败/协议异常根因。
+    // stub client（manager.test.ts 用）无 _stderrTail，保持纯 reason。
+    const tail = (
+      slot.handle as unknown as { _stderrTail?: () => string } | undefined
+    )?._stderrTail?.();
+    slot.error =
+      tail && tail.length > 0 ? `${reason}\n[server stderr]\n${tail}` : reason;
     console.warn(
-      `[mcp/manager] server '${slot.config.name}' failed: ${reason}`
+      `[mcp/manager] server '${slot.config.name}' failed: ${slot.error}`
     );
   }
 
@@ -422,12 +429,27 @@ export function createRealClient(server: McpServerConfig): McpClientHandle {
     );
   }
 
+  // stderr: "pipe"（默认 "inherit"）—— 见下：MCP server 子进程的结构化日志
+  // （如 codebase-memory-mcp 的 slog 行 `level=info msg=mcp.request ...`）默认
+  // 直通父进程 stderr，TUI 运行期会把父进程 stderr 画进渲染区/底栏。接管后
+  // 缓冲尾段，正常状态丢弃，仅 markFailed 时附进 error 保留诊断价值。
   const transport = new SdkStdioTransport({
     command: (server as McpStdioServer).entry.command,
     args: [...((server as McpStdioServer).entry.args ?? [])],
     env: (server as McpStdioServer).entry.env
       ? { ...(server as McpStdioServer).entry.env }
       : undefined,
+    stderr: "pipe",
+  });
+
+  // stderr 环形缓冲：仅保留最近一段（2KB），失败时供 markFailed 附尾段。
+  // SDK 在 stderr:"pipe" 时于构造器立即创建 PassThrough（_stderrStream），
+  // 这里可以直接挂 data 监听器，无需等 spawn。
+  const MAX_STDERR_TAIL = 2048;
+  let stderrTail = "";
+  transport.stderr?.on("data", (chunk: unknown) => {
+    const s = Buffer.isBuffer(chunk) ? chunk.toString() : String(chunk);
+    stderrTail = (stderrTail + s).slice(-MAX_STDERR_TAIL);
   });
 
   // SDK 内部通过 Client._onclose 触发 transport close；这里再 hook 一次保险。
@@ -514,6 +536,9 @@ export function createRealClient(server: McpServerConfig): McpClientHandle {
   // 暴露 pid 以便 manager.shutdown 兜底（再次 SIGTERM）
   (handle as unknown as { _stdioPid: number | undefined })._stdioPid =
     transport.pid ?? undefined;
+  // 暴露 stderr 尾段，供 manager 在 markFailed 时附进 error（诊断价值）。
+  (handle as unknown as { _stderrTail: () => string })._stderrTail = () =>
+    stderrTail;
 
   return handle;
 }
