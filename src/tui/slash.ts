@@ -5,8 +5,10 @@
  * 一致（#146 TUI 自建 slash 词表 + 解析 + Tab 补全 + hint 行）；仅文件头注释
  * 更新为本次迁移说明。纯 TS 模块，无 ink / OpenTUI 依赖。
  *
- * 词表 11 条：/sessions /new /quit /exit /help /info /thinking /profile
- * /compact /rewind /mcp。/reset 不在词表内即天然不可达（Q5c 废除）。
+ * 词表 10 条：/sessions /new /quit /exit /help /info /thinking /compact
+ * /rewind /mcp。/reset 不在词表内即天然不可达（Q5c 废除）。
+ * rev 2026-08-11:删 /profile（首启引导由 agent 自己 rm BOOTSTRAP.md 完成,
+ * 不再需要宿主斜杠钩子）；#366 加 /rewind；#337/#361 加 /mcp。
  *
  * 解析规则：输入 trim 后以 "/" 开头先过词表；未命中 → unknown（UI 提示）；
  * 不以 "/" 开头 → message（普通消息）。
@@ -35,7 +37,6 @@ export type TuiSlashCommand =
   | "help"
   | "info"
   | "thinking"
-  | "profile"
   | "compact"
   | "rewind"
   | "mcp";
@@ -66,7 +67,6 @@ const VOCABULARY: ReadonlySet<string> = new Set<TuiSlashCommand>([
   "help",
   "info",
   "thinking",
-  "profile",
   "compact",
   "rewind",
   "mcp",
@@ -102,7 +102,6 @@ export function helpLines(
     "/info      当前会话元信息",
     "/help      本词表",
     "/thinking  切换思考过程折叠/展开",
-    "/profile   标记首启引导完成（先在外侧填好 ~/.iknow/user.md）",
     "/compact   压缩上下文（保留尾部，裁剪早期消息）",
     "/rewind    回退到更早的回合（选择锚点后确认）",
     "/quit      退出（别名 /exit）",
@@ -120,7 +119,6 @@ const HINT_DESCRIPTIONS: Record<TuiSlashCommand, string> = {
   info: "当前会话元信息",
   help: "本词表",
   thinking: "切换思考过程折叠/展开",
-  profile: "标记首启引导完成",
   compact: "压缩上下文",
   mcp: "查看 MCP 服务看板",
   rewind: "回退到更早的回合",

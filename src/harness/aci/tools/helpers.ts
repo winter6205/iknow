@@ -56,13 +56,21 @@ function expandHome(p: string): string {
  * e.g. the user profile at `~/.iknow/user.md`, which the assembly layer
  * already injects every turn but which the agent may also want to re-read
  * directly. A target is allowed if it falls under `root` OR any extra root.
- * Write tools (`edit_file` / `write_file`) do NOT pass extraReadRoots, so
- * the write containment stays cwd-scoped.
+ *
+ * `extraWriteRoots` (optional, rev 2026-08-11): same semantics for write tools.
+ * Write tools (`edit_file` / `write_file`) traditionally do NOT pass extra
+ * roots, but the user-profile directory at `~/.iknow/` needs write access so
+ * the agent can update `user.md` and `rm BOOTSTRAP.md` directly (replaces the
+ * old `/profile done` host hook). A target is allowed if it falls under
+ * `root` OR any extra root; symlink-escape is still rejected (realpath runs
+ * before this check). Read and write extra roots are passed independently —
+ * write tools can use `extraWriteRoots` without exposing any read roots.
  */
 export async function resolveWithinRoot(
   root: string,
   target: string,
-  extraReadRoots?: readonly string[]
+  extraReadRoots?: readonly string[],
+  extraWriteRoots?: readonly string[]
 ): Promise<string> {
   const realRoot = await realpath(resolve(root));
   const expandedTarget = expandHome(target);
@@ -72,10 +80,13 @@ export async function resolveWithinRoot(
   const resolvedTarget = await realpathWithMissingSuffix(absoluteTarget);
 
   const withinPrimary = isWithinRoot(realRoot, resolvedTarget);
-  const withinExtras = (extraReadRoots ?? []).some((r) =>
+  const withinReadExtras = (extraReadRoots ?? []).some((r) =>
     isWithinRoot(resolve(r), resolvedTarget)
   );
-  if (!withinPrimary && !withinExtras) {
+  const withinWriteExtras = (extraWriteRoots ?? []).some((r) =>
+    isWithinRoot(resolve(r), resolvedTarget)
+  );
+  if (!withinPrimary && !withinReadExtras && !withinWriteExtras) {
     throw new ToolExecutionError(
       `path outside workspace: ${resolvedTarget} not under ${realRoot}`
     );
