@@ -32,7 +32,12 @@ async function renderMd(mdText: string, width = WIDTH): Promise<Setup> {
 /** captureSpans 全帧 span 扫描：找第一个满足谓词的 span。 */
 function findSpan(
   setup: Setup,
-  pred: (span: { text: string; fg: RGBA; bg: RGBA; attributes: number }) => boolean
+  pred: (span: {
+    text: string;
+    fg: RGBA;
+    bg: RGBA;
+    attributes: number;
+  }) => boolean
 ): { text: string; fg: RGBA; bg: RGBA; attributes: number } | undefined {
   const { lines } = setup.captureSpans();
   for (const line of lines) {
@@ -82,9 +87,7 @@ test("inline code：codespan 前景色 = tuiPalette.code", async () => {
   const expected = RGBA.fromHex(tuiPalette.code);
   const span = findSpan(
     setup,
-    (s) =>
-      s.text.includes("codeword") &&
-      rgbaEq(s.fg, expected)
+    (s) => s.text.includes("codeword") && rgbaEq(s.fg, expected)
   );
   expect(span).toBeDefined();
   await setup.renderer.destroy();
@@ -221,7 +224,10 @@ test("代码块 c4：数字走 syntaxNumber 浅青", async () => {
 test("代码块 c4：plain 文本走 codeDefault 字色", async () => {
   const setup = await renderMd("```ts\nplainword\n```");
   const expected = RGBA.fromHex(tuiPalette.codeDefault);
-  const span = findSpan(setup, (s) => s.text === "plainword" && rgbaEq(s.fg, expected));
+  const span = findSpan(
+    setup,
+    (s) => s.text === "plainword" && rgbaEq(s.fg, expected)
+  );
   expect(span).toBeDefined();
   await setup.renderer.destroy();
 });
@@ -259,8 +265,14 @@ test("代码块 c4 diff：+ 行首 add 绿，- 行首 del 红", async () => {
   );
   const addExpected = RGBA.fromHex(tuiPalette.add);
   const delExpected = RGBA.fromHex(tuiPalette.del);
-  const addSpan = findSpan(setup, (s) => s.text === "+" && rgbaEq(s.fg, addExpected));
-  const delSpan = findSpan(setup, (s) => s.text === "-" && rgbaEq(s.fg, delExpected));
+  const addSpan = findSpan(
+    setup,
+    (s) => s.text === "+" && rgbaEq(s.fg, addExpected)
+  );
+  const delSpan = findSpan(
+    setup,
+    (s) => s.text === "-" && rgbaEq(s.fg, delExpected)
+  );
   expect(addSpan).toBeDefined();
   expect(delSpan).toBeDefined();
   await setup.renderer.destroy();

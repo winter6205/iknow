@@ -158,11 +158,7 @@ function flattenInline(tokens: ReadonlyArray<Token> | undefined): string {
 /** 纯 token 类型 + 文本。tokenizeCodeLine 产出 → CodeBlockLine 消费，
  *  拆分是为单测正则 / 捕获组逻辑时不必渲染 JSX（直接断言 CodeToken[]）。 */
 export type CodeTokenKind =
-  | "plain"
-  | "comment"
-  | "string"
-  | "number"
-  | "keyword";
+  "plain" | "comment" | "string" | "number" | "keyword";
 
 export interface CodeToken {
   readonly kind: CodeTokenKind;
@@ -215,7 +211,11 @@ function CodeBlockLine(props: {
   // 空行：`{" "}` 占一格 + box 背景铺满整行；行高不塌缩（box padding
   // + 1 行文本 = 1 物理行高）。
   if (line === "") {
-    return <text bg={bg} wrapMode="none">{" "}</text>;
+    return (
+      <text bg={bg} wrapMode="none">
+        {" "}
+      </text>
+    );
   }
   // diff 代码块：行首 +/- 用 palette.add/del 上色，其余保持默认字色
   // （参考预览 c4 不对 diff 行做语法高亮，只标 +/- 符号）。
