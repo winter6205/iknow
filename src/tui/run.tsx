@@ -164,6 +164,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         dataDir={dataDir}
         permissionMode={permissionMode}
         sessionGrants={sessionGrants}
+        // #337 Phase C：TuiApp 消费 skillCatalog（slash 候选 + /skill 加载发送）。
+        // onExtensions 在 buildTuiDeps 装配期同步注入（Phase B seam）；此处
+        // 可选缺省 = 空清单（测试 / 装配异常路径安全降级）。
+        skillCatalog={tuiExtensions?.skillCatalog}
         onQuit={onQuitBridge.destroy}
       />
     );

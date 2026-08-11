@@ -15,6 +15,16 @@
  *  - slashSuggestions：按当前输入前缀过滤并保持词表原顺序。
  *  - slashComplete：唯一匹配 → `/{cmd} `；0 或 ≥2 匹配 → null。
  *  - slashHintLines：渲染用一行短描述，便于在输入框下方紧凑展示。
+ *
+ * #337 Phase C（slash 扩展 + skill 加载发送）：
+ *  - 判别联合 `SlashCandidate` = 静态命令 | skill（Phase D 复用）；
+ *  - `slashSuggestions(input, skills?)` 混显静态命令（词表前缀过滤，保持在前）
+ *    与 skill 名（大小写不敏感前缀过滤，在后）——确定性顺序；
+ *  - `slashComplete(input, skills?)` 跨「静态命令 + skill」唯一匹配补全；
+ *  - `parseSkillLoad(raw, skills)` 精确命中 skill 名 → {name, remainder}，
+ *    命中静态命令 / 不匹配 → undefined（静态命令优先）。发送语义见 app.tsx。
+ *    SkillEntryLike = {name, description?} 最小投影，slash.ts 不依赖 harness
+ *    catalog 类型（解耦，便于单测注入扁平对象）。
  */
 
 export type TuiSlashCommand =
@@ -32,6 +42,19 @@ export type SlashParseResult =
   | { kind: "command"; command: TuiSlashCommand }
   | { kind: "unknown"; raw: string }
   | { kind: "message"; text: string };
+
+/** skill 最小投影（避免 slash.ts 强依赖 harness catalog 类型；调用方传入
+ *  skillCatalog.available() 同形扁平对象即可）。 */
+export interface SkillEntryLike {
+  readonly name: string;
+  readonly description?: string;
+}
+
+/** slash 候选判别联合：静态命令 | skill（Phase C 引入，Phase D 复用）。
+ *  顺序约定：静态命令在前、skill 在后（slashSuggestions 确定性输出）。 */
+export type SlashCandidate =
+  | { kind: "command"; command: TuiSlashCommand }
+  | { kind: "skill"; name: string; description?: string };
 
 const VOCABULARY: ReadonlySet<string> = new Set<TuiSlashCommand>([
   "sessions",
@@ -57,8 +80,16 @@ export function parseTuiInput(raw: string): SlashParseResult {
   return { kind: "unknown", raw: text };
 }
 
-/** /help 词表文案（无 emoji；中文与仓库 usage 文案风格一致）。 */
-export function helpLines(): ReadonlyArray<string> {
+/** /help 词表文案（无 emoji；中文与仓库 usage 文案风格一致）。
+ *  #337 Phase C：/mcp 占位描述 + `/<skill-name>  加载技能`（Phase D 若未接
+ *  /mcp，此处先作占位文案；skill 名由调用方动态拼入，不参与静态词表）。 */
+export function helpLines(
+  skillNames?: ReadonlyArray<string>
+): ReadonlyArray<string> {
+  const skillLines =
+    skillNames !== undefined && skillNames.length > 0
+      ? skillNames.map((name) => `/${name}  加载技能`)
+      : [];
   return [
     "/sessions  打开会话列表（↑↓ 选择，Enter 打开，Esc 返回）",
     "/new       新建会话",
@@ -67,7 +98,9 @@ export function helpLines(): ReadonlyArray<string> {
     "/thinking  切换思考过程折叠/展开",
     "/profile   标记首启引导完成（先在外侧填好 ~/.iknow/user.md）",
     "/compact   压缩上下文（保留尾部，裁剪早期消息）",
+    "/mcp       查看/重载 MCP 服务器连接状态（Phase D 接线）",
     "/quit      退出（别名 /exit）",
+    ...skillLines,
     "Ctrl+C     打断前台运行中的 turn",
     "Ctrl+O     展示思考内容（只展开；折叠回 /thinking）",
     "鼠标拖选    选中文本 → 右键复制到剪贴板",
@@ -92,33 +125,86 @@ export interface SlashHintLine {
   readonly description: string;
 }
 
+/** 首 token 的小写前缀（`/xxx...` → `xxx`；空 / 非 "/" 开头 → ""）。 */
+function slashPrefix(text: string): string {
+  if (!text.startsWith("/")) return "";
+  return (text.slice(1).split(/\s+/, 1)[0] ?? "").toLowerCase();
+}
+
 /**
- * 给定当前输入，返回所有匹配前缀的候选命令（按词表原顺序）。
- * 空 / 非 "/" 开头 / 未命中 → 空数组。
+ * 给定当前输入，返回所有匹配前缀的候选（静态命令在前、skill 在后，确定性
+ * 顺序）。skill 名匹配为大小写不敏感前缀过滤。空 / 非 "/" 开头 / 未命中
+ * → 空数组。静态命令仍按词表原顺序（slashHintLines 等既有契约不变）。
  */
 export function slashSuggestions(
-  input: string
-): ReadonlyArray<TuiSlashCommand> {
+  input: string,
+  skills?: ReadonlyArray<SkillEntryLike>
+): ReadonlyArray<SlashCandidate> {
   const text = input.trim();
   if (!text.startsWith("/")) return [];
-  const head = text.slice(1).split(/\s+/, 1)[0] ?? "";
-  const prefix = head.toLowerCase();
-  const out: TuiSlashCommand[] = [];
+  const prefix = slashPrefix(text);
+  const out: SlashCandidate[] = [];
   for (const cmd of VOCABULARY) {
-    if (cmd.startsWith(prefix)) out.push(cmd as TuiSlashCommand);
+    // 空前缀（输入恰为 "/"）→ 全部命令（cmd.startsWith("") 恒真）。
+    if (cmd.startsWith(prefix)) {
+      out.push({ kind: "command", command: cmd as TuiSlashCommand });
+    }
+  }
+  if (skills !== undefined) {
+    for (const skill of skills) {
+      if (skill.name.toLowerCase().startsWith(prefix)) {
+        out.push({
+          kind: "skill",
+          name: skill.name,
+          description: skill.description,
+        });
+      }
+    }
   }
   return out;
 }
 
 /**
- * 给定当前输入，给出一个 Tab 补全候选：唯一匹配 → `/{cmd} `（带尾随空格 +
- * 小写），0 或 ≥2 匹配 → null（让候选 UI 自然展示）。
+ * 给定当前输入，给出一个 Tab 补全候选：跨「静态命令 + skill」唯一匹配 →
+ * `/{cmd} ` / `/{skillName} `（带尾随空格；skill 名可能有连字符/点，无需
+ * 转义），0 或 ≥2 匹配 → null（让候选 UI 自然展示）。
  */
-export function slashComplete(input: string): string | null {
-  const matches = slashSuggestions(input);
+export function slashComplete(
+  input: string,
+  skills?: ReadonlyArray<SkillEntryLike>
+): string | null {
+  const matches = slashSuggestions(input, skills);
   if (matches.length !== 1) return null;
-  const cmd = matches[0]!;
-  return `/${cmd} `;
+  const only = matches[0]!;
+  return only.kind === "command" ? `/${only.command} ` : `/${only.name} `;
+}
+
+/**
+ * #337 Phase C：`/skill-name [提示词]` 解析。
+ * 输入 trim 后以 "/" 开头，首 token `/xxx` 中 `xxx` **精确命中** skill 名 →
+ * 返回 `{ name, remainder }`（remainder = 去掉首 token 后的剩余部分，可能
+ * 为空）。命中静态 slash 命令 / 不匹配 → undefined（静态命令优先，C1 语义）。
+ * 与 parseTuiInput 的 command/unknown/message 判别正交：skill 名不属于静态
+ * 词表，parseTuiInput 只会把它判为 unknown——调用方在 parseTuiInput **之前**
+ * 先调本函数分流。
+ */
+export function parseSkillLoad(
+  raw: string,
+  skills: ReadonlyArray<SkillEntryLike>
+): { name: string; remainder: string } | undefined {
+  const text = raw.trim();
+  const prefix = slashPrefix(text);
+  if (prefix === "") return undefined;
+  if (VOCABULARY.has(prefix)) return undefined;
+  for (const skill of skills) {
+    // 精确命中 skill 名（大小写不敏感，与 slashSuggestions 前缀过滤同语义；
+    // 返回原始 skill.name 作为 name，保留声明大小写）。
+    if (skill.name.toLowerCase() === prefix) {
+      const rest = text.slice(text.indexOf("/") + 1 + skill.name.length).trim();
+      return { name: skill.name, remainder: rest };
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -134,6 +220,20 @@ export function slashCompleteFromList(
   if (cursor < 0 || cursor >= suggestions.length) return null;
   const cmd = suggestions[cursor]!;
   return `/${cmd} `;
+}
+
+/** #337 Phase C：SlashCandidate 版按 cursor 补全（静态命令 | skill 通用）。
+ *  语义与 slashCompleteFromList 一致；skill 名原样保留（含连字符/点）。 */
+export function slashCompleteFromCandidates(
+  suggestions: ReadonlyArray<SlashCandidate>,
+  cursor: number
+): string | null {
+  if (suggestions.length === 0) return null;
+  if (cursor < 0 || cursor >= suggestions.length) return null;
+  const candidate = suggestions[cursor]!;
+  return candidate.kind === "command"
+    ? `/${candidate.command} `
+    : `/${candidate.name} `;
 }
 
 /** 给候选生成一行短描述的「补全提示行」（调用方负责渲染）。 */

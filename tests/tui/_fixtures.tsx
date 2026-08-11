@@ -29,6 +29,7 @@ import {
 import { createToolEventSink, TuiApp } from "../../src/tui/app.js";
 import { createPermissionModeContext } from "../../src/harness/permission/index.js";
 import { createSessionGrants } from "../../src/harness/permission/session-grants.js";
+import type { SkillCatalog } from "../../src/harness/skill/catalog.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 
 export interface TuiHarnessProps {
@@ -37,6 +38,8 @@ export interface TuiHarnessProps {
   readonly dataDir?: string;
   readonly initialView?: "chat" | "list";
   readonly onQuit?: () => void;
+  /** #337 Phase C：skillCatalog 注入口（slash 候选 / /skill 加载发送）。 */
+  readonly skillCatalog?: SkillCatalog;
   readonly children?: ReactNode;
 }
 
@@ -65,6 +68,7 @@ export function TuiHarness(props: TuiHarnessProps): ReactNode {
       sessionGrants={sessionGrants}
       initialView={props.initialView}
       onQuit={props.onQuit}
+      skillCatalog={props.skillCatalog}
     />
   );
 }

@@ -10,11 +10,14 @@
 import { describe, expect, test } from "bun:test";
 import {
   helpLines,
+  parseSkillLoad,
   parseTuiInput,
   slashComplete,
+  slashCompleteFromCandidates,
   slashCompleteFromList,
   slashHintLines,
   slashSuggestions,
+  type SlashCandidate,
 } from "../../src/tui/slash.js";
 
 describe("parseTuiInput: 词表命中", () => {
@@ -107,31 +110,35 @@ describe("helpLines", () => {
   });
 });
 
-describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
+describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → SlashCandidate 判别联合）", () => {
   test("空字符串 → 空数组", () => {
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  test('"/" → 全部 9 条（按词表插入顺序）', () => {
+  test('"/" → 全部 9 条静态命令（按词表插入顺序，kind="command"）', () => {
     expect(slashSuggestions("/")).toEqual([
-      "sessions",
-      "new",
-      "quit",
-      "exit",
-      "help",
-      "info",
-      "thinking",
-      "profile",
-      "compact",
+      { kind: "command", command: "sessions" },
+      { kind: "command", command: "new" },
+      { kind: "command", command: "quit" },
+      { kind: "command", command: "exit" },
+      { kind: "command", command: "help" },
+      { kind: "command", command: "info" },
+      { kind: "command", command: "thinking" },
+      { kind: "command", command: "profile" },
+      { kind: "command", command: "compact" },
     ]);
   });
 
-  test('"/q" → ["quit"]', () => {
-    expect(slashSuggestions("/q")).toEqual(["quit"]);
+  test('"/q" → [{command: quit}]', () => {
+    expect(slashSuggestions("/q")).toEqual([
+      { kind: "command", command: "quit" },
+    ]);
   });
 
-  test('"/e" → ["exit"]', () => {
-    expect(slashSuggestions("/e")).toEqual(["exit"]);
+  test('"/e" → [{command: exit}]', () => {
+    expect(slashSuggestions("/e")).toEqual([
+      { kind: "command", command: "exit" },
+    ]);
   });
 
   test('"/xxx" → 空数组（无匹配）', () => {
@@ -143,7 +150,73 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
   });
 
   test('trim 后仍以 "/" 开头 → 正常过滤', () => {
-    expect(slashSuggestions("  /q  ")).toEqual(["quit"]);
+    expect(slashSuggestions("  /q  ")).toEqual([
+      { kind: "command", command: "quit" },
+    ]);
+  });
+
+  test("不传 skills（缺省）→ 行为与旧版一致（纯静态命令）", () => {
+    expect(slashSuggestions("/q")).toEqual([
+      { kind: "command", command: "quit" },
+    ]);
+  });
+
+  test('"/" 且传 skills → 静态在前、skill 在后（确定性顺序，保持传入序）', () => {
+    expect(
+      slashSuggestions("/", [
+        { name: "echo", description: "回声" },
+        { name: "code-review", description: "代码审查" },
+      ])
+    ).toEqual([
+      { kind: "command", command: "sessions" },
+      { kind: "command", command: "new" },
+      { kind: "command", command: "quit" },
+      { kind: "command", command: "exit" },
+      { kind: "command", command: "help" },
+      { kind: "command", command: "info" },
+      { kind: "command", command: "thinking" },
+      { kind: "command", command: "profile" },
+      { kind: "command", command: "compact" },
+      { kind: "skill", name: "echo", description: "回声" },
+      { kind: "skill", name: "code-review", description: "代码审查" },
+    ]);
+  });
+
+  test("skill 名前缀过滤大小写不敏感（/CO 同时命中静态 compact + 两个 skill）", () => {
+    expect(
+      slashSuggestions("/CO", [
+        { name: "compact-wizard", description: "压缩向导" },
+        { name: "code-review", description: "代码审查" },
+      ])
+    ).toEqual([
+      { kind: "command", command: "compact" },
+      { kind: "skill", name: "compact-wizard", description: "压缩向导" },
+      { kind: "skill", name: "code-review", description: "代码审查" },
+    ]);
+  });
+
+  test("skill 无 description → description 缺省（undefined）", () => {
+    expect(slashSuggestions("/ba", [{ name: "bash-doc" }])).toEqual([
+      { kind: "skill", name: "bash-doc", description: undefined },
+    ]);
+  });
+
+  test('"/c" 混合：静态命令（compact）在前 + skill（code-review）在后', () => {
+    expect(
+      slashSuggestions("/c", [{ name: "code-review", description: "代码审查" }])
+    ).toEqual([
+      { kind: "command", command: "compact" },
+      { kind: "skill", name: "code-review", description: "代码审查" },
+    ]);
+  });
+
+  test("无前缀命中的 skill 不出现", () => {
+    expect(
+      slashSuggestions("/echo", [
+        { name: "echo", description: "回声" },
+        { name: "zzz", description: "不匹配" },
+      ])
+    ).toEqual([{ kind: "skill", name: "echo", description: "回声" }]);
   });
 });
 
@@ -158,6 +231,32 @@ describe('slashComplete: 唯一匹配 → "/cmd "；0/多匹配 → null', () =>
 
   test('"/xxx" → null（0 匹配）', () => {
     expect(slashComplete("/xxx")).toBeNull();
+  });
+
+  test('"/ec" + skills → "/echo "（skill 唯一匹配，尾随空格）', () => {
+    expect(slashComplete("/ec", [{ name: "echo", description: "回声" }])).toBe(
+      "/echo "
+    );
+  });
+
+  test('"/ec" + skills（skill 名含连字符）→ "/code-review "（原样保留）', () => {
+    expect(
+      slashComplete("/code-rev", [
+        { name: "code-review", description: "代码审查" },
+      ])
+    ).toBe("/code-review ");
+  });
+
+  test("跨静态 + skill 冲突多匹配 → null（'/e' 同时命中 exit + echo）", () => {
+    expect(
+      slashComplete("/e", [{ name: "echo", description: "回声" }])
+    ).toBeNull();
+  });
+
+  test("skill 名与静态命令前缀重合：静态优先（'/' 命中 9 静态 + skill → null）", () => {
+    expect(
+      slashComplete("/", [{ name: "sessions-helper", description: "会话助手" }])
+    ).toBeNull();
   });
 });
 
@@ -231,11 +330,14 @@ describe("T6 /thinking 词表", () => {
   });
 
   test('"/" 全部候选含 thinking（第 7 条）', () => {
-    expect(slashSuggestions("/")).toContain("thinking");
+    const all = slashSuggestions("/");
+    expect(all).toContainEqual({ kind: "command", command: "thinking" });
   });
 
-  test('"/think" 前缀 → ["thinking"]', () => {
-    expect(slashSuggestions("/think")).toEqual(["thinking"]);
+  test('"/think" 前缀 → [{command: thinking}]', () => {
+    expect(slashSuggestions("/think")).toEqual([
+      { kind: "command", command: "thinking" },
+    ]);
   });
 
   test('/thinking 唯一匹配 → 补全 "/thinking "', () => {
@@ -259,8 +361,10 @@ describe("#321 B1 右键复制：词表移除 /copy + Ctrl+Y", () => {
     expect(parseTuiInput("/copy")).toEqual({ kind: "unknown", raw: "/copy" });
   });
 
-  test('"/com" 前缀 → ["compact"]（/copy 移除后唯一候选）', () => {
-    expect(slashSuggestions("/com")).toEqual(["compact"]);
+  test('"/com" 前缀 → [{command: compact}]（/copy 移除后唯一候选）', () => {
+    expect(slashSuggestions("/com")).toEqual([
+      { kind: "command", command: "compact" },
+    ]);
   });
 
   test("/help 只保留鼠标拖选 + 右键复制说明，无 /copy、无 Ctrl+Y", () => {
@@ -288,8 +392,10 @@ describe("/compact 词表", () => {
     });
   });
 
-  test('"/com" 前缀 → ["compact"]', () => {
-    expect(slashSuggestions("/com")).toEqual(["compact"]);
+  test('"/com" 前缀 → [{command: compact}]', () => {
+    expect(slashSuggestions("/com")).toEqual([
+      { kind: "command", command: "compact" },
+    ]);
   });
 
   test('/compact 唯一匹配 → 补全 "/compact "', () => {
@@ -306,5 +412,98 @@ describe("/compact 词表", () => {
     const joined = helpLines().join("\n");
     expect(joined).toContain("/compact");
     expect(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(joined)).toBe(false);
+  });
+});
+
+/**
+ * #337 Phase C：/skill-name [提示词] 解析 —— 精确命中 skill 名 → {name,
+ * remainder}；命中静态命令 / 不匹配 → undefined（静态命令优先）。
+ */
+describe("parseSkillLoad: /skill-name [提示词] 解析", () => {
+  const SKILLS = [
+    { name: "echo", description: "回声" },
+    { name: "code-review", description: "代码审查" },
+  ];
+
+  test('"/echo" 精确命中 → { name: "echo", remainder: "" }', () => {
+    expect(parseSkillLoad("/echo", SKILLS)).toEqual({
+      name: "echo",
+      remainder: "",
+    });
+  });
+
+  test('"/echo 帮我做 X" → remainder 为剩余部分', () => {
+    expect(parseSkillLoad("/echo 帮我做 X", SKILLS)).toEqual({
+      name: "echo",
+      remainder: "帮我做 X",
+    });
+  });
+
+  test("remainder 保留多空格与连字符内容（trim 后）", () => {
+    expect(parseSkillLoad("/code-review   审查   diff", SKILLS)).toEqual({
+      name: "code-review",
+      remainder: "审查   diff",
+    });
+  });
+
+  test("skill 名大小写不敏感命中（/ECHO → echo）", () => {
+    expect(parseSkillLoad("  /ECHO   ", SKILLS)).toEqual({
+      name: "echo",
+      remainder: "",
+    });
+  });
+
+  test("声明大小写保留（skill 名 Echo，输入 /echo → name 保留 Echo）", () => {
+    expect(
+      parseSkillLoad("/echo 你好", [{ name: "Echo", description: "回声" }])
+    ).toEqual({ name: "Echo", remainder: "你好" });
+  });
+
+  test("命中静态命令 → undefined（/compact 不抢 skill-load）", () => {
+    expect(parseSkillLoad("/compact", SKILLS)).toBeUndefined();
+    expect(parseSkillLoad("/quit 现在", SKILLS)).toBeUndefined();
+  });
+
+  test("不匹配（无此 skill）→ undefined", () => {
+    expect(parseSkillLoad("/foobar", SKILLS)).toBeUndefined();
+  });
+
+  test("skill 名前缀不完整命中 → undefined（须精确命中）", () => {
+    expect(parseSkillLoad("/ec", SKILLS)).toBeUndefined();
+  });
+
+  test("非 / 开头（普通消息）→ undefined", () => {
+    expect(parseSkillLoad("hello", SKILLS)).toBeUndefined();
+  });
+
+  test("空 / 纯空白 → undefined", () => {
+    expect(parseSkillLoad("", SKILLS)).toBeUndefined();
+    expect(parseSkillLoad("   ", SKILLS)).toBeUndefined();
+  });
+
+  test("空 skills 数组 → undefined", () => {
+    expect(parseSkillLoad("/echo", [])).toBeUndefined();
+  });
+});
+
+/** #337 Phase C：SlashCandidate 版按 cursor 补全（静态命令 | skill 通用）。 */
+describe("slashCompleteFromCandidates: 按 cursor 补全 SlashCandidate", () => {
+  const MIXED: ReadonlyArray<SlashCandidate> = [
+    { kind: "command", command: "sessions" },
+    { kind: "skill", name: "echo" },
+  ];
+
+  test("cursor=0（静态命令）→ /sessions ", () => {
+    expect(slashCompleteFromCandidates(MIXED, 0)).toBe("/sessions ");
+  });
+
+  test("cursor=1（skill）→ /echo ", () => {
+    expect(slashCompleteFromCandidates(MIXED, 1)).toBe("/echo ");
+  });
+
+  test("cursor 越界上 / 下 / 空列表 → null", () => {
+    expect(slashCompleteFromCandidates(MIXED, -1)).toBeNull();
+    expect(slashCompleteFromCandidates(MIXED, 2)).toBeNull();
+    expect(slashCompleteFromCandidates([], 0)).toBeNull();
   });
 });

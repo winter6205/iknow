@@ -77,11 +77,12 @@ import {
 } from "./session-state.js";
 import {
   helpLines,
+  parseSkillLoad,
   parseTuiInput,
   slashComplete,
-  slashCompleteFromList,
+  slashCompleteFromCandidates,
   slashSuggestions,
-  type TuiSlashCommand,
+  type SlashCandidate,
 } from "./slash.js";
 import { activeToolNameOf, liveToolReduce } from "./live-tool-state.js";
 import type { LiveToolRun } from "./live-tool-state.js";
@@ -101,6 +102,8 @@ import {
   modeLabel,
 } from "../harness/permission/index.js";
 import { writeIknowState } from "../harness/identity/index.js";
+import { createSkillBody } from "../harness/skill/body.js";
+import type { SkillCatalog } from "../harness/skill/catalog.js";
 import { extractSummary } from "../session-api/store/schema.js";
 
 /**
@@ -190,6 +193,16 @@ export function createToolEventSink(): TuiToolEventSink {
 const defaultPermissionModeContext: PermissionModeContext =
   createPermissionModeContext("default");
 
+/** #337 Phase C：skillCatalog 缺省 fallback（空清单 — 兼容 fixture / 测试；
+ *  product 路径由 run.tsx 经 TuiExtensions.skillCatalog 注入）。模块私有。 */
+const emptySkillCatalog: SkillCatalog = Object.freeze({
+  search: () => [],
+  get: () => undefined,
+  all: () => [],
+  available: () => [],
+  getBodyPath: () => undefined,
+});
+
 export interface TuiAppProps {
   readonly bridge: TuiBridge;
   readonly askBridge: TuiAskUserBridge;
@@ -205,6 +218,10 @@ export interface TuiAppProps {
   readonly initialView?: TuiView;
   /** 测试 / mock 注入口：触发 renderer.destroy 的回调；缺省 = no-op。 */
   readonly onQuit?: () => void;
+  /** #337 Phase C：skill 清单（slash 候选混显 + /skill-name 加载发送）。
+   *  可选：缺省 = 空清单（兼容 fixture / 测试；产品路径由 run.tsx 经
+   *  TuiExtensions.skillCatalog 注入）。 */
+  readonly skillCatalog?: SkillCatalog;
 }
 
 interface Notice {
@@ -402,10 +419,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
 
   // ── 派生：active 会话 + 输入候选 + permissionIndex/active ──────
   const active = sessions[activeKey] ?? initial;
-  const inputHintSuggestions = useMemo<ReadonlyArray<TuiSlashCommand>>(() => {
+  // #337 Phase C：skillCatalog 可选（缺省 = 空清单）；available() = 非 disabled
+  // + 有 description、名字序。slash 候选混显「静态命令 + skill」。
+  const skillCatalog = props.skillCatalog ?? emptySkillCatalog;
+  const skillList = useMemo(() => skillCatalog.available(), [skillCatalog]);
+  const inputHintSuggestions = useMemo<ReadonlyArray<SlashCandidate>>(() => {
     if (!inputValue.trim().startsWith("/")) return [];
-    return slashSuggestions(inputValue);
-  }, [inputValue]);
+    return slashSuggestions(inputValue, skillList);
+  }, [inputValue, skillList]);
   // 新 ask id 到来 → render-body 复位 modal 状态。
   const askId = askPending?.id;
   const lastAskIdRef = useRef<string | undefined>(undefined);
@@ -524,6 +545,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   }
 
   // ── turn 发送 ───────────────────────────────────────────────────
+  // #337 Phase C 决定：skill-load 的 echo 与发送文本**一致**（全量正文也出现在
+  // echo）。理由：TuiSessionState.messages 是权威历史，turn 结束 turnFinished
+  // 用落盘消息原子替换中间态——若 echo 用精简形态「[加载技能 X]」而发送文本含
+  // 正文，turn 完成后显示会被权威正文覆盖，形成「运行中精简 → 完成变全量」的
+  // 不一致跳变。spec 明示该场景可接受退路（echo 与发送同文本），且它最不破坏
+  // 状态机纪律（echo 恒 = 模型历史可见文本）。故 skill-load 走 sendTurn 同路径。
   async function sendTurn(text: string): Promise<void> {
     if (active.runState !== "idle") {
       setNotice({
@@ -699,6 +726,34 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         return;
       }
     }
+    // #337 Phase C：/skill-name [提示词] 精确命中 → 确定性 skill-load 发送
+    // （静态命令优先：parseSkillLoad 命中词表返回 undefined，落回原分流）。
+    if (skillList.length > 0) {
+      const skillLoad = parseSkillLoad(text, skillList);
+      if (skillLoad !== undefined) {
+        const entry = skillCatalog.get(skillLoad.name);
+        if (entry === undefined || entry.disabled) {
+          setNotice({
+            lines: [`技能 ${skillLoad.name} 不可用（已禁用或不存在）。`],
+          });
+          return;
+        }
+        try {
+          const body = await createSkillBody({ entry, dir: entry.dir });
+          const sendText = `[skill-load name="${skillLoad.name}"]\n${body}${
+            skillLoad.remainder.length > 0 ? `\n\n${skillLoad.remainder}` : ""
+          }`;
+          setNotice(undefined);
+          // echo 与发送文本一致（见 sendTurn 头注决定）：正文也出现在用户
+          // 看到的 echo；发送文本 = 全量正文 + remainder，经 run()
+          // encodeUserText 整段进模型 tool 历史（确定性生效）。
+          await sendTurn(sendText);
+        } catch (err) {
+          setNotice({ lines: [`加载技能失败：${describeError(err)}`] });
+        }
+        return;
+      }
+    }
     const parsed = parseTuiInput(text);
     if (parsed.kind === "message") {
       // 真实消息进历史（避免 y/n / slash / busy-guard 消息污染）。
@@ -731,7 +786,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         await quit();
         return;
       case "help":
-        setNotice({ lines: helpLines() });
+        setNotice({
+          lines: helpLines(
+            skillList.length > 0
+              ? skillList.map((entry) => entry.name)
+              : undefined
+          ),
+        });
         return;
       case "info": {
         setNotice({
@@ -880,7 +941,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // + ContextBar 1 行 + ask 槽 1 行 + headroom 1 行 + slash 候选行 + notice
   // 折行 + modal 折行 + bgLine。
   const hintRows = inputValue.trim().startsWith("/")
-    ? slashSuggestions(inputValue).length
+    ? slashSuggestions(inputValue, skillList).length
     : 0;
   const bgSession = Object.values(sessions).find(
     (s) => s.runState === "running-bg"
@@ -999,14 +1060,32 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           disabled={askModalActive}
           onChange={setInputValue}
           onSubmit={(v) => void handleSubmit(v)}
-          onSelectHint={(cmd) => void handleSubmit(`/${cmd}`)}
+          onSelectHint={(candidate) => {
+            // #337 Phase C：candidate 为 SlashCandidate 判别联合。
+            // 静态命令 → 走 handleSubmit(`/${cmd}`) 原路由（含 /new 等）；
+            // skill → 发送 skill-load。hint 可见时 Enter 走本回调而非 onSubmit
+            // （PromptInput 语义），故要保留用户已输入的 remainder：若当前
+            // inputValue 首 token 精确命中同 skill → 提整个 raw（含 remainder）；
+            // 否则（部分输入如 /ec，或 hint 选中非当前 token 的 skill）→
+            // 补全 `/name ` 形态发送。
+            if (candidate.kind === "command") {
+              void handleSubmit(`/${candidate.command}`);
+            } else {
+              const load = parseSkillLoad(inputValue, skillList);
+              if (load !== undefined && load.name === candidate.name) {
+                void handleSubmit(inputValue);
+              } else {
+                void handleSubmit(`/${candidate.name}`);
+              }
+            }
+          }}
           onTabComplete={(value, cursor) => {
             // 多匹配（suggestions > 1）→ null 不动作；唯一匹配 → 补全串；
             // 当 cursor 越过 0 时按 selected hint 补全（任务 B 兼容）。
             if (inputHintSuggestions.length === 1 && cursor === 0) {
-              return slashCompleteFromList(inputHintSuggestions, 0);
+              return slashCompleteFromCandidates(inputHintSuggestions, 0);
             }
-            return slashComplete(value);
+            return slashComplete(value, skillList);
           }}
           hintSuggestions={inputHintSuggestions}
           history={inputHistory}
