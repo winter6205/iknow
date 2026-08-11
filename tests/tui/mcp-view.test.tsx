@@ -6,8 +6,9 @@
  * 形态 — testRender + mockInput 驱动键盘契约：
  *  - 列表渲染：3 server 状态（connected/failed/disabled）+ 工具数 + ↑↓
  *    cursor + Enter 切 detail；
- *  - 详情：mcp__server__tool 名 + description 渲染；
- *  - reload 触发：按 r → onReload 调用 1 次 + reloading 状态；
+ *  - 详情：剥离 mcp__server__ 前缀的工具短名 + description 渲染（空
+ *    description 回退 `(空)`；工具超视口末尾 `… N more tools`）；
+ *  - reload 触发：列表与详情模式按 r → onReload 调用 1 次 + reloading 状态；
  *  - 空状态：statuses 空 → 空提示 + reload 提示；
  *  - Esc 返回 onBack 调用 1 次。
  *
@@ -135,12 +136,12 @@ test("↑↓ 移动 cursor；Enter 进入 detail", async () => {
   // Enter → detail（cursor 已在 db → db 详情，含 db 工具行）。
   setup.mockInput.pressEnter();
   frame = await untilFrame(setup, (f) => f.includes("db · failed"));
-  expect(frame).toContain("mcp__db__query");
+  expect(frame).toContain("query · 数据库查询");
   expect(opened).toBe(false);
   await setup.renderer.destroy();
 });
 
-test("详情：mcp__server__tool 名 + description 渲染", async () => {
+test("详情：剥离 mcp__server__ 前缀的工具名 + description 渲染", async () => {
   const setup = await renderMcp({});
   await setup.renderOnce();
   // 初始 cursor 在 fileserver（index 0），Enter 进详情。
@@ -148,12 +149,15 @@ test("详情：mcp__server__tool 名 + description 渲染", async () => {
   const frame = await untilFrame(setup, (f) =>
     f.includes("fileserver · connected")
   );
-  expect(frame).toContain("mcp__fileserver__read");
-  expect(frame).toContain("读取文件");
-  expect(frame).toContain("mcp__fileserver__write");
-  expect(frame).toContain("写入文件");
+  // 工具名剥离 `mcp__<server>__` 前缀 → 只显示短名。
+  expect(frame).toContain("read · 读取文件");
+  expect(frame).toContain("write · 写入文件");
+  // 全名不应再出现（避免行内冗余）。
+  expect(frame).not.toContain("mcp__fileserver__read");
+  expect(frame).not.toContain("mcp__fileserver__write");
   // db 的工具不应出现在 fileserver 详情。
-  expect(frame).not.toContain("mcp__db__query");
+  expect(frame).not.toContain("query");
+  expect(frame).not.toContain("数据库查询");
   await setup.renderer.destroy();
 });
 
@@ -217,5 +221,66 @@ test("详情模式 Esc 先回列表，再 Esc 回 chat（onBack 仅第二次触�
   setup.mockInput.pressEscape();
   await untilFrame(setup, () => backCount === 1);
   expect(backCount).toBe(1);
+  await setup.renderer.destroy();
+});
+
+test("详情模式 r 触发 reload（onReload 1 次 + reloading 提示）", async () => {
+  let reloadCount = 0;
+  const setup = await renderMcp({
+    onReload: () => {
+      reloadCount += 1;
+    },
+  });
+  await setup.renderOnce();
+  setup.mockInput.pressEnter();
+  await untilFrame(setup, (f) => f.includes("fileserver · connected"));
+  // 仍在详情模式（工具短名行可见）时按 r → reload 生效。
+  setup.mockInput.pressKey("r");
+  const frame = await untilFrame(setup, (f) =>
+    f.includes("reload in progress")
+  );
+  expect(reloadCount).toBe(1);
+  expect(frame).toContain("reload in progress");
+  // 详情工具行仍在（r 不改变模式）。
+  expect(frame).toContain("read · 读取文件");
+  // ~200ms 延迟后 reloading 清位。
+  await untilFrame(setup, (f) => !f.includes("reload in progress"), 3000);
+  await setup.renderer.destroy();
+});
+
+test("详情：description 空回退 `(空)`", async () => {
+  const setup = await renderMcp({
+    tools: [makeTool("fileserver", "bare", "")],
+  });
+  await setup.renderOnce();
+  setup.mockInput.pressEnter();
+  const frame = await untilFrame(setup, (f) =>
+    f.includes("fileserver · connected")
+  );
+  expect(frame).toContain("bare · (空)");
+  await setup.renderer.destroy();
+});
+
+test("详情：工具超视口末尾 `… N more tools` 提示行", async () => {
+  const manyTools: ReadonlyArray<McpToolEntry> = Array.from(
+    { length: 8 },
+    (_, i) => makeTool("fileserver", `tool${i}`, `第 ${i} 个工具`)
+  );
+  const setup = await renderMcp({
+    statuses: [makeStatus("fileserver", "connected")],
+    tools: manyTools,
+    rows: 7,
+  });
+  await setup.renderOnce();
+  setup.mockInput.pressEnter();
+  // rows=7 → viewHeight=3 → maxToolRows=2：只显示 2 个工具短名 + 余量提示。
+  const frame = await untilFrame(setup, (f) =>
+    f.includes("fileserver · connected")
+  );
+  expect(frame).toContain("tool0 · 第 0 个工具");
+  expect(frame).toContain("tool1 · 第 1 个工具");
+  expect(frame).toContain("… 6 more tools");
+  // 视口内工具短名用剥离后的名字，不带 mcp__ 前缀。
+  expect(frame).not.toContain("mcp__fileserver__tool0");
   await setup.renderer.destroy();
 });

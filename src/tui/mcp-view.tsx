@@ -9,12 +9,15 @@
  *  - 行 = `> server · state · 工具数 · source(user|project)`；
  *  - state 着色：connected 绿 / failed 红 / pending 暗黄 / disabled 灰；
  *  - ↑↓ 选行，Enter 进入 detail，`r` 触发 reload（带 reloading 提示），
- *    Esc 返回 chat；
+ *    Esc 返回 chat；detail 模式同样响应 `r`（server 级操作）；
+ *    reloading 提示两模式共用底部行。
  *  - 空状态：`无 MCP 服务。.iknow/mcp.json 配置后 /mcp 重载` + reload 提示。
  *
  * 详情模式（mode="detail"）：
- *  - header = `server · state` + 工具列表 `mcp__server__tool · description`；
+ *  - header = `server · state` + 工具列表 `tool · description`（剥离
+ *    `mcp__<server>__` 前缀，避免整行冗余全名）；
  *  - 首条 `← 返回`；Esc / Enter 返回列表（Esc 再按回 chat）；
+ *  - `r` 重载（同列表模式，reload 是 server 级操作）；
  *  - cursor 恒 0（单 server 详情游标不活跃，留作未来多 server detail 切换）。
  *
  * reload 语义：`r` → onReload + `reloading=true`；onReload 完成后延迟 ~200ms
@@ -113,9 +116,14 @@ export function McpView(props: McpViewProps): ReactNode {
       return;
     }
     if (mode === "detail") {
-      // 单 server 详情：Enter / ↑↓ 均不活跃，返回列表即可。
+      // 单 server 详情：Enter / ↑↓ 均不活跃，返回列表即可；`r` 是 server 级
+      // 操作，不依赖详情内容，两种模式都响应 reload。
       if (e.name === "return") {
         setMode("list");
+        return;
+      }
+      if (e.name === "r" || e.name === "R") {
+        handleReload();
       }
       return;
     }
@@ -227,6 +235,8 @@ export function McpView(props: McpViewProps): ReactNode {
     ? props.tools.filter((t) => t.server === selected.name)
     : [];
   // 首条 `← 返回` 恒在 index 0；工具行从 index 1 起，简单截断到视口。
+  // 工具名剥离 `mcp__<server>__` 前缀（server 已在 header 明示，避免冗余全名）；
+  // description 为空时与列表模式同口径回退 `(空)`。
   const toolRows: ReactNode[] = [];
   const maxToolRows = viewHeight - 1; // 预留 ← 返回 1 行
   toolRows.push(
@@ -234,11 +244,22 @@ export function McpView(props: McpViewProps): ReactNode {
       ← 返回
     </text>
   );
-  for (let i = 0; i < detailTools.length && i < maxToolRows; i++) {
-    const t = detailTools[i]!;
+  const shownTools = detailTools.slice(0, maxToolRows);
+  for (const t of shownTools) {
+    const toolName = t.tool.name.split("__").slice(2).join("__");
+    const desc = t.tool.description.length > 0 ? t.tool.description : "(空)";
     toolRows.push(
       <text key={t.tool.name} fg={pal.text}>
-        {clipOneLine(`${t.tool.name} · ${t.tool.description}`, maxLineWidth)}
+        {clipOneLine(`${toolName} · ${desc}`, maxLineWidth)}
+      </text>
+    );
+  }
+  // 工具数超出视口 → 末尾提示余量（行账与截断同源，避免溢出）。
+  const hiddenTools = detailTools.length - shownTools.length;
+  if (hiddenTools > 0) {
+    toolRows.push(
+      <text key="more" fg={pal.dim}>
+        … {hiddenTools} more tools
       </text>
     );
   }
