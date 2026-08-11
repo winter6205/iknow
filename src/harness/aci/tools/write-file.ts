@@ -9,7 +9,8 @@
  */
 
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { dirname, relative, resolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, relative, resolve } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
 import type { AciToolDef } from "../types.js";
@@ -66,6 +67,15 @@ function displayPath(root: string, target: string): string {
   return path === "" ? "." : path;
 }
 
+/** `~/.iknow/` — the agent's own profile directory. Mirror of read-file.ts:
+ *  read_file already allows reading the profile by default (extraReadRoots);
+ *  write_file now allows writing it (extraWriteRoots), so the agent can update
+ *  `user.md` and delete `BOOTSTRAP.md` directly (rev 2026-08-11, replaces the
+ *  old `/profile done` host hook). */
+function iknowProfileRoot(): string {
+  return join(homedir(), ".iknow");
+}
+
 /**
  * Create or wholly overwrite a file below `root`.
  *
@@ -73,12 +83,18 @@ function displayPath(root: string, target: string): string {
  * creation; it never changes the whole-file replacement semantics.
  */
 export function createWriteFileTool(root: string): AciToolDef {
+  const extraWriteRoots = Object.freeze([iknowProfileRoot()]);
   const handler = async (input: unknown): Promise<unknown> => {
     const params = parseInput(input);
 
     let target: string;
     try {
-      target = await resolveWithinRoot(root, params.path);
+      target = await resolveWithinRoot(
+        root,
+        params.path,
+        undefined,
+        extraWriteRoots
+      );
     } catch (error) {
       throw asToolExecutionError("[write_file] cannot resolve path", error);
     }
