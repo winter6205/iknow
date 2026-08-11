@@ -85,11 +85,15 @@ export function toolIndicator(name: string, budgetCols: number): string {
   const prefixW = visualWidth(PREFIX);
   if (budgetCols <= prefixW) return "";
   const nameBudget = budgetCols - prefixW;
-  if (visualWidth(name) <= nameBudget) return PREFIX + name;
-  // 尾部截断：逐码点累加直到再放一个字符就超过（预留 `…` 位）。
+  // 折叠空白：内嵌换行/多空格会让一行渲染变形（首行剩余 + 溢出），
+  // 折叠为单空格后再截断（正常工具名无空白，零影响）。
+  const folded = name.replace(/\s+/g, " ");
+  if (visualWidth(folded) <= nameBudget) return PREFIX + folded;
+  // 尾部截断：对折叠后文本逐码点累加（折叠过 name 才走到这），
+  // 直到再放一个字符就超过（预留 `…` 位）。
   const ellW = visualWidth("…");
   let acc = "";
-  for (const ch of name) {
+  for (const ch of folded) {
     if (visualWidth(acc + ch) > nameBudget - ellW) break;
     acc += ch;
   }

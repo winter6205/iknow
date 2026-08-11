@@ -23,6 +23,10 @@ import {
   toolIndicator,
   valueBand,
 } from "../../src/tui/context-bar.js";
+import {
+  activeToolNameOf,
+  shortenMcpToolName,
+} from "../../src/tui/live-tool-state.js";
 import { tuiPalette } from "../../src/tui/theme.js";
 import { TuiHarness } from "./_fixtures.js";
 import type { TokenUsage } from "../../src/harness/model-adapter/types.js";
@@ -116,6 +120,18 @@ describe("纯函数（数值语义 SSOT）", () => {
     expect(out.startsWith("[tool] ")).toBe(true);
     expect(out.endsWith("…")).toBe(true);
     expect(stringWidth(out)).toBeLessThanOrEqual(13);
+  });
+
+  test("toolIndicator：内嵌空白折叠为单空格（防止换行/多空格导致底栏变形）", () => {
+    // 换行 + 多空格 → 折叠后单空格；预算内原样返回。
+    const inBudget = toolIndicator("a\nb  c", 11);
+    expect(inBudget).toBe("[tool] a b c");
+    // 超预算截断：迭代折叠后文本，输出不含原换行。
+    const truncated = toolIndicator("alpha\nbeta  gamma", 14);
+    expect(truncated.startsWith("[tool] ")).toBe(true);
+    expect(truncated.endsWith("…")).toBe(true);
+    expect(truncated).not.toContain("\n");
+    expect(stringWidth(truncated)).toBeLessThanOrEqual(14);
   });
 });
 
@@ -315,5 +331,45 @@ describe("渲染（只读 lastUsage）", () => {
     expect(ctxLine).toBeDefined();
     expect(ctxLine?.startsWith("│")).toBe(true);
     await setup.renderer.destroy();
+  });
+});
+
+// #377 项 B 相关：activeToolNameOf 把 MCP 工具名剥为 <server>/<tool> 短形态
+// （ContextBar 尾缀单一消费方），非 MCP 名原样。
+describe("activeToolNameOf / shortenMcpToolName", () => {
+  test("activeToolNameOf 取最后一个 running；无 running → undefined", () => {
+    const runs = [
+      { id: "a", name: "read_file", status: "ok" as const, input: undefined },
+      {
+        id: "b",
+        name: "mcp__alpha__search",
+        status: "running" as const,
+        input: undefined,
+      },
+    ];
+    expect(activeToolNameOf(runs)).toBe("alpha/search");
+    expect(activeToolNameOf([])).toBeUndefined();
+    expect(
+      activeToolNameOf([
+        {
+          id: "c",
+          name: "write_file",
+          status: "ok" as const,
+          input: undefined,
+        },
+      ])
+    ).toBeUndefined();
+  });
+
+  test("shortenMcpToolName：mcp__<server>__<tool> → <server>/<tool>；非 MCP 原样", () => {
+    expect(shortenMcpToolName("mcp__codebase-memory__search_code")).toBe(
+      "codebase-memory/search_code"
+    );
+    // server / tool 段本身含 __（manager sanitize 只把非 [A-Za-z0-9_] 替换）：
+    // 只剥第一个 __ 之后的第一个 __，其余保留在 tool 段。
+    expect(shortenMcpToolName("mcp__a__b__c")).toBe("a/b__c");
+    expect(shortenMcpToolName("read_file")).toBe("read_file");
+    // 畸形 mcp__ 形态（无分隔）原样返回
+    expect(shortenMcpToolName("mcp__nosep")).toBe("mcp__nosep");
   });
 });
