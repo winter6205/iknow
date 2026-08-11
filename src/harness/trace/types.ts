@@ -45,6 +45,22 @@ export interface LlmCallRecord {
   durationMs: number;
   supplierStop?: "success" | "truncation" | "refusal" | "other";
   stream: boolean;
+  /**
+   * #361 / ADR-0014 Decision 6:loop-engine 在 model 阶段成功 / 错误 / 摘要
+   * 三处(recordLlmCall @ 427 / 948 / 970)首次填充 messages 字段 —— 语义
+   * 即"模型本步实际看到的 messages"(effectiveState.messages, 含 reactive
+   * 压缩后形态;摘要轮为 outcome.inputMessages = truncateTailForSummary
+   * 截尾 + 收尾 user prompt)。
+   *
+   * **无 size cap**(review-fix S6):全量 messages 进 trace 会膨胀 jsonl
+   * 行体积 —— 长会话持续累积,行字节数随 turn 线性增长。决策:不在写入
+   * 侧裁剪(避免与 messages_captured 验收 6 矛盾 —— 验收 6 要求 messages
+   * 数组含 coordinator 段 proactive 关键词等完整 system 文本,截断会破坏
+   * "模型实际所见"不变量);如未来需控容,由 trace 消费端(IDE 调试器 /
+   * 上层观测工具)按 IKNOW_TRACE_MAX_CONTENT_BYTES 类策略裁剪,loop-engine
+   * 保持"所见即所填"的真值纪律。Postel(ADR-0003 D9):messagesCaptured
+   * 独立布尔开关,字段填充由 loop-engine 决定;trace 服务不裁剪。
+   */
   messagesCaptured: boolean;
   messages?: ReadonlyArray<unknown>;
   status: TraceStatus;

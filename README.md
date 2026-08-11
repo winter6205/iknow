@@ -26,6 +26,28 @@ npm run typecheck
 npm test
 ```
 
+### TUI on WSL / Linux
+
+The TUI (OpenTUI) ships its native rendering core as npm **optionalDependencies**
+(`@opentui/core-linux-x64` / `-musl`, `-darwin-*`, `-win32-*`, …). A plain
+`npm install` skips them, so on a fresh checkout the TUI fails to start with
+`OpenTUI native FFI is not available`. Install optional deps explicitly:
+
+```bash
+npm install --include=optional
+```
+
+Before launching the TUI, run the binding self-check (also covers a broken /
+partial optional-deps install):
+
+```bash
+npm run probe:tui-binding   # 6/6 passed → exit 0; any FAIL → exit 1
+```
+
+`npm ci` (clean install) 自动安装 `optionalDependencies`,无需 `--include=optional` flag;
+缺失时 TUI 启动即崩 — 探针可前置兜底。`npm install` 第一次拉依赖则**必须**带
+`--include=optional`(npm 默认行为是跳过 optionalDependencies)。
+
 ## Run
 
 **Primary interactive entry is `chat`.** Use one-shot `ask` / bare query only for scripts and CI.

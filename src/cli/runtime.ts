@@ -105,25 +105,44 @@ export async function buildHarnessEngine(
 }
 
 /**
- * #337 T8 生命周期钩子 — 把 `BuiltEngine.shutdown` 挂到进程退出事件上。
+ * #337 T8 / #356 T6 生命周期钩子 — 把 `shutdown` 句柄挂到进程退出事件上。
  *
- * 长程 CLI 入口（chat REPL / serve）持有 MCP manager 后台连接，进程退出
- * 前必须显式关闭 stdio 子进程 + 取消 in-flight 调用（SC11 / SC16）。
+ * 长程 CLI 入口（chat REPL / serve / tui）持有 MCP manager 后台连接 +
+ * subagent manager 子进程池,进程退出前必须显式关闭 stdio 子进程 + 取消
+ * in-flight 调用（SC11 / SC16 / SC12）。T6 起 `BuiltEngine.shutdown` 是
+ * 组合句柄（Promise.all([mcpManager?.shutdown(), subagentManager?.shutdown()])） —
+ * 顺序 mcpManager first → subagentManager second（两者无共享可变状态,
+ * Promise.all 并发;顺序仅语义标注,非严格串行）。本钩子保持调用
+ * shutdown 一次即可,不再展开。
  * ask 入口 manager 未创建 → shutdown 缺席 → 本函数直接返回 no-op 句柄,
  * 调用方无需特判。
  *
+ * 参数类型故意放宽为结构 `{ readonly shutdown?: () => Promise<void> }` —
+ * `BuiltEngine` / `SessionHub` / TUI 入口本地 subagent 句柄都满足;
+ * 注册钩子只关心 shutdown 一次调用,deps/engine 形态与本函数无关。
+ *
  * 用法:
  *   const built = await buildHarnessEngine(...);
- *   registerShutdown(built);  // chat / serve:hook 一次即可
- *   await runChatSession(...);
+ *   registerShutdown(built);  // chat:hook 一次即可
+ *   const { hub } = await startSessionServe(...);
+ *   registerShutdown(hub);    // serve:hub 暴露 built.shutdown
  *
  * `dispose()` 用于测试或一次性清理场景主动调用（不影响已经绑定的进程
  * 信号监听器,后者由进程退出触发）。
  */
-export function registerShutdown(built: BuiltEngine): {
+export function registerShutdown(built: {
+  readonly shutdown?: () => Promise<void>;
+}): {
   readonly dispose: () => Promise<void>;
 } {
   let shuttingDown = false;
+  // #365 DRIFT-1 (源自 #356 review-High4):re-kill one-shot —— 首次信号
+  // dispose 完成后,重发一次让外部处理器(chat-session 的 onSigint 计数器
+  // 等)有机会强退;但无外部处理器(serve / 纯 registerShutdown) 时,
+  // unconditional re-kill 会与自身 handler 互踢成 microtask 死循环(vitest
+  // process.emit 同步路径掩盖;node/bun 真实信号投递实测挂死)。reKilled
+  // 守门:第二次信号落地后 force-exit,不再 re-kill,统一"二次强杀语义"。
+  let reKilled = false;
   const dispose = async (): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -141,7 +160,12 @@ export function registerShutdown(built: BuiltEngine): {
   };
   const onSignal = (sig: NodeJS.Signals): void => {
     void dispose().finally(() => {
-      // 第二次信号直接退出(用户强杀语义),不等待 close 兜底。
+      if (reKilled) {
+        // 第二次信号直接退出(用户强杀语义),不等待 close 兜底。
+        const code = sig === "SIGINT" ? 130 : sig === "SIGTERM" ? 143 : 128;
+        process.exit(code);
+      }
+      reKilled = true;
       process.kill(process.pid, sig);
     });
   };

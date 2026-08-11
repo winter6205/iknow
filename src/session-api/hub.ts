@@ -20,6 +20,8 @@ import {
   type RunResult,
 } from "../harness/index.js";
 import { buildHarnessEngine } from "../harness/build-engine.js";
+import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
+import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { getVersion } from "../cli/usage.js"; // SC-W 6/7: agentVersion 注入(与 session-api/http.ts 同向 import,无循环)
 import type { AskUser } from "../harness/permission/types.js";
 import type {
@@ -44,7 +46,13 @@ import { join } from "node:path";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
-import { CURRENT_SCHEMA_VERSION, extractSummary } from "./store/index.js";
+import {
+  appendCheckpoint,
+  CURRENT_SCHEMA_VERSION,
+  extractSummary,
+  shouldPersistCheckpoint,
+  toInterruptReason,
+} from "./store/index.js";
 import type {
   ApiErrorBody,
   CompactSessionResponse,
@@ -293,16 +301,26 @@ export type SessionHubOptions = {
    * "serve"（skip BOOTSTRAP，spec A12 矩阵）；测试可省略 → 默认 "chat"。
    */
   surface?: "chat" | "tui" | "ask" | "serve";
+  /**
+   * #356 T7:subagent manager — host drain 消费面。serve 入口经
+   * buildHarnessEngine 自建 (surface !== "ask");hub 构造时未注入时,
+   * ensureDeps() 后从 built.subagentManager 懒取。未配置 (ask 形态) →
+   * 无 drain,行为零变化。
+   */
+  readonly subagentManager?: SubAgentManager;
 };
 
-// -- stop reasons that must NOT persist to file (裁决#8) -----------------------
-
-/** cancelled → no-op (spec L237); protocolError/emptyFinalResponse → drop context (chat-session.ts:84-89). */
-const DROP_REASONS: ReadonlySet<string> = new Set([
-  "cancelled",
-  "protocolError",
-  "emptyFinalResponse",
-]);
+// -- stop-reason persistence decision (T1: replaced DROP_REASONS set) ---------
+//
+// The previous design used a static DROP_REASONS set to skip certain stop
+// reasons (cancelled / protocolError / emptyFinalResponse). T1 replaces that
+// with `shouldPersistCheckpoint(result, priorMessages)` from
+// ./store/checkpoint.ts. Nuance preserved:
+//   - `cancelled` WITH delta>0 now persists (the user query landed; record a
+//     checkpoint so the interrupted turn is recoverable / rewind-able).
+//   - `protocolError` / `emptyFinalResponse` never persist (维持 #120 裁决).
+//   - every other stopReason (completed / maxTurns / timeout / nonSuccessStop)
+//     persists as-is.
 
 // -- SessionHub ----------------------------------------------------------------
 
@@ -330,6 +348,8 @@ export class SessionHub {
   /** #196 IKNOW T5: 入口 surface；默认 "chat"（tests 兼容）。serve 路径
    *  由 serve.ts 显式传 "serve"。 */
   private readonly surface: "chat" | "tui" | "ask" | "serve" | undefined;
+  /** #356 T7: subagent manager（host drain 消费面；懒取见 ensureDeps）。 */
+  private subagentManager: SubAgentManager | undefined;
   /** Per-conversation serialization (spec A15). */
   private readonly inflight = new Map<string, Promise<void>>();
 
@@ -349,6 +369,7 @@ export class SessionHub {
     this.overrideEnv = opts.overrideEnv;
     this.sandboxRoot = opts.sandboxRoot;
     this.surface = opts.surface;
+    this.subagentManager = opts.subagentManager;
     this.defaults = {
       jsonMode: opts.defaultJsonMode ?? false,
     };
@@ -419,6 +440,7 @@ export class SessionHub {
       summary: "",
       cwd: process.cwd(),
       sanitized_at: now,
+      checkpoints: [],
     };
     await this.store.save({ id, file });
     return {
@@ -519,15 +541,27 @@ export class SessionHub {
           }
           opts.onStream?.(event);
         };
+        // #356 T7 (SC7):host drain — serve 入口每轮 run() 前,把 manager 内
+        // completed 子代理结果浓缩成 user message,拼入 priorMessages 末尾。
+        // 空 manager / 无 completed → priorMessages 不变 (行为零变化)。
+        const drained = await drainPendingSubagents(this.subagentManager);
+        const drainedMsg: AnthropicNativeMessage = {
+          role: "user",
+          content: [{ type: "text", text: drained }],
+        };
+        const priorMessages = drained
+          ? [...session.messages, drainedMsg]
+          : session.messages;
         let finalResult: RunResult;
         try {
           const { result } = await run(query, runDeps, opts.signal, {
-            priorMessages: session.messages,
+            priorMessages,
             onStream: wrappedOnStream,
           });
           // Violation kill → surface protocolError so the SPA client can
-          // attribute the stop; DROP_REASONS already drops protocolError
-          // context on save (mirrors the chat-session drop semantics).
+          // attribute the stop; shouldPersistCheckpoint still drops
+          // protocolError context on save (mirrors the chat-session drop
+          // semantics, 维持 #120 裁决).
           finalResult = killed
             ? { ...result, stopReason: "protocolError" }
             : result;
@@ -561,6 +595,9 @@ export class SessionHub {
           conversationId,
           session,
           result: finalResult,
+          // priorMessages = the file BEFORE this run; only the messages THIS
+          // run appended count as progress for the cancelled-delta decision.
+          priorMessages: session.messages,
         });
         return {
           session: this.summarize({
@@ -595,6 +632,11 @@ export class SessionHub {
           updatedAt: new Date().toISOString(),
           schemaVersion: CURRENT_SCHEMA_VERSION,
           summary: "",
+          // Reset wipes conversation history; prior checkpoint records
+          // reference turns that no longer exist (messagesCount would also
+          // falsely satisfy `appendCheckpoint`'s delta<=0 no-op guard and
+          // silently drop the next interrupt save). Clear defensively.
+          checkpoints: [],
         };
         await this.store.save({ id: conversationId, file: reset });
         return {
@@ -725,19 +767,44 @@ export class SessionHub {
     return next;
   }
 
-  /** 裁决#8: save condition based on stopReason. */
+  /** 裁决#8 + T1: save condition based on stopReason and progress delta.
+   *  `priorMessages` = session.messages BEFORE this run (postMessage already
+   *  holds it); shouldPersistCheckpoint decides whether to save. Interrupting
+   *  stops (cancelled with delta>0) also append a checkpoint record so the
+   *  interrupted turn is recoverable / rewind-able. */
   private async conditionalSave(opts: {
     readonly conversationId: string;
     readonly session: SessionFileV1;
     readonly result: RunResult;
+    readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
   }): Promise<void> {
-    const { conversationId, session, result } = opts;
-    if (DROP_REASONS.has(result.stopReason)) return;
+    const { conversationId, session, result, priorMessages } = opts;
+    if (!shouldPersistCheckpoint(result, priorMessages)) return;
+    const now = new Date().toISOString();
+    const turnCount = session.turnCount + result.turnCount;
+    const interruptReason = toInterruptReason(result.stopReason);
+    // appendCheckpoint compares record.messagesCount to session.messages.length
+    // for its delta=0 guard, so it must receive the session BEFORE new messages
+    // are merged in (otherwise delta = 0 would always be false and the guard
+    // never fires). Compute the checkpointed session first, then merge the
+    // post-run messages / turnCount / metadata on top.
+    const withCheckpoint =
+      interruptReason === null
+        ? session
+        : appendCheckpoint(session, {
+            turnIndex: turnCount,
+            messagesCount: result.messages.length,
+            interruptedAt: now,
+            interruptReason,
+            ...(result.lastUsage !== null
+              ? { lastUsage: result.lastUsage }
+              : {}),
+          });
     const updated: SessionFileV1 = {
-      ...session,
+      ...withCheckpoint,
       messages: result.messages,
-      turnCount: session.turnCount + result.turnCount,
-      updatedAt: new Date().toISOString(),
+      turnCount,
+      updatedAt: now,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       summary: extractSummary(result.messages),
     };
@@ -766,7 +833,7 @@ export class SessionHub {
     // The returned `engine` is built once (code-review 2026-08-05) and
     // discarded — serve only consumes `deps`, and the cost is a single
     // `createLoopEngine` allocation, not a per-message re-construction.
-    const { deps } = await buildHarnessEngine({
+    const built = await buildHarnessEngine({
       env,
       askUser: this.askUser,
       ...(this.sandboxRoot ? { sandboxRoot: this.sandboxRoot } : {}),
@@ -774,7 +841,10 @@ export class SessionHub {
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
       ...(this.permissionMode ? { permissionMode: this.permissionMode } : {}),
     });
-    this.cachedDeps = deps;
+    this.cachedDeps = built.deps;
+    // #356 T7: serve 懒取 subagent manager — buildHarnessEngine 在 surface !==
+    // "ask" 时自建;constructor 注入优先 (测试缝),未注入则取 built 的。
+    this.subagentManager = this.subagentManager ?? built.subagentManager;
     return this.cachedDeps;
   }
 

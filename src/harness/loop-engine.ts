@@ -275,6 +275,8 @@ const SUMMARY_PROMPT = (reason: string): string =>
 interface SummaryOutcome {
   readonly text: string;
   readonly usage: TokenUsage | undefined;
+  /** 摘要轮模型实际看到的输入消息(truncateTailForSummary 截尾 + 收尾 user prompt) */
+  readonly inputMessages: ReadonlyArray<AnthropicNativeMessage>;
 }
 
 /**
@@ -340,7 +342,9 @@ async function runSummaryWithTimeout(opts: {
         adapterResolved = true;
         if (timer !== undefined) clearTimeout(timer);
         const text = (r.projection.texts ?? []).join("\n").trim();
-        return text.length > 0 ? { text, usage: r.usage } : null;
+        return text.length > 0
+          ? { text, usage: r.usage, inputMessages: messages }
+          : null;
       },
       (): SummaryOutcome | null => {
         adapterResolved = true;
@@ -424,7 +428,16 @@ async function epilogueSummary(opts: {
         durationMs,
         supplierStop: "success",
         stream: streamMode,
-        messagesCaptured: false,
+        // ADR-0014 决策 6 / #361 T12:摘要轮捕获模型实际看到的 messages。
+        // review-fix S5:改用 outcome.inputMessages = tryRunSummary 经
+        // truncateTailForSummary 截尾后的输入 + 收尾 user prompt(即模型
+        // 本轮真实看到的 messages),不再用 opts.messages(完整 pre-summary
+        // 历史,与模型所见不符)。
+        // 取舍:全量消息进 trace 会膨胀 jsonl;LlmCallRecord.messages 字段
+        // 语义即"模型实际看到的 messages"(ADR-0003 既有字段),摘要轮同样
+        // 满足该语义,保持一致填充。token 计数照旧经 *_tokens 字段表达。
+        messagesCaptured: true,
+        messages: outcome.inputMessages,
         // SC-W 5:摘要轮同样无可填 model 字段(adapter 不暴露,见 ok 分支注释)。
         status: "ok",
         ...(outcome.usage !== undefined ? outcome.usage : {}),
@@ -945,7 +958,13 @@ async function stepWithTrace(opts: {
           endedAt: llmEndedAt,
           durationMs: llmDurationMs,
           stream: streamMode,
-          messagesCaptured: false,
+          messagesCaptured: true,
+          // ADR-0014 决策 6 / #361 T12:错误分支同样捕获模型实际看到的
+          // messages(取 effectiveState.messages,与 ok 分支同源 —— 包含
+          // reactive 压缩后形态)。error/status 字段语义不变(Postel);
+          // messages 字段是独立的"模型实际看到了什么"通道,error 不影响
+          // 该字段填充,与 ok 分支语义对齐。
+          messages: effectiveState.messages,
           // SC-W 5:错误分支 model 三字段整体缺席(Postel,ADR-0008 D3 同构)——
           // 且 adapter 本就不暴露 model,无论成功失败都无可填。
           status: "error",
@@ -967,7 +986,16 @@ async function stepWithTrace(opts: {
           durationMs: llmDurationMs,
           supplierStop: modelPhase.result.supplierStop,
           stream: streamMode,
-          messagesCaptured: false,
+          messagesCaptured: true,
+          // ADR-0014 决策 6 / #361 T12:成功分支捕获模型实际看到的
+          // messages(取 effectiveState.messages,reactive 压缩后的权威
+          // 历史 —— loop-engine.ts:879 注释明确 effectiveState 记录
+          // 模型本步实际看到的 messages)。该字段是 ADR-0003 既有字段,
+          // 仅从此处起首次填充;取舍:全量 messages 进 trace 会膨胀
+          // jsonl,但 LlmCallRecord.messages 字段语义即"模型实际看到的
+          // messages",符合 ADR 决策 6 验收纪律(messages_captured:true +
+          // messages 数组含 coordinator 段 proactive 关键词)。
+          messages: effectiveState.messages,
           status: "ok",
           ...(usage !== undefined ? usage : {}),
         })

@@ -5,7 +5,7 @@
  * 改写为 bun:test（D2 裁决：tests/tui/ 由 bun:test 驱动）。
  *
  * #146 slash 词表解析（SC 12：TUI 自建词表，不复用 chat processChatLine）：
- * 9 命令 + 未知 /xxx + 普通消息 + 空输入 + /reset 天然不可达。
+ * 11 命令 + 未知 /xxx + 普通消息 + 空输入 + /reset 天然不可达。
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -32,6 +32,7 @@ describe("parseTuiInput: 词表命中", () => {
     ["/thinking", "thinking"],
     ["/profile", "profile"],
     ["/compact", "compact"],
+    ["/rewind", "rewind"],
   ] as const) {
     test(`解析 ${input} → command ${command}`, () => {
       const parsed = parseTuiInput(input);
@@ -86,7 +87,7 @@ describe("parseTuiInput: 普通消息与边界", () => {
 });
 
 describe("helpLines", () => {
-  test("覆盖全部 10 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
+  test("覆盖全部 11 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
     const joined = helpLines().join("\n");
     for (const cmd of [
       "/sessions",
@@ -98,6 +99,7 @@ describe("helpLines", () => {
       "/exit",
       "/profile",
       "/compact",
+      "/rewind",
     ]) {
       expect(joined).toContain(cmd);
     }
@@ -117,7 +119,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  test('"/" → 全部 10 条静态命令（按词表插入顺序，kind="command"）', () => {
+  test('"/" → 全部 11 条静态命令（按词表插入顺序，kind="command"；mcp + rewind）', () => {
     expect(slashSuggestions("/")).toEqual([
       { kind: "command", command: "sessions" },
       { kind: "command", command: "new" },
@@ -128,6 +130,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       { kind: "command", command: "thinking" },
       { kind: "command", command: "profile" },
       { kind: "command", command: "compact" },
+      { kind: "command", command: "rewind" },
       { kind: "command", command: "mcp" },
     ]);
   });
@@ -180,6 +183,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       { kind: "command", command: "thinking" },
       { kind: "command", command: "profile" },
       { kind: "command", command: "compact" },
+      { kind: "command", command: "rewind" },
       { kind: "command", command: "mcp" },
     ]);
   });

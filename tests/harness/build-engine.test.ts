@@ -18,12 +18,16 @@ import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 import { createMcpManager } from "../../src/harness/mcp/manager.ts";
 import type { McpClientHandle } from "../../src/harness/mcp/manager.ts";
+import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
 
 // Order is load-bearing: it must match the `aciTools` array in
 // `src/harness/build-engine.ts` (policy byName key-space, ADR-0006)。
 // #194 T6 (Layer 4 baseline):扩 memory_recall + memory_save 到 10 件;
 // #224 在 10 件基础上末尾追加 tool_search(11 件,memoryDir 默认存在)。
 // #337 T8 (skill 装配):catalog 装配后末尾追加 skill / skill_search(→ 23 件)。
+// #356 T6 (subagent 装配):surface !== "ask" 时 build-engine 自建 subagentManager,
+// registry 末尾追加 spawn_subagent / subagent_result(→ 25 件)。ask 入口不创建
+// manager → registry 停 23 件(SC8,见 ask 剥离断言)。
 const EXPECTED_TOOLS = [
   "bash",
   "read_file",
@@ -50,6 +54,10 @@ const EXPECTED_TOOLS = [
   // #337 T8 skill 工具集 append-only:21→23,2 件在末尾。
   "skill",
   "skill_search",
+  // #356 T6 subagent 工具集 append-only:23→25,2 件在末尾(全装配 chat surface
+  // 才在场;ask 缺 subagentManager → 23 件)。
+  "spawn_subagent",
+  "subagent_result",
 ];
 
 /** Deterministic env: never read process.env / .env files (env.ts SSOT). */
@@ -91,6 +99,23 @@ describe("buildHarnessEngine (SSOT assembly)", () => {
     // build-engine 路径也必须仍带 web_fetch / web_search)。
     expect(names).toContain("web_fetch");
     expect(names).toContain("web_search");
+    // #356 T6:全装配(默认 chat surface)含 spawn_subagent / subagent_result 两件。
+    expect(names).toContain("spawn_subagent");
+    expect(names).toContain("subagent_result");
+  });
+
+  it("full assembly: built.subagentManager 存在 + built.shutdown 是函数", async () => {
+    const built: BuiltEngine = await buildHarnessEngine({
+      env: makeEnv("sk-test-subagent-full-1"),
+      askUser: createNoAskUser(),
+    });
+
+    // chat surface 自建 subagentManager(是函数对象);shutdown 为组合句柄(函数)。
+    expect(typeof built.subagentManager).toBe("object");
+    expect(typeof built.subagentManager!.shutdown).toBe("function");
+    expect(typeof built.shutdown).toBe("function");
+    // cleanup:组合 shutdown 不抛(空 MCP config + 无运行子代理)。
+    await built.shutdown!();
   });
 
   it("wires promptTools to reg.visibleSchemas (all 11 tools, no lazy)", async () => {
@@ -307,12 +332,32 @@ describe("buildHarnessEngine — #337 T8 skill 装配", () => {
     expect(built.deps.registry.get("skill")).toBeDefined();
     expect(built.deps.registry.get("skill_search")).toBeDefined();
 
-    // ask 不创建 MCP manager → shutdown 句柄缺席
+    // ask 不创建 MCP manager → shutdown 句柄缺席;subagent manager 同门缺席
+    // （T6:surface !== "ask" 才创建）。
     expect(built.shutdown).toBeUndefined();
+    expect(built.subagentManager).toBeUndefined();
+
+    // SC8:ask 剥离 spawn_subagent / subagent_result(registry / executor /
+    // catalog 三方视图一致)。skillCatalog 仍装配(SC12)。
+    expect(built.deps.registry.get("spawn_subagent")).toBeUndefined();
+    expect(built.deps.registry.get("subagent_result")).toBeUndefined();
+    const names = built.deps.registry.list().map((d) => d.name);
+    expect(names).not.toContain("spawn_subagent");
+    expect(names).not.toContain("subagent_result");
+    // ask + memory:{enabled:false} 双重剥离 → 25 - memory2 - subagent2 = 21 件
+    // (skill 两件仍装配,SC12)。
+    expect(names).toEqual(
+      EXPECTED_TOOLS.filter(
+        (n) =>
+          n !== "memory_recall" &&
+          n !== "memory_save" &&
+          n !== "spawn_subagent" &&
+          n !== "subagent_result"
+      )
+    );
 
     // 三方视图零 mcp__*（SC12）：registry.list()（= executor 可见视图）
     // + deps 视图（registry = executor 的输入，registry 是真实三方视图锚点）。
-    const names = built.deps.registry.list().map((d) => d.name);
     expect(names.filter((n) => n.startsWith("mcp__"))).toEqual([]);
   });
 });
@@ -404,5 +449,72 @@ describe("buildHarnessEngine — #337 T8 MCP manager 装配", () => {
     const last = captured.at(-1);
     expect(last).toBeDefined();
     expect(last!.timeoutMsOverride).toBe(90_000);
+  });
+});
+
+describe("buildHarnessEngine — #356 T6 subagent manager 装配", () => {
+  const roots: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      roots.splice(0).map((r) => rm(r, { recursive: true, force: true }))
+    );
+  });
+
+  /** fake manager 注入验证装配不崩(spawn 不被调用;仅验证 registry 含两件 +
+   *  BuiltEngine.subagentManager 透出注入对象)。 */
+  const fakeManager: SubAgentManager = {
+    spawn: () => ({ taskId: "fake-id" }),
+    queryBuffer: () => ({ status: "not_found" }),
+    waitFor: () => Promise.reject(new Error("not used")),
+    shutdown: () => Promise.resolve(),
+    drainCompleted: () => [],
+  };
+
+  it("chat surface：注入 fake subagentManager → registry 含两件 + 透出注入对象", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t6-chat-fake-"));
+    roots.push(root);
+
+    const built: BuiltEngine = await buildHarnessEngine({
+      env: makeEnv("sk-test-t6-chat-fake-1"),
+      askUser: createNoAskUser(),
+      surface: "chat",
+      userHome: join(root, "home"),
+      cwd: root,
+      subagentManager: fakeManager,
+    });
+
+    // 注入对象透出(BuiltEngine.subagentManager === fakeManager,引用相等)。
+    expect(built.subagentManager).toBe(fakeManager);
+    const names = built.deps.registry.list().map((d) => d.name);
+    expect(names).toContain("spawn_subagent");
+    expect(names).toContain("subagent_result");
+    expect(built.deps.registry.get("spawn_subagent")).toBeDefined();
+    expect(built.deps.registry.get("subagent_result")).toBeDefined();
+    expect(names).toEqual(EXPECTED_TOOLS);
+
+    // 组合 shutdown 不抛(fake manager shutdown resolve)。
+    await built.shutdown!();
+  });
+
+  it("ask surface：即使注入 fake manager 也不装配两件(T6 同 MCP 门:surface !== ask)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t6-ask-fake-"));
+    roots.push(root);
+
+    const built: BuiltEngine = await buildHarnessEngine({
+      env: makeEnv("sk-test-t6-ask-fake-1"),
+      askUser: createNoAskUser(),
+      surface: "ask",
+      memory: { enabled: false },
+      userHome: join(root, "home"),
+      cwd: root,
+      subagentManager: fakeManager,
+    });
+
+    // ask 不创建/不透出 manager,registry 停 23 件(SC8)。
+    expect(built.subagentManager).toBeUndefined();
+    const names = built.deps.registry.list().map((d) => d.name);
+    expect(names).not.toContain("spawn_subagent");
+    expect(names).not.toContain("subagent_result");
   });
 });

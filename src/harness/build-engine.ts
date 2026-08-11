@@ -27,18 +27,20 @@ import { createAciExecutor } from "./aci/index.js";
 import { createPermissionPolicy } from "./permission/policy.js";
 import type { PermissionModeContext } from "./permission/modes.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
+import type { AciCatalog } from "./aci/types.js";
 import { createLspNotifier } from "./lsp/notifier.js";
 import type { Registry } from "./tools/types.js";
 import type { RegistryImpl } from "./tools/registry.js";
 import type { ValidateFunction } from "ajv";
 import { homedir } from "node:os";
-import type { AskUser } from "./permission/types.js";
+import type { AskUser, PostToolUseHook } from "./permission/types.js";
 import type { IknowEnv } from "../config/env.js";
 import { ValidationError } from "../shared/errors.js";
 import {
   createIknowSystemResolver,
   initIknowWorkspaceSafe,
 } from "./identity/index.js";
+import { IKNOW_COORDINATOR_TEXT } from "./identity/assemble.js";
 import {
   resolveProjectMemoryDir,
   createSystemResolver,
@@ -48,6 +50,11 @@ import { createSkillCatalog } from "./skill/catalog.js";
 import type { SkillCatalog } from "./skill/catalog.js";
 import { loadMcpConfig } from "./mcp/config.js";
 import { createMcpManager, type McpManager } from "./mcp/manager.js";
+import {
+  createSubAgentManager,
+  type SubAgentManager,
+} from "./subagent/manager.js";
+import { defaultSubAgentSpawn } from "./subagent/spawn.js";
 
 export type BuildEngineOpts = {
   readonly env: IknowEnv;
@@ -79,13 +86,38 @@ export type BuildEngineOpts = {
    * 捕获 createMcpManager 入参(如 timeoutMsOverride 透传)。
    */
   readonly createMcpManager?: typeof import("./mcp/manager.js").createMcpManager;
+  /** #356 T6 测试缝:subagent manager 覆盖注入(生产默认不传则内部自建)。 */
+  readonly subagentManager?: SubAgentManager;
+  /** TUI 工具摘要观测缝:透传给 createAciExecutor hooks.postToolUse(chat/serve 不传 → 零变化)。 */
+  readonly hooks?: PostToolUseHook;
 };
 
 export type BuiltEngine = {
   readonly deps: LoopEngineDeps;
   readonly engine: ReturnType<typeof createLoopEngine>;
-  /** #337 T8:MCP manager shutdown 句柄(ask surface 不创建 manager 时缺席)。 */
+  /** #356 T6:subagent manager 句柄(ask surface 不创建时缺席;T7 host-drain 消费)。 */
+  readonly subagentManager?: SubAgentManager;
+  /** #337 T8 / #356 T6:MCP + subagent 组合 shutdown 句柄(ask surface 两者皆缺席时
+   * 无句柄)。顺序:mcpManager first → subagentManager second(两者无共享可变状态,
+   * Promise.all 并发;顺序仅语义标注)。 */
   readonly shutdown?: () => Promise<void>;
+  /**
+   * #337 T8:skill catalog(全 surface 装配;ask 也装配——SC12 skill 两件在场)。
+   * TUI deps 消费其 available()/get() 派生 slash 候选 + 加载正文(deps.ts
+   * TuiExtensions.skillCatalog)。chat/serve 缺省不读。
+   */
+  readonly skillCatalog?: SkillCatalog;
+  /**
+   * #337 T8 / #361 Phase D:MCP manager 句柄(surface === "ask" 时缺席)。
+   * TUI deps 消费 status()/reload() 构建 /mcp 看板扩展面;ask 零 mcp__*。
+   */
+  readonly mcpManager?: McpManager;
+  /**
+   * #361 Phase D:动态 MCP 工具全量源(reg.catalog.all() 含 registerExternal
+   * 追加的 mcp__* 工具;inner 冻结快照不含)。TUI deps 据此平铺
+   * `{ server, tool }[]`(listMcpTools);server 名反解在 deps.ts。
+   */
+  readonly catalog?: AciCatalog;
 };
 
 /**
@@ -178,11 +210,27 @@ export async function buildHarnessEngine(
       env: process.env,
     }).scan()
   );
+  // #356 T6:subagent manager 条件装配 — 与 MCP 同门(surface !== "ask"):
+  //   - chat/tui/serve 自建 createSubAgentManager({ spawn: defaultSubAgentSpawn });
+  //     opts.subagentManager 测试缝覆盖注入。
+  //   - ask 不创建(SC8 守门,oneshot 即用即抛,registry 缺 spawn_subagent /
+  //     subagent_result 两件 = 23 件,三方视图一致)。
+  // 注:TUI 产品入口 buildTuiDeps(#365 T2)现委托 build-engine({surface:"tui"})
+  // 装配,自动继承 subagentManager / IKNOW_COORDINATOR_TEXT / shutdown 句柄
+  // — chat / tui / serve / ask 四入口共用 SSOT,工具面 25 件永不漂移。
+  // 位置在 registry 装配之前:registry 的 subagentManager opt 在此消费,故放
+  // MCP 条件装配段之前(同 surface 条件,语义同形)。
+  const subagentManager: SubAgentManager | undefined =
+    surface !== "ask"
+      ? (opts.subagentManager ??
+        createSubAgentManager({ spawn: defaultSubAgentSpawn }))
+      : undefined;
   const reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
     ...(memoryEnabled ? { memoryDir } : undefined),
     skillCatalog,
+    ...(subagentManager ? { subagentManager } : undefined),
     onEdit: (file) => lspNotifier.invalidate(file),
   });
   // #337:动态 registry 包装 —— 让 inner executor 能解析 registerExternal
@@ -206,6 +254,7 @@ export async function buildHarnessEngine(
     catalog: reg.catalog,
     policy,
     askUser,
+    ...(opts.hooks ? { hooks: { postToolUse: opts.hooks } } : {}),
   });
 
   // registry 单源:reg.inner 已是按 memoryEnabled 条件化的最终视图(8 或 10 件)。
@@ -231,6 +280,10 @@ export async function buildHarnessEngine(
     mcpManager = (opts.createMcpManager ?? createMcpManager)({
       config: config.servers,
       registerExternal: reg.registerExternal,
+      // #337 reload 缝:manager.reload 先按名撤回旧 server 已注册的 mcp__* 工具,
+      // 再重建——不注入则 reload 后 stale 名残留 externalByExt,重名 register
+      // 触发 Gate2 duplicate,新 server 工具静默注册失败(与 TUI deps 同款装配)。
+      unregisterExternal: reg.unregisterExternal,
       // #378 根因 B: env 注入连接超时(默认 60_000, 缓解 npx -y cold start)。
       timeoutMsOverride: env.mcp.connectTimeoutMs,
       ...(opts.createMcpClient ? { createClient: opts.createMcpClient } : {}),
@@ -286,6 +339,11 @@ export async function buildHarnessEngine(
           description: entry.description ?? "",
           ...(entry.disabled ? { disabled: true } : {}),
         })),
+      // #361 T8 subagent coordinator 引导层 — 条件与 registry 同源:
+      // subagentManager 装配 (surface !== "ask") 时注入 IKNOW_COORDINATOR_TEXT,
+      // ask (无 manager) 不注入 → 装配层段缺席 (字节级零变化)。文案含验收6
+      // 关键词 proactive / parallelizable / blocks until finished。
+      ...(subagentManager ? { coordinatorText: IKNOW_COORDINATOR_TEXT } : {}),
     }),
     // #119 T7:env.compress 透传 → deps.compress(LoopEngineDeps.compress 可选缝)。
     // IknowCompressEnv 必填(contextWindow / thresholdTokens),缺失即压缩关闭由
@@ -299,7 +357,26 @@ export async function buildHarnessEngine(
   return {
     deps,
     engine,
-    ...(mcpManager ? { shutdown: () => mcpManager!.shutdown() } : {}),
+    ...(subagentManager ? { subagentManager } : {}),
+    // #337 T8 / #361 Phase D:透出 skillCatalog + mcpManager + catalog,供
+    // TUI deps 构建扩展面(TuiExtensions.skillCatalog / mcp.status / mcp.reload /
+    // listMcpTools)。全 surface 通用装配件,非 TUI 专用 — 不改变既有消费方。
+    skillCatalog,
+    ...(mcpManager ? { mcpManager } : {}),
+    catalog: reg.catalog,
+    // #356 T6:shutdown 组合 MCP + subagent 两清理。SC12 顺序:mcpManager first →
+    // subagentManager second(两者无共享可变状态,Promise.all 并发触发;顺序仅
+    // 语义标注,非严格串行 — ask 入口两者都缺席时 shutdown 也缺席)。
+    ...(mcpManager || subagentManager
+      ? {
+          shutdown: async (): Promise<void> => {
+            await Promise.all([
+              mcpManager?.shutdown(),
+              subagentManager?.shutdown(),
+            ]);
+          },
+        }
+      : {}),
   };
 }
 

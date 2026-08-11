@@ -10,7 +10,7 @@
  *    各自的处理函数（Ctrl+C → notice）；
  *  - Bracketed paste：mockInput.pasteBracketedText(text) → usePaste
  *    触发 → 受控 inputValue 更新 → 输入框显示文本（不再显示
- *    「type message…」placeholder）。
+ *    「输入消息…」placeholder）。
  *  - Kitty 协议：testRender 默认 kittyKeyboard: true 启 Kitty 解析
  *    路径（OpenTUI 内置），不测协议字节。
  *
@@ -124,12 +124,12 @@ async function renderAppWithThinking() {
   return { setup };
 }
 
-test("首帧渲染：占位「type message…」可见，notice 区域为空", async () => {
+test("首帧渲染：占位「输入消息…」可见，notice 区域为空", async () => {
   const setup = await renderApp();
   const frame = setup.captureCharFrame();
-  // 输入框（PromptInput）边框可见 + 占位符存在。
+  // 输入框（PromptInput）边框可见 + 占位符存在（#377 起中文占位）。
   expect(frame).toContain("╭");
-  expect(frame).toContain("type message");
+  expect(frame).toContain("输入消息");
   await setup.renderer.destroy();
 });
 
@@ -174,7 +174,7 @@ test("bracketed paste：pasteBracketedText → 输入框显示粘贴文本", asy
   await setup.mockInput.pasteBracketedText(text);
   await settle(setup);
   const frame = setup.captureCharFrame();
-  // 粘贴的文本应出现在输入框（替代「type message…」占位）。
+  // 粘贴的文本应出现在输入框（替代「输入消息…」占位）。
   expect(frame).toContain(text);
   await setup.renderer.destroy();
 });

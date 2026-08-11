@@ -5,8 +5,8 @@
  * 一致（#146 TUI 自建 slash 词表 + 解析 + Tab 补全 + hint 行）；仅文件头注释
  * 更新为本次迁移说明。纯 TS 模块，无 ink / OpenTUI 依赖。
  *
- * 词表 10 条：/sessions /new /mcp /quit /exit /help /info /thinking /profile
- * /compact。/reset 不在词表内即天然不可达（Q5c 废除）。
+ * 词表 11 条：/sessions /new /quit /exit /help /info /thinking /profile
+ * /compact /rewind /mcp。/reset 不在词表内即天然不可达（Q5c 废除）。
  *
  * 解析规则：输入 trim 后以 "/" 开头先过词表；未命中 → unknown（UI 提示）；
  * 不以 "/" 开头 → message（普通消息）。
@@ -37,6 +37,7 @@ export type TuiSlashCommand =
   | "thinking"
   | "profile"
   | "compact"
+  | "rewind"
   | "mcp";
 
 export type SlashParseResult =
@@ -67,6 +68,7 @@ const VOCABULARY: ReadonlySet<string> = new Set<TuiSlashCommand>([
   "thinking",
   "profile",
   "compact",
+  "rewind",
   "mcp",
 ]);
 
@@ -84,8 +86,8 @@ export function parseTuiInput(raw: string): SlashParseResult {
 
 /** /help 词表文案（无 emoji；中文与仓库 usage 文案风格一致）。
  *  #337 Phase C：`/<skill-name>  加载技能`（skill 名由调用方动态拼入，不参与
- *  静态词表）。#361 Phase D：/mcp 真描述（词表 10 条，顺序 sessions / new /
- *  mcp / ... / quit，与 slashSuggestions 的词表序一致）。 */
+ *  静态词表）。#361 Phase D：/mcp 真描述（词表 11 条含 rewind，/mcp 末位与
+ *  slashSuggestions 的词表序一致）。 */
 export function helpLines(
   skillNames?: ReadonlyArray<string>
 ): ReadonlyArray<string> {
@@ -102,6 +104,7 @@ export function helpLines(
     "/thinking  切换思考过程折叠/展开",
     "/profile   标记首启引导完成（先在外侧填好 ~/.iknow/user.md）",
     "/compact   压缩上下文（保留尾部，裁剪早期消息）",
+    "/rewind    回退到更早的回合（选择锚点后确认）",
     "/quit      退出（别名 /exit）",
     ...skillLines,
     "Ctrl+C     打断前台运行中的 turn",
@@ -120,6 +123,7 @@ const HINT_DESCRIPTIONS: Record<TuiSlashCommand, string> = {
   profile: "标记首启引导完成",
   compact: "压缩上下文",
   mcp: "查看 MCP 服务看板",
+  rewind: "回退到更早的回合",
   quit: "退出（别名 /exit）",
   exit: "同 /quit",
 };

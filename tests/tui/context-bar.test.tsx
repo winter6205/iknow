@@ -124,7 +124,8 @@ describe("纯函数（数值语义 SSOT）", () => {
 
   test("toolIndicator：内嵌空白折叠为单空格（防止换行/多空格导致底栏变形）", () => {
     // 换行 + 多空格 → 折叠后单空格；预算内原样返回。
-    const inBudget = toolIndicator("a\nb  c", 11);
+    // "[tool] a b c" 宽 12 列,精确预算 12 → 折叠后原样返回。
+    const inBudget = toolIndicator("a\nb  c", stringWidth("[tool] a b c"));
     expect(inBudget).toBe("[tool] a b c");
     // 超预算截断：迭代折叠后文本，输出不含原换行。
     const truncated = toolIndicator("alpha\nbeta  gamma", 14);

@@ -277,7 +277,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     await app.pressEscape();
     await untilFrame(
       app.setup,
-      (f) => f.includes("type message"),
+      (f) => f.includes("输入消息"),
       8000,
       "back"
     );

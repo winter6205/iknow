@@ -27,7 +27,11 @@ import {
   type CliRendererConfig,
 } from "@opentui/core";
 import { createRoot } from "@opentui/react";
-import { prepareRuntime, type RuntimeBundle } from "../cli/runtime.js";
+import {
+  prepareRuntime,
+  registerShutdown,
+  type RuntimeBundle,
+} from "../cli/runtime.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import {
   buildTuiDeps,
@@ -126,10 +130,24 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         tuiExtensions = ext;
       },
     };
-    const deps = await buildTuiDeps(bundle, depsOpts);
+    // T2 返回平铺的 LoopEngineDeps & { subagentManager?, shutdown? }(非嵌套
+    // { deps, ... }),rest 解构剥离两个句柄后 deps 即 LoopEngineDeps。
+    const { subagentManager, shutdown, ...deps } = await buildTuiDeps(
+      bundle,
+      depsOpts
+    );
+    // #365 T4:挂 MCP + subagent 组合 shutdown 到进程信号(runtime.ts 语义,
+    // 与 chat/serve 一致)。T4 起 registerShutdown 参数放宽为结构
+    // `{ shutdown?: }`(DRIFT-1),TUI 只透 shutdown 句柄 — deps / engine /
+    // subagentManager 形态与钩子无关,不再用 undefined as never 占位。
+    // shutdown 缺席(防御,ask 形态不可能) → registerShutdown 内部 no-op。
+    // TUI exitOnCtrlC=false 是 renderer 层打断前台 turn,SIGINT 到 Node
+    // 进程层 handler 仍响应。
+    registerShutdown({ ...(shutdown ? { shutdown } : {}) });
     const bridge = createTuiBridge({
       dataDir: options.dataDir,
       deps,
+      subagentManager,
       traceOut: options.traceOut,
       inflight,
       contextWindow: bundle.env.compress.contextWindow,

@@ -3,7 +3,21 @@
  */
 
 export type CliCommand =
-  "chat" | "ask" | "oneshot" | "help" | "serve" | "trace" | "tui";
+  | "chat"
+  | "ask"
+  | "oneshot"
+  | "help"
+  | "serve"
+  | "trace"
+  | "tui"
+  /**
+   * #356 subagent worker headless 重入 (双下划线前缀区别产品形态,spec
+   * Boundaries Never)。本命令不暴露在 printUsage / getVersion 公共展示路径;
+   * 仅由父代理通过 child_process.spawn 触发,operator 不直调。
+   * argv 早 flag `--subagent-worker` 在 parseArgs for-loop 最前面检测,
+   * 一旦命中立即返回 baseParsed,不再走任何产品分支。
+   */
+  | "__subagent_worker__";
 
 export type ParsedCli = {
   command: CliCommand;
@@ -58,6 +72,12 @@ export type ParsedCli = {
    * 缺省 false = 默认自动 open。
    */
   noOpen: boolean;
+  /**
+   * T4: `iknow chat --resume <id>` 锚定既有 conversationId 续跑。解析保持
+   * command-agnostic(后续 ask/serve/tui 可独立决策是否消费);仅 chat 入口
+   * 实际消费。`undefined`(默认)= 新开会话(随机 UUID)。
+   */
+  resumeId?: string;
 };
 
 export type ParseArgsOptions = {
@@ -73,6 +93,12 @@ export type ParseArgsOptions = {
  * - no positionals + interactive → chat
  * - no positionals + !interactive → help
  * - ask / bare query with empty text → missingQuery (caller exits 1)
+ *
+ * #356 early flag: `--subagent-worker` 在 for-loop 最前面检测(早于
+ * `-h` / `--version` / 既有 flag 分支)。一旦命中立即返回
+ * `baseParsed({command:"__subagent_worker__", fields:{...defaults}})`,
+ * 不进入任何产品形态分支。子代理由父进程 spawn 后 stdin 喂 envelope,
+ * CLI argv 不再包含 chat/ask/serve/tui 等 sub-command。
  */
 export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   const argv = opts.argv;
@@ -86,10 +112,33 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   let maxBytes: number | undefined;
   let maxTurns: number | undefined;
   let noOpen = false;
+  let resumeId: string | undefined;
   const rest: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
+    // #356 early flag:在 for-loop 最前面检测,一旦命中 → 立即返回 worker
+    // command。早 flag 语义覆盖后续任何 argv 项(即便用户同时塞了
+    // chat/ask/serve/tui 也以 worker 优先,operator 不直调,只为父进程 spawn)。
+    // 不在 printUsage / getVersion 公共展示路径露出。
+    if (a === "--subagent-worker") {
+      return baseParsed({
+        command: "__subagent_worker__",
+        fields: {
+          json: false,
+          port: 8787,
+          host: "127.0.0.1",
+          traceOut: undefined,
+          dataDir: undefined,
+          maxBytes: undefined,
+          maxTurns: undefined,
+          noOpen: false,
+          query: "",
+          missingQuery: false,
+          versionOnly: false,
+        },
+      });
+    }
     if (a === "-h" || a === "--help") {
       return baseParsed({
         command: "help",
@@ -102,6 +151,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           maxBytes,
           maxTurns,
           noOpen,
+          resumeId,
           query: "",
           missingQuery: false,
           versionOnly: false,
@@ -157,6 +207,16 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
     } else if (a === "--no-open") {
       // T7: 布尔 flag（无实参），关闭 trace 自动开浏览器（CI/headless）。
       noOpen = true;
+    } else if (a === "--resume") {
+      // T4: 值式 flag —— 缺失 / 空串 / 纯空白均拒绝（镜像 --port 风格）。
+      const raw = argv[++i];
+      if (raw === undefined) {
+        throw new Error("--resume requires a conversation id argument");
+      }
+      if (raw.trim().length === 0) {
+        throw new Error("--resume requires a non-empty conversation id");
+      }
+      resumeId = raw;
     } else if (a === "--data-dir") {
       const raw = argv[++i];
       if (raw === undefined) {
@@ -175,6 +235,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           maxBytes,
           maxTurns,
           noOpen,
+          resumeId,
           query: "",
           missingQuery: false,
           versionOnly: true,
@@ -194,6 +255,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
     maxBytes,
     maxTurns,
     noOpen,
+    resumeId,
     versionOnly: false,
   };
   const head = rest[0];

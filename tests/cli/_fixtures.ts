@@ -132,6 +132,7 @@ export function makeState(over: Partial<CliChatState> = {}): CliChatState {
     messages: [],
     jsonMode: false,
     session: {},
+    conversationId: null,
     ...over,
   };
 }
@@ -143,13 +144,26 @@ export interface MakeCtxOpts {
   readonly streamEventsByStep?: ReadonlyArray<
     ReadonlyArray<HarnessStreamEvent>
   >;
+  /** T2: per-step stub-model delay (milliseconds). */
+  readonly delayMs?: number;
+  /** T2: checkpoint 落盘 store；注入时 processChatLine 走持久化分支。 */
+  readonly checkpointStore?: import("../../src/session-api/store/index.ts").SessionStore;
+  /** T2: abort controller；注入时 processChatLine 把 controller.signal 传 run()。 */
+  readonly abortController?: AbortController;
 }
 
 export function makeCtx(opts: MakeCtxOpts): ChatLineContext {
   return {
     deps: makeDeps(opts.responses, {
       streamEventsByStep: opts.streamEventsByStep,
+      delayMs: opts.delayMs,
     }),
     state: makeState(opts.stateOverrides ?? {}),
+    ...(opts.checkpointStore !== undefined && {
+      checkpointStore: opts.checkpointStore,
+    }),
+    ...(opts.abortController !== undefined && {
+      abortController: opts.abortController,
+    }),
   };
 }
