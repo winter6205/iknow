@@ -90,6 +90,12 @@ export interface McpManagerOptions {
   /** T1 的 registerExternal 缝，把 mcp__ 工具追加进 ACI registry。 */
   readonly registerExternal: (defs: readonly AciToolDef[]) => void;
   /**
+   * reload 缝：按名撤回旧 slot 已注册的 mcp__* 工具。缺席时 reload
+   * 静默跳过 unregister（stale 名会残留 externalByExt，重名 register
+   * 触发 Gate2 duplicate —— 生产装配必须注入）。
+   */
+  readonly unregisterExternal?: (names: readonly string[]) => void;
+  /**
    * 连接超时毫秒（spec 假设 9：30s）。测试可注入短超时。
    * 默认 30_000。
    */
@@ -104,7 +110,8 @@ export interface McpManager {
   /** 后台化启动连接；早于 connect 完成返回。 */
   readonly start: () => Promise<void>;
   /**
-   * 重载 server 集：shutdown 现有全部 → 清 slots → 用新 config 重建 → start()。
+   * 重载 server 集：收集旧 slots 已注册工具名 → unregisterExternal 撤回 →
+   * shutdown 现有全部 → 清 slots → 用新 config 重建 → start()。
    * 幂等：未 start / 已 shutdown 也能调用。reload 返回前不阻塞在连接上
    * （内部 start() fire-and-forget，与既有 start 同语义）。
    */
@@ -286,9 +293,19 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
   }
 
   async function reload(config: readonly McpServerConfig[]): Promise<void> {
-    // shutdown 取消 in-flight + close client + SIGTERM stdio 子孙 +
-    // slot 标 failed——旧状态彻底终结后重建。
+    // 先在 shutdown/rebuild 前抓旧 slots 已注册工具全名（mcp__<server>__<tool>）：
+    // slot.registered 属于 slot，rebuildSlots 的 slots.clear() 会把它一并清掉，
+    // 漏抓将导致外部 registry 残留 stale 名（重名 register 触发 Gate2 duplicate）。
+    // disabled / 未连接过的 slot 无 registered，flat 后为空，unregister 幂等忽略。
+    const oldNames: string[] = [];
+    for (const slot of slots.values()) {
+      if (slot.registered) oldNames.push(...slot.registered);
+    }
+    // shutdown 取消 in-flight + close + 标 failed —— 旧状态彻底终结后，撤回
+    // 这些名字的外部注册（此后不再有 call 穿过 stale 名）。unregisterExternal
+    // 缺席（未注入装配）静默跳过，保证幂等。
     await shutdown();
+    opts.unregisterExternal?.(oldNames);
     rebuildSlots(config);
     bootstrapAll();
   }

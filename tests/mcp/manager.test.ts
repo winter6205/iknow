@@ -751,4 +751,91 @@ describe("MCP manager — reload", () => {
 
     await mgr.shutdown();
   });
+
+  it("reload unregisters stale tool names of a removed server (case A)", async () => {
+    const unregistered: string[][] = [];
+    const mgr = createMcpManager({
+      config: [makeStdio("alpha")],
+      registerExternal: () => {},
+      unregisterExternal: (names) => {
+        unregistered.push([...names]);
+      },
+      createClient: () =>
+        makeStubClient({
+          initialTools: [sampleTool("echo"), sampleTool("ping")],
+          listChangedHandlers: [],
+          closeHandlers: [],
+        }),
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "alpha", "connected", 2000);
+
+    // reload 到只剩 beta —— alpha 已注册的工具名必须被撤回
+    await mgr.reload([makeStdio("beta")]);
+
+    expect(unregistered).toHaveLength(1);
+    expect(unregistered[0]!.sort()).toEqual([
+      "mcp__alpha__echo",
+      "mcp__alpha__ping",
+    ]);
+
+    await mgr.shutdown();
+  });
+
+  it("reload purges stale names and allows same-name re-register without Gate2 duplicate (case B)", async () => {
+    // 真 AciRegistry 装配：registerExternal / unregisterExternal 双闭包直连。
+    // 两个 server 都暴露同名工具 lookup —— 旧名不撤回则重注册触发 duplicate。
+    const reg = createAciRegistry([]);
+    let mgr: McpManager | undefined;
+    const createClientFor = (): McpClientHandle =>
+      makeStubClient({
+        initialTools: [sampleTool("lookup")],
+        listChangedHandlers: [],
+        closeHandlers: [],
+      });
+    mgr = createMcpManager({
+      config: [makeStdio("old")],
+      registerExternal: (defs) => reg.registerExternal(defs),
+      unregisterExternal: (names) => reg.unregisterExternal(names),
+      createClient: createClientFor,
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "old", "connected", 2000);
+    expect(reg.catalog.get("mcp__old__lookup")).toBeDefined();
+
+    // 重载：old → new（同名工具 lookup）。旧名未撤回会触发 duplicate。
+    await mgr.reload([makeStdio("new")]);
+    await waitForStatus(mgr, "new", "connected", 2000);
+
+    // stale 名从 catalog 消失，新名成功注册（未抛 RegistryConstructionError）
+    expect(reg.catalog.get("mcp__old__lookup")).toBeUndefined();
+    expect(reg.catalog.get("mcp__new__lookup")).toBeDefined();
+
+    await mgr.shutdown();
+  });
+
+  it("reload without unregisterExternal still works (idempotent, case C)", async () => {
+    const mgr = createMcpManager({
+      config: [makeStdio("alpha")],
+      registerExternal: () => {},
+      // 故意不注入 unregisterExternal
+      createClient: () =>
+        makeStubClient({
+          initialTools: [sampleTool("echo")],
+          listChangedHandlers: [],
+          closeHandlers: [],
+        }),
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "alpha", "connected", 2000);
+
+    await expect(mgr.reload([makeStdio("beta")])).resolves.toBeUndefined();
+    await waitForStatus(mgr, "beta", "connected", 2000);
+    expect(mgr.status().map((s) => s.name)).toEqual(["beta"]);
+
+    await mgr.shutdown();
+  });
 });

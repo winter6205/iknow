@@ -245,6 +245,10 @@ export async function buildTuiDeps(
   mcpManager = createMcpManager({
     config: mcpConfig.servers,
     registerExternal: reg.registerExternal,
+    // reload 缝：manager.reload 先按名撤回旧 server 已注册的 mcp__* 工具，
+    // 再重建——不注入则 reload 后 stale 名残留 externalByExt，重名 register
+    // 触发 Gate2 duplicate，新 server 工具静默注册失败。
+    unregisterExternal: reg.unregisterExternal,
     ...(opts.createMcpClient ? { createClient: opts.createMcpClient } : {}),
   });
   void mcpManager.start().catch((err) => {
