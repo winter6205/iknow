@@ -37,6 +37,7 @@
     "probe:sandbox": "tsx scripts/sandbox-probe.ts",
     "probe:lsp": "tsx scripts/lsp-probe.ts",
     "probe:tui-binding": "$HOME/.bun/bin/bun run scripts/tui-binding-probe.ts",
+    "probe:t4-real-llm": "tsx scripts/t4-spawn-subagent-real-llm-smoke.ts",
     "prepare": "husky"
   },
   "devDependencies": {
