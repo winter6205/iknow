@@ -31,6 +31,8 @@
 
 **TUI 渲染后端平台声明（#321/#343，2026-08-10）**：TUI 已从 ink 迁移到 @opentui/react 0.5.1（Zig 原生渲染器，仅 bun 可驱动 FFI）。**Linux（含 WSL2）实测验收通过；macOS / Windows 未验证**（原生二进制跨平台行为属上游责任）。旧 ink 实现归档 `archive/tui-ink/`（只读参考）。
 
+**TUI skill + MCP 扩展源（#337，2026-08-11）**：TUI 入口与 chat/serve 对齐 skill 与 MCP 扩展源装配——`skill` / `skill_search` 工具 + `<available_skills>` 系统段 + MCP manager 连接（`mcp__*` 工具经 tool_search discover）。slash 输入 `/` 混显静态命令 + 动态 skill 候选，Tab 补全；`/skill-name [提示词]` 确定性加载（skill 正文拼入 user message 发送）；`/mcp` 看板查看 server 状态 / 工具详情 / reload。
+
 ### 1.3 评测与质量门禁
 
 | 能力          | 说明                                                     |
