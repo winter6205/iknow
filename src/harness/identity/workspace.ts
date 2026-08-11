@@ -54,6 +54,12 @@ function userFilePath(workspace: string): string {
   return path.join(workspace, "user.md");
 }
 
+/** rev 2026-08-11 新增：BOOTSTRAP.md 文件路径（对齐 ohmo `get_bootstrap_path`）。
+ *  seed 后只读、不写；完成 = 文件被删，无需宿主钩子。 */
+export function bootstrapFilePath(workspace: string): string {
+  return path.join(workspace, "BOOTSTRAP.md");
+}
+
 async function readIfExists(p: string): Promise<string | undefined> {
   try {
     return await fs.readFile(p, "utf8");

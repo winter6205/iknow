@@ -10,7 +10,7 @@ import {
   initializeIknowWorkspace,
   readIknowState,
   writeIknowState,
-  IKNOW_BOOTSTRAP_PROMPT,
+  BOOTSTRAP_TEMPLATE,
 } from "../../../src/harness/identity/index.ts";
 
 let workDir: string;
@@ -55,59 +55,22 @@ describe("bootstrap state machine", () => {
 });
 
 /**
- * BOOTSTRAP prompt must not direct the agent to use file/bash tools against
- * `~/.iknow/` (the workspace root-isolates read_file/glob; bash hard-wall
- * rejects compound commands; write_file also stays inside workspace root).
- * Without this guarantee, first-launch turns cascade [失败] tool rows and
- * never produce an answer. The completion hook `/profile` (cli + tui) flips
- * bootstrap_seeded so bootstrap terminates when the user has filled user.md.
- *
- * Allowable: the prompt may *name* read_file / glob / compound commands in
- * a "do not use these" warning. The assertion below forbids *instructional*
- * phrasing — "use read_file", "run cat", "execute X on user.md".
+ * rev 2026-08-11:BOOTSTRAP 从对话脚本(14cd709 应急设计,断言"不要诱导工具")
+ * 改为文件模板。新语义 — agent 用 ACI 工具(read_file / write_file / edit_file)
+ * 读写 `~/.iknow/`,引导完成后自己 rm BOOTSTRAP.md(文件驱动隐式完成)。
+ * 断言同步翻转:prompt 应 *诱导* 用工具、不再提 /profile done。
  */
-describe("IKNOW_BOOTSTRAP_PROMPT: pure-conversation guide", () => {
-  it("does NOT instruct 'use read_file' / 'read it with' against ~/.iknow", () => {
-    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/use\s+read_file/i);
-    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(
-      /read\s+(it\s+)?with\s+read_file/i
-    );
+describe("BOOTSTRAP_TEMPLATE: file-driven tool guide", () => {
+  it("instructs agent to update ~/.iknow/user.md with tools", () => {
+    expect(BOOTSTRAP_TEMPLATE).toMatch(/update\s+.*user\.md/i);
+    expect(BOOTSTRAP_TEMPLATE).toMatch(/\.iknow/i);
   });
 
-  it("does NOT instruct 'use glob' against ~/.iknow", () => {
-    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/use\s+glob/i);
+  it("does NOT reference /profile done (host hook removed)", () => {
+    expect(BOOTSTRAP_TEMPLATE).not.toMatch(/\/profile\s+done/);
   });
 
-  it("does NOT instruct agent to use bash cat / sed / printf against ~/.iknow", () => {
-    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/\bcat\s+~?\/?home/);
-    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/\bcat\s+~?\/?\.iknow/);
-    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/run\s+cat/i);
-    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/use\s+sed/i);
-  });
-
-  it("does NOT instruct agent to write to ~/.iknow/user.md via shell", () => {
-    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/>>?\s*~\/?\.iknow/);
-    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/use\s+tee/i);
-    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/use\s+printf/i);
-  });
-
-  it("points the user at the /profile completion hook so bootstrap terminates", () => {
-    expect(IKNOW_BOOTSTRAP_PROMPT).toMatch(/\/profile\s+done/);
-  });
-
-  it("warns (not instructs) the agent that file/bash tools are out-of-sandbox", () => {
-    // W5 → W6: 文案已改为与真实执行对齐 — read_file 默认允许读 ~/.iknow/(用户画像);
-    // write_file / edit_file / glob 仍然 cwd-scoping 拒绝 ~/.iknow/;
-    // compound shell commands 可直达;host 拥有该目录,agent 不诱导用工具。
-    // 断言承诺:write-file 子集拒绝、read_file 显式可读、host 拥有目录、用户在外侧编辑。
-    expect(IKNOW_BOOTSTRAP_PROMPT).toMatch(/project-root sandbox/i);
-    expect(IKNOW_BOOTSTRAP_PROMPT).toMatch(/read_file\s+can\s+read/i);
-    expect(IKNOW_BOOTSTRAP_PROMPT).toMatch(
-      /write_file\s*\/\s*edit_file\s*\/\s*glob/i
-    );
-    expect(IKNOW_BOOTSTRAP_PROMPT).toMatch(/host owns this directory/i);
-    expect(IKNOW_BOOTSTRAP_PROMPT).toMatch(/in your own editor/i);
-    // 不允许回归到旧的"compound shell commands will reject"错误声明。
-    expect(IKNOW_BOOTSTRAP_PROMPT).not.toMatch(/compound.*will reject/i);
+  it("tells the agent to delete the bootstrap file when done", () => {
+    expect(BOOTSTRAP_TEMPLATE).toMatch(/delete this file/i);
   });
 });

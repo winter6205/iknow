@@ -65,7 +65,7 @@ describe("buildHarnessEngine surface → deps.system", () => {
     expect(out).toContain("iknow Identity");
     expect(out).toContain("iknow Soul");
     expect(out).toContain("User Profile");
-    expect(out).toContain("First-run bootstrap");
+    expect(out).toContain("First Contact");
   });
 
   it("tui: same as chat (bootstrap active)", async () => {
@@ -73,7 +73,7 @@ describe("buildHarnessEngine surface → deps.system", () => {
     expect(out).toContain("iknow Identity");
     expect(out).toContain("iknow Soul");
     expect(out).toContain("User Profile");
-    expect(out).toContain("First-run bootstrap");
+    expect(out).toContain("First Contact");
   });
 
   it("ask: system excludes bootstrap but keeps identity/soul/user_profile", async () => {
@@ -81,7 +81,7 @@ describe("buildHarnessEngine surface → deps.system", () => {
     expect(out).toContain("iknow Identity");
     expect(out).toContain("iknow Soul");
     expect(out).toContain("User Profile");
-    expect(out).not.toContain("First-run bootstrap");
+    expect(out).not.toContain("First Contact");
   });
 
   it("serve: bootstrap active (same as chat/tui; 2026-08-08 裁定对话型入口共享身份状态机)", async () => {
@@ -89,7 +89,7 @@ describe("buildHarnessEngine surface → deps.system", () => {
     expect(out).toContain("iknow Identity");
     expect(out).toContain("iknow Soul");
     expect(out).toContain("User Profile");
-    expect(out).toContain("First-run bootstrap");
+    expect(out).toContain("First Contact");
   });
 
   it("order: identity < soul < user_profile < bootstrap", async () => {
@@ -100,7 +100,7 @@ describe("buildHarnessEngine surface → deps.system", () => {
     );
     expect(out.indexOf("iknow Soul")).toBeLessThan(out.indexOf("User Profile"));
     expect(out.indexOf("User Profile")).toBeLessThan(
-      out.indexOf("First-run bootstrap")
+      out.indexOf("First Contact")
     );
   });
 
@@ -120,7 +120,7 @@ describe("buildHarnessEngine surface → deps.system", () => {
     expect(out).toContain("iknow Identity");
     expect(out).toContain("iknow Soul");
     expect(out).toContain("User Profile");
-    expect(out).not.toContain("First-run bootstrap");
+    expect(out).not.toContain("First Contact");
   });
 
   it("default surface (no opts.surface) is chat → bootstrap active", async () => {
@@ -132,7 +132,7 @@ describe("buildHarnessEngine surface → deps.system", () => {
     });
     const out =
       (await (deps.system as () => Promise<string | undefined>)()) ?? "";
-    expect(out).toContain("First-run bootstrap");
+    expect(out).toContain("First Contact");
   });
 
   it("ask: memory_layer inactive — deps.system still carries identity layers", async () => {
