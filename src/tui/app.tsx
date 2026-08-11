@@ -601,6 +601,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   ): Promise<void> {
     let stopReason: string | undefined;
     let lastUsage: TokenUsage | null = null;
+    let interrupted: boolean | undefined;
     const draft = createStreamDraft();
     setStreamDraft(draft);
     const onStream = (event: HarnessStreamEvent): void => {
@@ -628,6 +629,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       });
       stopReason = resp.stopReason;
       lastUsage = resp.lastUsage;
+      // B1: 打断反馈 —— cancelled 时 bridge 透传 true/false;非 cancelled
+      // (completed 等) → undefined,notice 分支只对 cancelled 生效。
+      interrupted = resp.interrupted;
     } catch (err) {
       stopReason = "protocolError";
       setNotice({ lines: [`turn 失败：${describeError(err)}`] });
@@ -658,7 +662,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       setLiveToolLines((prev) => ({ ...prev, [targetId]: [] }));
       setLiveToolRuns((prev) => ({ ...prev, [targetId]: [] }));
       if (stopReason === "cancelled") {
-        setNotice({ lines: ["已打断当前 turn（未落盘）。"] });
+        // B1: interrupted=true → checkpoint 已保存(delta>0);false → 无新内容
+        // 未落 checkpoint(delta=0);undefined → 旧链路 / 未知,保留兜底文案。
+        setNotice({
+          lines:
+            interrupted === true
+              ? ["已打断，checkpoint 已保存"]
+              : interrupted === false
+                ? ["已打断（无新内容，未落 checkpoint）"]
+                : ["已打断当前 turn"],
+        });
       }
     } catch (err) {
       // 刷新失败也要落回 idle，否则会话卡在 running-fg。

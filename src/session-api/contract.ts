@@ -31,6 +31,12 @@ export interface TurnAnswerDto {
    * （byte-stable，与 thinking/toolCalls/lastUsage 同模式）。
    */
   readonly stopSummary?: string;
+  /**
+   * B1：Ctrl+C 打断反馈 —— 仅 stopReason === "cancelled" 时存在：
+   * true = checkpoint 已保存（cancelled + delta>0）；false = 无新内容未落盘
+   * （cancelled + delta=0）。其它 stopReason → 字段缺席（byte-stable）。
+   */
+  readonly interrupted?: boolean;
 }
 
 /** T1: 单条 thinking 文本视图（redacted_thinking 仅计数，data 永不上 wire）。 */

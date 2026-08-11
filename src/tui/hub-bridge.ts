@@ -86,6 +86,9 @@ export interface TuiPostResult {
   readonly jsonMode: boolean;
   /** T3: 最近一次成功模型调用的 token usage（wire 字段缺席 → null，与 RunResult 同语义）。 */
   readonly lastUsage: TokenUsage | null;
+  /** B1: Ctrl+C 打断反馈 —— cancelled 时存在（true=checkpoint 已保存 /
+   *  false=无新内容未落盘）；非 cancelled 缺席（undefined）。 */
+  readonly interrupted?: boolean;
 }
 
 export interface TuiBridge {
@@ -172,6 +175,9 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
           jsonMode: resp.session.json_mode,
           // T3: wire 字段缺席等价 null（与 RunResult.lastUsage 语义一致）。
           lastUsage: resp.turn.answer.lastUsage ?? null,
+          // B1: 仅 cancelled 时 wire 存在 → 原样透传；非 cancelled 缺席 →
+          // undefined（app.tsx 以 `=== undefined` 区分旧链路 / 正常停）。
+          interrupted: resp.turn.answer.interrupted,
         };
       } finally {
         opts.inflight.unmark(conversationId);

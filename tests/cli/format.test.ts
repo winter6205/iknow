@@ -123,6 +123,61 @@ describe("formatRunHuman", () => {
     assert.ok(out.includes("partial"));
     assert.ok(out.includes("stop=timeout"));
   });
+
+  // -- B1: Ctrl+C 打断反馈（interruptNote 前缀） -------------------------------
+
+  it("cancelled + interruptNote=已保存 → 输出含 ⏹ 已打断 与 已保存", () => {
+    const out = formatRunHuman({
+      result: mkResult({
+        finalText: "",
+        stopReason: "cancelled",
+        turnCount: 0,
+      }),
+      trace: mkTrace([]),
+      interruptNote: "已保存",
+    });
+    assert.ok(out.includes("⏹ 已打断"), "note 前缀必须出现;got: " + out);
+    assert.ok(out.includes("已保存"), "note 文案必须透传;got: " + out);
+    assert.ok(out.includes("stop=cancelled"), "状态行仍在;got: " + out);
+    // 前缀独立成行,状态行紧随其后。
+    assert.match(out, /⏹ 已打断，已保存\nstop=cancelled/);
+  });
+
+  it("cancelled + interruptNote=未落checkpoint → 输出含 ⏹ 已打断 与 未落", () => {
+    const out = formatRunHuman({
+      result: mkResult({
+        finalText: "",
+        stopReason: "cancelled",
+        turnCount: 0,
+      }),
+      trace: mkTrace([]),
+      interruptNote: "未落checkpoint",
+    });
+    assert.ok(out.includes("⏹ 已打断"));
+    assert.ok(out.includes("未落checkpoint"));
+    assert.match(out, /⏹ 已打断，未落checkpoint\nstop=cancelled/);
+  });
+
+  it("completed + 无 interruptNote → 输出不含 ⏹ 已打断(byte-stable)", () => {
+    const out = formatRunHuman({
+      result: mkResult({ finalText: "hello", stopReason: "completed" }),
+      trace: mkTrace([]),
+    });
+    assert.ok(!out.includes("⏹ 已打断"), "非打断不得出现 note;got: " + out);
+  });
+
+  it("cancelled + interruptNote 缺席(旧链路)→ 无前缀,与打断前输出一致", () => {
+    const out = formatRunHuman({
+      result: mkResult({
+        finalText: "",
+        stopReason: "cancelled",
+        turnCount: 0,
+      }),
+      trace: mkTrace([]),
+    });
+    assert.ok(!out.includes("⏹ 已打断"));
+    assert.equal(out, "\n\nstop=cancelled · turns=0 · tools=- · 0ms");
+  });
 });
 
 describe("formatRunJson", () => {

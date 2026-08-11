@@ -61,6 +61,9 @@ export interface FormatRunOpts {
 export interface FormatRunHumanOpts extends FormatRunOpts {
   /** #152 T5:thinking 展示开关;默认 false。 */
   readonly showThinking?: boolean;
+  /** B1: Ctrl+C 打断反馈文案。仅 cancelled 时由调用方(chat-session)算好
+   *  传入("已保存"/"未落checkpoint");缺省 → 状态行不加前缀,byte-stable。 */
+  readonly interruptNote?: string;
 }
 
 /**
@@ -178,16 +181,19 @@ export function renderAssistantAnswer(opts: {
  * 模型调用,不显示。
  */
 export function formatStatusLine(opts: FormatRunHumanOpts): string {
-  const { result, trace } = opts;
+  const { result, trace, interruptNote } = opts;
   const toolNames = flattenToolNames(trace);
   const tools = toolNames.length > 0 ? toolNames.join(TOOL_LIST_SEP) : NO_TOOLS;
-  return (
+  const status =
     `stop=${result.stopReason} · ` +
     `turns=${result.turnCount} · ` +
     `tools=${tools} · ` +
     `${trace.totals.totalDurationMs}ms` +
-    tokenSegment(result.lastUsage)
-  );
+    tokenSegment(result.lastUsage);
+  // B1: 打断反馈作为状态行前缀 —— 流式宿主只 emit statusLine(chat-session.ts
+  // 861),note 必须骑在 statusLine 上才不丢;formatRunHuman 委托本函数,
+  // 两路径都带。非 cancelled → interruptNote undefined → 无前缀,byte-stable。
+  return interruptNote ? `⏹ 已打断，${interruptNote}\n${status}` : status;
 }
 
 /**

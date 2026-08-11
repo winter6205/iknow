@@ -51,6 +51,11 @@ const neverResolvingAdapter: LoopAdapter = {
   encodeToolResults: () => [],
 };
 
+/** B1: 单文本 user 消息构造(B1 直测 conditionalSave 用)。 */
+function userMsg(t: string): AnthropicNativeMessage {
+  return { role: "user", content: [{ type: "text", text: t }] };
+}
+
 function sampleFile(opts: {
   readonly id: string;
   readonly overrides?: Partial<SessionFileV1>;
@@ -382,6 +387,125 @@ describe("boundary: exception — cancelled signal", () => {
     // The pure-function path (shouldPersistCheckpoint with delta=0) is
     // covered by checkpoint.test.ts — here we exercise the realistic
     // cancelled-with-progress hub path.
+  });
+
+  it("cancelled + delta>0 → answer.interrupted === true (B1)", async () => {
+    // 与上一个用例同诱导:delayMs 保证 model in-flight 时 abort 生效,
+    // run resolve cancelled,且本轮已追加 user 消息(delta=1 > 0)→ 实际落盘。
+    const tool = createStubTool({ name: "noop", next: () => ({}) });
+    const registry = createRegistry([tool]);
+    const executor = createExecutor(registry);
+    const adapter = createStubModel({
+      responses: [assistantResult({ texts: ["should not appear"] })],
+      delayMs: 500,
+    });
+    const deps: LoopEngineDeps = { adapter, executor, registry, maxTurns: 5 };
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 50);
+
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "will be cancelled",
+      signal: controller.signal,
+    });
+    assert.equal(res.turn.answer.stopReason, "cancelled");
+    // B1: interrupted 必须存在且为 true(shouldPersistCheckpoint=true)。
+    assert.equal("interrupted" in res.turn.answer, true);
+    assert.equal(res.turn.answer.interrupted, true);
+  });
+
+  it("conditionalSave cancelled + delta=0 → 返回 false 且不落盘 (B1)", async () => {
+    // 真实 hub 路径下 run() 总在 abort 前追加 user 消息(delta 恒 ≥1),delta=0
+    // 分支只能以合成 RunResult 直测 conditionalSave —— 计划原文:「conditionalSave
+    // cancelled + delta=0 → returns false」。private 成员经
+    // `hub as unknown as { conditionalSave: (...) => Promise<boolean> }` 收窄
+    // (TypeScript 对同一字面量类型的窄化在运行时无存根,直接调真实实现)。
+    const hub = makeHub(makeDeps([]));
+    const file = sampleFile({
+      id: "b1-delta0",
+      overrides: { messages: [userMsg("q")], turnCount: 0, checkpoints: [] },
+    });
+    const conditionalSave = (
+      hub as unknown as {
+        conditionalSave(opts: {
+          readonly conversationId: string;
+          readonly session: SessionFileV1;
+          readonly result: {
+            readonly finalText: string | null;
+            readonly messages: ReadonlyArray<AnthropicNativeMessage>;
+            readonly turnCount: number;
+            readonly stopReason: string;
+            readonly lastUsage: null;
+          };
+          readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
+        }): Promise<boolean>;
+      }
+    ).conditionalSave;
+    // cancelled + delta=0(prior=[q] 与 result.messages 同长)→ false,不写文件。
+    // 解构出的方法丢 this,须 .call(hub, …) 绑定 store。
+    const savedFalse = await conditionalSave.call(hub, {
+      conversationId: file.conversation_id,
+      session: file,
+      result: {
+        finalText: null,
+        messages: [userMsg("q")], // delta=0
+        turnCount: 0,
+        stopReason: "cancelled",
+        lastUsage: null,
+      },
+      priorMessages: [userMsg("q")],
+    });
+    assert.equal(savedFalse, false);
+    await assert.rejects(
+      () => store.load(file.conversation_id),
+      (err: unknown) => (err as { kind?: string }).kind === "not_found",
+      "delta=0 不得落盘任何文件"
+    );
+
+    // cancelled + delta>0 → true 且落盘(与 shouldPersistCheckpoint 判定一致)。
+    const id2 = "b1-delta1";
+    const file2 = sampleFile({
+      id: id2,
+      overrides: { messages: [], turnCount: 0 },
+    });
+    const savedTrue = await conditionalSave.call(hub, {
+      conversationId: id2,
+      session: file2,
+      result: {
+        finalText: null,
+        messages: [userMsg("q")], // delta=1 vs prior []
+        turnCount: 0,
+        stopReason: "cancelled",
+        lastUsage: null,
+      },
+      priorMessages: [],
+    });
+    assert.equal(savedTrue, true);
+    const persisted = await store.load(id2);
+    assert.equal(persisted.messages.length, 1);
+    assert.equal(persisted.checkpoints?.[0]?.interruptReason, "cancelled");
+  });
+});
+
+describe("postMessage answer wire fields — interrupted (B1)", () => {
+  it("completed → interrupted 字段缺席(byte-stable)", async () => {
+    const hub = makeHub(makeDeps([assistantResult({ texts: ["plain"] })]));
+    const { session } = await hub.createSession();
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "hi",
+    });
+    assert.equal(res.turn.answer.stopReason, "completed");
+    assert.equal("interrupted" in res.turn.answer, false);
+    // 与既有 byte-stable 断言同键集(无新增键泄漏)。
+    assert.deepEqual(Object.keys(res.turn.answer).sort(), [
+      "finalText",
+      "stopReason",
+      "turnCount",
+    ]);
   });
 });
 

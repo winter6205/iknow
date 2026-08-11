@@ -244,12 +244,22 @@ export async function processChatLine(
     ) {
       ctx.state.messages = Object.freeze([...result.messages]);
     }
+    // B1: Ctrl+C 打断反馈 —— 仅 cancelled 时提示 checkpoint 是否已保存。
+    // 与上方 persistChatSessionCheckpoint 同源判定(shouldPersistCheckpoint),
+    // 保证「状态行文案」与「实际落盘」一致;非 cancelled → undefined(无前缀)。
+    const interruptNote =
+      result.stopReason === "cancelled"
+        ? shouldPersistCheckpoint(result, priorMessages)
+          ? "已保存"
+          : "未落checkpoint"
+        : undefined;
     const human = !ctx.state.jsonMode;
     const output = human
       ? formatRunHuman({
           result,
           trace,
           showThinking: ctx.showThinking,
+          interruptNote,
         })
       : formatRunJson({ result, trace });
     return {
@@ -258,7 +268,12 @@ export async function processChatLine(
       // #195:status line for the streaming chat host(non-streamed / pipe /
       // json paths ignore it — they consume `output` unchanged).
       statusLine: human
-        ? formatStatusLine({ result, trace, showThinking: ctx.showThinking })
+        ? formatStatusLine({
+            result,
+            trace,
+            showThinking: ctx.showThinking,
+            interruptNote,
+          })
         : undefined,
       ranQuery: true,
     };
@@ -737,6 +752,11 @@ async function runInteractive(opts: {
   let sigintCount = 0;
   /** Coalesce same-tick dual delivery (process + readline) without timed debounce. */
   let sigintCoalesce = false;
+  /** B1: 首次 Ctrl+C 空闲分支的提示 —— 明确「空闲不打断」语义,避免用户误以为
+   *  当前 turn 被打断。busy 分支文案保持不变(见 onSigint)。 */
+  const printIdleCtrlCNotice = (): void => {
+    writeErr("\n当前无运行中的 turn（Ctrl+C 空闲时不打断）；/quit 退出");
+  };
   const onSigint = (): void => {
     if (sigintCoalesce) {
       return;
@@ -748,15 +768,19 @@ async function runInteractive(opts: {
 
     sigintCount += 1;
     if (sigintCount === 1) {
-      writeErr("\n再次 Ctrl+C 退出，或输入 /quit");
       // T2: busy 时第一次 Ctrl+C 打断 in-flight turn。controller.signal 由
       // processChatLine 透传到 run(),signal.abort → run 以 stopReason
       // "cancelled" resolve → post-run 路径落 checkpoint(recoverable)。
       // 空闲时不 abort(避免污染下一次 turn),直接重绘 prompt。
       if (busy) {
+        writeErr("\n再次 Ctrl+C 退出，或输入 /quit");
         ctx.abortController?.abort();
       } else if (!closed) {
+        printIdleCtrlCNotice();
         rl.prompt(true);
+      } else {
+        // closed 兜底:仍提示退出路径(与改前「无条件打印」一致)。
+        writeErr("\n再次 Ctrl+C 退出，或输入 /quit");
       }
       return;
     }
