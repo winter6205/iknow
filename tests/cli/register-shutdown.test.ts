@@ -313,7 +313,7 @@ describe("registerShutdown (#365 T5)", () => {
     );
     expect(r.timedOut).toBe(false);
     expect(r.code, `child stderr: ${r.stderr}`).toBe(130);
-    expect(r.disposeRan).toBe(true);
+    expect(r.disposeRan, `child stderr: ${r.stderr}`).toBe(true);
     expect(readFileSync(join(sentinelDir, "dispose-ran"), "utf8")).toBe("ran");
   }, 90000);
 
