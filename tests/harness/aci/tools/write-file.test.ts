@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import {
   access,
-  mkdir,
   mkdtemp,
   readFile,
   rm,
@@ -10,7 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, it } from "vitest";
+import { afterEach, describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 import { createWriteFileTool } from "../../../../src/harness/aci/tools/write-file.ts";
@@ -251,87 +250,6 @@ describe("write_file — handler input validation", () => {
           extra: true,
         }),
       ToolExecutionError
-    );
-  });
-});
-
-// ── #196 rev 2026-08-11 T8: write_file 允许写 ~/.iknow/（isolated HOME）──
-describe("write_file — ~/.iknow profile write allowed by default (isolated HOME)", () => {
-  let origHome: string | undefined;
-  let fakeHome: string;
-  let fakeIknow: string;
-  const isolatedScratch: string[] = [];
-
-  beforeAll(async () => {
-    origHome = process.env.HOME;
-    fakeHome = await mkdtemp(join(tmpdir(), "write-file-profile-home-"));
-    fakeIknow = join(fakeHome, ".iknow");
-    await mkdir(fakeIknow, { recursive: true });
-    process.env.HOME = fakeHome;
-  });
-
-  afterAll(async () => {
-    process.env.HOME = origHome;
-    await Promise.all(
-      isolatedScratch
-        .splice(0)
-        .map((p) => rm(p, { recursive: true, force: true }))
-    );
-  });
-
-  it("writes ~/.iknow/user.md (profile dir is an extraWriteRoot)", async () => {
-    const root = await makeScratch("write-file-profile-root-");
-    const tool = createWriteFileTool(root);
-
-    const res = await tool.handler({
-      path: "~/.iknow/user.md",
-      content: "# Profile\n- Name: Test\n",
-    });
-    assert.match(String(res.output), /wrote \d+ bytes/);
-
-    const written = await readFile(join(fakeIknow, "user.md"), "utf8");
-    assert.equal(written, "# Profile\n- Name: Test\n");
-  });
-
-  it("writes ~/.iknow/BOOTSTRAP.md (delete-able seed file)", async () => {
-    const root = await makeScratch("write-file-profile-bootstrap-");
-    const tool = createWriteFileTool(root);
-
-    const res = await tool.handler({
-      path: "~/.iknow/BOOTSTRAP.md",
-      content: "# First Contact\n",
-    });
-    assert.match(String(res.output), /wrote/);
-
-    const written = await readFile(join(fakeIknow, "BOOTSTRAP.md"), "utf8");
-    assert.equal(written, "# First Contact\n");
-  });
-
-  it("still rejects a symlink escape from ~/.iknow to outside", async () => {
-    const root = await makeScratch("write-file-profile-escape-root-");
-    const outside = await makeScratch("write-file-profile-escape-out-");
-    const tool = createWriteFileTool(root);
-    await symlink(outside, join(fakeIknow, "escape"), "dir");
-
-    await assert.rejects(
-      () => tool.handler({ path: "~/.iknow/escape/secret.txt", content: "x" }),
-      (error: unknown) =>
-        error instanceof ToolExecutionError &&
-        error.message.includes("outside workspace")
-    );
-    assert.equal(await doesNotExist(join(outside, "secret.txt")), true);
-  });
-
-  it("still rejects path outside cwd AND ~/.iknow", async () => {
-    const root = await makeScratch("write-file-profile-outside-root-");
-    const outside = await makeScratch("write-file-profile-outside-");
-    const tool = createWriteFileTool(root);
-
-    await assert.rejects(
-      () => tool.handler({ path: join(outside, "x.txt"), content: "x" }),
-      (error: unknown) =>
-        error instanceof ToolExecutionError &&
-        error.message.includes("outside workspace")
     );
   });
 });

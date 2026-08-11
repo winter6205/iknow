@@ -12,7 +12,7 @@
 > 4. 装配层 `readBootstrapIfNeeded` 不再读 `bootstrap_seeded`，改读文件存在
 > 5. 删 `/profile done` 斜杠命令（chat-session / hub / app.tsx 三入口）
 > 6. 删 `appendIknowUserSections` / `BOOTSTRAP_COMPLETE_SECTIONS`（commit d1beae5 已回撤）
-> 7. ACI 写工具补 `extraWriteRoots: [~/.iknow]`，与读工具对称
+> 7. ACI 写工具**保持 cwd-scoped**（不放行 `~/.iknow/` 写），agent 写 user.md / 删 BOOTSTRAP.md 走 bash（rev 2026-08-11 操作员裁决；`resolveWithinRoot` `extraWriteRoots` 基础设施保留待未来启用）
 >
 > **supersede 关系**——以下旧段是旧产品决策（2026-08-06 的"应急设计"，基于错误沙箱前提）的产物，新决策 supersede 旧段；本文保留旧段文字以备溯源，但实施以本 Rev 块 + §"Bootstrap 机制（rev 2026-08-11）"+ §"ACI 写工具 extraWriteRoots 对称（rev 2026-08-11）" 为准：
 >
@@ -278,23 +278,17 @@ export function bootstrapFilePath(workspace: string): string;
 
 ### ACI 写工具 extraWriteRoots 对称（rev 2026-08-11）
 
-`read_file` 已有 `extraReadRoots: [~/.iknow]`（`src/harness/aci/tools/read-file.ts:36`）。`write_file` / `edit_file` 当前走 `resolveWithinRoot(root, params.path)` 不带 extra roots——agent 在引导对话里**能读不能写** `~/.iknow/`。这是与 ohmo 行为的不对称，也是引导流程被迫走"宿主编辑 + /profile done"绕路的根因。
+`read_file` 已有 `extraReadRoots: [~/.iknow]`（`src/harness/aci/tools/read-file.ts:36`）。`write_file` / `edit_file` 当前走 `resolveWithinRoot(root, params.path)` 不带 extra roots——agent 在引导对话里**能读不能写** `~/.iknow/`。
 
-**决策**：写工具补 `extraWriteRoots: [~/.iknow]`，跟读工具对称。agent 用 ACI 工具直接写 `user.md` / `BOOTSTRAP.md`（完成后 `rm` 文件）；bash 路径同样可用。`resolveWithinRoot` helper 接受可选 `extraWriteRoots` 参数；`write-file.ts` / `edit-file.ts` 各自传入 `~/.iknow` 作为额外可写根（与 read-file 的 `extraReadRoots` 镜像）。
+**决策（rev 2026-08-11 — 已定：bash 路径）**：agent 写 `~/.iknow/user.md` / 删 `BOOTSTRAP.md` 走 **bash**。`write_file` / `edit_file` **保持 cwd-scoped**（不放行 `~/.iknow/` 写）。这是操作员裁决：写工具不放行 profile 目录，agent 用 bash（bwrap 把整个 home `--bind` 进沙箱，bash 可自由读写）完成引导写入。
 
-**安全边界**：symlink 逃逸仍由 `resolveWithinRoot` 内部保证（realpath 后还在 extra root 下）。`SENSITIVE_PATH_FRAGMENTS` 不含 `.iknow`（不含 `.ssh/.aws/.gnupg/.kube/.docker/.env/.pem/.key`），因此 `~/.iknow/user.md` / `~/.iknow/BOOTSTRAP.md` 不撞 hard-wall。`hard-walls.ts:230` 兜底：non-allowlisted 命令走 ask tier 而非 hard-wall deny。
+**依据**：
 
-#### D1 裁决区（rev 2026-08-11 — 已定：工具路径）
+- bwrap 把整个 home `--bind` 进沙箱（`bwrap.ts:49-72` `bindArgs`），bash 沙箱内可自由读写 `~/.iknow/`
+- `hard-walls.ts:230` 明示 non-allowlisted 命令走 ask tier 而非 hard-wall deny；`SENSITIVE_PATH_FRAGMENTS`（`fs-policy.ts:5-12`）不含 `.iknow`，路径不撞硬墙
+- 写工具保持 cwd-scoped 是既有安全边界（read-only 放行 profile 读；写不放行——避免 agent 意外覆写用户画像）
 
-**决策**：agent 写 `~/.iknow/user.md` / `BOOTSTRAP.md` 走 **ACI 工具路径**（write_file / edit_file 补 `extraWriteRoots`），不依赖 bash。
-
-**依据**（复核后确认）：
-
-- bwrap 把整个 home `--bind` 进沙箱（`bwrap.ts:49-72` `bindArgs`），bash 沙箱内可自由读写 `~/.iknow/` —— bash 路径技术可行
-- 但工具路径更稳：`write_file`/`edit_file` 是 typed、带 schema、走 permission 层，agent 不用记 bash 复合命令语法；与 read_file 已有 `extraReadRoots` 完全镜像，实现最小
-- bash 路径没有 hard-wall 拦截（`SENSITIVE_PATH_FRAGMENTS` 不含 `.iknow`、`hard-walls.ts:230` 明示 non-allowlisted 走 ask tier），但仍比工具多一层命令解析不确定性
-
-**落地**：T7（helpers `extraWriteRoots` 第 4 参）+ T8（write_file 传 `~/.iknow`）+ T9（edit_file 传 `~/.iknow`）。引导 prompt（BOOTSTRAP_TEMPLATE）明确告知 agent 用工具写/删文件。
+**落地**：T1 已把 BOOTSTRAP_TEMPLATE 文案改为"用 bash 写/删文件"。`resolveWithinRoot` 的 `extraWriteRoots` 第 4 参（T7）作为基础设施保留待未来启用，本 plan 不使用它。
 
 ### 注入缝（依赖 #121 aim，但**提升到 master baseline**）
 

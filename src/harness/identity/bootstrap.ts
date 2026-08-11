@@ -18,9 +18,11 @@ so future sessions can speak to your context.
 
 ## Note on tools
 
-You can read and write \`~/.iknow/\` with your tools — read_file, write_file,
-and edit_file all allow paths inside it (your profile directory is permitted
-by default). So you can update \`user.md\` directly yourself.
+You can read \`~/.iknow/\` with read_file (your profile is permitted by
+default). write_file / edit_file stay cwd-scoped and will reject paths there —
+so to update \`user.md\` or delete this file, use the bash shell instead
+(\`printf >> ~/.iknow/user.md\` or similar). The home tree is bind-mounted
+read-write under the bash sandbox.
 
 ## Goals
 

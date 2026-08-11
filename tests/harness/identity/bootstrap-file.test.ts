@@ -33,11 +33,13 @@ describe("BOOTSTRAP_TEMPLATE (rev 2026-08-11 file template)", () => {
     );
   });
 
-  it("directs agent to use tools (write_file / edit_file / read_file) for ~/.iknow/", () => {
-    // rev 2026-08-11:agent 用 ACI 工具读写 ~/.iknow/(T7-T9 落地);bash 也是可用路径
+  it("directs agent to read ~/.iknow/ with read_file + write via bash", () => {
+    // rev 2026-08-11:read_file 放行 ~/.iknow/(extraReadRoots);write_file/edit_file
+    // 保持 cwd-scoped(操作员裁决)——agent 用 bash 写/删,bwrap 把整个 home --bind。
     expect(BOOTSTRAP_TEMPLATE).toMatch(/read_file/);
     expect(BOOTSTRAP_TEMPLATE).toMatch(/write_file/);
     expect(BOOTSTRAP_TEMPLATE).toMatch(/edit_file/);
+    expect(BOOTSTRAP_TEMPLATE).toMatch(/bash/);
     expect(BOOTSTRAP_TEMPLATE).toMatch(/\.iknow/);
   });
 

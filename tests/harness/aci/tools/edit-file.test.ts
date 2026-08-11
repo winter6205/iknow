@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, describe, it } from "vitest";
+import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   mkdtemp,
@@ -422,70 +422,5 @@ describe("createEditFileTool — onEdit seam", () => {
       (err: unknown) =>
         err instanceof ToolExecutionError || err instanceof Error
     );
-  });
-});
-
-// ── #196 rev 2026-08-11 T9: edit_file 允许编辑 ~/.iknow/（isolated HOME）──
-describe("edit_file — ~/.iknow profile edit allowed by default (isolated HOME)", () => {
-  let origHome: string | undefined;
-  let fakeHome: string;
-  let fakeIknow: string;
-  const isolatedScratch: string[] = [];
-
-  beforeEach(async () => {
-    origHome = process.env.HOME;
-    fakeHome = await mkdtemp(join(tmpdir(), "edit-file-profile-home-"));
-    fakeIknow = join(fakeHome, ".iknow");
-    await mkdir(fakeIknow, { recursive: true });
-    process.env.HOME = fakeHome;
-  });
-
-  afterEach(async () => {
-    process.env.HOME = origHome;
-    await Promise.all(
-      isolatedScratch
-        .splice(0)
-        .map((p) => rm(p, { recursive: true, force: true }))
-    );
-  });
-
-  it("edits ~/.iknow/user.md (profile dir is an extraWriteRoot)", async () => {
-    const userMd = join(fakeIknow, "user.md");
-    await writeFile(userMd, "- Name: Old\n", "utf8");
-    const tool = createEditFileTool(scratch);
-
-    const res = (await tool.handler({
-      path: "~/.iknow/user.md",
-      old_str: "- Name: Old",
-      new_str: "- Name: New",
-    })) as { output: string };
-    assert.match(res.output, /updated|replaced|edit/i);
-
-    const written = await readFile(userMd, "utf8");
-    assert.equal(written, "- Name: New\n");
-  });
-
-  it("still rejects a symlink escape from ~/.iknow to outside", async () => {
-    const outside = await mkdtemp(join(tmpdir(), "edit-file-escape-out-"));
-    scratchPaths.push(outside);
-    const tool = createEditFileTool(scratch);
-    await symlink(outside, join(fakeIknow, "escape"), "dir");
-    const outsideFile = join(outside, "secret.txt");
-    await writeFile(outsideFile, "before\n", "utf8");
-
-    await assert.rejects(
-      () =>
-        tool.handler({
-          path: "~/.iknow/escape/secret.txt",
-          old_str: "before",
-          new_str: "after",
-        }),
-      (error: unknown) =>
-        error instanceof ToolExecutionError &&
-        error.message.includes("outside workspace")
-    );
-    // 外部文件内容未被破坏
-    const after = await readFile(outsideFile, "utf8");
-    assert.equal(after, "before\n");
   });
 });
