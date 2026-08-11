@@ -23,6 +23,10 @@ import {
 } from "../../src/tui/hub-bridge.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.js";
 import { resolveProjectSessionDir } from "../../src/session-api/store/session-store.js";
+import { createStubModel } from "../../src/harness/stubs/stub-model.js";
+import type { LoopEngineDeps } from "../../src/harness/loop-engine.js";
+import type { LoopState } from "../../src/harness/model-adapter/types.js";
+import type { SubAgentManager } from "../../src/harness/subagent/manager.js";
 
 describe("inflight registry", () => {
   test("soleId：空 → undefined；单会话 → 该 id；多会话 → undefined", () => {
@@ -268,5 +272,77 @@ describe("hub-bridge compactSession（/compact）", () => {
       inflight: createInflightRegistry(),
     });
     await expect(bridge.compactSession("no-such-id")).rejects.toThrow();
+  });
+});
+
+describe("hub-bridge subagentManager 透传（#365 T3）", () => {
+  let baseDir: string;
+
+  beforeEach(async () => {
+    baseDir = await mkdtemp(join(tmpdir(), "iknow-tui-bridge-sub-"));
+  });
+  afterEach(async () => {
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
+  test("独立参数注入 → hub 经 host-drain 消费该 manager（drain 结果拼入 run priorMessages）", async () => {
+    // #365 T3：subagentManager 是独立参数（不再经 deps.subagentManager 透传）。
+    // 验证：hub 内部持有所注入 manager，postMessage 时经 drainPendingSubagents
+    // 消费。手法：hand-rolled fake manager（drainCompleted 返回 1 条 completed）+
+    // 捕获 adapter 断言 stub-model 第一 turn 收到的 state.messages 含浓缩段。
+    // manager 未被 hub 持有 → drain 走 undefined 路径 → 无注入 → 断言失败。
+    const fakeMgr: SubAgentManager = {
+      spawn: () => ({ taskId: "t3-task" }),
+      queryBuffer: () => ({ status: "not_found" }),
+      waitFor: () => Promise.reject(new Error("not used")),
+      shutdown: () => Promise.resolve(),
+      abortTask: () => false,
+      listActive: () => [],
+      drainCompleted: () => [
+        {
+          taskId: "t3-task",
+          envelope: {
+            status: "ok",
+            summary: "t3 fake subagent",
+            result: "t3 body",
+          },
+        },
+      ],
+    };
+
+    const seen: LoopState[] = [];
+    const innerStub = createStubModel({
+      responses: [assistantResult({ texts: ["final after drain"] })],
+    });
+    const capAdapter: LoopEngineDeps["adapter"] = {
+      encodeUserText: (t) => innerStub.encodeUserText(t),
+      encodeToolResults: (r) => innerStub.encodeToolResults(r),
+      step: async (state, request, signal) => {
+        seen.push(state);
+        return innerStub.step(state, request, signal);
+      },
+    };
+
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      deps: { ...makeDeps([]), adapter: capAdapter },
+      inflight: createInflightRegistry(),
+      subagentManager: fakeMgr,
+    });
+    const id = await bridge.ensureSession(undefined);
+    await bridge.postMessage({ conversationId: id, text: "继续" });
+
+    const firstStep = seen[0];
+    expect(firstStep).toBeDefined();
+    const joined = firstStep.messages
+      .map((m) =>
+        m.content
+          .filter((b): b is { type: "text"; text: string } => b.type === "text")
+          .map((b) => b.text)
+          .join(" ")
+      )
+      .join("\n");
+    expect(joined).toContain("## Sub-agent t3-task result: t3 fake subagent");
+    expect(joined).toContain("t3 body");
   });
 });

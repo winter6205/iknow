@@ -127,7 +127,10 @@ describe("SubAgentManager spawn → completed", () => {
     // taskId 是 manager 内部 randomUUID 唯一真值(SC3)
     assert.ok(taskId.length > 0);
     assert.equal(payload.task, "");
-    assert.equal(payload.sandboxRoot, "");
+    // #365 真实 LLM e2e 修复:def 缺席 sandboxRoot → manager 以父进程 cwd 补齐
+    // (role.ts:34 约定"manager 装配期根据父 cwd 补齐");不再写空串进 envelope
+    // (空串会让 worker 的 bwrap fence `--bind "" ""` 直接失败)。
+    assert.equal(payload.sandboxRoot, process.cwd());
     assert.equal(payload.systemPrompt, "p");
     assert.deepEqual(payload.disallowedTools, ["edit_file"]);
     assert.equal(payload.model, "opus");

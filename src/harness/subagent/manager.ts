@@ -332,9 +332,16 @@ export function createSubAgentManager(opts: {
     // #356 High #1 fix: task / sandboxRoot live on SubAgentDefinition (role.ts);
     // read directly. Empty-string fallback keeps manager output as a valid
     // WorkerEnvelope that satisfies worker-side schema.
+    // #365 真实 LLM e2e 修复:spawn_subagent 工具不采集 sandboxRoot(role.ts:34
+    // 注释约定"manager 装配期根据父 cwd 补齐"),此前 def.sandboxRoot ?? ""
+    // 直接把空串写进 envelope → worker 的 fs 工具(bash bwrap fence)以空 cwd
+    // 装配,`--bind "" ""` bwrap 即抛 "Can't find source path" → worker 内所有
+    // fs 工具不可用。此处补齐:def 缺席时回退 process.cwd()(父代理进程 cwd,
+    // 与 build-engine 缺省 sandboxRoot 同语义)。
+    const sandboxRoot = def.sandboxRoot ?? process.cwd();
     return {
       task: def.task ?? "",
-      sandboxRoot: def.sandboxRoot ?? "",
+      sandboxRoot,
       ...(def.systemPrompt !== undefined && { systemPrompt: def.systemPrompt }),
       ...(def.disallowedTools !== undefined && {
         disallowedTools: [...def.disallowedTools],

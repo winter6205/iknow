@@ -33,7 +33,7 @@ import type { RegistryImpl } from "./tools/registry.js";
 import type { ValidateFunction } from "ajv";
 import { homedir } from "node:os";
 import path from "node:path";
-import type { AskUser } from "./permission/types.js";
+import type { AskUser, PostToolUseHook } from "./permission/types.js";
 import type { IknowEnv } from "../config/env.js";
 import { ValidationError } from "../shared/errors.js";
 import {
@@ -83,6 +83,8 @@ export type BuildEngineOpts = {
   ) => import("./mcp/manager.js").McpClientHandle;
   /** #356 T6 测试缝:subagent manager 覆盖注入(生产默认不传则内部自建)。 */
   readonly subagentManager?: SubAgentManager;
+  /** TUI 工具摘要观测缝:透传给 createAciExecutor hooks.postToolUse(chat/serve 不传 → 零变化)。 */
+  readonly hooks?: PostToolUseHook;
 };
 
 export type BuiltEngine = {
@@ -191,7 +193,9 @@ export async function buildHarnessEngine(
   //     opts.subagentManager 测试缝覆盖注入。
   //   - ask 不创建(SC8 守门,oneshot 即用即抛,registry 缺 spawn_subagent /
   //     subagent_result 两件 = 23 件,三方视图一致)。
-  // 注:TUI 产品入口 buildTuiDeps 独立装配(不经 build-engine),不在此受控。
+  // 注:TUI 产品入口 buildTuiDeps(#365 T2)现委托 build-engine({surface:"tui"})
+  // 装配,自动继承 subagentManager / IKNOW_COORDINATOR_TEXT / shutdown 句柄
+  // — chat / tui / serve / ask 四入口共用 SSOT,工具面 25 件永不漂移。
   // 位置在 registry 装配之前:registry 的 subagentManager opt 在此消费,故放
   // MCP 条件装配段之前(同 surface 条件,语义同形)。
   const subagentManager: SubAgentManager | undefined =
@@ -228,6 +232,7 @@ export async function buildHarnessEngine(
     catalog: reg.catalog,
     policy,
     askUser,
+    ...(opts.hooks ? { hooks: { postToolUse: opts.hooks } } : {}),
   });
 
   // registry 单源:reg.inner 已是按 memoryEnabled 条件化的最终视图(8 或 10 件)。
