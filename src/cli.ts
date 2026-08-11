@@ -244,6 +244,9 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     showThinking: bundle.env.chat.showThinking,
     // W2: 传给 REPL host,host 的 /permissions 斜杠命令就地翻 mode。
     permissionMode,
+    // T4: `--resume <id>` 续跑锚点。仅 chat 消费;ask/serve/tui 入口
+    // 不传(解析虽 command-agnostic,host 各自决策)。undefined = 新开会话。
+    resumeId: parsed.resumeId,
   });
 }
 

@@ -78,6 +78,14 @@ export type ChatSessionOpts = {
    * 不重建引擎。ask/serve 不传。
    */
   permissionMode?: PermissionModeContext;
+  /**
+   * T4: `--resume <id>` 锚定既有 conversationId 续跑。设置时 runChatSession
+   * 以该 id 作为 conversationId(写回同一 checkpoint 文件),并尝试从
+   * SessionStore 加载既有 messages 作为初始历史;load 失败(typed)则保留
+   * 该 id 作为锚点继续,但 messages 从空开始。undefined = 每次新开随机
+   * UUID,行为与 T2 完全相同。
+   */
+  resumeId?: string;
 };
 
 export type ChatLineContext = {
@@ -360,6 +368,51 @@ function formatChatError(err: unknown): string {
 }
 
 /**
+ * T4: `--resume <id>` 的消息 seed 辅助 —— runChatSession 在构造 state 之前
+ * 调用,从 SessionStore 加载既有 messages 作为初始历史(processChatLine 的
+ * `prior = ctx.state.messages` 自然看到该历史,首轮续跑无需额外接线)。
+ *
+ * 纯 IO(唯一 IO 是 `store.load`)+ 纯映射,无 Sidekiq、无 harness 依赖,
+ * 便于单测。导出是因为测试要直接验证五种 typed 错误的边界处理。
+ *
+ * **失败语义**:SessionStore.load 只抛 typed SessionStoreError(not_found |
+ * parse_failed | schema_invalid | io_error,见 session-store.ts:58)。所有
+ * typed 错误均**非阻塞** —— 返回空 messages + 触发 warn 回调(stderr 一行);
+ * 调用方保留 conversationId 锚点,使后续 checkpoint 仍写回同一 `<id>.json`,
+ * 而非碎片化成新 id。未知 throw(防御性 —— store 只抛 typed)→ 原样重抛。
+ */
+export async function seedResumeMessages(opts: {
+  readonly store: SessionStore | undefined;
+  readonly id: string | undefined;
+}): Promise<{
+  messages: ReadonlyArray<AnthropicNativeMessage>;
+  /** 缺省 = 无失败需要通知(undefined 即不调用);存在时调用方应执行以落 stderr。 */
+  warn?: () => void;
+}> {
+  if (opts.store === undefined || opts.id === undefined) {
+    return { messages: [] };
+  }
+  try {
+    const file = await opts.store.load(opts.id);
+    return { messages: file.messages };
+  } catch (err) {
+    if (!isSessionStoreErrorKind(err)) {
+      // 防御性:store 契约只抛 typed 错误,出现未知异常应当外暴而不是静默吞咽。
+      throw err;
+    }
+    const kind = (err as SessionStoreError).kind;
+    const id = opts.id;
+    return {
+      messages: [],
+      warn: () =>
+        writeErr(
+          `恢复会话 ${id} 失败: [${kind}]，从空开始（仍锚定 ${id} 续写）`
+        ),
+    };
+  }
+}
+
+/**
  * T2: chat REPL 的 post-run checkpoint 落盘 —— `src/session-api/hub.ts`
  * conditionalSave(#120 T1)的 chat 侧镜像。纯 IO(load/save 原子写),决策全权
  * 委托 T1 纯函数:
@@ -555,11 +608,35 @@ export function createStreamPreviewSink(opts: {
  * Run a product chat session (TTY REPL or non-interactive pipe).
  */
 export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
-  // T2: REPL 级 conversationId(随机 UUID,固定一次)。`randomUUID` 与 cli.ts
-  // ask 入口同源,确保 token 形态一致。T4 --resume 会复用此字段锚定同一文件。
-  const conversationId = randomUUID();
+  // T2 + T4: REPL 级 conversationId。`--resume <id>` 锚定既有 checkpoint
+  // 文件 id;缺省(undefined)= 新开会话随机 UUID(`randomUUID` 与 cli.ts ask
+  // 入口同源,确保 token 形态一致)。
+  const conversationId = opts.resumeId ?? randomUUID();
+
+  // T2: REPL 级 AbortController + SessionStore 注入 ctx;ask/pipe 入口仍
+  // 共享同一 ctx,缺省情况下 signal/store 不会走持久化路径(向 ask 开放零变化)。
+  // store 默认池 = ~/.iknow,与 serve/TUI 同池(#120 Q6 精神);tests / ask
+  // 入口传 opts.deps 不带 store 路径,持久化天然跳过。
+  // **T4 顺序调整**:checkpointStore 提前到 state 构造之前 —— resume 路径要先
+  // load 既有文件再 seed state.messages;依赖图(store 与 state)允许此顺序。
+  const abortController = new AbortController();
+  const checkpointStore = new SessionStore(resolveServeDataDir());
+
+  // T4: resume 时从既有 checkpoint 文件加载初始消息历史(seed)。
+  //   - `opts.resumeId === undefined` → 零 IO,空 messages,行为与 T2 完全一致。
+  //   - load 成功 → messages 来自文件,首轮续跑 processChatLine 的 prior 直接
+  //     看到历史,无需任何额外接线。
+  //   - load 失败(typed)→ messages 空 + 一行 stderr 警告;**仍保留
+  //     conversationId 锚点** —— 后续 turn 的 checkpoint 写回同一 `<id>.json`,
+  //     不会碎片化成新 id。未知异常(防御性)→ 原样重抛。
+  const { messages: seeded, warn: resumeWarn } = await seedResumeMessages({
+    store: opts.resumeId !== undefined ? checkpointStore : undefined,
+    id: opts.resumeId,
+  });
+  resumeWarn?.();
+
   const state: CliChatState = {
-    messages: Object.freeze([]),
+    messages: Object.freeze([...seeded]),
     jsonMode: opts.jsonMode,
     session: opts.session,
     conversationId,
@@ -583,13 +660,6 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     onKill,
   });
   const wrappedDeps: LoopEngineDeps = { ...opts.deps, executor };
-
-  // T2: REPL 级 AbortController + SessionStore 注入 ctx;ask/pipe 入口仍
-  // 共享同一 ctx,缺省情况下 signal/store 不会走持久化路径(向 ask 开放零变化)。
-  // store 默认池 = ~/.iknow,与 serve/TUI 同池(#120 Q6 精神);tests / ask
-  // 入口传 opts.deps 不带 store 路径,持久化天然跳过。
-  const abortController = new AbortController();
-  const checkpointStore = new SessionStore(resolveServeDataDir());
 
   const ctx: ChatLineContext = {
     deps: wrappedDeps,

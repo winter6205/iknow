@@ -58,6 +58,12 @@ export type ParsedCli = {
    * 缺省 false = 默认自动 open。
    */
   noOpen: boolean;
+  /**
+   * T4: `iknow chat --resume <id>` 锚定既有 conversationId 续跑。解析保持
+   * command-agnostic(后续 ask/serve/tui 可独立决策是否消费);仅 chat 入口
+   * 实际消费。`undefined`(默认)= 新开会话(随机 UUID)。
+   */
+  resumeId?: string;
 };
 
 export type ParseArgsOptions = {
@@ -86,6 +92,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   let maxBytes: number | undefined;
   let maxTurns: number | undefined;
   let noOpen = false;
+  let resumeId: string | undefined;
   const rest: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
@@ -102,6 +109,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           maxBytes,
           maxTurns,
           noOpen,
+          resumeId,
           query: "",
           missingQuery: false,
           versionOnly: false,
@@ -157,6 +165,16 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
     } else if (a === "--no-open") {
       // T7: 布尔 flag（无实参），关闭 trace 自动开浏览器（CI/headless）。
       noOpen = true;
+    } else if (a === "--resume") {
+      // T4: 值式 flag —— 缺失 / 空串 / 纯空白均拒绝（镜像 --port 风格）。
+      const raw = argv[++i];
+      if (raw === undefined) {
+        throw new Error("--resume requires a conversation id argument");
+      }
+      if (raw.trim().length === 0) {
+        throw new Error("--resume requires a non-empty conversation id");
+      }
+      resumeId = raw;
     } else if (a === "--data-dir") {
       const raw = argv[++i];
       if (raw === undefined) {
@@ -175,6 +193,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           maxBytes,
           maxTurns,
           noOpen,
+          resumeId,
           query: "",
           missingQuery: false,
           versionOnly: true,
@@ -194,6 +213,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
     maxBytes,
     maxTurns,
     noOpen,
+    resumeId,
     versionOnly: false,
   };
   const head = rest[0];
