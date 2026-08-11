@@ -42,6 +42,7 @@ import addFormats from "ajv-formats";
 import type { ValidateFunction } from "ajv";
 import type { RegistryImpl } from "../harness/tools/registry.js";
 import type { AciRegistry } from "../harness/aci/aci-registry.js";
+import type { AciToolDef } from "../harness/aci/types.js";
 
 /** 工具摘要行事件（postToolUse 投影，observability-only）。 */
 export interface TuiToolEvent {
@@ -105,6 +106,9 @@ export interface BuildTuiDepsOptions {
  * #337 Phase B：装配完成透出的 TUI 扩展面（Phase C/D 消费）。
  *  - skillCatalog：Phase C 读 available()/get() 派生 slash 候选 + 加载正文；
  *  - mcp.status / reload：MCP server 连接状态快照 + 重读两级 config 后重载；
+ *  - listMcpTools（#361 Phase D）：一次拉全量 mcp__* 工具 → 平铺
+ *    `{ server, tool }[]`，detail view 按 server 过滤（避免 N 次过滤）。
+ *    只追加 readonly 字段，不改 Phase B 既有逻辑；
  *  - shutdown：TUI 退出路径调用，关闭所有 MCP client + 取消 in-flight + SIGTERM stdio。
  */
 export interface TuiExtensions {
@@ -113,7 +117,33 @@ export interface TuiExtensions {
     readonly status: () => readonly McpServerStatus[];
     readonly reload: () => Promise<void>;
   };
+  readonly listMcpTools: () => ReadonlyArray<McpToolExtEntry>;
   readonly shutdown: () => Promise<void>;
+}
+
+/** MCP 看板消费的最小扩展面（TuiAppProps.mcp 用；deps.ts SSOT）。 */
+export interface TuiMcpViewExt {
+  readonly status: () => readonly McpServerStatus[];
+  readonly reload: () => Promise<void>;
+  readonly listMcpTools: () => ReadonlyArray<McpToolExtEntry>;
+}
+
+export interface McpToolExtEntry {
+  readonly server: string;
+  readonly tool: AciToolDef;
+}
+
+/**
+ * 从动态工具名反解 server 名：`mcp__<server>__<tool>`（server / tool 段都
+ * 可能含 `__` —— manager 的 sanitizeSegment 只把非 `[A-Za-z0-9_]` 替换成 `_`，
+ * 连字符 / 点保留）。返回中间段 `server`；段数不足（非标准形态）返回原名。
+ * 纯函数 + exported 供单测直接断言。
+ */
+export function mcpServerOfToolName(name: string): string {
+  const body = name.startsWith("mcp__") ? name.slice("mcp__".length) : name;
+  const sep = body.indexOf("__");
+  if (sep === -1) return name;
+  return body.slice(0, sep);
 }
 
 export async function buildTuiDeps(
@@ -233,6 +263,20 @@ export async function buildTuiDeps(
     await mcpManager!.reload(cfg.servers);
   };
 
+  // #361 Phase D：listMcpTools 实现 — 从 reg.catalog.all() 取全部 mcp__* 动态
+  // 工具，按 server 名反解（mcp__<server>__<tool>），平铺成 {server, tool}[]。
+  // reload 后工具集变化（unregister + register），detail view 每次进入重拉最新
+  // 即可（TuiApp 侧缓存 policy：看板首次进入拉一次，reload 后刷新）。
+  const listMcpTools = (): ReadonlyArray<McpToolExtEntry> => {
+    const out: McpToolExtEntry[] = [];
+    for (const def of reg.catalog.all()) {
+      if (!def.name.startsWith("mcp__")) continue;
+      out.push({ server: mcpServerOfToolName(def.name), tool: def });
+    }
+    out.sort((a, b) => a.server.localeCompare(b.server));
+    return out;
+  };
+
   // 装配完成后同步回调透出扩展面（Phase C/D 消费）。shutdown 收口于
   // manager.shutdown（关闭 client + 取消 in-flight + SIGTERM stdio 子孙）。
   opts.onExtensions?.({
@@ -241,6 +285,7 @@ export async function buildTuiDeps(
       status: () => mcpManager!.status(),
       reload,
     },
+    listMcpTools,
     shutdown: () => mcpManager!.shutdown(),
   });
 

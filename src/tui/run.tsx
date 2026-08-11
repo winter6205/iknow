@@ -168,6 +168,17 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         // onExtensions 在 buildTuiDeps 装配期同步注入（Phase B seam）；此处
         // 可选缺省 = 空清单（测试 / 装配异常路径安全降级）。
         skillCatalog={tuiExtensions?.skillCatalog}
+        // #361 Phase D：TuiApp 消费 MCP 看板扩展面（status / reload /
+        // listMcpTools），缺省 = undefined → /mcp 提示「MCP 未装配」。
+        mcp={
+          tuiExtensions
+            ? {
+                status: tuiExtensions.mcp.status,
+                reload: tuiExtensions.mcp.reload,
+                listMcpTools: tuiExtensions.listMcpTools,
+              }
+            : undefined
+        }
         onQuit={onQuitBridge.destroy}
       />
     );

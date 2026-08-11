@@ -30,16 +30,19 @@ import { createToolEventSink, TuiApp } from "../../src/tui/app.js";
 import { createPermissionModeContext } from "../../src/harness/permission/index.js";
 import { createSessionGrants } from "../../src/harness/permission/session-grants.js";
 import type { SkillCatalog } from "../../src/harness/skill/catalog.js";
+import type { TuiMcpViewExt } from "../../src/tui/deps.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 
 export interface TuiHarnessProps {
   readonly bridge?: TuiBridge;
   readonly cwd?: string;
   readonly dataDir?: string;
-  readonly initialView?: "chat" | "list";
+  readonly initialView?: "chat" | "list" | "mcp";
   readonly onQuit?: () => void;
   /** #337 Phase C：skillCatalog 注入口（slash 候选 / /skill 加载发送）。 */
   readonly skillCatalog?: SkillCatalog;
+  /** #361 Phase D：mcp 扩展注入口（/mcp 看板数据源）。 */
+  readonly mcp?: TuiMcpViewExt;
   readonly children?: ReactNode;
 }
 
@@ -69,6 +72,7 @@ export function TuiHarness(props: TuiHarnessProps): ReactNode {
       initialView={props.initialView}
       onQuit={props.onQuit}
       skillCatalog={props.skillCatalog}
+      mcp={props.mcp}
     />
   );
 }

@@ -24,6 +24,7 @@ describe("parseTuiInput: 词表命中", () => {
   for (const [input, command] of [
     ["/sessions", "sessions"],
     ["/new", "new"],
+    ["/mcp", "mcp"],
     ["/quit", "quit"],
     ["/exit", "exit"],
     ["/help", "help"],
@@ -85,11 +86,12 @@ describe("parseTuiInput: 普通消息与边界", () => {
 });
 
 describe("helpLines", () => {
-  test("覆盖全部 9 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
+  test("覆盖全部 10 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
     const joined = helpLines().join("\n");
     for (const cmd of [
       "/sessions",
       "/new",
+      "/mcp",
       "/info",
       "/help",
       "/quit",
@@ -115,7 +117,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  test('"/" → 全部 9 条静态命令（按词表插入顺序，kind="command"）', () => {
+  test('"/" → 全部 10 条静态命令（按词表插入顺序，kind="command"）', () => {
     expect(slashSuggestions("/")).toEqual([
       { kind: "command", command: "sessions" },
       { kind: "command", command: "new" },
@@ -126,6 +128,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       { kind: "command", command: "thinking" },
       { kind: "command", command: "profile" },
       { kind: "command", command: "compact" },
+      { kind: "command", command: "mcp" },
     ]);
   });
 
@@ -177,6 +180,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       { kind: "command", command: "thinking" },
       { kind: "command", command: "profile" },
       { kind: "command", command: "compact" },
+      { kind: "command", command: "mcp" },
       { kind: "skill", name: "echo", description: "回声" },
       { kind: "skill", name: "code-review", description: "代码审查" },
     ]);
@@ -225,7 +229,7 @@ describe('slashComplete: 唯一匹配 → "/cmd "；0/多匹配 → null', () =>
     expect(slashComplete("/q")).toBe("/quit ");
   });
 
-  test('"/" → null（9 匹配）', () => {
+  test('"/" → null（10 匹配）', () => {
     expect(slashComplete("/")).toBeNull();
   });
 
@@ -253,7 +257,7 @@ describe('slashComplete: 唯一匹配 → "/cmd "；0/多匹配 → null', () =>
     ).toBeNull();
   });
 
-  test("skill 名与静态命令前缀重合：静态优先（'/' 命中 9 静态 + skill → null）", () => {
+  test("skill 名与静态命令前缀重合：静态优先（'/' 命中 10 静态 + skill → null）", () => {
     expect(
       slashComplete("/", [{ name: "sessions-helper", description: "会话助手" }])
     ).toBeNull();
@@ -284,6 +288,7 @@ describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
     "thinking",
     "profile",
     "compact",
+    "mcp",
   ] as const;
 
   test("cursor=0 → /sessions （首条）", () => {
@@ -294,8 +299,12 @@ describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
     expect(slashCompleteFromList(ALL, 2)).toBe("/quit ");
   });
 
-  test("cursor=8 → /compact （末条）", () => {
+  test("cursor=8 → /compact （词表第 9 条）", () => {
     expect(slashCompleteFromList(ALL, 8)).toBe("/compact ");
+  });
+
+  test("cursor=9 → /mcp （词表末条，append-only）", () => {
+    expect(slashCompleteFromList(ALL, 9)).toBe("/mcp ");
   });
 
   test("cursor 越界上 / 下 / 空列表 → null", () => {
@@ -505,5 +514,63 @@ describe("slashCompleteFromCandidates: 按 cursor 补全 SlashCandidate", () => 
     expect(slashCompleteFromCandidates(MIXED, -1)).toBeNull();
     expect(slashCompleteFromCandidates(MIXED, 2)).toBeNull();
     expect(slashCompleteFromCandidates([], 0)).toBeNull();
+  });
+});
+
+/**
+ * #361 Phase D：/mcp 词表收口（append-only 末位，词表 9 → 10）。
+ * 静态命令，与 parseSkillLoad 正交（命中静态词表返回 undefined，不抢
+ * skill-load）；hint 描述 + helpLines 真描述。
+ */
+describe("#361 Phase D /mcp 词表", () => {
+  test("/mcp → command mcp", () => {
+    expect(parseTuiInput("/mcp")).toEqual({ kind: "command", command: "mcp" });
+  });
+
+  test("大小写与空白容忍（/MCP、 /Mcp ）", () => {
+    expect(parseTuiInput("  /MCP  ")).toEqual({
+      kind: "command",
+      command: "mcp",
+    });
+    expect(parseTuiInput("/Mcp")).toEqual({
+      kind: "command",
+      command: "mcp",
+    });
+  });
+
+  test('"/m" 前缀 → 唯一候选 mcp（不与任何旧命令前缀冲突）', () => {
+    expect(slashSuggestions("/m")).toEqual([
+      { kind: "command", command: "mcp" },
+    ]);
+  });
+
+  test('"/" 全部候选含 mcp（词表末位）', () => {
+    const all = slashSuggestions("/");
+    expect(all).toContainEqual({ kind: "command", command: "mcp" });
+    expect(all[all.length - 1]).toEqual({
+      kind: "command",
+      command: "mcp",
+    });
+  });
+
+  test('/mcp 唯一匹配 → 补全 "/mcp "（尾随空格）', () => {
+    expect(slashComplete("/mcp")).toBe("/mcp ");
+  });
+
+  test("hint 描述：查看 MCP 服务看板", () => {
+    expect(slashHintLines(["mcp"])).toEqual([
+      { command: "mcp", description: "查看 MCP 服务看板" },
+    ]);
+  });
+
+  test("/help 含 /mcp 真描述且无 emoji；parseSkillLoad('/mcp') → undefined", () => {
+    const joined = helpLines().join("\n");
+    expect(joined).toContain("/mcp");
+    expect(joined).toContain("查看 MCP 服务看板");
+    expect(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(joined)).toBe(false);
+    // 静态命令优先：/mcp 精确命中词表 → parseSkillLoad 返回 undefined。
+    expect(
+      parseSkillLoad("/mcp", [{ name: "mcp-helper", description: "x" }])
+    ).toBeUndefined();
   });
 });

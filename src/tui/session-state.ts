@@ -8,7 +8,7 @@
  * 业务约束（沿用 #146 + #120 纪律）：
  *  - 会话运行三态 `idle` / `running-fg` / `running-bg`（分时切换 active-one；
  *    turn 运行中切走 → 后台继续执行）；
- *  - 视图两态 `chat` / `list`；
+ *  - 视图三态 `chat` / `list` / `mcp`；
  *  - 消息纪律与 #120 Q3 一致：`ReadonlyArray` + `Object.freeze`，整体替换、
  *    永不 mutate。
  *
@@ -24,7 +24,7 @@ import type {
 import type { SessionFileV1 } from "../session-api/store/schema.js";
 
 export type SessionRunState = "idle" | "running-fg" | "running-bg";
-export type TuiView = "chat" | "list";
+export type TuiView = "chat" | "list" | "mcp";
 
 /** 未建档会话的内存占位键（lazy create：首条消息发出才进 SessionStore）。 */
 export const DRAFT_SESSION_ID = "__draft__";

@@ -47,7 +47,8 @@ import type {
   AnthropicNativeMessage,
   TokenUsage,
 } from "../harness/model-adapter/types.js";
-import type { TuiToolEvent } from "./deps.js";
+import type { TuiToolEvent, TuiMcpViewExt } from "./deps.js";
+import type { McpServerStatus } from "../harness/mcp/manager.js";
 import type { TuiBridge } from "./hub-bridge.js";
 import type { TuiAskUserBridge, TuiPendingAsk } from "./ask-user.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
@@ -90,6 +91,7 @@ import { ChatView } from "./chat-view.js";
 import type { StreamDraft } from "../cli/stream-draft.js";
 import { createStreamDraft } from "../cli/stream-draft.js";
 import { ListView, relativeTime, type TuiListEntry } from "./list-view.js";
+import { McpView, type McpToolEntry } from "./mcp-view.js";
 import { ContextBar } from "./context-bar.js";
 import { PromptInput } from "./prompt-input.js";
 import { renderBannerLines, VERSION } from "./banner.js";
@@ -222,6 +224,10 @@ export interface TuiAppProps {
    *  可选：缺省 = 空清单（兼容 fixture / 测试；产品路径由 run.tsx 经
    *  TuiExtensions.skillCatalog 注入）。 */
   readonly skillCatalog?: SkillCatalog;
+  /** #361 Phase D：MCP 看板扩展面（TuiMcpViewExt 最小依赖）。缺省 =
+   *  undefined → /mcp 切 view 时提示「MCP 未装配」。产品路径由 run.tsx 经
+   *  TuiExtensions 注入；fixture / 测试可选 stub。 */
+  readonly mcp?: TuiMcpViewExt;
 }
 
 interface Notice {
@@ -489,6 +495,36 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const [listEntries, setListEntries] = useState<ReadonlyArray<TuiListEntry>>(
     []
   );
+
+  // ── #361 Phase D：/mcp 看板数据（首次进入拉一次，reload 后刷新）──────
+  const [mcpStatuses, setMcpStatuses] = useState<readonly McpServerStatus[]>(
+    () => props.mcp?.status() ?? []
+  );
+  const [mcpTools, setMcpTools] = useState<readonly McpToolEntry[]>(
+    () => props.mcp?.listMcpTools?.() ?? []
+  );
+  async function enterMcpView(): Promise<void> {
+    if (!props.mcp) {
+      setNotice({ lines: ["MCP 未装配（buildTuiDeps 未注入 mcp 扩展）。"] });
+      return;
+    }
+    // 看板首次进入拉一次最新（status + 全量工具），保留缓存避免重拉。
+    setMcpStatuses(props.mcp.status());
+    setMcpTools(props.mcp.listMcpTools?.() ?? []);
+    setView("mcp");
+  }
+  async function reloadMcpView(): Promise<void> {
+    const ext = props.mcp;
+    if (!ext) return;
+    try {
+      await ext.reload();
+    } catch (err) {
+      setNotice({ lines: [`MCP 重载失败：${describeError(err)}`] });
+    }
+    // reload 后工具集变化（unregister + register）→ 刷新状态与工具列表。
+    setMcpStatuses(ext.status());
+    setMcpTools(ext.listMcpTools?.() ?? []);
+  }
   async function safeList(): Promise<ReadonlyArray<TuiListEntry>> {
     try {
       const raw = await props.bridge.listSessions();
@@ -778,6 +814,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         setView("list");
         return;
       }
+      case "mcp": {
+        await enterMcpView();
+        return;
+      }
       case "new":
         newSession();
         return;
@@ -966,6 +1006,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     5,
     rows - 2 - noticeRenderRows(notice?.lines, cols)
   );
+  // #361 Phase D：MCP 看板视图 — 输入框 / mode 行 / ContextBar 均不渲染
+  // （view !== "chat"），底部仅 notice 占用 + 空行隔离，与列表同款预算。
+  const mcpViewRows = Math.max(
+    5,
+    rows - 2 - noticeRenderRows(notice?.lines, cols)
+  );
 
   return (
     <box
@@ -981,6 +1027,15 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           cols={cols}
           rows={listViewRows}
           onOpen={(i) => void openSessionAt(i)}
+          onBack={() => setView("chat")}
+        />
+      ) : view === "mcp" ? (
+        <McpView
+          statuses={mcpStatuses}
+          tools={mcpTools}
+          cols={cols}
+          rows={mcpViewRows}
+          onReload={reloadMcpView}
           onBack={() => setView("chat")}
         />
       ) : (

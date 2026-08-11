@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildTuiDeps,
+  mcpServerOfToolName,
   type BuildTuiDepsOptions,
   type TuiExtensions,
 } from "../../src/tui/deps.js";
@@ -143,5 +144,50 @@ describe("buildTuiDeps — #337 Phase B skill + MCP 装配", () => {
     await expect(captured!.mcp.reload()).resolves.toBeUndefined();
     // 收口：避免跨测试泄漏 manager 状态。
     await captured!.shutdown();
+  });
+
+  test("onExtensions 透出 listMcpTools（#361 Phase D）：可调用 + 无 mcp.json 时为空数组", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-tui-mcptools-"));
+    roots.push(root);
+
+    let captured: TuiExtensions | undefined;
+    await buildTuiDeps(makeBundle(), {
+      askUser: createNoAskUser(),
+      userHome: join(root, "home"),
+      cwd: root,
+      onExtensions: (ext) => {
+        captured = ext;
+      },
+    });
+
+    expect(captured).toBeDefined();
+    expect(typeof captured!.listMcpTools).toBe("function");
+    // 无 mcp.json → 无 mcp__* 工具 → 空数组（幂等，可重复调用）。
+    const tools = captured!.listMcpTools();
+    expect(Array.isArray(tools)).toBe(true);
+    expect(tools).toEqual([]);
+    expect(captured!.listMcpTools()).toEqual([]);
+    await captured!.shutdown();
+  });
+});
+
+describe("mcpServerOfToolName（#361 Phase D server 反解）", () => {
+  test("标准形态：mcp__<server>__<tool> → server", () => {
+    expect(mcpServerOfToolName("mcp__fileserver__read")).toBe("fileserver");
+    expect(mcpServerOfToolName("mcp__codebase-memory__search")).toBe(
+      "codebase-memory"
+    );
+  });
+
+  test("server / tool 段含下划线：只取首段（server 名带 _ 保留）", () => {
+    expect(mcpServerOfToolName("mcp__my_server__do_thing")).toBe("my_server");
+  });
+
+  test("非 mcp__ 前缀 → 原名", () => {
+    expect(mcpServerOfToolName("read")).toBe("read");
+  });
+
+  test("仅 mcp__server 无工具段（畸形）→ 返回原名（不会匹配任何 status，安全降级）", () => {
+    expect(mcpServerOfToolName("mcp__solo")).toBe("mcp__solo");
   });
 });
