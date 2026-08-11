@@ -33,7 +33,6 @@ import {
   createViolationCounter,
   wireKillSessionNotification,
 } from "../harness/sandbox/violation-handling.js";
-import { writeIknowState } from "../harness/identity/index.js";
 import { createStreamDraft } from "./stream-draft.js";
 import {
   parsePermissionMode,
@@ -309,34 +308,6 @@ async function processSlash(opts: {
 
     case "reset":
       return { quit: false, output: effect.message };
-
-    case "profile": {
-      // #196 首启完成钩子:用户已在外侧填好 ~/.iknow/user.md,输入
-      // /profile done 翻 bootstrap_seeded。writeIknowState 是 async,
-      // 落点在 host 的 processSlash;写失败走 typed IknowIdentityError →
-      // 错误文案(不静默)。
-      if ((effect.args[0] ?? "").toLowerCase() !== "done") {
-        return {
-          quit: false,
-          output: "",
-          stderr:
-            "Usage: /profile done（已在外侧填好 ~/.iknow/user.md 后执行）",
-        };
-      }
-      try {
-        await writeIknowState({ bootstrap_seeded: true });
-      } catch (err) {
-        return {
-          quit: false,
-          output: "",
-          stderr: `首启完成标记失败：${formatChatError(err)}`,
-        };
-      }
-      return {
-        quit: false,
-        output: "首启引导已完成，下次会话直接进入工作。",
-      };
-    }
 
     case "permissions": {
       // W2: 权限模式查询/切换。无 ctx.permissionMode(ask/serve 不传)→

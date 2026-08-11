@@ -39,8 +39,6 @@ import {
 import { loadIknowEnv, type LlmEnv } from "../config/env.js";
 import { ValidationError } from "../shared/errors.js";
 import { MaxTurnsExceeded } from "../harness/errors.js";
-import { writeIknowState } from "../harness/identity/index.js";
-import type { IknowIdentityError } from "../harness/identity/index.js";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
@@ -145,29 +143,6 @@ export function mapStoreError(err: SessionStoreError): {
 // -- history projection (裁决#11: getSession turns) -----------------------------
 
 /** Extract joined text from text blocks of a native message. */
-/** #196: writeIknowState throw 是 typed union（kind/path + kind 分派字段，
- *  workspace.ts:37-42）——state_parse_failed 用 reason / state_schema_invalid
- *  用 field / write_failed 与 io_error 用 cause。按 kind 分派取详情字段，
- *  避免错误文案落到 String(err) = "[object Object]"。 */
-function isIknowIdentityError(err: unknown): err is IknowIdentityError {
-  if (typeof err !== "object" || err === null) return false;
-  const e = err as { kind?: unknown; path?: unknown };
-  return typeof e.kind === "string" && typeof e.path === "string";
-}
-
-/** 展开 IknowIdentityError 到可读详情（按 kind 分派不同详情字段）。 */
-function iknowIdentityDetail(err: IknowIdentityError): string {
-  switch (err.kind) {
-    case "state_parse_failed":
-      return `${err.kind}@${err.path}: ${err.reason}`;
-    case "state_schema_invalid":
-      return `${err.kind}@${err.path}: field ${err.field}`;
-    case "write_failed":
-    case "io_error":
-      return `${err.kind}@${err.path}: ${err.cause}`;
-  }
-}
-
 function textOf(msg: AnthropicNativeMessage): string {
   return msg.content
     .filter(
@@ -467,18 +442,10 @@ export class SessionHub {
     const { conversationId, text } = opts;
     this.validateText(text);
     const query = text.trim();
-    // #196 /profile done 首启完成钩子（web 端）：用户在浏览器外填好
-    // ~/.iknow/user.md 后输入 /profile done，翻 bootstrap_seeded=true。
-    // 与 CLI / TUI 的 slash 命令同语义。走 serialize 队列保持 per-conversation
-    // 序列化契约（A15）；writeIknowState 失败 → 错误文案。不触发模型调用。
-    const profileDone = query.toLowerCase() === "/profile done";
     return this.serialize({
       conversationId,
       work: async () => {
         const session = await this.store.load(conversationId);
-        if (profileDone) {
-          return this.handleProfileDone(session, query);
-        }
         const priorCount = session.messages.length;
         const baseDeps = await this.ensureDeps();
         // T2: per-turn override — rebuild deps with a one-shot adapter only;
@@ -855,37 +822,6 @@ export class SessionHub {
       json_mode: file.jsonMode,
       turn_count: file.turnCount,
       prior_count: 0,
-    };
-  }
-
-  /** #196 /profile done 首启完成钩子：翻 bootstrap_seeded，不触发模型调用。
-   *  writeIknowState 失败 → 把 typed union 的 kind/path/cause 格式化后
-   *  转 ValidationError（对齐 CLI formatChatError 语义，避免 [object Object]）。 */
-  private async handleProfileDone(
-    session: SessionFileV1,
-    query: string
-  ): Promise<PostMessageResponse> {
-    try {
-      await writeIknowState({ bootstrap_seeded: true });
-    } catch (err) {
-      const detail = isIknowIdentityError(err)
-        ? iknowIdentityDetail(err)
-        : err instanceof Error
-          ? err.message
-          : String(err);
-      throw new ValidationError(`无法标记首启完成：${detail}`);
-    }
-    return {
-      session: this.summarize({ file: session }),
-      turn: {
-        query,
-        answer: {
-          finalText:
-            "已标记首启引导完成。下次对话起，agent 将直接使用你填写的 ~/.iknow/user.md 画像。",
-          stopReason: "completed",
-          turnCount: 0,
-        },
-      },
     };
   }
 

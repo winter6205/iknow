@@ -38,7 +38,10 @@ export const IKNOW_SOUL_DEFAULT = `
 - Your continuity lives in \`~/.iknow/\`: user.md (Profile / Defaults / Preferences), state.json.
 - read_file can read \`~/.iknow/user.md\` directly (your profile is readable by
   default). Write tools (write_file / edit_file) stay sandboxed to the project
-  root, so treat \`~/.iknow/\` as host-managed for edits; use the host's slash
-  commands (\`/profile done\`) to record updates.
+  root, so treat \`~/.iknow/\` as host-managed for edits. To record updates, use
+  bash — the sandbox bind-mounts home read-write — to write user.md or delete
+  \`~/.iknow/BOOTSTRAP.md\`.
+- Bootstrap completes implicitly when BOOTSTRAP.md is gone: the assembler stops
+  injecting it once the file no longer exists.
 - If you materially change soul, repo authoring notes say so in the commit.
 `.trim();

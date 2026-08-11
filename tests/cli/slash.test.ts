@@ -196,34 +196,6 @@ describe("applySlashCommand", () => {
     assert.strictEqual(eff.text, "Empty command. Type /help for commands.");
   });
 
-  it("/profile done → {type:profile, args:['done']}", () => {
-    const ctx = { state: makeState() };
-    const eff = applySlashCommand({
-      command: "profile",
-      args: ["done"],
-      ctx,
-    });
-    assert.strictEqual(eff.type, "profile");
-    if (eff.type !== "profile") return;
-    assert.deepEqual(eff.args, ["done"]);
-  });
-
-  it("/profile (no arg) → {type:profile, args:[]} (host surfaces usage)", () => {
-    const ctx = { state: makeState() };
-    const eff = applySlashCommand({ command: "profile", args: [], ctx });
-    assert.strictEqual(eff.type, "profile");
-    if (eff.type !== "profile") return;
-    assert.deepEqual(eff.args, []);
-  });
-
-  it("help text advertises /profile (completion hook)", () => {
-    const ctx = { state: makeState() };
-    const eff = applySlashCommand({ command: "help", args: [], ctx });
-    assert.strictEqual(eff.type, "help");
-    if (eff.type !== "help") return;
-    assert.ok(eff.text.includes("/profile"), "HELP must advertise /profile");
-  });
-
   it("control-char strip: error text does NOT contain raw ESC", () => {
     const ctx = { state: makeState() };
     const esc = String.fromCharCode(27);

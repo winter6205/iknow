@@ -108,7 +108,6 @@ import {
   createPermissionModeContext,
   modeLabel,
 } from "../harness/permission/index.js";
-import { writeIknowState } from "../harness/identity/index.js";
 import { extractSummary } from "../session-api/store/schema.js";
 
 /**
@@ -883,32 +882,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           return;
         }
         await openRewindPicker(targetId);
-        return;
-      }
-      case "profile": {
-        if (
-          text
-            .replace(/^\s*\/profile\s*/i, "")
-            .trim()
-            .toLowerCase() !== "done"
-        ) {
-          setNotice({
-            lines: [
-              "Usage: /profile done（已在外侧填好 ~/.iknow/user.md 后执行）",
-            ],
-          });
-          return;
-        }
-        try {
-          await writeIknowState({ bootstrap_seeded: true });
-          setNotice({ lines: ["首启引导已完成，下次会话直接进入工作。"] });
-        } catch (err) {
-          setNotice({
-            lines: [
-              `首启完成标记失败：${err instanceof Error ? err.message : String(err)}`,
-            ],
-          });
-        }
         return;
       }
     }

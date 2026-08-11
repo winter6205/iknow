@@ -5,7 +5,7 @@
  * 改写为 bun:test（D2 裁决：tests/tui/ 由 bun:test 驱动）。
  *
  * #146 slash 词表解析（SC 12：TUI 自建词表，不复用 chat processChatLine）：
- * 10 命令 + 未知 /xxx + 普通消息 + 空输入 + /reset 天然不可达。
+ * 9 命令 + 未知 /xxx + 普通消息 + 空输入 + /reset 天然不可达。
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -26,7 +26,6 @@ describe("parseTuiInput: 词表命中", () => {
     ["/help", "help"],
     ["/info", "info"],
     ["/thinking", "thinking"],
-    ["/profile", "profile"],
     ["/compact", "compact"],
     ["/rewind", "rewind"],
   ] as const) {
@@ -83,7 +82,7 @@ describe("parseTuiInput: 普通消息与边界", () => {
 });
 
 describe("helpLines", () => {
-  test("覆盖全部 10 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
+  test("覆盖全部 9 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
     const joined = helpLines().join("\n");
     for (const cmd of [
       "/sessions",
@@ -92,7 +91,6 @@ describe("helpLines", () => {
       "/help",
       "/quit",
       "/exit",
-      "/profile",
       "/compact",
       "/rewind",
     ]) {
@@ -114,7 +112,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  test('"/" → 全部 10 条（按词表插入顺序，T6 加 rewind）', () => {
+  test('"/" → 全部 9 条（按词表插入顺序，删 /profile 后仍含 /rewind）', () => {
     expect(slashSuggestions("/")).toEqual([
       "sessions",
       "new",
@@ -123,7 +121,6 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
       "help",
       "info",
       "thinking",
-      "profile",
       "compact",
       "rewind",
     ]);
@@ -155,7 +152,7 @@ describe('slashComplete: 唯一匹配 → "/cmd "；0/多匹配 → null', () =>
     expect(slashComplete("/q")).toBe("/quit ");
   });
 
-  test('"/" → null（10 匹配）', () => {
+  test('"/" → null（9 匹配）', () => {
     expect(slashComplete("/")).toBeNull();
   });
 
@@ -186,7 +183,6 @@ describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
     "help",
     "info",
     "thinking",
-    "profile",
     "compact",
   ] as const;
 
@@ -198,8 +194,8 @@ describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
     expect(slashCompleteFromList(ALL, 2)).toBe("/quit ");
   });
 
-  test("cursor=8 → /compact （末条）", () => {
-    expect(slashCompleteFromList(ALL, 8)).toBe("/compact ");
+  test("cursor=7 → /compact （末条）", () => {
+    expect(slashCompleteFromList(ALL, 7)).toBe("/compact ");
   });
 
   test("cursor 越界上 / 下 / 空列表 → null", () => {

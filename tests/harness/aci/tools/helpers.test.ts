@@ -123,6 +123,47 @@ describe("resolveWithinRoot", () => {
     }
     assert.equal(resolved, expected);
   });
+
+  it("extraWriteRoots: allows write target inside an extra root", async () => {
+    const root = await makeScratch("aci-helper-root-");
+    const extra = await makeScratch("aci-helper-extra-");
+    await mkdir(join(extra, "sub"));
+    const target = join(extra, "sub", "new.ts");
+
+    assert.equal(
+      await resolveWithinRoot(root, target, undefined, [extra]),
+      target
+    );
+  });
+
+  it("extraWriteRoots: rejects target outside primary AND extra roots", async () => {
+    const root = await makeScratch("aci-helper-root-");
+    const extra = await makeScratch("aci-helper-extra-");
+    const outside = await makeScratch("aci-helper-outside-");
+
+    await assert.rejects(
+      resolveWithinRoot(root, join(outside, "file.ts"), undefined, [extra]),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("outside workspace")
+    );
+  });
+
+  it("extraWriteRoots: rejects a symlink escaping the extra root", async () => {
+    const root = await makeScratch("aci-helper-root-");
+    const extra = await makeScratch("aci-helper-extra-");
+    const outside = await makeScratch("aci-helper-outside-");
+    await symlink(outside, join(extra, "escape"), "dir");
+
+    await assert.rejects(
+      resolveWithinRoot(root, join(extra, "escape", "file.ts"), undefined, [
+        extra,
+      ]),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("outside workspace")
+    );
+  });
 });
 
 describe("truncateByCodePoint", () => {
