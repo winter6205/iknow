@@ -25,16 +25,15 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 
 import { IKNOW_IDENTITY_DEFAULT } from "./identity.js";
-import { IKNOW_BOOTSTRAP_PROMPT } from "./bootstrap.js";
 import { IKNOW_SOUL_DEFAULT } from "./soul.js";
-import { readIknowState } from "./workspace.js";
+import { bootstrapFilePath } from "./workspace.js";
 
 /** IKNOW-196 + #194 T6 装配顺序 (5 段,逐步锁死)。 */
 export const IKNOW_ASSEMBLY_ORDER = [
   "identity", // 1. 认知层 (代码 LOCKED):Name/Kind/Signature
   "soul", // 2. 人格层 (代码 LOCKED):core truths/boundaries/vibe/continuity
   "user_profile", // 3. 用户画像 (~/.iknow/user.md) — 用户可改
-  "bootstrap", // 4. 首启引导 (仅当 bootstrap_seeded=false 注入)
+  "bootstrap", // 4. 首启引导 (rev 2026-08-11:文件驱动 — BOOTSTRAP.md 存在即注入)
   "memory_layer", // 5. 记忆层 (#194 / #121:AGENTS.md / rules / memory promote)
 ] as const;
 
@@ -207,23 +206,27 @@ async function readUserProfile(userHome: string): Promise<string | undefined> {
   }
 }
 
-/** bootstrap_active=false → skip;否则读 state,bootstrap_seeded=false → 注入。
- *  state 读失败(EACCES / EISDIR / 其他 IO)→ warn + skip(spec 降级契约
- *  spec.md:300-326,装配不阻塞) */
+/** rev 2026-08-11 对齐 openharness 隐式完成:
+ *  bootstrap_active=false → skip;否则读 `~/.iknow/BOOTSTRAP.md` 文件存在性,
+ *  存在 → 注入内容,缺失 → undefined。**不再读 state.json.bootstrap_seeded**。
+ *  完成机制 = agent 自己 rm BOOTSTRAP.md(文件驱动)。文件读失败
+ *  (EACCES / EISDIR / 其他 IO) → warn + skip(spec 降级契约)。 */
 async function readBootstrapIfNeeded(
   userHome: string,
   bootstrapActive: boolean
 ): Promise<string | undefined> {
   if (!bootstrapActive) return undefined;
   const wsRoot = path.join(userHome, ".iknow");
+  const bp = bootstrapFilePath(wsRoot);
   try {
-    const state = await readIknowState(wsRoot);
-    if (state.bootstrap_seeded) return undefined;
-    return IKNOW_BOOTSTRAP_PROMPT;
+    const content = await fs.readFile(bp, "utf8");
+    if (content.trim().length === 0) return undefined;
+    return content;
   } catch (err) {
-    const e = err as { kind?: string; path?: string; cause?: string };
+    const e = err as NodeJS.ErrnoException;
+    if (e.code === "ENOENT") return undefined;
     console.warn(
-      `[iknow-identity] state read failed (${e.path ?? wsRoot}): ${e.kind ?? "unknown"} ${e.cause ?? ""}`
+      `[iknow-identity] BOOTSTRAP.md read failed (${bp}): ${e.message}`
     );
     return undefined;
   }

@@ -22,15 +22,15 @@ afterAll(async () => {
 });
 
 describe("bootstrap state machine", () => {
-  it("initial seed has bootstrap_seeded=false", async () => {
+  it("initial seed: bootstrap_seeded flips true + schema_version=1", async () => {
     const { state } = await initializeIknowWorkspace({ workspace: workDir });
-    expect(state.bootstrap_seeded).toBe(false);
+    expect(state.bootstrap_seeded).toBe(true);
     expect(state.schema_version).toBe(1);
   });
 
-  it("bootstrap_seeded false → true is the only migration path", async () => {
+  it("bootstrap_seeded true→true (seed 即翻旗;写 state 保持 true)", async () => {
     const init = await initializeIknowWorkspace({ workspace: workDir });
-    expect(init.state.bootstrap_seeded).toBe(false);
+    expect(init.state.bootstrap_seeded).toBe(true);
     const after = await writeIknowState({ bootstrap_seeded: true }, workDir);
     expect(after.bootstrap_seeded).toBe(true);
     const p = join(workDir, "state.json");

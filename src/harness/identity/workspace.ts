@@ -218,13 +218,18 @@ export async function initializeIknowWorkspace(opts?: {
   const sp = stateFilePath(root);
   const stateExisting = await readIfExists(sp);
   if (stateExisting === undefined) {
+    // 首次初始化:seed state(bs=false)+ seed BOOTSTRAP.md,然后翻 flag=true
+    // (对齐 ohmo initialize_workspace:写 BOOTSTRAP.md 的同一决策点翻 flag,
+    // 避免后续每次 build 重新 seed 已删文件)。
     const seed: IknowStateV1 = {
       schema_version: 1,
       bootstrap_seeded: false,
     };
     await atomicWriteJson(sp, JSON.stringify(seed, null, 2));
     await seedBootstrapFile(root);
-    return { root, state: seed };
+    const complete: IknowStateV1 = { ...seed, bootstrap_seeded: true };
+    await atomicWriteJson(sp, JSON.stringify(complete, null, 2));
+    return { root, state: complete };
   }
 
   // 文件存在但 JSON 损坏 / schema 不匹配 → self-heal:
@@ -252,20 +257,20 @@ export async function initializeIknowWorkspace(opts?: {
     };
     await atomicWriteJson(sp, JSON.stringify(seed, null, 2));
     await seedBootstrapFile(root);
-    return { root, state: seed };
+    const complete: IknowStateV1 = { ...seed, bootstrap_seeded: true };
+    await atomicWriteJson(sp, JSON.stringify(complete, null, 2));
+    return { root, state: complete };
   }
 
-  // 合法 state 保留不动(idempotent)。rev 2026-08-11:若 bs=false(用户改过
-  // state 或历史 state 无 bootstrap 完成记录)且 BOOTSTRAP.md 缺失 → 补 seed。
-  if (!parsed.bootstrap_seeded) {
-    await seedBootstrapFile(root);
-  }
+  // 合法 state 保留不动(idempotent)。rev 2026-08-11:bs=true 是 seed 完成的
+  // 存档标记(对齐 ohmo),seed 后不再补文件——完成由 BOOTSTRAP.md 文件缺失
+  // 驱动(装配层读文件),不重新 seed。
   return { root, state: parsed };
 }
 
-/** rev 2026-08-11:seed BOOTSTRAP.md(bs=false 时,文件不存在才写,幂等)。
+/** rev 2026-08-11:seed BOOTSTRAP.md(文件不存在才写,幂等;不覆盖用户已改)。
  *  对齐 ohmo initialize_workspace:首次启动写引导文件,引导完成后 agent 自己
- *  rm 它。不覆盖用户已改 BOOTSTRAP.md。 */
+ *  rm 它。调用方在同一决策点把 bs 翻 true。 */
 async function seedBootstrapFile(root: string): Promise<void> {
   const bp = bootstrapFilePath(root);
   const existing = await readIfExists(bp);
