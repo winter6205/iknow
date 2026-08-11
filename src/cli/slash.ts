@@ -44,12 +44,6 @@ export type SlashEffect =
   | { type: "error"; text: string }
   | { type: "reset"; message: string }
   /**
-   * #196 首启完成钩子:host 侧翻 bootstrap_seeded(applySlashCommand 保持
-   * 纯同步,await writeIknowState 落在 host 的 processSlash)。args 原样透传
-   * ("done" 由 host 判定,CLI 纯解析)。
-   */
-  | { type: "profile"; args: string[] }
-  /**
    * W2: 权限模式查询/切换。args[0] ∈ {"", "status", "default", "plan",
    * "full_auto", "help"}。空 / "status" → host 显示当前 mode;其它 → host
    * 调用 modeContext.set(args[0])。
@@ -71,7 +65,6 @@ const HELP_TEXT = `命令 / Commands:
   /quit  /exit          退出 · leave chat
   /json on|off          切换 JSON 输出 · toggle machine JSON
   /reset                清空会话 · clear messages (session kept)
-  /profile done         标记首启引导完成 · mark first-run bootstrap done
   /permissions [mode]   查看/切换权限模式(default|plan|full_auto)
 
 其他输入视为问题 · anything else is a question for the agent.`;
@@ -133,12 +126,6 @@ export function applySlashCommand(opts: ApplySlashCommandOpts): SlashEffect {
       // messages. Session is intentionally preserved across reset.
       ctx.state.messages = Object.freeze([]);
       return { type: "reset", message: "Session cleared." };
-
-    case "profile":
-      // #196 完成钩子:host (processSlash in chat-session.ts) 调
-      // writeIknowState({ bootstrap_seeded: true }),本函数保持纯同步,
-      // 把 args 透传,host 决定 "done" / 其它分支的语义。
-      return { type: "profile", args };
 
     case "permissions":
       // W2: 权限模式查询/切换。纯解析,实际 set 落在 host(它持有

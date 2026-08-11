@@ -26,7 +26,6 @@ describe("parseTuiInput: 词表命中", () => {
     ["/help", "help"],
     ["/info", "info"],
     ["/thinking", "thinking"],
-    ["/profile", "profile"],
     ["/compact", "compact"],
   ] as const) {
     test(`解析 ${input} → command ${command}`, () => {
@@ -82,7 +81,7 @@ describe("parseTuiInput: 普通消息与边界", () => {
 });
 
 describe("helpLines", () => {
-  test("覆盖全部 9 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
+  test("覆盖全部 8 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
     const joined = helpLines().join("\n");
     for (const cmd of [
       "/sessions",
@@ -91,7 +90,6 @@ describe("helpLines", () => {
       "/help",
       "/quit",
       "/exit",
-      "/profile",
       "/compact",
     ]) {
       expect(joined).toContain(cmd);
@@ -112,7 +110,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  test('"/" → 全部 9 条（按词表插入顺序）', () => {
+  test('"/" → 全部 8 条（按词表插入顺序）', () => {
     expect(slashSuggestions("/")).toEqual([
       "sessions",
       "new",
@@ -121,7 +119,6 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
       "help",
       "info",
       "thinking",
-      "profile",
       "compact",
     ]);
   });
@@ -183,7 +180,6 @@ describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
     "help",
     "info",
     "thinking",
-    "profile",
     "compact",
   ] as const;
 
@@ -195,8 +191,8 @@ describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
     expect(slashCompleteFromList(ALL, 2)).toBe("/quit ");
   });
 
-  test("cursor=8 → /compact （末条）", () => {
-    expect(slashCompleteFromList(ALL, 8)).toBe("/compact ");
+  test("cursor=7 → /compact （末条）", () => {
+    expect(slashCompleteFromList(ALL, 7)).toBe("/compact ");
   });
 
   test("cursor 越界上 / 下 / 空列表 → null", () => {
