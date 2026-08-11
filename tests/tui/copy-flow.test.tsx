@@ -1,261 +1,170 @@
+/** @jsxImportSource @opentui/react */
 /**
  * tests/tui/copy-flow.test.tsx
  *
- * #238 鼠标拖选复制端到端：mount 一个 resume 会话（assistant 有内容），
- * 向 stdin 注入 SGR 鼠标序列（左键按下 → 拖动 → 释放），断言：
- *  1. 拖选期间 stdout 出现反色高亮（\x1b[7m…\x1b[27m）；
- *  2. 释放后自动调用 copyToClipboard → notice 出现"已复制"。
+ * #343 B1：右键复制 copy-flow 契约（#238）回归测试，覆盖 OpenTUI 选区 +
+ * 原生 fallback 链：
+ *  - `copyToClipboard` 单元：空文本 / PATH=nonexistent 退化写文件 / 命令
+ *    成功返回 method；
+ *  - 拖选（renderer "selection" 事件）**不再**自动触发复制（#343 删除项）；
+ *  - 右键 down+up → 复制当前选区 → notice 显示「已复制（N 字）」/「已写入…」
+ *    /「选中区域为空」；
+ *  - CJK 双宽：选区文本原样透传（OpenTUI 内置解析器负责）。
  *
- * SGR 序列（DECSET 1002h drag 模式）：
- *  - 按下：\x1b[<0;x;yM
- *  - 拖动：\x1b[<32;x;yM
- *  - 释放：\x1b[<3;x;ym
- *
- * 坐标口径：内容流（banner + 消息）从终端第 1 行起；fake stream 终端
- * 100 列 × 30 行。窗口 = 终端全高（viewport = rows - 状态栏 - 输入框…），
- * 因 fake stream 无真实渲染，靠 ChatView onWindow 回调提供 startRow/endRow
- *（startRow=0 通常；endRow = viewport）。
+ * 异步纪律：setup.waitForVisualIdle() 是唯一异步等待入口。
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { PassThrough } from "node:stream";
-import { mkdtemp, rm } from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { render } from "ink";
-import type { Instance } from "ink";
-import { TuiApp, createToolEventSink } from "../../src/tui/app.js";
-import {
-  createInflightRegistry,
-  createTuiBridge,
-} from "../../src/tui/hub-bridge.js";
-import { createTuiAskUserBridge } from "../../src/tui/ask-user.js";
-import { attachSession } from "../../src/tui/session-state.js";
-import { makeDeps } from "../cli/_fixtures.js";
+import { testRender } from "@opentui/react/test-utils";
+import { MouseButtons } from "@opentui/core/testing";
+import { TuiHarness } from "./_fixtures.js";
+import { copyToClipboard } from "../../src/tui/clipboard.js";
 
-const ANSI_RE = /\x1b\[[0-9;?]*[a-zA-Z]/g;
-const strip = (s: string): string => s.replace(ANSI_RE, "");
-const delay = (ms: number): Promise<void> =>
-  new Promise((r) => setTimeout(r, ms));
+const COLS = 80;
+const ROWS = 24;
 
-async function waitFor(
-  cond: () => boolean | Promise<boolean>,
-  timeoutMs = 8000,
-  label = ""
-): Promise<void> {
-  const start = Date.now();
-  while (!(await cond())) {
-    if (Date.now() - start > timeoutMs) {
-      throw new Error(`waitFor timeout: ${label}`);
+/** 临时 dataDir：用于 copyToClipboard fallback 写文件断言。 */
+let tmpDataDir: string;
+beforeEach(() => {
+  tmpDataDir = mkdtempSync(join(tmpdir(), "iknow-copy-"));
+});
+afterEach(() => {
+  try {
+    rmSync(tmpDataDir, { recursive: true, force: true });
+  } catch {
+    // best effort
+  }
+});
+
+describe("copyToClipboard（原生 fallback 链）", () => {
+  test("空文本 → kind:empty（不写文件、不 spawn）", async () => {
+    const result = await copyToClipboard("", { dataDir: tmpDataDir });
+    expect(result.kind).toBe("empty");
+  });
+
+  test("PATH=/nonexistent 时退化写 <dataDir>/last_copy.txt", async () => {
+    const text = "fallback 测试文本";
+    const result = await copyToClipboard(text, {
+      dataDir: tmpDataDir,
+      env: { PATH: "/nonexistent" } as NodeJS.ProcessEnv,
+    });
+    expect(result.kind).toBe("fallback");
+    if (result.kind === "fallback") {
+      expect(result.path).toBe(join(tmpDataDir, "last_copy.txt"));
+      expect(result.bytes).toBe(Buffer.byteLength(text, "utf8"));
+      const written = readFileSync(result.path, "utf8");
+      expect(written).toBe(text);
     }
-    await delay(50);
-  }
-}
+  });
 
-function fakeTtyStream(): PassThrough & {
-  isTTY: boolean;
-  columns: number;
-  rows: number;
-  setRawMode: (v: boolean) => void;
-  ref: () => void;
-  unref: () => void;
+  test("多字节 UTF-8 文本（CJK）bytes 计 lengthByBytes 不是 char count", async () => {
+    const text = "你好世界";
+    const result = await copyToClipboard(text, {
+      dataDir: tmpDataDir,
+      env: { PATH: "/nonexistent" } as NodeJS.ProcessEnv,
+    });
+    expect(result.kind).toBe("fallback");
+    if (result.kind === "fallback") {
+      expect(result.bytes).toBe(Buffer.byteLength(text, "utf8"));
+      expect(result.bytes).toBe(12);
+    }
+  });
+});
+
+/**
+ * 构造一个 fake Selection 对象（duck-type getSelectedText + touchedRenderables）。
+ * 测试中直接写入 renderer.currentSelection，触发右键复制 handler。
+ */
+function fakeSelection(text: string): {
+  getSelectedText(): string;
+  touchedRenderables: unknown[];
 } {
-  const stream = new PassThrough() as PassThrough & {
-    isTTY: boolean;
-    columns: number;
-    rows: number;
-    setRawMode: (v: boolean) => void;
-    ref: () => void;
-    unref: () => void;
-  };
-  stream.isTTY = true;
-  stream.columns = 100;
-  stream.rows = 30;
-  stream.setRawMode = (): void => {};
-  stream.ref = (): void => {};
-  stream.unref = (): void => {};
-  return stream;
+  return { getSelectedText: () => text, touchedRenderables: [] };
 }
 
-const LONG_TIMEOUT = 30_000;
+async function renderApp() {
+  const setup = await testRender(<TuiHarness />, {
+    width: COLS,
+    height: ROWS,
+    exitOnCtrlC: false,
+  });
+  await setup.waitForVisualIdle();
+  return setup;
+}
 
-describe("TuiApp 鼠标拖选复制（#238）", () => {
-  let baseDir: string;
-  let stdout: ReturnType<typeof fakeTtyStream>;
-  let stdin: ReturnType<typeof fakeTtyStream>;
-  const instances: Instance[] = [];
-
-  beforeEach(async () => {
-    baseDir = await mkdtemp(join(tmpdir(), "iknow-tui-drag-"));
-    stdout = fakeTtyStream();
-    stdin = fakeTtyStream();
-  }, LONG_TIMEOUT);
-  afterEach(async () => {
-    for (const ins of instances) ins.unmount();
-    instances.length = 0;
-    await rm(baseDir, { recursive: true, force: true });
-  }, LONG_TIMEOUT);
-
-  function mountResumedApp(): {
-    readonly out: () => string;
-    readonly rawOut: () => string;
-  } {
-    const initial = attachSession({
-      conversation_id: "drag-target",
-      messages: [
-        { role: "user", content: [{ type: "text", text: "请讲个故事" }] },
-        {
-          role: "assistant",
-          content: [
-            { type: "text", text: "第一行故事内容" },
-            { type: "text", text: "第二行故事结尾" },
-          ],
-        },
-      ],
-      turnCount: 1,
-      updatedAt: "2026-01-01T00:00:00.000Z",
-      jsonMode: false,
-    });
-    const bridge = createTuiBridge({
-      dataDir: baseDir,
-      deps: makeDeps([]),
-      inflight: createInflightRegistry(),
-    });
-    const askBridge = createTuiAskUserBridge();
-    const toolEventSink = createToolEventSink();
-    const out: string[] = [];
-    stdout.on("data", (chunk) => out.push(String(chunk)));
-    const instance = render(
-      <TuiApp
-        bridge={bridge}
-        askBridge={askBridge}
-        toolEventSink={toolEventSink}
-        initialSession={initial}
-        cwd="/tmp/proj"
-        dataDir={baseDir}
-      />,
-      {
-        stdout,
-        stdin,
-        exitOnCtrlC: false,
-        interactive: true,
-        kittyKeyboard: { mode: "disabled" },
-      }
+describe("TuiApp 右键复制（#343 B1）", () => {
+  test("拖选（selection 事件）不再自动复制，无 notice", async () => {
+    const setup = await renderApp();
+    setup.renderer.emit(
+      "selection",
+      fakeSelection("auto-copy should not happen")
     );
-    instances.push(instance);
-    return {
-      out: (): string => strip(out.join("")),
-      rawOut: (): string => out.join(""),
-    };
-  }
+    await setup.waitForVisualIdle();
+    await new Promise((r) => setTimeout(r, 50));
+    await setup.waitForVisualIdle();
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toMatch(/已复制|已写入|选中区域为空|复制失败/);
+    await setup.renderer.destroy();
+  });
 
-  it.skip(
-    "拖选高亮：注入 按下→拖动→释放，stdout 出现反色 \x1b[7m 且非空",
-    async () => {
-      const { out, rawOut } = mountResumedApp();
-      await delay(400);
-      await waitFor(
-        () => out().includes("请讲个故事"),
-        8000,
-        "resumed-session-visible"
-      );
-      // 在 assistant 文本行上按下并拖动（x=5..20, y 取消息区域）。
-      // 内容流起始 = 终端行 1；空会话 banner 完整，这里 resume 有消息后
-      // banner = 单行短 banner，消息区紧跟其后。
-      const pressY = 2; // 尽量选消息区（内容流第 1 行附近）
-      const dragY = 2;
-      stdin.write(`\x1b[<0;5;${pressY}M`);
-      await delay(50);
-      stdin.write(`\x1b[<32;20;${dragY}M`);
-      await delay(50);
-      stdin.write(`\x1b[<3;20;${dragY}m`);
-      await waitFor(
-        () => rawOut().includes("\x1b[7m") && rawOut().includes("\x1b[27m"),
-        8000,
-        "inverse-highlight"
-      );
-      await delay(100);
-      expect(rawOut().includes("\x1b[7m")).toBe(true);
-    },
-    LONG_TIMEOUT
-  );
+  test("完整右键（down+up）：down 保留选区 → up 复制成功（fallback 写文件）", async () => {
+    const setup = await renderApp();
+    const text = "full right click";
+    (
+      setup.renderer as unknown as { currentSelection: unknown }
+    ).currentSelection = fakeSelection(text);
+    // 真实右键序列：down（应被 onMouseDown preventDefault 保留选区）+ up。
+    await setup.mockMouse.click(5, 5, MouseButtons.RIGHT);
+    await setup.waitForVisualIdle();
+    await new Promise((r) => setTimeout(r, 50));
+    await setup.waitForVisualIdle();
+    const frame = setup.captureCharFrame();
+    expect(frame).toMatch(/已复制|已写入/);
+    await setup.renderer.destroy();
+  });
 
-  it(
-    "拖选后释放 → 自动复制（notice 出现 已复制/写入/失败 任一）",
-    async () => {
-      const { out } = mountResumedApp();
-      await delay(400);
-      await waitFor(
-        () => out().includes("请讲个故事"),
-        8000,
-        "resumed-session-visible"
-      );
-      // 按下 → 拖动 → 释放
-      stdin.write("\x1b[<0;3;2M");
-      await delay(50);
-      stdin.write("\x1b[<32;10;2M");
-      await delay(50);
-      stdin.write("\x1b[<3;10;2m");
-      // notice 文案三态（ok → "已复制"；fallback → "文本已写入"；error → "复制失败"）
-      await waitFor(
-        () => /(已复制|文本已写入|复制失败)/.test(out()),
-        8000,
-        "drag-copy-notice"
-      );
-    },
-    LONG_TIMEOUT
-  );
+  test("右键 up：空选区 →「选中区域为空。」notice", async () => {
+    const setup = await renderApp();
+    (
+      setup.renderer as unknown as { currentSelection: unknown }
+    ).currentSelection = fakeSelection("");
+    await setup.mockMouse.click(5, 5, MouseButtons.RIGHT);
+    await setup.waitForVisualIdle();
+    await new Promise((r) => setTimeout(r, 20));
+    await setup.waitForVisualIdle();
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("选中区域为空");
+    await setup.renderer.destroy();
+  });
 
-  it(
-    "Ctrl+Y 重复制：拖选复制后（选区已清）再 Ctrl+Y → 复制最近选区",
-    async () => {
-      const { out } = mountResumedApp();
-      await delay(400);
-      await waitFor(
-        () => out().includes("请讲个故事"),
-        8000,
-        "resumed-session-visible"
-      );
-      // 拖选 → 自动复制
-      stdin.write("\x1b[<0;3;2M");
-      await delay(50);
-      stdin.write("\x1b[<32;10;2M");
-      await delay(50);
-      stdin.write("\x1b[<3;10;2m");
-      await waitFor(
-        () => /(已复制|文本已写入|复制失败)/.test(out()),
-        8000,
-        "drag-copy-notice"
-      );
-      // 选区已清；Ctrl+Y 应命中 lastSelectionRef → 再次复制
-      stdin.write("\x19");
-      await waitFor(
-        () => /(已复制|文本已写入|复制失败)/.test(out()),
-        8000,
-        "ctrl-y-recopy"
-      );
-    },
-    LONG_TIMEOUT
-  );
+  test("右键 up：无选区（null）→「无选区：先按住鼠标左键拖选文本。」notice", async () => {
+    const setup = await renderApp();
+    (
+      setup.renderer as unknown as { currentSelection: unknown }
+    ).currentSelection = null;
+    await setup.mockMouse.click(5, 5, MouseButtons.RIGHT);
+    await setup.waitForVisualIdle();
+    await new Promise((r) => setTimeout(r, 20));
+    await setup.waitForVisualIdle();
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("无选区：先按住鼠标左键拖选文本。");
+    await setup.renderer.destroy();
+  });
 
-  it(
-    "Ctrl+Y 无选区 → 提示先拖选（不复制、无 \x1b[7m）",
-    async () => {
-      const { out, rawOut } = mountResumedApp();
-      await delay(400);
-      await waitFor(
-        () => out().includes("请讲个故事"),
-        8000,
-        "resumed-session-visible"
-      );
-      stdin.write("\x19"); // Ctrl+Y
-      await waitFor(
-        () => out().includes("无选区"),
-        8000,
-        "no-selection-notice"
-      );
-      await delay(100);
-      expect(rawOut().includes("\x1b[7m")).toBe(false);
-    },
-    LONG_TIMEOUT
-  );
+  test("右键 up：CJK 选区文本原样透传", async () => {
+    const setup = await renderApp();
+    const text = "中文测试 — 你好世界";
+    (
+      setup.renderer as unknown as { currentSelection: unknown }
+    ).currentSelection = fakeSelection(text);
+    await setup.mockMouse.click(5, 5, MouseButtons.RIGHT);
+    await setup.waitForVisualIdle();
+    await new Promise((r) => setTimeout(r, 50));
+    await setup.waitForVisualIdle();
+    const frame = setup.captureCharFrame();
+    expect(frame).toMatch(/已复制|已写入/);
+    await setup.renderer.destroy();
+  });
 });

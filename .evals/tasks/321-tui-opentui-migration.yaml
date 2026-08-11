@@ -1,0 +1,48 @@
+id: 321-tui-opentui-migration
+tier: fast
+description: "TUI 渲染后端迁移 ink→@opentui/react 收口 — SC1 ink 零命中、迁移文件就位、tests/tui 全绿、性能探针可运行"
+repo: .
+test_command: |
+  set -e
+  # SC1: 全仓无 ink（排除 archive）
+  if rg "from \"ink\"|from 'ink'" src/ tests/ --glob '!archive/**' -q; then
+    echo "FAIL: src/tests 仍引用 ink"; exit 1
+  fi
+  grep -q '"@opentui/react": "0.5.1"' package.json || { echo "FAIL: package.json 未精确锁 @opentui/react 0.5.1"; exit 1; }
+  grep -q '"@opentui/core": "0.5.1"' package.json || { echo "FAIL: package.json 未精确锁 @opentui/core 0.5.1"; exit 1; }
+  grep -q '"ink"' package.json && { echo "FAIL: package.json 仍含 ink"; exit 1; }
+
+  # 归档保留
+  test -d archive/tui-ink/src || { echo "FAIL: archive/tui-ink/src 缺失"; exit 1; }
+  test -d archive/tui-ink/tests || { echo "FAIL: archive/tui-ink/tests 缺失"; exit 1; }
+
+  # SC3: 行计数模块零复发（仅存于 archive）——排除注释约束声明（严禁 import 清单）
+  if rg -n "markdown-lines|message-rows|row-window" src/ \
+      --glob '!**/*.test.ts' --glob '!**/*.test.tsx' \
+      | grep -v '^\s*[^:]*:[0-9]*:\s*\*' -q; then
+    echo "FAIL: src/ 仍有行计数模块引用"; exit 1
+  fi
+
+  # 迁移关键文件就位
+  for f in run app chat-view markdown message-blocks prompt-input clipboard session-state slash hub-bridge deps; do
+    test -f "src/tui/$f.tsx" || test -f "src/tui/$f.ts" || { echo "FAIL: src/tui/$f.* 缺失"; exit 1; }
+  done
+
+  # 键盘收口: 无自实现 mouse/selection 模块
+  test -f src/tui/mouse.ts && { echo "FAIL: src/tui/mouse.ts 仍存在"; exit 1; }
+  test -f src/tui/selection.ts && { echo "FAIL: src/tui/selection.ts 仍存在"; exit 1; }
+
+  # tests/tui 全绿（bun 运行器; 尾斜杠必须）
+  $HOME/.bun/bin/bun test tests/tui/ >/dev/null 2>&1 || { echo "FAIL: bun test tests/tui/ 未全绿"; exit 1; }
+
+  # 性能探针可运行（exit 0，产出帧统计）
+  $HOME/.bun/bin/bun scripts/otui-perf-probe.ts >/dev/null 2>&1 || { echo "FAIL: otui-perf-probe 未通过"; exit 1; }
+
+  echo "PASS: TUI ink→@opentui/react 迁移收口 — SC1/SC3/归档/测试/探针全绿"
+prompt: |
+  Run `bash .evals/run.sh --task 321-tui-opentui-migration`.
+  Verifies the TUI rendering-backend migration (ink→@opentui/react 0.5.1) is
+  closed out: no ink imports in src/tests, @opentui/* pinned to 0.5.1,
+  archive/tui-ink/ preserved, row-count modules (markdown-lines/message-rows/
+  row-window) and custom mouse/selection modules gone from src/, all migrated
+  files present, bun test tests/tui/ green, and the performance probe passes.

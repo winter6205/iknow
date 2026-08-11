@@ -253,6 +253,9 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     showThinking: bundle.env.chat.showThinking,
     // W2: 传给 REPL host,host 的 /permissions 斜杠命令就地翻 mode。
     permissionMode,
+    // T4: `--resume <id>` 续跑锚点。仅 chat 消费;ask/serve/tui 入口
+    // 不传(解析虽 command-agnostic,host 各自决策)。undefined = 新开会话。
+    resumeId: parsed.resumeId,
     // #356 T7:host drain — chat 入口每轮 runHarness 前把 completed 子代理
     // 结果拼入 priorMessages。ask 入口无 manager(surface 门控),不传。
     subagentManager: built.subagentManager,
@@ -319,21 +322,27 @@ async function main(): Promise<void> {
 }
 
 async function runTui(parsed: ParsedCli): Promise<void> {
-  // 动态 import：与 serve 同款 lazy 路径，chat/ask 不背 ink/react 依赖树。
-  // #356 High#4 (SC12/SC3):TUI 退出链由 tui/run.tsx 自管 —— buildTuiDeps
-  // 不经 buildHarnessEngine(独立装配),run.tsx 本地自建 subagentManager 并把
-  // 其 shutdown 挂 registerShutdown(built),进程退出时清理子进程(见 run.tsx)。
-  const { runTui: startTui } = await import("./tui/run.js");
-  try {
-    await startTui({
-      sessionId: parsed.sessionId,
-      dataDir: parsed.dataDir,
-      traceOut: resolveTracePath(parsed.traceOut),
-    });
-  } catch (err) {
-    printChatError(err);
+  // 动态 import：与 serve 同款 lazy 路径，chat/ask 不背 opentui 依赖树。
+  // #343 T1：OpenTUI 渲染入口；runTui 返回退出码（E1/E2 类型化错误在
+  // tui/run.tsx 单一 catch 点收口，这里不再包 try/catch）。
+  // 运行时守卫：OpenTUI 0.5.1 仅在 Bun（~/.bun/bin/bun）下可用；Node 无
+  // node:ffi（Node 26 才有），tsx+Node 跑 tui 必然 FFI 失败。提前拦截并
+  // 指引 npm run dev:tui，避免绕 FFI 报错（#321 实测）。
+  if (process.versions.bun === undefined) {
+    process.stderr.write(
+      `TUI 需用 Bun 运行（OpenTUI 原生 FFI 仅 Bun 支持，Node 22 无 node:ffi）。\n` +
+        `请改用：npm run dev:tui\n`
+    );
     process.exitCode = 1;
+    return;
   }
+  const { runTui: startTui } = await import("./tui/run.js");
+  const exitCode = await startTui({
+    sessionId: parsed.sessionId,
+    dataDir: parsed.dataDir,
+    traceOut: resolveTracePath(parsed.traceOut),
+  });
+  process.exitCode = exitCode;
 }
 
 async function runServe(parsed: ParsedCli): Promise<void> {

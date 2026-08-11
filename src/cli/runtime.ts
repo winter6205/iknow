@@ -136,11 +136,12 @@ export function registerShutdown(built: {
   readonly dispose: () => Promise<void>;
 } {
   let shuttingDown = false;
-  // #356 High#4:re-kill one-shot —— 首次信号 dispose 完成后,重发一次让外部
-  // 处理器(chat-session 的 onSigint 计数器等)有机会强退;但无外部处理器
-  // (serve / 纯 registerShutdown) 时,unconditional re-kill 会与自身 handler
-  // 互踢成 microtask 死循环。reKilled 守门:第二次信号落地后 force-exit,
-  // 不再 re-kill,统一"二次强杀语义"。
+  // #365 DRIFT-1 (源自 #356 review-High4):re-kill one-shot —— 首次信号
+  // dispose 完成后,重发一次让外部处理器(chat-session 的 onSigint 计数器
+  // 等)有机会强退;但无外部处理器(serve / 纯 registerShutdown) 时,
+  // unconditional re-kill 会与自身 handler 互踢成 microtask 死循环(vitest
+  // process.emit 同步路径掩盖;node/bun 真实信号投递实测挂死)。reKilled
+  // 守门:第二次信号落地后 force-exit,不再 re-kill,统一"二次强杀语义"。
   let reKilled = false;
   const dispose = async (): Promise<void> => {
     if (shuttingDown) return;

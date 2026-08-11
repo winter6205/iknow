@@ -39,14 +39,18 @@ import {
 import { loadIknowEnv, type LlmEnv } from "../config/env.js";
 import { ValidationError } from "../shared/errors.js";
 import { MaxTurnsExceeded } from "../harness/errors.js";
-import { writeIknowState } from "../harness/identity/index.js";
-import type { IknowIdentityError } from "../harness/identity/index.js";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
-import { CURRENT_SCHEMA_VERSION, extractSummary } from "./store/index.js";
+import {
+  appendCheckpoint,
+  CURRENT_SCHEMA_VERSION,
+  extractSummary,
+  shouldPersistCheckpoint,
+  toInterruptReason,
+} from "./store/index.js";
 import type {
   ApiErrorBody,
   CompactSessionResponse,
@@ -139,29 +143,6 @@ export function mapStoreError(err: SessionStoreError): {
 // -- history projection (裁决#11: getSession turns) -----------------------------
 
 /** Extract joined text from text blocks of a native message. */
-/** #196: writeIknowState throw 是 typed union（kind/path + kind 分派字段，
- *  workspace.ts:37-42）——state_parse_failed 用 reason / state_schema_invalid
- *  用 field / write_failed 与 io_error 用 cause。按 kind 分派取详情字段，
- *  避免错误文案落到 String(err) = "[object Object]"。 */
-function isIknowIdentityError(err: unknown): err is IknowIdentityError {
-  if (typeof err !== "object" || err === null) return false;
-  const e = err as { kind?: unknown; path?: unknown };
-  return typeof e.kind === "string" && typeof e.path === "string";
-}
-
-/** 展开 IknowIdentityError 到可读详情（按 kind 分派不同详情字段）。 */
-function iknowIdentityDetail(err: IknowIdentityError): string {
-  switch (err.kind) {
-    case "state_parse_failed":
-      return `${err.kind}@${err.path}: ${err.reason}`;
-    case "state_schema_invalid":
-      return `${err.kind}@${err.path}: field ${err.field}`;
-    case "write_failed":
-    case "io_error":
-      return `${err.kind}@${err.path}: ${err.cause}`;
-  }
-}
-
 function textOf(msg: AnthropicNativeMessage): string {
   return msg.content
     .filter(
@@ -304,14 +285,17 @@ export type SessionHubOptions = {
   readonly subagentManager?: SubAgentManager;
 };
 
-// -- stop reasons that must NOT persist to file (裁决#8) -----------------------
-
-/** cancelled → no-op (spec L237); protocolError/emptyFinalResponse → drop context (chat-session.ts:84-89). */
-const DROP_REASONS: ReadonlySet<string> = new Set([
-  "cancelled",
-  "protocolError",
-  "emptyFinalResponse",
-]);
+// -- stop-reason persistence decision (T1: replaced DROP_REASONS set) ---------
+//
+// The previous design used a static DROP_REASONS set to skip certain stop
+// reasons (cancelled / protocolError / emptyFinalResponse). T1 replaces that
+// with `shouldPersistCheckpoint(result, priorMessages)` from
+// ./store/checkpoint.ts. Nuance preserved:
+//   - `cancelled` WITH delta>0 now persists (the user query landed; record a
+//     checkpoint so the interrupted turn is recoverable / rewind-able).
+//   - `protocolError` / `emptyFinalResponse` never persist (维持 #120 裁决).
+//   - every other stopReason (completed / maxTurns / timeout / nonSuccessStop)
+//     persists as-is.
 
 // -- SessionHub ----------------------------------------------------------------
 
@@ -444,6 +428,7 @@ export class SessionHub {
       summary: "",
       cwd: process.cwd(),
       sanitized_at: now,
+      checkpoints: [],
     };
     await this.store.save({ id, file });
     return {
@@ -470,18 +455,10 @@ export class SessionHub {
     const { conversationId, text } = opts;
     this.validateText(text);
     const query = text.trim();
-    // #196 /profile done 首启完成钩子（web 端）：用户在浏览器外填好
-    // ~/.iknow/user.md 后输入 /profile done，翻 bootstrap_seeded=true。
-    // 与 CLI / TUI 的 slash 命令同语义。走 serialize 队列保持 per-conversation
-    // 序列化契约（A15）；writeIknowState 失败 → 错误文案。不触发模型调用。
-    const profileDone = query.toLowerCase() === "/profile done";
     return this.serialize({
       conversationId,
       work: async () => {
         const session = await this.store.load(conversationId);
-        if (profileDone) {
-          return this.handleProfileDone(session, query);
-        }
         const priorCount = session.messages.length;
         const baseDeps = await this.ensureDeps();
         // T2: per-turn override — rebuild deps with a one-shot adapter only;
@@ -562,8 +539,9 @@ export class SessionHub {
             onStream: wrappedOnStream,
           });
           // Violation kill → surface protocolError so the SPA client can
-          // attribute the stop; DROP_REASONS already drops protocolError
-          // context on save (mirrors the chat-session drop semantics).
+          // attribute the stop; shouldPersistCheckpoint still drops
+          // protocolError context on save (mirrors the chat-session drop
+          // semantics, 维持 #120 裁决).
           finalResult = killed
             ? { ...result, stopReason: "protocolError" }
             : result;
@@ -597,6 +575,9 @@ export class SessionHub {
           conversationId,
           session,
           result: finalResult,
+          // priorMessages = the file BEFORE this run; only the messages THIS
+          // run appended count as progress for the cancelled-delta decision.
+          priorMessages: session.messages,
         });
         return {
           session: this.summarize({
@@ -631,6 +612,11 @@ export class SessionHub {
           updatedAt: new Date().toISOString(),
           schemaVersion: CURRENT_SCHEMA_VERSION,
           summary: "",
+          // Reset wipes conversation history; prior checkpoint records
+          // reference turns that no longer exist (messagesCount would also
+          // falsely satisfy `appendCheckpoint`'s delta<=0 no-op guard and
+          // silently drop the next interrupt save). Clear defensively.
+          checkpoints: [],
         };
         await this.store.save({ id: conversationId, file: reset });
         return {
@@ -761,19 +747,44 @@ export class SessionHub {
     return next;
   }
 
-  /** 裁决#8: save condition based on stopReason. */
+  /** 裁决#8 + T1: save condition based on stopReason and progress delta.
+   *  `priorMessages` = session.messages BEFORE this run (postMessage already
+   *  holds it); shouldPersistCheckpoint decides whether to save. Interrupting
+   *  stops (cancelled with delta>0) also append a checkpoint record so the
+   *  interrupted turn is recoverable / rewind-able. */
   private async conditionalSave(opts: {
     readonly conversationId: string;
     readonly session: SessionFileV1;
     readonly result: RunResult;
+    readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
   }): Promise<void> {
-    const { conversationId, session, result } = opts;
-    if (DROP_REASONS.has(result.stopReason)) return;
+    const { conversationId, session, result, priorMessages } = opts;
+    if (!shouldPersistCheckpoint(result, priorMessages)) return;
+    const now = new Date().toISOString();
+    const turnCount = session.turnCount + result.turnCount;
+    const interruptReason = toInterruptReason(result.stopReason);
+    // appendCheckpoint compares record.messagesCount to session.messages.length
+    // for its delta=0 guard, so it must receive the session BEFORE new messages
+    // are merged in (otherwise delta = 0 would always be false and the guard
+    // never fires). Compute the checkpointed session first, then merge the
+    // post-run messages / turnCount / metadata on top.
+    const withCheckpoint =
+      interruptReason === null
+        ? session
+        : appendCheckpoint(session, {
+            turnIndex: turnCount,
+            messagesCount: result.messages.length,
+            interruptedAt: now,
+            interruptReason,
+            ...(result.lastUsage !== null
+              ? { lastUsage: result.lastUsage }
+              : {}),
+          });
     const updated: SessionFileV1 = {
-      ...session,
+      ...withCheckpoint,
       messages: result.messages,
-      turnCount: session.turnCount + result.turnCount,
-      updatedAt: new Date().toISOString(),
+      turnCount,
+      updatedAt: now,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       summary: extractSummary(result.messages),
     };
@@ -830,37 +841,6 @@ export class SessionHub {
       json_mode: file.jsonMode,
       turn_count: file.turnCount,
       prior_count: 0,
-    };
-  }
-
-  /** #196 /profile done 首启完成钩子：翻 bootstrap_seeded，不触发模型调用。
-   *  writeIknowState 失败 → 把 typed union 的 kind/path/cause 格式化后
-   *  转 ValidationError（对齐 CLI formatChatError 语义，避免 [object Object]）。 */
-  private async handleProfileDone(
-    session: SessionFileV1,
-    query: string
-  ): Promise<PostMessageResponse> {
-    try {
-      await writeIknowState({ bootstrap_seeded: true });
-    } catch (err) {
-      const detail = isIknowIdentityError(err)
-        ? iknowIdentityDetail(err)
-        : err instanceof Error
-          ? err.message
-          : String(err);
-      throw new ValidationError(`无法标记首启完成：${detail}`);
-    }
-    return {
-      session: this.summarize({ file: session }),
-      turn: {
-        query,
-        answer: {
-          finalText:
-            "已标记首启引导完成。下次对话起，agent 将直接使用你填写的 ~/.iknow/user.md 画像。",
-          stopReason: "completed",
-          turnCount: 0,
-        },
-      },
     };
   }
 

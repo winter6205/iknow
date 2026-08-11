@@ -9,10 +9,37 @@
  * CURRENT rejected); sanitizeSessionFile (pure, backfills summary/cwd/sanitized_at
  * for v1 inputs and validates message element shape); extractSummary (first
  * user message's first text block, trimmed, truncated to 80 chars).
+ *
+ * v3 (T1 checkpoint data layer): SessionFileV1 gains the optional
+ * `checkpoints` array of per-turn interrupt snapshots, shared by the
+ * checkpoint (interrupt persist) and TUI rewind (rollback) paths. v1/v2 files
+ * sanitize to `checkpoints: []` (spread-preserve forward-compat discipline
+ * intact — the field is a derived add-on, not a mutation of authoritative
+ * history).
  */
 import type { AnthropicNativeMessage } from "../../harness/index.js";
 
-/** Session file shape (#120 schema v2). Loaders sanitize legacy v1 files. */
+/** Why a turn ended in an interrupt state — the checkpoint's discriminating
+ *  label. Mirrors the harness StopReason interruption subset (cancelled /
+ *  maxTurns / protocolError / timeout) plus `process` (reserved for a
+ *  process-level closeout the hub may record later). */
+export type InterruptReason =
+  "cancelled" | "maxTurns" | "protocolError" | "process" | "timeout";
+
+/** One interrupt snapshot: how far a session had progressed when an
+ *  interrupting stop happened (turnCount / messagesCount) plus the label.
+ *  `lastUsage` carries the last successful model-call usage when known
+ *  (mirrors RunResult.lastUsage; absent → the interrupt saw no usage). */
+export interface CheckpointRecord {
+  readonly turnIndex: number;
+  readonly messagesCount: number;
+  readonly interruptedAt: string;
+  readonly interruptReason: InterruptReason;
+  readonly lastUsage?: unknown;
+}
+
+/** Session file shape (#120 schema v2, v3 = +checkpoints). Loaders sanitize
+ *  legacy v1 files. */
 export interface SessionFileV1 {
   readonly schemaVersion: number;
   readonly conversation_id: string;
@@ -26,9 +53,11 @@ export interface SessionFileV1 {
   readonly cwd: string;
   /** v2: ISO timestamp of when sanitize last normalized this file. */
   readonly sanitized_at: string;
+  /** v3: interrupt snapshots for checkpoint / TUI rewind ([] until a save). */
+  readonly checkpoints?: ReadonlyArray<CheckpointRecord>;
 }
 
-export const CURRENT_SCHEMA_VERSION = 2 as const;
+export const CURRENT_SCHEMA_VERSION = 3 as const;
 
 /**
  * Validate parsed JSON against the session-file shape.
@@ -61,6 +90,15 @@ export function validateSessionFile(value: unknown): string | null {
   }
   if (typeof obj["updatedAt"] !== "string") {
     return "updatedAt";
+  }
+  // v3: optional `checkpoints` array — validate shape if present, never
+  // silently coerce (a malformed checkpoints field would break downstream
+  // rewind computation).
+  if (
+    obj["checkpoints"] !== undefined &&
+    !isValidCheckpointList(obj["checkpoints"])
+  ) {
+    return "checkpoints";
   }
   return null;
 }
@@ -117,6 +155,13 @@ export function sanitizeSessionFile(raw: unknown): SessionFileV1 {
   const messagesRaw = obj["messages"] as ReadonlyArray<unknown>;
   if (!isValidMessagesList(messagesRaw)) throw invalid("messages");
   const messages = messagesRaw as ReadonlyArray<AnthropicNativeMessage>;
+  // v3 backfill: v1/v2 files carry no `checkpoints` → normalize to [] (a
+  // derived add-on, not a mutation of authoritative history — spread-preserve
+  // discipline intact). When present, `checkpoints` is already validated by
+  // validateSessionFile above.
+  const checkpoints = Array.isArray(obj["checkpoints"])
+    ? (obj["checkpoints"] as ReadonlyArray<CheckpointRecord>)
+    : [];
   return {
     ...obj,
     schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -129,6 +174,7 @@ export function sanitizeSessionFile(raw: unknown): SessionFileV1 {
       typeof obj["sanitized_at"] === "string"
         ? obj["sanitized_at"]
         : (obj["updatedAt"] as string),
+    checkpoints,
   } as SessionFileV1;
 }
 
@@ -192,4 +238,37 @@ function isValidContentBlock(b: unknown): boolean {
     default:
       return false;
   }
+}
+
+/** Deep-validate a `checkpoints` array (v3). Each element must carry the
+ *  InterruptReason union, two numeric anchors, and an ISO string. `lastUsage`
+ *  is intentionally NOT shape-validated — it is a passthrough container for
+ *  RunResult.lastUsage (TokenUsage | null), and downstream consumers know how
+ *  to interpret absent vs null. */
+function isValidCheckpointList(records: unknown): boolean {
+  if (!Array.isArray(records)) return false;
+  for (const r of records) {
+    if (!isValidCheckpoint(r)) return false;
+  }
+  return true;
+}
+
+const VALID_INTERRUPT_REASONS: ReadonlySet<InterruptReason> = new Set([
+  "cancelled",
+  "maxTurns",
+  "protocolError",
+  "process",
+  "timeout",
+]);
+
+function isValidCheckpoint(c: unknown): boolean {
+  if (c === null || typeof c !== "object") return false;
+  const r = c as Record<string, unknown>;
+  return (
+    typeof r["turnIndex"] === "number" &&
+    typeof r["messagesCount"] === "number" &&
+    typeof r["interruptedAt"] === "string" &&
+    typeof r["interruptReason"] === "string" &&
+    VALID_INTERRUPT_REASONS.has(r["interruptReason"] as InterruptReason)
+  );
 }

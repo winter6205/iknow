@@ -1,19 +1,20 @@
+/** @jsxImportSource @opentui/react */
 /**
  * tests/tui/modal.test.tsx
  *
- * #279 项3：TUI modal 渲染槽（ModalHost + SelectModal + reduceModalKey）。
- * 覆盖：
+ * #343 T4：TUI modal 渲染槽（OpenTUI 版 ModalHost + SelectModal +
+ * reduceModalKey）。覆盖：
  *  - reduceModalKey 纯函数：y/a/n hotkey 直选（大小写不敏感）、↑↓ 导航
  *    clamp、Enter 选中当前、Esc dismiss、ctrl/meta 与无匹配字符 ignore、
  *    通用 select 同机制（hotkey 可自定义）；
  *  - selectModalRows 行账：窄终端标题 / 描述 / 选项按视觉宽度折行计入；
  *  - ModalHost 渲染：permission 盒子（标题 / 三选项 / 键位提示）、通用
- *    select 盒子、无 modal → 空；
- *  - 行账不变式：ink 实测渲染行数 === selectModalRows 预测（宽 / 窄终端）。
+ *    select 盒子、无 modal → 空帧；
+ *  - 行账不变式（归档语义重写）：captureCharFrame 实测盒子高度（╭→╰
+ *    边框行数）=== selectModalRows 预测（宽 / 窄终端，CJK 描述）。
  */
-import { afterEach, describe, expect, it } from "vitest";
-import { PassThrough } from "node:stream";
-import { render } from "ink";
+import { describe, expect, test } from "bun:test";
+import { testRender } from "@opentui/react/test-utils";
 import {
   ModalHost,
   PERMISSION_ANSWERS,
@@ -25,10 +26,6 @@ import {
   type SelectOption,
   type TuiModal,
 } from "../../src/tui/modal.js";
-
-const ANSI_RE = /\x1b\[[0-9;?]*[a-zA-Z]/g;
-const strip = (s: string): string => s.replace(ANSI_RE, "");
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const noKey = {
   upArrow: false,
@@ -49,7 +46,7 @@ function key(
 const permModal = { options: PERMISSION_ANSWERS, selectedIndex: 0 };
 
 describe("reduceModalKey（权限确认 y/a/n）", () => {
-  it("y / a / n hotkey 直选（once/always/reject）", () => {
+  test("y / a / n hotkey 直选（once/always/reject）", () => {
     expect(reduceModalKey(key("y"), permModal)).toEqual({
       type: "select",
       value: "once",
@@ -64,7 +61,7 @@ describe("reduceModalKey（权限确认 y/a/n）", () => {
     });
   });
 
-  it("hotkey 大小写不敏感", () => {
+  test("hotkey 大小写不敏感", () => {
     expect(reduceModalKey(key("Y"), permModal)).toEqual({
       type: "select",
       value: "once",
@@ -75,7 +72,7 @@ describe("reduceModalKey（权限确认 y/a/n）", () => {
     });
   });
 
-  it("↑/↓ 移动选中索引并 clamp", () => {
+  test("↑/↓ 移动选中索引并 clamp", () => {
     expect(reduceModalKey(key("", { upArrow: true }), permModal)).toEqual({
       type: "move",
       index: 0, // 已在 0 → clamp
@@ -95,7 +92,7 @@ describe("reduceModalKey（权限确认 y/a/n）", () => {
     ).toEqual({ type: "move", index: 1 });
   });
 
-  it("Enter 选中当前索引项", () => {
+  test("Enter 选中当前索引项", () => {
     expect(reduceModalKey(key("", { return: true }), permModal)).toEqual({
       type: "select",
       value: "once",
@@ -108,13 +105,13 @@ describe("reduceModalKey（权限确认 y/a/n）", () => {
     ).toEqual({ type: "select", value: "reject" });
   });
 
-  it("Esc → dismiss", () => {
+  test("Esc → dismiss", () => {
     expect(reduceModalKey(key("", { escape: true }), permModal)).toEqual({
       type: "dismiss",
     });
   });
 
-  it("ctrl/meta 组合键与无匹配字符 → ignore", () => {
+  test("ctrl/meta 组合键与无匹配字符 → ignore", () => {
     expect(reduceModalKey(key("y", { ctrl: true }), permModal)).toEqual({
       type: "ignore",
     });
@@ -125,7 +122,7 @@ describe("reduceModalKey（权限确认 y/a/n）", () => {
     expect(reduceModalKey(key(""), permModal)).toEqual({ type: "ignore" });
   });
 
-  it("通用 select：自定义 hotkey 同样直选", () => {
+  test("通用 select：自定义 hotkey 同样直选", () => {
     const options: ReadonlyArray<SelectOption> = [
       { value: "default", label: "Default", hotkey: "1" },
       { value: "full_auto", label: "Full Auto", hotkey: "2" },
@@ -142,14 +139,14 @@ describe("reduceModalKey（权限确认 y/a/n）", () => {
 });
 
 describe("selectModalRows（modal 行账 SSOT）", () => {
-  it("宽终端：权限 modal = 边框 2 + 标题 1 + 描述 1 + 选项 3 + 提示 1", () => {
+  test("宽终端：权限 modal = 边框 2 + 标题 1 + 描述 1 + 选项 3 + 提示 1", () => {
     const ask = { tool: "bash", summaryHint: "ls -la" };
     expect(permissionModalRows(ask, 100)).toBe(8);
     // 无描述 → 少 1 行。
     expect(permissionModalRows({ tool: "bash", summaryHint: "" }, 100)).toBe(7);
   });
 
-  it("窄终端：标题 / 描述按视觉宽度折行入账（CJK 占 2 列）", () => {
+  test("窄终端：标题 / 描述按视觉宽度折行入账（CJK 占 2 列）", () => {
     const longHint =
       "rm -rf /some/very/long/path/that/wraps/on/narrow/terminals";
     const wide = permissionModalRows(
@@ -165,7 +162,7 @@ describe("selectModalRows（modal 行账 SSOT）", () => {
     expect(narrow - wide).toBe(1);
   });
 
-  it("通用 select 内容同样入账（自定义标题 / 选项数）", () => {
+  test("通用 select 内容同样入账（自定义标题 / 选项数）", () => {
     const rows = selectModalRows(
       {
         title: "选择权限模式",
@@ -181,54 +178,28 @@ describe("selectModalRows（modal 行账 SSOT）", () => {
   });
 });
 
-function fakeTty(rows: number, cols: number) {
-  const s = new PassThrough() as PassThrough & {
-    isTTY: boolean;
-    columns: number;
-    rows: number;
-    setRawMode: (v: boolean) => void;
-    ref: () => void;
-    unref: () => void;
-  };
-  s.isTTY = true;
-  s.columns = cols;
-  s.rows = rows;
-  s.setRawMode = (): void => {};
-  s.ref = (): void => {};
-  s.unref = (): void => {};
-  return s;
+/** 帧中 modal 盒子实测高度：顶框行（含 ╭）到底框行（含 ╰）的行数。 */
+function modalBoxHeight(frame: string): number {
+  const lines = frame.split("\n");
+  const top = lines.findIndex((l) => l.includes("╭"));
+  const bottom = lines.findIndex((l) => l.includes("╰"));
+  expect(top).toBeGreaterThanOrEqual(0);
+  expect(bottom).toBeGreaterThan(top);
+  return bottom - top + 1;
+}
+
+async function renderModal(modal: TuiModal | undefined, cols: number) {
+  const setup = await testRender(<ModalHost modal={modal} cols={cols} />, {
+    width: cols,
+    height: 30,
+  });
+  await setup.renderOnce();
+  return setup;
 }
 
 describe("ModalHost 渲染", () => {
-  // ink 输出 flush 需要 interactive + TTY 假面（与 app.test.tsx 同款；
-  // ModalHost 本身无 useInput，stdin 仅为满足 ink 输入链路前提）。
-  const mounted: Array<{ unmount: () => void }> = [];
-  function mountModal(modal: TuiModal | undefined, cols: number) {
-    const stdout = fakeTty(24, cols);
-    const stdin = fakeTty(24, cols);
-    const out: string[] = [];
-    stdout.on("data", (c) => out.push(String(c)));
-    const instance = render(<ModalHost modal={modal} cols={cols} />, {
-      stdout,
-      stdin,
-      exitOnCtrlC: false,
-      interactive: true,
-      kittyKeyboard: { mode: "disabled" },
-    });
-    mounted.push(instance);
-    return {
-      text: async (): Promise<string> => {
-        await delay(150); // ink 异步节流渲染，等首帧 flush
-        return strip(out.join(""));
-      },
-    };
-  }
-  afterEach(() => {
-    for (const m of mounted.splice(0)) m.unmount();
-  });
-
-  it("permission modal：标题 + 三选项 + 键位提示可见", async () => {
-    const app = mountModal(
+  test("permission modal：标题 + 三选项 + 键位提示可见", async () => {
+    const setup = await renderModal(
       {
         kind: "permission",
         tool: "bash",
@@ -237,32 +208,34 @@ describe("ModalHost 渲染", () => {
       },
       100
     );
-    const text = await app.text();
-    expect(text).toContain("允许执行 bash？");
-    expect(text).toContain("ls -la");
-    expect(text).toContain("[y]");
-    expect(text).toContain("本次允许");
-    expect(text).toContain("[a]");
-    expect(text).toContain("总是允许（本会话）");
-    expect(text).toContain("[n]");
-    expect(text).toContain("拒绝");
-    expect(text).toContain("Esc 收起");
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("允许执行 bash？");
+    expect(frame).toContain("ls -la");
+    expect(frame).toContain("[y]");
+    expect(frame).toContain("本次允许");
+    expect(frame).toContain("[a]");
+    expect(frame).toContain("总是允许（本会话）");
+    expect(frame).toContain("[n]");
+    expect(frame).toContain("拒绝");
+    expect(frame).toContain("Esc 收起");
     // 选中项标记落在第一项。
-    expect(text).toMatch(/❯ \[y\]/);
+    expect(frame).toContain("❯ [y]");
+    await setup.renderer.destroy();
   });
 
-  it("selectedIndex 移动选中标记", async () => {
-    const app = mountModal(
+  test("selectedIndex 移动选中标记", async () => {
+    const setup = await renderModal(
       { kind: "permission", tool: "bash", summaryHint: "", selectedIndex: 2 },
       100
     );
-    const text = await app.text();
-    expect(text).toMatch(/❯ \[n\]/);
-    expect(text).not.toMatch(/❯ \[y\]/);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("❯ [n]");
+    expect(frame).not.toContain("❯ [y]");
+    await setup.renderer.destroy();
   });
 
-  it("通用 select modal 渲染自定义选项", async () => {
-    const app = mountModal(
+  test("通用 select modal 渲染自定义选项", async () => {
+    const setup = await renderModal(
       {
         kind: "select",
         title: "选择权限模式",
@@ -279,41 +252,41 @@ describe("ModalHost 渲染", () => {
       },
       100
     );
-    const text = await app.text();
-    expect(text).toContain("选择权限模式");
-    expect(text).toContain("[1] Default");
-    expect(text).toContain("[2] Full Auto");
-    expect(text).toContain("跳过确认");
-    expect(text).toMatch(/❯ \[2\]/);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("选择权限模式");
+    expect(frame).toContain("[1] Default");
+    expect(frame).toContain("[2] Full Auto");
+    expect(frame).toContain("跳过确认");
+    expect(frame).toContain("❯ [2]");
+    await setup.renderer.destroy();
   });
 
-  it("无 modal → 空渲染", async () => {
-    const app = mountModal(undefined, 100);
-    const text = await app.text();
-    expect(text.trim()).toBe("");
+  test("无 modal → 空帧", async () => {
+    const setup = await renderModal(undefined, 100);
+    expect(setup.captureCharFrame().trim()).toBe("");
+    await setup.renderer.destroy();
   });
 
-  it("行账不变式：实测渲染行数 === selectModalRows（宽 / 窄终端）", async () => {
+  test("行账不变式：实测盒子高度 === selectModalRows（宽 / 窄终端）", async () => {
     for (const cols of [100, 44]) {
       const ask = {
         tool: "write_file",
         summaryHint: "写入 src/some/long/path/file.ts（覆盖既有内容）",
       };
-      const app = mountModal(
+      const setup = await renderModal(
         { kind: "permission", ...ask, selectedIndex: 0 },
         cols
       );
-      const text = await app.text();
-      const frame = text.replace(/\n+$/, "");
-      const rendered = frame.split("\n").length;
+      const height = modalBoxHeight(setup.captureCharFrame());
       expect(
-        rendered,
-        `cols=${cols} 实测 ${rendered} === 预测 ${permissionModalRows(ask, cols)}`
+        height,
+        `cols=${cols} 实测 ${height} === 预测 ${permissionModalRows(ask, cols)}`
       ).toBe(permissionModalRows(ask, cols));
       // 双重核对：内容描述重算一致（渲染 / 行账同源守卫）。
       expect(selectModalRows(permissionModalContent(ask), cols)).toBe(
         permissionModalRows(ask, cols)
       );
+      await setup.renderer.destroy();
     }
   });
 });

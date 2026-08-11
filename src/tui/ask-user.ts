@@ -1,14 +1,15 @@
 /**
  * src/tui/ask-user.ts
  *
- * #146 TUI 专用 AskUser 桥接：ink 全屏 raw mode 下 readline 不可用，
- * 仿 createServeAskUser 的 queue-based + fail-closed 纪律（#115 H3），
- * 但 resolve 入口在 TUI 状态机（用户在输入框键入 y/n 或按对应键）。
+ * #343 T4（自 archive/tui-ink/src/ask-user.ts 迁移，语义不变）：
+ * TUI 专用 AskUser 桥接 —— 全屏 raw mode 下 readline 不可用，仿
+ * createServeAskUser 的 queue-based + fail-closed 纪律（#115 H3），
+ * resolve 入口在 TUI 状态机（用户在权限 modal 键入 y/n/a 或 ↑↓Enter）。
  *
  * 语义：
  *  - ask(ctx) 分配 `ask-N`，挂 fail-closed 定时器（默认 60s，unref）；
  *  - 仅 resolveAsk(id, true) 可放行；超时 / 未知 id → false；
- *  - pending() 供 UI 渲染提示行（工具名 + summaryHint + id）。
+ *  - pending() 供 UI 渲染提示（工具名 + summaryHint + id）。
  */
 import type { AskUser } from "../harness/permission/types.js";
 
@@ -23,10 +24,8 @@ export interface TuiAskUserBridge {
   readonly resolveAsk: (id: string, approved: boolean) => boolean;
   readonly pending: () => TuiPendingAsk | undefined;
   readonly pendingCount: () => number;
-  /** #279 项3：pending 变化通知（enqueue / settle 各触发一次）。TUI 据此
-   *  即时 re-render 挂/摘 modal——此前 pending 只能靠「恰好的」re-render
-   *  被看见（turn 流式刷新兜底；idle 直发 ask 会延迟到下一次无关渲染）。
-   *  返回退订函数。 */
+  /** pending 变化通知（enqueue / settle 各触发一次）。TUI 据此即时
+   *  re-render 挂/摘 modal。返回退订函数。 */
   readonly subscribe: (cb: () => void) => () => void;
 }
 
@@ -41,7 +40,7 @@ export function createTuiAskUserBridge(opts?: {
     {
       readonly info: TuiPendingAsk;
       readonly resolve: (v: boolean) => void;
-      readonly timer: NodeJS.Timeout;
+      readonly timer: ReturnType<typeof setTimeout>;
     }
   >();
   let counter = 0;
@@ -68,7 +67,7 @@ export function createTuiAskUserBridge(opts?: {
       const timer = setTimeout(() => {
         settle(id, false);
       }, timeoutMs);
-      if (timer.unref) timer.unref();
+      if (typeof timer.unref === "function") timer.unref();
       queue.set(id, {
         info: { id, tool: ctx.tool, summaryHint: ctx.summaryHint },
         resolve,

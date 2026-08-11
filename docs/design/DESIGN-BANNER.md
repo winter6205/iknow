@@ -165,3 +165,28 @@ JetBrains Mono（字符宽高比接近 0.5:1，braille 显示最接近正方形�
   （U+1F300-1FAFF 缺席）。
 - pty 冒烟：真实 TTY 下 banner 渲染正常（见
   `docs/handoff/2026-08-05-tui-implementation.md` 手工表）。
+
+## 6. e2 黄昏魔法石渐变定稿（2026-08-11）
+
+> 本节是 §1-§5 所述「双色分层（墨绿线稿 + 金棕 R 符文）」之后的配色升级
+> 定稿存档。探索全记录见 `docs/design/DESIGN-BANNER-GRADIENT.md`。
+
+操作员 #321 logo 重设计验收后定稿 **e2 v0 黄昏魔法石**：
+
+- **探索过程**：16 个渐变方案族（上下 v / 左右 h / 放射 r / 异色系 e，
+  每族 4 方案）第一轮 → e2 方向确认 → e2 5 变体（v0-v4）第二轮并排对比 →
+  操作员选定 **e2 v0 原版**。
+- **端点**：`#1a1d6e`（深蓝紫）→ `#ffafaf`（粉金）。
+- **公式**：13×32 逐 cell 上色，对角线 `t = 0.6·(c/31) + 0.4·(r/12)`，
+  RGB 空间线性插值（`c 权重 0.6` / `r 权重 0.4`）。实现见
+  `src/tui/banner.ts` `eyeGradientCells({from, to, cWeight, rWeight})`；
+  端点 SSOT = `src/tui/theme.ts` `logoInk` / `logoGold`。
+- **这是对 §2 双色分层的升级**：不规则对角线渐变替代双色分层。几何
+  （13×32 braille + alpha>128 主体 mask）不变；颜色从「墨绿 + 金棕」两层
+  离散 mask 升级为「蓝紫 → 粉金」单层连续渐变；旧 `EYE_GOLD_LINES` /
+  `BannerSegment` / `eyeSegments()` 金层管线删除（PR #360 commit
+  `6d3a3f2`）。
+- **窄终端降级保留**：`BANNER_MIN_COLS = 80`、单行 `◆ iknow <version>`、
+  降级单色 = §2 同款。
+- **细节 / 各候选否决理由 / ANSI256 退化调研**：见
+  `docs/design/DESIGN-BANNER-GRADIENT.md`。

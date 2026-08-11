@@ -1,12 +1,9 @@
 /**
  * src/tui/clipboard.ts
  *
- * 多平台复制到系统剪贴板（#238 鼠标拖选复制路径）。
- *
- * 设计：openharness `_copy_to_clipboard` 同款 fallback 链（参照
- * upstream-openharness/src/openharness/commands/registry.py:223）。我们
- * 没有 pyperclip 依赖，因此每平台直接 spawn 一个本机剪贴板命令；按
- * `candidatesForPlatform()` 顺序遍历，找到第一个能完成写 → 命中。
+ * #343 T5：迁移自 archive/tui-ink/src/clipboard.ts（#238 鼠标拖选复制
+ * fallback 链）。T0 归档后从 src/tui/ 重建此文件——逻辑、平台探测、PATH
+ * 隔离、超时都保持不动（语义对齐 ink 版 #238 copy-flow 契约）：
  *  1. macOS pbcopy
  *  2. Linux wl-copy（Wayland）
  *  3. Linux xclip -selection clipboard（X11）
@@ -14,9 +11,11 @@
  *  5. Windows clip.exe
  *  6. 退化：写 <dataDir>/last_copy.txt
  *
- * 调用入口：app.tsx 的 `doCopySelection`（mouseup + Ctrl+Y 都走这里）。
- * 选区文本由 selection.ts 的 `extractSelectionText` 提供；本模块只负责
- * 文本 → 系统剪贴板。
+ * T5 调用入口：app.tsx 的 `doCopySelection`（OSC52 不可用 / 不可达时
+ * 走此 fallback 链）。T5 优先路径是 `renderer.copyToClipboardOSC52`
+ * （@opentui/core 内置 OSC52 写入），仅当终端不支持 OSC52 时退回
+ * 本文件的 platform 探测链——D3 裁决保留两条路径，OSC52 失败不会
+ * 静默。
  *
  * 不引外部依赖：复制实现 100 行出头可控，pyperclip 倒退在 ts-paths
  * 之外、对单仓库 lockfile 还要加一依赖，违反 #238 的最小改动目标。
@@ -130,6 +129,9 @@ function which(binary: string, envPath: string): boolean {
  * options.env：注入给候选命令的 env（缺省 = process.env）。测试断言
  * 必然 fallback 时传 { PATH: "/nonexistent" }，不动全局 PATH 避免
  * 并行 worker 串扰。
+ *
+ * T5 备注：OSC52 路径走 CliRenderer.copyToClipboardOSC52，本函数仅作
+ * 不可用 / 失败时的原生 fallback——不重复探测，保持单职责。
  */
 export async function copyToClipboard(
   text: string,

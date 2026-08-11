@@ -85,4 +85,19 @@ describe("soul Continuity: does not direct agent to read/update ~/.iknow", () =>
   it("does not say 'update' as an agent action against user.md", () => {
     expect(constTemplateBody("soul.ts")).not.toMatch(/update\s+it\s+when/i);
   });
+  // rev 2026-08-11: /profile done 宿主斜杠命令已删（chat-session / app.tsx / hub），
+  // soul 若再引用会让 agent 幻想它存在。
+  it("does not reference the removed '/profile done' host slash command", () => {
+    expect(constTemplateBody("soul.ts")).not.toContain("/profile done");
+  });
+  it("points to the bash channel (bwrap binds home read-write) for ~/.iknow updates", () => {
+    const body = constTemplateBody("soul.ts");
+    expect(body).toContain("bash");
+    expect(body).toMatch(/bind-mounts? home/);
+  });
+  it("hints the bootstrap completion mechanism (BOOTSTRAP.md gone => implicit done)", () => {
+    const body = constTemplateBody("soul.ts");
+    expect(body).toContain("bootstrap");
+    expect(body).toMatch(/bootstrap\.md/);
+  });
 });

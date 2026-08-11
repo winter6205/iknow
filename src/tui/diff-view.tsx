@@ -1,8 +1,10 @@
+/** @jsxImportSource @opentui/react */
 /**
  * src/tui/diff-view.tsx
  *
- * #298 T5 统一 diff 渲染器：把 `computeDiff`（diff-unified.ts）产出的
- * `DiffLine[]` 按终端宽度渲染成红绿 diff 预览。只做渲染、不做算法。
+ * #343 T4（自 archive/tui-ink/src/diff-view.tsx 迁移 ink → OpenTUI）：
+ * 统一 diff 渲染器 —— 把 `computeDiff`（diff-unified.ts）产出的 `DiffLine[]`
+ * 按终端宽度渲染成红绿 diff 预览。只做渲染、不做算法。
  *
  * 宽度分档（行号 + 颜色）：
  *  - cols >= 80：双列行号（oldNo | newNo）+ 红绿；
@@ -12,9 +14,12 @@
  *
  * 行文本（DiffLine.text）已带统一 diff 前缀（` ` / `-` / `+`），本层只排
  * 行号列 + 上色。hunk 头（`@@ -A,B +C,D @@`，kind ctx）无行号，整行 dim。
+ *
+ * 着色（OpenTUI 版）：add/del 行 fg 上语义色 + 外层 `<box width={cols}>`
+ * 铺 backgroundColor 整行遮罩（bgAdd/bgDel）；tests/tui/diff-view.test.tsx
+ * 用 captureSpans 实测 fg/bg RGBA（归档 ink 时代 skip 的上色契约落地）。
  */
-import { Box, Text } from "ink";
-import type { ReactElement } from "react";
+import type { ReactNode } from "react";
 import type { DiffLine } from "./diff-unified.js";
 import { tuiPalette } from "./theme.js";
 
@@ -22,12 +27,12 @@ function pad3(n: number | undefined): string {
   return n === undefined ? "   " : String(n).padStart(3);
 }
 
-/** 内容行文本（含 diff 前缀）。hunk 头整行 dim。 */
+/** hunk 头判定（`@@` 起始的 ctx 行）。 */
 function isHunkHeader(line: DiffLine): boolean {
   return line.kind === "ctx" && line.text.startsWith("@@");
 }
 
-/** 单行渲染字符串（纯函数，供 diff-view.test 直接断言文本形状）。 */
+/** 单行渲染字符串（纯函数，供测试直接断言文本形状）。 */
 export function diffRowText(line: DiffLine, cols: number): string {
   // 窄终端降级：仅 add 行，无行号。
   if (cols < 40) return line.kind === "add" ? line.text : "";
@@ -47,10 +52,9 @@ export function diffRowText(line: DiffLine, cols: number): string {
 /**
  * DiffLine[] → 可见平文本行（按 cols 折叠；空文本 drop）。
  *
- * 行账 SSOT：message-rows（裁剪路径）与 live-tool-preview（live tail）都
- * 用本函数做「预测览行数」，`<DiffView>` 渲染同一套折叠规则 —— 折叠规则
- * 只在此汇聚，杜绝 3 处内联 `.map(diffRowText).filter(t !== "")` 分叉
- * （#298 review-Medium：#189 行账 parity 风险）。
+ * 行账 SSOT：`liveToolPreviewRows`（live tail 行账预测）与 `<DiffView>`
+ * 渲染都走 `diffRowText` 这同一套按 cols 折叠规则 —— 折叠规则只在此
+ * 汇聚，杜绝多处内联分叉（行账 parity）。
  */
 export function diffRowTexts(
   rows: readonly DiffLine[],
@@ -63,12 +67,9 @@ export function diffRowTexts(
  * 单行整行背景遮罩色（按 kind + hunk 头）。
  *
  * 只作用于 JSX 渲染层：add/del 返回淡色底，ctx/hunk 头返回 undefined
- * （透明、不产 `48` 背景序列）。**不**经 diffRowText / diffRowTexts 文本
- * 投影（那是 message-rows / live-tool-preview 的行账 SSOT，#189 parity，
- * 绝不能改）。
- *
- * 任何终端宽度都生效：遮罩是纯渲染层产物，不影响行账文本；窄终端
- * （cols<40）折叠为 add-only 行时 add 行同样上绿底。
+ * （透明）。**不**经 diffRowText / diffRowTexts 文本投影（那是行账 SSOT，
+ * 绝不能改）。任何终端宽度都生效：窄终端折叠为 add-only 行时 add 行同样
+ * 上绿底。
  */
 function rowBgColor(line: DiffLine): string | undefined {
   if (isHunkHeader(line)) return undefined;
@@ -95,20 +96,25 @@ function rowColor(line: DiffLine): string {
   }
 }
 
-/** 单个 diff 行渲染。 */
+/** 单个 diff 行渲染：空文本 → 不占行；否则整行盒（遮罩铺满 cols）+ 文本
+ *  （wrapMode none = 超宽截断不折行，行账 1 行）。 */
 export function DiffRow(props: {
   readonly line: DiffLine;
   readonly cols: number;
-}): ReactElement {
+}): ReactNode {
   const text = diffRowText(props.line, props.cols);
-  if (text === "") return <></>;
+  if (text === "") return null;
   const bg = rowBgColor(props.line);
   return (
-    <Box width={bg === undefined ? undefined : props.cols} backgroundColor={bg}>
-      <Text color={rowColor(props.line)} wrap="truncate" backgroundColor={bg}>
+    <box
+      width={props.cols}
+      overflow="hidden"
+      {...(bg === undefined ? {} : { backgroundColor: bg })}
+    >
+      <text fg={rowColor(props.line)} wrapMode="none">
         {text}
-      </Text>
-    </Box>
+      </text>
+    </box>
   );
 }
 
@@ -121,13 +127,13 @@ function foldNarrow(rows: readonly DiffLine[]): readonly DiffLine[] {
 export function DiffView(props: {
   readonly rows: readonly DiffLine[];
   readonly cols: number;
-}): ReactElement {
+}): ReactNode {
   const rows = props.cols < 40 ? foldNarrow(props.rows) : props.rows;
   return (
-    <Box flexDirection="column">
+    <box flexDirection="column">
       {rows.map((line, i) => (
         <DiffRow key={i} line={line} cols={props.cols} />
       ))}
-    </Box>
+    </box>
   );
 }

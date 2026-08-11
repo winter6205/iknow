@@ -9,8 +9,13 @@ import { defineConfig } from "vitest/config";
  */
 export default defineConfig({
   test: {
-    // .tsx: TUI 组件冒烟测试（ink renderToString；#146）。
+    // .tsx：TUI 组件测试；#343 T0 后 ink TUI 测试已归档到 archive/tui-ink/
+    // （在 tests/ 之外，本 include 不收集）。
     include: ["tests/**/*.test.ts", "tests/**/*.test.tsx"],
+    // D2 裁决：tests/tui 由 bun:test 驱动（OpenTUI 原生 FFI 仅 bun 可用，
+    // Node/vitest 下 createTestRenderer 报 "native FFI is not available"）。
+    // 聚合入口见 package.json "test" script。
+    exclude: ["tests/tui/**", "**/node_modules/**"],
     pool: "forks",
     // 4 核机器上默认会 fork min(cores, fileCount) 个并行进程，叠加各
     // 测试文件内的真实定时器/TUI 轮询容易放大偶发失败。限流到 3 个

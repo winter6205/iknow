@@ -82,6 +82,17 @@ function baseArgs(
 ): string[] {
   const tmp = fsPolicy.allowedPaths()[2] ?? "/tmp";
   const cwdRebind = isTmpDescendant(cwd, tmp) ? ["--bind", cwd, cwd] : [];
+  // `--tmpfs /tmp` (below) mounts an empty tmpfs over /tmp, which hides every
+  // /tmp/* subtree that was bound earlier in bindArgs — including a home dir
+  // that lives under /tmp (e.g. tests/CI set HOME to mkdtemp(join(tmpdir(),…)))
+  // or a workspace root on a tmp-mount. Without a post-tmpfs rebind, writes to
+  // ~/.iknow inside the fence land on the throwaway tmpfs and vanish when the
+  // fence exits. isTmpDescendant detects the shadowed case and re-binds the
+  // real home after `--tmpfs /tmp`. Production home is /home/<user>, which is
+  // NOT under /tmp, so homeRebind stays empty and production argv is
+  // byte-for-byte unchanged.
+  const home = pathForHome(fsPolicy);
+  const homeRebind = isTmpDescendant(home, tmp) ? ["--bind", home, home] : [];
   return [
     "--unshare-user-try",
     "--unshare-net",
@@ -106,7 +117,11 @@ function baseArgs(
     String(resources.tmp),
     "--tmpfs",
     "/tmp",
+    // cwd first: cwd must win over home when both are under /tmp and overlap
+    // (cwd+home share the same fs layer here, so order is not strictly
+    // enforced, but keeping cwd first preserves the pre-existing contract).
     ...cwdRebind,
+    ...homeRebind,
     "--proc",
     "/proc",
     "--dev-bind",

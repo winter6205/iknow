@@ -3,7 +3,7 @@
  * 链路集成测试。
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildHarnessEngine } from "../../../src/harness/build-engine.ts";
@@ -65,7 +65,7 @@ describe("buildHarnessEngine surface → deps.system", () => {
     expect(out).toContain("iknow Identity");
     expect(out).toContain("iknow Soul");
     expect(out).toContain("User Profile");
-    expect(out).toContain("First-run bootstrap");
+    expect(out).toContain("First Contact");
   });
 
   it("tui: same as chat (bootstrap active)", async () => {
@@ -73,7 +73,7 @@ describe("buildHarnessEngine surface → deps.system", () => {
     expect(out).toContain("iknow Identity");
     expect(out).toContain("iknow Soul");
     expect(out).toContain("User Profile");
-    expect(out).toContain("First-run bootstrap");
+    expect(out).toContain("First Contact");
   });
 
   it("ask: system excludes bootstrap but keeps identity/soul/user_profile", async () => {
@@ -81,7 +81,7 @@ describe("buildHarnessEngine surface → deps.system", () => {
     expect(out).toContain("iknow Identity");
     expect(out).toContain("iknow Soul");
     expect(out).toContain("User Profile");
-    expect(out).not.toContain("First-run bootstrap");
+    expect(out).not.toContain("First Contact");
   });
 
   it("serve: bootstrap active (same as chat/tui; 2026-08-08 裁定对话型入口共享身份状态机)", async () => {
@@ -89,7 +89,7 @@ describe("buildHarnessEngine surface → deps.system", () => {
     expect(out).toContain("iknow Identity");
     expect(out).toContain("iknow Soul");
     expect(out).toContain("User Profile");
-    expect(out).toContain("First-run bootstrap");
+    expect(out).toContain("First Contact");
   });
 
   it("order: identity < soul < user_profile < bootstrap", async () => {
@@ -100,7 +100,7 @@ describe("buildHarnessEngine surface → deps.system", () => {
     );
     expect(out.indexOf("iknow Soul")).toBeLessThan(out.indexOf("User Profile"));
     expect(out.indexOf("User Profile")).toBeLessThan(
-      out.indexOf("First-run bootstrap")
+      out.indexOf("First Contact")
     );
   });
 
@@ -113,26 +113,32 @@ describe("buildHarnessEngine surface → deps.system", () => {
     expect(out).not.toContain("memory_recall(query)");
   });
 
-  it("second skip: bootstrap_seeded=true → system excludes bootstrap", async () => {
+  it("second skip: BOOTSTRAP.md deleted → system excludes bootstrap", async () => {
+    // rev 2026-08-11 隐式完成:agent 引导对话后 rm BOOTSTRAP.md
     await initializeIknowWorkspace();
-    await writeIknowState({ bootstrap_seeded: true });
+    await unlink(join(process.env.HOME!, ".iknow", "BOOTSTRAP.md"));
     const out = await buildSystem("chat");
     expect(out).toContain("iknow Identity");
     expect(out).toContain("iknow Soul");
     expect(out).toContain("User Profile");
-    expect(out).not.toContain("First-run bootstrap");
+    expect(out).not.toContain("First Contact");
   });
 
-  it("default surface (no opts.surface) is chat → bootstrap active", async () => {
-    // Reset state — earlier test flipped bootstrap_seeded=true.
-    await writeIknowState({ bootstrap_seeded: false });
+  it("default surface (no opts.surface) is chat → bootstrap active when file present", async () => {
+    // rev 2026-08-11 文件驱动:BOOTSTRAP.md 存在 → 注入。上一测试 unlink 了文件,
+    // 这里重建 seed 的文件(bs=true 已翻,但文件缺失→不注入;重建文件→注入)。
+    await initializeIknowWorkspace();
+    await writeFile(
+      join(process.env.HOME!, ".iknow", "BOOTSTRAP.md"),
+      "# BOOTSTRAP.md - First Contact\n\nseed again"
+    );
     const { deps } = await buildHarnessEngine({
       env: makeEnv("sk-test-identity-default"),
       askUser: createNoAskUser(),
     });
     const out =
       (await (deps.system as () => Promise<string | undefined>)()) ?? "";
-    expect(out).toContain("First-run bootstrap");
+    expect(out).toContain("First Contact");
   });
 
   it("ask: memory_layer inactive — deps.system still carries identity layers", async () => {

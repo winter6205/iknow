@@ -99,6 +99,10 @@ export function assistantResult(
  * #179 T6: optional `streamEventsByStep` forwards to the stub's
  * `streamEventsByStep` seam (T4 wiring). When set, each step emits the
  * scripted events before returning its `responses` entry.
+ *
+ * #343 T7: optional `delayMs` forwards to stub-model's step delay seam so
+ * stream-driven UI states (e.g. `tool_call_start` → `[运行中]` tail) have
+ * time to render before the turn completes.
  */
 export function makeDeps(
   responses: AssistantTurnResult[],
@@ -106,6 +110,7 @@ export function makeDeps(
     readonly streamEventsByStep?: ReadonlyArray<
       ReadonlyArray<HarnessStreamEvent>
     >;
+    readonly delayMs?: number;
   } = {}
 ): LoopEngineDeps {
   const tool = createStubTool({ name: "noop", next: () => ({}) });
@@ -113,9 +118,11 @@ export function makeDeps(
   const executor = createExecutor(registry);
   const adapter = createStubModel({
     responses,
-    // createStubModel accepts `streamEventsByStep: undefined`; passing through
-    // directly keeps the optional forward trivial (no conditional spread).
+    // createStubModel accepts `streamEventsByStep` / `delayMs`: undefined
+    // passes through (no conditional spread); keeps the optional forward
+    // trivial and lets future seams plug in the same way.
     streamEventsByStep: opts.streamEventsByStep,
+    ...(opts.delayMs !== undefined && { delayMs: opts.delayMs }),
   });
   return { adapter, executor, registry, maxTurns: 5 };
 }
@@ -125,6 +132,7 @@ export function makeState(over: Partial<CliChatState> = {}): CliChatState {
     messages: [],
     jsonMode: false,
     session: {},
+    conversationId: null,
     ...over,
   };
 }
@@ -136,13 +144,26 @@ export interface MakeCtxOpts {
   readonly streamEventsByStep?: ReadonlyArray<
     ReadonlyArray<HarnessStreamEvent>
   >;
+  /** T2: per-step stub-model delay (milliseconds). */
+  readonly delayMs?: number;
+  /** T2: checkpoint 落盘 store；注入时 processChatLine 走持久化分支。 */
+  readonly checkpointStore?: import("../../src/session-api/store/index.ts").SessionStore;
+  /** T2: abort controller；注入时 processChatLine 把 controller.signal 传 run()。 */
+  readonly abortController?: AbortController;
 }
 
 export function makeCtx(opts: MakeCtxOpts): ChatLineContext {
   return {
     deps: makeDeps(opts.responses, {
       streamEventsByStep: opts.streamEventsByStep,
+      delayMs: opts.delayMs,
     }),
     state: makeState(opts.stateOverrides ?? {}),
+    ...(opts.checkpointStore !== undefined && {
+      checkpointStore: opts.checkpointStore,
+    }),
+    ...(opts.abortController !== undefined && {
+      abortController: opts.abortController,
+    }),
   };
 }

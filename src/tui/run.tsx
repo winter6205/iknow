@@ -1,116 +1,173 @@
+/** @jsxImportSource @opentui/react */
 /**
  * src/tui/run.tsx
  *
- * #146 TUI 进程入口（cli.ts runTui 动态 import 的唯一公共面）。
- * 装配链（与 serve 同款 α 直连 + buildHarnessEngine 同款 ACI deps）：
- *   prepareRuntime → buildTuiDeps（real adapter + ACI 6 工具 + askUser 桥接
- *   + postToolUse 事件）→ createTuiBridge（SessionStore + SessionHub）
- *   → ink render <TuiApp/>。
+ * #343 T6-C：OpenTUI 渲染入口扩展（端到端装配）。T1 阶段仅做 root.render
+ * + E1/E2 单一 catch；本步完成 product 路径的全量接线：
+ *  - prepareRuntime → buildTuiDeps（real adapter + ACI 10 工具 + askUser
+ *    桥接 + postToolUse 事件）；
+ *  - createInflightRegistry + createTuiBridge（SessionStore + SessionHub
+ *    + 单会话归因 soleInflightId + contextWindow 透传）；
+ *  - createToolEventSink + createTuiAskUserBridge；
+ *  - createPermissionModeContext（env IKNOW_PERMISSION_MODE 初始值） +
+ *    createSessionGrants（#279 项3 always 落点）+ 注入 deps 与 TuiApp；
+ *  - sessionId resume：`iknow tui <id>` → loadSessionFile → attachSession
+ *    → initialSession prop；
+ *  - `<TuiApp bridge askBridge toolEventSink cwd dataDir permissionMode
+ *    sessionGrants info initialSession onQuit/>`，onQuit 触发 renderer.destroy。
  *
- * trace：traceOut 传入 hub，postMessage 内按 conversation 建
- * JsonlTraceService（ADR-0003 D4 / #146 决策 5=10a，TUI 自动继承）。
+ * 错误路径（specs/321 Error Paths E1/E2）：渲染器构造 / 运行抛错 → 类型化
+ * stderr 消息 + 退出码 1。runTui 有且仅有一个 catch 点，全部清理（destroy
+ * 渲染器）收口于该点。createRenderer 注入口保留供测试诱导。
  */
-import { render } from "ink";
+import {
+  CliRenderEvents,
+  createCliRenderer,
+  type CliRenderer,
+  type CliRendererConfig,
+} from "@opentui/core";
+import { createRoot } from "@opentui/react";
 import {
   prepareRuntime,
   registerShutdown,
   type RuntimeBundle,
 } from "../cli/runtime.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
-import { buildTuiDeps } from "./deps.js";
+import { buildTuiDeps, type BuildTuiDepsOptions } from "./deps.js";
 import { createTuiAskUserBridge } from "./ask-user.js";
 import { createInflightRegistry, createTuiBridge } from "./hub-bridge.js";
-import { TuiApp, createToolEventSink } from "./app.js";
+import { createToolEventSink, TuiApp } from "./app.js";
 import { attachSession } from "./session-state.js";
 import { createSessionGrants } from "../harness/permission/session-grants.js";
-import { createSubAgentManager } from "../harness/subagent/manager.js";
-import { defaultSubAgentSpawn } from "../harness/subagent/spawn.js";
 import { initIknowWorkspaceSafe } from "../harness/identity/index.js";
 import {
   createPermissionModeContext,
   parsePermissionMode,
-  type PermissionModeContext,
 } from "../harness/permission/index.js";
 
+/** E1/E2 类型化错误前缀（specs/321 SC 11：错误消息常量化，禁 magic string）。 */
+export const TUI_RENDERER_ERROR_PREFIX = "TUI 渲染后端初始化失败";
+
 export interface RunTuiOptions {
-  /** `iknow tui <session-id>` resume；缺省 = draft 新会话（Q2=C）。 */
+  /** `iknow tui <session-id>` resume；缺省 = 新会话（Q2=C）。 */
   readonly sessionId?: string;
   /** 会话池根目录（--data-dir）；缺省 ~/.iknow。 */
   readonly dataDir?: string;
-  /** JSONL trace 输出路径（cli.ts resolveTracePath 产物）。 */
+  /** JSONL trace 输出路径。 */
   readonly traceOut?: string;
+  /** 测试注入口：覆盖渲染器工厂（诱导 E1/E2）；生产缺省 createCliRenderer。 */
+  readonly createRenderer?: (config: CliRendererConfig) => Promise<CliRenderer>;
 }
 
-export async function runTui(opts: RunTuiOptions): Promise<void> {
-  if (!process.stdout.isTTY || !process.stdin.isTTY) {
-    throw new Error("iknow tui 需要 TTY（交互界面）；脚本场景用 iknow ask。");
+/** Ctrl+C 语义自管：打断前台 turn 而非退出（#146 Q1a）。
+ *  alternate-screen：scrollback 收口（#321 问题 1）。
+ *  不 freeze：OpenTUI 0.5.1 的 CliRenderer 构造器在 Linux 下会写
+ *  config.useThread 默认值，冻结对象抛 "not extensible"（实测）。 */
+const RENDERER_CONFIG: CliRendererConfig = {
+  exitOnCtrlC: false,
+  screenMode: "alternate-screen",
+};
+
+/**
+ * 启动 TUI 渲染循环，返回进程退出码（0 = 正常退出，1 = E1/E2 类型化失败）。
+ * cli.ts 将返回值落为 process.exitCode。
+ */
+export async function runTui(options: RunTuiOptions = {}): Promise<number> {
+  const factory = options.createRenderer ?? createCliRenderer;
+  let renderer: CliRenderer | undefined;
+  let onQuitBridge: { destroy: () => void } | undefined;
+  try {
+    renderer = await factory(RENDERER_CONFIG);
+    // 装配链：runtime → deps → bridge/ask/tool 桥接 → TuiApp
+    await initIknowWorkspaceSafe();
+    const bundle: RuntimeBundle = await prepareRuntime();
+    const dataDir = resolveServeDataDir(options.dataDir);
+    const cwd = process.cwd();
+
+    const inflight = createInflightRegistry();
+    const toolEventSink = createToolEventSink();
+    const askBridge = createTuiAskUserBridge();
+    const permissionMode = createPermissionModeContext(
+      parsePermissionMode(process.env.IKNOW_PERMISSION_MODE) ?? "default"
+    );
+    const sessionGrants = createSessionGrants();
+
+    const depsOpts: BuildTuiDepsOptions = {
+      askUser: askBridge.ask,
+      onToolEvent: (event) => toolEventSink.emit(event),
+      soleInflightId: () => inflight.soleId(),
+      permissionMode,
+      sessionGrants,
+    };
+    // T2 返回平铺的 LoopEngineDeps & { subagentManager?, shutdown? }(非嵌套
+    // { deps, ... }),rest 解构剥离两个句柄后 deps 即 LoopEngineDeps。
+    const { subagentManager, shutdown, ...deps } = await buildTuiDeps(
+      bundle,
+      depsOpts
+    );
+    // #365 T4:挂 MCP + subagent 组合 shutdown 到进程信号(runtime.ts 语义,
+    // 与 chat/serve 一致)。T4 起 registerShutdown 参数放宽为结构
+    // `{ shutdown?: }`(DRIFT-1),TUI 只透 shutdown 句柄 — deps / engine /
+    // subagentManager 形态与钩子无关,不再用 undefined as never 占位。
+    // shutdown 缺席(防御,ask 形态不可能) → registerShutdown 内部 no-op。
+    // TUI exitOnCtrlC=false 是 renderer 层打断前台 turn,SIGINT 到 Node
+    // 进程层 handler 仍响应。
+    registerShutdown({ ...(shutdown ? { shutdown } : {}) });
+    const bridge = createTuiBridge({
+      dataDir: options.dataDir,
+      deps,
+      subagentManager,
+      traceOut: options.traceOut,
+      inflight,
+      contextWindow: bundle.env.compress.contextWindow,
+    });
+
+    let initialSession;
+    if (options.sessionId) {
+      const file = await bridge.loadSessionFile(options.sessionId);
+      initialSession = attachSession(file);
+    }
+
+    onQuitBridge = {
+      destroy: (): void => {
+        if (!renderer!.isDestroyed) renderer!.destroy();
+      },
+    };
+
+    const root = createRoot(renderer);
+    root.render(
+      <TuiApp
+        bridge={bridge}
+        askBridge={askBridge}
+        toolEventSink={toolEventSink}
+        initialSession={initialSession}
+        cwd={cwd}
+        dataDir={dataDir}
+        permissionMode={permissionMode}
+        sessionGrants={sessionGrants}
+        onQuit={onQuitBridge.destroy}
+      />
+    );
+    await whenDestroyed(renderer);
+    return 0;
+  } catch (err) {
+    // 唯一 catch 点（E1/E2）：类型化消息写 stderr，destroy 收口于此。
+    const cause = err instanceof Error ? err.message : String(err);
+    process.stderr.write(
+      `${TUI_RENDERER_ERROR_PREFIX}：${cause}。请重新安装依赖（npm ci）后重试\n`
+    );
+    if (renderer && !renderer.isDestroyed) {
+      renderer.destroy();
+    }
+    void onQuitBridge;
+    return 1;
   }
-  // #196 IKNOW T5: eager + idempotent 初始化 ~/.iknow/(initIknowWorkspaceSafe
-  // 内部 try/catch+warn,失败不阻塞装配 — tui 自有 buildTuiDeps 路径不走
-  // build-engine,必须独立 init)。
-  await initIknowWorkspaceSafe();
-  const bundle: RuntimeBundle = await prepareRuntime();
-  const dataDir = resolveServeDataDir(opts.dataDir);
-  const cwd = process.cwd();
+}
 
-  const inflight = createInflightRegistry();
-  const toolEventSink = createToolEventSink();
-  const askBridge = createTuiAskUserBridge();
-  // W2 扩展：TUI 也持可变 PermissionModeContext —— Shift+Tab 在 TUI/REPL
-  // 就地翻 mode,引擎不重建。初始值走 env IKNOW_PERMISSION_MODE(可选),
-  // 缺省 default。chat REPL 同源(cli.ts runChat)。
-  const permissionMode: PermissionModeContext = createPermissionModeContext(
-    parsePermissionMode(process.env.IKNOW_PERMISSION_MODE) ?? "default"
-  );
-  // #279 项3：会话级授权登记表 —— 权限 modal「总是允许」写入这里；deps policy
-  // 的 session 层读它（同一实例），后续同工具调用不再 ask。
-  const sessionGrants = createSessionGrants();
-  // #356 High#4 (SC12/SC3):TUI 长程入口 —— buildTuiDeps 内部 default
-  // createSubAgentManager 不返回句柄,这里自建并经测试缝透传(测试可注入覆盖),
-  // 保证进程退出时 registerShutdown 触发 subagentManager.shutdown —— 关闭
-  // stdio 子进程(SC11/SC16),否则 ink render 退出后 spawn 的子进程不被
-  // SIGTERM 清理(SC12)。MCP 在 TUI 路径不装配(registry 缺 mcp__* 工具),
-  // 故只挂 subagentManager.shutdown;与 chat/serve built.shutdown(组合句柄)
-  // 同语义,但语义面更窄 —— 本路径无 mcp。
-  const subagentManager = createSubAgentManager({
-    spawn: defaultSubAgentSpawn,
+/** 渲染器 destroy 事件 = TUI 生命周期终点（/quit / 信号 / E4）。 */
+function whenDestroyed(renderer: CliRenderer): Promise<void> {
+  if (renderer.isDestroyed) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    renderer.once(CliRenderEvents.DESTROY, () => resolve());
   });
-  const deps = buildTuiDeps(bundle, {
-    askUser: askBridge.ask,
-    onToolEvent: (event) => toolEventSink.emit(event),
-    soleInflightId: () => inflight.soleId(),
-    permissionMode,
-    sessionGrants,
-    subagentManager,
-  });
-  registerShutdown({ shutdown: () => subagentManager.shutdown() });
-  const bridge = createTuiBridge({
-    dataDir: opts.dataDir,
-    deps,
-    traceOut: opts.traceOut,
-    inflight,
-    // T3: 透传上下文窗口容量（仅显示用，不启用压缩——本计划裁决 5）。
-    contextWindow: bundle.env.compress.contextWindow,
-  });
-
-  let initialSession;
-  if (opts.sessionId) {
-    const file = await bridge.loadSessionFile(opts.sessionId);
-    initialSession = attachSession(file);
-  }
-
-  const app = render(
-    <TuiApp
-      bridge={bridge}
-      askBridge={askBridge}
-      toolEventSink={toolEventSink}
-      initialSession={initialSession}
-      cwd={cwd}
-      dataDir={dataDir}
-      permissionMode={permissionMode}
-      sessionGrants={sessionGrants}
-    />,
-    { exitOnCtrlC: false, kittyKeyboard: { mode: "disabled" } } // Ctrl+C 语义自管：打断前台 turn（Q1a）；kittyKeyboard disabled 避免 ink 启动期 kitty probe 的 200ms 窗口吞 stdin data（实测真实 pty 下导致首个 Enter / 滚轮 SGR 事件丢失）
-  );
-  await app.waitUntilExit();
 }

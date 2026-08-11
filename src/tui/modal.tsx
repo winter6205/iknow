@@ -1,25 +1,24 @@
+/** @jsxImportSource @opentui/react */
 /**
  * src/tui/modal.tsx
  *
- * #279 项3：TUI modal 渲染槽（对齐 upstream-openharness 的 ModalHost +
- * SelectModal 模式，自写实现）：
+ * #343 T4（自 archive/tui-ink/src/modal.tsx 迁移 ink → OpenTUI，语义不变）：
+ * TUI modal 渲染槽：
  *  - `SelectModal`：通用选择 modal（标题 + 选项列表 + 选中索引 + 键位提示），
- *    纯渲染、无内部状态（选中索引 / 键路由由宿主持有，与 openharness 同构）；
+ *    纯渲染、无内部状态（选中索引 / 键路由由宿主持有）；
  *  - `ModalHost`：按 modal 判别联合分派渲染（permission / select），无活动
  *    modal 时返回 null；
  *  - 权限确认实例 = `PERMISSION_ANSWERS`（y/a/n = once/always/reject）喂给
- *    SelectModal，键路由走纯函数 `reduceModalKey`（宿主 useInput 消费）。
+ *    SelectModal，键路由走纯函数 `reduceModalKey`（宿主 useKeyboard 消费，
+ *    OpenTUI KeyEvent 经 `modalKeyEventOf` 投影为 ModalKeyEvent）。
  *
- * 行账纪律（#189 / #268 同类）：modal 占屏必须入账 —— `selectModalRows`
- * 用 **wrap-ansi（ink 折行同款库、同参数 trim:false + hard:true）** 预测
- * modal 盒子的实际终端行数（边框 2 行 + 内文折行后行数），app 层
- * chromeReserveRows 据此压缩 viewport，窄终端不溢出。不能用贪心字符填充
- * （wrapTextVisual）：ink 走 wrap-ansi 整词换行，长工具名 + 窄列时贪心
- * 填充少算行数 → 帧高溢出。渲染与行账共用 `selectModalContent` /
- * `selectOptionLine` 单一来源，防双份实现漂移。
+ * 行账纪律（OpenTUI 版）：渲染与行账共用 `wrapModalLines`（wrap-ansi，
+ * trim:false + hard:true）把每个逻辑行折成物理行 —— SelectModal 逐物理行
+ * 渲染 `<text>`，盒子高度 = 边框 2 + 物理行数，`selectModalRows` 同式预测，
+ * 两者永不漂移（tests/tui/modal.test.tsx 行账不变式实测 ╭→╰ 行数核对）。
  */
-import type { ReactElement } from "react";
-import { Box, Text } from "ink";
+import type { ReactNode } from "react";
+import { TextAttributes, type KeyEvent } from "@opentui/core";
 import wrapAnsi from "wrap-ansi";
 import { tuiPalette } from "./theme.js";
 
@@ -89,26 +88,25 @@ export function selectOptionLine(option: SelectOption): string {
 }
 
 /** 盒子内文可用宽度：终端列 - 左右边框 2 - paddingX 左右各 1。cols 极窄
- *  （<4）时归 0（不再设 8 下限——下限会在 cols<12 高估内宽、低估折行行数）。 */
+ *  （<4）时归 0（不设下限——下限会在窄终端高估内宽、低估折行行数）。 */
 export function selectModalInnerWidth(cols: number): number {
   return Math.max(0, cols - 4);
 }
 
 /**
- * 按 ink 同款折行把内文行拆成物理行：wrap-ansi + `{trim:false, hard:true}`
- * （ink wrapText 'wrap' 模式的原参数）。ink 走整词换行——贪心字符填充
- * （wrapTextVisual）在长工具名 + 窄列时少算行数，行账必须与渲染同库同参。
+ * 按折行把内文行拆成物理行：wrap-ansi + `{trim:false, hard:true}`。
  * 内宽 ≤ 0（cols<4 退化终端）无法再折 → 记 1 行。
+ * 渲染（SelectModal）与行账（selectModalRows）共用本函数 —— 单一来源。
  */
-function wrapModalLines(s: string, inner: number): string[] {
+export function wrapModalLines(s: string, inner: number): string[] {
   if (inner <= 0) return [s];
   return wrapAnsi(s, inner, { trim: false, hard: true }).split("\n");
 }
 
 /**
  * modal 盒子实际占用的终端行数（行账 SSOT，可单测）：上下边框 2 行 +
- * 标题 / 描述 / 选项 / 键位提示按 wrap-ansi 折行后的行数。选中行的 `❯ `
- * 前缀与非选中行的两空格前缀等宽（各 2 列），折行预测按选中形态计（最宽形态）。
+ * 标题 / 描述 / 选项 / 键位提示折行后的行数。选中行的 `❯ ` 前缀与非选中
+ * 行的两空格前缀等宽（各 2 列），折行预测按选中形态计（最宽形态）。
  */
 export function selectModalRows(
   content: SelectModalContent,
@@ -130,7 +128,7 @@ export function selectModalRows(
   return rows;
 }
 
-/** 权限 modal 占行（chromeReserveRows 入账用）。 */
+/** 权限 modal 占行（chrome 行账入账用）。 */
 export function permissionModalRows(
   ask: { readonly tool: string; readonly summaryHint: string },
   cols: number,
@@ -139,62 +137,106 @@ export function permissionModalRows(
   return selectModalRows(permissionModalContent(ask), cols, selectedIndex);
 }
 
+/** 选项选中行的 `❯ ` / 非选中行的两空格前缀宽度（各 2 列）。 */
+const OPTION_PREFIX = "❯ ";
+
 /**
  * 通用选择 modal（纯渲染）：圆角线框 + 标题 + 可选描述 + 选项列表 +
  * 底部键位提示。selectedIndex 由宿主持有（↑↓ / Enter / hotkey / Esc 的
- * 键路由在宿主 useInput，走 reduceModalKey 纯函数）。
+ * 键路由在宿主 useKeyboard，走 reduceModalKey 纯函数）。
+ *
+ * 每个逻辑行先经 wrapModalLines 折成物理行再逐行 `<text>` 渲染 —— 与
+ * selectModalRows 同源，盒子高度 = 预测行数（行账不变式）。
  */
 export function SelectModal(props: {
   readonly content: SelectModalContent;
   readonly selectedIndex: number;
   readonly cols: number;
-}): ReactElement {
+}): ReactNode {
   const pal = tuiPalette;
-  const { content, selectedIndex } = props;
+  const { content, selectedIndex, cols } = props;
+  const inner = selectModalInnerWidth(cols);
   const hint = content.hint ?? SELECT_MODAL_HINT;
+  const lines: ReactNode[] = [];
+
+  wrapModalLines(content.title, inner).forEach((line, i) => {
+    lines.push(
+      <text
+        key={`title-${i}`}
+        fg={pal.running}
+        attributes={TextAttributes.BOLD}
+      >
+        {line}
+      </text>
+    );
+  });
+  if (content.description !== undefined && content.description.length > 0) {
+    wrapModalLines(content.description, inner).forEach((line, i) => {
+      lines.push(
+        <text key={`desc-${i}`} fg={pal.dim}>
+          {line}
+        </text>
+      );
+    });
+  }
+  content.options.forEach((opt, optIdx) => {
+    const selected = optIdx === selectedIndex;
+    const prefix = selected ? OPTION_PREFIX : "  ";
+    wrapModalLines(`${prefix}${selectOptionLine(opt)}`, inner).forEach(
+      (line, i) => {
+        // 选中项首物理行：`❯ ` 前缀上 accent，其余上正文色（与非选中区分）。
+        if (selected && i === 0 && line.startsWith(OPTION_PREFIX)) {
+          lines.push(
+            <text key={`opt-${optIdx}-${i}`}>
+              <span fg={pal.accent}>{OPTION_PREFIX}</span>
+              <span fg={pal.text} attributes={TextAttributes.BOLD}>
+                {line.slice(OPTION_PREFIX.length)}
+              </span>
+            </text>
+          );
+          return;
+        }
+        lines.push(
+          <text
+            key={`opt-${optIdx}-${i}`}
+            fg={selected ? pal.text : pal.dim}
+            attributes={selected ? TextAttributes.BOLD : TextAttributes.NONE}
+          >
+            {line}
+          </text>
+        );
+      }
+    );
+  });
+  wrapModalLines(hint, inner).forEach((line, i) => {
+    lines.push(
+      <text key={`hint-${i}`} fg={pal.dim}>
+        {line}
+      </text>
+    );
+  });
+
   return (
-    <Box
+    <box
       flexDirection="column"
-      borderStyle="round"
+      borderStyle="rounded"
       borderColor={pal.running}
       paddingX={1}
       marginBottom={1}
     >
-      <Text color={pal.running} bold>
-        {content.title}
-      </Text>
-      {content.description !== undefined && content.description.length > 0 && (
-        <Text color={pal.dim}>{content.description}</Text>
-      )}
-      {content.options.map((opt, i) => {
-        const selected = i === selectedIndex;
-        return (
-          <Text key={opt.value} color={selected ? pal.accent : pal.dim}>
-            {selected ? "❯ " : "  "}
-            {opt.hotkey !== undefined ? `[${opt.hotkey}] ` : ""}
-            <Text color={selected ? pal.text : pal.dim} bold={selected}>
-              {opt.label}
-            </Text>
-            {opt.description !== undefined ? (
-              <Text color={pal.dim}> {opt.description}</Text>
-            ) : null}
-          </Text>
-        );
-      })}
-      <Text color={pal.dim}>{hint}</Text>
-    </Box>
+      {lines}
+    </box>
   );
 }
 
 /**
  * ModalHost：modal 渲染槽。无活动 modal → null（行账 0）；permission →
- * 权限确认三选项；select → 通用选择。与 openharness ModalHost 同构
- * （宿主持状态 + 键路由，Host 只做分派渲染）。
+ * 权限确认三选项；select → 通用选择。宿主持状态 + 键路由，Host 只做分派渲染。
  */
 export function ModalHost(props: {
   readonly modal: TuiModal | undefined;
   readonly cols: number;
-}): ReactElement | null {
+}): ReactNode {
   const { modal, cols } = props;
   if (modal === undefined) return null;
   if (modal.kind === "permission") {
@@ -215,7 +257,7 @@ export function ModalHost(props: {
   );
 }
 
-/** reduceModalKey 的键位输入切片（宿主 useInput 参数投影）。 */
+/** reduceModalKey 的键位输入切片（宿主键事件的投影形态）。 */
 export interface ModalKeyEvent {
   readonly input: string;
   readonly key: {
@@ -228,6 +270,22 @@ export interface ModalKeyEvent {
   };
 }
 
+/** OpenTUI KeyEvent → ModalKeyEvent 投影（宿主 useKeyboard 与 reduceModalKey
+ *  之间的适配单源；单字符可打印键走 hotkey 直选通道）。 */
+export function modalKeyEventOf(e: KeyEvent): ModalKeyEvent {
+  return {
+    input: typeof e.name === "string" && e.name.length === 1 ? e.name : "",
+    key: {
+      upArrow: e.name === "up",
+      downArrow: e.name === "down",
+      return: e.name === "return",
+      escape: e.name === "escape",
+      ctrl: e.ctrl,
+      meta: e.meta,
+    },
+  };
+}
+
 /** reduceModalKey 决策结果。 */
 export type ModalKeyAction =
   | { readonly type: "move"; readonly index: number }
@@ -236,7 +294,7 @@ export type ModalKeyAction =
   | { readonly type: "ignore" };
 
 /**
- * modal 键路由纯函数（宿主 useInput 消费，可单测）：
+ * modal 键路由纯函数（宿主 useKeyboard 消费，可单测）：
  *  - ↑/↓ 移动选中索引（clamp）；Enter 选中当前项；Esc 收起（dismiss）；
  *  - 可打印字符按 hotkey 直选（大小写不敏感）；
  *  - ctrl/meta 组合键与无匹配字符 → ignore（宿主自行决定是否吞键）。

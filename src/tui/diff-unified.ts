@@ -1,20 +1,21 @@
 /**
  * src/tui/diff-unified.ts
  *
- * #298 T3 统一 diff（jsdiff）纯函数：把 old/new 文本算成逐行 `DiffLine[]`，
- * TUI 红绿 diff 预览（T5 diff-view）只做渲染、不做算法。
+ * #343 T4（自 archive/tui-ink/src/diff-unified.ts 迁移，语义不变）：
+ * 统一 diff（jsdiff）纯函数 —— 把 old/new 文本算成逐行 `DiffLine[]`，
+ * TUI 红绿 diff 预览（diff-view.tsx）只做渲染、不做算法。
  *
  * 契约（与 git diff --unified=3 对齐，实测同构）：
  *  - 行文本带统一 diff 前缀：`ctx` → 前导空格、`del` → `-`、`add` → `+`；
  *  - hunk 头 `@@ -A,B +C,D @@`（每 hunk 首行，kind `ctx`，无行号）——
- *    它是 `oldNo`/`newNo` 的起点锚（T5 diff-view 靠它排双列行号）；
+ *    它是 `oldNo`/`newNo` 的起点锚（diff-view 靠它排行号列）；
  *  - `oldNo` 在 `del`/`ctx` 行递增，`newNo` 在 `add`/`ctx` 行递增，
  *    每个 hunk 独立从 oldStart/newStart 起算；
  *  - 无行尾换行标记 `\ No newline at end of file` 以 `ctx` 行保留；
  *  - 双双空输入 → 空数组；单边空 → 纯 add / 纯 del 一个 hunk。
  *
  * 错误契约：jsdiff 任何异常统一包装为 typed `DiffError`（带 `code`），
- * 不外泄 raw Error —— T5 渲染层按 instanceof 判级，不碰栈文本。
+ * 不外泄 raw Error —— 渲染层按 instanceof 判级，不碰栈文本。
  */
 import { structuredPatch } from "diff";
 
@@ -49,7 +50,7 @@ function hunkHeaderText(
 }
 
 /**
- * old/new 文本 → 逐行统一 diff。`cols` 保留给 T5（窄终端折叠渲染），
+ * old/new 文本 → 逐行统一 diff。`cols` 保留给渲染层（窄终端折叠），
  * 本层是纯函数，与终端宽度无关——忽略该参数。
  *
  * 空输入契约：双双空 → `[]`；单边空 → 单 hunk 的纯 add / 纯 del。

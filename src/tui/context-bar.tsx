@@ -1,52 +1,49 @@
+/** @jsxImportSource @opentui/react */
 /**
  * src/tui/context-bar.tsx
  *
- * T4 (#TBD): 上下文用量条 — 三档色容量条（原型 f3afc37 variant3-single.tsx
- * 视觉 `│ ctx █░ band NN% 状态 X.Xk/Y.Yk`）。标签用 `ctx`（用户 2026-08-07
- * 反馈：不用中文），状态词 ok / warn / alert 对应三档色。
+ * #343 T4（自 archive/tui-ink/src/context-bar.tsx 迁移 ink → OpenTUI）：
+ * 上下文用量条 —— 三档色容量条（`│ ctx █░ band NN% 状态 X.Xk/Y.Yk`）。
  *
- * 数值语义（本计划裁决 1）：used = inputTokens + cacheReadInputTokens +
- * cacheCreationInputTokens（cache null → 0，Anthropic 三类 token 互不相交，
- * 合计 = 本回合模型看到的完整上下文）；pct = round(used / contextWindow × 100)。
- * 分母 = contextWindow 真值（非原型 mock 8000）。
+ * 数据契约（ADR-0008 D5，specs/321 Always 项）：本组件**只读**消费
+ * `RunResult.lastUsage`（TokenUsage wire 形状原样），不引入第二份 token
+ * 账本、不写回 usage —— 迁移只换渲染组件，数据路径不变。
  *
- * 三档色阈值（用户 2026-08-07 反馈：颜色调淡蓝）：
- *  - <50% CTX_BLUE 淡蓝（新增，取代原 bgRunning 灰绿）；
- *  - 50-80% running（琥珀，theme.ts:60，保留警示）；
- *  - >80% error（theme.ts:62，保留告警）。
- * running 时左 border 600ms 脉动（pal.border ↔ pal.running，原型 usePulse 钩子形态）。
+ * 数值语义（与 web/src/components/ContextUsageStrip.tsx 镜像同值）：
+ * used = inputTokens + cacheReadInputTokens + cacheCreationInputTokens
+ * （cache null → 0）；pct = round(used / contextWindow × 100)。
  *
- * 始终显示框（用户 2026-08-07 反馈：一开始就 0% 框，不是横线等文本）：
- * lastUsage === null（首轮前）也渲染完整 band + `0% ok` + `0.0k/window`，
- * 用量是真实检测（首轮后）后才刷新。窄列（cols < 40）降级仅 `ctx NN%`；
- * NO_COLOR 由 ink chalk 自动去色，`█░` 形状 + 数字兜底可读。
+ * 三档色阈值：<50% CTX_BLUE 淡蓝；50-80% running（琥珀）；>80% error。
+ * running 且已有用量时左 border 600ms 脉动。
+ *
+ * 始终显示框：lastUsage === null（首轮前）也渲染完整 band + `0% ok` +
+ * `0.0k/window`。窄列（cols < 40）降级仅 `ctx NN%`。activeToolName 尾缀
+ * `⚙ name`（不新增 chrome 行，行账不变）。
  */
 import { useEffect, useState } from "react";
-import type { ReactElement } from "react";
-import { Box, Text } from "ink";
+import type { ReactNode } from "react";
 import type { TokenUsage } from "../harness/model-adapter/types.js";
-import { visualWidth } from "./banner.js";
+import { visualWidth } from "./tool-summary.js";
 import { tuiPalette } from "./theme.js";
 
 export interface ContextBarProps {
+  /** 只读投影（ADR-0008 D5）：host 传 RunResult.lastUsage，本组件不改写。 */
   readonly lastUsage: TokenUsage | null;
   readonly contextWindow: number;
   readonly running: boolean;
   readonly cols: number;
-  /** #279 项 4：当前运行中工具名（app.tsx 从 liveToolRuns 派生）。
-   *  undefined = 无工具运行 → 不渲染指示器。渲染在本行尾缀（不新增
-   *  chrome 行，#189 行账不变）。 */
+  /** 当前运行中工具名（app 从 liveToolRuns 派生）。undefined = 无工具运行
+   *  → 不渲染指示器。渲染在本行尾缀（不新增 chrome 行）。 */
   readonly activeToolName?: string;
 }
 
-/** 淡蓝（用户 2026-08-07 反馈）；与 Web ContextUsageStrip COLOR_SAFE 镜像同值。
- *  导出供 tests/tui/context-bar.test.tsx 引用（保持与 Web 测试同模式）。 */
+/** 淡蓝安全档；与 Web ContextUsageStrip COLOR_SAFE 镜像同值。
+ *  导出供测试引用（保持与 Web 测试同模式）。 */
 export const CTX_BLUE = "#7ab8ff";
 
-// 数值语义 SSOT（本计划裁决 1）：下述纯函数与
-// web/src/components/ContextUsageStrip.tsx 镜像保持逐字一致 —— 修改任一侧
-// 必须同步另一侧（裁决 1 公式 / 三档色阈值变更需双改）。
-/** 容量条：█ 填充 + ░ 空余（原型 variant3-single.tsx:91-95 同签名同输出）。 */
+// 数值语义 SSOT：下述纯函数与 web/src/components/ContextUsageStrip.tsx
+// 镜像保持逐字一致 —— 修改任一侧必须同步另一侧（公式 / 三档色阈值双改）。
+/** 容量条：█ 填充 + ░ 空余。 */
 export function valueBand(pct: number, width = 10): string {
   const clamped = Math.max(0, Math.min(100, pct));
   const filled = Math.round((clamped / 100) * width);
@@ -60,7 +57,7 @@ export function contextColor(pct: number): string {
   return CTX_BLUE;
 }
 
-/** 上下文 token 用量合计（裁决 1）：cache 空字段按 0 处理。 */
+/** 上下文 token 用量合计：cache 空字段按 0 处理。 */
 export function ctxUsed(lastUsage: TokenUsage): number {
   return (
     lastUsage.inputTokens +
@@ -69,7 +66,7 @@ export function ctxUsed(lastUsage: TokenUsage): number {
   );
 }
 
-/** 600ms 布尔脉动（原型 variant3-single.tsx:151-165 usePulse，frozen 冻结）。 */
+/** 600ms 布尔脉动（frozen 冻结时不启动定时器）。 */
 function usePulse(frozen: boolean, periodMs = 600): boolean {
   const [n, setN] = useState(0);
   useEffect(() => {
@@ -80,11 +77,11 @@ function usePulse(frozen: boolean, periodMs = 600): boolean {
   return n % 2 === 0;
 }
 
-/** 活动工具指示器（#279 项 4）：`⚙ name` 截断到 budgetCols 视觉列宽内
- *  （banner.ts visualWidth 口径，CJK/emoji 安全）；放不下前缀 → 空串。
- *  超宽名字尾部截断补 `…`。纯函数，供单测直驱。 */
+/** 活动工具指示器：`[tool] name` 截断到 budgetCols 视觉列宽内（CJK 安全）；
+ *  放不下前缀 → 空串。超宽名字尾部截断补 `…`。纯函数，供单测直驱。
+ *  无 emoji UI 字形（spec #146:86 无 emoji UI 字形约束）。 */
 export function toolIndicator(name: string, budgetCols: number): string {
-  const PREFIX = "⚙ ";
+  const PREFIX = "[tool] ";
   const prefixW = visualWidth(PREFIX);
   if (budgetCols <= prefixW) return "";
   const nameBudget = budgetCols - prefixW;
@@ -99,10 +96,10 @@ export function toolIndicator(name: string, budgetCols: number): string {
   return PREFIX + acc + "…";
 }
 
-export function ContextBar(props: ContextBarProps): ReactElement {
+export function ContextBar(props: ContextBarProps): ReactNode {
   const pal = tuiPalette;
   const { lastUsage, contextWindow, running, cols } = props;
-  // 分母 ≤ 0（envInt 返回 0 / 负数）→ 视为无效，used/pct 按 0 兜底，防 NaN/Infinity。
+  // 分母 ≤ 0（envInt 返回 0 / 负数）→ 视为无效，used/pct 按 0 兜底，防 NaN。
   const denomOk = contextWindow > 0;
   const used = lastUsage === null || !denomOk ? 0 : ctxUsed(lastUsage);
   const pct =
@@ -110,14 +107,13 @@ export function ContextBar(props: ContextBarProps): ReactElement {
       ? 0
       : Math.round((used / contextWindow) * 100);
   // 首轮前（lastUsage null）不脉动——没有用量「可读」，静置 0% 框；
-  // 运行中且已检测出用量才脉动左 border（用户反馈「等有文本之后再检测」）。
+  // 运行中且已检测出用量才脉动左 border。
   const warm = lastUsage !== null && running && pct > 0 && denomOk;
   const leftBorder = usePulse(!warm) ? pal.border : pal.running;
   const color = contextColor(pct);
   const activeToolName = props.activeToolName;
-  // #279 项 4：活动工具指示器追加在**本行尾缀**（不新增 chrome 行，
-  // #189 行账不变）。预算 = cols − 已渲染基线宽 − 1（前导空格），
-  // visualWidth 口径保证窄终端不溢行。
+  // 活动工具指示器追加在**本行尾缀**（不新增 chrome 行，行账不变）。
+  // 预算 = cols − 已渲染基线宽 − 1（前导空格），visualWidth 口径防溢行。
   const narrowBase = `│ ctx ${pct}%`;
   const narrowIndicator =
     activeToolName === undefined
@@ -126,13 +122,11 @@ export function ContextBar(props: ContextBarProps): ReactElement {
   // 窄列（cols < 40）：仅 `ctx NN%`（省略状态词与 k/k 数字）。
   if (cols < 40) {
     return (
-      <Box>
-        <Text color={leftBorder}>│</Text>
-        <Text color={color}> ctx {pct}%</Text>
-        {narrowIndicator !== "" && (
-          <Text color={pal.dim}> {narrowIndicator}</Text>
-        )}
-      </Box>
+      <box flexDirection="row">
+        <text fg={leftBorder}>│</text>
+        <text fg={color}> ctx {pct}%</text>
+        {narrowIndicator !== "" && <text fg={pal.dim}> {narrowIndicator}</text>}
+      </box>
     );
   }
   const statusWord = pct > 80 ? "alert" : pct >= 50 ? "warn" : "ok";
@@ -145,18 +139,16 @@ export function ContextBar(props: ContextBarProps): ReactElement {
       ? ""
       : toolIndicator(activeToolName, cols - visualWidth(wideBase) - 1);
   return (
-    <Box>
-      <Text color={leftBorder}>│</Text>
-      <Text>
-        <Text> ctx </Text>
-        <Text color={color}>{valueBand(pct, 10)}</Text>
-        <Text color={color}> {pct}%</Text>
-        <Text color={color}> {statusWord}</Text>
-        <Text color={pal.dim}> {tokensText}</Text>
-        {wideIndicator !== "" && (
-          <Text color={pal.dim}> {wideIndicator}</Text>
-        )}
-      </Text>
-    </Box>
+    <box flexDirection="row">
+      <text fg={leftBorder}>│</text>
+      <text>
+        <span> ctx </span>
+        <span fg={color}>{valueBand(pct, 10)}</span>
+        <span fg={color}> {pct}%</span>
+        <span fg={color}> {statusWord}</span>
+        <span fg={pal.dim}> {tokensText}</span>
+        {wideIndicator !== "" && <span fg={pal.dim}> {wideIndicator}</span>}
+      </text>
+    </box>
   );
 }

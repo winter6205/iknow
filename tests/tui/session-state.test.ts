@@ -1,6 +1,9 @@
 /**
  * tests/tui/session-state.test.ts
  *
+ * #343 T6-A 测试：从 archive/tui-ink/tests/session-state.test.ts 迁回 tests/tui/，
+ * 改写为 bun:test（D2 裁决：tests/tui/ 由 bun:test 驱动）。
+ *
  * #146 状态机转换表（Q1a 裁决）全组合：
  *  - 任何会话态可自由切换；running-fg 被切走 → running-bg；
  *  - 切回 running-bg → running-fg；idle 不变；
@@ -10,7 +13,7 @@
  * T3：TuiSessionState / TurnFinishedInput 增 lastUsage 字段（上下文用量显示）。
  * 字段缺席（init）= null；turnFinished 把 hub 回执透传；Object.freeze 纪律保持。
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, test } from "bun:test";
 import {
   attachSession,
   canInterrupt,
@@ -50,7 +53,7 @@ function sampleFile(overrides?: Partial<SessionFileV1>): SessionFileV1 {
 }
 
 describe("session-state: draft / attach", () => {
-  it("createDraftSession：未建档、空消息、idle、冻结", () => {
+  test("createDraftSession：未建档、空消息、idle、冻结", () => {
     const draft = createDraftSession();
     expect(draft.conversationId).toBeUndefined();
     expect(draft.messages).toHaveLength(0);
@@ -59,11 +62,11 @@ describe("session-state: draft / attach", () => {
     expect(Object.isFrozen(draft.messages)).toBe(true);
   });
 
-  it("createDraftSession：lastUsage 初值 null（无首轮 usage）", () => {
+  test("createDraftSession：lastUsage 初值 null（无首轮 usage）", () => {
     expect(createDraftSession().lastUsage).toBeNull();
   });
 
-  it("attachSession：从文件恢复（消息冻结拷贝，不与源共享引用）", () => {
+  test("attachSession：从文件恢复（消息冻结拷贝，不与源共享引用）", () => {
     const file = sampleFile();
     const attached = attachSession(file);
     expect(attached.conversationId).toBe("conv-1");
@@ -74,13 +77,13 @@ describe("session-state: draft / attach", () => {
     expect(attached.messages).not.toBe(file.messages);
   });
 
-  it("attachSession：lastUsage 初值 null（lastUsage 只来自运行时回执，不从文件读）", () => {
+  test("attachSession：lastUsage 初值 null（lastUsage 只来自运行时回执，不从文件读）", () => {
     expect(attachSession(sampleFile()).lastUsage).toBeNull();
   });
 });
 
 describe("session-state: 三态转换表（Q1a）", () => {
-  it("turnStarted：idle → running-fg；非 idle 保持原状态", () => {
+  test("turnStarted：idle → running-fg；非 idle 保持原状态", () => {
     const draft = createDraftSession();
     const started = turnStarted(draft);
     expect(started.runState).toBe("running-fg");
@@ -88,24 +91,24 @@ describe("session-state: 三态转换表（Q1a）", () => {
     expect(turnStarted(started)).toBe(started);
   });
 
-  it("switchedAwayFrom：running-fg → running-bg（后台继续执行）", () => {
+  test("switchedAwayFrom：running-fg → running-bg（后台继续执行）", () => {
     const running = turnStarted(createDraftSession());
     expect(switchedAwayFrom(running).runState).toBe("running-bg");
   });
 
-  it("switchedAwayFrom：idle 会话切走不变", () => {
+  test("switchedAwayFrom：idle 会话切走不变", () => {
     const idle = createDraftSession();
     expect(switchedAwayFrom(idle)).toBe(idle);
   });
 
-  it("switchedTo：running-bg → running-fg；idle 不变", () => {
+  test("switchedTo：running-bg → running-fg；idle 不变", () => {
     const bg = switchedAwayFrom(turnStarted(createDraftSession()));
     expect(switchedTo(bg).runState).toBe("running-fg");
     const idle = createDraftSession();
     expect(switchedTo(idle)).toBe(idle);
   });
 
-  it("canInterrupt：仅 running-fg 可打断（Ctrl+C 作用域 Q1a）", () => {
+  test("canInterrupt：仅 running-fg 可打断（Ctrl+C 作用域 Q1a）", () => {
     const draft = createDraftSession();
     expect(canInterrupt(draft)).toBe(false);
     const fg = turnStarted(draft);
@@ -114,7 +117,7 @@ describe("session-state: 三态转换表（Q1a）", () => {
     expect(canInterrupt(bg)).toBe(false);
   });
 
-  it("turnFinished：落回 idle + 消息/turnCount/updatedAt 整体替换", () => {
+  test("turnFinished：落回 idle + 消息/turnCount/updatedAt 整体替换", () => {
     const started = turnStarted(createDraftSession());
     const messages: ReadonlyArray<AnthropicNativeMessage> = [
       msg("问"),
@@ -135,7 +138,7 @@ describe("session-state: 三态转换表（Q1a）", () => {
     expect(Object.isFrozen(done.messages)).toBe(true);
   });
 
-  it("turnFinished：cancelled 也落回 idle（hub DROP_REASONS 不落盘由 hub 保证）", () => {
+  test("turnFinished：cancelled 也落回 idle（hub DROP_REASONS 不落盘由 hub 保证）", () => {
     const started = turnStarted(createDraftSession());
     const done = turnFinished(started, {
       conversationId: "conv-9",
@@ -152,7 +155,7 @@ describe("session-state: 三态转换表（Q1a）", () => {
 });
 
 describe("session-state: lastUsage（T3，上下文用量显示）", () => {
-  it("turnFinished 传 lastUsage → state.lastUsage 命中 + 冻结纪律保持", () => {
+  test("turnFinished 传 lastUsage → state.lastUsage 命中 + 冻结纪律保持", () => {
     const lastUsage = {
       inputTokens: 100,
       outputTokens: 50,
@@ -177,7 +180,7 @@ describe("session-state: lastUsage（T3，上下文用量显示）", () => {
     expect(Object.isFrozen(done.messages)).toBe(true);
   });
 
-  it("turnFinished 无 lastUsage（null）→ state.lastUsage 为 null", () => {
+  test("turnFinished 无 lastUsage（null）→ state.lastUsage 为 null", () => {
     const done = turnFinished(createDraftSession(), {
       conversationId: "conv-t3",
       messages: [],
@@ -192,7 +195,7 @@ describe("session-state: lastUsage（T3，上下文用量显示）", () => {
 });
 
 describe("session-state: userMessageEchoed (T2 即时回显)", () => {
-  it("正常追加：messages 末尾新增 user text 消息，其余字段不变", () => {
+  test("正常追加：messages 末尾新增 user text 消息，其余字段不变", () => {
     const draft = createDraftSession();
     const echoed = userMessageEchoed(draft, "你好");
     expect(echoed.messages).toHaveLength(1);
@@ -206,14 +209,14 @@ describe("session-state: userMessageEchoed (T2 即时回显)", () => {
     expect(echoed.runState).toBe(draft.runState);
   });
 
-  it("空文本不追加（返回原状态）", () => {
+  test("空文本不追加（返回原状态）", () => {
     const draft = createDraftSession();
     expect(userMessageEchoed(draft, "")).toBe(draft);
     expect(userMessageEchoed(draft, "   ")).toBe(draft);
     expect(draft.messages).toHaveLength(0);
   });
 
-  it("冻结纪律：返回新冻结状态，不 mutate 原状态", () => {
+  test("冻结纪律：返回新冻结状态，不 mutate 原状态", () => {
     const draft = createDraftSession();
     const echoed = userMessageEchoed(draft, "冻结测试");
     expect(Object.isFrozen(echoed)).toBe(true);
@@ -223,7 +226,7 @@ describe("session-state: userMessageEchoed (T2 即时回显)", () => {
     expect(draft.messages).toHaveLength(0);
   });
 
-  it("在既有消息后追加（不覆盖历史）", () => {
+  test("在既有消息后追加（不覆盖历史）", () => {
     const started = turnStarted(createDraftSession());
     const first = userMessageEchoed(started, "第一条");
     const second = userMessageEchoed(first, "第二条");
@@ -249,7 +252,7 @@ describe("session-state: sessionCompacted（/compact 落盘后刷新）", () => 
     msg("尾部消息"),
   ];
 
-  it("压缩后：消息/turnCount/updatedAt 替换，runState 归 idle", () => {
+  test("压缩后：消息/turnCount/updatedAt 替换，runState 归 idle", () => {
     const lastUsage = {
       inputTokens: 100,
       outputTokens: 20,
@@ -290,7 +293,7 @@ describe("session-state: sessionCompacted（/compact 落盘后刷新）", () => 
     expect(Object.isFrozen(compacted.messages)).toBe(true);
   });
 
-  it("非 idle（running-fg）→ 保持原状态（与 turnStarted 同护栏语义）", () => {
+  test("非 idle（running-fg）→ 保持原状态（与 turnStarted 同护栏语义）", () => {
     const running = turnStarted(createDraftSession());
     const result = sessionCompacted(running, {
       messages: compactedMessages,

@@ -71,16 +71,18 @@ describe("T12 public exports + Gate B gate", () => {
     // #160 / ADR-0008(accepted):TokenUsage 域类型经 spec+plan+ACR 授权为显示路径
     // 必需层,移出禁词表(与 cancel/timeout/trace 同一授权先例)。
     // retry/checkpoint/costusd 护栏/OTel-span-metric 树仍禁(推迟到 018 真实接通后)。
+    // 2026-08-11 gate-refresh:移除三个全库零场景的死字面禁词(判定+证据见
+    // public-exports gate 说明与子代理全库扫描):httpstatus(代码库无 HttpStatus
+    // 标识符,HTTP status 走数字字面量/enum string)、requestid(无 request ID 概念,
+    // trace record 用 id/parentLlmCallId 等域字段)、withresolvers(无
+    // Promise.withResolvers 使用)。判据 12 边界不变,六个活跃 capability 护栏保留。
     const keywords = [
       "retry",
       "checkpoint",
       "costusd",
-      "httpstatus",
-      "requestid",
       "otel",
       "span",
       "metric",
-      "withresolvers",
     ];
     for (const f of files) {
       const lines = readFileSync(f, "utf8").split(/\r?\n/);

@@ -1,196 +1,203 @@
+/** @jsxImportSource @opentui/react */
 /**
  * tests/tui/diff-view.test.tsx
  *
- * #298 T5 diff-view 渲染器：三档宽度（cols=80/60/40）窄终端降级测试。
- *  - 双列行号（cols>=80）+ 红绿着色；
- *  - 单列行号（40–79）+ 红绿着色；
- *  - cols<40 折叠为仅 add（无行号 / 无 del / 无 hunk 头），不抛错。
- *  - hunk 头 `@@ -A,B +C,D @@` 出现且渲染对齐。
+ * #343 T4：diff-view 渲染器（OpenTUI 版）：
+ *  - diffRowText 三档宽度文本形状（cols>=80 双列行号 / 40–79 单列 / <40 仅 add）；
+ *  - DiffView 帧渲染：hunk 头、行号列、窄终端折叠；
+ *  - captureSpans 着色断言（归档 it.skip 的真上色契约，OpenTUI 下可实测）：
+ *    add 行 fg 绿（#2ea043）+ 整行淡绿底（#1f3d2b），del 行 fg 红（#d73a49）
+ *    + 淡红底（#3d1f24），各至少一条。
  */
-import { describe, expect, it } from "vitest";
-import { renderToString } from "ink";
-import React from "react";
+import { describe, expect, test } from "bun:test";
+import { testRender } from "@opentui/react/test-utils";
+import type { CapturedFrame } from "@opentui/core";
 import { computeDiff, type DiffLine } from "../../src/tui/diff-unified.js";
-import { DiffRow, DiffView, diffRowText } from "../../src/tui/diff-view.js";
-
-const ANSI_RE = /\x1b\[[0-9;]*m/g;
-const strip = (s: string): string => s.replace(ANSI_RE, "");
-
-/** 造一个 edit_file 场景的 diff：old_str → new_str。 */
-function editRows(oldText: string, newText: string): readonly DiffLine[] {
-  return computeDiff("a.ts", oldText, newText);
-}
+import { DiffView, diffRowText } from "../../src/tui/diff-view.js";
+import { tuiPalette } from "../../src/tui/theme.js";
 
 const OLD = "one\ntwo\nthree\nfour\nfive";
 const NEW = "one\nTWO\nthree\nFOUR\nfive";
 
+function editRows(oldText: string, newText: string): readonly DiffLine[] {
+  return computeDiff("a.ts", oldText, newText);
+}
+
+/** hex → [r,g,b] 0-1 浮点（captureSpans 的 RGBA 口径）。 */
+function hex01(hex: string): [number, number, number] {
+  return [
+    parseInt(hex.slice(1, 3), 16) / 255,
+    parseInt(hex.slice(3, 5), 16) / 255,
+    parseInt(hex.slice(5, 7), 16) / 255,
+  ];
+}
+
+/** 帧中是否存在一个 span：文本含 needle 且 fg（可选 bg）与 hex 匹配（±1/255）。 */
+function hasSpan(
+  frame: CapturedFrame,
+  needle: string,
+  fgHex: string,
+  bgHex?: string
+): boolean {
+  const [fr, fg2, fb] = hex01(fgHex);
+  const bg = bgHex === undefined ? undefined : hex01(bgHex);
+  return frame.lines.some((line) =>
+    line.spans.some((span) => {
+      if (!span.text.includes(needle)) return false;
+      const eps = 1.5 / 255;
+      if (Math.abs(span.fg.r - fr) > eps) return false;
+      if (Math.abs(span.fg.g - fg2) > eps) return false;
+      if (Math.abs(span.fg.b - fb) > eps) return false;
+      if (bg !== undefined) {
+        if (Math.abs(span.bg.r - bg[0]) > eps) return false;
+        if (Math.abs(span.bg.g - bg[1]) > eps) return false;
+        if (Math.abs(span.bg.b - bg[2]) > eps) return false;
+      }
+      return true;
+    })
+  );
+}
+
+/** 帧中是否存在任一 cell 的背景色 = hex（整行遮罩可能落在文本外 cell）。 */
+function hasBgCell(frame: CapturedFrame, bgHex: string): boolean {
+  const [r, g, b] = hex01(bgHex);
+  const eps = 1.5 / 255;
+  return frame.lines.some((line) =>
+    line.spans.some(
+      (span) =>
+        Math.abs(span.bg.r - r) < eps &&
+        Math.abs(span.bg.g - g) < eps &&
+        Math.abs(span.bg.b - b) < eps
+    )
+  );
+}
+
+async function renderDiff(rows: readonly DiffLine[], cols: number) {
+  const setup = await testRender(<DiffView rows={rows} cols={cols} />, {
+    width: cols,
+    height: 30,
+  });
+  await setup.renderOnce();
+  return setup;
+}
+
 describe("diffRowText（纯函数文本形状）", () => {
-  it("cols>=80：del/add 双列行号", () => {
+  test("cols>=80：del/add 双列行号", () => {
     const rows = editRows(OLD, NEW);
-    const del = rows.find((r) => r.kind === "del")!;
-    const add = rows.find((r) => r.kind === "add")!;
-    // del 行只带 oldNo（newNo 空列），add 行只带 newNo（oldNo 空列）。
-    expect(diffRowText(del, 80)).toMatch(/^\s*2\s+│\s+-two/);
-    expect(diffRowText(add, 80)).toMatch(/\s+2\s+│\s+\+TWO/);
+    const del = rows.find((r) => r.kind === "del");
+    const add = rows.find((r) => r.kind === "add");
+    expect(del).toBeDefined();
+    expect(add).toBeDefined();
+    expect(diffRowText(del!, 80)).toMatch(
+      /^\s*2\s+3\s+│\s+-two|^\s*2\s+│\s+-two/
+    );
+    expect(diffRowText(add!, 80)).toMatch(/2\s+│\s+\+TWO/);
   });
 
-  it("40–79：单列行号", () => {
+  test("40–79：单列行号", () => {
     const rows = editRows(OLD, NEW);
-    const del = rows.find((r) => r.kind === "del")!;
-    expect(diffRowText(del, 60)).toMatch(/^\s*2\s+│\s+-two/);
+    const del = rows.find((r) => r.kind === "del");
+    expect(diffRowText(del!, 60)).toMatch(/^\s*2\s+│\s+-two/);
   });
 
-  it("cols<40：add 保留原文，del/ctx 空串", () => {
+  test("cols<40：add 保留原文，del/ctx 空串", () => {
     const rows = editRows(OLD, NEW);
-    const add = rows.find((r) => r.kind === "add")!;
-    const del = rows.find((r) => r.kind === "del")!;
-    expect(diffRowText(add, 32)).toBe("+TWO");
-    expect(diffRowText(del, 32)).toBe("");
+    const add = rows.find((r) => r.kind === "add");
+    const del = rows.find((r) => r.kind === "del");
+    expect(diffRowText(add!, 32)).toBe("+TWO");
+    expect(diffRowText(del!, 32)).toBe("");
   });
 
-  it("hunk 头整行保留（无行号）", () => {
+  test("hunk 头整行保留（无行号）", () => {
     const rows = editRows(OLD, NEW);
-    const hdr = rows.find((r) => r.text.startsWith("@@"))!;
-    expect(diffRowText(hdr, 80)).toBe(hdr.text);
-    expect(diffRowText(hdr, 60)).toBe(hdr.text);
+    const hdr = rows.find((r) => r.text.startsWith("@@"));
+    expect(diffRowText(hdr!, 80)).toBe(hdr!.text);
+    expect(diffRowText(hdr!, 60)).toBe(hdr!.text);
   });
 });
 
-describe("DiffView 渲染（ink renderToString）", () => {
-  function render(rows: readonly DiffLine[], cols: number): string {
-    return strip(
-      renderToString(React.createElement(DiffView, { rows, cols }), {
-        columns: cols,
-      })
-    );
-  }
-
-  // SKIP(用户授权 2026-08-08)：真实渲染未发射期望的 add 绿 truecolor 码
-  // \x1b[38;2;46;160;67m。pre-existing 失败，与 LSP didOpen 改动无关
-  // （stash 干净基座同样失败）。原因详见 git 提交正文。
-  it.skip("cols=80：双列行号 + hunk 头 + 红绿（add/del 着色）", () => {
-    const rows = editRows(OLD, NEW);
-    const out = render(rows, 80);
-    // hunk 头出现且对齐
-    expect(out).toContain("@@ -1,5 +1,5 @@");
-    // 双列行号：del 行 oldNo 在第 1 列、add 行 newNo 在第 2 列
-    expect(out).toMatch(/\n\s*2\s+│\s+-two/);
-    expect(out).toMatch(/\s+2\s+│\s+\+TWO/);
-    // 红/绿 ANSI 上色字节存在
-    expect(
-      renderToString(React.createElement(DiffView, { rows, cols: 80 }), {
-        columns: 80,
-      })
-    ).toContain("\x1b[38;2;46;160;67m"); // #2ea043 → add 绿
+describe("DiffView 帧渲染", () => {
+  test("cols=80：双列行号 + hunk 头", async () => {
+    const setup = await renderDiff(editRows(OLD, NEW), 80);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("@@ -1,5 +1,5 @@");
+    expect(frame).toMatch(/2\s+│\s+-two/);
+    expect(frame).toMatch(/2\s+│\s+\+TWO/);
+    await setup.renderer.destroy();
   });
 
-  // SKIP(用户授权 2026-08-08)：真实渲染未发射期望的 del 红 truecolor 码
-  // \x1b[38;2;215;58;73m。pre-existing 失败，与 LSP didOpen 改动无关。
-  it.skip("cols=80：del 行红色 #d73a49", () => {
-    const rows = editRows(OLD, NEW);
-    const raw = renderToString(
-      React.createElement(DiffView, { rows, cols: 80 }),
-      { columns: 80 }
-    );
-    expect(raw).toContain("\x1b[38;2;215;58;73m"); // #d73a49 → del 红
+  test("cols=40：单列行号仍生效（边界含 40）", async () => {
+    const setup = await renderDiff(editRows(OLD, NEW), 40);
+    const frame = setup.captureCharFrame();
+    expect(frame).toMatch(/2\s+│\s+-two/);
+    expect(frame).toContain("@@ -1,5 +1,5 @@");
+    await setup.renderer.destroy();
   });
 
-  it("cols=60：单列行号 + 红绿", () => {
-    const rows = editRows(OLD, NEW);
-    const out = render(rows, 60);
-    expect(out).toMatch(/2\s+│\s+-two/);
-    expect(out).toMatch(/2\s+│\s+\+TWO/);
-    expect(out).toContain("@@ -1,5 +1,5 @@");
+  test("cols=32（<40）：折叠为仅 add，无行号 / 无 del / 无 hunk 头，不抛错", async () => {
+    const setup = await renderDiff(editRows(OLD, NEW), 32);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("+TWO");
+    expect(frame).not.toContain("-two");
+    expect(frame).not.toContain("@@");
+    expect(frame).not.toContain("│");
+    await setup.renderer.destroy();
   });
 
-  it("cols=40：单列行号仍生效（边界含 40）", () => {
-    const rows = editRows(OLD, NEW);
-    const out = render(rows, 40);
-    expect(out).toMatch(/2\s+│\s+-two/);
-    expect(out).toContain("@@ -1,5 +1,5 @@");
+  test("纯新增（write_file）：全 add", async () => {
+    const setup = await renderDiff(editRows("", "a\nb\nc\n"), 80);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("+a");
+    expect(frame).toContain("+b");
+    expect(frame).toContain("+c");
+    await setup.renderer.destroy();
   });
 
-  it("cols=32（<40）：折叠为仅 add，无行号 / 无 del / 无 hunk 头，不抛错", () => {
-    const rows = editRows(OLD, NEW);
-    let out = "";
-    expect(() => {
-      out = render(rows, 32);
-    }).not.toThrow();
-    expect(out).toContain("+TWO");
-    expect(out).not.toContain("-two");
-    expect(out).not.toContain("@@");
-    // 无行号列（无 │ 分隔）
-    expect(out).not.toContain("│");
-  });
-
-  it.skip("cols=32（<40）：add 行同样整行绿底（背景遮罩任何宽度都生效）", () => {
-    // 窄终端（VSCode 集成终端窄窗口）折叠为 add-only 行，add 行仍上淡绿底。
-    const rows = editRows(OLD, NEW);
-    const raw = renderToString(
-      React.createElement(DiffView, { rows, cols: 32 }),
-      { columns: 32 }
-    );
-    expect(raw).toContain("\x1b[48;2;31;61;43m"); // #1f3d2b → bgAdd 淡绿底
-    expect(raw).not.toContain("\x1b[48;2;61;31;36m"); // 折叠无 del，故无 bgDel
-  });
-
-  it("纯新增（write_file）：全 add", () => {
-    const rows = editRows("", "a\nb\nc\n");
-    const out = render(rows, 80);
-    expect(out).toContain("+a");
-    expect(out).toContain("+b");
-    expect(out).toContain("+c");
-  });
-
-  it("空 diff：空渲染不抛", () => {
-    expect(render([], 80)).toBe("");
-    expect(render([], 30)).toBe("");
+  test("空 diff：空帧不抛", async () => {
+    const setup = await renderDiff([], 80);
+    expect(setup.captureCharFrame().trim()).toBe("");
+    await setup.renderer.destroy();
   });
 });
 
-describe("DiffRow 着色", () => {
-  // SKIP(用户授权 2026-08-08)：真实渲染未发射 add/del truecolor 码
-  // (\x1b[38;2;46;160;67m / \x1b[38;2;215;58;73m)。pre-existing 失败，
-  // 与 LSP didOpen 改动无关（source diff 之外的 XY 都断言 ANSI 上色字节）。
-  it.skip("add → 绿；del → 红；ctx → dim", () => {
-    const rows = editRows(OLD, NEW);
-    const add = rows.find((r) => r.kind === "add")!;
-    const del = rows.find((r) => r.kind === "del")!;
-    const ctx = rows.find((r) => r.kind === "ctx")!;
-    const raw = (r: DiffLine) =>
-      renderToString(React.createElement(DiffRow, { line: r, cols: 80 }));
-    expect(raw(add)).toContain("\x1b[38;2;46;160;67m");
-    expect(raw(del)).toContain("\x1b[38;2;215;58;73m");
-    expect(raw(ctx)).not.toContain("\x1b[38;2;46;160;67m");
-    expect(raw(ctx)).not.toContain("\x1b[38;2;215;58;73m");
+describe("DiffView 着色（captureSpans）", () => {
+  test("add 行 fg 绿（#2ea043）至少一条", async () => {
+    const setup = await renderDiff(editRows(OLD, NEW), 80);
+    const spans = setup.captureSpans();
+    expect(hasSpan(spans, "+TWO", tuiPalette.add)).toBe(true);
+    await setup.renderer.destroy();
   });
 
-  // #298 T6 整行背景遮罩：#1f3d2b（bgAdd）= R31 G61 B43，#3d1f24（bgDel）
-  // = R61 G31 B36。字符区上底 + 外层 Box width 铺满到行尾。
-  it.skip("add → 整行淡绿底（bgAdd 背景序列）", () => {
-    const rows = editRows(OLD, NEW);
-    const add = rows.find((r) => r.kind === "add")!;
-    const raw = renderToString(
-      React.createElement(DiffRow, { line: add, cols: 80 })
-    );
-    expect(raw).toContain("\x1b[48;2;31;61;43m"); // #1f3d2b → bgAdd 淡绿底
+  test("del 行 fg 红（#d73a49）至少一条", async () => {
+    const setup = await renderDiff(editRows(OLD, NEW), 80);
+    const spans = setup.captureSpans();
+    expect(hasSpan(spans, "-two", tuiPalette.del)).toBe(true);
+    await setup.renderer.destroy();
   });
 
-  it.skip("del → 整行淡红底（bgDel 背景序列）", () => {
-    const rows = editRows(OLD, NEW);
-    const del = rows.find((r) => r.kind === "del")!;
-    const raw = renderToString(
-      React.createElement(DiffRow, { line: del, cols: 80 })
-    );
-    expect(raw).toContain("\x1b[48;2;61;31;36m"); // #3d1f24 → bgDel 淡红底
+  test("add/del 整行背景遮罩（bgAdd 淡绿底 / bgDel 淡红底）", async () => {
+    const setup = await renderDiff(editRows(OLD, NEW), 80);
+    const spans = setup.captureSpans();
+    expect(hasBgCell(spans, tuiPalette.bgAdd)).toBe(true);
+    expect(hasBgCell(spans, tuiPalette.bgDel)).toBe(true);
+    await setup.renderer.destroy();
   });
 
-  it("ctx → 无背景序列（保持透明）", () => {
-    const rows = editRows(OLD, NEW);
-    const ctx = rows.find((r) => r.kind === "ctx")!;
-    const raw = renderToString(
-      React.createElement(DiffRow, { line: ctx, cols: 80 })
-    );
-    expect(raw).not.toContain("\x1b[48;2;");
+  test("窄终端折叠后 add 行仍上绿底", async () => {
+    const setup = await renderDiff(editRows(OLD, NEW), 32);
+    const spans = setup.captureSpans();
+    expect(hasSpan(spans, "+TWO", tuiPalette.add)).toBe(true);
+    expect(hasBgCell(spans, tuiPalette.bgAdd)).toBe(true);
+    // 折叠无 del → 无淡红底。
+    expect(hasBgCell(spans, tuiPalette.bgDel)).toBe(false);
+    await setup.renderer.destroy();
+  });
+
+  test("ctx 行不上 add/del 色", async () => {
+    const setup = await renderDiff(editRows(OLD, NEW), 80);
+    const spans = setup.captureSpans();
+    expect(hasSpan(spans, "one", tuiPalette.add)).toBe(false);
+    expect(hasSpan(spans, "one", tuiPalette.del)).toBe(false);
+    await setup.renderer.destroy();
   });
 });

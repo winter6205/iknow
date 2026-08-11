@@ -95,7 +95,8 @@ describe("truncateMiddle（宽度感知中段截断）", () => {
     expect(out.endsWith("file.toml")).toBe(true);
   });
   it("CJK 值不超宽（旧实现按码点数切会溢出）", () => {
-    const s = "/家/用户/数据目录/超长路径名称一二三四五六七八九/iknow-数据.toml";
+    const s =
+      "/家/用户/数据目录/超长路径名称一二三四五六七八九/iknow-数据.toml";
     const out = truncateMiddle(s, 32);
     expect(visualWidth(out)).toBeLessThanOrEqual(32);
     expect(out).toContain("…");
@@ -120,7 +121,9 @@ describe("banner 窄终端降级（CJK 回归）", () => {
     }
   });
   it("cols = MIN-1：降级返回 []（窄终端契约）", () => {
-    expect(renderBanner(info, { cols: BANNER_MIN_COLS - 1, short: false })).toEqual([]);
+    expect(
+      renderBanner(info, { cols: BANNER_MIN_COLS - 1, short: false })
+    ).toEqual([]);
   });
   it("窄终端 SHORT 档仍保留单行（不让 logo 消失）", () => {
     for (const cols of [40, 60, BANNER_MIN_COLS - 1]) {

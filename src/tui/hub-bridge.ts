@@ -1,7 +1,10 @@
 /**
  * src/tui/hub-bridge.ts
  *
- * #146 TUI ↔ SessionHub 桥接（α 直连，与 serve 同款装配）。
+ * #343 T6-A 迁移：从 archive/tui-ink/src/hub-bridge.ts 迁回 src/tui/。逻辑与
+ * 原版一致（#146 TUI ↔ SessionHub 桥接 α 直连）；仅文件头注释更新为本次迁移
+ * 说明。纯 TS 模块，无 ink / OpenTUI 依赖。
+ *
  * 职责：
  *  - 装配 SessionStore（~/.iknow + sha1(cwd)[:12] 命名空间，#120）+ SessionHub；
  *  - lazy create（Q4 裁决）：draft 会话首条消息发出才 createSession 建档，
@@ -17,11 +20,10 @@ import { SessionStore } from "../session-api/store/session-store.js";
 import { SessionHub } from "../session-api/hub.js";
 import type { PostMessageResponse } from "../session-api/contract.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
+import { rewindFile } from "../session-api/store/index.js";
 import type { LoopEngineDeps } from "../harness/index.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { TokenUsage } from "../harness/model-adapter/types.js";
-// #356 T7:host drain — buildTuiDeps 返回值携带 subagentManager,hub 构造时
-// 透传(SessionHub 内部 drainCompleted → 下轮 run priorMessages 末尾)。
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 
@@ -31,6 +33,20 @@ import { resolveServeDataDir } from "../session-api/serve.js";
  * `IKNOW_MODEL_CONTEXT_WINDOW`）。仅作显示，不启用压缩（本计划裁决 5）。
  */
 export const DEFAULT_CONTEXT_WINDOW = 200_000;
+
+/**
+ * T6 (checkpoint-rewind): 双 Esc 回退的 debounce 窗口（间隔 ≤ 此值视为双击，
+ * 打开 L3 锚点选择器）。对齐 rewind baseline §1 实测 `foE = 1000ms`
+ * （specs/checkpoint-rewind.md 双 Esc 行为）。idle 首次 Esc 只记时间戳不动作。
+ * 纯函数 `isDoubleEsc(lastMs, nowMs)` 在该文件导出以便单测 1000ms 边界
+ * （999ms 命中 / 1001ms 不命中）。调用点不得内联裸字面量 1000。
+ */
+export const REWIND_DOUBLE_ESC_WINDOW_MS = 1000;
+
+/** 双 Esc debounce 判定：与上次 Esc 间隔 ≤ 窗口 → 命中（双击）。 */
+export function isDoubleEsc(lastMs: number, nowMs: number): boolean {
+  return nowMs - lastMs <= REWIND_DOUBLE_ESC_WINDOW_MS;
+}
 
 /**
  * in-flight 会话登记簿：postMessage 进出登记；deps.ts 的 postToolUse 钩子
@@ -86,6 +102,12 @@ export interface TuiBridge {
   readonly loadSessionFile: (conversationId: string) => Promise<SessionFileV1>;
   /** 手动压缩会话（/compact）。返回是否实际发生裁剪（false = 无需压缩）。 */
   readonly compactSession: (conversationId: string) => Promise<boolean>;
+  /** 回退到更早 turn（/rewind / 双 Esc）：load → rewindFile → store.save →
+   *  返回更新文件。错误复用 SessionStore 既有 typed kinds，不新造。 */
+  readonly rewindSession: (
+    conversationId: string,
+    keepTurns: number
+  ) => Promise<SessionFileV1>;
   readonly inflight: InflightRegistry;
   /** T3: 上下文窗口容量（tokens）。仅显示用，不触发压缩。 */
   readonly contextWindow: number;
@@ -94,16 +116,15 @@ export interface TuiBridge {
 export interface CreateTuiBridgeOptions {
   /** 会话池根目录；缺省 ~/.iknow（与 serve 同款 resolveServeDataDir）。 */
   readonly dataDir?: string;
-  /** harness deps（产品路径传 buildTuiDeps 结果；测试注入 stub deps）。
-   *  #356 T7:buildTuiDeps 返回 `LoopEngineDeps & { subagentManager? }`，
-   *  createTuiBridge 取该字段透传给 SessionHub(SC7 三入口 drain)。
-   *  测试 stub(makeDeps)返回纯 LoopEngineDeps → 该字段缺席 = 无 drain,
-   *  行为零变化。 */
-  readonly deps: LoopEngineDeps & { subagentManager?: SubAgentManager };
+  /** harness deps（产品路径传 buildTuiDeps 结果；测试注入 stub deps）。 */
+  readonly deps: LoopEngineDeps;
   readonly defaultJsonMode?: boolean;
   readonly traceOut?: string;
   /** in-flight 登记簿（deps.ts 的 soleInflightId 同源，归因一致）。 */
   readonly inflight: InflightRegistry;
+  /** subagentManager 由 buildTuiDeps 经 buildHarnessEngine SSOT 装配，
+   *  hub-bridge 透传给 SessionHub。缺省 undefined → 无 manager 路径（drain 返空）。 */
+  readonly subagentManager?: SubAgentManager;
   /** T3: 上下文窗口容量（tokens）。缺省 `DEFAULT_CONTEXT_WINDOW = 200_000`。 */
   readonly contextWindow?: number;
 }
@@ -115,12 +136,9 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     deps: opts.deps,
     defaultJsonMode: opts.defaultJsonMode ?? false,
     traceOut: opts.traceOut,
-    // #356 T7 (SC7):TUI 入口 host drain 修复 — buildTuiDeps 自建 subagentManager
-    // 经 deps 透传给 SessionHub(构造期注入;buildTuiDeps → createTuiBridge 链
-    // cachedDeps 总 set → ensureDeps 早返回 → 懒取路径永不触发 → 必须构造期传)。
-    // 此前 TUI 未传 → hub.subagentManager undefined → drainPendingSubagents("") →
-    // spawn_subagent 完成结果永不进入下一轮 run。
-    subagentManager: opts.deps.subagentManager,
+    // subagentManager 由 buildTuiDeps 经 buildHarnessEngine SSOT 装配，
+    // hub-bridge 透传给 SessionHub。
+    subagentManager: opts.subagentManager,
   });
 
   const bridge: TuiBridge = {
@@ -158,6 +176,18 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     compactSession: async (conversationId) => {
       const res = await hub.compactSession(conversationId);
       return res.compacted;
+    },
+    // 与 compactSession 同纪律：load → rewindFile → save 直链。store.load /
+    // store.save 与 hub 的 serialize 队列共用同一 per-conversation 队列入口
+    // 无冲突面（rewind 走 store 裸 IO；hub 的 postMessage/compact 写盘走
+    // serialize 队列——load 读到的是队内已落盘的权威文件，save 由 rewindFile
+    // 纯截断产出）。错误复用既有 typed kinds（not_found / parse_failed /
+    // schema_invalid / write_failed / io_error），不新造。
+    rewindSession: async (conversationId, keepTurns) => {
+      const file = await store.load(conversationId);
+      const rewound = rewindFile(file, keepTurns);
+      await store.save({ id: conversationId, file: rewound });
+      return rewound;
     },
     inflight: opts.inflight,
     contextWindow: opts.contextWindow ?? DEFAULT_CONTEXT_WINDOW,

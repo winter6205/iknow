@@ -4,12 +4,13 @@
  *
  * 模块责任:eager + idempotent 初始化 `~/.iknow/` 目录;seed user.md
  * (USER_TEMPLATE,来自 `./user-template.ts`);seed state.json
- * (bootstrap_seeded:false);读 / 写 state.json (PATCH 单字段 +
- * atomic write)。读路径 JSON 损坏 / schema 不匹配 → skip + warn,
- * 不阻塞装配。
+ * (bootstrap_seeded:false);**rev 2026-08-11 seed BOOTSTRAP.md**
+ * (BOOTSTRAP_TEMPLATE,bs=false 时;对齐 ohmo initialize_workspace);
+ * 读 / 写 state.json (PATCH 单字段 + atomic write)。读路径 JSON 损坏 /
+ * schema 不匹配 → skip + warn,不阻塞装配。
  *
- * 锁定约束:不创建 identity.md / soul.md / bootstrap.md 文件
- * (这些是代码常量,见 `identity.ts` / `soul.ts` / `bootstrap.ts`);
+ * 锁定约束:不创建 identity.md / soul.md 文件
+ * (认知/人格是代码常量,见 `identity.ts` / `soul.ts`);
  * user.md 是用户可改文件,seed 后不再覆盖。
  */
 
@@ -19,6 +20,7 @@ import { promises as fs } from "node:fs";
 import { randomBytes } from "node:crypto";
 
 import { USER_TEMPLATE } from "./user-template.js";
+import { BOOTSTRAP_TEMPLATE } from "./bootstrap.js";
 
 /** IKNOW-196 workspace 根:复用 #121 homeDir 模式。 */
 export function iknowWorkspaceRoot(): string {
@@ -52,6 +54,12 @@ function stateFilePath(workspace: string): string {
 
 function userFilePath(workspace: string): string {
   return path.join(workspace, "user.md");
+}
+
+/** rev 2026-08-11 新增：BOOTSTRAP.md 文件路径（对齐 ohmo `get_bootstrap_path`）。
+ *  seed 后只读、不写；完成 = 文件被删，无需宿主钩子。 */
+export function bootstrapFilePath(workspace: string): string {
+  return path.join(workspace, "BOOTSTRAP.md");
 }
 
 async function readIfExists(p: string): Promise<string | undefined> {
@@ -174,9 +182,11 @@ export async function writeIknowState(
  * 4 入口 (chat / serve / tui / ask) 直接调,失败 log + 不阻塞装配
  * (spec Boundaries Always — 用户级文件 IO 失败不应让 agent 永远跑不起来)。
  */
-export async function initIknowWorkspaceSafe(): Promise<void> {
+export async function initIknowWorkspaceSafe(opts?: {
+  workspace?: string;
+}): Promise<void> {
   try {
-    await initializeIknowWorkspace();
+    await initializeIknowWorkspace(opts);
   } catch (err) {
     // IknowIdentityError 是 discriminated union,统一 console.warn + 继续。
     console.warn(
@@ -210,12 +220,18 @@ export async function initializeIknowWorkspace(opts?: {
   const sp = stateFilePath(root);
   const stateExisting = await readIfExists(sp);
   if (stateExisting === undefined) {
+    // 首次初始化:seed state(bs=false)+ seed BOOTSTRAP.md,然后翻 flag=true
+    // (对齐 ohmo initialize_workspace:写 BOOTSTRAP.md 的同一决策点翻 flag,
+    // 避免后续每次 build 重新 seed 已删文件)。
     const seed: IknowStateV1 = {
       schema_version: 1,
       bootstrap_seeded: false,
     };
     await atomicWriteJson(sp, JSON.stringify(seed, null, 2));
-    return { root, state: seed };
+    await seedBootstrapFile(root);
+    const complete: IknowStateV1 = { ...seed, bootstrap_seeded: true };
+    await atomicWriteJson(sp, JSON.stringify(complete, null, 2));
+    return { root, state: complete };
   }
 
   // 文件存在但 JSON 损坏 / schema 不匹配 → self-heal:
@@ -242,8 +258,24 @@ export async function initializeIknowWorkspace(opts?: {
       bootstrap_seeded: false,
     };
     await atomicWriteJson(sp, JSON.stringify(seed, null, 2));
-    return { root, state: seed };
+    await seedBootstrapFile(root);
+    const complete: IknowStateV1 = { ...seed, bootstrap_seeded: true };
+    await atomicWriteJson(sp, JSON.stringify(complete, null, 2));
+    return { root, state: complete };
   }
 
+  // 合法 state 保留不动(idempotent)。rev 2026-08-11:bs=true 是 seed 完成的
+  // 存档标记(对齐 ohmo),seed 后不再补文件——完成由 BOOTSTRAP.md 文件缺失
+  // 驱动(装配层读文件),不重新 seed。
   return { root, state: parsed };
+}
+
+/** rev 2026-08-11:seed BOOTSTRAP.md(文件不存在才写,幂等;不覆盖用户已改)。
+ *  对齐 ohmo initialize_workspace:首次启动写引导文件,引导完成后 agent 自己
+ *  rm 它。调用方在同一决策点把 bs 翻 true。 */
+async function seedBootstrapFile(root: string): Promise<void> {
+  const bp = bootstrapFilePath(root);
+  const existing = await readIfExists(bp);
+  if (existing !== undefined) return;
+  await atomicWriteJson(bp, BOOTSTRAP_TEMPLATE);
 }

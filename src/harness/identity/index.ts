@@ -18,6 +18,7 @@ export {
   initIknowWorkspaceSafe,
   readIknowState,
   writeIknowState,
+  bootstrapFilePath,
 } from "./workspace.js";
 export type { IknowStateV1, IknowIdentityError } from "./workspace.js";
 
@@ -29,7 +30,7 @@ export type {
 
 export { IKNOW_IDENTITY_DEFAULT } from "./identity.js";
 export { IKNOW_SOUL_DEFAULT } from "./soul.js";
-export { IKNOW_BOOTSTRAP_PROMPT } from "./bootstrap.js";
+export { BOOTSTRAP_TEMPLATE } from "./bootstrap.js";
 
 export {
   IKNOW_ASSEMBLY_ORDER,
