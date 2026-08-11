@@ -95,7 +95,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       permissionMode,
       sessionGrants,
     };
-    const deps = buildTuiDeps(bundle, depsOpts);
+    const deps = await buildTuiDeps(bundle, depsOpts);
     const bridge = createTuiBridge({
       dataDir: options.dataDir,
       deps,
