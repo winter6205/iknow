@@ -10,6 +10,7 @@ import {
   mkdir,
   unlink,
   readdir,
+  readFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -153,5 +154,60 @@ describe("initializeIknowWorkspace roundtrip", () => {
     const entries = await readdir(ws);
     const backups = entries.filter((e) => e.startsWith("state.json.corrupt."));
     expect(backups.length).toBe(0);
+  });
+});
+
+// ── #196 rev 2026-08-11 T2: seed BOOTSTRAP.md(对齐 ohmo initialize_workspace) ──
+describe("initializeIknowWorkspace seeds BOOTSTRAP.md", () => {
+  it("bs=false → writes BOOTSTRAP.md with template content", async () => {
+    const ws = join(workDir, "seed-bootstrap");
+    const init = await initializeIknowWorkspace({ workspace: ws });
+    expect(init.state.bootstrap_seeded).toBe(false);
+
+    const content = await readFile(join(ws, "BOOTSTRAP.md"), "utf8");
+    expect(content).toContain("First Contact");
+    expect(content).toContain("Goals");
+  });
+
+  it("idempotent: second init does NOT overwrite BOOTSTRAP.md", async () => {
+    const ws = join(workDir, "seed-bootstrap-idem");
+    await initializeIknowWorkspace({ workspace: ws });
+    await writeFile(
+      join(ws, "BOOTSTRAP.md"),
+      "custom user-edited bootstrap",
+      "utf8"
+    );
+
+    const re = await initializeIknowWorkspace({ workspace: ws });
+    expect(re.state.bootstrap_seeded).toBe(false);
+
+    const content = await readFile(join(ws, "BOOTSTRAP.md"), "utf8");
+    expect(content).toBe("custom user-edited bootstrap");
+  });
+
+  it("bs=true → does NOT write BOOTSTRAP.md (bootstrap already complete)", async () => {
+    const ws = join(workDir, "seed-bootstrap-seeded");
+    await initializeIknowWorkspace({ workspace: ws });
+    await writeIknowState({ bootstrap_seeded: true }, ws);
+    // 模拟用户已删文件
+    await unlink(join(ws, "BOOTSTRAP.md"));
+
+    const re = await initializeIknowWorkspace({ workspace: ws });
+    expect(re.state.bootstrap_seeded).toBe(true);
+
+    // bs=true 时不应重新 seed BOOTSTRAP.md
+    await expect(readFile(join(ws, "BOOTSTRAP.md"), "utf8")).rejects.toThrow();
+  });
+
+  it("self-heal corrupt → seeds BOOTSTRAP.md too", async () => {
+    const ws = join(workDir, "seed-bootstrap-heal");
+    await mkdir(ws, { recursive: true });
+    await writeFile(join(ws, "state.json"), "{ broken");
+
+    const init = await initializeIknowWorkspace({ workspace: ws });
+    expect(init.state.bootstrap_seeded).toBe(false);
+
+    const content = await readFile(join(ws, "BOOTSTRAP.md"), "utf8");
+    expect(content).toContain("First Contact");
   });
 });

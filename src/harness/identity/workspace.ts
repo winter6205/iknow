@@ -4,12 +4,13 @@
  *
  * 模块责任:eager + idempotent 初始化 `~/.iknow/` 目录;seed user.md
  * (USER_TEMPLATE,来自 `./user-template.ts`);seed state.json
- * (bootstrap_seeded:false);读 / 写 state.json (PATCH 单字段 +
- * atomic write)。读路径 JSON 损坏 / schema 不匹配 → skip + warn,
- * 不阻塞装配。
+ * (bootstrap_seeded:false);**rev 2026-08-11 seed BOOTSTRAP.md**
+ * (BOOTSTRAP_TEMPLATE,bs=false 时;对齐 ohmo initialize_workspace);
+ * 读 / 写 state.json (PATCH 单字段 + atomic write)。读路径 JSON 损坏 /
+ * schema 不匹配 → skip + warn,不阻塞装配。
  *
- * 锁定约束:不创建 identity.md / soul.md / bootstrap.md 文件
- * (这些是代码常量,见 `identity.ts` / `soul.ts` / `bootstrap.ts`);
+ * 锁定约束:不创建 identity.md / soul.md 文件
+ * (认知/人格是代码常量,见 `identity.ts` / `soul.ts`);
  * user.md 是用户可改文件,seed 后不再覆盖。
  */
 
@@ -19,6 +20,7 @@ import { promises as fs } from "node:fs";
 import { randomBytes } from "node:crypto";
 
 import { USER_TEMPLATE } from "./user-template.js";
+import { BOOTSTRAP_TEMPLATE } from "./bootstrap.js";
 
 /** IKNOW-196 workspace 根:复用 #121 homeDir 模式。 */
 export function iknowWorkspaceRoot(): string {
@@ -221,6 +223,7 @@ export async function initializeIknowWorkspace(opts?: {
       bootstrap_seeded: false,
     };
     await atomicWriteJson(sp, JSON.stringify(seed, null, 2));
+    await seedBootstrapFile(root);
     return { root, state: seed };
   }
 
@@ -248,8 +251,24 @@ export async function initializeIknowWorkspace(opts?: {
       bootstrap_seeded: false,
     };
     await atomicWriteJson(sp, JSON.stringify(seed, null, 2));
+    await seedBootstrapFile(root);
     return { root, state: seed };
   }
 
+  // 合法 state 保留不动(idempotent)。rev 2026-08-11:若 bs=false(用户改过
+  // state 或历史 state 无 bootstrap 完成记录)且 BOOTSTRAP.md 缺失 → 补 seed。
+  if (!parsed.bootstrap_seeded) {
+    await seedBootstrapFile(root);
+  }
   return { root, state: parsed };
+}
+
+/** rev 2026-08-11:seed BOOTSTRAP.md(bs=false 时,文件不存在才写,幂等)。
+ *  对齐 ohmo initialize_workspace:首次启动写引导文件,引导完成后 agent 自己
+ *  rm 它。不覆盖用户已改 BOOTSTRAP.md。 */
+async function seedBootstrapFile(root: string): Promise<void> {
+  const bp = bootstrapFilePath(root);
+  const existing = await readIfExists(bp);
+  if (existing !== undefined) return;
+  await atomicWriteJson(bp, BOOTSTRAP_TEMPLATE);
 }
