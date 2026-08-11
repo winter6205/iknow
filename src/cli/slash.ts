@@ -23,11 +23,17 @@ import type { SessionContext } from "../shared/schema.js";
  * host 通过整体替换并冻结来维护 append-only 历史，禁止原地修改；这是
  * append-only 纪律在 host 层的落法。`jsonMode` 决定 ask/chat 输出走哪一支投影;`session` 透传 harness
  * (SessionContext 由 Session API 装配)。
+ *
+ * `conversationId` (T2) — 由 runChatSession 在入口处一次性生成（`randomUUID`），
+ * 作为该 REPL 会话的 session-pool 文件名（`~/.iknow/sessions/<proj>/<id>.json`）。
+ * T4 `--resume` 会复用同一字段在重启时锚定同一文件。Tests / makeState 默认 `null`
+ * 标识"无 checkpoint 落盘路径"，processChatLine 据此跳过持久化分支。
  */
 export type CliChatState = {
   messages: ReadonlyArray<AnthropicNativeMessage>;
   jsonMode: boolean;
   session: SessionContext;
+  conversationId: string | null;
 };
 
 export type ParsedChatLine =

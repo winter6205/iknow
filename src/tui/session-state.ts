@@ -181,3 +181,30 @@ export function sessionCompacted(
     runState: "idle",
   });
 }
+
+/**
+ * 回退（/rewind / 双 Esc）落盘后的会话刷新：镜像 sessionCompacted —— 以
+ * rewindFile 截断后的文件内容整体替换 messages / turnCount / updatedAt /
+ * jsonMode，但**保留** lastStopReason / lastUsage（回退不是 turn，不应清掉
+ * 上下文用量读数），runState 归 idle。仅 idle 会话可回退（running 时由命令
+ * 侧护栏拒绝，这里同 turnStarted 语义：非 idle 保持原状态，不抛错）。
+ */
+export function sessionRewound(
+  session: TuiSessionState,
+  input: {
+    readonly messages: ReadonlyArray<AnthropicNativeMessage>;
+    readonly turnCount: number;
+    readonly updatedAt: string;
+    readonly jsonMode: boolean;
+  }
+): TuiSessionState {
+  if (session.runState !== "idle") return session;
+  return Object.freeze({
+    ...session,
+    messages: Object.freeze([...input.messages]),
+    turnCount: input.turnCount,
+    updatedAt: input.updatedAt,
+    jsonMode: input.jsonMode,
+    runState: "idle",
+  });
+}

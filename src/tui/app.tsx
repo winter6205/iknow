@@ -48,7 +48,7 @@ import type {
   TokenUsage,
 } from "../harness/model-adapter/types.js";
 import type { TuiToolEvent } from "./deps.js";
-import type { TuiBridge } from "./hub-bridge.js";
+import { isDoubleEsc, type TuiBridge } from "./hub-bridge.js";
 import type { TuiAskUserBridge, TuiPendingAsk } from "./ask-user.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
@@ -67,6 +67,7 @@ import {
   canInterrupt,
   createDraftSession,
   sessionCompacted,
+  sessionRewound,
   switchedAwayFrom,
   switchedTo,
   turnFinished,
@@ -75,6 +76,13 @@ import {
   type TuiSessionState,
   type TuiView,
 } from "./session-state.js";
+import {
+  buildRewindTargets,
+  reduceRewindKey,
+  rewindModalRows,
+  rewindPickerContent,
+  type RewindTarget,
+} from "./rewind-picker.js";
 import {
   helpLines,
   parseTuiInput,
@@ -246,6 +254,17 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const [askModalDismissed, setAskModalDismissed] = useState(false);
   const [permissionIndex, setPermissionIndex] = useState(0);
   const [pendingQuit, setPendingQuit] = useState(false);
+  // T6 (checkpoint-rewind)：L3 回退 picker 状态（/rewind 与双 Esc 共用）。
+  // 激活态直接持有会话文件投影后的锚点目标（选择时一次性 load，减少闭包
+  // 与异步竞态）；selectedIndex / confirming 由宿主持有（纯渲染无内部状态，
+  // 与权限 modal 同纪律）。active 会话切走即关闭（newSession / openSessionAt
+  // 清态），避免 picker 悬在错误会话上。
+  const [rewindTargets, setRewindTargets] = useState<
+    ReadonlyArray<RewindTarget> | undefined
+  >(undefined);
+  const [rewindIndex, setRewindIndex] = useState(0);
+  const [rewindConfirming, setRewindConfirming] = useState(false);
+  const lastEscAtRef = useRef<number | undefined>(undefined);
 
   // ── 流式草稿（单会话 in-flight 时挂，bg 由落盘刷新获得终稿）─────
   const [streamDraft, setStreamDraft] = useState<StreamDraft | null>(null);
@@ -490,6 +509,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     setActiveKey(DRAFT_SESSION_ID);
     setView("chat");
     setNotice(undefined);
+    setRewindTargets(undefined);
+    setRewindConfirming(false);
+    setRewindIndex(0);
   }
   async function openSessionAt(index: number): Promise<void> {
     if (index === 0) {
@@ -521,6 +543,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     setActiveKey(id);
     setView("chat");
     setNotice(undefined);
+    setRewindTargets(undefined);
+    setRewindConfirming(false);
+    setRewindIndex(0);
   }
 
   // ── turn 发送 ───────────────────────────────────────────────────
@@ -678,6 +703,71 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     setThinkingExpanded((prev) => !prev);
   }
 
+  /** T6：打开 L3 回退锚点选择器（/rewind 与双 Esc 共用路径）。
+   *  一次 load 会话文件 → 投影锚点 → 激活 picker。失败经 describeError 只透
+   *  typed kind。调用方已保证 idle + 非 draft。 */
+  async function openRewindPicker(targetId: string): Promise<void> {
+    try {
+      const file = await props.bridge.loadSessionFile(targetId);
+      const targets = buildRewindTargets(file);
+      if (targets.length === 0) {
+        // L0 空态：无完成 turn / 空会话 → notice，零 store IO（load 已发生，
+        // 但无任何截断落盘）。对标 baseline §2 "Nothing to rewind to yet."。
+        setNotice({
+          lines: ["Nothing to rewind to yet."],
+        });
+        return;
+      }
+      setRewindTargets(targets);
+      setRewindIndex(0);
+      setRewindConfirming(false);
+    } catch (err) {
+      setNotice({ lines: [`读取会话失败：${describeError(err)}`] });
+    }
+  }
+
+  /** T6：确认后执行回退（盘上截断 + UI 状态反射）。
+   *  anchorTextForInput = 回退锚点用户消息完整文本（不截断），回退后填回
+   *   输入框 — 与 baseline §2 的「清空输入框」有意分歧，用户实测要求回退后
+   *   能直接修改并重发（spec §Divergence 已记录）。
+   *  userMessageTextForNotice = 截 80 展示用版，用于 notice「已回退到 ［消息］ 之前」。 */
+  async function executeRewind(
+    targetId: string,
+    keepTurns: number,
+    anchorTextForInput: string,
+    userMessageTextForNotice: string
+  ): Promise<void> {
+    setRewindTargets(undefined);
+    setRewindConfirming(false);
+    try {
+      await props.bridge.rewindSession(targetId, keepTurns);
+      const fresh = await props.bridge.loadSessionFile(targetId);
+      setSessions((prev) => {
+        const current = prev[targetId];
+        if (!current) return prev;
+        return {
+          ...prev,
+          [targetId]: sessionRewound(current, {
+            messages: fresh.messages,
+            turnCount: fresh.turnCount,
+            updatedAt: fresh.updatedAt,
+            jsonMode: fresh.jsonMode,
+          }),
+        };
+      });
+      setNotice({
+        lines: [
+          `已回退到 ［${userMessageTextForNotice || "(无文本)"}］ 之前。`,
+        ],
+      });
+      // 输入框填回锚点消息全文 —— 用户可修改并重发（与 Claude Code baseline §2
+      // 「回退后清空输入框」的有意分歧，spec §Divergence 已记录）。
+      setInputValue(anchorTextForInput);
+    } catch (err) {
+      setNotice({ lines: [`回退失败：${describeError(err)}`] });
+    }
+  }
+
   // ── submit 路由 ────────────────────────────────────────────────
   async function handleSubmit(raw: string): Promise<void> {
     setInputValue("");
@@ -780,6 +870,21 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         }
         return;
       }
+      case "rewind": {
+        if (active.runState !== "idle") {
+          setNotice({
+            lines: ["当前会话正在运行；回退等本轮结束后再执行。"],
+          });
+          return;
+        }
+        const targetId = active.conversationId;
+        if (targetId === undefined) {
+          setNotice({ lines: ["当前是空会话，还没有可回退的点。"] });
+          return;
+        }
+        await openRewindPicker(targetId);
+        return;
+      }
       case "profile": {
         if (
           text
@@ -851,6 +956,77 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       toggleThinking();
       return;
     }
+    // T6 rewind picker 活跃时独占键位（Esc 走 cancel；↑/↓ 移动；Enter 在
+    // 选择态进入确认行 / 确认态执行）。reducer 路由见 rewind-picker 纯函数。
+    if (rewindTargets !== undefined) {
+      const action = reduceRewindKey(modalKeyEventOf(e), {
+        targets: rewindTargets,
+        selectedIndex: rewindIndex,
+        confirming: rewindConfirming,
+      });
+      switch (action.type) {
+        case "move":
+          setRewindIndex(action.index);
+          break;
+        case "confirm":
+          setRewindConfirming(true);
+          break;
+        case "execute": {
+          const targetId = active.conversationId;
+          // 确认态 Enter 时 reducer 只产 execute 不产 move，此处索引安全。
+          const t = rewindTargets[rewindIndex];
+          if (targetId !== undefined) {
+            void executeRewind(
+              targetId,
+              action.keepTurns,
+              t?.fullText ?? "",
+              t?.userMessageText ?? ""
+            );
+          }
+          break;
+        }
+        case "cancel":
+          setRewindTargets(undefined);
+          setRewindIndex(0);
+          setRewindConfirming(false);
+          setNotice(undefined);
+          break;
+        case "ignore":
+          break;
+      }
+      return;
+    }
+    // T6 双 Esc：running-fg 第一下 Esc 打断 in-flight turn（对标 baseline
+    // §1：先打断，第二下 idle 才开 picker），等效 Ctrl+C 分支；idle 首次 Esc
+    // 只记时间戳不动作；间隔 ≤ REWIND_DOUBLE_ESC_WINDOW_MS → 打开 L3 picker。
+    // askModalActive 时下方块处理 Esc dismiss，re-path 不拦截（避免吞掉
+    // dismiss）。
+    if (e.name === "escape" && !askModalActive) {
+      const nowMs = Date.now();
+      const last = lastEscAtRef.current;
+      if (canInterrupt(active)) {
+        const id = active.conversationId;
+        if (id !== undefined) {
+          aborters.current.get(id)?.abort();
+        }
+        lastEscAtRef.current = nowMs;
+        return;
+      }
+      if (last !== undefined && isDoubleEsc(last, nowMs)) {
+        lastEscAtRef.current = undefined;
+        const targetId = active.conversationId;
+        if (targetId !== undefined) {
+          void openRewindPicker(targetId);
+        } else {
+          setNotice({
+            lines: ["当前是空会话，还没有可回退的点。"],
+          });
+        }
+      } else {
+        lastEscAtRef.current = nowMs;
+      }
+      return;
+    }
     // modal 活跃时独占键位。
     if (askModalActive && askPending !== undefined) {
       const action = reduceModalKey(modalKeyEventOf(e), {
@@ -889,7 +1065,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const modalAsk =
     view === "chat" && askModalDismissed === false ? askPending : undefined;
   const modalRowsForBudget =
-    modalAsk !== undefined ? permissionModalRows(modalAsk, cols) : 0;
+    modalAsk !== undefined
+      ? permissionModalRows(modalAsk, cols)
+      : rewindTargets !== undefined
+        ? rewindModalRows(rewindTargets, cols, rewindIndex, rewindConfirming)
+        : 0;
   const viewportRows = Math.max(
     5,
     rows -
@@ -964,14 +1144,24 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       {view === "chat" && (
         <ModalHost
           modal={
-            askModalActive && askPending !== undefined
+            rewindTargets !== undefined
               ? {
-                  kind: "permission",
-                  tool: askPending.tool,
-                  summaryHint: askPending.summaryHint,
-                  selectedIndex: permissionIndex,
+                  kind: "select",
+                  ...rewindPickerContent(
+                    rewindTargets,
+                    rewindIndex,
+                    rewindConfirming
+                  ),
+                  selectedIndex: rewindConfirming ? 0 : rewindIndex,
                 }
-              : undefined
+              : askModalActive && askPending !== undefined
+                ? {
+                    kind: "permission",
+                    tool: askPending.tool,
+                    summaryHint: askPending.summaryHint,
+                    selectedIndex: permissionIndex,
+                  }
+                : undefined
           }
           cols={cols}
         />
@@ -989,14 +1179,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         <PromptInput
           value={inputValue}
           placeholder={
-            askPending
-              ? askModalActive
-                ? "modal 键位接管中（Esc 退回输入）"
-                : "y/a/n 确认工具授权（a=总是允许）"
-              : "输入消息或 /help"
+            rewindTargets !== undefined
+              ? "回退选择器中（↑↓ 选择 · Enter 确认 · Esc 关闭）"
+              : askPending
+                ? askModalActive
+                  ? "modal 键位接管中（Esc 退回输入）"
+                  : "y/a/n 确认工具授权（a=总是允许）"
+                : "输入消息或 /help"
           }
           active={active.runState === "running-fg"}
-          disabled={askModalActive}
+          disabled={askModalActive || rewindTargets !== undefined}
           onChange={setInputValue}
           onSubmit={(v) => void handleSubmit(v)}
           onSelectHint={(cmd) => void handleSubmit(`/${cmd}`)}

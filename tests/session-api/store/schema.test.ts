@@ -28,7 +28,7 @@ import type {
 } from "@anthropic-ai/sdk/resources/messages/messages.js";
 
 const valid: SessionFileV1 = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   conversation_id: "abc",
   messages: [],
   jsonMode: false,
@@ -37,6 +37,7 @@ const valid: SessionFileV1 = {
   summary: "",
   cwd: "",
   sanitized_at: "2026-01-01T00:00:00.000Z",
+  checkpoints: [],
 };
 
 // -- happy path --------------------------------------------------------------
@@ -46,8 +47,8 @@ describe("validateSessionFile — happy path", () => {
     assert.equal(validateSessionFile(valid), null);
   });
 
-  it("CURRENT_SCHEMA_VERSION is the canonical v2 literal (2)", () => {
-    assert.equal(CURRENT_SCHEMA_VERSION, 2);
+  it("CURRENT_SCHEMA_VERSION is the canonical v3 literal (3) — checkpoint data layer", () => {
+    assert.equal(CURRENT_SCHEMA_VERSION, 3);
     assert.equal(validateSessionFile({ ...valid }), null);
   });
 
@@ -69,16 +70,119 @@ describe("validateSessionFile — happy path", () => {
 // -- range check (#120 T1) ---------------------------------------------------
 
 describe("validateSessionFile — schemaVersion range check (#120)", () => {
-  it("accepts schemaVersion 1 and 2 (≤ CURRENT) and rejects anything above", () => {
+  it("accepts schemaVersion 1, 2 and 3 (≤ CURRENT) and rejects anything above", () => {
     assert.equal(validateSessionFile({ ...valid, schemaVersion: 1 }), null);
     assert.equal(validateSessionFile({ ...valid, schemaVersion: 2 }), null);
+    assert.equal(validateSessionFile({ ...valid, schemaVersion: 3 }), null);
     assert.equal(
-      validateSessionFile({ ...valid, schemaVersion: 3 }),
+      validateSessionFile({ ...valid, schemaVersion: 4 }),
       "schemaVersion"
     );
     assert.equal(
       validateSessionFile({ ...valid, schemaVersion: 99 }),
       "schemaVersion"
+    );
+  });
+});
+
+// -- v3: checkpoints field (T1 checkpoint data layer) -------------------------
+
+describe("validateSessionFile — v3 checkpoints field", () => {
+  it("accepts a valid checkpoints array", () => {
+    const file = {
+      ...valid,
+      checkpoints: [
+        {
+          turnIndex: 1,
+          messagesCount: 2,
+          interruptedAt: "2026-08-11T00:00:00.000Z",
+          interruptReason: "cancelled",
+        },
+      ],
+    };
+    assert.equal(validateSessionFile(file), null);
+  });
+
+  it("accepts checkpoints entries with lastUsage (passthrough, no shape gate)", () => {
+    const file = {
+      ...valid,
+      checkpoints: [
+        {
+          turnIndex: 1,
+          messagesCount: 2,
+          interruptedAt: "t",
+          interruptReason: "timeout",
+          lastUsage: {
+            inputTokens: 1,
+            outputTokens: 1,
+            cacheCreationInputTokens: null,
+            cacheReadInputTokens: null,
+          },
+        },
+      ],
+    };
+    assert.equal(validateSessionFile(file), null);
+  });
+
+  it("rejects a non-array checkpoints → 'checkpoints'", () => {
+    assert.equal(
+      validateSessionFile({ ...valid, checkpoints: "oops" }),
+      "checkpoints"
+    );
+    assert.equal(
+      validateSessionFile({ ...valid, checkpoints: 42 }),
+      "checkpoints"
+    );
+    assert.equal(
+      validateSessionFile({ ...valid, checkpoints: {} }),
+      "checkpoints"
+    );
+  });
+
+  it("rejects a checkpoint with an invalid interruptReason → 'checkpoints'", () => {
+    assert.equal(
+      validateSessionFile({
+        ...valid,
+        checkpoints: [
+          {
+            turnIndex: 1,
+            messagesCount: 2,
+            interruptedAt: "t",
+            interruptReason: "mystery",
+          },
+        ],
+      }),
+      "checkpoints"
+    );
+  });
+
+  it("rejects a checkpoint missing a required field → 'checkpoints'", () => {
+    assert.equal(
+      validateSessionFile({
+        ...valid,
+        checkpoints: [
+          {
+            turnIndex: 1,
+            messagesCount: 2,
+            interruptedAt: "t",
+            // interruptReason missing
+          },
+        ],
+      }),
+      "checkpoints"
+    );
+  });
+
+  it("sanitize rejects a malformed checkpoints element (never repairs)", () => {
+    assert.throws(
+      () =>
+        sanitizeSessionFile({
+          ...valid,
+          checkpoints: [{ turnIndex: "x", messagesCount: 1 }],
+        }),
+      (err: unknown) =>
+        (err as { kind?: string; field?: string }).kind === "schema_invalid" &&
+        (err as { kind?: string; field?: string }).field === "checkpoints"
     );
   });
 });
@@ -184,8 +288,8 @@ describe("isSessionFileV1 — type guard companion", () => {
 
   it("returns false for any rejected value", () => {
     assert.equal(isSessionFileV1(null), false);
-    // schemaVersion above CURRENT (was 2 with strict equality; now 3+)
-    assert.equal(isSessionFileV1({ ...valid, schemaVersion: 3 }), false);
+    // schemaVersion above CURRENT (CURRENT is 3 now — checkpoint data layer)
+    assert.equal(isSessionFileV1({ ...valid, schemaVersion: 4 }), false);
     assert.equal(isSessionFileV1({ ...valid, turnCount: "x" }), false);
   });
 });

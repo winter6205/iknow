@@ -36,7 +36,7 @@ const sampleFile = (opts: {
 }): SessionFileV1 => {
   const { id, overrides = {} } = opts;
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     conversation_id: id,
     summary: "",
     cwd: "/tmp/test",
@@ -45,6 +45,7 @@ const sampleFile = (opts: {
     jsonMode: false,
     turnCount: 0,
     updatedAt: new Date().toISOString(),
+    checkpoints: [],
     ...overrides,
   };
 };
@@ -214,7 +215,8 @@ describe("SessionStore.load", () => {
     assert.equal(loaded.summary, "hello");
     assert.equal(loaded.cwd, "");
     assert.equal(loaded.sanitized_at, raw.updatedAt);
-    assert.equal(loaded.schemaVersion, 2);
+    assert.equal(loaded.schemaVersion, 3);
+    assert.deepEqual(loaded.checkpoints, []);
     assert.equal(after, before);
   });
 
@@ -250,7 +252,7 @@ describe("SessionStore.load", () => {
     await store.save({ id: file.conversation_id, file });
     const loaded = await store.load("conv-load-ok");
     assert.equal(loaded.conversation_id, "conv-load-ok");
-    assert.equal(loaded.schemaVersion, 2);
+    assert.equal(loaded.schemaVersion, 3);
   });
 
   it("round-trips a complete v2 file", async () => {
