@@ -182,9 +182,11 @@ export async function writeIknowState(
  * 4 入口 (chat / serve / tui / ask) 直接调,失败 log + 不阻塞装配
  * (spec Boundaries Always — 用户级文件 IO 失败不应让 agent 永远跑不起来)。
  */
-export async function initIknowWorkspaceSafe(): Promise<void> {
+export async function initIknowWorkspaceSafe(opts?: {
+  workspace?: string;
+}): Promise<void> {
   try {
-    await initializeIknowWorkspace();
+    await initializeIknowWorkspace(opts);
   } catch (err) {
     // IknowIdentityError 是 discriminated union,统一 console.warn + 继续。
     console.warn(

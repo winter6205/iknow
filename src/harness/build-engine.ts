@@ -32,6 +32,7 @@ import type { Registry } from "./tools/types.js";
 import type { RegistryImpl } from "./tools/registry.js";
 import type { ValidateFunction } from "ajv";
 import { homedir } from "node:os";
+import path from "node:path";
 import type { AskUser } from "./permission/types.js";
 import type { IknowEnv } from "../config/env.js";
 import { ValidationError } from "../shared/errors.js";
@@ -235,7 +236,15 @@ export async function buildHarnessEngine(
 
   // #196 IKNOW T4:启动时 eager + idempotent 初始化 ~/.iknow/(initIknowWorkspaceSafe
   // 内部 try/catch + warn,失败不阻塞装配 — 守 spec Boundaries Always 降级契约)。
-  await initIknowWorkspaceSafe();
+  // rev 2026-08-11:透传 userHome 缝 — 否则 seed 落到 os.homedir()/真实 home,
+  // 而装配 readBootstrapIfNeeded 读 opts.userHome,二者分叉(隔离 HOME 测试
+  // 必红 + 污染真实 home)。缺省(CLI 未传 userHome)→ 与 iknowWorkspaceRoot()
+  // 同值,行为不变。
+  await initIknowWorkspaceSafe(
+    userHome === homedir()
+      ? undefined
+      : { workspace: path.join(userHome, ".iknow") }
+  );
   // #337 T8:MCP 条件化装配。四入口判定:
   //   - surface === "ask" → 不创建 manager(SC12 守门,ask 三方视图零 mcp__*)。
   //     ask oneshot 进程即用即抛,无长连接,无需关闭句柄。
