@@ -2,17 +2,17 @@
 
 > **Lean spec.** 本 spec 锁定实施层决策：身份层独立成段（`assembleIdentityContext` 注入缝）、认知/人格分层、装配顺序、文件归位、状态机、入口覆盖、测试 / Boundaries / Success Criteria。已在 spec 阶段由操作员逐条确认的 5 个决策点（issue #196 决策点 §1-§5）作为先决决议直接引用，不在本 spec 体内重开。
 
-> ## ⚠️ Rev 2026-08-11 决策修订（supersede 旧段）
+> ## ✅ Rev 2026-08-11 决策修订（已落地，12-bullet tracker `docs/plans/196-identity-bootstrap-align.md` 全部完成）
 >
-> **本次修订记录 7 项对齐 openharness 的决策**（详 §"Bootstrap 机制（rev 2026-08-11 对齐 openharness 隐式完成）" + §"ACI 写工具 extraWriteRoots 对称（rev 2026-08-11）"）：
+> **本次修订记录 7 项对齐 openharness 的决策，均已实施**（D1 决策 + T1-T10 落地，T11 本 spec 收口，T12 E2E）：
 >
-> 1. bootstrap 完成机制从 **flag 驱动** 改为 **文件驱动**（agent 自己 `rm BOOTSTRAP.md` 隐式完成，对齐 ohmo）
-> 2. `bootstrap.ts` 不再导出 `IKNOW_BOOTSTRAP_PROMPT`，改成导出 `BOOTSTRAP_TEMPLATE`（文件内容）
-> 3. `initializeIknowWorkspace` 在 `bootstrap_seeded=false` 时 seed `~/.iknow/BOOTSTRAP.md`
-> 4. 装配层 `readBootstrapIfNeeded` 不再读 `bootstrap_seeded`，改读文件存在
-> 5. 删 `/profile done` 斜杠命令（chat-session / hub / app.tsx 三入口）
-> 6. 删 `appendIknowUserSections` / `BOOTSTRAP_COMPLETE_SECTIONS`（commit d1beae5 已回撤）
-> 7. ACI 写工具**保持 cwd-scoped**（不放行 `~/.iknow/` 写），agent 写 user.md / 删 BOOTSTRAP.md 走 bash（rev 2026-08-11 操作员裁决；`resolveWithinRoot` `extraWriteRoots` 基础设施保留待未来启用）
+> 1. bootstrap 完成机制从 **flag 驱动** 改为 **文件驱动**（agent 自己 `rm BOOTSTRAP.md` 隐式完成，对齐 ohmo）✅
+> 2. `bootstrap.ts` 不再导出 `IKNOW_BOOTSTRAP_PROMPT`，改成导出 `BOOTSTRAP_TEMPLATE`（文件内容）✅
+> 3. `initializeIknowWorkspace` 在 `bootstrap_seeded=false` 时 seed `~/.iknow/BOOTSTRAP.md` 并翻旗 ✅
+> 4. 装配层 `readBootstrapIfNeeded` 不再读 `bootstrap_seeded`，改读文件存在 ✅
+> 5. 删 `/profile done` 斜杠命令（chat-session / hub / app.tsx 三入口）✅
+> 6. 删 `appendIknowUserSections` / `BOOTSTRAP_COMPLETE_SECTIONS` ✅
+> 7. ACI 写工具**保持 cwd-scoped**（不放行 `~/.iknow/` 写），agent 写 user.md / 删 BOOTSTRAP.md 走 bash（操作员裁决；`resolveWithinRoot` `extraWriteRoots` 基础设施保留待未来启用）✅
 >
 > **supersede 关系**——以下旧段是旧产品决策（2026-08-06 的"应急设计"，基于错误沙箱前提）的产物，新决策 supersede 旧段；本文保留旧段文字以备溯源，但实施以本 Rev 块 + §"Bootstrap 机制（rev 2026-08-11）"+ §"ACI 写工具 extraWriteRoots 对称（rev 2026-08-11）" 为准：
 >
@@ -109,11 +109,13 @@ src/
 │   └── identity/                             # 【新增】本 spec 核心模块
 │       ├── identity.ts                       #   导出 IKNOW_IDENTITY_DEFAULT（认知：Name/Kind/Signature）
 │       ├── soul.ts                           #   导出 IKNOW_SOUL_DEFAULT（人格：core truths/boundaries/vibe/continuity）
-│       ├── bootstrap.ts                      #   导出 IKNOW_BOOTSTRAP_PROMPT（首启对话脚本）
+│       ├── bootstrap.ts                      #   【rev 2026-08-11】导出 BOOTSTRAP_TEMPLATE（BOOTSTRAP.md 文件模板，非对话脚本）
 │       ├── user-template.ts                  #   导出 USER_TEMPLATE（seed user.md 模板）
 │       ├── index.ts                          #   导出 assembleIdentityContext(ctx) + IKNOW_WORKSPACE_ROOT 常量
 │       └── workspace.ts                      #   【新增】initializeIknowWorkspace(opts) — eager + idempotent seed
 │                                                 + read/write state.json + bootstrap_seeded 状态机
+│                                                 + bootstrapFilePath(workspace)
+│                                                 + 【rev 2026-08-11】bs=false 时 seed ~/.iknow/BOOTSTRAP.md + 翻旗
 ├── cli/                                      # 【改】runtime.ts 注入 init 触发
 │   ├── runtime.ts                            #   buildHarnessEngine 调 initializeIknowWorkspace per init
 │   └── {chat-session,slash,format,ask-user,parse-args}.ts # 【不动】020 / 022 既有
@@ -125,7 +127,8 @@ src/
 tests/
 ├── harness/identity/                         # 【新增】identity 装配单元测试
 │   ├── identity.test.ts                      #   identity / soul 段拼装 + identity vs soul 边界
-│   ├── bootstrap.test.ts                     #   BOOTSTRAP 首启触发 + state.json 写入
+│   ├── bootstrap-file.test.ts                #   【rev 2026-08-11】BOOTSTRAP_TEMPLATE 文件模板 + bootstrapFilePath
+│   ├── bootstrap.test.ts                     #   BOOTSTRAP 状态机（seed 即翻旗）+ 文件驱动
 │   ├── workspace.test.ts                     #   initializeIknowWorkspace 幂等 + seed 行为
 │   └── system-injection.test.ts              #   buildHarnessEngine 装入 deps.system + 4 入口覆盖（mock）
 └── harness/memory/assembly.test.ts           # 【改】回归 #121 既有 7 段；新增 1+N 段装配总测
@@ -326,7 +329,7 @@ export function shouldIncludeBootstrap(
 
 - **数据单源**：`identity.ts` / `soul.ts` / `bootstrap.ts` 三个 const string 是 SSOT，不能在 `assembleIdentityContext` 内重新拼段。
 - **错误降级**：user.md / state.json 读失败时（文件不存在 / IO 异常）→ 跳过该段（不抛、不凝 500），装配继续（与 #121 readOrEmpty 行为一致）。
-- **写入显式**：state.json 写入只发生在 BOOTSTRAP 完成钩子（`writeIknowState({ bootstrap_seeded: true })`）；不在装配路径上写。
+- **写入显式**：rev 2026-08-11 — state.json 写入只发生在 `initializeIknowWorkspace` seed BOOTSTRAP.md 后翻旗（`bootstrap_seeded: true`）；装配路径不写。BOOTSTRAP.md 完成 = agent 自己删文件（文件驱动，无宿主钩子）。
 - **不构造第二份权威副本**：identity / soul 字符串只在 `deps.system` 装配时存在，不缓存进 `LoopState.messages`（守 014 附加原则）。
 - **eager + idempotent**：`initializeIknowWorkspace` 可被任意入口任意次调用，幂等。
 
@@ -458,7 +461,7 @@ export type IknowIdentityError =
 
 1. `node -e "import('./src/harness/identity/identity.js').then(m => console.log(typeof m.IKNOW_IDENTITY_DEFAULT === 'string' && m.IKNOW_IDENTITY_DEFAULT.length > 0))"` 退出码 0 → identity const string 存在
 2. `node -e "import('./src/harness/identity/soul.js').then(m => console.log(typeof m.IKNOW_SOUL_DEFAULT === 'string' && m.IKNOW_SOUL_DEFAULT.length > 0))"` 退出码 0 → soul const string 存在
-3. `node -e "import('./src/harness/identity/bootstrap.js').then(m => console.log(typeof m.IKNOW_BOOTSTRAP_PROMPT === 'string'))"` 退出码 0 → bootstrap const string 存在
+3. `node -e "import('./src/harness/identity/bootstrap.js').then(m => console.log(typeof m.BOOTSTRAP_TEMPLATE === 'string' && m.BOOTSTRAP_TEMPLATE.includes('delete this file')))"` 退出码 0 → BOOTSTRAP_TEMPLATE const string 存在（rev 2026-08-11:BOOTSTRAP.md 文件模板）
 4. `grep -c "iknow" src/harness/identity/identity.ts` ≥ 1 → identity 段含 "iknow" 自指
 5. `grep -c "core truths" src/harness/identity/soul.ts` ≥ 1 → soul 段含 core truths 段
 6. `grep -c "vibe" src/harness/identity/soul.ts` ≥ 1 → soul 段含 vibe 段（按 A13 Vibe 归人格）
@@ -491,10 +494,11 @@ export type IknowIdentityError =
 
 ### 状态机（4 条）
 
-24. `npm test -- tests/harness/identity/bootstrap.test.ts` 退出 0 → BOOTSTRAP 状态机测试
+24. `npm test -- tests/harness/identity/bootstrap.test.ts` 退出 0 → BOOTSTRAP 状态机测试（seed 即翻旗）
+    24b. `npm test -- tests/harness/identity/bootstrap-file.test.ts` 退出 0 → BOOTSTRAP_TEMPLATE 文件模板 + bootstrapFilePath（rev 2026-08-11）
 25. `npm test -- tests/harness/identity/workspace.test.ts` 退出 0 → workspace 初始化测试
 26. `npm test -- tests/harness/identity/workspace.test.ts -t "roundtrip"` 退出 0 → state.json 读写往返（schema_version=1 + bootstrap_seeded 字段必写）
-27. `npm test -- tests/harness/identity/system-injection.test.ts -t "second skip"` 退出 0 → 二次启动跳过 BOOTSTRAP 段
+27. `npm test -- tests/harness/identity/system-injection.test.ts -t "second skip"` 退出 0 → 二次启动（BOOTSTRAP.md 已删）跳过 BOOTSTRAP 段（rev 2026-08-11:文件驱动隐式完成）
 
 ### 装配顺序（3 条）
 

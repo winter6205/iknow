@@ -1,8 +1,9 @@
-# Plan: identity bootstrap 对齐 openharness + 删多余（#196 rev 2026-08-11）
+# Plan: identity bootstrap 对齐 openharness + 删多余（#196 rev 2026-08-11）✅ DONE
 
 > **Spec**: `specs/196-identity-assembly.md`（Rev 2026-08-11 决策修订块 + §"Bootstrap 机制（rev 2026-08-11 对齐 openharness 隐式完成）" + §"ACI 写工具 extraWriteRoots 对称（rev 2026-08-11）"）
+> **Status**: rev 2026-08-11 全部落地（commit 12a98ca spec 决策 + eb90dfc T1 + d142b11 T2/T3 + 6fdacf3 T4 + b538fc7 T6 + 1368ef7 T7 + 1d8b10c T8/T9 回退 + spec 收口）。T12 E2E 由 stub-model 覆盖；真 LLM 引导对话走手工 smoke。
 > **Map**: wayfinder:map #196；决策出典：PR #213（14cd709 应急设计）/ #347（挂起"另开 issue 讨论交互"）/ b2f432e（撤回 prompt 过度承诺）/ 本次 Rev 块
-> **Tracker**: 本地文件（docs/plans 不入 git），12 bullets 逐条打勾
+> **Tracker**: 本地文件（docs/plans 不入 git），12 bullets 全部完成
 > **前置隔离**: 本次工作已隔离在 worktree `identity-356-profile-done`（基于 master=33b29a2）；master 上两条误提交（d1beae5/73f23da）已回撤并 format-patch 备份到 `$CLAUDE_JOB_DIR/tmp/`。
 
 ## 依赖图
