@@ -55,6 +55,11 @@ export interface AssemblyContext {
   readonly memoryResolver?: () => Promise<string | undefined>;
   readonly toolList?: () => ReadonlyArray<string> | undefined;
   readonly skills?: () => ReadonlyArray<SkillSummary> | undefined;
+  /** #361 T8 subagent coordinator 段注入缝 (可选):build-engine 在
+   *  subagentManager 装配 (chat/tui/serve) 时经 createIknowSystemResolver opts
+   *  传入 IKNOW_COORDINATOR_TEXT;ask (无 manager) 不传入 → 段缺席,字节级零
+   *  变化 (KV 缓存稳定契约)。空串亦视为缺席。 */
+  readonly coordinatorText?: string;
 }
 
 /** #337 T6 `<available_skills>` 段元素形态(最小投影:name + description + disabled)。
@@ -89,6 +94,11 @@ export function createIknowSystemResolver(opts: {
   readonly toolList?: () => ReadonlyArray<string> | undefined;
   /** #337 T6 skills 注入缝 (可选):见 AssemblyContext.skills 注释。 */
   readonly skills?: () => ReadonlyArray<SkillSummary> | undefined;
+  /** #361 T8 subagent coordinator 段注入缝 (可选):build-engine 在
+   *  subagentManager 装配 (chat/tui/serve) 时经 createIknowSystemResolver opts
+   *  传入 IKNOW_COORDINATOR_TEXT;ask (无 manager) 不传入 → 段缺席,字节级零
+   *  变化 (KV 缓存稳定契约)。空串亦视为缺席。 */
+  readonly coordinatorText?: string;
 }): () => Promise<string | undefined> {
   const bootstrapActive = shouldIncludeBootstrap(opts.surface);
   return () =>
@@ -100,6 +110,9 @@ export function createIknowSystemResolver(opts: {
       ...(opts.memoryResolver ? { memoryResolver: opts.memoryResolver } : {}),
       ...(opts.toolList ? { toolList: opts.toolList } : {}),
       ...(opts.skills ? { skills: opts.skills } : {}),
+      ...(opts.coordinatorText
+        ? { coordinatorText: opts.coordinatorText }
+        : {}),
     });
 }
 
@@ -126,12 +139,21 @@ export async function assembleIdentityContext(
   // `pwd` (which is `execute` → ask by default). Cwd is constant per process,
   // so output stays byte-stable across turns (KV cache contract).
   segments.push(projectPathSegment(ctx.cwd));
-  // #337 T6 加性段 `<available_skills>`:append 在最末,不触碰 LOCKED 顺序。
-  // 缺席(seam 未注入)→ 跳过(字节级零变化);提供且经 disabled 过滤后为空 →
-  // 渲染空清单显式语句;提供且非空 → 渲染名字序列表。
+  // #337 T6 加性段 `<available_skills>`:append 在 projectPath 之后;随后还有
+  // #361 T8 coordinator 段在其后追加(见下),故本段不再是最末。不触碰 LOCKED
+  // 顺序。缺席(seam 未注入)→ 跳过(字节级零变化);提供且经 disabled 过滤后
+  // 为空 → 渲染空清单显式语句;提供且非空 → 渲染名字序列表。
   const skills = ctx.skills?.();
   if (skills !== undefined) {
     segments.push(skillsSegment(skills));
+  }
+  // #361 T8 加性段 subagent coordinator slot:append 在最末,不触碰 LOCKED 顺序。
+  // 仅 subagentManager 装配 (chat/tui/serve) 时 build-engine 注入
+  // coordinatorText;ask (无 manager) 不注入 → 段缺席 (字节级零变化,守 KV
+  // 缓存稳定契约)。文本是 ADR-0014 决策 3 引导层 → model 实际可见的 system
+  // prompt 一部分 (验收6 的 proactive 关键词即出于此)。
+  if (ctx.coordinatorText) {
+    segments.push(coordinatorSegment(ctx.coordinatorText));
   }
   return segments.join("\n\n");
 }
@@ -234,4 +256,44 @@ export function skillsSegment(skills: ReadonlyArray<SkillSummary>): string {
   }
   const body = visible.map((s) => `${s.name}: ${s.description}`).join("\n");
   return `<available_skills>\n${body}\n</available_skills>`;
+}
+
+/** #361 T8 subagent coordinator 引导文本正文 (SSOT,不含段标题——标题由
+ *  coordinatorSegment 加 "## Sub-agent coordination" 渲染,projectPathSegment /
+ *  skillsSegment 同形态)。ADR-0014 决策 3 引导层:前景 spawn 为默认契约。
+ *
+ *  内容覆盖 ADR 决策 3 五要点:
+ *   ① 两工具是谁 —— spawn_subagent + subagent_result
+ *   ② 何时派   —— multi-step exploration / independent verification /
+ *                parallelizable work(句子同 opencode 工具描述对照)
+ *   ③ 前景默认"阻塞等待结果" —— blocks until finished,same-turn envelope
+ *   ④ 一回合多 spawn 并行 —— issue multiple spawn_subagent calls in one turn
+ *   ⑤ 结果处置 —— envelope 直接返回 / failed 也是数据读 reason + summary
+ *
+ *  验收 6 硬挂钩 (model 实际可见的 system prompt 含):
+ *    proactive(proactively) · parallelizable · blocks until finished
+ *  措辞 "Default contract today" 为 V2 追加异步纪律段留空间。
+ *
+ *  build-engine 在 subagentManager 装配时经 createIknowSystemResolver opts
+ *  传入;ask (surface !== chat/tui/serve) 不传 → 段缺席 (字节级零变化)。 */
+export const IKNOW_COORDINATOR_TEXT = `
+Fork work to sub-agents running in separate processes. Two tools drive this:
+
+- spawn_subagent — spawn a sub-agent for a \`task\` (optionally \`systemPrompt\`, \`model\`, \`disallowedTools\`, \`maxTurns\`, \`timeoutMs\`). By default it blocks until finished: the tool result is the sub-agent's envelope, returned directly in the same turn.
+- subagent_result — poll a spawned task by \`task_id\` (status: not_found / running / completed / failed) when you need a fresh status without re-spawning.
+
+Use spawn_subagent proactively for multi-step exploration, independent verification, or parallelizable work — anything self-contained that can run in its own process without the main loop's state. Do not spawn for trivial lookups you can do directly.
+
+Result handling: a completed spawn returns the envelope {status: "ok", summary, result, fileRefs?, usage?} directly. A failed worker is data, not an error — read {status: "failed", reason, summary} and decide next steps from it.
+
+Parallelize by issuing multiple spawn_subagent calls in one turn: each spawns an independent worker process and they run concurrently. Keep each task self-contained; sub-agents cannot spawn further sub-agents.
+
+(Default contract today: spawn blocks until the sub-agent finishes. A future version may add an explicit asynchronous mode for fire-and-forget work.)
+`.trim();
+
+/** #361 T8 subagent coordinator 段渲染:段标题 + 正文 (coordinatorSegment 在
+ *  assembleIdentityContext 内对 ctx.coordinatorText 调用,加性段不触碰 LOCKED
+ *  顺序;缺席 → 跳过,字节级零变化)。 */
+export function coordinatorSegment(text: string): string {
+  return `## Sub-agent coordination\n${text}`;
 }

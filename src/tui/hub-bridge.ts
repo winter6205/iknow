@@ -23,6 +23,11 @@ import type { SessionFileV1 } from "../session-api/store/schema.js";
 import type { LoopEngineDeps } from "../harness/index.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { TokenUsage } from "../harness/model-adapter/types.js";
+// #361 TUI 入口 subagent 接线待清理:本次 cherry-pick 跳过 V1 TUI 自建 manager
+// commits (9a745ff/a2be099),29c01fc 残留暂存,TUI 不装配 subagentManager →
+// drain 走空字符串路径 → spawn_subagent 在 TUI 下不工作。chat/serve 路径由
+// build-engine 装配完整,功能可用。issue 跟踪整段清理。
+import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 
 /**
@@ -94,8 +99,11 @@ export interface TuiBridge {
 export interface CreateTuiBridgeOptions {
   /** 会话池根目录；缺省 ~/.iknow（与 serve 同款 resolveServeDataDir）。 */
   readonly dataDir?: string;
-  /** harness deps（产品路径传 buildTuiDeps 结果；测试注入 stub deps）。 */
-  readonly deps: LoopEngineDeps;
+  /** harness deps（产品路径传 buildTuiDeps 结果；测试注入 stub deps）。
+   *  #361 TUI 入口 subagent 接线暂存:字段 subagentManager? 类型保留但 TUI
+   * 路径当前未装配 manager（29c01fc 残留由 buildTuiDeps 注释 + issue #364
+   * 跟踪）。chat/serve 路径 build-engine 装配完整。 */
+  readonly deps: LoopEngineDeps & { subagentManager?: SubAgentManager };
   readonly defaultJsonMode?: boolean;
   readonly traceOut?: string;
   /** in-flight 登记簿（deps.ts 的 soleInflightId 同源，归因一致）。 */
@@ -111,6 +119,11 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     deps: opts.deps,
     defaultJsonMode: opts.defaultJsonMode ?? false,
     traceOut: opts.traceOut,
+    // #361 TUI 入口 subagent 接线待清理:TUI 当前未装配 manager,
+    // opts.deps.subagentManager 为 undefined → SessionHub 走无 manager 路径
+    // (drain 返空字符串)。issue #364 跟踪整段回退 29c01fc TUI 接线 + 补
+    // 9a745ff/a2be099(若需要)。chat/serve 路径 build-engine 装配完整。
+    subagentManager: opts.deps.subagentManager,
   });
 
   const bridge: TuiBridge = {

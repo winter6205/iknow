@@ -105,10 +105,15 @@ export async function buildHarnessEngine(
 }
 
 /**
- * #337 T8 生命周期钩子 — 把 `BuiltEngine.shutdown` 挂到进程退出事件上。
+ * #337 T8 / #356 T6 生命周期钩子 — 把 `BuiltEngine.shutdown` 挂到进程退出事件上。
  *
- * 长程 CLI 入口（chat REPL / serve）持有 MCP manager 后台连接，进程退出
- * 前必须显式关闭 stdio 子进程 + 取消 in-flight 调用（SC11 / SC16）。
+ * 长程 CLI 入口（chat REPL / serve）持有 MCP manager 后台连接 + subagent
+ * manager 子进程池，进程退出前必须显式关闭 stdio 子进程 + 取消 in-flight
+ * 调用（SC11 / SC16）。T6 起 `BuiltEngine.shutdown` 是组合句柄
+ * （Promise.all([mcpManager?.shutdown(), subagentManager?.shutdown()])） —
+ * 顺序 mcpManager first → subagentManager second（两者无共享可变状态,
+ * Promise.all 并发;顺序仅语义标注,非严格串行）。本钩子保持调用
+ * built.shutdown 一次即可,不再展开。
  * ask 入口 manager 未创建 → shutdown 缺席 → 本函数直接返回 no-op 句柄,
  * 调用方无需特判。
  *
