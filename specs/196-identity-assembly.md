@@ -2,6 +2,35 @@
 
 > **Lean spec.** 本 spec 锁定实施层决策：身份层独立成段（`assembleIdentityContext` 注入缝）、认知/人格分层、装配顺序、文件归位、状态机、入口覆盖、测试 / Boundaries / Success Criteria。已在 spec 阶段由操作员逐条确认的 5 个决策点（issue #196 决策点 §1-§5）作为先决决议直接引用，不在本 spec 体内重开。
 
+> ## ⚠️ Rev 2026-08-11 决策修订（supersede 旧段）
+>
+> **本次修订记录 7 项对齐 openharness 的决策**（详 §"Bootstrap 机制（rev 2026-08-11 对齐 openharness 隐式完成）" + §"ACI 写工具 extraWriteRoots 对称（rev 2026-08-11）"）：
+>
+> 1. bootstrap 完成机制从 **flag 驱动** 改为 **文件驱动**（agent 自己 `rm BOOTSTRAP.md` 隐式完成，对齐 ohmo）
+> 2. `bootstrap.ts` 不再导出 `IKNOW_BOOTSTRAP_PROMPT`，改成导出 `BOOTSTRAP_TEMPLATE`（文件内容）
+> 3. `initializeIknowWorkspace` 在 `bootstrap_seeded=false` 时 seed `~/.iknow/BOOTSTRAP.md`
+> 4. 装配层 `readBootstrapIfNeeded` 不再读 `bootstrap_seeded`，改读文件存在
+> 5. 删 `/profile done` 斜杠命令（chat-session / hub / app.tsx 三入口）
+> 6. 删 `appendIknowUserSections` / `BOOTSTRAP_COMPLETE_SECTIONS`（commit d1beae5 已回撤）
+> 7. ACI 写工具补 `extraWriteRoots: [~/.iknow]`，与读工具对称
+>
+> **supersede 关系**——以下旧段是旧产品决策（2026-08-06 的"应急设计"，基于错误沙箱前提）的产物，新决策 supersede 旧段；本文保留旧段文字以备溯源，但实施以本 Rev 块 + §"Bootstrap 机制（rev 2026-08-11）"+ §"ACI 写工具 extraWriteRoots 对称（rev 2026-08-11）" 为准：
+>
+> - §A12「激活 BOOTSTRAP 按 bootstrapActive 开关」→ superseded by 决策 1/4（装配层看 BOOTSTRAP.md 文件存在与否，不看 flag、不看 surface）
+> - §Project Structure `bootstrap.ts` 注释「导出 IKNOW_BOOTSTRAP_PROMPT（首启对话脚本）」→ superseded by 决策 2（导出 BOOTSTRAP_TEMPLATE 文件内容）
+> - §Code Style「bootstrap 是首启唯一一次注入（bootstrap_seeded=false 时挂上）」→ superseded by 决策 1/4（注入 = 文件存在）
+> - §Style「state.json 写入只发生在 BOOTSTRAP 完成钩子」→ superseded by 决策 3（state.json 写入只发生在 seed BOOTSTRAP.md 后翻 flag）
+> - §Testing「`bootstrap.test.ts` BOOTSTRAP 首启触发 + state.json 写入」→ 改测 BOOTSTRAP.md 文件存在/不存在 → 装配注入/不注入
+> - §Success Criteria 第 2/6 条「首启时 agent 走 BOOTSTRAP 脚本引导用户填 user.md / 二次启动跳过 BOOTSTRAP 段」→ 改测 BOOTSTRAP.md 存在/缺失语义
+> - §Success Criteria「`npm test ... bootstrap.test.ts`」→ 改测 `bootstrap-file.test.ts`
+> - §ADR Reference 「bootstrap.ts 移到代码（非工作区）」→ 与决策 2 不冲突（仍是代码常量），但表述改为「BOOTSTRAP_TEMPLATE 在代码；BOOTSTRAP.md seed 后在工作区」
+>
+> **本 Rev 块不动既有段落**，全文翻新留待后续 12-bullet tracker 收口时合并。本次 spec 修订按"1 commit = 1 logical task"约定只做"决策记录 + 全文 supersede 标记"，不重写其它段落。
+>
+> 决策依据（决策 4/5/6）：commit 14cd709 "修复首启引导死胡同"基于"ACI 沙箱把 home 三路封死 + bash 复合命令被 hard-wall 拦"为前提——实测证伪：`bwrap.ts:49-72` 把整个 home `--bind` 进沙箱（bash 可自由读写）、`hard-walls.ts:230` 明示 non-allowlisted 走 ask tier 而非 hard-wall deny、`SENSITIVE_PATH_FRAGMENTS`（`fs-policy.ts:5-12`）不含 `.iknow`。
+>
+> 决策依据（决策 7）：`src/harness/aci/tools/read-file.ts:36` 已有 `extraReadRoots: [~/.iknow]`；写工具无对应 `extraWriteRoots` 是配置缺失，不是沙箱要求。
+
 ## Assumptions (confirmed)
 
 > 以下 14 条假设经操作员逐条确认（2026-08-06），构成本 spec 的实施层决策基础。issue #196 §1-§5 决议作为先决决议直接引入，不在 list 重开。
@@ -204,15 +233,14 @@ export function iknowWorkspaceRoot(): string {
 export interface IknowStateV1 {
   readonly schema_version: 1;
   readonly bootstrap_seeded: boolean;
-  readonly created_at: string; // ISO 8601
-  readonly updated_at: string; // ISO 8601
 }
 
-/** IKNOW-196 初始化（eager + idempotent）。
+/** IKNOW-196 初始化（eager + idempotent）。rev 2026-08-11 对齐 openharness:
  *  - mkdir -p ~/.iknow/（幂等）
  *  - 写 user.md（仅当不存在；不覆盖用户已改）
  *  - 写 state.json（仅当不存在；bs=false）
- *  - 不创建 / 不写 identity.ts / soul.ts / bootstrap.ts / BOOTSTRAP.md（这些是代码常量）
+ *  - **bs=false 时 seed BOOTSTRAP.md 文件**（仅当不存在；不覆盖）+ 翻 flag（rev 2026-08-11）
+ *  - 不创建 / 不写 identity.ts / soul.ts / bootstrap.ts / IDENTITY.md（认知/人格/身份是代码常量）
  *  - 不创建 identity.md 文件（已合并到 soul，不单独存在）
  */
 export async function initializeIknowWorkspace(opts?: {
@@ -222,14 +250,51 @@ export async function initializeIknowWorkspace(opts?: {
 /** 读取 state.json；不存在则返默认值（schema_version:1 / bootstrap_seeded:false）。 */
 export async function readIknowState(workspace?: string): Promise<IknowStateV1>;
 
-/** 写入 state.json（PATCH 单字段；updated_at 同步更新）。 */
+/** 写入 state.json（PATCH 单字段）。rev 2026-08-11：删去 created_at/updated_at
+ *  字段（state.json 自愈时已用 random 备份，简化 schema；同 commit 5eeb835
+ *  先例）。bs 翻旗后**只**用于审计/调试，**装配路径不再读它**。 */
 export async function writeIknowState(
-  patch: Partial<
-    Omit<IknowStateV1, "schema_version" | "created_at" | "updated_at">
-  >,
+  patch: Partial<Omit<IknowStateV1, "schema_version">>,
   workspace?: string
 ): Promise<IknowStateV1>;
+
+/** rev 2026-08-11 新增：BOOTSTRAP.md 文件路径解析（与 ohmo `get_bootstrap_path` 对齐）。
+ *  seed 后只读、不写。完成 = 文件被删，**无需宿主钩子**。 */
+export function bootstrapFilePath(workspace: string): string;
 ```
+
+### Bootstrap 机制（rev 2026-08-11 对齐 openharness 隐式完成）
+
+**问题溯源**：`bootstrap_seeded` flag 在 iknow 现状下被装配层每次会话读取（`readBootstrapIfNeeded` 读 state.json 决定是否注入 `IKNOW_BOOTSTRAP_PROMPT`）。openharness 同名 flag 只在 `initialize_workspace()` 内被读一次（决定是否 seed BOOTSTRAP.md 文件），runtime / prompts **从不读它**——行为由文件存在与否驱动，agent 自己 `rm BOOTSTRAP.md` 隐式完成。
+
+**对齐决策**：
+
+1. **完成机制从 flag 驱动改为文件驱动**：`bootstrap_seeded` 仅用于 `initializeIknowWorkspace` 一次性 seed 决策；装配层从读 flag 改为读 `BOOTSTRAP.md` 是否存在。
+2. **bootstrap 段从代码常量改为种子文件**：`bootstrap.ts` 不再导出 `IKNOW_BOOTSTRAP_PROMPT`（对话脚本），改成导出 `BOOTSTRAP_TEMPLATE`（文件内容），内容结尾对齐 ohmo 风格"This file can be deleted when done. If gone later, do not assume it should come back."。
+3. **`initializeIknowWorkspace` seed BOOTSTRAP.md**：`bootstrap_seeded=false` 且文件不存在时，把 `BOOTSTRAP_TEMPLATE` 原子写入 `~/.iknow/BOOTSTRAP.md`，随后翻 flag。幂等。
+4. **删除 `/profile done` 钩子**（chat-session / app.tsx / hub）：bootstrap 完成不再靠宿主斜杠命令；agent 引导对话结束后 `rm BOOTSTRAP.md` 即可（bash 在 bwrap sandbox 内有 home `--bind`，可写）。
+5. **删除 `appendIknowUserSections` / `BOOTSTRAP_COMPLETE_SECTIONS`**（commit d1beae5 已回撤）：基于"bash 复合命令被 hard-wall 拦"错误前提做的过度设计。实测 `bwrap.ts:49-72` 把整个 home `--bind` 进沙箱，`hard-walls.ts:230` 明示 non-allowlisted 命令走 ask tier 而非 hard-wall，`SENSITIVE_PATH_FRAGMENTS` 不含 `.iknow`，bash 可自由读写。
+6. **保留** `~/.iknow/` 路径决策（跨项目用户画像，不污染仓库）—— **不**对齐 openharness 把 workspace 放 cwd 的做法。openharness = 项目级 workspace；iknow = 用户级 workspace。这是产品决策，不是设计失误。
+
+### ACI 写工具 extraWriteRoots 对称（rev 2026-08-11）
+
+`read_file` 已有 `extraReadRoots: [~/.iknow]`（`src/harness/aci/tools/read-file.ts:36`）。`write_file` / `edit_file` 当前走 `resolveWithinRoot(root, params.path)` 不带 extra roots——agent 在引导对话里**能读不能写** `~/.iknow/`。这是与 ohmo 行为的不对称，也是引导流程被迫走"宿主编辑 + /profile done"绕路的根因。
+
+**决策**：写工具补 `extraWriteRoots: [~/.iknow]`，跟读工具对称。agent 用 ACI 工具直接写 `user.md` / `BOOTSTRAP.md`（完成后 `rm` 文件）；bash 路径同样可用。`resolveWithinRoot` helper 接受可选 `extraWriteRoots` 参数；`write-file.ts` / `edit-file.ts` 各自传入 `~/.iknow` 作为额外可写根（与 read-file 的 `extraReadRoots` 镜像）。
+
+**安全边界**：symlink 逃逸仍由 `resolveWithinRoot` 内部保证（realpath 后还在 extra root 下）。`SENSITIVE_PATH_FRAGMENTS` 不含 `.iknow`（不含 `.ssh/.aws/.gnupg/.kube/.docker/.env/.pem/.key`），因此 `~/.iknow/user.md` / `~/.iknow/BOOTSTRAP.md` 不撞 hard-wall。`hard-walls.ts:230` 兜底：non-allowlisted 命令走 ask tier 而非 hard-wall deny。
+
+#### D1 裁决区（rev 2026-08-11 — 已定：工具路径）
+
+**决策**：agent 写 `~/.iknow/user.md` / `BOOTSTRAP.md` 走 **ACI 工具路径**（write_file / edit_file 补 `extraWriteRoots`），不依赖 bash。
+
+**依据**（复核后确认）：
+
+- bwrap 把整个 home `--bind` 进沙箱（`bwrap.ts:49-72` `bindArgs`），bash 沙箱内可自由读写 `~/.iknow/` —— bash 路径技术可行
+- 但工具路径更稳：`write_file`/`edit_file` 是 typed、带 schema、走 permission 层，agent 不用记 bash 复合命令语法；与 read_file 已有 `extraReadRoots` 完全镜像，实现最小
+- bash 路径没有 hard-wall 拦截（`SENSITIVE_PATH_FRAGMENTS` 不含 `.iknow`、`hard-walls.ts:230` 明示 non-allowlisted 走 ask tier），但仍比工具多一层命令解析不确定性
+
+**落地**：T7（helpers `extraWriteRoots` 第 4 参）+ T8（write_file 传 `~/.iknow`）+ T9（edit_file 传 `~/.iknow`）。引导 prompt（BOOTSTRAP_TEMPLATE）明确告知 agent 用工具写/删文件。
 
 ### 注入缝（依赖 #121 aim，但**提升到 master baseline**）
 
