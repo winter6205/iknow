@@ -32,7 +32,7 @@ import type { Registry } from "./tools/types.js";
 import type { RegistryImpl } from "./tools/registry.js";
 import type { ValidateFunction } from "ajv";
 import { homedir } from "node:os";
-import type { AskUser } from "./permission/types.js";
+import type { AskUser, PostToolUseHook } from "./permission/types.js";
 import type { IknowEnv } from "../config/env.js";
 import { ValidationError } from "../shared/errors.js";
 import {
@@ -82,6 +82,8 @@ export type BuildEngineOpts = {
   ) => import("./mcp/manager.js").McpClientHandle;
   /** #356 T6 测试缝:subagent manager 覆盖注入(生产默认不传则内部自建)。 */
   readonly subagentManager?: SubAgentManager;
+  /** TUI 工具摘要观测缝:透传给 createAciExecutor hooks.postToolUse(chat/serve 不传 → 零变化)。 */
+  readonly hooks?: PostToolUseHook;
 };
 
 export type BuiltEngine = {
@@ -227,6 +229,7 @@ export async function buildHarnessEngine(
     catalog: reg.catalog,
     policy,
     askUser,
+    ...(opts.hooks ? { hooks: { postToolUse: opts.hooks } } : {}),
   });
 
   // registry 单源:reg.inner 已是按 memoryEnabled 条件化的最终视图(8 或 10 件)。
