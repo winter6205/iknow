@@ -87,4 +87,50 @@ describe("ACI registry external registration", () => {
       ["read_file", external.name]
     );
   });
+
+  it("unregisterExternal removes a tool from catalog, discover, and visible schemas", () => {
+    const registry = createAciRegistry([makeTool("read_file")]);
+    const external = makeTool("mcp__a__x");
+
+    registry.registerExternal([external]);
+    assert.equal(registry.catalog.get(external.name), external);
+
+    registry.unregisterExternal([external.name]);
+
+    // 三个下游视图都从 externalByExt live 读，应同步收敛
+    assert.equal(registry.catalog.get(external.name), undefined);
+    assert.equal(registry.discover(external.name), undefined);
+    assert.deepEqual(
+      registry.visibleSchemas().map((tool) => tool.name),
+      ["read_file"]
+    );
+    assert.deepEqual(
+      registry.catalog.all().map((tool) => tool.name),
+      ["read_file"]
+    );
+  });
+
+  it("re-registers the same name after unregister (reload contract)", () => {
+    const registry = createAciRegistry([makeTool("read_file")]);
+    const external = makeTool("mcp__a__x");
+
+    registry.registerExternal([external]);
+    registry.unregisterExternal([external.name]);
+
+    // unregister 清掉了名字 → Gate2 duplicate 不再触发，同名可重新注册
+    assert.doesNotThrow(() => registry.registerExternal([external]));
+    assert.equal(registry.catalog.get(external.name), external);
+  });
+
+  it("unregister of unregistered names is idempotent (no throw)", () => {
+    const registry = createAciRegistry([makeTool("read_file")]);
+
+    assert.doesNotThrow(() =>
+      registry.unregisterExternal(["mcp__never__registered", "mcp__a__x"])
+    );
+    // 未注册名字被忽略后，仍可正常注册
+    assert.doesNotThrow(() =>
+      registry.registerExternal([makeTool("mcp__a__x")])
+    );
+  });
 });

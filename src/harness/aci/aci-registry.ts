@@ -21,6 +21,13 @@ export interface AciRegistry {
   readonly catalog: AciCatalog;
   /** 动态追加 MCP 扩展源工具，不改变 inner 的构造期快照。 */
   readonly registerExternal: (defs: ReadonlyArray<AciToolDef>) => void;
+  /**
+   * 按名移除动态扩展源工具（reload 时先 unregister 再 register）。
+   * 仅操作 externalByExt Map；不动 inner 冻结快照、不动 Gate2 防撞
+   * （同名 register 仍报错）。未注册的名字静默忽略（幂等 — reload
+   * 路径对陈旧 config 名不抛）。
+   */
+  readonly unregisterExternal: (names: ReadonlyArray<string>) => void;
   /** 核心（非 lazy）工具 schema —— 默认进 prompt 的集合。 */
   readonly visibleSchemas: () => ReadonlyArray<ToolDef>;
   /** 延迟加载：按需检索某工具 schema（含 lazy 的），未注册返回 undefined。 */
@@ -118,6 +125,15 @@ export function createAciRegistry(
     }
   };
 
+  // reload 缝：把外部工具按名撤回；不在此处跑 ajv 编译（已被
+  // registerExternal 编译过）。catalog / visibleSchemas / discover
+  // 都从 externalByExt live 读，因此删除后下游视图自动收敛。
+  const unregisterExternal = (names: ReadonlyArray<string>): void => {
+    for (const name of names) {
+      externalByExt.delete(name);
+    }
+  };
+
   // #224 discovered set：本 run 内被检索过的工具名（闭包状态，不跨 session
   // 持久化）。discover() 命中时 add；visibleSchemas() 按 tools 顺序拼
   // 非 lazy + 已发现的 lazy（含去重），从下一轮起进入 promptTools()。
@@ -140,6 +156,7 @@ export function createAciRegistry(
     inner,
     catalog,
     registerExternal,
+    unregisterExternal,
     visibleSchemas,
     discover,
   });

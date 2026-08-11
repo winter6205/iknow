@@ -103,6 +103,12 @@ export interface McpManagerOptions {
 export interface McpManager {
   /** 后台化启动连接；早于 connect 完成返回。 */
   readonly start: () => Promise<void>;
+  /**
+   * 重载 server 集：shutdown 现有全部 → 清 slots → 用新 config 重建 → start()。
+   * 幂等：未 start / 已 shutdown 也能调用。reload 返回前不阻塞在连接上
+   * （内部 start() fire-and-forget，与既有 start 同语义）。
+   */
+  readonly reload: (config: readonly McpServerConfig[]) => Promise<void>;
   /** 关闭所有 client + 取消 in-flight + SIGTERM stdio 子孙。 */
   readonly shutdown: () => Promise<void>;
   /** 当前状态拍快照（按 name 字母序）。 */
@@ -140,15 +146,24 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
   /** 按 name 索引 slot。 */
   const slots = new Map<string, Slot>();
 
-  // 排序保证测试稳定性
-  for (const cfg of [...opts.config].sort((a, b) =>
-    a.name.localeCompare(b.name)
-  )) {
-    slots.set(cfg.name, {
-      config: cfg,
-      state: cfg.status === "disabled" ? "disabled" : "pending",
-    });
+  /**
+   * 按 config 重置 slots —— 构造器 + reload 共用（reload 先 await
+   * shutdown 终结旧 slots，再调本函数清空 + 重建）。字母序保证
+   * 测试稳定性。
+   */
+  function rebuildSlots(config: readonly McpServerConfig[]): void {
+    slots.clear();
+    for (const cfg of [...config].sort((a, b) =>
+      a.name.localeCompare(b.name)
+    )) {
+      slots.set(cfg.name, {
+        config: cfg,
+        state: cfg.status === "disabled" ? "disabled" : "pending",
+      });
+    }
   }
+
+  rebuildSlots(opts.config);
 
   /** 把 slot 的工具列表通过 registerExternal 追加（增量 diff）。 */
   function registerTools(slot: Slot, tools: readonly SdkTool[]): void {
@@ -252,15 +267,30 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
     })();
   }
 
-  async function start(): Promise<void> {
+  /**
+   * 后台启动所有非 disabled slot。start / reload 共用。
+   * 不 await —— 返回的 tasks 仅用于静默吞错，连接在后台完成（SC8）。
+   */
+  function bootstrapAll(): void {
     const tasks: Promise<void>[] = [];
     for (const slot of slots.values()) {
       if (slot.state === "disabled") continue;
       slot.bg = bootSlot(slot);
       tasks.push(slot.bg);
     }
-    // 不 await —— start() 必须早返回。tasks 仅用于静默吞错。
     void Promise.allSettled(tasks);
+  }
+
+  async function start(): Promise<void> {
+    bootstrapAll();
+  }
+
+  async function reload(config: readonly McpServerConfig[]): Promise<void> {
+    // shutdown 取消 in-flight + close client + SIGTERM stdio 子孙 +
+    // slot 标 failed——旧状态彻底终结后重建。
+    await shutdown();
+    rebuildSlots(config);
+    bootstrapAll();
   }
 
   async function shutdown(): Promise<void> {
@@ -328,7 +358,7 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
     return out;
   }
 
-  const manager: McpManager = { start, shutdown, status };
+  const manager: McpManager = { start, reload, shutdown, status };
 
   // 测试钩子：暴露 slot 内 handle 数组（用于 in-flight callTool + 触发 list_changed）。
   // 生产路径由 createRealClient 实现，无副作用。

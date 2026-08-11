@@ -646,3 +646,109 @@ describe("MCP manager — onclose semantics", () => {
     await mgr.shutdown();
   });
 });
+
+// =========================================================================
+// reload — Phase A harness seam（TUI 看板 refresh）
+// =========================================================================
+
+describe("MCP manager — reload", () => {
+  it("reload replaces server set: renamed / added / removed servers reflected in status()", async () => {
+    const mgr = createMcpManager({
+      config: [makeStdio("alpha")],
+      registerExternal: () => {},
+      createClient: () =>
+        makeStubClient({
+          initialTools: [],
+          listChangedHandlers: [],
+          closeHandlers: [],
+        }),
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "alpha", "connected", 2000);
+    expect(mgr.status().map((s) => s.name)).toEqual(["alpha"]);
+
+    // 重载：改名 alpha → gamma，新增 beta，删除原 alpha 对应 server
+    await mgr.reload([makeStdio("beta"), makeStdio("gamma")]);
+
+    // reload 不阻塞在连接上（SC8）——状态立即反映新 server 集
+    expect(mgr.status().map((s) => s.name)).toEqual(["beta", "gamma"]);
+    // 后台 connect 完成后转 connected
+    await waitForStatus(mgr, "beta", "connected", 2000);
+    await waitForStatus(mgr, "gamma", "connected", 2000);
+    expect(mgr.status().every((s) => s.state === "connected")).toBe(true);
+
+    await mgr.shutdown();
+  });
+
+  it("reload aborts an in-flight callTool (reject, never resolve)", async () => {
+    let registered: AciToolDef[] = [];
+    const mgr = createMcpManager({
+      config: [makeStdio("svc")],
+      registerExternal: (defs) => {
+        registered = [...defs, ...registered];
+      },
+      createClient: () =>
+        makeStubClient({
+          initialTools: [sampleTool("slowOp")],
+          callToolDelayMs: 5000,
+          listChangedHandlers: [],
+          closeHandlers: [],
+        }),
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "svc", "connected", 2000);
+
+    const handler = registered.find((d) => d.name === "mcp__svc__slowOp");
+    expect(handler).toBeDefined();
+    const callP = handler!.handler!({}, {});
+    await new Promise((r) => setTimeout(r, 30));
+
+    // reload 内部先 shutdown → 取消 in-flight（复用 SC16 语义）
+    const reloadP = mgr.reload([makeStdio("svc")]);
+
+    let rejected = false;
+    let resolved: unknown = undefined;
+    try {
+      resolved = await callP;
+    } catch (err) {
+      rejected = true;
+      expect(err).toBeDefined();
+    }
+    await reloadP;
+
+    expect(rejected).toBe(true);
+    expect(resolved).toBeUndefined();
+  });
+
+  it("reload with a disabled server does not construct a client and status reflects disabled", async () => {
+    const handles: McpClientHandle[] = [];
+    const mgr = createMcpManager({
+      config: [makeStdio("svc")],
+      registerExternal: () => {},
+      createClient: () => {
+        const h = makeStubClient({
+          initialTools: [],
+          listChangedHandlers: [],
+          closeHandlers: [],
+        });
+        handles.push(h);
+        return h;
+      },
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "svc", "connected", 2000);
+    expect(handles).toHaveLength(1);
+
+    // 重载为 disabled —— 不建 client，状态直接 disabled
+    await mgr.reload([makeStdio("svc", "disabled")]);
+
+    expect(handles).toHaveLength(1); // 未新增 client
+    expect(mgr.status()).toHaveLength(1);
+    expect(mgr.status()[0]).toMatchObject({ name: "svc", state: "disabled" });
+
+    await mgr.shutdown();
+  });
+});
