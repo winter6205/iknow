@@ -726,12 +726,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
   }
 
-  /** T6：确认后执行回退（盘上截断 + UI 状态反射）。anchorText = 回退锚点的
-   *  用户消息真实文本，用于 notice（对齐真值「回退到 ［锚点消息］ 之前」）。 */
+  /** T6：确认后执行回退（盘上截断 + UI 状态反射）。
+   *  anchorTextForInput = 回退锚点用户消息完整文本（不截断），回退后填回
+   *   输入框 — 与 baseline §2 的「清空输入框」有意分歧，用户实测要求回退后
+   *   能直接修改并重发（spec §Divergence 已记录）。
+   *  userMessageTextForNotice = 截 80 展示用版，用于 notice「已回退到 ［消息］ 之前」。 */
   async function executeRewind(
     targetId: string,
     keepTurns: number,
-    anchorText: string
+    anchorTextForInput: string,
+    userMessageTextForNotice: string
   ): Promise<void> {
     setRewindTargets(undefined);
     setRewindConfirming(false);
@@ -752,8 +756,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         };
       });
       setNotice({
-        lines: [`已回退到 ［${anchorText || "(无文本)"}］ 之前。`],
+        lines: [
+          `已回退到 ［${userMessageTextForNotice || "(无文本)"}］ 之前。`,
+        ],
       });
+      // 输入框填回锚点消息全文 —— 用户可修改并重发（与 Claude Code baseline §2
+      // 「回退后清空输入框」的有意分歧，spec §Divergence 已记录）。
+      setInputValue(anchorTextForInput);
     } catch (err) {
       setNotice({ lines: [`回退失败：${describeError(err)}`] });
     }
@@ -964,13 +973,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           break;
         case "execute": {
           const targetId = active.conversationId;
-          // 确认态 Enter 时 rewindIndex 未被 reducer 移动（见 reduceRewindKey：
-          // 确认态 Enter 只产 execute 不产 move），此处索引安全。
+          // 确认态 Enter 时 reducer 只产 execute 不产 move，此处索引安全。
           const t = rewindTargets[rewindIndex];
           if (targetId !== undefined) {
             void executeRewind(
               targetId,
               action.keepTurns,
+              t?.fullText ?? "",
               t?.userMessageText ?? ""
             );
           }

@@ -11,9 +11,9 @@
  *     （传给 rewindFile 的落点）。当前 turn（索引 == turnCount）不列出——
  *     回退到"此刻所在位置"是 no-op（fallback 规则 3）。
  *   - 锚点行主 label = 锚点用户消息的真实文本（对标 Claude Code picker 按
- *     内容选锚点）。keepTurns=0 锚点 = 「首条用户消息之前」：仅当会话已有
- *     至少 2 个完成 turn（available ≥ 2）才列出（对 available ≤ 1 的新会话
- *     它与当前状态是同一位置 → no-op，不列，fallback 规则 4）。
+ *     内容选锚点）。keepTurns=0 锚点 = 「首条用户消息之前」，是真实回退
+ *     （rewindFile 截空 msgs=[]/turnCount=0），任何有 turn 的会话都列出；
+ *     空会话（无 user 消息）走 L0 空态（fallback 规则 4）。
  *   - 与 file.checkpoints 按 turnIndex 合取 interruptedAt：命中快照的锚点显示
  *     中断时间戳，否则 ""——纯 conversation 回退，无 code 轴 / 文件恢复。
  *
@@ -29,20 +29,24 @@ import {
   type SelectModalContent,
 } from "./modal.js";
 
-/** 一个回退落点（spec RewindTarget 字段语义）。 */
+/** 一个回退落点（spec RewindTarget 字段语义）。
+ *  userMessageText = 显示用文本（截 80，picker label 再截 40）；
+ *  fullText = 锚点用户消息的完整文本，用于回退后填回输入框（用户要修改
+ *  并重发时拿的是原文，不是截断版）。 */
 export interface RewindTarget {
   readonly keepTurns: number;
   readonly userMessageText: string;
+  readonly fullText: string;
   readonly anchorTurnIndex: number;
   readonly anchoredAt: string;
 }
 
 /**
- * 从会话文件投影合法回退锚点。空会话 / 无完成 turn（splitTurns ≤ 1）→ 空数组
- * （L0 空态由宿主提示，零 store IO）。「首条用户消息之前」锚点（keepTurns=0）
- * 仅当会话已有 ≥2 个完成 turn 才列出（available ≤ 1 时它与当前状态是同一
- * 位置，rewindFile 走 no-op 分支，不是一次真实回退）；随后按 0-based turn
- * 索引 1..total-1 投影（keepTurns = 索引），主 label = 锚点用户消息真实文本。
+ * 从会话文件投影合法回退锚点。空会话 / 无 user 消息（splitTurns = 0）→ 空
+ * 数组（L0 空态由宿主提示，零 store IO）。对有 turn 的会话，keepTurns=0
+ * 「首条用户消息之前」总是合法回退（rewindFile 真实截空，msgs=[]/turnCount=0；
+ * 不与当前状态重合——只有 available=0 才重合，已被 total===0 早返回覆盖）。
+ * 主 label = 锚点用户消息真实文本（对标 Claude Code picker §2）。
  */
 export function buildRewindTargets(
   file: SessionFileV1
@@ -51,19 +55,19 @@ export function buildRewindTargets(
   const total = slices.length;
   const targets: RewindTarget[] = [];
   if (total === 0) return targets;
-  if (total >= 2) {
-    targets.push({
-      keepTurns: 0,
-      userMessageText: firstUserText(file.messages[slices[0]!.start]),
-      anchorTurnIndex: 0,
-      anchoredAt: "",
-    });
-  }
+  targets.push({
+    keepTurns: 0,
+    userMessageText: firstUserText(file.messages[slices[0]!.start]),
+    fullText: firstUserFullText(file.messages[slices[0]!.start]),
+    anchorTurnIndex: 0,
+    anchoredAt: anchoredAtFor(file, 0),
+  });
   for (let i = 1; i < total; i++) {
     const slice = slices[i]!;
     targets.push({
       keepTurns: i,
       userMessageText: firstUserText(file.messages[slice.start]),
+      fullText: firstUserFullText(file.messages[slice.start]),
       anchorTurnIndex: i,
       anchoredAt: anchoredAtFor(file, i),
     });
@@ -77,6 +81,12 @@ function firstUserText(msg: AnthropicNativeMessage): string {
   return block !== undefined && block.type === "text"
     ? block.text.trim().slice(0, 80)
     : "";
+}
+
+/** 锚点用户消息首个 text block 的完整文本（不截断；回退后填回输入框用）。 */
+function firstUserFullText(msg: AnthropicNativeMessage): string {
+  const block = msg.content.find((b) => b.type === "text");
+  return block !== undefined && block.type === "text" ? block.text.trim() : "";
 }
 
 /** 与 file.checkpoints 按 turnIndex 合取 interruptedAt（无快照 → ""）。 */

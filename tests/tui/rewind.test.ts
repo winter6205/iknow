@@ -17,10 +17,12 @@ import {
   createTuiBridge,
 } from "../../src/tui/hub-bridge.js";
 import {
+  attachSession,
   sessionRewound,
   turnFinished,
   turnStarted,
 } from "../../src/tui/session-state.js";
+import { rewindFile } from "../../src/session-api/store/checkpoint.js";
 import {
   buildRewindTargets,
   reduceRewindKey,
@@ -216,6 +218,24 @@ describe("sessionRewound（/rewind 落盘后刷新）", () => {
     });
     expect(result).toBe(running);
   });
+
+  test("keepTurns=0 回退后：messages=[] turnCount=0 runState=idle", () => {
+    // 1-turn 会话回退到起点：盘上截空 → UI 整体反射为空会话（非 no-op）。
+    const session = attachSession({
+      ...sampleFile(),
+      messages: [userMsg("q1"), assistantMsg([text("a1")])],
+      turnCount: 1,
+    });
+    const rewound = sessionRewound(session, {
+      messages: [],
+      turnCount: 0,
+      updatedAt: "2026-08-06T00:00:00.000Z",
+      jsonMode: false,
+    });
+    expect(rewound.runState).toBe("idle");
+    expect(rewound.messages).toHaveLength(0);
+    expect(rewound.turnCount).toBe(0);
+  });
 });
 
 // -- buildRewindTargets / reduceRewindKey（picker 纯函数） ----------------------
@@ -232,23 +252,38 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
     ).toEqual([]);
   });
 
-  test("turnCount ≤ 1 → 空数组（L0 空态，无可回退点）", () => {
-    // 1-turn 会话：keepTurns=0 与当前状态重合（rewindFile no-op 分支，
-    // checkpoint.ts:174），不再作为误导条目列出；走宿主 L0 空态 notice。
+  test("turnCount=1 列出 keepTurns=0 锚点（真实回退，不是 no-op）", () => {
+    // 1-turn 会话：keepTurns=0「首条用户消息之前」是真实回退（rewindFile
+    // 截空 msgs=[]/turnCount=0），必须列出，不能因为与 available 相近被吞。
+    const targets = buildRewindTargets({
+      ...sampleFile(),
+      messages: [userMsg("q1"), assistantMsg([text("a1")])],
+      turnCount: 1,
+    });
+    expect(targets).toHaveLength(1);
+    expect(targets[0]).toMatchObject({
+      keepTurns: 0,
+      userMessageText: "q1",
+      fullText: "q1",
+    });
+  });
+
+  test("只单条 user 消息无 reply → 也列 keepTurns=0", () => {
+    // 仅一条用户消息（无 assistant 回复）仍有 1 个 turn 起点，keepTurns=0
+    // 锚点照常列出（完整文本填入输入框）。
+    const targets = buildRewindTargets({
+      ...sampleFile(),
+      messages: [userMsg("q1")],
+      turnCount: 1,
+    });
+    expect(targets).toHaveLength(1);
+    expect(targets[0]!.fullText).toBe("q1");
+  });
+
+  test("空 messages turnCount=0 → 真 L0 空态", () => {
+    // 无 user 消息 → splitTurns 空 → 空数组（宿主走 L0 空态，零 store IO）。
     expect(
-      buildRewindTargets({
-        ...sampleFile(),
-        messages: [userMsg("q1"), assistantMsg([text("a1")])],
-        turnCount: 1,
-      })
-    ).toEqual([]);
-    // 单条用户消息无 assistant 回复也属同一空态。
-    expect(
-      buildRewindTargets({
-        ...sampleFile(),
-        messages: [userMsg("q1")],
-        turnCount: 1,
-      })
+      buildRewindTargets({ ...sampleFile(), messages: [], turnCount: 0 })
     ).toEqual([]);
   });
 
@@ -265,12 +300,14 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
       keepTurns: 0,
       anchorTurnIndex: 0,
       userMessageText: "q1",
+      fullText: "q1",
       anchoredAt: "",
     });
     expect(targets[1]).toMatchObject({
       keepTurns: 1,
       anchorTurnIndex: 1,
       userMessageText: "q2",
+      fullText: "q2",
     });
   });
 
@@ -282,19 +319,25 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
       keepTurns: 0,
       anchorTurnIndex: 0,
       userMessageText: "q1",
+      fullText: "q1",
       anchoredAt: "",
     });
     expect(targets[1]).toMatchObject({
       keepTurns: 1,
       anchorTurnIndex: 1,
       userMessageText: "q2",
+      fullText: "q2",
     });
-    expect(targets[2]).toMatchObject({ keepTurns: 2, userMessageText: "q3" });
+    expect(targets[2]).toMatchObject({
+      keepTurns: 2,
+      userMessageText: "q3",
+      fullText: "q3",
+    });
     // 回退到当前 turn(=3) 不在列表（fallback 规则 3：no-op 自然不可达）。
     expect(targets.some((t) => t.keepTurns === 3)).toBe(false);
   });
 
-  test("锚点文本 strip + 截 80（同 extractSummary 语义）", () => {
+  test("锚点文本 strip + 截 80（同 extractSummary 语义）；fullText 不截断", () => {
     const long = "x".repeat(100);
     const file = {
       ...sampleFile(),
@@ -302,7 +345,10 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
       turnCount: 2,
     };
     const targets = buildRewindTargets(file);
+    // 展示用文本截 80。
     expect(targets[1]!.userMessageText).toHaveLength(80);
+    // 填回输入框的完整文本不截断（用户要修改重发时拿的是原文）。
+    expect(targets[1]!.fullText).toHaveLength(100);
   });
 
   test("与 checkpoints 按 turnIndex 合取 anchoredAt；无快照 → 空串", () => {
@@ -312,6 +358,38 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
     // 起点条目无快照。
     expect(targets[0]!.anchoredAt).toBe("");
   });
+
+  test("悬空 tool_result-only user 消息不开新 turn（splitTurns 语义）", () => {
+    // [q1, t-orphan tool_result]：tool_result-only user 消息是 continuation 不是
+    // query → splitTurns 只有 1 个 turn → 只列 keepTurns=0 锚点（label=q1）。
+    const targets = buildRewindTargets({
+      ...sampleFile(),
+      messages: [userMsg("q1"), userToolResult("t-orphan")],
+      turnCount: 1,
+    });
+    expect(targets).toHaveLength(1);
+    expect(targets[0]).toMatchObject({
+      keepTurns: 0,
+      userMessageText: "q1",
+    });
+  });
+
+  test("keepTurns=0 锚点 anchoredAt 合取 turnIndex=0 快照", () => {
+    // 起点锚点（turnIndex=0）命中 checkpoints 快照时 anchoredAt 非空——
+    // 与 i≥1 的锚点同规则合取，不再恒为 ""。
+    const targets = buildRewindTargets({
+      ...sampleFile(),
+      checkpoints: [
+        {
+          turnIndex: 0,
+          messagesCount: 1,
+          interruptedAt: ISO,
+          interruptReason: "cancelled",
+        },
+      ],
+    });
+    expect(targets[0]!.anchoredAt).toBe(ISO);
+  });
 });
 
 describe("reduceRewindKey（选择器键路由）", () => {
@@ -319,16 +397,24 @@ describe("reduceRewindKey（选择器键路由）", () => {
     {
       keepTurns: 0,
       userMessageText: "q1",
+      fullText: "q1",
       anchorTurnIndex: 0,
       anchoredAt: "",
     },
     {
       keepTurns: 1,
       userMessageText: "q2",
+      fullText: "q2",
       anchorTurnIndex: 1,
       anchoredAt: ISO,
     },
-    { keepTurns: 2, userMessageText: "q3", anchorTurnIndex: 2, anchoredAt: "" },
+    {
+      keepTurns: 2,
+      userMessageText: "q3",
+      fullText: "q3",
+      anchorTurnIndex: 2,
+      anchoredAt: "",
+    },
   ];
   const noKey = {
     upArrow: false,
@@ -464,16 +550,29 @@ describe("rewindPickerContent（picker 渲染形状）", () => {
     expect(content.description).toContain("之前");
   });
 
-  test("turnCount≤1 → buildRewindTargets 空数组：宿主走 L0 空态不进入本函数", () => {
-    // turnCount≤1 picker 永不打开（spec 规则 1），不需要测渲染；
-    // 这里只锁 buildRewindTargets 在该场景返回 []。
-    expect(
-      buildRewindTargets({
-        ...sampleFile(),
-        messages: [userMsg("q1")],
-        turnCount: 1,
-      })
-    ).toEqual([]);
+  test("1-turn 会话 keepTurns=0 锚点照常渲染（label = 首条消息 q1）", () => {
+    // turnCount=1 也列出 keepTurns=0（真实截空回退），picker 正常渲染，
+    // 不再走「空数组 → L0 空态」分支。
+    const targets = buildRewindTargets({
+      ...sampleFile(),
+      messages: [userMsg("q1")],
+      turnCount: 1,
+    });
+    const content = rewindPickerContent(targets, 0, false);
+    expect(content.options.map((o) => o.label)).toEqual(["q1"]);
+  });
+
+  test("label 截 40（userMessageText 截 80 后再截 40）", () => {
+    // 2-turn 文件首条消息 200 字：userMessageText 截到 80，picker label 再截 40。
+    const long = "x".repeat(200);
+    const targets = buildRewindTargets({
+      ...sampleFile(),
+      messages: [userMsg(long), assistantMsg([text("a1")]), userMsg("q2")],
+      turnCount: 2,
+    });
+    const content = rewindPickerContent(targets, 0, false);
+    expect(content.options[0]!.label).toHaveLength(40);
+    expect(targets[0]!.userMessageText).toHaveLength(80);
   });
 });
 
@@ -527,6 +626,30 @@ describe("bridge.rewindSession（load → rewindFile → save → 返回更新�
     });
   }
 
+  test("rewindFile（available=1 边界）keepTurns=0 真实截空（非 no-op）", () => {
+    // available=1 时 keepTurns=0 与 available 不等 → 走截断分支（checkpoint.ts:180），
+    // messages 截空、turnCount=0、checkpoints 全清 —— 不是 no-op。
+    const out = rewindFile(
+      {
+        ...sampleFile(),
+        messages: [userMsg("q1"), assistantMsg([text("a1")])],
+        turnCount: 1,
+        checkpoints: [
+          {
+            turnIndex: 1,
+            messagesCount: 2,
+            interruptedAt: ISO,
+            interruptReason: "cancelled",
+          },
+        ],
+      },
+      0
+    );
+    expect(out.messages).toHaveLength(0);
+    expect(out.turnCount).toBe(0);
+    expect(out.checkpoints).toEqual([]);
+  });
+
   test("turn-boundary preservation：截断到 turn 起点", async () => {
     await seedFile(sampleFile());
     const bridge = makeBridge();
@@ -537,6 +660,24 @@ describe("bridge.rewindSession（load → rewindFile → save → 返回更新�
     // 落盘可读回（同一文件）。
     const reloaded = await bridge.loadSessionFile("conv-rewind");
     expect(reloaded.messages.length).toBe(4);
+  });
+
+  test("bridge.rewindSession（1-turn 文件）keepTurns=0 → 真实截空落盘", async () => {
+    // 集成路径：1-turn 会话回退到起点 → 盘上 messages=[]/turnCount=0/checkpoints=[]。
+    await seedFile({
+      ...sampleFile(),
+      messages: [userMsg("q1"), assistantMsg([text("a1")])],
+      turnCount: 1,
+    });
+    const bridge = makeBridge();
+    const out = await bridge.rewindSession("conv-rewind", 0);
+    expect(out.messages).toHaveLength(0);
+    expect(out.turnCount).toBe(0);
+    expect(out.checkpoints).toEqual([]);
+    // 落盘可读回（同一切口读到截空文件）。
+    const reloaded = await bridge.loadSessionFile("conv-rewind");
+    expect(reloaded.messages).toHaveLength(0);
+    expect(reloaded.turnCount).toBe(0);
   });
 
   test("tool-pair intact：回退后 tool_use 与 tool_result 保持配对", async () => {
