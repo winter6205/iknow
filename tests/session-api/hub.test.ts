@@ -57,7 +57,7 @@ function sampleFile(opts: {
 }): SessionFileV1 {
   const { id, overrides = {} } = opts;
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     conversation_id: id,
     summary: "",
     cwd: "/tmp/test",
@@ -66,6 +66,7 @@ function sampleFile(opts: {
     jsonMode: false,
     turnCount: 0,
     updatedAt: new Date().toISOString(),
+    checkpoints: [],
     ...overrides,
   };
 }
@@ -162,10 +163,12 @@ describe("createSession", () => {
         await import("node:fs/promises")
       ).readFile(join(sessionDir, `${session.conversation_id}.json`), "utf8")
     );
-    assert.equal(raw.schemaVersion, 2);
+    // T1 checkpoint: createSession writes the v3 schema + empty checkpoints.
+    assert.equal(raw.schemaVersion, 3);
     assert.equal(raw.summary, "");
     assert.equal(typeof raw.cwd, "string");
     assert.equal(typeof raw.sanitized_at, "string");
+    assert.deepEqual(raw.checkpoints, []);
   });
 
   it("creates a session file and returns summary", async () => {
@@ -286,10 +289,21 @@ describe("boundary: exception — cancelled signal", () => {
     });
     assert.equal(res.turn.answer.stopReason, "cancelled");
     assert.equal(res.turn.answer.finalText, "");
-    // File must NOT be updated (cancelled → no save)
+    // T1: cancelled WITH delta>0 now persists — the user query landed before
+    // the abort, so the interrupted turn is recoverable via a checkpoint.
     const loaded = await store.load(session.conversation_id);
-    assert.equal(loaded.messages.length, 0);
+    assert.equal(loaded.messages.length, 1);
     assert.equal(loaded.turnCount, 0);
+    // A checkpoint record marks the interrupted turn.
+    assert.equal(loaded.checkpoints?.length, 1);
+    const cp = loaded.checkpoints?.[0];
+    assert.equal(cp?.turnIndex, 0);
+    assert.equal(cp?.messagesCount, 1);
+    assert.equal(cp?.interruptReason, "cancelled");
+    assert.equal(typeof cp?.interruptedAt, "string");
+    // The pure-function path (shouldPersistCheckpoint with delta=0) is
+    // covered by checkpoint.test.ts — here we exercise the realistic
+    // cancelled-with-progress hub path.
   });
 });
 

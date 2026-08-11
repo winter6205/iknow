@@ -27,6 +27,7 @@ describe("parseTuiInput: 词表命中", () => {
     ["/info", "info"],
     ["/thinking", "thinking"],
     ["/compact", "compact"],
+    ["/rewind", "rewind"],
   ] as const) {
     test(`解析 ${input} → command ${command}`, () => {
       const parsed = parseTuiInput(input);
@@ -81,7 +82,7 @@ describe("parseTuiInput: 普通消息与边界", () => {
 });
 
 describe("helpLines", () => {
-  test("覆盖全部 8 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
+  test("覆盖全部 9 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
     const joined = helpLines().join("\n");
     for (const cmd of [
       "/sessions",
@@ -91,6 +92,7 @@ describe("helpLines", () => {
       "/quit",
       "/exit",
       "/compact",
+      "/rewind",
     ]) {
       expect(joined).toContain(cmd);
     }
@@ -110,7 +112,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  test('"/" → 全部 8 条（按词表插入顺序）', () => {
+  test('"/" → 全部 9 条（按词表插入顺序，删 /profile 后仍含 /rewind）', () => {
     expect(slashSuggestions("/")).toEqual([
       "sessions",
       "new",
@@ -120,6 +122,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
       "info",
       "thinking",
       "compact",
+      "rewind",
     ]);
   });
 

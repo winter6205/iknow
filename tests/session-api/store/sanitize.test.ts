@@ -45,7 +45,9 @@ const v1File = (opts?: {
   updatedAt: opts?.updatedAt ?? "2026-01-01T00:00:00.000Z",
 });
 
-/** Complete raw v2 file shape. */
+/** Complete raw v2 file shape (loads as v3 after sanitize — backfills
+ *  schemaVersion 3 + checkpoints: []). The fixture stays shaped as written so
+ *  the "backfill" tests can see the raw input vs sanitized output diff. */
 const v2File = (): Record<string, unknown> => ({
   schemaVersion: 2,
   conversation_id: "conv-2",
@@ -167,7 +169,7 @@ describe("sanitizeSessionFile — reject-first ordering", () => {
       () =>
         sanitizeSessionFile({
           ...v2File(),
-          schemaVersion: 3,
+          schemaVersion: 4,
           future_field: 1,
           messages: [{ role: "martian", content: [] }],
         }),
@@ -291,12 +293,66 @@ describe("sanitizeSessionFile — thinking / redacted_thinking blocks", () => {
   });
 });
 
-// -- sanitizeSessionFile — complete v2 passes through -----------------------
+// -- sanitizeSessionFile — complete v3 (CURRENT) passes through -------------
 
-describe("sanitizeSessionFile — schemaVersion 2 complete file", () => {
+describe("sanitizeSessionFile — schemaVersion 3 complete file", () => {
   it("passes through with every field equal to the input", () => {
-    const input = v2File();
-    const out = sanitizeSessionFile(input);
+    // A CURRENT (v3) file already carries the v3 add-on (checkpoints: []),
+    // so sanitize is a no-op pass-through. The legacy backfill is exercised
+    // in the next describe block.
+    const input: Record<string, unknown> = {
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      conversation_id: "conv-v3-pass",
+      messages: [userMsg("hello")],
+      jsonMode: true,
+      turnCount: 1,
+      updatedAt: "2026-08-11T00:00:00.000Z",
+      summary: "hello",
+      cwd: "/work",
+      sanitized_at: "2026-08-11T00:00:00.000Z",
+      checkpoints: [],
+    };
+    const out = sanitizeSessionFile(input) as unknown as Record<
+      string,
+      unknown
+    >;
     assert.deepEqual(out, input);
+  });
+
+  it("v2 file gains schemaVersion 3 + checkpoints: [] (v3 backfill)", () => {
+    const input = v2File();
+    const out = sanitizeSessionFile(input) as unknown as Record<
+      string,
+      unknown
+    >;
+    assert.equal(out["schemaVersion"], CURRENT_SCHEMA_VERSION);
+    assert.deepEqual(out["checkpoints"], []);
+  });
+
+  it("v1 file also gains checkpoints: [] (derived add-on, not a repair)", () => {
+    const out = sanitizeSessionFile(v1File()) as unknown as Record<
+      string,
+      unknown
+    >;
+    assert.equal(out["schemaVersion"], CURRENT_SCHEMA_VERSION);
+    assert.deepEqual(out["checkpoints"], []);
+  });
+
+  it("preserves a valid v3 checkpoints array verbatim", () => {
+    const input = {
+      ...v2File(),
+      schemaVersion: 3,
+      checkpoints: [
+        {
+          turnIndex: 1,
+          messagesCount: 2,
+          interruptedAt: "2026-08-11T00:00:00.000Z",
+          interruptReason: "cancelled",
+        },
+      ],
+    };
+    const out = sanitizeSessionFile(input);
+    assert.equal(out.checkpoints?.length, 1);
+    assert.equal(out.checkpoints?.[0]?.turnIndex, 1);
   });
 });
