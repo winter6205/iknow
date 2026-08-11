@@ -26,7 +26,8 @@ export type TuiSlashCommand =
   | "info"
   | "thinking"
   | "profile"
-  | "compact";
+  | "compact"
+  | "rewind";
 
 export type SlashParseResult =
   | { kind: "command"; command: TuiSlashCommand }
@@ -43,6 +44,7 @@ const VOCABULARY: ReadonlySet<string> = new Set<TuiSlashCommand>([
   "thinking",
   "profile",
   "compact",
+  "rewind",
 ]);
 
 /** 解析输入框内容；空/纯空白 → message（调用方按空输入忽略）。 */
@@ -67,6 +69,7 @@ export function helpLines(): ReadonlyArray<string> {
     "/thinking  切换思考过程折叠/展开",
     "/profile   标记首启引导完成（先在外侧填好 ~/.iknow/user.md）",
     "/compact   压缩上下文（保留尾部，裁剪早期消息）",
+    "/rewind    回退到更早的回合（选择锚点后确认）",
     "/quit      退出（别名 /exit）",
     "Ctrl+C     打断前台运行中的 turn",
     "Ctrl+O     展示思考内容（只展开；折叠回 /thinking）",
@@ -83,6 +86,7 @@ const HINT_DESCRIPTIONS: Record<TuiSlashCommand, string> = {
   thinking: "切换思考过程折叠/展开",
   profile: "标记首启引导完成",
   compact: "压缩上下文",
+  rewind: "回退到更早的回合",
   quit: "退出（别名 /exit）",
   exit: "同 /quit",
 };

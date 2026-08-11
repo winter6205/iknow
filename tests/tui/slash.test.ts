@@ -5,7 +5,7 @@
  * 改写为 bun:test（D2 裁决：tests/tui/ 由 bun:test 驱动）。
  *
  * #146 slash 词表解析（SC 12：TUI 自建词表，不复用 chat processChatLine）：
- * 9 命令 + 未知 /xxx + 普通消息 + 空输入 + /reset 天然不可达。
+ * 10 命令 + 未知 /xxx + 普通消息 + 空输入 + /reset 天然不可达。
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -28,6 +28,7 @@ describe("parseTuiInput: 词表命中", () => {
     ["/thinking", "thinking"],
     ["/profile", "profile"],
     ["/compact", "compact"],
+    ["/rewind", "rewind"],
   ] as const) {
     test(`解析 ${input} → command ${command}`, () => {
       const parsed = parseTuiInput(input);
@@ -82,7 +83,7 @@ describe("parseTuiInput: 普通消息与边界", () => {
 });
 
 describe("helpLines", () => {
-  test("覆盖全部 9 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
+  test("覆盖全部 10 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
     const joined = helpLines().join("\n");
     for (const cmd of [
       "/sessions",
@@ -93,6 +94,7 @@ describe("helpLines", () => {
       "/exit",
       "/profile",
       "/compact",
+      "/rewind",
     ]) {
       expect(joined).toContain(cmd);
     }
@@ -112,7 +114,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  test('"/" → 全部 9 条（按词表插入顺序）', () => {
+  test('"/" → 全部 10 条（按词表插入顺序，T6 加 rewind）', () => {
     expect(slashSuggestions("/")).toEqual([
       "sessions",
       "new",
@@ -123,6 +125,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序", () => {
       "thinking",
       "profile",
       "compact",
+      "rewind",
     ]);
   });
 
@@ -152,7 +155,7 @@ describe('slashComplete: 唯一匹配 → "/cmd "；0/多匹配 → null', () =>
     expect(slashComplete("/q")).toBe("/quit ");
   });
 
-  test('"/" → null（9 匹配）', () => {
+  test('"/" → null（10 匹配）', () => {
     expect(slashComplete("/")).toBeNull();
   });
 

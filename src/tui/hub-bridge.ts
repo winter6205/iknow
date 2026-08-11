@@ -20,6 +20,7 @@ import { SessionStore } from "../session-api/store/session-store.js";
 import { SessionHub } from "../session-api/hub.js";
 import type { PostMessageResponse } from "../session-api/contract.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
+import { rewindFile } from "../session-api/store/index.js";
 import type { LoopEngineDeps } from "../harness/index.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { TokenUsage } from "../harness/model-adapter/types.js";
@@ -31,6 +32,20 @@ import { resolveServeDataDir } from "../session-api/serve.js";
  * `IKNOW_MODEL_CONTEXT_WINDOW`）。仅作显示，不启用压缩（本计划裁决 5）。
  */
 export const DEFAULT_CONTEXT_WINDOW = 200_000;
+
+/**
+ * T6 (checkpoint-rewind): 双 Esc 回退的 debounce 窗口（间隔 ≤ 此值视为双击，
+ * 打开 L3 锚点选择器）。对齐 rewind baseline §1 实测 `foE = 1000ms`
+ * （specs/checkpoint-rewind.md 双 Esc 行为）。idle 首次 Esc 只记时间戳不动作。
+ * 纯函数 `isDoubleEsc(lastMs, nowMs)` 在该文件导出以便单测 1000ms 边界
+ * （999ms 命中 / 1001ms 不命中）。调用点不得内联裸字面量 1000。
+ */
+export const REWIND_DOUBLE_ESC_WINDOW_MS = 1000;
+
+/** 双 Esc debounce 判定：与上次 Esc 间隔 ≤ 窗口 → 命中（双击）。 */
+export function isDoubleEsc(lastMs: number, nowMs: number): boolean {
+  return nowMs - lastMs <= REWIND_DOUBLE_ESC_WINDOW_MS;
+}
 
 /**
  * in-flight 会话登记簿：postMessage 进出登记；deps.ts 的 postToolUse 钩子
@@ -86,6 +101,12 @@ export interface TuiBridge {
   readonly loadSessionFile: (conversationId: string) => Promise<SessionFileV1>;
   /** 手动压缩会话（/compact）。返回是否实际发生裁剪（false = 无需压缩）。 */
   readonly compactSession: (conversationId: string) => Promise<boolean>;
+  /** 回退到更早 turn（/rewind / 双 Esc）：load → rewindFile → store.save →
+   *  返回更新文件。错误复用 SessionStore 既有 typed kinds，不新造。 */
+  readonly rewindSession: (
+    conversationId: string,
+    keepTurns: number
+  ) => Promise<SessionFileV1>;
   readonly inflight: InflightRegistry;
   /** T3: 上下文窗口容量（tokens）。仅显示用，不触发压缩。 */
   readonly contextWindow: number;
@@ -148,6 +169,18 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     compactSession: async (conversationId) => {
       const res = await hub.compactSession(conversationId);
       return res.compacted;
+    },
+    // 与 compactSession 同纪律：load → rewindFile → save 直链。store.load /
+    // store.save 与 hub 的 serialize 队列共用同一 per-conversation 队列入口
+    // 无冲突面（rewind 走 store 裸 IO；hub 的 postMessage/compact 写盘走
+    // serialize 队列——load 读到的是队内已落盘的权威文件，save 由 rewindFile
+    // 纯截断产出）。错误复用既有 typed kinds（not_found / parse_failed /
+    // schema_invalid / write_failed / io_error），不新造。
+    rewindSession: async (conversationId, keepTurns) => {
+      const file = await store.load(conversationId);
+      const rewound = rewindFile(file, keepTurns);
+      await store.save({ id: conversationId, file: rewound });
+      return rewound;
     },
     inflight: opts.inflight,
     contextWindow: opts.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
