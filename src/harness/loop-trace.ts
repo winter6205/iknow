@@ -7,8 +7,8 @@
  * Gate B 守门说明:本文件是 017 type-only 形状层,所有 timeout/trace/
  * signal/cancel 相关标识符都是 SSOT 字段名占位,不在此实现任何 Gate B
  * 能力行为;行为实现由 017 后置 spec 在其它模块承担并显式 deferred。
- * (本文件为 017 deferred 模块,Gate B capability gate 通过 exemptedFiles
- * 显式放行;见 public-exports.test.ts。)
+ * (本文件为 017 deferred 模块,Gate B capability gate 构造性满足,
+ * 无 exemption 必要;见 public-exports.test.ts。)
  */
 
 /** 025 #98:取消来源四值枚举(原 timeoutHit/signalAborted 双布尔)。值域与 023 RaceModelOutcome.source 对齐(adapter→none)。 */
