@@ -45,9 +45,10 @@ async function untilFrame(
 function makeStatus(
   name: string,
   state: McpServerStatus["state"],
-  source: McpServerStatus["source"] = "user"
+  source: McpServerStatus["source"] = "user",
+  error?: string
 ): McpServerStatus {
-  return { name, state, source };
+  return { name, state, source, ...(error !== undefined ? { error } : {}) };
 }
 
 function makeTool(
@@ -284,3 +285,70 @@ test("详情：工具超视口末尾 `… N more tools` 提示行", async () => 
   expect(frame).not.toContain("mcp__fileserver__tool0");
   await setup.renderer.destroy();
 });
+
+
+test("列表行：#378 failed + error 渲染 error 首行（connect timeout 可见）", async () => {
+  const setup = await renderMcp({
+    statuses: [makeStatus("db", "failed", "user", "connect timeout")],
+    tools: [],
+  });
+  await setup.renderOnce();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("db");
+  expect(frame).toContain("failed");
+  expect(frame).toContain("connect timeout");
+  await setup.renderer.destroy();
+});
+
+test("列表行：#378 failed 无 error → 与现状字节一致（仅 state，无 error 区）", async () => {
+  const setup = await renderMcp({
+    statuses: [makeStatus("db", "failed")],
+    tools: [],
+  });
+  await setup.renderOnce();
+  const frame = setup.captureCharFrame();
+  // 既有断言等价性：行内无 error 尾随文本（不渲染 error 区）。
+  expect(frame).not.toMatch(/failed[^\n]*error/);
+  await setup.renderer.destroy();
+});
+
+test("列表行：#378 connected / pending / disabled → 不显 error 区", async () => {
+  const setup = await renderMcp({
+    statuses: [
+      makeStatus("fileserver", "connected", "user", "stale error"),
+      makeStatus("db", "pending"),
+      makeStatus("legacy", "disabled", "project"),
+    ],
+    tools: [],
+  });
+  await setup.renderOnce();
+  const frame = setup.captureCharFrame();
+  expect(frame).not.toContain("stale error");
+  await setup.renderer.destroy();
+});
+
+test("详情：#378 failed + error 多行按 \n 拆行渲染", async () => {
+  const setup = await renderMcp({
+    statuses: [makeStatus("db", "failed", "user", "connect timeout\nconnection closed by server")],
+    tools: [],
+  });
+  await setup.renderOnce();
+  setup.mockInput.pressEnter();
+  const frame = await untilFrame(setup, (f) => f.includes("db · failed"));
+  expect(frame).toContain("connect timeout");
+  expect(frame).toContain("connection closed by server");
+  await setup.renderer.destroy();
+});
+
+test("详情：#378 connected → 无 error 区", async () => {
+  const setup = await renderMcp({
+    statuses: [makeStatus("fileserver", "connected", "user", "stale error")],
+    tools: [],
+  });
+  await setup.renderOnce();
+  setup.mockInput.pressEnter();
+  const frame = await untilFrame(setup, (f) => f.includes("fileserver · connected"));
+  expect(frame).not.toContain("stale error");
+  await setup.renderer.destroy();
+});
+

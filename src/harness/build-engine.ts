@@ -74,6 +74,11 @@ export type BuildEngineOpts = {
   readonly createMcpClient?: (
     server: import("./mcp/config.js").McpServerConfig
   ) => import("./mcp/manager.js").McpClientHandle;
+  /**
+   * #378 测试缝:createMcpManager 工厂覆盖。与 deps.ts 对偶——测试经此
+   * 捕获 createMcpManager 入参(如 timeoutMsOverride 透传)。
+   */
+  readonly createMcpManager?: typeof import("./mcp/manager.js").createMcpManager;
 };
 
 export type BuiltEngine = {
@@ -223,9 +228,11 @@ export async function buildHarnessEngine(
   let mcpManager: McpManager | undefined;
   if (surface !== "ask") {
     const config = await loadMcpConfig({ home: userHome, cwd });
-    mcpManager = createMcpManager({
+    mcpManager = (opts.createMcpManager ?? createMcpManager)({
       config: config.servers,
       registerExternal: reg.registerExternal,
+      // #378 根因 B: env 注入连接超时(默认 60_000, 缓解 npx -y cold start)。
+      timeoutMsOverride: env.mcp.connectTimeoutMs,
       ...(opts.createMcpClient ? { createClient: opts.createMcpClient } : {}),
     });
     // start() 返回的 promise 仅作错误兜底(start 内部 void allSettled,

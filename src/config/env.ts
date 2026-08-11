@@ -101,6 +101,17 @@ export interface IknowCompressEnv {
   thresholdTokens: number | undefined;
 }
 
+/**
+ * #378 根因 B: MCP 连接超时配置臂(env SSOT, 透传至 createMcpManager.timeoutMsOverride)。
+ *
+ * `IKNOW_MCP_CONNECT_TIMEOUT_MS`:MCP server 连接超时毫秒(正整数)。
+ * 默认 60_000(根因 B: 30s 被 npx -y cold start 击穿, 提到 60s 缓解)。
+ * 非法值(非数字 / 负数 / 0)→ 回退 60_000(统一双轨, 零/负超时无意义)。
+ */
+export interface McpEnv {
+  connectTimeoutMs: number;
+}
+
 export interface IknowEnv {
   llm: LlmEnv;
   /** #152 T5:thinking 可见面控制臂。 */
@@ -109,6 +120,8 @@ export interface IknowEnv {
   web: WebEnv;
   /** #119 T1: 自动压缩配置臂(透传至 harness/compress/)。 */
   compress: IknowCompressEnv;
+  /** #378 根因 B: MCP 连接超时配置臂(透传至 createMcpManager.timeoutMsOverride)。 */
+  mcp: McpEnv;
 }
 
 /** Placeholder values treated as "no real secret set" (case-insensitive). */
@@ -168,6 +181,16 @@ function envInt(opts: EnvIntOpts): number {
   if (!raw) return opts.fallback;
   const n = Number(raw);
   return Number.isFinite(n) ? Math.trunc(n) : opts.fallback;
+}
+
+/**
+ * #378 根因 B: 正整数 env values(MCP 连接超时等)。
+ * envInt 只查 finite, 但 0 / 负超时无意义, 此处收紧为 > 0 才透传,
+ * 否则回退 fallback(未设 / 非数字 / 负数 / 0 → fallback, 不抛错)。
+ */
+function envPositiveInt(opts: EnvIntOpts): number {
+  const n = envInt(opts);
+  return n > 0 ? n : opts.fallback;
 }
 
 interface EnvOptionalIntOpts {
@@ -381,6 +404,14 @@ export function loadIknowEnv(
           file,
           key: "IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS",
         }) ?? mergedSettings.llm?.compress?.thresholdTokens,
+    },
+    // #378 根因 B: MCP 连接超时(默认 60_000, 缓解 npx -y cold start 击穿 30s)。
+    mcp: {
+      connectTimeoutMs: envPositiveInt({
+        file,
+        key: "IKNOW_MCP_CONNECT_TIMEOUT_MS",
+        fallback: 60_000,
+      }),
     },
   };
 }

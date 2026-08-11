@@ -7,7 +7,7 @@
  *
  * 状态机（per server）：
  *   pending → connected   connect + 首次 listTools 完成，registerExternal(defs)
- *   pending → failed      connect/listTools 抛错或超时（30s）
+ *   pending → failed      connect/listTools 抛错或超时（默认 60s，可注入）
  *   pending → disabled    config.status === "disabled"，不建 client
  *   connected → failed    onclose 回调命中（不重连）
  *   connected → connected list_changed 触发增量重注册
@@ -96,8 +96,8 @@ export interface McpManagerOptions {
    */
   readonly unregisterExternal?: (names: readonly string[]) => void;
   /**
-   * 连接超时毫秒（spec 假设 9：30s）。测试可注入短超时。
-   * 默认 30_000。
+   * 连接超时毫秒（#378 根因 B：默认 60_000，缓解 npx cold start；生产装配点
+   * 经 env 注入）。测试可注入短超时。
    */
   readonly timeoutMsOverride?: number;
   /** 工具调用超时（adapter 把 tier=long 映射到 30 min，这里给单测覆盖口）。 */
@@ -130,6 +130,13 @@ interface Slot {
   readonly config: McpServerConfig;
   state: McpServerState;
   error?: string;
+  /**
+   * 超时标记（#378 根因 A）：仅 connect 超时路径（L-setTimeout 回调）设置。
+   * 用于把"超时后迟到成功"与"真失败"区分开：bootSlot 在
+   * 同一任务内允许把 failed 翻回 connected（flip-back），真失败不可翻。
+   * flip-back 成功或正常 connected 后必须清除（见 bootSlot）。
+   */
+  timedOut?: boolean;
   handle?: McpClientHandle;
   /** shutdown 时 abort 所有在途 callTool。 */
   callAbort?: AbortController;
@@ -143,7 +150,10 @@ interface Slot {
 // 工厂
 // ---------------------------------------------------------------------------
 
-const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
+// 与 src/config/env.ts 的 IKNOW_MCP_CONNECT_TIMEOUT_MS 默认(60_000)对齐——
+// 生产装配点(deps.ts / build-engine.ts)均经 env 注入 timeoutMsOverride,
+// 此处兜底给独立调用 createMcpManager 且未注入的测试/脚本用, 避免双默认漂移。
+const DEFAULT_CONNECT_TIMEOUT_MS = 60_000;
 const DEFAULT_CALL_TIMEOUT_MS = 1_800_000; // long 档（参见 aci/types.ts TIMEOUT_TIER_MS）
 
 export function createMcpManager(opts: McpManagerOptions): McpManager {
@@ -233,6 +243,9 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
     slot.callAbort = new AbortController();
 
     const timeoutHandle = setTimeout(() => {
+      // 超时先设标记再标 failed：bootSlot 靠它判断"迟到成功可否翻回"（#378）。
+      // 真抛错路径不设此标记 —— 失败即定型，不翻。
+      slot.timedOut = true;
       markFailed(slot, "connect timeout");
     }, timeoutMs);
 
@@ -263,15 +276,33 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
         markFailed(slot, err instanceof Error ? err.message : String(err));
         return;
       }
-      // connect 期间可能已被超时器标 failed
+      // connect 期间可能已被超时器标 failed。仅"超时后迟到成功"允许继续走
+      // listTools（flip-back 入口，#378 根因 A）；真失败（无 timedOut 标记）
+      // 一律 return —— failed 定型。
       if (slot.state !== "pending") {
-        clearTimeout(timeoutHandle);
-        return;
+        if (slot.state !== "failed" || !slot.timedOut) {
+          clearTimeout(timeoutHandle);
+          return;
+        }
+        // timedOut 标记不清除：flip-back 成功由第二守卫负责清除，
+        // 若 listTools 真抛错则 catch 保持 failed（标记残留无影响）。
       }
       try {
         const tools = await created.listTools();
         clearTimeout(timeoutHandle);
-        if (slot.state !== "pending") return;
+        if (slot.state !== "pending") {
+          // 超时后迟到成功：同一 bootSlot 任务内翻回 connected。
+          // registerTools 由 `registered` 集合去重，重复调用幂等。
+          if (slot.state === "failed" && slot.timedOut) {
+            registerTools(slot, tools);
+            slot.state = "connected";
+            delete slot.timedOut;
+            // 恢复 connected 时清掉 error：status() 只在 failed+error 时
+            // 填 error，避免把超时残因带到已恢复的连接上。
+            delete slot.error;
+          }
+          return;
+        }
         registerTools(slot, tools);
         slot.state = "connected";
       } catch (err) {

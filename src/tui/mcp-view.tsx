@@ -33,7 +33,7 @@ import { TextAttributes, type KeyEvent } from "@opentui/core";
 import type { McpServerStatus } from "../harness/mcp/manager.js";
 import type { AciToolDef } from "../harness/aci/types.js";
 import { tuiPalette } from "./theme.js";
-import { clipOneLine } from "./tool-summary.js";
+import { clipOneLine, visualWidth } from "./tool-summary.js";
 
 /** 平铺的 MCP 工具条目（server 反解自 `mcp__<server>__<tool>`）。 */
 export interface McpToolEntry {
@@ -189,6 +189,18 @@ export function McpView(props: McpViewProps): ReactNode {
         `${marker} ${status.name}`,
         Math.max(4, maxLineWidth - 8)
       );
+      // #378：failed 时 state 旁追渲染 error 首行（clipOneLine 截断；
+      // pal.dim + pal.error 色）。error 列宽预算让位于名称截断
+      // maxLineWidth - 8 既定逻辑——按「非 error 部分视觉宽」回找余量
+      // （含 ` · ` 分隔符），余量不足（名称占满整行）时不渲染，行不溢出于现状。
+      const stateText = ` · ${status.state}`;
+      const dimText = ` · ${count} 工具 · ${status.source}`;
+      const errorBudget =
+        status.state === "failed" && status.error
+          ? maxLineWidth - visualWidth(`${prefix}${stateText}${dimText}`) - 3
+          : 0;
+      const errorLine =
+        errorBudget > 0 ? clipOneLine(status.error ?? "", errorBudget) : "";
       rows.push(
         <text
           key={status.name}
@@ -196,11 +208,10 @@ export function McpView(props: McpViewProps): ReactNode {
           attributes={selected ? TextAttributes.BOLD : TextAttributes.NONE}
         >
           {prefix}
-          <span fg={stateColor}> · {status.state}</span>
-          <span fg={pal.dim}>
-            {" "}
-            · {count} 工具 · {status.source}
-          </span>
+          <span fg={stateColor}>{stateText}</span>
+          <span fg={pal.dim}>{dimText}</span>
+          {errorLine.length > 0 && <span fg={pal.dim}> · </span>}
+          {errorLine.length > 0 && <span fg={pal.error}>{errorLine}</span>}
         </text>
       );
     }
@@ -273,6 +284,17 @@ export function McpView(props: McpViewProps): ReactNode {
         {selected && <text fg={stateColor}> · {selected.state}</text>}
         <text fg={pal.dim}> Esc 返回列表 · 再按回 chat</text>
       </box>
+      {/* #378：failed + error → header 下 error 多行（按 \n 拆行、逐行
+          clipOneLine、pal.error 色），放于工具行之前；非 failed 不渲染。 */}
+      {selected?.state === "failed" &&
+        selected.error &&
+        selected.error
+          .split("\n")
+          .map((line, i) => (
+            <text key={`mcp-err-${i}`} fg={pal.error}>
+              {clipOneLine(line, maxLineWidth)}
+            </text>
+          ))}
       {toolRows}
       {footerLine !== undefined && (
         <box marginTop={1}>

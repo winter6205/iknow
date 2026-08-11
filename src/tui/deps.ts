@@ -96,6 +96,12 @@ export interface BuildTuiDepsOptions {
     server: import("../harness/mcp/config.js").McpServerConfig
   ) => import("../harness/mcp/manager.js").McpClientHandle;
   /**
+   * #378 测试缝：createMcpManager 工厂覆盖。与 createMcpClient 对偶——
+   * 测试经此捕获 createMcpManager 入参（如 timeoutMsOverride 透传），
+   * 避免 mock.module 触发 bun require 死锁（bun 1.3.14 已知问题）。
+   */
+  readonly createMcpManager?: typeof import("../harness/mcp/manager.js").createMcpManager;
+  /**
    * #337 Phase B：装配完成同步回调，透出扩展面（skillCatalog / mcp / shutdown）。
    * Phase C/D 消费（slash 候选派生、MCP 状态显示、退出路径收口）。
    */
@@ -242,13 +248,15 @@ export async function buildTuiDeps(
   // 透出,run.tsx 退出路径调用。
   let mcpManager: McpManager | undefined;
   const mcpConfig = await loadMcpConfig({ home: userHome, cwd });
-  mcpManager = createMcpManager({
+  mcpManager = (opts.createMcpManager ?? createMcpManager)({
     config: mcpConfig.servers,
     registerExternal: reg.registerExternal,
     // reload 缝：manager.reload 先按名撤回旧 server 已注册的 mcp__* 工具，
     // 再重建——不注入则 reload 后 stale 名残留 externalByExt，重名 register
     // 触发 Gate2 duplicate，新 server 工具静默注册失败。
     unregisterExternal: reg.unregisterExternal,
+    // #378 根因 B: env 注入连接超时(默认 60_000, 缓解 npx -y cold start)。
+    timeoutMsOverride: env.mcp.connectTimeoutMs,
     ...(opts.createMcpClient ? { createClient: opts.createMcpClient } : {}),
   });
   void mcpManager.start().catch((err) => {

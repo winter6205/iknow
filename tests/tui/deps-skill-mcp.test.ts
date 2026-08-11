@@ -28,8 +28,15 @@ import {
   type TuiExtensions,
 } from "../../src/tui/deps.js";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.js";
+import { createMcpManager } from "../../src/harness/mcp/manager.js";
 import type { RuntimeBundle } from "../../src/cli/runtime.js";
 import type { IknowEnv } from "../../src/config/env.js";
+
+// #378 根因 B: 捕获 createMcpManager 入参 —— 通过 buildTuiDeps 注入缝
+// (opts.createMcpManager) 委托真实实现, 不影响既有断言(skill catalog /
+// reload / listMcpTools 仍走真实 manager)。避免 mock.module 触发 bun 1.3.14
+// require 死锁(见 deps.ts createMcpManager 缝注释)。
+const capturedMcpManagerOpts: Array<Record<string, unknown>> = [];
 
 /** 最小合法 RuntimeBundle — buildTuiDeps 只读 env 字段，其余 stub。 */
 function makeBundle(): RuntimeBundle {
@@ -49,6 +56,8 @@ function makeBundle(): RuntimeBundle {
     chat: { showThinking: false },
     web: { searchUrl: undefined, proxy: undefined },
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
+    // #378 根因 B: MCP 连接超时(默认 60_000)。
+    mcp: { connectTimeoutMs: 60_000 },
   };
   return { env } as unknown as RuntimeBundle;
 }
@@ -168,6 +177,60 @@ describe("buildTuiDeps — #337 Phase B skill + MCP 装配", () => {
     expect(tools).toEqual([]);
     expect(captured!.listMcpTools()).toEqual([]);
     await captured!.shutdown();
+  });
+});
+
+describe("buildTuiDeps — #378 根因 B timeoutMsOverride 透传", () => {
+  const roots: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      roots.splice(0).map((r) => rm(r, { recursive: true, force: true }))
+    );
+    capturedMcpManagerOpts.length = 0;
+  });
+
+  test("装配链把 env.mcp.connectTimeoutMs 透传为 createMcpManager.timeoutMsOverride", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-tui-timeout-"));
+    roots.push(root);
+
+    const env = {
+      ...makeBundle().env,
+      mcp: { connectTimeoutMs: 90_000 },
+    } as unknown as IknowEnv;
+    await buildTuiDeps({ env } as unknown as RuntimeBundle, {
+      askUser: createNoAskUser(),
+      userHome: join(root, "home"),
+      cwd: root,
+      createMcpManager: (opts) => {
+        capturedMcpManagerOpts.push(opts as Record<string, unknown>);
+        return createMcpManager(opts);
+      },
+    });
+
+    const last = capturedMcpManagerOpts.at(-1);
+    expect(last).toBeDefined();
+    expect(last!.timeoutMsOverride).toBe(90_000);
+  });
+
+  test("默认 env.mcp.connectTimeoutMs=60_000 透传（未设 env 时 env.ts 已回退默认）", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-tui-timeout-default-"));
+    roots.push(root);
+
+    // makeBundle() 的 mcp 字段默认 60_000（与 loadIknowEnv 未设 env 时一致）。
+    await buildTuiDeps(makeBundle(), {
+      askUser: createNoAskUser(),
+      userHome: join(root, "home"),
+      cwd: root,
+      createMcpManager: (opts) => {
+        capturedMcpManagerOpts.push(opts as Record<string, unknown>);
+        return createMcpManager(opts);
+      },
+    });
+
+    const last = capturedMcpManagerOpts.at(-1);
+    expect(last).toBeDefined();
+    expect(last!.timeoutMsOverride).toBe(60_000);
   });
 });
 
