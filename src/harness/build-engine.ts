@@ -39,6 +39,7 @@ import {
   createIknowSystemResolver,
   initIknowWorkspaceSafe,
 } from "./identity/index.js";
+import { IKNOW_COORDINATOR_TEXT } from "./identity/assemble.js";
 import {
   resolveProjectMemoryDir,
   createSystemResolver,
@@ -304,6 +305,11 @@ export async function buildHarnessEngine(
           description: entry.description ?? "",
           ...(entry.disabled ? { disabled: true } : {}),
         })),
+      // #361 T8 subagent coordinator 引导层 — 条件与 registry 同源:
+      // subagentManager 装配 (surface !== "ask") 时注入 IKNOW_COORDINATOR_TEXT,
+      // ask (无 manager) 不注入 → 装配层段缺席 (字节级零变化)。文案含验收6
+      // 关键词 proactive / parallelizable / blocks until finished。
+      ...(subagentManager ? { coordinatorText: IKNOW_COORDINATOR_TEXT } : {}),
     }),
     // #119 T7:env.compress 透传 → deps.compress(LoopEngineDeps.compress 可选缝)。
     // IknowCompressEnv 必填(contextWindow / thresholdTokens),缺失即压缩关闭由

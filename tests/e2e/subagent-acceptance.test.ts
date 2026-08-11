@@ -140,7 +140,7 @@ describe("#356 T7 E2E A: stub-model host drain 全链路 (SC14)", () => {
 
     // 等 fake binary 完全退出 + buffer 收敛 (exit 后 stdout 已 parse)。
     await new Promise((r) => setTimeout(r, 100));
-    const drained = drainPendingSubagents(fakeMgr);
+    const drained = await drainPendingSubagents(fakeMgr);
     assert.ok(drained.length > 0, "fake binary 应至少完成 1 个 subagent 任务");
     assert.match(
       drained,

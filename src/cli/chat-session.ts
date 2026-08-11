@@ -156,7 +156,7 @@ export async function processChatLine(
   // #356 T7 (SC7):host drain — 把 manager 内 completed 子代理结果浓缩成
   // user message,拼入本次 run 的 priorMessages 末尾。空 manager / 无
   // completed → priorMessages 不变 (行为零变化)。
-  const drained = drainPendingSubagents(ctx.subagentManager);
+  const drained = await drainPendingSubagents(ctx.subagentManager);
   const priorMessages = drained
     ? Object.freeze([
         ...ctx.state.messages,
