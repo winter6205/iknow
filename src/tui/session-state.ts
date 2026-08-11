@@ -140,15 +140,21 @@ export function canInterrupt(session: TuiSessionState): boolean {
  * abort 后由落盘 messages 原子替换(中间态自动消失)。
  *
  * 空文本(trim 后)不追加,返回原状态 — 防空白输入污染 messages。
+ *
+ * #377 项 D（#337 Phase C 决定撤销）：echo 与发送文本可分离 —— 本函数接收
+ * **显示形态**（displayText），它是用户可见会话中的临时代理。skill-load
+ * 场景发送文本含技能正文（进模型历史），显示形态用精简占位「[加载技能 X]」
+ * 避免正文泄漏进会话。turn 结束 turnFinished 仍用落盘权威消息原子替换中间态
+ * （含正文 —— 这是用户接受的 running→complete 形态切换）。
  */
 export function userMessageEchoed(
   session: TuiSessionState,
-  text: string
+  displayText: string
 ): TuiSessionState {
-  if (text.trim().length === 0) return session;
+  if (displayText.trim().length === 0) return session;
   const userMessage: AnthropicNativeMessage = Object.freeze({
     role: "user",
-    content: Object.freeze([{ type: "text" as const, text }]),
+    content: Object.freeze([{ type: "text" as const, text: displayText }]),
   });
   return Object.freeze({
     ...session,

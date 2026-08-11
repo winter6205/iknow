@@ -125,12 +125,15 @@ interface DrivenApp {
 
 async function mountAppAsync(
   catalog: SkillCatalog,
-  responses: Parameters<typeof makeDeps>[0]
+  responses: Parameters<typeof makeDeps>[0],
+  opts: { readonly delayMs?: number } = {}
 ): Promise<DrivenApp> {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-skillload-data-"));
   const bridge = createTuiBridge({
     dataDir,
-    deps: makeDeps(responses),
+    deps: makeDeps(responses, {
+      ...(opts.delayMs ? { delayMs: opts.delayMs } : {}),
+    }),
     inflight: createInflightRegistry(),
   });
   const askBridge = createTuiAskUserBridge();
@@ -245,6 +248,47 @@ describe("Phase C: /skill-name 加载发送", () => {
     );
     expect(app.setup.captureCharFrame()).toContain("帮我做 X");
     expect(app.setup.captureCharFrame()).toContain("回声完成");
+
+    await app.destroy();
+    await fx.cleanup();
+  }, 30_000);
+
+  test("#377 D：turn 运行中 echo 显示精简占位「[加载技能 echo]」，不泄漏技能正文（turn 完成落盘全文替换）", async () => {
+    const fx = await plantSkillFixture();
+    // delayMs 拉长 stub-model 步进：让「echo 精简 → turn 完成」之间有时间
+    // 断言运行中形态。
+    const app = await mountAppAsync(
+      fx.catalog,
+      [assistantResult({ texts: ["回声完成"] })],
+      { delayMs: 500 }
+    );
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+    await untilFrame(app.setup, (f) => f.includes("type message"));
+
+    await app.typeText("/echo 帮我做 X");
+    await app.pressEnter();
+
+    // 运行中（未完成）：echo 是精简占位，不含技能正文。
+    const runFrame = app.setup.captureCharFrame();
+    expect(runFrame).toContain("[加载技能 echo]");
+    expect(runFrame).not.toContain("回声技能"); // 正文 frontmatter description 不泄漏
+    expect(runFrame).not.toContain("<skill_files>");
+
+    // 等 turn 完成 → inflight 清空。
+    await until(
+      () => app.bridge.inflight.ids().size === 0,
+      8000,
+      "skill-turn-done"
+    );
+
+    // 完成态：echo 被落盘权威消息替换 → 全量正文可见（与 #1 一致）。
+    await untilFrame(
+      app.setup,
+      (f) => f.includes('[skill-load name="echo"]'),
+      8000,
+      "echo-full"
+    );
+    expect(app.setup.captureCharFrame()).toContain("帮我做 X");
 
     await app.destroy();
     await fx.cleanup();

@@ -581,13 +581,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   }
 
   // ── turn 发送 ───────────────────────────────────────────────────
-  // #337 Phase C 决定：skill-load 的 echo 与发送文本**一致**（全量正文也出现在
-  // echo）。理由：TuiSessionState.messages 是权威历史，turn 结束 turnFinished
-  // 用落盘消息原子替换中间态——若 echo 用精简形态「[加载技能 X]」而发送文本含
-  // 正文，turn 完成后显示会被权威正文覆盖，形成「运行中精简 → 完成变全量」的
-  // 不一致跳变。spec 明示该场景可接受退路（echo 与发送同文本），且它最不破坏
-  // 状态机纪律（echo 恒 = 模型历史可见文本）。故 skill-load 走 sendTurn 同路径。
-  async function sendTurn(text: string): Promise<void> {
+  // #377 项 D（#337 Phase C 决定撤销）：echo 与发送文本可分离 —— displayText
+  // 控制用户可见会话中的临时代理，text 仍原样经 run() 进模型历史。skill-load
+  // 路径传 displayText 为「[加载技能 X] [remainder]」精简占位，避免技能正文
+  // 泄漏进会话显示。turn 结束 turnFinished 用落盘权威消息原子替换中间态——
+  // skill-load 会话仍会显示完整正文（落盘历史可见），这是用户接受的取舍：
+  // 运行中可见精简占位，完成后与会话文件一致。
+  async function sendTurn(text: string, displayText?: string): Promise<void> {
     if (active.runState !== "idle") {
       setNotice({
         lines: ["当前会话正在运行；导航命令仍可用，消息请等本轮结束。"],
@@ -622,7 +622,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       if (!current) return prev;
       return {
         ...prev,
-        [targetId]: userMessageEchoed(turnStarted(current), text),
+        [targetId]: userMessageEchoed(
+          turnStarted(current),
+          displayText ?? text
+        ),
       };
     });
     const controller = new AbortController();
@@ -779,11 +782,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           const sendText = `[skill-load name="${skillLoad.name}"]\n${body}${
             skillLoad.remainder.length > 0 ? `\n\n${skillLoad.remainder}` : ""
           }`;
+          // #377 项 D：发送文本含技能正文（进模型历史确定性生效），显示形态
+          // 用精简占位 —— 用户会话中只见「[加载技能 X] [remainder]」，正文不
+          // 泄漏。turn 完成后落盘权威消息原子替换（正文可见于会话文件）。
+          const displayText = `[加载技能 ${skillLoad.name}]${
+            skillLoad.remainder.length > 0 ? ` ${skillLoad.remainder}` : ""
+          }`;
           setNotice(undefined);
-          // echo 与发送文本一致（见 sendTurn 头注决定）：正文也出现在用户
-          // 看到的 echo；发送文本 = 全量正文 + remainder，经 run()
-          // encodeUserText 整段进模型 tool 历史（确定性生效）。
-          await sendTurn(sendText);
+          await sendTurn(sendText, displayText);
         } catch (err) {
           setNotice({ lines: [`加载技能失败：${describeError(err)}`] });
         }
