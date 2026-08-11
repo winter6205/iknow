@@ -21,4 +21,4 @@
 - 2026-08-11：首次会话确认 trace 跨会话共享问题（conversation_id 复用同一 jsonl），列为潜在改进点
 ```
 
-粘贴完成后，若 `~/.iknow/state.json` 中 `bootstrap_seeded` 仍为 `false`，在对话输入 `/profile done` 翻旗。
+（#196 rev 2026-08-11：不再需要 `/profile done` 翻 flag——bootstrap 完成改为文件驱动，agent 写 user.md + 删 BOOTSTRAP.md 即隐式完成。）
