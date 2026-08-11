@@ -36,6 +36,7 @@
     "aci:demo": "tsx src/harness/aci/demo.ts",
     "probe:sandbox": "tsx scripts/sandbox-probe.ts",
     "probe:lsp": "tsx scripts/lsp-probe.ts",
+    "probe:tui-binding": "$HOME/.bun/bin/bun run scripts/tui-binding-probe.ts",
     "prepare": "husky"
   },
   "devDependencies": {
