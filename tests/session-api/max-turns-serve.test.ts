@@ -24,20 +24,23 @@ import { createExecutor } from "../../src/harness/tools/executor.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import { assistantResult } from "../cli/_fixtures.ts";
+import { installTestSettingsSource } from "../_helpers/install-test-settings-source.ts";
 
 let baseDir: string;
 let store: SessionStore;
+let settingsSource: ReturnType<typeof installTestSettingsSource>;
 
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-max-turns-serve-"));
   store = new SessionStore(baseDir);
-  // #353 第二阶段：model 无代码默认，serve 装配的 loadIknowEnv() 需要来源。
-  process.env.IKNOW_LLM_MODEL = "test-model";
+  // #164 第二阶段：IKNOW_LLM_MODEL 已退役，serve 装配的 loadIknowEnv() 需要
+  // settings.llm.model 来源 → HOME 重定向到 tmp（settings.json 含 model + apiKey）。
+  settingsSource = installTestSettingsSource();
 });
 
 afterAll(async () => {
   await rm(baseDir, { recursive: true, force: true });
-  delete process.env.IKNOW_LLM_MODEL;
+  settingsSource.restore();
 });
 
 /**

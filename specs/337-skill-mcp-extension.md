@@ -231,7 +231,7 @@ export function toAciToolDef(
 
 - **OQ1**（假设 13 复核口）`<available_skills>` 加性段在 LOCKED 循环之后的追加位置（toolList 段之后、projectPath 段之前/后）；若实施中发现模型对 skill 清单感知率不足，段位置调整即触发本 spec 变更。
 - **OQ2**（假设 14 复核口）codebase-memory-mcp 在 CI 机器缺席时的 skip 形态；若 operator 要求 CI 必跑，则需改为在 CI 安装该 server（依赖外部安装链路）。
-- **OQ3** E2E B 的测试 key 由 operator 何时提供、走哪个环境变量名（沿用 `IKNOW_LLM_API_KEY_ENV` 指向的变量，或另设）。
+- **OQ3** E2E B 的测试 key 由 operator 何时提供、走哪个路径（settings-model-extension 收尾后：`settings.llm.apiKey` 字面或 `${VAR}` 占位符 → `IKNOW_LLM_API_KEY_ENV` 机制已退役，ADR-0015）。
 - **OQ4** serve 入口的 MCP server 连接以 serve 进程 cwd 为项目级 config 基准——与既有 serve sandboxRoot 语义一致（build-engine.ts:109-117 注释已指出 serve cwd 歧义），本期不额外解决，随该 backlog 走。
 
 ## Glossary

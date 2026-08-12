@@ -1,8 +1,16 @@
-# Plan: settings 机制扩字段 — `llm.model` + `llm.fallback` 入 settings
+# Plan: settings 机制扩字段 — `llm.model` + `llm.fallback` 入 settings（最终架构）
 
-Tracer bullet，承接 #353（settings 机制）的第二阶段：把模型配置从「env + 硬编码」二源改为「env > settings」两源链（**移除 hardcoded 兜底**），让全局 `~/.iknow/settings.json`（用户级）与 `<cwd>/.iknow/settings.json`（项目级）成为模型配置的单一可寻址位置，同时 `.env.local` 不再背负模型值（消除第二源 drift）。未配 model → fail-fast 抛错；fallback 由用户经 `settings.llm.fallback` 自配。
+Tracer bullet，承接 #353（settings 机制）的第二阶段 + **settings-model-extension 收敛收尾（Phase 2）**：把 LLM 配置（model + apiKey）从「env + 硬编码 / key 变量名间接寻址」收敛到 `settings.json` **单承载**。
 
-ADR: supersede ADR-0001 的「m3-combo 焊死」条款 → 模型配置改为可配置 + fail-fast（settings 覆盖 env 之下），**移除 hardcoded `m3-combo` 兜底**。
+**最终架构（ADR-0015 `docs/adr/0015-llm-config-settings-single-source.md`，现态真值）：**
+
+- `settings.llm.model`（字面值，唯一 model 来源，trim 后非空串）：缺失 → `loadIknowEnv` fail-fast 抛「no LLM model configured in settings.llm.model」，**无任何代码默认 / 无 env 覆盖**（`IKNOW_LLM_MODEL` 已退役，不再读取）。
+- `settings.llm.apiKey`（字面 / `${VAR}` / `$VAR`）：唯一 key 承载。字面 → 原样；占位符 → 经 `expandPlaceholders(value, fileMap)` 从 `process.env[VAR]` > `.env.local` > `.env` 解析（process.env 优先，fileMap 兜底）。解析不到 → undefined（消费点守卫抛「no API key configured」）。**`IKNOW_LLM_API_KEY_ENV` 已退役，`LlmEnv.apiKeyEnv` 字段已删**（不再有「key 变量名」概念）。
+- `settings.llm.fallback?: string[]`：用户自配 fallback 路由 ID 列表（代码不预置）。
+- `.env.local` 退化为**占位符真值源**（持有 `${VAR}` 指向的变量值本身），不再是 model / key 变量名的配置口。
+- provider = 9router、baseUrl 代码默认 `http://localhost:20128/v1`（`IKNOW_LLM_BASE_URL` 仍读）—— 项目级栈决策保留。
+
+ADR: supersede ADR-0001 的「m3-combo 焊死 + key 变量名间接寻址」条款 → 模型配置改为可配置 + fail-fast + apiKey 单承载（ADR-0015），**移除 hardcoded `m3-combo` 兜底 + `apiKeyEnv` / `IKNOW_LLM_MODEL` / `IKNOW_LLM_API_KEY_ENV` 机制**。
 
 ---
 
@@ -45,32 +53,44 @@ model:
 
 ---
 
-## Files expected to change
+## Files changed (Phase 1 + Phase 2)
 
-- `src/config/settings.ts`
-- `src/config/env.ts`
-- `tests/config/settings.test.ts`
-- `tests/config/env.test.ts`（若存在则加，不存在跳过）
-- `docs/adr/0001-9router-stack-as-code-defaults.md`
-- `docs/CONTEXT.md`
-- `CHANGELOG.md`
-- `scripts/i135-settings-model-extension-smoke.ts`（真实模型 smoke，B 组改断言 fail-fast）
-- `src/harness/sandbox/env-isolation.ts`（模块顶层 loadIknowEnv 的 fail-fast 防御）
+**Phase 1（model 可配置 + fail-fast）**:
+
+- `src/config/settings.ts`（`IknowSettingsLlm` + `model?` + `fallback?` + validators）
+- `src/config/env.ts`（model 链 `envOptional(IKNOW_LLM_MODEL) ?? settings.llm.model` + fail-fast）
+- `src/harness/build-engine.ts` / `src/tui/deps.ts` / `src/session-api/thinking-override.ts`（守卫文案对齐）
+- `src/harness/sandbox/env-isolation.ts`（`safeLlmApiKeyEnv` 防御模块顶层 loadIknowEnv 抛错）
+- `tests/config/settings.test.ts` / `tests/config/env.test.ts`（model/fallback 用例）
+- 测试 fixture `apiKeyEnv` 清理 9+ 文件 + `tests/_helpers/install-test-settings-source.ts`
+- `docs/adr/0015-llm-config-settings-single-source.md`
+
+**Phase 2（apiKey 单承载 + env 机制退役 + docs 同步）**:
+
+- `src/config/env.ts` 新增 `expandPlaceholders(value, fileMap)`（process.env 优先 + fileMap 兜底 + `yes` 占位符过滤 + 非法 `${...}` 形态 → undefined）
+- `src/config/env.ts` 移除 `IKNOW_LLM_API_KEY_ENV` / `IKNOW_LLM_MODEL` 读取，移除 `LlmEnv.apiKeyEnv` 字段
+- `src/harness/sandbox/env-isolation.ts` 的 `configuredSecretNames` 从 settings 占位符解析 secret 变量名
+- `scripts/i135-settings-model-extension-smoke.ts` 整脚本重写为 A/B/C/D 四组真实模型验证（settings 占位符 / 无 settings fail-fast / 缺 key 守卫 / 字面 key 不依赖 env）
+- `scripts/i153-probe-9router-thinking.ts` model 解析改 `loadIknowEnv().llm.model`
+- `scripts/i9/i10/i11/i132/i4/i12/t4` 7 个 probe/smoke 清理 `apiKeyEnv` / `IKNOW_LLM_API_KEY_ENV` / `IKNOW_LLM_MODEL` 字面值
+- `tests/config/env-expansion.test.ts`（新增 25 个边界用例）
+- `tests/config/settings.test.ts` / `tests/config/env.test.ts` / `tests/harness/sandbox/env-isolation.test.ts`（新增 30 个用例）
+- `docs/CONTEXT.md` §83 / `docs/adr/0001-…md`（supersede by 0015 段）/ `CHANGELOG.md` / `README.md` / `CLAUDE.md` / `docs/architecture.md` / `docs/STATUS.md` / `docs/integration-materials.env.example` 同步
 
 ---
 
-## Validation
+## Validation（Phase 2 实测）
 
-- `npm run typecheck`
-- `npm test -- tests/config/` 全绿
-- `npm test` 全绿
-- `npm run probe:settings-model`（需 ANTHROPIC_AUTH_TOKEN 环境变量已设）—— A 组证明 settings.llm.model 实际影响模型调用；B 组断言无 settings 时 `loadIknowEnv` 抛「no LLM model configured」（fail-fast）。
+- `npx tsc --noEmit` → exit 0
+- `npm test` → 全绿（除 SC8 预存 flaky：`tests/cli/register-shutdown.test.ts` 真实 SIGINT 计时断言偶发）
+- `npx vitest run tests/config/env-expansion.test.ts tests/config/settings.test.ts tests/config/env.test.ts tests/harness/sandbox/env-isolation.test.ts` → 152 用例全过
+- `npm run probe:settings-model`（`scripts/i135-settings-model-extension-smoke.ts`）A/B/C/D 四组 12 断言全过：settings `${VAR}` 占位符真实 chat（响应 model 被 9router 改写为 `deepseek-v4-flash`）/ 无 settings fail-fast / 缺 key 守卫 / 字面 key 不依赖 env。key 只打 `len` + `sha256_12` 指纹，绝不打印全文 / 落盘 / 进 git。
 
 ---
 
 ## Risks / Open items
 
-- **行为破坏（有意）**：未配 `settings.llm.model` 且未设 `IKNOW_LLM_MODEL` 时，改动前静默回退 `m3-combo`，改动后 env loader **fail-fast 抛错**。所有需要 LLM 的入口（CLI chat/ask/serve/hub/subagent）都会在装配期暴露「no LLM model configured」——这是用户裁定要求，属于有意破坏，配 model 即恢复。
+- **行为破坏（有意）**：未配 `settings.llm.model` → env loader **fail-fast 抛错**（改动前静默回退 `m3-combo`）；未配 `settings.llm.apiKey` → 消费点守卫抛「no API key configured」。所有需要 LLM 的入口（CLI chat/ask/serve/hub/subagent）都会在装配期暴露——这是用户裁定要求，属于有意破坏，配 settings 即恢复。
 - **导入期连带**：`src/harness/sandbox/env-isolation.ts` 模块顶层调用 `loadIknowEnv()`（SECRET_ENV_NAMES 常量），fail-fast 会让其在 model 未配时导入即崩 → 已用 `safeLlmApiKeyEnv()`（try/catch 退化）防御，安全层任何环境可加载。
-- `.env.local` 已删（用户 8/12 操作），不再有第二源 drift 风险。
-- ADR-0001 不全文废弃，仅 supersede 模型条款；其余（key 变量名、baseUrl 默认、provider）保留。
+- **`expandPlaceholders` 非法形态语义**：含 `${` 但含非法/未闭合 `${...}` 形态（`${}` / `${1VAR}` / `${VAR`）→ undefined（settings.ts `isApiKeyOrPlaceholder` 丢弃语义对齐）；含 `${` 但全串由合法 `${VAR}` 拼成 → 正常解析；`$VAR` 裸形态与 `${VAR}` 同样由 expandPlaceholders 解析（无字面短路；无 `$$` 转义；含 `$IDENT` 形态被当作占位符）。
+- ADR-0001 不全文废弃，仅 supersede model/key 条款；provider、baseUrl 代码默认保留。

@@ -153,7 +153,6 @@ describe("withThinkingOverride — replaces adapter only, reuses other deps", ()
     const env = makeTestLlmEnv({
       baseUrl: "http://invalid",
       model: "x",
-      apiKeyEnv: "K",
       apiKey: "k",
       maxOutputTokens: 64,
       timeoutMs: 1000,
@@ -190,7 +189,6 @@ describe("withThinkingOverride — replaces adapter only, reuses other deps", ()
     const envNoKey = makeTestLlmEnv({
       baseUrl: "http://invalid",
       model: "x",
-      apiKeyEnv: "K",
       apiKey: undefined,
       maxOutputTokens: 64,
       timeoutMs: 1000,
@@ -204,7 +202,7 @@ describe("withThinkingOverride — replaces adapter only, reuses other deps", ()
         }),
       (err: unknown) =>
         err instanceof ValidationError &&
-        /IKNOW_LLM_API_KEY_ENV/.test(err.message)
+        /apiKey.*placeholder|no API key configured/.test(err.message)
     );
   });
 });
@@ -245,7 +243,6 @@ describe("withThinkingOverride — request-side thinking fields via local captur
     };
     const env = makeTestLlmEnv({
       baseUrl: capture.origin,
-      apiKeyEnv: "K",
     });
     const result = withThinkingOverride({
       deps: baseDeps,
@@ -278,7 +275,6 @@ describe("withThinkingOverride — request-side thinking fields via local captur
     };
     const env = makeTestLlmEnv({
       baseUrl: capture.origin,
-      apiKeyEnv: "K",
     });
     const result = withThinkingOverride({
       deps: baseDeps,

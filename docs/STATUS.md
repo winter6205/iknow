@@ -92,8 +92,8 @@
 
 ### 3.1 近端（建议 1–2 个迭代）
 
-1. **env 密钥对齐**
-   - API key 变量（默认 `ANTHROPIC_AUTH_TOKEN`）与 9router 目标对齐（chat 401 根因排查）。
+1. **LLM 配置收敛到 settings.json 单承载（ADR-0015 settings-model-extension）**
+   - model 字面值 + apiKey 字面 / `${VAR}` 占位符；`IKNOW_LLM_API_KEY_ENV` / `IKNOW_LLM_MODEL` 已退役；provider/baseUrl 代码默认（`IKNOW_LLM_BASE_URL`）保留。
 2. **会话小增强**
    - 可选会话导出/导入 JSON；澄清轮最小状态。
 3. **观测最小集**

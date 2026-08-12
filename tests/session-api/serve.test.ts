@@ -20,17 +20,20 @@ import {
 import type { ListeningServer } from "../../src/session-api/http.ts";
 import type { SessionHub } from "../../src/session-api/hub.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
+import { installTestSettingsSource } from "../_helpers/install-test-settings-source.ts";
 
 // -- per-test cleanup --------------------------------------------------------
 
 let baseDir: string;
 let listening: ListeningServer | undefined;
 let hub: SessionHub | undefined;
+let settingsSource: ReturnType<typeof installTestSettingsSource>;
 
 beforeAll(() => {
-  // #353 第二阶段：model 无代码默认，startSessionServe 装配的 loadIknowEnv()
-  // 需要来源。测试本身不关心 model 值，给一个 sentinel 即可。
-  process.env.IKNOW_LLM_MODEL = "test-model";
+  // #164 第二阶段：IKNOW_LLM_MODEL 已退役，模型唯一来源 = settings.llm.model。
+  // startSessionServe 装配的 loadIknowEnv() 需要 settings 来源 → HOME 重定向到
+  // tmp（settings.json 含 model + `${VAR}` apiKey），不依赖真实 ~/.iknow。
+  settingsSource = installTestSettingsSource();
 });
 
 afterEach(async () => {
@@ -41,7 +44,7 @@ afterEach(async () => {
 });
 
 afterAll(() => {
-  delete process.env.IKNOW_LLM_MODEL;
+  settingsSource.restore();
 });
 
 // -- helpers -----------------------------------------------------------------

@@ -1,39 +1,34 @@
 /**
- * i135 probe — settings.llm.model 真实影响模型调用（TDD smoke）。
+ * i135 settings-model-extension smoke — Phase 2 整脚本重写。
  *
- * 目的:验证 #353 第二阶段(plans/settings-model-extension.md)的模型配置链
- * `env > settings.json(project > user)`(无任何代码默认,未配 → fail-fast)在
- * **真实模型**下生效 —— 写 `.iknow/settings.json` 到临时 cwd → `loadIknowEnv(cwd)`
- * → 真实 Anthropic-format 请求 → 请求 wire 上的 model == settings.llm.model。
+ * 目的：在真实 9router 模型下验证 LLM 配置已收敛到 `settings.json` 单承载
+ * （`#353` 第二阶段 / `#164`）。四组验证：
+ *   A. settings.json 写 `${ANTHROPIC_AUTH_TOKEN}` 占位符 → env loader 解析 →
+ *      真实 chat 走通（响应 model 字段被 9router 改写成上游 ID `deepseek-v4-flash`）；
+ *   B. settings.json `{}` → `loadIknowEnv` fail-fast 抛「no LLM model configured
+ *      in settings.llm.model」（不再有硬编码兜底）；
+ *   C. settings.json 有 model 但无 apiKey + `ANTHROPIC_AUTH_TOKEN=""` →
+ *      `env.llm.apiKey === undefined` → 守卫抛「no API key configured」；
+ *   D. settings.json 字面写 `"apiKey": "<real>"`（**脚本运行时经 Node fs 写入
+ *      tmp cwd，断言后 `finally rm`，绝不落 bash 命令行 / git / 日志 / fixtures**）
+ *      → 删除 env key 后 `loadIknowEnv` 仍走通（不依赖 env）。
  *
- * 断言设计(与 9router 实测行为对齐):
- *   - 9router 会把响应体 `model` 字段改写成实际路由到的上游 ID
- *     (实测:`hy3-combo` → `deepseek-v4-flash`),
- *     故 `response.model === settings.llm.model` 在真实流量下**不可能成立**。
- *     本探针改为权威证据链:
- *       A1 `env.llm.model === settings.llm.model`(env loader 链生效)
- *       A2 SDK fetch-hook 捕获的**出站请求体** model === settings.llm.model
- *          (wire 真值 —— 9router 收到什么就是什么)
- *       A3 adapter 回合成功(text 非空,真实响应可用)
- *       B1 无 settings 的 cwd → `loadIknowEnv` 抛「no LLM model configured」
- *          (fail-fast,不再有硬编码兜底)
- *       B2 / B3 对照请求路径已取消(无兜底 model 可发);原对照改为断言抛错
- *   - `hy3-combo` 经 9router /v1/messages 实测可用。
+ * 纪律（对齐 i9 / i132 / t4 / i164）：
+ *   - host-layer guard：读自身源码扫禁词 `src/cli` / `src/session-api` /
+ *     `src/interaction` / `web/`，命中即 throw + exit 1。
+ *   - 不 import host 层。
+ *   - key 仅打 `len` + `sha256_12` 指纹，绝不打印全文 / 写入 fixtures / 源码 /
+ *     git / 日志。
+ *   - baseUrl 常量 = `http://172.31.128.1:20128/v1`（9router 内网入口）。
+ *   - 每组独立 tmp HOME + tmp CWD（fork-local 隔离，不读真实 `~/.iknow`）。
+ *   - 临时 tmp 目录 `finally rm`，不污染仓库。
+ *   - 输出约定：每行 `[PASS]/[FAIL] <断言名>: <细节>` 到 stdout；
+ *     末尾一行 `i135 result=...` 到 stderr；exit 0 = 全断言过，
+ *     exit 1 = 任何失败。
  *
- * 前置条件:`IKNOW_LLM_MODEL` 必须 UNSET(env 仍最高,设了会压过 settings)。
- * 缺 key 守卫走 `getApiKey`(不触发 model fail-fast)。
- *
- * 边界 / 纪律(对齐 i9 / i132 / t4):
- *   - host-layer guard:读自身源码扫禁词 src/cli / src/session-api /
- *     src/interaction / web/,命中即 throw + exit 1。
- *   - 不 import host 层(src/cli / src/session-api / src/interaction / web/)。
- *   - 缺 key:`key absent, exit 1` 一行到 stderr + process.exit(1),不抛异常。
- *   - 不打印 ANTHROPIC_AUTH_TOKEN 任何部分,只打 len + sha256_12 指纹。
- *   - baseURL 只截到 host。
- *   - 临时 tmp cwd 用完 rm -rf 清理,不污染仓库。
- *   - 输出约定:一行结果到 stderr;exit 0 = 全断言过,exit 1 = 任何失败。
- *
- * 运行:npm run probe:settings-model(= tsx scripts/i135-settings-model-extension-smoke.ts)
+ * 运行：`npm run probe:settings-model`（= `tsx scripts/i135-settings-model-extension-smoke.ts`）。
+ * 前置：`process.env.ANTHROPIC_AUTH_TOKEN` 必须 set（A / C / D 依赖）；
+ * `process.env.IKNOW_LLM_BASE_URL` 未设则脚本强制设为 `http://172.31.128.1:20128/v1`。
  */
 
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -43,22 +38,29 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
-import { loadIknowEnv, getApiKey } from "../src/config/env.js";
+import { loadIknowEnv } from "../src/config/env.js";
 import {
   createRealAnthropicAdapter,
   encodeUserText,
 } from "../src/harness/model-adapter/anthropic-adapter.js";
+import { buildHarnessEngine } from "../src/harness/build-engine.js";
+import { createNoAskUser } from "../src/harness/permission/ask-user.js";
 
 const __filename = fileURLToPath(import.meta.url);
 
-/** settings.json 写入的模型路由 ID —— 经 9router /v1/messages 实测可用。 */
-const SETTINGS_MODEL = "hy3-combo";
-/** 简单 prompt,模型应回 "OK"(max_tokens 足够小,省时省 token)。 */
+/** 9router 入口 baseUrl 常量（A / D 组共享；脚本强制覆写 IKNOW_LLM_BASE_URL）。 */
+const BASE_URL = "http://172.31.128.1:20128/v1";
+/** settings.json 写入的模型路由 ID（9router 收到后改写响应 model = `deepseek-v4-flash`）。 */
+const SETTINGS_MODEL = "ocg/deepseek-v4-flash";
+/** 9router 对 `ocg/deepseek-v4-flash` 的响应 model 改写（wire 证据）。 */
+const WIRE_MODEL = "deepseek-v4-flash";
+/** 简单 prompt —— reasoning 模型需要 max_tokens ≥ 100 才出非空 content。 */
 const USER_PROMPT = "respond with the literal string OK";
 
 /**
- * host-layer guard:smoke 自身不得引用 host 层(src/cli / src/session-api /
- * src/interaction / web/)。读自身源码扫禁词,命中即 throw(参考 i9 同款)。
+ * host-layer guard：smoke 自身不得引用 host 层（src/cli / src/session-api /
+ * src/interaction / web/）。读自身源码扫禁词，命中即 throw（参考 i9 / i132 /
+ * i164 同款）。导入的 harness/ 模块不在禁词中。
  */
 function assertHostLayerGuard(): void {
   const self = readFileSync(__filename, "utf8");
@@ -66,7 +68,6 @@ function assertHostLayerGuard(): void {
   const lines = self.split("\n");
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    // 跳过 guard 声明行与注释(它们是断言对象,不是 import)。
     if (
       line.includes("const forbidden =") ||
       line.trim().startsWith("//") ||
@@ -85,7 +86,7 @@ function assertHostLayerGuard(): void {
   }
 }
 
-/** 截断 baseURL 到 host(不带 path),避免日志泄露完整端点。 */
+/** 截断 baseURL 到 host（不带 path），避免日志泄露完整端点。 */
 function hostOf(baseUrl: string): string {
   try {
     const u = new URL(baseUrl);
@@ -95,18 +96,19 @@ function hostOf(baseUrl: string): string {
   }
 }
 
-/** 密钥指纹:只输出 len + sha256 前 12 位,永不打印 key 内容。 */
+/** 密钥指纹：只输出 len + sha256 前 12 位，永不打印 key 内容。 */
 function fp(v: string | undefined): string {
   if (!v?.trim()) return "absent";
+  const t = v.trim();
   return (
     "len=" +
-    v.trim().length +
+    t.length +
     " sha256_12=" +
-    createHash("sha256").update(v.trim()).digest("hex").slice(0, 12)
+    createHash("sha256").update(t).digest("hex").slice(0, 12)
   );
 }
 
-/** 断言清单:全 pass → exit 0。 */
+/** 断言清单。 */
 const checks: Array<{ name: string; pass: boolean; detail?: string }> = [];
 function record(name: string, pass: boolean, detail?: string): void {
   checks.push({ name, pass, detail });
@@ -116,20 +118,19 @@ function record(name: string, pass: boolean, detail?: string): void {
 }
 
 /**
- * 构造带 wire 捕获的 Anthropic client:
- *   - 捕获每个**出站请求体**的 model(SDK 序列化为 string body);
- *   - 捕获每个 2xx JSON 响应体的 model(9router 会改写成上游 ID,留档用)。
- * 捕获值不是 secret,可安全打印。
+ * 构造带 wire 捕获的 Anthropic client：
+ *   - 捕获每个出站请求体的 model；
+ *   - 捕获每个 2xx JSON 响应体的 model（9router 会改写成上游 ID）。
  */
 function makeCapturingClient(
   apiKey: string,
   baseURL: string
 ): {
   readonly client: Anthropic;
-  readonly captured: Array<{ model?: string }>;
+  readonly sentModels: string[];
   readonly respModels: string[];
 } {
-  const captured: Array<{ model?: string }> = [];
+  const sentModels: string[] = [];
   const respModels: string[] = [];
   const client = new Anthropic({
     apiKey,
@@ -138,9 +139,10 @@ function makeCapturingClient(
     fetch: async (input, init) => {
       if (typeof init?.body === "string") {
         try {
-          captured.push(JSON.parse(init.body) as { model?: string });
+          const j = JSON.parse(init.body) as { model?: string };
+          if (typeof j.model === "string") sentModels.push(j.model);
         } catch {
-          /* 非 JSON body,忽略 */
+          /* 非 JSON body，忽略 */
         }
       }
       const res = await globalThis.fetch(input, init);
@@ -157,27 +159,28 @@ function makeCapturingClient(
       return res;
     },
   });
-  return { client, captured, respModels };
+  return { client, sentModels, respModels };
 }
 
-/** 一次真实 adapter step:单 user turn,无工具。 */
-async function runOneTurn(
-  env: { llm: { model: string; baseUrl: string; apiKey: string | undefined } },
-  key: string
-): Promise<{
+/** 一次真实 adapter step（max_tokens ≥ 100；reasoning 模型才出非空 content）。 */
+async function runOneTurn(env: {
+  llm: { model: string; baseUrl: string; apiKey: string | undefined };
+}): Promise<{
   sentModel: string | undefined;
   respModel: string | undefined;
   text: string;
-  supplierStop: string | undefined;
+  stop: string | undefined;
 }> {
-  const { client, captured, respModels } = makeCapturingClient(
-    key,
+  if (!env.llm.apiKey)
+    throw new Error("runOneTurn called with apiKey=undefined");
+  const { client, sentModels, respModels } = makeCapturingClient(
+    env.llm.apiKey,
     env.llm.baseUrl
   );
   const adapter = createRealAnthropicAdapter({
     client,
     model: env.llm.model,
-    maxTokens: 64,
+    maxTokens: 100,
     temperature: 0,
   });
   const turn = await adapter.step(
@@ -186,115 +189,230 @@ async function runOneTurn(
     undefined
   );
   return {
-    sentModel: captured.at(-1)?.model,
+    sentModel: sentModels.at(-1),
     respModel: respModels.at(-1),
     text: turn.projection.texts.join("").slice(0, 60),
-    supplierStop: turn.supplierStop,
+    stop: turn.supplierStop,
   };
+}
+
+/**
+ * 隔离 HOME：创建 tmp home 并把 process.env.HOME 指向它（避免读真实
+ * `~/.iknow/settings.json`），断言后恢复原 HOME 并删除 tmp。
+ */
+async function withIsolatedHome<T>(
+  fn: (home: string) => Promise<T>
+): Promise<{ value: T; home: string }> {
+  const home = await mkdtemp(join(tmpdir(), "iknow-i135-home-"));
+  const prevHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const value = await fn(home);
+    return { value, home };
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    await rm(home, { recursive: true, force: true });
+  }
+}
+
+/** A 组：settings `${ANTHROPIC_AUTH_TOKEN}` 占位符 → loader 解析 → 真实 chat。 */
+async function groupA(home: string): Promise<void> {
+  const cwd = await mkdtemp(join(tmpdir(), "iknow-i135-A-"));
+  await mkdir(join(cwd, ".iknow"), { recursive: true });
+  await writeFile(
+    join(cwd, ".iknow", "settings.json"),
+    JSON.stringify({
+      llm: { model: SETTINGS_MODEL, apiKey: "${ANTHROPIC_AUTH_TOKEN}" },
+    }) + "\n",
+    "utf8"
+  );
+  try {
+    const env = loadIknowEnv(cwd);
+    record(
+      "A1 loader: env.llm.model === settings.llm.model",
+      env.llm.model === SETTINGS_MODEL,
+      `env.llm.model=${env.llm.model} settings=${SETTINGS_MODEL}`
+    );
+    record(
+      "A2 apiKey 占位符解析成功（来自 process.env.ANTHROPIC_AUTH_TOKEN）",
+      Boolean(env.llm.apiKey?.trim()),
+      `apiKey fp=${fp(env.llm.apiKey)}`
+    );
+    const turn = await runOneTurn(env);
+    record(
+      "A3 出站请求 model === settings 字面（wire 真值）",
+      turn.sentModel === SETTINGS_MODEL,
+      `wire=${JSON.stringify(turn.sentModel)} settings=${SETTINGS_MODEL}`
+    );
+    record(
+      "A4 响应 model === 'deepseek-v4-flash'（9router 改写证据）",
+      turn.respModel === WIRE_MODEL,
+      `resp=${JSON.stringify(turn.respModel)} expected=${WIRE_MODEL}`
+    );
+    record(
+      "A5 content 非空（真实响应可用）",
+      turn.text.length > 0,
+      `text=${JSON.stringify(turn.text)} stop=${turn.stop}`
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+}
+
+/** B 组：settings `{}` → loadIknowEnv fail-fast 抛「no LLM model configured」。 */
+async function groupB(home: string): Promise<void> {
+  const cwd = await mkdtemp(join(tmpdir(), "iknow-i135-B-"));
+  try {
+    let err: Error | undefined;
+    try {
+      loadIknowEnv(cwd);
+    } catch (e) {
+      err = e instanceof Error ? e : new Error(String(e));
+    }
+    record(
+      "B1 settings={} → loadIknowEnv fail-fast 抛「no LLM model configured in settings.llm.model」",
+      err !== undefined &&
+        /no LLM model configured in settings\.llm\.model/.test(err.message),
+      err ? `err=${err.message}` : "no error thrown (expected fail-fast)"
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+}
+
+/** C 组：settings 有 model 无 apiKey + ANTHROPIC_AUTH_TOKEN="" → 守卫抛。 */
+async function groupC(home: string): Promise<void> {
+  const cwd = await mkdtemp(join(tmpdir(), "iknow-i135-C-"));
+  await mkdir(join(cwd, ".iknow"), { recursive: true });
+  await writeFile(
+    join(cwd, ".iknow", "settings.json"),
+    JSON.stringify({ llm: { model: SETTINGS_MODEL } }) + "\n",
+    "utf8"
+  );
+  const prevKey = process.env.ANTHROPIC_AUTH_TOKEN;
+  process.env.ANTHROPIC_AUTH_TOKEN = "";
+  try {
+    const env = loadIknowEnv(cwd);
+    record(
+      "C1 loader: apiKey 解析为 undefined（settings 无 apiKey + env key 空）",
+      env.llm.apiKey === undefined,
+      `apiKey=${JSON.stringify(env.llm.apiKey)}`
+    );
+    // 用 buildHarnessEngine 触发真实守卫（与生产同源；harness 层，不违反 host-layer guard）。
+    let guardErr: Error | undefined;
+    try {
+      await buildHarnessEngine({
+        env,
+        askUser: createNoAskUser(),
+        sandboxRoot: cwd,
+        surface: "chat",
+      });
+    } catch (e) {
+      guardErr = e instanceof Error ? e : new Error(String(e));
+    }
+    record(
+      "C2 buildHarnessEngine 守卫抛「no API key configured」（与 settings 单承载文案一致）",
+      guardErr !== undefined && /LLM mode needs API key/.test(guardErr.message),
+      guardErr ? `err=${guardErr.message}` : "no error thrown (expected guard)"
+    );
+  } finally {
+    if (prevKey === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
+    else process.env.ANTHROPIC_AUTH_TOKEN = prevKey;
+    await rm(cwd, { recursive: true, force: true });
+  }
+}
+
+/**
+ * D 组：settings 字面写 `"apiKey": "<real>"` → 删 env key → 真实 chat 走通。
+ *
+ * key 来源：`process.env.ANTHROPIC_AUTH_TOKEN`（脚本运行时内存；不落 bash 命令行
+ * / fixtures / 源码 / git / 日志；只进 tmp cwd 的 settings.json，写入后 `finally rm`）。
+ */
+async function groupD(home: string, realKey: string): Promise<void> {
+  const cwd = await mkdtemp(join(tmpdir(), "iknow-i135-D-"));
+  await mkdir(join(cwd, ".iknow"), { recursive: true });
+  // 字面 apiKey 写入 tmp settings.json（脚本内 Node fs，断言后立即删）。
+  await writeFile(
+    join(cwd, ".iknow", "settings.json"),
+    JSON.stringify({
+      llm: { model: SETTINGS_MODEL, apiKey: realKey },
+    }) + "\n",
+    "utf8"
+  );
+  // 删除 env key 以证明 D 组不依赖 env（loader 不读 process.env）。
+  const prevKey = process.env.ANTHROPIC_AUTH_TOKEN;
+  delete process.env.ANTHROPIC_AUTH_TOKEN;
+  try {
+    const env = loadIknowEnv(cwd);
+    record(
+      "D1 loader: apiKey 字面解析 === settings 字面（不依赖 env）",
+      env.llm.apiKey === realKey,
+      `env.llm.apiKey fp=${fp(env.llm.apiKey)} expected=${fp(realKey)}`
+    );
+    const turn = await runOneTurn(env);
+    record(
+      "D2 出站请求 model === settings 字面（wire 真值）",
+      turn.sentModel === SETTINGS_MODEL,
+      `wire=${JSON.stringify(turn.sentModel)} settings=${SETTINGS_MODEL}`
+    );
+    record(
+      "D3 响应 model === 'deepseek-v4-flash'（9router 改写证据）",
+      turn.respModel === WIRE_MODEL,
+      `resp=${JSON.stringify(turn.respModel)} expected=${WIRE_MODEL}`
+    );
+    record(
+      "D4 content 非空（字面 key 走通）",
+      turn.text.length > 0,
+      `text=${JSON.stringify(turn.text)} stop=${turn.stop}`
+    );
+  } finally {
+    if (prevKey === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
+    else process.env.ANTHROPIC_AUTH_TOKEN = prevKey;
+    await rm(cwd, { recursive: true, force: true });
+  }
 }
 
 async function main(): Promise<void> {
   assertHostLayerGuard();
 
-  // ── 缺 key 守卫:无 key 一行 stderr + exit 1,不抛异常(TDD 先写失败路径)──
-  // 走 getApiKey 直读 env key(不经 loadIknowEnv,避免触发 model fail-fast)。
-  const llmKeyEnv = process.env.IKNOW_LLM_API_KEY_ENV || "ANTHROPIC_AUTH_TOKEN";
-  const apiKey = getApiKey({ envVarName: llmKeyEnv, fileMap: {} });
-  if (!apiKey || apiKey.length === 0) {
+  // 强制 baseUrl 常量（脚本全程一致；不依赖调用方 env）。
+  const prevBase = process.env.IKNOW_LLM_BASE_URL;
+  process.env.IKNOW_LLM_BASE_URL = BASE_URL;
+
+  // 真实 key 读自 process.env（仅 D 组需要写入 settings；A 组走占位符解析）。
+  const realKey = process.env.ANTHROPIC_AUTH_TOKEN;
+  if (!realKey?.trim()) {
     console.error(
-      "key absent, exit 1 — set ANTHROPIC_AUTH_TOKEN (or via IKNOW_LLM_API_KEY_ENV)"
+      "key absent, exit 1 — set ANTHROPIC_AUTH_TOKEN in environment (real 9router key)."
     );
     process.exit(1);
   }
-  const key: string = apiKey;
 
-  // ── A. settings 生效路径:tmp cwd + .iknow/settings.json ──────────────
-  // 前置条件:IKNOW_LLM_MODEL 必须 UNSET(env 仍最高,设了会压过 settings)。
-  // 此处临时隔离,保证 A 组证明「settings 是唯一 model 来源时生效」,断言后恢复。
-  const withSettings = await mkdtemp(join(tmpdir(), "iknow-i135-settings-"));
-  await mkdir(join(withSettings, ".iknow"), { recursive: true });
-  await writeFile(
-    join(withSettings, ".iknow", "settings.json"),
-    JSON.stringify({ llm: { model: SETTINGS_MODEL } }) + "\n",
-    "utf8"
-  );
-
-  const prevModelEnvA = process.env.IKNOW_LLM_MODEL;
-  delete process.env.IKNOW_LLM_MODEL;
-  let envWithSettings: ReturnType<typeof loadIknowEnv>;
   try {
-    envWithSettings = loadIknowEnv(withSettings);
+    // 所有 4 组共享一个隔离 HOME（避免读真实 ~/.iknow/settings.json 干扰）。
+    const { home } = await withIsolatedHome(async (h) => {
+      await groupA(h);
+      await groupB(h);
+      await groupC(h);
+      await groupD(h, realKey);
+      return h;
+    });
+    void home;
   } finally {
-    if (prevModelEnvA === undefined) delete process.env.IKNOW_LLM_MODEL;
-    else process.env.IKNOW_LLM_MODEL = prevModelEnvA;
+    if (prevBase === undefined) delete process.env.IKNOW_LLM_BASE_URL;
+    else process.env.IKNOW_LLM_BASE_URL = prevBase;
   }
-  const a1 = envWithSettings.llm.model === SETTINGS_MODEL;
-  record(
-    "A1 settings 生效: env.llm.model === settings.llm.model",
-    a1,
-    `env.llm.model=${envWithSettings.llm.model} settings=${SETTINGS_MODEL}`
-  );
 
-  const turnA = await runOneTurn(envWithSettings, key);
-  const a2 = turnA.sentModel === SETTINGS_MODEL;
-  record(
-    "A2 wire 请求 model === settings.llm.model",
-    a2,
-    `wire=${JSON.stringify(turnA.sentModel)} settings=${SETTINGS_MODEL}`
-  );
-  record(
-    "A3 adapter 回合成功(text 非空)",
-    turnA.text.length > 0,
-    `text=${JSON.stringify(turnA.text)} stop=${turnA.supplierStop}`
-  );
-
-  // ── B. 对照路径:无 settings 的 tmp cwd → fail-fast 抛错(不再有兜底)──
-  // 临时隔离 IKNOW_LLM_MODEL + HOME(即使调用方设了 env / 真实 ~/.iknow 配了
-  // model,也要证明「无 settings + 无 env model」组合抛错),断言后恢复。
-  const noSettings = await mkdtemp(join(tmpdir(), "iknow-i135-nosettings-"));
-  const emptyHome = await mkdtemp(join(tmpdir(), "iknow-i135-emptyhome-"));
-  const prevModelEnv = process.env.IKNOW_LLM_MODEL;
-  const prevHome = process.env.HOME;
-  delete process.env.IKNOW_LLM_MODEL;
-  process.env.HOME = emptyHome;
-  let bErr: Error | undefined;
-  try {
-    loadIknowEnv(noSettings);
-  } catch (err) {
-    bErr = err instanceof Error ? err : new Error(String(err));
-  } finally {
-    if (prevModelEnv === undefined) delete process.env.IKNOW_LLM_MODEL;
-    else process.env.IKNOW_LLM_MODEL = prevModelEnv;
-    if (prevHome === undefined) delete process.env.HOME;
-    else process.env.HOME = prevHome;
-  }
-  const b1 = bErr !== undefined && /no LLM model configured/.test(bErr.message);
-  record(
-    "B1 无 settings → loadIknowEnv 抛「no LLM model configured」(fail-fast)",
-    b1,
-    bErr ? `err=${bErr.message}` : "no error thrown (expected fail-fast)"
-  );
-
-  // ── 清理临时 cwd,不污染仓库 ─────────────────────────────────────────
-  await Promise.all([
-    rm(withSettings, { recursive: true, force: true }),
-    rm(noSettings, { recursive: true, force: true }),
-    rm(emptyHome, { recursive: true, force: true }),
-  ]);
-
-  // ── 一行结果到 stderr + exit 码 ──────────────────────────────────────
   const passed = checks.filter((c) => c.pass).length;
   const total = checks.length;
   const allPass = passed === total;
   console.error(
     `i135 result=${allPass ? "pass" : "fail"} checks=${passed}/${total} ` +
       `settings_model=${SETTINGS_MODEL} ` +
-      `key_env=${llmKeyEnv} key_fp=${fp(key)} ` +
-      `baseUrl_host=${hostOf(envWithSettings.llm.baseUrl)} ` +
-      `a_wire=${JSON.stringify(turnA.sentModel)} a_resp=${JSON.stringify(turnA.respModel)} ` +
-      `a_text=${JSON.stringify(turnA.text)}`
+      `key_fp=${fp(realKey)} ` +
+      `baseUrl_host=${hostOf(BASE_URL)}`
   );
-
   process.exitCode = allPass ? 0 : 1;
 }
 

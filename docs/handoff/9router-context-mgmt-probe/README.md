@@ -3,7 +3,7 @@
 **Date**: 2026-08-02
 **Probe script**: `scripts/i132-probe-9router-context-mgmt.ts`
 **9router endpoint**: `http://<WSL-gateway>:20128/v1/messages` (dynamic gateway IP)
-**Key**: `ANTHROPIC_AUTH_TOKEN` (from `~/.claude/key.env`, 35 chars, fingerprint b9ffea64e85b)
+**Key**: `ANTHROPIC_AUTH_TOKEN` (from `~/.claude/key.env`, 35 chars, fingerprint b9ffea64e85b; settings-model-extension 后，9router 探针通过 `settings.llm.apiKey: "${ANTHROPIC_AUTH_TOKEN}"` 单承载读取，IKNOW_LLM_API_KEY_ENV 机制已退役)
 
 ## Probe Results
 

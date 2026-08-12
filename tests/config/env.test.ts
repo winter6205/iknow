@@ -40,8 +40,6 @@ const ENV_KEYS = [
   "IKNOW_LLM_MAX_TURNS",
   // #378 根因 B: MCP 连接超时 env (int; 非法 → fallback 60_000)。
   "IKNOW_MCP_CONNECT_TIMEOUT_MS",
-  // settings-model-extension: model env (settings.llm.model 回退链)。
-  "IKNOW_LLM_MODEL",
 ] as const;
 
 describe("loadIknowEnv — thinking config (#151 T4)", () => {
@@ -475,7 +473,7 @@ describe("loadIknowEnv — settings merge (#353)", () => {
   });
 });
 
-describe("loadIknowEnv — model precedence (settings-model-extension)", () => {
+describe("loadIknowEnv — model source: settings.llm.model 唯一承载 (settings-model-extension)", () => {
   beforeEach(() => {
     for (const k of ENV_KEYS) delete process.env[k];
   });
@@ -483,31 +481,22 @@ describe("loadIknowEnv — model precedence (settings-model-extension)", () => {
     for (const k of ENV_KEYS) delete process.env[k];
   });
 
-  it("env 不设 IKNOW_LLM_MODEL，settings.llm.model 生效", () => {
+  it("settings.llm.model 生效（trim 后）", () => {
     const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "from-settings" },
+      llm: { model: "  from-settings  " },
     });
     assert.equal(env.llm.model, "from-settings");
   });
 
-  it("env 设 IKNOW_LLM_MODEL → env 最高（覆盖 settings）", () => {
-    process.env.IKNOW_LLM_MODEL = "from-env";
-    const env = loadIknowEnv(process.cwd(), {
-      llm: { model: "from-settings" },
-    });
-    assert.equal(env.llm.model, "from-env");
-  });
-
-  it("env 与 settings 都没 model → fail-fast 抛错（不再硬编码兜底）", () => {
-    // 真正的空 settings（无 model 字段）→ env loader 必须抛错而非回退默认。
+  it("settings 无 model → fail-fast 抛「no LLM model configured in settings.llm.model」", () => {
     const noModelSettings: IknowSettings = {};
     assert.throws(() => loadIknowEnv(process.cwd(), noModelSettings), {
-      message: /no LLM model configured/,
+      message: /no LLM model configured in settings\.llm\.model/,
     });
   });
 
-  it("env 空串 → 视同未设，回退 settings.llm.model", () => {
-    process.env.IKNOW_LLM_MODEL = "";
+  it("IKNOW_LLM_MODEL env 已退役：设了也不读（不再覆盖 settings）", () => {
+    process.env.IKNOW_LLM_MODEL = "from-env";
     const env = loadIknowEnv(process.cwd(), {
       llm: { model: "from-settings" },
     });
@@ -696,5 +685,124 @@ describe("loadIknowEnv — mcp connect timeout (#378 根因 B)", () => {
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.mcp.connectTimeoutMs, 120000);
     assert.equal(env.llm.timeoutMs, 30000);
+  });
+});
+
+describe("loadIknowEnv — apiKey 解析路径 (settings-model-extension)", () => {
+  const API_KEY_VARS = ["ANTHROPIC_AUTH_TOKEN", "IKNOW_TEST_API_KEY"] as const;
+  beforeEach(() => {
+    for (const k of [...ENV_KEYS, ...API_KEY_VARS]) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const k of [...ENV_KEYS, ...API_KEY_VARS]) delete process.env[k];
+  });
+
+  it("settings.llm.apiKey 字面 → env.llm.apiKey 原样", () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model", apiKey: "sk-literal-123" },
+    });
+    assert.equal(env.llm.apiKey, "sk-literal-123");
+  });
+
+  it("settings.llm.apiKey 字面前后空白 → trim 后原样", () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model", apiKey: "  sk-literal-123  " },
+    });
+    assert.equal(env.llm.apiKey, "sk-literal-123");
+  });
+
+  it("settings.llm.apiKey ${VAR} + process.env → 展开", () => {
+    process.env.IKNOW_TEST_API_KEY = "sk-from-env";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model", apiKey: "${IKNOW_TEST_API_KEY}" },
+    });
+    assert.equal(env.llm.apiKey, "sk-from-env");
+  });
+
+  it("settings.llm.apiKey ${VAR} 缺失（env 无）→ undefined", () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model", apiKey: "${IKNOW_TEST_API_KEY}" },
+    });
+    assert.equal(env.llm.apiKey, undefined);
+  });
+
+  it("settings.llm.apiKey ${VAR} + process.env 空 → undefined（消费点守卫触发）", () => {
+    process.env.IKNOW_TEST_API_KEY = "";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model", apiKey: "${IKNOW_TEST_API_KEY}" },
+    });
+    assert.equal(env.llm.apiKey, undefined);
+  });
+
+  it("settings 未配 apiKey → env.llm.apiKey = undefined（不默认、不硬编码）", () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model" },
+    });
+    assert.equal(env.llm.apiKey, undefined);
+  });
+
+  it("settings 未配 apiKey + env ANTHROPIC_AUTH_TOKEN 有值 → 仍 undefined（env 不再直供 key）", () => {
+    // settings-model-extension：key 唯一来源 = settings.llm.apiKey；env key 变量名
+    // 不再被 loader 隐式读取（IKNOW_LLM_API_KEY_ENV 已退役）。
+    process.env.ANTHROPIC_AUTH_TOKEN = "sk-should-not-be-read";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model" },
+    });
+    assert.equal(env.llm.apiKey, undefined);
+  });
+
+  it("settings.llm.apiKey ${VAR} + .env.local 兜底 → 展开", async () => {
+    // fileMap = <cwd>/.env.local 合并；process.env 无该变量时读 file。
+    const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-apikey-file-"));
+    await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
+    await writeFile(
+      join(tmpCwd, ".iknow", "settings.json"),
+      JSON.stringify({
+        llm: { model: "test-model", apiKey: "${IKNOW_TEST_API_KEY}" },
+      })
+    );
+    await writeFile(
+      join(tmpCwd, ".env.local"),
+      "IKNOW_TEST_API_KEY=sk-from-file\n"
+    );
+    try {
+      const env = loadIknowEnv(tmpCwd);
+      assert.equal(env.llm.apiKey, "sk-from-file");
+    } finally {
+      await rm(tmpCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('.env.local 值 = "yes" → 视同未设 → undefined', async () => {
+    const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-apikey-yes-"));
+    await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
+    await writeFile(
+      join(tmpCwd, ".iknow", "settings.json"),
+      JSON.stringify({
+        llm: { model: "test-model", apiKey: "${IKNOW_TEST_API_KEY}" },
+      })
+    );
+    await writeFile(join(tmpCwd, ".env.local"), "IKNOW_TEST_API_KEY=yes\n");
+    try {
+      const env = loadIknowEnv(tmpCwd);
+      assert.equal(env.llm.apiKey, undefined);
+    } finally {
+      await rm(tmpCwd, { recursive: true, force: true });
+    }
+  });
+
+  it("settings.llm.apiKey 非法 ${ 未闭合 → settings 层丢弃 → env.llm.apiKey undefined", async () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model", apiKey: "${VAR" },
+    });
+    assert.equal(env.llm.apiKey, undefined);
+  });
+
+  it("IKNOW_LLM_MODEL env 已退役：设了也不读（model 仍来自 settings）", () => {
+    process.env.IKNOW_LLM_MODEL = "from-env";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "from-settings", apiKey: "sk-literal" },
+    });
+    assert.equal(env.llm.model, "from-settings");
   });
 });

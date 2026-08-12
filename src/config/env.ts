@@ -2,31 +2,43 @@
  * Load iknow runtime config from process.env + optional `.env` / `.env.local` (cwd)
  * + `.iknow/settings.json` (#353, loop 配置的单一事实源)。
  *
- * #353 loop-config 三个字段的 precedence:
- * `process.env > .env.local > .env > settings.json (project > user) > hardcoded defaults`
- * （其它字段保持既有 `process.env > .env.local > .env > hardcoded defaults`，不引入 settings 回退）。
- *
- * #353 第二阶段(supersede):模型来源 = `env > settings`，**无任何代码默认**。
- * `IKNOW_LLM_MODEL` / `settings.llm.model` 均未配置 → fail-fast 抛 typed error
- * (不再回退硬编码 `m3-combo`);fallback 由用户经 `settings.llm.fallback` 自配,
- * 代码不预置任何 fallback。
+ * settings-model-extension (#164 第二阶段) — LLM 配置收敛到 settings.json 单承载:
+ *   - `settings.llm.model` 是模型路由 ID 的**字面值**唯一来源（无占位符、无 env 回退）。
+ *     缺失 → fail-fast 抛「no LLM model configured in settings.llm.model」（见
+ *     `LLM_MODEL_MISSING_MESSAGE`）。
+ *     `IKNOW_LLM_MODEL` env 支已退役（不再读取）。
+ *   - `settings.llm.apiKey` 接受字面值或 `${VAR}` 占位符，经 `expandPlaceholders`
+ *     从 `process.env[VAR]` 优先、`.env.local` / `.env` 兜底解析；解析不到 →
+ *     undefined（消费点守卫抛「LLM mode needs API key.」）。
+ *     `IKNOW_LLM_API_KEY_ENV` env 支已退役（不再读取），apiKey 不再依赖 env 变量名。
+ *   - `settings.llm.fallback` / `maxTurns` / `compress` 保留（用户自配）。
+ * 其它字段保持既有 `process.env > .env.local > .env > hardcoded defaults`。
  *
  * Never logs secret values.
  */
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { loadIknowSettings, type IknowSettings } from "./settings.js";
+import { LLM_MODEL_MISSING_MESSAGE } from "./messages.js";
 
 export interface LlmEnv {
   baseUrl: string;
-  /** 模型路由 ID。env loader fail-fast 保证有值（env > settings，无代码默认）。 */
+  /**
+   * 模型路由 ID（settings.llm.model 字面值，trim 后必填）。
+   * env loader fail-fast 保证有值（settings 唯一来源，无任何代码默认）。
+   */
   model: string;
   /**
    * 模型 fallback 路由 ID 列表（来自 settings.llm.fallback，用户自配）。
    * 未配置 → []（无兜底；fallback 的消费方自行决定是否/如何使用）。
    */
   fallback: string[];
-  apiKeyEnv: string;
+  /**
+   * LLM API key（settings.llm.apiKey 经 `expandPlaceholders` 解析）。
+   * 字面值或 `${VAR}` 占位符解析成功 → 真实密钥；解析失败 → undefined。
+   * 消费点守卫：!env.llm.apiKey 时 build-engine / tui-deps / thinking-override
+   * 抛「LLM mode needs API key.」（不允许硬编码兜底）。
+   */
   apiKey: string | undefined;
   maxOutputTokens: number;
   timeoutMs: number;
@@ -291,38 +303,139 @@ function envStreamMode(opts: EnvFileKeyOpts): "on" | "off" {
 }
 
 /**
- * Resolve an API key by name.
- * Precedence: `process.env[envVarName]` then optional `fileMap` (from dotenv merge).
- *
- * Values that are empty/whitespace, or the placeholder `"yes"` (case-insensitive),
- * are treated as unset so template/docs defaults like `API_KEY=yes` do not become
- * live credentials.
+ * 占位符形态：`${VAR}` 或 `$VAR`。`expandPlaceholders` 与 settings.ts
+ * `isApiKeyOrPlaceholder` 共用同一 VAR 名字符集（`[A-Za-z_][A-Za-z0-9_]*`）。
  */
-export interface GetApiKeyOpts {
-  readonly envVarName: string;
-  readonly fileMap?: Record<string, string>;
+const PLACEHOLDER_PATTERN =
+  /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
+
+/**
+ * 提取 value 中所有 `${VAR}` / `$VAR` 占位符的变量名（去重保序）。
+ * 与 settings.ts `analyzePlaceholderSyntax` 共用同一正则源（防 drift）。
+ * env-isolation 的 SC20 遮蔽名单也复用此函数（M1：多段 `${A}${B}` 与
+ * 字面 + 占位符混合的合法形态都能提取出变量名）。
+ */
+export function extractPlaceholders(value: string): string[] {
+  PLACEHOLDER_PATTERN.lastIndex = 0;
+  const names = new Set<string>();
+  value.replace(
+    PLACEHOLDER_PATTERN,
+    (_match, braced: string | undefined, bare: string | undefined) => {
+      names.add(braced ?? (bare as string));
+      return "";
+    }
+  );
+  PLACEHOLDER_PATTERN.lastIndex = 0;
+  return [...names];
 }
 
-export function getApiKey(opts: GetApiKeyOpts): string | undefined {
-  const { envVarName, fileMap } = opts;
-  if (!envVarName) return undefined;
-  const fromProc = process.env[envVarName];
-  const raw =
-    fromProc !== undefined && fromProc !== ""
-      ? fromProc
-      : fileMap?.[envVarName];
-  if (raw === undefined) return undefined;
-  const trimmed = raw.trim();
+/**
+ * M2（prototype 注入）守卫 — `isPrototypeOwnKey`：
+ * Object.prototype 自有键（`constructor` / `__proto__` / `toString` /
+ * `hasOwnProperty` / `valueOf` 等）不是合法 env var 名 —— `process.env[name]`
+ * 与 `fileMap[name]` 都会命中 Object.prototype 返回函数 / 对象，
+ * `raw.trim is not a function` TypeError。任何路径读到这些键 → 拒绝。
+ */
+function isPrototypeOwnKey(name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(Object.prototype, name);
+}
+
+/**
+ * M2（prototype 注入）守卫 — `isPlainEnvName`：
+ *  - 合法标识符形态（`[A-Za-z_][A-Za-z0-9_]*`）；
+ *  - 非 Object.prototype 自有键（防 prototype 注入）；
+ *  - `Object.hasOwn(process.env, varName)`（process.env 是真值源才走）。
+ */
+function isPlainEnvName(varName: string): boolean {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(varName)) return false;
+  if (isPrototypeOwnKey(varName)) return false;
+  return Object.prototype.hasOwnProperty.call(process.env, varName);
+}
+
+/** 按优先级解析单个占位符变量：process.env[varName]（isPlainEnvName 守卫）→ fileMap[varName]。 */
+function resolveValueFromFilename(
+  varName: string,
+  fileMap: Record<string, string>
+): string | undefined {
+  // M2 硬拒：任何 Object.prototype 自有键（包括 fileMap 显式同名 `constructor`）都不解析。
+  if (isPrototypeOwnKey(varName)) return undefined;
+  if (isPlainEnvName(varName)) {
+    const fromProc = process.env[varName];
+    if (fromProc !== undefined && fromProc !== "") return fromProc;
+  }
+  // fileMap 兜底：仅当 varName 是合法标识符、且 fileMap 自身拥有该键时读取
+  // （防 fileMap 命中 Object.prototype；与 process.env 同款 hasOwn 守卫）。
+  if (
+    /^[A-Za-z_][A-Za-z0-9_]*$/.test(varName) &&
+    Object.prototype.hasOwnProperty.call(fileMap, varName)
+  ) {
+    const fromFile = fileMap[varName];
+    if (fromFile !== undefined && fromFile !== "") return fromFile;
+  }
+  return undefined;
+}
+
+/**
+ * settings-model-extension：解析 settings.llm.apiKey 的字面值 / `${VAR}` 占位符。
+ *
+ *  - undefined → undefined（未配，消费点守卫抛「no API key configured」）；
+ *  - 字面值（不含 `$VAR` / `${VAR}` 形态）→ 原样 trim 返回（设置文件里的字面
+ *    密钥即真实密钥；含 `$IDENT` 形态被当作占位符解析，无 `$$` 转义）；
+ *  - `${VAR}` / `$VAR` → 从 `process.env[VAR]` 优先、`fileMap[VAR]`（.env.local /
+ *    .env 合并）兜底解析；任一变量解析不到（未设 / 空 / "yes" 占位符 /
+ *    非普通环境名）→ 返 undefined（触发消费点守卫）；
+ *  - `"yes"`（dotenv 风格占位符，大小写不敏感）→ 视同未设 → undefined。
+ *
+ * 多段占位符（如 `${A}${B}`）逐段解析后拼接；任一缺失整串返 undefined。
+ * 非法占位符形态（如 `${}` / `${1VAR}` / `${VAR` 未闭合）→ undefined
+ * （与 settings.ts `isApiKeyOrPlaceholder` 的丢弃语义对齐 —— 含 `${` 但不匹配
+ * `${VAR}` 形态的串不是合法占位符也不是字面密钥）。
+ * 本函数不打印 / 不落盘任何密钥值。
+ */
+export function expandPlaceholders(
+  value: string | undefined,
+  fileMap: Record<string, string>
+): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
   if (!trimmed) return undefined;
   if (API_KEY_PLACEHOLDERS.has(trimmed.toLowerCase())) return undefined;
-  return trimmed;
+  // 含 `${` 时先做 braced 残骸检测：所有 `${...}` 子串必须都是合法 `${VAR}`，
+  // 残余 `${` 视为非法（`${}` / `${1VAR}` / `${VAR` 未闭合）→ undefined。
+  // 必须在「字面短路」前判，否则 `${}` 等会被当作纯字面返回。
+  if (trimmed.includes("${")) {
+    const bracedOnly = /\$\{[A-Za-z_][A-Za-z0-9_]*\}/g;
+    const stripped = trimmed.replace(bracedOnly, "");
+    if (stripped.includes("${")) return undefined;
+  }
+  const names = extractPlaceholders(trimmed);
+  if (names.length === 0) return trimmed; // 字面密钥原样返回。
+  let resolved = true;
+  const out = trimmed.replace(
+    PLACEHOLDER_PATTERN,
+    (match: string, braced: string | undefined, bare: string | undefined) => {
+      const varName = braced ?? (bare as string);
+      const raw = resolveValueFromFilename(varName, fileMap);
+      if (raw === undefined) {
+        resolved = false;
+        return match;
+      }
+      const val = raw.trim();
+      if (!val || API_KEY_PLACEHOLDERS.has(val.toLowerCase())) {
+        resolved = false;
+        return match;
+      }
+      return val;
+    }
+  );
+  return resolved ? out : undefined;
 }
 
 export function loadIknowEnv(
   cwd: string = process.cwd(),
   settings?: IknowSettings
 ): IknowEnv {
-  // process.env still wins via envGet / getApiKey; among files, .env.local overrides .env.
+  // process.env still wins via envGet; among files, .env.local overrides .env.
   // settings 参数是测试注入缝；不传时自动读取真实 settings 文件（project > user 合并）。
   const mergedSettings = settings ?? loadIknowSettings({ cwd });
 
@@ -331,24 +444,11 @@ export function loadIknowEnv(
     ...parseEnvFile(join(cwd, ".env.local")),
   };
 
-  // SSOT: key 变量名默认 = ANTHROPIC_AUTH_TOKEN（对齐实际部署 + 通用生态命名）。
-  // .env.local 只需持有密钥值本身；如需指向别的变量名，仍可设 IKNOW_LLM_API_KEY_ENV 覆盖。
-  const llmKeyEnv = envGet({
-    file,
-    key: "IKNOW_LLM_API_KEY_ENV",
-    fallback: "ANTHROPIC_AUTH_TOKEN",
-  });
-
-  // SSOT：模型来源 = env > settings，**无任何代码默认**。
-  // 用户未配（既无 IKNOW_LLM_MODEL 也无 settings.llm.model）→ fail-fast 抛错。
-  const modelRaw =
-    envOptional({ file, key: "IKNOW_LLM_MODEL" }) ?? mergedSettings.llm?.model;
+  // settings-model-extension：模型唯一来源 = settings.llm.model 字面值（无占位符、
+  // 无 env 回退）。缺失 → fail-fast 抛错（不硬编码兜底）。IKNOW_LLM_MODEL 已退役。
+  const modelRaw = mergedSettings.llm?.model?.trim();
   if (!modelRaw) {
-    throw new Error(
-      "iknow: no LLM model configured. Set settings.llm.model in " +
-        "~/.iknow/settings.json (or <cwd>/.iknow/settings.json), or " +
-        "IKNOW_LLM_MODEL env var."
-    );
+    throw new Error(LLM_MODEL_MISSING_MESSAGE);
   }
 
   return {
@@ -360,8 +460,9 @@ export function loadIknowEnv(
       }).replace(/\/$/, ""),
       model: modelRaw,
       fallback: mergedSettings.llm?.fallback ?? [],
-      apiKeyEnv: llmKeyEnv,
-      apiKey: getApiKey({ envVarName: llmKeyEnv, fileMap: file }),
+      // settings-model-extension：apiKey 来源 = settings.llm.apiKey（字面或 ${VAR}
+      // 占位符）经 expandPlaceholders 解析；未配 / 解析不到 → undefined（消费点守卫）。
+      apiKey: expandPlaceholders(mergedSettings.llm?.apiKey, file),
       maxOutputTokens: envInt({
         file,
         key: "IKNOW_LLM_MAX_OUTPUT_TOKENS",

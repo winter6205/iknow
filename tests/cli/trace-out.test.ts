@@ -20,15 +20,18 @@ import type { ListeningServer } from "../../src/session-api/http.ts";
 import { startSessionServe } from "../../src/session-api/serve.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import { assistantResult } from "./_fixtures.ts";
+import { installTestSettingsSource } from "../_helpers/install-test-settings-source.ts";
+
+let settingsSource: ReturnType<typeof installTestSettingsSource>;
 
 beforeAll(() => {
-  // #353 第二阶段：model 无代码默认，startSessionServe 装配的 loadIknowEnv()
-  // 需要来源（仅 serve 用例需要）。
-  process.env.IKNOW_LLM_MODEL = "test-model";
+  // #164 第二阶段：IKNOW_LLM_MODEL 已退役，startSessionServe 装配的 loadIknowEnv()
+  // 需要 settings.llm.model 来源（仅 serve 用例需要）→ HOME 重定向到 tmp。
+  settingsSource = installTestSettingsSource();
 });
 
 afterAll(() => {
-  delete process.env.IKNOW_LLM_MODEL;
+  settingsSource.restore();
 });
 
 describe("parse-args --trace-out", () => {

@@ -35,7 +35,6 @@ function makeEnv(apiKey: string): IknowEnv {
       baseUrl: "http://127.0.0.1:9999",
       model: "test-model",
       fallback: [],
-      apiKeyEnv: "ANTHROPIC_AUTH_TOKEN",
       apiKey,
       maxOutputTokens: 1024,
       timeoutMs: 60_000,

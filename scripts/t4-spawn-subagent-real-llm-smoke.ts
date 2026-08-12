@@ -183,14 +183,18 @@ async function main(): Promise<void> {
 
   const env = loadIknowEnv(process.cwd());
   if (!env.llm.apiKey) {
+    // settings-model-extension：key 来源 = settings.llm.apiKey（字面或 ${VAR}）。
     console.error(
-      `set ANTHROPIC_AUTH_TOKEN (or via IKNOW_LLM_API_KEY_ENV); got key_env=${env.llm.apiKeyEnv}`
+      "no API key — set settings.llm.apiKey (literal or ${VAR}) in " +
+        "~/.iknow/settings.json or <cwd>/.iknow/settings.json"
     );
     process.exitCode = 1;
     return;
   }
+  // L6：key=settings.llm.apiKey 是「来源标记」而非变量名（区别于退役前的
+  // IKNOW_LLM_API_KEY_ENV 变量名）。
   console.log(
-    `env: model=${env.llm.model} baseUrl=${hostOf(env.llm.baseUrl)} key_env=${env.llm.apiKeyEnv}`
+    `env: model=${env.llm.model} baseUrl=${hostOf(env.llm.baseUrl)} key=settings.llm.apiKey`
   );
 
   // ── T4 registerShutdown 真实信号触发(先于 LLM,不依赖模型)──────────────

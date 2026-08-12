@@ -386,3 +386,167 @@ describe("loadIknowSettings — settings 文件机制 (#353)", () => {
     }, TypeError);
   });
 });
+
+describe("loadIknowSettings — llm.apiKey validator (settings-model-extension)", () => {
+  it("字面非空串 → 合法（trim 后保留）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "sk-abc-123" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "sk-abc-123" },
+    });
+  });
+
+  it("字面前后空白 → trim 后保留", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "  sk-abc-123  " } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "sk-abc-123" },
+    });
+  });
+
+  it("${VAR} 占位符 → 合法（保留完整形态，env.ts 负责解析）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "${ANTHROPIC_AUTH_TOKEN}" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "${ANTHROPIC_AUTH_TOKEN}" },
+    });
+  });
+
+  it("$VAR 裸形态 → 合法（不含 `${`，按字面接受）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "$NINE_ROUTER_KEY" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "$NINE_ROUTER_KEY" },
+    });
+  });
+
+  it("空串 → 非法丢弃（不产出 apiKey）", async () => {
+    const { home, cwd } = await makeSettings({ llm: { apiKey: "" } }, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("全空白 → 非法丢弃", async () => {
+    const { home, cwd } = await makeSettings({ llm: { apiKey: "   " } }, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("非字符串（数组 / 数字 / null / 对象 / bool）→ 非法丢弃", async () => {
+    for (const bad of [["sk-abc"], 123, null, { name: "sk" }, true, false]) {
+      const { home, cwd } = await makeSettings({ llm: { apiKey: bad } }, {});
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `apiKey=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("${} 非法占位符 → 丢弃（含 `${` 但不匹配 `${VAR}` 形态）", async () => {
+    const { home, cwd } = await makeSettings({ llm: { apiKey: "${}" } }, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("${1VAR} 首字符非法 → 丢弃", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "${1VAR}" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("${VAR 未闭合 → 丢弃", async () => {
+    const { home, cwd } = await makeSettings({ llm: { apiKey: "${VAR" } }, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  // M7: validator 与 env.ts resolver 语义对齐——「整串所有 ${...} 形态都合法」
+  it("M7 收紧：${A}${1B} 混合合法 + 非法 → 丢弃（残骸检测）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "${A}${1B}" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("M7 收紧：${A}${B} 全合法 → 保留", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "${A}${B}" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "${A}${B}" },
+    });
+  });
+
+  it("M7 收紧：${A}literal 合法占位符 + 字面混合 → 保留", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "${A}literal" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "${A}literal" },
+    });
+  });
+
+  it("M7 收紧：plain 字面 → 保留", async () => {
+    const { home, cwd } = await makeSettings({ llm: { apiKey: "plain" } }, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "plain" },
+    });
+  });
+
+  it("project > user 合并 + apiKey 字段（project 覆盖 user）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "${USER_KEY}" } },
+      { llm: { apiKey: "${PROJECT_KEY}" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "${PROJECT_KEY}" },
+    });
+  });
+
+  it("project apiKey 非法不覆盖 user 合法（保留 user 值）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "${USER_KEY}" } },
+      { llm: { apiKey: "${1BAD}" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "${USER_KEY}" },
+    });
+  });
+
+  it("user apiKey 字面、project apiKey ${VAR} → project 覆盖", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "sk-literal" } },
+      { llm: { apiKey: "${PROJECT_KEY}" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "${PROJECT_KEY}" },
+    });
+  });
+
+  it("llm 是数组 → 整个 llm 丢弃（含 apiKey）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: [{ apiKey: "sk-abc" }] },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("返回对象深 frozen 含 apiKey（不可改）", async () => {
+    const { home, cwd } = await makeSettings({ llm: { apiKey: "sk-abc" } }, {});
+    const s = loadIknowSettings({ home, cwd });
+    assert.ok(Object.isFrozen(s.llm));
+    assert.throws(() => {
+      (s.llm as { apiKey: string }).apiKey = "other";
+    }, TypeError);
+  });
+});
