@@ -18,6 +18,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import {
+  CURRENT_SCHEMA_VERSION,
   resolveProjectSessionDir,
   SessionStore,
 } from "../../../src/session-api/store/index.ts";
@@ -36,7 +37,7 @@ const sampleFile = (opts: {
 }): SessionFileV1 => {
   const { id, overrides = {} } = opts;
   return {
-    schemaVersion: 3,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     conversation_id: id,
     summary: "",
     cwd: "/tmp/test",
@@ -215,7 +216,7 @@ describe("SessionStore.load", () => {
     assert.equal(loaded.summary, "hello");
     assert.equal(loaded.cwd, "");
     assert.equal(loaded.sanitized_at, raw.updatedAt);
-    assert.equal(loaded.schemaVersion, 3);
+    assert.equal(loaded.schemaVersion, CURRENT_SCHEMA_VERSION);
     assert.deepEqual(loaded.checkpoints, []);
     assert.equal(after, before);
   });
@@ -252,12 +253,12 @@ describe("SessionStore.load", () => {
     await store.save({ id: file.conversation_id, file });
     const loaded = await store.load("conv-load-ok");
     assert.equal(loaded.conversation_id, "conv-load-ok");
-    assert.equal(loaded.schemaVersion, 3);
+    assert.equal(loaded.schemaVersion, CURRENT_SCHEMA_VERSION);
   });
 
-  it("round-trips a complete v2 file", async () => {
+  it("round-trips a complete v4 file", async () => {
     const file = sampleFile({
-      id: "conv-v2",
+      id: "conv-v4",
       overrides: {
         summary: "saved",
         cwd: "/work",

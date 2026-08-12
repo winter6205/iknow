@@ -45,8 +45,8 @@ const v1File = (opts?: {
   updatedAt: opts?.updatedAt ?? "2026-01-01T00:00:00.000Z",
 });
 
-/** Complete raw v2 file shape (loads as v3 after sanitize — backfills
- *  schemaVersion 3 + checkpoints: []). The fixture stays shaped as written so
+/** Complete raw v2 file shape (loads as v4 after sanitize — backfills
+ *  schemaVersion 4 + checkpoints: []). The fixture stays shaped as written so
  *  the "backfill" tests can see the raw input vs sanitized output diff. */
 const v2File = (): Record<string, unknown> => ({
   schemaVersion: 2,
@@ -169,7 +169,7 @@ describe("sanitizeSessionFile — reject-first ordering", () => {
       () =>
         sanitizeSessionFile({
           ...v2File(),
-          schemaVersion: 4,
+          schemaVersion: CURRENT_SCHEMA_VERSION + 1,
           future_field: 1,
           messages: [{ role: "martian", content: [] }],
         }),
@@ -199,12 +199,33 @@ describe("sanitizeSessionFile — structural rejection", () => {
     );
   });
 
+  it("accepts a message with the v4 system role (Ctrl+C interrupt event)", () => {
+    // schema v4 (#392 T1): `system` role 进白名单 —— 打断作为 transcript 事件
+    // 持久化。sanitize 后消息原样保留(role + content 均不变)。
+    const out = sanitizeSessionFile({
+      ...v1File(),
+      messages: [
+        {
+          role: "system",
+          content: [{ type: "text", text: "Interrupted by user." }],
+        },
+      ],
+    });
+    assert.equal(out.messages.length, 1);
+    assert.equal(out.messages[0]?.role, "system");
+    assert.equal(
+      (out.messages[0]?.content[0] as { type: "text"; text: string }).text,
+      "Interrupted by user."
+    );
+  });
+
   it("rejects a message with an out-of-range role → 'messages'", () => {
+    // `tool` 仍非法 —— 白名单只有 user / assistant / system (schema v4)。
     assert.throws(
       () =>
         sanitizeSessionFile({
           ...v1File(),
-          messages: [{ role: "system", content: [text("x")] }],
+          messages: [{ role: "tool", content: [text("x")] }],
         }),
       isSchemaInvalid("messages")
     );
@@ -293,16 +314,16 @@ describe("sanitizeSessionFile — thinking / redacted_thinking blocks", () => {
   });
 });
 
-// -- sanitizeSessionFile — complete v3 (CURRENT) passes through -------------
+// -- sanitizeSessionFile — complete v4 (CURRENT) passes through -------------
 
-describe("sanitizeSessionFile — schemaVersion 3 complete file", () => {
+describe("sanitizeSessionFile — schemaVersion 4 complete file", () => {
   it("passes through with every field equal to the input", () => {
-    // A CURRENT (v3) file already carries the v3 add-on (checkpoints: []),
+    // A CURRENT (v4) file already carries the v3 add-on (checkpoints: []),
     // so sanitize is a no-op pass-through. The legacy backfill is exercised
     // in the next describe block.
     const input: Record<string, unknown> = {
       schemaVersion: CURRENT_SCHEMA_VERSION,
-      conversation_id: "conv-v3-pass",
+      conversation_id: "conv-v4-pass",
       messages: [userMsg("hello")],
       jsonMode: true,
       turnCount: 1,
@@ -319,7 +340,7 @@ describe("sanitizeSessionFile — schemaVersion 3 complete file", () => {
     assert.deepEqual(out, input);
   });
 
-  it("v2 file gains schemaVersion 3 + checkpoints: [] (v3 backfill)", () => {
+  it("v2 file gains schemaVersion 4 + checkpoints: [] (v3 backfill)", () => {
     const input = v2File();
     const out = sanitizeSessionFile(input) as unknown as Record<
       string,
@@ -354,5 +375,31 @@ describe("sanitizeSessionFile — schemaVersion 3 complete file", () => {
     const out = sanitizeSessionFile(input);
     assert.equal(out.checkpoints?.length, 1);
     assert.equal(out.checkpoints?.[0]?.turnIndex, 1);
+  });
+});
+
+// -- sanitizeSessionFile — v3 → v4 upgrade keeps system messages (#392 T1) ---
+
+describe("sanitizeSessionFile — v3 file with system message upgrades to v4", () => {
+  it("lifts a schemaVersion 3 file containing a system message to v4, keeping it", () => {
+    // schema v4 is additive: a v3 file (≤ CURRENT) sanitizes to v4 with no
+    // field changes — only the validate-time whitelist widened to `system`.
+    // A system message persisted at v3 thus survives the upgrade byte-for-byte.
+    const input = {
+      ...v2File(),
+      schemaVersion: 3,
+      messages: [
+        userMsg("hello"),
+        { role: "system", content: [text("Interrupted by user.")] },
+      ],
+    };
+    const out = sanitizeSessionFile(input);
+    assert.equal(out.schemaVersion, 4);
+    assert.equal(out.messages.length, 2);
+    assert.equal(out.messages[1]?.role, "system");
+    assert.deepEqual(out.messages[1], {
+      role: "system",
+      content: [{ type: "text", text: "Interrupted by user." }],
+    });
   });
 });

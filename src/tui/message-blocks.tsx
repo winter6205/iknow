@@ -93,6 +93,14 @@ function ThinkingSummary(props: { readonly cols: number }): ReactNode {
   );
 }
 
+/** system 中断消息固定文案 SSOT（#392 T3）。TUI 侧独立分支直接渲染，不走
+ *  Markdown 解析；`Interrupted by user.` 来自 loop 中断时注入的 system
+ *  content，无 text block 时 fallback 该文案。 */
+const SYSTEM_INTERRUPT_TEXT = "Interrupted by user.";
+
+/** 中断警示前缀（橙 running 色 + 方括号，同 [思考]/[运行中] 符号约定）。 */
+const SYSTEM_INTERRUPT_MARK = "[已打断]";
+
 /** 完整消息渲染（保留 Markdown 全功能 + tool_use 摘要 + thinking 折叠面板）。
  *
  *  props：
@@ -118,6 +126,20 @@ export function MessageBlocks(props: {
   // noTrailingSelfMargin：scrollbox 全内容滚动场景不再需要（行账已废除）；
   // 对外 API 兼容保留字段，不抛错，渲染层无需差异化。
   void props.noTrailingSelfMargin;
+  if (message.role === "system") {
+    // #392 T3：中断 system 消息走独立渲染分支——警示色 + 固定文案，不进
+    // Markdown / thinking 逻辑。文案取首个 text block（trim），空则 fallback。
+    const texts = message.content
+      .filter((b): b is { type: "text"; text: string } => b.type === "text")
+      .map((b) => b.text)
+      .join("\n");
+    const body = texts.trim() !== "" ? texts.trim() : SYSTEM_INTERRUPT_TEXT;
+    return (
+      <text fg={pal.running} wrapMode="word" width={cols}>
+        {`${SYSTEM_INTERRUPT_MARK} ${body}`}
+      </text>
+    );
+  }
   if (message.role === "user") {
     const texts = message.content
       .filter((b): b is { type: "text"; text: string } => b.type === "text")

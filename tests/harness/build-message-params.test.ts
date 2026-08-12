@@ -24,6 +24,16 @@ const userMsg = (text: string): AnthropicNativeMessage => ({
   content: [{ type: "text", text }],
 });
 
+const assistantMsg = (text: string): AnthropicNativeMessage => ({
+  role: "assistant",
+  content: [{ type: "text", text }],
+});
+
+const systemMsg = (text: string): AnthropicNativeMessage => ({
+  role: "system",
+  content: [{ type: "text", text }],
+});
+
 const initState = (msgs: AnthropicNativeMessage[] = []): LoopState => ({
   messages: msgs,
   turnCount: 0,
@@ -94,5 +104,43 @@ describe("buildMessageParams — system field (#121 T6 / SC 1)", () => {
     assert.equal(params.system, "sys");
     assert.ok(Array.isArray(params.tools), "tools present alongside system");
     assert.equal((params.tools as ReadonlyArray<unknown>).length, 1);
+  });
+
+  describe("wire body system-role guard (#392 T2 / R1 #385)", () => {
+    it("filters out system-role messages from the wire body (#392 T2)", () => {
+      const params = buildMessageParams(
+        makeOpts(),
+        initState([
+          userMsg("u1"),
+          assistantMsg("a1"),
+          systemMsg("interrupt marker"),
+          userMsg("u2"),
+        ]),
+        {}
+      );
+      const wireRoles = (
+        params.messages as ReadonlyArray<{ role: string }>
+      ).map((m) => m.role);
+      assert.ok(
+        !wireRoles.includes("system"),
+        "system-role messages must never reach the SDK wire body"
+      );
+      // user / assistant 项数量与顺序保持(打断的 system 项只进 transcript 展示层)。
+      assert.deepEqual(wireRoles, ["user", "assistant", "user"]);
+    });
+
+    it("passes messages through unchanged when no system role is present", () => {
+      const input = [userMsg("u1"), assistantMsg("a1"), userMsg("u2")];
+      const params = buildMessageParams(makeOpts(), initState(input), {});
+      const wireRoles = (
+        params.messages as ReadonlyArray<{ role: string }>
+      ).map((m) => m.role);
+      assert.deepEqual(wireRoles, ["user", "assistant", "user"]);
+      assert.equal(
+        (params.messages as ReadonlyArray<unknown>).length,
+        input.length,
+        "no system → 长度与顺序原样透传"
+      );
+    });
   });
 });

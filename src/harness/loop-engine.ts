@@ -213,6 +213,28 @@ function appendMessage(opts: {
   };
 }
 
+/** Ctrl+C / signal abort 触发的中断 system 消息固定文案（#392 T4 / G3 #388）。
+ *  Transcript 一等公民：append 到 LoopState.messages 末尾，随持久化/渲染/
+ * rewind 一起出现；provider 边界（buildMessageParams filter，T2）剥离它，
+ * 绝不进 SDK wire body。system 不构成 turn：splitTurns 按
+ * `role === "user"` 且非 tool_result 切片，system 项自然落在相邻 turn 间隙。 */
+const SYSTEM_INTERRUPT_TEXT = "Interrupted by user.";
+
+/** 把 system 中断消息 append 到权威历史末尾（immutable）；与 appendMessage
+ *  同样的冻结纪律，append-only 不变式不破。 */
+function appendSystemInterrupt(state: LoopState): LoopState {
+  return {
+    messages: Object.freeze([
+      ...state.messages,
+      freezeMessage({
+        role: "system",
+        content: [{ type: "text", text: SYSTEM_INTERRUPT_TEXT }],
+      }),
+    ]),
+    turnCount: state.turnCount,
+  };
+}
+
 /**
  * 从权威历史派生 `result.finalText`(仅 `reason === "completed"` 时调用)。
  *
@@ -1344,11 +1366,23 @@ export async function run(
     }
     if (transition.kind === "stop") {
       const { reason, finalState } = transition;
+      // #392 T4 / G3 #388:signal abort 取消时把 system 中断消息 append
+      // 到权威历史末尾(transcript 一等公民)。在 epilogueSummary 之前完成,
+      // 让收尾摘要事件看到完整历史(若它消费 messages 派生 stop_summary 文案)。
+      // Assistant 回合在 cancelled 时不进历史(raceModel / cancelled 归因),
+      // 所以 system 直接 append 到 finalState 末尾即可,不会与半截 assistant
+      // 重复或错位。timeout 不在此分支处理:timeout 是模型层超时而非用户中断,
+      // 固定文案 "Interrupted by user." 不适用;后续若需要可在 toInterruptReason
+      // 引入新 label 时再扩。
+      const finalMessages =
+        reason === "cancelled"
+          ? appendSystemInterrupt(finalState).messages
+          : finalState.messages;
       const finalText =
-        reason === "completed" ? deriveFinalText(finalState.messages) : null;
+        reason === "completed" ? deriveFinalText(finalMessages) : null;
       const result: RunResult = {
         finalText,
-        messages: finalState.messages,
+        messages: finalMessages,
         turnCount: finalState.turnCount,
         stopReason: reason,
         lastUsage,
@@ -1358,7 +1392,7 @@ export async function run(
       if (reason !== "completed") {
         await epilogueSummary({
           deps,
-          messages: finalState.messages,
+          messages: finalMessages,
           reason,
           onStream: opts?.onStream,
           signal,

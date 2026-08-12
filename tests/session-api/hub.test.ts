@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionHub, mapStoreError } from "../../src/session-api/hub.ts";
 import {
+  CURRENT_SCHEMA_VERSION,
   resolveProjectSessionDir,
   SessionStore,
 } from "../../src/session-api/store/index.ts";
@@ -62,7 +63,7 @@ function sampleFile(opts: {
 }): SessionFileV1 {
   const { id, overrides = {} } = opts;
   return {
-    schemaVersion: 3,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     conversation_id: id,
     summary: "",
     cwd: "/tmp/test",
@@ -168,8 +169,8 @@ describe("createSession", () => {
         await import("node:fs/promises")
       ).readFile(join(sessionDir, `${session.conversation_id}.json`), "utf8")
     );
-    // T1 checkpoint: createSession writes the v3 schema + empty checkpoints.
-    assert.equal(raw.schemaVersion, 3);
+    // T1 checkpoint: createSession writes the v4 schema + empty checkpoints.
+    assert.equal(raw.schemaVersion, CURRENT_SCHEMA_VERSION);
     assert.equal(raw.summary, "");
     assert.equal(typeof raw.cwd, "string");
     assert.equal(typeof raw.sanitized_at, "string");
@@ -296,14 +297,17 @@ describe("boundary: exception — cancelled signal", () => {
     assert.equal(res.turn.answer.finalText, "");
     // T1: cancelled WITH delta>0 now persists — the user query landed before
     // the abort, so the interrupted turn is recoverable via a checkpoint.
+    // #392 T4:cancelled 时 system 中断消息 append 到末尾(transcript 一等公民),
+    // 所以 messages 长度 = seed user(1) + system interrupt(1) = 2。
     const loaded = await store.load(session.conversation_id);
-    assert.equal(loaded.messages.length, 1);
+    assert.equal(loaded.messages.length, 2);
+    assert.equal(loaded.messages[1]!.role, "system");
     assert.equal(loaded.turnCount, 0);
     // A checkpoint record marks the interrupted turn.
     assert.equal(loaded.checkpoints?.length, 1);
     const cp = loaded.checkpoints?.[0];
     assert.equal(cp?.turnIndex, 0);
-    assert.equal(cp?.messagesCount, 1);
+    assert.equal(cp?.messagesCount, 2);
     assert.equal(cp?.interruptReason, "cancelled");
     assert.equal(typeof cp?.interruptedAt, "string");
     // The pure-function path (shouldPersistCheckpoint with delta=0) is

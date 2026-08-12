@@ -807,13 +807,58 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     assert.equal(result.stopReason, "cancelled");
     assert.equal(result.turnCount, 0);
     // Only the seed user message is in history; whole turn not appended.
-    assert.equal(result.messages.length, 1);
+    // #392 T4:cancelled 时 system 中断消息 append 到末尾(transcript 一等公民),
+    // 所以 messages 长度 = 1(seed user) + 1(system interrupt)。
+    assert.equal(result.messages.length, 2);
     assert.equal(result.messages[0]!.role, "user");
+    assert.equal(result.messages[1]!.role, "system");
+    const systemMsg = result.messages[1]!;
+    if (systemMsg.role === "system") {
+      const firstBlock = systemMsg.content[0];
+      if (firstBlock && firstBlock.type === "text") {
+        assert.equal(firstBlock.text, "Interrupted by user.");
+      } else {
+        assert.fail("system content[0] should be a text block");
+      }
+    } else {
+      assert.fail("second message should be system role");
+    }
     // Trace has one turn entry (the cancelled model attempt) flagged.
     assert.equal(trace.turns.length, 1);
     const last = trace.turns[0]!;
     assert.equal(last.cancelKind, "callerAbort");
     assert.equal(last.toolCalls.length, 0);
+  });
+
+  it("T4 #392: completed path does NOT append system interrupt (#392 G3 #388)", async () => {
+    // 守卫:非 cancelled 停因不能 append system 消息(只 cancelled 触发)。
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hi"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const controller = new AbortController();
+    const { result } = await run(
+      "x",
+      {
+        adapter: model,
+        executor: exec,
+        registry: reg,
+        maxTurns: 5,
+      },
+      controller.signal
+    );
+    assert.equal(result.stopReason, "completed");
+    // No system message appended for completed path
+    const systemEntries = result.messages.filter((m) => m.role === "system");
+    assert.equal(systemEntries.length, 0);
   });
 
   it("S13: signal abort during tool execution -> cancelled; tool_result is execution_failed", async () => {
@@ -850,10 +895,12 @@ describe("loop engine 017 S12–S17 (signal/timeout/trace)", () => {
     setTimeout(() => controller.abort(), 10);
     const { result, trace } = await p;
     assert.equal(result.stopReason, "cancelled");
-    // History grew: seed user + assistant(tool_use) + user(tool_result).
-    assert.equal(result.messages.length, 3);
+    // History grew: seed user + assistant(tool_use) + user(tool_result)
+    // + system interrupt (#392 T4, transcript 一等公民, append 在末尾)。
+    assert.equal(result.messages.length, 4);
     assert.equal(result.messages[1]!.role, "assistant");
     assert.equal(result.messages[2]!.role, "user");
+    assert.equal(result.messages[3]!.role, "system");
     // The tool_result encodes an execution_failed with "cancelled".
     const trBlock = result.messages[2]!.content[0]! as {
       type: "tool_result";
@@ -1956,7 +2003,6 @@ describe("loop engine T4 #160: RunResult.lastUsage (ADR-0008 Decision 5)", () =>
  *   - 传 subset promptTools → adapter.step 收到的就是该数组。
  */
 
-
 // ---------------------------------------------------------------------------
 // plan T3 / ADR-0013: reactive compact (PromptTooLongError → compact + retry)
 // ---------------------------------------------------------------------------
@@ -2342,7 +2388,8 @@ describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
     const tmpDir = mkdtempSync(join(tmpdir(), "summary-trace-"));
-    const { createJsonlTraceService } = await import("../../src/harness/trace/jsonl.ts");
+    const { createJsonlTraceService } =
+      await import("../../src/harness/trace/jsonl.ts");
     const { readFileSync } = await import("node:fs");
 
     const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
@@ -2350,11 +2397,18 @@ describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
     const exec = createExecutor(reg);
     const model = createStubModel({
       responses: [
-        assistantResult({ texts: ["never"], toolCalls: [], supplierStop: "success" }),
+        assistantResult({
+          texts: ["never"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
       ],
       delayMs: 200,
     });
-    const trace = createJsonlTraceService({ filePath: tmpDir, conversationId: "t4-sum" });
+    const trace = createJsonlTraceService({
+      filePath: tmpDir,
+      conversationId: "t4-sum",
+    });
     const { result, trace: runTrace } = await run("x", {
       adapter: model,
       executor: exec,
@@ -2367,7 +2421,11 @@ describe("loop engine T4: 收尾摘要 epilogue (stop_summary)", () => {
     // 主循环 turn: turnCount=0 时模型阶段 timeout → turn trace 1 条。
     assert.equal(runTrace.turns.length, 1);
     // JSONL:error llm_call + turn + summary ok llm_call = 3。
-    const lines = readFileSync(join(tmpDir, "t4-sum.jsonl"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const lines = readFileSync(join(tmpDir, "t4-sum.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
     assert.equal(lines.length, 3);
     assert.equal(lines[0]!["status"], "error");
     assert.equal(lines[1]!["record_type"], "turn");

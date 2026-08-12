@@ -68,6 +68,11 @@ const assistantMsg = (
   role: "assistant",
   content: blocks as AnthropicNativeMessage["content"],
 });
+// #392 T5:system 中断消息 helper(append-only,用作 rewind 锚点测试 fixture)
+const systemMsg = (body: string): AnthropicNativeMessage => ({
+  role: "system",
+  content: [{ type: "text", text: body }],
+});
 
 /** Anchor used to build a v3 SessionFileV1 in tests. Spread overrides fields. */
 const baseFile = (): SessionFileV1 => ({
@@ -166,6 +171,47 @@ describe("splitTurns — turn boundary projection", () => {
       assistantMsg([text("b")]),
     ];
     assert.equal(splitTurns(messages).length, 0);
+  });
+
+  // #392 T4 / B2:system 中断消息在场时 turn 切片不变(reviewer Medium #3)
+  it("does not let an interleaved system message shift turn boundaries", () => {
+    // 模拟真实中断:user(q1) → assistant(tool_use) → user(tool_result) →
+    // assistant(text) 之后 append system(Interrupted by user.),再 user(q2)。
+    // system 不构成 turn —— splitTurns 只按 role==="user" 且非 tool_result 切片。
+    const messages = [
+      userMsg("q1"),
+      assistantMsg([toolUse("t1", "read_file", {})]),
+      userToolResult("t1"),
+      assistantMsg([text("done")]),
+      systemMsg("Interrupted by user."),
+      userMsg("q2"),
+      assistantMsg([text("a2")]),
+    ];
+    const slices = splitTurns(messages);
+    assert.equal(slices.length, 2);
+    // turn0 应跨过 system 项:start 0 → end 5(system 落 [4,5) 间隙,不参与切片)
+    assert.equal(slices[0]!.start, 0);
+    assert.equal(slices[0]!.end, 5);
+    assert.equal(slices[1]!.start, 5);
+    assert.equal(slices[1]!.end, 7);
+  });
+
+  it("keeps the interrupt system message as the final element (append-only tail)", () => {
+    // 打断发生在 last turn 之后 → system 落在 messages 末尾,切片只含既有 turns
+    const messages = [
+      userMsg("q1"),
+      assistantMsg([text("a1")]),
+      systemMsg("Interrupted by user."),
+    ];
+    const slices = splitTurns(messages);
+    assert.equal(slices.length, 1);
+    assert.equal(slices[0]!.start, 0);
+    // 唯一 query 起点是 index 0,end 延伸到 messages 末尾(含 assistant + system),
+    // 但 turn 切片只以 query 定位 —— system 不引入新 turn。
+    assert.equal(slices[0]!.end, 3);
+    // system 是最后一个元素,不进任何 turn slice
+    const last = messages[messages.length - 1]!;
+    assert.equal(last.role, "system");
   });
 });
 
