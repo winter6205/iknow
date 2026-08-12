@@ -2,8 +2,14 @@
  * #353: iknow settings 文件机制（loop 配置的单一事实源）。
  *
  * 读取 user 级 `~/.iknow/settings.json` 与 project 级 `<cwd>/.iknow/settings.json`，
- * project 覆盖 user（llm 内部逐层合并：project 只覆盖其实际出现的合法字段，
+ * project 覆盖 user（llm / secrets 内部逐层合并：project 只覆盖其实际出现的合法字段，
  * 未覆盖的 user 字段保留）。
+ *
+ * `secrets` 段（#126 hook-system）：
+ *  - `secrets.enabled`：是否启用 hook 敏感信息脱敏，boolean 才合法；缺失 → 消费方按
+ *    true（默认开启）处理。
+ *  - `secrets.patterns`：敏感信息匹配模式（正则源串）列表，非空串字符串数组才合法；
+ *    缺失 / 空数组 → 消费方回退内置默认集（settings 层不预填内置集，只承载用户配置）。
  *
  * settings-model-extension（#164 第二阶段）：
  *  - `settings.llm.model` 是模型路由 ID 的字面值来源（trim 后非空串），env.ts
@@ -52,8 +58,20 @@ export interface IknowSettingsLlm {
   apiKey?: string;
 }
 
+export interface IknowSettingsSecrets {
+  /** 是否启用 hook 敏感信息脱敏。缺失时消费方按 true 处理（默认开启）。 */
+  enabled?: boolean;
+  /**
+   * 敏感信息匹配模式（正则源串）列表。用户自配，代码不预置任何默认；
+   * 缺失 / 空数组 → 消费方回退内置默认集（settings 层不填内置集）。
+   * 非空串字符串数组才合法（至少 1 项，每项 trim 后非空）；非法 → 丢弃该字段。
+   */
+  patterns?: string[];
+}
+
 export interface IknowSettings {
   llm?: IknowSettingsLlm;
+  secrets?: IknowSettingsSecrets;
 }
 
 export interface LoadSettingsOpts {
@@ -254,6 +272,38 @@ function mergeLlm(
   return out;
 }
 
+/**
+ * 校验单个 `secrets` 层：非法字段丢弃。
+ * 非普通对象（数组 / 字符串 / 数字等）→ undefined（丢弃该层）。
+ * enabled 非 boolean → 丢弃该字段；patterns 非非空串字符串数组 → 丢弃该字段；
+ * 全部字段非法 → undefined（丢弃该层）。
+ */
+function parseSecrets(raw: unknown): IknowSettingsSecrets | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const out: IknowSettingsSecrets = {};
+  if (typeof raw.enabled === "boolean") out.enabled = raw.enabled;
+  if (isNonEmptyStringArray(raw.patterns)) {
+    out.patterns = raw.patterns.map((s) => s.trim());
+  }
+  if (out.enabled === undefined && out.patterns === undefined) return undefined;
+  return out;
+}
+
+/** 逐层合并 secrets：project 字段优先，未覆盖的 user 字段保留。 */
+function mergeSecrets(
+  user: IknowSettingsSecrets | undefined,
+  project: IknowSettingsSecrets | undefined
+): IknowSettingsSecrets | undefined {
+  if (!user && !project) return undefined;
+  const out: IknowSettingsSecrets = {};
+  if (project?.enabled !== undefined) out.enabled = project.enabled;
+  else if (user?.enabled !== undefined) out.enabled = user.enabled;
+  if (project?.patterns !== undefined) out.patterns = project.patterns;
+  else if (user?.patterns !== undefined) out.patterns = user.patterns;
+  if (out.enabled === undefined && out.patterns === undefined) return undefined;
+  return out;
+}
+
 /** 先对每层做值校验，再合并；被丢弃的字段不参与覆盖。 */
 function mergeSettings(
   userRaw: Record<string, unknown>,
@@ -262,7 +312,13 @@ function mergeSettings(
   const userLlm = parseLlm(userRaw.llm);
   const projectLlm = parseLlm(projectRaw.llm);
   const llm = mergeLlm(userLlm, projectLlm);
-  return llm ? { llm } : {};
+  const userSecrets = parseSecrets(userRaw.secrets);
+  const projectSecrets = parseSecrets(projectRaw.secrets);
+  const secrets = mergeSecrets(userSecrets, projectSecrets);
+  if (llm && secrets) return { llm, secrets };
+  if (llm) return { llm };
+  if (secrets) return { secrets };
+  return {};
 }
 
 /** 递归冻结对象（含嵌套对象）。 */

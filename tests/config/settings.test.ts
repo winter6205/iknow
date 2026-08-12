@@ -550,3 +550,152 @@ describe("loadIknowSettings — llm.apiKey validator (settings-model-extension)"
     }, TypeError);
   });
 });
+
+describe("loadIknowSettings — secrets 段 (#126 hook-system T4)", () => {
+  it("user 写 secrets → 读到 enabled + patterns", async () => {
+    const { home, cwd } = await makeSettings(
+      { secrets: { enabled: true, patterns: ["TOKEN"] } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      secrets: { enabled: true, patterns: ["TOKEN"] },
+    });
+  });
+
+  it("secrets 缺失 → 不产出 secrets 字段", async () => {
+    const { home, cwd } = await makeSettings({ llm: { model: "m3" } }, {});
+    const s = loadIknowSettings({ home, cwd });
+    assert.deepEqual(s, { llm: { model: "m3" } });
+    assert.equal(s.secrets, undefined);
+  });
+
+  it("secrets.patterns 空数组 → 丢弃（不产出 patterns）", async () => {
+    const { home, cwd } = await makeSettings({ secrets: { patterns: [] } }, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("secrets.enabled: false → 读到（false 也是合法 boolean）", async () => {
+    const { home, cwd } = await makeSettings(
+      { secrets: { enabled: false } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      secrets: { enabled: false },
+    });
+  });
+
+  it("secrets.enabled: true → 读到", async () => {
+    const { home, cwd } = await makeSettings(
+      { secrets: { enabled: true } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      secrets: { enabled: true },
+    });
+  });
+
+  it("project 覆盖 user secrets.enabled（同字段替换）", async () => {
+    const { home, cwd } = await makeSettings(
+      { secrets: { enabled: true } },
+      { secrets: { enabled: false } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      secrets: { enabled: false },
+    });
+  });
+
+  it("project 覆盖 user secrets.patterns（替换非 merge 残留）", async () => {
+    const { home, cwd } = await makeSettings(
+      { secrets: { patterns: ["USER_TOKEN"] } },
+      { secrets: { patterns: ["PROJECT_TOKEN"] } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      secrets: { patterns: ["PROJECT_TOKEN"] },
+    });
+  });
+
+  it("逐层合并：project 只覆盖 enabled，保留 user 的 patterns", async () => {
+    const { home, cwd } = await makeSettings(
+      { secrets: { enabled: true, patterns: ["USER_TOKEN"] } },
+      { secrets: { enabled: false } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      secrets: { enabled: false, patterns: ["USER_TOKEN"] },
+    });
+  });
+
+  it('enabled 非 boolean（"yes" / 0 / 1）→ 丢弃（不产出 secrets）', async () => {
+    for (const bad of ["yes", 0, 1]) {
+      const { home, cwd } = await makeSettings(
+        { secrets: { enabled: bad } },
+        {}
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `enabled=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("patterns 非数组 / 含非字符串 / 含空串 → 丢弃整个 patterns 字段", async () => {
+    for (const bad of ["x", 123, [123], [""], ["   "], [null]]) {
+      const { home, cwd } = await makeSettings(
+        { secrets: { patterns: bad } },
+        {}
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `patterns=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("patterns 非法但 enabled 合法 → 丢弃 patterns、保留 enabled", async () => {
+    const { home, cwd } = await makeSettings(
+      { secrets: { enabled: true, patterns: [123] } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      secrets: { enabled: true },
+    });
+  });
+
+  it("project secrets 非法不覆盖 user 合法（保留 user 值）", async () => {
+    const { home, cwd } = await makeSettings(
+      { secrets: { enabled: true, patterns: ["USER_TOKEN"] } },
+      { secrets: { enabled: "yes", patterns: [123] } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      secrets: { enabled: true, patterns: ["USER_TOKEN"] },
+    });
+  });
+
+  it("secrets.patterns 元素 trim 后保留（两端空白去除）", async () => {
+    const { home, cwd } = await makeSettings(
+      { secrets: { patterns: ["  TOKEN_ONE  ", "TOKEN_TWO"] } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      secrets: { patterns: ["TOKEN_ONE", "TOKEN_TWO"] },
+    });
+  });
+
+  it("返回对象深 frozen 含 secrets 段（enabled + patterns 数组不可改）", async () => {
+    const { home, cwd } = await makeSettings(
+      { secrets: { enabled: true, patterns: ["TOKEN"] } },
+      {}
+    );
+    const s = loadIknowSettings({ home, cwd });
+    assert.ok(Object.isFrozen(s));
+    assert.ok(Object.isFrozen(s.secrets));
+    assert.ok(Object.isFrozen(s.secrets!.patterns));
+    assert.throws(() => {
+      (s.secrets as { enabled: boolean }).enabled = false;
+    }, TypeError);
+    assert.throws(() => {
+      (s.secrets!.patterns as string[])[0] = "other";
+    }, TypeError);
+  });
+});
