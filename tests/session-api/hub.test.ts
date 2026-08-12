@@ -297,14 +297,17 @@ describe("boundary: exception — cancelled signal", () => {
     assert.equal(res.turn.answer.finalText, "");
     // T1: cancelled WITH delta>0 now persists — the user query landed before
     // the abort, so the interrupted turn is recoverable via a checkpoint.
+    // #392 T4:cancelled 时 system 中断消息 append 到末尾(transcript 一等公民),
+    // 所以 messages 长度 = seed user(1) + system interrupt(1) = 2。
     const loaded = await store.load(session.conversation_id);
-    assert.equal(loaded.messages.length, 1);
+    assert.equal(loaded.messages.length, 2);
+    assert.equal(loaded.messages[1]!.role, "system");
     assert.equal(loaded.turnCount, 0);
     // A checkpoint record marks the interrupted turn.
     assert.equal(loaded.checkpoints?.length, 1);
     const cp = loaded.checkpoints?.[0];
     assert.equal(cp?.turnIndex, 0);
-    assert.equal(cp?.messagesCount, 1);
+    assert.equal(cp?.messagesCount, 2);
     assert.equal(cp?.interruptReason, "cancelled");
     assert.equal(typeof cp?.interruptedAt, "string");
     // The pure-function path (shouldPersistCheckpoint with delta=0) is

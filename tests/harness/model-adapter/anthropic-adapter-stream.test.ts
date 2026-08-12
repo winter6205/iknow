@@ -941,7 +941,10 @@ describe("RealAnthropicAdapter — stream-under-race 专测 (T3 #176, 023 语义
     controller.abort();
     const { result } = await pending;
     assert.equal(result.stopReason, "cancelled");
-    assert.equal(result.messages.length, 1);
+    // #392 T4:cancelled 时 system 中断消息 append 到末尾(transcript 一等公民)。
+    // seed user(1) + system interrupt(1) = 2。
+    assert.equal(result.messages.length, 2);
+    assert.equal(result.messages[1]!.role, "system");
     assert.equal(result.turnCount, 0);
   });
 

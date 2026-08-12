@@ -337,13 +337,15 @@ describe("processChatLine checkpoint 落盘接线", () => {
     controller.abort();
     const r = await pending;
     assert.equal(r.ranQuery, true);
-    // cancelled 不 append assistant(整回合不进历史)→ messages 只有 seed user。
-    assert.equal(ctx.state.messages.length, 1);
+    // cancelled 不 append assistant(整回合不进历史)→ messages 含 seed user +
+    // #392 T4 system 中断消息 transcript 追加。
+    assert.equal(ctx.state.messages.length, 2);
+    assert.equal(ctx.state.messages[1]!.role, "system");
     const file = await s.load("pcl-cancelled");
     assert.equal(file.turnCount, 0);
     assert.equal(file.checkpoints?.length, 1);
     assert.equal(file.checkpoints?.[0]?.interruptReason, "cancelled");
-    assert.equal(file.checkpoints?.[0]?.messagesCount, 1);
+    assert.equal(file.checkpoints?.[0]?.messagesCount, 2);
   });
 
   it("MaxTurnsExceeded-at-turn-0 → delta=0 → 不写文件(#120 裁决 + ACR)", async () => {
