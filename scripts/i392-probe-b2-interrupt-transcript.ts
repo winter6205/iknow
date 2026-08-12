@@ -10,18 +10,20 @@
  *   - 不走 fetch/parseLlmResponseJson;直接 createRealAnthropicAdapter。
  *   - mock SDK client:捕获 client.messages.create 的 params,断言 wire body
  *     不含 role:"system";同时调真实 SDK 完成 model 路径(用 dev router)。
- *   - 4 条断言(Q5.2):
+ *   - 5 条断言(Q5.2):
  *     ① result.stopReason === "cancelled"
  *     ② result.messages 末尾含 role:"system",text === "Interrupted by user."
- *     ③ 落盘 SessionStore 后 reload 末尾仍含 system 项
- *     ④ 落盘后 buildMessageParams wire body 不含 system 项
+ *     ③ JSON round-trip 模拟持久化后 system 项仍在(harness 层内,
+ *        不 import SessionStore —— host-layer guard 禁止)
+ *     ④ buildMessageParams wire body 不含 role:"system"(T2 守门)
+ *     ⑤ round-trip 后再次 buildMessageParams 仍不含 system(双重守门)
  *   - 成功落 docs/handoff/392-smoke/b2-interrupt-transcript.{json,md};
  *     失败落 fail 文件 + 打 trace + exit 1。
  *   - 缺 apiKey → stderr 提示 + exit 1,不抛。
  *   - 不 log key/baseURL 完整值;baseURL 只截到 host。
  *
  * 独立运行:npx tsx scripts/i392-probe-b2-interrupt-transcript.ts
- * (不进 npm scripts 默认表 — 由 `npm run probe:interrupt-transcript` 触发)
+ * (由 `npm run probe:interrupt-transcript` 触发)
  */
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
@@ -104,6 +106,8 @@ interface ProbeContext {
   readonly stopReason: string;
   readonly messages: ReadonlyArray<{ readonly role: string }>;
   readonly wireRoles: ReadonlyArray<string>;
+  readonly roundTripRoles: ReadonlyArray<string>;
+  readonly wireRolesAfterRoundTrip: ReadonlyArray<string>;
   readonly turns: number;
   readonly runError: unknown;
 }
@@ -134,6 +138,11 @@ function buildAssertions(ctx: ProbeContext): {
     }
   }
   const wireSystemCount = ctx.wireRoles.filter((r) => r === "system").length;
+  const wireSystemCountAfterRoundTrip = ctx.wireRolesAfterRoundTrip.filter(
+    (r) => r === "system"
+  ).length;
+  const roundTripSystemKept =
+    ctx.roundTripRoles[ctx.roundTripRoles.length - 1] === "system";
   const list: ReadonlyArray<AssertionCheck> = [
     { name: "stopReason === cancelled", pass: ctx.stopReason === "cancelled" },
     {
@@ -145,8 +154,16 @@ function buildAssertions(ctx: ProbeContext): {
       pass: systemTextOk,
     },
     {
+      name: "JSON round-trip 后 system 项仍在",
+      pass: roundTripSystemKept,
+    },
+    {
       name: "wire body 不含 role:system (T2 守门)",
       pass: wireSystemCount === 0,
+    },
+    {
+      name: "round-trip 后 wire body 仍不含 role:system (双重守门)",
+      pass: wireSystemCountAfterRoundTrip === 0,
     },
   ];
   return { list, allPass: list.every((a) => a.pass) };
@@ -185,6 +202,8 @@ async function main(): Promise<void> {
   let stopReason = "unknown";
   let messages: ReadonlyArray<{ readonly role: string }> = [];
   let wireRoles: ReadonlyArray<string> = [];
+  let roundTripRoles: ReadonlyArray<string> = [];
+  let wireRolesAfterRoundTrip: ReadonlyArray<string> = [];
   let turns = 0;
   let runError: unknown = undefined;
 
@@ -202,20 +221,41 @@ async function main(): Promise<void> {
     messages = result.messages;
     turns = result.turnCount;
 
-    // 落盘 reload + wire 守门(也跑一次 buildMessageParams 模拟 provider)
-    const reloadedMessages = messages; // e2e reload 模拟以同一份 messages 验
+    // 持久化模拟:JSON round-trip(harness 层内,不 import SessionStore ——
+    // host-layer guard 禁止引用 src/session-api)。真实落盘由 e2e 覆盖
+    // (archive/tests-real-llm/b2-interrupt-transcript.test.ts),此 probe 只
+    // 验「JSON 序列化后 system 项仍在 + wire 双重守门」。
+    const roundTripped = JSON.parse(JSON.stringify(messages)) as ReadonlyArray<{
+      readonly role: string;
+    }>;
+    roundTripRoles = roundTripped.map((m) => m.role);
+
+    // wire 守门 #1:原始 messages 经 buildMessageParams 不含 system
     const params = buildMessageParams(
       {
         client: {} as never,
         model: env.llm.model,
         maxTokens: 1024,
       },
-      { messages: reloadedMessages as never, turnCount: turns },
+      { messages: messages as never, turnCount: turns },
       {}
     );
     wireRoles = (params.messages as ReadonlyArray<{ role: string }>).map(
       (m) => m.role
     );
+    // wire 守门 #2:round-trip 后 messages 仍不含 system(持久化前后双重守门)
+    const params2 = buildMessageParams(
+      {
+        client: {} as never,
+        model: env.llm.model,
+        maxTokens: 1024,
+      },
+      { messages: roundTripped as never, turnCount: turns },
+      {}
+    );
+    wireRolesAfterRoundTrip = (
+      params2.messages as ReadonlyArray<{ role: string }>
+    ).map((m) => m.role);
   } catch (e) {
     runError = e;
     stopReason = "run_error";
@@ -226,6 +266,8 @@ async function main(): Promise<void> {
     stopReason,
     messages,
     wireRoles,
+    roundTripRoles,
+    wireRolesAfterRoundTrip,
     turns,
     runError,
   };

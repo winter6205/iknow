@@ -122,17 +122,43 @@ if (skipGuard) {
         cwd: cwdDir,
       });
       try {
-        // 用一个长 prompt(明示模型多次工具调用)给真实 in-flight 时间窗
-        const controller = new AbortController();
-        const pending = run(
-          "Please use the bash tool to run `sleep 3 && echo done` then call get_time tool. " +
-            "Don't skip steps; both tools required.",
+        // ---- run A:先完成一轮带真实 tool_call 的 turn(满足 plan T5
+        //      "≥1 多 turn + ≥1 真实 tool_call" 验收)。生产 registry 只暴露
+        //      真实工具(如 bash);demo/stub 工具(get_time/echo)不在装配内,
+        //      所以用 bash 完成真实工具调用(bootstrap e2e 已验证该路径)。----
+        const turnA = await run(
+          "Please use the bash tool to run `echo real-tool-call-marker`, then report " +
+            "what it printed in one short sentence.",
           built.deps,
-          controller.signal,
+          undefined,
           { maxTurns: 4 }
         );
+        const toolCalls = turnA.result.messages.flatMap((m) =>
+          m.role === "assistant"
+            ? m.content.flatMap((b) => (b.type === "tool_use" ? [b.name] : []))
+            : []
+        );
+        expect(
+          toolCalls.length > 0,
+          `run A 未发生真实 tool_call: ${toolCalls.join(",")}`
+        ).toBe(true);
+        expect(toolCalls).toContain("bash");
+        expect(turnA.result.turnCount).toBeGreaterThanOrEqual(2);
+        expect(turnA.result.messages.length).toBeGreaterThan(2);
 
-        // 给模型 ~1.5s 进入 in-flight,然后 abort 触发 cancelled 归因
+        // ---- run B:以 run A 的 messages 为 priorMessages 续跑,在 in-flight
+        //      中断 → system 消息 append 到权威历史末尾 ----
+        const controller = new AbortController();
+        const pending = run(
+          "Please call the bash tool to run `sleep 3 && echo done`.",
+          built.deps,
+          controller.signal,
+          {
+            priorMessages: turnA.result.messages,
+            maxTurns: 4,
+          }
+        );
+        // 给模型 ~1.5s 进入 in-flight 后 abort(cancelled 归因)
         await new Promise<void>((r) => setTimeout(r, 1500));
         controller.abort();
 
@@ -141,7 +167,7 @@ if (skipGuard) {
         // (1) stopReason === cancelled
         expect(result.stopReason).toBe("cancelled");
 
-        // (2) messages 末尾含 role:"system" 项,文案固定
+        // (2) messages 末尾含 role:"system" 项,文案固定(run A 历史 + system)
         const lastMsg = result.messages[result.messages.length - 1];
         expect(lastMsg?.role).toBe("system");
         if (lastMsg?.role === "system") {
@@ -152,7 +178,8 @@ if (skipGuard) {
           }
         }
 
-        // (3) 落盘 + reload 后 system 项仍在(schema v4 持久化)
+        // (3) 落盘 + reload 后 system 项仍在(schema v4 持久化),run A tool
+        //     turn 完整保留
         const store = new SessionStore(baseDir, cwdDir);
         await store.save({
           id: conversationId,
@@ -173,6 +200,15 @@ if (skipGuard) {
         const reloadedLast = reloaded.messages[reloaded.messages.length - 1];
         expect(reloadedLast?.role).toBe("system");
         expect(reloaded.schemaVersion).toBe(4);
+        // run A 的 tool_use 在 reload 后完整在场(system 不破坏历史)
+        const reloadedToolUses = reloaded.messages.flatMap((m) =>
+          m.role === "assistant"
+            ? m.content.filter((b) => b.type === "tool_use")
+            : []
+        );
+        expect(reloadedToolUses.length).toBeGreaterThanOrEqual(
+          toolCalls.length
+        );
 
         // (4) buildMessageParams filter(system) 后 SDK wire body 不含 system
         const params = buildMessageParams(
