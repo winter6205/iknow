@@ -614,7 +614,12 @@ export function buildMessageParams(
   return {
     model: opts.model,
     max_tokens: opts.maxTokens,
-    messages: state.messages as unknown as MessageParam[],
+    // invariant (#383 B2 T2 / R1 #385): system 消息绝不上 wire ——
+    // 服务端拒收 + 语义错位。Ctrl+C 打断的 system 项只进 transcript 展示层,
+    // 交给 SDK 前必须先过滤掉。
+    messages: state.messages.filter(
+      (m) => m.role !== "system"
+    ) as unknown as MessageParam[],
     ...(tools !== undefined ? { tools } : {}),
     // #196 IKNOW T1:system 字段条件附加 — undefined 或空串都不发
     // (byte-identical 既有行为 + KV 缓存前缀字节级稳定,对齐 #121 同款过滤)。
