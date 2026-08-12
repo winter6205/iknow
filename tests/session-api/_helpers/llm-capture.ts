@@ -84,6 +84,7 @@ export async function startLlmCapture(
 export const DEFAULT_TEST_LLM_ENV: TestLlmEnv = {
   baseUrl: "http://invalid",
   model: "test-model",
+  fallback: [],
   apiKeyEnv: "IKNOW_TEST_KEY",
   apiKey: "test-key",
   maxOutputTokens: 128,

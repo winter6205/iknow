@@ -34,6 +34,7 @@ function makeBundle(
     llm: {
       baseUrl: "http://127.0.0.1:9999",
       model: "test-model",
+      fallback: [],
       apiKeyEnv: "ANTHROPIC_AUTH_TOKEN",
       apiKey: "sk-test-sentinel-tui",
       maxOutputTokens: 1024,

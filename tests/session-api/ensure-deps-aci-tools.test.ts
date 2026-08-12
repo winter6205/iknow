@@ -69,10 +69,13 @@ let store: SessionStore;
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-ensure-deps-"));
   store = new SessionStore(baseDir);
+  // #353 第二阶段：model 无代码默认，serve 装配的 loadIknowEnv() 需要来源。
+  process.env.IKNOW_LLM_MODEL = "test-model";
 });
 
 afterAll(async () => {
   await rm(baseDir, { recursive: true, force: true });
+  delete process.env.IKNOW_LLM_MODEL;
 });
 
 describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {

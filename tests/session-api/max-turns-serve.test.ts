@@ -31,10 +31,13 @@ let store: SessionStore;
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-max-turns-serve-"));
   store = new SessionStore(baseDir);
+  // #353 第二阶段：model 无代码默认，serve 装配的 loadIknowEnv() 需要来源。
+  process.env.IKNOW_LLM_MODEL = "test-model";
 });
 
 afterAll(async () => {
   await rm(baseDir, { recursive: true, force: true });
+  delete process.env.IKNOW_LLM_MODEL;
 });
 
 /**
@@ -80,7 +83,11 @@ describe("SessionHub.postMessage maxTurns (serve entry, plan T6)", () => {
 
     // 文件不被 touch:throw 路径不调 conditionalSave
     const after = await store.load(session.conversation_id);
-    assert.equal(JSON.stringify(after), beforeJson, "session 文件必须保持 run 前状态");
+    assert.equal(
+      JSON.stringify(after),
+      beforeJson,
+      "session 文件必须保持 run 前状态"
+    );
     assert.equal(after.messages.length, 0);
     assert.equal(after.turnCount, 0);
   });

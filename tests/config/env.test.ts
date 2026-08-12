@@ -19,11 +19,12 @@ import { loadIknowEnv } from "../../src/config/env.ts";
 import type { IknowSettings } from "../../src/config/settings.ts";
 
 /**
- * #353 review: 既有 env 测试不测 settings，统一注入空 settings 以隔离
+ * #353 review: 既有 env 测试不测 settings，统一注入最小 settings 以隔离
  * 真实 `~/.iknow/settings.json` / `<cwd>/.iknow/settings.json`（避免本地配置
  * 污染导致断言非确定）。loadIknowEnv 传 settings 时跳过文件读取。
+ * 含最小 `llm.model`（env loader fail-fast：model 必须有来源，否则 loader 抛错）。
  */
-const EMPTY_SETTINGS: IknowSettings = {};
+const EMPTY_SETTINGS: IknowSettings = { llm: { model: "test-model" } };
 
 const ENV_KEYS = [
   "IKNOW_LLM_THINKING",
@@ -39,6 +40,8 @@ const ENV_KEYS = [
   "IKNOW_LLM_MAX_TURNS",
   // #378 根因 B: MCP 连接超时 env (int; 非法 → fallback 60_000)。
   "IKNOW_MCP_CONNECT_TIMEOUT_MS",
+  // settings-model-extension: model env (settings.llm.model 回退链)。
+  "IKNOW_LLM_MODEL",
 ] as const;
 
 describe("loadIknowEnv — thinking config (#151 T4)", () => {
@@ -317,11 +320,12 @@ describe("loadIknowEnv — settings merge (#353)", () => {
     for (const k of ENV_KEYS) delete process.env[k];
   });
 
-  it("settings 提供 maxTurns / compress → env 反映", () => {
+  it("settings 提供 maxTurns / compress / model → env 反映", () => {
     const env = loadIknowEnv(process.cwd(), {
       llm: {
         maxTurns: 25,
         compress: { contextWindow: 300000, thresholdTokens: 200000 },
+        model: "test-model",
       },
     });
     assert.equal(env.llm.maxTurns, 25);
@@ -337,6 +341,7 @@ describe("loadIknowEnv — settings merge (#353)", () => {
       llm: {
         maxTurns: 25,
         compress: { contextWindow: 300000, thresholdTokens: 200000 },
+        model: "test-model",
       },
     });
     assert.equal(env.llm.maxTurns, 10);
@@ -346,7 +351,7 @@ describe("loadIknowEnv — settings merge (#353)", () => {
 
   it("settings 只提供部分字段，其余保持默认", () => {
     const env = loadIknowEnv(process.cwd(), {
-      llm: { maxTurns: 15 },
+      llm: { maxTurns: 15, model: "test-model" },
     });
     assert.equal(env.llm.maxTurns, 15);
     assert.equal(env.compress.contextWindow, 200000);
@@ -360,7 +365,11 @@ describe("loadIknowEnv — settings merge (#353)", () => {
     await writeFile(
       join(settingsDir, "settings.json"),
       JSON.stringify({
-        llm: { maxTurns: 42, compress: { contextWindow: 400000 } },
+        llm: {
+          maxTurns: 42,
+          compress: { contextWindow: 400000 },
+          model: "test-model",
+        },
       })
     );
 
@@ -374,6 +383,54 @@ describe("loadIknowEnv — settings merge (#353)", () => {
     }
   });
 
+  it("真实文件集成：.iknow/settings.json 写 llm.model → env.llm.model 生效", async () => {
+    const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-settings-model-"));
+    await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
+    await writeFile(
+      join(tmpCwd, ".iknow", "settings.json"),
+      JSON.stringify({ llm: { model: "hy3-combo", maxTurns: 42 } })
+    );
+
+    try {
+      const env = loadIknowEnv(tmpCwd);
+      assert.equal(env.llm.model, "hy3-combo");
+      assert.equal(env.llm.maxTurns, 42);
+    } finally {
+      await rm(tmpCwd, { recursive: true, force: true });
+    }
+  });
+
+  it("真实文件集成：project model 覆盖 user model（隔离 HOME）", async () => {
+    const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-model-merge-"));
+    const emptyHome = await mkdtemp(join(tmpdir(), "iknow-env-model-home-"));
+    await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
+    await writeFile(
+      join(tmpCwd, ".iknow", "settings.json"),
+      JSON.stringify({ llm: { model: "project-model" } })
+    );
+    await mkdir(join(emptyHome, ".iknow"), { recursive: true });
+    await writeFile(
+      join(emptyHome, ".iknow", "settings.json"),
+      JSON.stringify({ llm: { model: "user-model" } })
+    );
+
+    try {
+      // 隔离 HOME，让 user 级文件真实参与 merge（project > user）。
+      const prevHome = process.env.HOME;
+      process.env.HOME = emptyHome;
+      try {
+        const env = loadIknowEnv(tmpCwd);
+        assert.equal(env.llm.model, "project-model");
+      } finally {
+        if (prevHome === undefined) delete process.env.HOME;
+        else process.env.HOME = prevHome;
+      }
+    } finally {
+      await rm(tmpCwd, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
+    }
+  });
+
   it("非法 env 值视为未设，回退到 settings", () => {
     process.env.IKNOW_LLM_MAX_TURNS = "abc";
     process.env.IKNOW_MODEL_CONTEXT_WINDOW = "bad";
@@ -382,6 +439,7 @@ describe("loadIknowEnv — settings merge (#353)", () => {
       llm: {
         maxTurns: 33,
         compress: { contextWindow: 330000, thresholdTokens: 220000 },
+        model: "test-model",
       },
     });
     // 非法 env = 未设（envOptionalInt/envInt 回退纪律），继续走 settings 回退。
@@ -398,7 +456,11 @@ describe("loadIknowEnv — settings merge (#353)", () => {
     await writeFile(
       join(tmpCwd, ".iknow", "settings.json"),
       JSON.stringify({
-        llm: { maxTurns: 9, compress: { contextWindow: 900000 } },
+        llm: {
+          maxTurns: 9,
+          compress: { contextWindow: 900000 },
+          model: "test-model",
+        },
       })
     );
     try {
@@ -407,6 +469,89 @@ describe("loadIknowEnv — settings merge (#353)", () => {
       assert.equal(env.compress.contextWindow, 900000);
       // thresholdTokens 未设 → undefined（proactive compact 关）。
       assert.equal(env.compress.thresholdTokens, undefined);
+    } finally {
+      await rm(tmpCwd, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("loadIknowEnv — model precedence (settings-model-extension)", () => {
+  beforeEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+
+  it("env 不设 IKNOW_LLM_MODEL，settings.llm.model 生效", () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "from-settings" },
+    });
+    assert.equal(env.llm.model, "from-settings");
+  });
+
+  it("env 设 IKNOW_LLM_MODEL → env 最高（覆盖 settings）", () => {
+    process.env.IKNOW_LLM_MODEL = "from-env";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "from-settings" },
+    });
+    assert.equal(env.llm.model, "from-env");
+  });
+
+  it("env 与 settings 都没 model → fail-fast 抛错（不再硬编码兜底）", () => {
+    // 真正的空 settings（无 model 字段）→ env loader 必须抛错而非回退默认。
+    const noModelSettings: IknowSettings = {};
+    assert.throws(() => loadIknowEnv(process.cwd(), noModelSettings), {
+      message: /no LLM model configured/,
+    });
+  });
+
+  it("env 空串 → 视同未设，回退 settings.llm.model", () => {
+    process.env.IKNOW_LLM_MODEL = "";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "from-settings" },
+    });
+    assert.equal(env.llm.model, "from-settings");
+  });
+});
+
+describe("loadIknowEnv — llm.fallback (settings-model-extension)", () => {
+  beforeEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+
+  it("settings.llm.fallback = [x, y] → env.llm.fallback = [x, y]", () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model", fallback: ["x", "y"] },
+    });
+    assert.deepEqual(env.llm.fallback, ["x", "y"]);
+  });
+
+  it("settings 未配 fallback → env.llm.fallback = []（无兜底）", () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model" },
+    });
+    assert.deepEqual(env.llm.fallback, []);
+  });
+
+  it("settings.llm.fallback 非法值由 settings 层丢弃，env 侧回退 []", async () => {
+    // 经真实 settings 文件链路：fallback 非法数组在 parseLlm 被丢弃
+    // （drop-not-throw）→ mergedSettings.llm.fallback 缺席 → env.llm.fallback = []。
+    const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-fallback-invalid-"));
+    await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
+    await writeFile(
+      join(tmpCwd, ".iknow", "settings.json"),
+      JSON.stringify({
+        llm: { model: "test-model", fallback: ["x", 5] },
+      })
+    );
+    try {
+      const env = loadIknowEnv(tmpCwd);
+      assert.equal(env.llm.model, "test-model");
+      assert.deepEqual(env.llm.fallback, []);
     } finally {
       await rm(tmpCwd, { recursive: true, force: true });
     }
@@ -435,7 +580,11 @@ describe("loadIknowEnv — subagent inheritance (#353)", () => {
     await writeFile(
       join(tmpCwd, ".iknow", "settings.json"),
       JSON.stringify({
-        llm: { maxTurns: 77, compress: { contextWindow: 600000 } },
+        llm: {
+          maxTurns: 77,
+          compress: { contextWindow: 600000 },
+          model: "test-model",
+        },
       })
     );
     try {
@@ -457,10 +606,10 @@ describe("loadIknowEnv — subagent inheritance (#353)", () => {
     }
   });
 
-  it("子代理在隔离 cwd（无 settings）自装配时不继承 project settings", async () => {
-    // 主代理 project settings 在 tmpCwdWith，但子代理被 spawn 到 tmpCwdEmpty
-    // （隔离 cwd）→ loadIknowEnv(tmpCwdEmpty) 读不到 project settings，
-    // 回退默认值（不继承）。
+  it("子代理在隔离 cwd（无 settings、无 model）→ fail-fast 抛错（不继承）", async () => {
+    // 主代理 project settings 在 tmpCwdWith（含 model），但子代理被 spawn 到
+    // tmpCwdEmpty（隔离 cwd）→ loadIknowEnv(tmpCwdEmpty) 读不到 project settings，
+    // env 也未设 IKNOW_LLM_MODEL → model 无来源，fail-fast 抛错（不静默回退）。
     const tmpWith = await mkdtemp(join(tmpdir(), "iknow-subagent-with-"));
     const tmpEmpty = await mkdtemp(join(tmpdir(), "iknow-subagent-empty-"));
     const emptyHome = await mkdtemp(join(tmpdir(), "iknow-subagent-home2-"));
@@ -468,17 +617,18 @@ describe("loadIknowEnv — subagent inheritance (#353)", () => {
     await writeFile(
       join(tmpWith, ".iknow", "settings.json"),
       JSON.stringify({
-        llm: { maxTurns: 77, compress: { contextWindow: 600000 } },
+        llm: {
+          maxTurns: 77,
+          compress: { contextWindow: 600000 },
+          model: "test-model",
+        },
       })
     );
     try {
       const prevHome = process.env.HOME;
       process.env.HOME = emptyHome;
       try {
-        const env = loadIknowEnv(tmpEmpty);
-        assert.equal(env.llm.maxTurns, undefined);
-        assert.equal(env.compress.contextWindow, 200000);
-        assert.equal(env.compress.thresholdTokens, undefined);
+        assert.throws(() => loadIknowEnv(tmpEmpty), /no LLM model configured/);
       } finally {
         if (prevHome === undefined) delete process.env.HOME;
         else process.env.HOME = prevHome;

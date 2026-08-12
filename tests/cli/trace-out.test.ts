@@ -1,7 +1,7 @@
 /**
  * T5 CLI --trace-out flag tests (GH #64).
  */
-import { describe, it, afterEach } from "vitest";
+import { afterAll, beforeAll, describe, it, afterEach } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -20,6 +20,16 @@ import type { ListeningServer } from "../../src/session-api/http.ts";
 import { startSessionServe } from "../../src/session-api/serve.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import { assistantResult } from "./_fixtures.ts";
+
+beforeAll(() => {
+  // #353 第二阶段：model 无代码默认，startSessionServe 装配的 loadIknowEnv()
+  // 需要来源（仅 serve 用例需要）。
+  process.env.IKNOW_LLM_MODEL = "test-model";
+});
+
+afterAll(() => {
+  delete process.env.IKNOW_LLM_MODEL;
+});
 
 describe("parse-args --trace-out", () => {
   it("parses --trace-out with a file path (ask command)", () => {

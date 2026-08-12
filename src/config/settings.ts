@@ -8,8 +8,9 @@
  * 对齐 env.ts 的"非法值回退不抛错"纪律：
  *  - 文件不存在 → 空对象；
  *  - 坏 JSON（SyntaxError）→ 空对象，其它意外异常继续抛；
- *  - 非法值（maxTurns 非有限正整数 / contextWindow / thresholdTokens 非有限正数）
- *    → 丢弃该字段，且被丢弃的字段不参与覆盖（不抹掉 user 对应值）；
+ *  - 非法值（maxTurns 非有限正整数 / contextWindow / thresholdTokens 非有限正数 /
+ *    model 非空串字符串 / fallback 非空串字符串数组）→ 丢弃该字段，
+ *    且被丢弃的字段不参与覆盖（不抹掉 user 对应值）；
  *  - 顶层 / 中间层必须是普通对象（数组 / 字符串等 → 丢弃该层 / 该字段）。
  *
  * 返回的 IknowSettings 深 frozen（Object.freeze 递归，对齐项目 immutable 纪律）。
@@ -26,6 +27,13 @@ export interface IknowSettingsLlmCompress {
 export interface IknowSettingsLlm {
   maxTurns?: number;
   compress?: IknowSettingsLlmCompress;
+  /** 模型路由 ID（9router）；非空串字符串才合法。 */
+  model?: string;
+  /**
+   * 模型 fallback 路由 ID 列表（用户自配，代码不预置任何默认）。
+   * 非空串字符串数组才合法（至少 1 项）；非法 → 丢弃该字段。
+   */
+  fallback?: string[];
 }
 
 export interface IknowSettings {
@@ -56,6 +64,16 @@ function isValidMaxTurns(v: unknown): v is number {
   );
 }
 
+/** 非空串字符串（trim 后仍有内容）：model 的值域。 */
+function isNonEmptyString(v: unknown): v is string {
+  return typeof v === "string" && v.trim().length > 0;
+}
+
+/** 非空串字符串数组（至少 1 项，每项 trim 后仍有内容）：fallback 的值域。 */
+function isNonEmptyStringArray(v: unknown): v is string[] {
+  return Array.isArray(v) && v.length > 0 && v.every(isNonEmptyString);
+}
+
 /**
  * 读取单个 settings 文件并解析为普通对象。
  * 文件不存在 → {}；坏 JSON（SyntaxError）→ {}（不抛错）；顶层非普通对象 → {}。
@@ -82,6 +100,10 @@ function parseLlm(raw: unknown): IknowSettingsLlm | undefined {
   if (!isPlainObject(raw)) return undefined;
   const out: IknowSettingsLlm = {};
   if (isValidMaxTurns(raw.maxTurns)) out.maxTurns = raw.maxTurns;
+  if (isNonEmptyString(raw.model)) out.model = raw.model.trim();
+  if (isNonEmptyStringArray(raw.fallback)) {
+    out.fallback = raw.fallback.map((s) => s.trim());
+  }
   if (isPlainObject(raw.compress)) {
     const compress: IknowSettingsLlmCompress = {};
     if (isPositiveFinite(raw.compress.contextWindow)) {
@@ -97,7 +119,12 @@ function parseLlm(raw: unknown): IknowSettingsLlm | undefined {
       out.compress = compress;
     }
   }
-  if (out.maxTurns === undefined && out.compress === undefined)
+  if (
+    out.maxTurns === undefined &&
+    out.compress === undefined &&
+    out.model === undefined &&
+    out.fallback === undefined
+  )
     return undefined;
   return out;
 }
@@ -111,6 +138,10 @@ function mergeLlm(
   const out: IknowSettingsLlm = {};
   if (project?.maxTurns !== undefined) out.maxTurns = project.maxTurns;
   else if (user?.maxTurns !== undefined) out.maxTurns = user.maxTurns;
+  if (project?.model !== undefined) out.model = project.model;
+  else if (user?.model !== undefined) out.model = user.model;
+  if (project?.fallback !== undefined) out.fallback = project.fallback;
+  else if (user?.fallback !== undefined) out.fallback = user.fallback;
   if (project?.compress !== undefined || user?.compress !== undefined) {
     const compress: IknowSettingsLlmCompress = {};
     if (project?.compress?.contextWindow !== undefined) {
@@ -130,7 +161,12 @@ function mergeLlm(
       out.compress = compress;
     }
   }
-  if (out.maxTurns === undefined && out.compress === undefined)
+  if (
+    out.maxTurns === undefined &&
+    out.compress === undefined &&
+    out.model === undefined &&
+    out.fallback === undefined
+  )
     return undefined;
   return out;
 }

@@ -6,7 +6,7 @@
  * wires them together. Without this test the file shows 0% coverage and
  * SC21's 80/70 gate fails for src/session-api/.
  */
-import { afterEach, describe, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -27,11 +27,21 @@ let baseDir: string;
 let listening: ListeningServer | undefined;
 let hub: SessionHub | undefined;
 
+beforeAll(() => {
+  // #353 第二阶段：model 无代码默认，startSessionServe 装配的 loadIknowEnv()
+  // 需要来源。测试本身不关心 model 值，给一个 sentinel 即可。
+  process.env.IKNOW_LLM_MODEL = "test-model";
+});
+
 afterEach(async () => {
   if (listening) await listening.close();
   if (baseDir) await rm(baseDir, { recursive: true, force: true });
   listening = undefined;
   hub = undefined;
+});
+
+afterAll(() => {
+  delete process.env.IKNOW_LLM_MODEL;
 });
 
 // -- helpers -----------------------------------------------------------------

@@ -6,6 +6,11 @@
  * `process.env > .env.local > .env > settings.json (project > user) > hardcoded defaults`
  * （其它字段保持既有 `process.env > .env.local > .env > hardcoded defaults`，不引入 settings 回退）。
  *
+ * #353 第二阶段(supersede):模型来源 = `env > settings`，**无任何代码默认**。
+ * `IKNOW_LLM_MODEL` / `settings.llm.model` 均未配置 → fail-fast 抛 typed error
+ * (不再回退硬编码 `m3-combo`);fallback 由用户经 `settings.llm.fallback` 自配,
+ * 代码不预置任何 fallback。
+ *
  * Never logs secret values.
  */
 import { readFileSync, existsSync } from "node:fs";
@@ -14,7 +19,13 @@ import { loadIknowSettings, type IknowSettings } from "./settings.js";
 
 export interface LlmEnv {
   baseUrl: string;
+  /** 模型路由 ID。env loader fail-fast 保证有值（env > settings，无代码默认）。 */
   model: string;
+  /**
+   * 模型 fallback 路由 ID 列表（来自 settings.llm.fallback，用户自配）。
+   * 未配置 → []（无兜底；fallback 的消费方自行决定是否/如何使用）。
+   */
+  fallback: string[];
   apiKeyEnv: string;
   apiKey: string | undefined;
   maxOutputTokens: number;
@@ -328,6 +339,18 @@ export function loadIknowEnv(
     fallback: "ANTHROPIC_AUTH_TOKEN",
   });
 
+  // SSOT：模型来源 = env > settings，**无任何代码默认**。
+  // 用户未配（既无 IKNOW_LLM_MODEL 也无 settings.llm.model）→ fail-fast 抛错。
+  const modelRaw =
+    envOptional({ file, key: "IKNOW_LLM_MODEL" }) ?? mergedSettings.llm?.model;
+  if (!modelRaw) {
+    throw new Error(
+      "iknow: no LLM model configured. Set settings.llm.model in " +
+        "~/.iknow/settings.json (or <cwd>/.iknow/settings.json), or " +
+        "IKNOW_LLM_MODEL env var."
+    );
+  }
+
   return {
     llm: {
       baseUrl: envGet({
@@ -335,8 +358,8 @@ export function loadIknowEnv(
         key: "IKNOW_LLM_BASE_URL",
         fallback: "http://localhost:20128/v1",
       }).replace(/\/$/, ""),
-      // SSOT: 项目主模型 = m3-combo (9router 路由 ID)
-      model: envGet({ file, key: "IKNOW_LLM_MODEL", fallback: "m3-combo" }),
+      model: modelRaw,
+      fallback: mergedSettings.llm?.fallback ?? [],
       apiKeyEnv: llmKeyEnv,
       apiKey: getApiKey({ envVarName: llmKeyEnv, fileMap: file }),
       maxOutputTokens: envInt({

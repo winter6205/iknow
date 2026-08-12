@@ -1,5 +1,20 @@
 import { loadIknowEnv } from "../../config/env.js";
 
+/**
+ * env-isolation 是输出清洗安全层，必须在任何环境可加载（含 model 未配的
+ * fail-fast 场景）。模块顶层 / 每次调用的 key 名解析对 model 无依赖——
+ * 只取 `IKNOW_LLM_API_KEY_ENV` 指向的 key 名；`loadIknowEnv` 在 model 未配时
+ * 抛「no LLM model configured」，此处吞掉并退化（secret 名单仅剩 env 扫描），
+ * 不让安全层因装配前置条件缺失而崩溃。model 配好时行为与之前一致。
+ */
+function safeLlmApiKeyEnv(): string | undefined {
+  try {
+    return loadIknowEnv().llm.apiKeyEnv;
+  } catch {
+    return undefined;
+  }
+}
+
 export const BASE_ENV_WHITELIST: readonly string[] = Object.freeze([
   "PATH",
   "HOME",
@@ -16,7 +31,7 @@ const SECRET_PATTERN =
   /API[_-]?KEY|SECRET|TOKEN|PASSWD|PASSWORD|PRIVATE[_-]?KEY/i;
 
 function configuredSecretNames(): readonly string[] {
-  const configured = loadIknowEnv().llm.apiKeyEnv;
+  const configured = safeLlmApiKeyEnv();
   const names = new Set<string>();
   if (configured) names.add(configured);
   for (const name of Object.keys(process.env)) {

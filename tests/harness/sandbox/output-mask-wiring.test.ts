@@ -32,7 +32,9 @@ let savedEnvKey: string;
 let hadEnv: boolean;
 
 beforeEach(() => {
-  const env = loadIknowEnv();
+  // 注入最小 model，避免 env loader 因「无 model 来源」fail-fast——
+  // 本测试只关心 apiKeyEnv 变量名，不关心 model 配置（#353 第二阶段：无默认）。
+  const env = loadIknowEnv(process.cwd(), { llm: { model: "test-model" } });
   savedEnvKey = env.llm.apiKeyEnv;
   hadEnv = Object.prototype.hasOwnProperty.call(process.env, savedEnvKey);
   savedEnvValue = process.env[savedEnvKey];
