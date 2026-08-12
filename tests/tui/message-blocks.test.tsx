@@ -4,6 +4,8 @@
  *
  * 覆盖范围（bun:test）：
  *  - user 消息 → ❯ accent 前缀，无 Markdown 渲染；
+ *  - system 消息 → 独立分支：[已打断] 前缀 + 固定文案 Interrupted by user.，
+ *    不进 Markdown 解析（#392 T3）；
  *  - assistant 文本 → Markdown 渲染（headings/code/lists 节选）；
  *  - thinking 折叠（默认）：单行 `[思考]` 文案；
  *  - thinking 展开：thinking 文本全文 + redacted 占位；
@@ -73,6 +75,53 @@ test("user 空文本 + 纯 tool_result：返回 null 不渲染任何节点", asy
   // 空 user content：frame 应为空或纯占位（不出现 ❯ 标记、不出现 tool_result 字段名）。
   expect(frame.includes("❯")).toBe(false);
   expect(frame.includes("tool_result")).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("system 消息：渲染固定文案 Interrupted by user.（警示色）", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "system",
+    content: [{ type: "text", text: "Interrupted by user." }],
+  };
+  const setup = await renderBlocks(msg);
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("Interrupted by user.");
+  await setup.renderer.destroy();
+});
+
+test("system 消息：不进 markdown 解析（字面保留，无 bullet 产物）", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "system",
+    content: [{ type: "text", text: "Interrupted by user. **不加粗** - 列表" }],
+  };
+  const setup = await renderBlocks(msg);
+  const frame = setup.captureCharFrame();
+  // 若走 markdown：** 被解析、- 变 •；字面保留则证明走独立分支。
+  expect(frame).toContain("**不加粗**");
+  expect(frame).toContain("- 列表");
+  expect(frame.includes("•")).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("system 消息：警示色前缀 [已打断] 出现", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "system",
+    content: [{ type: "text", text: "Interrupted by user." }],
+  };
+  const setup = await renderBlocks(msg);
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("[已打断]");
+  await setup.renderer.destroy();
+});
+
+test("system 空 content：fallback 固定文案 Interrupted by user.", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "system",
+    content: [],
+  };
+  const setup = await renderBlocks(msg);
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("Interrupted by user.");
   await setup.renderer.destroy();
 });
 
