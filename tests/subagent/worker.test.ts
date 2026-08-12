@@ -24,9 +24,9 @@ import type { IknowEnv } from "../../src/config/env.ts";
 const TEST_ENV: IknowEnv = {
   llm: {
     apiKey: "test-key",
-    apiKeyEnv: "TEST_KEY",
     baseUrl: "https://example.test",
     model: "test-model",
+    fallback: [],
     maxOutputTokens: 1024,
     temperature: 0,
     stream: "off",

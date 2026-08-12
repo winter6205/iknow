@@ -3,7 +3,7 @@
  * Runtime has zero dependency on any upstream host package or local reference clone.
  */
 
-export { loadIknowEnv, getApiKey } from "./config/env.js";
+export { loadIknowEnv } from "./config/env.js";
 export type { IknowEnv, LlmEnv } from "./config/env.js";
 
 export { loadIknowSettings } from "./config/settings.js";

@@ -78,13 +78,13 @@ export async function startLlmCapture(
   };
 }
 
-/** Defaults match the 10-field env literal that hub/http/thinking-override
+/** Defaults match the 9-field env literal that hub/http/thinking-override
  * tests each declared inline. Any field can be overridden (including setting
  * `apiKey` to `undefined` to assert the missing-key failure path). */
 export const DEFAULT_TEST_LLM_ENV: TestLlmEnv = {
   baseUrl: "http://invalid",
   model: "test-model",
-  apiKeyEnv: "IKNOW_TEST_KEY",
+  fallback: [],
   apiKey: "test-key",
   maxOutputTokens: 128,
   timeoutMs: 5000,
@@ -94,7 +94,7 @@ export const DEFAULT_TEST_LLM_ENV: TestLlmEnv = {
 };
 
 /**
- * Build a 10-field LlmEnv. Any field on `overrides` replaces the default —
+ * Build a 9-field LlmEnv. Any field on `overrides` replaces the default —
  * spread semantics preserve explicit `undefined` (so the no-key test path
  * still works) and leave omitted fields at the default value.
  */
@@ -107,12 +107,12 @@ export function makeTestLlmEnv(overrides: Partial<TestLlmEnv> = {}): {
 /**
  * Subset of `LlmEnv` we use in tests — a separate alias keeps the helper
  * independent of the live `LlmEnv` type's evolution while still being
- * assignable (each field's value type matches).
+ * assignable (each field's value type matches). settings-model-extension
+ * (i164 第二阶段)：LlmEnv 退役 `apiKeyEnv` 字段，本 type 不再包含。
  */
 export type TestLlmEnv = {
   readonly baseUrl: string;
   readonly model: string;
-  readonly apiKeyEnv: string;
   readonly apiKey: string | undefined;
   readonly maxOutputTokens: number;
   readonly timeoutMs: number;

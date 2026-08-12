@@ -109,16 +109,17 @@ One-shot always prints JSON on stdout so scripts do not break.
 
 ### LLM configuration
 
-The agent runs on a tool-calling LLM (harness anthropic-adapter). Required env (names only — put real keys in the shell / OS secret store):
+The agent runs on a tool-calling LLM (harness anthropic-adapter). LLM configuration is **single-sourced** in `~/.iknow/settings.json` (user) merged with `<cwd>/.iknow/settings.json` (project over user) — see `docs/adr/0015-llm-config-settings-single-source.md` (settings-model-extension, ADR-0015):
 
-| Variable                | Role                                                                            |
-| ----------------------- | ------------------------------------------------------------------------------- |
-| `IKNOW_LLM_API_KEY_ENV` | Name of env var that holds the API key (default `ANTHROPIC_AUTH_TOKEN`)         |
-| _(that key env)_        | Actual secret value (e.g. export `ANTHROPIC_AUTH_TOKEN=...`)                    |
-| `IKNOW_LLM_BASE_URL`    | Anthropic-compatible base (default `http://localhost:20128/v1` — 9router local) |
-| `IKNOW_LLM_MODEL`       | 9router route id (default `m3-combo`)                                           |
+| Settings field            | Role                                                                                  |
+| ------------------------- | ------------------------------------------------------------------------------------- |
+| `llm.model`               | 9router route id (字面值，唯一来源；缺失 fail-fast 抛「no LLM model configured…」)    |
+| `llm.apiKey`              | 字面密钥 / `${VAR}` 占位符（指向环境变量名，loader 从 process.env / .env.local 解析） |
+| `llm.fallback?: string[]` | 用户自配的 fallback 路由 ID 列表（代码不预置）                                        |
 
-If the key env is empty, the runtime exits with `llm_mode_missing_api_key`.
+Provider/baseUrl 仍由 env.ts 代码默认（`http://localhost:20128/v1`，9router），可用 `IKNOW_LLM_BASE_URL` 覆盖。
+
+If `settings.llm.apiKey` is missing/unresolvable, the runtime exits with `llm_mode_missing_api_key`. The previous `IKNOW_LLM_API_KEY_ENV` / `IKNOW_LLM_MODEL` env mechanisms are retired (ADR-0015).
 
 ## Layout
 

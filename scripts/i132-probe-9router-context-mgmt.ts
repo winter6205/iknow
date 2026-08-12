@@ -208,13 +208,17 @@ async function hit(
 async function main(): Promise<void> {
   const e = loadIknowEnv();
   const key = e.llm.apiKey;
-  console.log("apiKeyEnv=" + e.llm.apiKeyEnv);
+  // L6：loader_fp 是 settings.llm.apiKey 的「来源标记」指纹（来源标记而非
+  // 变量名，区别于退役前的 IKNOW_LLM_API_KEY_ENV 变量名）。
   console.log("loader_fp=" + fp(key));
   console.log("baseUrl=" + e.llm.baseUrl);
   console.log("llm_model=" + e.llm.model);
 
   if (!key) {
-    console.log("no_key — abort (see i4-smoke: key sync is typical blocker)");
+    console.log(
+      "no_key — set settings.llm.apiKey (literal or ${VAR}) in " +
+        "~/.iknow/settings.json or <cwd>/.iknow/settings.json"
+    );
     process.exitCode = 1;
     return;
   }

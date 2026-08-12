@@ -5,10 +5,20 @@
  * `currentSecretValues` are now actually masking the consumer-side output
  * boundaries (cli format, session-api hub.toTurnDto, jsonl trace writer).
  *
- * Test strategy: install a fake secret value via `process.env[llm.apiKeyEnv]`
+ * Test strategy: install a fake secret value via `process.env[<apikey var>]`
  * with a SENTINEL token, then drive each output boundary with a finalText
  * that contains the sentinel; assert the output contains `***` and NOT the
  * sentinel. Env is restored in afterEach for isolation.
+ *
+ * settings-model-extension：masking 的 secret 变量名不再来自 env.llm.apiKeyEnv
+ * （字段已退役），由 env-isolation 的 configuredSecretNames 解析：
+ *   - settings.llm.apiKey `${VAR}` 占位符指向的变量名；
+ *   - 兜底：process.env 中命中 SECRET_PATTERN(/API[_-]?KEY|SECRET|TOKEN|
+ *     PASSWD|PASSWORD|PRIVATE[_-]?KEY/i) 的变量名。
+ * 本测试通过 installTestSettingsSource 把 settings.llm.apiKey 设为
+ * `${IKNOW_SC20_TEST_SECRET}`，并把 SENTINEL 注入该变量 ——
+ * configuredSecretNames 收 `IKNOW_SC20_TEST_SECRET`，currentSecretValues 返
+ * [SENTINEL]，遮蔽生效。
  */
 import { describe, it, afterEach, beforeEach } from "vitest";
 import assert from "node:assert/strict";
@@ -23,25 +33,29 @@ import {
   type RunResult,
 } from "../../../src/harness/index.ts";
 import { createJsonlTraceService } from "../../../src/harness/trace/jsonl.ts";
-import { loadIknowEnv } from "../../../src/config/env.ts";
+import { installTestSettingsSource } from "../../_helpers/install-test-settings-source.ts";
 
 const SENTINEL = "sk-test-SENTINEL-123";
+const SECRET_VAR = "IKNOW_SC20_TEST_SECRET";
 
+let settingsSource: ReturnType<typeof installTestSettingsSource>;
 let savedEnvValue: string | undefined;
-let savedEnvKey: string;
 let hadEnv: boolean;
 
 beforeEach(() => {
-  const env = loadIknowEnv();
-  savedEnvKey = env.llm.apiKeyEnv;
-  hadEnv = Object.prototype.hasOwnProperty.call(process.env, savedEnvKey);
-  savedEnvValue = process.env[savedEnvKey];
-  process.env[savedEnvKey] = SENTINEL;
+  settingsSource = installTestSettingsSource({
+    model: "test-model",
+    apiKeyVar: SECRET_VAR,
+    apiKeyValue: SENTINEL,
+  });
+  hadEnv = Object.prototype.hasOwnProperty.call(process.env, SECRET_VAR);
+  savedEnvValue = process.env[SECRET_VAR];
 });
 
 afterEach(() => {
-  if (hadEnv) process.env[savedEnvKey] = savedEnvValue;
-  else delete process.env[savedEnvKey];
+  if (hadEnv) process.env[SECRET_VAR] = savedEnvValue;
+  else delete process.env[SECRET_VAR];
+  settingsSource.restore();
 });
 
 function mkResult(over: Partial<RunResult> = {}): RunResult {
@@ -132,7 +146,7 @@ describe("output mask wiring (SC20)", () => {
 
   it("formatRunJson does not mask when no secret env is set (currentSecretValues is empty)", () => {
     // Temporarily clear the env var (override the beforeEach setup).
-    delete process.env[savedEnvKey];
+    delete process.env[SECRET_VAR];
     const out = formatRunJson({
       result: mkResult({
         finalText: `safe text with ${SENTINEL}`,

@@ -18,6 +18,7 @@ import {
   type LoopEngineDeps,
 } from "../harness/index.js";
 import { loadIknowEnv, type LlmEnv } from "../config/env.js";
+import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import { ValidationError } from "../shared/errors.js";
 import {
   THINKING_EFFORT_VALUES,
@@ -91,9 +92,8 @@ export function withThinkingOverride(opts: {
   const { deps, override } = opts;
   const env = opts.env ?? loadIknowEnv();
   if (!env.llm.apiKey) {
-    throw new ValidationError(
-      `LLM mode needs the env var named by IKNOW_LLM_API_KEY_ENV (${env.llm.apiKeyEnv}); set the key.`
-    );
+    // settings-model-extension：key 来源 = settings.llm.apiKey（字面或 ${VAR}）。
+    throw new ValidationError(LLM_API_KEY_MISSING_MESSAGE);
   }
   const client = new Anthropic({
     apiKey: env.llm.apiKey,

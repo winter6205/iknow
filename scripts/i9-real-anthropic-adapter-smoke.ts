@@ -110,7 +110,7 @@ interface SmokeResult {
   readonly timestamp: string;
   readonly model: string;
   readonly baseUrl: string;
-  readonly key_env: string;
+  readonly key_source: string;
   readonly maxTurns: number;
   readonly turns: number;
   readonly stopReason: string;
@@ -155,9 +155,12 @@ async function main(): Promise<void> {
 
   const env = loadIknowEnv(process.cwd());
   const apiKey = env.llm.apiKey;
-  const keyEnv = env.llm.apiKeyEnv;
   if (!apiKey || apiKey.length === 0) {
-    console.error("set ANTHROPIC_AUTH_TOKEN (or via IKNOW_LLM_API_KEY_ENV)");
+    // settings-model-extension：key 来源 = settings.llm.apiKey（字面或 ${VAR}）。
+    console.error(
+      "no API key — set settings.llm.apiKey (literal or ${VAR}) in " +
+        "~/.iknow/settings.json or <cwd>/.iknow/settings.json"
+    );
     process.exitCode = 1;
     return;
   }
@@ -213,7 +216,9 @@ async function main(): Promise<void> {
     timestamp: new Date().toISOString(),
     model: env.llm.model,
     baseUrl: hostOf(env.llm.baseUrl),
-    key_env: keyEnv,
+    // settings-model-extension：key_source 语义改为 settings.llm.apiKey 来源标记
+    // （L6：来源标记而非变量名，区别于退役前的 IKNOW_LLM_API_KEY_ENV 变量名）。
+    key_source: "settings.llm.apiKey",
     maxTurns: 6,
     turns: turnCount,
     stopReason,
@@ -247,7 +252,7 @@ async function main(): Promise<void> {
     `| Field | Value |\n|-------|-------|\n` +
     `| model | ${result.model} |\n` +
     `| baseUrl host | ${result.baseUrl_host} |\n` +
-    `| key_env | ${result.key_env} |\n` +
+    `| key_source | ${result.key_source} |\n` +
     `| turns | ${result.turns} |\n` +
     `| stopReason | ${result.stopReason} |\n` +
     `| toolNames | ${result.toolNames.join(",")} |\n` +
@@ -261,7 +266,7 @@ async function main(): Promise<void> {
 
   // stdout 摘要(操作员可读,不含 key)
   console.log(
-    `result=${result.result} key_env=${result.key_env} model=${result.model} ` +
+    `result=${result.result} key_source=${result.key_source} model=${result.model} ` +
       `turns=${result.turns} stop_reason=${result.stopReason} ` +
       `tools=${result.toolNames.join(",")} durationMs=${result.durationMs}`
   );

@@ -11,7 +11,7 @@
 - **LoopTrace**: `run()` 的第二返回面 `{ result, trace }`；A 层结构元数据，严格不含 payload。`cancelKind` 是取消来源四值枚举 `"none" | "callerAbort" | "timerTimeout" | "hostCancel"`。
 - **ToolExecutionContext**: Executor 透传给 handler 的执行上下文 `{ signal }`；超时由 Executor 外包而非 ctx 携带。
 - **in-flight closeout**: abort/timeout 发生时的收尾语义——在途 tool call 填 `execution_failed`（message 固定 "cancelled"/"timeout"），signal 优先于 timeout。
-- **NINE_ROUTER_KEY**: SSOT env var name for the 9router API key；baked into `src/config/env.ts` as the code default of `IKNOW_LLM_API_KEY_ENV` (ADR-0001)。
+- **NINE_ROUTER_KEY / ANTHROPIC_AUTH_TOKEN**: 历史 key 变量名（ADR-0001 时代）；settings-model-extension（ADR-0015）后 key 唯一来源 = `settings.llm.apiKey`（字面或 `${VAR}` 占位符），`IKNOW_LLM_API_KEY_ENV` / `IKNOW_LLM_MODEL` / `LlmEnv.apiKeyEnv` 已退役。真实密钥只存 env / OS secret store，占位符 `${VAR}` 指向的变量名仍会被 `configuredSecretNames` 收集做输出遮蔽（SC20）。
 
 ### Flagged ambiguities（沿用 CONTEXT.md，与本 spec 相关者）
 

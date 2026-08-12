@@ -29,6 +29,7 @@ import type { PermissionModeContext } from "./permission/modes.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
 import type { AciCatalog } from "./aci/types.js";
 import { createLspNotifier } from "./lsp/notifier.js";
+import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import type { Registry } from "./tools/types.js";
 import type { RegistryImpl } from "./tools/registry.js";
 import type { ValidateFunction } from "ajv";
@@ -137,9 +138,8 @@ export async function buildHarnessEngine(
     // ValidationError keeps the HTTP layer's 400 mapping (http.ts sendError)
     // consistent for both CLI and serve; the message still carries the
     // `LLM mode needs` substring the CLI oneshot caller matches on.
-    throw new ValidationError(
-      `LLM mode needs the env var named by IKNOW_LLM_API_KEY_ENV (${env.llm.apiKeyEnv}); set the key.`
-    );
+    // settings-model-extension：key 来源 = settings.llm.apiKey（字面或 ${VAR}）。
+    throw new ValidationError(LLM_API_KEY_MISSING_MESSAGE);
   }
   if (!askUser) {
     throw new Error(

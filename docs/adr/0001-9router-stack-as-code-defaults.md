@@ -41,3 +41,40 @@ iknow 钉死 9router 作为唯一 LLM/embedding 提供方 + m3-combo 作为主�
 ## Update (2026-08-06): Status → deprecated
 
 本 ADR 状态标记为 `deprecated`（非 `superseded by NNNN`——它未被单一新 ADR 取代）。原因：原始决策的 **embedding 臂已随 023 归档**（harness 为通用 agent，无向量检索），**key 变量名默认已由 2026-08-05 Update 段修正为 `ANTHROPIC_AUTH_TOKEN`**。核心机制（「项目栈默认焊进 `env.ts`，`.env.local` 只持值」）仍有效，故保留文件、不删不归档；`docs/archive/024-archive-memory-assistant-era/` 记录了同批归档。读取本 ADR 时以 2026-08-05 Update 段的现态为准。
+
+---
+
+## Update (2026-08-12): 模型默认条款 supersede — settings.llm.model 可配置，移除 hardcoded m3-combo
+
+本 ADR 原决策「`m3-combo` 作为主模型焊进 `src/config/env.ts` 代码默认」的**现态部分**已由 settings 机制（#353 第二阶段）supersede：模型默认从「焊死」改为「可配置 + fail-fast」——`src/config/settings.ts` 的 `IknowSettingsLlm` 新增 `model?: string` 与 `fallback?: string[]` 字段，`src/config/env.ts` 的 model 链改为 `env > settings`，**无任何代码默认**。
+
+**supersede 边界（其余条款保留）：**
+
+- **移除 hardcoded `m3-combo`**：`env.ts` 不再回退 `"m3-combo"`。
+- **未配置 model → fail-fast（typed error）**：`IKNOW_LLM_MODEL` 与 `settings.llm.model` 均缺席时，env loader 抛「iknow: no LLM model configured…」，不再静默走任何默认。
+- **fallback 由用户自配**：新增 `settings.llm.fallback?: string[]`（用户声明模型 fallback 路由 ID 列表），代码不预置任何 fallback；`env.llm.fallback` 未配时 = `[]`。
+- **env 仍最高**：`IKNOW_LLM_MODEL`（env）优先于 `settings.llm.model`；fallback 仅来自 settings。
+- **未变部分**：key 变量名默认 `ANTHROPIC_AUTH_TOKEN`、provider/baseUrl `http://localhost:20128/v1` 仍焊进 env.ts 代码默认；`.env.local` 只持值、`IKNOW_LLM_API_KEY_ENV` 可覆盖变量名 —— 保留。
+
+**关联：** `plans/settings-model-extension.md`（tracer bullets / validation 详述）、#353（settings 机制第一阶段）。
+
+---
+
+## Update (2026-08-12): 后续条款 supersede — ADR-0015 settings 单承载收敛
+
+本 ADR 剩余「项目栈默认焊进 `env.ts`」条款中，**key 变量名间接寻址 + model 的 env 覆盖机制**已被 `docs/adr/0015-llm-config-settings-single-source.md`（settings-model-extension Phase 1+2）supersede：LLM 配置收敛到 `settings.json` 单承载。
+
+**supersede 边界（本次新增，覆盖上文 2026-08-12 段的部分内容）：**
+
+- **`apiKeyEnv` 间接寻址退役**：`LlmEnv.apiKeyEnv` 字段已删。key 唯一来源 = `settings.llm.apiKey`（字面值或 `${VAR}` / `$VAR` 占位符），经 `expandPlaceholders` 从 `process.env[VAR]` > `.env.local` > `.env` 解析；不再有「key 变量名」概念。
+- **`IKNOW_LLM_API_KEY_ENV` 机制退役**：不再有覆盖 key 变量名的 env 支（ADR-0001 2026-08-05 Update 段的该条款随之失效）。
+- **`IKNOW_LLM_MODEL` 退役**：上文 2026-08-12 段「env 仍最高：`IKNOW_LLM_MODEL`（env）优先于 `settings.llm.model`」条款失效——`env.ts` 不再读 `IKNOW_LLM_MODEL`，model 唯一来源 = `settings.llm.model` 字面值（缺失 fail-fast）。
+- **`.env.local` 职责收窄**：退化为占位符真值源（`settings.llm.apiKey` 的 `${VAR}` 变量在 `.env.local` 里的值），不再直接当 model / key 变量名的配置口。
+
+**保留条款（未被 0015 supersede）：**
+
+- provider = 9router、baseUrl 代码默认 `http://localhost:20128/v1` 仍焊进 `env.ts`（`IKNOW_LLM_BASE_URL` fallback）。
+- `.env.local` 只持值（占位符真值）；`process.env > .env.local > .env` 优先级对非 LLM 配置字段仍保留。
+- 无默认变量名、无硬编码兜底 model（0015 延续 2026-08-12 段的 fail-fast 纪律）。
+
+**关联：** `docs/adr/0015-llm-config-settings-single-source.md`、`plans/settings-model-extension.md`、`docs/CONTEXT.md` §83。

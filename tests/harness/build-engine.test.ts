@@ -66,7 +66,7 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
     llm: {
       baseUrl: "http://127.0.0.1:9999",
       model: "test-model",
-      apiKeyEnv: "ANTHROPIC_AUTH_TOKEN",
+      fallback: [],
       apiKey,
       maxOutputTokens: 1024,
       timeoutMs: 60_000,
@@ -140,7 +140,7 @@ describe("buildHarnessEngine (SSOT assembly)", () => {
         env: makeEnv(undefined),
         askUser: createNoAskUser(),
       })
-    ).rejects.toThrow(/LLM mode needs the env var/);
+    ).rejects.toThrow(/LLM mode needs API key/);
   });
 
   it("throws when askUser is missing", async () => {

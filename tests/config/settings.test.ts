@@ -211,4 +211,342 @@ describe("loadIknowSettings — settings 文件机制 (#353)", () => {
     const { home, cwd } = await makeSettings({}, {});
     assert.ok(Object.isFrozen(loadIknowSettings({ home, cwd })));
   });
+
+  it("user 写 llm.model → 读到该模型", async () => {
+    const { home, cwd } = await makeSettings({ llm: { model: "m3" } }, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { model: "m3" },
+    });
+  });
+
+  it("project 写 llm.model=x，user 写 llm.model=y → project 覆盖", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { model: "y" } },
+      { llm: { model: "x" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { model: "x" },
+    });
+  });
+
+  it("project 写非法 model，user 写合法 → user 保留（非法不覆盖）", async () => {
+    for (const bad of [123, "", true]) {
+      const { home, cwd } = await makeSettings(
+        { llm: { model: "y" } },
+        { llm: { model: bad } }
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        { llm: { model: "y" } },
+        `project model=${JSON.stringify(bad)} 应不覆盖 user`
+      );
+    }
+  });
+
+  it("llm.model 空串 → 丢弃（不产出 model）", async () => {
+    const { home, cwd } = await makeSettings({ llm: { model: "" } }, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("llm.model 非 string（123 / true / null / []）→ 丢弃", async () => {
+    for (const bad of [123, true, null, []]) {
+      const { home, cwd } = await makeSettings({ llm: { model: bad } }, {});
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `model=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("llm 是数组 → 整个 llm 丢弃（含 model）", async () => {
+    const { home, cwd } = await makeSettings({ llm: [{ model: "x" }] }, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("user/project 都没 model → 返回对象无 model 字段", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { maxTurns: 5 } },
+      { llm: { maxTurns: 3 } }
+    );
+    const s = loadIknowSettings({ home, cwd });
+    assert.deepEqual(s, { llm: { maxTurns: 3 } });
+    assert.equal(s.llm?.model, undefined);
+  });
+
+  it("返回对象深 frozen 含 model 字段", async () => {
+    const { home, cwd } = await makeSettings({ llm: { model: "m3" } }, {});
+    const s = loadIknowSettings({ home, cwd });
+    assert.ok(Object.isFrozen(s));
+    assert.ok(Object.isFrozen(s.llm));
+    assert.throws(() => {
+      (s.llm as { model: string }).model = "other";
+    }, TypeError);
+  });
+
+  it("user 写 llm.fallback → 读到 fallback 数组", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { fallback: ["m1", "m2"] } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { fallback: ["m1", "m2"] },
+    });
+  });
+
+  it("project 写 llm.fallback，user 也写 → project 覆盖（替换非 merge 残留）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { fallback: ["user-a", "user-b"] } },
+      { llm: { fallback: ["project-a"] } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { fallback: ["project-a"] },
+    });
+  });
+
+  it("user 写 fallback、project 写其它字段 → user fallback 保留（逐层合并）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { fallback: ["u1"] } },
+      { llm: { maxTurns: 5 } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { fallback: ["u1"], maxTurns: 5 },
+    });
+  });
+
+  it("project fallback 非法不覆盖 user 合法（保留 user 值）", async () => {
+    for (const bad of [123, "", "x", [], ["a", 5], [""], null, [1, 2]]) {
+      const { home, cwd } = await makeSettings(
+        { llm: { fallback: ["user-keep"] } },
+        { llm: { fallback: bad } }
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        { llm: { fallback: ["user-keep"] } },
+        `project fallback=${JSON.stringify(bad)} 应不覆盖 user`
+      );
+    }
+  });
+
+  it("llm.fallback 缺失 → 不产出 fallback 字段", async () => {
+    const { home, cwd } = await makeSettings({ llm: { model: "m3" } }, {});
+    const s = loadIknowSettings({ home, cwd });
+    assert.deepEqual(s, { llm: { model: "m3" } });
+    assert.equal(s.llm?.fallback, undefined);
+  });
+
+  it("llm.fallback 空数组 → 丢弃（不产出 fallback 字段）", async () => {
+    const { home, cwd } = await makeSettings({ llm: { fallback: [] } }, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("llm.fallback 非数组（string / 123 / true / {}）→ 丢弃", async () => {
+    for (const bad of ["x", 123, true, {}]) {
+      const { home, cwd } = await makeSettings({ llm: { fallback: bad } }, {});
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `fallback=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("llm.fallback 数组含空串 / 非字符串项 → 丢弃整个字段", async () => {
+    for (const bad of [["", "m1"], ["m1", 5], [null], ["   "]]) {
+      const { home, cwd } = await makeSettings({ llm: { fallback: bad } }, {});
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `fallback=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("llm.fallback 元素 trim 后保留（两端空白去除）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { fallback: ["  m1  ", "m2"] } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { fallback: ["m1", "m2"] },
+    });
+  });
+
+  it("返回对象深 frozen 含 fallback 数组（嵌套元素不可改）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { fallback: ["m1", "m2"] } },
+      {}
+    );
+    const s = loadIknowSettings({ home, cwd });
+    assert.ok(Object.isFrozen(s));
+    assert.ok(Object.isFrozen(s.llm));
+    assert.ok(Object.isFrozen(s.llm!.fallback));
+    assert.throws(() => {
+      (s.llm!.fallback as string[])[0] = "other";
+    }, TypeError);
+  });
+});
+
+describe("loadIknowSettings — llm.apiKey validator (settings-model-extension)", () => {
+  it("字面非空串 → 合法（trim 后保留）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "sk-abc-123" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "sk-abc-123" },
+    });
+  });
+
+  it("字面前后空白 → trim 后保留", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "  sk-abc-123  " } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "sk-abc-123" },
+    });
+  });
+
+  it("${VAR} 占位符 → 合法（保留完整形态，env.ts 负责解析）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "${ANTHROPIC_AUTH_TOKEN}" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "${ANTHROPIC_AUTH_TOKEN}" },
+    });
+  });
+
+  it("$VAR 裸形态 → 合法（不含 `${`，按字面接受）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "$NINE_ROUTER_KEY" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "$NINE_ROUTER_KEY" },
+    });
+  });
+
+  it("空串 → 非法丢弃（不产出 apiKey）", async () => {
+    const { home, cwd } = await makeSettings({ llm: { apiKey: "" } }, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("全空白 → 非法丢弃", async () => {
+    const { home, cwd } = await makeSettings({ llm: { apiKey: "   " } }, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("非字符串（数组 / 数字 / null / 对象 / bool）→ 非法丢弃", async () => {
+    for (const bad of [["sk-abc"], 123, null, { name: "sk" }, true, false]) {
+      const { home, cwd } = await makeSettings({ llm: { apiKey: bad } }, {});
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `apiKey=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("${} 非法占位符 → 丢弃（含 `${` 但不匹配 `${VAR}` 形态）", async () => {
+    const { home, cwd } = await makeSettings({ llm: { apiKey: "${}" } }, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("${1VAR} 首字符非法 → 丢弃", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "${1VAR}" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("${VAR 未闭合 → 丢弃", async () => {
+    const { home, cwd } = await makeSettings({ llm: { apiKey: "${VAR" } }, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  // M7: validator 与 env.ts resolver 语义对齐——「整串所有 ${...} 形态都合法」
+  it("M7 收紧：${A}${1B} 混合合法 + 非法 → 丢弃（残骸检测）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "${A}${1B}" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("M7 收紧：${A}${B} 全合法 → 保留", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "${A}${B}" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "${A}${B}" },
+    });
+  });
+
+  it("M7 收紧：${A}literal 合法占位符 + 字面混合 → 保留", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "${A}literal" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "${A}literal" },
+    });
+  });
+
+  it("M7 收紧：plain 字面 → 保留", async () => {
+    const { home, cwd } = await makeSettings({ llm: { apiKey: "plain" } }, {});
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "plain" },
+    });
+  });
+
+  it("project > user 合并 + apiKey 字段（project 覆盖 user）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "${USER_KEY}" } },
+      { llm: { apiKey: "${PROJECT_KEY}" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "${PROJECT_KEY}" },
+    });
+  });
+
+  it("project apiKey 非法不覆盖 user 合法（保留 user 值）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "${USER_KEY}" } },
+      { llm: { apiKey: "${1BAD}" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "${USER_KEY}" },
+    });
+  });
+
+  it("user apiKey 字面、project apiKey ${VAR} → project 覆盖", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { apiKey: "sk-literal" } },
+      { llm: { apiKey: "${PROJECT_KEY}" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { apiKey: "${PROJECT_KEY}" },
+    });
+  });
+
+  it("llm 是数组 → 整个 llm 丢弃（含 apiKey）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: [{ apiKey: "sk-abc" }] },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("返回对象深 frozen 含 apiKey（不可改）", async () => {
+    const { home, cwd } = await makeSettings({ llm: { apiKey: "sk-abc" } }, {});
+    const s = loadIknowSettings({ home, cwd });
+    assert.ok(Object.isFrozen(s.llm));
+    assert.throws(() => {
+      (s.llm as { apiKey: string }).apiKey = "other";
+    }, TypeError);
+  });
 });

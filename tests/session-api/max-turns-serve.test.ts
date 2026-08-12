@@ -24,17 +24,23 @@ import { createExecutor } from "../../src/harness/tools/executor.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import { assistantResult } from "../cli/_fixtures.ts";
+import { installTestSettingsSource } from "../_helpers/install-test-settings-source.ts";
 
 let baseDir: string;
 let store: SessionStore;
+let settingsSource: ReturnType<typeof installTestSettingsSource>;
 
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-max-turns-serve-"));
   store = new SessionStore(baseDir);
+  // #164 第二阶段：IKNOW_LLM_MODEL 已退役，serve 装配的 loadIknowEnv() 需要
+  // settings.llm.model 来源 → HOME 重定向到 tmp（settings.json 含 model + apiKey）。
+  settingsSource = installTestSettingsSource();
 });
 
 afterAll(async () => {
   await rm(baseDir, { recursive: true, force: true });
+  settingsSource.restore();
 });
 
 /**
@@ -80,7 +86,11 @@ describe("SessionHub.postMessage maxTurns (serve entry, plan T6)", () => {
 
     // 文件不被 touch:throw 路径不调 conditionalSave
     const after = await store.load(session.conversation_id);
-    assert.equal(JSON.stringify(after), beforeJson, "session 文件必须保持 run 前状态");
+    assert.equal(
+      JSON.stringify(after),
+      beforeJson,
+      "session 文件必须保持 run 前状态"
+    );
     assert.equal(after.messages.length, 0);
     assert.equal(after.turnCount, 0);
   });

@@ -6,7 +6,7 @@
  * wires them together. Without this test the file shows 0% coverage and
  * SC21's 80/70 gate fails for src/session-api/.
  */
-import { afterEach, describe, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -20,18 +20,31 @@ import {
 import type { ListeningServer } from "../../src/session-api/http.ts";
 import type { SessionHub } from "../../src/session-api/hub.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
+import { installTestSettingsSource } from "../_helpers/install-test-settings-source.ts";
 
 // -- per-test cleanup --------------------------------------------------------
 
 let baseDir: string;
 let listening: ListeningServer | undefined;
 let hub: SessionHub | undefined;
+let settingsSource: ReturnType<typeof installTestSettingsSource>;
+
+beforeAll(() => {
+  // #164 第二阶段：IKNOW_LLM_MODEL 已退役，模型唯一来源 = settings.llm.model。
+  // startSessionServe 装配的 loadIknowEnv() 需要 settings 来源 → HOME 重定向到
+  // tmp（settings.json 含 model + `${VAR}` apiKey），不依赖真实 ~/.iknow。
+  settingsSource = installTestSettingsSource();
+});
 
 afterEach(async () => {
   if (listening) await listening.close();
   if (baseDir) await rm(baseDir, { recursive: true, force: true });
   listening = undefined;
   hub = undefined;
+});
+
+afterAll(() => {
+  settingsSource.restore();
 });
 
 // -- helpers -----------------------------------------------------------------

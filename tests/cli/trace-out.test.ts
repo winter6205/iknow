@@ -1,7 +1,7 @@
 /**
  * T5 CLI --trace-out flag tests (GH #64).
  */
-import { describe, it, afterEach } from "vitest";
+import { afterAll, beforeAll, describe, it, afterEach } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -20,6 +20,19 @@ import type { ListeningServer } from "../../src/session-api/http.ts";
 import { startSessionServe } from "../../src/session-api/serve.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import { assistantResult } from "./_fixtures.ts";
+import { installTestSettingsSource } from "../_helpers/install-test-settings-source.ts";
+
+let settingsSource: ReturnType<typeof installTestSettingsSource>;
+
+beforeAll(() => {
+  // #164 第二阶段：IKNOW_LLM_MODEL 已退役，startSessionServe 装配的 loadIknowEnv()
+  // 需要 settings.llm.model 来源（仅 serve 用例需要）→ HOME 重定向到 tmp。
+  settingsSource = installTestSettingsSource();
+});
+
+afterAll(() => {
+  settingsSource.restore();
+});
 
 describe("parse-args --trace-out", () => {
   it("parses --trace-out with a file path (ask command)", () => {

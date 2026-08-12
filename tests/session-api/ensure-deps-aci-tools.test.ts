@@ -24,6 +24,7 @@ import { SessionHub } from "../../src/session-api/hub.ts";
 import { SessionStore } from "../../src/session-api/store/index.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import type { LoopEngineDeps } from "../../src/harness/index.ts";
+import { installTestSettingsSource } from "../_helpers/install-test-settings-source.ts";
 
 // #194 T6 (Layer 4 baseline):扩 memory_recall + memory_save 到 10 件;
 // #224 末尾追加 tool_search(11 件;与 tests/harness/build-engine.test.ts
@@ -65,14 +66,19 @@ const EXPECTED_TOOLS = [
 
 let baseDir: string;
 let store: SessionStore;
+let settingsSource: ReturnType<typeof installTestSettingsSource>;
 
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-ensure-deps-"));
   store = new SessionStore(baseDir);
+  // #164 第二阶段：IKNOW_LLM_MODEL 已退役，ensureDeps → buildHarnessEngine 装配
+  // 路径需要 settings.llm.model + apiKey 来源 → HOME 重定向到 tmp。
+  settingsSource = installTestSettingsSource();
 });
 
 afterAll(async () => {
   await rm(baseDir, { recursive: true, force: true });
+  settingsSource.restore();
 });
 
 describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {

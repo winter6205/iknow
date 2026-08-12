@@ -49,7 +49,7 @@ async function main(): Promise<void> {
       llm: {
         baseUrl: "http://127.0.0.1:9999",
         model: "test-model",
-        apiKeyEnv: "ANTHROPIC_AUTH_TOKEN",
+        // settings-model-extension：apiKeyEnv 字段已退役；key 仅由 apiKey 承载。
         apiKey,
         maxOutputTokens: 1024,
         timeoutMs: 60_000,

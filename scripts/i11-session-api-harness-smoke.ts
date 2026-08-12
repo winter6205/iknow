@@ -143,7 +143,7 @@ interface SmokeResult {
   readonly timestamp: string;
   readonly model: string;
   readonly baseUrl: string;
-  readonly key_env: string;
+  readonly key_source: string;
   readonly maxTurns: number;
   readonly durationMs: number;
   readonly serve: ServeSection;
@@ -334,11 +334,14 @@ async function main(): Promise<void> {
 
   const env = loadIknowEnv(process.cwd());
   const apiKey = env.llm.apiKey;
-  const keyEnv = env.llm.apiKeyEnv;
+  // settings-model-extension：key 唯一来源 = settings.llm.apiKey（字面或 ${VAR}）。
+  // 旧 `apiKeyEnv` 字段已退役；`key_source` 字段是 settings.llm.apiKey 来源
+  // 标记（L6：来源标记而非变量名，区别于退役前的 IKNOW_LLM_API_KEY_ENV）。
+  const keyEnv = "settings.llm.apiKey";
   if (!apiKey || apiKey.length === 0) {
     // 主脑裁决:CI 无 key 时 skip 非 fail,exitCode 0 而非 1。
     console.log(
-      `key missing, smoke skipped (need env var ${keyEnv} to run real model)`
+      `key missing, smoke skipped (need settings.llm.apiKey to run real model)`
     );
     // 写入最小 skip 证据,让审查者能看到脚本曾运行。
     const skipResult: SmokeResult = {
@@ -347,7 +350,7 @@ async function main(): Promise<void> {
       timestamp: new Date().toISOString(),
       model: env.llm.model,
       baseUrl: hostOf(env.llm.baseUrl),
-      key_env: keyEnv,
+      key_source: keyEnv,
       maxTurns: 6,
       durationMs: 0,
       serve: {
@@ -370,7 +373,7 @@ async function main(): Promise<void> {
       assertions: [],
       notes: [
         "key missing, smoke skipped per plan T10 acceptance (CI without key should not fail).",
-        "Run with ANTHROPIC_AUTH_TOKEN (or IKNOW_LLM_API_KEY_ENV) set to exercise real serve path.",
+        "Run with settings.llm.apiKey (literal or ${VAR} placeholder) set to exercise real serve path.",
       ],
     };
     mkdirSync(OUT_DIR, { recursive: true });
@@ -473,7 +476,7 @@ async function main(): Promise<void> {
     timestamp: new Date().toISOString(),
     model: env.llm.model,
     baseUrl: hostOf(env.llm.baseUrl),
-    key_env: keyEnv,
+    key_source: keyEnv,
     maxTurns: 6,
     durationMs,
     serve: {
@@ -522,7 +525,7 @@ async function main(): Promise<void> {
     `| Field | Value |\n|-------|-------|\n` +
     `| model | ${result.model} |\n` +
     `| baseUrl host | ${result.baseUrl} |\n` +
-    `| key_env | ${result.key_env} |\n` +
+    `| key_source | ${result.key_source} |\n` +
     `| maxTurns | ${result.maxTurns} |\n` +
     `| durationMs | ${result.durationMs} |\n` +
     `| serve.stopReason | ${result.serve.stopReason} |\n` +
@@ -541,7 +544,7 @@ async function main(): Promise<void> {
 
   // stdout 摘要(操作员可读,不含 key)
   console.log(
-    `result=${result.result} key_env=${result.key_env} model=${result.model} ` +
+    `result=${result.result} key_source=${result.key_source} model=${result.model} ` +
       `serve_stop=${result.serve.stopReason} serve_turns=${result.serve.turnCount} ` +
       `cancel_stop=${result.cancel.stopReason} timeout_stop=${result.timeout.stopReason} ` +
       `durationMs=${result.durationMs}`

@@ -64,7 +64,7 @@ npm test          # vitest：unit + harness + integration
 
 **交互主入口**: TTY `chat`；脚本 `ask`；浏览器 `iknow serve` + `web/dist`（开发可 `web:dev` 代理 `/api`）。  
 **LLM 客户端**: 默认流式臂（`IKNOW_LLM_STREAM` 值域 `on | off`，默认 `on`，env.ts SSOT），`off` 回退非流式臂；原生 SSE 事件不出 adapter 边界，host 侧消费 `HarnessStreamEvent`。  
-**LLM key**: 环境变量名默认 `ANTHROPIC_AUTH_TOKEN`（LLM 用，env.ts SSOT）；`.env.local` 可用 `IKNOW_LLM_API_KEY_ENV` 覆盖变量名。`models` 200 ≠ chat 必通；探针 `scripts/i4-probe-nine-endpoints.ts`。  
+**LLM key / model**: 配置收敛到 `~/.iknow/settings.json`（user）+ `<cwd>/.iknow/settings.json`（project over user，ADR-0015 settings-model-extension）。`settings.llm.model` 字面值 = 模型路由 ID 唯一来源（缺失 fail-fast）；`settings.llm.apiKey` 字面或 `${VAR}` 占位符（loader 经 `expandPlaceholders` 从 process.env / .env.local / .env 解析）。`IKNOW_LLM_API_KEY_ENV` / `IKNOW_LLM_MODEL` 已退役（不再读取）；`IKNOW_LLM_BASE_URL` 仍读（provider/baseUrl 是 9router 项目栈决策）。`models` 200 ≠ chat 必通；探针 `scripts/i4-probe-nine-endpoints.ts`。  
 **Git**: 无用户明确 `push` 授权则不执行。
 
 ### UI 调试

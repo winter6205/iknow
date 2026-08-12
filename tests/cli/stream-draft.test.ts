@@ -9,8 +9,8 @@ import type { HarnessStreamEvent } from "../../src/harness/stream.js";
  * 遮蔽行为依赖 `currentSecretValues()` 现取 process.env 中命中了
  * `SECRET_PATTERN`(/API[_-]?KEY|SECRET|TOKEN|PASSWD|PASSWORD|PRIVATE[_-]?KEY/i)
  * 的变量名下的**非空**值。`ANTHROPIC_AUTH_TOKEN` 命中该 pattern,且始终出现在
- * `configuredSecretNames()`(apiKeyEnv 默认名),故测试用 `ANTHROPIC_AUTH_TOKEN`
- * 注入真实 secret 值即可被 `masked()` 捕获。
+ * `configuredSecretNames()`(settings.llm.apiKey 占位符 + SECRET_PATTERN 兜底),
+ * 故测试用 `ANTHROPIC_AUTH_TOKEN` 注入真实 secret 值即可被 `masked()` 捕获。
  *
  * 每个用例结束都恢复被改动的 env 变量,避免污染其他测试。
  */

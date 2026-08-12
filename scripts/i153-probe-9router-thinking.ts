@@ -455,8 +455,10 @@ async function main(): Promise<void> {
     process.env.IKNOW_LLM_BASE_URL ??
     e.llm.baseUrl
   ).replace(/\/$/, "");
-  const model =
-    cli.model ?? process.env.IKNOW_LLM_MODEL ?? "minimax-cn/MiniMax-M3";
+  // settings-model-extension：model 唯一来源 = settings.llm.model（loadIknowEnv
+  // fail-fast 保证有值）；`--model` argv 覆盖仅限显式请求（不再有 IKNOW_LLM_MODEL
+  // env 回退，也不再硬编码 minimax-cn/MiniMax-M3 兜底）。
+  const model = cli.model ?? e.llm.model;
   // Default to 4096 so adaptive thinking + tool_use has budget, and
   // fixed-budget default of 2048 stays < max_tokens (per Anthropic constraint
   // carried over to MiniMax via 9router — see #143 §1.1).

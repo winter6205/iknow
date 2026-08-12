@@ -20,6 +20,7 @@
  */
 import type { LoopEngineDeps } from "../harness/index.js";
 import { buildHarnessEngine } from "../harness/build-engine.js";
+import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import type { PostToolUseHook } from "../harness/permission/types.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
@@ -177,9 +178,8 @@ export async function buildTuiDeps(
   }
 > {
   if (!bundle.env.llm.apiKey) {
-    throw new Error(
-      `CLI LLM mode needs the env var named by IKNOW_LLM_API_KEY_ENV (${bundle.env.llm.apiKeyEnv}); set the key.`
-    );
+    // settings-model-extension：key 来源 = settings.llm.apiKey（字面或 ${VAR}）。
+    throw new Error(LLM_API_KEY_MISSING_MESSAGE);
   }
   // #337 Phase B：userHome / cwd 测试缝（默认 = 真实 homedir() / process.cwd()），
   // 与 build-engine #337 T8 同款。装配期 skill scanner + mcp config 都从这里取。
@@ -201,6 +201,8 @@ export async function buildTuiDeps(
     ...(opts.userHome ? { userHome } : {}),
     ...(opts.cwd ? { cwd } : {}),
     // #378 测试缝:createMcpManager 工厂覆盖(透传,捕获入参断言)。
+    // prettier-ignore（master 一致单行：L3 review 复原；88 字符超 80 列，禁用 prettier 重排）。
+    // prettier-ignore
     ...(opts.createMcpManager ? { createMcpManager: opts.createMcpManager } : {}),
     // #337 Phase B 测试缝:MCP client 工厂覆盖。
     ...(opts.createMcpClient ? { createMcpClient: opts.createMcpClient } : {}),

@@ -42,6 +42,10 @@ import { resolve } from "node:path";
 import { buildViolationWiring } from "./harness/sandbox/violation-executor.js";
 import { openBrowser } from "./cli/open-browser.js";
 import type { TraceServeOptions } from "./traceserver/serve.js";
+import {
+  loadIknowSettings,
+  analyzePlaceholderSyntax,
+} from "./config/settings.js";
 
 /**
  * T7: 写侧与读侧共用的默认 trace 目录 —— 每会话独立文件
@@ -133,11 +137,23 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     });
   } catch (err) {
     if (err instanceof Error && err.message.includes("LLM mode needs")) {
+      // settings-model-extension：ask 错误 envelope 不再承载 env 变量名（apiKeyEnv
+      // 字段已退役）；改成 `apiKey` 携带 settings.llm.apiKey 的原始形态（None 或
+      // 占位符字符串如 "${ANTHROPIC_AUTH_TOKEN}"），便于上游告诉调用方原因。
+      // L5: `apiKey_placeholder` 标记让消费方识别 `apiKey: "${VAR}"` 是占位符非真值
+      // （true=占位符 / false=字面 / undefined 时字段省略）。
+      const rawApiKey = loadIknowSettings().llm?.apiKey;
+      const apiKeyIsPlaceholder =
+        rawApiKey !== undefined &&
+        analyzePlaceholderSyntax(rawApiKey.trim()).placeholders.length > 0;
       writeErr(
         JSON.stringify({
           error: "llm_mode_missing_api_key",
           message: err.message,
-          apiKeyEnv: bundle.env.llm.apiKeyEnv,
+          apiKey: rawApiKey === undefined ? "None" : rawApiKey,
+          ...(rawApiKey !== undefined
+            ? { apiKey_placeholder: apiKeyIsPlaceholder }
+            : {}),
         })
       );
       process.exitCode = 1;
