@@ -103,15 +103,27 @@ export interface AskUser {
 }
 
 /**
- * PreToolUse hook (chain step 1).
- * Return non-undefined to short-circuit (decision + reason).
- * reason will be wrapped at the executor as `[hook_blocked] <reason>`.
+ * Pre 钩子的拦截语义（#126 D1 类型收窄）。
+ *
+ * 钩子只表达「拦」：返回 PreHookBlock = 拦下该调用（reason 被 executor 包装为
+ * `[hook_blocked] <reason>` 回灌模型）；返回 undefined = 放行（进入 checkPermission）。
+ * 特意不复用 PermissionOutcome —— 后者属于权限层（policy/checkPermission），
+ * 钩子从未实现 ask/allow 语义，用专用类型让「deny-only」成为编译期事实。
+ */
+export interface PreHookBlock {
+  readonly reason: string;
+}
+
+/**
+ * PreToolUse hook (chain step 1)。
+ * deny-only：返回 PreHookBlock = 拦截（executor 包装 `[hook_blocked] <reason>`）；
+ * 返回 undefined = 放行。异常语义（#126 D3）由 executor 调用点承载（fail-closed）。
  */
 export interface PreToolUseHook {
   (ctx: {
     readonly tool: string;
     readonly input: unknown;
-  }): PermissionOutcome | undefined;
+  }): PreHookBlock | undefined;
 }
 
 /** PostToolUse hook (chain step 5). Observability only; cannot influence outcome. */

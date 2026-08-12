@@ -19,6 +19,7 @@ export type {
   PermissionRule,
   AciPermissionPolicy,
   AskUser,
+  PreHookBlock,
   PreToolUseHook,
   PostToolUseHook,
 } from "./types.js";

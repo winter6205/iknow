@@ -59,13 +59,12 @@ describe("createHooksPair", () => {
     );
   });
 
-  it("custom preToolUse can short-circuit with a decision (executor wraps as [hook_blocked])", () => {
+  it("custom preToolUse can short-circuit with a block (executor wraps as [hook_blocked])", () => {
     const h = createHooksPair({
-      preToolUse: () => ({ decision: "deny", reason: "blocked by audit hook" }),
+      preToolUse: () => ({ reason: "blocked by audit hook" }),
     });
     const out = h.preToolUse({ tool: "write_file", input: { path: "x" } });
     assert.ok(out);
-    assert.equal(out!.decision, "deny");
     assert.equal(out!.reason, "blocked by audit hook");
   });
 });

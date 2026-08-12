@@ -52,14 +52,11 @@ describe("types — basic shape", () => {
     p.then((v) => assert.equal(v, true));
   });
 
-  it("PreToolUseHook can return undefined or PermissionOutcome", () => {
+  it("PreToolUseHook is deny-only: undefined (pass) or PreHookBlock (block)", () => {
     const h: PreToolUseHook = () => undefined;
     assert.equal(h({ tool: "x", input: {} }), undefined);
-    const h2: PreToolUseHook = () => ({ decision: "deny", reason: "y" });
-    assert.deepEqual(h2({ tool: "x", input: {} }), {
-      decision: "deny",
-      reason: "y",
-    });
+    const h2: PreToolUseHook = () => ({ reason: "y" });
+    assert.deepEqual(h2({ tool: "x", input: {} }), { reason: "y" });
   });
 
   it("PostToolUseHook can return undefined or void", () => {

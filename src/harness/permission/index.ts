@@ -4,6 +4,7 @@
 
 export type {
   AskUser,
+  PreHookBlock,
   PreToolUseHook,
   PostToolUseHook,
   PermissionDecision,

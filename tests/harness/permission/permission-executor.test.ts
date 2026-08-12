@@ -186,7 +186,6 @@ describe("createPermissionExecutor — 5-step chain order", () => {
     const { executor: inner, calls } = makeInnerSpy();
     const policy = createPermissionPolicy();
     const pre: PreToolUseHook = () => ({
-      decision: "deny",
       reason: "audit-rejected",
     });
     const ex = createPermissionExecutor({

@@ -32,7 +32,7 @@ export interface HooksCustom {
 
 /**
  * Compose hook pair: caller-supplied overrides fall back to no-op. Production
- * implementations pass a custom preToolUse (e.g. audit / redaction) and/or
+ * implementations pass a custom preToolUse (deny-only, #126) and/or
  * postToolUse (projection / observability handlers).
  */
 export function createHooksPair(custom?: HooksCustom): HooksPair {
