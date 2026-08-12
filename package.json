@@ -39,6 +39,7 @@
     "probe:lsp": "tsx scripts/lsp-probe.ts",
     "probe:tui-binding": "$HOME/.bun/bin/bun run scripts/tui-binding-probe.ts",
     "probe:t4-real-llm": "tsx scripts/t4-spawn-subagent-real-llm-smoke.ts",
+    "probe:interrupt-transcript": "tsx scripts/i392-probe-b2-interrupt-transcript.ts",
     "prepare": "husky"
   },
   "devDependencies": {
