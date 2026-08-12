@@ -571,7 +571,7 @@ export class SessionHub {
           throw err;
         }
         // trace is destructured away → immediate GC (not logged/persisted/wired).
-        await this.conditionalSave({
+        const saved = await this.conditionalSave({
           conversationId,
           session,
           result: finalResult,
@@ -579,6 +579,7 @@ export class SessionHub {
           // run appended count as progress for the cancelled-delta decision.
           priorMessages: session.messages,
         });
+        void saved;
         return {
           session: this.summarize({
             file: await this.store.load(conversationId),
@@ -587,6 +588,10 @@ export class SessionHub {
             query,
             result: finalResult,
             turnMessages: finalResult.messages.slice(priorCount),
+            // B1: rendered interrupted is decided against the SAME priorMessages
+            // as conditionalSave — byte-identical shouldPersistCheckpoint verdict
+            // (saved 只在 cancelled 时消费;completed 等 stopReason 不读它)。
+            priorMessages: session.messages,
             ...(capturedStopSummary !== undefined &&
             capturedStopSummary.length > 0
               ? { stopSummary: capturedStopSummary }
@@ -751,15 +756,19 @@ export class SessionHub {
    *  `priorMessages` = session.messages BEFORE this run (postMessage already
    *  holds it); shouldPersistCheckpoint decides whether to save. Interrupting
    *  stops (cancelled with delta>0) also append a checkpoint record so the
-   *  interrupted turn is recoverable / rewind-able. */
+   *  interrupted turn is recoverable / rewind-able.
+   *
+   *  B1: 返回值 = true 实际落盘 / false 未落盘(shouldPersistCheckpoint 拒绝
+   *  或 store.save 抛错)。错误处理语义与改前一致 —— save 失败向上传播,
+   *  由 postMessage 的 serialize 队列收口,不在此处 warn。*/
   private async conditionalSave(opts: {
     readonly conversationId: string;
     readonly session: SessionFileV1;
     readonly result: RunResult;
     readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
-  }): Promise<void> {
+  }): Promise<boolean> {
     const { conversationId, session, result, priorMessages } = opts;
-    if (!shouldPersistCheckpoint(result, priorMessages)) return;
+    if (!shouldPersistCheckpoint(result, priorMessages)) return false;
     const now = new Date().toISOString();
     const turnCount = session.turnCount + result.turnCount;
     const interruptReason = toInterruptReason(result.stopReason);
@@ -789,6 +798,7 @@ export class SessionHub {
       summary: extractSummary(result.messages),
     };
     await this.store.save({ id: conversationId, file: updated });
+    return true;
   }
 
   /**
@@ -852,6 +862,10 @@ export class SessionHub {
     readonly turnMessages?: ReadonlyArray<AnthropicNativeMessage>;
     /** T6: best-effort 收尾摘要文本(异常停时由 postMessage 捕获)。 */
     readonly stopSummary?: string;
+    /** B1: run 前 session.messages —— 与 conditionalSave 同源,供 cancelled
+     * 判定 shouldPersistCheckpoint(delta>0 → interrupted=true)。非 cancelled
+     * 不消费;缺席(catch 分支等)时 cancelled 缺省判定 false。 */
+    readonly priorMessages?: ReadonlyArray<AnthropicNativeMessage>;
   }): TurnDto {
     const { query, result } = opts;
     // SC20: serve SPA output boundary — mask known secret values in the
@@ -882,6 +896,17 @@ export class SessionHub {
         opts.stopSummary.length > 0 &&
         result.stopReason !== "completed"
           ? { stopSummary: opts.stopSummary }
+          : {}),
+        // B1: 打断反馈 —— 仅 cancelled 时带上 interrupted(布尔:true=已保存
+        // checkpoint / false=无新内容未落盘)。其它 stopReason 字段缺席
+        // (byte-stable,与 thinking/toolCalls/lastUsage 同模式)。
+        ...(result.stopReason === "cancelled"
+          ? {
+              interrupted: shouldPersistCheckpoint(
+                result,
+                opts.priorMessages ?? []
+              ),
+            }
           : {}),
       },
     };
