@@ -36,6 +36,11 @@ import type { ValidateFunction } from "ajv";
 import { homedir } from "node:os";
 import path from "node:path";
 import type { AskUser, PostToolUseHook } from "./permission/types.js";
+import {
+  createSecretsGuardHook,
+  type HookErrorEvent,
+} from "./permission/index.js";
+import { loadIknowSettings, type IknowSettings } from "../config/settings.js";
 import type { IknowEnv } from "../config/env.js";
 import { ValidationError } from "../shared/errors.js";
 import {
@@ -92,6 +97,11 @@ export type BuildEngineOpts = {
   readonly subagentManager?: SubAgentManager;
   /** TUI 工具摘要观测缝:透传给 createAciExecutor hooks.postToolUse(chat/serve 不传 → 零变化)。 */
   readonly hooks?: PostToolUseHook;
+  /** #126 T5 测试缝:settings 对象覆盖注入(生产默认不传则 loadIknowSettings({ cwd }))。
+   *  secrets 段驱动 secrets-guard 装配;测试用 tmp fixture 注入隔离 settings。 */
+  readonly settings?: IknowSettings;
+  /** #126 T5 测试缝:secrets-guard 构造/运行期 hook 异常观测(production 不传 = 静默)。 */
+  readonly onHookError?: (e: HookErrorEvent) => void;
 };
 
 export type BuiltEngine = {
@@ -250,12 +260,27 @@ export async function buildHarnessEngine(
     // W2: mode context — REPL toggles this via /permissions; absent → default.
     ...(opts.permissionMode ? { mode: opts.permissionMode } : {}),
   });
+  // #126 T5:secrets guard 产品装配 —— settings.secrets 段驱动。
+  //   - 缺省 settings 测试缝 → loadIknowSettings({ cwd })(与 userHome/cwd 缝同源)。
+  //   - guard 挂 preToolUse(Step 1 最早短路):密钥形态在权限层之前拦截,
+  //     与既有 opts.hooks(postToolUse,Step 5 观测)互补不重叠。
+  //   - secrets.enabled 缺失 → 默认 true(内置集生效);enabled:false → guard 透明。
+  //   - secrets.patterns 缺失/空 → 内置默认集;追加的自定义 pattern 构造期编译,
+  //     非法正则剔除 + onHookError 告警,不毒化 guard(spec Constraints (a))。
+  const settings = opts.settings ?? loadIknowSettings({ cwd });
+  const secretsGuard = createSecretsGuardHook({
+    ...(settings.secrets ? { ...settings.secrets } : {}),
+    ...(opts.onHookError ? { onHookError: opts.onHookError } : {}),
+  });
   const executor = createAciExecutor({
     inner: baseExecutor,
     catalog: reg.catalog,
     policy,
     askUser,
-    ...(opts.hooks ? { hooks: { postToolUse: opts.hooks } } : {}),
+    hooks: {
+      preToolUse: secretsGuard,
+      ...(opts.hooks ? { postToolUse: opts.hooks } : {}),
+    },
   });
 
   // registry 单源:reg.inner 已是按 memoryEnabled 条件化的最终视图(8 或 10 件)。
