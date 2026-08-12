@@ -16,6 +16,16 @@
  * sanitize to `checkpoints: []` (spread-preserve forward-compat discipline
  * intact — the field is a derived add-on, not a mutation of authoritative
  * history).
+ *
+ * v4 (#383 B2 / #392, additive): the `system` role joins the validate-time
+ * whitelist so Ctrl+C interrupts can persist as transcript-resident
+ * {role:"system", content:[{type:"text", text:"Interrupted by user."}]}
+ * entries. No new fields, no migration: v3 files re-sanitize unchanged (the
+ * additive change only lifts the bar for `system`). System messages never
+ * reach the provider — buildMessageParams filters them before the SDK call
+ * (T2). System messages are not a turn for checkpoint rewind (splitTurns stays
+ * `role === "user"`-anchored and skips tool_result-only user messages); v3
+ * rewind semantics are byte-identical with a system entry present.
  */
 import type { AnthropicNativeMessage } from "../../harness/index.js";
 
@@ -57,7 +67,7 @@ export interface SessionFileV1 {
   readonly checkpoints?: ReadonlyArray<CheckpointRecord>;
 }
 
-export const CURRENT_SCHEMA_VERSION = 3 as const;
+export const CURRENT_SCHEMA_VERSION = 4 as const;
 
 /**
  * Validate parsed JSON against the session-file shape.
@@ -201,7 +211,17 @@ function isValidMessagesList(messages: ReadonlyArray<unknown>): boolean {
 function isValidMessage(m: unknown): boolean {
   if (m === null || typeof m !== "object") return false;
   const msg = m as Record<string, unknown>;
-  if (msg["role"] !== "user" && msg["role"] !== "assistant") return false;
+  // schema v4 (#383 B2): `system` role 进入白名单 —— Ctrl+C 打断作为
+  // transcript 事件持久化（仅展示层，绝不喂 provider）。`system` 消息与
+  // turn 切片正交：splitTurns 按 `role === "user"` 且非 tool_result 切片，
+  // system 项自然落在相邻 turn 的间隙，不影响 rewind 锚点。
+  if (
+    msg["role"] !== "user" &&
+    msg["role"] !== "assistant" &&
+    msg["role"] !== "system"
+  ) {
+    return false;
+  }
   if (!Array.isArray(msg["content"])) return false;
   return (msg["content"] as ReadonlyArray<unknown>).every(isValidContentBlock);
 }

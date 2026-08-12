@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionHub, mapStoreError } from "../../src/session-api/hub.ts";
 import {
+  CURRENT_SCHEMA_VERSION,
   resolveProjectSessionDir,
   SessionStore,
 } from "../../src/session-api/store/index.ts";
@@ -62,7 +63,7 @@ function sampleFile(opts: {
 }): SessionFileV1 {
   const { id, overrides = {} } = opts;
   return {
-    schemaVersion: 3,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     conversation_id: id,
     summary: "",
     cwd: "/tmp/test",
@@ -168,8 +169,8 @@ describe("createSession", () => {
         await import("node:fs/promises")
       ).readFile(join(sessionDir, `${session.conversation_id}.json`), "utf8")
     );
-    // T1 checkpoint: createSession writes the v3 schema + empty checkpoints.
-    assert.equal(raw.schemaVersion, 3);
+    // T1 checkpoint: createSession writes the v4 schema + empty checkpoints.
+    assert.equal(raw.schemaVersion, CURRENT_SCHEMA_VERSION);
     assert.equal(raw.summary, "");
     assert.equal(typeof raw.cwd, "string");
     assert.equal(typeof raw.sanitized_at, "string");

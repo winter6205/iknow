@@ -28,7 +28,7 @@ import type {
 } from "@anthropic-ai/sdk/resources/messages/messages.js";
 
 const valid: SessionFileV1 = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   conversation_id: "abc",
   messages: [],
   jsonMode: false,
@@ -47,8 +47,8 @@ describe("validateSessionFile — happy path", () => {
     assert.equal(validateSessionFile(valid), null);
   });
 
-  it("CURRENT_SCHEMA_VERSION is the canonical v3 literal (3) — checkpoint data layer", () => {
-    assert.equal(CURRENT_SCHEMA_VERSION, 3);
+  it("CURRENT_SCHEMA_VERSION is the canonical v4 literal (4) — system role (#392)", () => {
+    assert.equal(CURRENT_SCHEMA_VERSION, 4);
     assert.equal(validateSessionFile({ ...valid }), null);
   });
 
@@ -70,12 +70,13 @@ describe("validateSessionFile — happy path", () => {
 // -- range check (#120 T1) ---------------------------------------------------
 
 describe("validateSessionFile — schemaVersion range check (#120)", () => {
-  it("accepts schemaVersion 1, 2 and 3 (≤ CURRENT) and rejects anything above", () => {
+  it("accepts schemaVersion 1, 2, 3 and 4 (≤ CURRENT) and rejects anything above", () => {
     assert.equal(validateSessionFile({ ...valid, schemaVersion: 1 }), null);
     assert.equal(validateSessionFile({ ...valid, schemaVersion: 2 }), null);
     assert.equal(validateSessionFile({ ...valid, schemaVersion: 3 }), null);
+    assert.equal(validateSessionFile({ ...valid, schemaVersion: 4 }), null);
     assert.equal(
-      validateSessionFile({ ...valid, schemaVersion: 4 }),
+      validateSessionFile({ ...valid, schemaVersion: 5 }),
       "schemaVersion"
     );
     assert.equal(
@@ -187,6 +188,73 @@ describe("validateSessionFile — v3 checkpoints field", () => {
   });
 });
 
+// -- v4: system role (#392 T1, additive) ------------------------------------
+
+describe("validateSessionFile — system role (schema v4)", () => {
+  it("accepts a valid system message (Ctrl+C interrupt event)", () => {
+    const file = {
+      ...valid,
+      messages: [
+        {
+          role: "system",
+          content: [{ type: "text", text: "Interrupted by user." }],
+        },
+      ],
+    };
+    assert.equal(validateSessionFile(file), null);
+    assert.equal(sanitizeSessionFile(file).messages[0]?.role, "system");
+  });
+
+  it("accepts system messages interleaved with user/assistant turns", () => {
+    const file = {
+      ...valid,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "q1" }] },
+        { role: "assistant", content: [{ type: "text", text: "a1" }] },
+        {
+          role: "system",
+          content: [{ type: "text", text: "Interrupted by user." }],
+        },
+        { role: "user", content: [{ type: "text", text: "q2" }] },
+      ],
+    };
+    assert.equal(validateSessionFile(file), null);
+  });
+
+  it("rejects any role outside user / assistant / system → 'messages'", () => {
+    // validateSessionFile 只查顶层形状（不深校验 message 元素）——role 白名单
+    // 校验在 sanitizeSessionFile 的 isValidMessagesList 里，拒绝用例走 sanitize。
+    for (const role of ["tool", "function", "model", "developer", "nope"]) {
+      assert.throws(
+        () =>
+          sanitizeSessionFile({
+            ...valid,
+            messages: [{ role, content: [{ type: "text", text: "x" }] }],
+          }),
+        (err: unknown) =>
+          (err as { kind?: string; field?: string }).kind ===
+            "schema_invalid" &&
+          (err as { kind?: string; field?: string }).field === "messages",
+        `role ${JSON.stringify(role)} must be rejected`
+      );
+    }
+  });
+
+  it("still rejects a system message with a malformed block shape → 'messages'", () => {
+    // The role whitelist widening does not relax content-block validation.
+    assert.throws(
+      () =>
+        sanitizeSessionFile({
+          ...valid,
+          messages: [{ role: "system", content: [{ type: "text" }] }],
+        }),
+      (err: unknown) =>
+        (err as { kind?: string; field?: string }).kind === "schema_invalid" &&
+        (err as { kind?: string; field?: string }).field === "messages"
+    );
+  });
+});
+
 // -- root-level guards -------------------------------------------------------
 
 describe("validateSessionFile — root guard", () => {
@@ -288,8 +356,8 @@ describe("isSessionFileV1 — type guard companion", () => {
 
   it("returns false for any rejected value", () => {
     assert.equal(isSessionFileV1(null), false);
-    // schemaVersion above CURRENT (CURRENT is 3 now — checkpoint data layer)
-    assert.equal(isSessionFileV1({ ...valid, schemaVersion: 4 }), false);
+    // schemaVersion above CURRENT (CURRENT is 4 now — system role)
+    assert.equal(isSessionFileV1({ ...valid, schemaVersion: 5 }), false);
     assert.equal(isSessionFileV1({ ...valid, turnCount: "x" }), false);
   });
 });

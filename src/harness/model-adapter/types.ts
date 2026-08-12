@@ -31,7 +31,7 @@ export type AnthropicContentBlock =
   | { type: "redacted_thinking"; data: string };
 
 /** Anthropic 原生消息角色。 */
-export type AnthropicRole = "user" | "assistant";
+export type AnthropicRole = "user" | "assistant" | "system";
 
 /** Anthropic 原生消息(权威历史 append-only 单元)。 */
 export interface AnthropicNativeMessage {
