@@ -16,7 +16,10 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadIknowEnv } from "../../src/config/env.ts";
-import type { IknowSettings } from "../../src/config/settings.ts";
+import {
+  loadIknowSettings,
+  type IknowSettings,
+} from "../../src/config/settings.ts";
 
 /**
  * #353 review: 既有 env 测试不测 settings，统一注入最小 settings 以隔离
@@ -529,7 +532,10 @@ describe("loadIknowEnv — llm.fallback (settings-model-extension)", () => {
   it("settings.llm.fallback 非法值由 settings 层丢弃，env 侧回退 []", async () => {
     // 经真实 settings 文件链路：fallback 非法数组在 parseLlm 被丢弃
     // （drop-not-throw）→ mergedSettings.llm.fallback 缺席 → env.llm.fallback = []。
+    // 隔离 home（emptyHome）以避免真实 ~/.iknow/settings.json 的 user 层覆盖污染
+    // — 此前在 home 含合法 fallback 的机器上断言失败（非 hermetic）。
     const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-fallback-invalid-"));
+    const emptyHome = await mkdtemp(join(tmpdir(), "iknow-env-fallback-home-"));
     await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
     await writeFile(
       join(tmpCwd, ".iknow", "settings.json"),
@@ -538,11 +544,15 @@ describe("loadIknowEnv — llm.fallback (settings-model-extension)", () => {
       })
     );
     try {
-      const env = loadIknowEnv(tmpCwd);
+      const env = loadIknowEnv(
+        tmpCwd,
+        loadIknowSettings({ cwd: tmpCwd, home: emptyHome })
+      );
       assert.equal(env.llm.model, "test-model");
       assert.deepEqual(env.llm.fallback, []);
     } finally {
       await rm(tmpCwd, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
     }
   });
 });
