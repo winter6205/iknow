@@ -5,10 +5,12 @@
  * 一致（#146 TUI 自建 slash 词表 + 解析 + Tab 补全 + hint 行）；仅文件头注释
  * 更新为本次迁移说明。纯 TS 模块，无 ink / OpenTUI 依赖。
  *
- * 词表 10 条：/sessions /new /quit /exit /help /info /thinking /compact
- * /rewind /mcp。/reset 不在词表内即天然不可达（Q5c 废除）。
+ * 词表 11 条：/sessions /new /quit /exit /help /info /thinking /effort
+ * /compact /rewind /mcp。/reset 不在词表内即天然不可达（Q5c 废除）。
  * rev 2026-08-11:删 /profile（首启引导由 agent 自己 rm BOOTSTRAP.md 完成,
  * 不再需要宿主斜杠钩子）；#366 加 /rewind；#337/#361 加 /mcp。
+ * rev 2026-08-12:#377 系列加 /effort（思考强度调整）。
+ * /effort help 文案由 ADJUSTABLE_EFFORT_LEVELS 派生（不硬编码第二份列表）。
  *
  * 解析规则：输入 trim 后以 "/" 开头先过词表；未命中 → unknown（UI 提示）；
  * 不以 "/" 开头 → message（普通消息）。
@@ -29,6 +31,9 @@
  *    catalog 类型（解耦，便于单测注入扁平对象）。
  */
 
+import { THINKING_EFFORT_VALUES } from "../session-api/contract.js";
+import type { ThinkingEffortWire } from "../session-api/contract.js";
+
 export type TuiSlashCommand =
   | "sessions"
   | "new"
@@ -37,6 +42,7 @@ export type TuiSlashCommand =
   | "help"
   | "info"
   | "thinking"
+  | "effort"
   | "compact"
   | "rewind"
   | "mcp";
@@ -67,6 +73,7 @@ const VOCABULARY: ReadonlySet<string> = new Set<TuiSlashCommand>([
   "help",
   "info",
   "thinking",
+  "effort",
   "compact",
   "rewind",
   "mcp",
@@ -87,7 +94,7 @@ export function parseTuiInput(raw: string): SlashParseResult {
 /** /help 词表文案（无 emoji；中文与仓库 usage 文案风格一致）。
  *  #337 Phase C：`/<skill-name>  加载技能`（skill 名由调用方动态拼入，不参与
  *  静态词表）。#361 Phase D：/mcp 真描述（词表 11 条含 rewind，/mcp 末位与
- *  slashSuggestions 的词表序一致）。 */
+ *  slashSuggestions 的词表序一致）。#377 系列加 /effort（紧邻 /thinking 之后）。 */
 export function helpLines(
   skillNames?: ReadonlyArray<string>
 ): ReadonlyArray<string> {
@@ -101,13 +108,14 @@ export function helpLines(
     "/mcp       查看 MCP 服务看板（r 重载，Esc 返回）",
     "/info      当前会话元信息",
     "/help      本词表",
-    "/thinking  切换思考过程折叠/展开",
+    "/thinking  切换思考开关（开/关模型的思考）",
+    `/effort    调整思考强度（${ADJUSTABLE_EFFORT_LEVELS.join("/")}；缺省/关闭=自适应）`,
     "/compact   压缩上下文（保留尾部，裁剪早期消息）",
     "/rewind    回退到更早的回合（选择锚点后确认）",
     "/quit      退出（别名 /exit）",
     ...skillLines,
     "Ctrl+C     打断前台运行中的 turn",
-    "Ctrl+O     展示思考内容（只展开；折叠回 /thinking）",
+    "Ctrl+O     折叠/展开思考面板",
     "鼠标拖选    选中文本 → 右键复制到剪贴板",
   ];
 }
@@ -118,7 +126,8 @@ const HINT_DESCRIPTIONS: Record<TuiSlashCommand, string> = {
   new: "新建会话",
   info: "当前会话元信息",
   help: "本词表",
-  thinking: "切换思考过程折叠/展开",
+  thinking: "切换思考开关",
+  effort: "调整思考强度",
   compact: "压缩上下文",
   mcp: "查看 MCP 服务看板",
   rewind: "回退到更早的回合",
@@ -131,8 +140,9 @@ export interface SlashHintLine {
   readonly description: string;
 }
 
-/** 首 token 的小写前缀（`/xxx...` → `xxx`；空 / 非 "/" 开头 → ""）。 */
-function slashPrefix(text: string): string {
+/** 首 token 的小写前缀（`/xxx...` → `xxx`；空 / 非 "/" 开头 → ""）。
+ *  导出供 app.tsx onSelectHint 复用（reviewer Medium#3：内联 trim/slice/split 收敛）。 */
+export function slashPrefix(text: string): string {
   if (!text.startsWith("/")) return "";
   return (text.slice(1).split(/\s+/, 1)[0] ?? "").toLowerCase();
 }
@@ -217,6 +227,47 @@ export function parseSkillLoad(
     }
   }
   return undefined;
+}
+
+/**
+ * #377 系列 /effort：可调思考强度档位（SSOT 派生 —— 不硬编码第二份列表）。
+ * 复用 contract.ts 的 THINKING_EFFORT_VALUES（含 ""=自适应），过滤掉自适应档：
+ * 用户只通过 /effort 显式选 concrete 档（low/medium/high/xhigh/max），
+ * 缺省 / 关闭时回归自适应，不把 ""/auto 暴露成可选项。
+ */
+export const ADJUSTABLE_EFFORT_LEVELS: ReadonlyArray<
+  Exclude<ThinkingEffortWire, "">
+> = THINKING_EFFORT_VALUES.filter(
+  (v): v is Exclude<ThinkingEffortWire, ""> => v !== ""
+);
+
+/**
+ * #377 系列 /effort：解析 `/effort <level>` 的 level 部分（不含首 token 的剩余段）。
+ * 参考 parseSkillLoad 的 remainder 模式：取首 token 之后剩余 → trim →
+ * toLowerCase → 须命中 ADJUSTABLE_EFFORT_LEVELS（5 档 concrete，不含 ""）。
+ * 空 / 缺参 / 不在集合 → undefined。
+ */
+export function parseEffortLevel(raw: string): ThinkingEffortWire | undefined {
+  const text = raw.trim();
+  const firstTok = text.split(/\s+/, 1)[0] ?? text;
+  const rest = text.slice(firstTok.length).trim();
+  const level = rest.toLowerCase();
+  if (level === "") return undefined;
+  return (ADJUSTABLE_EFFORT_LEVELS as readonly string[]).includes(level)
+    ? (level as ThinkingEffortWire)
+    : undefined;
+}
+
+/**
+ * `/effort <level>` 是否有参数段（不含首 token 的剩余段非空）。
+ * 与 parseEffortLevel 的区分用途：parseEffortLevel 把「无参」与「非法 concrete
+ * 档」都返回 undefined，宿主需区分二者——无参 `/effort` 应打开档位面板（seed
+ * 当前已提交档），非法档（如 `/effort auto`）才走 notice 提示可用档位。
+ */
+export function effortHasArg(raw: string): boolean {
+  const text = raw.trim();
+  const firstTok = text.split(/\s+/, 1)[0] ?? text;
+  return text.slice(firstTok.length).trim() !== "";
 }
 
 /**

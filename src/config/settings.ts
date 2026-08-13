@@ -25,10 +25,14 @@
  *  - 文件不存在 → 空对象；
  *  - 坏 JSON（SyntaxError）→ 空对象，其它意外异常继续抛；
  *  - 非法值（maxTurns 非有限正整数 / contextWindow / thresholdTokens 非有限正数 /
+ *    thinking 非 "off"|"adaptive" / thinkingEffort 非五档 /
  *    model 非空串字符串 / fallback 非空串字符串数组 /
  *    apiKey 非字面非占位符）→ 丢弃该字段，且被丢弃的字段不参与覆盖（不抹掉
  *    user 对应值）；
  *  - 顶层 / 中间层必须是普通对象（数组 / 字符串等 → 丢弃该层 / 该字段）。
+ *
+ * llm.thinking / llm.thinkingEffort 与 env.ts IKNOW_LLM_THINKING(_EFFORT) 同值域，
+ * 但按 env > settings 优先级回退（#353 maxTurns 同款）——settings 只做缺省来源。
  *
  * 返回的 IknowSettings 深 frozen（Object.freeze 递归，对齐项目 immutable 纪律）。
  */
@@ -41,9 +45,29 @@ export interface IknowSettingsLlmCompress {
   thresholdTokens?: number;
 }
 
+/** llm.thinking 值域：与 env.ts IKNOW_LLM_THINKING 一致（大小写敏感小写）。 */
+export type IknowSettingsThinking = "off" | "adaptive";
+
+/** llm.thinkingEffort 值域：env 五档（不含 "" 占位——空串在 settings 中无意义）。 */
+export type IknowSettingsThinkingEffort =
+  "low" | "medium" | "high" | "xhigh" | "max";
+
+/** settings 侧 thinkingEffort 合法档位（不含 ""）。SSOT 见 session-api THINKING_EFFORT_VALUES（wire 层含 ""）。 */
+export const THINKING_EFFORT_LEVELS = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const satisfies readonly IknowSettingsThinkingEffort[];
+
 export interface IknowSettingsLlm {
   maxTurns?: number;
   compress?: IknowSettingsLlmCompress;
+  /** 缺省 thinking 开关；env IKNOW_LLM_THINKING 显式设置时覆盖它。 */
+  thinking?: IknowSettingsThinking;
+  /** 缺省 effort；env IKNOW_LLM_THINKING_EFFORT 显式设置时覆盖它。 */
+  thinkingEffort?: IknowSettingsThinkingEffort;
   /** 模型路由 ID（9router）；非空串字符串才合法。 */
   model?: string;
   /**
@@ -103,6 +127,18 @@ function isPositiveFinite(v: unknown): v is number {
 function isValidMaxTurns(v: unknown): v is number {
   return (
     typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 1
+  );
+}
+
+/** thinking 值域校验：仅小写 "off" | "adaptive"（大小写敏感，对齐 env 语义）。 */
+function isValidThinking(v: unknown): v is IknowSettingsThinking {
+  return v === "off" || v === "adaptive";
+}
+
+/** thinkingEffort 值域校验：仅小写五档（"" 在 settings 中无意义 → 非合法）。 */
+function isValidThinkingEffort(v: unknown): v is IknowSettingsThinkingEffort {
+  return (THINKING_EFFORT_LEVELS as readonly string[]).includes(
+    typeof v === "string" ? v : ""
   );
 }
 
@@ -209,6 +245,10 @@ function parseLlm(raw: unknown): IknowSettingsLlm | undefined {
   if (!isPlainObject(raw)) return undefined;
   const out: IknowSettingsLlm = {};
   if (isValidMaxTurns(raw.maxTurns)) out.maxTurns = raw.maxTurns;
+  if (isValidThinking(raw.thinking)) out.thinking = raw.thinking;
+  if (isValidThinkingEffort(raw.thinkingEffort)) {
+    out.thinkingEffort = raw.thinkingEffort;
+  }
   if (isNonEmptyString(raw.model)) out.model = raw.model.trim();
   if (isNonEmptyStringArray(raw.fallback)) {
     out.fallback = raw.fallback.map((s) => s.trim());
@@ -232,6 +272,8 @@ function parseLlm(raw: unknown): IknowSettingsLlm | undefined {
   if (
     out.maxTurns === undefined &&
     out.compress === undefined &&
+    out.thinking === undefined &&
+    out.thinkingEffort === undefined &&
     out.model === undefined &&
     out.fallback === undefined &&
     out.apiKey === undefined
@@ -249,6 +291,13 @@ function mergeLlm(
   const out: IknowSettingsLlm = {};
   if (project?.maxTurns !== undefined) out.maxTurns = project.maxTurns;
   else if (user?.maxTurns !== undefined) out.maxTurns = user.maxTurns;
+  if (project?.thinking !== undefined) out.thinking = project.thinking;
+  else if (user?.thinking !== undefined) out.thinking = user.thinking;
+  if (project?.thinkingEffort !== undefined) {
+    out.thinkingEffort = project.thinkingEffort;
+  } else if (user?.thinkingEffort !== undefined) {
+    out.thinkingEffort = user.thinkingEffort;
+  }
   if (project?.model !== undefined) out.model = project.model;
   else if (user?.model !== undefined) out.model = user.model;
   if (project?.fallback !== undefined) out.fallback = project.fallback;
@@ -277,6 +326,8 @@ function mergeLlm(
   if (
     out.maxTurns === undefined &&
     out.compress === undefined &&
+    out.thinking === undefined &&
+    out.thinkingEffort === undefined &&
     out.model === undefined &&
     out.fallback === undefined &&
     out.apiKey === undefined

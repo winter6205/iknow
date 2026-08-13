@@ -16,7 +16,7 @@
  *
  * 异步纪律：setup.waitForVisualIdle() 是唯一异步等待入口。
  */
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -57,6 +57,27 @@ async function settle(
   await setup.waitForVisualIdle();
   await new Promise((r) => setTimeout(r, 20));
   await setup.waitForVisualIdle();
+}
+
+/**
+ * 条件轮询帧（picker 面板打开时动效常驻，waitForVisualIdle 永不 idle —— 用
+ * renderOnce + captureCharFrame 轮询，与 thinking-picker.test.tsx 的
+ * untilFrame 同构）。pred 命中返回该帧。
+ */
+async function waitFrame(
+  setup: Awaited<ReturnType<typeof testRender>>,
+  pred: (frame: string) => boolean,
+  ms = 8000,
+  label = ""
+): Promise<string> {
+  const start = Date.now();
+  while (Date.now() - start < ms) {
+    await new Promise((r) => setTimeout(r, 50));
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    if (pred(frame)) return frame;
+  }
+  throw new Error(`waitFrame timeout (${label}):\n${setup.captureCharFrame()}`);
 }
 
 /** 完整 mount + 含 thinking 块的一轮 turn：供 Ctrl+O toggle 可见态断言。 */
@@ -254,6 +275,130 @@ test("Ctrl+O：toggle 思考面板（折叠→展开→折叠）", async () => {
   expect(frame).toContain("[思考]");
   expect(frame).not.toContain("链上推理");
   await setup.renderer.destroy();
+});
+
+/** /effort 测试专用装配：含 pre-warm 打字的 TuiApp mount。 */
+async function renderEffortApp() {
+  const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-effort-"));
+  const bridge = createTuiBridge({
+    dataDir,
+    deps: makeDeps([assistantResult({ texts: [] })]),
+    inflight: createInflightRegistry(),
+  });
+  const askBridge = createTuiAskUserBridge();
+  const toolEventSink = createToolEventSink();
+  const permissionMode = createPermissionModeContext("default");
+  const sessionGrants = createSessionGrants();
+  let setupRef: Awaited<ReturnType<typeof testRender>> | undefined;
+  const setup = await testRender(
+    <TuiApp
+      bridge={bridge}
+      askBridge={askBridge}
+      toolEventSink={toolEventSink}
+      cwd="/tmp/proj"
+      dataDir={dataDir}
+      permissionMode={permissionMode}
+      sessionGrants={sessionGrants}
+      onQuit={() => {
+        if (setupRef && !setupRef.renderer.isDestroyed)
+          setupRef.renderer.destroy();
+      }}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false, consoleMode: "disabled" }
+  );
+  setupRef = setup;
+  await new Promise((r) => setTimeout(r, 500));
+  await setup.waitForVisualIdle();
+  return setup;
+}
+
+/** pre-warm 打字（对齐 app.test.tsx / renderAppWithThinking 模式：
+ *  先按一个无害键启动 mockInput 解析器，再 Backspace 清掉，再真正输入，
+ *  避免首字符被吞）。 */
+async function typeEffortText(
+  setup: Awaited<ReturnType<typeof testRender>>,
+  text: string
+): Promise<void> {
+  setup.mockInput.pressKey("/");
+  await new Promise((r) => setTimeout(r, 100));
+  await setup.renderOnce();
+  for (let i = 0; i < 5; i++) {
+    setup.mockInput.pressBackspace();
+    await new Promise((r) => setTimeout(r, 30));
+  }
+  for (const ch of text) {
+    setup.mockInput.pressKey(ch);
+    await new Promise((r) => setTimeout(r, 30));
+  }
+  await new Promise((r) => setTimeout(r, 100));
+  await setup.renderOnce();
+}
+
+describe("/effort 思考强度调整", () => {
+  test("/effort high → 打开档位面板并直接固定 high；Enter 不关闭；Esc 保存退出", async () => {
+    const setup = await renderEffortApp();
+    await typeEffortText(setup, "/effort high");
+    setup.mockInput.pressEnter();
+    // 面板打开后动效常驻 → 用 waitFrame 轮询（waitForVisualIdle 永不 idle）。
+    const frame = await waitFrame(
+      setup,
+      (f) => f.includes("思考强度"),
+      8000,
+      "panel-open"
+    );
+    // /effort high → 档位面板打开（seed focus=fixed=high → ▸ high ◂）。
+    expect(frame).toContain("▸ high ◂");
+    // 不再设「思考档位设为 …（已启用）」notice。
+    expect(frame).not.toContain("思考档位");
+
+    // Enter：固定（focus 已固定为 high），面板保持打开（核心新增断言）。
+    setup.mockInput.pressEnter();
+    const afterEnter = await waitFrame(
+      setup,
+      (f) => f.includes("思考强度"),
+      8000,
+      "after-enter"
+    );
+    expect(afterEnter).toContain("思考强度");
+
+    // Esc：保存退出（写 thinkingEffort=high + 隐式 enabled），面板关闭。
+    setup.mockInput.pressEscape();
+    await waitFrame(setup, (f) => !f.includes("思考强度"), 8000, "saved-exit");
+    await setup.renderer.destroy();
+  });
+
+  test("/effort auto → notice 含可用档位列表 + 状态不变", async () => {
+    const setup = await renderEffortApp();
+    await typeEffortText(setup, "/effort auto");
+    setup.mockInput.pressEnter();
+    await settle(setup);
+    const frame = setup.captureCharFrame();
+    // 非法档位 → 提示可用档位（low medium high xhigh max）+ 用法。
+    expect(frame).toContain("low");
+    expect(frame).toContain("high");
+    expect(frame).toContain("xhigh");
+    expect(frame).toContain("max");
+    expect(frame).toContain("/effort <level>");
+    await setup.renderer.destroy();
+  });
+
+  test("/effort 无参（当前 auto）→ 打开档位面板呈自适应态（不提示可用档位）", async () => {
+    const setup = await renderEffortApp();
+    await typeEffortText(setup, "/effort");
+    setup.mockInput.pressEnter();
+    // 无参 → 打开档位面板（标题「思考强度」可见），不再走 notice；当前
+    // thinkingEffort="" → 面板呈自适应态（AUTO · 自适应，无档位游标）。
+    const frame = await waitFrame(
+      setup,
+      (f) => f.includes("思考强度"),
+      8000,
+      "panel-open"
+    );
+    expect(frame).not.toContain("/effort <level>"); // 不提示可用档位
+    expect(frame).toContain("自适应");
+    expect(frame).toContain("AUTO");
+    await setup.renderer.destroy();
+  });
 });
 
 test("同一 tick 快速连发两个字符：输入框同时含两字", async () => {

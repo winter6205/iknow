@@ -40,6 +40,7 @@
     "probe:tui-binding": "$HOME/.bun/bin/bun run scripts/tui-binding-probe.ts",
     "probe:t4-real-llm": "tsx scripts/t4-spawn-subagent-real-llm-smoke.ts",
     "probe:interrupt-transcript": "tsx scripts/i392-probe-b2-interrupt-transcript.ts",
+    "designs:tui-preview": "bun run scripts/tui-designs-preview.tsx",
     "probe:settings-model": "tsx scripts/i135-settings-model-extension-smoke.ts",
     "prepare": "husky"
   },

@@ -15,6 +15,9 @@ docs/integration-materials.env
 .evals/results/
 docs/iknow-spec/docs/eval/results/
 
+# temporary TUI design frame captures (view-only, regenerated on demand)
+.frames/
+
 # Node / TypeScript build
 node_modules/
 dist/

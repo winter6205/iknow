@@ -257,12 +257,19 @@ export function ModalHost(props: {
   );
 }
 
-/** reduceModalKey 的键位输入切片（宿主键事件的投影形态）。 */
+/** reduceModalKey / reduceThinkingSwitchKey / reduceThinkingEffortKey 的键位
+ *  输入切片（宿主键事件的投影形态）。OpenTUI KeyEvent.name 值域（同
+ *  parse.keypress 常量）：↑/↓ = "up"/"down"，←/→ = "left"/"right"，Enter/Esc/
+ *  Tab/Space = "return"/"escape"/"tab"/"space"。 */
 export interface ModalKeyEvent {
   readonly input: string;
   readonly key: {
     readonly upArrow: boolean;
     readonly downArrow: boolean;
+    readonly leftArrow: boolean;
+    readonly rightArrow: boolean;
+    readonly tab: boolean;
+    readonly space: boolean;
     readonly return: boolean;
     readonly escape: boolean;
     readonly ctrl: boolean;
@@ -278,6 +285,10 @@ export function modalKeyEventOf(e: KeyEvent): ModalKeyEvent {
     key: {
       upArrow: e.name === "up",
       downArrow: e.name === "down",
+      leftArrow: e.name === "left",
+      rightArrow: e.name === "right",
+      tab: e.name === "tab",
+      space: e.name === "space",
       return: e.name === "return",
       escape: e.name === "escape",
       ctrl: e.ctrl,

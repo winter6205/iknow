@@ -16,10 +16,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadIknowEnv } from "../../src/config/env.ts";
-import {
-  loadIknowSettings,
-  type IknowSettings,
-} from "../../src/config/settings.ts";
+import type { IknowSettings } from "../../src/config/settings.ts";
 
 /**
  * #353 review: 既有 env 测试不测 settings，统一注入最小 settings 以隔离
@@ -359,6 +356,104 @@ describe("loadIknowEnv — settings merge (#353)", () => {
     assert.equal(env.compress.thresholdTokens, undefined);
   });
 
+  it("settings 提供 thinking / thinkingEffort（env 未设）→ env 反映", () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: {
+        model: "test-model",
+        thinking: "adaptive",
+        thinkingEffort: "high",
+      },
+    });
+    assert.equal(env.llm.thinking, "adaptive");
+    assert.equal(env.llm.thinkingEffort, "high");
+  });
+
+  it("env 覆盖 settings：THINKING=off 压过 settings adaptive", () => {
+    process.env.IKNOW_LLM_THINKING = "off";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: {
+        model: "test-model",
+        thinking: "adaptive",
+        thinkingEffort: "max",
+      },
+    });
+    assert.equal(env.llm.thinking, "off");
+  });
+
+  it("env 覆盖 settings：THINKING=adaptive 压过 settings off", () => {
+    process.env.IKNOW_LLM_THINKING = "adaptive";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model", thinking: "off" },
+    });
+    assert.equal(env.llm.thinking, "adaptive");
+  });
+
+  it("env 覆盖 settings：EFFORT=low 压过 settings high", () => {
+    process.env.IKNOW_LLM_THINKING_EFFORT = "low";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: {
+        model: "test-model",
+        thinking: "adaptive",
+        thinkingEffort: "high",
+      },
+    });
+    assert.equal(env.llm.thinkingEffort, "low");
+  });
+
+  it("env EFFORT 非法值 = 未设，回退 settings 的 effort", () => {
+    process.env.IKNOW_LLM_THINKING_EFFORT = "extreme";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: {
+        model: "test-model",
+        thinking: "adaptive",
+        thinkingEffort: "max",
+      },
+    });
+    assert.equal(env.llm.thinkingEffort, "max");
+  });
+
+  it("env THINKING 非法值 = 未设，回退 settings 的 thinking", () => {
+    process.env.IKNOW_LLM_THINKING = "garbage";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model", thinking: "adaptive" },
+    });
+    assert.equal(env.llm.thinking, "adaptive");
+  });
+
+  it("env + settings 均未设 → 默认 off / 空 effort", () => {
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.llm.thinking, "off");
+    assert.equal(env.llm.thinkingEffort, "");
+  });
+
+  it("settings 提供 thinking=adaptive + thinkingEffort=max → 两者均派生", () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: {
+        model: "test-model",
+        thinking: "adaptive",
+        thinkingEffort: "max",
+      },
+    });
+    assert.equal(env.llm.thinking, "adaptive");
+    assert.equal(env.llm.thinkingEffort, "max");
+  });
+
+  it("settings 仅 thinking → effort 保持默认空", () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model", thinking: "adaptive" },
+    });
+    assert.equal(env.llm.thinking, "adaptive");
+    assert.equal(env.llm.thinkingEffort, "");
+  });
+
+  it("settings 仅 thinkingEffort → thinking 保持默认 off", () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model", thinkingEffort: "high" },
+    });
+    assert.equal(env.llm.thinking, "off");
+    assert.equal(env.llm.thinkingEffort, "high");
+  });
+
   it("未传 settings 时自动读取 .iknow/settings.json（真实文件集成）", async () => {
     const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-settings-"));
     const settingsDir = join(tmpCwd, ".iknow");
@@ -532,8 +627,8 @@ describe("loadIknowEnv — llm.fallback (settings-model-extension)", () => {
   it("settings.llm.fallback 非法值由 settings 层丢弃，env 侧回退 []", async () => {
     // 经真实 settings 文件链路：fallback 非法数组在 parseLlm 被丢弃
     // （drop-not-throw）→ mergedSettings.llm.fallback 缺席 → env.llm.fallback = []。
-    // 隔离 home（emptyHome）以避免真实 ~/.iknow/settings.json 的 user 层覆盖污染
-    // — 此前在 home 含合法 fallback 的机器上断言失败（非 hermetic）。
+    // 隔离 home（loadIknowEnv 显式传 emptyHome），避免真实 ~/.iknow/settings.json
+    // 的 fallback 泄漏进断言（#395 引入 home 注入缝，#406 复用）。
     const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-fallback-invalid-"));
     const emptyHome = await mkdtemp(join(tmpdir(), "iknow-env-fallback-home-"));
     await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
@@ -544,10 +639,7 @@ describe("loadIknowEnv — llm.fallback (settings-model-extension)", () => {
       })
     );
     try {
-      const env = loadIknowEnv(
-        tmpCwd,
-        loadIknowSettings({ cwd: tmpCwd, home: emptyHome })
-      );
+      const env = loadIknowEnv(tmpCwd, undefined, emptyHome);
       assert.equal(env.llm.model, "test-model");
       assert.deepEqual(env.llm.fallback, []);
     } finally {
@@ -607,8 +699,10 @@ describe("loadIknowEnv — subagent inheritance (#353)", () => {
 
   it("子代理在隔离 cwd（无 settings、无 model）→ fail-fast 抛错（不继承）", async () => {
     // 主代理 project settings 在 tmpCwdWith（含 model），但子代理被 spawn 到
-    // tmpCwdEmpty（隔离 cwd）→ loadIknowEnv(tmpCwdEmpty) 读不到 project settings，
-    // env 也未设 IKNOW_LLM_MODEL → model 无来源，fail-fast 抛错（不静默回退）。
+    // tmpCwdEmpty（隔离 cwd）→ loadIknowEnv(tmpCwdEmpty, undefined, emptyHome)
+    // 读不到 project settings 也无 user settings，env 也未设 IKNOW_LLM_MODEL
+    // → model 无来源，fail-fast 抛错（不静默回退）。emptyHome 经 loadIknowEnv
+    // 显式透传（os.homedir 不响应运行时 process.env.HOME 修改）。
     const tmpWith = await mkdtemp(join(tmpdir(), "iknow-subagent-with-"));
     const tmpEmpty = await mkdtemp(join(tmpdir(), "iknow-subagent-empty-"));
     const emptyHome = await mkdtemp(join(tmpdir(), "iknow-subagent-home2-"));
@@ -624,14 +718,10 @@ describe("loadIknowEnv — subagent inheritance (#353)", () => {
       })
     );
     try {
-      const prevHome = process.env.HOME;
-      process.env.HOME = emptyHome;
-      try {
-        assert.throws(() => loadIknowEnv(tmpEmpty), /no LLM model configured/);
-      } finally {
-        if (prevHome === undefined) delete process.env.HOME;
-        else process.env.HOME = prevHome;
-      }
+      assert.throws(
+        () => loadIknowEnv(tmpEmpty, undefined, emptyHome),
+        /no LLM model configured/
+      );
     } finally {
       await rm(tmpWith, { recursive: true, force: true });
       await rm(tmpEmpty, { recursive: true, force: true });

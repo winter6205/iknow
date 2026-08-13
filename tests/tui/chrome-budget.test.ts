@@ -14,6 +14,7 @@ import {
   chromeReserveRows,
   noticeRenderRows,
 } from "../../src/tui/app.js";
+import { thinkingPickerRows } from "../../src/tui/thinking-picker.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 
 function userMsg(text: string): AnthropicNativeMessage {
@@ -160,5 +161,70 @@ describe("bgStatusLine", () => {
         { role: "assistant", content: [{ type: "text", text: "x" }] },
       ])
     ).toBe("后台运行中");
+  });
+});
+
+/**
+ * thinkingPickerRows 行账（design-25 thinking-picker，双面板版）。
+ *
+ * 按面板 kind 分派：thinking 开关面板 5 行（圆角边框 2 行 + 内容 3 行：标题 /
+ * 状态行 / 键位提示，**无进度条**）；effort 档位面板 7 行（圆角边框 2 行 + 内容
+ * 5 行：标题 / 状态行 / 进度条 / 档位标签 / 键位提示）。**不含 marginBottom=1**
+ * —— 与 modalRows 同约定：marginBottom 由 chromeReserveRows 的 +1 入账。
+ */
+describe("thinkingPickerRows（design-25 面板行账）", () => {
+  test("thinking 开关面板（无进度条）：5 行 = 边框 2 + 内容 3", () => {
+    expect(thinkingPickerRows("thinking")).toBe(5);
+  });
+
+  test("effort 档位面板（含进度条）：7 行 = 边框 2 + 内容 5", () => {
+    expect(thinkingPickerRows("effort")).toBe(7);
+  });
+
+  test("thinking 面板 +1 marginBottom = 6 行 delta；effort +1 = 8 行 delta", () => {
+    // 与 modalRows 的 `+1` 约定一致（面板 marginBottom 由 chromeReserveRows
+    // 入账）。
+    expect(thinkingPickerRows("thinking") + 1).toBe(6);
+    expect(thinkingPickerRows("effort") + 1).toBe(8);
+  });
+
+  test("有 picker：pickerRows + 1（marginBottom，与 modalRows 同款 delta）", () => {
+    // T3 把 pickerRows 并入 chromeReserveRows 入账：thinking 5 行 + marginBottom
+    // 1 = 6 行 delta；effort 7 行 + 1 = 8 行 delta。
+    const base = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+    });
+    expect(base).toBe(7);
+    const withThinking = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      pickerRows: 5,
+    });
+    expect(withThinking - base).toBe(6);
+    const withEffort = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      pickerRows: 7,
+    });
+    expect(withEffort - base).toBe(8);
+  });
+
+  test("pickerRows 缺省（undefined）= 0，行为同未传", () => {
+    const a = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+    });
+    const b = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      pickerRows: undefined,
+    });
+    expect(a).toBe(b);
   });
 });
