@@ -317,10 +317,12 @@ describe("MCP integration — list_changed hot re-registration", () => {
     // 触发 list_changed：touch 触发文件 + 写点内容(确保 watcher 收到 change)
     writeFileSync(spawned.triggerFile, "go\n");
 
-    // 等待新工具出现 — 注意 sanitize 把 '-' 转 '_'
+    // 等待新工具出现 — sanitize 保留连字符/点（与 mcpServerOfToolName
+    // 反解契约一致：#361 面板 bug 修复后 `-` 不再被替换成 `_`，因此
+    // fixture 工具名 `added-on-listchange` 原样保留）。
     const newTool = await waitForToolRegistered(
       registered,
-      "mcp__lc_server__added_on_listchange",
+      "mcp__lc_server__added-on-listchange",
       5_000
     );
     expect(newTool).toBeDefined();
@@ -330,7 +332,7 @@ describe("MCP integration — list_changed hot re-registration", () => {
     expect(registry.catalog.get("mcp__lc_server__fail")).toBeDefined();
     expect(registry.catalog.get("mcp__lc_server__slow")).toBeDefined();
     expect(
-      registry.catalog.get("mcp__lc_server__added_on_listchange")
+      registry.catalog.get("mcp__lc_server__added-on-listchange")
     ).toBeDefined();
 
     // 注册次数应当 ≥ beforeCount + 1
@@ -340,7 +342,7 @@ describe("MCP integration — list_changed hot re-registration", () => {
     writeFileSync(spawned.triggerFile, "go2\n");
     await new Promise((r) => setTimeout(r, 300));
     const newToolCount = registered.filter(
-      (d) => d.name === "mcp__lc_server__added_on_listchange"
+      (d) => d.name === "mcp__lc_server__added-on-listchange"
     ).length;
     expect(newToolCount).toBe(1);
 
