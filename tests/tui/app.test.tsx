@@ -101,7 +101,14 @@ async function mountAppAsync(
           setupRef.renderer.destroy();
       }}
     />,
-    { width: 80, height: 30, exitOnCtrlC: false, consoleMode: "disabled" }
+    {
+      width: 80,
+      height: 30,
+      exitOnCtrlC: false,
+      consoleMode: "disabled",
+      // T8：Shift+Enter 需携带 shift 修饰（kitty 协议编码 [13;2u）。
+      kittyKeyboard: true,
+    }
   );
   setupRef = setup;
   // 等键盘 / useEffect 注册完成（mount 后异步）。
@@ -182,6 +189,36 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     await untilFrame(app.setup, (f) => f.includes("答复标题"), 8000, "answer");
     expect(app.setup.captureCharFrame()).toContain("正文内容");
 
+    await app.destroy();
+  }, 30_000);
+
+  test("T8 多行消息提交 → 消息流渲染多行（换行进模型与回显）", async () => {
+    const app = await mountAppAsync([assistantResult({ texts: ["多行答复"] })]);
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    // 输入两行（Shift+Enter 分隔后 Enter 提交）。第二行用 raw type（不走
+    // typeText 的 "/" 预热 + Backspace——会清掉第一行）。
+    await app.typeText("行一");
+    app.setup.mockInput.pressEnter({ shift: true });
+    await new Promise((r) => setTimeout(r, 100));
+    await app.setup.renderOnce();
+    for (const ch of "行二") {
+      app.setup.mockInput.pressKey(ch);
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    await new Promise((r) => setTimeout(r, 100));
+    await app.setup.renderOnce();
+    await app.pressEnter();
+
+    // turn 完成 → 消息流渲染两行内容（user 消息块 wrapMode=word 多行）。
+    await until(() => app.bridge.inflight.ids().size === 0, 8000, "multi-done");
+    const frame = await untilFrame(
+      app.setup,
+      (f) => f.includes("行一") && f.includes("行二"),
+      8000,
+      "multi-render"
+    );
+    expect(frame).toContain("多行答复");
     await app.destroy();
   }, 30_000);
 

@@ -95,7 +95,14 @@ async function mountAppAsync(
           setupRef.renderer.destroy();
       }}
     />,
-    { width: 80, height: 30, exitOnCtrlC: false, consoleMode: "disabled" }
+    {
+      width: 80,
+      height: 30,
+      exitOnCtrlC: false,
+      consoleMode: "disabled",
+      // T8：Shift+Enter 需携带 shift 修饰（kitty 协议编码 [13;2u）。
+      kittyKeyboard: true,
+    }
   );
   setupRef = setup;
   await new Promise((r) => setTimeout(r, 300));
@@ -131,6 +138,44 @@ async function mountAppAsync(
     },
   };
 }
+
+describe("T8 多行输入：提交后清空 + 历史召回保留多行", () => {
+  test("Shift+Enter 换行 → Enter 提交 → 输入框清空 + 历史召回多行文本", async () => {
+    const app = await mountAppAsync([
+      assistantResult({ texts: ["multi-reply"] }),
+    ]);
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    // 输入两行（Shift+Enter 分隔）。
+    await app.typeText("第一行");
+    app.setup.mockInput.pressEnter({ shift: true });
+    await new Promise((r) => setTimeout(r, 100));
+    await app.setup.renderOnce();
+    await app.typeText("第二行");
+    await app.pressEnter();
+
+    // turn 落盘：summary 含换行。
+    await until(() => app.bridge.inflight.ids().size === 0, 8000, "multi-turn");
+    const list = await app.bridge.listSessions();
+    expect(list.length).toBe(1);
+    expect(list[0]!.summary).toBe("第一行\n第二行");
+
+    // 提交后输入框已清空：占位「输入消息」重新可见（提交前输入框是实际文本；
+    // 注意消息流里会渲染用户消息全文，故不能用「第一行消失」作信号）。
+    await untilFrame(app.setup, (f) => f.includes("输入消息"), 8000, "cleared");
+
+    // 历史召回：↑ → 输入框占位消失（内容恢复完整多行文本）。
+    await app.pressArrow("up");
+    await untilFrame(
+      app.setup,
+      (f) => !f.includes("输入消息"),
+      8000,
+      "recall-multi"
+    );
+
+    await app.destroy();
+  }, 30_000);
+});
 
 describe("#279 项5：TUI 输入历史 ↑/↓ 导航", () => {
   test("空历史 ↑/↓ no-op：不崩、不吞后续输入", async () => {

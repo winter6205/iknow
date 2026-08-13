@@ -4,14 +4,19 @@
  * #321 T5-P0-2：chromeReserveRows + noticeRenderRows 纯函数单测（行账 SSOT）。
  * 这些函数承担 viewportRows 动态预算的逐项入账逻辑，新增底部行必须同步。
  *
- *  - chromeReserveRows：headroom 1 + mode 1 + 输入框 3 + hint + ContextBar 1
- *    + ask 1 + notice (rows + 1) + modal (rows + 1) + bgLine；
+ *  - chromeReserveRows：headroom 1 + mode 1 + 输入框(inputRows 动态) + hint +
+ *    ContextBar 1 + ask 1 + notice (rows + 1) + modal (rows + 1) + bgLine；
  *  - noticeRenderRows：空 / 空字符串 / 多行 / 视觉宽度折行 后行数。
+ *
+ * T8：输入框行账从固定 3 → `inputRows` 动态（默认 1 内容行 + 2 圆角边框行）。
+ * inputRows 缺省 = 1 → 3（等价旧固定值）；5 行输入 / 8 行输入（maxLines 上限）
+ * 时返回递增预算 —— 视图区高度随之减，不挤掉历史消息。
  */
 import { describe, expect, test } from "bun:test";
 import {
   bgStatusLine,
   chromeReserveRows,
+  inputVisibleLineCount,
   noticeRenderRows,
 } from "../../src/tui/app.js";
 import { thinkingPickerRows } from "../../src/tui/thinking-picker.js";
@@ -27,6 +32,7 @@ describe("chromeReserveRows", () => {
       noticeRows: 0,
       inputHintRows: 0,
       bgLine: false,
+      inputRows: 1,
     });
     expect(rows).toBe(1 + 1 + 3 + 0 + 1 + 1);
   });
@@ -36,11 +42,13 @@ describe("chromeReserveRows", () => {
       noticeRows: 0,
       inputHintRows: 0,
       bgLine: false,
+      inputRows: 1,
     });
     const withBg = chromeReserveRows({
       noticeRows: 0,
       inputHintRows: 0,
       bgLine: true,
+      inputRows: 1,
     });
     expect(withBg - base).toBe(1);
   });
@@ -50,11 +58,13 @@ describe("chromeReserveRows", () => {
       noticeRows: 0,
       inputHintRows: 0,
       bgLine: false,
+      inputRows: 1,
     });
     const withHint = chromeReserveRows({
       noticeRows: 0,
       inputHintRows: 3,
       bgLine: false,
+      inputRows: 1,
     });
     expect(withHint - base).toBe(3);
   });
@@ -64,11 +74,13 @@ describe("chromeReserveRows", () => {
       noticeRows: 0,
       inputHintRows: 0,
       bgLine: false,
+      inputRows: 1,
     });
     const withNotice = chromeReserveRows({
       noticeRows: 2,
       inputHintRows: 0,
       bgLine: false,
+      inputRows: 1,
     });
     expect(withNotice - base).toBe(3);
   });
@@ -78,11 +90,13 @@ describe("chromeReserveRows", () => {
       noticeRows: 0,
       inputHintRows: 0,
       bgLine: false,
+      inputRows: 1,
     });
     const withModal = chromeReserveRows({
       noticeRows: 0,
       inputHintRows: 0,
       bgLine: false,
+      inputRows: 1,
       modalRows: 5,
     });
     expect(withModal - base).toBe(6);
@@ -93,6 +107,7 @@ describe("chromeReserveRows", () => {
       noticeRows: 2,
       inputHintRows: 3,
       bgLine: true,
+      inputRows: 1,
       modalRows: 5,
     });
     expect(rows).toBe(1 + 1 + 3 + 3 + 1 + 1 + 3 + 6 + 1);
@@ -103,14 +118,136 @@ describe("chromeReserveRows", () => {
       noticeRows: 0,
       inputHintRows: 0,
       bgLine: false,
+      inputRows: 1,
     });
     const b = chromeReserveRows({
       noticeRows: 0,
       inputHintRows: 0,
       bgLine: false,
+      inputRows: 1,
       modalRows: undefined,
     });
     expect(a).toBe(b);
+  });
+
+  test("T8：inputRows 缺省 = 1 内容行 → 3（等价旧固定值 1+2 圆角边框）", () => {
+    const a = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+    });
+    const b = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+    });
+    expect(a).toBe(7);
+    expect(a).toBe(b);
+  });
+
+  test("T8：多行输入 inputRows=5 → 预算 +4（5 内容行 + 2 边框 − 3 基线）", () => {
+    const base = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+    });
+    const multi = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 5,
+    });
+    expect(multi - base).toBe(4);
+  });
+
+  test("T8：超过 maxLines（8）→ 高度封顶：inputRows=8 与 =20 同预算", () => {
+    const capped = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 8,
+    });
+    const beyond = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 20,
+    });
+    expect(capped).toBe(beyond);
+    expect(capped - 7).toBe(7); // 8 + 2 − 3
+  });
+});
+
+describe("inputVisibleLineCount", () => {
+  test("空字符串 → 1 行", () => {
+    expect(inputVisibleLineCount("")).toBe(1);
+  });
+
+  test("单行无换行 → 1 行", () => {
+    expect(inputVisibleLineCount("hello")).toBe(1);
+  });
+
+  test("含换行 → 按 \\n 物理行数", () => {
+    expect(inputVisibleLineCount("a\nb\nc")).toBe(3);
+  });
+
+  test("尾部换行 → 空行也计入（a\\nb\\n = 3 行）", () => {
+    expect(inputVisibleLineCount("a\nb\n")).toBe(3);
+  });
+
+  test("T8：行数严格单调增 —— 高度增长 SSOT 证据（1 → 2 → 3 → 4 → 5）", () => {
+    // chromeReserveRows 行账随 inputVisibleLineCount 严格递增；与
+    // textarea height={min(rows, MAX)} 联动 → 高度增长。
+    const base = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+    });
+    for (const n of [2, 3, 4, 5]) {
+      const expanded = chromeReserveRows({
+        noticeRows: 0,
+        inputHintRows: 0,
+        bgLine: false,
+        inputRows: inputVisibleLineCount(Array(n).fill("行").join("\n")),
+      });
+      expect(expanded - base).toBe(n - 1); // 每增一行预算 +1
+    }
+  });
+
+  test("T8：到达 MAX_INPUT_LINES 封顶 —— 内部滚动证据（inputRows=7/8/9/20 同预算）", () => {
+    // textarea 内部滚动的 SSOT 证据：超过 MAX_INPUT_LINES（8）后行账不再
+    // 增长 —— chromeReserveRows 内部 Math.min(..., MAX_INPUT_LINES)。
+    const a = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 7,
+    });
+    const b = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 8,
+    });
+    const c = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 9,
+    });
+    const d = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 20,
+    });
+    // 7 → 8 仍递增一行；8 → 9 → 20 封顶同预算（textarea 内部滚动吸收）
+    expect(b - a).toBe(1);
+    expect(b).toBe(c);
+    expect(c).toBe(d);
   });
 });
 
@@ -195,12 +332,14 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
       noticeRows: 0,
       inputHintRows: 0,
       bgLine: false,
+      inputRows: 1,
     });
     expect(base).toBe(7);
     const withThinking = chromeReserveRows({
       noticeRows: 0,
       inputHintRows: 0,
       bgLine: false,
+      inputRows: 1,
       pickerRows: 5,
     });
     expect(withThinking - base).toBe(6);
@@ -208,6 +347,7 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
       noticeRows: 0,
       inputHintRows: 0,
       bgLine: false,
+      inputRows: 1,
       pickerRows: 7,
     });
     expect(withEffort - base).toBe(8);
@@ -218,11 +358,13 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
       noticeRows: 0,
       inputHintRows: 0,
       bgLine: false,
+      inputRows: 1,
     });
     const b = chromeReserveRows({
       noticeRows: 0,
       inputHintRows: 0,
       bgLine: false,
+      inputRows: 1,
       pickerRows: undefined,
     });
     expect(a).toBe(b);
