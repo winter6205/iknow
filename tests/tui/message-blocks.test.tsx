@@ -388,7 +388,8 @@ test("T7 多消息交替：user / assistant 消息间有空白行分隔（margin
   const lines = frame.split("\n");
   expect(frame).toContain("第一条提问");
   const firstTextLine = lines.findIndex((l) => l.includes("第一条提问"));
-  // marginTop={1} → 文本首行前应有一个纯空白行（paddingY 之上）。
+  // marginTop={1} → 文本首行前应有一个纯空白行（消息根 box 顶部 margin 提
+  // 供的间距；paddingY=0 不再贡献 padding 行，紧凑模式）。
   expect(firstTextLine).toBeGreaterThan(0);
   const aboveBlank = lines
     .slice(0, firstTextLine)
@@ -405,7 +406,7 @@ test("T7 user 消息：底色 box 包裹后渲染不崩，❯ 前缀保留（结
   const setup = await renderBlocks(msg);
   const frame = setup.captureCharFrame();
   expect(frame).toContain("❯ 带底色的提问");
-  // 内容被 paddingY=1 包裹 → 文本首行前 / 末行后各有一个纯空白行（底色区）。
+  // 内容紧贴底色块（paddingY=0）；仅靠 marginTop={1} 消息间 1 行节奏。
   const lines = frame.split("\n");
   const textLine = lines.findIndex((l) => l.includes("带底色的提问"));
   expect(textLine).toBeGreaterThan(0);

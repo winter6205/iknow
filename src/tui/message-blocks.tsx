@@ -14,8 +14,11 @@
  *  - 全部 `<box>` / `<text>` + fg 属性；禁 ink 原语（Box / Text）。
  *  - **T7 消息间距 + 底色**：根 `<box>` 加 marginTop={1}（消息间空行间距）；
  *    user / assistant 分支用 box.backgroundColor（读 theme.ts userBg /
- *    assistantBg token）+ paddingX/paddingY 底色块。OpenTUI 无 lineHeight API，
- *    行距 = 消息块间 margin + 块内段落 margin，不自造真 leading。
+ *    assistantBg token）+ paddingX={1} 水平缩进（无 paddingY，底色块贴合内容）。
+ *    OpenTUI 无 lineHeight API，行距 = 消息块间 margin + 块内段落 margin，不自
+ *    造真 leading。2026-08-13 用户反馈 paddingY=1 让消息块上下各 1 行空白叠加
+ *    marginTop 造成 3 行/消息间距「太宽了」，改为 paddingY=0（底色贴内容） +
+ *    marginTop=1（消息间 1 行节奏）。
  *
  * 留存的子组件：
  *  - `ToolSummaryRow`：tool_use 摘要行（收口 + mark 染色 + 完成态 bash
@@ -180,15 +183,15 @@ export function MessageBlocks(props: {
       .map((b) => b.text)
       .join("\n");
     if (texts.trim() === "") return null; // 纯 tool_result：摘要行已覆盖。
-    // T7：user 底色块（pal.userBg + padding）。内部宽度 = cols-2（paddingX=1
-    // 两侧），text width 同步收窄避免溢出。
+    // T7：user 底色块（pal.userBg + paddingX=1 水平缩进，无 paddingY 贴内容）。
+    // 内部宽度 = cols-2（paddingX=1 两侧），text width 同步收窄避免溢出。
     return (
       <box flexDirection="column" marginTop={1}>
         <box
           flexDirection="column"
           backgroundColor={pal.userBg}
           paddingX={1}
-          paddingY={1}
+          paddingY={0}
         >
           <text fg={pal.accent} wrapMode="word" width={Math.max(1, cols - 2)}>
             {`❯ ${texts}`}
@@ -246,14 +249,15 @@ export function MessageBlocks(props: {
     }
   });
   if (nodes.length === 0) return null;
-  // T7：assistant 底色块（pal.assistantBg + padding）+ 根 marginTop（消息间距）。
+  // T7：assistant 底色块（pal.assistantBg + paddingX=1 水平缩进，无 paddingY
+  // 贴内容）+ 根 marginTop=1（消息间 1 行节奏）。
   return (
     <box flexDirection="column" marginTop={1}>
       <box
         flexDirection="column"
         backgroundColor={pal.assistantBg}
         paddingX={1}
-        paddingY={1}
+        paddingY={0}
       >
         {nodes}
       </box>
