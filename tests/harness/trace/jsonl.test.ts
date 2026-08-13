@@ -28,6 +28,10 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createJsonlTraceService } from "../../../src/harness/trace/jsonl.ts";
+import {
+  clearActiveExtraSecrets,
+  setActiveExtraSecrets,
+} from "../../../src/harness/sandbox/env-isolation.ts";
 import type {
   LlmCallRecord,
   ToolCallRecord,
@@ -688,5 +692,57 @@ describe("createJsonlTraceService — recordSandboxCmd (T2, schema 就位埋点�
     >;
     assert.equal(parsed["record_type"], "sandbox_cmd");
     assert.equal(parsed["conversation_id"], "conv-cmd-fs");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #406 T3 A4: 输出 mask 兜底 —— jsonl 无参 currentSecretValues() 覆盖 registry 值
+// ---------------------------------------------------------------------------
+// jsonl.ts:76 调用 currentSecretValues() 无参 → 经模块槽位（setActiveExtraSecrets）
+// 覆盖 registry 追踪的密钥值。写入行里的真值应被 mask 成 ***（沿用 mask 链路）。
+describe("#406 T3 — jsonl 输出 mask 兜底 (A4)", () => {
+  beforeEach(() => clearActiveExtraSecrets());
+  afterEach(() => clearActiveExtraSecrets());
+
+  it("registry 追踪值出现在 recordLlmCall 消息里 → 文件行含 *** 且不含真值", async () => {
+    setActiveExtraSecrets(["sk-registry-secret"]);
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-t3-a4",
+    });
+    const llm: LlmCallRecord = {
+      ...SAMPLE_LLM,
+      messages: [{ role: "user", content: "这是 sk-registry-secret 帮我测" }],
+    };
+    await svc.recordLlmCall(llm);
+
+    const filePath = join(scratch, "conv-t3-a4.jsonl");
+    const content = readFileSync(filePath, "utf8");
+    assert.ok(content.includes("***"), `行应含 mask 结果（实际=${content}）`);
+    assert.ok(
+      !content.includes("sk-registry-secret"),
+      `行不应含 registry 真值（实际=${content}）`
+    );
+  });
+
+  it("clearActiveExtraSecrets 后 registry 值不再被遮蔽", async () => {
+    setActiveExtraSecrets(["sk-registry-secret"]);
+    clearActiveExtraSecrets();
+    const svc = createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "conv-t3-a4-clear",
+    });
+    const llm: LlmCallRecord = {
+      ...SAMPLE_LLM,
+      messages: [{ role: "user", content: "raw sk-registry-secret here" }],
+    };
+    await svc.recordLlmCall(llm);
+
+    const filePath = join(scratch, "conv-t3-a4-clear.jsonl");
+    const content = readFileSync(filePath, "utf8");
+    assert.ok(
+      content.includes("sk-registry-secret"),
+      `清槽位后应保留原值（实际=${content}）`
+    );
   });
 });

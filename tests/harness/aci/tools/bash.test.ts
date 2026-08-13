@@ -6,6 +6,7 @@ import { afterEach, describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 import { createBashTool } from "../../../../src/harness/aci/tools/bash.ts";
+import { createSecretRegistry } from "../../../../src/harness/secret-roundtrip/index.ts";
 import { waitForPidFile, waitForProcessExit } from "./spawn-test-utils.ts";
 
 const scratchPaths: string[] = [];
@@ -170,3 +171,82 @@ async function runBash(cwd: string, command: string): Promise<BashResult> {
   const tool = createBashTool(cwd);
   return (await tool.handler({ command })) as BashResult;
 }
+
+// ---------------------------------------------------------------------------
+// #406 T3: bash 占位符还原层（restore 在 spawn 前执行）
+// ---------------------------------------------------------------------------
+// bwrap 0.11.1 在本测试环境可用（既有 execution describe 已真实 spawn）。
+// A1:registry 注册 sk- 真值后，命令含 <<<SECRET_1>>> → 还原后 spawn → stdout 含真值。
+// A2:命令含未注册 <<<SECRET_MISSING>>> → 原样传给 bash 不抛错，bash 把字面
+//    当命令名回显到 stderr（command not found）→ stderr 含字面（graceful）。
+describe("#406 T3 — bash 占位符还原层", () => {
+  it("A1：注册值还原 —— stdout 输出真值而非占位符", async () => {
+    const cwd = await makeScratch("bash-restore-");
+    const registry = createSecretRegistry();
+    registry.register("sk-aaaaaaaaaaaaaaaaaaaa");
+    const tool = createBashTool(cwd, { secretRegistry: registry });
+
+    const result = (await tool.handler({
+      command: 'echo "<<<SECRET_1>>>"',
+    })) as BashResult;
+
+    assert.equal(result.code, 0);
+    assert.equal(
+      result.stdout,
+      "sk-aaaaaaaaaaaaaaaaaaaa\n",
+      `stdout 应含还原后的真值（实际=${JSON.stringify(result.stdout)}）`
+    );
+  });
+
+  it("A1：多占位符命令完整还原后执行", async () => {
+    const cwd = await makeScratch("bash-restore-multi-");
+    const registry = createSecretRegistry();
+    registry.register("sk-aaaaaaaaaaaaaaaaaaaa");
+    registry.register("AKIA1234567890ABCDEF");
+    const tool = createBashTool(cwd, { secretRegistry: registry });
+
+    const result = (await tool.handler({
+      command: 'echo "<<<SECRET_1>>> <<<SECRET_2>>>"',
+    })) as BashResult;
+
+    assert.equal(result.code, 0);
+    assert.equal(
+      result.stdout,
+      "sk-aaaaaaaaaaaaaaaaaaaa AKIA1234567890ABCDEF\n",
+      `多占位符应全部还原（实际=${JSON.stringify(result.stdout)}）`
+    );
+  });
+
+  it("A2：未注册占位符原样透传 bash，不抛错（graceful degradation）", async () => {
+    const cwd = await makeScratch("bash-restore-missing-");
+    const registry = createSecretRegistry();
+    const tool = createBashTool(cwd, { secretRegistry: registry });
+
+    // 引号内占位符保证 bash 不把它当 here-string 重定向；restore 只还原已注册
+    // 占位符，未注册的 <<<SECRET_MISSING>>> 原样进入 bash 并输出到 stdout。
+    const result = (await tool.handler({
+      command: 'echo "<<<SECRET_MISSING>>>"',
+    })) as BashResult;
+
+    assert.equal(result.code, 0);
+    assert.equal(
+      result.stdout,
+      "<<<SECRET_MISSING>>>\n",
+      `未注册占位符应原样透传（实际=${JSON.stringify(result.stdout)}）`
+    );
+  });
+
+  it("A2：空 registry 命令不还原，原样透传", async () => {
+    const cwd = await makeScratch("bash-restore-empty-");
+    const tool = createBashTool(cwd, {
+      secretRegistry: createSecretRegistry(),
+    });
+
+    const result = (await tool.handler({
+      command: "echo keep",
+    })) as BashResult;
+
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout, "keep\n");
+  });
+});

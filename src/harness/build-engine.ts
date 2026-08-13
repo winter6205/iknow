@@ -24,6 +24,7 @@ import {
   type LoopEngineDeps,
 } from "./index.js";
 import { createAciExecutor } from "./aci/index.js";
+import { setActiveExtraSecrets } from "./sandbox/env-isolation.js";
 import { createPermissionPolicy } from "./permission/policy.js";
 import type { PermissionModeContext } from "./permission/modes.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
@@ -240,6 +241,19 @@ export async function buildHarnessEngine(
       ? (opts.subagentManager ??
         createSubAgentManager({ spawn: defaultSubAgentSpawn }))
       : undefined;
+  // #126 T5:settings 对象缝（测试注入隔离 settings；生产缺省 loadIknowSettings）。
+  const settings = opts.settings ?? loadIknowSettings({ cwd });
+  // #406 T2:per-engine secret registry —— settings.secrets.patterns 驱动构造。
+  // 构造期编译 DEFAULT + extras(registry.patterns 冻结);T4 将按 mode 门控构造。
+  // 当前无条件装配:loop-engine 在 secretRegistry 在场时才做占位符替换,
+  // 缺席字段(测试缝 settings 不含 secrets)→ 空 pattern 集,行为 byte-identical。
+  const secretRegistry: SecretRegistry | undefined = createSecretRegistry({
+    patterns: settings.secrets?.patterns,
+  });
+  // #406 T3:输出 mask 兜底 —— registry 追踪的密钥值写入 active extras 槽位，
+  // jsonl / format / stream-draft / hub 的 `currentSecretValues()` 无参调用
+  // 即覆盖这些值（构建期 registry 为空表，size 0 时写入空集，无副作用）。
+  setActiveExtraSecrets(secretRegistry.values());
   const reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
@@ -247,6 +261,10 @@ export async function buildHarnessEngine(
     skillCatalog,
     ...(subagentManager ? { subagentManager } : undefined),
     onEdit: (file) => lspNotifier.invalidate(file),
+    // #406 T3:secret registry 透传 → bash 工具 handler 在 spawn 前还原占位符。
+    // secretRegistry 已在上方构造（T2 段），registry 工厂只在 handler 调用时
+    // 解引用 opts.secretRegistry（惰性），无循环依赖。
+    ...(secretRegistry ? { secretRegistry } : {}),
   });
   // #337:动态 registry 包装 —— 让 inner executor 能解析 registerExternal
   // 动态注册的 mcp__ 工具。`reg.inner` 是构造期快照（aci-registry.ts:71），
@@ -264,21 +282,13 @@ export async function buildHarnessEngine(
     // W2: mode context — REPL toggles this via /permissions; absent → default.
     ...(opts.permissionMode ? { mode: opts.permissionMode } : {}),
   });
-  // #126 T5:secrets guard 产品装配 —— settings.secrets 段驱动。
-  //   - 缺省 settings 测试缝 → loadIknowSettings({ cwd })(与 userHome/cwd 缝同源)。
-  //   - guard 挂 preToolUse(Step 1 最早短路):密钥形态在权限层之前拦截,
-  //     与既有 opts.hooks(postToolUse,Step 5 观测)互补不重叠。
+  // #126 T5:secrets guard 产品装配 —— settings.secrets 段驱动（settings 已在
+  // 上方 registry 装配前解析）。guard 挂 preToolUse(Step 1 最早短路):密钥形态
+  // 在权限层之前拦截,与既有 opts.hooks(postToolUse,Step 5 观测)互补不重叠。
   //   - secrets.enabled 缺失 → 默认 true(内置集生效);enabled:false → guard 透明。
   //   - secrets.patterns 缺失/空 → 内置默认集;追加的自定义 pattern 构造期编译,
   //     非法正则剔除 + onHookError 告警,不毒化 guard(spec Constraints (a))。
-  const settings = opts.settings ?? loadIknowSettings({ cwd });
-  // #406 T2:per-engine secret registry —— settings.secrets.patterns 驱动构造。
-  // 构造期编译 DEFAULT + extras(registry.patterns 冻结);T4 将按 mode 门控构造。
-  // 当前无条件装配:loop-engine 在 secretRegistry 在场时才做占位符替换,
-  // 缺席字段(测试缝 settings 不含 secrets)→ 空 pattern 集,行为 byte-identical。
-  const secretRegistry: SecretRegistry | undefined = createSecretRegistry({
-    patterns: settings.secrets?.patterns,
-  });
+  //   - T4 将按 mode 门控:roundtrip（默认）不装配 guard,block 仍装配（向后兼容）。
   const secretsGuard = createSecretsGuardHook({
     ...(settings.secrets ? { ...settings.secrets } : {}),
     ...(opts.onHookError ? { onHookError: opts.onHookError } : {}),

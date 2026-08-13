@@ -78,8 +78,9 @@ data/sessions/*
 
 # 064 T5: JSONL trace output (default path ./trace.jsonl)
 trace.jsonl
-# runtime trace service output directory (per-session JSONL files)
-trace/
+# runtime trace service output directory (per-session JSONL files).
+# Root-anchored so tracked tests/harness/trace/ tests stay addable (#406 T3 A4).
+/trace/
 # clipboard fallback artifact when no clipboard is available (src/tui/clipboard.ts)
 last_copy.txt
 

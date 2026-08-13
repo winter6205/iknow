@@ -13,6 +13,7 @@ import {
   createNetworkPolicy,
   createResourceLimits,
 } from "../../sandbox/index.js";
+import { restore, type SecretRegistry } from "../../secret-roundtrip/index.js";
 import { spawnWithStopSignal, truncateByCodePoint } from "./helpers.js";
 
 const MAX_OUTPUT_CODE_POINTS = 12_000;
@@ -62,7 +63,15 @@ function requireBwrap(): void {
       "bash: bwrap is required; install bwrap (≥ 0.11.1) via apt install bubblewrap or your distro equivalent"
     );
 }
-export function createBashTool(cwd: string): AciToolDef {
+export interface CreateBashToolOptions {
+  /** #406 T3:per-engine secret registry。在场时 handler 在构造 bwrap fence 前
+   *  对命令做占位符还原（`<<<SECRET_N>>>` → 真值）；缺席时命令原样透传。 */
+  readonly secretRegistry?: SecretRegistry;
+}
+export function createBashTool(
+  cwd: string,
+  opts?: CreateBashToolOptions
+): AciToolDef {
   requireBwrap();
   const fsPolicy = createFsPolicy({ cwd, home: homedir(), tmpDir: tmpdir() });
   const networkPolicy = createNetworkPolicy();
@@ -84,9 +93,15 @@ export function createBashTool(cwd: string): AciToolDef {
         `bash: command targets a sensitive path: ${command}`
       );
     const fenceEnv = envIsolation.filter(process.env);
+    // #406 T3:构造 fence 前还原占位符 —— 还原后的命令才是真正 spawn 进 bwrap
+    // 的文本。原始命令（含占位符）只见于工具调用记录 / 模型上下文；模型永不
+    // 见还原后的命令，只看到 bash 输出的 stdout。
+    const finalCommand = opts?.secretRegistry
+      ? restore(command, opts.secretRegistry)
+      : command;
     const fence = createBwrapFence({
       command: "bash",
-      args: ["-c", command],
+      args: ["-c", finalCommand],
       fsPolicy,
       networkPolicy,
       resourceLimits,
