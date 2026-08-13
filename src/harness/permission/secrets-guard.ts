@@ -19,29 +19,15 @@
 
 import type { PreToolUseHook } from "./types.js";
 import type { HookErrorEvent } from "./permission-executor.js";
+import { DEFAULT_SECRET_PATTERNS } from "../secret-roundtrip/index.js";
+
+// #406: 模式 SSOT 迁出到 src/harness/secret-roundtrip/patterns.ts，
+// 本文件继续维护 `mode:"block"` 兼容路径（创建 deny-only preToolUse hook）。
+// 模式内容字节级等价 — 7 条默认占位正则原样搬移，未改一字。
+export { DEFAULT_SECRET_PATTERNS };
 
 /** stringify 截断上界（ADR-0006 封顶精神；spec Constraints (c)）。 */
 const MAX_SCAN_LENGTH = 20_000;
-
-/**
- * 内置密钥占位模式集（全 case-sensitive，占位形态 only，绝不含真实密钥）。
- * 顺序即优先级（首中即拦），但各类模式互斥，顺序不影响语义。
- */
-export const DEFAULT_SECRET_PATTERNS: ReadonlyArray<string> = Object.freeze([
-  // 1. 私钥块（RSA / EC / OPENSSH / DSA / PGP，前缀可选）
-  "-----BEGIN (RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----",
-  // 2. 通用 API key 形态（sk- 前缀 + ≥20 个 base64url 字符）
-  "sk-[A-Za-z0-9_-]{20,}",
-  // 3. AWS access key（AKIA + 16 位大写字母数字）
-  "AKIA[0-9A-Z]{16}",
-  // 4. GitHub token（ghp_ + 36 位 / github_pat_ + ≥50 位）
-  "ghp_[A-Za-z0-9]{36}",
-  "github_pat_[A-Za-z0-9_]{50,}",
-  // 5. Slack token（xoxb / xoxa / xoxp / xoxr / xoxs + ≥10 位）
-  "xox[baprs]-[A-Za-z0-9-]{10,}",
-  // 6. 私钥文件外传形态（cat / head / tail / curl / scp / rsync 触及 id_<name>）
-  "(cat|head|tail|curl|scp|rsync)\\b.*\\bid_[a-z]+\\b",
-]);
 
 /** guard-init 告警载荷（phase 统一 "guard-init"，无 tool 归属）。 */
 export interface SecretsGuardHookOpts {
