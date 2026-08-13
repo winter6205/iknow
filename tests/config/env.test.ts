@@ -628,7 +628,7 @@ describe("loadIknowEnv — llm.fallback (settings-model-extension)", () => {
     // 经真实 settings 文件链路：fallback 非法数组在 parseLlm 被丢弃
     // （drop-not-throw）→ mergedSettings.llm.fallback 缺席 → env.llm.fallback = []。
     // 隔离 home（loadIknowEnv 显式传 emptyHome），避免真实 ~/.iknow/settings.json
-    // 的 fallback 泄漏进断言。
+    // 的 fallback 泄漏进断言（#395 引入 home 注入缝，#406 复用）。
     const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-fallback-invalid-"));
     const emptyHome = await mkdtemp(join(tmpdir(), "iknow-env-fallback-home-"));
     await mkdir(join(tmpCwd, ".iknow"), { recursive: true });

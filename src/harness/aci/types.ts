@@ -70,6 +70,7 @@ export type {
   PermissionDecision,
   PermissionOutcome,
   AskUser,
+  PreHookBlock,
   PreToolUseHook,
   PostToolUseHook,
 } from "../permission/types.js";

@@ -111,8 +111,24 @@ export function currentSecretEnvNames(): readonly string[] {
   return configuredSecretNames();
 }
 
+/** #406 T3:active extras — per-engine secret registry 的值（build-engine 构造
+ *   registry 后经 `setActiveExtraSecrets(registry.values())` 写入）。让输出
+ *   mask 消费点（jsonl / format / stream-draft / hub 全走 `currentSecretValues()`
+ *   无参调用）无需改调用点即可覆盖 registry 追踪的密钥。模块级可变槽位是本层
+ *   唯一共享状态；显式 `extraSecrets` 入参优先于槽位（`??` 语义）。 */
+let activeExtraSecrets: ReadonlyArray<string> = Object.freeze([]);
+
+export function setActiveExtraSecrets(values: Iterable<string>): void {
+  activeExtraSecrets = Object.freeze([...new Set(values)]);
+}
+
+export function clearActiveExtraSecrets(): void {
+  activeExtraSecrets = Object.freeze([]);
+}
+
 export function currentSecretValues(
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  extraSecrets?: Iterable<string>
 ): readonly string[] {
   const values = new Set<string>();
   // 1) 变量名 → 实际值（占位符指向的 var + SECRET_PATTERN 兜底命中的 var）。
@@ -124,5 +140,10 @@ export function currentSecretValues(
   // 避免对字面密钥回显时 SC20 遮蔽失效）。
   const literal = literalApiKey();
   if (literal) values.add(literal);
+  // 3) #406 T3:registry 追踪值并入（显式入参优先，缺省用模块槽位）；Set 去重。
+  const extras = extraSecrets ?? activeExtraSecrets;
+  for (const v of extras) {
+    if (v) values.add(v);
+  }
   return Object.freeze([...values]);
 }

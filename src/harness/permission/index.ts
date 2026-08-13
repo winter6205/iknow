@@ -4,6 +4,7 @@
 
 export type {
   AskUser,
+  PreHookBlock,
   PreToolUseHook,
   PostToolUseHook,
   PermissionDecision,
@@ -59,4 +60,13 @@ export {
   createPermissionExecutor,
   createAciCatalog,
 } from "./permission-executor.js";
-export type { PermissionExecutorOptions } from "./permission-executor.js";
+export type {
+  PermissionExecutorOptions,
+  HookErrorEvent,
+} from "./permission-executor.js";
+
+export {
+  createSecretsGuardHook,
+  DEFAULT_SECRET_PATTERNS,
+} from "./secrets-guard.js";
+export type { SecretsGuardHookOpts } from "./secrets-guard.js";

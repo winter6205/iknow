@@ -17,6 +17,7 @@
 
 import type {
   AskUser,
+  PreHookBlock,
   PreToolUseHook,
   PostToolUseHook,
   PermissionOutcome,
@@ -126,4 +127,4 @@ export function checkPermission(opts: {
  * Re-export from permission/ so the prototype import surface stays stable.
  * -------------------------------------------------------------------------- */
 
-export type { AskUser, PreToolUseHook, PostToolUseHook };
+export type { AskUser, PreHookBlock, PreToolUseHook, PostToolUseHook };

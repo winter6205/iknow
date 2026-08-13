@@ -21,6 +21,7 @@ import type { IknowEnv } from "../../../config/env.js";
 import { createAciRegistry, type AciRegistry } from "../aci-registry.js";
 import type { AciToolDef } from "../types.js";
 import { createBashTool } from "./bash.js";
+import type { SecretRegistry } from "../../secret-roundtrip/index.js";
 import { createReadFileTool } from "./read-file.js";
 import { createGrepTool } from "./grep.js";
 import { createGlobTool } from "./glob.js";
@@ -119,6 +120,10 @@ export interface CreateDefaultAciRegistryOptions {
   readonly subagentManager?: SubAgentManager;
   /** #251 onEdit 接缝:edit_file 写盘成功后回调(装配层接 LSP notifier)。 */
   readonly onEdit?: (file: string) => void;
+  /** #406 T3:per-engine secret registry。透传给 bash 工具工厂——handler
+   *  执行前把占位符还原为真值（见 bash.ts restore 段）。缺席时 bash 命令
+   *  原样透传（行为 byte-identical，向后兼容）。 */
+  readonly secretRegistry?: SecretRegistry;
 }
 
 /**
@@ -172,6 +177,7 @@ export function createDefaultAciRegistry(
   const memoryDir = opts.memoryDir;
   const skillCatalog = opts.skillCatalog;
   const subagentManager = opts.subagentManager;
+  const secretRegistry = opts.secretRegistry;
 
   // holder:tool_search 自引用的惰性解引用点(装配完成前闭包返回 undefined,
   // tool-search.ts:resolveRegistry 触发 ToolExecutionError 兜底)。
@@ -185,7 +191,7 @@ export function createDefaultAciRegistry(
   // 键顺序必须与 ACI_TOOLSET_NAMES 逐项一致(Gate 3):memory_* 在
   // tool_search 之前,skill / skill_search 在末尾。
   const factories: Record<string, () => AciToolDef> = {
-    bash: () => createBashTool(sandboxRoot),
+    bash: () => createBashTool(sandboxRoot, { secretRegistry }),
     read_file: () => createReadFileTool(sandboxRoot),
     grep: () => createGrepTool(sandboxRoot),
     glob: () => createGlobTool(sandboxRoot),

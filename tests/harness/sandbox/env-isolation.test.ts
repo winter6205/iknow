@@ -10,7 +10,14 @@
  * `{llm:{apiKey:"${VAR}"}}` 后再加载模块级函数），以及字面 apiKey
  * 不加入 secret 名、SC20 遮蔽不退化。
  */
-import { describe, it, beforeAll, afterAll } from "vitest";
+import {
+  describe,
+  it,
+  beforeAll,
+  afterAll,
+  beforeEach,
+  afterEach,
+} from "vitest";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,9 +25,11 @@ import { join } from "node:path";
 import {
   BASE_ENV_WHITELIST,
   SECRET_ENV_NAMES,
+  clearActiveExtraSecrets,
   createEnvIsolation,
   currentSecretEnvNames,
   currentSecretValues,
+  setActiveExtraSecrets,
 } from "../../../src/harness/sandbox/env-isolation.js";
 // SECRET_ENV_NAMES 在模块加载期经 loadIknowSettings() 解析（真实 HOME / cwd），
 // 单测无法稳定注入 tmp settings —— 本文件断言占位符语义走 currentSecretEnvNames()
@@ -226,5 +235,94 @@ describe("configuredSecretNames — 多段占位符遮蔽 (M1, SC20)", () => {
       delete process.env[M1_A];
       delete process.env[M1_B];
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #406 T3: currentSecretValues extraSecrets 合并 + activeExtraSecrets 模块槽位
+// ---------------------------------------------------------------------------
+// A3/A4 不依赖 settings 文件（currentSecretValues 传 env 参数 / 模块槽位），
+// 但需要 SECRET_PATTERN 兜底扫描命中一个 env 变量名——用 MY_TOKEN_X
+// （命中 TOKEN 子串）验证 env 派生值参与并集。beforeEach/afterEach 清槽位，
+// 避免跨测试污染。
+describe("#406 T3 — currentSecretValues extraSecrets 合并 (A3)", () => {
+  const EXTRA_VAR = "MY_TOKEN_X";
+
+  beforeEach(() => {
+    delete process.env[EXTRA_VAR];
+  });
+  afterEach(() => {
+    delete process.env[EXTRA_VAR];
+  });
+
+  it("extraSecrets 与 env 派生值并集 + 去重（env 值只出现一次）", () => {
+    const env: NodeJS.ProcessEnv = { [EXTRA_VAR]: "sk-already-in-env-value" };
+    const result = currentSecretValues(env, [
+      "sk-new-xxx",
+      "sk-already-in-env-value",
+    ]);
+    assert.ok(
+      result.includes("sk-already-in-env-value"),
+      `应含 env 派生值（实际=${JSON.stringify(result)}）`
+    );
+    assert.ok(
+      result.includes("sk-new-xxx"),
+      `应含显式 extraSecrets 值（实际=${JSON.stringify(result)}）`
+    );
+    const occurrences = result.filter(
+      (v) => v === "sk-already-in-env-value"
+    ).length;
+    assert.equal(occurrences, 1, "env 派生值与 extraSecrets 重复时只保留一份");
+  });
+
+  it("env 值缺省时 extraSecrets 仍独立进入遮蔽集", () => {
+    const result = currentSecretValues({}, ["sk-standalone-extra"]);
+    assert.ok(result.includes("sk-standalone-extra"));
+  });
+
+  it("空值 extraSecrets 不污染遮蔽集", () => {
+    const result = currentSecretValues({}, ["", undefined as never]);
+    assert.ok(!result.includes(""));
+  });
+});
+
+describe("#406 T3 — activeExtraSecrets 模块槽位 (A4 trace/jsonl 路径)", () => {
+  beforeEach(() => clearActiveExtraSecrets());
+  afterEach(() => clearActiveExtraSecrets());
+
+  it("setActiveExtraSecrets 后 currentSecretValues() 无参调用含值", () => {
+    setActiveExtraSecrets(["sk-registry-secret"]);
+    const result = currentSecretValues({});
+    assert.ok(
+      result.includes("sk-registry-secret"),
+      `无参调用应覆盖 registry 值（实际=${JSON.stringify(result)}）`
+    );
+  });
+
+  it("clearActiveExtraSecrets 后 currentSecretValues() 无参调用不含值", () => {
+    setActiveExtraSecrets(["sk-registry-secret"]);
+    clearActiveExtraSecrets();
+    const result = currentSecretValues({});
+    assert.ok(!result.includes("sk-registry-secret"));
+  });
+
+  it("setActiveExtraSecrets 入参去重（重复值只留一份）", () => {
+    setActiveExtraSecrets(["sk-dup", "sk-dup", "sk-other"]);
+    const result = currentSecretValues({});
+    const occurrences = result.filter((v) => v === "sk-dup").length;
+    assert.equal(occurrences, 1);
+  });
+
+  it("显式 extraSecrets 优先于模块槽位（?? 语义）", () => {
+    setActiveExtraSecrets(["from-module"]);
+    const result = currentSecretValues({}, ["from-explicit"]);
+    assert.ok(
+      result.includes("from-explicit"),
+      `显式 extraSecrets 应生效（实际=${JSON.stringify(result)}）`
+    );
+    assert.ok(
+      !result.includes("from-module"),
+      "显式 extraSecrets 在场时模块槽位被覆盖"
+    );
   });
 });

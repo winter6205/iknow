@@ -25,6 +25,7 @@ export const VIOLATION_PREFIXES = Object.freeze({
   networkDenied: "[network_denied]",
   fsDenied: "[fs_denied]",
   hookBlocked: "[hook_blocked]",
+  hookError: "[hook_error]",
 });
 
 export type ViolationPrefixName = keyof typeof VIOLATION_PREFIXES;

@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import {
   createPermissionExecutor,
   createAciCatalog,
+  type HookErrorEvent,
 } from "../../../src/harness/permission/permission-executor.js";
 import { createPermissionPolicy } from "../../../src/harness/permission/policy.js";
 import type {
@@ -186,7 +187,6 @@ describe("createPermissionExecutor — 5-step chain order", () => {
     const { executor: inner, calls } = makeInnerSpy();
     const policy = createPermissionPolicy();
     const pre: PreToolUseHook = () => ({
-      decision: "deny",
       reason: "audit-rejected",
     });
     const ex = createPermissionExecutor({
@@ -296,6 +296,126 @@ describe("createPermissionExecutor — unknown tool → delegate to inner", () =
     assert.equal(result[0]!.kind, "ok");
     assert.equal(calls.length, 1);
     assert.equal(calls[0]![0]!.name, "unknown_tool");
+  });
+});
+
+describe("createPermissionExecutor — pre-hook exception → fail-closed", () => {
+  it("pre throws → [hook_error] execution_failed, inner zero calls, loop continues", async () => {
+    const tool = makeAciTool({ name: "grep", category: "read-only" });
+    const reg = makeRegistry([
+      tool,
+      makeAciTool({ name: "glob", category: "read-only" }),
+    ]);
+    const { executor: inner, calls } = makeInnerSpy();
+    const policy = createPermissionPolicy();
+    const ex = createPermissionExecutor({
+      inner,
+      registry: reg,
+      policy,
+      askUser: async () => true,
+      preToolUse: ({ tool: name }) => {
+        if (name === "grep") throw new Error("pre-hook blew up");
+        return undefined;
+      },
+    });
+    const result = await ex.executeAll([
+      { id: "u1", name: "grep", input: { pattern: "*.ts" } },
+      { id: "u2", name: "glob", input: { pattern: "*.js" } },
+    ]);
+    assert.equal(result.length, 2);
+    const first = result[0]!;
+    assert.equal(first.kind, "execution_failed");
+    if (first.kind === "execution_failed") {
+      assert.ok(first.message.startsWith("[hook_error]"), first.message);
+      assert.ok(first.message.includes("pre-hook threw"), first.message);
+      assert.ok(first.message.includes("pre-hook blew up"), first.message);
+    }
+    // fail-closed：grep 拦下，inner 只收到后续正常放行的 glob（无 grep）
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]![0]!.name, "glob");
+    // loop 继续：第二个调用正常放行并执行
+    const second = result[1]!;
+    assert.equal(second.kind, "ok");
+  });
+});
+
+describe("createPermissionExecutor — post-hook exception → fire-and-forget", () => {
+  it("post throws → result identical to no-throw case; onHookError fired", async () => {
+    const tool = makeAciTool({ name: "edit_file", category: "write" });
+    const reg = makeRegistry([tool]);
+    const policy = createPermissionPolicy();
+    const call: ToolCall = {
+      id: "u1",
+      name: "edit_file",
+      input: { path: "a.ts" },
+    };
+
+    const make = (
+      post: PostToolUseHook | undefined,
+      onHookError: (e: HookErrorEvent) => void
+    ) => {
+      const { executor: inner } = makeInnerSpy();
+      return createPermissionExecutor({
+        inner,
+        registry: reg,
+        policy,
+        askUser: async () => true,
+        postToolUse: post,
+        onHookError,
+      });
+    };
+
+    // 基线：post 无异常
+    const baseline = await make(undefined, () => undefined).executeAll([call]);
+    const baselineResult = baseline[0]!;
+    assert.equal(baselineResult.kind, "ok");
+
+    // post 抛异常
+    const fired: Array<HookErrorEvent> = [];
+    const threw = await make(
+      () => {
+        throw new Error("post-hook blew up");
+      },
+      (e) => fired.push(e)
+    ).executeAll([call]);
+    assert.equal(threw[0]!.kind, baselineResult.kind);
+    assert.deepEqual(threw[0], baselineResult);
+
+    assert.equal(fired.length, 1);
+    assert.equal(fired[0]!.phase, "post");
+    assert.equal(fired[0]!.tool, "edit_file");
+    assert.ok(fired[0]!.message.includes("post-hook blew up"));
+  });
+});
+
+describe("createPermissionExecutor — hook-error reason redaction", () => {
+  it("pre message with sensitive + overlong error → excludes input original, ≤200 chars", async () => {
+    const tool = makeAciTool({ name: "bash", category: "execute" });
+    const reg = makeRegistry([tool]);
+    const { executor: inner, calls } = makeInnerSpy();
+    const policy = createPermissionPolicy();
+    const ex = createPermissionExecutor({
+      inner,
+      registry: reg,
+      policy,
+      askUser: async () => true,
+      preToolUse: ({ input }) => {
+        // 异常 message 包含 input 原文（含敏感串）+ 超长填充
+        throw new Error(`${JSON.stringify(input)} ${"x".repeat(500)}`);
+      },
+    });
+    const input = { command: "cat id_rsa", apiKey: "sk-secret-abc" };
+    const result = await ex.executeAll([{ id: "u1", name: "bash", input }]);
+    const r = result[0]!;
+    assert.equal(r.kind, "execution_failed");
+    if (r.kind === "execution_failed") {
+      // spec Constraints (b)：组装后的完整 message ≤ 200 字符
+      assert.ok(r.message.length <= 200, `message length ${r.message.length}`);
+      // 不回灌原始 input 内容（脱敏核心）
+      assert.ok(!r.message.includes("sk-secret-abc"), r.message);
+      assert.ok(!r.message.includes("id_rsa"), r.message);
+    }
+    assert.equal(calls.length, 0);
   });
 });
 

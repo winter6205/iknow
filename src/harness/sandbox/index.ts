@@ -28,9 +28,11 @@ export type {
 export {
   BASE_ENV_WHITELIST,
   SECRET_ENV_NAMES,
+  clearActiveExtraSecrets,
   createEnvIsolation,
   currentSecretEnvNames,
   currentSecretValues,
+  setActiveExtraSecrets,
 } from "./env-isolation.js";
 export type { EnvIsolation, EnvIsolationOptions } from "./env-isolation.js";
 
