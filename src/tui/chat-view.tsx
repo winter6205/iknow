@@ -25,6 +25,14 @@
  *  - tail（liveToolRuns + legacy liveToolLines + askLine + 流式 thinking / draft
  *    面板 + spinner）。
  *
+ * 工具输出展开位置的区分（T3，plans/tui-render-optimization.md）：
+ *  - **历史消息里的 preview**：`MessageBlocks.ToolPreviewRows` 已改为内嵌
+ *    固定高度 `<ScrollableOutputRegion>`（主消息流只显摘要行，diff 收进
+ *    固定高度区内部滚动）；
+ *  - **live tail**：`liveToolRuns.map(liveToolPreviewBox)` 保持展开（运行中
+ *    工具逐条展开预览行，与「固定高度历史 preview」是两件事——live 行是
+ *    尾部临时面板，不占用历史消息流；T6 输出增量上线前维持现状）。
+ *
  * 流式并发防御（spec SC8）：`draftsMasked` 与 `thinkingDraftMasked` 经
  * useDeferredValue — 高频更新降级低优先级，与 app 层 startTransition 构成
  * 双向防御。T3 已实现，T6-B 沿用。

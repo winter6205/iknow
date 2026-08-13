@@ -15,7 +15,8 @@
  *
  * 留存的子组件：
  *  - `ToolSummaryRow`：tool_use 摘要行（收口 + mark 染色）；
- *  - `ToolPreviewRows`：write_file / edit_file 统一 diff 预览（DiffView）；
+ *  - `ToolPreviewRows`：write_file / edit_file 统一 diff 预览（固定高度
+ *    `<ScrollableOutputRegion>` 内嵌，不再直接 `<DiffView>` — T3）；
  *  - `ThinkingSummary`：折叠态 thinking 摘要行；
  *  - `MessageBlocks`：完整消息渲染入口（user / assistant / tool_use / thinking）。
  *
@@ -23,6 +24,7 @@
  *  - `summarizeToolCall` / `toolPreviewRows` / `toolResultStatusMap`（tool-summary）
  *  - `clipOneLineVisual`（tool-summary 内联导出，归档 text.ts SSOT 已迁移）
  *  - `REDACTED_PLACEHOLDER` / `summarizeThinkingContent`（cli/format）
+ *  - `diffRowTexts`（diff-view）＋ `ScrollableOutputRegion`（scrollable-output-region）
  *
  * 严禁 import：archive/tui-ink/*、markdown-lines、message-rows、row-window、
  * selection、selection-render、text、HighlightedLine——本文件应保持纯 OpenTUI
@@ -36,7 +38,8 @@ import type {
 import { tuiPalette } from "./theme.js";
 import { summarizeToolCall, toolPreviewRows } from "./tool-summary.js";
 import { clipOneLineVisual } from "./tool-summary.js";
-import { DiffView } from "./diff-view.js";
+import { diffRowTexts } from "./diff-view.js";
+import { ScrollableOutputRegion } from "./scrollable-output-region.js";
 import { Markdown } from "./markdown.js";
 import {
   REDACTED_PLACEHOLDER,
@@ -73,15 +76,27 @@ function ToolSummaryRow(props: {
   );
 }
 
-/** 工具内容预览（write_file / edit_file）：走 DiffView 红绿渲染；行数与
- *  OpenTUI 渲染逐行一致（toolPreviewRows SSOT）。 */
+/** 预览固定高度（write/edit diff 通常 6–20 行，6 行折叠 + 内部滚动是
+ *  合理默认；摘要行在主消息流保持单行，不撑开布局）。 */
+const TOOL_PREVIEW_HEIGHT = 6;
+
+/** 工具内容预览（write_file / edit_file）：diff 行（toolPreviewRows SSOT）
+ *  经 diffRowTexts 展平为文本行，收进固定高度 `<ScrollableOutputRegion>`
+ *  内部滚动（T3）——不再直接 `<DiffView>`，主消息流只显摘要行。 */
 function ToolPreviewRows(props: {
   readonly tu: ToolUseBlock;
   readonly cols: number;
 }): ReactNode {
   const rows = toolPreviewRows(props.tu.name, props.tu.input, props.cols);
-  if (rows.length === 0) return null;
-  return <DiffView rows={rows} cols={props.cols} />;
+  const lines = diffRowTexts(rows, props.cols);
+  if (lines.length === 0) return null;
+  return (
+    <ScrollableOutputRegion
+      lines={lines}
+      cols={props.cols}
+      height={TOOL_PREVIEW_HEIGHT}
+    />
+  );
 }
 
 /** 折叠态 thinking 摘要行（dim）。clip 到视觉宽度保证单行不折。 */
