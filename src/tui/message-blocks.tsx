@@ -12,9 +12,14 @@
  *  - **thinking 折叠文案**收敛在本文件为常量（`THINKING_FOLD_LINE = "[思考]"`），
  *    替代码仓 archive 里同名导出（本文件是当前唯一 caller，作为 SSOT）。
  *  - 全部 `<box>` / `<text>` + fg 属性；禁 ink 原语（Box / Text）。
+ *  - **T7 消息间距 + 底色**：根 `<box>` 加 marginTop={1}（消息间空行间距）；
+ *    user / assistant 分支用 box.backgroundColor（读 theme.ts userBg /
+ *    assistantBg token）+ paddingX/paddingY 底色块。OpenTUI 无 lineHeight API，
+ *    行距 = 消息块间 margin + 块内段落 margin，不自造真 leading。
  *
  * 留存的子组件：
- *  - `ToolSummaryRow`：tool_use 摘要行（收口 + mark 染色）；
+ *  - `ToolSummaryRow`：tool_use 摘要行（收口 + mark 染色 + 完成态 bash
+ *    `，ran N command(s)` 折叠摘要 — T4）；
  *  - `ToolPreviewRows`：write_file / edit_file 统一 diff 预览（固定高度
  *    `<ScrollableOutputRegion>` 内嵌，不再直接 `<DiffView>` — T3）；
  *  - `ThinkingSummary`：折叠态 thinking 摘要行；
@@ -36,7 +41,12 @@ import type {
   AnthropicNativeMessage,
 } from "../harness/model-adapter/types.js";
 import { tuiPalette } from "./theme.js";
-import { summarizeToolCall, toolPreviewRows } from "./tool-summary.js";
+import {
+  summarizeToolCall,
+  toolPreviewRows,
+  formatRanSuffix,
+  countBashCalls,
+} from "./tool-summary.js";
 import { clipOneLineVisual } from "./tool-summary.js";
 import { diffRowTexts } from "./diff-view.js";
 import { ScrollableOutputRegion } from "./scrollable-output-region.js";
@@ -54,11 +64,14 @@ type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
 const THINKING_FOLD_LINE = "[思考]";
 
 /** tool_use 摘要行：`[运行中]|[完成]|[失败] name · detail`。
+ *  完成态 bash 追加 `，ran N command(s)`（T4）：runCount = 该 assistant 消息内
+ *  同名工具调用次数（MessageBlocks 整消息一次聚合），缺省 0 → 无后缀。
  *  cols 收口：单行不折（tool-summary 视觉宽度）。 */
 function ToolSummaryRow(props: {
   readonly tu: ToolUseBlock;
   readonly statusMap: ReadonlyMap<string, boolean>;
   readonly cols: number;
+  readonly runCount?: number;
 }): ReactNode {
   const { detail } = summarizeToolCall(
     props.tu.name,
@@ -68,10 +81,15 @@ function ToolSummaryRow(props: {
   const hasResult = props.statusMap.has(props.tu.id);
   const failed = props.statusMap.get(props.tu.id) === true;
   const mark = !hasResult ? "[运行中]" : failed ? "[失败]" : "[完成]";
+  const ran =
+    hasResult && !failed && props.tu.name === "bash"
+      ? formatRanSuffix(props.runCount ?? 0)
+      : "";
   const fg = failed ? tuiPalette.error : tuiPalette.dim;
   return (
     <text fg={fg} wrapMode="none">
       {mark} {props.tu.name} · {detail}
+      {ran}
     </text>
   );
 }
@@ -162,29 +180,44 @@ export function MessageBlocks(props: {
       .map((b) => b.text)
       .join("\n");
     if (texts.trim() === "") return null; // 纯 tool_result：摘要行已覆盖。
+    // T7：user 底色块（pal.userBg + padding）。内部宽度 = cols-2（paddingX=1
+    // 两侧），text width 同步收窄避免溢出。
     return (
-      <text fg={pal.accent} wrapMode="word" width={cols}>
-        {`❯ ${texts}`}
-      </text>
+      <box flexDirection="column" marginTop={1}>
+        <box
+          flexDirection="column"
+          backgroundColor={pal.userBg}
+          paddingX={1}
+          paddingY={1}
+        >
+          <text fg={pal.accent} wrapMode="word" width={Math.max(1, cols - 2)}>
+            {`❯ ${texts}`}
+          </text>
+        </box>
+      </box>
     );
   }
   // assistant
   const summary = summarizeThinkingContent(message.content);
+  // T4：该 assistant 消息内 bash tool_use 总数（聚合 ran N 数据源），整消息算一次。
+  const bashRunCount = countBashCalls(message);
+  // T7：底色块 paddingX=1 两侧 → 内部内容宽度收窄 2 列。
+  const innerCols = Math.max(1, cols - 2);
   const nodes: ReactNode[] = [];
   if (summary !== "") {
-    nodes.push(<ThinkingSummary key="tk-sum" cols={cols} />);
+    nodes.push(<ThinkingSummary key="tk-sum" cols={innerCols} />);
   }
   if (summary !== "" && thinkingExpanded) {
     message.content.forEach((block, i) => {
       if (block.type === "thinking") {
         nodes.push(
-          <text key={`tk-b${i}`} wrapMode="word" width={cols}>
+          <text key={`tk-b${i}`} wrapMode="word" width={innerCols}>
             {block.thinking}
           </text>
         );
       } else if (block.type === "redacted_thinking") {
         nodes.push(
-          <text key={`tk-r${i}`} fg={pal.dim} wrapMode="word" width={cols}>
+          <text key={`tk-r${i}`} fg={pal.dim} wrapMode="word" width={innerCols}>
             {REDACTED_PLACEHOLDER}
           </text>
         );
@@ -195,18 +228,35 @@ export function MessageBlocks(props: {
     if (block.type === "text" && block.text.trim().length > 0) {
       nodes.push(
         <box key={`t${i}`}>
-          <Markdown text={block.text} width={cols} />
+          <Markdown text={block.text} width={innerCols} />
         </box>
       );
     } else if (block.type === "tool_use") {
       nodes.push(
         <box key={`u${i}`} flexDirection="column">
-          <ToolSummaryRow tu={block} statusMap={statusMap} cols={cols} />
-          <ToolPreviewRows tu={block} cols={cols} />
+          <ToolSummaryRow
+            tu={block}
+            statusMap={statusMap}
+            cols={innerCols}
+            runCount={bashRunCount}
+          />
+          <ToolPreviewRows tu={block} cols={innerCols} />
         </box>
       );
     }
   });
   if (nodes.length === 0) return null;
-  return <box flexDirection="column">{nodes}</box>;
+  // T7：assistant 底色块（pal.assistantBg + padding）+ 根 marginTop（消息间距）。
+  return (
+    <box flexDirection="column" marginTop={1}>
+      <box
+        flexDirection="column"
+        backgroundColor={pal.assistantBg}
+        paddingX={1}
+        paddingY={1}
+      >
+        {nodes}
+      </box>
+    </box>
+  );
 }

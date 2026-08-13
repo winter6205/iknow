@@ -65,6 +65,10 @@ export interface TuiPalette {
   readonly bgAdd: string;
   /** unified diff：删除行整行背景遮罩（GitHub dark del-bg 风格淡红）。 */
   readonly bgDel: string;
+  /** T7 消息底色：user 消息块背景（淡灰蓝，暗色下不刺眼，与 assistant 有区分度）。 */
+  readonly userBg: string;
+  /** T7 消息底色：assistant 消息块背景（比 userBg 更深，形成角色对比）。 */
+  readonly assistantBg: string;
   /** banner 渐变起点（e2 黄昏魔法石深蓝紫 #1a1d6e，对角线插值 c 权重 0.6）。 */
   readonly logoInk: string;
   /** banner 渐变终点（e2 黄昏魔法石粉金 #ffafaf，对角线插值 r 权重 0.4）。 */
@@ -96,6 +100,8 @@ export const tuiPalette: TuiPalette = Object.freeze({
   del: "#d73a49",
   bgAdd: "#1f3d2b",
   bgDel: "#3d1f24",
+  userBg: "#232323",
+  assistantBg: "#1a1a1a",
   logoInk: "#1a1d6e",
   logoGold: "#ffafaf",
 });

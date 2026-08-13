@@ -11,7 +11,9 @@ import { describe, expect, test } from "bun:test";
 import {
   clipOneLine,
   clipOneLineVisual,
+  countBashCalls,
   formatLiveToolEvent,
+  formatRanSuffix,
   projectToolLines,
   summarizeToolCall,
   toolPreviewRows,
@@ -58,6 +60,51 @@ describe("summarizeToolCall: 参数摘要（生成/编辑类增强）", () => {
     const { detail } = summarizeToolCall("mystery", { a: "x".repeat(200) });
     expect(detail.length).toBeLessThanOrEqual(80);
     expect(detail.endsWith("…")).toBe(true);
+  });
+});
+
+describe("countBashCalls / formatRanSuffix: 折叠摘要 ran N（T4）", () => {
+  const bashMsg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      { type: "text", text: "试一下" },
+      {
+        type: "tool_use",
+        id: "tu-1",
+        name: "bash",
+        input: { command: "npm test" },
+      },
+      { type: "tool_use", id: "tu-2", name: "write_file", input: {} },
+      {
+        type: "tool_use",
+        id: "tu-3",
+        name: "bash",
+        input: { command: "git status" },
+      },
+    ],
+  };
+
+  test("countBashCalls：仅统计 assistant 消息内 name === bash 的 tool_use", () => {
+    expect(countBashCalls(bashMsg)).toBe(2);
+    expect(
+      countBashCalls({
+        role: "user",
+        content: [],
+      } satisfies AnthropicNativeMessage)
+    ).toBe(0);
+    expect(
+      countBashCalls({
+        role: "assistant",
+        content: [{ type: "text", text: "x" }],
+      })
+    ).toBe(0);
+  });
+
+  test("formatRanSuffix：1 → ran 1 command，>1 → ran N commands，0 → 空串", () => {
+    expect(formatRanSuffix(1)).toBe("，ran 1 command");
+    expect(formatRanSuffix(2)).toBe("，ran 2 commands");
+    expect(formatRanSuffix(0)).toBe("");
+    expect(formatRanSuffix(-1)).toBe("");
   });
 });
 

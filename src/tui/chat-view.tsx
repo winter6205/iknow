@@ -21,7 +21,9 @@
  *    #ffafaf，c 权重 0.6 / r 权重 0.4），info 栏（Version/Cwd/Data dir）取
  *    bannerLines 行尾段；窄终端（bannerLines.length === 1）保持单行降级；
  *  - 每条 session 消息 → `MessageBlocks`（user → ❯ accent / assistant
- *    → Markdown + thinking 折叠 + tool_use 摘要 + statusMap 状态染色）；
+ *    → Markdown + thinking 折叠 + tool_use 摘要 + statusMap 状态染色；
+ *    **T7 消息间距 + 底色在 MessageBlocks 内部实现**：根 marginTop={1}
+ *    消息间空行 + userBg/assistantBg 底色块——本文件外层 box 不重复加 margin）；
  *  - tail（liveToolRuns + legacy liveToolLines + askLine + 流式 thinking / draft
  *    面板 + spinner）。
  *

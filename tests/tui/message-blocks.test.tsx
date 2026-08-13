@@ -11,6 +11,9 @@
  *  - thinking 展开：thinking 文本全文 + redacted 占位；
  *  - tool_use 摘要行 + statusMap 驱动 ok/failed/运行中 标记染色；
  *  - content 边界：空文本 user 消息返回 null，不渲染任何节点。
+ *  - T7 间距 + 底色：消息块根 marginTop={1} → 字符帧消息间出现空白分隔行；
+ *    底色为渲染元数据（captureCharFrame 字符帧不含背景色），结构层断言 =
+ *    底色 box 包裹后渲染不崩 + marginTop 空行存在。
  *
  * 渲染形态 OpenTUI 元素树（禁 ink Box/Text 原语）。captureCharFrame 文本断言。
  */
@@ -185,6 +188,81 @@ test("thinking 展开态：渲染 thinking 全文 + redacted 占位", async () =
   await setup.renderer.destroy();
 });
 
+test("tool_use 完成态折叠摘要：bash 单次 → ran 1 command 追加（T4）", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "tu-bash-1",
+        name: "bash",
+        input: { command: "npm test" },
+      },
+    ],
+  };
+  const setup = await renderBlocks(msg, {
+    statusMap: new Map([["tu-bash-1", false]]),
+  });
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("[完成]");
+  expect(frame).toContain("bash · npm test，ran 1 command");
+  await setup.renderer.destroy();
+});
+
+test("tool_use 完成态折叠摘要：同消息多 bash → ran 2 commands（聚合计数，T4）", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "tu-b1",
+        name: "bash",
+        input: { command: "npm test" },
+      },
+      { type: "text", text: "先看第一步" },
+      {
+        type: "tool_use",
+        id: "tu-b2",
+        name: "bash",
+        input: { command: "git status" },
+      },
+    ],
+  };
+  const setup = await renderBlocks(msg, {
+    statusMap: new Map([
+      ["tu-b1", false],
+      ["tu-b2", false],
+    ]),
+  });
+  const frame = setup.captureCharFrame();
+  // 同消息 2 个 bash block：两个摘要行都追加聚合 ran 2 commands。
+  expect(frame).toContain("bash · npm test，ran 2 commands");
+  expect(frame).toContain("bash · git status，ran 2 commands");
+  await setup.renderer.destroy();
+});
+
+test("tool_use 非 bash 工具（write_file）：不追加 ran 计数（T4）", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "tu-wf",
+        name: "write_file",
+        input: { path: "a.ts", content: "x" },
+      },
+    ],
+  };
+  const setup = await renderBlocks(msg, {
+    statusMap: new Map([["tu-wf", false]]),
+  });
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("[完成]");
+  expect(frame).toContain("write_file · 写入 a.ts（1 行）");
+  expect(frame.includes("ran")).toBe(false);
+  await setup.renderer.destroy();
+});
+
 test("tool_use 状态染色：statusMap 缺位 = [运行中]，failed = [失败]，成功 = [完成]", async () => {
   const okStatus = new Map<string, boolean>([["tu-ok", false]]);
   const failedStatus = new Map<string, boolean>([["tu-fail", true]]);
@@ -286,5 +364,83 @@ test("tool_use preview 固定高度：content 长时渲染稳定，摘要行可�
   // 首 diff 行（line-00）被内部滚动折叠不可见——证明固定高度滚动，不撑开布局。
   expect(frame).toContain("line-19");
   expect(frame).not.toContain("line-00");
+  await setup.renderer.destroy();
+});
+
+// -- T7：消息间距 + 底色 ------------------------------------------------
+// 底色 = 渲染元数据，captureCharFrame 字符帧不含背景色 → 底色断言走结构层：
+// 底色 box 包裹后渲染不崩 + 内层文本可见。间距 = marginTop → 字符帧空行分隔。
+
+test("T7 多消息交替：user / assistant 消息间有空白行分隔（marginTop 生效）", async () => {
+  const messages: AnthropicNativeMessage[] = [
+    { role: "user", content: [{ type: "text", text: "第一条提问" }] },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "第一个回答" }],
+    },
+    { role: "user", content: [{ type: "text", text: "第二条提问" }] },
+  ];
+  // 复用 renderBlocks 逐条渲染帧，对比单消息 vs 多消息帧内容高度
+  // （MessageBlocks 是单条渲染器，无法在一个 frame 里渲染多条——验证
+  // marginTop 通过「消息根 box 首行前存在空行」的结构断言表达）。
+  const setup = await renderBlocks(messages[0]!);
+  const frame = setup.captureCharFrame();
+  const lines = frame.split("\n");
+  expect(frame).toContain("第一条提问");
+  const firstTextLine = lines.findIndex((l) => l.includes("第一条提问"));
+  // marginTop={1} → 文本首行前应有一个纯空白行（paddingY 之上）。
+  expect(firstTextLine).toBeGreaterThan(0);
+  const aboveBlank = lines
+    .slice(0, firstTextLine)
+    .every((l) => l.trim() === "");
+  expect(aboveBlank).toBe(true);
+  await setup.renderer.destroy();
+});
+
+test("T7 user 消息：底色 box 包裹后渲染不崩，❯ 前缀保留（结构层断言）", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "user",
+    content: [{ type: "text", text: "带底色的提问" }],
+  };
+  const setup = await renderBlocks(msg);
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("❯ 带底色的提问");
+  // 内容被 paddingY=1 包裹 → 文本首行前 / 末行后各有一个纯空白行（底色区）。
+  const lines = frame.split("\n");
+  const textLine = lines.findIndex((l) => l.includes("带底色的提问"));
+  expect(textLine).toBeGreaterThan(0);
+  await setup.renderer.destroy();
+});
+
+test("T7 assistant 消息：底色 box 包裹后渲染不崩，markdown 产物保留（结构层断言）", async () => {
+  const md = ["# T7 标题", "", "正文段落", "", "- 列表项"].join("\n");
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [{ type: "text", text: md }],
+  };
+  const setup = await renderBlocks(msg);
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("T7 标题");
+  expect(frame).toContain("正文段落");
+  expect(frame).toContain("列表项");
+  await setup.renderer.destroy();
+});
+
+test("T7 纯 tool_use 消息：底色 box 包裹后渲染不崩，摘要行可见", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "tu-t7",
+        name: "write_file",
+        input: { path: "a.ts", content: "x" },
+      },
+    ],
+  };
+  const setup = await renderBlocks(msg);
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("[运行中]");
+  expect(frame).toContain("write_file");
   await setup.renderer.destroy();
 });

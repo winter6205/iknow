@@ -88,8 +88,10 @@ function clipDetail(s: string, name: string, cols: number | undefined): string {
   return clipOneLineVisual(s, Math.min(MAX_DETAIL, budget));
 }
 
-/** 单个工具调用的参数摘要。`cols` = 终端列宽：提供时 detail 按视觉宽度
- *  收口到「装饰 + 工具名 + detail」单行放得下（窄终端不折行，行账不漂移）。 */
+/**
+ * 单个工具调用的参数摘要。`cols` = 终端列宽：提供时 detail 按视觉宽度
+ * 收口到「装饰 + 工具名 + detail」单行放得下（窄终端不折行，行账不漂移）。
+ */
 export function summarizeToolCall(
   name: string,
   input: unknown,
@@ -103,6 +105,9 @@ export function summarizeToolCall(
       const lines = countLines(rec.content);
       return { detail: clip(`写入 ${path}（${lines} 行）`) };
     }
+
+    case "bash":
+      return { detail: clip(String(rec.command ?? "")) };
     case "edit_file": {
       const path = typeof rec.path === "string" ? rec.path : "?";
       const all = rec.replace_all === true;
@@ -112,8 +117,6 @@ export function summarizeToolCall(
         ),
       };
     }
-    case "bash":
-      return { detail: clip(String(rec.command ?? "")) };
     case "read_file":
       return { detail: clip(`读取 ${String(rec.path ?? "?")}`) };
     case "grep":
@@ -159,6 +162,27 @@ export function summarizePartialInput(
     return clipDetail(partialJson, name, cols);
   }
   return summarizeToolCall(name, parsed, cols).detail;
+}
+
+/** 一条 assistant 消息内 `name === "bash"` 的 `tool_use` block 计数（T4）。
+ *  折叠摘要「ran N command(s)」的 N 数据源：聚合语义——「某命令跑了几次」
+ *  对同一条 assistant 消息内多次调 bash 最有意义，非 per-call。非 bash /
+ *  非 assistant 消息一律 0（"ran N commands" 只对 shell 语义成立）。 */
+export function countBashCalls(message: AnthropicNativeMessage): number {
+  if (message.role !== "assistant") return 0;
+  let n = 0;
+  for (const block of message.content) {
+    if (block.type === "tool_use" && block.name === "bash") n += 1;
+  }
+  return n;
+}
+
+/** ran N command(s) 后缀文案（T4）。逗号全角接在 detail 后；N <= 0 → 空串。
+ *  plural：N === 1 → `ran 1 command`；N > 1 → `ran N commands`。 */
+export function formatRanSuffix(count: number): string {
+  if (count === 1) return "，ran 1 command";
+  if (count > 1) return `，ran ${count} commands`;
+  return "";
 }
 
 /**
