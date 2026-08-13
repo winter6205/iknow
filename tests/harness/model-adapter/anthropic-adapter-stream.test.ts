@@ -243,16 +243,25 @@ function thinkingDelta(text: string): unknown {
   };
 }
 
-function toolUseStart(name: string, id: string): unknown {
+function toolUseStart(name: string, id: string, index = 0): unknown {
   return {
     type: "content_block_start",
-    index: 0,
+    index,
     content_block: {
       type: "tool_use",
       id,
       name,
       input: {},
     } satisfies ToolUseBlock as unknown as ToolUseBlock,
+  };
+}
+
+/** SDK content_block_delta with input_json_delta — T1 tool input 增量夹具。 */
+function inputJsonDelta(index: number, partialJson: string): unknown {
+  return {
+    type: "content_block_delta",
+    index,
+    delta: { type: "input_json_delta", partial_json: partialJson },
   };
 }
 
@@ -1094,5 +1103,172 @@ describe("RealAnthropicAdapter — T1 streaming arm extension (phase 2)", () => 
       name: "echo",
       id: "toolu_42",
     });
+  });
+});
+
+// ─── 11. tool_input_delta (T1 tui-render-optimization) ──────────────────────
+
+describe("RealAnthropicAdapter — T1 tool_input_delta streaming arm extension", () => {
+  it("content_block_start tool_use + input_json_delta ×N → emit tool_call_start + tool_input_delta×N, id 配对正确, partialJson 拼接等于完整 input", async () => {
+    const final = wellShapedFinal({
+      text: "ok",
+      toolUse: {
+        id: "toolu_7",
+        name: "bash",
+        input: { command: "ls -la", cwd: "/tmp" },
+      },
+      stop_reason: "end_turn",
+    });
+    const events: HarnessStreamEvent[] = [];
+    const client = makeStreamingClientFactory({
+      captured: [],
+      streamFactory: () =>
+        makeFakeStream({
+          ops: [
+            { kind: "text", text: "ok" },
+            {
+              kind: "streamEvent",
+              event: toolUseStart("bash", "toolu_7"),
+            },
+            {
+              kind: "streamEvent",
+              event: inputJsonDelta(0, '{"command":'),
+            },
+            {
+              kind: "streamEvent",
+              event: inputJsonDelta(0, '"ls -la","cwd":'),
+            },
+            {
+              kind: "streamEvent",
+              event: inputJsonDelta(0, '"/tmp"}'),
+            },
+            { kind: "complete", message: final },
+          ],
+          partial: final,
+        }).stream,
+    });
+    const adapter = createRealAnthropicAdapter({
+      client: client as unknown as Parameters<
+        typeof createRealAnthropicAdapter
+      >[0]["client"],
+      model: "claude-stream-test",
+      maxTokens: 256,
+      stream: true,
+    });
+    await adapter.step(initState([userMsg("hi")]), {
+      onStream: (e) => events.push(e),
+    });
+    const inputDeltas = events.filter(
+      (e): e is { type: "tool_input_delta"; id: string; partialJson: string } =>
+        e.type === "tool_input_delta"
+    );
+    assert.deepEqual(inputDeltas, [
+      { type: "tool_input_delta", id: "toolu_7", partialJson: '{"command":' },
+      {
+        type: "tool_input_delta",
+        id: "toolu_7",
+        partialJson: '"ls -la","cwd":',
+      },
+      { type: "tool_input_delta", id: "toolu_7", partialJson: '"/tmp"}' },
+    ]);
+    // partialJson 按序拼接 = 完整 tool input JSON。
+    assert.equal(
+      inputDeltas.map((d) => d.partialJson).join(""),
+      '{"command":"ls -la","cwd":"/tmp"}'
+    );
+    // id 配对正确 — 每个 delta 都归属同一 tool_use block。
+    assert.equal(
+      inputDeltas.every((d) => d.id === "toolu_7"),
+      true
+    );
+    // wire 顺序:tool_call_start 在前,增量在后。
+    assert.deepEqual(
+      events.map((e) => e.type),
+      [
+        "text_delta",
+        "tool_call_start",
+        "tool_input_delta",
+        "tool_input_delta",
+        "tool_input_delta",
+      ]
+    );
+    // 权威 input 仍由 finalMessage 一次性交付 — interpretMessage 零改动 (对比 fixture 同形)。
+  });
+
+  it("empty partial_json ('') is NOT emitted — 对齐 text_delta / thinking_delta 纪律", async () => {
+    const final = wellShapedFinal({
+      text: "ok",
+      toolUse: { id: "toolu_9", name: "echo", input: { value: "x" } },
+      stop_reason: "end_turn",
+    });
+    const events: HarnessStreamEvent[] = [];
+    const client = makeStreamingClientFactory({
+      captured: [],
+      streamFactory: () =>
+        makeFakeStream({
+          ops: [
+            { kind: "streamEvent", event: toolUseStart("echo", "toolu_9") },
+            { kind: "streamEvent", event: inputJsonDelta(0, "") },
+            { kind: "streamEvent", event: inputJsonDelta(0, "") },
+            { kind: "streamEvent", event: inputJsonDelta(0, '{"value":"x"}') },
+            { kind: "text", text: "ok" },
+            { kind: "complete", message: final },
+          ],
+          partial: final,
+        }).stream,
+    });
+    const adapter = createRealAnthropicAdapter({
+      client: client as unknown as Parameters<
+        typeof createRealAnthropicAdapter
+      >[0]["client"],
+      model: "claude-stream-test",
+      maxTokens: 256,
+      stream: true,
+    });
+    await adapter.step(initState([userMsg("hi")]), {
+      onStream: (e) => events.push(e),
+    });
+    const inputDeltas = events.filter((e) => e.type === "tool_input_delta");
+    // 两个空 delta 被跳过 — 只有非空的一次 emit。
+    assert.deepEqual(inputDeltas, [
+      { type: "tool_input_delta", id: "toolu_9", partialJson: '{"value":"x"}' },
+    ]);
+  });
+
+  it("input_json_delta without a registered content_block_start (unknown index) is NOT emitted — 无 id 可配对", async () => {
+    const final = wellShapedFinal({
+      text: "ok",
+      stop_reason: "end_turn",
+    });
+    const events: HarnessStreamEvent[] = [];
+    const client = makeStreamingClientFactory({
+      captured: [],
+      streamFactory: () =>
+        makeFakeStream({
+          ops: [
+            { kind: "streamEvent", event: inputJsonDelta(0, '{"value":"x"}') },
+            { kind: "streamEvent", event: inputJsonDelta(0, "{}") },
+            { kind: "text", text: "ok" },
+            { kind: "complete", message: final },
+          ],
+          partial: final,
+        }).stream,
+    });
+    const adapter = createRealAnthropicAdapter({
+      client: client as unknown as Parameters<
+        typeof createRealAnthropicAdapter
+      >[0]["client"],
+      model: "claude-stream-test",
+      maxTokens: 256,
+      stream: true,
+    });
+    await adapter.step(initState([userMsg("hi")]), {
+      onStream: (e) => events.push(e),
+    });
+    assert.equal(
+      events.some((e) => e.type === "tool_input_delta"),
+      false,
+      "未登记的 index 不 emit tool_input_delta"
+    );
   });
 });
