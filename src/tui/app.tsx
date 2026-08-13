@@ -782,6 +782,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           }),
         }));
       }
+      if (event.type === "tool_input_delta") {
+        setLiveToolRuns((prev) => ({
+          ...prev,
+          [targetId]: liveToolReduce(prev[targetId] ?? [], {
+            kind: "tool_input_delta",
+            id: event.id,
+            partialJson: event.partialJson,
+          }),
+        }));
+      }
       if (event.type === "stop_summary") {
         setNotice({ lines: [event.text] });
       }

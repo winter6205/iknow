@@ -6,9 +6,13 @@
  *  - 摘要行 = 工具名 + 参数摘要 + 状态；
  *  - 生成/编辑类增强：write_file/edit_file 显示「生成了什么」（路径 + 行数）。
  *
+ * T5 (tui-render-optimization)：`summarizePartialInput` — 运行中 partial JSON
+ * 文本摘要（parse 成功走 summarizeToolCall，不完整 JSON 原样截断）。
+ *
  * 宽度纪律（窄终端修复）：摘要行渲染形态有三种——终稿 `[运行中] name · detail`、
- * live 完成行 `name · detail · ok`、live 运行行——行级窗口账目一律按 1 行计。
- * 传 `cols` 时按视觉宽度收口（预留最宽装饰），保证三种形态单行不折。
+ * live 完成行 `name · detail · ok`、live 运行行（T5 含 partial 摘要）——
+ * 行级窗口账目一律按 1 行计。传 `cols` 时按视觉宽度收口（预留最宽装饰），
+ * 保证三种形态单行不折。
  *
  * 内容可见性：write_file / edit_file 完成后 `toolPreviewRows` 产出统一 diff
  * 预览行（computeDiff 单源），`MessageBlocks` 渲染与 `live-tool-preview`
@@ -119,6 +123,42 @@ export function summarizeToolCall(
     default:
       return { detail: clip(JSON.stringify(rec)) };
   }
+}
+
+/**
+ * T5:运行中 partial JSON 文本的摘要。对逐段累积的 `partialJson` 尽力
+ * `JSON.parse`：
+ *  - parse 成功 → 走 `summarizeToolCall`（与完成态摘要同源，字节一致）；
+ *  - parse 失败（partial 不完整 JSON，如 `{"command":"l`）或 primitive 形态
+ *    （null / 数字 / 布尔）→ `clipDetail` 原样截断显示（单源，视觉宽度纪律）；
+ *  - 空串 → 空串。
+ *
+ * 遮蔽说明：partial 里可能含密钥形态，但增量只服务展示层中间态——完成后的
+ * 权威完整 input 才进模型；此处仅视觉截断，不接 output mask（风险低，保持
+ * 单行收口简单）。
+ */
+export function summarizePartialInput(
+  name: string,
+  partialJson: string,
+  cols?: number
+): string {
+  if (partialJson.length === 0) return "";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(partialJson);
+  } catch {
+    parsed = undefined;
+  }
+  // 不完整 JSON（parse 失败）或 primitive 形态（null / 数字 / 布尔 —— 工具参数
+  // 语义上只有 object/array）→ 原样截断显示。截断口径 = clipDetail 单源
+  // （与完成态摘要同一视觉宽度纪律，避免预算公式漂移）。
+  if (
+    parsed === undefined ||
+    (typeof parsed !== "object" && typeof parsed !== "boolean")
+  ) {
+    return clipDetail(partialJson, name, cols);
+  }
+  return summarizeToolCall(name, parsed, cols).detail;
 }
 
 /**

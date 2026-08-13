@@ -6,13 +6,16 @@
  * thinking / tool 配对 / 三段一致 UI == harness context == 落盘）。
  *
  * 装配：mountAppAsync + stub deps streamEventsByStep 注入脚本化流式事件
- * （text_delta / thinking_delta / tool_call_start / stop_summary）。
+ * （text_delta / thinking_delta / tool_call_start / tool_input_delta /
+ * stop_summary）。
  *
  * 覆盖：
  *  1. stop_summary onStream 事件 → notice 区呈现摘要文本；
  *  2. text_delta 流式 → turn 完成 → 落盘 assistant 文本 + draft 中间态由
  *     StreamDraft.masked() 渲染（中间态由 hint cursor 断言较 fragile，本测
- *     聚焦「stream 事件能流到 onStream → notice / draft 的路径打通」）。
+ *     聚焦「stream 事件能流到 onStream → notice / draft 的路径打通」）；
+ *  3. T5：tool_call_start + tool_input_delta×N → running 帧含 partial 参数
+ *     摘要（运行中增量实时显示），turn 完成后 finalText 落盘。
  *
  * 注：本测聚焦流式契约接线完整性（spec SC8）；UI == harness context ==
  * 落盘三段一致由 session-state / sessionHub / StreamDraft 共同保证，
@@ -293,6 +296,84 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
       (f) => f.includes("[运行中] noop") || f.includes("运行"),
       8000,
       "tool-running"
+    );
+
+    // turn 完成 → 落盘终稿（finalText 而非 draft 中间态）。
+    await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("running-tool-final"),
+      8000,
+      "tool-final-rendered"
+    );
+
+    await app.destroy();
+  }, 30_000);
+
+  test("T5: tool_call_start + tool_input_delta×N → running 帧含 partial 参数，完成后含最终参数", async () => {
+    // 内联 adapter：emit tool_call_start + tool_input_delta×N 后 await 3000ms
+    // 再返回 → 「工具运行中、turn 未完成」稳定窗口内 partial 摘要应出现。
+    const toolAdapter: ModelAdapter = {
+      async step(
+        _state: LoopState,
+        request: { onStream?: (e: HarnessStreamEvent) => void },
+        signal?: AbortSignal
+      ): Promise<AssistantTurnResult> {
+        if (signal?.aborted) {
+          throw new DOMException("This operation was aborted", "AbortError");
+        }
+        request.onStream?.({
+          type: "tool_call_start",
+          id: "tool-2",
+          name: "bash",
+        });
+        request.onStream?.({
+          type: "tool_input_delta",
+          id: "tool-2",
+          partialJson: '{"com',
+        });
+        request.onStream?.({
+          type: "tool_input_delta",
+          id: "tool-2",
+          partialJson: 'mand":"git status"}',
+        });
+        request.onStream?.({ type: "text_delta", text: "running-tool-reply" });
+        await abortableDelay(3000, signal);
+        if (signal?.aborted) {
+          throw new DOMException("This operation was aborted", "AbortError");
+        }
+        return assistantResult({ texts: ["running-tool-final"] });
+      },
+      encodeUserText(t: string): AnthropicNativeMessage {
+        return { role: "user", content: [{ type: "text", text: t }] };
+      },
+      encodeToolResults(
+        results: ReadonlyArray<ToolExecutionResult>
+      ): AnthropicContentBlock[] {
+        return results.map((r) => ({
+          type: "tool_result",
+          tool_use_id: r.toolUseId,
+          content: r.output,
+          is_error: r.isError,
+        }));
+      },
+    };
+    const app = await mountAppAsync(
+      [],
+      "running-tool-final",
+      buildToolDeps(toolAdapter)
+    );
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    await app.typeText("hi");
+    await app.pressEnter();
+
+    // running 阶段：partial 参数已累积 → 摘要行含 `git status`（parse 成功）。
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("[运行中] bash") && f.includes("git status"),
+      8000,
+      "tool-partial-rendered"
     );
 
     // turn 完成 → 落盘终稿（finalText 而非 draft 中间态）。
