@@ -56,10 +56,69 @@ describe("summarizeToolCall: 参数摘要（生成/编辑类增强）", () => {
     );
   });
 
-  test("未知工具 → JSON 参数摘要；超长裁剪到 80 字符内", () => {
+  test("未知工具 → 占位符摘要（避免 JSON 全文外露）", () => {
     const { detail } = summarizeToolCall("mystery", { a: "x".repeat(200) });
-    expect(detail.length).toBeLessThanOrEqual(80);
-    expect(detail.endsWith("…")).toBe(true);
+    expect(detail).toBe("(mystery)");
+    // 未知工具不再 stringify 整个 input —— 不落 JSON 全文。
+    expect(detail.includes("x".repeat(200))).toBe(false);
+  });
+
+  test("web_search → 搜索 query（聚焦首个关键字段，不落 JSON 全文）", () => {
+    const { detail } = summarizeToolCall("web_search", {
+      query: "DeepSeek V4 评测",
+      max_results: 6,
+    });
+    expect(detail).toBe("搜索 DeepSeek V4 评测");
+    expect(detail.includes('"max_results"')).toBe(false);
+  });
+
+  test("web_fetch → 抓取 url", () => {
+    const { detail } = summarizeToolCall("web_fetch", {
+      url: "https://example.com/a",
+      max_chars: 500,
+    });
+    expect(detail).toBe("抓取 https://example.com/a");
+  });
+
+  test("memory_recall / memory_save / tool_search / skill / skill_search 摘要", () => {
+    expect(
+      summarizeToolCall("memory_recall", { query: "TUI", limit: 5 }).detail
+    ).toBe("记忆 召回 TUI");
+    expect(
+      summarizeToolCall("memory_save", { title: "TUI 折叠", body: "x" }).detail
+    ).toBe("记忆 写入 TUI 折叠");
+    expect(summarizeToolCall("tool_search", { query: "web" }).detail).toBe(
+      "工具 web"
+    );
+    expect(summarizeToolCall("skill", { name: "playwright-cli" }).detail).toBe(
+      "skill playwright-cli"
+    );
+    expect(summarizeToolCall("skill_search", { query: "tui" }).detail).toBe(
+      "skill tui"
+    );
+  });
+
+  test("spawn_subagent / subagent_result 摘要（task / task_id）", () => {
+    expect(
+      summarizeToolCall("spawn_subagent", { task: "查 root cause" }).detail
+    ).toBe("派发子代理：查 root cause");
+    expect(
+      summarizeToolCall("subagent_result", { task_id: "t-1" }).detail
+    ).toBe("轮询 t-1");
+  });
+
+  test("LSP 工具 → LSP <op> file[:line]（不落 JSON 全文）", () => {
+    const { detail } = summarizeToolCall("lsp_definition", {
+      file: "src/a.ts",
+      line: 12,
+    });
+    expect(detail).toBe("LSP definition src/a.ts:12");
+    expect(
+      summarizeToolCall("lsp_document_symbol", { file: "b.ts" }).detail
+    ).toBe("LSP documentSymbol b.ts");
+    expect(
+      summarizeToolCall("lsp_workspace_symbol", { query: "foo" }).detail
+    ).toBe("LSP workspaceSymbol foo");
   });
 });
 

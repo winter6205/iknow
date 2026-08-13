@@ -29,6 +29,8 @@ export interface StreamDraft {
   thinkingRaw(): string;
   /** T3: thinking 原始文本遮蔽后的可渲染串(SC20 一致性,密钥不裸出)。 */
   thinkingMasked(): string;
+  /** 首次 thinking_delta 到现在的耗时秒数（无 thinking 返回 0）。 */
+  thinkingSeconds(): number;
   reset(): void;
   subscribe(listener: () => void): () => void;
 }
@@ -39,6 +41,9 @@ export function createStreamDraft(): StreamDraft {
   // 遮蔽,互不污染。thinking 不进 answer rawBuffer(终稿 thinking blocks 是
   // SSOT,流式 thinking 只是临时展示层)。
   let thinkingBuffer = "";
+  // 首次 thinking_delta 到达时刻（毫秒）—— 折叠行渲染「思考了 N 秒」用。
+  // 流式面板需要「思考中… · 经过 N 秒」时由 app.tsx 每次通知覆算。
+  let thinkingStartedAt: number | null = null;
   const listeners = new Set<() => void>();
 
   // T5 (#175): 渲染节流 —
@@ -103,6 +108,7 @@ export function createStreamDraft(): StreamDraft {
         rawBuffer += event.text;
         appendText(event.text);
       } else if (event.type === "thinking_delta") {
+        if (thinkingStartedAt === null) thinkingStartedAt = Date.now();
         thinkingBuffer += event.text;
         appendText(event.text);
       }
@@ -119,9 +125,14 @@ export function createStreamDraft(): StreamDraft {
     thinkingMasked(): string {
       return createOutputMask(currentSecretValues()).mask(thinkingBuffer);
     },
+    thinkingSeconds(): number {
+      if (thinkingStartedAt === null) return 0;
+      return Math.max(0, Math.floor((Date.now() - thinkingStartedAt) / 1000));
+    },
     reset(): void {
       rawBuffer = "";
       thinkingBuffer = "";
+      thinkingStartedAt = null;
       cancelPending();
       // 复位立即通知一次(清 UI 的草稿面板),不等节流窗口。
       flush();

@@ -12,13 +12,15 @@
  *  - **thinking 折叠文案**收敛在本文件为常量（`THINKING_FOLD_LINE = "[思考]"`），
  *    替代码仓 archive 里同名导出（本文件是当前唯一 caller，作为 SSOT）。
  *  - 全部 `<box>` / `<text>` + fg 属性；禁 ink 原语（Box / Text）。
- *  - **T7 消息间距 + 底色**：根 `<box>` 加 marginTop={1}（消息间空行间距）；
- *    user / assistant 分支用 box.backgroundColor（读 theme.ts userBg /
- *    assistantBg token）+ paddingX={1} 水平缩进（无 paddingY，底色块贴合内容）。
+ *  - **T7 消息间距 + 底色**：user / assistant 分支用 box.backgroundColor
+ *    （读 theme.ts userBg / assistantBg token）+ paddingX={1} 水平缩进
+ *    （无 paddingY，底色块贴合内容）。消息间 1 行节奏由 ChatView wrapper
+ *    `<box marginTop={i===0?0:1}>` 提供（首条不带顶部 margin，避免进入会话
+ *    时第一行无谓下推造成间距抖动）；本组件根 box 不再产 marginTop。
  *    OpenTUI 无 lineHeight API，行距 = 消息块间 margin + 块内段落 margin，不自
  *    造真 leading。2026-08-13 用户反馈 paddingY=1 让消息块上下各 1 行空白叠加
  *    marginTop 造成 3 行/消息间距「太宽了」，改为 paddingY=0（底色贴内容） +
- *    marginTop=1（消息间 1 行节奏）。
+ *    marginTop=1（消息间 1 行节奏，由 wrapper 提供）。
  *
  * 留存的子组件：
  *  - `ToolSummaryRow`：tool_use 摘要行（收口 + mark 染色 + 完成态 bash
@@ -120,11 +122,29 @@ function ToolPreviewRows(props: {
   );
 }
 
-/** 折叠态 thinking 摘要行（dim）。clip 到视觉宽度保证单行不折。 */
-function ThinkingSummary(props: { readonly cols: number }): ReactNode {
+/** 折叠态 thinking 摘要行（dim）。2026-08-13 用户反馈：「思考了几秒」直接
+ *  替换 `[思考]` 标记，不要叠加 `[思考] 思考了 3 秒`。规则：
+ *  - 有时间（流式面板）→ `思考了 {N} 秒` + 可选 `· ran {M} shell command(s)`；
+ *  - 无时间（历史消息）→ `[思考]` + 可选 `· ran {M} shell command(s)`，避免
+ *    伪精度「思考了 0 秒」；
+ *  - 工具计数英文（与参考图 `ran 2 shell commands` 一致），思考部分全中文；
+ *  - bash 数 = 0 → 省略 `· ran …` 段。 */
+function ThinkingSummary(props: {
+  readonly message: AnthropicNativeMessage;
+  readonly cols: number;
+  readonly thinkingSeconds?: number;
+}): ReactNode {
+  const bashCount = countBashCalls(props.message);
+  const ranSuffix =
+    bashCount > 0 ? formatRanSuffix(bashCount).replace(/^，/, " · ") : "";
+  const head =
+    props.thinkingSeconds !== undefined && props.thinkingSeconds > 0
+      ? `思考了 ${props.thinkingSeconds} 秒`
+      : THINKING_FOLD_LINE;
+  const text = `${head}${ranSuffix}`;
   return (
     <text fg={tuiPalette.dim} wrapMode="none">
-      {clipOneLineVisual(THINKING_FOLD_LINE, props.cols)}
+      {clipOneLineVisual(text, props.cols)}
     </text>
   );
 }
@@ -156,6 +176,10 @@ export function MessageBlocks(props: {
   readonly cols: number;
   readonly statusMap: ReadonlyMap<string, boolean>;
   readonly thinkingExpanded?: boolean;
+  /** 折叠态 thinking 行附带「思考了 N 秒」。仅流式面板（chat-view 同步当前
+   *  流的 streamDraft.thinkingSeconds()）传；历史消息缺省不传 → 折叠行只显
+   *  `[思考] · ran N shell commands`，避免「思考了 0 秒」伪精度。 */
+  readonly thinkingSeconds?: number;
   readonly noTrailingSelfMargin?: boolean;
 }): ReactNode {
   const { message, cols, statusMap, thinkingExpanded = false } = props;
@@ -186,7 +210,7 @@ export function MessageBlocks(props: {
     // T7：user 底色块（pal.userBg + paddingX=1 水平缩进，无 paddingY 贴内容）。
     // 内部宽度 = cols-2（paddingX=1 两侧），text width 同步收窄避免溢出。
     return (
-      <box flexDirection="column" marginTop={1}>
+      <box flexDirection="column">
         <box
           flexDirection="column"
           backgroundColor={pal.userBg}
@@ -208,7 +232,14 @@ export function MessageBlocks(props: {
   const innerCols = Math.max(1, cols - 2);
   const nodes: ReactNode[] = [];
   if (summary !== "") {
-    nodes.push(<ThinkingSummary key="tk-sum" cols={innerCols} />);
+    nodes.push(
+      <ThinkingSummary
+        key="tk-sum"
+        message={message}
+        cols={innerCols}
+        thinkingSeconds={props.thinkingSeconds}
+      />
+    );
   }
   if (summary !== "" && thinkingExpanded) {
     message.content.forEach((block, i) => {
@@ -252,7 +283,7 @@ export function MessageBlocks(props: {
   // T7：assistant 底色块（pal.assistantBg + paddingX=1 水平缩进，无 paddingY
   // 贴内容）+ 根 marginTop=1（消息间 1 行节奏）。
   return (
-    <box flexDirection="column" marginTop={1}>
+    <box flexDirection="column">
       <box
         flexDirection="column"
         backgroundColor={pal.assistantBg}

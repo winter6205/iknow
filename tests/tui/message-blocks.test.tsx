@@ -263,6 +263,97 @@ test("tool_use 非 bash 工具（write_file）：不追加 ran 计数（T4）", 
   await setup.renderer.destroy();
 });
 
+test("thinking 折叠态 + thinkingSeconds：渲染 `思考了 N 秒` 替换 [思考]", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "链上推理明细…", signature: "sig-1" },
+      { type: "text", text: "正式回答" },
+    ],
+  };
+  const setup = await testRender(
+    <MessageBlocks
+      message={msg}
+      cols={COLS}
+      statusMap={emptyStatusMap()}
+      thinkingExpanded={false}
+      thinkingSeconds={3}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // 新格式：折叠行 = `思考了 N 秒`（替换 [思考] 标记）。
+  expect(frame).toContain("思考了 3 秒");
+  expect(frame.includes("[思考]")).toBe(false);
+  // text block 仍渲染（正式回答保留）。
+  expect(frame).toContain("正式回答");
+  await setup.renderer.destroy();
+});
+
+test("thinking 折叠态 + bash tool_use：`[思考] · ran 1 command`（无时间）", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "链上推理…", signature: "sig-1" },
+      {
+        type: "tool_use",
+        id: "tu-bash-1",
+        name: "bash",
+        input: { command: "ls", description: "list" },
+      },
+      { type: "text", text: "跑完了" },
+    ],
+  };
+  const setup = await testRender(
+    <MessageBlocks
+      message={msg}
+      cols={COLS}
+      statusMap={emptyStatusMap()}
+      thinkingExpanded={false}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // 折叠行 = `[思考] · ran 1 command`（无时间）。精确定位子串，避免
+  // `[运行中] bash · ls` 摘要行里误带的 `·` 假阳性。
+  expect(frame).toContain("[思考] · ran 1 command");
+  await setup.renderer.destroy();
+});
+
+test("thinking 折叠态 + thinkingSeconds + bash：`思考了 3 秒 · ran 1 command`", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "链上推理…", signature: "sig-1" },
+      {
+        type: "tool_use",
+        id: "tu-bash-2",
+        name: "bash",
+        input: { command: "ls", description: "list" },
+      },
+      { type: "text", text: "跑完了" },
+    ],
+  };
+  const setup = await testRender(
+    <MessageBlocks
+      message={msg}
+      cols={COLS}
+      statusMap={emptyStatusMap()}
+      thinkingExpanded={false}
+      thinkingSeconds={3}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // 折叠行 = `思考了 3 秒 · ran 1 command`（时间 + bash 计数合并）。
+  expect(frame).toContain("思考了 3 秒 · ran 1 command");
+  expect(frame.includes("[思考]")).toBe(false);
+  await setup.renderer.destroy();
+});
+
 test("tool_use 状态染色：statusMap 缺位 = [运行中]，failed = [失败]，成功 = [完成]", async () => {
   const okStatus = new Map<string, boolean>([["tu-ok", false]]);
   const failedStatus = new Map<string, boolean>([["tu-fail", true]]);
@@ -369,9 +460,14 @@ test("tool_use preview 固定高度：content 长时渲染稳定，摘要行可�
 
 // -- T7：消息间距 + 底色 ------------------------------------------------
 // 底色 = 渲染元数据，captureCharFrame 字符帧不含背景色 → 底色断言走结构层：
-// 底色 box 包裹后渲染不崩 + 内层文本可见。间距 = marginTop → 字符帧空行分隔。
+// 底色 box 包裹后渲染不崩 + 内层文本可见。
+//
+// 间距归属变更：消息间 1 行节奏由 ChatView wrapper `<box marginTop={i===0?0:1}>`
+// 提供（chat-view.tsx:208 消息 map 循环处）。MessageBlocks 根 box 不再自带
+// marginTop——单条 MessageBlocks 渲染时首行前无 padding 空白行（T9 抖动修复
+// 后的 SSOT 边界）。本节 T7 测试用「wrapper 模拟 ChatView」模式恢复间距验证。
 
-test("T7 多消息交替：user / assistant 消息间有空白行分隔（marginTop 生效）", async () => {
+test("T7 多消息交替：wrapper marginTop={i===0?0:1} 提供 1 行节奏（首条无 margin）", async () => {
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "第一条提问" }] },
     {
@@ -380,21 +476,33 @@ test("T7 多消息交替：user / assistant 消息间有空白行分隔（margin
     },
     { role: "user", content: [{ type: "text", text: "第二条提问" }] },
   ];
-  // 复用 renderBlocks 逐条渲染帧，对比单消息 vs 多消息帧内容高度
-  // （MessageBlocks 是单条渲染器，无法在一个 frame 里渲染多条——验证
-  // marginTop 通过「消息根 box 首行前存在空行」的结构断言表达）。
-  const setup = await renderBlocks(messages[0]!);
+  // 模拟 ChatView wrapper 模式：每条消息外层 <box marginTop={i===0?0:1}>。
+  const setup = await testRender(
+    <>
+      {messages.map((message, i) => (
+        <box key={i} width={COLS} marginTop={i === 0 ? 0 : 1}>
+          <MessageBlocks
+            message={message}
+            cols={COLS}
+            statusMap={emptyStatusMap()}
+          />
+        </box>
+      ))}
+    </>,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   const lines = frame.split("\n");
-  expect(frame).toContain("第一条提问");
+  // 首条 user 文本首行应在第 0 行（无顶部 margin）。
   const firstTextLine = lines.findIndex((l) => l.includes("第一条提问"));
-  // marginTop={1} → 文本首行前应有一个纯空白行（消息根 box 顶部 margin 提
-  // 供的间距；paddingY=0 不再贡献 padding 行，紧凑模式）。
-  expect(firstTextLine).toBeGreaterThan(0);
-  const aboveBlank = lines
-    .slice(0, firstTextLine)
-    .every((l) => l.trim() === "");
-  expect(aboveBlank).toBe(true);
+  expect(firstTextLine).toBe(0);
+  // 第二条（assistant）与第一条间应有 1 行空白间隔。
+  const secondTextLine = lines.findIndex((l) => l.includes("第一个回答"));
+  expect(secondTextLine).toBeGreaterThan(firstTextLine + 1);
+  // 第三条（user）与第二条间同样有 1 行空白。
+  const thirdTextLine = lines.findIndex((l) => l.includes("第二条提问"));
+  expect(thirdTextLine).toBeGreaterThan(secondTextLine + 1);
   await setup.renderer.destroy();
 });
 
@@ -406,10 +514,11 @@ test("T7 user 消息：底色 box 包裹后渲染不崩，❯ 前缀保留（结
   const setup = await renderBlocks(msg);
   const frame = setup.captureCharFrame();
   expect(frame).toContain("❯ 带底色的提问");
-  // 内容紧贴底色块（paddingY=0）；仅靠 marginTop={1} 消息间 1 行节奏。
+  // 单条 MessageBlocks 渲染：根 box 无 marginTop → 文本首行 = frame[0]，
+  // 底色块紧贴内容（paddingY=0）；间距由 ChatView wrapper 提供。
   const lines = frame.split("\n");
   const textLine = lines.findIndex((l) => l.includes("带底色的提问"));
-  expect(textLine).toBeGreaterThan(0);
+  expect(textLine).toBe(0);
   await setup.renderer.destroy();
 });
 
