@@ -10,6 +10,9 @@
  *    true（默认开启）处理。
  *  - `secrets.patterns`：敏感信息匹配模式（正则源串）列表，非空串字符串数组才合法；
  *    缺失 / 空数组 → 消费方回退内置默认集（settings 层不预填内置集，只承载用户配置）。
+ *  - `secrets.mode`（#406 T4）：secret 处理模式，仅 `"roundtrip"` | `"block"` 合法；
+ *    缺失 → 消费方按 "roundtrip"（识别 + 占位符替换 + 还原）处理；"block" = 旧
+ *    deny-only preToolUse guard（#126 兼容路径）。非法值 → 丢弃该字段。
  *
  * settings-model-extension（#164 第二阶段）：
  *  - `settings.llm.model` 是模型路由 ID 的字面值来源（trim 后非空串），env.ts
@@ -67,6 +70,11 @@ export interface IknowSettingsSecrets {
    * 非空串字符串数组才合法（至少 1 项，每项 trim 后非空）；非法 → 丢弃该字段。
    */
   patterns?: string[];
+  /**
+   * #406 T4: secret 处理模式。缺省 = "roundtrip"（识别+占位符替换+还原）；
+   * "block" = 旧 deny-only preToolUse guard（#126 兼容路径）。非法值 → 丢弃。
+   */
+  mode?: "roundtrip" | "block";
 }
 
 export interface IknowSettings {
@@ -106,6 +114,11 @@ function isNonEmptyString(v: unknown): v is string {
 /** 非空串字符串数组（至少 1 项，每项 trim 后仍有内容）：fallback 的值域。 */
 function isNonEmptyStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.length > 0 && v.every(isNonEmptyString);
+}
+
+/** secret mode 值域：仅 "roundtrip" | "block"（缺省由消费方按 roundtrip 处理）。 */
+function isValidSecretMode(v: unknown): v is IknowSettingsSecrets["mode"] {
+  return v === "roundtrip" || v === "block";
 }
 
 /**
@@ -285,7 +298,13 @@ function parseSecrets(raw: unknown): IknowSettingsSecrets | undefined {
   if (isNonEmptyStringArray(raw.patterns)) {
     out.patterns = raw.patterns.map((s) => s.trim());
   }
-  if (out.enabled === undefined && out.patterns === undefined) return undefined;
+  if (isValidSecretMode(raw.mode)) out.mode = raw.mode;
+  if (
+    out.enabled === undefined &&
+    out.patterns === undefined &&
+    out.mode === undefined
+  )
+    return undefined;
   return out;
 }
 
@@ -300,7 +319,14 @@ function mergeSecrets(
   else if (user?.enabled !== undefined) out.enabled = user.enabled;
   if (project?.patterns !== undefined) out.patterns = project.patterns;
   else if (user?.patterns !== undefined) out.patterns = user.patterns;
-  if (out.enabled === undefined && out.patterns === undefined) return undefined;
+  if (project?.mode !== undefined) out.mode = project.mode;
+  else if (user?.mode !== undefined) out.mode = user.mode;
+  if (
+    out.enabled === undefined &&
+    out.patterns === undefined &&
+    out.mode === undefined
+  )
+    return undefined;
   return out;
 }
 

@@ -12,6 +12,11 @@
  *  - 内置常量无真实密钥（占位正则形态 grep 断言）
  */
 
+// NOTE (#406 T4): 这些测试覆盖 `settings.secrets.mode = "block"` 的 legacy
+// deny-only 路径。roundtrip 默认模式（识别 + 占位符替换 + bash 还原）在
+// tests/harness/secret-roundtrip/ 下覆盖。secrets-guard.ts 现在只作为
+// mode:"block" 的向后兼容装配保留。
+
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

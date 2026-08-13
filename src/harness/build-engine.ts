@@ -24,7 +24,10 @@ import {
   type LoopEngineDeps,
 } from "./index.js";
 import { createAciExecutor } from "./aci/index.js";
-import { setActiveExtraSecrets } from "./sandbox/env-isolation.js";
+import {
+  setActiveExtraSecrets,
+  clearActiveExtraSecrets,
+} from "./sandbox/env-isolation.js";
 import { createPermissionPolicy } from "./permission/policy.js";
 import type { PermissionModeContext } from "./permission/modes.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
@@ -243,17 +246,31 @@ export async function buildHarnessEngine(
       : undefined;
   // #126 T5:settings 对象缝（测试注入隔离 settings；生产缺省 loadIknowSettings）。
   const settings = opts.settings ?? loadIknowSettings({ cwd });
-  // #406 T2:per-engine secret registry —— settings.secrets.patterns 驱动构造。
-  // 构造期编译 DEFAULT + extras(registry.patterns 冻结);T4 将按 mode 门控构造。
-  // 当前无条件装配:loop-engine 在 secretRegistry 在场时才做占位符替换,
-  // 缺席字段(测试缝 settings 不含 secrets)→ 空 pattern 集,行为 byte-identical。
-  const secretRegistry: SecretRegistry | undefined = createSecretRegistry({
-    patterns: settings.secrets?.patterns,
-  });
-  // #406 T3:输出 mask 兜底 —— registry 追踪的密钥值写入 active extras 槽位，
-  // jsonl / format / stream-draft / hub 的 `currentSecretValues()` 无参调用
-  // 即覆盖这些值（构建期 registry 为空表，size 0 时写入空集，无副作用）。
-  setActiveExtraSecrets(secretRegistry.values());
+  // #406 T4:secret 处理模式 —— settings.secrets.mode 驱动装配。缺省 = "roundtrip"
+  // （识别 + 占位符替换 + bash 还原 + 输出 mask）；"block" = 旧 deny-only
+  // preToolUse guard（#126 兼容路径），roundtrip 机制整体关闭。非法值已被
+  // settings.parseSecrets 丢弃 → 此处只能见到 "roundtrip" | "block" | undefined。
+  const secretsMode: "roundtrip" | "block" =
+    settings.secrets?.mode ?? "roundtrip";
+  // #406 T2/T4:per-engine secret registry —— 仅 roundtrip 模式构造。
+  // 构造期编译 DEFAULT + extras(registry.patterns 冻结)。block 模式不构造：
+  // loop-engine 在 secretRegistry 缺席 + secretsMode="block" 时跳过识别,
+  // bash 工具拿不到 registry,输出 mask 不覆盖 registry 值。
+  let secretRegistry: SecretRegistry | undefined;
+  if (secretsMode !== "block") {
+    secretRegistry = createSecretRegistry({
+      patterns: settings.secrets?.patterns,
+    });
+  }
+  // #406 T3:输出 mask 兜底 —— roundtrip 模式下把 registry 追踪的密钥值写入
+  // active extras 槽位（jsonl / format / stream-draft / hub 的
+  // `currentSecretValues()` 无参调用即覆盖）。block 模式必须清空槽位,
+  // 防止同一进程内前一个 roundtrip engine 残留的 extras 泄漏进 block engine。
+  if (secretsMode !== "block") {
+    setActiveExtraSecrets(secretRegistry!.values());
+  } else {
+    clearActiveExtraSecrets();
+  }
   const reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
@@ -282,24 +299,27 @@ export async function buildHarnessEngine(
     // W2: mode context — REPL toggles this via /permissions; absent → default.
     ...(opts.permissionMode ? { mode: opts.permissionMode } : {}),
   });
-  // #126 T5:secrets guard 产品装配 —— settings.secrets 段驱动（settings 已在
-  // 上方 registry 装配前解析）。guard 挂 preToolUse(Step 1 最早短路):密钥形态
-  // 在权限层之前拦截,与既有 opts.hooks(postToolUse,Step 5 观测)互补不重叠。
+  // #126 T5 / #406 T4:secrets guard 产品装配 —— 仅 mode:"block"（legacy
+  // deny-only 路径）装配 preToolUse(Step 1 最早短路):密钥形态在权限层之前拦截,
+  // 与既有 opts.hooks(postToolUse,Step 5 观测)互补不重叠。
   //   - secrets.enabled 缺失 → 默认 true(内置集生效);enabled:false → guard 透明。
   //   - secrets.patterns 缺失/空 → 内置默认集;追加的自定义 pattern 构造期编译,
   //     非法正则剔除 + onHookError 告警,不毒化 guard(spec Constraints (a))。
-  //   - T4 将按 mode 门控:roundtrip（默认）不装配 guard,block 仍装配（向后兼容）。
-  const secretsGuard = createSecretsGuardHook({
-    ...(settings.secrets ? { ...settings.secrets } : {}),
-    ...(opts.onHookError ? { onHookError: opts.onHookError } : {}),
-  });
+  //   - 默认 roundtrip 模式 → guard 不装配（识别 + 占位符替换 + 还原替代拦截）。
+  const secretsGuard =
+    secretsMode === "block"
+      ? createSecretsGuardHook({
+          ...(settings.secrets ? { ...settings.secrets } : {}),
+          ...(opts.onHookError ? { onHookError: opts.onHookError } : {}),
+        })
+      : undefined;
   const executor = createAciExecutor({
     inner: baseExecutor,
     catalog: reg.catalog,
     policy,
     askUser,
     hooks: {
-      preToolUse: secretsGuard,
+      ...(secretsGuard ? { preToolUse: secretsGuard } : {}),
       ...(opts.hooks ? { postToolUse: opts.hooks } : {}),
     },
   });
@@ -357,9 +377,12 @@ export async function buildHarnessEngine(
     adapter,
     executor,
     registry: registryTools,
-    // #406 T2:secretRegistry 无条件注入 deps(缺席字段测试缝才不出现)。
-    // loop-engine run() 在场时对用户文本做占位符替换。
+    // #406 T2:secretRegistry 注入 deps(roundtrip 模式在场时 loop-engine
+    // run() 对用户文本做占位符替换;block 模式缺席 → 跳过识别)。
     ...(secretRegistry ? { secretRegistry } : {}),
+    // #406 T4:block 模式显式注入 secretsMode —— loop-engine 识别层据此跳过
+    // recognize(见 loop-engine.ts:1300)。roundtrip 缺省 = undefined(零变化)。
+    ...(secretsMode === "block" ? { secretsMode: "block" as const } : {}),
     // plan T5-engine / ADR-0012:env 优先(CLI --max-turns 由 surface 注入);
     // undefined = 无限(默认),长程探索不被 turn 计数误杀。
     maxTurns: env.llm.maxTurns,

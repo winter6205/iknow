@@ -699,3 +699,97 @@ describe("loadIknowSettings — secrets 段 (#126 hook-system T4)", () => {
     }, TypeError);
   });
 });
+
+describe("loadIknowSettings — secrets.mode 段 (#406 T4)", () => {
+  it('secrets.mode: "roundtrip" → 读到（显式 roundtrip 合法）', async () => {
+    const { home, cwd } = await makeSettings(
+      { secrets: { mode: "roundtrip" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      secrets: { mode: "roundtrip" },
+    });
+  });
+
+  it('secrets.mode: "block" → 读到（legacy deny-only 路径）', async () => {
+    const { home, cwd } = await makeSettings(
+      { secrets: { mode: "block" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      secrets: { mode: "block" },
+    });
+  });
+
+  it('secrets.mode: "invalid" → 丢弃（不产出 secrets）', async () => {
+    const { home, cwd } = await makeSettings(
+      { secrets: { mode: "invalid" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("secrets.mode 非字符串（123 / true / null / [] / {}）→ 丢弃", async () => {
+    for (const bad of [123, true, null, [], {}]) {
+      const { home, cwd } = await makeSettings({ secrets: { mode: bad } }, {});
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `mode=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("secrets.mode 非法但 enabled 合法 → 丢弃 mode、保留 enabled", async () => {
+    const { home, cwd } = await makeSettings(
+      { secrets: { enabled: true, mode: "bogus" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      secrets: { enabled: true },
+    });
+  });
+
+  it("project mode 覆盖 user mode（同字段替换）", async () => {
+    const { home, cwd } = await makeSettings(
+      { secrets: { mode: "roundtrip" } },
+      { secrets: { mode: "block" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      secrets: { mode: "block" },
+    });
+  });
+
+  it("project 无 mode、user 有 mode → 保留 user mode（逐层合并）", async () => {
+    const { home, cwd } = await makeSettings(
+      { secrets: { mode: "block", enabled: true } },
+      { secrets: { enabled: false } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      secrets: { enabled: false, mode: "block" },
+    });
+  });
+
+  it("project mode 非法不覆盖 user 合法（保留 user 值）", async () => {
+    const { home, cwd } = await makeSettings(
+      { secrets: { mode: "roundtrip" } },
+      { secrets: { mode: "invalid" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      secrets: { mode: "roundtrip" },
+    });
+  });
+
+  it("返回对象深 frozen 含 secrets.mode（不可改）", async () => {
+    const { home, cwd } = await makeSettings(
+      { secrets: { mode: "block" } },
+      {}
+    );
+    const s = loadIknowSettings({ home, cwd });
+    assert.ok(Object.isFrozen(s));
+    assert.ok(Object.isFrozen(s.secrets));
+    assert.throws(() => {
+      (s.secrets as { mode: string }).mode = "roundtrip";
+    }, TypeError);
+  });
+});
