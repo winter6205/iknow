@@ -179,6 +179,23 @@ export interface PermissionOutcome {
 - **违规计数状态**：会话级 counter 走闭包，不引入类层；N=3 默认值与升级动作必须同函数内，避免配置漂移。
 - **测试文件**：每个新模块至少 1 个测试文件，6 边界类全覆盖（空 / 负 / 溢出 / 并发 / 异常 / 畸形）；测试函数无行数限制但保持单文件 ≤ 600 行。
 
+## Secret 处理收敛（#406 roundtrip mask，supersedes guard 的 input 拦截角色）
+
+> **#126 hook-system（deny-only guard）已被 #406 roundtrip mask 替代**。本 spec 的
+> 「权限三层」仍有效，但 `secrets-guard.ts` 的密钥 input 拦截角色收敛为：
+>
+> - **默认 `secrets.mode = "roundtrip"`**：不装配 preToolUse secrets-guard。密钥形态
+>   由 `src/harness/secret-roundtrip/` 识别层在用户文本进 LLM 前替换为 `<<<SECRET_N>>>`
+>   占位符（per-engine registry，in-memory）；bash 工具 spawn 前 `restore()` 回填真值；
+>   output mask 经 `currentSecretValues(registry.values())` 兜底遮蔽 registry 值。
+>   **key 真值仅在 bash 进程构造 HTTP 请求那一瞬间物理存在**。
+> - **`secrets.mode = "block"`**：保留 #126 deny-only guard 兼容路径（向后兼容，
+>   `mode:"block"` 时 roundtrip 机制整体关闭）。
+>
+> 形态 SSOT：`src/harness/secret-roundtrip/patterns.ts`（`DEFAULT_SECRET_PATTERNS`）；
+> secrets-guard 的形态集 re-export 自同一 SSOT（一处增改，两层同生效）。
+> 详见 `specs/406-secret-roundtrip-mask.md`。
+
 ## Plan Decomposition（spec → plan 拆分预期，commit-count expectation）
 
 本 spec 在 plan 阶段将按 bounded context 拆为 **≥ 6 个 tracer bullets**（不强制单提交；1 个 [decision] + 5 个 [implementation]，分别落地 4 票决议）：
