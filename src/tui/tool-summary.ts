@@ -6,9 +6,13 @@
  *  - 摘要行 = 工具名 + 参数摘要 + 状态；
  *  - 生成/编辑类增强：write_file/edit_file 显示「生成了什么」（路径 + 行数）。
  *
+ * T5 (tui-render-optimization)：`summarizePartialInput` — 运行中 partial JSON
+ * 文本摘要（parse 成功走 summarizeToolCall，不完整 JSON 原样截断）。
+ *
  * 宽度纪律（窄终端修复）：摘要行渲染形态有三种——终稿 `[运行中] name · detail`、
- * live 完成行 `name · detail · ok`、live 运行行——行级窗口账目一律按 1 行计。
- * 传 `cols` 时按视觉宽度收口（预留最宽装饰），保证三种形态单行不折。
+ * live 完成行 `name · detail · ok`、live 运行行（T5 含 partial 摘要）——
+ * 行级窗口账目一律按 1 行计。传 `cols` 时按视觉宽度收口（预留最宽装饰），
+ * 保证三种形态单行不折。
  *
  * 内容可见性：write_file / edit_file 完成后 `toolPreviewRows` 产出统一 diff
  * 预览行（computeDiff 单源），`MessageBlocks` 渲染与 `live-tool-preview`
@@ -84,8 +88,78 @@ function clipDetail(s: string, name: string, cols: number | undefined): string {
   return clipOneLineVisual(s, Math.min(MAX_DETAIL, budget));
 }
 
-/** 单个工具调用的参数摘要。`cols` = 终端列宽：提供时 detail 按视觉宽度
- *  收口到「装饰 + 工具名 + detail」单行放得下（窄终端不折行，行账不漂移）。 */
+/** 字段提取辅助：string 字段（缺失 → fallback），避免逐 case 重复防御。 */
+function pickString(
+  rec: Record<string, unknown>,
+  key: string,
+  fallback = "?"
+): string {
+  const v = rec[key];
+  return typeof v === "string" ? v : fallback;
+}
+
+/** 字段提取辅助：number 字段（缺失/非有限数 → null）。 */
+function pickNumber(rec: Record<string, unknown>, key: string): number | null {
+  const v = rec[key];
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/** LSP 工具：共享「file[:line]」模板（definition/references/hover/...）。 */
+function lspAt(rec: Record<string, unknown>, name: string): string {
+  const file = pickString(rec, "file");
+  const line = pickNumber(rec, "line");
+  return `LSP ${name.replace("lsp_", "")} ${file}${line !== null ? `:${line}` : ""}`;
+}
+
+/** 工具 → 摘要器 lookup table。每项返回未 clip 的 detail 文本。 */
+const SUMMARIZERS: Readonly<
+  Record<string, (rec: Record<string, unknown>) => string>
+> = {
+  write_file: (r) =>
+    `写入 ${pickString(r, "path")}（${countLines(r.content)} 行）`,
+  bash: (r) => pickString(r, "command", ""),
+  edit_file: (r) => {
+    const all = r.replace_all === true;
+    return `编辑 ${pickString(r, "path")}${all ? "（全部替换）" : ""}：${pickString(r, "old_str", "")} → ${pickString(r, "new_str", "")}`;
+  },
+  read_file: (r) => `读取 ${pickString(r, "path")}`,
+  grep: (r) => `搜索 ${pickString(r, "pattern")}`,
+  glob: (r) => `匹配 ${pickString(r, "pattern")}`,
+  // web / memory / skill / search 类：聚焦首个关键字段，避免 JSON 全文外露。
+  web_search: (r) => `搜索 ${pickString(r, "query")}`,
+  web_fetch: (r) => `抓取 ${pickString(r, "url")}`,
+  memory_recall: (r) => `记忆 召回 ${pickString(r, "query")}`,
+  memory_save: (r) => `记忆 写入 ${pickString(r, "title")}`,
+  tool_search: (r) => {
+    const names = Array.isArray(r.names) ? `names=${r.names.length}` : "";
+    return `工具 ${pickString(r, "query", names || "?")}`;
+  },
+  skill: (r) => `skill ${pickString(r, "name")}`,
+  skill_search: (r) => `skill ${pickString(r, "query")}`,
+  spawn_subagent: (r) =>
+    `派发子代理：${pickString(r, "task", "").slice(0, 60) || "?"}`,
+  subagent_result: (r) => `轮询 ${pickString(r, "task_id")}`,
+  // LSP 工具集：10 件。8 件共享 file[:line] 模板；documentSymbol / workspaceSymbol 走各自形态。
+  lsp_definition: (r) => lspAt(r, "lsp_definition"),
+  lsp_references: (r) => lspAt(r, "lsp_references"),
+  lsp_hover: (r) => lspAt(r, "lsp_hover"),
+  lsp_go_to_implementation: (r) => lspAt(r, "lsp_go_to_implementation"),
+  lsp_prepare_call_hierarchy: (r) => lspAt(r, "lsp_prepare_call_hierarchy"),
+  lsp_incoming_calls: (r) => lspAt(r, "lsp_incoming_calls"),
+  lsp_outgoing_calls: (r) => lspAt(r, "lsp_outgoing_calls"),
+  lsp_diagnostics: (r) => lspAt(r, "lsp_diagnostics"),
+  lsp_document_symbol: (r) => `LSP documentSymbol ${pickString(r, "file")}`,
+  lsp_workspace_symbol: (r) => `LSP workspaceSymbol ${pickString(r, "query")}`,
+};
+
+/**
+ * 单个工具调用的参数摘要。`cols` = 终端列宽：提供时 detail 按视觉宽度
+ * 收口到「装饰 + 工具名 + detail」单行放得下（窄终端不折行，行账不漂移）。
+ *
+ * lookup table（SUMMARIZERS）dispatch：每个工具独立摘要器，函数体保持
+ * ≤10 行 / 圈复杂度 ≤10（complexity-anti-drift）；未知工具走 `(name)`
+ * 占位符（2026-08-13 用户反馈 tool fold 不该 JSON 全文外露）。
+ */
 export function summarizeToolCall(
   name: string,
   input: unknown,
@@ -93,32 +167,67 @@ export function summarizeToolCall(
 ): { detail: string } {
   const rec = inputRecord(input);
   const clip = (s: string): string => clipDetail(s, name, cols);
-  switch (name) {
-    case "write_file": {
-      const path = typeof rec.path === "string" ? rec.path : "?";
-      const lines = countLines(rec.content);
-      return { detail: clip(`写入 ${path}（${lines} 行）`) };
-    }
-    case "edit_file": {
-      const path = typeof rec.path === "string" ? rec.path : "?";
-      const all = rec.replace_all === true;
-      return {
-        detail: clip(
-          `编辑 ${path}${all ? "（全部替换）" : ""}：${String(rec.old_str ?? "")} → ${String(rec.new_str ?? "")}`
-        ),
-      };
-    }
-    case "bash":
-      return { detail: clip(String(rec.command ?? "")) };
-    case "read_file":
-      return { detail: clip(`读取 ${String(rec.path ?? "?")}`) };
-    case "grep":
-      return { detail: clip(`搜索 ${String(rec.pattern ?? "?")}`) };
-    case "glob":
-      return { detail: clip(`匹配 ${String(rec.pattern ?? "?")}`) };
-    default:
-      return { detail: clip(JSON.stringify(rec)) };
+  // 真未知工具：仅显示工具名占位，避免 JSON 全文外露
+  // （2026-08-13 用户反馈 tool fold 不该把 input args 全 JSON stringify）。
+  if (!(name in SUMMARIZERS)) return { detail: clip(`(${name})`) };
+  return { detail: clip(SUMMARIZERS[name]!(rec)) };
+}
+
+/**
+ * T5:运行中 partial JSON 文本的摘要。对逐段累积的 `partialJson` 尽力
+ * `JSON.parse`：
+ *  - parse 成功 → 走 `summarizeToolCall`（与完成态摘要同源，字节一致）；
+ *  - parse 失败（partial 不完整 JSON，如 `{"command":"l`）或 primitive 形态
+ *    （null / 数字 / 布尔）→ `clipDetail` 原样截断显示（单源，视觉宽度纪律）；
+ *  - 空串 → 空串。
+ *
+ * 遮蔽说明：partial 里可能含密钥形态，但增量只服务展示层中间态——完成后的
+ * 权威完整 input 才进模型；此处仅视觉截断，不接 output mask（风险低，保持
+ * 单行收口简单）。
+ */
+export function summarizePartialInput(
+  name: string,
+  partialJson: string,
+  cols?: number
+): string {
+  if (partialJson.length === 0) return "";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(partialJson);
+  } catch {
+    parsed = undefined;
   }
+  // 不完整 JSON（parse 失败）或 primitive 形态（null / 数字 / 布尔 —— 工具参数
+  // 语义上只有 object/array）→ 原样截断显示。截断口径 = clipDetail 单源
+  // （与完成态摘要同一视觉宽度纪律，避免预算公式漂移）。
+  if (
+    parsed === undefined ||
+    (typeof parsed !== "object" && typeof parsed !== "boolean")
+  ) {
+    return clipDetail(partialJson, name, cols);
+  }
+  return summarizeToolCall(name, parsed, cols).detail;
+}
+
+/** 一条 assistant 消息内 `name === "bash"` 的 `tool_use` block 计数（T4）。
+ *  折叠摘要「ran N command(s)」的 N 数据源：聚合语义——「某命令跑了几次」
+ *  对同一条 assistant 消息内多次调 bash 最有意义，非 per-call。非 bash /
+ *  非 assistant 消息一律 0（"ran N commands" 只对 shell 语义成立）。 */
+export function countBashCalls(message: AnthropicNativeMessage): number {
+  if (message.role !== "assistant") return 0;
+  let n = 0;
+  for (const block of message.content) {
+    if (block.type === "tool_use" && block.name === "bash") n += 1;
+  }
+  return n;
+}
+
+/** ran N command(s) 后缀文案（T4）。逗号全角接在 detail 后；N <= 0 → 空串。
+ *  plural：N === 1 → `ran 1 command`；N > 1 → `ran N commands`。 */
+export function formatRanSuffix(count: number): string {
+  if (count === 1) return "，ran 1 command";
+  if (count > 1) return `，ran ${count} commands`;
+  return "";
 }
 
 /**

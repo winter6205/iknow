@@ -12,10 +12,21 @@
  *  - **thinking 折叠文案**收敛在本文件为常量（`THINKING_FOLD_LINE = "[思考]"`），
  *    替代码仓 archive 里同名导出（本文件是当前唯一 caller，作为 SSOT）。
  *  - 全部 `<box>` / `<text>` + fg 属性；禁 ink 原语（Box / Text）。
+ *  - **T7 消息间距 + 底色**：user / assistant 分支用 box.backgroundColor
+ *    （读 theme.ts userBg / assistantBg token）+ paddingX={1} 水平缩进
+ *    （无 paddingY，底色块贴合内容）。消息间 1 行节奏由 ChatView wrapper
+ *    `<box marginTop={i===0?0:1}>` 提供（首条不带顶部 margin，避免进入会话
+ *    时第一行无谓下推造成间距抖动）；本组件根 box 不再产 marginTop。
+ *    OpenTUI 无 lineHeight API，行距 = 消息块间 margin + 块内段落 margin，不自
+ *    造真 leading。2026-08-13 用户反馈 paddingY=1 让消息块上下各 1 行空白叠加
+ *    marginTop 造成 3 行/消息间距「太宽了」，改为 paddingY=0（底色贴内容） +
+ *    marginTop=1（消息间 1 行节奏，由 wrapper 提供）。
  *
  * 留存的子组件：
- *  - `ToolSummaryRow`：tool_use 摘要行（收口 + mark 染色）；
- *  - `ToolPreviewRows`：write_file / edit_file 统一 diff 预览（DiffView）；
+ *  - `ToolSummaryRow`：tool_use 摘要行（收口 + mark 染色 + 完成态 bash
+ *    `，ran N command(s)` 折叠摘要 — T4）；
+ *  - `ToolPreviewRows`：write_file / edit_file 统一 diff 预览（固定高度
+ *    `<ScrollableOutputRegion>` 内嵌，不再直接 `<DiffView>` — T3）；
  *  - `ThinkingSummary`：折叠态 thinking 摘要行；
  *  - `MessageBlocks`：完整消息渲染入口（user / assistant / tool_use / thinking）。
  *
@@ -23,6 +34,7 @@
  *  - `summarizeToolCall` / `toolPreviewRows` / `toolResultStatusMap`（tool-summary）
  *  - `clipOneLineVisual`（tool-summary 内联导出，归档 text.ts SSOT 已迁移）
  *  - `REDACTED_PLACEHOLDER` / `summarizeThinkingContent`（cli/format）
+ *  - `diffRowTexts`（diff-view）＋ `ScrollableOutputRegion`（scrollable-output-region）
  *
  * 严禁 import：archive/tui-ink/*、markdown-lines、message-rows、row-window、
  * selection、selection-render、text、HighlightedLine——本文件应保持纯 OpenTUI
@@ -34,9 +46,15 @@ import type {
   AnthropicNativeMessage,
 } from "../harness/model-adapter/types.js";
 import { tuiPalette } from "./theme.js";
-import { summarizeToolCall, toolPreviewRows } from "./tool-summary.js";
+import {
+  summarizeToolCall,
+  toolPreviewRows,
+  formatRanSuffix,
+  countBashCalls,
+} from "./tool-summary.js";
 import { clipOneLineVisual } from "./tool-summary.js";
-import { DiffView } from "./diff-view.js";
+import { diffRowTexts } from "./diff-view.js";
+import { ScrollableOutputRegion } from "./scrollable-output-region.js";
 import { Markdown } from "./markdown.js";
 import {
   REDACTED_PLACEHOLDER,
@@ -51,11 +69,14 @@ type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
 const THINKING_FOLD_LINE = "[思考]";
 
 /** tool_use 摘要行：`[运行中]|[完成]|[失败] name · detail`。
+ *  完成态 bash 追加 `，ran N command(s)`（T4）：runCount = 该 assistant 消息内
+ *  同名工具调用次数（MessageBlocks 整消息一次聚合），缺省 0 → 无后缀。
  *  cols 收口：单行不折（tool-summary 视觉宽度）。 */
 function ToolSummaryRow(props: {
   readonly tu: ToolUseBlock;
   readonly statusMap: ReadonlyMap<string, boolean>;
   readonly cols: number;
+  readonly runCount?: number;
 }): ReactNode {
   const { detail } = summarizeToolCall(
     props.tu.name,
@@ -65,30 +86,65 @@ function ToolSummaryRow(props: {
   const hasResult = props.statusMap.has(props.tu.id);
   const failed = props.statusMap.get(props.tu.id) === true;
   const mark = !hasResult ? "[运行中]" : failed ? "[失败]" : "[完成]";
+  const ran =
+    hasResult && !failed && props.tu.name === "bash"
+      ? formatRanSuffix(props.runCount ?? 0)
+      : "";
   const fg = failed ? tuiPalette.error : tuiPalette.dim;
   return (
     <text fg={fg} wrapMode="none">
       {mark} {props.tu.name} · {detail}
+      {ran}
     </text>
   );
 }
 
-/** 工具内容预览（write_file / edit_file）：走 DiffView 红绿渲染；行数与
- *  OpenTUI 渲染逐行一致（toolPreviewRows SSOT）。 */
+/** 预览固定高度（write/edit diff 通常 6–20 行，6 行折叠 + 内部滚动是
+ *  合理默认；摘要行在主消息流保持单行，不撑开布局）。 */
+const TOOL_PREVIEW_HEIGHT = 6;
+
+/** 工具内容预览（write_file / edit_file）：diff 行（toolPreviewRows SSOT）
+ *  经 diffRowTexts 展平为文本行，收进固定高度 `<ScrollableOutputRegion>`
+ *  内部滚动（T3）——不再直接 `<DiffView>`，主消息流只显摘要行。 */
 function ToolPreviewRows(props: {
   readonly tu: ToolUseBlock;
   readonly cols: number;
 }): ReactNode {
   const rows = toolPreviewRows(props.tu.name, props.tu.input, props.cols);
-  if (rows.length === 0) return null;
-  return <DiffView rows={rows} cols={props.cols} />;
+  const lines = diffRowTexts(rows, props.cols);
+  if (lines.length === 0) return null;
+  return (
+    <ScrollableOutputRegion
+      lines={lines}
+      cols={props.cols}
+      height={TOOL_PREVIEW_HEIGHT}
+    />
+  );
 }
 
-/** 折叠态 thinking 摘要行（dim）。clip 到视觉宽度保证单行不折。 */
-function ThinkingSummary(props: { readonly cols: number }): ReactNode {
+/** 折叠态 thinking 摘要行（dim）。2026-08-13 用户反馈：「思考了几秒」直接
+ *  替换 `[思考]` 标记，不要叠加 `[思考] 思考了 3 秒`。规则：
+ *  - 有时间（流式面板）→ `思考了 {N} 秒` + 可选 `· ran {M} shell command(s)`；
+ *  - 无时间（历史消息）→ `[思考]` + 可选 `· ran {M} shell command(s)`，避免
+ *    伪精度「思考了 0 秒」；
+ *  - 工具计数英文（与参考图 `ran 2 shell commands` 一致），思考部分全中文；
+ *  - bash 数 = 0 → 省略 `· ran …` 段。 */
+function ThinkingSummary(props: {
+  readonly message: AnthropicNativeMessage;
+  readonly cols: number;
+  readonly thinkingSeconds?: number;
+}): ReactNode {
+  const bashCount = countBashCalls(props.message);
+  const ranSuffix =
+    bashCount > 0 ? formatRanSuffix(bashCount).replace(/^，/, " · ") : "";
+  const head =
+    props.thinkingSeconds !== undefined && props.thinkingSeconds > 0
+      ? `思考了 ${props.thinkingSeconds} 秒`
+      : THINKING_FOLD_LINE;
+  const text = `${head}${ranSuffix}`;
   return (
     <text fg={tuiPalette.dim} wrapMode="none">
-      {clipOneLineVisual(THINKING_FOLD_LINE, props.cols)}
+      {clipOneLineVisual(text, props.cols)}
     </text>
   );
 }
@@ -120,6 +176,10 @@ export function MessageBlocks(props: {
   readonly cols: number;
   readonly statusMap: ReadonlyMap<string, boolean>;
   readonly thinkingExpanded?: boolean;
+  /** 折叠态 thinking 行附带「思考了 N 秒」。仅流式面板（chat-view 同步当前
+   *  流的 streamDraft.thinkingSeconds()）传；历史消息缺省不传 → 折叠行只显
+   *  `[思考] · ran N shell commands`，避免「思考了 0 秒」伪精度。 */
+  readonly thinkingSeconds?: number;
   readonly noTrailingSelfMargin?: boolean;
 }): ReactNode {
   const { message, cols, statusMap, thinkingExpanded = false } = props;
@@ -147,29 +207,51 @@ export function MessageBlocks(props: {
       .map((b) => b.text)
       .join("\n");
     if (texts.trim() === "") return null; // 纯 tool_result：摘要行已覆盖。
+    // T7：user 底色块（pal.userBg + paddingX=1 水平缩进，无 paddingY 贴内容）。
+    // 内部宽度 = cols-2（paddingX=1 两侧），text width 同步收窄避免溢出。
     return (
-      <text fg={pal.accent} wrapMode="word" width={cols}>
-        {`❯ ${texts}`}
-      </text>
+      <box flexDirection="column">
+        <box
+          flexDirection="column"
+          backgroundColor={pal.userBg}
+          paddingX={1}
+          paddingY={0}
+        >
+          <text fg={pal.accent} wrapMode="word" width={Math.max(1, cols - 2)}>
+            {`❯ ${texts}`}
+          </text>
+        </box>
+      </box>
     );
   }
   // assistant
   const summary = summarizeThinkingContent(message.content);
+  // T4：该 assistant 消息内 bash tool_use 总数（聚合 ran N 数据源），整消息算一次。
+  const bashRunCount = countBashCalls(message);
+  // T7：底色块 paddingX=1 两侧 → 内部内容宽度收窄 2 列。
+  const innerCols = Math.max(1, cols - 2);
   const nodes: ReactNode[] = [];
   if (summary !== "") {
-    nodes.push(<ThinkingSummary key="tk-sum" cols={cols} />);
+    nodes.push(
+      <ThinkingSummary
+        key="tk-sum"
+        message={message}
+        cols={innerCols}
+        thinkingSeconds={props.thinkingSeconds}
+      />
+    );
   }
   if (summary !== "" && thinkingExpanded) {
     message.content.forEach((block, i) => {
       if (block.type === "thinking") {
         nodes.push(
-          <text key={`tk-b${i}`} wrapMode="word" width={cols}>
+          <text key={`tk-b${i}`} wrapMode="word" width={innerCols}>
             {block.thinking}
           </text>
         );
       } else if (block.type === "redacted_thinking") {
         nodes.push(
-          <text key={`tk-r${i}`} fg={pal.dim} wrapMode="word" width={cols}>
+          <text key={`tk-r${i}`} fg={pal.dim} wrapMode="word" width={innerCols}>
             {REDACTED_PLACEHOLDER}
           </text>
         );
@@ -180,18 +262,36 @@ export function MessageBlocks(props: {
     if (block.type === "text" && block.text.trim().length > 0) {
       nodes.push(
         <box key={`t${i}`}>
-          <Markdown text={block.text} width={cols} />
+          <Markdown text={block.text} width={innerCols} />
         </box>
       );
     } else if (block.type === "tool_use") {
       nodes.push(
         <box key={`u${i}`} flexDirection="column">
-          <ToolSummaryRow tu={block} statusMap={statusMap} cols={cols} />
-          <ToolPreviewRows tu={block} cols={cols} />
+          <ToolSummaryRow
+            tu={block}
+            statusMap={statusMap}
+            cols={innerCols}
+            runCount={bashRunCount}
+          />
+          <ToolPreviewRows tu={block} cols={innerCols} />
         </box>
       );
     }
   });
   if (nodes.length === 0) return null;
-  return <box flexDirection="column">{nodes}</box>;
+  // T7：assistant 底色块（pal.assistantBg + paddingX=1 水平缩进，无 paddingY
+  // 贴内容）+ 根 marginTop=1（消息间 1 行节奏）。
+  return (
+    <box flexDirection="column">
+      <box
+        flexDirection="column"
+        backgroundColor={pal.assistantBg}
+        paddingX={1}
+        paddingY={0}
+      >
+        {nodes}
+      </box>
+    </box>
+  );
 }

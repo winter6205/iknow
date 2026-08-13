@@ -80,6 +80,63 @@ async function waitFrame(
   throw new Error(`waitFrame timeout (${label}):\n${setup.captureCharFrame()}`);
 }
 
+/** T8 多行输入专用装配：完整 mount（TuiApp + bridge + stub deps 单轮回复）。 */
+async function renderMultilineApp() {
+  const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-multiline-"));
+  const bridge = createTuiBridge({
+    dataDir,
+    deps: makeDeps([assistantResult({ texts: ["多行回复"] })]),
+    inflight: createInflightRegistry(),
+  });
+  const askBridge = createTuiAskUserBridge();
+  const toolEventSink = createToolEventSink();
+  const permissionMode = createPermissionModeContext("default");
+  const sessionGrants = createSessionGrants();
+  let setupRef: Awaited<ReturnType<typeof testRender>> | undefined;
+  const setup = await testRender(
+    <TuiApp
+      bridge={bridge}
+      askBridge={askBridge}
+      toolEventSink={toolEventSink}
+      cwd="/tmp/proj"
+      dataDir={dataDir}
+      permissionMode={permissionMode}
+      sessionGrants={sessionGrants}
+      onQuit={() => {
+        if (setupRef && !setupRef.renderer.isDestroyed)
+          setupRef.renderer.destroy();
+      }}
+    />,
+    {
+      width: COLS,
+      height: ROWS,
+      exitOnCtrlC: false,
+      consoleMode: "disabled",
+      // T8：Shift+Enter 需携带 shift 修饰 —— 走 kitty 协议（encodeKittySequence
+      // 会编码 [13;2u = shift+return）；legacy 模式 shift 修饰丢失。
+      kittyKeyboard: true,
+    }
+  );
+  setupRef = setup;
+  await new Promise((r) => setTimeout(r, 500));
+  await setup.waitForVisualIdle();
+  await setup.waitForVisualIdle();
+  return { setup, bridge };
+}
+
+/** T8 多行输入专用 typeText：不走「/」预热（会触发 slash 候选），直接逐字符。 */
+async function typeMultilineText(
+  setup: Awaited<ReturnType<typeof testRender>>,
+  text: string
+): Promise<void> {
+  for (const ch of text) {
+    setup.mockInput.pressKey(ch);
+    await new Promise((r) => setTimeout(r, 30));
+  }
+  await new Promise((r) => setTimeout(r, 100));
+  await setup.renderOnce();
+}
+
 /** 完整 mount + 含 thinking 块的一轮 turn：供 Ctrl+O toggle 可见态断言。 */
 async function renderAppWithThinking() {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-kbd-"));
@@ -422,5 +479,38 @@ test("bracketed paste 不双写：粘贴文本只出现一次", async () => {
   const frame = setup.captureCharFrame();
   expect(frame).toContain(text);
   expect(frame).not.toContain(text + text);
+  await setup.renderer.destroy();
+});
+
+test("T8 Shift+Enter：换行不提交，输入框保留两行文本", async () => {
+  const { setup } = await renderMultilineApp();
+  await typeMultilineText(setup, "第一行");
+  setup.mockInput.pressEnter({ shift: true });
+  await settle(setup);
+  await typeMultilineText(setup, "第二行");
+  // 未提交：帧里两行文本仍可见（Shift+Enter 只换行不提交）。
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("第一行");
+  expect(frame).toContain("第二行");
+  await setup.renderer.destroy();
+});
+
+test("T8 Enter：提交多行文本 → 消息落盘含换行", async () => {
+  const { setup, bridge } = await renderMultilineApp();
+  await typeMultilineText(setup, "第一行");
+  setup.mockInput.pressEnter({ shift: true });
+  await settle(setup);
+  await typeMultilineText(setup, "第二行");
+  setup.mockInput.pressEnter();
+  // 等 turn 落盘 → 会话 summary 含换行分隔的两行文本。
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+    await setup.renderOnce();
+    if (bridge.inflight.ids().size === 0) break;
+  }
+  const list = await bridge.listSessions();
+  expect(list.length).toBe(1);
+  expect(list[0]!.summary).toBe("第一行\n第二行");
   await setup.renderer.destroy();
 });

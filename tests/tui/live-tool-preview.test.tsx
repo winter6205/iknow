@@ -7,11 +7,18 @@
  *  - 完成态：摘要行 + 统一 diff 预览（hunk 头 + 行号）；
  *  - 运行态 → 完成态切换：reducer 事件驱动，帧从 `[运行中]` 变为摘要 + diff；
  *  - 行账 parity：渲染行数 === liveToolPreviewRows。
+ *
+ * T5 (tui-render-optimization)：tool_input_delta 增量消费 —
+ *  - reducer 累积 partialJson 到 running 条目 partialInput；
+ *  - running 渲染 `[运行中] bash · <partial 摘要>`（parse 成功走
+ *    summarizeToolCall，不完整 JSON 原样截断显示）；
+ *  - post_tool_use 完成用完整 input 覆盖并清除 partialInput。
  */
 import { describe, expect, test } from "bun:test";
 import { useState } from "react";
 import { useKeyboard } from "@opentui/react";
 import { testRender } from "@opentui/react/test-utils";
+import { visualWidth } from "../../src/tui/tool-summary.js";
 import {
   liveToolPreviewBox,
   liveToolPreviewRows,
@@ -171,6 +178,195 @@ describe("运行态 → 完成态切换（reducer 驱动）", () => {
     );
     expect(frame).not.toContain("[运行中]");
     expect(frame).toContain("+hello");
+    await setup.renderer.destroy();
+  });
+});
+
+describe("T5: tool_input_delta 增量累积（reducer）", () => {
+  test("partial 拼接累积到 running 条目 partialInput（顺序保留）", () => {
+    const started = liveToolReduce([], {
+      kind: "tool_call_start",
+      id: "tu-1",
+      name: "bash",
+    });
+    const after1 = liveToolReduce(started, {
+      kind: "tool_input_delta",
+      id: "tu-1",
+      partialJson: '{"com',
+    });
+    const after2 = liveToolReduce(after1, {
+      kind: "tool_input_delta",
+      id: "tu-1",
+      partialJson: 'mand":"ls"}',
+    });
+    expect(after2).toHaveLength(1);
+    expect(after2[0]?.status).toBe("running");
+    expect(after2[0]?.partialInput).toBe('{"command":"ls"}');
+  });
+
+  test("未匹配 id / 非 running 条目 → 忽略（defensive）", () => {
+    const started = liveToolReduce([], {
+      kind: "tool_call_start",
+      id: "tu-1",
+      name: "bash",
+    });
+    const done = liveToolReduce(started, {
+      kind: "post_tool_use",
+      id: "tu-1",
+      name: "bash",
+      input: { command: "ls" },
+      ok: true,
+    });
+    // 完成态条目收到增量 → 忽略（非 running）。
+    const afterDone = liveToolReduce(done, {
+      kind: "tool_input_delta",
+      id: "tu-1",
+      partialJson: '{"command":"ls"}',
+    });
+    expect(afterDone[0]?.partialInput).toBeUndefined();
+    // 完全未匹配的 id → 原样返回。
+    const ghost = liveToolReduce(started, {
+      kind: "tool_input_delta",
+      id: "no-such-id",
+      partialJson: "{}",
+    });
+    expect(ghost).toBe(started);
+  });
+
+  test("post_tool_use 完成 → 完整 input 覆盖并清除 partialInput", () => {
+    const started = liveToolReduce([], {
+      kind: "tool_call_start",
+      id: "tu-1",
+      name: "bash",
+    });
+    const withPartial = liveToolReduce(started, {
+      kind: "tool_input_delta",
+      id: "tu-1",
+      partialJson: '{"command":"l',
+    });
+    const done = liveToolReduce(withPartial, {
+      kind: "post_tool_use",
+      id: "tu-1",
+      name: "bash",
+      input: { command: "ls" },
+      ok: true,
+    });
+    expect(done[0]?.status).toBe("ok");
+    expect(done[0]?.input).toEqual({ command: "ls" });
+    expect(done[0]?.partialInput).toBeUndefined();
+  });
+
+  test("多个运行中条目按 id 各自累积，顺序不漂移", () => {
+    const s1 = liveToolReduce([], {
+      kind: "tool_call_start",
+      id: "tu-1",
+      name: "bash",
+    });
+    const s2 = liveToolReduce(s1, {
+      kind: "tool_call_start",
+      id: "tu-2",
+      name: "read_file",
+    });
+    // 后发的事件可属于较早的条目（按 id 配对而非 FIFO 位置）。
+    const m1 = liveToolReduce(s2, {
+      kind: "tool_input_delta",
+      id: "tu-1",
+      partialJson: '{"command":"',
+    });
+    const m2 = liveToolReduce(m1, {
+      kind: "tool_input_delta",
+      id: "tu-2",
+      partialJson: '{"path":"a',
+    });
+    expect(m2.map((r) => r.id)).toEqual(["tu-1", "tu-2"]);
+    expect(m2[0]?.partialInput).toBe('{"command":"');
+    expect(m2[1]?.partialInput).toBe('{"path":"a');
+  });
+});
+
+describe("T5: running 态 partial 摘要渲染", () => {
+  test("partial parse 成功 → `[运行中] bash · <摘要>`（含 ls）", () => {
+    const run: LiveToolRun = {
+      id: "tu-1",
+      name: "bash",
+      status: "running",
+      input: undefined,
+      partialInput: '{"command":"ls"}',
+    };
+    const rows = liveToolPreviewTextLines(run, 80);
+    expect(rows[0]).toContain("[运行中] bash");
+    expect(rows[0]).toContain("ls");
+    expect(rows[0]).not.toContain("[运行中] bash · {"); // parse 成功走摘要
+  });
+
+  test('partial 不完整 JSON → 原样截断显示（含 `{"co`）', () => {
+    const run: LiveToolRun = {
+      id: "tu-1",
+      name: "bash",
+      status: "running",
+      input: undefined,
+      partialInput: '{"co',
+    };
+    const rows = liveToolPreviewTextLines(run, 80);
+    expect(rows[0]).toContain('{"co');
+  });
+
+  test("partialInput 空 / undefined → 保持 `[运行中] name` 基础行", () => {
+    const empty: LiveToolRun = {
+      id: "tu-1",
+      name: "bash",
+      status: "running",
+      input: undefined,
+      partialInput: "",
+    };
+    expect(liveToolPreviewTextLines(empty, 80)[0]).toBe("[运行中] bash");
+    const none: LiveToolRun = {
+      id: "tu-2",
+      name: "bash",
+      status: "running",
+      input: undefined,
+    };
+    expect(liveToolPreviewTextLines(none, 80)[0]).toBe("[运行中] bash");
+  });
+
+  test("行账 parity：partial 渲染仍是 1 行", () => {
+    const run: LiveToolRun = {
+      id: "tu-1",
+      name: "bash",
+      status: "running",
+      input: undefined,
+      partialInput: '{"command":"npm test -- --long-flag"}',
+    };
+    expect(liveToolPreviewRows(run, 80)).toBe(1);
+    expect(liveToolPreviewTextLines(run, 80).length).toBe(1);
+  });
+
+  test("窄终端：partial 摘要视觉宽度收口（单行不折）", () => {
+    const run: LiveToolRun = {
+      id: "tu-1",
+      name: "bash",
+      status: "running",
+      input: undefined,
+      partialInput: `{"command":"${"x".repeat(300)}"}`,
+    };
+    const line = liveToolPreviewTextLines(run, 30)[0] ?? "";
+    // 视觉宽度收口契约：完整行（含 [运行中] 前缀 + 分隔符）≤ 终端列宽。
+    expect(line.length).toBeGreaterThan(0);
+    expect(visualWidth(line)).toBeLessThanOrEqual(30);
+  });
+
+  test("box 渲染：partial 出现在 liveToolPreviewBox 帧", async () => {
+    const run: LiveToolRun = {
+      id: "tu-1",
+      name: "bash",
+      status: "running",
+      input: undefined,
+      partialInput: '{"command":"git status"}',
+    };
+    const setup = await renderBox(run, 80);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("[运行中] bash");
+    expect(frame).toContain("git status");
     await setup.renderer.destroy();
   });
 });
