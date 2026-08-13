@@ -269,8 +269,16 @@ export interface TuiAppProps {
     readonly effort: ThinkingEffortWire;
   };
   /** 当前模型名（ContextBar 前置展示）。缺省 "" → 不渲染前缀 model 段
-   *  （测试兼容）。product 路径由 run.tsx 传 bundle.env.llm.model。 */
+   *  （测试兼容）。product 路径由 run.tsx 传 env.llm.model。 */
   readonly model?: string;
+  /**
+   * settings-hot-reload（T4）:env 版本递增 counter。run.tsx 在 env reload
+   * 成功后递增并重渲染本组件；本组件以 [envVersion] useEffect 把新的
+   * model / defaultThinking 基线同步进内部 state（ContextBar model 显示 +
+   * thinkingEnabled / thinkingEffort 基线），实现文件级热更新的显示层刷新。
+   * 缺省 0 → 首次 mount 无副作用（基线由 props 初值决定，行为零变化）。
+   */
+  readonly envVersion?: number;
 }
 
 interface Notice {
@@ -316,6 +324,22 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffortWire>(
     () => props.defaultThinking?.effort ?? ""
   );
+  // settings-hot-reload（T4）:当前模型名（ContextBar 前置展示）。初始 = props.model；
+  // env reload 后经 [envVersion] useEffect 同步（不直接改 props.model 以免
+  // 跨 env 版本串态）。
+  const [modelName, setModelName] = useState<string | undefined>(
+    () => props.model
+  );
+  // settings-hot-reload（T4）:envVersion 变化 → 把新 env 的 model / thinking
+  // 基线同步进内部 state（ContextBar model + thinkingEnabled / thinkingEffort
+  // 基线刷新）。用户 /thinking /effort 的手动覆盖会被 env reload 复位到新基线
+  // （计划决策：settings 是运行时配置的事实源，env 变化即覆盖）。
+  const envVersion = props.envVersion ?? 0;
+  useEffect(() => {
+    setModelName(props.model);
+    setThinkingEnabled(props.defaultThinking?.mode === "adaptive");
+    setThinkingEffort(props.defaultThinking?.effort ?? "");
+  }, [envVersion]); // eslint-disable-line react-hooks/exhaustive-deps
   // ── thinking-picker 面板态（/thinking /effort 打开；null = 未打开）────
   // design-25 picker（用户定案双面板版）：/thinking /effort 不再立即生效 +
   // notice，改为弹出浮层面板。Enter 固定（面板保持打开）、Esc 保存退出（写入
@@ -1563,7 +1587,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             running={active.runState === "running-fg"}
             cols={cols}
             activeToolName={activeToolName}
-            model={props.model}
+            model={modelName}
             effortLabel={
               thinkingEnabled ? formatEffortLabel(thinkingEffort) : "off"
             }

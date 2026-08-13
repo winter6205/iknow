@@ -66,6 +66,7 @@ npm test          # vitest：unit + harness + integration
 **LLM 客户端**: 默认流式臂（`IKNOW_LLM_STREAM` 值域 `on | off`，默认 `on`，env.ts SSOT），`off` 回退非流式臂；原生 SSE 事件不出 adapter 边界，host 侧消费 `HarnessStreamEvent`。  
 **LLM key / model**: 配置收敛到 `~/.iknow/settings.json`（user）+ `<cwd>/.iknow/settings.json`（project over user，ADR-0015 settings-model-extension）。`settings.llm.model` 字面值 = 模型路由 ID 唯一来源（缺失 fail-fast）；`settings.llm.apiKey` 字面或 `${VAR}` 占位符（loader 经 `expandPlaceholders` 从 process.env / .env.local / .env 解析）。`IKNOW_LLM_API_KEY_ENV` / `IKNOW_LLM_MODEL` 已退役（不再读取）；`IKNOW_LLM_BASE_URL` 仍读（provider/baseUrl 是 9router 项目栈决策）。`models` 200 ≠ chat 必通；探针 `scripts/i4-probe-nine-endpoints.ts`。  
 **Secret 处理（#406）**: 默认 `secrets.mode = "roundtrip"`，用户贴 key 自动占位符化（`<<<SECRET_N>>>`），bash 还原层在 spawn 前回填真值；`mode = "block"` 显式保留 #126 deny-only 旧行为。
+**Settings 热更新**: `~/.iknow/settings.json` 或 `<cwd>/.iknow/settings.json` 改动**免重启生效**（fs.watch 100ms debounce → 下一轮 postMessage 用新 env；reload 失败保留旧 env）。运行时 `/thinking` `/effort` 面板是 in-memory override，不写回 settings。
 **Git**: 无用户明确 `push` 授权则不执行。
 
 ### UI 调试

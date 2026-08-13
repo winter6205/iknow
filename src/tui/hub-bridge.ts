@@ -29,7 +29,7 @@ import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { TokenUsage } from "../harness/model-adapter/types.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
-import type { LlmEnv } from "../config/env.js";
+import type { IknowEnv, LlmEnv } from "../config/env.js";
 
 /**
  * T3: TUI contextWindow 显示配置默认值（与 loop-engine.ts:152 的
@@ -140,6 +140,15 @@ export interface CreateTuiBridgeOptions {
   /** T2: LLM env 覆盖源，透传给 SessionHub（override 路径重建 adapter 时用，
    *  不回退 process.env）。与 SessionHub 构造 opts 的 overrideEnv 同形。 */
   readonly overrideEnv?: { readonly llm: LlmEnv };
+  /**
+   * settings-hot-reload（T3）:env 源，透传给 SessionHub.envProvider。
+   * T4 由 run.tsx 注入 EnvLoader.get（首次 lazy load + 缓存命中）。
+   * 缺省 → hub 内部 loadIknowEnv（行为零变化）。
+   */
+  readonly envProvider?: () => IknowEnv;
+  /** settings-hot-reload（T3）:env 变化回调，透传给 SessionHub.onEnvChange。
+   *  T4 由 run.tsx 注入 EnvLoader.subscribe 链路，驱动 TUI 显示层刷新。 */
+  readonly onEnvChange?: (env: IknowEnv) => void;
 }
 
 export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
@@ -155,6 +164,9 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     // T2: LLM env 覆盖源 —— TUI 启动期校验过的 env 透到 override 路径，
     // 避免 override 重建 adapter 时回退到 process.env（reviewer blocker）。
     ...(opts.overrideEnv ? { overrideEnv: opts.overrideEnv } : {}),
+    // settings-hot-reload（T3）:env 源 + 变化回调透传（缺省 → 行为零变化）。
+    ...(opts.envProvider ? { envProvider: opts.envProvider } : {}),
+    ...(opts.onEnvChange ? { onEnvChange: opts.onEnvChange } : {}),
   });
 
   const bridge: TuiBridge = {

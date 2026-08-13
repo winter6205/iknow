@@ -60,6 +60,44 @@ IKNOW_LLM_STREAM=on            # 流式臂开关 on|off，默认 on
   - 不写 → `undefined`，消费点守卫抛「LLM mode needs API key. Set settings.llm.apiKey (literal or ${VAR} placeholder)...」。
 - **`fallback`**（可选）：模型 fallback 路由 ID 数组，用户自配，代码不预置。
 
+### 3.1 `settings.json` schema 全字段参考
+
+`settings.json` 实际只承载 **`llm` 层**，且只接受下表中的字段（`parseLlm` 逐字段校验，非法值丢弃不抛错）。字段来自 `src/config/settings.ts` 的 `IknowSettingsLlm`（SSOT，勿以本表为准而以代码为准）。
+
+| 字段路径                       | 类型                                              | 默认（未配）        | 说明                                                                               |
+| ------------------------------ | ------------------------------------------------- | ------------------- | ---------------------------------------------------------------------------------- |
+| `llm.model`                    | string（trim 非空）                               | **fail-fast 抛错**  | 模型路由 ID 字面值，唯一来源，**必填**。                                           |
+| `llm.apiKey`                   | string（字面或 `${VAR}` / `$VAR`）                | `undefined`         | key 来源；消费点守卫抛「LLM mode needs API key.」。                                |
+| `llm.fallback`                 | string[]（非空）                                  | `[]`                | fallback 路由 ID 列表，用户自配。                                                  |
+| `llm.thinking`                 | `"off" \| "adaptive"`                             | `"off"`             | 缺省思考开关；`IKNOW_LLM_THINKING` env 显式设置时覆盖它（env > settings > 默认）。 |
+| `llm.thinkingEffort`           | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | `""`（不发）        | 缺省 effort；`IKNOW_LLM_THINKING_EFFORT` env 显式设置时覆盖它。                    |
+| `llm.maxTurns`                 | number（≥1 整数）                                 | `undefined`（无限） | 单次会话最大循环轮数；`IKNOW_LLM_MAX_TURNS` env 覆盖。                             |
+| `llm.compress.contextWindow`   | number（>0 有限）                                 | `200000`            | 模型上下文窗口；`IKNOW_MODEL_CONTEXT_WINDOW` env 覆盖。                            |
+| `llm.compress.thresholdTokens` | number（>0 有限）                                 | `undefined`（推导） | proactive auto-compact 阈值；`IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS` env 覆盖。      |
+
+**带默认值的字段都是可选**：不写 `thinking` / `thinkingEffort` 时，thinking 默认 `off`、effort 默认不发 —— 这不是「没读到」，而是「你用了默认」。
+
+**注意**：以下字段 **不在 settings.json 承载范围**，仍走 env（`process.env > .env.local > .env > 代码默认`），写进 settings.json 会被 `parseLlm` 忽略：
+
+- `baseUrl`（`IKNOW_LLM_BASE_URL`）、`maxOutputTokens`（`IKNOW_LLM_MAX_OUTPUT_TOKENS`）、`timeoutMs`（`IKNOW_LLM_TIMEOUT_MS`）、`temperature`（`IKNOW_LLM_TEMPERATURE`）、`stream`（`IKNOW_LLM_STREAM`）
+- `chat.showThinking`（`IKNOW_CHAT_SHOW_THINKING`）、`web.searchUrl` / `web.proxy`（`IKNOW_WEB_SEARCH_URL` / `IKNOW_WEB_PROXY`）、`mcp.connectTimeoutMs`（`IKNOW_MCP_CONNECT_TIMEOUT_MS`）
+
+#### 完整示例（含思考默认档）
+
+```json
+{
+  "llm": {
+    "model": "ocg/deepseek-v4-flash",
+    "apiKey": "${ANTHROPIC_AUTH_TOKEN}",
+    "fallback": ["deepseek-flash-combo"],
+    "thinking": "adaptive",
+    "thinkingEffort": "medium"
+  }
+}
+```
+
+> **关于「热更新」**：settings.json 是**热更新生效**的 —— `src/config/settings-watch.ts`（`fs.watch` + `fs.watchFile`，100ms debounce）监听 `~/.iknow/settings.json` 与 `<cwd>/.iknow/settings.json`，改动后下一轮 postMessage 即以新 env 调 LLM（adapter / thinking / model / apiKey / fallback 全部生效）。reload 失败（坏 JSON / model 缺失 / apiKey 解析失败）→ **保留旧 env**（不崩进程，默认写 stderr `[settings-hot-reload] reload failed: ...`）。TUI chat 路径已接入：ContextBar 的 model 名与 thinking 基线实时刷新。`.env.local` / `.env` 同链路热重读（`loadIknowEnv` 每次 reload 重读）。运行时 `/thinking` / `/effort` 面板的改动是**进程内 override**（in-memory，不写回 settings.json，也不重读），重启后回到 settings.json（或默认）值。
+
 ---
 
 ## 四、三种典型配法

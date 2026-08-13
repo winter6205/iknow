@@ -41,7 +41,10 @@ jobs:
         # 影响 CI，不删测试，sandbox 在本地验证。
         #   bwrap 物理执行类（无 user-namespace 的 runner 起不来）：
         #     bash-sandbox / demo / interrupt-routing / bash / grep /
-        #     mcp-chain / skill-mcp-acceptance / build-engine / ensure-deps
+        #     mcp-chain / skill-mcp-acceptance / build-engine / ensure-deps /
+        #     secret-roundtrip/e2e（chat × roundtrip 用例 createBashTool
+        #     真实 spawn echo 还原占位符；#406 合并时遗漏，CI 实证
+        #     bashResult.code 1!==0）
         #   装配依赖 bwrap 类（bwrap 缺失时 requireBwrap fail-loud，
         #   装了也仅能装配不能执行）：
         #     permission / registry / system-injection / max-turns-serve /
@@ -67,4 +70,5 @@ jobs:
             --exclude tests/harness/build-engine.test.ts \
             --exclude tests/session-api/ensure-deps-aci-tools.test.ts \
             --exclude tests/tui/banner-scroll-fixes.test.tsx \
-            --exclude tests/tui/logo-persists.test.tsx
+            --exclude tests/tui/logo-persists.test.tsx \
+            --exclude tests/harness/secret-roundtrip/e2e.test.ts

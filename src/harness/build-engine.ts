@@ -112,6 +112,35 @@ export type BuildEngineOpts = {
   readonly onHookError?: (e: HookErrorEvent) => void;
 };
 
+/**
+ * settings-hot-reload（T3）：从 env 纯函数构造 Anthropic adapter —— 无 I/O、
+ * 无装配副作用。build-engine 整条装配链内部调用它（保持既有行为不变）；
+ * hub 的 `reloadFromEnv` 也调用它做 adapter 最小面热重建（不重跑
+ * buildHarnessEngine / MCP / subagent / skill）。
+ *
+ * 返回 `{ client, adapter }`：client 保留给调用方统一关闭句柄
+ * （SDK 0.115 无 close API，仅作 APIKey/BaseURL 装载）。
+ */
+export function createAdapterFromEnv(env: IknowEnv): {
+  readonly client: Anthropic;
+  readonly adapter: LoopEngineDeps["adapter"];
+} {
+  const client = new Anthropic({
+    apiKey: env.llm.apiKey,
+    baseURL: env.llm.baseUrl,
+  });
+  const adapter = createRealAnthropicAdapter({
+    client,
+    model: env.llm.model,
+    maxTokens: env.llm.maxOutputTokens,
+    temperature: env.llm.temperature,
+    // SSOT env→adapter params (#151/#156) and stream arm (#179/#147).
+    thinking: buildThinkingParams(env.llm),
+    stream: env.llm.stream === "on",
+  });
+  return { client, adapter };
+}
+
 export type BuiltEngine = {
   readonly deps: LoopEngineDeps;
   readonly engine: ReturnType<typeof createLoopEngine>;
@@ -164,19 +193,10 @@ export async function buildHarnessEngine(
       "ask_inlet_missing: buildHarnessEngine requires an AskUser implementation (chat/ask/serve must inject one)"
     );
   }
-  const client = new Anthropic({
-    apiKey: env.llm.apiKey,
-    baseURL: env.llm.baseUrl,
-  });
-  const adapter = createRealAnthropicAdapter({
-    client,
-    model: env.llm.model,
-    maxTokens: env.llm.maxOutputTokens,
-    temperature: env.llm.temperature,
-    // SSOT env→adapter params (#151/#156) and stream arm (#179/#147).
-    thinking: buildThinkingParams(env.llm),
-    stream: env.llm.stream === "on",
-  });
+  // settings-hot-reload（T3）：adapter 构造收敛到 createAdapterFromEnv 纯函数
+  // （build-engine 与 hub.reloadFromEnv 共用，避免漂移）。apiKey 守卫在
+  // createAdapterFromEnv 之前（apiKey 缺失时 fail-fast 文案不变）。
+  const { adapter } = createAdapterFromEnv(env);
   // ACI 8 件工具集 (#141-T11 + web_fetch/web_search Web 类扩展,对齐 ADR-0004)。
   // 沙箱根 = opts.sandboxRoot ?? process.cwd()。
   //

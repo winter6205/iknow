@@ -497,3 +497,81 @@ describe("hub-bridge overrideEnv 透传（T2）", () => {
     expect(inflight.ids().size).toBe(0);
   });
 });
+// -- settings-hot-reload（T4）:envProvider + onEnvChange 接通 ---------------------------------
+
+describe("hub-bridge envProvider / onEnvChange 透传（T4）", () => {
+  let baseDir: string;
+
+  beforeEach(async () => {
+    baseDir = await mkdtemp(join(tmpdir(), "iknow-tui-bridge-envprovider-"));
+  });
+  afterEach(async () => {
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
+  test("bridge 把 envProvider 透给 hub：reloadFromEnv 用 envProvider() 重建 adapter", async () => {
+    const cap = await startLlmCapture(MINIMAL_SDK_MESSAGE);
+    try {
+      let currentModel = "model-t4-1";
+      const bridge = createTuiBridge({
+        dataDir: baseDir,
+        // deps 必须注入（SessionHub 构造守卫：无 askUser 时必须有 deps）；
+        // 首次 postMessage 用注入 stub（不联网），reloadFromEnv 后才走 envProvider
+        // 重建真实 adapter —— 这正是 T4 热更新的最小面通路。
+        deps: makeDeps([]),
+        inflight: createInflightRegistry(),
+        envProvider: () =>
+          ({
+            llm: makeTestLlmEnv({
+              baseUrl: cap.origin,
+              model: currentModel,
+              apiKey: "test-key",
+            }).llm,
+          }) as import("../../src/config/env.js").IknowEnv,
+        onEnvChange: () => {},
+      });
+      const id = await bridge.ensureSession(undefined);
+      // reloadFromEnv 先用当前 envProvider 建 adapter（model-t4-1）→ capture。
+      await bridge.hub.reloadFromEnv();
+      await bridge.postMessage({ conversationId: id, text: "hi" });
+      expect(cap.bodies.length).toBe(1);
+      // 改 model → reloadFromEnv → 下次 postMessage wire model 变化。
+      currentModel = "model-t4-2";
+      await bridge.hub.reloadFromEnv();
+      await bridge.postMessage({ conversationId: id, text: "hi again" });
+      expect(cap.bodies.length).toBe(2);
+      const models = cap.bodies.map((b) => (b as { model?: string }).model);
+      expect(models[0]).toBe("model-t4-1");
+      expect(models[1]).toBe("model-t4-2");
+    } finally {
+      await cap.close();
+    }
+  });
+
+  test("bridge 把 onEnvChange 透给 hub：reloadFromEnv 成功后触发一次", async () => {
+    const cap = await startLlmCapture(MINIMAL_SDK_MESSAGE);
+    try {
+      let currentModel = "model-t4-a";
+      const received: string[] = [];
+      const bridge = createTuiBridge({
+        dataDir: baseDir,
+        deps: makeDeps([]),
+        inflight: createInflightRegistry(),
+        envProvider: () =>
+          ({
+            llm: makeTestLlmEnv({
+              baseUrl: cap.origin,
+              model: currentModel,
+              apiKey: "test-key",
+            }).llm,
+          }) as import("../../src/config/env.js").IknowEnv,
+        onEnvChange: (env) => received.push(env.llm.model),
+      });
+      currentModel = "model-t4-b";
+      await bridge.hub.reloadFromEnv();
+      expect(received).toEqual(["model-t4-b"]);
+    } finally {
+      await cap.close();
+    }
+  });
+});

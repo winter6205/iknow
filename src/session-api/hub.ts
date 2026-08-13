@@ -19,7 +19,10 @@ import {
   type LoopEngineDeps,
   type RunResult,
 } from "../harness/index.js";
-import { buildHarnessEngine } from "../harness/build-engine.js";
+import {
+  buildHarnessEngine,
+  createAdapterFromEnv,
+} from "../harness/build-engine.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { getVersion } from "../cli/usage.js"; // SC-W 6/7: agentVersion 注入(与 session-api/http.ts 同向 import,无循环)
@@ -36,8 +39,9 @@ import {
   createOutputMask,
   currentSecretValues,
 } from "../harness/sandbox/index.js";
-import { loadIknowEnv, type LlmEnv } from "../config/env.js";
+import { loadIknowEnv, type IknowEnv, type LlmEnv } from "../config/env.js";
 import { ValidationError } from "../shared/errors.js";
+import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import { MaxTurnsExceeded } from "../harness/errors.js";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -76,6 +80,29 @@ function safeParse(s: string): unknown {
   } catch {
     return s;
   }
+}
+
+/**
+ * settings-hot-reload（reviewer major）:热重建去重的关键字段值比较。
+ *
+ * EnvLoader.get() 每次 reload 都返回**新对象**（loadIknowEnv 每次全新构造），
+ * 对象身份比较不可用。判定「settings 文件 touch 但内容没变」必须以字段值比较：
+ * model / apiKey / fallback / thinking / thinkingEffort 是 adapter 重建的全部
+ * 输入面（createAdapterFromEnv 消费 llm 的 model/apiKey/baseUrl + buildThinkingParams
+ * 消费 thinking/thinkingEffort；maxOutputTokens/temperature/stream 也是 adapter
+ * 参数但本期计划只圈定上述五个为热更新面 —— 保守取 plan 明确字段）。
+ * fallback 为数组，逐元素比较（顺序敏感，与 adapter 无关但反映配置变更）。
+ */
+function sameHotReloadKeyFields(a: LlmEnv, b: LlmEnv): boolean {
+  if (a.model !== b.model) return false;
+  if (a.apiKey !== b.apiKey) return false;
+  if (a.thinking !== b.thinking) return false;
+  if (a.thinkingEffort !== b.thinkingEffort) return false;
+  if (a.fallback.length !== b.fallback.length) return false;
+  for (let i = 0; i < a.fallback.length; i++) {
+    if (a.fallback[i] !== b.fallback[i]) return false;
+  }
+  return true;
 }
 
 // -- error mapping (裁决#10: pure function, http.ts T5 consumes) ---------------
@@ -283,6 +310,17 @@ export type SessionHubOptions = {
    * 无 drain,行为零变化。
    */
   readonly subagentManager?: SubAgentManager;
+  /**
+   * settings-hot-reload（T3）:env 源 — 构造 opts 可选。传入后 ensureDeps /
+   * reloadFromEnv 用它拿 env（替代内部 loadIknowEnv()）。T2 EnvLoader.get 是
+   * 天然实现。缺省 → 行为零变化（仍内部 loadIknowEnv）。向后兼容：既有
+   * overrideEnv / deps 注入路径均不受影响。
+   */
+  readonly envProvider?: () => IknowEnv;
+  /** settings-hot-reload（T3）:env 变化回调 — 构造 opts 可选。hub 在
+   *  reloadFromEnv 成功替换 adapter 后调用一次（新 env 为参数）。首次
+   *  ensureDeps 不算「变化」→ 不触发。T4 用它驱动 TUI 显示层刷新。 */
+  readonly onEnvChange?: (env: IknowEnv) => void;
 };
 
 // -- stop-reason persistence decision (T1: replaced DROP_REASONS set) ---------
@@ -327,6 +365,19 @@ export class SessionHub {
   private subagentManager: SubAgentManager | undefined;
   /** #356 High#4: built.shutdown 缓存（组合句柄；ensureDeps 懒取，hub.shutdown 触发）。 */
   private cachedShutdown: (() => Promise<void>) | undefined;
+  /**
+   * settings-hot-reload（T3）:env 源（缺省 → ensureDeps 内部 loadIknowEnv）。
+   * reloadFromEnv 用它拿新 env 重建 adapter；onEnvChange 在成功替换后触发。
+   */
+  private readonly envProvider: (() => IknowEnv) | undefined;
+  /** settings-hot-reload（T3）:env 变化回调（reloadFromEnv 成功后触发一次）。 */
+  private readonly onEnvChange: ((env: IknowEnv) => void) | undefined;
+  /**
+   * settings-hot-reload（reviewer major）:上次 reloadFromEnv 重建 adapter 时用的
+   * env 快照（关键字段值比较去重基准）。EnvLoader.get() 每次返回新对象，对象身份
+   * 比较不可用，必须以它做「touch 未变内容」判定。首次成功重建后赋值。
+   */
+  private lastReloadedEnv: IknowEnv | undefined;
   /** Per-conversation serialization (spec A15). */
   private readonly inflight = new Map<string, Promise<void>>();
 
@@ -347,6 +398,8 @@ export class SessionHub {
     this.sandboxRoot = opts.sandboxRoot;
     this.surface = opts.surface;
     this.subagentManager = opts.subagentManager;
+    this.envProvider = opts.envProvider;
+    this.onEnvChange = opts.onEnvChange;
     this.defaults = {
       jsonMode: opts.defaultJsonMode ?? false,
     };
@@ -372,6 +425,45 @@ export class SessionHub {
    */
   async shutdown(): Promise<void> {
     await this.cachedShutdown?.();
+  }
+
+  /**
+   * settings-hot-reload（T3）:env 源热重建 —— 用最新 env（envProvider()）走
+   * createAdapterFromEnv 重建 adapter 替换 `cachedDeps.adapter`。**不重跑**
+   * buildHarnessEngine 整条装配链（MCP / subagent / skill 都跳过，见
+   * plans/settings-hot-reload.md 决策 4）。registry / executor / maxTurns /
+   * timeoutMs 等字段复用旧 cachedDeps。
+   *
+   * 语义：
+   *   - env 关键字段（model / apiKey / fallback / thinking / thinkingEffort）
+   *     与上次重建时**值相同** → 视为「touch 未变内容」，跳过 adapter 重建且
+   *     不触发 onEnvChange（reviewer major：settings 文件 touch 但内容没变 →
+   *     不重建 adapter、不通知显示层）。注意 EnvLoader.get() 每次返回**新对象**，
+   *     对象身份比较不可用，必须做关键字段值比较。
+   *   - 成功（值变化）→ 替换 adapter，且以新 env 触发 onEnvChange（若注册）一次。
+   *   - envProvider 未注入 / cachedDeps 尚未构建（首次 postMessage 前）→
+   *     no-op（行为零变化）。
+   *   - apiKey 缺失 / 解析失败（settings `${VAR}` 解析不到 → apiKey=undefined）
+   *     → 抛 ValidationError（对齐 buildHarnessEngine 守卫），cachedDeps 保持
+   *     旧 adapter（reviewer major：降级保留旧 env，不在 SDK 层才炸）。
+   *   - envProvider() 抛错（坏 JSON / model 缺失）→ 抛错且 cachedDeps 不动，
+   *     不崩进程 —— 由调用方（T4 EnvLoader.subscribe 链路）负责降级通知。
+   */
+  async reloadFromEnv(): Promise<void> {
+    if (!this.envProvider) return;
+    if (!this.cachedDeps) return;
+    const env = this.envProvider();
+    if (!env.llm.apiKey) {
+      throw new ValidationError(LLM_API_KEY_MISSING_MESSAGE);
+    }
+    // 关键字段值比较去重（model / apiKey / fallback / thinking / thinkingEffort）。
+    // 任一变化 → 重建 + 通知；全同 → 跳过（touch 未变内容不触发）。
+    const prev = this.lastReloadedEnv;
+    if (prev && sameHotReloadKeyFields(prev.llm, env.llm)) return;
+    const { adapter } = createAdapterFromEnv(env);
+    this.cachedDeps = { ...this.cachedDeps, adapter };
+    this.lastReloadedEnv = env;
+    this.onEnvChange?.(env);
   }
 
   /**
@@ -816,7 +908,9 @@ export class SessionHub {
         "ask_inlet_missing: SessionHub lazy deps require AskUser (#162)"
       );
     }
-    const env = loadIknowEnv();
+    // settings-hot-reload（T3）:envProvider 注入后用它拿 env（替代内部
+    // loadIknowEnv()）。缺省 → 既有行为零变化（仍内部 loadIknowEnv）。
+    const env = this.envProvider ? this.envProvider() : loadIknowEnv();
     // Delegate validation and assembly to the SSOT. `buildHarnessEngine`
     // validates apiKey/askUser through the shared fail-loud path, preserving
     // the same ValidationError → HTTP 400 mapping for serve callers.
