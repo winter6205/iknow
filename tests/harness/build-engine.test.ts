@@ -680,3 +680,75 @@ describe("buildHarnessEngine — #126 T5 secrets guard 装配", () => {
     if (built.shutdown) await built.shutdown();
   });
 });
+
+// ---------------------------------------------------------------------------
+// #406 T2: secret registry 装配 — deps.secretRegistry 暴露
+// ---------------------------------------------------------------------------
+describe("buildHarnessEngine — #406 T2 secret registry 装配", () => {
+  it("默认 settings：deps.secretRegistry 是 SecretRegistry，构造期空表 + 默认 7 patterns", async () => {
+    const built = await buildHarnessEngine({
+      env: makeEnv("sk-test-t2-sr-1"),
+      askUser: createNoAskUser(),
+    });
+
+    // 类型已证明 SecretRegistry；运行期断言对象在场 + 关键契约
+    expect(built.deps.secretRegistry).toBeDefined();
+    expect(typeof built.deps.secretRegistry!.register).toBe("function");
+    expect(typeof built.deps.secretRegistry!.resolve).toBe("function");
+    // 构造期空表：未跑任何 run() 前 size === 0
+    expect(built.deps.secretRegistry!.size).toBe(0);
+    // 默认 patterns = DEFAULT_SECRET_PATTERNS 7 条
+    expect(built.deps.secretRegistry!.patterns.length).toBe(7);
+
+    if (built.shutdown) await built.shutdown();
+  });
+
+  it("settings.secrets.patterns 自定义追加 → registry.patterns = DEFAULT 7 + extras", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t2-sr-extras-"));
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t2-sr-2"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        userHome: join(root, "home"),
+        cwd: root,
+        settings: {
+          secrets: { patterns: ["CUSTOM_TOKEN_[A-Z0-9]{6}"] },
+        },
+      });
+
+      expect(built.deps.secretRegistry).toBeDefined();
+      // 自定义 extras 追加在 DEFAULT 之后 → 8 条，末尾 source 是自定义 pattern
+      expect(built.deps.secretRegistry!.patterns.length).toBe(8);
+      expect(built.deps.secretRegistry!.patterns[7]!.source).toBe(
+        "CUSTOM_TOKEN_[A-Z0-9]{6}"
+      );
+
+      if (built.shutdown) await built.shutdown();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("settings 不含 secrets → registry 仍构造（DEFAULT 7 条，不抛）", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t2-sr-nosec-"));
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t2-sr-3"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        userHome: join(root, "home"),
+        cwd: root,
+        settings: { llm: { model: "test-model", apiKey: "sk-dummy" } },
+      });
+
+      expect(built.deps.secretRegistry).toBeDefined();
+      expect(built.deps.secretRegistry!.patterns.length).toBe(7);
+      expect(built.deps.secretRegistry!.size).toBe(0);
+
+      if (built.shutdown) await built.shutdown();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});

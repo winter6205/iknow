@@ -32,6 +32,11 @@ import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createStubSignalTool } from "../../src/harness/stubs/stub-signal-tool.ts";
 import { assistantResult } from "../cli/_fixtures.ts";
+import {
+  createCompiledPatterns,
+  createSecretRegistry,
+  recognize,
+} from "../../src/harness/secret-roundtrip/index.ts";
 
 function makeNative(opts: {
   readonly role: "user" | "assistant";
@@ -2537,5 +2542,200 @@ describe("loop engine #224 W1: promptTools injection seam", () => {
     );
     // 与 registry.list() 不同:验证注入确被消费,而非回退全量。
     assert.notDeepEqual(capturedTools[0], reg.list());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #406 T2: secret roundtrip 识别层 —— run() 用户文本进 LLM 前占位符替换
+// ---------------------------------------------------------------------------
+describe("loop engine #406 T2: secret roundtrip 识别层", () => {
+  it("T2-A1: secretRegistry 在场 → 首条 user 消息文本为占位符，明文不出现", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["ok"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const secretRegistry = createSecretRegistry();
+    const userText = "这是 sk-aaaaaaaaaaaaaaaaaaaa，帮我测";
+    const { result } = await run(userText, {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+      secretRegistry,
+    });
+    assert.equal(result.stopReason, "completed");
+    const first = result.messages[0]!;
+    assert.equal(first.role, "user");
+    const text = (first.content[0] as { type: "text"; text: string }).text;
+    assert.equal(text, "这是 <<<SECRET_1>>>，帮我测");
+    // 明文绝不出现在任何编码消息中（含 assistant 回复、tool_result 等全树）
+    for (const m of result.messages) {
+      const serialized = JSON.stringify(m);
+      assert.ok(
+        !serialized.includes("sk-aaaaaaaaaaaaaaaaaaaa"),
+        "raw secret must not appear in any encoded message"
+      );
+    }
+    // registry 恰好记录 1 条
+    assert.equal(secretRegistry.size, 1);
+    assert.equal(
+      secretRegistry.resolve("<<<SECRET_1>>>"),
+      "sk-aaaaaaaaaaaaaaaaaaaa"
+    );
+  });
+
+  it("T2-A2: 二次 run 复用同一 registry + priorMessages → 占位符原样保留，不重复注册", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const secretRegistry = createSecretRegistry();
+    const model1 = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["first"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const firstRun = await run("用 sk-aaaaaaaaaaaaaaaaaaaa 处理", {
+      adapter: model1,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+      secretRegistry,
+    });
+    assert.equal(secretRegistry.size, 1);
+    const firstUserText = (
+      firstRun.result.messages[0]!.content[0] as { type: "text"; text: string }
+    ).text;
+    assert.equal(firstUserText, "用 <<<SECRET_1>>> 处理");
+
+    // 二次 run：同一 registry + priorMessages 续传，新文本只含占位符
+    const model2 = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["second"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const secondUserText = "再用 <<<SECRET_1>>> 调用一次";
+    const secondRun = await run(
+      secondUserText,
+      {
+        adapter: model2,
+        executor: exec,
+        registry: reg,
+        maxTurns: 5,
+        secretRegistry,
+      },
+      undefined,
+      { priorMessages: firstRun.result.messages }
+    );
+    // prior 消息原样保留占位符（首轮已替换 → 一路都是占位符）
+    const priorUserText = (
+      secondRun.result.messages[0]!.content[0] as { type: "text"; text: string }
+    ).text;
+    assert.equal(priorUserText, "用 <<<SECRET_1>>> 处理");
+    // 新 user 消息 = 用户文本 verbatim（占位符形态不触发任何密钥 pattern）
+    const newUserText = (
+      secondRun.result.messages[2]!.content[0] as { type: "text"; text: string }
+    ).text;
+    assert.equal(newUserText, secondUserText);
+    // 占位符文本在 recognize 层 matched 为空（A2 去重验证）
+    assert.deepEqual(recognize(secondUserText, secretRegistry).matched, []);
+    // registry 不重复注册（size 仍 1）
+    assert.equal(secretRegistry.size, 1);
+    assert.equal(
+      secretRegistry.resolve("<<<SECRET_1>>>"),
+      "sk-aaaaaaaaaaaaaaaaaaaa"
+    );
+  });
+
+  it("T2-A3: 自定义 patterns 扩展被接线 — DEFAULT 与 extras 都在 roundtrip 中识别", async () => {
+    // API-level：createCompiledPatterns 合并 DEFAULT 7 + extras 1 = 8
+    assert.equal(createCompiledPatterns(["MY_[0-9]{6}"]).length, 8);
+    const secretRegistry = createSecretRegistry({ patterns: ["MY_[0-9]{6}"] });
+    assert.equal(secretRegistry.patterns.length, 8); // DEFAULT 7 + custom 1
+
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["ok"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const { result } = await run(
+      "MY_123456 + sk-abcdefghijklmnopqrstuvwxyz123",
+      {
+        adapter: model,
+        executor: exec,
+        registry: reg,
+        maxTurns: 5,
+        secretRegistry,
+      }
+    );
+    const text = (
+      result.messages[0]!.content[0] as { type: "text"; text: string }
+    ).text;
+    // 扫描按 pattern 序：sk-（DEFAULT[1]）先注册 → SECRET_1；MY_（extras[0]）
+    // 后注册 → SECRET_2；输出按源文本位置重排 → MY_ 在前得 SECRET_2。
+    assert.equal(text, "<<<SECRET_2>>> + <<<SECRET_1>>>");
+    assert.equal(secretRegistry.size, 2);
+    assert.equal(
+      secretRegistry.resolve("<<<SECRET_1>>>"),
+      "sk-abcdefghijklmnopqrstuvwxyz123"
+    );
+    assert.equal(secretRegistry.resolve("<<<SECRET_2>>>"), "MY_123456");
+  });
+
+  it("T2-A4: secretRegistry 缺席 → 行为 byte-identical，明文原样进消息", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["ok"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const userText = "这是 sk-aaaaaaaaaaaaaaaaaaaa，帮我测";
+    const { result } = await run(userText, {
+      adapter: model,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+      // 故意不传 secretRegistry → legacy 路径
+    });
+    const text = (
+      result.messages[0]!.content[0] as { type: "text"; text: string }
+    ).text;
+    assert.equal(text, userText); // verbatim 明文
+  });
+
+  it("T2 bonus: 占位符本身不被识别为密钥 — 模型可安全引用 <<<SECRET_N>>>", async () => {
+    const secretRegistry = createSecretRegistry();
+    secretRegistry.register("sk-aaaaaaaaaaaaaaaaaaaa");
+    const r = recognize("<<<SECRET_1>>> 再次调用", secretRegistry);
+    assert.deepEqual(r.matched, []);
+    assert.equal(r.replaced, "<<<SECRET_1>>> 再次调用");
   });
 });

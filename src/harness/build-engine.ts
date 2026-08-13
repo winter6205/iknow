@@ -42,6 +42,10 @@ import {
 } from "./permission/index.js";
 import { loadIknowSettings, type IknowSettings } from "../config/settings.js";
 import type { IknowEnv } from "../config/env.js";
+import {
+  createSecretRegistry,
+  type SecretRegistry,
+} from "./secret-roundtrip/index.js";
 import { ValidationError } from "../shared/errors.js";
 import {
   createIknowSystemResolver,
@@ -268,6 +272,13 @@ export async function buildHarnessEngine(
   //   - secrets.patterns 缺失/空 → 内置默认集;追加的自定义 pattern 构造期编译,
   //     非法正则剔除 + onHookError 告警,不毒化 guard(spec Constraints (a))。
   const settings = opts.settings ?? loadIknowSettings({ cwd });
+  // #406 T2:per-engine secret registry —— settings.secrets.patterns 驱动构造。
+  // 构造期编译 DEFAULT + extras(registry.patterns 冻结);T4 将按 mode 门控构造。
+  // 当前无条件装配:loop-engine 在 secretRegistry 在场时才做占位符替换,
+  // 缺席字段(测试缝 settings 不含 secrets)→ 空 pattern 集,行为 byte-identical。
+  const secretRegistry: SecretRegistry | undefined = createSecretRegistry({
+    patterns: settings.secrets?.patterns,
+  });
   const secretsGuard = createSecretsGuardHook({
     ...(settings.secrets ? { ...settings.secrets } : {}),
     ...(opts.onHookError ? { onHookError: opts.onHookError } : {}),
@@ -336,6 +347,9 @@ export async function buildHarnessEngine(
     adapter,
     executor,
     registry: registryTools,
+    // #406 T2:secretRegistry 无条件注入 deps(缺席字段测试缝才不出现)。
+    // loop-engine run() 在场时对用户文本做占位符替换。
+    ...(secretRegistry ? { secretRegistry } : {}),
     // plan T5-engine / ADR-0012:env 优先(CLI --max-turns 由 surface 注入);
     // undefined = 无限(默认),长程探索不被 turn 计数误杀。
     maxTurns: env.llm.maxTurns,

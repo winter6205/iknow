@@ -68,6 +68,8 @@ import {
   getAutoCompactThreshold,
   shouldAutoCompact,
 } from "./compress/index.js";
+import { recognize } from "./secret-roundtrip/index.js";
+import type { SecretRegistry } from "./secret-roundtrip/index.js";
 
 /**
  * 把任意 reason 字符串安全映射为 TraceErrorType (消除 as 强转)。
@@ -189,6 +191,18 @@ export interface LoopEngineDeps {
     readonly contextWindow: number;
     readonly thresholdTokens: number | undefined;
   };
+  /**
+   * #406 T2:per-engine secret registry。当存在时 run() 把用户文本中的
+   * 密钥值替换为 `<<<SECRET_N>>>` 占位符后再编码为第一条 user message。
+   * 缺席 → 行为与 legacy byte-identical(明文进 messages)。
+   */
+  readonly secretRegistry?: SecretRegistry;
+  /**
+   * #406 T4:secret 处理模式。"block" 关闭识别(legacy deny-only
+   * preToolUse guard 处理密钥);缺省(undefined)= "roundtrip" →
+   * secretRegistry 存在时识别生效。
+   */
+  readonly secretsMode?: "roundtrip" | "block";
 }
 
 /**
@@ -1279,10 +1293,18 @@ export async function run(
   }
 ): Promise<{ result: RunResult; trace: LoopTrace }> {
   // 020 Q2 priorMessages 续传接缝:历史前缀逐条冻结,单次运行 turnCount 仍从 0 起。
+  // #406 T2:识别层入口 —— secretsMode 非 "block" 且 secretRegistry 在场时,
+  // 先对用户文本做占位符替换再编码。占位符形态不进 registry(recognize 只扫
+  // 密钥形态),跨 turn 续传时 previous 占位符原样保留。
+  let effectiveUserText = userText;
+  if (deps.secretsMode !== "block" && deps.secretRegistry !== undefined) {
+    const { replaced } = recognize(userText, deps.secretRegistry);
+    effectiveUserText = replaced;
+  }
   let state: LoopState = {
     messages: Object.freeze([
       ...(opts?.priorMessages ?? []).map(freezeMessage),
-      freezeMessage(deps.adapter.encodeUserText(userText)),
+      freezeMessage(deps.adapter.encodeUserText(effectiveUserText)),
     ]),
     turnCount: 0,
   };
