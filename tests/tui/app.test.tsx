@@ -252,6 +252,57 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     await app.destroy();
   }, 30_000);
 
+  test("turn 结束 → mode 行右侧显示运行时长 + token 总结段", async () => {
+    const app = await mountAppAsync([
+      assistantResult({
+        texts: ["统计答复"],
+        usage: {
+          inputTokens: 100,
+          outputTokens: 1500,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+        },
+      }),
+    ]);
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    await app.typeText("你好");
+    await app.pressEnter();
+    // turn 完成 → 落盘 + runElapsed 冻结。
+    await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
+    await untilFrame(app.setup, (f) => f.includes("统计答复"), 8000, "answer");
+
+    // mode 行右侧统计段：output 1500 → `↓ 1.5k tokens`（时长可能 0s，仍必现）。
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("↓ 1.5k tokens") && f.includes("mode:"),
+      8000,
+      "run-stats"
+    );
+    await app.destroy();
+  }, 30_000);
+
+  test("turn 结束无 token → mode 行不显示统计段（无 `↓` 假数据）", async () => {
+    // stub 路径无 usage（makeDeps 默认语义）→ outputTokens 缺席；时长 <1s
+    // 冻结 0s → mode 行右侧统计段不渲染（守卫：runElapsed>0 || output>0）。
+    const app = await mountAppAsync([assistantResult({ texts: ["普通答复"] })]);
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    await app.typeText("你好");
+    await app.pressEnter();
+    await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
+    await untilFrame(app.setup, (f) => f.includes("普通答复"), 8000, "answer");
+
+    // 等一个 render 周期后断言：mode 行仍显示（不含统计段）。
+    await new Promise((r) => setTimeout(r, 1200));
+    await app.setup.renderOnce();
+    const frame = app.setup.captureCharFrame();
+    expect(frame).toContain("mode:");
+    expect(frame.includes("↓")).toBe(false);
+    expect(frame.includes("tokens")).toBe(false);
+    await app.destroy();
+  }, 30_000);
+
   test("/compact draft 会话 → 提示无上下文", async () => {
     const app = await mountAppAsync([]);
     await untilFrame(app.setup, (f) => f.includes("Version"));

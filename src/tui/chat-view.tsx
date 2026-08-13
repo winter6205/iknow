@@ -108,6 +108,14 @@ export interface ChatViewProps {
   /** 流式 thinking 经过秒数（首次 thinking_delta 起算）——折叠面板显示
    *  `[思考] 思考中… N 秒` 用。运行结束后清 0。 */
   readonly thinkingSeconds?: number;
+  /** 最近一次 turn 的 thinking 最终秒数（app 层 turn 结束快照）。传给末条
+   *  assistant 消息的 thinking 折叠行 → 显示「思考了 N 秒」留存，turn 结束后
+   *  秒数不随流式草稿清空而消失。缺省 0 → 折叠行只显 `[思考]`。 */
+  readonly lastThinkingSeconds?: number;
+  /** thinking 阶段冻结秒数（answer 开始时刻快照）：>0 且流式 thinking 草稿
+   *  仍在 → 思考已结束、折叠行显示「思考了 N 秒」（不再「思考中…」递增），
+   *  秒数留存到 turn 结束历史消息接棒。缺省 0 → 仍按「思考中… N 秒」。 */
+  readonly thinkingFrozenSeconds?: number;
   /** askUser 待决提示（undefined = 无 pending ask）。 */
   readonly askLine?: string;
   /** thinking 折叠面板展开态（false = 折叠成 1 行 [思考]）。 */
@@ -216,16 +224,29 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         {/* 消息渲染：每条 message → MessageBlocks。
             消息间 1 行节奏由 wrapper marginTop 提供；首条 (i===0) 不带顶部
             margin，避免进入会话时第一行无谓下推造成间距抖动。 */}
-        {props.session.messages.map((message, i) => (
-          <box key={i} width={contentWidth} marginTop={i === 0 ? 0 : 1}>
-            <MessageBlocks
-              message={message}
-              cols={contentWidth}
-              statusMap={statusMap}
-              thinkingExpanded={thinkingExpanded}
-            />
-          </box>
-        ))}
+        {props.session.messages.map((message, i) => {
+          // 末条 assistant 消息携带 lastThinkingSeconds → 其 thinking 折叠行显示
+          // 「思考了 N 秒」留存（turn 结束后的秒数接棒）。仅末条 assistant 带：
+          // lastThinkingSeconds 对应刚结束的 turn，历史消息的秒数不适用。
+          const isLastAssistant =
+            i === props.session.messages.length - 1 &&
+            message.role === "assistant";
+          return (
+            <box key={i} width={contentWidth} marginTop={i === 0 ? 0 : 1}>
+              <MessageBlocks
+                message={message}
+                cols={contentWidth}
+                statusMap={statusMap}
+                thinkingExpanded={thinkingExpanded}
+                thinkingSeconds={
+                  isLastAssistant && (props.lastThinkingSeconds ?? 0) > 0
+                    ? props.lastThinkingSeconds
+                    : undefined
+                }
+              />
+            </box>
+          );
+        })}
         {/* tail：liveToolRuns（结构化）+ liveToolLines（向后兼容）。 */}
         {(liveToolRuns.length > 0 || props.liveToolLines.length > 0) && (
           <box flexDirection="column" width={contentWidth}>
@@ -242,13 +263,20 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             {props.askLine}
           </text>
         )}
-        {/* 流式 thinking 面板：折叠态 = 1 行 [思考] 思考中…；展开态走 Markdown。 */}
+        {/* 流式 thinking 面板：折叠态 = 1 行 [思考] 思考中… / 思考已结束 →
+            显示「思考了 N 秒」冻结留存；展开态走 Markdown。frozen 非空 = answer
+            已开始、thinking 阶段结束 → 秒数不再递增，显示「思考了 N 秒」，
+            直到 turn 结束历史消息接棒（留存不消失）。 */}
         {running && deferredThinkingDrafts.length > 0 && (
           <box flexDirection="column" width={contentWidth}>
             {thinkingExpanded ? (
               <box width={contentWidth}>
                 <Markdown text={deferredThinkingDrafts} width={contentWidth} />
               </box>
+            ) : (props.thinkingFrozenSeconds ?? 0) > 0 ? (
+              <text fg={pal.dim} wrapMode="none">
+                {`[思考] 思考了 ${props.thinkingFrozenSeconds} 秒`}
+              </text>
             ) : (
               <text fg={pal.dim} wrapMode="none">
                 {`[思考] 思考中…${(props.thinkingSeconds ?? 0) > 0 ? ` ${props.thinkingSeconds} 秒` : ""}`}

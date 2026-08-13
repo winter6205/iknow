@@ -240,6 +240,70 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     await app.destroy();
   }, 30_000);
 
+  test("thinking 留存：turn 结束 → 末条 assistant 折叠行显示「思考了 N 秒」", async () => {
+    // 需求：thinking 秒数结束后留存界面而不是消失。turn 结束后流式面板消失，
+    // app 层在 runTurnOnce finally 快照 thinkingSeconds → 历史消息末条 assistant
+    // 折叠行显示「思考了 N 秒」（秒数接棒，不随草稿清空丢失）。
+    // 内联 adapter：发 thinking_delta 后 await 3000ms 再返回 → thinkingStartedAt
+    // 打点后经 ≥1s，thinkingSeconds() 在 finally 快照时 > 0。
+    const thinkingAdapter: ModelAdapter = {
+      async step(
+        _state: LoopState,
+        request: { onStream?: (e: HarnessStreamEvent) => void },
+        signal?: AbortSignal
+      ): Promise<AssistantTurnResult> {
+        if (signal?.aborted) {
+          throw new DOMException("This operation was aborted", "AbortError");
+        }
+        request.onStream?.({ type: "thinking_delta", text: "链上推理…" });
+        await abortableDelay(3000, signal);
+        if (signal?.aborted) {
+          throw new DOMException("This operation was aborted", "AbortError");
+        }
+        return assistantResult({
+          texts: ["正式回答"],
+          thinkingBlocks: [
+            { type: "thinking", thinking: "链上推理…", signature: "sig-1" },
+          ],
+        });
+      },
+      encodeUserText(t: string): AnthropicNativeMessage {
+        return { role: "user", content: [{ type: "text", text: t }] };
+      },
+      encodeToolResults(
+        results: ReadonlyArray<ToolExecutionResult>
+      ): AnthropicContentBlock[] {
+        return results.map((r) => ({
+          type: "tool_result",
+          tool_use_id: r.toolUseId,
+          content: r.output,
+          is_error: r.isError,
+        }));
+      },
+    };
+    const app = await mountAppAsync(
+      [],
+      "正式回答",
+      buildToolDeps(thinkingAdapter)
+    );
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    await app.typeText("hi");
+    await app.pressEnter();
+
+    // turn 完成。
+    await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
+    // 末条 assistant 折叠行显示「思考了 N 秒」留存（N≥1，3s delay 保证秒数>0）。
+    await untilFrame(
+      app.setup,
+      (f) => /思考了 \d+ 秒/.test(f),
+      8000,
+      "thinking-persisted"
+    );
+
+    await app.destroy();
+  }, 30_000);
+
   test("tool_call_start → LiveToolRun 「[运行中] noop」实时追加", async () => {
     // 时序说明（T7 修复）：stub-model 的 streamEventsByStep 在 delay 之后
     // 发出事件、随即返回 → turn 立即完成 → [运行中] 状态窗口太短抓不到。
