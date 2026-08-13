@@ -39,10 +39,12 @@ describe("createEnvIsolation", () => {
     assert.ok(Object.isFrozen(filtered));
   });
 
-  it("derives at least one canonical secret name from env configuration", () => {
-    assert.ok(SECRET_ENV_NAMES.length > 0);
-    assert.ok(createEnvIsolation({ allowEnv: [] }).forbiddenNames().length > 0);
-  });
+  // 注：原「derives at least one canonical secret name from env configuration」
+  // 断言已删除（用户授权）：SECRET_ENV_NAMES 是模块加载期固化值，依赖 CI
+  // runner 导出命中 SECRET_PATTERN 的 token 类 env 变量（如 ACTIONS_RUNTIME_TOKEN），
+  // 该依赖不可移植（runner 不保证导出），CI 偶发 false。其「secret 名推导非空」
+  // 语义已由下方 configuredSecretNames 系列的 currentSecretEnvNames() 实时断言
+  // 覆盖（占位符 / SECRET_PATTERN 兜底 / 多段遮蔽），删除不丢真覆盖。
 
   it("never includes values for names identified as secrets", () => {
     const isolation = createEnvIsolation({ allowEnv: SECRET_ENV_NAMES });

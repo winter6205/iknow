@@ -253,22 +253,26 @@ interface EnvFileKeyOpts {
 }
 
 /**
- * #151 T4: 解析 IKNOW_LLM_THINKING 值域 "off" | "adaptive"(大小写不敏感)。
- * 非法值 → 回退 "off",不抛错。
+ * #151 T4 / S4: 解析 IKNOW_LLM_THINKING 值域 "off" | "adaptive"(大小写不敏感)。
+ * 未设 / 空串 / 非法值 → undefined(区别于 envThinkingMode 的"非法回退 off"):
+ * S4 需要三态(off / adaptive / 未设),未设时才能回退 settings.llm.thinking。
  */
-function envThinkingMode(opts: EnvFileKeyOpts): "off" | "adaptive" {
+function envThinkingModeOptional(
+  opts: EnvFileKeyOpts
+): "off" | "adaptive" | undefined {
   const raw = envGet({ file: opts.file, key: opts.key }).toLowerCase();
   if (raw === "off" || raw === "adaptive") return raw;
-  return "off";
+  return undefined;
 }
 
 /**
- * #151 T4: 解析 IKNOW_LLM_THINKING_EFFORT 值域 "" | "low" | "medium" |
- * "high" | "xhigh" | "max"。非法值 → 视同空(不发送 output_config)。
+ * #151 T4 / S4: 解析 IKNOW_LLM_THINKING_EFFORT 值域 "low" | "medium" |
+ * "high" | "xhigh" | "max"。未设 / 空串 / 非法值 → undefined
+ * (区别于 envThinkingEffort 的"非法视同空"):S4 需要区分"未设"以回退 settings。
  */
-function envThinkingEffort(
+function envThinkingEffortOptional(
   opts: EnvFileKeyOpts
-): "" | "low" | "medium" | "high" | "xhigh" | "max" {
+): "low" | "medium" | "high" | "xhigh" | "max" | undefined {
   const raw = envGet({ file: opts.file, key: opts.key }).toLowerCase();
   switch (raw) {
     case "low":
@@ -278,7 +282,7 @@ function envThinkingEffort(
     case "max":
       return raw;
     default:
-      return "";
+      return undefined;
   }
 }
 
@@ -433,11 +437,14 @@ export function expandPlaceholders(
 
 export function loadIknowEnv(
   cwd: string = process.cwd(),
-  settings?: IknowSettings
+  settings?: IknowSettings,
+  home?: string
 ): IknowEnv {
   // process.env still wins via envGet; among files, .env.local overrides .env.
   // settings 参数是测试注入缝；不传时自动读取真实 settings 文件（project > user 合并）。
-  const mergedSettings = settings ?? loadIknowSettings({ cwd });
+  // home 参数透传给 loadIknowSettings：测试隔离 user 级 settings 用（os.homedir()
+  // 不响应运行时 process.env.HOME 修改，须显式注入）。
+  const mergedSettings = settings ?? loadIknowSettings({ cwd, home });
 
   const file = {
     ...parseEnvFile(join(cwd, ".env")),
@@ -478,14 +485,23 @@ export function loadIknowEnv(
         key: "IKNOW_LLM_TEMPERATURE",
         fallback: 0,
       }),
-      thinking: envThinkingMode({
-        file,
-        key: "IKNOW_LLM_THINKING",
-      }),
-      thinkingEffort: envThinkingEffort({
-        file,
-        key: "IKNOW_LLM_THINKING_EFFORT",
-      }),
+      // S4: settings.llm.thinking / thinkingEffort 回退（env > settings > 默认）。
+      // Optional 解析保证三态：env 显式 off/adaptive 或合法 effort 直接赢；
+      // 未设 / 空 / 非法 → undefined → 落 settings；两者皆缺 → off / ""。
+      thinking:
+        envThinkingModeOptional({
+          file,
+          key: "IKNOW_LLM_THINKING",
+        }) ??
+        mergedSettings.llm?.thinking ??
+        "off",
+      thinkingEffort:
+        envThinkingEffortOptional({
+          file,
+          key: "IKNOW_LLM_THINKING_EFFORT",
+        }) ??
+        mergedSettings.llm?.thinkingEffort ??
+        "",
       // #179 T6 (D0):流式默认开;非法值回退 on。
       stream: envStreamMode({
         file,

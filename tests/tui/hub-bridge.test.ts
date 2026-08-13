@@ -27,6 +27,12 @@ import { createStubModel } from "../../src/harness/stubs/stub-model.js";
 import type { LoopEngineDeps } from "../../src/harness/loop-engine.js";
 import type { LoopState } from "../../src/harness/model-adapter/types.js";
 import type { SubAgentManager } from "../../src/harness/subagent/manager.js";
+import {
+  MINIMAL_SDK_MESSAGE,
+  makeTestLlmEnv,
+  startLlmCapture,
+  type LlmCapture,
+} from "../session-api/_helpers/llm-capture.ts";
 
 describe("inflight registry", () => {
   test("soleId：空 → undefined；单会话 → 该 id；多会话 → undefined", () => {
@@ -344,5 +350,150 @@ describe("hub-bridge subagentManager 透传（#365 T3）", () => {
       .join("\n");
     expect(joined).toContain("## Sub-agent t3-task result: t3 fake subagent");
     expect(joined).toContain("t3 body");
+  });
+});
+
+describe("hub-bridge postMessage thinking 透传（T2）", () => {
+  let baseDir: string;
+
+  beforeEach(async () => {
+    baseDir = await mkdtemp(join(tmpdir(), "iknow-tui-bridge-thinking-"));
+  });
+  afterEach(async () => {
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
+  // 共享的 local HTTP capture server：站在 LLM endpoint 位，记录 SDK 实际
+  // 发出的请求体。withThinkingOverride 用 real adapter（经 overrideEnv 指向
+  // capture origin），故可断言 wire 上的 thinking / output_config 字段 ——
+  // 这比 stub-model 路径强：bridge 剥掉 thinking 字段会直接在此暴露
+  // （request 无 thinking，或者根本走不到 capture（fallback 抛错））。
+  let capture: LlmCapture | undefined;
+
+  afterEach(async () => {
+    if (capture) {
+      await capture.close();
+      capture = undefined;
+    }
+  });
+
+  test("thinking: { mode: 'adaptive', effort: 'high' } → wire 请求带 thinking + output_config", async () => {
+    capture = await startLlmCapture(MINIMAL_SDK_MESSAGE);
+    const inflight = createInflightRegistry();
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      deps: makeDeps([]),
+      inflight,
+      // overrideEnv 与 run.tsx 同款透传：override 重建 adapter 时使用该 env，
+      // 不回退 process.env（reviewer blocker）。测试用它把 baseUrl 钉到 capture。
+      overrideEnv: makeTestLlmEnv({ baseUrl: capture.origin }),
+    });
+    const id = await bridge.ensureSession(undefined);
+    const result = await bridge.postMessage({
+      conversationId: id,
+      text: "think hard",
+      thinking: { mode: "adaptive", effort: "high" },
+    });
+    // 请求确实发出且只发了一次，wire 字段由 hub 原样转发。
+    expect(capture.bodies.length).toBe(1);
+    const body = capture.bodies[0] as Record<string, unknown>;
+    expect(body.thinking).toEqual({ type: "adaptive" });
+    expect(body.output_config).toEqual({ effort: "high" });
+    // 回执正常投影；inflight 进出自清。
+    expect(result.finalText).toBe("ok");
+    expect(result.stopReason).toBe("completed");
+    expect(inflight.ids().size).toBe(0);
+  });
+
+  test("thinking: { mode: 'off' } → wire 请求无 thinking / output_config 字段", async () => {
+    capture = await startLlmCapture(MINIMAL_SDK_MESSAGE);
+    const inflight = createInflightRegistry();
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      deps: makeDeps([]),
+      inflight,
+      overrideEnv: makeTestLlmEnv({ baseUrl: capture.origin }),
+    });
+    const id = await bridge.ensureSession(undefined);
+    const result = await bridge.postMessage({
+      conversationId: id,
+      text: "no thinking",
+      thinking: { mode: "off" },
+    });
+    expect(capture.bodies.length).toBe(1);
+    const body = capture.bodies[0] as Record<string, unknown>;
+    expect("thinking" in body).toBe(false);
+    expect("output_config" in body).toBe(false);
+    expect(result.finalText).toBe("ok");
+    expect(inflight.ids().size).toBe(0);
+  });
+
+  test("不传 thinking → cached stub deps 路径，不发 LLM 请求（capture 零请求）", async () => {
+    capture = await startLlmCapture(MINIMAL_SDK_MESSAGE);
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      deps: makeDeps([assistantResult({ texts: ["cached reply"] })]),
+      inflight: createInflightRegistry(),
+      overrideEnv: makeTestLlmEnv({ baseUrl: capture.origin }),
+    });
+    const id = await bridge.ensureSession(undefined);
+    const result = await bridge.postMessage({
+      conversationId: id,
+      text: "no override",
+    });
+    // cached path 走 stub adapter → 请求不该打到 capture server。
+    expect(result.finalText).toBe("cached reply");
+    expect(capture.bodies.length).toBe(0);
+  });
+});
+
+describe("hub-bridge overrideEnv 透传（T2）", () => {
+  let baseDir: string;
+
+  beforeEach(async () => {
+    baseDir = await mkdtemp(join(tmpdir(), "iknow-tui-bridge-overrideenv-"));
+  });
+  afterEach(async () => {
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
+  test("bridge 把 overrideEnv 透给 hub（capture server 收到请求 = env 生效）", async () => {
+    const cap = await startLlmCapture(MINIMAL_SDK_MESSAGE);
+    try {
+      const bridge = createTuiBridge({
+        dataDir: baseDir,
+        deps: makeDeps([]),
+        inflight: createInflightRegistry(),
+        // baseUrl 钉到 capture：透传生效 → hub 的 override 路径连上 capture。
+        overrideEnv: makeTestLlmEnv({ baseUrl: cap.origin }),
+      });
+      const id = await bridge.ensureSession(undefined);
+      await bridge.postMessage({
+        conversationId: id,
+        text: "override env",
+        thinking: { mode: "off" },
+      });
+      // 若 overrideEnv 未透传，withThinkingOverride 回退 loadIknowEnv() → 走
+      // 真实 endpoint（非 capture）或抛 ValidationError → capture 收不到请求。
+      expect(cap.bodies.length).toBe(1);
+    } finally {
+      await cap.close();
+    }
+  });
+
+  test("不传 overrideEnv → 无 override 字段注入，既有路径行为不变", async () => {
+    const inflight = createInflightRegistry();
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      deps: makeDeps([assistantResult({ texts: ["cached"] })]),
+      inflight,
+    });
+    const id = await bridge.ensureSession(undefined);
+    const result = await bridge.postMessage({
+      conversationId: id,
+      text: "plain",
+    });
+    expect(result.finalText).toBe("cached");
+    expect(inflight.ids().size).toBe(0);
   });
 });

@@ -20,6 +20,7 @@ import {
   ContextBar,
   ctxUsed,
   contextColor,
+  modelPrefix,
   toolIndicator,
   valueBand,
 } from "../../src/tui/context-bar.js";
@@ -70,6 +71,8 @@ async function renderBar(props: {
   running: boolean;
   cols: number;
   activeToolName?: string;
+  model?: string;
+  effortLabel?: string;
 }) {
   const setup = await testRender(<ContextBar {...props} />, {
     width: props.cols,
@@ -120,6 +123,23 @@ describe("纯函数（数值语义 SSOT）", () => {
     expect(out.startsWith("[tool] ")).toBe(true);
     expect(out.endsWith("…")).toBe(true);
     expect(stringWidth(out)).toBeLessThanOrEqual(13);
+  });
+
+  test("modelPrefix：短名原样 / 超宽 CJK 尾截断补 … / 预算过小回退空串", () => {
+    expect(modelPrefix("m3-combo", 20)).toBe("m3-combo");
+    expect(modelPrefix("Qwen3.8-Max Model", 40)).toBe("Qwen3.8-Max Model");
+    // 超预算：CJK 按 2 列计（visualWidth 口径），结果宽 ≤ 预算且尾部补 …。
+    const long = "Qwen3.8-Max-Exp-1234567890-abcde";
+    const out = modelPrefix(long, 20);
+    expect(out.endsWith("…")).toBe(true);
+    expect(stringWidth(out)).toBeLessThanOrEqual(20);
+    expect(out).not.toContain("\n");
+    // 预算过小（连 … 都放不下）→ 空串。
+    expect(modelPrefix(long, 0)).toBe("");
+    expect(modelPrefix(long, 1)).toBe("");
+    // 预算能放单字符时仍截断。
+    const tiny = modelPrefix(long, 2);
+    expect(stringWidth(tiny)).toBeLessThanOrEqual(2);
   });
 
   test("toolIndicator：内嵌空白折叠为单空格（防止换行/多空格导致底栏变形）", () => {
@@ -278,6 +298,104 @@ describe("渲染（只读 lastUsage）", () => {
     });
     expect(noTool.captureCharFrame()).not.toContain("[tool]");
     await noTool.renderer.destroy();
+  });
+
+  test("缺省不传 model/effortLabel → 前缀不渲染（现有帧断言保持通过）", async () => {
+    const setup = await renderBar({
+      lastUsage: null,
+      contextWindow: 10000,
+      running: false,
+      cols: 80,
+    });
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("│ ctx ░░░░░░░░░░ 0% ok 0.0k/10.0k");
+    expect(frame).not.toContain("·");
+    await setup.renderer.destroy();
+  });
+
+  test("model + effortLabel → `model · effort · ctx ...` 前缀渲染在 ctx 之前", async () => {
+    const setup = await renderBar({
+      lastUsage: makeUsage(5000),
+      contextWindow: 10000,
+      running: false,
+      cols: 80,
+      model: "Qwen3.8-Max Model",
+      effortLabel: "medium",
+    });
+    const frame = setup.captureCharFrame();
+    const ctxIdx = frame.indexOf("ctx");
+    expect(ctxIdx).toBeGreaterThan(-1);
+    expect(frame.slice(0, ctxIdx)).toContain("Qwen3.8-Max Model · medium ·");
+    expect(frame).toContain("medium");
+    expect(frame).toContain("█████░░░░░");
+    const lines = frame.split("\n").filter((l) => l.trim().length > 0);
+    expect(lines).toHaveLength(1);
+    await setup.renderer.destroy();
+  });
+
+  test("超长 model 名截断：前缀被截且整行视觉宽 ≤ cols（不换行）", async () => {
+    const cols = 60;
+    const setup = await renderBar({
+      lastUsage: makeUsage(5000),
+      contextWindow: 10000,
+      running: false,
+      cols,
+      model: "Qwen3.8-Max-Exp-1234567890-abcdefghijklmnop",
+      effortLabel: "high",
+    });
+    const lines = setup
+      .captureCharFrame()
+      .split("\n")
+      .filter((l) => l.trim().length > 0);
+    expect(lines).toHaveLength(1);
+    const line = lines[0] ?? "";
+    expect(line).toContain("…");
+    expect(line).toContain("high");
+    expect(line).toContain("ctx");
+    expect(stringWidth(line.trimEnd())).toBeLessThanOrEqual(cols);
+    await setup.renderer.destroy();
+  });
+
+  test("宽列前缀预算占用：activeToolName 尾缀不溢出", async () => {
+    const cols = 90;
+    const setup = await renderBar({
+      lastUsage: makeUsage(8100),
+      contextWindow: 10000,
+      running: true,
+      cols,
+      model: "Qwen3.8-Max Model",
+      effortLabel: "high",
+      activeToolName: "读写文件工具名字特别特别长",
+    });
+    const lines = setup
+      .captureCharFrame()
+      .split("\n")
+      .filter((l) => l.trim().length > 0);
+    expect(lines).toHaveLength(1);
+    expect(stringWidth((lines[0] ?? "").trimEnd())).toBeLessThanOrEqual(cols);
+    expect(lines[0] ?? "").toContain("[tool]");
+    await setup.renderer.destroy();
+  });
+
+  test("窄列 cols<40 + 前缀：保留 effort 段，单行 ≤ cols 且 ctx 仍可见", async () => {
+    const cols = 30;
+    const setup = await renderBar({
+      lastUsage: makeUsage(8100),
+      contextWindow: 10000,
+      running: true,
+      cols,
+      model: "Qwen3.8-Max Model",
+      effortLabel: "medium",
+    });
+    const lines = setup
+      .captureCharFrame()
+      .split("\n")
+      .filter((l) => l.trim().length > 0);
+    expect(lines).toHaveLength(1);
+    expect(stringWidth((lines[0] ?? "").trimEnd())).toBeLessThanOrEqual(cols);
+    expect(lines[0] ?? "").toContain("medium");
+    expect(lines[0] ?? "").toContain("ctx");
+    await setup.renderer.destroy();
   });
 
   test("窄列超宽工具名：截断补 …，单行 ≤ cols", async () => {

@@ -5,11 +5,13 @@
  * 改写为 bun:test（D2 裁决：tests/tui/ 由 bun:test 驱动）。
  *
  * #146 slash 词表解析（SC 12：TUI 自建词表，不复用 chat processChatLine）：
- * 10 命令 + 未知 /xxx + 普通消息 + 空输入 + /reset 天然不可达。
+ * 11 命令 + 未知 /xxx + 普通消息 + 空输入 + /reset 天然不可达。
  */
 import { describe, expect, test } from "bun:test";
 import {
+  effortHasArg,
   helpLines,
+  parseEffortLevel,
   parseSkillLoad,
   parseTuiInput,
   slashComplete,
@@ -38,6 +40,20 @@ describe("parseTuiInput: 词表命中", () => {
       expect(parsed).toEqual({ kind: "command", command });
     });
   }
+
+  test("解析 /effort → command effort（arg 由 parseEffortLevel 单独解析）", () => {
+    expect(parseTuiInput("/effort")).toEqual({
+      kind: "command",
+      command: "effort",
+    });
+  });
+
+  test("命令后带参数仍命中命令（/effort high → command effort）", () => {
+    expect(parseTuiInput("/effort high")).toEqual({
+      kind: "command",
+      command: "effort",
+    });
+  });
 
   test("大小写与前后空白容忍", () => {
     expect(parseTuiInput("  /QUIT  ")).toEqual({
@@ -86,7 +102,7 @@ describe("parseTuiInput: 普通消息与边界", () => {
 });
 
 describe("helpLines", () => {
-  test("覆盖全部 10 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
+  test("覆盖全部 11 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
     const joined = helpLines().join("\n");
     for (const cmd of [
       "/sessions",
@@ -94,6 +110,8 @@ describe("helpLines", () => {
       "/mcp",
       "/info",
       "/help",
+      "/thinking",
+      "/effort",
       "/quit",
       "/exit",
       "/compact",
@@ -117,7 +135,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  test('"/" → 全部 10 条静态命令（按词表插入顺序，kind="command"；rewind + mcp，无 /profile）', () => {
+  test('"/" → 全部 11 条静态命令（按词表插入顺序，kind="command"；rewind + mcp，无 /profile）', () => {
     expect(slashSuggestions("/")).toEqual([
       { kind: "command", command: "sessions" },
       { kind: "command", command: "new" },
@@ -126,6 +144,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       { kind: "command", command: "help" },
       { kind: "command", command: "info" },
       { kind: "command", command: "thinking" },
+      { kind: "command", command: "effort" },
       { kind: "command", command: "compact" },
       { kind: "command", command: "rewind" },
       { kind: "command", command: "mcp" },
@@ -138,9 +157,10 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
     ]);
   });
 
-  test('"/e" → [{command: exit}]', () => {
+  test('"/e" → [{command: exit}, {command: effort}]（/effort 加入后共享前缀）', () => {
     expect(slashSuggestions("/e")).toEqual([
       { kind: "command", command: "exit" },
+      { kind: "command", command: "effort" },
     ]);
   });
 
@@ -178,6 +198,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       { kind: "command", command: "help" },
       { kind: "command", command: "info" },
       { kind: "command", command: "thinking" },
+      { kind: "command", command: "effort" },
       { kind: "command", command: "compact" },
       { kind: "command", command: "rewind" },
       { kind: "command", command: "mcp" },
@@ -246,7 +267,7 @@ describe('slashComplete: 唯一匹配 → "/cmd "；0/多匹配 → null', () =>
     expect(slashComplete("/q")).toBe("/quit ");
   });
 
-  test('"/" → null（9 匹配）', () => {
+  test('"/" → null（10 匹配）', () => {
     expect(slashComplete("/")).toBeNull();
   });
 
@@ -274,7 +295,7 @@ describe('slashComplete: 唯一匹配 → "/cmd "；0/多匹配 → null', () =>
     ).toBeNull();
   });
 
-  test("skill 名与静态命令前缀重合：静态优先（'/' 命中 10 静态 + skill → null）", () => {
+  test("skill 名与静态命令前缀重合：静态优先（'/' 命中 11 静态 + skill → null）", () => {
     expect(
       slashComplete("/", [{ name: "sessions-helper", description: "会话助手" }])
     ).toBeNull();
@@ -303,6 +324,7 @@ describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
     "help",
     "info",
     "thinking",
+    "effort",
     "compact",
     "rewind",
     "mcp",
@@ -316,16 +338,20 @@ describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
     expect(slashCompleteFromList(ALL, 2)).toBe("/quit ");
   });
 
-  test("cursor=7 → /compact （词表第 8 条）", () => {
-    expect(slashCompleteFromList(ALL, 7)).toBe("/compact ");
+  test("cursor=7 → /effort （词表第 8 条）", () => {
+    expect(slashCompleteFromList(ALL, 7)).toBe("/effort ");
   });
 
-  test("cursor=8 → /rewind （词表第 9 条）", () => {
-    expect(slashCompleteFromList(ALL, 8)).toBe("/rewind ");
+  test("cursor=8 → /compact （词表第 9 条）", () => {
+    expect(slashCompleteFromList(ALL, 8)).toBe("/compact ");
   });
 
-  test("cursor=9 → /mcp （词表末条，append-only）", () => {
-    expect(slashCompleteFromList(ALL, 9)).toBe("/mcp ");
+  test("cursor=9 → /rewind （词表第 10 条）", () => {
+    expect(slashCompleteFromList(ALL, 9)).toBe("/rewind ");
+  });
+
+  test("cursor=10 → /mcp （词表末条，append-only）", () => {
+    expect(slashCompleteFromList(ALL, 10)).toBe("/mcp ");
   });
 
   test("cursor 越界上 / 下 / 空列表 → null", () => {
@@ -593,5 +619,119 @@ describe("#361 Phase D /mcp 词表", () => {
     expect(
       parseSkillLoad("/mcp", [{ name: "mcp-helper", description: "x" }])
     ).toBeUndefined();
+  });
+});
+
+/**
+ * #377 系列 /effort：调整思考强度。词表新增第 8 条（紧邻 /thinking 之后），
+
+ * 命令本身无 arg 语义（parseTuiInput 仍判 command），level 由 parseEffortLevel
+ * 单独解析：/effort <low|medium|high|xhigh|max>（5 档 concrete，不含 ""/auto）。
+ */
+describe("#377 系列 /effort 词表", () => {
+  test("/effort → command effort（parseTuiInput 仍判 command）", () => {
+    expect(parseTuiInput("/effort")).toEqual({
+      kind: "command",
+      command: "effort",
+    });
+    expect(parseTuiInput("  /EFFORT  ")).toEqual({
+      kind: "command",
+      command: "effort",
+    });
+  });
+
+  test('"/" 全部候选含 effort（紧邻 thinking 之后）', () => {
+    const all = slashSuggestions("/");
+    expect(all).toContainEqual({ kind: "command", command: "effort" });
+    const thinkingIdx = all.findIndex(
+      (c) => c.kind === "command" && c.command === "thinking"
+    );
+    const effortIdx = all.findIndex(
+      (c) => c.kind === "command" && c.command === "effort"
+    );
+    expect(effortIdx).toBe(thinkingIdx + 1);
+  });
+
+  test('"/ef" 前缀 → [{command: effort}]（唯一匹配）', () => {
+    expect(slashSuggestions("/ef")).toEqual([
+      { kind: "command", command: "effort" },
+    ]);
+  });
+
+  test('/effort 唯一匹配 → 补全 "/effort "', () => {
+    expect(slashComplete("/eff")).toBe("/effort ");
+  });
+
+  test("parseEffortLevel: /effort high → high", () => {
+    expect(parseEffortLevel("/effort high")).toBe("high");
+  });
+
+  test("parseEffortLevel: 5 档 concrete 全命中", () => {
+    expect(parseEffortLevel("/effort low")).toBe("low");
+    expect(parseEffortLevel("/effort medium")).toBe("medium");
+    expect(parseEffortLevel("/effort high")).toBe("high");
+    expect(parseEffortLevel("/effort xhigh")).toBe("xhigh");
+    expect(parseEffortLevel("/effort max")).toBe("max");
+  });
+
+  test("parseEffortLevel: 大小写不敏感 + trim（/effort HIGH / /effort  High  ）", () => {
+    expect(parseEffortLevel("/effort HIGH")).toBe("high");
+    expect(parseEffortLevel("  /effort  High  ")).toBe("high");
+  });
+
+  test('parseEffortLevel: 自适应档不在可选档位（auto / "" → undefined）', () => {
+    expect(parseEffortLevel("/effort auto")).toBeUndefined();
+    expect(parseEffortLevel('/effort ""')).toBeUndefined();
+    expect(parseEffortLevel("/effort adaptive")).toBeUndefined();
+  });
+
+  test("parseEffortLevel: 未知档 → undefined", () => {
+    expect(parseEffortLevel("/effort unknown")).toBeUndefined();
+    expect(parseEffortLevel("/effort ultra")).toBeUndefined();
+  });
+
+  test("parseEffortLevel: 空 / 缺参 / 全空白 → undefined", () => {
+    expect(parseEffortLevel("")).toBeUndefined();
+    expect(parseEffortLevel("/effort")).toBeUndefined();
+    expect(parseEffortLevel("/effort   ")).toBeUndefined();
+    expect(parseEffortLevel("   ")).toBeUndefined();
+  });
+
+  test("effortHasArg: 有参数段 → true（合法/非法 concrete 档均 true）", () => {
+    expect(effortHasArg("/effort low")).toBe(true);
+    expect(effortHasArg("/effort auto")).toBe(true);
+    expect(effortHasArg("/effort unknown")).toBe(true);
+    expect(effortHasArg("  /effort  High  ")).toBe(true);
+  });
+
+  test("effortHasArg: 无参数段 → false（空 / 缺参 / 全空白）", () => {
+    expect(effortHasArg("")).toBe(false);
+    expect(effortHasArg("/effort")).toBe(false);
+    expect(effortHasArg("/effort   ")).toBe(false);
+    expect(effortHasArg("   ")).toBe(false);
+  });
+
+  test("helpLines 含 /effort 行（紧邻 /thinking 之后）且列全 5 档名称", () => {
+    const joined = helpLines().join("\n");
+    expect(joined).toContain("/effort");
+    expect(joined).toContain("low");
+    expect(joined).toContain("medium");
+    expect(joined).toContain("high");
+    expect(joined).toContain("xhigh");
+    expect(joined).toContain("max");
+    const thinkingLineIdx = joined
+      .split("\n")
+      .findIndex((l) => l.startsWith("/thinking"));
+    const effortLineIdx = joined
+      .split("\n")
+      .findIndex((l) => l.startsWith("/effort"));
+    expect(effortLineIdx).toBe(thinkingLineIdx + 1);
+    expect(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(joined)).toBe(false);
+  });
+
+  test("HINT_DESCRIPTIONS.effort === 调整思考强度", () => {
+    expect(slashHintLines(["effort"])).toEqual([
+      { command: "effort", description: "调整思考强度" },
+    ]);
   });
 });

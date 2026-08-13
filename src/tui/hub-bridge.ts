@@ -18,7 +18,10 @@
  */
 import { SessionStore } from "../session-api/store/session-store.js";
 import { SessionHub } from "../session-api/hub.js";
-import type { PostMessageResponse } from "../session-api/contract.js";
+import type {
+  PostMessageResponse,
+  WireThinkingOverride,
+} from "../session-api/contract.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
 import { rewindFile } from "../session-api/store/index.js";
 import type { LoopEngineDeps } from "../harness/index.js";
@@ -26,6 +29,7 @@ import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { TokenUsage } from "../harness/model-adapter/types.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
+import type { LlmEnv } from "../config/env.js";
 
 /**
  * T3: TUI contextWindow 显示配置默认值（与 loop-engine.ts:152 的
@@ -94,11 +98,14 @@ export interface TuiBridge {
   readonly ensureSession: (
     conversationId: string | undefined
   ) => Promise<string>;
-  /** 发一条消息跑一个 turn（透传 signal 支持 Ctrl+C 打断前台）。 */
+  /** 发一条消息跑一个 turn（透传 signal 支持 Ctrl+C 打断前台）。
+   *  thinking: T2 每回合覆盖 harness 的 thinking 控制臂（与 SessionHub.postMessage
+   *  的 wire 字段同形；缺省 → 沿用 ensureDeps 的缓存配置）。 */
   readonly postMessage: (opts: {
     readonly conversationId: string;
     readonly text: string;
     readonly signal?: AbortSignal;
+    readonly thinking?: WireThinkingOverride;
     readonly onStream?: (event: HarnessStreamEvent) => void;
   }) => Promise<TuiPostResult>;
   readonly listSessions: () => ReturnType<SessionHub["listSessions"]>;
@@ -130,6 +137,9 @@ export interface CreateTuiBridgeOptions {
   readonly subagentManager?: SubAgentManager;
   /** T3: 上下文窗口容量（tokens）。缺省 `DEFAULT_CONTEXT_WINDOW = 200_000`。 */
   readonly contextWindow?: number;
+  /** T2: LLM env 覆盖源，透传给 SessionHub（override 路径重建 adapter 时用，
+   *  不回退 process.env）。与 SessionHub 构造 opts 的 overrideEnv 同形。 */
+  readonly overrideEnv?: { readonly llm: LlmEnv };
 }
 
 export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
@@ -142,6 +152,9 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     // subagentManager 由 buildTuiDeps 经 buildHarnessEngine SSOT 装配，
     // hub-bridge 透传给 SessionHub。
     subagentManager: opts.subagentManager,
+    // T2: LLM env 覆盖源 —— TUI 启动期校验过的 env 透到 override 路径，
+    // 避免 override 重建 adapter 时回退到 process.env（reviewer blocker）。
+    ...(opts.overrideEnv ? { overrideEnv: opts.overrideEnv } : {}),
   });
 
   const bridge: TuiBridge = {
@@ -152,7 +165,13 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
       const created = await hub.createSession();
       return created.session.conversation_id;
     },
-    postMessage: async ({ conversationId, text, signal, onStream }) => {
+    postMessage: async ({
+      conversationId,
+      text,
+      signal,
+      thinking,
+      onStream,
+    }) => {
       opts.inflight.mark(conversationId);
       try {
         const resp = await hub.postMessage({
@@ -160,6 +179,7 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
           text,
           signal,
           onStream,
+          ...(thinking !== undefined ? { thinking } : {}),
         });
         return {
           conversationId: resp.session.conversation_id,

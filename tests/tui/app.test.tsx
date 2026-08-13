@@ -69,6 +69,8 @@ interface DrivenApp {
   readonly pressEnter: () => Promise<void>;
   readonly pressEscape: () => Promise<void>;
   readonly pressTab: () => Promise<void>;
+  readonly pressSpace: () => Promise<void>;
+  readonly pressArrow: (dir: "left" | "right") => Promise<void>;
 }
 
 async function mountAppAsync(
@@ -143,6 +145,16 @@ async function mountAppAsync(
     },
     pressTab: async () => {
       setup.mockInput.pressTab();
+      await new Promise((r) => setTimeout(r, 100));
+      await setup.renderOnce();
+    },
+    pressSpace: async () => {
+      setup.mockInput.pressKey(" ");
+      await new Promise((r) => setTimeout(r, 100));
+      await setup.renderOnce();
+    },
+    pressArrow: async (dir) => {
+      setup.mockInput.pressArrow(dir);
       await new Promise((r) => setTimeout(r, 100));
       await setup.renderOnce();
     },
@@ -275,12 +287,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
 
     // Esc 返回聊天视图
     await app.pressEscape();
-    await untilFrame(
-      app.setup,
-      (f) => f.includes("输入消息"),
-      8000,
-      "back"
-    );
+    await untilFrame(app.setup, (f) => f.includes("输入消息"), 8000, "back");
 
     await app.destroy();
   }, 30_000);
@@ -292,6 +299,113 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     await app.pressTab();
     const frame = app.setup.captureCharFrame();
     expect(frame).toContain("/quit");
+    await app.destroy();
+  }, 30_000);
+});
+
+/**
+ * /thinking — design-25 thinking-picker（双面板版）：/thinking 不再立即翻转
+ * 开关 + notice，改为打开纯开关面板（ON/OFF）。Enter 固定（面板保持打开）、
+ * Esc 保存退出（写 thinkingEnabled，无 cancel 路径）。
+ */
+describe("/thinking 打开 thinking-picker（design-25 开关面板）", () => {
+  test("defaultThinking off → /thinking 开面板（无 notice）→ Space 切换 ON → Enter 不关闭 → Esc 保存退出 → /info adaptive (auto)", async () => {
+    const app = await mountAppAsync([]);
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    // /thinking Enter → 面板打开（标题「思考开关」），不设 notice「思考：开」。
+    await app.typeText("/thinking");
+    await app.pressEnter();
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("思考开关"),
+      8000,
+      "picker-open"
+    );
+    expect(app.setup.captureCharFrame()).not.toContain("思考：开");
+    expect(app.setup.captureCharFrame()).not.toContain("思考：关");
+
+    // 面板内 Space（OFF → ON）：开关预览翻转，面板保持打开。
+    await app.pressSpace();
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("思考开关") && f.includes("ON"),
+      8000,
+      "preview-on"
+    );
+
+    // Enter（固定当前预览 ON，不翻转、不退出）：面板**保持打开**（核心新增
+    // 断言：Enter 固定不关闭）。随后 Esc 保存退出。
+    await app.pressEnter();
+    const afterEnter = app.setup.captureCharFrame();
+    expect(afterEnter).toContain("思考开关");
+    expect(afterEnter).toContain("ON");
+
+    // Esc 保存退出（写 thinkingEnabled=true）→ 面板关闭、回输入正常。
+    await app.pressEscape();
+    await untilFrame(
+      app.setup,
+      (f) => !f.includes("思考开关"),
+      8000,
+      "picker-closed"
+    );
+    expect(app.setup.captureCharFrame()).toContain("Version");
+    expect(app.setup.captureCharFrame()).toContain("输入消息");
+
+    // /info 反射：enabled=true + effort="" → adaptive (auto)。
+    await app.typeText("/info");
+    await app.pressEnter();
+    const frame = await untilFrame(
+      app.setup,
+      (f) => f.includes("adaptive") && f.includes("runState"),
+      8000,
+      "info"
+    );
+    expect(frame).toContain("adaptive (auto)");
+
+    await app.destroy();
+  }, 30_000);
+
+  test("再开面板 Esc → 保存退出写 state（无 cancel 路径）→ /info thinking: off", async () => {
+    const app = await mountAppAsync([]);
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    await app.typeText("/thinking");
+    await app.pressEnter();
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("思考开关"),
+      8000,
+      "picker-open"
+    );
+
+    // Esc 保存退出（无任何切换 → 写回 seed OFF）：面板关闭，无 notice 噪音
+    // （无「思考：开」也无「已取消」），且 state 已写（/info 显示 off）。
+    await app.pressEscape();
+    await untilFrame(
+      app.setup,
+      (f) => !f.includes("思考开关"),
+      8000,
+      "picker-saved"
+    );
+    const frame = app.setup.captureCharFrame();
+    expect(frame).not.toContain("思考：开");
+    expect(frame).not.toContain("思考：关");
+    expect(frame).not.toContain("已取消");
+    expect(frame).toContain("Version");
+    expect(frame).toContain("输入消息");
+
+    // /info 反射：Esc 保存退出（非 cancel）→ state 已写为 off。
+    await app.typeText("/info");
+    await app.pressEnter();
+    const infoFrame = await untilFrame(
+      app.setup,
+      (f) => f.includes("runState"),
+      8000,
+      "info"
+    );
+    expect(infoFrame).toContain("thinking: off");
+
     await app.destroy();
   }, 30_000);
 });

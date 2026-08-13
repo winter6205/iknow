@@ -108,7 +108,8 @@ const SYSTEM_INTERRUPT_MARK = "[已打断]";
  *  - `cols`：终端列宽（Markdown wrap + ToolSummaryRow 单行收口共用）；
  *  - `statusMap`：`toolResultStatusMap(session.messages)`（tool_use → 是否失败）；
  *  - `thinkingExpanded`：thinking 折叠面板展开态（false = 折叠成 1 行 [思考]）；
- *    app 层 `/thinking` 斜杠切换。会话重启回退折叠。
+ *    折叠/展开由 Ctrl+O 翻转；/thinking 为独立开关（思考Enabled），不改折叠态。
+ *    会话重启回退折叠。
  *  - `noTrailingSelfMargin`：true 时抹掉最后一个块的 marginBottom ——
  *    OpenTUI `marginBottom` 不存在「折叠」语义，元素之间天然有间距。
  *    本参数在 ChatView 已废除（scrollbox 全内容滚动不写行账，无 trailing

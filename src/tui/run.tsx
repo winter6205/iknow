@@ -151,6 +151,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       traceOut: options.traceOut,
       inflight,
       contextWindow: bundle.env.compress.contextWindow,
+      // T2: 把启动期校验过的 env 透到 hub 的 override 路径 —— override 重建
+      // adapter 时用这份 env，不回退 process.env（reviewer blocker fix）。
+      overrideEnv: { llm: bundle.env.llm },
     });
 
     let initialSession;
@@ -197,6 +200,15 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
               }
             : undefined
         }
+        // thinking 初始基线 = env（adapter 已走 buildThinkingParams，这里只给
+        // app 知道初始状态；用户 /thinking /effort 改动后经 bridge.postMessage
+        // 的 thinking override 透传）。
+        defaultThinking={{
+          mode: bundle.env.llm.thinking,
+          effort: bundle.env.llm.thinkingEffort,
+        }}
+        // 当前模型名 → ContextBar 前置展示（bundle.env.llm.model SSOT）。
+        model={bundle.env.llm.model}
         onQuit={onQuitBridge.destroy}
       />
     );

@@ -90,11 +90,31 @@ import {
   parseTuiInput,
   slashComplete,
   slashCompleteFromCandidates,
+  slashPrefix,
   slashSuggestions,
   type SlashCandidate,
 } from "./slash.js";
 import { activeToolNameOf, liveToolReduce } from "./live-tool-state.js";
 import type { LiveToolRun } from "./live-tool-state.js";
+import {
+  ADJUSTABLE_EFFORT_LEVELS,
+  effortHasArg,
+  parseEffortLevel,
+} from "./slash.js";
+import {
+  ThinkingPicker,
+  effortToDisplayIndex,
+  indexToEffort,
+  reduceThinkingSwitchKey,
+  reduceThinkingEffortKey,
+  thinkingPickerRows,
+  type ThinkingPickerState,
+} from "./thinking-picker.js";
+import { computeThinkingOverride, formatEffortLabel } from "./thinking-gate.js";
+import type {
+  ThinkingEffortWire,
+  WireThinkingOverride,
+} from "../session-api/contract.js";
 import { ChatView } from "./chat-view.js";
 import type { StreamDraft } from "../cli/stream-draft.js";
 import { createStreamDraft } from "../cli/stream-draft.js";
@@ -151,6 +171,7 @@ export function noticeRenderRows(
  *   - slash 候选行（inputValue.trim().startsWith("/") ? … : 0）
  *   - notice 本体 + 自身 marginBottom=1
  *   - modal 本体 + 自身 marginBottom=1
+ *   - thinking-picker 面板 + 自身 marginBottom=1（pickerRows 同 modalRows 约定）
  *   - 后台运行标记行（存在 running-bg 时）
  */
 export function chromeReserveRows(opts: {
@@ -158,10 +179,13 @@ export function chromeReserveRows(opts: {
   readonly inputHintRows: number;
   readonly bgLine: boolean;
   readonly modalRows?: number;
+  readonly pickerRows?: number;
 }): number {
   const modalRows = opts.modalRows ?? 0;
+  const pickerRows = opts.pickerRows ?? 0;
   const noticeTotal = opts.noticeRows > 0 ? opts.noticeRows + 1 : 0;
   const modalTotal = modalRows > 0 ? modalRows + 1 : 0;
+  const pickerTotal = pickerRows > 0 ? pickerRows + 1 : 0;
   return (
     1 + // top headroom
     1 + // mode指示行
@@ -171,6 +195,7 @@ export function chromeReserveRows(opts: {
     1 + // ask 槽
     noticeTotal +
     modalTotal +
+    pickerTotal +
     (opts.bgLine ? 1 : 0)
   );
 }
@@ -235,6 +260,17 @@ export interface TuiAppProps {
    *  undefined → /mcp 切 view 时提示「MCP 未装配」。产品路径由 run.tsx 经
    *  TuiExtensions 注入；fixture / 测试可选 stub。 */
   readonly mcp?: TuiMcpViewExt;
+  /** thinking 控制臂初始基线（env `thinking` + `thinkingEffort` 形状）。
+   *  仅作为 TUI 内 thinkingEnabled / thinkingEffort state 的初始值；用户
+   *  /thinking /effort 改动后经 bridge.postMessage 的 thinking override 透传
+   *  （gate：仅当用户实际改了状态才透传）。缺省 → off + ""（与 env 默认一致）。 */
+  readonly defaultThinking?: {
+    readonly mode: "off" | "adaptive";
+    readonly effort: ThinkingEffortWire;
+  };
+  /** 当前模型名（ContextBar 前置展示）。缺省 "" → 不渲染前缀 model 段
+   *  （测试兼容）。product 路径由 run.tsx 传 bundle.env.llm.model。 */
+  readonly model?: string;
 }
 
 interface Notice {
@@ -268,8 +304,47 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const [liveToolRuns, setLiveToolRuns] = useState<
     Record<string, ReadonlyArray<LiveToolRun>>
   >({});
-  // T6 (D5): thinking 折叠面板展开态；/thinking 切换，Ctrl+O 只展开。
+  // T6 (D5): thinking 折叠面板展开态；Ctrl+O 折叠/展开，/thinking 为开关（思考Enabled）。
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
+  // thinking 控制臂开关（/thinking 切换，与折叠态解耦）。初始基线 =
+  // env defaultThinking.mode === "adaptive"；用户 /effort 也会 setEnabled(true)。
+  const [thinkingEnabled, setThinkingEnabled] = useState<boolean>(
+    () => props.defaultThinking?.mode === "adaptive"
+  );
+  // thinking 档位（/effort 设置；"" 表示未指定 → 不附加 effort）。初始 =
+  // env defaultThinking.effort。
+  const [thinkingEffort, setThinkingEffort] = useState<ThinkingEffortWire>(
+    () => props.defaultThinking?.effort ?? ""
+  );
+  // ── thinking-picker 面板态（/thinking /effort 打开；null = 未打开）────
+  // design-25 picker（用户定案双面板版）：/thinking /effort 不再立即生效 +
+  // notice，改为弹出浮层面板。Enter 固定（面板保持打开）、Esc 保存退出（写入
+  // 真实 thinkingEnabled / thinkingEffort，无 cancel 路径）。面板内是未提交
+  // 的暂存态（switchPreview / effortFocusIndex / effortFixedIndex），Esc 才写
+  // 真实 state。
+  const [thinkingPickerOpen, setThinkingPickerOpen] = useState<
+    null | "thinking" | "effort"
+  >(null);
+  // 开关面板预览态（/thinking）：面板内未提交的开关值（Enter/Space/Tab 翻转，
+  // Esc 保存退出才写 thinkingEnabled）。
+  const [switchPreview, setSwitchPreview] = useState<boolean>(
+    () => thinkingEnabled
+  );
+  // 档位面板聚焦档（/effort）：←/→ 移动的焦点游标（0..4，未提交）。
+  const [effortFocusIndex, setEffortFocusIndex] = useState<number>(
+    effortToDisplayIndex(thinkingEffort)
+  );
+  // 档位面板已固定档（/effort）：Enter 固定的面板内已提交档（0..4，Esc 保存
+  // 退出才写 thinkingEffort）。
+  const [effortFixedIndex, setEffortFixedIndex] = useState<number>(
+    effortToDisplayIndex(thinkingEffort)
+  );
+  // 档位面板自适应态（/effort）：Space/Tab 切换；Esc 保存退出时 autoOn 优先写
+  // ""=自适应（保持 auto，不降级到 concrete）。seed = 当前 thinkingEffort===""
+  // → 自适应态（打开 /effort 无参时修复「当前 auto → Esc 静默降 medium」bug）。
+  const [effortAutoOn, setEffortAutoOn] = useState<boolean>(
+    () => thinkingEffort === ""
+  );
   // W2 扩展：权限模式镜像（仅驱动模式指示行 re-render）。
   const [permMode, setPermMode] = useState(() => permissionMode.get());
   // #279 项3：权限 modal 槽状态（dismissed = Esc 收起后退回输入框 y/n 兜底）。
@@ -568,6 +643,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     setRewindTargets(undefined);
     setRewindConfirming(false);
     setRewindIndex(0);
+    setThinkingPickerOpen(null);
   }
   async function openSessionAt(index: number): Promise<void> {
     if (index === 0) {
@@ -602,6 +678,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     setRewindTargets(undefined);
     setRewindConfirming(false);
     setRewindIndex(0);
+    setThinkingPickerOpen(null);
   }
 
   // ── turn 发送 ───────────────────────────────────────────────────
@@ -686,11 +763,22 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       }
     };
     try {
+      // thinking override gate：仅当用户实际改了状态才透传（初始化即 env
+      // 默认 → 不透传，走 stub-model 测试的 cached deps 路径；用户 /thinking
+      // /effort 改了 → 透传 per-turn override）。决策逻辑见 thinking-gate.ts
+      // computeThinkingOverride（纯函数，已单测）。
+      const thinkingOverride: WireThinkingOverride | undefined =
+        computeThinkingOverride(
+          props.defaultThinking,
+          thinkingEnabled,
+          thinkingEffort
+        );
       const resp = await props.bridge.postMessage({
         conversationId: targetId,
         text,
         signal: controller.signal,
         onStream,
+        ...(thinkingOverride ? { thinking: thinkingOverride } : {}),
       });
       stopReason = resp.stopReason;
       lastUsage = resp.lastUsage;
@@ -777,7 +865,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     if (!renderer.isDestroyed) renderer.destroy();
   }
 
-  function toggleThinking(): void {
+  /** Ctrl+O：折叠态翻转（thinkingExpanded），语义与 /thinking 开关无关。 */
+  function toggleThinkingFold(): void {
     setThinkingExpanded((prev) => !prev);
   }
 
@@ -944,13 +1033,50 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         return;
       case "info": {
         setNotice({
-          lines: infoLines(active, activeKey, props.bridge.contextWindow),
+          lines: infoLines(active, activeKey, props.bridge.contextWindow, {
+            enabled: thinkingEnabled,
+            effort: thinkingEffort,
+          }),
         });
         return;
       }
-      case "thinking":
-        toggleThinking();
+      case "thinking": {
+        // design-25 picker（双面板版）：/thinking 打开纯开关面板（ON/OFF），
+        // 不设 notice（面板本身即反馈）。seed 自当前 thinkingEnabled；Enter/
+        // Space/Tab 翻转预览、Esc 保存退出写 thinkingEnabled。不碰 effort。
+        setThinkingPickerOpen("thinking");
+        setSwitchPreview(thinkingEnabled);
         return;
+      }
+      case "effort": {
+        const level = parseEffortLevel(text);
+        // design-25 picker（双面板版）：/effort 打开纯档位面板。有合法档参 →
+        // 打开并直接固定该档（Enter 预览亦可移档、再固定）；无参 → 打开面板
+        // seed 当前已提交档（用户点名：/effort 无参也要打开面板）；仅当输入了
+        // 非法 concrete 档（如 /effort auto）才走 notice 提示可用档位。
+        if (level === undefined && effortHasArg(text)) {
+          setNotice({
+            lines: [
+              `当前：${
+                thinkingEnabled ? "自适应" : "off"
+              }（档位：${formatEffortLabel(
+                thinkingEffort
+              )}）/ 可用：${ADJUSTABLE_EFFORT_LEVELS.join(
+                " "
+              )} / 用法：/effort <level>`,
+            ],
+          });
+          return;
+        }
+        const seed = level ?? thinkingEffort; // 无参 → seed 当前已提交档
+        setThinkingPickerOpen("effort");
+        // auto 态 seed：无参且当前是自适应（thinkingEffort=""）→ autoOn=true
+        // （面板灰显自适应态，Esc 保持 auto 写 ""）；显式档位 → autoOn=false。
+        setEffortAutoOn(seed === "");
+        setEffortFocusIndex(effortToDisplayIndex(seed));
+        setEffortFixedIndex(effortToDisplayIndex(seed)); // /effort <level> 直接固定该档
+        return;
+      }
       case "compact": {
         if (active.runState !== "idle") {
           setNotice({
@@ -1043,10 +1169,70 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       return;
     }
     if (view !== "chat") return;
-    // Ctrl+O：切换思考面板（展开/折叠）。toggleThinking 翻转 state —
-    // /thinking 仍然可独立切换。
+    // Ctrl+O：切换思考面板折叠态（展开/折叠）。toggleThinkingFold 只翻折叠，
+    // 与 /thinking 的开关（thinkingEnabled）解耦。
     if (e.ctrl && e.name === "o") {
-      toggleThinking();
+      toggleThinkingFold();
+      return;
+    }
+    // design-25 thinking-picker（双面板版）：picker 活跃时独占键位。优先级纪律
+    // （spec §0）：Ctrl 组合（含 Ctrl+O/Ctrl+C）> picker > rewind > 双 Esc >
+    // ask modal。本分支插在 Ctrl 分支之后、rewind 分支之前 —— ctrl/meta 组合由
+    // reducer 判 ignore 不吞（Ctrl+C/O 照常到 app 层）。交互语义（SSOT）：
+    // Enter 固定（面板保持打开，可继续调）、Esc 保存退出（写入真实 state，无
+    // cancel 路径）。
+    if (thinkingPickerOpen === "thinking") {
+      const action = reduceThinkingSwitchKey(modalKeyEventOf(e));
+      switch (action.type) {
+        case "toggle":
+          // Space/Tab：翻转面板内开关预览，面板保持打开。
+          setSwitchPreview((prev) => !prev);
+          break;
+        case "fix":
+          // Enter：固定当前预览（无翻转、面板保持打开）——「回车选定后固定而不
+          // 是退出」。开关面板只有 ON/OFF 两态，fix 即确认当前预览值，无需改
+          // switchPreview；写不写都在 Esc 时落盘。
+          break;
+        case "commit":
+          // Esc：把面板内已固定值写真实 thinkingEnabled，然后关闭。
+          setThinkingEnabled(switchPreview);
+          setThinkingPickerOpen(null);
+          break;
+        case "ignore":
+          break;
+      }
+      return;
+    }
+    if (thinkingPickerOpen === "effort") {
+      const action = reduceThinkingEffortKey(modalKeyEventOf(e), {
+        focusedIndex: effortFocusIndex,
+      });
+      switch (action.type) {
+        case "move":
+          // ←/→：移动焦点游标，面板保持打开。
+          setEffortFocusIndex(action.index);
+          break;
+        case "fix":
+          // Enter：把焦点档固定为面板内已提交档，面板保持打开。
+          setEffortFixedIndex(effortFocusIndex);
+          break;
+        case "toggleAuto":
+          // Space/Tab：切换自适应 auto 态，面板保持打开。
+          setEffortAutoOn((prev) => !prev);
+          break;
+        case "commit": {
+          // Esc：autoOn → 写 ""=自适应（保持 auto，不降级）；否则写已固定 concrete
+          // 档。均隐式开思考，然后关闭。
+          setThinkingEffort(
+            effortAutoOn ? "" : indexToEffort(effortFixedIndex)
+          );
+          setThinkingEnabled(true); // 隐式开思考（选档即开，spec §0 语义）
+          setThinkingPickerOpen(null);
+          break;
+        }
+        case "ignore":
+          break;
+      }
       return;
     }
     // T6 rewind picker 活跃时独占键位（Esc 走 cancel；↑/↓ 移动；Enter 在
@@ -1163,6 +1349,24 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       : rewindTargets !== undefined
         ? rewindModalRows(rewindTargets, cols, rewindIndex, rewindConfirming)
         : 0;
+  // design-25 thinking-picker 行账：picker 打开 → thinking 5 行 / effort 7 行
+  // + marginBottom 1 并入 chrome 预算（与 modalRows 同款），否则 viewport 高度被挤。
+  const pickerRowsForBudget =
+    view === "chat" && thinkingPickerOpen !== null
+      ? thinkingPickerRows(thinkingPickerOpen)
+      : 0;
+  // 面板判别联合（渲染槽 + 类型标注共用，SSOT）。
+  const pickerState: ThinkingPickerState | null =
+    view === "chat" && thinkingPickerOpen !== null
+      ? thinkingPickerOpen === "thinking"
+        ? { kind: "thinking", enabled: switchPreview }
+        : {
+            kind: "effort",
+            focusedIndex: effortFocusIndex,
+            currentIndex: effortFixedIndex,
+            autoOn: effortAutoOn,
+          }
+      : null;
   const viewportRows = Math.max(
     5,
     rows -
@@ -1171,6 +1375,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         inputHintRows: hintRows,
         bgLine,
         modalRows: modalRowsForBudget,
+        pickerRows: pickerRowsForBudget,
       })
   );
   // 列表视图（ListView 路径）：底部仅 notice 占用，与 headroom 2 行。
@@ -1249,6 +1454,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           ))}
         </box>
       )}
+      {pickerState !== null && <ThinkingPicker state={pickerState} />}
       {view === "chat" && (
         <ModalHost
           modal={
@@ -1290,14 +1496,22 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           placeholder={
             rewindTargets !== undefined
               ? "回退选择器中（↑↓ 选择 · Enter 确认 · Esc 关闭）"
-              : askPending
-                ? askModalActive
-                  ? "modal 键位接管中（Esc 退回输入）"
-                  : "y/a/n 确认工具授权（a=总是允许）"
-                : "输入消息或 /help"
+              : thinkingPickerOpen === "thinking"
+                ? "思考开关中（Space 切换 · Enter 固定 · Esc 保存退出）"
+                : thinkingPickerOpen === "effort"
+                  ? "思考强度中（←/→ 选档 · Tab 自动 · Enter 固定 · Esc 保存退出）"
+                  : askPending
+                    ? askModalActive
+                      ? "modal 键位接管中（Esc 退回输入）"
+                      : "y/a/n 确认工具授权（a=总是允许）"
+                    : "输入消息或 /help"
           }
           active={active.runState === "running-fg"}
-          disabled={askModalActive || rewindTargets !== undefined}
+          disabled={
+            askModalActive ||
+            rewindTargets !== undefined ||
+            thinkingPickerOpen !== null
+          }
           onChange={setInputValue}
           onSubmit={(v) => void handleSubmit(v)}
           onSelectHint={(candidate) => {
@@ -1309,7 +1523,17 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             // 否则（部分输入如 /ec，或 hint 选中非当前 token 的 skill）→
             // 补全 `/name ` 形态发送。
             if (candidate.kind === "command") {
-              void handleSubmit(`/${candidate.command}`);
+              // 保留用户已输入的 remainder：input 首 token 精确命中同 command
+              // （如 /effort high → effort）→ 提整个 raw（含参数）；否则
+              // （部分输入如 /q，或 hint 选中非当前 token 的 command）→
+              // 补全 `/{cmd}` 形态发送。首 token 复用 slash.ts 的 slashPrefix
+              // （reviewer Medium#3：Feature Envy 收敛）。
+              const firstTok = slashPrefix(inputValue);
+              if (firstTok === candidate.command) {
+                void handleSubmit(inputValue);
+              } else {
+                void handleSubmit(`/${candidate.command}`);
+              }
             } else {
               const load = parseSkillLoad(inputValue, skillList);
               if (load !== undefined && load.name === candidate.name) {
@@ -1339,6 +1563,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             running={active.runState === "running-fg"}
             cols={cols}
             activeToolName={activeToolName}
+            model={props.model}
+            effortLabel={
+              thinkingEnabled ? formatEffortLabel(thinkingEffort) : "off"
+            }
           />
         </box>
       )}
@@ -1354,7 +1582,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
 function infoLines(
   session: TuiSessionState,
   key: string,
-  contextWindow: number
+  contextWindow: number,
+  thinking: { readonly enabled: boolean; readonly effort: ThinkingEffortWire }
 ): ReadonlyArray<string> {
   const lu = session.lastUsage;
   const tokenLines =
@@ -1365,6 +1594,12 @@ function infoLines(
           `cache read: ${lu.cacheReadInputTokens}`,
           `window: ${contextWindow}`,
         ];
+  // thinking 档位行：off / adaptive (auto) / adaptive (high) 等。effort 空串
+  // 且 enabled → "auto"（未显式指定档位）；展示标签复用 formatEffortLabel
+  // （reviewer Medium#2：消除 `|| "auto"` 重复）。
+  const thinkingLine = thinking.enabled
+    ? `thinking: adaptive (${formatEffortLabel(thinking.effort)})`
+    : "thinking: off";
   return [
     `conversation_id: ${session.conversationId ?? key}（${
       session.conversationId ? "已建档" : "draft，首条消息后建档"
@@ -1374,6 +1609,7 @@ function infoLines(
     `jsonMode: ${session.jsonMode}`,
     `runState: ${session.runState}`,
     ...tokenLines,
+    thinkingLine,
   ];
 }
 

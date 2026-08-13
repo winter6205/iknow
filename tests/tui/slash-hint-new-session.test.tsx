@@ -122,6 +122,31 @@ async function mountAppAsync(
   };
 }
 
+describe("#377 系列 /effort：hint 候选 → Enter 选中触发", () => {
+  test('输入 "/ef" → 唯一候选 effort → Enter 触发（打开档位面板）', async () => {
+    const app = await mountAppAsync([
+      assistantResult({ texts: ["new-draft-reply"] }),
+    ]);
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+    await untilFrame(app.setup, (f) => f.includes("输入消息"));
+
+    // 输入 "/ef" → slashSuggestions 唯一命中 effort（静态命令）。
+    await app.typeText("/ef");
+
+    // Enter → onSelectHint(effort) → handleSubmit("/effort") → effort 无参 →
+    // 打开档位面板（seed 当前档，标题「思考强度」可见）。
+    await app.pressEnter();
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("思考强度"),
+      8000,
+      "effort-hint"
+    );
+
+    await app.destroy();
+  }, 30_000);
+});
+
 describe('任务 B："/" 出现候选 → ↓ → Enter 触发 /new', () => {
   test('"/" 出现候选 → ↓ → Enter 触发 /new（不退出，验证选中索引非 0）', async () => {
     const app = await mountAppAsync([

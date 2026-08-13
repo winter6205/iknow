@@ -148,6 +148,102 @@ describe("loadIknowSettings — settings 文件机制 (#353)", () => {
     assert.deepEqual(loadIknowSettings({ home, cwd }), {});
   });
 
+  it('合法 thinking / thinkingEffort 透传：{ thinking: "adaptive", thinkingEffort: "high" }', async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { thinking: "adaptive", thinkingEffort: "high" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { thinking: "adaptive", thinkingEffort: "high" },
+    });
+  });
+
+  it("thinking 合法值 off / adaptive 均透传", async () => {
+    for (const v of ["off", "adaptive"]) {
+      const { home, cwd } = await makeSettings({ llm: { thinking: v } }, {});
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        { llm: { thinking: v } },
+        `thinking=${v} 应透传`
+      );
+    }
+  });
+
+  it("project 覆盖 user 的 thinking / thinkingEffort（同字段替换）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { thinking: "adaptive", thinkingEffort: "low" } },
+      { llm: { thinking: "off", thinkingEffort: "max" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { thinking: "off", thinkingEffort: "max" },
+    });
+  });
+
+  it("逐层合并：project 只设置 thinking → 保留 user 的 thinkingEffort", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { thinking: "adaptive", thinkingEffort: "high" } },
+      { llm: { thinking: "off" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { thinking: "off", thinkingEffort: "high" },
+    });
+  });
+
+  it('非法 thinking（"ON" 大写 / 1 / "adaptive!"）→ 丢弃', async () => {
+    for (const bad of ["ON", 1, "adaptive!"]) {
+      const { home, cwd } = await makeSettings({ llm: { thinking: bad } }, {});
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `thinking=${bad} 应丢弃`
+      );
+    }
+  });
+
+  it('非法 thinkingEffort（"huge" / "Medium" 大写 / 0）→ 丢弃', async () => {
+    for (const bad of ["huge", "Medium", 0]) {
+      const { home, cwd } = await makeSettings(
+        { llm: { thinkingEffort: bad } },
+        {}
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `thinkingEffort=${bad} 应丢弃`
+      );
+    }
+  });
+
+  it("thinkingEffort 空串 → 视为缺失（不产出字段，其余字段保留）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { thinking: "adaptive", thinkingEffort: "" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { thinking: "adaptive" },
+    });
+  });
+
+  it("仅 llm.thinking（无 maxTurns/compress）→ llm 层不被丢弃", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { thinking: "adaptive" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { thinking: "adaptive" },
+    });
+  });
+
+  it("仅 llm.thinkingEffort（无 maxTurns/compress）→ llm 层不被丢弃", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { thinkingEffort: "max" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { thinkingEffort: "max" },
+    });
+  });
+
   it("project 非法值不覆盖 user 合法值（保留 user 值）", async () => {
     const { home, cwd } = await makeSettings(
       { llm: { maxTurns: 20 } },

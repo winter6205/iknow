@@ -30,6 +30,10 @@ import {
 const noKey = {
   upArrow: false,
   downArrow: false,
+  leftArrow: false,
+  rightArrow: false,
+  tab: false,
+  space: false,
   return: false,
   escape: false,
   ctrl: false,
