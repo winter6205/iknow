@@ -47,10 +47,34 @@ export const INPUT_MAX_LINES = 8;
  *
  * 注意：本函数计 *logical*（换行分割）行数，不计 wrapMode 视觉折行。
  * 命名保留 `Visible` 是历史原因（chromeReserveRows 早期调用），避免
- * 公开 API 改名；新代码如需 wrap-aware 行数请自行实现。T8。
+ * 公开 API 改名；新代码如需 wrap-aware 行数请用 `inputWrapLineCount`（T9 修复
+ * "输入多少都是一行"）。T8/T9。
  */
 export function inputVisibleLineCount(value: string): number {
   return value.split("\n").length;
+}
+
+/**
+ * T9：wrap-aware 输入框可见行数 —— 按终端列宽计算视觉折行后的实际行数。
+ * 长文本无 `\n` 但超过 cols 时也会拉伸（修 2026-08-14 用户反馈「输入多少都是一行」）。
+ * `cols` = 终端列宽；内部可用列宽扣减 chrome（圆角边框 2 + paddingX 2 + ❯ 2 = 6）。
+ * visualWidth 已按 CJK 2 列计算，与 OpenTUI textarea wrapMode="word" 同源。
+ */
+export function inputWrapLineCount(value: string, cols: number): number {
+  const INNER_CHROME_COLS = 6;
+  const innerCols = Math.max(1, cols - INNER_CHROME_COLS);
+  if (value.length === 0) return 1;
+  let total = 0;
+  for (const line of value.split("\n")) {
+    if (line.length === 0) {
+      total += 1;
+      continue;
+    }
+    // 按 innerCols 视觉宽度累计；超宽行折成 ceil(visualWidth/innerCols) 行。
+    const w = visualWidth(line);
+    total += Math.max(1, Math.ceil(w / innerCols));
+  }
+  return total;
 }
 
 /**
@@ -244,12 +268,14 @@ export function PromptInput(props: PromptInputProps): ReactNode {
   }
 
   const borderColor = props.active ? pal.running : pal.border;
-  // T8 高度自适应：按 `\n` 逻辑行数封顶 maxLines（达上限后 textarea 内部滚动）。
-  // 行数计算复用 inputVisibleLineCount（SSOT，与 chromeReserveRows 共享）。
+  // T9 高度自适应：按 wrap-aware 视觉折行行数封顶 maxLines（达上限后 textarea
+  // 内部滚动）。长文本无 `\n` 但超宽时也会拉伸（2026-08-14 用户反馈「输入多少
+  // 都是一行」）。行数计算复用 inputWrapLineCount（SSOT，与 chromeReserveRows
+  // 共享 wrap-aware 口径）。
   const maxLines = props.maxLines ?? INPUT_MAX_LINES;
   const visibleLines = Math.max(
     1,
-    Math.min(inputVisibleLineCount(props.value), maxLines)
+    Math.min(inputWrapLineCount(props.value, props.cols), maxLines)
   );
 
   return (

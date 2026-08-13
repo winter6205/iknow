@@ -128,6 +128,7 @@ import { ContextBar } from "./context-bar.js";
 import {
   INPUT_MAX_LINES as MAX_INPUT_LINES,
   inputVisibleLineCount,
+  inputWrapLineCount,
   PromptInput,
 } from "./prompt-input.js";
 // T8 — chromeReserveRows 行账封顶由 INPUT_MAX_LINES（prompt-input SSOT）
@@ -147,8 +148,11 @@ import { createSkillBody } from "../harness/skill/body.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
 import { extractSummary } from "../session-api/store/schema.js";
 
-/** T8：chromeReserveRows 行账封顶常量与可见行数计算函数的本地重导出（SSOT 实际定义在 prompt-input.tsx，避免两模块各持 "8" 常量飘移）。 */
-export { inputVisibleLineCount, MAX_INPUT_LINES };
+/** T8/T9：chromeReserveRows 行账封顶常量与可见行数计算函数的本地重导出
+ *  （SSOT 实际定义在 prompt-input.tsx，避免两模块各持 "8" 常量飘移）。
+ *  T9 加 inputWrapLineCount（wrap-aware 视觉折行行数）—— 修长文本无 `\n`
+ *  时输入框高度不增长的回归（2026-08-14 用户反馈「输入多少都是一行」）。 */
+export { inputVisibleLineCount, inputWrapLineCount, MAX_INPUT_LINES };
 
 /**
  * notice 文本按视觉宽度折行后行数（行账 SSOT，纯函数可单测）。
@@ -415,10 +419,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const [streamDraft, setStreamDraft] = useState<StreamDraft | null>(null);
   const [draftsMasked, setDraftsMasked] = useState<string>("");
   const [thinkingDraftMasked, setThinkingDraftMasked] = useState<string>("");
+  // 流式 thinking 经过秒数（折叠面板「思考中… N 秒」）。streamDraft 自身
+  // 只在 delta 到达时 notify（不会每秒推），故加 1Hz interval 主动拉秒数。
+  const [thinkingSeconds, setThinkingSeconds] = useState(0);
   useEffect(() => {
     if (streamDraft === null) {
       setDraftsMasked("");
       setThinkingDraftMasked("");
+      setThinkingSeconds(0);
       return undefined;
     }
     const unsubscribe = streamDraft.subscribe(() => {
@@ -426,11 +434,22 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       startTransition(() => {
         setDraftsMasked(streamDraft.masked());
         setThinkingDraftMasked(streamDraft.thinkingMasked());
+        setThinkingSeconds(streamDraft.thinkingSeconds());
       });
     });
     setDraftsMasked(streamDraft.masked());
     setThinkingDraftMasked(streamDraft.thinkingMasked());
-    return unsubscribe;
+    setThinkingSeconds(streamDraft.thinkingSeconds());
+    // 秒数每秒变：仅 thinking 进行中需要 tick（thinkingDraftMasked 非空）。
+    const tick = setInterval(() => {
+      if (streamDraft.thinkingRaw().length > 0) {
+        setThinkingSeconds(streamDraft.thinkingSeconds());
+      }
+    }, 1000);
+    return () => {
+      clearInterval(tick);
+      unsubscribe();
+    };
   }, [streamDraft]);
 
   // ── 退出 / 打断 / inflight 簿记 ────────────────────────────────
@@ -1425,9 +1444,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             autoOn: effortAutoOn,
           }
       : null;
-  // T8：输入框行账动态化 —— 内容行数按 textarea 逻辑行（封顶由
-  // chromeReserveRows 内部做，SSOT 防误传；超出部分 textarea 内部滚动）。
-  const inputContentRows = inputVisibleLineCount(inputValue);
+  // T9：输入框行账动态化 —— wrap-aware 视觉折行行数（修 2026-08-14 用户反馈
+  // 「输入多少都是一行」：长文本无 `\n` 时按 cols 折行计视觉行数）。封顶由
+  // chromeReserveRows 内部做（SSOT 防误传）；超出部分 textarea 内部滚动。
+  const inputContentRows = inputWrapLineCount(inputValue, cols);
   const viewportRows = Math.max(
     5,
     rows -
@@ -1485,6 +1505,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             rows={viewportRows}
             draftsMasked={draftsMasked}
             thinkingDraftMasked={thinkingDraftMasked}
+            thinkingSeconds={thinkingSeconds}
             liveToolLines={
               active.conversationId
                 ? (liveToolLines[active.conversationId] ?? [])

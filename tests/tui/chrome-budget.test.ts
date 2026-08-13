@@ -17,6 +17,7 @@ import {
   bgStatusLine,
   chromeReserveRows,
   inputVisibleLineCount,
+  inputWrapLineCount,
   noticeRenderRows,
 } from "../../src/tui/app.js";
 import { thinkingPickerRows } from "../../src/tui/thinking-picker.js";
@@ -248,6 +249,64 @@ describe("inputVisibleLineCount", () => {
     expect(b - a).toBe(1);
     expect(b).toBe(c);
     expect(c).toBe(d);
+  });
+});
+
+describe("inputWrapLineCount: T9 wrap-aware 输入框行数（修「输入多少都是一行」）", () => {
+  test("空字符串 → 1 行", () => {
+    expect(inputWrapLineCount("", 80)).toBe(1);
+  });
+
+  test("短文本无换行 → 1 行（cols=80）", () => {
+    expect(inputWrapLineCount("hello", 80)).toBe(1);
+  });
+
+  test("长 ASCII 文本无换行（100 字符，cols=80）→ ceil(100/74)=2 行（innerCols=cols-6）", () => {
+    // innerCols = 80 - 6 = 74（圆角 2 + paddingX 2 + ❯ 2）
+    expect(inputWrapLineCount("x".repeat(100), 80)).toBe(2);
+  });
+
+  test("超长 ASCII 文本（300 字符，cols=80）→ ceil(300/74)=5 行", () => {
+    expect(inputWrapLineCount("x".repeat(300), 80)).toBe(5);
+  });
+
+  test("CJK 按视觉宽度（2 列）折行：50 字 CJK × 2 = 100 视觉列 / 74 = 2 行", () => {
+    expect(inputWrapLineCount("测".repeat(50), 80)).toBe(2);
+  });
+
+  test("窄终端 cols=20：innerCols=14，长文本 'xxx...' 折多行", () => {
+    // 50 字符 ASCII / 14 = 4 行
+    expect(inputWrapLineCount("x".repeat(50), 20)).toBe(4);
+  });
+
+  test("换行 + 折行混合：'a\\n' + 长行（200 字符，cols=80）→ 1 + ceil(200/74)=1 + 3 = 4", () => {
+    expect(inputWrapLineCount("a\n" + "x".repeat(200), 80)).toBe(4);
+  });
+
+  test("尾部换行 → 空行也计入（'a\\nb\\n' = 3 行）", () => {
+    expect(inputWrapLineCount("a\nb\n", 80)).toBe(3);
+  });
+
+  test("cols=0 / cols=5 极端：innerCols 被 Math.max(1,..) 守护为 1", () => {
+    expect(inputWrapLineCount("ab", 0)).toBe(2); // innerCols=1 → a=1, b=1
+    expect(inputWrapLineCount("a", 5)).toBe(1); // innerCols=1 → 1 行
+  });
+
+  test("T9 chrome 联动：长无换行文本 → chromeReserveRows 行账同步增长", () => {
+    // 80 字符 ASCII, cols=80 → wrap-aware = 2 行 → chrome inputRows=2 比 1 大 1
+    const base = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+    });
+    const expanded = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: inputWrapLineCount("x".repeat(80), 80),
+    });
+    expect(expanded - base).toBe(1);
   });
 });
 
