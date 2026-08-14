@@ -138,6 +138,7 @@ import {
 import { renderBannerLines, VERSION } from "./banner.js";
 import { copyToClipboard, type CopyResult } from "./clipboard.js";
 import { summarizeToolCall } from "./tool-summary.js";
+import { formatRunDuration } from "./run-stats.js";
 import { tuiPalette } from "./theme.js";
 import {
   applyShiftTabModeFlip,
@@ -422,11 +423,37 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // 流式 thinking 经过秒数（折叠面板「思考中… N 秒」）。streamDraft 自身
   // 只在 delta 到达时 notify（不会每秒推），故加 1Hz interval 主动拉秒数。
   const [thinkingSeconds, setThinkingSeconds] = useState(0);
+  // 最近一次 turn 的 thinking 最终秒数（turn 结束快照）。供历史消息末条
+  // assistant 折叠行显示「思考了 N 秒」留存。**未按会话 key**：仅显示末条
+  // assistant 的留存，且与 mode 行 Crunched 同 turn 写入（同 runTurnOnce
+  // finally），非本 turn 不会读到；切换会话后末条 assistant 仍会带旧 turn
+  // 的 thinking 秒数（已知限制，未做归属校验，与原实现一致）。
+  const [lastThinkingSeconds, setLastThinkingSeconds] = useState(0);
+  // thinking 冻结秒数（answer 开始时刻快照）：思考结束、进入 answer 输出后，
+  // 折叠行从「思考中… N 秒」切「思考了 N 秒」。存 **ref** —— tick 是异步
+  // interval，runTurnOnce 的 finally 读的是旧闭包（stale closure 会读到 0）；
+  // ref 是可变引用，finally 永远读到最新冻结值。首次冻结后不再覆盖（防
+  // answer 阶段虚涨），由 runTurnOnce 入口清 0。
+  const thinkingFrozenRef = useRef(0);
+  // 渲染用镜像（ref 不触发重渲染，UI 需 state）。frozen>0 时 ChatView 显示
+  // 「思考了 N 秒」，否则按 thinkingSeconds 走「思考中… N 秒」。
+  const [thinkingFrozenSeconds, setThinkingFrozenSeconds] = useState(0);
+  // 运行时长统计（mode 行右侧实时秒数）：turn 开始打点、运行中 1Hz 递增、
+  // turn 结束冻结。runStartedAt 非空 = 运行中（mode 行显示 `· Xs`）；
+  // 置 null = 结束（mode 行清空，统计移到消息流末尾 Crunched 行）。
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  const [runElapsed, setRunElapsed] = useState(0);
+  // 最近一次完成 turn 的会话归属 + 快照秒数。runTurnOnce 入口清空（运行中
+  // 不显示上次总结），finally 写入；ChatView 仅在 `crunchedOf === activeKey`
+  // 时接收 crunchedSeconds，避免跨会话错配（跟旧 runStatsOf 同款所有权校验）。
+  const [crunchedOf, setCrunchedOf] = useState<string | null>(null);
+  const [crunchedSeconds, setCrunchedSeconds] = useState(0);
   useEffect(() => {
     if (streamDraft === null) {
       setDraftsMasked("");
       setThinkingDraftMasked("");
       setThinkingSeconds(0);
+      setThinkingFrozenSeconds(0);
       return undefined;
     }
     const unsubscribe = streamDraft.subscribe(() => {
@@ -441,9 +468,19 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     setThinkingDraftMasked(streamDraft.thinkingMasked());
     setThinkingSeconds(streamDraft.thinkingSeconds());
     // 秒数每秒变：仅 thinking 进行中需要 tick（thinkingDraftMasked 非空）。
+    // answer 已开始（masked 非空）→ thinking 阶段结束 → 冻结秒数一次（ref，
+    // 不再覆盖，防 answer 阶段虚涨）。
     const tick = setInterval(() => {
       if (streamDraft.thinkingRaw().length > 0) {
-        setThinkingSeconds(streamDraft.thinkingSeconds());
+        if (streamDraft.masked().length > 0) {
+          if (thinkingFrozenRef.current === 0) {
+            const frozen = streamDraft.thinkingSeconds();
+            thinkingFrozenRef.current = frozen;
+            setThinkingFrozenSeconds(frozen);
+          }
+        } else {
+          setThinkingSeconds(streamDraft.thinkingSeconds());
+        }
       }
     }, 1000);
     return () => {
@@ -585,6 +622,15 @@ export function TuiApp(props: TuiAppProps): ReactNode {
 
   // ── 派生：active 会话 + 输入候选 + permissionIndex/active ──────
   const active = sessions[activeKey] ?? initial;
+  // 1Hz 运行时 tick：running-fg 且已打点 → 递增 runElapsed（与 thinking 秒数
+  // tick 同纪律——只读 ref/state，不触发额外 setState 风暴）。
+  useEffect(() => {
+    if (active.runState !== "running-fg" || runStartedAt === null) return;
+    const tick = setInterval(() => {
+      setRunElapsed(Math.floor((Date.now() - runStartedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(tick);
+  }, [active.runState, runStartedAt]);
   // #337 Phase C：skillCatalog 可选（缺省 = 空清单）；available() = 非 disabled
   // + 有 description、名字序。slash 候选混显「静态命令 + skill」。
   const skillCatalog = props.skillCatalog ?? emptySkillCatalog;
@@ -813,6 +859,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     let interrupted: boolean | undefined;
     const draft = createStreamDraft();
     setStreamDraft(draft);
+    // 运行时长打点：turn 起始时刻（mode 行统计段「运行中」实时递增用）。
+    const startedAt = Date.now();
+    setRunStartedAt(startedAt);
+    setRunElapsed(0);
+    // 本 turn 独立 thinking 冻结会话：清 ref（tick 首次冻结时重写）。
+    thinkingFrozenRef.current = 0;
+    setThinkingFrozenSeconds(0);
+    // 清掉上次总结：新 turn 开始后流末尾不再显示旧总结（app 层 ↔ chat-view
+    // 通过 crunchedOf 归属校验）。
+    setCrunchedOf(null);
     const onStream = (event: HarnessStreamEvent): void => {
       draft.append(event);
       if (event.type === "tool_call_start") {
@@ -867,8 +923,32 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       setNotice({ lines: [`turn 失败：${describeError(err)}`] });
     } finally {
       aborters.current.delete(targetId);
+      // 快照本次 turn 的 thinking 最终秒数（reset 会置 0，必须先取）。
+      // 留存到历史消息 thinking 折叠行「思考了 N 秒」，thinking 结束后不消失。
+      // 优先用 thinking 冻结值（ref —— 异步 finally 读最新值，无 stale closure；
+      // answer 开始时刻，精确对应「思考结束」）；无冻结（turn 在 answer 前结束，
+      // 如 abort）→ 回落 draft 现值。finalThinkingSeconds 恒写入（含 0）——
+      // 防子秒 thinking 的 turn 继承上一 turn 残留秒数。
+      const finalThinkingSeconds =
+        thinkingFrozenRef.current > 0
+          ? thinkingFrozenRef.current
+          : draft.thinkingSeconds();
       draft.reset();
       setStreamDraft(null);
+      thinkingFrozenRef.current = 0;
+      setThinkingFrozenSeconds(0);
+      setLastThinkingSeconds(finalThinkingSeconds);
+      // 运行时长冻结：turn 结束精确值（含工具耗时尾段，tick 可能未覆盖）。
+      // crunchedOf = 归属会话 id —— 只有当前 active 会话等于它时 ChatView
+      // 才接收 crunchedSeconds（消息流末尾 Crunched 行），避免跨会话错配。
+      const finalRunSeconds = Math.max(
+        0,
+        Math.floor((Date.now() - startedAt) / 1000)
+      );
+      setRunElapsed(finalRunSeconds);
+      setRunStartedAt(null);
+      setCrunchedOf(targetId);
+      setCrunchedSeconds(finalRunSeconds);
     }
     try {
       const file = await props.bridge.loadSessionFile(targetId);
@@ -1506,6 +1586,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             draftsMasked={draftsMasked}
             thinkingDraftMasked={thinkingDraftMasked}
             thinkingSeconds={thinkingSeconds}
+            lastThinkingSeconds={lastThinkingSeconds}
+            thinkingFrozenSeconds={thinkingFrozenSeconds}
             liveToolLines={
               active.conversationId
                 ? (liveToolLines[active.conversationId] ?? [])
@@ -1525,6 +1607,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             }
             thinkingExpanded={thinkingExpanded}
             bannerLines={bannerLines}
+            crunchedSeconds={
+              crunchedOf === activeKey ? crunchedSeconds : undefined
+            }
           />
         </>
       )}
@@ -1564,12 +1649,20 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         />
       )}
       {view === "chat" && (
-        <box>
+        <box flexDirection="row">
           <text fg={permMode === "full_auto" ? pal.running : pal.dim}>
             {cols < 40
               ? `[${permMode === "full_auto" ? "auto" : "def"}]`
               : `mode: ${modeLabel(permMode)}`}
           </text>
+          {/* mode 右侧运行中实时显示秒数（`· Xs`，每秒跳）；结束后清空（mode
+              行不残留，统计移到流末尾 `Crunched for X` 行）。实时 token 计算
+              暂不做（#426 修订：先不上 token 数量计算）。 */}
+          {cols >= 40 &&
+            active.runState === "running-fg" &&
+            runStartedAt !== null && (
+              <text fg={pal.dim}>{` · ${formatRunDuration(runElapsed)}`}</text>
+            )}
         </box>
       )}
       {view === "chat" && (

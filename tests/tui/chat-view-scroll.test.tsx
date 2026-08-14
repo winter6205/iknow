@@ -391,3 +391,141 @@ test("thinking 折叠态：默认 1 行 [思考]，展开时显示全文", async
   expect(frameFolded.includes("链上推理")).toBe(false);
   await setup1.renderer.destroy();
 });
+
+test("thinking 留存：lastThinkingSeconds 传给末条 assistant 折叠行 → 「思考了 N 秒」", async () => {
+  // 场景：turn 结束后流式面板消失，但秒数由历史消息末条 assistant 的折叠行
+  // 接棒（app 层在 runTurnOnce finally 快照 → ChatView.lastThinkingSeconds）。
+  const initial = sessionWith([
+    msg("m-1", "user", "复杂问题"),
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "链上推理", signature: "sig-1" },
+        { type: "text", text: "正式回答" },
+      ],
+    },
+  ]);
+  const setup1 = await testRender(
+    <ChatView
+      session={initial}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      thinkingExpanded={false}
+      lastThinkingSeconds={4}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup1.waitForVisualIdle();
+  const frame = setup1.captureCharFrame();
+  // 末条 assistant 折叠行显示「思考了 4 秒」留存（非纯 [思考] 标记）。
+  expect(frame).toContain("思考了 4 秒");
+  await setup1.renderer.destroy();
+});
+
+test("流式 thinking 冻结：answer 开始后折叠行显示「思考了 N 秒」而非「思考中…」", async () => {
+  // 场景：turn 运行中，thinking 阶段已结束（answer 开始）→ app 层冻结秒数
+  // （thinkingFrozenSeconds）→ 折叠行从「思考中… N 秒」切「思考了 N 秒」，
+  // 秒数留存（不再递增）。
+  const initial = sessionWith(makeMessages(1));
+  const setup1 = await testRender(
+    <ChatView
+      session={{ ...initial, runState: "running-fg" }}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      thinkingExpanded={false}
+      thinkingDraftMasked="链上推理…"
+      thinkingFrozenSeconds={6}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup1.waitForVisualIdle();
+  const frame = setup1.captureCharFrame();
+  expect(frame).toContain("思考了 6 秒");
+  expect(frame.includes("思考中")).toBe(false);
+  await setup1.renderer.destroy();
+});
+
+test("thinking 留存：lastThinkingSeconds 不作用于非末条 assistant 消息", async () => {
+  // 前一条（非末条）assistant 带 thinking 的折叠行应保持 `[思考]`——秒数
+  // 只属于刚结束的 turn（末条），历史消息不伪精度。
+  const initial = sessionWith([
+    msg("m-1", "user", "旧问题"),
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "旧推理", signature: "sig-old" },
+        { type: "text", text: "旧回答" },
+      ],
+    },
+    msg("m-2", "user", "新问题"),
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "新推理", signature: "sig-new" },
+        { type: "text", text: "新回答" },
+      ],
+    },
+  ]);
+  const setup1 = await testRender(
+    <ChatView
+      session={initial}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      thinkingExpanded={false}
+      lastThinkingSeconds={7}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup1.waitForVisualIdle();
+  const frame = setup1.captureCharFrame();
+  // 末条「新回答」的折叠行带 7 秒；前一条「旧回答」的折叠行保持 [思考]。
+  expect(frame).toContain("思考了 7 秒");
+  expect(frame).toContain("[思考]");
+  await setup1.renderer.destroy();
+});
+
+test("crunchedSeconds prop → 流末尾渲染 `Crunched for 3m 46s`", async () => {
+  // 最近一次完成 turn 的运行时长（app 层 finally 快照）在消息流末尾渲染：
+  // 末条消息之后、live tail 之前的 dim 留存行（formatRunDuration 纯格式化）。
+  const initial = sessionWith([
+    msg("m-1", "user", "复杂问题"),
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "正式回答" }],
+    },
+  ]);
+  const setup1 = await testRender(
+    <ChatView
+      session={initial}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      crunchedSeconds={226}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup1.waitForVisualIdle();
+  const frame = setup1.captureCharFrame();
+  // 完整端到端串（Crunched 前缀 + 时长段）——与 run-stats 单测分开，确保
+  // ChatView 渲染路径把 formatCrunched 的完整输出落到画面（非只时长段）。
+  expect(frame).toContain("Crunched for 3m 46s");
+  await setup1.renderer.destroy();
+});
+
+test("crunchedSeconds 0 / undefined → 不渲染 Crunched", async () => {
+  // 缺省 undefined（= 0）→ 消息流末尾不产 crunched 留存行；sub-second 回合
+  // （0 秒）同样不渲染 `0s`。
+  const initial = sessionWith(makeMessages(2));
+  const setup1 = await testRender(
+    <ChatView session={initial} cols={COLS} rows={ROWS} liveToolLines={[]} />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup1.waitForVisualIdle();
+  const frame = setup1.captureCharFrame();
+  expect(frame.includes("3m 46s")).toBe(false);
+  expect(frame.includes("46s")).toBe(false);
+  await setup1.renderer.destroy();
+});
