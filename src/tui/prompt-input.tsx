@@ -219,11 +219,53 @@ export function PromptInput(props: PromptInputProps): ReactNode {
       return;
     }
 
-    // ↑/↓：hint 可见时调 hint cursor；否则走历史召回。
+    // ↑/↓ 优先级：
+    //   1) hint 可见 → hint cursor；
+    //   2) 多行输入（逻辑 \n 多行或 wrap 视觉折行）→ 主动调 ta.moveCursorUp/Down
+    //      （视觉行移动），越界（已在视觉首/末行且移动是 no-op）才回退历史；
+    //   3) 单行 → 历史召回 / 草稿恢复。
+    // 多行判定以 `props.value` 为准（受控 state，提交/程序写入后端是真值）——
+    // 不以 `ta.plainText` 为主因提交瞬间 textarea buffer 尚未 setText("") 清空，
+    // 会误判 wrap 多行（#431/#436 回归场景：`hist-line` 在 80 列下 wrap 2 行）。
+    // 视觉首/末行判定用 `ta.visualCursor.visualRow + ta.scrollY`（文档级视觉行），
+    // 不用 onCursorChange 的 `line`（逻辑行，wrap 多行时恒 0 误判越界）。
+    // `inputWrapLineCount` 是 SSOT 纯函数（同文件 :63）。
+    const ta = textareaRef.current;
+    const isMultiline =
+      inputWrapLineCount(props.value, props.cols) > 1 ||
+      props.value.includes("\n");
+    // 文档级视觉行 = scrollY + visualRow（wrap 多行时 scrollY > 0；逻辑单行
+    // scrollY=0）。仅在多行分支内计算（单行路径不需要，避免 getter 开销/异常）。
+    const visualRowOf = (t: NonNullable<TextareaRenderable>): number =>
+      t.scrollY + t.visualCursor.visualRow;
+    // 视觉总行数（wrap-aware）。
+    const totalVisualRowsOf = (t: NonNullable<TextareaRenderable>): number =>
+      t.editorView.getTotalVirtualLineCount();
+
     if (e.name === "up") {
       if (hasHint) {
         setHintCursor((c) => Math.max(0, c - 1));
+      } else if (isMultiline && ta !== null) {
+        // 多行：主动调原生 moveCursorUp（视觉行上移）；若光标已在视觉首行
+        // （visualRow === 0），moveCursorUp 在首行是 no-op → 越界 → 历史召回。
+        if (visualRowOf(ta) <= 0 && history.length > 0) {
+          if (historyCursor === -1) draftRef.current = props.value;
+          const next =
+            historyCursor === -1
+              ? history.length - 1
+              : Math.max(0, historyCursor - 1);
+          const target = history[next];
+          if (target !== undefined) {
+            navValueRef.current = target;
+            setHistoryCursor(next);
+            props.onChange(target);
+          }
+        } else {
+          ta.moveCursorUp();
+        }
+        e.preventDefault();
       } else if (history.length > 0) {
+        // 单行：历史召回（原逻辑）。
         if (historyCursor === -1) draftRef.current = props.value;
         const next =
           historyCursor === -1
@@ -235,14 +277,43 @@ export function PromptInput(props: PromptInputProps): ReactNode {
           setHistoryCursor(next);
           props.onChange(target);
         }
+        e.preventDefault();
       }
-      e.preventDefault();
       return;
     }
 
     if (e.name === "down") {
       if (hasHint) {
         setHintCursor((c) => Math.min(suggestions.length - 1, c + 1));
+      } else if (isMultiline && ta !== null) {
+        // 多行：主动调原生 moveCursorDown（视觉行下移）；若光标已在视觉末行
+        // （visualRow >= totalVisualRows - 1），moveCursorDown 越界 → 仅在正
+        // 在浏览历史时回退草稿；否则不做任何事（防止 historyCursor===-1 时被
+        // 错误兜底覆盖）。
+        if (visualRowOf(ta) >= totalVisualRowsOf(ta) - 1) {
+          // 已在视觉末行：moveCursorDown 越界 → 仅在正在浏览历史时回退草稿；
+          // 否则 no-op（保持现状）。
+          if (historyCursor !== -1) {
+            const next = historyCursor + 1;
+            if (next >= history.length) {
+              // 越过最新条：恢复草稿，游标归位 -1。
+              setHistoryCursor(-1);
+              navValueRef.current = draftRef.current;
+              props.onChange(draftRef.current);
+            } else {
+              const target = history[next];
+              if (target !== undefined) {
+                navValueRef.current = target;
+                setHistoryCursor(next);
+                props.onChange(target);
+              }
+            }
+          }
+        } else {
+          // 非末行：主动调原生 moveCursorDown（视觉行下移）。
+          ta.moveCursorDown();
+        }
+        e.preventDefault();
       } else if (historyCursor !== -1) {
         const next = historyCursor + 1;
         if (next >= history.length) {
@@ -258,8 +329,8 @@ export function PromptInput(props: PromptInputProps): ReactNode {
             props.onChange(target);
           }
         }
+        e.preventDefault();
       }
-      e.preventDefault();
       return;
     }
 
