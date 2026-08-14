@@ -48,11 +48,6 @@
 
 - `mcp__exa__*`。
 
-### 测试
-
-终端 / TUI 真实交互 → `mcp__aiterm__pty_*`。
-调试 WEBUI 时使用 `.claude/skills/playwright-cli/`。
-
 **产品主路径**:
 
 ```bash
