@@ -9,8 +9,9 @@
  *    `<scrollbox>` 全内容滚动，scrollbox 实测处理视口外的物理行。
  *  - **删除 `cloneElement` + `marginBottom` patch**：OpenTUI 直接按元素
  *    父子布局，无 ink margin 折叠规则，不必在末尾块裁 margin。
- *  - **thinking 折叠文案**收敛在本文件为常量（`THINKING_FOLD_LINE = "[思考]"`），
- *    替代码仓 archive 里同名导出（本文件是当前唯一 caller，作为 SSOT）。
+ *  - **thinking 折叠文案**收敛在 `./think-fold.ts`（SSOT：`formatThinkingFold` /
+ *    `formatThinkingLive` + `THINKING_FOLD_LINE`），本文件仅调用，不再另写
+ *    模板字符串；与 chat-view.tsx 流式折叠行同源收敛（2026-08-14）。
  *  - 全部 `<box>` / `<text>` + fg 属性；禁 ink 原语（Box / Text）。
  *  - **T7 消息间距 + 底色**：user / assistant 分支用 box.backgroundColor
  *    （读 theme.ts userBg / assistantBg token）+ paddingX={1} 水平缩进
