@@ -1,7 +1,10 @@
 # 提交前的全量测试兜底（push 时执行，比 commit 更重）。
 #
-# - --retry 1：偶发（flaky）失败自动重试 1 次 —— 只有重试后仍失败的
-#   才是真失败，避免"并行争用偶发红"挡住正常推送。
-# - 限流 fork（vitest.config.ts）降低 4 核机器上并行争用。
-# - 若确有 flaky 需要跳过本钩子，用 git push --no-verify（谨慎）。
-npm run test:pre-push
+# 2026-08-14 改法 A：本地 push 从全量 vitest（6.5min）降为变更相关窄路径，
+# 全量由 GitHub Actions test.yml 兜底（CI 跑全量 + retry 1 + exclude 17，
+# 失败拦 merge）。与 pre-commit 注释"全量交给 pre-push 与 CI"设计意图对齐。
+#
+# - test:changed：基于 git HEAD 差异的窄测试（同 pre-commit 的窄路径），
+#   覆盖本次实际变更文件，体感 ~1min。
+# - 若确需跳过本钩子（如仅文档/纯数据变更），用 git push --no-verify（谨慎）。
+npm run test:changed
