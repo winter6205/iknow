@@ -9,11 +9,13 @@
 
 ### 1.1 运行时核心（独立 `iknow`，无 gbrain 依赖）
 
-| 能力                  | 说明                                                                                                | 位置                                    |
-| --------------------- | --------------------------------------------------------------------------------------------------- | --------------------------------------- |
-| Agent 执行层          | harness foundation（loop-engine + anthropic-adapter + executor / registry）+ ACI 装饰层（8 件工具） | `src/harness/`（含 `src/harness/aci/`） |
-| 授权（per-tool-call） | harness ACI 装饰层逐次工具调用授权                                                                  | `src/harness/aci/`                      |
-| 配置加载              | `.env` / `.env.local` + `process.env`；密钥只读 env 名                                              | `src/config/env.ts`                     |
+| 能力                  | 说明                                                                                                                                       | 位置                                           |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------- |
+| Agent 执行层          | harness foundation（loop-engine + anthropic-adapter + executor / registry）+ ACI 装饰层（8 件工具）                                        | `src/harness/`（含 `src/harness/aci/`）        |
+| 授权（per-tool-call） | harness ACI 装饰层逐次工具调用授权                                                                                                         | `src/harness/aci/`                             |
+| 配置加载              | `.env` / `.env.local` + `process.env`；密钥只读 env 名                                                                                     | `src/config/env.ts`                            |
+| LLM 配置单承载        | `settings.llm.model` 字面值 + `settings.llm.apiKey` 字面/占位符 + `llm.fallback`；`IKNOW_LLM_API_KEY_ENV`/`IKNOW_LLM_MODEL` 退役(ADR-0015) | `src/config/settings.ts` + `src/config/env.ts` |
+| **会话持久化**        | `~/.iknow` 跨进程池 + SessionStore JSON v2(#120)                                                                                           | `src/session-api/store/`                       |
 
 ### 1.2 交互表面（I1–I3）
 
@@ -22,7 +24,7 @@
 | **产品 CLI 多轮**          | TTY REPL + 管道串行；默认 TTY 无参进 chat                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | `src/cli/*` + `src/cli.ts`                                                                            |
 | 人读输出                   | 答案文本流（markdown）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | `src/cli/format.ts`                                                                                   |
 | 机器输出                   | `/json on` 或 one-shot JSON                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | 同上                                                                                                  |
-| Slash                      | `/help` `/quit` `/json` `/reset`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | `src/cli/slash.ts`                                                                                    |
+| Slash                      | CLI chat: `/help` `/quit` `/json` `/reset`; TUI 扩展 9 条(见 CHANGELOG #337/#321/#119): `/compact` `/thinking` `/effort` `/skill-name` `/mcp` 等                                                                                                                                                                                                                                                                                                                                                                                                         | `src/cli/slash.ts` + `src/tui/`                                                                       |
 | 单次脚本                   | `ask "…"` / 裸 query → JSON（CI 兼容）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | `cli.ts`                                                                                              |
 | **Session HTTP API**       | 进程内多会话：create / message / command / reset；JSON 每轮                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | `src/session-api/`                                                                                    |
 | **Web 产品 UI**            | Vite + React + TS SPA（`web/`）；build → `web/dist`；`iknow serve` 优先托管 dist（无 dist 时回退 `web/`）；空/载入/错/数据四态 + 侧栏 JSON 投影；SSE 路径仍 **501**                                                                                                                                                                                                                                                                                                                                                                                      | `web/` + `iknow serve`                                                                                |
@@ -57,7 +59,6 @@
 
 | 缺口           | 说明                                                                                          |
 | -------------- | --------------------------------------------------------------------------------------------- |
-| **持久化存储** | 仅内存 store；无 DB / 对象存储 / 多租户                                                       |
 | **鉴权生产化** | 授权由 harness ACI 装饰层逐次工具调用承接；完整 ACL/审批流待 ADR                              |
 | **Web 生产化** | SPA 构建链已定（Vite React → `web/dist` + 同进程 API）；无鉴权 / 无多租户 / 无 CDN 发布流水线 |
 | **流式输出**   | SSE 路径预留 `…/events` → **501**；无 token streaming                                         |
@@ -69,13 +70,12 @@
 | **9router key 对齐**    | shell key 与 9router chat 对齐仍为运维项（探针 `scripts/i4-probe-nine-endpoints.ts`） |
 | **指代/省略续问鲁棒性** | LLM 依赖模型与 harness history，未系统评测                                            |
 | **澄清轮（0 tool）**    | 设计允许「意图不清先问」；未作为一等状态机落地                                        |
-| **会话持久化**          | REPL 进程内；无跨进程会话恢复                                                         |
 | **anthropic_tools**     | 仅 openai_tools；选 anthropic 会 fail-closed                                          |
 | **全量 context 打包**   | history 有字符预算；未从窗口严格扣 system/tools/检索正文                              |
 
 ### 2.3 协议开放项（设计未决，禁止静默定稿）
 
-> 当前 harness 时代的设计待决见 `specs/` 下各模块 spec（security-guardrails / trace-service / 146-tui / 120-session-persistence）与对应 ADR。
+> 设计待决见 `specs/README.md`（活跃 spec 索引）与 `docs/adr/`（决策 SSOT）；已落地/superseded spec 归档 `docs/archive/025-retire-completed-specs-and-plans/`。
 
 ### 2.4 运维与上线（P4）
 
@@ -92,14 +92,10 @@
 
 ### 3.1 近端（建议 1–2 个迭代）
 
-1. **LLM 配置收敛到 settings.json 单承载（ADR-0015 settings-model-extension）**
-   - model 字面值 + apiKey 字面 / `${VAR}` 占位符；`IKNOW_LLM_API_KEY_ENV` / `IKNOW_LLM_MODEL` 已退役；provider/baseUrl 代码默认（`IKNOW_LLM_BASE_URL`）保留。
-2. **会话小增强**
+1. **会话小增强**
    - 可选会话导出/导入 JSON；澄清轮最小状态。
-3. **观测最小集**
+2. **观测最小集**
    - 结构化日志：conversation_id、turn、tool 耗时、是否 llm。
-4. **Web MVP 原型接入 CLI**
-   - `iknow-prototype` 前端从 mock 切到真实 Session HTTP API；JSON 机器面板（工具轨迹/引用）可视化。
 
 ### 3.2 中期
 
@@ -158,17 +154,14 @@ npm run build --prefix web    # → web/dist  (root alias if present: npm run we
 
 ## 6. 文档索引
 
-| 文档                               | 用途                       |
-| ---------------------------------- | -------------------------- |
-| `specs/security-guardrails.md`     | 安全护栏 spec              |
-| `specs/trace-service.md`           | trace 观测 spec            |
-| `specs/146-tui.md`                 | TUI 交互骨架 spec          |
-| `specs/120-session-persistence.md` | 会话持久化 spec            |
-| `docs/architecture.md`             | 运行时能力切分             |
-| `docs/CONTEXT.md`                  | 领域术语                   |
-| `docs/CHANGELOG.md`                | 版本变更                   |
-| `docs/handoff/*`                   | 会话交接                   |
-| 本文 `docs/STATUS.md`              | **已实现 / 未实现 / 展望** |
+| 文档                   | 用途                                                                 |
+| ---------------------- | -------------------------------------------------------------------- |
+| `specs/README.md`      | 活跃 module spec 活索引（SSOT；只列当前活跃，新增/归档只改那里一处） |
+| `docs/architecture.md` | 运行时能力切分                                                       |
+| `docs/CONTEXT.md`      | 领域术语                                                             |
+| `docs/CHANGELOG.md`    | 版本变更                                                             |
+| `docs/handoff/*`       | 会话交接                                                             |
+| 本文 `docs/STATUS.md`  | **已实现 / 未实现 / 展望**                                           |
 
 ---
 

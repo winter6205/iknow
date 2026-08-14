@@ -79,9 +79,6 @@ npm test          # vitest：unit + harness + integration
 - docs/STATUS.md — 功能现状与展望
 - docs/architecture.md — 独立 runtime 能力切分
 - docs/handoff/<latest>.md — 最近 session 交接
-- specs/security-guardrails.md — 安全护栏 spec（权限/沙箱/中断超时）
-- specs/trace-service.md — trace 观测 spec
-- specs/146-tui.md — TUI 交互骨架 spec
-- specs/120-session-persistence.md — 会话持久化 spec
+- specs/README.md — 活跃 module spec 活索引（只列当前活跃；新增/归档只改那里一处）
 - CHANGELOG.md — 版本变更记录（根目录真值）
 - docs/integration-materials.env.example — LLM 接入材料占位（只写环境变量名）

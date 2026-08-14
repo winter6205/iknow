@@ -1,17 +1,18 @@
 # iknow
 
 Standalone **agent harness** for a tool-calling LLM CLI — loop engine +
-Anthropic adapter + an 8-tool ACI tool set (`bash` / `read_file` / `grep` /
-`glob` / `edit_file` / `write_file` / `web_fetch` / `web_search`), wired into a
+Anthropic adapter + an 11-tool ACI tool set (`bash` / `read_file` / `grep` /
+`glob` / `edit_file` / `write_file` / `web_fetch` / `web_search` /
+`memory_recall` / `memory_save` / `tool_search`; SSOT: `src/harness/aci/tools/registry.ts`), wired into a
 TTY `chat` REPL, a script-friendly one-shot `ask`, and an HTTP `serve` host
 that serves a Vite React SPA.
 
 - **Agent execution surface**: harness foundation (`src/harness/`) with ACI decor layer (`src/harness/aci/`, PR #95).
-- **Invariants**: harness-driven tool use with permission middleware (ADR-0004 / ADR-0006); streaming arm on by default (`IKNOW_LLM_STREAM=on`, `src/config/env.ts`); key var default `ANTHROPIC_AUTH_TOKEN`; project stack defaults baked into `env.ts` (ADR-0001, with 2026-08-05 update).
+- **Invariants**: harness-driven tool use with permission middleware (ADR-0004 / ADR-0006); streaming arm on by default (`IKNOW_LLM_STREAM=on`, `src/config/env.ts`); key configured via `settings.llm.apiKey` literal/placeholder (ADR-0015); project stack defaults baked into `env.ts` (ADR-0001, settings.json 单承载后).
 - **Runtime boundary**: iknow does not load the external gbrain package or the read-only `_upstream_gbrain/` checkout at runtime — no package link, path import, symlink, dynamic loading, or execution
 
 Design truth: `src/harness/` + module specs under `specs/`
-(`security-guardrails.md` / `trace-service.md` / `146-tui.md` / `120-session-persistence.md`).
+(live index: [`specs/README.md`](specs/README.md) — 只列当前活跃 spec，新增/归档只改那里一处).
 
 ## Requirements
 
