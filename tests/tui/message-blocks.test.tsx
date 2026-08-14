@@ -291,6 +291,33 @@ test("thinking 折叠态 + thinkingSeconds：渲染 `思考了 N 秒` 替换 [�
   await setup.renderer.destroy();
 });
 
+test("thinking 折叠态 + thinkingSeconds=0：渲染 `[思考]`（不显「思考了 0 秒」伪精度）", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "链上推理明细…", signature: "sig-1" },
+      { type: "text", text: "正式回答" },
+    ],
+  };
+  const setup = await testRender(
+    <MessageBlocks
+      message={msg}
+      cols={COLS}
+      statusMap={emptyStatusMap()}
+      thinkingExpanded={false}
+      thinkingSeconds={0}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  // 子秒 thinking（秒数 0）→ 历史折叠行回落 `[思考]`，不显伪精度。
+  expect(frame).toContain("[思考]");
+  expect(frame.includes("思考了")).toBe(false);
+  expect(frame).toContain("正式回答");
+  await setup.renderer.destroy();
+});
+
 test("thinking 折叠态 + bash tool_use：`[思考] · ran 1 command`（无时间）", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",

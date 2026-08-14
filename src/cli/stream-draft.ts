@@ -29,8 +29,20 @@ export interface StreamDraft {
   thinkingRaw(): string;
   /** T3: thinking 原始文本遮蔽后的可渲染串(SC20 一致性,密钥不裸出)。 */
   thinkingMasked(): string;
-  /** 首次 thinking_delta 到现在的耗时秒数（无 thinking 返回 0）。 */
-  thinkingSeconds(): number;
+  /**
+   * 思考计时起点（turn 起点打点）：让思考秒数**含 turn 启动 → 首条
+   * thinking_delta 的等待时段**（2026-08-14 用户反馈「计时不同步」）。
+   * 与首条 thinking_delta 的惰性打点二选一，显式打点优先。
+   * `t <= 0` → 视为未打点（调用方可传 0 表示「不确定起点」，随后续
+   * thinking_delta 惰性打点 —— 历史消息折叠行回退）。
+   */
+  markThinkingStart(t: number): void;
+  /**
+   * 首次 thinking 打点（markThinkingStart 或首条 thinking_delta）到现在的
+   * 耗时秒数（无 thinking 返回 0）。`now` 参数仅供测试注入时钟（缺省
+   * Date.now()）。
+   */
+  thinkingSeconds(now?: number): number;
   reset(): void;
   subscribe(listener: () => void): () => void;
 }
@@ -41,8 +53,13 @@ export function createStreamDraft(): StreamDraft {
   // 遮蔽,互不污染。thinking 不进 answer rawBuffer(终稿 thinking blocks 是
   // SSOT,流式 thinking 只是临时展示层)。
   let thinkingBuffer = "";
-  // 首次 thinking_delta 到达时刻（毫秒）—— 折叠行渲染「思考了 N 秒」用。
+  // 首次 thinking 打点时刻（毫秒）—— 折叠行渲染「思考了 N 秒」用。
   // 流式面板需要「思考中… · 经过 N 秒」时由 app.tsx 每次通知覆算。
+  // 打点来源（2026-08-14 起双通道，显式优先）：
+  //  - app.tsx runTurnOnce 入口 markThinkingStart(turn 起点) —— 计时含
+  //    「turn 启动 → 首条 thinking_delta」的等待思考时段（计时同步修复）；
+  //  - 兜底：首条 thinking_delta 惰性打点（历史消息折叠行 / 未走 app 层的
+  //    CLI 路径，chat-session.ts 不调 markThinkingStart）。
   let thinkingStartedAt: number | null = null;
   const listeners = new Set<() => void>();
 
@@ -125,9 +142,15 @@ export function createStreamDraft(): StreamDraft {
     thinkingMasked(): string {
       return createOutputMask(currentSecretValues()).mask(thinkingBuffer);
     },
-    thinkingSeconds(): number {
+    markThinkingStart(t: number): void {
+      if (t > 0) thinkingStartedAt = t;
+    },
+    thinkingSeconds(now?: number): number {
       if (thinkingStartedAt === null) return 0;
-      return Math.max(0, Math.floor((Date.now() - thinkingStartedAt) / 1000));
+      return Math.max(
+        0,
+        Math.floor(((now ?? Date.now()) - thinkingStartedAt) / 1000)
+      );
     },
     reset(): void {
       rawBuffer = "";

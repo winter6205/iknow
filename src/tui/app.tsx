@@ -447,7 +447,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // 折叠行从「思考中… N 秒」切「思考了 N 秒」。存 **ref** —— tick 是异步
   // interval，runTurnOnce 的 finally 读的是旧闭包（stale closure 会读到 0）；
   // ref 是可变引用，finally 永远读到最新冻结值。首次冻结后不再覆盖（防
-  // answer 阶段虚涨），由 runTurnOnce 入口清 0。
+  // answer 阶段虚涨），由 runTurnOnce 入口清 0。计时起点 = turn 起点
+  // （markThinkingStart），冻结值含「turn 启动 → 首 delta」的等待时段
+  // （2026-08-14 计时同步修复）。
   const thinkingFrozenRef = useRef(0);
   // 渲染用镜像（ref 不触发重渲染，UI 需 state）。frozen>0 时 ChatView 显示
   // 「思考了 N 秒」，否则按 thinkingSeconds 走「思考中… N 秒」。
@@ -475,12 +477,22 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       startTransition(() => {
         setDraftsMasked(streamDraft.masked());
         setThinkingDraftMasked(streamDraft.thinkingMasked());
-        setThinkingSeconds(streamDraft.thinkingSeconds());
+        // 思考秒数 state 只在 thinking 阶段写入：answer 已开始（masked 非空）
+        // 时不再 setThinkingSeconds —— 避免 answer 阶段 state 无意义虚涨
+        // （frozen>0 优先渲染「思考了 N 秒」，虚涨的 thinkingSeconds 未来若
+        // frozen 失效会导致跳变，2026-08-14 修复）。
+        if (streamDraft.masked().length === 0) {
+          setThinkingSeconds(streamDraft.thinkingSeconds());
+        }
       });
     });
     setDraftsMasked(streamDraft.masked());
     setThinkingDraftMasked(streamDraft.thinkingMasked());
-    setThinkingSeconds(streamDraft.thinkingSeconds());
+    // 与 subscribe 同纪律：仅在 thinking 阶段（answer 未开始）写入思考秒数，
+    // 避免 answer 阶段 state 虚涨。
+    if (streamDraft.masked().length === 0) {
+      setThinkingSeconds(streamDraft.thinkingSeconds());
+    }
     // 秒数每秒变：仅 thinking 进行中需要 tick（thinkingDraftMasked 非空）。
     // answer 已开始（masked 非空）→ thinking 阶段结束 → 冻结秒数一次（ref，
     // 不再覆盖，防 answer 阶段虚涨）。
@@ -875,6 +887,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     setStreamDraft(draft);
     // 运行时长打点：turn 起始时刻（mode 行统计段「运行中」实时递增用）。
     const startedAt = Date.now();
+    // 思考计时起点同步（2026-08-14）：turn 起点即打点 —— 思考秒数含「turn
+    // 启动 → 首条 thinking_delta」的等待思考时段（用户反馈「思考时不同步
+    // 计时，是之后延迟计时的」）。首条 thinking_delta 的惰性打点保留为兜底
+    // （历史消息折叠行 / 未走 app 层的路径）。
+    draft.markThinkingStart(startedAt);
     setRunStartedAt(startedAt);
     setRunElapsed(0);
     // 本 turn 独立 thinking 冻结会话：清 ref（tick 首次冻结时重写）。

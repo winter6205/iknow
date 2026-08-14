@@ -442,8 +442,58 @@ test("流式 thinking 冻结：answer 开始后折叠行显示「思考了 N 秒
   );
   await setup1.waitForVisualIdle();
   const frame = setup1.captureCharFrame();
+  // 统一文案：`思考了 N 秒` 即带语义，不叠加 `[思考]` 前缀（chat-view 与
+  // message-blocks 同源收敛，2026-08-14）。
   expect(frame).toContain("思考了 6 秒");
   expect(frame.includes("思考中")).toBe(false);
+  expect(frame.includes("[思考]")).toBe(false);
+  await setup1.renderer.destroy();
+});
+
+test("流式 thinking 未冻结：折叠行显示「思考中… N 秒」不叠加 [思考] 前缀", async () => {
+  // 场景：turn 运行中，thinking 阶段进行中（frozen=0）→ 折叠行显示实时经过
+  // 秒数（思考中… N 秒）。文案统一后 = `思考中… N 秒`，不再 `[思考] 思考中… N 秒`。
+  const initial = sessionWith(makeMessages(1));
+  const setup1 = await testRender(
+    <ChatView
+      session={{ ...initial, runState: "running-fg" }}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      thinkingExpanded={false}
+      thinkingDraftMasked="链上推理…"
+      thinkingSeconds={5}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup1.waitForVisualIdle();
+  const frame = setup1.captureCharFrame();
+  expect(frame).toContain("思考中… 5 秒");
+  expect(frame.includes("[思考]")).toBe(false);
+  await setup1.renderer.destroy();
+});
+
+test("流式 thinking 子秒未冻结：折叠行显示「思考中…」不显 0 秒", async () => {
+  // 场景：thinking 已开始但 <1s（子秒）→ 不显「0 秒」伪精度（1Hz tick 快照
+  // 偏小问题：首 delta 到 1Hz tick 的窗口内应保持「思考中…」）。
+  const initial = sessionWith(makeMessages(1));
+  const setup1 = await testRender(
+    <ChatView
+      session={{ ...initial, runState: "running-fg" }}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      thinkingExpanded={false}
+      thinkingDraftMasked="链上推理…"
+      thinkingSeconds={0}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup1.waitForVisualIdle();
+  const frame = setup1.captureCharFrame();
+  expect(frame).toContain("思考中…");
+  expect(frame.includes("0 秒")).toBe(false);
+  expect(frame.includes("[思考]")).toBe(false);
   await setup1.renderer.destroy();
 });
 

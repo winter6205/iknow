@@ -60,13 +60,9 @@ import {
   REDACTED_PLACEHOLDER,
   summarizeThinkingContent,
 } from "../cli/format.js";
+import { formatThinkingFold } from "./think-fold.js";
 
 type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
-
-/** 折叠态摘要行文案 SSOT（T6-B 收敛到本文件作为唯一来源，替代码仓 archive
- *  时代的同名导出）。2026-08-08 用户反馈去掉 "N 段" 计数与 "(Ctrl+O)"
- *  键位提示。 */
-const THINKING_FOLD_LINE = "[思考]";
 
 /** tool_use 摘要行：`[运行中]|[完成]|[失败] name · detail`。
  *  完成态 bash 追加 `，ran N command(s)`（T4）：runCount = 该 assistant 消息内
@@ -128,7 +124,10 @@ function ToolPreviewRows(props: {
  *  - 无时间（历史消息）→ `[思考]` + 可选 `· ran {M} shell command(s)`，避免
  *    伪精度「思考了 0 秒」；
  *  - 工具计数英文（与参考图 `ran 2 shell commands` 一致），思考部分全中文；
- *  - bash 数 = 0 → 省略 `· ran …` 段。 */
+ *  - bash 数 = 0 → 省略 `· ran …` 段。
+ *
+ * 文案经 `formatThinkingFold`（think-fold.ts SSOT，2026-08-14）——与
+ * chat-view 流式折叠行同源收敛，不在渲染层另写模板字符串。 */
 function ThinkingSummary(props: {
   readonly message: AnthropicNativeMessage;
   readonly cols: number;
@@ -137,11 +136,7 @@ function ThinkingSummary(props: {
   const bashCount = countBashCalls(props.message);
   const ranSuffix =
     bashCount > 0 ? formatRanSuffix(bashCount).replace(/^，/, " · ") : "";
-  const head =
-    props.thinkingSeconds !== undefined && props.thinkingSeconds > 0
-      ? `思考了 ${props.thinkingSeconds} 秒`
-      : THINKING_FOLD_LINE;
-  const text = `${head}${ranSuffix}`;
+  const text = `${formatThinkingFold(props.thinkingSeconds)}${ranSuffix}`;
   return (
     <text fg={tuiPalette.dim} wrapMode="none">
       {clipOneLineVisual(text, props.cols)}
