@@ -44,7 +44,14 @@
 
 ---
 
+## 网络工具
+
+- `mcp__exa__*`。
+
 ### 测试
+
+终端 / TUI 真实交互 → `mcp__aiterm__pty_*`。
+调试 WEBUI 时使用 `.claude/skills/playwright-cli/`。
 
 **产品主路径**:
 
@@ -68,10 +75,6 @@ npm test          # vitest：unit + harness + integration
 **Secret 处理（#406）**: 默认 `secrets.mode = "roundtrip"`，用户贴 key 自动占位符化（`<<<SECRET_N>>>`），bash 还原层在 spawn 前回填真值；`mode = "block"` 显式保留 #126 deny-only 旧行为。
 **Settings 热更新**: `~/.iknow/settings.json` 或 `<cwd>/.iknow/settings.json` 改动**免重启生效**（fs.watch 100ms debounce → 下一轮 postMessage 用新 env；reload 失败保留旧 env）。运行时 `/thinking` `/effort` 面板是 in-memory override，不写回 settings。
 **Git**: 无用户明确 `push` 授权则不执行。
-
-### UI 调试
-
-调试 UI 时使用 `.claude/skills/playwright-cli/`。
 
 ### Domain docs (auto-load on session start)
 
