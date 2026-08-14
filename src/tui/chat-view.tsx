@@ -21,9 +21,22 @@
  *    #ffafaf，c 权重 0.6 / r 权重 0.4），info 栏（Version/Cwd/Data dir）取
  *    bannerLines 行尾段；窄终端（bannerLines.length === 1）保持单行降级；
  *  - 每条 session 消息 → `MessageBlocks`（user → ❯ accent / assistant
- *    → Markdown + thinking 折叠 + tool_use 摘要 + statusMap 状态染色）；
+ *    → Markdown + thinking 折叠 + tool_use 摘要 + statusMap 状态染色）。
+ *    **T7 消息间距 + 底色**：消息间 1 行节奏由本文件 wrapper
+ *    `<box marginTop={i===0?0:1}>` 提供（首条无顶部 margin，避免进入会话时
+ *    第一行无谓下推造成的间距抖动）；MessageBlocks 内部根 box 不再产 marginTop。
+ *    userBg/assistantBg 底色块由 MessageBlocks 内部实现（paddingX={1} 水平缩进
+ *    + paddingY=0 底色贴内容）。
  *  - tail（liveToolRuns + legacy liveToolLines + askLine + 流式 thinking / draft
  *    面板 + spinner）。
+ *
+ * 工具输出展开位置的区分（T3，plans/tui-render-optimization.md）：
+ *  - **历史消息里的 preview**：`MessageBlocks.ToolPreviewRows` 已改为内嵌
+ *    固定高度 `<ScrollableOutputRegion>`（主消息流只显摘要行，diff 收进
+ *    固定高度区内部滚动）；
+ *  - **live tail**：`liveToolRuns.map(liveToolPreviewBox)` 保持展开（运行中
+ *    工具逐条展开预览行，与「固定高度历史 preview」是两件事——live 行是
+ *    尾部临时面板，不占用历史消息流；T6 输出增量上线前维持现状）。
  *
  * 流式并发防御（spec SC8）：`draftsMasked` 与 `thinkingDraftMasked` 经
  * useDeferredValue — 高频更新降级低优先级，与 app 层 startTransition 构成
@@ -44,6 +57,7 @@ import {
   forwardRef,
   useDeferredValue,
   useImperativeHandle,
+  useMemo,
   useRef,
 } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
@@ -91,6 +105,9 @@ export interface ChatViewProps {
   readonly draftsMasked?: string;
   /** 流式 thinking 草稿 masked 文本。thinkingExpanded 决定折叠 / 展开。 */
   readonly thinkingDraftMasked?: string;
+  /** 流式 thinking 经过秒数（首次 thinking_delta 起算）——折叠面板显示
+   *  `[思考] 思考中… N 秒` 用。运行结束后清 0。 */
+  readonly thinkingSeconds?: number;
   /** askUser 待决提示（undefined = 无 pending ask）。 */
   readonly askLine?: string;
   /** thinking 折叠面板展开态（false = 折叠成 1 行 [思考]）。 */
@@ -121,7 +138,12 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       props.thinkingDraftMasked ?? ""
     );
     // statusMap = tool_result 精确配对（与 T6 ToolSummaryRow 状态染色同一 SSOT）。
-    const statusMap = toolResultStatusMap(props.session.messages);
+    // useMemo 稳定下游 props：messages 引用变化时才重算，避免每次 render 产新
+    // Map 导致 MessageBlocks 引用 props 变化触发下游重渲染（解决间距抖动）。
+    const statusMap = useMemo(
+      () => toolResultStatusMap(props.session.messages),
+      [props.session.messages]
+    );
     const running = props.session.runState === "running-fg";
     const thinkingExpanded = props.thinkingExpanded === true;
     // 消息内容宽度留出滚动条 / 安全区余量（scrollbox 实测，不做行数估算）。
@@ -191,9 +213,11 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             )}
           </box>
         )}
-        {/* 消息渲染：每条 message → MessageBlocks。 */}
+        {/* 消息渲染：每条 message → MessageBlocks。
+            消息间 1 行节奏由 wrapper marginTop 提供；首条 (i===0) 不带顶部
+            margin，避免进入会话时第一行无谓下推造成间距抖动。 */}
         {props.session.messages.map((message, i) => (
-          <box key={i} width={contentWidth}>
+          <box key={i} width={contentWidth} marginTop={i === 0 ? 0 : 1}>
             <MessageBlocks
               message={message}
               cols={contentWidth}
@@ -227,7 +251,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
               </box>
             ) : (
               <text fg={pal.dim} wrapMode="none">
-                {"[思考] 思考中…"}
+                {`[思考] 思考中…${(props.thinkingSeconds ?? 0) > 0 ? ` ${props.thinkingSeconds} 秒` : ""}`}
               </text>
             )}
           </box>

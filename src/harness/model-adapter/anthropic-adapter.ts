@@ -545,6 +545,11 @@ async function stepStreamArm(deps: {
  * 空文本 delta 不承载渲染信息,跳过以消除 host 渲染噪声;Plan §3 "empty
  * 类" 给出"不 emit 或 emit 无副作用(实现期二选一)"的选项,本实现选中前者,
  * 在 `anthropic-adapter-stream.test.ts` 锁定。
+ *
+ * T1 (tui-render-optimization):`content_block_delta` 事件的 payload 只有
+ * `index` 无 block id(SDK `RawContentBlockDeltaEvent`),而 `tool_input_delta`
+ * 契约需要 id 供 host 与 tool_call_start / postToolUse 配对 — 故在
+ * `content_block_start tool_use` 处登记 `index → block.id`,delta 到达时查表。
  */
 function wireStreamEvents(
   stream: AnthropicMessageStream,
@@ -559,6 +564,9 @@ function wireStreamEvents(
       // the stream arm (aligned with ADR-0003 `safeTrace` MUST NOT throw).
     }
   };
+  // T1:content_block_start 登记 index → block.id,供 content_block_delta
+  // (input_json_delta) 配对;函数返回即自然清理(每回合一次装配)。
+  const indexToBlockId = new Map<number, string>();
   stream.on("text", (textDelta) => {
     if (textDelta === "") return; // empty delta:不 emit(见上方 empty-class 决策注释)
     safeEmit({ type: "text_delta", text: textDelta });
@@ -568,12 +576,30 @@ function wireStreamEvents(
     // (thinking 块专属 delta,不与 text_delta 路径混淆 — SDK 对 text 块用
     // `on("text")` 短路,thinking 块只在 content_block_delta 流到)。
     if (event.type === "content_block_delta") {
-      const delta = (event as { delta?: { type?: string; thinking?: string } })
-        .delta;
-      if (delta?.type !== "thinking_delta") return;
-      const text = delta.thinking ?? "";
-      if (text === "") return; // empty delta 不 emit — 对齐 text_delta 纪律
-      safeEmit({ type: "thinking_delta", text });
+      const delta = (
+        event as {
+          index?: number;
+          delta?: { type?: string; thinking?: string; partial_json?: string };
+        }
+      ).delta;
+      if (delta?.type === "thinking_delta") {
+        const text = delta.thinking ?? "";
+        if (text === "") return; // empty delta 不 emit — 对齐 text_delta 纪律
+        safeEmit({ type: "thinking_delta", text });
+        return;
+      }
+      // T1:tool input 增量透传 — 增量只服务展示层,权威 input 仍由
+      // finalMessage() → interpretMessage 一次性交付(零改动)。
+      if (delta?.type === "input_json_delta") {
+        const partialJson = delta.partial_json ?? "";
+        if (partialJson === "") return; // empty delta 不 emit — 对齐 text_delta 纪律
+        const id = indexToBlockId.get(event.index);
+        // 未登记 / 空串 id 均无 id 可配对 → 不 emit(空串 = tool_use block.id
+        // 缺失的 legacy 回退,无法与 tool_call_start / postToolUse 配对)。
+        if (id === undefined || id === "") return;
+        safeEmit({ type: "tool_input_delta", id, partialJson });
+        return;
+      }
       return;
     }
     if (event.type !== "content_block_start") return;
@@ -581,12 +607,15 @@ function wireStreamEvents(
     // D1 最小集:只 tool_use 翻译为 tool_call_start;server_tool_use 等其它
     // 内容块不在 v1 范围内(interpretMessage 也会因不支持类型 ProtocolError)。
     if (block.type !== "tool_use") return;
+    // T1:登记 index → block.id,供 input_json_delta 增量配对。
+    const id = typeof block.id === "string" ? block.id : "";
+    indexToBlockId.set(event.index, id);
     // 阶段二扩展:tool_use block.id 透传,host 据此与 postToolUse 完成事件
     // 配对(T4 实时状态依赖);id 缺失时回退空串(向后兼容 legacy)。
     safeEmit({
       type: "tool_call_start",
       name: block.name,
-      id: typeof block.id === "string" ? block.id : "",
+      id,
     });
   });
 }
