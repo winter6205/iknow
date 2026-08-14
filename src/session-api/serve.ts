@@ -9,6 +9,7 @@ import { SessionHub, type SessionHubOptions } from "./hub.js";
 import { listenSessionServer, type ListeningServer } from "./http.js";
 import { SessionStore } from "./store/index.js";
 import { loadIknowEnv } from "../config/env.js";
+import { loadIknowSettings } from "../config/settings.js";
 import {
   initIknowWorkspaceSafe,
   runHostInitScriptSafe,
@@ -43,6 +44,11 @@ export function resolveServeDataDir(dataDir?: string): string {
   return dataDir ? path.resolve(dataDir) : join(homedir(), ".iknow");
 }
 
+// 共享装配 (cli / serve / tui 三入口共用, SSOT): settings.verify → VerifyConfig。
+// serve 保留 re-export 供 tui/run.tsx 复用 (tui → session-api 同向依赖)。
+import { resolveVerifyConfig } from "../config/verify-config.js";
+export { resolveVerifyConfig };
+
 export async function startSessionServe(
   opts?: ServeOptions
 ): Promise<{ listening: ListeningServer; hub: SessionHub }> {
@@ -60,6 +66,12 @@ export async function startSessionServe(
     store,
     defaultJsonMode: opts?.json_mode ?? false,
     traceOut: opts?.traceOut,
+    // #128 T8:settings.verify 段 → 闭环配置。command 缺失 (含 verify 段缺失)
+    // → { command: "" }, hub 装配 subagentManager 时 runClassifier 接管
+    // (spec #128 Objective); 未装配 → verify-loop 透明关闭向后兼容 (SC7)。
+    // serve 的 cwd = 进程启动目录 (与 build-engine sandboxRoot fallback 一致,
+    // 见 hub.sandboxRoot 注释)。
+    verifyConfig: resolveVerifyConfig(loadIknowSettings().verify),
     // #196 A12（用户 2026-08-08 裁定）：serve 与 chat/tui 同属对话型入口，
     // 激活 BOOTSTRAP（surface="serve" → bootstrapActive=true），共享同一
     // ~/.iknow/state.json bootstrap_seeded 状态机；ask（oneshot 脚本）唯一例外。

@@ -24,6 +24,7 @@ import type {
   TurnRecord,
   SessionRecord,
   SandboxCmdRecord,
+  VerificationRecord,
 } from "./types.js";
 
 export interface JsonlTraceOptions {
@@ -199,6 +200,29 @@ export function createJsonlTraceService(
       try {
         writeLine(line);
         return id;
+      } catch (err) {
+        warnOnce(err);
+        return undefined;
+      }
+    },
+
+    async recordVerification(
+      record: VerificationRecord
+    ): Promise<string | undefined> {
+      // 与既有 record 的差异: id 由调用方提供, 不做 randomUUID 生成。
+      // 单 id 载体对齐既有模式: 顶层 verification_id 承载 id, 其余顶层 key
+      // 走 toSnakeCaseRecord; 从 snake 副本剔除原 id key, 避免重复落盘。
+      const snake = toSnakeCaseRecord(record);
+      delete snake.id;
+      const line: Record<string, unknown> = {
+        conversation_id: conversationId,
+        record_type: "verification",
+        verification_id: record.id,
+        ...snake,
+      };
+      try {
+        writeLine(line);
+        return record.id;
       } catch (err) {
         warnOnce(err);
         return undefined;

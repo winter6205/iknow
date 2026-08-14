@@ -20,6 +20,12 @@ import {
   type RunResult,
 } from "../harness/index.js";
 import {
+  runVerifyLoop,
+  type VerifyConfig,
+  type VerifyLoopOutcome,
+} from "../harness/verify/index.js";
+import { createRunClassifierFromManager } from "../harness/verify/run-classifier-adapter.js";
+import {
   buildHarnessEngine,
   createAdapterFromEnv,
 } from "../harness/build-engine.js";
@@ -51,10 +57,13 @@ import type { SessionFileV1 } from "./store/index.js";
 import {
   appendCheckpoint,
   CURRENT_SCHEMA_VERSION,
+  extractGoal,
   extractSummary,
+  pinGoal,
   shouldPersistCheckpoint,
   toInterruptReason,
 } from "./store/index.js";
+import type { GoalState } from "./store/index.js";
 import type {
   ApiErrorBody,
   CompactSessionResponse,
@@ -65,6 +74,7 @@ import type {
   ResetSessionResponse,
   SessionSummary,
   TurnDto,
+  VerifyAnswerView,
 } from "./contract.js";
 import { MAX_MESSAGE_CHARS } from "./contract.js";
 import { projectThinkingView, projectToolCalls } from "./turn-projection.js";
@@ -80,6 +90,24 @@ function safeParse(s: string): unknown {
   } catch {
     return s;
   }
+}
+
+/**
+ * #408 T3: detect a goal re-pin directive at the very start of a message.
+ *
+ * Matches only a **leading** `## GOAL:` marker (after trim). Returns the
+ * trimmed goal text, or null when the marker is absent / mid-message. A
+ * marker with no text (`## GOAL:` or `## GOAL:   `) returns `""` — the
+ * caller treats an empty result as a no-op (goal unchanged, no model run).
+ *
+ * Why leading-only: a mid-message `hello ## GOAL: x` is the user talking
+ * *about* the directive, not issuing it — the whole message stays a query.
+ */
+export function parseGoalCommand(text: string): string | null {
+  const trimmed = text.trim();
+  const marker = "## GOAL:";
+  if (!trimmed.startsWith(marker)) return null;
+  return trimmed.slice(marker.length).trim();
 }
 
 /**
@@ -313,6 +341,13 @@ export type SessionHubOptions = {
    */
   readonly subagentManager?: SubAgentManager;
   /**
+   * #128 T8:验证闭环配置 (settings.verify 段经 serve.ts 构造传入)。
+   * 缺席 = 透明关闭, postMessage 走原 run 路径逐字节不变 (SC7);
+   * 配置时每轮 run 被 runVerifyLoop 包裹 (仅 StopReason=completed 触发
+   * 验证; trace 仅 traceOut 配置时注入, 否则 VerificationRecord 不落盘)。
+   */
+  readonly verifyConfig?: VerifyConfig;
+  /**
    * settings-hot-reload（T3）:env 源 — 构造 opts 可选。传入后 ensureDeps /
    * reloadFromEnv 用它拿 env（替代内部 loadIknowEnv()）。T2 EnvLoader.get 是
    * 天然实现。缺省 → 行为零变化（仍内部 loadIknowEnv）。向后兼容：既有
@@ -365,6 +400,8 @@ export class SessionHub {
   private readonly surface: "chat" | "tui" | "ask" | "serve" | undefined;
   /** #356 T7: subagent manager（host drain 消费面；懒取见 ensureDeps）。 */
   private subagentManager: SubAgentManager | undefined;
+  /** #128 T8: 验证闭环配置（settings.verify 段；缺席 = 透明关闭）。 */
+  private readonly verifyConfig: VerifyConfig | undefined;
   /** #356 High#4: built.shutdown 缓存（组合句柄；ensureDeps 懒取，hub.shutdown 触发）。 */
   private cachedShutdown: (() => Promise<void>) | undefined;
   /**
@@ -400,6 +437,7 @@ export class SessionHub {
     this.sandboxRoot = opts.sandboxRoot;
     this.surface = opts.surface;
     this.subagentManager = opts.subagentManager;
+    this.verifyConfig = opts.verifyConfig;
     this.envProvider = opts.envProvider;
     this.onEnvChange = opts.onEnvChange;
     this.defaults = {
@@ -547,12 +585,40 @@ export class SessionHub {
     readonly onStream?: (event: HarnessStreamEvent) => void;
   }): Promise<PostMessageResponse> {
     const { conversationId, text } = opts;
-    this.validateText(text);
-    const query = text.trim();
+    // #408 T3: leading `## GOAL:` re-pins the session goal. Detect BEFORE
+    // validateText so the goal text (not the raw directive) is what gets
+    // validated and run. `null` = no directive → whole text is the query.
+    // `""` = empty directive → stripped to empty → validateText rejects
+    // below (goal unchanged, since we only persist after run succeeds).
+    const goalDirective = parseGoalCommand(text);
+    const query = goalDirective !== null ? goalDirective : text.trim();
+    this.validateText(query);
     return this.serialize({
       conversationId,
       work: async () => {
-        const session = await this.store.load(conversationId);
+        let session = await this.store.load(conversationId);
+        // #408 T3: re-pin the session-level goal when the incoming text is a
+        // `## GOAL: ...` directive. Persisted immediately so subsequent
+        // verify-loop rounds in this turn see the new goal.text. The query
+        // the model sees is the directive's text body (not the marker).
+        // After pinning, `session` is reloaded so conditionalSave sees the
+        // pinned goal and does NOT re-seed (else the T2 seed would overwrite
+        // the T3 pin).
+        if (goalDirective !== null && goalDirective.length > 0) {
+          const now = new Date().toISOString();
+          const pinned: SessionFileV1 = {
+            ...session,
+            goal: pinGoal({
+              current: session.goal,
+              text: goalDirective,
+              now,
+            }),
+            updatedAt: now,
+            schemaVersion: CURRENT_SCHEMA_VERSION,
+          };
+          await this.store.save({ id: conversationId, file: pinned });
+          session = await this.store.load(conversationId);
+        }
         const priorCount = session.messages.length;
         const baseDeps = await this.ensureDeps();
         // T2: per-turn override — rebuild deps with a one-shot adapter only;
@@ -627,11 +693,74 @@ export class SessionHub {
           ? [...session.messages, drainedMsg]
           : session.messages;
         let finalResult: RunResult;
+        let verifyView: VerifyAnswerView | undefined;
+        // #408 T5: verify-loop terminal outcome (only set when verifyConfig
+        // is configured). Captured outside the try block so the post-run
+        // write-back can read it.
+        let verifyOutcome: VerifyLoopOutcome | undefined;
         try {
-          const { result } = await run(query, runDeps, opts.signal, {
-            priorMessages,
-            onStream: wrappedOnStream,
-          });
+          // #128 T8:verifyConfig 非 undefined (含 command 空串) 时 run 被
+          // runVerifyLoop 包裹 (advisor 形态, 引擎零改动);缺席 → 原 run 调用
+          // 逐字节不变 (仅未接线路径)。
+          // runVerifyLoop 的 runFn 透传 onStream → wrappedOnStream 语义保持;
+          // trace 仅在 traceOut 配置时注入 (records 落盘, T7 已处理可选)。
+          // 注意: runVerifyLoop 的首轮 runFn 不带 priorMessages / onStream,
+          // 闭包必须兜底 hub 侧的 priorMessages 与 wrappedOnStream。
+          const runOutcome = this.verifyConfig
+            ? await runVerifyLoop({
+                runFn: (text, o) =>
+                  run(text, runDeps, o?.signal, {
+                    priorMessages: o?.priorMessages ?? priorMessages,
+                    onStream: o?.onStream ?? wrappedOnStream,
+                  }),
+                // #408 T4: verify-loop's task field = goal.text ?? query.
+                // Session-level goal wins; empty goal.text is treated as
+                // absent (defensive — re-feeding "" to the model on every
+                // round would break the loop). Goal-absent sessions stay
+                // byte-identical to pre-#408 (query).
+                userText:
+                  session.goal !== undefined && session.goal.text.length > 0
+                    ? session.goal.text
+                    : query,
+                config: this.verifyConfig,
+                sessionId: conversationId,
+                signal: opts.signal,
+                trace: runDeps.trace,
+                cwd: process.cwd(),
+                // #128 SC1 生产装配: subagentManager 在场 → 启用分类器填空
+                // (command 缺失/空串时分类器接管, spec Objective);缺席
+                // (ask 形态) → undefined, verify-loop 自然走透明关闭向后兼容。
+                runClassifier:
+                  this.subagentManager === undefined
+                    ? undefined
+                    : createRunClassifierFromManager({
+                        manager: this.subagentManager,
+                        ...(this.verifyConfig.classifierModel !== undefined
+                          ? {
+                              classifierModel:
+                                this.verifyConfig.classifierModel,
+                            }
+                          : {}),
+                      }),
+              })
+            : await run(query, runDeps, opts.signal, {
+                priorMessages,
+                onStream: wrappedOnStream,
+              });
+          const result = runOutcome.result;
+          // #408 T5: capture the terminal outcome for post-run write-back.
+          verifyOutcome =
+            "outcome" in runOutcome ? runOutcome.outcome : undefined;
+          // #128 M3: verify 最终判定 (failed / unstable / escalated) surface 到
+          // DTO, 避免"模型声称完成但验证没过"仍显示 completed (SC2/SC6 交付面)。
+          // 仅 verify 分支有 outcome/rounds; 裸 run 分支无 (字段缺席)。
+          verifyView =
+            "outcome" in runOutcome &&
+            (runOutcome.outcome === "failed" ||
+              runOutcome.outcome === "unstable" ||
+              runOutcome.outcome === "escalated")
+              ? { outcome: runOutcome.outcome, rounds: runOutcome.rounds }
+              : undefined;
           // Violation kill → surface protocolError so the SPA client can
           // attribute the stop; shouldPersistCheckpoint still drops
           // protocolError context on save (mirrors the chat-session drop
@@ -674,6 +803,36 @@ export class SessionHub {
           priorMessages: session.messages,
         });
         void saved;
+        // #408 T5: status write-back on verify-loop terminal outcome. The hub
+        // is the only writer of goal.status. `passed` → "achieved",
+        // `aborted` → "aborted"; `failed` / `unstable` / `escalated` /
+        // `disabled` leave the status unchanged. runVerifyLoop never sets
+        // goal.status itself (its body has no `goal` reference). Placed
+        // AFTER conditionalSave so a T2-seeded goal on this same turn is
+        // promoted in the same persistence round.
+        if (
+          (verifyOutcome === "passed" || verifyOutcome === "aborted") &&
+          saved
+        ) {
+          const justSaved = await this.store.load(conversationId);
+          if (justSaved.goal !== undefined) {
+            const now = new Date().toISOString();
+            const statusWriteback: SessionFileV1 = {
+              ...justSaved,
+              goal: {
+                ...justSaved.goal,
+                status: verifyOutcome === "passed" ? "achieved" : "aborted",
+                updatedAt: now,
+              },
+              updatedAt: now,
+              schemaVersion: CURRENT_SCHEMA_VERSION,
+            };
+            await this.store.save({
+              id: conversationId,
+              file: statusWriteback,
+            });
+          }
+        }
         return {
           session: this.summarize({
             file: await this.store.load(conversationId),
@@ -690,6 +849,8 @@ export class SessionHub {
             capturedStopSummary.length > 0
               ? { stopSummary: capturedStopSummary }
               : {}),
+            // #128 M3: 验证最终判定 (failed/unstable/escalated) surface 到 DTO。
+            ...(verifyView !== undefined ? { verify: verifyView } : {}),
           }),
         };
       },
@@ -890,9 +1051,32 @@ export class SessionHub {
       updatedAt: now,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       summary: extractSummary(result.messages),
+      // #408 T2: seed the session-level goal from the first user message text
+      // (full, trimmed) when absent. Seeded exactly once — subsequent turns
+      // preserve the existing goal (re-pin is the only overwrite, see T3).
+      // Only seeds when a user text block exists; a tool_result-only first
+      // message yields "" and is treated as "no goal".
+      ...(withCheckpoint.goal === undefined && extractGoal(result.messages)
+        ? {
+            goal: this.seedGoal(extractGoal(result.messages), now),
+          }
+        : {}),
     };
     await this.store.save({ id: conversationId, file: updated });
     return true;
+  }
+
+  /** #408 T2: construct a fresh active GoalState from the first user text.
+   *  source === "user_initial" (the seed path); status === "active"; no
+   *  history (a fresh seed has nothing to supersede). */
+  private seedGoal(text: string, now: string): GoalState {
+    return {
+      text,
+      source: "user_initial",
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    };
   }
 
   /**
@@ -962,6 +1146,9 @@ export class SessionHub {
      * 判定 shouldPersistCheckpoint(delta>0 → interrupted=true)。非 cancelled
      * 不消费;缺席(catch 分支等)时 cancelled 缺省判定 false。 */
     readonly priorMessages?: ReadonlyArray<AnthropicNativeMessage>;
+    /** #128 M3: verify 最终判定视图 (failed/unstable/escalated)。缺席 = 无 verify
+     * 或判定为 passed/disabled/aborted (byte-stable)。 */
+    readonly verify?: VerifyAnswerView;
   }): TurnDto {
     const { query, result } = opts;
     // SC20: serve SPA output boundary — mask known secret values in the
@@ -1004,6 +1191,9 @@ export class SessionHub {
               ),
             }
           : {}),
+        // #128 M3: verify 最终判定 (failed/unstable/escalated) surface。
+        // 仅 verify 配置且判定非 passed/disabled/aborted 时存在 (byte-stable)。
+        ...(opts.verify !== undefined ? { verify: opts.verify } : {}),
       },
     };
   }

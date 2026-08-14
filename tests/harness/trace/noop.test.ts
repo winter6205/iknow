@@ -89,13 +89,14 @@ describe("createNoopTraceService", () => {
     for (const spy of consoleSpies) spy.mockClear();
   });
 
-  it("returns a TraceService with exactly 5 public methods", () => {
+  it("returns a TraceService with exactly 6 public methods", () => {
     const svc = createNoopTraceService();
     expect(typeof svc.recordLlmCall).toBe("function");
     expect(typeof svc.recordToolCall).toBe("function");
     expect(typeof svc.recordTurn).toBe("function");
     expect(typeof svc.recordSession).toBe("function");
     expect(typeof svc.recordSandboxCmd).toBe("function");
+    expect(typeof svc.recordVerification).toBe("function");
     const ownKeys = Object.keys(svc).sort();
     assert.deepEqual(ownKeys, [
       "recordLlmCall",
@@ -103,6 +104,7 @@ describe("createNoopTraceService", () => {
       "recordSession",
       "recordToolCall",
       "recordTurn",
+      "recordVerification",
     ]);
   });
 

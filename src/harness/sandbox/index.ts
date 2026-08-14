@@ -41,3 +41,20 @@ export type { OutputMask } from "./output-mask.js";
 
 export { createBwrapFence } from "./bwrap.js";
 export type { BwrapFence, BwrapFenceOptions, SeccompProfile } from "./bwrap.js";
+
+export {
+  DEFAULT_MAX_OUTPUT_CODE_POINTS,
+  SIGNAL_EXIT_CODES,
+  requireBwrap,
+  runInSandbox,
+  signalExitCode,
+  spawnWithStopSignal,
+  truncateByCodePoint,
+} from "./runner.js";
+export type {
+  SandboxRunOptions,
+  SandboxRunResult,
+  SpawnResult,
+  SpawnWithStopSignalOptions,
+  SpawnWithStopSignalResult,
+} from "./runner.js";

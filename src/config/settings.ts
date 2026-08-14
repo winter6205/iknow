@@ -21,14 +21,20 @@
  *    `expandPlaceholders` 从 process.env > .env.local > .env 解析；未配 →
  *    undefined（消费点守卫抛错）。
  *
+ * #128 自动修正闭环（T5）：
+ *  - `settings.verify` 段承载闭环配置；未配置 → verify undefined（装配层
+ *    resolveVerifyConfig 以 command="" 兜底, 由分类器判官接管, 见 verify-config.ts）。
+ *  - 默认值（timeoutSec=600 / onExhausted=report / maxRounds=12）不在 settings
+ *    层填，由消费点（verify-loop）兜底——settings 层只透传用户显式配置。
+ *
  * 对齐 env.ts 的"非法值回退不抛错"纪律：
  *  - 文件不存在 → 空对象；
  *  - 坏 JSON（SyntaxError）→ 空对象，其它意外异常继续抛；
  *  - 非法值（maxTurns 非有限正整数 / contextWindow / thresholdTokens 非有限正数 /
  *    thinking 非 "off"|"adaptive" / thinkingEffort 非五档 /
  *    model 非空串字符串 / fallback 非空串字符串数组 /
- *    apiKey 非字面非占位符）→ 丢弃该字段，且被丢弃的字段不参与覆盖（不抹掉
- *    user 对应值）；
+ *    apiKey 非字面非占位符 / verify 段各字段越界或非字面量）→ 丢弃该字段，
+ *    且被丢弃的字段不参与覆盖（不抹掉 user 对应值）；
  *  - 顶层 / 中间层必须是普通对象（数组 / 字符串等 → 丢弃该层 / 该字段）。
  *
  * llm.thinking / llm.thinkingEffort 与 env.ts IKNOW_LLM_THINKING(_EFFORT) 同值域，
@@ -85,6 +91,36 @@ export interface IknowSettingsLlm {
   apiKey?: string;
 }
 
+export interface IknowSettingsVerify {
+  /**
+   * 验证命令。非空串才合法；未配置 → verify 段不产 command 字段，装配层
+   * resolveVerifyConfig 以 command="" 兜底（分类器判官接管，见 verify-config.ts）。
+   */
+  command?: string;
+  /** 失败用例单跑模板，`{files}` 占位；非空串才合法。 */
+  rerunTemplate?: string;
+  /** 失败数提取正则覆盖（可选）；非空串才合法。 */
+  countRegex?: string;
+  /**
+   * 验证命令超时（秒）。默认 600 由消费点兜底（settings 层不透传默认值）；
+   * 有限正整数才合法。
+   */
+  timeoutSec?: number;
+  /**
+   * 修正耗尽处置。仅 `"report"` | `"escalate"` 字面量合法；默认 report 由
+   * 消费点兜底。
+   */
+  onExhausted?: "report" | "escalate";
+  /** 兜底总轮数上限。默认 12 由消费点兜底；有限正整数才合法。 */
+  maxRounds?: number;
+  /**
+   * 分类器（command 缺失时的子代理 LLM 判官）模型路由 ID（A7）。
+   * 显式指定时用其值；缺省解析到 settings.llm.model。ADR-0015 扩展，
+   * 非空串才合法（与 command 同纪律），代码层不硬编码模型 ID。
+   */
+  classifierModel?: string;
+}
+
 export interface IknowSettingsSecrets {
   /** 是否启用 hook 敏感信息脱敏。缺失时消费方按 true 处理（默认开启）。 */
   enabled?: boolean;
@@ -103,6 +139,7 @@ export interface IknowSettingsSecrets {
 
 export interface IknowSettings {
   llm?: IknowSettingsLlm;
+  verify?: IknowSettingsVerify;
   secrets?: IknowSettingsSecrets;
 }
 
@@ -282,6 +319,82 @@ function parseLlm(raw: unknown): IknowSettingsLlm | undefined {
   return out;
 }
 
+/**
+ * 校验单个 `verify` 层：非法字段丢弃。
+ * 非普通对象（数组 / 字符串 / 数字等）→ undefined（丢弃该层）。
+ * verify 为普通对象但字段全部非法 → undefined（丢弃该字段，闭环不启用）。
+ * 默认值（timeoutSec=600 / onExhausted=report / maxRounds=12）不在此填充，
+ * 由消费点（verify-loop）兜底。
+ */
+function parseVerify(raw: unknown): IknowSettingsVerify | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const out: IknowSettingsVerify = {};
+  if (isNonEmptyString(raw.command)) out.command = raw.command.trim();
+  if (isNonEmptyString(raw.rerunTemplate)) {
+    out.rerunTemplate = raw.rerunTemplate.trim();
+  }
+  if (isNonEmptyString(raw.countRegex)) out.countRegex = raw.countRegex.trim();
+  if (isValidMaxTurns(raw.timeoutSec)) out.timeoutSec = raw.timeoutSec;
+  if (raw.onExhausted === "report" || raw.onExhausted === "escalate") {
+    out.onExhausted = raw.onExhausted;
+  }
+  if (isValidMaxTurns(raw.maxRounds)) out.maxRounds = raw.maxRounds;
+  if (isNonEmptyString(raw.classifierModel)) {
+    out.classifierModel = raw.classifierModel.trim();
+  }
+  if (
+    out.command === undefined &&
+    out.rerunTemplate === undefined &&
+    out.countRegex === undefined &&
+    out.timeoutSec === undefined &&
+    out.onExhausted === undefined &&
+    out.maxRounds === undefined &&
+    out.classifierModel === undefined
+  )
+    return undefined;
+  return out;
+}
+
+/** 逐层合并 verify：project 字段优先，未覆盖的 user 字段保留。 */
+function mergeVerify(
+  user: IknowSettingsVerify | undefined,
+  project: IknowSettingsVerify | undefined
+): IknowSettingsVerify | undefined {
+  if (!user && !project) return undefined;
+  const out: IknowSettingsVerify = {};
+  if (project?.command !== undefined) out.command = project.command;
+  else if (user?.command !== undefined) out.command = user.command;
+  if (project?.rerunTemplate !== undefined) {
+    out.rerunTemplate = project.rerunTemplate;
+  } else if (user?.rerunTemplate !== undefined) {
+    out.rerunTemplate = user.rerunTemplate;
+  }
+  if (project?.countRegex !== undefined) out.countRegex = project.countRegex;
+  else if (user?.countRegex !== undefined) out.countRegex = user.countRegex;
+  if (project?.timeoutSec !== undefined) out.timeoutSec = project.timeoutSec;
+  else if (user?.timeoutSec !== undefined) out.timeoutSec = user.timeoutSec;
+  if (project?.onExhausted !== undefined) out.onExhausted = project.onExhausted;
+  else if (user?.onExhausted !== undefined) out.onExhausted = user.onExhausted;
+  if (project?.maxRounds !== undefined) out.maxRounds = project.maxRounds;
+  else if (user?.maxRounds !== undefined) out.maxRounds = user.maxRounds;
+  if (project?.classifierModel !== undefined) {
+    out.classifierModel = project.classifierModel;
+  } else if (user?.classifierModel !== undefined) {
+    out.classifierModel = user.classifierModel;
+  }
+  if (
+    out.command === undefined &&
+    out.rerunTemplate === undefined &&
+    out.countRegex === undefined &&
+    out.timeoutSec === undefined &&
+    out.onExhausted === undefined &&
+    out.maxRounds === undefined &&
+    out.classifierModel === undefined
+  )
+    return undefined;
+  return out;
+}
+
 /** 逐层合并 llm：project 字段优先，未覆盖的 user 字段保留。 */
 function mergeLlm(
   user: IknowSettingsLlm | undefined,
@@ -389,13 +502,17 @@ function mergeSettings(
   const userLlm = parseLlm(userRaw.llm);
   const projectLlm = parseLlm(projectRaw.llm);
   const llm = mergeLlm(userLlm, projectLlm);
+  const userVerify = parseVerify(userRaw.verify);
+  const projectVerify = parseVerify(projectRaw.verify);
+  const verify = mergeVerify(userVerify, projectVerify);
   const userSecrets = parseSecrets(userRaw.secrets);
   const projectSecrets = parseSecrets(projectRaw.secrets);
   const secrets = mergeSecrets(userSecrets, projectSecrets);
-  if (llm && secrets) return { llm, secrets };
-  if (llm) return { llm };
-  if (secrets) return { secrets };
-  return {};
+  const out: IknowSettings = {};
+  if (llm) out.llm = llm;
+  if (verify) out.verify = verify;
+  if (secrets) out.secrets = secrets;
+  return out;
 }
 
 /** 递归冻结对象（含嵌套对象）。 */

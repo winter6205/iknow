@@ -1,0 +1,6 @@
+id: "020-verify-loop"
+tier: medium
+repo: .
+description: "Failure auto-correction loop (verify module) — verdict/inject/verify-loop acceptance suite passes"
+test_command: bash -e -c 'npx vitest run tests/harness/verify/'
+prompt: "Run `bash .evals/run.sh --task 020-verify-loop`. Confirms the verify module (tri-state verdict, confirmation ladder, failure signature, trend stop, injection envelope, verify-loop main loop) acceptance suite passes."

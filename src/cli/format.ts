@@ -241,6 +241,24 @@ export function formatRunHuman(opts: FormatRunHumanOpts): string {
 }
 
 /**
+ * #128 M3: 验证闭环最终判定的 CLI 人类可读报告 (failed / unstable / escalated)。
+ * 仅验证配置且最终判定非 passed/disabled/aborted 时由 chat 装配层调用;
+ * 未触发返回 undefined (不污染既有 output 形状)。
+ */
+export function formatVerifyReport(
+  outcome: "failed" | "unstable" | "escalated",
+  rounds: number
+): string {
+  const label =
+    outcome === "failed"
+      ? "验证未通过"
+      : outcome === "unstable"
+        ? "验证不稳定（套件干扰）"
+        : "验证耗尽（升级后仍未通过）";
+  return `[验证] ${label}（${rounds} 轮）—— 未判完成，结果以验证为准。`;
+}
+
+/**
  * #160 T5: 人类状态行的 token 读数段。
  *
  * `lastUsage` 是 `RunResult` 必填字段;null = run 无成功模型调用,返回空串

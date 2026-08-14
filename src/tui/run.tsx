@@ -48,6 +48,8 @@ import {
   createPermissionModeContext,
   parsePermissionMode,
 } from "../harness/permission/index.js";
+import { loadIknowSettings } from "../config/settings.js";
+import { resolveVerifyConfig } from "../session-api/serve.js";
 import { createEnvLoader, type EnvLoader } from "../config/env-loader.js";
 import type { IknowEnv } from "../config/env.js";
 import {
@@ -210,6 +212,11 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       deps,
       subagentManager,
       traceOut: options.traceOut,
+      // #128 T8: settings.verify 段 → 闭环配置 (经 hub-bridge 透传 SessionHub)。
+      // command 缺失 (含 verify 段缺失) → { command: "" }, hub 装配
+      // subagentManager 时 runClassifier 接管 (spec #128 Objective)。与 serve
+      // 共用 resolveVerifyConfig 装配。
+      verifyConfig: resolveVerifyConfig(loadIknowSettings().verify),
       inflight,
       contextWindow: currentEnv.compress.contextWindow,
       // T2: 把启动期校验过的 env 透到 hub 的 override 路径 —— override 重建

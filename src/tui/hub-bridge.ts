@@ -28,6 +28,7 @@ import type { LoopEngineDeps } from "../harness/index.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { TokenUsage } from "../harness/model-adapter/types.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
+import type { VerifyConfig } from "../harness/verify/index.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import type { IknowEnv, LlmEnv } from "../config/env.js";
 
@@ -135,6 +136,8 @@ export interface CreateTuiBridgeOptions {
   /** subagentManager 由 buildTuiDeps 经 buildHarnessEngine SSOT 装配，
    *  hub-bridge 透传给 SessionHub。缺省 undefined → 无 manager 路径（drain 返空）。 */
   readonly subagentManager?: SubAgentManager;
+  /** #128 T8: 验证闭环配置。缺席 = 透明关闭 (postMessage 走原 run, SC7)。 */
+  readonly verifyConfig?: VerifyConfig;
   /** T3: 上下文窗口容量（tokens）。缺省 `DEFAULT_CONTEXT_WINDOW = 200_000`。 */
   readonly contextWindow?: number;
   /** T2: LLM env 覆盖源，透传给 SessionHub（override 路径重建 adapter 时用，
@@ -161,6 +164,10 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     // subagentManager 由 buildTuiDeps 经 buildHarnessEngine SSOT 装配，
     // hub-bridge 透传给 SessionHub。
     subagentManager: opts.subagentManager,
+    // #128 T8: verifyConfig 由 run.tsx 装配 (settings.verify 段) 透传。
+    // command 缺失时 (含 verify 段缺失) 由 runClassifier 接管 (subagentManager
+    // 在场);缺席 = 不包裹 run (仅未接线路径)。
+    verifyConfig: opts.verifyConfig,
     // T2: LLM env 覆盖源 —— TUI 启动期校验过的 env 透到 override 路径，
     // 避免 override 重建 adapter 时回退到 process.env（reviewer blocker）。
     ...(opts.overrideEnv ? { overrideEnv: opts.overrideEnv } : {}),

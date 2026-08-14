@@ -10,7 +10,14 @@ import {
   type LoopEngineDeps,
   type RunResult,
 } from "../harness/index.js";
-import { formatRunHuman, formatRunJson, formatStatusLine } from "./format.js";
+import { runVerifyLoop, type VerifyConfig } from "../harness/verify/index.js";
+import { createRunClassifierFromManager } from "../harness/verify/run-classifier-adapter.js";
+import {
+  formatRunHuman,
+  formatRunJson,
+  formatStatusLine,
+  formatVerifyReport,
+} from "./format.js";
 import {
   applySlashCommand,
   parseChatLine,
@@ -48,6 +55,7 @@ import {
   CURRENT_SCHEMA_VERSION,
   extractSummary,
   appendCheckpoint,
+  pinGoal,
   shouldPersistCheckpoint,
   toInterruptReason,
 } from "../session-api/store/index.js";
@@ -93,6 +101,14 @@ export type ChatSessionOpts = {
    * 拼入 next turn 的 priorMessages。ask 入口无 manager → 不传。
    */
   readonly subagentManager?: SubAgentManager;
+  /**
+   * #128 T8:验证闭环配置 (settings.verify 段经 cli.ts 构造)。
+   * command 缺失 (含 verify 段完全缺失) → `{ command: "" }` 仍非 undefined ——
+   * subagentManager 在场时 runClassifier 接管 (每轮 completed 后 spawn 判官,
+   * spec #128 Objective); 未装配 subagentManager (ask 形态) → verify-loop
+   * 透明关闭向后兼容 (SC7)。command 已配 → 每轮 run 被 runVerifyLoop 包裹。
+   */
+  readonly verifyConfig?: VerifyConfig;
 };
 
 export type ChatLineContext = {
@@ -120,6 +136,11 @@ export type ChatLineContext = {
    * 缺席(undefined)= 不调 drain,行为零变化。
    */
   readonly subagentManager?: SubAgentManager;
+  /**
+   * #128 T8:同 ChatSessionOpts.verifyConfig,runChatSession 透传。
+   * 缺席(undefined)= 不包裹 run,行为逐字节不变 (仅测试/装配未接线路径)。
+   */
+  readonly verifyConfig?: VerifyConfig;
 };
 
 export type ProcessChatLineResult = {
@@ -203,17 +224,46 @@ export async function processChatLine(
       ])
     : ctx.state.messages;
   try {
-    const { result, trace } = await runHarness(
-      query,
-      ctx.deps,
-      ctx.abortController?.signal,
-      {
-        priorMessages,
-        // #179 T6 (D3):观察者回调透传;undefined = 非流式行为零变化(pipe/ask)。
-        // T6:wrap 后仅转发非 stop_summary 事件(摘要单独捕获,见上)。
-        onStream: wrappedOnStream,
-      }
-    );
+    // #128 T8:verifyConfig 非 undefined (含 command 空串) 时 run 被
+    // runVerifyLoop 包裹 (advisor 形态, 引擎零改动);缺席 → 原 runHarness
+    // 调用逐字节不变 (仅未接线路径)。runVerifyLoop 的 runFn 透传 onStream →
+    // wrappedOnStream 捕获 stop_summary 的既有语义保持;trace 未注入 (chat 无
+    // trace service), VerificationRecord 不落盘 (T7 已处理 trace 可选)。
+    // 注意: runVerifyLoop 的首轮 runFn 不带 priorMessages / onStream,
+    // 闭包必须兜底 chat 侧的 priorMessages 与 wrappedOnStream, 否则多轮
+    // 历史丢失 + 流式预览失效。
+    const runOutcome = ctx.verifyConfig
+      ? await runVerifyLoop({
+          runFn: (text, o) =>
+            runHarness(text, ctx.deps, o?.signal, {
+              priorMessages: o?.priorMessages ?? priorMessages,
+              onStream: o?.onStream ?? wrappedOnStream,
+            }),
+          userText: query,
+          config: ctx.verifyConfig,
+          sessionId: ctx.state.conversationId ?? "chat",
+          signal: ctx.abortController?.signal,
+          cwd: process.cwd(),
+          // #128 SC1 生产装配: subagentManager 在场 → 启用分类器填空
+          // (command 缺失/空串时分类器接管, spec Objective); 缺席 (ask 形态)
+          // → undefined, verify-loop 自然走透明关闭向后兼容 (SC7)。
+          runClassifier:
+            ctx.subagentManager === undefined
+              ? undefined
+              : createRunClassifierFromManager({
+                  manager: ctx.subagentManager,
+                  ...(ctx.verifyConfig.classifierModel !== undefined
+                    ? {
+                        classifierModel: ctx.verifyConfig.classifierModel,
+                      }
+                    : {}),
+                }),
+        })
+      : await runHarness(query, ctx.deps, ctx.abortController?.signal, {
+          priorMessages,
+          onStream: wrappedOnStream,
+        });
+    const { result, trace } = runOutcome;
     // T2: post-run checkpoint 落盘(mirrors hub.ts conditionalSave)。Ask/serve/
     // tests 没接 checkpointStore → 跳过,行为零变化(pipe / ask 一支不动)。
     // run resolve 后才落盘 —— throw 路径(下文 catch)不进此处,刻意保持 #120
@@ -253,7 +303,17 @@ export async function processChatLine(
           : "未落checkpoint"
         : undefined;
     const human = !ctx.state.jsonMode;
-    const output = human
+    // #128 M3: verify 最终判定 (failed/unstable/escalated) surface 到 chat 输出,
+    // 避免"模型声称完成但验证没过"仍显示正常完成 (SC2/SC6 交付面)。
+    // 仅 verify 分支有 outcome/rounds; 裸 run 分支无 (无报告, 行为不变)。
+    const verifyReport =
+      "outcome" in runOutcome &&
+      (runOutcome.outcome === "failed" ||
+        runOutcome.outcome === "unstable" ||
+        runOutcome.outcome === "escalated")
+        ? formatVerifyReport(runOutcome.outcome, runOutcome.rounds)
+        : undefined;
+    const baseOutput = human
       ? formatRunHuman({
           result,
           trace,
@@ -261,6 +321,10 @@ export async function processChatLine(
           interruptNote,
         })
       : formatRunJson({ result, trace });
+    const output =
+      verifyReport !== undefined
+        ? `${baseOutput}\n${verifyReport}`
+        : baseOutput;
     return {
       quit: false,
       output,
@@ -361,6 +425,68 @@ async function processSlash(opts: {
       return {
         quit: false,
         output: `权限模式已切换: ${parsed}`,
+      };
+    }
+
+    case "goal": {
+      // #408 T3: /goal <text> 覆盖会话级 goal。等价于「## GOAL: <text>」
+      // 文本指令的 CLI 入口;持久化走与 hub 相同的 pinGoal 纯函数 +
+      // checkpointStore。空 text / 缺 checkpointStore / 缺 conversationId
+      // → 错误;非空 text → 原子写(沿用 store.save 的 tmp+rename 模式)。
+      if (effect.text.length === 0) {
+        return {
+          quit: false,
+          output: "",
+          stderr: "Usage: /goal <text>",
+        };
+      }
+      const store = ctx.checkpointStore;
+      const conversationId = ctx.state.conversationId;
+      if (!store || !conversationId) {
+        return {
+          quit: false,
+          output: "",
+          stderr:
+            "/goal: 当前入口不提供会话持久化上下文（ask / pipe 模式不支持）",
+        };
+      }
+      let existing: SessionFileV1;
+      try {
+        existing = await store.load(conversationId);
+      } catch (err) {
+        return {
+          quit: false,
+          output: "",
+          stderr: `/goal: failed to load session: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        };
+      }
+      const now = new Date().toISOString();
+      const updated: SessionFileV1 = {
+        ...existing,
+        goal: pinGoal({
+          current: existing.goal,
+          text: effect.text,
+          now,
+        }),
+        updatedAt: now,
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+      };
+      try {
+        await store.save({ id: conversationId, file: updated });
+      } catch (err) {
+        return {
+          quit: false,
+          output: "",
+          stderr: `/goal: failed to persist: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        };
+      }
+      return {
+        quit: false,
+        output: `goal pinned: ${effect.text}`,
       };
     }
   }
@@ -678,6 +804,7 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     abortController,
     checkpointStore,
     subagentManager: opts.subagentManager,
+    verifyConfig: opts.verifyConfig,
   };
 
   const interactive = isInteractive();

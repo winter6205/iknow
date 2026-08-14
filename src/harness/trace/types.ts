@@ -166,6 +166,48 @@ export interface SandboxCmdRecord {
   error?: TraceError;
 }
 
+/**
+ * 分类器 (子代理 LLM 判官, #128) 单条证据: 判官跑了什么 + 跑出了什么。
+ * 语义同 verify 域 `ClassifierCheck` (spec A4); trace bounded context 遵循文件头
+ * 先例 (loop-trace.ts:17/22-23 注释) **不 import** verify 域类型 —— 通过形状重定义
+ * + JSDoc 标注源文件保持独立松耦合; verify-loop 抄入时做结构赋值。
+ * 无 command 的 check 算 skip 不算 pass (spec A4)。
+ */
+export interface VerificationCheck {
+  readonly command: string;
+  readonly output?: string;
+  readonly result: "pass" | "fail";
+}
+
+/**
+ * 验证判定记录（#128 自动修正闭环观测落点）。
+ * 与既有 record 的关键差异: id/sessionId/ts 由调用方提供 (plan §Decisions 定稿),
+ * 不依赖 turn 树 —— 以自有 id 关联整条验证轨迹。
+ * sessionId 关联会话根; round 为闭环轮次; verdict 三态判定; action 为策略动作。
+ * Postel: failedCount / signature / finalOutcome 可选, 仅存在时落盘。
+ */
+export interface VerificationRecord {
+  /** 自有 id (#286 决议：新 record 统一 parent_*_id 单值；VerificationRecord 以自有 id 关联整条验证轨迹，不依赖 turn 树）。 */
+  readonly id: string;
+  readonly sessionId: string;
+  readonly round: number;
+  readonly verdict: VerificationVerdict;
+  readonly exitCode: number;
+  /** Postel：布尔开关，内容仅存在时落盘。 */
+  readonly failedCount?: number;
+  readonly signature?: string;
+  readonly action: VerificationAction;
+  readonly finalOutcome?: string;
+  readonly ts: string;
+  /** 分类器分支字段: 语义同 verify 域 VerificationRecord (spec A4 / SC10)。 */
+  readonly reason?: string;
+  readonly evidence?: ReadonlyArray<VerificationCheck>;
+  readonly missing?: ReadonlyArray<string>;
+}
+
+export type VerificationVerdict = "pass" | "true-failure" | "unstable";
+export type VerificationAction = "continue" | "stop" | "escalate";
+
 export interface TraceService {
   /**
    * 记录一次 LLM 调用; 由实现生成 llmCallId。
@@ -192,4 +234,11 @@ export interface TraceService {
    * @throws never.
    */
   recordSandboxCmd(record: SandboxCmdRecord): Promise<string | undefined>;
+  /**
+   * 记录一次验证判定（#128 闭环）。
+   * 注意: 与既有 record 不同, VerificationRecord 的 id/sessionId/ts 由调用方提供,
+   * 实现不做 ID 生成 —— 成功返回 record.id, 失败返回 undefined。
+   * @throws never — 实现必须捕获 IO 错误并返回 undefined。
+   */
+  recordVerification(record: VerificationRecord): Promise<string | undefined>;
 }

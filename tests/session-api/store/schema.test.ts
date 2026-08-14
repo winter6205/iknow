@@ -14,6 +14,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   CURRENT_SCHEMA_VERSION,
+  extractGoal,
   isSessionFileV1,
   sanitizeSessionFile,
   validateSessionFile,
@@ -28,7 +29,7 @@ import type {
 } from "@anthropic-ai/sdk/resources/messages/messages.js";
 
 const valid: SessionFileV1 = {
-  schemaVersion: 4,
+  schemaVersion: 5,
   conversation_id: "abc",
   messages: [],
   jsonMode: false,
@@ -47,8 +48,8 @@ describe("validateSessionFile — happy path", () => {
     assert.equal(validateSessionFile(valid), null);
   });
 
-  it("CURRENT_SCHEMA_VERSION is the canonical v4 literal (4) — system role (#392)", () => {
-    assert.equal(CURRENT_SCHEMA_VERSION, 4);
+  it("CURRENT_SCHEMA_VERSION is the canonical v5 literal (5) — goal field (#408)", () => {
+    assert.equal(CURRENT_SCHEMA_VERSION, 5);
     assert.equal(validateSessionFile({ ...valid }), null);
   });
 
@@ -70,13 +71,14 @@ describe("validateSessionFile — happy path", () => {
 // -- range check (#120 T1) ---------------------------------------------------
 
 describe("validateSessionFile — schemaVersion range check (#120)", () => {
-  it("accepts schemaVersion 1, 2, 3 and 4 (≤ CURRENT) and rejects anything above", () => {
+  it("accepts schemaVersion 1, 2, 3, 4 and 5 (≤ CURRENT) and rejects anything above", () => {
     assert.equal(validateSessionFile({ ...valid, schemaVersion: 1 }), null);
     assert.equal(validateSessionFile({ ...valid, schemaVersion: 2 }), null);
     assert.equal(validateSessionFile({ ...valid, schemaVersion: 3 }), null);
     assert.equal(validateSessionFile({ ...valid, schemaVersion: 4 }), null);
+    assert.equal(validateSessionFile({ ...valid, schemaVersion: 5 }), null);
     assert.equal(
-      validateSessionFile({ ...valid, schemaVersion: 5 }),
+      validateSessionFile({ ...valid, schemaVersion: 6 }),
       "schemaVersion"
     );
     assert.equal(
@@ -255,6 +257,165 @@ describe("validateSessionFile — system role (schema v4)", () => {
   });
 });
 
+// -- v5: goal field (#408 T1) ------------------------------------------------
+
+const validGoal = {
+  text: "Build a C compiler",
+  source: "user_initial",
+  status: "active",
+  createdAt: "2026-08-13T00:00:00.000Z",
+  updatedAt: "2026-08-13T00:00:00.000Z",
+};
+
+describe("validateSessionFile — v5 goal field (#408)", () => {
+  it("accepts a valid goal object", () => {
+    assert.equal(validateSessionFile({ ...valid, goal: validGoal }), null);
+  });
+
+  it("accepts a goal with a non-empty history array", () => {
+    const goal = {
+      ...validGoal,
+      source: "user_pin",
+      history: [
+        {
+          text: "Build a compiler",
+          source: "user_initial",
+          status: "superseded",
+          updatedAt: "2026-08-13T00:00:00.000Z",
+        },
+      ],
+    };
+    assert.equal(validateSessionFile({ ...valid, goal }), null);
+  });
+
+  it("rejects goal with a non-string text (e.g. 123) → 'goal'", () => {
+    assert.equal(
+      validateSessionFile({ ...valid, goal: { ...validGoal, text: 123 } }),
+      "goal"
+    );
+  });
+
+  it("rejects goal missing text → 'goal'", () => {
+    const { text: _omit, ...withoutText } = validGoal;
+    assert.equal(validateSessionFile({ ...valid, goal: withoutText }), "goal");
+  });
+
+  it("rejects goal with unknown source → 'goal'", () => {
+    assert.equal(
+      validateSessionFile({
+        ...valid,
+        goal: { ...validGoal, source: "mystery" },
+      }),
+      "goal"
+    );
+  });
+
+  it("rejects goal with unknown status → 'goal'", () => {
+    assert.equal(
+      validateSessionFile({
+        ...valid,
+        goal: { ...validGoal, status: "pending" },
+      }),
+      "goal"
+    );
+  });
+
+  it("rejects goal with non-string timestamps → 'goal'", () => {
+    assert.equal(
+      validateSessionFile({ ...valid, goal: { ...validGoal, createdAt: 1 } }),
+      "goal"
+    );
+    assert.equal(
+      validateSessionFile({
+        ...valid,
+        goal: { ...validGoal, updatedAt: null },
+      }),
+      "goal"
+    );
+  });
+
+  it("rejects goal with a non-array history → 'goal'", () => {
+    assert.equal(
+      validateSessionFile({ ...valid, goal: { ...validGoal, history: "x" } }),
+      "goal"
+    );
+  });
+
+  it("rejects a malformed history entry → 'goal'", () => {
+    assert.equal(
+      validateSessionFile({
+        ...valid,
+        goal: { ...validGoal, history: [{ text: 1 }] },
+      }),
+      "goal"
+    );
+  });
+});
+
+describe("sanitizeSessionFile — v5 goal backfill (#408)", () => {
+  it("v4 file (no goal) sanitizes to goal: undefined", () => {
+    const v4Raw = { ...valid, schemaVersion: 4 };
+    const out = sanitizeSessionFile(v4Raw);
+    assert.equal(out.goal, undefined);
+    assert.equal(out.schemaVersion, 5);
+  });
+
+  it("v5 file with goal round-trips the same goal object", () => {
+    const goal = { ...validGoal, source: "user_pin" };
+    const out = sanitizeSessionFile({ ...valid, goal });
+    assert.deepEqual(out.goal, goal);
+  });
+
+  it("preserves goal.history through sanitize", () => {
+    const goal = {
+      ...validGoal,
+      history: [
+        {
+          text: "Build a compiler",
+          source: "user_initial",
+          status: "superseded",
+          updatedAt: "2026-08-13T00:00:00.000Z",
+        },
+      ],
+    };
+    const out = sanitizeSessionFile({ ...valid, goal });
+    assert.deepEqual(out.goal, goal);
+  });
+});
+
+// -- extractGoal (#408 T2) ---------------------------------------------------
+
+describe("extractGoal — full first user text, no truncation (#408 T2)", () => {
+  it("returns the full trimmed first user text (no 80-char truncation)", () => {
+    const long = "x".repeat(200);
+    const messages = [
+      { role: "user", content: [{ type: "text", text: `  ${long}  ` }] },
+    ] as const;
+    assert.equal(extractGoal(messages as never), long);
+  });
+
+  it("skips pure tool_result user messages and returns '' for no user text", () => {
+    assert.equal(extractGoal([]), "");
+    assert.equal(
+      extractGoal([
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "t", content: [] }],
+        },
+      ] as never),
+      ""
+    );
+  });
+
+  it("takes the first user message's first text block only", () => {
+    const messages = [
+      { role: "user", content: [{ type: "text", text: "first" }] },
+      { role: "user", content: [{ type: "text", text: "second" }] },
+    ] as const;
+    assert.equal(extractGoal(messages as never), "first");
+  });
+});
+
 // -- root-level guards -------------------------------------------------------
 
 describe("validateSessionFile — root guard", () => {
@@ -356,8 +517,8 @@ describe("isSessionFileV1 — type guard companion", () => {
 
   it("returns false for any rejected value", () => {
     assert.equal(isSessionFileV1(null), false);
-    // schemaVersion above CURRENT (CURRENT is 4 now — system role)
-    assert.equal(isSessionFileV1({ ...valid, schemaVersion: 5 }), false);
+    // schemaVersion above CURRENT (CURRENT is 5 now — goal field)
+    assert.equal(isSessionFileV1({ ...valid, schemaVersion: 6 }), false);
     assert.equal(isSessionFileV1({ ...valid, turnCount: "x" }), false);
   });
 });

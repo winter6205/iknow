@@ -378,13 +378,14 @@ describe("sanitizeSessionFile — schemaVersion 4 complete file", () => {
   });
 });
 
-// -- sanitizeSessionFile — v3 → v4 upgrade keeps system messages (#392 T1) ---
+// -- sanitizeSessionFile — v3 → v5 upgrade keeps system messages (#392 T1 / #408) ---
 
-describe("sanitizeSessionFile — v3 file with system message upgrades to v4", () => {
-  it("lifts a schemaVersion 3 file containing a system message to v4, keeping it", () => {
-    // schema v4 is additive: a v3 file (≤ CURRENT) sanitizes to v4 with no
-    // field changes — only the validate-time whitelist widened to `system`.
-    // A system message persisted at v3 thus survives the upgrade byte-for-byte.
+describe("sanitizeSessionFile — v3 file with system message upgrades to v5", () => {
+  it("lifts a schemaVersion 3 file containing a system message to v5, keeping it", () => {
+    // schema v5 is additive: a v3 file (≤ CURRENT) sanitizes to v5 with no
+    // field changes — only the validate-time whitelist widened to `system`
+    // and the optional `goal` field added (absent on legacy files). A system
+    // message persisted at v3 thus survives the upgrade byte-for-byte.
     const input = {
       ...v2File(),
       schemaVersion: 3,
@@ -394,7 +395,7 @@ describe("sanitizeSessionFile — v3 file with system message upgrades to v4", (
       ],
     };
     const out = sanitizeSessionFile(input);
-    assert.equal(out.schemaVersion, 4);
+    assert.equal(out.schemaVersion, CURRENT_SCHEMA_VERSION);
     assert.equal(out.messages.length, 2);
     assert.equal(out.messages[1]?.role, "system");
     assert.deepEqual(out.messages[1], {

@@ -73,6 +73,10 @@ docs/handoff/*
 # 196: identity assembly handoff evidence (smoke output + AC checklist).
 # Team artifact mirroring the i9/i10/i11-smoke exception pattern.
 !docs/handoff/2026-08-06-identity-assembly/
+# 408: i408 session-goal real-LLM smoke acceptance reports (#408
+# wayfinder task: session-level Goal for verify-loop task field, real-LLM
+# + real bwrap evidence). Mirrors the i9/i10/i11-smoke exceptions above.
+!docs/handoff/i408-smoke/
 
 # 022: session-api runtime JSON store (data/sessions/<id>.json), not team
 # content. The data/ top-level dir is kept via data/.gitkeep so the
@@ -83,6 +87,8 @@ data/sessions/*
 trace.jsonl
 # runtime trace service output directory (per-session JSONL files).
 # Root-anchored so tracked tests/harness/trace/ tests stay addable (#406 T3 A4).
+# 不能误伤已跟踪源码目录 src/harness/trace/ 与 tests/harness/trace/
+# （lint-staged re-add 时会被宽匹配 trace/ 误判忽略）。
 /trace/
 # clipboard fallback artifact when no clipboard is available (src/tui/clipboard.ts)
 last_copy.txt

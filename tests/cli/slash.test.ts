@@ -188,6 +188,26 @@ describe("applySlashCommand", () => {
     );
   });
 
+  it("goal → {type:goal, text: joined+trimmed args} (#408 T3)", () => {
+    const ctx = { state: makeState() };
+    const eff = applySlashCommand({
+      command: "goal",
+      args: ["write", "a", "type", "checker"],
+      ctx,
+    });
+    assert.strictEqual(eff.type, "goal");
+    if (eff.type !== "goal") return;
+    assert.strictEqual(eff.text, "write a type checker");
+  });
+
+  it("goal with no args → {type:goal, text: ''} (host rejects empty)", () => {
+    const ctx = { state: makeState() };
+    const eff = applySlashCommand({ command: "goal", args: [], ctx });
+    assert.strictEqual(eff.type, "goal");
+    if (eff.type !== "goal") return;
+    assert.strictEqual(eff.text, "");
+  });
+
   it("empty command (\"\") → 'Empty command. Type /help for commands.'", () => {
     const ctx = { state: makeState() };
     const eff = applySlashCommand({ command: "", args: [], ctx });

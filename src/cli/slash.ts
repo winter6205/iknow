@@ -54,7 +54,12 @@ export type SlashEffect =
    * "full_auto", "help"}。空 / "status" → host 显示当前 mode;其它 → host
    * 调用 modeContext.set(args[0])。
    */
-  | { type: "permissions"; args: string[] };
+  | { type: "permissions"; args: string[] }
+  /**
+   * #408 T3: 会话级 goal 覆盖。/goal <text> 由 host 持久化为 session.goal
+   * （source=user_pin）。空 args → host 显示当前 goal 或提示无 goal。
+   */
+  | { type: "goal"; text: string };
 
 /**
  * Strip C0 control chars (incl. ESC) and DEL so reflected command text
@@ -72,6 +77,7 @@ const HELP_TEXT = `命令 / Commands:
   /json on|off          切换 JSON 输出 · toggle machine JSON
   /reset                清空会话 · clear messages (session kept)
   /permissions [mode]   查看/切换权限模式(default|plan|full_auto)
+  /goal <text>          覆盖会话目标 · pin session goal
 
 其他输入视为问题 · anything else is a question for the agent.`;
 
@@ -137,6 +143,11 @@ export function applySlashCommand(opts: ApplySlashCommandOpts): SlashEffect {
       // W2: 权限模式查询/切换。纯解析,实际 set 落在 host(它持有
       // PermissionModeContext)。
       return { type: "permissions", args };
+
+    case "goal":
+      // #408 T3: /goal <text> 走 host 持久化为 session.goal。
+      // 纯解析,实际 pin 落在 host(chat-session 持有 checkpointStore)。
+      return { type: "goal", text: args.join(" ").trim() };
 
     case "":
       return {

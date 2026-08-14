@@ -26,6 +26,14 @@
  * (T2). System messages are not a turn for checkpoint rewind (splitTurns stays
  * `role === "user"`-anchored and skips tool_result-only user messages); v3
  * rewind semantics are byte-identical with a system entry present.
+ *
+ * v5 (#408, additive): optional `goal?: GoalState` field carries the session-
+ * level goal (user's intent for the whole session). Additive: v4 files
+ * sanitize to `goal: undefined` (absent) and the field round-trips byte-
+ * identical for v5 files. Source union is `user_initial | user_pin |
+ * model_proposed` (model_proposed is reserved, no writer in this spec); status
+ * union is `active | achieved | aborted | superseded`. The hub owns the only
+ * write path; `goal.text` is the verify-loop's task field when present.
  */
 import type { AnthropicNativeMessage } from "../../harness/index.js";
 
@@ -48,6 +56,30 @@ export interface CheckpointRecord {
   readonly lastUsage?: unknown;
 }
 
+/** v5 (#408): session-level goal — the user's intent for the whole session.
+ *  Carries the active goal (the verify-loop's task field binds here when
+ *  present, falling back to the current-turn query otherwise) plus a history
+ *  of superseded goals from prior re-pins. The hub owns the only write path;
+ *  `goal.text` is read-only to all other code. */
+export type GoalSource = "user_initial" | "user_pin" | "model_proposed";
+export type GoalStatus = "active" | "achieved" | "aborted" | "superseded";
+
+export interface GoalHistoryEntry {
+  readonly text: string;
+  readonly source: GoalSource;
+  readonly status: GoalStatus;
+  readonly updatedAt: string;
+}
+
+export interface GoalState {
+  readonly text: string;
+  readonly source: GoalSource;
+  readonly status: GoalStatus;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly history?: ReadonlyArray<GoalHistoryEntry>;
+}
+
 /** Session file shape (#120 schema v2, v3 = +checkpoints). Loaders sanitize
  *  legacy v1 files. */
 export interface SessionFileV1 {
@@ -65,9 +97,13 @@ export interface SessionFileV1 {
   readonly sanitized_at: string;
   /** v3: interrupt snapshots for checkpoint / TUI rewind ([] until a save). */
   readonly checkpoints?: ReadonlyArray<CheckpointRecord>;
+  /** v5: session-level goal (#408). Absent on legacy files (loads as
+   *  `undefined`); the hub is the only writer and seeds it on the first
+   *  user message, then re-pins via `## GOAL:` or `/goal`. */
+  readonly goal?: GoalState;
 }
 
-export const CURRENT_SCHEMA_VERSION = 4 as const;
+export const CURRENT_SCHEMA_VERSION = 5 as const;
 
 /**
  * Validate parsed JSON against the session-file shape.
@@ -110,6 +146,11 @@ export function validateSessionFile(value: unknown): string | null {
   ) {
     return "checkpoints";
   }
+  // v5: optional `goal` object — validate shape if present, never silently
+  // coerce (a malformed goal would break downstream verify-loop binding).
+  if (obj["goal"] !== undefined && !isValidGoal(obj["goal"])) {
+    return "goal";
+  }
   return null;
 }
 
@@ -135,6 +176,73 @@ export function extractSummary(
     }
   }
   return "";
+}
+
+/**
+ * Extract the full first user message text — no truncation, just trimmed.
+ * Used to seed the session-level goal (#408 T2) where the full intent matters;
+ * `extractSummary` truncates to 80 chars and would lose the tail. "" if no user
+ * message has a text block (skips pure tool_result user messages, mirrors
+ * extractSummary's skip rule).
+ */
+export function extractGoal(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): string {
+  for (const msg of messages) {
+    if (msg.role !== "user") continue;
+    const firstText = msg.content.find((b) => b.type === "text");
+    if (firstText && firstText.type === "text") {
+      return firstText.text.trim();
+    }
+  }
+  return "";
+}
+
+/**
+ * #408 T3: re-pin the session-level goal.
+ *
+ * Pure — given the current `GoalState` (or `undefined` for a fresh session)
+ * and the new `text`, build the new active goal and prepend the prior goal
+ * (if any) to `history[0]` with `status: "superseded"`.
+ *
+ * - Source is `"user_pin"` for the re-pinned goal; the prior entry preserves
+ *   its own source label (typically `"user_initial"`).
+ * - `createdAt` is preserved on the existing goal (or stamped from `now` on
+ *   a fresh re-pin); `updatedAt` advances to `now`.
+ * - `history` accumulates monotonically: `history = [priorGoal, ...prevHistory]`
+ *   (capped naturally by the file; sanitize validates shape on load).
+ *
+ * The empty `text` no-op case is the caller's responsibility — this helper
+ * always produces a valid new goal and is meant to be invoked only when a
+ * re-pin is intentional (see `parseGoalCommand` in hub.ts and the `/goal`
+ * slash command's empty-args rejection).
+ */
+export function pinGoal(opts: {
+  readonly current: GoalState | undefined;
+  readonly text: string;
+  readonly now: string;
+}): GoalState {
+  const { current, text, now } = opts;
+  const priorHistory = current?.history ?? [];
+  const newHistory = current
+    ? [
+        {
+          text: current.text,
+          source: current.source,
+          status: "superseded" as const,
+          updatedAt: now,
+        },
+        ...priorHistory,
+      ]
+    : priorHistory;
+  return {
+    text,
+    source: "user_pin",
+    status: "active",
+    createdAt: current?.createdAt ?? now,
+    updatedAt: now,
+    history: newHistory,
+  };
 }
 
 /**
@@ -172,6 +280,11 @@ export function sanitizeSessionFile(raw: unknown): SessionFileV1 {
   const checkpoints = Array.isArray(obj["checkpoints"])
     ? (obj["checkpoints"] as ReadonlyArray<CheckpointRecord>)
     : [];
+  // v5 `goal` needs NO backfill — it is optional and additive. The `...obj`
+  // spread below already preserves it verbatim when present (validated by
+  // validateSessionFile) and omits it when absent, keeping v4 → v5 round-trip
+  // byte-identical (a v4 file loads with `goal: undefined`, not a synthesized
+  // empty object). The hub owns the only write path (G1).
   return {
     ...obj,
     schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -290,5 +403,53 @@ function isValidCheckpoint(c: unknown): boolean {
     typeof r["interruptedAt"] === "string" &&
     typeof r["interruptReason"] === "string" &&
     VALID_INTERRUPT_REASONS.has(r["interruptReason"] as InterruptReason)
+  );
+}
+
+const VALID_GOAL_SOURCES: ReadonlySet<GoalSource> = new Set([
+  "user_initial",
+  "user_pin",
+  "model_proposed",
+]);
+
+const VALID_GOAL_STATUSES: ReadonlySet<GoalStatus> = new Set([
+  "active",
+  "achieved",
+  "aborted",
+  "superseded",
+]);
+
+/** Deep-validate the v5 `goal` object (all five required fields + optional
+ *  history array). Reject-first: a malformed goal would silently break the
+ *  verify-loop's `goal.text` binding, so it must fail loudly like checkpoints. */
+function isValidGoal(g: unknown): boolean {
+  if (g === null || typeof g !== "object") return false;
+  const goal = g as Record<string, unknown>;
+  if (
+    typeof goal["text"] !== "string" ||
+    typeof goal["source"] !== "string" ||
+    !VALID_GOAL_SOURCES.has(goal["source"] as GoalSource) ||
+    typeof goal["status"] !== "string" ||
+    !VALID_GOAL_STATUSES.has(goal["status"] as GoalStatus) ||
+    typeof goal["createdAt"] !== "string" ||
+    typeof goal["updatedAt"] !== "string"
+  ) {
+    return false;
+  }
+  if (goal["history"] === undefined) return true;
+  if (!Array.isArray(goal["history"])) return false;
+  return (goal["history"] as ReadonlyArray<unknown>).every(isValidGoalHistory);
+}
+
+function isValidGoalHistory(h: unknown): boolean {
+  if (h === null || typeof h !== "object") return false;
+  const entry = h as Record<string, unknown>;
+  return (
+    typeof entry["text"] === "string" &&
+    typeof entry["source"] === "string" &&
+    VALID_GOAL_SOURCES.has(entry["source"] as GoalSource) &&
+    typeof entry["status"] === "string" &&
+    VALID_GOAL_STATUSES.has(entry["status"] as GoalStatus) &&
+    typeof entry["updatedAt"] === "string"
   );
 }

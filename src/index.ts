@@ -11,6 +11,7 @@ export type {
   IknowSettings,
   IknowSettingsLlm,
   IknowSettingsLlmCompress,
+  IknowSettingsVerify,
 } from "./config/settings.js";
 
 export type * from "./shared/schema.js";

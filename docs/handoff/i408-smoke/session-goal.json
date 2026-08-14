@@ -1,0 +1,134 @@
+{
+  "result": "pass",
+  "reason": "ran",
+  "timestamp": "2026-08-13T15:06:04.808Z",
+  "model": "ocg/deepseek-v4-flash",
+  "baseUrl": "172.31.128.1:20128",
+  "key_source": "settings.llm.apiKey",
+  "maxTurns": 5,
+  "durationMs": 5705,
+  "sections": [
+    {
+      "section": "A: T2 + T4 + T5 (real LLM + real runVerifyLoop)",
+      "stopReason": "completed",
+      "llmCalls": 2,
+      "userTexts": [
+        "Please reply with exactly the word ACK (goal-text-164f92)",
+        "Please reply with exactly the word ACK (goal-text-164f92)",
+        "Please reply with exactly the word ACK (goal-text-164f92)"
+      ],
+      "goalOnDisk": {
+        "text": "Please reply with exactly the word ACK (goal-text-164f92)",
+        "source": "user_initial",
+        "status": "achieved",
+        "createdAt": "2026-08-13T15:06:01.647Z",
+        "updatedAt": "2026-08-13T15:06:03.217Z"
+      },
+      "assertions": [
+        {
+          "name": "turn1 stopReason === completed",
+          "pass": true,
+          "detail": "actual=completed"
+        },
+        {
+          "name": "T2 seed: turn1 后 store.goal.text === goalText",
+          "pass": true,
+          "detail": "actual=\"Please reply with exactly the word ACK (goal-text-164f92)\""
+        },
+        {
+          "name": "T2 seed: source === 'user_initial'",
+          "pass": true,
+          "detail": "actual=user_initial"
+        },
+        {
+          "name": "T5 write-back: turn1 后 store.goal.status === 'achieved'",
+          "pass": true,
+          "detail": "actual=achieved"
+        },
+        {
+          "name": "turn2 stopReason === completed",
+          "pass": true,
+          "detail": "actual=completed"
+        },
+        {
+          "name": "T4 seam (real trace): turn2 末位 user message === goalText (非 query)",
+          "pass": true,
+          "detail": "userTexts=[\"Please reply with exactly the word ACK (\", \"Please reply with exactly the word ACK (\", \"Please reply with exactly the word ACK (\"]"
+        },
+        {
+          "name": "T5 write-back: turn2 后 store.goal.status 保持 'achieved'",
+          "pass": true,
+          "detail": "actual=achieved"
+        },
+        {
+          "name": "trace 含 record_type 'verification' (真 runVerifyLoop 跑过)",
+          "pass": true,
+          "detail": "verification_records=2"
+        }
+      ]
+    },
+    {
+      "section": "B: T3 re-pin via ## GOAL: (real LLM + real runVerifyLoop)",
+      "stopReason": "completed",
+      "llmCalls": 2,
+      "userTexts": [
+        "Please reply with exactly the word ACK (goal-text-164f92)",
+        "Please reply with exactly the word ACK (goal-text-164f92)",
+        "Please reply with exactly the word ACK (goal-text-164f92)"
+      ],
+      "goalOnDisk": {
+        "text": "Reply with exactly the word REPIN-78cbfb",
+        "source": "user_pin",
+        "status": "achieved",
+        "createdAt": "2026-08-13T15:06:01.647Z",
+        "updatedAt": "2026-08-13T15:06:04.806Z",
+        "history": [
+          {
+            "text": "Please reply with exactly the word ACK (goal-text-164f92)",
+            "source": "user_initial",
+            "status": "superseded",
+            "updatedAt": "2026-08-13T15:06:03.221Z"
+          }
+        ]
+      },
+      "assertions": [
+        {
+          "name": "turnB stopReason === completed",
+          "pass": true,
+          "detail": "actual=completed"
+        },
+        {
+          "name": "T3 re-pin: store.goal.text === newGoalText",
+          "pass": true,
+          "detail": "actual=\"Reply with exactly the word REPIN-78cbfb\""
+        },
+        {
+          "name": "T3 re-pin: source === 'user_pin'",
+          "pass": true,
+          "detail": "actual=user_pin"
+        },
+        {
+          "name": "T3 re-pin: history[0].text === prior goalText (section A 的)",
+          "pass": true,
+          "detail": "prior=\"Please reply with exactly the word ACK (goal-text-164f92)\""
+        },
+        {
+          "name": "T3 re-pin: history[0].status === 'superseded'",
+          "pass": true,
+          "detail": "actual=superseded"
+        },
+        {
+          "name": "T5 write-back: re-pin 后 status === 'achieved'",
+          "pass": true,
+          "detail": "actual=achieved"
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "Real e2e for #408 (Session-level Goal for Verify-Loop Task Field).",
+    "Observation channel: JSONL trace llm_call.messages (model's actual view) + SessionStore (goal persistence).",
+    "Workspace: dataDir=/tmp/i408-data-ucfwzH, traceDir=/tmp/i408-trace-SCU2rw, traceFile=/tmp/i408-trace-SCU2rw/4b3472f1-b2c7-4665-90c5-af3d9ce0447e.jsonl",
+    "verify.command = `true` → runVerifyLoop exits 0 on round 1 → outcome 'passed' → T5 write-back fires."
+  ]
+}

@@ -1,38 +1,20 @@
-import { spawn, type ChildProcess } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
-
-const DEFAULT_KILL_GRACE_MS = 2_000;
-
-export interface SpawnWithStopSignalOptions {
-  readonly cwd: string;
-  readonly signal?: AbortSignal;
-  /**
-   * Explicit env forwarded to `spawn`. When omitted, child inherits the full
-   * process env (used by tests that don't care about isolation). Production
-   * callers must pass a pre-filtered env so a leaked host secret can't reach
-   * the child via the parent — bwrap's --clearenv covers the in-sandbox half,
-   * this covers the outside half (#225).
-   */
-  readonly env?: NodeJS.ProcessEnv;
-  /** Test seam; production callers should use the two-second default. */
-  readonly killGraceMs?: number;
-}
-
-export interface SpawnResult {
-  readonly code: number | null;
-  readonly signal: NodeJS.Signals | null;
-  readonly stdout: string;
-  readonly stderr: string;
-}
-
-export interface SpawnWithStopSignalResult {
-  readonly child: ChildProcess;
-  readonly done: Promise<SpawnResult>;
-}
+// spawnWithStopSignal / truncateByCodePoint 迁至 sandbox/runner（#128 T2）：
+// sandbox 是基础层，这里 re-export 保持 grep / glob / 既有测试的 import 路径不变。
+export {
+  SIGNAL_EXIT_CODES,
+  spawnWithStopSignal,
+  truncateByCodePoint,
+} from "../../sandbox/runner.js";
+export type {
+  SpawnResult,
+  SpawnWithStopSignalOptions,
+  SpawnWithStopSignalResult,
+} from "../../sandbox/runner.js";
 
 /**
  * Resolve a target through symlinks and require its real location to stay under
@@ -92,75 +74,6 @@ export async function resolveWithinRoot(
     );
   }
   return resolvedTarget;
-}
-
-/** Truncate by Unicode code points rather than UTF-16 code units. */
-export function truncateByCodePoint(text: string, max: number): string {
-  if (!Number.isInteger(max) || max < 0) {
-    throw new RangeError("max must be a non-negative integer");
-  }
-  return Array.from(text).slice(0, max).join("");
-}
-
-/**
- * Spawn in a detached process group so cancellation can stop the whole tree.
- * The returned promise centralizes output collection and the TERM-to-KILL
- * escalation shared by bash and grep.
- */
-export function spawnWithStopSignal(
-  command: string,
-  args: readonly string[],
-  options: SpawnWithStopSignalOptions
-): SpawnWithStopSignalResult {
-  const child = spawn(command, args, {
-    cwd: options.cwd,
-    ...(options.env !== undefined ? { env: options.env } : {}),
-    detached: true,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let stdout = "";
-  let stderr = "";
-  let killTimer: NodeJS.Timeout | undefined;
-  let settled = false;
-
-  child.stdout?.setEncoding("utf8");
-  child.stderr?.setEncoding("utf8");
-  child.stdout?.on("data", (chunk: string) => {
-    stdout += chunk;
-  });
-  child.stderr?.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
-
-  const stopTree = (): void => {
-    const pid = child.pid;
-    if (settled || pid === undefined) return;
-    killProcessGroup(pid, "SIGTERM");
-    killTimer = setTimeout(() => {
-      if (!settled) killProcessGroup(pid, "SIGKILL");
-    }, options.killGraceMs ?? DEFAULT_KILL_GRACE_MS);
-    killTimer.unref();
-  };
-
-  if (options.signal?.aborted) stopTree();
-  else options.signal?.addEventListener("abort", stopTree, { once: true });
-
-  const done = new Promise<SpawnResult>((resolveDone, rejectDone) => {
-    child.once("error", (error) => {
-      settled = true;
-      if (killTimer !== undefined) clearTimeout(killTimer);
-      options.signal?.removeEventListener("abort", stopTree);
-      rejectDone(error);
-    });
-    child.once("close", (code, signal) => {
-      settled = true;
-      if (killTimer !== undefined) clearTimeout(killTimer);
-      options.signal?.removeEventListener("abort", stopTree);
-      resolveDone({ code, signal, stdout, stderr });
-    });
-  });
-
-  return { child, done };
 }
 
 /**
@@ -287,12 +200,4 @@ function isWithinRoot(root: string, target: string): boolean {
     pathFromRoot === "" ||
     (!pathFromRoot.startsWith("..") && !isAbsolute(pathFromRoot))
   );
-}
-
-function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
-  try {
-    process.kill(-pid, signal);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-  }
 }

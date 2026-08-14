@@ -20,6 +20,9 @@ import type {
   LlmCallRecord,
   ToolCallRecord,
   TurnRecord,
+  SessionRecord,
+  SandboxCmdRecord,
+  VerificationRecord,
 } from "../../../src/harness/trace/types.ts";
 import { assistantResult } from "../../cli/_fixtures.ts";
 import { parseJsonl } from "./_fixtures.ts";
@@ -323,6 +326,19 @@ describe("T4 criterion 11/14: recordLlmCall returns undefined", () => {
       },
       async recordTurn(_record: TurnRecord): Promise<string | undefined> {
         return "mock-turn-id";
+      },
+      async recordSession(_record: SessionRecord): Promise<string | undefined> {
+        return "mock-session-id";
+      },
+      async recordSandboxCmd(
+        _record: SandboxCmdRecord
+      ): Promise<string | undefined> {
+        return "mock-cmd-id";
+      },
+      async recordVerification(
+        _record: VerificationRecord
+      ): Promise<string | undefined> {
+        return _record.id;
       },
     };
     const { result } = await run("go", {

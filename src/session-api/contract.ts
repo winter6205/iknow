@@ -37,6 +37,18 @@ export interface TurnAnswerDto {
    * （cancelled + delta=0）。其它 stopReason → 字段缺席（byte-stable）。
    */
   readonly interrupted?: boolean;
+  /**
+   * #128 失败自动修正闭环（M3 surface）：仅 verify 配置且最终判定为
+   * 真失败 / 不稳定 / 升级后仍失败时存在。passed / disabled / aborted → 字段缺席
+   * （byte-stable，与 stopSummary / interrupted 同模式）。
+   */
+  readonly verify?: VerifyAnswerView;
+}
+
+/** #128：验证闭环最终判定的 wire 视图（rounds + outcome，供 UI surface）。 */
+export interface VerifyAnswerView {
+  readonly outcome: "failed" | "unstable" | "escalated";
+  readonly rounds: number;
 }
 
 /** T1: 单条 thinking 文本视图（redacted_thinking 仅计数，data 永不上 wire）。 */

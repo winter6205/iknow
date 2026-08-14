@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
@@ -13,61 +12,23 @@ import {
   createNetworkPolicy,
   createResourceLimits,
 } from "../../sandbox/index.js";
+import {
+  DEFAULT_MAX_OUTPUT_CODE_POINTS,
+  requireBwrap,
+  runInSandbox,
+} from "../../sandbox/runner.js";
 import { restore, type SecretRegistry } from "../../secret-roundtrip/index.js";
-import { spawnWithStopSignal, truncateByCodePoint } from "./helpers.js";
 
-const MAX_OUTPUT_CODE_POINTS = 12_000;
-const SIGNAL_EXIT_CODES: Readonly<Record<string, number>> = Object.freeze({
-  SIGHUP: 129,
-  SIGINT: 130,
-  SIGQUIT: 131,
-  SIGILL: 132,
-  SIGTRAP: 133,
-  SIGABRT: 134,
-  SIGBUS: 135,
-  SIGFPE: 136,
-  SIGKILL: 137,
-  SIGUSR1: 138,
-  SIGSEGV: 139,
-  SIGUSR2: 140,
-  SIGPIPE: 141,
-  SIGALRM: 142,
-  SIGTERM: 143,
-  SIGSTKFLT: 144,
-  SIGCHLD: 145,
-  SIGCONT: 146,
-  SIGSTOP: 147,
-  SIGTSTP: 148,
-  SIGTTIN: 149,
-  SIGTTOU: 150,
-  SIGURG: 151,
-  SIGXCPU: 152,
-  SIGXFSZ: 153,
-  SIGVTALRM: 154,
-  SIGPROF: 155,
-  SIGWINCH: 156,
-  SIGIO: 157,
-  SIGPWR: 158,
-  SIGSYS: 159,
-});
 interface BashInput {
   readonly command?: unknown;
 }
-function signalExitCode(signal: NodeJS.Signals | null): number {
-  return signal === null ? 1 : (SIGNAL_EXIT_CODES[signal] ?? 1);
-}
-function requireBwrap(): void {
-  const probe = spawnSync("bwrap", ["--version"], { stdio: "ignore" });
-  if (probe.status !== 0)
-    throw new ToolExecutionError(
-      "bash: bwrap is required; install bwrap (≥ 0.11.1) via apt install bubblewrap or your distro equivalent"
-    );
-}
+
 export interface CreateBashToolOptions {
   /** #406 T3:per-engine secret registry。在场时 handler 在构造 bwrap fence 前
    *  对命令做占位符还原（`<<<SECRET_N>>>` → 真值）；缺席时命令原样透传。 */
   readonly secretRegistry?: SecretRegistry;
 }
+
 export function createBashTool(
   cwd: string,
   opts?: CreateBashToolOptions
@@ -108,16 +69,17 @@ export function createBashTool(
       env: fenceEnv,
       cwd,
     });
-    const { done } = spawnWithStopSignal(fence.argv[0], fence.argv.slice(1), {
+    const result = await runInSandbox({
+      fence,
       cwd,
       signal: ctx?.signal,
       env: fenceEnv,
+      maxOutputCodePoints: DEFAULT_MAX_OUTPUT_CODE_POINTS,
     });
-    const result = await done;
     return {
-      code: result.code ?? signalExitCode(result.signal),
-      stdout: truncateByCodePoint(result.stdout, MAX_OUTPUT_CODE_POINTS),
-      stderr: truncateByCodePoint(result.stderr, MAX_OUTPUT_CODE_POINTS),
+      code: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
     };
   };
   return Object.freeze({

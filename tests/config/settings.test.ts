@@ -20,6 +20,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadIknowSettings } from "../../src/config/settings.ts";
+import { resolveVerifyConfig } from "../../src/config/verify-config.ts";
 
 let workDir: string;
 beforeAll(async () => {
@@ -643,6 +644,424 @@ describe("loadIknowSettings — llm.apiKey validator (settings-model-extension)"
     assert.ok(Object.isFrozen(s.llm));
     assert.throws(() => {
       (s.llm as { apiKey: string }).apiKey = "other";
+    }, TypeError);
+  });
+});
+
+describe("loadIknowSettings — verify 段 (#128 自动修正闭环)", () => {
+  it("未配置 verify → verify undefined（透明关闭）", async () => {
+    const { home, cwd } = await makeSettings({ llm: { maxTurns: 5 } }, {});
+    const s = loadIknowSettings({ home, cwd });
+    assert.deepEqual(s, { llm: { maxTurns: 5 } });
+    assert.equal(s.verify, undefined);
+  });
+
+  it("完整合法 verify 段 → 逐字段解析（command/rerunTemplate/countRegex/timeoutSec/onExhausted/maxRounds）", async () => {
+    const { home, cwd } = await makeSettings(
+      {
+        verify: {
+          command: "npm test",
+          rerunTemplate: "npm test {files}",
+          countRegex: "\\d+ failures?",
+          timeoutSec: 900,
+          onExhausted: "escalate",
+          maxRounds: 20,
+        },
+      },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      verify: {
+        command: "npm test",
+        rerunTemplate: "npm test {files}",
+        countRegex: "\\d+ failures?",
+        timeoutSec: 900,
+        onExhausted: "escalate",
+        maxRounds: 20,
+      },
+    });
+  });
+
+  it("默认值语义：timeoutSec/maxRounds/onExhausted 未配时 verify 字段里没有它们（消费点兜底）", async () => {
+    const { home, cwd } = await makeSettings(
+      { verify: { command: "npm test" } },
+      {}
+    );
+    const s = loadIknowSettings({ home, cwd });
+    assert.deepEqual(s, { verify: { command: "npm test" } });
+    assert.equal(s.verify?.timeoutSec, undefined);
+    assert.equal(s.verify?.onExhausted, undefined);
+    assert.equal(s.verify?.maxRounds, undefined);
+  });
+
+  it("非法值降级：负数 timeoutSec / 空 command / 未知 onExhausted → 该字段被丢弃", async () => {
+    for (const badTimeout of [0, -5, 1.5, "abc"]) {
+      const { home, cwd } = await makeSettings(
+        { verify: { command: "npm test", timeoutSec: badTimeout } },
+        {}
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        { verify: { command: "npm test" } },
+        `timeoutSec=${JSON.stringify(badTimeout)} 应丢弃`
+      );
+    }
+    for (const badCommand of ["", "   ", 123, null, true, []]) {
+      const { home, cwd } = await makeSettings(
+        { verify: { command: badCommand, timeoutSec: 60 } },
+        {}
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        { verify: { timeoutSec: 60 } },
+        `command=${JSON.stringify(badCommand)} 应丢弃`
+      );
+    }
+    for (const badExhausted of ["stop", "", "ESCALATE", 1, null]) {
+      const { home, cwd } = await makeSettings(
+        { verify: { command: "npm test", onExhausted: badExhausted } },
+        {}
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        { verify: { command: "npm test" } },
+        `onExhausted=${JSON.stringify(badExhausted)} 应丢弃`
+      );
+    }
+  });
+
+  it("非法值降级：负数/非整数 maxRounds → 丢弃", async () => {
+    for (const bad of [0, -1, 2.5, "abc"]) {
+      const { home, cwd } = await makeSettings(
+        { verify: { command: "npm test", maxRounds: bad } },
+        {}
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        { verify: { command: "npm test" } },
+        `maxRounds=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("verify 全字段非法 → 不产出 verify（丢弃整个字段）", async () => {
+    const { home, cwd } = await makeSettings(
+      { verify: { command: "", timeoutSec: -1, onExhausted: "nope" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("verify 非普通对象（数组 / 字符串 / 数字）→ 丢弃该层", async () => {
+    for (const bad of [[{ command: "npm test" }], "garbage", 42]) {
+      const { home, cwd } = await makeSettings({ verify: bad }, {});
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `verify=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("verify 字符串字段 trim 后保留（两端空白去除）", async () => {
+    const { home, cwd } = await makeSettings(
+      {
+        verify: {
+          command: "  npm test  ",
+          rerunTemplate: "  vitest run {files}  ",
+          countRegex: "  (\\d+) failed  ",
+        },
+      },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      verify: {
+        command: "npm test",
+        rerunTemplate: "vitest run {files}",
+        countRegex: "(\\d+) failed",
+      },
+    });
+  });
+
+  it("rerunTemplate / countRegex 空串或非字符串 → 丢弃该字段", async () => {
+    for (const bad of ["", "   ", 123, null, []]) {
+      const { home, cwd } = await makeSettings(
+        {
+          verify: { command: "npm test", rerunTemplate: bad, countRegex: bad },
+        },
+        {}
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        { verify: { command: "npm test" } },
+        `rerunTemplate/countRegex=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("project 覆盖 user：verify 段逐字段覆盖", async () => {
+    const { home, cwd } = await makeSettings(
+      {
+        verify: {
+          command: "user-test",
+          rerunTemplate: "user-template",
+          timeoutSec: 300,
+          onExhausted: "escalate",
+          maxRounds: 5,
+        },
+      },
+      { verify: { command: "project-test", timeoutSec: 120 } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      verify: {
+        command: "project-test",
+        rerunTemplate: "user-template",
+        timeoutSec: 120,
+        onExhausted: "escalate",
+        maxRounds: 5,
+      },
+    });
+  });
+
+  it("project verify 非法值不覆盖 user 合法值（保留 user 值）", async () => {
+    for (const bad of [0, -1, "abc"]) {
+      const { home, cwd } = await makeSettings(
+        { verify: { command: "user-test", timeoutSec: 300 } },
+        { verify: { command: "project-test", timeoutSec: bad } }
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        { verify: { command: "project-test", timeoutSec: 300 } },
+        `project timeoutSec=${JSON.stringify(bad)} 应不覆盖 user`
+      );
+    }
+  });
+
+  it("project 配 verify、user 未配 → 只出 project verify", async () => {
+    const { home, cwd } = await makeSettings(
+      {},
+      { verify: { command: "npm test" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      verify: { command: "npm test" },
+    });
+  });
+
+  it("verify 与 llm 并存 → 两者都保留", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { maxTurns: 20 }, verify: { command: "npm test" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { maxTurns: 20 },
+      verify: { command: "npm test" },
+    });
+  });
+
+  it("classifierModel：非空串合法 → 透传 + trim（#128 verify 分类器，A7 槽位）", async () => {
+    const { home, cwd } = await makeSettings(
+      { verify: { classifierModel: "  claude-haiku-4-5  " } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      verify: { classifierModel: "claude-haiku-4-5" },
+    });
+  });
+
+  it("classifierModel：空串/非字符串/数字/数组/null → 丢弃该字段（沿用 command 的 drop-not-throw 纪律）", async () => {
+    for (const bad of ["", "   ", 123, true, null, [], { foo: "bar" }]) {
+      const { home, cwd } = await makeSettings(
+        { verify: { command: "npm test", classifierModel: bad } },
+        {}
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        { verify: { command: "npm test" } },
+        `classifierModel=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("classifierModel 与 command 互不耦合：仅 classifierModel → verify 段保留（command 缺时不透明关闭见 SC7，本字段独立）", async () => {
+    const { home, cwd } = await makeSettings(
+      { verify: { classifierModel: "claude-haiku-4-5" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      verify: { classifierModel: "claude-haiku-4-5" },
+    });
+  });
+
+  it("classifierModel：project 覆盖 user（逐字段 project-wins-over-user）", async () => {
+    const { home, cwd } = await makeSettings(
+      { verify: { classifierModel: "user-model" } },
+      { verify: { classifierModel: "project-model" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      verify: { classifierModel: "project-model" },
+    });
+  });
+
+  it("classifierModel：project 非法值不覆盖 user 合法值（保留 user 值）", async () => {
+    for (const bad of ["", 0, null, true]) {
+      const { home, cwd } = await makeSettings(
+        { verify: { classifierModel: "user-model" } },
+        { verify: { classifierModel: bad } }
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        { verify: { classifierModel: "user-model" } },
+        `project classifierModel=${JSON.stringify(bad)} 应不覆盖 user`
+      );
+    }
+  });
+
+  it("classifierModel：与其它字段共存的合并结果（project 只覆盖部分字段）", async () => {
+    const { home, cwd } = await makeSettings(
+      {
+        verify: {
+          command: "user-test",
+          rerunTemplate: "user-template",
+          timeoutSec: 300,
+          classifierModel: "user-model",
+        },
+      },
+      { verify: { command: "project-test", classifierModel: "project-model" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      verify: {
+        command: "project-test",
+        rerunTemplate: "user-template",
+        timeoutSec: 300,
+        classifierModel: "project-model",
+      },
+    });
+  });
+
+  it("classifierModel：verify 段被整体丢弃时（仅 classifierModel 一个字段且非法）不产出 verify", async () => {
+    const { home, cwd } = await makeSettings(
+      { verify: { classifierModel: "" } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("classifierModel：返回对象深 frozen 含 verify.classifierModel（不可改）", async () => {
+    const { home, cwd } = await makeSettings(
+      { verify: { classifierModel: "claude-haiku-4-5" } },
+      {}
+    );
+    const s = loadIknowSettings({ home, cwd });
+    assert.ok(Object.isFrozen(s.verify));
+    assert.throws(() => {
+      (s.verify as { classifierModel: string }).classifierModel = "other";
+    }, TypeError);
+  });
+
+  // #128 装配层修复: command 缺失时 resolveVerifyConfig 以 { command: "" } 兜底
+  // (分类器判官接管, spec Objective), 不再是 undefined 透明关闭。
+  it("resolveVerifyConfig(undefined)（verify 段完全缺失）→ { command: '' }（分类器接管，不再透明关闭）", async () => {
+    const { home, cwd } = await makeSettings({}, {});
+    const settings = loadIknowSettings({ home, cwd });
+    const config = resolveVerifyConfig(settings.verify);
+    assert.deepEqual(config, { command: "" });
+    assert.notEqual(config, undefined, "verify 段缺失也必须产出 VerifyConfig");
+  });
+
+  it("resolveVerifyConfig({ command: 'npm test' }) → command 原样透传（不回归）", async () => {
+    const { home, cwd } = await makeSettings(
+      { verify: { command: "  npm test  ", timeoutSec: 300 } },
+      {}
+    );
+    const config = resolveVerifyConfig(loadIknowSettings({ home, cwd }).verify);
+    assert.deepEqual(config, { command: "npm test", timeoutSec: 300 });
+  });
+
+  it("resolveVerifyConfig 全字段透传：verify 段全字段 → 逐字段保留", async () => {
+    const { home, cwd } = await makeSettings(
+      {
+        verify: {
+          command: "npm test",
+          rerunTemplate: "npm test {files}",
+          countRegex: "\\d+ failures?",
+          timeoutSec: 900,
+          onExhausted: "escalate",
+          maxRounds: 20,
+          classifierModel: "claude-haiku-4-5",
+        },
+      },
+      {}
+    );
+    const config = resolveVerifyConfig(loadIknowSettings({ home, cwd }).verify);
+    assert.deepEqual(config, {
+      command: "npm test",
+      rerunTemplate: "npm test {files}",
+      countRegex: "\\d+ failures?",
+      timeoutSec: 900,
+      onExhausted: "escalate",
+      maxRounds: 20,
+      classifierModel: "claude-haiku-4-5",
+    });
+  });
+
+  it("resolveVerifyConfig 只透传显式配置字段：command 未配 + 仅 classifierModel → { command: '', classifierModel }（默认值仍由消费点兜底）", async () => {
+    const { home, cwd } = await makeSettings(
+      { verify: { classifierModel: "claude-haiku-4-5" } },
+      {}
+    );
+    const config = resolveVerifyConfig(loadIknowSettings({ home, cwd }).verify);
+    assert.deepEqual(config, {
+      command: "",
+      classifierModel: "claude-haiku-4-5",
+    });
+    assert.equal(config.timeoutSec, undefined);
+    assert.equal(config.maxRounds, undefined);
+    assert.equal(config.onExhausted, undefined);
+  });
+
+  it("resolveVerifyConfig 非法值降级：字段级非法 → 丢弃（不产字段），command 空串兜底", async () => {
+    // command 空串非法 → settings 层丢弃 command；timeoutSec 非法 → 丢弃。
+    const { home, cwd } = await makeSettings(
+      { verify: { command: "   ", timeoutSec: -1 } },
+      {}
+    );
+    const settings = loadIknowSettings({ home, cwd });
+    assert.deepEqual(
+      settings,
+      {},
+      "settings 层丢弃全部非法字段 → 无 verify 段"
+    );
+    const config = resolveVerifyConfig(settings.verify);
+    assert.deepEqual(config, { command: "" }, "装配层仍以 command='' 兜底");
+  });
+
+  it("返回对象深 frozen 含 verify 段（嵌套字段不可改）", async () => {
+    const { home, cwd } = await makeSettings(
+      {
+        verify: {
+          command: "npm test",
+          rerunTemplate: "npm test {files}",
+          timeoutSec: 900,
+          onExhausted: "escalate",
+          maxRounds: 20,
+        },
+      },
+      {}
+    );
+    const s = loadIknowSettings({ home, cwd });
+    assert.ok(Object.isFrozen(s));
+    assert.ok(Object.isFrozen(s.verify));
+    assert.throws(() => {
+      (s.verify as { command: string }).command = "other";
+    }, TypeError);
+    assert.throws(() => {
+      (s.verify as { timeoutSec: number }).timeoutSec = 1;
+    }, TypeError);
+    assert.throws(() => {
+      (s.verify as { onExhausted: string }).onExhausted = "report";
+    }, TypeError);
+    assert.throws(() => {
+      (s.verify as { maxRounds: number }).maxRounds = 1;
     }, TypeError);
   });
 });

@@ -13,6 +13,9 @@ export type {
   TurnRecord,
   SessionRecord,
   SandboxCmdRecord,
+  VerificationRecord,
+  VerificationVerdict,
+  VerificationAction,
 } from "./types.js";
 
 export { createNoopTraceService } from "./noop.js";

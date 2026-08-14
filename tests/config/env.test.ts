@@ -16,7 +16,10 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadIknowEnv } from "../../src/config/env.ts";
-import type { IknowSettings } from "../../src/config/settings.ts";
+import {
+  loadIknowSettings,
+  type IknowSettings,
+} from "../../src/config/settings.ts";
 
 /**
  * #353 review: 既有 env 测试不测 settings，统一注入最小 settings 以隔离
@@ -632,6 +635,7 @@ describe("loadIknowEnv — llm.fallback (settings-model-extension)", () => {
     const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-env-fallback-invalid-"));
     const emptyHome = await mkdtemp(join(tmpdir(), "iknow-env-fallback-home-"));
     await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
+    await mkdir(join(emptyHome, ".iknow"), { recursive: true });
     await writeFile(
       join(tmpCwd, ".iknow", "settings.json"),
       JSON.stringify({

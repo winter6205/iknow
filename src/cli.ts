@@ -46,6 +46,8 @@ import {
   loadIknowSettings,
   analyzePlaceholderSyntax,
 } from "./config/settings.js";
+// 共享装配 (cli / serve / tui 三入口共用, SSOT): settings.verify → VerifyConfig。
+import { resolveVerifyConfig } from "./config/verify-config.js";
 
 /**
  * T7: 写侧与读侧共用的默认 trace 目录 —— 每会话独立文件
@@ -275,6 +277,11 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // #356 T7:host drain — chat 入口每轮 runHarness 前把 completed 子代理
     // 结果拼入 priorMessages。ask 入口无 manager(surface 门控),不传。
     subagentManager: built.subagentManager,
+    // #128 T8:settings.verify 段 → 闭环配置。command 缺失 (含 verify 段缺失)
+    // → { command: "" }, subagentManager 在场 (chat) 时 runClassifier 接管
+    // 分类器判官 (spec #128 Objective); ask 形态无 manager → verify-loop
+    // 透明关闭向后兼容 (SC7)。其余字段随行透传。
+    verifyConfig: resolveVerifyConfig(loadIknowSettings().verify),
   });
 }
 
