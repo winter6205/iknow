@@ -486,3 +486,46 @@ test("thinking 留存：lastThinkingSeconds 不作用于非末条 assistant 消�
   expect(frame).toContain("[思考]");
   await setup1.renderer.destroy();
 });
+
+test("crunchedSeconds prop → 流末尾渲染 `Crunched for 3m 46s`", async () => {
+  // 最近一次完成 turn 的运行时长（app 层 finally 快照）在消息流末尾渲染：
+  // 末条消息之后、live tail 之前的 dim 留存行（formatRunDuration 纯格式化）。
+  const initial = sessionWith([
+    msg("m-1", "user", "复杂问题"),
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "正式回答" }],
+    },
+  ]);
+  const setup1 = await testRender(
+    <ChatView
+      session={initial}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      crunchedSeconds={226}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup1.waitForVisualIdle();
+  const frame = setup1.captureCharFrame();
+  // 完整端到端串（Crunched 前缀 + 时长段）——与 run-stats 单测分开，确保
+  // ChatView 渲染路径把 formatCrunched 的完整输出落到画面（非只时长段）。
+  expect(frame).toContain("Crunched for 3m 46s");
+  await setup1.renderer.destroy();
+});
+
+test("crunchedSeconds 0 / undefined → 不渲染 Crunched", async () => {
+  // 缺省 undefined（= 0）→ 消息流末尾不产 crunched 留存行；sub-second 回合
+  // （0 秒）同样不渲染 `0s`。
+  const initial = sessionWith(makeMessages(2));
+  const setup1 = await testRender(
+    <ChatView session={initial} cols={COLS} rows={ROWS} liveToolLines={[]} />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup1.waitForVisualIdle();
+  const frame = setup1.captureCharFrame();
+  expect(frame.includes("3m 46s")).toBe(false);
+  expect(frame.includes("46s")).toBe(false);
+  await setup1.renderer.destroy();
+});

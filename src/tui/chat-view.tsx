@@ -70,6 +70,7 @@ import { EYE_LINES, eyeGradientCells } from "./banner.js";
 import { Spinner } from "./components.js";
 import { tuiPalette } from "./theme.js";
 import { toolResultStatusMap } from "./tool-summary.js";
+import { formatCrunched } from "./run-stats.js";
 
 export interface ChatViewHandle {
   /**
@@ -116,6 +117,11 @@ export interface ChatViewProps {
    *  仍在 → 思考已结束、折叠行显示「思考了 N 秒」（不再「思考中…」递增），
    *  秒数留存到 turn 结束历史消息接棒。缺省 0 → 仍按「思考中… N 秒」。 */
   readonly thinkingFrozenSeconds?: number;
+  /** 最近一次完成 turn 的运行秒数快照（app 层 runTurnOnce finally 写入
+   *  crunchedOf === activeKey 时传）。在消息流末尾渲染 `Crunched for X`，
+   *  会话结束后显示，运行中清空（app 层管理 crunchedOf 归属，ChatView 仅做
+   *  条件渲染）。缺省 undefined → 不渲染。 */
+  readonly crunchedSeconds?: number;
   /** askUser 待决提示（undefined = 无 pending ask）。 */
   readonly askLine?: string;
   /** thinking 折叠面板展开态（false = 折叠成 1 行 [思考]）。 */
@@ -247,6 +253,15 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             </box>
           );
         })}
+        {/* crunched 留存行：消息流末尾（末条消息之后、live tail 之前）。
+            最近一次完成 turn 的运行时长（app 层 finally 快照传
+            crunchedSeconds）；>0 才渲染（sub-second 回合不显 `0s`），
+            缺省 undefined / 0 → 无输出。与 [思考] 折叠行同款 dim 视觉。 */}
+        {(props.crunchedSeconds ?? 0) > 0 && (
+          <text fg={pal.dim} wrapMode="none">
+            {formatCrunched(props.crunchedSeconds ?? 0)}
+          </text>
+        )}
         {/* tail：liveToolRuns（结构化）+ liveToolLines（向后兼容）。 */}
         {(liveToolRuns.length > 0 || props.liveToolLines.length > 0) && (
           <box flexDirection="column" width={contentWidth}>

@@ -30,6 +30,7 @@ import {
 import { createTuiAskUserBridge } from "../../src/tui/ask-user.js";
 import { createPermissionModeContext } from "../../src/harness/permission/index.js";
 import { createSessionGrants } from "../../src/harness/permission/session-grants.js";
+import type { LoopEngineDeps } from "../../src/harness/index.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 
 /** 帧等待：mockInput 字节经 stdin 异步解析，需轮询 renderOnce。 */
@@ -74,12 +75,13 @@ interface DrivenApp {
 }
 
 async function mountAppAsync(
-  responses: Parameters<typeof makeDeps>[0]
+  responses: Parameters<typeof makeDeps>[0],
+  depsOverride?: LoopEngineDeps
 ): Promise<DrivenApp> {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-app-"));
   const bridge = createTuiBridge({
     dataDir,
-    deps: makeDeps(responses),
+    deps: depsOverride ?? makeDeps(responses),
     inflight: createInflightRegistry(),
   });
   const askBridge = createTuiAskUserBridge();
@@ -252,39 +254,49 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     await app.destroy();
   }, 30_000);
 
-  test("turn 结束 → mode 行右侧显示运行时长 + token 总结段", async () => {
-    const app = await mountAppAsync([
-      assistantResult({
-        texts: ["统计答复"],
-        usage: {
-          inputTokens: 100,
-          outputTokens: 1500,
-          cacheReadInputTokens: 0,
-          cacheCreationInputTokens: 0,
-        },
-      }),
-    ]);
+  test("turn 运行中 → mode 行右侧实时秒数；turn 结束 → mode 行清空 + 流末尾 `Crunched for`", async () => {
+    // delayMs=3000 让 turn 停留 running-fg ~3s —— 运行中实时秒数（`· Ns`，
+    // 每秒跳）有足够窗口被 untilFrame 抓到。
+    const app = await mountAppAsync(
+      [assistantResult({ texts: ["答复"] })],
+      makeDeps([assistantResult({ texts: ["答复"] })], { delayMs: 3000 })
+    );
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
     await app.typeText("你好");
     await app.pressEnter();
-    // turn 完成 → 落盘 + runElapsed 冻结。
-    await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
-    await untilFrame(app.setup, (f) => f.includes("统计答复"), 8000, "answer");
-
-    // mode 行右侧统计段：output 1500 → `↓ 1.5k tokens`（时长可能 0s，仍必现）。
+    // 运行中：mode 行右侧出现实时秒数（`mode: Default · Ns`）。
     await untilFrame(
       app.setup,
-      (f) => f.includes("↓ 1.5k tokens") && f.includes("mode:"),
+      (f) => /mode: Default · \d+s/.test(f),
       8000,
-      "run-stats"
+      "running-elapsed"
     );
+
+    // turn 完成 → 流末尾 Crunched 行（快照秒数 ≥1，3s delay 保证）。
+    await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
+    const frame = await untilFrame(
+      app.setup,
+      (f) => f.includes("Crunched for"),
+      8000,
+      "crunched-summary"
+    );
+
+    // mode 行清空：无 `·`、无秒数尾缀（trim 精确等于 `mode: Default`）。
+    const modeLine = frame
+      .split("\n")
+      .find((l) => l.includes("mode:"))
+      ?.trim();
+    expect(modeLine).toBe("mode: Default");
+    // token 统计段已随 #426 修订移除：帧内无 `↓` / `tokens`。
+    expect(frame.includes("↓")).toBe(false);
+    expect(frame.includes("tokens")).toBe(false);
     await app.destroy();
   }, 30_000);
 
-  test("turn 结束无 token → mode 行不显示统计段（无 `↓` 假数据）", async () => {
-    // stub 路径无 usage（makeDeps 默认语义）→ outputTokens 缺席；时长 <1s
-    // 冻结 0s → mode 行右侧统计段不渲染（守卫：runElapsed>0 || output>0）。
+  test("快速 turn（<1s）→ mode 行无运行统计段 + 流末尾无 Crunched（gate 守 <1s）", async () => {
+    // stub 无 delay → turn 立即完成；秒数冻结 0s → formatCrunched 返回空串
+    // + ChatView `>0` gate 把 Crunched 行排除（不渲染难看的 `Crunched for 0s`）。
     const app = await mountAppAsync([assistantResult({ texts: ["普通答复"] })]);
     await untilFrame(app.setup, (f) => f.includes("Version"));
 
@@ -293,13 +305,16 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
     await untilFrame(app.setup, (f) => f.includes("普通答复"), 8000, "answer");
 
-    // 等一个 render 周期后断言：mode 行仍显示（不含统计段）。
+    // 等一个 render 周期后断言：mode 行仍显示、无运行统计段；流末尾无 Crunched。
     await new Promise((r) => setTimeout(r, 1200));
     await app.setup.renderOnce();
     const frame = app.setup.captureCharFrame();
-    expect(frame).toContain("mode:");
-    expect(frame.includes("↓")).toBe(false);
-    expect(frame.includes("tokens")).toBe(false);
+    const modeLine = frame
+      .split("\n")
+      .find((l) => l.includes("mode:"))
+      ?.trim();
+    expect(modeLine).toBe("mode: Default");
+    expect(frame.includes("Crunched for")).toBe(false);
     await app.destroy();
   }, 30_000);
 

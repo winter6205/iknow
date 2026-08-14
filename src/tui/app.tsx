@@ -138,7 +138,7 @@ import {
 import { renderBannerLines, VERSION } from "./banner.js";
 import { copyToClipboard, type CopyResult } from "./clipboard.js";
 import { summarizeToolCall } from "./tool-summary.js";
-import { formatRunStats } from "./run-stats.js";
+import { formatRunDuration } from "./run-stats.js";
 import { tuiPalette } from "./theme.js";
 import {
   applyShiftTabModeFlip,
@@ -424,9 +424,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // 只在 delta 到达时 notify（不会每秒推），故加 1Hz interval 主动拉秒数。
   const [thinkingSeconds, setThinkingSeconds] = useState(0);
   // 最近一次 turn 的 thinking 最终秒数（turn 结束快照）。供历史消息末条
-  // assistant 折叠行显示「思考了 N 秒」留存。**未按会话 key**：TUI 同一时刻
-  // 只有 1 个前台流式 turn（SC8），多会话场景由 runStatsOf 归属校验兜底
-  // （见下），避免张冠李戴。
+  // assistant 折叠行显示「思考了 N 秒」留存。**未按会话 key**：仅显示末条
+  // assistant 的留存，且与 mode 行 Crunched 同 turn 写入（同 runTurnOnce
+  // finally），非本 turn 不会读到；切换会话后末条 assistant 仍会带旧 turn
+  // 的 thinking 秒数（已知限制，未做归属校验，与原实现一致）。
   const [lastThinkingSeconds, setLastThinkingSeconds] = useState(0);
   // thinking 冻结秒数（answer 开始时刻快照）：思考结束、进入 answer 输出后，
   // 折叠行从「思考中… N 秒」切「思考了 N 秒」。存 **ref** —— tick 是异步
@@ -437,14 +438,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // 渲染用镜像（ref 不触发重渲染，UI 需 state）。frozen>0 时 ChatView 显示
   // 「思考了 N 秒」，否则按 thinkingSeconds 走「思考中… N 秒」。
   const [thinkingFrozenSeconds, setThinkingFrozenSeconds] = useState(0);
-  // 运行时长统计（mode 行右侧总结段）：turn 开始打点、运行中 1Hz 递增、
-  // turn 结束冻结显示。缺省 0 → 未运行 / 无时长（mode 行不渲染统计段）。
+  // 运行时长统计（mode 行右侧实时秒数）：turn 开始打点、运行中 1Hz 递增、
+  // turn 结束冻结。runStartedAt 非空 = 运行中（mode 行显示 `· Xs`）；
+  // 置 null = 结束（mode 行清空，统计移到消息流末尾 Crunched 行）。
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [runElapsed, setRunElapsed] = useState(0);
-  // 运行统计归属会话 id：记录最近一次完成 turn 的会话。mode 行渲染时只有
-  // `runStatsOf === activeKey` 才显示统计段——避免会话 A 的 turn 时长 / token
-  // 在切到会话 B 后错误展示（跨会话错配）。
-  const [runStatsOf, setRunStatsOf] = useState<string | null>(null);
+  // 最近一次完成 turn 的会话归属 + 快照秒数。runTurnOnce 入口清空（运行中
+  // 不显示上次总结），finally 写入；ChatView 仅在 `crunchedOf === activeKey`
+  // 时接收 crunchedSeconds，避免跨会话错配（跟旧 runStatsOf 同款所有权校验）。
+  const [crunchedOf, setCrunchedOf] = useState<string | null>(null);
+  const [crunchedSeconds, setCrunchedSeconds] = useState(0);
   useEffect(() => {
     if (streamDraft === null) {
       setDraftsMasked("");
@@ -863,6 +866,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     // 本 turn 独立 thinking 冻结会话：清 ref（tick 首次冻结时重写）。
     thinkingFrozenRef.current = 0;
     setThinkingFrozenSeconds(0);
+    // 清掉上次总结：新 turn 开始后流末尾不再显示旧总结（app 层 ↔ chat-view
+    // 通过 crunchedOf 归属校验）。
+    setCrunchedOf(null);
     const onStream = (event: HarnessStreamEvent): void => {
       draft.append(event);
       if (event.type === "tool_call_start") {
@@ -933,11 +939,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       setThinkingFrozenSeconds(0);
       setLastThinkingSeconds(finalThinkingSeconds);
       // 运行时长冻结：turn 结束精确值（含工具耗时尾段，tick 可能未覆盖）。
-      // runStatsOf = 归属会话 id —— 只有当前 active 会话等于它时 mode 行
-      // 才显示统计段，避免跨会话错配。
-      setRunElapsed(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+      // crunchedOf = 归属会话 id —— 只有当前 active 会话等于它时 ChatView
+      // 才接收 crunchedSeconds（消息流末尾 Crunched 行），避免跨会话错配。
+      const finalRunSeconds = Math.max(
+        0,
+        Math.floor((Date.now() - startedAt) / 1000)
+      );
+      setRunElapsed(finalRunSeconds);
       setRunStartedAt(null);
-      setRunStatsOf(targetId);
+      setCrunchedOf(targetId);
+      setCrunchedSeconds(finalRunSeconds);
     }
     try {
       const file = await props.bridge.loadSessionFile(targetId);
@@ -1596,6 +1607,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             }
             thinkingExpanded={thinkingExpanded}
             bannerLines={bannerLines}
+            crunchedSeconds={
+              crunchedOf === activeKey ? crunchedSeconds : undefined
+            }
           />
         </>
       )}
@@ -1641,22 +1655,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
               ? `[${permMode === "full_auto" ? "auto" : "def"}]`
               : `mode: ${modeLabel(permMode)}`}
           </text>
-          {/* 运行时长 + token 统计段：mode 右侧。turn 运行中（runStartedAt 非空）
-              不显示（避免数字跳动干扰）；会话结束（idle）且有时长或有产出
-              token → 显示该 turn 总结 `3m 46s · ↓ 1.5k tokens`。token 源 =
-              lastUsage.outputTokens（产出量；输入侧含 cache 语义不混入）。
-              快速 turn（<1s）时长 0s 但 token 有值 → 仍显示 `0s · ↓ x.xk`，
-              保证「会话结束后必现总结」。 */}
+          {/* mode 右侧运行中实时显示秒数（`· Xs`，每秒跳）；结束后清空（mode
+              行不残留，统计移到流末尾 `Crunched for X` 行）。实时 token 计算
+              暂不做（#426 修订：先不上 token 数量计算）。 */}
           {cols >= 40 &&
-            runStartedAt === null &&
-            runStatsOf === activeKey &&
-            (runElapsed > 0 || (active.lastUsage?.outputTokens ?? 0) > 0) && (
-              <text fg={pal.dim}>
-                {` ${formatRunStats(
-                  runElapsed,
-                  active.lastUsage?.outputTokens ?? null
-                )}`}
-              </text>
+            active.runState === "running-fg" &&
+            runStartedAt !== null && (
+              <text fg={pal.dim}>{` · ${formatRunDuration(runElapsed)}`}</text>
             )}
         </box>
       )}

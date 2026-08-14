@@ -2,14 +2,10 @@
 /**
  * tests/tui/run-stats.test.ts
  *
- * mode 行右侧运行时长 + token 统计纯函数单测（run-stats.ts）。
+ * mode 行右侧运行时长 + 压缩耗时纯函数单测（run-stats.ts）。
  */
 import { describe, expect, test } from "bun:test";
-import {
-  formatRunDuration,
-  formatRunStats,
-  formatRunTokens,
-} from "../../src/tui/run-stats.js";
+import { formatCrunched, formatRunDuration } from "../../src/tui/run-stats.js";
 
 describe("formatRunDuration", () => {
   test("不足 1 分钟：仅秒", () => {
@@ -36,30 +32,22 @@ describe("formatRunDuration", () => {
   });
 });
 
-describe("formatRunTokens", () => {
-  test("千分位：`↓ 1.5k`", () => {
-    expect(formatRunTokens(1500)).toBe("↓ 1.5k");
-    expect(formatRunTokens(12345)).toBe("↓ 12.3k");
+describe("formatCrunched", () => {
+  test("0 / 负值 / NaN → 空串", () => {
+    expect(formatCrunched(0)).toBe("");
+    expect(formatCrunched(-5)).toBe("");
+    expect(formatCrunched(Number.NaN)).toBe("");
   });
 
-  test("null / undefined / 0 / NaN → 空串", () => {
-    expect(formatRunTokens(null)).toBe("");
-    expect(formatRunTokens(undefined)).toBe("");
-    expect(formatRunTokens(0)).toBe("");
-    expect(formatRunTokens(Number.NaN)).toBe("");
-  });
-});
-
-describe("formatRunStats", () => {
-  test("时长 + token：`3m 46s · ↓ 1.5k tokens`", () => {
-    expect(formatRunStats(226, 1500)).toBe("3m 46s · ↓ 1.5k tokens");
+  test("秒级：`Crunched for 45s`", () => {
+    expect(formatCrunched(45)).toBe("Crunched for 45s");
   });
 
-  test("无 token（null）→ 只有时长", () => {
-    expect(formatRunStats(226, null)).toBe("3m 46s");
+  test("分钟级：`Crunched for 3m 46s`", () => {
+    expect(formatCrunched(226)).toBe("Crunched for 3m 46s");
   });
 
-  test("无 token（0）→ 只有时长", () => {
-    expect(formatRunStats(45, 0)).toBe("45s");
+  test("小时级：`Crunched for 1h 0m`", () => {
+    expect(formatCrunched(3600)).toBe("Crunched for 1h 0m");
   });
 });
