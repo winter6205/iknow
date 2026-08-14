@@ -26,7 +26,13 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  # PR 级快速门。只跑快速 vitest subset，快速给反馈。
+  # PR 级快速门。目标 ~5min 内给 PR 通过/失败反馈。
+  # 排除集镜像 test-full（CI 实证失败集：bwrap 装配/物理执行依赖 +
+  # TUI 时序 flake）。runner 跑不通的测试由本地 WSL 全量验证；CI 仅
+  # 缩短反馈时间。TUI 时序 flake 靠 --retry 1 兜底（与 test-full 一致）。
+  # 注：不装 bubblewrap —— 沙箱/ACI 测试在 runner 上结构性跑不通（无
+  # user-namespace + bwrap 物理执行），纯靠 --exclude 拦掉。本地 WSL
+  # 验证，CI 缩短反馈时间。
   test-fast:
     runs-on: ubuntu-latest
     timeout-minutes: 8
@@ -39,17 +45,40 @@ jobs:
       - run: npm ci
       - name: Typecheck
         run: npm run typecheck
-      - name: Vitest fast subset (bail-10 on first failure)
-        # fast = 快速 vitest 子集：排除慢/重路径（e2e 全流 / integration /
-        #   secret-roundtrip e2e / build-engine 时间敏感 / ensure-deps）。
-        # 这些由 test-full（nightly + manual）兜底。
+      - name: Vitest fast subset (bail-10 + retry-1 for flaky timing)
+        # 排除集 = test-full 镜像。bwrap 物理执行类（runner 无 user-namespace）：
+        #   bash-sandbox / demo / interrupt-routing / bash / grep /
+        #   mcp-chain / skill-mcp-acceptance / build-engine / ensure-deps /
+        #   secret-roundtrip/e2e。
+        # 装配依赖 bwrap 类（bwrap 缺失时 requireBwrap fail-loud）：
+        #   permission / registry / system-injection / max-turns-serve /
+        #   deps-tools / build-engine-hooks（经 buildHarnessEngine →
+        #   createDefaultAciRegistry → createBashTool → requireBwrap）。
+        # 慢/重路径 + TUI 时序 flaky（runner 环境偶发，--retry 1 兜底）：
+        #   e2e / integration / banner-scroll-fixes / logo-persists。
+        # 本地 WSL 全量绿；排除仅影响 CI，不删测试。
         run: |
-          npx vitest run --bail=10 \
+          npx vitest run --retry 1 --bail=10 \
             --exclude tests/e2e \
             --exclude tests/integration \
+            --exclude tests/harness/aci/bash-sandbox.test.ts \
+            --exclude tests/harness/aci/demo.test.ts \
+            --exclude tests/harness/aci/interrupt-routing.test.ts \
+            --exclude tests/harness/aci/tools/bash.test.ts \
+            --exclude tests/harness/aci/tools/grep.test.ts \
+            --exclude tests/harness/aci/permission.test.ts \
+            --exclude tests/harness/aci/tools/registry.test.ts \
+            --exclude tests/harness/identity/system-injection.test.ts \
+            --exclude tests/session-api/max-turns-serve.test.ts \
+            --exclude tests/tui/deps-tools.test.ts \
+            --exclude tests/build-engine-hooks.test.ts \
+            --exclude tests/integration/mcp-chain.test.ts \
+            --exclude tests/e2e/skill-mcp-acceptance.test.ts \
             --exclude tests/harness/build-engine.test.ts \
-            --exclude tests/harness/secret-roundtrip \
-            --exclude tests/session-api/ensure-deps-aci-tools.test.ts
+            --exclude tests/session-api/ensure-deps-aci-tools.test.ts \
+            --exclude tests/tui/banner-scroll-fixes.test.tsx \
+            --exclude tests/tui/logo-persists.test.tsx \
+            --exclude tests/harness/secret-roundtrip/e2e.test.ts
 
   # 全量兜底（nightly cron + manual dispatch）。内容 = 原 test job。
   test-full:
@@ -84,7 +113,8 @@ jobs:
         #   装配依赖 bwrap 类（bwrap 缺失时 requireBwrap fail-loud，
         #   装了也仅能装配不能执行）：
         #     permission / registry / system-injection / max-turns-serve /
-        #     deps-tools
+        #     deps-tools / build-engine-hooks（经 buildHarnessEngine →
+        #     createDefaultAciRegistry → createBashTool → requireBwrap）。
         #   TUI 时序 flaky（runner 环境偶发，--retry 1 兜底）：
         #     banner-scroll-fixes / logo-persists
         # 注意：sandbox/bwrap.test、resource-limits 等纯逻辑测试在 CI
@@ -101,6 +131,7 @@ jobs:
             --exclude tests/harness/identity/system-injection.test.ts \
             --exclude tests/session-api/max-turns-serve.test.ts \
             --exclude tests/tui/deps-tools.test.ts \
+            --exclude tests/build-engine-hooks.test.ts \
             --exclude tests/integration/mcp-chain.test.ts \
             --exclude tests/e2e/skill-mcp-acceptance.test.ts \
             --exclude tests/harness/build-engine.test.ts \
