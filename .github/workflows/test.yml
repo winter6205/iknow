@@ -1,7 +1,12 @@
 name: test
 
-# 全量测试跑在干净的 CI runner 上（无本地开发机 CPU 争用）。提交前
-# 本地只用 test:changed（变更相关），全量由本 workflow 保证。
+# 测试分两级：
+#
+#   test-fast  — PR 级快速门（required check）。只跑快速 vitest subset，
+#                目标 ~5min 内给 PR 通过/失败反馈，避免 PR 每次都等全量
+#                15min。
+#   test-full  — 全量兜底（nightly cron + manual dispatch）。保留原 test
+#                job 完整内容（vitest --retry 1 + CI 实证排除集）。
 #
 # CI 环境限制（实测）：GitHub Actions 标准 runner 的容器不允许
 # user-namespace 网络隔离（bwrap --unshare-net → RTM_NEWADDR:
@@ -15,11 +20,42 @@ name: test
 on:
   push: { branches: [master] }
   pull_request: { branches: [master] }
+  schedule:
+    # nightly 全量兜底（UTC 03:00 = CST 11:00）
+    - cron: "0 3 * * *"
+  workflow_dispatch: {}
 
 jobs:
-  test:
+  # PR 级快速门。只跑快速 vitest subset，快速给反馈。
+  test-fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Vitest fast subset (bail-10 on first failure)
+        # fast = 快速 vitest 子集：排除慢/重路径（e2e 全流 / integration /
+        #   secret-roundtrip e2e / build-engine 时间敏感 / ensure-deps）。
+        # 这些由 test-full（nightly + manual）兜底。
+        run: |
+          npx vitest run --bail=10 \
+            --exclude tests/e2e \
+            --exclude tests/integration \
+            --exclude tests/harness/build-engine.test.ts \
+            --exclude tests/harness/secret-roundtrip \
+            --exclude tests/session-api/ensure-deps-aci-tools.test.ts
+
+  # 全量兜底（nightly cron + manual dispatch）。内容 = 原 test job。
+  test-full:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -35,7 +71,7 @@ jobs:
       - run: npm ci
       - name: Typecheck
         run: npm run typecheck
-      - name: Test suite (CI — exclude sandbox-dependent, retry flaky)
+      - name: Test suite (full — exclude sandbox-dependent, retry flaky)
         # 排除集 = 两次 CI 实证失败集的并集（bwrap 物理执行依赖 + 装配
         # 依赖 bwrap 缺失 + TUI 时序 flaky）。本地 WSL 全量绿；排除仅
         # 影响 CI，不删测试，sandbox 在本地验证。
