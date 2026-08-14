@@ -9,8 +9,9 @@
  *    `<scrollbox>` 全内容滚动，scrollbox 实测处理视口外的物理行。
  *  - **删除 `cloneElement` + `marginBottom` patch**：OpenTUI 直接按元素
  *    父子布局，无 ink margin 折叠规则，不必在末尾块裁 margin。
- *  - **thinking 折叠文案**收敛在本文件为常量（`THINKING_FOLD_LINE = "[思考]"`），
- *    替代码仓 archive 里同名导出（本文件是当前唯一 caller，作为 SSOT）。
+ *  - **thinking 折叠文案**收敛在 `./think-fold.ts`（SSOT：`formatThinkingFold` /
+ *    `formatThinkingLive` + `THINKING_FOLD_LINE`），本文件仅调用，不再另写
+ *    模板字符串；与 chat-view.tsx 流式折叠行同源收敛（2026-08-14）。
  *  - 全部 `<box>` / `<text>` + fg 属性；禁 ink 原语（Box / Text）。
  *  - **T7 消息间距 + 底色**：user / assistant 分支用 box.backgroundColor
  *    （读 theme.ts userBg / assistantBg token）+ paddingX={1} 水平缩进
@@ -60,13 +61,9 @@ import {
   REDACTED_PLACEHOLDER,
   summarizeThinkingContent,
 } from "../cli/format.js";
+import { formatThinkingFold } from "./think-fold.js";
 
 type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
-
-/** 折叠态摘要行文案 SSOT（T6-B 收敛到本文件作为唯一来源，替代码仓 archive
- *  时代的同名导出）。2026-08-08 用户反馈去掉 "N 段" 计数与 "(Ctrl+O)"
- *  键位提示。 */
-const THINKING_FOLD_LINE = "[思考]";
 
 /** tool_use 摘要行：`[运行中]|[完成]|[失败] name · detail`。
  *  完成态 bash 追加 `，ran N command(s)`（T4）：runCount = 该 assistant 消息内
@@ -128,7 +125,10 @@ function ToolPreviewRows(props: {
  *  - 无时间（历史消息）→ `[思考]` + 可选 `· ran {M} shell command(s)`，避免
  *    伪精度「思考了 0 秒」；
  *  - 工具计数英文（与参考图 `ran 2 shell commands` 一致），思考部分全中文；
- *  - bash 数 = 0 → 省略 `· ran …` 段。 */
+ *  - bash 数 = 0 → 省略 `· ran …` 段。
+ *
+ * 文案经 `formatThinkingFold`（think-fold.ts SSOT，2026-08-14）——与
+ * chat-view 流式折叠行同源收敛，不在渲染层另写模板字符串。 */
 function ThinkingSummary(props: {
   readonly message: AnthropicNativeMessage;
   readonly cols: number;
@@ -137,11 +137,7 @@ function ThinkingSummary(props: {
   const bashCount = countBashCalls(props.message);
   const ranSuffix =
     bashCount > 0 ? formatRanSuffix(bashCount).replace(/^，/, " · ") : "";
-  const head =
-    props.thinkingSeconds !== undefined && props.thinkingSeconds > 0
-      ? `思考了 ${props.thinkingSeconds} 秒`
-      : THINKING_FOLD_LINE;
-  const text = `${head}${ranSuffix}`;
+  const text = `${formatThinkingFold(props.thinkingSeconds)}${ranSuffix}`;
   return (
     <text fg={tuiPalette.dim} wrapMode="none">
       {clipOneLineVisual(text, props.cols)}

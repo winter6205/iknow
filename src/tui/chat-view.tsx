@@ -71,6 +71,7 @@ import { Spinner } from "./components.js";
 import { tuiPalette } from "./theme.js";
 import { toolResultStatusMap } from "./tool-summary.js";
 import { formatCrunched } from "./run-stats.js";
+import { formatThinkingFold, formatThinkingLive } from "./think-fold.js";
 
 export interface ChatViewHandle {
   /**
@@ -106,8 +107,9 @@ export interface ChatViewProps {
   readonly draftsMasked?: string;
   /** 流式 thinking 草稿 masked 文本。thinkingExpanded 决定折叠 / 展开。 */
   readonly thinkingDraftMasked?: string;
-  /** 流式 thinking 经过秒数（首次 thinking_delta 起算）——折叠面板显示
-   *  `[思考] 思考中… N 秒` 用。运行结束后清 0。 */
+  /** 流式 thinking 经过秒数（markThinkingStart / 首条 thinking_delta 起算）
+   *  ——折叠面板显示 `思考中… N 秒` 用（think-fold.ts 文案统一，不叠加
+   *  `[思考]` 前缀）。运行结束后清 0。 */
   readonly thinkingSeconds?: number;
   /** 最近一次 turn 的 thinking 最终秒数（app 层 turn 结束快照）。传给末条
    *  assistant 消息的 thinking 折叠行 → 显示「思考了 N 秒」留存，turn 结束后
@@ -278,10 +280,13 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             {props.askLine}
           </text>
         )}
-        {/* 流式 thinking 面板：折叠态 = 1 行 [思考] 思考中… / 思考已结束 →
+        {/* 流式 thinking 面板：折叠态 = 1 行 思考中… N 秒 / 思考已结束 →
             显示「思考了 N 秒」冻结留存；展开态走 Markdown。frozen 非空 = answer
             已开始、thinking 阶段结束 → 秒数不再递增，显示「思考了 N 秒」，
-            直到 turn 结束历史消息接棒（留存不消失）。 */}
+            直到 turn 结束历史消息接棒（留存不消失）。
+            文案统一（2026-08-14）：两分支都走 think-fold.ts SSOT ——
+            `思考中… N 秒` / `思考了 N 秒` 即带语义，不再叠加 `[思考]` 前缀
+            （与 message-blocks 历史折叠行同源收敛）。 */}
         {running && deferredThinkingDrafts.length > 0 && (
           <box flexDirection="column" width={contentWidth}>
             {thinkingExpanded ? (
@@ -290,11 +295,11 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
               </box>
             ) : (props.thinkingFrozenSeconds ?? 0) > 0 ? (
               <text fg={pal.dim} wrapMode="none">
-                {`[思考] 思考了 ${props.thinkingFrozenSeconds} 秒`}
+                {formatThinkingFold(props.thinkingFrozenSeconds)}
               </text>
             ) : (
               <text fg={pal.dim} wrapMode="none">
-                {`[思考] 思考中…${(props.thinkingSeconds ?? 0) > 0 ? ` ${props.thinkingSeconds} 秒` : ""}`}
+                {formatThinkingLive(props.thinkingSeconds)}
               </text>
             )}
           </box>

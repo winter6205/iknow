@@ -50,6 +50,7 @@ import type {
 } from "../../src/harness/index.js";
 import type { ToolExecutionResult } from "../../src/harness/tools/types.js";
 import type { HarnessStreamEvent } from "../../src/harness/stream.ts";
+import { createStreamDraft } from "../../src/cli/stream-draft.js";
 
 /** 事件发出后延迟返回的窗口（abort 透传）：工具运行中稳定阶段。 */
 function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -303,6 +304,90 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
 
     await app.destroy();
   }, 30_000);
+
+  test("计时同步：思考秒数含 turn 启动 → 首 thinking_delta 的等待时段（app 层 markThinkingStart）", async () => {
+    // 场景：请求发出后等待首 thinking_delta 的「等待思考」时段也应计入思考秒数。
+    // app 层在 runTurnOnce 入口对 streamDraft 调用 markThinkingStart(turn 起点)，
+    // 而非等首条 thinking_delta 惰性打点。本测用内联 adapter：turn 起点
+    // markThinkingStart 打点 → 延迟 2600ms → 发出 thinking_delta → 再延迟 1000ms
+    // → 返回。期望：thinking 面板折叠行出现时（frozen 快照 ≥3s），已包含等待时段。
+    const thinkingAdapter: ModelAdapter = {
+      async step(
+        _state: LoopState,
+        request: { onStream?: (e: HarnessStreamEvent) => void },
+        signal?: AbortSignal
+      ): Promise<AssistantTurnResult> {
+        if (signal?.aborted) {
+          throw new DOMException("This operation was aborted", "AbortError");
+        }
+        await abortableDelay(2600, signal);
+        if (signal?.aborted) {
+          throw new DOMException("This operation was aborted", "AbortError");
+        }
+        request.onStream?.({ type: "thinking_delta", text: "等待后思考…" });
+        await abortableDelay(1000, signal);
+        if (signal?.aborted) {
+          throw new DOMException("This operation was aborted", "AbortError");
+        }
+        return assistantResult({
+          texts: ["正式回答"],
+          thinkingBlocks: [
+            { type: "thinking", thinking: "等待后思考…", signature: "sig-2" },
+          ],
+        });
+      },
+      encodeUserText(t: string): AnthropicNativeMessage {
+        return { role: "user", content: [{ type: "text", text: t }] };
+      },
+      encodeToolResults(
+        results: ReadonlyArray<ToolExecutionResult>
+      ): AnthropicContentBlock[] {
+        return results.map((r) => ({
+          type: "tool_result",
+          tool_use_id: r.toolUseId,
+          content: r.output,
+          is_error: r.isError,
+        }));
+      },
+    };
+    const app = await mountAppAsync(
+      [],
+      "正式回答",
+      buildToolDeps(thinkingAdapter)
+    );
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    await app.typeText("hi");
+    await app.pressEnter();
+
+    // turn 完成后历史折叠行留存秒数 N≥3（turn 起点 → thinking_delta 等待
+    // 2.6s + delta 后 1s）。若计时从首 delta 惰性打点，N 只会是 ≥1。
+    await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
+    await untilFrame(
+      app.setup,
+      (f) => /思考了 [3-9]\d* 秒/.test(f),
+      8000,
+      "thinking-timing-synced"
+    );
+
+    await app.destroy();
+  }, 30_000);
+
+  test("markThinkingStart 后 thinkingSeconds() 基于打点时刻计算（含等待时段）", async () => {
+    // 单元级集成：createStreamDraft + markThinkingStart 直接验证计时起点 =
+    // turn 起点（非首 delta 时刻）。8000ms 后秒数 ≥8（等待时段计入）。
+    const draft = createStreamDraft();
+    const t0 = Date.now();
+    draft.markThinkingStart(t0);
+    draft.append({ type: "thinking_delta", text: "想" });
+    // 打点 8s 后（思考仍在进行，未 reset）→ thinkingSeconds ≥8。
+    expect(draft.thinkingSeconds()).toBe(0); // 刚打点未满 1s
+    expect(draft.thinkingSeconds(t0 + 8000)).toBe(8);
+    expect(draft.thinkingSeconds(t0 + 8_500)).toBe(8);
+    // reset → 清零。
+    draft.reset();
+    expect(draft.thinkingSeconds()).toBe(0);
+  });
 
   test("tool_call_start → LiveToolRun 「[运行中] noop」实时追加", async () => {
     // 时序说明（T7 修复）：stub-model 的 streamEventsByStep 在 delay 之后
