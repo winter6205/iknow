@@ -42,6 +42,7 @@
     "probe:interrupt-transcript": "tsx scripts/i392-probe-b2-interrupt-transcript.ts",
     "designs:tui-preview": "bun run scripts/tui-designs-preview.tsx",
     "probe:settings-model": "tsx scripts/i135-settings-model-extension-smoke.ts",
+    "probe:settings-bidir": "tsx scripts/i413-bidirectional-settings-smoke.ts",
     "prepare": "husky"
   },
   "devDependencies": {

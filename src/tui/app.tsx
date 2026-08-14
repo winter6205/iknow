@@ -107,11 +107,13 @@ import {
 } from "./slash.js";
 import {
   ThinkingPicker,
+  committedThinkingPatch,
   effortToDisplayIndex,
   indexToEffort,
   reduceThinkingSwitchKey,
   reduceThinkingEffortKey,
   thinkingPickerRows,
+  type CommittedThinkingPatch,
   type ThinkingPickerState,
 } from "./thinking-picker.js";
 import { computeThinkingOverride, formatEffortLabel } from "./thinking-gate.js";
@@ -308,6 +310,18 @@ export interface TuiAppProps {
    * 缺省 0 → 首次 mount 无副作用（基线由 props 初值决定，行为零变化）。
    */
   readonly envVersion?: number;
+  /**
+   * 反向持久化（T4，settings 双向通道）：/thinking /effort 面板 Esc 保存退出
+   * 时把面板 commit 结果投影成可持久化 payload 交给宿主写回 settings.json
+   * （fire-and-forget，不阻塞面板 state 更新）。返回 `{ ok: false; reason }`
+   * 或抛错 → app 以 notice 呈现失败，in-memory override 已生效（本次会话）。
+   * 成功不发 notice（写回是后台行为，面板 Esc 本身即反馈）。
+   * 可选：缺省 undefined → 面板行为与 PR #413 完全一致（纯 in-memory override，
+   * 测试 / fixture 兼容）。
+   */
+  readonly onPersistThinking?: (
+    patch: CommittedThinkingPatch
+  ) => Promise<{ ok: true } | { ok: false; reason: string }>;
 }
 
 interface Notice {
@@ -1290,6 +1304,40 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
   }
 
+  // ── 反向持久化（T4，settings 双向通道） ────────────────────────────────
+  /**
+   * 把面板 commit 的 payload 交给 props.onPersistThinking 写回 settings.json。
+   * fire-and-forget（不 await、不阻塞面板 state 更新 —— Esc 保存退出已生效）；
+   * 失败（reject 或返回 { ok:false }）→ notice 呈现，in-memory override 保留
+   * （本次会话仍有效）。成功静默（面板 Esc 本身即反馈，写回是后台行为）。
+   * payload null（committedThinkingPatch 防御分支，当前 union 无此路径）→ no-op。
+   */
+  function persistThinkingFromCommit(
+    patch: CommittedThinkingPatch | null
+  ): void {
+    if (patch === null || props.onPersistThinking === undefined) return;
+    void props.onPersistThinking(patch).then(
+      (res) => {
+        if (!res.ok) {
+          setNotice({
+            lines: [
+              `思考设置已生效（本次会话），但写回 settings.json 失败：${res.reason}`,
+            ],
+          });
+        }
+      },
+      (err) => {
+        setNotice({
+          lines: [
+            `思考设置已生效（本次会话），但写回 settings.json 失败：${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          ],
+        });
+      }
+    );
+  }
+
   // ── 全局键位（Ctrl+C / Shift+Tab / Ctrl+O / modal） ────
   useKeyboard((e) => {
     if (e.eventType !== "press") return;
@@ -1354,6 +1402,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           // Esc：把面板内已固定值写真实 thinkingEnabled，然后关闭。
           setThinkingEnabled(switchPreview);
           setThinkingPickerOpen(null);
+          // 反向持久化（T4）：fire-and-forget —— 不阻塞面板 state 更新，
+          // 失败以 notice 呈现（in-memory override 已生效，本次会话仍有效）。
+          void persistThinkingFromCommit(
+            committedThinkingPatch({
+              kind: "thinking",
+              enabled: switchPreview,
+            })
+          );
           break;
         case "ignore":
           break;
@@ -1385,6 +1441,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           );
           setThinkingEnabled(true); // 隐式开思考（选档即开，spec §0 语义）
           setThinkingPickerOpen(null);
+          // 反向持久化（T4）：fire-and-forget —— 不阻塞面板 state 更新，
+          // 失败以 notice 呈现（in-memory override 已生效，本次会话仍有效）。
+          void persistThinkingFromCommit(
+            committedThinkingPatch({
+              kind: "effort",
+              focusedIndex: effortFocusIndex,
+              currentIndex: effortFixedIndex,
+              autoOn: effortAutoOn,
+            })
+          );
           break;
         }
         case "ignore":

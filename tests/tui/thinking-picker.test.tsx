@@ -42,6 +42,7 @@ import {
   PICKER_WIDTH,
   THINKING_LEVELS,
   ThinkingPicker,
+  committedThinkingPatch,
   effortToDisplayIndex,
   effortToIndex,
   indexToEffort,
@@ -116,6 +117,61 @@ describe("effortToIndex / indexToEffort（SSOT 映射）", () => {
   test("THINKING_LEVELS 复用 slash.ts ADJUSTABLE_EFFORT_LEVELS（同引用，顺序一致）", () => {
     expect(THINKING_LEVELS).toBe(ADJUSTABLE_EFFORT_LEVELS);
     expect(THINKING_LEVELS).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
+});
+
+// -- committedThinkingPatch（T3，settings 双向持久化 payload 投影） -----------
+
+describe("committedThinkingPatch（commit payload 投影）", () => {
+  test("thinking 面板 enabled=true → { thinking: 'adaptive' } 且无 effort 键", () => {
+    const patch = committedThinkingPatch({ kind: "thinking", enabled: true });
+    expect(patch).not.toBeNull();
+    expect(patch!.thinking).toBe("adaptive");
+    expect("thinkingEffort" in patch!).toBe(false); // 开关面板不碰档位（记忆保留）
+  });
+
+  test("thinking 面板 enabled=false → { thinking: 'off' }", () => {
+    expect(
+      committedThinkingPatch({ kind: "thinking", enabled: false })
+    ).toEqual({
+      thinking: "off",
+    });
+  });
+
+  test("effort 面板 autoOn=true → { thinking: 'adaptive', thinkingEffort: null }", () => {
+    expect(
+      committedThinkingPatch({
+        kind: "effort",
+        focusedIndex: 2,
+        currentIndex: 2,
+        autoOn: true,
+      })
+    ).toEqual({ thinking: "adaptive", thinkingEffort: null });
+  });
+
+  test("effort 面板 concrete 档 → 按 currentIndex（已固定档）映射五档", () => {
+    // 五档全跑：currentIndex 才是 Enter 固定后的 committed 档（Esc 保存退出
+    // 写它），focusedIndex 只是移动中预览不参与投影。
+    const levels = ["low", "medium", "high", "xhigh", "max"] as const;
+    for (let i = 0; i < levels.length; i++) {
+      expect(
+        committedThinkingPatch({
+          kind: "effort",
+          focusedIndex: 2, // 与 committed 分离：焦点不代表已提交档
+          currentIndex: i,
+          autoOn: false,
+        })
+      ).toEqual({ thinking: "adaptive", thinkingEffort: levels[i] });
+    }
+  });
+
+  test("当前判别联合下 null 分支不可达（防御）", () => {
+    // ThinkingPickerState 只有 kind:"thinking" | "effort" 两变体，default 分支
+    // 只在未来新增变体时触发——用类型断言把未知 kind 喂进去验证兜底语义。
+    const unreachable = {
+      kind: "future-kind",
+    } as unknown as ThinkingPickerState;
+    expect(committedThinkingPatch(unreachable)).toBeNull();
   });
 });
 

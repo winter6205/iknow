@@ -85,6 +85,57 @@ export function indexToEffort(index: number): ThinkingEffortWire {
     : "";
 }
 
+// ── commit payload 投影（T3，settings 双向持久化） ─────────────────────────
+
+/** committedThinkingPatch 返回的持久化 payload（feed settings.ts）：
+ *  - thinking：llm.thinking 值域（"off" | "adaptive"）；
+ *  - thinkingEffort：五档 concrete（IknowSettingsThinkingEffort 值域，**不含
+ *    ""**——auto 语义以「删除键」表达，settings 中空串无意义）；null → 调用方
+ *    删除该键（persist-settings mergeThinkingPatch 语义）。 */
+export interface CommittedThinkingPatch {
+  readonly thinking: "off" | "adaptive";
+  readonly thinkingEffort?: Exclude<ThinkingEffortWire, ""> | null;
+}
+
+/**
+ * 把面板 Esc 保存退出的当前 panel state 投影成**可持久化 payload**（纯函数，
+ * 无 React 依赖，可独立单测）。写回 settings.json 时只持久化用户实际改的那个
+ * 面板的字段（最小改动，plan settings-bidirectional-persist 决策 #5）：
+ *  - kind:"thinking" → 只写开关：enabled → {thinking:"adaptive"}；disabled →
+ *    {thinking:"off"}。**不带 thinkingEffort 键**——开关面板不碰档位，effort 档
+ *    位记忆保留（/thinking 切 off 不抹掉已选档，重新开启仍用原档）。
+ *  - kind:"effort" → 档位面板必开思考：{thinking:"adaptive"}；autoOn（自适应）→
+ *    thinkingEffort:null（auto 在 settings 中无意义，删除键 = 缺省自适应，与
+ *    env.ts defaultEffort="" 语义一致）；concrete → 复用 indexToEffort 映射当前
+ *    已固定档（effortFixedIndex，Enter 固定后的 committed 档）。
+ *  - null = 无持久化需要（防御分支，当前 union 无此路径）——仅未来新增
+ *    ThinkingPickerState 变体时兜底，调用方需显式处理。
+ */
+export function committedThinkingPatch(
+  state: ThinkingPickerState
+): CommittedThinkingPatch | null {
+  switch (state.kind) {
+    case "thinking":
+      return { thinking: state.enabled ? "adaptive" : "off" };
+    case "effort":
+      return {
+        thinking: "adaptive",
+        // currentIndex ∈ [0,4]（app.tsx clamp 保证）→ indexToEffort 必回五档，
+        // 收窄掉 ""（settings 无意义；auto 已由 null 分支表达）。
+        thinkingEffort: state.autoOn
+          ? null
+          : (indexToEffort(state.currentIndex) as Exclude<
+              ThinkingEffortWire,
+              ""
+            >),
+      };
+    default:
+      // 判别联合收窄后不可达：仅未来新增 kind 变体时兜底，防御性返回 null
+      // （不持久化任何改动），避免把未知面板误写成 thinking 键。
+      return null;
+  }
+}
+
 // ── 开关面板键路由（/thinking） ────────────────────────────────────────
 
 /** reduceThinkingSwitchKey 决策结果。 */

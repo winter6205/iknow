@@ -2,6 +2,14 @@
 
 ## 0.1.0 (unreleased)
 
+### 双向持久化（settings.json 反向通道）
+
+- **settings.json 反向通道（2026-08-13）**: 运行时 `/thinking` / `/effort` 面板 **Esc 保存退出**把改动写回 `settings.json`（project 级文件存在写 project，否则写 user 级，合并 llm 子树保留 apiKey/model/secrets 全部原字段）；写回用 sha256 self-write 哨兵跳过自身 reload 防回环（PR #413 单向通道不变，外部改动照常热更新）；失败 TUI notice 提示、in-memory override 保留、不 crash；面板内 Enter 固定 / Space-Tab 预览不落盘。四个 commit：
+  - `feat(config): settings.json 反向持久化 — persist-settings 纯函数模块 (T1)`
+  - `feat(config): EnvLoader self-write 哨兵 — 写回不回环 (T2)`
+  - `feat(tui/thinking-picker): commit payload 上提 — 可持久化投影 (T3)`
+  - `feat(tui): /thinking /effort Esc 写回 settings.json — app/run 接线 (T4)`
+
 ### Changed
 
 - **统一 Secret 处理层 — Roundtrip Mask（#406，2026-08-13）**: 替代 #126 hook-system（PR #405，已关闭 superseded）。识别层把用户文本里的密钥形态替换为 `<<<SECRET_N>>>` 占位符（per-engine registry，in-memory），bash 还原层在 spawn 前回填真值，output mask 经 `currentSecretValues(registry.values())` 兜底遮蔽 registry 值——**key 真值仅在 bash 进程构造 HTTP 请求那一瞬间物理存在**。`settings.secrets.mode` 控制：`roundtrip` 默认（识别+占位符+还原+兜底）、`block` 兼容旧 deny-only guard。新增模块 `src/harness/secret-roundtrip/`（patterns SSOT / registry / recognize）；secrets-guard 仅作 `mode:"block"` 向后兼容。4 surface（chat/ask/tui/serve）× 2 mode 端到端矩阵验收：`tests/harness/secret-roundtrip/e2e.test.ts`（12 case：8 装配矩阵 + 4 全流）。详见 `specs/406-secret-roundtrip-mask.md`。

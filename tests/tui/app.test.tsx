@@ -21,7 +21,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { testRender } from "@opentui/react/test-utils";
 import type { TestRendererSetup } from "@opentui/core/testing";
-import { TuiApp, createToolEventSink } from "../../src/tui/app.js";
+import {
+  TuiApp,
+  createToolEventSink,
+  type TuiAppProps,
+} from "../../src/tui/app.js";
 import {
   createInflightRegistry,
   createTuiBridge,
@@ -76,7 +80,8 @@ interface DrivenApp {
 
 async function mountAppAsync(
   responses: Parameters<typeof makeDeps>[0],
-  depsOverride?: LoopEngineDeps
+  depsOverride?: LoopEngineDeps,
+  onPersistThinking?: TuiAppProps["onPersistThinking"]
 ): Promise<DrivenApp> {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-app-"));
   const bridge = createTuiBridge({
@@ -98,6 +103,7 @@ async function mountAppAsync(
       dataDir={dataDir}
       permissionMode={permissionMode}
       sessionGrants={sessionGrants}
+      {...(onPersistThinking ? { onPersistThinking } : {})}
       onQuit={() => {
         if (setupRef && !setupRef.renderer.isDestroyed)
           setupRef.renderer.destroy();
@@ -508,6 +514,76 @@ describe("/thinking 打开 thinking-picker（design-25 开关面板）", () => {
       "info"
     );
     expect(infoFrame).toContain("thinking: off");
+
+    await app.destroy();
+  }, 30_000);
+
+  test("onPersistThinking: /thinking Esc commit → prop 被调（payload = { thinking }）", async () => {
+    const calls: ReadonlyArray<{ thinking: "off" | "adaptive" }> = [];
+    const app = await mountAppAsync([], (patch) => {
+      calls.push(patch);
+      return Promise.resolve({ ok: true as const });
+    });
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    // /thinking → Space 切 ON → Esc 保存退出（写 thinkingEnabled + 持久化）。
+    await app.typeText("/thinking");
+    await app.pressEnter();
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("思考开关"),
+      8000,
+      "picker-open"
+    );
+    await app.pressSpace();
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("思考开关") && f.includes("ON"),
+      8000,
+      "preview-on"
+    );
+    await app.pressEscape();
+    await untilFrame(
+      app.setup,
+      (f) => !f.includes("思考开关"),
+      8000,
+      "picker-saved"
+    );
+
+    // 断言：prop 恰好被调一次，payload = 面板 commit 结果（thinking=adaptive）。
+    await until(() => calls.length === 1, 8000, "persist-called");
+    expect(calls[0]).toEqual({ thinking: "adaptive" });
+
+    await app.destroy();
+  }, 30_000);
+
+  test("onPersistThinking reject → notice「写回 settings.json 失败」（无 crash，面板已关）", async () => {
+    const app = await mountAppAsync([], () =>
+      Promise.reject(new Error("EACCES: permission denied"))
+    );
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    // /thinking → Esc 保存退出（无切换 → 写回 seed OFF → payload { thinking:"off" }）。
+    await app.typeText("/thinking");
+    await app.pressEnter();
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("思考开关"),
+      8000,
+      "picker-open"
+    );
+    await app.pressEscape();
+
+    // 失败 notice 出现（含「写回 settings.json 失败」+ 错误消息），面板已关闭。
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("写回 settings.json 失败"),
+      8000,
+      "persist-fail-notice"
+    );
+    const frame = app.setup.captureCharFrame();
+    expect(frame).toContain("EACCES: permission denied");
+    expect(frame).not.toContain("思考开关");
 
     await app.destroy();
   }, 30_000);

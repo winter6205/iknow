@@ -40,7 +40,7 @@ import {
 } from "./deps.js";
 import { createTuiAskUserBridge } from "./ask-user.js";
 import { createInflightRegistry, createTuiBridge } from "./hub-bridge.js";
-import { createToolEventSink, TuiApp } from "./app.js";
+import { createToolEventSink, TuiApp, type TuiAppProps } from "./app.js";
 import { attachSession, type TuiSessionState } from "./session-state.js";
 import { createSessionGrants } from "../harness/permission/session-grants.js";
 import { initIknowWorkspaceSafe } from "../harness/identity/index.js";
@@ -50,6 +50,10 @@ import {
 } from "../harness/permission/index.js";
 import { createEnvLoader, type EnvLoader } from "../config/env-loader.js";
 import type { IknowEnv } from "../config/env.js";
+import {
+  persistThinkingChanges,
+  resolveThinkingSettingsPath,
+} from "../config/persist-settings.js";
 import { homedir } from "node:os";
 
 /** E1/E2 类型化错误前缀（specs/321 SC 11：错误消息常量化，禁 magic string）。 */
@@ -138,6 +142,28 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     const bundle: RuntimeBundle = { env: currentEnv, session: runtime.session };
     const dataDir = resolveServeDataDir(options.dataDir);
     const cwd = process.cwd();
+    // settings 双向持久化（T4）：/thinking /effort 面板 Esc → 写回 settings.json。
+    // 目标文件按「project 存在写 project，否则 user」解析（project 本就覆盖 user，
+    // 写 user 等于无效——对齐 settings.ts merge 优先级）。写回后登记 self-write
+    // 哨兵（activeEnvLoader.markSelfWrite）→ 自身 fs.watch 不回环。失败 → 返回
+    // { ok:false, reason } 由 app 以 notice 呈现，不 crash TUI（in-memory
+    // override 保留）。persistThinkingChanges 内部原子写（tmp + rename），
+    // 写回不重建 adapter（哨兵吞 reload，当前 env / adapter 不动）。
+    const persistThinking: NonNullable<
+      TuiAppProps["onPersistThinking"]
+    > = async (patch) => {
+      try {
+        const path = resolveThinkingSettingsPath({ cwd, home: homedir() });
+        const { bytes } = await persistThinkingChanges(path, patch);
+        activeEnvLoader.markSelfWrite(path, bytes);
+        return { ok: true as const };
+      } catch (err) {
+        return {
+          ok: false as const,
+          reason: err instanceof Error ? err.message : String(err),
+        };
+      }
+    };
 
     const inflight = createInflightRegistry();
     const toolEventSink = createToolEventSink();
@@ -271,6 +297,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
           // envVersion 递增 counter：app.tsx [envVersion] useEffect 驱动显示层刷新
           // （ContextBar model / thinking 基线跟随热更新）。
           envVersion={envVersion}
+          // settings 双向持久化（T4）：面板 Esc → persistThinking 闭包写回
+          // settings.json（失败以 notice 呈现，不 crash TUI）。
+          onPersistThinking={persistThinking}
           onQuit={onQuitBridge!.destroy}
         />
       );
