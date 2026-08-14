@@ -356,4 +356,79 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
       // no-op
     }
   });
+
+  test("只改 baseUrl → 触发 adapter 重建（新 adapter 指向新 origin）", async () => {
+    // 两个 capture server：reload 切换 baseUrl 后，下一个 postMessage 命中 cap2。
+    const cap1 = await startLlmCapture(MINIMAL_SDK_MESSAGE);
+    const cap2 = await startLlmCapture(MINIMAL_SDK_MESSAGE);
+    const store0 = makeStore();
+    let currentBaseUrl = cap1.origin;
+    const envProvider = () =>
+      makeFullEnv({
+        model: "baseurl-test",
+        apiKey: "test-key",
+        baseUrl: currentBaseUrl,
+      });
+    const hub = new SessionHub({
+      store: store0,
+      askUser: createNoAskUser(),
+      envProvider,
+      deps: baseDeps(),
+    });
+    try {
+      const id = await createSessionId(hub);
+      // 首次 reload → adapter 指向 cap1。
+      await hub.reloadFromEnv();
+      await hub.postMessage({ conversationId: id, text: "first" });
+      expect(cap1.bodies.length).toBe(1);
+      expect(cap2.bodies.length).toBe(0);
+
+      // 只改 baseUrl → reloadFromEnv → adapter 重建指向 cap2。
+      currentBaseUrl = cap2.origin;
+      await hub.reloadFromEnv();
+      await hub.postMessage({ conversationId: id, text: "second" });
+      expect(cap1.bodies.length).toBe(1); // cap1 不再被命中
+      expect(cap2.bodies.length).toBe(1); // 新 adapter 命中 cap2
+      expect((cap2.bodies[0] as { model?: string }).model).toBe("baseurl-test");
+    } finally {
+      await cap1.close();
+      await cap2.close();
+    }
+  });
+
+  test("只改 temperature → 触发 adapter 重建（wire temperature 字段变化）", async () => {
+    const cap = await startLlmCapture(MINIMAL_SDK_MESSAGE);
+    const store0 = makeStore();
+    let currentTemperature = 0;
+    const envProvider = () =>
+      makeFullEnv({
+        model: "temp-test",
+        apiKey: "test-key",
+        baseUrl: cap.origin,
+        temperature: currentTemperature,
+      });
+    const hub = new SessionHub({
+      store: store0,
+      askUser: createNoAskUser(),
+      envProvider,
+      deps: baseDeps(),
+    });
+    try {
+      const id = await createSessionId(hub);
+      // 首次 reload（temperature=0）→ adapter 重建。
+      await hub.reloadFromEnv();
+      await hub.postMessage({ conversationId: id, text: "cold" });
+      expect(cap.bodies.length).toBe(1);
+      expect((cap.bodies[0] as { temperature?: number }).temperature).toBe(0);
+
+      // 只改 temperature → reloadFromEnv → adapter 重建、wire temperature 变化。
+      currentTemperature = 0.7;
+      await hub.reloadFromEnv();
+      await hub.postMessage({ conversationId: id, text: "warm" });
+      expect(cap.bodies.length).toBe(2);
+      expect((cap.bodies[1] as { temperature?: number }).temperature).toBe(0.7);
+    } finally {
+      await cap.close();
+    }
+  });
 });

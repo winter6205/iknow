@@ -96,7 +96,7 @@ IKNOW_LLM_STREAM=on            # 流式臂开关 on|off，默认 on
 }
 ```
 
-> **关于「热更新」**：settings.json 是**热更新生效**的 —— `src/config/settings-watch.ts`（`fs.watch` + `fs.watchFile`，100ms debounce）监听 `~/.iknow/settings.json` 与 `<cwd>/.iknow/settings.json`，改动后下一轮 postMessage 即以新 env 调 LLM（adapter / thinking / model / apiKey / fallback 全部生效）。reload 失败（坏 JSON / model 缺失 / apiKey 解析失败）→ **保留旧 env**（不崩进程，默认写 stderr `[settings-hot-reload] reload failed: ...`）。TUI chat 路径已接入：ContextBar 的 model 名与 thinking 基线实时刷新。`.env.local` / `.env` 同链路热重读（`loadIknowEnv` 每次 reload 重读）。运行时 `/thinking` / `/effort` 面板的改动是**进程内 override**（in-memory，不写回 settings.json，也不重读），重启后回到 settings.json（或默认）值。
+> **关于「热更新」**：settings.json 是**热更新生效**的 —— `src/config/settings-watch.ts`（`fs.watch` + `fs.watchFile`，100ms debounce）监听 `~/.iknow/settings.json` 与 `<cwd>/.iknow/settings.json`，改动后下一轮 postMessage 即以新 env 调 LLM。**热更新生效字段仅限白名单 9 项**——`model` / `apiKey` / `thinking` / `thinkingEffort` / `fallback` / `baseUrl` / `maxOutputTokens` / `temperature` / `stream`（即 `createAdapterFromEnv` 的全部入参面，详 `src/harness/build-engine.ts:124-142`）；不在白名单的字段，如 `llm.compress.contextWindow` / `llm.compress.thresholdTokens`（loop-engine `compress` 配置，hub 热重建不重跑）、`llm.maxTurns`（loop-engine `maxTurns`，同款原因）、`chat.showThinking` / `web.searchUrl` / `web.proxy` / `mcp.connectTimeoutMs`（装配期/`IknowEnv` 其它臂，非 adapter 入参）等，**改完需重启进程**才生效。reload 失败（坏 JSON / model 缺失 / apiKey 解析失败）→ **保留旧 env**（不崩进程，默认写 stderr `[settings-hot-reload] reload failed: ...`）。TUI chat 路径已接入：ContextBar 的 model 名与 thinking 基线实时刷新。`.env.local` / `.env` 同链路热重读（`loadIknowEnv` 每次 reload 重读）。运行时 `/thinking` / `/effort` 面板的改动是**进程内 override**（in-memory，不写回 settings.json，也不重读），重启后回到 settings.json（或默认）值。
 
 ---
 

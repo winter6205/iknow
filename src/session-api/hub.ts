@@ -87,15 +87,17 @@ function safeParse(s: string): unknown {
  *
  * EnvLoader.get() 每次 reload 都返回**新对象**（loadIknowEnv 每次全新构造），
  * 对象身份比较不可用。判定「settings 文件 touch 但内容没变」必须以字段值比较：
- * model / apiKey / fallback / thinking / thinkingEffort 是 adapter 重建的全部
- * 输入面（createAdapterFromEnv 消费 llm 的 model/apiKey/baseUrl + buildThinkingParams
- * 消费 thinking/thinkingEffort；maxOutputTokens/temperature/stream 也是 adapter
- * 参数但本期计划只圈定上述五个为热更新面 —— 保守取 plan 明确字段）。
- * fallback 为数组，逐元素比较（顺序敏感，与 adapter 无关但反映配置变更）。
+ * 全部 createAdapterFromEnv 入参：model / apiKey / baseUrl / maxOutputTokens /
+ * temperature / stream + thinking 控制器 thinking / thinkingEffort。fallback
+ * 与 adapter 无关但反映配置变更，也纳入比较（数组逐元素、顺序敏感）。
  */
 function sameHotReloadKeyFields(a: LlmEnv, b: LlmEnv): boolean {
   if (a.model !== b.model) return false;
   if (a.apiKey !== b.apiKey) return false;
+  if (a.baseUrl !== b.baseUrl) return false;
+  if (a.maxOutputTokens !== b.maxOutputTokens) return false;
+  if (a.temperature !== b.temperature) return false;
+  if (a.stream !== b.stream) return false;
   if (a.thinking !== b.thinking) return false;
   if (a.thinkingEffort !== b.thinkingEffort) return false;
   if (a.fallback.length !== b.fallback.length) return false;
