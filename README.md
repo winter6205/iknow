@@ -1,15 +1,16 @@
 # iknow
 
 Standalone **agent harness** for a tool-calling LLM CLI — loop engine +
-Anthropic adapter + an 11-tool ACI tool set (`bash` / `read_file` / `grep` /
-`glob` / `edit_file` / `write_file` / `web_fetch` / `web_search` /
-`memory_recall` / `memory_save` / `tool_search`; SSOT: `src/harness/aci/tools/registry.ts`), wired into a
-TTY `chat` REPL, a script-friendly one-shot `ask`, and an HTTP `serve` host
-that serves a Vite React SPA.
+Anthropic adapter + an ACI tool set (SSOT: `src/harness/aci/tools/registry.ts`;
+core 8 + `memory_recall` / `memory_save` / `tool_search` + 10 LSP entries +
+`skill` / `skill_search` + `spawn_subagent` / `subagent_result`, several of
+which are conditional on user configuration), wired into a TTY `chat` REPL, a
+script-friendly one-shot `ask`, and an HTTP `serve` host that serves a Vite
+React SPA.
 
-- **Agent execution surface**: harness foundation (`src/harness/`) with ACI decor layer (`src/harness/aci/`, PR #95).
-- **Invariants**: harness-driven tool use with permission middleware (ADR-0004 / ADR-0006); streaming arm on by default (`IKNOW_LLM_STREAM=on`, `src/config/env.ts`); key configured via `settings.llm.apiKey` literal/placeholder (ADR-0015); project stack defaults baked into `env.ts` (ADR-0001, settings.json 单承载后).
-- **Runtime boundary**: iknow does not load the external gbrain package or the read-only `_upstream_gbrain/` checkout at runtime — no package link, path import, symlink, dynamic loading, or execution
+- **Agent execution surface**: harness foundation (`src/harness/`) with ACI decor layer (`src/harness/aci/`).
+- **Invariants**: harness-driven tool use with permission middleware; streaming arm on by default (`IKNOW_LLM_STREAM=on`, `src/config/env.ts`); LLM key configured via `settings.llm.apiKey` literal or `${VAR}` placeholder (ADR-0015); project stack defaults baked into `env.ts` (ADR-0001, settings.json single source of truth 后).
+- **Runtime boundary**: iknow ships only its own source under `src/`; no upstream reference directory is linked, imported, symlinked, dynamically loaded, or executed at runtime.
 
 Design truth: `src/harness/` + module specs under `specs/`
 (live index: [`specs/README.md`](specs/README.md) — 只列当前活跃 spec，新增/归档只改那里一处).
@@ -27,27 +28,15 @@ npm run typecheck
 npm test
 ```
 
-### TUI on WSL / Linux
+### TUI (OpenTUI)
 
-The TUI (OpenTUI) ships its native rendering core as npm **optionalDependencies**
-(`@opentui/core-linux-x64` / `-musl`, `-darwin-*`, `-win32-*`, …). A plain
-`npm install` skips them, so on a fresh checkout the TUI fails to start with
-`OpenTUI native FFI is not available`. Install optional deps explicitly:
-
-```bash
-npm install --include=optional
-```
-
-Before launching the TUI, run the binding self-check (also covers a broken /
-partial optional-deps install):
+`@opentui/core` 与 `@opentui/react` 是常规 `dependencies`,`npm install` / `npm ci` 默认装上
+当前平台的 native core (`@opentui/core-linux-x64` / `-musl`, `-darwin-*`,
+`-win32-*`)。启动前可跑一遍 binding 自检(同时覆盖装一半 / 损坏场景):
 
 ```bash
 npm run probe:tui-binding   # 6/6 passed → exit 0; any FAIL → exit 1
 ```
-
-`npm ci` (clean install) 自动安装 `optionalDependencies`,无需 `--include=optional` flag;
-缺失时 TUI 启动即崩 — 探针可前置兜底。`npm install` 第一次拉依赖则**必须**带
-`--include=optional`(npm 默认行为是跳过 optionalDependencies)。
 
 ## Run
 
@@ -95,7 +84,7 @@ printf '公司的退款政策是什么？\n/quit\n' | IKNOW_CHAT_QUIET=1 npx tsx
 | `/help`                     | list commands                                       |
 | `/quit` or `/exit` / Ctrl+D | leave                                               |
 
-Human view shows the streamed answer text (markdown rendered by the SPA).
+Human view writes the streamed answer text directly to stdout; markdown rendering belongs to the `serve` SPA.
 
 ### One-shot (JSON — scripts / CI)
 
@@ -112,11 +101,11 @@ One-shot always prints JSON on stdout so scripts do not break.
 
 The agent runs on a tool-calling LLM (harness anthropic-adapter). LLM configuration is **single-sourced** in `~/.iknow/settings.json` (user) merged with `<cwd>/.iknow/settings.json` (project over user) — see `docs/adr/0015-llm-config-settings-single-source.md` (settings-model-extension, ADR-0015):
 
-| Settings field            | Role                                                                                  |
-| ------------------------- | ------------------------------------------------------------------------------------- |
-| `llm.model`               | 9router route id (字面值，唯一来源；缺失 fail-fast 抛「no LLM model configured…」)    |
-| `llm.apiKey`              | 字面密钥 / `${VAR}` 占位符（指向环境变量名，loader 从 process.env / .env.local 解析） |
-| `llm.fallback?: string[]` | 用户自配的 fallback 路由 ID 列表（代码不预置）                                        |
+| Settings field            | Role                                                                               |
+| ------------------------- | ---------------------------------------------------------------------------------- |
+| `llm.model`               | 9router route id (字面值，唯一来源；缺失 fail-fast 抛「no LLM model configured…」) |
+| `llm.apiKey`              | 字面密钥 / `${VAR}` 占位符（loader 从 `process.env` / `.env.local` / `.env` 解析） |
+| `llm.fallback?: string[]` | 用户自配的 fallback 路由 ID 列表（代码不预置）                                     |
 
 Provider/baseUrl 仍由 env.ts 代码默认（`http://localhost:20128/v1`，9router），可用 `IKNOW_LLM_BASE_URL` 覆盖。
 
@@ -124,16 +113,17 @@ If `settings.llm.apiKey` is missing/unresolvable, the runtime exits with `llm_mo
 
 ## Layout
 
-| Path                | Role                                                                                                                 |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `src/harness/`      | Agent runtime foundation (loop-engine, anthropic-adapter, executor, registry) + ACI decor layer (`src/harness/aci/`) |
-| `_upstream_gbrain/` | **Read-only reference clone** (gitignored; never import)                                                             |
-
-## Upstream reference
-
-`_upstream_gbrain/` may exist as a read-only source and algorithm baseline.  
-It is **gitignored** and **must not** be imported or executed at runtime. iknow is an independently packaged and maintained adaptation of gbrain's agent-harness architecture; reviewed adaptations live in iknow-owned `src/` code rather than being loaded from this checkout.
+| Path               | Role                                                                                                                 |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| `src/harness/`     | Agent runtime foundation (loop-engine, anthropic-adapter, executor, registry) + ACI decor layer (`src/harness/aci/`) |
+| `src/cli/`         | Product CLI entrypoints (`chat` / `ask` / `serve` / `tui`)                                                           |
+| `src/tui/`         | OpenTUI TUI surface (slash routing, components, layouts)                                                             |
+| `src/config/`      | `env.ts` settings loader (ADR-0015 single source)                                                                    |
+| `src/session-api/` | Static SPA host (`prefer web/dist`, falls back to `web/`) + session pool                                             |
+| `web/`             | Vite React SPA (built into `web/dist`, served by `src/session-api/`)                                                 |
+| `specs/`           | Foundation per-module specs (live index: `specs/README.md`)                                                          |
+| `docs/`            | Architecture, ADR catalog, status, handoff notes                                                                     |
 
 ## License
 
-MIT (product code). Upstream gbrain reference remains under its own MIT license when present on disk.
+MIT (product code).
