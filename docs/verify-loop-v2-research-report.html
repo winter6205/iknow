@@ -1,0 +1,1412 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>verify-loop v2 — 学术研究报告</title>
+    <style>
+      :root {
+        --ink: #1f2430;
+        --ink-soft: #4a5261;
+        --ink-faint: #8a91a0;
+        --paper: #f7f5f1;
+        --card: #ffffff;
+        --line: #e3dfd6;
+        --teal: #0d7377;
+        --teal-deep: #0a5c60;
+        --amber: #b7791f;
+        --amber-soft: #f5ead2;
+        --teal-soft: #e3f0ee;
+        --red: #9b2c2c;
+        --red-soft: #f6e3e3;
+        --code-bg: #f0ede7;
+        --serif:
+          "Georgia", "Times New Roman", "Noto Serif SC", "Songti SC", "SimSun",
+          serif;
+        --sans:
+          -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei",
+          "Helvetica Neue", Arial, sans-serif;
+        --mono:
+          "SFMono-Regular", "JetBrains Mono", Consolas, "Liberation Mono",
+          monospace;
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        font-family: var(--serif);
+        color: var(--ink);
+        background: var(--paper);
+        line-height: 1.75;
+        font-size: 16px;
+      }
+      .cover {
+        background: linear-gradient(160deg, #16283a 0%, #0d7377 120%);
+        color: #f4f1e8;
+        padding: 96px 48px 72px;
+        position: relative;
+        overflow: hidden;
+      }
+      .cover::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(
+            600px 300px at 85% 15%,
+            rgba(255, 255, 255, 0.06),
+            transparent 60%
+          ),
+          radial-gradient(
+            400px 240px at 10% 85%,
+            rgba(255, 255, 255, 0.05),
+            transparent 60%
+          );
+        pointer-events: none;
+      }
+      .cover-inner {
+        max-width: 980px;
+        margin: 0 auto;
+        position: relative;
+        z-index: 1;
+      }
+      .cover-kicker {
+        font-family: var(--sans);
+        font-size: 12px;
+        letter-spacing: 0.28em;
+        text-transform: uppercase;
+        color: #9fd3cf;
+        margin-bottom: 28px;
+      }
+      .cover-title {
+        font-size: 46px;
+        line-height: 1.25;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        margin-bottom: 18px;
+      }
+      .cover-sub {
+        font-size: 19px;
+        color: #cfe0dc;
+        max-width: 720px;
+        line-height: 1.6;
+        margin-bottom: 40px;
+      }
+      .cover-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        font-family: var(--sans);
+      }
+      .meta-chip {
+        background: rgba(255, 255, 255, 0.1);
+        border: 1px solid rgba(255, 255, 255, 0.22);
+        padding: 6px 14px;
+        border-radius: 999px;
+        font-size: 12.5px;
+        color: #e6eeec;
+      }
+      .meta-chip b {
+        color: #ffffff;
+        font-weight: 600;
+      }
+      .wrap {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 0 40px;
+      }
+      section {
+        padding: 64px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .sec-head {
+        display: flex;
+        align-items: baseline;
+        gap: 16px;
+        margin-bottom: 30px;
+      }
+      .sec-num {
+        font-family: var(--sans);
+        font-weight: 700;
+        font-size: 14px;
+        color: var(--teal);
+        letter-spacing: 0.12em;
+        white-space: nowrap;
+      }
+      .sec-title {
+        font-size: 28px;
+        font-weight: 700;
+        letter-spacing: 0.01em;
+      }
+      .sec-rule {
+        flex: 1;
+        height: 1px;
+        background: var(--line);
+        align-self: center;
+      }
+      p.lead {
+        font-size: 17px;
+        color: var(--ink-soft);
+        margin-bottom: 18px;
+      }
+      p.body {
+        margin-bottom: 14px;
+        color: var(--ink);
+      }
+      .muted {
+        color: var(--ink-faint);
+      }
+      .small {
+        font-size: 13.5px;
+      }
+      .mono {
+        font-family: var(--mono);
+        font-size: 0.9em;
+        background: var(--code-bg);
+        padding: 1px 6px;
+        border-radius: 4px;
+      }
+      code.file {
+        font-family: var(--mono);
+        font-size: 0.85em;
+        color: var(--teal-deep);
+      }
+      b.hl {
+        color: var(--teal-deep);
+      }
+      .abstract {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-left: 4px solid var(--teal);
+        border-radius: 8px;
+        padding: 28px 32px;
+        margin-bottom: 26px;
+      }
+      .abstract h3 {
+        font-family: var(--sans);
+        font-size: 12px;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: var(--teal);
+        margin-bottom: 12px;
+      }
+      .abstract p {
+        font-size: 16px;
+        color: var(--ink-soft);
+      }
+      .keylist {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        margin: 20px 0 8px;
+      }
+      .keyitem {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 14px 18px;
+        font-size: 14.5px;
+        color: var(--ink-soft);
+      }
+      .keyitem b {
+        color: var(--ink);
+      }
+      .paper-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+      }
+      .paper {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 24px 26px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        transition: box-shadow 0.15s ease;
+      }
+      .paper:hover {
+        box-shadow: 0 6px 22px rgba(31, 36, 48, 0.08);
+      }
+      .paper-tags {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .tag {
+        font-family: var(--sans);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        padding: 3px 10px;
+        border-radius: 999px;
+      }
+      .tag-arxiv {
+        background: var(--teal-soft);
+        color: var(--teal-deep);
+      }
+      .tag-role {
+        background: var(--amber-soft);
+        color: var(--amber);
+      }
+      .tag-src {
+        background: var(--code-bg);
+        color: var(--ink-soft);
+      }
+      .paper-title {
+        font-size: 17.5px;
+        font-weight: 700;
+        line-height: 1.45;
+      }
+      .paper-meta {
+        font-family: var(--sans);
+        font-size: 13px;
+        color: var(--ink-faint);
+      }
+      .paper-claim {
+        font-size: 14.5px;
+        color: var(--ink);
+      }
+      .paper-claim b {
+        color: var(--teal-deep);
+      }
+      .paper-to-v2 {
+        font-size: 13.5px;
+        color: var(--ink-soft);
+        border-left: 3px solid var(--amber);
+        padding-left: 12px;
+      }
+      .paper-to-v2 .lbl {
+        font-family: var(--sans);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--amber);
+        display: block;
+        margin-bottom: 2px;
+      }
+      .paper-wide {
+        grid-column: 1 / -1;
+      }
+      .tbl-wrap {
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--card);
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 14px;
+      }
+      thead th {
+        font-family: var(--sans);
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--teal-deep);
+        background: var(--teal-soft);
+        text-align: left;
+        padding: 12px 16px;
+        white-space: nowrap;
+      }
+      tbody td {
+        padding: 12px 16px;
+        border-top: 1px solid var(--line);
+        vertical-align: top;
+        color: var(--ink-soft);
+      }
+      tbody td:first-child {
+        font-weight: 700;
+        color: var(--ink);
+      }
+      tbody tr:nth-child(even) {
+        background: #fbfaf7;
+      }
+      td code,
+      td .mono {
+        white-space: nowrap;
+      }
+      .decision {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 26px 28px;
+        margin-bottom: 18px;
+      }
+      .decision-head {
+        display: flex;
+        align-items: baseline;
+        gap: 14px;
+        margin-bottom: 12px;
+        flex-wrap: wrap;
+      }
+      .d-badge {
+        font-family: var(--sans);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        background: var(--teal);
+        color: #fff;
+        padding: 3px 10px;
+        border-radius: 6px;
+      }
+      .decision-title {
+        font-size: 19px;
+        font-weight: 700;
+      }
+      .d-papers {
+        font-family: var(--sans);
+        font-size: 12.5px;
+        color: var(--ink-faint);
+      }
+      .decision p {
+        font-size: 14.5px;
+        color: var(--ink-soft);
+        margin-bottom: 8px;
+      }
+      .decision p b {
+        color: var(--ink);
+      }
+      .decision .why {
+        border-left: 3px solid var(--teal);
+        padding-left: 14px;
+        margin-top: 4px;
+      }
+      .decision .anchor {
+        font-size: 13px;
+        color: var(--ink-faint);
+        font-family: var(--mono);
+      }
+      .limitations {
+        list-style: none;
+      }
+      .limitations li {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-left: 4px solid var(--red);
+        border-radius: 8px;
+        padding: 18px 22px;
+        margin-bottom: 12px;
+        font-size: 14.5px;
+        color: var(--ink-soft);
+      }
+      .limitations li b {
+        color: var(--ink);
+      }
+      .limitations .lbl {
+        font-family: var(--sans);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--red);
+        display: block;
+        margin-bottom: 4px;
+      }
+      .limitations .note {
+        margin-top: 6px;
+        font-size: 13px;
+        color: var(--ink-faint);
+      }
+      .refs {
+        list-style: none;
+        counter-reset: ref;
+      }
+      .refs li {
+        counter-increment: ref;
+        position: relative;
+        padding: 10px 0 10px 52px;
+        border-bottom: 1px dashed var(--line);
+        font-size: 14px;
+        color: var(--ink-soft);
+      }
+      .refs li::before {
+        content: "[" counter(ref) "]";
+        position: absolute;
+        left: 0;
+        top: 10px;
+        font-family: var(--sans);
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--teal);
+      }
+      .refs a {
+        color: var(--teal-deep);
+        text-decoration: none;
+        font-family: var(--mono);
+        font-size: 0.92em;
+      }
+      .refs a:hover {
+        text-decoration: underline;
+      }
+      .refs .t {
+        font-weight: 700;
+        color: var(--ink);
+      }
+      .refs .note-src {
+        font-size: 12.5px;
+        color: var(--ink-faint);
+      }
+      .note-box {
+        background: var(--amber-soft);
+        border: 1px solid #e6d3a8;
+        border-radius: 8px;
+        padding: 16px 20px;
+        font-size: 13.5px;
+        color: #6b5317;
+        margin: 18px 0;
+      }
+      .note-box b {
+        color: var(--amber);
+      }
+      .footer {
+        padding: 40px 0 56px;
+        font-family: var(--sans);
+        font-size: 12px;
+        color: var(--ink-faint);
+        text-align: center;
+      }
+      @media (max-width: 820px) {
+        .paper-grid,
+        .keylist {
+          grid-template-columns: 1fr;
+        }
+        .cover-title {
+          font-size: 34px;
+        }
+        .wrap {
+          padding: 0 22px;
+        }
+        section {
+          padding: 48px 0;
+        }
+      }
+      @media print {
+        .cover {
+          background: #16283a;
+          -webkit-print-color-adjust: exact;
+          print-color-adjust: exact;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="cover">
+      <div class="cover-inner">
+        <div class="cover-kicker">
+          Research Report &middot; iknow verify-loop
+        </div>
+        <h1 class="cover-title">
+          verify-loop v2 学术研究报告<br />新一代验证闭环的设计依据、学术映射与诚实局限
+        </h1>
+        <p class="cover-sub">
+          verify-loop v2（PROTOTYPE）基于 24 篇权威论文交叉验证，对
+          v1（#128）做五项学术升级： multi-candidate best-of-N、multi-judge
+          pool、多维 effort budget、confidence-based stop 与 execution-first
+          分层。
+          本报告整理这些升级背后的论文依据、学术结论到实现的映射，以及原型阶段诚实披露的简化。
+        </p>
+        <div class="cover-meta">
+          <span class="meta-chip">模块 <b>src/harness/verify/*</b></span>
+          <span class="meta-chip">形态 <b>PROTOTYPE · 未替换 v1 装配</b></span>
+          <span class="meta-chip">对比基线 <b>v1 #128 verify-loop.ts</b></span>
+          <span class="meta-chip">日期 <b>2026-08-15</b></span>
+        </div>
+      </div>
+    </header>
+
+    <div class="wrap">
+      <section id="abstract">
+        <div class="sec-head">
+          <span class="sec-num">摘要</span>
+          <h2 class="sec-title">摘要</h2>
+          <span class="sec-rule"></span>
+        </div>
+
+        <div class="abstract">
+          <h3>Abstract</h3>
+          <p>
+            Agentic loop
+            的验证闭环（verify-loop）决定「模型产出是否被判定为完成」。v1 采用
+            单候选串行修正、纯 maxRounds 预算、单判官 LLM 判定——三个维度均与
+            2023–2024 年的 测试时计算（test-time compute）与 LLM-as-a-Judge
+            研究结论相悖。verify-loop v2 以论文交叉验证驱动设计：对同一 command
+            做 K 次验证采样并做 self-consistency 聚合 （best-of-N），用多判官
+            majority 替代单判官盲信，以 rounds/tokens/costUsd/wallMs
+            四元组预算替代纯 maxRounds，并让真实执行（exit + signature）先于 LLM
+            判定（execution-first）。 本原型保持 v1 的 advisor
+            包裹形态与引擎零改动约束，验证新一代状态机；若通过可 lift 进生产。
+          </p>
+        </div>
+
+        <div class="keylist">
+          <div class="keyitem">
+            <b>1 · 一致性</b>　self-consistency majority voting（Wang et al.
+            2023）
+          </div>
+          <div class="keyitem">
+            <b>2 · 预算感知</b>　optimal frontier → budget-aware 决策（Snell et
+            al. 2024）
+          </div>
+          <div class="keyitem">
+            <b>3 · 采样饱和</b>　固定 N 无 cap 是反模式（Brown et al. 2024）
+          </div>
+          <div class="keyitem">
+            <b>4 · 自修正陷阱</b>　无外部 verifier 的 self-correction
+            会失败（Huang et al. 2023）
+          </div>
+          <div class="keyitem">
+            <b>5 · 判官瓶颈</b>　judge 准确率 ~75% → multi-judge pool（Tan et
+            al. 2024）
+          </div>
+          <div class="keyitem">
+            <b>6 · 多样性</b>　judge 去相关，多样性 &gt; 单判官（Nine Judges,
+            Two Effective Votes）
+          </div>
+          <div class="keyitem">
+            <b>7 · 采样聚合</b>　best-of-N multi-candidate + consensus
+            aggregation
+          </div>
+          <div class="keyitem">
+            <b>8 · 偏倚缓解</b>　position-bias shuffle（Zheng et al. 2023
+            swap-pair 工程化）
+          </div>
+        </div>
+      </section>
+
+      <section id="background">
+        <div class="sec-head">
+          <span class="sec-num">01</span>
+          <h2 class="sec-title">研究背景</h2>
+          <span class="sec-rule"></span>
+        </div>
+
+        <p class="lead">
+          验证闭环解决的问题：Agentic loop
+          中，模型每轮产出后需要一个「完成判定」。判定过松则错误代码被放行，过紧则浪费
+          compute 反复修正。
+        </p>
+
+        <p class="body">
+          v1（<code class="file">verify-loop.ts</code>，#128）的验证模型是<b
+            class="hl"
+            >单候选串行撞墙</b
+          >：
+          每次失败注入一个验证失败信封，模型重新生成一个候选修复，再跑验证——直到
+          maxRounds 耗尽。 判定侧则主要依赖<b class="hl">单判官 LLM</b
+          >。2023–2024 年的研究揭示这三条路径各有结构性缺陷：
+        </p>
+
+        <div class="keylist">
+          <div class="keyitem">
+            <b>单候选不稳定</b>　单条 greedy / 单次采样不可靠，majority
+            采样显著更稳（2203.11171）
+          </div>
+          <div class="keyitem">
+            <b>重复采样有饱和点</b>　N-sampling 随 N 单调提升到饱和，无 budget
+            cap 是反模式（2407.21787）
+          </div>
+          <div class="keyitem">
+            <b>compute 分配需最优</b>　parallel vs sequential 存在 optimal
+            frontier，需 budget-aware（2408.03314）
+          </div>
+          <div class="keyitem">
+            <b>单 judge 不可盲信</b>　最强 judge 仅 ~75%，且带 position/length
+            bias（2410.12784 / 2306.05685）
+          </div>
+          <div class="keyitem">
+            <b>自修正缺外部 verifier 会失败</b
+            >　纯自我评估不可靠，需真实执行做判据（2310.01798）
+          </div>
+          <div class="keyitem">
+            <b>多样性优于单一升级</b>　多 judge 聚合 &gt; 单 judge
+            变强（2408.02666）
+          </div>
+        </div>
+
+        <p class="body" style="margin-top: 18px">
+          verify-loop v2
+          以这组论文交叉验证为设计输入，将研究结论映射为五条升级点。形态上保持
+          v1 的
+          <b class="hl">advisor 包裹 run()</b>（引擎零改动，ADR-0011
+          冻结停止语义），并复用 v1 的 seam：
+          <span class="mono">RunVerifyFn</span> /
+          <span class="mono">RunClassifierFn</span> /
+          <span class="mono">VerifyConfig</span> /
+          <span class="mono">TraceService</span>。 依赖方向与 v1
+          相同：只消费纯函数层（consensus / judge-pool / effort-budget / verdict
+          / inject）+ sandbox 基础层， 不 import ACI 装饰层与 settings。
+        </p>
+
+        <div class="note-box">
+          <b>报告边界：</b
+          >本报告为「学术依据整理与呈现」，全部内容锚定自源码头注释与上述研究结论；
+          论文的完整标题、作者全名等细节若源码注释未给出，则标注「引用自
+          verify-loop-v2.ts 头注释」，不补造细节。
+        </div>
+      </section>
+
+      <section id="papers">
+        <div class="sec-head">
+          <span class="sec-num">02</span>
+          <h2 class="sec-title">核心论文图谱</h2>
+          <span class="sec-rule"></span>
+        </div>
+
+        <p class="lead">
+          每篇论文给出：作者 / 年份 / arXiv 编号 / 核心论点 / 对 v2 设计的启发。
+        </p>
+
+        <div class="paper-grid">
+          <div class="paper">
+            <div class="paper-tags">
+              <span class="tag tag-arxiv">arXiv:2203.11171</span>
+              <span class="tag tag-role">一致性</span>
+            </div>
+            <h3 class="paper-title">
+              Self-Consistency Improves Chain of Thought Reasoning
+            </h3>
+            <div class="paper-meta">
+              Wang et al. · ICLR 2023 · 引用自源码头注释
+            </div>
+            <p class="paper-claim">
+              对同一任务采样<b>多条候选</b> + 边缘投票（majority voting），单条
+              greedy 不稳定时显著提升正确率与一致性。
+            </p>
+            <div class="paper-to-v2">
+              <span class="lbl">对 v2 的启发</span>
+              best-of-N 候选采样 +
+              <span class="mono">aggregateConsensus</span>
+              多数聚合，替代单候选串行撞墙。
+            </div>
+          </div>
+
+          <div class="paper">
+            <div class="paper-tags">
+              <span class="tag tag-arxiv">arXiv:2407.21787</span>
+              <span class="tag tag-role">采样缩放</span>
+            </div>
+            <h3 class="paper-title">Large Language Monkeys</h3>
+            <div class="paper-meta">Brown et al. · 2024 · 引用自源码头注释</div>
+            <p class="paper-claim">
+              重复采样 + verifier 重排序随 N
+              <b>单调提升（log-linear 到饱和点）</b>；无 budget cap 的固定 N
+              是反模式（B6）。
+            </p>
+            <div class="paper-to-v2">
+              <span class="lbl">对 v2 的启发</span>
+              采样必须有界：<span class="mono">candidateCount</span> 可配 +
+              多维预算耗尽 → <span class="mono">exhausted</span> outcome。
+            </div>
+          </div>
+
+          <div class="paper">
+            <div class="paper-tags">
+              <span class="tag tag-arxiv">arXiv:2408.03314</span>
+              <span class="tag tag-role">测试时计算</span>
+            </div>
+            <h3 class="paper-title">Scaling LLM Test-Time Compute Optimally</h3>
+            <div class="paper-meta">Snell et al. · 2024 · 引用自源码头注释</div>
+            <p class="paper-claim">
+              compute 分配存在 <b>optimal frontier</b>：简单任务走 parallel
+              sampling，难任务走 sequential revise → 需要 budget-aware 决策。
+            </p>
+            <div class="paper-to-v2">
+              <span class="lbl">对 v2 的启发</span>
+              多维 effort budget（rounds/tokens/costUsd/wallMs）+ dispersion
+              置信信号，供 budget-aware stop 消费。
+            </div>
+          </div>
+
+          <div class="paper">
+            <div class="paper-tags">
+              <span class="tag tag-arxiv">arXiv:2410.12784</span>
+              <span class="tag tag-role">判官基准</span>
+            </div>
+            <h3 class="paper-title">JudgeBench</h3>
+            <div class="paper-meta">
+              Tan et al. · NeurIPS 2024 · 引用自源码头注释
+            </div>
+            <p class="paper-claim">
+              最强 judge 准确率 <b>~75%</b>，远低于人类 <b>~90%</b> —— 单 judge
+              不可盲信。
+            </p>
+            <div class="paper-to-v2">
+              <span class="lbl">对 v2 的启发</span>
+              单判官 → <span class="mono">judgeCount=3</span> 多判官 majority
+              聚合（classifier 路径）。
+            </div>
+          </div>
+
+          <div class="paper">
+            <div class="paper-tags">
+              <span class="tag tag-arxiv">arXiv:2306.05685</span>
+              <span class="tag tag-role">判官偏倚</span>
+            </div>
+            <h3 class="paper-title">Judging LLM-as-a-Judge</h3>
+            <div class="paper-meta">Zheng et al. · 2023 · 引用自源码头注释</div>
+            <p class="paper-claim">
+              GPT-4 judge 与人类一致性 <b>~80%</b>，存在
+              <b>position / length / self-enhancement</b> 三大 bias。
+            </p>
+            <div class="paper-to-v2">
+              <span class="lbl">对 v2 的启发</span>
+              position-bias 缓解：<span class="mono">shuffleBySeed</span>
+              顺序打乱（swap-pair 思路的工程化轻量版）；anti-bias prompt
+              由装配层加。
+            </div>
+          </div>
+
+          <div class="paper">
+            <div class="paper-tags">
+              <span class="tag tag-arxiv">arXiv:2408.02666</span>
+              <span class="tag tag-role">多样性</span>
+            </div>
+            <h3 class="paper-title">Self-Taught Evaluators</h3>
+            <div class="paper-meta">
+              Wang et al. · Meta · 2024 · 引用自源码头注释
+            </div>
+            <p class="paper-claim">
+              多 judge 聚合 <b>&gt; 单 judge 升级</b>（多样性 &gt;
+              单一模型更强）；majority 在 3–4 judge 时边际收益最大。
+            </p>
+            <div class="paper-to-v2">
+              <span class="lbl">对 v2 的启发</span>
+              judge slot 支持多模型、跨 family 聚合；默认 3
+              判官落在边际收益最大区间。
+            </div>
+          </div>
+
+          <div class="paper">
+            <div class="paper-tags">
+              <span class="tag tag-arxiv">arXiv:2310.01798</span>
+              <span class="tag tag-role">自修正陷阱</span>
+            </div>
+            <h3 class="paper-title">
+              Large Language Models Cannot Self-Correct Reasoning Yet
+            </h3>
+            <div class="paper-meta">
+              Huang et al. · 2023 · 引用自研究结论要点
+            </div>
+            <p class="paper-claim">
+              无外部 verifier 的 self-correction <b>会失败</b> ——
+              模型自我评估缺少独立 ground truth。
+            </p>
+            <div class="paper-to-v2">
+              <span class="lbl">对 v2 的启发</span>
+              execution-first 验证分层：真实执行产 artifact（exit +
+              signature）结构化判定，LLM judge 仅兜底 free-form。
+            </div>
+          </div>
+
+          <div class="paper">
+            <div class="paper-tags">
+              <span class="tag tag-arxiv"
+                >Nine Judges, Two Effective Votes</span
+              >
+              <span class="tag tag-role">去相关</span>
+            </div>
+            <h3 class="paper-title">Nine Judges, Two Effective Votes</h3>
+            <div class="paper-meta">研究结论要点 6 · 引用自研究结论要点</div>
+            <p class="paper-claim">
+              judge 必须<b>去相关</b>（来自不同
+              family）：强相关的判官投票近似一个有效票。
+            </p>
+            <div class="paper-to-v2">
+              <span class="lbl">对 v2 的启发</span>
+              多样性 &gt; 单判官：judge slot 支持多模型备选、跨 family
+              聚合，而非盲目堆判官数量。
+            </div>
+          </div>
+
+          <div class="paper paper-wide">
+            <div class="paper-tags">
+              <span class="tag tag-arxiv">2302.08468</span>
+              <span class="tag tag-arxiv">2304.05128</span>
+              <span class="tag tag-arxiv">2306.09896</span>
+              <span class="tag tag-role">执行优先</span>
+              <span class="tag tag-src">论文名未在源码注释中给出</span>
+            </div>
+            <h3 class="paper-title">
+              execution-first 分层（三篇依据，未具名）
+            </h3>
+            <div class="paper-meta">
+              引用自 verify-loop-v2.ts 头注释（升级点 5）
+            </div>
+            <p class="paper-claim">
+              command 路径产 artifact（exit + signature）做结构化判定，LLM judge
+              仅兜底 free-form。 三篇 arXiv 编号（2302.08468 / 2304.05128 /
+              2306.09896）作为 execution-first 分层依据在源码头注释中列出，
+              但论文标题未在源码注释中给出，此处不补造。
+            </p>
+            <div class="paper-to-v2">
+              <span class="lbl">对 v2 的启发</span>
+              验证判定分层：可执行命令先于 LLM 判断；无 command 时才走
+              classifier（judge-pool）路径。
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="mapping">
+        <div class="sec-head">
+          <span class="sec-num">03</span>
+          <h2 class="sec-title">学术 → 实现映射</h2>
+          <span class="sec-rule"></span>
+        </div>
+
+        <p class="lead">研究结论到 v2 代码的具体落点，逐条对应。</p>
+
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 4%">#</th>
+                <th style="width: 26%">学术结论</th>
+                <th style="width: 22%">依据</th>
+                <th style="width: 28%">v2 实现</th>
+                <th style="width: 20%">源码锚点</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>1</td>
+                <td>Self-consistency majority voting 提升一致性</td>
+                <td>2203.11171</td>
+                <td>
+                  失败修正时对 K 候选做
+                  <span class="mono">aggregateConsensus</span> 聚合（passRatio
+                  默认 2/3；<span class="mono">onExhausted==="escalate"</span>
+                  时降为 0.5）
+                </td>
+                <td>
+                  <code class="file">consensus.ts</code> /
+                  <code class="file">verify-loop-v2.ts</code>
+                </td>
+              </tr>
+              <tr>
+                <td>2</td>
+                <td>Compute 分配存在 optimal frontier，需 budget-aware</td>
+                <td>2408.03314</td>
+                <td>
+                  四元组预算
+                  <span class="mono">{ rounds, tokens, costUsd, wallMs }</span>
+                  消费与耗尽判定；<span class="mono">shouldSampleMore</span>
+                  提供收敛建议
+                </td>
+                <td>
+                  <code class="file">effort-budget.ts</code> /
+                  <code class="file">consensus.ts</code>
+                </td>
+              </tr>
+              <tr>
+                <td>3</td>
+                <td>N-sampling 有饱和点，无 cap 的固定 N 是反模式</td>
+                <td>2407.21787</td>
+                <td>
+                  <span class="mono">candidateCount</span> 可配（默认
+                  3）；预算耗尽 → 新 outcome <span class="mono">exhausted</span>
+                </td>
+                <td><code class="file">verify-loop-v2.ts</code></td>
+              </tr>
+              <tr>
+                <td>4</td>
+                <td>无外部 verifier 的 self-correction 会失败</td>
+                <td>2310.01798</td>
+                <td>
+                  execution-first：command 路径产
+                  <span class="mono">exit + signature</span> 结构化判定，LLM
+                  judge 仅兜底
+                </td>
+                <td>
+                  <code class="file">verify-loop-v2.ts</code> /
+                  <code class="file">verdict.ts</code>
+                </td>
+              </tr>
+              <tr>
+                <td>5</td>
+                <td>单 judge 准确率 ~75%，不可盲信</td>
+                <td>2410.12784</td>
+                <td>
+                  classifier 路径 <span class="mono">judgeCount=3</span> 判官
+                  majority 聚合
+                </td>
+                <td><code class="file">judge-pool.ts</code></td>
+              </tr>
+              <tr>
+                <td>6</td>
+                <td>多样性 &gt; 单一模型更强（多 judge &gt; 单 judge 升级）</td>
+                <td>2408.02666</td>
+                <td>
+                  judge slot 支持多模型、跨 family 聚合；majority 3–4 judge
+                  边际收益最大
+                </td>
+                <td><code class="file">judge-pool.ts</code> 头注释</td>
+              </tr>
+              <tr>
+                <td>7</td>
+                <td>judge 存在 position/length/self-enhancement bias</td>
+                <td>2306.05685</td>
+                <td>
+                  <span class="mono">shuffleBySeed</span>（xorshift32
+                  确定性）顺序打乱；anti-bias prompt 由装配层加
+                </td>
+                <td><code class="file">judge-pool.ts</code></td>
+              </tr>
+              <tr>
+                <td>8</td>
+                <td>judge 去相关：强相关判官 ≈ 一个有效票</td>
+                <td>Nine Judges, Two Effective Votes</td>
+                <td>judge slot 跨 family 选型，不靠堆判官数量换精度</td>
+                <td><code class="file">judge-pool.ts</code> 头注释</td>
+              </tr>
+              <tr>
+                <td>9</td>
+                <td>多维 effort budget（rounds + tokens + $ + wall）</td>
+                <td>2408.03314 / 2407.21787 / Anthropic·DeepMind 工程实践</td>
+                <td>
+                  <span class="mono">EffortBudgetLimits</span> 任一维度超限 →
+                  <span class="mono">isBudgetExhausted</span> = true
+                </td>
+                <td><code class="file">effort-budget.ts</code></td>
+              </tr>
+              <tr>
+                <td>10</td>
+                <td>一致性离差 dispersion = confidence 信号</td>
+                <td>2408.03314</td>
+                <td>
+                  dispersion = 1 − |pass−fail|/N 计算并写入 record；离差高 →
+                  判定分裂、应加大采样
+                </td>
+                <td><code class="file">consensus.ts</code></td>
+              </tr>
+              <tr>
+                <td>11</td>
+                <td>execution-first 分层：命令产 artifact 结构化判定</td>
+                <td>2302.08468 / 2304.05128 / 2306.09896</td>
+                <td>
+                  command 路径验证采样归一化二值 + signature；judge 仅兜底
+                  free-form
+                </td>
+                <td><code class="file">verify-loop-v2.ts</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="decisions">
+        <div class="sec-head">
+          <span class="sec-num">04</span>
+          <h2 class="sec-title">设计决策：为什么这样设计</h2>
+          <span class="sec-rule"></span>
+        </div>
+
+        <p class="lead">
+          v2 相对 v1（#128）的五项学术升级，每项给出「论文依据 → 为什么这样设计
+          → 源码落点」。
+        </p>
+
+        <div class="decision">
+          <div class="decision-head">
+            <span class="d-badge">升级点 1</span>
+            <h3 class="decision-title">
+              Multi-candidate best-of-N + self-consistency 聚合
+            </h3>
+            <span class="d-papers">2203.11171 · 2407.21787</span>
+          </div>
+          <p class="why">
+            <b>为什么：</b>v1
+            失败修正时是单候选串行撞墙——单条候选具有随机性，一次失败不代表真实失败，
+            且失败后重新生成也未必收敛。Self-Consistency
+            证明多数采样显著提升一致性； Large Language Monkeys 证明重复采样随 N
+            提升。v2 将「验证失败是否为真」的判断从一次采样 扩展为 K
+            次采样的多数共识：全 pass 放行、全 fail 注入信封继续修正、恰好各半判
+            unstable （不静默放行）、分裂按 passRatio 多数决定。
+          </p>
+          <p class="anchor">
+            锚点：<code class="file">verify-loop-v2.ts</code> ·
+            <span class="mono">checkOneCandidate</span> /
+            <span class="mono">aggregateConsensus</span> /
+            <span class="mono">buildMultiCandidateEnvelope</span>
+          </p>
+        </div>
+
+        <div class="decision">
+          <div class="decision-head">
+            <span class="d-badge">升级点 2</span>
+            <h3 class="decision-title">Multi-judge pool（3 判官 majority）</h3>
+            <span class="d-papers">2306.05685 · 2410.12784 · 2408.02666</span>
+          </div>
+          <p class="why">
+            <b>为什么：</b>JudgeBench 给出最强 judge 仅 ~75%，单 judge
+            不可盲信； Self-Taught Evaluators 给出多 judge 聚合 &gt; 单 judge
+            升级，majority 在 3–4 judge 边际收益最大 → 默认 3
+            判官。Judge-as-Judge 揭示 position/length/self-enhancement 三大 bias
+            → 内置 position-bias shuffle
+            缓解。abstain（判不了）不参与多数计算，全部 abstain → fail-open
+            到不稳定上游，不静默放行。
+          </p>
+          <p class="anchor">
+            锚点：<code class="file">judge-pool.ts</code> ·
+            <span class="mono">aggregateJudgePool</span> /
+            <span class="mono">shuffleBySeed</span>（xorshift32）
+          </p>
+        </div>
+
+        <div class="decision">
+          <div class="decision-head">
+            <span class="d-badge">升级点 3</span>
+            <h3 class="decision-title">
+              Effort budget 多维（rounds + tokens + costUsd + wallMs）
+            </h3>
+            <span class="d-papers">2408.03314 · 2407.21787</span>
+          </div>
+          <p class="why">
+            <b>为什么：</b>纯 maxRounds 只限制迭代轮数，无法表达 token
+            消耗、估算成本与墙钟时间。 Test-Time Compute 要求 budget-aware
+            决策；Monkeys 指出无 cap 的固定 N 是反模式 → 四元组预算
+            <span class="mono">{ rounds, tokens, costUsd, wallMs }</span
+            >，任一维度超限即
+            exhausted。未设置的维度不参与判定（视为无限），保持 v1 maxRounds
+            语义的可兼容扩展。
+          </p>
+          <p class="anchor">
+            锚点：<code class="file">effort-budget.ts</code> ·
+            <span class="mono">initialEffort</span> /
+            <span class="mono">spendEffort</span> /
+            <span class="mono">isBudgetExhausted</span> /
+            <span class="mono">budgetSummary</span>
+          </p>
+        </div>
+
+        <div class="decision">
+          <div class="decision-head">
+            <span class="d-badge">升级点 4</span>
+            <h3 class="decision-title">
+              Confidence-based stop（dispersion 置信信号）
+            </h3>
+            <span class="d-papers">2408.03314</span>
+          </div>
+          <p class="why">
+            <b>为什么：</b
+            >验证判定的置信度可以从候选一致性离差中读出：dispersion = 1 −
+            |pass−fail|/N， 离差高 = 判官/候选分裂严重 = uncertainty
+            高，应加大采样或降级；离差低 = 高置信，可放行避免过采样。 v2 中
+            dispersion 已计算并记录进 record，但 stop 判定当前为纯
+            majority（低离差高置信放行）； dispersion 驱动的早停/加采样（<span
+              class="mono"
+              >shouldSampleMore</span
+            >：打平 → 采， dispersion &gt; 0.5（如 2v1）→ 采，3v1（0.5）→
+            边缘不采）留待 lift。
+          </p>
+          <p class="anchor">
+            锚点：<code class="file">consensus.ts</code> ·
+            <span class="mono">shouldSampleMore</span> /
+            <span class="mono">aggregateConsensus</span>（confidence 字段）
+          </p>
+        </div>
+
+        <div class="decision">
+          <div class="decision-head">
+            <span class="d-badge">升级点 5</span>
+            <h3 class="decision-title">Execution-first 验证分层</h3>
+            <span class="d-papers"
+              >2302.08468 · 2304.05128 · 2306.09896 · 2310.01798</span
+            >
+          </div>
+          <p class="why">
+            <b>为什么：</b>无外部 verifier 的 self-correction
+            会失败（2310.01798），而 LLM judge 自身仅 ~75%。 v2
+            让可执行命令的真实运行成为第一层判据：command 路径产 artifact（exit
+            code + failure signature）
+            的结构化判定——真实、可复现、不依赖模型主观；LLM judge 仅兜底无
+            command 的 free-form classifier 路径。judge
+            判定只出现在命令不可用时的降级通道。
+          </p>
+          <p class="anchor">
+            锚点：<code class="file">verify-loop-v2.ts</code> ·
+            <span class="mono">checkOneCandidate</span> /
+            <span class="mono">buildFailureSignature</span>（<code class="file"
+              >verdict.ts</code
+            >）
+          </p>
+        </div>
+
+        <div class="decision">
+          <div class="decision-head">
+            <span class="d-badge">架构决策</span>
+            <h3 class="decision-title">
+              Advisor 包裹 + 纯函数层 + 七态 outcome
+            </h3>
+            <span class="d-papers">对齐 v1 #128 · ADR-0011</span>
+          </div>
+          <p class="why">
+            <b>为什么：</b>v2 保持 v1 的 advisor 包裹 run()
+            形态（引擎零改动，ADR-0011 冻结停止语义）， 复用 v1
+            seam（RunVerifyFn / RunClassifierFn / VerifyConfig /
+            TraceService），使新一代状态机
+            可在不触碰引擎的前提下原型验证。共识聚合、判官池、预算全部落在<b
+              class="hl"
+              >纯函数层</b
+            >
+            （零 IO 零副作用，状态由调用方持有并传入，与 verdict.ts
+            同纪律），可测且可复现。 outcome 七态（passed / failed / unstable /
+            escalated / aborted / disabled / exhausted）：
+            <span class="mono">exhausted</span> 为 v2 新增（预算耗尽），<span
+              class="mono"
+              >escalated</span
+            >
+            为 v1 向后兼容保留的 union 成员、本原型不产出。
+          </p>
+          <p class="anchor">
+            锚点：<code class="file">verify-loop-v2.ts</code> 头注释 /
+            <span class="mono">buildResultV2</span>
+          </p>
+        </div>
+      </section>
+
+      <section id="limitations">
+        <div class="sec-head">
+          <span class="sec-num">05</span>
+          <h2 class="sec-title">原型简化与诚实的局限</h2>
+          <span class="sec-rule"></span>
+        </div>
+
+        <p class="lead">
+          本模块标注为 PROTOTYPE：验证新一代状态机，若通过可 lift
+          进生产；当前不替换 v1 装配（chat-session 仍接
+          v1）。以下简化均在源码注释中显式披露。
+        </p>
+
+        <ol class="limitations">
+          <li>
+            <span class="lbl">简化 1 · best-of-N 局限在验证层</span>
+            <b
+              >K 候选 = 对同一 command 做 K 次验证采样（验证层
+              best-of-N），不是模型产 K 个候选修复。</b
+            >
+            模型侧候选采样（多候选修复再选）留待 lift。
+          </li>
+          <li>
+            <span class="lbl">简化 2 · position-bias shuffle 仅影响观测</span>
+            <b>shuffle 只改变判定展示顺序（观测），聚合本身顺序无关。</b>
+            真实缓解需逐判官差异化输入/模型（swap-pair
+            双跑思路的工程化轻量版：不双跑，只改呈现顺序、减少成本）。
+            逐判官差异化留待 lift。
+          </li>
+          <li>
+            <span class="lbl">简化 3 · effort 数字为估算占位</span>
+            command 候选每次采样固定计入
+            <span class="mono">tokens:200 / costUsd:0.001 / wallMs:1000</span>；
+            judge 每次调用计入
+            <span class="mono">tokens:800 / costUsd:0.004 / wallMs:5000</span>。
+            <b>均为估算占位（原型），生产应从 RunResult.usage 实测。</b>
+          </li>
+          <li>
+            <span class="lbl">简化 4 · confidence-based stop 未接线</span>
+            <b
+              >dispersion 已计算并记录进 record，但 stop 判定当前为纯
+              majority</b
+            >（低离差高置信放行）； dispersion 驱动的早停/加采样（<span
+              class="mono"
+              >shouldSampleMore</span
+            >）留待 lift，预算兜底为 exhausted。
+          </li>
+          <li>
+            <span class="lbl">简化 5 · judge 输出三态简化解析</span>
+            判官输出以字符串包含匹配判定
+            <span class="mono">"kind":"pass" / "kind":"fail"</span>，否则
+            abstain； 生产走
+            <span class="mono">parseClassifierResult</span> 正式解析。
+          </li>
+          <li>
+            <span class="lbl">简化 6 · command 路径二值归一化</span>
+            超时折叠为 fail 候选（exit≠0 同路），<b
+              >不含 v1 的 B13 不稳定语义通道</b
+            >——本原型二值归一化不含该通道，
+            语义与注释一致（诚实记录，见头注释升级点 5）。
+          </li>
+          <li>
+            <span class="lbl">简化 7 · escalated 不产出</span>
+            无趋势裁判/escalate 信封注入，<span class="mono">escalated</span>
+            union 成员仅为 v1 向后兼容保留， 本原型不产出；新增
+            <span class="mono">exhausted</span>（预算耗尽）。
+          </li>
+          <li>
+            <span class="lbl">简化 8 · 未替换 v1 装配</span>
+            本模块只验证新一代状态机，chat-session 仍接 v1；v2 验证通过后可 lift
+            进生产。
+          </li>
+        </ol>
+
+        <div class="note-box">
+          <b>验证路径说明：</b>command 空 + 无 classifier → 透明关闭（<span
+            class="mono"
+            >disabled</span
+          >，rounds=0， 对齐 v1 SC7 向后兼容）；classifier 路径判定 pass / 全部
+          abstain / tie / 耗尽 均显式处理， abstain 与 tie 不静默放行。
+        </div>
+      </section>
+
+      <section id="references">
+        <div class="sec-head">
+          <span class="sec-num">06</span>
+          <h2 class="sec-title">引用清单</h2>
+          <span class="sec-rule"></span>
+        </div>
+
+        <ol class="refs">
+          <li>
+            <span class="t"
+              >Self-Consistency Improves Chain of Thought Reasoning in Language
+              Models</span
+            >
+            — Wang et al. · ICLR 2023 ·
+            <a
+              href="https://arxiv.org/abs/2203.11171"
+              target="_blank"
+              rel="noopener"
+              >arXiv:2203.11171</a
+            >
+          </li>
+          <li>
+            <span class="t"
+              >Scaling LLM Test-Time Compute Optimally Can Be More Effective
+              than Scaling Model Parameters</span
+            >
+            — Snell et al. · 2024 ·
+            <a
+              href="https://arxiv.org/abs/2408.03314"
+              target="_blank"
+              rel="noopener"
+              >arXiv:2408.03314</a
+            >
+          </li>
+          <li>
+            <span class="t"
+              >Large Language Monkeys: Scaling Inference Compute with Repeated
+              Sampling</span
+            >
+            — Brown et al. · 2024 ·
+            <a
+              href="https://arxiv.org/abs/2407.21787"
+              target="_blank"
+              rel="noopener"
+              >arXiv:2407.21787</a
+            >
+          </li>
+          <li>
+            <span class="t"
+              >Large Language Models Cannot Self-Correct Reasoning Yet</span
+            >
+            — Huang et al. · 2023 ·
+            <a
+              href="https://arxiv.org/abs/2310.01798"
+              target="_blank"
+              rel="noopener"
+              >arXiv:2310.01798</a
+            >
+          </li>
+          <li>
+            <span class="t"
+              >JudgeBench: A Benchmark for Evaluating LLM-based Judges</span
+            >
+            — Tan et al. · NeurIPS 2024 ·
+            <a
+              href="https://arxiv.org/abs/2410.12784"
+              target="_blank"
+              rel="noopener"
+              >arXiv:2410.12784</a
+            >
+          </li>
+          <li>
+            <span class="t"
+              >Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena</span
+            >
+            — Zheng et al. · 2023 ·
+            <a
+              href="https://arxiv.org/abs/2306.05685"
+              target="_blank"
+              rel="noopener"
+              >arXiv:2306.05685</a
+            >
+          </li>
+          <li>
+            <span class="t">Self-Taught Evaluators</span>
+            — Wang et al. · Meta · 2024 ·
+            <a
+              href="https://arxiv.org/abs/2408.02666"
+              target="_blank"
+              rel="noopener"
+              >arXiv:2408.02666</a
+            >
+          </li>
+          <li>
+            <span class="t">Nine Judges, Two Effective Votes</span>
+            — 研究结论要点（judge 去相关，多样性 &gt; 单判官）
+            <span class="note-src">引用自研究结论要点 6</span>
+          </li>
+          <li>
+            <span class="t"
+              >execution-first
+              验证分层依据（三篇，论文名未在源码注释给出）</span
+            >
+            ·
+            <a
+              href="https://arxiv.org/abs/2302.08468"
+              target="_blank"
+              rel="noopener"
+              >arXiv:2302.08468</a
+            >
+            ·
+            <a
+              href="https://arxiv.org/abs/2304.05128"
+              target="_blank"
+              rel="noopener"
+              >arXiv:2304.05128</a
+            >
+            ·
+            <a
+              href="https://arxiv.org/abs/2306.09896"
+              target="_blank"
+              rel="noopener"
+              >arXiv:2306.09896</a
+            >
+            <span class="note-src"
+              >引用自 verify-loop-v2.ts 头注释（升级点 5）</span
+            >
+          </li>
+        </ol>
+
+        <div class="note-box" style="margin-top: 22px">
+          <b>诚实边界：</b>部分论文标题（如 execution-first 三篇、Nine Judges
+          原文出处）未在源码注释或研究结论要点中给出， 本报告按要求标注「引用自
+          verify-loop-v2.ts 头注释 / 研究结论要点」，未补造细节。
+          标题带下划线的条目为研究结论要点给出的正式标题，其余以源码注释为准。
+        </div>
+      </section>
+
+      <div class="footer">
+        iknow verify-loop v2 · 学术研究报告 · 锚定源码：<span class="mono"
+          >src/harness/verify/verify-loop-v2.ts</span
+        >
+        · <span class="mono">consensus.ts</span> ·
+        <span class="mono">judge-pool.ts</span> ·
+        <span class="mono">effort-budget.ts</span> ·
+        <span class="mono">verdict.ts</span> ·
+        <span class="mono">inject.ts</span> ·
+        <span class="mono">sandbox-run.ts</span>
+      </div>
+    </div>
+  </body>
+</html>
