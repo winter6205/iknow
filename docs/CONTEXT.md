@@ -53,6 +53,9 @@ _Avoid_: 把 meta 拼入 model tool_result；让 TUI / Web 直接读 handler 原
 **ACI tool set**: Harness 装配层（`src/harness/aci/`）注册的工具集；当前 8 件：`bash` / `read_file` / `grep` / `glob` / `edit_file` / `write_file` / `web_fetch` / `web_search`，SSOT 工厂 = `src/harness/aci/tools/registry.ts:createDefaultAciRegistry`，所有入口（`build-engine` / `tui/deps`）从这里取，工具数永不同步漂移（#141 / #191 / a277f68）。每次工具调用经 permission middleware（ADR-0004）与 timeout tier 装饰。
 _Avoid_: 在 harness 之外另起 tool 注册表；在 entry point 手写工具数组（#228 决议 D4——`memory_recall` / `memory_save` 入 SSOT 8+2=10）；让工具返回结构化 metadata
 
+**声明工具面 vs 实际工具面**: `SubAgentDefinition.disallowedTools` 写进 `WorkerEnvelope` 的是声明面；worker 进程装配后真正可被模型调用的工具集是实际面，二者必须相等——裁剪发生在 `createAciRegistry(tools)` **之前**的 def-list 期（`createDefaultAciRegistry` 工厂内），由构造期快照保证，不事后修补（`AciRegistry.inner` 是冻结快照）。
+_Avoid_: 给 `AciRegistry` 加 `.tools` 字段在产物上事后裁剪；声明 deny-list 但 worker 不消费（#468 修复对象）
+
 **deps.system injection seam**: Each-turn 系统文本装配的唯一权威缝——loop-engine 调 `deps.system?.()`（`loop-engine.ts:358`），结果透传 `adapter.step request.system`；`undefined` 时不发送 `system` 字段（`anthropic-adapter.ts:577-580` 条件 spread），KV cache 前缀字节级稳定。装配主体是 `identity/assemble.ts` 的 `IKNOW_ASSEMBLY_ORDER` 流水线（#196）。
 _Avoid_: 在 adapter 或 host 层直接拼系统；发送空串 `system`（KV cache jitter）；绕开 `deps.system` 在 adapter 内部二次组装
 
@@ -76,6 +79,15 @@ _Avoid_: 把 frontend-only server 当生产路径但不代理 `/api`
 
 **product SPA (web/)**: Vite + React + TypeScript chat console；同源 Session client；JSON 侧栏。
 _Avoid_: 零依赖静态壳当产品；展示层省略 trace 字段
+
+**goal（会话使命）**: 用户显式设定的整个会话固定锚，agent 沿它自主探索/建设；只由 `/goal <text>` / `## GOAL: <text>` 写入（`source = user_pin`），仅 `/goal clear` 清除，verify-loop 终局写 `status = achieved / aborted`；分类器 task 字段第一优先来源。
+_Avoid_: 把 goal 当模型可推进的活对象（`model_proposed` / T6 propose-confirm 已整体删除）；模型输出 / 工具结果 / 文件内容写 goal
+
+**taskFocus（任务焦点）**: 长上下文中模型当前该围绕什么干、compact 后仍保持焦点的**确定性提取**对象（v1 不用 LLM）；首条 user 消息 seed，`text` ≤ 500 字符、`history` ≤ 5 条 × 300 字符去重；仅 compact 边界渲染一次（焦点截 240 + 最近 3 条各截 120）；分类器 task 字段第二优先来源。
+_Avoid_: 用 LLM 摘要生成 taskFocus；普通 turn 注入；模型写 taskFocus
+
+**task 取值公式**: `task = session.goal.text ?? session.taskFocus.text ?? query`（唯一口径）；判定层只读消费、不回写。
+_Avoid_: 把过渡态 `goal.text ?? query` 当对齐目标；把证据上下文塞进 task 字段（走 evidenceContext）
 
 **streaming arm**: LLM 客户端默认流式臂（`IKNOW_LLM_STREAM` 值域 `on | off`，默认 `on`，`env.ts` SSOT），`off` 回退非流式臂；原生 SSE 事件不出 adapter 边界，收敛为 `HarnessStreamEvent` 最小集（`text_delta` / `tool_call_start`，`src/harness/stream.ts`），终态经 SDK `finalMessage()` -> `interpretMessage`（SSOT）落为同形 `AssistantTurnResult`。
 _Avoid_: 把 `stream: false` + 裸 JSON 解析当默认 LLM 臂；让原生 SSE 事件逸出 adapter 边界
@@ -112,6 +124,30 @@ _Avoid_: 固定轮数一刀切；单轮退化即停；无兜底上限
 
 **escalate 模式**: 修正耗尽后的可选处置（默认 report 停止+如实报告）——注入升级指令（禁止重复同一修复、换思路或明确报告阻塞）并给新预算继续；总预算不重置。服务长程自主任务。
 _Avoid_: 把 escalate 当无限轮次；降级放行（验证未通过算完成）
+
+**判官（judge）**: command 缺失时接管「任务完成了吗」判定的子代理 LLM 分类器；工具面只读（deny `bash / edit_file / write_file / web_fetch / web_search`，由 def-list 期裁剪保证声明面 = 实际面）；#449 重构后为证据感知、四态输出（pass / fail / unverified / abort）。
+_Avoid_: 给判官执行能力（G1 决议只读）；与 evidence-checker（确定性纯函数规则引擎，零 LLM）混同
+
+**checker 三态 verdict**: 证据充分性判定 = `EVIDENCE_SUFFICIENT`（直接 PASS，零 LLM 成本）/ `EVIDENCE_CONTRADICTED`（硬矛盾：删/清空测试文件等二进制事实）/ `EVIDENCE_INSUFFICIENT`（先补跑、再判官）；6 条检查封装在 `evidence-checker.ts` 内部，调用方只消费 verdict 不数条件。
+_Avoid_: 与闭环「三态判定」（pass / 真失败 / 不稳定——那是轮次判定，这是证据充分性判定）混同；调用方自数 PASS 条件
+
+**green marker**: 测试框架输出里的通过摘要行（白名单 pytest / jest / vitest / go test / cargo test）；checker 只从框架摘要行读通过数字。
+_Avoid_: 扫描任意 stdout 判绿；白名单外自造框架解析
+
+**弱绿（weak green）**: exit 0 但不代表整套过的绿——`0 tests run` / `collected 0 items` / `no tests found` / 窄跑（`-k` / `-t` / `::`）；弱绿不算充分证据。
+_Avoid_: 把 exit 0 当测试通过
+
+**unverified**: 判官第 4 态——判官工作正常，但读完证据后认为不足以判定完成，拒绝猜 PASS/FAIL；映射到 `unstable`（停止、不注入信封、结果原样返回用户），与 `abort`（判官自身 transport/schema/超时故障）严格区分，`VerificationRecord.reason` 落盘区分。
+_Avoid_: 把 unverified 猜成 pass 或 fail（"a verifier that bluffs is worse than none"）；与 abort 混同
+
+**evidenceContext（证据体检单）**: 判官输入信封附加字段 = checker verdict + 不足原因 + 已执行测试命令列表 + 补跑尝试结果 + 原始证据摘要（宿主侧截断 ≤ 20000 codepoints）；task 字段不重绑。
+_Avoid_: 把证据塞进 task 字段；注入前不截断
+
+**补跑信封**: `EVIDENCE_INSUFFICIENT` 时注入主会话的反馈信封（"你声称完成，但缺真实测试证据 + 原因 + 请跑 <命令> 并展示框架通过摘要"）；命令来源 = 用户 `verify.command` 优先，否则 D2 探测；每闭环至多 1 次。
+_Avoid_: 与 `[VALIDATION FAILED]` 失败信封混同（补跑信封用 `[VERIFY: rerun needed]` 前缀）；无限补跑轮
+
+**D2 自动探测**: 无 `verify.command` 时按项目标志文件探测默认验证命令（pyproject/pytest.ini→pytest、package.json vitest/jest dep→对应 runner、go.mod→go test、Cargo.toml→cargo test）；冲突或无标志 → null（fail-closed，落判官）。
+_Avoid_: 多标志冲突时猜命令；把探测结果当必跑命令
 
 **双重承载面 (hook dual surfaces)**: (#126 决议 D1) 钩子系统的正式形态——引擎内承载面（Pre/PostToolUse，挂 permission-executor 5 步链，工具级/同步/无状态）+ 引擎外承载面（Stop，host/orchestrator 层订阅 `run()` completed 返回，任务级/多轮/有策略状态，实现即 #128 外挂自检层）。Stop 钩子的触发事件是 host 侧观察到的 run() 返回，不是引擎 Transition。
 _Avoid_: 把三类钩子塞进单一承载机制；把 Stop 映射到 step() Transition；把双重承载面当设计缺陷而非分层结果
