@@ -243,6 +243,120 @@ describe("createDefaultAciRegistry — onEdit 透传(#251)", () => {
   });
 });
 
+/**
+ * #468 T1 工厂 deny-list 裁剪的测试。
+ *
+ * 工厂入参 `disallowedTools?: ReadonlyArray<string>`:
+ *   - 双面裁剪（inner 协议 registry + visibleSchemas 模型可见 schema）
+ *   - 宽容模式：deny 名不在 available → 静默跳过（不抛）
+ *   - 缺席 / undefined / 空数组 → byte-identical 向后兼容
+ *   - Gate 3 镜像过滤：toolsetNames 与 factories 键集一致（含 deny 名过滤）
+ *   - 与既有条件化装配（memoryDir / skillCatalog / subagentManager）正交组合
+ *
+ * 验证 helper:全量 − 条件化缺席键 − deny-list，与工厂 Gate 3 镜像同源。
+ */
+function expectedSurface(
+  deny: ReadonlyArray<string>,
+  opts: { memory?: boolean; skill?: boolean; subagent?: boolean } = {}
+): readonly string[] {
+  const conditionallyAbsent = [
+    ...(opts.memory ? [] : ["memory_recall", "memory_save"]),
+    ...(opts.skill ? [] : ["skill", "skill_search"]),
+    ...(opts.subagent ? [] : ["spawn_subagent", "subagent_result"]),
+  ];
+  return [...ACI_TOOLSET_NAMES].filter(
+    (n) => !conditionallyAbsent.includes(n) && !deny.includes(n)
+  );
+}
+
+describe("createDefaultAciRegistry — #468 disallowedTools 裁剪", () => {
+  it("deny 5 禁项 → inner/visibleSchemas 双面同集,其余工具在场", () => {
+    const deny = ["bash", "edit_file", "write_file", "web_fetch", "web_search"];
+    const reg = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: "/tmp/root",
+      disallowedTools: deny,
+    });
+    const expected = expectedSurface(deny);
+    const names = reg.inner.list().map((def) => def.name);
+    expect(names).toEqual(expected);
+    expect(reg.visibleSchemas().map((s) => s.name)).toEqual(expected);
+    // 5 禁项 inner + catalog 双面缺席。
+    expect(reg.catalog.get("bash")).toBeUndefined();
+    expect(reg.catalog.get("edit_file")).toBeUndefined();
+    expect(reg.catalog.get("write_file")).toBeUndefined();
+    expect(reg.catalog.get("web_fetch")).toBeUndefined();
+    expect(reg.catalog.get("web_search")).toBeUndefined();
+    // 未被 deny 的工具仍在场。
+    expect(reg.catalog.get("read_file")).toBeDefined();
+    expect(reg.catalog.get("grep")).toBeDefined();
+    expect(reg.catalog.get("tool_search")).toBeDefined();
+  });
+
+  it("deny 含未知名工具名 → 宽容忽略,只裁已知项", () => {
+    const reg = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: "/tmp/root",
+      disallowedTools: ["bash", "foo_tool_does_not_exist"],
+    });
+    const names = reg.inner.list().map((def) => def.name);
+    expect(names).not.toContain("bash");
+    expect(names).toContain("read_file");
+    // 未知名被宽容忽略 — 除 bash 外其余工具全在场。
+    expect(names).toEqual(expectedSurface(["bash"]));
+    expect(reg.visibleSchemas().map((s) => s.name)).toEqual(names);
+  });
+
+  it("deny 空数组 / undefined / 缺省 → 三种形态 byte-identical(向后兼容)", () => {
+    const base = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: "/tmp/root",
+    });
+    const empty = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: "/tmp/root",
+      disallowedTools: [],
+    });
+    const undef = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: "/tmp/root",
+      disallowedTools: undefined,
+    });
+    const baseNames = base.inner.list().map((d) => d.name);
+    const baseVisible = base.visibleSchemas().map((s) => s.name);
+    expect(empty.inner.list().map((d) => d.name)).toEqual(baseNames);
+    expect(undef.inner.list().map((d) => d.name)).toEqual(baseNames);
+    expect(empty.visibleSchemas().map((s) => s.name)).toEqual(baseVisible);
+    expect(undef.visibleSchemas().map((s) => s.name)).toEqual(baseVisible);
+  });
+
+  it("deny 与条件化装配组合:memoryDir 在场时 deny memory_recall → 双面剔除,memory_save 仍存", () => {
+    const reg = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: "/tmp/root",
+      memoryDir: "/tmp/root/memory",
+      disallowedTools: ["memory_recall"],
+    });
+    const expected = expectedSurface(["memory_recall"], { memory: true });
+    const names = reg.inner.list().map((def) => def.name);
+    expect(names).toEqual(expected);
+    expect(reg.visibleSchemas().map((s) => s.name)).toEqual(expected);
+    expect(reg.catalog.get("memory_recall")).toBeUndefined();
+    // memory_save 未被 deny,条件化亦在场,故保留(deny 与条件化正交可组合)。
+    expect(reg.catalog.get("memory_save")).toBeDefined();
+  });
+
+  it("deny 全量实际工具 → inner/visibleSchemas 为空,装配不 crash(Gate 3 镜像一致)", () => {
+    const reg = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: "/tmp/root",
+      disallowedTools: [...ACI_TOOLSET_NAMES],
+    });
+    expect(reg.inner.list()).toEqual([]);
+    expect(reg.visibleSchemas()).toEqual([]);
+  });
+});
+
 describe("createDefaultAciRegistry — 并发闭包隔离", () => {
   it("两次工厂调用返回的 AciRegistry 相互独立", () => {
     const a = createDefaultAciRegistry({
