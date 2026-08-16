@@ -26,9 +26,12 @@
 import {
   Client as SdkClient,
   type CallToolResult as SdkCallToolResult,
+  type Resource as SdkResource,
+  type ResourceContents as SdkResourceContents,
   type Tool as SdkTool,
 } from "@modelcontextprotocol/client";
 import { StdioClientTransport as SdkStdioTransport } from "@modelcontextprotocol/client/stdio";
+import { ToolExecutionError, errorMessage } from "../errors.js";
 import type { AciToolDef } from "../aci/types.js";
 import { toAciToolDef } from "./adapter.js";
 import type { McpServerConfig, McpStdioServer } from "./config.js";
@@ -59,13 +62,66 @@ export interface McpCallResult {
 }
 
 /**
+ * wayfinder #440 Stream B T8 — MCP resource 通道共享类型（manager 层 ↔ 工具层共享）。
+ *
+ * 与 p04 commit 2 同形：McpResource / McpResourceContent / McpPerServerState /
+ * ListResourcesOpts / ListResourcesResult / ReadResourceResult 全部 readonly,
+ * 聚合循环里 push 进 mutable 形态再冻结返回（见 MutableListResourcesResult）。
+ */
+export interface McpResource {
+  readonly server: string;
+  readonly uri: string;
+  readonly name: string;
+  readonly description?: string;
+  readonly mimeType?: string;
+}
+
+export interface McpPerServerState {
+  readonly server: string;
+  readonly state: McpServerState;
+  readonly nextCursor?: string;
+}
+
+export interface McpResourceContent {
+  readonly uri: string;
+  readonly mimeType?: string;
+  readonly text?: string;
+  readonly blob?: string;
+}
+
+export interface ListResourcesOpts {
+  readonly server?: string;
+  readonly cursor?: string;
+  readonly signal?: AbortSignal;
+}
+
+export interface ListResourcesResult {
+  readonly resources: ReadonlyArray<McpResource>;
+  readonly perServer: ReadonlyArray<McpPerServerState>;
+}
+
+/** 内部 mutable 形态 — 聚合循环里 push；返回前冻结成 ListResourcesResult。 */
+interface MutableListResourcesResult {
+  resources: McpResource[];
+  perServer: McpPerServerState[];
+}
+
+export interface ReadResourceResult {
+  readonly server: string;
+  readonly uri: string;
+  readonly contents: ReadonlyArray<McpResourceContent>;
+}
+
+/**
  * 抽象的 MCP client 句柄。让单测注入 stub，避免启动真子进程。
  *  - `connect()` → 建立到 server 的会话；
  *  - `listTools()` → 拉取工具清单；
  *  - `callTool(name, args, { timeout, signal, resetTimeoutOnProgress })`
  *  - `close()` → 关闭会话；
  *  - `onListChanged(tools)` → server 推送的工具变更；
- *  - `onClose()` → SDK 端连接关闭通知（用于触发 failed 不重连）。
+ *  - `onClose()` → SDK 端连接关闭通知（用于触发 failed 不重连）；
+ *  - `listResources({ cursor, signal })` → SDK 原语 `resources/list`（T8）。
+ *  - `readResource(uri, { signal })` → SDK 原语 `resources/read`（T8）。
  */
 export interface McpClientHandle {
   readonly connect: () => Promise<void>;
@@ -82,6 +138,28 @@ export interface McpClientHandle {
   readonly close: () => Promise<void>;
   readonly onListChanged: (cb: (tools: readonly SdkTool[]) => void) => void;
   readonly onClose: (cb: () => void) => void;
+  /**
+   * T8 — list resources exposed by the server. Optional `cursor` for pagination.
+   * Returns SDK `{ resources, nextCursor? }` shape — manager 透传到调用方，仅做
+   * 服务端归并。
+   */
+  readonly listResources: (opts?: {
+    readonly cursor?: string;
+    readonly signal?: AbortSignal;
+  }) => Promise<{
+    readonly resources: readonly SdkResource[];
+    readonly nextCursor?: string;
+  }>;
+  /**
+   * T8 — read a specific resource by URI. Returns SDK `{ contents }` shape
+   * (TextResourceContents | BlobResourceContents 联合)。
+   */
+  readonly readResource: (
+    uri: string,
+    opts?: {
+      readonly signal?: AbortSignal;
+    }
+  ) => Promise<{ readonly contents: readonly SdkResourceContents[] }>;
 }
 
 export interface McpManagerOptions {
@@ -120,6 +198,26 @@ export interface McpManager {
   readonly shutdown: () => Promise<void>;
   /** 当前状态拍快照（按 name 字母序）。 */
   readonly status: () => readonly McpServerStatus[];
+  /**
+   * T8 — list resources across all connected servers (or one if `server`
+   * specified). Aggregates per-server `listResources` calls,按 server 字母序
+   * 合并 `resources` 数组,并附 `perServer` 状态快照（含 `nextCursor`）。
+   * 未连接的 server 跳过，不抛；调用方用 `perServer[].state` 自检。SDK
+   * 抛错 → 该 server 抛 ToolExecutionError。
+   */
+  readonly listResources: (
+    opts?: ListResourcesOpts
+  ) => Promise<ListResourcesResult>;
+  /**
+   * T8 — read a resource by server + URI。`server` 与 `uri` 都必填。
+   * server 未配置 → 抛 ToolExecutionError。server 存在但未 connected /
+   * failed → 抛 ToolExecutionError（携带 slot 当前 state 上下文）。
+   */
+  readonly readResource: (
+    server: string,
+    uri: string,
+    opts?: { readonly signal?: AbortSignal }
+  ) => Promise<ReadResourceResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -261,9 +359,9 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
       } catch (err) {
         // 重注册冲突 → warn but 不破坏本 server；已注册的留任。
         console.warn(
-          `[mcp/manager] server '${slot.config.name}' list_changed re-registration skipped: ${
-            err instanceof Error ? err.message : String(err)
-          }`
+          `[mcp/manager] server '${slot.config.name}' list_changed re-registration skipped: ${errorMessage(
+            err
+          )}`
         );
       }
     });
@@ -273,7 +371,7 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
         await created.connect();
       } catch (err) {
         clearTimeout(timeoutHandle);
-        markFailed(slot, err instanceof Error ? err.message : String(err));
+        markFailed(slot, errorMessage(err));
         return;
       }
       // connect 期间可能已被超时器标 failed。仅"超时后迟到成功"允许继续走
@@ -307,7 +405,7 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
         slot.state = "connected";
       } catch (err) {
         clearTimeout(timeoutHandle);
-        markFailed(slot, err instanceof Error ? err.message : String(err));
+        markFailed(slot, errorMessage(err));
       }
     })();
   }
@@ -361,9 +459,9 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
           handle.close().catch((err) => {
             // close 失败仅 warn
             console.warn(
-              `[mcp/manager] server '${slot.config.name}' close error: ${
-                err instanceof Error ? err.message : String(err)
-              }`
+              `[mcp/manager] server '${slot.config.name}' close error: ${errorMessage(
+                err
+              )}`
             );
           })
         );
@@ -413,20 +511,140 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
     return out;
   }
 
-  const manager: McpManager = { start, reload, shutdown, status };
+  // -------------------------------------------------------------------------
+  // T8 — resource 通道 (list/read)
+  // -------------------------------------------------------------------------
+
+  /**
+   * 把单个 slot 的 resources 聚合进 out。未 connected slot → perServer 记录
+   * 当前 state（不抛）；SDK 抛错 → 抛 ToolExecutionError（屏蔽 SDK 类型）。
+   */
+  async function collectSlotResources(
+    slot: Slot,
+    opts: ListResourcesOpts | undefined,
+    out: MutableListResourcesResult
+  ): Promise<void> {
+    if (!slot.handle || slot.state !== "connected") {
+      out.perServer.push({ server: slot.config.name, state: slot.state });
+      return;
+    }
+    let result: {
+      readonly resources: readonly SdkResource[];
+      readonly nextCursor?: string;
+    };
+    try {
+      result = await slot.handle.listResources({
+        cursor: opts?.cursor,
+        // 把 caller 的 signal + slot 的 shutdown signal 合并，与 callTool 路径一致：
+        // shutdown() 取消时在途 listResources 收到 abort（SC16）。
+        signal: mergeAbort(opts?.signal, slot.callAbort?.signal),
+      });
+    } catch (err) {
+      throw new ToolExecutionError(
+        `mcp server '${slot.config.name}' listResources failed: ${errorMessage(err)}`
+      );
+    }
+    for (const r of result.resources) {
+      out.resources.push({
+        server: slot.config.name,
+        uri: r.uri,
+        name: r.name,
+        description: r.description,
+        mimeType: r.mimeType,
+      });
+    }
+    out.perServer.push({
+      server: slot.config.name,
+      state: slot.state,
+      nextCursor: result.nextCursor,
+    });
+  }
+
+  /** 按 server 名找 slot 并校验 connected；失败抛 ToolExecutionError。 */
+  function lookupConnectedSlot(server: string, op: string): Slot {
+    if (!server) {
+      throw new ToolExecutionError(`mcp ${op}: server name is required`);
+    }
+    const slot = slots.get(server);
+    if (!slot) {
+      throw new ToolExecutionError(`mcp server '${server}' not configured`);
+    }
+    if (!slot.handle || slot.state !== "connected") {
+      throw new ToolExecutionError(
+        `mcp server '${server}' not connected (state=${slot.state})`
+      );
+    }
+    return slot;
+  }
+
+  /**
+   * 聚合 listResources：`server` 缺省 → 全 server；指定 → 仅该 server。
+   * 跳过未 connected 的 slot（不抛，perServer 暴露当前 state）。
+   * SDK 抛错 → 抛 ToolExecutionError（manager 层屏蔽 SDK 错误类型）。
+   * `cursor` 透传给每个 server；不分页聚合（SDK 内部 listResources
+   * 在 `cursor` 缺席时已自动聚合，cursor 存在时按 page 协议透传）。
+   */
+  async function listResources(
+    opts?: ListResourcesOpts
+  ): Promise<ListResourcesResult> {
+    const out: MutableListResourcesResult = { resources: [], perServer: [] };
+    // 按 name 字母序遍历，确保聚合顺序测试稳定
+    const ordered = [...slots.values()].sort((a, b) =>
+      a.config.name.localeCompare(b.config.name)
+    );
+    for (const slot of ordered) {
+      if (opts?.server && slot.config.name !== opts.server) continue;
+      await collectSlotResources(slot, opts, out);
+    }
+    return out;
+  }
+
+  /**
+   * 读单个 server 的 resource URI。server 未配置（config 内不存在）
+   * → 抛 ToolExecutionError "not configured"。server 存在但未 connected
+   * → 抛 ToolExecutionError（带当前 state）。SDK 抛错 → 抛 ToolExecutionError。
+   */
+  async function readResource(
+    server: string,
+    uri: string,
+    opts?: { readonly signal?: AbortSignal }
+  ): Promise<ReadResourceResult> {
+    if (!uri) {
+      throw new ToolExecutionError(
+        `mcp readResource: uri is required (server='${server}')`
+      );
+    }
+    const slot = lookupConnectedSlot(server, "readResource");
+    let raw: { readonly contents: readonly SdkResourceContents[] };
+    try {
+      raw = await slot.handle!.readResource(uri, {
+        // 把 caller 的 signal + slot 的 shutdown signal 合并，与 callTool 路径一致：
+        // shutdown() 取消时在途 readResource 收到 abort（SC16）。
+        signal: mergeAbort(opts?.signal, slot.callAbort?.signal),
+      });
+    } catch (err) {
+      throw new ToolExecutionError(
+        `mcp server '${server}' readResource('${uri}') failed: ${errorMessage(err)}`
+      );
+    }
+    return {
+      server,
+      uri,
+      contents: raw.contents.map(projectResourceContent),
+    };
+  }
+
+  const manager: McpManager = {
+    start,
+    reload,
+    shutdown,
+    status,
+    listResources,
+    readResource,
+  };
 
   // 测试钩子：暴露 slot 内 handle 数组（用于 in-flight callTool + 触发 list_changed）。
-  // 生产路径由 createRealClient 实现，无副作用。
-  (manager as unknown as { _handles: McpClientHandle[] })._handles = [];
-  const wire = (slot: Slot) => {
-    const orig = slot.handle;
-    if (orig)
-      (manager as unknown as { _handles: McpClientHandle[] })._handles.push(
-        orig
-      );
-  };
-  // We need to intercept after boot resolves; simplest is to expose via status reads.
-  // Tests poke _handles directly after connect; we keep pointer fresh via wrapper.
+  // live getter：每次读时从 slots 收集当前 handle，避免静态快照过期。
   Object.defineProperty(manager, "_handles", {
     get() {
       const arr: McpClientHandle[] = [];
@@ -434,7 +652,6 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
       return arr;
     },
   });
-  void wire;
 
   return Object.freeze(manager);
 }
@@ -542,6 +759,28 @@ export function createRealClient(server: McpServerConfig): McpClientHandle {
       );
       return { result };
     },
+    // T8 — 转发 resources/list + resources/read SDK 原语
+    listResources: async (opts) => {
+      const result = await sdk.listResources(
+        { cursor: opts?.cursor } as never,
+        { signal: opts?.signal } as never
+      );
+      const page = result as { resources: SdkResource[]; nextCursor?: string };
+      return {
+        resources: (page.resources ?? []) as readonly SdkResource[],
+        nextCursor: page.nextCursor,
+      };
+    },
+    readResource: async (uri, opts) => {
+      const result = await sdk.readResource(
+        { uri } as never,
+        { signal: opts?.signal } as never
+      );
+      const page = result as { contents: SdkResourceContents[] };
+      return {
+        contents: (page.contents ?? []) as readonly SdkResourceContents[],
+      };
+    },
     close: async () => {
       try {
         await sdk.close();
@@ -583,10 +822,24 @@ function sanitize(value: string): string {
 }
 
 /**
+ * ResourceContents 是 TextResourceContents | BlobResourceContents 联合
+ * —— 仅透传存在的字段,类型守卫后在对象文案层统一形态。
+ */
+function projectResourceContent(c: SdkResourceContents): McpResourceContent {
+  const text = (c as { text?: string }).text;
+  const blob = (c as { blob?: string }).blob;
+  return {
+    uri: c.uri,
+    mimeType: c.mimeType,
+    text,
+    blob,
+  };
+}
+
+/**
  * 合并两个 AbortSignal:任一被 abort → 结果被 abort。
  * 任一为 undefined → 返回另一个的引用。
- * Node 18+ 的 AbortSignal.any 支持原生的多 signal 合并,在更老的运行时
- * 我们手写一个 fallback(本仓库 targetsNode >= 20,AbortSignal.any 一定可用)。
+ * package.json engines.node >= 20 → AbortSignal.any 一定可用（无 fallback）。
  */
 function mergeAbort(
   a: AbortSignal | undefined,
@@ -597,13 +850,5 @@ function mergeAbort(
   if (!b) return a;
   // 两者都已 aborted → 直接返回 a(行为等价)
   if (a.aborted || b.aborted) return a;
-  if (typeof AbortSignal.any === "function") {
-    return AbortSignal.any([a, b]);
-  }
-  // 兜底:自己造 controller
-  const ctrl = new AbortController();
-  const onAbort = () => ctrl.abort();
-  a.addEventListener("abort", onAbort, { once: true });
-  b.addEventListener("abort", onAbort, { once: true });
-  return ctrl.signal;
+  return AbortSignal.any([a, b]);
 }
