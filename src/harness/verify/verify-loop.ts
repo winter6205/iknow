@@ -50,14 +50,16 @@ import {
   evaluateTrend,
   type TrendResult,
 } from "./verdict.js";
-import type {
-  ClassifierCheck,
-  EvidenceContext,
-  EvidenceReport,
-  EvidenceVerdict,
-  VerificationRecord,
-  Verdict,
-  VerifyConfig,
+import {
+  REASON_ABORT_TYPED,
+  REASON_UNVERIFIED,
+  type ClassifierCheck,
+  type EvidenceContext,
+  type EvidenceReport,
+  type EvidenceVerdict,
+  type VerificationRecord,
+  type Verdict,
+  type VerifyConfig,
 } from "./types.js";
 // 沙箱执行体 (M4 拆分): RunVerifyFn / makeDefaultRunVerify / runVerifyOnce 落
 // sandbox-run.ts, 本文件只做判定编排 (不 import sandbox 层)。
@@ -637,11 +639,17 @@ function buildResult(opts: {
 
 /**
  * 单次分类器判定 (SC1 command-absent 分支执行体)。
- * 归一化规则 (spec SC5/A5):
+ * 归一化规则 (spec SC5/A5 + #449b B7 SC7/SC8):
  *   - 用户 abort → aborted;
  *   - transport 错 (status:"failed", reason ∈ crashed/timeout/protocolError)
- *     → verdict=unstable, 不注入信封 (fail-open, 不静默放行);
- *   - schema 错 (parseClassifierResult 收敛为 abort) → verdict=unstable;
+ *     → verdict=unstable, reason=REASON_ABORT_TYPED (判官自身故障统一 abort),
+ *     不注入信封 (fail-open, 不静默放行);
+ *   - schema 错 (parseClassifierResult 收敛为 abort) → verdict=unstable,
+ *     reason=REASON_ABORT_TYPED, 不注入信封;
+ *   - {kind:"unverified"} (判官读完证据仍不足、拒绝猜 PASS/FAIL, B7 第 4 态)
+ *     → verdict=unstable, signature="classifier-unverified",
+ *     reason=REASON_UNVERIFIED, 不注入信封 —— 与 abort 严格区分 (SC7 typed
+ *     reason 落盘), 二者都走 decideRoundAction stop → outcome=unstable;
  *   - {kind:"pass"} → verdict=pass;
  *   - {kind:"fail"} → verdict=true-failure + reason/missing (信封消费)。
  */
@@ -678,23 +686,26 @@ async function runClassifierOnce(opts: {
     // (outcome=aborted), 不得按 transport 错降级为 unstable。
     if (opts.signal?.aborted) return { aborted: true };
     // // EXIT: seam throw (非用户 abort) = transport 错 → fail-open unstable,
-    // 不注入失败信封 (不静默放过)。
+    // 不注入失败信封 (不静默放过); reason=REASON_ABORT_TYPED (判官自身故障,
+    // 与 schema 降级统一, B7 SC7 typed reason 区分落盘)。
     return {
       verdict: "unstable",
       exitCode: 1,
       signature: "classifier-transport-error",
       outputText: "",
+      reason: REASON_ABORT_TYPED,
     };
   }
   if (opts.signal?.aborted) return { aborted: true };
   if (envelope.status === "failed") {
     // // EXIT: worker 进程级失败 (crashed/timeout/protocolError) = transport 错
-    // → fail-open unstable, 不注入失败信封。
+    // → fail-open unstable, 不注入失败信封; reason=REASON_ABORT_TYPED (同上)。
     return {
       verdict: "unstable",
       exitCode: 1,
       signature: "classifier-transport-error",
       outputText: "",
+      reason: REASON_ABORT_TYPED,
     };
   }
   // SC8 运行时保证: 判官输出宿主侧截断后解析 (prompt 不写长度, A8; 截断不
@@ -703,12 +714,26 @@ async function runClassifierOnce(opts: {
     truncateClassifierOutput(envelope.result)
   );
   if (parsed.kind === "abort") {
-    // // EXIT: schema 错 / 判官判不了 → fail-open unstable, 不注入失败信封。
+    // // EXIT: schema 错 / 判官判不了 → fail-open unstable, 不注入失败信封;
+    // reason=REASON_ABORT_TYPED (B7 SC7 typed reason 落盘)。
     return {
       verdict: "unstable",
       exitCode: 1,
       signature: "classifier-abort",
       outputText: "",
+      reason: REASON_ABORT_TYPED,
+    };
+  }
+  if (parsed.kind === "unverified") {
+    // #449b B7: unverified 是判官诚实停法 (读完证据仍不足, 拒绝猜 PASS/FAIL),
+    // 不是判官故障 —— signature/reason 与 abort 严格区分 (SC7); 同样直接走
+    // decideRoundAction stop → outcome=unstable, 不注入信封 (SC8, 零第 2 轮)。
+    return {
+      verdict: "unstable",
+      exitCode: 1,
+      signature: "classifier-unverified",
+      outputText: "",
+      reason: REASON_UNVERIFIED,
     };
   }
   if (parsed.kind === "pass") {

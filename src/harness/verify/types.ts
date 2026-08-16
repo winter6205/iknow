@@ -20,11 +20,15 @@ export interface ClassifierCheck {
 }
 
 /**
- * 分类器三态联合 (spec A4 + Code Style)。
+ * 分类器四态联合 (spec A4 + Code Style + #449b B7 SC7)。
  *  - pass：判官认为任务完成（含非空 evidence）；
  *  - fail：判官认为任务未完成，列出 missing（spec A8 信封消费 missing[]）；
  *  - abort：判官跑完了但判不了——transport / schema 错 / pass+空 evidence 静默降级
- *    都映射到此态（"判官判不了"，不是任务失败）。
+ *    都映射到此态（"判官判不了"，不是任务失败）；
+ *  - unverified (#449b B7)：判官读完证据认为不足、拒绝猜 PASS/FAIL（G5-1 决议
+ *    第 4 态，与 abort 严格区分——unverified = 判官自身的诚实停法，不是判官故障）。
+ *    reason 必填非空；evidence 允许缺省（可能没跑命令所以无 evidence，与 abort
+ *    同款可选纪律）；consumer 直接映射 unstable 停法（SC7/SC8，不注入信封）。
  *
  * 降级规则：`{kind:"pass", evidence:[]}` 在 verify-loop 内部被 parseClassifierResult
  * 静默改写为 abort（reason 补"证据缺失"）；子代理 prompt 显式禁止该写法。
@@ -41,7 +45,8 @@ export type ClassifierResult =
       readonly missing: readonly string[];
       readonly evidence: readonly ClassifierCheck[];
     }
-  | { readonly kind: "abort"; readonly reason: string };
+  | { readonly kind: "abort"; readonly reason: string }
+  | { readonly kind: "unverified"; readonly reason: string };
 
 /** 确认阶梯结果 (confirmFailure)。flaky = 全量复跑过, 放行不修正。 */
 export type ConfirmationVerdict = "flaky" | "unstable" | "true-failure";

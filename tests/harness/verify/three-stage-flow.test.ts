@@ -965,3 +965,251 @@ describe("evidence-aware judge input + record trace (#449b B6)", () => {
     assert.equal(ctx.checkerVerdict, "EVIDENCE_INSUFFICIENT");
   });
 });
+
+/* ------------------------------ B7: 判官四态停法 (unverified/abort/pass) ------------------------------ */
+
+/**
+ * #449b B7: runClassifierOnce 四态映射 + unverified/abort 停法 (SC7/SC8)。
+ *   - 判官 unverified → { verdict: "unstable", signature: "classifier-unverified",
+ *     reason: "unverified" } → decideRoundAction stop → outcome=unstable,
+ *     零信封注入 (runFn 恰 1 次, 无第 2 轮);
+ *   - 判官 abort (schema 降级) / transport 错 → { verdict: "unstable",
+ *     signature: "classifier-abort" / "classifier-transport-error",
+ *     reason: "abort" } → outcome=unstable, 零信封注入 (reason 与 unverified
+ *     区分落盘, SC7);
+ *   - 判官 pass → outcome=passed + reason 缺席 (Postel, pass 不落 reason)。
+ *
+ * fixture: 判官路径 (command="") + 无 bash 无探测 (text-only) → INSUFFICIENT
+ * 直落判官, 不触发补跑信封 (probeVerifyCommand([]) = null)。
+ */
+describe("judge four-state stop behavior (#449b B7)", () => {
+  /** text-only 判官路径 runFn: 每次调用都返回 completed (含 priorMessages)。 */
+  function judgePathRunFn(): {
+    readonly runFn: VerifyLoopOptions["runFn"];
+    readonly calls: () => ReadonlyArray<RecordedCall>;
+  } {
+    const calls: RecordedCall[] = [];
+    const runFn: VerifyLoopOptions["runFn"] = async (userText, runOpts) => {
+      const prior = runOpts?.priorMessages ?? [];
+      const lastUserMsg = [...prior].reverse().find((m) => m.role === "user");
+      const lastUserText = lastUserMsg
+        ? lastUserMsg.content
+            .map((b) => (b.type === "text" ? b.text : ""))
+            .join("")
+        : undefined;
+      calls.push({ userText, priorCount: prior.length, lastUserText });
+      return stubRun({
+        text: "implemented but no test output",
+        stopReason: "completed",
+        priorMessages: prior,
+        userText,
+      });
+    };
+    return { runFn, calls: () => calls };
+  }
+
+  it("判官 unverified → outcome=unstable + reason='unverified' + 0 信封注入 (runFn 恰 1 次)", async () => {
+    const { runFn, calls } = judgePathRunFn();
+    const { runClassifier, calls: classifierCalls } = makeClassifierSpy([
+      okEnvelope({
+        kind: "unverified",
+        reason: "evidence insufficient to decide PASS or FAIL",
+      }),
+    ]);
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runClassifier,
+        config: { command: "" },
+        sessionId: "b7-unverified",
+      })
+    );
+    assert.equal(classifierCalls().length, 1, "INSUFFICIENT 落判官恰 1 次");
+    assert.equal(out.outcome, "unstable", "unverified → fail-open unstable");
+    assert.equal(out.rounds, 1);
+    assert.equal(out.records.length, 1);
+    assert.equal(out.records[0]!.verdict, "unstable");
+    assert.equal(
+      out.records[0]!.signature,
+      "classifier-unverified",
+      "signature 区分 unverified (SC7)"
+    );
+    assert.equal(
+      out.records[0]!.reason,
+      "unverified",
+      "typed reason REASON_UNVERIFIED 落盘 (SC7)"
+    );
+    assert.equal(
+      out.records[0]!.finalOutcome,
+      "unstable",
+      "decideRoundAction stop finalOutcome"
+    );
+    // 0 信封注入: unstable 走 stop, 不进 buildFailureEnvelope (decideRoundAction
+    // 只在 continue 调它); runFn 恰 1 次 = 无第 2 轮。首轮无 priorMessages →
+    // lastUserText 为 undefined (无任何注入), 用 ?? "" 归一后断言无信封文本。
+    assert.equal(calls().length, 1, "runFn 只调 1 次, 无修正/补跑轮");
+    assert.equal(
+      (calls()[0]!.lastUserText ?? "").includes("[VALIDATION FAILED]"),
+      false,
+      "unverified 不注入失败信封"
+    );
+    assert.equal(
+      (calls()[0]!.lastUserText ?? "").includes("[VERIFY: rerun needed]"),
+      false,
+      "unverified 不注入补跑信封 (无 probe 命令, text-only fixture)"
+    );
+    // 终局消息历史也无任何信封 (unstable 停法零注入, 与 classifier-loop SC5 同款断言面)。
+    const allUserText = out.result.messages
+      .filter((m) => m.role === "user")
+      .map((m) =>
+        m.content.map((b) => (b.type === "text" ? b.text : "")).join("")
+      )
+      .join("\n");
+    assert.equal(allUserText.includes("[VALIDATION FAILED]"), false);
+    assert.equal(allUserText.includes("[VERIFY: rerun needed]"), false);
+  });
+
+  it("判官 abort (schema 降级 {kind:'abort'}) → outcome=unstable + reason='abort' + 0 信封注入", async () => {
+    const { runFn, calls } = judgePathRunFn();
+    const { runClassifier } = makeClassifierSpy([
+      okEnvelope({ kind: "abort", reason: "judge could not decide" }),
+    ]);
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runClassifier,
+        config: { command: "" },
+        sessionId: "b7-abort",
+      })
+    );
+    assert.equal(out.outcome, "unstable", "abort → fail-open unstable");
+    assert.equal(out.rounds, 1);
+    assert.equal(out.records.length, 1);
+    assert.equal(out.records[0]!.verdict, "unstable");
+    assert.equal(
+      out.records[0]!.signature,
+      "classifier-abort",
+      "signature 区分 abort (SC7)"
+    );
+    assert.equal(
+      out.records[0]!.reason,
+      "abort",
+      "typed reason REASON_ABORT_TYPED 落盘 (SC7)"
+    );
+    assert.equal(
+      out.records[0]!.reason,
+      "abort",
+      "reason 与 unverified 区分落盘"
+    );
+    assert.equal(calls().length, 1, "abort 零信封注入, runFn 恰 1 次");
+  });
+
+  it("判官 abort (畸形 JSON, schema 降级) → outcome=unstable + reason='abort' + 0 信封注入", async () => {
+    const { runFn, calls } = judgePathRunFn();
+    const { runClassifier } = makeClassifierSpy([
+      { status: "ok", result: "not-json-at-all", summary: "judge done" },
+    ]);
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runClassifier,
+        config: { command: "" },
+        sessionId: "b7-abort-json",
+      })
+    );
+    assert.equal(out.outcome, "unstable");
+    assert.equal(out.records.length, 1);
+    assert.equal(
+      out.records[0]!.reason,
+      "abort",
+      "schema 降级 reason 统一 abort"
+    );
+    assert.equal(out.records[0]!.signature, "classifier-abort");
+    assert.equal(calls().length, 1, "schema 降级零信封注入");
+  });
+
+  it("transport 错 (envelope.status='failed') → outcome=unstable + reason='abort' (判官自身故障统一 abort)", async () => {
+    const { runFn, calls } = judgePathRunFn();
+    const { runClassifier } = makeClassifierSpy([
+      {
+        status: "failed",
+        reason: "crashed",
+        summary: "worker died",
+        result: "",
+      },
+    ]);
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runClassifier,
+        config: { command: "" },
+        sessionId: "b7-transport",
+      })
+    );
+    assert.equal(out.outcome, "unstable", "transport 错 → fail-open unstable");
+    assert.equal(out.records.length, 1);
+    assert.equal(
+      out.records[0]!.signature,
+      "classifier-transport-error",
+      "signature 区分 transport 错"
+    );
+    assert.equal(
+      out.records[0]!.reason,
+      "abort",
+      "transport 与 schema 降级同为判官自身故障, reason 统一 abort"
+    );
+    assert.equal(calls().length, 1, "transport 错零信封注入");
+  });
+
+  it("判官 unverified: evidenceVerdict 仍是 checker 态 EVIDENCE_INSUFFICIENT (INSUFFICIENT 轮 B4 合并, Postel)", async () => {
+    // unverified 是判官态, 不是 checker 态: evidenceVerdict 反映的是 B4 前级
+    // checkEvidence 的 INSUFFICIENT (判官只在 INSUFFICIENT 分支被调), 两者是
+    // 不同字段, 并存于 record —— judge reason=unverified + checker
+    // evidenceVerdict=INSUFFICIENT 互不覆盖。
+    const { runFn } = judgePathRunFn();
+    const { runClassifier } = makeClassifierSpy([
+      okEnvelope({ kind: "unverified", reason: "cannot decide" }),
+    ]);
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runClassifier,
+        config: { command: "" },
+        sessionId: "b7-unverified-evidence",
+      })
+    );
+    assert.equal(out.outcome, "unstable");
+    assert.equal(out.records[0]!.reason, "unverified");
+    assert.equal(
+      out.records[0]!.evidenceVerdict,
+      "EVIDENCE_INSUFFICIENT",
+      "INSUFFICIENT 轮 B4 合并 evidenceVerdict (unverified ≠ checker 态)"
+    );
+    assert.deepEqual(out.records[0]!.gamingSignals, []);
+  });
+
+  it("判官 pass → outcome=passed + records[0].reason 缺席 (Postel, pass 不落 reason)", async () => {
+    const { runFn, calls } = judgePathRunFn();
+    const { runClassifier } = makeClassifierSpy([
+      passEnvelope("evidence shows build green"),
+    ]);
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runClassifier,
+        config: { command: "" },
+        sessionId: "b7-pass",
+      })
+    );
+    assert.equal(out.outcome, "passed");
+    assert.equal(out.rounds, 1);
+    assert.equal(out.records.length, 1);
+    assert.equal(out.records[0]!.verdict, "pass");
+    assert.equal(
+      out.records[0]!.reason,
+      undefined,
+      "pass 不落 reason (Postel 可选字段仅存在时写盘)"
+    );
+    assert.equal(calls().length, 1, "pass 终局, runFn 恰 1 次");
+  });
+});
