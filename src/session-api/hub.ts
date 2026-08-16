@@ -778,22 +778,20 @@ export class SessionHub {
                     priorMessages: o?.priorMessages ?? priorMessages,
                     onStream: o?.onStream ?? wrappedOnStream,
                   }),
-                // #408 T4 + #458 T8 + #449 B8: verify-loop's task field =
-                // #459 formula `goal.text ?? taskFocus.text ?? query`
-                // (SC5 编排闭环)。Session-level goal wins; empty goal.text
-                // is treated as absent (defensive — re-feeding "" to the
-                // model on every round would break the loop). Goal-absent
-                // sessions fall to the taskFocus segment (#458 data-side),
-                // empty taskFocus.text likewise skips to query. Sessions
-                // without goal/taskFocus stay byte-identical to pre-#408
-                // (query).
+                // #408 T4 + #449 B8 (修订 per #473): verify-loop's task
+                // field = `goal.text ?? query`. The taskFocus segment is
+                // DELIBERATELY removed from the verify input (#473): taskFocus
+                // is the stable focus anchor (seeded once, never switched by
+                // plain queries per OQ2), so feeding it into every verify
+                // round made a new task B re-verify the stale task A and
+                // short-circuit PASS. Verify must run the pinned mission
+                // (goal) or the CURRENT query — never the stable focus.
+                // taskFocus keeps its compact-boundary rendering + /goal
+                // status roles (data-side only, lifecycle unchanged).
                 userText:
                   session.goal !== undefined && session.goal.text.length > 0
                     ? session.goal.text
-                    : session.taskFocus !== undefined &&
-                        session.taskFocus.text.length > 0
-                      ? session.taskFocus.text
-                      : query,
+                    : query,
                 config: this.verifyConfig,
                 sessionId: conversationId,
                 signal: opts.signal,

@@ -1,7 +1,11 @@
 /**
- * #408 T4 + #458 T8 + #449 B8: verify-loop seam — userText = #459 formula
- * `goal.text ?? taskFocus.text ?? query`, plus the SC3 数据侧 (data-side)
- * three-segment fallback readiness.
+ * #408 T4 + #449 B8 (修订 per #473): verify-loop seam — userText =
+ * `goal.text ?? query`. The taskFocus segment was removed from the CONSUMER
+ * side (#473): taskFocus is the stable focus anchor (seeded once, never
+ * switched by plain queries per OQ2), so feeding it into the verify input
+ * made a new task B re-verify the stale task A and short-circuit PASS.
+ * The DATA-side three-segment formula `goal.text ?? taskFocus.text ?? query`
+ * (SC3, #458 T8) is UNCHANGED — see the dedicated SC3 describe block below.
  *
  * History:
  *   - #408 T4: hub.ts userText seam = `goal.text ?? query`. user_initial
@@ -11,11 +15,10 @@
  *     To keep T4 assertions valid as unit-level tests of the **seam
  *     binding** itself, fixtures in this file use `source === "user_pin"`
  *     — the only `GoalSource` value that survives load as a goal (SC1).
- *   - #458 T8 (SC3 acceptance): 任务公式
- *     `goal.text ?? taskFocus.text ?? query` 数据侧就位供 #449 消费。
- *   - #449 B8: hub.ts userText seam 升级到 #459 公式三段 fallback
- *     (`goal.text ?? taskFocus.text ?? query`, 空字符串按缺席算),
- *     消费端 taskFocus 段落地。SC5 (verify-loop 编排闭环) 接线之一。
+ *   - #449 B8: hub.ts userText seam 升级到三段 fallback
+ *     (`goal.text ?? taskFocus.text ?? query`)。
+ *   - #473 (this revision): 消费端 taskFocus 段移除 → `goal.text ?? query`。
+ *     原因:taskFocus 稳定焦点锚导致新任务被旧焦点遮蔽。
  *
  * DATA-side three-segment formula 仍由本文件独立断言 (从 loaded session
  * 派生 final-task-text,不经过 verify-loop seam),与 CONSUMER-side seam
@@ -260,12 +263,13 @@ describe("verify-loop seam: userText = goal.text ?? query (#408 T4 / #458 T8)", 
     assert.equal(after.goal?.source, "user_pin");
   });
 
-  // -- #449 B8 (SC5): userText seam 升级到 #459 三段 fallback
-  // (goal.text ?? taskFocus.text ?? query)。#458 T8 仅就位数据侧,
-  // 消费端 (hub.ts userText) 由本块接管。empty-string 在每段都按缺席算
-  // (与既有 empty-goal-skip 纪律一致),避免把空文本喂给 verify-loop。
+  // -- #449 B8 (SC5, 修订 per #473): userText 消费端公式
+  // `goal.text ?? query`。taskFocus 段已从 verify 输入移除 (#473 根因:
+  // taskFocus 是稳定焦点锚,喂进 verify 会让新任务被旧焦点遮蔽而误判
+  // PASS)。数据侧三段公式(SC3)见下方独立 describe 块,不受影响。
+  // empty-goal-skip 纪律不变(空文本不喂 verify-loop)。
 
-  it("goal absent + taskFocus present → userText === taskFocus.text (#459 三段 fallback 第二段, #449 B8)", async () => {
+  it("goal absent + taskFocus present → userText === query (taskFocus 不遮蔽当前 query, #473)", async () => {
     const id = "taskfocus-binds";
     await seedSession({
       id,
@@ -284,12 +288,12 @@ describe("verify-loop seam: userText = goal.text ?? query (#408 T4 / #458 T8)", 
     expect(runVerifyLoopMock).toHaveBeenCalledTimes(1);
     assert.equal(
       capturedUserText(),
-      "TF: implement AST visitors",
-      "goal 缺席 + taskFocus 在场 → userText 应取 taskFocus.text"
+      "Q",
+      "goal 缺席 + taskFocus 在场 → userText 应取当前 query (taskFocus 不进 verify 输入, #473)"
     );
   });
 
-  it("goal.text === '' + taskFocus present → userText === taskFocus.text (空 goal 按缺席算, #449 B8)", async () => {
+  it("goal.text === '' + taskFocus present → userText === query (空 goal 按缺席算 → 兜底 query, #473)", async () => {
     const id = "empty-goal-taskfocus-binds";
     await seedSession({
       id,
@@ -316,12 +320,12 @@ describe("verify-loop seam: userText = goal.text ?? query (#408 T4 / #458 T8)", 
     expect(runVerifyLoopMock).toHaveBeenCalledTimes(1);
     assert.equal(
       capturedUserText(),
-      "TF takes over empty goal",
-      "goal.text === '' 应跳过第一段 → 命中 taskFocus 第二段"
+      "Q",
+      "goal.text === '' 跳过第一段 → 兜底 query (taskFocus 不进 verify 输入, #473)"
     );
   });
 
-  it("taskFocus.text === '' → falls back to query (空 taskFocus 按缺席算, #449 B8)", async () => {
+  it("taskFocus.text === '' → falls back to query (空 taskFocus 不进 verify 输入, #449 B8)", async () => {
     const id = "empty-taskfocus";
     await seedSession({
       id,
@@ -338,11 +342,7 @@ describe("verify-loop seam: userText = goal.text ?? query (#408 T4 / #458 T8)", 
     });
     assert.equal(res.turn.answer.stopReason, "completed");
     expect(runVerifyLoopMock).toHaveBeenCalledTimes(1);
-    assert.equal(
-      capturedUserText(),
-      "Q",
-      "taskFocus.text === '' 应跳过 → 兜底 query (与 empty-goal-skip 同纪律)"
-    );
+    assert.equal(capturedUserText(), "Q", "taskFocus.text === '' → 兜底 query");
   });
 });
 
