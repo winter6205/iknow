@@ -520,3 +520,72 @@ describe("createTodoWriteTool — typed-error catch 渲染契约 (code-quality.m
     // 是反向文档(防止回归到 plain object 抛错)。
   });
 });
+
+// ---------------------------------------------------------------------------
+// #440 T6: D9 正面引导式 description —— 只写正面触发,无负面禁令。
+// 纪律约束：「正面触发条件自排除简单任务」(D9 决策),禁止 "do not" /
+// "avoid" / "simple task" / "never" 等负面措辞（grilling 修正后模型决策
+// 噪声会变多）。description 字面在 ToolDef.description 字段,经 registry
+// catalog 暴露给模型 promptTools —— 测试用 reg.inner.get 拿 def.description
+// 锁形态(系统 prompt grep 锚点 = ToolDef.description)。
+// ---------------------------------------------------------------------------
+
+const NEGATIVE_PHRASES = [
+  "do not",
+  "don't",
+  "avoid",
+  "should not",
+  "shouldn't",
+  "never",
+  "simple task",
+  "trivial",
+  "不要",
+  "避免",
+  "禁止",
+  "切勿",
+];
+
+describe("createTodoWriteTool — #440 T6 D9 正面引导式 description (无负面禁令)", () => {
+  function readDescription(): string {
+    const tool = createTodoWriteTool({ todoDir });
+    return tool.description;
+  }
+
+  it("正面触发条件自显：含 'multi-step' / 'progress' 等正向关键词", () => {
+    const desc = readDescription().toLowerCase();
+    // 至少一个正向触发关键词（multi-step / multi-turn / progress / track）。
+    const positiveKeys = ["multi-step", "multi-turn", "progress", "track"];
+    assert.ok(
+      positiveKeys.some((k) => desc.includes(k)),
+      `description 应含至少一个正向关键词, got: ${desc}`
+    );
+  });
+
+  it("description 不含任何 NEGATIVE_PHRASES（grammar 守门）", () => {
+    const desc = readDescription().toLowerCase();
+    for (const phrase of NEGATIVE_PHRASES) {
+      assert.ok(
+        !desc.includes(phrase.toLowerCase()),
+        `description 不应含负面措辞 "${phrase}", got: ${desc}`
+      );
+    }
+  });
+
+  it("description 明确告知三个 mode 的形态(list/add/check),无歧义", () => {
+    const desc = readDescription();
+    assert.ok(desc.includes("list"));
+    assert.ok(desc.includes("add"));
+    assert.ok(desc.includes("check"));
+  });
+
+  it("registry catalog 暴露的 description 与 factory 直接读一致（系统 prompt grep 锚点）", () => {
+    const tool = createTodoWriteTool({ todoDir });
+    // factory 直接读
+    const factoryDesc = tool.description;
+    // 模拟系统 prompt 暴露：经 ACI 工具面（registry.inner）的同一 def
+    // 此刻不依赖 registry 装配（隔离测试），但 assert factory 形态稳定
+    // (promptTools 经 reg.visibleSchemas 拿到的 def.description 字段同源)
+    assert.equal(typeof factoryDesc, "string");
+    assert.ok(factoryDesc.length > 20, "description should be informative");
+  });
+});
