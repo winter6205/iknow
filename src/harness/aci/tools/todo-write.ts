@@ -80,7 +80,7 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
   return Object.freeze({
     name: "todo_write",
     description:
-      "Maintain a session-scoped todo ledger at <session>/todos.md for tracking progress on multi-step, multi-turn complex tasks. Use mode=list to read all current items, mode=add to append an open `- [ ] <item>` line, mode=check to flip the first exact-match `- [ ] <item>` line to `- [x] <item>`. Designed for tasks spanning multiple turns where progress needs to persist between rounds.",
+      "Maintain a session-scoped todo ledger at <session>/todos.md for tracking progress on multi-step, multi-turn complex tasks. Use mode=list to read all current items, mode=add to append an open `- [ ] <item>` line, mode=check to flip the first exact-match `- [ ] <item>` line to `- [x] <item>`. Designed for tasks across multiple turns where progress needs to persist between rounds.",
     inputSchema: {
       type: "object",
       properties: {
