@@ -30,10 +30,21 @@
  * v5 (#408, additive): optional `goal?: GoalState` field carries the session-
  * level goal (user's intent for the whole session). Additive: v4 files
  * sanitize to `goal: undefined` (absent) and the field round-trips byte-
- * identical for v5 files. Source union is `user_initial | user_pin |
- * model_proposed` (model_proposed is reserved, no writer in this spec); status
+ * identical for v5 files. Source union is `user_initial | user_pin`; status
  * union is `active | achieved | aborted | superseded`. The hub owns the only
  * write path; `goal.text` is the verify-loop's task field when present.
+ *
+ * #458 T2 (goal/taskFocus split, SC1/SC2/SC4): `GoalSource` is shrunk to
+ * `user_initial | user_pin` — the removed model-propose slot has no writer
+ * (T6 model-propose/confirm channel is zero-landing). Legacy disk values
+ * that carried the removed slot now fail `isValidGoal` → sanitize throws
+ * `schema_invalid` (an executable migrate — never silently dropped). A new
+ * optional `taskFocus?: TaskFocusState` field carries the deterministic
+ * task focus (#459 term A): on load, a legacy top-level goal with
+ * `source === "user_initial"` migrates to `taskFocus` (seeded via
+ * `seedTaskFocus`) and the goal field is dropped; `user_pin` goals survive
+ * verbatim. `MAX_GOAL_CHARS` + `validateGoalText` gate the /goal and
+ * `## GOAL:` write paths at 2000 chars.
  */
 import type { AnthropicNativeMessage } from "../../harness/index.js";
 
@@ -60,8 +71,10 @@ export interface CheckpointRecord {
  *  Carries the active goal (the verify-loop's task field binds here when
  *  present, falling back to the current-turn query otherwise) plus a history
  *  of superseded goals from prior re-pins. The hub owns the only write path;
- *  `goal.text` is read-only to all other code. */
-export type GoalSource = "user_initial" | "user_pin" | "model_proposed";
+ *  `goal.text` is read-only to all other code. (#458 T2: source union shrunk
+ *  to `user_initial | user_pin`; legacy disk values carrying the removed
+ *  slot fail validation and sanitize throws `schema_invalid`.) */
+export type GoalSource = "user_initial" | "user_pin";
 export type GoalStatus = "active" | "achieved" | "aborted" | "superseded";
 
 export interface GoalHistoryEntry {
@@ -78,6 +91,25 @@ export interface GoalState {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly history?: ReadonlyArray<GoalHistoryEntry>;
+}
+
+/** v5 (#458 T2): deterministic task focus (#459 term A) — what the current
+ *  turn is working on. Distinct from `goal` (the user's pinned intent):
+ *  taskFocus is seeded from the first user message, re-pinned via
+ *  `## GOAL:` / `/goal`, and cleared via `/goal clear`, all through the
+ *  pure `seedTaskFocus` helper (T1 OQ2). The verify-loop binds
+ *  `goal.text ?? taskFocus.text ?? query` (SC3). Main-entry text is sliced
+ *  to 500 chars on seed; history entries keep the full text (only the main
+ *  entry is truncated — T1 OQ2: "历史不截断，仅主条目 text slice 500"). */
+export interface TaskFocusHistoryEntry {
+  readonly text: string;
+  readonly updatedAt: string;
+}
+
+export interface TaskFocusState {
+  readonly text: string;
+  readonly updatedAt: string;
+  readonly history?: ReadonlyArray<TaskFocusHistoryEntry>;
 }
 
 /** Session file shape (#120 schema v2, v3 = +checkpoints). Loaders sanitize
@@ -98,9 +130,16 @@ export interface SessionFileV1 {
   /** v3: interrupt snapshots for checkpoint / TUI rewind ([] until a save). */
   readonly checkpoints?: ReadonlyArray<CheckpointRecord>;
   /** v5: session-level goal (#408). Absent on legacy files (loads as
-   *  `undefined`); the hub is the only writer and seeds it on the first
-   *  user message, then re-pins via `## GOAL:` or `/goal`. */
+   *  `undefined`); the hub is the only writer and re-pins via `## GOAL:` /
+   *  `/goal`. (#458 T2: top-level `user_initial` goals migrate to `taskFocus`
+   *  on load — see sanitizeSessionFile — so a goal present after sanitize is
+   *  always `user_pin`.) */
   readonly goal?: GoalState;
+  /** v5 (#458 T2): deterministic task focus. Optional additive field (SC2) —
+   *  absent on files written before #458. Sanitize never repairs a malformed
+   *  taskFocus (shape-validated like goal/checkpoints); on load a legacy
+   *  `user_initial` goal migrates here via `seedTaskFocus`. */
+  readonly taskFocus?: TaskFocusState;
 }
 
 export const CURRENT_SCHEMA_VERSION = 5 as const;
@@ -150,6 +189,11 @@ export function validateSessionFile(value: unknown): string | null {
   // coerce (a malformed goal would break downstream verify-loop binding).
   if (obj["goal"] !== undefined && !isValidGoal(obj["goal"])) {
     return "goal";
+  }
+  // v5 (#458 T2): optional `taskFocus` object — validate shape if present.
+  // Mirrors the goal/checkpoints pattern; never silently coerce.
+  if (obj["taskFocus"] !== undefined && !isValidTaskFocus(obj["taskFocus"])) {
+    return "taskFocus";
   }
   return null;
 }
@@ -245,6 +289,78 @@ export function pinGoal(opts: {
   };
 }
 
+/** #458 T2 (SC5): goal text is capped at 2000 chars on both write entries
+ *  (`/goal <text>` in cli and the `## GOAL:` directive path in the hub). */
+export const MAX_GOAL_CHARS = 2000;
+
+/** #458 T2 (SC5): validate a goal text string. Returns `null` when valid,
+ *  or an error-description string when not. Invalid = empty after trim, or
+ *  raw length > MAX_GOAL_CHARS. The caller passes the raw (untrimmed) text —
+ *  `## GOAL:` directives feed the original body here — so trim is applied
+ *  internally for the empty check only; the returned/retained text is the
+ *  caller's responsibility. */
+export function validateGoalText(text: string): string | null {
+  if (text.trim().length === 0) {
+    return `goal text must be non-empty (got ${text.length} chars)`;
+  }
+  if (text.length > MAX_GOAL_CHARS) {
+    return `goal text exceeds ${MAX_GOAL_CHARS} chars (got ${text.length})`;
+  }
+  return null;
+}
+
+/** #458 T2 (T1 OQ2): main-entry text cap. `seedTaskFocus` slices the new
+ *  primary `text` to this many chars. */
+export const MAX_TASK_FOCUS_CHARS = 500;
+
+/** #458 T2 (T1 OQ2 algorithm): deterministic task-focus seed/re-pin.
+ *
+ *  Switch condition: `(current === undefined) || normalize(nextText) !==
+ *  normalize(current.text)` where `normalize = text.trim().toLowerCase()`.
+ *  On switch the new `nextText` becomes the primary entry (text sliced to
+ *  MAX_TASK_FOCUS_CHARS, updatedAt = `now`) and is prepended to `history[0]`
+ *  (capped at 5, deduped by normalized text — a text already present in
+ *  history is not re-entered). History entries keep the full untruncated
+ *  text (T1 OQ2: 历史不截断，仅主条目 text slice 500).
+ *
+ *  No-op (same focus re-seeded): returns `current` by reference — idempotent,
+ *  `now` is NOT applied (a repeated seed must not stamp a new timestamp).
+ *
+ *  Used by the hub to seed taskFocus from the first user message and by
+ *  sanitize to migrate legacy `user_initial` goals on load.
+ */
+export function seedTaskFocus(opts: {
+  readonly current: TaskFocusState | undefined;
+  readonly nextText: string;
+  readonly now: string;
+}): TaskFocusState {
+  const { current, nextText, now } = opts;
+  const normalize = (s: string) => s.trim().toLowerCase();
+  if (
+    current !== undefined &&
+    normalize(nextText) === normalize(current.text)
+  ) {
+    return current;
+  }
+  const priorHistory = current?.history ?? [];
+  // #458 去重规则: 新文本进入 history[0] 时, 若既有 history 已有相同
+  // normalize 文本条目则跳过(不重复入 history) — 判定基于插入前的既有
+  // history, 重复时不追加新条目。cap 5: 追加后超限挤掉最旧。
+  const alreadyPresent = priorHistory.some(
+    (entry) => normalize(entry.text) === normalize(nextText)
+  );
+  const history = alreadyPresent
+    ? priorHistory
+    : ([{ text: nextText, updatedAt: now }] as TaskFocusHistoryEntry[]).concat(
+        priorHistory
+      );
+  return {
+    text: nextText.slice(0, MAX_TASK_FOCUS_CHARS),
+    updatedAt: now,
+    history: history.slice(0, 5),
+  };
+}
+
 /**
  * Sanitize a parsed session file of any ≤ CURRENT version into the current shape.
  *
@@ -280,12 +396,38 @@ export function sanitizeSessionFile(raw: unknown): SessionFileV1 {
   const checkpoints = Array.isArray(obj["checkpoints"])
     ? (obj["checkpoints"] as ReadonlyArray<CheckpointRecord>)
     : [];
-  // v5 `goal` needs NO backfill — it is optional and additive. The `...obj`
-  // spread below already preserves it verbatim when present (validated by
-  // validateSessionFile) and omits it when absent, keeping v4 → v5 round-trip
-  // byte-identical (a v4 file loads with `goal: undefined`, not a synthesized
-  // empty object). The hub owns the only write path (G1).
-  return {
+  // v5 `goal` is optional and additive — preserved verbatim via `...obj`
+  // when present (validated by validateSessionFile above), omitted when
+  // absent, keeping v4 → v5 round-trip byte-identical. The hub owns the
+  // only write path. (#458 T2: a legacy `user_initial` goal migrates to
+  // `taskFocus` and is dropped — see below.)
+  //
+  // #458 T2 migration: legacy `user_initial` top-level goals only exist on
+  // pre-#459 disk. The deterministic task-focus seed path now replaces the
+  // goal-seed path, so on load we upgrade the data forward: build a fresh
+  // `taskFocus` via `seedTaskFocus({ current: undefined, nextText: goal.text,
+  // now: sanitized_at })` and drop the `goal` field. `user_pin` goals are
+  // preserved verbatim (the spread below keeps them). Values from the
+  // removed model-propose slot never reach here — validateSessionFile
+  // rejects them with `schema_invalid` (an executable migrate, not a
+  // silent drop — SC1).
+  const rawGoal = obj["goal"] as GoalState | undefined;
+  const migratedTaskFocus =
+    rawGoal !== undefined && rawGoal.source === "user_initial"
+      ? seedTaskFocus({
+          current: undefined,
+          nextText: rawGoal.text,
+          now:
+            typeof obj["sanitized_at"] === "string"
+              ? (obj["sanitized_at"] as string)
+              : (obj["updatedAt"] as string),
+        })
+      : undefined;
+  // Build the result with conditional goal/taskFocus keys to preserve
+  // byte-identical round-trip for v4/v5 files that lack these fields
+  // (spread-discipline: never emit `field: undefined` keys). The migration
+  // case explicitly drops the old goal key (no stale goal persists).
+  const result: Record<string, unknown> = {
     ...obj,
     schemaVersion: CURRENT_SCHEMA_VERSION,
     summary:
@@ -298,7 +440,12 @@ export function sanitizeSessionFile(raw: unknown): SessionFileV1 {
         ? obj["sanitized_at"]
         : (obj["updatedAt"] as string),
     checkpoints,
-  } as SessionFileV1;
+  };
+  if (migratedTaskFocus !== undefined) {
+    delete result["goal"];
+    result["taskFocus"] = migratedTaskFocus;
+  }
+  return result as unknown as SessionFileV1;
 }
 
 // -- module-level helpers ----------------------------------------------------
@@ -409,7 +556,6 @@ function isValidCheckpoint(c: unknown): boolean {
 const VALID_GOAL_SOURCES: ReadonlySet<GoalSource> = new Set([
   "user_initial",
   "user_pin",
-  "model_proposed",
 ]);
 
 const VALID_GOAL_STATUSES: ReadonlySet<GoalStatus> = new Set([
@@ -451,5 +597,29 @@ function isValidGoalHistory(h: unknown): boolean {
     typeof entry["status"] === "string" &&
     VALID_GOAL_STATUSES.has(entry["status"] as GoalStatus) &&
     typeof entry["updatedAt"] === "string"
+  );
+}
+
+/** Deep-validate the #458 `taskFocus` object (text + updatedAt required,
+ *  optional history array). Reject-first like goal/checkpoints: a malformed
+ *  taskFocus would silently break the verify-loop's task-field binding
+ *  (`goal.text ?? taskFocus.text ?? query`), so it must fail loudly. */
+function isValidTaskFocus(t: unknown): boolean {
+  if (t === null || typeof t !== "object") return false;
+  const focus = t as Record<string, unknown>;
+  if (typeof focus["text"] !== "string") return false;
+  if (typeof focus["updatedAt"] !== "string") return false;
+  if (focus["history"] === undefined) return true;
+  if (!Array.isArray(focus["history"])) return false;
+  return (focus["history"] as ReadonlyArray<unknown>).every(
+    isValidTaskFocusHistory
+  );
+}
+
+function isValidTaskFocusHistory(h: unknown): boolean {
+  if (h === null || typeof h !== "object") return false;
+  const entry = h as Record<string, unknown>;
+  return (
+    typeof entry["text"] === "string" && typeof entry["updatedAt"] === "string"
   );
 }
