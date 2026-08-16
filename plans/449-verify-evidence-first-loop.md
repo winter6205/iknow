@@ -278,6 +278,59 @@ B8 ─────────────────────────�
 | SC10 | 命令路径回归（既有测试全绿 + 零删改）                                | B2 + B3-B9 冻结 + B10 收口 | ✅（既有 7 文件 `git diff --stat` 0 行变化 + `npx vitest run tests/harness/verify` exit 0）                      |
 | SC11 | trace 双轨（jsonl + noop + trace-based assert + no-trace deepEqual） | B3                         | ✅（`grep -n "evidenceVerdict\|gamingSignals" trace/types.ts` + trace-record.test.ts 双实现）                    |
 
+### 实施收口证据（B10 实测，2026-08-16）
+
+> B10 对 SC1-SC11 逐条实测收口（grep 实证 + 测试实证 + git 实证三路）；下表 file:line 为实施后真值。
+
+| SC   | 实测证据                                                                                                                                                                                                                                                                           |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| SC1  | `src/harness/verify/verify-loop.ts:35,827` — `import { checkEvidence }` + body 前级调用（commit `8021fbf4`）                                                                                                                                                                       |
+| SC2  | `three-stage-flow.test.ts:382` "零判官零重跑直接 PASS"：`classifierCalls().length === 0` + `outcome === "passed"`（commit `8021fbf4`）                                                                                                                                             |
+| SC3  | `three-stage-flow.test.ts:410` "SUFFICIENT + config.command 已配：runVerify spy 0 调用 (SC3 反向断言)"（commit `8021fbf4`）+ `:1432` 入口级重申（commit `bfe655b3`）                                                                                                               |
+| SC4  | `src/harness/verify/inject.ts:183` `buildEvidenceRerunEnvelope` + `inject.test.ts` 9 用例（逐字文案/截断/append-only）+ `three-stage-flow.test.ts:600` 轮次上限（commit `7585bd35`）                                                                                               |
+| SC5  | `src/session-api/hub.ts` + `src/cli/chat-session.ts:207-208` 三段 fallback（`goal.text ?? taskFocus.text ?? query`）+ `tests/cli/chat-session-user-text.test.ts` 8 用例 + `goal-seam.test.ts` 3 用例（commit `30cd7d92`）                                                          |
+| SC6  | `judge-input.test.ts`（def.task 首段 = userText + JSON 段 parse-back）+ `three-stage-flow.test.ts:831` spy 收 evidenceContext（commit `9bc9861f`）；e2e smoke 实测判官 task 二段（commit `bfe655b3` 脚本，真实跑通 result=pass）                                                   |
+| SC7  | `src/harness/verify/types.ts:49,132`（unverified 变体 + REASON_UNVERIFIED）+ `classifier.ts` 四态解析 + `classifier.test.ts` +5 用例（commit `8286a284`）                                                                                                                          |
+| SC8  | `three-stage-flow.test.ts:1015,1076,1111,1135` — unverified/abort/schema 降级/transport 错四组停法：outcome=unstable + reason 区分落盘 + 0 信封注入（commit `8286a284`）                                                                                                           |
+| SC9  | `three-stage-flow.test.ts:1291` 集成层复断言 disallowedTools 5 项原样 + systemPrompt 零 evidenceContext 泄漏（commit `bfe655b3`）；实际工具面裁剪 = 468 plan 职责                                                                                                                  |
+| SC10 | frozen 7 文件中 5 个零改动（verify-loop/verdict/classifier-loop/classifier-sc7/classifier-abort.test.ts）；classifier.test.ts +43 行追加、inject.test.ts +335 行追加（既有 case 零删除，plan 冻结条款明示允许）；`npx vitest run tests/harness/verify` = 17 文件 / 249 用例 exit 0 |
+| SC11 | `src/harness/trace/types.ts:214-216` 镜像字段 + `trace-record.test.ts` 9 用例（jsonl snake_case 落盘 + noop 零副作用 + Postel 缺席省略）（commit `61ef3a42`）                                                                                                                      |
+
+**Commit 链**（master `faa6429b` 之上，1 bullet = 1 commit）：
+
+| Commit        | Bullet | 内容                                                            |
+| ------------- | ------ | --------------------------------------------------------------- |
+| `66e18c17`    | B2     | 命令路径回归基线锁定（空 commit + 行数快照；基线 191 用例全绿） |
+| `30cd7d92`    | B8     | userText #459 公式（hub + chat-session）                        |
+| `61ef3a42`    | B3     | trace 数据侧 evidenceVerdict/gamingSignals + reason typed union |
+| `1c5ae4c3`    | B1     | spec OQ1/OQ2 定稿镜像                                           |
+| `8021fbf4`    | B4     | evidence-first 前级接线（三态映射）                             |
+| `7585bd35`    | B5     | 补跑信封 + 1 次上限                                             |
+| `9bc9861f`    | B6     | 判官 evidenceContext 输入升级                                   |
+| `8286a284`    | B7     | 判官四态解析 + unverified/abort 停法                            |
+| `bfe655b3`    | B9     | 三级流集成收口 + real-LLM smoke 脚本                            |
+| （本 commit） | B10    | 本收口段 + 文件清单修正                                         |
+
+**实施过程 leader 裁决记录**（plan 未预见、实施中裁决的边界）：
+
+1. **补跑是判官路径专属机制**（B5）：spec Code Style 伪代码 `(config.command || probed)` 若按字面实施会让命令路径 frozen 基线（`verify-loop.test.ts` 纯文本 fixture → INSUFFICIENT → 补跑轮 → rounds/records 断言全破）与 SC10/Never-do 直接矛盾。裁决：`deriveRerunCommand` 在 `config.command` 非空时返回 null（命令路径沙箱重跑是 frozen legacy，补跑信封冗余）；命令空时走 `probeVerifyCommand` 探测。SC3/SC4/SC10 同时满足。
+2. **evidenceContext 不进 systemPrompt**（B6）：plan 修改文件清单原写"JUDGE_ROLE 扩 systemPrompt 段"，与 spec 468/449b「JUDGE_ROLE 声明不变」+ A6「上下文走 evidenceContext」冲突。裁决：JUDGE_ROLE 声明零改动（systemPrompt/disallowedTools 逐字节），evidenceContext 经 `buildJudgeTask` append 到 `def.task` 第二段。
+3. **unverified 轮 evidenceVerdict 并存**（B7）：判官只在 INSUFFICIENT 分支被调，B4 合并的 `evidenceVerdict=EVIDENCE_INSUFFICIENT` 与判官 `reason=unverified` 在 record 中并存（两字段各自真实），不断言 evidenceVerdict 缺席。
+4. **CLI 测试 1 行断言更新**（B6）：`tests/cli/process-chat-line-verify.test.ts:221` 断言 `task === "research a topic"` 被 B6 二段 task 正当取代，更新为 `task.split("\n")[0]` 断言（保持原意图：判官收到用户原问句）。
+5. **real-LLM smoke 实测跑通**（B9）：本环境 LLM key 可解析，smoke 一次跑通 result=pass（SC6 task 二段 + SC10 verdict 落盘 + outcome=unstable + 判官 spawn 1 次），超越 plan"交付脚本"预期，产出真实 e2e 证据。
+6. **补跑信封纳入 injected-envelope 过滤集**（B5，code-review spec 轴补充记录）：plan B5 acceptance 原文"`buildNextPriorMessages` 不剥它（`[VERIFY: rerun needed]`）→ 完整信息保留到下一轮"。实施把 `isValidationEnvelope` 改名 `isInjectedEnvelope` 并把 `[VERIFY: rerun needed]` 加入 `INJECTED_ENVELOPE_PREFIXES`（`verify-loop.ts:456`）——补跑信封在 round 3+ 被滤除。两处行为都有理由（不剥 → 下一轮 evidence 核对看到它；剥 → 防 stale 累积），但 plan 文字只陈述了前者。行为与 spec 的 stale-envelope 纪律一致，此处补录为第 6 条裁决以保证 plan 级可审计性。
+
+**后续 ticket**（本轮 code-review 非阻断项，均不属 449b 范围）：
+
+- **449c（原定 verify 闭环观测面板）顺带挂**：`runVerifyLoopBody` 圈复杂度 ≈14-15（S5 硬闸 10，B4 前既有 ~11 + 本轮三态映射叠加；ACR 已注 soft caveat）、`verify-loop.ts` 1148 行（S5 REVIEW 软阈值 500）——拆 `evidence-gate.ts` 纯函数模块；`runClassifierLoop` 共享 `lastEvidenceContext` 在 SUFFICIENT/CONTRADICTED 短路轮残留过期值（Medium，当前无触发路径——buildFailureEnvelope 只在 continue 轮消费，short-circuit 轮不进 continue，但防御性清空更稳）；`buildJudgeTask` 未对 `evidenceSummary` 套 OQ2 20k 截断（与 buildClassifierEnvelope 不一致，Medium，runs 累积可能撑爆判官 task）；`PROBE_FLAG_FILES` 与 command-probe.ts `FLAG_FILE_COMMANDS` keys 重复（SSOT 违反，Medium，改法=从 command-probe 导出复用）。
+- **468 plan 落地时**：JUDGE_ROLE systemPrompt 加 `unverified` 到允许态清单（当前判官 prompt 只教 abort，四态中的 unverified 在生产不可达——parse 层已就绪，等 468 改 prompt 即可通达）。
+
+**code-review gate**（终审，Standards + Spec 双轴）：
+
+- Spec 轴：0 High / 0 Medium / 6 Low（SC1-SC11 全实测通过；Low 含 compact fixture 可选项、smoke 输出未入库等 traceability 项）。
+- Standards 轴：1 High / 6 Medium / 4 Low。High（`runVerifyLoopBody` 圈复杂度）裁为**误报**——S5 阈值 10 硬闸、B4 前函数已 ~11、ACR 已注 soft caveat、本质是"改既有超标函数"非新增违规；处置 = 不阻断本轮 + 挂 449c ticket。6 Medium 全部非阻断（共享变量防御性清空 / SSOT 去重 / OQ2 截断对齐 / typed-error catch / 文件长度）→ 挂 449c。4 Low 信息级。
+- **GATE: PASS**（High 误报降级 + Medium 挂 ticket + 全部 SC1-SC11 满足）。
+
 ### 跨 plan blocks 图
 
 ```
@@ -338,7 +391,7 @@ B8 ─────────────────────────�
 - `src/harness/verify/verify-loop.ts`（B4 produceObservation 缝 + B5 rerunAttempts + B6 判官 evidenceContext + B7 四态映射）
 - `src/harness/verify/inject.ts`（B5 buildEvidenceRerunEnvelope + B6 buildClassifierEnvelope 扩 evidenceSummary）
 - `src/harness/verify/classifier.ts`（B7 parseClassifierResult 扩 unverified 态）
-- `src/harness/verify/run-classifier-adapter.ts`（B6 evidenceContext 入参 + JUDGE_ROLE 扩 systemPrompt 段）
+- `src/harness/verify/run-classifier-adapter.ts`（B6 evidenceContext 入参 + buildJudgeTask task 二段拼接；**JUDGE_ROLE 声明零改动**——systemPrompt/disallowedTools 逐字节未动，B10 裁决记录第 2 条）
 - `src/harness/trace/types.ts`（B3 镜像扩展）
 - `src/session-api/hub.ts`（B8 userText 公式升级到 #459）
 - `src/cli/chat-session.ts`（B8 userText 公式升级到 #459）
