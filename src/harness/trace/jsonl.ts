@@ -25,6 +25,7 @@ import type {
   SessionRecord,
   SandboxCmdRecord,
   VerificationRecord,
+  GoalRecord,
 } from "./types.js";
 
 export interface JsonlTraceOptions {
@@ -218,6 +219,31 @@ export function createJsonlTraceService(
         conversation_id: conversationId,
         record_type: "verification",
         verification_id: record.id,
+        ...snake,
+      };
+      try {
+        writeLine(line);
+        return record.id;
+      } catch (err) {
+        warnOnce(err);
+        return undefined;
+      }
+    },
+
+    async recordGoal(record: GoalRecord): Promise<string | undefined> {
+      // 与 recordVerification 同形态: id 由调用方提供, 不做 randomUUID 生成。
+      // 单 id 载体对齐既有模式: 顶层 goal_id 承载 id, 其余顶层 key 走
+      // toSnakeCaseRecord; 从 snake 副本剔除原 id key (避免重复落盘)。
+      const snake = toSnakeCaseRecord(record);
+      delete snake.id;
+      // GoalRecord 携带 conversationId 字段, 但 conversation_id 是工厂实例绑定
+      // (ADR-0003 D4), 剔除 snake 副本里的 conversation_id 保证工厂 binding 胜出,
+      // 与 record 内冗余 conversationId 字段 (调用方透传) 语义对齐。
+      delete snake.conversation_id;
+      const line: Record<string, unknown> = {
+        conversation_id: conversationId,
+        record_type: "goal",
+        goal_id: record.id,
         ...snake,
       };
       try {
