@@ -108,7 +108,31 @@ export interface VerificationRecord {
   readonly reason?: string;
   readonly evidence?: readonly ClassifierCheck[];
   readonly missing?: readonly string[];
+  /**
+   * 证据优先前级字段 (#449b B3, spec 449-evidence-checker)。
+   *  - evidenceVerdict — checkEvidence 三态 verdict (B4 INSUFFICIENT 时落盘);
+   *  - gamingSignals — 软信号 (断言减少 / 新增 skip / --no-verify) 仅记录不判定。
+   * Postel: 可选字段仅存在时落盘, JSON.stringify 自动丢弃 undefined。
+   * 命令路径记录 (不含这些字段) 保持原样, 无回归。
+   */
+  readonly evidenceVerdict?: EvidenceVerdict;
+  readonly gamingSignals?: ReadonlyArray<string>;
 }
+
+/**
+ * reason 字段判别常量 (#449b B3, typed reason 区分落盘)。
+ * reason 字段本身保留 string (避免改既有解析路径), producer 写字面值,
+ * consumer 用这些常量 + VerifyReasonKind 判别 (SC7: unverified ≠ abort)。
+ */
+export const REASON_UNVERIFIED = "unverified" as const;
+export const REASON_ABORT_TYPED = "abort" as const;
+
+/**
+ * reason 判别联合 (#449b B3, 判别用)。
+ * classifier = 判官一句话立论 (既有语义, spec A4);
+ * unverified / abort = B7 停法 typed reason (SC7/SC8)。
+ */
+export type VerifyReasonKind = "classifier" | "unverified" | "abort";
 
 /**
  * evidence-checker 证据充分性判定 (spec 449-evidence-checker, G2 三态 verdict)。

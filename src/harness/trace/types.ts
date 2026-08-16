@@ -203,6 +203,17 @@ export interface VerificationRecord {
   readonly reason?: string;
   readonly evidence?: ReadonlyArray<VerificationCheck>;
   readonly missing?: ReadonlyArray<string>;
+  /**
+   * 证据优先前级字段 (#449b B3, 镜像 verify 域 VerificationRecord.evidenceVerdict / .gamingSignals)。
+   * trace bounded context 遵循文件头注释 (types.ts:21-23) **不 import** verify 域类型;
+   * 通过同名字面字符串联合保持独立松耦合, verify-loop 在 buildRecord 处做结构赋值。
+   * evidenceVerdict 三值: EVIDENCE_SUFFICIENT / EVIDENCE_CONTRADICTED / EVIDENCE_INSUFFICIENT
+   * (与 src/harness/verify/types.ts `EvidenceVerdict` 同值域)。
+   * Postel: 可选字段仅存在时落盘。
+   */
+  readonly evidenceVerdict?:
+    "EVIDENCE_SUFFICIENT" | "EVIDENCE_CONTRADICTED" | "EVIDENCE_INSUFFICIENT";
+  readonly gamingSignals?: ReadonlyArray<string>;
 }
 
 export type VerificationVerdict = "pass" | "true-failure" | "unstable";
