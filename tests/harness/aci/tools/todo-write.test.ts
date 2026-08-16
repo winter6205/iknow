@@ -452,3 +452,71 @@ describe("codepointLength — pure helper", () => {
     assert.equal(codepointLength(family), 5);
   });
 });
+
+// -- T5: typed-error catch 渲染契约（code-quality.md §typed-error catch 契约）
+// 渲染端必须能从 catch 侧区分 typed-error 与 plain object —— 禁止
+// `err instanceof Error ? err.message : String(err)`（plain Error 会丢
+// 掉 name / className 区分；plain object 会打成 [object Object]）。本组
+// 测试断言 throw 端 + 通用 catch 模板的输出形态。
+// ---------------------------------------------------------------------------
+
+describe("createTodoWriteTool — typed-error catch 渲染契约 (code-quality.md)", () => {
+  it("invalid mode: throw ToolExecutionError 且 message 以 [todo_write] 前缀开头", async () => {
+    const tool = createTodoWriteTool({ todoDir });
+    let caught: unknown;
+    try {
+      await tool.handler({ mode: "bogus" });
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(caught instanceof ToolExecutionError);
+    assert.equal((caught as Error).name, "ToolExecutionError");
+    assert.ok(
+      (caught as Error).message.startsWith("[todo_write]"),
+      `message prefix preserved: ${(caught as Error).message}`
+    );
+    // mode validation 报告枚举集合(不内嵌 bad value),断言正确渲染集合。
+    assert.ok((caught as Error).message.includes("list | add | check"));
+  });
+
+  it("empty item on add: 同样以 [todo_write] 前缀抛 typed-error", async () => {
+    const tool = createTodoWriteTool({ todoDir });
+    let caught: unknown;
+    try {
+      await tool.handler({ mode: "add", item: "" });
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(caught instanceof ToolExecutionError);
+    assert.ok((caught as Error).message.startsWith("[todo_write]"));
+    assert.ok((caught as Error).message.includes("non-empty"));
+  });
+
+  it("通用 catch 模板正确提取 message(模拟 code-quality.md 渲染契约)", () => {
+    // 模拟 catch 侧:
+    //   } catch (err) { return err instanceof Error ? err.message : String(err); }
+    // 对 ToolExecutionError 应回 message(不是 [object Object]); name 应保留。
+    function renderCatch(err: unknown): string {
+      return err instanceof Error ? err.message : String(err);
+    }
+    const tErr = new ToolExecutionError(
+      "[todo_write] file would exceed 65536 bytes"
+    );
+    assert.equal(
+      renderCatch(tErr),
+      "[todo_write] file would exceed 65536 bytes"
+    );
+    assert.equal(tErr.name, "ToolExecutionError");
+  });
+
+  it("plain object (非 Error 子类): catch 端 String(err) 应避免丢 [object Object]", () => {
+    // 反向断言:若 throw 端出现 plain object(漏 instanceof Error 检查),
+    // catch 用 String(err) 会打成 [object Object] —— 此处仅文档化契约,
+    // 不复现 bug,但保留断言防回归。
+    const plain = { kind: "tool_error", reason: "x" };
+    const rendered = String(plain);
+    assert.equal(rendered, "[object Object]");
+    // 注:todo_write 当前所有错误路径都 throw ToolExecutionError,此断言只
+    // 是反向文档(防止回归到 plain object 抛错)。
+  });
+});

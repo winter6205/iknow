@@ -352,3 +352,81 @@ describe("worker tool surface: 并发 N/A — 占位说明", () => {
     assert.equal(true, true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// #440 T5: D6 worker ownership isolation — todo_write 不入 worker 工具面
+// 装配路径 createWorkerDeps → createDefaultAciRegistry(无 todoDir)
+// → factories 缺 todo_write → 双面（inner + visibleSchemas）俱缺席。
+// 即使主 loop 注册表装配了 todo_write（buildHarnessEngine + todoDir），
+// worker 子进程仍是 25 件（25 - subagent2 - memory2 - todo_write = 21，
+// 加 skill 2 = 23；详见 D6 决策 + #440 T4 todoDir seam）。
+// ---------------------------------------------------------------------------
+
+describe("worker tool surface: #440 T5 D6 ownership — todo_write 缺席", () => {
+  it("worker 装配路径不传 todoDir → inner.list() 不含 todo_write", async () => {
+    const deps = await buildWorkerWithFullSkillCatalog();
+    const names = deps.registry.list().map((d) => d.name);
+    assert.ok(
+      !names.includes("todo_write"),
+      `worker surface should exclude todo_write, got: ${names.join(", ")}`
+    );
+  });
+
+  it("worker 装配路径不传 todoDir → promptTools() 不含 todo_write", async () => {
+    const deps = await buildWorkerWithFullSkillCatalog();
+    if (!deps.promptTools) {
+      // promptTools 缺席本身是合法（无注册表 → 无可见面），跳过本断言
+      return;
+    }
+    const names = deps.promptTools().map((d) => d.name);
+    assert.ok(
+      !names.includes("todo_write"),
+      `worker promptTools should exclude todo_write, got: ${names.join(", ")}`
+    );
+  });
+
+  it("worker 装配路径不传 todoDir → reg.catalog.get(todo_write) === undefined（双层防护）", async () => {
+    const deps = await buildWorkerWithFullSkillCatalog();
+    // 通过 dynamic registry wrapper 测试（executor 实际可见的查找路径）
+    const found = (deps.registry as { get?: (n: string) => unknown }).get?.(
+      "todo_write"
+    );
+    assert.equal(found, undefined);
+  });
+});
+
+/**
+ * 走真实 createWorkerDeps 装配：注入 stub-model + 空 skill catalog 让
+ * skill/skill_search 静态在场（Gate 3 锁），不加 subagentManager 与
+ * memoryDir（worker 装配特征），不传 todoDir（D6 ownership）。返回值
+ * 含 deps.registry（executor 真实可见）+ deps.promptTools（模型可见）。
+ */
+async function buildWorkerWithFullSkillCatalog(): Promise<LoopEngineDeps> {
+  const env: IknowEnv = {
+    llm: {
+      baseUrl: "http://127.0.0.1:9999",
+      model: "test-model",
+      fallback: [],
+      apiKey: "sk-test-worker-t5",
+      maxOutputTokens: 1024,
+      timeoutMs: 60_000,
+      temperature: 0,
+      thinking: "off",
+      thinkingEffort: "",
+      stream: "on",
+    },
+    chat: { showThinking: false },
+    web: { searchUrl: undefined, proxy: undefined },
+    compress: { contextWindow: 200_000, thresholdTokens: undefined },
+    mcp: { connectTimeoutMs: 60_000 },
+  };
+  const opts: CreateWorkerDepsOptions = {
+    envelope: {} as WorkerEnvelope,
+    env,
+    model: createStubModel({ responses: [] }),
+    sandboxRoot: "/tmp/sandbox-worker-t5",
+    trace: createNoopTraceService(),
+    skillCatalog: createSkillCatalog([]),
+  };
+  return createWorkerDeps(opts);
+}

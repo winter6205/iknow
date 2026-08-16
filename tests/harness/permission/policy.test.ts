@@ -391,3 +391,86 @@ describe("policy.ts is sync (askUser is the executor's job)", () => {
     assert.equal(typeof r.decision, "string");
   });
 });
+
+// ---------------------------------------------------------------------------
+// #440 T5: todo_write D7 权限规则 — list 子模式 bypass ask (read-only),
+//         add / check 走 category default ask (write)。
+// ---------------------------------------------------------------------------
+
+describe("SC7: #440 T5 todo_write list 子模式 bypass ask (read-only), add/check 走默认 ask", () => {
+  const policy = createPermissionPolicy();
+
+  it("todo_write list mode → allow (bypass ask, read-only 子模式)", () => {
+    const out = checkPermission({
+      def: makeTool({ name: "todo_write", category: "write" }),
+      input: { mode: "list" },
+      sources: policy.sources,
+      hardWalls: policy.hardWalls,
+      defaultByCategory: policy.defaultByCategory,
+    });
+    assert.equal(out.decision, "allow");
+    assert.ok(out.reason.includes("todo_write"));
+    assert.ok(out.reason.includes("list"));
+  });
+
+  it("todo_write add mode → ask (write category 默认, list 子模式豁免不适用)", () => {
+    const out = checkPermission({
+      def: makeTool({ name: "todo_write", category: "write" }),
+      input: { mode: "add", item: "ship T5" },
+      sources: policy.sources,
+      hardWalls: policy.hardWalls,
+      defaultByCategory: policy.defaultByCategory,
+    });
+    assert.equal(out.decision, "ask");
+    assert.ok(out.reason.includes("write"));
+  });
+
+  it("todo_write check mode → ask (write category 默认, list 子模式豁免不适用)", () => {
+    const out = checkPermission({
+      def: makeTool({ name: "todo_write", category: "write" }),
+      input: { mode: "check", item: "ship T5" },
+      sources: policy.sources,
+      hardWalls: policy.hardWalls,
+      defaultByCategory: policy.defaultByCategory,
+    });
+    assert.equal(out.decision, "ask");
+    assert.ok(out.reason.includes("write"));
+  });
+
+  it("todo_write 缺 mode → ask (defense in depth, list 子模式豁免不适用)", () => {
+    const out = checkPermission({
+      def: makeTool({ name: "todo_write", category: "write" }),
+      input: {},
+      sources: policy.sources,
+      hardWalls: policy.hardWalls,
+      defaultByCategory: policy.defaultByCategory,
+    });
+    assert.equal(out.decision, "ask");
+    assert.ok(out.reason.includes("write"));
+  });
+
+  it("todo_write input 非对象 → ask (defense in depth, mode 字段无法读取)", () => {
+    const out = checkPermission({
+      def: makeTool({ name: "todo_write", category: "write" }),
+      input: null,
+      sources: policy.sources,
+      hardWalls: policy.hardWalls,
+      defaultByCategory: policy.defaultByCategory,
+    });
+    assert.equal(out.decision, "ask");
+    assert.ok(out.reason.includes("write"));
+  });
+
+  it("todo_write list mode 在 full_auto mode → allow (mode 优先级高于 code-rule, 但结果同 allow)", () => {
+    const fullAuto = createPermissionPolicy({ mode: "full_auto" });
+    const out = checkPermission({
+      def: makeTool({ name: "todo_write", category: "write" }),
+      input: { mode: "list" },
+      sources: fullAuto.sources,
+      hardWalls: fullAuto.hardWalls,
+      defaultByCategory: fullAuto.defaultByCategory,
+      mode: fullAuto.mode,
+    });
+    assert.equal(out.decision, "allow");
+  });
+});

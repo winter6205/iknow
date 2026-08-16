@@ -47,6 +47,22 @@ function codeBuiltInRules(): ReadonlyArray<NormalRuleSpec> {
       reason:
         "code built-in: memory_save writes into the agent memory library, not user workspace",
     },
+    {
+      // #440 D7: todo_write category="write" → 默认 ask;list 子模式仅读,应
+      // bypass ask 走 allow。规则在 code 层,project/session 仍可 escalate 为
+      // ask/deny;hard-wall 仍不可 override。匹配条件:tool 名 + input.mode
+      // === "list"。非对象 / 缺 mode / mode 非 list → 不命中,继续走默认
+      // write → ask(defense in depth,handler 层 ToolExecutionError 兜底)。
+      id: "code-allow-todo-write-list",
+      match: ({ tool, input }) =>
+        tool === "todo_write" &&
+        typeof input === "object" &&
+        input !== null &&
+        !Array.isArray(input) &&
+        (input as { mode?: unknown }).mode === "list",
+      decision: "allow",
+      reason: "code built-in: todo_write list mode is read-only (bypass ask)",
+    },
   ]);
 }
 
