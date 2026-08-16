@@ -80,14 +80,14 @@ _Avoid_: 把 frontend-only server 当生产路径但不代理 `/api`
 **product SPA (web/)**: Vite + React + TypeScript chat console；同源 Session client；JSON 侧栏。
 _Avoid_: 零依赖静态壳当产品；展示层省略 trace 字段
 
-**goal（会话使命）**: 用户显式设定的整个会话固定锚，agent 沿它自主探索/建设；只由 `/goal <text>` / `## GOAL: <text>` 写入（`source = user_pin`），仅 `/goal clear` 清除，verify-loop 终局写 `status = achieved / aborted`；分类器 task 字段第一优先来源。
+**goal（会话使命）**: 用户显式设定的整个会话固定锚，agent 沿它自主探索/建设；只由 `/goal <text>` / `## GOAL: <text>` 写入（`source = user_pin`），仅 `/goal clear` 清除，verify-loop 终局写 `status = achieved / aborted`；verify-loop 输入的第一优先段（`goal.text ?? query`，#473）。
 _Avoid_: 把 goal 当模型可推进的活对象（`model_proposed` / T6 propose-confirm 已整体删除）；模型输出 / 工具结果 / 文件内容写 goal
 
-**taskFocus（任务焦点）**: 长上下文中模型当前该围绕什么干、compact 后仍保持焦点的**确定性提取**对象（v1 不用 LLM）；首条 user 消息 seed，`text` ≤ 500 字符、`history` ≤ 5 条 × 300 字符去重；仅 compact 边界渲染一次（焦点截 240 + 最近 3 条各截 120）；分类器 task 字段第二优先来源。
-_Avoid_: 用 LLM 摘要生成 taskFocus；普通 turn 注入；模型写 taskFocus
+**taskFocus（任务焦点）**: 长上下文中模型当前该围绕什么干、compact 后仍保持焦点的**确定性提取**对象（v1 不用 LLM）；首条 user 消息 seed，`text` ≤ 500 字符、`history` ≤ 5 条 × 300 字符去重；仅 compact 边界渲染一次（焦点截 240 + 最近 3 条各截 120）；**不进入 verify 输入**（#473：稳定焦点锚喂进 verify 会让新任务被旧焦点遮蔽而误判 PASS）。
+_Avoid_: 用 LLM 摘要生成 taskFocus；普通 turn 注入；模型写 taskFocus；把 taskFocus 段喂进 verify 输入（#473）
 
-**task 取值公式**: `task = session.goal.text ?? session.taskFocus.text ?? query`（唯一口径）；判定层只读消费、不回写。
-_Avoid_: 把过渡态 `goal.text ?? query` 当对齐目标；把证据上下文塞进 task 字段（走 evidenceContext）
+**task 取值公式（verify 消费端）**: `task = session.goal.text ?? query`（#473 收敛后口径）；判定层只读消费、不回写。数据侧三段公式 `goal.text ?? taskFocus.text ?? query`（SC3 / #458 T8）仍是 taskFocus/紧凑渲染的派生历史口径，但**不再作为 verify 输入的来源**。
+_Avoid_: 把 taskFocus 段喂进 verify 输入（#473）；把证据上下文塞进 task 字段（走 evidenceContext）
 
 **streaming arm**: LLM 客户端默认流式臂（`IKNOW_LLM_STREAM` 值域 `on | off`，默认 `on`，`env.ts` SSOT），`off` 回退非流式臂；原生 SSE 事件不出 adapter 边界，收敛为 `HarnessStreamEvent` 最小集（`text_delta` / `tool_call_start`，`src/harness/stream.ts`），终态经 SDK `finalMessage()` -> `interpretMessage`（SSOT）落为同形 `AssistantTurnResult`。
 _Avoid_: 把 `stream: false` + 裸 JSON 解析当默认 LLM 臂；让原生 SSE 事件逸出 adapter 边界
