@@ -28,6 +28,9 @@ import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
 // #356 T6 (subagent 装配):surface !== "ask" 时 build-engine 自建 subagentManager,
 // registry 末尾追加 spawn_subagent / subagent_result(→ 25 件)。ask 入口不创建
 // manager → registry 停 23 件(SC8,见 ask 剥离断言)。
+// #440 T11 (MCP resources 装配):surface !== "ask" 时 build-engine 自建
+// mcpManager,registry 末尾追加 list_mcp_resources / read_mcp_resource(→ 27 件)。
+// ask 入口不创建 manager → registry 停 25 件(mcpManager 缺席 → list/read 缺席)。
 const EXPECTED_TOOLS = [
   "bash",
   "read_file",
@@ -58,6 +61,10 @@ const EXPECTED_TOOLS = [
   // 才在场;ask 缺 subagentManager → 23 件)。
   "spawn_subagent",
   "subagent_result",
+  // #440 T11 MCP resources 工具集 append-only:25→27,2 件在末尾(全装配 chat
+  // surface 才在场;ask 缺 mcpManager → 25 件)。
+  "list_mcp_resources",
+  "read_mcp_resource",
 ];
 
 /** Deterministic env: never read process.env / .env files (env.ts SSOT). */
@@ -344,15 +351,17 @@ describe("buildHarnessEngine — #337 T8 skill 装配", () => {
     const names = built.deps.registry.list().map((d) => d.name);
     expect(names).not.toContain("spawn_subagent");
     expect(names).not.toContain("subagent_result");
-    // ask + memory:{enabled:false} 双重剥离 → 25 - memory2 - subagent2 = 21 件
-    // (skill 两件仍装配,SC12)。
+    // ask + memory:{enabled:false} 双重剥离 → 27 - memory2 - subagent2 - mcp2 = 21 件
+    // (skill 两件仍装配,SC12;MCP 两件因 surface="ask" 不装配,SC12 守门)。
     expect(names).toEqual(
       EXPECTED_TOOLS.filter(
         (n) =>
           n !== "memory_recall" &&
           n !== "memory_save" &&
           n !== "spawn_subagent" &&
-          n !== "subagent_result"
+          n !== "subagent_result" &&
+          n !== "list_mcp_resources" &&
+          n !== "read_mcp_resource"
       )
     );
 

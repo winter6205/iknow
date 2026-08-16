@@ -1,15 +1,16 @@
 /**
  * tests/harness/aci/tools/registry.test.ts
  *
- * `createDefaultAciRegistry` — 25 件 SSOT 工具注册层单元测试
- * （三条件键 memoryDir / skillCatalog / subagentManager 全部缺席 → 19 件
- * = 8 基线 + tool_search + 10 LSP；只 memoryDir → 21 件；memoryDir+skillCatalog → 23 件；
- * 三者皆在场 → 25 件 = 全量）。
+ * `createDefaultAciRegistry` — 27 件 SSOT 工具注册层单元测试
+ * （四条件键 memoryDir / skillCatalog / subagentManager / mcpManager
+ *  全部缺席 → 19 件 = 8 基线 + tool_search + 10 LSP；只 memoryDir → 21 件；
+ *  memoryDir+skillCatalog → 23 件；三者皆在场 → 25 件；四者皆在场 → 27 件
+ *  = 全量 #440 T11 末态）。
  *
  * 对齐 upstream `create_default_tool_registry()`(tools/__init__.py:48):
  * 单一装配函数返回注册表,所有入口共享。本测试锁 5 边界类:
  *
- *   - 正常路径:返回 AciRegistry,list() 25 工具(三条件键全在场),顺序 append-only
+ *   - 正常路径:返回 AciRegistry,list() 27 工具(四条件键全在场),顺序 append-only
  *   - 空输入:env.web 全空(undefined)→ 直连不抛;sandboxRoot:"" → 不抛
  *   - 非法输入:proxy 非 http/https / 含凭据 → 装配期同步抛 ToolExecutionError
  *   - 溢出/边界:sandboxRoot 指向不存在路径 → 装配期不抛(执行期由 fs 工具越界逻辑拒绝)
@@ -19,8 +20,8 @@
  * 实际装配出的工具名与 `ACI_TOOLSET_NAMES` 严格一致(长度 + 顺序 + 成员)。
  * Gate 3 的抛错路径是结构性(derived-from-map),不重构无法从外部触发,
  * 故只锁正向一致;分歧在装配期 by-construction 失败。memory / skill /
- * subagent 工具是条件装配的(对照名单按 memoryDir / skillCatalog /
- * subagentManager 镜像过滤)。
+ * subagent / mcp resources 工具是条件装配的(对照名单按 memoryDir /
+ * skillCatalog / subagentManager / mcpManager 镜像过滤)。
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
@@ -33,6 +34,7 @@ import {
 import { createSkillCatalog } from "../../../../src/harness/skill/catalog.js";
 import type { IknowEnv } from "../../../../src/config/env.js";
 import type { SubAgentManager } from "../../../../src/harness/subagent/manager.js";
+import type { McpManager } from "../../../../src/harness/mcp/manager.js";
 
 /** 合法最小 env(仅 web 字段;LLM 字段工厂不消费)。 */
 function makeWebEnv(
@@ -54,14 +56,28 @@ const fakeSubagentManager: SubAgentManager = {
   drainCompleted: () => [],
 };
 
+/** #440 T11 fake mcpManager（仅用于 createDefaultAciRegistry 装配期断言
+ * list_mcp_resources / read_mcp_resource 在场；handler 路径单测在
+ * tests/harness/aci/tools/list-mcp-resources.test.ts 与
+ * tests/harness/aci/tools/read-mcp-resource.test.ts）。 */
+const fakeMcpManager: McpManager = {
+  start: () => Promise.resolve(),
+  reload: () => Promise.resolve(),
+  shutdown: () => Promise.resolve(),
+  status: () => [],
+  listResources: () => Promise.reject(new Error("fake: list not stubbed")),
+  readResource: () => Promise.reject(new Error("fake: read not stubbed")),
+} as unknown as McpManager;
+
 describe("createDefaultAciRegistry — 正常路径", () => {
-  it("memoryDir + skillCatalog + subagentManager 同时在场 → list() 全量,顺序 append-only", () => {
+  it("memoryDir + skillCatalog + subagentManager + mcpManager 同时在场 → list() 全量 27 件,顺序 append-only", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
       memoryDir: "/tmp/root/memory",
       skillCatalog: createSkillCatalog([]),
       subagentManager: fakeSubagentManager,
+      mcpManager: fakeMcpManager,
     });
     const names = reg.inner.list().map((def) => def.name);
     expect(names).toEqual([...EXPECTED_TOOLS]);
@@ -74,9 +90,12 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(reg.catalog.get("skill_search")).toBeDefined();
     expect(reg.catalog.get("spawn_subagent")).toBeDefined();
     expect(reg.catalog.get("subagent_result")).toBeDefined();
+    // #440 T11:mcpManager 条件化装配,在场时两件入注册表。
+    expect(reg.catalog.get("list_mcp_resources")).toBeDefined();
+    expect(reg.catalog.get("read_mcp_resource")).toBeDefined();
   });
 
-  it("memoryDir + skillCatalog + subagentManager 都缺席 → list() 19 件(8 基线 + tool_search + 10 LSP,无 memory/skill/spawn 工具)", () => {
+  it("memoryDir + skillCatalog + subagentManager 都缺席 → list() 19 件(8 基线 + tool_search + 10 LSP,无 memory/skill/spawn/mcp 工具)", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -90,7 +109,9 @@ describe("createDefaultAciRegistry — 正常路径", () => {
           n !== "skill" &&
           n !== "skill_search" &&
           n !== "spawn_subagent" &&
-          n !== "subagent_result"
+          n !== "subagent_result" &&
+          n !== "list_mcp_resources" &&
+          n !== "read_mcp_resource"
       )
     );
     expect(reg.catalog.get("tool_search")).toBeDefined();
@@ -100,10 +121,13 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(reg.catalog.get("skill_search")).toBeUndefined();
     expect(reg.catalog.get("spawn_subagent")).toBeUndefined();
     expect(reg.catalog.get("subagent_result")).toBeUndefined();
+    // #440 T11:mcpManager 缺席 → list/read 缺席。
+    expect(reg.catalog.get("list_mcp_resources")).toBeUndefined();
+    expect(reg.catalog.get("read_mcp_resource")).toBeUndefined();
   });
 
-  it("Gate 3:ACI_TOOLSET_NAMES 长度 25,前 8 原序 + memory_* + tool_search + 10 LSP + skill + skill_search + spawn_subagent + subagent_result", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(25);
+  it("Gate 3:ACI_TOOLSET_NAMES 长度 27,前 8 原序 + memory_* + tool_search + 10 LSP + skill + skill_search + spawn_subagent + subagent_result + mcp resources", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(27);
     // 前 8 件原序不变(append-only 纪律)。
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
@@ -136,7 +160,12 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     // #356 T4 spawn_subagent append-only:23→24,末位 1 件,不重排既有 23 件。
     expect(ACI_TOOLSET_NAMES.slice(23, 24)).toEqual(["spawn_subagent"]);
     // #356 T5 subagent_result append-only:24→25,末位 1 件,不重排既有 24 件。
-    expect(ACI_TOOLSET_NAMES.slice(24)).toEqual(["subagent_result"]);
+    expect(ACI_TOOLSET_NAMES.slice(24, 25)).toEqual(["subagent_result"]);
+    // #440 T11 MCP resources 工具集 append-only:25→27,末位 2 件。
+    expect(ACI_TOOLSET_NAMES.slice(25)).toEqual([
+      "list_mcp_resources",
+      "read_mcp_resource",
+    ]);
   });
 });
 
@@ -257,12 +286,18 @@ describe("createDefaultAciRegistry — onEdit 透传(#251)", () => {
  */
 function expectedSurface(
   deny: ReadonlyArray<string>,
-  opts: { memory?: boolean; skill?: boolean; subagent?: boolean } = {}
+  opts: {
+    memory?: boolean;
+    skill?: boolean;
+    subagent?: boolean;
+    mcp?: boolean;
+  } = {}
 ): readonly string[] {
   const conditionallyAbsent = [
     ...(opts.memory ? [] : ["memory_recall", "memory_save"]),
     ...(opts.skill ? [] : ["skill", "skill_search"]),
     ...(opts.subagent ? [] : ["spawn_subagent", "subagent_result"]),
+    ...(opts.mcp ? [] : ["list_mcp_resources", "read_mcp_resource"]),
   ];
   return [...ACI_TOOLSET_NAMES].filter(
     (n) => !conditionallyAbsent.includes(n) && !deny.includes(n)
@@ -365,6 +400,8 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
       memoryDir: "/tmp/root-a/memory",
       skillCatalog: createSkillCatalog([]),
       subagentManager: fakeSubagentManager,
+      // #440 T11:为对齐 EXPECTED_TOOLS.length(27)传入 mcpManager 装配 27 件。
+      mcpManager: fakeMcpManager,
     });
     const b = createDefaultAciRegistry({
       env: makeWebEnv(),
@@ -372,6 +409,8 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
       memoryDir: "/tmp/root-b/memory",
       skillCatalog: createSkillCatalog([]),
       subagentManager: fakeSubagentManager,
+      // #440 T11:同上。
+      mcpManager: fakeMcpManager,
     });
     expect(a).not.toBe(b);
     expect(a.catalog).not.toBe(b.catalog);
