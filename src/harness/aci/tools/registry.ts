@@ -130,6 +130,11 @@ export interface CreateDefaultAciRegistryOptions {
    *  （memoryDir / skillCatalog / subagentManager）正交组合（Gate 3 镜像
    *  过滤保证 toolsetNames 与 factories 键集一致）。 */
   readonly disallowedTools?: ReadonlyArray<string>;
+  /** #440 D2/D6:session 作用域 todos.md 目录。host 注入：build-engine
+   *  从 session/conversationId 解析（每 conversationId 一份）。缺席时
+   *  todo_write 不入注册表（与 memoryDir 同形态：worker 装配路径不注入
+   *  todoDir 即把所有权边界隔在主 loop 内,跨 executor 竞态由装配期排除）。 */
+  readonly todoDir?: string;
 }
 
 /**
@@ -185,6 +190,11 @@ export function createDefaultAciRegistry(
   const subagentManager = opts.subagentManager;
   const secretRegistry = opts.secretRegistry;
   const disallowedTools = opts.disallowedTools;
+  // #440 D2 seam：host 注入；build-engine 在 surface !== "ask" 解析 session 级
+  // 目录。T1 仅占 seam：todo_write 工厂文件 + SSOT append-only 装配在 T2/T4 才
+  // 进入（参 `CreateDefaultAciRegistryOptions.todoDir` 注释）。本步不消费变量
+  // —— T4 装配时把 todoDir 拉入 conditional spread + Gate 3 excluded 镜像。
+  void opts.todoDir;
 
   // holder:tool_search 自引用的惰性解引用点(装配完成前闭包返回 undefined,
   // tool-search.ts:resolveRegistry 触发 ToolExecutionError 兜底)。

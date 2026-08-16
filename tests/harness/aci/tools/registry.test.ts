@@ -381,3 +381,54 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
     expect(b.catalog.all()).toHaveLength(EXPECTED_TOOLS.length);
   });
 });
+
+// ---------------------------------------------------------------------------
+// #440 T1 — session 作用域 todoDir seam（D2/D6 host 注入的工厂侧）
+//
+// 范围：只断言 createDefaultAciRegistry 接受 todoDir opt（host 注入）且
+// Gate 3 不抛——todo_write 工具工厂 + SSOT append-only 装配属于 T2/T4，
+// T1 不假设工具已在注册表中（避免与 SSOT 纪律耦合）。
+// ---------------------------------------------------------------------------
+
+describe("createDefaultAciRegistry — #440 T1 todoDir seam", () => {
+  it("todoDir:任意字符串 → 装配期不抛（seam 接受；Gate 3 仍通过）", () => {
+    expect(() =>
+      createDefaultAciRegistry({
+        env: makeWebEnv(),
+        sandboxRoot: "/tmp/root",
+        todoDir: "/tmp/root/some-session/todos",
+      })
+    ).not.toThrow();
+  });
+
+  it("todoDir:undefined / 缺省 → 与既有行为 byte-identical", () => {
+    const base = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: "/tmp/root",
+    });
+    const withUndef = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: "/tmp/root",
+      todoDir: undefined,
+    });
+    expect(withUndef.inner.list().map((d) => d.name)).toEqual(
+      base.inner.list().map((d) => d.name)
+    );
+    expect(withUndef.visibleSchemas().map((s) => s.name)).toEqual(
+      base.visibleSchemas().map((s) => s.name)
+    );
+  });
+
+  it("todoDir 与其他条件化装配（memoryDir / skillCatalog / subagentManager）正交组合", () => {
+    const reg = createDefaultAciRegistry({
+      env: makeWebEnv(),
+      sandboxRoot: "/tmp/root",
+      memoryDir: "/tmp/root/memory",
+      skillCatalog: createSkillCatalog([]),
+      subagentManager: fakeSubagentManager,
+      todoDir: "/tmp/root/session-1/todos",
+    });
+    // 既有 25 件全在场（todo_write 尚未追加到 SSOT,T4 才装配）。
+    expect(reg.inner.list().map((d) => d.name)).toEqual([...EXPECTED_TOOLS]);
+  });
+});

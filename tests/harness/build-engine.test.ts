@@ -771,6 +771,64 @@ describe("buildHarnessEngine — #406 T2 secret registry 装配", () => {
 });
 
 // ---------------------------------------------------------------------------
+// #440 T1 — session 作用域 todoDir seam（build-engine 装配侧）
+//
+// D2 决议：build-engine 在 surface !== "ask" 时把 host-injected todoDir 透传
+// 给 createDefaultAciRegistry；ask 不传。worker 装配路径（createWorkerDeps）
+// 不传 todoDir → 所有权边界隔在主 loop 内。
+//
+// 范围：仅断言 buildHarnessEngine 接受 todoDir opt、Gate 3 不抛；todo_write
+// 工厂 + SSOT append 在 T2/T4 才进入，本步不假设工具在注册表中。
+// ---------------------------------------------------------------------------
+
+describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
+  it("chat surface：todoDir 传入 → 装配不抛（seam 接受）", async () => {
+    const built = await buildHarnessEngine({
+      env: makeEnv("sk-test-t1-chat-tododir"),
+      askUser: createNoAskUser(),
+      surface: "chat",
+      todoDir: "/tmp/some-session/todos",
+    });
+    // todo_write 尚未追加 SSOT → 注册表保持 25 件；T4 才扩展。
+    expect(built.deps.registry.list().map((d) => d.name)).toEqual(
+      EXPECTED_TOOLS
+    );
+    if (built.shutdown) await built.shutdown();
+  });
+
+  it("ask surface：todoDir 传入 → 装配不抛（oneshot 不装配 todoDir 给 registry，行为不变）", async () => {
+    const built = await buildHarnessEngine({
+      env: makeEnv("sk-test-t1-ask-tododir"),
+      askUser: createNoAskUser(),
+      surface: "ask",
+      memory: { enabled: false },
+      todoDir: "/tmp/some-session/todos",
+    });
+    // ask 形态与现有 SC8 守门一致：23 件（25 - memory2 - subagent2）。
+    expect(built.deps.registry.list().map((d) => d.name)).toEqual(
+      EXPECTED_TOOLS.filter(
+        (n) =>
+          n !== "memory_recall" &&
+          n !== "memory_save" &&
+          n !== "spawn_subagent" &&
+          n !== "subagent_result"
+      )
+    );
+  });
+
+  it("默认 chat surface 不传 todoDir → 装配不抛（seam 缺席零变化，向后兼容）", async () => {
+    const built = await buildHarnessEngine({
+      env: makeEnv("sk-test-t1-chat-default"),
+      askUser: createNoAskUser(),
+    });
+    expect(built.deps.registry.list().map((d) => d.name)).toEqual(
+      EXPECTED_TOOLS
+    );
+    if (built.shutdown) await built.shutdown();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // #406 T4: secrets.mode 装配矩阵 — roundtrip 默认 vs block 兼容
 // ---------------------------------------------------------------------------
 // A1/A3:缺省(无 mode)或显式 "roundtrip" → secretsMode 缺席(undefined)、

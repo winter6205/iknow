@@ -110,6 +110,11 @@ export type BuildEngineOpts = {
   readonly settings?: IknowSettings;
   /** #126 T5 测试缝:secrets-guard 构造/运行期 hook 异常观测(production 不传 = 静默)。 */
   readonly onHookError?: (e: HookErrorEvent) => void;
+  /** #440 D2 seam:session 作用域 todos.md 目录。host 注入：调用方
+   *  (chat-session / session-hub / TUI deps) 根据 conversationId 解析得到
+   *  唯一的 per-session 目录；测试可传 mkdtemp 路径隔离。surface === "ask"
+   *  路径不传(SC8 oneshot 剥离,与 memory / subagent / skill 编排同形态)。 */
+  readonly todoDir?: string;
 };
 
 /**
@@ -302,6 +307,12 @@ export async function buildHarnessEngine(
     // secretRegistry 已在上方构造（T2 段），registry 工厂只在 handler 调用时
     // 解引用 opts.secretRegistry（惰性），无循环依赖。
     ...(secretRegistry ? { secretRegistry } : {}),
+    // #440 D2/D6 seam：surface !== "ask" 时把 host-injected todoDir 透传
+    // 给 registry（todo_write 条件化装配的开关）。ask 不传 → tool 不入注册表
+    // （与 memoryEnabled / subagentManager / skillCatalog 同形态）。worker
+    // 装配路径 (createWorkerDeps → createDefaultAciRegistry) 不传 todoDir
+    // → 所有权边界隔在主 loop 内。
+    ...(surface !== "ask" && opts.todoDir ? { todoDir: opts.todoDir } : {}),
   });
   // #337:动态 registry 包装 —— 让 inner executor 能解析 registerExternal
   // 动态注册的 mcp__ 工具。`reg.inner` 是构造期快照（aci-registry.ts:71），
