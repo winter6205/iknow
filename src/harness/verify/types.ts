@@ -178,3 +178,23 @@ export interface EvidenceReport {
   /** 绿证据后被代码编辑 (agent-receipts STALE 语义)。 */
   readonly stale: boolean;
 }
+
+/**
+ * #449b B6: 判官输入信封附加字段 (spec 449 Code Style, G5-3 决议术语)。
+ * 判官从"只看 task"升级到 task + evidenceContext 二段: task = #459 公式原样
+ * (不重绑, SC6), evidenceContext = 证据体检单 (checker verdict + 不足原因 +
+ * 已执行测试命令 + 补跑尝试结果 + 证据摘要, 宿主侧截断)。
+ * 字段含义:
+ *   - checkerVerdict — checkEvidence 三态 (SUFFICIENT / CONTRADICTED / INSUFFICIENT);
+ *   - reasons — 不足 / 矛盾原因 (与 buildEvidenceRerunEnvelope Missing 段同源);
+ *   - executedCommands — 已执行的 bash 测试命令列表 (report.runs.map(r => r.command));
+ *   - rerunAttempted — 本轮之前是否触发过补跑 (消息扫描 [VERIFY: rerun needed] 前缀派生);
+ *   - evidenceSummary — 证据摘要 (每 run 一行 command + exit + green, 走 truncateExcerpt)。
+ */
+export interface EvidenceContext {
+  readonly checkerVerdict: EvidenceVerdict;
+  readonly reasons: ReadonlyArray<string>;
+  readonly executedCommands: ReadonlyArray<string>;
+  readonly rerunAttempted: boolean;
+  readonly evidenceSummary: string;
+}

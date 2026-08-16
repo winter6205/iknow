@@ -2,6 +2,7 @@
 // sandbox 出口 re-export (T2 runner 迁移), 不从 ACI 装饰层拉取 ——
 // 避免 verify → ACI 反向依赖 (spec Project Structure / ACR 裁决)。
 import { truncateByCodePoint } from "../sandbox/index.js";
+import type { EvidenceContext } from "./types.js";
 
 export const DEFAULT_MAX_CHARS = 20_000;
 
@@ -78,6 +79,14 @@ export interface BuildClassifierEnvelopeArgs {
   readonly reason: string;
   /** Code-point cap for the reason value. Defaults to DEFAULT_MAX_CHARS. */
   readonly maxChars?: number;
+  /**
+   * #449b B6: 证据体检单 (G5-3 决议术语)。缺席 → 信封逐字节不变 (Postel 既有
+   * 契约冻结, SC10 回归锚)。在场 → 在 missing/reason 段后、固定指令前插入
+   * `evidence_context:` 段 (checker_verdict / reasons / executed_commands /
+   * rerun_attempted / evidence_summary 五行 + evidenceSummary 多行块),
+   * evidenceSummary 走 truncateExcerpt(DEFAULT_MAX_CHARS)。
+   */
+  readonly evidenceContext?: EvidenceContext;
 }
 
 export function buildClassifierEnvelope(
@@ -103,7 +112,36 @@ export function buildClassifierEnvelope(
     `reason: ${truncatedReason}`,
   ];
 
-  return `${fields.join("\n")}\n${VALIDATION_FIXED_INSTRUCTION}\n`;
+  const head = fields.join("\n");
+
+  // B6: evidenceContext 缺席 → 既有信封字节相等 (Postel 冻结既有契约, SC10)。
+  if (args.evidenceContext === undefined) {
+    return `${head}\n${VALIDATION_FIXED_INSTRUCTION}\n`;
+  }
+
+  // B6: evidenceContext 在场 → 在 missing/reason 之后、固定指令之前插入
+  // evidence_context 段。evidenceSummary 走 truncateExcerpt(B1 OQ2 = 20000)。
+  const ctx = args.evidenceContext;
+  const summaryCap = args.maxChars ?? DEFAULT_MAX_CHARS;
+  const truncatedSummary = truncateExcerpt(ctx.evidenceSummary, summaryCap);
+  const reasonsJson = `[${ctx.reasons.map((r) => JSON.stringify(r)).join(", ")}]`;
+  const commandsJson = `[${ctx.executedCommands
+    .map((c) => JSON.stringify(c))
+    .join(", ")}]`;
+  const contextBlock = [
+    "evidence_context:",
+    `checker_verdict: ${ctx.checkerVerdict}`,
+    `reasons: ${reasonsJson}`,
+    `executed_commands: ${commandsJson}`,
+    `rerun_attempted: ${ctx.rerunAttempted}`,
+    "evidence_summary:",
+    truncatedSummary,
+  ].join("\n");
+
+  // evidence_summary 是多行块 (每 run 一行); summary 自身若以 \n 结尾则无需补
+  // 分隔, 否则在 evidence_summary 与 FIXED_INSTRUCTION 之间补 \n。
+  const separator = contextBlock.endsWith("\n") ? "" : "\n";
+  return `${head}\n${contextBlock}${separator}${VALIDATION_FIXED_INSTRUCTION}\n`;
 }
 
 /**

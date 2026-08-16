@@ -52,6 +52,8 @@ import {
 } from "./verdict.js";
 import type {
   ClassifierCheck,
+  EvidenceContext,
+  EvidenceReport,
   EvidenceVerdict,
   VerificationRecord,
   Verdict,
@@ -120,6 +122,12 @@ export interface RunClassifierFn {
     readonly cwd: string;
     /** 分类器模型槽位 (A7: settings.verify.classifierModel ?? settings.llm.model)。 */
     readonly model?: string;
+    /**
+     * #449b B6: 证据体检单 (G5-3 决议术语)。由 runClassifierLoop 在
+     * produceObservation 闭包内组装, 通过 envelope.task 拼接段 + failure
+     * envelope.evidence_context 段两路喂入判官。
+     */
+    readonly evidenceContext?: EvidenceContext;
   }): Promise<ClassifierEnvelope>;
 }
 
@@ -485,6 +493,63 @@ const PROBE_FLAG_FILES: ReadonlySet<string> = new Set([
   "Cargo.toml",
 ]);
 
+/** #449b B5 补跑信封前缀 (rerunAttempted 消息扫描派生锚点, 与 INJECTED_ENVELOPE_PREFIXES 同源)。 */
+const RERUN_ENVELOPE_PREFIX = "[VERIFY: rerun needed]";
+
+/**
+ * #449b B6: 从消息历史派生 rerunAttempted (补跑是否已尝试)。
+ * 闭包无法访问 runVerifyLoopBody 局部 rerunAttempts (produceObservation seam
+ * 签名冻结, 沿用 B4 决策不扩缝) —— 用可观测痕迹: user 消息文本以
+ * `[VERIFY: rerun needed]` 开头即代表 B5 补跑信封已注入过。
+ * checkEvidence 同输入 messages 只读扫描, 幂等无副作用。
+ */
+function hasRerunEnvelope(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): boolean {
+  for (const message of messages) {
+    if (message.role !== "user") continue;
+    for (const block of message.content) {
+      if (block.type !== "text") continue;
+      if (block.text.startsWith(RERUN_ENVELOPE_PREFIX)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * #449b B6: 证据摘要序列化 (evidenceSummary 数据源)。
+ * 每 run 一行 `command exit=N green=<bool>` (沿用既有简洁风格);
+ * 宿主侧截断由下游消费方负责 (buildClassifierEnvelope / 判官 task 拼接段)。
+ */
+function buildEvidenceSummary(report: EvidenceReport): string {
+  if (report.runs.length === 0) return "";
+  return report.runs
+    .map((r) => `${r.command} exit=${r.exitCode} green=${r.greenSummary}`)
+    .join("\n");
+}
+
+/**
+ * #449b B6: 组装 EvidenceContext (证据体检单, G5-3 决议)。
+ * 纯函数幂等: 与 body 前级 checkEvidence 各自独立调用, 无副作用。
+ *   - checkerVerdict = report.verdict;
+ *   - reasons = report.reasons;
+ *   - executedCommands = report.runs.map(r => r.command);
+ *   - rerunAttempted = 消息扫描 [VERIFY: rerun needed] 前缀派生;
+ *   - evidenceSummary = 每 run 一行序列化。
+ */
+function buildEvidenceContext(
+  report: EvidenceReport,
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): EvidenceContext {
+  return {
+    checkerVerdict: report.verdict,
+    reasons: report.reasons,
+    executedCommands: report.runs.map((r) => r.command),
+    rerunAttempted: hasRerunEnvelope(messages),
+    evidenceSummary: buildEvidenceSummary(report),
+  };
+}
+
 /**
  * 从消息历史提取 probeVerifyCommand 输入候选 (B5 决议: 优先真实派生)。
  *   - write_file / edit_file tool_use 的 filePath: 标志文件名命中即贡献;
@@ -588,6 +653,11 @@ async function runClassifierOnce(opts: {
   readonly model?: string;
   readonly summary: string;
   readonly finalText: string | null;
+  /**
+   * #449b B6: 证据体检单 (produceObservation 闭包内组装)。undefined → 判官
+   * 拿不到 evidenceContext, task = userText 逐字节 (B6 兼容既有 SC7 SC10)。
+   */
+  readonly evidenceContext?: EvidenceContext;
 }): Promise<RoundResult> {
   let envelope: ClassifierEnvelope;
   try {
@@ -598,6 +668,9 @@ async function runClassifierOnce(opts: {
       signal: opts.signal,
       cwd: opts.cwd,
       ...(opts.model !== undefined ? { model: opts.model } : {}),
+      ...(opts.evidenceContext !== undefined
+        ? { evidenceContext: opts.evidenceContext }
+        : {}),
     });
   } catch {
     // 用户 abort 优先于 transport 归类: seam 在用户 Ctrl+C 时可能以
@@ -946,12 +1019,29 @@ function runClassifierLoop(
   sessionId: string
 ): Promise<VerifyLoopResult> {
   const { runClassifier } = options;
+  /**
+   * #449b B6: produceObservation 与 buildFailureEnvelope 共享 evidenceContext
+   * 派生结果。produceObservation 闭包内组装, buildFailureEnvelope 闭包读取。
+   * 两闭包在同一轮先后触发 (produceObservation → observation → decision →
+   * 若 continue 才调 buildFailureEnvelope), 共享变量顺序一致性保证。
+   */
+  let lastEvidenceContext: EvidenceContext | undefined;
   return runVerifyLoopBody({
     options,
     maxRounds,
     sessionId,
-    produceObservation: (_round, current) => {
+    produceObservation: (round, current) => {
       const summary = current.result.finalText ?? "";
+      // B6: 复用证据优先前级同源 report (checkEvidence 纯函数幂等, 二次调用
+      // 与 body 前级各自独立无副作用; claimIndex = round 与前级对齐)。
+      const report = checkEvidence({
+        messages: current.result.messages,
+        claimIndex: round,
+      });
+      lastEvidenceContext = buildEvidenceContext(
+        report,
+        current.result.messages
+      );
       return runClassifierOnce({
         task: options.userText,
         runClassifier,
@@ -962,6 +1052,7 @@ function runClassifierLoop(
           : {}),
         summary,
         finalText: current.result.finalText,
+        evidenceContext: lastEvidenceContext,
       });
     },
     buildFailureEnvelope: (round, maxRounds, observation) =>
@@ -971,6 +1062,11 @@ function runClassifierLoop(
         task: options.userText,
         reason: observation.reason ?? "classifier reported failure",
         missing: observation.missing ?? [],
+        // B6: 失败修正信封附 evidence_context 段 (Postel: undefined → 既有
+        // 信封字节相等, 不传 evidence_context 段)。
+        ...(lastEvidenceContext !== undefined
+          ? { evidenceContext: lastEvidenceContext }
+          : {}),
       }),
   });
 }

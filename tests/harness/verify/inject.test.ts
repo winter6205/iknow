@@ -7,6 +7,7 @@ import {
   buildValidationEnvelope,
   truncateExcerpt,
 } from "../../../src/harness/verify/inject.ts";
+import type { EvidenceContext } from "../../../src/harness/verify/types.ts";
 import { truncateByCodePoint } from "../../../src/harness/aci/tools/helpers.ts";
 
 const FIXED_INSTRUCTION =
@@ -619,5 +620,156 @@ describe("buildEvidenceRerunEnvelope", () => {
     // command: 字符串只以 2 空格缩进形式出现 (在 "your next response ..." 之后),
     // 不应有 "command: npm test" 这种键值对形态。
     assert.equal(envelope.includes("command: npm test"), false);
+  });
+});
+
+/**
+ * B6 (#449b) buildClassifierEnvelope evidence_context 扩段 — G5-3 证据体检单进
+ * 失败修正信封。既有 buildClassifierEnvelope 用例 (上方 describe) 零删除,
+ * 本 describe 只追加 evidenceContext 在场/缺席两个方向。
+ */
+describe("buildClassifierEnvelope with evidenceContext (#449b B6)", () => {
+  /** 构造完整 EvidenceContext fixture (含多行 summary 验证截断)。 */
+  function makeEvidenceContext(): EvidenceContext {
+    return {
+      checkerVerdict: "EVIDENCE_INSUFFICIENT",
+      reasons: ["no bash test execution before claim found", "stale evidence"],
+      executedCommands: ["npx vitest run", "pytest"],
+      rerunAttempted: true,
+      evidenceSummary:
+        "npx vitest run exit=1 green=false\npytest exit=0 green=true",
+    };
+  }
+
+  it("evidence_context 段字段齐 (checker_verdict/reasons/executed_commands/rerun_attempted/evidence_summary)", () => {
+    const envelope = buildClassifierEnvelope({
+      round: 2,
+      maxRounds: 12,
+      task: "goal text",
+      missing: ["m1"],
+      reason: "judge one-liner",
+      evidenceContext: makeEvidenceContext(),
+    });
+
+    // 段序: missing/reason 之后、evidence_context 之后、固定指令之前。
+    const idxEvidence = envelope.indexOf("\nevidence_context:\n");
+    const idxReason = envelope.indexOf("\nreason: judge one-liner\n");
+    const idxInstruction = envelope.indexOf("\n" + FIXED_INSTRUCTION + "\n");
+    assert.ok(idxReason > -1, "reason line present");
+    assert.ok(
+      idxEvidence > -1,
+      "evidence_context section marker present\n---\n" + envelope
+    );
+    assert.ok(idxInstruction > -1, "fixed instruction present");
+    assert.ok(
+      idxReason < idxEvidence && idxEvidence < idxInstruction,
+      "evidence_context must sit after missing/reason and before the fixed instruction"
+    );
+    assert.ok(envelope.endsWith(FIXED_INSTRUCTION + "\n"));
+
+    // 头部 (missing/reason 段) 与既有 envelope 一致 —— SC10 回归锚。
+    const headerEnd = idxEvidence + 1;
+    const header = envelope.slice(0, headerEnd);
+    assert.ok(header.includes("\ntask: goal text\n"));
+    assert.ok(header.includes('\nmissing: ["m1"]\n'));
+    assert.ok(header.includes("\nreason: judge one-liner\n"));
+
+    // evidence_context 段 deepEqual 行结构 (evidenceSummary 多行块)。
+    const tail = envelope.slice(idxEvidence + 1);
+    const tailLines = tail.split("\n");
+    // tail 末三行 = summary末行 + FIXED_INSTRUCTION + ""; 但 summary 自身以 \n
+    // 结尾时, 末行 = "" + FIXED_INSTRUCTION + "". 取 summary 后段。
+    const summaryStart =
+      tailLines.findIndex((l) => l === "evidence_summary:") + 1;
+    assert.ok(summaryStart > 0, "evidence_summary: marker must precede block");
+    const summaryEnd = tailLines.length - 2; // 末 = "" , 末-1 = FIXED_INSTRUCTION
+    const summaryLines = tailLines.slice(summaryStart, summaryEnd);
+    assert.deepEqual(summaryLines, [
+      "npx vitest run exit=1 green=false",
+      "pytest exit=0 green=true",
+    ]);
+    // 头部 5 行: evidence_context: + checker_verdict + reasons + executed_commands + rerun_attempted。
+    assert.deepEqual(tailLines.slice(0, 5), [
+      "evidence_context:",
+      "checker_verdict: EVIDENCE_INSUFFICIENT",
+      'reasons: ["no bash test execution before claim found", "stale evidence"]',
+      'executed_commands: ["npx vitest run", "pytest"]',
+      "rerun_attempted: true",
+    ]);
+  });
+
+  it("evidenceSummary 截到 20000 codepoints (truncateExcerpt, B1 OQ2)", () => {
+    const evidenceSummary = "x".repeat(25_000);
+    const envelope = buildClassifierEnvelope({
+      round: 1,
+      maxRounds: 12,
+      task: "t",
+      missing: [],
+      reason: "r",
+      evidenceContext: {
+        checkerVerdict: "EVIDENCE_INSUFFICIENT",
+        reasons: [],
+        executedCommands: [],
+        rerunAttempted: false,
+        evidenceSummary,
+      },
+    });
+    // evidence_summary 块跟在 evidence_summary: 标记之后, 在 FIXED_INSTRUCTION
+    // 之前; 取该块 = envelope 中 marker 之后到 FIXED_INSTRUCTION 之前的子串。
+    const markerIdx = envelope.indexOf("evidence_summary:\n");
+    const instructionIdx = envelope.lastIndexOf(
+      "\n" + FIXED_INSTRUCTION + "\n"
+    );
+    assert.ok(markerIdx > -1, "evidence_summary marker present");
+    assert.ok(instructionIdx > -1, "fixed instruction present");
+    const block = envelope.slice(
+      markerIdx + "evidence_summary:\n".length,
+      instructionIdx
+    );
+    assert.equal(
+      Array.from(block).length,
+      20_000,
+      "evidence_summary block must be truncated to 20000 code points"
+    );
+    assert.equal(block, truncateByCodePoint(evidenceSummary, 20_000));
+  });
+
+  it("evidenceContext 缺席 → 信封与既有逐字节一致 (回归锚)", () => {
+    const baseArgs = {
+      round: 2,
+      maxRounds: 12,
+      task: "为 SessionGoal 增加 status 字段并落盘",
+      missing: ["部署到 staging"],
+      reason: "goal 已写入 session store,但 staging 部署步骤未执行",
+    };
+    const base = buildClassifierEnvelope(baseArgs);
+    const withUndefined = buildClassifierEnvelope({
+      ...baseArgs,
+      evidenceContext: undefined,
+    });
+    assert.equal(
+      withUndefined,
+      base,
+      "absent evidenceContext must not alter the envelope byte-for-byte"
+    );
+    assert.equal(
+      withUndefined.includes("evidence_context"),
+      false,
+      "no evidence_context section when evidenceContext is undefined (Postel)"
+    );
+  });
+
+  it("evidenceContext 缺席 → 仍无 command 路径字段名", () => {
+    const envelope = buildClassifierEnvelope({
+      round: 1,
+      maxRounds: 12,
+      task: "t",
+      missing: ["a"],
+      reason: "b",
+    });
+    assert.equal(envelope.includes("command:"), false);
+    assert.equal(envelope.includes("exit_code:"), false);
+    assert.equal(envelope.includes("failed_count:"), false);
+    assert.equal(envelope.includes("signature:"), false);
   });
 });

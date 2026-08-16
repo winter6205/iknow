@@ -27,7 +27,10 @@ import {
   type RunVerifyFn,
   type VerifyLoopOptions,
 } from "../../../src/harness/verify/verify-loop.ts";
-import type { VerifyConfig } from "../../../src/harness/verify/types.ts";
+import type {
+  EvidenceContext,
+  VerifyConfig,
+} from "../../../src/harness/verify/types.ts";
 import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
@@ -289,19 +292,22 @@ function passEnvelope(reason: string): ClassifierEnvelope {
   });
 }
 
-/** 构造一个调用 spy + 返回脚本的 runClassifier 替身 (与 classifier-loop 同款)。 */
+/** 构造一个调用 spy + 返回脚本的 runClassifier 替身 (与 classifier-loop 同款)。
+ *  #449b B6: spy 额外捕获 evidenceContext (判官输入升级断言面)。 */
 function makeClassifierSpy(script: ReadonlyArray<ClassifierEnvelope>): {
   readonly runClassifier: RunClassifierFn;
   readonly calls: () => ReadonlyArray<{
     readonly task: string;
     readonly summary: string;
     readonly finalText: string | null;
+    readonly evidenceContext: EvidenceContext | undefined;
   }>;
 } {
   const calls: Array<{
     task: string;
     summary: string;
     finalText: string | null;
+    evidenceContext: EvidenceContext | undefined;
   }> = [];
   let i = 0;
   const runClassifier: RunClassifierFn = async (args) => {
@@ -309,6 +315,7 @@ function makeClassifierSpy(script: ReadonlyArray<ClassifierEnvelope>): {
       task: args.task,
       summary: args.summary,
       finalText: args.finalText,
+      evidenceContext: args.evidenceContext,
     });
     const next = script[i];
     if (next === undefined) {
@@ -763,5 +770,198 @@ describe("evidence-first rerun (B5)", () => {
       false,
       "round 3 末条不是补跑信封"
     );
+  });
+});
+
+/* ------------------------------ B6: judge evidence-aware input + record trace ------------------------------ */
+
+/**
+ * #449b B6: 判官输入升级 (EvidenceContext 证据体检单进判官)。
+ *   - INSUFFICIENT 落判官时 runClassifier spy 收到 evidenceContext:
+ *       checkerVerdict === "EVIDENCE_INSUFFICIENT" + reasons 非空 + 任务
+ *       字段首段 = userText 原样 (SC6 task 不重绑);
+ *   - record.evidenceVerdict === "EVIDENCE_INSUFFICIENT" 落 trace (CapturingTrace
+ *     镜像 verify-loop.test.ts makeCapturingTrace 模式)。
+ *
+ * fixture: messages 仅含 user + assistant text, 无 bash → checkEvidence
+ * INSUFFICIENT, 无可探测命令 → 直接落判官 (B5 rerun cap 不触发)。
+ */
+describe("evidence-aware judge input + record trace (#449b B6)", () => {
+  /** Capturing TraceService: 镜像 verify-loop.test.ts makeCapturingTrace 模式
+   *  (recordVerification 落盘, 其它方法 no-op)。 */
+  function makeCapturingTrace(): {
+    readonly trace: import("../../../src/harness/trace/index.ts").TraceService;
+    readonly records: () => ReadonlyArray<
+      import("../../../src/harness/trace/index.ts").VerificationRecord
+    >;
+  } {
+    const records: Array<
+      import("../../../src/harness/trace/index.ts").VerificationRecord
+    > = [];
+    return {
+      trace: {
+        async recordLlmCall() {
+          return undefined;
+        },
+        async recordToolCall() {
+          return undefined;
+        },
+        async recordTurn() {
+          return undefined;
+        },
+        async recordSession() {
+          return undefined;
+        },
+        async recordSandboxCmd() {
+          return undefined;
+        },
+        async recordVerification(record) {
+          records.push(record);
+          return record.id;
+        },
+      },
+      records: () => records,
+    };
+  }
+
+  it("INSUFFICIENT 落判官: spy 收到 evidenceContext (checkerVerdict=INSUFFICIENT + reasons 非空)", async () => {
+    // 判官路径 (command="") + 无 bash 无探测 → INSUFFICIENT → 直落判官。
+    const runFn: VerifyLoopOptions["runFn"] = async (_userText, runOpts) =>
+      stubRun({
+        text: "implemented but no test output",
+        userText: "implement goal",
+        priorMessages: runOpts?.priorMessages,
+      });
+    const { runClassifier, calls: classifierCalls } = makeClassifierSpy([
+      passEnvelope("evidence weak but pass"),
+    ]);
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runClassifier,
+        config: { command: "" },
+        sessionId: "s6",
+      })
+    );
+    assert.equal(classifierCalls().length, 1, "INSUFFICIENT 落判官恰 1 次");
+    const call = classifierCalls()[0]!;
+    assert.ok(
+      call.evidenceContext !== undefined,
+      "spy must capture a defined evidenceContext"
+    );
+    assert.equal(
+      call.evidenceContext!.checkerVerdict,
+      "EVIDENCE_INSUFFICIENT",
+      "evidenceContext.checkerVerdict 来自 checkEvidence 三态"
+    );
+    assert.ok(
+      call.evidenceContext!.reasons.length > 0,
+      "evidenceContext.reasons 非空 (B6 体检单语义)"
+    );
+    assert.deepEqual(
+      call.evidenceContext!.executedCommands,
+      [],
+      "无 bash run → executedCommands 为空数组"
+    );
+    assert.equal(call.evidenceContext!.rerunAttempted, false);
+    assert.equal(
+      call.task,
+      "implement goal",
+      "task 首段 = userText 原样 (SC6)"
+    );
+    assert.equal(out.outcome, "passed");
+    assert.equal(out.rounds, 1);
+  });
+
+  it("INSUFFICIENT 落判官 + 软信号: evidenceContext.reasons 含信号", async () => {
+    // bash 失败 (INSUFFICIENT_WITH_SIGNAL_MESSAGES) + 无探测 → 直落判官。
+    const { runFn } = makeEvidenceRunFn(INSUFFICIENT_WITH_SIGNAL_MESSAGES);
+    const { runClassifier, calls: classifierCalls } = makeClassifierSpy([
+      passEnvelope("weak evidence but pass"),
+    ]);
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runClassifier,
+        config: { command: "" },
+        sessionId: "s6b",
+      })
+    );
+    assert.equal(classifierCalls().length, 1);
+    const ctx = classifierCalls()[0]!.evidenceContext!;
+    assert.equal(ctx.checkerVerdict, "EVIDENCE_INSUFFICIENT");
+    assert.ok(ctx.reasons.length > 0, "reasons 非空");
+    assert.deepEqual(
+      ctx.executedCommands,
+      ["npx vitest run"],
+      "executedCommands = report.runs.map(r => r.command)"
+    );
+    assert.ok(
+      ctx.evidenceSummary.includes("npx vitest run"),
+      "evidenceSummary 含 run 行 (每 run 一行 command)"
+    );
+    assert.equal(out.outcome, "passed");
+  });
+
+  it("record.evidenceVerdict === 'EVIDENCE_INSUFFICIENT' 落 trace (CapturingTrace)", async () => {
+    const runFn: VerifyLoopOptions["runFn"] = async (_userText, runOpts) =>
+      stubRun({
+        text: "implemented but no test output",
+        userText: "implement goal",
+        priorMessages: runOpts?.priorMessages,
+      });
+    const { runClassifier } = makeClassifierSpy([passEnvelope("pass")]);
+    const capture = makeCapturingTrace();
+    // defaultOptions 是本地 helper, 旧签名不接 trace; B6 用例直接构造 options。
+    const opts: VerifyLoopOptions = {
+      runFn,
+      userText: "implement goal",
+      config: { command: "" },
+      sessionId: "s6c",
+      runClassifier,
+      trace: capture.trace,
+      cwd: process.cwd(),
+    };
+    const out = await runVerifyLoop(opts);
+    assert.equal(out.outcome, "passed");
+    const records = capture.records();
+    assert.equal(records.length, 1);
+    assert.equal(
+      records[0]!.evidenceVerdict,
+      "EVIDENCE_INSUFFICIENT",
+      "INSUFFICIENT 轮落盘 evidenceVerdict (B6 trace 双轨)"
+    );
+    assert.deepEqual(records[0]!.gamingSignals, []);
+  });
+
+  it("rerunAttempted 派生: 补跑一轮后落判官 → evidenceContext.rerunAttempted=true (消息扫描)", async () => {
+    // 判官路径 (command="") + probeable fixture (pyproject.toml → pytest):
+    // round 1 INSUFFICIENT + probe 命中 → 补跑; round 2 仍 INSUFFICIENT + cap
+    // 用尽 → 落判官。spy 收到的 evidenceContext.rerunAttempted=true
+    // (消息扫描 [VERIFY: rerun needed] 前缀派生)。
+    // makeEvidenceRunFn: 后续轮 messages = prior (含补跑信封) + user + assistant,
+    // 模拟生产 run() 把 priorMessages 并入 next turn 消息历史。
+    const { runFn } = makeEvidenceRunFn(PROBE_OK_MESSAGES);
+    const { runClassifier, calls: classifierCalls } = makeClassifierSpy([
+      passEnvelope("still no test evidence"),
+    ]);
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runClassifier,
+        config: { command: "" },
+        sessionId: "s6d",
+      })
+    );
+    assert.equal(out.outcome, "passed");
+    assert.equal(out.rounds, 2);
+    assert.equal(classifierCalls().length, 1, "补跑用尽后落判官恰 1 次");
+    const ctx = classifierCalls()[0]!.evidenceContext!;
+    assert.equal(
+      ctx.rerunAttempted,
+      true,
+      "evidenceContext.rerunAttempted 派生自消息扫描 [VERIFY: rerun needed] 前缀"
+    );
+    assert.equal(ctx.checkerVerdict, "EVIDENCE_INSUFFICIENT");
   });
 });
