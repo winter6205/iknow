@@ -32,6 +32,7 @@ import type {
 } from "../model-adapter/types.js";
 import type { LoopTrace } from "../loop-trace.js";
 import type { TraceService } from "../trace/index.js";
+import { checkEvidence } from "./evidence-checker.js";
 import { buildClassifierEnvelope, buildValidationEnvelope } from "./inject.js";
 import {
   parseClassifierResult,
@@ -46,6 +47,7 @@ import {
 } from "./verdict.js";
 import type {
   ClassifierCheck,
+  EvidenceVerdict,
   VerificationRecord,
   Verdict,
   VerifyConfig,
@@ -175,6 +177,10 @@ interface RoundObservation {
   readonly missing?: ReadonlyArray<string>;
   /** 分类器分支: 判官跑的 evidence 列表 (SC10 落盘 + A8 信封 evidence 字段)。 */
   readonly evidence?: ReadonlyArray<ClassifierCheck>;
+  /** 证据优先前级 (#449b B4): 仅 EVIDENCE_INSUFFICIENT 轮由 body 合并进本轮
+   *  observation; Postel 落盘经 buildRecord (SUFFICIENT / CONTRADICTED 不携带)。 */
+  readonly evidenceVerdict?: EvidenceVerdict;
+  readonly gamingSignals?: ReadonlyArray<string>;
 }
 
 /** 一轮验证的终态; aborted = 用户中断打断验证执行。 */
@@ -395,6 +401,14 @@ function buildRecord(opts: {
     ...(observation.missing !== undefined
       ? { missing: observation.missing }
       : {}),
+    // #449b B4: 证据优先前级字段 Postel 落盘 (仅 INSUFFICIENT 轮产这些键;
+    // SUFFICIENT / CONTRADICTED 短路 observation 不含这些字段, 自然不落)。
+    ...(observation.evidenceVerdict !== undefined
+      ? { evidenceVerdict: observation.evidenceVerdict }
+      : {}),
+    ...(observation.gamingSignals !== undefined
+      ? { gamingSignals: observation.gamingSignals }
+      : {}),
     action,
     ...(finalOutcome !== undefined ? { finalOutcome } : {}),
     ts: new Date().toISOString(),
@@ -607,7 +621,56 @@ async function runVerifyLoopBody(opts: {
     }
 
     round += 1;
-    const observation = await opts.produceObservation(round, current);
+    // #449b B4 evidence-first 前级 (spec Code Style): 每轮 produceObservation 前
+    // 先 checkEvidence, 三态映射:
+    //   EVIDENCE_SUFFICIENT → 直接 PASS 短路 (零判官零重跑, 即便配了 command, G3);
+    //   EVIDENCE_CONTRADICTED → true-failure (进修正轮, 趋势/签名机制原样消费);
+    //   EVIDENCE_INSUFFICIENT → 落原 produceObservation (判官/命令既有机制), 且把
+    //     evidenceVerdict + gamingSignals 合并进本轮 observation (buildRecord Postel
+    //     落盘)。SUFFICIENT/CONTRADICTED 不落 evidenceVerdict (B3 Postel 语义)。
+    const evidenceReport = checkEvidence({
+      messages: current.result.messages,
+      claimIndex: round,
+    });
+    let pendingEvidence:
+      | {
+          readonly evidenceVerdict: EvidenceVerdict;
+          readonly gamingSignals: ReadonlyArray<string>;
+        }
+      | undefined;
+    let observation: RoundResult;
+    if (evidenceReport.verdict === "EVIDENCE_SUFFICIENT") {
+      observation = {
+        verdict: "pass",
+        exitCode: 0,
+        outputText: "",
+      };
+    } else if (evidenceReport.verdict === "EVIDENCE_CONTRADICTED") {
+      observation = {
+        verdict: "true-failure",
+        exitCode: 1,
+        signature: buildFailureSignature({
+          exitCode: 1,
+          outputText: evidenceReport.reasons.join("\n"),
+          countRegex: undefined,
+        }),
+        outputText: "",
+      };
+    } else {
+      observation = await opts.produceObservation(round, current);
+      pendingEvidence = {
+        evidenceVerdict: "EVIDENCE_INSUFFICIENT",
+        gamingSignals: evidenceReport.gamingSignals,
+      };
+    }
+    // 仅 INSUFFICIENT 轮合并 evidenceVerdict/gamingSignals (Postel: 短路轮
+    // 不携带这些字段, buildRecord 不落盘)。
+    if (pendingEvidence !== undefined) {
+      observation = {
+        ...observation,
+        ...pendingEvidence,
+      };
+    }
     if (observation.aborted) {
       return buildResult({
         current,
