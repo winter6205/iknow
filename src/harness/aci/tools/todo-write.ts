@@ -1,36 +1,32 @@
 /**
- * #440 T2: todo_write tool — session-scope ledger with mode routing.
+ * #440 T2/T3: todo_write tool — session-scope ledger with mode routing,
+ * governance limits, and atomic write.
  *
- * Spec: docs/handoff/2026-08-17-wayfinder-440-decisions.md D1/D5 (tool shape
- * + short receipt, no envelope meta) + D2 (file: `<session 目录>/todos.md`,
- * factory `todoDir` seam). T2 implements mode routing (list / add / check)
- * + checkbox format; T3 layers file/item governance + atomic write on top.
+ * Spec: docs/handoff/2026-08-17-wayfinder-440-decisions.md D1/D2/D4/D5/D7.
+ *   - D1: single-tool + mode enum shape (list / add / check).
+ *   - D2: file at `<session 目录>/todos.md`; factory `todoDir` seam.
+ *   - D4: file limit 64 KB; per-item limit 500 codepoints; tmp + rename
+ *     atomic write (negative-phrasing rejection is NOT applied — todo items
+ *     like "别忘了跑测试" are legitimate tasks; only memory_save rejects
+ *     negative phrasing).
+ *   - D5: short receipt ("Updated todos.md"); no pending count; no envelope
+ *     meta.
+ *   - D7: write / non-concurrency-safe / block / default timeout tier; the
+ *     code-level permission rule in policy.ts:codeBuiltInRules allows
+ *     `mode === "list"` to bypass ask (read-only sub-mode).
  *
- * Contract (D1/D5):
- *   - input `{ mode: "list" | "add" | "check", item?: string }`,
- *     additionalProperties: false
- *   - checkbox format: add appends `- [ ] <item>\n`; check flips first exact
- *     match `- [ ] <item>` to `- [x] <item>`. Leading `[x]` line is not a
- *     match (already checked).
- *   - list returns the full file content as a plain string; missing file is
- *     a legal state (returns `""`, never throws on absence).
- *   - output: list → full content (string); add / check → short receipt
- *     `"Updated todos.md"` (no pending count, no envelope meta — D5).
- *   - typed errors (`ToolExecutionError` — D7 default ask守门 uses
- *     error.name for catch):
- *     - unknown `mode` → "[todo_write] mode must be 'list' | 'add' | 'check'"
- *     - `add` / `check` without non-empty string `item` → "[todo_write] item
- *       must be a non-empty string for mode <mode>"
- *     - `check` with no matching `- [ ] <item>` line → "[todo_write] no open
- *       item matches: <item>"
+ * Ownership boundary (D6): the worker assembly path does not inject todoDir
+ * → todo_write is excluded from the worker tool surface at registry
+ * construction time. Concurrency among add/check calls inside the same main
+ * loop is not blocked at the file level — but each call is
+ * non-concurrency-safe (`isConcurrencySafe: false`), so the loop engine
+ * serializes the per-turn tool calls.
  *
- * aci metadata (D7): write / non-concurrency-safe / block / default timeout.
- *
- * Injection seam: `todoDir` is host-injected per conversationId. T2 does NOT
- * append to ACI_TOOLSET_NAMES; the factory is independent (T4 wires the
- * registry). T2 tests exercise the factory directly (no registry integration).
+ * Injection seam: `todoDir` is host-injected per conversationId. T2/T3 does
+ * NOT append to ACI_TOOLSET_NAMES; T4 wires the SSOT append.
  */
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile, unlink } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
 import type { AciToolDef } from "../types.js";
@@ -47,8 +43,19 @@ export type TodoWriteMode = (typeof TODO_WRITE_MODES)[number];
 const OPEN_PREFIX = "- [ ] ";
 const CLOSED_PREFIX = "- [x] ";
 
+/**
+ * Governance limits (D4): file size capped at 64 KB (much smaller than the
+ * memory_save 1 MB ceiling); per-item text capped at 500 codepoints (matches
+ * the taskFocus discipline; `[...item].length` counts Unicode code points,
+ * not UTF-16 code units, so emoji and CJK are measured correctly).
+ */
+export const MAX_FILE_BYTES = 64 * 1024;
+export const MAX_ITEM_CODEPOINTS = 500;
+
 export interface TodoWriteToolDeps {
   readonly todoDir: string;
+  /** Test seam: deterministic tmp suffix (defaults to random hex). */
+  readonly randomBytes?: (n: number) => Buffer;
 }
 
 /**
@@ -56,12 +63,19 @@ export interface TodoWriteToolDeps {
  * (D1 single-tool + mode enum shape).
  *
  * mode = "list": returns full `todos.md` content (or `""` if file missing).
- * mode = "add": appends `- [ ] <item>\n` line; returns short receipt.
- * mode = "check": flips first exact-match `- [ ] <item>` to `- [x] <item>`;
- *                 no match → typed error.
+ * mode = "add": appends `- [ ] <item>\n` line atomically; returns short receipt.
+ * mode = "check": flips first exact-match `- [ ] <item>` to `- [x] <item>`
+ *                 atomically; no match → typed error.
+ *
+ * Write failure (mkdir / writeFile / rename): typed ToolExecutionError; tmp
+ * file is unlinked in `finally` so a crashed mid-write never leaves a
+ * half-written `.tmp` next to the real file. The pre-existing `todos.md`
+ * (if any) is untouched when an atomic write fails — `rename` is the only
+ * step that can promote tmp to the final path.
  */
 export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
   const filePath = join(deps.todoDir, "todos.md");
+  const random = deps.randomBytes ?? ((n: number) => randomBytes(n));
 
   return Object.freeze({
     name: "todo_write",
@@ -87,13 +101,14 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
       switch (params.mode) {
         case "list":
           return await readTodos(filePath);
-        case "add":
-          // Atomic write + limits live in T3; this branch uses naive append for
-          // TDD purposes. The harness integration path is exercised by T7.
-          await appendTodoLine(filePath, formatOpenLine(params.item));
+        case "add": {
+          const current = await readTodos(filePath);
+          const next = appendLine(current, formatOpenLine(params.item));
+          assertWithinFileLimit(next);
+          await writeTodosAtomic(filePath, next, random);
           return "Updated todos.md";
+        }
         case "check": {
-          // Same as above — T3 swaps naive write for atomic write with limits.
           const current = await readTodos(filePath);
           const flipped = flipFirstOpenLine(current, params.item);
           if (flipped === null) {
@@ -101,7 +116,8 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
               `[todo_write] no open item matches: ${params.item}`
             );
           }
-          await writeTodos(filePath, flipped);
+          assertWithinFileLimit(flipped);
+          await writeTodosAtomic(filePath, flipped, random);
           return "Updated todos.md";
         }
       }
@@ -136,6 +152,16 @@ function parseInput(input: unknown): ParsedInput {
       `[todo_write] item must be a non-empty string for mode ${mode}`
     );
   }
+  // Per-item limit (D4): 500 codepoints. Measured on `[...item].length` so
+  // emoji / CJK characters count by Unicode code points (not UTF-16 units).
+  if (
+    (mode === "add" || mode === "check") &&
+    codepointLength(item) > MAX_ITEM_CODEPOINTS
+  ) {
+    throw new ToolExecutionError(
+      `[todo_write] item exceeds ${MAX_ITEM_CODEPOINTS} codepoints (got ${codepointLength(item)})`
+    );
+  }
   return { mode, item };
 }
 
@@ -165,7 +191,7 @@ function requireItemFor(mode: TodoWriteMode, value: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
-// file IO (T2 naive; T3 swaps to atomic + limits)
+// file IO (T3: atomic + limits)
 // ---------------------------------------------------------------------------
 
 async function readTodos(filePath: string): Promise<string> {
@@ -179,21 +205,68 @@ async function readTodos(filePath: string): Promise<string> {
   }
 }
 
-async function appendTodoLine(filePath: string, line: string): Promise<void> {
-  // T2 naive append; T3 swaps to mkdir + tmp + rename + limits.
-  const { appendFile } = await import("node:fs/promises");
-  await appendFile(filePath, line, "utf8");
-}
-
-async function writeTodos(filePath: string, content: string): Promise<void> {
-  // T2 naive write; T3 swaps to tmp + rename + limits.
-  const { writeFile } = await import("node:fs/promises");
-  await writeFile(filePath, content, "utf8");
+/**
+ * Atomic write: tmp file then rename. On any failure the tmp is unlinked so
+ * a crashed mid-write never pollutes the directory. The pre-existing
+ * `todos.md` (if any) is untouched when an atomic write fails — `rename` is
+ * the only step that can promote tmp to the final path.
+ */
+async function writeTodosAtomic(
+  filePath: string,
+  content: string,
+  random: (n: number) => Buffer
+): Promise<void> {
+  try {
+    await mkdir(join(filePath, ".."), { recursive: true });
+  } catch (error) {
+    throw new ToolExecutionError(
+      `[todo_write] mkdir failed: ${(error as Error).message}`
+    );
+  }
+  const slug = random(6).toString("hex"); // 12 hex chars
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${slug}.tmp`;
+  try {
+    await writeFile(tmpPath, content, "utf8");
+    await rename(tmpPath, filePath);
+  } catch (error) {
+    // Best-effort tmp cleanup; the directory remains consistent (no half-written
+    // file can be observed at the final path).
+    try {
+      await unlink(tmpPath);
+    } catch {
+      // tmp may already be gone (rename succeeded then a later step failed);
+      // ignore — the contract is just "no polluted tmp leftover".
+    }
+    throw new ToolExecutionError(
+      `[todo_write] atomic write failed: ${(error as Error).message}`
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
-// checkbox format (pure)
+// limits + line formatting (pure)
 // ---------------------------------------------------------------------------
+
+function assertWithinFileLimit(content: string): void {
+  // Byte length measured via Buffer.byteLength(..., "utf8") — mirrors the
+  // size on disk rather than counting code units or code points.
+  const bytes = Buffer.byteLength(content, "utf8");
+  if (bytes > MAX_FILE_BYTES) {
+    throw new ToolExecutionError(
+      `[todo_write] file would exceed ${MAX_FILE_BYTES} bytes (got ${bytes})`
+    );
+  }
+}
+
+export function codepointLength(s: string): number {
+  return [...s].length;
+}
+
+/** Append `line` to `existing`. Tolerant of missing trailing newline. */
+export function appendLine(existing: string, line: string): string {
+  if (existing.length === 0) return line;
+  return existing.endsWith("\n") ? existing + line : existing + "\n" + line;
+}
 
 /** Build an open `- [ ] <item>` line ending with newline. */
 export function formatOpenLine(item: string): string {
