@@ -59,16 +59,14 @@ function makeBundle(
   return { env } as unknown as RuntimeBundle;
 }
 
-// #365 T2：surface="tui" → build-engine 全装配 25 件(skillCatalog + subagentManager
+// #365 T2：surface="tui" → build-engine 全装配 26 件(skillCatalog + subagentManager
 // 均装配)。数组与 tests/harness/build-engine.test.ts 的 EXPECTED_TOOLS 对齐(SSOT)。
 // 拆分:base 11 件(#194 + #224)→ +10 LSP(#251)= 21 件 → + skill/skill_search
 // (#337 T8)= 23 件 → + spawn_subagent/subagent_result (#356 T6)= 25 件。
 // #440 T4:todo_write append-only:25→26,条件化装配 — todoDir 缺席时
-// todo_write 不入注册表。TUI deps 装配路径(build-engine {surface:"tui"})
-// 当前未透传 todoDir → 25 件;TUI 入口接入 todoDir 后再升至 26 件,届时
-// 本常量扩展为 26 并改名为 EXPECTED_TOOLSET_26。本步保留 25 件 + 注释
-// (TUI deps.ts 不在 #440 scope 内,D6 主 loop 所有权边界把 todo 隔在
-// chat session / serve session 层)。
+// todo_write 不入注册表。
+// #440 T1-fix:TUI deps 装配路径(build-engine {surface:"tui"})现在透传
+// todoDir(由 resolveSessionTodoDir({userHome,surface:"tui"}) 解析)→ 26 件。
 const EXPECTED_BASE_11 = [
   "bash",
   "read_file",
@@ -94,21 +92,23 @@ const EXPECTED_LSP_10 = [
   "lsp_outgoing_calls",
   "lsp_diagnostics",
 ];
-const EXPECTED_TOOLSET_25 = [
+const EXPECTED_TOOLSET_26 = [
   ...EXPECTED_BASE_11,
   ...EXPECTED_LSP_10,
   "skill",
   "skill_search",
   "spawn_subagent",
   "subagent_result",
+  // #440 T1-fix:todo_write 在 TUI surface 装配(todoDir 由 deps.ts 注入)。
+  "todo_write",
 ];
 
-describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(25 件)", () => {
+describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(26 件)", () => {
   // #337 Phase B:tmp fixture 隔离真实 ~/.iknow / cwd(避免 worktree 已提交
   // 的 .iknow/mcp.json 触发真实 stdio subprocess 启动,以及 .iknow/skills
   // 污染 skill scanner 降级行为)。skill/skill_search 静态装配(Gate 3 锁:
-  // skillCatalog 提供即装两件),tmp 即使无 skills/mcp.json 仍产 25 件
-  // (surface="tui" 全装配含 subagent 2 件)。
+  // skillCatalog 提供即装两件),tmp 即使无 skills/mcp.json 仍产 26 件
+  // (surface="tui" 全装配含 subagent 2 件 + todo_write 1 件)。
   const roots: string[] = [];
 
   afterEach(async () => {
@@ -117,7 +117,7 @@ describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(25 件)"
     );
   });
 
-  test("装配出完整 25 件工具(surface=tui 全装配:11 base + 10 LSP + skill 2 + subagent 2)", async () => {
+  test("装配出完整 26 件工具(surface=tui 全装配:11 base + 10 LSP + skill 2 + subagent 2 + todo 1)", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-tui-deps-toolset-"));
     roots.push(root);
     const deps = await buildTuiDeps(makeBundle(), {
@@ -129,7 +129,8 @@ describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(25 件)"
       .list()
       .map((def) => def.name)
       .sort();
-    expect(names).toEqual([...EXPECTED_TOOLSET_25].sort());
+    expect(names).toEqual([...EXPECTED_TOOLSET_26].sort());
+    expect(names).toContain("todo_write");
   });
 
   test("显式断言 web_fetch / web_search / skill / skill_search 都在注册表里", async () => {

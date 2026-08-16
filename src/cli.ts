@@ -39,6 +39,7 @@ import { maxTurnsEnvelope } from "./cli/max-turns.js";
 import { randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
+import { resolveSessionTodoDir } from "./harness/aci/tools/todo-write.js";
 import { buildViolationWiring } from "./harness/sandbox/violation-executor.js";
 import { openBrowser } from "./cli/open-browser.js";
 import type { TraceServeOptions } from "./traceserver/serve.js";
@@ -236,11 +237,14 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // chat TTY REPL: interactive y/N prompt via stdin/stdout.
     // #196 A12:chat 激活 BOOTSTRAP(surface="chat" → bootstrapActive=true)。
     // #194 T6:chat 显式 memory:{enabled:true} — 10 件工具 + memory_layer 装配。
+    // #440 T1-fix:chat 入口注入 todoDir 让 todo_write 在主 loop 在场
+    // (per-conversationId resolution 是后续 ticket,见 todo-write.ts resolveSessionTodoDir 注释)。
     built = await buildHarnessEngine(bundle, {
       askUser: createTtyAskUser(),
       surface: "chat",
       memory: { enabled: true },
       permissionMode,
+      todoDir: resolveSessionTodoDir({ surface: "chat" }),
     });
   } catch (err) {
     printChatError(err);

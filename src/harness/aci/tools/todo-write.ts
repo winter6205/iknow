@@ -27,6 +27,7 @@
  */
 import { mkdir, readFile, rename, writeFile, unlink } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { AciToolDef } from "../types.js";
@@ -291,4 +292,37 @@ export function flipFirstOpenLine(
     }
   }
   return null;
+}
+
+/**
+ * #440 T1-fix: resolve the v1 process-stable per-surface todoDir.
+ *
+ * v1 limitation: returns a SHARED directory for all conversations within
+ * a single surface (chat / serve / tui). D2 originally scoped per
+ * conversationId — per-session resolution is a follow-up ticket because:
+ *   - chat REPL: `conversationId = resumeId ?? randomUUID()` is created
+ *     INSIDE `runChatSession` (chat-session.ts:963), AFTER buildHarnessEngine
+ *     returns (cli.ts:239). Plumbing it requires either reordering cli.ts or
+ *     computing the id twice. Deferred to #440-followup.
+ *   - serve (hub): `cachedDeps` is shared across all conversations in the hub
+ *     process (hub.ts ensureDeps caches the engine once). Per-conversationId
+ *     todoDir requires engine rebuild per session — too expensive. Deferred.
+ *   - TUI: `soleInflightId` is dynamic per message (deps.ts:153). Same
+ *     architectural issue as serve. Deferred.
+ *
+ * Until per-conversationId isolation lands, all sessions within the same
+ * surface share `<userHome>/.iknow/todos/<surface>/todos.md`. Stable across
+ * turns within a session; per-surface (chat ≠ serve ≠ TUI on the same box);
+ * per-user (multi-user → different userHome). Tests inject `userHome` to
+ * redirect into a tmpdir (mirrors build-engine's userHome seam).
+ *
+ * Pure (no IO) — exported so chat/serve/tui callers can compute the same
+ * path before calling `buildHarnessEngine({ todoDir })`.
+ */
+export function resolveSessionTodoDir(opts: {
+  readonly userHome?: string;
+  readonly surface: "chat" | "serve" | "tui";
+}): string {
+  const userHome = opts.userHome ?? homedir();
+  return join(userHome, ".iknow", "todos", opts.surface);
 }

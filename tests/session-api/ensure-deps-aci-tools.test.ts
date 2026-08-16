@@ -86,7 +86,7 @@ afterAll(async () => {
 });
 
 describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
-  it("returns the ACI 25-tool registry (no todo_write) when serve constructs without deps", async () => {
+  it("returns the ACI 26-tool registry (incl. todo_write) when serve constructs without deps", async () => {
     const hub = new SessionHub({
       store,
       askUser: createNoAskUser(),
@@ -97,12 +97,11 @@ describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
 
     const deps = await ensure();
     const names = deps.registry.list().map((def) => def.name);
-    // serve 不传 todoDir → todo_write 缺席;过滤后再断言(SSOT 26 - todo_write = 25)。
-    const expectedNoTodo = EXPECTED_TOOLS.filter((n) => n !== "todo_write");
-    for (const expected of expectedNoTodo) {
+    // #440 T1-fix:serve 入口注入 todoDir → todo_write 装配,SSOT 26 件全在场。
+    for (const expected of EXPECTED_TOOLS) {
       expect(names).toContain(expected);
     }
-    expect(names).toHaveLength(expectedNoTodo.length);
-    expect(names).not.toContain("todo_write");
+    expect(names).toHaveLength(EXPECTED_TOOLS.length);
+    expect(names).toContain("todo_write");
   });
 });
