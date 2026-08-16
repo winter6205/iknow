@@ -4,6 +4,7 @@ import type {
   AnthropicNativeMessage,
 } from "../../../../src/harness/model-adapter/types.js";
 import { checkEvidence } from "../../../../src/harness/verify/evidence-checker.js";
+import { message, textBlock, toolResult, toolUse } from "./_fixtures.js";
 
 /**
  * T2 exit code 双路解析 + fail-closed (spec SC4 / A9)。
@@ -14,34 +15,6 @@ import { checkEvidence } from "../../../../src/harness/verify/evidence-checker.j
  *   - is_error: true + [execution_failed] 前缀 → null。
  * fail-closed (A8): 空输入 / 无 bash / 畸形 shape 全不 crash → INSUFFICIENT。
  */
-
-function toolUse(id: string, command: string): AnthropicContentBlock {
-  return { type: "tool_use", id, name: "bash", input: { command } };
-}
-
-function toolResult(
-  id: string,
-  content: unknown,
-  is_error = false
-): AnthropicContentBlock {
-  return {
-    type: "tool_result",
-    tool_use_id: id,
-    content,
-    is_error,
-  };
-}
-
-function textBlock(text: string): AnthropicContentBlock {
-  return { type: "text", text };
-}
-
-function message(
-  role: "user" | "assistant",
-  ...blocks: AnthropicContentBlock[]
-): AnthropicNativeMessage {
-  return { role, content: blocks };
-}
 
 /** 单条 bash run + tool_result 的完整 transcript 骨架。 */
 function transcript(blocks: AnthropicContentBlock[]): AnthropicNativeMessage[] {

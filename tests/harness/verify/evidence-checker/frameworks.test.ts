@@ -1,50 +1,18 @@
 import { describe, expect, it } from "vitest";
-import type {
-  AnthropicContentBlock,
-  AnthropicNativeMessage,
-} from "../../../../src/harness/model-adapter/types.js";
+import type { AnthropicNativeMessage } from "../../../../src/harness/model-adapter/types.js";
 import { checkEvidence } from "../../../../src/harness/verify/evidence-checker.js";
+import {
+  greenTranscript,
+  message,
+  textBlock,
+  toolResult,
+  toolUse,
+} from "./_fixtures.js";
 
 /**
  * T3 五框架 green marker (spec SC3 / A4): 五框架各一条「exit 0 + green 摘要
  * + 无编辑」→ SUFFICIENT (一条即够, G2-4 阈值)。marker 只从框架摘要行读数字。
  */
-
-function toolUse(id: string, command: string): AnthropicContentBlock {
-  return { type: "tool_use", id, name: "bash", input: { command } };
-}
-
-function toolResult(id: string, content: unknown): AnthropicContentBlock {
-  return { type: "tool_result", tool_use_id: id, content };
-}
-
-function textBlock(text: string): AnthropicContentBlock {
-  return { type: "text", text };
-}
-
-function message(
-  role: "user" | "assistant",
-  ...blocks: AnthropicContentBlock[]
-): AnthropicNativeMessage {
-  return { role, content: blocks };
-}
-
-/** 构造: task → bash(tool_use + tool_result) → done (claimIndex=2)。 */
-function greenTranscript(
-  command: string,
-  stdout: string
-): AnthropicNativeMessage[] {
-  const id = "g01";
-  return [
-    message("user", textBlock("task")),
-    message(
-      "assistant",
-      toolUse(id, command),
-      toolResult(id, JSON.stringify({ code: 0, stdout, stderr: "" }))
-    ),
-    message("user", textBlock("done")),
-  ];
-}
 
 describe("五框架 green marker → SUFFICIENT (exit 0 + green 摘要 + 无编辑)", () => {
   it("pytest: count+duration 双子句摘要行", () => {
@@ -78,7 +46,7 @@ describe("五框架 green marker → SUFFICIENT (exit 0 + green 摘要 + 无编�
   it("go test: ok <pkg> 行", () => {
     const msgs = greenTranscript(
       "go test ./...",
-      "ok  	example.com/proj/pkg	0.023s\n"
+      "ok  \texample.com/proj/pkg\t0.023s\n"
     );
     const report = checkEvidence({ messages: msgs, claimIndex: 2 });
     expect(report.runs[0].framework).toBe("go");
@@ -105,9 +73,8 @@ describe("五框架 green marker → SUFFICIENT (exit 0 + green 摘要 + 无编�
         toolUse(id1, "npx vitest run --no-inline"),
         toolResult(id1, JSON.stringify({ code: 1, stdout: "FAIL", stderr: "" }))
       ),
-      message("assistant"),
       message(
-        "user",
+        "assistant",
         toolUse(id2, "npx vitest run"),
         toolResult(
           id2,

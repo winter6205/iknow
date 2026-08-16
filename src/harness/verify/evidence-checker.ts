@@ -265,12 +265,14 @@ function extractTestRuns(
       const { stdout } = parseToolResult(
         isError || text?.startsWith(EXECUTION_FAILED_PREFIX) ? null : text
       );
+      // runner + green 摘要行双锚定命中 → framework; greenSummary 与之等价。
+      const framework = detectFramework(command, stdout);
       runs.push({
         messageIndex: i,
         command,
         exitCode: parseExitCode(text, isError),
-        framework: detectFramework(command, stdout),
-        greenSummary: detectFramework(command, stdout) !== null,
+        framework,
+        greenSummary: framework !== null,
         weakGreen: isWeakGreen(command, stdout),
         swallowed: isSwallowed(command),
       });
@@ -307,8 +309,14 @@ function hasContradiction(
         if (isTestFilePath(fp) && isEmpty) return true;
       } else if (b.name === "bash") {
         const command = extractCommand(b.input);
-        // bash `rm` 测试文件 (rm / rm -f / rm -rf 目标含 test 路径)。
-        if (/\brm\b.*(test|spec|__tests__)/.test(command)) return true;
+        // bash `rm` 测试文件: 提取 rm 目标 token 逐个喂 isTestFilePath,
+        // 收敛到「真测试文件」路径判定 (不子串误中 node_modules/vitest 等)。
+        if (/\brm\b/.test(command)) {
+          const target = command
+            .split(/\s+/)
+            .find((t) => t && !t.startsWith("-") && isTestFilePath(t));
+          if (target !== undefined) return true;
+        }
       }
     }
   }
@@ -321,7 +329,10 @@ function isTestFilePath(filePath: string): boolean {
     /\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(filePath) ||
     /\b(tests?|__tests__|test_)\./.test(filePath) ||
     filePath.includes("/test/") ||
-    filePath.startsWith("test_") ||
+    filePath.includes("/tests/") ||
+    /(^|\/)tests?\/?$/.test(filePath) ||
+    /(^|\/)test_[^/]+$/.test(filePath) ||
+    /(^|\/)(test|tests|spec)\/[^/]+$/.test(filePath) ||
     filePath.endsWith("_test.go") ||
     filePath.endsWith("_test.py")
   );
@@ -352,9 +363,29 @@ function collectGamingSignals(
         ) {
           signals.push("git commit --no-verify/-n (skipped pre-commit checks)");
         }
+        // 变更测试文件自身的 bash 操作 → 软信号 (与 CONTRADICTED 对齐:
+        // 只有目标是 isTestFilePath 才记, 避免 rm dist/bundle.js 等误报)。
         if (/\b(rm|sed|mv)\b/.test(command)) {
-          // 变更测试文件自身的 bash 操作视为可疑 (低置信, 只记录)。
-          signals.push("bash file mutation on test-ish target");
+          const target = command
+            .split(/\s+/)
+            .find((t) => t && !t.startsWith("-") && isTestFilePath(t));
+          if (target !== undefined) {
+            signals.push("bash file mutation on test file: " + target);
+          }
+        }
+      } else if (b.name === "edit_file" || b.name === "write_file") {
+        // 新增 skip/xfail 装饰器到测试文件 → 软信号 (spec Glossary 三类别)。
+        // 只扫可见的 input.content 文本, 不读 fs (纯函数纪律 A11)。
+        const input = b.input as { filePath?: unknown; content?: unknown };
+        const fp = typeof input.filePath === "string" ? input.filePath : "";
+        if (isTestFilePath(fp) && typeof input.content === "string") {
+          if (
+            /(\.skip|\.skipIf|\.xfail|@pytest\.mark\.skip|#\[ignore\]|#\[should_panic\])/.test(
+              input.content
+            )
+          ) {
+            signals.push("new skip/xfail decorator in test file: " + fp);
+          }
         }
       }
     }
@@ -418,9 +449,13 @@ export function checkEvidence(args: {
     );
   }
 
-  const runs = extractTestRuns(messages);
+  // claimIndex 窗口化: claim 之后产生的 run 不作证据 (时序窗口右端 = claimIndex,
+  // fail-closed 偏保守; claim 后产生的 run 即使绿也不 SUFFICIENT)。
+  const runs = extractTestRuns(messages).filter(
+    (r) => r.messageIndex < claimIndex
+  );
   if (runs.length === 0) {
-    return insufficient(["no bash test execution found in transcript"], []);
+    return insufficient(["no bash test execution before claim found"], []);
   }
 
   // CONTRADICTED (A7): 清空/删除测试文件是唯一硬否决, 优先于其它判定。
@@ -439,10 +474,8 @@ export function checkEvidence(args: {
   const verdict = computeVerdict(runs);
   if (verdict === "EVIDENCE_SUFFICIENT") {
     // 时效 (A6): 绿测试 turn 之后、claimIndex 之前有代码编辑 → stale → 不 SUFFICIENT。
-    const stale = runs.some(
-      (r) =>
-        r.messageIndex < claimIndex &&
-        hasStaleEdit(messages, r.messageIndex, claimIndex)
+    const stale = runs.some((r) =>
+      hasStaleEdit(messages, r.messageIndex, claimIndex)
     );
     if (stale) {
       return insufficient(

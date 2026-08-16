@@ -1,34 +1,13 @@
 import { describe, expect, it } from "vitest";
-import type {
-  AnthropicContentBlock,
-  AnthropicNativeMessage,
-} from "../../../../src/harness/model-adapter/types.js";
+import type { AnthropicNativeMessage } from "../../../../src/harness/model-adapter/types.js";
 import { checkEvidence } from "../../../../src/harness/verify/evidence-checker.js";
+import { message, textBlock, toolResult, toolUse } from "./_fixtures.js";
 
 /**
  * T4 fail-closed 收口 (spec SC7 / A8): 歧义 / 残缺 / 空输入样本集全部
  * 非 SUFFICIENT。属性式用例: 随机残缺 fixture 集 (缺 content / 空 runs /
  * 全 null exitCode) 任一永不 SUFFICIENT。
  */
-
-function toolUse(id: string, command: string): AnthropicContentBlock {
-  return { type: "tool_use", id, name: "bash", input: { command } };
-}
-
-function toolResult(id: string, content: unknown): AnthropicContentBlock {
-  return { type: "tool_result", tool_use_id: id, content };
-}
-
-function textBlock(text: string): AnthropicContentBlock {
-  return { type: "text", text };
-}
-
-function message(
-  role: "user" | "assistant",
-  ...blocks: AnthropicContentBlock[]
-): AnthropicNativeMessage {
-  return { role, content: blocks };
-}
 
 describe("fail-closed 歧义 / 残缺 / 空输入 → 非 SUFFICIENT (A8)", () => {
   it("claimIndex = 0 → INSUFFICIENT", () => {
