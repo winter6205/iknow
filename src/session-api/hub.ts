@@ -67,7 +67,7 @@ import {
   validateGoalText,
 } from "./store/index.js";
 import type { GoalStatus, TaskFocusState } from "./store/index.js";
-import { applyTransition } from "./goal/index.js";
+import { applyTransition, assertValidTransition } from "./goal/index.js";
 import type {
   ApiErrorBody,
   CompactSessionResponse,
@@ -725,8 +725,13 @@ export class SessionHub {
           // session-api,零反向依赖。
           ...(session.taskFocus !== undefined
             ? {
-                boundaryAttachment: () =>
-                  this.renderTaskFocusBoundary(session.taskFocus!),
+                // 抽 const 让闭包内引用窄化后的 focus,消除非空断言。
+                boundaryAttachment: () => {
+                  const focus = session.taskFocus;
+                  return focus === undefined
+                    ? undefined
+                    : this.renderTaskFocusBoundary(focus);
+                },
               }
             : {}),
         };
@@ -880,7 +885,23 @@ export class SessionHub {
           if (justSaved.goal !== undefined) {
             const target = OUTCOME_TO_STATUS[verifyOutcome];
             const now = new Date().toISOString();
-            if (target !== undefined && target !== justSaved.goal.status) {
+            // T3 assertValidTransition 守门: OUTCOME_TO_STATUS 的 target 值域
+            // 含 "active"（failed/unstable 保持态），对已处于 achieved/aborted
+            // 的 goal 属非法反向边（achieved→active 不在白名单）——守卫拦截，
+            // goal 不变，仅 recordGoal trace 留痕（与 failed/unstable 行为对齐）。
+            const transition =
+              target === undefined
+                ? undefined
+                : assertValidTransition({
+                    from: justSaved.goal.status,
+                    to: target,
+                  });
+            if (
+              target !== undefined &&
+              target !== justSaved.goal.status &&
+              transition !== undefined &&
+              transition.ok
+            ) {
               const writeback: SessionFileV1 = {
                 ...justSaved,
                 goal: applyTransition(justSaved.goal, target, now),
@@ -893,7 +914,7 @@ export class SessionHub {
               });
             }
             // T12 writeback 发射点: status ?? "active" 覆盖 disabled(无
-            // target) 与 failed/unstable/自转移场景。
+            // target) 与 failed/unstable/自转移/非法反向边场景。
             await runDeps.trace?.recordGoal({
               id: randomUUID(),
               sessionId: conversationId,

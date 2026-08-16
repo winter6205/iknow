@@ -301,4 +301,29 @@ describe("taskFocus seed on fresh session (#458 T5 SC2)", () => {
     assert.equal(seedRec["action"], "seed");
     assert.equal(seedRec["text_len"], "Build a thing".length);
   });
+
+  it("achieved goal + outcome 'failed' → 非法反向边被 assertValidTransition 拦截, status 保持 achieved, recordGoal 留痕(status: active)", async () => {
+    // Reviewer 补强（standards+spec 双轴同指）：OUTCOME_TO_STATUS 的
+    // target="active"（failed/unstable 保持态）对已 achieved 的 goal 是
+    // 非法反向边（achieved→active 不在 VALID_GOAL_TRANSITIONS）。write-back
+    // 分支经 assertValidTransition 守卫拦截，goal 不变，仅 recordGoal trace 留痕。
+    setOutcome("failed");
+    const id = "t5-achieved-failed";
+    await seedSession(id, {
+      ...activeGoal,
+      status: "achieved",
+    });
+    const hub = makeHub();
+    await hub.postMessage({ conversationId: id, text: "test it" });
+    const after = await load(id);
+    assert.equal(
+      after.goal?.status,
+      "achieved",
+      "achieved→active 非法反向边必须被拦截, status 保持 achieved"
+    );
+    // trace 仍留痕（writeback action, status 报当前 active 目标）。
+    const rec = await readWritebackGoalRecord(id);
+    assert.equal(rec["action"], "writeback");
+    assert.equal(rec["status"], "active");
+  });
 });
