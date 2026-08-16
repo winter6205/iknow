@@ -203,6 +203,15 @@ export interface LoopEngineDeps {
    * secretRegistry 存在时识别生效。
    */
   readonly secretsMode?: "roundtrip" | "block";
+  /**
+   * #458 T7 (SC11): compact 边界渲染缝。可选闭包 — 当 compact 触发时,
+   * 若返回非空字符串,`applyCompactAttachment` 会在 boundary placeholder
+   * user 消息之后追加一条 user 消息承载渲染文本(如 taskFocus 边界快照)。
+   * 字段缺席 → helper 早退,行为与现 master byte-identical(不改停止语义,
+   * ADR-0011)。harness 不 import session-api;渲染文本由 caller(如 hub 的
+   * renderTaskFocusBoundary 私有 closure)经闭包注入,零反向依赖。
+   */
+  readonly boundaryAttachment?: () => string | undefined;
 }
 
 /**
@@ -246,6 +255,40 @@ function appendSystemInterrupt(state: LoopState): LoopState {
       }),
     ]),
     turnCount: state.turnCount,
+  };
+}
+
+/**
+ * #458 T7 (SC11):统一两处 compact 调用点(reactive line 717 / proactive
+ * line 1339)的压缩 + 边界渲染缝。原始 compactMessages 输出 + boundary
+ * placeholder user 消息后,若 `deps.boundaryAttachment?.()` 返回非空字符串,
+ * 再追加一条 user 消息承载渲染文本(放在 placeholder 之后)。新
+ * state.messages 走与 appendMessage 相同的 immutable 冻结纪律。
+ *
+ * 停止语义守门:boundaryAttachment 字段缺席 → helper 早退,返回
+ * `compactMessages(state.messages)` 原样产物,与现 master byte-identical;
+ * 字段在 → 仅在 compact 触发时插入 user 消息,不改变 stopReason / messages
+ * count for verifier。普通 turn(非 compact)→ 调用方只在 compact 分支调本
+ * helper,boundaryAttachment 不被调用(SC11 no-op)。
+ */
+function applyCompactAttachment(
+  state: LoopState,
+  deps: LoopEngineDeps
+): LoopState {
+  const compacted = compactMessages(state.messages);
+  if (compacted === state.messages) return state;
+  const boundary = deps.boundaryAttachment?.();
+  const composed: ReadonlyArray<AnthropicNativeMessage> =
+    boundary !== undefined && boundary.length > 0
+      ? [
+          compacted[0]!,
+          { role: "user", content: [{ type: "text", text: boundary }] },
+          ...compacted.slice(1),
+        ]
+      : compacted;
+  return {
+    ...state,
+    messages: Object.freeze(composed.map((m) => freezeMessage(m))),
   };
 }
 
@@ -714,14 +757,11 @@ async function runModelPhase(opts: {
         !opts.reactiveAttemptedRef.attempted
       ) {
         opts.reactiveAttemptedRef.attempted = true;
-        const compacted = compactMessages(opts.state.messages);
-        if (compacted !== opts.state.messages) {
+        const compactedState = applyCompactAttachment(opts.state, opts.deps);
+        if (compactedState.messages !== opts.state.messages) {
           return {
             kind: "reactive_compact_pending",
-            state: {
-              ...opts.state,
-              messages: Object.freeze(compacted.map((m) => freezeMessage(m))),
-            },
+            state: compactedState,
           };
         }
       }
@@ -1336,15 +1376,15 @@ export async function run(
           threshold,
         })
       ) {
-        const compacted = compactMessages(state.messages);
-        if (compacted !== state.messages) {
+        // #458 T7 (SC11):applyCompactAttachment 统一 proactive + reactive
+        // 两处 compact(helper 提取无双份实现),并在 placeholder 之后注入
+        // boundaryAttachment 渲染文本。返回 state 同引用 = 未实际压缩。
+        const compactedState = applyCompactAttachment(state, deps);
+        if (compactedState.messages !== state.messages) {
           // immutable 重建(SC7/Q5);不 mutate,原 messages 引用不变。
           // S10 freeze gate:压缩结果须与 appendMessage 一样冻结每一条,
           // 否则可变普通对象进入权威历史,违反 append-only immutable 不变式。
-          state = {
-            ...state,
-            messages: Object.freeze(compacted.map((m) => freezeMessage(m))),
-          };
+          state = compactedState;
           lastCompactTurn = state.turnCount;
         }
       }

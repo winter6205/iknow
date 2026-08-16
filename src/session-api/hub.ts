@@ -66,7 +66,7 @@ import {
   toInterruptReason,
   validateGoalText,
 } from "./store/index.js";
-import type { GoalStatus } from "./store/index.js";
+import type { GoalStatus, TaskFocusState } from "./store/index.js";
 import { applyTransition } from "./goal/index.js";
 import type {
   ApiErrorBody,
@@ -717,6 +717,18 @@ export class SessionHub {
           executor: wrappedExecutor,
           agentVersion: getVersion(),
           ...(trace !== undefined ? { trace } : {}),
+          // #458 T7 (SC11):compact 边界渲染缝 — taskFocus 在场时注入
+          // boundaryAttachment 闭包,compact 触发时在 placeholder 后追加
+          // 一条 user 消息承载渲染文本;taskFocus 缺席 → 字段缺席,helper
+          // 早退(行为 byte-stable,不影响停止语义 ADR-0011)。renderTaskFocusBoundary
+          // 是 hub 内私有 closure — harness 域独立原则,harness 不 import
+          // session-api,零反向依赖。
+          ...(session.taskFocus !== undefined
+            ? {
+                boundaryAttachment: () =>
+                  this.renderTaskFocusBoundary(session.taskFocus!),
+              }
+            : {}),
         };
         // plan T6 / ADR-0011:异常停前 loop-engine 通过 onStream emit
         // stop_summary。包一层 wrapper 捕获 stop_summary 文本(无条件 — 即使
@@ -1053,6 +1065,22 @@ export class SessionHub {
       filePath: this.traceOut,
       conversationId,
     });
+  }
+
+  /** #458 T7 (SC11):compact 边界渲染 — 把 TaskFocusState 渲染为单段文本,
+   *  由 runDeps.boundaryAttachment 闭包注入 loop-engine,在 compact 触发时
+   *  追加为一条 user 消息(放在 boundary placeholder 之后)。纯字符串派生,
+   *  零 IO / 零 LLM 调用(v1 排除)。
+   *
+   *  输出形态:当前焦点截 240 + `\n---\n` + 最近 3 条历史各截 120,共 4 段;
+   *  总长 cap 720 字符(防御 — 截断到 720 保证注入文本有界)。 */
+  private renderTaskFocusBoundary(focus: TaskFocusState): string {
+    const segments = [
+      focus.text.slice(0, 240),
+      ...(focus.history ?? []).slice(0, 3).map((h) => h.text.slice(0, 120)),
+    ];
+    const joined = segments.join("\n---\n");
+    return joined.length > 720 ? joined.slice(0, 720) : joined;
   }
 
   /** #458 T5/T12: `/goal clear` 占位 helper (T6 slash + chat-session 调用)。

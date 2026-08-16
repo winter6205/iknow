@@ -16,6 +16,16 @@
  *
  * 不硬编码真实 LLM token value;只用 estimate 函数语义(constant 层) +
  * 自定义 threshold 模拟触发。
+ *
+ * #458 T7 (SC11): compact 边界渲染缝。`deps.boundaryAttachment` 可选闭包
+ * 在 compact 触发时把渲染文本追加为一条 user 消息(放在 boundary placeholder
+ * 之后)。两处 compact 调用点(reactive line 717 / proactive line 1339)共用
+ * `applyCompactAttachment` helper:
+ *   f. proactive compact + boundaryAttachment → messages[0]=placeholder,
+ *      messages[1]=attachment user 消息,messages[2+]=保留尾部;
+ *   g. boundaryAttachment 缺席 → 仅 placeholder(byte-stable);
+ *   h. reactive compact 路径同样命中(共享 helper);
+ *   i. 普通 turn(阈值未达)→ boundaryAttachment 不调用(no-op)。
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -27,9 +37,16 @@ import { createStubTool } from "../../../src/harness/stubs/stub-tool.ts";
 import { assistantResult } from "../../cli/_fixtures.ts";
 import {
   COMPACTION_BOUNDARY_PLACEHOLDER,
+  DEFAULT_KEEP_RECENT,
   estimateMessagesTokens,
 } from "../../../src/harness/compress/index.ts";
-import type { AnthropicContentBlock } from "../../../src/harness/model-adapter/types.ts";
+import { PromptTooLongError } from "../../../src/harness/errors.ts";
+import type {
+  AnthropicContentBlock,
+  AnthropicNativeMessage,
+  AssistantTurnResult,
+  LoopState,
+} from "../../../src/harness/model-adapter/types.ts";
 
 /** 每回合 inflate 的文本量:让 estimate 在 ~5 回合内越过低阈值(≈1000)。 */
 const BIG_TEXT = "payload ".repeat(40); // ~320 chars → ~80 tokens/回合
@@ -261,5 +278,187 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
       { role: "user", content: [{ type: "text", text: "x" }] },
     ]);
     assert.ok(probe >= 1);
+  });
+});
+
+// -- #458 T7 (SC11): compact 边界 boundaryAttachment 渲染缝 --------------------
+
+/** Construct a minimal prior-message array. */
+const text = (value: string): AnthropicNativeMessage => ({
+  role: "user",
+  content: [{ type: "text", text: value }],
+});
+
+/**
+ * Reactive path 触发器：first attempt throws PromptTooLongError, second
+ * attempt returns success。模拟"压缩前模型拒绝 → reactive 触发压缩 →
+ * 压缩后模型接受"。
+ */
+function makeFlakyAdapter(opts: {
+  readonly retryText: string;
+  readonly attemptCount: { value: number };
+}) {
+  return Object.freeze({
+    encodeUserText: (t: string): AnthropicNativeMessage => ({
+      role: "user",
+      content: [{ type: "text", text: t }],
+    }),
+    encodeToolResults: (): AnthropicContentBlock[] => [],
+    step: async (
+      _state: LoopState,
+      _request: unknown
+    ): Promise<AssistantTurnResult> => {
+      opts.attemptCount.value += 1;
+      if (opts.attemptCount.value === 1) {
+        throw new PromptTooLongError("synthetic 400 prompt-too-long");
+      }
+      return assistantResult({
+        texts: [opts.retryText],
+        toolCalls: [],
+        supplierStop: "success",
+      });
+    },
+  });
+}
+
+describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
+  const noopTool = createStubTool({
+    name: "noop",
+    next: () => TOOL_RESULT_TEXT,
+  });
+  const registry = createRegistry([noopTool]);
+  const executor = createExecutor(registry);
+
+  it("proactive compact + boundaryAttachment → placeholder 后追加 attachment user 消息", async () => {
+    const model = createStubModel({ responses: buildResponses(TURNS) });
+    const { result } = await run("hello", {
+      adapter: model,
+      executor,
+      registry,
+      maxTurns: TURNS + 1,
+      compress: { contextWindow: 200_000, thresholdTokens: 1000 },
+      boundaryAttachment: () => "focus@now\n---\nhist1",
+    });
+    assert.equal(result.stopReason, "completed");
+    // SC11:boundary placeholder 在 messages[0],attachment user 消息紧随其后。
+    assert.deepStrictEqual(result.messages[0], {
+      role: "user",
+      content: [{ type: "text", text: COMPACTION_BOUNDARY_PLACEHOLDER }],
+    });
+    assert.deepStrictEqual(result.messages[1], {
+      role: "user",
+      content: [{ type: "text", text: "focus@now\n---\nhist1" }],
+    });
+    // 保留尾部:最终 assistant 收尾仍在。
+    assertCompletionTail(result.messages);
+  });
+
+  it("boundaryAttachment 缺席 → 仅 placeholder 无 attachment 消息", async () => {
+    const model = createStubModel({ responses: buildResponses(TURNS) });
+    const { result } = await run("hello", {
+      adapter: model,
+      executor,
+      registry,
+      maxTurns: TURNS + 1,
+      compress: { contextWindow: 200_000, thresholdTokens: 1000 },
+    });
+    assert.equal(result.stopReason, "completed");
+    // 占位符出现(确认 compact 真触发)。
+    assert.deepStrictEqual(result.messages[0], {
+      role: "user",
+      content: [{ type: "text", text: COMPACTION_BOUNDARY_PLACEHOLDER }],
+    });
+    // messages[1] 不应是 attachment 文本;它要么是保留尾部要么是后续 assistant。
+    const second = result.messages[1];
+    assert.ok(second, "messages[1] must exist (kept tail or assistant)");
+    const secondText = second.content
+      .filter((b): b is { type: "text"; text: string } => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+    assert.ok(
+      !secondText.includes("focus@now"),
+      "messages[1] must NOT be attachment user message when boundaryAttachment absent"
+    );
+  });
+
+  it("普通 turn(阈值未达)→ boundaryAttachment 不调用(no-op SC11)", async () => {
+    let calls = 0;
+    const model = createStubModel({ responses: buildResponses(3) });
+    const { result } = await run("hello", {
+      adapter: model,
+      executor,
+      registry,
+      maxTurns: 10,
+      // 极大 contextWindow → 缺省阈值 window-33000 远超 estimate → 不触发。
+      compress: { contextWindow: 10_000_000, thresholdTokens: undefined },
+      boundaryAttachment: () => {
+        calls++;
+        return "focus@now\n---\nhist1";
+      },
+    });
+    assert.equal(result.stopReason, "completed");
+    assert.equal(calls, 0, "阈值未达 → boundaryAttachment 不得被调用");
+    const serialized = JSON.stringify(result.messages);
+    assert.ok(
+      !serialized.includes(COMPACTION_BOUNDARY_PLACEHOLDER),
+      "阈值未达 → 不得触发 compact,无占位符"
+    );
+    assert.ok(
+      !serialized.includes("focus@now"),
+      "阈值未达 → 不得注入 attachment 文本"
+    );
+  });
+
+  it("reactive compact + boundaryAttachment → placeholder 后追加 attachment(共享 helper)", async () => {
+    // 12 条 prior + 1 user text → compactMessages 产出 placeholder + DEFAULT_KEEP_RECENT kept。
+    const longPrior = Array.from({ length: 12 }, (_, i) =>
+      text(`prior-${i} ${"z".repeat(20)}`)
+    );
+    const attemptCount = { value: 0 };
+    const adapter = makeFlakyAdapter({
+      retryText: "done after compact",
+      attemptCount,
+    });
+    const { result } = await run(
+      "Q",
+      {
+        adapter,
+        executor,
+        registry,
+        maxTurns: 5,
+        compress: { contextWindow: 200_000, thresholdTokens: 10_000 },
+        boundaryAttachment: () => "focus@now\n---\nhist1",
+      },
+      undefined,
+      { priorMessages: longPrior }
+    );
+    assert.equal(result.stopReason, "completed");
+    assert.equal(
+      attemptCount.value,
+      2,
+      "首次抛 PromptTooLongError → 压缩 → 重试成功"
+    );
+    // SC11:placeholder + attachment + DEFAULT_KEEP_RECENT kept + 1 retry assistant。
+    assert.equal(
+      result.messages.length,
+      1 + 1 + DEFAULT_KEEP_RECENT + 1,
+      `expected 1 placeholder + 1 attachment + ${DEFAULT_KEEP_RECENT} kept + 1 assistant = ${
+        1 + 1 + DEFAULT_KEEP_RECENT + 1
+      }, got ${result.messages.length}`
+    );
+    assert.deepStrictEqual(result.messages[0], {
+      role: "user",
+      content: [{ type: "text", text: COMPACTION_BOUNDARY_PLACEHOLDER }],
+    });
+    assert.deepStrictEqual(result.messages[1], {
+      role: "user",
+      content: [{ type: "text", text: "focus@now\n---\nhist1" }],
+    });
+    // 收尾为 retry 成功的 assistant 文本。
+    const finalText = result.finalText;
+    assert.ok(
+      finalText !== null && finalText.includes("done after compact"),
+      `final text must contain retry output, got ${finalText}`
+    );
   });
 });
