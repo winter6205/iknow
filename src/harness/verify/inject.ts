@@ -105,3 +105,63 @@ export function buildClassifierEnvelope(
 
   return `${fields.join("\n")}\n${VALIDATION_FIXED_INSTRUCTION}\n`;
 }
+
+/**
+ * #449b B5 补跑信封专属收尾指令 (B1 OQ1 终稿)。
+ * 刻意不用 VALIDATION_FIXED_INSTRUCTION: 补跑信封语义 = "你声称完成但缺真实
+ * 测试证据, 请跑命令并展示框架通过摘要", 与验证失败信封 (修正失败) 不同类。
+ */
+export const EVIDENCE_RERUN_FIXED_INSTRUCTION =
+  "Run the command and show the test framework's green-summary line; do not claim completion until verification passes.";
+
+export interface BuildEvidenceRerunEnvelopeArgs {
+  readonly round: number;
+  readonly maxRounds: number;
+  /** EvidenceReport.reasons (最多展示 5 条, 超出截 …N more 避免 envelope 膨胀)。 */
+  readonly reasons: ReadonlyArray<string>;
+  /** 可跑命令: config.command ?? probeVerifyCommand(...)。 */
+  readonly command: string;
+}
+
+/**
+ * #449b B5 补跑信封构造器 (spec Code Style / B1 OQ1 终稿逐字)。
+ *
+ * 形态契约:
+ *   [VERIFY: rerun needed] attempt=N/M
+ *   You claimed completion, but the automated evidence check did not find
+ *   real test execution in the transcript.
+ *   Missing:
+ *   - <reason 1>
+ *   - <reason 2>
+ *   Run this command and include the test framework's green-summary line in
+ *   your next response (e.g. "5 passed" / "Tests: 5 passed"):
+ *     <command>
+ *   Run the command and show the test framework's green-summary line; do not
+ *   claim completion until verification passes.
+ *
+ * 与 [VALIDATION FAILED] 信封区分语义 (B1 决议): 补跑是证据体检后给模型一次
+ * 补证据的机会, 前缀用 [VERIFY: rerun needed]; reasons 空 → 省略 Missing 段。
+ */
+export function buildEvidenceRerunEnvelope(
+  args: BuildEvidenceRerunEnvelopeArgs
+): string {
+  const truncatedReasons = args.reasons.slice(0, 5);
+  const lines: string[] = [
+    `[VERIFY: rerun needed] attempt=${args.round}/${args.maxRounds}`,
+    "You claimed completion, but the automated evidence check did not find",
+    "real test execution in the transcript.",
+  ];
+  if (truncatedReasons.length > 0) {
+    lines.push("Missing:");
+    for (const reason of truncatedReasons) lines.push(`- ${reason}`);
+    const extra = args.reasons.length - truncatedReasons.length;
+    if (extra > 0) lines.push(`…${extra} more`);
+  }
+  lines.push(
+    "Run this command and include the test framework's green-summary line in",
+    'your next response (e.g. "5 passed" / "Tests: 5 passed"):',
+    `  ${args.command}`
+  );
+  lines.push(EVIDENCE_RERUN_FIXED_INSTRUCTION);
+  return `${lines.join("\n")}\n`;
+}

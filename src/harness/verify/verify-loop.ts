@@ -33,7 +33,12 @@ import type {
 import type { LoopTrace } from "../loop-trace.js";
 import type { TraceService } from "../trace/index.js";
 import { checkEvidence } from "./evidence-checker.js";
-import { buildClassifierEnvelope, buildValidationEnvelope } from "./inject.js";
+import { probeVerifyCommand } from "./command-probe.js";
+import {
+  buildClassifierEnvelope,
+  buildEvidenceRerunEnvelope,
+  buildValidationEnvelope,
+} from "./inject.js";
 import {
   parseClassifierResult,
   truncateClassifierOutput,
@@ -64,6 +69,13 @@ import {
 export const DEFAULT_TIMEOUT_SEC = 600;
 /** 兜底总轮数上限默认; 裁判是趋势不是计数器 (plan §Decisions 定稿)。 */
 export const DEFAULT_MAX_ROUNDS = 12;
+/**
+ * #449b B5 补跑 (evidence-rerun) 单闭环上限 (plan B5 决议)。
+ * `rerunAttempts >= RERUN_ATTEMPT_CAP` 后落原 produceObservation (判官 / 命令
+ * 既有机制); 1 次 = 给模型一次补证据机会, 避免无限 loop (spec A10 决议细化)。
+ * 不导出: 仅供 runVerifyLoopBody 内部使用。
+ */
+const RERUN_ATTEMPT_CAP = 1;
 
 /** 单次 run() 的返回形状 (runFn 委托的返回)。 */
 export type RunOutcome = {
@@ -425,28 +437,112 @@ function userTextMessage(text: string): AnthropicNativeMessage {
   });
 }
 
-/** 是否为本轮注入的验证失败信封 (code-review High: 避免 stale 信封累积)。 */
-function isValidationEnvelope(message: AnthropicNativeMessage): boolean {
+/**
+ * #449b B5: 已注入信封前缀集 (B5 决议把 `[VERIFY: rerun needed]` 补跑信封纳入
+ * 滤除范围 —— plan B5 说 "buildNextPriorMessages 不剥它" 与本决议冲突, 采纳
+ * 实施侦察: 不剥会导致 round 3+ prior 残留已失效补跑上下文)。
+ * `[VALIDATION FAILED]` = 验证失败修正 (既有) + `[VERIFY: rerun needed]` =
+ * 补跑提示 (B5 新增); 其它前缀不属于本循环注入, 不得剥。
+ */
+const INJECTED_ENVELOPE_PREFIXES = [
+  "[VALIDATION FAILED]",
+  "[VERIFY: rerun needed]",
+] as const;
+
+/**
+ * 是否为本循环注入的任一信封 (code-review High: 避免 stale 信封累积)。
+ * 涵盖: 验证失败修正信封 + 补跑信封 (B5 扩展, 见 INJECTED_ENVELOPE_PREFIXES)。
+ */
+function isInjectedEnvelope(message: AnthropicNativeMessage): boolean {
   if (message.role !== "user") return false;
   return message.content.some((b) => {
     if (b.type !== "text") return false;
-    return b.text.startsWith("[VALIDATION FAILED]");
+    return INJECTED_ENVELOPE_PREFIXES.some((p) => b.text.startsWith(p));
   });
 }
 
 /**
- * 重建下一轮 priorMessages: 从 current.result.messages 滤除已注入的验证信封,
- * 再 append 新注入消息。避免每轮把上一轮失败信封留存在历史里 —— 模型不得
- * 重复读到已失效的旧失败上下文 (历史收敛 + closeout 不残留 stale 上下文)。
+ * 重建下一轮 priorMessages: 从 current.result.messages 滤除已注入的验证信封
+ * ([VALIDATION FAILED] / [VERIFY: rerun needed]), 再 append 新注入消息。
+ * 避免每轮把上一轮失败 / 补跑信封留存在历史里 —— 模型不得重复读到已失效的
+ * 旧上下文 (历史收敛 + closeout 不残留 stale 上下文)。
  */
 function buildNextPriorMessages(
   current: RunOutcome,
   injected: AnthropicNativeMessage
 ): ReadonlyArray<AnthropicNativeMessage> {
   const filtered = current.result.messages.filter(
-    (m) => !isValidationEnvelope(m)
+    (m) => !isInjectedEnvelope(m)
   );
   return [...filtered, injected];
+}
+
+/** #449b B5 probeVerifyCommand 的 flag file 候选集 (D2 spec Code Style)。 */
+const PROBE_FLAG_FILES: ReadonlySet<string> = new Set([
+  "pyproject.toml",
+  "pytest.ini",
+  "go.mod",
+  "Cargo.toml",
+]);
+
+/**
+ * 从消息历史提取 probeVerifyCommand 输入候选 (B5 决议: 优先真实派生)。
+ *   - write_file / edit_file tool_use 的 filePath: 标志文件名命中即贡献;
+ *   - write_file filePath === "package.json" 且 content 字符串以 `{` 起头:
+ *     视为 package.json 内容形态 (probe 解析 JSON 看 vitest / jest deps);
+ *   - 其它非标志路径 / 缺 content 的 package.json: 不贡献 (probe fail-closed)。
+ * 沿用 probeVerifyCommand 的两形态契约 (路径字符串 | JSON 内容字符串)。
+ */
+function collectProbeFiles(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): string[] {
+  const files: string[] = [];
+  for (const message of messages) {
+    if (!message || typeof message !== "object") continue;
+    const content = message.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const b = block as AnthropicContentBlock;
+      if (b.type !== "tool_use") continue;
+      if (b.name !== "write_file" && b.name !== "edit_file") continue;
+      const input = b.input as { filePath?: unknown; content?: unknown };
+      const filePath = typeof input.filePath === "string" ? input.filePath : "";
+      if (filePath.length === 0) continue;
+      if (PROBE_FLAG_FILES.has(filePath)) {
+        files.push(filePath);
+        continue;
+      }
+      if (
+        b.name === "write_file" &&
+        filePath === "package.json" &&
+        typeof input.content === "string" &&
+        input.content.startsWith("{")
+      ) {
+        files.push(input.content);
+      }
+    }
+  }
+  return files;
+}
+
+/**
+ * #449b B5 补跑命令派生 (Leader 裁决 v2: 判官路径专属机制)。
+ *
+ * 命令路径 (config.command 非空) 走沙箱重跑 (frozen legacy, SC10/Never-do):
+ * 沙箱已执行该命令, 补跑信封冗余且会破坏命令路径基线 → 不补跑 → 落
+ * produceCommandObservation。判官路径 (command 空) 才走 probeVerifyCommand
+ * 探测 (write_file/edit_file 标志文件 + package.json JSON 内容)。
+ *
+ * 返回: 唯一补跑命令 | null (无命令/冲突/未探测到 → 跳过补跑)。
+ */
+function deriveRerunCommand(
+  configCommand: string | undefined,
+  current: RunOutcome
+): string | null {
+  const configured = (configCommand ?? "").trim();
+  if (configured.length > 0) return null;
+  return probeVerifyCommand(collectProbeFiles(current.result.messages));
 }
 
 /** 升级指令 (spec 假设 B10 固定模板): 禁止重复同一修复, 换思路或明确报告阻塞。 */
@@ -592,6 +688,8 @@ async function runVerifyLoopBody(opts: {
   const records: VerificationRecord[] = [];
   const trend: TrendState = {};
   let escalated = false;
+  /** #449b B5: 补跑轮数计数 (1-attempt cap, 与 trend/escalated 同层局部状态)。 */
+  let rerunAttempts = 0;
   let current = await options.runFn(options.userText, {
     signal: options.signal,
   });
@@ -657,6 +755,37 @@ async function runVerifyLoopBody(opts: {
         outputText: "",
       };
     } else {
+      // #449b B5 补跑信封 (Leader 裁决 v2: 判官路径专属机制): INSUFFICIENT +
+      // deriveRerunCommand 非 null (command 空时 probeVerifyCommand 探测命中) 且
+      // rerunAttempts < 1 → 注入补跑信封 → 走一次 run() 续轮 (rerunAttempts += 1)
+      // → 下一轮重新进 B4 证据核对。命令路径 (config.command 非空) 不补跑, 直接
+      // 落 produceObservation 走沙箱重跑 (frozen legacy, SC10/Never-do)。cap 用尽
+      // 后落原 produceObservation (判官 / 命令既有机制), 不无限补跑
+      // (A10 决议: 1 次上限, 不走 config 字段)。
+      if (rerunAttempts < RERUN_ATTEMPT_CAP) {
+        const rerunCommand = deriveRerunCommand(
+          options.config.command,
+          current
+        );
+        if (rerunCommand !== null) {
+          rerunAttempts += 1;
+          current = await options.runFn(options.userText, {
+            signal: options.signal,
+            priorMessages: buildNextPriorMessages(
+              current,
+              userTextMessage(
+                buildEvidenceRerunEnvelope({
+                  round,
+                  maxRounds: opts.maxRounds,
+                  reasons: evidenceReport.reasons,
+                  command: rerunCommand,
+                })
+              )
+            ),
+          });
+          continue;
+        }
+      }
       observation = await opts.produceObservation(round, current);
       pendingEvidence = {
         evidenceVerdict: "EVIDENCE_INSUFFICIENT",

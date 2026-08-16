@@ -3,6 +3,7 @@ import { describe, it } from "vitest";
 
 import {
   buildClassifierEnvelope,
+  buildEvidenceRerunEnvelope,
   buildValidationEnvelope,
   truncateExcerpt,
 } from "../../../src/harness/verify/inject.ts";
@@ -436,5 +437,187 @@ describe("buildClassifierEnvelope", () => {
     assert.equal(envelope.includes("exit_code:"), false);
     assert.equal(envelope.includes("failed_count:"), false);
     assert.equal(envelope.includes("signature:"), false);
+  });
+});
+
+/**
+ * B5 (#449b) 补跑信封构造器 — B1 OQ1 终稿逐字 + 1-attempt-cap 收尾指令。
+ * 不复用 assertEnvelopeShape (绑 command 路径字段); 内联断言。
+ */
+describe("buildEvidenceRerunEnvelope", () => {
+  // B5 新尾指令, 独立常量 (不复用 VALIDATION_FIXED_INSTRUCTION); 测试端逐字锁。
+  const RERUN_INSTRUCTION =
+    "Run the command and show the test framework's green-summary line; do not claim completion until verification passes.";
+
+  it("matches the B1 OQ1 final copy verbatim (attempt=N/M + command embedded + Missing)", () => {
+    const envelope = buildEvidenceRerunEnvelope({
+      round: 1,
+      maxRounds: 12,
+      reasons: [
+        "no bash test execution before claim found",
+        "no run satisfies exit-0 + green-summary evidence threshold",
+      ],
+      command: "npm test",
+    });
+
+    // B1 OQ1 终稿逐字 (plan/449-verify-evidence-first-loop.md B1 bullet 代码块)。
+    assert.deepEqual(envelope.split("\n"), [
+      "[VERIFY: rerun needed] attempt=1/12",
+      "You claimed completion, but the automated evidence check did not find",
+      "real test execution in the transcript.",
+      "Missing:",
+      "- no bash test execution before claim found",
+      "- no run satisfies exit-0 + green-summary evidence threshold",
+      "Run this command and include the test framework's green-summary line in",
+      'your next response (e.g. "5 passed" / "Tests: 5 passed"):',
+      "  npm test",
+      RERUN_INSTRUCTION,
+      "",
+    ]);
+  });
+
+  it("renders attempt=N/M from round and maxRounds", () => {
+    const envelope = buildEvidenceRerunEnvelope({
+      round: 2,
+      maxRounds: 4,
+      reasons: ["x"],
+      command: "pytest",
+    });
+    assert.ok(
+      envelope.startsWith("[VERIFY: rerun needed] attempt=2/4\n"),
+      "header line must carry attempt and maxRounds\n---\n" + envelope
+    );
+  });
+
+  it("embeds the command verbatim (no truncation, 2-space indent)", () => {
+    const command = "npx vitest run tests/foo.test.ts --runInBand";
+    const envelope = buildEvidenceRerunEnvelope({
+      round: 1,
+      maxRounds: 12,
+      reasons: ["x"],
+      command,
+    });
+    assert.ok(
+      envelope.includes(`\n  ${command}\n`),
+      "command must be embedded verbatim with 2-space indent\n---\n" + envelope
+    );
+  });
+
+  it("truncates reasons beyond 5 and appends …N more", () => {
+    const reasons = Array.from({ length: 8 }, (_, i) => `reason ${i + 1}`);
+    const envelope = buildEvidenceRerunEnvelope({
+      round: 1,
+      maxRounds: 12,
+      reasons,
+      command: "npm test",
+    });
+    // 前 5 条按原顺序逐字
+    for (const r of [
+      "reason 1",
+      "reason 2",
+      "reason 3",
+      "reason 4",
+      "reason 5",
+    ]) {
+      assert.ok(
+        envelope.includes(`- ${r}`),
+        `must include first 5 reasons verbatim, missing: ${r}\n---\n${envelope}`
+      );
+    }
+    assert.ok(!envelope.includes("- reason 6"), "must not include 6th reason");
+    assert.ok(!envelope.includes("- reason 7"), "must not include 7th reason");
+    assert.ok(!envelope.includes("- reason 8"), "must not include 8th reason");
+    // …3 more (省略 8-5=3 条); OQ1 决议: 超出截 …N more 避免 envelope 膨胀
+    assert.ok(
+      envelope.includes("…3 more"),
+      `must append …N more line for omitted reasons\n---\n${envelope}`
+    );
+  });
+
+  it("omits the Missing section entirely when reasons is empty", () => {
+    const envelope = buildEvidenceRerunEnvelope({
+      round: 1,
+      maxRounds: 12,
+      reasons: [],
+      command: "npm test",
+    });
+    assert.ok(
+      !envelope.includes("Missing:"),
+      "empty reasons → omit Missing section\n---\n" + envelope
+    );
+    assert.ok(
+      !envelope.includes("- "),
+      "empty reasons → no bullet lines\n---\n" + envelope
+    );
+    // 其余结构仍完整 (header + body + command + tail)
+    assert.ok(envelope.startsWith("[VERIFY: rerun needed]"));
+    assert.ok(envelope.includes("  npm test\n"));
+    assert.ok(envelope.endsWith(RERUN_INSTRUCTION + "\n"));
+  });
+
+  it("ends with the rerun-specific fixed instruction (does not reuse VALIDATION_FIXED_INSTRUCTION)", () => {
+    const envelope = buildEvidenceRerunEnvelope({
+      round: 1,
+      maxRounds: 12,
+      reasons: ["x"],
+      command: "npm test",
+    });
+    assert.ok(
+      envelope.endsWith(RERUN_INSTRUCTION + "\n"),
+      `must end with the rerun instruction verbatim\n---\n${envelope}`
+    );
+    assert.equal(
+      envelope.includes(FIXED_INSTRUCTION),
+      false,
+      "must not reuse VALIDATION_FIXED_INSTRUCTION (B5 替换为补跑专属指令)"
+    );
+    // 第二末行 = RERUN_INSTRUCTION, 第一末行 = ""
+    const lines = envelope.split("\n");
+    assert.equal(lines[lines.length - 2], RERUN_INSTRUCTION);
+    assert.equal(lines[lines.length - 1], "");
+  });
+
+  it("does not use the VALIDATION FAILED prefix (B1 刻意区分语义)", () => {
+    const envelope = buildEvidenceRerunEnvelope({
+      round: 1,
+      maxRounds: 12,
+      reasons: ["x"],
+      command: "npm test",
+    });
+    assert.ok(envelope.startsWith("[VERIFY: rerun needed]"));
+    assert.equal(
+      envelope.includes("[VALIDATION FAILED]"),
+      false,
+      "must not use [VALIDATION FAILED] prefix (B1: 区分验证失败 vs 补跑两类)"
+    );
+  });
+
+  it("is append-only as a single user message with no forged tool calls", () => {
+    const envelope = buildEvidenceRerunEnvelope({
+      round: 1,
+      maxRounds: 12,
+      reasons: ["x"],
+      command: "npm test",
+    });
+    assert.equal(typeof envelope, "string");
+    assert.equal(envelope.includes('"tool_use"'), false);
+    assert.equal(envelope.includes('"tool_result"'), false);
+    assert.equal(envelope.includes("tool_use"), false);
+  });
+
+  it("does not carry command-path field names (command / exit_code / failed_count / signature)", () => {
+    const envelope = buildEvidenceRerunEnvelope({
+      round: 1,
+      maxRounds: 12,
+      reasons: ["x"],
+      command: "npm test",
+    });
+    // 补跑信封只带: attempt + Missing(reasons) + command + tail (无 exit_code 等)。
+    assert.equal(envelope.includes("exit_code:"), false);
+    assert.equal(envelope.includes("failed_count:"), false);
+    assert.equal(envelope.includes("signature:"), false);
+    // command: 字符串只以 2 空格缩进形式出现 (在 "your next response ..." 之后),
+    // 不应有 "command: npm test" 这种键值对形态。
+    assert.equal(envelope.includes("command: npm test"), false);
   });
 });

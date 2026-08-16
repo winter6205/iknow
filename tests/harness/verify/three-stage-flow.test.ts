@@ -93,10 +93,22 @@ const GREEN_FIRST_MESSAGES: AnthropicNativeMessage[] = [
   { role: "assistant", content: [textBlock("implemented")] },
 ];
 
-/** 无 bash 证据 → INSUFFICIENT (runs.length === 0 → 早退 fail-closed)。 */
-const NO_EVIDENCE_MESSAGES: AnthropicNativeMessage[] = [
-  { role: "user", content: [textBlock("task")] },
-  { role: "assistant", content: [textBlock("implemented but no test output")] },
+/** 判官路径 probe 成功: write_file 到 pyproject.toml (B5 D2 标志文件) → probeVerifyCommand
+ *  返回 "pytest"; 无 bash 测试证据 → INSUFFICIENT + probe 命中 → 触发补跑信封。
+ *  pyproject.toml 非测试文件 → 无 CONTRADICTED、无 gamingSignals。 */
+const PROBE_OK_MESSAGES: AnthropicNativeMessage[] = [
+  {
+    role: "assistant",
+    content: [
+      writeFile("w04", "pyproject.toml", "[project]\nname = 'demo'\n"),
+      {
+        type: "tool_result",
+        tool_use_id: "w04",
+        content: JSON.stringify({ code: 0, stdout: "ok", stderr: "" }),
+      },
+    ],
+  },
+  { role: "assistant", content: [textBlock("implemented but no tests")] },
 ];
 
 /** INSUFFICIENT + 有 run (exit≠0) + 软信号: bash fail + git commit --no-verify。
@@ -531,6 +543,225 @@ describe("evidence-first three-stage flow", () => {
       calls()[1]!.lastUserText?.includes("[VALIDATION FAILED]"),
       true,
       "下一轮 runFn 携带失败信封"
+    );
+  });
+});
+
+/* ------------------------------ B5: evidence-rerun envelope + 1-attempt cap ------------------------------ */
+
+describe("evidence-first rerun (B5)", () => {
+  const RERUN_INSTRUCTION =
+    "Run the command and show the test framework's green-summary line; do not claim completion until verification passes.";
+
+  /** 逐次返回脚本文本消息的 runFn (记录每次 priorMessages), 供补跑轮次断言。 */
+  function scriptedRunFn(script: ReadonlyArray<AnthropicNativeMessage[]>): {
+    readonly runFn: VerifyLoopOptions["runFn"];
+    readonly priors: () => ReadonlyArray<ReadonlyArray<AnthropicNativeMessage>>;
+  } {
+    const priors: Array<ReadonlyArray<AnthropicNativeMessage>> = [];
+    const runFn: VerifyLoopOptions["runFn"] = async (_userText, runOpts) => {
+      priors.push(runOpts?.priorMessages ?? []);
+      const call = priors.length - 1;
+      const messages = script[call];
+      if (messages === undefined) {
+        throw new Error(`scripted runFn exhausted at call ${call}`);
+      }
+      return makeSingleOutcome(messages);
+    };
+    return { runFn, priors: () => priors };
+  }
+
+  function lastUserText(prior: ReadonlyArray<AnthropicNativeMessage>): string {
+    const lastUser = [...prior].reverse().find((m) => m.role === "user");
+    return lastUser
+      ? lastUser.content.map((b) => (b.type === "text" ? b.text : "")).join("")
+      : "";
+  }
+
+  function allText(prior: ReadonlyArray<AnthropicNativeMessage>): string {
+    return prior
+      .map((m) =>
+        m.content.map((b) => (b.type === "text" ? b.text : "")).join("")
+      )
+      .join("\n");
+  }
+
+  it("补跑 1 次上限: 判官路径 INSUFFICIENT + probe 成功 → 补跑一轮 → 仍 INSUFFICIENT → 落判官", async () => {
+    // 判官路径 (command="") + probeable fixture (pyproject.toml → "pytest")。
+    // call 0 (round 1) 与 call 1 (补跑轮, round 2) 都是 PROBE_OK: 两轮均
+    // INSUFFICIENT → 补跑 cap 用尽后落判官 (runClassifier 被调, exit 0 → pass)。
+    const { runFn, priors } = scriptedRunFn([
+      PROBE_OK_MESSAGES,
+      PROBE_OK_MESSAGES,
+    ]);
+    const verify = makeScriptedVerify([
+      () => ({ exitCode: 0, stdout: "should not run", stderr: "" }),
+    ]);
+    const { runClassifier, calls: classifierCalls } = makeClassifierSpy([
+      passEnvelope("still no test evidence, but pass"),
+    ]);
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runClassifier,
+        config: { command: "" },
+      })
+    );
+    // round 1 INSUFFICIENT + probe "pytest" 命中 → 注入补跑信封 (末条), rerunAttempts=1。
+    const round1Text = lastUserText(priors()[1]!);
+    assert.equal(
+      round1Text.startsWith("[VERIFY: rerun needed]"),
+      true,
+      "round 1 补跑信封注入\n---\n" + round1Text
+    );
+    assert.equal(
+      round1Text.includes("  pytest"),
+      true,
+      "补跑命令来自 probe (pyproject.toml → pytest)\n---\n" + round1Text
+    );
+    // round 2 仍 INSUFFICIENT + cap 用尽 → 落判官 (恰 1 次, pass → passed)。
+    assert.equal(classifierCalls().length, 1, "补跑用尽后落判官恰 1 次");
+    assert.equal(verify.callCount(), 0, "判官路径零命令重跑");
+    assert.equal(out.outcome, "passed");
+    assert.equal(out.rounds, 2, "补跑不产轮数增量, 仅判官轮记 1");
+    assert.equal(out.records.length, 1);
+    assert.equal(out.records[0]!.round, 2);
+    assert.equal(out.records[0]!.evidenceVerdict, "EVIDENCE_INSUFFICIENT");
+    assert.equal(
+      out.records[0]!.gamingSignals?.length,
+      0,
+      "PROBE_OK 无 bash 软信号"
+    );
+  });
+
+  it("补跑后 SUFFICIENT: 补跑轮绿证据 → PASS 零判官零重跑", async () => {
+    // 判官路径 (command="") + probeable fixture: round 1 PROBE_OK (INSUFFICIENT) →
+    // 补跑; round 2 绿 bash (SUFFICIENT) → PASS, 判官/命令都不触发。
+    const { runFn } = scriptedRunFn([PROBE_OK_MESSAGES, GREEN_FIRST_MESSAGES]);
+    const verify = makeScriptedVerify([
+      () => ({ exitCode: 0, stdout: "should not run", stderr: "" }),
+    ]);
+    const { runClassifier, calls: classifierCalls } = makeClassifierSpy([
+      passEnvelope("should never be reached"),
+    ]);
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runVerify: verify.runVerify,
+        runClassifier,
+        config: { command: "" },
+      })
+    );
+    assert.equal(out.outcome, "passed");
+    assert.equal(out.rounds, 2, "补跑轮 (1) + SUFFICIENT 轮 (2)");
+    assert.equal(out.records.length, 1, "仅 SUFFICIENT 轮落 record");
+    assert.equal(out.records[0]!.verdict, "pass");
+    assert.equal(
+      out.records[0]!.evidenceVerdict,
+      undefined,
+      "SUFFICIENT 不落 evidenceVerdict (Postel)"
+    );
+    assert.equal(
+      verify.callCount(),
+      0,
+      "SUFFICIENT 短路 produceObservation, 零重跑"
+    );
+    assert.equal(classifierCalls().length, 0, "SUFFICIENT 短路判官, 零 spawn");
+  });
+
+  it("无命令 + probe 失败 → 不补跑直接落判官", async () => {
+    // round 1: 消息含 write_file 到非标志路径 src/foo.ts → collectProbeFiles 命中
+    // 0 标志文件 → probeVerifyCommand 返回 null → 无命令 → 不补跑 → 落判官。
+    const PROBE_FAIL_MESSAGES: AnthropicNativeMessage[] = [
+      {
+        role: "assistant",
+        content: [
+          writeFile("w03", "src/foo.ts", "export const x = 1;"),
+          {
+            type: "tool_result",
+            tool_use_id: "w03",
+            content: JSON.stringify({ code: 0, stdout: "ok", stderr: "" }),
+          },
+        ],
+      },
+      { role: "assistant", content: [textBlock("implemented but no tests")] },
+    ];
+    const { runFn } = scriptedRunFn([PROBE_FAIL_MESSAGES]);
+    const { runClassifier, calls: classifierCalls } = makeClassifierSpy([
+      passEnvelope("weak evidence but pass"),
+    ]);
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runClassifier,
+        config: { command: "" },
+      })
+    );
+    assert.equal(classifierCalls().length, 1, "probe 失败 → 直接落判官");
+    assert.equal(out.outcome, "passed");
+    assert.equal(out.rounds, 1);
+    assert.equal(out.records.length, 1);
+    assert.equal(out.records[0]!.evidenceVerdict, "EVIDENCE_INSUFFICIENT");
+  });
+
+  it("补跑信封被 buildNextPriorMessages 滤除 (round 3 prior 不含 [VERIFY: rerun needed])", async () => {
+    // 判官路径 (command="") + probeable fixture: round 1 PROBE_OK (INSUFFICIENT) →
+    // 补跑信封; round 2 CONTRADICTED → true-failure → [VALIDATION FAILED] 信封;
+    // round 3 GREEN (SUFFICIENT) → PASS。round 3 的 priorMessages 必须滤除
+    // 补跑信封 (isInjectedEnvelope 扩展), 只留 [VALIDATION FAILED] 信封 ——
+    // 模型不得重复读到已失效的旧补跑上下文。
+    const { runFn, priors } = scriptedRunFn([
+      PROBE_OK_MESSAGES,
+      CONTRADICTED_MESSAGES,
+      GREEN_FIRST_MESSAGES,
+    ]);
+    // runVerify 脚本化: 本用例全程短路 (补跑 / CONTRADICTED / SUFFICIENT), 永不
+    // 落到 produceCommandObservation; 即使误触也立即返回 exit 0 而不是真的 spawn。
+    const verify = makeScriptedVerify([
+      () => ({ exitCode: 0, stdout: "should not run", stderr: "" }),
+    ]);
+    const { runClassifier, calls: classifierCalls } = makeClassifierSpy([
+      passEnvelope("should never be reached"),
+    ]);
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runVerify: verify.runVerify,
+        runClassifier,
+        config: { command: "" },
+      })
+    );
+    assert.equal(out.outcome, "passed");
+    assert.equal(out.rounds, 3);
+    assert.equal(verify.callCount(), 0, "全程短路, 零命令重跑");
+    assert.equal(
+      classifierCalls().length,
+      0,
+      "判官路径零 spawn (补跑/CONTRADICTED/SUFFICIENT 全短路)"
+    );
+    // round 2 prior 携带补跑信封 (交付给 round 2 的证据核对)。
+    assert.equal(
+      allText(priors()[1]!).includes("[VERIFY: rerun needed]"),
+      true,
+      "round 2 收到补跑信封 (供模型补证据)"
+    );
+    // round 3 prior 必须滤除补跑信封, 且末条 = [VALIDATION FAILED] 修正信封。
+    assert.equal(
+      allText(priors()[2]!).includes("[VERIFY: rerun needed]"),
+      false,
+      "round 3 prior 不得残留补跑信封 (isInjectedEnvelope 扩展滤除)\n---\n" +
+        allText(priors()[2]!)
+    );
+    assert.equal(
+      lastUserText(priors()[2]!).startsWith("[VALIDATION FAILED]"),
+      true,
+      "round 3 携带 [VALIDATION FAILED] 信封\n---\n" +
+        lastUserText(priors()[2]!)
+    );
+    assert.equal(
+      lastUserText(priors()[2]!).includes(RERUN_INSTRUCTION),
+      false,
+      "round 3 末条不是补跑信封"
     );
   });
 });
