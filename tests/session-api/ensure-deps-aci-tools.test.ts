@@ -31,6 +31,7 @@ import { installTestSettingsSource } from "../_helpers/install-test-settings-sou
 // EXPECTED_TOOLS 同形)。
 // #356 T6:build-engine 全装配(surface 默认 chat)自建 subagentManager →
 // registry 末尾追加 spawn_subagent / subagent_result(→ 25 件)。
+// #440 T4:todo_write append-only:25→26,末位 1 件(serve 不传 todoDir → 缺席)。
 const EXPECTED_TOOLS = [
   "bash",
   "read_file",
@@ -62,6 +63,9 @@ const EXPECTED_TOOLS = [
   // 全装配,subagentManager 自建 → 两件在场)。
   "spawn_subagent",
   "subagent_result",
+  // #440 T4 todo_write append-only:25→26,末位 1 件(serve 不传 todoDir →
+  // 不在场 — 与 build-engine 装配侧一致)。
+  "todo_write",
 ];
 
 let baseDir: string;
@@ -82,7 +86,7 @@ afterAll(async () => {
 });
 
 describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
-  it("returns the ACI 25-tool registry when serve constructs without deps", async () => {
+  it("returns the ACI 25-tool registry (no todo_write) when serve constructs without deps", async () => {
     const hub = new SessionHub({
       store,
       askUser: createNoAskUser(),
@@ -93,9 +97,12 @@ describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
 
     const deps = await ensure();
     const names = deps.registry.list().map((def) => def.name);
-    for (const expected of EXPECTED_TOOLS) {
+    // serve 不传 todoDir → todo_write 缺席;过滤后再断言(SSOT 26 - todo_write = 25)。
+    const expectedNoTodo = EXPECTED_TOOLS.filter((n) => n !== "todo_write");
+    for (const expected of expectedNoTodo) {
       expect(names).toContain(expected);
     }
-    expect(names).toHaveLength(EXPECTED_TOOLS.length);
+    expect(names).toHaveLength(expectedNoTodo.length);
+    expect(names).not.toContain("todo_write");
   });
 });

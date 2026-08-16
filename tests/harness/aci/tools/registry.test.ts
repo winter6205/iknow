@@ -55,13 +55,15 @@ const fakeSubagentManager: SubAgentManager = {
 };
 
 describe("createDefaultAciRegistry — 正常路径", () => {
-  it("memoryDir + skillCatalog + subagentManager 同时在场 → list() 全量,顺序 append-only", () => {
+  it("memoryDir + skillCatalog + subagentManager + todoDir 同时在场 → list() 全量 26 件,顺序 append-only", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
       memoryDir: "/tmp/root/memory",
       skillCatalog: createSkillCatalog([]),
       subagentManager: fakeSubagentManager,
+      // #440 T4:todo_write 条件化装配,todoDir 在场才入注册表。
+      todoDir: "/tmp/root/session-1/todos",
     });
     const names = reg.inner.list().map((def) => def.name);
     expect(names).toEqual([...EXPECTED_TOOLS]);
@@ -74,9 +76,11 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(reg.catalog.get("skill_search")).toBeDefined();
     expect(reg.catalog.get("spawn_subagent")).toBeDefined();
     expect(reg.catalog.get("subagent_result")).toBeDefined();
+    // #440 T4:todo_write 在 todoDir 在场时进入注册表(末位第 26 件)。
+    expect(reg.catalog.get("todo_write")).toBeDefined();
   });
 
-  it("memoryDir + skillCatalog + subagentManager 都缺席 → list() 19 件(8 基线 + tool_search + 10 LSP,无 memory/skill/spawn 工具)", () => {
+  it("memoryDir + skillCatalog + subagentManager 都缺席 → list() 19 件(8 基线 + tool_search + 10 LSP,无 memory/skill/spawn/todo_write 工具)", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -90,7 +94,8 @@ describe("createDefaultAciRegistry — 正常路径", () => {
           n !== "skill" &&
           n !== "skill_search" &&
           n !== "spawn_subagent" &&
-          n !== "subagent_result"
+          n !== "subagent_result" &&
+          n !== "todo_write"
       )
     );
     expect(reg.catalog.get("tool_search")).toBeDefined();
@@ -100,10 +105,11 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(reg.catalog.get("skill_search")).toBeUndefined();
     expect(reg.catalog.get("spawn_subagent")).toBeUndefined();
     expect(reg.catalog.get("subagent_result")).toBeUndefined();
+    expect(reg.catalog.get("todo_write")).toBeUndefined();
   });
 
-  it("Gate 3:ACI_TOOLSET_NAMES 长度 25,前 8 原序 + memory_* + tool_search + 10 LSP + skill + skill_search + spawn_subagent + subagent_result", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(25);
+  it("Gate 3:ACI_TOOLSET_NAMES 长度 26,前 8 原序 + memory_* + tool_search + 10 LSP + skill + skill_search + spawn_subagent + subagent_result + todo_write", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(26);
     // 前 8 件原序不变(append-only 纪律)。
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
@@ -136,7 +142,9 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     // #356 T4 spawn_subagent append-only:23→24,末位 1 件,不重排既有 23 件。
     expect(ACI_TOOLSET_NAMES.slice(23, 24)).toEqual(["spawn_subagent"]);
     // #356 T5 subagent_result append-only:24→25,末位 1 件,不重排既有 24 件。
-    expect(ACI_TOOLSET_NAMES.slice(24)).toEqual(["subagent_result"]);
+    expect(ACI_TOOLSET_NAMES.slice(24, 25)).toEqual(["subagent_result"]);
+    // #440 T4 todo_write append-only:25→26,末位 1 件,不重排既有 25 件。
+    expect(ACI_TOOLSET_NAMES.slice(25)).toEqual(["todo_write"]);
   });
 });
 
@@ -257,12 +265,18 @@ describe("createDefaultAciRegistry — onEdit 透传(#251)", () => {
  */
 function expectedSurface(
   deny: ReadonlyArray<string>,
-  opts: { memory?: boolean; skill?: boolean; subagent?: boolean } = {}
+  opts: {
+    memory?: boolean;
+    skill?: boolean;
+    subagent?: boolean;
+    todo?: boolean;
+  } = {}
 ): readonly string[] {
   const conditionallyAbsent = [
     ...(opts.memory ? [] : ["memory_recall", "memory_save"]),
     ...(opts.skill ? [] : ["skill", "skill_search"]),
     ...(opts.subagent ? [] : ["spawn_subagent", "subagent_result"]),
+    ...(opts.todo ? [] : ["todo_write"]),
   ];
   return [...ACI_TOOLSET_NAMES].filter(
     (n) => !conditionallyAbsent.includes(n) && !deny.includes(n)
@@ -359,12 +373,14 @@ describe("createDefaultAciRegistry — #468 disallowedTools 裁剪", () => {
 
 describe("createDefaultAciRegistry — 并发闭包隔离", () => {
   it("两次工厂调用返回的 AciRegistry 相互独立", () => {
+    // #440 T4:两 registry 都给 todoDir → 26 件,验证 catalog.all() 长度独立。
     const a = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root-a",
       memoryDir: "/tmp/root-a/memory",
       skillCatalog: createSkillCatalog([]),
       subagentManager: fakeSubagentManager,
+      todoDir: "/tmp/root-a/session-a/todos",
     });
     const b = createDefaultAciRegistry({
       env: makeWebEnv(),
@@ -372,6 +388,7 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
       memoryDir: "/tmp/root-b/memory",
       skillCatalog: createSkillCatalog([]),
       subagentManager: fakeSubagentManager,
+      todoDir: "/tmp/root-b/session-b/todos",
     });
     expect(a).not.toBe(b);
     expect(a.catalog).not.toBe(b.catalog);

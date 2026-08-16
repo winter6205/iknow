@@ -41,6 +41,7 @@ import type { SubAgentManager } from "../../subagent/manager.js";
 import { buildWorkerToolSurface } from "../../subagent/role.js";
 import { RegistryConstructionError, ToolExecutionError } from "../../errors.js";
 import type { SkillCatalog } from "../../skill/catalog.js";
+import { createTodoWriteTool } from "./todo-write.js";
 
 /**
  * 11 件生产工具的命名常量 — SSOT（8 基线 + memory_recall + memory_save + tool_search）。
@@ -102,6 +103,10 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   // 缺席时不入注册表，与 spawn_subagent / skillCatalog / memoryDir 同形态：
   // Gate 3 在 toolsetNames 端镜像过滤，见工厂尾部注释）。
   "subagent_result", // #356 T5 主代理轮询子代理四态（not_found/running/completed/failed）
+  // #440 T4 todo_write append-only：25→26。条件化装配（todoDir 缺席时
+  // 不入注册表 — worker 装配路径 + ask 表面均不传 todoDir；Gate 3 镜像
+  // 过滤，见工厂尾部注释）。
+  "todo_write", // #440 D1/D2 session 作用域 ledger（host 注入 todoDir）
 ] as const);
 
 /**
@@ -190,11 +195,11 @@ export function createDefaultAciRegistry(
   const subagentManager = opts.subagentManager;
   const secretRegistry = opts.secretRegistry;
   const disallowedTools = opts.disallowedTools;
-  // #440 D2 seam：host 注入；build-engine 在 surface !== "ask" 解析 session 级
-  // 目录。T1 仅占 seam：todo_write 工厂文件 + SSOT append-only 装配在 T2/T4 才
-  // 进入（参 `CreateDefaultAciRegistryOptions.todoDir` 注释）。本步不消费变量
-  // —— T4 装配时把 todoDir 拉入 conditional spread + Gate 3 excluded 镜像。
-  void opts.todoDir;
+  // #440 T4 todo_write 条件化装配的开关。host 注入；build-engine 在
+  // surface !== "ask" 解析 session 级目录并透传。worker 装配路径不传 →
+  // todo_write 不入 worker 工具面（D6 所有权边界）；ask 不传 → tool 不
+  // 入注册表（SC8 oneshot 剥离）。Gate 3 镜像过滤见下。
+  const todoDir = opts.todoDir;
 
   // holder:tool_search 自引用的惰性解引用点(装配完成前闭包返回 undefined,
   // tool-search.ts:resolveRegistry 触发 ToolExecutionError 兜底)。
@@ -259,6 +264,14 @@ export function createDefaultAciRegistry(
             createSubAgentResultTool({ manager: subagentManager }),
         }
       : {}),
+    // #440 T4 todo_write 工具集（条件化装配：todoDir 缺席时不入注册表 —
+    // worker 装配路径不传 todoDir（D6 所有权边界）；ask 表面 build-engine
+    // 也不传 todoDir（SC8 oneshot 剥离）；Gate 3 镜像过滤，见下）。
+    ...(todoDir
+      ? {
+          todo_write: () => createTodoWriteTool({ todoDir }),
+        }
+      : {}),
   };
 
   // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。
@@ -273,6 +286,7 @@ export function createDefaultAciRegistry(
     ...(memoryDir ? [] : ["memory_recall", "memory_save"]),
     ...(skillCatalog ? [] : ["skill", "skill_search"]),
     ...(subagentManager ? [] : ["spawn_subagent", "subagent_result"]),
+    ...(todoDir ? [] : ["todo_write"]),
     ...(disallowedTools ?? []),
   ];
   const toolsetNames = (ACI_TOOLSET_NAMES as ReadonlyArray<string>).filter(

@@ -63,6 +63,12 @@ function makeBundle(
 // 均装配)。数组与 tests/harness/build-engine.test.ts 的 EXPECTED_TOOLS 对齐(SSOT)。
 // 拆分:base 11 件(#194 + #224)→ +10 LSP(#251)= 21 件 → + skill/skill_search
 // (#337 T8)= 23 件 → + spawn_subagent/subagent_result (#356 T6)= 25 件。
+// #440 T4:todo_write append-only:25→26,条件化装配 — todoDir 缺席时
+// todo_write 不入注册表。TUI deps 装配路径(build-engine {surface:"tui"})
+// 当前未透传 todoDir → 25 件;TUI 入口接入 todoDir 后再升至 26 件,届时
+// 本常量扩展为 26 并改名为 EXPECTED_TOOLSET_26。本步保留 25 件 + 注释
+// (TUI deps.ts 不在 #440 scope 内,D6 主 loop 所有权边界把 todo 隔在
+// chat session / serve session 层)。
 const EXPECTED_BASE_11 = [
   "bash",
   "read_file",
