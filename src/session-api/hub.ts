@@ -18,6 +18,7 @@ import {
   type HarnessStreamEvent,
   type LoopEngineDeps,
   type RunResult,
+  type TraceService,
 } from "../harness/index.js";
 import {
   runVerifyLoop,
@@ -60,10 +61,13 @@ import {
   extractGoal,
   extractSummary,
   pinGoal,
+  seedTaskFocus,
   shouldPersistCheckpoint,
   toInterruptReason,
+  validateGoalText,
 } from "./store/index.js";
-import type { GoalState } from "./store/index.js";
+import type { GoalStatus } from "./store/index.js";
+import { applyTransition } from "./goal/index.js";
 import type {
   ApiErrorBody,
   CompactSessionResponse,
@@ -196,6 +200,30 @@ export function mapStoreError(err: SessionStoreError): {
     },
   };
 }
+
+// -- verify outcome → goal status (#458 T5 SC8) ------------------------------
+
+/**
+ * Verify-loop terminal outcome → goal status write-back target.
+ *
+ * `undefined` = no status change (only trace 留痕 via recordGoal).
+ * Mimics STORE_ERROR_MAP's data-table shape (ACR #4 thin wiring).
+ *
+ * - `passed`     → "achieved"
+ * - `aborted`    → "aborted"
+ * - `escalated`  → "aborted"  (NEW in #458 SC8; pre-#458 kept active)
+ * - `failed`     → "active"   (result stays active; trace 留痕)
+ * - `unstable`   → "active"   (result stays active; trace 留痕)
+ * - `disabled`   → undefined  (no status change; trace 留痕)
+ */
+const OUTCOME_TO_STATUS: Record<VerifyLoopOutcome, GoalStatus | undefined> = {
+  passed: "achieved",
+  aborted: "aborted",
+  escalated: "aborted",
+  failed: "active",
+  unstable: "active",
+  disabled: undefined,
+} as const;
 
 // -- history projection (裁决#11: getSession turns) -----------------------------
 
@@ -591,12 +619,29 @@ export class SessionHub {
     // `""` = empty directive → stripped to empty → validateText rejects
     // below (goal unchanged, since we only persist after run succeeds).
     const goalDirective = parseGoalCommand(text);
+    // #458 T5: validate goal text length/non-empty BEFORE serialize so an
+    // over-long `## GOAL: ...` never reaches the pin path / store. Empty
+    // directive is skipped (goalDirective === "") and falls through to
+    // validateText("") which rejects with "message text must be non-empty"
+    // — preserves the existing empty-`## GOAL:` acceptance (#408 T3).
+    if (goalDirective !== null && goalDirective.length > 0) {
+      const msg = validateGoalText(goalDirective);
+      if (msg !== null) {
+        throw new ValidationError(`${goalDirective} rejected: ${msg}`, {
+          field: "goal_text",
+        });
+      }
+    }
     const query = goalDirective !== null ? goalDirective : text.trim();
     this.validateText(query);
     return this.serialize({
       conversationId,
       work: async () => {
         let session = await this.store.load(conversationId);
+        // #458 T5/T12: hoist the trace service so the `## GOAL:` pin block
+        // (below) and runDeps share one TraceService instance for this
+        // postMessage (avoid double construction; same file writer closure).
+        const trace = this.createTrace(conversationId);
         // #408 T3: re-pin the session-level goal when the incoming text is a
         // `## GOAL: ...` directive. Persisted immediately so subsequent
         // verify-loop rounds in this turn see the new goal.text. The query
@@ -618,6 +663,16 @@ export class SessionHub {
           };
           await this.store.save({ id: conversationId, file: pinned });
           session = await this.store.load(conversationId);
+          // #458 T5/T12: pin 发射点 — 文本截 200 防 jsonl 行膨胀;
+          // 状态机转移由 hub 唯一持有, trace 仅记录生命周期事件。
+          await trace?.recordGoal({
+            id: randomUUID(),
+            sessionId: conversationId,
+            action: "pin",
+            text: goalDirective.slice(0, 200),
+            ts: now,
+            conversationId,
+          });
         }
         const priorCount = session.messages.length;
         const baseDeps = await this.ensureDeps();
@@ -661,14 +716,7 @@ export class SessionHub {
           ...deps,
           executor: wrappedExecutor,
           agentVersion: getVersion(),
-          ...(this.traceOut
-            ? {
-                trace: createJsonlTraceService({
-                  filePath: this.traceOut,
-                  conversationId,
-                }),
-              }
-            : {}),
+          ...(trace !== undefined ? { trace } : {}),
         };
         // plan T6 / ADR-0011:异常停前 loop-engine 通过 onStream emit
         // stop_summary。包一层 wrapper 捕获 stop_summary 文本(无条件 — 即使
@@ -801,35 +849,46 @@ export class SessionHub {
           // priorMessages = the file BEFORE this run; only the messages THIS
           // run appended count as progress for the cancelled-delta decision.
           priorMessages: session.messages,
+          // #458 T5/T12: trace 透传 — seed 发射点使用; undefined 时无副作用。
+          ...(trace !== undefined ? { trace } : {}),
         });
         void saved;
-        // #408 T5: status write-back on verify-loop terminal outcome. The hub
-        // is the only writer of goal.status. `passed` → "achieved",
-        // `aborted` → "aborted"; `failed` / `unstable` / `escalated` /
-        // `disabled` leave the status unchanged. runVerifyLoop never sets
-        // goal.status itself (its body has no `goal` reference). Placed
+        // #458 T5 (SC8): goal.status write-back on verify-loop terminal
+        // outcome. The hub is the only writer of goal.status. Target status
+        // is looked up from OUTCOME_TO_STATUS; applyTransition runs only
+        // when target is a valid forward edge from current status
+        // (T3 assertValidTransition rejects self-transitions, so
+        // active→active / achieved→achieved are no-ops and the goal stays
+        // put). recordGoal fires for every outcome with a goal present
+        // (write-back trace 留痕 even when no status change). Placed
         // AFTER conditionalSave so a T2-seeded goal on this same turn is
         // promoted in the same persistence round.
-        if (
-          (verifyOutcome === "passed" || verifyOutcome === "aborted") &&
-          saved
-        ) {
+        if (verifyOutcome !== undefined && saved) {
           const justSaved = await this.store.load(conversationId);
           if (justSaved.goal !== undefined) {
+            const target = OUTCOME_TO_STATUS[verifyOutcome];
             const now = new Date().toISOString();
-            const statusWriteback: SessionFileV1 = {
-              ...justSaved,
-              goal: {
-                ...justSaved.goal,
-                status: verifyOutcome === "passed" ? "achieved" : "aborted",
+            if (target !== undefined && target !== justSaved.goal.status) {
+              const writeback: SessionFileV1 = {
+                ...justSaved,
+                goal: applyTransition(justSaved.goal, target, now),
                 updatedAt: now,
-              },
-              updatedAt: now,
-              schemaVersion: CURRENT_SCHEMA_VERSION,
-            };
-            await this.store.save({
-              id: conversationId,
-              file: statusWriteback,
+                schemaVersion: CURRENT_SCHEMA_VERSION,
+              };
+              await this.store.save({
+                id: conversationId,
+                file: writeback,
+              });
+            }
+            // T12 writeback 发射点: status ?? "active" 覆盖 disabled(无
+            // target) 与 failed/unstable/自转移场景。
+            await runDeps.trace?.recordGoal({
+              id: randomUUID(),
+              sessionId: conversationId,
+              action: "writeback",
+              status: target ?? "active",
+              ts: now,
+              conversationId,
             });
           }
         }
@@ -985,6 +1044,47 @@ export class SessionHub {
     }
   }
 
+  /** #458 T5/T12: per-postMessage trace service (undefined when traceOut is
+   *  not configured). Hoisted at the start of serialize's work so the pin /
+   *  seed / writeback 发射点 and runDeps share one instance. */
+  private createTrace(conversationId: string): TraceService | undefined {
+    if (!this.traceOut) return undefined;
+    return createJsonlTraceService({
+      filePath: this.traceOut,
+      conversationId,
+    });
+  }
+
+  /** #458 T5/T12: `/goal clear` 占位 helper (T6 slash + chat-session 调用)。
+   *  Clears both the pinned goal and taskFocus (SC: goal/taskFocus 一并清空),
+   *  records the trace clear event, and persists atomically through the same
+   *  serialize queue. */
+  async clearGoal(conversationId: string): Promise<void> {
+    await this.serialize({
+      conversationId,
+      work: async () => {
+        const session = await this.store.load(conversationId);
+        const now = new Date().toISOString();
+        const cleared: SessionFileV1 = {
+          ...session,
+          goal: undefined,
+          taskFocus: undefined,
+          updatedAt: now,
+          schemaVersion: CURRENT_SCHEMA_VERSION,
+        };
+        await this.store.save({ id: conversationId, file: cleared });
+        await this.createTrace(conversationId)?.recordGoal({
+          id: randomUUID(),
+          sessionId: conversationId,
+          action: "clear",
+          status: "cleared",
+          ts: now,
+          conversationId,
+        });
+      },
+    });
+  }
+
   /**
    * Serialize operations on the same conversation_id (spec A15).
    * Different ids run in parallel; same id chains sequentially.
@@ -1021,8 +1121,12 @@ export class SessionHub {
     readonly session: SessionFileV1;
     readonly result: RunResult;
     readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
+    /** #458 T5/T12: trace for the seed 发射点 — only emitted when this
+     *  conditionalSave actually seeds a fresh taskFocus. Undefined when
+     *  traceOut is not configured (optional chain in caller). */
+    readonly trace?: TraceService;
   }): Promise<boolean> {
-    const { conversationId, session, result, priorMessages } = opts;
+    const { conversationId, session, result, priorMessages, trace } = opts;
     if (!shouldPersistCheckpoint(result, priorMessages)) return false;
     const now = new Date().toISOString();
     const turnCount = session.turnCount + result.turnCount;
@@ -1051,32 +1155,41 @@ export class SessionHub {
       updatedAt: now,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       summary: extractSummary(result.messages),
-      // #408 T2: seed the session-level goal from the first user message text
-      // (full, trimmed) when absent. Seeded exactly once — subsequent turns
-      // preserve the existing goal (re-pin is the only overwrite, see T3).
-      // Only seeds when a user text block exists; a tool_result-only first
-      // message yields "" and is treated as "no goal".
-      ...(withCheckpoint.goal === undefined && extractGoal(result.messages)
+      // #458 T2/T5 (SC2): seed taskFocus from the first user message text
+      // (full, trimmed) when taskFocus is still absent. `seedTaskFocus`
+      // slices the primary entry to 500 chars and prepends the prior focus
+      // (if any) to history. Seeded exactly once — subsequent turns keep
+      // the existing taskFocus (a re-pin / seedTaskFocus switch is the only
+      // overwrite). Only seeds when a user text block exists; a
+      // tool_result-only first message yields "" and is treated as absent.
+      // A user-pinned goal (source === "user_pin") never blocks the seed —
+      // taskFocus is the deterministic task field, orthogonal to the pinned
+      // goal.
+      ...(withCheckpoint.taskFocus === undefined && extractGoal(result.messages)
         ? {
-            goal: this.seedGoal(extractGoal(result.messages), now),
+            taskFocus: seedTaskFocus({
+              current: withCheckpoint.taskFocus,
+              nextText: extractGoal(result.messages),
+              now,
+            }),
           }
         : {}),
     };
     await this.store.save({ id: conversationId, file: updated });
+    // #458 T5/T12: seed 发射点 — 只在本次确实 seed 了 taskFocus 时落盘
+    // (trace 仅在 traceOut 配置时存在)。textLen 不写明文, 防日志膨胀。
+    const textLen = extractGoal(result.messages).length;
+    if (withCheckpoint.taskFocus === undefined && textLen > 0) {
+      await trace?.recordGoal({
+        id: randomUUID(),
+        sessionId: conversationId,
+        action: "seed",
+        textLen,
+        ts: now,
+        conversationId,
+      });
+    }
     return true;
-  }
-
-  /** #408 T2: construct a fresh active GoalState from the first user text.
-   *  source === "user_initial" (the seed path); status === "active"; no
-   *  history (a fresh seed has nothing to supersede). */
-  private seedGoal(text: string, now: string): GoalState {
-    return {
-      text,
-      source: "user_initial",
-      status: "active",
-      createdAt: now,
-      updatedAt: now,
-    };
   }
 
   /**
