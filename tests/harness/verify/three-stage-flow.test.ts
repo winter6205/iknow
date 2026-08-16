@@ -37,6 +37,10 @@ import type {
   RunResult,
 } from "../../../src/harness/model-adapter/types.ts";
 import type { LoopTrace } from "../../../src/harness/loop-trace.ts";
+import { createRunClassifierFromManager } from "../../../src/harness/verify/run-classifier-adapter.ts";
+import type { SubAgentDefinition } from "../../../src/harness/subagent/manager.js";
+import type { SubAgentEnvelope } from "../../../src/harness/subagent/envelope.js";
+import type { SubAgentManager } from "../../../src/harness/subagent/manager.js";
 import { textBlock, toolUse, writeFile } from "./evidence-checker/_fixtures.js";
 
 /* ------------------------------ 测试替身 ------------------------------ */
@@ -1211,5 +1215,247 @@ describe("judge four-state stop behavior (#449b B7)", () => {
       "pass 不落 reason (Postel 可选字段仅存在时写盘)"
     );
     assert.equal(calls().length, 1, "pass 终局, runFn 恰 1 次");
+  });
+});
+
+/* ------------------------------ B9: SC9 只读判官 + 补跑 abort + 命令路径冻结 ------------------------------ */
+
+/**
+ * #449b B9 三级流集成测试收口 (plan B9):
+ *   - SC9 只读判官集成层复断言: runVerifyLoop → createRunClassifierFromManager
+ *     → stubManager 捕获 spawn def —— 声明面 (disallowedTools 5 项 / systemPrompt
+ *     零 evidenceContext 泄漏) 在真实装配路径下完整保留, task 二段 (userText +
+ *     evidenceContext JSON) 经集成层落到 def;
+ *   - 补跑中 abort: round 1 INSUFFICIENT + probe 命中 → rerun 分支第 2 次 runFn
+ *     挂起 → 用户 abort → while 顶部检查点收敛 outcome=aborted, records 零伪造
+ *     (rerun 轮未 produceObservation), runFn 恰 2 次 (无 stale 第三轮);
+ *   - 命令路径冻结重申: SUFFICIENT + config.command 已配 → runVerify spy 0 +
+ *     runClassifier spy 0 + outcome passed (入口级 1 例, B4 既有机制防回归)。
+ */
+
+/** JUDGE_ROLE 声明面 disallowedTools (run-classifier-adapter.ts JUDGE_ROLE 同源)。 */
+const JUDGE_DISALLOWED_TOOLS: ReadonlyArray<string> = Object.freeze([
+  "bash",
+  "edit_file",
+  "write_file",
+  "web_fetch",
+  "web_search",
+]);
+
+describe("SC9 只读判官集成层复断言 (#449b B9)", () => {
+  /** makeStubManager 镜像 (judge-input.test.ts): spawn 捕获 def, waitFor 回 pass 信封。 */
+  function makeCapturingManager(): {
+    readonly manager: SubAgentManager;
+    readonly captured: () => SubAgentDefinition | undefined;
+  } {
+    let captured: SubAgentDefinition | undefined;
+    const manager: SubAgentManager = {
+      spawn(def) {
+        captured = def;
+        return { taskId: "t1" };
+      },
+      queryBuffer() {
+        return { status: "not_found" };
+      },
+      async waitFor(
+        _taskId: string,
+        _timeoutMs?: number,
+        _signal?: AbortSignal
+      ): Promise<SubAgentEnvelope> {
+        return {
+          status: "ok",
+          result: JSON.stringify({
+            kind: "pass",
+            reason: "verified",
+            evidence: [{ command: "noop", result: "pass" }],
+          }),
+          summary: "judge done",
+        };
+      },
+      async shutdown() {
+        // no-op
+      },
+      drainCompleted() {
+        return [];
+      },
+      listActive() {
+        return [];
+      },
+      abortTask() {
+        return false;
+      },
+    };
+    return { manager, captured: () => captured };
+  }
+
+  it("INSUFFICIENT 落判官: def 声明面完整保留 + task 二段 (SC9 集成层复断言)", async () => {
+    // 判官路径 (command="") + text-only (无 bash 无探测) → INSUFFICIENT 直落判官。
+    const runFn: VerifyLoopOptions["runFn"] = async (_userText, runOpts) =>
+      stubRun({
+        text: "implemented but no test output",
+        userText: "implement goal",
+        priorMessages: runOpts?.priorMessages,
+      });
+    const { manager, captured } = makeCapturingManager();
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runClassifier: createRunClassifierFromManager({ manager }),
+        config: { command: "" },
+        sessionId: "b9-sc9",
+      })
+    );
+    assert.equal(
+      out.outcome,
+      "passed",
+      "判官 pass envelope → 集成层收敛 passed"
+    );
+    assert.equal(out.rounds, 1);
+    const def = captured();
+    assert.ok(def !== undefined, "判官 seam 必须 spawn");
+    // SC9 复断言: 声明面 disallowedTools 5 项原样。实际工具面 = 468 plan 负责
+    // (worker deny-list 裁剪); 本用例只复断言声明面完整保留。
+    assert.ok(
+      def.disallowedTools !== undefined,
+      "JUDGE_ROLE 必须声明 disallowedTools"
+    );
+    assert.deepEqual(
+      [...def.disallowedTools].sort(),
+      [...JUDGE_DISALLOWED_TOOLS].sort(),
+      "disallowedTools = 5 项禁工具 (bash/edit_file/write_file/web_fetch/web_search)"
+    );
+    // SC6: task 二段 = userText 原样 + evidenceContext JSON 段 (集成层装配)。
+    const lines = def.task.split("\n");
+    assert.equal(
+      lines[0],
+      "implement goal",
+      "task 首段 = userText 逐字节 (SC6)"
+    );
+    assert.equal(
+      lines.length,
+      2,
+      "task 恰 2 段 (userText + evidenceContext JSON)"
+    );
+    const ctx = JSON.parse(lines[1]!) as EvidenceContext;
+    assert.equal(
+      ctx.checkerVerdict,
+      "EVIDENCE_INSUFFICIENT",
+      "evidenceContext.checkerVerdict 经集成层装配 (checkEvidence 三态)"
+    );
+    // SC9: systemPrompt 零 evidenceContext 泄漏 (声明面零改动)。
+    assert.equal(typeof def.systemPrompt, "string");
+    assert.ok(
+      !def.systemPrompt!.includes("evidence_context"),
+      "systemPrompt 不含 evidence_context 段标记"
+    );
+    assert.ok(
+      !def.systemPrompt!.includes("evidenceContext"),
+      "systemPrompt 不含 evidenceContext 键 (JUDGE_ROLE 零改动)"
+    );
+  });
+});
+
+describe("补跑中 abort 无 stale 信封 (#449b B9)", () => {
+  it("round1 INSUFFICIENT + probe 命中 → 补跑轮挂起 → abort → outcome=aborted, records 零伪造", async () => {
+    const controller = new AbortController();
+    const { runFn, calls } = makeEvidenceRunFn(PROBE_OK_MESSAGES);
+    let resolveRerunStarted!: () => void;
+    const rerunStarted = new Promise<void>((resolve) => {
+      resolveRerunStarted = resolve;
+    });
+    const runFnHook: VerifyLoopOptions["runFn"] = async (userText, runOpts) => {
+      const call = calls().length;
+      if (call === 1) {
+        // 补跑轮 (rerun branch 第 2 次 runFn) 挂起, 等待用户 abort 信号
+        // (mirror classifier-abort.test.ts 在飞挂起模式)。
+        resolveRerunStarted();
+        await new Promise<void>((resolve) => {
+          if (runOpts?.signal?.aborted) {
+            resolve();
+            return;
+          }
+          runOpts?.signal?.addEventListener("abort", () => resolve(), {
+            once: true,
+          });
+        });
+      }
+      return runFn(userText, runOpts);
+    };
+    // 判官路径 (command="" + runClassifier 在场选 classifier-loop body, B5 补跑
+    // 信封在 runVerifyLoopBody 内); 补跑轮在飞时 abort → 判官 seam 永不消费
+    // (abort 早于 round 2 produceObservation), spy 脚本保持未消费。
+    const { runClassifier } = makeClassifierSpy([]);
+    // defaultOptions 不接 signal, 直接构造 options (B6 trace 前置例同款写法)。
+    const opts: VerifyLoopOptions = {
+      runFn: runFnHook,
+      userText: "implement goal",
+      config: { command: "" },
+      sessionId: "b9-rerun-abort",
+      signal: controller.signal,
+      cwd: process.cwd(),
+      runClassifier,
+    };
+    const promise = runVerifyLoop(opts);
+    await rerunStarted;
+    controller.abort();
+    const out = await promise;
+
+    assert.equal(
+      out.outcome,
+      "aborted",
+      "补跑轮在飞时 abort → while 顶部检查点收敛 aborted"
+    );
+    assert.equal(
+      out.rounds,
+      1,
+      "round 1 已计数, rerun 轮未进 produceObservation"
+    );
+    assert.equal(
+      out.records.length,
+      0,
+      "不伪造 round1/rerun 轮 VerificationRecord (无 stale 判定)"
+    );
+    assert.equal(
+      calls().length,
+      2,
+      "runFn 恰 2 次 (round1 主轮 + 补跑轮), 无 stale 第三轮续跑"
+    );
+    assert.equal(
+      calls()[1]!.lastUserText?.startsWith("[VERIFY: rerun needed]"),
+      true,
+      "补跑轮收到 B5 补跑信封"
+    );
+  });
+});
+
+describe("命令路径冻结复跑 (#449b B9)", () => {
+  it("SUFFICIENT + config.command 已配 → runVerify spy 0 + runClassifier spy 0 + outcome passed (入口级)", async () => {
+    // B4 既有机制 (G3: 证据充分短路零重跑, 即便配 command) 的入口级复跑: 双 spy 0
+    // 一次断言齐, 防监管路径 (.command-./.classifier-.) 接线回归。B4 用例已覆盖
+    // 命令 / 判官两路各自 spy 0; 本条仅在 the-loop 入口合并重申。
+    const { runFn } = makeEvidenceRunFn(GREEN_FIRST_MESSAGES);
+    const verify = makeScriptedVerify([
+      () => ({ exitCode: 0, stdout: "should not run", stderr: "" }),
+    ]);
+    const { runClassifier, calls: classifierCalls } = makeClassifierSpy([
+      passEnvelope("should never be reached"),
+    ]);
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runVerify: verify.runVerify,
+        runClassifier,
+      })
+    );
+    assert.equal(out.outcome, "passed");
+    assert.equal(out.rounds, 1);
+    assert.equal(
+      verify.callCount(),
+      0,
+      "SUFFICIENT + command 已配 → 零沙箱重跑"
+    );
+    assert.equal(classifierCalls().length, 0, "SUFFICIENT → 零判官 spawn");
+    assert.equal(out.records.length, 1);
+    assert.equal(out.records[0]!.verdict, "pass");
   });
 });
