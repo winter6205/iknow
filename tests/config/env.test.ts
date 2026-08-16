@@ -313,6 +313,27 @@ describe("loadIknowEnv — maxTurns (plan T5)", () => {
   });
 });
 
+describe("loadIknowEnv — maxOutputTokens default (#trace 8e05e04c)", () => {
+  // 默认值选 8192 的完整 rationale 见 src/config/env.ts 该 fallback 注释。
+  beforeEach(() => {
+    delete process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS;
+  });
+  afterEach(() => {
+    delete process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS;
+  });
+
+  it("未设 IKNOW_LLM_MAX_OUTPUT_TOKENS → 落到 8192 fallback", () => {
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.llm.maxOutputTokens, 8192);
+  });
+
+  it("显式 env 仍可覆盖 fallback", () => {
+    process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = "4096";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.llm.maxOutputTokens, 4096);
+  });
+});
+
 describe("loadIknowEnv — settings merge (#353)", () => {
   beforeEach(() => {
     for (const k of ENV_KEYS) delete process.env[k];
