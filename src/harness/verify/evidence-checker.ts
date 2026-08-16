@@ -280,6 +280,89 @@ function extractTestRuns(
 }
 
 /**
+ * CONTRADICTED 硬否决判定 (A7 二进制事实, spec: truth count-based 永不指控)。
+ * 只认两个可观测的"测试文件被破坏"事实:
+ *  - write_file 把测试文件清空 (内容 ≈ 空);
+ *  - bash `rm` 测试文件。
+ * 数字类信号 (断言减少) 永不 CONTRADICTED (落 gamingSignals 软信号)。
+ */
+function hasContradiction(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): boolean {
+  for (const message of messages) {
+    if (!message || typeof message !== "object") continue;
+    const content = message.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const b = block as AnthropicContentBlock;
+      if (b.type !== "tool_use") continue;
+      if (b.name === "write_file") {
+        const input = b.input as { filePath?: unknown; content?: unknown };
+        const fp = typeof input.filePath === "string" ? input.filePath : "";
+        const c = input.content;
+        const isEmpty =
+          (typeof c === "string" && c.trim() === "") ||
+          (Array.isArray(c) && c.length === 0);
+        if (isTestFilePath(fp) && isEmpty) return true;
+      } else if (b.name === "bash") {
+        const command = extractCommand(b.input);
+        // bash `rm` 测试文件 (rm / rm -f / rm -rf 目标含 test 路径)。
+        if (/\brm\b.*(test|spec|__tests__)/.test(command)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** 测试文件路径启发式 (src/foo.test.ts / tests/* / test_*.py 等)。 */
+function isTestFilePath(filePath: string): boolean {
+  return (
+    /\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$/i.test(filePath) ||
+    /\b(tests?|__tests__|test_)\./.test(filePath) ||
+    filePath.includes("/test/") ||
+    filePath.startsWith("test_") ||
+    filePath.endsWith("_test.go") ||
+    filePath.endsWith("_test.py")
+  );
+}
+
+/**
+ * gamingSignals 软信号收集 (A7: 仅记录, 不参与判定)。
+ * count-based 永不指控: 断言数减少 / 新增 skip/xfail / --no-verify 只落
+ * gamingSignals, 不改 verdict。
+ */
+function collectGamingSignals(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): string[] {
+  const signals: string[] = [];
+  for (const message of messages) {
+    if (!message || typeof message !== "object") continue;
+    const content = message.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const b = block as AnthropicContentBlock;
+      if (b.type !== "tool_use") continue;
+      if (b.name === "bash") {
+        const command = extractCommand(b.input);
+        if (
+          /--no-verify|-n\b/.test(command) &&
+          /\bgit\s+commit\b/.test(command)
+        ) {
+          signals.push("git commit --no-verify/-n (skipped pre-commit checks)");
+        }
+        if (/\b(rm|sed|mv)\b/.test(command)) {
+          // 变更测试文件自身的 bash 操作视为可疑 (低置信, 只记录)。
+          signals.push("bash file mutation on test-ish target");
+        }
+      }
+    }
+  }
+  return signals;
+}
+
+/**
  * fail-closed 的 INSUFFICIENT 报告构造 (A8: 拿不准不 PASS)。
  * stale 由时效路径传入 (stale INSUFFICIENT 时报告需保留 STALE 语义)。
  */
@@ -340,6 +423,19 @@ export function checkEvidence(args: {
     return insufficient(["no bash test execution found in transcript"], []);
   }
 
+  // CONTRADICTED (A7): 清空/删除测试文件是唯一硬否决, 优先于其它判定。
+  if (hasContradiction(messages)) {
+    return {
+      verdict: "EVIDENCE_CONTRADICTED",
+      reasons: ["test files cleared or removed (binary contradiction)"],
+      runs,
+      gamingSignals: collectGamingSignals(messages),
+      stale: false,
+    };
+  }
+
+  const gamingSignals = collectGamingSignals(messages);
+
   const verdict = computeVerdict(runs);
   if (verdict === "EVIDENCE_SUFFICIENT") {
     // 时效 (A6): 绿测试 turn 之后、claimIndex 之前有代码编辑 → stale → 不 SUFFICIENT。
@@ -359,12 +455,15 @@ export function checkEvidence(args: {
       verdict,
       reasons: [],
       runs,
-      gamingSignals: [],
+      gamingSignals,
       stale: false,
     };
   }
-  return insufficient(
-    ["no run satisfies exit-0 + green-summary evidence threshold"],
-    runs
-  );
+  return {
+    ...insufficient(
+      ["no run satisfies exit-0 + green-summary evidence threshold"],
+      runs
+    ),
+    gamingSignals,
+  };
 }
