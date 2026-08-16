@@ -109,3 +109,48 @@ export interface VerificationRecord {
   readonly evidence?: readonly ClassifierCheck[];
   readonly missing?: readonly string[];
 }
+
+/**
+ * evidence-checker 证据充分性判定 (spec 449-evidence-checker, G2 三态 verdict)。
+ *
+ * 与上方闭环轮次三态 (Verdict) 是不同域: 这是证据优先判定的确定性前级,
+ * 产出对主会话 transcript 真实执行证据的判定; 调用方只消费 verdict, 不数条件。
+ */
+export type EvidenceVerdict =
+  "EVIDENCE_SUFFICIENT" | "EVIDENCE_CONTRADICTED" | "EVIDENCE_INSUFFICIENT";
+
+/**
+ * 单条 bash 测试执行的提取证据 (spec 449-evidence-checker Code Style)。
+ * messageIndex = messages 数组 index, 是时效判定的时序锚
+ * (R2/G4-2: 不用 mtime/diff/git, 只信会话自身工具调用顺序)。
+ */
+export interface TestRunEvidence {
+  /** messages 数组 index (时序锚)。 */
+  readonly messageIndex: number;
+  /** bash tool_use input.command。 */
+  readonly command: string;
+  /** tool_result 结构化 JSON {code}；is_error 或无 code → null。 */
+  readonly exitCode: number | null;
+  /** 白名单框架 (只从框架摘要行读数字, 绝不扫描任意输出)。 */
+  readonly framework: "pytest" | "jest" | "vitest" | "go" | "cargo" | null;
+  /** stdout 含白名单 green 摘要行。 */
+  readonly greenSummary: boolean;
+  /** 弱绿: 0 tests / collected 0 / no tests found / 窄跑。 */
+  readonly weakGreen: boolean;
+  /** 吞失败: || true / || exit 0 / ; exit 0 / --passWithNoTests。 */
+  readonly swallowed: boolean;
+}
+
+/**
+ * checkEvidence 产出 (spec 449-evidence-checker Code Style)。
+ * reasons 供补跑信封与 evidenceContext 消费; gamingSignals 仅记录不判定。
+ */
+export interface EvidenceReport {
+  readonly verdict: EvidenceVerdict;
+  readonly reasons: ReadonlyArray<string>;
+  readonly runs: ReadonlyArray<TestRunEvidence>;
+  /** 软信号 (断言减少 / 新增 skip / --no-verify) 仅记录, 不改 verdict。 */
+  readonly gamingSignals: ReadonlyArray<string>;
+  /** 绿证据后被代码编辑 (agent-receipts STALE 语义)。 */
+  readonly stale: boolean;
+}
