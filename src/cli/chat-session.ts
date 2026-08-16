@@ -174,6 +174,48 @@ export interface ProcessChatLineOpts {
 }
 
 /**
+ * #449 B8 (SC5): chat 端 #459 三段 fallback 的纯读盘 +
+ * 公式 helper。语义与 hub 端 `session.goal !== undefined &&
+ * session.goal.text.length > 0 ? session.goal.text : session.taskFocus !==
+ * undefined && session.taskFocus.text.length > 0 ? session.taskFocus.text :
+ * query` 逐字一致 (empty-goal-skip + empty-taskFocus-skip 同纪律)。
+ *
+ * 失败语义:
+ * - store 缺席 / conversationId === null → 兜底 query (ask / pipe / tests
+ *   未装配 checkpointStore, 或 tests 用 makeState 默认 conversationId =
+ *   null);与 pre-#449 行为逐字节一致。
+ * - store.load 抛 typed error (not_found = fresh conversation 合法态 /
+ *   parse_failed / schema_invalid / io_error / write_failed /
+ *   concurrent_write) → 兜底 query,不阻断 agent 回合。
+ * - 未知 throw (store 契约外, 防御性) → fail-open 回 query 同上 (userText
+ *   只是 verify-loop task 文本, 读失败不该让整个 turn 崩;pre-#449 从不读盘,
+ *   这是严格退化保护)。
+ */
+async function resolveVerifyUserText(
+  store: SessionStore | undefined,
+  conversationId: string | null,
+  query: string
+): Promise<string> {
+  if (store === undefined || conversationId === null) {
+    return query;
+  }
+  try {
+    const session = await store.load(conversationId);
+    if (session.goal !== undefined && session.goal.text.length > 0) {
+      return session.goal.text;
+    }
+    if (session.taskFocus !== undefined && session.taskFocus.text.length > 0) {
+      return session.taskFocus.text;
+    }
+    return query;
+  } catch {
+    // 读盘失败一律 fail-open 到 query (见上方失败语义注释);
+    // typed / 未知 throw 不区分对待,保持与 pre-#449 行为逐字节一致。
+    return query;
+  }
+}
+
+/**
  * Pure-ish one-line handler for tests and both I/O paths.
  * Mutates ctx (state) as needed.
  */
@@ -196,6 +238,23 @@ export async function processChatLine(
   }
 
   const query = parsedLine.text;
+
+  // #449 B8 (SC5): chat 端 verify-loop task 文本 = hub 同款 #459 三段
+  // fallback (`goal.text ?? taskFocus.text ?? query`)。chat 路径可读会话
+  // 状态:checkpointStore + state.conversationId (与 goalStatus/goalClear
+  // /goalPin 既有读盘同源);store 缺席 / 读盘失败 → 兜底 query (fail-open,
+  // 公式兜底段 = #449 前的既有行为,逐字节保持)。
+  // 仅在 verifyConfig 在场时被 processChatLine 调用 (userText 只被
+  // runVerifyLoop 消费, 非 verify 路径无副作用);提前置 query,verifyConfig
+  // 缺席分支直接走 runHarness(query, ...),不引入额外 IO。
+  const userText =
+    ctx.verifyConfig === undefined
+      ? query
+      : await resolveVerifyUserText(
+          ctx.checkpointStore,
+          ctx.state.conversationId,
+          query
+        );
   // plan T6:stop_summary 事件观察 — 经 wrapper 包一层,捕获异常停的收尾
   // 摘要文本。host 的 onStream(若有)只接到 text_delta / tool_call_start 等
   // 业务事件,避免预览 sink 双打印。摘要由 loop-engine run() 在返回/重抛前
@@ -241,7 +300,8 @@ export async function processChatLine(
               priorMessages: o?.priorMessages ?? priorMessages,
               onStream: o?.onStream ?? wrappedOnStream,
             }),
-          userText: query,
+          // #449 B8: userText 由上方三段 fallback 预计算 (chat 端读盘)。
+          userText,
           config: ctx.verifyConfig,
           sessionId: ctx.state.conversationId ?? "chat",
           signal: ctx.abortController?.signal,

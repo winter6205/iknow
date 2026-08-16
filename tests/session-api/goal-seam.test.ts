@@ -1,6 +1,7 @@
 /**
- * #408 T4 + #458 T8: verify-loop seam — userText = goal.text ?? query,
- * plus the SC3 数据侧 (data-side) three-segment fallback readiness.
+ * #408 T4 + #458 T8 + #449 B8: verify-loop seam — userText = #459 formula
+ * `goal.text ?? taskFocus.text ?? query`, plus the SC3 数据侧 (data-side)
+ * three-segment fallback readiness.
  *
  * History:
  *   - #408 T4: hub.ts userText seam = `goal.text ?? query`. user_initial
@@ -12,17 +13,13 @@
  *     — the only `GoalSource` value that survives load as a goal (SC1).
  *   - #458 T8 (SC3 acceptance): 任务公式
  *     `goal.text ?? taskFocus.text ?? query` 数据侧就位供 #449 消费。
+ *   - #449 B8: hub.ts userText seam 升级到 #459 公式三段 fallback
+ *     (`goal.text ?? taskFocus.text ?? query`, 空字符串按缺席算),
+ *     消费端 taskFocus 段落地。SC5 (verify-loop 编排闭环) 接线之一。
  *
- * The DATA-side three-segment formula is asserted directly from the
- * loaded session file (no seam involvement). The CONSUMER-side
- * `userText` at hub.ts:781-784 currently implements only
- * `goal.text ?? query`; the `taskFocus.text` segment lands in plan
- * #449 B8 (NOT #458). This split keeps the data-side ready for #449
- * while not touching src/ from T8.
- *
- * Deferral note (commit-message-ready):
- *   "SC3 数据侧三段 fallback 由本 bullet 就位;消费端 taskFocus 段
- *    由 plan #449 B8 接 hub.ts:781-784 userText seam 升级(独立 PR)。"
+ * DATA-side three-segment formula 仍由本文件独立断言 (从 loaded session
+ * 派生 final-task-text,不经过 verify-loop seam),与 CONSUMER-side seam
+ * 测试互不重叠,两条测试线并行守护。
  */
 import {
   afterAll,
@@ -261,6 +258,91 @@ describe("verify-loop seam: userText = goal.text ?? query (#408 T4 / #458 T8)", 
     const after = await store.load(id);
     assert.equal(after.goal?.text, "Type-system-validate-LSP");
     assert.equal(after.goal?.source, "user_pin");
+  });
+
+  // -- #449 B8 (SC5): userText seam 升级到 #459 三段 fallback
+  // (goal.text ?? taskFocus.text ?? query)。#458 T8 仅就位数据侧,
+  // 消费端 (hub.ts userText) 由本块接管。empty-string 在每段都按缺席算
+  // (与既有 empty-goal-skip 纪律一致),避免把空文本喂给 verify-loop。
+
+  it("goal absent + taskFocus present → userText === taskFocus.text (#459 三段 fallback 第二段, #449 B8)", async () => {
+    const id = "taskfocus-binds";
+    await seedSession({
+      id,
+      taskFocus: {
+        text: "TF: implement AST visitors",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        history: [],
+      },
+    });
+    const hub = makeHub();
+    const res = await hub.postMessage({
+      conversationId: id,
+      text: "Q",
+    });
+    assert.equal(res.turn.answer.stopReason, "completed");
+    expect(runVerifyLoopMock).toHaveBeenCalledTimes(1);
+    assert.equal(
+      capturedUserText(),
+      "TF: implement AST visitors",
+      "goal 缺席 + taskFocus 在场 → userText 应取 taskFocus.text"
+    );
+  });
+
+  it("goal.text === '' + taskFocus present → userText === taskFocus.text (空 goal 按缺席算, #449 B8)", async () => {
+    const id = "empty-goal-taskfocus-binds";
+    await seedSession({
+      id,
+      goal: {
+        text: "",
+        source: "user_pin",
+        status: "active",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        history: [],
+      },
+      taskFocus: {
+        text: "TF takes over empty goal",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        history: [],
+      },
+    });
+    const hub = makeHub();
+    const res = await hub.postMessage({
+      conversationId: id,
+      text: "Q",
+    });
+    assert.equal(res.turn.answer.stopReason, "completed");
+    expect(runVerifyLoopMock).toHaveBeenCalledTimes(1);
+    assert.equal(
+      capturedUserText(),
+      "TF takes over empty goal",
+      "goal.text === '' 应跳过第一段 → 命中 taskFocus 第二段"
+    );
+  });
+
+  it("taskFocus.text === '' → falls back to query (空 taskFocus 按缺席算, #449 B8)", async () => {
+    const id = "empty-taskfocus";
+    await seedSession({
+      id,
+      taskFocus: {
+        text: "",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        history: [],
+      },
+    });
+    const hub = makeHub();
+    const res = await hub.postMessage({
+      conversationId: id,
+      text: "Q",
+    });
+    assert.equal(res.turn.answer.stopReason, "completed");
+    expect(runVerifyLoopMock).toHaveBeenCalledTimes(1);
+    assert.equal(
+      capturedUserText(),
+      "Q",
+      "taskFocus.text === '' 应跳过 → 兜底 query (与 empty-goal-skip 同纪律)"
+    );
   });
 });
 

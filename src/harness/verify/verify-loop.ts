@@ -32,7 +32,13 @@ import type {
 } from "../model-adapter/types.js";
 import type { LoopTrace } from "../loop-trace.js";
 import type { TraceService } from "../trace/index.js";
-import { buildClassifierEnvelope, buildValidationEnvelope } from "./inject.js";
+import { checkEvidence } from "./evidence-checker.js";
+import { probeVerifyCommand } from "./command-probe.js";
+import {
+  buildClassifierEnvelope,
+  buildEvidenceRerunEnvelope,
+  buildValidationEnvelope,
+} from "./inject.js";
 import {
   parseClassifierResult,
   truncateClassifierOutput,
@@ -44,11 +50,16 @@ import {
   evaluateTrend,
   type TrendResult,
 } from "./verdict.js";
-import type {
-  ClassifierCheck,
-  VerificationRecord,
-  Verdict,
-  VerifyConfig,
+import {
+  REASON_ABORT_TYPED,
+  REASON_UNVERIFIED,
+  type ClassifierCheck,
+  type EvidenceContext,
+  type EvidenceReport,
+  type EvidenceVerdict,
+  type VerificationRecord,
+  type Verdict,
+  type VerifyConfig,
 } from "./types.js";
 // 沙箱执行体 (M4 拆分): RunVerifyFn / makeDefaultRunVerify / runVerifyOnce 落
 // sandbox-run.ts, 本文件只做判定编排 (不 import sandbox 层)。
@@ -62,6 +73,13 @@ import {
 export const DEFAULT_TIMEOUT_SEC = 600;
 /** 兜底总轮数上限默认; 裁判是趋势不是计数器 (plan §Decisions 定稿)。 */
 export const DEFAULT_MAX_ROUNDS = 12;
+/**
+ * #449b B5 补跑 (evidence-rerun) 单闭环上限 (plan B5 决议)。
+ * `rerunAttempts >= RERUN_ATTEMPT_CAP` 后落原 produceObservation (判官 / 命令
+ * 既有机制); 1 次 = 给模型一次补证据机会, 避免无限 loop (spec A10 决议细化)。
+ * 不导出: 仅供 runVerifyLoopBody 内部使用。
+ */
+const RERUN_ATTEMPT_CAP = 1;
 
 /** 单次 run() 的返回形状 (runFn 委托的返回)。 */
 export type RunOutcome = {
@@ -106,6 +124,12 @@ export interface RunClassifierFn {
     readonly cwd: string;
     /** 分类器模型槽位 (A7: settings.verify.classifierModel ?? settings.llm.model)。 */
     readonly model?: string;
+    /**
+     * #449b B6: 证据体检单 (G5-3 决议术语)。由 runClassifierLoop 在
+     * produceObservation 闭包内组装, 通过 envelope.task 拼接段 + failure
+     * envelope.evidence_context 段两路喂入判官。
+     */
+    readonly evidenceContext?: EvidenceContext;
   }): Promise<ClassifierEnvelope>;
 }
 
@@ -175,6 +199,10 @@ interface RoundObservation {
   readonly missing?: ReadonlyArray<string>;
   /** 分类器分支: 判官跑的 evidence 列表 (SC10 落盘 + A8 信封 evidence 字段)。 */
   readonly evidence?: ReadonlyArray<ClassifierCheck>;
+  /** 证据优先前级 (#449b B4): 仅 EVIDENCE_INSUFFICIENT 轮由 body 合并进本轮
+   *  observation; Postel 落盘经 buildRecord (SUFFICIENT / CONTRADICTED 不携带)。 */
+  readonly evidenceVerdict?: EvidenceVerdict;
+  readonly gamingSignals?: ReadonlyArray<string>;
 }
 
 /** 一轮验证的终态; aborted = 用户中断打断验证执行。 */
@@ -395,6 +423,14 @@ function buildRecord(opts: {
     ...(observation.missing !== undefined
       ? { missing: observation.missing }
       : {}),
+    // #449b B4: 证据优先前级字段 Postel 落盘 (仅 INSUFFICIENT 轮产这些键;
+    // SUFFICIENT / CONTRADICTED 短路 observation 不含这些字段, 自然不落)。
+    ...(observation.evidenceVerdict !== undefined
+      ? { evidenceVerdict: observation.evidenceVerdict }
+      : {}),
+    ...(observation.gamingSignals !== undefined
+      ? { gamingSignals: observation.gamingSignals }
+      : {}),
     action,
     ...(finalOutcome !== undefined ? { finalOutcome } : {}),
     ts: new Date().toISOString(),
@@ -411,28 +447,169 @@ function userTextMessage(text: string): AnthropicNativeMessage {
   });
 }
 
-/** 是否为本轮注入的验证失败信封 (code-review High: 避免 stale 信封累积)。 */
-function isValidationEnvelope(message: AnthropicNativeMessage): boolean {
+/**
+ * #449b B5: 已注入信封前缀集 (B5 决议把 `[VERIFY: rerun needed]` 补跑信封纳入
+ * 滤除范围 —— plan B5 说 "buildNextPriorMessages 不剥它" 与本决议冲突, 采纳
+ * 实施侦察: 不剥会导致 round 3+ prior 残留已失效补跑上下文)。
+ * `[VALIDATION FAILED]` = 验证失败修正 (既有) + `[VERIFY: rerun needed]` =
+ * 补跑提示 (B5 新增); 其它前缀不属于本循环注入, 不得剥。
+ */
+const INJECTED_ENVELOPE_PREFIXES = [
+  "[VALIDATION FAILED]",
+  "[VERIFY: rerun needed]",
+] as const;
+
+/**
+ * 是否为本循环注入的任一信封 (code-review High: 避免 stale 信封累积)。
+ * 涵盖: 验证失败修正信封 + 补跑信封 (B5 扩展, 见 INJECTED_ENVELOPE_PREFIXES)。
+ */
+function isInjectedEnvelope(message: AnthropicNativeMessage): boolean {
   if (message.role !== "user") return false;
   return message.content.some((b) => {
     if (b.type !== "text") return false;
-    return b.text.startsWith("[VALIDATION FAILED]");
+    return INJECTED_ENVELOPE_PREFIXES.some((p) => b.text.startsWith(p));
   });
 }
 
 /**
- * 重建下一轮 priorMessages: 从 current.result.messages 滤除已注入的验证信封,
- * 再 append 新注入消息。避免每轮把上一轮失败信封留存在历史里 —— 模型不得
- * 重复读到已失效的旧失败上下文 (历史收敛 + closeout 不残留 stale 上下文)。
+ * 重建下一轮 priorMessages: 从 current.result.messages 滤除已注入的验证信封
+ * ([VALIDATION FAILED] / [VERIFY: rerun needed]), 再 append 新注入消息。
+ * 避免每轮把上一轮失败 / 补跑信封留存在历史里 —— 模型不得重复读到已失效的
+ * 旧上下文 (历史收敛 + closeout 不残留 stale 上下文)。
  */
 function buildNextPriorMessages(
   current: RunOutcome,
   injected: AnthropicNativeMessage
 ): ReadonlyArray<AnthropicNativeMessage> {
   const filtered = current.result.messages.filter(
-    (m) => !isValidationEnvelope(m)
+    (m) => !isInjectedEnvelope(m)
   );
   return [...filtered, injected];
+}
+
+/** #449b B5 probeVerifyCommand 的 flag file 候选集 (D2 spec Code Style)。 */
+const PROBE_FLAG_FILES: ReadonlySet<string> = new Set([
+  "pyproject.toml",
+  "pytest.ini",
+  "go.mod",
+  "Cargo.toml",
+]);
+
+/** #449b B5 补跑信封前缀 (rerunAttempted 消息扫描派生锚点, 与 INJECTED_ENVELOPE_PREFIXES 同源)。 */
+const RERUN_ENVELOPE_PREFIX = "[VERIFY: rerun needed]";
+
+/**
+ * #449b B6: 从消息历史派生 rerunAttempted (补跑是否已尝试)。
+ * 闭包无法访问 runVerifyLoopBody 局部 rerunAttempts (produceObservation seam
+ * 签名冻结, 沿用 B4 决策不扩缝) —— 用可观测痕迹: user 消息文本以
+ * `[VERIFY: rerun needed]` 开头即代表 B5 补跑信封已注入过。
+ * checkEvidence 同输入 messages 只读扫描, 幂等无副作用。
+ */
+function hasRerunEnvelope(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): boolean {
+  for (const message of messages) {
+    if (message.role !== "user") continue;
+    for (const block of message.content) {
+      if (block.type !== "text") continue;
+      if (block.text.startsWith(RERUN_ENVELOPE_PREFIX)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * #449b B6: 证据摘要序列化 (evidenceSummary 数据源)。
+ * 每 run 一行 `command exit=N green=<bool>` (沿用既有简洁风格);
+ * 宿主侧截断由下游消费方负责 (buildClassifierEnvelope / 判官 task 拼接段)。
+ */
+function buildEvidenceSummary(report: EvidenceReport): string {
+  if (report.runs.length === 0) return "";
+  return report.runs
+    .map((r) => `${r.command} exit=${r.exitCode} green=${r.greenSummary}`)
+    .join("\n");
+}
+
+/**
+ * #449b B6: 组装 EvidenceContext (证据体检单, G5-3 决议)。
+ * 纯函数幂等: 与 body 前级 checkEvidence 各自独立调用, 无副作用。
+ *   - checkerVerdict = report.verdict;
+ *   - reasons = report.reasons;
+ *   - executedCommands = report.runs.map(r => r.command);
+ *   - rerunAttempted = 消息扫描 [VERIFY: rerun needed] 前缀派生;
+ *   - evidenceSummary = 每 run 一行序列化。
+ */
+function buildEvidenceContext(
+  report: EvidenceReport,
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): EvidenceContext {
+  return {
+    checkerVerdict: report.verdict,
+    reasons: report.reasons,
+    executedCommands: report.runs.map((r) => r.command),
+    rerunAttempted: hasRerunEnvelope(messages),
+    evidenceSummary: buildEvidenceSummary(report),
+  };
+}
+
+/**
+ * 从消息历史提取 probeVerifyCommand 输入候选 (B5 决议: 优先真实派生)。
+ *   - write_file / edit_file tool_use 的 filePath: 标志文件名命中即贡献;
+ *   - write_file filePath === "package.json" 且 content 字符串以 `{` 起头:
+ *     视为 package.json 内容形态 (probe 解析 JSON 看 vitest / jest deps);
+ *   - 其它非标志路径 / 缺 content 的 package.json: 不贡献 (probe fail-closed)。
+ * 沿用 probeVerifyCommand 的两形态契约 (路径字符串 | JSON 内容字符串)。
+ */
+function collectProbeFiles(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): string[] {
+  const files: string[] = [];
+  for (const message of messages) {
+    if (!message || typeof message !== "object") continue;
+    const content = message.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const b = block as AnthropicContentBlock;
+      if (b.type !== "tool_use") continue;
+      if (b.name !== "write_file" && b.name !== "edit_file") continue;
+      const input = b.input as { filePath?: unknown; content?: unknown };
+      const filePath = typeof input.filePath === "string" ? input.filePath : "";
+      if (filePath.length === 0) continue;
+      if (PROBE_FLAG_FILES.has(filePath)) {
+        files.push(filePath);
+        continue;
+      }
+      if (
+        b.name === "write_file" &&
+        filePath === "package.json" &&
+        typeof input.content === "string" &&
+        input.content.startsWith("{")
+      ) {
+        files.push(input.content);
+      }
+    }
+  }
+  return files;
+}
+
+/**
+ * #449b B5 补跑命令派生 (Leader 裁决 v2: 判官路径专属机制)。
+ *
+ * 命令路径 (config.command 非空) 走沙箱重跑 (frozen legacy, SC10/Never-do):
+ * 沙箱已执行该命令, 补跑信封冗余且会破坏命令路径基线 → 不补跑 → 落
+ * produceCommandObservation。判官路径 (command 空) 才走 probeVerifyCommand
+ * 探测 (write_file/edit_file 标志文件 + package.json JSON 内容)。
+ *
+ * 返回: 唯一补跑命令 | null (无命令/冲突/未探测到 → 跳过补跑)。
+ */
+function deriveRerunCommand(
+  configCommand: string | undefined,
+  current: RunOutcome
+): string | null {
+  const configured = (configCommand ?? "").trim();
+  if (configured.length > 0) return null;
+  return probeVerifyCommand(collectProbeFiles(current.result.messages));
 }
 
 /** 升级指令 (spec 假设 B10 固定模板): 禁止重复同一修复, 换思路或明确报告阻塞。 */
@@ -462,11 +639,17 @@ function buildResult(opts: {
 
 /**
  * 单次分类器判定 (SC1 command-absent 分支执行体)。
- * 归一化规则 (spec SC5/A5):
+ * 归一化规则 (spec SC5/A5 + #449b B7 SC7/SC8):
  *   - 用户 abort → aborted;
  *   - transport 错 (status:"failed", reason ∈ crashed/timeout/protocolError)
- *     → verdict=unstable, 不注入信封 (fail-open, 不静默放行);
- *   - schema 错 (parseClassifierResult 收敛为 abort) → verdict=unstable;
+ *     → verdict=unstable, reason=REASON_ABORT_TYPED (判官自身故障统一 abort),
+ *     不注入信封 (fail-open, 不静默放行);
+ *   - schema 错 (parseClassifierResult 收敛为 abort) → verdict=unstable,
+ *     reason=REASON_ABORT_TYPED, 不注入信封;
+ *   - {kind:"unverified"} (判官读完证据仍不足、拒绝猜 PASS/FAIL, B7 第 4 态)
+ *     → verdict=unstable, signature="classifier-unverified",
+ *     reason=REASON_UNVERIFIED, 不注入信封 —— 与 abort 严格区分 (SC7 typed
+ *     reason 落盘), 二者都走 decideRoundAction stop → outcome=unstable;
  *   - {kind:"pass"} → verdict=pass;
  *   - {kind:"fail"} → verdict=true-failure + reason/missing (信封消费)。
  */
@@ -478,6 +661,11 @@ async function runClassifierOnce(opts: {
   readonly model?: string;
   readonly summary: string;
   readonly finalText: string | null;
+  /**
+   * #449b B6: 证据体检单 (produceObservation 闭包内组装)。undefined → 判官
+   * 拿不到 evidenceContext, task = userText 逐字节 (B6 兼容既有 SC7 SC10)。
+   */
+  readonly evidenceContext?: EvidenceContext;
 }): Promise<RoundResult> {
   let envelope: ClassifierEnvelope;
   try {
@@ -488,6 +676,9 @@ async function runClassifierOnce(opts: {
       signal: opts.signal,
       cwd: opts.cwd,
       ...(opts.model !== undefined ? { model: opts.model } : {}),
+      ...(opts.evidenceContext !== undefined
+        ? { evidenceContext: opts.evidenceContext }
+        : {}),
     });
   } catch {
     // 用户 abort 优先于 transport 归类: seam 在用户 Ctrl+C 时可能以
@@ -495,23 +686,26 @@ async function runClassifierOnce(opts: {
     // (outcome=aborted), 不得按 transport 错降级为 unstable。
     if (opts.signal?.aborted) return { aborted: true };
     // // EXIT: seam throw (非用户 abort) = transport 错 → fail-open unstable,
-    // 不注入失败信封 (不静默放过)。
+    // 不注入失败信封 (不静默放过); reason=REASON_ABORT_TYPED (判官自身故障,
+    // 与 schema 降级统一, B7 SC7 typed reason 区分落盘)。
     return {
       verdict: "unstable",
       exitCode: 1,
       signature: "classifier-transport-error",
       outputText: "",
+      reason: REASON_ABORT_TYPED,
     };
   }
   if (opts.signal?.aborted) return { aborted: true };
   if (envelope.status === "failed") {
     // // EXIT: worker 进程级失败 (crashed/timeout/protocolError) = transport 错
-    // → fail-open unstable, 不注入失败信封。
+    // → fail-open unstable, 不注入失败信封; reason=REASON_ABORT_TYPED (同上)。
     return {
       verdict: "unstable",
       exitCode: 1,
       signature: "classifier-transport-error",
       outputText: "",
+      reason: REASON_ABORT_TYPED,
     };
   }
   // SC8 运行时保证: 判官输出宿主侧截断后解析 (prompt 不写长度, A8; 截断不
@@ -520,12 +714,26 @@ async function runClassifierOnce(opts: {
     truncateClassifierOutput(envelope.result)
   );
   if (parsed.kind === "abort") {
-    // // EXIT: schema 错 / 判官判不了 → fail-open unstable, 不注入失败信封。
+    // // EXIT: schema 错 / 判官判不了 → fail-open unstable, 不注入失败信封;
+    // reason=REASON_ABORT_TYPED (B7 SC7 typed reason 落盘)。
     return {
       verdict: "unstable",
       exitCode: 1,
       signature: "classifier-abort",
       outputText: "",
+      reason: REASON_ABORT_TYPED,
+    };
+  }
+  if (parsed.kind === "unverified") {
+    // #449b B7: unverified 是判官诚实停法 (读完证据仍不足, 拒绝猜 PASS/FAIL),
+    // 不是判官故障 —— signature/reason 与 abort 严格区分 (SC7); 同样直接走
+    // decideRoundAction stop → outcome=unstable, 不注入信封 (SC8, 零第 2 轮)。
+    return {
+      verdict: "unstable",
+      exitCode: 1,
+      signature: "classifier-unverified",
+      outputText: "",
+      reason: REASON_UNVERIFIED,
     };
   }
   if (parsed.kind === "pass") {
@@ -578,6 +786,8 @@ async function runVerifyLoopBody(opts: {
   const records: VerificationRecord[] = [];
   const trend: TrendState = {};
   let escalated = false;
+  /** #449b B5: 补跑轮数计数 (1-attempt cap, 与 trend/escalated 同层局部状态)。 */
+  let rerunAttempts = 0;
   let current = await options.runFn(options.userText, {
     signal: options.signal,
   });
@@ -607,7 +817,87 @@ async function runVerifyLoopBody(opts: {
     }
 
     round += 1;
-    const observation = await opts.produceObservation(round, current);
+    // #449b B4 evidence-first 前级 (spec Code Style): 每轮 produceObservation 前
+    // 先 checkEvidence, 三态映射:
+    //   EVIDENCE_SUFFICIENT → 直接 PASS 短路 (零判官零重跑, 即便配了 command, G3);
+    //   EVIDENCE_CONTRADICTED → true-failure (进修正轮, 趋势/签名机制原样消费);
+    //   EVIDENCE_INSUFFICIENT → 落原 produceObservation (判官/命令既有机制), 且把
+    //     evidenceVerdict + gamingSignals 合并进本轮 observation (buildRecord Postel
+    //     落盘)。SUFFICIENT/CONTRADICTED 不落 evidenceVerdict (B3 Postel 语义)。
+    const evidenceReport = checkEvidence({
+      messages: current.result.messages,
+      claimIndex: round,
+    });
+    let pendingEvidence:
+      | {
+          readonly evidenceVerdict: EvidenceVerdict;
+          readonly gamingSignals: ReadonlyArray<string>;
+        }
+      | undefined;
+    let observation: RoundResult;
+    if (evidenceReport.verdict === "EVIDENCE_SUFFICIENT") {
+      observation = {
+        verdict: "pass",
+        exitCode: 0,
+        outputText: "",
+      };
+    } else if (evidenceReport.verdict === "EVIDENCE_CONTRADICTED") {
+      observation = {
+        verdict: "true-failure",
+        exitCode: 1,
+        signature: buildFailureSignature({
+          exitCode: 1,
+          outputText: evidenceReport.reasons.join("\n"),
+          countRegex: undefined,
+        }),
+        outputText: "",
+      };
+    } else {
+      // #449b B5 补跑信封 (Leader 裁决 v2: 判官路径专属机制): INSUFFICIENT +
+      // deriveRerunCommand 非 null (command 空时 probeVerifyCommand 探测命中) 且
+      // rerunAttempts < 1 → 注入补跑信封 → 走一次 run() 续轮 (rerunAttempts += 1)
+      // → 下一轮重新进 B4 证据核对。命令路径 (config.command 非空) 不补跑, 直接
+      // 落 produceObservation 走沙箱重跑 (frozen legacy, SC10/Never-do)。cap 用尽
+      // 后落原 produceObservation (判官 / 命令既有机制), 不无限补跑
+      // (A10 决议: 1 次上限, 不走 config 字段)。
+      if (rerunAttempts < RERUN_ATTEMPT_CAP) {
+        const rerunCommand = deriveRerunCommand(
+          options.config.command,
+          current
+        );
+        if (rerunCommand !== null) {
+          rerunAttempts += 1;
+          current = await options.runFn(options.userText, {
+            signal: options.signal,
+            priorMessages: buildNextPriorMessages(
+              current,
+              userTextMessage(
+                buildEvidenceRerunEnvelope({
+                  round,
+                  maxRounds: opts.maxRounds,
+                  reasons: evidenceReport.reasons,
+                  command: rerunCommand,
+                })
+              )
+            ),
+          });
+          continue;
+        }
+      }
+      observation = await opts.produceObservation(round, current);
+      pendingEvidence = {
+        evidenceVerdict: "EVIDENCE_INSUFFICIENT",
+        gamingSignals: evidenceReport.gamingSignals,
+      };
+    }
+    // 仅 INSUFFICIENT 轮合并 evidenceVerdict/gamingSignals (Postel: 短路轮
+    // 不携带这些字段, buildRecord 不落盘)。
+    if (pendingEvidence !== undefined) {
+      observation = {
+        ...observation,
+        ...pendingEvidence,
+      };
+    }
     if (observation.aborted) {
       return buildResult({
         current,
@@ -754,12 +1044,29 @@ function runClassifierLoop(
   sessionId: string
 ): Promise<VerifyLoopResult> {
   const { runClassifier } = options;
+  /**
+   * #449b B6: produceObservation 与 buildFailureEnvelope 共享 evidenceContext
+   * 派生结果。produceObservation 闭包内组装, buildFailureEnvelope 闭包读取。
+   * 两闭包在同一轮先后触发 (produceObservation → observation → decision →
+   * 若 continue 才调 buildFailureEnvelope), 共享变量顺序一致性保证。
+   */
+  let lastEvidenceContext: EvidenceContext | undefined;
   return runVerifyLoopBody({
     options,
     maxRounds,
     sessionId,
-    produceObservation: (_round, current) => {
+    produceObservation: (round, current) => {
       const summary = current.result.finalText ?? "";
+      // B6: 复用证据优先前级同源 report (checkEvidence 纯函数幂等, 二次调用
+      // 与 body 前级各自独立无副作用; claimIndex = round 与前级对齐)。
+      const report = checkEvidence({
+        messages: current.result.messages,
+        claimIndex: round,
+      });
+      lastEvidenceContext = buildEvidenceContext(
+        report,
+        current.result.messages
+      );
       return runClassifierOnce({
         task: options.userText,
         runClassifier,
@@ -770,6 +1077,7 @@ function runClassifierLoop(
           : {}),
         summary,
         finalText: current.result.finalText,
+        evidenceContext: lastEvidenceContext,
       });
     },
     buildFailureEnvelope: (round, maxRounds, observation) =>
@@ -779,6 +1087,11 @@ function runClassifierLoop(
         task: options.userText,
         reason: observation.reason ?? "classifier reported failure",
         missing: observation.missing ?? [],
+        // B6: 失败修正信封附 evidence_context 段 (Postel: undefined → 既有
+        // 信封字节相等, 不传 evidence_context 段)。
+        ...(lastEvidenceContext !== undefined
+          ? { evidenceContext: lastEvidenceContext }
+          : {}),
       }),
   });
 }

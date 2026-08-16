@@ -778,15 +778,22 @@ export class SessionHub {
                     priorMessages: o?.priorMessages ?? priorMessages,
                     onStream: o?.onStream ?? wrappedOnStream,
                   }),
-                // #408 T4: verify-loop's task field = goal.text ?? query.
-                // Session-level goal wins; empty goal.text is treated as
-                // absent (defensive — re-feeding "" to the model on every
-                // round would break the loop). Goal-absent sessions stay
-                // byte-identical to pre-#408 (query).
+                // #408 T4 + #458 T8 + #449 B8: verify-loop's task field =
+                // #459 formula `goal.text ?? taskFocus.text ?? query`
+                // (SC5 编排闭环)。Session-level goal wins; empty goal.text
+                // is treated as absent (defensive — re-feeding "" to the
+                // model on every round would break the loop). Goal-absent
+                // sessions fall to the taskFocus segment (#458 data-side),
+                // empty taskFocus.text likewise skips to query. Sessions
+                // without goal/taskFocus stay byte-identical to pre-#408
+                // (query).
                 userText:
                   session.goal !== undefined && session.goal.text.length > 0
                     ? session.goal.text
-                    : query,
+                    : session.taskFocus !== undefined &&
+                        session.taskFocus.text.length > 0
+                      ? session.taskFocus.text
+                      : query,
                 config: this.verifyConfig,
                 sessionId: conversationId,
                 signal: opts.signal,

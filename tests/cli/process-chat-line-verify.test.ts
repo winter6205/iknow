@@ -218,7 +218,8 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
       1,
       "command 缺失 + subagentManager 在场 → 每轮 completed 后 spawn 判官"
     );
-    assert.equal(spawnedDefs[0]!.task, "research a topic");
+    // B6 后 task = userText + evidenceContext JSON 段, 断言首段 = 用户原问句 (SC6 task 不重绑)。
+    assert.equal(spawnedDefs[0]!.task.split("\n")[0], "research a topic");
     // 分类器模型槽位: verifyConfig 无 classifierModel → adapter 不填 model →
     // manager spawn def 无 model → worker 兜底 settings.llm.model (A7 缺省语义)。
     assert.equal(

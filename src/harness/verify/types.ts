@@ -20,11 +20,15 @@ export interface ClassifierCheck {
 }
 
 /**
- * 分类器三态联合 (spec A4 + Code Style)。
+ * 分类器四态联合 (spec A4 + Code Style + #449b B7 SC7)。
  *  - pass：判官认为任务完成（含非空 evidence）；
  *  - fail：判官认为任务未完成，列出 missing（spec A8 信封消费 missing[]）；
  *  - abort：判官跑完了但判不了——transport / schema 错 / pass+空 evidence 静默降级
- *    都映射到此态（"判官判不了"，不是任务失败）。
+ *    都映射到此态（"判官判不了"，不是任务失败）；
+ *  - unverified (#449b B7)：判官读完证据认为不足、拒绝猜 PASS/FAIL（G5-1 决议
+ *    第 4 态，与 abort 严格区分——unverified = 判官自身的诚实停法，不是判官故障）。
+ *    reason 必填非空；evidence 允许缺省（可能没跑命令所以无 evidence，与 abort
+ *    同款可选纪律）；consumer 直接映射 unstable 停法（SC7/SC8，不注入信封）。
  *
  * 降级规则：`{kind:"pass", evidence:[]}` 在 verify-loop 内部被 parseClassifierResult
  * 静默改写为 abort（reason 补"证据缺失"）；子代理 prompt 显式禁止该写法。
@@ -41,7 +45,8 @@ export type ClassifierResult =
       readonly missing: readonly string[];
       readonly evidence: readonly ClassifierCheck[];
     }
-  | { readonly kind: "abort"; readonly reason: string };
+  | { readonly kind: "abort"; readonly reason: string }
+  | { readonly kind: "unverified"; readonly reason: string };
 
 /** 确认阶梯结果 (confirmFailure)。flaky = 全量复跑过, 放行不修正。 */
 export type ConfirmationVerdict = "flaky" | "unstable" | "true-failure";
@@ -108,7 +113,31 @@ export interface VerificationRecord {
   readonly reason?: string;
   readonly evidence?: readonly ClassifierCheck[];
   readonly missing?: readonly string[];
+  /**
+   * 证据优先前级字段 (#449b B3, spec 449-evidence-checker)。
+   *  - evidenceVerdict — checkEvidence 三态 verdict (B4 INSUFFICIENT 时落盘);
+   *  - gamingSignals — 软信号 (断言减少 / 新增 skip / --no-verify) 仅记录不判定。
+   * Postel: 可选字段仅存在时落盘, JSON.stringify 自动丢弃 undefined。
+   * 命令路径记录 (不含这些字段) 保持原样, 无回归。
+   */
+  readonly evidenceVerdict?: EvidenceVerdict;
+  readonly gamingSignals?: ReadonlyArray<string>;
 }
+
+/**
+ * reason 字段判别常量 (#449b B3, typed reason 区分落盘)。
+ * reason 字段本身保留 string (避免改既有解析路径), producer 写字面值,
+ * consumer 用这些常量 + VerifyReasonKind 判别 (SC7: unverified ≠ abort)。
+ */
+export const REASON_UNVERIFIED = "unverified" as const;
+export const REASON_ABORT_TYPED = "abort" as const;
+
+/**
+ * reason 判别联合 (#449b B3, 判别用)。
+ * classifier = 判官一句话立论 (既有语义, spec A4);
+ * unverified / abort = B7 停法 typed reason (SC7/SC8)。
+ */
+export type VerifyReasonKind = "classifier" | "unverified" | "abort";
 
 /**
  * evidence-checker 证据充分性判定 (spec 449-evidence-checker, G2 三态 verdict)。
@@ -153,4 +182,24 @@ export interface EvidenceReport {
   readonly gamingSignals: ReadonlyArray<string>;
   /** 绿证据后被代码编辑 (agent-receipts STALE 语义)。 */
   readonly stale: boolean;
+}
+
+/**
+ * #449b B6: 判官输入信封附加字段 (spec 449 Code Style, G5-3 决议术语)。
+ * 判官从"只看 task"升级到 task + evidenceContext 二段: task = #459 公式原样
+ * (不重绑, SC6), evidenceContext = 证据体检单 (checker verdict + 不足原因 +
+ * 已执行测试命令 + 补跑尝试结果 + 证据摘要, 宿主侧截断)。
+ * 字段含义:
+ *   - checkerVerdict — checkEvidence 三态 (SUFFICIENT / CONTRADICTED / INSUFFICIENT);
+ *   - reasons — 不足 / 矛盾原因 (与 buildEvidenceRerunEnvelope Missing 段同源);
+ *   - executedCommands — 已执行的 bash 测试命令列表 (report.runs.map(r => r.command));
+ *   - rerunAttempted — 本轮之前是否触发过补跑 (消息扫描 [VERIFY: rerun needed] 前缀派生);
+ *   - evidenceSummary — 证据摘要 (每 run 一行 command + exit + green, 走 truncateExcerpt)。
+ */
+export interface EvidenceContext {
+  readonly checkerVerdict: EvidenceVerdict;
+  readonly reasons: ReadonlyArray<string>;
+  readonly executedCommands: ReadonlyArray<string>;
+  readonly rerunAttempted: boolean;
+  readonly evidenceSummary: string;
 }

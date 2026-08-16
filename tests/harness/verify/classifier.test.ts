@@ -187,3 +187,46 @@ describe("truncateClassifierOutput — 宿主侧 2000 chars 截断 (#128 A8 + SC
     }
   });
 });
+
+/* ------------------------------ #449b B7: unverified 第 4 态 ------------------------------ */
+
+describe("parseClassifierResult — unverified 第 4 态 (#449b B7 SC7)", () => {
+  const VALID_UNVERIFIED: ClassifierResult = {
+    kind: "unverified",
+    reason: "evidence insufficient to decide PASS or FAIL",
+  };
+
+  it("合法 unverified: reason 非空 + evidence 缺省 → 原样返回", () => {
+    const out = parseClassifierResult(JSON.stringify(VALID_UNVERIFIED));
+    expect(out).toEqual(VALID_UNVERIFIED);
+  });
+
+  it("unverified 带 evidence 也接受 (evidence 可选, 不强制——判官读完证据仍不足)", () => {
+    const raw = {
+      kind: "unverified",
+      reason: "ran one test but still unsure",
+      evidence: [{ command: "npm test", output: "3 passed", result: "pass" }],
+    };
+    const out = parseClassifierResult(JSON.stringify(raw));
+    expect(out).toEqual({ kind: "unverified", reason: raw.reason });
+  });
+
+  it("unverified 缺 reason → abort 降级 (reason 必填纪律对齐 pass/fail)", () => {
+    const out = parseClassifierResult(JSON.stringify({ kind: "unverified" }));
+    expect(out.kind).toBe("abort");
+  });
+
+  it("unverified reason 为空字符串 → abort 降级", () => {
+    const out = parseClassifierResult(
+      JSON.stringify({ kind: "unverified", reason: "" })
+    );
+    expect(out.kind).toBe("abort");
+  });
+
+  it("unverified 是独立态: 不与 abort 混淆 (reason 原样保留, 非降级文案)", () => {
+    const out = parseClassifierResult(
+      JSON.stringify({ kind: "unverified", reason: "cannot decide" })
+    );
+    expect(out).toEqual({ kind: "unverified", reason: "cannot decide" });
+  });
+});
