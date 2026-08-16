@@ -214,3 +214,67 @@ export function sessionRewound(
     runState: "idle",
   });
 }
+
+/**
+ * 输入历史（↑ recall）种子：把已落盘会话的 query user 消息按 turn 顺序
+ * 投影为输入历史。会话恢复（`iknow tui <session-id>` / /sessions Enter
+ * openSessionAt）后 ↑ 立即可用，不必先提交一条新输入 —— 此前历史仅存
+ * process 内存、只在提交时追加，恢复/切换会话后 ↑ 为空。
+ *
+ * query 判别与 checkpoint.ts isQuery 同源（镜像 hub.ts
+ * projectMessagesToTurns）：`role === "user"` 且 content 不含 tool_result
+ * block；tool_result 回显是 turn 的延续，不是新提问。
+ *
+ * 文本提取：全部 text block 的 `.text` 用 "\n" 连接后 trim（用户实际键入
+ * 全文；与 rewind-picker firstUserFullText 只取首个 text block 不同 —— 输入
+ * 历史要完整文本，而实际消息几乎都恰好一个 text block）。
+ *
+ * 丢弃规则（与提交路径 app.tsx handleSubmit 一致）：
+ *  - trim 后为空；
+ *  - `[skill-load ` 开头：skill-load 代理正文会持久化进 transcript（见
+ *    app.tsx sendTurn displayText 注释），但不得污染 ↑ 历史（显示占位
+ *    约定「[加载技能 X]」）；
+ *  - 相邻重复抑制：与上一条保留项相同则跳过（同提交路径
+ *    `h[h.length-1] === text` 语义）；非相邻重复保留（真实重提同一问题）。
+ */
+export function seedInputHistory(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): ReadonlyArray<string> {
+  const history: string[] = [];
+  for (const message of messages) {
+    if (
+      message.role !== "user" ||
+      message.content.some((block) => block.type === "tool_result")
+    ) {
+      continue;
+    }
+    const text = message.content
+      .flatMap((block) => (block.type === "text" ? [block.text] : []))
+      .join("\n")
+      .trim();
+    if (text.length === 0) continue;
+    if (text.startsWith("[skill-load ")) continue;
+    if (history[history.length - 1] === text) continue;
+    history.push(text);
+  }
+  return Object.freeze(history);
+}
+
+/**
+ * 追加一条输入历史（提交路径；将替换 app.tsx handleSubmit 的内联
+ * updater，语义必须逐点一致）：
+ *  - 空白输入（trim 后空）不追加，返回原引用 —— app.tsx setState 依赖
+ *    引用相等跳过重渲染；
+ *  - text 不 trim（上游 handleSubmit 已 `raw.trim()`），按传入原样入列；
+ *  - 相邻重复抑制：与末条相同返回原引用（同 seedInputHistory /
+ *    `h[h.length-1] === text`）；非相邻重复不属于本函数职责；
+ *  - 其余返回新冻结数组（ReadonlyArray 纪律：整体替换、永不 mutate）。
+ */
+export function appendInputHistory(
+  history: ReadonlyArray<string>,
+  text: string
+): ReadonlyArray<string> {
+  if (text.trim().length === 0) return history;
+  if (history[history.length - 1] === text) return history;
+  return Object.freeze([...history, text]);
+}

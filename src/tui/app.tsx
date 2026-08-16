@@ -68,9 +68,11 @@ import {
 } from "./modal.js";
 import {
   DRAFT_SESSION_ID,
+  appendInputHistory,
   attachSession,
   canInterrupt,
   createDraftSession,
+  seedInputHistory,
   sessionCompacted,
   sessionRewound,
   switchedAwayFrom,
@@ -345,8 +347,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const [activeKey, setActiveKey] = useState(initialKey);
   const [view, setView] = useState<TuiView>(props.initialView ?? "chat");
   const [inputValue, setInputValue] = useState("");
-  // #279 项5：命令历史（内存态，会话内有效不落盘）；prompt-input 不持有。
-  const [inputHistory, setInputHistory] = useState<ReadonlyArray<string>>([]);
+  // #279 项5 + 会话恢复种子：输入历史（内存态不落盘）按 session key 隔离
+  // （conversationId / DRAFT_SESSION_ID），initialSession 恢复时用
+  // seedInputHistory 把已落盘 transcript 的 query user 消息投影为种子
+  // （↑ 召回立即可用）；此后提交经 appendInputHistory 追加（空白跳过 +
+  // 相邻去重，同引用短路）。openSessionAt 首次 attach 同样播种；已加载过
+  // 的会话切回沿用既有历史（map 已有 key 不重播，保留本进程内追加项）。
+  const [inputHistories, setInputHistories] = useState<
+    Record<string, ReadonlyArray<string>>
+  >(() => ({ [initialKey]: seedInputHistory(initial.messages) }));
+  const inputHistory = inputHistories[activeKey] ?? [];
   const [notice, setNotice] = useState<Notice | undefined>(undefined);
   const [liveToolLines, setLiveToolLines] = useState<
     Record<string, ReadonlyArray<string>>
@@ -776,6 +786,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   function newSession(): void {
     const draft = createDraftSession();
     setSessions((prev) => ({ ...prev, [DRAFT_SESSION_ID]: draft }));
+    // 新草稿从空输入历史起（不继承上一草稿的 ↑ 召回 —— 提交 remap 时 DRAFT
+    // 键已复位为 []，这里与之一致，防 /new 泄漏上一草稿历史）。
+    setInputHistories((prev) => ({ ...prev, [DRAFT_SESSION_ID]: [] }));
     setActiveKey(DRAFT_SESSION_ID);
     setView("chat");
     setNotice(undefined);
@@ -797,7 +810,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     if (!existing) {
       try {
         const file = await props.bridge.loadSessionFile(id);
-        setSessions((prev) => ({ ...prev, [id]: attachSession(file) }));
+        const attached = attachSession(file);
+        setSessions((prev) => ({ ...prev, [id]: attached }));
+        // 首次 attach 顺带播种输入历史（transcript 投影，↑ 召回立即可用）；
+        // 已加载过的会话（existing 分支）map 已有 key 不重播——保留本进程内
+        // 的追加项（重播会把 seed 复位、吞掉切走前未落盘的提交）。
+        setInputHistories((prev) =>
+          prev[id] === undefined
+            ? { ...prev, [id]: seedInputHistory(attached.messages) }
+            : prev
+        );
       } catch (err) {
         setNotice({ lines: [`打开会话失败：${describeError(err)}`] });
         return;
@@ -852,6 +874,19 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         };
         delete next[DRAFT_SESSION_ID];
         return next;
+      });
+      // 输入历史随会话 remap 迁到新 key：提交 append 发生在 remap 前的
+      // DRAFT_SESSION_ID 名下，不迁移则 ↑ 历史在首条消息建档瞬间清空。
+      // DRAFT 键复位为 []（后续 /new 新草稿从空历史起，不继承上一草稿）。
+      setInputHistories((prev) => {
+        const draftHistory = prev[DRAFT_SESSION_ID];
+        if (draftHistory === undefined) return prev;
+        if (prev[conversationId as string] !== undefined) return prev;
+        return {
+          ...prev,
+          [conversationId as string]: draftHistory,
+          [DRAFT_SESSION_ID]: [],
+        };
       });
       setActiveKey(conversationId);
     }
@@ -1177,11 +1212,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
     const parsed = parseTuiInput(text);
     if (parsed.kind === "message") {
-      // 真实消息进历史（避免 y/n / slash / busy-guard 消息污染）。
+      // 真实消息进历史（避免 y/n / slash / busy-guard 消息污染）；按当前
+      // activeKey 落账（per-session 隔离，appendInputHistory 空白跳过 +
+      // 相邻去重、无变化返回原引用）。
       if (!askPending && active.runState === "idle" && parsed.text.length > 0) {
-        setInputHistory((h) =>
-          h[h.length - 1] === parsed.text ? h : [...h, parsed.text]
-        );
+        setInputHistories((prev) => ({
+          ...prev,
+          [activeKey]: appendInputHistory(prev[activeKey] ?? [], parsed.text),
+        }));
       }
       setNotice(undefined);
       await sendTurn(parsed.text);
@@ -1804,10 +1842,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             }
           }}
           onTabComplete={(value, cursor) => {
-            // 多匹配（suggestions > 1）→ null 不动作；唯一匹配 → 补全串；
-            // 当 cursor 越过 0 时按 selected hint 补全（任务 B 兼容）。
-            if (inputHintSuggestions.length === 1 && cursor === 0) {
-              return slashCompleteFromCandidates(inputHintSuggestions, 0);
+            // 高亮非首候选（cursor > 0）→ 按 hint 选中项补全（原
+            // length===1 && cursor===0 条件使「选中补全」恒不可达——修复死
+            // 代码）；否则唯一匹配补全 / 多匹配最长公共前缀部分补全
+            // （slashComplete 三态语义）。
+            if (cursor > 0 && inputHintSuggestions.length > 0) {
+              return slashCompleteFromCandidates(inputHintSuggestions, cursor);
             }
             return slashComplete(value, skillList);
           }}

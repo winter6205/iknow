@@ -17,7 +17,9 @@
  *
  * Tab 补全 + 候选提示词（live filtering）：
  *  - slashSuggestions：按当前输入前缀过滤并保持词表原顺序。
- *  - slashComplete：唯一匹配 → `/{cmd} `；0 或 ≥2 匹配 → null。
+ *  - slashComplete：三态 —— 唯一匹配 → `/{cmd} `；0 匹配 → null；≥2 匹配
+ *    → 候选补全形的最长公共前缀（有进展才返回，bash 式部分补全，详见
+ *    函数 doc comment）。
  *  - slashHintLines：渲染用一行短描述，便于在输入框下方紧凑展示。
  *
  * #337 Phase C（slash 扩展 + skill 加载发送）：
@@ -187,18 +189,58 @@ export function slashSuggestions(
 }
 
 /**
- * 给定当前输入，给出一个 Tab 补全候选：跨「静态命令 + skill」唯一匹配 →
- * `/{cmd} ` / `/{skillName} `（带尾随空格；skill 名可能有连字符/点，无需
- * 转义），0 或 ≥2 匹配 → null（让候选 UI 自然展示）。
+ * 求一组字符串的最长公共前缀（逐字符精确比较，大小写敏感；空数组 → ""）。
+ * 仅供 slashComplete 的多匹配部分补全使用，模块私有。
+ */
+function longestCommonPrefix(forms: ReadonlyArray<string>): string {
+  if (forms.length === 0) return "";
+  let lcp = forms[0]!;
+  for (let i = 1; i < forms.length && lcp !== ""; i++) {
+    const form = forms[i]!;
+    const end = Math.min(lcp.length, form.length);
+    let j = 0;
+    while (j < end && lcp[j] === form[j]) j++;
+    lcp = lcp.slice(0, j);
+  }
+  return lcp;
+}
+
+/**
+ * 给定当前输入，给出一个 Tab 补全结果，三态语义（shell-like）：
+ *  1) 唯一匹配 → `/{cmd} ` / `/{skillName} `（带尾随空格；skill 名可能有
+ *     连字符/点，无需转义）；
+ *  2) 0 匹配 → null；
+ *  3) ≥2 匹配 → 取全部候选补全形（`/{command}` / `/{skill.name}`，命令与
+ *     skill 统一，保留声明原始大小写）的最长公共前缀（LCP），按进展规则
+ *     决定返回（bash 式部分补全，不带尾随空格，剩余歧义由候选 UI 展示）：
+ *       - LCP 严格长于已输入前缀形 `/${slashPrefix(input.trim())}` → 返回 LCP；
+ *       - 二者忽略大小写相等但大小写不同（typedForm 恒小写）→ 返回 LCP
+ *         （把输入规范化为候选声明大小写，如 '/ECHO' → '/Echo'）；
+ *       - 否则（无进展，如 '/e' 对 exit/effort、裸 '/' 对全词表）→ null。
+ *     大小写规则确定性说明：skill 前缀匹配大小写不敏感，LCP 用候选原始
+ *     大小写逐字符比较 —— 混合大小写候选的 LCP 可能比忽略大小写的理论
+ *     公共前缀短，这是可接受的保守行为（宁可少补，不错补）。
  */
 export function slashComplete(
   input: string,
   skills?: ReadonlyArray<SkillEntryLike>
 ): string | null {
   const matches = slashSuggestions(input, skills);
-  if (matches.length !== 1) return null;
-  const only = matches[0]!;
-  return only.kind === "command" ? `/${only.command} ` : `/${only.name} `;
+  if (matches.length === 0) return null;
+  const forms = matches.map((m) =>
+    m.kind === "command" ? `/${m.command}` : `/${m.name}`
+  );
+  if (matches.length === 1) return `${forms[0]!} `;
+  const lcp = longestCommonPrefix(forms);
+  const typedForm = `/${slashPrefix(input.trim())}`;
+  if (
+    lcp.length > typedForm.length ||
+    (lcp.toLowerCase() === typedForm.toLowerCase() && lcp !== typedForm)
+  ) {
+    // 部分补全：不带尾随空格（还有剩余歧义，等下一次 Tab 或 ↓ 选择）。
+    return lcp;
+  }
+  return null;
 }
 
 /**

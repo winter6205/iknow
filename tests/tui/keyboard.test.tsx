@@ -80,8 +80,9 @@ async function waitFrame(
   throw new Error(`waitFrame timeout (${label}):\n${setup.captureCharFrame()}`);
 }
 
-/** T8 多行输入专用装配：完整 mount（TuiApp + bridge + stub deps 单轮回复）。 */
-async function renderMultilineApp() {
+/** T8 多行输入专用装配：完整 mount（TuiApp + bridge + stub deps 单轮回复）。
+ *  可选 width：窄终端场景（窄于 COLS，但须 ≥ app 层 cols 下限 40）。 */
+async function renderMultilineApp(opts: { readonly width?: number } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-multiline-"));
   const bridge = createTuiBridge({
     dataDir,
@@ -108,7 +109,7 @@ async function renderMultilineApp() {
       }}
     />,
     {
-      width: COLS,
+      width: opts.width ?? COLS,
       height: ROWS,
       exitOnCtrlC: false,
       consoleMode: "disabled",
@@ -513,4 +514,143 @@ test("T8 Enter：提交多行文本 → 消息落盘含换行", async () => {
   expect(list.length).toBe(1);
   expect(list[0]!.summary).toBe("第一行\n第二行");
   await setup.renderer.destroy();
+});
+
+describe("T8 回归：程序写入后光标重置（Backspace no-op / 前插）", () => {
+  /**
+   * 根因（T8 迁移回归，prompt-input.tsx 受控同步 effect）：`ta.setText()` 会
+   * 完全重置 buffer 并把光标挪到 offset 0 —— 旧 `<input>` value setter 自带
+   * 的 `cursorOffset = newValue.length` 恢复步骤在迁移时被丢掉。↑ 历史召回 /
+   * Tab 补全 / rewind 回填等程序写入后：Backspace 在 offset 0 是原生 no-op
+   * （「删不掉」），继续输入前插到开头（「光标跳到首字符」）。
+   *
+   * 观察手段：消息流会渲染用户消息全文（转录一份），输入框再渲染一份 ——
+   * 用帧内出现次数的变化区分两份（转录份恒在，输入框份随编辑变化）；追加
+   * 场景用「行尾紧跟新字符」的独占子串断言（转录里行尾后无该字符）。
+   */
+
+  /** 帧内子串出现次数（区分消息流转录份与输入框渲染份）。 */
+  function countOccurrences(frame: string, needle: string): number {
+    let count = 0;
+    let idx = frame.indexOf(needle);
+    while (idx !== -1) {
+      count++;
+      idx = frame.indexOf(needle, idx + 1);
+    }
+    return count;
+  }
+
+  /** 等 turn 落盘（inflight 清空），同上方 T8 Enter 提交用例的轮询。 */
+  async function waitTurnDone(
+    setup: Awaited<ReturnType<typeof testRender>>,
+    bridge: ReturnType<typeof createTuiBridge>
+  ): Promise<void> {
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+      await setup.renderOnce();
+      if (bridge.inflight.ids().size === 0) return;
+    }
+    throw new Error("waitTurnDone timeout: inflight 未清空");
+  }
+
+  test("多行召回后 Backspace 删掉末字符（不是 offset 0 处 no-op）", async () => {
+    const { setup, bridge } = await renderMultilineApp();
+    await typeMultilineText(setup, "第一行");
+    setup.mockInput.pressEnter({ shift: true });
+    await settle(setup);
+    await typeMultilineText(setup, "第二行");
+    setup.mockInput.pressEnter();
+    await waitTurnDone(setup, bridge);
+    // 提交后输入框清空：占位符（输入消息或 /help）重新可见。
+    await waitFrame(setup, (f) => f.includes("输入消息"), 8000, "cleared");
+    // ↑ 召回：占位符消失（输入框恢复完整多行文本，光标位置不影响帧）。
+    setup.mockInput.pressArrow("up");
+    await waitFrame(setup, (f) => !f.includes("输入消息"), 8000, "recall");
+    // 基线：消息流转录 1 份 + 输入框 1 份（≥2 同时防「召回失败」的空转通过）。
+    const before = countOccurrences(setup.captureCharFrame(), "第二行");
+    expect(before).toBeGreaterThanOrEqual(2);
+    // Backspace：光标应在末尾 → 删掉「行」，输入框那份消失（计数 -1）。
+    // 修复前光标被 setText 重置到 offset 0 → 原生 backspace no-op，计数不变。
+    setup.mockInput.pressBackspace();
+    await waitFrame(
+      setup,
+      (f) => countOccurrences(f, "第二行") === before - 1,
+      8000,
+      "backspace-deletes-last-char"
+    );
+    await setup.renderer.destroy();
+  }, 30_000);
+
+  test("多行召回后输入字符追加到末尾（不前插到开头）", async () => {
+    const { setup, bridge } = await renderMultilineApp();
+    await typeMultilineText(setup, "第一行");
+    setup.mockInput.pressEnter({ shift: true });
+    await settle(setup);
+    await typeMultilineText(setup, "第二行");
+    setup.mockInput.pressEnter();
+    await waitTurnDone(setup, bridge);
+    await waitFrame(setup, (f) => f.includes("输入消息"), 8000, "cleared");
+    setup.mockInput.pressArrow("up");
+    await waitFrame(setup, (f) => !f.includes("输入消息"), 8000, "recall");
+    // 输入 X：光标在末尾 → X 追加在「第二行」之后。转录份行尾后无 X，
+    // 「第二行X」只能来自输入框的追加位；修复前 X 前插成「X第一行」。
+    setup.mockInput.pressKey("X");
+    await waitFrame(setup, (f) => f.includes("第二行X"), 8000, "append-at-end");
+    expect(setup.captureCharFrame()).not.toContain("X第一行");
+    await setup.renderer.destroy();
+  }, 30_000);
+
+  test("窄终端 CJK：wrap 超长中文行召回后 Backspace 删掉末字符（setCursor 视觉列 clamp 到真实行尾）", async () => {
+    // spec 回归：prompt-input setText 后的光标恢复是「窄终端 CJK」承重场景 —
+    // 修复前若直接 `cursorOffset = value.length`，视觉列口径下（CJK 计 2 列）
+    // 会把光标设到行中，Backspace 删错字符；此处 width=44（窄但高于 app 层
+    // cols 下限 40 → 输入框内宽 38）验证 setCursor 越界自动 clamp 到真实行尾。
+    // 24 字中文 = 48 视觉列 > 38 → wrap 2 行，触发 wrap-aware ↑ 历史召回 +
+    // 末行行尾光标恢复路径。
+    const { setup, bridge } = await renderMultilineApp({ width: 44 });
+    const wrapped = "我是一段超过窄终端列宽需要折行的中文输入内容显示";
+    await typeMultilineText(setup, wrapped);
+    setup.mockInput.pressEnter();
+    await waitTurnDone(setup, bridge);
+    await waitFrame(setup, (f) => f.includes("输入消息"), 8000, "cleared");
+    // ↑ 召回 wrap 长行（wrap-aware 越界判定 → 历史召回）。
+    setup.mockInput.pressArrow("up");
+    await waitFrame(setup, (f) => !f.includes("输入消息"), 8000, "recall");
+    const before = countOccurrences(
+      setup.captureCharFrame(),
+      wrapped.slice(-2)
+    );
+    // Backspace 应删掉末字符（光标 clamp 在末行行尾）；若光标停行中会删错
+    // 字符 → 末两字份数不变 → waitFrame 超时。
+    setup.mockInput.pressBackspace();
+    await waitFrame(
+      setup,
+      (f) => countOccurrences(f, wrapped.slice(-2)) === before - 1,
+      8000,
+      "narrow-cjk-backspace-deletes-last-char"
+    );
+    await setup.renderer.destroy();
+  }, 30_000);
+
+  test("单行召回后 Backspace 删掉 'o'（hello → hell，简单场景回归护栏）", async () => {
+    const { setup, bridge } = await renderMultilineApp();
+    await typeMultilineText(setup, "hello");
+    setup.mockInput.pressEnter();
+    await waitTurnDone(setup, bridge);
+    await waitFrame(setup, (f) => f.includes("输入消息"), 8000, "cleared");
+    setup.mockInput.pressArrow("up");
+    await waitFrame(setup, (f) => !f.includes("输入消息"), 8000, "recall");
+    const before = countOccurrences(setup.captureCharFrame(), "hello");
+    expect(before).toBeGreaterThanOrEqual(2);
+    // Backspace：删掉末尾 'o' → 输入框变 "hell"，"hello" 计数 -1（转录份保留）。
+    setup.mockInput.pressBackspace();
+    await waitFrame(
+      setup,
+      (f) => countOccurrences(f, "hello") === before - 1,
+      8000,
+      "backspace-deletes-o"
+    );
+    await setup.renderer.destroy();
+  }, 30_000);
 });
