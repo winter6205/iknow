@@ -174,11 +174,11 @@ export interface ProcessChatLineOpts {
 }
 
 /**
- * #449 B8 (SC5): chat 端 #459 三段 fallback 的纯读盘 +
- * 公式 helper。语义与 hub 端 `session.goal !== undefined &&
- * session.goal.text.length > 0 ? session.goal.text : session.taskFocus !==
- * undefined && session.taskFocus.text.length > 0 ? session.taskFocus.text :
- * query` 逐字一致 (empty-goal-skip + empty-taskFocus-skip 同纪律)。
+ * #449 B8 (SC5, 修订 per #473): chat 端 verify-loop task 公式的纯读盘 +
+ * helper。`goal.text ?? query` (empty-goal-skip 同纪律)。taskFocus 段已
+ * 从 verify 输入中移除 (#473): taskFocus 是稳定焦点锚(首次 seed 后不再
+ * 变化, OQ2), 喂进每轮 verify 会让新任务 B 重新验证旧的 A 而误判 PASS。
+ * taskFocus 的 compact 渲染 / /goal status 角色不受影响(数据侧)。
  *
  * 失败语义:
  * - store 缺席 / conversationId === null → 兜底 query (ask / pipe / tests
@@ -203,9 +203,6 @@ async function resolveVerifyUserText(
     const session = await store.load(conversationId);
     if (session.goal !== undefined && session.goal.text.length > 0) {
       return session.goal.text;
-    }
-    if (session.taskFocus !== undefined && session.taskFocus.text.length > 0) {
-      return session.taskFocus.text;
     }
     return query;
   } catch {
@@ -239,11 +236,12 @@ export async function processChatLine(
 
   const query = parsedLine.text;
 
-  // #449 B8 (SC5): chat 端 verify-loop task 文本 = hub 同款 #459 三段
-  // fallback (`goal.text ?? taskFocus.text ?? query`)。chat 路径可读会话
-  // 状态:checkpointStore + state.conversationId (与 goalStatus/goalClear
-  // /goalPin 既有读盘同源);store 缺席 / 读盘失败 → 兜底 query (fail-open,
-  // 公式兜底段 = #449 前的既有行为,逐字节保持)。
+  // #449 B8 (SC5, 修订 per #473): chat 端 verify-loop task 文本 = hub 同款
+  // `goal.text ?? query`。taskFocus 段已从消费端移除 (#473, 见
+  // resolveVerifyUserText 注释)。chat 路径可读会话状态:checkpointStore +
+  // state.conversationId (与 goalStatus/goalClear /goalPin 既有读盘同源);
+  // store 缺席 / 读盘失败 → 兜底 query (fail-open, 公式兜底段 = #449 前的
+  // 既有行为,逐字节保持)。
   // 仅在 verifyConfig 在场时被 processChatLine 调用 (userText 只被
   // runVerifyLoop 消费, 非 verify 路径无副作用);提前置 query,verifyConfig
   // 缺席分支直接走 runHarness(query, ...),不引入额外 IO。

@@ -1,12 +1,15 @@
 /**
- * #449 B8 (SC5): chat-session 端 userText seam 升级到 #459 三段 fallback
- * `goal.text ?? taskFocus.text ?? query`。
+ * #449 B8 (SC5, 修订 per #473): chat-session 端 verify-loop userText =
+ * `goal.text ?? query`。taskFocus 段已从消费端移除 (#473): taskFocus 是
+ * 稳定焦点锚(首次 seed 后不再变化, OQ2), 喂进每轮 verify 会让新任务被
+ * 旧焦点遮蔽而误判 PASS。数据侧三段公式(`goal ?? taskFocus ?? query`,
+ * SC3/#458 T8)不受影响 — 见 tests/session-api/goal-seam.test.ts SC3 块。
  *
  * Hub 端同款接线已在 `tests/session-api/goal-seam.test.ts` 覆盖;本文件
  * 守护 chat 端的等价接线。chat-session 通过 `ctx.checkpointStore.load(
  * conversationId)` 读会话状态(与 `goalStatus` / `goalClear` / `goalPin`
- * 既有读盘模式一致),把 hub 三段 fallback 套用到 verify-loop 的 userText
- * 字段(仅 verifyConfig 在场时被消费)。
+ * 既有读盘模式一致),把 `goal.text ?? query` 套用到 verify-loop 的
+ * userText 字段(仅 verifyConfig 在场时被消费)。
  *
  * Mock seam: `vi.mock("../../src/harness/verify/index.ts")` 替换
  * `runVerifyLoop`,captures 入口 opts 拿 userText(沿用
@@ -177,7 +180,7 @@ function capturedUserText(): string {
   return opts.userText as string;
 }
 
-describe("chat-session verify-loop seam: userText = goal.text ?? taskFocus.text ?? query (#449 B8)", () => {
+describe("chat-session verify-loop seam: userText = goal.text ?? query (#449 B8, 修订 per #473)", () => {
   it("session without goal/taskFocus → userText === query (byte-identical to pre-#449 baseline)", async () => {
     const id = "chat-no-goal-baseline";
     // 不 seed — store.load 在 resolveVerifyUserText 里抛 not_found →
@@ -189,7 +192,7 @@ describe("chat-session verify-loop seam: userText = goal.text ?? taskFocus.text 
     assert.equal(capturedUserText(), "build it");
   });
 
-  it("goal absent + taskFocus present → userText === taskFocus.text (#459 第二段)", async () => {
+  it("goal absent + taskFocus present → userText === query (taskFocus 不遮蔽当前 query, #473)", async () => {
     const id = "chat-taskfocus-binds";
     await seedSession({
       id,
@@ -205,12 +208,12 @@ describe("chat-session verify-loop seam: userText = goal.text ?? taskFocus.text 
     expect(runVerifyLoopMock).toHaveBeenCalledTimes(1);
     assert.equal(
       capturedUserText(),
-      "TF: chat-session implements three-segment",
-      "goal 缺席 + taskFocus 在场 → chat 端 userText 应取 taskFocus.text"
+      "Q",
+      "goal 缺席 + taskFocus 在场 → chat 端 userText 应取当前 query (taskFocus 不进 verify 输入, #473)"
     );
   });
 
-  it("goal.text === '' + taskFocus present → userText === taskFocus.text (空 goal 按缺席算, 与 hub 同纪律)", async () => {
+  it("goal.text === '' + taskFocus present → userText === query (空 goal 按缺席算 → 兜底 query, #473)", async () => {
     const id = "chat-empty-goal-taskfocus";
     await seedSession({
       id,
@@ -232,7 +235,11 @@ describe("chat-session verify-loop seam: userText = goal.text ?? taskFocus.text 
     const r = await processChatLine({ line: "Q", ctx });
     assert.equal(r.ranQuery, true);
     expect(runVerifyLoopMock).toHaveBeenCalledTimes(1);
-    assert.equal(capturedUserText(), "TF chat takes over");
+    assert.equal(
+      capturedUserText(),
+      "Q",
+      "goal.text === '' 跳过第一段 → 兜底 query (taskFocus 不进 verify 输入, #473)"
+    );
   });
 
   it("goal present + taskFocus present → userText === goal.text (第一段优先, 与 hub 同纪律)", async () => {
