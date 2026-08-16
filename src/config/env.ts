@@ -473,7 +473,11 @@ export function loadIknowEnv(
       maxOutputTokens: envInt({
         file,
         key: "IKNOW_LLM_MAX_OUTPUT_TOKENS",
-        fallback: 2048,
+        // #trace 8e05e04c 根因: 2048 在 thinking=adaptive + 长生成任务下会让模型撞到
+        // max_tokens, 触发 supplierStop=truncation → nonSuccessStop → session error,
+        // 用户什么都没看到。8192 容纳 thinking budget + 完整响应(贪吃蛇 HTML 单次回
+        // 复即超过 2048 tokens), 同时不放大成本。
+        fallback: 8192,
       }),
       timeoutMs: envInt({
         file,
