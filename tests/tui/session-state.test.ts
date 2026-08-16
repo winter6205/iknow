@@ -15,9 +15,11 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  appendInputHistory,
   attachSession,
   canInterrupt,
   createDraftSession,
+  seedInputHistory,
   sessionCompacted,
   switchedAwayFrom,
   switchedTo,
@@ -325,5 +327,135 @@ describe("session-state: sessionCompacted（/compact 落盘后刷新）", () => 
       jsonMode: false,
     });
     expect(result).toBe(running); // 原对象引用，无替换
+  });
+});
+
+describe("session-state: seedInputHistory（会话恢复投影输入历史）", () => {
+  test("空 messages → []", () => {
+    expect(seedInputHistory([])).toEqual([]);
+  });
+
+  test("混合消息：仅保留 query user 文本，assistant 排除", () => {
+    const messages: ReadonlyArray<AnthropicNativeMessage> = [
+      msg("你好"),
+      msg("你好，有什么可以帮你？", "assistant"),
+      msg("第二条"),
+    ];
+    expect(seedInputHistory(messages)).toEqual(["你好", "第二条"]);
+  });
+
+  test("含 tool_result block 的 user 消息排除（isQuery 语义，与 checkpoint.ts 同源）", () => {
+    const messages: ReadonlyArray<AnthropicNativeMessage> = [
+      msg("触发工具"),
+      msg("我来调用工具", "assistant"),
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "tu_1", content: "ok" },
+          { type: "text", text: "工具结果后的补充说明" },
+        ],
+      },
+      msg("下一条 query"),
+    ];
+    expect(seedInputHistory(messages)).toEqual(["触发工具", "下一条 query"]);
+  });
+
+  test("[skill-load 开头的代理文本排除（技能正文不得污染 ↑ 历史）", () => {
+    const messages: ReadonlyArray<AnthropicNativeMessage> = [
+      msg('[skill-load name="echo"]\n# 回声技能\nfull body\n\n帮我做 X'),
+      msg("正常问题"),
+    ];
+    expect(seedInputHistory(messages)).toEqual(["正常问题"]);
+  });
+
+  test("相邻重复抑制；非相邻重复保留", () => {
+    expect(seedInputHistory([msg("dup"), msg("dup")])).toEqual(["dup"]);
+    expect(seedInputHistory([msg("a"), msg("b"), msg("a")])).toEqual([
+      "a",
+      "b",
+      "a",
+    ]);
+  });
+
+  test("多 text block：全部 text 用 \\n 连接（用户输入全文）", () => {
+    const messages: ReadonlyArray<AnthropicNativeMessage> = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "第一段" },
+          { type: "text", text: "第二段" },
+        ],
+      },
+    ];
+    expect(seedInputHistory(messages)).toEqual(["第一段\n第二段"]);
+  });
+
+  test("纯空白 / 无 text block 的文本跳过", () => {
+    const messages: ReadonlyArray<AnthropicNativeMessage> = [
+      msg("   "),
+      msg("\n\t"),
+      { role: "user", content: [] },
+    ];
+    expect(seedInputHistory(messages)).toEqual([]);
+  });
+
+  test("trim 后入历史：首尾空白剥除", () => {
+    expect(seedInputHistory([msg("  hi  ")])).toEqual(["hi"]);
+  });
+
+  test("真实 turn 顺序保留（多轮 + tool 往返混合）", () => {
+    const messages: ReadonlyArray<AnthropicNativeMessage> = [
+      msg("第一问"),
+      msg("答一", "assistant"),
+      msg("第二问"),
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "tu_1", name: "bash", input: {} }],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "tu_1", content: "out" }],
+      },
+      msg("答二", "assistant"),
+      msg("第三问"),
+    ];
+    expect(seedInputHistory(messages)).toEqual([
+      "第一问",
+      "第二问",
+      "第三问",
+    ]);
+  });
+});
+
+describe("session-state: appendInputHistory（提交追加）", () => {
+  test("空历史追加 → [text]", () => {
+    expect(appendInputHistory([], "x")).toEqual(["x"]);
+  });
+
+  test("相邻重复：末条相同 → 返回同一引用（app.tsx setState 身份依赖）", () => {
+    const history: ReadonlyArray<string> = ["x"];
+    const appended = appendInputHistory(history, "x");
+    expect(appended).toEqual(["x"]);
+    expect(appended).toBe(history);
+  });
+
+  test("空白输入不追加：'' 与 '   ' 均返回原引用（空历史同样成立）", () => {
+    const empty: ReadonlyArray<string> = [];
+    expect(appendInputHistory(empty, "")).toBe(empty);
+    const history: ReadonlyArray<string> = ["x"];
+    expect(appendInputHistory(history, "")).toBe(history);
+    expect(appendInputHistory(history, "   ")).toBe(history);
+  });
+
+  test("正常追加：新数组包含原条目 + 新条目，原数组不 mutate", () => {
+    const history: ReadonlyArray<string> = ["x"];
+    const appended = appendInputHistory(history, "y");
+    expect(appended).toEqual(["x", "y"]);
+    expect(appended).not.toBe(history);
+    expect(history).toEqual(["x"]);
+  });
+
+  test("text 保持原样（不 trim；上游 handleSubmit 已 trim）", () => {
+    expect(appendInputHistory([], "  keep  ")).toEqual(["  keep  "]);
   });
 });

@@ -262,7 +262,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
   });
 });
 
-describe('slashComplete: 唯一匹配 → "/cmd "；0/多匹配 → null', () => {
+describe('slashComplete: 唯一匹配 → "/cmd "；0 匹配 → null；≥2 匹配 → LCP 无进展 → null', () => {
   test('"/q" → "/quit "（唯一匹配 + 尾随空格 + 小写）', () => {
     expect(slashComplete("/q")).toBe("/quit ");
   });
@@ -298,6 +298,89 @@ describe('slashComplete: 唯一匹配 → "/cmd "；0/多匹配 → null', () =>
   test("skill 名与静态命令前缀重合：静态优先（'/' 命中 11 静态 + skill → null）", () => {
     expect(
       slashComplete("/", [{ name: "sessions-helper", description: "会话助手" }])
+    ).toBeNull();
+  });
+});
+
+/**
+ * fix/tui-input-issues：slashComplete 三态语义（shell-like 部分补全）。
+ *  1) 唯一匹配 → `/{label} `（带尾随空格，原契约不变）；
+ *  2) 0 匹配 → null；
+ *  3) ≥2 匹配 → 候选补全形（`/{command}` / `/{skill.name}` 原始大小写）的
+ *     最长公共前缀（LCP）有进展（长于已输入前缀，或等长但大小写不同 →
+ *     规范化为候选大小写）→ 返回 LCP **不带尾随空格**（bash 式部分补全，
+ *     剩余歧义由 hint UI 展示）；无进展 → null。
+ */
+describe("slashComplete: 三态语义（唯一 → 尾随空格；多匹配 → LCP 部分补全）", () => {
+  test('"/q" → "/quit "（唯一匹配 + 尾随空格，回归守卫）', () => {
+    expect(slashComplete("/q")).toBe("/quit ");
+  });
+
+  test('"/ex" → "/exit "（唯一）', () => {
+    expect(slashComplete("/ex")).toBe("/exit ");
+  });
+
+  test('"/ef" → "/effort "（唯一）', () => {
+    expect(slashComplete("/ef")).toBe("/effort ");
+  });
+
+  test('"/e" → null（exit + effort 共 2 匹配，LCP "/e" 无进展）', () => {
+    expect(slashComplete("/e")).toBeNull();
+  });
+
+  test('裸 "/" → null（11 命令，LCP "/" 无进展）', () => {
+    expect(slashComplete("/")).toBeNull();
+  });
+
+  test('"/zzz" → null（0 匹配）', () => {
+    expect(slashComplete("/zzz")).toBeNull();
+  });
+
+  test("多匹配有公共进展：/foo + skills foo-one/foo-two → LCP '/foo-'（不带尾随空格）", () => {
+    expect(
+      slashComplete("/foo", [
+        { name: "foo-one", description: "x" },
+        { name: "foo-two", description: "y" },
+      ])
+    ).toBe("/foo-");
+  });
+
+  test("LCP 保留候选原始大小写：skills Echo/Echo-extra + '/Ec' → '/Echo'（不带尾随空格）", () => {
+    expect(
+      slashComplete("/Ec", [
+        { name: "Echo", description: "回声" },
+        { name: "Echo-extra", description: "x" },
+      ])
+    ).toBe("/Echo");
+  });
+
+  test("等长但大小写不同 → 规范化为候选大小写：'/Echo' → '/Echo'（非 null）", () => {
+    expect(
+      slashComplete("/Echo", [
+        { name: "Echo", description: "回声" },
+        { name: "Echo-extra", description: "x" },
+      ])
+    ).toBe("/Echo");
+    expect(
+      slashComplete("/ECHO", [
+        { name: "Echo", description: "回声" },
+        { name: "Echo-extra", description: "x" },
+      ])
+    ).toBe("/Echo");
+  });
+
+  test("大小写不敏感输入仍走长度进展：'/EC'（typed '/ec' < LCP '/Echo'）→ '/Echo'", () => {
+    expect(
+      slashComplete("/EC", [
+        { name: "Echo", description: "回声" },
+        { name: "Echo-extra", description: "x" },
+      ])
+    ).toBe("/Echo");
+  });
+
+  test("跨静态命令 + skill 多匹配无进展 → null（'/e' + echo：LCP '/e' == typed）", () => {
+    expect(
+      slashComplete("/e", [{ name: "echo", description: "回声" }])
     ).toBeNull();
   });
 });
