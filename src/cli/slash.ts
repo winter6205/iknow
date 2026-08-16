@@ -56,10 +56,13 @@ export type SlashEffect =
    */
   | { type: "permissions"; args: string[] }
   /**
-   * #408 T3: 会话级 goal 覆盖。/goal <text> 由 host 持久化为 session.goal
-   * （source=user_pin）。空 args → host 显示当前 goal 或提示无 goal。
+   * #458 T6: 会话级 goal 三面。/goal <text> 由 host 持久化为 session.goal
+   * （source=user_pin）；/goal status 显示当前 goal/taskFocus；/goal clear
+   * 清空 goal + taskFocus。三态统一由 host 侧 processSlash 的 case "goal"
+   * 按 action 分派。空 args / "status" → status；"clear" → clear；其它 →
+   * pin <text>（join+trim）。大小写敏感（"CLEAR" ≠ clear → pin）。
    */
-  | { type: "goal"; text: string };
+  | { type: "goal"; action: "status" | "clear" | "pin"; text: string };
 
 /**
  * Strip C0 control chars (incl. ESC) and DEL so reflected command text
@@ -70,14 +73,16 @@ function sanitizeCommandForDisplay(command: string): string {
   return command.replace(/[\u0000-\u001F\u007F]/g, "");
 }
 
-const HELP_TEXT = `命令 / Commands:
-  /help                 显示帮助 · show this help
-  /status               会话状态 · json / messages
-  /quit  /exit          退出 · leave chat
-  /json on|off          切换 JSON 输出 · toggle machine JSON
-  /reset                清空会话 · clear messages (session kept)
-  /permissions [mode]   查看/切换权限模式(default|plan|full_auto)
-  /goal <text>          覆盖会话目标 · pin session goal
+export const HELP_TEXT = `命令 / Commands:
+  /help                       显示帮助 · show this help
+  /status                     会话状态 · json / messages
+  /quit  /exit                退出 · leave chat
+  /json on|off                切换 JSON 输出 · toggle machine JSON
+  /reset                      清空会话 · clear messages (session kept)
+  /permissions [mode]         查看/切换权限模式(default|plan|full_auto)
+  /goal status                查看会话目标 · show session goal
+  /goal clear                 清空会话目标 · clear session goal
+  /goal <status|clear|text>   三面: 查看 / 清空 / 覆盖 · status / clear / pin
 
 其他输入视为问题 · anything else is a question for the agent.`;
 
@@ -144,10 +149,24 @@ export function applySlashCommand(opts: ApplySlashCommandOpts): SlashEffect {
       // PermissionModeContext)。
       return { type: "permissions", args };
 
-    case "goal":
-      // #408 T3: /goal <text> 走 host 持久化为 session.goal。
-      // 纯解析,实际 pin 落在 host(chat-session 持有 checkpointStore)。
-      return { type: "goal", text: args.join(" ").trim() };
+    case "goal": {
+      // #458 T6: /goal 三面 —— status / clear / pin(<text>)。
+      // status / clear 区分大小写(小写才触发；大写按 <text> pin,因为 <text>
+      // 本身可能以大写开头)。空 args → status(回显)；其它 → pin text = join+trim。
+      // 纯解析:实际 IO(读盘 / 清空 / 持久化)落在 host(chat-session 持有
+      // checkpointStore + validateGoalText)。
+      const sub = args[0] ?? "";
+      if (sub === "status") {
+        return { type: "goal", action: "status", text: "" };
+      }
+      if (sub === "clear") {
+        return { type: "goal", action: "clear", text: "" };
+      }
+      if (args.length === 0) {
+        return { type: "goal", action: "status", text: "" };
+      }
+      return { type: "goal", action: "pin", text: args.join(" ").trim() };
+    }
 
     case "":
       return {

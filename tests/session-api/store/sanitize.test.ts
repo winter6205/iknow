@@ -378,6 +378,101 @@ describe("sanitizeSessionFile — schemaVersion 4 complete file", () => {
   });
 });
 
+// -- #458 T2: user_initial → taskFocus migration + user_pin passthrough ------
+
+describe("sanitizeSessionFile — #458 user_initial → taskFocus migration", () => {
+  it("loads a v5 user_initial goal as taskFocus and drops the goal field", () => {
+    // Legacy disk state (only user_initial produced top-level goals before
+    // #459): sanitize upgrades goal → deterministic taskFocus and the goal
+    // field is left undefined (spread omits it — no stale goal key).
+    const raw = {
+      schemaVersion: 5,
+      conversation_id: "conv-migrate",
+      messages: [userMsg("hello")],
+      jsonMode: true,
+      turnCount: 1,
+      updatedAt: "2026-08-13T00:00:00.000Z",
+      summary: "hello",
+      cwd: "/work",
+      sanitized_at: "2026-08-13T00:00:00.000Z",
+      checkpoints: [],
+      goal: {
+        text: "Build a C compiler",
+        source: "user_initial",
+        status: "active",
+        createdAt: "2026-08-13T00:00:00.000Z",
+        updatedAt: "2026-08-13T00:00:00.000Z",
+      },
+    };
+    const out = sanitizeSessionFile(raw);
+    assert.equal(out.goal, undefined);
+    assert.equal(out.taskFocus?.text, "Build a C compiler");
+    assert.equal(out.taskFocus?.updatedAt, "2026-08-13T00:00:00.000Z");
+    // T1 OQ2 literal: the seeded nextText (the migrated goal text) enters
+    // history[0] with the migration timestamp (sanitized_at = updatedAt here).
+    assert.deepEqual(out.taskFocus?.history, [
+      {
+        text: "Build a C compiler",
+        updatedAt: "2026-08-13T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("user_initial migration preserves unknown top-level fields (spread discipline)", () => {
+    const out = sanitizeSessionFile({
+      schemaVersion: 5,
+      conversation_id: "conv-migrate2",
+      messages: [],
+      jsonMode: false,
+      turnCount: 0,
+      updatedAt: "2026-08-13T00:00:00.000Z",
+      summary: "",
+      cwd: "",
+      sanitized_at: "2026-08-13T00:00:00.000Z",
+      checkpoints: [],
+      goal: {
+        text: "X",
+        source: "user_initial",
+        status: "active",
+        createdAt: "2026-08-13T00:00:00.000Z",
+        updatedAt: "2026-08-13T00:00:00.000Z",
+      },
+      future_flag: { nested: 1 },
+    });
+    assert.equal(out.goal, undefined);
+    assert.equal(out.taskFocus?.text, "X");
+    assert.deepEqual(
+      (out as unknown as Record<string, unknown>)["future_flag"],
+      { nested: 1 }
+    );
+  });
+
+  it("leaves a user_pin goal verbatim (no migration) — user_pin 旧盘原样", () => {
+    const raw = {
+      schemaVersion: 5,
+      conversation_id: "conv-pin",
+      messages: [userMsg("hello")],
+      jsonMode: true,
+      turnCount: 1,
+      updatedAt: "2026-08-13T00:00:00.000Z",
+      summary: "hello",
+      cwd: "/work",
+      sanitized_at: "2026-08-13T00:00:00.000Z",
+      checkpoints: [],
+      goal: {
+        text: "Pinned goal",
+        source: "user_pin",
+        status: "active",
+        createdAt: "2026-08-13T00:00:00.000Z",
+        updatedAt: "2026-08-13T00:00:00.000Z",
+      },
+    };
+    const out = sanitizeSessionFile(raw);
+    assert.deepEqual(out.goal, raw.goal);
+    assert.equal(out.taskFocus, undefined);
+  });
+});
+
 // -- sanitizeSessionFile — v3 → v5 upgrade keeps system messages (#392 T1 / #408) ---
 
 describe("sanitizeSessionFile — v3 file with system message upgrades to v5", () => {

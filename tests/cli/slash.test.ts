@@ -188,7 +188,7 @@ describe("applySlashCommand", () => {
     );
   });
 
-  it("goal → {type:goal, text: joined+trimmed args} (#408 T3)", () => {
+  it("goal args → {type:goal, action:pin, text: joined+trimmed} (#458 T6)", () => {
     const ctx = { state: makeState() };
     const eff = applySlashCommand({
       command: "goal",
@@ -197,14 +197,16 @@ describe("applySlashCommand", () => {
     });
     assert.strictEqual(eff.type, "goal");
     if (eff.type !== "goal") return;
+    assert.strictEqual(eff.action, "pin");
     assert.strictEqual(eff.text, "write a type checker");
   });
 
-  it("goal with no args → {type:goal, text: ''} (host rejects empty)", () => {
+  it("goal with no args → {type:goal, action:status, text:''} (#458 T6)", () => {
     const ctx = { state: makeState() };
     const eff = applySlashCommand({ command: "goal", args: [], ctx });
     assert.strictEqual(eff.type, "goal");
     if (eff.type !== "goal") return;
+    assert.strictEqual(eff.action, "status");
     assert.strictEqual(eff.text, "");
   });
 

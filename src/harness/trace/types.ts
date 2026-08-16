@@ -208,6 +208,55 @@ export interface VerificationRecord {
 export type VerificationVerdict = "pass" | "true-failure" | "unstable";
 export type VerificationAction = "continue" | "stop" | "escalate";
 
+/**
+ * Goal 生命周期 trace action (T4, #458).
+ *
+ * 自包含字面量联合 —— trace bounded context 遵循文件头注释 (types.ts:21-23)
+ * 与 VerificationRecord 同模式, **不 import** session-api 的 GoalAction 类型;
+ * 通过重定义字面量 + JSDoc 标注源文件保持 trace 域独立松耦合.
+ * 源文件对照: plans/458-goal-lifecycle-taskfocus.md T4 Acceptance.
+ */
+export type GoalAction = "seed" | "pin" | "clear" | "writeback";
+
+/**
+ * Goal 生命周期 trace status (T4, #458).
+ *
+ * 刻意 **不含** 已删的模型提议槽位 (SC1 防回归, ACR #2 协同: T6 模型提议/确认通道
+ * 零落地, 删除该字面值避免死值). 包含 `cleared` 是 /goal clear 命令的终态,
+ * 与 applyTransition 五态 (active/achieved/aborted/superseded) 区分 —— 清除态
+ * 不走状态机转移, 仅 trace 留痕.
+ *
+ * 自包含字面量联合 —— 不 import session-api 类型.
+ */
+export type GoalTraceStatus =
+  "active" | "achieved" | "aborted" | "superseded" | "cleared";
+
+/**
+ * Goal 生命周期 trace record (T4, #458 — T12 数据契约落定).
+ *
+ * 与 VerificationRecord 同形态: id/sessionId/ts/conversationId 由调用方提供;
+ * 实现不做 ID 生成 —— 成功返回 record.id, 失败返回 undefined.
+ * sessionId 关联会话根; action 区分生命周期节点 (seed/pin/clear/writeback);
+ * status 可选 (clear 与 seed 不一定带 status); text 与 textLen 二选一 (seed
+ * 路径只带 textLen 不带 text 明文, 减少日志膨胀 — 与 hub.ts:1061 seed 发射点对齐).
+ *
+ * Postel: status / text / textLen 可选, 仅存在时落盘 (JSON.stringify 自动丢弃 undefined).
+ */
+export interface GoalRecord {
+  /** 自有 id (调用方提供, 实现不做 ID 生成). */
+  readonly id: string;
+  readonly sessionId: string;
+  readonly action: GoalAction;
+  /** Postel: 可选 (clear/seed 不一定带). */
+  readonly status?: GoalTraceStatus;
+  /** Postel: 可选 (seed 路径只带 textLen). */
+  readonly text?: string;
+  /** Postel: 可选 (Pin/writeback 路径通常不带). */
+  readonly textLen?: number;
+  readonly ts: string;
+  readonly conversationId: string;
+}
+
 export interface TraceService {
   /**
    * 记录一次 LLM 调用; 由实现生成 llmCallId。
@@ -241,4 +290,13 @@ export interface TraceService {
    * @throws never — 实现必须捕获 IO 错误并返回 undefined。
    */
   recordVerification(record: VerificationRecord): Promise<string | undefined>;
+  /**
+   * 记录一次 goal 生命周期事件 (#458 T12 数据契约).
+   * 注意: 与 VerificationRecord 同形态 —— id/sessionId/ts 由调用方提供,
+   * 实现不做 ID 生成 —— 成功返回 record.id, 失败返回 undefined.
+   * record.conversationId 是冗余字段 (工厂构造时已实例绑定), 实现从 snake
+   * 副本剔除以保证工厂 binding 胜出 (对齐 recordVerification 语义).
+   * @throws never — 实现必须捕获 IO 错误并返回 undefined。
+   */
+  recordGoal(record: GoalRecord): Promise<string | undefined>;
 }

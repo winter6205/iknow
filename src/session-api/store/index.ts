@@ -7,14 +7,20 @@ export type {
   GoalStatus,
   InterruptReason,
   SessionFileV1,
+  TaskFocusHistoryEntry,
+  TaskFocusState,
 } from "./schema.js";
 export {
   CURRENT_SCHEMA_VERSION,
   extractGoal,
   extractSummary,
   isSessionFileV1,
+  MAX_GOAL_CHARS,
+  MAX_TASK_FOCUS_CHARS,
   pinGoal,
   sanitizeSessionFile,
+  seedTaskFocus,
+  validateGoalText,
   validateSessionFile,
 } from "./schema.js";
 export {

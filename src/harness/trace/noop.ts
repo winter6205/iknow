@@ -33,5 +33,8 @@ export function createNoopTraceService(): TraceService {
     async recordVerification(_record) {
       return undefined;
     },
+    async recordGoal(_record) {
+      return undefined;
+    },
   };
 }

@@ -22,6 +22,7 @@ import {
   applySlashCommand,
   parseChatLine,
   type CliChatState,
+  type SlashEffect,
 } from "./slash.js";
 import type { SessionContext } from "../shared/schema.js";
 import { isIknowError } from "../shared/errors.js";
@@ -58,6 +59,7 @@ import {
   pinGoal,
   shouldPersistCheckpoint,
   toInterruptReason,
+  validateGoalText,
 } from "../session-api/store/index.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import { randomUUID } from "node:crypto";
@@ -429,17 +431,13 @@ async function processSlash(opts: {
     }
 
     case "goal": {
-      // #408 T3: /goal <text> 覆盖会话级 goal。等价于「## GOAL: <text>」
-      // 文本指令的 CLI 入口;持久化走与 hub 相同的 pinGoal 纯函数 +
-      // checkpointStore。空 text / 缺 checkpointStore / 缺 conversationId
-      // → 错误;非空 text → 原子写(沿用 store.save 的 tmp+rename 模式)。
-      if (effect.text.length === 0) {
-        return {
-          quit: false,
-          output: "",
-          stderr: "Usage: /goal <text>",
-        };
-      }
+      // #458 T6: /goal 三面 —— status / clear / pin(<text>)。
+      // status / clear 走 typed-error catch 契约:not_found 是 fresh
+      // conversation 的合法态(非错误,stderr 静默 + 友好 output),其它
+      // typed 错误(parse_failed / schema_invalid / io_error / write_failed /
+      // concurrent_write)渲染 `${kind}: ${conversation_id}`。pin 先经
+      // validateGoalText 长度/空校验,非 null → stderr 错误不落盘。
+      // recordGoal 由 hub.clearGoal 统一落(clear 分支)。
       const store = ctx.checkpointStore;
       const conversationId = ctx.state.conversationId;
       if (!store || !conversationId) {
@@ -450,46 +448,204 @@ async function processSlash(opts: {
             "/goal: 当前入口不提供会话持久化上下文（ask / pipe 模式不支持）",
         };
       }
-      let existing: SessionFileV1;
-      try {
-        existing = await store.load(conversationId);
-      } catch (err) {
-        return {
-          quit: false,
-          output: "",
-          stderr: `/goal: failed to load session: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        };
+      if (effect.action === "status") {
+        return goalStatus(store, conversationId);
       }
-      const now = new Date().toISOString();
-      const updated: SessionFileV1 = {
-        ...existing,
-        goal: pinGoal({
-          current: existing.goal,
-          text: effect.text,
-          now,
-        }),
-        updatedAt: now,
-        schemaVersion: CURRENT_SCHEMA_VERSION,
-      };
-      try {
-        await store.save({ id: conversationId, file: updated });
-      } catch (err) {
-        return {
-          quit: false,
-          output: "",
-          stderr: `/goal: failed to persist: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        };
+      if (effect.action === "clear") {
+        return goalClear(store, conversationId);
       }
-      return {
-        quit: false,
-        output: `goal pinned: ${effect.text}`,
-      };
+      return goalPin(store, conversationId, effect);
     }
   }
+}
+
+/** #458 T6: /goal status —— 回显当前 goal.text + taskFocus;not_found =
+ *  fresh conversation 合法态「未设置 goal / taskFocus」。 */
+async function goalStatus(
+  store: SessionStore,
+  conversationId: string
+): Promise<ProcessChatLineResult> {
+  let existing: SessionFileV1;
+  try {
+    existing = await store.load(conversationId);
+  } catch (err) {
+    if (
+      isSessionStoreErrorKind(err) &&
+      (err as SessionStoreError).kind === "not_found"
+    ) {
+      return { quit: false, output: "未设置 goal / taskFocus" };
+    }
+    return {
+      quit: false,
+      output: "",
+      stderr: typedGoalError(err, conversationId),
+    };
+  }
+  const goalText = existing.goal?.text;
+  const focusText = existing.taskFocus?.text;
+  if (!goalText && !focusText) {
+    return { quit: false, output: "未设置 goal / taskFocus" };
+  }
+  const parts: string[] = [];
+  if (goalText) parts.push(`goal: ${goalText}`);
+  if (focusText) parts.push(`taskFocus: ${focusText}`);
+  return { quit: false, output: parts.join("\n") };
+}
+
+/** #458 T6: /goal clear —— hub.clearGoal 语义的 chat 侧镜像(经 store 原子写
+ *  goal + taskFocus 双清);not_found = fresh conversation 合法态「无 goal 可清」。
+ *  注:CLI chat 入口不装配 SessionHub,recordGoal trace 发射点由 hub 统一落
+ *  (T5),CLI 路径无 trace 副作用是既有事实。 */
+async function goalClear(
+  store: SessionStore,
+  conversationId: string
+): Promise<ProcessChatLineResult> {
+  let existing: SessionFileV1;
+  try {
+    existing = await store.load(conversationId);
+  } catch (err) {
+    if (
+      isSessionStoreErrorKind(err) &&
+      (err as SessionStoreError).kind === "not_found"
+    ) {
+      return { quit: false, output: "无 goal 可清" };
+    }
+    return {
+      quit: false,
+      output: "",
+      stderr: typedGoalError(err, conversationId),
+    };
+  }
+  const now = new Date().toISOString();
+  const cleared: SessionFileV1 = {
+    ...existing,
+    goal: undefined,
+    taskFocus: undefined,
+    updatedAt: now,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+  };
+  try {
+    await store.save({ id: conversationId, file: cleared });
+  } catch (err) {
+    return {
+      quit: false,
+      output: "",
+      stderr: typedGoalError(err, conversationId),
+    };
+  }
+  return { quit: false, output: "goal cleared" };
+}
+
+/** #458 T6: /goal pin —— validateGoalText 非 null → stderr 错误不落盘;
+ *  合法 → pinGoal 原子写(#408 T3 路径同形态)。fresh conversation 也走
+ *  not_found 合法态(从零 pin,构造最小 SessionFileV1)。 */
+async function goalPin(
+  store: SessionStore,
+  conversationId: string,
+  effect: Extract<SlashEffect, { type: "goal" }>
+): Promise<ProcessChatLineResult> {
+  const text = effect.text.trim();
+  if (text.length === 0) {
+    return {
+      quit: false,
+      output: "",
+      stderr: "Usage: /goal <status|clear|text>",
+    };
+  }
+  const invalid = validateGoalText(text);
+  if (invalid !== null) {
+    return { quit: false, output: "", stderr: `goal rejected: ${invalid}` };
+  }
+  const loaded = await loadGoalTarget(store, conversationId);
+  if (!loaded.ok) return loaded.result;
+  return savePinnedGoal(store, conversationId, loaded.file, text);
+}
+
+/** load-or-fresh:not_found 是 fresh conversation 合法态 → 返回最小
+ *  SessionFileV1(从零 pin);其它 typed 错误 → 返回 stderr 渲染结果。 */
+async function loadGoalTarget(
+  store: SessionStore,
+  conversationId: string
+): Promise<
+  | { ok: true; file: SessionFileV1 }
+  | { ok: false; result: ProcessChatLineResult }
+> {
+  try {
+    return { ok: true, file: await store.load(conversationId) };
+  } catch (err) {
+    if (
+      isSessionStoreErrorKind(err) &&
+      (err as SessionStoreError).kind === "not_found"
+    ) {
+      return { ok: true, file: freshSessionFile(conversationId) };
+    }
+    return {
+      ok: false,
+      result: {
+        quit: false,
+        output: "",
+        stderr: typedGoalError(err, conversationId),
+      },
+    };
+  }
+}
+
+/** 最小合法 SessionFileV1(形状与 persistChatSessionCheckpoint 的重建一致)。 */
+function freshSessionFile(conversationId: string): SessionFileV1 {
+  const now = new Date().toISOString();
+  return {
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    conversation_id: conversationId,
+    messages: [],
+    jsonMode: false,
+    turnCount: 0,
+    updatedAt: now,
+    summary: "",
+    cwd: process.cwd(),
+    sanitized_at: now,
+    checkpoints: [],
+  };
+}
+
+/** pinGoal + 原子写;save 失败 → typed-error 渲染,不 crash。 */
+async function savePinnedGoal(
+  store: SessionStore,
+  conversationId: string,
+  existing: SessionFileV1,
+  text: string
+): Promise<ProcessChatLineResult> {
+  const now = new Date().toISOString();
+  const updated: SessionFileV1 = {
+    ...existing,
+    goal: pinGoal({
+      current: existing.goal,
+      text,
+      now,
+    }),
+    updatedAt: now,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+  };
+  try {
+    await store.save({ id: conversationId, file: updated });
+  } catch (err) {
+    return {
+      quit: false,
+      output: "",
+      stderr: typedGoalError(err, conversationId),
+    };
+  }
+  return { quit: false, output: `goal pinned: ${text}` };
+}
+
+/** #458 T6: typed-error catch 契约 —— 渲染 `${kind}: ${conversation_id}`。
+ *  只接受 SessionStore typed 错误(判别联合的 kind);未知 throw 是 store 契约
+ *  外意外,原样重抛(防御性,不静默吞)。 */
+function typedGoalError(err: unknown, conversationId: string): string {
+  if (isSessionStoreErrorKind(err)) {
+    const kind = (err as SessionStoreError).kind;
+    return `${kind}: ${conversationId}`;
+  }
+  throw err;
 }
 
 function formatChatError(err: unknown): string {

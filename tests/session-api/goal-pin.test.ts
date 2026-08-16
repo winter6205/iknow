@@ -1,17 +1,24 @@
 /**
- * #408 T3: goal re-pin via `## GOAL:` text in postMessage.
+ * #458 T8 (SC2 + SC4 + mid-message directive behavior):
+ * `## GOAL:` re-pin via postMessage — post-T2/T5 semantic migration.
  *
- * parseGoalCommand detects the leading `## GOAL: <text>` marker in the
- * postMessage input. When present with non-empty text, the hub pins the
- * session-level goal (history[0] = superseded prior) and runs the model
- * with the stripped text as the query. When present with empty text, it
- * is a no-op (goal unchanged, no history entry). When the marker appears
- * mid-message (`hello ## GOAL: x`), the whole text is treated as a normal
- * query — no pin.
+ * T2/T5 changed the hub's seed path: the first user message now seeds
+ * `taskFocus` (not `goal`); a re-pin via `## GOAL: <text>` produces a
+ * `source === "user_pin"` goal. Legacy `source === "user_initial"` goals
+ * in fixtures would be migrated to `taskFocus` on sanitize/load (SC4),
+ * so the re-pin history-accumulation tests now use a pre-existing
+ * `user_pin` goal fixture (explicitly constructed via `pinGoal`) — this
+ * preserves the "prior pushed to history[0] with status superseded"
+ * invariant without depending on the seed path.
  *
- * The `/goal` slash command's wire-shape is verified in slash.ts's own
- * unit-style coverage; the persistence seam is chat-session's
- * processSlash, which calls the same `pinGoal()` pure helper.
+ * The mid-message test (`hello ## GOAL: x`) retains its directive-behavior
+ * assertions (model ran with the full text as the query, no pin) but the
+ * goal.source assertion is removed: after T2 the seed path seeds
+ * `taskFocus` (not `goal`), so a non-pin directive leaves `goal` undefined
+ * and seeds `taskFocus` with the full text.
+ *
+ * Fixture adjustment reason (commit-message-ready): "seed 路径改走
+ * taskFocus, user_pin fixture 显式构造保证既有用例继续成立"。
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -20,8 +27,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionHub } from "../../src/session-api/hub.ts";
 import {
+  CURRENT_SCHEMA_VERSION,
+  pinGoal,
   resolveProjectSessionDir,
   SessionStore,
+  type SessionFileV1,
 } from "../../src/session-api/store/index.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 
@@ -45,20 +55,35 @@ function makeHub(): SessionHub {
   });
 }
 
-describe("## GOAL: re-pin (#408 T3 acceptance #1)", () => {
-  it("overwrites goal.text, source === user_pin, prior pushed to history[0] with status === superseded", async () => {
+describe("## GOAL: re-pin via postMessage (#458 T8)", () => {
+  it("overwrites goal.text, source === user_pin, prior user_pin goal pushed to history[0] with status === superseded", async () => {
     const hub = makeHub();
     const { session } = await hub.createSession();
 
-    // Seed an initial goal via T2 path: empty-session first postMessage.
-    await hub.postMessage({
-      conversationId: session.conversation_id,
-      text: "Build a C compiler",
+    // Pre-existing user_pin goal fixture (T2 seed path no longer creates
+    // a goal; construct one explicitly via pinGoal so the re-pin history
+    // accumulation invariant holds).
+    const now0 = new Date().toISOString();
+    await store.save({
+      id: session.conversation_id,
+      file: {
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversation_id: session.conversation_id,
+        messages: [],
+        jsonMode: false,
+        turnCount: 0,
+        updatedAt: now0,
+        summary: "",
+        cwd: process.cwd(),
+        sanitized_at: now0,
+        checkpoints: [],
+        goal: pinGoal({
+          current: undefined,
+          text: "Build a C compiler",
+          now: now0,
+        }),
+      } as SessionFileV1,
     });
-    const after1 = await store.load(session.conversation_id);
-    assert.equal(after1.goal?.text, "Build a C compiler");
-    assert.equal(after1.goal?.source, "user_initial");
-    assert.equal(after1.goal?.history, undefined);
 
     // Re-pin via ## GOAL: with non-empty text.
     await hub.postMessage({
@@ -72,23 +97,44 @@ describe("## GOAL: re-pin (#408 T3 acceptance #1)", () => {
     assert.ok(after2.goal?.history);
     assert.equal(after2.goal!.history!.length, 1);
     assert.equal(after2.goal!.history![0]!.text, "Build a C compiler");
-    assert.equal(after2.goal!.history![0]!.source, "user_initial");
+    // Pre-existing user_pin goal carries source user_pin into history.
+    assert.equal(after2.goal!.history![0]!.source, "user_pin");
     assert.equal(after2.goal!.history![0]!.status, "superseded");
     // updatedAt advances after re-pin.
     assert.match(after2.goal!.updatedAt, /^\d{4}-\d{2}-\d{2}T/);
-    assert.ok(
-      after2.goal!.updatedAt >= after1.goal!.updatedAt,
-      "updatedAt advanced"
-    );
+    assert.ok(after2.goal!.updatedAt >= now0, "updatedAt advanced");
+    // taskFocus is seeded from the query "write a type checker" because
+    // the fixture did not pre-populate taskFocus (SC2).
+    assert.equal(after2.taskFocus?.text, "write a type checker");
   });
 
   it("accumulates history monotonically across multiple re-pins", async () => {
     const hub = makeHub();
     const { session } = await hub.createSession();
-    await hub.postMessage({
-      conversationId: session.conversation_id,
-      text: "Build a compiler",
+
+    // Pre-existing user_pin goal fixture.
+    const now0 = new Date().toISOString();
+    await store.save({
+      id: session.conversation_id,
+      file: {
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversation_id: session.conversation_id,
+        messages: [],
+        jsonMode: false,
+        turnCount: 0,
+        updatedAt: now0,
+        summary: "",
+        cwd: process.cwd(),
+        sanitized_at: now0,
+        checkpoints: [],
+        goal: pinGoal({
+          current: undefined,
+          text: "Build a compiler",
+          now: now0,
+        }),
+      } as SessionFileV1,
     });
+
     await hub.postMessage({
       conversationId: session.conversation_id,
       text: "## GOAL: write a lexer",
@@ -105,7 +151,8 @@ describe("## GOAL: re-pin (#408 T3 acceptance #1)", () => {
     assert.equal(loaded.goal!.history![0]!.text, "write a lexer");
     assert.equal(loaded.goal!.history![0]!.status, "superseded");
     assert.equal(loaded.goal!.history![1]!.text, "Build a compiler");
-    assert.equal(loaded.goal!.history![1]!.source, "user_initial");
+    // The pre-existing fixture was user_pin, so history[1].source === "user_pin".
+    assert.equal(loaded.goal!.history![1]!.source, "user_pin");
     assert.equal(loaded.goal!.history![1]!.status, "superseded");
   });
 
@@ -120,14 +167,16 @@ describe("## GOAL: re-pin (#408 T3 acceptance #1)", () => {
     assert.equal(loaded.goal?.text, "write a type checker");
     assert.equal(loaded.goal?.source, "user_pin");
     assert.deepEqual(loaded.goal!.history ?? [], []);
+    // No pre-existing taskFocus → SC2 seeds taskFocus from the query.
+    assert.equal(loaded.taskFocus?.text, "write a type checker");
   });
 });
 
-describe("## GOAL: empty → no-op (#408 T3 acceptance #3)", () => {
-  it("empty ## GOAL: rejects (empty query) and leaves goal unchanged", async () => {
+describe("## GOAL: empty → no-op (#458 T8)", () => {
+  it("empty ## GOAL: rejects (empty query) and leaves goal + taskFocus unchanged", async () => {
     const hub = makeHub();
     const { session } = await hub.createSession();
-    // Seed a goal first so we can verify it's unchanged.
+    // First postMessage seeds taskFocus (SC2); goal stays undefined.
     await hub.postMessage({
       conversationId: session.conversation_id,
       text: "Build a C compiler",
@@ -151,12 +200,14 @@ describe("## GOAL: empty → no-op (#408 T3 acceptance #3)", () => {
       "empty ## GOAL: must reject (no goal text to run)"
     );
     const after = await store.load(session.conversation_id);
+    // Both the (undefined) goal and the seeded taskFocus must be unchanged.
     assert.deepEqual(after.goal, before.goal);
+    assert.deepEqual(after.taskFocus, before.taskFocus);
   });
 });
 
-describe("## GOAL: mid-message → no-op, normal query (#408 T3 acceptance #4)", () => {
-  it("'hello ## GOAL: x' is NOT a pin directive; whole text is the query and seeds via T2", async () => {
+describe("## GOAL: mid-message → no-op, normal query (#458 T8)", () => {
+  it("'hello ## GOAL: x' is NOT a pin directive; whole text is the query and seeds via T2 (taskFocus, not goal)", async () => {
     const hub = makeHub();
     const { session } = await hub.createSession();
     const res = await hub.postMessage({
@@ -165,11 +216,15 @@ describe("## GOAL: mid-message → no-op, normal query (#408 T3 acceptance #4)",
     });
     // The model ran with the full text as the query.
     assert.equal(res.turn.query, "hello ## GOAL: x");
-    // The goal was seeded via the T2 path (source=user_initial, full text),
-    // NOT pinned via T3 (source would be user_pin if directive matched).
+    // T2/T5 migration: the seed path no longer creates a top-level goal.
+    // The full text is instead captured into taskFocus (SC2). No pin
+    // happened (mid-message is not a directive), so goal is undefined.
     const loaded = await store.load(session.conversation_id);
-    assert.equal(loaded.goal?.source, "user_initial");
-    assert.equal(loaded.goal?.text, "hello ## GOAL: x");
-    assert.equal(loaded.goal?.history, undefined);
+    assert.equal(loaded.goal, undefined, "mid-message must NOT pin a goal");
+    assert.equal(
+      loaded.taskFocus?.text,
+      "hello ## GOAL: x",
+      "seed path captures the full text into taskFocus"
+    );
   });
 });
