@@ -108,64 +108,71 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
     );
   });
 
-  it("verifyConfig 配置 + 验证 exit 0 → 闭环激活 + 单轮通过", async () => {
-    rmSync(markerPath, { force: true });
-    const ctx = makeCtx({
-      responses: [assistantResult({ texts: ["answer-ok"] })],
-    });
-    Object.assign(ctx, {
-      verifyConfig: { command: passScript } satisfies VerifyConfig,
-    });
-    const r = await processChatLine({ line: "fix this", ctx });
-    assert.equal(r.ranQuery, true);
-    assert.match(r.output, /answer-ok/);
-    // 铁证: 验证命令真实执行了 (闭环激活)。
-    assert.equal(
-      existsSync(markerPath),
-      true,
-      "配置 verifyConfig 时验证命令应经沙箱执行"
-    );
-    // 单轮通过, 历史形状与未配置一致 (SC7: 通过轮不改装配面)。
-    assert.equal(ctx.state.messages.length, 2);
-    assert.equal(ctx.state.messages[1]!.role, "assistant");
-  });
+  it.skipIf(!hasBwrap())(
+    "verifyConfig 配置 + 验证 exit 0 → 闭环激活 + 单轮通过",
+    async () => {
+      rmSync(markerPath, { force: true });
+      const ctx = makeCtx({
+        responses: [assistantResult({ texts: ["answer-ok"] })],
+      });
+      Object.assign(ctx, {
+        verifyConfig: { command: passScript } satisfies VerifyConfig,
+      });
+      const r = await processChatLine({ line: "fix this", ctx });
+      assert.equal(r.ranQuery, true);
+      assert.match(r.output, /answer-ok/);
+      // 铁证: 验证命令真实执行了 (闭环激活)。
+      assert.equal(
+        existsSync(markerPath),
+        true,
+        "配置 verifyConfig 时验证命令应经沙箱执行"
+      );
+      // 单轮通过, 历史形状与未配置一致 (SC7: 通过轮不改装配面)。
+      assert.equal(ctx.state.messages.length, 2);
+      assert.equal(ctx.state.messages[1]!.role, "assistant");
+    }
+  );
 
-  it("verifyConfig 配置 + 验证真失败 → 注入失败信封", async () => {
-    rmSync(markerPath, { force: true });
-    const ctx = makeCtx({
-      responses: [
-        assistantResult({ texts: ["fix-attempt-1"] }),
-        assistantResult({ texts: ["fix-attempt-2"] }),
-      ],
-    });
-    Object.assign(ctx, {
-      verifyConfig: { command: failScript } satisfies VerifyConfig,
-    });
-    const r = await processChatLine({ line: "make tests pass", ctx });
-    assert.equal(r.ranQuery, true);
-    assert.equal(existsSync(markerPath), true, "验证命令应真实执行");
-    // failScript 恒定 exit 1 → 首轮失败注入信封 → 第二轮验证同签名停滞 →
-    // 闭环停止。历史含两条 assistant。
-    assert.equal(
-      ctx.state.messages.filter((m) => m.role === "assistant").length,
-      2
-    );
-    const envelopes = ctx.state.messages.filter(
-      (m) =>
-        m.role === "user" &&
-        m.content.some(
-          (b) =>
-            b.type === "text" &&
-            (b.text as string).includes("[VALIDATION FAILED]")
-        )
-    );
-    assert.equal(envelopes.length, 1, "应恰有一条注入信封");
-    const envText = (envelopes[0]!.content[0] as { type: "text"; text: string })
-      .text;
-    assert.match(envText, /attempt=1\/12/);
-    assert.match(envText, /exit_code: 1/);
-    assert.match(envText, /signature: exit=1\|tests\/auth\.test\.ts/);
-  });
+  it.skipIf(!hasBwrap())(
+    "verifyConfig 配置 + 验证真失败 → 注入失败信封",
+    async () => {
+      rmSync(markerPath, { force: true });
+      const ctx = makeCtx({
+        responses: [
+          assistantResult({ texts: ["fix-attempt-1"] }),
+          assistantResult({ texts: ["fix-attempt-2"] }),
+        ],
+      });
+      Object.assign(ctx, {
+        verifyConfig: { command: failScript } satisfies VerifyConfig,
+      });
+      const r = await processChatLine({ line: "make tests pass", ctx });
+      assert.equal(r.ranQuery, true);
+      assert.equal(existsSync(markerPath), true, "验证命令应真实执行");
+      // failScript 恒定 exit 1 → 首轮失败注入信封 → 第二轮验证同签名停滞 →
+      // 闭环停止。历史含两条 assistant。
+      assert.equal(
+        ctx.state.messages.filter((m) => m.role === "assistant").length,
+        2
+      );
+      const envelopes = ctx.state.messages.filter(
+        (m) =>
+          m.role === "user" &&
+          m.content.some(
+            (b) =>
+              b.type === "text" &&
+              (b.text as string).includes("[VALIDATION FAILED]")
+          )
+      );
+      assert.equal(envelopes.length, 1, "应恰有一条注入信封");
+      const envText = (
+        envelopes[0]!.content[0] as { type: "text"; text: string }
+      ).text;
+      assert.match(envText, /attempt=1\/12/);
+      assert.match(envText, /exit_code: 1/);
+      assert.match(envText, /signature: exit=1\|tests\/auth\.test\.ts/);
+    }
+  );
 
   it("装配层默认启用: command 缺失 (verifyConfig = { command: '' }) + subagentManager 在场 → runVerifyLoop + runClassifier 接管 (spec #128 Objective)", async () => {
     rmSync(markerPath, { force: true });
