@@ -155,8 +155,8 @@ vitest，落 `tests/harness/verify/`。stub runFn + stub 判官做确定性替�
 
 ## Open Questions
 
-- **OQ1**：补跑信封文案终稿（G5-4 给了骨架，措辞 PLAN 定）。不阻塞。
-- **OQ2**：evidenceContext 截断上限具体值（建议 ≤ 20000 codepoints）。不阻塞。
+- **OQ1**：补跑信封文案终稿（G5-4 给了骨架，措辞 PLAN 定）。**v1 PLAN 定稿**（见 `plans/449-verify-evidence-first-loop.md` B1 bullet）：B5 实施时逐字落入 `buildEvidenceRerunEnvelope`。
+- **OQ2**：evidenceContext 截断上限具体值（建议 ≤ 20000 codepoints）。**v1 PLAN 定稿**（见 `plans/449-verify-evidence-first-loop.md` B1 bullet）：上限 = `20_000` codepoints，常量复用 `src/harness/verify/inject.ts` 的 `DEFAULT_MAX_CHARS`。
 - **OQ3**：CONTRADICTED 走修正轮后的最终 outcome 映射（真失败 vs 升级）——v1 按真失败进既有 trend/maxRounds 处置，与命令路径失败同构。不阻塞。
 
 ## Assumptions（operator delegated，逐条挂外部真值）
