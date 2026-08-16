@@ -1,11 +1,28 @@
 /**
- * #408 T4: verify-loop seam — userText = goal.text ?? query.
+ * #408 T4 + #458 T8: verify-loop seam — userText = goal.text ?? query,
+ * plus the SC3 数据侧 (data-side) three-segment fallback readiness.
  *
- * runVerifyLoop is stubbed via vi.mock so we can capture its
- * `options.userText` and assert the seam binds to `session.goal.text`
- * when present (falling back to `query` when absent or empty). The
- * hub itself imports runVerifyLoop statically; vitest hoists vi.mock
- * to intercept that import.
+ * History:
+ *   - #408 T4: hub.ts userText seam = `goal.text ?? query`. user_initial
+ *     fixtures bound goal to verify-loop's userText.
+ *   - #458 T2 (SC4): sanitize migration moved `user_initial` goals to
+ *     `taskFocus` on load (the legacy propose/confirm lifecycle is gone).
+ *     To keep T4 assertions valid as unit-level tests of the **seam
+ *     binding** itself, fixtures in this file use `source === "user_pin"`
+ *     — the only `GoalSource` value that survives load as a goal (SC1).
+ *   - #458 T8 (SC3 acceptance): 任务公式
+ *     `goal.text ?? taskFocus.text ?? query` 数据侧就位供 #449 消费。
+ *
+ * The DATA-side three-segment formula is asserted directly from the
+ * loaded session file (no seam involvement). The CONSUMER-side
+ * `userText` at hub.ts:781-784 currently implements only
+ * `goal.text ?? query`; the `taskFocus.text` segment lands in plan
+ * #449 B8 (NOT #458). This split keeps the data-side ready for #449
+ * while not touching src/ from T8.
+ *
+ * Deferral note (commit-message-ready):
+ *   "SC3 数据侧三段 fallback 由本 bullet 就位;消费端 taskFocus 段
+ *    由 plan #449 B8 接 hub.ts:781-784 userText seam 升级(独立 PR)。"
  */
 import {
   afterAll,
@@ -73,10 +90,12 @@ vi.mock("../../src/harness/verify/index.ts", async () => {
 import { SessionHub } from "../../src/session-api/hub.ts";
 import {
   CURRENT_SCHEMA_VERSION,
+  pinGoal,
   resolveProjectSessionDir,
   SessionStore,
   type GoalState,
   type SessionFileV1,
+  type TaskFocusState,
 } from "../../src/session-api/store/index.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 import type { VerifyConfig } from "../../src/harness/verify/types.ts";
@@ -101,24 +120,32 @@ afterEach(() => {
 async function seedSession(opts: {
   readonly id: string;
   readonly goal?: GoalState;
+  readonly taskFocus?: TaskFocusState;
 }): Promise<void> {
+  const now = "2026-01-01T00:00:00.000Z";
   const base = {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     conversation_id: opts.id,
     messages: [],
     jsonMode: false,
     turnCount: 0,
-    updatedAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: now,
     summary: "",
     cwd: process.cwd(),
-    sanitized_at: "2026-01-01T00:00:00.000Z",
+    sanitized_at: now,
     checkpoints: [],
-  } satisfies Omit<SessionFileV1, "goal">;
+  } satisfies Omit<SessionFileV1, "goal" | "taskFocus">;
   await store.save({
     id: opts.id,
     file:
-      opts.goal !== undefined
-        ? ({ ...base, goal: opts.goal } as SessionFileV1)
+      opts.goal !== undefined || opts.taskFocus !== undefined
+        ? ({
+            ...base,
+            ...(opts.goal !== undefined ? { goal: opts.goal } : {}),
+            ...(opts.taskFocus !== undefined
+              ? { taskFocus: opts.taskFocus }
+              : {}),
+          } as SessionFileV1)
         : (base as SessionFileV1),
   });
 }
@@ -146,18 +173,18 @@ function capturedUserText(): string {
   return opts.userText as string;
 }
 
-describe("verify-loop seam: userText = goal.text ?? query (#408 T4)", () => {
-  it("session carrying goal.text binds userText === goal.text (NOT current query)", async () => {
+describe("verify-loop seam: userText = goal.text ?? query (#408 T4 / #458 T8)", () => {
+  it("session carrying user_pin goal.text binds userText === goal.text (NOT current query)", async () => {
     const id = "goal-bearing";
+    // #458 T2 (SC4): use user_pin so the goal survives sanitize (user_initial
+    // would migrate to taskFocus on load).
     await seedSession({
       id,
-      goal: {
+      goal: pinGoal({
+        current: undefined,
         text: "Type-system-validate-LSP",
-        source: "user_initial",
-        status: "active",
-        createdAt: "2026-01-01T00:00:00.000Z",
-        updatedAt: "2026-01-01T00:00:00.000Z",
-      },
+        now: "2026-01-01T00:00:00.000Z",
+      }),
     });
     const hub = makeHub();
     const res = await hub.postMessage({
@@ -192,10 +219,18 @@ describe("verify-loop seam: userText = goal.text ?? query (#408 T4)", () => {
       id,
       goal: {
         text: "",
-        source: "user_initial",
+        source: "user_pin",
         status: "active",
         createdAt: "2026-01-01T00:00:00.000Z",
         updatedAt: "2026-01-01T00:00:00.000Z",
+        history: [
+          {
+            text: "previous-pinned-text",
+            source: "user_pin",
+            status: "superseded",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
       },
     });
     const hub = makeHub();
@@ -208,17 +243,15 @@ describe("verify-loop seam: userText = goal.text ?? query (#408 T4)", () => {
     assert.equal(capturedUserText(), "non-empty query");
   });
 
-  it("goal persists across the turn (no overwrite from conditionalSave's seed path)", async () => {
+  it("user_pin goal persists across the turn (no overwrite from conditionalSave's seed path)", async () => {
     const id = "goal-persistence";
     await seedSession({
       id,
-      goal: {
+      goal: pinGoal({
+        current: undefined,
         text: "Type-system-validate-LSP",
-        source: "user_initial",
-        status: "active",
-        createdAt: "2026-01-01T00:00:00.000Z",
-        updatedAt: "2026-01-01T00:00:00.000Z",
-      },
+        now: "2026-01-01T00:00:00.000Z",
+      }),
     });
     const hub = makeHub();
     await hub.postMessage({
@@ -227,6 +260,111 @@ describe("verify-loop seam: userText = goal.text ?? query (#408 T4)", () => {
     });
     const after = await store.load(id);
     assert.equal(after.goal?.text, "Type-system-validate-LSP");
-    assert.equal(after.goal?.source, "user_initial");
+    assert.equal(after.goal?.source, "user_pin");
+  });
+});
+
+// -- #458 T8 (SC3 acceptance) ---------------------------------------------
+//
+// SC3 任务公式: `goal.text ?? taskFocus.text ?? query` 数据侧就位
+// (供 #449 B8 在消费端接入)。本块独立断言 数据侧 三段 fallback,
+// 不走 verify-loop seam — 用 `store.load` 直接读盘,从 loaded.session
+// 派生 final-task-text,验证三段优先级一致。
+//
+// 这把 consumer-side upgrade 留给 #449 B8 (hub.ts userText 缝加 taskFocus 段)
+// 而不阻塞 #458 T8 的回归矩阵收尾。
+
+describe("SC3 data-side three-segment fallback: goal.text ?? taskFocus.text ?? query (#458 T8)", () => {
+  it("仅 taskFocus 在场 → final-task-text === taskFocus.text (goal 缺席走第二段)", async () => {
+    const id = "taskfocus-only";
+    await seedSession({
+      id,
+      taskFocus: {
+        text: "TF: implement AST visitors",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        history: [],
+      },
+    });
+    const loaded = await store.load(id);
+    const query = "Q";
+    const finalTaskText = loaded.goal?.text ?? loaded.taskFocus?.text ?? query;
+    assert.equal(finalTaskText, "TF: implement AST visitors");
+  });
+
+  it("仅 goal 在场 → final-task-text === goal.text (第一段命中)", async () => {
+    const id = "goal-only";
+    await seedSession({
+      id,
+      goal: pinGoal({
+        current: undefined,
+        text: "G: ship plan 458",
+        now: "2026-01-01T00:00:00.000Z",
+      }),
+    });
+    const loaded = await store.load(id);
+    const query = "Q";
+    const finalTaskText = loaded.goal?.text ?? loaded.taskFocus?.text ?? query;
+    assert.equal(finalTaskText, "G: ship plan 458");
+  });
+
+  it("两者皆缺席 → final-task-text === query (兜底段)", async () => {
+    const id = "neither";
+    await seedSession({ id });
+    const loaded = await store.load(id);
+    const query = "Q";
+    const finalTaskText = loaded.goal?.text ?? loaded.taskFocus?.text ?? query;
+    assert.equal(finalTaskText, "Q");
+  });
+
+  it("goal 与 taskFocus 共存 → final-task-text === goal.text (第一段优先)", async () => {
+    const id = "both-present";
+    await seedSession({
+      id,
+      goal: pinGoal({
+        current: undefined,
+        text: "G dominates",
+        now: "2026-01-01T00:00:00.000Z",
+      }),
+      taskFocus: {
+        text: "TF subordinate",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        history: [],
+      },
+    });
+    const loaded = await store.load(id);
+    const query = "Q";
+    const finalTaskText = loaded.goal?.text ?? loaded.taskFocus?.text ?? query;
+    assert.equal(finalTaskText, "G dominates");
+    // 顺序敏感:反转测试,确保是 `goal ?? taskFocus ?? query`,不是别的顺序。
+    const reversed = loaded.taskFocus?.text ?? loaded.goal?.text ?? query;
+    assert.notEqual(reversed, "G dominates");
+  });
+
+  it("goal.text === '' → literal `??` chain yields '' (nullish vs empty-string semantics; consumer skip owned by #449 B8)", async () => {
+    const id = "empty-goal-but-taskfocus";
+    await seedSession({
+      id,
+      goal: {
+        text: "",
+        source: "user_pin",
+        status: "active",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        history: [],
+      },
+      taskFocus: {
+        text: "TF takes over empty goal",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        history: [],
+      },
+    });
+    const loaded = await store.load(id);
+    const query = "Q";
+    // 数据侧公式是 `??` 空值合并:`''` 不是 nullish,因此空字符串会“占住”
+    // 第一段而不落入 taskFocus。empty-goal-skip 属于消费端语义
+    // (hub.ts userText 需 `text.length > 0` 判断),由 #449 B8 决定。
+    const finalTaskText = loaded.goal?.text ?? loaded.taskFocus?.text ?? query;
+    assert.equal(finalTaskText, "");
+    assert.equal(loaded.taskFocus?.text, "TF takes over empty goal");
   });
 });
