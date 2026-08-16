@@ -38,6 +38,7 @@ import { createSkillSearchTool } from "./skill-search.js";
 import { createSpawnSubAgentTool } from "../../subagent/spawn-subagent-tool.js";
 import { createSubAgentResultTool } from "../../subagent/subagent-result-tool.js";
 import type { SubAgentManager } from "../../subagent/manager.js";
+import { buildWorkerToolSurface } from "../../subagent/role.js";
 import { RegistryConstructionError, ToolExecutionError } from "../../errors.js";
 import type { SkillCatalog } from "../../skill/catalog.js";
 
@@ -124,6 +125,11 @@ export interface CreateDefaultAciRegistryOptions {
    *  执行前把占位符还原为真值（见 bash.ts restore 段）。缺席时 bash 命令
    *  原样透传（行为 byte-identical，向后兼容）。 */
   readonly secretRegistry?: SecretRegistry;
+  /** #468 deny-list：def-list 期宽容裁剪（buildWorkerToolSurface 语义）——
+   *  缺席 / undefined / 空数组不裁剪，向后兼容。与既有条件化装配
+   *  （memoryDir / skillCatalog / subagentManager）正交组合（Gate 3 镜像
+   *  过滤保证 toolsetNames 与 factories 键集一致）。 */
+  readonly disallowedTools?: ReadonlyArray<string>;
 }
 
 /**
@@ -178,6 +184,7 @@ export function createDefaultAciRegistry(
   const skillCatalog = opts.skillCatalog;
   const subagentManager = opts.subagentManager;
   const secretRegistry = opts.secretRegistry;
+  const disallowedTools = opts.disallowedTools;
 
   // holder:tool_search 自引用的惰性解引用点(装配完成前闭包返回 undefined,
   // tool-search.ts:resolveRegistry 触发 ToolExecutionError 兜底)。
@@ -248,11 +255,15 @@ export function createDefaultAciRegistry(
   // memoryDir 缺席时 memory_recall/memory_save 不装配,skillCatalog 缺席时
   // skill/skill_search 不装配,故对照名单需先剔除这两个条件键。任何不一致
   // 均装配期失败,不留到运行期。
-  const factoryNames = Object.keys(factories);
+  // #468 deny-list：deny 名并入 excluded（toolsetNames 端剔除），factories 键
+  // 端同源过滤 → Gate 3 双侧镜像一致（与 memoryDir 条件化同款机制）。
+  const denySet = new Set(disallowedTools ?? []);
+  const factoryNames = Object.keys(factories).filter((n) => !denySet.has(n));
   const excluded: ReadonlyArray<string> = [
     ...(memoryDir ? [] : ["memory_recall", "memory_save"]),
     ...(skillCatalog ? [] : ["skill", "skill_search"]),
     ...(subagentManager ? [] : ["spawn_subagent", "subagent_result"]),
+    ...(disallowedTools ?? []),
   ];
   const toolsetNames = (ACI_TOOLSET_NAMES as ReadonlyArray<string>).filter(
     (n) => !excluded.includes(n)
@@ -267,7 +278,20 @@ export function createDefaultAciRegistry(
   }
 
   const tools = toolsetNames.map((n) => factories[n]!());
-  const reg = createAciRegistry(tools);
+  // #468 def-list 期裁剪（构造期保证 inner/visibleSchemas 双面只剩保留项）。
+  // buildWorkerToolSurface 宽容模式合并默认 deny [spawn_subagent] + 用户 deny；
+  // 默认 deny 在 worker 装配路径上属合法冗余（subagentManager 缺席 →
+  // spawn_subagent 不在 tools）。仅当 disallowedTools 非空才调用 —
+  // build-engine.ts:294 既有调用（subagentManager 在场、未传
+  // disallowedTools）若无条件调用 buildWorkerToolSurface，宽容模式默认
+  // deny 会误剥离 spawn_subagent，破坏向后兼容。Gate 3 excluded 已先把
+  // deny 名从 toolsetNames 剔除，此处 buildWorkerToolSurface 是双机制的
+  // 幂等兜底（actual surface 二次断言）。
+  const finalTools =
+    disallowedTools !== undefined && disallowedTools.length > 0
+      ? buildWorkerToolSurface(tools, disallowedTools)
+      : tools;
+  const reg = createAciRegistry(finalTools);
   assembled.reg = reg;
   return reg;
 }

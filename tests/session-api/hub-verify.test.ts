@@ -113,61 +113,70 @@ describe("SessionHub postMessage — verify-loop 装配 (T8)", () => {
     );
   });
 
-  it("verifyConfig 配置 + 验证 exit 0 → 闭环激活 + 单轮通过", async () => {
-    rmSync(markerPath, { force: true });
-    const hub = makeHub({
-      verifyConfig: { command: passScript },
-      responses: [assistantResult({ texts: ["fixed"] })],
-    });
-    const { session } = await hub.createSession();
-    const res = await hub.postMessage({
-      conversationId: session.conversation_id,
-      text: "fix this",
-    });
-    assert.equal(res.turn.answer.stopReason, "completed");
-    assert.equal(res.turn.answer.finalText, "fixed");
-    assert.equal(
-      existsSync(markerPath),
-      true,
-      "配置 verifyConfig 时验证命令应经沙箱执行"
-    );
-  });
+  it.skipIf(!hasBwrap())(
+    "verifyConfig 配置 + 验证 exit 0 → 闭环激活 + 单轮通过",
+    async () => {
+      rmSync(markerPath, { force: true });
+      const hub = makeHub({
+        verifyConfig: { command: passScript },
+        responses: [assistantResult({ texts: ["fixed"] })],
+      });
+      const { session } = await hub.createSession();
+      const res = await hub.postMessage({
+        conversationId: session.conversation_id,
+        text: "fix this",
+      });
+      assert.equal(res.turn.answer.stopReason, "completed");
+      assert.equal(res.turn.answer.finalText, "fixed");
+      assert.equal(
+        existsSync(markerPath),
+        true,
+        "配置 verifyConfig 时验证命令应经沙箱执行"
+      );
+    }
+  );
 
-  it("verifyConfig 配置 + 验证真失败 → 注入失败信封 (下轮 priorMessages)", async () => {
-    rmSync(markerPath, { force: true });
-    // 两条 stub 响应: 第一条 run 返回 (completed) → 验证挂 → 注入信封;
-    // 第二条 run (信封在 priorMessages 中) 返回 → 验证仍挂 → 停滞停。
-    const hub = makeHub({
-      verifyConfig: { command: failScript },
-      responses: [
-        assistantResult({ texts: ["fix-1"] }),
-        assistantResult({ texts: ["fix-2"] }),
-      ],
-    });
-    const { session } = await hub.createSession();
-    const res = await hub.postMessage({
-      conversationId: session.conversation_id,
-      text: "make tests pass",
-    });
-    assert.equal(res.turn.answer.stopReason, "completed");
-    assert.equal(existsSync(markerPath), true, "验证命令应真实执行");
-    // 信封注入在第二轮 run 的 priorMessages 里 (messages 含
-    // [VALIDATION FAILED] user 消息)。postMessage 已 conditionalSave 落盘,
-    // 从盘上 load 最新文件断言。
-    const saved = await new SessionStore(dataDir).load(session.conversation_id);
-    const envelopes = saved.messages.filter(
-      (m) =>
-        m.role === "user" &&
-        m.content.some(
-          (b) =>
-            b.type === "text" &&
-            (b.text as string).includes("[VALIDATION FAILED]")
-        )
-    );
-    assert.equal(envelopes.length, 1, "应恰有一条注入信封");
-    const envText = (envelopes[0]!.content[0] as { type: "text"; text: string })
-      .text;
-    assert.match(envText, /attempt=1\/12/);
-    assert.match(envText, /exit_code: 1/);
-  });
+  it.skipIf(!hasBwrap())(
+    "verifyConfig 配置 + 验证真失败 → 注入失败信封 (下轮 priorMessages)",
+    async () => {
+      rmSync(markerPath, { force: true });
+      // 两条 stub 响应: 第一条 run 返回 (completed) → 验证挂 → 注入信封;
+      // 第二条 run (信封在 priorMessages 中) 返回 → 验证仍挂 → 停滞停。
+      const hub = makeHub({
+        verifyConfig: { command: failScript },
+        responses: [
+          assistantResult({ texts: ["fix-1"] }),
+          assistantResult({ texts: ["fix-2"] }),
+        ],
+      });
+      const { session } = await hub.createSession();
+      const res = await hub.postMessage({
+        conversationId: session.conversation_id,
+        text: "make tests pass",
+      });
+      assert.equal(res.turn.answer.stopReason, "completed");
+      assert.equal(existsSync(markerPath), true, "验证命令应真实执行");
+      // 信封注入在第二轮 run 的 priorMessages 里 (messages 含
+      // [VALIDATION FAILED] user 消息)。postMessage 已 conditionalSave 落盘,
+      // 从盘上 load 最新文件断言。
+      const saved = await new SessionStore(dataDir).load(
+        session.conversation_id
+      );
+      const envelopes = saved.messages.filter(
+        (m) =>
+          m.role === "user" &&
+          m.content.some(
+            (b) =>
+              b.type === "text" &&
+              (b.text as string).includes("[VALIDATION FAILED]")
+          )
+      );
+      assert.equal(envelopes.length, 1, "应恰有一条注入信封");
+      const envText = (
+        envelopes[0]!.content[0] as { type: "text"; text: string }
+      ).text;
+      assert.match(envText, /attempt=1\/12/);
+      assert.match(envText, /exit_code: 1/);
+    }
+  );
 });

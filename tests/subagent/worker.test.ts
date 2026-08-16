@@ -7,11 +7,14 @@ import {
 } from "../../src/harness/model-adapter/anthropic-adapter.ts";
 import { ProtocolError } from "../../src/harness/errors.ts";
 import {
+  createWorkerDeps,
   runWorkerOnce,
   toFailedEnvelope,
   toOkEnvelope,
   type CreateWorkerDepsOptions,
 } from "../../src/harness/subagent/worker.ts";
+import { createSkillCatalog } from "../../src/harness/skill/catalog.ts";
+import { createNoopTraceService } from "../../src/harness/trace/noop.ts";
 import type {
   SubAgentEnvelope,
   WorkerEnvelope,
@@ -265,5 +268,80 @@ describe("subagent worker: CreateWorkerDepsOptions seam 字段 (类型契约)", 
     };
     assert.equal(opts.env.llm.maxTurns, undefined);
     assert.equal(opts.sandboxRoot, "/tmp/sb");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F. #468 disallowedTools 消费 — worker 装配期把 deny-list 透传给
+//    createDefaultAciRegistry, 声明工具面 = 实际工具面 (inner + visibleSchemas
+//    双面断言)。不真发 LLM / 不写盘 / 不扫 fs —— 用 stub-model + noop trace +
+//    空 skill catalog 保持 hermetic。
+// ---------------------------------------------------------------------------
+
+describe("subagent worker: #468 disallowedTools 透传 createDefaultAciRegistry (声明面 = 实际面)", () => {
+  /** hermetic 装配缝: stub-model (零模型调用) + 空 skill catalog + noop trace。 */
+  function hermeticOpts(
+    extra?: Partial<CreateWorkerDepsOptions>
+  ): CreateWorkerDepsOptions {
+    return {
+      env: TEST_ENV,
+      sandboxRoot: "/tmp/sb",
+      model: createStubModel({ responses: [] }),
+      skillCatalog: createSkillCatalog([]),
+      system: () => undefined,
+      trace: createNoopTraceService(),
+      ...extra,
+    };
+  }
+
+  it("deny 5 禁项 → inner.list() 与 promptTools() 双面均无 bash/edit_file/write_file/web_fetch/web_search, 保留 read_file/grep/glob", async () => {
+    const deps = await createWorkerDeps(
+      hermeticOpts({
+        disallowedTools: [
+          "bash",
+          "edit_file",
+          "write_file",
+          "web_fetch",
+          "web_search",
+        ],
+      })
+    );
+    const innerNames = deps.registry.list().map((t) => t.name);
+    const promptNames = deps.promptTools().map((t) => t.name);
+    for (const denied of [
+      "bash",
+      "edit_file",
+      "write_file",
+      "web_fetch",
+      "web_search",
+    ]) {
+      assert.ok(!innerNames.includes(denied), `inner.list() 不应含 ${denied}`);
+      assert.ok(
+        !promptNames.includes(denied),
+        `promptTools() 不应含 ${denied}`
+      );
+    }
+    for (const kept of ["read_file", "grep", "glob"]) {
+      assert.ok(innerNames.includes(kept), `inner.list() 应含 ${kept}`);
+      assert.ok(promptNames.includes(kept), `promptTools() 应含 ${kept}`);
+    }
+  });
+
+  it("向后兼容: 不传 disallowedTools → 全量面不裁剪 (无 subagentManager → spawn_subagent 缺席, 其余工具俱在)", async () => {
+    const deps = await createWorkerDeps(hermeticOpts());
+    const innerNames = deps.registry.list().map((t) => t.name);
+    const promptNames = deps.promptTools().map((t) => t.name);
+    assert.ok(
+      innerNames.includes("bash"),
+      "inner.list() 应含 bash (未声明 deny-list)"
+    );
+    assert.ok(
+      promptNames.includes("bash"),
+      "promptTools() 应含 bash (未声明 deny-list)"
+    );
+    assert.ok(
+      !innerNames.includes("spawn_subagent"),
+      "worker 无 subagentManager → spawn_subagent 缺席"
+    );
   });
 });

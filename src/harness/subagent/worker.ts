@@ -84,6 +84,10 @@ export interface CreateWorkerDepsOptions {
   readonly system?: LoopEngineDeps["system"];
   /** 测试缝: 覆盖 maxTurns (envelope.maxTurns > env.llm.maxTurns 优先)。 */
   readonly maxTurns?: number;
+  /** #468 deny-list: 来自 WorkerEnvelope.disallowedTools, 透传给
+   *  createDefaultAciRegistry 做 def-list 期裁剪 (声明面 = 实际面)。
+   *  缺席 / undefined 不裁剪, 向后兼容旧 wire。 */
+  readonly disallowedTools?: ReadonlyArray<string>;
 }
 
 /**
@@ -138,6 +142,7 @@ export async function createWorkerDeps(
     env,
     sandboxRoot,
     skillCatalog,
+    ...(opts.disallowedTools ? { disallowedTools: opts.disallowedTools } : {}),
   });
 
   const baseExecutor = createExecutor(reg.inner);
@@ -316,6 +321,7 @@ export async function runSubagentWorker(): Promise<void> {
   const deps = await createWorkerDeps({
     env: loadIknowEnv(),
     sandboxRoot: workerEnvelope.sandboxRoot,
+    disallowedTools: workerEnvelope.disallowedTools,
   });
   const result = await runWorkerOnce({ workerEnvelope, deps });
   process.stdout.write(JSON.stringify(result) + "\n");
