@@ -34,6 +34,22 @@ export type QueryBufferResult =
       summary: string;
     };
 
+/**
+ * #358 T7: Session API 只读投影的最小状态面 (spec Code Style 137)。
+ * 字段集与 trace SubagentSpawnRecord 对齐,但截断语义不同:
+ * taskPreview 截断 ≤120 (权限行,不落 task 全文 —— spec 358 权限 row)。
+ * Postel: endedAt/summary/reason 仅终态且有值时在场, running 态缺席。
+ */
+export interface SubagentInfo {
+  readonly taskId: string;
+  readonly state: "starting" | "running" | "completed" | "failed";
+  readonly taskPreview: string;
+  readonly startedAt: string;
+  readonly endedAt?: string;
+  readonly summary?: string;
+  readonly reason?: string;
+}
+
 export interface SubAgentManager {
   /**
    * 同步入 map 立即返回 taskId(manager 内部 randomUUID() 唯一真值,SC3)。
@@ -72,6 +88,13 @@ export interface SubAgentManager {
    * 已终态任务 no-op。
    */
   readonly abortTask: (taskId: string) => boolean;
+  /**
+   * #358 T7: 只读全量枚举(starting/running/completed/failed 合一) — Session
+   * API GET /sessions/:id/subagents 端点消费。数据源 = 内存 map + 终态
+   * envelope(与 queryBuffer/drainCompleted 同真值),不在端点侧做任务寿命
+   * 语义决策。taskPreview 截断 ≤120 见 SubagentInfo 注释。
+   */
+  readonly listSubagents: () => ReadonlyArray<SubagentInfo>;
 }
 
 /** spawn DI 工厂签名:由调用方注入(fake 测试 / 生产 defaultSubAgentSpawn)。 */
@@ -175,6 +198,12 @@ interface Task {
    * (exit handler 与 child.on("error")/timeout-fired 等多路径都可能触发终态);
    * flag 一旦置位不再覆写, 避免重复落盘。 */
   stoppedEmitted: boolean;
+  /**
+   * #358 T7: 终态 ISO 戳(仅簿记,不改状态机语义)。emitStop 内随
+   * stoppedEmitted 锁存一次;listSubagents 读它当 endedAt。running/
+   * starting 态缺席 → Postel 不上行。
+   */
+  endedAt?: string;
 }
 
 const WAIT_POLL_MS = 25;
@@ -278,6 +307,8 @@ export function createSubAgentManager(opts: {
     if (task.stoppedEmitted) return;
     task.stoppedEmitted = true;
     const endedAt = new Date().toISOString();
+    // #358 T7: 终态 ISO 随 single-emit 锁存一次 (listSubagents 读它当 endedAt)。
+    task.endedAt = endedAt;
     const durationMs = Math.max(
       0,
       Date.parse(endedAt) - Date.parse(task.startedAt)
@@ -396,6 +427,14 @@ export function createSubAgentManager(opts: {
       task.timeoutTimer = setTimeout(() => {
         // Already terminated (child exit / stdout envelope) -> do not overwrite.
         if (task.state === "completed" || task.state === "failed") return;
+        // #358 T3 优雅窗口:此处先写 generic fallback 信封并立即 SIGTERM,
+        // 但 SIGKILL 兜底(5s 后)到达之前,stdout handler 的
+        // `task.envelope = env` 会用**子进程写回的更丰富信封**无条件替换
+        // fallback —— worker 在 SIGTERM 上自跑收尾摘要轮后 emits 的
+        // {reason:"timeout", summary:<真实进度>} 因此成为父侧最终真值,
+        // 不被 generic "timeout after <n>ms" 覆盖 (emitStateChange/emitStop
+        // 已先发不可逆;timedOut 由 exit handler 的 guard 保 reason=timeout)。
+        // SIGKILL 兜底只对忽略 SIGTERM 的 worker 生效 (armKillFallback)。
         task.envelope = {
           status: "failed",
           reason: "timeout",
@@ -706,6 +745,35 @@ export function createSubAgentManager(opts: {
     return out;
   }
 
+  /**
+   * #358 T7: 全量只读投影。summary/reason 取终态 envelope(与 queryBuffer
+   * 同真值);taskPreview 截断 ≤120,不落 task 全文(spec 权限 row)。
+   * Postel: endedAt 仅在终态存续;summary/reason 仅 envelope 有值时上行。
+   */
+  function listSubagents(): ReadonlyArray<SubagentInfo> {
+    const out: SubagentInfo[] = [];
+    for (const task of tasks.values()) {
+      const envelope = task.envelope;
+      const item: SubagentInfo = {
+        taskId: task.id,
+        state: task.state,
+        taskPreview: task.def.task?.slice(0, 120) ?? "",
+        startedAt: task.startedAt,
+        ...(task.endedAt !== undefined ? { endedAt: task.endedAt } : {}),
+        ...(envelope?.summary !== undefined
+          ? { summary: envelope.summary }
+          : {}),
+        ...(envelope !== undefined &&
+        envelope.status === "failed" &&
+        envelope.reason !== undefined
+          ? { reason: envelope.reason }
+          : {}),
+      };
+      out.push(item);
+    }
+    return out;
+  }
+
   async function shutdown(): Promise<void> {
     const runningTasks = [...tasks.values()].filter(
       (t) => t.state === "starting" || t.state === "running"
@@ -813,5 +881,6 @@ export function createSubAgentManager(opts: {
     drainCompleted,
     listActive,
     abortTask,
+    listSubagents,
   });
 }

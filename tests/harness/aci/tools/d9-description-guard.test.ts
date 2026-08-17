@@ -79,6 +79,8 @@ const fakeSubagentManager: SubAgentManager = {
   drainCompleted: () => [],
   listActive: () => [],
   abortTask: () => false,
+  // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
+  listSubagents: () => [],
 };
 
 /** Fake McpManager — sufficient for assembly. Mirrors registry.test.ts:63-70. */

@@ -31,7 +31,10 @@ import {
   createAdapterFromEnv,
 } from "../harness/build-engine.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
-import type { SubAgentManager } from "../harness/subagent/manager.js";
+import type {
+  SubAgentManager,
+  SubagentInfo,
+} from "../harness/subagent/manager.js";
 import { getVersion } from "../cli/usage.js"; // SC-W 6/7: agentVersion 注入(与 session-api/http.ts 同向 import,无循环)
 import type { AskUser } from "../harness/permission/types.js";
 import type {
@@ -495,6 +498,19 @@ export class SessionHub {
    */
   listPendingAsks(): ReadonlyArray<PendingAskView> {
     return this.askHandle?.pendingAll() ?? [];
+  }
+
+  /**
+   * #358 T7: Session API GET /sessions/:id/subagents 数据源。先经 store.load
+   * 做会话存在性门 —— 未知会话 → 抛 typed not_found(由 http 层 sendError
+   * 收编成 404, 不在 hub 裸抛);manager 缺席(ask 形态) → 200 空列表。
+   * 只读投影, 无写路径。
+   */
+  async listSubagentsForSession(
+    conversationId: string
+  ): Promise<ReadonlyArray<SubagentInfo>> {
+    await this.store.load(conversationId);
+    return this.subagentManager?.listSubagents() ?? [];
   }
 
   /**

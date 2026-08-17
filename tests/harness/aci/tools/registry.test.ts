@@ -54,6 +54,10 @@ const fakeSubagentManager: SubAgentManager = {
   waitFor: () => Promise.reject(new Error("not used")),
   shutdown: () => Promise.resolve(),
   drainCompleted: () => [],
+  listActive: () => [],
+  abortTask: () => false,
+  // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
+  listSubagents: () => [],
 };
 
 /** #440 T11 fake mcpManager（仅用于 createDefaultAciRegistry 装配期断言

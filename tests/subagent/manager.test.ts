@@ -660,7 +660,7 @@ describe("SubAgentDefinition local definition typecheck", () => {
     assert.equal(def.systemPrompt, undefined);
   });
 
-  it("manager surface exposes the five-member API", () => {
+  it("manager surface exposes the seven-member API", () => {
     const { manager } = makeHarness();
     const api: SubAgentManager = manager;
     assert.equal(typeof api.spawn, "function");
@@ -668,5 +668,87 @@ describe("SubAgentDefinition local definition typecheck", () => {
     assert.equal(typeof api.waitFor, "function");
     assert.equal(typeof api.shutdown, "function");
     assert.equal(typeof api.drainCompleted, "function");
+    assert.equal(typeof api.listActive, "function");
+    // #358 T7: 只读枚举面（Session API 端点消费；running/completed/failed 三态合一）。
+    assert.equal(typeof api.listSubagents, "function");
+  });
+});
+
+// ── #358 T7:listSubagents (只读枚举面,Session API 端点消费) ──────────────────
+
+describe("SubAgentManager listSubagents (#358 T7)", () => {
+  it("空管理面 → 返回空数组", () => {
+    const { manager } = makeHarness();
+    const items = manager.listSubagents();
+    assert.equal(items.length, 0);
+  });
+
+  it("completed 任务 → taskId/state/startedAt/taskPreview/endedAt/summary 齐全", () => {
+    const { manager, spawned } = makeHarness();
+    const { taskId } = manager.spawn({
+      task: "第一个任务提示词".repeat(40),
+    });
+    emitEnvelope(spawned[0]!, okEnvelope("r"));
+    const items = manager.listSubagents();
+    assert.equal(items.length, 1);
+    const item = items[0]!;
+    assert.equal(item.taskId, taskId);
+    assert.equal(item.state, "completed");
+    assert.equal(typeof item.startedAt, "string");
+    // 权限行: taskPreview 截断 ≤120,不落 task 全文 (spec 358 权限 row)。
+    assert.ok(item.taskPreview.length <= 120);
+    assert.equal(item.taskPreview, "第一个任务提示词".repeat(40).slice(0, 120));
+    // Postel: completed 必有 endedAt + summary。
+    assert.equal(typeof item.endedAt, "string");
+    assert.equal(item.summary, "done");
+    assert.equal(item.reason, undefined);
+  });
+
+  it("failed 任务 → state=failed + reason + summary (Postel: endedAt 必在)", () => {
+    const { manager, spawned } = makeHarness();
+    manager.spawn({ task: "explore the repo" });
+    spawned[0]!.emit("exit", 1, null);
+    const items = manager.listSubagents();
+    assert.equal(items.length, 1);
+    const item = items[0]!;
+    assert.equal(item.state, "failed");
+    assert.equal(item.reason, "crashed");
+    assert.match(item.summary!, /worker exit code=1 signal=null/);
+    assert.equal(typeof item.endedAt, "string");
+  });
+
+  it("running 任务 → Postel: endedAt/summary/reason 全缺席 (仅必备四字段)", () => {
+    const { manager } = makeHarness();
+    manager.spawn({ task: "long running" });
+    const items = manager.listSubagents();
+    assert.equal(items.length, 1);
+    const item = items[0]!;
+    assert.equal(item.state, "running");
+    assert.equal(item.endedAt, undefined);
+    assert.equal(item.summary, undefined);
+    assert.equal(item.reason, undefined);
+  });
+
+  it("task 缺席 → taskPreview 为空串 (回退不落全文)", () => {
+    const { manager } = makeHarness();
+    manager.spawn({ model: "opus" });
+    const items = manager.listSubagents();
+    assert.equal(items[0]!.taskPreview, "");
+  });
+
+  it("completed + failed + running 混合 → 返回全部三项 (每项 snapshot 只读)", () => {
+    const { manager, spawned, spawnCalls } = makeHarness();
+    manager.spawn({ task: "completed-task" }); // 0
+    manager.spawn({ task: "failed-task" }); // 1
+    manager.spawn({ task: "running-task" }); // 2
+    emitEnvelope(spawned[0]!, okEnvelope("done"));
+    spawned[1]!.emit("exit", 1, null);
+    assert.equal(spawnCalls.length, 3);
+    const items = manager.listSubagents();
+    assert.equal(items.length, 3);
+    const byState = Object.fromEntries(items.map((i) => [i.state, i]));
+    assert.equal(byState["completed"]!.taskPreview, "completed-task");
+    assert.equal(byState["failed"]!.taskPreview, "failed-task");
+    assert.equal(byState["running"]!.taskPreview, "running-task");
   });
 });

@@ -47,6 +47,8 @@ function baseManager(over: Partial<SubAgentManager>): SubAgentManager {
     drainCompleted: () => [],
     listActive: () => [],
     abortTask: () => false,
+    // #358 T7: 接口新增只读枚举面 —— baseManager 一处补全覆盖全部 over-spread 实例。
+    listSubagents: () => [],
     ...over,
   };
 }

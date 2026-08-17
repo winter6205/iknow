@@ -511,6 +511,10 @@ describe("buildHarnessEngine — #356 T6 subagent manager 装配", () => {
     waitFor: () => Promise.reject(new Error("not used")),
     shutdown: () => Promise.resolve(),
     drainCompleted: () => [],
+    listActive: () => [],
+    abortTask: () => false,
+    // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
+    listSubagents: () => [],
   };
 
   it("chat surface：注入 fake subagentManager → registry 含两件 + 透出注入对象", async () => {
