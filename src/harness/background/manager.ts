@@ -1,0 +1,477 @@
+/**
+ * #502 T2 — BackgroundTaskManager:后台任务生命周期 / 内存 Map 状态机 /
+ * registry 落盘同步 / 日志流式追加。
+ *
+ * 本票范围(精确):spawn(立即返回,不 await 退出)、registry json 写入/状态
+ * 迁移同步、log 尾部读取原语、stop(SIGTERM → 2s → SIGKILL,host 侧
+ * kill(-pgid))。shutdown/reap = T6 范围,本票不实现。
+ *
+ * DI 边界 mirror subagent/manager.ts:manager 不直接 import child_process
+ * 运行时(spawn 工厂经 opts 注入);生产实现 defaultBackgroundSpawn 同文件
+ * 导出(bwrap fence + detached spawn),T4 装配时由 build-engine 注入。
+ * bwrap fence 复用 createBwrapFence(ARGV 现状),Triad 本票不加 network
+ * 分支(Track B / T9)。
+ *
+ * 治理值自 ADR-0021 D1.6/D1.7(DEFAULT_LOG_MAX_* / task_id 格式在此即 SSOT)。
+ * typed-error BackgroundTaskError 判定联合(code-quality.md catch 契约):
+ *   empty_task_id / task_not_found / schema_invalid / io_failure / kill_race。
+ * kill_race 语义定稿(测试锁住):对已终态任务的 stop = 幂等成功(合法态,
+ * 不抛错、不二次发信号);仅 kill 升级期间进程组已消失(ESRCH)而未达 exit
+ * 事件 → 命中 kill_race 归类,调用面仍按幂等成功收敛,不把竞态暴露为错误。
+ */
+import { randomBytes } from "node:crypto";
+import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
+import { appendFile, readFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
+
+import {
+  BASE_ENV_WHITELIST,
+  createBwrapFence,
+  createEnvIsolation,
+  createFsPolicy,
+  createNetworkPolicy,
+  createResourceLimits,
+} from "../sandbox/index.js";
+import type { BackgroundTaskRecord, BackgroundTaskStatus } from "./registry.js";
+import { createBackgroundRegistry } from "./registry.js";
+import type { BackgroundRegistry } from "./registry.js";
+import type { BackgroundTaskError } from "./registry.js";
+
+/** spawn 请求校验失败的补充 kind(manager 专属;registry 不感知请求)。 */
+export type BackgroundSpawnValidationError =
+  | BackgroundTaskError
+  | {
+      kind: "spawn_validation_failed";
+      context: string;
+    };
+
+/** ADR-0021 D1.6:日志读取默认窗口 12KB(治理值 SSOT 落在 manager 常量)。 */
+export const DEFAULT_LOG_MAX_BYTES = 12 * 1024;
+/** ADR-0021 D1.6:日志读取窗口上限 100KB。 */
+export const MAX_LOG_READ_BYTES = 100 * 1024;
+/** stop 升级:SIGTERM → 宽限 2s → SIGKILL(复用 runner.ts stopTree 模式)。 */
+const STOP_KILL_GRACE_MS = 2_000;
+
+/** 内存态:进程内活句柄,不入 registry json(child + 可迁移状态)。 */
+interface BackgroundTask {
+  readonly task_id: string;
+  readonly client: MutableClientState;
+  child?: ChildProcess;
+  /** 日志 appendFile 串行链:每 chunk 都续在上一链尾,保证顺序。 */
+  writeChain: Promise<void>;
+}
+
+/** 对外只读展示;内部可迁移字段由 manager 独占变更。 */
+export interface BackgroundTaskClientState {
+  readonly status: BackgroundTaskStatus;
+  readonly exit_code: number | null;
+  readonly conversation_id: string;
+  readonly log_path: string;
+  readonly command: string;
+}
+
+interface MutableClientState {
+  status: BackgroundTaskStatus;
+  exit_code: number | null;
+  conversation_id: string;
+  log_path: string;
+  command: string;
+}
+
+export interface CreateBackgroundTaskManagerOptions {
+  /** 落盘根:`<workspaceRoot>/.iknow/tasks`(ADR-0021 D1.3)。 */
+  readonly tasksDir: string;
+  /** DI spawn 工厂:由调用方注入(fake 测试 / 生产 defaultBackgroundSpawn)。 */
+  readonly spawn: BackgroundSpawn;
+  /** 落盘 / 风险事件日志(缺省静默)。 */
+  readonly log?: (msg: string) => void;
+}
+
+/** spawn 工厂签名:传入已解析的请求,返回 ChildProcess。 */
+export type BackgroundSpawn = (
+  request: BackgroundSpawnRequest
+) => Promise<ChildProcess>;
+
+/** spawn 入参:命令 / cwd / 记账 conversationId。 */
+export interface BackgroundSpawnRequest {
+  readonly command: string;
+  readonly cwd: string;
+  readonly conversationId?: string;
+  /** 注入给 defaultBackgroundSpawn 的 fence 装配选项(T4 装配期可选传入)。 */
+  readonly workspaceRoot?: string;
+  readonly env?: NodeJS.ProcessEnv;
+  readonly home?: string;
+}
+
+export type BackgroundSpawnResult =
+  | {
+      readonly status: "ok";
+      readonly task_id: string;
+      readonly log_path: string;
+    }
+  | {
+      readonly status: "spawn_error";
+      readonly task_id: string;
+      readonly error: BackgroundSpawnValidationError;
+    };
+
+export interface BackgroundStatusResult {
+  readonly status: BackgroundTaskStatus;
+  readonly task_id: string;
+  readonly exit_code: number | null;
+  readonly command: string;
+}
+
+export interface BackgroundOutputResult {
+  /** 仅返回尾部文本(默认 12KB,上限 100KB),超上限时截断。 */
+  readonly text: string;
+  readonly status: BackgroundTaskStatus;
+  readonly exit_code: number | null;
+  readonly task_id: string;
+}
+
+export interface BackgroundTaskManager {
+  /**
+   * 经注入的 spawn 工厂起 detached 进程组,立即返回 {task_id, log_path}。
+   * 落盘 json 写入失败 → spawn_error(io_failure)。resolved 即 registry
+   * 已在盘上(同步契约,测试可立即读回)。
+   */
+  readonly spawn: (
+    request: BackgroundSpawnRequest
+  ) => Promise<BackgroundSpawnResult>;
+  /** 查询当前状态(running / exited / killed)。内存态,不读盘。 */
+  readonly status: (taskId: string) => Promise<BackgroundStatusResult>;
+  /** 读日志尾部(默认 12KB,上限 100KB),附带当前状态与 exitCode。 */
+  readonly output: (
+    taskId: string,
+    maxBytes?: number
+  ) => Promise<BackgroundOutputResult>;
+  /**
+   * host 侧 kill(-pgid):SIGTERM → 2s 宽限 → SIGKILL。
+   * 对已终态任务幂等成功(合法态);对未知任务抛 task_not_found。
+   */
+  readonly stop: (taskId: string) => Promise<void>;
+}
+
+/**
+ * 生产 spawn 工厂:内部构建 bwrap fence + detached spawn。
+ * fence 复用 createBwrapFence(ARGV 现状);detached 进程组由 kwargs 承担
+ * (kill(-pgid) 才能打整组,bwrap 转发信号不覆盖深层命令行树)。
+ */
+export async function defaultBackgroundSpawn(
+  req: BackgroundSpawnRequest
+): Promise<ChildProcess> {
+  const cwd = req.cwd;
+  const home = req.home ?? homedir();
+  const fsPolicy = createFsPolicy({
+    cwd,
+    home,
+    tmpDir: tmpdir(),
+    ...(req.workspaceRoot ? { workspaceRoot: req.workspaceRoot } : {}),
+  });
+  const resources = createResourceLimits();
+  const network = createNetworkPolicy();
+  const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
+  const fenceEnv = envIsolation.filter(req.env ?? process.env);
+  const fence = createBwrapFence({
+    command: "bash",
+    args: ["-c", req.command],
+    fsPolicy,
+    networkPolicy: network,
+    resourceLimits: resources,
+    env: fenceEnv,
+    cwd,
+  });
+  return nodeSpawn(fence.argv[0], fence.argv.slice(1), {
+    cwd,
+    env: fenceEnv,
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: true,
+  }) as ChildProcess;
+}
+
+/** spawn 请求校验:command 必须非空字符串。 */
+function validateRequest(
+  req: BackgroundSpawnRequest
+): BackgroundSpawnValidationError | null {
+  if (typeof req.command !== "string" || req.command.trim().length === 0) {
+    return {
+      kind: "spawn_validation_failed",
+      context: "spawn: command required",
+    } satisfies BackgroundSpawnValidationError;
+  }
+  return null;
+}
+
+export function createBackgroundTaskManager(
+  opts: CreateBackgroundTaskManagerOptions
+): BackgroundTaskManager {
+  const log = opts.log ?? (() => undefined);
+  const registry: BackgroundRegistry = createBackgroundRegistry({
+    tasksDir: opts.tasksDir,
+    log,
+  });
+  const tasks = new Map<string, BackgroundTask>();
+
+  /** task_id 生成(ADR-0021 D1.7):`bg-` + 12 位随机 hex。 */
+  function generateTaskId(): string {
+    return `bg-${randomBytes(6).toString("hex")}`;
+  }
+
+  async function spawn(
+    request: BackgroundSpawnRequest
+  ): Promise<BackgroundSpawnResult> {
+    const invalid = validateRequest(request);
+    if (invalid) {
+      return { status: "spawn_error", task_id: "", error: invalid };
+    }
+    const taskId = generateTaskId();
+    const logPath = join(opts.tasksDir, `${taskId}.log`);
+
+    let child: ChildProcess;
+    try {
+      child = await opts.spawn(request);
+    } catch (err) {
+      const error: BackgroundTaskError = {
+        kind: "io_failure",
+        context: `spawn ${taskId}`,
+        cause: err instanceof Error ? err.message : String(err),
+      };
+      log(`background spawn factory threw: ${error.context}`);
+      return { status: "spawn_error", task_id: taskId, error };
+    }
+    if (child.pid === undefined) {
+      log(`background spawn returned no pid: ${taskId}`);
+      return {
+        status: "spawn_error",
+        task_id: taskId,
+        error: {
+          kind: "io_failure",
+          context: `spawn ${taskId}: child has no pid`,
+        },
+      };
+    }
+
+    const record: BackgroundTaskRecord = {
+      task_id: taskId,
+      command: request.command,
+      owner_pid: process.pid,
+      conversation_id: request.conversationId ?? "",
+      pgid: child.pid,
+      status: "running",
+      exit_code: null,
+      created_at: new Date().toISOString(),
+      log_path: logPath,
+    };
+
+    // registry json 落盘(running 态)先于返回 —— spawn resolved 即 registry
+    // 在盘上(spawn → registry 同步契约)。失败 = spawn_error(io_failure),
+    // 且立即回收已起的 detached child(不泄漏孤儿)。
+    try {
+      await registry.save(record);
+    } catch (err) {
+      const error = err as BackgroundTaskError;
+      log(`background registry save failed on spawn: ${taskId}`);
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* ESRCH 等忽略 */
+      }
+      return { status: "spawn_error", task_id: taskId, error };
+    }
+
+    const client: MutableClientState = {
+      status: "running",
+      exit_code: null,
+      conversation_id: record.conversation_id,
+      log_path: logPath,
+      command: request.command,
+    };
+    const task: BackgroundTask = {
+      task_id: taskId,
+      client,
+      child,
+      writeChain: Promise.resolve(),
+    };
+    tasks.set(taskId, task);
+
+    // 状态终态迁移:exit 事件驱动,只迁移一次。
+    let settled = false;
+    const settle = async (
+      status: BackgroundTaskStatus,
+      exitCode: number | null
+    ): Promise<void> => {
+      if (settled) return;
+      settled = true;
+      client.status = status;
+      client.exit_code = exitCode;
+      const rec: BackgroundTaskRecord = {
+        task_id: taskId,
+        command: request.command,
+        owner_pid: process.pid,
+        conversation_id: record.conversation_id,
+        pgid: record.pgid,
+        status,
+        exit_code: exitCode,
+        created_at: record.created_at,
+        log_path: logPath,
+      };
+      try {
+        await registry.save(rec);
+      } catch (err) {
+        log(
+          `background registry save failed on settle: ${
+            (err as BackgroundTaskError).context
+          }`
+        );
+      }
+    };
+
+    // 日志流式追加:stdout + stderr 合并进同一 log 文件(append,4KiB chunk
+    // 语义来自 OpenHarness manager.py chunk reader 思想)。串行链保顺序:
+    // 每 chunk 都续在 task.writeChain 尾部,并发 data 事件不乱序。
+    const enqueue = (chunk: Buffer | string): void => {
+      task.writeChain = task.writeChain.then(() =>
+        appendFile(logPath, chunk, "utf8").catch(() => {
+          log(`background log append failed: ${taskId}`);
+        })
+      );
+    };
+    child.stdout?.on("data", (chunk: Buffer) => enqueue(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => enqueue(chunk));
+
+    child.on("error", (err) => {
+      log(`background child error: ${err.message}`);
+    });
+
+    child.on("exit", (code, signal) => {
+      // 被信号终止 → killed;自然退出 → exited。exit 事件到达时写入队列
+      // 可能仍 pending —— settle 只迁移状态 + 落盘 json,log flush 由
+      // output 侧 drain。
+      const termStatus: BackgroundTaskStatus =
+        signal !== null ? "killed" : "exited";
+      const exitCode = code ?? (signal === null ? 0 : null);
+      void settle(termStatus, exitCode);
+    });
+
+    return { status: "ok", task_id: taskId, log_path: logPath };
+  }
+
+  function ensureTask(taskId: string, op: string): BackgroundTask {
+    if (taskId.trim().length === 0) {
+      throw {
+        kind: "empty_task_id",
+        context: op,
+      } satisfies BackgroundTaskError;
+    }
+    const task = tasks.get(taskId);
+    if (!task) {
+      throw {
+        kind: "task_not_found",
+        context: taskId,
+      } satisfies BackgroundTaskError;
+    }
+    return task;
+  }
+
+  async function status(taskId: string): Promise<BackgroundStatusResult> {
+    const task = ensureTask(taskId, "status");
+    return {
+      status: task.client.status,
+      task_id: taskId,
+      exit_code: task.client.exit_code,
+      command: task.client.command,
+    };
+  }
+
+  async function output(
+    taskId: string,
+    maxBytes: number = DEFAULT_LOG_MAX_BYTES
+  ): Promise<BackgroundOutputResult> {
+    const task = ensureTask(taskId, "output");
+    // drain 串行写链:log 文件读完前先等所有已入队 appendFile 完成,
+    // 避免 stdout/stderr chunk 与读操作竞态。
+    await task.writeChain.catch(() => undefined);
+    const effectiveMax = Math.min(
+      maxBytes > 0 ? maxBytes : DEFAULT_LOG_MAX_BYTES,
+      MAX_LOG_READ_BYTES
+    );
+    let raw: string;
+    try {
+      raw = await readFile(task.client.log_path, "utf8");
+    } catch (err) {
+      // log 尚不存在(spawn 刚返回,首 chunk 未落) → 空文本,非错误。
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") raw = "";
+      else {
+        throw {
+          kind: "io_failure",
+          context: `output ${taskId}`,
+          cause: err instanceof Error ? err.message : String(err),
+        } satisfies BackgroundTaskError;
+      }
+    }
+    return {
+      text: raw.length > effectiveMax ? raw.slice(-effectiveMax) : raw,
+      status: task.client.status,
+      exit_code: task.client.exit_code,
+      task_id: taskId,
+    };
+  }
+
+  /** host 侧 kill(-pgid):SIGTERM → 宽限 2s → SIGKILL。 */
+  async function stop(taskId: string): Promise<void> {
+    const task = ensureTask(taskId, "stop");
+    if (task.client.status !== "running") {
+      // 幂等语义:对已终态任务 stop = 合法 no-op(不抛错、不二次发信号)。
+      return;
+    }
+    const child = task.child;
+    const pid = child?.pid;
+    if (!child || pid === undefined) {
+      log(`background stop: no child handle for ${taskId}`);
+      return;
+    }
+    // 第一击:child 单进程 + 进程组双路(fake 下 process.kill 对假 pid 抛
+    // ESRCH 被吞,断言走 child.kill 记录)。
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      /* 已死 EPIPE / ESRCH 忽略 */
+    }
+    try {
+      process.kill(-pid, "SIGTERM");
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      // ESRCH = 进程组已消失(可能刚自然退出,exit 未达) → kill_race 窗口,
+      // 按幂等收敛,不抛错。
+      if (code !== "ESRCH") {
+        log(`background stop SIGTERM group failed: ${String(err)}`);
+      }
+    }
+    // SIGKILL 兜底:2s 后仍 running 才发。
+    const killFallback = setTimeout(() => {
+      const t = tasks.get(taskId);
+      if (t && t.client.status === "running" && t.child) {
+        try {
+          t.child.kill("SIGKILL");
+        } catch {
+          /* 忽略 */
+        }
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          /* 忽略 */
+        }
+      }
+    }, STOP_KILL_GRACE_MS);
+    killFallback.unref?.();
+  }
+
+  return Object.freeze({
+    spawn,
+    status,
+    output,
+    stop,
+  });
+}
