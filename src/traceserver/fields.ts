@@ -31,6 +31,39 @@ export interface TraceFieldDef {
   readonly tone?: "status";
 }
 
+/**
+ * T5 (#358) subagent 生命周期列。
+ * jsonlKey 对齐 src/harness/trace/types.ts 三类 Subagent*Record + jsonl.ts
+ * camelToSnake: subagent_id 是显式 id 载体 (= manager taskId), task_id /
+ * parent_turn_id / from_state / to_state / final_state / exit_code 来自顶层
+ * camelCase key 的 snake 化。Postel: 可选字段 (parent_turn_id 等) 仅存在时
+ * 落盘, 列定义按 schema 声明不受写入侧缺席影响。
+ *
+ * 三类 record 共用列 (subagentId / taskId / origin / parentTurnId / startedAt /
+ * status / ts) 直接列全三 type; 单类列 (fromState / toState / finalState) 只列
+ * 对应 type。
+ */
+const SUBAGENT_TYPES: ReadonlyArray<TraceRecordType> = [
+  "subagent_spawn",
+  "subagent_stop",
+  "subagent_state_change",
+] as const;
+
+const SUBAGENT_STOP_REASON_OPTIONS: ReadonlyArray<string> = [
+  "crashed",
+  "maxTurnsExceeded",
+  "timeout",
+  "protocolError",
+  "cancelled",
+] as const;
+
+const SUBAGENT_STATE_OPTIONS: ReadonlyArray<string> = [
+  "starting",
+  "running",
+  "completed",
+  "failed",
+] as const;
+
 export const TRACE_FIELD_DEFS: ReadonlyArray<TraceFieldDef> = [
   {
     key: "conversationId",
@@ -44,36 +77,84 @@ export const TRACE_FIELD_DEFS: ReadonlyArray<TraceFieldDef> = [
     jsonlKey: "record_type",
     type: "enum",
     label: "记录类型",
-    recordTypes: ["llm_call", "tool_call", "turn", "violation"],
-    options: ["llm_call", "tool_call", "turn", "violation"],
+    recordTypes: [
+      "llm_call",
+      "tool_call",
+      "turn",
+      "violation",
+      "subagent_spawn",
+      "subagent_stop",
+      "subagent_state_change",
+    ],
+    options: [
+      "llm_call",
+      "tool_call",
+      "turn",
+      "violation",
+      "subagent_spawn",
+      "subagent_stop",
+      "subagent_state_change",
+    ],
   },
   {
     key: "startedAt",
     jsonlKey: "started_at",
     type: "datetime",
     label: "开始时间",
-    recordTypes: ["llm_call", "tool_call", "turn", "session", "sandbox_cmd"],
+    recordTypes: [
+      "llm_call",
+      "tool_call",
+      "turn",
+      "session",
+      "sandbox_cmd",
+      "subagent_spawn",
+      "subagent_stop",
+      "subagent_state_change",
+    ],
   },
   {
     key: "endedAt",
     jsonlKey: "ended_at",
     type: "datetime",
     label: "结束时间",
-    recordTypes: ["llm_call", "tool_call", "turn", "session", "sandbox_cmd"],
+    recordTypes: [
+      "llm_call",
+      "tool_call",
+      "turn",
+      "session",
+      "sandbox_cmd",
+      "subagent_stop",
+    ],
   },
   {
     key: "durationMs",
     jsonlKey: "duration_ms",
     type: "number",
     label: "耗时 (ms)",
-    recordTypes: ["llm_call", "tool_call", "turn", "session", "sandbox_cmd"],
+    recordTypes: [
+      "llm_call",
+      "tool_call",
+      "turn",
+      "session",
+      "sandbox_cmd",
+      "subagent_stop",
+    ],
   },
   {
     key: "status",
     jsonlKey: "status",
     type: "enum",
     label: "状态",
-    recordTypes: ["llm_call", "tool_call", "turn", "session", "sandbox_cmd"],
+    recordTypes: [
+      "llm_call",
+      "tool_call",
+      "turn",
+      "session",
+      "sandbox_cmd",
+      "subagent_spawn",
+      "subagent_stop",
+      "subagent_state_change",
+    ],
     options: ["ok", "error"],
     tone: "status",
   },
@@ -134,7 +215,12 @@ export const TRACE_FIELD_DEFS: ReadonlyArray<TraceFieldDef> = [
     jsonlKey: "ts",
     type: "datetime",
     label: "时间",
-    recordTypes: ["violation"],
+    recordTypes: [
+      "violation",
+      "subagent_spawn",
+      "subagent_stop",
+      "subagent_state_change",
+    ],
   },
   {
     key: "agentVersion",
@@ -148,7 +234,12 @@ export const TRACE_FIELD_DEFS: ReadonlyArray<TraceFieldDef> = [
     jsonlKey: "parent_turn_id",
     type: "string",
     label: "父回合 ID",
-    recordTypes: ["sandbox_cmd"],
+    recordTypes: [
+      "sandbox_cmd",
+      "subagent_spawn",
+      "subagent_stop",
+      "subagent_state_change",
+    ],
   },
   {
     key: "command",
@@ -162,7 +253,7 @@ export const TRACE_FIELD_DEFS: ReadonlyArray<TraceFieldDef> = [
     jsonlKey: "exit_code",
     type: "number",
     label: "退出码",
-    recordTypes: ["sandbox_cmd"],
+    recordTypes: ["sandbox_cmd", "subagent_stop"],
   },
   {
     key: "stdoutCaptured",
@@ -177,6 +268,60 @@ export const TRACE_FIELD_DEFS: ReadonlyArray<TraceFieldDef> = [
     type: "string",
     label: "标准输出",
     recordTypes: ["sandbox_cmd"],
+  },
+  {
+    key: "subagentId",
+    jsonlKey: "subagent_id",
+    type: "string",
+    label: "子代理 ID",
+    recordTypes: SUBAGENT_TYPES,
+  },
+  {
+    key: "taskId",
+    jsonlKey: "task_id",
+    type: "string",
+    label: "任务 ID",
+    recordTypes: SUBAGENT_TYPES,
+  },
+  {
+    key: "origin",
+    jsonlKey: "origin",
+    type: "enum",
+    label: "来源",
+    recordTypes: SUBAGENT_TYPES,
+    options: ["parent", "child"],
+  },
+  {
+    key: "finalState",
+    jsonlKey: "final_state",
+    type: "enum",
+    label: "终态",
+    recordTypes: ["subagent_stop"],
+    options: ["completed", "failed"],
+  },
+  {
+    key: "reason",
+    jsonlKey: "reason",
+    type: "enum",
+    label: "原因",
+    recordTypes: ["subagent_stop", "subagent_state_change"],
+    options: SUBAGENT_STOP_REASON_OPTIONS,
+  },
+  {
+    key: "fromState",
+    jsonlKey: "from_state",
+    type: "enum",
+    label: "原状态",
+    recordTypes: ["subagent_state_change"],
+    options: SUBAGENT_STATE_OPTIONS,
+  },
+  {
+    key: "toState",
+    jsonlKey: "to_state",
+    type: "enum",
+    label: "新状态",
+    recordTypes: ["subagent_state_change"],
+    options: SUBAGENT_STATE_OPTIONS,
   },
 ];
 

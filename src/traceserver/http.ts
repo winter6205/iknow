@@ -57,6 +57,20 @@ function parseConversationId(value: string | null): string | undefined {
   return value;
 }
 
+/** T5 (#358): 非空字符串过滤值 (task_id / parent_turn_id 共用 parseConversationId 形状)。 */
+function parseStringParam(
+  value: string | null,
+  field: string
+): string | undefined {
+  if (value === null) return undefined;
+  if (value.length === 0) {
+    throw new ValidationError(`${field} must be a non-empty string`, {
+      field,
+    });
+  }
+  return value;
+}
+
 function parseRecordType(value: string | null): TraceRecordType | undefined {
   if (value === null) return undefined;
   if (!(TRACE_RECORD_TYPES as ReadonlyArray<string>).includes(value)) {
@@ -142,6 +156,8 @@ function parseTraceQuery(url: URL): TraceQuery {
     limit: parseLimit(p.get("limit")),
     offset: parseOffset(p.get("offset")),
     resumeOffset: parseResumeOffset(p.get("resume_offset")),
+    taskId: parseStringParam(p.get("task_id"), "task_id"),
+    parentTurnId: parseStringParam(p.get("parent_turn_id"), "parent_turn_id"),
   };
 }
 
