@@ -69,6 +69,12 @@ export const THINKING_EFFORT_LEVELS = [
 
 export interface IknowSettingsLlm {
   maxTurns?: number;
+  /**
+   * #358 T1: 单次 LLM 调用竞速上限（per-call，毫秒）。
+   * 镜像 maxTurns 校验纪律：有限正整数才合法；非整数 / 非正数 / 非数字 / 错类型 → 丢弃该字段。
+   * env 链：`envOptionalInt("IKNOW_LLM_TIMEOUT_MS") ?? settings.llm.timeoutMs ?? 60_000`。
+   */
+  timeoutMs?: number;
   compress?: IknowSettingsLlmCompress;
   /** 缺省 thinking 开关；env IKNOW_LLM_THINKING 显式设置时覆盖它。 */
   thinking?: IknowSettingsThinking;
@@ -137,10 +143,31 @@ export interface IknowSettingsSecrets {
   mode?: "roundtrip" | "block";
 }
 
+/**
+ * #358 T1: 子代理配置段（per-task wallclock，独立于 per-call llm.timeoutMs）。
+ *
+ * `taskTimeoutMs` = 子代理整任务寿命上限（毫秒），父 manager SIGTERM 计时消费。
+ * 与 `llm.timeoutMs`（per-call LLM 调用竞速）语义、命名、消费点全程分离（C9）。
+ *
+ * 校验纪律（镜像 maxTurns）：
+ *  - 有限正整数（>= 1 且为整数）才合法；
+ *  - 非正 / 非整数 / 非数字 / 错类型 → 丢弃该字段；
+ *  - 全部字段非法 → 不产出 subagent 段。
+ *
+ * env 链（镜像 maxTurns 模式）：
+ * `envOptionalInt("IKNOW_SUBAGENT_TASK_TIMEOUT_MS") ?? mergedSettings.subagent?.taskTimeoutMs`，
+ * env 层不预填 7200s 默认值（缺省值在 T2 的 manager 消费点声明，避免两处声明）。
+ */
+export interface IknowSettingsSubagent {
+  taskTimeoutMs?: number;
+}
+
 export interface IknowSettings {
   llm?: IknowSettingsLlm;
   verify?: IknowSettingsVerify;
   secrets?: IknowSettingsSecrets;
+  /** #358 T1: 子代理配置段（per-task wallclock）。 */
+  subagent?: IknowSettingsSubagent;
 }
 
 export interface LoadSettingsOpts {
@@ -162,6 +189,26 @@ function isPositiveFinite(v: unknown): v is number {
 
 /** 有限正整数（>= 1 且为整数）：maxTurns 的值域。 */
 function isValidMaxTurns(v: unknown): v is number {
+  return (
+    typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 1
+  );
+}
+
+/**
+ * #358 T1: llm.timeoutMs 校验（per-call LLM 调用竞速上限，毫秒）。
+ * 镜像 maxTurns 纪律：有限正整数才合法；非正 / 非整数 / 非数字 / 错类型 → 丢弃。
+ */
+function isValidTimeoutMs(v: unknown): v is number {
+  return (
+    typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 1
+  );
+}
+
+/**
+ * #358 T1: subagent.taskTimeoutMs 校验（per-task 整任务寿命上限，毫秒）。
+ * 镜像 maxTurns 纪律：有限正整数才合法；非正 / 非整数 / 非数字 / 错类型 → 丢弃。
+ */
+function isValidTaskTimeoutMs(v: unknown): v is number {
   return (
     typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 1
   );
@@ -282,6 +329,8 @@ function parseLlm(raw: unknown): IknowSettingsLlm | undefined {
   if (!isPlainObject(raw)) return undefined;
   const out: IknowSettingsLlm = {};
   if (isValidMaxTurns(raw.maxTurns)) out.maxTurns = raw.maxTurns;
+  // #358 T1: per-call LLM 调用竞速上限（毫秒）。
+  if (isValidTimeoutMs(raw.timeoutMs)) out.timeoutMs = raw.timeoutMs;
   if (isValidThinking(raw.thinking)) out.thinking = raw.thinking;
   if (isValidThinkingEffort(raw.thinkingEffort)) {
     out.thinkingEffort = raw.thinkingEffort;
@@ -308,6 +357,7 @@ function parseLlm(raw: unknown): IknowSettingsLlm | undefined {
   }
   if (
     out.maxTurns === undefined &&
+    out.timeoutMs === undefined &&
     out.compress === undefined &&
     out.thinking === undefined &&
     out.thinkingEffort === undefined &&
@@ -355,6 +405,22 @@ function parseVerify(raw: unknown): IknowSettingsVerify | undefined {
   return out;
 }
 
+/**
+ * #358 T1: 校验单个 `subagent` 层 —— 非法字段丢弃。
+ * 非普通对象（数组 / 字符串 / 数字等）→ undefined（丢弃该层）。
+ * taskTimeoutMs 非有限正整数 → 丢弃该字段。
+ * 全部字段非法 → undefined（丢弃该段）。
+ */
+function parseSubagent(raw: unknown): IknowSettingsSubagent | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const out: IknowSettingsSubagent = {};
+  if (isValidTaskTimeoutMs(raw.taskTimeoutMs)) {
+    out.taskTimeoutMs = raw.taskTimeoutMs;
+  }
+  if (out.taskTimeoutMs === undefined) return undefined;
+  return out;
+}
+
 /** 逐层合并 verify：project 字段优先，未覆盖的 user 字段保留。 */
 function mergeVerify(
   user: IknowSettingsVerify | undefined,
@@ -395,6 +461,25 @@ function mergeVerify(
   return out;
 }
 
+/**
+ * #358 T1: 逐层合并 subagent：project 字段优先，未覆盖的 user 字段保留。
+ * 仅 taskTimeoutMs 一个字段；parse 层已保证 > 0 整数，merge 仅做 project > user 选择。
+ */
+function mergeSubagent(
+  user: IknowSettingsSubagent | undefined,
+  project: IknowSettingsSubagent | undefined
+): IknowSettingsSubagent | undefined {
+  if (!user && !project) return undefined;
+  const out: IknowSettingsSubagent = {};
+  if (project?.taskTimeoutMs !== undefined) {
+    out.taskTimeoutMs = project.taskTimeoutMs;
+  } else if (user?.taskTimeoutMs !== undefined) {
+    out.taskTimeoutMs = user.taskTimeoutMs;
+  }
+  if (out.taskTimeoutMs === undefined) return undefined;
+  return out;
+}
+
 /** 逐层合并 llm：project 字段优先，未覆盖的 user 字段保留。 */
 function mergeLlm(
   user: IknowSettingsLlm | undefined,
@@ -404,6 +489,9 @@ function mergeLlm(
   const out: IknowSettingsLlm = {};
   if (project?.maxTurns !== undefined) out.maxTurns = project.maxTurns;
   else if (user?.maxTurns !== undefined) out.maxTurns = user.maxTurns;
+  // #358 T1: per-call LLM 调用竞速上限（per-field project > user）。
+  if (project?.timeoutMs !== undefined) out.timeoutMs = project.timeoutMs;
+  else if (user?.timeoutMs !== undefined) out.timeoutMs = user.timeoutMs;
   if (project?.thinking !== undefined) out.thinking = project.thinking;
   else if (user?.thinking !== undefined) out.thinking = user.thinking;
   if (project?.thinkingEffort !== undefined) {
@@ -438,6 +526,7 @@ function mergeLlm(
   }
   if (
     out.maxTurns === undefined &&
+    out.timeoutMs === undefined &&
     out.compress === undefined &&
     out.thinking === undefined &&
     out.thinkingEffort === undefined &&
@@ -508,10 +597,15 @@ function mergeSettings(
   const userSecrets = parseSecrets(userRaw.secrets);
   const projectSecrets = parseSecrets(projectRaw.secrets);
   const secrets = mergeSecrets(userSecrets, projectSecrets);
+  // #358 T1: 子代理配置段（per-task wallclock），与 llm.timeoutMs（per-call）独立。
+  const userSubagent = parseSubagent(userRaw.subagent);
+  const projectSubagent = parseSubagent(projectRaw.subagent);
+  const subagent = mergeSubagent(userSubagent, projectSubagent);
   const out: IknowSettings = {};
   if (llm) out.llm = llm;
   if (verify) out.verify = verify;
   if (secrets) out.secrets = secrets;
+  if (subagent) out.subagent = subagent;
   return out;
 }
 

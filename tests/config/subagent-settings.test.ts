@@ -1,0 +1,284 @@
+/**
+ * #358 T1 — subagent settings 双字段集成（per-call llm.timeoutMs + per-task subagent.taskTimeoutMs）。
+ *
+ * settings + env 联合：
+ *  - settings 文件层 parse/merge（drop-not-throw + project > user）；
+ *  - env 文件层 + process.env 层 fallback（env > settings）；
+ *  - 跨进程继承（子代理自装配同 cwd → 继承 project settings 的两个字段）。
+ *
+ * 覆盖：单字段、双字段并存、合并覆盖、env 覆盖 settings、跨进程继承、frozen。
+ */
+import { describe, it, beforeAll, afterAll } from "vitest";
+import assert from "node:assert/strict";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadIknowSettings } from "../../src/config/settings.ts";
+import { loadIknowEnv } from "../../src/config/env.ts";
+
+let workDir: string;
+beforeAll(async () => {
+  workDir = await mkdtemp(join(tmpdir(), "iknow-subagent-settings-"));
+});
+afterAll(async () => {
+  await rm(workDir, { recursive: true, force: true });
+});
+
+/** env loader fail-fast 兜底：model 必须有来源，否则 loader 抛错。 */
+const EMPTY = { llm: { model: "test-model" } };
+
+/** 写 user / project 各一个 settings 文件，返回隔离的 LoadSettingsOpts。 */
+async function makeSettings(
+  user: Record<string, unknown>,
+  project: Record<string, unknown>
+): Promise<{ home: string; cwd: string }> {
+  const home = join(workDir, "home", `${Math.random().toString(36).slice(2)}`);
+  const cwd = join(workDir, "cwd", `${Math.random().toString(36).slice(2)}`);
+  await mkdir(join(home, ".iknow"), { recursive: true });
+  await mkdir(join(cwd, ".iknow"), { recursive: true });
+  if (Object.keys(user).length > 0) {
+    await writeFile(
+      join(home, ".iknow", "settings.json"),
+      JSON.stringify(user)
+    );
+  }
+  if (Object.keys(project).length > 0) {
+    await writeFile(
+      join(cwd, ".iknow", "settings.json"),
+      JSON.stringify(project)
+    );
+  }
+  return { home, cwd };
+}
+
+describe("subagent settings — settings 文件层 parse (#358 T1)", () => {
+  it("仅 subagent.taskTimeoutMs → 出 subagent 段（不含 llm）", async () => {
+    const { home, cwd } = await makeSettings(
+      { subagent: { taskTimeoutMs: 7_200_000 } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      subagent: { taskTimeoutMs: 7_200_000 },
+    });
+  });
+
+  it("仅 llm.timeoutMs → 出 llm 段带 timeoutMs（不含 subagent）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { timeoutMs: 60_000 } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { timeoutMs: 60_000 },
+    });
+  });
+
+  it("同时配 llm.timeoutMs + subagent.taskTimeoutMs → 两段都保留", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { timeoutMs: 60_000 }, subagent: { taskTimeoutMs: 7_200_000 } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { timeoutMs: 60_000 },
+      subagent: { taskTimeoutMs: 7_200_000 },
+    });
+  });
+
+  it("drop-not-throw: taskTimeoutMs 0/-5/'abc'/1.5 → 丢弃 subagent 段", async () => {
+    for (const bad of [0, -5, "abc", 1.5]) {
+      const { home, cwd } = await makeSettings(
+        { subagent: { taskTimeoutMs: bad } },
+        {}
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `taskTimeoutMs=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("drop-not-throw: llm.timeoutMs 0/-5/'abc'/1.5 → 丢弃 llm.timeoutMs 字段", async () => {
+    for (const bad of [0, -5, "abc", 1.5]) {
+      const { home, cwd } = await makeSettings({ llm: { timeoutMs: bad } }, {});
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `timeoutMs=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+});
+
+describe("subagent settings — settings 文件层 merge (#358 T1)", () => {
+  it("project 覆盖 user llm.timeoutMs", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { timeoutMs: 60_000 } },
+      { llm: { timeoutMs: 30_000 } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { timeoutMs: 30_000 },
+    });
+  });
+
+  it("project 覆盖 user subagent.taskTimeoutMs", async () => {
+    const { home, cwd } = await makeSettings(
+      { subagent: { taskTimeoutMs: 7_200_000 } },
+      { subagent: { taskTimeoutMs: 1_800_000 } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      subagent: { taskTimeoutMs: 1_800_000 },
+    });
+  });
+
+  it("逐层合并：user 配 llm.timeoutMs、project 配 subagent.taskTimeoutMs → 两段都保留", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { timeoutMs: 60_000 } },
+      { subagent: { taskTimeoutMs: 7_200_000 } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { timeoutMs: 60_000 },
+      subagent: { taskTimeoutMs: 7_200_000 },
+    });
+  });
+
+  it("逐层合并：user 配 subagent.taskTimeoutMs、project 配 llm.timeoutMs → 两段都保留", async () => {
+    const { home, cwd } = await makeSettings(
+      { subagent: { taskTimeoutMs: 7_200_000 } },
+      { llm: { timeoutMs: 30_000 } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { timeoutMs: 30_000 },
+      subagent: { taskTimeoutMs: 7_200_000 },
+    });
+  });
+
+  it("project 非法 timeoutMs 不覆盖 user 合法（保留 user 值）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { timeoutMs: 60_000 } },
+      { llm: { timeoutMs: "bad" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { timeoutMs: 60_000 },
+    });
+  });
+
+  it("project 非法 taskTimeoutMs 不覆盖 user 合法（保留 user 值）", async () => {
+    const { home, cwd } = await makeSettings(
+      { subagent: { taskTimeoutMs: 7_200_000 } },
+      { subagent: { taskTimeoutMs: -1 } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      subagent: { taskTimeoutMs: 7_200_000 },
+    });
+  });
+});
+
+describe("subagent settings — env > settings 链 (#358 T1)", () => {
+  const ENV_KEYS_SUBAGENT = [
+    "IKNOW_LLM_TIMEOUT_MS",
+    "IKNOW_SUBAGENT_TASK_TIMEOUT_MS",
+  ] as const;
+
+  beforeAll(() => {
+    for (const k of ENV_KEYS_SUBAGENT) delete process.env[k];
+  });
+  afterAll(() => {
+    for (const k of ENV_KEYS_SUBAGENT) delete process.env[k];
+  });
+
+  it("settings 配 llm.timeoutMs + subagent.taskTimeoutMs → env 透传", () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model", timeoutMs: 45_000 },
+      subagent: { taskTimeoutMs: 3_600_000 },
+    });
+    assert.equal(env.llm.timeoutMs, 45_000);
+    assert.equal(env.subagent?.taskTimeoutMs, 3_600_000);
+  });
+
+  it("env 配 llm.timeoutMs + subagent.taskTimeoutMs → env wins（覆盖 settings）", () => {
+    process.env.IKNOW_LLM_TIMEOUT_MS = "30000";
+    process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "7200000";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model", timeoutMs: 45_000 },
+      subagent: { taskTimeoutMs: 3_600_000 },
+    });
+    assert.equal(env.llm.timeoutMs, 30_000);
+    assert.equal(env.subagent?.taskTimeoutMs, 7_200_000);
+  });
+
+  it("env 非法 + settings 未配 → llm.timeoutMs 60000 fallback、subagent.taskTimeoutMs undefined", () => {
+    process.env.IKNOW_LLM_TIMEOUT_MS = "abc";
+    process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "abc";
+    const env = loadIknowEnv(process.cwd(), EMPTY);
+    assert.equal(env.llm.timeoutMs, 60_000);
+    assert.equal(env.subagent?.taskTimeoutMs, undefined);
+  });
+
+  it("仅 subagent.taskTimeoutMs env、llm.timeoutMs 未配 → subagent 有值、llm 走 fallback", () => {
+    process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "7200000";
+    const env = loadIknowEnv(process.cwd(), EMPTY);
+    assert.equal(env.subagent?.taskTimeoutMs, 7_200_000);
+    assert.equal(env.llm.timeoutMs, 60_000);
+  });
+});
+
+describe("subagent settings — 跨进程继承 (#358 T1, 跨 process boundary)", () => {
+  const ENV_KEYS_CROSS = [
+    "IKNOW_LLM_TIMEOUT_MS",
+    "IKNOW_SUBAGENT_TASK_TIMEOUT_MS",
+  ] as const;
+
+  beforeAll(() => {
+    for (const k of ENV_KEYS_CROSS) delete process.env[k];
+  });
+  afterAll(() => {
+    for (const k of ENV_KEYS_CROSS) delete process.env[k];
+  });
+
+  it("子代理 process 在相同 cwd → 继承 project settings 的 llm.timeoutMs + subagent.taskTimeoutMs", async () => {
+    const tmpCwd = await mkdtemp(join(tmpdir(), "iknow-subagent-inherit-t1-"));
+    const emptyHome = await mkdtemp(
+      join(tmpdir(), "iknow-subagent-inherit-home-")
+    );
+    await mkdir(join(tmpCwd, ".iknow"), { recursive: true });
+    await writeFile(
+      join(tmpCwd, ".iknow", "settings.json"),
+      JSON.stringify({
+        llm: { model: "test-model", timeoutMs: 45_000 },
+        subagent: { taskTimeoutMs: 7_200_000 },
+      })
+    );
+
+    try {
+      const prevHome = process.env.HOME;
+      process.env.HOME = emptyHome;
+      try {
+        const env = loadIknowEnv(tmpCwd);
+        assert.equal(env.llm.timeoutMs, 45_000);
+        assert.equal(env.subagent?.taskTimeoutMs, 7_200_000);
+      } finally {
+        if (prevHome === undefined) delete process.env.HOME;
+        else process.env.HOME = prevHome;
+      }
+    } finally {
+      await rm(tmpCwd, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
+    }
+  });
+
+  it("隔离 cwd（无 settings）→ env 端 subagent/taskTimeoutMs undefined（不静默回退）", async () => {
+    const tmpEmpty = await mkdtemp(join(tmpdir(), "iknow-subagent-empty-cwd-"));
+    const emptyHome = await mkdtemp(
+      join(tmpdir(), "iknow-subagent-empty-home-")
+    );
+    try {
+      assert.throws(
+        () => loadIknowEnv(tmpEmpty, undefined, emptyHome),
+        /no LLM model configured/
+      );
+    } finally {
+      await rm(tmpEmpty, { recursive: true, force: true });
+      await rm(emptyHome, { recursive: true, force: true });
+    }
+  });
+});
