@@ -46,7 +46,8 @@ export interface SubAgentManager {
   /**
    * #361 C3: 第三参 `signal?: AbortSignal` —— caller abort → reject
    * SubAgentAbortError(与 SubAgentWaitTimeoutError 类型区分)。首查终态路径
-   * 保留(立即 resolve,不经 interval)。timeoutMs 默认 PER_TASK_TIMEOUT_MS。
+   * 保留(立即 resolve,不经 interval)。timeoutMs 缺省走 #358 T2 三层链
+   * (def.timeoutMs ?? opts.taskTimeoutMs ?? PER_TASK_TIMEOUT_MS)。
    */
   readonly waitFor: (
     taskId: string,
@@ -128,12 +129,27 @@ export class SubAgentAbortError extends Error {
 }
 
 /**
- * #361 T13: per-task 缺省 wallclock 5min(修正 spawn-subagent-tool 注释
- * "default 5 min if absent" 与 manager waitFor 旧默认 30s 不一致)。
+ * #361 T13 / #358 T2: per-task 缺省 wallclock 7200s(2h)——spec Assumptions 1:
+ * operator 真实使用数据表明子代理任务常态超过 1 小时,对齐 deer-flow 1800s
+ * 实测再留余量;300s 原值无实测依据。
  * wait:true handler 显式传给 waitFor;manager 内部 spawn 的 per-task
- * SIGTERM 计时器也用此常量作缺省,worker 侧 wallclock 与前景 wait 对齐。
+ * SIGTERM 计时器也用此链末端常量作缺省,worker 侧 wallclock 与前景 wait 对齐。
+ * 唯一声明点 (spec "per-task 缺省值归 T2 manager 消费点, 避免两处声明")。
  */
-export const PER_TASK_TIMEOUT_MS = 300_000;
+export const PER_TASK_TIMEOUT_MS = 7_200_000;
+
+/**
+ * #358 T2: per-task wallclock 三层缺省链 (spec SC4 / Assumptions 1):
+ * `def.timeoutMs ?? opts.taskTimeoutMs ?? PER_TASK_TIMEOUT_MS`。
+ * 语义分离 (C9): 这是任务寿命 (父 manager SIGTERM), 与 worker 内 per-call
+ * 竞速 (deps.timeoutMs) 无关; 单一常量声明点保证缺省值不漂移。
+ */
+export function effectiveTaskTimeoutMs(
+  def: SubAgentDefinition,
+  opts: { readonly taskTimeoutMs?: number }
+): number {
+  return def.timeoutMs ?? opts.taskTimeoutMs ?? PER_TASK_TIMEOUT_MS;
+}
 
 type TaskState = "starting" | "running" | "completed" | "failed";
 
@@ -198,6 +214,13 @@ export function createSubAgentManager(opts: {
    * 发埋点;不注入则零副作用 (与既有行为 byte-stable)。
    */
   readonly trace?: TraceService;
+  /**
+   * #358 T2: per-task 缺省 wallclock (毫秒) — 消费链中段:
+   * `def.timeoutMs ?? opts.taskTimeoutMs ?? PER_TASK_TIMEOUT_MS`。
+   * 装配由 build-engine 从 env.subagent.taskTimeoutMs (settings/env 合并)
+   * 透传;env 层无第三层默认 (常量唯一声明点在本文件)。
+   */
+  readonly taskTimeoutMs?: number;
 }): SubAgentManager {
   const tasks = new Map<string, Task>();
   /** 所有未决 waitFor 的轮询句柄(非终态,shutdown 必须清,防进程悬挂)。 */
@@ -361,14 +384,14 @@ export function createSubAgentManager(opts: {
     emitStateChange(task, "running");
 
     // #356 High #2 fix: per-task timeout (SC6 / assumption 14).
-    // #361 T13: def.timeoutMs 缺省 = PER_TASK_TIMEOUT_MS(5min),与前景 wait
-    // 对齐 — 避免"spawn 300s wallclock vs waitFor 300s wait"语义错位。
+    // #358 T2: def.timeoutMs 缺省走三层链 (def ?? taskTimeoutMs ?? 7200s),
+    // 与前景 wait 对齐 — 避免"spawn wallclock vs waitFor wait"语义错位。
     // expiry -> mark failed reason:"timeout" + SIGTERM;5s fallback SIGKILL
     // against workers that ignore SIGTERM(review-fix S1:兜底改在 timeout
     // SIGTERM 之后 arm,基准对齐 SIGTERM 点;不再 spawn 时 arm —— 否则默认
-    // 300s timeout 下 5s 就把 worker 强杀)。timer.unref so it does not
+    // 7200s timeout 下 5s 就把 worker 强杀)。timer.unref so it does not
     // block process exit。
-    const effectiveTimeoutMs = def.timeoutMs ?? PER_TASK_TIMEOUT_MS;
+    const effectiveTimeoutMs = effectiveTaskTimeoutMs(def, opts);
     if (effectiveTimeoutMs > 0) {
       task.timeoutTimer = setTimeout(() => {
         // Already terminated (child exit / stdout envelope) -> do not overwrite.
@@ -578,7 +601,7 @@ export function createSubAgentManager(opts: {
 
   function waitFor(
     taskId: string,
-    timeoutMs = PER_TASK_TIMEOUT_MS,
+    timeoutMs?: number,
     signal?: AbortSignal
   ): Promise<SubAgentEnvelope> {
     return new Promise((resolve, reject) => {
@@ -587,6 +610,10 @@ export function createSubAgentManager(opts: {
         reject(new SubAgentWaitTimeoutError());
         return;
       }
+      // #358 T2: 缺省 timeoutMs 走三层链 (def ?? taskTimeoutMs ?? 7200s),
+      // 与 spawn 的 SIGTERM 计时同源 — 防止缺省值两处声明漂移。
+      const effectiveTimeout =
+        timeoutMs ?? effectiveTaskTimeoutMs(task.def, opts);
       // #361 C3: 预 abort → 立即 SubAgentAbortError,不建轮询状态。
       if (signal?.aborted) {
         reject(new SubAgentAbortError(taskId));
@@ -633,7 +660,7 @@ export function createSubAgentManager(opts: {
           settleReject(new SubAgentAbortError(taskId));
           return;
         }
-        if (Date.now() - started >= timeoutMs) {
+        if (Date.now() - started >= effectiveTimeout) {
           cleanup();
           settleReject(new SubAgentWaitTimeoutError());
         }

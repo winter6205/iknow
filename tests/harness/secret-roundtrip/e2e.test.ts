@@ -58,6 +58,8 @@ function makeEnv(apiKey: string): IknowEnv {
     web: { searchUrl: undefined, proxy: undefined },
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
+    // #358 T2: subagent 配置臂 (build-engine 读取 taskTimeoutMs)。
+    subagent: { taskTimeoutMs: undefined },
   };
 }
 

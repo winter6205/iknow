@@ -253,6 +253,25 @@ export function toFailedEnvelope(
 }
 
 /**
+ * #358 T2 / D8 (spec SC5): 仅 envelope.maxTurns 覆盖 deps; envelope.timeoutMs
+ * 绝不过渡到 deps。两者语义分离 (C9):
+ *   - deps.timeoutMs = per-call 竞速 (raceModel 模型调用超时);
+ *   - envelope.timeoutMs = per-task 寿命 (父 manager SIGTERM 计时)。
+ * 旧实现把二者混用 (D8 bug): 一次正常 LLM 调用会按任务寿命竞速, per-call
+ * 保护失效 (spec 358 Code Style 理由段 "worker 内无 per-task 消费者")。
+ *
+ * 纯函数: envelope 无 maxTurns 时返回原 deps 引用 (spread 守卫零覆盖)。
+ */
+export function applyEnvelopeOverrides(
+  envelope: Pick<WorkerEnvelope, "maxTurns">,
+  deps: LoopEngineDeps
+): LoopEngineDeps {
+  return envelope.maxTurns !== undefined
+    ? { ...deps, maxTurns: envelope.maxTurns }
+    : deps;
+}
+
+/**
  * 测试 seam (导出仅供测试): envelope → run → truncateEnvelopeResult。
  *
  * 把 readStdin → parseWorkerEnvelope → run → 派生 envelope → 截断这一段
@@ -273,16 +292,8 @@ export async function runWorkerOnce(opts: {
   readonly deps: LoopEngineDeps;
 }): Promise<SubAgentEnvelope> {
   const { workerEnvelope: env, deps } = opts;
-  // #356 High #2 fix: envelope.maxTurns / envelope.timeoutMs 优先覆盖 deps
-  // 默认(与 maxTurns 既有覆盖同形态);任一字段缺失保留 deps 默认。
-  const runDeps: LoopEngineDeps =
-    env.maxTurns !== undefined || env.timeoutMs !== undefined
-      ? {
-          ...deps,
-          ...(env.maxTurns !== undefined && { maxTurns: env.maxTurns }),
-          ...(env.timeoutMs !== undefined && { timeoutMs: env.timeoutMs }),
-        }
-      : deps;
+  // #358 T2 / D8: 只应用 maxTurns 覆盖, timeoutMs 不进 deps (per-call 语义)。
+  const runDeps = applyEnvelopeOverrides(env, deps);
   try {
     const { result } = await run(env.task, runDeps);
     // run() 正常返回 ≠ 成功: harness 协议层错误 / 空最终回应以 stopReason

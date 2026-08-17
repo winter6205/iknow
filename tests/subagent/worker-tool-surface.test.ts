@@ -419,6 +419,7 @@ async function buildWorkerWithFullSkillCatalog(): Promise<LoopEngineDeps> {
     web: { searchUrl: undefined, proxy: undefined },
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
+    subagent: { taskTimeoutMs: undefined },
   };
   const opts: CreateWorkerDepsOptions = {
     envelope: {} as WorkerEnvelope,

@@ -66,8 +66,9 @@ function makeFakeChild(): FakeChild {
   }) as unknown as FakeChild;
 }
 
-/** 收 wrapper:记录最近一次 spawn 的 child + 入参,供测试 emit。 */
-function makeHarness() {
+/** 收 wrapper:记录最近一次 spawn 的 child + 入参,供测试 emit。
+ *  `opts.taskTimeoutMs` 透传给 createSubAgentManager (T2 三层缺省链中段)。 */
+function makeHarness(opts: { readonly taskTimeoutMs?: number } = {}) {
   const spawned: FakeChild[] = [];
   const spawnCalls: {
     def: SubAgentDefinition;
@@ -81,6 +82,9 @@ function makeHarness() {
       spawnCalls.push({ def, taskId, payload });
       return child as unknown as ChildProcess;
     },
+    ...(opts.taskTimeoutMs !== undefined
+      ? { taskTimeoutMs: opts.taskTimeoutMs }
+      : {}),
   });
   return { manager, spawned, spawnCalls };
 }
@@ -375,6 +379,89 @@ describe("SubAgentManager per-task timeout (def.timeoutMs)", () => {
       ).length;
       assert.equal(sigtermCount, 1);
       assert.deepEqual(manager.queryBuffer(taskId), { status: "not_found" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ── #358 T2: per-task 三层缺省链 def.timeoutMs ?? opts.taskTimeoutMs ?? 常量 ──
+
+describe("SubAgentManager per-task 缺省链 (T2: def ?? taskTimeoutMs ?? 7200s)", () => {
+  it("层 1: def.timeoutMs=111 优先 → 111ms 触发 SIGTERM (不 shell 到下方层)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { manager, spawned } = makeHarness({ taskTimeoutMs: 222 });
+      const { taskId } = manager.spawn({ timeoutMs: 111 });
+      await vi.advanceTimersByTimeAsync(111);
+      const q = manager.queryBuffer(taskId);
+      assert.equal(q.status, "failed");
+      if (q.status === "failed") {
+        assert.equal(q.reason, "timeout");
+        assert.match(q.summary, /timeout after 111ms/);
+      }
+      const signals = spawned[0]!.kill.mock.calls.map((c) => c[0]);
+      assert.deepEqual(signals, ["SIGTERM"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("层 2: 无 def.timeoutMs + opts.taskTimeoutMs=222 → 222ms 触发 SIGTERM", async () => {
+    vi.useFakeTimers();
+    try {
+      const { manager, spawned } = makeHarness({ taskTimeoutMs: 222 });
+      const { taskId } = manager.spawn({});
+      await vi.advanceTimersByTimeAsync(222);
+      const q = manager.queryBuffer(taskId);
+      assert.equal(q.status, "failed");
+      if (q.status === "failed") {
+        assert.equal(q.reason, "timeout");
+        assert.match(q.summary, /timeout after 222ms/);
+      }
+      const signals = spawned[0]!.kill.mock.calls.map((c) => c[0]);
+      assert.deepEqual(signals, ["SIGTERM"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("层 3: 前两层皆缺席 → 默认 7_200_000ms (固定常量, 不 shell 到任何 env)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { manager, spawned } = makeHarness();
+      const { taskId } = manager.spawn({});
+      assert.deepEqual(manager.queryBuffer(taskId), { status: "running" });
+      await vi.advanceTimersByTimeAsync(7_200_000);
+      const q = manager.queryBuffer(taskId);
+      assert.equal(q.status, "failed");
+      if (q.status === "failed") {
+        assert.equal(q.reason, "timeout");
+        assert.match(q.summary, /timeout after 7200000ms/);
+      }
+      const signals = spawned[0]!.kill.mock.calls.map((c) => c[0]);
+      assert.deepEqual(signals, ["SIGTERM"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waitFor 缺省 timeoutMs 也走同一链: opts.taskTimeoutMs=50 → ~50ms SubAgentWaitTimeoutError", async () => {
+    vi.useFakeTimers();
+    try {
+      const { manager, spawned } = makeHarness({ taskTimeoutMs: 50 });
+      const { taskId } = manager.spawn({});
+      // 关键: 先让 child 干净退出 (0, null) 且无 envelope —— SC16 下 state
+      // 维持 running 不落终态, 同时 exit handler 清掉 spawn 的 50ms SIGTERM
+      // 计时器。否则同一链值 50ms 的 spawn timer 会先把 state 标 failed
+      // (终态) → waitFor 反而 resolve 失败 envelope, 无从观察 waitFor 自身
+      // 的 effectiveTimeout 拒绝路径。清掉后剩 waitFor 的 interval 独占,
+      // 50ms 到达 → Date.now()-started >= 50 → SubAgentWaitTimeoutError。
+      spawned[0]!.emit("exit", 0, null);
+      const pending = manager.waitFor(taskId);
+      const rejected = assert.rejects(pending, SubAgentWaitTimeoutError);
+      await vi.advanceTimersByTimeAsync(100);
+      await rejected;
     } finally {
       vi.useRealTimers();
     }

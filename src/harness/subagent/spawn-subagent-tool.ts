@@ -2,8 +2,10 @@
  * #356 T4 / #361 V1.5 — spawn_subagent ACI 工具（主代理第 24/25 件之一）。
  *
  * **#361 前景 spawn 反转（ADR-0014 V1.5）**：默认 `wait:true` — 模型调一次 →
- * handler `await manager.waitFor(taskId, PER_TASK_TIMEOUT_MS, ctx.signal)`，
- * 阻塞至子代理终态，把完整 envelope 直接作 tool_result 返回。多个独立任务
+ * handler `await manager.waitFor(taskId, undefined, ctx.signal)`（缺省超时
+ * 由 manager 三层链 `def.timeoutMs ?? taskTimeoutMs ?? PER_TASK_TIMEOUT_MS`
+ * 决定，spawn timer 同源），阻塞至子代理终态，把完整 envelope 直接作
+ * tool_result 返回。多个独立任务
  * 可在同一 turn 并行发多条 spawn_subagent（wait:true 各自阻塞，executor
  * 并发安全）。`wait:false` → 立即返 `{task_id}`（异步臂），结果由 host drain
  * 在下一轮 turn 拼入 user message / subagent_result 主动拉取。
@@ -28,11 +30,7 @@ import type { AciToolDef } from "../aci/types.js";
 import type { ToolExecutionContext } from "../tools/types.js";
 import type { SubAgentDefinition } from "./role.js";
 import type { SubAgentManager } from "./manager.js";
-import {
-  PER_TASK_TIMEOUT_MS,
-  SubAgentAbortError,
-  SubAgentCapacityError,
-} from "./manager.js";
+import { SubAgentAbortError, SubAgentCapacityError } from "./manager.js";
 import { ToolExecutionError } from "../errors.js";
 
 /**
@@ -128,8 +126,11 @@ export function createSpawnSubAgentTool(
       // 端按 SubAgentDefinition 自身字段约束走 default deny / 默认 maxTurns 等）。
       // #356 High #1 修复：task 必填透传进 def（此前漏掉 → buildWorkerPayload
       // 读到 def.task ?? "" 永远空串 → 子代理跑空任务）。
-      // #361 T13: timeoutMs 缺席时默认 PER_TASK_TIMEOUT_MS(5min),使 worker
-      // 侧 wallclock 与前景 wait 对齐(注释 vs 实际 30s 不一致修复)。
+      // #358 T2: timeoutMs 缺席时整个字段省略 —— 不在此把 percall/常量塞进
+      // def.timeoutMs。理由:manager 三层链 `def.timeoutMs ?? env.subagent.
+      // taskTimeoutMs ?? PER_TASK_TIMEOUT_MS` 必须让中段（settings 可配的
+      // taskTimeoutMs）在模型未显式给 timeout 时生效;若这里永远补死常量,
+      // 中段变成死代码(SC4 消费点证明)。
       const def: SubAgentDefinition = {
         task,
         ...(typeof obj.systemPrompt === "string"
@@ -142,7 +143,7 @@ export function createSpawnSubAgentTool(
         ...(typeof obj.maxTurns === "number" ? { maxTurns: obj.maxTurns } : {}),
         ...(typeof obj.timeoutMs === "number"
           ? { timeoutMs: obj.timeoutMs }
-          : { timeoutMs: PER_TASK_TIMEOUT_MS }),
+          : {}),
       };
       let taskId: string;
       try {
@@ -163,11 +164,14 @@ export function createSpawnSubAgentTool(
         return JSON.stringify({ task_id: taskId });
       }
       try {
-        // 前景臂：显式 PER_TASK_TIMEOUT_MS(300s)——绝不能落 waitFor 缺省
-        //（manager 旧缺省 30s,前景等分钟级会提前崩）。
+        // 前景臂： waitFor 缺省走 manager 三层链 (def.timeoutMs ??
+        // env.subagent.taskTimeoutMs ?? 7200s)。def 在 handler 内只在模型
+        // 显式给 timeoutMs 时携带该字段（缺省省略），故此处传 undefined
+        // 让 spawn timer 与 waitFor 的缺省值由同一 effectiveTaskTimeoutMs
+        // 链决定 —— 中段 taskTimeoutMs 生效时两者天然对齐。
         const envelope = await deps.manager.waitFor(
           taskId,
-          PER_TASK_TIMEOUT_MS,
+          undefined,
           ctx?.signal
         );
         // C5：成功 tool_result = envelope（executor 20000 截断,天然复用）。

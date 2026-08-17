@@ -312,6 +312,10 @@ export async function buildHarnessEngine(
           // #358 T4: trace 注入 (生产默认 NoopTraceService,byte-stable;
           // 测试经 opts.subagentTrace / opts.subagentManager 覆盖)。
           trace: opts.subagentTrace ?? createNoopTraceService(),
+          // #358 T2: per-task wallclock 链条中段 — env.subagent.taskTimeoutMs
+          // (settings/env 合并已由 T1 在 env 层完成, 此处直接消费; 缺省
+          // undefined → manager 回退自己的 7200s 常量)。
+          taskTimeoutMs: env.subagent.taskTimeoutMs,
         }))
       : undefined;
   // #126 T5:settings 对象缝（测试注入隔离 settings；生产缺省 loadIknowSettings）。

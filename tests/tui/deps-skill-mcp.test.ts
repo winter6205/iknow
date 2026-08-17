@@ -58,6 +58,8 @@ function makeBundle(): RuntimeBundle {
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     // #378 根因 B: MCP 连接超时(默认 60_000)。
     mcp: { connectTimeoutMs: 60_000 },
+    // #358 T2: subagent 配置臂 (build-engine 读取 taskTimeoutMs)。
+    subagent: { taskTimeoutMs: undefined },
   };
   return { env } as unknown as RuntimeBundle;
 }
