@@ -21,7 +21,10 @@ export {
 } from "./http.js";
 export { listSessions, type SessionSummary } from "./sessions.js";
 export {
+  createTraceRouter,
   startTraceServe,
+  type TraceRouter,
+  type TraceRouterOptions,
   type TraceServeOptions,
   type TraceListeningServer,
 } from "./serve.js";
