@@ -31,9 +31,8 @@
  */
 import * as http from "node:http";
 import * as path from "node:path";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { isIknowError, ValidationError } from "../shared/errors.js";
+import { readPackageVersion } from "../shared/package-version.js";
 import { TraceReadError } from "./types.js";
 import { handleTracesRequest, handleSessionsRequest } from "./http.js";
 import {
@@ -47,8 +46,6 @@ export interface TraceRouterOptions {
   readonly traceDir?: string;
   /** Cap bytes per read; defaults to the reader's MAX_TRACE_BYTES. */
   readonly maxBytes?: number;
-  /** Version string for standalone health (injected by the caller). */
-  readonly version?: string;
 }
 
 export type TraceRouter = (
@@ -143,7 +140,7 @@ export function startTraceServe(
   const port = opts.port ?? 24881;
   const traceDir = opts.traceOut ? path.resolve(opts.traceOut) : undefined;
   const webRoot = opts.webRoot ?? resolveDefaultWebRoot();
-  const version = opts.version ?? readLocalVersion();
+  const version = opts.version ?? readPackageVersion();
   const router = createTraceRouter({
     ...(traceDir !== undefined ? { traceDir } : {}),
     ...(opts.maxBytes !== undefined ? { maxBytes: opts.maxBytes } : {}),
@@ -233,31 +230,6 @@ async function handleStandaloneRequest(
     });
   } catch (err) {
     sendError({ res, err });
-  }
-}
-
-const FALLBACK_VERSION = "0.0.0";
-
-/**
- * Standalone-only version reader (ADR-0020 D1.4): traceserver no longer
- * reverse-imports the CLI usage module — mounted mode gets its version from
- * the caller (session-api already reads the package version for its own
- * health). Mirrors the CLI getVersion computation (src/traceserver or
- * dist/traceserver → repo root).
- */
-function readLocalVersion(): string {
-  try {
-    const here = path.dirname(fileURLToPath(import.meta.url));
-    const pkgPath = path.join(here, "..", "..", "package.json");
-    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
-      version?: string;
-    };
-    if (typeof pkg.version === "string" && pkg.version.length > 0) {
-      return pkg.version;
-    }
-    return FALLBACK_VERSION;
-  } catch {
-    return FALLBACK_VERSION;
   }
 }
 

@@ -2,27 +2,15 @@
  * CLI usage / version strings (stdout).
  * Bilingual (中文 + English) product help for humans and scripts.
  */
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readPackageVersion } from "../shared/package-version.js";
 
-const FALLBACK_VERSION = "0.1.0";
-
-/** Resolve package version from package.json; fall back to 0.1.0. */
+/**
+ * Resolve package version from package.json; fall back to 0.1.0.
+ * Delegates to the shared reader so the CLI and the standalone trace shell
+ * report the same version (and same fallback) for the same process.
+ */
 export function getVersion(): string {
-  try {
-    const here = dirname(fileURLToPath(import.meta.url));
-    // src/cli or dist/cli → repo root
-    const pkgPath = join(here, "..", "..", "package.json");
-    const raw = readFileSync(pkgPath, "utf8");
-    const pkg = JSON.parse(raw) as { version?: string };
-    if (typeof pkg.version === "string" && pkg.version.length > 0) {
-      return pkg.version;
-    }
-    return FALLBACK_VERSION;
-  } catch {
-    return FALLBACK_VERSION;
-  }
+  return readPackageVersion();
 }
 
 /** Full usage text (no trailing newline required by caller). */
