@@ -229,3 +229,67 @@ describe("bash.timeout.partialOutput", () => {
     5_000
   );
 });
+
+describe("bash.fence.networkOptIn (argv shape, no spawn)", () => {
+  // T9: network:true drops --unshare-net; every other fence flag stays.
+  // Written at the fence-construction layer (createBwrapFence direct call)
+  // because the bash tool's inputSchema network param lands in T10 — this
+  // ticket owns only the bwrap argv branch, not the bash.ts schema.
+  function fenceArgv(network?: boolean): string[] {
+    const cwd = "/workspace";
+    const opts: {
+      command: string;
+      args: string[];
+      fsPolicy: ReturnType<typeof createFsPolicy>;
+      networkPolicy: ReturnType<typeof createNetworkPolicy>;
+      resourceLimits: ReturnType<typeof createResourceLimits>;
+      env: NodeJS.ProcessEnv;
+      cwd: string;
+      network?: boolean;
+    } = {
+      command: "bash",
+      args: ["-c", "echo hi"],
+      fsPolicy: createFsPolicy({ cwd, home: homedir(), tmpDir: "/tmp/job" }),
+      networkPolicy: createNetworkPolicy(),
+      resourceLimits: createResourceLimits(),
+      env: { PATH: "/bin" },
+      cwd,
+    };
+    if (network !== undefined) {
+      opts.network = network;
+    }
+    return createBwrapFence(opts).argv;
+  }
+
+  it("network:true removes --unshare-net but keeps every canonical fence flag", () => {
+    const cwd = "/workspace";
+    const argv = fenceArgv(true);
+    assert.equal(argv.includes("--unshare-net"), false);
+    // canonical fence flags spot-check (mirrors argvHasUnshareNet style)
+    assert.equal(argv[0], "bwrap");
+    assert.equal(argv[1], "--unshare-user-try");
+    assert.ok(argv.includes("--die-with-parent"));
+    const etcIdx = argv.indexOf("/etc");
+    assert.deepEqual(argv.slice(etcIdx - 1, etcIdx + 2), [
+      "--ro-bind",
+      "/etc",
+      "/etc",
+    ]);
+    const bindCwdIdx = argv.findIndex(
+      (arg, index) => arg === "--bind" && argv[index + 1] === cwd
+    );
+    assert.notEqual(bindCwdIdx, -1, "expected --bind <cwd> <cwd> in argv");
+    assert.ok(argv.includes("--clearenv"));
+    assert.ok(argv.includes("--chdir"));
+    assert.deepEqual(argv.slice(argv.indexOf("--"), argv.indexOf("--") + 3), [
+      "--",
+      "bash",
+      "-c",
+    ]);
+  });
+
+  it("network:false and absent network keep --unshare-net (default isolation)", () => {
+    assert.ok(fenceArgv(false).includes("--unshare-net"));
+    assert.ok(fenceArgv().includes("--unshare-net"));
+  });
+});

@@ -18,7 +18,7 @@ const resourceLimits = createResourceLimits();
 const env = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST }).filter(
   process.env
 );
-function run(command: string) {
+function run(command: string, network = false) {
   const fence = createBwrapFence({
     command: "bash",
     args: ["-c", command],
@@ -27,6 +27,7 @@ function run(command: string) {
     resourceLimits,
     env,
     cwd,
+    network,
   });
   return spawnSync(fence.argv[0], fence.argv.slice(1), {
     cwd,
@@ -40,6 +41,14 @@ const checks = [
   ["/etc readonly", () => run("touch /etc/sandbox-probe-write")],
   ["cwd writable", () => run("touch probe-write && rm probe-write && echo ok")],
   ["network denied", () => run("curl -sS https://example.com")],
+  // T9 (#503): network:true is the only axis that drops --unshare-net. Same
+  // target as `network denied` — reachable here (status 0), unreachable on the
+  // default branch (mirror assertion). --max-time caps a hung peer on the
+  // reachable branch so a dead remote fails the probe instead of stalling it.
+  [
+    "network opt-in reachable",
+    () => run("curl -sS --max-time 5 https://example.com", true),
+  ],
   ["node runs", () => run("node -v")],
 ] as const;
 
