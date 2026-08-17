@@ -45,12 +45,22 @@ export type BackgroundSpawnValidationError =
   | {
       kind: "spawn_validation_failed";
       context: string;
+    }
+  | {
+      kind: "concurrency_limit_reached";
+      context: string;
+      /** 正面措辞的可用动作提示（ADR-0021 D1.6 纪律：说明现状 + 可用动作，零负面词）。 */
+      message: string;
     };
 
 /** ADR-0021 D1.6:日志读取默认窗口 12KB(治理值 SSOT 落在 manager 常量)。 */
 export const DEFAULT_LOG_MAX_BYTES = 12 * 1024;
 /** ADR-0021 D1.6:日志读取窗口上限 100KB。 */
 export const MAX_LOG_READ_BYTES = 100 * 1024;
+/** ADR-0021 D1.6 / #491 D6:并发上限 8 —— 达到上限时 manager.spawn 以正面措辞
+ *  拒绝（concurrency_limit_reached spawn_error,见 manager.ts spawn 段）。导出
+ *  用于测试与装配断言。 */
+export const MAX_CONCURRENT_BACKGROUND_TASKS = 8;
 /** stop 升级:SIGTERM → 宽限 2s → SIGKILL(复用 runner.ts stopTree 模式)。 */
 const STOP_KILL_GRACE_MS = 2_000;
 /** #502 T6 shutdown 镜像 SC12(subagent/manager.ts:479-563)常量:SIGTERM →
@@ -149,16 +159,26 @@ export interface BackgroundTaskManager {
   ) => Promise<BackgroundSpawnResult>;
   /** 查询当前状态(running / exited / killed)。内存态,不读盘。 */
   readonly status: (taskId: string) => Promise<BackgroundStatusResult>;
-  /** 读日志尾部(默认 12KB,上限 100KB),附带当前状态与 exitCode。 */
+  /**
+   * 读日志尾部(默认 12KB,上限 100KB),附带当前状态与 exitCode。
+   * requesterConversationId 可选（T5 / ADR-0021 D1.4）:非空且与任务记录的
+   * conversation_id 不等 → 抛 task_not_in_scope（携带 owner_conversation_id）。
+   * 缺省 / 记录无 conversationId → 不过滤（向后兼容）。
+   */
   readonly output: (
     taskId: string,
-    maxBytes?: number
+    maxBytes?: number,
+    requesterConversationId?: string
   ) => Promise<BackgroundOutputResult>;
   /**
    * host 侧 kill(-pgid):SIGTERM → 2s 宽限 → SIGKILL。
    * 对已终态任务幂等成功(合法态);对未知任务抛 task_not_found。
+   * requesterConversationId 可选（T5 scope 过滤，语义同 output）。
    */
-  readonly stop: (taskId: string) => Promise<void>;
+  readonly stop: (
+    taskId: string,
+    requesterConversationId?: string
+  ) => Promise<void>;
   /**
    * #502 T6 进程级收尾(镜像 SC12,ADR-0021 D1.1 exit reap):
    * 清 killFallback timers → SIGTERM 所有 running 进程组 → ≤5s 宽限 →
@@ -275,6 +295,25 @@ export function createBackgroundTaskManager(
     const invalid = validateRequest(request);
     if (invalid) {
       return { status: "spawn_error", task_id: "", error: invalid };
+    }
+    // #502 T5 / ADR-0021 D1.6:并发上限治理闸门。内存 Map 收 running 状态,
+    // 排除已 exited / killed 的（reap 中 / 自然终止的任务不占名额）。task_id
+    // 不生成（任务未被创建,register 不会写空任务文件）。正面措辞 message
+    // 纪律（ADR-0021 D1.6 / #491 D6）：说明现状 + 可用动作 + 零负面词。
+    let runningCount = 0;
+    for (const t of tasks.values()) {
+      if (t.client.status === "running") runningCount += 1;
+    }
+    if (runningCount >= MAX_CONCURRENT_BACKGROUND_TASKS) {
+      return {
+        status: "spawn_error",
+        task_id: "",
+        error: {
+          kind: "concurrency_limit_reached",
+          context: `spawn: ${runningCount} running tasks (limit ${MAX_CONCURRENT_BACKGROUND_TASKS})`,
+          message: `当前已有 ${runningCount} 个 background 任务在运行（上限 ${MAX_CONCURRENT_BACKGROUND_TASKS}）。可用 bash_stop 终止已完成或多余的任务后再启动新任务。`,
+        },
+      };
     }
     const taskId = generateTaskId();
     const logPath = join(opts.tasksDir, `${taskId}.log`);
@@ -430,6 +469,36 @@ export function createBackgroundTaskManager(
     return task;
   }
 
+  /**
+   * #502 T5 / ADR-0021 D1.4:conversation scope 过滤。仅当 requester 与 owner
+   * 都非空且不等时拒绝（task_not_in_scope + owner_conversation_id）。其它路径
+   * （requester 缺省 / 空串 / 记录无 conversationId）→ 不过滤，向后兼容：
+   * 历史 manager 没有 conversationId 报错语义，spawm 时尚未注入会话装配的
+   * 入口（ask / worker / oneshot）依然可见。owner 字段单独携带；render 路径
+   * 在 bash-output / bash-stop handler 走 renderTaskError 渲染 `${kind}:
+   * ${context}`（code-quality.md typed-error catch 契约）。
+   */
+  function assertTaskInScope(
+    task: BackgroundTask,
+    requesterConversationId: string | undefined,
+    op: string
+  ): void {
+    const owner = task.client.conversation_id;
+    if (
+      requesterConversationId === undefined ||
+      requesterConversationId.length === 0 ||
+      owner.length === 0 ||
+      requesterConversationId === owner
+    ) {
+      return;
+    }
+    throw {
+      kind: "task_not_in_scope",
+      context: `${op} ${task.task_id} (owner conversation ${owner})`,
+      owner_conversation_id: owner,
+    } satisfies BackgroundTaskError;
+  }
+
   async function status(taskId: string): Promise<BackgroundStatusResult> {
     const task = ensureTask(taskId, "status");
     return {
@@ -442,9 +511,13 @@ export function createBackgroundTaskManager(
 
   async function output(
     taskId: string,
-    maxBytes: number = DEFAULT_LOG_MAX_BYTES
+    maxBytes: number = DEFAULT_LOG_MAX_BYTES,
+    requesterConversationId?: string
   ): Promise<BackgroundOutputResult> {
     const task = ensureTask(taskId, "output");
+    // #502 T5 / ADR-0021 D1.4:conversation scope 过滤（req 与 owner 都非空且
+    // 不等 → task_not_in_scope + owner_conversation_id）。
+    assertTaskInScope(task, requesterConversationId, "output");
     // drain 串行写链:log 文件读完前先等所有已入队 appendFile 完成,
     // 避免 stdout/stderr chunk 与读操作竞态。
     await task.writeChain.catch(() => undefined);
@@ -475,8 +548,15 @@ export function createBackgroundTaskManager(
   }
 
   /** host 侧 kill(-pgid):SIGTERM → 宽限 2s → SIGKILL。 */
-  async function stop(taskId: string): Promise<void> {
+  async function stop(
+    taskId: string,
+    requesterConversationId?: string
+  ): Promise<void> {
     const task = ensureTask(taskId, "stop");
+    // #502 T5 / ADR-0021 D1.4:scope 过滤（语义同 output）。先于幂等分支:跨
+    // conversation 试图停他人任务 → 拒绝,即便任务已 exited（scope 优先于
+    // 幂等,因幂等是合法态而跨 session 触达不是合法态）。
+    assertTaskInScope(task, requesterConversationId, "stop");
     if (task.client.status !== "running") {
       // 幂等语义:对已终态任务 stop = 合法 no-op(不抛错、不二次发信号)。
       return;

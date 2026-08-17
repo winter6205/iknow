@@ -50,6 +50,12 @@ export interface BackgroundTaskRecord {
 export type BackgroundTaskError =
   | { kind: "empty_task_id"; context: string }
   | { kind: "task_not_found"; context: string }
+  | {
+      kind: "task_not_in_scope";
+      context: string;
+      /** 任务真正的 conversation_id（计划点名携带）。渲染 `${kind}: ${context}`。 */
+      owner_conversation_id: string;
+    }
   | { kind: "schema_invalid"; context: string; cause?: unknown }
   | { kind: "io_failure"; context: string; cause?: unknown };
 

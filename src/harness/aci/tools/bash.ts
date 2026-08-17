@@ -91,7 +91,7 @@ export function createBashTool(
       const bgCommand = opts?.secretRegistry
         ? restore(command, opts.secretRegistry)
         : command;
-      return await handleBackground(bgCommand, cwd, opts ?? {});
+      return await handleBackground(bgCommand, cwd, opts ?? {}, ctx);
     }
     const fenceEnv = envIsolation.filter(process.env);
     // #406 T3:构造 fence 前还原占位符 —— 还原后的命令才是真正 spawn 进 bwrap
@@ -167,11 +167,17 @@ export function createBashTool(
  * 立即返回 {task_id, log_path}。不 await 子进程退出、不经 runInSandbox（无 fence
  * 二次构造）。secret 还原后的 finalCommand 在这里已是输入（调用方校验链之后
  * 还原），占位符不进 registry / log。
+ *
+ * #502 T5:ctx.conversationId 透传 spawn request —— 进程由哪个 session 启的就
+ * 标哪个 conversationId，bash_output / bash_stop 后续按同字段做 scope 过滤。
+ * ctx 缺省 → 记录里 conversation_id 落空串 → 不过滤（向后兼容，与 ADR-0021 D1.4
+ * 对齐）。
  */
 async function handleBackground(
   finalCommand: string,
   cwd: string,
-  opts: CreateBashToolOptions
+  opts: CreateBashToolOptions,
+  ctx?: ToolExecutionContext
 ): Promise<{ task_id: string; log_path: string }> {
   const manager = opts.backgroundManager;
   if (!manager) {
@@ -185,12 +191,22 @@ async function handleBackground(
     workspaceRoot: opts.workspaceRoot,
     env: process.env,
     home: opts.home,
+    ...(ctx?.conversationId !== undefined
+      ? { conversationId: ctx.conversationId }
+      : {}),
   });
   if (result.status === "spawn_error") {
     // 与 bash 既有错误形态一致:typed-error 渲染（${kind}: ${context}）装进
     // ToolExecutionError。caller catch 契约不会被 [object Object] 污染。
+    // concurrency_limit_reached 携带正面措辞 message（ADR-0021 D1.6:说明
+    // 现状+可用动作+零负面词），用 message 替代 context 让模型看到可执行
+    // 的后续动作；其它 kind 仍走 context 字节一致。
+    const detail =
+      "message" in result.error && result.error.message
+        ? result.error.message
+        : result.error.context;
     throw new ToolExecutionError(
-      `bash: background spawn failed: ${result.error.kind}: ${result.error.context}`
+      `bash: background spawn failed: ${result.error.kind}: ${detail}`
     );
   }
   return { task_id: result.task_id, log_path: result.log_path };

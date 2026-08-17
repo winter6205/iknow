@@ -61,13 +61,19 @@ export function createBashOutputTool(
 ): AciToolDef {
   const handler = async (
     input: unknown,
-    _ctx?: ToolExecutionContext
+    ctx?: ToolExecutionContext
   ): Promise<string> => {
     const parsed = compileOutputInput(input);
     const maxBytes = normalizeMaxBytes(parsed.max_bytes);
     let result: BackgroundOutputResult;
     try {
-      result = await opts.backgroundManager.output(parsed.task_id, maxBytes);
+      // #502 T5 / ADR-0021 D1.4:ctx.conversationId 透传 manager 做 scope 过滤。
+      // ctx 缺省 → requesterConversationId undefined → manager 不过滤（向后兼容）。
+      result = await opts.backgroundManager.output(
+        parsed.task_id,
+        maxBytes,
+        ctx?.conversationId
+      );
     } catch (err) {
       if (err instanceof ToolExecutionError) throw err;
       // typed-error catch 契约：kind 判别后用 renderTaskError 渲染 `${kind}:

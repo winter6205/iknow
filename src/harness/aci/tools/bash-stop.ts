@@ -42,11 +42,13 @@ export function createBashStopTool(
 ): AciToolDef {
   const handler = async (
     input: unknown,
-    _ctx?: ToolExecutionContext
+    ctx?: ToolExecutionContext
   ): Promise<string> => {
     const parsed = compileStopInput(input);
     try {
-      await opts.backgroundManager.stop(parsed.task_id);
+      // #502 T5 / ADR-0021 D1.4:ctx.conversationId 透传 manager 做 scope 过滤。
+      // 跨 conversation 停他人任务 → task_not_in_scope（manager 权威判别）。
+      await opts.backgroundManager.stop(parsed.task_id, ctx?.conversationId);
     } catch (err) {
       if (err instanceof ToolExecutionError) throw err;
       // typed-error catch 契约：kind 判别后用 renderTaskError 渲染 `${kind}:

@@ -212,6 +212,14 @@ export interface LoopEngineDeps {
    * renderTaskFocusBoundary 私有 closure)经闭包注入,零反向依赖。
    */
   readonly boundaryAttachment?: () => string | undefined;
+  /**
+   * #502 T5 / ADR-0021 D1.4:当前 session 的 conversationId（纯记账 + 入参
+   * filter）。由 surface 层（chat-session / hub）注入 per-session 值；loop-engine
+   * 经 executor.executeAll 第 4 参透传给 tool ctx（bash-output / bash-stop 读
+   * ctx.conversationId 与 task 的 conversation_id 比对）。字段缺省 = 不过滤
+   * （ask / worker / oneshot 等无会话装配零行为变化）。
+   */
+  readonly conversationId?: string;
 }
 
 /**
@@ -860,7 +868,8 @@ async function runToolPhase(opts: {
   const results = await opts.deps.executor.executeAll(
     toolCallViews,
     opts.signal,
-    toolTimeout
+    toolTimeout,
+    opts.deps.conversationId
   );
   const blocks = opts.deps.adapter.encodeToolResults(results);
   const toolResultMsg: AnthropicNativeMessage = {

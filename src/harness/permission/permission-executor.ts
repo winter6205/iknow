@@ -139,7 +139,8 @@ export function createPermissionExecutor(
   async function executeAll(
     calls: ReadonlyArray<ToolCall>,
     signal?: AbortSignal,
-    timeoutMs?: number
+    timeoutMs?: number,
+    conversationId?: string
   ): Promise<ReadonlyArray<ToolExecutionResult>> {
     const out: ToolExecutionResult[] = [];
     for (const call of calls) {
@@ -147,7 +148,12 @@ export function createPermissionExecutor(
 
       // Step 0: catalog miss → delegate to inner one-at-a-time
       if (!def) {
-        const [result] = await opts.inner.executeAll([call], signal, timeoutMs);
+        const [result] = await opts.inner.executeAll(
+          [call],
+          signal,
+          timeoutMs,
+          conversationId
+        );
         out.push(result as ToolExecutionResult);
         continue;
       }
@@ -223,7 +229,12 @@ export function createPermissionExecutor(
       }
 
       // Step 4: allow → delegate to inner
-      const [result] = await opts.inner.executeAll([call], signal, timeoutMs);
+      const [result] = await opts.inner.executeAll(
+        [call],
+        signal,
+        timeoutMs,
+        conversationId
+      );
       out.push(result as ToolExecutionResult);
 
       // Step 5: postToolUse hook — 异常 fire-and-forget（#126 D3）：

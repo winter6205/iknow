@@ -44,9 +44,15 @@ export function wrapWithViolationHook(
     executeAll: async (
       calls: ReadonlyArray<ToolCall>,
       signal?: AbortSignal,
-      timeoutMs?: number
+      timeoutMs?: number,
+      conversationId?: string
     ): Promise<ReadonlyArray<ToolExecutionResult>> => {
-      const out = await opts.inner.executeAll(calls, signal, timeoutMs);
+      const out = await opts.inner.executeAll(
+        calls,
+        signal,
+        timeoutMs,
+        conversationId
+      );
       for (let i = 0; i < out.length; i += 1) {
         const call = calls[i];
         const r = out[i];
