@@ -42,6 +42,8 @@ import type { BackgroundTaskManager } from "../../background/manager.js";
 import type { McpManager } from "../../mcp/manager.js";
 import { createListMcpResourcesTool } from "./list-mcp-resources.js";
 import { createReadMcpResourceTool } from "./read-mcp-resource.js";
+import { createBashOutputTool } from "./bash-output.js";
+import { createBashStopTool } from "./bash-stop.js";
 import { buildWorkerToolSurface } from "../../subagent/role.js";
 import { RegistryConstructionError, ToolExecutionError } from "../../errors.js";
 import type { SkillCatalog } from "../../skill/catalog.js";
@@ -122,6 +124,12 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   "todo_write", // #440 D1/D2 session 作用域 ledger（host 注入 todoDir）
   "list_mcp_resources", // #440 T11 list MCP server 暴露的 resources（聚合 / 可选 server + cursor）
   "read_mcp_resource", // #440 T11 读单个 resource 内容（必填 server + uri）
+  // #502 T4 bash_output / bash_stop append-only：28→30（Track A 模型操作面，
+  // 与 T3 bash background:true 成对）。两件都条件化装配（backgroundManager
+  // 缺席时不入注册表——ask 入口零件；bash 常驻不在此列，参数级能力由 handler
+  // 运行时决策——Gate 3 在 toolsetNames 端镜像过滤，见工厂尾部注释）。
+  "bash_output", // #502 T4 读后台任务日志尾部 + 状态/exit_code（read-only 默认 allow）
+  "bash_stop", // #502 T4 终止后台任务进程组（SIGTERM→2s→SIGKILL；write 默认 ask）
 ] as const);
 
 /**
@@ -334,6 +342,15 @@ export function createDefaultAciRegistry(
             }),
         }
       : {}),
+    // #502 T4 bash_output / bash_stop 工具集（条件化装配：backgroundManager
+    // 缺席时不入注册表——ask 入口零件；bash 常驻工具不在此列，T3 参数级
+    // 能力由 handler 运行时决策。Gate 3 镜像过滤，见下）。
+    ...(backgroundManager
+      ? {
+          bash_output: () => createBashOutputTool({ backgroundManager }),
+          bash_stop: () => createBashStopTool({ backgroundManager }),
+        }
+      : {}),
   };
 
   // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。
@@ -350,6 +367,7 @@ export function createDefaultAciRegistry(
     ...(subagentManager ? [] : ["spawn_subagent", "subagent_result"]),
     ...(todoDir ? [] : ["todo_write"]),
     ...(mcpManager ? [] : ["list_mcp_resources", "read_mcp_resource"]),
+    ...(backgroundManager ? [] : ["bash_output", "bash_stop"]),
     ...(disallowedTools ?? []),
   ];
   const toolsetNames = (ACI_TOOLSET_NAMES as ReadonlyArray<string>).filter(

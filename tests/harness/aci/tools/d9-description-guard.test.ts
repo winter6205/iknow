@@ -8,8 +8,9 @@
  *
  * Scope:
  *   - Assemble createDefaultAciRegistry with ALL conditional deps present
- *     so every tool (including the 3 already-D9-compliant ones: todo_write,
- *     list_mcp_resources, read_mcp_resource) is exercised.
+ *     so every tool (including the 5 already-D9-compliant ones: todo_write,
+ *     list_mcp_resources, read_mcp_resource, bash_output, bash_stop) is
+ *     exercised.
  *   - Iterate every tool from the registry catalog and assert:
  *       1. description length > 0 (sanity)
  *       2. no NEGATIVE_PHRASE appears in any description
@@ -48,6 +49,7 @@ import { createSkillCatalog } from "../../../../src/harness/skill/catalog.js";
 import type { IknowEnv } from "../../../../src/config/env.js";
 import type { SubAgentManager } from "../../../../src/harness/subagent/manager.js";
 import type { McpManager } from "../../../../src/harness/mcp/manager.js";
+import type { BackgroundTaskManager } from "../../../../src/harness/background/manager.js";
 
 /** #483 D9: 12-word blocklist — mirrors tests/harness/aci/tools/todo-write.test.ts:533. */
 const NEGATIVE_PHRASES: ReadonlyArray<string> = [
@@ -91,6 +93,17 @@ const fakeMcpManager: McpManager = {
   readResource: () => Promise.reject(new Error("fake: read not stubbed")),
 } as unknown as McpManager;
 
+/** #502 T4 fake backgroundManager — sufficient for assembly (handler 永不触达)。 */
+const fakeBackgroundManager: BackgroundTaskManager = {
+  spawn: () => Promise.reject(new Error("fake: spawn not stubbed")),
+  status: () => Promise.reject(new Error("fake: status not stubbed")),
+  output: () => Promise.reject(new Error("fake: output not stubbed")),
+  stop: () => Promise.reject(new Error("fake: stop not stubbed")),
+  shutdown: () => Promise.resolve(),
+  registerConversationDeletedListener: () => undefined,
+  onConversationDeleted: () => undefined,
+} as unknown as BackgroundTaskManager;
+
 describe("#483 D9 — regression guard: every ACI tool description avoids NEGATIVE_PHRASES", () => {
   // Assemble once for the whole suite. Reusing the same registry across
   // every assertion keeps the test cheap and guarantees a stable tool set.
@@ -102,12 +115,13 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     subagentManager: fakeSubagentManager,
     todoDir: "/tmp/root/session-1/todos",
     mcpManager: fakeMcpManager,
+    backgroundManager: fakeBackgroundManager,
   });
 
-  // Sanity: registry assembled with the full 28-tool toolset. If this drifts,
+  // Sanity: registry assembled with the full 30-tool toolset. If this drifts,
   // the gate below would silently cover a smaller set — surface the drift
   // explicitly so the failure mode is unambiguous.
-  it("registry contains the full 28-tool ACI toolset (assembly sanity)", () => {
+  it("registry contains the full 30-tool ACI toolset (assembly sanity)", () => {
     const names = reg.catalog.all().map((t) => t.name);
     expect(names).toEqual([...ACI_TOOLSET_NAMES]);
   });
@@ -140,10 +154,10 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
 
   // Pre-#483 D9 baseline would have included bash's "Don't have a dedicated
   // tool" and a number of imperative "do not" / "never" fragments. After the
-  // audit, the only thing we pin is that all 28 tools are positive-trigger
+  // audit, the only thing we pin is that all 30 tools are positive-trigger
   // phrased — verified structurally by the blocklist assertions above.
-  it("toolset size after audit: 28 (full conditional-deps assembly)", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(28);
-    expect(reg.catalog.all()).toHaveLength(28);
+  it("toolset size after audit: 30 (full conditional-deps assembly)", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(30);
+    expect(reg.catalog.all()).toHaveLength(30);
   });
 });

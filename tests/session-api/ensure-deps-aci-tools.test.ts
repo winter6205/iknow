@@ -33,6 +33,8 @@ import { installTestSettingsSource } from "../_helpers/install-test-settings-sou
 // registry 末尾追加 spawn_subagent / subagent_result(→ 25 件)。
 // #440 双 Stream 并集:todo_write(T4) + MCP resources 两件(T11) append-only
 // 25→28(serve 走 build-engine 全装配,todoDir + mcpManager 均自建 → 三件在场)。
+// #502 T3:serve surface !== "ask" → build-engine 自建 backgroundManager →
+// registry 末尾追加 bash_output / bash_stop(→ 30 件,与 build-engine 全装配同形)。
 const EXPECTED_TOOLS = [
   "bash",
   "read_file",
@@ -71,6 +73,11 @@ const EXPECTED_TOOLS = [
   // build-engine 全装配,mcpManager 自建 → 两件在场)。
   "list_mcp_resources",
   "read_mcp_resource",
+  // #502 T3 bash_output / bash_stop 工具集 append-only:28→30,末位 2 件
+  // (serve 走 build-engine 全装配,backgroundManager 自建 → bash_output/bash_stop
+  // 入注册表;bash 仍常驻,参数级 background:true 能力由 handler 运行时决策)。
+  "bash_output",
+  "bash_stop",
 ];
 
 let baseDir: string;

@@ -1,16 +1,16 @@
 /**
  * tests/harness/aci/tools/registry.test.ts
  *
- * `createDefaultAciRegistry` — 28 件 SSOT 工具注册层单元测试
- * （五条件键 memoryDir / skillCatalog / subagentManager / todoDir / mcpManager
- *  全部缺席 → 19 件 = 8 基线 + tool_search + 10 LSP；只 memoryDir → 21 件；
- *  memoryDir+skillCatalog → 23 件；三者皆在场 → 25 件；五者皆在场 → 28 件
- *  = 全量 #440 双 Stream 并集末态）。
+ * `createDefaultAciRegistry` — 30 件 SSOT 工具注册层单元测试
+ * （六条件键 memoryDir / skillCatalog / subagentManager / todoDir / mcpManager
+ *  / backgroundManager 全部缺席 → 19 件 = 8 基线 + tool_search + 10 LSP；
+ *  只 memoryDir → 21 件；memoryDir+skillCatalog → 23 件；三者皆在场 → 25 件；
+ *  五者皆在场 → 28 件；六者皆在场 → 30 件 = 全量 #502 T4 末态）。
  *
  * 对齐 upstream `create_default_tool_registry()`(tools/__init__.py:48):
  * 单一装配函数返回注册表,所有入口共享。本测试锁 5 边界类:
  *
- *   - 正常路径:返回 AciRegistry,list() 28 工具(五条件键全在场),顺序 append-only
+ *   - 正常路径:返回 AciRegistry,list() 30 工具(六条件键全在场),顺序 append-only
  *   - 空输入:env.web 全空(undefined)→ 直连不抛;sandboxRoot:"" → 不抛
  *   - 非法输入:proxy 非 http/https / 含凭据 → 装配期同步抛 ToolExecutionError
  *   - 溢出/边界:sandboxRoot 指向不存在路径 → 装配期不抛(执行期由 fs 工具越界逻辑拒绝)
@@ -35,6 +35,7 @@ import { createSkillCatalog } from "../../../../src/harness/skill/catalog.js";
 import type { IknowEnv } from "../../../../src/config/env.js";
 import type { SubAgentManager } from "../../../../src/harness/subagent/manager.js";
 import type { McpManager } from "../../../../src/harness/mcp/manager.js";
+import type { BackgroundTaskManager } from "../../../../src/harness/background/manager.js";
 
 /** 合法最小 env(仅 web 字段;LLM 字段工厂不消费)。 */
 function makeWebEnv(
@@ -69,11 +70,24 @@ const fakeMcpManager: McpManager = {
   readResource: () => Promise.reject(new Error("fake: read not stubbed")),
 } as unknown as McpManager;
 
+/** #502 T4 fake backgroundManager（仅用于 createDefaultAciRegistry 装配期断言
+ * bash_output / bash_stop 在场；handler 路径单测在
+ * tests/harness/aci/bash-output-stop.test.ts）。 */
+const fakeBackgroundManager: BackgroundTaskManager = {
+  spawn: () => Promise.reject(new Error("fake: spawn not stubbed")),
+  status: () => Promise.reject(new Error("fake: status not stubbed")),
+  output: () => Promise.reject(new Error("fake: output not stubbed")),
+  stop: () => Promise.reject(new Error("fake: stop not stubbed")),
+  shutdown: () => Promise.resolve(),
+  registerConversationDeletedListener: () => undefined,
+  onConversationDeleted: () => undefined,
+} as unknown as BackgroundTaskManager;
+
 describe("createDefaultAciRegistry — 正常路径", () => {
-  // #440 双 Stream 并集：memoryDir + skillCatalog + subagentManager +
-  // todoDir + mcpManager 同时在场 → list() 全量 28 件（25 基线 + todo_write +
-  // list_mcp_resources + read_mcp_resource），顺序 append-only。
-  it("memoryDir + skillCatalog + subagentManager + todoDir + mcpManager 同时在场 → list() 全量 28 件,顺序 append-only", () => {
+  // #502 T4 全条件装配：memoryDir + skillCatalog + subagentManager +
+  // todoDir + mcpManager + backgroundManager 同时在场 → list() 全量 30 件
+  // （28 基线 + bash_output + bash_stop），顺序 append-only。
+  it("memoryDir + skillCatalog + subagentManager + todoDir + mcpManager + backgroundManager 同时在场 → list() 全量 30 件,顺序 append-only", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -83,6 +97,8 @@ describe("createDefaultAciRegistry — 正常路径", () => {
       // #440 T4:todo_write 条件化装配,todoDir 在场才入注册表。
       todoDir: "/tmp/root/session-1/todos",
       mcpManager: fakeMcpManager,
+      // #502 T4:bash_output / bash_stop 条件化装配,backgroundManager 在场才入注册表。
+      backgroundManager: fakeBackgroundManager,
     });
     const names = reg.inner.list().map((def) => def.name);
     expect(names).toEqual([...EXPECTED_TOOLS]);
@@ -100,9 +116,12 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     // #440 T11:mcpManager 条件化装配,在场时两件入注册表。
     expect(reg.catalog.get("list_mcp_resources")).toBeDefined();
     expect(reg.catalog.get("read_mcp_resource")).toBeDefined();
+    // #502 T4:backgroundManager 条件化装配,在场时两件入注册表。
+    expect(reg.catalog.get("bash_output")).toBeDefined();
+    expect(reg.catalog.get("bash_stop")).toBeDefined();
   });
 
-  it("memoryDir + skillCatalog + subagentManager 都缺席 → list() 19 件(8 基线 + tool_search + 10 LSP,无 memory/skill/spawn/todo/mcp 工具)", () => {
+  it("memoryDir + skillCatalog + subagentManager 都缺席 → list() 19 件(8 基线 + tool_search + 10 LSP,无 memory/skill/spawn/todo/mcp/bg 工具)", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -119,7 +138,9 @@ describe("createDefaultAciRegistry — 正常路径", () => {
           n !== "subagent_result" &&
           n !== "todo_write" &&
           n !== "list_mcp_resources" &&
-          n !== "read_mcp_resource"
+          n !== "read_mcp_resource" &&
+          n !== "bash_output" &&
+          n !== "bash_stop"
       )
     );
     expect(reg.catalog.get("tool_search")).toBeDefined();
@@ -134,12 +155,15 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     // #440 T11:mcpManager 缺席 → list/read 缺席。
     expect(reg.catalog.get("list_mcp_resources")).toBeUndefined();
     expect(reg.catalog.get("read_mcp_resource")).toBeUndefined();
+    // #502 T4:backgroundManager 缺席 → bash_output / bash_stop 缺席（bash 常驻）。
+    expect(reg.catalog.get("bash_output")).toBeUndefined();
+    expect(reg.catalog.get("bash_stop")).toBeUndefined();
   });
 
-  // #440 双 Stream 并集:ACI_TOOLSET_NAMES 长度 28(25 基线 + todo_write +
-  // list_mcp_resources + read_mcp_resource),顺序 append-only 不重排既有。
-  it("Gate 3:ACI_TOOLSET_NAMES 长度 28,前 8 原序 + memory_* + tool_search + 10 LSP + skill + skill_search + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(28);
+  // #502 T4 全条件装配:ACI_TOOLSET_NAMES 长度 30(28 基线 + bash_output +
+  // bash_stop),顺序 append-only 不重排既有。
+  it("Gate 3:ACI_TOOLSET_NAMES 长度 30,前 8 原序 + memory_* + tool_search + 10 LSP + skill + skill_search + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(30);
     // 前 8 件原序不变(append-only 纪律)。
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
@@ -175,10 +199,16 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(ACI_TOOLSET_NAMES.slice(24, 25)).toEqual(["subagent_result"]);
     // #440 双 Stream 并集:todo_write (T4) + MCP resources (T11) 三件
     // 末尾 append-only,不重排既有 25 件。
-    expect(ACI_TOOLSET_NAMES.slice(25)).toEqual([
+    expect(ACI_TOOLSET_NAMES.slice(25, 28)).toEqual([
       "todo_write",
       "list_mcp_resources",
       "read_mcp_resource",
+    ]);
+    // #502 T4 bash_output / bash_stop 工具集 append-only:28→30,末位 2 件,
+    // 不重排既有 28 件。
+    expect(ACI_TOOLSET_NAMES.slice(28, 30)).toEqual([
+      "bash_output",
+      "bash_stop",
     ]);
   });
 });
@@ -306,6 +336,7 @@ function expectedSurface(
     subagent?: boolean;
     todo?: boolean;
     mcp?: boolean;
+    bg?: boolean;
   } = {}
 ): readonly string[] {
   const conditionallyAbsent = [
@@ -314,6 +345,7 @@ function expectedSurface(
     ...(opts.subagent ? [] : ["spawn_subagent", "subagent_result"]),
     ...(opts.todo ? [] : ["todo_write"]),
     ...(opts.mcp ? [] : ["list_mcp_resources", "read_mcp_resource"]),
+    ...(opts.bg ? [] : ["bash_output", "bash_stop"]),
   ];
   return [...ACI_TOOLSET_NAMES].filter(
     (n) => !conditionallyAbsent.includes(n) && !deny.includes(n)
@@ -410,8 +442,9 @@ describe("createDefaultAciRegistry — #468 disallowedTools 裁剪", () => {
 
 describe("createDefaultAciRegistry — 并发闭包隔离", () => {
   it("两次工厂调用返回的 AciRegistry 相互独立", () => {
-    // #440 双 Stream 并集:两 registry 都给 todoDir + mcpManager → 28 件,
-    // 验证 catalog.all() 长度独立（闭包隔离,共享类型不串味）。
+    // #502 T4 全条件装配:两 registry 都给 todoDir + mcpManager +
+    // backgroundManager → 30 件,验证 catalog.all() 长度独立（闭包隔离,
+    // 共享类型不串味）。
     const a = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root-a",
@@ -420,6 +453,7 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
       subagentManager: fakeSubagentManager,
       todoDir: "/tmp/root-a/session-a/todos",
       mcpManager: fakeMcpManager,
+      backgroundManager: fakeBackgroundManager,
     });
     const b = createDefaultAciRegistry({
       env: makeWebEnv(),
@@ -429,6 +463,7 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
       subagentManager: fakeSubagentManager,
       todoDir: "/tmp/root-b/session-b/todos",
       mcpManager: fakeMcpManager,
+      backgroundManager: fakeBackgroundManager,
     });
     expect(a).not.toBe(b);
     expect(a.catalog).not.toBe(b.catalog);
@@ -476,7 +511,7 @@ describe("createDefaultAciRegistry — #440 T1 todoDir seam", () => {
     );
   });
 
-  it("todoDir 与其他条件化装配（memoryDir / skillCatalog / subagentManager / mcpManager）正交组合", () => {
+  it("todoDir 与其他条件化装配（memoryDir / skillCatalog / subagentManager / mcpManager / backgroundManager）正交组合", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -485,9 +520,10 @@ describe("createDefaultAciRegistry — #440 T1 todoDir seam", () => {
       subagentManager: fakeSubagentManager,
       todoDir: "/tmp/root/session-1/todos",
       mcpManager: fakeMcpManager,
+      backgroundManager: fakeBackgroundManager,
     });
-    // #440 双 Stream 并集:5 个条件化 seam 全在场 → 28 件全装配(25 基线 +
-    // todo_write + list_mcp_resources + read_mcp_resource)。
+    // #502 T4 全条件装配:6 个条件化 seam 全在场 → 30 件全装配(28 基线 +
+    // bash_output + bash_stop)。
     expect(reg.inner.list().map((d) => d.name)).toEqual([...EXPECTED_TOOLS]);
   });
 });
