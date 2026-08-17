@@ -22,6 +22,7 @@
 import { randomBytes } from "node:crypto";
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { appendFile, readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -52,6 +53,9 @@ export const DEFAULT_LOG_MAX_BYTES = 12 * 1024;
 export const MAX_LOG_READ_BYTES = 100 * 1024;
 /** stop 升级:SIGTERM → 宽限 2s → SIGKILL(复用 runner.ts stopTree 模式)。 */
 const STOP_KILL_GRACE_MS = 2_000;
+/** #502 T6 shutdown 镜像 SC12(subagent/manager.ts:479-563)常量:SIGTERM →
+ *  宽限 5s → SIGKILL。镜像同名同值,便于 review。 */
+const SHUTDOWN_SIGKILL_GRACE_MS = 5_000;
 
 /** 内存态:进程内活句柄,不入 registry json(child + 可迁移状态)。 */
 interface BackgroundTask {
@@ -60,6 +64,9 @@ interface BackgroundTask {
   child?: ChildProcess;
   /** 日志 appendFile 串行链:每 chunk 都续在上一链尾,保证顺序。 */
   writeChain: Promise<void>;
+  /** #502 T6:stop() arm 的 SIGKILL 兜底 timer;shutdown() 需 clearTimeout 避免
+   *  与自身 5s 宽限升级重复触发。 */
+  killFallback?: NodeJS.Timeout;
 }
 
 /** 对外只读展示;内部可迁移字段由 manager 独占变更。 */
@@ -152,6 +159,26 @@ export interface BackgroundTaskManager {
    * 对已终态任务幂等成功(合法态);对未知任务抛 task_not_found。
    */
   readonly stop: (taskId: string) => Promise<void>;
+  /**
+   * #502 T6 进程级收尾(镜像 SC12,ADR-0021 D1.1 exit reap):
+   * 清 killFallback timers → SIGTERM 所有 running 进程组 → ≤5s 宽限 →
+   * 未退出组 SIGKILL → registry json 收敛(killed/exited + exit_code
+   * best-effort)→ 清空内存 Map。幂等:第二次调用空集合并快速返回。
+   * 不抛错(单个组的信号错误被吞,以日志呈现)。
+   */
+  readonly shutdown: () => Promise<void>;
+  /**
+   * #502 T6 reap 接缝:注册 conversation 删除监听器。本票(plans/
+   * bash-service-loop.md T6)只留订阅点、不实现生命周期本体 —— 事件发射
+   * `onConversationDeleted` 由外部生命周期组件(#440 Not yet specified)
+   * 驱动。注册本身不触发任何调用。
+   */
+  readonly registerConversationDeletedListener: (
+    listener: (conversationId: string) => void
+  ) => void;
+  /** #502 T6 reap 接缝:发射 conversation 删除事件,迭代调用全部注册者。
+   *  单个 listener 抛错被吞,不污染其它监听器 / 调用方。 */
+  readonly onConversationDeleted: (conversationId: string) => void;
 }
 
 /**
@@ -213,10 +240,33 @@ export function createBackgroundTaskManager(
     log,
   });
   const tasks = new Map<string, BackgroundTask>();
+  /** #502 T6 reap 接缝:conversation 删除监听器集合(本票零内部 caller)。 */
+  const conversationDeletedListeners = new Set<
+    (conversationId: string) => void
+  >();
 
   /** task_id 生成(ADR-0021 D1.7):`bg-` + 12 位随机 hex。 */
   function generateTaskId(): string {
     return `bg-${randomBytes(6).toString("hex")}`;
+  }
+
+  /**
+   * #502 T6:读进程组 leader 的 starttime(/proc/<pid>/stat f22),供启动 stale
+   * 清扫防 pgid 复用误杀(ADR-0021 D1.5)。非 Linux / 目录不可读 → undefined
+   * (reap 对无 starttime 记录走保守跳过政策)。
+   */
+  function readChildStartTime(pid: number): number | undefined {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const suffix = stat
+        .slice(stat.lastIndexOf(")") + 1)
+        .trim()
+        .split(/\s+/);
+      const v = Number(suffix[19]);
+      return Number.isFinite(v) ? v : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   async function spawn(
@@ -253,6 +303,7 @@ export function createBackgroundTaskManager(
       };
     }
 
+    const starttime = readChildStartTime(child.pid);
     const record: BackgroundTaskRecord = {
       task_id: taskId,
       command: request.command,
@@ -263,6 +314,7 @@ export function createBackgroundTaskManager(
       exit_code: null,
       created_at: new Date().toISOString(),
       log_path: logPath,
+      ...(starttime !== undefined ? { starttime } : {}),
     };
 
     // registry json 落盘(running 态)先于返回 —— spawn resolved 即 registry
@@ -316,6 +368,9 @@ export function createBackgroundTaskManager(
         exit_code: exitCode,
         created_at: record.created_at,
         log_path: logPath,
+        ...(record.starttime !== undefined
+          ? { starttime: record.starttime }
+          : {}),
       };
       try {
         await registry.save(rec);
@@ -466,6 +521,159 @@ export function createBackgroundTaskManager(
       }
     }, STOP_KILL_GRACE_MS);
     killFallback.unref?.();
+    // #502 T6:记录到 task —— shutdown() 先 clearTimeout 再 SIGTERM,避免宽限
+    // 窗口期(2s)与 shutdown 自身升级(5s)重复补发 SIGKILL。
+    task.killFallback = killFallback;
+  }
+
+  /**
+   * #502 T6 进程级收尾(镜像 SC12,ADR-0021 D1.1 exit reap):
+   *   1. 清空所有 armed killFallback timers(stop 兜底层)
+   *   2. SIGTERM 所有 running 进程组(child + group 双路)
+   *   3. 等 ≤5s 宽限(child exit 事件 + 升级 timer 双门)
+   *   4. 未退出组 SIGKILL 兜底
+   *   5. registry json 收敛(未达 exit 事件且状态仍 running 的任务 → 标 killed,
+   *      已 settled 的不再覆盖;best-effort save)
+   *   6. 清空内存 Map
+   * 幂等:第二次调用 shuttingDown 已置位,空集合快速返回。
+   * 单个组的信号错误被吞,以日志呈现(不抛错,不污染其它组)。
+   */
+  let shuttingDown = false;
+  async function shutdown(): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
+    // 1. 收集所有 running 任务 + 清 killFallback timers(stop 升级不补刀)。
+    const running: BackgroundTask[] = [];
+    for (const task of tasks.values()) {
+      if (task.killFallback) {
+        clearTimeout(task.killFallback);
+        task.killFallback = undefined;
+      }
+      if (task.client.status === "running") {
+        running.push(task);
+      }
+    }
+
+    if (running.length === 0) {
+      tasks.clear();
+      return;
+    }
+
+    // 2. SIGTERM 所有 running 进程组(child + group 双路,错误吞)。
+    for (const task of running) {
+      const child = task.child;
+      const pid = child?.pid;
+      if (!child || pid === undefined) continue;
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        /* EPIPE / ESRCH 忽略 */
+      }
+      try {
+        process.kill(-pid, "SIGTERM");
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== "ESRCH") {
+          log(`background shutdown SIGTERM failed: ${String(err)}`);
+        }
+      }
+    }
+
+    // 3. 等 ≤5s 宽限(child exit 事件 + 升级 timer 双门)。
+    const closed = new Set<BackgroundTask>();
+    let resolveExit: () => void = () => undefined;
+    const waitForExits = new Promise<void>((resolve) => {
+      resolveExit = resolve;
+      for (const task of running) {
+        const child = task.child;
+        if (!child) {
+          closed.add(task);
+          continue;
+        }
+        child.once("exit", () => {
+          closed.add(task);
+          if (closed.size === running.length) resolve();
+        });
+      }
+      // 没有 child listener 可挂载或都当场关闭 → 立即 resolve
+      if (closed.size === running.length) resolve();
+    });
+    const timer = setTimeout(() => resolveExit(), SHUTDOWN_SIGKILL_GRACE_MS);
+    timer.unref?.();
+    await waitForExits;
+    clearTimeout(timer);
+
+    // 4. 未退出组 SIGKILL 兜底。
+    for (const task of running) {
+      if (closed.has(task)) continue;
+      const child = task.child;
+      const pid = child?.pid;
+      if (!child || pid === undefined) continue;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* 忽略 */
+      }
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        /* 忽略 */
+      }
+    }
+
+    // 5. registry json 收敛:仅覆盖仍 running 的(已 settled 的 exit 事件已落
+    //    盘 killed/exited,不再改写)。best-effort save:失败仅记日志。
+    for (const task of running) {
+      if (task.client.status !== "running") continue;
+      task.client.status = "killed";
+      task.client.exit_code = null;
+      const rec: BackgroundTaskRecord = {
+        task_id: task.task_id,
+        command: task.client.command,
+        owner_pid: process.pid,
+        conversation_id: task.client.conversation_id,
+        pgid: task.child?.pid ?? 0,
+        status: "killed",
+        exit_code: null,
+        created_at: new Date().toISOString(),
+        log_path: task.client.log_path,
+      };
+      try {
+        await registry.save(rec);
+      } catch (err) {
+        log(
+          `background registry save failed on shutdown: ${
+            (err as BackgroundTaskError).context
+          }`
+        );
+      }
+    }
+
+    // 6. 清空内存 Map。
+    tasks.clear();
+  }
+
+  /** #502 T6 reap 接缝:注册 conversation 删除监听器。无内部 caller;注册本身不触发。 */
+  function registerConversationDeletedListener(
+    listener: (conversationId: string) => void
+  ): void {
+    conversationDeletedListeners.add(listener);
+  }
+
+  /** #502 T6 reap 接缝:发射事件 + 迭代调用全部注册者。单个 listener 抛错被吞。 */
+  function onConversationDeleted(conversationId: string): void {
+    for (const listener of conversationDeletedListeners) {
+      try {
+        listener(conversationId);
+      } catch (err) {
+        log(
+          `background conversation-deleted listener threw: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      }
+    }
   }
 
   return Object.freeze({
@@ -473,5 +681,8 @@ export function createBackgroundTaskManager(
     status,
     output,
     stop,
+    shutdown,
+    registerConversationDeletedListener,
+    onConversationDeleted,
   });
 }

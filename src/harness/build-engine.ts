@@ -82,6 +82,7 @@ import {
   type BackgroundTaskManager,
 } from "./background/manager.js";
 import { resolveTasksDir } from "./background/paths.js";
+import { reapStaleTasks } from "./background/stale-reap.js";
 
 export type BuildEngineOpts = {
   readonly env: IknowEnv;
@@ -319,6 +320,26 @@ export async function buildHarnessEngine(
           spawn: defaultBackgroundSpawn,
         })
       : undefined;
+  // #502 T6:启动 stale 清扫（ADR-0021 D1.5）—— 全 surface（含 ask）执行：
+  // 回收 owner_pid 已死的遗留后台任务进程组（残留 json 标 dead + log 追加
+  // reap marker）。只处理 owner-dead 记录，starttime 不符 / 无 starttime 保守
+  // 跳过；绝不 throw —— 清扫失败以 warn 呈现，启动流程不因清扫阻塞。
+  if (typeof process !== "undefined") {
+    try {
+      const summary = await reapStaleTasks({
+        tasksDir: resolveTasksDir(workspaceRoot),
+      });
+      if (summary.reaped.length > 0) {
+        console.warn(
+          `[build-engine] reaped ${summary.reaped.length} stale background task(s): ${summary.reaped.join(", ")}`
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `[build-engine] background stale reap skipped: ${errorMessage(err)}`
+      );
+    }
+  }
   // #126 T5:settings 对象缝（测试注入隔离 settings；生产缺省 loadIknowSettings）。
   const settings = opts.settings ?? loadIknowSettings({ cwd });
   // #406 T4:secret 处理模式 —— settings.secrets.mode 驱动装配。缺省 = "roundtrip"
@@ -572,15 +593,18 @@ export async function buildHarnessEngine(
     skillCatalog,
     ...(mcpManager ? { mcpManager } : {}),
     catalog: reg.catalog,
-    // #356 T6:shutdown 组合 MCP + subagent 两清理。SC12 顺序:mcpManager first →
-    // subagentManager second(两者无共享可变状态,Promise.all 并发触发;顺序仅
-    // 语义标注,非严格串行 — ask 入口两者都缺席时 shutdown 也缺席)。
-    ...(mcpManager || subagentManager
+    // #356 T6:shutdown 组合 MCP + subagent + background 三清理。SC12 顺序:
+    // mcpManager first → subagentManager second(两者无共享可变状态,Promise.all
+    // 并发触发;顺序仅语义标注,非严格串行 — ask 入口三者都缺席时 shutdown 也
+    // 缺席)。#502 T6:backgroundManager.shutdown() 加入 —— 杀遗留后台进程组,
+    // 与 MCP/subagent 无共享可变状态,可安全并入 Promise.all。
+    ...(mcpManager || subagentManager || backgroundManager
       ? {
           shutdown: async (): Promise<void> => {
             await Promise.all([
               mcpManager?.shutdown(),
               subagentManager?.shutdown(),
+              backgroundManager?.shutdown(),
             ]);
           },
         }

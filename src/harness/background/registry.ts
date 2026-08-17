@@ -17,13 +17,18 @@
 import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-/** ADR-0021 定稿 task 状态机字面量。 */
-export type BackgroundTaskStatus = "running" | "exited" | "killed";
+/** ADR-0021 定稿 task 状态机字面量。"dead" 由启动 stale 清扫(reap)写入:
+ *  owner_pid 死亡 + pgid 已不存在 / starttime 匹配 → 进程组已 SIGKILL,
+ *  进程级生命周期收敛。本票(T6)加入。 */
+export type BackgroundTaskStatus = "running" | "exited" | "killed" | "dead";
 
 /**
  * 落盘记录(ADR-0021):字段名 snake_case = wire 契约,与 task_id 格式
  * (`bg-` + 12 hex)一并构成 bash_output / bash_stop 入参的唯一对应。
  * exit_code 缺省 null(running 态),终态后填充自然退出码。
+ * starttime 可选(ADR-0021 D1.5 / T6):进程组 leader 的 /proc/<pid>/stat
+ * 第 22 字段,启动 stale 清扫用其防 pgid 误杀复用进程组。非 Linux /
+ * 读 /proc 失败时缺省 → reap 对无 starttime 记录走保守政策(只跳过、不 kill)。
  */
 export interface BackgroundTaskRecord {
   readonly task_id: string;
@@ -35,6 +40,7 @@ export interface BackgroundTaskRecord {
   readonly exit_code: number | null;
   readonly created_at: string;
   readonly log_path: string;
+  readonly starttime?: number;
 }
 
 /**
