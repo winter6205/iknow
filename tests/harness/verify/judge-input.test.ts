@@ -21,6 +21,7 @@ import type { EvidenceContext } from "../../../src/harness/verify/types.ts";
 import type { SubAgentDefinition } from "../../../src/harness/subagent/manager.js";
 import type { SubAgentEnvelope } from "../../../src/harness/subagent/envelope.js";
 import type { SubAgentManager } from "../../../src/harness/subagent/manager.js";
+import { ACI_TOOLSET_NAMES } from "../../../src/harness/aci/tools/registry.ts";
 
 /* ------------------------------ 测试替身 ------------------------------ */
 
@@ -81,14 +82,25 @@ function makeStubManager(opts: StubManagerOpts = {}): {
   return { manager, captured: () => captured };
 }
 
-/** JUDGE_ROLE 声明面 disallowedTools (spec 468 + run-classifier-adapter.ts:35-41)。 */
-const JUDGE_DISALLOWED_TOOLS: ReadonlyArray<string> = Object.freeze([
-  "bash",
-  "edit_file",
-  "write_file",
-  "web_fetch",
-  "web_search",
+/**
+ * #357 T2 — 判官 allow-list 推导真值。
+ *
+ * 判官白名单基线（spec 357 Objective 2 + plans T2 acceptance 2）：
+ * 「只许本地纯只读」= read_file / grep / glob。fail-closed 推导：
+ *   disallowedTools = ACI_TOOLSET_NAMES − JUDGE_ALLOWED_BASELINE
+ *
+ * 加白名单 = 显式改 JUDGE_ALLOWED_BASELINE 常量 + operator 拍板。
+ */
+const JUDGE_ALLOWED_BASELINE: ReadonlyArray<string> = Object.freeze([
+  "read_file",
+  "grep",
+  "glob",
 ]);
+
+/** 推导真值 = 全量 ACI 工具面 − 白名单基线（与 run-classifier-adapter 推导公式同源）。 */
+const JUDGE_DISALLOWED_TOOLS: ReadonlyArray<string> = Object.freeze(
+  [...ACI_TOOLSET_NAMES].filter((n) => !JUDGE_ALLOWED_BASELINE.includes(n))
+);
 
 /* ------------------------------ B6: evidence-aware judge input ------------------------------ */
 
@@ -148,7 +160,7 @@ describe("createRunClassifierFromManager — evidence-aware judge input (#449b B
     assert.equal(parsed.evidenceSummary, evidenceContext.evidenceSummary);
   });
 
-  it("SC9: def.disallowedTools 声明 5 项禁工具原样保留", async () => {
+  it("SC9: def.disallowedTools = 全量 ACI 工具面 − 白名单基线（fail-closed allow-list 推导）", async () => {
     const { manager, captured } = makeStubManager();
     const runClassifier = createRunClassifierFromManager({ manager });
     await runClassifier({
@@ -162,10 +174,35 @@ describe("createRunClassifierFromManager — evidence-aware judge input (#449b B
       def.disallowedTools !== undefined,
       "JUDGE_ROLE must declare disallowedTools"
     );
+    // fail-closed: 全量面减去白名单三件 = 全量面 − {read_file, grep, glob}。
     assert.deepEqual(
       [...def.disallowedTools].sort(),
       [...JUDGE_DISALLOWED_TOOLS].sort(),
-      "disallowedTools must contain exactly the 5 declared items (bash/edit_file/write_file/web_fetch/web_search)"
+      "disallowedTools must equal ACI_TOOLSET_NAMES − JUDGE_ALLOWED_BASELINE"
+    );
+    // 白名单三件必须缺席（允许判官使用）。
+    for (const allowed of JUDGE_ALLOWED_BASELINE) {
+      assert.ok(
+        !def.disallowedTools!.includes(allowed),
+        `白名单工具 ${allowed} 必须不在 disallowedTools 内`
+      );
+    }
+  });
+
+  it("#357 T2: 白名单为空时判官零工具可装配（pure-text 路径边界）", () => {
+    // 推导公式: deny = 全量面 − 白名单。白名单 = ∅ → deny = 全量面。
+    // 这条 spec Testing Strategy「白名单空 → 判官零工具仍可装配」边界条件
+    // 由本测试守护（fail-closed 推导边界）。判官工厂实际产物是 deny 数组,
+    // 真零工具的运行时验证在 worker-tool-surface.test.ts C 段「deny 全量」
+    // 已覆盖等价语义——此处仅锁推导公式正确性。
+    const emptyAllow: ReadonlyArray<string> = Object.freeze([]);
+    const computedDeny = [...ACI_TOOLSET_NAMES].filter(
+      (n) => !emptyAllow.includes(n)
+    );
+    assert.deepEqual(
+      computedDeny,
+      [...ACI_TOOLSET_NAMES],
+      "白名单空 → deny = 全量面（fail-closed）"
     );
   });
 

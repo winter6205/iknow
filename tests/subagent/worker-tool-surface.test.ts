@@ -32,23 +32,33 @@ import { createNoopTraceService } from "../../src/harness/trace/noop.ts";
 import type { LoopEngineDeps } from "../../src/harness/loop-engine.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 import type { WorkerEnvelope } from "../../src/harness/subagent/envelope.ts";
+import { ACI_TOOLSET_NAMES } from "../../src/harness/aci/tools/registry.ts";
 
 // ---------------------------------------------------------------------------
 // Constants & fixtures
 // ---------------------------------------------------------------------------
 
 /**
- * 镜像 JUDGE_ROLE.disallowedTools（run-classifier-adapter.ts:35-41，
- * module-private 不可 import，spec 禁改源文件）—— 与真值源 drift 由该文件
- * 单测守护。若 JUDGE_ROLE 真值漂移，本测试失败 = 显式信号。
+ * #357 T2 — 镜像 JUDGE_ROLE 真值源（run-classifier-adapter.ts:35-41 module-private，
+ * 不可 import，drift 由本测试守护）。
+ *
+ * 判官 allow-list 推导（fail-closed）：
+ *   deny = ACI_TOOLSET_NAMES − JUDGE_ALLOWED_BASELINE
+ *
+ * 与真值源同源：若 JUDGE_ROLE 白名单真值漂移，本测试失败 = 显式信号。
+ * 加白名单 = 显式改 JUDGE_ALLOWED_BASELINE 常量 + operator 拍板（spec 357
+ * Objective 2 + plans T2 acceptance 2）。
  */
-const JUDGE_DENY = [
-  "bash",
-  "edit_file",
-  "write_file",
-  "web_fetch",
-  "web_search",
-] as const;
+const JUDGE_ALLOWED_BASELINE: ReadonlyArray<string> = Object.freeze([
+  "read_file",
+  "grep",
+  "glob",
+]);
+
+/** 镜像 = 全量面 − 白名单基线（与 run-classifier-adapter 推导公式同源）。 */
+const JUDGE_DENY: ReadonlyArray<string> = Object.freeze(
+  [...ACI_TOOLSET_NAMES].filter((n) => !JUDGE_ALLOWED_BASELINE.includes(n))
+);
 
 /** 测试用 minimal IknowEnv —— createWorkerDeps 路径类型要求，不真发请求。 */
 const TEST_ENV: IknowEnv = {
@@ -160,19 +170,16 @@ function hermeticOpts(
 // ---------------------------------------------------------------------------
 
 describe("worker tool surface: 正常路径 — declared deny-list 全生效", () => {
-  it("deny JUDGE 5 禁项 → inner+visibleSchemas 双面均不含 5 项", async () => {
+  it("deny JUDGE 25 禁项（allow-list 推导）→ inner+visibleSchemas 双面 = 白名单三件", async () => {
+    // #357 T2 判官 allow-list 推导：deny = 全量面 − {read_file, grep, glob}，
+    // 装配后双面仅剩白名单三件。fail-closed：白名单外一律禁。
     const deps = await createWorkerDeps(
       hermeticOpts({ disallowedTools: [...JUDGE_DENY] })
     );
-    assertSurface(deps, JUDGE_DENY, [
-      "read_file",
-      "grep",
-      "glob",
-      "tool_search",
-    ]);
+    assertSurface(deps, JUDGE_DENY, ["read_file", "grep", "glob"]);
   });
 
-  it("deny JUDGE 5 禁项 → 双面集合与 WORKER_BASE_SURFACE - JUDGE_DENY 完全相等", async () => {
+  it("deny JUDGE 25 禁项 → 双面集合恰为白名单基线（与 WORKER_BASE_SURFACE - JUDGE_DENY 完全相等）", async () => {
     const deps = await createWorkerDeps(
       hermeticOpts({ disallowedTools: [...JUDGE_DENY] })
     );
@@ -257,14 +264,24 @@ describe("worker tool surface: 边界 — undefined / 空 / deny-all", () => {
 });
 
 // ---------------------------------------------------------------------------
-// D. 权限 / 判官只读 —— JUDGE_ROLE 5 禁项双面缺席（SC3 + SC4 权限行）
+// D. 权限 / 判官只读 —— JUDGE_ROLE allow-list 推导（SC3 + SC4 权限行）
 // ---------------------------------------------------------------------------
 
-describe("worker tool surface: 权限 — 判官只读（JUDGE_ROLE 5 禁项）", () => {
-  it("JUDGE 5 禁项在 inner.list() 与 promptTools() 双面均缺席", async () => {
-    // JUDGE_DENY = 本地镜像 run-classifier-adapter.ts:35-41（module-private，
-    // spec 禁改源文件，drift 由此守护）。与 "正常" 测试重叠语义但独立断言
-    // —— 显式命名让判官契约变更时定位到此用例。
+describe("worker tool surface: 权限 — 判官只读（allow-list 推导）", () => {
+  it("判官面双面恰为白名单三件（inner.list() 与 promptTools() = {read_file, grep, glob}）", async () => {
+    // #357 T2：判官 deny = 全量面 − {read_file, grep, glob}，装配后双面
+    // 恰为白名单三件（fail-closed allow-list）。与「A 正常」测试重叠语义但
+    // 独立断言 —— 显式命名让判官白名单变更时定位到此用例。
+    const deps = await createWorkerDeps(
+      hermeticOpts({ disallowedTools: [...JUDGE_DENY] })
+    );
+    const innerNames = deps.registry.list().map((t) => t.name);
+    const promptNames = deps.promptTools().map((t) => t.name);
+    assert.deepEqual(innerNames, [...JUDGE_ALLOWED_BASELINE]);
+    assert.deepEqual(promptNames, [...JUDGE_ALLOWED_BASELINE]);
+  });
+
+  it("白名单外全部工具在 inner.list() 与 promptTools() 双面均缺席", async () => {
     const deps = await createWorkerDeps(
       hermeticOpts({ disallowedTools: [...JUDGE_DENY] })
     );
@@ -282,7 +299,7 @@ describe("worker tool surface: 权限 — 判官只读（JUDGE_ROLE 5 禁项）"
     }
   });
 
-  it("JUDGE 5 禁项在 reg.catalog 也缺席（catalog 双层防护 / executor + permission middleware）", async () => {
+  it("白名单外工具在 reg.catalog 也缺席（catalog 双层防护 / executor + permission middleware）", async () => {
     // 单独调一次 createDefaultAciRegistry 验证 catalog 端（registry.inner 不直接
     // 暴露 catalog，但 createWorkerDeps 内部已用 createDefaultAciRegistry，
     // 故这里通过其返回的 registry 内层结构拿 catalog —— 仅在 catalog 暴露
