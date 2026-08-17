@@ -31,6 +31,8 @@ import { installTestSettingsSource } from "../_helpers/install-test-settings-sou
 // EXPECTED_TOOLS 同形)。
 // #356 T6:build-engine 全装配(surface 默认 chat)自建 subagentManager →
 // registry 末尾追加 spawn_subagent / subagent_result(→ 25 件)。
+// #440 T11:build-engine 全装配(surface 默认 chat)自建 mcpManager →
+// registry 末尾追加 list_mcp_resources / read_mcp_resource(→ 27 件)。
 const EXPECTED_TOOLS = [
   "bash",
   "read_file",
@@ -62,6 +64,10 @@ const EXPECTED_TOOLS = [
   // 全装配,subagentManager 自建 → 两件在场)。
   "spawn_subagent",
   "subagent_result",
+  // #440 T11 MCP resources 工具集 append-only:25→27,末尾两件(serve 走
+  // build-engine 全装配,mcpManager 自建 → 两件在场)。
+  "list_mcp_resources",
+  "read_mcp_resource",
 ];
 
 let baseDir: string;

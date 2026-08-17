@@ -63,3 +63,21 @@ export class MaxTurnsExceeded extends Error {
 export class ToolExecutionError extends Error {
   override readonly name = "ToolExecutionError";
 }
+
+/**
+ * 任意 throwable → 安全字符串摘要（typed error 已由调用方判定分支）。
+ *
+ * 取代 `err instanceof Error ? err.message : String(err)`：后者把 plain object
+ * 打成 `[object Object]`，丢光 kind/context。code-quality.md typed-error catch 契约
+ * 明确禁止该形态。本 helper 与 lessons from tools/list-mcp-resources.ts /
+ * read-mcp-resource.ts 的工具层 `errMessage` 一致；现在抽到 errors.ts 单点维护。
+ */
+export function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}

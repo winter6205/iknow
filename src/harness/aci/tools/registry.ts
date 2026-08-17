@@ -38,6 +38,9 @@ import { createSkillSearchTool } from "./skill-search.js";
 import { createSpawnSubAgentTool } from "../../subagent/spawn-subagent-tool.js";
 import { createSubAgentResultTool } from "../../subagent/subagent-result-tool.js";
 import type { SubAgentManager } from "../../subagent/manager.js";
+import type { McpManager } from "../../mcp/manager.js";
+import { createListMcpResourcesTool } from "./list-mcp-resources.js";
+import { createReadMcpResourceTool } from "./read-mcp-resource.js";
 import { buildWorkerToolSurface } from "../../subagent/role.js";
 import { RegistryConstructionError, ToolExecutionError } from "../../errors.js";
 import type { SkillCatalog } from "../../skill/catalog.js";
@@ -102,6 +105,14 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   // 缺席时不入注册表，与 spawn_subagent / skillCatalog / memoryDir 同形态：
   // Gate 3 在 toolsetNames 端镜像过滤，见工厂尾部注释）。
   "subagent_result", // #356 T5 主代理轮询子代理四态（not_found/running/completed/failed）
+  // #440 T11 MCP resources 工具集 append-only：25→27。两件都条件化装配
+  // （mcpManager 缺席时不入注册表，与 subagentManager / skillCatalog /
+  // memoryDir 同形态：Gate 3 在 toolsetNames 端镜像过滤，见工厂尾部注释）。
+  // M2 决议：read-only / 默认 ask 关闭；与 web_fetch / web_search 先例对齐
+  // （ask 是副作用守门，不是内容审查门）。list 由 iknow 自写 meta 工具
+  // 行为透明，诚实标 read-only（与 mcp__* 动态工具的保守 write 默认不同）。
+  "list_mcp_resources", // #440 T11 list MCP server 暴露的 resources（聚合 / 可选 server + cursor）
+  "read_mcp_resource", // #440 T11 读单个 resource 内容（必填 server + uri）
 ] as const);
 
 /**
@@ -119,6 +130,11 @@ export interface CreateDefaultAciRegistryOptions {
   /** #356 T4 主代理本地子代理生命周期管理器。缺席时 spawn_subagent 不入注册表
    * （ask 入口零件场景；chat/tui/serve 由 build-engine 按 surface 条件构造传入）。 */
   readonly subagentManager?: SubAgentManager;
+  /** #440 T11 MCP 资源通道管理器。缺席时 list_mcp_resources / read_mcp_resource
+   *  不入注册表（ask 入口零件场景 + 任务型 worker；chat/tui/serve 由 build-engine
+   *  按 surface 条件构造传入）。与 subagentManager / skillCatalog / memoryDir
+   *  同形态：Gate 3 在 toolsetNames 端镜像过滤，见工厂尾部注释。 */
+  readonly mcpManager?: McpManager;
   /** #251 onEdit 接缝:edit_file 写盘成功后回调(装配层接 LSP notifier)。 */
   readonly onEdit?: (file: string) => void;
   /** #406 T3:per-engine secret registry。透传给 bash 工具工厂——handler
@@ -183,6 +199,7 @@ export function createDefaultAciRegistry(
   const memoryDir = opts.memoryDir;
   const skillCatalog = opts.skillCatalog;
   const subagentManager = opts.subagentManager;
+  const mcpManager = opts.mcpManager;
   const secretRegistry = opts.secretRegistry;
   const disallowedTools = opts.disallowedTools;
 
@@ -249,6 +266,23 @@ export function createDefaultAciRegistry(
             createSubAgentResultTool({ manager: subagentManager }),
         }
       : {}),
+    // #440 T11 MCP resources 工具集（条件化装配：mcpManager 缺席时
+    // 不入注册表——ask 入口零件 + 任务型 worker；与 subagentManager /
+    // skillCatalog / memoryDir 同形态；Gate 3 镜像过滤，见下）。
+    // list / read 都通过 getManager 惰性闭包解引用 manager；装配期
+    // mcpManager 缺席则工具不入注册表（handler 永不被路由）。
+    ...(mcpManager
+      ? {
+          list_mcp_resources: () =>
+            createListMcpResourcesTool({
+              getManager: () => mcpManager,
+            }),
+          read_mcp_resource: () =>
+            createReadMcpResourceTool({
+              getManager: () => mcpManager,
+            }),
+        }
+      : {}),
   };
 
   // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。
@@ -263,6 +297,7 @@ export function createDefaultAciRegistry(
     ...(memoryDir ? [] : ["memory_recall", "memory_save"]),
     ...(skillCatalog ? [] : ["skill", "skill_search"]),
     ...(subagentManager ? [] : ["spawn_subagent", "subagent_result"]),
+    ...(mcpManager ? [] : ["list_mcp_resources", "read_mcp_resource"]),
     ...(disallowedTools ?? []),
   ];
   const toolsetNames = (ACI_TOOLSET_NAMES as ReadonlyArray<string>).filter(

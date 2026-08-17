@@ -59,10 +59,12 @@ function makeBundle(
   return { env } as unknown as RuntimeBundle;
 }
 
-// #365 T2：surface="tui" → build-engine 全装配 25 件(skillCatalog + subagentManager
-// 均装配)。数组与 tests/harness/build-engine.test.ts 的 EXPECTED_TOOLS 对齐(SSOT)。
+// #365 T2：surface="tui" → build-engine 全装配 27 件(skillCatalog +
+// subagentManager + mcpManager 均装配)。数组与 tests/harness/build-engine.test.ts
+// 的 EXPECTED_TOOLS 对齐(SSOT)。
 // 拆分:base 11 件(#194 + #224)→ +10 LSP(#251)= 21 件 → + skill/skill_search
-// (#337 T8)= 23 件 → + spawn_subagent/subagent_result (#356 T6)= 25 件。
+// (#337 T8)= 23 件 → + spawn_subagent/subagent_result (#356 T6)= 25 件
+// → + list_mcp_resources/read_mcp_resource (#440 T11)= 27 件。
 const EXPECTED_BASE_11 = [
   "bash",
   "read_file",
@@ -88,13 +90,15 @@ const EXPECTED_LSP_10 = [
   "lsp_outgoing_calls",
   "lsp_diagnostics",
 ];
-const EXPECTED_TOOLSET_25 = [
+const EXPECTED_TOOLSET_27 = [
   ...EXPECTED_BASE_11,
   ...EXPECTED_LSP_10,
   "skill",
   "skill_search",
   "spawn_subagent",
   "subagent_result",
+  "list_mcp_resources",
+  "read_mcp_resource",
 ];
 
 describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(25 件)", () => {
@@ -123,7 +127,7 @@ describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(25 件)"
       .list()
       .map((def) => def.name)
       .sort();
-    expect(names).toEqual([...EXPECTED_TOOLSET_25].sort());
+    expect(names).toEqual([...EXPECTED_TOOLSET_27].sort());
   });
 
   test("显式断言 web_fetch / web_search / skill / skill_search 都在注册表里", async () => {
