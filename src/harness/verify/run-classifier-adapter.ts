@@ -121,12 +121,19 @@ export function createRunClassifierFromManager(
     // 字段在生产路径语义同源, adapter 无独立消费者; 此处显式 void 标记"已接
     // 收、当前不消费", 避免 TS6133 又保留契约面。
     void finalText;
+    // #357 code-review fix: 判官 def 不再显式传 sandboxRoot（此前锚 cwd =
+    // process.cwd()）。T1 起 manager 以 parent sandboxRoot 单点校验 prefix-of-
+    // parent——显式 sandboxRoot 配置（serve 路径）下 cwd ≠ parent root,判官
+    // spawn 每轮被拒并静默降级为 crashed envelope。省略字段走 SC8 继承路径:
+    // envelope.sandboxRoot = manager parent sandboxRoot（判官与父代理同工作域,
+    // 正是判官读证据文件的正确锚）。cwd 参数保留于 RunClassifierFn 签名
+    // （verify-loop 契约），adapter 当前不消费。
+    void cwd;
     const def = {
       ...JUDGE_ROLE,
       task: buildJudgeTask(task, evidenceContext),
       model: model ?? classifierModel,
       timeoutMs,
-      sandboxRoot: cwd,
     };
     let taskId: string;
     try {

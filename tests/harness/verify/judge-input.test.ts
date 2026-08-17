@@ -313,3 +313,92 @@ describe("createRunClassifierFromManager — evidence-aware judge input (#449b B
     assert.equal(parsed.evidenceSummary, "", "empty evidenceSummary preserved");
   });
 });
+
+/* ------------------------------ #357 code-review fix: 判官 sandboxRoot 继承 ------------------------------ */
+
+import { EventEmitter } from "node:events";
+import { mkdtempSync, rmSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PassThrough } from "node:stream";
+import type { ChildProcess } from "node:child_process";
+import { createSubAgentManager } from "../../../src/harness/subagent/manager.js";
+import type { WorkerEnvelope } from "../../../src/harness/subagent/envelope.js";
+
+/**
+ * #357 code-review fix 回归测试（Standards+Spec 双轴 Medium）：
+ * 判官 def 不显式传 sandboxRoot → manager 单点校验走 SC8 继承路径。
+ *
+ * 修复前形态：adapter 把 `sandboxRoot: cwd`（= process.cwd()）钉进 def ——
+ * serve 显式 sandboxRoot 配置下 cwd ≠ manager parent root，判官 spawn 每轮
+ * 被 T1 校验拒绝（SubAgentSandboxRootError）→ catch 吞成 crashed envelope，
+ * verify 静默空转。修复后：字段省略 → envelope.sandboxRoot = parent root。
+ */
+describe("#357 判官 spawn 锚 — 省略 sandboxRoot 走 SC8 继承（parent ≠ cwd 场景）", () => {
+  it("真实 manager（parent sandboxRoot ≠ process.cwd()）→ 判官 spawn 成功且继承父根", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "judge-anchor-"));
+    try {
+      const spawnCalls: {
+        def: SubAgentDefinition;
+        payload: WorkerEnvelope;
+      }[] = [];
+      const manager = createSubAgentManager({
+        spawn: (def, _taskId, payload) => {
+          spawnCalls.push({ def, payload });
+          const stdout = new PassThrough();
+          const child = Object.assign(new EventEmitter(), {
+            stdin: new PassThrough(),
+            stdout,
+            stderr: new PassThrough(),
+            pid: 99,
+            kill: () => true,
+            exitCode: null,
+            signalCode: null,
+          });
+          // spawn 后异步 emit 合法 pass envelope → manager completed 终态，
+          // waitFor 快速收敛（不挂 120s 缺省 timeout）。
+          setImmediate(() => {
+            stdout.write(
+              JSON.stringify({
+                status: "ok",
+                summary: "judge done",
+                result: PASS_JUDGE_JSON,
+              }) + "\n"
+            );
+            (child as EventEmitter).emit("exit", 0, null);
+          });
+          return child as unknown as ChildProcess;
+        },
+        sandboxRoot: parent,
+      });
+      const runClassifier = createRunClassifierFromManager({
+        manager,
+        timeoutMs: 10_000,
+      });
+      // cwd 显式传 process.cwd()（≠ parent）——修复前该值会被钉进 def.sandboxRoot
+      // 触发越界拒绝；修复后 adapter 不消费 cwd。
+      const result = await runClassifier({
+        task: "judge the work",
+        summary: "",
+        finalText: null,
+        cwd: process.cwd(),
+      });
+      assert.equal(result.status, "ok", "判官全链路正常收尾（未被校验拒绝）");
+      assert.equal(spawnCalls.length, 1, "判官 spawn 未被收窄校验拒绝");
+      assert.equal(
+        spawnCalls[0]!.def.sandboxRoot,
+        undefined,
+        "def 不显式钉 sandboxRoot（省略 = 继承）"
+      );
+      assert.equal(
+        spawnCalls[0]!.payload.sandboxRoot,
+        realpathSync(parent),
+        "envelope 继承 manager parent sandboxRoot（SC8），不是 process.cwd()"
+      );
+      assert.notEqual(spawnCalls[0]!.payload.sandboxRoot, process.cwd());
+      await manager.shutdown();
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+});
