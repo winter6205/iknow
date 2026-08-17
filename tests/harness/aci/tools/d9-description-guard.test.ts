@@ -51,7 +51,14 @@ import type { SubAgentManager } from "../../../../src/harness/subagent/manager.j
 import type { McpManager } from "../../../../src/harness/mcp/manager.js";
 import type { BackgroundTaskManager } from "../../../../src/harness/background/manager.js";
 
-/** #483 D9: 12-word blocklist — mirrors tests/harness/aci/tools/todo-write.test.ts:533. */
+/** #483 D9: 12-word blocklist — mirrors tests/harness/aci/tools/todo-write.test.ts:533.
+ *
+ * 纪律判据（#502 T7）：本表只封禁面向模型的负面祈使（do not / never / 不要…）。
+ * 风险/拒绝类描述词（reject / out of scope / guard…）是工具行为的客观约束陈述
+ * （web_fetch 的 SSRF guard rejects、edit_file 的 lint rejects、memory_save 的
+ * negative-form reject），不面向模型下禁令，且 D9 paradigm（#440 D6/D9）允许
+ * 「inline governance constraints」表述；新增此类词会触发四处既有描述越界改
+ * 写，超出 T7 范围，故不扩 blocklist。 */
 const NEGATIVE_PHRASES: ReadonlyArray<string> = [
   "do not",
   "don't",
@@ -66,6 +73,16 @@ const NEGATIVE_PHRASES: ReadonlyArray<string> = [
   "禁止",
   "切勿",
 ];
+
+/** #502 T7 d9 扩面：正面引导构造（trigger verb）白名单。description 必须
+ *  命中至少一个 — 锁写作形态是「何时用 / 与什么配对」而非负面祈使。与
+ *  todo-write.test.ts:554-562 的 positive-keys 同思路但放工具集级别。
+ *  选词原则：覆盖现有 30 件工具的动词光谱（use / pair / read / run / fetch
+ *  / search / discover / load / list / poll / maintain / capture / delegate
+ *  / resolve / apply / create / terminate / return）— 任何 description 命中
+ *  之一即过，全部 30 件当前文案均命中（手算已确认，vitest 兜底）。 */
+const POSITIVE_TRIGGER_PATTERN =
+  /\b(use|pair|read|run|fetch|search|discover|load|list|poll|maintain|capture|delegate|resolve|apply|create|terminate|return)\b/i;
 
 /** Minimal env (only web fields are consumed by the registry factory). */
 function makeWebEnv(): Pick<IknowEnv, "web"> {
@@ -150,6 +167,46 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
       empty,
       `tools with empty description: ${empty.map((o) => o.name).join(", ")}`
     ).toEqual([]);
+  });
+
+  // ── #502 T7 d9 扩面（扩张不削弱） ─────────────────────────────────────
+  // 既有 blocklist / 30 件装配 / toHaveLength(30) 断言全部保留。
+
+  it("every tool description carries positive-guidance substance (> 30 chars) — d9 扩面", () => {
+    const tooShort = reg.catalog
+      .all()
+      .filter((t) => t.description.length <= 30);
+    expect(
+      tooShort,
+      `descriptions too short to carry positive guidance: ${tooShort
+        .map((o) => o.name)
+        .join(", ")}`
+    ).toEqual([]);
+  });
+
+  it("every tool description uses a positive trigger construct (use X / pair with Y / returns…) — d9 扩面", () => {
+    const missing = reg.catalog
+      .all()
+      .filter((t) => !POSITIVE_TRIGGER_PATTERN.test(t.description));
+    expect(
+      missing,
+      `descriptions without a positive trigger phrasing: ${missing
+        .map((o) => o.name)
+        .join(", ")}`
+    ).toEqual([]);
+  });
+
+  // T7 核心：bash 顶层 description 必须把「长驻服务 → background:true /
+  // bash_output / bash_stop」的正面回路写进模型可见字段（schema 字段描述
+  // 只是第二道防线；模型在工具选择阶段读顶层 description）。本断言锁三
+  // 件套关键词，RED 在 description 补强前触发，GREEN 在补强后。
+  it('bash description documents the background-loop trio ("background: true" / "bash_output" / "bash_stop") — T7 核心', () => {
+    const bash = reg.catalog.all().find((t) => t.name === "bash");
+    expect(bash).toBeDefined();
+    const desc = bash!.description.toLowerCase();
+    expect(desc).toContain("background: true");
+    expect(desc).toContain("bash_output");
+    expect(desc).toContain("bash_stop");
   });
 
   // Pre-#483 D9 baseline would have included bash's "Don't have a dedicated

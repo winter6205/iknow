@@ -90,7 +90,7 @@ export function createBashOutputTool(
   return Object.freeze({
     name: "bash_output",
     description:
-      "Read the log tail and current state of a background bash task previously spawned with bash(background: true). Use after a background task has returned its task_id and you want to inspect progress, check whether the command has exited, or read accumulated output before deciding the next step (continue waiting, call bash_stop to terminate, or relaunch with adjusted parameters). Returns one JSON envelope with text (log tail), status (running / exited / killed / dead), exit_code, and task_id. The text is truncated by default to the last 12 KB (configurable via max_bytes, capped at 100 KB); stale tasks return empty text rather than erroring.",
+      "Read the log tail and current state of a background bash task previously spawned with bash(background: true). Use after a background task has returned its task_id and you want to inspect progress, check whether the command has exited, or read accumulated output before deciding the next step (continue waiting, call bash_stop to terminate, or relaunch with adjusted parameters). Pair with bash_stop to terminate the task once its output shows the work is done (server ready, build finished, error surfaced). Returns one JSON envelope with text (log tail), status (running / exited / killed / dead), exit_code, and task_id. The text is truncated by default to the last 12 KB (configurable via max_bytes, capped at 100 KB); stale tasks return empty text rather than erroring.",
     inputSchema: {
       type: "object",
       properties: {

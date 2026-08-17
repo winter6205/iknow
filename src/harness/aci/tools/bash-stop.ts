@@ -64,7 +64,7 @@ export function createBashStopTool(
   return Object.freeze({
     name: "bash_stop",
     description:
-      'Terminate a background bash task previously spawned with bash(background: true). Use when a background task is no longer needed (a server has served its purpose, a build finished, or the task is stuck) and its process group should be sent SIGTERM, escalated to SIGKILL after a 2-second grace period. Accepts the task_id returned by bash(background: true); stopping an already-finished task succeeds silently. Returns one JSON envelope with task_id and status="stopped".',
+      'Terminate a background bash task previously spawned with bash(background: true); sends SIGTERM to the process group, escalates to SIGKILL after a 2-second grace period, and releases the registry slot. Use as the stop step of a start-verify-stop service loop: once bash_output confirms the server has served its purpose (or a build finished, or the task is stuck), call bash_stop to terminate the process group and free the port / bound resources. Accepts the task_id returned by bash(background: true); stopping an already-finished task succeeds silently. Returns one JSON envelope with task_id and status="stopped".',
     inputSchema: {
       type: "object",
       properties: {
