@@ -145,6 +145,13 @@ export interface CreateDefaultAciRegistryOptions {
   readonly mcpManager?: McpManager;
   /** #251 onEdit 接缝:edit_file 写盘成功后回调(装配层接 LSP notifier)。 */
   readonly onEdit?: (file: string) => void;
+  /** ADR-0019 (T4): per-root state anchor. Threaded into bash + read_file
+   *  factories so the fs-policy fence binds `<workspaceRoot>` and the
+   *  protected-state pathset covers `<workspaceRoot>/.iknow` at parity
+   *  with `<home>/.iknow`. Defaults to `sandboxRoot` (legacy shape) when
+   *  absent — preserves existing registry callers that don't thread
+   *  per-root state. */
+  readonly workspaceRoot?: string;
   /** #406 T3:per-engine secret registry。透传给 bash 工具工厂——handler
    *  执行前把占位符还原为真值（见 bash.ts restore 段）。缺席时 bash 命令
    *  原样透传（行为 byte-identical，向后兼容）。 */
@@ -215,6 +222,11 @@ export function createDefaultAciRegistry(
   const mcpManager = opts.mcpManager;
   const secretRegistry = opts.secretRegistry;
   const disallowedTools = opts.disallowedTools;
+  // ADR-0019 (T4): per-root state anchor. Threaded to bash + read_file so
+  // the fence protects `<workspaceRoot>/.iknow` the same way it does
+  // `<home>/.iknow`. Falls back to sandboxRoot when absent (legacy shape)
+  // so existing callers without per-root state stay byte-identical.
+  const workspaceRoot = opts.workspaceRoot ?? sandboxRoot;
   // #440 T4 todo_write 条件化装配的开关。host 注入；build-engine 在
   // surface !== "ask" 解析 session 级目录并透传。worker 装配路径不传 →
   // todo_write 不入 worker 工具面（D6 所有权边界）；ask 不传 → tool 不
@@ -233,8 +245,8 @@ export function createDefaultAciRegistry(
   // 键顺序必须与 ACI_TOOLSET_NAMES 逐项一致(Gate 3):memory_* 在
   // tool_search 之前,skill / skill_search 在末尾。
   const factories: Record<string, () => AciToolDef> = {
-    bash: () => createBashTool(sandboxRoot, { secretRegistry }),
-    read_file: () => createReadFileTool(sandboxRoot),
+    bash: () => createBashTool(sandboxRoot, { secretRegistry, workspaceRoot }),
+    read_file: () => createReadFileTool(sandboxRoot, { workspaceRoot }),
     grep: () => createGrepTool(sandboxRoot),
     glob: () => createGlobTool(sandboxRoot),
     edit_file: () => createEditFileTool(sandboxRoot, { onEdit }),

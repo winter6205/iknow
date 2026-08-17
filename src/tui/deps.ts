@@ -81,6 +81,13 @@ export interface BuildTuiDepsOptions {
   readonly userHome?: string;
   /** #337 Phase B 测试缝：cwd 覆盖（默认 process.cwd()）。 */
   readonly cwd?: string;
+  /**
+   * ADR-0019 (T2): per-root state anchor — CLI `--workspace-root` flag 透传
+   * 到 build-engine。TUI 入口(tui/run.tsx)从 `RunTuiOptions.workspaceRoot`
+   * 透传到 buildTuiDeps → buildHarnessEngine。TUI 不再持有 userHome/cwd
+   * 之外的全局 state,workspaceRoot 在 deps 层单向透明。
+   */
+  readonly workspaceRoot?: string;
   /** #337 Phase B 测试缝：MCP client 工厂覆盖（注入 stub 避免真实 stdio 启动）。 */
   readonly createMcpClient?: (
     server: import("../harness/mcp/config.js").McpServerConfig
@@ -205,6 +212,8 @@ export async function buildTuiDeps(
     // #337 Phase B 测试缝:userHome / cwd 覆盖(与 build-engine 同款)。
     ...(opts.userHome ? { userHome } : {}),
     ...(opts.cwd ? { cwd } : {}),
+    // ADR-0019 (T2): per-root state anchor 透传到 build-engine。
+    ...(opts.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
     // #378 测试缝:createMcpManager 工厂覆盖(透传,捕获入参断言)。
     // prettier-ignore（master 一致单行：L3 review 复原；88 字符超 80 列，禁用 prettier 重排）。
     // prettier-ignore

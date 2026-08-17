@@ -39,6 +39,9 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
 
 let origHome: string | undefined;
 let workDir: string;
+// ADR-0019 (T2): 显式注入 workspaceRoot = workDir,避免 build-engine /
+// initializeIknowWorkspace 默认锚到 process.cwd()(worktree 根,污染仓库)。
+// 既有 HOME 重定向保留(userHome/homedir 测试 缝),但不参与 per-root identity seam。
 
 beforeAll(async () => {
   origHome = process.env.HOME;
@@ -57,6 +60,8 @@ async function buildSystem(surface: "chat" | "tui" | "ask" | "serve") {
     env: makeEnv("sk-test-identity-" + surface),
     askUser: createNoAskUser(),
     surface,
+    // ADR-0019 (T2):per-root identity seed 锚 workDir,默认 cwd 已不适用。
+    workspaceRoot: workDir,
   });
   return (await (deps.system as () => Promise<string | undefined>)()) ?? "";
 }
@@ -116,8 +121,10 @@ describe("buildHarnessEngine surface → deps.system", () => {
   });
 
   it("second skip: BOOTSTRAP.md deleted → system excludes bootstrap", async () => {
-    // rev 2026-08-11 隐式完成:agent 引导对话后 rm BOOTSTRAP.md
-    await initializeIknowWorkspace();
+    // rev 2026-08-11 隐式完成:agent 引导对话后 rm BOOTSTRAP.md。
+    // ADR-0019 (T2):显式 workspaceRoot=workDir,与 buildSystem 的 per-root
+    // identity seam 同锚(默认 iknowWorkspaceRoot() = cwd 不再指向 workDir)。
+    await initializeIknowWorkspace({ workspace: join(workDir, ".iknow") });
     await unlink(join(process.env.HOME!, ".iknow", "BOOTSTRAP.md"));
     const out = await buildSystem("chat");
     expect(out).toContain("iknow Identity");
@@ -129,7 +136,8 @@ describe("buildHarnessEngine surface → deps.system", () => {
   it("default surface (no opts.surface) is chat → bootstrap active when file present", async () => {
     // rev 2026-08-11 文件驱动:BOOTSTRAP.md 存在 → 注入。上一测试 unlink 了文件,
     // 这里重建 seed 的文件(bs=true 已翻,但文件缺失→不注入;重建文件→注入)。
-    await initializeIknowWorkspace();
+    // ADR-0019 (T2):workspaceRoot=workDir 锚 per-root identity(默认 cwd 已不适用)。
+    await initializeIknowWorkspace({ workspace: join(workDir, ".iknow") });
     await writeFile(
       join(process.env.HOME!, ".iknow", "BOOTSTRAP.md"),
       "# BOOTSTRAP.md - First Contact\n\nseed again"
@@ -137,6 +145,7 @@ describe("buildHarnessEngine surface → deps.system", () => {
     const { deps } = await buildHarnessEngine({
       env: makeEnv("sk-test-identity-default"),
       askUser: createNoAskUser(),
+      workspaceRoot: workDir,
     });
     const out =
       (await (deps.system as () => Promise<string | undefined>)()) ?? "";
@@ -149,6 +158,7 @@ describe("buildHarnessEngine surface → deps.system", () => {
       askUser: createNoAskUser(),
       surface: "ask",
       memory: { enabled: false },
+      workspaceRoot: workDir,
     });
     expect(typeof deps.system).toBe("function");
     const out = (await deps.system?.()) ?? "";

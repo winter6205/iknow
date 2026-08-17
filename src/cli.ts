@@ -34,6 +34,10 @@ import {
 } from "./harness/permission/index.js";
 import type { PermissionMode } from "./harness/permission/modes.js";
 import { isIknowError } from "./shared/errors.js";
+import {
+  WORKSPACE_ROOT_ENV_KEY,
+  type WorkspaceRootError,
+} from "./config/workspace-root.js";
 import { MaxTurnsExceeded } from "./harness/errors.js";
 import { maxTurnsEnvelope } from "./cli/max-turns.js";
 import { randomUUID } from "node:crypto";
@@ -70,7 +74,53 @@ function resolveTracePath(flag: string | undefined): string {
   return flag ?? process.env.IKNOW_TRACE_OUT ?? DEFAULT_TRACE_DIR;
 }
 
+/**
+ * review-fix (M5): WorkspaceRootError type guard —— resolver 抛的是 plain
+ * object（`satisfies WorkspaceRootError`,非 Error 实例）,必须按判别联合
+ * `kind` 识别,不能用 `instanceof Error ? err.message : String(err)`
+ * （后者打 plain object 会成 `[object Object]`,kind/path 全部不可见）。
+ */
+export function isWorkspaceRootError(err: unknown): err is WorkspaceRootError {
+  if (err === null || typeof err !== "object") return false;
+  const maybe = err as Record<string, unknown>;
+  // kind is the discriminant; each variant then either has `path` (3 of 4)
+  // or `varName` (empty_env). Type guard is intentionally narrow on `kind`
+  // alone — full payload check belongs to the switch in
+  // renderWorkspaceRootError, which is TS-narrowed per branch.
+  return (
+    typeof maybe.kind === "string" &&
+    ["empty_explicit", "empty_env", "non_absolute", "not_found"].includes(
+      maybe.kind
+    )
+  );
+}
+
+/** review-fix (M5): 4-kind 文本渲染（discriminated union,顺序与
+ *  WorkspaceRootError 定义对齐）。 */
+export function renderWorkspaceRootError(err: WorkspaceRootError): string {
+  switch (err.kind) {
+    case "empty_explicit":
+      return `[workspace_root]: empty_explicit`;
+    case "empty_env":
+      return `[workspace_root]: empty_env ${WORKSPACE_ROOT_ENV_KEY}=<empty>`;
+    case "non_absolute":
+      return `[workspace_root]: non_absolute path=${err.path}`;
+    case "not_found":
+      return `[workspace_root]: not_found path=${err.path}`;
+  }
+}
+
 function printCliError(err: unknown): void {
+  if (isWorkspaceRootError(err)) {
+    writeErr(
+      JSON.stringify({
+        error: "workspace_root",
+        code: err.kind,
+        message: renderWorkspaceRootError(err),
+      })
+    );
+    return;
+  }
   if (isIknowError(err)) {
     writeErr(
       JSON.stringify({
@@ -100,6 +150,10 @@ function printCliError(err: unknown): void {
 }
 
 function printChatError(err: unknown): void {
+  if (isWorkspaceRootError(err)) {
+    writeErr(`错误 ${renderWorkspaceRootError(err)}`);
+    return;
+  }
   if (isIknowError(err)) {
     writeErr(`错误 [${err.code}]: ${err.message}`);
     return;
@@ -129,6 +183,7 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     // 仍挂 createIknowSystemResolver)。
     // W2: ask 入口从 env IKNOW_PERMISSION_MODE 读静态 mode;oneshot 不暴露
     // 切换(context 不会被 set,等同于静态)。
+    // ADR-0019 (T2):`--workspace-root` flag 透传,ask 也是 per-root 状态消费方。
     built = await buildHarnessEngine(bundle, {
       askUser: createFailClosedAskUser(),
       surface: "ask",
@@ -137,6 +192,13 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
         (process.env.IKNOW_PERMISSION_MODE as PermissionMode | undefined) ??
           "default"
       ),
+      // review-fix (M1/M5): 用 `!== undefined` 而非 truthy 守门 —— 空字符串
+      // 必须显式传到 buildHarnessEngine 才能触发 resolver 的 empty_explicit。
+      // truthy 守门会把 `""` 当作「未设」吞掉,用户从 CLI 看到的就不是
+      // typed error 而是 REPL 静默回 cwd fallback —— 与 DELIVERABLE 不符。
+      ...(parsed.workspaceRoot !== undefined
+        ? { workspaceRoot: parsed.workspaceRoot }
+        : {}),
     });
   } catch (err) {
     if (err instanceof Error && err.message.includes("LLM mode needs")) {
@@ -239,12 +301,17 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // #194 T6:chat 显式 memory:{enabled:true} — 10 件工具 + memory_layer 装配。
     // #440 T1-fix:chat 入口注入 todoDir 让 todo_write 在主 loop 在场
     // (per-conversationId resolution 是后续 ticket,见 todo-write.ts resolveSessionTodoDir 注释)。
+    // ADR-0019 (T2):`--workspace-root` flag 透传到 per-root identity / memory seam。
     built = await buildHarnessEngine(bundle, {
       askUser: createTtyAskUser(),
       surface: "chat",
       memory: { enabled: true },
       permissionMode,
       todoDir: resolveSessionTodoDir({ surface: "chat" }),
+      // review-fix (M1/M5): `!== undefined` 守门 — 空字符串透传触 empty_explicit。
+      ...(parsed.workspaceRoot !== undefined
+        ? { workspaceRoot: parsed.workspaceRoot }
+        : {}),
     });
   } catch (err) {
     printChatError(err);
@@ -367,6 +434,11 @@ async function runTui(parsed: ParsedCli): Promise<void> {
   const exitCode = await startTui({
     sessionId: parsed.sessionId,
     dataDir: parsed.dataDir,
+    // ADR-0019 (T2):`--workspace-root` flag 透传到 TUI 装配层。
+    // review-fix (M1/M5): `!== undefined` 守门 — 空字符串透传触 empty_explicit。
+    ...(parsed.workspaceRoot !== undefined
+      ? { workspaceRoot: parsed.workspaceRoot }
+      : {}),
     traceOut: resolveTracePath(parsed.traceOut),
   });
   process.exitCode = exitCode;
@@ -388,6 +460,12 @@ async function runServe(parsed: ParsedCli): Promise<void> {
       port: parsed.port,
       json_mode: parsed.json,
       dataDir: parsed.dataDir,
+      // ADR-0019 (T2):`--workspace-root` flag 透传到 serve 入口 — init /
+      // resolveServeDataDir 消费(详见 session-api/serve.ts)。
+      // review-fix (M1/M5): `!== undefined` 守门 — 空字符串透传触 empty_explicit。
+      ...(parsed.workspaceRoot !== undefined
+        ? { workspaceRoot: parsed.workspaceRoot }
+        : {}),
       traceOut: tracePath,
       askHandle,
       hubOptions: {

@@ -40,12 +40,19 @@ const FILE_CAP = 12000;
 /**
  * Inputs needed to compose the layered system prompt.
  *   cwd + userHome: discovery roots for the static layer (AGENTS.md + rules).
- *   memoryDir: project-namespaced memory root (~/.iknow/memory/<base>-<hash>).
+ *   workspaceRoot: ADR-0019 (T2) per-root state anchor — the user scope's
+ *     physical root (user-level AGENTS.md + rules read from
+ *     `<workspaceRoot>/.iknow/`); project scope stays at `<cwd>`.
+ *     Optional + `userHome` fallback keeps 既有 T337 seam 测 / 直接 ctx
+ *     construction 零破坏;build-engine 装配期总是显式传入。
+ *   memoryDir: project-namespaced memory root (<workspaceRoot>/.iknow/memory/
+ *     <base>-<hash>, per-root memory decision).
  *   promoteEntries: optional injection — used by tests + per-turn refresh hook.
  */
 export interface AssemblyContext {
   readonly cwd: string;
   readonly userHome: string;
+  readonly workspaceRoot?: string;
   readonly memoryDir: string;
   readonly promoteEntries?: ReadonlyArray<MemoryEntryV1>;
 }
@@ -54,7 +61,12 @@ export interface AssemblyContext {
 export async function assembleSystemPrompt(
   ctx: AssemblyContext
 ): Promise<string> {
-  const user = await loadStaticLayer(ctx.userHome, "user");
+  // ADR-0019 (T2): user-scope physical root = ctx.workspaceRoot ?? userHome
+  // (per-root state anchor;既有 T337 seam 测 / ctx 未传 workspaceRoot → 回退)。
+  // ADR-0009 read-order user-first / project-second + PRIORITY_DECLARATION 位置
+  // 不位移(装配顺序与 priority declaration 由 parts.push 顺序守)。
+  const userRoot = ctx.workspaceRoot ?? ctx.userHome;
+  const user = await loadStaticLayer(userRoot, "user");
   const project = await loadStaticLayer(ctx.cwd, "project");
   const hasMemory = await memoryLibraryNonEmpty(ctx.memoryDir);
   const promote =

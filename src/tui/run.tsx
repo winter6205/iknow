@@ -53,10 +53,15 @@ import { resolveVerifyConfig } from "../session-api/serve.js";
 import { createEnvLoader, type EnvLoader } from "../config/env-loader.js";
 import type { IknowEnv } from "../config/env.js";
 import {
+  WORKSPACE_ROOT_ENV_KEY,
+  resolveWorkspaceRoot,
+} from "../config/workspace-root.js";
+import {
   persistThinkingChanges,
   resolveThinkingSettingsPath,
 } from "../config/persist-settings.js";
 import { homedir } from "node:os";
+import { join } from "node:path";
 
 /** E1/E2 类型化错误前缀（specs/321 SC 11：错误消息常量化，禁 magic string）。 */
 export const TUI_RENDERER_ERROR_PREFIX = "TUI 渲染后端初始化失败";
@@ -64,8 +69,16 @@ export const TUI_RENDERER_ERROR_PREFIX = "TUI 渲染后端初始化失败";
 export interface RunTuiOptions {
   /** `iknow tui <session-id>` resume；缺省 = 新会话（Q2=C）。 */
   readonly sessionId?: string;
-  /** 会话池根目录（--data-dir）；缺省 ~/.iknow。 */
+  /** 会话池根目录（--data-dir）；缺省 <workspaceRoot>/.iknow。 */
   readonly dataDir?: string;
+  /**
+   * ADR-0019 (T2): per-root state anchor — CLI `--workspace-root` flag 透传。
+   * 装配期 resolve 一次并透传:initIknowWorkspaceSafe(seed 落
+   * `<workspaceRoot>/.iknow`)+ resolveServeDataDir(数据落 workspace)+
+   * buildTuiDeps → build-engine。缺省 undefined → 与既有行为一致
+   * (seed 默认 iknowWorkspaceRoot(),dataDir 默认 ~/.iknow,memory 默认 homedir)。
+   */
+  readonly workspaceRoot?: string;
   /** JSONL trace 输出路径。 */
   readonly traceOut?: string;
   /** 测试注入口：覆盖渲染器工厂（诱导 E1/E2）；生产缺省 createCliRenderer。 */
@@ -122,9 +135,27 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   };
   try {
     renderer = await factory(RENDERER_CONFIG);
-    // 装配链：runtime → deps → bridge/ask/tool 桥接 → TuiApp
-    await initIknowWorkspaceSafe();
     const runtime = await prepareRuntime();
+    // review-fix (M1 / H1): TUI 用 active env 条件 resolve workspaceRoot ——
+    // explicit flag 或 env SSOT 任一在场时走 resolver(typed error
+    // fail-fast);两者都缺 → undefined(保持 dataDir 默认 ~/.iknow 与
+    // initIknowWorkspaceSafe 默认 cwd 行为,不漂移)。
+    const envWsRoot = runtime.env.workspaceRoot;
+    const workspaceRoot =
+      options.workspaceRoot !== undefined || envWsRoot !== undefined
+        ? resolveWorkspaceRoot({
+            explicit: options.workspaceRoot,
+            cwd: process.cwd(),
+            env: { [WORKSPACE_ROOT_ENV_KEY]: envWsRoot },
+          })
+        : undefined;
+    // 装配链：runtime → deps → bridge/ask/tool 桥接 → TuiApp
+    // ADR-0019 (T2): 显式 workspaceRoot → initIknowWorkspaceSafe 落
+    // `<workspaceRoot>/.iknow`(per-root identity seed)。缺省 → 与既有
+    // 行为一致(iknowWorkspaceRoot() = cwd + .iknow,T2 D1.1 default)。
+    await initIknowWorkspaceSafe(
+      workspaceRoot ? { workspace: join(workspaceRoot, ".iknow") } : undefined
+    );
     // settings-hot-reload（T4）:EnvLoader 作为 env 源。初次 get() = lazy load
     // 拿初始 env，后续 watcher 触发自动 reload。初始 env 用它（而非 bundle.env）
     // 保证「初始 adapter + envProvider 首次快照」同源一致（生产两值相同）。
@@ -142,7 +173,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // 定义延后到 initialSession / onQuitBridge 就绪（env 变化只发生在装配完成后）。
     let rerenderApp: () => void = () => {};
     const bundle: RuntimeBundle = { env: currentEnv, session: runtime.session };
-    const dataDir = resolveServeDataDir(options.dataDir);
+    // ADR-0019 (T2): explicit workspaceRoot → resolveServeDataDir 落
+    // `<workspaceRoot>/.iknow`;缺省 → ~/.iknow(spec #120 SC 1 既有默认)。
+    const dataDir = resolveServeDataDir(options.dataDir, workspaceRoot);
     const cwd = process.cwd();
     // settings 双向持久化（T4）：/thinking /effort 面板 Esc → 写回 settings.json。
     // 目标文件按「project 存在写 project，否则 user」解析（project 本就覆盖 user，
@@ -155,7 +188,15 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       TuiAppProps["onPersistThinking"]
     > = async (patch) => {
       try {
-        const path = resolveThinkingSettingsPath({ cwd, home: homedir() });
+        // ADR-0019 D1.3（T3）: 用 T2 已透传的 workspaceRoot 替代硬编码 homedir()；
+        // 未显式注入时由 persist-settings.ts 内 resolveWorkspaceRoot({cwd}) 兜底
+        // （process.cwd()，与 buildTuiDeps / initIknowWorkspaceSafe 同源）。这样
+        // 单 TUI 重定向 + dual-TUI 并行都落 <workspaceRoot>/.iknow/settings.json，
+        // 不再写 ~/.iknow/settings.json（kill global-pollution 路径）。
+        const path = resolveThinkingSettingsPath({
+          cwd,
+          workspaceRoot,
+        });
         const { bytes } = await persistThinkingChanges(path, patch);
         activeEnvLoader.markSelfWrite(path, bytes);
         return { ok: true as const };
@@ -181,6 +222,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       soleInflightId: () => inflight.soleId(),
       permissionMode,
       sessionGrants,
+      // ADR-0019 (T2): workspaceRoot 透传到 build-engine identity /
+      // memory / skill seam。
+      ...(workspaceRoot ? { workspaceRoot } : {}),
       onExtensions: (ext) => {
         tuiExtensions = ext;
       },
@@ -208,7 +252,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     };
     registerShutdown({ shutdown: combinedShutdown });
     const bridge = createTuiBridge({
-      dataDir: options.dataDir,
+      // review-fix (M4): 传已 resolve 的 dataDir —— 先前把 raw options.dataDir
+      // 交给 bridge,而 TuiApp 已用 resolveServeDataDir 的值,导致 bridge 内部
+      // SessionStore 落点与展示层漂移(显式 workspaceRoot 时尤甚)。
+      dataDir,
       deps,
       subagentManager,
       traceOut: options.traceOut,

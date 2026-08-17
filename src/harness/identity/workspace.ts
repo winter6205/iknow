@@ -15,16 +15,32 @@
  */
 
 import path from "node:path";
-import os from "node:os";
 import { promises as fs } from "node:fs";
 import { randomBytes } from "node:crypto";
 
+import {
+  resolveWorkspaceRoot,
+  type ResolveWorkspaceRootOpts,
+} from "../../config/workspace-root.js";
 import { USER_TEMPLATE } from "./user-template.js";
 import { BOOTSTRAP_TEMPLATE } from "./bootstrap.js";
 
-/** IKNOW-196 workspace 根:复用 #121 homeDir 模式。 */
-export function iknowWorkspaceRoot(): string {
-  return path.join(os.homedir(), ".iknow");
+/**
+ * ADR-0019 (T2): per-root state anchor — identity workspace seed
+ * (user.md / state.json / BOOTSTRAP.md) follows `resolveWorkspaceRoot()`
+ * priority chain `[explicit, env, cwd]`. Default = `process.cwd()`.
+ *
+ * 函数名保留以避免所有调用方飘移(ref T2 任务约束)。内部委托
+ * `resolveWorkspaceRoot` —— 与 plan T2 axis-1 bounded-context-guardian
+ * 决策一致:identity workspace seed 与 global home 解耦。
+ *
+ * review-fix (H1/H2): 接受可选 opts 透传 env 槽位。调用方在 entry 层
+ * 已 resolve 出真实 workspaceRoot 时应传显式值;其余调用方可用
+ * `env` 透传 `IKNOW_WORKSPACE_ROOT`(env SSOT fidelity ——
+ * 不读裸 `process.env`,而是 loader merge 后的 `IknowEnv.workspaceRoot`)。
+ */
+export function iknowWorkspaceRoot(opts?: ResolveWorkspaceRootOpts): string {
+  return path.join(resolveWorkspaceRoot(opts), ".iknow");
 }
 
 /** Schema-versioned state.json(预留 schema 迁移)。 */

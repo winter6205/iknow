@@ -27,6 +27,10 @@ import { randomUUID } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
 import { loadIknowEnv, type IknowEnv } from "../../config/env.js";
 import {
+  WORKSPACE_ROOT_ENV_KEY,
+  resolveWorkspaceRoot,
+} from "../../config/workspace-root.js";
+import {
   createRealAnthropicAdapter,
   buildThinkingParams,
   createExecutor,
@@ -88,6 +92,10 @@ export interface CreateWorkerDepsOptions {
    *  createDefaultAciRegistry 做 def-list 期裁剪 (声明面 = 实际面)。
    *  缺席 / undefined 不裁剪, 向后兼容旧 wire。 */
   readonly disallowedTools?: ReadonlyArray<string>;
+  /** ADR-0019 (review-fix H3): per-root state anchor。透传给
+   *  createDefaultAciRegistry 让 fs-policy 保护 `<workspaceRoot>/.iknow`。
+   *  缺席 → registry 内部 fallback 到 sandboxRoot(legacy 形态)。 */
+  readonly workspaceRoot?: string;
 }
 
 /**
@@ -143,6 +151,11 @@ export async function createWorkerDeps(
     sandboxRoot,
     skillCatalog,
     ...(opts.disallowedTools ? { disallowedTools: opts.disallowedTools } : {}),
+    // ADR-0019 (review-fix H3): spread-guard 透传 —— 缺席时 registry
+    // 内部 fallback sandboxRoot(legacy 字节不变)。
+    ...(opts.workspaceRoot !== undefined
+      ? { workspaceRoot: opts.workspaceRoot }
+      : {}),
   });
 
   const baseExecutor = createExecutor(reg.inner);
@@ -318,10 +331,23 @@ function readStdin(): Promise<string> {
 export async function runSubagentWorker(): Promise<void> {
   const input = await readStdin();
   const workerEnvelope = parseWorkerEnvelope(input);
+  const env = loadIknowEnv();
   const deps = await createWorkerDeps({
-    env: loadIknowEnv(),
+    env,
     sandboxRoot: workerEnvelope.sandboxRoot,
     disallowedTools: workerEnvelope.disallowedTools,
+    // ADR-0019 (review-fix H3): worker 继承父 env SSOT —— 当 spawn 父进程
+    // 设置了 IKNOW_WORKSPACE_ROOT,worker 的 fs-policy fence 也按同一根
+    // 保护 `.iknow`(与 build-engine 同形态)。条件解析:无 flag 且无 env
+    // 时不 resolve,保持 sandboxRoot fallback(legacy 字节不变)。
+    ...(env.workspaceRoot !== undefined
+      ? {
+          workspaceRoot: resolveWorkspaceRoot({
+            cwd: process.cwd(),
+            env: { [WORKSPACE_ROOT_ENV_KEY]: env.workspaceRoot },
+          }),
+        }
+      : {}),
   });
   const result = await runWorkerOnce({ workerEnvelope, deps });
   process.stdout.write(JSON.stringify(result) + "\n");

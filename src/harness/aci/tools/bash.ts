@@ -27,6 +27,15 @@ export interface CreateBashToolOptions {
   /** #406 T3:per-engine secret registry。在场时 handler 在构造 bwrap fence 前
    *  对命令做占位符还原（`<<<SECRET_N>>>` → 真值）；缺席时命令原样透传。 */
   readonly secretRegistry?: SecretRegistry;
+  /** ADR-0019 (T4): per-root state anchor. Threaded into `createFsPolicy` so the
+   *  fence binds `<workspaceRoot>` as a root and `<workspaceRoot>/.iknow` is
+   *  covered by the protected-state pathset. Defaults to `cwd` (the legacy
+   *  shape) when absent — preserves the existing bash argv for callers that
+   *  don't thread per-root state (e.g. demo.ts, bash-sandbox.test.ts). */
+  readonly workspaceRoot?: string;
+  /** #337 T8 测试缝:home 覆盖（默认 homedir()）— production 不传 = 真实
+   *  home,单测可注入 tmpdir 隔离真实 user dir。 */
+  readonly home?: string;
 }
 
 export function createBashTool(
@@ -34,7 +43,12 @@ export function createBashTool(
   opts?: CreateBashToolOptions
 ): AciToolDef {
   requireBwrap();
-  const fsPolicy = createFsPolicy({ cwd, home: homedir(), tmpDir: tmpdir() });
+  const fsPolicy = createFsPolicy({
+    cwd,
+    home: opts?.home ?? homedir(),
+    tmpDir: tmpdir(),
+    ...(opts?.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
+  });
   const networkPolicy = createNetworkPolicy();
   const resourceLimits = createResourceLimits();
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });

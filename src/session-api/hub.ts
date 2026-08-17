@@ -370,6 +370,14 @@ export type SessionHubOptions = {
    */
   readonly subagentManager?: SubAgentManager;
   /**
+   * review-fix (M1 / H1): per-root state anchor。serve 入口解析后
+   * 透传 —— 让 hub 的 buildHarnessEngine 走 entry-resolved workspaceRoot,
+   * 保证 serve 与 CLI flag 路径同形态(seed 落 `<workspaceRoot>/.iknow`,
+   * bash fence 保护 `<workspaceRoot>/.iknow`)。缺席 → build-engine
+   * 走 cwd fallback(legacy 默认)。
+   */
+  readonly workspaceRoot?: string;
+  /**
    * #128 T8:验证闭环配置 (settings.verify 段经 serve.ts 构造传入)。
    * 缺席 = 透明关闭, postMessage 走原 run 路径逐字节不变 (SC7);
    * 配置时每轮 run 被 runVerifyLoop 包裹 (仅 StopReason=completed 触发
@@ -429,6 +437,8 @@ export class SessionHub {
   private readonly surface: "chat" | "tui" | "ask" | "serve" | undefined;
   /** #356 T7: subagent manager（host drain 消费面；懒取见 ensureDeps）。 */
   private subagentManager: SubAgentManager | undefined;
+  /** review-fix (M1 / H1): per-root state anchor 缓存；serve 入口解析后透传。 */
+  private readonly workspaceRoot: string | undefined;
   /** #128 T8: 验证闭环配置（settings.verify 段；缺席 = 透明关闭）。 */
   private readonly verifyConfig: VerifyConfig | undefined;
   /** #356 High#4: built.shutdown 缓存（组合句柄；ensureDeps 懒取，hub.shutdown 触发）。 */
@@ -466,6 +476,8 @@ export class SessionHub {
     this.sandboxRoot = opts.sandboxRoot;
     this.surface = opts.surface;
     this.subagentManager = opts.subagentManager;
+    // review-fix (M1 / H1): per-root state anchor 缓存。
+    this.workspaceRoot = opts.workspaceRoot;
     this.verifyConfig = opts.verifyConfig;
     this.envProvider = opts.envProvider;
     this.onEnvChange = opts.onEnvChange;
@@ -1281,6 +1293,10 @@ export class SessionHub {
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
       ...(this.permissionMode ? { permissionMode: this.permissionMode } : {}),
+      // review-fix (M1 / H1): serve entry 已解析的 workspaceRoot 透传 —
+      // 让 build-engine 的 bash fence 对齐 serve 的 identity seed / dataDir
+      // (同一 per-root 锚点,不落回 sandboxRoot|cwd)。
+      ...(this.workspaceRoot ? { workspaceRoot: this.workspaceRoot } : {}),
       todoDir: resolveSessionTodoDir({ surface: "serve" }),
     });
     this.cachedDeps = built.deps;

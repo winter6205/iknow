@@ -49,6 +49,14 @@ export type IdentitySegmentKind = (typeof IKNOW_ASSEMBLY_ORDER)[number];
 export interface AssemblyContext {
   readonly cwd: string;
   readonly userHome: string;
+  /**
+   * ADR-0019 (T2, D1.4): per-root state anchor. user.md / BOOTSTRAP.md reads
+   * switch from `path.join(userHome, ".iknow")` to
+   * `path.join(workspaceRoot, ".iknow")`. Optional + `userHome` fallback keeps
+   * 既有 T337 seam 测 / 直接构造 AssemblyContext 的调用方零破坏;
+   * build-engine 装配期总是显式传入解析后的 workspaceRoot。
+   */
+  readonly workspaceRoot?: string;
   readonly bootstrapActive: boolean;
   readonly memoryEnabled: boolean;
   readonly memoryResolver?: () => Promise<string | undefined>;
@@ -89,6 +97,8 @@ export function createIknowSystemResolver(opts: {
   readonly surface: "chat" | "tui" | "ask" | "serve";
   readonly memoryEnabled: boolean;
   readonly memoryResolver?: () => Promise<string | undefined>;
+  /** ADR-0019 (T2, D1.4): per-root state anchor(可选;缺席 → 装配回退 userHome)。 */
+  readonly workspaceRoot?: string;
   /** #224 工具名录段注入缝 (可选):见 AssemblyContext.toolList 注释。 */
   readonly toolList?: () => ReadonlyArray<string> | undefined;
   /** #337 T6 skills 注入缝 (可选):见 AssemblyContext.skills 注释。 */
@@ -104,6 +114,7 @@ export function createIknowSystemResolver(opts: {
     assembleIdentityContext({
       cwd: opts.cwd,
       userHome: opts.userHome,
+      ...(opts.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
       bootstrapActive,
       memoryEnabled: opts.memoryEnabled,
       ...(opts.memoryResolver ? { memoryResolver: opts.memoryResolver } : {}),
@@ -168,9 +179,10 @@ async function resolveSegment(
     case "soul":
       return IKNOW_SOUL_DEFAULT;
     case "user_profile":
-      return readUserProfile(ctx.userHome);
+      // ADR-0019 (T2, D1.4):per-root workspaceRoot > userHome fallback.
+      return readUserProfile(ctx);
     case "bootstrap":
-      return readBootstrapIfNeeded(ctx.userHome, ctx.bootstrapActive);
+      return readBootstrapIfNeeded(ctx, ctx.bootstrapActive);
     case "memory_layer":
       // #194 T6:memory 层由 build-engine 注入的 resolver 装配。降级契约
       // 对齐 readUserProfile / readBootstrapIfNeeded:enabled=false →
@@ -190,9 +202,17 @@ async function resolveSegment(
   }
 }
 
-/** 读 user.md:不存在 / 空 → 跳过;读失败 → skip + warn。 */
-async function readUserProfile(userHome: string): Promise<string | undefined> {
-  const root = path.join(userHome, ".iknow");
+/**
+ * 读 user.md:不存在 / 空 → 跳过;读失败 → skip + warn。
+ * ADR-0019 (T2, D1.4):physical root = `<ctx.workspaceRoot>/.iknow` when
+ * provided(user persona state is per-root),否则回退 `userHome`(既有 T337
+ * seam 测 / 直接 ctx 构造方零破坏)。
+ */
+async function readUserProfile(
+  ctx: AssemblyContext
+): Promise<string | undefined> {
+  const stateRoot = ctx.workspaceRoot ?? ctx.userHome;
+  const root = path.join(stateRoot, ".iknow");
   const p = path.join(root, "user.md");
   try {
     const content = await fs.readFile(p, "utf8");
@@ -206,17 +226,19 @@ async function readUserProfile(userHome: string): Promise<string | undefined> {
   }
 }
 
-/** rev 2026-08-11 对齐 openharness 隐式完成:
- *  bootstrap_active=false → skip;否则读 `~/.iknow/BOOTSTRAP.md` 文件存在性,
- *  存在 → 注入内容,缺失 → undefined。**不再读 state.json.bootstrap_seeded**。
+/** rev 2026-08-11 对齐 openharness 隐式完成 + ADR-0019 (T2, D1.4):
+ *  bootstrap_active=false → skip;否则读 `<ctx.workspaceRoot>/.iknow/BOOTSTRAP.md`
+ *  文件存在性,存在 → 注入内容,缺失 → undefined。
+ *  workspaceRoot 缺席 → 回退 userHome(既有 T337 seam 测兼容)。
  *  完成机制 = agent 自己 rm BOOTSTRAP.md(文件驱动)。文件读失败
  *  (EACCES / EISDIR / 其他 IO) → warn + skip(spec 降级契约)。 */
 async function readBootstrapIfNeeded(
-  userHome: string,
+  ctx: AssemblyContext,
   bootstrapActive: boolean
 ): Promise<string | undefined> {
   if (!bootstrapActive) return undefined;
-  const wsRoot = path.join(userHome, ".iknow");
+  const stateRoot = ctx.workspaceRoot ?? ctx.userHome;
+  const wsRoot = path.join(stateRoot, ".iknow");
   const bp = bootstrapFilePath(wsRoot);
   try {
     const content = await fs.readFile(bp, "utf8");

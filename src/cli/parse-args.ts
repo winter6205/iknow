@@ -57,6 +57,13 @@ export type ParsedCli = {
    */
   dataDir?: string;
   /**
+   * Workspace root for per-root state (--workspace-root flag, T1).
+   * Resolved by `resolveWorkspaceRoot({explicit, cwd, env})` in the
+   * build-engine / tui-deps layer. CLI here only stores the raw flag
+   * value; resolver applies priority chain + validation.
+   */
+  workspaceRoot?: string;
+  /**
    * `tui [session-id]` 可选位置参数（#146 SC 2：直连 resume 该会话）。
    */
   sessionId?: string;
@@ -109,6 +116,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   let host = "127.0.0.1";
   let traceOut: string | undefined;
   let dataDir: string | undefined;
+  let workspaceRoot: string | undefined;
   let maxBytes: number | undefined;
   let maxTurns: number | undefined;
   let noOpen = false;
@@ -130,6 +138,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           host: "127.0.0.1",
           traceOut: undefined,
           dataDir: undefined,
+          workspaceRoot: undefined,
           maxBytes: undefined,
           maxTurns: undefined,
           noOpen: false,
@@ -148,6 +157,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           host,
           traceOut,
           dataDir,
+          workspaceRoot,
           maxBytes,
           maxTurns,
           noOpen,
@@ -223,6 +233,12 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
         throw new Error("--data-dir requires a directory argument");
       }
       dataDir = raw;
+    } else if (a === "--workspace-root") {
+      const raw = argv[++i];
+      if (raw === undefined) {
+        throw new Error("--workspace-root requires a directory argument");
+      }
+      workspaceRoot = raw;
     } else if (a === "--version" || a === "-V") {
       return baseParsed({
         command: "help",
@@ -232,6 +248,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           host,
           traceOut,
           dataDir,
+          workspaceRoot,
           maxBytes,
           maxTurns,
           noOpen,
@@ -252,6 +269,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
     host,
     traceOut,
     dataDir,
+    workspaceRoot,
     maxBytes,
     maxTurns,
     noOpen,

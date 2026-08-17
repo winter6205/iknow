@@ -24,7 +24,12 @@ import {
   type PermissionModeContext,
 } from "../harness/permission/modes.js";
 import { loadIknowEnv, type IknowEnv } from "../config/env.js";
+import {
+  WORKSPACE_ROOT_ENV_KEY,
+  resolveWorkspaceRoot,
+} from "../config/workspace-root.js";
 import type { SessionContext } from "../shared/schema.js";
+import { join } from "node:path";
 
 export type RuntimeBundle = {
   env: IknowEnv;
@@ -85,11 +90,37 @@ export async function buildHarnessEngine(
      *  loop 装配(per-conversationId resolution 是后续 ticket,见 todo-write.ts
      * resolveSessionTodoDir 注释)。chat/ask CLI 入口由调用方解析后透传。 */
     todoDir?: string;
+    /** ADR-0019 (T2): per-root state anchor — CLI `--workspace-root` flag 透传
+     *  到 build-engine(priority chain `[explicit, env, cwd]` 在 build-engine
+     *  层执行)。CLI 入口(runChat/runOneShot/runTui/runServe)各自解析后透传。 */
+    workspaceRoot?: string;
   }
 ): Promise<BuiltEngine> {
-  // #196 IKNOW T5: eager + idempotent 初始化 ~/.iknow/(initIknowWorkspaceSafe
-  // 内部 try/catch+warn,失败不阻塞装配 — 幂等备份,build-engine 内还有一次)。
-  await initIknowWorkspaceSafe();
+  // review-fix (M1 / H1/H2): CLI entry 层条件 resolve workspaceRoot —— 当
+  // explicit flag 或 env SSOT 任一存在时,在 entry 集中走 resolver 拿到
+  // typed WorkspaceRootError(打印友好);否则透传 undefined 让 build-engine
+  // 走 cwd fallback(legacy 默认 `~/.iknow` 行为)。条件解析目的:不无条件
+  // 把 cwd 当 workspaceRoot,否则 serve / tui 的 `resolveServeDataDir`
+  // 默认从 `~/.iknow` 漂移到 `<cwd>/.iknow`(回归 ——
+  // 见 plans/workspace-root-launch.md T5 决策:dataDir default 锚点)。
+  const envWsRoot = bundle.env.workspaceRoot;
+  const resolvedWorkspaceRoot =
+    opts.workspaceRoot !== undefined || envWsRoot !== undefined
+      ? resolveWorkspaceRoot({
+          explicit: opts.workspaceRoot,
+          cwd: process.cwd(),
+          env: { [WORKSPACE_ROOT_ENV_KEY]: envWsRoot },
+        })
+      : undefined;
+  // #196 IKNOW T5 + ADR-0019 (T2): eager + idempotent 初始化 per-root identity
+  // workspace(initIknowWorkspaceSafe 内部 try/catch+warn,失败不阻塞装配 —
+  // 幂等备份,build-engine 内还有一次)。CLI 显式 workspaceRoot 在场 → seed
+  // 落 `<workspaceRoot>/.iknow`;缺省 → iknowWorkspaceRoot()(cwd,T2 D1.1)。
+  await initIknowWorkspaceSafe(
+    resolvedWorkspaceRoot
+      ? { workspace: join(resolvedWorkspaceRoot, ".iknow") }
+      : undefined
+  );
   // W1: 宿主侧执行用户初始化脚本(默认 ~/.iknow/init.sh,可被
   // IKNOW_HOST_INIT_SCRIPT 覆盖)。spawn 由宿主进程发起,不经过 agent
   // bash 工具 → 无权限确认、无 allowlist 限制。文件不存在则 skip;
@@ -99,6 +130,7 @@ export async function buildHarnessEngine(
   // surface 透传到 buildCoreEngine,build-engine 据此判定 BOOTSTRAP 段是否激活;
   // memory 开关透传,#194 T6 双分支在 buildCoreEngine (build-engine.ts) 内;
   // permissionMode (W2) 透传到 policy.mode,chat REPL 持 context 翻 /permissions;
+  // workspaceRoot (ADR-0019 T2) 透传到 per-root identity / memoryDir seam;
   // todoDir (#440 T1-fix) 透传到 registry 让 todo_write 在场(surface !== ask 限定)。
   return buildCoreEngine({
     env: bundle.env,
@@ -107,6 +139,7 @@ export async function buildHarnessEngine(
     ...(opts.memory ? { memory: opts.memory } : {}),
     ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}),
     ...(opts.todoDir ? { todoDir: opts.todoDir } : {}),
+    ...(resolvedWorkspaceRoot ? { workspaceRoot: resolvedWorkspaceRoot } : {}),
   });
 }
 

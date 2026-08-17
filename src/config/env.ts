@@ -20,6 +20,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { loadIknowSettings, type IknowSettings } from "./settings.js";
 import { LLM_MODEL_MISSING_MESSAGE } from "./messages.js";
+import { WORKSPACE_ROOT_ENV_KEY } from "./workspace-root.js";
 
 export interface LlmEnv {
   baseUrl: string;
@@ -145,6 +146,15 @@ export interface IknowEnv {
   compress: IknowCompressEnv;
   /** #378 根因 B: MCP 连接超时配置臂(透传至 createMcpManager.timeoutMsOverride)。 */
   mcp: McpEnv;
+  /**
+   * ADR-0019 (T1): workspace-root per-root state anchor, read from
+   * `IKNOW_WORKSPACE_ROOT` via envOptional (canonical reader; empty/unset
+   * → undefined). Consumers pass this into `resolveWorkspaceRoot({env})`
+   * (priority chain `[explicit, env, cwd]`); the resolver validates the
+   * path is absolute and exists, throwing a typed `WorkspaceRootError`
+   * for relative / missing paths.
+   */
+  workspaceRoot: string | undefined;
 }
 
 /** Placeholder values treated as "no real secret set" (case-insensitive). */
@@ -557,5 +567,12 @@ export function loadIknowEnv(
         fallback: 60_000,
       }),
     },
+    // ADR-0019 (T1): workspace-root per-root state anchor (D1.5 register at
+    // env SSOT; `envOptional` canonical reader — empty/unset → undefined,
+    // 消费方 resolver 对相对路径 / 目录不存在做 typed 校验)。
+    workspaceRoot: envOptional({
+      file,
+      key: WORKSPACE_ROOT_ENV_KEY,
+    }),
   };
 }

@@ -62,6 +62,10 @@ import {
   resolveProjectMemoryDir,
   createSystemResolver,
 } from "./memory/index.js";
+import {
+  WORKSPACE_ROOT_ENV_KEY,
+  resolveWorkspaceRoot,
+} from "../config/workspace-root.js";
 import { createSkillScanner } from "./skill/scanner.js";
 import { createSkillCatalog } from "./skill/catalog.js";
 import type { SkillCatalog } from "./skill/catalog.js";
@@ -94,6 +98,19 @@ export type BuildEngineOpts = {
   /** #337 T8 测试缝:userHome / cwd 覆盖(默认 homedir() / process.cwd())。 */
   readonly userHome?: string;
   readonly cwd?: string;
+  /**
+   * ADR-0019 (T2, D1.1/D1.4): per-root state anchor — CLI `--workspace-root`
+   * flag / env `IKNOW_WORKSPACE_ROOT`。per-root consumers 全部在本层消费:
+   *   - identity workspace seed (initIknowWorkspaceSafe ← workspaceRoot/.iknow)
+   *   - createIknowSystemResolver workspaceRoot(user.md/BOOTSTRAP.md 读取根)
+   *   - memoryDir(resolveProjectMemoryDir ← workspaceRoot)
+   *   - skill scanner userhome 档
+   * `workspaceRoot` **不**加入 `LoopEngineDeps`(ACR minimal-change-verifier)。
+   * 缺省 → `resolveWorkspaceRoot({ env: process.env })`(priority chain
+   * `[explicit, env, cwd]`;T1 resolver SSOT)。opts.workspaceRoot(CLI 显式)
+   * > env > cwd 的优先顺序由 resolver 层保证。
+   */
+  readonly workspaceRoot?: string;
   /** #337 T8 测试缝:MCP client 工厂覆盖(注入 stub,SC8 慢 connect 断言)。 */
   readonly createMcpClient?: (
     server: import("./mcp/config.js").McpServerConfig
@@ -228,7 +245,19 @@ export async function buildHarnessEngine(
   // 单测用 tmp fixture 注入空 home 隔离真实用户目录,不污染 ~/.iknow。
   const userHome = opts.userHome ?? homedir();
   const cwd = opts.cwd ?? process.cwd();
-  const memoryDir = resolveProjectMemoryDir(cwd);
+  // ADR-0019 (T2, D1.1):per-root state anchor,priority chain
+  // `[opts.workspaceRoot(CLI 显式), env IKNOW_WORKSPACE_ROOT, cwd]`。
+  // resolver 是纯函数(existsSync 唯一 IO),typed `WorkspaceRootError`
+  // 在 CLI flag 非法时 fail-fast。缺省 = cwd(D1.1 default process.cwd())。
+  const workspaceRoot =
+    opts.workspaceRoot ??
+    resolveWorkspaceRoot({
+      cwd,
+      env: { [WORKSPACE_ROOT_ENV_KEY]: env.workspaceRoot },
+    });
+  // ADR-0019 (T2): memory root 落 `<workspaceRoot>/.iknow/memory/...`
+  // (per-root memory 决策)。cwd 仍作 hash 输入,项目命名空间隔离保留。
+  const memoryDir = resolveProjectMemoryDir(cwd, workspaceRoot);
   const sandboxRoot = opts.sandboxRoot ?? cwd;
   // 10 件工具集 SSOT 工厂(append-only 顺序;env.web 透传 IKNOW_WEB_PROXY /
   // IKNOW_WEB_SEARCH_URL)。proxyUrl 非法 → 装配期同步抛(见 registry.ts)。
@@ -362,6 +391,15 @@ export async function buildHarnessEngine(
     // 装配路径 (createWorkerDeps → createDefaultAciRegistry) 不传 todoDir
     // → 所有权边界隔在主 loop 内。
     ...(surface !== "ask" && opts.todoDir ? { todoDir: opts.todoDir } : {}),
+    // ADR-0019 (T4 / review-fix H3): per-root state anchor threaded into
+    // bash + read_file factories so the fs-policy fence protects
+    // `<workspaceRoot>/.iknow` at parity with `<home>/.iknow`. Always
+    // resolved (opts.workspaceRoot wins; env SSOT `IKNOW_WORKSPACE_ROOT`
+    // is read from `env.workspaceRoot`, not raw `process.env`, so
+    // `.env` / `.env.local` overrides ride the same surface). Spread-guard
+    // keeps the legacy callers (no opts.workspaceRoot, no env var) on
+    // their `sandboxRoot` fallback inside registry.ts.
+    ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
   });
   // #337:动态 registry 包装 —— 让 inner executor 能解析 registerExternal
   // 动态注册的 mcp__ 工具。`reg.inner` 是构造期快照（aci-registry.ts:71），
@@ -408,16 +446,21 @@ export async function buildHarnessEngine(
   // deps.registry / executor / catalog 三方一致 — ask 入口自然不含 memory 工具。
   const registryTools: Registry = reg.inner;
 
-  // #196 IKNOW T4:启动时 eager + idempotent 初始化 ~/.iknow/(initIknowWorkspaceSafe
-  // 内部 try/catch + warn,失败不阻塞装配 — 守 spec Boundaries Always 降级契约)。
-  // rev 2026-08-11:透传 userHome 缝 — 否则 seed 落到 os.homedir()/真实 home,
-  // 而装配 readBootstrapIfNeeded 读 opts.userHome,二者分叉(隔离 HOME 测试
-  // 必红 + 污染真实 home)。缺省(CLI 未传 userHome)→ 与 iknowWorkspaceRoot()
-  // 同值,行为不变。
+  // #196 IKNOW T4 + ADR-0019 (T2):启动时 eager + idempotent 初始化 per-root
+  // identity workspace(initIknowWorkspaceSafe 内部 try/catch + warn,失败不
+  // 阻塞装配 — 守 spec Boundaries Always 降级契约)。
+  //   - 显式 workspaceRoot(opts.workspaceRoot / env)→ seed 落
+  //     `<workspaceRoot>/.iknow`(identity seed 跟随 per-root state anchor)。
+  //   - 缺省→ 与 iknowWorkspaceRoot() 同值(process.cwd()/.iknow),行为不变。
+  // 兼容注:既有 T337 seam 测传 userHome ≠ homedir() 隔离 HOME(旧逻辑走
+  // `{ workspace: path.join(userHome, ".iknow") }`)—— 该缝保持优先:userHome
+  // 显式 ≠ homedir()(测试注入)时仍以 userHome 为准,workspaceRoot 只在未注入
+  // userHome 测试缝时接管(两者含意不同:userHome = global config anchor 测试
+  // 隔离,workspaceRoot = per-root state anchor 真实装配)。
   await initIknowWorkspaceSafe(
-    userHome === homedir()
-      ? undefined
-      : { workspace: path.join(userHome, ".iknow") }
+    userHome !== homedir()
+      ? { workspace: path.join(userHome, ".iknow") }
+      : { workspace: path.join(workspaceRoot, ".iknow") }
   );
   // #337 T8:MCP 条件化装配。四入口判定（#440 T11 已上移到 registry call 之前,
   // 详见上方 mcpManager 块 + holder 模式 — 此处仅保留历史注释锚点）。
@@ -459,6 +502,9 @@ export async function buildHarnessEngine(
     system: createIknowSystemResolver({
       cwd,
       userHome,
+      // ADR-0019 (T2, D1.4):user.md / BOOTSTRAP.md 读取根 = workspaceRoot
+      // (per-root persona state)。缺省与 userHome 同值(既有测试零变化)。
+      workspaceRoot,
       surface,
       memoryEnabled,
       ...(memoryEnabled
@@ -466,6 +512,9 @@ export async function buildHarnessEngine(
             memoryResolver: createSystemResolver({
               cwd,
               userHome,
+              // ADR-0019 (T2):memoryResolver ctx 也带 workspaceRoot —
+              // refresh discover + assemble 的 user-scope 物理根同源。
+              workspaceRoot,
               memoryDir,
             }),
           }

@@ -23,17 +23,46 @@ const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 2000;
 const MAX_FILE_BYTES = 1_048_576; // 1 MiB
 
+export interface CreateReadFileToolOptions {
+  /** ADR-0019 (T4): per-root state anchor. When provided, `<workspaceRoot>/.iknow`
+   *  is added to the read-allowed roots so the agent can read its own per-root
+   *  state at parity with the home profile. The protected-path check in
+   *  fs-policy (still gating `<workspaceRoot>/.iknow/...` writes from the
+   *  bash fence) keeps the write side locked down; read_file's seam only
+   *  widens the read scope. Defaults to `root` (cwd) — the
+   *  legacy shape — to preserve the existing read-file-profile.test.ts
+   *  contract when workspaceRoot is not threaded. */
+  readonly workspaceRoot?: string;
+}
+
 /** `~/.iknow/` — the agent's own profile directory (readUserProfile in the
  *  assembly layer already reads `user.md` from here every turn). */
 function iknowProfileRoot(): string {
   return join(homedir(), ".iknow");
 }
 
-export function createReadFileTool(root: string): AciToolDef {
+export function createReadFileTool(
+  root: string,
+  opts?: CreateReadFileToolOptions
+): AciToolDef {
   // read_file is a read-only tool. Beyond the primary sandbox root (cwd) it
   // may also read the agent's own profile at `~/.iknow/` — the user asked for
   // this to be allowed by default. Write tools stay cwd-scoped.
-  const extraReadRoots = Object.freeze([iknowProfileRoot()]);
+  //
+  // ADR-0019 (T4): when workspaceRoot is threaded, `<workspaceRoot>/.iknow`
+  // is added as a second read root so the agent's per-root persona state
+  // reaches the same surface as the global home profile. The contract is
+  // reachability-only: extraReadRoots grants traversal through
+  // `resolveWithinRoot`, while protected-path enforcement (the fs-policy
+  // `isSensitive` set) is the separate fence that turns `.iknow` state
+  // files into `execution_failed` when touched from the bash channel. Read
+  // and protection are independent and intentionally so — see plan T4.
+  const extraReadRoots = Object.freeze([
+    iknowProfileRoot(),
+    ...(opts?.workspaceRoot && opts.workspaceRoot !== root
+      ? [join(opts.workspaceRoot, ".iknow")]
+      : []),
+  ]);
   return Object.freeze({
     name: "read_file",
     description:

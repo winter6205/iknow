@@ -1,4 +1,4 @@
-import { stat } from "node:fs/promises";
+import { mkdir, stat } from "node:fs/promises";
 import {
   findProjectAgents,
   findUserAgents,
@@ -11,6 +11,11 @@ import { assembleSystemPrompt, type AssemblyContext } from "./assembly.js";
 export function createSystemResolver(
   ctx: AssemblyContext
 ): () => Promise<string | undefined> {
+  // ADR-0019 (T2): per-root memory store — 装配期 eager mkdir
+  // `<workspaceRoot>/.iknow/memory`(递归;project namespace 子目录由
+  // memory_save / memory_recall 按需 mkdir)。幂等 + 失败静默,
+  // 不阻塞装配(降级契约对齐 createSystemResolver 的 catch-all)。
+  void mkdir(ctx.memoryDir, { recursive: true }).catch(() => {});
   let tracked: ReadonlyArray<MemoryLayerEntry> | undefined;
   let lastMtime = new Map<string, number>();
   let lastSystem: string | undefined;
@@ -50,12 +55,17 @@ export function createSystemResolver(
 async function discover(
   ctx: AssemblyContext
 ): Promise<ReadonlyArray<MemoryLayerEntry>> {
+  // ADR-0019 (T2):user-scope physical root 与 assembleSystemPrompt 同源
+  // (ctx.workspaceRoot ?? ctx.userHome),否则 mtime 跟踪 userHome 路径但
+  // 装配读 workspaceRoot 路径 → 缓存与实际内容漂移,per-root 编辑不触发
+  // refresh(回归风险)。
+  const userRoot = ctx.workspaceRoot ?? ctx.userHome;
   const [projectAgents, userAgents, projectRules, userRules] =
     await Promise.all([
       findProjectAgents(ctx.cwd),
-      findUserAgents(ctx.userHome),
+      findUserAgents(userRoot),
       listRulesFiles(ctx.cwd, "project"),
-      listRulesFiles(ctx.userHome, "user"),
+      listRulesFiles(userRoot, "user"),
     ]);
   return [userAgents, ...userRules, projectAgents, ...projectRules].filter(
     (entry): entry is MemoryLayerEntry => entry !== null

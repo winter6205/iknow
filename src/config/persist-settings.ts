@@ -12,6 +12,9 @@
  *     自适应，与 env 缺省语义一致）。其它字段一律原样保留（决策 5/6）。
  *   - **原子写**：tmp 文件写入**同目录**后 rename 替换（原子）；tmp 在 rename
  *     前 chmod 0600（settings 含 apiKey，敏感）；父目录缺失 → mkdir -p。
+ *     tmp 文件名 per-invocation 唯一（randomUUID 后缀）—— 并行双写同一文件
+ *     时两个调用各写各自 tmp，rename 原子交换保证无双写踩踏（
+ *     plans/workspace-root-launch.md T3 acceptance #2 concurrent 边界类）。
  *   - **self-write 哨兵**：返回写入的完整 bytes 字符串（非解析对象），由
  *     EnvLoader（T2）按 sha256 内容哈希登记，watcher 命中时跳过 reload 防止
  *     写回回环。
@@ -20,10 +23,9 @@
  *
  * 只导出 plan T1 列出的四个 API，不暴露多余公共面。
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import {
@@ -31,6 +33,7 @@ import {
   type IknowSettingsThinking,
   type IknowSettingsThinkingEffort,
 } from "./settings.js";
+import { resolveWorkspaceRoot } from "./workspace-root.js";
 
 /** settings.json 文件名（user / project 两处共用）。 */
 const SETTINGS_FILENAME = "settings.json";
@@ -44,12 +47,29 @@ export interface ThinkingPersistPatch {
   thinkingEffort?: IknowSettingsThinkingEffort | null;
 }
 
-/** resolveThinkingSettingsPath 的注入选项（对齐 settings.ts LoadSettingsOpts）。 */
+/** resolveThinkingSettingsPath 的注入选项（ADR-0019 D1.3 三档）。 */
 export interface ResolveSettingsPathOptions {
   /** 项目根，默认 process.cwd()（project 级 `<cwd>/.iknow/settings.json`）。 */
   cwd?: string;
-  /** 用户 home，默认 os.homedir()（user 级 `<home>/.iknow/settings.json`）。 */
+  /**
+   * per-root state anchor（ADR-0019 / plans/workspace-root-launch.md D1.3）——
+   * 无 project settings.json 时的写回 fallback 目标。默认
+   * `resolveWorkspaceRoot({cwd})`（T1 resolver，priority
+   * `[explicit, env, cwd]`，默认 cwd）。`persistThinkingChanges` 内部对父目录
+   * `mkdir -p`，fresh workspace 也能直接落盘。
+   */
+  workspaceRoot?: string;
+  /**
+   * 保留字段仅作向后兼容（settings.ts LoadSettingsOpts 同形签名）。T3 起不再
+   * 用作 fallback 目标 —— 三档实现中只有 cwd + workspaceRoot 两档生效。
+   */
   home?: string;
+  /**
+   * review-fix (H1/H2): env 槽位透传 —— 调用方缺省 workspaceRoot 时,
+   * 让 resolver 读 env SSOT(IknowEnv.workspaceRoot)而非裸 process.env。
+   * 与 build-engine 的 env SSOT fidelity 同一契约。
+   */
+  env?: Readonly<Record<string, string | undefined>>;
 }
 
 /** 普通对象（raw JSON 的顶层 / llm 层只可能是这种；排除 null / 数组）。 */
@@ -139,27 +159,35 @@ export function mergeThinkingPatch(
 }
 
 /**
- * 选择写回目标 settings 文件路径：
- * project 级 `<cwd>/.iknow/settings.json` 存在 → 其路径（project 本就覆盖
- * user，写 user 等于无效）；否则 user 级 `<home>/.iknow/settings.json`。
- * 与 settings.ts「project over user」merge 优先级一致。
+ * 选择写回目标 settings 文件路径（ADR-0019 D1.3 三档，plans/
+ * workspace-root-launch.md T3 acceptance）：
+ *  1. project 级 `<cwd>/.iknow/settings.json` 存在 → 其路径（project 本就覆盖
+ *     user，写 user 等于无效）；
+ *  2. 否则 → `<workspaceRoot>/.iknow/settings.json`（per-root state anchor，
+ *     mkdir -p 由 persistThinkingChanges 负责）；
+ *  3. **不再** fallback 到 `<home>/.iknow/settings.json` —— 该路径是用户抱怨
+ *     的 global-pollution 路径，T3 彻底杀死。目录既有性用 existsSync 探测
+ *     （与 workspace-root.ts / settings.ts 惯例一致，纯 meta-query）。
  */
 export function resolveThinkingSettingsPath(
   opts?: ResolveSettingsPathOptions
 ): string {
   const cwd = opts?.cwd ?? process.cwd();
-  const home = opts?.home ?? homedir();
   const projectFile = join(cwd, ".iknow", SETTINGS_FILENAME);
-  return existsSync(projectFile)
-    ? projectFile
-    : join(home, ".iknow", SETTINGS_FILENAME);
+  if (existsSync(projectFile)) return projectFile;
+  const workspaceRoot =
+    opts?.workspaceRoot ?? resolveWorkspaceRoot({ cwd, env: opts?.env });
+  return join(workspaceRoot, ".iknow", SETTINGS_FILENAME);
 }
 
 /**
  * 把 thinking patch 持久化到指定 settings 文件（原子写）。
  * 读 raw JSON（文件不存在 / 坏 JSON → 空对象起步）→ 合并 patch → 写 tmp
- * （同目录，rename 前 chmod 0600）→ rename 原子替换。返回完整 bytes 字符串
- * 供 self-write 哨兵登记（T2 按内容哈希比对，不解析对象）。
+ * （同目录，rename 前 chmod 0600）→ rename 原子替换。tmp 文件名 per-
+ * invocation 唯一（`.settings.json.<uuid>.tmp`），并行双写同一文件时
+ * 两个调用各自写各自 tmp，rename 原子替换目标文件，最终状态 = 某次完整
+ * 写入的快照（无 half-written / 无 torn）。返回完整 bytes 字符串供
+ * self-write 哨兵登记（T2 按内容哈希比对，不解析对象）。
  */
 export async function persistThinkingChanges(
   filePath: string,
@@ -168,7 +196,10 @@ export async function persistThinkingChanges(
   const raw = await readSettingsRaw(filePath);
   const merged = mergeThinkingPatch(raw, patch);
   const bytes = `${JSON.stringify(merged, null, 2)}\n`;
-  const tmpPath = join(dirname(filePath), `.${SETTINGS_FILENAME}.tmp`);
+  const tmpPath = join(
+    dirname(filePath),
+    `.${SETTINGS_FILENAME}.${randomUUID()}.tmp`
+  );
   await mkdir(dirname(filePath), { recursive: true });
   await writeFile(tmpPath, bytes, { encoding: "utf8", flag: "w" });
   await chmod(tmpPath, 0o600);
