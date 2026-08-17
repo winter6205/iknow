@@ -18,9 +18,12 @@ import {
   runInSandbox,
 } from "../../sandbox/runner.js";
 import { restore, type SecretRegistry } from "../../secret-roundtrip/index.js";
+import type { BackgroundTaskManager } from "../../background/manager.js";
 
 interface BashInput {
   readonly command?: unknown;
+  /** #502 T3:background?: boolean — 缺省 false = 前台（既有路径）。 */
+  readonly background?: unknown;
 }
 
 export interface CreateBashToolOptions {
@@ -36,6 +39,14 @@ export interface CreateBashToolOptions {
   /** #337 T8 测试缝:home 覆盖（默认 homedir()）— production 不传 = 真实
    *  home,单测可注入 tmpdir 隔离真实 user dir。 */
   readonly home?: string;
+  /** #502 T3:后台任务管理器。在场时 `background: true` 分支可用 —— handler
+   *  经 manager.spawn 起 detached 子进程后立即返回 {task_id, log_path}，不
+   *  阻塞、不占 tier timer（handler 毫秒级返回 ⇒ executor tier 天然不治理
+   *  后台 daemon）。缺省时 `background: true` → ToolExecutionError（fail-fast，
+   *  不静默退化成前台 —— 长驻进程退化成前台会被 build tier 杀），前台路径
+   *  完全不受影响。生产装配 build-engine 注入 createBackgroundTaskManager +
+   *  defaultBackgroundSpawn。 */
+  readonly backgroundManager?: BackgroundTaskManager;
 }
 
 export function createBashTool(
@@ -67,6 +78,14 @@ export function createBashTool(
       throw new ToolExecutionError(
         `bash: command targets a sensitive path: ${command}`
       );
+    // #502 T3:校验链通过后才决定前台 / 后台 —— 危险命令 / 敏感路径在两侧
+    // 都先执行同一闸门（background 不豁免安全检查）。
+    if ((input as BashInput | null)?.background === true) {
+      const bgCommand = opts?.secretRegistry
+        ? restore(command, opts.secretRegistry)
+        : command;
+      return await handleBackground(bgCommand, cwd, opts ?? {});
+    }
     const fenceEnv = envIsolation.filter(process.env);
     // #406 T3:构造 fence 前还原占位符 —— 还原后的命令才是真正 spawn 进 bwrap
     // 的文本。原始命令（含占位符）只见于工具调用记录 / 模型上下文；模型永不
@@ -102,7 +121,14 @@ export function createBashTool(
       "Run shell commands inside the bwrap sandbox for builds, scripts, or one-shot operations without a dedicated tool; pair with read_file / grep / glob / edit_file / write_file for file work inside the fence. Returns {code, stdout, stderr}; stdout/stderr truncated at 12000 code points per stream. Hard-walls reject obvious destructive patterns and sensitive-path targets before spawn; non-hard-wall commands go through the normal permission flow. Long-running processes that need to outlive the call are killed when the build-tier 5-minute timeout fires, and listeners inside the fence are not reachable from the host because bwrap is network-isolated.",
     inputSchema: {
       type: "object",
-      properties: { command: { type: "string" } },
+      properties: {
+        command: { type: "string" },
+        background: {
+          type: "boolean",
+          description:
+            "When true, run the command in the background: returns {task_id, log_path} immediately and the process keeps running after the call, managed by the task registry. Use for long-lived servers or daemons; pair with bash_output (read the log) and bash_stop (terminate). Defaults to false (foreground).",
+        },
+      },
       required: ["command"],
       additionalProperties: false,
     },
@@ -114,4 +140,38 @@ export function createBashTool(
       timeoutTier: "build" as const,
     },
   });
+}
+
+/**
+ * #502 T3:background 分支 —— 经 backgroundManager.spawn 起 detached 子进程后
+ * 立即返回 {task_id, log_path}。不 await 子进程退出、不经 runInSandbox（无 fence
+ * 二次构造）。secret 还原后的 finalCommand 在这里已是输入（调用方校验链之后
+ * 还原），占位符不进 registry / log。
+ */
+async function handleBackground(
+  finalCommand: string,
+  cwd: string,
+  opts: CreateBashToolOptions
+): Promise<{ task_id: string; log_path: string }> {
+  const manager = opts.backgroundManager;
+  if (!manager) {
+    throw new ToolExecutionError(
+      "bash: background execution is not available (no background manager configured)"
+    );
+  }
+  const result = await manager.spawn({
+    command: finalCommand,
+    cwd,
+    workspaceRoot: opts.workspaceRoot,
+    env: process.env,
+    home: opts.home,
+  });
+  if (result.status === "spawn_error") {
+    // 与 bash 既有错误形态一致:typed-error 渲染（${kind}: ${context}）装进
+    // ToolExecutionError。caller catch 契约不会被 [object Object] 污染。
+    throw new ToolExecutionError(
+      `bash: background spawn failed: ${result.error.kind}: ${result.error.context}`
+    );
+  }
+  return { task_id: result.task_id, log_path: result.log_path };
 }

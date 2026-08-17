@@ -76,6 +76,12 @@ import {
   type SubAgentManager,
 } from "./subagent/manager.js";
 import { defaultSubAgentSpawn } from "./subagent/spawn.js";
+import {
+  createBackgroundTaskManager,
+  defaultBackgroundSpawn,
+  type BackgroundTaskManager,
+} from "./background/manager.js";
+import { resolveTasksDir } from "./background/paths.js";
 
 export type BuildEngineOpts = {
   readonly env: IknowEnv;
@@ -300,6 +306,19 @@ export async function buildHarnessEngine(
       ? (opts.subagentManager ??
         createSubAgentManager({ spawn: defaultSubAgentSpawn }))
       : undefined;
+  // #502 T3:bash background 任务管理器 — 条件装配（surface !== "ask"）：
+  //   - chat/tui/serve 生产自建 createBackgroundTaskManager({
+  //       tasksDir: resolveTasksDir(workspaceRoot), spawn: defaultBackgroundSpawn })
+  //     —— registry 落 <workspaceRoot>/.iknow/tasks（ADR-0021 D1.3）。
+  //   - ask 不创建（SC8 oneshot 即用即抛；T4 bash_output/bash_stop 也缺席）。
+  //   与 subagentManager 同门：workspaceRoot 已在上方解析，per-root 命名空间锚。
+  const backgroundManager: BackgroundTaskManager | undefined =
+    surface !== "ask"
+      ? createBackgroundTaskManager({
+          tasksDir: resolveTasksDir(workspaceRoot),
+          spawn: defaultBackgroundSpawn,
+        })
+      : undefined;
   // #126 T5:settings 对象缝（测试注入隔离 settings；生产缺省 loadIknowSettings）。
   const settings = opts.settings ?? loadIknowSettings({ cwd });
   // #406 T4:secret 处理模式 —— settings.secrets.mode 驱动装配。缺省 = "roundtrip"
@@ -376,6 +395,9 @@ export async function buildHarnessEngine(
     ...(memoryEnabled ? { memoryDir } : undefined),
     skillCatalog,
     ...(subagentManager ? { subagentManager } : undefined),
+    // #502 T3:bash background 任务管理器透传（同门条件装配）——bash 工具
+    // `background: true` 分支可用（立即返 task_id，不占 tier timer）。
+    ...(backgroundManager ? { backgroundManager } : {}),
     // #440 T11 mcpManager 条件化装配:在场时 list_mcp_resources /
     // read_mcp_resource 入注册表(handler 闭包捕获外部 mcpManager holder,
     // 实际调用时取当前值)。

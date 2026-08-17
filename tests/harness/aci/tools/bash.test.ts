@@ -26,7 +26,7 @@ afterEach(async () => {
 });
 
 describe("createBashTool — schema and metadata", () => {
-  it("exposes only the required command input without a model-facing timeout", async () => {
+  it("exposes command + optional background(input) without a model-facing timeout", async () => {
     const cwd = await makeScratch("bash-schema-");
     const tool = createBashTool(cwd);
     const schema = tool.inputSchema as {
@@ -38,7 +38,15 @@ describe("createBashTool — schema and metadata", () => {
 
     assert.equal(tool.name, "bash");
     assert.equal(schema.type, "object");
-    assert.deepEqual(schema.properties, { command: { type: "string" } });
+    assert.deepEqual(schema.properties, {
+      command: { type: "string" },
+      // #502 T3:background?: boolean(缺省 false = 前台,行为不变)
+      background: {
+        type: "boolean",
+        description:
+          "When true, run the command in the background: returns {task_id, log_path} immediately and the process keeps running after the call, managed by the task registry. Use for long-lived servers or daemons; pair with bash_output (read the log) and bash_stop (terminate). Defaults to false (foreground).",
+      },
+    });
     assert.deepEqual(schema.required, ["command"]);
     assert.equal(schema.additionalProperties, false);
     assert.equal("timeout" in schema.properties, false);

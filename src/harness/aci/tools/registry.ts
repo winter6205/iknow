@@ -38,6 +38,7 @@ import { createSkillSearchTool } from "./skill-search.js";
 import { createSpawnSubAgentTool } from "../../subagent/spawn-subagent-tool.js";
 import { createSubAgentResultTool } from "../../subagent/subagent-result-tool.js";
 import type { SubAgentManager } from "../../subagent/manager.js";
+import type { BackgroundTaskManager } from "../../background/manager.js";
 import type { McpManager } from "../../mcp/manager.js";
 import { createListMcpResourcesTool } from "./list-mcp-resources.js";
 import { createReadMcpResourceTool } from "./read-mcp-resource.js";
@@ -166,6 +167,12 @@ export interface CreateDefaultAciRegistryOptions {
    *  todo_write 不入注册表（与 memoryDir 同形态：worker 装配路径不注入
    *  todoDir 即把所有权边界隔在主 loop 内,跨 executor 竞态由装配期排除）。 */
   readonly todoDir?: string;
+  /** #502 T3:background 任务管理器。在场时透传给 bash 工厂 —— `background: true`
+   *  分支可用（handler 经 manager.spawn 立即返 task_id）。缺席时 bash 的
+   *  background:true → ToolExecutionError（fail-fast）。与 subagentManager /
+   *  skillCatalog 同形态：只透传不条件化装配名称 —— bash 是常驻工具，参数级
+   *  能力由 handler 运行时决策。 */
+  readonly backgroundManager?: BackgroundTaskManager;
 }
 
 /**
@@ -222,6 +229,7 @@ export function createDefaultAciRegistry(
   const mcpManager = opts.mcpManager;
   const secretRegistry = opts.secretRegistry;
   const disallowedTools = opts.disallowedTools;
+  const backgroundManager = opts.backgroundManager;
   // ADR-0019 (T4): per-root state anchor. Threaded to bash + read_file so
   // the fence protects `<workspaceRoot>/.iknow` the same way it does
   // `<home>/.iknow`. Falls back to sandboxRoot when absent (legacy shape)
@@ -245,7 +253,12 @@ export function createDefaultAciRegistry(
   // 键顺序必须与 ACI_TOOLSET_NAMES 逐项一致(Gate 3):memory_* 在
   // tool_search 之前,skill / skill_search 在末尾。
   const factories: Record<string, () => AciToolDef> = {
-    bash: () => createBashTool(sandboxRoot, { secretRegistry, workspaceRoot }),
+    bash: () =>
+      createBashTool(sandboxRoot, {
+        secretRegistry,
+        workspaceRoot,
+        ...(backgroundManager ? { backgroundManager } : {}),
+      }),
     read_file: () => createReadFileTool(sandboxRoot, { workspaceRoot }),
     grep: () => createGrepTool(sandboxRoot),
     glob: () => createGlobTool(sandboxRoot),
