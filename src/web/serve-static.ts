@@ -47,6 +47,15 @@ export interface ServeStaticOpts {
   readonly pathname: string;
   /** Filename under webRoot served as the SPA entry (chat="index.html", trace="trace.html"). */
   readonly fallbackHtml: string;
+  /**
+   * Optional mount prefix to strip before resolving files (ADR-0020 D1.2:
+   * the session server hosts the trace SPA under `/trace`, but the built
+   * assets live at the webRoot top level). Stripping happens BEFORE the
+   * traversal guard, so the guard still protects the stripped path.
+   * Returns false (caller keeps dispatching) when pathname does not start
+   * with the prefix — or equals it exactly.
+   */
+  readonly stripPrefix?: string;
 }
 
 /**
@@ -57,11 +66,25 @@ export interface ServeStaticOpts {
  * under webRoot — caller is then responsible for sending 404.
  */
 export function serveStaticRequest(opts: ServeStaticOpts): boolean {
-  const { res, webRoot, pathname, fallbackHtml } = opts;
+  const { res, webRoot, fallbackHtml, stripPrefix } = opts;
+  let pathname = opts.pathname;
   // Never treat /api as static (caller should only invoke for non-API GETs,
   // but double-guard path traversal + SPA scope).
   if (pathname === "/api" || pathname.startsWith("/api/")) {
     return false;
+  }
+
+  // ADR-0020 D1.2: mount prefix (e.g. `/trace`) strips to webRoot-relative
+  // before file resolution; bare prefix serves the SPA entry. Non-matching
+  // paths fall through to the caller's next handler.
+  if (stripPrefix !== undefined) {
+    if (pathname === stripPrefix) {
+      pathname = "/";
+    } else if (pathname.startsWith(`${stripPrefix}/`)) {
+      pathname = pathname.slice(stripPrefix.length);
+    } else {
+      return false;
+    }
   }
 
   let rel = pathname === "/" ? `/${fallbackHtml}` : pathname;

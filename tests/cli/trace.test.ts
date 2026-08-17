@@ -73,10 +73,17 @@ describe("parseArgs — `trace` subcommand", () => {
     assert.equal(parsed.host, "127.0.0.1");
   });
 
-  it("defaults port to 24881 when --port omitted", () => {
+  it("defaults port to 8787 (probe mode) when --port omitted", () => {
     const parsed = parseArgs({ argv: ["trace"] });
     assert.equal(parsed.command, "trace");
+    assert.equal(parsed.port, 8787);
+  });
+
+  it("--separate defaults port to 24881 (#183 standalone, ADR-0020 D2.2)", () => {
+    const parsed = parseArgs({ argv: ["trace", "--separate"] });
+    assert.equal(parsed.command, "trace");
     assert.equal(parsed.port, 24881);
+    assert.equal(parsed.separate, true);
   });
 
   // Sentinel regression: `iknow trace --port 8787` must honor the explicit
@@ -258,7 +265,13 @@ describe("runTrace — T7 默认目录 / fail-fast / serve 分开", () => {
       }) + "\n",
       "utf8"
     );
-    spawned = spawnTraceCli(scratch, ["--no-open", "--port", "0"]);
+    // ADR-0020 D2.2: 独立进程目录语义现在走 --separate escape hatch。
+    spawned = spawnTraceCli(scratch, [
+      "--separate",
+      "--no-open",
+      "--port",
+      "0",
+    ]);
     const url = await Promise.race([
       spawned.url,
       spawned.exited.then((e) => {

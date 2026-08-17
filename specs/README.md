@@ -54,7 +54,7 @@
 - `252-loop-stop-semantics.md` — 决策已进 ADR-0011 / ADR-0012 / ADR-0013
 - `321-tui-opentui-migration.md` — 渲染后端迁移完成（PR #360；旧 ink 归档 `archive/tui-ink/`）
 - `356-subagent-v1.md` — superseded by V1.5（`#361` foreground spawn 反转）
-- `trace-lifecycle-panel-v2.md` / `iknow-trace-standalone-service.md` / `traceserver-inspection-panel.md` — trace 三迭代 spec；独立 `iknow trace` 进程（`#183`）+ web trace.html 面板已取代
+- `trace-lifecycle-panel-v2.md` / `iknow-trace-standalone-service.md` / `traceserver-inspection-panel.md` — trace 三迭代 spec；独立 `iknow trace` 进程（`#183`）+ web trace.html 面板已取代；**superseded by ADR-0020（读侧融合回 `iknow serve` 同进程同端口；`iknow trace` 默认探测 + `--separate` escape hatch）**
 
 ---
 

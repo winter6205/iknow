@@ -474,11 +474,11 @@ async function runServe(parsed: ParsedCli): Promise<void> {
       },
     });
     writeErr(`iknow serve  http://${listening.host}:${listening.port}/`);
-    if (parsed.traceOut) {
-      writeErr(
-        `Trace 写入 ${parsed.traceOut}；检测面板请另起 \`iknow trace --trace-out ${parsed.traceOut}\``
-      );
-    }
+    // ADR-0020: 读侧同进程挂载 —— 面板直接在本端口 /trace，无需另起进程。
+    writeErr(
+      `Trace 面板: http://${listening.host}:${listening.port}/trace` +
+        (parsed.traceOut ? `（写目录 ${parsed.traceOut}）` : "")
+    );
     writeErr("API: /api/v1/health  ·  UI: /  ·  Ctrl+C to stop");
     // #356 High#4 (SC12/SC3):serve 是长程入口 —— hub.ensureDeps 内
     // buildHarnessEngine 自建 MCP + subagent manager,built.shutdown 缓存在
@@ -495,17 +495,13 @@ async function runServe(parsed: ParsedCli): Promise<void> {
 }
 
 async function runTrace(parsed: ParsedCli): Promise<void> {
-  // T7: trace CLI 默认读 ./trace/ 目录（无需 --trace-out），并把该目录传给
-  // startTraceServe（读侧 v2 目录语义）。--trace-out 显式提供时覆盖默认。
-  // 注意：这里不复用写侧 resolveTracePath —— env IKNOW_TRACE_OUT 是写侧
-  // (serve/chat/ask) 的，不是读侧；trace 只认 flag 或默认目录。
+  // T7: trace CLI 默认读 ./trace/ 目录（无需 --trace-out）。--trace-out 显式
+  // 提供时覆盖默认。注意：这里不复用写侧 resolveTracePath —— env
+  // IKNOW_TRACE_OUT 是写侧 (serve/chat/ask) 的，不是读侧。
   const traceOut = parsed.traceOut ?? DEFAULT_TRACE_DIR;
 
-  // SC-C 21 fail-fast：检测到旧单文件格式 trace → 提示迁移，不静默当目录读。
-  // 两种情形：
-  //   1) 显式 --trace-out 指向一个已存在的「文件」（旧单文件或误传单文件）。
-  //   2) 用默认 ./trace/ 目录，但 CWD 里还留着未迁移的旧 ./trace.jsonl
-  //      （默认目录与旧文件路径不冲突，但用户数据还没迁 → 面板会空，需提示）。
+  // SC-C 21 fail-fast（ADR-0020 D2.3：两种模式都先于探测执行——都依赖迁移后
+  // 的目录语义）。检测到旧单文件格式 trace → 提示迁移，不静默当目录读。
   const legacyConflict = detectLegacyTrace(
     traceOut,
     parsed.traceOut === undefined
@@ -521,6 +517,32 @@ async function runTrace(parsed: ParsedCli): Promise<void> {
     return;
   }
 
+  // ADR-0020 D2.1 默认模式：不起进程，探测 iknow serve health 后指向同进程
+  // /trace 面板。探测目标 host/port 来自 --host/--port（缺省 127.0.0.1:8787）。
+  if (!parsed.separate) {
+    const host = parsed.host;
+    const port = parsed.port;
+    if (await probeServeHealth(host, port)) {
+      const url = `http://${host}:${port}/trace`;
+      writeErr(`iknow trace  ${url}`);
+      writeErr("Trace 检测面板（与 iknow serve 同进程，ADR-0020）");
+      // SC-C 19: 默认自动打开浏览器；--no-open 关闭（CI/headless）。
+      if (!parsed.noOpen) {
+        openBrowser(url);
+      }
+      return;
+    }
+    writeErr(
+      `未检测到 iknow serve（http://${host}:${port}/api/v1/health 不可达）`
+    );
+    writeErr(
+      "请先运行 `iknow serve`，或用 `iknow trace --separate` 起独立检测进程"
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  // ADR-0020 D2.2 --separate escape hatch：保留 #183 独立进程模式。
   const { startTraceServe } = await import("./traceserver/serve.js");
   const serveOpts: TraceServeOptions = {
     traceOut,
@@ -534,9 +556,8 @@ async function runTrace(parsed: ParsedCli): Promise<void> {
     writeErr(`iknow trace  ${url}`);
     writeErr(`Trace 检测面板：${traceOut}`);
     writeErr(
-      "API: /api/v1/health  ·  /api/v1/sessions  ·  /api/v1/traces  ·  Ctrl+C to stop"
+      "API: /api/v1/health  ·  /api/v1/traces/sessions  ·  /api/v1/traces  ·  Ctrl+C to stop"
     );
-    // SC-C 19: 默认自动打开浏览器；--no-open 关闭（CI/headless）。
     if (!parsed.noOpen) {
       openBrowser(url);
     }
@@ -546,6 +567,27 @@ async function runTrace(parsed: ParsedCli): Promise<void> {
   } catch (err) {
     printChatError(err);
     process.exitCode = 1;
+  }
+}
+
+/**
+ * ADR-0020 D2.1: probe `iknow serve` health on host:port. 2s timeout；
+ * 任何网络/解析失败都按「未检测到」处理（探测不是错误路径，是分支信号）。
+ */
+async function probeServeHealth(host: string, port: number): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2000);
+  try {
+    const res = await fetch(`http://${host}:${port}/api/v1/health`, {
+      signal: controller.signal,
+    });
+    if (!res.ok) return false;
+    const body = (await res.json()) as { ok?: unknown };
+    return body.ok === true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
