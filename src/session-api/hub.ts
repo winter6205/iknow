@@ -1302,6 +1302,12 @@ export class SessionHub {
     // #440 T1-fix:serve 入口注入 todoDir 让 todo_write 在主 loop 在场
     // (per-conversationId resolution 是后续 ticket — serve 的 cachedDeps
     // 跨所有会话共享,per-conversationId 需 engine 重建,代价太高)。
+    // review-fix (Fix 1): subagent 生命周期事件落盘（spec SC1 生产装配）——
+    // hub 的 subagentManager 是单例共享（surface!=="ask" 在 build-engine.ts:307-320
+    // 自建一次）, 所有 serve 会话的 subagent 事件聚合到 <traceOut>/subagent.jsonl
+    // (conversationId="subagent")；reader 侧按 per-record task_id 过滤。
+    // 仅当 this.traceOut 配置（serve.ts 总会传 resolveTracePath 解析值）才注入；
+    // 缺席 → manager 走 build-engine 默认 NoopTraceService (byte-stable)。
     const built = await buildHarnessEngine({
       env,
       askUser: this.askUser,
@@ -1314,6 +1320,14 @@ export class SessionHub {
       // (同一 per-root 锚点,不落回 sandboxRoot|cwd)。
       ...(this.workspaceRoot ? { workspaceRoot: this.workspaceRoot } : {}),
       todoDir: resolveSessionTodoDir({ surface: "serve" }),
+      ...(this.traceOut !== undefined
+        ? {
+            subagentTrace: createJsonlTraceService({
+              filePath: this.traceOut,
+              conversationId: "subagent",
+            }),
+          }
+        : {}),
     });
     this.cachedDeps = built.deps;
     // #356 T7: serve 懒取 subagent manager — buildHarnessEngine 在 surface !==

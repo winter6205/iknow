@@ -58,7 +58,7 @@ ACR 补充观察（已消化进 bullets）：① #371 真实缺口 = 只读 GET 
 
 ### T2. `[implementation]` D8 修复 + per-task 消费链（缺省上调独立落地） `[blocks: T1]`
 
-- **Affects**: `src/harness/subagent/worker.ts`（删 envelope.timeoutMs → deps.timeoutMs 的 spread）；`src/harness/subagent/manager.ts`（SIGTERM timer 消费链：def.timeoutMs ?? env 值 ?? 常量；常量上调至 spec 定案值）；`tests/subagent/`（D8 专项 + 缺省链用例）。
+- **Affects**: `src/harness/subagent/worker.ts`（删 envelope.timeoutMs → deps.timeoutMs 的 spread）；`src/harness/subagent/manager.ts`（SIGTERM timer 消费链：def.timeoutMs ?? env 值 ?? 常量；常量上调至 spec 定案值）；`src/harness/build-engine.ts`（env.subagent.taskTimeoutMs 注入透传 manager 中段）；`src/harness/subagent/spawn-subagent-tool.ts`（drop PER_TASK_TIMEOUT_MS 默认填充, 走三层链）；`tests/subagent/`（D8 专项 + 缺省链用例）。
 - **Acceptance**:
   1. spec SC5：D8 专项测试绿——worker `deps.timeoutMs` 恒为 env 值，不随 spawn timeoutMs 变化。
   2. spec SC4 消费点面：`grep -n "7200" src/harness/subagent/manager.ts` 命中（缺省 7200s 落消费点，spec Assumptions 1）。
@@ -85,7 +85,7 @@ ACR 补充观察（已消化进 bullets）：① #371 真实缺口 = 只读 GET 
 
 ### T4. `[implementation]` trace 三类事件写侧（subagent_spawn / stop / state_change）
 
-- **Affects**: `src/harness/trace/types.ts`（3 record 类型 + SubagentState 联合 + TraceService 接口 +3 方法）；`src/harness/trace/jsonl.ts`（3 record 实现，同形态 toSnakeCaseRecord + warnOnce）；`src/harness/trace/noop.ts`（3 空实现）；`src/harness/trace/observability-bridge.ts`（_record 联合追加）；`src/harness/trace/index.ts`（barrel）；`src/harness/subagent/manager.ts`（spawn / 状态变更 / 终止三处埋点，safeTrace 包裹）；`tests/`（double-track：trace assert + no-trace deepEqual 基线）。
+- **Affects**: `src/harness/trace/types.ts`（3 record 类型 + SubagentState 联合 + TraceService 接口 +3 方法）；`src/harness/trace/jsonl.ts`（3 record 实现，同形态 toSnakeCaseRecord + warnOnce）；`src/harness/trace/noop.ts`（3 空实现）；`src/harness/trace/observability-bridge.ts`（_record 联合追加）；`src/harness/trace/index.ts`（barrel）；`src/harness/subagent/manager.ts`（spawn / 状态变更 / 终止三处埋点，safeTrace 包裹）；`src/harness/build-engine.ts`（subagentTrace 注入缝 + NoopTraceService 缺省 —— 生产装配点, 与 T2 的 taskTimeoutMs 注入同文件）；`tests/`（double-track：trace assert + no-trace deepEqual 基线）。
 - **Acceptance**:
   1. spec SC1：集成测试断言三类事件落盘，spawn 与 stop 按 task_id 配对；`grep -c "subagent_" <trace.jsonl>` ≥ 3。
   2. double-track 基线：NoopTraceService / 无 trace 场景 deepEqual 不破（项目测试规范「Trace as assert surface」）。

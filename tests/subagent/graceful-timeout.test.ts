@@ -31,6 +31,9 @@ import assert from "node:assert/strict";
 import { describe, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type {
   AssistantTurnResult,
@@ -48,6 +51,7 @@ import type {
   WorkerEnvelope,
 } from "../../src/harness/subagent/envelope.ts";
 import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
+import { createJsonlTraceService } from "../../src/harness/trace/jsonl.ts";
 import { assistantResult } from "../cli/_fixtures.ts";
 
 // ---------------------------------------------------------------------------
@@ -311,6 +315,83 @@ describe("subagent graceful timeout: manager 优雅窗口 (子信封替换 fallb
       }
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D. review-fix (Fix 2): emitStateChange self-loop guard —— timeout 路径
+//    timer fire (running→failed) 后, stdout handler 收到 worker 的 timeout
+//    envelope 再次 emitStateChange (failed→failed) 是 spurious 自环, 不得
+//    再落一条 from_state === to_state === "failed" 的 subagent_state_change。
+//    断言真实 jsonl 中不存在该 spurious 记录, 且迁移序列只含真实迁移。
+// ---------------------------------------------------------------------------
+
+describe("subagent graceful timeout: emitStateChange self-loop guard (Fix 2)", () => {
+  it("timeout → failed→failed 自环不落盘 (jsonl 无 from_state===to_state==='failed')", async () => {
+    vi.useFakeTimers();
+    const scratchDir = mkdtempSync(join(tmpdir(), "iknow-trace-sloop-"));
+    try {
+      const trace = createJsonlTraceService({
+        filePath: scratchDir,
+        conversationId: "conv-self-loop",
+      });
+      const spawned: FakeChild[] = [];
+      const manager = createSubAgentManager({
+        spawn: (_def, _taskId, _payload) => {
+          const child = makeFakeChild();
+          spawned.push(child);
+          return child as unknown as ChildProcess;
+        },
+        trace,
+      });
+      // 短 timeout 触发 timer fire: starting→running (spawn) → failed (timer)
+      const { taskId } = manager.spawn({ timeoutMs: 50 });
+      await vi.advanceTimersByTimeAsync(50);
+      // 优雅窗口内 child 写回 timeout envelope → stdout handler 再次
+      // emitStateChange("failed") —— 自环应被 guard 吞掉, 不落盘。
+      emitTimeoutEnvelope(spawned[0]!, "worker graceful summary");
+      await Promise.resolve();
+      await Promise.resolve();
+
+      assert.equal(manager.queryBuffer(taskId).status, "failed");
+      const filePath = join(scratchDir, "conv-self-loop.jsonl");
+      const content = readFileSync(filePath, "utf8");
+      const lines = content.split("\n").filter(Boolean);
+      const stateChanges = lines
+        .map((l) => JSON.parse(l) as Record<string, unknown>)
+        .filter((r) => r.record_type === "subagent_state_change");
+      assert.ok(
+        stateChanges.length >= 1,
+        `expected >=1 state_change, got ${stateChanges.length}`
+      );
+      for (const rec of stateChanges) {
+        assert.notEqual(
+          rec.from_state,
+          rec.to_state,
+          `no self-loop state_change (found from=${rec.from_state} to=${rec.to_state})`
+        );
+        assert.ok(
+          !(rec.from_state === "failed" && rec.to_state === "failed"),
+          "failed→failed 自环记录存在"
+        );
+      }
+      // 真实迁移序列仍完整: starting→running + running→failed 各一条。
+      assert.ok(
+        stateChanges.some(
+          (r) => r.from_state === "starting" && r.to_state === "running"
+        ),
+        "starting→running 迁移存在"
+      );
+      assert.ok(
+        stateChanges.some(
+          (r) => r.from_state === "running" && r.to_state === "failed"
+        ),
+        "running→failed 迁移存在"
+      );
+    } finally {
+      vi.useRealTimers();
+      rmSync(scratchDir, { recursive: true, force: true });
     }
   });
 });

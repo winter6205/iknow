@@ -174,6 +174,23 @@ export function effectiveTaskTimeoutMs(
   return def.timeoutMs ?? opts.taskTimeoutMs ?? PER_TASK_TIMEOUT_MS;
 }
 
+/**
+ * #358 review-fix (Fix 3): taskPreview SSOT —— 长度 + 来源统一。
+ * 只取 `def.task`（不回落 def.systemPrompt），截断 ≤120 字符（默认）。
+ * 两个消费面共用同一真值:
+ *   - `recordSubagentSpawn` 的 subagent_spawn 落盘 taskPreview
+ *   - `listSubagents` 的 HTTP/API 投影 taskPreview
+ * 120 是 spec 权限行定案的 "least-privilege" 边界（task 全文不落盘 / 不
+ * 上行）；trace 侧没有理由写更多，且 systemPrompt 纳入会扩大脱敏面。max
+ * 参数供显式覆盖（当前无调用方传 <120 以下的更小值，保留参数防未来漂移）。
+ */
+export function truncateTaskPreview(
+  def: SubAgentDefinition,
+  max?: number
+): string {
+  return def.task?.slice(0, max ?? 120) ?? "";
+}
+
 type TaskState = "starting" | "running" | "completed" | "failed";
 
 interface Task {
@@ -271,6 +288,14 @@ export function createSubAgentManager(opts: {
     opts2?: { readonly reason?: SubagentStateChangeRecord["reason"] }
   ): void {
     const fromState = task.state;
+    // review-fix (Fix 2): 同态迁移 self-loop guard —— 状态机 "same state"
+    // 迁移是 no-op。典型场景: SC6 优雅收尾时 timer fire 先 emitStateChange
+    // (running → failed), 随后 worker 的 timeout envelope 在 stdout handler
+    // 再次 emitStateChange (failed → failed) —— 前者已落盘, 后者若再写会
+    // 产生 from_state === to_state === "failed" 的 spurious 记录。跳过 state
+    // 赋值与 trace 两者 (既有 emitStop 的 stoppedEmitted 单点守门不覆盖这里:
+    // state_change 没有等价 flag, 靠 prev === toState 判定)。
+    if (fromState === toState) return;
     task.state = toState;
     if (!trace) return;
     void safeTrace(() =>
@@ -393,7 +418,7 @@ export function createSubAgentManager(opts: {
     // #358 T4: subagent_spawn 在 child 成功 launch 后 emit (task.state 此时还是
     // "starting",下方 emitStateChange("running") 联动跑 starting→running 迁移)。
     if (trace) {
-      const taskPreviewSource = def.task ?? def.systemPrompt ?? "";
+      const taskPreviewSource = truncateTaskPreview(def, 120);
       void safeTrace(() =>
         trace.recordSubagentSpawn({
           id: task.id,
@@ -403,7 +428,7 @@ export function createSubAgentManager(opts: {
           status: "ok",
           ts: new Date().toISOString(),
           ...(taskPreviewSource.length > 0
-            ? { taskPreview: taskPreviewSource.slice(0, 200) }
+            ? { taskPreview: taskPreviewSource }
             : {}),
           ...(def.model !== undefined ? { model: def.model } : {}),
           ...(def.maxTurns !== undefined ? { maxTurns: def.maxTurns } : {}),
@@ -757,7 +782,8 @@ export function createSubAgentManager(opts: {
       const item: SubagentInfo = {
         taskId: task.id,
         state: task.state,
-        taskPreview: task.def.task?.slice(0, 120) ?? "",
+        // Fix 3: 与 recordSubagentSpawn 同源 (truncateTaskPreview 默认 120)。
+        taskPreview: truncateTaskPreview(task.def),
         startedAt: task.startedAt,
         ...(task.endedAt !== undefined ? { endedAt: task.endedAt } : {}),
         ...(envelope?.summary !== undefined

@@ -287,6 +287,26 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     return;
   }
 
+  // review-fix (Fix 1): subagent 生命周期事件落盘（spec SC1 生产装配）——
+  // chat 入口当前不写 loop-engine trace（chat-session 内无 createJsonlTraceService，
+  // 见 chat-session.ts:289 注释），但 subagent manager 必须有 trace 才能让三类事件
+  // (subagent_spawn / subagent_state_change / subagent_stop) 落 JSONL。仅当 traceOut
+  // 显式配置（flag 或 env）时构造 subagent JsonlTraceService —— 否则 manager 走
+  // build-engine 默认 NoopTraceService，零副作用（byte-stable）。单 hub 实例共享一
+  // 个 manager 时所有会话的 subagent 事件聚合到 <traceOut>/subagent.jsonl
+  // (conversationId="subagent")；reader 侧按 per-record task_id 过滤（spec SC1
+  // v1 选择 — per-session 隔离需 per-session manager，超出本 review-fix 范围，
+  // 已在 build-engine.ts:307-320 注释里说明）。
+  const tracePath = resolveTracePath(parsed.traceOut);
+  const subagentTraceConfigured =
+    parsed.traceOut !== undefined || process.env.IKNOW_TRACE_OUT !== undefined;
+  const subagentTraceService = subagentTraceConfigured
+    ? createJsonlTraceService({
+        filePath: tracePath,
+        conversationId: "subagent",
+      })
+    : undefined;
+
   let built: import("./harness/build-engine.js").BuiltEngine;
   // W2: chat REPL 持一个可变 PermissionModeContext —— /permissions 命令在
   // REPL 里就地翻转它,引擎不重建。初始值走 env IKNOW_PERMISSION_MODE(可
@@ -308,6 +328,11 @@ async function runChat(parsed: ParsedCli): Promise<void> {
       memory: { enabled: true },
       permissionMode,
       todoDir: resolveSessionTodoDir({ surface: "chat" }),
+      // review-fix (Fix 1): subagent trace 生产装配 —— 仅显式配置 traceOut/env 时
+      // 注入 <traceOut>/subagent.jsonl (conversationId="subagent", 聚合所有会话)。
+      ...(subagentTraceService !== undefined
+        ? { subagentTrace: subagentTraceService }
+        : {}),
       // review-fix (M1/M5): `!== undefined` 守门 — 空字符串透传触 empty_explicit。
       ...(parsed.workspaceRoot !== undefined
         ? { workspaceRoot: parsed.workspaceRoot }
