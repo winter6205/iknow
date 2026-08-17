@@ -169,7 +169,7 @@ describe("secret-roundtrip e2e — roundtrip 全流（识别 → bash 还原 →
   // 测试密钥：形态只需命中 DEFAULT sk- pattern 并映射到单个占位符；具体值无关紧要。
   const SECRET = "sk-aaaaaaaaaaaaaaaaaaaa";
 
-  it("chat × roundtrip：run() 消息全树占位符；bash 还原层 spawn 前回填真值", async () => {
+  it("chat × roundtrip：run() 消息全树占位符；bash 还原层 spawn 前回填真值，输出 mask 兜底", async () => {
     const secretRegistry = createSecretRegistry();
     const deps = makeRunDeps({
       responses: [
@@ -203,19 +203,24 @@ describe("secret-roundtrip e2e — roundtrip 全流（识别 → bash 还原 →
     }
     assert.equal(secretRegistry.resolve("<<<SECRET_1>>>"), SECRET);
 
-    // (2) 还原层：bash 工具拿到同一 registry → spawn 前 restore → stdout 真值。
+    // (2) 还原层 + 输出 mask（#357 T3）：bash 工具拿到同一 registry → spawn 前
+    // restore（命令拿真值）→ echo 回来后 stdout 经 output-mask 洗涤：真值不外泄到
+    // tool_result。restore 命中证据 = 占位符缺席；mask 命中证据 = 真值缺席 + *** 在场。
     const { root } = await makeFixture();
     const bashTool = createBashTool(root, { secretRegistry });
     const bashResult = (await bashTool.handler({
       command: 'echo "<<<SECRET_1>>>"',
     })) as { code: number; stdout: string; stderr: string };
     assert.equal(bashResult.code, 0);
-    assert.equal(
-      bashResult.stdout,
-      `${SECRET}\n`,
-      `bash stdout 应含还原后的真值（实际=${JSON.stringify(bashResult.stdout)}）`
+    assert.ok(
+      !bashResult.stdout.includes("<<<SECRET_1>>>"),
+      "restore 命中：占位符已被真值替换（否则原样透传）"
     );
-    assert.ok(!bashResult.stdout.includes("<<<SECRET_1>>>"));
+    assert.ok(
+      !bashResult.stdout.includes(SECRET),
+      `mask 命中：真值不得外泄到 tool_result（实际=${JSON.stringify(bashResult.stdout)}）`
+    );
+    assert.equal(bashResult.stdout, "***\n");
   });
 
   it("chat × block：run() 用户明文原样进消息（roundtrip 识别关闭），registry 缺席", async () => {

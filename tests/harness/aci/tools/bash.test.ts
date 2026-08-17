@@ -180,7 +180,7 @@ async function runBash(cwd: string, command: string): Promise<BashResult> {
 // A2:命令含未注册 <<<SECRET_MISSING>>> → 原样传给 bash 不抛错，bash 把字面
 //    当命令名回显到 stderr（command not found）→ stderr 含字面（graceful）。
 describe("#406 T3 — bash 占位符还原层", () => {
-  it("A1：注册值还原 —— stdout 输出真值而非占位符", async () => {
+  it("A1：注册值还原 —— stdout 不含占位符（restore 命中）", async () => {
     const cwd = await makeScratch("bash-restore-");
     const registry = createSecretRegistry();
     registry.register("sk-aaaaaaaaaaaaaaaaaaaa");
@@ -190,12 +190,21 @@ describe("#406 T3 — bash 占位符还原层", () => {
       command: 'echo "<<<SECRET_1>>>"',
     })) as BashResult;
 
+    // 注：M1 输出遮罩在 restore 后跑，stdout 此时已是 ***（掩盖真值）。
+    // 本用例 assert restore 命中（占位符消失 + 真值被 mask 替代），不
+    // 重复 M1 的语义。
     assert.equal(result.code, 0);
     assert.equal(
-      result.stdout,
-      "sk-aaaaaaaaaaaaaaaaaaaa\n",
-      `stdout 应含还原后的真值（实际=${JSON.stringify(result.stdout)}）`
+      result.stdout.includes("<<<SECRET_1>>>"),
+      false,
+      `stdout 不应再含占位符（实际=${JSON.stringify(result.stdout)}）`
     );
+    assert.equal(
+      result.stdout.includes("sk-aaaaaaaaaaaaaaaaaaaa"),
+      false,
+      `stdout 不应含原 secret 值（实际=${JSON.stringify(result.stdout)}）`
+    );
+    assert.equal(result.stdout, "***\n");
   });
 
   it("A1：多占位符命令完整还原后执行", async () => {
@@ -209,12 +218,18 @@ describe("#406 T3 — bash 占位符还原层", () => {
       command: 'echo "<<<SECRET_1>>> <<<SECRET_2>>>"',
     })) as BashResult;
 
+    // 同上：restore 命中后被 mask 遮成 *** ***；本用例仅 assert 两个
+    // 占位符都已被还原（stdout 不含占位符字面）。
     assert.equal(result.code, 0);
     assert.equal(
-      result.stdout,
-      "sk-aaaaaaaaaaaaaaaaaaaa AKIA1234567890ABCDEF\n",
-      `多占位符应全部还原（实际=${JSON.stringify(result.stdout)}）`
+      result.stdout.includes("<<<SECRET_1>>>") ||
+        result.stdout.includes("<<<SECRET_2>>>"),
+      false,
+      `stdout 不应含任何占位符（实际=${JSON.stringify(result.stdout)}）`
     );
+    assert.equal(result.stdout.includes("sk-aaaaaaaaaaaaaaaaaaaa"), false);
+    assert.equal(result.stdout.includes("AKIA1234567890ABCDEF"), false);
+    assert.equal(result.stdout, "*** ***\n");
   });
 
   it("A2：未注册占位符原样透传 bash，不抛错（graceful degradation）", async () => {
@@ -248,5 +263,134 @@ describe("#406 T3 — bash 占位符还原层", () => {
 
     assert.equal(result.code, 0);
     assert.equal(result.stdout, "keep\n");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #406 T3: bash 输出遮罩（output mask 接入 handler return 前）
+// ---------------------------------------------------------------------------
+// 约束：
+//   - mask 构造在 handler 内每次现取（registry 值可跨 turn 变化；不模块级缓存）
+//   - 缺席 secretRegistry → 不 mask、不 crash
+//   - 形状不变：恰 {code, stdout, stderr} 三字段
+//   - registry 在场但空 → mask identity，输出原样
+describe("#406 T3 — bash 输出遮罩（output-mask on stdout/stderr）", () => {
+  it("M1：registry 在场 + 命令经占位符还原路径 → stdout 真值被遮罩为 ***", async () => {
+    const cwd = await makeScratch("bash-mask-stdout-");
+    const registry = createSecretRegistry();
+    const secret = "sk-live-超密值-aaaaaaaaaaaa";
+    registry.register(secret);
+    const tool = createBashTool(cwd, { secretRegistry: registry });
+
+    const result = (await tool.handler({
+      command: 'echo "<<<SECRET_1>>>"',
+    })) as BashResult;
+
+    assert.equal(result.code, 0);
+    assert.equal(
+      result.stdout.includes(secret),
+      false,
+      `stdout 不应含原 secret 值（实际=${JSON.stringify(result.stdout)}）`
+    );
+    assert.equal(
+      result.stdout.includes("***"),
+      true,
+      `stdout 应含遮罩符 ***（实际=${JSON.stringify(result.stdout)}）`
+    );
+  });
+
+  it("M1：registry 在场 + stderr 真值同样被遮罩", async () => {
+    const cwd = await makeScratch("bash-mask-stderr-");
+    const registry = createSecretRegistry();
+    const secret = "AKIA1234567890ABCDEF-leak";
+    registry.register(secret);
+    const tool = createBashTool(cwd, { secretRegistry: registry });
+
+    const result = (await tool.handler({
+      command: `printf '%s' "<<<SECRET_1>>>" >&2; exit 0`,
+    })) as BashResult;
+
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout, "");
+    assert.equal(
+      result.stderr.includes(secret),
+      false,
+      `stderr 不应含原 secret 值（实际=${JSON.stringify(result.stderr)}）`
+    );
+    assert.equal(
+      result.stderr.includes("***"),
+      true,
+      `stderr 应含遮罩符 ***（实际=${JSON.stringify(result.stderr)}）`
+    );
+  });
+
+  it("M2：缺席 secretRegistry → 输出原样、不 crash", async () => {
+    const cwd = await makeScratch("bash-mask-absent-");
+    const tool = createBashTool(cwd); // 不传 secretRegistry
+    const secret = "sk-live-超密值-no-mask";
+
+    const result = (await tool.handler({
+      command: `echo "${secret}"`,
+    })) as BashResult;
+
+    assert.equal(result.code, 0);
+    assert.equal(
+      result.stdout.includes(secret),
+      true,
+      `缺席 registry 时 stdout 应原样含真值（实际=${JSON.stringify(result.stdout)}）`
+    );
+    assert.equal(result.stdout.includes("***"), false);
+  });
+
+  it("M3：返回形状不变 —— 恰 {code, stdout, stderr} 三字段", async () => {
+    const cwd = await makeScratch("bash-mask-shape-");
+    const registry = createSecretRegistry();
+    registry.register("sk-shape-probe-aaaaaaaaaa");
+    const tool = createBashTool(cwd, { secretRegistry: registry });
+
+    const result = await tool.handler({
+      command: 'echo "<<<SECRET_1>>>"',
+    });
+
+    assert.deepEqual(Object.keys(result as object).sort(), [
+      "code",
+      "stderr",
+      "stdout",
+    ]);
+    assert.deepEqual(result, {
+      code: 0,
+      stdout: "***\n",
+      stderr: "",
+    });
+  });
+
+  it("M4：registry 在场但值为空（边界） → mask identity，输出原样不 crash", async () => {
+    const cwd = await makeScratch("bash-mask-empty-registry-");
+    const tool = createBashTool(cwd, {
+      secretRegistry: createSecretRegistry(), // 空 registry
+    });
+
+    const result = (await tool.handler({
+      command: "echo keep",
+    })) as BashResult;
+
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout, "keep\n");
+    assert.equal(result.stderr, "");
+  });
+
+  it("M4：注册空串（边界） → mask identity，输出原样不 crash", async () => {
+    const cwd = await makeScratch("bash-mask-empty-string-");
+    const registry = createSecretRegistry();
+    registry.register(""); // 空串注册
+    const tool = createBashTool(cwd, { secretRegistry: registry });
+
+    const result = (await tool.handler({
+      command: "echo keep",
+    })) as BashResult;
+
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout, "keep\n");
+    assert.equal(result.stderr, "");
   });
 });

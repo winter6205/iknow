@@ -10,7 +10,9 @@ import {
   createEnvIsolation,
   createFsPolicy,
   createNetworkPolicy,
+  createOutputMask,
   createResourceLimits,
+  currentSecretValues,
 } from "../../sandbox/index.js";
 import {
   DEFAULT_MAX_OUTPUT_CODE_POINTS,
@@ -90,10 +92,21 @@ export function createBashTool(
       env: fenceEnv,
       maxOutputCodePoints: DEFAULT_MAX_OUTPUT_CODE_POINTS,
     });
+    // #406 T3:输出遮罩 —— handler return 前对 stdout / stderr 洗一遍。
+    // mask 构造在 handler 内每次现取（registry 值可跨 turn 变化；不模块级
+    // 缓存）。缺席 secretRegistry → 不构造 mask（plan 验收 #2；不扩展
+    // 「缺席仍用 env 三源 mask」）。截断权威在 executor，mask 在 truncation
+    // 之后跑 —— 遮的是已截断的真值，最大遮蔽窗口。
+    const mask =
+      opts?.secretRegistry !== undefined
+        ? createOutputMask(
+            currentSecretValues(process.env, opts.secretRegistry.values())
+          )
+        : undefined;
     return {
       code: result.exitCode,
-      stdout: result.stdout,
-      stderr: result.stderr,
+      stdout: mask ? mask.mask(result.stdout) : result.stdout,
+      stderr: mask ? mask.mask(result.stderr) : result.stderr,
     };
   };
   return Object.freeze({
