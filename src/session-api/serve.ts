@@ -146,8 +146,11 @@ export async function startSessionServe(
     host,
     port: Number.isFinite(port) ? port : 8787,
     contextWindow: env.compress.contextWindow,
-    // Note: serve still ACCEPTS --trace-out (write side via hub). The READ-
-    // side reader is now mounted by `iknow trace` (spec #183 R3).
+    // ADR-0020: serve accepts --trace-out and mounts the READ side too —
+    // `/api/v1/traces*` + `/trace` SPA live on this same server/port.
+    ...(opts?.traceOut !== undefined
+      ? { trace: { traceDir: path.resolve(opts.traceOut) } }
+      : {}),
   });
 
   return { listening, hub };

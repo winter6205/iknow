@@ -1,9 +1,10 @@
 /**
  * Minimal node:http router for Session API + static web UI.
  * 022 T5: nested ApiErrorBody, hub error mapping, GET /sessions list.
- * 183 R3: trace inspection read API was moved to `iknow trace`; this server
- * no longer mounts /api/v1/traces (write-side `--trace-out` on serve/chat/ask
- * remains unchanged).
+ * ADR-0020: the trace inspection read API is MOUNTED in-process (reverses
+ * #183 R3's standalone split): `opts.trace` mounts `/api/v1/traces*` via
+ * traceserver's createTraceRouter + the trace SPA under `/trace`; write-side
+ * `--trace-out` on serve/chat/ask remains unchanged.
  * Static-asset serving extracted to `src/web/serve-static.ts` so traceserver
  * can host its own SPA with the same guards; `resolveDefaultWebRoot` is
  * re-exported below for tests that historically imported it from here.
@@ -15,6 +16,7 @@ import type { SessionStoreError } from "./store/index.js";
 import { parseThinkingOverride } from "./thinking-override.js";
 import type { ApiErrorBody, HealthResponse } from "./contract.js";
 import { getVersion } from "../cli/usage.js";
+import { createTraceRouter } from "../traceserver/serve.js";
 import {
   resolveDefaultWebRoot,
   serveStaticRequest,
@@ -34,6 +36,17 @@ export type SessionHttpServerOptions = {
   /** 上下文窗口大小（token）。缺省 200000（与 loop-engine 默认同源）。
    *  HealthResponse 字段；由 serve.ts 从 loadIknowEnv().compress.contextWindow 透传。 */
   contextWindow?: number;
+  /**
+   * ADR-0020: mount the trace inspection read API in-process. When present,
+   * `/api/v1/traces*` routes (incl. `/api/v1/traces/sessions`) and the
+   * `/trace` SPA become available on this server's port.
+   */
+  trace?: {
+    /** Absolute path to the trace directory (write-side traceOut). */
+    traceDir?: string;
+    /** Per-read byte cap forwarded to the JSONL reader. */
+    maxBytes?: number;
+  };
 };
 
 export type ListeningServer = {
@@ -49,9 +62,22 @@ export function createSessionHttpServer(
   const hub = opts.hub;
   const webRoot = opts.webRoot ?? resolveDefaultWebRoot();
   const contextWindow = opts.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+  // ADR-0020: build the trace router once (per server) when trace mounting
+  // is requested; undefined otherwise keeps handle() dispatch branch-free.
+  const traceRouter =
+    opts.trace !== undefined
+      ? createTraceRouter({
+          ...(opts.trace.traceDir !== undefined
+            ? { traceDir: opts.trace.traceDir }
+            : {}),
+          ...(opts.trace.maxBytes !== undefined
+            ? { maxBytes: opts.trace.maxBytes }
+            : {}),
+        })
+      : undefined;
 
   return http.createServer((req, res) => {
-    void handle({ req, res, hub, webRoot, contextWindow });
+    void handle({ req, res, hub, webRoot, contextWindow, traceRouter });
   });
 }
 
@@ -90,10 +116,15 @@ interface HandleOpts {
   readonly hub: SessionHub;
   readonly webRoot: string;
   readonly contextWindow: number;
+  /** ADR-0020: mounted trace router (undefined = trace not mounted). */
+  readonly traceRouter?: (
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ) => Promise<boolean>;
 }
 
 async function handle(opts: HandleOpts): Promise<void> {
-  const { req, res, hub, webRoot, contextWindow } = opts;
+  const { req, res, hub, webRoot, contextWindow, traceRouter } = opts;
   try {
     const method = (req.method ?? "GET").toUpperCase();
     const url = new URL(
@@ -132,6 +163,23 @@ async function handle(opts: HandleOpts): Promise<void> {
       const id = sessionMatch[1]!;
       const rest = sessionMatch[2] ?? "";
       if (await handleSessionRoute({ method, id, rest, req, res, hub })) return;
+    }
+
+    // ADR-0020 mounted trace subtree: `/api/v1/traces*` read API + `/trace`
+    // SPA. The router maps ValidationError→400 / TraceReadError→500 envelope
+    // internally; handle()'s catch remains the backstop for any escape.
+    if (method === "GET" && traceRouter) {
+      if (await traceRouter(req, res)) return;
+      if (
+        serveStaticRequest({
+          res,
+          webRoot,
+          pathname,
+          fallbackHtml: "trace.html",
+          stripPrefix: "/trace",
+        })
+      )
+        return;
     }
 
     if (
@@ -371,9 +419,10 @@ function sendJson(opts: SendJsonOpts): void {
 
 /**
  * Type guard for the plain-object SessionStoreError discriminated union.
- * Error instances (e.g. traceserver TraceReadError, which also carries a
- * `kind` property) are excluded: store errors are plain objects, never
- * Error subclasses, so a kind collision must not reroute them here.
+ * Error instances are excluded — notably traceserver's TraceReadError (which
+ * also carries a `kind` property) now flows through the mounted trace router
+ * in-process (ADR-0020): store errors are plain objects, never Error
+ * subclasses, so a kind collision must not reroute them here.
  */
 function isSessionStoreError(err: unknown): err is SessionStoreError {
   if (typeof err !== "object" || err === null) return false;
