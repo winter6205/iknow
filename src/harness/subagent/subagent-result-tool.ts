@@ -38,7 +38,7 @@ export function createSubAgentResultTool(
   return Object.freeze({
     name: "subagent_result",
     description:
-      "Poll the status of a sub-agent spawned via spawn_subagent. Returns {status:not_found|running|completed|failed} for the given task_id. not_found: no such task (unknown/expired id). running: sub-agent still executing. completed: returns the full envelope {status:'ok', summary, result, fileRefs?, usage?}. failed: returns {status:'failed', reason, summary}. Sync non-blocking; call it again later to re-poll.",
+      "Poll a sub-agent that was spawned with wait:false (or re-check after a wait:true completion); sync non-blocking, call again later to re-poll. Returns one JSON object with `status` ∈ `not_found` (no such task — unknown or expired id) / `running` / `completed` (carries the full envelope: summary / result / fileRefs / usage) / `failed` (carries `{reason, summary}`).",
     inputSchema: {
       type: "object",
       properties: {

@@ -108,7 +108,7 @@ export function createWebSearchTool(deps?: WebSearchToolDeps): AciToolDef {
   return Object.freeze({
     name: "web_search",
     description:
-      "Search the web and return compact top results with titles, URLs, and snippets. Defaults to a Bing HTML search endpoint; an explicit search_url override is validated against the same SSRF guard. Refuses empty queries, private targets, and endpoints with no results.",
+      "Discover URLs by keyword before reading them with web_fetch. Returns up to max_results (default 5, cap 10) titles / URLs / snippets in a numbered list; defaults to a Bing HTML endpoint — pass search_url to override (still SSRF-validated). Pair with web_fetch on each returned URL.",
     inputSchema: {
       type: "object",
       properties: {

@@ -41,7 +41,7 @@ export function createMemoryRecallTool(deps: MemoryRecallToolDeps): AciToolDef {
   return Object.freeze({
     name: "memory_recall",
     description:
-      "Search the memory library for entries matching a query. Returns a plain string with each hit's title, frontmatter metadata, and body, capped at 20000 characters. Read-only; results travel over the low-trust tool_result channel.",
+      "Look up prior knowledge (conventions, contracts, project notes) at the start of a task or when a recurring question comes up; pair with memory_save to capture a new fact worth keeping. Returns one block per hit: a `### title` line, metadata lines, a blank line, then the body (limit 1..50, default 10), self-capped at 20000 chars; pure read-only over the per-conversation memory library.",
     inputSchema: {
       type: "object",
       properties: {

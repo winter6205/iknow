@@ -99,7 +99,7 @@ export function createBashTool(
   return Object.freeze({
     name: "bash",
     description:
-      "Execute a bash command inside the bwrap sandbox in the configured working directory and return its exit code, stdout, and stderr. Dangerous patterns and sensitive paths are rejected; other commands go through the normal permission flow.",
+      "Run shell commands inside the bwrap sandbox for builds, scripts, or one-shot operations without a dedicated tool; pair with read_file / grep / glob / edit_file / write_file for file work inside the fence. Returns {code, stdout, stderr}; stdout/stderr truncated at 12000 code points per stream. Hard-walls reject obvious destructive patterns and sensitive-path targets before spawn; non-hard-wall commands go through the normal permission flow. Long-running processes that need to outlive the call are killed when the build-tier 5-minute timeout fires, and listeners inside the fence are not reachable from the host because bwrap is network-isolated.",
     inputSchema: {
       type: "object",
       properties: { command: { type: "string" } },

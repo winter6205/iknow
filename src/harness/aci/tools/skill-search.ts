@@ -41,7 +41,7 @@ export function createSkillSearchTool(deps: SkillSearchToolDeps): AciToolDef {
   return Object.freeze({
     name: "skill_search",
     description:
-      "Search installed skills by keyword (case-insensitive substring on name/description). Returns one JSON object {name, description} per line; returns '(no matches)' when nothing matches. Disabled and undocumented skills are excluded.",
+      "Discover available skills by keyword before loading the chosen one via skill. Returns one JSON object `{name, description}` per line (case-insensitive substring on name / description); empty query or no match → `(no matches)`; disabled and undocumented skills are excluded.",
     inputSchema: {
       type: "object",
       properties: { query: { type: "string" } },

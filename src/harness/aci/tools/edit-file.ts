@@ -161,7 +161,7 @@ export function createEditFileTool(
   return Object.freeze({
     name: TOOL_NAME,
     description:
-      "Replace old_str with new_str in a file under root (linted, split-join, no regex). Set replace_all=true to replace every occurrence.",
+      "Apply a surgical in-place edit to an existing file when you have the exact `old_str` to anchor on; pair with read_file to confirm current contents before editing. Replaces old_str with new_str via split-join (no regex semantics — `$`/`&` literals pass through unchanged); lint(new_str) rejects unbalanced patches before any write. Default replace_all=false — the file must contain old_str exactly once; set replace_all=true to replace every occurrence.",
     inputSchema: {
       type: "object",
       properties: {

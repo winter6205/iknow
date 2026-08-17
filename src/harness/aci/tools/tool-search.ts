@@ -107,7 +107,7 @@ export function createToolSearchTool(deps: ToolSearchDeps): AciToolDef {
   return Object.freeze({
     name: "tool_search",
     description:
-      'Search the registry of all registered iknow tools, returns ToolDef JSON describing each match. use to find tools beyond the current prompt: pass a non-empty `query` to match tool name or description by case-insensitive substring, or `names` to retrieve exact tool names. Returns one JSON object (name, description, inputSchema) per line; returns "(no matches)" when nothing matches.',
+      "Discover tools beyond the current prompt — pass `query` (case-insensitive substring on tool name / description) or `names` (exact list) to pull ToolDef JSON. Returns one JSON object per line `(name, description, inputSchema)`; empty input or no match → `(no matches)`. Side effect: marks retrieved tools as discovered so they surface in the next prompt.",
     inputSchema: {
       type: "object",
       properties: {

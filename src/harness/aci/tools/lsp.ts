@@ -166,6 +166,10 @@ interface OperationSpec {
   readonly name: string;
   readonly method: string;
   readonly schema: Record<string, unknown>;
+  /** #483 D9: per-operation description — each of the 7 positionOps gets its
+   *  own sentence instead of sharing a generic template, so the model prompt
+   *  sees positive-trigger phrasing tuned to the operation. */
+  readonly description: string;
   /** 把 ajv-validated input 映射到 LSP request params。 */
   readonly buildParams: (input: PositionInput | FileOnlyInput) => unknown;
 }
@@ -182,7 +186,7 @@ function makeOperationTool(ctx: LspCtx, spec: OperationSpec): AciToolDef {
   const validate = compileValidator(spec.schema, spec.name);
   return Object.freeze({
     name: spec.name,
-    description: `LSP operation ${spec.method}. Read-only symbol lookup; 1-based line, 0-based character.`,
+    description: spec.description,
     inputSchema: spec.schema,
     aci: LSP_ACI_META,
     handler: async (
@@ -223,12 +227,13 @@ function makeOperationTool(ctx: LspCtx, spec: OperationSpec): AciToolDef {
 function makeCallHierarchyCallTool(
   ctx: LspCtx,
   name: string,
-  method: string
+  method: string,
+  description: string
 ): AciToolDef {
   const validate = compileValidator(POSITION_SCHEMA, name);
   return Object.freeze({
     name,
-    description: `LSP operation ${method}. Multi-step: resolves call hierarchy items via textDocument/prepareCallHierarchy first, then forwards ${method} with the first item.`,
+    description,
     inputSchema: POSITION_SCHEMA,
     aci: LSP_ACI_META,
     handler: async (
@@ -292,12 +297,11 @@ function extractCallHierarchyItems(prepared: unknown): ReadonlyArray<unknown> {
  *
  * 输出：纯字符串（契约 Y1）。
  */
-function makeDiagnosticsTool(ctx: LspCtx): AciToolDef {
+function makeDiagnosticsTool(ctx: LspCtx, description: string): AciToolDef {
   const validate = compileValidator(FILE_ONLY_SCHEMA, "lsp_diagnostics");
   return Object.freeze({
     name: "lsp_diagnostics",
-    description:
-      "Read push LSP diagnostics for a file (textDocument/publishDiagnostics, latest-wins). Filters severity 0 (Hint); caps at 20 entries per file. Returns a plain-text summary.",
+    description,
     inputSchema: FILE_ONLY_SCHEMA,
     aci: LSP_ACI_META,
     handler: async (input: unknown): Promise<unknown> => {
@@ -395,6 +399,8 @@ export function createLspToolSet(ctx: LspCtx): ReadonlyArray<AciToolDef> {
       name: "lsp_definition",
       method: "textDocument/definition",
       schema: POSITION_SCHEMA,
+      description:
+        "Resolve the symbol at a 1-based line, 0-based character position to its declaration; pair with lsp_references to also see usages of the same symbol. Returns the LSP response as a JSON string.",
       buildParams: (input) =>
         positionParams(
           (input as PositionInput).file,
@@ -406,6 +412,8 @@ export function createLspToolSet(ctx: LspCtx): ReadonlyArray<AciToolDef> {
       name: "lsp_references",
       method: "textDocument/references",
       schema: POSITION_SCHEMA,
+      description:
+        "List every reference (across the project) to the symbol at a 1-based line, 0-based character position; the declaration is included when present. Pair with lsp_definition to find where the symbol is declared. Returns the LSP response as a JSON string.",
       buildParams: (input) => {
         const p = input as PositionInput;
         return referencesParams(p.file, p.line, p.character);
@@ -415,6 +423,8 @@ export function createLspToolSet(ctx: LspCtx): ReadonlyArray<AciToolDef> {
       name: "lsp_hover",
       method: "textDocument/hover",
       schema: POSITION_SCHEMA,
+      description:
+        "Get the type / signature / doc comment at a 1-based line, 0-based character position; pair with lsp_definition to jump to the declaration. Returns the LSP response as a JSON string.",
       buildParams: (input) => {
         const p = input as PositionInput;
         return positionParams(p.file, p.line, p.character);
@@ -424,6 +434,8 @@ export function createLspToolSet(ctx: LspCtx): ReadonlyArray<AciToolDef> {
       name: "lsp_document_symbol",
       method: "textDocument/documentSymbol",
       schema: FILE_ONLY_SCHEMA,
+      description:
+        "List all symbols in a single file (functions, classes, variables, …) by file path; pair with lsp_workspace_symbol to find symbols across the whole project when the file is unknown. Returns the LSP response as a JSON string.",
       buildParams: (input) =>
         documentSymbolParams((input as FileOnlyInput).file),
     },
@@ -431,12 +443,16 @@ export function createLspToolSet(ctx: LspCtx): ReadonlyArray<AciToolDef> {
       name: "lsp_workspace_symbol",
       method: "workspace/symbol",
       schema: FILE_ONLY_SCHEMA,
+      description:
+        "Search symbols across the whole workspace by query string (empty query = all symbols in the current workspace/symbol snapshot); pair with lsp_document_symbol to scope to a single file. Returns the LSP response as a JSON string.",
       buildParams: () => workspaceSymbolParams(),
     },
     {
       name: "lsp_go_to_implementation",
       method: "textDocument/implementation",
       schema: POSITION_SCHEMA,
+      description:
+        "Resolve interface / abstract-method call sites at a 1-based line, 0-based character position to concrete implementations; pair with lsp_references for the full usage set. Returns the LSP response as a JSON string.",
       buildParams: (input) => {
         const p = input as PositionInput;
         return positionParams(p.file, p.line, p.character);
@@ -446,6 +462,8 @@ export function createLspToolSet(ctx: LspCtx): ReadonlyArray<AciToolDef> {
       name: "lsp_prepare_call_hierarchy",
       method: "textDocument/prepareCallHierarchy",
       schema: POSITION_SCHEMA,
+      description:
+        "Resolve a function / method at a 1-based line, 0-based character position to a call-hierarchy item; pair with lsp_incoming_calls / lsp_outgoing_calls for callers / callees of the resolved item. Returns the LSP response (a list of items) as a JSON string.",
       buildParams: (input) => {
         const p = input as PositionInput;
         return positionParams(p.file, p.line, p.character);
@@ -460,16 +478,23 @@ export function createLspToolSet(ctx: LspCtx): ReadonlyArray<AciToolDef> {
     makeCallHierarchyCallTool(
       ctx,
       "lsp_incoming_calls",
-      "callHierarchy/incomingCalls"
+      "callHierarchy/incomingCalls",
+      "List functions / methods that call the function at a 1-based line, 0-based character position (multi-step: prepareCallHierarchy first, then incomingCalls on the first item). Pair with lsp_outgoing_calls for the reverse direction. Returns the LSP response as a JSON string."
     )
   );
   tools.push(
     makeCallHierarchyCallTool(
       ctx,
       "lsp_outgoing_calls",
-      "callHierarchy/outgoingCalls"
+      "callHierarchy/outgoingCalls",
+      "List functions / methods called by the function at a 1-based line, 0-based character position (multi-step: prepareCallHierarchy first, then outgoingCalls on the first item). Pair with lsp_incoming_calls for the reverse direction. Returns the LSP response as a JSON string."
     )
   );
-  tools.push(makeDiagnosticsTool(ctx));
+  tools.push(
+    makeDiagnosticsTool(
+      ctx,
+      "Read the latest push diagnostics for a file (textDocument/publishDiagnostics, latest-wins) — useful before running builds / tests to see in-editor errors. Filters severity 0 (Hint); caps at 20 entries per file, appending an `...(N more issue(s) truncated, total M)` footer when over the cap. Returns a plain-text summary wrapped in a `<diagnostics file=...>` tag. Pair with read_file offset/limit on the lines referenced in the entries."
+    )
+  );
   return Object.freeze(tools);
 }

@@ -142,7 +142,7 @@ export function createWriteFileTool(root: string): AciToolDef {
   return Object.freeze({
     name: TOOL_NAME,
     description:
-      "Create or completely overwrite a UTF-8 file under root. Parent directories are created by default and the file is written verbatim.",
+      "Create a new file or fully overwrite an existing one inside the workspace root; prefer edit_file for surgical changes to an existing file. Writes verbatim UTF-8 (no template processing); parent directories auto-created unless create_directories=false. Writes outside the workspace root are out of scope.",
     inputSchema: {
       type: "object",
       properties: {

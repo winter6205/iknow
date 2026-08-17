@@ -87,7 +87,7 @@ export function createWebFetchTool(deps?: WebFetchToolDeps): AciToolDef {
   return Object.freeze({
     name: "web_fetch",
     description:
-      "Fetch one web page and return compact readable text. Returns the final URL, HTTP status, content type, and the page body (HTML converted to plain text), wrapped in an untrusted-content banner. Refuses non-http(s) URLs, private/internal targets, and non-2xx responses.",
+      "Fetch a single web page when you have the URL (from web_search or the user); for bulk or interactive flows use a browser instead. Returns the final URL, HTTP status, content type, and the body (HTML→plain text) wrapped in an untrusted-content banner; max_chars 500..50000 (default 12000) — body is truncated at the executor (contract X). SSRF guard rejects non-http(s) URLs, private/internal targets, and non-2xx responses; redirects validated hop-by-hop up to 5 hops.",
     inputSchema: {
       type: "object",
       properties: {

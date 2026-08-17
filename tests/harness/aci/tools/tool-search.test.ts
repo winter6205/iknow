@@ -252,11 +252,12 @@ describe("tool_search — ajv input 校验 (S4 / D9)", () => {
   });
 
   it("schema 字段描述包含 spec 要求的两个英文短语", () => {
-    // D7:description 必须含 "returns ToolDef JSON" +
-    // "use to find tools beyond the current prompt"。
+    // #483 D9: description must contain "pull ToolDef JSON" +
+    // "Discover tools beyond the current prompt" (replaces D7 "returns
+    // ToolDef JSON" / "use to find tools beyond the current prompt").
     const { toolSearch } = buildToolSearchOverFixture([makeTool("x")]);
     const desc = toolSearch.description;
-    expect(desc).toContain("returns ToolDef JSON");
-    expect(desc).toContain("use to find tools beyond the current prompt");
+    expect(desc).toContain("pull ToolDef JSON");
+    expect(desc).toContain("Discover tools beyond the current prompt");
   });
 });

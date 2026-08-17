@@ -99,7 +99,7 @@ export function createGrepTool(root: string, deps?: GrepToolDeps): AciToolDef {
   return Object.freeze({
     name: "grep",
     description:
-      "Search file contents under a workspace directory using a regular expression. Returns `relative_path:line:content` lines (relative to the workspace root). Case-sensitive by default; set ignoreCase=true to disable. Falls back to a Node scan if ripgrep is unavailable.",
+      "Search file contents under a workspace directory using a regular expression; prefer this over reading whole files when the search root or query isn't pinpointed. Returns `relative_path:line:content` lines (relative to the workspace root), capped at `limit` (default 200, hard cap 2000); case-sensitive by default — set ignoreCase=true to disable. Falls back to a Node scan if ripgrep is unavailable. Pair with read_file offset/limit on the matched region, or with glob first to pick a tighter search root.",
     inputSchema: {
       type: "object",
       properties: {

@@ -66,7 +66,7 @@ export function createReadFileTool(
   return Object.freeze({
     name: "read_file",
     description:
-      "Read a slice of a UTF-8 text file with 1-based line numbers. Stateless; each call must supply an offset if it needs to continue. Refuses files >1MB (use grep to locate the region first) and binary files (NUL byte).",
+      "Read a slice of a UTF-8 text file starting at a 0-based offset (default window 200, hard cap 2000); pair with grep to locate the region in large files and with glob to discover candidate paths first. Returns each line as a 1-based line number right-padded to 6 chars, a tab, then the line text; stateless — each call must supply offset to continue. Files >1MB are out of scope (locate with grep and read precisely with offset/limit); binary files (NUL byte) are out of scope.",
     inputSchema: {
       type: "object",
       properties: {

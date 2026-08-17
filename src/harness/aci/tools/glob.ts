@@ -60,7 +60,7 @@ export function createGlobTool(root: string, deps?: GlobToolDeps): AciToolDef {
   return {
     name: "glob",
     description:
-      "Find files under a workspace root by glob pattern. Returns up to `limit` sorted relative paths, one per line. Empty pattern is rejected.",
+      "Discover files by glob pattern under a workspace root before opening them with read_file / edit_file / write_file; supports `*`, `**`, `?` segments (rg-compatible when rg is on PATH). Returns up to `limit` sorted root-relative paths, one per line; default 200, hard cap 5000. Pair with grep to scan content within the matched paths.",
     inputSchema: {
       type: "object",
       properties: {

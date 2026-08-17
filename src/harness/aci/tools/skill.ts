@@ -37,7 +37,7 @@ export function createSkillTool(deps: SkillToolDeps): AciToolDef {
   return Object.freeze({
     name: "skill",
     description:
-      "Load a skill's body by exact name. Use after skill_search to pick a skill from the available list. Pass the skill name (not a query). Returns the skill's body content, or a hint pointing back to skill_search when the name is unknown.",
+      "Load the full body of a skill you've already chosen via skill_search; pair with skill_search first to pick the right name. Returns the assembled skill body (frontmatter stripped, `Base directory` line, sampled `<skill_files>`), or a hint pointing back to skill_search when the name is unknown.",
     inputSchema: {
       type: "object",
       properties: { name: { type: "string" } },

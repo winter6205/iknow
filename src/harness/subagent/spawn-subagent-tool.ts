@@ -51,7 +51,7 @@ export function createSpawnSubAgentTool(
   return Object.freeze({
     name: "spawn_subagent",
     description:
-      "Use proactively for multi-step exploration, independent verification, or parallelizable work. The call blocks until the sub-agent finishes and returns its full result directly — just call it like any other tool. For independent tasks, issue multiple spawn_subagent calls in one turn to run them in parallel. Pass wait:false to run asynchronously (returns task_id immediately; poll with subagent_result). v1 forbids nested spawn_subagent.",
+      "Delegate multi-step exploration, independent verification, or parallelizable work to a fresh sub-agent that inherits the parent's tool surface minus `spawn_subagent`. Default wait:true — the call blocks until the sub-agent finishes and returns its full result envelope (timeout 5 min default; override via timeoutMs). Issue multiple `spawn_subagent` calls in one turn to run independent tasks in parallel. Pass wait:false to run fire-and-forget: returns `{task_id}` immediately, poll later via subagent_result. Sub-agent v1 caps at one level — nested `spawn_subagent` inside a child agent returns ToolExecutionError.",
     inputSchema: {
       type: "object",
       properties: {

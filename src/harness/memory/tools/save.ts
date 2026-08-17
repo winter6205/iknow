@@ -55,7 +55,7 @@ export function createMemorySaveTool(deps: MemorySaveToolDeps): AciToolDef {
   return Object.freeze({
     name: "memory_save",
     description:
-      "Persist a memory entry into the project memory library. Entries must use affirmative phrasing — drafts containing negative-form words or phrasing are rejected before any disk mutation. Writes are atomic (tmp + rename) so concurrent saves cannot corrupt the directory.",
+      "Capture a fact worth keeping across sessions (convention, decision, gotcha) after confirming it once; pair with memory_recall first to spot duplicates. Persists `title`/`body`/`type`/`importance` as an atomic file under the per-conversation memory library; entries must use affirmative phrasing (negative-form words reject before any disk mutation); importance 1..5 (default 1).",
     inputSchema: {
       type: "object",
       properties: {
