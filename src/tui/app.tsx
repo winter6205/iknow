@@ -444,9 +444,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const [streamDraft, setStreamDraft] = useState<StreamDraft | null>(null);
   const [draftsMasked, setDraftsMasked] = useState<string>("");
   const [thinkingDraftMasked, setThinkingDraftMasked] = useState<string>("");
-  // 流式 thinking 经过秒数（折叠面板「思考中… N 秒」）。streamDraft 自身
-  // 只在 delta 到达时 notify（不会每秒推），故加 1Hz interval 主动拉秒数。
-  const [thinkingSeconds, setThinkingSeconds] = useState(0);
   // 最近一次 turn 的 thinking 最终秒数（turn 结束快照）。供历史消息末条
   // assistant 折叠行显示「思考了 N 秒」留存。**未按会话 key**：仅显示末条
   // assistant 的留存，且与 mode 行 Crunched 同 turn 写入（同 runTurnOnce
@@ -454,15 +451,15 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // 的 thinking 秒数（已知限制，未做归属校验，与原实现一致）。
   const [lastThinkingSeconds, setLastThinkingSeconds] = useState(0);
   // thinking 冻结秒数（answer 开始时刻快照）：思考结束、进入 answer 输出后，
-  // 折叠行从「思考中… N 秒」切「思考了 N 秒」。存 **ref** —— tick 是异步
+  // 折叠行从「思考中…」切「思考了 N 秒」。存 **ref** —— tick 是异步
   // interval，runTurnOnce 的 finally 读的是旧闭包（stale closure 会读到 0）；
   // ref 是可变引用，finally 永远读到最新冻结值。首次冻结后不再覆盖（防
-  // answer 阶段虚涨），由 runTurnOnce 入口清 0。计时起点 = turn 起点
-  // （markThinkingStart），冻结值含「turn 启动 → 首 delta」的等待时段
-  // （2026-08-14 计时同步修复）。
+  // answer 阶段虚涨），由 runTurnOnce 入口清 0。计时起点 = 首条
+  // thinking_delta（惰性打点，stream-draft 内部），冻结值 = 纯思考时长
+  // （2026-08-14 语义修正，不含 turn 启动等待时段）。
   const thinkingFrozenRef = useRef(0);
   // 渲染用镜像（ref 不触发重渲染，UI 需 state）。frozen>0 时 ChatView 显示
-  // 「思考了 N 秒」，否则按 thinkingSeconds 走「思考中… N 秒」。
+  // 「思考了 N 秒」，否则按静态「思考中…」（无实时秒数，PR 1 后）。
   const [thinkingFrozenSeconds, setThinkingFrozenSeconds] = useState(0);
   // 运行时长统计（mode 行右侧实时秒数）：turn 开始打点、运行中 1Hz 递增、
   // turn 结束冻结。runStartedAt 非空 = 运行中（mode 行显示 `· Xs`）；
@@ -478,7 +475,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     if (streamDraft === null) {
       setDraftsMasked("");
       setThinkingDraftMasked("");
-      setThinkingSeconds(0);
       setThinkingFrozenSeconds(0);
       return undefined;
     }
@@ -487,36 +483,23 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       startTransition(() => {
         setDraftsMasked(streamDraft.masked());
         setThinkingDraftMasked(streamDraft.thinkingMasked());
-        // 思考秒数 state 只在 thinking 阶段写入：answer 已开始（masked 非空）
-        // 时不再 setThinkingSeconds —— 避免 answer 阶段 state 无意义虚涨
-        // （frozen>0 优先渲染「思考了 N 秒」，虚涨的 thinkingSeconds 未来若
-        // frozen 失效会导致跳变，2026-08-14 修复）。
-        if (streamDraft.masked().length === 0) {
-          setThinkingSeconds(streamDraft.thinkingSeconds());
-        }
       });
     });
     setDraftsMasked(streamDraft.masked());
     setThinkingDraftMasked(streamDraft.thinkingMasked());
-    // 与 subscribe 同纪律：仅在 thinking 阶段（answer 未开始）写入思考秒数，
-    // 避免 answer 阶段 state 虚涨。
-    if (streamDraft.masked().length === 0) {
-      setThinkingSeconds(streamDraft.thinkingSeconds());
-    }
-    // 秒数每秒变：仅 thinking 进行中需要 tick（thinkingDraftMasked 非空）。
-    // answer 已开始（masked 非空）→ thinking 阶段结束 → 冻结秒数一次（ref，
-    // 不再覆盖，防 answer 阶段虚涨）。
+    // tick 现仅负责 answer 开始时刻的冻结快照：thinking 进行中（thinkingRaw
+    // 非空）→ answer 已开始（masked 非空）→ 冻结秒数一次（ref，不再覆盖，
+    // 防 answer 阶段虚涨）。流式折叠行无实时秒数（PR 1 后 formatThinkingLive
+    // 恒 `思考中…`），故不再有每秒递增的分支。
     const tick = setInterval(() => {
-      if (streamDraft.thinkingRaw().length > 0) {
-        if (streamDraft.masked().length > 0) {
-          if (thinkingFrozenRef.current === 0) {
-            const frozen = streamDraft.thinkingSeconds();
-            thinkingFrozenRef.current = frozen;
-            setThinkingFrozenSeconds(frozen);
-          }
-        } else {
-          setThinkingSeconds(streamDraft.thinkingSeconds());
-        }
+      if (
+        streamDraft.thinkingRaw().length > 0 &&
+        streamDraft.masked().length > 0 &&
+        thinkingFrozenRef.current === 0
+      ) {
+        const frozen = streamDraft.thinkingSeconds();
+        thinkingFrozenRef.current = frozen;
+        setThinkingFrozenSeconds(frozen);
       }
     }, 1000);
     return () => {
@@ -921,12 +904,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     const draft = createStreamDraft();
     setStreamDraft(draft);
     // 运行时长打点：turn 起始时刻（mode 行统计段「运行中」实时递增用）。
+    // 注意与思考秒数区分：运行时长 = turn 起点 → turn 结束（含等待 / 工具），
+    // 思考秒数由 stream-draft 首条 thinking_delta 惰性打点起算（纯思考时长，
+    // 不含 turn 启动等待 —— 2026-08-14 语义修正，见 stream-draft.ts 注释）。
     const startedAt = Date.now();
-    // 思考计时起点同步（2026-08-14）：turn 起点即打点 —— 思考秒数含「turn
-    // 启动 → 首条 thinking_delta」的等待思考时段（用户反馈「思考时不同步
-    // 计时，是之后延迟计时的」）。首条 thinking_delta 的惰性打点保留为兜底
-    // （历史消息折叠行 / 未走 app 层的路径）。
-    draft.markThinkingStart(startedAt);
     setRunStartedAt(startedAt);
     setRunElapsed(0);
     // 本 turn 独立 thinking 冻结会话：清 ref（tick 首次冻结时重写）。
@@ -1706,7 +1687,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             rows={viewportRows}
             draftsMasked={draftsMasked}
             thinkingDraftMasked={thinkingDraftMasked}
-            thinkingSeconds={thinkingSeconds}
             lastThinkingSeconds={lastThinkingSeconds}
             thinkingFrozenSeconds={thinkingFrozenSeconds}
             liveToolLines={

@@ -9,8 +9,9 @@
  *  - message-blocks.tsx 历史折叠行旧文案 = `思考了 N 秒` / 纯 `[思考]`
  *    （秒数替换 [思考] 标记）。
  * 本模块把两处收敛到同一纯函数，从源头统一：`思考了 N 秒` 本身即带语义，
- * 不再叠加 `[思考]` 前缀；子秒 / 无秒数时回落 `[思考]`（历史）或 `思考中…`
- * （流式）。
+ * 不再叠加 `[思考]` 前缀；子秒 / 无秒数时回落 `[思考]`（历史）。
+ * 流式行不再叠加实时秒数（恒 `思考中…`）—— 思考时长由事后 frozen 摘要
+ * `思考了 N 秒` 承担，避免与 mode 行运行时长视觉重复 + 语义混淆。
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -38,20 +39,7 @@ describe("formatThinkingFold（历史折叠行文案）", () => {
 });
 
 describe("formatThinkingLive（流式折叠行文案）", () => {
-  test("seconds > 0 → `思考中… N 秒`（不叠加 [思考] 前缀）", () => {
-    expect(formatThinkingLive(7)).toBe("思考中… 7 秒");
-    expect(formatThinkingLive(5)).toBe("思考中… 5 秒");
-  });
-
-  test("seconds === 0 → `思考中…`（子秒 thinking 不显 0 秒）", () => {
-    expect(formatThinkingLive(0)).toBe("思考中…");
-  });
-
-  test("undefined → `思考中…`", () => {
-    expect(formatThinkingLive(undefined)).toBe("思考中…");
-  });
-
-  test("负值兜底 → `思考中…`", () => {
-    expect(formatThinkingLive(-1)).toBe("思考中…");
+  test("恒为 `思考中…`（实时秒数已下线 — 思考时长由事后 frozen 摘要承担）", () => {
+    expect(formatThinkingLive()).toBe("思考中…");
   });
 });

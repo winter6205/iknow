@@ -419,11 +419,7 @@ describe("session-state: seedInputHistory（会话恢复投影输入历史）", 
       msg("答二", "assistant"),
       msg("第三问"),
     ];
-    expect(seedInputHistory(messages)).toEqual([
-      "第一问",
-      "第二问",
-      "第三问",
-    ]);
+    expect(seedInputHistory(messages)).toEqual(["第一问", "第二问", "第三问"]);
   });
 });
 

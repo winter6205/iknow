@@ -419,10 +419,7 @@ describe("Tab 补全接线：hint 选中项 + 三态 slashComplete（app.tsx onT
 
     await app.typeText("/q");
     // 唯一候选 quit：hint 1 份 /quit（输入框还是 /q）。
-    await untilFrame(
-      app.setup,
-      (f) => countOccurrences(f, "/quit") === 1
-    );
+    await untilFrame(app.setup, (f) => countOccurrences(f, "/quit") === 1);
 
     await app.pressTab();
     // 补全 "/quit "：输入框多 1 份 → 共 2 份。

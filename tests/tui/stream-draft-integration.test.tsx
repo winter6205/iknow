@@ -305,12 +305,15 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     await app.destroy();
   }, 30_000);
 
-  test("计时同步：思考秒数含 turn 启动 → 首 thinking_delta 的等待时段（app 层 markThinkingStart）", async () => {
-    // 场景：请求发出后等待首 thinking_delta 的「等待思考」时段也应计入思考秒数。
-    // app 层在 runTurnOnce 入口对 streamDraft 调用 markThinkingStart(turn 起点)，
-    // 而非等首条 thinking_delta 惰性打点。本测用内联 adapter：turn 起点
-    // markThinkingStart 打点 → 延迟 2600ms → 发出 thinking_delta → 再延迟 1000ms
-    // → 返回。期望：thinking 面板折叠行出现时（frozen 快照 ≥3s），已包含等待时段。
+  test("纯思考时长：思考秒数不含 turn 启动 → 首 thinking_delta 等待时段（惰性打点）", async () => {
+    // 场景：请求发出后等待首 thinking_delta 的「等待思考」时段**不计入**思考
+    // 秒数。计时起点 = 首条 thinking_delta 惰性打点（唯一来源，2026-08-14）——
+    // 思考秒数 = 纯思考时长（首 delta → answer 开始）。用户澄清「运行时长并
+    // 不是思考时间」，等待时段由 app 层 mode 行 / `Crunched for X` 统计。
+    // 本测用内联 adapter：延迟 2600ms（等待时段）→ 发出 thinking_delta → 再
+    // 延迟 1500ms → 返回。期望：turn 完成后的折叠行留存秒数 ≈1（纯思考时长，
+    // 不含等待 2.6s；旧 turn 起点打点语义会 ≥4）。1500ms 窗口比 1000ms 加宽
+    // floor 边界余量，降低 CI 时钟抖动下的 flake 概率。
     const thinkingAdapter: ModelAdapter = {
       async step(
         _state: LoopState,
@@ -325,7 +328,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
           throw new DOMException("This operation was aborted", "AbortError");
         }
         request.onStream?.({ type: "thinking_delta", text: "等待后思考…" });
-        await abortableDelay(1000, signal);
+        await abortableDelay(1500, signal);
         if (signal?.aborted) {
           throw new DOMException("This operation was aborted", "AbortError");
         }
@@ -360,30 +363,30 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     await app.typeText("hi");
     await app.pressEnter();
 
-    // turn 完成后历史折叠行留存秒数 N≥3（turn 起点 → thinking_delta 等待
-    // 2.6s + delta 后 1s）。若计时从首 delta 惰性打点，N 只会是 ≥1。
+    // turn 完成后历史折叠行留存秒数 ≈1（首 delta 惰性打点起算，纯思考时长
+    // 1500ms；等待 2.6s 不计入）。CI 抖动容忍到 2；旧 turn 起点打点语义
+    // 会 ≥4 —— `[12]` 即证明等待时段已被排除。
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
     await untilFrame(
       app.setup,
-      (f) => /思考了 [3-9]\d* 秒/.test(f),
+      (f) => /思考了 [12] 秒/.test(f),
       8000,
-      "thinking-timing-synced"
+      "thinking-pure-duration"
     );
 
     await app.destroy();
   }, 30_000);
 
-  test("markThinkingStart 后 thinkingSeconds() 基于打点时刻计算（含等待时段）", async () => {
-    // 单元级集成：createStreamDraft + markThinkingStart 直接验证计时起点 =
-    // turn 起点（非首 delta 时刻）。8000ms 后秒数 ≥8（等待时段计入）。
+  test("首 thinking_delta 惰性打点：thinkingSeconds() 基于首 delta 时刻计算", async () => {
+    // 单元级集成：createStreamDraft 直接验证计时起点 = 首条 thinking_delta
+    // 时刻（惰性打点，无 turn 起点显式打点通道）。8000ms 后秒数 =8（纯思考
+    // 时长，不含 turn 启动等待）。`Date.now()` 于 append 之后求值 → 恒晚于
+    // 打点时刻，elapsed ≥ 8000ms 成立，断言确定性成立。
     const draft = createStreamDraft();
-    const t0 = Date.now();
-    draft.markThinkingStart(t0);
     draft.append({ type: "thinking_delta", text: "想" });
-    // 打点 8s 后（思考仍在进行，未 reset）→ thinkingSeconds ≥8。
     expect(draft.thinkingSeconds()).toBe(0); // 刚打点未满 1s
-    expect(draft.thinkingSeconds(t0 + 8000)).toBe(8);
-    expect(draft.thinkingSeconds(t0 + 8_500)).toBe(8);
+    expect(draft.thinkingSeconds(Date.now() + 8000)).toBe(8);
+    expect(draft.thinkingSeconds(Date.now() + 8_500)).toBe(8);
     // reset → 清零。
     draft.reset();
     expect(draft.thinkingSeconds()).toBe(0);

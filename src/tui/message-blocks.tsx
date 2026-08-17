@@ -66,14 +66,14 @@ import { formatThinkingFold } from "./think-fold.js";
 type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
 
 /** tool_use 摘要行：`[运行中]|[完成]|[失败] name · detail`。
- *  完成态 bash 追加 `，ran N command(s)`（T4）：runCount = 该 assistant 消息内
- *  同名工具调用次数（MessageBlocks 整消息一次聚合），缺省 0 → 无后缀。
+ *  2026-08-14：不再拼 `，ran N command(s)` 后缀 —— 工具计数只由
+ *  ThinkingSummary（有秒数时）统一汇总一次（`思考了 N 秒 · ran M …`），
+ *  避免「思考折叠行 + 工具行」双处重复计数造成结束状态混乱观感。
  *  cols 收口：单行不折（tool-summary 视觉宽度）。 */
 function ToolSummaryRow(props: {
   readonly tu: ToolUseBlock;
   readonly statusMap: ReadonlyMap<string, boolean>;
   readonly cols: number;
-  readonly runCount?: number;
 }): ReactNode {
   const { detail } = summarizeToolCall(
     props.tu.name,
@@ -83,15 +83,10 @@ function ToolSummaryRow(props: {
   const hasResult = props.statusMap.has(props.tu.id);
   const failed = props.statusMap.get(props.tu.id) === true;
   const mark = !hasResult ? "[运行中]" : failed ? "[失败]" : "[完成]";
-  const ran =
-    hasResult && !failed && props.tu.name === "bash"
-      ? formatRanSuffix(props.runCount ?? 0)
-      : "";
   const fg = failed ? tuiPalette.error : tuiPalette.dim;
   return (
     <text fg={fg} wrapMode="none">
       {mark} {props.tu.name} · {detail}
-      {ran}
     </text>
   );
 }
@@ -121,9 +116,12 @@ function ToolPreviewRows(props: {
 
 /** 折叠态 thinking 摘要行（dim）。2026-08-13 用户反馈：「思考了几秒」直接
  *  替换 `[思考]` 标记，不要叠加 `[思考] 思考了 3 秒`。规则：
- *  - 有时间（流式面板）→ `思考了 {N} 秒` + 可选 `· ran {M} shell command(s)`；
- *  - 无时间（历史消息）→ `[思考]` + 可选 `· ran {M} shell command(s)`，避免
- *    伪精度「思考了 0 秒」；
+ *  - 有时间（流式面板 / 末条 assistant 留存）→ `思考了 {N} 秒` + 可选
+ *    `· ran {M} shell command(s)` —— turn 级统一摘要（对齐参考样式
+ *    `Thought for 3s, ran 1 shell command`）；
+ *  - 无时间（历史消息 / 子秒）→ 仅 `[思考]` 折叠标记，**不**拼 ran-N ——
+ *    工具计数只在此处（有秒数时）汇总一次，避免「思考行 + 工具行」双处
+ *    重复计数造成结束状态混乱观感（2026-08-14 用户反馈）；
  *  - 工具计数英文（与参考图 `ran 2 shell commands` 一致），思考部分全中文；
  *  - bash 数 = 0 → 省略 `· ran …` 段。
  *
@@ -134,9 +132,12 @@ function ThinkingSummary(props: {
   readonly cols: number;
   readonly thinkingSeconds?: number;
 }): ReactNode {
+  const hasSeconds = (props.thinkingSeconds ?? 0) > 0;
   const bashCount = countBashCalls(props.message);
   const ranSuffix =
-    bashCount > 0 ? formatRanSuffix(bashCount).replace(/^，/, " · ") : "";
+    hasSeconds && bashCount > 0
+      ? formatRanSuffix(bashCount).replace(/^，/, " · ")
+      : "";
   const text = `${formatThinkingFold(props.thinkingSeconds)}${ranSuffix}`;
   return (
     <text fg={tuiPalette.dim} wrapMode="none">
@@ -222,8 +223,6 @@ export function MessageBlocks(props: {
   }
   // assistant
   const summary = summarizeThinkingContent(message.content);
-  // T4：该 assistant 消息内 bash tool_use 总数（聚合 ran N 数据源），整消息算一次。
-  const bashRunCount = countBashCalls(message);
   // T7：底色块 paddingX=1 两侧 → 内部内容宽度收窄 2 列。
   const innerCols = Math.max(1, cols - 2);
   const nodes: ReactNode[] = [];
@@ -264,12 +263,7 @@ export function MessageBlocks(props: {
     } else if (block.type === "tool_use") {
       nodes.push(
         <box key={`u${i}`} flexDirection="column">
-          <ToolSummaryRow
-            tu={block}
-            statusMap={statusMap}
-            cols={innerCols}
-            runCount={bashRunCount}
-          />
+          <ToolSummaryRow tu={block} statusMap={statusMap} cols={innerCols} />
           <ToolPreviewRows tu={block} cols={innerCols} />
         </box>
       );

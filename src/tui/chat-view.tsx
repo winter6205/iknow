@@ -107,17 +107,14 @@ export interface ChatViewProps {
   readonly draftsMasked?: string;
   /** 流式 thinking 草稿 masked 文本。thinkingExpanded 决定折叠 / 展开。 */
   readonly thinkingDraftMasked?: string;
-  /** 流式 thinking 经过秒数（markThinkingStart / 首条 thinking_delta 起算）
-   *  ——折叠面板显示 `思考中… N 秒` 用（think-fold.ts 文案统一，不叠加
-   *  `[思考]` 前缀）。运行结束后清 0。 */
-  readonly thinkingSeconds?: number;
   /** 最近一次 turn 的 thinking 最终秒数（app 层 turn 结束快照）。传给末条
    *  assistant 消息的 thinking 折叠行 → 显示「思考了 N 秒」留存，turn 结束后
    *  秒数不随流式草稿清空而消失。缺省 0 → 折叠行只显 `[思考]`。 */
   readonly lastThinkingSeconds?: number;
   /** thinking 阶段冻结秒数（answer 开始时刻快照）：>0 且流式 thinking 草稿
    *  仍在 → 思考已结束、折叠行显示「思考了 N 秒」（不再「思考中…」递增），
-   *  秒数留存到 turn 结束历史消息接棒。缺省 0 → 仍按「思考中… N 秒」。 */
+   *  秒数留存到 turn 结束历史消息接棒。缺省 0 → 仍按静态 `思考中…`
+   *  （无实时秒数，2026-08-14）。 */
   readonly thinkingFrozenSeconds?: number;
   /** 最近一次完成 turn 的运行秒数快照（app 层 runTurnOnce finally 写入
    *  crunchedOf === activeKey 时传）。在消息流末尾渲染 `Crunched for X`，
@@ -280,13 +277,13 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             {props.askLine}
           </text>
         )}
-        {/* 流式 thinking 面板：折叠态 = 1 行 思考中… N 秒 / 思考已结束 →
+        {/* 流式 thinking 面板：折叠态 = 1 行 静态 `思考中…` / 思考已结束 →
             显示「思考了 N 秒」冻结留存；展开态走 Markdown。frozen 非空 = answer
             已开始、thinking 阶段结束 → 秒数不再递增，显示「思考了 N 秒」，
             直到 turn 结束历史消息接棒（留存不消失）。
             文案统一（2026-08-14）：两分支都走 think-fold.ts SSOT ——
-            `思考中… N 秒` / `思考了 N 秒` 即带语义，不再叠加 `[思考]` 前缀
-            （与 message-blocks 历史折叠行同源收敛）。 */}
+            折叠行恒 `思考中…`（无实时秒数，PR 1）/ `思考了 N 秒` 即带语义，
+            不再叠加 `[思考]` 前缀（与 message-blocks 历史折叠行同源收敛）。 */}
         {running && deferredThinkingDrafts.length > 0 && (
           <box flexDirection="column" width={contentWidth}>
             {thinkingExpanded ? (
@@ -299,7 +296,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
               </text>
             ) : (
               <text fg={pal.dim} wrapMode="none">
-                {formatThinkingLive(props.thinkingSeconds)}
+                {formatThinkingLive()}
               </text>
             )}
           </box>

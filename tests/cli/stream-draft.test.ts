@@ -102,17 +102,19 @@ describe("createStreamDraft", () => {
     assert.equal(draft.thinkingRaw(), "思考 继续");
   });
 
-  it("thinkingSeconds:未 markThinkingStart 返回 0", () => {
+  it("thinkingSeconds:无 thinking_delta 返回 0", () => {
     const draft = createStreamDraft();
     assert.equal(draft.thinkingSeconds(), 0);
   });
 
-  it("thinkingSeconds:markThinkingStart 打点后基于打点时刻计算", () => {
+  it("thinkingSeconds:首 thinking_delta 惰性打点，基于打点时刻计算", () => {
+    vi.useFakeTimers();
     const draft = createStreamDraft();
     const t0 = 1_000_000;
-    draft.markThinkingStart(t0);
-    // 打完点 7500ms → floor = 7s（计算起点从打点时刻起算，含 turn 启动→首
-    // delta 的「等待思考」时段）。
+    vi.setSystemTime(t0);
+    draft.append({ type: "thinking_delta", text: "想" });
+    // 首 delta 惰性打点后 7500ms → floor = 7s（计算起点 = 首 delta 时刻，
+    // 纯思考时长，不含 turn 启动→首 delta 的「等待思考」时段）。
     assert.equal(draft.thinkingSeconds(t0 + 7500), 7);
     // 1Hz tick 快照偏小问题：1300ms 也应有秒数（floor=1，子秒不吞）。
     assert.equal(draft.thinkingSeconds(t0 + 1300), 1);
@@ -120,27 +122,36 @@ describe("createStreamDraft", () => {
     assert.equal(draft.thinkingSeconds(t0 + 500), 0);
   });
 
-  it("thinkingSeconds:markThinkingStart 之前 thinking_delta 已打点 → 被覆盖为 markThinkingStart 时刻", () => {
+  it("thinkingSeconds:后续 thinking_delta 不覆盖首次打点", () => {
+    vi.useFakeTimers();
     const draft = createStreamDraft();
     const t0 = 5_000_000;
+    vi.setSystemTime(t0);
     draft.append({ type: "thinking_delta", text: "先想" });
-    draft.markThinkingStart(t0);
-    assert.equal(draft.thinkingSeconds(6_000_000), 1000);
-    assert.equal(draft.thinkingSeconds(5_500_000), 500);
+    vi.setSystemTime(t0 + 5000);
+    draft.append({ type: "thinking_delta", text: "再想" });
+    // 从**首次** delta 打点起算（t0 → t0+7000 = 7s），而非第二次 delta
+    // （t0+5000 → 仅 2s）—— 惰性打点只发生一次，后续 delta 不覆盖。
+    assert.equal(draft.thinkingSeconds(t0 + 7000), 7);
   });
 
-  it("thinkingSeconds:markThinkingStart 后仍可由 thinking_delta 惰性打点（历史消息折叠行回退）", () => {
+  it("thinkingSeconds:子秒 thinking 仍打点（当帧 0，随时间增长）", () => {
+    vi.useFakeTimers();
     const draft = createStreamDraft();
-    // markThinkingStart(0) → 视为未打点 → 后续 thinking_delta 惰性打点。
-    draft.markThinkingStart(0);
+    const t0 = 3_000_000;
+    vi.setSystemTime(t0);
     draft.append({ type: "thinking_delta", text: "想" });
-    // 惰性打点时刻 = Date.now()（真实时钟）。断言通过则打点成功且非 0/NaN。
-    assert.ok(draft.thinkingSeconds(Date.now() + 3000) === 3);
+    // 惰性打点于 append 时生效；当帧未满 1s → 0，但不吞掉计时起点——
+    // 之后随时间正常增长（3s 后 = 3，非 0/NaN）。
+    assert.equal(draft.thinkingSeconds(t0), 0);
+    assert.equal(draft.thinkingSeconds(t0 + 3000), 3);
   });
 
   it("thinkingSeconds:reset 后清零", () => {
+    vi.useFakeTimers();
     const draft = createStreamDraft();
-    draft.markThinkingStart(1_000_000);
+    const t0 = 1_000_000;
+    vi.setSystemTime(t0);
     draft.append({ type: "thinking_delta", text: "想" });
     draft.reset();
     assert.equal(draft.thinkingSeconds(), 0);

@@ -425,7 +425,7 @@ test("thinking 留存：lastThinkingSeconds 传给末条 assistant 折叠行 →
 
 test("流式 thinking 冻结：answer 开始后折叠行显示「思考了 N 秒」而非「思考中…」", async () => {
   // 场景：turn 运行中，thinking 阶段已结束（answer 开始）→ app 层冻结秒数
-  // （thinkingFrozenSeconds）→ 折叠行从「思考中… N 秒」切「思考了 N 秒」，
+  // （thinkingFrozenSeconds）→ 折叠行从静态「思考中…」切「思考了 N 秒」，
   // 秒数留存（不再递增）。
   const initial = sessionWith(makeMessages(1));
   const setup1 = await testRender(
@@ -450,9 +450,10 @@ test("流式 thinking 冻结：answer 开始后折叠行显示「思考了 N 秒
   await setup1.renderer.destroy();
 });
 
-test("流式 thinking 未冻结：折叠行显示「思考中… N 秒」不叠加 [思考] 前缀", async () => {
-  // 场景：turn 运行中，thinking 阶段进行中（frozen=0）→ 折叠行显示实时经过
-  // 秒数（思考中… N 秒）。文案统一后 = `思考中… N 秒`，不再 `[思考] 思考中… N 秒`。
+test("流式 thinking 未冻结：折叠行显示「思考中…」无实时秒数、不叠加 [思考] 前缀", async () => {
+  // 场景：turn 运行中，thinking 阶段进行中（frozen=0）→ 折叠行显示静态
+  // `思考中…`（实时递增秒数已下线，2026-08-14 —— 思考时长由事后 frozen
+  // 摘要 `思考了 N 秒` 承担，避免与 mode 行运行时长视觉重复 + 语义混淆）。
   const initial = sessionWith(makeMessages(1));
   const setup1 = await testRender(
     <ChatView
@@ -462,20 +463,20 @@ test("流式 thinking 未冻结：折叠行显示「思考中… N 秒」不叠�
       liveToolLines={[]}
       thinkingExpanded={false}
       thinkingDraftMasked="链上推理…"
-      thinkingSeconds={5}
     />,
     { width: COLS, height: ROWS, exitOnCtrlC: false }
   );
   await setup1.waitForVisualIdle();
   const frame = setup1.captureCharFrame();
-  expect(frame).toContain("思考中… 5 秒");
+  expect(frame).toContain("思考中…");
+  expect(frame.includes("5 秒")).toBe(false);
   expect(frame.includes("[思考]")).toBe(false);
   await setup1.renderer.destroy();
 });
 
 test("流式 thinking 子秒未冻结：折叠行显示「思考中…」不显 0 秒", async () => {
-  // 场景：thinking 已开始但 <1s（子秒）→ 不显「0 秒」伪精度（1Hz tick 快照
-  // 偏小问题：首 delta 到 1Hz tick 的窗口内应保持「思考中…」）。
+  // 场景：thinking 已开始但 <1s（子秒）→ 折叠行保持静态「思考中…」
+  // （流式行无实时秒数，PR 1 后恒不显秒数 —— 子秒自然不显「0 秒」伪精度）。
   const initial = sessionWith(makeMessages(1));
   const setup1 = await testRender(
     <ChatView
@@ -485,7 +486,6 @@ test("流式 thinking 子秒未冻结：折叠行显示「思考中…」不显 
       liveToolLines={[]}
       thinkingExpanded={false}
       thinkingDraftMasked="链上推理…"
-      thinkingSeconds={0}
     />,
     { width: COLS, height: ROWS, exitOnCtrlC: false }
   );

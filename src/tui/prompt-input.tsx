@@ -152,28 +152,21 @@ export function PromptInput(props: PromptInputProps): ReactNode {
     const ta = textareaRef.current;
     if (!ta) return;
     if (ta.plainText !== props.value) {
-      // setText 会完全重置 buffer 并把光标挪到 offset 0（@opentui/core
-      // EditBufferRenderable「Set text and completely reset the buffer state」）。
-      // T8 从 <input> 迁移时丢了旧 value setter 自带的
-      // `cursorOffset = newValue.length` 恢复步骤 → 程序写入（↑/↓ 历史召回 /
-      // Tab 补全 / rewind 回填 / 粘贴追加）后光标不可见地停在 (0,0)：Backspace
-      // 在 offset 0 是原生 no-op，后续输入前插到开头。按写入来源恢复光标：
-      //  - 导航写入（召回/草稿恢复/Tab 补全：写入前先置 navValueRef，此刻
-      //    与 value 相等）→ 光标置末尾，等价旧 input setter 语义；
-      //  - 外部程序写入（rewind 回填 / 粘贴追加）→ clamp 恢复写入前光标位置。
-      // 注意不能直接 `cursorOffset = value.length`：cursorOffset 的原生单位
-      // 是视觉列（实测 CJK 计 2、换行计 1），与 JS code-unit 长度不一致，
-      // 多行下按 length 赋值会把光标设到行中。setCursor(row, col) 的 col
-      // 同为视觉列（与 visualWidth 同口径，row/col 越界自动 clamp）：先定位
-      // 末行行尾，再读回 cursorOffset 得到 native 单位的末尾值（getter/setter
-      // 同单位可 round-trip），供外部写入路径 clamp 复用。
-      const savedCursor = ta.cursorOffset;
+      // T8 迁移丢的旧 setter 行为：setText 内部 setCursorByOffset(0) 把光标
+      // 重置到 buffer 起点。程序写入（↑/↓ 召回 / Tab 补全 / rewind 回填 /
+      // paste 追加 / submit 清空）调 setText 后用户接着 backspace 会「从第
+      // 一个字删」。本 app 程序写入全是全量替换或尾部追加，**末尾光标 = 统
+      // 一正确 UX** —— gotoBufferEnd 走 updateSelectionForMovement 不发
+      // content-changed、不与 handleContentChange 回环；已在末尾时是恒等
+      // （upstream 若未来保留光标本行 no-op-safe）。
+      //
+      // 替代 440e2599 的「setCursor(末行, visW) + min(savedCursor)」复合
+      // 逻辑 —— savedCursor 在快速输入窗口下 stale（多轮写入累积，钳到错
+      // 位光标），用户报告「快速输入时光标往前偏移」即此复合逻辑的脆弱面。
+      // 统一末尾避开 savedCursor stale 风险，同时覆盖 paste / rewind /
+      // submit 清空等所有程序写入路径。
       ta.setText(props.value);
-      const lines = props.value.split("\n");
-      ta.setCursor(lines.length - 1, visualWidth(lines[lines.length - 1]!));
-      if (navValueRef.current !== props.value) {
-        ta.cursorOffset = Math.min(savedCursor, ta.cursorOffset);
-      }
+      ta.gotoBufferEnd();
     }
   }, [props.value]);
 

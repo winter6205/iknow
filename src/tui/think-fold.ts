@@ -15,10 +15,12 @@
  *      前缀；与 message-blocks 历史行为一致）；
  *    - `seconds === 0` / `undefined` / 非正 → `[思考]`（不显「思考了 0 秒」
  *      伪精度；子秒 thinking 历史消息回落纯标记）。
- *  - `formatThinkingLive(seconds)` — 流式面板 thinking 折叠行（进行中）：
- *    - `seconds > 0` → `思考中… N 秒`（同样不叠加 `[思考]` 前缀）；
- *    - `seconds === 0` / `undefined` / 非正 → `思考中…`（1Hz tick 快照偏小 /
- *      子秒窗口内不显「0 秒」）。
+ *  - `formatThinkingLive()` — 流式面板 thinking 折叠行（进行中）：
+ *    - 恒返回 `思考中…`。实时递增的「思考中… N 秒」已下线 —— 思考中阶段的
+ *      实时秒数与 mode 行运行时长视觉重复且语义混淆（mode 行 `· Xs` 是
+ *      turn 运行总时长 ≠ 思考时间），「思考时长」只由事后 frozen 摘要
+ *      `思考了 N 秒` 承担。保留本函数作为 SSOT 收口，便于将来切换成
+ *      动画动词 / spinner 时集中调整文案。
  *
  * 纪律：纯函数、无 React 依赖、无 IO —— 与 run-stats.ts 同款，供单测直驱
  * （tests/tui/think-fold.test.ts）。调用方（chat-view.tsx / message-blocks.tsx）
@@ -35,9 +37,7 @@ export function formatThinkingFold(seconds: number | undefined): string {
   return `思考了 ${s} 秒`;
 }
 
-/** 流式折叠行文案：`思考中… N 秒` 或 `思考中…`（不叠加 [思考] 前缀）。 */
-export function formatThinkingLive(seconds: number | undefined): string {
-  const s = Math.max(0, Math.floor(seconds ?? 0));
-  if (s <= 0) return "思考中…";
-  return `思考中… ${s} 秒`;
+/** 流式折叠行文案（恒 `思考中…`，无实时秒数 — 见模块注释）。 */
+export function formatThinkingLive(): string {
+  return "思考中…";
 }

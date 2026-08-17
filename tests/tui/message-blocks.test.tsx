@@ -188,7 +188,7 @@ test("thinking 展开态：渲染 thinking 全文 + redacted 占位", async () =
   await setup.renderer.destroy();
 });
 
-test("tool_use 完成态折叠摘要：bash 单次 → ran 1 command 追加（T4）", async () => {
+test("tool_use 完成态折叠摘要：bash 完成 → [完成] bash · npm test（无 ran 后缀）", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -205,11 +205,13 @@ test("tool_use 完成态折叠摘要：bash 单次 → ran 1 command 追加（T4
   });
   const frame = setup.captureCharFrame();
   expect(frame).toContain("[完成]");
-  expect(frame).toContain("bash · npm test，ran 1 command");
+  expect(frame).toContain("bash · npm test");
+  // 2026-08-14：工具行不再拼 ran-N 后缀（计数统一由 ThinkingSummary 汇总）。
+  expect(frame.includes("ran")).toBe(false);
   await setup.renderer.destroy();
 });
 
-test("tool_use 完成态折叠摘要：同消息多 bash → ran 2 commands（聚合计数，T4）", async () => {
+test("tool_use 完成态折叠摘要：同消息多 bash → 各摘要行均无 ran 后缀", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -235,13 +237,14 @@ test("tool_use 完成态折叠摘要：同消息多 bash → ran 2 commands（�
     ]),
   });
   const frame = setup.captureCharFrame();
-  // 同消息 2 个 bash block：两个摘要行都追加聚合 ran 2 commands。
-  expect(frame).toContain("bash · npm test，ran 2 commands");
-  expect(frame).toContain("bash · git status，ran 2 commands");
+  // 同消息 2 个 bash block：摘要行只显 `[完成] name · detail`，计数不再逐行追加。
+  expect(frame).toContain("bash · npm test");
+  expect(frame).toContain("bash · git status");
+  expect(frame.includes("ran")).toBe(false);
   await setup.renderer.destroy();
 });
 
-test("tool_use 非 bash 工具（write_file）：不追加 ran 计数（T4）", async () => {
+test("tool_use 非 bash 工具（write_file）：无 ran 计数", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -318,7 +321,7 @@ test("thinking 折叠态 + thinkingSeconds=0：渲染 `[思考]`（不显「思�
   await setup.renderer.destroy();
 });
 
-test("thinking 折叠态 + bash tool_use：`[思考] · ran 1 command`（无时间）", async () => {
+test("thinking 折叠态 + bash tool_use：无 thinkingSeconds → `[思考]`（无 ran 后缀）", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -343,13 +346,15 @@ test("thinking 折叠态 + bash tool_use：`[思考] · ran 1 command`（无时�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 折叠行 = `[思考] · ran 1 command`（无时间）。精确定位子串，避免
-  // `[运行中] bash · ls` 摘要行里误带的 `·` 假阳性。
-  expect(frame).toContain("[思考] · ran 1 command");
+  // 2026-08-14：无 thinkingSeconds → 折叠行只显 `[思考]`（纯折叠标记），
+  // ran-N 后缀不再拼上 —— 避免 `[思考] · ran 1 command` 与工具行 ran-N
+  // 双处重复计数造成混乱观感。
+  expect(frame).toContain("[思考]");
+  expect(frame.includes("ran")).toBe(false);
   await setup.renderer.destroy();
 });
 
-test("thinking 折叠态 + thinkingSeconds + bash：`思考了 3 秒 · ran 1 command`", async () => {
+test("thinking 折叠态 + thinkingSeconds + bash：`思考了 3 秒 · ran 1 command`（turn 级统一摘要）", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -375,7 +380,8 @@ test("thinking 折叠态 + thinkingSeconds + bash：`思考了 3 秒 · ran 1 co
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 折叠行 = `思考了 3 秒 · ran 1 command`（时间 + bash 计数合并）。
+  // 折叠行 = `思考了 3 秒 · ran 1 command`（turn 级统一摘要 —— 对齐参考
+  // 样式 `Thought for 3s, ran 1 shell command`：思考时长 + 工具计数合并）。
   expect(frame).toContain("思考了 3 秒 · ran 1 command");
   expect(frame.includes("[思考]")).toBe(false);
   await setup.renderer.destroy();
