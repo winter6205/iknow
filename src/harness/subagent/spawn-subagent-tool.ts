@@ -33,7 +33,7 @@ import {
   SubAgentAbortError,
   SubAgentCapacityError,
 } from "./manager.js";
-import { ToolExecutionError } from "../errors.js";
+import { ToolExecutionError, SubAgentSandboxRootError } from "../errors.js";
 
 /**
  * 依赖注入：`manager` 父代理侧子代理生命周期 / 状态机 / buffer / shutdown 链
@@ -97,6 +97,11 @@ export function createSpawnSubAgentTool(
           description:
             "Optional: per-sub-agent wallclock; default 5 min if absent.",
         },
+        sandboxRoot: {
+          type: "string",
+          description:
+            "Optional (#357 T1): restrict the sub-agent to this directory. Must be a path inside the parent sandbox root (realpath-resolved, symlinks must point inside parent). Out-of-range or non-existent paths are rejected before any spawn occurs.",
+        },
       },
       required: ["task"],
       additionalProperties: false,
@@ -143,11 +148,19 @@ export function createSpawnSubAgentTool(
         ...(typeof obj.timeoutMs === "number"
           ? { timeoutMs: obj.timeoutMs }
           : { timeoutMs: PER_TASK_TIMEOUT_MS }),
+        // #357 T1: 透传 sandboxRoot;manager.buildWorkerPayload 单点校验 prefix-of-parent。
+        ...(typeof obj.sandboxRoot === "string"
+          ? { sandboxRoot: obj.sandboxRoot }
+          : {}),
       };
       let taskId: string;
       try {
         taskId = deps.manager.spawn(def).taskId;
       } catch (err) {
+        // #357 T1: sandboxRoot 越界 / 不存在 → ToolExecutionError(message 面向模型)。
+        if (err instanceof SubAgentSandboxRootError) {
+          throw new ToolExecutionError(err.message);
+        }
         // #361 C1: capacity → ToolExecutionError（消息含 capacity + 4/4）。
         if (err instanceof SubAgentCapacityError) {
           throw new ToolExecutionError(err.message);

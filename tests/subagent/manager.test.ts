@@ -17,6 +17,7 @@
  * EventEmitter + PassThrough stdin/stdout/stderr + kill spy。
  */
 import assert from "node:assert/strict";
+import { realpathSync } from "node:fs";
 import { describe, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
@@ -127,10 +128,10 @@ describe("SubAgentManager spawn → completed", () => {
     // taskId 是 manager 内部 randomUUID 唯一真值(SC3)
     assert.ok(taskId.length > 0);
     assert.equal(payload.task, "");
-    // #365 真实 LLM e2e 修复:def 缺席 sandboxRoot → manager 以父进程 cwd 补齐
-    // (role.ts:34 约定"manager 装配期根据父 cwd 补齐");不再写空串进 envelope
-    // (空串会让 worker 的 bwrap fence `--bind "" ""` 直接失败)。
-    assert.equal(payload.sandboxRoot, process.cwd());
+    // #357 T1 (承 #365): def 缺席 sandboxRoot → manager 以父 sandboxRoot 补齐。
+    // makeHarness 不传 sandboxRoot opt → fallback = realpathSync(process.cwd())。
+    // 缺省继承父根而非 process.cwd() 字面值(SC8 锁定行为变更)。
+    assert.equal(payload.sandboxRoot, realpathSync(process.cwd()));
     assert.equal(payload.systemPrompt, "p");
     assert.deepEqual(payload.disallowedTools, ["edit_file"]);
     assert.equal(payload.model, "opus");

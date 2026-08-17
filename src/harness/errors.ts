@@ -13,6 +13,9 @@
  *   (throw 替代 silent-stop;不携带 messages / usage 快照,数据留在 session 权威状态)
  * - ToolExecutionError: Executor 接住并净化后,作为可反馈业务失败信号;
  *   正常路径上,Executor 把工具业务失败装入 ToolExecutionResult,而非抛错
+ * - SubAgentSandboxRootError: #357 T1 — sandboxRoot 收窄越界 typed 拒绝;
+ *   buildWorkerPayload 单点校验发现 def.sandboxRoot 落在父 sandboxRoot 之外
+ *   / 不存在时同步抛,spawn 工厂不被调用(走 typed error,不裸抛 Error)
  */
 
 export class RegistryConstructionError extends Error {
@@ -62,6 +65,36 @@ export class MaxTurnsExceeded extends Error {
 
 export class ToolExecutionError extends Error {
   override readonly name = "ToolExecutionError";
+}
+
+/**
+ * #357 T1: sandboxRoot 收窄越界 typed 拒绝。
+ *
+ * `buildWorkerPayload` 单点校验(manager 内)发现 def.sandboxRoot 落在父
+ * sandboxRoot 之外 / 解析后 ENOENT 时同步抛;spawn 工厂不触发。
+ * 仿 `SubAgentCapacityError` 形态(命名 + readonly name + readonly context 字段),
+ * 区别于 capacity 的 status/reason 字段 —— 此错误域不参与 envelope 失败态,
+ * 是输入拒绝(类似 ToolExecutionError 域),由 tool handler catch 后转
+ * ToolExecutionError 抛给 executor。
+ *
+ * message 面向模型:说明 requested 路径越界,要求留在 parent sandboxRoot 内,
+ * 模型可据此缩小 sandboxRoot 范围或省略字段以继承父根(SC8)。
+ */
+export class SubAgentSandboxRootError extends Error {
+  override readonly name = "SubAgentSandboxRootError";
+  readonly context: {
+    readonly parentSandboxRoot: string;
+    readonly requested: string;
+  };
+  constructor(context: {
+    readonly parentSandboxRoot: string;
+    readonly requested: string;
+  }) {
+    super(
+      `spawn_subagent: sandboxRoot '${context.requested}' is outside the parent sandbox root '${context.parentSandboxRoot}'. Pass a path inside the parent sandbox root, or omit sandboxRoot to inherit the parent root.`
+    );
+    this.context = context;
+  }
 }
 
 /**

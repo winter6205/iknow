@@ -298,7 +298,9 @@ export async function buildHarnessEngine(
   const subagentManager: SubAgentManager | undefined =
     surface !== "ask"
       ? (opts.subagentManager ??
-        createSubAgentManager({ spawn: defaultSubAgentSpawn }))
+        // #357 T1: 传入 sandboxRoot 作为子代理收窄校验的父根锚点;
+        // 子代理 def.sandboxRoot 必须落在该锚点之下(realpath 防 symlink 逃逸)。
+        createSubAgentManager({ spawn: defaultSubAgentSpawn, sandboxRoot }))
       : undefined;
   // #126 T5:settings 对象缝（测试注入隔离 settings；生产缺省 loadIknowSettings）。
   const settings = opts.settings ?? loadIknowSettings({ cwd });
