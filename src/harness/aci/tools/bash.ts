@@ -24,6 +24,9 @@ interface BashInput {
   readonly command?: unknown;
   /** #502 T3:background?: boolean — 缺省 false = 前台（既有路径）。 */
   readonly background?: unknown;
+  /** #503 T10 / ADR-0022:network?: boolean — 缺省 false = 网络隔离（既有
+   *  --unshare-net 路径）；true = 去 unshare-net、获得宿主网络可见性。 */
+  readonly network?: unknown;
 }
 
 export interface CreateBashToolOptions {
@@ -81,6 +84,10 @@ export function createBashTool(
     // #502 T3:校验链通过后才决定前台 / 后台 —— 危险命令 / 敏感路径在两侧
     // 都先执行同一闸门（background 不豁免安全检查）。
     if ((input as BashInput | null)?.background === true) {
+      // #503 T11 TODO:network:true + background 接线 —— 后台路径不在 T10 范
+      // 围内(默认 spawn 是 host-net 隐含行为,后续需要协调 manager.spawn
+      // 是否透传 fence shape 变化)。此处先保留 input.network 解析点占位,
+      // T11 任务里把 fence shape 决策下沉到 manager.spawn。
       const bgCommand = opts?.secretRegistry
         ? restore(command, opts.secretRegistry)
         : command;
@@ -93,6 +100,11 @@ export function createBashTool(
     const finalCommand = opts?.secretRegistry
       ? restore(command, opts.secretRegistry)
       : command;
+    // #503 T10 / ADR-0022:network:true 透传到 fence（T9 已落地
+    // createBwrapFence 的 `network` 选项 + baseArgs 内插 --unshare-net）。
+    // 权限层（policy.ts code-ask-bash-network）已强制 ask full_auto 不豁免,
+    // 此处只判严格 === true;非布尔 / 缺省 / false → 走既有隔离路径。
+    const wantsHostNetwork = (input as BashInput | null)?.network === true;
     const fence = createBwrapFence({
       command: "bash",
       args: ["-c", finalCommand],
@@ -101,6 +113,7 @@ export function createBashTool(
       resourceLimits,
       env: fenceEnv,
       cwd,
+      ...(wantsHostNetwork ? { network: true } : {}),
     });
     const result = await runInSandbox({
       fence,
@@ -127,6 +140,13 @@ export function createBashTool(
           type: "boolean",
           description:
             "When true, run the command in the background: returns {task_id, log_path} immediately and the process keeps running after the call, managed by the task registry. Use for long-lived servers or daemons; pair with bash_output (read the log) and bash_stop (terminate). Defaults to false (foreground).",
+        },
+        // #503 T10 / ADR-0022:network?: boolean — 宿主网络批准轴。non-negative
+        // 措辞（d9 门禁）：正面说明 what it does,不提 "do not"。
+        network: {
+          type: "boolean",
+          description:
+            "When true, this command gets host network access (the fence skips --unshare-net) so it can reach the LAN or the internet. Network opt-in is a separate approval axis: calls with network:true always go through explicit permission and full_auto mode does not exempt them. Defaults to false (network-isolated).",
         },
       },
       required: ["command"],

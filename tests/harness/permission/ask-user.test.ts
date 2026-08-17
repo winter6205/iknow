@@ -207,6 +207,38 @@ describe("ServeAskUserHandle.pendingAll (commit B: web ask UI)", () => {
     await p;
   });
 
+  it("#503 T10 — pendingAll 透传 network 字段（bash network:true ask 标记）", async () => {
+    const h = createServeAskUser({ timeoutMs: 1_000 });
+    const p = h.ask({
+      tool: "bash",
+      input: { command: "curl localhost", network: true },
+      summaryHint: '[请求宿主网络] "curl localhost"',
+      network: true,
+    });
+    await Promise.resolve();
+    const list = h.pendingAll();
+    assert.equal(list.length, 1);
+    assert.equal(list[0]!.network, true);
+    assert.equal(list[0]!.tool, "bash");
+    h.resolveAsk(list[0]!.id, true);
+    await p;
+  });
+
+  it("#503 T10 — pendingAll 缺省 network 时不残留 network 字段（key absent）", async () => {
+    const h = createServeAskUser({ timeoutMs: 1_000 });
+    const p = h.ask({
+      tool: "edit_file",
+      input: { path: "x.ts" },
+      summaryHint: "edit x.ts",
+    });
+    await Promise.resolve();
+    const first = h.pendingAll()[0]!;
+    assert.equal(first.network, undefined);
+    assert.equal("network" in first, false);
+    h.resolveAsk(first.id, true);
+    await p;
+  });
+
   it("clears entry after resolveAsk", async () => {
     const h = createServeAskUser({ timeoutMs: 1_000 });
     const p = h.ask({ tool: "write_file", input: {}, summaryHint: "wf" });

@@ -49,6 +49,22 @@ export function PermissionDialog(props: PermissionDialogProps) {
       </div>
       <div style={{ fontSize: 13, opacity: 0.85, marginBottom: 8 }}>
         Tool <code>{ask.tool}</code>
+        {ask.network === true ? (
+          <span
+            style={{
+              marginLeft: 6,
+              padding: "1px 6px",
+              borderRadius: 4,
+              fontSize: 11,
+              background: "var(--ik-warn-bg, rgba(255, 180, 90, 0.18))",
+              color: "var(--ik-warn, #c97)",
+              border: "1px solid var(--ik-warn, #c97)",
+            }}
+            aria-label="host network requested"
+          >
+            host network
+          </span>
+        ) : null}
         {ask.summaryHint ? (
           <>
             {" "}

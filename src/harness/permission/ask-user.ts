@@ -117,6 +117,9 @@ export interface PendingAskView {
   readonly id: string;
   readonly tool: string;
   readonly summaryHint: string;
+  /** #503 T10 / ADR-0022:bash network:true 时由 executor 透传；缺省时该
+   *  key 不存在（前端不渲染宿主网络标记）。 */
+  readonly network?: boolean;
 }
 
 interface PendingAsk extends PendingAskView {
@@ -173,7 +176,12 @@ export function createServeAskUser(
   function snapshot(): PendingAskView[] {
     const out: PendingAskView[] = [];
     for (const p of pending.values()) {
-      out.push({ id: p.id, tool: p.ctx.tool, summaryHint: p.ctx.summaryHint });
+      out.push({
+        id: p.id,
+        tool: p.ctx.tool,
+        summaryHint: p.ctx.summaryHint,
+        ...(p.ctx.network !== undefined ? { network: p.ctx.network } : {}),
+      });
     }
     return out;
   }

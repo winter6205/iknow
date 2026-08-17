@@ -17,6 +17,9 @@ export interface TuiPendingAsk {
   readonly id: string;
   readonly tool: string;
   readonly summaryHint: string;
+  /** #503 T10 / ADR-0022:bash network:true 时由 executor 透传；缺省时该
+   *  key 不存在。TUI 权限 modal 可据此渲染宿主网络标记行。 */
+  readonly network?: boolean;
 }
 
 export interface TuiAskUserBridge {
@@ -69,7 +72,12 @@ export function createTuiAskUserBridge(opts?: {
       }, timeoutMs);
       if (typeof timer.unref === "function") timer.unref();
       queue.set(id, {
-        info: { id, tool: ctx.tool, summaryHint: ctx.summaryHint },
+        info: {
+          id,
+          tool: ctx.tool,
+          summaryHint: ctx.summaryHint,
+          ...(ctx.network !== undefined ? { network: ctx.network } : {}),
+        },
         resolve,
         timer,
       });

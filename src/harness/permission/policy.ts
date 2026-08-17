@@ -63,6 +63,24 @@ function codeBuiltInRules(): ReadonlyArray<NormalRuleSpec> {
       decision: "allow",
       reason: "code built-in: todo_write list mode is read-only (bypass ask)",
     },
+    {
+      // #503 T10 / ADR-0022:bash network:true 强制 ask — 命中 rule 先于 mode
+      // 解析(见 checkPermission 分层循环),故 full_auto 分支永远到不了这条
+      // 调用,fence 形状变化(去 --unshare-net、获得宿主网络可见性)是新的
+      // 批准轴,与动作批准轴正交。匹配条件:tool === "bash" 且 input.network
+      // <b>严格等于 true</b>(非布尔 "true" / 缺省 / false → 不命中,走既有
+      // 分类默认路径)。非 bash 工具同名字段不受影响。硬墙仍先于本规则。
+      id: "code-ask-bash-network",
+      match: ({ tool, input }) =>
+        tool === "bash" &&
+        typeof input === "object" &&
+        input !== null &&
+        !Array.isArray(input) &&
+        (input as { network?: unknown }).network === true,
+      decision: "ask",
+      reason:
+        "code built-in: bash network:true changes the fence shape (host network) — explicit approval required, full_auto does not exempt network opt-in",
+    },
   ]);
 }
 

@@ -393,6 +393,158 @@ describe("policy.ts is sync (askUser is the executor's job)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// #503 T10 / ADR-0022 D2: bash network:true → 强制 ask，full_auto 不豁免。
+// 规则在 code 层，命中后直接 return（先于 mode 解析），所以 full_auto 分支
+//（policy.ts:155）对这条调用永远到不了。fence 形状变化（去 --unshare-net）
+// 是新批准轴，与动作批准轴正交；硬墙仍先于 code 规则（hard-wall 优先）。
+// ---------------------------------------------------------------------------
+
+describe("SC8: #503 T10 bash network:true 强制 ask（layered rule 先于 mode，full_auto 不豁免）", () => {
+  const policy = createPermissionPolicy();
+
+  it("network:true + default mode → ask（rule reason 含 host-network 语义）", () => {
+    const out = checkPermission({
+      def: makeTool({ name: "bash", category: "execute" }),
+      input: { command: "curl http://127.0.0.1:3000", network: true },
+      sources: policy.sources,
+      hardWalls: policy.hardWalls,
+      defaultByCategory: policy.defaultByCategory,
+    });
+    assert.equal(out.decision, "ask");
+    assert.ok(out.reason.includes("network"));
+    assert.ok(out.reason.includes("host"));
+  });
+
+  it("network:true + full_auto → ask（layered rule 先于 mode 解析，full_auto 永远到不了）", () => {
+    const fullAuto = createPermissionPolicy({ mode: "full_auto" });
+    const out = checkPermission({
+      def: makeTool({ name: "bash", category: "execute" }),
+      input: { command: "curl http://127.0.0.1:3000", network: true },
+      sources: fullAuto.sources,
+      hardWalls: fullAuto.hardWalls,
+      defaultByCategory: fullAuto.defaultByCategory,
+      mode: fullAuto.mode,
+    });
+    assert.equal(out.decision, "ask");
+    assert.ok(out.reason.includes("network"));
+  });
+
+  it("network 缺省 + full_auto → 既有 full_auto allow 决策不变（零回归）", () => {
+    const fullAuto = createPermissionPolicy({ mode: "full_auto" });
+    const out = checkPermission({
+      def: makeTool({ name: "bash", category: "execute" }),
+      input: { command: "echo hi" },
+      sources: fullAuto.sources,
+      hardWalls: fullAuto.hardWalls,
+      defaultByCategory: fullAuto.defaultByCategory,
+      mode: fullAuto.mode,
+    });
+    assert.equal(out.decision, "allow");
+    assert.ok(out.reason.includes("full_auto"));
+  });
+
+  it("network:false + full_auto → 既有 full_auto allow 决策不变（network:false 不命中规则）", () => {
+    const fullAuto = createPermissionPolicy({ mode: "full_auto" });
+    const out = checkPermission({
+      def: makeTool({ name: "bash", category: "execute" }),
+      input: { command: "echo hi", network: false },
+      sources: fullAuto.sources,
+      hardWalls: fullAuto.hardWalls,
+      defaultByCategory: fullAuto.defaultByCategory,
+      mode: fullAuto.mode,
+    });
+    assert.equal(out.decision, "allow");
+  });
+
+  it('network 非布尔（字符串 "true"）input 校验边界 → 不命中规则，走既有路径', () => {
+    // 字符串 "true" !== true → 规则不命中。
+    //  default mode 下 execute → category default ask；但 reason 是 category
+    //  default，不是 rule reason（reason 区分即可锁定）。
+    const outDefault = checkPermission({
+      def: makeTool({ name: "bash", category: "execute" }),
+      input: { command: "ls", network: "true" },
+      sources: policy.sources,
+      hardWalls: policy.hardWalls,
+      defaultByCategory: policy.defaultByCategory,
+    });
+    assert.equal(outDefault.decision, "ask");
+    assert.ok(outDefault.reason.includes("category default"));
+    // full_auto 下规则不命中 → mode 解析直接放行。
+    const fullAuto = createPermissionPolicy({ mode: "full_auto" });
+    const outFullAuto = checkPermission({
+      def: makeTool({ name: "bash", category: "execute" }),
+      input: { command: "ls", network: "true" },
+      sources: fullAuto.sources,
+      hardWalls: fullAuto.hardWalls,
+      defaultByCategory: fullAuto.defaultByCategory,
+      mode: fullAuto.mode,
+    });
+    assert.equal(outFullAuto.decision, "allow");
+  });
+
+  it("network:true + 危险命令 → hard-wall 仍先于 code 规则触发 deny", () => {
+    const out = checkPermission({
+      def: makeTool({ name: "bash", category: "execute" }),
+      input: { command: "rm -rf /", network: true },
+      sources: policy.sources,
+      hardWalls: policy.hardWalls,
+      defaultByCategory: policy.defaultByCategory,
+    });
+    assert.equal(out.decision, "deny");
+    assert.ok(out.reason.includes("[hard_wall]"));
+  });
+
+  it('非 bash 工具 network 字段存在 → 规则不命中（规则 tool==="bash" 卡口）', () => {
+    const out = checkPermission({
+      def: makeTool({ name: "web_fetch", category: "read-only" }),
+      input: { url: "https://x.example", network: true },
+      sources: policy.sources,
+      hardWalls: policy.hardWalls,
+      defaultByCategory: policy.defaultByCategory,
+    });
+    // read-only category default → allow。规则不命中 → 走 category default。
+    assert.equal(out.decision, "allow");
+    assert.ok(out.reason.includes("category default"));
+  });
+
+  it("project 层仍可对 network:true escalate（如改成 deny）", () => {
+    const project = {
+      kind: "project" as const,
+      filePath: "/tmp/perm-network.toml",
+      rules: [
+        {
+          id: "project-deny-bash-network",
+          match: ({ tool }: { tool: string }) => tool === "bash",
+          decision: "deny" as const,
+          reason: "project denies bash (network applies too)",
+        },
+      ],
+    };
+    const out = checkPermission({
+      def: makeTool({ name: "bash", category: "execute" }),
+      input: { command: "curl x", network: true },
+      sources: { code: policy.sources.code, project },
+      hardWalls: policy.hardWalls,
+      defaultByCategory: policy.defaultByCategory,
+    });
+    assert.equal(out.decision, "deny");
+  });
+
+  it("network:true 在 plan mode → ask（layered rule 仍先于 mode）", () => {
+    const plan = createPermissionPolicy({ mode: "plan" });
+    const out = checkPermission({
+      def: makeTool({ name: "bash", category: "execute" }),
+      input: { command: "curl x", network: true },
+      sources: plan.sources,
+      hardWalls: plan.hardWalls,
+      defaultByCategory: plan.defaultByCategory,
+      mode: plan.mode,
+    });
+    assert.equal(out.decision, "ask");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // #440 T5: todo_write D7 权限规则 — list 子模式 bypass ask (read-only),
 //         add / check 走 category default ask (write)。
 // ---------------------------------------------------------------------------

@@ -53,9 +53,12 @@ describe("createPermissionPolicy", () => {
     //     (unblocks non-interactive inlets — ask/serve/chat TTY without prompt)
     //   - code-allow-todo-write-list (#440 T5): todo_write list 子模式只读,
     //     bypass ask。add/check 仍走默认 write → ask。
+    //   - code-ask-bash-network (#503 T10 / ADR-0022):bash network:true
+    //     强制 ask（layered rule 先于 mode 解析,full_auto 不豁免 fence
+    //     形状变化 = 宿主网络批准轴）。
     // Project / session layers can still escalate to ask or deny; hard-walls
     // remain un-overrideable.
-    assert.equal(p.sources.code.rules.length, 2);
+    assert.equal(p.sources.code.rules.length, 3);
     const memSave = p.sources.code.rules.find(
       (r) => r.id === "code-allow-memory-save"
     )!;
@@ -69,6 +72,32 @@ describe("createPermissionPolicy", () => {
     assert.ok(
       todoList.match({ tool: "todo_write", input: { mode: "list" } }),
       "list mode matches"
+    );
+    const bashNet = p.sources.code.rules.find(
+      (r) => r.id === "code-ask-bash-network"
+    )!;
+    assert.equal(bashNet.decision, "ask");
+    assert.ok(
+      bashNet.match({ tool: "bash", input: { command: "x", network: true } }),
+      "network:true bash matches"
+    );
+    assert.equal(
+      bashNet.match({ tool: "bash", input: { command: "x", network: false } }),
+      false,
+      "network:false does not match"
+    );
+    assert.equal(
+      bashNet.match({ tool: "bash", input: { command: "x" } }),
+      false,
+      "absent network does not match"
+    );
+    assert.equal(
+      bashNet.match({
+        tool: "bash",
+        input: { command: "x", network: "true" },
+      }),
+      false,
+      "string network does not match"
     );
     assert.equal(
       todoList.match({ tool: "todo_write", input: { mode: "add", item: "x" } }),

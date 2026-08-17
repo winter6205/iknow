@@ -190,11 +190,18 @@ export function createPermissionExecutor(
 
       // Step 3: ask path
       if (outcome.decision === "ask") {
-        const hint = summarizeInput(call.input);
+        // #503 T10 / ADR-0022:bash network:true 是宿主网络批准轴 —— hint 加
+        // `[请求宿主网络]` 标记 + 命令摘要（+ secret 占位符警告），并把
+        // `network` 字段透传到 askUser ctx（PendingAskView 两侧窗口可呈现）。
+        const networkRequested = isNetworkBash(def.name, call.input);
+        const hint = networkRequested
+          ? summarizeNetworkBash(call.input)
+          : summarizeInput(call.input);
         const approved = await askUser({
           tool: def.name,
           input: call.input,
           summaryHint: hint,
+          ...(networkRequested ? { network: true } : {}),
         });
         if (!approved) {
           out.push({
@@ -261,6 +268,58 @@ function summarizeInput(input: unknown): string {
   } catch {
     return "(unserializable input)";
   }
+}
+
+/**
+ * #503 T10 / ADR-0022:bash network:true 是宿主网络批准轴。判定条件与
+ * policy.ts `code-ask-bash-network` 规则完全相同（tool === "bash" 且
+ * input.network 严格 === true），保证 hint 形态与决策来源一一对应。
+ */
+function isNetworkBash(tool: string, input: unknown): boolean {
+  return (
+    tool === "bash" &&
+    typeof input === "object" &&
+    input !== null &&
+    !Array.isArray(input) &&
+    (input as { network?: unknown }).network === true
+  );
+}
+
+/** `<<<SECRET_N>>>` 占位符（#406 roundtrip 产物，#503 出站警告触发器）。 */
+const SECRET_PLACEHOLDER_RE = /<<<SECRET_\d+>>>/;
+
+/** 命令摘要截断基数（与 summarizeInput 同级 80 字符封顶 + "..."）。 */
+const NETWORK_HINT_BASE_MAX = 80;
+const NETWORK_HINT_MARKER = "[请求宿主网络] ";
+const SECRET_WARNING =
+  " [secret 警告] 命令含 secret 占位符，批准后真值可能随命令出站";
+
+/**
+ * bash network:true 的 ask hint：`[请求宿主网络] <命令摘要>`，命令摘要沿用
+ * summarizeInput 的 80 字符 + "..." 截断风格；命令含 `<<<SECRET_N>>>`
+ * 占位符时追加 [secret 警告]（只 mark warning，不读出真值 —— 视图无权
+ * 读取 registry 内容，ADR-0022 Decision 3）。非字符串命令兜底走原 JSON 路径。
+ */
+function summarizeNetworkBash(input: unknown): string {
+  const command = (input as { command?: unknown } | null)?.command;
+  let hint: string;
+  if (typeof command === "string" && command.length > 0) {
+    const markerLen = NETWORK_HINT_MARKER.length;
+    if (command.length + markerLen <= NETWORK_HINT_BASE_MAX) {
+      hint = `${NETWORK_HINT_MARKER}${command}`;
+    } else {
+      hint =
+        NETWORK_HINT_MARKER +
+        command.slice(0, NETWORK_HINT_BASE_MAX - markerLen - 3) +
+        "...";
+    }
+    if (SECRET_PLACEHOLDER_RE.test(command)) {
+      hint += SECRET_WARNING;
+    }
+    return hint;
+  }
+  // command 缺失 / 非字符串（规则已命中 network:true）→ 兜底走原 JSON 路径。
+  return summarizeInput(input);
 }
 
 /**
