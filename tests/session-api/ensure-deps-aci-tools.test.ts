@@ -31,8 +31,8 @@ import { installTestSettingsSource } from "../_helpers/install-test-settings-sou
 // EXPECTED_TOOLS 同形)。
 // #356 T6:build-engine 全装配(surface 默认 chat)自建 subagentManager →
 // registry 末尾追加 spawn_subagent / subagent_result(→ 25 件)。
-// #440 T11:build-engine 全装配(surface 默认 chat)自建 mcpManager →
-// registry 末尾追加 list_mcp_resources / read_mcp_resource(→ 27 件)。
+// #440 双 Stream 并集:todo_write(T4) + MCP resources 两件(T11) append-only
+// 25→28(serve 走 build-engine 全装配,todoDir + mcpManager 均自建 → 三件在场)。
 const EXPECTED_TOOLS = [
   "bash",
   "read_file",
@@ -64,7 +64,10 @@ const EXPECTED_TOOLS = [
   // 全装配,subagentManager 自建 → 两件在场)。
   "spawn_subagent",
   "subagent_result",
-  // #440 T11 MCP resources 工具集 append-only:25→27,末尾两件(serve 走
+  // #440 T4 todo_write append-only:25→26,末位 1 件(serve T1-fix 后透传 todoDir →
+  // 在场 — 与 build-engine 装配侧一致)。
+  "todo_write",
+  // #440 T11 MCP resources 工具集 append-only:26→28,末尾两件(serve 走
   // build-engine 全装配,mcpManager 自建 → 两件在场)。
   "list_mcp_resources",
   "read_mcp_resource",
@@ -88,7 +91,7 @@ afterAll(async () => {
 });
 
 describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
-  it("returns the ACI 25-tool registry when serve constructs without deps", async () => {
+  it("returns the ACI 26-tool registry (incl. todo_write) when serve constructs without deps", async () => {
     const hub = new SessionHub({
       store,
       askUser: createNoAskUser(),
@@ -99,9 +102,11 @@ describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
 
     const deps = await ensure();
     const names = deps.registry.list().map((def) => def.name);
+    // #440 T1-fix:serve 入口注入 todoDir → todo_write 装配,SSOT 26 件全在场。
     for (const expected of EXPECTED_TOOLS) {
       expect(names).toContain(expected);
     }
     expect(names).toHaveLength(EXPECTED_TOOLS.length);
+    expect(names).toContain("todo_write");
   });
 });

@@ -52,6 +52,7 @@ import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import { MaxTurnsExceeded } from "../harness/errors.js";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { resolveSessionTodoDir } from "../harness/aci/tools/todo-write.js";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
@@ -1270,6 +1271,9 @@ export class SessionHub {
     // The returned `engine` is built once (code-review 2026-08-05) and
     // discarded — serve only consumes `deps`, and the cost is a single
     // `createLoopEngine` allocation, not a per-message re-construction.
+    // #440 T1-fix:serve 入口注入 todoDir 让 todo_write 在主 loop 在场
+    // (per-conversationId resolution 是后续 ticket — serve 的 cachedDeps
+    // 跨所有会话共享,per-conversationId 需 engine 重建,代价太高)。
     const built = await buildHarnessEngine({
       env,
       askUser: this.askUser,
@@ -1277,6 +1281,7 @@ export class SessionHub {
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
       ...(this.permissionMode ? { permissionMode: this.permissionMode } : {}),
+      todoDir: resolveSessionTodoDir({ surface: "serve" }),
     });
     this.cachedDeps = built.deps;
     // #356 T7: serve 懒取 subagent manager — buildHarnessEngine 在 surface !==

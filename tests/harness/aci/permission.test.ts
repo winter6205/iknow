@@ -48,18 +48,38 @@ describe("createPermissionPolicy", () => {
     // three-layer shape). defaults: read-only → allow, write/execute/collaborate → ask.
     const p = createPermissionPolicy();
     assert.equal(p.sources.code.kind, "code");
-    // The code layer ships with a single built-in allow rule for `memory_save`
-    // (agent self-write into its own memory library, not user workspace). This
-    // unblocks the agent's memory persistence at non-interactive inlets
-    // (ask / serve, or chat TTY with no prompt available) that would otherwise
-    // fail-closed via `[user_denied]`. Project / session layers can still
-    // escalate to ask or deny; hard-walls remain un-overrideable.
-    assert.equal(p.sources.code.rules.length, 1);
-    const only = p.sources.code.rules[0]!;
-    assert.equal(only.id, "code-allow-memory-save");
-    assert.equal(only.decision, "allow");
-    assert.ok(only.match({ tool: "memory_save", input: {} }));
-    assert.equal(only.match({ tool: "edit_file", input: {} }), false);
+    // The code layer ships with built-in allow rules:
+    //   - code-allow-memory-save: agent self-write to its own memory library
+    //     (unblocks non-interactive inlets — ask/serve/chat TTY without prompt)
+    //   - code-allow-todo-write-list (#440 T5): todo_write list 子模式只读,
+    //     bypass ask。add/check 仍走默认 write → ask。
+    // Project / session layers can still escalate to ask or deny; hard-walls
+    // remain un-overrideable.
+    assert.equal(p.sources.code.rules.length, 2);
+    const memSave = p.sources.code.rules.find(
+      (r) => r.id === "code-allow-memory-save"
+    )!;
+    assert.equal(memSave.decision, "allow");
+    assert.ok(memSave.match({ tool: "memory_save", input: {} }));
+    assert.equal(memSave.match({ tool: "edit_file", input: {} }), false);
+    const todoList = p.sources.code.rules.find(
+      (r) => r.id === "code-allow-todo-write-list"
+    )!;
+    assert.equal(todoList.decision, "allow");
+    assert.ok(
+      todoList.match({ tool: "todo_write", input: { mode: "list" } }),
+      "list mode matches"
+    );
+    assert.equal(
+      todoList.match({ tool: "todo_write", input: { mode: "add", item: "x" } }),
+      false,
+      "add mode does not match"
+    );
+    assert.equal(
+      todoList.match({ tool: "todo_write", input: {} }),
+      false,
+      "missing mode does not match"
+    );
     assert.equal(Object.isFrozen(p), true);
     assert.equal(p.defaultByCategory["read-only"], "allow");
     assert.equal(p.defaultByCategory.write, "ask");

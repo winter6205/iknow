@@ -81,6 +81,10 @@ export async function buildHarnessEngine(
     /** W2: 权限模式上下文。chat REPL 传可变 context(可被 /permissions 翻);
      *  ask/serve 传静态 context(不可变但类型相同)。缺省 → 引擎内 default。 */
     permissionMode?: PermissionModeContext;
+    /** #440 T1-fix:host 注入的 session-scoped todoDir,用于 todo_write 在主
+     *  loop 装配(per-conversationId resolution 是后续 ticket,见 todo-write.ts
+     * resolveSessionTodoDir 注释)。chat/ask CLI 入口由调用方解析后透传。 */
+    todoDir?: string;
   }
 ): Promise<BuiltEngine> {
   // #196 IKNOW T5: eager + idempotent 初始化 ~/.iknow/(initIknowWorkspaceSafe
@@ -94,13 +98,15 @@ export async function buildHarnessEngine(
   await runHostInitScriptSafe();
   // surface 透传到 buildCoreEngine,build-engine 据此判定 BOOTSTRAP 段是否激活;
   // memory 开关透传,#194 T6 双分支在 buildCoreEngine (build-engine.ts) 内;
-  // permissionMode (W2) 透传到 policy.mode,chat REPL 持 context 翻 /permissions。
+  // permissionMode (W2) 透传到 policy.mode,chat REPL 持 context 翻 /permissions;
+  // todoDir (#440 T1-fix) 透传到 registry 让 todo_write 在场(surface !== ask 限定)。
   return buildCoreEngine({
     env: bundle.env,
     askUser: opts.askUser,
     surface: opts.surface ?? "chat",
     ...(opts.memory ? { memory: opts.memory } : {}),
     ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}),
+    ...(opts.todoDir ? { todoDir: opts.todoDir } : {}),
   });
 }
 

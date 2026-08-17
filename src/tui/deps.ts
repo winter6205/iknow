@@ -20,6 +20,7 @@
  */
 import type { LoopEngineDeps } from "../harness/index.js";
 import { buildHarnessEngine } from "../harness/build-engine.js";
+import { resolveSessionTodoDir } from "../harness/aci/tools/todo-write.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import type { PostToolUseHook } from "../harness/permission/types.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
@@ -185,11 +186,15 @@ export async function buildTuiDeps(
   // 与 build-engine #337 T8 同款。装配期 skill scanner + mcp config 都从这里取。
   const userHome = opts.userHome ?? homedir();
   const cwd = opts.cwd ?? process.cwd();
+  // #440 T1-fix:TUI 入口注入 todoDir 让 todo_write 在主 loop 在场
+  // (per-conversationId resolution 是后续 ticket — soleInflightId 动态,
+  // per-conversationId 需 engine 重建,代价太高;v1 共享 ~/.iknow/todos/tui/)。
   const built = await buildHarnessEngine({
     env: bundle.env,
     askUser: opts.askUser,
     surface: "tui",
     memory: { enabled: true },
+    todoDir: resolveSessionTodoDir({ userHome, surface: "tui" }),
     // #365 T2: 沙箱根保持 TUI 历史语义(启动目录 = process.cwd());
     // build-engine 缺省即 process.cwd(),故不显式传。
     // memoryDir 同理缺省解析自 cwd(与 #146 TUI 启动目录语义一致)。
