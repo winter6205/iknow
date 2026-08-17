@@ -33,8 +33,8 @@ export function usageText(): string {
 用法 / Usage:
   iknow                         交互对话（仅 TTY）/ interactive chat (TTY only)
   iknow chat [options]          会话：TTY REPL 或按行管道 / chat (TTY REPL or piped lines)
-  iknow serve [options]         HTTP 会话 API + Web UI / session API + web UI
-  iknow trace [options]         独立 trace 检测面板 / standalone trace inspection (read-only)
+  iknow serve [options]         HTTP 会话 API + Web UI + trace 面板(/trace) / session API + web UI + trace panel
+  iknow trace [options]         打开 trace 面板（探测 serve）/ open trace panel (probes serve)
   iknow tui [session-id]        终端多会话交互界面 / multi-session TUI (banners/lists/slash)
   iknow ask "<query>" [options] 单次 JSON 回答（脚本/CI）/ one-shot JSON (scripts/CI)
   iknow "<query>" [options]     同上（兼容写法）/ same as ask (compat)
@@ -43,8 +43,8 @@ export function usageText(): string {
 
 选项 / Options:
   --json                        聊天开始即用 JSON 输出 / chat starts with JSON answers
-  --port <n>                    serve/trace 监听端口，serve 默认 8787 / trace 默认 24881
-                                / serve/trace port (default serve=8787, trace=24881)
+  --port <n>                    serve 监听端口（默认 8787）；trace 默认探测 8787、--separate 用 24881
+                                / serve port (default 8787); trace probes 8787, --separate uses 24881
   --host <addr>                 serve/trace 绑定地址，默认 127.0.0.1
                                 / serve/trace host (default 127.0.0.1)
   --data-dir <dir>              会话池根目录，默认 ~/.iknow / session pool root (default ~/.iknow)
@@ -52,6 +52,8 @@ export function usageText(): string {
                                 / per-root state root (identity/memory/serve), default process.cwd()
   --max-bytes <n>               trace 单次读取字节上限，默认 8 MiB / trace read cap (default 8 MiB)
   --no-open                     trace 不自动打开浏览器（CI/headless）/ trace: do not auto-open browser (CI/headless)
+  --separate                    trace 保留独立检测进程（#183 旧行为，端口 24881）
+                                / trace: keep standalone inspection process (#183 behavior, port 24881)
 
 会话内命令 / In-chat commands:
   /help  /status  /quit  /json on|off  /reset
@@ -60,12 +62,15 @@ export function usageText(): string {
   • TTY 无参数 → chat；管道/非 TTY 无参数 → 用法 / no args: TTY→chat, piped→usage
   • 空 ask/query → 用法 + exit 1（无默认 demo 问句）/ empty ask → usage + exit 1
   • ask 输出 JSON；chat 默认人类可读 / ask→JSON, chat→human view
-  • serve 打开 http://host:port/ ；API 见 src/session-api/contract.ts
-• trace 默认读 ./trace/ 目录并自动开浏览器（--no-open 关闭）；检测到旧 ./trace.jsonl 需先跑迁移脚本
-    / trace defaults to ./trace/ and auto-opens the browser (--no-open disables);
+  • serve 打开 http://host:port/ ；API 见 src/session-api/contract.ts；trace 面板在 /trace
+• trace 默认探测 iknow serve（--host/--port 指定目标）后打开 /trace 面板并自动开浏览器
+    （--no-open 关闭）；检测不到 serve → exit 1 提示先起 serve 或 --separate
+    / trace probes iknow serve then opens /trace (auto browser; --no-open disables);
+    no serve → exit 1, start serve first or use --separate
+• trace --separate 保留独立进程读 ./trace/ 目录（/api/v1/traces + /fields + /health）；
+    写侧由 serve/chat/ask 的 --trace-out 负责；检测到旧 ./trace.jsonl 需先跑迁移脚本
+    / trace --separate keeps the standalone reader on ./trace/;
     if an old ./trace.jsonl exists, run npx tsx scripts/trace-migrate.ts first
-• trace 独立进程读 /api/v1/traces + /fields + /health；写侧仍由 serve/chat/ask 的 --trace-out 负责
-    / trace is a separate process; serve/chat/ask still write via --trace-out
   • tui 与 serve 共享 ~/.iknow 会话池；tui 内 /help 看 slash 词表 / tui shares the pool
   • 管道可设 IKNOW_CHAT_QUIET=1 关闭 turn 标记 / pipe: IKNOW_CHAT_QUIET=1 quiet markers`;
 }

@@ -80,6 +80,12 @@ export type ParsedCli = {
    */
   noOpen: boolean;
   /**
+   * ADR-0020 D2.2: `iknow trace --separate` escape hatch — 保留 #183 独立
+   * 进程模式（默认 24881）。缺省 false = 默认探测 `iknow serve` 后指向
+   * 同进程 /trace 面板（D2.1）。
+   */
+  separate: boolean;
+  /**
    * T4: `iknow chat --resume <id>` 锚定既有 conversationId 续跑。解析保持
    * command-agnostic(后续 ask/serve/tui 可独立决策是否消费);仅 chat 入口
    * 实际消费。`undefined`(默认)= 新开会话(随机 UUID)。
@@ -120,6 +126,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   let maxBytes: number | undefined;
   let maxTurns: number | undefined;
   let noOpen = false;
+  let separate = false;
   let resumeId: string | undefined;
   const rest: string[] = [];
 
@@ -142,6 +149,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           maxBytes: undefined,
           maxTurns: undefined,
           noOpen: false,
+          separate: false,
           query: "",
           missingQuery: false,
           versionOnly: false,
@@ -161,6 +169,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           maxBytes,
           maxTurns,
           noOpen,
+          separate,
           resumeId,
           query: "",
           missingQuery: false,
@@ -217,6 +226,9 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
     } else if (a === "--no-open") {
       // T7: 布尔 flag（无实参），关闭 trace 自动开浏览器（CI/headless）。
       noOpen = true;
+    } else if (a === "--separate") {
+      // ADR-0020 D2.2: 布尔 flag（无实参），trace 保留独立进程模式。
+      separate = true;
     } else if (a === "--resume") {
       // T4: 值式 flag —— 缺失 / 空串 / 纯空白均拒绝（镜像 --port 风格）。
       const raw = argv[++i];
@@ -252,6 +264,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           maxBytes,
           maxTurns,
           noOpen,
+          separate,
           resumeId,
           query: "",
           missingQuery: false,
@@ -273,6 +286,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
     maxBytes,
     maxTurns,
     noOpen,
+    separate,
     resumeId,
     versionOnly: false,
   };
@@ -301,10 +315,11 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   }
 
   if (head === "trace") {
-    // iknow trace: default port 24881 (serve uses 8787). Sentinel-based: only
-    // override when the user did not pass --port, so `iknow trace --port 8787`
-    // is honored verbatim instead of silently bumped to 24881.
-    const tracePort = portSet ? port : 24881;
+    // ADR-0020 D2: default mode probes `iknow serve` → default port 8787
+    // (serve's port); `--separate` keeps the #183 standalone default 24881.
+    // Sentinel-based: only override when the user did not pass --port, so
+    // `iknow trace --port 9999` is honored verbatim.
+    const tracePort = portSet ? port : separate ? 24881 : 8787;
     return baseParsed({
       command: "trace",
       fields: {
