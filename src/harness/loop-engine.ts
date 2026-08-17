@@ -483,8 +483,13 @@ async function tryRunSummary(opts: {
  * 落一条独立的 `recordLlmCall`(status ok),**不**额外落 turn ——
  * 避免破坏既有 turn 序列的 `lines.length` 精确断言(挂 maxTurns 的
  * 断言由本分支 throw 前内部先行记录 turn)。
+ *
+ * **#358 T3 导出**:worker.ts 在 run() 返回 cancelled + subagent-timeout
+ * abort 后以**未中止**的新 signal 自跑本收尾摘要轮 (spec Code Style
+ * "catch 侧跑 epilogueSummary 一轮" 的进程内落实; signal 已 abort 时
+ * run() 内部不会跑, 故由 worker 补上)。导出为 additive, 逻辑零改动。
  */
-async function epilogueSummary(opts: {
+export async function epilogueSummary(opts: {
   readonly deps: LoopEngineDeps;
   readonly messages: ReadonlyArray<AnthropicNativeMessage>;
   readonly reason: string;

@@ -44,7 +44,8 @@ import { createIknowSystemResolver } from "../identity/index.js";
 import { createSkillScanner } from "../skill/scanner.js";
 import { createSkillCatalog } from "../skill/catalog.js";
 import { createJsonlTraceService, type TraceService } from "../trace/index.js";
-import { run } from "../loop-engine.js";
+import { run, epilogueSummary } from "../loop-engine.js";
+import type { HarnessStreamEvent } from "../stream.js";
 import { MaxTurnsExceeded, ProtocolError } from "../errors.js";
 import {
   parseWorkerEnvelope,
@@ -240,16 +241,35 @@ export function toOkEnvelope(
 }
 
 /** 失败路径 envelope (SC6 reason enum: crashed/maxTurnsExceeded/timeout/protocolError)。
- *  导出: 测试 seam — 直接验证 reason 四值各自的 envelope 形态。 */
+ *  导出: 测试 seam — 直接验证 reason 四值各自的 envelope 形态。
+ *  #358 T3 (additive): 第二参 summary 可选 — SIGTERM 优雅收尾时携带
+ *  worker 自跑收尾摘要轮的 stop_summary 文本;不传时行为与旧签名逐位一致
+ *  (空串), 不 breaking 既有 callers。 */
 export function toFailedEnvelope(
-  reason: SubAgentEnvelope["reason"]
+  reason: SubAgentEnvelope["reason"],
+  summary = ""
 ): SubAgentEnvelope {
   return {
     status: "failed",
     reason,
-    summary: "",
+    summary,
     result: "",
   };
+}
+
+/**
+ * #358 T3:是否本 worker 的 SIGTERM 超时 abort。
+ *
+ * 判定线 = `signal.reason === "subagent-timeout"` (worker 注册的 SIGTERM
+ * handler 用该 reason abort controller)。run() 的 stopReason 为 cancelled
+ * 未必源自本 abort —— 工具侧 execution_failed:"cancelled" 也能产生
+ * cancelled (computeToolStopFlags, 无 signal abort), 此时绝不能误走
+ * 超时收尾信封。纯谓词, 导出供测试 seam 与 worker 判定共用。
+ */
+export function isSubagentTimeoutAbort(
+  signal: AbortSignal | undefined
+): boolean {
+  return signal?.aborted === true && signal.reason === "subagent-timeout";
 }
 
 /**
@@ -286,6 +306,19 @@ export function applyEnvelopeOverrides(
  *   - run() 抛 ProtocolError → status:failed, reason:protocolError
  *     (harness 模型协议错误, 不是 envelope 协议 —— 区别于 exit 2 路径);
  *   - 其他 run() 错误 → 抛出 (runSubagentWorker 兜底 → exit 2 → crashed)。
+ *
+ * #358 T3 SIGTERM 优雅收尾 (spec Code Style "catch 侧跑 epilogueSummary 一轮"):
+ *   - 进程收 SIGTERM (父 manager 超时计时到) → 同步前奏注册的 handler 用
+ *     reason "subagent-timeout" abort controller → raceModel callerAbort →
+ *     run() 返回 stopReason="cancelled";
+ *   - run() 内部的 epilogueSummary 会因 signal 已 abort 直接跳过 (L494
+ *     "if (opts.signal?.aborted) return") —— 故 worker 在 run() 返回后
+ *     用**未中止的新 signal** 自跑一轮收尾摘要 (reason:"timeout"), 捕获
+ *     stop_summary 文本进 envelope.summary, 让父代理 drain 拿到真实进度
+ *     (而非 generic "timeout after <n>ms");
+ *   - 摘要轮 best-effort (D3 纪律): 失败 / 超时 / 抛错 → summary 回退空串,
+ *     envelope 照常写, 绝不阻塞;
+ *   - non-SIGTERM 路径 (普通 cancelled / protocolError / ok) 字节不变。
  */
 export async function runWorkerOnce(opts: {
   readonly workerEnvelope: WorkerEnvelope;
@@ -294,8 +327,16 @@ export async function runWorkerOnce(opts: {
   const { workerEnvelope: env, deps } = opts;
   // #358 T2 / D8: 只应用 maxTurns 覆盖, timeoutMs 不进 deps (per-call 语义)。
   const runDeps = applyEnvelopeOverrides(env, deps);
+  // #358 T3: SIGTERM → abort("subagent-timeout")。worker 由父 manager per-task
+  // 超时计时驱动, 收到 SIGTERM = 任务寿命到点, 走优雅收尾而非立即退出。
+  const controller = new AbortController();
+  const onSigterm = (): void => controller.abort("subagent-timeout");
+  process.once("SIGTERM", onSigterm);
   try {
-    const { result } = await run(env.task, runDeps);
+    // 运行期透传 signal。onStream 不传: (a) text_delta 等热路径事件 worker
+    // 无展示消费方; (b) signal 已 abort 时 run() 内部不跑收尾摘要, 不会 emit
+    // stop_summary —— 摘要捕获只在下方自跑收尾轮 (runTimeoutEpilogue) 完成。
+    const { result } = await run(env.task, runDeps, controller.signal);
     // run() 正常返回 ≠ 成功: harness 协议层错误 / 空最终回应以 stopReason
     // 形态返回 (不 throw), 但 worker 必须标 failed —— 父代理 drain 收到 ok
     // 却带 protocolError stopReason 会误判子代理成功 (SC6 / SC13)。
@@ -305,6 +346,22 @@ export async function runWorkerOnce(opts: {
     ) {
       log(`run() stopReason=${result.stopReason}`);
       return truncateEnvelopeResult(toFailedEnvelope("protocolError"));
+    }
+    // #358 T3 超时收尾: stopReason=cancelled 且确系本 worker 的 SIGTERM
+    // abort (signal.reason === "subagent-timeout"; 工具侧 cancelled 不误标)。
+    if (
+      result.stopReason === "cancelled" &&
+      isSubagentTimeoutAbort(controller.signal)
+    ) {
+      const summary = await runTimeoutEpilogue(runDeps, result.messages);
+      log(
+        `run() cancelled by SIGTERM (subagent-timeout); epilogue summary=${
+          summary ? `${summary.length} chars` : "<empty>"
+        }`
+      );
+      return truncateEnvelopeResult(
+        toFailedEnvelope("timeout", summary.length > 0 ? summary : "")
+      );
     }
     return truncateEnvelopeResult(toOkEnvelope(result));
   } catch (err) {
@@ -316,7 +373,51 @@ export async function runWorkerOnce(opts: {
       return truncateEnvelopeResult(toFailedEnvelope("protocolError"));
     }
     throw err;
+  } finally {
+    // 任务结束（无论成败）即移除 SIGTERM 监听, 避免 worker 长驻阶段
+    // 残留 listener（runSubagentWorker 随后 process.exit(0)）。
+    process.removeListener("SIGTERM", onSigterm);
   }
+}
+
+/**
+ * #358 T3:worker 自跑一轮 SIGTERM 收尾摘要 (best-effort, D3)。
+ *
+ * run() 返回 cancelled+(subagent-timeout abort) 时, run() 内部不会跑
+ * 收尾摘要 (signal 已 abort, epilogueSummary 直接返回)。此处用全新
+ * **未中止** controller 调 epilogueSummary 一轮 (reason:"timeout"):
+ *   - 需要手传 result.messages (cancelled 时已含 appendSystemInterrupt 的
+ *     权威历史, 见 run() stop 分支), 摘要轮只读它作为输入;
+ *   - 捕获 stop_summary 事件文本 → 返回它; 摘要轮失败 / 超时 / signal
+ *     再次中断 → 返回空串 (envelope 照常写, 绝不阻塞原始停因)。
+ * 内部 15s 摘要超时归 loop-engine 的 runSummaryWithTimeout 管, 这里不再
+ * 加第二层计时。
+ */
+async function runTimeoutEpilogue(
+  deps: LoopEngineDeps,
+  messages: ReadonlyArray<
+    import("../model-adapter/types.js").AnthropicNativeMessage
+  >
+): Promise<string> {
+  let summary = "";
+  const epilogueController = new AbortController();
+  try {
+    await epilogueSummary({
+      deps,
+      messages,
+      reason: "timeout",
+      signal: epilogueController.signal,
+      onStream: (event: HarnessStreamEvent) => {
+        if (event.type === "stop_summary") {
+          summary = event.text;
+        }
+      },
+    });
+  } catch {
+    // D3: 摘要失败绝不阻塞 — 返回空串, writer 侧照常写 timeout 信封。
+    return "";
+  }
+  return summary;
 }
 
 /** 一次性读 stdin 全部字节 (worker 协议: 单 envelope, 读到 EOF)。 */
