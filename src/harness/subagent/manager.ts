@@ -12,6 +12,13 @@ import type { ChildProcess } from "node:child_process";
 import { parseParentEnvelope, truncateEnvelopeResult } from "./envelope.js";
 import type { SubAgentEnvelope, WorkerEnvelope } from "./envelope.js";
 import type { SubAgentDefinition } from "./role.js";
+import type {
+  TraceService,
+  SubagentStopRecord,
+  SubagentStateChangeRecord,
+  SubagentState,
+} from "../trace/index.js";
+import { safeTrace } from "../trace/safe-trace.js";
 
 // re-export: manager 的调用方(T4/T5 工具、host-drain)统一从 manager 侧拿
 // SubAgentDefinition,不必各自 import role.js。
@@ -145,6 +152,13 @@ interface Task {
   timeoutTimer?: NodeJS.Timeout;
   /** #356 High #2 fix: SIGKILL 兜底 timer(exit / shutdown 需与 timeoutTimer 一并清)。 */
   timeoutKillFallback?: NodeJS.Timeout;
+  /** #358 T4: startedAt ISO 戳 (subagent_spawn 落盘的 source)。
+   *  Task 构造时即生成;后续 spawn/stop 都引用此 ISO。 */
+  readonly startedAt: string;
+  /** #358 T4: stoppedEmitted guard — subagent_stop 单点 single-emit
+   * (exit handler 与 child.on("error")/timeout-fired 等多路径都可能触发终态);
+   * flag 一旦置位不再覆写, 避免重复落盘。 */
+  stoppedEmitted: boolean;
 }
 
 const WAIT_POLL_MS = 25;
@@ -178,12 +192,92 @@ function armKillFallback(task: Task, reset = false): void {
 
 export function createSubAgentManager(opts: {
   readonly spawn: SubAgentSpawn;
+  /**
+   * #358 T4: 可选 TraceService — 子代理生命周期三类事件 (subagent_spawn /
+   * subagent_state_change / subagent_stop) 落盘。注入则通过 safeTrace 包裹
+   * 发埋点;不注入则零副作用 (与既有行为 byte-stable)。
+   */
+  readonly trace?: TraceService;
 }): SubAgentManager {
   const tasks = new Map<string, Task>();
   /** 所有未决 waitFor 的轮询句柄(非终态,shutdown 必须清,防进程悬挂)。 */
   const waitPollers = new Set<ReturnType<typeof setInterval>>();
   /** 未决 waitFor 的 settleReject 引用:shutdown 时主动拒绝,SC16 不悬挂。 */
   const waitRejecters = new Set<(reason: unknown) => void>();
+  /** #358 T4: trace 句柄 closure 捕获, spawn/state_change/stop 三处共用。 */
+  const trace = opts.trace;
+
+  /**
+   * #358 T4: emitStateChange — 任何 task.state 迁移点必经此处。
+   * Postel: reason 仅 toState === "failed" 时填 (spec Code Style 121)。
+   * 该函数: (1) 写入 task.state (2) 同步发 subagent_state_change 埋点 (3) 不 throw。
+   * safeTrace 包裹: trace 写盘失败不阻塞 manager 业务。
+   */
+  function emitStateChange(
+    task: Task,
+    toState: SubagentState,
+    opts2?: { readonly reason?: SubagentStateChangeRecord["reason"] }
+  ): void {
+    const fromState = task.state;
+    task.state = toState;
+    if (!trace) return;
+    void safeTrace(() =>
+      trace.recordSubagentStateChange({
+        id: task.id,
+        taskId: task.id,
+        origin: "parent",
+        startedAt: task.startedAt,
+        status: toState === "failed" ? "error" : "ok",
+        ts: new Date().toISOString(),
+        fromState,
+        toState,
+        ...(opts2?.reason !== undefined ? { reason: opts2.reason } : {}),
+      })
+    );
+  }
+
+  /**
+   * #358 T4: emitStop — 任务终态时落 subagent_stop; stoppedEmitted flag 守门
+   * 保证 single-emit (exit handler + timeout-fire + child.on("error") 多路径
+   * 都可能触发终态); 已发则 no-op。
+   * Postel: 缺省 reason = envelope.reason; summary = envelope.summary (failed 态必有)。
+   */
+  function emitStop(
+    task: Task,
+    finalState: "completed" | "failed",
+    extras: {
+      readonly exitCode?: number;
+      readonly signal?: NodeJS.Signals | string;
+      readonly reason?: SubagentStopRecord["reason"];
+      readonly summary?: string;
+    } = {}
+  ): void {
+    if (task.stoppedEmitted) return;
+    task.stoppedEmitted = true;
+    const endedAt = new Date().toISOString();
+    const durationMs = Math.max(
+      0,
+      Date.parse(endedAt) - Date.parse(task.startedAt)
+    );
+    if (!trace) return;
+    void safeTrace(() =>
+      trace.recordSubagentStop({
+        id: task.id,
+        taskId: task.id,
+        origin: "parent",
+        startedAt: task.startedAt,
+        endedAt,
+        durationMs,
+        finalState,
+        status: finalState === "failed" ? "error" : "ok",
+        ts: endedAt,
+        ...(extras.exitCode !== undefined ? { exitCode: extras.exitCode } : {}),
+        ...(extras.signal !== undefined ? { signal: extras.signal } : {}),
+        ...(extras.reason !== undefined ? { reason: extras.reason } : {}),
+        ...(extras.summary !== undefined ? { summary: extras.summary } : {}),
+      })
+    );
+  }
 
   function spawn(def: SubAgentDefinition): { readonly taskId: string } {
     // #361 C1: running+starting ≥ MAX_CONCURRENT_WORKERS 立即抛 SubAgentCapacityError。
@@ -197,25 +291,74 @@ export function createSubAgentManager(opts: {
     }
 
     const id = randomUUID();
-    const task: Task = { id, def, state: "starting" };
+    const startedAt = new Date().toISOString();
+    const task: Task = {
+      id,
+      def,
+      state: "starting",
+      startedAt,
+      stoppedEmitted: false,
+    };
     tasks.set(id, task);
 
     let child: ChildProcess;
     try {
       child = opts.spawn(def, id, buildWorkerPayload(def));
     } catch (err) {
-      task.state = "failed";
+      const errMsg = err instanceof Error ? err.message : String(err);
       task.envelope = {
         status: "failed",
         reason: "crashed",
-        summary: `subagent spawn failed: ${err instanceof Error ? err.message : String(err)}`,
+        summary: `subagent spawn failed: ${errMsg}`,
         result: "",
       };
+      // #358 T4: spawn 仍落 subagent_spawn (失败路径也记录尝试);
+      // 紧接 emitStateChange(failed) + emitStop (single-emit lifecycle)。
+      if (trace) {
+        void safeTrace(() =>
+          trace.recordSubagentSpawn({
+            id: task.id,
+            taskId: task.id,
+            origin: "parent",
+            startedAt: task.startedAt,
+            status: "error",
+            ts: new Date().toISOString(),
+          })
+        );
+      }
+      emitStateChange(task, "failed", { reason: "crashed" });
+      emitStop(task, "failed", {
+        reason: "crashed",
+        summary: `subagent spawn failed: ${errMsg}`,
+      });
       return { taskId: id };
     }
     task.child = child;
-    task.state = "running";
     task.abortCtrl = new AbortController();
+
+    // #358 T4: subagent_spawn 在 child 成功 launch 后 emit (task.state 此时还是
+    // "starting",下方 emitStateChange("running") 联动跑 starting→running 迁移)。
+    if (trace) {
+      const taskPreviewSource = def.task ?? def.systemPrompt ?? "";
+      void safeTrace(() =>
+        trace.recordSubagentSpawn({
+          id: task.id,
+          taskId: task.id,
+          origin: "parent",
+          startedAt: task.startedAt,
+          status: "ok",
+          ts: new Date().toISOString(),
+          ...(taskPreviewSource.length > 0
+            ? { taskPreview: taskPreviewSource.slice(0, 200) }
+            : {}),
+          ...(def.model !== undefined ? { model: def.model } : {}),
+          ...(def.maxTurns !== undefined ? { maxTurns: def.maxTurns } : {}),
+          ...(def.timeoutMs !== undefined ? { timeoutMs: def.timeoutMs } : {}),
+        })
+      );
+    }
+    // 状态迁移: starting → running (emitStateChange 内置 task.state 写入 + 埋点)
+    emitStateChange(task, "running");
 
     // #356 High #2 fix: per-task timeout (SC6 / assumption 14).
     // #361 T13: def.timeoutMs 缺省 = PER_TASK_TIMEOUT_MS(5min),与前景 wait
@@ -230,13 +373,17 @@ export function createSubAgentManager(opts: {
       task.timeoutTimer = setTimeout(() => {
         // Already terminated (child exit / stdout envelope) -> do not overwrite.
         if (task.state === "completed" || task.state === "failed") return;
-        task.state = "failed";
         task.envelope = {
           status: "failed",
           reason: "timeout",
           summary: `timeout after ${effectiveTimeoutMs}ms`,
           result: "",
         };
+        emitStateChange(task, "failed", { reason: "timeout" });
+        emitStop(task, "failed", {
+          reason: "timeout",
+          summary: `timeout after ${effectiveTimeoutMs}ms`,
+        });
         if (task.child) {
           try {
             task.child.kill("SIGTERM");
@@ -271,16 +418,44 @@ export function createSubAgentManager(opts: {
         try {
           const env = truncateEnvelopeResult(parseParentEnvelope(line));
           task.envelope = env;
-          task.state = "completed";
+          // #358 T4: state migration + stop event (single-emit 在 emitStop 内由
+          // stoppedEmitted flag 守门,后续 exit/error 路径重复触发 no-op)。
+          if (env.status === "ok") {
+            emitStateChange(task, "completed");
+            emitStop(task, "completed", { summary: env.summary });
+          } else {
+            emitStateChange(task, "failed", {
+              reason: (env.reason ?? "protocolError") as
+                | "crashed"
+                | "maxTurnsExceeded"
+                | "timeout"
+                | "protocolError"
+                | "cancelled",
+            });
+            emitStop(task, "failed", {
+              reason: (env.reason ?? "protocolError") as
+                | "crashed"
+                | "maxTurnsExceeded"
+                | "timeout"
+                | "protocolError"
+                | "cancelled",
+              summary: env.summary,
+            });
+          }
         } catch (err) {
           // SC13:信封校验失败 = 协议错误。
-          task.state = "failed";
+          const errMsg = err instanceof Error ? err.message : String(err);
           task.envelope = {
             status: "failed",
             reason: "protocolError",
-            summary: `subagent envelope protocol error: ${err instanceof Error ? err.message : String(err)}`,
+            summary: `subagent envelope protocol error: ${errMsg}`,
             result: "",
           };
+          emitStateChange(task, "failed", { reason: "protocolError" });
+          emitStop(task, "failed", {
+            reason: "protocolError",
+            summary: `subagent envelope protocol error: ${errMsg}`,
+          });
         }
       }
     });
@@ -303,26 +478,54 @@ export function createSubAgentManager(opts: {
       const timedOut =
         task.state === "failed" && task.envelope?.reason === "timeout";
       if (!timedOut && (code !== 0 || signal !== null)) {
-        task.state = "failed";
-        task.envelope = {
-          status: "failed",
-          reason: "crashed",
-          summary: `worker exit code=${code} signal=${signal}`,
-          result: "",
-        };
+        const reason: "crashed" | "timeout" =
+          task.state === "failed" && task.envelope?.reason === "timeout"
+            ? "timeout"
+            : "crashed";
+        // 在 timeout-fire 之后 child 走 SIGTERM 退出:task.state 已经 failed,
+        // 直接 emitStop(reason=timeout, signal=SIGTERM 等) — 不再次 emitStateChange。
+        if (reason === "crashed") {
+          task.envelope = {
+            status: "failed",
+            reason: "crashed",
+            summary: `worker exit code=${code} signal=${signal}`,
+            result: "",
+          };
+          emitStateChange(task, "failed", { reason: "crashed" });
+          emitStop(task, "failed", {
+            reason: "crashed",
+            summary: `worker exit code=${code} signal=${signal}`,
+            ...(code !== null ? { exitCode: code } : {}),
+            ...(signal !== null ? { signal } : {}),
+          });
+        } else {
+          // timeout envelope 已经写入 → 仅补 emitStop (terminal 信号)
+          emitStop(task, "failed", {
+            reason: "timeout",
+            summary: task.envelope?.summary ?? `timeout after effective`,
+            ...(code !== null ? { exitCode: code } : {}),
+            ...(signal !== null ? { signal } : {}),
+          });
+        }
       }
-      // 干净退出(0, null)且有 envelope → 保持 completed;无 envelope → 维持 running,
-      // 由 waitFor timeout / host drain 兜底。
+      // SC16: 干净退出 (0, null) 且无 envelope → 不改 state,维持 running。
+      // 由 waitFor timeout / host drain 兜底(SC16 由兜底机制接住)。
+      // 干净退出(0, null)且有 envelope → 保持 completed (已在 stdout 段 emitStop)。
     });
 
     child.on("error", (err) => {
-      task.state = "failed";
+      const errMsg = err.message;
       task.envelope = {
         status: "failed",
         reason: "crashed",
-        summary: err.message,
+        summary: errMsg,
         result: "",
       };
+      emitStateChange(task, "failed", { reason: "crashed" });
+      emitStop(task, "failed", {
+        reason: "crashed",
+        summary: errMsg,
+      });
     });
 
     return { taskId: id };

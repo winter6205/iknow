@@ -89,7 +89,7 @@ describe("createNoopTraceService", () => {
     for (const spy of consoleSpies) spy.mockClear();
   });
 
-  it("returns a TraceService with exactly 7 public methods", () => {
+  it("returns a TraceService with exactly 10 public methods", () => {
     const svc = createNoopTraceService();
     expect(typeof svc.recordLlmCall).toBe("function");
     expect(typeof svc.recordToolCall).toBe("function");
@@ -98,12 +98,18 @@ describe("createNoopTraceService", () => {
     expect(typeof svc.recordSandboxCmd).toBe("function");
     expect(typeof svc.recordVerification).toBe("function");
     expect(typeof svc.recordGoal).toBe("function");
+    expect(typeof svc.recordSubagentSpawn).toBe("function");
+    expect(typeof svc.recordSubagentStop).toBe("function");
+    expect(typeof svc.recordSubagentStateChange).toBe("function");
     const ownKeys = Object.keys(svc).sort();
     assert.deepEqual(ownKeys, [
       "recordGoal",
       "recordLlmCall",
       "recordSandboxCmd",
       "recordSession",
+      "recordSubagentSpawn",
+      "recordSubagentStateChange",
+      "recordSubagentStop",
       "recordToolCall",
       "recordTurn",
       "recordVerification",
@@ -125,6 +131,50 @@ describe("createNoopTraceService", () => {
   it("recordTurn resolves undefined", async () => {
     const svc = createNoopTraceService();
     const result = await svc.recordTurn(SAMPLE_TURN);
+    assert.equal(result, undefined);
+  });
+
+  it("recordSubagentSpawn resolves undefined (T4 #358)", async () => {
+    const svc = createNoopTraceService();
+    const result = await svc.recordSubagentSpawn({
+      id: "task-1",
+      taskId: "task-1",
+      origin: "parent",
+      startedAt: "2026-08-18T00:00:00.000Z",
+      status: "ok",
+      ts: "2026-08-18T00:00:00.000Z",
+    });
+    assert.equal(result, undefined);
+  });
+
+  it("recordSubagentStop resolves undefined (T4 #358)", async () => {
+    const svc = createNoopTraceService();
+    const result = await svc.recordSubagentStop({
+      id: "task-1",
+      taskId: "task-1",
+      origin: "parent",
+      startedAt: "2026-08-18T00:00:00.000Z",
+      endedAt: "2026-08-18T00:00:01.000Z",
+      durationMs: 1000,
+      finalState: "completed",
+      status: "ok",
+      ts: "2026-08-18T00:00:01.000Z",
+    });
+    assert.equal(result, undefined);
+  });
+
+  it("recordSubagentStateChange resolves undefined (T4 #358)", async () => {
+    const svc = createNoopTraceService();
+    const result = await svc.recordSubagentStateChange({
+      id: "task-1",
+      taskId: "task-1",
+      origin: "parent",
+      startedAt: "2026-08-18T00:00:00.000Z",
+      status: "ok",
+      ts: "2026-08-18T00:00:00.500Z",
+      fromState: "starting",
+      toState: "running",
+    });
     assert.equal(result, undefined);
   });
 

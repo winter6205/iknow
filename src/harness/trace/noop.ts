@@ -36,5 +36,14 @@ export function createNoopTraceService(): TraceService {
     async recordGoal(_record) {
       return undefined;
     },
+    async recordSubagentSpawn(_record) {
+      return undefined;
+    },
+    async recordSubagentStop(_record) {
+      return undefined;
+    },
+    async recordSubagentStateChange(_record) {
+      return undefined;
+    },
   };
 }

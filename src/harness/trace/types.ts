@@ -220,6 +220,86 @@ export type VerificationVerdict = "pass" | "true-failure" | "unstable";
 export type VerificationAction = "continue" | "stop" | "escalate";
 
 /**
+ * 子代理生命周期状态机（T4，#358）— 与 manager 内部 `TaskState` 同构（"starting" |
+ * "running" | "completed" | "failed"）。trace 域独立松耦合（文件头注释 21-23），
+ * 不 import manager.ts；通过重定义字面联合保持字面描述一致（byte-stable 对齐）。
+ */
+export type SubagentState = "starting" | "running" | "completed" | "failed";
+
+/**
+ * 子代理生命周期 trace record (T4, #358) — 子代理生命周期三类事件落盘。
+ *
+ * 与 VerificationRecord / GoalRecord 同形态：id 由调用方提供（= manager 的 taskId），
+ * 实现不做 ID 生成 —— 成功返回 record.id, 失败返回 undefined。
+ *
+ * Postel (ADR-0003 D9): 可选字段仅存在时落盘（JSON.stringify 自动丢弃 undefined）。
+ * 可选字段 model / taskPreview / maxTurns / timeoutMs / error 等仅当调用方有可填
+ * 来源时才在 record 上存在 —— manager 当前无 parentTurnId 来源（spawn-subagent 工具
+ * 未把 turnId 写到 SubAgentDefinition），后续 ticket 在 SubAgentDefinition 上加
+ * parentTurnId?；本轮 manager 埋点对此字段置 undefined → 不落 key。
+ *
+ * Origin 留位 v1 恒 "parent"（子代理生命周期状态机完全在父 manager 内；worker 只
+ * 写 stdout 信封，schema 不变即可升级 child 留位）。
+ */
+export interface SubagentSpawnRecord {
+  readonly id: string;
+  readonly taskId: string;
+  readonly parentTurnId?: string;
+  readonly origin: "parent" | "child";
+  readonly startedAt: string;
+  readonly status: TraceStatus;
+  readonly ts: string;
+  readonly taskPreview?: string;
+  readonly maxTurns?: number;
+  readonly timeoutMs?: number;
+  readonly model?: string;
+  readonly error?: TraceError;
+}
+
+/**
+ * SubagentStopRecord — 任务终态（含 completed / failed）时落盘一次。
+ * durationMs = endedAt − startedAt（ms）；finalState ∈ {"completed","failed"}。
+ * reason 域对齐 envelope reason union + "cancelled"（waitFor abort 路径延伸）。
+ */
+export interface SubagentStopRecord {
+  readonly id: string;
+  readonly taskId: string;
+  readonly parentTurnId?: string;
+  readonly origin: "parent" | "child";
+  readonly startedAt: string;
+  readonly endedAt: string;
+  readonly durationMs: number;
+  readonly finalState: "completed" | "failed";
+  readonly status: TraceStatus;
+  readonly ts: string;
+  readonly exitCode?: number;
+  readonly signal?: NodeJS.Signals | string;
+  readonly reason?:
+    "crashed" | "maxTurnsExceeded" | "timeout" | "protocolError" | "cancelled";
+  readonly summary?: string;
+  readonly error?: TraceError;
+}
+
+/**
+ * SubagentStateChangeRecord — task.state 每次迁移时落一条（含 starting→running、
+ * *→completed、*→failed）。fromState / toState 必有；reason 仅 failed 时填。
+ */
+export interface SubagentStateChangeRecord {
+  readonly id: string;
+  readonly taskId: string;
+  readonly parentTurnId?: string;
+  readonly origin: "parent" | "child";
+  readonly startedAt: string;
+  readonly status: TraceStatus;
+  readonly ts: string;
+  readonly fromState: SubagentState;
+  readonly toState: SubagentState;
+  readonly reason?:
+    "crashed" | "maxTurnsExceeded" | "timeout" | "protocolError" | "cancelled";
+  readonly error?: TraceError;
+}
+
+/**
  * Goal 生命周期 trace action (T4, #458).
  *
  * 自包含字面量联合 —— trace bounded context 遵循文件头注释 (types.ts:21-23)
@@ -310,4 +390,22 @@ export interface TraceService {
    * @throws never — 实现必须捕获 IO 错误并返回 undefined。
    */
   recordGoal(record: GoalRecord): Promise<string | undefined>;
+  /**
+   * 记录一次子代理 spawn (#358 T4) — 调用方提供 id (= manager taskId), 实现不做 ID 生成。
+   * @throws never — 调用方应经 safeTrace 包裹, 实现失败返回 undefined。
+   */
+  recordSubagentSpawn(record: SubagentSpawnRecord): Promise<string | undefined>;
+  /**
+   * 记录一次子代理终态 (completed / failed) (#358 T4) — 单点 single-emit,
+   * 父 manager 内置 stoppedEmitted flag 保证不重复落盘。
+   * @throws never.
+   */
+  recordSubagentStop(record: SubagentStopRecord): Promise<string | undefined>;
+  /**
+   * 记录一次子代理状态迁移 (#358 T4) — fromState/toState 必有; reason 仅 failed 时填。
+   * @throws never.
+   */
+  recordSubagentStateChange(
+    record: SubagentStateChangeRecord
+  ): Promise<string | undefined>;
 }
