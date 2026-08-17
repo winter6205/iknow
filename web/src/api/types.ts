@@ -180,8 +180,20 @@ export interface SessionsResponse {
   readonly sessions: ReadonlyArray<TraceSessionSummary>;
 }
 
+/**
+ * Mirrors TraceRecordType in src/traceserver/types.ts (whitelist-derrived union).
+ * 新 record 类型只在此追加, 对齐读侧白名单 (T5)。
+ */
 export type TraceRecordType =
-  "llm_call" | "tool_call" | "turn" | "violation" | "session" | "sandbox_cmd";
+  | "llm_call"
+  | "tool_call"
+  | "turn"
+  | "violation"
+  | "session"
+  | "sandbox_cmd"
+  | "subagent_spawn"
+  | "subagent_stop"
+  | "subagent_state_change";
 
 export type TraceFieldType =
   "string" | "number" | "boolean" | "enum" | "datetime";
@@ -205,4 +217,13 @@ export interface TraceQueryParams {
   readonly offset?: number;
   /** 前端轮询间隔（缺省 1000ms，0 关闭）。spec v2 SC-R 14 / SC-V 26. */
   readonly poll?: number;
+  /**
+   * T5/T6 (#358): 精确匹配 subagent task_id (snake_case wire, 镜像读侧
+   * TraceQuery.taskId)。undefined = 不参与过滤。
+   */
+  readonly task_id?: string;
+  /**
+   * T5/T6 (#358): 精确匹配 parent_turn_id (snake_case wire)。undefined = 不参与过滤。
+   */
+  readonly parent_turn_id?: string;
 }

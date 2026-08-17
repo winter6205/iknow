@@ -233,6 +233,12 @@ function traceQueryString(params: TraceQueryParams): string {
   if (params.limit !== undefined) sp.set("limit", String(params.limit));
   if (params.offset !== undefined) sp.set("offset", String(params.offset));
   if (params.poll !== undefined) sp.set("poll", String(params.poll));
+  if (params.task_id !== undefined && params.task_id !== "") {
+    sp.set("task_id", params.task_id);
+  }
+  if (params.parent_turn_id !== undefined && params.parent_turn_id !== "") {
+    sp.set("parent_turn_id", params.parent_turn_id);
+  }
   return sp.toString();
 }
 

@@ -151,6 +151,221 @@ describe("recordsToEvents", () => {
     );
   });
 
+  it("maps the three subagent record types to the subagent station", () => {
+    const events = recordsToEvents([
+      {
+        record_type: "subagent_spawn",
+        started_at: iso(0, 1, 0),
+        status: "ok",
+      },
+      {
+        record_type: "subagent_stop",
+        started_at: iso(0, 1, 1),
+        status: "ok",
+        final_state: "completed",
+      },
+      {
+        record_type: "subagent_state_change",
+        started_at: iso(0, 1, 2),
+        status: "ok",
+        to_state: "running",
+      },
+    ]);
+    assert.deepEqual(
+      events.map((e) => e.station),
+      ["subagent", "subagent", "subagent"]
+    );
+  });
+
+  it("derives subagent status from final_state / to_state", () => {
+    const completed = recordsToEvents([
+      {
+        record_type: "subagent_stop",
+        started_at: iso(0, 1, 0),
+        status: "ok",
+        final_state: "completed",
+      },
+    ])[0];
+    assert.equal(completed.status, "ok");
+
+    const failedStop = recordsToEvents([
+      {
+        record_type: "subagent_stop",
+        started_at: iso(0, 1, 0),
+        status: "ok",
+        final_state: "failed",
+        reason: "timeout",
+      },
+    ])[0];
+    assert.equal(failedStop.status, "error");
+
+    const failedChange = recordsToEvents([
+      {
+        record_type: "subagent_state_change",
+        started_at: iso(0, 1, 0),
+        status: "ok",
+        to_state: "failed",
+      },
+    ])[0];
+    assert.equal(failedChange.status, "error");
+
+    const runningChange = recordsToEvents([
+      {
+        record_type: "subagent_state_change",
+        started_at: iso(0, 1, 0),
+        status: "ok",
+        to_state: "running",
+      },
+    ])[0];
+    assert.equal(runningChange.status, "ok");
+  });
+
+  it("honours wire status=error on subagent rows", () => {
+    const events = recordsToEvents([
+      {
+        record_type: "subagent_spawn",
+        started_at: iso(0, 1, 0),
+        status: "error",
+      },
+    ]);
+    assert.equal(events[0].status, "error");
+  });
+
+  it("labels subagent records with lifecycle text", () => {
+    const events = recordsToEvents([
+      {
+        record_type: "subagent_spawn",
+        started_at: iso(0, 1, 0),
+        status: "ok",
+      },
+      {
+        record_type: "subagent_spawn",
+        started_at: iso(0, 1, 1),
+        status: "ok",
+        task_preview: "修复 flaky test",
+      },
+      {
+        record_type: "subagent_stop",
+        started_at: iso(0, 1, 2),
+        status: "ok",
+        final_state: "completed",
+      },
+      {
+        record_type: "subagent_stop",
+        started_at: iso(0, 1, 3),
+        status: "ok",
+        final_state: "failed",
+      },
+      {
+        record_type: "subagent_state_change",
+        started_at: iso(0, 1, 4),
+        status: "ok",
+        from_state: "starting",
+        to_state: "running",
+      },
+    ]);
+    assert.deepEqual(
+      events.map((e) => e.label),
+      [
+        "子代理 spawn",
+        "修复 flaky test",
+        "子代理 stop · completed",
+        "子代理 stop · failed",
+        "子代理状态 starting→running",
+      ]
+    );
+  });
+
+  it("strips subagent structural keys from the detail fields", () => {
+    const events = recordsToEvents([
+      {
+        record_type: "subagent_stop",
+        subagent_id: "s1",
+        task_id: "t1",
+        parent_turn_id: "p1",
+        origin: "parent",
+        final_state: "failed",
+        started_at: iso(0, 1, 0),
+        status: "ok",
+        reason: "timeout",
+        summary: "reproduced in 2 steps",
+      },
+      {
+        record_type: "subagent_state_change",
+        subagent_id: "s1",
+        task_id: "t1",
+        origin: "parent",
+        from_state: "running",
+        to_state: "failed",
+        started_at: iso(0, 1, 1),
+        status: "ok",
+      },
+    ]);
+    const stopFields = events[0].fields;
+    assert.equal(stopFields["subagent_id"], undefined);
+    assert.equal(stopFields["task_id"], undefined);
+    assert.equal(stopFields["parent_turn_id"], undefined);
+    assert.equal(stopFields["origin"], undefined);
+    assert.equal(stopFields["final_state"], undefined);
+    // payload detail is preserved, not deduplicated away
+    assert.equal(stopFields["reason"], "timeout");
+    assert.equal(stopFields["summary"], "reproduced in 2 steps");
+    const changeFields = events[1].fields;
+    assert.equal(changeFields["from_state"], undefined);
+    assert.equal(changeFields["to_state"], undefined);
+    assert.equal(changeFields["record_type"], undefined);
+  });
+
+  it("places subagent events chronologically alongside other stations", () => {
+    const events = recordsToEvents([
+      {
+        record_type: "llm_call",
+        llm_call_id: "l1",
+        started_at: iso(0, 1, 1),
+        status: "ok",
+      },
+      {
+        record_type: "subagent_spawn",
+        subagent_id: "s1",
+        started_at: iso(0, 1, 2),
+        status: "ok",
+        task_preview: "多回合排查",
+      },
+      {
+        record_type: "subagent_state_change",
+        subagent_id: "s1",
+        started_at: iso(0, 1, 3),
+        status: "ok",
+        to_state: "running",
+      },
+      {
+        record_type: "subagent_stop",
+        subagent_id: "s1",
+        started_at: iso(0, 1, 4),
+        status: "ok",
+        final_state: "completed",
+      },
+      {
+        record_type: "tool_call",
+        parent_llm_call_id: "l1",
+        tool_name: "grep",
+        started_at: iso(0, 1, 5),
+        status: "ok",
+      },
+    ]);
+    assert.equal(events.length, 5);
+    assert.deepEqual(
+      events.map((e) => e.idx),
+      [0, 1, 2, 3, 4]
+    );
+    assert.deepEqual(
+      events.map((e) => e.station),
+      ["llm", "subagent", "subagent", "subagent", "tool"]
+    );
+    assert.equal(events[1].label, "多回合排查");
+    assert.ok(events.every((e) => e.turn === 0));
+  });
+
   it("routes a permission-denied violation to the permission station with denied status", () => {
     const events = recordsToEvents([
       {
@@ -249,10 +464,23 @@ describe("statusTone / isErr", () => {
 });
 
 describe("STATIONS", () => {
-  it("declares the 6 FlowTree stations in spec order", () => {
+  it("declares the 7 FlowTree stations in spec order", () => {
     assert.deepEqual(
       STATIONS.map((s) => s.id),
-      ["session", "llm", "tool", "sandbox", "permission", "violation"]
+      [
+        "session",
+        "llm",
+        "tool",
+        "sandbox",
+        "permission",
+        "violation",
+        "subagent",
+      ]
     );
+  });
+
+  it("labels the subagent station with the UI string", () => {
+    const subagentStation = STATIONS.find((s) => s.id === "subagent");
+    assert.equal(subagentStation?.label, "子代理");
   });
 });
