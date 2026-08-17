@@ -119,6 +119,10 @@ export interface BackgroundSpawnRequest {
   readonly workspaceRoot?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly home?: string;
+  /** #503 T11:network?: boolean — 透传 defaultBackgroundSpawn 构造 host-net
+   *  fence（去 --unshare-net）。缺省 / false = 既有隔离路径（与 bwrap 默认
+   *  --unshare-net 行为一致）。由 bash.ts handleBackground 透传 input.network。 */
+  readonly network?: boolean;
 }
 
 export type BackgroundSpawnResult =
@@ -229,6 +233,10 @@ export async function defaultBackgroundSpawn(
     resourceLimits: resources,
     env: fenceEnv,
     cwd,
+    // #503 T11:network:true 透传到 fence —— 去掉 --unshare-net,共享宿主
+    // netns。其余 fence（--unshare-user-try / --die-with-parent / ro-binds /
+    // tmpfs / clearenv / chdir / 命令）逐字节不变,只动网络轴。
+    ...(req.network ? { network: true } : {}),
   });
   return nodeSpawn(fence.argv[0], fence.argv.slice(1), {
     cwd,

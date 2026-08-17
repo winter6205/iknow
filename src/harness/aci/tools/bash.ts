@@ -84,14 +84,21 @@ export function createBashTool(
     // #502 T3:校验链通过后才决定前台 / 后台 —— 危险命令 / 敏感路径在两侧
     // 都先执行同一闸门（background 不豁免安全检查）。
     if ((input as BashInput | null)?.background === true) {
-      // #503 T11 TODO:network:true + background 接线 —— 后台路径不在 T10 范
-      // 围内(默认 spawn 是 host-net 隐含行为,后续需要协调 manager.spawn
-      // 是否透传 fence shape 变化)。此处先保留 input.network 解析点占位,
-      // T11 任务里把 fence shape 决策下沉到 manager.spawn。
+      // #503 T11:network:true + background 接线 —— fence shape 决策下沉到
+      // manager.spawn（BackgroundSpawnRequest.network → defaultBackgroundSpawn
+      // 构造 host-net fence）。权限层强制 ask 由 T10 policy 覆盖，工具层不重复
+      // 检查；此处只解析严格 === true，非布尔 / 缺省 / false → 隔离路径。
       const bgCommand = opts?.secretRegistry
         ? restore(command, opts.secretRegistry)
         : command;
-      return await handleBackground(bgCommand, cwd, opts ?? {}, ctx);
+      const wantsHostNetwork = (input as BashInput | null)?.network === true;
+      return await handleBackground(
+        bgCommand,
+        cwd,
+        opts ?? {},
+        ctx,
+        wantsHostNetwork
+      );
     }
     const fenceEnv = envIsolation.filter(process.env);
     // #406 T3:构造 fence 前还原占位符 —— 还原后的命令才是真正 spawn 进 bwrap
@@ -177,7 +184,8 @@ async function handleBackground(
   finalCommand: string,
   cwd: string,
   opts: CreateBashToolOptions,
-  ctx?: ToolExecutionContext
+  ctx?: ToolExecutionContext,
+  wantsHostNetwork = false
 ): Promise<{ task_id: string; log_path: string }> {
   const manager = opts.backgroundManager;
   if (!manager) {
@@ -194,6 +202,9 @@ async function handleBackground(
     ...(ctx?.conversationId !== undefined
       ? { conversationId: ctx.conversationId }
       : {}),
+    // #503 T11:background path 的 host-network opt-in —— 透传 spawn request,
+    // defaultBackgroundSpawn 据此构造 host-net fence（去 --unshare-net）。
+    ...(wantsHostNetwork ? { network: true } : {}),
   });
   if (result.status === "spawn_error") {
     // 与 bash 既有错误形态一致:typed-error 渲染（${kind}: ${context}）装进
