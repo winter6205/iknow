@@ -82,6 +82,8 @@ CLI `src/cli.ts` gains:
 - `--trace-out <file>` flag (or `IKNOW_TRACE_OUT` env read) on the `serve` subcommand.
 - `chat` TTY REPL subcommand is **unmodified**.
 
+> **读侧形态（ADR-0020, 2026-08-17）**：trace 读侧（`src/traceserver/` 查询 API + trace.html 检测面板）**同进程挂载在 `iknow serve`**——`/api/v1/traces/*` 路由子树 + `/trace` SPA（写侧 hub 每会话写的 `<traceDir>/<convId>.jsonl` 就地可读）。`iknow trace` 默认行为 = 探测 serve health 后打印 `/trace` URL（`--separate` escape hatch 保留独立进程模式）。#183 的独立进程拆分已被推翻（理由复盘见 ADR-0020 Context）。
+
 `tests/harness/trace/` — new test directory; coverage strategy in §Testing Strategy below.
 
 ## Code Style
