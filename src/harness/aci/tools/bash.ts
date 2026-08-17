@@ -88,11 +88,14 @@ export function createBashTool(
       // manager.spawn（BackgroundSpawnRequest.network → defaultBackgroundSpawn
       // 构造 host-net fence）。权限层强制 ask 由 T10 policy 覆盖，工具层不重复
       // 检查；此处只解析严格 === true，非布尔 / 缺省 / false → 隔离路径。
+      // #502 review-repair（#406 roundtrip）:recordCommand 传原始占位符形态
+      // input.command（占位符落盘）,command 传还原后真值（spawn 执行用,不上盘）。
       const bgCommand = opts?.secretRegistry
         ? restore(command, opts.secretRegistry)
         : command;
       const wantsHostNetwork = (input as BashInput | null)?.network === true;
       return await handleBackground(
+        command,
         bgCommand,
         cwd,
         opts ?? {},
@@ -172,8 +175,11 @@ export function createBashTool(
 /**
  * #502 T3:background 分支 —— 经 backgroundManager.spawn 起 detached 子进程后
  * 立即返回 {task_id, log_path}。不 await 子进程退出、不经 runInSandbox（无 fence
- * 二次构造）。secret 还原后的 finalCommand 在这里已是输入（调用方校验链之后
- * 还原），占位符不进 registry / log。
+ * 二次构造）。
+ *
+ * #502 review-repair（#406 roundtrip）:secret 还原在调用方完成 —— command 传
+ * 还原后真值（只活在 spawn 调用栈,沙箱执行拿真值）；recordCommand 传原始
+ * 占位符形态（registry json 落盘用,占位符在盘上）。
  *
  * #502 T5:ctx.conversationId 透传 spawn request —— 进程由哪个 session 启的就
  * 标哪个 conversationId，bash_output / bash_stop 后续按同字段做 scope 过滤。
@@ -181,6 +187,7 @@ export function createBashTool(
  * 对齐）。
  */
 async function handleBackground(
+  recordCommand: string,
   finalCommand: string,
   cwd: string,
   opts: CreateBashToolOptions,
@@ -195,6 +202,7 @@ async function handleBackground(
   }
   const result = await manager.spawn({
     command: finalCommand,
+    recordCommand,
     cwd,
     workspaceRoot: opts.workspaceRoot,
     env: process.env,

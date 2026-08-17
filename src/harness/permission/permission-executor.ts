@@ -22,7 +22,11 @@ import type {
   ToolDef,
 } from "../tools/types.js";
 import type { AciCatalog, AciToolDef } from "../aci/types.js";
-import { checkPermission, type PermissionPolicy } from "./policy.js";
+import {
+  checkPermission,
+  isBashNetworkTrue,
+  type PermissionPolicy,
+} from "./policy.js";
 import { VIOLATION_PREFIXES } from "./prefixes.js";
 import type {
   AskUser,
@@ -282,18 +286,12 @@ function summarizeInput(input: unknown): string {
 }
 
 /**
- * #503 T10 / ADR-0022:bash network:true 是宿主网络批准轴。判定条件与
- * policy.ts `code-ask-bash-network` 规则完全相同（tool === "bash" 且
- * input.network 严格 === true），保证 hint 形态与决策来源一一对应。
+ * #503 T10 / ADR-0022:bash network:true 是宿主网络批准轴。判定条件委托给
+ * policy.ts 的 `isBashNetworkTrue` SSOT —— 决策来源与 hint 形态一一对应，
+ * review-repair #502/#503 收敛两处逐字同形谓词。
  */
 function isNetworkBash(tool: string, input: unknown): boolean {
-  return (
-    tool === "bash" &&
-    typeof input === "object" &&
-    input !== null &&
-    !Array.isArray(input) &&
-    (input as { network?: unknown }).network === true
-  );
+  return isBashNetworkTrue(tool, input);
 }
 
 /** `<<<SECRET_N>>>` 占位符（#406 roundtrip 产物，#503 出站警告触发器）。 */

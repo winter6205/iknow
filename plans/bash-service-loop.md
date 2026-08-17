@@ -38,9 +38,9 @@ Each numbered item is one tracer bullet: vertical slice, one tag, one commit, bi
    - [blocks: T2]
    - Status: [ ] pending
 
-4. **T4 `bash_output` / `bash_stop` 工具 + 装配 25→27** — affects: `src/harness/aci/tools/bash-output.ts`（新）、`src/harness/aci/tools/bash-stop.ts`（新）、`src/harness/aci/tools/registry.ts`（ACI_TOOLSET_NAMES 4 处同步）、`tests/harness/aci/bash-output-stop.test.ts`（新）、装配一致性测试
+4. **T4 `bash_output` / `bash_stop` 工具 + 装配 28→30** — affects: `src/harness/aci/tools/bash-output.ts`（新）、`src/harness/aci/tools/bash-stop.ts`（新）、`src/harness/aci/tools/registry.ts`（ACI_TOOLSET_NAMES 4 处同步）、`tests/harness/aci/bash-output-stop.test.ts`（新）、装配一致性测试
    - `[implementation]` `bash_output(task_id, max_bytes?)` read-only 免 ask 回日志尾部 + `{status, exitCode}`；`bash_stop(task_id)` host 侧 kill 进程组（SIGTERM→SIGKILL 升级复用 `runner.ts` stopTree 模式）；条件化装配 + 装配层 SSOT 锁 4 处同步（#440 standing preference）。
-   - Acceptance: `npx vitest run tests/harness/aci/bash-output-stop.test.ts` exit 0 + 全条件装配测试绿（27 件一致）；日志尾部截断用例（超上限只回尾部，截断值引 ADR 定稿）。
+   - Acceptance: `npx vitest run tests/harness/aci/bash-output-stop.test.ts` exit 0 + 全条件装配测试绿（30 件一致）；日志尾部截断用例（超上限只回尾部，截断值引 ADR 定稿）。
    - Per-ticket loop: tdd → typecheck+tests → code-review → verification-before-completion → commit on ticket branch
    - Commit: 1 commit = this 1 task
    - [blocks: T3]
@@ -62,9 +62,9 @@ Each numbered item is one tracer bullet: vertical slice, one tag, one commit, bi
    - [blocks: T2]
    - Status: [ ] pending
 
-7. **[parallel] T7 描述纪律 + description guard 扩面** — affects: `src/harness/aci/tools/bash.ts`（description 正面引导）、`bash-output.ts` / `bash-stop.ts`（description）、`tests/harness/aci/d9-description-guard.test.ts`（扩到 27 件）
+7. **[parallel] T7 描述纪律 + description guard 扩面** — affects: `src/harness/aci/tools/bash.ts`（description 正面引导）、`bash-output.ts` / `bash-stop.ts`（description）、`tests/harness/aci/d9-description-guard.test.ts`（扩到 30 件）
    - `[implementation]` 纪律写 tool description（#440 D9 先例）：bash 描述加「服务/长驻进程设 background，bash_output 读日志，bash_stop 终止」正面触发条件；无负面禁令；guard NEGATIVE_PHRASES 全条件扩面。
-   - Acceptance: `npx vitest run tests/harness/aci/d9-description-guard.test.ts` exit 0（27 件全条件装配 × blocklist 零命中）。
+   - Acceptance: `npx vitest run tests/harness/aci/d9-description-guard.test.ts` exit 0（30 件全条件装配 × blocklist 零命中）。
    - Per-ticket loop: tdd → typecheck+tests → code-review → verification-before-completion → commit on ticket branch
    - Commit: 1 commit = this 1 task
    - [blocks: T4]
@@ -109,6 +109,6 @@ Each numbered item is one tracer bullet: vertical slice, one tag, one commit, bi
 - **architecture-change-reviewer verdict**: PASS（2026-08-18，5/5 yes）——bounded-context: yes（`src/harness/background/` 单向切片无反向依赖无环）/ defensive-contract: yes（T2 五边界类 + T5 overflow + T4 数据溢出 + T6 跨进程异常）/ error-handling: yes（typed-error catch 契约 + `task_not_in_scope` 带 owner id）/ complexity-anti-drift: yes（模块内 manager/registry/paths/stale-reap 分文件，无 god-file 意图）/ minimal-change: yes（1 bullet = 1 commit，lifecycle 声明范围外仅留 T6 订阅缝）。
 - **affected S1-S6 skills**: S1 bounded-context（新 `src/harness/background/` 模块 = 新能力切片，单向依赖 sandbox/aci）、S2 defensive-contract（registry/manager 公开接口五边界类测试）、S5 anti-drift（新模块复杂度阈值）、S6 minimal-change（1 bullet = 1 commit）。
 - **parallelization surface**: Track B（T8-T11）与 Track A（T1-T7）全程并行；Track A 内部 T5/T6/T7 在各自前置后可并行；唯一汇合点 T11。
-- **context-loop 注记**: CONTEXT.md「ACI tool set」词条仍为历史口径（8 件），本计划按 #440 Decisions-so-far 现状口径（25→27）执行；词条更新属 `arthurpower:domain-modeling` 职责，不在本计划内。ADR-0004（bash 安全边界 = OS 沙箱）/ ADR-0019（workspace root 落盘）构成本计划的约束输入，无矛盾。
+- **context-loop 注记**: CONTEXT.md「ACI tool set」词条仍为历史口径（8 件），本计划按 #440 Decisions-so-far 现状口径（28→30）执行；词条更新属 `arthurpower:domain-modeling` 职责，不在本计划内。ADR-0004（bash 安全边界 = OS 沙箱）/ ADR-0019（workspace root 落盘）构成本计划的约束输入，无矛盾。脚注：计划成稿时基线口径 25，实施时 #440 已 graduate todo_write + mcp 两件，基线实际 28（explorer 交叉验证），故 T4 / T7 数字按 28→30 / 30 件口径生效，与 `src/harness/aci/tools/registry.ts` 注释及 `tests/harness/aci/tools/d9-description-guard.test.ts` 30 件装配一致。
 - **范围外（单独 issue 跟踪）**: conversation lifecycle v2（schema createdAt/archivedAt、archive、session events emitter、busy/idle 运行时、SSE 接缝、DB 升级信号清单）——见 tracker 上的独立 grilling issue；本计划 T6 仅预留 reap 订阅缝。
 - **closed-loop backstop**: `.evals/tasks/` 下 bash-service-loop 相关 eval task，`bash .evals/run.sh` 全绿 = plan 实施完成。

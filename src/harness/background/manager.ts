@@ -22,7 +22,6 @@
 import { randomBytes } from "node:crypto";
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { appendFile, readFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -38,6 +37,7 @@ import type { BackgroundTaskRecord, BackgroundTaskStatus } from "./registry.js";
 import { createBackgroundRegistry } from "./registry.js";
 import type { BackgroundRegistry } from "./registry.js";
 import type { BackgroundTaskError } from "./registry.js";
+import { readProcStartTime } from "./proc.js";
 
 /** spawn 请求校验失败的补充 kind(manager 专属;registry 不感知请求)。 */
 export type BackgroundSpawnValidationError =
@@ -71,6 +71,9 @@ const SHUTDOWN_SIGKILL_GRACE_MS = 5_000;
 interface BackgroundTask {
   readonly task_id: string;
   readonly client: MutableClientState;
+  /** #502 review-repair:spawn 时的原 created_at(registry 真值);shutdown 收敛
+   *  步骤 5 沿用,不覆盖为当前时间(与 settle 闭包同语义)。 */
+  readonly createdAt: string;
   child?: ChildProcess;
   /** 日志 appendFile 串行链:每 chunk 都续在上一链尾,保证顺序。 */
   writeChain: Promise<void>;
@@ -112,9 +115,15 @@ export type BackgroundSpawn = (
 
 /** spawn 入参:命令 / cwd / 记账 conversationId。 */
 export interface BackgroundSpawnRequest {
+  /** 还原后真值命令 —— spawn 工厂（defaultBackgroundSpawn 进 bwrap）消费的
+   *  语义不变;真值只活在内存与 spawn 调用栈,绝不落盘。 */
   readonly command: string;
   readonly cwd: string;
   readonly conversationId?: string;
+  /** #502 review-repair（#406 roundtrip）:持久化形态 —— 落盘 registry json 的
+   *  command 用此字段（占位符形态,`<<<SECRET_N>>>`),spawn 真值不上盘。
+   *  缺省（无 secret registry 场景 / 手写调用方）→ 回退 request.command。 */
+  readonly recordCommand?: string;
   /** 注入给 defaultBackgroundSpawn 的 fence 装配选项(T4 装配期可选传入)。 */
   readonly workspaceRoot?: string;
   readonly env?: NodeJS.ProcessEnv;
@@ -278,25 +287,6 @@ export function createBackgroundTaskManager(
     return `bg-${randomBytes(6).toString("hex")}`;
   }
 
-  /**
-   * #502 T6:读进程组 leader 的 starttime(/proc/<pid>/stat f22),供启动 stale
-   * 清扫防 pgid 复用误杀(ADR-0021 D1.5)。非 Linux / 目录不可读 → undefined
-   * (reap 对无 starttime 记录走保守跳过政策)。
-   */
-  function readChildStartTime(pid: number): number | undefined {
-    try {
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-      const suffix = stat
-        .slice(stat.lastIndexOf(")") + 1)
-        .trim()
-        .split(/\s+/);
-      const v = Number(suffix[19]);
-      return Number.isFinite(v) ? v : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
   async function spawn(
     request: BackgroundSpawnRequest
   ): Promise<BackgroundSpawnResult> {
@@ -350,10 +340,14 @@ export function createBackgroundTaskManager(
       };
     }
 
-    const starttime = readChildStartTime(child.pid);
+    const starttime = readProcStartTime(child.pid);
+    /** #502 review-repair（#406 roundtrip）:持久化形态 —— bash 后台传占位符形态
+     *  入参（占位符在盘上,真值仅活在 spawn 调用栈）。其他调用方（无 secret
+     *  registry / 手写 manager.spawn 路径）缺省回退 command,行为不变。 */
+    const persistCommand = request.recordCommand ?? request.command;
     const record: BackgroundTaskRecord = {
       task_id: taskId,
-      command: request.command,
+      command: persistCommand,
       owner_pid: process.pid,
       conversation_id: request.conversationId ?? "",
       pgid: child.pid,
@@ -385,11 +379,12 @@ export function createBackgroundTaskManager(
       exit_code: null,
       conversation_id: record.conversation_id,
       log_path: logPath,
-      command: request.command,
+      command: persistCommand,
     };
     const task: BackgroundTask = {
       task_id: taskId,
       client,
+      createdAt: record.created_at,
       child,
       writeChain: Promise.resolve(),
     };
@@ -407,7 +402,7 @@ export function createBackgroundTaskManager(
       client.exit_code = exitCode;
       const rec: BackgroundTaskRecord = {
         task_id: taskId,
-        command: request.command,
+        command: persistCommand,
         owner_pid: process.pid,
         conversation_id: record.conversation_id,
         pgid: record.pgid,
@@ -712,6 +707,8 @@ export function createBackgroundTaskManager(
 
     // 5. registry json 收敛:仅覆盖仍 running 的(已 settled 的 exit 事件已落
     //    盘 killed/exited,不再改写)。best-effort save:失败仅记日志。
+    //    收敛保留 spawn 时的原 created_at(settle 闭包同语义)—— 落盘记录是
+    //    时间不变的实体,created_at 表示任务创建时刻,不随 shutdown 改写。
     for (const task of running) {
       if (task.client.status !== "running") continue;
       task.client.status = "killed";
@@ -724,7 +721,7 @@ export function createBackgroundTaskManager(
         pgid: task.child?.pid ?? 0,
         status: "killed",
         exit_code: null,
-        created_at: new Date().toISOString(),
+        created_at: task.createdAt,
         log_path: task.client.log_path,
       };
       try {

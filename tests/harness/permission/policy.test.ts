@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import {
   createPermissionPolicy,
   checkPermission,
+  isBashNetworkTrue,
 } from "../../../src/harness/permission/policy.js";
 import { createSessionGrants } from "../../../src/harness/permission/session-grants.js";
 import type {
@@ -401,6 +402,54 @@ describe("policy.ts is sync (askUser is the executor's job)", () => {
 
 describe("SC8: #503 T10 bash network:true 强制 ask（layered rule 先于 mode，full_auto 不豁免）", () => {
   const policy = createPermissionPolicy();
+
+  it("isBashNetworkTrue SSOT 与 code-ask-bash-network 决策同源（review-repair 跨引用一致性）", () => {
+    // 决策规则（policy.ts）与 hint 判定（permission-executor.ts isNetworkBash）
+    // 共用同一谓词。直接引用 SSOT 函数，验证 predicate 对决策结果逐例对应：
+    // 规则命中 ⟺ isBashNetworkTrue(tool, input) 为 true。permission-executor
+    // 侧 import 同一函数，命题自动成立（编译期强类型 + 此处行为锁定）。
+    const cases: ReadonlyArray<{
+      tool: string;
+      input: unknown;
+      expectNetworkTrue: boolean;
+    }> = [
+      {
+        tool: "bash",
+        input: { command: "curl x", network: true },
+        expectNetworkTrue: true,
+      },
+      { tool: "bash", input: { command: "ls" }, expectNetworkTrue: false },
+      {
+        tool: "bash",
+        input: { command: "ls", network: false },
+        expectNetworkTrue: false,
+      },
+      {
+        tool: "bash",
+        input: { command: "ls", network: "true" },
+        expectNetworkTrue: false,
+      },
+      {
+        tool: "web_fetch",
+        input: { url: "x", network: true },
+        expectNetworkTrue: false,
+      },
+    ];
+    for (const c of cases) {
+      assert.equal(isBashNetworkTrue(c.tool, c.input), c.expectNetworkTrue);
+      const out = checkPermission({
+        def: makeTool({ name: c.tool, category: "execute" }),
+        input: c.input,
+        sources: policy.sources,
+        hardWalls: policy.hardWalls,
+        defaultByCategory: policy.defaultByCategory,
+      });
+      if (c.expectNetworkTrue) {
+        assert.equal(out.decision, "ask");
+        assert.ok(out.reason.includes("network"));
+      }
+    }
+  });
 
   it("network:true + default mode → ask（rule reason 含 host-network 语义）", () => {
     const out = checkPermission({

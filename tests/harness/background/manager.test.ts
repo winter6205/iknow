@@ -122,6 +122,61 @@ describe("BackgroundTaskManager 正常路径", () => {
     assert.ok(rec.created_at.length > 0);
   });
 
+  it("recordCommand 缺省 → 落盘 command 回退为 request.command（其他调用方兼容，#502 review-repair #406 roundtrip 契约回退路径）", async () => {
+    const { manager } = await makeManager();
+    const res = await manager.spawn({ command: "echo fallback", cwd: "." });
+    const rec = JSON.parse(
+      await fs.readFile(res.log_path.replace(/\.log$/, ".json"), "utf8")
+    ) as { command: string };
+    // 无 recordCommand 字段:manager 内部 `request.recordCommand ?? request.command`
+    // 取 command,落盘 command = request.command。既有手写调用方（spawn
+    // 不带 recordCommand）行为零回归。
+    assert.equal(rec.command, "echo fallback");
+  });
+
+  it("recordCommand 存在 → 落盘 command = recordCommand,spawn 工厂仍收 command（真值不上盘）", async () => {
+    // 自定义 manager:spawn 工厂捕获 request,断言 spawn 工厂收真值、registry
+    // 落盘记录存占位符形态。#502 review-repair #406 roundtrip 契约。
+    const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-record-"));
+    tempRoots.push(root);
+    let capturedRequest:
+      | {
+          command: string;
+          recordCommand: string | undefined;
+        }
+      | undefined;
+    const manager = createBackgroundTaskManager({
+      tasksDir: resolveTasksDir(root),
+      spawn: async (req) => {
+        capturedRequest = {
+          command: req.command,
+          recordCommand: req.recordCommand,
+        };
+        return makeFakeChild(55555) as unknown as ChildProcess;
+      },
+    });
+    const res = await manager.spawn({
+      command: 'echo "sk-real-secret"',
+      recordCommand: 'echo "<<<SECRET_1>>>"',
+      cwd: root,
+    });
+    assert.equal(res.status, "ok");
+
+    // spawn 工厂只收 request.command(还原后真值);recordCommand 字段存在于
+    // request 但不参与 spawn 调用栈。
+    assert.ok(capturedRequest, "spawn factory must have captured request");
+    assert.equal(capturedRequest!.command, 'echo "sk-real-secret"');
+    assert.equal(capturedRequest!.recordCommand, 'echo "<<<SECRET_1>>>"');
+
+    // 落盘 JSON:command 字段 = 占位符形态,真值不上盘。
+    const rec = JSON.parse(
+      await fs.readFile(res.log_path.replace(/\.log$/, ".json"), "utf8")
+    ) as { command: string };
+    assert.equal(rec.command, 'echo "<<<SECRET_1>>>"');
+    assert.ok(!rec.command.includes("sk-real-secret"));
+    assert.ok(rec.command.includes("<<<SECRET_1>>>"));
+  });
+
   it("stdout + stderr 合并流入 log 文件", async () => {
     const { manager, spawned } = await makeManager();
     const { task_id } = await manager.spawn({ command: "echo hi", cwd: "." });

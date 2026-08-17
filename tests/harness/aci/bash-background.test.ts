@@ -29,10 +29,12 @@
  */
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, describe, it, vi } from "vitest";
 
 import { ToolExecutionError } from "../../../src/harness/errors.ts";
@@ -90,6 +92,27 @@ function makeFakeManager(): {
     stop: vi.fn(async () => undefined),
   } satisfies BackgroundTaskManager;
   return { manager, spawn };
+}
+
+/** fake ChildProcess —— EventEmitter + PassThrough,真实 fs 落盘路径用。 */
+interface FakeChild {
+  readonly stdin: PassThrough;
+  readonly stdout: PassThrough;
+  readonly stderr: PassThrough;
+  readonly pid: number;
+  readonly kill: ReturnType<typeof vi.fn>;
+  emit: (event: string | symbol, ...args: unknown[]) => boolean;
+}
+
+function makeFakeBgChild(pid = 54321): FakeChild {
+  const kill = vi.fn(() => true);
+  return Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    pid,
+    kill,
+  }) as unknown as FakeChild;
 }
 
 interface BashResult {
@@ -170,7 +193,7 @@ describe("bash background handler（fake manager）", () => {
     );
   });
 
-  it("secret 占位符命令传给 manager 的是还原后的最终命令（占位符不进 registry/log）", async () => {
+  it("secret 占位符命令：spawn 工厂收还原后真值（沙箱执行）,recordCommand 传原始占位符（落盘）", async () => {
     const cwd = await makeScratch("bash-bg-secret-");
     const { manager, spawn } = makeFakeManager();
     spawn.mockResolvedValue({
@@ -191,11 +214,98 @@ describe("bash background handler（fake manager）", () => {
     })) as { task_id: string; log_path: string };
 
     assert.match(result.task_id, /^bg-[0-9a-f]{12}$/);
-    const reqCommand = spawn.mock.calls[0]?.[0]?.command as string;
-    assert.equal(reqCommand, 'echo "sk-aaaaaaaaaaaaaaaaaaaa"');
-    assert.equal(reqCommand.includes("<<<SECRET_1>>>"), false);
-    // registry / log 记录的是还原后命令（manager 直接消费 request.command）
-    assert.equal(reqCommand.includes("sk-aaaaaaaaaaaaaaaaaaaa"), true);
+    const req = spawn.mock.calls[0]?.[0] as {
+      command: string;
+      recordCommand: string;
+    };
+    // #502 review-repair（#406 roundtrip）：spawn 工厂（沙箱执行）拿真值 —— 占位符不
+    // 进 spawn 调用栈之外的任何路径。
+    assert.equal(req.command, 'echo "sk-aaaaaaaaaaaaaaaaaaaa"');
+    assert.equal(req.command.includes("<<<SECRET_1>>>"), false);
+    assert.equal(req.command.includes("sk-aaaaaaaaaaaaaaaaaaaa"), true);
+    // recordCommand = 原始入参（占位符形态,落盘用）—— manager 据此落 registry json,
+    // 真值不上盘。
+    assert.equal(req.recordCommand, 'echo "<<<SECRET_1>>>"');
+    assert.equal(req.recordCommand.includes("sk-aaaaaaaaaaaaaaaaaaaa"), false);
+    assert.equal(req.recordCommand.includes("<<<SECRET_1>>>"), true);
+  });
+
+  it("真实 manager：registry json 落盘 command = 占位符形态，真值不上盘（#406 roundtrip 契约锁盘面）", async () => {
+    const root = await makeScratch("bash-bg-secret-disk-");
+    const tasksDir = resolveTasksDir(root);
+    const fakeChildren: FakeChild[] = [];
+    const manager = createBackgroundTaskManager({
+      tasksDir,
+      spawn: async () => {
+        const child = makeFakeBgChild();
+        fakeChildren.push(child);
+        return child as unknown as ChildProcess;
+      },
+    });
+    const registry = createSecretRegistry();
+    registry.register("sk-aaaaaaaaaaaaaaaaaaaa");
+    const tool = createBashTool(root, {
+      secretRegistry: registry,
+      backgroundManager: manager,
+      workspaceRoot: root,
+    });
+
+    const res = (await tool.handler({
+      command: 'echo "<<<SECRET_1>>>"',
+      background: true,
+    })) as { task_id: string; log_path: string };
+
+    // spawn 后立即读盘 —— running 态 record 的 command 必须是占位符形态。
+    const jsonPath = res.log_path.replace(/\.log$/, ".json");
+    const runningRec = JSON.parse(await readFile(jsonPath, "utf8")) as {
+      command: string;
+      task_id: string;
+      status: string;
+    };
+    assert.equal(runningRec.task_id, res.task_id);
+    assert.equal(runningRec.status, "running");
+    assert.equal(runningRec.command, 'echo "<<<SECRET_1>>>"');
+    assert.ok(!runningRec.command.includes("sk-aaaaaaaaaaaaaaaaaaaa"));
+    assert.ok(runningRec.command.includes("<<<SECRET_1>>>"));
+
+    // settle 路径同样走 persistCommand —— 触发 exit 后 status 转 exited,
+    // 读盘 record 的 command 仍为占位符形态（不还原为真值）。settle 是
+    // 异步落盘,await waitFor 直至 json 收敛到 exited 状态（writeFile 默认
+    // O_TRUNC,settle 进行中文件可能瞬时为空,不可裸读）。
+    fakeChildren[0]!.emit("exit", 0, null);
+    const settledRec = await vi.waitFor(async () => {
+      const rec = JSON.parse(await readFile(jsonPath, "utf8")) as {
+        command: string;
+        status: string;
+      };
+      assert.equal(rec.status, "exited");
+      return rec;
+    });
+    assert.equal(settledRec.command, 'echo "<<<SECRET_1>>>"');
+    assert.ok(!settledRec.command.includes("sk-aaaaaaaaaaaaaaaaaaaa"));
+  });
+
+  it("secretRegistry 缺省（无占位符场景）→ recordCommand === command,缺省回退路径等价", async () => {
+    const cwd = await makeScratch("bash-bg-secret-default-");
+    const { manager, spawn } = makeFakeManager();
+    spawn.mockResolvedValue({
+      status: "ok",
+      task_id: "bg-0123456789ab",
+      log_path: "/tmp/tasks/bg-0123456789ab.log",
+    });
+    const tool = createBashTool(cwd, { backgroundManager: manager });
+
+    await tool.handler({ command: "echo plain", background: true });
+    const req = spawn.mock.calls[0]?.[0] as {
+      command: string;
+      recordCommand: string;
+    };
+    // 无 secret registry：bash 透传 command 不还原；recordCommand 字段值与
+    // command 字面相同，manager 侧 `recordCommand ?? command` 取相同结果，
+    // 落盘行为与既有路径逐字节一致（其他手写调用方缺省 recordCommand 走
+    // `request.command` 回退，兼容性保持）。
+    assert.equal(req.command, "echo plain");
+    assert.equal(req.recordCommand, "echo plain");
   });
 
   it("background:true + 危险命令照拒（ToolExecutionError，与前台同闸门）", async () => {

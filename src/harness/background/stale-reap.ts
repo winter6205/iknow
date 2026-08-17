@@ -20,12 +20,13 @@
  * 决不 throw:missing tasksDir / broken json / 落盘失败 → 跳过该条(skipped)
  * 或 best-effort 继续,log 呈现。返回 summary 供调用方展示 / 断言。
  */
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 
 import type { BackgroundTaskRecord, BackgroundTaskLog } from "./registry.js";
 import { createBackgroundRegistry } from "./registry.js";
 import type { BackgroundTaskError } from "./registry.js";
+import { readProcStartTime } from "./proc.js";
 
 export interface ReapStaleTasksOptions {
   readonly tasksDir: string;
@@ -47,22 +48,6 @@ function isPidAlive(pid: number): boolean {
     return existsSync(`/proc/${pid}`);
   } catch {
     return false;
-  }
-}
-
-/** 读 /proc/<pid>/stat 第 22 字段(starttime):suffix 空格分词 index 19
- *  (已验证:node suffix[19] === awk $22)。读不到 → undefined。 */
-function readProcStartTime(pid: number): number | undefined {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const suffix = stat
-      .slice(stat.lastIndexOf(")") + 1)
-      .trim()
-      .split(/\s+/);
-    const v = Number(suffix[19]);
-    return Number.isFinite(v) ? v : undefined;
-  } catch {
-    return undefined;
   }
 }
 

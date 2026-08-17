@@ -31,6 +31,25 @@ export const DEFAULT_BY_CATEGORY: Readonly<
   collaborate: "ask",
 });
 
+/**
+ * #503 T10 / ADR-0022 — bash network:true 命中判定（SSOT，review-repair
+ * #502/#503）。规则 `code-ask-bash-network`（policy.ts）与
+ * permission-executor.ts 的 hint 判定（isNetworkBash）共用同一函数：
+ * 两处逐字同形谓词收敛，保证「决策来源」与「hint 形态」一一对应不再漂移。
+ * 命中条件：tool === "bash" 且 input.network 严格 === true（非布尔 "true" /
+ * 缺省 / false → 不命中）。非 bash 工具同名字段不受影响（web_fetch 等走
+ * 既有类别默认）。
+ */
+export function isBashNetworkTrue(tool: string, input: unknown): boolean {
+  return (
+    tool === "bash" &&
+    typeof input === "object" &&
+    input !== null &&
+    !Array.isArray(input) &&
+    (input as { network?: unknown }).network === true
+  );
+}
+
 function codeBuiltInRules(): ReadonlyArray<NormalRuleSpec> {
   return Object.freeze([
     {
@@ -71,12 +90,7 @@ function codeBuiltInRules(): ReadonlyArray<NormalRuleSpec> {
       // <b>严格等于 true</b>(非布尔 "true" / 缺省 / false → 不命中,走既有
       // 分类默认路径)。非 bash 工具同名字段不受影响。硬墙仍先于本规则。
       id: "code-ask-bash-network",
-      match: ({ tool, input }) =>
-        tool === "bash" &&
-        typeof input === "object" &&
-        input !== null &&
-        !Array.isArray(input) &&
-        (input as { network?: unknown }).network === true,
+      match: ({ tool, input }) => isBashNetworkTrue(tool, input),
       decision: "ask",
       reason:
         "code built-in: bash network:true changes the fence shape (host network) — explicit approval required, full_auto does not exempt network opt-in",

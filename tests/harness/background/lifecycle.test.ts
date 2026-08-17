@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { readFileSync, promises as fs } from "node:fs";
+import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { PassThrough } from "node:stream";
@@ -32,6 +32,7 @@ import {
 } from "../../../src/harness/background/manager.js";
 import { reapStaleTasks } from "../../../src/harness/background/stale-reap.js";
 import { resolveTasksDir } from "../../../src/harness/background/paths.js";
+import { readProcStartTime as readStartTime } from "../../../src/harness/background/proc.js";
 import type {
   BackgroundTaskRecord,
   BackgroundTaskStatus,
@@ -67,21 +68,6 @@ async function waitGroupGone(pgid: number, timeoutMs = 3000): Promise<void> {
       throw new Error(`process group ${pgid} still alive after ${timeoutMs}ms`);
     }
     await new Promise((r) => setTimeout(r, 25));
-  }
-}
-
-/** /proc/<pid>/stat 第 22 字段(starttime):suffix 空格分词 index 19(已验证)。 */
-function readStartTime(pid: number): number | undefined {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const suffix = stat
-      .slice(stat.lastIndexOf(")") + 1)
-      .trim()
-      .split(/\s+/);
-    const v = Number(suffix[19]);
-    return Number.isFinite(v) ? v : undefined;
-  } catch {
-    return undefined;
   }
 }
 
@@ -209,6 +195,45 @@ describe("T6 manager.shutdown 进程级收尾", () => {
       const after = await readRec(tasksDir, res.task_id);
       assert.equal(after.status, "killed");
     });
+  });
+
+  it("shutdown 收敛保留 spawn 时原 created_at(时间不变的实体,review-repair #502/#503 Low #7)", async () => {
+    // 必须在 shutdown 步骤 5 触发:任务在 grace 后仍 running(无 exit 事件)。
+    // 用 fake child(永不 emit exit)+ fake timers(含 Date,系统性时钟可
+    // 控),锚定 spawn 时系统时间,显式推进到不同刻度后 shutdown —— 修复前
+    // shutdown 步骤 5 用 `new Date().toISOString()` 覆盖,字符串应变化;
+    // 修复后沿用 spawn 时原 created_at。
+    vi.useFakeTimers();
+    try {
+      const initial = new Date("2026-08-18T00:00:00.000Z");
+      vi.setSystemTime(initial);
+      const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-life-"));
+      const tasksDir = resolveTasksDir(root);
+      const manager = createBackgroundTaskManager({
+        tasksDir,
+        spawn: async () => makeFakeChild() as unknown as ChildProcess,
+      });
+      const res = await manager.spawn({ command: "never-exits", cwd: root });
+      assert.equal(res.status, "ok");
+      if (res.status !== "ok") return;
+      const before = await readRec(tasksDir, res.task_id);
+      assert.equal(before.status, "running");
+      const createdBefore = before.created_at;
+
+      // 让 fake Date 跨过至少 1ms:shutdown 步骤 5 在未修复时新 created_at
+      // 会是新时间戳(revealing the bug);修复后不变式成立。
+      vi.setSystemTime(new Date("2026-08-18T00:00:05.500Z"));
+      const shutdownP = manager.shutdown();
+      await vi.advanceTimersByTimeAsync(5_500);
+      await shutdownP;
+
+      const after = await readRec(tasksDir, res.task_id);
+      assert.equal(after.status, "killed");
+      // 不变式:shutdown 收敛写下 killed 时,created_at 沿用 spawn 时的原值。
+      assert.equal(after.created_at, createdBefore);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shutdown 幂等 —— 第二次调用不 throw", async () => {
