@@ -28,6 +28,9 @@ import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
 // #356 T6 (subagent 装配):surface !== "ask" 时 build-engine 自建 subagentManager,
 // registry 末尾追加 spawn_subagent / subagent_result(→ 25 件)。ask 入口不创建
 // manager → registry 停 23 件(SC8,见 ask 剥离断言)。
+// #440 T11 (MCP resources 装配):surface !== "ask" 时 build-engine 自建
+// mcpManager,registry 末尾追加 list_mcp_resources / read_mcp_resource(→ 27 件)。
+// ask 入口不创建 manager → registry 停 25 件(mcpManager 缺席 → list/read 缺席)。
 const EXPECTED_TOOLS = [
   "bash",
   "read_file",
@@ -58,9 +61,12 @@ const EXPECTED_TOOLS = [
   // 才在场;ask 缺 subagentManager → 23 件)。
   "spawn_subagent",
   "subagent_result",
-  // #440 T4 todo_write append-only:25→26,末位 1 件(全装配 chat surface + todoDir
-  // 在场才入注册表;ask + worker 装配路径不传 todoDir → 不在场)。
+  // #440 双 Stream 并集 append-only:25→28。todo_write（T4，全装配 chat surface
+  // + todoDir 在场才入注册表；ask + worker 装配路径不传 todoDir → 不在场）+
+  // MCP resources 两件（T11，全装配 chat surface 才在场；ask 缺 mcpManager → 不在场）。
   "todo_write",
+  "list_mcp_resources",
+  "read_mcp_resource",
 ];
 
 /** #440 T4 条件化缺席视图:todoDir 未透传的 chat surface(默认行为)。
@@ -364,15 +370,18 @@ describe("buildHarnessEngine — #337 T8 skill 装配", () => {
     const names = built.deps.registry.list().map((d) => d.name);
     expect(names).not.toContain("spawn_subagent");
     expect(names).not.toContain("subagent_result");
-    // ask + memory:{enabled:false} 双重剥离 → 26 - memory2 - subagent2 - todo_write =
-    // 21 件(todoDir 未透传 + ask 不传,双重缺席;skill 两件仍装配,SC12)。
+    // ask + memory:{enabled:false} 双重剥离 → 28 - todo(1) - memory2 - subagent2 -
+    // mcp2 = 21 件(todo_write 因 todoDir 未透传缺席,ask 不装配 MCP 两件,memory 两件
+    // 禁用;skill 两件仍装配,SC12 守门)。
     expect(names).toEqual(
       EXPECTED_TOOLS_NO_TODO.filter(
         (n) =>
           n !== "memory_recall" &&
           n !== "memory_save" &&
           n !== "spawn_subagent" &&
-          n !== "subagent_result"
+          n !== "subagent_result" &&
+          n !== "list_mcp_resources" &&
+          n !== "read_mcp_resource"
       )
     );
 
@@ -827,8 +836,8 @@ describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
       memory: { enabled: false },
       todoDir: "/tmp/some-session/todos",
     });
-    // ask 形态与现有 SC8 守门一致：26 - memory2 - subagent2 - todo_write(ask 不传
-    // todoDir 给 registry) = 23 件。
+    // ask 形态与现有 SC8 守门一致：28 - memory2 - subagent2 - mcp2 - todo_write
+    // (ask 不传 todoDir 给 registry,mcpManager 在 ask 路径也不装配,SC12) = 23 件。
     expect(built.deps.registry.list().map((d) => d.name)).toEqual(
       EXPECTED_TOOLS.filter(
         (n) =>
@@ -836,6 +845,8 @@ describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
           n !== "memory_save" &&
           n !== "spawn_subagent" &&
           n !== "subagent_result" &&
+          n !== "list_mcp_resources" &&
+          n !== "read_mcp_resource" &&
           n !== "todo_write"
       )
     );

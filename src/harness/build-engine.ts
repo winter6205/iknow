@@ -31,6 +31,8 @@ import {
 import { createPermissionPolicy } from "./permission/policy.js";
 import type { PermissionModeContext } from "./permission/modes.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
+import type { AciRegistry } from "./aci/aci-registry.js";
+import { errorMessage } from "./errors.js";
 import type { AciCatalog } from "./aci/types.js";
 import { createLspNotifier } from "./lsp/notifier.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
@@ -296,12 +298,59 @@ export async function buildHarnessEngine(
   } else {
     clearActiveExtraSecrets();
   }
-  const reg = createDefaultAciRegistry({
+  // #440 T11 MCP resources 条件化装配:registry 必须先看到 mcpManager，
+  // 但 createMcpManager 又需要 `reg.registerExternal`（动态 mcp__* 工具注入
+  // 缝）。两层相互依赖 → 用闭包 holder 解：
+  //   1. 先声明两个 let 变量作为 holder
+  //   2. mcpManager 用 `(defs) => reg!.registerExternal(defs)` 闭包捕获
+  //      reg（调用发生在 mcpManager.start() 异步阶段,此时 reg 已构造完）
+  //   3. 再构造 reg,传入已定义的 mcpManager（list/read 工具闭包同样捕获
+  //      holder,handler 实际调用时拿到 mcpManager）
+  let reg: AciRegistry | undefined;
+  let mcpManager: McpManager | undefined;
+  if (surface !== "ask") {
+    const config = await loadMcpConfig({ home: userHome, cwd });
+    mcpManager = (opts.createMcpManager ?? createMcpManager)({
+      config: config.servers,
+      // 闭包捕获 reg holder — mcpManager.start() 异步触发时 reg 已赋值。
+      registerExternal: (defs) => {
+        if (!reg) {
+          throw new Error(
+            "[build-engine] reg not constructed when mcpManager tried to register"
+          );
+        }
+        return reg.registerExternal(defs);
+      },
+      // #337 reload 缝:manager.reload 先按名撤回旧 server 已注册的 mcp__* 工具,
+      // 再重建——不注入则 reload 后 stale 名残留 externalByExt,重名 register
+      // 触发 Gate2 duplicate,新 server 工具静默注册失败(与 TUI deps 同款装配)。
+      unregisterExternal: (names) => {
+        if (!reg) return;
+        reg.unregisterExternal(names);
+      },
+      // #378 根因 B: env 注入连接超时(默认 60_000, 缓解 npx -y cold start)。
+      timeoutMsOverride: env.mcp.connectTimeoutMs,
+      ...(opts.createMcpClient ? { createClient: opts.createMcpClient } : {}),
+    });
+    // start() 返回的 promise 仅作错误兜底(start 内部 void allSettled,
+    // 但保留 promise 引用便于未来加 await + timeout 收尾)。fire-and-forget。
+    void mcpManager.start().catch((err) => {
+      console.warn(
+        `[build-engine] MCP manager start failed: ${errorMessage(err)}`
+      );
+    });
+  }
+
+  reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
     ...(memoryEnabled ? { memoryDir } : undefined),
     skillCatalog,
     ...(subagentManager ? { subagentManager } : undefined),
+    // #440 T11 mcpManager 条件化装配:在场时 list_mcp_resources /
+    // read_mcp_resource 入注册表(handler 闭包捕获外部 mcpManager holder,
+    // 实际调用时取当前值)。
+    ...(mcpManager ? { mcpManager } : {}),
     onEdit: (file) => lspNotifier.invalidate(file),
     // #406 T3:secret registry 透传 → bash 工具 handler 在 spawn 前还原占位符。
     // secretRegistry 已在上方构造（T2 段），registry 工厂只在 handler 调用时
@@ -370,9 +419,9 @@ export async function buildHarnessEngine(
       ? undefined
       : { workspace: path.join(userHome, ".iknow") }
   );
-  // #337 T8:MCP 条件化装配。四入口判定:
+  // #337 T8:MCP 条件化装配。四入口判定（#440 T11 已上移到 registry call 之前,
+  // 详见上方 mcpManager 块 + holder 模式 — 此处仅保留历史注释锚点）。
   //   - surface === "ask" → 不创建 manager(SC12 守门,ask 三方视图零 mcp__*)。
-  //     ask oneshot 进程即用即抛,无长连接,无需关闭句柄。
   //   - surface ∈ {chat, tui, serve} → loadMcpConfig 两级合并 + createMcpManager
   //     + start() **不 await**(SC8 守门:慢 connect 不阻塞 buildHarnessEngine
   //     返回)。manager.start() 内部 void Promise.allSettled,fire-and-forget;
@@ -380,30 +429,6 @@ export async function buildHarnessEngine(
   //   shutdown 句柄透出 BuiltEngine.shutdown,RuntimeBundle 生命周期钩子
   //   (cli.ts SIGINT/SIGTERM 接线)在进程退出前调它,manager 关闭所有 client +
   //   取消 in-flight + SIGTERM stdio 子孙(SC11)。
-  let mcpManager: McpManager | undefined;
-  if (surface !== "ask") {
-    const config = await loadMcpConfig({ home: userHome, cwd });
-    mcpManager = (opts.createMcpManager ?? createMcpManager)({
-      config: config.servers,
-      registerExternal: reg.registerExternal,
-      // #337 reload 缝:manager.reload 先按名撤回旧 server 已注册的 mcp__* 工具,
-      // 再重建——不注入则 reload 后 stale 名残留 externalByExt,重名 register
-      // 触发 Gate2 duplicate,新 server 工具静默注册失败(与 TUI deps 同款装配)。
-      unregisterExternal: reg.unregisterExternal,
-      // #378 根因 B: env 注入连接超时(默认 60_000, 缓解 npx -y cold start)。
-      timeoutMsOverride: env.mcp.connectTimeoutMs,
-      ...(opts.createMcpClient ? { createClient: opts.createMcpClient } : {}),
-    });
-    // start() 返回的 promise 仅作错误兜底(start 内部 void allSettled,
-    // 但保留 promise 引用便于未来加 await + timeout 收尾)。
-    void mcpManager.start().catch((err) => {
-      console.warn(
-        `[build-engine] MCP manager start failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`
-      );
-    });
-  }
   const deps: LoopEngineDeps = {
     adapter,
     executor,
