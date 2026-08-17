@@ -154,6 +154,32 @@ export class SessionApiError extends Error {
   }
 }
 
+// -- Subagent runtime status (#358 T8) ---------------------------------------
+
+/**
+ * 子代理在场状态投影（镜像 `src/harness/subagent/manager.ts` SubagentInfo，
+ * T7 端点响应 item）。字段语义与后端 SSOT 同源：
+ * `state` ∈ "starting"|"running"|"completed"|"failed"；
+ * Postel：endedAt/summary/reason 仅终态且有值时在场。
+ */
+export interface SubagentStatus {
+  readonly taskId: string;
+  readonly state: SubagentState;
+  readonly taskPreview: string;
+  readonly startedAt: string;
+  readonly endedAt?: string;
+  readonly summary?: string;
+  readonly reason?: string;
+}
+
+/** 四态联合，对齐 SubagentState（manager TaskState 同构）。 */
+export type SubagentState = "starting" | "running" | "completed" | "failed";
+
+/** 镜像 T7 端点返回包 `{ subagents: [...] }`（镜像 `{ asks: [...] }` 先例）。 */
+export interface SubagentsResponse {
+  readonly subagents: ReadonlyArray<SubagentStatus>;
+}
+
 // -- Trace inspection panel (mirrors src/traceserver/) -----------------------
 
 export type TraceRecord = Record<string, unknown>;

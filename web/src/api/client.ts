@@ -9,6 +9,7 @@ import type {
   ResetSessionResponse,
   SessionListItem,
   SessionsResponse,
+  SubagentsResponse,
   TraceFieldDef,
   TraceQueryParams,
   TracesResponse,
@@ -221,6 +222,30 @@ export function resolveAsk(
     },
     signal
   );
+}
+
+// -- Subagent runtime status (#358 T8) ---------------------------------------
+
+/**
+ * #358 T8: subagent 状态端点路径（纯函数，单独导出供单测——镜像
+ * `resolveTraceSessionsBase` 形态；与 `listPendingAsks` 同样的
+ * `{API}/sessions/{id}/...` URI 形态）。`encodeURIComponent` 处理
+ * sessionId 中的特殊字符（避免裸 `?` `/` 触发路由解析）。
+ */
+export function resolveSubagentsPath(sessionId: string): string {
+  return `${API}/sessions/${encodeURIComponent(sessionId)}/subagents`;
+}
+
+/**
+ * GET /sessions/:id/subagents — 只读子代理状态投影（spec #358 T8）。
+ * 与 `listPendingAsks` 同形：轮询端点，解析 `{ subagents: SubagentStatus[] }`。
+ * 不建 SSE/websocket（spec Boundaries Never）。
+ */
+export function getSubagents(
+  id: string,
+  signal?: AbortSignal
+): Promise<SubagentsResponse> {
+  return request(resolveSubagentsPath(id), { method: "GET" }, signal);
 }
 
 // -- Trace inspection endpoints -----------------------------------------------
