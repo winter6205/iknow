@@ -8,6 +8,7 @@ import {
 import * as api from "../api/client";
 import type { SessionListItem } from "../api/types";
 import { shortId } from "../lib/format";
+import { traceDeepLink } from "../lib/trace-entry";
 import {
   isCurrentSession,
   sortSessionsByUpdatedDesc,
@@ -231,14 +232,14 @@ function SessionItem({
     truncateExcerpt(session.lastFinalText, 32) ||
     shortId(session.conversation_id, 8);
   return (
-    <li>
+    <li className="group relative">
       <button
         type="button"
         aria-current={active ? "true" : undefined}
         title={session.conversation_id}
         onClick={() => onSelect(session.conversation_id)}
         className={cx(
-          "group flex w-full items-baseline gap-2 truncate rounded-panel px-3 py-1.5 text-left text-[13px]",
+          "flex w-full items-baseline gap-2 truncate rounded-panel px-3 py-1.5 pr-8 text-left text-[13px]",
           "transition-colors duration-[160ms] ease-soft",
           active
             ? "bg-accent-soft text-accent font-medium"
@@ -248,6 +249,22 @@ function SessionItem({
       >
         <span className="truncate">{excerpt}</span>
       </button>
+      {/* ADR-0020 contextual deep-link: hover 浮出，直达该会话的 trace 面板。
+          <a> 与 button 同级（a 嵌 button 是非法嵌套）；group-hover/focus 显隐。 */}
+      <a
+        href={traceDeepLink(session.conversation_id)}
+        title={`在 trace 面板查看 ${session.conversation_id}`}
+        aria-label={`在 trace 面板查看 ${session.conversation_id}`}
+        className={cx(
+          "absolute right-1.5 top-1/2 -translate-y-1/2 rounded-pill px-1.5 py-0.5",
+          "font-mono text-[10px] text-ink-3 opacity-0",
+          "transition-opacity duration-[160ms] ease-soft",
+          "group-hover:opacity-100 hover:text-ink focus-visible:opacity-100",
+          FOCUS_RING
+        )}
+      >
+        ⇱trace
+      </a>
     </li>
   );
 }

@@ -13,6 +13,7 @@ import { FlowTree } from "./FlowTree";
 import { FlowNodeDetail } from "./FlowNodeDetail";
 import { TraceSessionList } from "./TraceSessionList";
 import { TraceViewToggle, type TraceView } from "./TraceViewToggle";
+import { pickInitialTraceSession } from "../lib/trace-entry";
 
 /**
  * 读取 `?poll=<ms>` 参数（缺省 1000，0 关闭轮询）。spec v2 SC-V 26。
@@ -44,6 +45,13 @@ export function TracePanel() {
     refresh: refreshSessions,
   } = useTraceSessions();
   const [sessionId, setSessionId] = useState<string | null>(null);
+  // ADR-0020 deep-link: `/trace?session=<conversationId>`（chat 侧栏 ⇱trace
+  // 入口）优先选中该会话；读一次即可（后续用户点选覆盖）。SSR-free SPA，
+  // window 恒在。
+  const [initialSessionParam] = useState<string | null>(() => {
+    const param = new URLSearchParams(window.location.search).get("session");
+    return param !== null && param.trim().length > 0 ? param : null;
+  });
   const pollMs = readPollMs();
   const { events, loading, error, refresh } = useTraceSessionTraces(
     sessionId,
@@ -75,13 +83,13 @@ export function TracePanel() {
     };
   }, [fieldsReloadKey]);
 
-  // 会话列表就绪后默认选中最近会话（mtime 最新，SC-V 23）。
+  // 会话列表就绪后默认选中（SC-V 23 + deep-link 优先）；选中算法是纯函数
+  // pickInitialTraceSession（web/src/lib/trace-entry.ts，root vitest 覆盖）。
   useEffect(() => {
     if (sessionId !== null) return;
-    if (sessions.length === 0) return;
-    const latest = [...sessions].sort((a, b) => b.mtime - a.mtime)[0];
-    setSessionId(latest.conversation_id);
-  }, [sessions, sessionId]);
+    const picked = pickInitialTraceSession(sessions, initialSessionParam);
+    if (picked !== null) setSessionId(picked);
+  }, [sessions, sessionId, initialSessionParam]);
 
   const visibleFields = filterFieldsForRecordType(fields, filters.recordType);
 
@@ -187,6 +195,16 @@ export function TracePanel() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center gap-3 border-b border-line px-4 py-2">
+        {/* ADR-0020: 与 chat 页（/）同进程互链 —— trace 面板是独立 SPA
+            页面（/trace），返回是一次普通页面导航。 */}
+        <a
+          href="/"
+          title="返回对话页面"
+          className="flex items-center gap-1 font-mono text-[11px] tracking-[0.02em] text-ink-3 transition-colors hover:text-ink"
+        >
+          <span aria-hidden="true">←</span>
+          返回对话
+        </a>
         <TraceViewToggle value={view} onChange={setView} />
         <span className="text-[11px] text-ink-3">
           {view === "flow" && sessionId !== null ? (

@@ -253,28 +253,23 @@ export function getTraceFields(
 // -- Trace session list (spec v2: 会话列表 → 下钻) ----------------------------
 
 /**
- * Trace 会话列表（读侧 trace 进程 `GET /api/v1/sessions`，spec SC-R 10）。
- * 与 session-api 的 `listSessions`（chat 会话）不同——这是 trace 面板自己的
- * 会话目录列表（conversation_id / mtime / size / agent_version）。
+ * Trace 会话列表（读侧 `GET /api/v1/traces/sessions`，ADR-0020 D1.6）。
+ * 与 session-api 的 `listSessions`（chat 会话 `GET /api/v1/sessions`）不同——
+ * 这是 trace 面板自己的会话目录列表（conversation_id / mtime / size /
+ * agent_version）。
  *
- * spec Open Q3: 端点定在 `/api/v1/sessions`（与 `/api/v1/traces` 平级），由
- * trace 进程提供。trace 页面由该进程托管，其 origin 与 TRACE_API 相同
- * （TRACE_API = <origin>/api/v1/traces），故从 TRACE_API 提取 origin 后拼
- * `<origin>/api/v1/sessions`。VITE_TRACE_API_BASE 覆盖 origin 时同样生效。
+ * ADR-0020 D1.1: 端点从 standalone 的 `/api/v1/sessions` 迁入 traces 前缀
+ * 下（`/api/v1/traces/sessions`），避免与 chat sessions 撞名。mounted mode
+ * 与 `--separate` mode 都在该前缀下提供（standalone 另保留旧别名一个版本）。
+ * TRACE_API 默认 `/api/v1/traces`，故 sessions = `${TRACE_API}/sessions`；
+ * VITE_TRACE_API_BASE 覆盖时同样从覆盖值推导（exported 供单测）。
  */
-function traceSessionsBase(): string {
-  if (TRACE_API.startsWith("http://") || TRACE_API.startsWith("https://")) {
-    try {
-      return new URL(TRACE_API).origin + "/api/v1/sessions";
-    } catch {
-      return "/api/v1/sessions";
-    }
-  }
-  return "/api/v1/sessions";
+export function resolveTraceSessionsBase(traceApi: string): string {
+  return `${traceApi}/sessions`;
 }
 
 export function getTraceSessions(
   signal?: AbortSignal
 ): Promise<SessionsResponse> {
-  return request(traceSessionsBase(), {}, signal);
+  return request(resolveTraceSessionsBase(TRACE_API), {}, signal);
 }

@@ -35,18 +35,31 @@ export function ChatHeader({ phase, healthLabel }: ChatHeaderProps) {
         </h1>
       </div>
 
-      {/* Connection status */}
-      <span
-        className="flex items-center gap-1.5 font-mono text-[11px] tracking-[0.02em] text-ink-3"
-        title={healthLabel ?? undefined}
-        aria-live="polite"
-      >
+      {/* Right meta cluster: trace panel entry + connection status */}
+      <div className="flex items-center gap-3">
+        {/* ADR-0020: trace inspection panel lives in-process at /trace — same
+            styling as the connection status (low-frequency dev tool, meta
+            area, never competes with the composer). */}
+        <a
+          href="/trace"
+          title="Trace 检测面板（ADR-0020：与对话服务同进程）"
+          className="flex items-center gap-1 font-mono text-[11px] tracking-[0.02em] text-ink-3 transition-colors hover:text-ink"
+        >
+          <span aria-hidden="true">▗</span>
+          Trace
+        </a>
         <span
-          className={`h-1.5 w-1.5 rounded-full ${status.dotClass}`}
-          aria-hidden="true"
-        />
-        {status.label}
-      </span>
+          className="flex items-center gap-1.5 font-mono text-[11px] tracking-[0.02em] text-ink-3"
+          title={healthLabel ?? undefined}
+          aria-live="polite"
+        >
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${status.dotClass}`}
+            aria-hidden="true"
+          />
+          {status.label}
+        </span>
+      </div>
     </header>
   );
 }
