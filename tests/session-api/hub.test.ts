@@ -742,6 +742,24 @@ describe("compactSession", () => {
       }
     );
   });
+
+  it("title 保留 pre-compact 首条 user 意图(review-fix:不被 placeholder/preamble 污染)", async () => {
+    // stub model 对 full-compact prompt 返回 empty → fallback placeholder 路径。
+    // 修复前:title = extractTitle(compacted) = "[compaction boundary..." 前缀。
+    // 修复后:title = extractTitle(before) = 首条 user 文本("q0")。
+    const deps = makeDeps(
+      Array.from({ length: 4 }, (_, i) =>
+        assistantResult({ texts: [`answer ${i}`] })
+      )
+    );
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    await seedTurns(hub, session.conversation_id, 4);
+    const res = await hub.compactSession(session.conversation_id);
+    assert.equal(res.compacted, true);
+    const after = await store.load(session.conversation_id);
+    assert.equal(after.title, "q0");
+  });
 });
 
 describe("postMessage title projection", () => {

@@ -553,4 +553,32 @@ describe("sanitizeSessionFile — #467 legacy summary → title migration", () =
     const out = sanitizeSessionFile(raw);
     assert.equal(out.title, "first user query");
   });
+
+  it("legacy old-field 非 string(null)→ key 仍删除 + title 走 fallback(review-fix Medium)", () => {
+    // 修复前:`typeof obj["summary"] === "string"` 判,非 string 值(null/42/object)
+    // 会漏过 delete 分支 → 过期字段经 ...obj 泄漏进输出。修复后:`"summary" in obj`
+    // 无条件删 key,title 走 extractTitle fallback(非 string 值不作为 title)。
+    const legacyNull = JSON.parse(`{
+      "schemaVersion": ${CURRENT_SCHEMA_VERSION},
+      "conversation_id": "conv-null",
+      "messages": [{"role":"user","content":[{"type":"text","text":"recompute-me"}]}],
+      "jsonMode": true,
+      "turnCount": 1,
+      "updatedAt": "2026-08-19T00:00:00.000Z",
+      "${LEGACY_KEY}": null,
+      "cwd": "/work",
+      "sanitized_at": "2026-08-19T00:00:00.000Z",
+      "checkpoints": []
+    }`) as Record<string, unknown>;
+    const out = sanitizeSessionFile(legacyNull) as unknown as Record<
+      string,
+      unknown
+    >;
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(out, LEGACY_KEY),
+      false,
+      `non-string legacy \`${LEGACY_KEY}\` key must still be dropped`
+    );
+    assert.equal(out["title"], "recompute-me");
+  });
 });

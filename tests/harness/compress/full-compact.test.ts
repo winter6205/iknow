@@ -321,6 +321,27 @@ describe("runFullCompact", () => {
       assert.ok(out2.message.includes("async boom"));
   });
 
+  it("adapter_failed:失败分支不泄漏 timeout timer(review-fix Medium)", async () => {
+    // 修复前:catch 分支设 adapterSettled=true 但不 clearTimeout,外部 finally
+    // 因 !adapterSettled 为 false 而跳过清理 → 25 s timer 挂在 event loop。
+    // 修复后:finally 块在 IIFE 内统一清 timer,失败路径不残留。
+    const throwAdapter = makeAdapter([{ throw: new Error("boom") }]);
+    const timersBefore = process
+      .getActiveResourcesInfo()
+      .filter((r) => r === "Timeout").length;
+    const out = await runFullCompact({ adapter: throwAdapter, dropped });
+    assert.equal(out.kind, "adapter_failed");
+    // 让 microtask 队列清空,确保任何 pending setTimeout 都已登记。
+    await new Promise((r) => setTimeout(r, 0));
+    const timersAfter = process
+      .getActiveResourcesInfo()
+      .filter((r) => r === "Timeout").length;
+    assert.ok(
+      timersAfter <= timersBefore,
+      `失败分支不应残留 timeout timer: before=${timersBefore}, after=${timersAfter}`
+    );
+  });
+
   it("timeout:超时 → timeout,且 adapter 调用被 abort(AbortError)", async () => {
     let aborted = false;
     const adapter: CompactAdapter = {

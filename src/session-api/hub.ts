@@ -1109,10 +1109,13 @@ export class SessionHub {
           schemaVersion: CURRENT_SCHEMA_VERSION,
           // 用首条 user 文本派生 session title 字段(#467 改名,原 summary;
           // 便于会话列表快速展示):
-          //   - 摘要轮:messages[0] = SUMMARY_PREAMBLE + 摘要内容 user 消息。
+          //   - 摘要轮:messages[0] = SUMMARY_PREAMBLE + 摘要内容 user 消息,
+          //     extractTitle(compacted) 会拿到 preamble 前缀,而不是用户原话。
           //   - placeholder 路径:messages[0] = "[compaction boundary ...]" user 消息。
-          // 两条路径都走 extractTitle 一致派生,语义对齐。
-          title: extractTitle(compacted),
+          // 用 pre-compact 的 `before` 派生,标题保留原会话首条 user 意图(对齐
+          // 旧 placeholder 时代的行为),而不是被 preamble / placeholder 污染
+          // (#467 review-fix Medium:之前用 compacted,标题退化为通用 preamble)。
+          title: extractTitle(before),
         };
         await this.store.save({ id: conversationId, file: updated });
         return {

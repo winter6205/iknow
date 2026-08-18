@@ -259,8 +259,6 @@ export async function runFullCompact(opts: {
   const adapterP = (async (): Promise<FullCompactOutcome> => {
     try {
       const result = await opts.adapter.step(state, request, compositeSignal);
-      adapterSettled = true;
-      if (timer !== undefined) clearTimeout(timer);
       const rawText = (result.projection.texts ?? []).join("\n").trim();
       const extracted = extractCompactSummary(rawText);
       if (extracted !== undefined && extracted.length > 0) {
@@ -272,8 +270,14 @@ export async function runFullCompact(opts: {
       }
       return { kind: "empty_response" };
     } catch (err) {
-      adapterSettled = true;
       return { kind: "adapter_failed", message: String(err) };
+    } finally {
+      // timer / settled 信号必须在 IIFE 内清除,不能依赖外部 finally:
+      // 外部 finally 只在 !adapterSettled 时清 timer,失败分支(adapterSettled=true
+      // 但走 catch)会泄漏 25 s timeout,在 iknow ask oneshot 触发失败的 compact
+      // 时让进程多挂 ~25 s 才退出。
+      adapterSettled = true;
+      if (timer !== undefined) clearTimeout(timer);
     }
   })();
 

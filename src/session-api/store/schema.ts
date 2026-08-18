@@ -452,7 +452,10 @@ export function sanitizeSessionFile(raw: unknown): SessionFileV1 {
         : (obj["updatedAt"] as string),
     checkpoints,
   };
-  if (typeof obj["summary"] === "string") {
+  if ("summary" in obj) {
+    // 不管 value 类型(string / null / number / object)都删除:
+    // legacy `summary` 是过期字段,迁移后绝不存活进新文件
+    // (#467 review-fix Medium:之前用 typeof === 'string' 判,非 string 值会漏过)。
     delete result["summary"];
   }
   if (migratedTaskFocus !== undefined) {
