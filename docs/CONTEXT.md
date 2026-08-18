@@ -77,6 +77,12 @@ _Avoid_: 在 Session API 之外另起前端直连；把 harness 工具逐一包�
 **iknow serve**: CLI host，跑 Session API + 静态产品 UI（`web/dist` 优先，回退 `web/`）。
 _Avoid_: 把 frontend-only server 当生产路径但不代理 `/api`
 
+**workspace（serve 主根）**: 用户在 product SPA 选定的已存在绝对目录；Web 上唯一项目锚。绑定后三锚合一。ADR-0023：serve 缺省不是 cwd。
+_Avoid_: 把 serve 缺省说成 `process.cwd()`；与 `workspaceRoot` 字段、`home`（global 配置锚）、`sandboxRoot` 混同
+
+**unbound**: serve hub 尚未绑定主根。此时不得 buildHarnessEngine 用进程 cwd，不得 postMessage。
+_Avoid_: unbound 时 buildHarnessEngine 或 postMessage；把 unbound 说成「默认 cwd」
+
 **product SPA (web/)**: Vite + React + TypeScript chat console；同源 Session client；JSON 侧栏。
 _Avoid_: 零依赖静态壳当产品；展示层省略 trace 字段
 
