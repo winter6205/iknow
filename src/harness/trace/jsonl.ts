@@ -26,6 +26,9 @@ import type {
   SandboxCmdRecord,
   VerificationRecord,
   GoalRecord,
+  SubagentSpawnRecord,
+  SubagentStopRecord,
+  SubagentStateChangeRecord,
 } from "./types.js";
 
 export interface JsonlTraceOptions {
@@ -244,6 +247,73 @@ export function createJsonlTraceService(
         conversation_id: conversationId,
         record_type: "goal",
         goal_id: record.id,
+        ...snake,
+      };
+      try {
+        writeLine(line);
+        return record.id;
+      } catch (err) {
+        warnOnce(err);
+        return undefined;
+      }
+    },
+
+    // ─── #358 T4 — 子代理生命周期三类事件 ────────────────────────────────
+    // 与 recordVerification / recordGoal 同形态: id 由调用方提供 = manager
+    // taskId; 实现不做 randomUUID 生成。顶层 subagent_id 承载 id, 其余
+    // 顶层 key 走 toSnakeCaseRecord; 从 snake 副本剔除原 id key, 避免
+    // 重复落盘。Postel: 可选字段仅有可填来源时存在 (manager 埋点遵守)。
+    // ADR-0003 D13: 失败返回 undefined, 不抛。
+
+    async recordSubagentSpawn(
+      record: SubagentSpawnRecord
+    ): Promise<string | undefined> {
+      const snake = toSnakeCaseRecord(record);
+      delete snake.id;
+      const line: Record<string, unknown> = {
+        conversation_id: conversationId,
+        record_type: "subagent_spawn",
+        subagent_id: record.id,
+        ...snake,
+      };
+      try {
+        writeLine(line);
+        return record.id;
+      } catch (err) {
+        warnOnce(err);
+        return undefined;
+      }
+    },
+
+    async recordSubagentStop(
+      record: SubagentStopRecord
+    ): Promise<string | undefined> {
+      const snake = toSnakeCaseRecord(record);
+      delete snake.id;
+      const line: Record<string, unknown> = {
+        conversation_id: conversationId,
+        record_type: "subagent_stop",
+        subagent_id: record.id,
+        ...snake,
+      };
+      try {
+        writeLine(line);
+        return record.id;
+      } catch (err) {
+        warnOnce(err);
+        return undefined;
+      }
+    },
+
+    async recordSubagentStateChange(
+      record: SubagentStateChangeRecord
+    ): Promise<string | undefined> {
+      const snake = toSnakeCaseRecord(record);
+      delete snake.id;
+      const line: Record<string, unknown> = {
+        conversation_id: conversationId,
+        record_type: "subagent_state_change",
+        subagent_id: record.id,
         ...snake,
       };
       try {

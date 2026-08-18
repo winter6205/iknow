@@ -16,6 +16,10 @@ export type {
   VerificationRecord,
   VerificationVerdict,
   VerificationAction,
+  SubagentState,
+  SubagentSpawnRecord,
+  SubagentStopRecord,
+  SubagentStateChangeRecord,
 } from "./types.js";
 
 export { createNoopTraceService } from "./noop.js";

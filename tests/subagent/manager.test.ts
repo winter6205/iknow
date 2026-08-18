@@ -67,8 +67,9 @@ function makeFakeChild(): FakeChild {
   }) as unknown as FakeChild;
 }
 
-/** 收 wrapper:记录最近一次 spawn 的 child + 入参,供测试 emit。 */
-function makeHarness() {
+/** 收 wrapper:记录最近一次 spawn 的 child + 入参,供测试 emit。
+ *  `opts.taskTimeoutMs` 透传给 createSubAgentManager (T2 三层缺省链中段)。 */
+function makeHarness(opts: { readonly taskTimeoutMs?: number } = {}) {
   const spawned: FakeChild[] = [];
   const spawnCalls: {
     def: SubAgentDefinition;
@@ -82,6 +83,9 @@ function makeHarness() {
       spawnCalls.push({ def, taskId, payload });
       return child as unknown as ChildProcess;
     },
+    ...(opts.taskTimeoutMs !== undefined
+      ? { taskTimeoutMs: opts.taskTimeoutMs }
+      : {}),
   });
   return { manager, spawned, spawnCalls };
 }
@@ -382,6 +386,89 @@ describe("SubAgentManager per-task timeout (def.timeoutMs)", () => {
   });
 });
 
+// ── #358 T2: per-task 三层缺省链 def.timeoutMs ?? opts.taskTimeoutMs ?? 常量 ──
+
+describe("SubAgentManager per-task 缺省链 (T2: def ?? taskTimeoutMs ?? 7200s)", () => {
+  it("层 1: def.timeoutMs=111 优先 → 111ms 触发 SIGTERM (不 shell 到下方层)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { manager, spawned } = makeHarness({ taskTimeoutMs: 222 });
+      const { taskId } = manager.spawn({ timeoutMs: 111 });
+      await vi.advanceTimersByTimeAsync(111);
+      const q = manager.queryBuffer(taskId);
+      assert.equal(q.status, "failed");
+      if (q.status === "failed") {
+        assert.equal(q.reason, "timeout");
+        assert.match(q.summary, /timeout after 111ms/);
+      }
+      const signals = spawned[0]!.kill.mock.calls.map((c) => c[0]);
+      assert.deepEqual(signals, ["SIGTERM"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("层 2: 无 def.timeoutMs + opts.taskTimeoutMs=222 → 222ms 触发 SIGTERM", async () => {
+    vi.useFakeTimers();
+    try {
+      const { manager, spawned } = makeHarness({ taskTimeoutMs: 222 });
+      const { taskId } = manager.spawn({});
+      await vi.advanceTimersByTimeAsync(222);
+      const q = manager.queryBuffer(taskId);
+      assert.equal(q.status, "failed");
+      if (q.status === "failed") {
+        assert.equal(q.reason, "timeout");
+        assert.match(q.summary, /timeout after 222ms/);
+      }
+      const signals = spawned[0]!.kill.mock.calls.map((c) => c[0]);
+      assert.deepEqual(signals, ["SIGTERM"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("层 3: 前两层皆缺席 → 默认 7_200_000ms (固定常量, 不 shell 到任何 env)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { manager, spawned } = makeHarness();
+      const { taskId } = manager.spawn({});
+      assert.deepEqual(manager.queryBuffer(taskId), { status: "running" });
+      await vi.advanceTimersByTimeAsync(7_200_000);
+      const q = manager.queryBuffer(taskId);
+      assert.equal(q.status, "failed");
+      if (q.status === "failed") {
+        assert.equal(q.reason, "timeout");
+        assert.match(q.summary, /timeout after 7200000ms/);
+      }
+      const signals = spawned[0]!.kill.mock.calls.map((c) => c[0]);
+      assert.deepEqual(signals, ["SIGTERM"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waitFor 缺省 timeoutMs 也走同一链: opts.taskTimeoutMs=50 → ~50ms SubAgentWaitTimeoutError", async () => {
+    vi.useFakeTimers();
+    try {
+      const { manager, spawned } = makeHarness({ taskTimeoutMs: 50 });
+      const { taskId } = manager.spawn({});
+      // 关键: 先让 child 干净退出 (0, null) 且无 envelope —— SC16 下 state
+      // 维持 running 不落终态, 同时 exit handler 清掉 spawn 的 50ms SIGTERM
+      // 计时器。否则同一链值 50ms 的 spawn timer 会先把 state 标 failed
+      // (终态) → waitFor 反而 resolve 失败 envelope, 无从观察 waitFor 自身
+      // 的 effectiveTimeout 拒绝路径。清掉后剩 waitFor 的 interval 独占,
+      // 50ms 到达 → Date.now()-started >= 50 → SubAgentWaitTimeoutError。
+      spawned[0]!.emit("exit", 0, null);
+      const pending = manager.waitFor(taskId);
+      const rejected = assert.rejects(pending, SubAgentWaitTimeoutError);
+      await vi.advanceTimersByTimeAsync(100);
+      await rejected;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 // ── fixture 8:waitFor timeout ─────────────────────────────────────────────────
 
 describe("SubAgentManager waitFor timeout", () => {
@@ -574,7 +661,7 @@ describe("SubAgentDefinition local definition typecheck", () => {
     assert.equal(def.systemPrompt, undefined);
   });
 
-  it("manager surface exposes the five-member API", () => {
+  it("manager surface exposes the seven-member API", () => {
     const { manager } = makeHarness();
     const api: SubAgentManager = manager;
     assert.equal(typeof api.spawn, "function");
@@ -582,5 +669,87 @@ describe("SubAgentDefinition local definition typecheck", () => {
     assert.equal(typeof api.waitFor, "function");
     assert.equal(typeof api.shutdown, "function");
     assert.equal(typeof api.drainCompleted, "function");
+    assert.equal(typeof api.listActive, "function");
+    // #358 T7: 只读枚举面（Session API 端点消费；running/completed/failed 三态合一）。
+    assert.equal(typeof api.listSubagents, "function");
+  });
+});
+
+// ── #358 T7:listSubagents (只读枚举面,Session API 端点消费) ──────────────────
+
+describe("SubAgentManager listSubagents (#358 T7)", () => {
+  it("空管理面 → 返回空数组", () => {
+    const { manager } = makeHarness();
+    const items = manager.listSubagents();
+    assert.equal(items.length, 0);
+  });
+
+  it("completed 任务 → taskId/state/startedAt/taskPreview/endedAt/summary 齐全", () => {
+    const { manager, spawned } = makeHarness();
+    const { taskId } = manager.spawn({
+      task: "第一个任务提示词".repeat(40),
+    });
+    emitEnvelope(spawned[0]!, okEnvelope("r"));
+    const items = manager.listSubagents();
+    assert.equal(items.length, 1);
+    const item = items[0]!;
+    assert.equal(item.taskId, taskId);
+    assert.equal(item.state, "completed");
+    assert.equal(typeof item.startedAt, "string");
+    // 权限行: taskPreview 截断 ≤120,不落 task 全文 (spec 358 权限 row)。
+    assert.ok(item.taskPreview.length <= 120);
+    assert.equal(item.taskPreview, "第一个任务提示词".repeat(40).slice(0, 120));
+    // Postel: completed 必有 endedAt + summary。
+    assert.equal(typeof item.endedAt, "string");
+    assert.equal(item.summary, "done");
+    assert.equal(item.reason, undefined);
+  });
+
+  it("failed 任务 → state=failed + reason + summary (Postel: endedAt 必在)", () => {
+    const { manager, spawned } = makeHarness();
+    manager.spawn({ task: "explore the repo" });
+    spawned[0]!.emit("exit", 1, null);
+    const items = manager.listSubagents();
+    assert.equal(items.length, 1);
+    const item = items[0]!;
+    assert.equal(item.state, "failed");
+    assert.equal(item.reason, "crashed");
+    assert.match(item.summary!, /worker exit code=1 signal=null/);
+    assert.equal(typeof item.endedAt, "string");
+  });
+
+  it("running 任务 → Postel: endedAt/summary/reason 全缺席 (仅必备四字段)", () => {
+    const { manager } = makeHarness();
+    manager.spawn({ task: "long running" });
+    const items = manager.listSubagents();
+    assert.equal(items.length, 1);
+    const item = items[0]!;
+    assert.equal(item.state, "running");
+    assert.equal(item.endedAt, undefined);
+    assert.equal(item.summary, undefined);
+    assert.equal(item.reason, undefined);
+  });
+
+  it("task 缺席 → taskPreview 为空串 (回退不落全文)", () => {
+    const { manager } = makeHarness();
+    manager.spawn({ model: "opus" });
+    const items = manager.listSubagents();
+    assert.equal(items[0]!.taskPreview, "");
+  });
+
+  it("completed + failed + running 混合 → 返回全部三项 (每项 snapshot 只读)", () => {
+    const { manager, spawned, spawnCalls } = makeHarness();
+    manager.spawn({ task: "completed-task" }); // 0
+    manager.spawn({ task: "failed-task" }); // 1
+    manager.spawn({ task: "running-task" }); // 2
+    emitEnvelope(spawned[0]!, okEnvelope("done"));
+    spawned[1]!.emit("exit", 1, null);
+    assert.equal(spawnCalls.length, 3);
+    const items = manager.listSubagents();
+    assert.equal(items.length, 3);
+    const byState = Object.fromEntries(items.map((i) => [i.state, i]));
+    assert.equal(byState["completed"]!.taskPreview, "completed-task");
+    assert.equal(byState["failed"]!.taskPreview, "failed-task");
+    assert.equal(byState["running"]!.taskPreview, "running-task");
   });
 });

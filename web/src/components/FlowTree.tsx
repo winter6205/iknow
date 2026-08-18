@@ -1,4 +1,4 @@
-/* FlowTree — 树状拓扑：6 站点横排顶部，事件按归属垂直落入各自子树
+/* FlowTree — 树状拓扑：7 站点横排顶部，事件按归属垂直落入各自子树
    移植自 prototype web/trace-prototype/src/variants/FlowTree.tsx（#291）。
    数据源改为真实 API 投影后的 TraceEvent[]（见 lib/flowTree.ts）。 */
 import type { ReactNode } from "react";
@@ -22,6 +22,8 @@ const ICONS: Record<string, string> = {
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7l8-4z"/></svg>',
   violation:
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4l9 16H3l9-16z"/><path d="M12 10v5M12 18v.1"/></svg>',
+  subagent:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="M12 7.5v3M12 10.5l-4.5 6M12 10.5l4.5 6"/></svg>',
 };
 
 /* 布局常量（px，逻辑画布） */

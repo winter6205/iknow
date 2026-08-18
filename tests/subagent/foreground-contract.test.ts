@@ -6,7 +6,7 @@
  *   C3: waitFor abort → SubAgentAbortError; 已终态 abort 无副作用
  *   C4: drain 中途 waitFor 拒绝 → 返回部分、不抛
  *   C5: wait:true 失败 envelope 作 ok 返回; abort → execution_failed:cancelled
- *   T13: PER_TASK_TIMEOUT_MS 对齐 (default 5 min = 300_000 ms)
+ *   T13: PER_TASK_TIMEOUT_MS 对齐 (default 2 h = 7_200_000 ms)
  *   T12: messages_captured 三处置 true + coordinator 段 proactive 断言
  *
  * 时序:implementer A (subagent 层) 逐文件合入 manager.ts(已) / host-drain.ts /
@@ -34,8 +34,8 @@ import { createSpawnSubAgentTool } from "../../src/harness/subagent/spawn-subage
 import { ToolExecutionError } from "../../src/harness/errors.ts";
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
 
-/** PER_TASK_TIMEOUT_MS 默认 5 分钟(契约 T13)。 */
-const PER_TASK_TIMEOUT_MS_DEFAULT = 5 * 60 * 1000;
+/** PER_TASK_TIMEOUT_MS 默认 2 小时(契约 T13; #358 spec Assumptions 1)。 */
+const PER_TASK_TIMEOUT_MS_DEFAULT = 120 * 60 * 1000;
 
 /** 最小完整 SubAgentManager fake:缺省成员全 no-op,测试按需覆盖。 */
 function baseManager(over: Partial<SubAgentManager>): SubAgentManager {
@@ -47,6 +47,8 @@ function baseManager(over: Partial<SubAgentManager>): SubAgentManager {
     drainCompleted: () => [],
     listActive: () => [],
     abortTask: () => false,
+    // #358 T7: 接口新增只读枚举面 —— baseManager 一处补全覆盖全部 over-spread 实例。
+    listSubagents: () => [],
     ...over,
   };
 }
@@ -297,18 +299,17 @@ describe("C5: wait:true 失败 envelope 作 ok 返回; abort → execution_faile
   });
 });
 
-describe("T13: PER_TASK_TIMEOUT_MS 默认 5 分钟", () => {
-  it("PER_TASK_TIMEOUT_MS = 300_000 (契约 5min,修复旧 30s 注释不一致)", () => {
+describe("T13: PER_TASK_TIMEOUT_MS 默认 2 小时", () => {
+  it("PER_TASK_TIMEOUT_MS = 7_200_000 (契约 7200s, spec Assumptions 1)", () => {
     expect(PER_TASK_TIMEOUT_MS).toBe(PER_TASK_TIMEOUT_MS_DEFAULT);
   });
 
   it("manager waitFor 缺省 timeoutMs = PER_TASK_TIMEOUT_MS(与前台 wait 对齐)", async () => {
-    // manager.waitFor 缺省签名 = PER_TASK_TIMEOUT_MS(300s)——不再 30s。
+    // manager.waitFor 缺省签名 = PER_TASK_TIMEOUT_MS(7200s)——不再 30s。
     const mgr = createSubAgentManager({ spawn: makeFakeSpawnFactory() });
     const { taskId } = mgr.spawn({ task: "t" });
-    // waitFor 缺省 300s:进程已 exit 0 → 立即 resolve;断言不抛即可,证明
-    // 缺省路径可用。真实 300s 语义由常量断言 + spawn-subagent-tool 显式
-    // 传参覆盖。
+    // waitFor 缺省 7200s:进程已 exit 0 → 立即 resolve;断言不抛即可,证明
+    // 缺省路径可用。真实 7200s 语义由常量断言覆盖。
     const p = mgr.waitFor(taskId);
     expect(p).toBeInstanceOf(Promise);
     // 防止 shutdown 主动拒绝 waitFor 时形成 unhandled rejection:test 不关心

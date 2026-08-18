@@ -97,6 +97,8 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     // #378 根因 B: MCP 连接超时(默认 60_000)。
     mcp: { connectTimeoutMs: 60_000 },
+    // #358 T2: subagent 配置臂 (build-engine 读取 taskTimeoutMs 透传给 manager)。
+    subagent: { taskTimeoutMs: undefined },
   };
 }
 
@@ -509,6 +511,10 @@ describe("buildHarnessEngine — #356 T6 subagent manager 装配", () => {
     waitFor: () => Promise.reject(new Error("not used")),
     shutdown: () => Promise.resolve(),
     drainCompleted: () => [],
+    listActive: () => [],
+    abortTask: () => false,
+    // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
+    listSubagents: () => [],
   };
 
   it("chat surface：注入 fake subagentManager → registry 含两件 + 透出注入对象", async () => {

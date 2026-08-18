@@ -1294,6 +1294,10 @@ describe("SC9 只读判官集成层复断言 (#449b B9)", () => {
       abortTask() {
         return false;
       },
+      // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
+      listSubagents() {
+        return [];
+      },
     };
     return { manager, captured: () => captured };
   }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it } from "vitest";
+import { describe, it, vi } from "vitest";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import {
   buildThinkingParams,
@@ -7,6 +7,7 @@ import {
 } from "../../src/harness/model-adapter/anthropic-adapter.ts";
 import { ProtocolError } from "../../src/harness/errors.ts";
 import {
+  applyEnvelopeOverrides,
   createWorkerDeps,
   runWorkerOnce,
   toFailedEnvelope,
@@ -203,6 +204,79 @@ describe("subagent worker: runWorkerOnce 端到端 (stub-model + 全 deps)", () 
     });
     assert.equal(env.status, "ok");
     assert.equal(env.result, "ok");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G. #358 T2 / D8: applyEnvelopeOverrides + runWorkerOnce 的 per-call 隔离
+//    deps.timeoutMs 只能来自 env (createWorkerDeps 侧), 绝不从 spawn 的
+//    per-task timeoutMs 渗入 —— 否则一次正常 LLM 调用会按任务寿命竞速
+//    (per-call 保护失效 / 显式小值误杀)。
+// ---------------------------------------------------------------------------
+
+describe("subagent worker: applyEnvelopeOverrides (D8 per-call 隔离, SC5)", () => {
+  const baseEnvelope: WorkerEnvelope = {
+    task: "investigate X",
+    sandboxRoot: "/tmp/sb",
+  };
+
+  it("envelope 携带 timeoutMs → deps.timeoutMs 不变 (只处理 maxTurns)", () => {
+    const deps = makeDeps(
+      createStubModel({ responses: [assistantResult({ texts: ["ok"] })] })
+    );
+    const out = applyEnvelopeOverrides(
+      { ...baseEnvelope, maxTurns: 7, timeoutMs: 999_999 },
+      deps
+    );
+    assert.equal(out.timeoutMs, deps.timeoutMs, "timeoutMs 不被 envelope 覆盖");
+    // 仅 maxTurns 生效, 其余字段逐位保留 (spread 守卫)
+    assert.equal(out.maxTurns, 7);
+    assert.equal(out.adapter, deps.adapter);
+    assert.equal(out.registry, deps.registry);
+  });
+
+  it("envelope 无 maxTurns/timeoutMs → 原 deps 引用不变 (零覆盖)", () => {
+    const deps = makeDeps(
+      createStubModel({ responses: [assistantResult({ texts: ["ok"] })] })
+    );
+    const out = applyEnvelopeOverrides(baseEnvelope, deps);
+    assert.equal(out, deps, "无覆盖时应返回同一 deps 引用");
+  });
+
+  it("仅 timeoutMs 无 maxTurns → deps 原引用不变 (timeoutMs 完全不在覆盖面)", () => {
+    const deps = makeDeps(
+      createStubModel({ responses: [assistantResult({ texts: ["ok"] })] })
+    );
+    const out = applyEnvelopeOverrides({ ...baseEnvelope, timeoutMs: 1 }, deps);
+    assert.equal(out, deps, "timeoutMs 单独出现不触发任何对象重建");
+  });
+
+  it("runWorkerOnce 端到端: envelope timeoutMs:1 + 宽松 deps.timeoutMs → 正常完成 (旧 spread 会在 1ms 竞速超时)", async () => {
+    vi.useFakeTimers();
+    try {
+      // 单条 ok 回应:NEW 路径由正常 step 消费 (完成); OLD 路径 1ms 竞速
+      // 超时 → 该回应被 epilogue 摘要消费 → finalText null → result ""。
+      const adapter = createStubModel({
+        responses: [assistantResult({ texts: ["complete"] })],
+        delayMs: 200,
+      });
+      const p = runWorkerOnce({
+        workerEnvelope: { ...baseEnvelope, timeoutMs: 1 },
+        // deps.timeoutMs 宽松 (60s) — envelope.timeoutMs=1 是 per-task 寿命,
+        // 渗入 per-call 竞速会杀掉这次正常调用 (D8)。
+        deps: { ...makeDeps(adapter), timeoutMs: 60_000 },
+      });
+      // 让 run 的初始微任务 (system?.() / raceModel 计时器注册) 先落盘
+      await Promise.resolve();
+      await Promise.resolve();
+      // 推进 300ms:NEW 下 200ms 步完成;OLD 下 1ms 竞速超时 + 摘要延时收敛
+      await vi.advanceTimersByTimeAsync(300);
+      const env = await p;
+      assert.equal(env.status, "ok");
+      assert.equal(env.result, "complete", "per-call 竞速不被信封寿命覆盖");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

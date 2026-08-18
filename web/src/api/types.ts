@@ -154,6 +154,32 @@ export class SessionApiError extends Error {
   }
 }
 
+// -- Subagent runtime status (#358 T8) ---------------------------------------
+
+/**
+ * 子代理在场状态投影（镜像 `src/harness/subagent/manager.ts` SubagentInfo，
+ * T7 端点响应 item）。字段语义与后端 SSOT 同源：
+ * `state` ∈ "starting"|"running"|"completed"|"failed"；
+ * Postel：endedAt/summary/reason 仅终态且有值时在场。
+ */
+export interface SubagentStatus {
+  readonly taskId: string;
+  readonly state: SubagentState;
+  readonly taskPreview: string;
+  readonly startedAt: string;
+  readonly endedAt?: string;
+  readonly summary?: string;
+  readonly reason?: string;
+}
+
+/** 四态联合，对齐 SubagentState（manager TaskState 同构）。 */
+export type SubagentState = "starting" | "running" | "completed" | "failed";
+
+/** 镜像 T7 端点返回包 `{ subagents: [...] }`（镜像 `{ asks: [...] }` 先例）。 */
+export interface SubagentsResponse {
+  readonly subagents: ReadonlyArray<SubagentStatus>;
+}
+
 // -- Trace inspection panel (mirrors src/traceserver/) -----------------------
 
 export type TraceRecord = Record<string, unknown>;
@@ -180,8 +206,20 @@ export interface SessionsResponse {
   readonly sessions: ReadonlyArray<TraceSessionSummary>;
 }
 
+/**
+ * Mirrors TraceRecordType in src/traceserver/types.ts (whitelist-derrived union).
+ * 新 record 类型只在此追加, 对齐读侧白名单 (T5)。
+ */
 export type TraceRecordType =
-  "llm_call" | "tool_call" | "turn" | "violation" | "session" | "sandbox_cmd";
+  | "llm_call"
+  | "tool_call"
+  | "turn"
+  | "violation"
+  | "session"
+  | "sandbox_cmd"
+  | "subagent_spawn"
+  | "subagent_stop"
+  | "subagent_state_change";
 
 export type TraceFieldType =
   "string" | "number" | "boolean" | "enum" | "datetime";
@@ -205,4 +243,13 @@ export interface TraceQueryParams {
   readonly offset?: number;
   /** 前端轮询间隔（缺省 1000ms，0 关闭）。spec v2 SC-R 14 / SC-V 26. */
   readonly poll?: number;
+  /**
+   * T5/T6 (#358): 精确匹配 subagent task_id (snake_case wire, 镜像读侧
+   * TraceQuery.taskId)。undefined = 不参与过滤。
+   */
+  readonly task_id?: string;
+  /**
+   * T5/T6 (#358): 精确匹配 parent_turn_id (snake_case wire)。undefined = 不参与过滤。
+   */
+  readonly parent_turn_id?: string;
 }

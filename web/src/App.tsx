@@ -9,7 +9,9 @@ import { SessionSidebar } from "./components/SessionSidebar";
 import { StateBlock } from "./components/StateBlock";
 import { useSessionChat } from "./hooks/useSessionChat";
 import { useAsksPolling } from "./hooks/useAsksPolling";
+import { useSubagentsPolling } from "./hooks/useSubagentsPolling";
 import { PermissionDialog } from "./components/PermissionDialog";
+import { SubagentStatusBar } from "./components/SubagentStatusBar";
 import {
   loadThinkingSettings,
   saveThinkingSettings,
@@ -84,6 +86,8 @@ function ChatApp() {
   const conversationId = chat.session?.conversation_id ?? null;
   const isSending = chat.phase === "sending";
   const askPolling = useAsksPolling(conversationId, isSending);
+  // #358 T8: 子代理状态栏轮询（spec SC8；2.5s 间隔，镜像 useAsksPolling）。
+  const subagentPolling = useSubagentsPolling(conversationId);
   const permissionDialog =
     askPolling.pendingAsk && conversationId ? (
       <PermissionDialog
@@ -195,6 +199,8 @@ function ChatApp() {
       }
       footer={
         <>
+          {/* 子代理状态栏（spec #358 SC8）：零子代理 → 组件返回 null，不打扰 idle 会话。 */}
+          <SubagentStatusBar subagents={subagentPolling.subagents} />
           <Composer
             disabled={!chat.session || chat.phase === "loading"}
             sending={chat.phase === "sending"}

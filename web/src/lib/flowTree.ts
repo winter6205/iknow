@@ -6,16 +6,22 @@
  * `TraceEvent` shape the FlowTree layout consumes. The prototype used a hard
  * coded `EVENTS` array; here `recordsToEvents` derives events from wire rows.
  *
- * The tree shows 6 stations (session/llm/tool/sandbox/permission/violation);
- * each record_type maps to a station, and the multi-turn layout is recovered
- * by walking the records chronologically (llm/tool rows carry no turn_index —
- * the `turn` row that follows them carries it).
+ * The tree shows 7 stations (session/llm/tool/sandbox/permission/violation/
+ * subagent); each record_type maps to a station, and the multi-turn layout is
+ * recovered by walking the records chronologically (llm/tool rows carry no
+ * turn_index — the `turn` row that follows them carries it).
  */
 
 import type { TraceRecord, TraceRecordType } from "../api/types";
 
 export type StationId =
-  "session" | "llm" | "tool" | "sandbox" | "permission" | "violation";
+  | "session"
+  | "llm"
+  | "tool"
+  | "sandbox"
+  | "permission"
+  | "violation"
+  | "subagent";
 
 export type EventStatus = "ok" | "warn" | "denied" | "error";
 
@@ -46,6 +52,7 @@ export const STATIONS: { id: StationId; label: string }[] = [
   { id: "sandbox", label: "沙箱" },
   { id: "permission", label: "权限" },
   { id: "violation", label: "异常" },
+  { id: "subagent", label: "子代理" },
 ];
 
 export const fmtDur = (ms: number): string =>
@@ -102,6 +109,10 @@ function stationOf(
     case "turn":
       // 回合标记落在会话站（原型：回合分组挂在 session 站下）。
       return "session";
+    case "subagent_spawn":
+    case "subagent_stop":
+    case "subagent_state_change":
+      return "subagent";
     case "violation": {
       const decision = str(record, "decision") ?? "";
       const reason = str(record, "reason") ?? String(record["detail"] ?? "");
@@ -131,6 +142,18 @@ function statusOf(
     const kind = str(record, "tool_kind");
     if (kind !== undefined && kind !== "ok") return "error";
   }
+  // Subagent 终态 / 状态迁移失败即使 wire status 缺省也标红：stop 落 failed
+  // 或 state_change 迁到 failed 都是失败终局（T4 写侧 status 可被 safeTrace
+  // 包裹后在终态路由保留 reason，这里以状态域为准不依赖 status 填写）。
+  if (station === "subagent") {
+    if (str(record, "final_state") === "failed") return "error";
+    if (
+      str(record, "to_state") === "failed" &&
+      recordType === "subagent_state_change"
+    ) {
+      return "error";
+    }
+  }
   return "ok";
 }
 
@@ -147,6 +170,18 @@ function labelOf(recordType: TraceRecordType, record: TraceRecord): string {
       return str(record, "tool_name") ?? "工具调用";
     case "sandbox_cmd":
       return str(record, "command") ?? "沙箱命令";
+    case "subagent_spawn":
+      // task_preview 截断后的任务摘要在服务端已截断, 直接展示 (权限行)。
+      return str(record, "task_preview") ?? "子代理 spawn";
+    case "subagent_stop": {
+      const finalState = str(record, "final_state");
+      return finalState ? `子代理 stop · ${finalState}` : "子代理 stop";
+    }
+    case "subagent_state_change": {
+      const fromState = str(record, "from_state") ?? "?";
+      const toState = str(record, "to_state") ?? "?";
+      return `子代理状态 ${fromState}→${toState}`;
+    }
     case "turn":
       return `回合 ${num(record, "turn_index") + 1}`;
     case "violation": {
@@ -172,6 +207,19 @@ const STRUCTURAL_KEYS = new Set([
   "duration_ms",
   "status",
   "turn_index",
+  // Subagent 生命周期列 (T4/T5): 承载 id / 关联 / 状态机迁移的键剥离出详情区 —
+  // 这些键在列定义 (TRACE_FIELD_DEFS) 里各有独立列, 重复展示无信息增益。
+  // 保留 reason / summary / task_preview 等 payload 细节。
+  "subagent_id",
+  "task_id",
+  "parent_turn_id",
+  "origin",
+  "final_state",
+  "from_state",
+  "to_state",
+  "exit_code",
+  "signal",
+  "ts",
 ]);
 
 function fieldsOf(

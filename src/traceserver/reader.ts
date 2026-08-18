@@ -181,7 +181,10 @@ function parseOneLine(line: string): TraceRecordRow | undefined {
 
 // -- applyFilter ---------------------------------------------------------------
 
-/** Exact-match filter on conversation_id / record_type / status. */
+/**
+ * Exact-match filter on conversation_id / record_type / status +
+ * T5 task_id / parent_turn_id. 全部 AND 组合, 缺省 undefined 的被滤条件不生效。
+ */
 function applyFilter(
   rows: ReadonlyArray<TraceRecordRow>,
   query: TraceQuery
@@ -198,6 +201,16 @@ function applyFilter(
     if (recordType !== undefined && row["record_type"] !== recordType)
       return false;
     if (status !== undefined && row["status"] !== status) return false;
+    // T5 (#358): task_id / parent_turn_id 精确匹配。缺省 undefined 时跳过
+    // (缺失 key 的行视为不匹配, 不参与成功判定)。空字符串值已在上游
+    // http.ts parseStringParam 拒绝 400, 不会到达 filter。
+    if (query.taskId !== undefined && row["task_id"] !== query.taskId)
+      return false;
+    if (
+      query.parentTurnId !== undefined &&
+      row["parent_turn_id"] !== query.parentTurnId
+    )
+      return false;
     return true;
   });
 }

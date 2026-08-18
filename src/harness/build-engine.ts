@@ -76,6 +76,8 @@ import {
   type SubAgentManager,
 } from "./subagent/manager.js";
 import { defaultSubAgentSpawn } from "./subagent/spawn.js";
+import { createNoopTraceService } from "./trace/noop.js";
+import type { TraceService } from "./trace/types.js";
 
 export type BuildEngineOpts = {
   readonly env: IknowEnv;
@@ -122,6 +124,13 @@ export type BuildEngineOpts = {
   readonly createMcpManager?: typeof import("./mcp/manager.js").createMcpManager;
   /** #356 T6 测试缝:subagent manager 覆盖注入(生产默认不传则内部自建)。 */
   readonly subagentManager?: SubAgentManager;
+  /**
+   * #358 T4 测试缝:subagent manager 配套 TraceService 覆盖注入。生产默认
+   * createNoopTraceService() (manager 透传 trace 字段来自各 caller,本缝保持
+   * 既有 byte-stable;集成路径在 cli.ts / hub.ts / #371 路由层把 per-conversation
+   * JsonlTraceService 注入 manager)。
+   */
+  readonly subagentTrace?: TraceService;
   /** TUI 工具摘要观测缝:透传给 createAciExecutor hooks.postToolUse(chat/serve 不传 → 零变化)。 */
   readonly hooks?: PostToolUseHook;
   /** #126 T5 测试缝:settings 对象覆盖注入(生产默认不传则 loadIknowSettings({ cwd }))。
@@ -300,7 +309,17 @@ export async function buildHarnessEngine(
       ? (opts.subagentManager ??
         // #357 T1: 传入 sandboxRoot 作为子代理收窄校验的父根锚点;
         // 子代理 def.sandboxRoot 必须落在该锚点之下(realpath 防 symlink 逃逸)。
-        createSubAgentManager({ spawn: defaultSubAgentSpawn, sandboxRoot }))
+        // #358 T4: trace 注入 (生产默认 NoopTraceService,byte-stable;
+        // 测试经 opts.subagentTrace / opts.subagentManager 覆盖)。
+        // #358 T2: per-task wallclock 链条中段 — env.subagent.taskTimeoutMs
+        // (settings/env 合并已由 T1 在 env 层完成, 此处直接消费; 缺省
+        // undefined → manager 回退自己的 7200s 常量)。
+        createSubAgentManager({
+          spawn: defaultSubAgentSpawn,
+          sandboxRoot,
+          trace: opts.subagentTrace ?? createNoopTraceService(),
+          taskTimeoutMs: env.subagent.taskTimeoutMs,
+        }))
       : undefined;
   // #126 T5:settings 对象缝（测试注入隔离 settings；生产缺省 loadIknowSettings）。
   const settings = opts.settings ?? loadIknowSettings({ cwd });

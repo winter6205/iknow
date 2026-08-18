@@ -15,6 +15,13 @@ import { parseParentEnvelope, truncateEnvelopeResult } from "./envelope.js";
 import type { SubAgentEnvelope, WorkerEnvelope } from "./envelope.js";
 import type { SubAgentDefinition } from "./role.js";
 import { SubAgentSandboxRootError } from "../errors.js";
+import type {
+  TraceService,
+  SubagentStopRecord,
+  SubagentStateChangeRecord,
+  SubagentState,
+} from "../trace/index.js";
+import { safeTrace } from "../trace/safe-trace.js";
 
 // re-export: manager 的调用方(T4/T5 工具、host-drain)统一从 manager 侧拿
 // SubAgentDefinition,不必各自 import role.js。
@@ -30,6 +37,22 @@ export type QueryBufferResult =
       summary: string;
     };
 
+/**
+ * #358 T7: Session API 只读投影的最小状态面 (spec Code Style 137)。
+ * 字段集与 trace SubagentSpawnRecord 对齐,但截断语义不同:
+ * taskPreview 截断 ≤120 (权限行,不落 task 全文 —— spec 358 权限 row)。
+ * Postel: endedAt/summary/reason 仅终态且有值时在场, running 态缺席。
+ */
+export interface SubagentInfo {
+  readonly taskId: string;
+  readonly state: "starting" | "running" | "completed" | "failed";
+  readonly taskPreview: string;
+  readonly startedAt: string;
+  readonly endedAt?: string;
+  readonly summary?: string;
+  readonly reason?: string;
+}
+
 export interface SubAgentManager {
   /**
    * 同步入 map 立即返回 taskId(manager 内部 randomUUID() 唯一真值,SC3)。
@@ -42,7 +65,8 @@ export interface SubAgentManager {
   /**
    * #361 C3: 第三参 `signal?: AbortSignal` —— caller abort → reject
    * SubAgentAbortError(与 SubAgentWaitTimeoutError 类型区分)。首查终态路径
-   * 保留(立即 resolve,不经 interval)。timeoutMs 默认 PER_TASK_TIMEOUT_MS。
+   * 保留(立即 resolve,不经 interval)。timeoutMs 缺省走 #358 T2 三层链
+   * (def.timeoutMs ?? opts.taskTimeoutMs ?? PER_TASK_TIMEOUT_MS)。
    */
   readonly waitFor: (
     taskId: string,
@@ -67,6 +91,13 @@ export interface SubAgentManager {
    * 已终态任务 no-op。
    */
   readonly abortTask: (taskId: string) => boolean;
+  /**
+   * #358 T7: 只读全量枚举(starting/running/completed/failed 合一) — Session
+   * API GET /sessions/:id/subagents 端点消费。数据源 = 内存 map + 终态
+   * envelope(与 queryBuffer/drainCompleted 同真值),不在端点侧做任务寿命
+   * 语义决策。taskPreview 截断 ≤120 见 SubagentInfo 注释。
+   */
+  readonly listSubagents: () => ReadonlyArray<SubagentInfo>;
 }
 
 /** spawn DI 工厂签名:由调用方注入(fake 测试 / 生产 defaultSubAgentSpawn)。 */
@@ -124,12 +155,44 @@ export class SubAgentAbortError extends Error {
 }
 
 /**
- * #361 T13: per-task 缺省 wallclock 5min(修正 spawn-subagent-tool 注释
- * "default 5 min if absent" 与 manager waitFor 旧默认 30s 不一致)。
+ * #361 T13 / #358 T2: per-task 缺省 wallclock 7200s(2h)——spec Assumptions 1:
+ * operator 真实使用数据表明子代理任务常态超过 1 小时,对齐 deer-flow 1800s
+ * 实测再留余量;300s 原值无实测依据。
  * wait:true handler 显式传给 waitFor;manager 内部 spawn 的 per-task
- * SIGTERM 计时器也用此常量作缺省,worker 侧 wallclock 与前景 wait 对齐。
+ * SIGTERM 计时器也用此链末端常量作缺省,worker 侧 wallclock 与前景 wait 对齐。
+ * 唯一声明点 (spec "per-task 缺省值归 T2 manager 消费点, 避免两处声明")。
  */
-export const PER_TASK_TIMEOUT_MS = 300_000;
+export const PER_TASK_TIMEOUT_MS = 7_200_000;
+
+/**
+ * #358 T2: per-task wallclock 三层缺省链 (spec SC4 / Assumptions 1):
+ * `def.timeoutMs ?? opts.taskTimeoutMs ?? PER_TASK_TIMEOUT_MS`。
+ * 语义分离 (C9): 这是任务寿命 (父 manager SIGTERM), 与 worker 内 per-call
+ * 竞速 (deps.timeoutMs) 无关; 单一常量声明点保证缺省值不漂移。
+ */
+export function effectiveTaskTimeoutMs(
+  def: SubAgentDefinition,
+  opts: { readonly taskTimeoutMs?: number }
+): number {
+  return def.timeoutMs ?? opts.taskTimeoutMs ?? PER_TASK_TIMEOUT_MS;
+}
+
+/**
+ * #358 review-fix (Fix 3): taskPreview SSOT —— 长度 + 来源统一。
+ * 只取 `def.task`（不回落 def.systemPrompt），截断 ≤120 字符（默认）。
+ * 两个消费面共用同一真值:
+ *   - `recordSubagentSpawn` 的 subagent_spawn 落盘 taskPreview
+ *   - `listSubagents` 的 HTTP/API 投影 taskPreview
+ * 120 是 spec 权限行定案的 "least-privilege" 边界（task 全文不落盘 / 不
+ * 上行）；trace 侧没有理由写更多，且 systemPrompt 纳入会扩大脱敏面。max
+ * 参数供显式覆盖（当前无调用方传 <120 以下的更小值，保留参数防未来漂移）。
+ */
+export function truncateTaskPreview(
+  def: SubAgentDefinition,
+  max?: number
+): string {
+  return def.task?.slice(0, max ?? 120) ?? "";
+}
 
 type TaskState = "starting" | "running" | "completed" | "failed";
 
@@ -148,6 +211,19 @@ interface Task {
   timeoutTimer?: NodeJS.Timeout;
   /** #356 High #2 fix: SIGKILL 兜底 timer(exit / shutdown 需与 timeoutTimer 一并清)。 */
   timeoutKillFallback?: NodeJS.Timeout;
+  /** #358 T4: startedAt ISO 戳 (subagent_spawn 落盘的 source)。
+   *  Task 构造时即生成;后续 spawn/stop 都引用此 ISO。 */
+  readonly startedAt: string;
+  /** #358 T4: stoppedEmitted guard — subagent_stop 单点 single-emit
+   * (exit handler 与 child.on("error")/timeout-fired 等多路径都可能触发终态);
+   * flag 一旦置位不再覆写, 避免重复落盘。 */
+  stoppedEmitted: boolean;
+  /**
+   * #358 T7: 终态 ISO 戳(仅簿记,不改状态机语义)。emitStop 内随
+   * stoppedEmitted 锁存一次;listSubagents 读它当 endedAt。running/
+   * starting 态缺席 → Postel 不上行。
+   */
+  endedAt?: string;
 }
 
 const WAIT_POLL_MS = 25;
@@ -189,12 +265,109 @@ export function createSubAgentManager(opts: {
    * buildWorkerPayload 内 realpath 一次后冻结,worker fs 工具沿用同一 resolved 值。
    */
   readonly sandboxRoot?: string;
+  /**
+   * #358 T4: 可选 TraceService — 子代理生命周期三类事件 (subagent_spawn /
+   * subagent_state_change / subagent_stop) 落盘。注入则通过 safeTrace 包裹
+   * 发埋点;不注入则零副作用 (与既有行为 byte-stable)。
+   */
+  readonly trace?: TraceService;
+  /**
+   * #358 T2: per-task 缺省 wallclock (毫秒) — 消费链中段:
+   * `def.timeoutMs ?? opts.taskTimeoutMs ?? PER_TASK_TIMEOUT_MS`。
+   * 装配由 build-engine 从 env.subagent.taskTimeoutMs (settings/env 合并)
+   * 透传;env 层无第三层默认 (常量唯一声明点在本文件)。
+   */
+  readonly taskTimeoutMs?: number;
 }): SubAgentManager {
   const tasks = new Map<string, Task>();
   /** 所有未决 waitFor 的轮询句柄(非终态,shutdown 必须清,防进程悬挂)。 */
   const waitPollers = new Set<ReturnType<typeof setInterval>>();
   /** 未决 waitFor 的 settleReject 引用:shutdown 时主动拒绝,SC16 不悬挂。 */
   const waitRejecters = new Set<(reason: unknown) => void>();
+  /** #358 T4: trace 句柄 closure 捕获, spawn/state_change/stop 三处共用。 */
+  const trace = opts.trace;
+
+  /**
+   * #358 T4: emitStateChange — 任何 task.state 迁移点必经此处。
+   * Postel: reason 仅 toState === "failed" 时填 (spec Code Style 121)。
+   * 该函数: (1) 写入 task.state (2) 同步发 subagent_state_change 埋点 (3) 不 throw。
+   * safeTrace 包裹: trace 写盘失败不阻塞 manager 业务。
+   */
+  function emitStateChange(
+    task: Task,
+    toState: SubagentState,
+    opts2?: { readonly reason?: SubagentStateChangeRecord["reason"] }
+  ): void {
+    const fromState = task.state;
+    // review-fix (Fix 2): 同态迁移 self-loop guard —— 状态机 "same state"
+    // 迁移是 no-op。典型场景: SC6 优雅收尾时 timer fire 先 emitStateChange
+    // (running → failed), 随后 worker 的 timeout envelope 在 stdout handler
+    // 再次 emitStateChange (failed → failed) —— 前者已落盘, 后者若再写会
+    // 产生 from_state === to_state === "failed" 的 spurious 记录。跳过 state
+    // 赋值与 trace 两者 (既有 emitStop 的 stoppedEmitted 单点守门不覆盖这里:
+    // state_change 没有等价 flag, 靠 prev === toState 判定)。
+    if (fromState === toState) return;
+    task.state = toState;
+    if (!trace) return;
+    void safeTrace(() =>
+      trace.recordSubagentStateChange({
+        id: task.id,
+        taskId: task.id,
+        origin: "parent",
+        startedAt: task.startedAt,
+        status: toState === "failed" ? "error" : "ok",
+        ts: new Date().toISOString(),
+        fromState,
+        toState,
+        ...(opts2?.reason !== undefined ? { reason: opts2.reason } : {}),
+      })
+    );
+  }
+
+  /**
+   * #358 T4: emitStop — 任务终态时落 subagent_stop; stoppedEmitted flag 守门
+   * 保证 single-emit (exit handler + timeout-fire + child.on("error") 多路径
+   * 都可能触发终态); 已发则 no-op。
+   * Postel: 缺省 reason = envelope.reason; summary = envelope.summary (failed 态必有)。
+   */
+  function emitStop(
+    task: Task,
+    finalState: "completed" | "failed",
+    extras: {
+      readonly exitCode?: number;
+      readonly signal?: NodeJS.Signals | string;
+      readonly reason?: SubagentStopRecord["reason"];
+      readonly summary?: string;
+    } = {}
+  ): void {
+    if (task.stoppedEmitted) return;
+    task.stoppedEmitted = true;
+    const endedAt = new Date().toISOString();
+    // #358 T7: 终态 ISO 随 single-emit 锁存一次 (listSubagents 读它当 endedAt)。
+    task.endedAt = endedAt;
+    const durationMs = Math.max(
+      0,
+      Date.parse(endedAt) - Date.parse(task.startedAt)
+    );
+    if (!trace) return;
+    void safeTrace(() =>
+      trace.recordSubagentStop({
+        id: task.id,
+        taskId: task.id,
+        origin: "parent",
+        startedAt: task.startedAt,
+        endedAt,
+        durationMs,
+        finalState,
+        status: finalState === "failed" ? "error" : "ok",
+        ts: endedAt,
+        ...(extras.exitCode !== undefined ? { exitCode: extras.exitCode } : {}),
+        ...(extras.signal !== undefined ? { signal: extras.signal } : {}),
+        ...(extras.reason !== undefined ? { reason: extras.reason } : {}),
+        ...(extras.summary !== undefined ? { summary: extras.summary } : {}),
+      })
+    );
+  }
 
   function spawn(def: SubAgentDefinition): { readonly taskId: string } {
     // #361 C1: running+starting ≥ MAX_CONCURRENT_WORKERS 立即抛 SubAgentCapacityError。
@@ -214,46 +387,107 @@ export function createSubAgentManager(opts: {
     const payload = buildWorkerPayload(def);
 
     const id = randomUUID();
-    const task: Task = { id, def, state: "starting" };
+    const startedAt = new Date().toISOString();
+    const task: Task = {
+      id,
+      def,
+      state: "starting",
+      startedAt,
+      stoppedEmitted: false,
+    };
     tasks.set(id, task);
 
     let child: ChildProcess;
     try {
       child = opts.spawn(def, id, payload);
     } catch (err) {
-      task.state = "failed";
+      const errMsg = err instanceof Error ? err.message : String(err);
       task.envelope = {
         status: "failed",
         reason: "crashed",
-        summary: `subagent spawn failed: ${err instanceof Error ? err.message : String(err)}`,
+        summary: `subagent spawn failed: ${errMsg}`,
         result: "",
       };
+      // #358 T4: spawn 仍落 subagent_spawn (失败路径也记录尝试);
+      // 紧接 emitStateChange(failed) + emitStop (single-emit lifecycle)。
+      if (trace) {
+        void safeTrace(() =>
+          trace.recordSubagentSpawn({
+            id: task.id,
+            taskId: task.id,
+            origin: "parent",
+            startedAt: task.startedAt,
+            status: "error",
+            ts: new Date().toISOString(),
+          })
+        );
+      }
+      emitStateChange(task, "failed", { reason: "crashed" });
+      emitStop(task, "failed", {
+        reason: "crashed",
+        summary: `subagent spawn failed: ${errMsg}`,
+      });
       return { taskId: id };
     }
     task.child = child;
-    task.state = "running";
     task.abortCtrl = new AbortController();
 
+    // #358 T4: subagent_spawn 在 child 成功 launch 后 emit (task.state 此时还是
+    // "starting",下方 emitStateChange("running") 联动跑 starting→running 迁移)。
+    if (trace) {
+      const taskPreviewSource = truncateTaskPreview(def, 120);
+      void safeTrace(() =>
+        trace.recordSubagentSpawn({
+          id: task.id,
+          taskId: task.id,
+          origin: "parent",
+          startedAt: task.startedAt,
+          status: "ok",
+          ts: new Date().toISOString(),
+          ...(taskPreviewSource.length > 0
+            ? { taskPreview: taskPreviewSource }
+            : {}),
+          ...(def.model !== undefined ? { model: def.model } : {}),
+          ...(def.maxTurns !== undefined ? { maxTurns: def.maxTurns } : {}),
+          ...(def.timeoutMs !== undefined ? { timeoutMs: def.timeoutMs } : {}),
+        })
+      );
+    }
+    // 状态迁移: starting → running (emitStateChange 内置 task.state 写入 + 埋点)
+    emitStateChange(task, "running");
+
     // #356 High #2 fix: per-task timeout (SC6 / assumption 14).
-    // #361 T13: def.timeoutMs 缺省 = PER_TASK_TIMEOUT_MS(5min),与前景 wait
-    // 对齐 — 避免"spawn 300s wallclock vs waitFor 300s wait"语义错位。
+    // #358 T2: def.timeoutMs 缺省走三层链 (def ?? taskTimeoutMs ?? 7200s),
+    // 与前景 wait 对齐 — 避免"spawn wallclock vs waitFor wait"语义错位。
     // expiry -> mark failed reason:"timeout" + SIGTERM;5s fallback SIGKILL
     // against workers that ignore SIGTERM(review-fix S1:兜底改在 timeout
     // SIGTERM 之后 arm,基准对齐 SIGTERM 点;不再 spawn 时 arm —— 否则默认
-    // 300s timeout 下 5s 就把 worker 强杀)。timer.unref so it does not
+    // 7200s timeout 下 5s 就把 worker 强杀)。timer.unref so it does not
     // block process exit。
-    const effectiveTimeoutMs = def.timeoutMs ?? PER_TASK_TIMEOUT_MS;
+    const effectiveTimeoutMs = effectiveTaskTimeoutMs(def, opts);
     if (effectiveTimeoutMs > 0) {
       task.timeoutTimer = setTimeout(() => {
         // Already terminated (child exit / stdout envelope) -> do not overwrite.
         if (task.state === "completed" || task.state === "failed") return;
-        task.state = "failed";
+        // #358 T3 优雅窗口:此处先写 generic fallback 信封并立即 SIGTERM,
+        // 但 SIGKILL 兜底(5s 后)到达之前,stdout handler 的
+        // `task.envelope = env` 会用**子进程写回的更丰富信封**无条件替换
+        // fallback —— worker 在 SIGTERM 上自跑收尾摘要轮后 emits 的
+        // {reason:"timeout", summary:<真实进度>} 因此成为父侧最终真值,
+        // 不被 generic "timeout after <n>ms" 覆盖 (emitStateChange/emitStop
+        // 已先发不可逆;timedOut 由 exit handler 的 guard 保 reason=timeout)。
+        // SIGKILL 兜底只对忽略 SIGTERM 的 worker 生效 (armKillFallback)。
         task.envelope = {
           status: "failed",
           reason: "timeout",
           summary: `timeout after ${effectiveTimeoutMs}ms`,
           result: "",
         };
+        emitStateChange(task, "failed", { reason: "timeout" });
+        emitStop(task, "failed", {
+          reason: "timeout",
+          summary: `timeout after ${effectiveTimeoutMs}ms`,
+        });
         if (task.child) {
           try {
             task.child.kill("SIGTERM");
@@ -290,16 +524,44 @@ export function createSubAgentManager(opts: {
         try {
           const env = truncateEnvelopeResult(parseParentEnvelope(line));
           task.envelope = env;
-          task.state = "completed";
+          // #358 T4: state migration + stop event (single-emit 在 emitStop 内由
+          // stoppedEmitted flag 守门,后续 exit/error 路径重复触发 no-op)。
+          if (env.status === "ok") {
+            emitStateChange(task, "completed");
+            emitStop(task, "completed", { summary: env.summary });
+          } else {
+            emitStateChange(task, "failed", {
+              reason: (env.reason ?? "protocolError") as
+                | "crashed"
+                | "maxTurnsExceeded"
+                | "timeout"
+                | "protocolError"
+                | "cancelled",
+            });
+            emitStop(task, "failed", {
+              reason: (env.reason ?? "protocolError") as
+                | "crashed"
+                | "maxTurnsExceeded"
+                | "timeout"
+                | "protocolError"
+                | "cancelled",
+              summary: env.summary,
+            });
+          }
         } catch (err) {
           // SC13:信封校验失败 = 协议错误。
-          task.state = "failed";
+          const errMsg = err instanceof Error ? err.message : String(err);
           task.envelope = {
             status: "failed",
             reason: "protocolError",
-            summary: `subagent envelope protocol error: ${err instanceof Error ? err.message : String(err)}`,
+            summary: `subagent envelope protocol error: ${errMsg}`,
             result: "",
           };
+          emitStateChange(task, "failed", { reason: "protocolError" });
+          emitStop(task, "failed", {
+            reason: "protocolError",
+            summary: `subagent envelope protocol error: ${errMsg}`,
+          });
         }
       }
     });
@@ -322,26 +584,54 @@ export function createSubAgentManager(opts: {
       const timedOut =
         task.state === "failed" && task.envelope?.reason === "timeout";
       if (!timedOut && (code !== 0 || signal !== null)) {
-        task.state = "failed";
-        task.envelope = {
-          status: "failed",
-          reason: "crashed",
-          summary: `worker exit code=${code} signal=${signal}`,
-          result: "",
-        };
+        const reason: "crashed" | "timeout" =
+          task.state === "failed" && task.envelope?.reason === "timeout"
+            ? "timeout"
+            : "crashed";
+        // 在 timeout-fire 之后 child 走 SIGTERM 退出:task.state 已经 failed,
+        // 直接 emitStop(reason=timeout, signal=SIGTERM 等) — 不再次 emitStateChange。
+        if (reason === "crashed") {
+          task.envelope = {
+            status: "failed",
+            reason: "crashed",
+            summary: `worker exit code=${code} signal=${signal}`,
+            result: "",
+          };
+          emitStateChange(task, "failed", { reason: "crashed" });
+          emitStop(task, "failed", {
+            reason: "crashed",
+            summary: `worker exit code=${code} signal=${signal}`,
+            ...(code !== null ? { exitCode: code } : {}),
+            ...(signal !== null ? { signal } : {}),
+          });
+        } else {
+          // timeout envelope 已经写入 → 仅补 emitStop (terminal 信号)
+          emitStop(task, "failed", {
+            reason: "timeout",
+            summary: task.envelope?.summary ?? `timeout after effective`,
+            ...(code !== null ? { exitCode: code } : {}),
+            ...(signal !== null ? { signal } : {}),
+          });
+        }
       }
-      // 干净退出(0, null)且有 envelope → 保持 completed;无 envelope → 维持 running,
-      // 由 waitFor timeout / host drain 兜底。
+      // SC16: 干净退出 (0, null) 且无 envelope → 不改 state,维持 running。
+      // 由 waitFor timeout / host drain 兜底(SC16 由兜底机制接住)。
+      // 干净退出(0, null)且有 envelope → 保持 completed (已在 stdout 段 emitStop)。
     });
 
     child.on("error", (err) => {
-      task.state = "failed";
+      const errMsg = err.message;
       task.envelope = {
         status: "failed",
         reason: "crashed",
-        summary: err.message,
+        summary: errMsg,
         result: "",
       };
+      emitStateChange(task, "failed", { reason: "crashed" });
+      emitStop(task, "failed", {
+        reason: "crashed",
+        summary: errMsg,
+      });
     });
 
     return { taskId: id };
@@ -442,7 +732,7 @@ export function createSubAgentManager(opts: {
 
   function waitFor(
     taskId: string,
-    timeoutMs = PER_TASK_TIMEOUT_MS,
+    timeoutMs?: number,
     signal?: AbortSignal
   ): Promise<SubAgentEnvelope> {
     return new Promise((resolve, reject) => {
@@ -451,6 +741,10 @@ export function createSubAgentManager(opts: {
         reject(new SubAgentWaitTimeoutError());
         return;
       }
+      // #358 T2: 缺省 timeoutMs 走三层链 (def ?? taskTimeoutMs ?? 7200s),
+      // 与 spawn 的 SIGTERM 计时同源 — 防止缺省值两处声明漂移。
+      const effectiveTimeout =
+        timeoutMs ?? effectiveTaskTimeoutMs(task.def, opts);
       // #361 C3: 预 abort → 立即 SubAgentAbortError,不建轮询状态。
       if (signal?.aborted) {
         reject(new SubAgentAbortError(taskId));
@@ -497,7 +791,7 @@ export function createSubAgentManager(opts: {
           settleReject(new SubAgentAbortError(taskId));
           return;
         }
-        if (Date.now() - started >= timeoutMs) {
+        if (Date.now() - started >= effectiveTimeout) {
           cleanup();
           settleReject(new SubAgentWaitTimeoutError());
         }
@@ -539,6 +833,36 @@ export function createSubAgentManager(opts: {
     const out: string[] = [];
     for (const [id, task] of tasks) {
       if (task.state === "starting" || task.state === "running") out.push(id);
+    }
+    return out;
+  }
+
+  /**
+   * #358 T7: 全量只读投影。summary/reason 取终态 envelope(与 queryBuffer
+   * 同真值);taskPreview 截断 ≤120,不落 task 全文(spec 权限 row)。
+   * Postel: endedAt 仅在终态存续;summary/reason 仅 envelope 有值时上行。
+   */
+  function listSubagents(): ReadonlyArray<SubagentInfo> {
+    const out: SubagentInfo[] = [];
+    for (const task of tasks.values()) {
+      const envelope = task.envelope;
+      const item: SubagentInfo = {
+        taskId: task.id,
+        state: task.state,
+        // Fix 3: 与 recordSubagentSpawn 同源 (truncateTaskPreview 默认 120)。
+        taskPreview: truncateTaskPreview(task.def),
+        startedAt: task.startedAt,
+        ...(task.endedAt !== undefined ? { endedAt: task.endedAt } : {}),
+        ...(envelope?.summary !== undefined
+          ? { summary: envelope.summary }
+          : {}),
+        ...(envelope !== undefined &&
+        envelope.status === "failed" &&
+        envelope.reason !== undefined
+          ? { reason: envelope.reason }
+          : {}),
+      };
+      out.push(item);
     }
     return out;
   }
@@ -650,5 +974,6 @@ export function createSubAgentManager(opts: {
     drainCompleted,
     listActive,
     abortTask,
+    listSubagents,
   });
 }

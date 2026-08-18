@@ -48,6 +48,8 @@ function makeFakeManager() {
     drainCompleted: () => [],
     listActive: () => [],
     abortTask: () => false,
+    // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
+    listSubagents: () => [],
   };
   return { manager, spawn, waitFor };
 }
@@ -184,6 +186,18 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
     expect(spawn).toHaveBeenCalledWith(
       expect.objectContaining({ task: "t", timeoutMs: 60000 })
     );
+  });
+
+  it("timeoutMs 缺席 → def 省略该字段 (manager 三层链 def ?? taskTimeoutMs ?? 7200s 接管)", async () => {
+    // #358 T2 (SC4 消费点证明): 模型未给 timeoutMs 时 handler 不得把常量塞进
+    // def.timeoutMs —— 否则链条中段 env.subagent.taskTimeoutMs 永远被顶掉变
+    // 死代码。断言 def 上 timeoutMs 为 undefined (spawn 收到缺字段 def, 由
+    // manager 侧 effectiveTaskTimeoutMs 决定 SIGTERM / waitFor 缺省)。
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    await tool.handler({ task: "t", wait: false });
+    const calledDef = spawn.mock.calls[0][0] as SubAgentDefinition;
+    expect(calledDef.timeoutMs).toBeUndefined();
   });
 
   it("全字段组合透传(含默认缺省)", async () => {

@@ -54,6 +54,7 @@ function makeBundle(
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     // #378 根因 B: MCP 连接超时(默认 60_000)。
     mcp: { connectTimeoutMs: 60_000 },
+    subagent: { taskTimeoutMs: undefined },
   };
   // buildTuiDeps 委托 buildHarnessEngine,只需 env 字段;其余 bundle 字段不读。
   return { env } as unknown as RuntimeBundle;

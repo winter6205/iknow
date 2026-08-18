@@ -43,6 +43,9 @@ const ENV_KEYS = [
   "IKNOW_LLM_MAX_TURNS",
   // #378 根因 B: MCP 连接超时 env (int; 非法 → fallback 60_000)。
   "IKNOW_MCP_CONNECT_TIMEOUT_MS",
+  // #358 T1: settings 双字段通道 — llm.timeoutMs (per-call) + subagent.taskTimeoutMs (per-task)。
+  "IKNOW_LLM_TIMEOUT_MS",
+  "IKNOW_SUBAGENT_TASK_TIMEOUT_MS",
 ] as const;
 
 describe("loadIknowEnv — thinking config (#151 T4)", () => {
@@ -310,6 +313,186 @@ describe("loadIknowEnv — maxTurns (plan T5)", () => {
     assert.equal(env.llm.maxTurns, 5);
     assert.equal(env.llm.maxOutputTokens, 1024);
     assert.equal(env.llm.timeoutMs, 30000);
+  });
+});
+
+describe("loadIknowEnv — llm.timeoutMs (#358 settings 双字段, per-call)", () => {
+  beforeEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+
+  it("default: env 不设且 settings 未配 → 60000 fallback（third-tier 默认）", () => {
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.llm.timeoutMs, 60_000);
+  });
+
+  it("IKNOW_LLM_TIMEOUT_MS=30000 → env.llm.timeoutMs=30000", () => {
+    process.env.IKNOW_LLM_TIMEOUT_MS = "30000";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.llm.timeoutMs, 30_000);
+  });
+
+  it("IKNOW_LLM_TIMEOUT_MS=7200000 → env.llm.timeoutMs=7200000（per-call 大值）", () => {
+    process.env.IKNOW_LLM_TIMEOUT_MS = "7200000";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.llm.timeoutMs, 7_200_000);
+  });
+
+  it("IKNOW_LLM_TIMEOUT_MS 空串 → 60000（fallback，与未设同义）", () => {
+    process.env.IKNOW_LLM_TIMEOUT_MS = "";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.llm.timeoutMs, 60_000);
+  });
+
+  it("IKNOW_LLM_TIMEOUT_MS 非数字 (abc) → 60000 fallback", () => {
+    process.env.IKNOW_LLM_TIMEOUT_MS = "abc";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.llm.timeoutMs, 60_000);
+  });
+
+  it("IKNOW_LLM_TIMEOUT_MS 小数 (30000.7) → trunc 为 30000（envOptionalInt 用 trunc）", () => {
+    process.env.IKNOW_LLM_TIMEOUT_MS = "30000.7";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.llm.timeoutMs, 30_000);
+  });
+
+  it("env > settings：settings 设了 45000、env 设了 30000 → env wins", () => {
+    process.env.IKNOW_LLM_TIMEOUT_MS = "30000";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model", timeoutMs: 45_000 },
+    });
+    assert.equal(env.llm.timeoutMs, 30_000);
+  });
+
+  it("env 不设、settings 设了 → settings wins（45000）", () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model", timeoutMs: 45_000 },
+    });
+    assert.equal(env.llm.timeoutMs, 45_000);
+  });
+
+  it("env 不设、settings 未配 → 60000 fallback（third-tier 默认）", () => {
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.llm.timeoutMs, 60_000);
+  });
+
+  it("非法 env 值视为未设 → 回退到 settings", () => {
+    process.env.IKNOW_LLM_TIMEOUT_MS = "abc";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model", timeoutMs: 45_000 },
+    });
+    assert.equal(env.llm.timeoutMs, 45_000);
+  });
+
+  it("env 非法 + settings 未配 → 60000 fallback", () => {
+    process.env.IKNOW_LLM_TIMEOUT_MS = "abc";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.llm.timeoutMs, 60_000);
+  });
+
+  it("timeoutMs 与其它 LLM env 字段独立(不影响 maxTurns / maxOutputTokens / temperature)", () => {
+    process.env.IKNOW_LLM_TIMEOUT_MS = "45000";
+    process.env.IKNOW_LLM_MAX_TURNS = "7";
+    process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = "2048";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.llm.timeoutMs, 45_000);
+    assert.equal(env.llm.maxTurns, 7);
+    assert.equal(env.llm.maxOutputTokens, 2048);
+  });
+});
+
+describe("loadIknowEnv — subagent.taskTimeoutMs (#358 settings 双字段, per-task)", () => {
+  beforeEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+
+  it("default: env 不设且 settings 未配 → undefined（env 层无第三层默认，常量归 T2 manager 消费点）", () => {
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.subagent?.taskTimeoutMs, undefined);
+  });
+
+  it("IKNOW_SUBAGENT_TASK_TIMEOUT_MS=7200000 → env.subagent.taskTimeoutMs=7200000", () => {
+    process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "7200000";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.subagent?.taskTimeoutMs, 7_200_000);
+  });
+
+  it("IKNOW_SUBAGENT_TASK_TIMEOUT_MS=1800000 → env.subagent.taskTimeoutMs=1800000（deer-flow 实测）", () => {
+    process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "1800000";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.subagent?.taskTimeoutMs, 1_800_000);
+  });
+
+  it("IKNOW_SUBAGENT_TASK_TIMEOUT_MS 空串 → undefined（与未设同义）", () => {
+    process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.subagent?.taskTimeoutMs, undefined);
+  });
+
+  it("IKNOW_SUBAGENT_TASK_TIMEOUT_MS 非数字 (abc) → undefined", () => {
+    process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "abc";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.subagent?.taskTimeoutMs, undefined);
+  });
+
+  it("IKNOW_SUBAGENT_TASK_TIMEOUT_MS 小数 (1800000.7) → trunc 为 1800000（envOptionalInt 用 trunc）", () => {
+    process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "1800000.7";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.subagent?.taskTimeoutMs, 1_800_000);
+  });
+
+  it("env > settings：settings 设了 3600000、env 设了 7200000 → env wins", () => {
+    process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "7200000";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model" },
+      subagent: { taskTimeoutMs: 3_600_000 },
+    });
+    assert.equal(env.subagent?.taskTimeoutMs, 7_200_000);
+  });
+
+  it("env 不设、settings 设了 → settings wins（3600000）", () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model" },
+      subagent: { taskTimeoutMs: 3_600_000 },
+    });
+    assert.equal(env.subagent?.taskTimeoutMs, 3_600_000);
+  });
+
+  it("非法 env 值视为未设 → 回退到 settings", () => {
+    process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "abc";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model" },
+      subagent: { taskTimeoutMs: 3_600_000 },
+    });
+    assert.equal(env.subagent?.taskTimeoutMs, 3_600_000);
+  });
+
+  it("env 非法 + settings 未配 → undefined（无第三层默认）", () => {
+    process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "abc";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.subagent?.taskTimeoutMs, undefined);
+  });
+
+  it("taskTimeoutMs 与 llm.timeoutMs 独立：互不影响", () => {
+    process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "7200000";
+    process.env.IKNOW_LLM_TIMEOUT_MS = "45000";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.subagent?.taskTimeoutMs, 7_200_000);
+    assert.equal(env.llm.timeoutMs, 45_000);
+  });
+
+  it("env + settings 同时配 llm.timeoutMs + subagent.taskTimeoutMs → 两者都保留", () => {
+    process.env.IKNOW_LLM_TIMEOUT_MS = "45000";
+    process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "7200000";
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.llm.timeoutMs, 45_000);
+    assert.equal(env.subagent?.taskTimeoutMs, 7_200_000);
   });
 });
 

@@ -297,6 +297,17 @@ async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
     sendJson({ res, status: 200, body: { asks: hub.listPendingAsks() } });
     return true;
   }
+  // #358 T7: GET /sessions/:id/subagents — 只读子代理状态投影(running/
+  // completed/failed 合一)。hub 先做会话存在性门(未知会话 → typed 404 via
+  // 已有多层 sendError 收编);列表包裹 {subagents:[...]} 镜像 {asks:[...]} 先例。
+  if (method === "GET" && rest === "/subagents") {
+    sendJson({
+      res,
+      status: 200,
+      body: { subagents: await hub.listSubagentsForSession(id) },
+    });
+    return true;
+  }
   // POST /asks/:askId/resolve — body {decision} ∈ {allow-once|always-allow|deny}.
   // Always 200 with `{resolved}`: true when the ask was still pending and got
   // resolved; false when the id is unknown / already resolved / timed out

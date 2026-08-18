@@ -314,6 +314,8 @@ describe("hub-bridge subagentManager 透传（#365 T3）", () => {
           },
         },
       ],
+      // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
+      listSubagents: () => [],
     };
 
     const seen: LoopState[] = [];

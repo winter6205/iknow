@@ -1,4 +1,11 @@
-import type { LlmCallRecord, ToolCallRecord, TurnRecord } from "./types.js";
+import type {
+  LlmCallRecord,
+  ToolCallRecord,
+  TurnRecord,
+  SubagentSpawnRecord,
+  SubagentStopRecord,
+  SubagentStateChangeRecord,
+} from "./types.js";
 
 /**
  * Observability backend 翻译器 (B-scope deferred, GH #64 ADR Decision 3 + spec 判据 16)。
@@ -12,8 +19,14 @@ import type { LlmCallRecord, ToolCallRecord, TurnRecord } from "./types.js";
  */
 export function translateToObservability(
   // 下划线前缀满足 noUnusedParameters (B-scope 不消费 record,只占位)。
-  // 调用方按 record 三种类型传参,类型检查即承担 "是否穷举" 的作用。
-  _record: LlmCallRecord | ToolCallRecord | TurnRecord
+  // 调用方按 record 类型传参,类型检查即承担 "是否穷举" 的作用。
+  _record:
+    | LlmCallRecord
+    | ToolCallRecord
+    | TurnRecord
+    | SubagentSpawnRecord
+    | SubagentStopRecord
+    | SubagentStateChangeRecord
 ): never {
   throw new Error("B-scenario not implemented");
 }

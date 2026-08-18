@@ -42,7 +42,6 @@ export interface LlmEnv {
    */
   apiKey: string | undefined;
   maxOutputTokens: number;
-  timeoutMs: number;
   temperature: number;
   /**
    * #151 T4 请求侧 thinking 控制臂:
@@ -71,6 +70,14 @@ export interface LlmEnv {
    * env 侧走 envOptionalInt(未设 / 空 / 非数字 → undefined,不抛错)。
    */
   maxTurns?: number;
+  /**
+   * #358 T1: 单次 LLM 调用竞速上限(per-call,毫秒)。
+   * env 链:`envOptionalInt("IKNOW_LLM_TIMEOUT_MS") ?? mergedSettings.llm?.timeoutMs ?? 60_000`。
+   * 第三层 60_000 默认保留(envInt 既有 fallback,延后到 envOptionalInt 之后作
+   * 兜底,不破坏既有 env=任意值的行为,只增加 upstream settings 来源)。
+   * 镜像 maxTurns 模式(env > settings),但 maxTurns 缺省 = 无限,本字段缺省 = 60s。
+   */
+  timeoutMs: number;
 }
 
 /**
@@ -136,6 +143,21 @@ export interface McpEnv {
   connectTimeoutMs: number;
 }
 
+/**
+ * #358 T1: 子代理配置臂(透传至 harness/subagent/manager.ts 的 SIGTERM 计时器消费点)。
+ *
+ * `taskTimeoutMs` = 子代理整任务寿命上限(per-task wallclock, 毫秒)。
+ * 与 `LlmEnv.timeoutMs`(per-call LLM 调用竞速)语义、命名、消费点全程分离(C9)。
+ *
+ * env 链:`envOptionalInt("IKNOW_SUBAGENT_TASK_TIMEOUT_MS") ?? mergedSettings.subagent?.taskTimeoutMs`。
+ * env 层无第三层默认值(7200s 常量由 T2 的 manager 消费点声明,
+ * 避免缺省值在两处声明, settings 单一承载通过 mirror 校验)。
+ */
+export interface IknowSubagentEnv {
+  /** 子代理整任务寿命上限(毫秒);env 不设 + settings 未配 → undefined。 */
+  taskTimeoutMs: number | undefined;
+}
+
 export interface IknowEnv {
   llm: LlmEnv;
   /** #152 T5:thinking 可见面控制臂。 */
@@ -146,6 +168,8 @@ export interface IknowEnv {
   compress: IknowCompressEnv;
   /** #378 根因 B: MCP 连接超时配置臂(透传至 createMcpManager.timeoutMsOverride)。 */
   mcp: McpEnv;
+  /** #358 T1: 子代理配置臂(per-task wallclock; manager SIGTERM 计时器消费)。 */
+  subagent: IknowSubagentEnv;
   /**
    * ADR-0019 (T1): workspace-root per-root state anchor, read from
    * `IKNOW_WORKSPACE_ROOT` via envOptional (canonical reader; empty/unset
@@ -489,11 +513,16 @@ export function loadIknowEnv(
         // 复即超过 2048 tokens), 同时不放大成本。
         fallback: 8192,
       }),
-      timeoutMs: envInt({
-        file,
-        key: "IKNOW_LLM_TIMEOUT_MS",
-        fallback: 60_000,
-      }),
+      // #358 T1: per-call LLM 调用竞速上限(env > settings > 60_000 fallback)。
+      // 镜像 maxTurns 模式(envOptionalInt ?? settings),但保留第三层 60_000 默认
+      // (envInt 既有 fallback),env 不设 + settings 未配 → 60_000。
+      timeoutMs:
+        envOptionalInt({
+          file,
+          key: "IKNOW_LLM_TIMEOUT_MS",
+        }) ??
+        mergedSettings.llm?.timeoutMs ??
+        60_000,
       temperature: envNumber({
         file,
         key: "IKNOW_LLM_TEMPERATURE",
@@ -566,6 +595,14 @@ export function loadIknowEnv(
         key: "IKNOW_MCP_CONNECT_TIMEOUT_MS",
         fallback: 60_000,
       }),
+    },
+    // #358 T1: 子代理 per-task wallclock(env > settings,无第三层默认;7200s 常量归 T2 manager)。
+    subagent: {
+      taskTimeoutMs:
+        envOptionalInt({
+          file,
+          key: "IKNOW_SUBAGENT_TASK_TIMEOUT_MS",
+        }) ?? mergedSettings.subagent?.taskTimeoutMs,
     },
     // ADR-0019 (T1): workspace-root per-root state anchor (D1.5 register at
     // env SSOT; `envOptional` canonical reader — empty/unset → undefined,

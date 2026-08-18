@@ -11,8 +11,21 @@
  * the per-field level via TRACE_FIELD_DEFS in fields.ts.
  */
 
+/**
+ * T5: 白名单派生 union — 新 record 类型只在此追加, reader/http/fields 全部
+ * 从该白名单联动 (不硬编码 record 名单)。声明顺序被既有消费者依赖, 新成员
+ * 只能 APPEND 到末尾。
+ */
 export type TraceRecordType =
-  "llm_call" | "tool_call" | "turn" | "violation" | "session" | "sandbox_cmd";
+  | "llm_call"
+  | "tool_call"
+  | "turn"
+  | "violation"
+  | "session"
+  | "sandbox_cmd"
+  | "subagent_spawn"
+  | "subagent_stop"
+  | "subagent_state_change";
 
 export const TRACE_RECORD_TYPES: ReadonlyArray<TraceRecordType> = [
   "llm_call",
@@ -21,6 +34,9 @@ export const TRACE_RECORD_TYPES: ReadonlyArray<TraceRecordType> = [
   "violation",
   "session",
   "sandbox_cmd",
+  "subagent_spawn",
+  "subagent_stop",
+  "subagent_state_change",
 ];
 
 /** Raw JSONL row, snake_case keys preserved. Read-only to discourage mutation. */
@@ -34,6 +50,17 @@ export interface TraceQuery {
   /** Row-based pagination offset (limit 1..200, offset >= 0). */
   readonly limit?: number;
   readonly offset?: number;
+  /**
+   * T5 (#358): 精确匹配 task_id (JSONL 顶层 snake_case key)。
+   * undefined = 不参与过滤。Exact-match 只做, 时间窗查询不在本轮 (spec Open Question 1)。
+   */
+  readonly taskId?: string;
+  /**
+   * T5 (#358): 精确匹配 parent_turn_id。undefined = 不参与过滤。
+   * v1 写侧 SubagentDefinition 尚无 parentTurnId 来源, 该字段当前不落盘;
+   * 读侧先就位, spec 升级 child 留位时即可查。
+   */
+  readonly parentTurnId?: string;
   /**
    * 增量轮询恢复字节偏移 (SC-R 14): 只读文件 resumeOffset 之后的追加行。
    * 与行分页 `offset` 正交 — 行分页是「从第 N 行开始」, 这是「从第 N 字节之后读新增」。

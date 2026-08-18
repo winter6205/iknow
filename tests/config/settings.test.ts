@@ -484,6 +484,243 @@ describe("loadIknowSettings — settings 文件机制 (#353)", () => {
   });
 });
 
+describe("loadIknowSettings — llm.timeoutMs (#358 settings 双字段)", () => {
+  it("合法正整数 timeoutMs=60000 → 透传", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { timeoutMs: 60_000 } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { timeoutMs: 60_000 },
+    });
+  });
+
+  it("合法正整数 timeoutMs=7200000 → 透传（per-call 大值）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { timeoutMs: 7_200_000 } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { timeoutMs: 7_200_000 },
+    });
+  });
+
+  it('drop-not-throw: timeoutMs 0 / -5 / "abc" / 1.5 → 丢弃', async () => {
+    for (const bad of [0, -5, "abc", 1.5]) {
+      const { home, cwd } = await makeSettings({ llm: { timeoutMs: bad } }, {});
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `timeoutMs=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("drop-not-throw: timeoutMs 非数字/null/true/[]/{}/undefined → 丢弃", async () => {
+    for (const bad of [null, true, false, [], {}, "  "]) {
+      const { home, cwd } = await makeSettings({ llm: { timeoutMs: bad } }, {});
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `timeoutMs=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("project 覆盖 user timeoutMs（同字段替换）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { timeoutMs: 60_000 } },
+      { llm: { timeoutMs: 30_000 } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { timeoutMs: 30_000 },
+    });
+  });
+
+  it("project 非法 timeoutMs 不覆盖 user 合法（保留 user 值）", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { timeoutMs: 60_000 } },
+      { llm: { timeoutMs: "bad" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { timeoutMs: 60_000 },
+    });
+  });
+
+  it("逐层合并：project 只覆盖 timeoutMs，保留 user 的 maxTurns", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { maxTurns: 20, timeoutMs: 60_000 } },
+      { llm: { timeoutMs: 30_000 } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { maxTurns: 20, timeoutMs: 30_000 },
+    });
+  });
+
+  it("仅 timeoutMs（无其它 llm 字段）→ llm 层不丢弃", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { timeoutMs: 60_000 } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { timeoutMs: 60_000 },
+    });
+  });
+
+  it("timeoutMs 缺失 → 不产出 timeoutMs 字段", async () => {
+    const { home, cwd } = await makeSettings({ llm: { maxTurns: 5 } }, {});
+    const s = loadIknowSettings({ home, cwd });
+    assert.deepEqual(s, { llm: { maxTurns: 5 } });
+    assert.equal(s.llm?.timeoutMs, undefined);
+  });
+
+  it("返回对象深 frozen 含 timeoutMs", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { timeoutMs: 60_000 } },
+      {}
+    );
+    const s = loadIknowSettings({ home, cwd });
+    assert.ok(Object.isFrozen(s.llm));
+    assert.throws(() => {
+      (s.llm as { timeoutMs: number }).timeoutMs = 999;
+    }, TypeError);
+  });
+});
+
+describe("loadIknowSettings — subagent 段 (#358 settings 双字段)", () => {
+  it("合法 taskTimeoutMs=7200000 → 透传（per-task 缺省）", async () => {
+    const { home, cwd } = await makeSettings(
+      { subagent: { taskTimeoutMs: 7_200_000 } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      subagent: { taskTimeoutMs: 7_200_000 },
+    });
+  });
+
+  it("合法 taskTimeoutMs=1800000 → 透传（deer-flow 实测值）", async () => {
+    const { home, cwd } = await makeSettings(
+      { subagent: { taskTimeoutMs: 1_800_000 } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      subagent: { taskTimeoutMs: 1_800_000 },
+    });
+  });
+
+  it('drop-not-throw: taskTimeoutMs 0 / -5 / "abc" / 1.5 → 丢弃', async () => {
+    for (const bad of [0, -5, "abc", 1.5]) {
+      const { home, cwd } = await makeSettings(
+        { subagent: { taskTimeoutMs: bad } },
+        {}
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `taskTimeoutMs=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("drop-not-throw: taskTimeoutMs 非数字/null/true/[]/{}/undefined → 丢弃", async () => {
+    for (const bad of [null, true, false, [], {}]) {
+      const { home, cwd } = await makeSettings(
+        { subagent: { taskTimeoutMs: bad } },
+        {}
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `taskTimeoutMs=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("project 覆盖 user taskTimeoutMs（同字段替换）", async () => {
+    const { home, cwd } = await makeSettings(
+      { subagent: { taskTimeoutMs: 7_200_000 } },
+      { subagent: { taskTimeoutMs: 1_800_000 } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      subagent: { taskTimeoutMs: 1_800_000 },
+    });
+  });
+
+  it("project 非法 taskTimeoutMs 不覆盖 user 合法（保留 user 值）", async () => {
+    const { home, cwd } = await makeSettings(
+      { subagent: { taskTimeoutMs: 7_200_000 } },
+      { subagent: { taskTimeoutMs: "bad" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      subagent: { taskTimeoutMs: 7_200_000 },
+    });
+  });
+
+  it("subagent 非普通对象（数组 / 字符串 / 数字）→ 丢弃该层", async () => {
+    for (const bad of [[{ taskTimeoutMs: 7_200_000 }], "garbage", 42]) {
+      const { home, cwd } = await makeSettings({ subagent: bad }, {});
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `subagent=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("taskTimeoutMs 缺失 → 不产出 subagent 段", async () => {
+    const { home, cwd } = await makeSettings({ llm: { maxTurns: 5 } }, {});
+    const s = loadIknowSettings({ home, cwd });
+    assert.deepEqual(s, { llm: { maxTurns: 5 } });
+    assert.equal(s.subagent, undefined);
+  });
+
+  it("taskTimeoutMs 全部非法 → 不产出 subagent 段", async () => {
+    const { home, cwd } = await makeSettings(
+      { subagent: { taskTimeoutMs: 0 } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {});
+  });
+
+  it("subagent 与 llm 并存 → 两段都保留", async () => {
+    const { home, cwd } = await makeSettings(
+      {
+        llm: { maxTurns: 20, timeoutMs: 60_000 },
+        subagent: { taskTimeoutMs: 7_200_000 },
+      },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { maxTurns: 20, timeoutMs: 60_000 },
+      subagent: { taskTimeoutMs: 7_200_000 },
+    });
+  });
+
+  it("逐层合并：user 配 llm.timeoutMs、project 配 subagent.taskTimeoutMs → 两段都保留", async () => {
+    const { home, cwd } = await makeSettings(
+      { llm: { timeoutMs: 60_000 } },
+      { subagent: { taskTimeoutMs: 7_200_000 } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      llm: { timeoutMs: 60_000 },
+      subagent: { taskTimeoutMs: 7_200_000 },
+    });
+  });
+
+  it("返回对象深 frozen 含 subagent", async () => {
+    const { home, cwd } = await makeSettings(
+      { subagent: { taskTimeoutMs: 7_200_000 } },
+      {}
+    );
+    const s = loadIknowSettings({ home, cwd });
+    assert.ok(Object.isFrozen(s));
+    assert.ok(Object.isFrozen(s.subagent));
+    assert.throws(() => {
+      (s.subagent as { taskTimeoutMs: number }).taskTimeoutMs = 999;
+    }, TypeError);
+  });
+});
+
 describe("loadIknowSettings — llm.apiKey validator (settings-model-extension)", () => {
   it("字面非空串 → 合法（trim 后保留）", async () => {
     const { home, cwd } = await makeSettings(
