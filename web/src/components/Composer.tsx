@@ -36,9 +36,15 @@ export type ComposerProps = {
   placeholder?: string;
   thinkingSettings?: ThinkingSettings;
   onThinkingChange?: (next: ThinkingSettings) => void;
-  /** 上下文用量（透传 pill 内的 UsageChip）。 */
+  /** 上下文用量（透传输入框下方状态条的 UsageChip）。 */
   usage?: TokenUsage | null;
   contextWindow?: number | null;
+  /** 模型名（health 下发）；状态条左半部显示。缺席 → 不显示。 */
+  model?: string | null;
+  /** 当前 permission mode 显示标签（如 "Default"）；缺席 → 徽标不渲染。 */
+  permissionModeLabel?: string | null;
+  /** Shift+Tab（或点击徽标）触发的模式循环切换（App 调后端端点）。 */
+  onPermissionModeToggle?: () => void;
 };
 
 // Auto-grow cap: ~4 lines of text-sm with leading-snug plus padding. Past
@@ -56,6 +62,9 @@ export function Composer({
   onThinkingChange = () => {},
   usage = null,
   contextWindow = null,
+  model = null,
+  permissionModeLabel = null,
+  onPermissionModeToggle = () => {},
 }: ComposerProps) {
   const [value, setValue] = useState("");
   const fieldId = useId();
@@ -87,15 +96,12 @@ export function Composer({
   };
 
   /** 采纳候选：带参命令补全形带尾随空格，等待参数输入。 */
-  const acceptCandidate = useCallback(
-    (name: SlashCommandName) => {
-      const takesArg = name === "thinking" || name === "effort";
-      setValue(takesArg ? `/${name} ` : `/${name}`);
-      setSelectedIndex(0);
-      setMenuDismissed(false);
-    },
-    []
-  );
+  const acceptCandidate = useCallback((name: SlashCommandName) => {
+    const takesArg = name === "thinking" || name === "effort";
+    setValue(takesArg ? `/${name} ` : `/${name}`);
+    setSelectedIndex(0);
+    setMenuDismissed(false);
+  }, []);
 
   const executeCommand = useCallback(
     (name: SlashCommandName, arg: string) => {
@@ -153,6 +159,19 @@ export function Composer({
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    // Shift+Tab 切 permission mode（镜像 TUI 快捷键）：优先于 slash 菜单的
+    // Tab 补全采纳，preventDefault 阻止浏览器反向移焦。徽标缺席（端点未
+    // 装配）→ 不拦截，保留浏览器原生反向移焦。
+    if (
+      e.key === "Tab" &&
+      e.shiftKey &&
+      !e.nativeEvent.isComposing &&
+      permissionModeLabel !== null
+    ) {
+      e.preventDefault();
+      onPermissionModeToggle();
+      return;
+    }
     if (menuOpen && !e.nativeEvent.isComposing) {
       const ev = menuKeyEvent(
         { value, selectedIndex: selected, candidates },
@@ -207,11 +226,6 @@ export function Composer({
             onKeyDown={onKeyDown}
             className="min-w-0 flex-1 resize-none overflow-hidden border-0 bg-transparent py-2 text-sm leading-snug text-ink placeholder:text-ink-3 outline-none transition-colors duration-200 ease-[var(--ease-soft)] disabled:opacity-60"
           />
-          <UsageChip
-            usage={usage}
-            contextWindow={contextWindow}
-            sending={sending}
-          />
           <ThinkingToggle
             settings={thinkingSettings}
             onChange={onThinkingChange}
@@ -249,6 +263,31 @@ export function Composer({
           )}
         </button>
       </div>
+      {/* 状态条：输入框下方。左 = 模型名 + permission mode 徽标（Shift+Tab
+          切换）；右 = 用量块（token 明细 + 进度条 + 百分比）。两者皆无 →
+          整行不渲染。 */}
+      {model || permissionModeLabel ? (
+        <div className="mt-1.5 flex items-center justify-between gap-3 px-2 font-mono text-[10px] leading-none text-ink-3">
+          <span className="flex min-w-0 items-center gap-2">
+            {model ? <span className="truncate">{model}</span> : null}
+            {permissionModeLabel ? (
+              <button
+                type="button"
+                onClick={onPermissionModeToggle}
+                title="Shift+Tab 切换权限模式"
+                className={`shrink-0 rounded-pill border border-ink-3/30 px-1.5 py-0.5 transition-colors duration-200 ease-[var(--ease-soft)] hover:border-ink-3 ${FOCUS_RING}`}
+              >
+                {permissionModeLabel}
+              </button>
+            ) : null}
+          </span>
+          <UsageChip
+            usage={usage}
+            contextWindow={contextWindow}
+            sending={sending}
+          />
+        </div>
+      ) : null}
     </form>
   );
 }

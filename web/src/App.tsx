@@ -8,9 +8,11 @@ import { SessionSidebar } from "./components/SessionSidebar";
 import { StateBlock } from "./components/StateBlock";
 import { useSessionChat } from "./hooks/useSessionChat";
 import { useAsksPolling } from "./hooks/useAsksPolling";
+import { usePermissionMode } from "./hooks/usePermissionMode";
 import { useSubagentsPolling } from "./hooks/useSubagentsPolling";
 import { PermissionDialog } from "./components/PermissionDialog";
 import { SubagentStatusBar } from "./components/SubagentStatusBar";
+import { permissionModeLabel } from "./lib/permission-mode";
 import {
   resolveArgCommand,
   slashHelpText,
@@ -80,6 +82,20 @@ function ChatApp() {
     (text: string) => chat.sendMessage(text, toWireOverride(thinkingSettings)),
     [chat, thinkingSettings]
   );
+
+  // permission mode（TUI Shift+Tab 的 web 镜像）：状态 + 初始读取在
+  // usePermissionMode；notice 反馈留在 App（走 chat.pushNotice）。
+  const perm = usePermissionMode();
+  const cyclePermMode = useCallback(async () => {
+    try {
+      const next = await perm.cycle();
+      chat.pushNotice(`权限模式：${permissionModeLabel(next)}`);
+    } catch (e) {
+      chat.pushNotice(
+        `模式切换失败：${e instanceof Error ? e.message : String(e)}`
+      );
+    }
+  }, [chat, perm]);
 
   // Permission polling is only active while a turn is in flight AND we have a
   // session id. When the dialog appears, it sits at the top of the message
@@ -177,7 +193,13 @@ function ChatApp() {
     },
     // applyArgSetting 闭包捕获 chat / handleThinkingChange / thinkingSettings，
     // 三者均已在依赖列中。
-    [chat, handleCompact, handleNewSession, handleThinkingChange, thinkingSettings]
+    [
+      chat,
+      handleCompact,
+      handleNewSession,
+      handleThinkingChange,
+      thinkingSettings,
+    ]
   );
 
   const side = (
@@ -261,6 +283,13 @@ function ChatApp() {
             onNotice={chat.pushNotice}
             usage={chat.lastAnswer?.lastUsage ?? null}
             contextWindow={chat.contextWindow}
+            model={chat.model}
+            permissionModeLabel={
+              perm.mode !== null ? permissionModeLabel(perm.mode) : null
+            }
+            onPermissionModeToggle={() => {
+              void cyclePermMode();
+            }}
           />
         </>
       }

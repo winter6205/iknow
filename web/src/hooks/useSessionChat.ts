@@ -39,6 +39,8 @@ export type SessionChatState = {
   lastAnswer: TurnAnswerDto | null;
   healthLabel: string | null;
   contextWindow: number | null;
+  /** 模型路由 ID（health 下发）；未配置 → null。输入框下方状态条显示。 */
+  model: string | null;
 };
 
 export type SessionChatApi = SessionChatState & {
@@ -65,6 +67,7 @@ export type SessionChatApi = SessionChatState & {
 type ApplySessionExtras = {
   healthLabel?: string | null;
   contextWindow?: number | null;
+  model?: string | null;
 };
 
 /** localStorage key for the active conversation id (SC16 refresh restore). */
@@ -168,6 +171,7 @@ const INITIAL: SessionChatState = {
   lastAnswer: null,
   healthLabel: null,
   contextWindow: null,
+  model: null,
 };
 
 export function useSessionChat(): SessionChatApi {
@@ -241,6 +245,7 @@ export function useSessionChat(): SessionChatApi {
       const healthExtras: ApplySessionExtras = {
         healthLabel: `${health.service} ${health.version}`,
         contextWindow: health.contextWindow,
+        model: health.model ?? null,
       };
       const stored = readStoredSessionId();
       if (stored) {

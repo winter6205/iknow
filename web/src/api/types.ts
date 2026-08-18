@@ -119,6 +119,16 @@ export type HealthResponse = {
   service: string;
   version: string;
   readonly contextWindow: number;
+  /** 模型路由 ID（settings.llm.model）；未配置时字段缺席。 */
+  readonly model?: string;
+};
+
+/** Mirrors PermissionMode in src/harness/permission/modes.ts. */
+export type PermissionMode = "default" | "plan" | "full_auto";
+
+/** Mirrors PermissionModeResponse in src/session-api/contract.ts. */
+export type PermissionModeResponse = {
+  readonly mode: PermissionMode;
 };
 
 /**

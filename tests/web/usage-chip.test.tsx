@@ -58,10 +58,7 @@ describe("UsageChip — 三档色阈值", () => {
     it(`${name} 渲染百分比与档色 hex`, () => {
       const html = render({ usage: usage(pct), contextWindow: 100 });
       assert.ok(html.includes(`${pct}%`), `must include percent "${pct}%"`);
-      assert.ok(
-        html.includes(color),
-        `must include tier color hex "${color}"`
-      );
+      assert.ok(html.includes(color), `must include tier color hex "${color}"`);
     });
   }
 });
@@ -113,16 +110,36 @@ describe("UsageChip — cache nulls 当 0（迁移自 context-usage-strip）", (
   });
 });
 
-describe("UsageChip — title 明细", () => {
-  it("悬停 title 显示 X.Xk / Y.Yk tokens", () => {
+describe("UsageChip — 明细与悬停 title", () => {
+  it("可见 X.Xk / Y.Yk token 明细", () => {
     const html = render({ usage: usage(42000), contextWindow: 200000 });
-    assert.ok(html.includes('title="42.0k / 200.0k tokens"'));
+    assert.ok(html.includes("42.0k / 200.0k"));
+  });
+
+  it("悬停 title 显示精确 token 值", () => {
+    const html = render({ usage: usage(42000), contextWindow: 200000 });
+    assert.ok(html.includes('title="42,000 / 200,000 tokens"'));
+  });
+
+  it("进度条填充宽度 = min(pct,100)%", () => {
+    const html = render({ usage: usage(42000), contextWindow: 200000 });
+    assert.ok(html.includes("width:21%"));
+  });
+
+  it("进度条填充宽度封顶 100%（used 超窗时）", () => {
+    const html = render({ usage: usage(150), contextWindow: 100 });
+    assert.ok(html.includes("width:100%"));
+    assert.ok(html.includes("150%"));
   });
 });
 
 describe("UsageChip — sending prop", () => {
   it("sending=true → 轻微透明（对齐 ContextUsageStrip 现有口径）", () => {
-    const html = render({ usage: usage(49), contextWindow: 100, sending: true });
+    const html = render({
+      usage: usage(49),
+      contextWindow: 100,
+      sending: true,
+    });
     assert.ok(html.includes("opacity:0.85"));
   });
 
