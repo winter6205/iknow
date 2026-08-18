@@ -51,6 +51,7 @@ import {
   currentSecretValues,
 } from "../harness/sandbox/index.js";
 import { loadIknowEnv, type IknowEnv, type LlmEnv } from "../config/env.js";
+import { resolveWorkspaceRoot } from "../config/workspace-root.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import { MaxTurnsExceeded } from "../harness/errors.js";
@@ -403,6 +404,15 @@ export type SessionHubOptions = {
    *  reloadFromEnv 成功替换 adapter 后调用一次（新 env 为参数）。首次
    *  ensureDeps 不算「变化」→ 不触发。T4 用它驱动 TUI 显示层刷新。 */
   readonly onEnvChange?: (env: IknowEnv) => void;
+  /**
+   * serve-workspace T2 测试缝：按根装配 engine，避免单测走真实 LLM。
+   * 生产省略 → `buildHarnessEngine` 且 cwd/workspaceRoot/sandboxRoot 三等。
+   */
+  readonly buildEngine?: (root: string) => Promise<{
+    deps: LoopEngineDeps;
+    shutdown?: () => Promise<void>;
+    subagentManager?: SubAgentManager;
+  }>;
 };
 
 // -- stop-reason persistence decision (T1: replaced DROP_REASONS set) ---------
@@ -470,6 +480,27 @@ export class SessionHub {
    * 比较不可用，必须以它做「touch 未变内容」判定。首次成功重建后赋值。
    */
   private lastReloadedEnv: IknowEnv | undefined;
+  /** Constructor-injected deps (tests). Distinct from lazy/Map cache. */
+  private readonly injectedDeps: LoopEngineDeps | undefined;
+  /** serve-workspace T2: test seam; production omits → buildHarnessEngine. */
+  private readonly buildEngine:
+    | ((root: string) => Promise<{
+        deps: LoopEngineDeps;
+        shutdown?: () => Promise<void>;
+        subagentManager?: SubAgentManager;
+      }>)
+    | undefined;
+  /** serve picker bind (T2); session file workspaceRoot is the engine Map key. */
+  private boundRoot: string | undefined;
+  /** Per-root BuiltEngine cache (same root shared across sessions). */
+  private readonly engineByRoot = new Map<
+    string,
+    {
+      deps: LoopEngineDeps;
+      shutdown?: () => Promise<void>;
+      subagentManager?: SubAgentManager;
+    }
+  >();
   /** Per-conversation serialization (spec A15). */
   private readonly inflight = new Map<string, Promise<void>>();
 
@@ -480,7 +511,9 @@ export class SessionHub {
       );
     }
     this.store = opts.store;
+    this.injectedDeps = opts.deps;
     this.cachedDeps = opts.deps;
+    this.buildEngine = opts.buildEngine;
     this.traceOut = opts.traceOut;
     this.askUser = opts.askUser;
     this.askHandle = opts.askHandle;
@@ -533,6 +566,9 @@ export class SessionHub {
    */
   async shutdown(): Promise<void> {
     await this.cachedShutdown?.();
+    for (const entry of this.engineByRoot.values()) {
+      await entry.shutdown?.();
+    }
   }
 
   /**
@@ -559,7 +595,7 @@ export class SessionHub {
    */
   async reloadFromEnv(): Promise<void> {
     if (!this.envProvider) return;
-    if (!this.cachedDeps) return;
+    if (!this.cachedDeps && this.engineByRoot.size === 0) return;
     const env = this.envProvider();
     if (!env.llm.apiKey) {
       throw new ValidationError(LLM_API_KEY_MISSING_MESSAGE);
@@ -569,7 +605,15 @@ export class SessionHub {
     const prev = this.lastReloadedEnv;
     if (prev && sameHotReloadKeyFields(prev.llm, env.llm)) return;
     const { adapter } = createAdapterFromEnv(env);
-    this.cachedDeps = { ...this.cachedDeps, adapter };
+    if (this.cachedDeps) {
+      this.cachedDeps = { ...this.cachedDeps, adapter };
+    }
+    for (const [root, entry] of this.engineByRoot) {
+      this.engineByRoot.set(root, {
+        ...entry,
+        deps: { ...entry.deps, adapter },
+      });
+    }
     this.lastReloadedEnv = env;
     this.onEnvChange?.(env);
   }
@@ -613,11 +657,23 @@ export class SessionHub {
     return approved;
   }
 
+  /**
+   * Bind the serve picker root. T3 adds recents/trust; T2 only resolves
+   * `explicit` via `resolveWorkspaceRoot`. createSession writes this root
+   * onto the session file so postMessage can key the engine Map.
+   */
+  bindWorkspace(absPath: string): string {
+    const resolved = resolveWorkspaceRoot({ explicit: absPath });
+    this.boundRoot = resolved;
+    return resolved;
+  }
+
   async createSession(
     req?: CreateSessionRequest
   ): Promise<CreateSessionResponse> {
     const id = randomUUID();
     const now = new Date().toISOString();
+    const root = this.boundRoot;
     const file: SessionFileV1 = {
       schemaVersion: CURRENT_SCHEMA_VERSION,
       conversation_id: id,
@@ -626,9 +682,10 @@ export class SessionHub {
       turnCount: 0,
       updatedAt: now,
       title: "",
-      cwd: process.cwd(),
+      cwd: root ?? process.cwd(),
       sanitized_at: now,
       checkpoints: [],
+      ...(root !== undefined ? { workspaceRoot: root } : {}),
     };
     await this.store.save({ id, file });
     return {
@@ -678,6 +735,12 @@ export class SessionHub {
       conversationId,
       work: async () => {
         let session = await this.store.load(conversationId);
+        if (this.surface === "serve" && session.workspaceRoot === undefined) {
+          throw new ValidationError(
+            "workspace is unbound; select a workspace before sending",
+            { field: "workspaceRoot" }
+          );
+        }
         // #458 T5/T12: hoist the trace service so the `## GOAL:` pin block
         // (below) and runDeps share one TraceService instance for this
         // postMessage (avoid double construction; same file writer closure).
@@ -715,7 +778,7 @@ export class SessionHub {
           });
         }
         const priorCount = session.messages.length;
-        const baseDeps = await this.ensureDeps();
+        const baseDeps = await this.ensureDeps(session.workspaceRoot);
         // T2: per-turn override — rebuild deps with a one-shot adapter only;
         // executor / registry / maxTurns / timeoutMs are reused from the
         // cached deps. When absent, the cached path is unchanged.
@@ -840,7 +903,7 @@ export class SessionHub {
                 sessionId: conversationId,
                 signal: opts.signal,
                 trace: runDeps.trace,
-                cwd: process.cwd(),
+                cwd: session.workspaceRoot ?? process.cwd(),
                 // #128 SC1 生产装配: subagentManager 在场 → 启用分类器填空
                 // (command 缺失/空串时分类器接管, spec Objective);缺席
                 // (ask 形态) → undefined, verify-loop 自然走透明关闭向后兼容。
@@ -1435,6 +1498,69 @@ export class SessionHub {
   }
 
   /**
+   * Per-root engine cache. Session file `workspaceRoot` is the Map key
+   * (picker `boundRoot` is only the fallback when listSkills etc. have no
+   * session). Production assembly sets cwd/workspaceRoot/sandboxRoot equal.
+   */
+  private async getOrBuildEngine(root: string): Promise<{
+    deps: LoopEngineDeps;
+    shutdown?: () => Promise<void>;
+    subagentManager?: SubAgentManager;
+  }> {
+    const hit = this.engineByRoot.get(root);
+    if (hit) return hit;
+    const built = this.buildEngine
+      ? await this.buildEngine(root)
+      : await this.buildProductionEngine(root);
+    const entry = {
+      deps: built.deps,
+      shutdown: built.shutdown,
+      subagentManager: built.subagentManager,
+    };
+    this.engineByRoot.set(root, entry);
+    this.subagentManager = this.subagentManager ?? built.subagentManager;
+    return entry;
+  }
+
+  private async buildProductionEngine(root: string): Promise<{
+    deps: LoopEngineDeps;
+    shutdown?: () => Promise<void>;
+    subagentManager?: SubAgentManager;
+  }> {
+    if (!this.askUser) {
+      throw new Error(
+        "ask_inlet_missing: SessionHub lazy deps require AskUser (#162)"
+      );
+    }
+    const env = this.envProvider ? this.envProvider() : loadIknowEnv();
+    const built = await buildHarnessEngine({
+      env,
+      askUser: this.askUser,
+      cwd: root,
+      sandboxRoot: root,
+      workspaceRoot: root,
+      ...(this.surface ? { surface: this.surface } : {}),
+      ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
+      ...(this.permissionMode ? { permissionMode: this.permissionMode } : {}),
+      todoDir: resolveSessionTodoDir({ surface: "serve" }),
+      ...(this.traceOut !== undefined
+        ? {
+            subagentTrace: createJsonlTraceService({
+              filePath: this.traceOut,
+              conversationId: "subagent",
+            }),
+          }
+        : {}),
+    });
+    this.skillCatalog = built.skillCatalog;
+    this.mcpManager = built.mcpManager;
+    this.aciCatalog = built.catalog;
+    this.mcpHome = homedir();
+    this.mcpCwd = root;
+    return built;
+  }
+
+  /**
    * Lazy deps construction. Delegates to the shared harness assembly
    * (`src/harness/build-engine.ts`) so the serve path picks up the same ACI
    * 8-tool set as the CLI (bash / read_file / grep / glob / edit_file /
@@ -1442,7 +1568,14 @@ export class SessionHub {
    * serve mode was stuck on the echo/get_time stubs and the web SPA could
    * not exercise the new tools.
    */
-  private async ensureDeps(): Promise<LoopEngineDeps> {
+  private async ensureDeps(sessionRoot?: string): Promise<LoopEngineDeps> {
+    if (this.injectedDeps) {
+      return this.cachedDeps ?? this.injectedDeps;
+    }
+    const mapRoot = sessionRoot ?? this.boundRoot;
+    if (mapRoot !== undefined) {
+      return (await this.getOrBuildEngine(mapRoot)).deps;
+    }
     if (this.cachedDeps) return this.cachedDeps;
     if (!this.askUser) {
       throw new Error(
