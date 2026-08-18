@@ -234,7 +234,12 @@ function spawnTraceCli(cwd: string, args: string[]): SpawnedTrace {
 
   const exited = new Promise<{ code: number | null; output: string }>(
     (resolveExit) => {
-      child.on("exit", (code) => resolveExit({ code, output: out + err }));
+      // 用 close 事件(而非 exit)收尾:close 在 stdio 流完全关闭后触发,
+      // 保证 `out + err` 已 flush 完整。fail-fast 短寿子进程的 exit 事件
+      // 可能在 stdio pipe 数据尚未 flush 到父进程 buffer 时触发,导致
+      // assert.match(legacy.output, /迁移|migrate/) 在全量并行负载下偶
+      // 发失败(flaky)。close 解决该 race。
+      child.on("close", (code) => resolveExit({ code, output: out + err }));
       child.on("error", () => resolveExit({ code: null, output: out + err }));
     }
   );
