@@ -42,6 +42,7 @@ import type {
 } from "@anthropic-ai/sdk/resources/messages.js";
 import type { MessageStreamEvent } from "@anthropic-ai/sdk/resources/messages.js";
 import type { HarnessStreamEvent } from "../stream.js";
+import { safeEmitStream } from "../stream.js";
 
 /**
  * #176 T3: `client.messages.stream(...)` 返回的 SDK MessageStream 之最小消费面。
@@ -556,14 +557,8 @@ function wireStreamEvents(
   onStream: ((event: HarnessStreamEvent) => void) | undefined
 ): void {
   if (onStream === undefined) return;
-  const safeEmit = (event: HarnessStreamEvent): void => {
-    try {
-      onStream(event);
-    } catch {
-      // D3:swallow observer exceptions,host faults must not back-flow into
-      // the stream arm (aligned with ADR-0003 `safeTrace` MUST NOT throw).
-    }
-  };
+  const safeEmit = (event: HarnessStreamEvent): void =>
+    safeEmitStream(onStream, event);
   // T1:content_block_start 登记 index → block.id,供 content_block_delta
   // (input_json_delta) 配对;函数返回即自然清理(每回合一次装配)。
   const indexToBlockId = new Map<number, string>();

@@ -25,6 +25,7 @@ import type {
   TokenUsage,
 } from "../model-adapter/types.js";
 import type { HarnessStreamEvent } from "../stream.js";
+import { safeEmitStream } from "../stream.js";
 import { DEFAULT_KEEP_RECENT, COMPACT_TIMEOUT_SECONDS } from "./constant.js";
 import { preserveToolPairs } from "./window.js";
 
@@ -221,19 +222,29 @@ export interface CompactAdapter {
  *   - adapter resolves with empty/whitespace-only text → `{ kind: "empty_response" }`;
  *   - adapter throws / rejects → `{ kind: "adapter_failed", message: String(err) }`;
  *   - timeout (default `COMPACT_TIMEOUT_SECONDS * 1000`) fires → `{ kind: "timeout" }`,
- *     the in-flight adapter call is aborted via internal controller.
+ *     the in-flight adapter call is aborted via internal controller;
+ *   - `opts.signal` aborts **mid-flight** (wait 逻辑参考 Claude Code:压缩中
+ *     用户取消 = 保持会话原样)→ `{ kind: "signal_aborted" }`,in-flight adapter
+ *     调用经 composite signal 一并取消(与 timeout abort 同一通道)。
  *
  * Timeout / signal-merge pattern mirrors `runSummaryWithTimeout` (loop-engine.ts
  * epilogue summary) — internal `AbortController` merged with `opts.signal`,
  * timer fires `compactController.abort()` to cancel real HTTP. Adapter call
  * is wrapped in an async IIFE so synchronous throws are caught uniformly
  * with async rejections.
+ *
+ * `opts.onStream` 透传:Claude Code 的压缩体感 = 模型生成可见 + 可取消,
+ * 不是黑屏等待。压缩调用开始 / 结束各 emit 一条 `compaction_started` /
+ * `compaction_completed`(携带 outcome.kind + latencyMs),adapter 自身的
+ * text_delta / tool 事件经 request.onStream 直透到宿主层;emit 一律
+ * try/catch 吞咽(观察者错误不得反流回压缩逻辑,对齐 wireStreamEvents D3)。
  */
 export async function runFullCompact(opts: {
   readonly adapter: CompactAdapter;
   readonly dropped: ReadonlyArray<AnthropicNativeMessage>;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
 }): Promise<FullCompactOutcome> {
   if (opts.signal?.aborted) return { kind: "signal_aborted" };
   const timeoutMs = opts.timeoutMs ?? COMPACT_TIMEOUT_SECONDS * 1000;
@@ -246,7 +257,9 @@ export async function runFullCompact(opts: {
     messages: compactMessages,
     turnCount: 0,
   });
-  const request = Object.freeze({});
+  const request = Object.freeze({
+    ...(opts.onStream !== undefined ? { onStream: opts.onStream } : {}),
+  });
   const compactController = new AbortController();
   const compositeSignal = AbortSignal.any(
     opts.signal
@@ -255,6 +268,12 @@ export async function runFullCompact(opts: {
   );
   let timer: ReturnType<typeof setTimeout> | undefined;
   let adapterSettled = false;
+  const startedMono = performance.now();
+
+  safeEmitStream(opts.onStream, {
+    type: "compaction_started",
+    droppedCount: opts.dropped.length,
+  });
 
   const adapterP = (async (): Promise<FullCompactOutcome> => {
     try {
@@ -274,8 +293,8 @@ export async function runFullCompact(opts: {
     } finally {
       // timer / settled 信号必须在 IIFE 内清除,不能依赖外部 finally:
       // 外部 finally 只在 !adapterSettled 时清 timer,失败分支(adapterSettled=true
-      // 但走 catch)会泄漏 25 s timeout,在 iknow ask oneshot 触发失败的 compact
-      // 时让进程多挂 ~25 s 才退出。
+      // 但走 catch)会泄漏 90 s timeout,在 iknow ask oneshot 触发失败的 compact
+      // 时让进程多挂 ~90 s 才退出。
       adapterSettled = true;
       if (timer !== undefined) clearTimeout(timer);
     }
@@ -289,7 +308,31 @@ export async function runFullCompact(opts: {
   });
 
   try {
-    return await Promise.race([adapterP, timeoutP]);
+    const winner = await Promise.race([adapterP, timeoutP]);
+    // 中途被 run / 宿主 signal 取消 → 返回 signal_aborted(Claude Code 体感:
+    // 压缩中 Esc = 立刻退出 + 会话原样,不像 timeout / adapter_failed 那样
+    // 走 fallback placeholder)。同步 emit `compaction_cancelled` 终态事件
+    // 让宿主渲染层清除 "Compacting…" 指示器(stream.ts 注释契约:started 必有
+    // 对端 completed / failed / cancelled 之一收尾)。
+    if (opts.signal?.aborted) {
+      safeEmitStream(opts.onStream, { type: "compaction_cancelled" });
+      return { kind: "signal_aborted" };
+    }
+    const durationMs = Math.round(performance.now() - startedMono);
+    if (winner.kind === "summarized") {
+      safeEmitStream(opts.onStream, {
+        type: "compaction_completed",
+        summaryLen: winner.text.length,
+        durationMs,
+      });
+    } else if (winner.kind !== "signal_aborted") {
+      safeEmitStream(opts.onStream, {
+        type: "compaction_failed",
+        reason: winner.kind,
+        durationMs,
+      });
+    }
+    return winner;
   } finally {
     // Race settled; if adapter hadn't finished yet the late .then() / .catch()
     // handlers still set adapterSettled = true and call clearTimeout (no-op on

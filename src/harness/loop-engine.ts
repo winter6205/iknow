@@ -283,15 +283,27 @@ function appendSystemInterrupt(state: LoopState): LoopState {
  *      (no tools → 纯文本;adapter 拒绝 / 超时 / 空响应 → 各种 outcome);
  *   3. `summarized` → `buildCompactedMessages`:
  *      [summary user 消息, (可选 boundaryAttr), ...kept];
- *   4. 其余 outcome → 回退现有 `compactMessages` + boundary placeholder
+ *   4. `signal_aborted`(wait 逻辑参考 Claude Code:压缩中取消 = 保持会话原样,
+ *      不做 fallback 截断,与 timeout / adapter_failed 不同)→ 返回 state 不变;
+ *   5. 其余 outcome → 回退现有 `compactMessages` + boundary placeholder
  *      路径(#467 决议:摘要失败绝不阻塞主 loop)。
  *
  * 停止语义守门不变:boundaryAttachment 字段缺席 → 摘要路径不插入 attachment,
  * 回退路径与现 master byte-identical;普通 turn(非 compact)→ helper 不被调用。
+ *
+ * `opts.signal` / `opts.onStream`:run 级取消信号与流式事件观察者透传到
+ * `runFullCompact`——reactive 调用点传 `opts.signal`(PromptTooLongError 重试
+ * 前压缩期间用户取消 → 保持原样 → protocolError 收场);proactive 调用点传
+ * `opts?.onStream`(宿主收到 compaction_started / completed / failed + 摘要
+ * text_delta 直透)。缺席 → 行为零变化(旧 `signal: undefined` 语义)。
  */
 async function applyCompactAttachment(
   state: LoopState,
-  deps: LoopEngineDeps
+  deps: LoopEngineDeps,
+  opts?: {
+    readonly signal?: AbortSignal;
+    readonly onStream?: (event: HarnessStreamEvent) => void;
+  }
 ): Promise<LoopState> {
   const split = splitForCompaction(state.messages);
   if (split === undefined) return state;
@@ -305,10 +317,19 @@ async function applyCompactAttachment(
   const outcome = await runFullCompact({
     adapter: deps.adapter,
     dropped: split.dropped,
-    signal: undefined,
+    signal: opts?.signal,
+    onStream: opts?.onStream,
   });
   const endedAt = new Date().toISOString();
   const durationMs = performance.now() - startMono;
+
+  // wait 逻辑参考 Claude Code:压缩中取消(Esc/Ctrl+C)→ 会话保持原样,
+  // 不做 fallback 截断(截断会让摘要失败路径的 messages 丢失,与"取消即无变化"
+  // 的取消语义冲突)。调用方据此决定后续收场(reactive → protocolError;
+  // proactive → 下一轮 stepWithTrace 看到 callerAbort 取消)。
+  if (outcome.kind === "signal_aborted") {
+    return state;
+  }
 
   if (outcome.kind === "summarized") {
     const boundary = deps.boundaryAttachment?.();
@@ -879,8 +900,19 @@ async function runModelPhase(opts: {
         opts.reactiveAttemptedRef.attempted = true;
         const compactedState = await applyCompactAttachment(
           opts.state,
-          opts.deps
+          opts.deps,
+          { signal: opts.signal, onStream: opts.onStream }
         );
+        // wait 逻辑参考 Claude Code:reactive compact 期间被用户取消 →
+        // 不论压缩结果如何都按取消收场(避免落 protocolError 让用户困惑)。
+        if (opts.signal?.aborted) {
+          return modelStop({
+            state: opts.state,
+            started: opts.started,
+            reason: "cancelled",
+            cancelKind: "callerAbort",
+          });
+        }
         if (compactedState.messages !== opts.state.messages) {
           return {
             kind: "reactive_compact_pending",
@@ -1503,7 +1535,13 @@ export async function run(
         // #458 T7 (SC11):applyCompactAttachment 统一 proactive + reactive
         // 两处 compact(helper 提取无双份实现),并在 placeholder 之后注入
         // boundaryAttachment 渲染文本。返回 state 同引用 = 未实际压缩。
-        const compactedState = await applyCompactAttachment(state, deps);
+        // wait 逻辑参考 Claude Code:压缩中取消 → state 不变,下一轮
+        // stepWithTrace(raceModel)在 callerAbort/hostCancel 处停下;同时透传
+        // onStream 让宿主看到 compaction_started/completed/failed + 摘要 text_delta。
+        const compactedState = await applyCompactAttachment(state, deps, {
+          signal,
+          onStream: opts?.onStream,
+        });
         if (compactedState.messages !== state.messages) {
           // immutable 重建(SC7/Q5);不 mutate,原 messages 引用不变。
           // S10 freeze gate:压缩结果须与 appendMessage 一样冻结每一条,

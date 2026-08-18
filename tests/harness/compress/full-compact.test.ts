@@ -323,7 +323,7 @@ describe("runFullCompact", () => {
 
   it("adapter_failed:失败分支不泄漏 timeout timer(review-fix Medium)", async () => {
     // 修复前:catch 分支设 adapterSettled=true 但不 clearTimeout,外部 finally
-    // 因 !adapterSettled 为 false 而跳过清理 → 25 s timer 挂在 event loop。
+    // 因 !adapterSettled 为 false 而跳过清理 → 90 s timer 挂在 event loop。
     // 修复后:finally 块在 IIFE 内统一清 timer,失败路径不残留。
     const throwAdapter = makeAdapter([{ throw: new Error("boom") }]);
     const timersBefore = process
@@ -365,6 +365,7 @@ describe("runFullCompact", () => {
 
   it("signal_aborted:入口已 abort → 不调 adapter,直接 signal_aborted", async () => {
     let called = false;
+    const events: string[] = [];
     const adapter: CompactAdapter = {
       encodeUserText: (userText: string): AnthropicNativeMessage =>
         text(userText),
@@ -379,12 +380,186 @@ describe("runFullCompact", () => {
       adapter,
       dropped,
       signal: controller.signal,
+      onStream: (e) => events.push(e.type),
     });
     assert.equal(out.kind, "signal_aborted");
     assert.equal(called, false, "已 abort 时不得发起模型调用");
+    // 入口已 abort:不发起模型调用 = 不 emit compaction_started。
+    assert.deepEqual(events, []);
   });
 
   it("默认超时 = COMPACT_TIMEOUT_SECONDS(常量 exported)", () => {
-    assert.equal(COMPACT_TIMEOUT_SECONDS, 25);
+    // 2026-08-19 实测调整:25s 在 ~27KB dropped 下已吃掉 67% 预算,长上下文场景
+    // 必溢出。25→90 给 ~3.6× headroom,见 constant.ts 注释 + smoke artifact
+    // docs/handoff/i467-full-compact/real-llm-full-compact.{json,md}。
+    assert.equal(COMPACT_TIMEOUT_SECONDS, 90);
+  });
+
+  // #467 T4:wait 逻辑参考 Claude Code — 压缩生命周期事件透传。
+  // 宿主层据此渲染 "Compacting…" 指示器 + 展示摘要生成进度
+  // (adapter 流式臂的 text_delta 经 request.onStream 直透)。
+  describe("wait logic 事件生命周期 (Claude Code UX)", () => {
+    it("summarized:emits compaction_started + compaction_completed, observer 错误被吞咽", async () => {
+      const events: { type: string; payload?: unknown }[] = [];
+      const throwing = (): void => {
+        throw new Error("observer crash");
+      };
+      const usage: TokenUsage = {
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheCreationInputTokens: null,
+        cacheReadInputTokens: null,
+      };
+      const adapter = makeAdapter([
+        assistantTurn({
+          texts: ["<analysis>x</analysis><summary>Y</summary>"],
+          usage,
+        }),
+      ]);
+      const out = await runFullCompact({
+        adapter,
+        dropped,
+        onStream: (e) => {
+          events.push({ type: e.type, payload: e });
+          throwing(); // 必须不反流回压缩逻辑
+        },
+      });
+      assert.equal(out.kind, "summarized");
+      // compaction_started → compaction_completed 两事件;completed 携带
+      // summaryLen + durationMs;started 携带 droppedCount。
+      const types = events.map((e) => e.type);
+      assert.deepEqual(types, ["compaction_started", "compaction_completed"]);
+      const started = events[0]?.payload as {
+        type: string;
+        droppedCount: number;
+      };
+      assert.equal(started.droppedCount, dropped.length);
+      const completed = events[1]?.payload as {
+        type: string;
+        summaryLen: number;
+        durationMs: number;
+      };
+      assert.equal(completed.summaryLen, "Y".length);
+      assert.ok(
+        typeof completed.durationMs === "number" && completed.durationMs >= 0,
+        "durationMs 是非负 number"
+      );
+    });
+
+    it("adapter_failed:emits compaction_failed(reason = adapter_failed),吞咽观察者 throw", async () => {
+      const events: { type: string; reason?: string }[] = [];
+      const throwingObserver = (): void => {
+        throw new Error("nope");
+      };
+      const adapter = makeAdapter([{ throw: new Error("boom") }]);
+      const out = await runFullCompact({
+        adapter,
+        dropped,
+        onStream: (e) => {
+          events.push({
+            type: e.type,
+            reason: "reason" in e ? e.reason : undefined,
+          });
+          throwingObserver();
+        },
+      });
+      assert.equal(out.kind, "adapter_failed");
+      assert.deepEqual(
+        events.map((e) => e.type),
+        ["compaction_started", "compaction_failed"]
+      );
+      assert.equal(events[1]?.reason, "adapter_failed");
+    });
+
+    it("onStream → adapter.step request.onStream 直透", async () => {
+      let receivedOnStream: unknown = undefined;
+      const adapter: CompactAdapter = {
+        encodeUserText: (userText: string): AnthropicNativeMessage =>
+          text(userText),
+        step: async (_state, request): Promise<AssistantTurnResult> => {
+          receivedOnStream = request.onStream;
+          return assistantTurn({
+            texts: ["<analysis>x</analysis><summary>Y</summary>"],
+          });
+        },
+      };
+      const observer = (): void => {};
+      await runFullCompact({
+        adapter,
+        dropped,
+        onStream: observer,
+      });
+      assert.equal(
+        receivedOnStream,
+        observer,
+        "request.onStream === opts.onStream"
+      );
+    });
+
+    it("中途 abort:opts.signal 中途 abort → signal_aborted,emit compaction_started 但不 emit completed/failed", async () => {
+      // Claude Code 体感:压缩中 Esc/Ctrl+C = 立刻退出 + 会话原样。
+      // runFullCompact 必须把中途取消映射为 signal_aborted(让 caller 决定
+      // 不做 fallback 截断),且不发 compaction_completed / compaction_failed
+      // —— completed 让宿主误以为成功,failed 让宿主误以为异常停。
+      const events: string[] = [];
+      const adapter: CompactAdapter = {
+        encodeUserText: (userText: string): AnthropicNativeMessage =>
+          text(userText),
+        step: async (_state, _request, signal) => {
+          // 挂起到 abort。
+          await new Promise<never>((_, reject) => {
+            signal?.addEventListener("abort", () => {
+              reject(new DOMException("aborted", "AbortError"));
+            });
+          });
+          throw new Error("unreachable");
+        },
+      };
+      const controller = new AbortController();
+      // 关键时序:不先 await;先发起 runFullCompact(同步 emit compaction_started
+      // 并把 adapter.step 挂起到 abort 监听),然后 controller.abort() 触发
+      // composite signal → adapter 抛 AbortError → race resolved with
+      // adapter_failed → opts.signal?.aborted 检查覆盖为 signal_aborted。
+      const outPromise = runFullCompact({
+        adapter,
+        dropped,
+        signal: controller.signal,
+        timeoutMs: 5000,
+        onStream: (e) => events.push(e.type),
+      });
+      // 让 microtask 跑一拍,确保 adapter.step 已注册 abort listener。
+      await new Promise((r) => setTimeout(r, 0));
+      controller.abort();
+      const out = await outPromise;
+      assert.equal(
+        out.kind,
+        "signal_aborted",
+        "mid-flight user abort 必须映射为 signal_aborted(caller 走 keep-state 路径)"
+      );
+      // 事件序列:started(同步段)→ cancelled 终态收尾(宿主据此清除指示器);
+      // completed / failed 不 emit——取消非失败(spec-reviewer 契约修复)。
+      assert.deepEqual(events, ["compaction_started", "compaction_cancelled"]);
+    });
+
+    it("opts.onStream 未传 → 行为零变化(不抛,不影响 outcome)", async () => {
+      const usage: TokenUsage = {
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheCreationInputTokens: null,
+        cacheReadInputTokens: null,
+      };
+      const adapter = makeAdapter([
+        assistantTurn({
+          texts: ["<analysis>x</analysis><summary>Z</summary>"],
+          usage,
+        }),
+      ]);
+      // 不传 onStream:必须不抛,outcome 仍是 summarized。
+      const out = await runFullCompact({ adapter, dropped });
+      assert.equal(out.kind, "summarized");
+      if (out.kind === "summarized") {
+        assert.equal(out.text, "Z");
+      }
+    });
   });
 });

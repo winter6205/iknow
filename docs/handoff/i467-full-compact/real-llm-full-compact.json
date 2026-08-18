@@ -1,0 +1,78 @@
+{
+  "result": "pass",
+  "timestamp": "2026-08-18T18:09:24.819Z",
+  "model": "minimax-cn/MiniMax-M3",
+  "baseUrl": "172.31.128.1:20128",
+  "key_source": "settings.llm.apiKey",
+  "stream": "on",
+  "thinking": "adaptive",
+  "maxOutputTokens": 8192,
+  "compact_timeout_seconds": 90,
+  "phases": {
+    "functional": {
+      "outcome": "summarized",
+      "durationMs": 12543,
+      "summaryLen": 5021,
+      "outputTokens": 1924,
+      "assertions": [
+        {
+          "name": "outcome.kind === summarized",
+          "pass": true
+        },
+        {
+          "name": "summary length >= 200 (non-trivial)",
+          "pass": true
+        },
+        {
+          "name": "contains 'Primary Request' (9-section)",
+          "pass": true
+        },
+        {
+          "name": "preserves a seed fact (lexer/#459/ZWJ)",
+          "pass": true
+        },
+        {
+          "name": "no <analysis> tag leaked",
+          "pass": true
+        },
+        {
+          "name": "buildCompactedMessages shape ok",
+          "pass": true
+        },
+        {
+          "name": "usage.outputTokens > 0",
+          "pass": true
+        }
+      ]
+    },
+    "long": {
+      "outcome": "summarized",
+      "durationMs": 16405,
+      "droppedCount": 74,
+      "droppedCharCount": 27292,
+      "summaryLen": 6362,
+      "defaultTimeoutMs": 90000,
+      "assertions": [
+        {
+          "name": "outcome.kind in {summarized, timeout}",
+          "pass": true
+        }
+      ],
+      "notes": []
+    },
+    "abort": {
+      "outcome": "timeout",
+      "wallClockMs": 116,
+      "assertions": [
+        {
+          "name": "outcome.kind === timeout (real SDK aborted)",
+          "pass": true
+        },
+        {
+          "name": "wall clock < 1000ms (signal aborted HTTP, not just setTimeout race)",
+          "pass": true
+        }
+      ]
+    }
+  }
+}

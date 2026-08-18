@@ -54,14 +54,15 @@ type FullCompactOutcome =
 Exit criteria：
 
 - `summarized` 且 text 经 `extractCompactSummary` 非空 → 采用摘要；
-- 其余 4 种 → 调用方回退现有纯截断（placeholder）路径，**绝不阻塞主回路**（对齐 epilogue summary ADR-0011 纪律）；
-- 超时值复用 `COMPACT_TIMEOUT_SECONDS`（25s，现有 constant，解除 `void` 门后状态）；测试可注入 `timeoutMs` 覆盖。
+- 其余 3 种 → 调用方回退现有纯截断（placeholder）路径，**绝不阻塞主回路**（对齐 epilogue summary ADR-0011 纪律）；`signal_aborted` 例外——wait 逻辑参考 Claude Code：压缩中取消 = 会话保持原样，不做破坏性 fallback；
+- 超时值复用 `COMPACT_TIMEOUT_SECONDS`（**90s**；初版 25s 经 i467 real-LLM smoke 实测证据调整：27KB dropped 已耗时 ~17s 占 25s 的 67%，长上下文必溢出；产物 `docs/handoff/i467-full-compact/`）；测试可注入 `timeoutMs` 覆盖；
+- 等待 UX（参考 Claude Code）：runFullCompact 透传 `opts.onStream`，emit `compaction_started` / `compaction_completed` / `compaction_failed` 事件 + adapter text_delta 直透，宿主可渲染进度。
 
 ### 触发点接入（保留双触发路径语义）
 
 1. **loop-engine**：`applyCompactAttachment` 改 async（两处调用点 reactive line ~773 / proactive line ~1396 同步改 await）。执行序：
    - `splitForCompaction` → dropped 为空 → 原样返回（不变）；
-   - dropped 在场 → `runFullCompact`（best-effort，timeout 25s）；
+   - dropped 在场 → `runFullCompact`（best-effort，timeout 90s）；
    - 成功 → `buildCompactedMessages`（摘要 user 消息）+ boundaryAttachment 注入；
    - 失败 → 原 `compactMessages` placeholder 路径（行为与现 master 等价）+ boundaryAttachment 注入。
    - trace：摘要轮走 `deps.trace?.recordLlmCall`（status ok/error，对齐 epilogue summary 记录模式，`loop-engine.ts:1516` 同款）。
@@ -141,6 +142,6 @@ Exit criteria：
 
 ## 风险
 
-1. **超时拖累主回路**：proactive compact 发生在 turn 循环内，25s 超时会阻塞该 turn。缓解：epilogue summary 已验证同款模式可接受；阈值 25s 为 constant 可配。
+1. **超时拖累主回路**：proactive compact 发生在 turn 循环内，90s 超时会阻塞该 turn。缓解：run 级 signal 透传进压缩等待（用户可取消，signal_aborted → 会话原样 + cancelled stop）；阈值 90s 为 constant 可配；实测 27KB dropped ~17s（i467 smoke）。
 2. **摘要质量回归**：摘要丢关键信息。缓解：9 节结构 + "All user messages" 节保留用户原话；失败回退截断路径不劣于现状。
 3. **改名迁移**：旧 session 文件 `summary` 字段 → sanitize 回填 `title`；round-trip 测试钉住。

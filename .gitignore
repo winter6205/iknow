@@ -77,6 +77,10 @@ docs/handoff/*
 # wayfinder task: session-level Goal for verify-loop task field, real-LLM
 # + real bwrap evidence). Mirrors the i9/i10/i11-smoke exceptions above.
 !docs/handoff/i408-smoke/
+# 467: i467 full-compact real-LLM smoke acceptance reports (real adapter
+# e2e + 25→90 timeout evidence + Claude Code wait-logic event verification).
+# Mirrors the i9/i10/i11-smoke exceptions above.
+!docs/handoff/i467-full-compact/
 
 # 022: session-api runtime JSON store (data/sessions/<id>.json), not team
 # content. The data/ top-level dir is kept via data/.gitkeep so the
