@@ -20,6 +20,9 @@ import path from "node:path";
 /** Env var name. Exported so env-SSOT loader and CLI share one symbol. */
 export const WORKSPACE_ROOT_ENV_KEY = "IKNOW_WORKSPACE_ROOT";
 
+/** SessionFile / PUT path cap (serve-workspace T1). Overflow → schema_invalid. */
+export const MAX_WORKSPACE_ROOT_CHARS = 4096;
+
 /** Typed-error discriminated union (4 kinds; mirror `IknowIdentityError`). */
 export type WorkspaceRootError =
   | { kind: "empty_explicit"; path: string }

@@ -10,6 +10,7 @@ export type {
   TaskFocusHistoryEntry,
   TaskFocusState,
 } from "./schema.js";
+export { MAX_WORKSPACE_ROOT_CHARS } from "../../config/workspace-root.js";
 export {
   CURRENT_SCHEMA_VERSION,
   extractGoal,

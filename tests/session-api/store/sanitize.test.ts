@@ -582,3 +582,56 @@ describe("sanitizeSessionFile — #467 legacy summary → title migration", () =
     assert.equal(out["title"], "recompute-me");
   });
 });
+
+// -- serve-workspace T1: additive workspaceRoot (no cwd backfill) ------------
+
+describe("sanitizeSessionFile — additive workspaceRoot (serve-workspace T1)", () => {
+  it("leaves workspaceRoot absent when the key is missing (never cwd / process.cwd())", () => {
+    const out = sanitizeSessionFile(v1File()) as unknown as Record<
+      string,
+      unknown
+    >;
+    assert.equal(out["workspaceRoot"], undefined);
+    assert.equal("workspaceRoot" in out, false);
+    assert.notEqual(out["workspaceRoot"], process.cwd());
+    assert.notEqual(out["workspaceRoot"], out["cwd"]);
+  });
+
+  it("preserves an absolute workspaceRoot via spread (...obj)", () => {
+    const abs = "/home/user/project";
+    const out = sanitizeSessionFile({
+      ...v2File(),
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      workspaceRoot: abs,
+    });
+    assert.equal(out.workspaceRoot, abs);
+  });
+
+  it("rejects relative / empty / null workspaceRoot → schema_invalid workspaceRoot", () => {
+    const cases: unknown[] = ["relative/path", "", null];
+    for (const workspaceRoot of cases) {
+      assert.throws(
+        () =>
+          sanitizeSessionFile({
+            ...v1File(),
+            workspaceRoot,
+          }),
+        isSchemaInvalid("workspaceRoot"),
+        `must reject ${JSON.stringify(workspaceRoot)} as workspaceRoot`
+      );
+    }
+  });
+
+  it("rejects workspaceRoot longer than 4096 chars → schema_invalid workspaceRoot", () => {
+    const overflow = `/${"x".repeat(4096)}`;
+    assert.equal(overflow.length, 4097);
+    assert.throws(
+      () =>
+        sanitizeSessionFile({
+          ...v1File(),
+          workspaceRoot: overflow,
+        }),
+      isSchemaInvalid("workspaceRoot")
+    );
+  });
+});

@@ -46,7 +46,9 @@
  * verbatim. `MAX_GOAL_CHARS` + `validateGoalText` gate the /goal and
  * `## GOAL:` write paths at 2000 chars.
  */
+import path from "node:path";
 import type { AnthropicNativeMessage } from "../../harness/index.js";
+import { MAX_WORKSPACE_ROOT_CHARS } from "../../config/workspace-root.js";
 
 /** Why a turn ended in an interrupt state — the checkpoint's discriminating
  *  label. Mirrors the harness StopReason interruption subset (cancelled /
@@ -141,6 +143,10 @@ export interface SessionFileV1 {
    *  taskFocus (shape-validated like goal/checkpoints); on load a legacy
    *  `user_initial` goal migrates here via `seedTaskFocus`. */
   readonly taskFocus?: TaskFocusState;
+  /** Additive (CURRENT stays 5): serve/session bind root. Absent = unbound;
+   *  sanitize never backfills cwd or process.cwd(). Illegal present values
+   *  fail validate with field `"workspaceRoot"` (not silently dropped). */
+  readonly workspaceRoot?: string;
 }
 
 export const CURRENT_SCHEMA_VERSION = 5 as const;
@@ -195,6 +201,14 @@ export function validateSessionFile(value: unknown): string | null {
   // Mirrors the goal/checkpoints pattern; never silently coerce.
   if (obj["taskFocus"] !== undefined && !isValidTaskFocus(obj["taskFocus"])) {
     return "taskFocus";
+  }
+  // Additive optional string: absent is valid (unbound). Present values must
+  // be absolute, non-empty, and ≤ MAX_WORKSPACE_ROOT_CHARS — never coerce.
+  if (
+    obj["workspaceRoot"] !== undefined &&
+    !isValidWorkspaceRoot(obj["workspaceRoot"])
+  ) {
+    return "workspaceRoot";
   }
   return null;
 }
@@ -641,4 +655,13 @@ function isValidTaskFocusHistory(h: unknown): boolean {
   return (
     typeof entry["text"] === "string" && typeof entry["updatedAt"] === "string"
   );
+}
+
+/** Optional SessionFile workspaceRoot: string, absolute, length-capped. */
+function isValidWorkspaceRoot(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  if (value.length === 0 || value.length > MAX_WORKSPACE_ROOT_CHARS) {
+    return false;
+  }
+  return path.isAbsolute(value);
 }
