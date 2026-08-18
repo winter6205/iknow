@@ -18,6 +18,26 @@ export type SubagentStatusBarProps = {
   readonly subagents: ReadonlyArray<SubagentStatus>;
 };
 
+/** 终态（completed/failed）条目最多保留最近 N 条；活跃条目全显示。 */
+const MAX_TERMINAL = 5;
+
+/**
+ * 历史累积缓解：starting/running 全保留，终态只保留列表序最后
+ * MAX_TERMINAL 条（原相对顺序不变）。导出供 tests/web 直接断言。
+ */
+export function visibleSubagents(
+  subagents: ReadonlyArray<SubagentStatus>
+): ReadonlyArray<SubagentStatus> {
+  const terminal = subagents.filter(
+    (s) => s.state === "completed" || s.state === "failed"
+  );
+  if (terminal.length <= MAX_TERMINAL) return subagents;
+  const keep = new Set(terminal.slice(-MAX_TERMINAL).map((s) => s.taskId));
+  return subagents.filter(
+    (s) => s.state === "starting" || s.state === "running" || keep.has(s.taskId)
+  );
+}
+
 function stateLabel(state: SubagentState): string {
   switch (state) {
     case "starting":
@@ -32,9 +52,8 @@ function stateLabel(state: SubagentState): string {
 }
 
 /**
- * 四态徽标 tone：starting/running → warn 琥珀（活跃/in-flight；对齐
- * ContextUsageStrip running 档色 #d9a343 语义），completed → ok 雾灰绿
- * （--color-ok），failed → danger 红（--color-danger）。
+ * 四态徽标 tone：starting/running → warn 琥珀（活跃/in-flight），
+ * completed → ok 雾灰绿（--color-ok），failed → danger 红（--color-danger）。
  */
 function badgeClass(state: SubagentState): string {
   switch (state) {
@@ -49,10 +68,11 @@ function badgeClass(state: SubagentState): string {
 }
 
 export function SubagentStatusBar({ subagents }: SubagentStatusBarProps) {
-  if (subagents.length === 0) return null;
+  const visible = visibleSubagents(subagents);
+  if (visible.length === 0) return null;
   return (
     <div className="mx-auto flex w-full max-w-[var(--chat-max)] flex-col gap-1 px-4 pt-2">
-      {subagents.map((s) => {
+      {visible.map((s) => {
         const label =
           s.taskPreview.trim().length > 0 ? s.taskPreview : "子代理";
         return (

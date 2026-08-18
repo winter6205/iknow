@@ -14,8 +14,16 @@ import { isIknowError, ValidationError } from "../shared/errors.js";
 import { mapStoreError, type SessionHub } from "./hub.js";
 import type { SessionStoreError } from "./store/index.js";
 import { parseThinkingOverride } from "./thinking-override.js";
-import type { ApiErrorBody, HealthResponse } from "./contract.js";
+import type {
+  ApiErrorBody,
+  HealthResponse,
+  PermissionModeResponse,
+} from "./contract.js";
 import { getVersion } from "../cli/usage.js";
+import {
+  nextShiftTabMode,
+  type PermissionModeContext,
+} from "../harness/permission/modes.js";
 import { createTraceRouter } from "../traceserver/serve.js";
 import {
   resolveDefaultWebRoot,
@@ -36,6 +44,12 @@ export type SessionHttpServerOptions = {
   /** 上下文窗口大小（token）。缺省 200000（与 loop-engine 默认同源）。
    *  HealthResponse 字段；由 serve.ts 从 loadIknowEnv().compress.contextWindow 透传。 */
   contextWindow?: number;
+  /** 模型路由 ID（settings.llm.model）。HealthResponse 字段；
+   *  由 serve.ts 透传；缺席 → health 不带 model（byte-stable）。 */
+  model?: string;
+  /** 可变 permission mode holder（与 hub 共用同一 context 实例）。
+   *  在场 → GET/POST /api/v1/permission-mode 可用；缺席 → 两端点 404。 */
+  permissionMode?: PermissionModeContext;
   /**
    * ADR-0020: mount the trace inspection read API in-process. When present,
    * `/api/v1/traces*` routes (incl. `/api/v1/traces/sessions`) and the
@@ -77,7 +91,16 @@ export function createSessionHttpServer(
       : undefined;
 
   return http.createServer((req, res) => {
-    void handle({ req, res, hub, webRoot, contextWindow, traceRouter });
+    void handle({
+      req,
+      res,
+      hub,
+      webRoot,
+      contextWindow,
+      model: opts.model,
+      permissionMode: opts.permissionMode,
+      traceRouter,
+    });
   });
 }
 
@@ -116,6 +139,10 @@ interface HandleOpts {
   readonly hub: SessionHub;
   readonly webRoot: string;
   readonly contextWindow: number;
+  /** HealthResponse 模型名字段（缺席 → 不下发）。 */
+  readonly model?: string;
+  /** 可变 permission mode holder（缺席 → permission-mode 端点 404）。 */
+  readonly permissionMode?: PermissionModeContext;
   /** ADR-0020: mounted trace router (undefined = trace not mounted). */
   readonly traceRouter?: (
     req: http.IncomingMessage,
@@ -124,7 +151,16 @@ interface HandleOpts {
 }
 
 async function handle(opts: HandleOpts): Promise<void> {
-  const { req, res, hub, webRoot, contextWindow, traceRouter } = opts;
+  const {
+    req,
+    res,
+    hub,
+    webRoot,
+    contextWindow,
+    model,
+    permissionMode,
+    traceRouter,
+  } = opts;
   try {
     const method = (req.method ?? "GET").toUpperCase();
     const url = new URL(
@@ -134,8 +170,14 @@ async function handle(opts: HandleOpts): Promise<void> {
     const pathname = decodeURIComponent(url.pathname);
 
     if (method === "GET" && pathname === "/api/v1/health")
-      return sendHealth(res, contextWindow);
+      return sendHealth(res, contextWindow, model);
     if (method === "GET" && isSsePath(pathname)) return sendSseReserved(res);
+
+    // permission mode 读取 / Shift+Tab 循环切换（web 快捷键；holder 缺席 →
+    // 404，与 trace 未挂载同模式）。
+    if (pathname === "/api/v1/permission-mode") {
+      return handlePermissionModeRoute({ method, req, res, permissionMode });
+    }
 
     if (method === "POST" && pathname === "/api/v1/sessions") {
       const createReq = parseCreateBody(await readJsonBody(req));
@@ -193,12 +235,17 @@ async function handle(opts: HandleOpts): Promise<void> {
   }
 }
 
-function sendHealth(res: http.ServerResponse, contextWindow: number): void {
+function sendHealth(
+  res: http.ServerResponse,
+  contextWindow: number,
+  model?: string
+): void {
   const body: HealthResponse = {
     ok: true,
     service: "iknow-session-api",
     version: getVersion(),
     contextWindow,
+    ...(model !== undefined ? { model } : {}),
   };
   sendJson({ res, status: 200, body });
 }
@@ -235,6 +282,40 @@ function sendNotFound(opts: SendNotFoundOpts): void {
       error: { kind: "not_found", message: `no route ${method} ${pathname}` },
     } satisfies ApiErrorBody,
   });
+}
+
+/** Route context for /api/v1/permission-mode (web Shift+Tab 模式切换)。 */
+type PermissionModeRouteContext = {
+  method: string;
+  req: http.IncomingMessage;
+  res: http.ServerResponse;
+  permissionMode?: PermissionModeContext;
+};
+
+/**
+ * GET → 当前 mode；POST（空 body）→ cycle 语义走 SSOT nextShiftTabMode
+ * （与 TUI/REPL 同一映射）并写回共享 holder（hub 运行时即时生效）。
+ * holder 缺席 / 其它 method → 404。
+ */
+async function handlePermissionModeRoute(
+  ctx: PermissionModeRouteContext
+): Promise<void> {
+  const { method, req, res, permissionMode } = ctx;
+  if (permissionMode === undefined) {
+    return sendNotFound({ res, method, pathname: "/api/v1/permission-mode" });
+  }
+  if (method === "GET") {
+    const body: PermissionModeResponse = { mode: permissionMode.get() };
+    return sendJson({ res, status: 200, body });
+  }
+  if (method === "POST") {
+    await readJsonBody(req); // 消费 body（允许空）；切换无参数
+    const next = nextShiftTabMode(permissionMode.get());
+    permissionMode.set(next);
+    const body: PermissionModeResponse = { mode: next };
+    return sendJson({ res, status: 200, body });
+  }
+  return sendNotFound({ res, method, pathname: "/api/v1/permission-mode" });
 }
 
 /** Route context for /sessions/:id(...) dispatch (keeps param count ≤ 4). */

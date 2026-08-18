@@ -1,21 +1,28 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { ChatHeader } from "./components/ChatHeader";
 import { Composer } from "./components/Composer";
-import { ContextUsageStrip } from "./components/ContextUsageStrip";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { MessageList } from "./components/MessageList";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { StateBlock } from "./components/StateBlock";
 import { useSessionChat } from "./hooks/useSessionChat";
 import { useAsksPolling } from "./hooks/useAsksPolling";
+import { usePermissionMode } from "./hooks/usePermissionMode";
 import { useSubagentsPolling } from "./hooks/useSubagentsPolling";
 import { PermissionDialog } from "./components/PermissionDialog";
 import { SubagentStatusBar } from "./components/SubagentStatusBar";
+import { permissionModeLabel } from "./lib/permission-mode";
+import {
+  resolveArgCommand,
+  slashHelpText,
+  type SlashCommandName,
+} from "./lib/slash";
 import {
   loadThinkingSettings,
   saveThinkingSettings,
   toWireOverride,
+  type ThinkingEffort,
   type ThinkingSettings,
 } from "./lib/thinking-settings";
 
@@ -44,32 +51,29 @@ function ChatApp() {
   const [sidebarSignal, setSidebarSignal] = useState(0);
   const bumpSidebar = useCallback(() => setSidebarSignal((n) => n + 1), []);
 
-  // 压缩按钮反馈：working 时按钮显示「压缩中…」；完成后短暂显示结果提示。
+  // /compact 反馈：working 时防重复触发；结果经 notice 消息进消息流。
   const [compacting, setCompacting] = useState(false);
-  const [compactNotice, setCompactNotice] = useState<string | null>(null);
-  const compactNoticeTimer = useRef<number | null>(null);
 
   const handleCompact = useCallback(async () => {
     if (compacting) return;
     setCompacting(true);
-    setCompactNotice(null);
     try {
       const didCompact = await chat.compact();
-      setCompactNotice(didCompact ? "已压缩上下文" : "上下文未达压缩阈值");
+      // false 的两类成因分开提示：无会话（compact 早退）≠ 未达压缩阈值，
+      // 避免会话缺席时误导用户"上下文未达阈值"。
+      chat.pushNotice(
+        didCompact
+          ? "已压缩上下文"
+          : chat.session
+            ? "上下文未达压缩阈值"
+            : "当前无会话可压缩"
+      );
     } catch (e) {
-      setCompactNotice(
+      chat.pushNotice(
         `压缩失败：${e instanceof Error ? e.message : String(e)}`
       );
     } finally {
       setCompacting(false);
-      // 提示停留 3s 后自动消失。
-      if (compactNoticeTimer.current !== null) {
-        window.clearTimeout(compactNoticeTimer.current);
-      }
-      compactNoticeTimer.current = window.setTimeout(() => {
-        setCompactNotice(null);
-        compactNoticeTimer.current = null;
-      }, 3000);
     }
   }, [compacting, chat]);
 
@@ -78,6 +82,20 @@ function ChatApp() {
     (text: string) => chat.sendMessage(text, toWireOverride(thinkingSettings)),
     [chat, thinkingSettings]
   );
+
+  // permission mode（TUI Shift+Tab 的 web 镜像）：状态 + 初始读取在
+  // usePermissionMode；notice 反馈留在 App（走 chat.pushNotice）。
+  const perm = usePermissionMode();
+  const cyclePermMode = useCallback(async () => {
+    try {
+      const next = await perm.cycle();
+      chat.pushNotice(`权限模式：${permissionModeLabel(next)}`);
+    } catch (e) {
+      chat.pushNotice(
+        `模式切换失败：${e instanceof Error ? e.message : String(e)}`
+      );
+    }
+  }, [chat, perm]);
 
   // Permission polling is only active while a turn is in flight AND we have a
   // session id. When the dialog appears, it sits at the top of the message
@@ -128,6 +146,60 @@ function ChatApp() {
       bumpSidebar();
     },
     [chat, bumpSidebar]
+  );
+
+  // slash 命令路由（核心 5 子集；反馈统一走 notice 消息）。
+  // 带参命令（thinking/effort）的 arg 归一化 + 值域判定 + 用法文案由
+  // lib/slash resolveArgCommand / ARG_COMMAND_SPECS 数据驱动，本处只留
+  // 每条命令的生效动作。
+  /** 带参命令生效动作：thinking 开关 / effort 档位（值已过词表值域校验）。 */
+  const applyArgSetting = (cmd: "thinking" | "effort", value: string) => {
+    if (cmd === "thinking") {
+      handleThinkingChange({ ...thinkingSettings, enabled: value === "on" });
+      chat.pushNotice(value === "on" ? "已开启思考" : "已关闭思考");
+      return;
+    }
+    // effort 仅在 thinking 开启时生效（toWireOverride：!enabled → mode
+    // off），故一并置 enabled=true。值已过词表值域校验（ThinkingEffort 子集）。
+    handleThinkingChange({ enabled: true, effort: value as ThinkingEffort });
+    chat.pushNotice(`思考强度已设为 ${value}`);
+  };
+
+  const handleCommand = useCallback(
+    (name: SlashCommandName, arg?: string) => {
+      switch (name) {
+        case "compact":
+          // 对齐原压缩按钮语义：sending 中不触发，但不再静默。
+          if (chat.phase === "sending") {
+            chat.pushNotice("回复生成中，稍后再试");
+          } else {
+            void handleCompact();
+          }
+          break;
+        case "new":
+          void handleNewSession();
+          break;
+        case "help":
+          chat.pushNotice(slashHelpText());
+          break;
+        case "thinking":
+        case "effort": {
+          const res = resolveArgCommand(name, arg);
+          if (res.ok) applyArgSetting(name, res.value);
+          else chat.pushNotice(res.notice);
+          break;
+        }
+      }
+    },
+    // applyArgSetting 闭包捕获 chat / handleThinkingChange / thinkingSettings，
+    // 三者均已在依赖列中。
+    [
+      chat,
+      handleCompact,
+      handleNewSession,
+      handleThinkingChange,
+      thinkingSettings,
+    ]
   );
 
   const side = (
@@ -207,26 +279,18 @@ function ChatApp() {
             thinkingSettings={thinkingSettings}
             onThinkingChange={handleThinkingChange}
             onSend={handleSend}
-          />
-          {/* 上下文用量条：输入框下方（用户 2026-08-07 反馈：放输入框下方）。
-              右侧压缩按钮：手动触发 compactSession（后端幂等，低于阈值 no-op）。 */}
-          <ContextUsageStrip
+            onCommand={handleCommand}
+            onNotice={chat.pushNotice}
             usage={chat.lastAnswer?.lastUsage ?? null}
             contextWindow={chat.contextWindow}
-            sending={chat.phase === "sending"}
-            onCompact={handleCompact}
-            compacting={compacting}
-            compactDisabled={!chat.session}
+            model={chat.model}
+            permissionModeLabel={
+              perm.mode !== null ? permissionModeLabel(perm.mode) : null
+            }
+            onPermissionModeToggle={() => {
+              void cyclePermMode();
+            }}
           />
-          {compactNotice ? (
-            <p
-              role="status"
-              aria-live="polite"
-              className="mx-auto w-full max-w-[var(--chat-max)] px-4 pb-1 pt-0 text-center font-mono text-[10px] text-ink-3"
-            >
-              {compactNotice}
-            </p>
-          ) : null}
         </>
       }
     />

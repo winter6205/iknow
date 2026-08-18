@@ -52,6 +52,9 @@ import {
   toolPreviewRows,
   formatRanSuffix,
   countBashCalls,
+  isSubagentTool,
+  subagentDisplayMark,
+  SUBAGENT_TOOL_LABEL,
 } from "./tool-summary.js";
 import { clipOneLineVisual } from "./tool-summary.js";
 import { diffRowTexts } from "./diff-view.js";
@@ -66,6 +69,9 @@ import { formatThinkingFold } from "./think-fold.js";
 type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
 
 /** tool_use 摘要行：`[运行中]|[完成]|[失败] name · detail`。
+ *  子代理工具（spawn_subagent / subagent_result）走独立视觉
+ *  `${mark} 子代理 · ${detail}`，glyph（▣/✓/✗）已表状态，
+ *  不与普通工具共用 `[运行中]/[完成]/[失败] name` 形态。
  *  2026-08-14：不再拼 `，ran N command(s)` 后缀 —— 工具计数只由
  *  ThinkingSummary（有秒数时）统一汇总一次（`思考了 N 秒 · ran M …`），
  *  避免「思考折叠行 + 工具行」双处重复计数造成结束状态混乱观感。
@@ -82,6 +88,19 @@ function ToolSummaryRow(props: {
   );
   const hasResult = props.statusMap.has(props.tu.id);
   const failed = props.statusMap.get(props.tu.id) === true;
+  // 子代理工具专属形态：glyph + 子代理标签 + detail。
+  if (isSubagentTool(props.tu.name)) {
+    const mark = !hasResult
+      ? subagentDisplayMark("running")
+      : failed
+        ? subagentDisplayMark("failed")
+        : subagentDisplayMark("ok");
+    return (
+      <text fg={failed ? tuiPalette.error : tuiPalette.dim} wrapMode="none">
+        {mark} {SUBAGENT_TOOL_LABEL} · {detail}
+      </text>
+    );
+  }
   const mark = !hasResult ? "[运行中]" : failed ? "[失败]" : "[完成]";
   const fg = failed ? tuiPalette.error : tuiPalette.dim;
   return (

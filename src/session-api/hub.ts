@@ -15,7 +15,6 @@ import {
   compactMessages,
   runFullCompact,
   splitForCompaction,
-  type AnthropicContentBlock,
   type AnthropicNativeMessage,
   type HarnessStreamEvent,
   type LoopEngineDeps,
@@ -87,7 +86,12 @@ import type {
   VerifyAnswerView,
 } from "./contract.js";
 import { MAX_MESSAGE_CHARS } from "./contract.js";
-import { projectThinkingView, projectToolCalls } from "./turn-projection.js";
+import {
+  isTurnQuery,
+  messageText,
+  projectThinkingView,
+  projectToolCalls,
+} from "./turn-projection.js";
 import {
   withThinkingOverride,
   type ThinkingOverride,
@@ -232,17 +236,8 @@ const OUTCOME_TO_STATUS: Record<VerifyLoopOutcome, GoalStatus | undefined> = {
 } as const;
 
 // -- history projection (裁决#11: getSession turns) -----------------------------
-
-/** Extract joined text from text blocks of a native message. */
-function textOf(msg: AnthropicNativeMessage): string {
-  return msg.content
-    .filter(
-      (b): b is Extract<AnthropicContentBlock, { type: "text" }> =>
-        b.type === "text"
-    )
-    .map((b) => b.text)
-    .join(" ");
-}
+// 文本拼接 messageText 与 turn 边界判定 isTurnQuery 收敛在 turn-projection.ts
+//（store/checkpoint.ts 共用同一 SSOT）。
 
 /**
  * Project raw AnthropicNativeMessage[] → display-form TurnDto[] for wire.
@@ -250,7 +245,8 @@ function textOf(msg: AnthropicNativeMessage): string {
  * Projection is non-authoritative: stopReason/turnCount are lossy (裁决#11).
  *
  * T1: also projects thinking/toolCalls per turn (messages between this user
- * query and the next non-tool_result user message). Mask = SC20 boundary.
+ * query and the next real query message, per `isTurnQuery`). Mask = SC20
+ * boundary.
  */
 export function projectMessagesToTurns(
   messages: ReadonlyArray<AnthropicNativeMessage>
@@ -260,11 +256,11 @@ export function projectMessagesToTurns(
   let turnIndex = 0;
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i]!;
-    if (msg.role !== "user") continue;
-    // Skip tool_result user messages (they are continuation, not queries).
-    if (msg.content.some((b) => b.type === "tool_result")) continue;
-    const query = textOf(msg);
-    // Turn slice: from this query until the next non-tool_result user message.
+    // Skip tool_result continuations and subagent drain messages (neither is
+    // a real user query — drain is a host-injected result summary).
+    if (!isTurnQuery(msg)) continue;
+    const query = messageText(msg);
+    // Turn slice: from this query until the next real query message.
     const end = findTurnSliceEnd(messages, i);
     const turnMessages = messages.slice(i, end);
     const finalText = findFinalTextInSlice(turnMessages);
@@ -287,21 +283,17 @@ export function projectMessagesToTurns(
 
 /**
  * End index of the turn slice that starts at `messages[i]` (the query): the
- * index of the next non-tool_result user message, or `messages.length` when
- * the turn runs to the end of history. Pulled out to keep
- * `projectMessagesToTurns` ≤10 cyclomatic and the slice-bounds logic in one
- * place (M2 / ACR complexity anti-drift).
+ * index of the next real query message (per `isTurnQuery`), or
+ * `messages.length` when the turn runs to the end of history. Pulled out to
+ * keep `projectMessagesToTurns` ≤10 cyclomatic and the slice-bounds logic in
+ * one place (M2 / ACR complexity anti-drift).
  */
 function findTurnSliceEnd(
   messages: ReadonlyArray<AnthropicNativeMessage>,
   i: number
 ): number {
   for (let j = i + 1; j < messages.length; j++) {
-    const next = messages[j]!;
-    if (
-      next.role === "user" &&
-      !next.content.some((b) => b.type === "tool_result")
-    ) {
+    if (isTurnQuery(messages[j]!)) {
       return j;
     }
   }
@@ -319,7 +311,7 @@ function findFinalTextInSlice(
 ): string {
   for (const m of turnMessages) {
     if (m.role !== "assistant") continue;
-    const t = textOf(m);
+    const t = messageText(m);
     if (t) return t;
   }
   return "";

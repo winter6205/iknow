@@ -577,3 +577,55 @@ describe("hub-bridge envProvider / onEnvChange 透传（T4）", () => {
     }
   });
 });
+
+// -- listSubagents 投影（#358 T7）----------------------------------------------------
+
+describe("hub-bridge listSubagents 投影（#358 T7）", () => {
+  test("无 subagentManager → listSubagents 恒返回空数组", () => {
+    const bridge = createTuiBridge({
+      deps: makeDeps([]),
+      inflight: createInflightRegistry(),
+    });
+    // 多次调用稳定空 — 不依赖 hub 内部状态。
+    expect(bridge.listSubagents()).toEqual([]);
+    expect(bridge.listSubagents()).toEqual([]);
+  });
+
+  test("注入 fake manager → listSubagents 透传 manager.listSubagents() 投影", () => {
+    // 与 hub-bridge subagentManager 透传 describe 同款 fake 模式(hand-rolled
+    // SubAgentManager,字段齐 interface)。验证:bridge.listSubagents() ==
+    // manager.listSubagents() (byte-stable)。
+    const projection = [
+      {
+        taskId: "t-r",
+        state: "running" as const,
+        taskPreview: "查找",
+        startedAt: new Date().toISOString(),
+      },
+      {
+        taskId: "t-d",
+        state: "completed" as const,
+        taskPreview: "完成",
+        startedAt: new Date(Date.now() - 5000).toISOString(),
+        endedAt: new Date().toISOString(),
+        summary: "done",
+      },
+    ];
+    const fakeMgr: SubAgentManager = {
+      spawn: () => ({ taskId: "x" }),
+      queryBuffer: () => ({ status: "not_found" }),
+      waitFor: () => Promise.reject(new Error("not used")),
+      shutdown: () => Promise.resolve(),
+      abortTask: () => false,
+      listActive: () => [],
+      drainCompleted: () => [],
+      listSubagents: () => projection,
+    };
+    const bridge = createTuiBridge({
+      deps: makeDeps([]),
+      inflight: createInflightRegistry(),
+      subagentManager: fakeMgr,
+    });
+    expect(bridge.listSubagents()).toBe(projection);
+  });
+});

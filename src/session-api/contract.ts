@@ -161,6 +161,14 @@ export type HealthResponse = {
   /** 上下文窗口大小（token）。来源 env.compress.contextWindow（IKNOW_MODEL_CONTEXT_WINDOW），
    *  默认 200000。上下文用量显示的百分比分母。 */
   contextWindow: number;
+  /** 模型路由 ID（settings.llm.model）。未配置 → 字段缺席（byte-stable，
+   *  与 lastUsage 同模式）。web 输入框下方状态条显示用。 */
+  model?: string;
+};
+
+/** GET/POST /api/v1/permission-mode 响应（web Shift+Tab 模式切换）。 */
+export type PermissionModeResponse = {
+  mode: "default" | "plan" | "full_auto";
 };
 
 /**

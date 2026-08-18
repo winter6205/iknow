@@ -9,7 +9,7 @@
  * `RunResult.lastUsage`（TokenUsage wire 形状原样），不引入第二份 token
  * 账本、不写回 usage —— 迁移只换渲染组件，数据路径不变。
  *
- * 数值语义（与 web/src/components/ContextUsageStrip.tsx 镜像同值）：
+ * 数值语义（与 web/src/components/UsageChip.tsx 镜像同值）：
  * used = inputTokens + cacheReadInputTokens + cacheCreationInputTokens
  * （cache null → 0）；pct = round(used / contextWindow × 100)。
  *
@@ -41,12 +41,12 @@ export interface ContextBarProps {
   readonly effortLabel?: string;
 }
 
-/** 淡蓝安全档；与 Web ContextUsageStrip COLOR_SAFE 镜像同值。
+/** 淡蓝安全档；与 Web UsageChip COLOR_SAFE 镜像同值。
  *  导出供测试引用（保持与 Web 测试同模式）。 */
 export const CTX_BLUE = "#7ab8ff";
 
-// 数值语义 SSOT：下述纯函数与 web/src/components/ContextUsageStrip.tsx
-// 镜像保持逐字一致 —— 修改任一侧必须同步另一侧（公式 / 三档色阈值双改）。
+// 数值语义 SSOT：下述纯函数与 web/src/components/UsageChip.tsx
+// 镜像保持一致 —— 修改任一侧必须同步另一侧（公式 / 三档色阈值双改）。
 /** 容量条：█ 填充 + ░ 空余。 */
 export function valueBand(pct: number, width = 10): string {
   const clamped = Math.max(0, Math.min(100, pct));

@@ -14,10 +14,14 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import type { AnthropicNativeMessage } from "../../src/harness/index.ts";
+import { projectMessagesToTurns } from "../../src/session-api/hub.ts";
+import { SUBAGENT_DRAIN_PREFIX } from "../../src/harness/subagent/host-drain.ts";
 import {
   MAX_THINKING_TEXT_CHARS,
   MAX_TOOL_INPUT_PREVIEW_CHARS,
   MAX_TOOL_OUTPUT_PREVIEW_CHARS,
+  isTurnQuery,
+  messageText,
   projectThinkingView,
   projectToolCalls,
 } from "../../src/session-api/turn-projection.ts";
@@ -360,6 +364,140 @@ describe("boundary: block order across multiple assistant turns", () => {
     assert.deepEqual(
       toolCalls?.map((c) => c.id),
       ["t1", "t2"]
+    );
+  });
+});
+
+// -- boundary 9: subagent drain user messages ---------------------------
+// host-drain 把 completed 子代理结果浓缩成 `## Sub-agent <id> result: ...`
+// user message 拼入历史；显示投影既不得把它当 query 露出，也不得让它切断
+// 前一个 turn 的 slice。
+
+describe("boundary: subagent drain messages in projectMessagesToTurns", () => {
+  const drainText = "## Sub-agent task_1 result: sum\n\nresult body";
+  const drainMsg = assistant("user", [{ type: "text", text: drainText }]);
+
+  it("drain user message is not projected as a turn query", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [{ type: "text", text: "q1" }]),
+      assistant("assistant", [{ type: "text", text: "a1" }]),
+      drainMsg,
+      assistant("assistant", [{ type: "text", text: "ack" }]),
+      assistant("user", [{ type: "text", text: "q2" }]),
+      assistant("assistant", [{ type: "text", text: "a2" }]),
+    ];
+    const turns = projectMessagesToTurns(messages);
+    assert.deepEqual(
+      turns.map((t) => t.query),
+      ["q1", "q2"]
+    );
+    for (const t of turns) {
+      assert.ok(!t.query.startsWith(SUBAGENT_DRAIN_PREFIX.trim()));
+    }
+  });
+
+  it("drain message does not cut the preceding turn's slice", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [{ type: "text", text: "q1" }]),
+      assistant("assistant", [
+        { type: "tool_use", id: "t1", name: "noop", input: {} },
+      ]),
+      drainMsg,
+      assistant("user", [
+        {
+          type: "tool_result",
+          tool_use_id: "t1",
+          content: [{ type: "text", text: "ok" }],
+        },
+      ]),
+      assistant("assistant", [{ type: "text", text: "final" }]),
+      assistant("user", [{ type: "text", text: "q2" }]),
+      assistant("assistant", [{ type: "text", text: "a2" }]),
+    ];
+    const turns = projectMessagesToTurns(messages);
+    assert.equal(turns.length, 2);
+    assert.equal(turns[0]?.query, "q1");
+    // slice 未被 drain 切断：tool_result 仍落在 turn 1 内，配对成功。
+    assert.equal(turns[0]?.answer.toolCalls?.[0]?.outputPreview, "ok");
+    assert.equal(turns[0]?.answer.finalText, "final");
+    assert.equal(turns[1]?.query, "q2");
+    assert.equal(turns[1]?.answer.finalText, "a2");
+  });
+
+  it("history containing only drain messages projects to []", () => {
+    const messages: AnthropicNativeMessage[] = [
+      drainMsg,
+      assistant("assistant", [{ type: "text", text: "ack" }]),
+    ];
+    assert.deepEqual(projectMessagesToTurns(messages), []);
+  });
+});
+
+// -- shared turn-boundary helpers (hub.ts + store/checkpoint.ts SSOT) ----
+
+describe("messageText — 文本块拼接（共享 helper）", () => {
+  it("多个 text 块按空格连接", () => {
+    const msg = assistant("user", [
+      { type: "text", text: "a" },
+      { type: "text", text: "b" },
+    ]);
+    assert.equal(messageText(msg), "a b");
+  });
+
+  it("非 text 块被忽略；无 text 块 → 空串", () => {
+    const msg = assistant("user", [
+      {
+        type: "tool_result",
+        tool_use_id: "t1",
+        content: [{ type: "text", text: "inner" }],
+      },
+    ]);
+    assert.equal(messageText(msg), "");
+  });
+});
+
+describe("isTurnQuery — turn 边界判定（共享 helper）", () => {
+  it("普通 user 文本消息 → true", () => {
+    assert.equal(
+      isTurnQuery(assistant("user", [{ type: "text", text: "q" }])),
+      true
+    );
+  });
+
+  it("assistant 消息 → false", () => {
+    assert.equal(
+      isTurnQuery(assistant("assistant", [{ type: "text", text: "a" }])),
+      false
+    );
+  });
+
+  it("携带 tool_result 块的 user 消息 → false（续接非 query）", () => {
+    assert.equal(
+      isTurnQuery(
+        assistant("user", [
+          { type: "text", text: "q" },
+          {
+            type: "tool_result",
+            tool_use_id: "t1",
+            content: [{ type: "text", text: "ok" }],
+          },
+        ])
+      ),
+      false
+    );
+  });
+
+  it("subagent drain summary user 消息 → false（host 注入非 query）", () => {
+    assert.equal(
+      isTurnQuery(
+        assistant("user", [
+          {
+            type: "text",
+            text: `${SUBAGENT_DRAIN_PREFIX}task_1 result: sum\n\nbody`,
+          },
+        ])
+      ),
+      false
     );
   });
 });

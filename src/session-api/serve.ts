@@ -101,6 +101,13 @@ export async function startSessionServe(
   // cwd defaults to process.cwd() → the store picks its project namespace.
   const store = new SessionStore(dataDir);
 
+  // W2: serve 从 env IKNOW_PERMISSION_MODE 读初始 mode(可选)。holder 提为
+  // 局部变量,hub 与 http 层共用同一实例 —— web Shift+Tab 经
+  // POST /api/v1/permission-mode 运行时切换(与 TUI 同 SSOT nextShiftTabMode)。
+  const permissionModeCtx = createPermissionModeContext(
+    parsePermissionMode(process.env.IKNOW_PERMISSION_MODE) ?? "default"
+  );
+
   const hub = new SessionHub({
     store,
     defaultJsonMode: opts?.json_mode ?? false,
@@ -115,11 +122,7 @@ export async function startSessionServe(
     // 激活 BOOTSTRAP（surface="serve" → bootstrapActive=true），共享同一
     // ~/.iknow/state.json bootstrap_seeded 状态机；ask（oneshot 脚本）唯一例外。
     surface: "serve",
-    // W2: serve 从 env IKNOW_PERMISSION_MODE 读初始 mode(可选);不暴露
-    // 运行时切换(context 不被 set,等同于静态)。
-    permissionMode: createPermissionModeContext(
-      parsePermissionMode(process.env.IKNOW_PERMISSION_MODE) ?? "default"
-    ),
+    permissionMode: permissionModeCtx,
     ...opts?.hubOptions,
     // review-fix (M1 / H1): serve 入口已解析的 workspaceRoot 透传给 hub →
     // 走 build-engine 时 bash fence 对齐 identity seed / dataDir 锚点。
@@ -146,6 +149,9 @@ export async function startSessionServe(
     host,
     port: Number.isFinite(port) ? port : 8787,
     contextWindow: env.compress.contextWindow,
+    // 模型名（settings.llm.model SSOT）：HealthResponse 下发，web 状态条显示。
+    model: loadIknowSettings().llm?.model,
+    permissionMode: permissionModeCtx,
     // ADR-0020: serve accepts --trace-out and mounts the READ side too —
     // `/api/v1/traces*` + `/trace` SPA live on this same server/port.
     ...(opts?.traceOut !== undefined

@@ -27,8 +27,10 @@ import {
   listenSessionServer,
   resolveDefaultWebRoot,
   type ListeningServer,
+  type SessionHttpServerOptions,
 } from "../../src/session-api/http.ts";
 import { SessionStore } from "../../src/session-api/store/index.ts";
+import { createPermissionModeContext } from "../../src/harness/permission/modes.ts";
 import type { AssistantTurnResult } from "../../src/harness/index.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 import {
@@ -123,6 +125,27 @@ async function createSession(): Promise<string> {
     .conversation_id;
 }
 
+/** 以指定 listen 选项（model / permissionMode）重启服务器。 */
+async function restartWithOptions(
+  opts: Pick<SessionHttpServerOptions, "model" | "permissionMode">
+): Promise<void> {
+  await listening.close();
+  await rm(baseDir, { recursive: true, force: true });
+  baseDir = await mkdtemp(join(tmpdir(), "iknow-http-restart-"));
+  const store = new SessionStore(baseDir);
+  const hub = new SessionHub({
+    store,
+    deps: makeDeps([assistantResult({ texts: ["x"] })]),
+  });
+  listening = await listenSessionServer({
+    hub,
+    host: "127.0.0.1",
+    port: 0,
+    ...opts,
+  });
+  origin = `http://${listening.host}:${listening.port}`;
+}
+
 // -- endpoint 1: health -------------------------------------------------------
 
 describe("GET /api/v1/health", () => {
@@ -164,6 +187,65 @@ describe("GET /api/v1/health", () => {
     const { body } = await getJson("/api/v1/health");
     const b = body as { contextWindow: number };
     assert.equal(b.contextWindow, 128_000);
+  });
+
+  it("health 带 model 选项时透传模型名", async () => {
+    await restartWithOptions({ model: "some-model-route-id" });
+    const { body } = await getJson("/api/v1/health");
+    assert.equal((body as { model?: string }).model, "some-model-route-id");
+  });
+
+  it("health 无 model 选项时字段缺席（byte-stable）", async () => {
+    const { body } = await getJson("/api/v1/health");
+    assert.equal("model" in (body as Record<string, unknown>), false);
+  });
+});
+
+// -- endpoint: permission mode -------------------------------------------------
+
+describe("GET/POST /api/v1/permission-mode", () => {
+  it("holder 缺席 → GET/POST 均 404", async () => {
+    await restartWithOptions({});
+    const got = await getJson("/api/v1/permission-mode");
+    assert.equal(got.status, 404);
+    const posted = await postJson({
+      path: "/api/v1/permission-mode",
+      payload: {},
+    });
+    assert.equal(posted.status, 404);
+  });
+
+  it("GET 返回当前 mode；POST 循环 default → full_auto → default", async () => {
+    const ctx = createPermissionModeContext("default");
+    await restartWithOptions({ permissionMode: ctx });
+    const g1 = await getJson("/api/v1/permission-mode");
+    assert.equal(g1.status, 200);
+    assert.deepEqual(g1.body, { mode: "default" });
+
+    const p1 = await postJson({ path: "/api/v1/permission-mode", payload: {} });
+    assert.deepEqual(p1.body, { mode: "full_auto" });
+    assert.equal(ctx.get(), "full_auto"); // holder 与响应一致（运行时生效）
+
+    const p2 = await postJson({ path: "/api/v1/permission-mode", payload: {} });
+    assert.deepEqual(p2.body, { mode: "default" });
+    assert.equal(ctx.get(), "default");
+  });
+
+  it("POST 从 plan → full_auto（plan 不是循环目标，SSOT nextShiftTabMode）", async () => {
+    const ctx = createPermissionModeContext("plan");
+    await restartWithOptions({ permissionMode: ctx });
+    const p = await postJson({ path: "/api/v1/permission-mode", payload: {} });
+    assert.deepEqual(p.body, { mode: "full_auto" });
+  });
+
+  it("POST 空 body（无 Content-Type）也正常消费", async () => {
+    const ctx = createPermissionModeContext("default");
+    await restartWithOptions({ permissionMode: ctx });
+    const res = await fetch(`${origin}/api/v1/permission-mode`, {
+      method: "POST",
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { mode: "full_auto" });
   });
 });
 

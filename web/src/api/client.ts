@@ -4,6 +4,7 @@ import type {
   CreateSessionResponse,
   GetSessionResponse,
   HealthResponse,
+  PermissionModeResponse,
   PostMessageRequest,
   PostMessageResponse,
   ResetSessionResponse,
@@ -91,6 +92,31 @@ async function request<T>(
 
 export function health(signal?: AbortSignal): Promise<HealthResponse> {
   return request(`${API}/health`, {}, signal);
+}
+
+/**
+ * permission mode 端点（TUI Shift+Tab 的 web 镜像）。GET 读当前值；POST
+ * 走后端 SSOT 循环（nextShiftTabMode）切换并返回新值 —— 前端不复制
+ * 循环语义。holder 缺席的装配返回 404（调用方静默降级：徽标不渲染）。
+ */
+export function getPermissionMode(
+  signal?: AbortSignal
+): Promise<PermissionModeResponse["mode"]> {
+  return request<PermissionModeResponse>(
+    `${API}/permission-mode`,
+    {},
+    signal
+  ).then((res) => res.mode);
+}
+
+export function cyclePermissionMode(
+  signal?: AbortSignal
+): Promise<PermissionModeResponse["mode"]> {
+  return request<PermissionModeResponse>(
+    `${API}/permission-mode`,
+    { method: "POST" },
+    signal
+  ).then((res) => res.mode);
 }
 
 export function createSession(

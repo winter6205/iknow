@@ -490,8 +490,10 @@ function isValidMessage(m: unknown): boolean {
   const msg = m as Record<string, unknown>;
   // schema v4 (#383 B2): `system` role 进入白名单 —— Ctrl+C 打断作为
   // transcript 事件持久化（仅展示层，绝不喂 provider）。`system` 消息与
-  // turn 切片正交：splitTurns 按 `role === "user"` 且非 tool_result 切片，
-  // system 项自然落在相邻 turn 的间隙，不影响 rewind 锚点。
+  // turn 切片正交：splitTurns 按 turn-projection.ts `isTurnQuery` 规则切片
+  // （`role === "user"` 且无 tool_result 块且非 subagent drain summary，
+  // 与 checkpoint.ts / hub.ts 同一 SSOT），system 项自然落在相邻 turn 的
+  // 间隙，不影响 rewind 锚点。
   if (
     msg["role"] !== "user" &&
     msg["role"] !== "assistant" &&

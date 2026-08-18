@@ -141,7 +141,20 @@ import {
 // 外部 import 表面（tests/tui/*）稳定。
 import { renderBannerLines, VERSION } from "./banner.js";
 import { copyToClipboard, type CopyResult } from "./clipboard.js";
-import { summarizeToolCall } from "./tool-summary.js";
+import {
+  isSubagentTool,
+  SUBAGENT_TOOL_LABEL,
+  subagentDisplayMark,
+  summarizeToolCall,
+  formatLiveToolEvent,
+} from "./tool-summary.js";
+import {
+  SubagentPanel,
+  projectSubagentLines,
+  FAILED_VISIBLE_WINDOW_S,
+  DONE_FADE_WINDOW_S,
+} from "./subagent-panel.js";
+import type { SubagentInfo } from "../harness/subagent/manager.js";
 import { formatRunDuration } from "./run-stats.js";
 import { tuiPalette } from "./theme.js";
 import {
@@ -197,6 +210,7 @@ export function noticeRenderRows(
  *   - notice 本体 + 自身 marginBottom=1
  *   - modal 本体 + 自身 marginBottom=1
  *   - thinking-picker 面板 + 自身 marginBottom=1（pickerRows 同 modalRows 约定）
+ *   - 子代理状态面板（动态 0-4 行，panelRows；ContextBar 下方，见 subagent-panel.tsx）
  *   - 后台运行标记行（存在 running-bg 时）
  */
 export function chromeReserveRows(opts: {
@@ -208,6 +222,9 @@ export function chromeReserveRows(opts: {
   readonly inputRows?: number;
   readonly modalRows?: number;
   readonly pickerRows?: number;
+  /** 子代理状态面板行数（projectSubagentLines 实际产出，0-4）。缺省 0 →
+   *   不占行（组件渲染 null / 旧行为兼容）。 */
+  readonly panelRows?: number;
 }): number {
   const inputContentRows = Math.max(
     1,
@@ -215,6 +232,7 @@ export function chromeReserveRows(opts: {
   );
   const modalRows = opts.modalRows ?? 0;
   const pickerRows = opts.pickerRows ?? 0;
+  const panelRows = opts.panelRows ?? 0;
   const noticeTotal = opts.noticeRows > 0 ? opts.noticeRows + 1 : 0;
   const modalTotal = modalRows > 0 ? modalRows + 1 : 0;
   const pickerTotal = pickerRows > 0 ? pickerRows + 1 : 0;
@@ -229,6 +247,7 @@ export function chromeReserveRows(opts: {
     noticeTotal +
     modalTotal +
     pickerTotal +
+    panelRows +
     (opts.bgLine ? 1 : 0)
   );
 }
@@ -466,6 +485,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // 置 null = 结束（mode 行清空，统计移到消息流末尾 Crunched 行）。
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [runElapsed, setRunElapsed] = useState(0);
+  // #358 T7: 子代理只读投影 (host = bridge.listSubagents)。初始空数组 —
+  // 第一帧前不调用 bridge,watch 派生恒 false 不启表。
+  const [subagents, setSubagents] = useState<ReadonlyArray<SubagentInfo>>([]);
   // 最近一次完成 turn 的会话归属 + 快照秒数。runTurnOnce 入口清空（运行中
   // 不显示上次总结），finally 写入；ChatView 仅在 `crunchedOf === activeKey`
   // 时接收 crunchedSeconds，避免跨会话错配（跟旧 runStatsOf 同款所有权校验）。
@@ -627,12 +649,21 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           }));
           return;
         }
+        // #358 T7: legacy 路径（无 toolUseId 的字符串事件）统一走
+        // formatLiveToolEvent SSOT——spawn_subagent / subagent_result 借此命中
+        // 子代理专属 glyph 分支（▣/✓/✗ + 子代理标签）；detail 空时输出
+        // `${name} · ok`，替代旧实现 `name  [ok]` 的残缺模板（对齐
+        // tool-summary.ts:341 字节规则）。传 cols 让 detail 按视觉宽度收口。
         setLiveToolLines((prev) => ({
           ...prev,
           [event.conversationId]: [
             ...(prev[event.conversationId] ?? []),
-            summarizeToolCall(event.toolName, event.input, cols).detail +
-              ` [${event.kind}]`,
+            formatLiveToolEvent({
+              toolName: event.toolName,
+              input: event.input,
+              kind: event.kind,
+              cols,
+            }),
           ],
         }));
       }),
@@ -650,6 +681,35 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }, 1000);
     return () => clearInterval(tick);
   }, [active.runState, runStartedAt]);
+  // #358 T7: 子代理 watch 派生 — 轮询窗口 = running-fg OR 活跃子代理 OR
+  // 终态保留窗口内（failed 走 FAILED_VISIBLE_WINDOW_S×1000，completed 走
+  // DONE_FADE_WINDOW_S×1000 —— 均从 SubagentPanel 同源导入，避免双编码）。
+  // 终态窗口过后 subagents 数组仍可能保留该条但 Date.parse 距 now > 窗口 →
+  // hasRecentEndedSubagent=false → subagentWatch=false → effect cleanup 停表,
+  // 不浪费 1Hz 轮询。
+  const hasLiveSubagent = subagents.some(
+    (s) => s.state === "starting" || s.state === "running"
+  );
+  const hasRecentEndedSubagent = subagents.some((s) => {
+    if (s.endedAt === undefined) return false;
+    const ageMs = Date.now() - Date.parse(s.endedAt);
+    return s.state === "failed"
+      ? ageMs < FAILED_VISIBLE_WINDOW_S * 1000
+      : ageMs < DONE_FADE_WINDOW_S * 1000;
+  });
+  const subagentWatch = hasLiveSubagent || hasRecentEndedSubagent;
+  // 1Hz 子代理轮询:running-fg 或 watch=true → 拉 bridge.listSubagents()。
+  // 无 manager(ask surface)→ listSubagents 恒空数组,watch 恒 false,不启表;
+  // running-bg 时若仍有活跃 / 未过期终态子代理（watch=true）也启表——
+  // chat 视图下面板需要最新 subagents 投影（runElapsed/ageSec 每秒跳变），
+  // list/mcp 视图下面板不渲染但轮询开销 1Hz 且仅 watch=true 时承担。
+  useEffect(() => {
+    if (active.runState !== "running-fg" && !subagentWatch) return;
+    const tick = setInterval(() => {
+      setSubagents(props.bridge.listSubagents());
+    }, 1000);
+    return () => clearInterval(tick);
+  }, [active.runState, subagentWatch, props.bridge]);
   // #337 Phase C：skillCatalog 可选（缺省 = 空清单）；available() = 非 disabled
   // + 有 description、名字序。slash 候选混显「静态命令 + skill」。
   const skillCatalog = props.skillCatalog ?? emptySkillCatalog;
@@ -673,6 +733,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const activeToolName = active.conversationId
     ? activeToolNameOf(liveToolRuns[active.conversationId] ?? [])
     : undefined;
+  // #358 T7: 子代理工具对称 —— activeToolName 若是子代理工具（spawn_subagent /
+  // subagent_result，activeToolNameOf 派生）→ ContextBar 尾缀显示
+  // `▣ 子代理`（subagentDisplayMark/SUBAGENT_TOOL_LABEL 与 tool-summary 同源，
+  // 与 live-tool-preview 子代理形态一致）。
+  const activeToolLabel =
+    activeToolName !== undefined && isSubagentTool(activeToolName)
+      ? `${subagentDisplayMark("running")} ${SUBAGENT_TOOL_LABEL}`
+      : activeToolName;
 
   // ── 权限 modal 应答落点 ──────────────────────────────────────────
   function resolvePermissionAsk(
@@ -1630,6 +1698,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // 「输入多少都是一行」：长文本无 `\n` 时按 cols 折行计视觉行数）。封顶由
   // chromeReserveRows 内部做（SSOT 防误传）；超出部分 textarea 内部滚动。
   const inputContentRows = inputWrapLineCount(inputValue, cols);
+  // #358 T7: 子代理面板行数投影（ContextBar 下方，最多 4 行）——计入底部
+  // chrome 行账，矮终端视口不裁切。非 chat 视图面板不渲染 → 0。
+  const subagentPanelRows =
+    view === "chat"
+      ? projectSubagentLines(subagents, Date.now(), cols).length
+      : 0;
   const viewportRows = Math.max(
     5,
     rows -
@@ -1640,6 +1714,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         inputRows: inputContentRows,
         modalRows: modalRowsForBudget,
         pickerRows: pickerRowsForBudget,
+        panelRows: subagentPanelRows,
       })
   );
   // 列表视图（ListView 路径）：底部仅 notice 占用，与 headroom 2 行。
@@ -1843,7 +1918,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             contextWindow={props.bridge.contextWindow}
             running={active.runState === "running-fg"}
             cols={cols}
-            activeToolName={activeToolName}
+            activeToolName={activeToolLabel}
             model={modelName}
             effortLabel={
               thinkingEnabled ? formatEffortLabel(thinkingEffort) : "off"
@@ -1851,6 +1926,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           />
         </box>
       )}
+      {/* #358 T7: 子代理状态面板（ContextBar 下方）。条件渲染 —
+          无可见子代理行时返回 null（行数 0 → chromeReserveRows.panelRows=0）；
+          非 null 时行数已计入 chromeReserveRows.panelRows（上面 subagentPanelRows
+          派生），矮终端视口不裁切。 */}
+      {view === "chat" && <SubagentPanel subagents={subagents} cols={cols} />}
       {bgSession !== undefined && (
         <box>
           <text fg={pal.dim}>{bgStatusLine(bgSession.messages)}</text>

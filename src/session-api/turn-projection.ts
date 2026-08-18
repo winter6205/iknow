@@ -14,7 +14,41 @@ import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
 } from "../harness/index.js";
+import { isSubagentDrainText } from "../harness/subagent/host-drain.js";
 import type { ThinkingView, ToolCallView } from "./contract.js";
+
+/**
+ * Joined text of a message's text blocks (" "-separated; "" when none).
+ * Single shared implementation — previously duplicated verbatim as hub.ts
+ * `textOf` and store/checkpoint.ts `joinedText`; keep every consumer on this
+ * one helper (修改此处即双侧生效，禁止再复制第二份).
+ */
+export function messageText(msg: AnthropicNativeMessage): string {
+  return msg.content
+    .filter(
+      (b): b is Extract<AnthropicContentBlock, { type: "text" }> =>
+        b.type === "text"
+    )
+    .map((b) => b.text)
+    .join(" ");
+}
+
+/**
+ * Turn-boundary rule SSOT (hub.ts projectMessagesToTurns 与
+ * store/checkpoint.ts splitTurns 共用；原 hub `isQueryMessage` / checkpoint
+ * `isQuery` 三条件收敛于此): a turn starts at a user message that carries NO
+ * tool_result block and is NOT a subagent drain summary; user messages with
+ * only tool_result blocks are continuation, not queries. Drain messages are
+ * host-injected result summaries — they neither surface as a turn nor bound
+ * the preceding turn's slice.
+ */
+export function isTurnQuery(msg: AnthropicNativeMessage): boolean {
+  return (
+    msg.role === "user" &&
+    !msg.content.some((b) => b.type === "tool_result") &&
+    !isSubagentDrainText(messageText(msg))
+  );
+}
 
 /** Max thinking text chars per entry (after mask, before truncation). */
 export const MAX_THINKING_TEXT_CHARS = 2000;
