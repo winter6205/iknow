@@ -49,17 +49,24 @@ import {
   currentSecretValues,
 } from "../harness/sandbox/index.js";
 import { loadIknowEnv, type IknowEnv, type LlmEnv } from "../config/env.js";
-import { ValidationError } from "../shared/errors.js";
+import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import { MaxTurnsExceeded } from "../harness/errors.js";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { resolveSessionTodoDir } from "../harness/aci/tools/todo-write.js";
+import type { AciCatalog } from "../harness/aci/types.js";
+import type { SkillCatalog } from "../harness/skill/catalog.js";
+import { createSkillBody } from "../harness/skill/body.js";
+import type { McpManager } from "../harness/mcp/manager.js";
+import { loadMcpConfig } from "../harness/mcp/config.js";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
 import {
   appendCheckpoint,
+  rewindFile,
   CURRENT_SCHEMA_VERSION,
   extractGoal,
   extractSummary,
@@ -77,9 +84,13 @@ import type {
   CreateSessionRequest,
   CreateSessionResponse,
   GetSessionResponse,
+  McpServerStatusDto,
+  McpToolDto,
   PostMessageResponse,
   ResetSessionResponse,
+  RewindSessionResponse,
   SessionSummary,
+  SkillSummaryDto,
   TurnDto,
   VerifyAnswerView,
 } from "./contract.js";
@@ -438,6 +449,12 @@ export class SessionHub {
   private readonly verifyConfig: VerifyConfig | undefined;
   /** #356 High#4: built.shutdown 缓存（组合句柄；ensureDeps 懒取，hub.shutdown 触发）。 */
   private cachedShutdown: (() => Promise<void>) | undefined;
+  /** TUI TuiExtensions 同源：lazy ensureDeps 后才有；deps 注入测试路径保持缺席。 */
+  private skillCatalog: SkillCatalog | undefined;
+  private mcpManager: McpManager | undefined;
+  private aciCatalog: AciCatalog | undefined;
+  private mcpHome: string | undefined;
+  private mcpCwd: string | undefined;
   /**
    * settings-hot-reload（T3）:env 源（缺省 → ensureDeps 内部 loadIknowEnv）。
    * reloadFromEnv 用它拿新 env 重建 adapter；onEnvChange 在成功替换后触发。
@@ -1062,6 +1079,92 @@ export class SessionHub {
   }
 
   /**
+   * 回退会话到 keepTurns（TUI hub-bridge.rewindSession 的 HTTP 同源落点）。
+   * 走 serialize 队列，与 compact/postMessage 同互斥。
+   */
+  async rewindSession(
+    conversationId: string,
+    keepTurns: number
+  ): Promise<RewindSessionResponse> {
+    return this.serialize({
+      conversationId,
+      work: async () => {
+        const session = await this.store.load(conversationId);
+        const rewound = rewindFile(session, keepTurns);
+        const updated: SessionFileV1 = {
+          ...rewound,
+          updatedAt: new Date().toISOString(),
+          schemaVersion: CURRENT_SCHEMA_VERSION,
+        };
+        await this.store.save({ id: conversationId, file: updated });
+        return {
+          session: this.summarize({ file: updated }),
+          turns: projectMessagesToTurns(updated.messages),
+          keepTurns: updated.turnCount,
+        };
+      },
+    });
+  }
+
+  /** GET /api/v1/skills — catalog 缺席（测试注入 deps）→ 空清单。 */
+  async listSkills(): Promise<readonly SkillSummaryDto[]> {
+    await this.ensureDeps();
+    return (
+      this.skillCatalog?.available().map((entry) => ({
+        name: entry.name,
+        description: entry.description ?? "",
+      })) ?? []
+    );
+  }
+
+  async loadSkillBody(name: string): Promise<{ name: string; body: string }> {
+    await this.ensureDeps();
+    const entry = this.skillCatalog?.get(name);
+    if (entry === undefined || entry.disabled) {
+      throw new NotFoundError(`skill not found: ${name}`);
+    }
+    const body = await createSkillBody({ entry, dir: entry.dir });
+    return { name: entry.name, body };
+  }
+
+  async listMcpServers(): Promise<readonly McpServerStatusDto[]> {
+    await this.ensureDeps();
+    return (this.mcpManager?.status() ?? []).map((s) => ({
+      name: s.name,
+      state: s.state,
+      source: s.source,
+      ...(s.error !== undefined ? { error: s.error } : {}),
+    }));
+  }
+
+  async reloadMcp(): Promise<readonly McpServerStatusDto[]> {
+    await this.ensureDeps();
+    if (this.mcpManager) {
+      const home = this.mcpHome ?? homedir();
+      const cwd = this.mcpCwd ?? process.cwd();
+      const cfg = await loadMcpConfig({ home, cwd });
+      await this.mcpManager.reload(cfg.servers);
+    }
+    return this.listMcpServers();
+  }
+
+  async listMcpTools(): Promise<readonly McpToolDto[]> {
+    await this.ensureDeps();
+    if (!this.aciCatalog) return [];
+    const out: McpToolDto[] = [];
+    for (const def of this.aciCatalog.all()) {
+      if (!def.name.startsWith("mcp__")) continue;
+      out.push({
+        server: mcpServerOfToolName(def.name),
+        name: def.name,
+        description: def.description,
+      });
+    }
+    out.sort((a, b) => a.server.localeCompare(b.server));
+    return out;
+  }
+
+  /**
    * T6: write a violation kill event to the JSONL trace (serve entry).
    * Best-effort — a trace write failure must not break the served turn; any
    * error is swallowed (mirrors JsonlTraceService warn-once semantics).
@@ -1326,6 +1429,11 @@ export class SessionHub {
         : {}),
     });
     this.cachedDeps = built.deps;
+    this.skillCatalog = built.skillCatalog;
+    this.mcpManager = built.mcpManager;
+    this.aciCatalog = built.catalog;
+    this.mcpHome = homedir();
+    this.mcpCwd = process.cwd();
     // #356 T7: serve 懒取 subagent manager — buildHarnessEngine 在 surface !==
     // "ask" 时自建;constructor 注入优先 (测试缝),未注入则取 built 的。
     this.subagentManager = this.subagentManager ?? built.subagentManager;
@@ -1411,4 +1519,11 @@ export class SessionHub {
       },
     };
   }
+}
+
+function mcpServerOfToolName(name: string): string {
+  const body = name.startsWith("mcp__") ? name.slice("mcp__".length) : name;
+  const sep = body.indexOf("__");
+  if (sep === -1) return name;
+  return body.slice(0, sep);
 }

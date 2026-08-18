@@ -1,16 +1,9 @@
-/**
- * web/src/components/SlashCommandMenu.tsx
- *
- * Composer 输入框上方的 slash 命令补全菜单。纯展示：候选列表 + 选中高亮；
- * 键盘导航（↑↓/Enter/Tab/Esc）在 Composer 侧裁决，鼠标点选经 onPick 采纳。
- */
-import type { SlashCommand, SlashCommandName } from "../lib/slash";
+import type { SlashCandidate } from "../lib/slash";
 
 export type SlashCommandMenuProps = {
-  readonly candidates: ReadonlyArray<SlashCommand>;
+  readonly candidates: ReadonlyArray<SlashCandidate>;
   readonly selectedIndex: number;
-  /** 采纳候选（等价于 Enter/Tab 选中项）。 */
-  readonly onPick: (name: SlashCommandName) => void;
+  readonly onPick: (name: string) => void;
 };
 
 export function SlashCommandMenu({
@@ -19,10 +12,7 @@ export function SlashCommandMenu({
   onPick,
 }: SlashCommandMenuProps) {
   if (candidates.length === 0) return null;
-  const selected = Math.max(
-    0,
-    Math.min(selectedIndex, candidates.length - 1)
-  );
+  const selected = Math.max(0, Math.min(selectedIndex, candidates.length - 1));
   return (
     <ul
       role="listbox"
@@ -30,11 +20,14 @@ export function SlashCommandMenu({
       className="mb-1 flex flex-col gap-0.5 rounded-panel border border-ink-3/30 bg-surface p-1 shadow-bubble"
     >
       {candidates.map((c, i) => (
-        <li key={c.name} role="option" aria-selected={i === selected}>
+        <li
+          key={`${c.kind}:${c.name}`}
+          role="option"
+          aria-selected={i === selected}
+        >
           <button
             type="button"
             tabIndex={-1}
-            // mousedown（非 click）+ preventDefault：点选不抢 textarea 焦点。
             onMouseDown={(e) => {
               e.preventDefault();
               onPick(c.name);

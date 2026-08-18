@@ -558,6 +558,82 @@ describe("POST /api/v1/sessions/:id/reset", () => {
   });
 });
 
+// -- host 扩展面：skills / mcp / rewind（WebUI 映射 TUI TuiExtensions） ----
+
+describe("GET /api/v1/skills + /mcp（deps 注入路径：空清单非 500）", () => {
+  it("skills 空数组（测试注入 deps 无 catalog）", async () => {
+    const { status, body } = await getJson("/api/v1/skills");
+    assert.equal(status, 200);
+    assert.deepEqual(body, { skills: [] });
+  });
+
+  it("未知 skill → 404", async () => {
+    const { status, body } = await getJson("/api/v1/skills/no-such-skill");
+    assert.equal(status, 404);
+    assertNestedError({ body, kind: "not_found" });
+  });
+
+  it("mcp 空清单", async () => {
+    const { status, body } = await getJson("/api/v1/mcp");
+    assert.equal(status, 200);
+    assert.deepEqual(body, { servers: [] });
+  });
+
+  it("mcp tools 空清单", async () => {
+    const { status, body } = await getJson("/api/v1/mcp/tools");
+    assert.equal(status, 200);
+    assert.deepEqual(body, { tools: [] });
+  });
+});
+
+describe("POST /api/v1/sessions/:id/rewind", () => {
+  it("keepTurns 缺席 / 非整数 → 400", async () => {
+    const id = await createSession();
+    const missing = await postJson({
+      path: `/api/v1/sessions/${id}/rewind`,
+      payload: {},
+    });
+    assert.equal(missing.status, 400);
+    assertNestedError({ body: missing.body, kind: "validation" });
+    const neg = await postJson({
+      path: `/api/v1/sessions/${id}/rewind`,
+      payload: { keepTurns: -1 },
+    });
+    assert.equal(neg.status, 400);
+    assertNestedError({ body: neg.body, kind: "validation" });
+  });
+
+  it("missing session → 404", async () => {
+    const { status, body } = await postJson({
+      path: "/api/v1/sessions/does-not-exist/rewind",
+      payload: { keepTurns: 0 },
+    });
+    assert.equal(status, 404);
+    assertNestedError({ body, kind: "not_found" });
+  });
+
+  it("keepTurns=0 截空会话", async () => {
+    const id = await createSession();
+    await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: { text: "msg" },
+    });
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/rewind`,
+      payload: { keepTurns: 0 },
+    });
+    assert.equal(status, 200);
+    const b = body as {
+      session: { turn_count: number };
+      turns: unknown[];
+      keepTurns: number;
+    };
+    assert.equal(b.keepTurns, 0);
+    assert.equal(b.session.turn_count, 0);
+    assert.deepEqual(b.turns, []);
+  });
+});
+
 // -- endpoint 6b: POST /api/v1/sessions/:id/compact --------------------------
 
 describe("POST /api/v1/sessions/:id/compact", () => {

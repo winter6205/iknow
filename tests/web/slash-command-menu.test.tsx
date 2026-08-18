@@ -9,9 +9,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { SlashCommandMenu } from "../../web/src/components/SlashCommandMenu.tsx";
-import { SLASH_COMMANDS } from "../../web/src/lib/slash.ts";
+import { SLASH_COMMANDS, slashCandidates } from "../../web/src/lib/slash.ts";
+import type { SlashCandidate } from "../../web/src/lib/slash.ts";
 
-function render(selectedIndex: number, candidates = SLASH_COMMANDS): string {
+function render(
+  selectedIndex: number,
+  candidates: ReadonlyArray<SlashCandidate> = slashCandidates("/")
+): string {
   return renderToStaticMarkup(
     <SlashCommandMenu
       candidates={candidates}
@@ -36,7 +40,7 @@ describe("SlashCommandMenu — 候选渲染", () => {
   });
 
   it("选中项 aria-selected=true，其余 false", () => {
-    const html = render(1, SLASH_COMMANDS.slice(0, 3));
+    const html = render(1, slashCandidates("/").slice(0, 3));
     assert.equal(
       (html.match(/aria-selected="true"/g) ?? []).length,
       1,
@@ -46,7 +50,7 @@ describe("SlashCommandMenu — 候选渲染", () => {
     // 选中高亮 class 落在第二项（bg-accent-soft 完整形式仅出现于选中项）。
     const secondIdx = html.indexOf("/new");
     const before = html.slice(0, secondIdx);
-    assert.ok(before.includes("bg-accent-soft\""));
+    assert.ok(before.includes('bg-accent-soft"'));
   });
 
   it("selectedIndex 越界 → 钳制到边界（不崩溃）", () => {

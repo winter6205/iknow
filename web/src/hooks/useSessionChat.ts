@@ -45,14 +45,14 @@ export type SessionChatState = {
 
 export type SessionChatApi = SessionChatState & {
   /** `thinking` (T5) 为该回合的可选覆盖；未提供时后端走缓存配置。 */
-  sendMessage: (text: string, thinking?: ThinkingOverride) => Promise<void>;
+  sendMessage: (
+    text: string,
+    thinking?: ThinkingOverride,
+    displayText?: string
+  ) => Promise<void>;
   reset: () => Promise<void>;
-  /**
-   * 手动压缩会话。返回 true 表示实际发生裁剪（消息变少），false 表示已低于
-   * 阈值无需压缩。失败抛错（调用方提示）；成功路径保留 phase=ready（无 loading
-   * 闪烁），刷新 messages/lastAnswer 为压缩后投影。
-   */
   compact: () => Promise<boolean>;
+  rewind: (keepTurns: number) => Promise<void>;
   newSession: () => Promise<void>;
   /** Switch to an existing conversation by id (sidebar selection). */
   setConversation: (id: string) => Promise<void>;
@@ -286,7 +286,7 @@ export function useSessionChat(): SessionChatApi {
   }, [bootstrap]);
 
   const sendMessage = useCallback(
-    async (text: string, thinking?: ThinkingOverride) => {
+    async (text: string, thinking?: ThinkingOverride, displayText?: string) => {
       const gen = bootGen.current;
       const id = sessionIdRef.current;
       const trimmed = text.trim();
@@ -295,7 +295,7 @@ export function useSessionChat(): SessionChatApi {
       const userMsg: ChatUiMessage = {
         id: `u-local-${Date.now()}-${queryIdSlice(trimmed)}`,
         role: "user",
-        text: trimmed,
+        text: displayText ?? trimmed,
       };
       setState((prev) => ({
         ...prev,
@@ -379,6 +379,23 @@ export function useSessionChat(): SessionChatApi {
       throw e instanceof Error ? e : new Error(errMessage(e));
     }
   }, [applySession]);
+
+  const rewind = useCallback(
+    async (keepTurns: number): Promise<void> => {
+      const gen = bootGen.current;
+      const id = sessionIdRef.current;
+      if (!id) return;
+      try {
+        const res = await api.rewindSession(id, keepTurns);
+        if (gen !== bootGen.current) return;
+        applySession(res.session, res.turns);
+      } catch (e) {
+        if (gen !== bootGen.current) return;
+        throw e instanceof Error ? e : new Error(errMessage(e));
+      }
+    },
+    [applySession]
+  );
 
   const newSession = useCallback(async () => {
     // Bump gen so in-flight sendMessage / reset cannot clobber.
@@ -464,6 +481,7 @@ export function useSessionChat(): SessionChatApi {
     sendMessage,
     reset,
     compact,
+    rewind,
     newSession,
     setConversation,
     retryBootstrap,

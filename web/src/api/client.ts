@@ -4,12 +4,17 @@ import type {
   CreateSessionResponse,
   GetSessionResponse,
   HealthResponse,
+  McpStatusResponse,
+  McpToolsResponse,
   PermissionModeResponse,
   PostMessageRequest,
   PostMessageResponse,
   ResetSessionResponse,
+  RewindSessionResponse,
   SessionListItem,
   SessionsResponse,
+  SkillBodyResponse,
+  SkillsResponse,
   SubagentsResponse,
   TraceFieldDef,
   TraceQueryParams,
@@ -213,6 +218,48 @@ export function compactSession(
     },
     signal
   );
+}
+
+export function rewindSession(
+  id: string,
+  keepTurns: number,
+  signal?: AbortSignal
+): Promise<RewindSessionResponse> {
+  return request(
+    `${API}/sessions/${encodeURIComponent(id)}/rewind`,
+    {
+      method: "POST",
+      body: JSON.stringify({ keepTurns }),
+    },
+    signal
+  );
+}
+
+export function listSkills(signal?: AbortSignal): Promise<SkillsResponse> {
+  return request(`${API}/skills`, {}, signal);
+}
+
+export function getSkillBody(
+  name: string,
+  signal?: AbortSignal
+): Promise<SkillBodyResponse> {
+  return request(`${API}/skills/${encodeURIComponent(name)}`, {}, signal);
+}
+
+export function listMcp(signal?: AbortSignal): Promise<McpStatusResponse> {
+  return request(`${API}/mcp`, {}, signal);
+}
+
+export function reloadMcp(signal?: AbortSignal): Promise<McpStatusResponse> {
+  return request(
+    `${API}/mcp/reload`,
+    { method: "POST", body: JSON.stringify({}) },
+    signal
+  );
+}
+
+export function listMcpTools(signal?: AbortSignal): Promise<McpToolsResponse> {
+  return request(`${API}/mcp/tools`, {}, signal);
 }
 
 export interface PendingAsk {

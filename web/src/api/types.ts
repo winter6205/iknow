@@ -114,6 +114,47 @@ export type CompactSessionResponse = {
   afterCount: number;
 };
 
+export type RewindSessionResponse = {
+  session: SessionSummary;
+  turns: TurnDto[];
+  keepTurns: number;
+};
+
+export type SkillSummary = {
+  readonly name: string;
+  readonly description: string;
+};
+
+export type SkillsResponse = {
+  readonly skills: readonly SkillSummary[];
+};
+
+export type SkillBodyResponse = {
+  readonly name: string;
+  readonly body: string;
+};
+
+export type McpServerStatus = {
+  readonly name: string;
+  readonly state: string;
+  readonly source: string;
+  readonly error?: string;
+};
+
+export type McpStatusResponse = {
+  readonly servers: readonly McpServerStatus[];
+};
+
+export type McpTool = {
+  readonly server: string;
+  readonly name: string;
+  readonly description: string;
+};
+
+export type McpToolsResponse = {
+  readonly tools: readonly McpTool[];
+};
+
 export type HealthResponse = {
   ok: true;
   service: string;

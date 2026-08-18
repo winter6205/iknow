@@ -10,10 +10,12 @@ import {
 } from "react";
 import { FOCUS_RING } from "../lib/ui";
 import {
+  commandTakesArg,
   menuKeyEvent,
   slashCandidates,
   slashSubmitDecision,
   type MenuKeyEvent,
+  type SkillEntryLike,
   type SlashCommandName,
 } from "../lib/slash";
 import { SlashCommandMenu } from "./SlashCommandMenu";
@@ -31,6 +33,8 @@ export type ComposerProps = {
   onSend: (text: string) => void | Promise<void>;
   /** slash 命令执行入口；"/" 开头的输入永不走 onSend。 */
   onCommand?: (name: SlashCommandName, arg?: string) => void;
+  onSkillLoad?: (name: string, remainder: string) => void;
+  skills?: ReadonlyArray<SkillEntryLike>;
   /** 非法 slash 输入提示通道（App 接 chat.pushNotice）；缺席 → 静默兜底。 */
   onNotice?: (text: string) => void;
   placeholder?: string;
@@ -56,6 +60,8 @@ export function Composer({
   sending = false,
   onSend,
   onCommand = () => {},
+  onSkillLoad = () => {},
+  skills = [],
   onNotice = () => {},
   placeholder = "输入问题…",
   thinkingSettings = DEFAULT_THINKING_SETTINGS,
@@ -75,7 +81,10 @@ export function Composer({
   // 置位，直到输入再次变化才重新打开。
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [menuDismissed, setMenuDismissed] = useState(false);
-  const candidates = useMemo(() => slashCandidates(value), [value]);
+  const candidates = useMemo(
+    () => slashCandidates(value, skills),
+    [value, skills]
+  );
   const menuOpen = !locked && !menuDismissed && candidates.length > 0;
   const selected = menuOpen
     ? Math.max(0, Math.min(selectedIndex, candidates.length - 1))
@@ -96,8 +105,8 @@ export function Composer({
   };
 
   /** 采纳候选：带参命令补全形带尾随空格，等待参数输入。 */
-  const acceptCandidate = useCallback((name: SlashCommandName) => {
-    const takesArg = name === "thinking" || name === "effort";
+  const acceptCandidate = useCallback((name: string) => {
+    const takesArg = commandTakesArg(name);
     setValue(takesArg ? `/${name} ` : `/${name}`);
     setSelectedIndex(0);
     setMenuDismissed(false);
@@ -112,12 +121,25 @@ export function Composer({
     [onCommand]
   );
 
+  const executeSkill = useCallback(
+    (name: string, remainder: string) => {
+      onSkillLoad(name, remainder);
+      setValue("");
+      setMenuDismissed(false);
+    },
+    [onSkillLoad]
+  );
+
   const submit = useCallback(async () => {
     const text = value.trim();
     if (!text || locked) return;
-    const decision = slashSubmitDecision(text);
+    const decision = slashSubmitDecision(text, skills);
     if (decision.kind === "execute") {
       executeCommand(decision.name, decision.arg);
+      return;
+    }
+    if (decision.kind === "skill") {
+      executeSkill(decision.name, decision.remainder);
       return;
     }
     if (decision.kind === "notice") {
@@ -131,7 +153,7 @@ export function Composer({
     } catch {
       // Keep draft text so the user can retry after a failed send.
     }
-  }, [value, locked, onSend, onNotice, executeCommand]);
+  }, [value, locked, onSend, onNotice, executeCommand, executeSkill, skills]);
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -149,6 +171,8 @@ export function Composer({
     } else if (ev.kind === "enter") {
       if (ev.action.kind === "execute") {
         executeCommand(ev.action.name, ev.action.arg);
+      } else if (ev.action.kind === "skill") {
+        executeSkill(ev.action.name, ev.action.remainder);
       } else if (ev.action.kind === "accept") {
         setValue(ev.action.text);
         setSelectedIndex(0);
@@ -174,7 +198,7 @@ export function Composer({
     }
     if (menuOpen && !e.nativeEvent.isComposing) {
       const ev = menuKeyEvent(
-        { value, selectedIndex: selected, candidates },
+        { value, selectedIndex: selected, candidates, skills },
         e.key,
         e.shiftKey
       );

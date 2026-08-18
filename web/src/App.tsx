@@ -18,6 +18,13 @@ import {
   slashHelpText,
   type SlashCommandName,
 } from "./lib/slash";
+import { formatSessionInfo } from "./lib/session-info";
+import { buildRewindTargetsFromTurns } from "./lib/rewind-targets";
+import type { WebRewindTarget } from "./lib/rewind-targets";
+import * as api from "./api/client";
+import type { McpServerStatus, McpTool, SkillSummary } from "./api/types";
+import { McpPanel } from "./components/McpPanel";
+import { RewindPicker } from "./components/RewindPicker";
 import {
   loadThinkingSettings,
   saveThinkingSettings,
@@ -53,6 +60,22 @@ function ChatApp() {
 
   // /compact 反馈：working 时防重复触发；结果经 notice 消息进消息流。
   const [compacting, setCompacting] = useState(false);
+  const [skills, setSkills] = useState<readonly SkillSummary[]>([]);
+  const [mcpOpen, setMcpOpen] = useState(false);
+  const [mcpServers, setMcpServers] = useState<readonly McpServerStatus[]>([]);
+  const [mcpTools, setMcpTools] = useState<readonly McpTool[]>([]);
+  const [mcpReloading, setMcpReloading] = useState(false);
+  const [rewindTargets, setRewindTargets] = useState<
+    ReadonlyArray<WebRewindTarget> | undefined
+  >(undefined);
+  const [rewindIndex, setRewindIndex] = useState(0);
+
+  useEffect(() => {
+    void api
+      .listSkills()
+      .then((res) => setSkills(res.skills))
+      .catch(() => setSkills([]));
+  }, []);
 
   const handleCompact = useCallback(async () => {
     if (compacting) return;
@@ -148,11 +171,7 @@ function ChatApp() {
     [chat, bumpSidebar]
   );
 
-  // slash 命令路由（核心 5 子集；反馈统一走 notice 消息）。
-  // 带参命令（thinking/effort）的 arg 归一化 + 值域判定 + 用法文案由
-  // lib/slash resolveArgCommand / ARG_COMMAND_SPECS 数据驱动，本处只留
-  // 每条命令的生效动作。
-  /** 带参命令生效动作：thinking 开关 / effort 档位（值已过词表值域校验）。 */
+  // slash 命令路由（对齐 TUI 词表；浏览器能力映射）。
   const applyArgSetting = (cmd: "thinking" | "effort", value: string) => {
     if (cmd === "thinking") {
       handleThinkingChange({ ...thinkingSettings, enabled: value === "on" });
@@ -169,7 +188,6 @@ function ChatApp() {
     (name: SlashCommandName, arg?: string) => {
       switch (name) {
         case "compact":
-          // 对齐原压缩按钮语义：sending 中不触发，但不再静默。
           if (chat.phase === "sending") {
             chat.pushNotice("回复生成中，稍后再试");
           } else {
@@ -179,8 +197,74 @@ function ChatApp() {
         case "new":
           void handleNewSession();
           break;
+        case "sessions":
+          setCollapsed(false);
+          bumpSidebar();
+          break;
         case "help":
-          chat.pushNotice(slashHelpText());
+          chat.pushNotice(slashHelpText(skills.map((s) => s.name)));
+          break;
+        case "info":
+          chat.pushNotice(
+            formatSessionInfo({
+              conversationId: chat.session?.conversation_id ?? null,
+              turnCount: chat.session?.turn_count ?? 0,
+              jsonMode: chat.session?.json_mode ?? false,
+              phase: chat.phase,
+              contextWindow: chat.contextWindow,
+              lastUsage: chat.lastAnswer?.lastUsage ?? null,
+              thinkingEnabled: thinkingSettings.enabled,
+              effort: thinkingSettings.effort,
+            })
+          );
+          break;
+        case "quit":
+        case "exit":
+          chat.pushNotice("浏览器中关闭标签页即可退出（无独立进程）。");
+          break;
+        case "mcp":
+          void (async () => {
+            try {
+              const [st, tools] = await Promise.all([
+                api.listMcp(),
+                api.listMcpTools(),
+              ]);
+              setMcpServers(st.servers);
+              setMcpTools(tools.tools);
+              setMcpOpen(true);
+            } catch (e) {
+              chat.pushNotice(
+                `MCP 看板失败：${e instanceof Error ? e.message : String(e)}`
+              );
+            }
+          })();
+          break;
+        case "rewind":
+          if (chat.phase === "sending") {
+            chat.pushNotice("回复生成中，稍后再试");
+            break;
+          }
+          void (async () => {
+            const id = chat.session?.conversation_id;
+            if (!id) {
+              chat.pushNotice("当前无会话可回退");
+              return;
+            }
+            try {
+              const hist = await api.getSessionHistory(id);
+              const targets = buildRewindTargetsFromTurns(hist.turns);
+              if (targets.length === 0) {
+                chat.pushNotice("Nothing to rewind to yet.");
+                return;
+              }
+              setRewindIndex(0);
+              setRewindTargets(targets);
+            } catch (e) {
+              chat.pushNotice(
+                `无法加载回退锚点：${e instanceof Error ? e.message : String(e)}`
+              );
+            }
+          })();
           break;
         case "thinking":
         case "effort": {
@@ -191,15 +275,41 @@ function ChatApp() {
         }
       }
     },
-    // applyArgSetting 闭包捕获 chat / handleThinkingChange / thinkingSettings，
-    // 三者均已在依赖列中。
     [
       chat,
       handleCompact,
       handleNewSession,
       handleThinkingChange,
+      bumpSidebar,
+      skills,
       thinkingSettings,
     ]
+  );
+
+  const handleSkillLoad = useCallback(
+    (name: string, remainder: string) => {
+      void (async () => {
+        try {
+          const { body } = await api.getSkillBody(name);
+          const sendText = `[skill-load name="${name}"]\n${body}${
+            remainder.length > 0 ? `\n\n${remainder}` : ""
+          }`;
+          const displayText = `[加载技能 ${name}]${
+            remainder.length > 0 ? ` ${remainder}` : ""
+          }`;
+          await chat.sendMessage(
+            sendText,
+            toWireOverride(thinkingSettings),
+            displayText
+          );
+        } catch (e) {
+          chat.pushNotice(
+            `加载技能失败：${e instanceof Error ? e.message : String(e)}`
+          );
+        }
+      })();
+    },
+    [chat, thinkingSettings]
   );
 
   const side = (
@@ -263,6 +373,55 @@ function ChatApp() {
             />
           ) : null}
           {permissionDialog}
+          {mcpOpen ? (
+            <McpPanel
+              servers={mcpServers}
+              tools={mcpTools}
+              reloading={mcpReloading}
+              onReload={() => {
+                void (async () => {
+                  setMcpReloading(true);
+                  try {
+                    const st = await api.reloadMcp();
+                    const tools = await api.listMcpTools();
+                    setMcpServers(st.servers);
+                    setMcpTools(tools.tools);
+                  } catch (e) {
+                    chat.pushNotice(
+                      `MCP 重载失败：${e instanceof Error ? e.message : String(e)}`
+                    );
+                  } finally {
+                    setMcpReloading(false);
+                  }
+                })();
+              }}
+              onClose={() => setMcpOpen(false)}
+            />
+          ) : null}
+          {rewindTargets !== undefined ? (
+            <RewindPicker
+              targets={rewindTargets}
+              selectedIndex={rewindIndex}
+              confirming={true}
+              onSelect={setRewindIndex}
+              onConfirm={() => {
+                const t = rewindTargets[rewindIndex];
+                if (!t) return;
+                void (async () => {
+                  try {
+                    await chat.rewind(t.keepTurns);
+                    setRewindTargets(undefined);
+                    chat.pushNotice(`已回退到 keepTurns=${t.keepTurns}`);
+                  } catch (e) {
+                    chat.pushNotice(
+                      `回退失败：${e instanceof Error ? e.message : String(e)}`
+                    );
+                  }
+                })();
+              }}
+              onClose={() => setRewindTargets(undefined)}
+            />
+          ) : null}
           <MessageList
             messages={chat.messages}
             sending={chat.phase === "sending"}
@@ -280,6 +439,8 @@ function ChatApp() {
             onThinkingChange={handleThinkingChange}
             onSend={handleSend}
             onCommand={handleCommand}
+            onSkillLoad={handleSkillLoad}
+            skills={skills}
             onNotice={chat.pushNotice}
             usage={chat.lastAnswer?.lastUsage ?? null}
             contextWindow={chat.contextWindow}

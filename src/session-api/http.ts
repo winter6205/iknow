@@ -173,6 +173,45 @@ async function handle(opts: HandleOpts): Promise<void> {
       return sendHealth(res, contextWindow, model);
     if (method === "GET" && isSsePath(pathname)) return sendSseReserved(res);
 
+    if (method === "GET" && pathname === "/api/v1/skills") {
+      return sendJson({
+        res,
+        status: 200,
+        body: { skills: await hub.listSkills() },
+      });
+    }
+    const skillMatch = pathname.match(/^\/api\/v1\/skills\/([^/]+)$/);
+    if (method === "GET" && skillMatch) {
+      const name = decodeURIComponent(skillMatch[1]!);
+      return sendJson({
+        res,
+        status: 200,
+        body: await hub.loadSkillBody(name),
+      });
+    }
+    if (method === "GET" && pathname === "/api/v1/mcp") {
+      return sendJson({
+        res,
+        status: 200,
+        body: { servers: await hub.listMcpServers() },
+      });
+    }
+    if (method === "POST" && pathname === "/api/v1/mcp/reload") {
+      await readJsonBody(req);
+      return sendJson({
+        res,
+        status: 200,
+        body: { servers: await hub.reloadMcp() },
+      });
+    }
+    if (method === "GET" && pathname === "/api/v1/mcp/tools") {
+      return sendJson({
+        res,
+        status: 200,
+        body: { tools: await hub.listMcpTools() },
+      });
+    }
+
     // permission mode 读取 / Shift+Tab 循环切换（web 快捷键；holder 缺席 →
     // 404，与 trace 未挂载同模式）。
     if (pathname === "/api/v1/permission-mode") {
@@ -360,6 +399,15 @@ async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
     });
     return true;
   }
+  if (method === "POST" && rest === "/rewind") {
+    const keepTurns = extractKeepTurnsField(await readJsonBody(req));
+    sendJson({
+      res,
+      status: 200,
+      body: await hub.rewindSession(id, keepTurns),
+    });
+    return true;
+  }
   // POST /compact — 手动压缩会话（web 压缩按钮 / TUI /compact 的 HTTP 侧）。
   // body 可空；无 body / 空 body 等价 {}（压缩无参数）。
   if (method === "POST" && rest === "/compact") {
@@ -442,6 +490,17 @@ function parseCreateBody(raw: unknown): {
     out.json_mode = Boolean(o.json_mode);
   }
   return out;
+}
+
+function extractKeepTurnsField(raw: unknown): number {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new ValidationError("body must be a JSON object with keepTurns");
+  }
+  const n = (raw as Record<string, unknown>).keepTurns;
+  if (typeof n !== "number" || !Number.isInteger(n) || n < 0) {
+    throw new ValidationError("keepTurns must be a non-negative integer");
+  }
+  return n;
 }
 
 function extractTextField(raw: unknown): string {

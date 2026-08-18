@@ -18,13 +18,26 @@ import {
   slashEnterAction,
   slashHelpText,
   slashSubmitDecision,
+  parseSkillLoad,
   SLASH_COMMANDS,
   UNKNOWN_SLASH_NOTICE,
 } from "../../web/src/lib/slash.ts";
 
 describe("matchSlash — 合法命令", () => {
-  it("五个词表命令无参匹配", () => {
-    for (const name of ["compact", "new", "help", "thinking", "effort"]) {
+  it("TUI 词表 11 条无参或带参均可匹配", () => {
+    for (const name of [
+      "sessions",
+      "new",
+      "quit",
+      "exit",
+      "help",
+      "info",
+      "thinking",
+      "effort",
+      "compact",
+      "rewind",
+      "mcp",
+    ]) {
       const m = matchSlash(`/${name}`);
       assert.ok(m !== null, `/${name} must match`);
       assert.equal(m?.name, name);
@@ -66,8 +79,8 @@ describe("matchSlash — 非法输入 → null", () => {
   });
 
   it("未知命令 → null", () => {
-    assert.equal(matchSlash("/quit"), null);
     assert.equal(matchSlash("/unknown x"), null);
+    assert.equal(matchSlash("/zzz"), null);
   });
 
   it("无参命令携带多余参数 → null（裁决：非法，不执行也不发送）", () => {
@@ -78,12 +91,24 @@ describe("matchSlash — 非法输入 → null", () => {
 });
 
 describe("slashCandidates — 前缀过滤", () => {
-  it('裸 "/" → 全部 5 条按词表序', () => {
+  it('裸 "/" → 全部静态命令按词表序（skill 不入场）', () => {
     const names = slashCandidates("/").map((c) => c.name);
-    assert.deepEqual(names, ["compact", "new", "help", "thinking", "effort"]);
+    assert.deepEqual(names, [
+      "sessions",
+      "new",
+      "quit",
+      "exit",
+      "help",
+      "info",
+      "thinking",
+      "effort",
+      "compact",
+      "rewind",
+      "mcp",
+    ]);
   });
 
-  it("前缀过滤：/c → compact；/th → thinking；/e → effort", () => {
+  it("前缀过滤：/c → compact；/th → thinking；/e → effort+exit", () => {
     assert.deepEqual(
       slashCandidates("/c").map((c) => c.name),
       ["compact"]
@@ -94,8 +119,20 @@ describe("slashCandidates — 前缀过滤", () => {
     );
     assert.deepEqual(
       slashCandidates("/e").map((c) => c.name),
-      ["effort"]
+      ["exit", "effort"]
     );
+  });
+
+  it("skill 混显：至少 1 字符前缀才入场；静态命令在前", () => {
+    const skills = [{ name: "explore", description: "explore code" }];
+    assert.deepEqual(
+      slashCandidates("/", skills).map((c) => c.name),
+      slashCandidates("/").map((c) => c.name)
+    );
+    const mixed = slashCandidates("/e", skills);
+    assert.equal(mixed[0]?.kind, "command");
+    assert.equal(mixed[mixed.length - 1]?.kind, "skill");
+    assert.equal(mixed[mixed.length - 1]?.name, "explore");
   });
 
   it("首 token 之后仍按命令名前缀过滤（输入参数时菜单不消失）", () => {
@@ -152,7 +189,7 @@ describe("slashEnterAction — 菜单打开时的 Enter 裁决", () => {
 });
 
 describe("slashHelpText", () => {
-  it("包含全部 5 条命令与说明", () => {
+  it("包含全部静态命令与说明", () => {
     const text = slashHelpText();
     for (const c of SLASH_COMMANDS) {
       assert.ok(text.includes(c.hint), `must include hint ${c.hint}`);
@@ -161,6 +198,12 @@ describe("slashHelpText", () => {
         `must include description ${c.description}`
       );
     }
+  });
+
+  it("skill 名以 /name 加载技能 行追加", () => {
+    const text = slashHelpText(["explore"]);
+    assert.ok(text.includes("/explore"));
+    assert.ok(text.includes("加载技能"));
   });
 });
 
@@ -201,7 +244,26 @@ describe("menuKeyEvent — 菜单打开时的键盘裁决", () => {
   const state = {
     value: "/th",
     selectedIndex: 1,
-    candidates: SLASH_COMMANDS.slice(0, 3), // compact / new / help
+    candidates: [
+      {
+        kind: "command" as const,
+        name: "compact" as const,
+        description: "",
+        hint: "/compact",
+      },
+      {
+        kind: "command" as const,
+        name: "new" as const,
+        description: "",
+        hint: "/new",
+      },
+      {
+        kind: "command" as const,
+        name: "help" as const,
+        description: "",
+        hint: "/help",
+      },
+    ],
   };
 
   it("ArrowDown → move（钳制到末项）", () => {
@@ -216,11 +278,14 @@ describe("menuKeyEvent — 菜单打开时的键盘裁决", () => {
   });
 
   it("ArrowUp → move（钳制到 0）", () => {
-    assert.deepEqual(menuKeyEvent(state, "ArrowUp"), { kind: "move", index: 0 });
-    assert.deepEqual(
-      menuKeyEvent({ ...state, selectedIndex: 0 }, "ArrowUp"),
-      { kind: "move", index: 0 }
-    );
+    assert.deepEqual(menuKeyEvent(state, "ArrowUp"), {
+      kind: "move",
+      index: 0,
+    });
+    assert.deepEqual(menuKeyEvent({ ...state, selectedIndex: 0 }, "ArrowUp"), {
+      kind: "move",
+      index: 0,
+    });
   });
 
   it("Escape → dismiss", () => {
@@ -237,14 +302,18 @@ describe("menuKeyEvent — 菜单打开时的键盘裁决", () => {
   it("Enter（非 shift）→ enter 裁决经 slashEnterAction", () => {
     // "/th" 不完整 → accept 带参命令补全形（尾随空格）；slashEnterAction
     // 按 value 重算候选（仅 thinking），索引须在其范围内。
-    assert.deepEqual(
-      menuKeyEvent({ ...state, selectedIndex: 0 }, "Enter"),
-      { kind: "enter", action: { kind: "accept", text: "/thinking " } }
-    );
+    assert.deepEqual(menuKeyEvent({ ...state, selectedIndex: 0 }, "Enter"), {
+      kind: "enter",
+      action: { kind: "accept", text: "/thinking " },
+    });
     // 完整命令 → execute
     assert.deepEqual(
       menuKeyEvent(
-        { value: "/effort high", selectedIndex: 0, candidates: SLASH_COMMANDS.slice(4) },
+        {
+          value: "/effort high",
+          selectedIndex: 0,
+          candidates: slashCandidates("/effort"),
+        },
         "Enter"
       ),
       {
@@ -283,16 +352,33 @@ describe("resolveArgCommand — 带参命令值域判定", () => {
     });
     assert.deepEqual(resolveArgCommand("effort", "ultra"), {
       ok: false,
-      notice: "用法：/effort low|medium|high",
+      notice: "用法：/effort low|medium|high|xhigh|max",
     });
   });
 
-  it("词表值域与用法文案 SSOT", () => {
+  it("词表值域与用法文案 SSOT（对齐 TUI ADJUSTABLE_EFFORT_LEVELS）", () => {
     assert.deepEqual(ARG_COMMAND_SPECS.thinking.values, ["on", "off"]);
     assert.deepEqual(ARG_COMMAND_SPECS.effort.values, [
       "low",
       "medium",
       "high",
+      "xhigh",
+      "max",
     ]);
+  });
+});
+
+describe("parseSkillLoad", () => {
+  const skills = [{ name: "explore", description: "x" }];
+
+  it("精确命中 skill → name + remainder", () => {
+    assert.deepEqual(parseSkillLoad("/explore extra", skills), {
+      name: "explore",
+      remainder: "extra",
+    });
+  });
+
+  it("静态命令优先 → undefined", () => {
+    assert.equal(parseSkillLoad("/help", skills), undefined);
   });
 });

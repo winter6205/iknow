@@ -154,6 +154,50 @@ export type CompactSessionResponse = {
   afterCount: number;
 };
 
+/** POST /api/v1/sessions/:id/rewind — 对齐 TUI rewindSession。 */
+export type RewindSessionResponse = {
+  session: SessionSummary;
+  turns: TurnDto[];
+  keepTurns: number;
+};
+
+/** GET /api/v1/skills — TUI skillCatalog.available() 投影。 */
+export type SkillSummaryDto = {
+  readonly name: string;
+  readonly description: string;
+};
+
+export type SkillsResponse = {
+  readonly skills: readonly SkillSummaryDto[];
+};
+
+export type SkillBodyResponse = {
+  readonly name: string;
+  readonly body: string;
+};
+
+/** GET /api/v1/mcp — TUI mcp.status() 投影。 */
+export type McpServerStatusDto = {
+  readonly name: string;
+  readonly state: string;
+  readonly source: string;
+  readonly error?: string;
+};
+
+export type McpStatusResponse = {
+  readonly servers: readonly McpServerStatusDto[];
+};
+
+export type McpToolDto = {
+  readonly server: string;
+  readonly name: string;
+  readonly description: string;
+};
+
+export type McpToolsResponse = {
+  readonly tools: readonly McpToolDto[];
+};
+
 export type HealthResponse = {
   ok: true;
   service: "iknow-session-api";
