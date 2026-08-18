@@ -19,6 +19,12 @@ export interface BwrapFenceOptions {
   readonly env: NodeJS.ProcessEnv;
   readonly cwd: string;
   readonly overlaySensitivePaths?: boolean;
+  // Per-call network opt-in (#503, ADR-0022). Absent/false = isolated
+  // (keep --unshare-net); true = drop --unshare-net so the sandboxed
+  // process has host-network visibility. The rest of the fence (user ns /
+  // die-with-parent / ro-binds / tmpfs / clearenv / chdir / command) is
+  // unchanged — this is the only approval axis this option touches.
+  readonly network?: boolean;
   readonly seccompProfile?: never;
 }
 
@@ -78,7 +84,8 @@ function baseArgs(
   cwd: string,
   fsPolicy: FsPolicy,
   resources: ResourceLimits,
-  overlaySensitivePaths: boolean
+  overlaySensitivePaths: boolean,
+  network: boolean
 ): string[] {
   const tmp = fsPolicy.allowedPaths()[2] ?? "/tmp";
   const cwdRebind = isTmpDescendant(cwd, tmp) ? ["--bind", cwd, cwd] : [];
@@ -95,7 +102,9 @@ function baseArgs(
   const homeRebind = isTmpDescendant(home, tmp) ? ["--bind", home, home] : [];
   return [
     "--unshare-user-try",
-    "--unshare-net",
+    // network:true is the only axis that drops --unshare-net (ADR-0022 #1);
+    // every line below stays byte-for-byte unchanged either way.
+    ...(network ? [] : ["--unshare-net"]),
     "--die-with-parent",
     "--ro-bind",
     "/usr",
@@ -140,7 +149,8 @@ export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {
       opts.cwd,
       opts.fsPolicy,
       opts.resourceLimits,
-      opts.overlaySensitivePaths ?? true
+      opts.overlaySensitivePaths ?? true,
+      opts.network === true
     ),
     // --clearenv must precede every --setenv so the sandbox inherits only the
     // whitelisted entries, never the host env (bwrap otherwise copies the whole
@@ -153,6 +163,10 @@ export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {
     opts.command,
     ...opts.args,
   ];
+  // networkPolicy has no enforcement in the fence layer (STATIC_NETWORK_WHITELIST
+  // is not executed here, see network-policy.ts). The real network control axis
+  // is the --unshare-net switch driven by the `network` option above; keep
+  // networkPolicy as the declared-but-inert contract input (ADR-0022 fog).
   void opts.networkPolicy;
   return Object.freeze({ argv: Object.freeze(argv), sealed: true as const });
 }

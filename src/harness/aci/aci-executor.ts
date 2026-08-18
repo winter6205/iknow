@@ -97,7 +97,8 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
     executeAll: async (
       calls: ReadonlyArray<ToolCall>,
       signal?: AbortSignal,
-      _timeoutMs?: number
+      _timeoutMs?: number,
+      conversationId?: string
     ): Promise<ReadonlyArray<ToolExecutionResult>> => {
       const out: ToolExecutionResult[] = [];
       for (const call of calls) {
@@ -134,6 +135,7 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
           def,
           tierTimeoutMs,
           callerSignal: signal,
+          conversationId,
         });
         out.push(result);
       }
@@ -170,8 +172,10 @@ async function routeOneCall(opts: {
   readonly def: AciToolDef | undefined;
   readonly tierTimeoutMs: number | undefined;
   readonly callerSignal: AbortSignal | undefined;
+  readonly conversationId?: string;
 }): Promise<ToolExecutionResult> {
-  const { executor, call, def, tierTimeoutMs, callerSignal } = opts;
+  const { executor, call, def, tierTimeoutMs, callerSignal, conversationId } =
+    opts;
   const isBlock = def !== undefined && def.aci.interruptBehavior === "block";
 
   const tierAbort = new AbortController();
@@ -189,7 +193,12 @@ async function routeOneCall(opts: {
       ? AbortSignal.any([callerSignal, tierAbort.signal])
       : tierAbort.signal;
 
-  const innerPromise = executor.executeAll([call], effectiveSignal, undefined);
+  const innerPromise = executor.executeAll(
+    [call],
+    effectiveSignal,
+    undefined,
+    conversationId
+  );
 
   let result: ToolExecutionResult;
   try {

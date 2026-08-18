@@ -231,12 +231,18 @@ export function createExecutor(registry: RegistryImpl): Executor {
   async function runOne(
     call: ToolCall,
     signal?: AbortSignal,
-    timeoutMs?: number
+    timeoutMs?: number,
+    conversationId?: string
   ): Promise<ToolExecutionResult> {
     const validation = validateCall(registry, call);
     if (!validation.ok) return validation.failure;
     const stop = buildStopSignal(signal, timeoutMs);
-    const ctx: ToolExecutionContext = { signal: stop.signal };
+    // 017 T5: conversationId 并进 ctx —— tool handler（bash-output / bash-stop）
+    // 读 ctx.conversationId 透传给 manager 做 scope filter。字段缺省 = 不过滤。
+    const ctx: ToolExecutionContext = {
+      signal: stop.signal,
+      ...(conversationId !== undefined ? { conversationId } : {}),
+    };
     try {
       const out =
         timeoutMs === undefined
@@ -274,11 +280,12 @@ export function createExecutor(registry: RegistryImpl): Executor {
   async function executeAll(
     calls: ReadonlyArray<ToolCall>,
     signal?: AbortSignal,
-    timeoutMs?: number
+    timeoutMs?: number,
+    conversationId?: string
   ): Promise<ReadonlyArray<ToolExecutionResult>> {
     const out: ToolExecutionResult[] = [];
     for (const call of calls) {
-      out.push(await runOne(call, signal, timeoutMs));
+      out.push(await runOne(call, signal, timeoutMs, conversationId));
     }
     return out;
   }

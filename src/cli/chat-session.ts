@@ -1008,7 +1008,18 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     counter,
     onKill,
   });
-  const wrappedDeps: LoopEngineDeps = { ...opts.deps, executor };
+  // #502 T5 / ADR-0021 D1.4:per-session conversationId 注入 deps（loop-engine
+  // 经 executor.executeAll 第 4 参透传到 tool ctx.conversationId）。build-engine
+  // 的 deps 跨会话共享,cachedDeps不变;此处在 REPL 级 wrappedDeps 闭包落 session
+  // 锚点,scope 过滤才能在同 session 内闭环。
+  const wrappedDeps: LoopEngineDeps = {
+    ...opts.deps,
+    executor,
+    // CliChatState.conversationId:string | null;LoopEngineDeps.conversationId:
+    // string | undefined —— null 用 ?? undefined 收敛到 undefined 缺省语义
+    // （不过滤，与 ADR-0021 D1.4 backward-compat 路径对齐）。
+    conversationId: state.conversationId ?? undefined,
+  };
 
   const ctx: ChatLineContext = {
     deps: wrappedDeps,

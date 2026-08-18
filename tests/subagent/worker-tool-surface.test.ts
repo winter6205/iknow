@@ -13,11 +13,13 @@
  *     实际面由构造保证（registry.ts:280-296 def-list 期裁剪 + buildWorkerToolSurface
  *     幂等兜底），非事后修补。
  *
- * worker 装配特征：createWorkerDeps 不传 subagentManager 与 memoryDir
- * （worker.ts:141-146）→ spawn_subagent / subagent_result / memory_recall
- * / memory_save 四件天然缺席。本测试额外显式传 `skillCatalog:
+ * worker 装配特征：createWorkerDeps 不传 subagentManager / memoryDir /
+ * todoDir / mcpManager / backgroundManager（worker.ts:141-146 + #502 T3
+ * 旁注）→ spawn_subagent / subagent_result / memory_recall / memory_save /
+ * todo_write / list_mcp_resources / read_mcp_resource / bash_output /
+ * bash_stop 九件天然缺席。本测试额外显式传 `skillCatalog:
  * createSkillCatalog([])` 让 skill / skill_search 在场以保持全量 21 件
- * 面可断言（25 - 4 = 21）。
+ * 面可断言（30 - 缺席 9 = 21: memory2 + subagent2 + todo_write + mcp2 + bg2）。
  */
 
 import assert from "node:assert/strict";
@@ -87,8 +89,10 @@ const TEST_ENV: IknowEnv = {
  *   - 10 LSP（lsp_definition ... lsp_diagnostics，#251）
  *   - skill + skill_search（#337，条件化：skillCatalog 在场时入注册表）
  * 条件化缺席（worker 不装配）：memory_recall / memory_save（memoryDir 缺席），
- * spawn_subagent / subagent_result（subagentManager 缺席）。
- * 全量 25 - 缺席 4 = 21，与 ACI_TOOLSET_NAMES 在 worker 装配路径下
+ * spawn_subagent / subagent_result（subagentManager 缺席），todo_write
+ * （todoDir 缺席），list_mcp_resources / read_mcp_resource（mcpManager 缺席），
+ * bash_output / bash_stop（backgroundManager 缺席,#502 T3 同门）。
+ * 全量 30 - 缺席 9 = 21，与 ACI_TOOLSET_NAMES 在 worker 装配路径下
  * 实际生效集合一致。
  */
 const WORKER_BASE_SURFACE: ReadonlyArray<string> = Object.freeze([

@@ -745,6 +745,10 @@ export class SessionHub {
           ...deps,
           executor: wrappedExecutor,
           agentVersion: getVersion(),
+          // #502 T5 / ADR-0021 D1.4:per-postMessage conversationId 注入 deps。
+          // serve cachedDeps 跨会话共享（hub.ts:1287 注），此处 per-run 注入会话
+          // 锚点，bash_output / bash_stop 的 scope 过滤才能按会话闭环。
+          conversationId,
           ...(trace !== undefined ? { trace } : {}),
           // #458 T7 (SC11):compact 边界渲染缝 — taskFocus 在场时注入
           // boundaryAttachment 闭包,compact 触发时在 placeholder 后追加

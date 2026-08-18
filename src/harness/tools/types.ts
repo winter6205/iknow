@@ -25,9 +25,10 @@ export type ToolHandler = (
   ctx?: ToolExecutionContext // 017 新增;015 老 handler (input) => ... 继续合法
 ) => Promise<unknown> | unknown;
 
-/** 017: Executor 透传给 handler 的执行上下文;仅含 signal,不含 timeoutMs(超时由 Executor Promise.race 外包;type-only;runtime deferred to T5)。 */
+/** 017: Executor 透传给 handler 的执行上下文;含 signal + conversationId。timeoutMs 由 Executor Promise.race 外包不在此。T5: conversationId 注入用于 bash background conversation scope 过滤（bash-output / bash-stop handler 读 ctx 交给 manager；缺省 = 不过滤，向后兼容，ADR-0021 D1.4）。 */
 export interface ToolExecutionContext {
   readonly signal?: AbortSignal;
+  readonly conversationId?: string;
 }
 
 /**
@@ -126,6 +127,7 @@ export interface Executor {
   readonly executeAll: (
     calls: ReadonlyArray<ToolCall>,
     signal?: AbortSignal, // 017: 原样透传到 ctx.signal
-    timeoutMs?: number // 017: 单 handler Promise.race 超时;undefined = 不 race(015 语义;type-only;runtime deferred to T5)
+    timeoutMs?: number, // 017: 单 handler Promise.race 超时;undefined = 不 race(015 语义)
+    conversationId?: string // 017 T5: 原样透传到 ctx.conversationId;缺省 = 不过滤(向后兼容)
   ) => Promise<ReadonlyArray<ToolExecutionResult>>;
 }

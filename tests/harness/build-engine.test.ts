@@ -29,8 +29,12 @@ import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
 // registry 末尾追加 spawn_subagent / subagent_result(→ 25 件)。ask 入口不创建
 // manager → registry 停 23 件(SC8,见 ask 剥离断言)。
 // #440 T11 (MCP resources 装配):surface !== "ask" 时 build-engine 自建
-// mcpManager,registry 末尾追加 list_mcp_resources / read_mcp_resource(→ 27 件)。
-// ask 入口不创建 manager → registry 停 25 件(mcpManager 缺席 → list/read 缺席)。
+// mcpManager,registry 末尾追加 list_mcp_resources / read_mcp_resource(→ 28 件)。
+// ask 入口不创建 manager → registry 停 26 件(mcpManager 缺席 → list/read 缺席)。
+// #502 T3 (background 装配):surface !== "ask" 时 build-engine 自建
+// backgroundManager,registry 末尾追加 bash_output / bash_stop(→ 30 件)。
+// ask 入口不创建 manager → registry 停 28 件(backgroundManager 缺席 → bash_output /
+// bash_stop 缺席;bash 仍常驻)。
 const EXPECTED_TOOLS = [
   "bash",
   "read_file",
@@ -67,10 +71,15 @@ const EXPECTED_TOOLS = [
   "todo_write",
   "list_mcp_resources",
   "read_mcp_resource",
+  // #502 T3 bash_output / bash_stop 工具集 append-only:28→30,末位 2 件
+  // （全装配 chat/tui/serve surface 在场;ask 缺 backgroundManager → 缺席;
+  //  bash 仍常驻,参数级 background:true 能力由 handler 运行时决策）。
+  "bash_output",
+  "bash_stop",
 ];
 
-/** #440 T4 条件化缺席视图:todoDir 未透传的 chat surface(默认行为)。
- *  既有 SSOT 断言通过 EXPECTED_TOOLS_NO_TODO 表达"25 件不变";todo_write
+/** #440 T4 / #502 T3 条件化缺席视图:todoDir 未透传的 chat surface(默认行为)。
+ *  既有 SSOT 断言通过 EXPECTED_TOOLS_NO_TODO 表达"28 件不变";todo_write
  *  在场需显式传 todoDir(主循环生产路径,非测试默认形态)。 */
 const EXPECTED_TOOLS_NO_TODO = EXPECTED_TOOLS.filter((n) => n !== "todo_write");
 
@@ -186,7 +195,9 @@ describe("buildHarnessEngine — memory opt-out (ask path, SC 12)", () => {
     });
 
     const names = deps.registry.list().map((def) => def.name);
-    // #440 T4:todoDir 未透传 → todo_write 缺席;EXPECTED_TOOLS_NO_TODO = 25 件。
+    // #502 T3:ask surface 缺 backgroundManager → bash_output/bash_stop 缺席;
+    // #440 T4:todoDir 未透传 → todo_write 缺席;memory:enabled=false → memory 两件
+    // 缺席;EXPECTED_TOOLS_NO_TODO(29) - memory2 = 27 件。
     expect(names).toEqual(
       EXPECTED_TOOLS_NO_TODO.filter(
         (n) => n !== "memory_recall" && n !== "memory_save"
@@ -372,9 +383,9 @@ describe("buildHarnessEngine — #337 T8 skill 装配", () => {
     const names = built.deps.registry.list().map((d) => d.name);
     expect(names).not.toContain("spawn_subagent");
     expect(names).not.toContain("subagent_result");
-    // ask + memory:{enabled:false} 双重剥离 → 28 - todo(1) - memory2 - subagent2 -
-    // mcp2 = 21 件(todo_write 因 todoDir 未透传缺席,ask 不装配 MCP 两件,memory 两件
-    // 禁用;skill 两件仍装配,SC12 守门)。
+    // ask + memory:{enabled:false} 双重剥离 → 30 - todo(1) - memory2 - subagent2 -
+    // mcp2 - bg2 = 21 件(todo_write 因 todoDir 未透传缺席,ask 不装配 MCP 两件,
+    // memory 两件禁用,bg 两件 ask 缺席;skill 两件仍装配,SC12 守门)。
     expect(names).toEqual(
       EXPECTED_TOOLS_NO_TODO.filter(
         (n) =>
@@ -383,7 +394,9 @@ describe("buildHarnessEngine — #337 T8 skill 装配", () => {
           n !== "spawn_subagent" &&
           n !== "subagent_result" &&
           n !== "list_mcp_resources" &&
-          n !== "read_mcp_resource"
+          n !== "read_mcp_resource" &&
+          n !== "bash_output" &&
+          n !== "bash_stop"
       )
     );
 
@@ -818,7 +831,7 @@ describe("buildHarnessEngine — #406 T2 secret registry 装配", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
-  it("chat surface：todoDir 传入 → todo_write 装配 + 26 件（seam 接受 + SSOT append-only）", async () => {
+  it("chat surface：todoDir 传入 → todo_write 装配 + 30 件（seam 接受 + SSOT append-only）", async () => {
     const built = await buildHarnessEngine({
       env: makeEnv("sk-test-t1-chat-tododir"),
       askUser: createNoAskUser(),
@@ -826,7 +839,9 @@ describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
       todoDir: "/tmp/some-session/todos",
     });
     // chat surface + todoDir → todoDir 透传给 registry → todo_write 装配。
-    // T4 已 SSOT append,EXPECTED_TOOLS 含 todo_write (26 件)。
+    // T4 已 SSOT append,EXPECTED_TOOLS 含 todo_write + bash_output + bash_stop
+    // (30 件;backgroundManager 由 build-engine 装配期自建 → bash_output/bash_stop
+    // 入注册表;todoDir 由 host 注入 → todo_write 入注册表)。
     expect(built.deps.registry.list().map((d) => d.name)).toEqual(
       EXPECTED_TOOLS
     );
@@ -842,8 +857,9 @@ describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
       memory: { enabled: false },
       todoDir: "/tmp/some-session/todos",
     });
-    // ask 形态与现有 SC8 守门一致：28 - memory2 - subagent2 - mcp2 - todo_write
-    // (ask 不传 todoDir 给 registry,mcpManager 在 ask 路径也不装配,SC12) = 23 件。
+    // ask 形态与现有 SC8 守门一致：30 - memory2 - subagent2 - mcp2 - todo_write
+    // - bg2 (ask 不传 todoDir 给 registry,mcpManager + backgroundManager 在 ask
+    // 路径也不装配,SC12) = 21 件。
     expect(built.deps.registry.list().map((d) => d.name)).toEqual(
       EXPECTED_TOOLS.filter(
         (n) =>
@@ -853,18 +869,21 @@ describe("buildHarnessEngine — #440 T1 todoDir seam", () => {
           n !== "subagent_result" &&
           n !== "list_mcp_resources" &&
           n !== "read_mcp_resource" &&
-          n !== "todo_write"
+          n !== "todo_write" &&
+          n !== "bash_output" &&
+          n !== "bash_stop"
       )
     );
     expect(built.deps.registry.get("todo_write")).toBeUndefined();
   });
 
-  it("默认 chat surface 不传 todoDir → todo_write 不装配，25 件（seam 缺席零变化，向后兼容）", async () => {
+  it("默认 chat surface 不传 todoDir → todo_write 不装配，29 件（seam 缺席零变化，向后兼容）", async () => {
     const built = await buildHarnessEngine({
       env: makeEnv("sk-test-t1-chat-default"),
       askUser: createNoAskUser(),
     });
-    // todoDir undefined → todo_write 缺席；EXPECTED_TOOLS 含 todo_write 故过滤掉。
+    // todoDir undefined → todo_write 缺席；EXPECTED_TOOLS(30) 含 todo_write
+    // 故过滤掉 → 29 件;backgroundManager 已装配,bash_output/bash_stop 在场。
     expect(built.deps.registry.list().map((d) => d.name)).toEqual(
       EXPECTED_TOOLS.filter((n) => n !== "todo_write")
     );

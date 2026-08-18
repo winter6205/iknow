@@ -9,6 +9,65 @@ import {
 } from "../../../src/harness/sandbox/resource-limits.js";
 
 describe("createBwrapFence", () => {
+  // Shared construction helper (mirrors the canonical assembly). Pure argv
+  // logic — no spawn. `network` is only set when explicitly passed so the
+  // absent (default) path is exercised by the same call shape.
+  function fenceArgv(network?: boolean): string[] {
+    const cwd = "/workspace";
+    const opts: {
+      command: string;
+      args: string[];
+      fsPolicy: ReturnType<typeof createFsPolicy>;
+      networkPolicy: ReturnType<typeof createNetworkPolicy>;
+      resourceLimits: ReturnType<typeof createResourceLimits>;
+      env: NodeJS.ProcessEnv;
+      cwd: string;
+      network?: boolean;
+    } = {
+      command: "bash",
+      args: ["-c", "echo hi"],
+      fsPolicy: createFsPolicy({ cwd, home: "/home/user", tmpDir: "/tmp/job" }),
+      networkPolicy: createNetworkPolicy(),
+      resourceLimits: createResourceLimits(),
+      env: { PATH: "/bin" },
+      cwd,
+    };
+    if (network !== undefined) {
+      opts.network = network;
+    }
+    return createBwrapFence(opts).argv;
+  }
+
+  // Spot-check helper asserting the canonical fence key flags are present,
+  // mirroring the assertion style of the first test.
+  function assertCanonicalFenceFlags(argv: string[], cwd: string): void {
+    assert.equal(argv[0], "bwrap");
+    assert.equal(argv[1], "--unshare-user-try");
+    assert.ok(argv.includes("--die-with-parent"));
+    const etcIndex = argv.indexOf("/etc");
+    assert.deepEqual(argv.slice(etcIndex - 1, etcIndex + 2), [
+      "--ro-bind",
+      "/etc",
+      "/etc",
+    ]);
+    const bindCwdIndex = argv.findIndex(
+      (arg, index) => arg === "--bind" && argv[index + 1] === cwd
+    );
+    assert.notEqual(bindCwdIndex, -1, "expected --bind <cwd> <cwd> in argv");
+    assert.ok(argv.includes("--clearenv"));
+    assert.ok(
+      argv.includes("--tmpfs") && argv.includes("/tmp"),
+      "expected --tmpfs /tmp in argv"
+    );
+    assert.equal(argv.includes("--rlimit-as"), false);
+    const commandIdx = argv.indexOf("--");
+    assert.deepEqual(argv.slice(commandIdx, commandIdx + 3), [
+      "--",
+      "bash",
+      "-c",
+    ]);
+  }
+
   it("builds the ordered v0 fence argv", () => {
     const cwd = "/workspace";
     const argv = createBwrapFence({
@@ -69,6 +128,21 @@ describe("createBwrapFence", () => {
       );
     }
     assert.deepEqual(argv.slice(-3), ["--", "node", "-v"]);
+  });
+
+  it("network:true drops --unshare-net but keeps every other fence flag (T9 opt-in)", () => {
+    const argv = fenceArgv(true);
+    assert.equal(argv.includes("--unshare-net"), false);
+    assertCanonicalFenceFlags(argv, "/workspace");
+  });
+
+  it("network:false and absent network both keep --unshare-net (default isolation)", () => {
+    const argvFalse = fenceArgv(false);
+    assert.ok(argvFalse.includes("--unshare-net"));
+    assertCanonicalFenceFlags(argvFalse, "/workspace");
+    const argvAbsent = fenceArgv();
+    assert.ok(argvAbsent.includes("--unshare-net"));
+    assertCanonicalFenceFlags(argvAbsent, "/workspace");
   });
 
   it("throws a ToolExecutionError when fsPolicy.allowedPaths() is empty (M4 fail-loud)", () => {

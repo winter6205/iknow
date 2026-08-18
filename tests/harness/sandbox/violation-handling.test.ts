@@ -302,6 +302,22 @@ describe("categorizeResult", () => {
     );
   });
 
+  it("[user_denied] network ask 被拒 → low,无新分类(#503 T11)", () => {
+    // T11 闭环:network:true 的 host-net opt-in 在 permission 层强制 ask
+    // (T10),用户拒绝走既有 [user_denied] 路径 → categorizer 落在 low tier,
+    // 不需要为 network 引入新拒绝分类 —— 分类面与动作拒绝轴解耦,只认前缀。
+    // 这条用例把该形态钉死:input.network 不参与 categorize,分类只读 message。
+    assert.equal(
+      categorizeResult({
+        name: "bash",
+        input: { command: "curl -sS http://127.0.0.1:3000", network: true },
+        kind: "execution_failed",
+        message: "[user_denied] user declined tool call: bash",
+      }).tier,
+      "low"
+    );
+  });
+
   it("non-execution_failed results → undefined tier", () => {
     assert.equal(
       categorizeResult({

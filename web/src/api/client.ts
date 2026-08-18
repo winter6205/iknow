@@ -193,6 +193,9 @@ export interface PendingAsk {
   readonly id: string;
   readonly tool: string;
   readonly summaryHint: string;
+  /** #503 T10 / ADR-0022:bash network:true 时由 executor 透传；缺省时该
+   *  key 不存在。SPA PermissionDialog 可据此渲染宿主网络标记。 */
+  readonly network?: boolean;
 }
 
 export type AskDecision = "allow-once" | "always-allow" | "deny";
