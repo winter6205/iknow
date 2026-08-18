@@ -369,12 +369,25 @@ describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
       );
 
       // 8) registry json 状态收敛 killed(读 .iknow/tasks/<id>.json)
+      // status flip 是 exit 事件驱动的异步 settle(manager.stop 毫秒级返回,
+      // 不阻塞);端口释放可能先于 settle 的 writeFile 落盘完成 → 端口关闭后
+      // 单次读 JSON 会拾到 spawn 时的 "running" 记录(full vitest 并发下偶发,
+      // 单跑通过)。与上方端口轮询同型(3s 上限 / 50ms 间隔)等待收敛。
       const jsonPath = logPath.replace(/\.log$/, ".json");
-      const rec = JSON.parse(await readFile(jsonPath, "utf8")) as {
-        status: string;
-        task_id: string;
-        conversation_id: string;
-      };
+      let rec:
+        | { status: string; task_id: string; conversation_id: string }
+        | undefined;
+      const regDeadline = Date.now() + 3_000;
+      while (Date.now() < regDeadline) {
+        try {
+          rec = JSON.parse(await readFile(jsonPath, "utf8")) as typeof rec;
+        } catch {
+          rec = undefined;
+        }
+        if (rec && rec.status !== "running") break;
+        await sleep(50);
+      }
+      assert.ok(rec, "registry json should exist and be parseable");
       assert.equal(rec.task_id, taskId);
       assert.equal(rec.conversation_id, conversationId);
       assert.equal(
