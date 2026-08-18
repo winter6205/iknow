@@ -9,32 +9,31 @@
 | stream | on |
 | thinking | adaptive |
 | maxOutputTokens | 8192 |
-| COMPACT_TIMEOUT_SECONDS | 90 |
+| timeout policy | no-default-client-side-timeout (Claude Code semantics) |
 
 ## Phase A — functional
 
 | Field | Value |
 |-------|-------|
 | outcome | summarized |
-| latencyMs | 12543 |
-| summaryLen | 5021 |
-| outputTokens | 1924 |
+| latencyMs | 13549 |
+| summaryLen | 4537 |
+| outputTokens | 2278 |
 ## Phase B — long-context latency stress
 
 | Field | Value |
 |-------|-------|
 | outcome | summarized |
-| latencyMs | 16405 |
+| latencyMs | 17398 |
 | dropped count / chars | 74 / 27292 |
-| defaultTimeoutMs | 90000 |
-| summaryLen | 6362 |
+| summaryLen | 5364 |
 
 ## Phase C — real SDK abort path
 
 | Field | Value |
 |-------|-------|
 | outcome | timeout |
-| wallClockMs | 116 |
+| wallClockMs | 104 |
 
 ### Phase A assertions
 
@@ -52,7 +51,7 @@
 
 | Assertion | Outcome |
 |-----------|---------|
-| outcome.kind in {summarized, timeout} | PASS |
+| outcome.kind === summarized (long-context 在 SDK 默认 HTTP 超时内完成) | PASS |
 
 ### Phase C assertions
 

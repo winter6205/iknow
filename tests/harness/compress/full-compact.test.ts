@@ -19,10 +19,7 @@ import {
   buildCompactedMessages,
   runFullCompact,
 } from "../../../src/harness/compress/full-compact.ts";
-import {
-  COMPACT_TIMEOUT_SECONDS,
-  DEFAULT_KEEP_RECENT,
-} from "../../../src/harness/compress/constant.ts";
+import { DEFAULT_KEEP_RECENT } from "../../../src/harness/compress/constant.ts";
 import type { CompactAdapter } from "../../../src/harness/compress/full-compact.ts";
 import type {
   AnthropicNativeMessage,
@@ -154,6 +151,37 @@ describe("extractCompactSummary", () => {
   it("连续空行折叠(3+ → 2)", () => {
     const out = extractCompactSummary("<summary>a\n\n\n\nb</summary>");
     assert.equal(out, "a\n\nb");
+  });
+
+  // #467 follow-up 回归:i467 real-LLM smoke 抓到 MiniMax-M3 真实模型把
+  // `<analysis>` 文本写在 `<summary>` 块内(或未闭合)→ 旧实现只 pre-strip
+  // 一次,scratchpad 文本泄漏进权威摘要。修复后对 base 再 strip 一次(含
+  // unclosed tail),无论 model 把 analysis 写在 summary 块外还是块内都能
+  // 干净剥离。
+  it("<analysis> 写在 <summary> 块内也被剥离(真实模型 leak 修复)", () => {
+    const raw =
+      "<summary>\n" +
+      "Primary request.\n" +
+      "<analysis>\ninner scratchpad inside summary block\n</analysis>\n" +
+      "More summary content.\n" +
+      "</summary>";
+    const out = extractCompactSummary(raw);
+    assert.ok(out !== undefined);
+    assert.ok(!out!.includes("<analysis>"), "analysis 标签不能泄漏进提取结果");
+    assert.ok(
+      !out!.includes("inner scratchpad"),
+      "analysis 块内文本必须被剥离"
+    );
+    assert.ok(out!.includes("Primary request"));
+    assert.ok(out!.includes("More summary content"));
+  });
+
+  it("<analysis> 未闭合(tail-only)也被剥离", () => {
+    const raw = "<summary>\nPrimary request.\n<analysis>orphan";
+    const out = extractCompactSummary(raw);
+    assert.ok(out !== undefined);
+    assert.ok(!out!.includes("<analysis>"));
+    assert.ok(out!.includes("Primary request"));
   });
 });
 
@@ -321,15 +349,21 @@ describe("runFullCompact", () => {
       assert.ok(out2.message.includes("async boom"));
   });
 
-  it("adapter_failed:失败分支不泄漏 timeout timer(review-fix Medium)", async () => {
+  it("adapter_failed:失败分支不泄漏注入的 timeout timer(review-fix Medium)", async () => {
     // 修复前:catch 分支设 adapterSettled=true 但不 clearTimeout,外部 finally
-    // 因 !adapterSettled 为 false 而跳过清理 → 90 s timer 挂在 event loop。
-    // 修复后:finally 块在 IIFE 内统一清 timer,失败路径不残留。
+    // 因 !adapterSettled 为 false 而跳过清理 → 注入的 timeout timer 挂在
+    // event loop。修复后:finally 块在 IIFE 内统一清 timer,失败路径不残留。
+    // 注:timeoutMs 缺席时本来就不装 timer;此测试显式注入 timeoutMs=5000
+    // 触发 timer,验证失败分支仍正确清理。
     const throwAdapter = makeAdapter([{ throw: new Error("boom") }]);
     const timersBefore = process
       .getActiveResourcesInfo()
       .filter((r) => r === "Timeout").length;
-    const out = await runFullCompact({ adapter: throwAdapter, dropped });
+    const out = await runFullCompact({
+      adapter: throwAdapter,
+      dropped,
+      timeoutMs: 5000,
+    });
     assert.equal(out.kind, "adapter_failed");
     // 让 microtask 队列清空,确保任何 pending setTimeout 都已登记。
     await new Promise((r) => setTimeout(r, 0));
@@ -338,29 +372,8 @@ describe("runFullCompact", () => {
       .filter((r) => r === "Timeout").length;
     assert.ok(
       timersAfter <= timersBefore,
-      `失败分支不应残留 timeout timer: before=${timersBefore}, after=${timersAfter}`
+      `失败分支不应残留注入的 timeout timer: before=${timersBefore}, after=${timersAfter}`
     );
-  });
-
-  it("timeout:超时 → timeout,且 adapter 调用被 abort(AbortError)", async () => {
-    let aborted = false;
-    const adapter: CompactAdapter = {
-      encodeUserText: (userText: string): AnthropicNativeMessage =>
-        text(userText),
-      step: async (_state, _request, signal) => {
-        // 挂起直到被 abort。
-        await new Promise<never>((_, reject) => {
-          signal?.addEventListener("abort", () => {
-            aborted = true;
-            reject(new DOMException("aborted", "AbortError"));
-          });
-        });
-        throw new Error("unreachable");
-      },
-    };
-    const out = await runFullCompact({ adapter, dropped, timeoutMs: 30 });
-    assert.equal(out.kind, "timeout");
-    assert.ok(aborted, "超时必须 abort 真实 adapter 调用");
   });
 
   it("signal_aborted:入口已 abort → 不调 adapter,直接 signal_aborted", async () => {
@@ -388,11 +401,46 @@ describe("runFullCompact", () => {
     assert.deepEqual(events, []);
   });
 
-  it("默认超时 = COMPACT_TIMEOUT_SECONDS(常量 exported)", () => {
-    // 2026-08-19 实测调整:25s 在 ~27KB dropped 下已吃掉 67% 预算,长上下文场景
-    // 必溢出。25→90 给 ~3.6× headroom,见 constant.ts 注释 + smoke artifact
-    // docs/handoff/i467-full-compact/real-llm-full-compact.{json,md}。
-    assert.equal(COMPACT_TIMEOUT_SECONDS, 90);
+  it("无默认 client-side 超时:timeoutMs 缺席 → 无 timer,adapter settle 即出 outcome(Claude Code 语义)", async () => {
+    // 参考 Claude Code:压缩等模型自然完成,不设紧凑 timeout;上限 = SDK
+    // 默认 HTTP timeout + 用户 signal。timeoutMs 缺席时不得装 timer ——
+    // 验证:慢 adapter(80ms,超旧 25s 语义下会触发 timeout)返回 summarized,
+    // 且全程无 Timeout 句柄被注册(getActiveResourcesInfo 增量 = 0)。
+    const timersBefore = process
+      .getActiveResourcesInfo()
+      .filter((r) => r === "Timeout").length;
+    const slowAdapter = makeAdapter([
+      { delayMs: 80, then: assistantTurn({ texts: ["<summary>S</summary>"] }) },
+    ]);
+    const out = await runFullCompact({ adapter: slowAdapter, dropped });
+    assert.equal(out.kind, "summarized");
+    const timersAfter = process
+      .getActiveResourcesInfo()
+      .filter((r) => r === "Timeout").length;
+    assert.ok(
+      timersAfter <= timersBefore,
+      `timeoutMs 缺席不得注册 timer: before=${timersBefore}, after=${timersAfter}`
+    );
+  });
+
+  it("timeoutMs 显式注入仍生效(测试 / caller 显式注入缝保留)", async () => {
+    let aborted = false;
+    const adapter: CompactAdapter = {
+      encodeUserText: (userText: string): AnthropicNativeMessage =>
+        text(userText),
+      step: async (_state, _request, signal) => {
+        await new Promise<never>((_, reject) => {
+          signal?.addEventListener("abort", () => {
+            aborted = true;
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        });
+        throw new Error("unreachable");
+      },
+    };
+    const out = await runFullCompact({ adapter, dropped, timeoutMs: 30 });
+    assert.equal(out.kind, "timeout");
+    assert.ok(aborted, "注入 timeoutMs 必须 abort 真实 adapter 调用");
   });
 
   // #467 T4:wait 逻辑参考 Claude Code — 压缩生命周期事件透传。

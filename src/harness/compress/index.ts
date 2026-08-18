@@ -24,11 +24,13 @@ export function shouldAutoCompact(
 //
 // #467 step 2:full-compact 五个函数(LLM 结构化摘要压缩)与旧纯截断路径
 // `compactMessages` 并列暴露 —— loop-engine 与 hub 可自由选择摘要成功路径或
-// placeholder 回退路径。
+// placeholder 回退路径。注:不再导出 `COMPACT_TIMEOUT_SECONDS`(2026-08-19,
+// 实测 27KB dropped ~17s + Claude Code 无 client-side 超时语义对齐)——
+// runFullCompact 不设默认 client-side 超时,上限 = SDK 默认 HTTP timeout
+// + 用户 signal 取消;`timeoutMs` 保留为注入缝供测试 / 显式 caller 使用。
 export {
   COMPACTION_BOUNDARY_PLACEHOLDER,
   DEFAULT_KEEP_RECENT,
-  COMPACT_TIMEOUT_SECONDS,
 } from "./constant.js";
 export { compactMessages } from "./window.js";
 export { estimateMessagesTokens, estimateTokens } from "./estimate.js";

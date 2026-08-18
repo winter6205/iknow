@@ -1,19 +1,19 @@
 {
   "result": "pass",
-  "timestamp": "2026-08-18T18:09:24.819Z",
+  "timestamp": "2026-08-18T18:38:57.615Z",
   "model": "minimax-cn/MiniMax-M3",
   "baseUrl": "172.31.128.1:20128",
   "key_source": "settings.llm.apiKey",
   "stream": "on",
   "thinking": "adaptive",
   "maxOutputTokens": 8192,
-  "compact_timeout_seconds": 90,
+  "timeout_policy": "no-default-client-side-timeout (Claude Code semantics)",
   "phases": {
     "functional": {
       "outcome": "summarized",
-      "durationMs": 12543,
-      "summaryLen": 5021,
-      "outputTokens": 1924,
+      "durationMs": 13549,
+      "summaryLen": 4537,
+      "outputTokens": 2278,
       "assertions": [
         {
           "name": "outcome.kind === summarized",
@@ -47,14 +47,13 @@
     },
     "long": {
       "outcome": "summarized",
-      "durationMs": 16405,
+      "durationMs": 17398,
       "droppedCount": 74,
       "droppedCharCount": 27292,
-      "summaryLen": 6362,
-      "defaultTimeoutMs": 90000,
+      "summaryLen": 5364,
       "assertions": [
         {
-          "name": "outcome.kind in {summarized, timeout}",
+          "name": "outcome.kind === summarized (long-context 在 SDK 默认 HTTP 超时内完成)",
           "pass": true
         }
       ],
@@ -62,7 +61,7 @@
     },
     "abort": {
       "outcome": "timeout",
-      "wallClockMs": 116,
+      "wallClockMs": 104,
       "assertions": [
         {
           "name": "outcome.kind === timeout (real SDK aborted)",

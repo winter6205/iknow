@@ -1,11 +1,11 @@
 /**
  * #467 真实 LLM full-compact smoke：用真实模型测量压缩耗时并验证端到端契约。
  *
- * 背景:issue #467 决议 COMPACT_TIMEOUT_SECONDS=25;但用户反馈"上下文一场时间
- * 会变长"——长上下文摘要的 latency 可能超 25s。本 smoke 在真实 LLM 上测两条
- * case(中等 fixture / ~80KB 长 fixture)的 latencyMs,为 task #14 的超时调整
- * 决策提供 ground truth;同时验证摘要结构化 / 提取 / 重组装契约与真实 SDK
- * abort 传播。
+ * 背景:full-compact 不设默认 client-side 超时(wait 逻辑参考 Claude Code:
+ * 压缩等模型自然完成,上限 = SDK 默认 HTTP timeout + 用户 signal 取消;
+ * OpenHarness 的 25s/attempt + retries 模型在长上下文下不够)。本 smoke 在
+ * 真实 LLM 上测两条 case(中等 fixture / ~80KB 长 fixture)的 latencyMs,
+ * 同时验证摘要结构化 / 提取 / 重组装契约与真实 SDK abort 传播。
  *
  * adapter 装配:loadIknowEnv → createAdapterFromEnv(env) —— 与生产
  * buildHarnessEngine / hub.reloadFromEnv 共用的 SSOT 工厂,流式臂开关 /
@@ -15,10 +15,10 @@
  *   A. functional — 中等量 dropped,user/assistant/tool 交错;断言
  *      summarized + 9 节结构 + 种子事实保留 + 重装配几何;
  *   B. long-context latency — ~40 条 / ~80KB dropped,测真实 latencyMs;
- *      outcome=timeout → 直接证明默认超时对长上下文不足;
+ *      断言 summarized(无默认超时 → adapter 自然 settle);
  *   C. abort — timeoutMs=100ms 必须真 abort 飞行 HTTP(wall clock < 1s),
- *      验证 runFullCompact 内部 AbortController 经 adapter 信号参数生效
- *      (adapter 两臂都把 signal 传给 SDK RequestOptions)。
+ *      验证 runFullCompact 注入缝 + 内部 AbortController 经 adapter 信号参数
+ *      生效(adapter 两臂都把 signal 传给 SDK RequestOptions)。
  *
  * host-layer guard:smoke 自身不得引用 src/cli / src/session-api /
  * src/interaction / web/(harness 层独立性,同 i9 smoke)。
@@ -37,7 +37,6 @@ import {
   splitForCompaction,
   buildCompactedMessages,
   runFullCompact,
-  COMPACT_TIMEOUT_SECONDS,
 } from "../src/harness/compress/index.js";
 import type {
   AnthropicNativeMessage,
@@ -299,23 +298,9 @@ async function runLongPhase(env: IknowEnv): Promise<
   const startedAt = performance.now();
   const outcome = await runFullCompact({ adapter, dropped: split.dropped });
   const durationMs = Math.round(performance.now() - startedAt);
-  const defaultTimeoutMs = COMPACT_TIMEOUT_SECONDS * 1000;
-
-  const notes: string[] = [];
-  if (outcome.kind === "timeout") {
-    notes.push(
-      `hit default COMPACT_TIMEOUT_SECONDS=${COMPACT_TIMEOUT_SECONDS}s with ` +
-        `${droppedCharCount} chars dropped — default too tight for long contexts.`
-    );
-  } else if (
-    outcome.kind === "summarized" &&
-    durationMs > defaultTimeoutMs * 0.8
-  ) {
-    notes.push(
-      `latency ${durationMs}ms is ${Math.round((durationMs / defaultTimeoutMs) * 100)}% ` +
-        `of default ${defaultTimeoutMs}ms — headroom thin; recommend raising.`
-    );
-  }
+  // 无默认 client-side 超时(Claude Code 语义):phase B 仅记录真实 latency,
+  // 不再比较"占默认超时 X%"。若 adapter 失败(timeout 已被 SDK 默认 HTTP 超时
+  // 兜底;本 phase 调用未注入 timeoutMs → 不会触发 timer),如实上报 outcome。
   return {
     outcome: outcome.kind,
     durationMs,
@@ -324,11 +309,11 @@ async function runLongPhase(env: IknowEnv): Promise<
     summaryLen: outcome.kind === "summarized" ? outcome.text.length : 0,
     assertions: [
       {
-        name: "outcome.kind in {summarized, timeout}",
-        pass: outcome.kind === "summarized" || outcome.kind === "timeout",
+        name: "outcome.kind === summarized (long-context 在 SDK 默认 HTTP 超时内完成)",
+        pass: outcome.kind === "summarized",
       },
     ],
-    notes,
+    notes: [],
   };
 }
 
@@ -386,8 +371,7 @@ async function main(): Promise<void> {
   const long = await runLongPhase(env);
   console.log(
     `  outcome=${long.outcome} latencyMs=${long.durationMs} ` +
-      `dropped=${long.droppedCount} chars=${long.droppedCharCount} ` +
-      `defaultTimeoutMs=${COMPACT_TIMEOUT_SECONDS * 1000}`
+      `dropped=${long.droppedCount} chars=${long.droppedCharCount}`
   );
   for (const n of long.notes) console.log(`  note: ${n}`);
 
@@ -407,7 +391,7 @@ async function main(): Promise<void> {
     stream: env.llm.stream,
     thinking: env.llm.thinking,
     maxOutputTokens: env.llm.maxOutputTokens,
-    compact_timeout_seconds: COMPACT_TIMEOUT_SECONDS,
+    timeout_policy: "no-default-client-side-timeout (Claude Code semantics)",
     phases: {
       functional: {
         outcome: functional.outcome,
@@ -424,7 +408,6 @@ async function main(): Promise<void> {
         droppedCount: long.droppedCount,
         droppedCharCount: long.droppedCharCount,
         summaryLen: long.summaryLen,
-        defaultTimeoutMs: COMPACT_TIMEOUT_SECONDS * 1000,
         assertions: long.assertions,
         notes: long.notes,
       },
@@ -458,7 +441,7 @@ async function main(): Promise<void> {
     `| stream | ${summary.stream} |\n` +
     `| thinking | ${summary.thinking} |\n` +
     `| maxOutputTokens | ${summary.maxOutputTokens} |\n` +
-    `| COMPACT_TIMEOUT_SECONDS | ${summary.compact_timeout_seconds} |\n\n` +
+    `| timeout policy | ${summary.timeout_policy} |\n\n` +
     `## Phase A — functional\n\n` +
     `| Field | Value |\n|-------|-------|\n` +
     `| outcome | ${summary.phases.functional.outcome} |\n` +
@@ -470,7 +453,6 @@ async function main(): Promise<void> {
     `| outcome | ${summary.phases.long.outcome} |\n` +
     `| latencyMs | ${summary.phases.long.durationMs} |\n` +
     `| dropped count / chars | ${summary.phases.long.droppedCount} / ${summary.phases.long.droppedCharCount} |\n` +
-    `| defaultTimeoutMs | ${summary.phases.long.defaultTimeoutMs} |\n` +
     `| summaryLen | ${summary.phases.long.summaryLen} |\n\n` +
     (summary.phases.long.notes.length > 0
       ? `**Notes**\n\n${summary.phases.long.notes.map((n) => `- ${n}`).join("\n")}\n`

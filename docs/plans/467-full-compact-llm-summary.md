@@ -32,13 +32,13 @@
 
 每函数单一职责（complexity-anti-drift UNCLEAR 修复）：
 
-| 函数                                              | 职责                                                                                                                                                              |
-| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `buildCompactPrompt(customInstructions?: string)` | 纯字符串拼装：NO_TOOLS_PREAMBLE + BASE_COMPACT_PROMPT + 可选 Additional Instructions + NO_TOOLS_TRAILER                                                           |
-| `extractCompactSummary(raw: string)`              | 纯解析：strip `<analysis>` 块 → 提取 `<summary>` 内容；无 `<summary>` 包裹 → 取 strip 后全文（Postel）；空 → `undefined`                                          |
-| `splitForCompaction(messages, keepRecent)`        | 纯切分：复用 window.ts 的 tool-pair 配对纪律，返回 `{ dropped, kept }`（dropped 为空 → `undefined` = 无需压缩）                                                   |
-| `buildCompactedMessages(opts)`                    | 纯组装：boundary 消息（摘要 user 消息，带 "This session is being continued…" wrapper）+ kept；与 `compactMessages` 共用 tool-pair 校验                            |
-| `runFullCompact(opts)`                            | 编排：调用 `opts.adapter.step`（state = dropped + prompt user 消息，无 tools，turnCount 0）+ `COMPACT_TIMEOUT_SECONDS` 超时 + catch-all；返回 discriminated union |
+| 函数                                              | 职责                                                                                                                                                                                                                                                                                           |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `buildCompactPrompt(customInstructions?: string)` | 纯字符串拼装：NO_TOOLS_PREAMBLE + BASE_COMPACT_PROMPT + 可选 Additional Instructions + NO_TOOLS_TRAILER                                                                                                                                                                                        |
+| `extractCompactSummary(raw: string)`              | 纯解析：strip `<analysis>` 块 → 提取 `<summary>` 内容；无 `<summary>` 包裹 → 取 strip 后全文（Postel）；空 → `undefined`                                                                                                                                                                       |
+| `splitForCompaction(messages, keepRecent)`        | 纯切分：复用 window.ts 的 tool-pair 配对纪律，返回 `{ dropped, kept }`（dropped 为空 → `undefined` = 无需压缩）                                                                                                                                                                                |
+| `buildCompactedMessages(opts)`                    | 纯组装：boundary 消息（摘要 user 消息，带 "This session is being continued…" wrapper）+ kept；与 `compactMessages` 共用 tool-pair 校验                                                                                                                                                         |
+| `runFullCompact(opts)`                            | 编排：调用 `opts.adapter.step`（state = dropped + prompt user 消息，无 tools，turnCount 0）+ 可选 `opts.timeoutMs` 注入 timer + catch-all；返回 discriminated union。无默认 client-side 超时（wait 逻辑参考 Claude Code：压缩等模型自然完成；上限 = SDK 默认 HTTP timeout + 用户 signal 取消） |
 
 ### 错误处理（error-handling-enforcer FAIL 修复：typed discriminated union + exit criteria）
 
@@ -55,14 +55,14 @@ Exit criteria：
 
 - `summarized` 且 text 经 `extractCompactSummary` 非空 → 采用摘要；
 - 其余 3 种 → 调用方回退现有纯截断（placeholder）路径，**绝不阻塞主回路**（对齐 epilogue summary ADR-0011 纪律）；`signal_aborted` 例外——wait 逻辑参考 Claude Code：压缩中取消 = 会话保持原样，不做破坏性 fallback；
-- 超时值复用 `COMPACT_TIMEOUT_SECONDS`（**90s**；初版 25s 经 i467 real-LLM smoke 实测证据调整：27KB dropped 已耗时 ~17s 占 25s 的 67%，长上下文必溢出；产物 `docs/handoff/i467-full-compact/`）；测试可注入 `timeoutMs` 覆盖；
-- 等待 UX（参考 Claude Code）：runFullCompact 透传 `opts.onStream`，emit `compaction_started` / `compaction_completed` / `compaction_failed` 事件 + adapter text_delta 直透，宿主可渲染进度。
+- 不设默认 client-side 超时（2026-08-19 实测调整，参考 Claude Code + OpenHarness 双源：实测 27KB dropped ~17s 占旧 25s 的 67%，OpenHarness 的 25s/attempt + retries 模型在长上下文下不足；Claude Code 不设 client-side 超时，靠 SDK 默认 HTTP timeout + 用户 signal 兜底）。`timeoutMs` 保留为注入缝供测试 / 显式 caller 使用；产物 `docs/handoff/i467-full-compact/`；
+- 等待 UX（参考 Claude Code）：runFullCompact 透传 `opts.onStream`，emit `compaction_started` / `compaction_completed` / `compaction_failed` / `compaction_cancelled` 事件 + adapter text_delta 直透，宿主可渲染进度。
 
 ### 触发点接入（保留双触发路径语义）
 
 1. **loop-engine**：`applyCompactAttachment` 改 async（两处调用点 reactive line ~773 / proactive line ~1396 同步改 await）。执行序：
    - `splitForCompaction` → dropped 为空 → 原样返回（不变）；
-   - dropped 在场 → `runFullCompact`（best-effort，timeout 90s）；
+   - dropped 在场 → `runFullCompact`（best-effort，无默认超时；失败 → `compactMessages` placeholder）；
    - 成功 → `buildCompactedMessages`（摘要 user 消息）+ boundaryAttachment 注入；
    - 失败 → 原 `compactMessages` placeholder 路径（行为与现 master 等价）+ boundaryAttachment 注入。
    - trace：摘要轮走 `deps.trace?.recordLlmCall`（status ok/error，对齐 epilogue summary 记录模式，`loop-engine.ts:1516` 同款）。
@@ -142,6 +142,6 @@ Exit criteria：
 
 ## 风险
 
-1. **超时拖累主回路**：proactive compact 发生在 turn 循环内，90s 超时会阻塞该 turn。缓解：run 级 signal 透传进压缩等待（用户可取消，signal_aborted → 会话原样 + cancelled stop）；阈值 90s 为 constant 可配；实测 27KB dropped ~17s（i467 smoke）。
+1. **压缩调用阻塞主回路**：proactive compact 发生在 turn 循环内，等待期间 turn 被阻塞。缓解：run 级 signal 透传进压缩等待（用户可取消，signal_aborted → 会话原样 + cancelled stop）；无默认 client-side 超时（SDK 默认 HTTP timeout + 用户 signal 兜底；长上下文用户可经 Esc/Ctrl+C 中止）。实测 27KB dropped ~17s（i467 smoke）。
 2. **摘要质量回归**：摘要丢关键信息。缓解：9 节结构 + "All user messages" 节保留用户原话；失败回退截断路径不劣于现状。
 3. **改名迁移**：旧 session 文件 `summary` 字段 → sanitize 回填 `title`；round-trip 测试钉住。

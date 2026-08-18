@@ -26,7 +26,7 @@ import type {
 } from "../model-adapter/types.js";
 import type { HarnessStreamEvent } from "../stream.js";
 import { safeEmitStream } from "../stream.js";
-import { DEFAULT_KEEP_RECENT, COMPACT_TIMEOUT_SECONDS } from "./constant.js";
+import { DEFAULT_KEEP_RECENT } from "./constant.js";
 import { preserveToolPairs } from "./window.js";
 
 // ---------------------------------------------------------------------------
@@ -99,7 +99,14 @@ export function buildCompactPrompt(customInstructions?: string): string {
 export function extractCompactSummary(raw: string): string | undefined {
   const withoutAnalysis = raw.replace(/<analysis>[\s\S]*?<\/analysis>/g, "");
   const summaryMatch = withoutAnalysis.match(/<summary>([\s\S]*?)<\/summary>/);
-  const base = summaryMatch ? (summaryMatch[1] ?? "") : withoutAnalysis;
+  let base = summaryMatch ? (summaryMatch[1] ?? "") : withoutAnalysis;
+  // #467 follow-up:i467 real-LLM smoke 抓到真实模型(MiniMax-M3)把
+  // `<analysis>` 写进 summary 块内(或未闭合)→ 上面的 pre-strip 漏过,
+  // scratchpad 文本泄漏进权威摘要。对提取出的 base 再全局 strip 一次
+  // (含 unclosed tail);summary 块本身不承载 analysis 语义,strip 无信息损失。
+  base = base
+    .replace(/<analysis>[\s\S]*?<\/analysis>/g, "")
+    .replace(/<analysis>[\s\S]*$/g, "");
   const collapsed = base.replace(/\n{3,}/g, "\n\n");
   const trimmed = collapsed.trim();
   return trimmed.length > 0 ? trimmed : undefined;
@@ -221,8 +228,12 @@ export interface CompactAdapter {
  *   - adapter resolves with non-empty extracted text → `{ kind: "summarized" }`;
  *   - adapter resolves with empty/whitespace-only text → `{ kind: "empty_response" }`;
  *   - adapter throws / rejects → `{ kind: "adapter_failed", message: String(err) }`;
- *   - timeout (default `COMPACT_TIMEOUT_SECONDS * 1000`) fires → `{ kind: "timeout" }`,
- *     the in-flight adapter call is aborted via internal controller;
+ *   - `opts.timeoutMs` 注入的 timer 触发 → `{ kind: "timeout" }`,the in-flight
+ *     adapter call is aborted via internal controller;**无默认 client-side
+ *     超时**(wait 逻辑参考 Claude Code:压缩不设紧凑 timeout,上限 = SDK 默认
+ *     HTTP timeout + 用户 signal 取消;OpenHarness 的 25s/attempt + retries
+ *     模型在长上下文下不够——i467 smoke 实测 27KB dropped 已 ~17s)。
+ *     `timeoutMs` 保留为测试 / 未来 caller 显式注入缝;
  *   - `opts.signal` aborts **mid-flight** (wait 逻辑参考 Claude Code:压缩中
  *     用户取消 = 保持会话原样)→ `{ kind: "signal_aborted" }`,in-flight adapter
  *     调用经 composite signal 一并取消(与 timeout abort 同一通道)。
@@ -247,7 +258,9 @@ export async function runFullCompact(opts: {
   readonly onStream?: (event: HarnessStreamEvent) => void;
 }): Promise<FullCompactOutcome> {
   if (opts.signal?.aborted) return { kind: "signal_aborted" };
-  const timeoutMs = opts.timeoutMs ?? COMPACT_TIMEOUT_SECONDS * 1000;
+  // 无默认超时(Claude Code 语义):timeoutMs 缺席 → 不装 timer,adapter 自然
+  // settle;上限由 SDK 默认 HTTP timeout(10 min)+ 用户 signal 兜底。
+  const timeoutMs = opts.timeoutMs;
   const promptText = buildCompactPrompt();
   const compactMessages: ReadonlyArray<AnthropicNativeMessage> = Object.freeze([
     ...opts.dropped,
@@ -293,22 +306,27 @@ export async function runFullCompact(opts: {
     } finally {
       // timer / settled 信号必须在 IIFE 内清除,不能依赖外部 finally:
       // 外部 finally 只在 !adapterSettled 时清 timer,失败分支(adapterSettled=true
-      // 但走 catch)会泄漏 90 s timeout,在 iknow ask oneshot 触发失败的 compact
-      // 时让进程多挂 ~90 s 才退出。
+      // 但走 catch)会泄漏注入的 timeoutMs timer(无默认超时后仅测试 / 显式注入
+      // 路径存在,但泄漏语义同样必须守住)。
       adapterSettled = true;
       if (timer !== undefined) clearTimeout(timer);
     }
   })();
 
-  const timeoutP = new Promise<FullCompactOutcome>((resolve) => {
-    timer = setTimeout(() => {
-      compactController.abort();
-      resolve({ kind: "timeout" });
-    }, timeoutMs);
-  });
+  const timeoutP =
+    timeoutMs !== undefined
+      ? new Promise<FullCompactOutcome>((resolve) => {
+          timer = setTimeout(() => {
+            compactController.abort();
+            resolve({ kind: "timeout" });
+          }, timeoutMs);
+        })
+      : undefined;
 
   try {
-    const winner = await Promise.race([adapterP, timeoutP]);
+    const winner = await Promise.race(
+      timeoutP !== undefined ? [adapterP, timeoutP] : [adapterP]
+    );
     // 中途被 run / 宿主 signal 取消 → 返回 signal_aborted(Claude Code 体感:
     // 压缩中 Esc = 立刻退出 + 会话原样,不像 timeout / adapter_failed 那样
     // 走 fallback placeholder)。同步 emit `compaction_cancelled` 终态事件
