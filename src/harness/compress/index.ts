@@ -21,10 +21,23 @@ export function shouldAutoCompact(
 // Re-export 公共 API:让 `import { ... } from "src/harness/compress/"` 一站式可用
 // 注:strict noUnusedLocals 下,仅 re-export 的符号不能先 import 再 re-export,
 // 直接 `export ... from` 保持单一 write(T6 deviation)。
+//
+// #467 step 2:full-compact 五个函数(LLM 结构化摘要压缩)与旧纯截断路径
+// `compactMessages` 并列暴露 —— loop-engine 与 hub 可自由选择摘要成功路径或
+// placeholder 回退路径。
 export {
   COMPACTION_BOUNDARY_PLACEHOLDER,
   DEFAULT_KEEP_RECENT,
+  COMPACT_TIMEOUT_SECONDS,
 } from "./constant.js";
 export { compactMessages } from "./window.js";
 export { estimateMessagesTokens, estimateTokens } from "./estimate.js";
 export { getAutoCompactThreshold, validateThreshold } from "./threshold.js";
+export {
+  buildCompactPrompt,
+  extractCompactSummary,
+  splitForCompaction,
+  buildCompactedMessages,
+  runFullCompact,
+} from "./full-compact.js";
+export type { FullCompactOutcome, CompactAdapter } from "./full-compact.js";

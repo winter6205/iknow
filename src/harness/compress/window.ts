@@ -10,8 +10,12 @@ import type {
 
 /**
  * 从末尾保留 keepRecent 条并向前修补边界,确保 tool_use↔tool_result 配对完整。
+ *
+ * #467 step 2:导出供 `full-compact.splitForCompaction` 复用同一 tool-pair
+ * 守门(proactive / reactive / 手动 compress 共用同一份"丢弃前缀 + 配对补全"
+ * 不变式)。新导出是 additive,既有 `compactMessages` 行为字节级稳定。
  */
-function preserveToolPairs(
+export function preserveToolPairs(
   messages: ReadonlyArray<AnthropicNativeMessage>,
   keepRecent: number
 ): { kept: ReadonlyArray<AnthropicNativeMessage>; slicedFrom: number } {

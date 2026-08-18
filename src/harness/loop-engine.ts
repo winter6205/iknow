@@ -63,11 +63,16 @@ import type {
 import { safeTrace } from "./trace/index.js";
 import type { HarnessStreamEvent } from "./stream.js";
 import {
+  buildCompactedMessages,
+  buildCompactPrompt,
   compactMessages,
   estimateMessagesTokens,
   getAutoCompactThreshold,
+  runFullCompact,
   shouldAutoCompact,
+  splitForCompaction,
 } from "./compress/index.js";
+import type { FullCompactOutcome } from "./compress/index.js";
 import { recognize } from "./secret-roundtrip/index.js";
 import type { SecretRegistry } from "./secret-roundtrip/index.js";
 
@@ -267,24 +272,78 @@ function appendSystemInterrupt(state: LoopState): LoopState {
 }
 
 /**
- * #458 T7 (SC11):统一两处 compact 调用点(reactive line 717 / proactive
- * line 1339)的压缩 + 边界渲染缝。原始 compactMessages 输出 + boundary
- * placeholder user 消息后,若 `deps.boundaryAttachment?.()` 返回非空字符串,
- * 再追加一条 user 消息承载渲染文本(放在 placeholder 之后)。新
- * state.messages 走与 appendMessage 相同的 immutable 冻结纪律。
+ * #458 T7 (SC11):统一两处 compact 调用点(reactive / proactive)的压缩 +
+ * 边界渲染缝。原 placeholder 路径保持不变,现叠加 #467 step 2 的 LLM
+ * 结构化摘要优先路径:
  *
- * 停止语义守门:boundaryAttachment 字段缺席 → helper 早退,返回
- * `compactMessages(state.messages)` 原样产物,与现 master byte-identical;
- * 字段在 → 仅在 compact 触发时插入 user 消息,不改变 stopReason / messages
- * count for verifier。普通 turn(非 compact)→ 调用方只在 compact 分支调本
- * helper,boundaryAttachment 不被调用(SC11 no-op)。
+ *   1. `splitForCompaction(state.messages, DEFAULT_KEEP_RECENT)` 复用
+ *      window.ts tool-pair 守门拆 dropped / kept;无可丢前缀 →
+ *      return state(行为与旧 `compacted === state.messages` 早退一致);
+ *   2. best-effort `runFullCompact` 对 dropped 跑一轮 LLM 摘要
+ *      (no tools → 纯文本;adapter 拒绝 / 超时 / 空响应 → 各种 outcome);
+ *   3. `summarized` → `buildCompactedMessages`:
+ *      [summary user 消息, (可选 boundaryAttr), ...kept];
+ *   4. 其余 outcome → 回退现有 `compactMessages` + boundary placeholder
+ *      路径(#467 决议:摘要失败绝不阻塞主 loop)。
+ *
+ * 停止语义守门不变:boundaryAttachment 字段缺席 → 摘要路径不插入 attachment,
+ * 回退路径与现 master byte-identical;普通 turn(非 compact)→ helper 不被调用。
  */
-function applyCompactAttachment(
+async function applyCompactAttachment(
   state: LoopState,
   deps: LoopEngineDeps
-): LoopState {
+): Promise<LoopState> {
+  const split = splitForCompaction(state.messages);
+  if (split === undefined) return state;
+
+  const startedAt = new Date().toISOString();
+  const startMono = performance.now();
+  const inputMessages: ReadonlyArray<AnthropicNativeMessage> = Object.freeze([
+    ...split.dropped,
+    deps.adapter.encodeUserText(buildCompactPrompt()),
+  ]);
+  const outcome = await runFullCompact({
+    adapter: deps.adapter,
+    dropped: split.dropped,
+    signal: undefined,
+  });
+  const endedAt = new Date().toISOString();
+  const durationMs = performance.now() - startMono;
+
+  if (outcome.kind === "summarized") {
+    const boundary = deps.boundaryAttachment?.();
+    const composed = buildCompactedMessages({
+      summaryText: outcome.text,
+      kept: split.kept,
+      boundaryText: boundary,
+    });
+    await recordCompactLlmCall({
+      deps,
+      startedAt,
+      endedAt,
+      durationMs,
+      status: "ok",
+      outcome,
+      inputMessages,
+    });
+    return {
+      ...state,
+      messages: Object.freeze(composed.map((m) => freezeMessage(m))),
+    };
+  }
+
+  // 摘要失败 / 超时 / 空响应 / adapter 拒绝 → 回退旧纯截断 placeholder 路径。
   const compacted = compactMessages(state.messages);
   if (compacted === state.messages) return state;
+  await recordCompactLlmCall({
+    deps,
+    startedAt,
+    endedAt,
+    durationMs,
+    status: "error",
+    outcome,
+    inputMessages,
+  });
   const boundary = deps.boundaryAttachment?.();
   const composed: ReadonlyArray<AnthropicNativeMessage> =
     boundary !== undefined && boundary.length > 0
@@ -298,6 +357,54 @@ function applyCompactAttachment(
     ...state,
     messages: Object.freeze(composed.map((m) => freezeMessage(m))),
   };
+}
+
+/**
+ * #467 step 2:compact 摘要轮的 trace 落盘(best-effort,失败不阻塞)。
+ * 模式对齐 epilogueSummary(loop-engine.ts:517)的 recordLlmCall:成功路径
+ * usage 展开填四 token 字段,失败路径 status "error" + error.message 携带
+ * outcome.kind(kind 不在 TraceErrorType 联合内,走 "unknown" 兜底,具体
+ * kind 保留在 message 供观测方区分)。POSTEL(ADR-0008 D3):usage 缺席时
+ * *_tokens 键缺席(not zero)。
+ */
+async function recordCompactLlmCall(opts: {
+  readonly deps: LoopEngineDeps;
+  readonly startedAt: string;
+  readonly endedAt: string;
+  readonly durationMs: number;
+  readonly status: "ok" | "error";
+  readonly outcome: FullCompactOutcome;
+  readonly inputMessages: ReadonlyArray<AnthropicNativeMessage>;
+}): Promise<void> {
+  if (opts.deps.trace === undefined) return;
+  const streamMode = opts.deps.adapter.streamMode === true;
+  const usage =
+    opts.outcome.kind === "summarized" ? opts.outcome.usage : undefined;
+  const error: TraceError | undefined =
+    opts.status === "error"
+      ? {
+          type: "unknown",
+          message: `compact_${opts.outcome.kind}${
+            opts.outcome.kind === "adapter_failed"
+              ? `: ${opts.outcome.message}`
+              : ""
+          }`,
+        }
+      : undefined;
+  await safeTrace(() =>
+    opts.deps.trace!.recordLlmCall({
+      startedAt: opts.startedAt,
+      endedAt: opts.endedAt,
+      durationMs: opts.durationMs,
+      ...(opts.status === "ok" ? { supplierStop: "success" } : {}),
+      stream: streamMode,
+      messagesCaptured: true,
+      messages: opts.inputMessages,
+      status: opts.status,
+      ...(error !== undefined ? { error } : {}),
+      ...(usage !== undefined ? usage : {}),
+    })
+  );
 }
 
 /**
@@ -770,7 +877,10 @@ async function runModelPhase(opts: {
         !opts.reactiveAttemptedRef.attempted
       ) {
         opts.reactiveAttemptedRef.attempted = true;
-        const compactedState = applyCompactAttachment(opts.state, opts.deps);
+        const compactedState = await applyCompactAttachment(
+          opts.state,
+          opts.deps
+        );
         if (compactedState.messages !== opts.state.messages) {
           return {
             kind: "reactive_compact_pending",
@@ -1393,7 +1503,7 @@ export async function run(
         // #458 T7 (SC11):applyCompactAttachment 统一 proactive + reactive
         // 两处 compact(helper 提取无双份实现),并在 placeholder 之后注入
         // boundaryAttachment 渲染文本。返回 state 同引用 = 未实际压缩。
-        const compactedState = applyCompactAttachment(state, deps);
+        const compactedState = await applyCompactAttachment(state, deps);
         if (compactedState.messages !== state.messages) {
           // immutable 重建(SC7/Q5);不 mutate,原 messages 引用不变。
           // S10 freeze gate:压缩结果须与 appendMessage 一样冻结每一条,

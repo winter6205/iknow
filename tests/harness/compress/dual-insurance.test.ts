@@ -57,11 +57,20 @@ function makeFlakyAdapter(opts: {
     encodeToolResults: (): AnthropicContentBlock[] => [],
     step: async (
       _state: LoopState,
-      _request: unknown
+      request: { readonly tools?: unknown }
     ): Promise<AssistantTurnResult> => {
       opts.attemptCount.value += 1;
       if (opts.attemptCount.value === 1) {
         throw new PromptTooLongError("synthetic 400 prompt-too-long");
+      }
+      // #467 step 2:full-compact 摘要轮(tools === undefined)返回空文本 →
+      // empty_response → fallback placeholder(共用 compactMessages 产物)。
+      if (request.tools === undefined) {
+        return assistantResult({
+          texts: [],
+          toolCalls: [],
+          supplierStop: "success",
+        });
       }
       return assistantResult({
         texts: [opts.retryText],
@@ -76,9 +85,7 @@ describe("compress 双保险共存 (proactive + reactive, ADR-0013)", () => {
   it("proactive 独立:估算触发不依赖 reactive 路径,压缩走 compactMessages", () => {
     // 估算足以越过阈值 → proactive 触发,不经 PromptTooLongError 也不经
     // reactive 入口。reactive 是否实现/装配都不改变 shouldAutoCompact 判定。
-    const messages = Array.from({ length: 200 }, () =>
-      text("a".repeat(40))
-    );
+    const messages = Array.from({ length: 200 }, () => text("a".repeat(40)));
     const estimate = estimateMessagesTokens(messages);
     assert.ok(estimate > 0);
 
@@ -119,9 +126,7 @@ describe("compress 双保险共存 (proactive + reactive, ADR-0013)", () => {
   it("reactive 独立:proactive 阈值拉高(估算不触发)仍能压缩并重试成功", async () => {
     // 装配 12 条小 prior → estimate 远小于阈值 → proactive 估算触发不成立,
     // 此时唯一的压缩触发源只能是 reactive 错误路径(无阈值冲突)。
-    const longPrior = Array.from({ length: 12 }, (_, i) =>
-      text(`prior-${i}`)
-    );
+    const longPrior = Array.from({ length: 12 }, (_, i) => text(`prior-${i}`));
     const withQ: AnthropicNativeMessage[] = [
       ...longPrior,
       { role: "user", content: [{ type: "text", text: "Q" }] },
@@ -158,9 +163,9 @@ describe("compress 双保险共存 (proactive + reactive, ADR-0013)", () => {
       { priorMessages: longPrior }
     );
 
-    // reactive 独立工作:1 throw → 压缩 → 重试 → 成功。
+    // reactive 独立工作:1 throw → full-compact 摘要步(fallback → placeholder)→ 重试 → 成功。
     assert.equal(result.stopReason, "completed");
-    assert.equal(attemptCount.value, 2, "首次抛 PromptTooLongError,重试一次成功");
+    assert.equal(attemptCount.value, 3, "首次抛 + 摘要步 + 重试成功");
     // 压缩产物:边界占位 + DEFAULT_KEEP_RECENT 尾部 + 收尾 assistant。
     assert.equal(
       result.messages.length,
@@ -179,9 +184,7 @@ describe("compress 双保险共存 (proactive + reactive, ADR-0013)", () => {
     // PromptTooLongError → compactMessages)的产物结构契约相同。
     // 这里在 proactive 侧直调 compactMessages,在 reactive 侧经 loop-engine
     // run 触发,断言两者的"压缩段"逐消息 deepEqual。
-    const longPrior = Array.from({ length: 12 }, (_, i) =>
-      text(`prior-${i}`)
-    );
+    const longPrior = Array.from({ length: 12 }, (_, i) => text(`prior-${i}`));
     const encodedQ: AnthropicNativeMessage = {
       role: "user",
       content: [{ type: "text", text: "Q" }],
@@ -225,16 +228,16 @@ describe("compress 双保险共存 (proactive + reactive, ADR-0013)", () => {
     // reactive 压缩段 = result.messages.slice(0, 1 + DEFAULT_KEEP_RECENT),
     // 应与 proactive 直调的 compactMessages 产物 deepEqual —— 双路径共用
     // 同一压缩函数,无双叉阈值与逻辑。
-    const reactiveCompact = result.messages.slice(
-      0,
-      1 + DEFAULT_KEEP_RECENT
-    );
+    const reactiveCompact = result.messages.slice(0, 1 + DEFAULT_KEEP_RECENT);
     assert.deepStrictEqual(
       reactiveCompact,
       proactiveCompact,
       "proactive 与 reactive 压缩段必须 deepEqual(共用 compactMessages)"
     );
     // 最后一条为 retry 成功的 assistant 收尾,与压缩段独立。
-    assert.equal(result.messages[result.messages.length - 1]?.role, "assistant");
+    assert.equal(
+      result.messages[result.messages.length - 1]?.role,
+      "assistant"
+    );
   });
 });

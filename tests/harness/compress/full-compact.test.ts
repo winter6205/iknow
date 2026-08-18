@@ -1,0 +1,369 @@
+/**
+ * #467 step 2:full-compact — LLM 结构化摘要压缩(替代纯截断)单元测试。
+ *
+ * 覆盖 5 个导出函数(backlog 要求)+ 5 类边界(defensive contract):
+ *   1. buildCompactPrompt —— 正常路径 + customInstructions 注入(trim 后空/非空)
+ *   2. extractCompactSummary —— 有/无 <summary> 标签、analysis 剥离、空输入
+ *   3. splitForCompaction —— 正常切分 + tool_use↔tool_result 配对补全 +
+ *      无可压缩窗口(空 / ≤ keepRecent / slicedFrom=0)→ undefined
+ *   4. buildCompactedMessages —— Summary 前导 + 可选 boundaryText(空串剔除)
+ *   5. runFullCompact —— summarized / empty_response / timeout / adapter_failed /
+ *      signal_aborted 全 variant 覆盖 + 超时 abort 真实取消
+ */
+import { describe, it } from "vitest";
+import assert from "node:assert/strict";
+import {
+  buildCompactPrompt,
+  extractCompactSummary,
+  splitForCompaction,
+  buildCompactedMessages,
+  runFullCompact,
+} from "../../../src/harness/compress/full-compact.ts";
+import {
+  COMPACT_TIMEOUT_SECONDS,
+  DEFAULT_KEEP_RECENT,
+} from "../../../src/harness/compress/constant.ts";
+import type { CompactAdapter } from "../../../src/harness/compress/full-compact.ts";
+import type {
+  AnthropicNativeMessage,
+  AssistantTurnResult,
+  LoopState,
+  TokenUsage,
+} from "../../../src/harness/model-adapter/types.ts";
+
+const text = (value: string): AnthropicNativeMessage => ({
+  role: "user",
+  content: [{ type: "text", text: value }],
+});
+
+const toolUse = (id: string): AnthropicNativeMessage => ({
+  role: "assistant",
+  content: [{ type: "tool_use", id, name: "lookup", input: {} }],
+});
+
+const toolResult = (id: string): AnthropicNativeMessage => ({
+  role: "user",
+  content: [{ type: "tool_result", tool_use_id: id, content: "ok" }],
+});
+
+function assistantTurn(
+  opts: { texts?: string[]; usage?: TokenUsage } = {}
+): AssistantTurnResult {
+  const texts = opts.texts ?? [];
+  const native: AnthropicNativeMessage = {
+    role: "assistant",
+    content: texts.map((t) => ({ type: "text", text: t })),
+  };
+  return {
+    nativeMessage: native,
+    projection: { nativeMessage: native, texts, toolCalls: [] },
+    supplierStop: "success",
+    needsTools: false,
+    isEmptyFinalResponse: texts.length === 0,
+    ...(opts.usage !== undefined && { usage: opts.usage }),
+  };
+}
+
+/** 简易 CompactAdapter:记录调用次数,按脚本返回对应结果。 */
+function makeAdapter(
+  script: Array<
+    | AssistantTurnResult
+    | { readonly throw: Error }
+    | { readonly delayMs: number; readonly then: AssistantTurnResult }
+  >
+): CompactAdapter & { readonly calls: { value: number } } {
+  const calls = { value: 0 };
+  return {
+    calls,
+    encodeUserText: (userText: string): AnthropicNativeMessage =>
+      text(userText),
+    step: async (): Promise<AssistantTurnResult> => {
+      const entry = script[calls.value];
+      calls.value += 1;
+      if (entry === undefined) {
+        throw new Error("Unexpected extra adapter.step call");
+      }
+      if ("throw" in entry) throw entry.throw;
+      if ("delayMs" in entry) {
+        await new Promise((r) => setTimeout(r, entry.delayMs));
+        return entry.then;
+      }
+      return entry;
+    },
+  };
+}
+
+describe("buildCompactPrompt", () => {
+  it("无 customInstructions → 不出现 Additional Instructions 段", () => {
+    const prompt = buildCompactPrompt();
+    assert.ok(prompt.includes("<analysis>"));
+    assert.ok(prompt.includes("<summary>"));
+    assert.ok(!prompt.includes("Additional Instructions:"));
+  });
+
+  it("customInstructions 非空 → 追加 Additional Instructions 段", () => {
+    const prompt = buildCompactPrompt("Focus on the user's request.");
+    assert.ok(
+      prompt.includes(
+        "\n\nAdditional Instructions:\nFocus on the user's request."
+      )
+    );
+  });
+
+  it("customInstructions 为空白 → 忽略(Postel)", () => {
+    const prompt = buildCompactPrompt("   \n\t ");
+    assert.ok(!prompt.includes("Additional Instructions:"));
+  });
+
+  it("安全保留指令固化在模板内(两个 security 追加)", () => {
+    const prompt = buildCompactPrompt();
+    // analysis 段 security 指令
+    assert.ok(
+      prompt.includes(
+        "Note any security-relevant instructions or constraints the user stated"
+      )
+    );
+    // section 6 security 指令
+    assert.ok(
+      prompt.includes("Preserve any security-relevant instructions verbatim")
+    );
+  });
+});
+
+describe("extractCompactSummary", () => {
+  it("标准 <analysis> + <summary> → 只取 summary 内容,analysis 剥离", () => {
+    const raw =
+      "<analysis>scratchpad\ndetails</analysis>\n\n" +
+      "<summary>\nPrimary request.\nErrors: fix A.\n</summary>";
+    const out = extractCompactSummary(raw);
+    assert.equal(out, "Primary request.\nErrors: fix A.");
+  });
+
+  it("无 <summary> 标签 → Postel:返回剥离 analysis 后的全文", () => {
+    const raw = "<analysis>scratch</analysis>\nplain summary text without tags";
+    const out = extractCompactSummary(raw);
+    assert.equal(out, "plain summary text without tags");
+  });
+
+  it("空 / 仅空白 / 仅 analysis → undefined", () => {
+    assert.equal(extractCompactSummary(""), undefined);
+    assert.equal(extractCompactSummary("   \n  "), undefined);
+    assert.equal(extractCompactSummary("<analysis>x</analysis>"), undefined);
+  });
+
+  it("连续空行折叠(3+ → 2)", () => {
+    const out = extractCompactSummary("<summary>a\n\n\n\nb</summary>");
+    assert.equal(out, "a\n\nb");
+  });
+});
+
+describe("splitForCompaction", () => {
+  it("空数组 / ≤ keepRecent → undefined(无可压缩窗口)", () => {
+    assert.equal(splitForCompaction([]), undefined);
+    const short = Array.from({ length: DEFAULT_KEEP_RECENT - 1 }, (_, i) =>
+      text(String(i))
+    );
+    assert.equal(splitForCompaction(short), undefined);
+    const exact = Array.from({ length: DEFAULT_KEEP_RECENT }, (_, i) =>
+      text(String(i))
+    );
+    assert.equal(splitForCompaction(exact), undefined);
+  });
+
+  it("正常切分:dropped = 前缀,kept = 尾部 DEFAULT_KEEP_RECENT 条", () => {
+    const messages = Array.from({ length: 10 }, (_, i) => text(`m${i}`));
+    const split = splitForCompaction(messages);
+    assert.ok(split !== undefined);
+    assert.equal(split.dropped.length, 10 - DEFAULT_KEEP_RECENT);
+    assert.equal(split.kept.length, DEFAULT_KEEP_RECENT);
+    assert.equal(split.dropped[0], messages[0]);
+    assert.equal(split.kept[0], messages[10 - DEFAULT_KEEP_RECENT]);
+  });
+
+  it("tool_use 跨边界 → 向前补全配对,配对完整性守门(SC11)", () => {
+    // 构造:丢弃区含调用,保留区首条是其 tool_result → 必须把 tool_use 并入 kept。
+    const t1 = "call-1";
+    const messages = [
+      text("a"),
+      text("b"),
+      text("c"),
+      toolUse(t1), // 这个 tool_use 落在丢弃区(slicedFrom=6 之前)
+      text("d"),
+      text("e"),
+      toolResult(t1),
+      text("f"),
+      text("g"),
+      text("h"),
+    ];
+    // length 10 > keepRecent 6 → 默认 earliestIndex = 4(idx4 = text d)。
+    // tool_result(id=t1) 在 idx6 保留区内 → 回扫找出 tool_use(idx3) 并入 kept。
+    const split = splitForCompaction(messages);
+    assert.ok(split !== undefined);
+    assert.ok(
+      split.kept.some(
+        (m) =>
+          m.role === "assistant" &&
+          m.content.some((b) => b.type === "tool_use" && b.id === t1)
+      ),
+      "tool_use 必须随其 tool_result 一起保留(SC11 配对)"
+    );
+    // kept 内所有 tool_use 都有配对 tool_result(守门不变式)。
+    const keptUseIds = new Set<string>();
+    const keptResultIds = new Set<string>();
+    for (const m of split.kept) {
+      for (const b of m.content) {
+        if (b.type === "tool_use") keptUseIds.add(b.id);
+        if (b.type === "tool_result") keptResultIds.add(b.tool_use_id);
+      }
+    }
+    for (const id of keptUseIds) {
+      assert.ok(keptResultIds.has(id), `tool_use ${id} 必须在 kept 内有配对`);
+    }
+  });
+
+  it("dropped 冻结(shallow freeze),kept 复用 window 切片", () => {
+    const messages = Array.from({ length: 10 }, (_, i) => text(`m${i}`));
+    const split = splitForCompaction(messages);
+    assert.ok(split !== undefined);
+    assert.ok(Object.isFrozen(split.dropped), "dropped 数组应冻结");
+  });
+});
+
+describe("buildCompactedMessages", () => {
+  it("summary 前导 + kept;无 boundaryText → 无 attachment 消息", () => {
+    const kept = [text("k1"), text("k2")];
+    const out = buildCompactedMessages({ summaryText: "SUM", kept });
+    assert.equal(out.length, 3);
+    assert.equal(out[0]!.role, "user");
+    const t = out[0]!.content[0];
+    assert.equal(t.type, "text");
+    assert.ok(
+      t.type === "text" &&
+        t.text.startsWith(
+          "This session is being continued from a previous conversation"
+        )
+    );
+    assert.ok(t.type === "text" && t.text.endsWith("\n\nSummary:\nSUM"));
+  });
+
+  it("boundaryText 提供 → summary 与 kept 之间插入 attachment user 消息", () => {
+    const kept = [text("k1")];
+    const out = buildCompactedMessages({
+      summaryText: "SUM",
+      kept,
+      boundaryText: "focus@now",
+    });
+    assert.equal(out.length, 3);
+    assert.deepStrictEqual(out[1], {
+      role: "user",
+      content: [{ type: "text", text: "focus@now" }],
+    });
+    assert.equal(out[2], kept[0]);
+  });
+
+  it("boundaryText 为空串 → 不插入 attachment(Postel)", () => {
+    const kept = [text("k1")];
+    const out = buildCompactedMessages({
+      summaryText: "SUM",
+      kept,
+      boundaryText: "",
+    });
+    assert.equal(out.length, 2);
+  });
+});
+
+describe("runFullCompact", () => {
+  const dropped = Array.from({ length: 8 }, (_, i) => text(`m${i}`));
+
+  it("summarized:非空摘要文本 + usage 透传", async () => {
+    const usage: TokenUsage = {
+      inputTokens: 10,
+      outputTokens: 5,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+    };
+    const adapter = makeAdapter([
+      assistantTurn({
+        texts: ["<analysis>x</analysis><summary>Y</summary>"],
+        usage,
+      }),
+    ]);
+    const out = await runFullCompact({ adapter, dropped });
+    assert.equal(out.kind, "summarized");
+    if (out.kind === "summarized") {
+      assert.equal(out.text, "Y");
+      assert.deepStrictEqual(out.usage, usage);
+    }
+    assert.equal(adapter.calls.value, 1);
+  });
+
+  it("empty_response:仅空白 / 空文本 → empty_response", async () => {
+    const blank = makeAdapter([assistantTurn({ texts: ["   \n"] })]);
+    const out1 = await runFullCompact({ adapter: blank, dropped });
+    assert.equal(out1.kind, "empty_response");
+
+    const empty = makeAdapter([assistantTurn({ texts: [] })]);
+    const out2 = await runFullCompact({ adapter: empty, dropped });
+    assert.equal(out2.kind, "empty_response");
+  });
+
+  it("adapter_failed:同步/异步 throw 都收敛为 adapter_failed", async () => {
+    const syncThrow = makeAdapter([{ throw: new Error("sync boom") }]);
+    const out1 = await runFullCompact({ adapter: syncThrow, dropped });
+    assert.equal(out1.kind, "adapter_failed");
+    if (out1.kind === "adapter_failed")
+      assert.ok(out1.message.includes("sync boom"));
+
+    const asyncThrow = makeAdapter([{ throw: new Error("async boom") }]);
+    const out2 = await runFullCompact({ adapter: asyncThrow, dropped });
+    assert.equal(out2.kind, "adapter_failed");
+    if (out2.kind === "adapter_failed")
+      assert.ok(out2.message.includes("async boom"));
+  });
+
+  it("timeout:超时 → timeout,且 adapter 调用被 abort(AbortError)", async () => {
+    let aborted = false;
+    const adapter: CompactAdapter = {
+      encodeUserText: (userText: string): AnthropicNativeMessage =>
+        text(userText),
+      step: async (_state, _request, signal) => {
+        // 挂起直到被 abort。
+        await new Promise<never>((_, reject) => {
+          signal?.addEventListener("abort", () => {
+            aborted = true;
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        });
+        throw new Error("unreachable");
+      },
+    };
+    const out = await runFullCompact({ adapter, dropped, timeoutMs: 30 });
+    assert.equal(out.kind, "timeout");
+    assert.ok(aborted, "超时必须 abort 真实 adapter 调用");
+  });
+
+  it("signal_aborted:入口已 abort → 不调 adapter,直接 signal_aborted", async () => {
+    let called = false;
+    const adapter: CompactAdapter = {
+      encodeUserText: (userText: string): AnthropicNativeMessage =>
+        text(userText),
+      step: async (): Promise<AssistantTurnResult> => {
+        called = true;
+        return assistantTurn({ texts: ["x"] });
+      },
+    };
+    const controller = new AbortController();
+    controller.abort();
+    const out = await runFullCompact({
+      adapter,
+      dropped,
+      signal: controller.signal,
+    });
+    assert.equal(out.kind, "signal_aborted");
+    assert.equal(called, false, "已 abort 时不得发起模型调用");
+  });
+
+  it("默认超时 = COMPACT_TIMEOUT_SECONDS(常量 exported)", () => {
+    assert.equal(COMPACT_TIMEOUT_SECONDS, 25);
+  });
+});

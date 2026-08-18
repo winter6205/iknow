@@ -41,12 +41,44 @@ import {
   estimateMessagesTokens,
 } from "../../../src/harness/compress/index.ts";
 import { PromptTooLongError } from "../../../src/harness/errors.ts";
+
+// #467 step 2:compact 触发的"边界"消息可以是旧的纯截断占位符
+// (COMPACTION_BOUNDARY_PLACEHOLDER)或新的 LLM 摘要轮(SUMMARY_PREAMBLE + 摘要
+// 内容)。同一断言需要兼容两种形态 — 用 isCompactBoundaryMessage 判定。
+// 保留对 placeholder 的兼容性以便老契约断言不破(blue-green 过渡)。
+const SUMMARY_PREAMBLE_FRAGMENT =
+  "This session is being continued from a previous conversation";
+function isCompactBoundaryMessage(m: AnthropicNativeMessage): boolean {
+  if (m.role !== "user") return false;
+  return m.content.some(
+    (b): b is { type: "text"; text: string } =>
+      b.type === "text" &&
+      (b.text === COMPACTION_BOUNDARY_PLACEHOLDER ||
+        b.text.startsWith(SUMMARY_PREAMBLE_FRAGMENT))
+  );
+}
+/** #467 step 2:LLM 摘要轮 user 消息(SUMMARY_PREAMBLE + 摘要内容)。 */
+function isSummaryMessage(m: AnthropicNativeMessage | undefined): boolean {
+  if (m === undefined || m.role !== "user") return false;
+  return m.content.some(
+    (b): b is { type: "text"; text: string } =>
+      b.type === "text" && b.text.startsWith(SUMMARY_PREAMBLE_FRAGMENT)
+  );
+}
+function textOf(m: AnthropicNativeMessage): string {
+  return m.content
+    .filter((b): b is { type: "text"; text: string } => b.type === "text")
+    .map((b) => b.text)
+    .join("");
+}
 import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
   AssistantTurnResult,
   LoopState,
 } from "../../../src/harness/model-adapter/types.ts";
+import { toAnthropicToolResults } from "../../../src/harness/tools/tool-result.ts";
+import type { ToolExecutionResult } from "../../../src/harness/tools/types.ts";
 
 /** 每回合 inflate 的文本量:让 estimate 在 ~5 回合内越过低阈值(≈1000)。 */
 const BIG_TEXT = "payload ".repeat(40); // ~320 chars → ~80 tokens/回合
@@ -169,11 +201,10 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
       compress: { contextWindow: 200_000, thresholdTokens: 1000 },
     });
     assert.equal(result.stopReason, "completed");
-    // 压缩发生:边界占位符出现。
-    const serialized = JSON.stringify(result.messages);
+    // 压缩发生:边界消息出现(placeholder 或 LLM 摘要轮皆可,#467 step 2)。
     assert.ok(
-      serialized.includes(COMPACTION_BOUNDARY_PLACEHOLDER),
-      "低阈值 + 长对话必须触发压缩"
+      result.messages.some(isCompactBoundaryMessage),
+      "低阈值 + 长对话必须触发压缩 (placeholder 或 summary)"
     );
     // 压缩后 messages 显著短于未压缩的 1+200+1=202 条。
     assert.ok(
@@ -216,17 +247,15 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
       compress: { contextWindow: 200_000, thresholdTokens: 1000 },
     });
     assert.equal(result.stopReason, "completed");
-    // 占位符出现次数 = 压缩次数(每次 compact 插入一条边界消息)。
-    const placeholderCount = result.messages.filter((m) =>
-      m.content.some(
-        (b): b is { type: "text"; text: string } =>
-          b.type === "text" && b.text === COMPACTION_BOUNDARY_PLACEHOLDER
-      )
+    // 边界消息(placeholder 或 summary)出现次数 = 压缩次数(每次 compact 插入
+    // 一条边界消息,#467 step 2 摘要轮也是边界消息)。
+    const boundaryCount = result.messages.filter(
+      isCompactBoundaryMessage
     ).length;
-    assert.ok(placeholderCount >= 1, "至少触发一次压缩");
+    assert.ok(boundaryCount >= 1, "至少触发一次压缩");
     assert.ok(
-      placeholderCount <= Math.floor(TURNS / 2),
-      `压缩次数 ${placeholderCount} 应 ≤ ${Math.floor(TURNS / 2)}(turnCount 锚点守约)`
+      boundaryCount <= Math.floor(TURNS / 2),
+      `压缩次数 ${boundaryCount} 应 ≤ ${Math.floor(TURNS / 2)}(turnCount 锚点守约)`
     );
     // S10 freeze gate:压缩结果与 appendMessage 一样冻结每条 + content 块,
     // 后续回路修改应静默失败(strict mode)。
@@ -266,10 +295,8 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
     });
     assert.equal(small.result.stopReason, "completed");
     assert.ok(
-      JSON.stringify(small.result.messages).includes(
-        COMPACTION_BOUNDARY_PLACEHOLDER
-      ),
-      "极小 contextWindow + 缺省阈值必须触发压缩"
+      small.result.messages.some(isCompactBoundaryMessage),
+      "极小 contextWindow + 缺省阈值必须触发压缩 (placeholder 或 summary)"
     );
 
     // (c) 语义自检:estimate + 缺省阈值关系(纯函数,不依赖 LLM)。
@@ -290,6 +317,73 @@ const text = (value: string): AnthropicNativeMessage => ({
 });
 
 /**
+ * #467 step 2:proactive compact → LLM 摘要成功路径专用 adapter。
+ * 非 compact 步(tools 已传)按脚本消费;compact 摘要步(tools === undefined)
+ * 返回 `<analysis>…</analysis><summary>SUMMARY-OVER-DROPPED</summary>`,
+ * 让 runFullCompact 走 summarized 分支 → buildCompactedMessages 输出
+ * `SUMMARY_PREAMBLE + 摘要内容` 的 user 消息在 messages[0]。
+ */
+function makeCompactSummaryAdapter(opts: {
+  readonly responses: ReadonlyArray<AssistantTurnResult>;
+}): LoopAdapter & { readonly compactSteps: { value: number } } {
+  const queue = opts.responses.slice();
+  const compactSteps = { value: 0 };
+  return Object.freeze({
+    encodeUserText: (t: string): AnthropicNativeMessage => ({
+      role: "user",
+      content: [{ type: "text", text: t }],
+    }),
+    // 必须产出真实 tool_result 块:本 adapter 会跑完整 tool 回合,preserveToolPairs
+    // 依赖 tool_result 块做配对守门。空数组会让 tool_use 悬空,splitForCompaction
+    // 抛 "missing tool_result"(与 flaky adapter 不同,那里 compact 发生在首个
+    // tool 回合前,从不带悬空 tool_use 进入 split)。
+    encodeToolResults: (
+      results: ReadonlyArray<ToolExecutionResult>
+    ): AnthropicContentBlock[] => toAnthropicToolResults(results),
+    step: async (
+      state: LoopState,
+      request: { readonly tools?: unknown }
+    ): Promise<AssistantTurnResult> => {
+      if (request.tools === undefined) {
+        // 与 stub-model 同款判别:只有带 full-compact prompt 的 no-tools 步
+        // 才算摘要步;收尾摘要(epilogue SUMMARY_PROMPT)会经正常 queue 消费。
+        const lastUserText = [...state.messages]
+          .reverse()
+          .find((m) => m.role === "user")
+          ?.content.filter(
+            (b): b is { type: "text"; text: string } => b.type === "text"
+          )
+          .map((b) => b.text)
+          .join("");
+        if (
+          lastUserText?.includes(
+            "Your task is to create a detailed summary of the conversation so far"
+          ) === true
+        ) {
+          compactSteps.value += 1;
+          return assistantResult({
+            texts: [
+              "<analysis>scratch dropped detail</analysis>" +
+                "<summary>SUMMARY-OVER-DROPPED</summary>",
+            ],
+            toolCalls: [],
+            supplierStop: "success",
+          });
+        }
+      }
+      const next = queue.shift();
+      if (next === undefined) {
+        throw new Error(
+          "makeCompactSummaryAdapter: scripted responses exhausted"
+        );
+      }
+      return next;
+    },
+    compactSteps,
+  });
+}
+
+/**
  * Reactive path 触发器：first attempt throws PromptTooLongError, second
  * attempt returns success。模拟"压缩前模型拒绝 → reactive 触发压缩 →
  * 压缩后模型接受"。
@@ -306,11 +400,21 @@ function makeFlakyAdapter(opts: {
     encodeToolResults: (): AnthropicContentBlock[] => [],
     step: async (
       _state: LoopState,
-      _request: unknown
+      request: { readonly tools?: unknown; readonly onStream?: unknown }
     ): Promise<AssistantTurnResult> => {
       opts.attemptCount.value += 1;
       if (opts.attemptCount.value === 1) {
         throw new PromptTooLongError("synthetic 400 prompt-too-long");
+      }
+      // #467 step 2:full-compact 摘要轮步进无 tools(request.tools === undefined)。
+      // 摘要步返回空文本 → runFullCompact 报 empty_response → 回退 placeholder,
+      // 测试意图(验证 fallback 路径)保持;摘要成功路径由专门用例覆盖。
+      if (request.tools === undefined) {
+        return assistantResult({
+          texts: [],
+          toolCalls: [],
+          supplierStop: "success",
+        });
       }
       return assistantResult({
         texts: [opts.retryText],
@@ -340,11 +444,12 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
       boundaryAttachment: () => "focus@now\n---\nhist1",
     });
     assert.equal(result.stopReason, "completed");
-    // SC11:boundary placeholder 在 messages[0],attachment user 消息紧随其后。
-    assert.deepStrictEqual(result.messages[0], {
-      role: "user",
-      content: [{ type: "text", text: COMPACTION_BOUNDARY_PLACEHOLDER }],
-    });
+    // SC11:#467 step 2:boundary 可能是 LLM 摘要轮或 placeholder; attachment user
+    // 消息紧跟其后(buildCompactedMessages / fallback 都遵循此 layout)。
+    assert.ok(
+      isCompactBoundaryMessage(result.messages[0]!),
+      "messages[0] must be compact boundary (placeholder 或 summary)"
+    );
     assert.deepStrictEqual(result.messages[1], {
       role: "user",
       content: [{ type: "text", text: "focus@now\n---\nhist1" }],
@@ -363,11 +468,11 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
       compress: { contextWindow: 200_000, thresholdTokens: 1000 },
     });
     assert.equal(result.stopReason, "completed");
-    // 占位符出现(确认 compact 真触发)。
-    assert.deepStrictEqual(result.messages[0], {
-      role: "user",
-      content: [{ type: "text", text: COMPACTION_BOUNDARY_PLACEHOLDER }],
-    });
+    // 边界消息出现(确认 compact 真触发):placeholder 或 LLM 摘要轮皆可。
+    assert.ok(
+      isCompactBoundaryMessage(result.messages[0]!),
+      "messages[0] must be compact boundary (placeholder 或 summary)"
+    );
     // messages[1] 不应是 attachment 文本;它要么是保留尾部要么是后续 assistant。
     const second = result.messages[1];
     assert.ok(second, "messages[1] must exist (kept tail or assistant)");
@@ -433,10 +538,13 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
       { priorMessages: longPrior }
     );
     assert.equal(result.stopReason, "completed");
+    // #467 step 2:applyCompactAttachment 全程多一次 adapter 调用(runFullCompact
+    // 摘要步 + PromptTooLongError 触发 + 重试成功),full-compact 失败 → fallback
+    // placeholder,几何 (placeholder + attachment + kept + retry) 保持不变。
     assert.equal(
       attemptCount.value,
-      2,
-      "首次抛 PromptTooLongError → 压缩 → 重试成功"
+      3,
+      "首次抛 PromptTooLongError → 摘要步 + 重试成功"
     );
     // SC11:placeholder + attachment + DEFAULT_KEEP_RECENT kept + 1 retry assistant。
     assert.equal(
@@ -460,5 +568,57 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
       finalText !== null && finalText.includes("done after compact"),
       `final text must contain retry output, got ${finalText}`
     );
+  });
+
+  // -- #467 step 2:proactive compact → LLM 摘要成功注入 -------------------------
+
+  it("proactive compact → 摘要成功 → messages[0] 为 SUMMARY_PREAMBLE + 摘要内容,attachment 紧随", async () => {
+    // 12 条 prior:proactive 阈值拉低(1000)让首轮即触发 compact。adapter 在
+    // compact 摘要步(tools === undefined)返回结构化摘要;其余按脚本消费。
+    const longPrior = Array.from({ length: 12 }, (_, i) =>
+      text(`prior-${i} ${"z".repeat(20)}`)
+    );
+    const adapter = makeCompactSummaryAdapter({
+      responses: buildResponses(TURNS),
+    });
+    const { result } = await run(
+      "hello",
+      {
+        adapter,
+        executor,
+        registry,
+        maxTurns: TURNS + 1,
+        compress: { contextWindow: 200_000, thresholdTokens: 1000 },
+        boundaryAttachment: () => "focus@now\n---\nhist1",
+      },
+      undefined,
+      { priorMessages: longPrior }
+    );
+    assert.equal(result.stopReason, "completed");
+    // 摘要轮确实跑了 ≥1 次(runFullCompact summarized 分支多次级联触发,
+    // lastCompactTurn 锚点不抑制 cascade)。该断言钉住"摘要成功路径被真实接通",
+    // 旧 placeholder 路径仅 fallback 会跑 0 次。
+    assert.ok(
+      adapter.compactSteps.value >= 1,
+      "摘要轮至少 1 次,否则 LLM 摘要成功路径未被触发"
+    );
+
+    // messages[0] = SUMMARY_PREAMBLE + 摘要内容(LLM 摘要成功路径)。
+    assert.ok(
+      isSummaryMessage(result.messages[0]!),
+      "messages[0] 必须是 LLM 摘要轮 user 消息"
+    );
+    const firstText = textOf(result.messages[0]!);
+    assert.ok(
+      firstText.includes("SUMMARY-OVER-DROPPED"),
+      "摘要内容进入 messages[0]"
+    );
+    // messages[1] = boundaryAttachment 渲染文本(与 fallback 路径几何一致)。
+    assert.deepStrictEqual(result.messages[1], {
+      role: "user",
+      content: [{ type: "text", text: "focus@now\n---\nhist1" }],
+    });
+    // 保留尾部:最终 assistant 收尾仍在。
+    assertCompletionTail(result.messages);
   });
 });

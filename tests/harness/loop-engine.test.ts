@@ -2056,11 +2056,22 @@ describe("loop engine T3 #252: reactive compact (ADR-0013)", () => {
       encodeToolResults: (): AnthropicContentBlock[] => [],
       step: async (
         _state: LoopState,
-        _request: unknown
+        request: { readonly tools?: unknown }
       ): Promise<AssistantTurnResult> => {
         stepCalls++;
         if (stepCalls === 1) {
           throw new PromptTooLongError("synthetic 400 prompt-too-long");
+        }
+        // #467 step 2:full-compact 摘要轮(tools === undefined)返回空文本 →
+        // empty_response → fallback placeholder。本测试关心 fallback 路径下的
+        // reactive compact + retry 几何,摘要成功路径由 integration.test.ts
+        // 单独覆盖。
+        if (request.tools === undefined) {
+          return assistantResult({
+            texts: [],
+            toolCalls: [],
+            supplierStop: "success",
+          });
         }
         return assistantResult({
           texts: ["done after compact"],
@@ -2090,7 +2101,8 @@ describe("loop engine T3 #252: reactive compact (ADR-0013)", () => {
       { priorMessages: longPrior }
     );
     assert.equal(result.stopReason, "completed");
-    assert.equal(stepCalls, 2); // 1 throw + 1 retry success
+    // #467 step 2:1 throw + 1 full-compact 摘要步(fallback → placeholder)+ 1 retry success。
+    assert.equal(stepCalls, 3);
     // reactive compact 生效:13 条 → 边界占位 + 6 末尾;加 user(Q) 已含在 13 内,
     // 收尾 assistant +1。13 → (1 + 6) + 1(assistant) = 8。
     assert.equal(
