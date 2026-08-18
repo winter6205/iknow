@@ -35,6 +35,11 @@ const BWRAP_PATTERNS: ReadonlyArray<RegExp> = [
   /\bcreateBashTool\s*\(/,
   /\bcreateDefaultAciRegistry\s*\(/,
   /\bcreateWorkerDeps\s*\(/,
+  // 传递链:buildHarnessEngine → createDefaultAciRegistry → createBashTool
+  // → requireBwrap(与既有排除集注释"装配依赖 bwrap 类"同链;
+  // CI 实证:build-engine-hooks / build-engine-subagent-trace 均经此
+  // 装配,bwrap 缺失即 fail-loud)。
+  /\bbuildHarnessEngine\s*\(/,
 ];
 
 function walk(dir: string, out: string[]): void {
