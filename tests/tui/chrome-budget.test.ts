@@ -428,4 +428,42 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
     });
     expect(a).toBe(b);
   });
+
+  // #358 T7 fixup（M4）：子代理状态面板行数计入底部行账 —— 缺省不占行，显式
+  // panelRows 按值入账（预览行不额外 +1，面板自身无 marginBottom）。
+  test("panelRows 缺省（undefined / 未传）= 0，不占底部行账", () => {
+    const base = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+    });
+    expect(base).toBe(7);
+    const explicit = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+      panelRows: undefined,
+    });
+    expect(explicit).toBe(base);
+  });
+
+  test("panelRows=4 → 预算 +4（底线基准 7 + 4 = 11）", () => {
+    const base = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+    });
+    expect(base).toBe(7);
+    const withPanel = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+      panelRows: 4,
+    });
+    expect(withPanel - base).toBe(4);
+  });
 });

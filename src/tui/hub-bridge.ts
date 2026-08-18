@@ -27,7 +27,10 @@ import { rewindFile } from "../session-api/store/index.js";
 import type { LoopEngineDeps } from "../harness/index.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { TokenUsage } from "../harness/model-adapter/types.js";
-import type { SubAgentManager } from "../harness/subagent/manager.js";
+import type {
+  SubAgentManager,
+  SubagentInfo,
+} from "../harness/subagent/manager.js";
 import type { VerifyConfig } from "../harness/verify/index.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import type { IknowEnv, LlmEnv } from "../config/env.js";
@@ -122,6 +125,8 @@ export interface TuiBridge {
   readonly inflight: InflightRegistry;
   /** T3: 上下文窗口容量（tokens）。仅显示用，不触发压缩。 */
   readonly contextWindow: number;
+  /** 子代理状态只读投影（#358 T7 同真值）：无 manager → 空数组。 */
+  readonly listSubagents: () => ReadonlyArray<SubagentInfo>;
 }
 
 export interface CreateTuiBridgeOptions {
@@ -236,6 +241,8 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     },
     inflight: opts.inflight,
     contextWindow: opts.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    // #358 T7: 子代理只读投影。无 manager（ask surface / 旧产品路径） → 空。
+    listSubagents: () => opts.subagentManager?.listSubagents() ?? [],
   };
   return Object.freeze(bridge);
 }

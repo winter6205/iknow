@@ -587,3 +587,123 @@ test("T7 纯 tool_use 消息：底色 box 包裹后渲染不崩，摘要行可�
   expect(frame).toContain("write_file");
   await setup.renderer.destroy();
 });
+
+// -- 子代理工具专属显示（spec #146） --------------------------------------
+
+test("spawn_subagent 运行中（statusMap 无该 id）→ `▣ 子代理 · 派发子代理：…`，不含 `[运行中] spawn_subagent`", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "tu-spawn",
+        name: "spawn_subagent",
+        input: { task: "调查渲染层" },
+      },
+    ],
+  };
+  const setup = await renderBlocks(msg);
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("▣ 子代理 · 派发子代理：调查渲染层");
+  // 不残留普通工具形态 `[运行中] spawn_subagent`。
+  expect(frame).not.toContain("[运行中] spawn_subagent");
+  await setup.renderer.destroy();
+});
+
+test("spawn_subagent 完成 ok → `✓ 子代理 · …`", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "tu-spawn",
+        name: "spawn_subagent",
+        input: { task: "调查渲染层" },
+      },
+    ],
+  };
+  const setup = await renderBlocks(msg, {
+    statusMap: new Map([["tu-spawn", false]]),
+  });
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("✓ 子代理 · 派发子代理：调查渲染层");
+  expect(frame).not.toContain("[完成]");
+  await setup.renderer.destroy();
+});
+
+test("spawn_subagent 完成 failed → `✗ 子代理 · …`", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "tu-spawn",
+        name: "spawn_subagent",
+        input: { task: "调查渲染层" },
+      },
+    ],
+  };
+  const setup = await renderBlocks(msg, {
+    statusMap: new Map([["tu-spawn", true]]),
+  });
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("✗ 子代理 · 派发子代理：调查渲染层");
+  expect(frame).not.toContain("[失败]");
+  await setup.renderer.destroy();
+});
+
+test("subagent_result 完成 ok → `✓ 子代理 · 轮询 t-1`", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "tu-poll",
+        name: "subagent_result",
+        input: { task_id: "t-1" },
+      },
+    ],
+  };
+  const setup = await renderBlocks(msg, {
+    statusMap: new Map([["tu-poll", false]]),
+  });
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("✓ 子代理 · 轮询 t-1");
+  await setup.renderer.destroy();
+});
+
+test("bash 回归：`[运行中] bash` / 完成态字节不变", async () => {
+  const running: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "tu-bash-2",
+        name: "bash",
+        input: { command: "ls" },
+      },
+    ],
+  };
+  const setup = await renderBlocks(running);
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("[运行中] bash · ls");
+  await setup.renderer.destroy();
+
+  const done: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "tu-bash-3",
+        name: "bash",
+        input: { command: "npm test" },
+      },
+    ],
+  };
+  const setupDone = await renderBlocks(done, {
+    statusMap: new Map([["tu-bash-3", false]]),
+  });
+  const doneFrame = setupDone.captureCharFrame();
+  expect(doneFrame).toContain("[完成] bash · npm test");
+  await setupDone.renderer.destroy();
+});

@@ -128,6 +128,7 @@ function fakeBridge(opts: FakeBridgeOptions): TuiBridge {
     },
     inflight,
     contextWindow: 200_000,
+    listSubagents: () => [],
   };
   return bridge;
 }
