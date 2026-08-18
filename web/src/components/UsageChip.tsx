@@ -1,10 +1,10 @@
 /**
  * web/src/components/UsageChip.tsx
  *
- * 轻量上下文用量指示（取代已退役的 ContextUsageStrip 容量条）：只显示
- * 百分比，三档色语义沿用原口径（<50% #7ab8ff / ≥50% #d9a343 / >80%
- * #c95d47，与 TUI context-bar.tsx 同值）；悬停 title 给出 X.Xk / Y.Yk
- * tokens 明细。
+ * 上下文用量块（输入框下方状态条的右半部）：`X.Xk / Y.Yk` token 明细 +
+ * 64px 进度条 + 百分比，三档色语义沿用原口径（<50% #7ab8ff / ≥50%
+ * #d9a343 / >80% #c95d47，与 TUI context-bar.tsx 同值）；悬停 title 给出
+ * 精确 token 值。
  *
  * 跨 package 镜像约束：三档色阈值与数值语义和 TUI src/tui/context-bar.tsx
  * 镜像同值 —— 修改任一侧必须同步另一侧（公式 / 三档色阈值双改）。
@@ -37,6 +37,10 @@ function ctxUsed(u: TokenUsage): number {
   );
 }
 
+function fmtK(n: number): string {
+  return `${(n / 1000).toFixed(1)}k`;
+}
+
 export function UsageChip({
   usage,
   contextWindow,
@@ -48,8 +52,12 @@ export function UsageChip({
     }
     const used = ctxUsed(usage);
     return {
+      used,
       pct: Math.round((used / contextWindow) * 100),
-      title: `${(used / 1000).toFixed(1)}k / ${(contextWindow / 1000).toFixed(1)}k tokens`,
+      label: `${fmtK(used)} / ${fmtK(contextWindow)}`,
+      title: `${used.toLocaleString("en-US")} / ${contextWindow.toLocaleString(
+        "en-US"
+      )} tokens`,
     };
   }, [usage, contextWindow]);
 
@@ -64,9 +72,22 @@ export function UsageChip({
     <span
       title={detail.title}
       style={style}
-      className="shrink-0 self-center rounded-pill border border-ink-3/30 px-1.5 py-0.5 font-mono text-[10px] leading-none"
+      className="flex shrink-0 items-center gap-1.5 font-mono text-[10px] leading-none"
     >
-      {detail.pct}%
+      <span>{detail.label}</span>
+      <span
+        aria-hidden="true"
+        className="relative h-[3px] w-16 overflow-hidden rounded-full bg-ink-3/20"
+      >
+        <span
+          className="absolute inset-y-0 left-0 rounded-full"
+          style={{
+            width: `${Math.min(detail.pct, 100)}%`,
+            backgroundColor: color,
+          }}
+        />
+      </span>
+      <span>{detail.pct}%</span>
     </span>
   );
 }
