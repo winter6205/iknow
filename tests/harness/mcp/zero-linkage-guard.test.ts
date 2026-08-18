@@ -18,8 +18,9 @@
  *   3. evidence-checker: 含 read_mcp_resource tool_use 的消息序列,verdict 与
  *      「同等形态但 tool 名替换为 read_file 的对照组」一致（M5 决议：同
  *      web_fetch 待遇,资源读取不是测试运行）
- *   4. JUDGE_DENY 字面不变（run-classifier-adapter.ts:36-42）— 不含 list/read,
- *      与 baseline 5 禁项 byte-identical
+ *   4. 判官 allow-list 基线字面不变（#357 T2 起: run-classifier-adapter.ts
+ *      JUDGE_ALLOWED_TOOLS = read_file/grep/glob, deny = ACI_TOOLSET_NAMES −
+ *      白名单 fail-closed 推导）— 不含 list/read
  */
 import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
@@ -28,6 +29,7 @@ import {
   DEFAULT_DISALLOWED_TOOLS,
   buildWorkerToolSurface,
 } from "../../../src/harness/subagent/role.js";
+import { ACI_TOOLSET_NAMES } from "../../../src/harness/aci/tools/registry.js";
 import { createWorkerDeps } from "../../../src/harness/subagent/worker.js";
 import { checkEvidence } from "../../../src/harness/verify/evidence-checker.js";
 import type { AnthropicNativeMessage } from "../../../src/harness/model-adapter/types.js";
@@ -261,14 +263,16 @@ describe("M5 evidence-checker 零联动 — read_mcp_resource tool_use 形态不
 });
 
 // =========================================================================
-// 4. JUDGE_DENY 字面不变（run-classifier-adapter.ts:36-42）
+// 4. 判官 allow-list 基线字面不变（#357 T2: JUDGE_ALLOWED_TOOLS）
 // =========================================================================
 
-describe("M5 JUDGE_DENY 不加 — 判官 deny-list 字面 byte-identical", () => {
-  it("run-classifier-adapter.ts 的 JUDGE_ROLE.disallowedTools 仅 5 禁项,且不含 list/read_mcp_resource", async () => {
-    // 决议原话：「判官 deny-list 不加（read-only 工具与判官已持有的
-    // read_file/grep 同类）」。grep 真值源文件验证字面不变,防止后续
-    // 编辑加进 list/read。
+describe("M5 判官 allow-list 基线 — JUDGE_ALLOWED_TOOLS 字面 byte-identical", () => {
+  it("run-classifier-adapter.ts 的白名单基线恰为 read_file/grep/glob + 推导消费 ACI_TOOLSET_NAMES,且不含 list/read_mcp_resource", async () => {
+    // #357 T2:判官工具面从硬编码 5 禁项 deny 改为 fail-closed allow-list 推导
+    // （deny = ACI_TOOLSET_NAMES − JUDGE_ALLOWED_TOOLS）。本 guard 钉住:
+    //   - 白名单三件基线字面在场（防误删/漂移）;
+    //   - 推导公式消费 ACI_TOOLSET_NAMES（防退回硬编码 deny 清单）;
+    //   - list/read_mcp_resource 字面不进文件（决议防线不变:判官不加资源读取）。
     const src = await readFile(
       new URL(
         "../../../src/harness/verify/run-classifier-adapter.ts",
@@ -276,29 +280,25 @@ describe("M5 JUDGE_DENY 不加 — 判官 deny-list 字面 byte-identical", () =
       ),
       "utf8"
     );
-    // 5 禁项必须在字面里出现（防止误删）
-    expect(src).toContain('"bash"');
-    expect(src).toContain('"edit_file"');
-    expect(src).toContain('"write_file"');
-    expect(src).toContain('"web_fetch"');
-    expect(src).toContain('"web_search"');
-    // 决议防线：list/read_mcp_resource 字面不进 JUDGE_ROLE.disallowedTools
+    expect(src).toContain("JUDGE_ALLOWED_TOOLS");
+    expect(src).toContain('"read_file"');
+    expect(src).toContain('"grep"');
+    expect(src).toContain('"glob"');
+    expect(src).toContain("ACI_TOOLSET_NAMES");
+    expect(src).toContain("Object.freeze");
+    // 决议防线：list/read_mcp_resource 字面不进 run-classifier-adapter.ts
     expect(src).not.toMatch(/list_mcp_resources/);
     expect(src).not.toMatch(/read_mcp_resource/);
   });
 
-  it("worker 装配（createWorkerDeps）装上 JUDGE_DENY 时,只剥 5 禁项,不动 list/read", async () => {
-    // 镜像 JUDGE_ROLE.disallowedTools 真值（同 worker-tool-surface.test.ts
-    // JUDGE_DENY 本地常量）,作为本测试断言的输入基线。两份断言守护同一真值
+  it("worker 装配（createWorkerDeps）装上判官 deny（全量面 − 白名单）时,只留白名单三件,不动 list/read", async () => {
+    // 镜像 JUDGE_ROLE.disallowedTools 推导真值（同 worker-tool-surface.test.ts
+    // JUDGE_DENY 推导公式）,作为本测试断言的输入基线。两份断言守护同一真值
     // 源: 真值漂移 = 镜像侧的 worker-tool-surface.test.ts 也失败。
-    const JUDGE_DENY: ReadonlyArray<string> = Object.freeze([
-      "bash",
-      "edit_file",
-      "write_file",
-      "web_fetch",
-      "web_search",
-    ]);
-    // 直接用 hermetic opts 模拟 worker 装配 + JUDGE_DENY 注入
+    const JUDGE_DENY: ReadonlyArray<string> = (
+      ACI_TOOLSET_NAMES as ReadonlyArray<string>
+    ).filter((n) => !["read_file", "grep", "glob"].includes(n));
+    // 直接用 hermetic opts 模拟 worker 装配 + 判官 deny 注入
     // （仅验证 deny-list 形态,不触发真实 adapter / mcpManager）。
     const env = makeMinimalEnv();
     const deps = await createWorkerDeps({
@@ -313,7 +313,11 @@ describe("M5 JUDGE_DENY 不加 — 判官 deny-list 字面 byte-identical", () =
       disallowedTools: [...JUDGE_DENY],
     });
     const inner = deps.registry.list().map((t) => t.name);
-    // 5 禁项被剥
+    // 白名单三件留下（判官只读面）
+    expect(inner).toContain("read_file");
+    expect(inner).toContain("grep");
+    expect(inner).toContain("glob");
+    // 旧 5 禁项（现属推导 deny 集）被剥
     expect(inner).not.toContain("bash");
     expect(inner).not.toContain("edit_file");
     expect(inner).not.toContain("write_file");

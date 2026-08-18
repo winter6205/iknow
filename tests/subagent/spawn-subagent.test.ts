@@ -209,6 +209,19 @@ describe("spawn_subagent — 可选字段透传到 def", () => {
       })
     );
   });
+
+  it("#357 T1: sandboxRoot 字符串透传到 def", async () => {
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    await tool.handler({
+      task: "t",
+      sandboxRoot: "/tmp/work",
+      wait: false,
+    });
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ task: "t", sandboxRoot: "/tmp/work" })
+    );
+  });
 });
 
 describe("spawn_subagent — AciToolDef 元数据", () => {
@@ -231,9 +244,46 @@ describe("spawn_subagent — AciToolDef 元数据", () => {
     const schema = tool.inputSchema as {
       required: string[];
       additionalProperties: boolean;
+      properties: Record<string, { type: string }>;
     };
     expect(schema.required).toEqual(["task"]);
     expect(schema.additionalProperties).toBe(false);
     expect(Object.isFrozen(tool)).toBe(true);
+  });
+
+  it("#357 T1: inputSchema 含 sandboxRoot 字段(string,可选)", () => {
+    const { manager } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    const schema = tool.inputSchema as {
+      properties: Record<string, { type: string; description?: string }>;
+      required: string[];
+    };
+    expect(schema.properties.sandboxRoot).toBeDefined();
+    expect(schema.properties.sandboxRoot.type).toBe("string");
+    // 不进 required(可选)
+    expect(schema.required).not.toContain("sandboxRoot");
+  });
+});
+
+describe("spawn_subagent — #357 T1: SubAgentSandboxRootError → ToolExecutionError", () => {
+  it("manager.spawn 抛 SubAgentSandboxRootError → handler 转 ToolExecutionError", async () => {
+    const { SubAgentSandboxRootError } =
+      await import("../../src/harness/errors.ts");
+    const { manager, spawn } = makeFakeManager();
+    // 让 spawn 每次都抛 typed error(mockImplementationOnce 仅触发一次,改用
+    // mockImplementation 让两次 handler 调用都覆盖到,避免第二次回到默认 mock)。
+    spawn.mockImplementation(() => {
+      throw new SubAgentSandboxRootError({
+        parentSandboxRoot: "/parent",
+        requested: "/outside",
+      });
+    });
+    const tool = createSpawnSubAgentTool({ manager });
+    await expect(
+      tool.handler({ task: "t", sandboxRoot: "/outside", wait: false })
+    ).rejects.toThrow(ToolExecutionError);
+    await expect(
+      tool.handler({ task: "t", sandboxRoot: "/outside", wait: false })
+    ).rejects.toThrow(/sandboxRoot/i);
   });
 });

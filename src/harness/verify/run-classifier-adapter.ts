@@ -19,9 +19,28 @@
 import type { SubAgentManager } from "../subagent/manager.js";
 import type { ClassifierEnvelope, RunClassifierFn } from "./verify-loop.js";
 import type { EvidenceContext } from "./types.js";
+import { ACI_TOOLSET_NAMES } from "../aci/tools/registry.js";
+
+/**
+ * #357 T2 — 判官 allow-list 基线（fail-closed）。
+ *
+ * 判官语义 = 「只许本地纯只读」：白名单三件 = read_file / grep / glob。
+ *
+ * 为什么用 allow-list 而不是 deny-by-category（#357 spec 357 Code Style 理由段）：
+ *   - `aci.category="write"` 只覆盖 edit_file/write_file 两件，bash（execute）
+ *     与 web_*（联网读）还需另写规则；
+ *   - allow-list 与「只许本地纯只读」语义精确对齐；
+ *   - fail-closed：ACI 扩件时判官默认拿不到新工具，除非显式加白名单
+ *     （加白名单 = 显式改本常量 + operator 拍板，不接受运行时配置）。
+ */
+const JUDGE_ALLOWED_TOOLS: ReadonlyArray<string> = Object.freeze([
+  "read_file",
+  "grep",
+  "glob",
+]);
 
 /** 判官 role: 子代理 LLM 判官 (A4 schema 契约 prompt)。 */
-const JUDGE_ROLE = {
+const JUDGE_ROLE: SubAgentDefinitionShape = {
   systemPrompt:
     "You are a strict task-completion judge. Given a task, evaluate whether " +
     "the work is actually done. Output ONLY a JSON object with exactly one of " +
@@ -33,15 +52,26 @@ const JUDGE_ROLE = {
     '{"kind":"abort","reason":"<one-line>"}\n' +
     "Rules: pass and fail MUST include at least one evidence item; never emit " +
     'pass with empty evidence. If you cannot determine completion, use "abort".',
-  disallowedTools: [
-    "bash",
-    "edit_file",
-    "write_file",
-    "web_fetch",
-    "web_search",
-  ],
+  // #357 T2: deny = 全量 ACI 工具面 − 白名单基线（fail-closed allow-list 推导）。
+  // 推导公式 = ACI_TOOLSET_NAMES 减 JUDGE_ALLOWED_TOOLS；不在白名单内一律禁。
+  // 类型放宽为 ReadonlyArray<string>（与 SubAgentDefinition.disallowedTools 对齐），
+  // 便于推导后类型兼容；as const 在 readonly tuple 与推导数组的 union 上不兼容。
+  disallowedTools: (ACI_TOOLSET_NAMES as ReadonlyArray<string>).filter(
+    (n) => !JUDGE_ALLOWED_TOOLS.includes(n)
+  ),
   maxTurns: 2,
-} as const;
+};
+
+/**
+ * JUDGE_ROLE 字段类型形状：系统 prompt / 工具面 deny / maxTurns。
+ * 不复用 SubAgentDefinition（其字段含 task / model / timeoutMs / sandboxRoot
+ * 全部可选，且这些字段由 buildJudgeTask / 外部 opts 注入，role 不持有）。
+ */
+interface SubAgentDefinitionShape {
+  readonly systemPrompt: string;
+  readonly disallowedTools: ReadonlyArray<string>;
+  readonly maxTurns: number;
+}
 
 export interface CreateRunClassifierOpts {
   readonly manager: SubAgentManager;
@@ -91,12 +121,19 @@ export function createRunClassifierFromManager(
     // 字段在生产路径语义同源, adapter 无独立消费者; 此处显式 void 标记"已接
     // 收、当前不消费", 避免 TS6133 又保留契约面。
     void finalText;
+    // #357 code-review fix: 判官 def 不再显式传 sandboxRoot（此前锚 cwd =
+    // process.cwd()）。T1 起 manager 以 parent sandboxRoot 单点校验 prefix-of-
+    // parent——显式 sandboxRoot 配置（serve 路径）下 cwd ≠ parent root,判官
+    // spawn 每轮被拒并静默降级为 crashed envelope。省略字段走 SC8 继承路径:
+    // envelope.sandboxRoot = manager parent sandboxRoot（判官与父代理同工作域,
+    // 正是判官读证据文件的正确锚）。cwd 参数保留于 RunClassifierFn 签名
+    // （verify-loop 契约），adapter 当前不消费。
+    void cwd;
     const def = {
       ...JUDGE_ROLE,
       task: buildJudgeTask(task, evidenceContext),
       model: model ?? classifierModel,
       timeoutMs,
-      sandboxRoot: cwd,
     };
     let taskId: string;
     try {

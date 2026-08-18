@@ -8,10 +8,13 @@
  * 在 ./spawn.ts,T6 接线时由 build-engine 注入。
  */
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import { parseParentEnvelope, truncateEnvelopeResult } from "./envelope.js";
 import type { SubAgentEnvelope, WorkerEnvelope } from "./envelope.js";
 import type { SubAgentDefinition } from "./role.js";
+import { SubAgentSandboxRootError } from "../errors.js";
 
 // re-export: manager 的调用方(T4/T5 工具、host-drain)统一从 manager 侧拿
 // SubAgentDefinition,不必各自 import role.js。
@@ -178,6 +181,14 @@ function armKillFallback(task: Task, reset = false): void {
 
 export function createSubAgentManager(opts: {
   readonly spawn: SubAgentSpawn;
+  /**
+   * #357 T1: 父 sandboxRoot —— 父代理的"工作域"。`buildWorkerPayload` 单点校验
+   * `def.sandboxRoot` 必须 prefix-of-parent(防任意路径提权)。缺省 = process.cwd()
+   * (manager 直造场景,如既有的 manager.test.ts makeHarness);生产装配由 build-engine
+   * 注入主代理的 sandboxRoot(SC8)。manager 自身不解析 opts.sandboxRoot —— 在
+   * buildWorkerPayload 内 realpath 一次后冻结,worker fs 工具沿用同一 resolved 值。
+   */
+  readonly sandboxRoot?: string;
 }): SubAgentManager {
   const tasks = new Map<string, Task>();
   /** 所有未决 waitFor 的轮询句柄(非终态,shutdown 必须清,防进程悬挂)。 */
@@ -196,13 +207,19 @@ export function createSubAgentManager(opts: {
       throw new SubAgentCapacityError(activeCount);
     }
 
+    // #357 T1: 校验必须在 opts.spawn 之前(否则 line 205 既有 try/catch 会把
+    // 拒绝吞成 task failed)。也不在 tasks.set 之后 —— 提前抛出保证 map 无残留。
+    // buildWorkerPayload 单点校验所有 spawn 路径(模型工具 + 判官 + 将来角色),
+    // 校验失败同步抛 SubAgentSandboxRootError(handler 转 ToolExecutionError)。
+    const payload = buildWorkerPayload(def);
+
     const id = randomUUID();
     const task: Task = { id, def, state: "starting" };
     tasks.set(id, task);
 
     let child: ChildProcess;
     try {
-      child = opts.spawn(def, id, buildWorkerPayload(def));
+      child = opts.spawn(def, id, payload);
     } catch (err) {
       task.state = "failed";
       task.envelope = {
@@ -253,9 +270,11 @@ export function createSubAgentManager(opts: {
     }
 
     // 写 payload(stdin JSON-line)。worker 侧 for-await stdin 读到 EOF 才开始跑;
-    // 写完即 end(),否则 worker 永远等 stdin。
+    // 写完即 end(),否则 worker 永远等 stdin。#357 T1:复用单点校验过的 payload,
+    // 避免二次 buildWorkerPayload 调用带来的再次校验副作用风险(虽然当前为纯函数,
+    // 但显式复用更清晰,且与 opts.spawn 第三参对齐)。
     if (child.stdin) {
-      child.stdin.write(JSON.stringify(buildWorkerPayload(def)) + "\n");
+      child.stdin.write(JSON.stringify(payload) + "\n");
       child.stdin.end();
     }
 
@@ -329,19 +348,67 @@ export function createSubAgentManager(opts: {
   }
 
   function buildWorkerPayload(def: SubAgentDefinition): WorkerEnvelope {
-    // #356 High #1 fix: task / sandboxRoot live on SubAgentDefinition (role.ts);
-    // read directly. Empty-string fallback keeps manager output as a valid
-    // WorkerEnvelope that satisfies worker-side schema.
-    // #365 真实 LLM e2e 修复:spawn_subagent 工具不采集 sandboxRoot(role.ts:34
-    // 注释约定"manager 装配期根据父 cwd 补齐"),此前 def.sandboxRoot ?? ""
-    // 直接把空串写进 envelope → worker 的 fs 工具(bash bwrap fence)以空 cwd
-    // 装配,`--bind "" ""` bwrap 即抛 "Can't find source path" → worker 内所有
-    // fs 工具不可用。此处补齐:def 缺席时回退 process.cwd()(父代理进程 cwd,
-    // 与 build-engine 缺省 sandboxRoot 同语义)。
-    const sandboxRoot = def.sandboxRoot ?? process.cwd();
+    // #357 T1: 所有 spawn 路径必经此单点校验。语义:
+    //   1. parentSandboxRoot = realpathSync(opts.sandboxRoot ?? process.cwd())
+    //      —— 父代理的工作域真值(resolve 父目录层可能含 symlink,例如 /var → /private/var
+    //      on macOS),worker fs 工具沿用同一 resolved 值。
+    //   2. def.sandboxRoot 缺席 → 写入 parentSandboxRoot(SC8:继承父根,不是 process.cwd())。
+    //      父根 ≠ process.cwd() 的场景(主代理的 sandboxRoot ≠ 启动 cwd)下,这一变更
+    //      防止子代理工作域意外扩大到主进程 cwd 之外。
+    //   3. def.sandboxRoot 在场 → resolved = realpathSync(resolve(def.sandboxRoot)),
+    //      rel = relative(parentSandboxRoot, resolved)。rel === "" 合法(相等);
+    //      rel.startsWith("..") || isAbsolute(rel) → typed 拒绝。realpath 抛 ENOENT
+    //      → fail-closed 同样 typed 拒绝(避免给模型"声明未创建路径就能逃逸"的暗示);
+    //      其他 errno 原样 rethrow(让 unexpected I/O 故障暴露给上游)。
+    //   4. `rel.startsWith("..")` 对合法目录名 `..foo` 也拒绝(spec Code Style 是
+    //      合同,fail-closed 优先,不试图区分 `..foo` vs `..` / `../`)。
+    let parentSandboxRoot: string;
+    try {
+      parentSandboxRoot = realpathSync(opts.sandboxRoot ?? process.cwd());
+    } catch (err) {
+      // opts.sandboxRoot 本身存在但不可 realpath(罕见;主代理装配通常与 cwd 同) →
+      // 不可推断父根,直接 typed 拒绝。
+      if (
+        (err as NodeJS.ErrnoException).code === "ENOENT" ||
+        (err as NodeJS.ErrnoException).code === "ENOTDIR"
+      ) {
+        throw new SubAgentSandboxRootError({
+          parentSandboxRoot: opts.sandboxRoot ?? process.cwd(),
+          requested: def.sandboxRoot ?? "(inherited from parent)",
+        });
+      }
+      throw err;
+    }
+
+    let resolved: string;
+    if (def.sandboxRoot === undefined) {
+      resolved = parentSandboxRoot;
+    } else {
+      try {
+        resolved = realpathSync(resolve(def.sandboxRoot));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+          // fail-closed: 模型声明的 sandboxRoot 不存在 → typed 拒绝,
+          // 防止"声明一个未来创建的路径 = 隐式扩大父根"语义漏洞。
+          throw new SubAgentSandboxRootError({
+            parentSandboxRoot,
+            requested: def.sandboxRoot,
+          });
+        }
+        throw err;
+      }
+      const rel = relative(parentSandboxRoot, resolved);
+      if (rel.startsWith("..") || isAbsolute(rel)) {
+        throw new SubAgentSandboxRootError({
+          parentSandboxRoot,
+          requested: def.sandboxRoot,
+        });
+      }
+    }
+
     return {
       task: def.task ?? "",
-      sandboxRoot,
+      sandboxRoot: resolved,
       ...(def.systemPrompt !== undefined && { systemPrompt: def.systemPrompt }),
       ...(def.disallowedTools !== undefined && {
         disallowedTools: [...def.disallowedTools],

@@ -38,6 +38,7 @@ import type {
 } from "../../../src/harness/model-adapter/types.ts";
 import type { LoopTrace } from "../../../src/harness/loop-trace.ts";
 import { createRunClassifierFromManager } from "../../../src/harness/verify/run-classifier-adapter.ts";
+import { ACI_TOOLSET_NAMES } from "../../../src/harness/aci/tools/registry.ts";
 import type { SubAgentDefinition } from "../../../src/harness/subagent/manager.js";
 import type { SubAgentEnvelope } from "../../../src/harness/subagent/envelope.js";
 import type { SubAgentManager } from "../../../src/harness/subagent/manager.js";
@@ -1233,14 +1234,23 @@ describe("judge four-state stop behavior (#449b B7)", () => {
  *     runClassifier spy 0 + outcome passed (入口级 1 例, B4 既有机制防回归)。
  */
 
-/** JUDGE_ROLE 声明面 disallowedTools (run-classifier-adapter.ts JUDGE_ROLE 同源)。 */
-const JUDGE_DISALLOWED_TOOLS: ReadonlyArray<string> = Object.freeze([
-  "bash",
-  "edit_file",
-  "write_file",
-  "web_fetch",
-  "web_search",
+/**
+ * #357 T2 — 判官 allow-list 推导真值（与 judge-input.test.ts 同源同公式）。
+ *
+ * 判官白名单基线 = {read_file, grep, glob}（spec 357 Objective 2 「只许本地
+ * 纯只读」）。fail-closed: deny = 全量面 − 白名单。加白名单 = 显式改白名单常量
+ * + operator 拍板，不接受运行时配置。
+ */
+const JUDGE_ALLOWED_BASELINE: ReadonlyArray<string> = Object.freeze([
+  "read_file",
+  "grep",
+  "glob",
 ]);
+
+/** 镜像 = ACI_TOOLSET_NAMES − 白名单基线（与 run-classifier-adapter 推导公式同源）。 */
+const JUDGE_DISALLOWED_TOOLS: ReadonlyArray<string> = Object.freeze(
+  [...ACI_TOOLSET_NAMES].filter((n) => !JUDGE_ALLOWED_BASELINE.includes(n))
+);
 
 describe("SC9 只读判官集成层复断言 (#449b B9)", () => {
   /** makeStubManager 镜像 (judge-input.test.ts): spawn 捕获 def, waitFor 回 pass 信封。 */
@@ -1313,8 +1323,9 @@ describe("SC9 只读判官集成层复断言 (#449b B9)", () => {
     assert.equal(out.rounds, 1);
     const def = captured();
     assert.ok(def !== undefined, "判官 seam 必须 spawn");
-    // SC9 复断言: 声明面 disallowedTools 5 项原样。实际工具面 = 468 plan 负责
-    // (worker deny-list 裁剪); 本用例只复断言声明面完整保留。
+    // SC9 复断言: 声明面 disallowedTools = 全量面 − 白名单基线（#357 T2
+    // allow-list 推导）。实际工具面 = 468 plan 负责 (worker deny-list 裁剪);
+    // 本用例只复断言声明面完整保留。
     assert.ok(
       def.disallowedTools !== undefined,
       "JUDGE_ROLE 必须声明 disallowedTools"
@@ -1322,8 +1333,15 @@ describe("SC9 只读判官集成层复断言 (#449b B9)", () => {
     assert.deepEqual(
       [...def.disallowedTools].sort(),
       [...JUDGE_DISALLOWED_TOOLS].sort(),
-      "disallowedTools = 5 项禁工具 (bash/edit_file/write_file/web_fetch/web_search)"
+      "disallowedTools = ACI_TOOLSET_NAMES − JUDGE_ALLOWED_BASELINE (allow-list 推导)"
     );
+    // 白名单三件必须缺席（允许判官使用）— fail-closed 推导的护栏。
+    for (const allowed of JUDGE_ALLOWED_BASELINE) {
+      assert.ok(
+        !def.disallowedTools!.includes(allowed),
+        `白名单工具 ${allowed} 必须不在 disallowedTools 内`
+      );
+    }
     // SC6: task 二段 = userText 原样 + evidenceContext JSON 段 (集成层装配)。
     const lines = def.task.split("\n");
     assert.equal(

@@ -36,6 +36,7 @@
     "web:typecheck": "npm run typecheck --prefix web",
     "aci:demo": "tsx src/harness/aci/demo.ts",
     "probe:sandbox": "tsx scripts/sandbox-probe.ts",
+    "probe:sandbox:subagent": "tsx scripts/sandbox-probe-subagent.ts",
     "probe:lsp": "tsx scripts/lsp-probe.ts",
     "probe:tui-binding": "$HOME/.bun/bin/bun run scripts/tui-binding-probe.ts",
     "probe:t4-real-llm": "tsx scripts/t4-spawn-subagent-real-llm-smoke.ts",
