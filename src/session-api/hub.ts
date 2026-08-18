@@ -13,6 +13,8 @@ import {
   run,
   createJsonlTraceService,
   compactMessages,
+  runFullCompact,
+  splitForCompaction,
   type AnthropicNativeMessage,
   type HarnessStreamEvent,
   type LoopEngineDeps,
@@ -69,7 +71,7 @@ import {
   rewindFile,
   CURRENT_SCHEMA_VERSION,
   extractGoal,
-  extractSummary,
+  extractTitle,
   pinGoal,
   seedTaskFocus,
   shouldPersistCheckpoint,
@@ -623,7 +625,7 @@ export class SessionHub {
       jsonMode: req?.json_mode ?? this.defaults.jsonMode,
       turnCount: 0,
       updatedAt: now,
-      summary: "",
+      title: "",
       cwd: process.cwd(),
       sanitized_at: now,
       checkpoints: [],
@@ -1010,7 +1012,7 @@ export class SessionHub {
           turnCount: 0,
           updatedAt: new Date().toISOString(),
           schemaVersion: CURRENT_SCHEMA_VERSION,
-          summary: "",
+          title: "",
           // Reset wipes conversation history; prior checkpoint records
           // reference turns that no longer exist (messagesCount would also
           // falsely satisfy `appendCheckpoint`'s delta<=0 no-op guard and
@@ -1032,13 +1034,18 @@ export class SessionHub {
 
   /**
    * 手动压缩会话（TUI /compact、web 压缩按钮共用落点）。
-   * 与 resetSession 同模式走 serialize 队列：load → compactMessages → save。
-   * compactMessages 是纯函数（保留尾部 DEFAULT_KEEP_RECENT 条 + tool 配对补全，
-   * 前置裁剪以边界占位符单消息替代）。
+   * 与 resetSession 同模式走 serialize 队列：load → compact → save。
    *
-   * 幂等 no-op：消息条数未减少（已低于压缩窗口或本就 ≤ keepRecent）时不落盘、
-   * 不 bump updatedAt（避免会话在列表里凭空“更新”），返回 compacted=false 供
-   * 客户端提示。实际压缩 → 落盘并重算 summary（extractSummary 取首条用户文本）。
+   * #467 step 2: 优先尝试 LLM 结构化摘要(`runFullCompact` best-effort)。
+   * `cachedDeps` 缺席(ask / worker / oneshot 等无 harness 装配)或 adapter
+   * 不可用 → 跳过 LLM 路径,走 `compactMessages` 纯截断路径。LLM 摘要失败
+   * (empty_response / timeout / adapter_failed)同样回退 placeholder。
+   * title 字段由 `extractTitle` 取首条 user 文本派生(#467 改名,原
+   * `summary`;两条路径的 messages[0] 都是 user 文本消息,派生语义一致)。
+   *
+   * 幂等 no-op: 消息条数未减少(已低于压缩窗口或本就 ≤ keepRecent 或
+   * 无 dropped 前缀)时不落盘、不 bump updatedAt,返回 compacted=false。
+   * 实际压缩 → 落盘并重算 title。
    */
   async compactSession(
     conversationId: string
@@ -1048,8 +1055,53 @@ export class SessionHub {
       work: async () => {
         const session = await this.store.load(conversationId);
         const before = session.messages;
-        const compacted = compactMessages(before);
-        if (compacted.length >= before.length) {
+        const split = splitForCompaction(before);
+        if (split === undefined) {
+          return {
+            session: this.summarize({ file: session }),
+            turns: projectMessagesToTurns(before),
+            compacted: false,
+            beforeCount: before.length,
+            afterCount: before.length,
+          };
+        }
+
+        // #467 step 2: 优先 LLM 结构化摘要(best-effort,失败回退 placeholder)。
+        // cachedDeps 缺席(ask / oneshot 等无 harness 装配)→ adapter 不可用,
+        // 跳过 LLM 路径,直接 placeholder。
+        let nextMessages: ReadonlyArray<AnthropicNativeMessage> | undefined;
+        if (this.cachedDeps?.adapter !== undefined) {
+          try {
+            const outcome = await runFullCompact({
+              adapter: this.cachedDeps.adapter,
+              dropped: split.dropped,
+            });
+            if (outcome.kind === "summarized") {
+              const preamble =
+                "This session is being continued from a previous " +
+                "conversation that ran out of context. The summary below " +
+                "covers the earlier portion of the conversation.\n\n" +
+                "Summary:\n";
+              nextMessages = [
+                {
+                  role: "user",
+                  content: [{ type: "text", text: preamble + outcome.text }],
+                },
+                ...split.kept,
+              ];
+            }
+          } catch {
+            // runFullCompact 自身已收敛所有错误到 FullCompactOutcome;
+            // 此处 catch 是防御性兜底,任何意外抛出都视作失败 → placeholder。
+          }
+        }
+
+        // 回退 / LLM 跳过 → 纯截断 + boundary placeholder。
+        const useCompactMessages = nextMessages === undefined;
+        const compacted = useCompactMessages
+          ? compactMessages(before)
+          : nextMessages!;
+        if (useCompactMessages && compacted.length >= before.length) {
           return {
             session: this.summarize({ file: session }),
             turns: projectMessagesToTurns(before),
@@ -1064,7 +1116,15 @@ export class SessionHub {
           turnCount: session.turnCount,
           updatedAt: new Date().toISOString(),
           schemaVersion: CURRENT_SCHEMA_VERSION,
-          summary: extractSummary(compacted),
+          // 用首条 user 文本派生 session title 字段(#467 改名,原 summary;
+          // 便于会话列表快速展示):
+          //   - 摘要轮:messages[0] = SUMMARY_PREAMBLE + 摘要内容 user 消息,
+          //     extractTitle(compacted) 会拿到 preamble 前缀,而不是用户原话。
+          //   - placeholder 路径:messages[0] = "[compaction boundary ...]" user 消息。
+          // 用 pre-compact 的 `before` 派生,标题保留原会话首条 user 意图(对齐
+          // 旧 placeholder 时代的行为),而不是被 preamble / placeholder 污染
+          // (#467 review-fix Medium:之前用 compacted,标题退化为通用 preamble)。
+          title: extractTitle(before),
         };
         await this.store.save({ id: conversationId, file: updated });
         return {
@@ -1336,7 +1396,7 @@ export class SessionHub {
       turnCount,
       updatedAt: now,
       schemaVersion: CURRENT_SCHEMA_VERSION,
-      summary: extractSummary(result.messages),
+      title: extractTitle(result.messages),
       // #458 T2/T5 (SC2): seed taskFocus from the first user message text
       // (full, trimmed) when taskFocus is still absent. `seedTaskFocus`
       // slices the primary entry to 500 chars and prepends the prior focus

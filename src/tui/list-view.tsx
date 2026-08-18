@@ -4,8 +4,9 @@
  *
  * #343 T4（自 archive/tui-ink/src/list-view.tsx 迁移 ink → OpenTUI，语义不变）：
  * 会话列表视图（Q4a/Q4b 裁决）：
- *  - 列内容 = summary（首条 user 前 80 字符，#120 SSOT）+ 相对时间 + 运行指示；
- *    数据源 = SessionStore.list() 的 summary 字段，不做 per-id 重读（SC 13）；
+ *  - 列内容 = title（首条 user 前 80 字符，#120 SSOT；#467 改名自 summary）
+ *    + 相对时间 + 运行指示；数据源 = SessionStore.list() 的 title 字段，不做
+ *    per-id 重读（SC 13）；
  *  - updatedAt 降序（store.list() 已排序）；
  *  - 首行 `+ 新建会话` 伪条目：Enter = /new 等价（Q4b）；
  *  - ↑↓ 选择，Enter 打开，Esc 返回聊天视图（Q3 列表纯导航；本视图内追加
@@ -14,7 +15,7 @@
  *  - running-bg 会话行内静态 `[运行中]` 暗色标记（与前台 spinner 区分）。
  *
  * —— 会话超限修复（2026-08-09，迁移后保留）——
- *   1. 顶部搜索框：直接键入即过滤（按 summary / lastFinalText 子串匹配，
+ *   1. 顶部搜索框：直接键入即过滤（按 title / lastFinalText 子串匹配，
  *      不区分大小写；清空 = 全量）。
  *   2. 视口窗口：只渲染 `rows` 预算内的行（顶部搜索框 + 表头 + 行数预算），
  *      超出部分不渲染，杜绝整帧溢出。
@@ -62,7 +63,7 @@ export interface ListViewProps {
   readonly onBack: () => void;
 }
 
-/** 行内容匹配（搜索过滤谓词）：summary / lastFinalText 子串，不区分大小写。
+/** 行内容匹配（搜索过滤谓词）：title / lastFinalText 子串，不区分大小写。
  *  exported 供单测直接断言。 */
 export function listEntryMatches(
   entry: SessionListEntry,
@@ -71,7 +72,7 @@ export function listEntryMatches(
   const q = query.trim().toLowerCase();
   if (!q) return true;
   return (
-    entry.summary.toLowerCase().includes(q) ||
+    entry.title.toLowerCase().includes(q) ||
     entry.lastFinalText.toLowerCase().includes(q)
   );
 }
@@ -224,7 +225,7 @@ export function ListView(props: ListViewProps): ReactNode {
     const time = relativeTime(entry.updatedAt);
     rows.push(
       <text key={entry.conversation_id} fg={selected ? pal.accent : pal.text}>
-        {marker} {renderSummary(entry.summary || "(空)")}
+        {marker} {renderSummary(entry.title || "(空)")}
         <span fg={pal.dim}> {time}</span>
         {entry.runningBg ? <span fg={pal.dim}> [运行中]</span> : ""}
       </text>

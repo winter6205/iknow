@@ -158,8 +158,10 @@ function runSignalChild(
       settled = true;
       resolve(r);
     };
-    // 30s guard:冷启动 import runtime.ts 图约 4-9s(并发 fork 下更久),
-    // 30s 既给足冷启动余量,又能捕获 DRIFT-1 旧实现的无限 re-kill 挂死。
+    // 60s guard:冷启动 import runtime.ts 图约 4-9s(全量并行套件负载下
+    // vitest forks ×3 + tsx 解析竞争可达 10-20s+),60s 给足冷启动余量,
+    // 又仍能捕获 DRIFT-1 旧实现的无限 re-kill 挂死。旧 30s 在重负载
+    // 下偶发超时 → 测试误报 fail(2026-08-19 全量套件 flaky 排查结论)。
     const guard = setTimeout(() => {
       child.kill("SIGKILL");
       finish({
@@ -168,10 +170,12 @@ function runSignalChild(
         disposeRan: existsSync(sentinel),
         stderr: err,
       });
-    }, 30000);
-    child.on("exit", (code) => {
+    }, 60000);
+    // close(而非 exit)收尾:close 在 stdio 流完全关闭后触发,err 缓冲
+    // 保证完整(exit 可能在 stderr 管道数据尚未 flush 时触发)。
+    // writeFileSync 在 dispose 里同步落盘,close 后立即可读。
+    child.on("close", (code) => {
       clearTimeout(guard);
-      // writeFileSync 在 dispose 里同步落盘,exit 后立即可读。
       finish({
         code,
         timedOut: false,

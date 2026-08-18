@@ -1,0 +1,77 @@
+{
+  "result": "pass",
+  "timestamp": "2026-08-18T18:38:57.615Z",
+  "model": "minimax-cn/MiniMax-M3",
+  "baseUrl": "172.31.128.1:20128",
+  "key_source": "settings.llm.apiKey",
+  "stream": "on",
+  "thinking": "adaptive",
+  "maxOutputTokens": 8192,
+  "timeout_policy": "no-default-client-side-timeout (Claude Code semantics)",
+  "phases": {
+    "functional": {
+      "outcome": "summarized",
+      "durationMs": 13549,
+      "summaryLen": 4537,
+      "outputTokens": 2278,
+      "assertions": [
+        {
+          "name": "outcome.kind === summarized",
+          "pass": true
+        },
+        {
+          "name": "summary length >= 200 (non-trivial)",
+          "pass": true
+        },
+        {
+          "name": "contains 'Primary Request' (9-section)",
+          "pass": true
+        },
+        {
+          "name": "preserves a seed fact (lexer/#459/ZWJ)",
+          "pass": true
+        },
+        {
+          "name": "no <analysis> tag leaked",
+          "pass": true
+        },
+        {
+          "name": "buildCompactedMessages shape ok",
+          "pass": true
+        },
+        {
+          "name": "usage.outputTokens > 0",
+          "pass": true
+        }
+      ]
+    },
+    "long": {
+      "outcome": "summarized",
+      "durationMs": 17398,
+      "droppedCount": 74,
+      "droppedCharCount": 27292,
+      "summaryLen": 5364,
+      "assertions": [
+        {
+          "name": "outcome.kind === summarized (long-context 在 SDK 默认 HTTP 超时内完成)",
+          "pass": true
+        }
+      ],
+      "notes": []
+    },
+    "abort": {
+      "outcome": "timeout",
+      "wallClockMs": 104,
+      "assertions": [
+        {
+          "name": "outcome.kind === timeout (real SDK aborted)",
+          "pass": true
+        },
+        {
+          "name": "wall clock < 1000ms (signal aborted HTTP, not just setTimeout race)",
+          "pass": true
+        }
+      ]
+    }
+  }
+}

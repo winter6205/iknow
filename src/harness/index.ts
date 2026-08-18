@@ -90,4 +90,14 @@ export {
 // 压缩：proactive/reactive 双保险共用 + 手动压缩入口（TUI /compact、web 按钮）
 // 共用的纯函数收口。loop-engine 自动触发；host 侧（session-api/hub）经
 // compactSession 手动触发，二者共用同一 `compactMessages`，阈值/压缩逻辑不分叉。
-export { compactMessages } from "./compress/index.js";
+// #467 step 2:LLM 结构化摘要(full compact)路径与纯截断 placeholder 路径并列
+// 暴露 —— loop-engine 自动路径与 hub 手动路径共用同一 best-effort 契约。
+export {
+  compactMessages,
+  buildCompactPrompt,
+  extractCompactSummary,
+  splitForCompaction,
+  buildCompactedMessages,
+  runFullCompact,
+} from "./compress/index.js";
+export type { FullCompactOutcome, CompactAdapter } from "./compress/index.js";

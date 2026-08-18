@@ -297,11 +297,11 @@ describe("GET /api/v1/sessions", () => {
     const { status, body } = await getJson("/api/v1/sessions");
     assert.equal(status, 200);
     const b = body as {
-      sessions: Array<{ conversation_id: string; summary?: string }>;
+      sessions: Array<{ conversation_id: string; title?: string }>;
     };
     assert.ok(Array.isArray(b.sessions));
     assert.ok(
-      b.sessions.some((s) => s.conversation_id === id && s.summary === "hi"),
+      b.sessions.some((s) => s.conversation_id === id && s.title === "hi"),
       "list must include the session that has a reply"
     );
   });
@@ -311,7 +311,7 @@ describe("GET /api/v1/sessions", () => {
     const { status, body } = await getJson("/api/v1/sessions");
     assert.equal(status, 200);
     const b = body as {
-      sessions: Array<{ conversation_id: string; summary?: string }>;
+      sessions: Array<{ conversation_id: string; title?: string }>;
     };
     assert.ok(
       !b.sessions.some((s) => s.conversation_id === id),

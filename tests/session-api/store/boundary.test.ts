@@ -7,7 +7,7 @@
  *     delta=0 / appendCheckpoint delta=0 / rewind keepTurns=0 均已有,跳过。
  *   - negative(负值/非法)→ turnSliceEnd(-1) / appendCheckpoint 负 delta /
  *     rewind clamp / schema 拒非数组 messages 均已有,跳过。
- *   - overflow(大输入)→ 只有 extractSummary 80 字符上限;缺大 messages 数组
+ *   - overflow(大输入)→ 只有 extractTitle 80 字符上限;缺大 messages 数组
  *     与大 checkpoints 数组。本文件补 3 例。
  *   - concurrent(并发)→ 既有仅 immutability(T1)+ 顺序重复 commit(T2/T4);
  *     缺并行 save() 到同一 id 的撕裂防护。本文件补 1 例(核心)。
@@ -70,7 +70,7 @@ const baseFile = (): SessionFileV1 => ({
   jsonMode: false,
   turnCount: 0,
   updatedAt: "2026-08-11T00:00:00.000Z",
-  summary: "",
+  title: "",
   cwd: "",
   sanitized_at: "2026-08-11T00:00:00.000Z",
   checkpoints: [],
@@ -195,9 +195,9 @@ describe("concurrent — N 并行 save() 到同一 id", () => {
     const candidates: SessionFileV1[] = Array.from({ length: N }, (_, i) => ({
       ...baseFile(),
       conversation_id: id,
-      // 每个候选可辨识:turnCount=i + summary="summary-i" + 60 条消息。
+      // 每个候选可辨识:turnCount=i + title="title-i" + 60 条消息。
       turnCount: i,
-      summary: `summary-${i}`,
+      title: `title-${i}`,
       messages: Array.from({ length: 60 }, (_, m) =>
         m % 2 === 0 ? userMsg(`q${i}-${m}`) : assistantMsg(`a${i}-${m}`)
       ),
@@ -271,10 +271,10 @@ describe("concurrent — N 并行 save() 到同一 id", () => {
       -1,
       "文件可解析且 v3 合法,但不匹配任何候选 —— 静默有效撕裂"
     );
-    // 一致性:命中的 i 必须与其 turnCount/summary 自洽(防 partial 撕裂)。
+    // 一致性:命中的 i 必须与其 turnCount/title 自洽(防 partial 撕裂)。
     const m = candidates[matchIndex]!;
     assert.equal((parsed as SessionFileV1).turnCount, m.turnCount);
-    assert.equal((parsed as SessionFileV1).summary, m.summary);
+    assert.equal((parsed as SessionFileV1).title, m.title);
   });
 });
 
@@ -369,7 +369,7 @@ describe("exception — deeper IO tree (typed errors)", () => {
         jsonMode: false,
         turnCount: 1,
         updatedAt: ISO,
-        summary: "q1",
+        title: "q1",
         cwd: "",
         sanitized_at: ISO,
         checkpoints: null,

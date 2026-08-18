@@ -13,7 +13,7 @@ export type {
 export {
   CURRENT_SCHEMA_VERSION,
   extractGoal,
-  extractSummary,
+  extractTitle,
   isSessionFileV1,
   MAX_GOAL_CHARS,
   MAX_TASK_FOCUS_CHARS,

@@ -47,7 +47,7 @@ function sampleFile(overrides?: Partial<SessionFileV1>): SessionFileV1 {
     jsonMode: false,
     turnCount: 1,
     updatedAt: now,
-    summary: "你好",
+    title: "你好",
     cwd: "/tmp/proj",
     sanitized_at: now,
     ...overrides,

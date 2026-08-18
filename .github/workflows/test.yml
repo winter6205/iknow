@@ -45,6 +45,8 @@ jobs:
       - run: npm ci
       - name: Typecheck
         run: npm run typecheck
+      - name: Check bwrap test excludes (CI guard — #467 merge regression)
+        run: npx tsx scripts/ci-check-test-excludes.ts
       - name: Vitest fast subset (bail-10 + retry-1 for flaky timing)
         # 排除集 = test-full 镜像。bwrap 物理执行类（runner 无 user-namespace）：
         #   bash-sandbox / demo / interrupt-routing / bash / grep /
@@ -67,11 +69,16 @@ jobs:
             --exclude 'tests/e2e/**' \
             --exclude 'tests/integration/**' \
             --exclude tests/harness/aci/bash-sandbox.test.ts \
+            --exclude tests/harness/aci/bash-background.test.ts \
+            --exclude tests/harness/aci/bash-output-stop.test.ts \
+            --exclude tests/harness/aci/bash-service-loop.e2e.test.ts \
             --exclude tests/harness/aci/demo.test.ts \
             --exclude tests/harness/aci/interrupt-routing.test.ts \
             --exclude tests/harness/aci/tools/bash.test.ts \
             --exclude tests/harness/aci/tools/grep.test.ts \
             --exclude tests/harness/aci/permission.test.ts \
+            --exclude tests/harness/aci/registry-workspace-root.test.ts \
+            --exclude tests/harness/aci/tools/d9-description-guard.test.ts \
             --exclude tests/harness/aci/tools/registry.test.ts \
             --exclude tests/harness/identity/system-injection.test.ts \
             --exclude tests/session-api/max-turns-serve.test.ts \
@@ -80,12 +87,16 @@ jobs:
             --exclude tests/integration/mcp-chain.test.ts \
             --exclude tests/e2e/skill-mcp-acceptance.test.ts \
             --exclude tests/harness/build-engine.test.ts \
+            --exclude tests/harness/build-engine-subagent-trace.test.ts \
             --exclude tests/session-api/ensure-deps-aci-tools.test.ts \
             --exclude tests/subagent/worker-tool-surface.test.ts \
             --exclude tests/subagent/worker.test.ts \
             --exclude tests/tui/banner-scroll-fixes.test.tsx \
             --exclude tests/tui/logo-persists.test.tsx \
-            --exclude 'tests/harness/secret-roundtrip/**'
+            --exclude 'tests/harness/secret-roundtrip/**' \
+            --exclude tests/harness/mcp/zero-linkage-guard.test.ts \
+            --exclude tests/harness/sandbox/runner.test.ts \
+            --exclude tests/subagent/envelope-freeze.test.ts
 
   # 全量兜底（nightly cron + manual dispatch）。内容 = 原 test job。
   test-full:
@@ -107,6 +118,8 @@ jobs:
       - run: npm ci
       - name: Typecheck
         run: npm run typecheck
+      - name: Check bwrap test excludes (CI guard — #467 merge regression)
+        run: npx tsx scripts/ci-check-test-excludes.ts
       - name: Test suite (full — exclude sandbox-dependent, retry flaky)
         # 排除集 = 两次 CI 实证失败集的并集（bwrap 物理执行依赖 + 装配
         # 依赖 bwrap 缺失 + TUI 时序 flaky）。本地 WSL 全量绿；排除仅
@@ -132,11 +145,16 @@ jobs:
         run: |
           npx vitest run --retry 1 \
             --exclude tests/harness/aci/bash-sandbox.test.ts \
+            --exclude tests/harness/aci/bash-background.test.ts \
+            --exclude tests/harness/aci/bash-output-stop.test.ts \
+            --exclude tests/harness/aci/bash-service-loop.e2e.test.ts \
             --exclude tests/harness/aci/demo.test.ts \
             --exclude tests/harness/aci/interrupt-routing.test.ts \
             --exclude tests/harness/aci/tools/bash.test.ts \
             --exclude tests/harness/aci/tools/grep.test.ts \
             --exclude tests/harness/aci/permission.test.ts \
+            --exclude tests/harness/aci/registry-workspace-root.test.ts \
+            --exclude tests/harness/aci/tools/d9-description-guard.test.ts \
             --exclude tests/harness/aci/tools/registry.test.ts \
             --exclude tests/harness/identity/system-injection.test.ts \
             --exclude tests/session-api/max-turns-serve.test.ts \
@@ -145,9 +163,13 @@ jobs:
             --exclude tests/integration/mcp-chain.test.ts \
             --exclude tests/e2e/skill-mcp-acceptance.test.ts \
             --exclude tests/harness/build-engine.test.ts \
+            --exclude tests/harness/build-engine-subagent-trace.test.ts \
             --exclude tests/session-api/ensure-deps-aci-tools.test.ts \
             --exclude tests/subagent/worker-tool-surface.test.ts \
             --exclude tests/subagent/worker.test.ts \
             --exclude tests/tui/banner-scroll-fixes.test.tsx \
             --exclude tests/tui/logo-persists.test.tsx \
-            --exclude tests/harness/secret-roundtrip/e2e.test.ts
+            --exclude tests/harness/secret-roundtrip/e2e.test.ts \
+            --exclude tests/harness/mcp/zero-linkage-guard.test.ts \
+            --exclude tests/harness/sandbox/runner.test.ts \
+            --exclude tests/subagent/envelope-freeze.test.ts

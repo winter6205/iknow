@@ -180,7 +180,7 @@ describe('任务 B："/" 出现候选 → ↓ → Enter 触发 /new', () => {
     const list = await app.bridge.listSessions();
     expect(list).toBeDefined();
     expect(list.length).toBe(1);
-    expect(list[0]!.summary).toBe("new-draft-msg");
+    expect(list[0]!.title).toBe("new-draft-msg");
     // 5) assistant 答复渲染出来
     await untilFrame(
       app.setup,

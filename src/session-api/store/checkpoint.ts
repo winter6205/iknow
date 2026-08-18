@@ -26,7 +26,7 @@ import type {
   InterruptReason,
   SessionFileV1,
 } from "./schema.js";
-import { extractSummary } from "./schema.js";
+import { extractTitle } from "./schema.js";
 
 /**
  * Exclusive end index (within `messages`) of the turn at 0-based ordinal
@@ -156,7 +156,7 @@ export function appendCheckpoint(
  * split: the slice end index comes from turnSliceEnd and a truncated turn's
  * tool_result block (if any) stays inside its slice. Also:
  *   - recomputes turnCount (number of kept turns);
- *   - recomputes summary from the truncated prefix;
+ *   - recomputes title from the truncated prefix (#467 renamed from `summary`);
  *   - prunes checkpoints whose turnIndex >= keepTurns (records that describe
  *     turns that no longer exist after the truncation).
  *
@@ -184,7 +184,7 @@ export function rewindFile(
     ...session,
     messages,
     turnCount: target,
-    summary: extractSummary(messages),
+    title: extractTitle(messages),
     checkpoints,
   };
 }

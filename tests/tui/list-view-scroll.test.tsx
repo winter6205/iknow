@@ -3,7 +3,7 @@
  * tests/tui/list-view-scroll.test.tsx
  *
  * #343 T4：会话列表「搜索 + 视口翻页」行为（OpenTUI 版，归档语义重写）：
- *  - listEntryMatches 纯函数：summary / lastFinalText 子串匹配、不区分大小写、
+ *  - listEntryMatches 纯函数：title / lastFinalText 子串匹配、不区分大小写、
  *    空白 query 匹配全部；
  *  - 视口窗口：rows 预算内只渲染「搜索框 + 表头 + 可视行」，会话超过视口时
  *    滚动指示出现、超出部分不渲染（杜绝整帧溢出）；
@@ -39,7 +39,7 @@ async function untilFrame(
 
 function makeEntry(
   id: string,
-  summary: string,
+  title: string,
   lastFinalText = "",
   runningBg = false
 ): TuiListEntry {
@@ -47,7 +47,7 @@ function makeEntry(
     conversation_id: id,
     updatedAt: new Date().toISOString(),
     lastFinalText,
-    summary,
+    title,
     runningBg,
   };
 }
@@ -88,7 +88,7 @@ test("listEntryMatches：空 / 空白 query → 全部匹配", () => {
   expect(listEntryMatches(entry, "   ")).toBe(true);
 });
 
-test("listEntryMatches：summary / lastFinalText 子串匹配（英文不区分大小写）", () => {
+test("listEntryMatches：title / lastFinalText 子串匹配（英文不区分大小写）", () => {
   const entry = makeEntry("c1", "部署流程排查", "权限报错 403 access-denied");
   expect(listEntryMatches(entry, "部署")).toBe(true);
   expect(listEntryMatches(entry, "排查")).toBe(true);

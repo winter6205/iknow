@@ -199,7 +199,7 @@ function sessionFileWithUserMessages(
     jsonMode: false,
     turnCount: texts.length,
     updatedAt: overrides?.updatedAt ?? "2026-08-11T00:00:00.000Z",
-    summary: texts[0] ?? "",
+    title: texts[0] ?? "",
     cwd: "",
     sanitized_at: "2026-08-11T00:00:00.000Z",
     checkpoints: [],
@@ -221,11 +221,11 @@ describe("T8 多行输入：提交后清空 + 历史召回保留多行", () => {
     await app.typeText("第二行");
     await app.pressEnter();
 
-    // turn 落盘：summary 含换行。
+    // turn 落盘：title 含换行。
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "multi-turn");
     const list = await app.bridge.listSessions();
     expect(list.length).toBe(1);
-    expect(list[0]!.summary).toBe("第一行\n第二行");
+    expect(list[0]!.title).toBe("第一行\n第二行");
 
     // 提交后输入框已清空：占位「输入消息」重新可见（提交前输入框是实际文本；
     // 注意消息流里会渲染用户消息全文，故不能用「第一行消失」作信号）。
@@ -262,7 +262,7 @@ describe("#279 项5：TUI 输入历史 ↑/↓ 导航", () => {
     const list = await app.bridge.listSessions();
     expect(list).toBeDefined();
     expect(list.length).toBe(1);
-    expect(list[0]!.summary).toBe("after-noop");
+    expect(list[0]!.title).toBe("after-noop");
     await app.destroy();
   }, 30_000);
 
@@ -360,7 +360,7 @@ describe("会话恢复种子：per-session 输入历史（initialSession / openS
       (f) => f.includes("新建会话") && f.includes("msg-b1")
     );
 
-    // ↓ 选中 B（选中行 marker ">" 落到 B 的 summary 上，状态可见后再按
+    // ↓ 选中 B（选中行 marker ">" 落到 B 的 title 上，状态可见后再按
     // Enter，避免「Enter 先于 ↓ 的渲染提交 → onOpen(0) 误开新会话」竞态）
     // → Enter → openSessionAt(1)：loadSessionFile + attach + 种子。
     await app.pressArrow("down");

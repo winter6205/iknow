@@ -78,11 +78,20 @@ function makeFlakyAdapter(opts: {
     encodeToolResults: (): AnthropicContentBlock[] => [],
     step: async (
       _state: LoopState,
-      _request: unknown
+      request: { readonly tools?: unknown }
     ): Promise<AssistantTurnResult> => {
       opts.attemptCount.value += 1;
       if (opts.attemptCount.value === 1) {
         throw new PromptTooLongError("synthetic 400 prompt-too-long");
+      }
+      // #467 step 2:full-compact 摘要轮(tools === undefined)返回空文本 →
+      // empty_response → fallback placeholder(保留本组测试的几何不变式)。
+      if (request.tools === undefined) {
+        return assistantResult({
+          texts: [],
+          toolCalls: [],
+          supplierStop: "success",
+        });
       }
       return assistantResult({
         texts: [opts.retryText],
@@ -152,7 +161,7 @@ async function seedSessionWithFocus(
       jsonMode: false,
       turnCount: 12,
       updatedAt: now,
-      summary: "",
+      title: "",
       cwd: process.cwd(),
       sanitized_at: now,
       checkpoints: [],
@@ -184,7 +193,7 @@ async function seedSessionWithoutFocus(
       jsonMode: false,
       turnCount: 12,
       updatedAt: now,
-      summary: "",
+      title: "",
       cwd: process.cwd(),
       sanitized_at: now,
       checkpoints: [],
@@ -221,8 +230,8 @@ describe("reactive compact + boundaryAttachment (#458 T8)", () => {
     });
     const res = await hub.postMessage({ conversationId: id, text: "go" });
     expect(res.turn.answer.stopReason).toBe("completed");
-    // 首次抛 + 重试成功 = step 被调 2 次。
-    expect(attemptCount.value).toBe(2);
+    // #467 step 2:首次抛 + full-compact 摘要步(fallback → placeholder)+ 重试成功 = 3 次。
+    expect(attemptCount.value).toBe(3);
 
     // 从 store 读回:reactive compact 触发后 result.messages 落盘,
     // boundaryAttachment 注入的 user 消息应在 placeholder 之后。
@@ -253,7 +262,8 @@ describe("reactive compact + boundaryAttachment (#458 T8)", () => {
     });
     const res = await hub.postMessage({ conversationId: id, text: "go" });
     expect(res.turn.answer.stopReason).toBe("completed");
-    expect(attemptCount.value).toBe(2);
+    // #467 step 2:首次抛 + full-compact 摘要步 + 重试成功 = 3 次。
+    expect(attemptCount.value).toBe(3);
 
     const loaded = await store.load(id);
     expect(loaded.messages.length).toBeGreaterThan(0);

@@ -75,7 +75,7 @@ export function buildRewindTargets(
   return targets;
 }
 
-/** 锚点用户消息首个 text block（trim + 截 80，同 extractSummary 语义）。 */
+/** 锚点用户消息首个 text block（trim + 截 80，同 extractTitle 语义）。 */
 function firstUserText(msg: AnthropicNativeMessage): string {
   const block = msg.content.find((b) => b.type === "text");
   return block !== undefined && block.type === "text"

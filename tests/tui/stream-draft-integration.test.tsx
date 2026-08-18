@@ -224,7 +224,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     const list = await app.bridge.listSessions();
     expect(list).toBeDefined();
     expect(list.length).toBe(1);
-    expect(list[0]!.summary).toBe("hi");
+    expect(list[0]!.title).toBe("hi");
     const sessionId = list[0]!.conversation_id;
     const file = await app.bridge.loadSessionFile(sessionId);
     expect(file.turnCount).toBe(1);

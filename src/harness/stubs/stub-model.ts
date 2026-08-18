@@ -96,6 +96,45 @@ export function createStubModel(opts: StubModelOptions): StubModelFull {
       if (signal?.aborted) {
         throw new DOMException("This operation was aborted", "AbortError");
       }
+      // #467 step 2:full-compact 摘要轮无 tools(request.tools === undefined),
+      // 与收尾摘要 epilogue(runSummaryWithTimeout)同形。用 state 最后一条
+      // user 文本区分:full-compact prompt 含 BASE_COMPACT_PROMPT 的标题句,
+      // SUMMARY_PROMPT 不含。full-compact 替身不模拟摘要内容 → 返回 empty text,
+      // 让 runFullCompact 报 empty_response → fallback placeholder。否则
+      // scripted responses 会被摘要步提前耗尽,主循环后续 turn 拿到
+      // ProtocolError(预期外)。既有 fallback 行为测试与 step 计数假设保持稳定。
+      if (request.tools === undefined) {
+        const lastUserText = [..._state.messages]
+          .reverse()
+          .find((m) => m.role === "user")
+          ?.content.filter(
+            (b): b is { type: "text"; text: string } => b.type === "text"
+          )
+          .map((b) => b.text)
+          .join("");
+        const isFullCompact =
+          lastUserText?.includes(
+            "Your task is to create a detailed summary of the conversation so far"
+          ) === true;
+        if (isFullCompact) {
+          const emptyNative: AnthropicNativeMessage = {
+            role: "assistant",
+            content: [],
+          };
+          return {
+            nativeMessage: emptyNative,
+            projection: {
+              nativeMessage: emptyNative,
+              texts: [],
+              toolCalls: [],
+            },
+            supplierStop: "success",
+            needsTools: false,
+            isEmptyFinalResponse: true,
+          };
+        }
+        // 收尾摘要(same no-tools shape)→ 消费 queued response(normal path)。
+      }
       const next = queue.shift();
       if (!next) {
         throw new ProtocolError(

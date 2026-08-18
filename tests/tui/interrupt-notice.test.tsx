@@ -62,7 +62,7 @@ function fakeBridge(opts: FakeBridgeOptions): TuiBridge {
   let file: SessionFileV1 = {
     schemaVersion: 3,
     conversation_id: "conv-b1",
-    summary: "",
+    title: "",
     cwd: "/tmp/proj",
     sanitized_at: new Date().toISOString(),
     messages: [],

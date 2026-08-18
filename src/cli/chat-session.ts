@@ -54,7 +54,7 @@ import {
   type SessionStoreError,
   type SessionFileV1,
   CURRENT_SCHEMA_VERSION,
-  extractSummary,
+  extractTitle,
   appendCheckpoint,
   pinGoal,
   shouldPersistCheckpoint,
@@ -658,7 +658,7 @@ function freshSessionFile(conversationId: string): SessionFileV1 {
     jsonMode: false,
     turnCount: 0,
     updatedAt: now,
-    summary: "",
+    title: "",
     cwd: process.cwd(),
     sanitized_at: now,
     checkpoints: [],
@@ -811,7 +811,7 @@ export async function persistChatSessionCheckpoint(opts: {
         jsonMode,
         turnCount: 0,
         updatedAt: new Date().toISOString(),
-        summary: "",
+        title: "",
         cwd: process.cwd(),
         sanitized_at: new Date().toISOString(),
         checkpoints: [],
@@ -841,7 +841,7 @@ export async function persistChatSessionCheckpoint(opts: {
       turnCount,
       updatedAt: now,
       schemaVersion: CURRENT_SCHEMA_VERSION,
-      summary: extractSummary(result.messages),
+      title: extractTitle(result.messages),
     };
     await store.save({ id: conversationId, file: updated });
   } catch (err) {

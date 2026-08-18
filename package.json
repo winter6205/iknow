@@ -28,6 +28,7 @@
     "test:pre-push": "vitest run --retry 1",
     "test:ci": "vitest run",
     "test:real-llm": "vitest run --config vitest.real-llm.config.ts",
+    "ci:check-excludes": "tsx scripts/ci-check-test-excludes.ts",
     "dev": "tsx src/cli.ts",
     "dev:tui": "$HOME/.bun/bin/bun run src/cli.ts tui",
     "serve": "tsx src/cli.ts serve",

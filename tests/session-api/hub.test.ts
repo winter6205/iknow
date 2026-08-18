@@ -65,7 +65,7 @@ function sampleFile(opts: {
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     conversation_id: id,
-    summary: "",
+    title: "",
     cwd: "/tmp/test",
     sanitized_at: new Date().toISOString(),
     messages: [],
@@ -171,7 +171,7 @@ describe("createSession", () => {
     );
     // T1 checkpoint: createSession writes the v4 schema + empty checkpoints.
     assert.equal(raw.schemaVersion, CURRENT_SCHEMA_VERSION);
-    assert.equal(raw.summary, "");
+    assert.equal(raw.title, "");
     assert.equal(typeof raw.cwd, "string");
     assert.equal(typeof raw.sanitized_at, "string");
     assert.deepEqual(raw.checkpoints, []);
@@ -622,7 +622,7 @@ describe("drop-context stop reasons do not save", () => {
 // -- getSession / resetSession / listSessions --------------------------------
 
 describe("getSession", () => {
-  it("returns summary with projected turns (no raw messages)", async () => {
+  it("returns title with projected turns (no raw messages)", async () => {
     const deps = makeDeps([assistantResult({ texts: ["hi"] })]);
     const hub = makeHub(deps);
     const { session } = await hub.createSession();
@@ -742,23 +742,41 @@ describe("compactSession", () => {
       }
     );
   });
+
+  it("title 保留 pre-compact 首条 user 意图(review-fix:不被 placeholder/preamble 污染)", async () => {
+    // stub model 对 full-compact prompt 返回 empty → fallback placeholder 路径。
+    // 修复前:title = extractTitle(compacted) = "[compaction boundary..." 前缀。
+    // 修复后:title = extractTitle(before) = 首条 user 文本("q0")。
+    const deps = makeDeps(
+      Array.from({ length: 4 }, (_, i) =>
+        assistantResult({ texts: [`answer ${i}`] })
+      )
+    );
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    await seedTurns(hub, session.conversation_id, 4);
+    const res = await hub.compactSession(session.conversation_id);
+    assert.equal(res.compacted, true);
+    const after = await store.load(session.conversation_id);
+    assert.equal(after.title, "q0");
+  });
 });
 
-describe("postMessage summary projection", () => {
-  it("recomputes summary instead of preserving a dirty value", async () => {
+describe("postMessage title projection", () => {
+  it("recomputes title instead of preserving a dirty value", async () => {
     const hub = makeHub(makeDeps([assistantResult({ texts: ["answer"] })]));
     const { session } = await hub.createSession();
     const path = join(sessionDir, `${session.conversation_id}.json`);
     const { readFile, writeFile } = await import("node:fs/promises");
     const raw = JSON.parse(await readFile(path, "utf8"));
-    raw.summary = "dirty";
+    raw.title = "dirty";
     await writeFile(path, JSON.stringify(raw), "utf8");
     await hub.postMessage({
       conversationId: session.conversation_id,
       text: "hello",
     });
     const saved = JSON.parse(await readFile(path, "utf8"));
-    assert.equal(saved.summary, "hello");
+    assert.equal(saved.title, "hello");
   });
 });
 
@@ -776,7 +794,7 @@ describe("listSessions", () => {
       (e) => e.conversation_id === session.conversation_id
     );
     assert.ok(entry);
-    assert.equal(entry.summary, "hello");
+    assert.equal(entry.title, "hello");
   });
 
   it("excludes a freshly created session with no reply (issue #96)", async () => {

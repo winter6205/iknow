@@ -30,4 +30,33 @@ export type HarnessStreamEvent =
   | { type: "thinking_delta"; text: string }
   | { type: "tool_call_start"; name: string; id: string }
   | { type: "tool_input_delta"; id: string; partialJson: string }
-  | { type: "stop_summary"; text: string };
+  | { type: "stop_summary"; text: string }
+  // #467:LLM 结构化摘要压缩(full-compact)生命周期事件。宿主层据此渲染
+  // "Compacting…"指示 / 透出摘要 latency(text_delta 经 adapter request.onStream
+  // 直透)。compact 期间 turn 仍在继续(主 loop 等摘要完成才进入下一 step),
+  // 故宿主收到 compaction_started 时可显示进度指示器;收到 completed / failed /
+  // cancelled 中任一终态事件后清除指示器(cancelled = wait 中用户取消,非错误,
+  // 语义对齐 Claude Code:压缩中 Esc = 会话原样 + 无失败呈现)。事件形状保持
+  // 最小:仅携带宿主渲染 / 日志所需字段。
+  | { type: "compaction_started"; droppedCount: number }
+  | { type: "compaction_completed"; summaryLen: number; durationMs: number }
+  | { type: "compaction_failed"; reason: string; durationMs: number }
+  | { type: "compaction_cancelled" };
+
+/**
+ * 观察者错误不得反流回 emit 路径(对齐 ADR-0003 `safeTrace` MUST NOT throw
+ * 与 wireStreamEvents D3 先例)。统一封装:anthropic-adapter stream 翻译 + full
+ * compact 压缩生命周期事件均消费此函数,避免各处 try/catch 复制粘贴。
+ */
+export function safeEmitStream(
+  onStream: ((event: HarnessStreamEvent) => void) | undefined,
+  event: HarnessStreamEvent
+): void {
+  if (onStream === undefined) return;
+  try {
+    onStream(event);
+  } catch {
+    // D3:swallow observer exceptions,host faults must not back-flow into
+    // the stream arm (aligned with ADR-0003 `safeTrace` MUST NOT throw).
+  }
+}
