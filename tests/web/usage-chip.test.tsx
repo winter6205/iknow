@@ -1,7 +1,8 @@
 /**
  * tests/web/usage-chip.test.tsx
  *
- * UsageChip 渲染断言 — 三档色阈值 × null → 不渲染 × cache null 当 0 ×
+ * UsageChip 渲染断言 — 三档色阈值 × usage null → 按 0 渲染（首回合前
+ * 状态条常驻；contextWindow null → 不渲染）× cache null 当 0 ×
  * title 明细。百分比计算断言语义迁移自已退役的
  * context-usage-strip.test.tsx（组件整体退役，非降断言）：
  * 分子 = inputTokens + cacheReadInputTokens + cacheCreationInputTokens，
@@ -63,10 +64,11 @@ describe("UsageChip — 三档色阈值", () => {
   }
 });
 
-describe("UsageChip — null / 缺失 → 不渲染", () => {
-  it("usage === null → 空字符串", () => {
+describe("UsageChip — null / 缺失", () => {
+  it("usage === null → 按 0 渲染（首回合前状态条常驻）", () => {
     const html = render({ usage: null, contextWindow: 200000 });
-    assert.equal(html, "");
+    assert.ok(html.includes("0.0k / 200.0k"));
+    assert.ok(html.includes("0%"));
   });
 
   it("contextWindow === null → 空字符串", () => {
