@@ -11,6 +11,12 @@
  */
 import * as http from "node:http";
 import { isIknowError, ValidationError } from "../shared/errors.js";
+import {
+  isWorkspaceRootError,
+  renderWorkspaceRootError,
+  type WorkspaceRootError,
+} from "../config/workspace-root.js";
+import { isWorkspacesRecentsError } from "../config/workspaces-recents.js";
 import { mapStoreError, type SessionHub } from "./hub.js";
 import type { SessionStoreError } from "./store/index.js";
 import { parseThinkingOverride } from "./thinking-override.js";
@@ -18,6 +24,9 @@ import type {
   ApiErrorBody,
   HealthResponse,
   PermissionModeResponse,
+  PutWorkspaceRequest,
+  WorkspaceResponse,
+  WorkspacesResponse,
 } from "./contract.js";
 import { getVersion } from "../cli/usage.js";
 import {
@@ -216,6 +225,40 @@ async function handle(opts: HandleOpts): Promise<void> {
     // 404，与 trace 未挂载同模式）。
     if (pathname === "/api/v1/permission-mode") {
       return handlePermissionModeRoute({ method, req, res, permissionMode });
+    }
+
+    // serve-workspace T3: picker bind state + recents/trust roster.
+    if (pathname === "/api/v1/workspace") {
+      if (method === "GET") {
+        return sendJson({
+          res,
+          status: 200,
+          body: hub.getWorkspaceState() satisfies WorkspaceResponse,
+        });
+      }
+      if (method === "PUT") {
+        const parsed = parsePutWorkspaceBody(await readJsonBody(req));
+        const root = await hub.bindWorkspace(parsed.path, {
+          confirmTrust: parsed.confirmTrust,
+        });
+        return sendJson({
+          res,
+          status: 200,
+          body: { bound: true, root } satisfies WorkspaceResponse,
+        });
+      }
+      return sendMethodNotAllowed(res, method, pathname);
+    }
+    if (method === "GET" && pathname === "/api/v1/workspaces") {
+      return sendJson({
+        res,
+        status: 200,
+        body: {
+          workspaces: (await hub.listTrustedWorkspaces()).map((root) => ({
+            root,
+          })),
+        } satisfies WorkspacesResponse,
+      });
     }
 
     if (method === "POST" && pathname === "/api/v1/sessions") {
@@ -529,6 +572,40 @@ function extractBoolField(opts: ExtractBoolFieldOpts): boolean {
   return Boolean(o[key]);
 }
 
+/** serve-workspace T3: parse PUT /api/v1/workspace body. */
+function parsePutWorkspaceBody(raw: unknown): PutWorkspaceRequest {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new ValidationError("body must be a JSON object");
+  }
+  const o = raw as Record<string, unknown>;
+  const path = o["path"];
+  if (typeof path !== "string") {
+    throw new ValidationError("path must be a string", { field: "path" });
+  }
+  return {
+    path,
+    confirmTrust: Boolean(o["confirmTrust"]),
+  };
+}
+
+/** serve-workspace T3: 405 for exact path with the wrong method. */
+function sendMethodNotAllowed(
+  res: http.ServerResponse,
+  method: string,
+  pathname: string
+): void {
+  sendJson({
+    res,
+    status: 405,
+    body: {
+      error: {
+        kind: "internal",
+        message: `method ${method} not allowed on ${pathname}`,
+      },
+    } satisfies ApiErrorBody,
+  });
+}
+
 async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
@@ -591,8 +668,29 @@ function isSessionStoreError(err: unknown): err is SessionStoreError {
 }
 
 /**
+ * serve-workspace T3: recents/trust file errors → HTTP status + fixed wire
+ * message. Mirrors the store error map's data-table shape; entries must NOT
+ * carry a conversation_id (recents errors are home/file-level).
+ */
+const RECENTS_ERROR_MAP = {
+  parse_failed: {
+    status: 422,
+    message: "workspaces.json is not valid JSON",
+  },
+  io_error: {
+    status: 500,
+    message: "IO error on workspaces.json",
+  },
+  concurrent_write: {
+    status: 409,
+    message: "concurrent write conflict on workspaces.json",
+  },
+} as const;
+
+/**
  * Centralized error → nested ApiErrorBody mapping.
- * Precedence: SessionStoreError → typed store error; ValidationError → 400
+ * Precedence: WorkspaceRootError → 400 validation; recents errors → typed
+ * status; SessionStoreError → typed store error; ValidationError → 400
  * validation; IknowError NOT_FOUND → 404 not_found; everything else → 500.
  */
 interface SendErrorOpts {
@@ -602,6 +700,44 @@ interface SendErrorOpts {
 
 function sendError(opts: SendErrorOpts): void {
   const { res, err } = opts;
+  // serve-workspace T3: WorkspaceRootError MUST be checked before the
+  // SessionStoreError guard — the `not_found` kind exists in both unions
+  // with different HTTP targets (400 validation vs 404 not_found). The
+  // resolver's not_found is ADR-0023 EXIT.
+  if (isWorkspaceRootError(err)) {
+    const werr = err as WorkspaceRootError;
+    sendJson({
+      res,
+      status: 400,
+      body: {
+        error: {
+          kind: "validation",
+          message: renderWorkspaceRootError(werr),
+          field: "path",
+        },
+      } satisfies ApiErrorBody,
+    });
+    return;
+  }
+  // serve-workspace T3: recents/trust IO errors are plain objects with
+  // overlapping kinds (parse_failed / concurrent_write) that the
+  // SessionStoreError guard would otherwise misclassify. Map each kind to
+  // its own status; messages are fixed text (no conversation_id — these
+  // errors are file-level, not session-level).
+  if (isWorkspacesRecentsError(err)) {
+    const entry = RECENTS_ERROR_MAP[err.kind];
+    sendJson({
+      res,
+      status: entry.status,
+      body: {
+        error: {
+          kind: err.kind,
+          message: entry.message,
+        },
+      } satisfies ApiErrorBody,
+    });
+    return;
+  }
   if (isSessionStoreError(err)) {
     const { status, body } = mapStoreError(err);
     sendJson({ res, status, body });

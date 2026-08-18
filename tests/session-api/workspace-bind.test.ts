@@ -108,7 +108,7 @@ describe("bindWorkspace + three anchors", () => {
         return { deps: makeDeps([assistantResult({ texts: ["bound"] })]) };
       },
     });
-    const bound = hub.bindWorkspace(root);
+    const bound = await hub.bindWorkspace(root);
     assert.equal(bound, root);
     const { session } = await hub.createSession();
     const file = await store.load(session.conversation_id);
@@ -140,9 +140,9 @@ describe("bindWorkspace + three anchors", () => {
         return { deps: makeDeps([assistantResult({ texts: [engineRoot] })]) };
       },
     });
-    hub.bindWorkspace(rootA);
+    await hub.bindWorkspace(rootA);
     const { session } = await hub.createSession();
-    hub.bindWorkspace(rootB);
+    await hub.bindWorkspace(rootB);
     const res = await hub.postMessage({
       conversationId: session.conversation_id,
       text: "hi",
@@ -169,9 +169,9 @@ describe("two roots two engines", () => {
         };
       },
     });
-    hub.bindWorkspace(rootA);
+    await hub.bindWorkspace(rootA);
     const s1 = await hub.createSession();
-    hub.bindWorkspace(rootB);
+    await hub.bindWorkspace(rootB);
     const s2 = await hub.createSession();
 
     const [r1, r2] = await Promise.all([
@@ -210,9 +210,9 @@ describe("two roots two engines", () => {
         };
       },
     });
-    hub.bindWorkspace(rootA);
+    await hub.bindWorkspace(rootA);
     const s1 = await hub.createSession();
-    hub.bindWorkspace(rootB);
+    await hub.bindWorkspace(rootB);
     const s2 = await hub.createSession();
     await hub.postMessage({
       conversationId: s1.session.conversation_id,
@@ -226,5 +226,69 @@ describe("two roots two engines", () => {
     assert.equal(shutdowns.length, 2);
     assert.ok(shutdowns.includes(rootA));
     assert.ok(shutdowns.includes(rootB));
+  });
+});
+
+// -- serve-workspace T3: recents/trust wiring on the hub ---------------------
+
+describe("bindWorkspace trust + recents (T3)", () => {
+  it("rejects an untrusted root without confirmTrust (ValidationError field=path)", async () => {
+    const store = await makeStore();
+    const home = await tmpDir("iknow-ws-trust-home-");
+    const root = await tmpDir("iknow-ws-trust-root-");
+    const hub = new SessionHub({
+      store,
+      deps: makeDeps([assistantResult({ texts: ["x"] })]),
+      surface: "serve",
+      recentsHome: home,
+    });
+    await assert.rejects(
+      () => hub.bindWorkspace(root),
+      (err: unknown) => {
+        assert.ok(err instanceof ValidationError);
+        assert.equal(err.details?.["field"], "path");
+        return true;
+      }
+    );
+    // Still unbound after the rejection.
+    assert.equal(hub.getWorkspaceState().bound, false);
+  });
+
+  it("confirmTrust=true binds, persists recents, and allows a second bind without confirmTrust", async () => {
+    const store = await makeStore();
+    const home = await tmpDir("iknow-ws-trust-home2-");
+    const root = await tmpDir("iknow-ws-trust-root2-");
+    const hub = new SessionHub({
+      store,
+      deps: makeDeps([assistantResult({ texts: ["x"] })]),
+      surface: "serve",
+      recentsHome: home,
+    });
+    const bound = await hub.bindWorkspace(root, { confirmTrust: true });
+    assert.equal(bound, root);
+    assert.deepEqual(hub.getWorkspaceState(), { bound: true, root });
+    assert.deepEqual(await hub.listTrustedWorkspaces(), [root]);
+
+    // A fresh hub sharing the same recentsHome sees the trusted root.
+    const hub2 = new SessionHub({
+      store,
+      deps: makeDeps([assistantResult({ texts: ["x"] })]),
+      surface: "serve",
+      recentsHome: home,
+    });
+    const bound2 = await hub2.bindWorkspace(root);
+    assert.equal(bound2, root);
+  });
+
+  it("recentsHome absent → T2 behavior preserved (no trust gate)", async () => {
+    const store = await makeStore();
+    const root = await tmpDir("iknow-ws-nohome-");
+    const hub = new SessionHub({
+      store,
+      deps: makeDeps([assistantResult({ texts: ["x"] })]),
+      surface: "serve",
+    });
+    const bound = await hub.bindWorkspace(root);
+    assert.equal(bound, root);
   });
 });

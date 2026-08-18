@@ -79,11 +79,14 @@ describe("isWorkspaceRootError — type guard (review-fix M5)", () => {
     assert.equal(isWorkspaceRootError(42), false);
     assert.equal(isWorkspaceRootError({}), false);
     assert.equal(isWorkspaceRootError({ kind: "wat" }), false);
-    // Note: an object with a known kind but no payload (e.g. `{ kind: "not_found" }`)
-    // is intentionally accepted by the guard — payload validation belongs to
-    // renderWorkspaceRootError's TS-narrowed switch. The guard's only job is
-    // to separate WorkspaceRootError-shaped errors from everything else
-    // (Error / null / unknown kind).
+    // Note: a known kind WITHOUT the matching payload (`path` or `varName`)
+    // is rejected too — the guard is shape-aware so that SessionStoreError's
+    // `{ kind: "not_found", conversation_id }` does NOT slip into the
+    // 400-validation branch (which would otherwise map a store not_found
+    // to 400). Payload validation itself stays in
+    // renderWorkspaceRootError's TS-narrowed switch.
+    assert.equal(isWorkspaceRootError({ kind: "not_found" }), false);
+    assert.equal(isWorkspaceRootError({ kind: "not_found", path: "/x" }), true);
   });
 });
 

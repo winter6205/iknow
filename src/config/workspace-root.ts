@@ -23,12 +23,67 @@ export const WORKSPACE_ROOT_ENV_KEY = "IKNOW_WORKSPACE_ROOT";
 /** SessionFile / PUT path cap (serve-workspace T1). Overflow → schema_invalid. */
 export const MAX_WORKSPACE_ROOT_CHARS = 4096;
 
-/** Typed-error discriminated union (4 kinds; mirror `IknowIdentityError`). */
+/** Typed-error discriminated union (mirror `IknowIdentityError`). The first
+ *  4 kinds come from the resolver priority chain; `overflow` comes from the
+ *  serve PUT path (T3) which must reject >MAX_WORKSPACE_ROOT_CHARS inputs
+ *  before hitting `existsSync` (a 4KB path is a client bug, not an fs query). */
 export type WorkspaceRootError =
   | { kind: "empty_explicit"; path: string }
   | { kind: "empty_env"; varName: typeof WORKSPACE_ROOT_ENV_KEY }
   | { kind: "non_absolute"; path: string }
-  | { kind: "not_found"; path: string };
+  | { kind: "not_found"; path: string }
+  | { kind: "overflow"; path: string };
+
+/**
+ * Plain-object discriminated-union guard. The resolver throws
+ * `satisfies WorkspaceRootError` objects, NOT Error instances — callers must
+ * branch on `kind`, never `err instanceof Error ? err.message : String(err)`
+ * (the latter prints `[object Object]`, hiding kind/path). SSOT lives here;
+ * `src/cli.ts` re-exports for CLI render.
+ *
+ * Kind-only guard would collide with `SessionStoreError`'s `{ kind: "not_found" }`
+ * (the store uses `conversation_id`, the workspace resolver uses `path` /
+ * `varName`). We require the matching payload field so a SessionStoreError
+ * not_found does NOT slip into the 400-validation branch (would be 404).
+ * serve-workspace T3 hardening; pure resolver unchanged.
+ */
+export function isWorkspaceRootError(err: unknown): err is WorkspaceRootError {
+  if (err === null || typeof err !== "object") return false;
+  const maybe = err as Record<string, unknown>;
+  if (typeof maybe.kind !== "string") return false;
+  if (
+    ![
+      "empty_explicit",
+      "empty_env",
+      "non_absolute",
+      "not_found",
+      "overflow",
+    ].includes(maybe.kind)
+  ) {
+    return false;
+  }
+  // Discriminate by payload: workspace errors carry `path` (string) or
+  // `varName` (string, empty_env only); store errors carry `conversation_id`.
+  return (
+    typeof maybe["path"] === "string" || typeof maybe["varName"] === "string"
+  );
+}
+
+/** Per-kind text render (discriminated union, order matches the definition). */
+export function renderWorkspaceRootError(err: WorkspaceRootError): string {
+  switch (err.kind) {
+    case "empty_explicit":
+      return `[workspace_root]: empty_explicit`;
+    case "empty_env":
+      return `[workspace_root]: empty_env ${WORKSPACE_ROOT_ENV_KEY}=<empty>`;
+    case "non_absolute":
+      return `[workspace_root]: non_absolute path=${err.path}`;
+    case "not_found":
+      return `[workspace_root]: not_found path=${err.path}`;
+    case "overflow":
+      return `[workspace_root]: overflow path length exceeds ${MAX_WORKSPACE_ROOT_CHARS}`;
+  }
+}
 
 export interface ResolveWorkspaceRootOpts {
   /**

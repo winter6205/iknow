@@ -51,7 +51,15 @@ import {
   currentSecretValues,
 } from "../harness/sandbox/index.js";
 import { loadIknowEnv, type IknowEnv, type LlmEnv } from "../config/env.js";
-import { resolveWorkspaceRoot } from "../config/workspace-root.js";
+import {
+  MAX_WORKSPACE_ROOT_CHARS,
+  resolveWorkspaceRoot,
+  type WorkspaceRootError,
+} from "../config/workspace-root.js";
+import {
+  loadWorkspacesRecents,
+  upsertWorkspaceRecent,
+} from "../config/workspaces-recents.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import { MaxTurnsExceeded } from "../harness/errors.js";
@@ -104,6 +112,7 @@ import {
   projectThinkingView,
   projectToolCalls,
 } from "./turn-projection.js";
+import type { WorkspaceResponse } from "./contract.js";
 import {
   withThinkingOverride,
   type ThinkingOverride,
@@ -413,6 +422,12 @@ export type SessionHubOptions = {
     shutdown?: () => Promise<void>;
     subagentManager?: SubAgentManager;
   }>;
+  /**
+   * serve-workspace T3: recents/trust 名单的 home 根（落
+   * `<recentsHome>/.iknow/workspaces.json`）。生产 serve.ts 传 `homedir()`；
+   * 缺席 → bindWorkspace 保持 T2 语义（无 trust gate、不落 recents）。
+   */
+  readonly recentsHome?: string;
 };
 
 // -- stop-reason persistence decision (T1: replaced DROP_REASONS set) ---------
@@ -492,6 +507,8 @@ export class SessionHub {
     | undefined;
   /** serve picker bind (T2); session file workspaceRoot is the engine Map key. */
   private boundRoot: string | undefined;
+  /** serve-workspace T3: recents/trust roster home (absent → T2 behavior). */
+  private readonly recentsHome: string | undefined;
   /** Per-root BuiltEngine cache (same root shared across sessions). */
   private readonly engineByRoot = new Map<
     string,
@@ -525,6 +542,7 @@ export class SessionHub {
     this.subagentManager = opts.subagentManager;
     // review-fix (M1 / H1): per-root state anchor 缓存。
     this.workspaceRoot = opts.workspaceRoot;
+    this.recentsHome = opts.recentsHome;
     this.verifyConfig = opts.verifyConfig;
     this.envProvider = opts.envProvider;
     this.onEnvChange = opts.onEnvChange;
@@ -658,14 +676,81 @@ export class SessionHub {
   }
 
   /**
-   * Bind the serve picker root. T3 adds recents/trust; T2 only resolves
-   * `explicit` via `resolveWorkspaceRoot`. createSession writes this root
+   * Bind the serve picker root (ADR-0023). createSession writes this root
    * onto the session file so postMessage can key the engine Map.
+   *
+   * T3 trust gate: when `recentsHome` is wired, a root NOT in the recents/
+   * trust roster requires `{ confirmTrust: true }` (rule 3: 新绝对路径 →
+   * 确认信任；recents 已信任). On trust, the root is upserted into
+   * `<recentsHome>/.iknow/workspaces.json` (home). When `recentsHome` is
+   * absent (tests / legacy) T2 behavior is preserved.
+   *
+   * Errors (plan T3 ACR verdict):
+   *   - `WorkspaceRootError` (resolver: empty_explicit / non_absolute /
+   *     not_found; overflow pre-check) — plain object, kind-only.
+   *   - `ValidationError` field=path when confirmTrust is required and
+   *     missing.
+   *   - `WorkspacesRecentsError` from the recents IO layer (parse_failed /
+   *     io_error / concurrent_write).
    */
-  bindWorkspace(absPath: string): string {
+  async bindWorkspace(
+    absPath: string,
+    opts?: { readonly confirmTrust?: boolean }
+  ): Promise<string> {
+    if (typeof absPath !== "string" || absPath.length === 0) {
+      throw {
+        kind: "empty_explicit",
+        path: typeof absPath === "string" ? absPath : "",
+      } satisfies WorkspaceRootError;
+    }
+    if (absPath.length > MAX_WORKSPACE_ROOT_CHARS) {
+      throw {
+        kind: "overflow",
+        path: absPath,
+      } satisfies WorkspaceRootError;
+    }
     const resolved = resolveWorkspaceRoot({ explicit: absPath });
+    if (this.recentsHome === undefined) {
+      this.boundRoot = resolved;
+      return resolved;
+    }
+    const recents = await loadWorkspacesRecents({ home: this.recentsHome });
+    const trusted = recents.recents.some((r) => r.root === resolved);
+    if (!trusted && opts?.confirmTrust !== true) {
+      throw new ValidationError(
+        "workspace root is not trusted; confirm trust to bind",
+        { field: "path" }
+      );
+    }
+    await upsertWorkspaceRecent({
+      home: this.recentsHome,
+      root: resolved,
+      lastUsedAt: new Date().toISOString(),
+    });
     this.boundRoot = resolved;
     return resolved;
+  }
+
+  /**
+   * serve-workspace T3: picker state snapshot for GET /api/v1/workspace.
+   * Synchronous — reads only the in-memory `boundRoot`.
+   */
+  getWorkspaceState(): WorkspaceResponse {
+    if (this.boundRoot === undefined) return { bound: false };
+    return { bound: true, root: this.boundRoot };
+  }
+
+  /**
+   * serve-workspace T3: trusted roots (recents) for GET /api/v1/workspaces.
+   * recentsHome absent (serve not wired with home recents) → NotFoundError so
+   * http.ts maps it to 404 not_found — the "serve not assembled" semantics.
+   */
+  async listTrustedWorkspaces(): Promise<readonly string[]> {
+    if (this.recentsHome === undefined) {
+      throw new NotFoundError("workspaces recents not wired");
+    }
+    const file = await loadWorkspacesRecents({ home: this.recentsHome });
+    return file.recents.map((r) => r.root);
   }
 
   async createSession(

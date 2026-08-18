@@ -35,9 +35,10 @@ import {
 import type { PermissionMode } from "./harness/permission/modes.js";
 import { isIknowError } from "./shared/errors.js";
 import {
-  WORKSPACE_ROOT_ENV_KEY,
-  type WorkspaceRootError,
+  isWorkspaceRootError,
+  renderWorkspaceRootError,
 } from "./config/workspace-root.js";
+export { isWorkspaceRootError, renderWorkspaceRootError };
 import { MaxTurnsExceeded } from "./harness/errors.js";
 import { maxTurnsEnvelope } from "./cli/max-turns.js";
 import { randomUUID } from "node:crypto";
@@ -79,36 +80,8 @@ function resolveTracePath(flag: string | undefined): string {
  * object（`satisfies WorkspaceRootError`,非 Error 实例）,必须按判别联合
  * `kind` 识别,不能用 `instanceof Error ? err.message : String(err)`
  * （后者打 plain object 会成 `[object Object]`,kind/path 全部不可见）。
+ * 真实定义见 `./config/workspace-root.ts`;此处 re-export 保持 CLI 公开 API 不变。
  */
-export function isWorkspaceRootError(err: unknown): err is WorkspaceRootError {
-  if (err === null || typeof err !== "object") return false;
-  const maybe = err as Record<string, unknown>;
-  // kind is the discriminant; each variant then either has `path` (3 of 4)
-  // or `varName` (empty_env). Type guard is intentionally narrow on `kind`
-  // alone — full payload check belongs to the switch in
-  // renderWorkspaceRootError, which is TS-narrowed per branch.
-  return (
-    typeof maybe.kind === "string" &&
-    ["empty_explicit", "empty_env", "non_absolute", "not_found"].includes(
-      maybe.kind
-    )
-  );
-}
-
-/** review-fix (M5): 4-kind 文本渲染（discriminated union,顺序与
- *  WorkspaceRootError 定义对齐）。 */
-export function renderWorkspaceRootError(err: WorkspaceRootError): string {
-  switch (err.kind) {
-    case "empty_explicit":
-      return `[workspace_root]: empty_explicit`;
-    case "empty_env":
-      return `[workspace_root]: empty_env ${WORKSPACE_ROOT_ENV_KEY}=<empty>`;
-    case "non_absolute":
-      return `[workspace_root]: non_absolute path=${err.path}`;
-    case "not_found":
-      return `[workspace_root]: not_found path=${err.path}`;
-  }
-}
 
 function printCliError(err: unknown): void {
   if (isWorkspaceRootError(err)) {

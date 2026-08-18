@@ -228,6 +228,26 @@ export interface ApiErrorBody {
   };
 }
 
+/** serve-workspace T3: GET /api/v1/workspace response. */
+export type WorkspaceResponse = {
+  readonly bound: boolean;
+  readonly root?: string;
+};
+
+/** serve-workspace T3: PUT /api/v1/workspace request body. */
+export interface PutWorkspaceRequest {
+  readonly path: string;
+  readonly confirmTrust?: boolean;
+}
+
+/** serve-workspace T3: PUT /api/v1/workspace response body. */
+export type PutWorkspaceResponse = WorkspaceResponse;
+
+/** serve-workspace T3: GET /api/v1/workspaces response (recents / trusted). */
+export type WorkspacesResponse = {
+  readonly workspaces: readonly { readonly root: string }[];
+};
+
 /** Reserved routes (UI may probe; server may return 501). */
 export const RESERVED_PATHS = {
   eventsSse: "/api/v1/sessions/:id/events",
