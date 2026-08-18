@@ -264,10 +264,11 @@ export function Composer({
         </button>
       </div>
       {/* 状态条：输入框下方。左 = 模型名 + permission mode 徽标（Shift+Tab
-          切换）；右 = 用量块（token 明细 + 进度条 + 百分比）。两者皆无 →
+          切换）；右 = 用量块（token 明细 + 进度条 + 百分比）。右缘对齐 pill
+          右缘（发送按钮 40px + gap 8px 在 pill 之外 → pr-12）。两者皆无 →
           整行不渲染。 */}
       {model || permissionModeLabel ? (
-        <div className="mt-1.5 flex items-center justify-between gap-3 px-2 font-mono text-[10px] leading-none text-ink-3">
+        <div className="mt-1.5 flex items-center justify-between gap-3 pl-2 pr-12 font-mono text-[10px] leading-none text-ink-3">
           <span className="flex min-w-0 items-center gap-2">
             {model ? <span className="truncate">{model}</span> : null}
             {permissionModeLabel ? (

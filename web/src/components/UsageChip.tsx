@@ -12,7 +12,8 @@
  * 数值语义（迁移自 ContextUsageStrip，见 CONTEXT.md `context usage
  * (display)` 词条）：used = inputTokens + cacheReadInputTokens +
  * cacheCreationInputTokens（cache null → 0）；pct = round(used /
- * contextWindow × 100)。usage 为 null 或 contextWindow 缺失 → null。
+ * contextWindow × 100)。contextWindow 缺失 → null；usage 为 null（首回合
+ * 前尚无读数）→ 按 0 渲染（状态条常驻，不等计算完成才出现）。
  */
 import { useMemo } from "react";
 import type { TokenUsage } from "../api/types";
@@ -47,10 +48,11 @@ export function UsageChip({
   sending = false,
 }: UsageChipProps) {
   const detail = useMemo(() => {
-    if (usage === null || contextWindow === null || contextWindow <= 0) {
+    if (contextWindow === null || contextWindow <= 0) {
       return null;
     }
-    const used = ctxUsed(usage);
+    // usage 缺席（首回合前）→ used=0：状态条常驻，不隐藏等读数。
+    const used = usage === null ? 0 : ctxUsed(usage);
     return {
       used,
       pct: Math.round((used / contextWindow) * 100),
