@@ -47,6 +47,13 @@ export function MessageList({
           <li key={m.id}>
             {m.role === "user" ? (
               <UserMessage text={m.text} staggerIndex={idx * 2} />
+            ) : m.role === "notice" ? (
+              <div
+                role="status"
+                className="mx-auto w-fit max-w-[85%] rounded-panel border border-line bg-surface px-3 py-1.5 text-center text-[11px] leading-relaxed text-ink-3 whitespace-pre-line"
+              >
+                {m.text}
+              </div>
             ) : (
               <AgentCard
                 text={m.text}

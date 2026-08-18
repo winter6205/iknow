@@ -139,6 +139,34 @@ describe("splitTurns — turn boundary projection", () => {
     assert.equal(slices[1]!.end, 6);
   });
 
+  it("skips subagent drain user messages when delineating turns", () => {
+    // [user(q1), assistant(a1), user(drain), assistant(ack), user(q2), assistant(a2)]
+    // drain 消息不是 turn 边界（与 hub.ts projectMessagesToTurns 同源）：
+    // turn0 = [0,4)  turn1 = [4,6)
+    const messages = [
+      userMsg("q1"),
+      assistantMsg([text("a1")]),
+      userMsg("## Sub-agent task_1 result: sum\n\nresult body"),
+      assistantMsg([text("ack")]),
+      userMsg("q2"),
+      assistantMsg([text("a2")]),
+    ];
+    const slices = splitTurns(messages);
+    assert.equal(slices.length, 2);
+    assert.equal(slices[0]!.start, 0);
+    assert.equal(slices[0]!.end, 4);
+    assert.equal(slices[1]!.start, 4);
+    assert.equal(slices[1]!.end, 6);
+  });
+
+  it("returns [] when only drain user messages exist (no real query)", () => {
+    const messages = [
+      userMsg("## Sub-agent task_1 result: sum\n\nresult body"),
+      assistantMsg([text("ack")]),
+    ];
+    assert.equal(splitTurns(messages).length, 0);
+  });
+
   it("groups multiple tool cycles inside a single turn", () => {
     // [user(q), assistant(tool_use t1), user(tool_result t1),
     //  assistant(tool_use t2), user(tool_result t2), assistant(text)]

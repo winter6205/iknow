@@ -11,26 +11,22 @@
  *     tool pairs complete, recomputes turnCount, and prunes checkpoints that
  *     describe truncated turns.
  *
- * Turn-boundary rule (mirrors hub.ts projectMessagesToTurns): a turn starts at
- * a user message that has NO tool_result block; user messages that carry only
- * tool_result blocks are continuation, not queries.
+ * Turn-boundary rule (SSOT: turn-projection.ts `isTurnQuery`, shared with
+ * hub.ts projectMessagesToTurns): a turn starts at a user message that has NO
+ * tool_result block and is NOT a subagent drain summary; user messages that
+ * carry only tool_result blocks are continuation, not queries.
  */
-import type { AnthropicNativeMessage, RunResult } from "../../harness/index.js";
+import type {
+  AnthropicNativeMessage,
+  RunResult,
+} from "../../harness/index.js";
+import { isTurnQuery } from "../turn-projection.js";
 import type {
   CheckpointRecord,
   InterruptReason,
   SessionFileV1,
 } from "./schema.js";
 import { extractSummary } from "./schema.js";
-
-/** A turn starts at a user message that carries no tool_result block — matches
- *  hub.ts projectMessagesToTurns and rewind's "skip tool_result user msg"
- *  rule verbatim. */
-function isQuery(msg: AnthropicNativeMessage): boolean {
-  return (
-    msg.role === "user" && !msg.content.some((b) => b.type === "tool_result")
-  );
-}
 
 /**
  * Exclusive end index (within `messages`) of the turn at 0-based ordinal
@@ -54,16 +50,18 @@ export interface TurnSlice {
   readonly end: number;
 }
 
-/** Project turn boundaries: one slice per non-tool_result user message
- *  (matching hub.ts projectMessagesToTurns). Returns [] when no query message
- *  exists (e.g. a session that starts mid tool-result, which is malformed). */
+/** Project turn boundaries: one slice per turn-starting user message per the
+ *  shared `isTurnQuery` rule (no tool_result block, not a subagent drain
+ *  summary — SSOT in turn-projection.ts, same as hub.ts
+ *  projectMessagesToTurns). Returns [] when no query message exists (e.g. a
+ *  session that starts mid tool-result, which is malformed). */
 export function splitTurns(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): ReadonlyArray<TurnSlice> {
   const slices: TurnSlice[] = [];
   let nextStart = -1;
   for (let i = 0; i < messages.length; i++) {
-    if (!isQuery(messages[i]!)) continue;
+    if (!isTurnQuery(messages[i]!)) continue;
     if (nextStart >= 0) {
       slices.push({ start: nextStart, end: i });
     }

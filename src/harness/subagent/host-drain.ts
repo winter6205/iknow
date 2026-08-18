@@ -25,6 +25,19 @@
  */
 import type { SubAgentManager } from "./manager.js";
 
+/**
+ * Drain 消息文本前缀（SSOT）。单 task 浓缩格式为
+ * `${SUBAGENT_DRAIN_PREFIX}${taskId} result: ${summary}\n\n${result}`；
+ * 显示投影层（session-api turn 投影 / rewind 边界投影）用
+ * `isSubagentDrainText` 识别并跳过 drain 消息，格式与谓词同源。
+ */
+export const SUBAGENT_DRAIN_PREFIX = "## Sub-agent ";
+
+/** trim 后以 drain 前缀开头即判定 —— drain 消息不构成 turn / 不作 slice 边界。 */
+export function isSubagentDrainText(text: string): boolean {
+  return text.trim().startsWith(SUBAGENT_DRAIN_PREFIX);
+}
+
 export interface DrainPendingSubagentsOpts {
   /** 轮询间隔(仅 running 时),默认 100ms。 */
   readonly pollMs?: number;
@@ -55,7 +68,7 @@ export async function drainPendingSubagents(
     return list
       .map(
         ({ taskId, envelope }) =>
-          `## Sub-agent ${taskId} result: ${envelope.summary}\n\n${envelope.result}`
+          `${SUBAGENT_DRAIN_PREFIX}${taskId} result: ${envelope.summary}\n\n${envelope.result}`
       )
       .join("\n\n");
   };
