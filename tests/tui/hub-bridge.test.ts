@@ -134,7 +134,7 @@ describe("hub-bridge postMessage", () => {
     // 落盘可读回（共享池纪律）
     const file = await bridge.loadSessionFile(id);
     expect(file.turnCount).toBe(1);
-    expect(file.summary).toBe("你好");
+    expect(file.title).toBe("你好");
   });
 
   test("postMessage 失败也 unmark（异常路径不留 inflight）", async () => {
@@ -159,12 +159,12 @@ describe("hub-bridge postMessage", () => {
     // 仅建档不发消息 → list 不可见（lazy create 双保险）
     await bridge.hub.createSession();
     expect(await bridge.listSessions()).toHaveLength(0);
-    // 发一条 → 可见且带 summary
+    // 发一条 → 可见且带 title
     const id = await bridge.ensureSession(undefined);
     await bridge.postMessage({ conversationId: id, text: "第一个问题" });
     const list = await bridge.listSessions();
     expect(list).toHaveLength(1);
-    expect(list[0]!.summary).toBe("第一个问题");
+    expect(list[0]!.title).toBe("第一个问题");
   });
 });
 

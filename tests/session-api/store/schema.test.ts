@@ -42,7 +42,7 @@ const valid: SessionFileV1 = {
   jsonMode: false,
   turnCount: 0,
   updatedAt: "2026-01-01T00:00:00.000Z",
-  summary: "",
+  title: "",
   cwd: "",
   sanitized_at: "2026-01-01T00:00:00.000Z",
   checkpoints: [],
@@ -61,7 +61,7 @@ describe("validateSessionFile — happy path", () => {
   });
 
   it("accepts schemaVersion 1 (forward-compat: sanitize fills v2 fields)", () => {
-    // v1 file lacks summary/cwd/sanitized_at but passes the range check;
+    // v1 file lacks title/cwd/sanitized_at but passes the range check;
     // sanitizeSessionFile is responsible for filling them on load.
     const v1 = {
       schemaVersion: 1,

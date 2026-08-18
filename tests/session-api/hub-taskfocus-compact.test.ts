@@ -130,7 +130,7 @@ async function seedSession(opts: {
     jsonMode: false,
     turnCount: 0,
     updatedAt: new Date().toISOString(),
-    summary: "",
+    title: "",
     cwd: process.cwd(),
     sanitized_at: new Date().toISOString(),
     checkpoints: [],

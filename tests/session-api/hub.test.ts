@@ -65,7 +65,7 @@ function sampleFile(opts: {
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     conversation_id: id,
-    summary: "",
+    title: "",
     cwd: "/tmp/test",
     sanitized_at: new Date().toISOString(),
     messages: [],
@@ -171,7 +171,7 @@ describe("createSession", () => {
     );
     // T1 checkpoint: createSession writes the v4 schema + empty checkpoints.
     assert.equal(raw.schemaVersion, CURRENT_SCHEMA_VERSION);
-    assert.equal(raw.summary, "");
+    assert.equal(raw.title, "");
     assert.equal(typeof raw.cwd, "string");
     assert.equal(typeof raw.sanitized_at, "string");
     assert.deepEqual(raw.checkpoints, []);
@@ -622,7 +622,7 @@ describe("drop-context stop reasons do not save", () => {
 // -- getSession / resetSession / listSessions --------------------------------
 
 describe("getSession", () => {
-  it("returns summary with projected turns (no raw messages)", async () => {
+  it("returns title with projected turns (no raw messages)", async () => {
     const deps = makeDeps([assistantResult({ texts: ["hi"] })]);
     const hub = makeHub(deps);
     const { session } = await hub.createSession();
@@ -744,21 +744,21 @@ describe("compactSession", () => {
   });
 });
 
-describe("postMessage summary projection", () => {
-  it("recomputes summary instead of preserving a dirty value", async () => {
+describe("postMessage title projection", () => {
+  it("recomputes title instead of preserving a dirty value", async () => {
     const hub = makeHub(makeDeps([assistantResult({ texts: ["answer"] })]));
     const { session } = await hub.createSession();
     const path = join(sessionDir, `${session.conversation_id}.json`);
     const { readFile, writeFile } = await import("node:fs/promises");
     const raw = JSON.parse(await readFile(path, "utf8"));
-    raw.summary = "dirty";
+    raw.title = "dirty";
     await writeFile(path, JSON.stringify(raw), "utf8");
     await hub.postMessage({
       conversationId: session.conversation_id,
       text: "hello",
     });
     const saved = JSON.parse(await readFile(path, "utf8"));
-    assert.equal(saved.summary, "hello");
+    assert.equal(saved.title, "hello");
   });
 });
 
@@ -776,7 +776,7 @@ describe("listSessions", () => {
       (e) => e.conversation_id === session.conversation_id
     );
     assert.ok(entry);
-    assert.equal(entry.summary, "hello");
+    assert.equal(entry.title, "hello");
   });
 
   it("excludes a freshly created session with no reply (issue #96)", async () => {

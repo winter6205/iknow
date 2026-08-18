@@ -151,7 +151,7 @@ import {
 } from "../harness/permission/index.js";
 import { createSkillBody } from "../harness/skill/body.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
-import { extractSummary } from "../session-api/store/schema.js";
+import { extractTitle } from "../session-api/store/schema.js";
 
 /** T8/T9：chromeReserveRows 行账封顶常量与可见行数计算函数的本地重导出
  *  （SSOT 实际定义在 prompt-input.tsx，避免两模块各持 "8" 常量飘移）。
@@ -1894,13 +1894,13 @@ function infoLines(
   ];
 }
 
-/** 后台会话状态行（spec #146 SC5：`后台运行中 · <summary>`）。
- *  纯函数可单测：summary 为空时回退「后台运行中」（不加尾缀）。 */
+/** 后台会话状态行（spec #146 SC5：`后台运行中 · <title>`）。
+ *  纯函数可单测：title 为空时回退「后台运行中」（不加尾缀）。 */
 export function bgStatusLine(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): string {
-  const summary = extractSummary(messages);
-  return summary.length > 0 ? `后台运行中 · ${summary}` : "后台运行中";
+  const title = extractTitle(messages);
+  return title.length > 0 ? `后台运行中 · ${title}` : "后台运行中";
 }
 
 function describeError(err: unknown): string {

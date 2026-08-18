@@ -21,7 +21,7 @@ import type {
 } from "../../../src/harness/index.ts";
 import {
   CURRENT_SCHEMA_VERSION,
-  extractSummary,
+  extractTitle,
   sanitizeSessionFile,
   type CheckpointRecord,
   type InterruptReason,
@@ -82,7 +82,7 @@ const baseFile = (): SessionFileV1 => ({
   jsonMode: false,
   turnCount: 0,
   updatedAt: "2026-01-01T00:00:00.000Z",
-  summary: "",
+  title: "",
   cwd: "",
   sanitized_at: "2026-01-01T00:00:00.000Z",
   checkpoints: [],
@@ -575,7 +575,7 @@ describe("rewindFile — truncates a session to keepTurns turn boundaries", () =
     assert.equal(out.checkpoints?.length ?? 0, 0);
   });
 
-  it("recomputes summary from the truncated message prefix", () => {
+  it("recomputes title from the truncated message prefix", () => {
     // Truncating a 3-turn session to 1 turn leaves the first user text intact.
     const messages = [
       userMsg("first"),
@@ -589,11 +589,11 @@ describe("rewindFile — truncates a session to keepTurns turn boundaries", () =
       ...baseFile(),
       messages,
       turnCount: 3,
-      summary: "stale",
+      title: "stale",
       updatedAt: ISO,
     };
     const out = rewindFile(session, 1);
-    assert.equal(out.summary, "first");
+    assert.equal(out.title, "first");
   });
 
   // 空/非法输入 — empty session
@@ -633,7 +633,7 @@ describe("checkpoints — schema interplay", () => {
       jsonMode: false,
       turnCount: 0,
       updatedAt: "2026-02-02T00:00:00.000Z",
-      summary: "",
+      title: "",
       cwd: "",
       sanitized_at: "2026-02-02T00:00:00.000Z",
     };
@@ -659,7 +659,7 @@ describe("checkpoints — schema interplay", () => {
       jsonMode: false,
       turnCount: 1,
       updatedAt: "2026-08-11T00:00:00.000Z",
-      summary: "q1",
+      title: "q1",
       cwd: "",
       sanitized_at: "2026-08-11T00:00:00.000Z",
       checkpoints: [ckpt],
@@ -669,13 +669,13 @@ describe("checkpoints — schema interplay", () => {
     assert.deepEqual(out.checkpoints?.[0], ckpt);
   });
 
-  // boundary — extractSummary still works on a v3 file
-  it("extractSummary remains valid after truncate (prefix invariance)", () => {
+  // boundary — extractTitle still works on a v3 file
+  it("extractTitle remains valid after truncate (prefix invariance)", () => {
     const messages = [
       userMsg("first"),
       assistantMsg([text("a1")]),
       userMsg("second"),
     ];
-    assert.equal(extractSummary(messages), "first");
+    assert.equal(extractTitle(messages), "first");
   });
 });

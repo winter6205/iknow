@@ -5,7 +5,7 @@
  * 的 serve 半边）。TUI bridge ↔ 独立 serve 风格 hub 共享同一 SessionStore
  * 池：
  *   Step 1  TUI bridge 建档 + postMessage N 轮
- *   Step 2  独立 hub load：messages / turnCount / summary / schemaVersion 一致
+ *   Step 2  独立 hub load：messages / turnCount / title / schemaVersion 一致
  *   Step 3  独立 hub 续跑第 N+1 轮保存
  *   Step 4  TUI bridge 再读：N+1 可见
  *
@@ -71,12 +71,12 @@ describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 hub 共享池", () => {
     const raw = JSON.parse(readFileSync(join(dir, `${id}.json`), "utf8")) as {
       schemaVersion: number;
       turnCount: number;
-      summary: string;
+      title: string;
       cwd: string;
     };
     expect(raw.schemaVersion).toBe(2);
     expect(raw.turnCount).toBe(2);
-    expect(raw.summary).toBe("第一个问题");
+    expect(raw.title).toBe("第一个问题");
     expect(raw.cwd).toBe(cwd);
 
     // Step 3：独立 hub 续跑第 N+1 轮
@@ -85,7 +85,7 @@ describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 hub 共享池", () => {
     // Step 4：TUI bridge 再读：N+1 可见
     const file = await bridge.loadSessionFile(id);
     expect(file.turnCount).toBe(3);
-    expect(file.summary).toBe("第一个问题"); // summary = 首条 user，不随轮变
+    expect(file.title).toBe("第一个问题"); // title = 首条 user，不随轮变
     const assistantTexts = file.messages
       .filter((m) => m.role === "assistant")
       .flatMap((m) =>
@@ -94,9 +94,9 @@ describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 hub 共享池", () => {
           .map((b) => b.text)
       );
     expect(assistantTexts).toEqual(["第一轮答复", "第二轮答复", "第三轮答复"]);
-    // TUI 列表视图数据源（SC 13：list() summary 字段）
+    // TUI 列表视图数据源（SC 13：list() title 字段）
     const list = await bridge.listSessions();
     expect(list).toHaveLength(1);
-    expect(list[0]!.summary).toBe("第一个问题");
+    expect(list[0]!.title).toBe("第一个问题");
   });
 });

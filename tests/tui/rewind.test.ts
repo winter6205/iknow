@@ -90,7 +90,7 @@ function sampleFile(overrides?: Partial<SessionFileV1>): SessionFileV1 {
     jsonMode: false,
     turnCount: 3,
     updatedAt: "2026-08-11T00:00:00.000Z",
-    summary: "stale-summary",
+    title: "stale-title",
     cwd: "",
     sanitized_at: "2026-08-11T00:00:00.000Z",
     checkpoints: [
@@ -341,7 +341,7 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
     expect(targets.some((t) => t.keepTurns === 3)).toBe(false);
   });
 
-  test("锚点文本 strip + 截 80（同 extractSummary 语义）；fullText 不截断", () => {
+  test("锚点文本 strip + 截 80（同 extractTitle 语义）；fullText 不截断", () => {
     const long = "x".repeat(100);
     const file = {
       ...sampleFile(),
@@ -715,11 +715,11 @@ describe("bridge.rewindSession（load → rewindFile → save → 返回更新�
     ]);
   });
 
-  test("summary 从截断前缀重算", async () => {
+  test("title 从截断前缀重算", async () => {
     await seedFile(sampleFile());
     const bridge = makeBridge();
     const out = await bridge.rewindSession("conv-rewind", 1);
-    expect(out.summary).toBe("q1");
+    expect(out.title).toBe("q1");
   });
 
   test("keepTurns 越界（≥ available）→ no-op 等价（钳制）", async () => {

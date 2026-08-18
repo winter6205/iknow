@@ -93,7 +93,7 @@ function project(file: SessionFileV1): {
   messages: SessionFileV1["messages"];
   conversation_id: string;
   turnCount: number;
-  summary: string;
+  title: string;
   cwd: string;
   schemaVersion: number;
   updatedAt: string;
@@ -103,7 +103,7 @@ function project(file: SessionFileV1): {
     messages: file.messages,
     conversation_id: file.conversation_id,
     turnCount: file.turnCount,
-    summary: file.summary,
+    title: file.title,
     cwd: file.cwd,
     schemaVersion: file.schemaVersion,
     updatedAt: file.updatedAt,
@@ -149,7 +149,7 @@ describe("Q6 cross-entry consistency: shared pool, two independent SessionHub en
     assert.equal(diskAfterA["schemaVersion"], CURRENT_SCHEMA_VERSION);
     assert.equal(diskAfterA["conversation_id"], conversationId);
     assert.equal(diskAfterA["turnCount"], 2);
-    assert.equal(diskAfterA["summary"], "alpha-query");
+    assert.equal(diskAfterA["title"], "alpha-query");
     assert.equal(diskAfterA["cwd"], process.cwd());
     assert.equal(diskAfterA["jsonMode"], true);
     const messagesLen = (diskAfterA["messages"] as unknown[]).length;
@@ -177,7 +177,7 @@ describe("Q6 cross-entry consistency: shared pool, two independent SessionHub en
       messages: diskAfterA["messages"] as SessionFileV1["messages"],
       conversation_id: diskAfterA["conversation_id"] as string,
       turnCount: diskAfterA["turnCount"] as number,
-      summary: diskAfterA["summary"] as string,
+      title: diskAfterA["title"] as string,
       cwd: diskAfterA["cwd"] as string,
       schemaVersion: diskAfterA["schemaVersion"] as number,
       updatedAt: diskAfterA["updatedAt"] as string,

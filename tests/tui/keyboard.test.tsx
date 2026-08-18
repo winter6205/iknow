@@ -503,7 +503,7 @@ test("T8 Enter：提交多行文本 → 消息落盘含换行", async () => {
   await settle(setup);
   await typeMultilineText(setup, "第二行");
   setup.mockInput.pressEnter();
-  // 等 turn 落盘 → 会话 summary 含换行分隔的两行文本。
+  // 等 turn 落盘 → 会话 title 含换行分隔的两行文本。
   const deadline = Date.now() + 8000;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 50));
@@ -512,7 +512,7 @@ test("T8 Enter：提交多行文本 → 消息落盘含换行", async () => {
   }
   const list = await bridge.listSessions();
   expect(list.length).toBe(1);
-  expect(list[0]!.summary).toBe("第一行\n第二行");
+  expect(list[0]!.title).toBe("第一行\n第二行");
   await setup.renderer.destroy();
 });
 

@@ -39,7 +39,7 @@ const sampleFile = (opts: {
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     conversation_id: id,
-    summary: "",
+    title: "",
     cwd: "/tmp/test",
     sanitized_at: new Date().toISOString(),
     messages: [],
@@ -161,7 +161,7 @@ describe("SessionStore project namespace", () => {
         file: sampleFile({
           id: "ns-shared-1",
           overrides: {
-            summary: "hello",
+            title: "hello",
             // list() skips sessions without assistant text (issue #96);
             // include an assistant reply so the cross-store list assertion
             // proves the namespace is shared.
@@ -180,13 +180,13 @@ describe("SessionStore project namespace", () => {
       });
       const loaded = await storeB.load("ns-shared-1");
       assert.equal(loaded.conversation_id, "ns-shared-1");
-      assert.equal(loaded.summary, "hello");
+      assert.equal(loaded.title, "hello");
       // list() from the sibling store sees the same file under the same
       // baseDir + cwd namespace.
       const listB = await storeB.list();
       assert.equal(listB.length, 1);
       assert.equal(listB[0]?.conversation_id, "ns-shared-1");
-      assert.equal(listB[0]?.summary, "hello");
+      assert.equal(listB[0]?.title, "hello");
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
@@ -213,7 +213,7 @@ describe("SessionStore.load", () => {
     const before = await readFile(path, "utf8");
     const loaded = await store.load("conv-v1");
     const after = await readFile(path, "utf8");
-    assert.equal(loaded.summary, "hello");
+    assert.equal(loaded.title, "hello");
     assert.equal(loaded.cwd, "");
     assert.equal(loaded.sanitized_at, raw.updatedAt);
     assert.equal(loaded.schemaVersion, CURRENT_SCHEMA_VERSION);
@@ -260,7 +260,7 @@ describe("SessionStore.load", () => {
     const file = sampleFile({
       id: "conv-v4",
       overrides: {
-        summary: "saved",
+        title: "saved",
         cwd: "/work",
         sanitized_at: "2026-01-01T00:00:00Z",
       },
@@ -421,7 +421,7 @@ describe("SessionStore.list", () => {
     for (const e of ours) {
       assert.equal(typeof e.updatedAt, "string");
       assert.equal(typeof e.lastFinalText, "string");
-      assert.equal(typeof e.summary, "string");
+      assert.equal(typeof e.title, "string");
       assert.ok(!("messages" in e), "list entries must not contain messages");
     }
   });

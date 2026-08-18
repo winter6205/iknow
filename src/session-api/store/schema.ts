@@ -6,8 +6,8 @@
  * data. Hub maps these to different wire kinds (422 + 422, but distinct).
  *
  * #120 adds: schemaVersion range check (≤ CURRENT accepted → sanitize, >
- * CURRENT rejected); sanitizeSessionFile (pure, backfills summary/cwd/sanitized_at
- * for v1 inputs and validates message element shape); extractSummary (first
+ * CURRENT rejected); sanitizeSessionFile (pure, backfills title/cwd/sanitized_at
+ * for v1 inputs and validates message element shape); extractTitle (first
  * user message's first text block, trimmed, truncated to 80 chars).
  *
  * v3 (T1 checkpoint data layer): SessionFileV1 gains the optional
@@ -121,8 +121,9 @@ export interface SessionFileV1 {
   readonly jsonMode: boolean;
   readonly turnCount: number;
   readonly updatedAt: string;
-  /** v2: first user message text, trimmed, truncated to 80 chars. */
-  readonly summary: string;
+  /** v2: first user message text, trimmed, truncated to 80 chars.
+   *  (#467: renamed from `summary` — it is a UI title excerpt, not an LLM summary.) */
+  readonly title: string;
   /** v2: working directory the session was created in. */
   readonly cwd: string;
   /** v2: ISO timestamp of when sanitize last normalized this file. */
@@ -204,12 +205,13 @@ export function isSessionFileV1(value: unknown): value is SessionFileV1 {
 }
 
 /**
- * Extract a one-line summary: the first text block of the first user message
- * that has one, trimmed then truncated to 80 chars. Markdown is NOT stripped —
- * the storage layer stays format-agnostic. "" if no user message has a text
- * block (skips pure tool_result user messages).
+ * Extract a one-line UI title (#467: renamed from the pre-#467 summary helper —
+ * it is a title excerpt for the session list, not an LLM summary): the first
+ * text block of the first user message that has one, trimmed then truncated to
+ * 80 chars. Markdown is NOT stripped — the storage layer stays format-agnostic.
+ * "" if no user message has a text block (skips pure tool_result user messages).
  */
-export function extractSummary(
+export function extractTitle(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): string {
   for (const msg of messages) {
@@ -225,9 +227,9 @@ export function extractSummary(
 /**
  * Extract the full first user message text — no truncation, just trimmed.
  * Used to seed the session-level goal (#408 T2) where the full intent matters;
- * `extractSummary` truncates to 80 chars and would lose the tail. "" if no user
+ * `extractTitle` truncates to 80 chars and would lose the tail. "" if no user
  * message has a text block (skips pure tool_result user messages, mirrors
- * extractSummary's skip rule).
+ * extractTitle's skip rule).
  */
 export function extractGoal(
   messages: ReadonlyArray<AnthropicNativeMessage>
@@ -370,7 +372,7 @@ export function seedTaskFocus(opts: {
  * field-preservation branch (so unknown future-version fields can not leak
  * past a too-new schema check).
  *
- * Backfills v2 fields (summary/cwd/sanitized_at) for v1 inputs; preserves
+ * Backfills v2 fields (title/cwd/sanitized_at) for v1 inputs; preserves
  * unknown top-level fields on ≤ CURRENT files so future versions round-trip
  * (#120 Boundaries Never: future fields must be preserved, not dropped).
  *
@@ -427,13 +429,22 @@ export function sanitizeSessionFile(raw: unknown): SessionFileV1 {
   // byte-identical round-trip for v4/v5 files that lack these fields
   // (spread-discipline: never emit `field: undefined` keys). The migration
   // case explicitly drops the old goal key (no stale goal persists).
+  // #467 T3: title 字段迁移。legacy 命名 `summary` 是首条 user 文本的 UI
+  // 标题摘录(非 LLM 摘要),现改名 `title`。迁移规则:优先取遗留 `summary`
+  // (旧盘文件),其次取已写的 `title`,都没有则从
+  // 首条 user 文本重算(extractTitle,语义与旧命名时代的计算完全一致)。
+  // 输出 key 恒为 `title` —— 遗留 `summary` key 在迁移后删除,绝不存活进
+  // 新文件(spread-preserve 纪律:未知字段保留,但旧名字是已知过期字段)。
+  const title: string =
+    typeof obj["summary"] === "string"
+      ? (obj["summary"] as string)
+      : typeof obj["title"] === "string"
+        ? (obj["title"] as string)
+        : extractTitle(messages);
   const result: Record<string, unknown> = {
     ...obj,
     schemaVersion: CURRENT_SCHEMA_VERSION,
-    summary:
-      typeof obj["summary"] === "string"
-        ? obj["summary"]
-        : extractSummary(messages),
+    title,
     cwd: typeof obj["cwd"] === "string" ? obj["cwd"] : "",
     sanitized_at:
       typeof obj["sanitized_at"] === "string"
@@ -441,6 +452,9 @@ export function sanitizeSessionFile(raw: unknown): SessionFileV1 {
         : (obj["updatedAt"] as string),
     checkpoints,
   };
+  if (typeof obj["summary"] === "string") {
+    delete result["summary"];
+  }
   if (migratedTaskFocus !== undefined) {
     delete result["goal"];
     result["taskFocus"] = migratedTaskFocus;

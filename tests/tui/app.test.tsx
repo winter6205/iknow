@@ -191,7 +191,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     await until(() => app.bridge.inflight.ids().size === 0, 8000, "turn-done");
     const list = await app.bridge.listSessions();
     expect(list.length).toBe(1);
-    expect(list[0]!.summary).toBe("你好");
+    expect(list[0]!.title).toBe("你好");
 
     // assistant 答复渲染
     await untilFrame(app.setup, (f) => f.includes("答复标题"), 8000, "answer");
@@ -361,7 +361,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
     );
     const list = (await app.bridge.listSessions()) ?? [];
     expect(list.length).toBe(1);
-    expect(list[0]!.summary).toBe("第一条"); // summary = 首条 user（#120 SC 6）
+    expect(list[0]!.title).toBe("第一条"); // title = 首条 user（#120 SC 6）
     // turnCount 查 session 文件（list 不携带）
     const sessionId = list[0]!.conversation_id;
     const file = await app.bridge.loadSessionFile(sessionId);
@@ -376,7 +376,7 @@ describe("TuiApp 端到端（tracer bullet）", () => {
   // （已在 Tab 补全测试中覆盖）作为候选行为最终落点；候选完整渲染属于
   // PromptInput 单测范畴，archive PromptInput 切片测试在 T7 收口时一并迁移。
 
-  test("/sessions → 列表视图（+ 新建会话 + summary）→ Esc 返回聊天", async () => {
+  test("/sessions → 列表视图（+ 新建会话 + title）→ Esc 返回聊天", async () => {
     const app = await mountAppAsync([assistantResult({ texts: ["reply-A"] })]);
     await untilFrame(app.setup, (f) => f.includes("Version"));
     await app.typeText("hello");

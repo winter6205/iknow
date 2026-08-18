@@ -29,7 +29,8 @@ export interface SessionListEntry {
   readonly updatedAt: string;
   /** Text excerpt from the most recent assistant turn ("" if none). */
   readonly lastFinalText: string;
-  readonly summary: string;
+  /** UI title excerpt (#467 renamed from `summary`). */
+  readonly title: string;
 }
 
 /**
@@ -206,7 +207,7 @@ export class SessionStore {
         conversation_id: id,
         updatedAt: file.updatedAt,
         lastFinalText,
-        summary: file.summary,
+        title: file.title,
       };
     } catch {
       return null; // skip corrupt / unreadable files

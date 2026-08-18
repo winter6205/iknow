@@ -65,7 +65,7 @@ import {
   appendCheckpoint,
   CURRENT_SCHEMA_VERSION,
   extractGoal,
-  extractSummary,
+  extractTitle,
   pinGoal,
   seedTaskFocus,
   shouldPersistCheckpoint,
@@ -616,7 +616,7 @@ export class SessionHub {
       jsonMode: req?.json_mode ?? this.defaults.jsonMode,
       turnCount: 0,
       updatedAt: now,
-      summary: "",
+      title: "",
       cwd: process.cwd(),
       sanitized_at: now,
       checkpoints: [],
@@ -1003,7 +1003,7 @@ export class SessionHub {
           turnCount: 0,
           updatedAt: new Date().toISOString(),
           schemaVersion: CURRENT_SCHEMA_VERSION,
-          summary: "",
+          title: "",
           // Reset wipes conversation history; prior checkpoint records
           // reference turns that no longer exist (messagesCount would also
           // falsely satisfy `appendCheckpoint`'s delta<=0 no-op guard and
@@ -1031,12 +1031,12 @@ export class SessionHub {
    * `cachedDeps` 缺席(ask / worker / oneshot 等无 harness 装配)或 adapter
    * 不可用 → 跳过 LLM 路径,走 `compactMessages` 纯截断路径。LLM 摘要失败
    * (empty_response / timeout / adapter_failed)同样回退 placeholder。
-   * summary 字段由 `extractSummary` 取首条 user 文本派生(两条路径的
-   * messages[0] 都是 user 文本消息,派生语义一致)。
+   * title 字段由 `extractTitle` 取首条 user 文本派生(#467 改名,原
+   * `summary`;两条路径的 messages[0] 都是 user 文本消息,派生语义一致)。
    *
    * 幂等 no-op: 消息条数未减少(已低于压缩窗口或本就 ≤ keepRecent 或
    * 无 dropped 前缀)时不落盘、不 bump updatedAt,返回 compacted=false。
-   * 实际压缩 → 落盘并重算 summary。
+   * 实际压缩 → 落盘并重算 title。
    */
   async compactSession(
     conversationId: string
@@ -1107,11 +1107,12 @@ export class SessionHub {
           turnCount: session.turnCount,
           updatedAt: new Date().toISOString(),
           schemaVersion: CURRENT_SCHEMA_VERSION,
-          // 用首条 user 文本派生 session summary 字段(便于会话列表快速展示):
+          // 用首条 user 文本派生 session title 字段(#467 改名,原 summary;
+          // 便于会话列表快速展示):
           //   - 摘要轮:messages[0] = SUMMARY_PREAMBLE + 摘要内容 user 消息。
           //   - placeholder 路径:messages[0] = "[compaction boundary ...]" user 消息。
-          // 两条路径都走 extractSummary 一致派生,语义对齐。
-          summary: extractSummary(compacted),
+          // 两条路径都走 extractTitle 一致派生,语义对齐。
+          title: extractTitle(compacted),
         };
         await this.store.save({ id: conversationId, file: updated });
         return {
@@ -1297,7 +1298,7 @@ export class SessionHub {
       turnCount,
       updatedAt: now,
       schemaVersion: CURRENT_SCHEMA_VERSION,
-      summary: extractSummary(result.messages),
+      title: extractTitle(result.messages),
       // #458 T2/T5 (SC2): seed taskFocus from the first user message text
       // (full, trimmed) when taskFocus is still absent. `seedTaskFocus`
       // slices the primary entry to 500 chars and prepends the prior focus
