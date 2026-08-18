@@ -111,6 +111,23 @@ function lspAt(rec: Record<string, unknown>, name: string): string {
   return `LSP ${name.replace("lsp_", "")} ${file}${line !== null ? `:${line}` : ""}`;
 }
 
+/** 子代理工具专属显示（与普通工具行区分；主流 Agent 惯例：子代理调用有独立
+ *  视觉，不与普通工具共用 `[运行中] name · detail` 形态）。几何字形，无 emoji
+ *  （spec #146:86）。 */
+export const SUBAGENT_TOOL_LABEL = "子代理";
+
+/** 子代理工具判定：spawn_subagent（派发）+ subagent_result（轮询）。 */
+export function isSubagentTool(name: string): boolean {
+  return name === "spawn_subagent" || name === "subagent_result";
+}
+
+/** 子代理工具状态字形：running → ▣，ok → ✓，failed → ✗。 */
+export function subagentDisplayMark(kind: "running" | "ok" | "failed"): string {
+  if (kind === "ok") return "✓";
+  if (kind === "failed") return "✗";
+  return "▣";
+}
+
 /** 工具 → 摘要器 lookup table。每项返回未 clip 的 detail 文本。 */
 const SUMMARIZERS: Readonly<
   Record<string, (rec: Record<string, unknown>) => string>
@@ -321,22 +338,39 @@ export function projectToolLines(
  *  文本拼接全部落在此处，禁止复制 `${name} · ${detail} · ${status}` 模板。
  *
  *  字节规则:
- *   - detail 非空 → `${toolName} · ${detail} · ${status}`
- *   - detail 空   → `${toolName} · ${status}`（省去中间分隔符，避免残留）
+ *   - 普通工具：detail 非空 → `${toolName} · ${detail} · ${status}`；
+ *     detail 空 → `${toolName} · ${status}`（省去中间分隔符，避免残留）。
+ *   - 子代理工具（spawn_subagent / subagent_result）独立形态：
+ *     detail 非空 → `${mark} ${SUBAGENT_TOOL_LABEL} · ${detail}`；
+ *     detail 空 → `${mark} ${SUBAGENT_TOOL_LABEL}`（glyph 已表状态，不拼
+ *     尾部 ` · ok/failed`）。
  *
  *  `detail` 可选 override：装配层已完成事件携带 precomputed detail
  *  （如 liveToolReducer 落地）时，通过显式 detail 跳过 summarizeToolCall
- *  重算，保证完成事件渲染与 reducer state.detail 字节一致。 */
+ *  重算，保证完成事件渲染与 reducer state.detail 字节一致。
+ *
+ *  `cols` 透传：提供时 detail 按视觉宽度收口（与 summarizeToolCall 同纪律，
+ *  「装饰 + 工具名 + detail」单行放得下，窄终端不折行）；缺省 → legacy 80
+ *  字符截断（与既有调用方字节兼容）。 */
 export function formatLiveToolEvent(opts: {
   readonly toolName: string;
   readonly input: unknown;
   readonly kind: string;
   /** 显式 detail override；提供时跳过 summarizeToolCall 重算。 */
   readonly detail?: string;
+  /** 终端列宽（可选）：提供时 detail 按视觉宽度收口；缺省 legacy 80 截断。 */
+  readonly cols?: number;
 }): string {
   const detail =
-    opts.detail ?? summarizeToolCall(opts.toolName, opts.input).detail;
+    opts.detail ??
+    summarizeToolCall(opts.toolName, opts.input, opts.cols).detail;
   const status = opts.kind === "ok" ? "ok" : "failed";
+  // 子代理工具分支（独立视觉，glyph + 子代理标签 + detail，不再拼尾部状态）。
+  if (isSubagentTool(opts.toolName)) {
+    const mark = subagentDisplayMark(status);
+    if (detail.length === 0) return `${mark} ${SUBAGENT_TOOL_LABEL}`;
+    return `${mark} ${SUBAGENT_TOOL_LABEL} · ${detail}`;
+  }
   if (detail.length === 0) return `${opts.toolName} · ${status}`;
   return `${opts.toolName} · ${detail} · ${status}`;
 }

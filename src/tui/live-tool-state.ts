@@ -22,7 +22,11 @@
  *    展示层事件不应破坏权威状态）。
  *  - 纯函数 + Object.freeze 纪律，与 session-state.ts 同源。
  */
-import { formatLiveToolEvent } from "./tool-summary.js";
+import {
+  formatLiveToolEvent,
+  isSubagentTool,
+  subagentDisplayMark,
+} from "./tool-summary.js";
 
 export type LiveToolStatus = "running" | "ok" | "failed";
 
@@ -184,20 +188,34 @@ export function shortenMcpToolName(name: string): string {
   return `${server}/${tool}`;
 }
 
-/** 运行中条目格式化 —— `[运行中] name`。 */
+/** 运行中条目格式化 —— `[运行中] name`。子代理工具走独立视觉（字形走
+ *  `subagentDisplayMark` SSOT，禁硬编码）：
+ *  spawn_subagent → `▣ 派发子代理中…`，subagent_result → `▣ 轮询子代理中…`。 */
 export function formatRunningToolLine(run: LiveToolRun): string {
+  if (isSubagentTool(run.name)) {
+    const mark = subagentDisplayMark("running");
+    return run.name === "spawn_subagent"
+      ? `${mark} 派发子代理中…`
+      : `${mark} 轮询子代理中…`;
+  }
   return `[运行中] ${run.name}`;
 }
 
 /** 完成条目格式化 —— 委托 formatLiveToolEvent（tool-summary.ts）单源。
  *  模板文本统一在 formatLiveToolEvent 内。这里必须用 LiveToolRun 的
  *  precomputed detail（run.detail ?? ""），不要传 run.input 重算 — 重算结果
- *  可能与 postToolUse 落入 reducer 的 detail 字节不一致。 */
-export function formatCompletedToolLine(run: LiveToolRun): string {
+ *  可能与 postToolUse 落入 reducer 的 detail 字节不一致。`cols` 透传给
+ *  formatLiveToolEvent；detail 已由 reducer 用同 cols 预算裁过（除非
+ *  detail 为空走内部 summarizeToolCall，否则 cols 不再被消费）。 */
+export function formatCompletedToolLine(
+  run: LiveToolRun,
+  cols?: number
+): string {
   return formatLiveToolEvent({
     toolName: run.name,
     input: run.input,
     kind: run.status === "ok" ? "ok" : "failed",
     detail: run.detail ?? "",
+    cols,
   });
 }

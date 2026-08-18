@@ -9,12 +9,15 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  SUBAGENT_TOOL_LABEL,
   clipOneLine,
   clipOneLineVisual,
   countBashCalls,
   formatLiveToolEvent,
   formatRanSuffix,
+  isSubagentTool,
   projectToolLines,
+  subagentDisplayMark,
   summarizeToolCall,
   toolPreviewRows,
   visualWidth,
@@ -410,5 +413,119 @@ describe("toolPreviewRows: 写/改文件内容可见（统一 diff）", () => {
 
   test("edit_file 无 old_str/new_str → 空数组", () => {
     expect(toolPreviewRows("edit_file", { path: "a.ts" }, 80)).toHaveLength(0);
+  });
+});
+
+describe("子代理工具专属显示（isSubagentTool / subagentDisplayMark / SUBAGENT_TOOL_LABEL）", () => {
+  test("isSubagentTool：spawn_subagent / subagent_result → true；普通工具 → false", () => {
+    expect(isSubagentTool("spawn_subagent")).toBe(true);
+    expect(isSubagentTool("subagent_result")).toBe(true);
+    expect(isSubagentTool("bash")).toBe(false);
+    expect(isSubagentTool("read_file")).toBe(false);
+  });
+
+  test("subagentDisplayMark：running → ▣，ok → ✓，failed → ✗", () => {
+    expect(subagentDisplayMark("running")).toBe("▣");
+    expect(subagentDisplayMark("ok")).toBe("✓");
+    expect(subagentDisplayMark("failed")).toBe("✗");
+  });
+
+  test('SUBAGENT_TOOL_LABEL === "子代理"', () => {
+    expect(SUBAGENT_TOOL_LABEL).toBe("子代理");
+  });
+
+  test("formatLiveToolEvent spawn_subagent ok（input 含 task）→ `✓ 子代理 · 派发子代理：…`（无尾部 ` · ok`）", () => {
+    const line = formatLiveToolEvent({
+      toolName: "spawn_subagent",
+      input: { task: "调查渲染层" },
+      kind: "ok",
+    });
+    expect(line).toBe("✓ 子代理 · 派发子代理：调查渲染层");
+    // 子代理分支：glyph 已表状态，不再拼尾部 ` · ok/failed`。
+    expect(line.endsWith(" · ok")).toBe(false);
+    expect(line.endsWith(" · failed")).toBe(false);
+  });
+
+  test("formatLiveToolEvent spawn_subagent failed → `✗ 子代理 · …`", () => {
+    const line = formatLiveToolEvent({
+      toolName: "spawn_subagent",
+      input: { task: "调查渲染层" },
+      kind: "execution_failed",
+    });
+    expect(line).toBe("✗ 子代理 · 派发子代理：调查渲染层");
+    expect(line.includes("· failed")).toBe(false);
+  });
+
+  test("formatLiveToolEvent subagent_result ok → `✓ 子代理 · 轮询 …`", () => {
+    const line = formatLiveToolEvent({
+      toolName: "subagent_result",
+      input: { task_id: "t-1" },
+      kind: "ok",
+    });
+    expect(line).toBe("✓ 子代理 · 轮询 t-1");
+  });
+
+  test("formatLiveToolEvent 子代理 detail 空（显式 override）→ `${mark} 子代理`（无 `· ` 残留）", () => {
+    // 子代理 summary 器兜底值非空，构造 detail 空走显式 override 路径，
+    // 验证子代理分支 detail 空形态（不拼 `· `，也不拼尾部状态）。
+    const line = formatLiveToolEvent({
+      toolName: "subagent_result",
+      input: { task_id: "t-1" },
+      kind: "ok",
+      detail: "",
+    });
+    expect(line).toBe("✓ 子代理");
+    expect(line.includes("·")).toBe(false);
+  });
+
+  test("formatLiveToolEvent bash ok 回归 → `bash · <detail> · ok` 字节不变（普通分支不受影响）", () => {
+    const line = formatLiveToolEvent({
+      toolName: "bash",
+      input: { command: "npm test" },
+      kind: "ok",
+    });
+    expect(line).toBe("bash · npm test · ok");
+  });
+
+  test("formatLiveToolEvent tool_search detail 空（普通分支）→ 普通空形态字节不变", () => {
+    // 工具 search / 神秘工具在 detail 空时仍走普通分支；子代理分支不被波及。
+    const line = formatLiveToolEvent({
+      toolName: "tool_search",
+      input: {},
+      kind: "ok",
+      detail: "",
+    });
+    expect(line).toBe("tool_search · ok");
+    expect(line).not.toContain("子代理");
+  });
+});
+
+// M5 fixup：formatLiveToolEvent opts.cols 透传 —— detail override 缺省时
+// 走 summarizeToolCall(name, input, cols) 视觉宽度收口（窄终端 CJK 不溢出）。
+describe("formatLiveToolEvent(cols) 透传：detail 空时按视觉宽度收口", () => {
+  test("窄 cols + CJK 长 command → 单行 ≤ cols（不在中间换行）", () => {
+    // detail 空走 summarizeToolCall；提供 cols 时 detail 按视觉宽度收口。
+    const cols = 40;
+    const line = formatLiveToolEvent({
+      toolName: "bash",
+      input: {
+        command: "非常长的命令用于测试中文输入时按视觉宽度折行的行为".repeat(4),
+      },
+      kind: "ok",
+      cols,
+    });
+    expect(visualWidth(line)).toBeLessThanOrEqual(cols);
+    expect(line.endsWith("· ok")).toBe(true);
+  });
+
+  test("cols 缺省 → legacy 80 字符截断（与既有调用方字节兼容）", () => {
+    const line = formatLiveToolEvent({
+      toolName: "bash",
+      input: { command: "x".repeat(200) },
+      kind: "ok",
+    });
+    // 80 字符截断 + `· ok` 后缀总长不超过 100
+    expect(line.length).toBeLessThanOrEqual(100);
+    expect(line.startsWith("bash · x")).toBe(true);
   });
 });

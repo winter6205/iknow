@@ -7,21 +7,26 @@
 import { describe, expect, test } from "bun:test";
 import { formatCrunched, formatRunDuration } from "../../src/tui/run-stats.js";
 
-describe("formatRunDuration", () => {
+// M1 fixup：本 describe 与 subagent-panel 投影共用 `formatRunDuration` 单源 —
+// panel 的 formatElapsedSec 已删除（此前字节重复），其边界用例并入本块保持覆盖。
+describe("formatRunDuration（subagent-panel 投影共用 SSOT）", () => {
   test("不足 1 分钟：仅秒", () => {
     expect(formatRunDuration(0)).toBe("0s");
+    expect(formatRunDuration(1)).toBe("1s");
     expect(formatRunDuration(45)).toBe("45s");
     expect(formatRunDuration(59)).toBe("59s");
   });
 
   test("分钟：`3m 46s`", () => {
     expect(formatRunDuration(60)).toBe("1m 0s");
+    expect(formatRunDuration(125)).toBe("2m 5s");
     expect(formatRunDuration(226)).toBe("3m 46s");
     expect(formatRunDuration(3599)).toBe("59m 59s");
   });
 
   test("小时：`1h 5m`", () => {
     expect(formatRunDuration(3600)).toBe("1h 0m");
+    expect(formatRunDuration(3661)).toBe("1h 1m");
     expect(formatRunDuration(3900)).toBe("1h 5m");
     expect(formatRunDuration(7325)).toBe("2h 2m");
   });

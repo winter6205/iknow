@@ -53,7 +53,7 @@ export function liveToolPreviewTextLines(
   if (run.status === "running") {
     return [runningLine(run, cols)];
   }
-  const out: string[] = [formatCompletedToolLine(run)];
+  const out: string[] = [formatCompletedToolLine(run, cols)];
   const rows = toolPreviewRows(run.name, run.input, cols, {
     oldContent: run.oldContent,
     newContent: run.newContent,
@@ -75,7 +75,7 @@ export function liveToolPreviewBox(run: LiveToolRun, cols: number): ReactNode {
   const status =
     run.status === "running"
       ? runningLine(run, cols)
-      : formatCompletedToolLine(run);
+      : formatCompletedToolLine(run, cols);
   const rows =
     run.status === "running"
       ? []

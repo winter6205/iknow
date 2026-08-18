@@ -25,6 +25,7 @@ import {
   liveToolPreviewTextLines,
 } from "../../src/tui/live-tool-preview.js";
 import {
+  formatRunningToolLine,
   liveToolReduce,
   type LiveToolRun,
 } from "../../src/tui/live-tool-state.js";
@@ -368,5 +369,37 @@ describe("T5: running 态 partial 摘要渲染", () => {
     expect(frame).toContain("[运行中] bash");
     expect(frame).toContain("git status");
     await setup.renderer.destroy();
+  });
+});
+
+describe("formatRunningToolLine: 子代理工具专属运行行", () => {
+  test("spawn_subagent run → `▣ 派发子代理中…`", () => {
+    const run: LiveToolRun = {
+      id: "tu-spawn",
+      name: "spawn_subagent",
+      status: "running",
+      input: undefined,
+    };
+    expect(formatRunningToolLine(run)).toBe("▣ 派发子代理中…");
+  });
+
+  test("subagent_result run → `▣ 轮询子代理中…`", () => {
+    const run: LiveToolRun = {
+      id: "tu-poll",
+      name: "subagent_result",
+      status: "running",
+      input: undefined,
+    };
+    expect(formatRunningToolLine(run)).toBe("▣ 轮询子代理中…");
+  });
+
+  test("bash run 回归 → `[运行中] bash`（普通工具形态不受影响）", () => {
+    const run: LiveToolRun = {
+      id: "tu-bash",
+      name: "bash",
+      status: "running",
+      input: undefined,
+    };
+    expect(formatRunningToolLine(run)).toBe("[运行中] bash");
   });
 });
