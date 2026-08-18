@@ -277,3 +277,69 @@ describe("useSessionChat compact()", () => {
     Renderer.updateContainer(null, hook.root, null, () => undefined);
   });
 });
+
+describe("useSessionChat pushNotice()", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function bootReady() {
+    vi.mocked(api.health).mockResolvedValue({
+      ok: true,
+      service: "session-api",
+      version: "test",
+      contextWindow: 200000,
+    });
+    vi.mocked(api.createSession).mockResolvedValue({
+      session: {
+        conversation_id: "c1",
+        json_mode: false,
+        turn_count: 0,
+        prior_count: 0,
+      },
+      turns: [],
+    });
+    return renderHook();
+  }
+
+  it("追加纯本地 notice 消息（不进 wire、id 唯一）", async () => {
+    const hook = bootReady();
+    await act(async () => {
+      await vi.waitFor(() => assert.equal(hook.getCurrent()?.phase, "ready"));
+    });
+
+    act(() => {
+      hook.getCurrent()?.pushNotice("已压缩上下文");
+    });
+    act(() => {
+      hook.getCurrent()?.pushNotice("第二条");
+    });
+    const messages = hook.getCurrent()?.messages ?? [];
+    assert.equal(messages.length, 2);
+    assert.equal(messages[0]?.role, "notice");
+    assert.equal(messages[0]?.text, "已压缩上下文");
+    assert.notEqual(messages[0]?.id, messages[1]?.id);
+    // 不调任何 wire API。
+    assert.equal(vi.mocked(api.postMessage).mock.calls.length, 0);
+
+    Renderer.updateContainer(null, hook.root, null, () => undefined);
+  });
+
+  it("会话切换（applySession）后 notice 不残留", async () => {
+    const hook = bootReady();
+    await act(async () => {
+      await vi.waitFor(() => assert.equal(hook.getCurrent()?.phase, "ready"));
+    });
+    act(() => {
+      hook.getCurrent()?.pushNotice("临时提示");
+    });
+    assert.equal(hook.getCurrent()?.messages.length, 1);
+
+    await act(async () => {
+      await hook.getCurrent()?.newSession();
+    });
+    assert.equal(hook.getCurrent()?.messages.length, 0);
+
+    Renderer.updateContainer(null, hook.root, null, () => undefined);
+  });
+});

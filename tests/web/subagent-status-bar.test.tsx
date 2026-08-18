@@ -10,7 +10,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { SubagentStatusBar } from "../../web/src/components/SubagentStatusBar.tsx";
+import {
+  SubagentStatusBar,
+  visibleSubagents,
+} from "../../web/src/components/SubagentStatusBar.tsx";
 import type { SubagentStatus } from "../../web/src/api/types.ts";
 
 /** 构造一个 SubagentStatus，只显式列出覆盖到的字段，其余走默认值。 */
@@ -139,5 +142,63 @@ describe("SubagentStatusBar — 四态徽标", () => {
     );
     assert.ok(html.includes("子代理"));
     assert.ok(html.includes("运行中"));
+  });
+});
+
+describe("SubagentStatusBar — 终态截断（visibleSubagents）", () => {
+  function terminal(id: string, state: "completed" | "failed"): SubagentStatus {
+    return item({ state, taskId: id, taskPreview: `任务-${id}` });
+  }
+
+  it("终态 ≤5 条 → 全保留", () => {
+    const list = ["t1", "t2", "t3", "t4", "t5"].map((id) =>
+      terminal(id, "completed")
+    );
+    assert.deepEqual(
+      visibleSubagents(list).map((s) => s.taskId),
+      ["t1", "t2", "t3", "t4", "t5"]
+    );
+  });
+
+  it("终态 7 条 → 只保留最近 5 条（列表序尾部），相对顺序不变", () => {
+    const list = ["t1", "t2", "t3", "t4", "t5", "t6", "t7"].map((id) =>
+      terminal(id, id === "t3" ? "failed" : "completed")
+    );
+    assert.deepEqual(
+      visibleSubagents(list).map((s) => s.taskId),
+      ["t3", "t4", "t5", "t6", "t7"]
+    );
+  });
+
+  it("活跃条目（starting/running）不受截断影响，与保留的终态按原序交错", () => {
+    const list: SubagentStatus[] = [
+      terminal("t1", "completed"),
+      item({ state: "running", taskId: "r1", taskPreview: "活跃甲" }),
+      terminal("t2", "completed"),
+      terminal("t3", "completed"),
+      terminal("t4", "failed"),
+      terminal("t5", "completed"),
+      terminal("t6", "completed"),
+      item({ state: "starting", taskId: "s1", taskPreview: "活跃乙" }),
+    ];
+    // 终态 6 条 → 丢弃最早的 t1；running/starting 全保留。
+    assert.deepEqual(
+      visibleSubagents(list).map((s) => s.taskId),
+      ["r1", "t2", "t3", "t4", "t5", "t6", "s1"]
+    );
+  });
+
+  it("组件渲染走同一过滤：超量终态只渲染最近 5 条", () => {
+    const list = ["t1", "t2", "t3", "t4", "t5", "t6"].map((id) =>
+      terminal(id, "completed")
+    );
+    const html = renderToStaticMarkup(<SubagentStatusBar subagents={list} />);
+    assert.ok(!html.includes("任务-t1"), "最早终态条目被截断");
+    assert.ok(html.includes("任务-t2"));
+    assert.ok(html.includes("任务-t6"));
+    assert.equal(
+      (html.match(/data-state="completed"/g) ?? []).length,
+      5
+    );
   });
 });

@@ -20,7 +20,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 
-import { drainPendingSubagents } from "../../src/harness/subagent/host-drain.ts";
+import {
+  drainPendingSubagents,
+  isSubagentDrainText,
+  SUBAGENT_DRAIN_PREFIX,
+} from "../../src/harness/subagent/host-drain.ts";
 import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
 
@@ -135,5 +139,36 @@ describe("drainPendingSubagents (SC7 host-drain)", () => {
     ]);
     const out = await drainPendingSubagents(mgr);
     assert.equal(out, "## Sub-agent tid-fail result: exit code=1\n\n");
+  });
+});
+
+describe("isSubagentDrainText / SUBAGENT_DRAIN_PREFIX (SSOT 同源)", () => {
+  it("单 task drain 输出满足谓词且以前缀开头", async () => {
+    const mgr = fakeManager([completedItem("tid-a", "sA", "rA")]);
+    const out = await drainPendingSubagents(mgr);
+    assert.equal(isSubagentDrainText(out), true);
+    assert.ok(out.startsWith(SUBAGENT_DRAIN_PREFIX));
+  });
+
+  it("多 task 拼接输出仍满足谓词（首项前缀在头）", async () => {
+    const mgr = fakeManager([
+      completedItem("tid-a", "sA", "rA"),
+      completedItem("tid-b", "sB", "rB"),
+    ]);
+    assert.equal(isSubagentDrainText(await drainPendingSubagents(mgr)), true);
+  });
+
+  it("普通用户文本不满足谓词", () => {
+    assert.equal(isSubagentDrainText("hello world"), false);
+    assert.equal(isSubagentDrainText(""), false);
+    // 前缀必须含尾随空格，避免误伤 "## Sub-agentX" 之类用户输入。
+    assert.equal(isSubagentDrainText("## Sub-agentX"), false);
+  });
+
+  it("trim 后以前缀开头即判定（容忍前导空白）", () => {
+    assert.equal(
+      isSubagentDrainText("  ## Sub-agent t result: s\n\nr"),
+      true
+    );
   });
 });

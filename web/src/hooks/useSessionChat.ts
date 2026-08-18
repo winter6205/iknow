@@ -21,6 +21,13 @@ export type ChatUiMessage =
       role: "agent";
       text: string;
       answer: TurnAnswerDto;
+    }
+  | {
+      // 纯本地提示（slash 命令反馈等）：不进 wire，turnsToMessages 不产生，
+      // applySession（会话切换/压缩刷新）时被替换清除。
+      id: string;
+      role: "notice";
+      text: string;
     };
 
 export type SessionChatState = {
@@ -50,6 +57,8 @@ export type SessionChatApi = SessionChatState & {
   retryBootstrap: () => void;
   /** Clear mid-session error without resetting conversation. */
   clearError: () => void;
+  /** 追加一条纯本地 notice 消息（slash 命令反馈；不进 wire）。 */
+  pushNotice: (text: string) => void;
 };
 
 /** Safe extras for applySession — cannot override derived session fields. */
@@ -165,6 +174,7 @@ export function useSessionChat(): SessionChatApi {
   const [state, setState] = useState<SessionChatState>(INITIAL);
   const bootGen = useRef(0);
   const sessionIdRef = useRef<string | null>(null);
+  const noticeSeq = useRef(0);
 
   const applySession = useCallback(
     (
@@ -431,6 +441,19 @@ export function useSessionChat(): SessionChatApi {
     });
   }, []);
 
+  const pushNotice = useCallback((text: string) => {
+    noticeSeq.current += 1;
+    const notice: ChatUiMessage = {
+      id: `n-${noticeSeq.current}`,
+      role: "notice",
+      text,
+    };
+    setState((prev) => ({
+      ...prev,
+      messages: [...prev.messages, notice],
+    }));
+  }, []);
+
   return {
     ...state,
     sendMessage,
@@ -440,5 +463,6 @@ export function useSessionChat(): SessionChatApi {
     setConversation,
     retryBootstrap,
     clearError,
+    pushNotice,
   };
 }
