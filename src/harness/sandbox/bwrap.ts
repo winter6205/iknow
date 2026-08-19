@@ -25,6 +25,13 @@ export interface BwrapFenceOptions {
   // die-with-parent / ro-binds / tmpfs / clearenv / chdir / command) is
   // unchanged — this is the only approval axis this option touches.
   readonly network?: boolean;
+  // #562 T5: cwdReadonly — absent/false = V1 path (`--bind cwd cwd`, the
+  // writable cwd); true = bind cwd as `--ro-bind cwd cwd` so a validator
+  // hole still gets EROFS at the kernel layer. Only the cwd-bind verb
+  // changes; argv order contract (system --ro-bind → user --bind/--ro-bind
+  // → --size/--tmpfs → 可选 cwd 重绑 → --proc/--dev-bind → --chdir → -- → 命令)
+  // and the rebind-after-tmpfs rule (cwd isTmpDescendant) stay intact.
+  readonly cwdReadonly?: boolean;
   readonly seccompProfile?: never;
 }
 
@@ -55,7 +62,8 @@ function isTmpDescendant(cwd: string, tmp: string): boolean {
 function bindArgs(
   fsPolicy: FsPolicy,
   cwd: string,
-  overlaySensitivePaths: boolean
+  overlaySensitivePaths: boolean,
+  cwdReadonly: boolean
 ): string[] {
   const paths = fsPolicy.allowedPaths();
   const home = pathForHome(fsPolicy);
@@ -66,11 +74,16 @@ function bindArgs(
         return existsSync(target) ? ["--tmpfs", target] : [];
       })
     : [];
+  // #562 T5: cwdReadonly switches the cwd-bind verb from --bind to --ro-bind.
+  // tmp + home stays writable (tmp is the sandbox /tmp mount, home is the
+  // user-configurable bind target). Verb swap is the only change; argv order
+  // is preserved (see baseArgs caller).
+  const cwdVerb = cwdReadonly ? "--ro-bind" : "--bind";
   return [
     "--bind",
     tmp,
     tmp,
-    "--bind",
+    cwdVerb,
     cwd,
     cwd,
     "--bind",
@@ -85,10 +98,16 @@ function baseArgs(
   fsPolicy: FsPolicy,
   resources: ResourceLimits,
   overlaySensitivePaths: boolean,
-  network: boolean
+  network: boolean,
+  cwdReadonly: boolean
 ): string[] {
   const tmp = fsPolicy.allowedPaths()[2] ?? "/tmp";
-  const cwdRebind = isTmpDescendant(cwd, tmp) ? ["--bind", cwd, cwd] : [];
+  // #562 T5: cwdRebind (post-tmpfs --bind cwd cwd when cwd is /tmp descendant)
+  // also respects cwdReadonly — readonly fence must stay read-only even after
+  // the post-tmpfs rebind, otherwise the rebind silently promotes it back to
+  // writable. Verb swap only; argv position unchanged.
+  const cwdRebindVerb = cwdReadonly ? "--ro-bind" : "--bind";
+  const cwdRebind = isTmpDescendant(cwd, tmp) ? [cwdRebindVerb, cwd, cwd] : [];
   // `--tmpfs /tmp` (below) mounts an empty tmpfs over /tmp, which hides every
   // /tmp/* subtree that was bound earlier in bindArgs — including a home dir
   // that lives under /tmp (e.g. tests/CI set HOME to mkdtemp(join(tmpdir(),…)))
@@ -121,7 +140,7 @@ function baseArgs(
     "--ro-bind",
     "/etc",
     "/etc",
-    ...bindArgs(fsPolicy, cwd, overlaySensitivePaths),
+    ...bindArgs(fsPolicy, cwd, overlaySensitivePaths, cwdReadonly),
     "--size",
     String(resources.tmp),
     "--tmpfs",
@@ -150,7 +169,8 @@ export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {
       opts.fsPolicy,
       opts.resourceLimits,
       opts.overlaySensitivePaths ?? true,
-      opts.network === true
+      opts.network === true,
+      opts.cwdReadonly === true
     ),
     // --clearenv must precede every --setenv so the sandbox inherits only the
     // whitelisted entries, never the host env (bwrap otherwise copies the whole

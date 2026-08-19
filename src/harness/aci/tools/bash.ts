@@ -58,6 +58,11 @@ export interface CreateBashToolOptions {
    * 抛 ReadonlyViolationError（extends ToolExecutionError）。缺省 "any" =
    * V1 路径逐字节不变（回归基线）。 */
   readonly bashMode?: "any" | "readonly";
+  /** #562 T5:fence cwd 级只读控制 —— true 时 fence 把 cwd bind 为 --ro-bind,
+   * 同时把 GIT_OPTIONAL_LOCKS=0 注入 fence env（git ≥2.14 防 `git status` 刷
+   * index）。缺省 / false = V1 路径逐字节不变。bashMode→cwdReadonly 映射由 T6
+   * 在 registry 装配处完成；本字段是 additive 透传缝。 */
+  readonly cwdReadonly?: boolean;
 }
 
 export function createBashTool(
@@ -119,6 +124,14 @@ export function createBashTool(
       );
     }
     const fenceEnv = envIsolation.filter(process.env);
+    // #562 T5:cwdReadonly → 注入 GIT_OPTIONAL_LOCKS=0(fence 级只读兜底)。
+    // git ≥2.14 读取时跳过 index 刷新,防止 `git status` 在 readonly fence 内
+    // 静默写 .git/index。post-filter additive:bypass BASE_ENV_WHITELIST(只用于
+    // bash-derived commands,不存在 secret 风险);缺省 / false → 不注入,V1
+    // 回归基线。
+    if (opts?.cwdReadonly === true) {
+      fenceEnv.GIT_OPTIONAL_LOCKS = "0";
+    }
     // #406 T3:构造 fence 前还原占位符 —— 还原后的命令才是真正 spawn 进 bwrap
     // 的文本。原始命令（含占位符）只见于工具调用记录 / 模型上下文；模型永不
     // 见还原后的命令，只看到 bash 输出的 stdout。
@@ -139,6 +152,7 @@ export function createBashTool(
       env: fenceEnv,
       cwd,
       ...(wantsHostNetwork ? { network: true } : {}),
+      ...(opts?.cwdReadonly === true ? { cwdReadonly: true } : {}),
     });
     const result = await runInSandbox({
       fence,
