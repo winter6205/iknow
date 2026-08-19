@@ -54,6 +54,7 @@ import {
   type SubAgentEnvelope,
   type WorkerEnvelope,
 } from "./envelope.js";
+import { toolConstraintsSegment } from "../identity/assemble.js";
 
 /** stderr 日志前缀 (spec Code Style: warn 一行不泄露 env 值)。 */
 const LOG_PREFIX = "[subagent-worker]";
@@ -86,20 +87,56 @@ function resolvePersonaBody(role: string | undefined): string | undefined {
 }
 
 /**
- * #556 T2: 加性段注入 wrapper (base < persona < addendum)。两者全缺省
- * 走外层短路 (返回 base), 字节级 byte-stable, 守 V1 baseline。
+ * #562 T7: 查 catalog 取 bashMode 派生 tool constraints 段文本。
+ * bashMode="readonly" → 注入 "Tool constraints for this run" 段;
+ * 其他 (role 缺省 / 未知 / bashMode 缺省 / bashMode="any") → 不注入,
+ * 走 V1 baseline (byte-stable, 段缺席)。
  *
- * 顺序契约: 加性段追加在 base system 之后, 不重排 IKNOW_ASSEMBLY_ORDER
- * 的 5 段 LOCKED 顺序。base 缺席 → 输出只是 persona + addendum。
+ * 防御契约与 resolvePersonaBody 同形态:role 缺省 / 未知 → 不抛, 装配
+ * 期 catch 后走 fallback;catalog 是只读数据, 无副作用。
+ */
+function resolveConstraintsText(role: string | undefined): string | undefined {
+  if (role === undefined) return undefined;
+  try {
+    const entry = getAgentEntry(role);
+    if (entry.bashMode === "readonly") {
+      return toolConstraintsSegment("readonly");
+    }
+    return undefined;
+  } catch (err) {
+    if (err instanceof AgentCatalogLookupError) {
+      log(`role '${role}' not in catalog; falling back to V1 baseline`);
+      return undefined;
+    }
+    throw err;
+  }
+}
+
+/**
+ * #556 T2 + #562 T7: 加性段注入 wrapper
+ * (base < persona < constraints < addendum)。
+ *
+ * 顺序契约 (plan T7 实现选):
+ *   - persona (#556):catalog body, 角色定位。
+ *   - constraints (#562 T7):readonly mode 时追加, mode 延伸语义。
+ *   - addendum (#556):envelope.systemPrompt, 用户后置追加。
+ *
+ * 三者全缺省走外层短路 (返回 base), 字节级 byte-stable, 守 V1 baseline。
+ * base 缺席 → 输出只是 extras 三者按序 join;任一缺席 → 该 slot 在
+ * extras 数组过滤掉, 顺序保持不变。
+ *
+ * 加性段追加在 base system 之后, 不重排 IKNOW_ASSEMBLY_ORDER 的 5 段
+ * LOCKED 顺序 (identity / soul / user_profile / bootstrap / memory_layer)。
  */
 function withRoleExtras(
   base: () => Promise<string | undefined>,
   persona: string | undefined,
+  constraints: string | undefined,
   addendum: string | undefined
 ): () => Promise<string | undefined> {
   return async () => {
     const baseText = await base();
-    const extras = [persona, addendum].filter(
+    const extras = [persona, constraints, addendum].filter(
       (s): s is string => s !== undefined
     );
     if (extras.length === 0) return baseText;
@@ -242,16 +279,22 @@ export async function createWorkerDeps(
         })),
     });
 
-  // #556 T2: persona + addendum 注入 (加性段, 不触碰 IKNOW_ASSEMBLY_ORDER)。
-  // 顺序 base < persona < addendum;两者全缺省 → base 透传, V1 baseline
-  // 严格 byte-stable。role 缺省 / 未知 → 不查 catalog / 不注入 persona
-  // (T2 防御契约, defense-in-depth): worker 装配期 catch AgentCatalogLookupError
-  // 显式走 fallback, 单测 envelope-role.test.ts 锁定该路径。
+  // #556 T2 + #562 T7: persona + constraints + addendum 注入 (加性段,
+  // 不触碰 IKNOW_ASSEMBLY_ORDER)。顺序 base < persona < constraints <
+  // addendum;三者全缺省 → base 透传, V1 baseline 严格 byte-stable。
+  //
+  // role 缺省 / 未知 → 不查 catalog / 不注入 persona / 不注入 constraints
+  // (T2 防御契约 + T7 readonly 派生, defense-in-depth): worker 装配期
+  // catch AgentCatalogLookupError 显式走 fallback, 单测 envelope-role
+  // 与 tool-constraints 锁定该路径。
   const personaText = resolvePersonaBody(opts.role);
+  const constraintsText = resolveConstraintsText(opts.role);
   const addendumText = opts.addendum;
   const system =
-    personaText !== undefined || addendumText !== undefined
-      ? withRoleExtras(baseSystem, personaText, addendumText)
+    personaText !== undefined ||
+    constraintsText !== undefined ||
+    addendumText !== undefined
+      ? withRoleExtras(baseSystem, personaText, constraintsText, addendumText)
       : baseSystem;
 
   const deps: LoopEngineDeps = {
