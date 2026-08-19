@@ -4,6 +4,8 @@
 
 ### Breaking
 
+- **serve-workspace explicit bind（ADR-0023, #531, 2026-08-19）**: `iknow serve` 不再回退到 `process.cwd()` 作为 workspace root —— long-running 进程的 cwd ≠ 用户项目根，serve hub 默认保持 unbound。WebUI Picker（chip + `/workspace` slash）是 canonical bind surface；未 bind 前 `POST /api/v1/sessions/:id/messages` 返回 400 `validation` field=`workspaceRoot`。Bind 后 `workspaceRoot` 写入每个 session 文件，引擎 `cwd === workspaceRoot === sandboxRoot` 收敛到同一绝对路径。Trust roster 落 `~/.iknow/workspaces.json`，新绝对路径需 `confirmTrust` on PUT（乐观 rev-CAS）。CLI `--workspace-root <abs>` / `IKNOW_WORKSPACE_ROOT` 仍支持显式 pre-bind（ADR-0019 D1.1 对 `chat` / `tui` / `ask` 保持不变）。详见 `docs/adr/0023-serve-workspace-explicit.md` + `specs/serve-workspace.md`；计划 `plans/serve-workspace.md` §T1-T6。
+
 - **`iknow trace` 默认行为反转（ADR-0020, 2026-08-17）**: 不再默认起独立进程（默认端口 24881）——改为探测 `http://<host>:<port>/api/v1/health`（默认 `127.0.0.1:8787`），成功则打印 `http://host:port/trace` 并自动开浏览器（`--no-open` 关闭），失败则提示「未检测到 iknow serve，请先 `iknow serve` 或用 `iknow trace --separate`」并 `exit 1`。脚本依赖旧独立进程行为者改用 `iknow trace --separate`（escape hatch，保留独立进程 24881 行为一个版本）。`detectLegacyTrace` 迁移检测在两种模式里都前置保留。context：`#183` 的三条拆分理由（慢读、故障不隔离、横扩）在 A-scenario（developer local debug）下无语义，前两条以 per-query cap（`MAX_TRACE_BYTES` 8MiB + 行截断 + reader cap） + 路由级 try/catch 缓解；详见 `docs/adr/0020-trace-inspection-mount-into-serve.md`。计划：`plans/merge-trace-into-serve.md` §T6。
 
 ### Added
