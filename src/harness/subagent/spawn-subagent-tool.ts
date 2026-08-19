@@ -1,5 +1,5 @@
 /**
- * #356 T4 / #361 V1.5 — spawn_subagent ACI 工具（主代理第 24/25 件之一）。
+ * #356 T4 / #361 V1.5 / #556 T3 — spawn_subagent ACI 工具（主代理第 24/25 件之一）。
  *
  * **#361 前景 spawn 反转（ADR-0014 V1.5）**：默认 `wait:true` — 模型调一次 →
  * handler `await manager.waitFor(taskId, undefined, ctx.signal)`（缺省超时
@@ -10,7 +10,14 @@
  * 并发安全）。`wait:false` → 立即返 `{task_id}`（异步臂），结果由 host drain
  * 在下一轮 turn 拼入 user message / subagent_result 主动拉取。
  *
- * **依赖注入形态**：工厂收 `manager`（T2 提供）。装配层
+ * **#556 T3 subagent_type routing**：可选参数 `subagent_type`（CC Agent
+ * tool 字面名）→ 解析为 catalog id → 写入 `def.role`（T2 装配链路已透传到
+ * envelope.role → worker 注入 persona 段）。缺省 = 不设置 `def.role`（V1
+ * byte-stable 路径）；ajv enum = catalog id 列表（运行时从 resolveAgentCatalog
+ * 派生，不写死字面）；未知值 ajv fail-fast。
+ *
+ * **依赖注入形态**：工厂收 `manager`（T2 提供）+ `catalog?`（T3 新增，
+ * 可选 — 缺省走内部默认 `resolveAgentCatalog`）。装配层
  * `createDefaultAciRegistry` 在 `subagentManager` opts 传入时实例化；
  * 缺席时不装配（`ask` 入口零件场景；与 `memoryDir` / `skillCatalog` 条件化
  * 同形态，registry.ts Gate 3 toolsetNames 镜像过滤）。
@@ -32,30 +39,64 @@ import type { SubAgentDefinition } from "./role.js";
 import type { SubAgentManager } from "./manager.js";
 import { SubAgentAbortError, SubAgentCapacityError } from "./manager.js";
 import { ToolExecutionError, SubAgentSandboxRootError } from "../errors.js";
+import {
+  builtinCatalogResolver,
+  type AgentCatalogResolver,
+} from "./catalog.js";
 
 /**
  * 依赖注入：`manager` 父代理侧子代理生命周期 / 状态机 / buffer / shutdown 链
  * （T2 createSubAgentManager 的输出）。本工具消费 `spawn(def)` 同步入口 +
  * `waitFor(taskId, timeoutMs, signal)` 前景阻塞入口；drain 由 host 侧独占
  * （spec Never 暴露给 agent）。
+ *
+ * `catalog?` 是 #556 T3 新增 seam：可选 — 缺省走内部默认 `builtinCatalogResolver`
+ * （builtin catalog 双面 list + get），production 装配 `registry.ts` 不显式注入
+ * （plan T3 决议：registry 职责是工具面，不是 agent 路由 — 不动 registry.ts）。
+ * 测试可显式注入 fake resolver 验证 factory 真的在用 deps.catalog。
  */
 export interface SpawnSubAgentToolDeps {
   readonly manager: SubAgentManager;
+  /**
+   * #556 T3: agent catalog resolver (双面 list + get)。
+   * 可选 — 缺省 = builtin catalog (`builtinCatalogResolver`)。
+   * list() 供 enum + prose list 派生；get(id) 供 handler 单 id 校验。
+   */
+  readonly catalog?: AgentCatalogResolver;
 }
 
 export function createSpawnSubAgentTool(
   deps: SpawnSubAgentToolDeps
 ): AciToolDef {
+  // #556 T3: catalog resolver 闭包 — factory 内部 default = builtin catalog
+  // (builtinCatalogResolver 双面 list + get)。registry.ts 不传 catalog, factory
+  // 兜底 (plan T3 决议: registry 职责是工具面, 不是 agent 路由)。
+  const catalog: AgentCatalogResolver = deps.catalog ?? builtinCatalogResolver;
+  const catalogIds = catalog.list().map((e) => e.id);
+  const proseLines = catalog
+    .list()
+    .map((e) => `- ${e.id}: ${e.description}`)
+    .join("\n");
   return Object.freeze({
     name: "spawn_subagent",
     description:
-      "Delegate multi-step exploration, independent verification, or parallelizable work to a fresh sub-agent that inherits the parent's tool surface minus `spawn_subagent`. Default `wait:true` — the call blocks until the sub-agent finishes and returns its full result envelope (timeout 5 min default; override via `timeoutMs`). Issue multiple `spawn_subagent` calls in one turn to run independent tasks in parallel. Pass `wait:false` for fire-and-forget: returns `{task_id}` immediately and poll later via `subagent_result`. The returned envelope is the sole ground truth about sub-agent state — running status is observable only through it, not via elapsed time, return shape, or anything else.",
+      "Delegate multi-step exploration, independent verification, or parallelizable work to a fresh sub-agent that inherits the parent's tool surface minus `spawn_subagent`. Default `wait:true` — the call blocks until the sub-agent finishes and returns its full result envelope (timeout 5 min default; override via `timeoutMs`). Issue multiple `spawn_subagent` calls in one turn to run independent tasks in parallel. Pass `wait:false` for fire-and-forget: returns `{task_id}` immediately and poll later via `subagent_result`. The returned envelope is the sole ground truth about sub-agent state — running status is observable only through it, not via elapsed time, return shape, or anything else.\n\nAvailable subagent types (set `subagent_type` to route):\n" +
+      proseLines,
     inputSchema: {
       type: "object",
       properties: {
         task: {
           type: "string",
           description: "Task description for the sub-agent.",
+        },
+        subagent_type: {
+          type: "string",
+          // #556 T3: enum = catalog ids (运行时 resolveAgentCatalog 派生,
+          // 不写死字面)。ajv fail-fast 拒未知 id (typed error 走 ToolExecutionError
+          // handler 路径, 见 plan T3 防御契约)。
+          enum: catalogIds,
+          description:
+            "Optional (#556 T3): route the sub-agent through a builtin persona. Pick one of the available subagent types listed above. Omit to keep V1 default behavior (no persona segment, general tool surface).",
         },
         systemPrompt: {
           type: "string",
@@ -127,6 +168,31 @@ export function createSpawnSubAgentTool(
       }
       // #361：默认值在 handler 内解析（ACI schema 不表达默认值）。缺省 = 前景。
       const wait = obj.wait !== false;
+      // #556 T3: subagent_type → role 解析 (additive, V1 baseline = 不写 def.role)。
+      //   - 缺省 (undefined) → 不设置 def.role (V1 byte-stable 路径)
+      //   - 已知 id → 写入 def.role (= catalog id, 透传到 envelope.role → worker
+      //     装配期查 catalog 取 body 注入 persona 段, T2 链路)
+      //   - 未知 id → ajv enum 已在 executor 入口拒;此处 catch 防御 (ajv 漏
+      //     网 / 直接调 handler) → 转 ToolExecutionError (不静默吞掉)
+      const subagentType = obj.subagent_type;
+      let resolvedRole: string | undefined;
+      if (subagentType === undefined) {
+        resolvedRole = undefined; // V1 baseline
+      } else if (typeof subagentType !== "string") {
+        // ajv strict 已拒, 此处防御
+        throw new ToolExecutionError(
+          "spawn_subagent: subagent_type must be a string"
+        );
+      } else {
+        try {
+          catalog.get(subagentType); // fail-fast unknown
+          resolvedRole = subagentType;
+        } catch {
+          throw new ToolExecutionError(
+            `spawn_subagent: unknown subagent_type '${subagentType}'`
+          );
+        }
+      }
       // 装配 SubAgentDefinition：可选字段透传，缺失字段从 def 上省略（manager
       // 端按 SubAgentDefinition 自身字段约束走 default deny / 默认 maxTurns 等）。
       // #356 High #1 修复：task 必填透传进 def（此前漏掉 → buildWorkerPayload
@@ -138,6 +204,8 @@ export function createSpawnSubAgentTool(
       // 中段变成死代码(SC4 消费点证明)。
       const def: SubAgentDefinition = {
         task,
+        // #556 T3: subagent_type 解析结果 (undefined = 不设字段, V1 baseline)
+        ...(resolvedRole !== undefined ? { role: resolvedRole } : {}),
         ...(typeof obj.systemPrompt === "string"
           ? { systemPrompt: obj.systemPrompt }
           : {}),

@@ -1,6 +1,6 @@
 /**
- * #356 T4 / #361 V1.5 — spawn_subagent ACI 工具单测（fake SubAgentManager，
- * 不真启子进程）。
+ * #356 T4 / #361 V1.5 / #556 T3 — spawn_subagent ACI 工具单测（fake
+ * SubAgentManager，不真启子进程）。
  *
  * 覆盖票面（#361 前景契约反转后）：
  *   1. wait:false → handler 解析为 {task_id} JSON，manager.spawn 被调一次
@@ -14,17 +14,33 @@
  *   9. maxTurns 整数透传
  *  10. wait:false → waitFor 不被调用
  *  11. aci 元数据（timeoutTier=long，前景臂 ≥ PER_TASK_TIMEOUT_MS）
+ *  12. #556 T3: subagent_type 可选参数 → def.role 透传（缺省 = V1 byte-stable）
+ *  13. #556 T3: inputSchema.subagent_type enum = catalog ids（运行时派生）
+ *  14. #556 T3: description 含 prose list（catalog entries）
  *
  * 超字段 {task:"x", foo:"bar"} 的严格性由 registry 的 ajv strict 校验守门
  * （createAciRegistry 装配时编译 inputSchema，additionalProperties:false），
  * 工具 handler 收的是已校验 input——此处不重复测（依赖 registry 严校验）。
  */
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
 
 import { createSpawnSubAgentTool } from "../../src/harness/subagent/spawn-subagent-tool.ts";
 import type { SubAgentDefinition } from "../../src/harness/subagent/manager.ts";
 import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
 import { ToolExecutionError } from "../../src/harness/errors.ts";
+import {
+  resolveAgentCatalog,
+  getAgentEntry,
+} from "../../src/harness/subagent/catalog.ts";
+
+/** ajv 实例（与仓库同款 strict + allErrors + formats）— T3 测 inputSchema 编译。 */
+function makeAjv(): Ajv.default {
+  const ajv = new Ajv.default({ strict: true, allErrors: true });
+  addFormats.default(ajv);
+  return ajv;
+}
 
 /** fake manager：spawn 固定 taskId + 记录入参 def（spy）；其余成员面 stub。 */
 function makeFakeManager() {
@@ -347,5 +363,274 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
     expect(description).not.toMatch(/nested/i);
     expect(description).not.toMatch(/one level/i);
     expect(description).not.toMatch(/caps at/i);
+  });
+});
+
+/**
+ * #556 T3 — subagent_type 参数 + ajv enum (catalog ids 派生) +
+ * handler 映射 → def.role。
+ *
+ * 防御契约 (T3 acceptance):
+ *   - subagent_type 缺省 → def.role 缺省 → V1 byte-stable（不动现有 wire）
+ *   - subagent_type 已知 → def.role 显式透传 → manager.buildWorkerPayload →
+ *     envelope.role → worker 注入 catalog body persona 段 (T2 装配)
+ *   - ajv enum = catalog id 列表（运行时 resolveAgentCatalog 派生）
+ *   - 未知 subagent_type → ajv fail-fast（在 handler 入口之前被拒）
+ *   - description prose list 段：intro + 每 entry 一行 `name: description`
+ */
+describe("spawn_subagent — #556 T3 subagent_type 参数 + ajv enum", () => {
+  it("inputSchema.subagent_type 字段存在 (string + enum = catalog ids 派生)", () => {
+    const { manager } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    const schema = tool.inputSchema as {
+      properties: Record<
+        string,
+        { type: string; enum?: ReadonlyArray<string> }
+      >;
+      required: string[];
+    };
+    const subagentType = schema.properties.subagent_type;
+    expect(subagentType).toBeDefined();
+    expect(subagentType.type).toBe("string");
+    // enum = catalog ids 派生（运行时不写死字面）
+    const expected = resolveAgentCatalog().map((e) => e.id);
+    expect(subagentType.enum).toBeDefined();
+    expect([...subagentType.enum!]).toEqual(expected);
+  });
+
+  it("subagent_type 不进 required (可选参数)", () => {
+    const { manager } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    const schema = tool.inputSchema as { required: string[] };
+    expect(schema.required).not.toContain("subagent_type");
+    // required 仍只 = ["task"]（V1 baseline 保留）
+    expect(schema.required).toEqual(["task"]);
+  });
+
+  it("ajv 编译: subagent_type='explore' 通过 strict 校验", () => {
+    const { manager } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    const validate = makeAjv().compile(tool.inputSchema);
+    expect(validate({ task: "x", subagent_type: "explore" })).toBe(true);
+    expect(validate({ task: "x", subagent_type: "general-purpose" })).toBe(
+      true
+    );
+  });
+
+  it("ajv 编译: subagent_type 未知值被 enum 拒绝 (fail-fast, ajv 入口拦截)", () => {
+    const { manager } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    const validate = makeAjv().compile(tool.inputSchema);
+    expect(validate({ task: "x", subagent_type: "not_a_real_agent" })).toBe(
+      false
+    );
+    // ajv enum 错误: instancePath=/subagent_type, keyword="enum",
+    // params.allowedValues = catalog ids (ajv 拒绝原因: not in enum)。
+    const errs = validate.errors ?? [];
+    const enumErr = errs.find(
+      (e) =>
+        e.instancePath === "/subagent_type" &&
+        (e as { keyword?: string }).keyword === "enum"
+    );
+    expect(enumErr).toBeDefined();
+    // params.allowedValues 含 catalog ids
+    const allowed = (enumErr as { params?: { allowedValues?: unknown } })
+      ?.params?.allowedValues;
+    expect(allowed).toEqual(["explore", "general-purpose"]);
+  });
+
+  it("ajv 编译: subagent_type 非 string 类型被拒", () => {
+    const { manager } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    const validate = makeAjv().compile(tool.inputSchema);
+    expect(validate({ task: "x", subagent_type: 123 })).toBe(false);
+    expect(validate({ task: "x", subagent_type: ["explore"] })).toBe(false);
+  });
+
+  it("ajv 编译: 缺 subagent_type 仍合法 (optional)", () => {
+    const { manager } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    const validate = makeAjv().compile(tool.inputSchema);
+    expect(validate({ task: "x" })).toBe(true);
+  });
+});
+
+describe("spawn_subagent — #556 T3 handler: subagent_type → def.role", () => {
+  it("subagent_type='explore' → def.role = 'explore' (透传 spawn)", async () => {
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    await tool.handler({
+      task: "explore the repo",
+      subagent_type: "explore",
+      wait: false,
+    });
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ task: "explore the repo", role: "explore" })
+    );
+  });
+
+  it("subagent_type='general-purpose' → def.role = 'general-purpose'", async () => {
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    await tool.handler({
+      task: "do anything",
+      subagent_type: "general-purpose",
+      wait: false,
+    });
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ role: "general-purpose" })
+    );
+  });
+
+  it("subagent_type 缺省 → def.role 缺省 (V1 byte-stable, 不显式置 role 字段)", async () => {
+    // plan T3 防御契约: 不传 subagent_type = 不设置 def.role = V1 byte-stable
+    // (与 V1 baseline 比对: spawn 收到的 def 没有 role 字段)
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    await tool.handler({ task: "no-role", wait: false });
+    const calledDef = spawn.mock.calls[0][0] as SubAgentDefinition;
+    expect(calledDef.role).toBeUndefined();
+  });
+
+  it("subagent_type 显式传 'general-purpose' 等价于不传 (V1 缺省值)", async () => {
+    // 缺省语义 = 'general-purpose' (plan T3 描述)；handler 不写死, 缺省由
+    // schema/ajv 缺省值兜底 → V1 路径 (不设置 def.role)。验证两种走法 spawn
+    // 收到的 def 在 role 字段层面一致 (都 undefined)。
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    await tool.handler({ task: "t", wait: false });
+    await tool.handler({ task: "t", wait: false });
+    const def1 = spawn.mock.calls[0][0] as SubAgentDefinition;
+    const def2 = spawn.mock.calls[1][0] as SubAgentDefinition;
+    expect(def1.role).toBeUndefined();
+    expect(def2.role).toBeUndefined();
+  });
+
+  it("subagent_type + 其他字段组合 → 全部透传", async () => {
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    await tool.handler({
+      task: "t",
+      subagent_type: "explore",
+      systemPrompt: "be focused",
+      disallowedTools: ["spawn_subagent"],
+      model: "opus",
+      maxTurns: 4,
+      timeoutMs: 60000,
+      sandboxRoot: "/tmp/work",
+      wait: false,
+    });
+    expect(spawn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        task: "t",
+        role: "explore",
+        systemPrompt: "be focused",
+        disallowedTools: ["spawn_subagent"],
+        model: "opus",
+        maxTurns: 4,
+        timeoutMs: 60000,
+        sandboxRoot: "/tmp/work",
+      })
+    );
+  });
+});
+
+describe("spawn_subagent — #556 T3 deps.catalog (additive, default = builtin)", () => {
+  it("未传 catalog → factory 内部 fallback resolveAgentCatalog, ajv enum 仍 = builtin ids", () => {
+    // plan 决议: dist 装配 (registry.ts) 不传 catalog, factory 内部用 default。
+    // 此处验证 default 行为: 即使 deps 没显式给 catalog, ajv enum 仍来自
+    // resolveAgentCatalog().map(e => e.id) = ['explore', 'general-purpose'].
+    const { manager } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    const schema = tool.inputSchema as {
+      properties: Record<string, { enum?: ReadonlyArray<string> }>;
+    };
+    expect([...schema.properties.subagent_type.enum!]).toEqual([
+      "explore",
+      "general-purpose",
+    ]);
+  });
+
+  it("deps.catalog 显式传 fake resolver → ajv enum + prose list 都由 fake 派生", () => {
+    // 测试缝: 注入 fake resolver (list + get 双面), 验证 factory 真的在用
+    // deps.catalog 而不是内部默认 (factory 闭包 → list + get 两消费面同时生效)。
+    const FAKE_ENTRY = {
+      id: "fake_agent",
+      description: "fake agent for testing",
+      body: "fake body",
+    };
+    const fakeCatalog = {
+      list: () => [FAKE_ENTRY] as const,
+      get: (id: string) => {
+        if (id === "fake_agent") return FAKE_ENTRY;
+        throw new Error("unknown " + id);
+      },
+    };
+    const { manager } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({
+      manager,
+      catalog: fakeCatalog,
+    });
+    // enum 由 fake list 派生
+    const schema = tool.inputSchema as {
+      properties: Record<string, { enum?: ReadonlyArray<string> }>;
+    };
+    expect([...schema.properties.subagent_type.enum!]).toEqual(["fake_agent"]);
+    // prose list 含 fake_agent 行
+    expect(tool.description).toMatch(
+      /-\s*fake_agent\s*:\s*fake agent for testing/
+    );
+    // 原 builtin 'explore' 不在 enum / prose (fake 完全替换)
+    expect([...schema.properties.subagent_type.enum!]).not.toContain("explore");
+    expect(tool.description).not.toMatch(/-\s*explore\s*:/);
+  });
+
+  it("deps.catalog 接受 resolver 双面形态 (list + get)", () => {
+    // 类型契约: deps.catalog 是 AgentCatalogResolver (双面: list() 返回
+    // ReadonlyArray<AgentCatalogEntry>, get(id) 返回 AgentCatalogEntry)。
+    // factory 接受该形态, 不要求是 builtinCatalogResolver 同款 frozen。
+    const fakeCatalog = {
+      list: () => resolveAgentCatalog(),
+      get: (id: string) => getAgentEntry(id),
+    };
+    const { manager } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({
+      manager,
+      catalog: fakeCatalog,
+    });
+    expect(tool.name).toBe("spawn_subagent");
+  });
+});
+
+describe("spawn_subagent description — #556 T3 prose list 段 (catalog entries)", () => {
+  const fixtureManager = (): SubAgentManager => makeFakeManager().manager;
+  let description: string;
+  beforeAll(() => {
+    description = createSpawnSubAgentTool({
+      manager: fixtureManager(),
+    }).description;
+  });
+
+  it("含 'Available subagent types' intro 段", () => {
+    expect(description).toMatch(/Available subagent types/i);
+  });
+
+  it("每个 catalog entry 一行 `name: description`", () => {
+    const catalog = resolveAgentCatalog();
+    for (const entry of catalog) {
+      const re = new RegExp(
+        `-\\s*${entry.id}\\s*:\\s*${entry.description.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`
+      );
+      expect(description).toMatch(re);
+    }
+  });
+
+  it("prose list 在原描述之后追加 (不动现有 SSOT 段)", () => {
+    // 原描述的 "Delegate multi-step exploration" 必须仍然出现在 prose list
+    // 段之前。
+    const introIdx = description.indexOf("Delegate multi-step exploration");
+    const proseIdx = description.indexOf("Available subagent types");
+    expect(introIdx).toBeGreaterThanOrEqual(0);
+    expect(proseIdx).toBeGreaterThan(introIdx);
   });
 });

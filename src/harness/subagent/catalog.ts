@@ -92,3 +92,26 @@ export function getAgentEntry(id: string): AgentCatalogEntry {
   }
   return entry;
 }
+
+/**
+ * #556 T3: catalog resolver 双面 (list + get) 形态 — 给 spawn_subagent 工厂
+ * 提供 enum + prose list (list) + 单 id 校验 (get) 两个消费面。
+ *
+ * builtin = frozen singleton, 闭包 list/get 指向 BUILTIN_CATALOG / getAgentEntry。
+ * production 装配层 (registry.ts) 不显式注入 — spawn-subagent-tool 工厂内部
+ * 默认走 builtin resolver (plan T3 决议: registry 职责是工具面, 不是 agent
+ * 路由 — 不动 registry.ts)。
+ *
+ * 测试可注入 fake resolver (list 返回固定数组 + get 按需返 entry) 验证工厂
+ * 双消费面契约。
+ */
+export interface AgentCatalogResolver {
+  readonly list: () => ReadonlyArray<AgentCatalogEntry>;
+  readonly get: (id: string) => AgentCatalogEntry;
+}
+
+/** builtin catalog resolver (frozen singleton, list + get 双面)。 */
+export const builtinCatalogResolver: AgentCatalogResolver = Object.freeze({
+  list: () => BUILTIN_CATALOG,
+  get: (id: string) => getAgentEntry(id),
+});
