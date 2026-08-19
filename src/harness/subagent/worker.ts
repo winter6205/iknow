@@ -113,6 +113,36 @@ function resolveConstraintsText(role: string | undefined): string | undefined {
 }
 
 /**
+ * #562 T6: 查 catalog 取 bashMode 派生出 worker 装配期的 bash 模式。
+ *
+ * 继承 plan T6 fallback 链路:
+ *   - role 缺省 → 返回 "any" (V1 baseline 等价; worker 不显式 grep,
+ *     但 deps.bashMode 字段总会显式设置, 让 wiring 显式可见);
+ *   - role 已知 (catalog 命中, e.g. "explore") → 返回 entry.bashMode,
+ *     缺省视为 "any" (catalog 默认 / explore 外其他角色不强制 readonly);
+ *   - role 未知 → 返回 "any" (defense-in-depth, 不静默吞掉 — 装配期
+ *     catch AgentCatalogLookupError 后写一行 log, 装配仍走 "any" 显式
+ *     透传, 与 resolvePersonaBody / resolveConstraintsText 同形态);
+ *
+ * 显式 "any":bash handler 不启用 readonly validator, fence 不收
+ * cwdReadonly —— 字节与 V1 一致。返回类型收窄到 "any" | "readonly",
+ * 编译期保证调用方分支覆盖完整。
+ */
+function resolveBashMode(role: string | undefined): "any" | "readonly" {
+  if (role === undefined) return "any";
+  try {
+    const entry = getAgentEntry(role);
+    return entry.bashMode ?? "any";
+  } catch (err) {
+    if (err instanceof AgentCatalogLookupError) {
+      log(`role '${role}' not in catalog; bashMode fallback to 'any'`);
+      return "any";
+    }
+    throw err;
+  }
+}
+
+/**
  * #556 T2 + #562 T7: 加性段注入 wrapper
  * (base < persona < constraints < addendum)。
  *
@@ -190,6 +220,14 @@ export interface CreateWorkerDepsOptions {
    * persona 段之后 (顺序: base < persona < addendum), 与 LOCKED 5 段解耦。
    */
   readonly addendum?: string;
+  /**
+   * #562 T6: bash 模式显式覆盖 (= 优先于 role 派生)。缺省 → worker
+   * 装配期调 resolveBashMode(role) 派生:role "explore" → "readonly",
+   * 其他全部 → "any"。该 seam 为测试与未来跨阶段注入留口 (e.g.
+   * 直接派 readonly worker 不读 catalog)。Catalog 路由仍归 spawn
+   * tool 负责;registry 只透传,不读 catalog。
+   */
+  readonly bashMode?: "any" | "readonly";
 }
 
 /**
@@ -240,6 +278,10 @@ export async function createWorkerDeps(
   // 独立 registry: 不依赖父注册表 (spec 假设 4)。worker 子进程不含
   // spawn_subagent (SC9) —— registry.ts 不传 subagentManager, 该工具不在
   // factories 里 (T2 才把两件工具 append 进 ACI_TOOLSET_NAMES)。
+  // #562 T6: bashMode 透传到 bash 工具工厂。优先 opts.bashMode 显式覆盖,
+  // 否则 resolveBashMode(role) 派生 (role 缺省 / 未知 → "any" fallback)。
+  const bashMode: "any" | "readonly" =
+    opts.bashMode ?? resolveBashMode(opts.role);
   const reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
@@ -250,6 +292,7 @@ export async function createWorkerDeps(
     ...(opts.workspaceRoot !== undefined
       ? { workspaceRoot: opts.workspaceRoot }
       : {}),
+    ...(bashMode !== undefined ? { bashMode } : {}),
   });
 
   const baseExecutor = createExecutor(reg.inner);

@@ -143,6 +143,12 @@ export function createBashTool(
     // 权限层（policy.ts code-ask-bash-network）已强制 ask full_auto 不豁免,
     // 此处只判严格 === true;非布尔 / 缺省 / false → 走既有隔离路径。
     const wantsHostNetwork = (input as BashInput | null)?.network === true;
+    // #562 T6: bashMode="readonly" 派生 cwdReadonly:true 传给 fence。
+    // bashMode→cwdReadonly 映射由 T6 在此装配完成 (registry 只透传 bashMode,
+    // 不读 catalog)。cwdReadonly 显式 true / bashMode==="readonly" 任一即触发。
+    // 缺省 "any" / undefined → 不传 cwdReadonly, T5 argv baseline 不破。
+    const fenceIsReadonly =
+      opts?.cwdReadonly === true || opts?.bashMode === "readonly";
     const fence = createBwrapFence({
       command: "bash",
       args: ["-c", finalCommand],
@@ -152,7 +158,7 @@ export function createBashTool(
       env: fenceEnv,
       cwd,
       ...(wantsHostNetwork ? { network: true } : {}),
-      ...(opts?.cwdReadonly === true ? { cwdReadonly: true } : {}),
+      ...(fenceIsReadonly ? { cwdReadonly: true } : {}),
     });
     const result = await runInSandbox({
       fence,
