@@ -4,8 +4,10 @@
  * #365 T2: buildTuiDeps 委托 buildHarnessEngine({ surface: "tui" }) —— 装配
  * SSOT 化。TUI 不再自建 adapter / executor / permission / registry / system,
  * 全量走 harness 单一装配点(与 chat / ask / serve 同源,工具面永不漂移)。
- * TUI 因此自动继承 subagentManager(surface !== "ask" 自建) + coordinatorText
- * (IKNOW_COORDINATOR_TEXT) + shutdown 组合句柄(MCP + subagent 两清理)。
+ * TUI 因此自动继承 subagentManager(surface !== "ask" 自建) + shutdown 组合
+ * 句柄(MCP + subagent 两清理)。coordinator 段默认缺席(#558 T2)—— 引导
+ * 落点已迁到 spawn_subagent 工具 description(#557 T1 SSOT);装配缝保留,
+ * 调用方显式经 createIknowSystemResolver opts.coordinatorText 仍渲染该段。
  *
  * T1 观测缝(#365):opts.onToolEvent + opts.soleInflightId 由本模块 wrapTuiHook
  * 包装成 BuildEngineOpts.hooks(PostToolUseHook),经 build-engine 透传进

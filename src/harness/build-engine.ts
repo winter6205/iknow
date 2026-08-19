@@ -57,7 +57,6 @@ import {
   createIknowSystemResolver,
   initIknowWorkspaceSafe,
 } from "./identity/index.js";
-import { IKNOW_COORDINATOR_TEXT } from "./identity/assemble.js";
 import {
   resolveProjectMemoryDir,
   createSystemResolver,
@@ -307,8 +306,12 @@ export async function buildHarnessEngine(
   //   - ask 不创建(SC8 守门,oneshot 即用即抛,registry 缺 spawn_subagent /
   //     subagent_result 两件 = 23 件,三方视图一致)。
   // 注:TUI 产品入口 buildTuiDeps(#365 T2)现委托 build-engine({surface:"tui"})
-  // 装配,自动继承 subagentManager / IKNOW_COORDINATOR_TEXT / shutdown 句柄
+  // 装配,自动继承 subagentManager / shutdown 句柄
   // — chat / tui / serve / ask 四入口共用 SSOT,工具面 25 件永不漂移。
+  // (#558 T2): 默认路径不再向 deps.system 注入 coordinator 段,引导落点
+  // 收敛到 spawn_subagent 工具 description（T1 SSOT）。装配缝保留:
+  // createIknowSystemResolver opts.coordinatorText 显式传入非空字符串
+  // 仍渲染段(coordinator-segment.test.ts seam 用例覆盖)。
   // 位置在 registry 装配之前:registry 的 subagentManager opt 在此消费,故放
   // MCP 条件装配段之前(同 surface 条件,语义同形)。
   const subagentManager: SubAgentManager | undefined =
@@ -589,11 +592,10 @@ export async function buildHarnessEngine(
           description: entry.description ?? "",
           ...(entry.disabled ? { disabled: true } : {}),
         })),
-      // #361 T8 subagent coordinator 引导层 — 条件与 registry 同源:
-      // subagentManager 装配 (surface !== "ask") 时注入 IKNOW_COORDINATOR_TEXT,
-      // ask (无 manager) 不注入 → 装配层段缺席 (字节级零变化)。文案含验收6
-      // 关键词 proactive / parallelizable / blocks until finished。
-      ...(subagentManager ? { coordinatorText: IKNOW_COORDINATOR_TEXT } : {}),
+      // #558 T2: 默认路径停止注入 coordinator 段 — 引导落点收敛到
+      // spawn_subagent 工具 description (T1 SSOT)。装配缝保留:
+      // 调用方可显式传入 coordinatorText 让 createIknowSystemResolver 渲染该段
+      // (coordinator-segment.test.ts seam 用例覆盖)。
     }),
     // #119 T7:env.compress 透传 → deps.compress(LoopEngineDeps.compress 可选缝)。
     // IknowCompressEnv 必填(contextWindow / thresholdTokens),缺失即压缩关闭由

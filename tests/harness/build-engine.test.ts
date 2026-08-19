@@ -979,3 +979,88 @@ describe("buildHarnessEngine — #406 T4 secrets.mode 装配矩阵", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// #558 T2: 默认路径停止注入 coordinator 调度段(plan 555 T2 acceptance 1)
+// — 默认 buildHarnessEngine(自建 subagentManager 的 surface)在 deps.system()
+//   不再渲染 "## Sub-agent coordination" 段 / 6 验收关键词;装配缝仍保留
+//   (显式传入非空 coordinatorText 才渲染,见 coordinator-segment.test.ts seam 用例)。
+// ---------------------------------------------------------------------------
+describe("buildHarnessEngine — #558 T2 默认不注入 coordinator 段", () => {
+  it("默认 chat surface(自建 subagentManager)→ deps.system() 不含 ## Sub-agent coordination 段", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t2-default-absence-"));
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t2-default-1"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        userHome: join(root, "home"),
+        cwd: root,
+      });
+
+      // subagentManager 在场(全装配),但默认不再注入 coordinator 段:
+      // plan 555 T2 决议:默认路径引导落点 = 工具 description (T1 SSOT),
+      // 不再向 system 段双写。
+      expect(built.subagentManager).toBeDefined();
+
+      const systemText = (await built.deps.system?.()) ?? "";
+      expect(systemText).not.toContain("## Sub-agent coordination");
+      expect(systemText).not.toContain("proactively");
+      expect(systemText).not.toContain("parallelizable");
+      expect(systemText).not.toContain("spawn_subagent");
+      expect(systemText).not.toContain("blocks until finished");
+      expect(systemText).not.toContain("Use spawn_subagent");
+
+      if (built.shutdown) await built.shutdown();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("tui surface(委托 buildHarnessEngine)→ deps.system() 默认同样不含 coordinator 段", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t2-tui-default-"));
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t2-tui-default-1"),
+        askUser: createNoAskUser(),
+        surface: "tui",
+        userHome: join(root, "home"),
+        cwd: root,
+      });
+
+      expect(built.subagentManager).toBeDefined();
+      const systemText = (await built.deps.system?.()) ?? "";
+      expect(systemText).not.toContain("## Sub-agent coordination");
+      expect(systemText).not.toContain("proactively");
+      expect(systemText).not.toContain("parallelizable");
+      expect(systemText).not.toContain("blocks until finished");
+
+      if (built.shutdown) await built.shutdown();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("serve surface(自建 subagentManager)→ deps.system() 默认同样不含 coordinator 段", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t2-serve-default-"));
+    try {
+      const built = await buildHarnessEngine({
+        env: makeEnv("sk-test-t2-serve-default-1"),
+        askUser: createNoAskUser(),
+        surface: "serve",
+        userHome: join(root, "home"),
+        cwd: root,
+      });
+
+      expect(built.subagentManager).toBeDefined();
+      const systemText = (await built.deps.system?.()) ?? "";
+      expect(systemText).not.toContain("## Sub-agent coordination");
+      expect(systemText).not.toContain("proactively");
+      expect(systemText).not.toContain("parallelizable");
+
+      if (built.shutdown) await built.shutdown();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});

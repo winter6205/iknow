@@ -175,19 +175,21 @@ describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(30 件)"
     ).rejects.toThrow(/only http and https|malformed/i);
   });
 
-  it("coordinatorText 注入(与 build-engine chat 同门):deps.system 含 coordinator 段关键词", async () => {
-    // surface="tui" → build-engine 自建 subagentManager 且透传 coordinatorText
-    // (IKNOW_COORDINATOR_TEXT),委托后 built.subagentManager 原样透出。
+  it("#558 T2: 默认 TUI 路径(自建 subagentManager)→ deps.system 不含 coordinator 段", async () => {
+    // surface="tui" → build-engine 自建 subagentManager,但 #558 T2 起
+    // 不再向 createIknowSystemResolver 透传 IKNOW_COORDINATOR_TEXT;引导
+    // 落点收敛到 spawn_subagent 工具 description (T1 SSOT)。
     const deps = await buildTuiDeps(makeBundle(), {
       askUser: createNoAskUser(),
     });
     expect(deps.subagentManager).toBeDefined();
     const systemText =
       (await (deps.system as () => Promise<string | undefined>)()) ?? "";
-    expect(systemText).toContain("## Sub-agent coordination");
-    expect(systemText).toContain("proactively");
-    expect(systemText).toContain("parallelizable");
-    expect(systemText).toContain("blocks until finished");
+    expect(systemText).not.toContain("## Sub-agent coordination");
+    expect(systemText).not.toContain("proactively");
+    expect(systemText).not.toContain("parallelizable");
+    expect(systemText).not.toContain("spawn_subagent");
+    expect(systemText).not.toContain("blocks until finished");
   });
 });
 

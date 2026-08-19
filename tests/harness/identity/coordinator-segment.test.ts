@@ -97,26 +97,28 @@ describe("coordinator 加性段 — seam 缺席 / 字节级零变化", () => {
 });
 
 describe("coordinator 加性段 — seam 提供时渲染", () => {
-  it("coordinatorText 提供 → 段渲染,含 ## Sub-agent coordination 标题 + 验收关键词", async () => {
+  it("coordinatorText 提供 → 段渲染,含 ## Sub-agent coordination 标题 + 测试本地正文", async () => {
+    // #558 T2: seam 用例改用测试本地短字符串,不依赖生产 IKNOW_COORDINATOR_TEXT
+    // 内容（默认路径已停注入,生产常量只作 SSOT 文案验收,C 类用例守门）。
+    const localText = "explicit coordinator seam text for T2 regression";
     const out = await assembleIdentityContext({
       ...baseCtx(),
-      coordinatorText: IKNOW_COORDINATOR_TEXT,
+      coordinatorText: localText,
     });
     expect(out).toBeDefined();
     expect(out).toContain("## Sub-agent coordination");
-    // 验收 6 硬挂钩:proactive / parallelizable / blocks until finished
-    expect(out).toContain("proactively");
-    expect(out).toContain("parallelizable");
-    expect(out).toContain("blocks until finished");
-    // 两工具名 (ADR 决策 3 ①)
-    expect(out).toContain("spawn_subagent");
-    expect(out).toContain("subagent_result");
+    expect(out).toContain(localText);
+    // 验收 6 硬挂钩:这些是 seam 渲染契约,与 IKNOW_COORDINATOR_TEXT 内容解耦
+    // (coordinatorSegment 只渲染标题 + 原文)。
+    expect(out).not.toContain("proactively");
+    expect(out).not.toContain("parallelizable");
   });
 
   it("coordinator 段置于 LOCKED 段之后 (顺序不破)", async () => {
+    const localText = "order-check text";
     const out = await assembleIdentityContext({
       ...baseCtx(),
-      coordinatorText: IKNOW_COORDINATOR_TEXT,
+      coordinatorText: localText,
     });
     const idxCoord = out!.indexOf("## Sub-agent coordination");
     expect(idxCoord).toBeGreaterThanOrEqual(0);
@@ -127,10 +129,11 @@ describe("coordinator 加性段 — seam 提供时渲染", () => {
   });
 
   it("coordinator 段置于 projectPath / skills 加性段之末", async () => {
+    const localText = "tail-check text";
     const out = await assembleIdentityContext({
       ...baseCtx(),
       skills: () => [{ name: "alpha", description: "first" }],
-      coordinatorText: IKNOW_COORDINATOR_TEXT,
+      coordinatorText: localText,
     });
     const idxPath = out!.indexOf("## Project path");
     const idxSkills = out!.indexOf("<available_skills>");
@@ -141,9 +144,10 @@ describe("coordinator 加性段 — seam 提供时渲染", () => {
   });
 
   it("cross-turn byte-stable (KV 缓存契约):相同输入二次调用字符串相等", async () => {
+    const localText = "byte-stable seam text";
     const ctx = {
       ...baseCtx(),
-      coordinatorText: IKNOW_COORDINATOR_TEXT,
+      coordinatorText: localText,
     };
     const a = await assembleIdentityContext(ctx);
     const b = await assembleIdentityContext(ctx);
@@ -151,18 +155,17 @@ describe("coordinator 加性段 — seam 提供时渲染", () => {
   });
 
   it("createIknowSystemResolver 透传 opts.coordinatorText 到装配输出", async () => {
+    const localText = "resolver seam text for T2 regression";
     const resolver = createIknowSystemResolver({
       cwd: process.cwd(),
       userHome: workDir,
       surface: "ask",
-      coordinatorText: IKNOW_COORDINATOR_TEXT,
+      coordinatorText: localText,
     });
     const out = await resolver();
     expect(out).toBeDefined();
     expect(out).toContain("## Sub-agent coordination");
-    expect(out).toContain("proactively");
-    expect(out).toContain("parallelizable");
-    expect(out).toContain("blocks until finished");
+    expect(out).toContain(localText);
   });
 
   it("createIknowSystemResolver 不传 coordinatorText → 段缺席", async () => {
