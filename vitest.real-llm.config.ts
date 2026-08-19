@@ -19,16 +19,17 @@ import { defineConfig } from "vitest/config";
  */
 export default defineConfig({
   test: {
-    // M5：archive/tests-real-llm/ 已从 include 移除（含 IKNOW_LLM_MODEL /
-    // apiKeyEnv 退役变量引用，与 settings 单承载语义不符）。
-    include: [],
+    // #556 T8:t8-live-subagent-routing 走 settings 单承载 + 走 HAS_KEY 守卫,
+    // 与 settings-model-extension 收敛兼容,纳入 include。
+    // 其他 archive/tests-real-llm/ 文件仍按 M5 不收。
+    include: ["archive/tests-real-llm/t8-live-subagent-routing.test.ts"],
     exclude: ["**/node_modules/**"],
     pool: "forks",
     poolOptions: {
       forks: { maxForks: 1, minForks: 1 },
     },
     reporter: "default",
-    testTimeout: 240_000,
-    hookTimeout: 240_000,
+    testTimeout: 360_000,
+    hookTimeout: 360_000,
   },
 });
