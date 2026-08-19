@@ -519,29 +519,74 @@ describe("runFullCompact", () => {
       assert.equal(events[1]?.reason, "adapter_failed");
     });
 
-    it("onStream → adapter.step request.onStream 直透", async () => {
-      let receivedOnStream: unknown = undefined;
+    // #550 替换原「onStream → adapter.step request.onStream 直透」用例:
+    // 直透会让压缩摘要 text_delta 泄漏进宿主主回答草稿(渲染污染 latent
+    // bug,issue #550)。新契约 = 包装透传:text_delta 重映射为
+    // compaction_text_delta,thinking_delta 吞咽,其余事件原样透传。
+    // 覆盖不变或更强:旧用例只 assert 引用相等,新用例 assert 完整路由语义。
+    it("onStream → adapter.step request.onStream 包装(text_delta → compaction_text_delta;thinking 吞咽)", async () => {
+      const observed: Array<{ type: string; text?: string }> = [];
       const adapter: CompactAdapter = {
         encodeUserText: (userText: string): AnthropicNativeMessage =>
           text(userText),
         step: async (_state, request): Promise<AssistantTurnResult> => {
-          receivedOnStream = request.onStream;
+          // 模拟 adapter 在压缩上下文内的流式输出:摘要 text_delta +
+          // thinking_delta(模型 scratchpad)+ 其他事件。
+          request.onStream?.({ type: "text_delta", text: "摘要第一段" });
+          request.onStream?.({ type: "thinking_delta", text: "内部思考" });
+          request.onStream?.({ type: "text_delta", text: "摘要第二段" });
           return assistantTurn({
             texts: ["<analysis>x</analysis><summary>Y</summary>"],
           });
         },
       };
-      const observer = (): void => {};
       await runFullCompact({
         adapter,
         dropped,
-        onStream: observer,
+        onStream: (e) => {
+          if (e.type === "text_delta" || e.type === "compaction_text_delta") {
+            observed.push({ type: e.type, text: e.text });
+          } else {
+            observed.push({ type: e.type });
+          }
+        },
       });
-      assert.equal(
-        receivedOnStream,
-        observer,
-        "request.onStream === opts.onStream"
+      // 摘要 text_delta 全部重映射为 compaction_text_delta —— 宿主据此路由
+      // 到独立压缩草稿,不进主回答区。
+      assert.deepEqual(
+        observed.filter((e) => e.type.includes("text")),
+        [
+          { type: "compaction_text_delta", text: "摘要第一段" },
+          { type: "compaction_text_delta", text: "摘要第二段" },
+        ]
       );
+      // thinking_delta 吞咽(scratchpad 不暴露)+ 无裸 text_delta 泄漏。
+      assert.ok(
+        !observed.some((e) => e.type === "thinking_delta"),
+        "压缩 thinking_delta 不得透到宿主"
+      );
+      assert.ok(
+        !observed.some((e) => e.type === "text_delta"),
+        "裸 text_delta 不得透到宿主(#550 渲染污染守门)"
+      );
+    });
+
+    it("生命周期事件仍直发 opts.onStream(started/completed 不被 wrapper 二次包装)", async () => {
+      const types: string[] = [];
+      const adapter: CompactAdapter = {
+        encodeUserText: (userText: string): AnthropicNativeMessage =>
+          text(userText),
+        step: async (): Promise<AssistantTurnResult> =>
+          assistantTurn({
+            texts: ["<summary>done</summary>"],
+          }),
+      };
+      await runFullCompact({
+        adapter,
+        dropped,
+        onStream: (e) => types.push(e.type),
+      });
+      assert.deepEqual(types, ["compaction_started", "compaction_completed"]);
     });
 
     it("中途 abort:opts.signal 中途 abort → signal_aborted,emit compaction_started 但不 emit completed/failed", async () => {

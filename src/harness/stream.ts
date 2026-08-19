@@ -32,16 +32,21 @@ export type HarnessStreamEvent =
   | { type: "tool_input_delta"; id: string; partialJson: string }
   | { type: "stop_summary"; text: string }
   // #467:LLM 结构化摘要压缩(full-compact)生命周期事件。宿主层据此渲染
-  // "Compacting…"指示 / 透出摘要 latency(text_delta 经 adapter request.onStream
-  // 直透)。compact 期间 turn 仍在继续(主 loop 等摘要完成才进入下一 step),
-  // 故宿主收到 compaction_started 时可显示进度指示器;收到 completed / failed /
-  // cancelled 中任一终态事件后清除指示器(cancelled = wait 中用户取消,非错误,
-  // 语义对齐 Claude Code:压缩中 Esc = 会话原样 + 无失败呈现)。事件形状保持
-  // 最小:仅携带宿主渲染 / 日志所需字段。
+  // "Compacting…"指示 / 透出摘要 latency。compact 期间 turn 仍在继续(主 loop
+  // 等摘要完成才进入下一 step),故宿主收到 compaction_started 时可显示进度
+  // 指示器;收到 completed / failed / cancelled 中任一终态事件后清除指示器
+  // (cancelled = wait 中用户取消,非错误,语义对齐 Claude Code:压缩中 Esc =
+  // 会话原样 + 无失败呈现)。事件形状保持最小:仅携带宿主渲染 / 日志所需字段。
   | { type: "compaction_started"; droppedCount: number }
   | { type: "compaction_completed"; summaryLen: number; durationMs: number }
   | { type: "compaction_failed"; reason: string; durationMs: number }
-  | { type: "compaction_cancelled" };
+  | { type: "compaction_cancelled" }
+  // #550:压缩摘要的流式文本轨道。runFullCompact 不再把 adapter 的原始
+  // text_delta 直透宿主,而是重映射为本事件——宿主若把它当 text_delta 追加进
+  // 主回答草稿,摘要文本会污染 assistant 回复(渲染污染 latent bug)。宿主
+  // 按 `type` 窄化路由到独立压缩草稿;thinking_delta 在压缩上下文内被
+  // runFullCompact 吞咽(scratchpad,不暴露)。
+  | { type: "compaction_text_delta"; text: string };
 
 /**
  * 观察者错误不得反流回 emit 路径(对齐 ADR-0003 `safeTrace` MUST NOT throw
