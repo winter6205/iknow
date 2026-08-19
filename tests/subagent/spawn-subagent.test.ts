@@ -19,7 +19,7 @@
  * （createAciRegistry 装配时编译 inputSchema，additionalProperties:false），
  * 工具 handler 收的是已校验 input——此处不重复测（依赖 registry 严校验）。
  */
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { createSpawnSubAgentTool } from "../../src/harness/subagent/spawn-subagent-tool.ts";
 import type { SubAgentDefinition } from "../../src/harness/subagent/manager.ts";
@@ -299,5 +299,53 @@ describe("spawn_subagent — #357 T1: SubAgentSandboxRootError → ToolExecution
     await expect(
       tool.handler({ task: "t", sandboxRoot: "/outside", wait: false })
     ).rejects.toThrow(/sandboxRoot/i);
+  });
+});
+
+/**
+ * #557 T1 — spawn_subagent.description = 工具用法 SSOT。
+ * 主题以 issue #555 评论为准（何时派、阻塞或并行、wait:false、无 envelope 不谎报），
+ * 不写嵌套政策（嵌套禁止由代码保证，不在 description 表达）。
+ */
+describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
+  const fixtureManager = (): SubAgentManager => makeFakeManager().manager;
+  let description: string;
+  beforeAll(() => {
+    description = createSpawnSubAgentTool({
+      manager: fixtureManager(),
+    }).description;
+  });
+
+  it("写入 5 主题：何时用 / 默认阻塞 / 并行 / wait:false 轮询 / 无 envelope 不谎报", () => {
+    // 1. 何时用：multi-step exploration / independent verification / parallelizable work → 派 sub-agent
+    expect(description).toMatch(/multi-step exploration/);
+    expect(description).toMatch(/independent verification/);
+    expect(description).toMatch(/parallelizable work/);
+    // 2. 默认阻塞：wait:true → blocks until sub-agent finishes, returns full envelope; 5 min default overridable via timeoutMs
+    expect(description).toMatch(/wait[:\s]*true/i);
+    expect(description).toMatch(/blocks? until/i);
+    expect(description).toMatch(/envelope/i);
+    expect(description).toMatch(/5\s*min/i);
+    expect(description).toMatch(/timeoutMs/i);
+    // 3. 并行：同一 turn 多次 spawn_subagent 跑独立任务
+    expect(description).toMatch(/multiple.*spawn_subagent/s);
+    expect(description).toMatch(/one (?:single )?turn/i);
+    expect(description).toMatch(/parallel/i);
+    // 4. wait:false → 立即返回 {task_id},用 subagent_result 轮询
+    expect(description).toMatch(/wait[:\s]*false/i);
+    expect(description).toMatch(/task_id/i);
+    expect(description).toMatch(/subagent_result/i);
+    // 5. 无 envelope 不谎报：envelope 是 sub-agent 状态的唯一真值，running 不能从 elapsed time / return shape 等推断
+    expect(description).toMatch(/sole ground truth|ground truth/i);
+    expect(description).toMatch(/observable/i);
+    expect(description).toMatch(/elapsed time/i);
+    expect(description).toMatch(/return shape/i);
+  });
+
+  it("不写入嵌套政策(nested / one level / caps at 等措辞)", () => {
+    // 嵌套禁止由代码保证,description 不应假装一个语义级 SSOT
+    expect(description).not.toMatch(/nested/i);
+    expect(description).not.toMatch(/one level/i);
+    expect(description).not.toMatch(/caps at/i);
   });
 });

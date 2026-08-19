@@ -49,7 +49,7 @@ export function createSpawnSubAgentTool(
   return Object.freeze({
     name: "spawn_subagent",
     description:
-      "Delegate multi-step exploration, independent verification, or parallelizable work to a fresh sub-agent that inherits the parent's tool surface minus `spawn_subagent`. Default wait:true — the call blocks until the sub-agent finishes and returns its full result envelope (timeout 5 min default; override via timeoutMs). Issue multiple `spawn_subagent` calls in one turn to run independent tasks in parallel. Pass wait:false to run fire-and-forget: returns `{task_id}` immediately, poll later via subagent_result. Sub-agent v1 caps at one level — nested `spawn_subagent` inside a child agent returns ToolExecutionError.",
+      "Delegate multi-step exploration, independent verification, or parallelizable work to a fresh sub-agent that inherits the parent's tool surface minus `spawn_subagent`. Default `wait:true` — the call blocks until the sub-agent finishes and returns its full result envelope (timeout 5 min default; override via `timeoutMs`). Issue multiple `spawn_subagent` calls in one turn to run independent tasks in parallel. Pass `wait:false` for fire-and-forget: returns `{task_id}` immediately and poll later via `subagent_result`. The returned envelope is the sole ground truth about sub-agent state — running status is observable only through it, not via elapsed time, return shape, or anything else.",
     inputSchema: {
       type: "object",
       properties: {
