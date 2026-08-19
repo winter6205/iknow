@@ -174,8 +174,12 @@ export function createSpawnSubAgentTool(
       //     装配期查 catalog 取 body 注入 persona 段, T2 链路)
       //   - 未知 id → ajv enum 已在 executor 入口拒;此处 catch 防御 (ajv 漏
       //     网 / 直接调 handler) → 转 ToolExecutionError (不静默吞掉)
+      // #556 T3 + Spec review 收口: 捕获 catalog entry 用于 merge disallowedTools
+      // —— 否则 explore 角色的 [edit_file, write_file] 不进入 wire,worker 工具
+      // 面仍含这两个工具 (T8 acceptance "tool surface 无 edit_file/write_file" 失守)。
       const subagentType = obj.subagent_type;
       let resolvedRole: string | undefined;
+      let catalogDisallowed: ReadonlyArray<string> | undefined;
       if (subagentType === undefined) {
         resolvedRole = undefined; // V1 baseline
       } else if (typeof subagentType !== "string") {
@@ -185,14 +189,34 @@ export function createSpawnSubAgentTool(
         );
       } else {
         try {
-          catalog.get(subagentType); // fail-fast unknown
+          const entry = catalog.get(subagentType); // fail-fast unknown
           resolvedRole = subagentType;
+          catalogDisallowed = entry.disallowedTools;
         } catch {
           throw new ToolExecutionError(
             `spawn_subagent: unknown subagent_type '${subagentType}'`
           );
         }
       }
+      // catalog entry.disallowedTools 与 obj.disallowedTools union (Set 去重)。
+      // 两者均缺省 → undefined (V1 baseline,不动 def.disallowedTools 字段)。
+      // 仅有 catalog → 应用 catalog deny (e.g. explore → [edit_file, write_file])。
+      // 仅有 parent → 应用 parent deny (V1 行为)。
+      // 双有 → union,parent 可 ADD 更多 deny,不可 subtract catalog 默认。
+      const parentDisallowed = Array.isArray(obj.disallowedTools)
+        ? (obj.disallowedTools as ReadonlyArray<string>)
+        : undefined;
+      const mergedDisallowed =
+        parentDisallowed || catalogDisallowed
+          ? Object.freeze(
+              Array.from(
+                new Set<string>([
+                  ...(parentDisallowed ?? []),
+                  ...(catalogDisallowed ?? []),
+                ])
+              )
+            )
+          : undefined;
       // 装配 SubAgentDefinition：可选字段透传，缺失字段从 def 上省略（manager
       // 端按 SubAgentDefinition 自身字段约束走 default deny / 默认 maxTurns 等）。
       // #356 High #1 修复：task 必填透传进 def（此前漏掉 → buildWorkerPayload
@@ -209,8 +233,10 @@ export function createSpawnSubAgentTool(
         ...(typeof obj.systemPrompt === "string"
           ? { systemPrompt: obj.systemPrompt }
           : {}),
-        ...(Array.isArray(obj.disallowedTools)
-          ? { disallowedTools: obj.disallowedTools as ReadonlyArray<string> }
+        // #556 T3 + Spec review 收口: catalog entry.disallowedTools 与 parent
+        // disallowedTools union 后写入;两者均缺省 → 字段省略 (V1 byte-stable)。
+        ...(mergedDisallowed !== undefined
+          ? { disallowedTools: mergedDisallowed }
           : {}),
         ...(typeof obj.model === "string" ? { model: obj.model } : {}),
         ...(typeof obj.maxTurns === "number" ? { maxTurns: obj.maxTurns } : {}),

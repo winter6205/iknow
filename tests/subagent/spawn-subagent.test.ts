@@ -525,13 +525,114 @@ describe("spawn_subagent — #556 T3 handler: subagent_type → def.role", () =>
         task: "t",
         role: "explore",
         systemPrompt: "be focused",
-        disallowedTools: ["spawn_subagent"],
+        // #556 T3 + Spec review 收口: parent disallowedTools 与 catalog entry
+        // denied union (Set 去重)。explore 的 catalog 默认 [edit_file, write_file]
+        // 与 parent [spawn_subagent] merge = [spawn_subagent, edit_file, write_file]。
+        disallowedTools: ["spawn_subagent", "edit_file", "write_file"],
         model: "opus",
         maxTurns: 4,
         timeoutMs: 60000,
         sandboxRoot: "/tmp/work",
       })
     );
+  });
+});
+
+describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools merge in wire", () => {
+  // Spec reviewer (2026-08-20 code-review) High finding:
+  //   catalog entry.disallowedTools 未流入 wire,explore 角色的
+  //   [edit_file, write_file] deny 不进入 worker tool surface。
+  //   修法: handler 在 resolvedRole 解析时捕获 catalog entry,
+  //   union(parent disallowedTools, catalog entry.disallowedTools)
+  //   后写入 def.disallowedTools (registry.ts Gate 3 deny-list
+  //   把 entry 内的工具名从 toolsetNames 剔除)。
+
+  it("subagent_type='explore' 无 parent disallowedTools → def.disallowedTools = catalog 默认 [edit_file, write_file]", async () => {
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    await tool.handler({
+      task: "explore-only",
+      subagent_type: "explore",
+      wait: false,
+    });
+    const def = spawn.mock.calls[0][0] as SubAgentDefinition;
+    expect(def.role).toBe("explore");
+    expect(def.disallowedTools).toBeDefined();
+    expect([...def.disallowedTools!]).toEqual(
+      expect.arrayContaining(["edit_file", "write_file"])
+    );
+    expect(def.disallowedTools).toHaveLength(2);
+  });
+
+  it("subagent_type='explore' + parent disallowedTools → union (parent ADD, 不 subtract catalog)", async () => {
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    await tool.handler({
+      task: "explore-with-parent",
+      subagent_type: "explore",
+      disallowedTools: ["some_extra_tool"],
+      wait: false,
+    });
+    const def = spawn.mock.calls[0][0] as SubAgentDefinition;
+    expect(def.role).toBe("explore");
+    expect([...def.disallowedTools!]).toEqual(
+      expect.arrayContaining(["edit_file", "write_file", "some_extra_tool"])
+    );
+    expect(def.disallowedTools).toHaveLength(3);
+  });
+
+  it("subagent_type='explore' + parent 重复 deny 同名 → Set 去重", async () => {
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    await tool.handler({
+      task: "dedupe-check",
+      subagent_type: "explore",
+      disallowedTools: ["edit_file", "another_tool"], // edit_file 已含于 catalog
+      wait: false,
+    });
+    const def = spawn.mock.calls[0][0] as SubAgentDefinition;
+    expect(def.disallowedTools).toHaveLength(3); // edit_file (1) + write_file + another_tool
+    expect([...def.disallowedTools!]).toEqual(
+      expect.arrayContaining(["edit_file", "write_file", "another_tool"])
+    );
+  });
+
+  it("subagent_type='general-purpose' 无 catalog denied → def.disallowedTools 缺省 (V1 byte-stable)", async () => {
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    await tool.handler({
+      task: "general",
+      subagent_type: "general-purpose",
+      wait: false,
+    });
+    const def = spawn.mock.calls[0][0] as SubAgentDefinition;
+    expect(def.role).toBe("general-purpose");
+    expect(def.disallowedTools).toBeUndefined();
+  });
+
+  it("subagent_type 不传 + parent disallowedTools → def.disallowedTools = parent (V1 byte-stable)", async () => {
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    await tool.handler({
+      task: "v1-baseline",
+      disallowedTools: ["some_tool"],
+      wait: false,
+    });
+    const def = spawn.mock.calls[0][0] as SubAgentDefinition;
+    expect(def.role).toBeUndefined();
+    expect(def.disallowedTools).toEqual(["some_tool"]);
+  });
+
+  it("subagent_type 不传 + 无 parent disallowedTools → def.disallowedTools 字段缺省 (V1 byte-stable)", async () => {
+    const { manager, spawn } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    await tool.handler({
+      task: "v1-blank",
+      wait: false,
+    });
+    const def = spawn.mock.calls[0][0] as SubAgentDefinition;
+    expect(def.role).toBeUndefined();
+    expect(def.disallowedTools).toBeUndefined();
   });
 });
 
