@@ -47,6 +47,7 @@ import { createJsonlTraceService, type TraceService } from "../trace/index.js";
 import { run, epilogueSummary } from "../loop-engine.js";
 import type { HarnessStreamEvent } from "../stream.js";
 import { MaxTurnsExceeded, ProtocolError } from "../errors.js";
+import { getAgentEntry, AgentCatalogLookupError } from "./catalog.js";
 import {
   parseWorkerEnvelope,
   truncateEnvelopeResult,
@@ -63,6 +64,49 @@ function log(message: string): void {
 
 /** default worker trace dir (cli.ts DEFAULT_TRACE_DIR 同形态, IKNOW_TRACE_OUT 优先)。 */
 const DEFAULT_WORKER_TRACE_DIR = "./trace/";
+
+/**
+ * #556 T2: 查 catalog 取 persona 段文本 (catalog body)。role 缺省 / 未知
+ * → 返回 undefined (不注入 persona, 走 V1 baseline fallback)。未知 id
+ * 走 catch 路径 (defense-in-depth): spawn 侧 ajv 已挡一轮, 此处为
+ * wire-mismatch 兜底, 单测 envelope-role.test.ts 显式锁定 fallback 内容
+ * (不静默吞掉 — 装配层发一行 log, 输出仍无 persona)。
+ */
+function resolvePersonaBody(role: string | undefined): string | undefined {
+  if (role === undefined) return undefined;
+  try {
+    return getAgentEntry(role).body;
+  } catch (err) {
+    if (err instanceof AgentCatalogLookupError) {
+      log(`role '${role}' not in catalog; falling back to V1 baseline`);
+      return undefined;
+    }
+    throw err;
+  }
+}
+
+/**
+ * #556 T2: 加性段注入 wrapper (base < persona < addendum)。两者全缺省
+ * 走外层短路 (返回 base), 字节级 byte-stable, 守 V1 baseline。
+ *
+ * 顺序契约: 加性段追加在 base system 之后, 不重排 IKNOW_ASSEMBLY_ORDER
+ * 的 5 段 LOCKED 顺序。base 缺席 → 输出只是 persona + addendum。
+ */
+function withRoleExtras(
+  base: () => Promise<string | undefined>,
+  persona: string | undefined,
+  addendum: string | undefined
+): () => Promise<string | undefined> {
+  return async () => {
+    const baseText = await base();
+    const extras = [persona, addendum].filter(
+      (s): s is string => s !== undefined
+    );
+    if (extras.length === 0) return baseText;
+    if (baseText === undefined) return extras.join("\n\n");
+    return baseText + "\n\n" + extras.join("\n\n");
+  };
+}
 
 /**
  * worker 装配入参 (createWorkerDeps seam)。
@@ -97,6 +141,18 @@ export interface CreateWorkerDepsOptions {
    *  createDefaultAciRegistry 让 fs-policy 保护 `<workspaceRoot>/.iknow`。
    *  缺席 → registry 内部 fallback 到 sandboxRoot(legacy 形态)。 */
   readonly workspaceRoot?: string;
+  /**
+   * #556 T2: 来自 envelope.role 的 seam 副本 (runSubagentWorker 透传)。
+   * worker 装配期查 catalog 取 body 注入 persona 段; 缺省 / 未知 → 走 V1
+   * baseline (不入 persona 段, 不注入额外 deny, 详见 plan T2 防御契约)。
+   */
+  readonly role?: string;
+  /**
+   * #556 T2: 来自 envelope.systemPrompt 的 seam 副本 — 修复 schema 有 / 透传
+   * 有 / 此前未消费的幽灵通道。该字段在 worker 装配期作为 addendum 追加
+   * persona 段之后 (顺序: base < persona < addendum), 与 LOCKED 5 段解耦。
+   */
+  readonly addendum?: string;
 }
 
 /**
@@ -171,7 +227,7 @@ export async function createWorkerDeps(
   // surface "ask" → shouldIncludeBootstrap false (无 BOOTSTRAP 段); memory
   // 关闭 (worker 有界 scope, 不共享用户记忆层)。skills 段照常注入
   // (SC12: skill 工具在场就该让模型知道 available skills)。
-  const system =
+  const baseSystem =
     opts.system ??
     createIknowSystemResolver({
       cwd,
@@ -185,6 +241,18 @@ export async function createWorkerDeps(
           ...(entry.disabled ? { disabled: true } : {}),
         })),
     });
+
+  // #556 T2: persona + addendum 注入 (加性段, 不触碰 IKNOW_ASSEMBLY_ORDER)。
+  // 顺序 base < persona < addendum;两者全缺省 → base 透传, V1 baseline
+  // 严格 byte-stable。role 缺省 / 未知 → 不查 catalog / 不注入 persona
+  // (T2 防御契约, defense-in-depth): worker 装配期 catch AgentCatalogLookupError
+  // 显式走 fallback, 单测 envelope-role.test.ts 锁定该路径。
+  const personaText = resolvePersonaBody(opts.role);
+  const addendumText = opts.addendum;
+  const system =
+    personaText !== undefined || addendumText !== undefined
+      ? withRoleExtras(baseSystem, personaText, addendumText)
+      : baseSystem;
 
   const deps: LoopEngineDeps = {
     adapter,
@@ -448,6 +516,12 @@ export async function runSubagentWorker(): Promise<void> {
     env,
     sandboxRoot: workerEnvelope.sandboxRoot,
     disallowedTools: workerEnvelope.disallowedTools,
+    // #556 T2: envelope.role / envelope.systemPrompt 透传到 createWorkerDeps
+    // seam —— 缺失时不传 (V1 baseline, byte-stable)。
+    ...(workerEnvelope.role !== undefined ? { role: workerEnvelope.role } : {}),
+    ...(workerEnvelope.systemPrompt !== undefined
+      ? { addendum: workerEnvelope.systemPrompt }
+      : {}),
     // ADR-0019 (review-fix H3): worker 继承父 env SSOT —— 当 spawn 父进程
     // 设置了 IKNOW_WORKSPACE_ROOT,worker 的 fs-policy fence 也按同一根
     // 保护 `.iknow`(与 build-engine 同形态)。条件解析:无 flag 且无 env
