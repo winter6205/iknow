@@ -4,6 +4,7 @@ import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
 import { isDangerousCommand } from "../permission.js";
 import { commandContainsSensitivePath } from "../../permission/hard-walls.js";
+import { validateReadonlyCommand } from "./bash-readonly.js";
 import {
   BASE_ENV_WHITELIST,
   createBwrapFence,
@@ -52,6 +53,11 @@ export interface CreateBashToolOptions {
    *  完全不受影响。生产装配 build-engine 注入 createBackgroundTaskManager +
    *  defaultBackgroundSpawn。 */
   readonly backgroundManager?: BackgroundTaskManager;
+  /** #562 T4:bash 模式 —— "readonly" 时 handler 在 isDangerousCommand 之后、
+   * commandContainsSensitivePath 之前调 validateReadonlyCommand，越界命令
+   * 抛 ReadonlyViolationError（extends ToolExecutionError）。缺省 "any" =
+   * V1 路径逐字节不变（回归基线）。 */
+  readonly bashMode?: "any" | "readonly";
 }
 
 export function createBashTool(
@@ -79,6 +85,13 @@ export function createBashTool(
       throw new ToolExecutionError(
         `bash: dangerous command rejected: ${command}`
       );
+    // #562 T4:bashMode="readonly" → enforce read-only command policy.
+    // 缺省 ("any") → 此分支不进入，handler 逐字节不变（V1 回归基线）。
+    // validateReadonlyCommand 抛 ReadonlyViolationError（extends
+    // ToolExecutionError），executor 经既有 ToolExecutionError 路径捕获。
+    if (opts?.bashMode === "readonly") {
+      validateReadonlyCommand(command);
+    }
     if (commandContainsSensitivePath(command))
       throw new ToolExecutionError(
         `bash: command targets a sensitive path: ${command}`

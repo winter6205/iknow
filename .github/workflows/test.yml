@@ -75,6 +75,7 @@ jobs:
             --exclude tests/harness/aci/demo.test.ts \
             --exclude tests/harness/aci/interrupt-routing.test.ts \
             --exclude tests/harness/aci/tools/bash.test.ts \
+            --exclude tests/harness/aci/tools/bash-readonly.test.ts \
             --exclude tests/harness/aci/tools/grep.test.ts \
             --exclude tests/harness/aci/permission.test.ts \
             --exclude tests/harness/aci/registry-workspace-root.test.ts \
@@ -152,6 +153,7 @@ jobs:
             --exclude tests/harness/aci/demo.test.ts \
             --exclude tests/harness/aci/interrupt-routing.test.ts \
             --exclude tests/harness/aci/tools/bash.test.ts \
+            --exclude tests/harness/aci/tools/bash-readonly.test.ts \
             --exclude tests/harness/aci/tools/grep.test.ts \
             --exclude tests/harness/aci/permission.test.ts \
             --exclude tests/harness/aci/registry-workspace-root.test.ts \
