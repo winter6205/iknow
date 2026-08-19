@@ -304,3 +304,22 @@ export interface TraceQueryParams {
    */
   readonly parent_turn_id?: string;
 }
+
+// -- serve-workspace (#531, T5) -------------------------------------------------
+
+/** serve-workspace T3: GET /api/v1/workspace 响应（picker 绑定状态）。 */
+export interface WorkspaceState {
+  readonly bound: boolean;
+  readonly root?: string;
+}
+
+/** serve-workspace T3: PUT /api/v1/workspace 请求体。 */
+export interface PutWorkspaceRequest {
+  readonly path: string;
+  readonly confirmTrust?: boolean;
+}
+
+/** serve-workspace T3: GET /api/v1/workspaces 响应（recents / trusted）。 */
+export interface WorkspacesResponse {
+  readonly workspaces: ReadonlyArray<{ readonly root: string }>;
+}

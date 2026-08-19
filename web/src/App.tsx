@@ -25,6 +25,8 @@ import * as api from "./api/client";
 import type { McpServerStatus, McpTool, SkillSummary } from "./api/types";
 import { McpPanel } from "./components/McpPanel";
 import { RewindPicker } from "./components/RewindPicker";
+import { WorkspacePicker } from "./components/WorkspacePicker";
+import { useWorkspace } from "./hooks/useWorkspace";
 import {
   loadThinkingSettings,
   saveThinkingSettings,
@@ -38,6 +40,10 @@ const NARROW_QUERY = "(max-width: 768px)";
 
 function ChatApp() {
   const chat = useSessionChat();
+  // serve-workspace T5: 顶栏 chip + picker 状态（commit 后即生效）。useWorkspace
+  // 在挂载时拉 GET /workspace + /workspaces，loading 期间 chip 暂显示 unbound
+  // CTA；recents 缺席（404）静默降级为空。
+  const ws = useWorkspace();
   // Lazy init from the current viewport so the first paint already reflects
   // the narrow-screen collapsed state (no layout flash). Vite SPA has no SSR,
   // so window is always available here.
@@ -69,6 +75,8 @@ function ChatApp() {
     ReadonlyArray<WebRewindTarget> | undefined
   >(undefined);
   const [rewindIndex, setRewindIndex] = useState(0);
+  // serve-workspace T5: picker 显示开关（CTA / chip / /workspace 三入口）。
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
 
   useEffect(() => {
     void api
@@ -149,7 +157,13 @@ function ChatApp() {
   }, []);
 
   const header = (
-    <ChatHeader phase={chat.phase} healthLabel={chat.healthLabel} />
+    <ChatHeader
+      phase={chat.phase}
+      healthLabel={chat.healthLabel}
+      workspaceBound={ws.bound}
+      workspaceRoot={ws.root}
+      onOpenWorkspacePicker={() => setWorkspaceOpen(true)}
+    />
   );
 
   // Sidebar lists past conversations and switches the active one. Passes the
@@ -238,6 +252,10 @@ function ChatApp() {
               );
             }
           })();
+          break;
+        case "workspace":
+          // serve-workspace T5: picker 入口（与 chip / 顶栏 CTA 同源）。
+          setWorkspaceOpen(true);
           break;
         case "rewind":
           if (chat.phase === "sending") {
@@ -422,6 +440,15 @@ function ChatApp() {
               onClose={() => setRewindTargets(undefined)}
             />
           ) : null}
+          {workspaceOpen ? (
+            <WorkspacePicker
+              recents={ws.recents}
+              currentRoot={ws.root}
+              onBind={ws.bind}
+              onClose={() => setWorkspaceOpen(false)}
+              onNotice={chat.pushNotice}
+            />
+          ) : null}
           <MessageList
             messages={chat.messages}
             sending={chat.phase === "sending"}
@@ -433,7 +460,7 @@ function ChatApp() {
           {/* 子代理状态栏（spec #358 SC8）：零子代理 → 组件返回 null，不打扰 idle 会话。 */}
           <SubagentStatusBar subagents={subagentPolling.subagents} />
           <Composer
-            disabled={!chat.session || chat.phase === "loading"}
+            disabled={!chat.session || chat.phase === "loading" || !ws.bound}
             sending={chat.phase === "sending"}
             thinkingSettings={thinkingSettings}
             onThinkingChange={handleThinkingChange}

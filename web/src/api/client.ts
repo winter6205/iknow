@@ -19,6 +19,9 @@ import type {
   TraceFieldDef,
   TraceQueryParams,
   TracesResponse,
+  WorkspaceState,
+  WorkspacesResponse,
+  PutWorkspaceRequest,
 } from "./types";
 import { SessionApiError } from "./types";
 
@@ -322,6 +325,44 @@ export function getSubagents(
   signal?: AbortSignal
 ): Promise<SubagentsResponse> {
   return request(resolveSubagentsPath(id), { method: "GET" }, signal);
+}
+
+// -- Workspace picker (serve-workspace #531, T5) --------------------------------
+
+/**
+ * GET /api/v1/workspace — 当前 picker 绑定状态（bound + root）。
+ * 未绑定 → `{ bound: false }`，root 缺席。
+ */
+export function getWorkspace(signal?: AbortSignal): Promise<WorkspaceState> {
+  return request(`${API}/workspace`, {}, signal);
+}
+
+/**
+ * GET /api/v1/workspaces — recents/trust 名单（picker 候选）。recentsHome
+ * 缺席 → 后端 404 not_found（调用方自行静默降级为空列表）。
+ */
+export function listTrustedWorkspaces(
+  signal?: AbortSignal
+): Promise<WorkspacesResponse> {
+  return request(`${API}/workspaces`, {}, signal);
+}
+
+/**
+ * PUT /api/v1/workspace — 切换绑定根。`confirmTrust=true` 用于未信任路径
+ * （首次绑定新绝对路径需显式确认信任）。
+ */
+export function putWorkspace(
+  body: PutWorkspaceRequest,
+  signal?: AbortSignal
+): Promise<WorkspaceState> {
+  return request(
+    `${API}/workspace`,
+    {
+      method: "PUT",
+      body: JSON.stringify(body),
+    },
+    signal
+  );
 }
 
 // -- Trace inspection endpoints -----------------------------------------------

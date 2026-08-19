@@ -1,8 +1,9 @@
 /**
  * web/src/lib/slash.ts
  *
- * Web Composer 的 slash 命令面。词表对齐 TUI `src/tui/slash.ts`（11 条 +
- * skill 混显）；浏览器无进程退出时 /quit /exit 仍进词表，由 App 做能力映射。
+ * Web Composer 的 slash 命令面。词表对齐 TUI `src/tui/slash.ts`（12 条 +
+ * skill 混显，含 serve-workspace 的 /workspace）；浏览器无进程退出时 /quit
+ * /exit 仍进词表，由 App 做能力映射。
  */
 
 export type SlashCommandName =
@@ -16,7 +17,8 @@ export type SlashCommandName =
   | "effort"
   | "compact"
   | "rewind"
-  | "mcp";
+  | "mcp"
+  | "workspace";
 
 export type SlashCommand = {
   readonly name: SlashCommandName;
@@ -54,6 +56,7 @@ export const SLASH_COMMANDS: ReadonlyArray<SlashCommand> = [
   { name: "compact", description: "压缩上下文", hint: "/compact" },
   { name: "rewind", description: "回退到更早的回合", hint: "/rewind" },
   { name: "mcp", description: "查看 MCP 服务看板", hint: "/mcp" },
+  { name: "workspace", description: "选择工作空间根", hint: "/workspace" },
 ];
 
 const BY_NAME = new Map<SlashCommandName, SlashCommand>(
