@@ -533,6 +533,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // ── 退出 / 打断 / inflight 簿记 ────────────────────────────────
   const aborters = useRef(new Map<string, AbortController>());
   const inflightPromises = useRef(new Set<Promise<unknown>>());
+  // #548:手动压缩专属 AbortController — 与 turn 的 `aborters` map 解耦
+  // (turn 中断 ↔ 压缩中断两条独立通道)。同一时刻仅一个 /compact 路径在
+  // 飞(活跃会话只有一个),所以 ref 单槽足够。Esc/Ctrl+C handler 在
+  // `canInterrupt(active)` 兜底之前先看此 ref 是否非空,是 → 走压缩取消;
+  // re-entry 护栏(防止 /compact 重复触发)同样看此 ref(同步源,无 React
+  // commit 竞态;Standards review Low#4 修复)。
+  const compactingControllerRef = useRef<AbortController | null>(null);
   const viewRef = useRef<TuiView>(view);
   viewRef.current = view;
 
@@ -1359,34 +1366,98 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           });
           return;
         }
+        // #548:防止压缩未结束前重复触发(压缩期间 runState 仍 idle,既有 gate
+        // 拦不住;用 ref 作同步守护,React state 会有一帧 commit 滞后)。
+        if (compactingControllerRef.current !== null) {
+          setNotice({
+            lines: ["压缩进行中；按 Esc 取消或等待完成。"],
+          });
+          return;
+        }
         const targetId = active.conversationId;
         if (targetId === undefined) {
           setNotice({ lines: ["当前是空会话，还没有可压缩的上下文。"] });
           return;
         }
+        // #548:创建专属 AbortController(Esc/Ctrl+C 通过 compactingControllerRef
+        // 触发 abort) + observer(透传 compaction_* 进度事件 + compaction_text_delta,
+        // 后者经 #550 wrapper 重映射后进入压缩预览,此处只展示 dropped 数与
+        // 终态消息,文本预览留作后续 UI 加挂)。progress 期间 notice 实时
+        // 刷新,终端事件由 promise resolve 后的最终 notice 接管。
+        const compactController = new AbortController();
+        compactingControllerRef.current = compactController;
+        setNotice({ lines: ["正在压缩上下文…(按 Esc 取消)"] });
+        // #548:onStream 内的 compaction_cancelled 事件标记"中途取消"(bridge
+        // 返回 compacted=false,与"未达阈值"同形),promise resolve 后据此
+        // 选择不同 notice 文案。闭包变量,无需 React state。
+        // 注:pre-aborted signal(early-return at full-compact.ts:262)observer
+        // 不触发 — response.cancelled 字段兜底(Low #1 修复)。
+        let cancelledByUser = false;
         try {
-          const compacted = await props.bridge.compactSession(targetId);
-          const file = await props.bridge.loadSessionFile(targetId);
-          setSessions((prev) => {
-            const current = prev[targetId];
-            if (!current) return prev;
-            return {
-              ...prev,
-              [targetId]: sessionCompacted(current, {
-                messages: file.messages,
-                turnCount: file.turnCount,
-                updatedAt: file.updatedAt,
-                jsonMode: file.jsonMode,
-              }),
-            };
+          const compactResult = await props.bridge.compactSession(targetId, {
+            signal: compactController.signal,
+            onStream: (event) => {
+              switch (event.type) {
+                case "compaction_started":
+                  setNotice({
+                    lines: [
+                      `正在压缩上下文（${event.droppedCount} 条）…(按 Esc 取消)`,
+                    ],
+                  });
+                  return;
+                case "compaction_cancelled":
+                  cancelledByUser = true;
+                  return;
+                case "compaction_completed":
+                case "compaction_failed":
+                case "compaction_text_delta":
+                  // 终态/失败细节由 promise resolve 后的最终 notice 接管;
+                  // compaction_text_delta 留作 UI 加挂点(tracer bullet 仅接住,
+                  // 不渲染,以免主面板污染)。
+                  return;
+                default:
+                  return;
+              }
+            },
           });
-          setNotice({
-            lines: compacted
-              ? ["已压缩上下文（保留尾部，裁剪早期消息）。"]
-              : ["上下文未达压缩阈值，无需压缩。"],
-          });
+          const compacted = compactResult.compacted;
+          // Low #1 兜底:pre-aborted signal 路径 observer 不触发 → 用
+          // response.cancelled 兜底。
+          if (compactResult.cancelled) cancelledByUser = true;
+          if (cancelledByUser) {
+            // #548:Claude Code 取消语义 — 会话保持原样,不 sessionCompacted
+            // 投影(updatedAt / messages 均不变),仅提示用户。
+            setNotice({
+              lines: ["压缩已取消，会话保持原样。"],
+            });
+          } else if (compacted) {
+            // 实际裁剪完成 → 重读落盘文件 + sessionCompacted 投影。
+            const file = await props.bridge.loadSessionFile(targetId);
+            setSessions((prev) => {
+              const current = prev[targetId];
+              if (!current) return prev;
+              return {
+                ...prev,
+                [targetId]: sessionCompacted(current, {
+                  messages: file.messages,
+                  turnCount: file.turnCount,
+                  updatedAt: file.updatedAt,
+                  jsonMode: file.jsonMode,
+                }),
+              };
+            });
+            setNotice({
+              lines: ["已压缩上下文（保留尾部，裁剪早期消息）。"],
+            });
+          } else {
+            setNotice({
+              lines: ["上下文未达压缩阈值，无需压缩。"],
+            });
+          }
         } catch (err) {
           setNotice({ lines: [`压缩失败：${describeError(err)}`] });
+        } finally {
+          compactingControllerRef.current = null;
         }
         return;
       }
@@ -1465,6 +1536,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
     // Ctrl+C：打断 running-fg；否则提示。
     if (e.ctrl && e.name === "c") {
+      // #548:压缩进行中 → 走压缩取消通道(runState 仍 idle,既有
+      // canInterrupt 拦不住);return 后不再进 turn/notice 分支。
+      if (compactingControllerRef.current !== null) {
+        compactingControllerRef.current.abort();
+        return;
+      }
       if (canInterrupt(active)) {
         const id = active.conversationId;
         if (id !== undefined) {
@@ -1608,6 +1685,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     // askModalActive 时下方块处理 Esc dismiss，re-path 不拦截（避免吞掉
     // dismiss）。
     if (e.name === "escape" && !askModalActive) {
+      // #548:压缩进行中 → 走压缩取消通道(等同 Ctrl+C 行为);
+      // 此分支优先于 running-fg 打断,因为压缩期间 runState 仍 idle,
+      // canInterrupt 会落进 double-Esc rewind picker 路径,语义错误。
+      if (compactingControllerRef.current !== null) {
+        compactingControllerRef.current.abort();
+        return;
+      }
       const nowMs = Date.now();
       const last = lastEscAtRef.current;
       if (canInterrupt(active)) {

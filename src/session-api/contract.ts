@@ -7,6 +7,7 @@
  * reference the old shapes — they will be rewritten in T4/T5.
  */
 import type { StopReason, TokenUsage } from "../harness/index.js";
+import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { SessionStoreErrorKind } from "./store/errors.js";
 
 /** Max user message length (code units). */
@@ -143,15 +144,30 @@ export type ResetSessionResponse = {
  * 压缩后 session 保持同一 conversation_id；turns 为压缩后消息投影。
  * `compacted`：true 表示实际发生了裁剪（消息数减少）；false 表示消息已
  * 低于压缩阈值、无变化（幂等 no-op，客户端据此提示“无需压缩”）。
+ * `cancelled`：#548 — 仅在 opts.signal 中途 abort、压缩未完成时为 true；
+ * 会话保持原样（messages/turnCount/updatedAt 均不动），与
+ * compacted=false 的"未达阈值"语义区分(web/TUI 渲染区分)。
  */
 export type CompactSessionResponse = {
   session: SessionSummary;
   turns: TurnDto[];
   compacted: boolean;
+  /** #548:signal abort → true,会话保持原样;其余时刻缺席 = false。 */
+  cancelled?: boolean;
   /** 压缩前的消息条数（DEFAULT_KEEP_RECENT 尾窗保留判定用）。 */
   beforeCount: number;
   /** 压缩后的消息条数（no-op 时 === beforeCount）。 */
   afterCount: number;
+};
+
+/**
+ * 手动压缩调用方 opts (#548) — hub.compactSession 与 TuiBridge.compactSession
+ * 共享同一 shape(本文件导出避免 3 处独立声明 drift,Standards review
+ * Low#1 数据团)。
+ */
+export type CompactCallerOpts = {
+  readonly signal?: AbortSignal;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
 };
 
 /** POST /api/v1/sessions/:id/rewind — 对齐 TUI rewindSession。 */

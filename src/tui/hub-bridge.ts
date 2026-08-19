@@ -26,6 +26,7 @@ import type { SessionFileV1 } from "../session-api/store/schema.js";
 import { rewindFile } from "../session-api/store/index.js";
 import type { LoopEngineDeps } from "../harness/index.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
+import type { CompactCallerOpts } from "../session-api/contract.js";
 import type { TokenUsage } from "../harness/model-adapter/types.js";
 import type {
   SubAgentManager,
@@ -114,8 +115,20 @@ export interface TuiBridge {
   }) => Promise<TuiPostResult>;
   readonly listSessions: () => ReturnType<SessionHub["listSessions"]>;
   readonly loadSessionFile: (conversationId: string) => Promise<SessionFileV1>;
-  /** 手动压缩会话（/compact）。返回是否实际发生裁剪（false = 无需压缩）。 */
-  readonly compactSession: (conversationId: string) => Promise<boolean>;
+  /** 手动压缩会话（/compact）。返回 `{ compacted, cancelled? }`,`compacted`
+   *  true = 实际发生裁剪;false = 未达压缩阈值或 #548 中途取消 — 后者
+   *  `cancelled:true`,app 层据此区分。signal/onStream 透传到
+   *  SessionHub.compactSession → runFullCompact,让 /compact 支持 progress
+   *  事件 + 中途取消(Claude Code 体感)。observer 已带 compaction_cancelled
+   *  事件,但 pre-aborted signal 路径 observer 不触发(early-return at
+   *  full-compact.ts:262);`cancelled` 字段是兜底字段,覆盖所有取消路径。 */
+  readonly compactSession: (
+    conversationId: string,
+    opts?: CompactCallerOpts
+  ) => Promise<{
+    readonly compacted: boolean;
+    readonly cancelled?: boolean;
+  }>;
   /** 回退到更早 turn（/rewind / 双 Esc）：load → rewindFile → store.save →
    *  返回更新文件。错误复用 SessionStore 既有 typed kinds，不新造。 */
   readonly rewindSession: (
@@ -223,9 +236,25 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     },
     listSessions: () => hub.listSessions(),
     loadSessionFile: (conversationId) => store.load(conversationId),
-    compactSession: async (conversationId) => {
-      const res = await hub.compactSession(conversationId);
-      return res.compacted;
+    compactSession: async (conversationId, compactOpts) => {
+      const res = await hub.compactSession(
+        conversationId,
+        compactOpts !== undefined
+          ? {
+              ...(compactOpts.signal !== undefined
+                ? { signal: compactOpts.signal }
+                : {}),
+              ...(compactOpts.onStream !== undefined
+                ? { onStream: compactOpts.onStream }
+                : {}),
+            }
+          : undefined
+      );
+      // cancelled 透传 — TUI app 据此区分"未达阈值"与"用户中途取消" (Low #1 兜底)。
+      return {
+        compacted: res.compacted,
+        ...(res.cancelled ? { cancelled: true } : {}),
+      };
     },
     // 与 compactSession 同纪律：load → rewindFile → save 直链。store.load /
     // store.save 与 hub 的 serialize 队列共用同一 per-conversation 队列入口

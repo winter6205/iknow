@@ -409,13 +409,17 @@ async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
     return true;
   }
   // POST /compact — 手动压缩会话（web 压缩按钮 / TUI /compact 的 HTTP 侧）。
-  // body 可空；无 body / 空 body 等价 {}（压缩无参数）。
+  // body 可空；无 body / 空 body 等价 {}（压缩本身无参数）。
+  // #548:把 req 关闭事件绑到 AbortController,客户端断连 → 自动 signal_aborted
+  // → hub 走 keep-state 路径 + 响应 cancelled:true(契约同步 #548)。
   if (method === "POST" && rest === "/compact") {
     await readJsonBody(req); // 消费 body（允许空），压缩本身无参数
+    const compactController = new AbortController();
+    req.once("close", () => compactController.abort());
     sendJson({
       res,
       status: 200,
-      body: await hub.compactSession(id),
+      body: await hub.compactSession(id, { signal: compactController.signal }),
     });
     return true;
   }

@@ -760,6 +760,94 @@ describe("compactSession", () => {
     const after = await store.load(session.conversation_id);
     assert.equal(after.title, "q0");
   });
+
+  // #548:opts.onStream 透传到 runFullCompact,host 收到 compaction_started /
+  // completed 序列;opts.signal 未传 → 行为零变化(向后兼容)。
+  it("opts.onStream 透传:runFullCompact 生命周期事件序列被 host observer 捕获", async () => {
+    const deps = makeDeps(
+      Array.from({ length: 4 }, (_, i) =>
+        assistantResult({ texts: [`answer ${i}`] })
+      )
+    );
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    await seedTurns(hub, session.conversation_id, 4);
+
+    const events: string[] = [];
+    const res = await hub.compactSession(session.conversation_id, {
+      onStream: (e) => events.push(e.type),
+    });
+    assert.equal(res.compacted, true);
+    // stub model 对 full-compact prompt 返回 empty_response → fallback
+    // placeholder;compaction_started + compaction_failed(reason=empty_response)
+    // 必出,completed 不出(fail 不代表成功)。
+    assert.ok(
+      events.includes("compaction_started"),
+      "compaction_started 必 emit"
+    );
+    assert.ok(
+      events.includes("compaction_failed"),
+      "stub empty_response 走 compaction_failed"
+    );
+  });
+
+  // #548:opts.signal 中途 abort → runFullCompact 返回 signal_aborted →
+  // hub 走 keep-state 路径(不 fallback 截断、不落盘、不 bump updatedAt)、
+  // 响应带 cancelled:true。Claude Code 取消语义对齐。
+  it("opts.signal 中途 abort → compacted=false, cancelled=true,会话保持原样", async () => {
+    // 4 turns × 2 msgs = 8 → 触发 splitForCompaction(dropped ≠ []),
+    // 走 runFullCompact 路径。stub-model 默认 delayMs=0,无延迟;但 mid-flight
+    // abort 仍能触发 — 关键时序是 microtask 排在前 + controller.abort 紧跟。
+    // 我们走"pre-aborted"路径(更简单、更稳):构造已 aborted 的 signal,
+    // hub.compactSession 内 runFullCompact 第一行检查就立刻返回 signal_aborted。
+    const deps = makeDeps(
+      Array.from({ length: 4 }, (_, i) =>
+        assistantResult({ texts: [`answer ${i}`] })
+      )
+    );
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    await seedTurns(hub, session.conversation_id, 4);
+
+    const before = await store.load(session.conversation_id);
+    const controller = new AbortController();
+    controller.abort(); // pre-aborted → runFullCompact 早退 signal_aborted
+
+    const res = await hub.compactSession(session.conversation_id, {
+      signal: controller.signal,
+    });
+    assert.equal(res.compacted, false, "取消不算实际裁剪");
+    assert.equal(
+      res.cancelled,
+      true,
+      "cancelled:true 区分于未达阈值的 compacted=false"
+    );
+    assert.equal(res.beforeCount, before.messages.length);
+    assert.equal(res.afterCount, before.messages.length);
+
+    // 会话保持原样:落盘文件未 touch(updatedAt 不动、messages 不变)。
+    const after = await store.load(session.conversation_id);
+    assert.equal(after.updatedAt, before.updatedAt, "未 bump updatedAt");
+    assert.equal(after.messages.length, before.messages.length, "未裁剪");
+    assert.equal(after.turnCount, before.turnCount, "turnCount 不重置");
+  });
+
+  // #548:opts.onStream 缺席 → 行为零变化(旧调用点不变);stub empty_response
+  // 路径下 fallback 截断,compacted:true。
+  it("opts 缺席 → 行为零变化(compat 旧调用点)", async () => {
+    const deps = makeDeps(
+      Array.from({ length: 4 }, (_, i) =>
+        assistantResult({ texts: [`answer ${i}`] })
+      )
+    );
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    await seedTurns(hub, session.conversation_id, 4);
+
+    const res = await hub.compactSession(session.conversation_id);
+    assert.equal(res.compacted, true);
+    assert.equal(res.cancelled, undefined, "未取消时 cancelled 缺席");
+  });
 });
 
 describe("postMessage title projection", () => {
