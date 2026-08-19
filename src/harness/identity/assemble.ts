@@ -62,10 +62,11 @@ export interface AssemblyContext {
   readonly memoryResolver?: () => Promise<string | undefined>;
   readonly toolList?: () => ReadonlyArray<string> | undefined;
   readonly skills?: () => ReadonlyArray<SkillSummary> | undefined;
-  /** #361 T8 subagent coordinator 段注入缝 (可选):build-engine 在
-   *  subagentManager 装配 (chat/tui/serve) 时经 createIknowSystemResolver opts
-   *  传入 IKNOW_COORDINATOR_TEXT;ask (无 manager) 不传入 → 段缺席,字节级零
-   *  变化 (KV 缓存稳定契约)。空串亦视为缺席。 */
+  /** #558 T2 coordinator 段注入缝 (可选):默认路径(build-engine 在
+   *  chat/tui/serve 自建 manager)不再注入 —— 引导落点已迁到 spawn_subagent
+   *  工具 description (#557 T1 SSOT)。调用方显式传入非空字符串仍渲染
+   *  "## Sub-agent coordination" 段;缺席/undefined/空串 → 段缺席 (KV 缓存
+   *  稳定契约)。 */
   readonly coordinatorText?: string;
 }
 
@@ -103,10 +104,11 @@ export function createIknowSystemResolver(opts: {
   readonly toolList?: () => ReadonlyArray<string> | undefined;
   /** #337 T6 skills 注入缝 (可选):见 AssemblyContext.skills 注释。 */
   readonly skills?: () => ReadonlyArray<SkillSummary> | undefined;
-  /** #361 T8 subagent coordinator 段注入缝 (可选):build-engine 在
-   *  subagentManager 装配 (chat/tui/serve) 时经 createIknowSystemResolver opts
-   *  传入 IKNOW_COORDINATOR_TEXT;ask (无 manager) 不传入 → 段缺席,字节级零
-   *  变化 (KV 缓存稳定契约)。空串亦视为缺席。 */
+  /** #558 T2 coordinator 段注入缝 (可选):默认路径(build-engine 在
+   *  chat/tui/serve 自建 manager)不再注入 —— 引导落点已迁到 spawn_subagent
+   *  工具 description (#557 T1 SSOT)。调用方显式传入非空字符串仍渲染
+   *  "## Sub-agent coordination" 段;缺席/undefined/空串 → 段缺席 (KV 缓存
+   *  稳定契约)。 */
   readonly coordinatorText?: string;
 }): () => Promise<string | undefined> {
   const bootstrapActive = shouldIncludeBootstrap(opts.surface);
@@ -299,8 +301,9 @@ export function skillsSegment(skills: ReadonlyArray<SkillSummary>): string {
  *    proactive(proactively) · parallelizable · blocks until finished
  *  措辞 "Default contract today" 为 V2 追加异步纪律段留空间。
  *
- *  build-engine 在 subagentManager 装配时经 createIknowSystemResolver opts
- *  传入;ask (surface !== chat/tui/serve) 不传 → 段缺席 (字节级零变化)。 */
+ *  #558 T2:build-engine 默认路径不再注入该常量 —— 引导落点已迁到
+ *  spawn_subagent 工具 description (#557 T1 SSOT)。装配缝仍保留:调用方
+ *  经 createIknowSystemResolver opts.coordinatorText 显式传入仍渲染该段。 */
 export const IKNOW_COORDINATOR_TEXT = `
 Fork work to sub-agents running in separate processes. Two tools drive this:
 
