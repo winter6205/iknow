@@ -72,11 +72,11 @@ export async function startSessionServe(
 ): Promise<{ listening: ListeningServer; hub: SessionHub }> {
   // 显式 workspaceRoot(CLI --workspace-root / env IKNOW_WORKSPACE_ROOT)注入
   // per-root identity + data 锚点;缺省 → dataDir 走 legacy ~/.iknow,
-  // initIknowWorkspaceSafe 走 iknowWorkspaceRoot()(process.cwd(),T2 D1.1)。
+  // identity seed 跳过(unbound — ADR-0023:serve 不把 process.cwd() 当 seed)。
   // review-fix (M1 / H1): 先条件 resolve 一次 —— explicit flag 或 env SSOT
   // 任一在场时走 resolver(CLI flag 非法 → typed WorkspaceRootError
-  // fail-fast,打印友好);两者都缺 → undefined(保持 dataDir 默认 ~/.iknow
-  // 与 initIknowWorkspaceSafe 默认 cwd 行为,不漂移)。
+  // fail-fast,打印友好);两者都缺 → undefined,保持 hub unbound
+  // (dataDir 默认 ~/.iknow,不 seed 任何 cwd 状态)。
   const envWsRoot = loadIknowEnv().workspaceRoot;
   const workspaceRoot =
     opts?.workspaceRoot !== undefined || envWsRoot !== undefined
@@ -86,13 +86,18 @@ export async function startSessionServe(
           env: { [WORKSPACE_ROOT_ENV_KEY]: envWsRoot },
         })
       : undefined;
-  // #196 IKNOW T5 + ADR-0019 (T2): eager + idempotent 初始化 per-root identity
-  // workspace(initIknowWorkspaceSafe 内部 try/catch+warn,失败不阻塞装配 —
-  // 幂等备份,build-engine 内还有一次)。workspaceRoot 在场 → seed 落
-  // `<workspaceRoot>/.iknow`。
-  await initIknowWorkspaceSafe(
-    workspaceRoot ? { workspace: join(workspaceRoot, ".iknow") } : undefined
-  );
+  // #196 IKNOW T5 + ADR-0019 (T2) + ADR-0023 (T4): eager + idempotent 初始化
+  // per-root identity workspace(initIknowWorkspaceSafe 内部 try/catch+warn,
+  // 失败不阻塞装配 — 幂等备份,build-engine 内还有一次)。workspaceRoot 在场 →
+  // seed 落 `<workspaceRoot>/.iknow`;**缺席 → 完全跳过**(不再把 `process.cwd()`
+  // 当作 identity seed 写进 `<cwd>/.iknow` —— 长驻 serve 的 cwd ≠ 用户项目根,
+  // serve 必须等 SPA 显式选定 workspace 后才能发 turn,见 ADR-0023 作为 ADR-0019
+  // D1.1 的表面例外;chat/tui/ask 的 cwd 默认不变)。
+  if (workspaceRoot !== undefined) {
+    await initIknowWorkspaceSafe({
+      workspace: join(workspaceRoot, ".iknow"),
+    });
+  }
   // W1: serve 入口也执行宿主侧 init 脚本(默认 ~/.iknow/init.sh)。
   // 与 chat/ask 共用 runHostInitScriptSafe;文件不存在则 skip,失败不阻塞。
   // D1.2:host-init 保持 global —— 不 thread workspaceRoot。
@@ -127,12 +132,25 @@ export async function startSessionServe(
     // review-fix (M1 / H1): serve 入口已解析的 workspaceRoot 透传给 hub →
     // 走 build-engine 时 bash fence 对齐 identity seed / dataDir 锚点。
     ...(workspaceRoot ? { workspaceRoot } : {}),
+    // serve-workspace T4 (ADR-0023): recents/trust 名单落 home —— 显式
+    // `--workspace-root` / `IKNOW_WORKSPACE_ROOT` 预绑时以 confirmTrust=true
+    // 写入 `<homedir>/.iknow/workspaces.json`(规则 3:显式指定 = 显式信任)。
+    // 缺席 → hub 保持 T2 语义(无 trust gate、不落 recents),见 hub.ts。
+    recentsHome: homedir(),
     // Prefer the full handle when provided so web can resolve asks; fall back
     // to the bare askUser (back-compat for callers that only wire `.ask`).
     ...(opts?.askHandle
       ? { askUser: opts.askHandle.ask, askHandle: opts.askHandle }
       : {}),
   });
+
+  // serve-workspace T4 (ADR-0023): flag/env 解析出 absolute root → 启动即预绑
+  // 到 hub(boundRoot = resolved,recents 写入)。用户显式 `--workspace-root` /
+  // `IKNOW_WORKSPACE_ROOT` = 显式信任,必须传 confirmTrust:true(未被 recents
+  // 收录的新绝对路径才能过信任门)。缺席 → hub 保持 unbound,等 SPA 显式选择。
+  if (workspaceRoot !== undefined) {
+    await hub.bindWorkspace(workspaceRoot, { confirmTrust: true });
+  }
 
   const port =
     opts?.port ??

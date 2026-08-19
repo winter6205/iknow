@@ -36,10 +36,12 @@
 
 ## Status of ACR cross-check (PASS — hand to writing-plans)
 
+Re-verify 2026-08-19 (pinned ownership + EXIT + 5-class):
+
 ```
-bounded-context-guardian: yes — HTTP/绑定留在 session-api；recents 文件属 home 配置面（~/.iknow/workspaces.json）；SPA 只消费 DTO；不从 session-api import tui；harness 仍只收 cwd/workspaceRoot/sandboxRoot 同值，不新增 LoopEngineDeps 字段
-defensive-contract-validator: yes — T1/T3 覆盖 empty/relative/not_found；T2 覆盖 unbound postMessage 与 concurrent 两根 Map；overflow 超长路径走 WorkspaceRootError；exception 缺会话 404
-error-handling-enforcer: yes — unbound/非法根用 typed ValidationError 或 WorkspaceRootError 映射 400；不吞成 cwd fallback；EXIT = 400 body.kind 文档化
+bounded-context-guardian: yes — recents 钉在 src/config/workspaces-recents.ts（home 配置面）；HTTP/绑定留在 session-api；SPA 只消费 DTO；不从 session-api import tui；harness 仍只收 cwd/workspaceRoot/sandboxRoot 同值
+defensive-contract-validator: yes — T1 empty/negative/overflow(>MAX_WORKSPACE_ROOT_CHARS)/exception；T2 unbound + concurrent 两根 Map；T3 PUT empty/relative/not_found/overflow/缺 confirmTrust + recents concurrent merge + corrupt JSON exception
+error-handling-enforcer: yes — EXIT: unbound → ValidationError field=workspaceRoot HTTP 400 kind=validation；WorkspaceRootError 在 sendError 先于 store not_found 映射 400 kind=validation field=path；recents parse_failed 422 / io_error 500 / concurrent_write 409；schema 非法根 422 schema_invalid；永不 cwd fallback
 complexity-anti-drift: yes — 声明结构：resolver 复用既有；hub 增加 Map 查找而非把 serve.ts 变成装配器；SPA picker 独立组件；无「一个函数同时解析根+跑 loop+画 UI」
 minimal-change-verifier: yes — 计划按 tracer bullet 1 commit；不改 TUI/chat cwd 默认；不顺手做 worktree
 OVERALL: PASS — hand to writing-plans

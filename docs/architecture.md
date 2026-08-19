@@ -63,6 +63,25 @@ Multi-turn chat / REPL is a **host-layer** concern. See:
 Cross-turn state lives in the harness turn loop (LLM history within `run()`)
 plus a per-session `SessionContext` marker.
 
+## serve workspace = explicit (ADR-0023, T3/T4/T5)
+
+`iknow serve` is **unbound** by default. The serve hub MUST NOT fall back to
+`process.cwd()` as the workspace root (the long-running process cwd ≠ user
+project root). The hub stays unbound until the SPA Picker binds an absolute
+path; until then `POST /api/v1/sessions/:id/messages` returns 400
+`validation` field=`workspaceRoot`. Flag/env pre-bind via
+`--workspace-root <abs>` / `IKNOW_WORKSPACE_ROOT` is opt-in explicit
+(ADR-0019 D1.1 still holds for `chat` / `tui` / `ask`). Bound state writes
+`workspaceRoot` onto each session file; engine
+`cwd === workspaceRoot === sandboxRoot` then collapse to the same absolute
+path. Trust roster lives in `<home>/.iknow/workspaces.json`; new absolute
+paths require explicit `confirmTrust` on PUT (optimistic rev-CAS).
+
+ADR-0019 (per-root state anchor) is unchanged for `chat` / `tui` / `ask`;
+this ADR is the serve-surface exception. See
+`docs/adr/0023-serve-workspace-explicit.md` and
+`specs/serve-workspace.md` (`specs/README.md:36`).
+
 ## Non-goals (this scaffold)
 
 - Durable multi-tenant store

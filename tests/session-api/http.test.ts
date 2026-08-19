@@ -17,6 +17,7 @@
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -29,7 +30,10 @@ import {
   type ListeningServer,
   type SessionHttpServerOptions,
 } from "../../src/session-api/http.ts";
-import { SessionStore } from "../../src/session-api/store/index.ts";
+import {
+  SessionStore,
+  resolveProjectSessionDir,
+} from "../../src/session-api/store/index.ts";
 import { createPermissionModeContext } from "../../src/harness/permission/modes.ts";
 import type { AssistantTurnResult } from "../../src/harness/index.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
@@ -829,6 +833,162 @@ describe("static file serving", () => {
     } finally {
       if (staticServer) await staticServer.close();
       await rm(staticRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// -- serve-workspace T3: workspace bind + recents/trust ----------------------
+
+describe("GET/PUT /api/v1/workspace + GET /api/v1/workspaces (T3)", () => {
+  async function putJson(opts: {
+    readonly path: string;
+    readonly payload: unknown;
+  }): Promise<{ status: number; body: unknown }> {
+    const res = await fetch(`${origin}${opts.path}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(opts.payload),
+    });
+    const body = await res.json();
+    return { status: res.status, body };
+  }
+
+  async function freshServeServer(): Promise<void> {
+    await listening.close();
+    const recentsHome = await mkdtemp(join(tmpdir(), "iknow-http-recents-"));
+    baseDir = await mkdtemp(join(tmpdir(), "iknow-http-ws-"));
+    const store = new SessionStore(baseDir);
+    const hub = new SessionHub({
+      store,
+      deps: makeDeps([assistantResult({ texts: ["ws-bound"] })]),
+      surface: "serve",
+      recentsHome,
+    });
+    listening = await listenSessionServer({ hub, host: "127.0.0.1", port: 0 });
+    origin = `http://${listening.host}:${listening.port}`;
+  }
+
+  it("GET unbound → 200 { bound: false }", async () => {
+    const { status, body } = await getJson("/api/v1/workspace");
+    assert.equal(status, 200);
+    const b = body as { bound?: boolean; root?: string };
+    assert.equal(b.bound, false);
+    assert.equal(b.root, undefined);
+  });
+
+  it("PUT empty path → 400 validation field=path", async () => {
+    const { status, body } = await putJson({
+      path: "/api/v1/workspace",
+      payload: { path: "" },
+    });
+    assert.equal(status, 400);
+    assertNestedError({ body, kind: "validation" });
+    assert.equal((body as { error?: { field?: string } }).error?.field, "path");
+  });
+
+  it("PUT relative path → 400 validation field=path", async () => {
+    const { status, body } = await putJson({
+      path: "/api/v1/workspace",
+      payload: { path: "data/foo" },
+    });
+    assert.equal(status, 400);
+    assertNestedError({ body, kind: "validation" });
+    assert.equal((body as { error?: { field?: string } }).error?.field, "path");
+  });
+
+  it("PUT missing path (WorkspaceRootError not_found) → 400 validation, NOT 404", async () => {
+    // Precedence: WorkspaceRootError mapping must fire BEFORE the store
+    // not_found guard, else this would surface as 404.
+    const { status, body } = await putJson({
+      path: "/api/v1/workspace",
+      payload: { path: join(tmpdir(), "iknow-no-such-dir-xyz") },
+    });
+    assert.equal(status, 400);
+    assertNestedError({ body, kind: "validation" });
+    assert.equal((body as { error?: { field?: string } }).error?.field, "path");
+  });
+
+  it("PUT trusted root without confirmTrust → 400 validation", async () => {
+    // The trust gate only exists when recentsHome is wired — reboot the
+    // server with a recents home so this exercises the actual gate.
+    await freshServeServer();
+    const root = await mkdtemp(join(tmpdir(), "iknow-http-trusted-"));
+    try {
+      const { status, body } = await putJson({
+        path: "/api/v1/workspace",
+        payload: { path: root },
+      });
+      assert.equal(status, 400);
+      assertNestedError({ body, kind: "validation" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("PUT confirmTrust:true binds; GET → bound with root; createSession writes the root", async () => {
+    // recentsHome must be wired for the trust gate + recents persistence
+    // assertions (last sub-block: GET /api/v1/workspaces must return 200).
+    await freshServeServer();
+    const root = await mkdtemp(join(tmpdir(), "iknow-http-bind-"));
+    try {
+      const { status, body } = await putJson({
+        path: "/api/v1/workspace",
+        payload: { path: root, confirmTrust: true },
+      });
+      assert.equal(status, 200);
+      const b = body as { bound?: boolean; root?: string };
+      assert.equal(b.bound, true);
+      assert.equal(b.root, root);
+
+      const after = await getJson("/api/v1/workspace");
+      assert.equal((after.body as { bound?: boolean }).bound, true);
+      assert.equal((after.body as { root?: string }).root, root);
+
+      // createSession writes the bound root onto the session file.
+      const cid = await createSession();
+      const dir = resolveProjectSessionDir(baseDir, process.cwd());
+      const raw = JSON.parse(
+        readFileSync(join(dir, `${cid}.json`), "utf8")
+      ) as { workspaceRoot?: string };
+      assert.equal(raw.workspaceRoot, root);
+
+      // Recents persisted with the trusted root.
+      const recents = await getJson("/api/v1/workspaces");
+      assert.equal(recents.status, 200);
+      const list = recents.body as { workspaces?: { root?: string }[] };
+      assert.ok(Array.isArray(list.workspaces));
+      assert.deepEqual(
+        list.workspaces!.map((w) => w.root),
+        [root]
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("GET /api/v1/workspaces without recentsHome → 404 (serve not wired)", async () => {
+    const { status, body } = await getJson("/api/v1/workspaces");
+    assert.equal(status, 404);
+    assertNestedError({ body, kind: "not_found" });
+  });
+
+  it("PUT trusted root on the second attempt binds without confirmTrust", async () => {
+    await freshServeServer();
+    const root = await mkdtemp(join(tmpdir(), "iknow-http-rebind-"));
+    try {
+      const first = await putJson({
+        path: "/api/v1/workspace",
+        payload: { path: root, confirmTrust: true },
+      });
+      assert.equal(first.status, 200);
+      const second = await putJson({
+        path: "/api/v1/workspace",
+        payload: { path: root },
+      });
+      assert.equal(second.status, 200);
+      assert.equal((second.body as { bound?: boolean }).bound, true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });

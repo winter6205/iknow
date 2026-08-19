@@ -24,23 +24,11 @@ import {
 } from "../../web/src/lib/slash.ts";
 
 describe("matchSlash — 合法命令", () => {
-  it("TUI 词表 11 条无参或带参均可匹配", () => {
-    for (const name of [
-      "sessions",
-      "new",
-      "quit",
-      "exit",
-      "help",
-      "info",
-      "thinking",
-      "effort",
-      "compact",
-      "rewind",
-      "mcp",
-    ]) {
-      const m = matchSlash(`/${name}`);
-      assert.ok(m !== null, `/${name} must match`);
-      assert.equal(m?.name, name);
+  it("SLASH_COMMANDS 全部条目无参或带参均可匹配（动态跟随词表扩容）", () => {
+    for (const cmd of SLASH_COMMANDS) {
+      const m = matchSlash(`/${cmd.name}`);
+      assert.ok(m !== null, `/${cmd.name} must match`);
+      assert.equal(m?.name, cmd.name);
     }
   });
 
@@ -93,19 +81,10 @@ describe("matchSlash — 非法输入 → null", () => {
 describe("slashCandidates — 前缀过滤", () => {
   it('裸 "/" → 全部静态命令按词表序（skill 不入场）', () => {
     const names = slashCandidates("/").map((c) => c.name);
-    assert.deepEqual(names, [
-      "sessions",
-      "new",
-      "quit",
-      "exit",
-      "help",
-      "info",
-      "thinking",
-      "effort",
-      "compact",
-      "rewind",
-      "mcp",
-    ]);
+    assert.deepEqual(
+      names,
+      SLASH_COMMANDS.map((c) => c.name)
+    );
   });
 
   it("前缀过滤：/c → compact；/th → thinking；/e → effort+exit", () => {

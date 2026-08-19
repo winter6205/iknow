@@ -1,8 +1,13 @@
 import type { ChatPhase } from "../hooks/useSessionChat";
+import { WorkspaceChip } from "./WorkspaceChip";
 
 export type ChatHeaderProps = {
   phase: ChatPhase;
   healthLabel: string | null;
+  /** serve-workspace T5: picker 绑定态（chip 展示）。 */
+  workspaceBound: boolean;
+  workspaceRoot: string | null;
+  onOpenWorkspacePicker: () => void;
 };
 
 function statusFor(phase: ChatPhase): { label: string; dotClass: string } {
@@ -19,7 +24,13 @@ function statusFor(phase: ChatPhase): { label: string; dotClass: string } {
   }
 }
 
-export function ChatHeader({ phase, healthLabel }: ChatHeaderProps) {
+export function ChatHeader({
+  phase,
+  healthLabel,
+  workspaceBound,
+  workspaceRoot,
+  onOpenWorkspacePicker,
+}: ChatHeaderProps) {
   const status = statusFor(phase);
 
   return (
@@ -48,6 +59,11 @@ export function ChatHeader({ phase, healthLabel }: ChatHeaderProps) {
           <span aria-hidden="true">▗</span>
           Trace
         </a>
+        <WorkspaceChip
+          bound={workspaceBound}
+          root={workspaceRoot}
+          onOpen={onOpenWorkspacePicker}
+        />
         <span
           className="flex items-center gap-1.5 font-mono text-[11px] tracking-[0.02em] text-ink-3"
           title={healthLabel ?? undefined}

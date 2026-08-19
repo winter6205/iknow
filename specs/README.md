@@ -33,7 +33,7 @@
 ### 身份与记忆
 
 - `196-identity-assembly.md` — 身份认知装配（identity / soul / 首启 BOOTSTRAP）
-- `serve-workspace.md` — serve/Web 工作空间制度（显式主根，禁止自动 cwd；ADR-0023）
+- `serve-workspace.md` — serve/Web 工作空间制度（显式主根，禁止自动 cwd；ADR-0023, serve default = unbound, #531）
 
 ### Verify 证据优先重构（#449/#458，实施顺序 A→B→C→D）
 

@@ -8,7 +8,7 @@
  */
 import { afterAll, afterEach, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { join } from "node:path";
@@ -19,6 +19,7 @@ import {
 } from "../../src/session-api/serve.ts";
 import type { ListeningServer } from "../../src/session-api/http.ts";
 import type { SessionHub } from "../../src/session-api/hub.ts";
+import { resolveProjectSessionDir } from "../../src/session-api/store/index.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import { installTestSettingsSource } from "../_helpers/install-test-settings-source.ts";
 
@@ -198,6 +199,142 @@ describe("startSessionServe — dataDir resolution", () => {
     listening = out.listening;
     assert.ok(listening.port > 0);
     assert.ok(out.hub);
+  });
+});
+
+// -- workspace pre-bind (T4, ADR-0023) --------------------------------------
+//
+// Acceptance (plans/serve-workspace.md T4 + issue #536):
+//   - 无 flag/env 启动 → hub unbound（不把 process.cwd() 传 workspaceRoot，不
+//     用 cwd 做 identity seed —— initIknowWorkspaceSafe 在 unbound 时跳过）。
+//   - --workspace-root <abs> / IKNOW_WORKSPACE_ROOT → 启动即预绑 picker 根
+//     （hub.getWorkspaceState().bound === true 且 root === 解析值）。
+//   - recentsHome = homedir() wired → 显式预绑时 recents 文件被写入
+//     `<homedir>/.iknow/workspaces.json`(test 通过 installTestSettingsSource
+//     把 HOME 重定向到 tmp,天然隔离)。
+
+describe("startSessionServe — workspace pre-bind (T4)", () => {
+  // Helper: read the raw session file from disk via
+  // resolveProjectSessionDir (serve.ts's SessionStore uses the same layout;
+  // we don't expose the store, just read the file the test owns via baseDir).
+  async function readSessionWorkspaceRoot(
+    baseDir: string,
+    conversationId: string
+  ): Promise<string | undefined> {
+    const filePath = join(
+      resolveProjectSessionDir(baseDir, process.cwd()),
+      `${conversationId}.json`
+    );
+    const raw = JSON.parse(await readFile(filePath, "utf8")) as {
+      workspaceRoot?: string;
+    };
+    return raw.workspaceRoot;
+  }
+
+  it("无 flag/env → hub unbound;workspaceRoot 不传 cwd", async () => {
+    // Defensive: 防止更早的 describe 残留 env（虽然同 fork 内 file 顺序跑 +
+    // 本 describe 是本 file 第一组,理论上无残留,但 confirm zero 状态更稳）。
+    const prevEnv = process.env.IKNOW_WORKSPACE_ROOT;
+    delete process.env.IKNOW_WORKSPACE_ROOT;
+    const localBaseDir = await mkdtemp(join(tmpdir(), "iknow-t4-unbound-"));
+    try {
+      const out = await startSessionServe({
+        hubOptions: { askUser: createNoAskUser() },
+        dataDir: localBaseDir,
+        port: 0,
+      });
+      listening = out.listening;
+      // (a) picker unbound; deepEqual enforces `root` field 缺席(否则与
+      // {bound:false} 不等 → assert fails)。等价于 plan 钉的「不把 cwd 写入」
+      // 投射到 wire。
+      assert.deepEqual(out.hub.getWorkspaceState(), { bound: false });
+      // (b) recents wired (homedir = installTestSettingsSource 的 tmp home),
+      // 但本测试未 bind 任何 root → recents 文件缺失,loadWorkspacesRecents
+      // 返回 fresh empty state(plan §T3 ACR: missing file → []).
+      const recents = await out.hub.listTrustedWorkspaces();
+      assert.equal(recents.length, 0);
+      // (c) 创建会话后写盘文件不携带 workspaceRoot —— 等价于「不把 cwd 当
+      // seed 写进 identity workspace」(T1 additivity: 缺字段 ≠ cwd)。
+      const created = await out.hub.createSession();
+      const ws = await readSessionWorkspaceRoot(
+        localBaseDir,
+        created.session.conversation_id
+      );
+      assert.equal(ws, undefined);
+    } finally {
+      if (prevEnv !== undefined) process.env.IKNOW_WORKSPACE_ROOT = prevEnv;
+      await rm(localBaseDir, { recursive: true, force: true });
+    }
+  });
+
+  it("--workspace-root <abs> → hub bound;session 写入该 root", async () => {
+    const prevEnv = process.env.IKNOW_WORKSPACE_ROOT;
+    delete process.env.IKNOW_WORKSPACE_ROOT;
+    const root = await mkdtemp(join(tmpdir(), "iknow-t4-flag-"));
+    const localBaseDir = await mkdtemp(join(tmpdir(), "iknow-t4-flag-base-"));
+    try {
+      const out = await startSessionServe({
+        hubOptions: { askUser: createNoAskUser() },
+        dataDir: localBaseDir,
+        workspaceRoot: root,
+        port: 0,
+      });
+      listening = out.listening;
+      // (a) picker bound 到显式 absolute root。
+      assert.deepEqual(out.hub.getWorkspaceState(), { bound: true, root });
+      // (b) recents wired,显式预绑以 confirmTrust:true 写入 recents 文件。
+      const recents = await out.hub.listTrustedWorkspaces();
+      assert.ok(
+        recents.includes(root),
+        `recents should include the pre-bound root: ${root} (got ${JSON.stringify(recents)})`
+      );
+      // (c) T1 additivity: session file 携带 workspaceRoot = bound root。
+      const created = await out.hub.createSession();
+      const ws = await readSessionWorkspaceRoot(
+        localBaseDir,
+        created.session.conversation_id
+      );
+      assert.equal(ws, root);
+    } finally {
+      if (prevEnv !== undefined) process.env.IKNOW_WORKSPACE_ROOT = prevEnv;
+      await rm(root, { recursive: true, force: true });
+      await rm(localBaseDir, { recursive: true, force: true });
+    }
+  });
+
+  it("env IKNOW_WORKSPACE_ROOT → 预绑 (mirror flag 路径)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t4-env-"));
+    const localBaseDir = await mkdtemp(join(tmpdir(), "iknow-t4-env-base-"));
+    const prevEnv = process.env.IKNOW_WORKSPACE_ROOT;
+    // env 在 startSessionServe 内经 loadIknowEnv → envOptional 读出,所以必须
+    // 在调用前 set;finally 还原避免污染后续 case。
+    process.env.IKNOW_WORKSPACE_ROOT = root;
+    try {
+      const out = await startSessionServe({
+        hubOptions: { askUser: createNoAskUser() },
+        dataDir: localBaseDir,
+        port: 0,
+        // 不传 workspaceRoot —— 由 env SSOT 透传到 resolver。
+      });
+      listening = out.listening;
+      assert.deepEqual(out.hub.getWorkspaceState(), { bound: true, root });
+      const recents = await out.hub.listTrustedWorkspaces();
+      assert.ok(
+        recents.includes(root),
+        `recents should include the env-bound root: ${root} (got ${JSON.stringify(recents)})`
+      );
+      const created = await out.hub.createSession();
+      const ws = await readSessionWorkspaceRoot(
+        localBaseDir,
+        created.session.conversation_id
+      );
+      assert.equal(ws, root);
+    } finally {
+      if (prevEnv !== undefined) process.env.IKNOW_WORKSPACE_ROOT = prevEnv;
+      else delete process.env.IKNOW_WORKSPACE_ROOT;
+      await rm(root, { recursive: true, force: true });
+      await rm(localBaseDir, { recursive: true, force: true });
+    }
   });
 });
 

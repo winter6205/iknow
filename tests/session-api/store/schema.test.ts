@@ -546,6 +546,41 @@ describe("validateSessionFile — taskFocus field (#458 T2)", () => {
   });
 });
 
+// -- serve-workspace T1: additive workspaceRoot ------------------------------
+
+describe("validateSessionFile — workspaceRoot field (serve-workspace T1)", () => {
+  it("accepts a file with workspaceRoot absent (empty class)", () => {
+    assert.equal(validateSessionFile(valid), null);
+    assert.equal("workspaceRoot" in valid, false);
+  });
+
+  it("accepts an absolute workspaceRoot string", () => {
+    assert.equal(
+      validateSessionFile({ ...valid, workspaceRoot: "/abs/project" }),
+      null
+    );
+  });
+
+  it("returns 'workspaceRoot' for illegal present values", () => {
+    const illegal: unknown[] = [
+      "relative/path",
+      "",
+      null,
+      42,
+      {},
+      "not-absolute",
+      `/${"x".repeat(4096)}`,
+    ];
+    for (const workspaceRoot of illegal) {
+      assert.equal(
+        validateSessionFile({ ...valid, workspaceRoot }),
+        "workspaceRoot",
+        `must reject ${JSON.stringify(workspaceRoot)}`
+      );
+    }
+  });
+});
+
 // -- #458 T2: seedTaskFocus (T1 OQ2 algorithm) -------------------------------
 
 describe("seedTaskFocus (#458 T2 — T1 OQ2 algorithm)", () => {

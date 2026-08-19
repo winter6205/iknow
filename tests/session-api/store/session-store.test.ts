@@ -218,6 +218,8 @@ describe("SessionStore.load", () => {
     assert.equal(loaded.sanitized_at, raw.updatedAt);
     assert.equal(loaded.schemaVersion, CURRENT_SCHEMA_VERSION);
     assert.deepEqual(loaded.checkpoints, []);
+    assert.equal(loaded.workspaceRoot, undefined);
+    assert.equal("workspaceRoot" in loaded, false);
     assert.equal(after, before);
   });
 
