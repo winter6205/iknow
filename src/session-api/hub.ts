@@ -91,6 +91,7 @@ import type { GoalStatus, TaskFocusState } from "./store/index.js";
 import { applyTransition, assertValidTransition } from "./goal/index.js";
 import type {
   ApiErrorBody,
+  CompactCallerOpts,
   CompactSessionResponse,
   CreateSessionRequest,
   CreateSessionResponse,
@@ -1194,9 +1195,19 @@ export class SessionHub {
    * 幂等 no-op: 消息条数未减少(已低于压缩窗口或本就 ≤ keepRecent 或
    * 无 dropped 前缀)时不落盘、不 bump updatedAt,返回 compacted=false。
    * 实际压缩 → 落盘并重算 title。
+   *
+   * #548:`opts.signal` / `opts.onStream` 透传到 `runFullCompact`,让宿主
+   * 看到压缩期间的全套事件(compaction_started / completed / failed /
+   * cancelled + compaction_text_delta)并支持中途取消。**取消语义对齐
+   * Claude Code**:opts.signal abort → `signal_aborted` outcome → 不走
+   * fallback 截断、会话保持原样、不 bump updatedAt,返回
+   * `{ compacted: false, cancelled: true }`(additive 字段,与"未达阈值"
+   * 的 compacted=false 区分)。host observer 与 adapter 错误均经
+   * runFullCompact safeEmitStream 吞咽,本函数不另行暴露。
    */
   async compactSession(
-    conversationId: string
+    conversationId: string,
+    opts?: CompactCallerOpts
   ): Promise<CompactSessionResponse> {
     return this.serialize({
       conversationId,
@@ -1217,12 +1228,21 @@ export class SessionHub {
         // #467 step 2: 优先 LLM 结构化摘要(best-effort,失败回退 placeholder)。
         // cachedDeps 缺席(ask / oneshot 等无 harness 装配)→ adapter 不可用,
         // 跳过 LLM 路径,直接 placeholder。
+        // #548:opts.signal / opts.onStream 透传到 runFullCompact — 宿主可看
+        // 到 compaction_started/completed/failed/cancelled + compaction_text_delta
+        // 全套事件并支持中途取消。signal_aborted outcome 走 keep-state
+        // 路径(不 fallback 截断、不落盘、cancelled:true)对齐 Claude Code。
         let nextMessages: ReadonlyArray<AnthropicNativeMessage> | undefined;
+        let cancelled = false;
         if (this.cachedDeps?.adapter !== undefined) {
           try {
             const outcome = await runFullCompact({
               adapter: this.cachedDeps.adapter,
               dropped: split.dropped,
+              ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
+              ...(opts?.onStream !== undefined
+                ? { onStream: opts.onStream }
+                : {}),
             });
             if (outcome.kind === "summarized") {
               const preamble =
@@ -1237,11 +1257,27 @@ export class SessionHub {
                 },
                 ...split.kept,
               ];
+            } else if (outcome.kind === "signal_aborted") {
+              // Claude Code 取消语义:会话保持原样,不 fallback 截断、不
+              // bump updatedAt;cancelled:true 区分"未达压缩阈值"的
+              // compacted=false(web/TUI 渲染区分)。
+              cancelled = true;
             }
           } catch {
             // runFullCompact 自身已收敛所有错误到 FullCompactOutcome;
             // 此处 catch 是防御性兜底,任何意外抛出都视作失败 → placeholder。
           }
+        }
+
+        if (cancelled) {
+          return {
+            session: this.summarize({ file: session }),
+            turns: projectMessagesToTurns(before),
+            compacted: false,
+            cancelled: true,
+            beforeCount: before.length,
+            afterCount: before.length,
+          };
         }
 
         // 回退 / LLM 跳过 → 纯截断 + boundary placeholder。

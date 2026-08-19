@@ -263,12 +263,12 @@ describe("hub-bridge compactSession（/compact）", () => {
     }
 
     const compacted = await bridge.compactSession(id);
-    expect(compacted).toBe(true);
+    expect(compacted.compacted).toBe(true);
 
     // 短会话（1 turn = 2 条）→ 无需压缩。
     const id2 = await bridge.ensureSession(undefined);
     await bridge.postMessage({ conversationId: id2, text: "hi" });
-    expect(await bridge.compactSession(id2)).toBe(false);
+    expect((await bridge.compactSession(id2)).compacted).toBe(false);
   });
 
   test("missing session → 抛错（not_found 透传）", async () => {
@@ -278,6 +278,60 @@ describe("hub-bridge compactSession（/compact）", () => {
       inflight: createInflightRegistry(),
     });
     await expect(bridge.compactSession("no-such-id")).rejects.toThrow();
+  });
+
+  // #548:bridge.compactSession 把 opts.signal / opts.onStream 透传到
+  // SessionHub.compactSession → runFullCompact;host 收到 lifecycle 事件序列。
+  // 取消语义(返回 compacted=false, 会话保持原样)在 hub.test.ts 已覆盖。
+  test("opts.signal / opts.onStream 透传到 hub(返回 boolean 不变)", async () => {
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      deps: makeDeps(
+        Array.from({ length: 4 }, (_, i) =>
+          assistantResult({ texts: [`answer ${i}`] })
+        )
+      ),
+      inflight: createInflightRegistry(),
+    });
+    const id = await bridge.ensureSession(undefined);
+    for (let i = 0; i < 4; i++) {
+      await bridge.postMessage({ conversationId: id, text: `q${i}` });
+    }
+
+    const events: string[] = [];
+    const compacted = await bridge.compactSession(id, {
+      onStream: (e) => events.push(e.type),
+    });
+    expect(compacted.compacted).toBe(true);
+    // stub empty_response → compaction_started + compaction_failed 序列必出。
+    expect(events).toContain("compaction_started");
+    expect(events).toContain("compaction_failed");
+  });
+
+  // #548:pre-aborted signal → runFullCompact 早退 signal_aborted → hub
+  // 走 keep-state 路径 → bridge 返回 compacted=false(取消同形)且不落盘。
+  test("pre-aborted signal → compacted=false,会话保持原样", async () => {
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      deps: makeDeps(
+        Array.from({ length: 4 }, (_, i) =>
+          assistantResult({ texts: [`answer ${i}`] })
+        )
+      ),
+      inflight: createInflightRegistry(),
+    });
+    const id = await bridge.ensureSession(undefined);
+    for (let i = 0; i < 4; i++) {
+      await bridge.postMessage({ conversationId: id, text: `q${i}` });
+    }
+
+    const controller = new AbortController();
+    controller.abort();
+    const compacted = await bridge.compactSession(id, {
+      signal: controller.signal,
+    });
+    expect(compacted.compacted).toBe(false);
+    expect(compacted.cancelled).toBe(true);
   });
 });
 

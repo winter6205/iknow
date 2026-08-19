@@ -294,8 +294,9 @@ function appendSystemInterrupt(state: LoopState): LoopState {
  * `opts.signal` / `opts.onStream`:run 级取消信号与流式事件观察者透传到
  * `runFullCompact`——reactive 调用点传 `opts.signal`(PromptTooLongError 重试
  * 前压缩期间用户取消 → 保持原样 → protocolError 收场);proactive 调用点传
- * `opts?.onStream`(宿主收到 compaction_started / completed / failed + 摘要
- * text_delta 直透)。缺席 → 行为零变化(旧 `signal: undefined` 语义)。
+ * `opts?.onStream`(宿主收到 compaction_started / completed / failed +
+ * compaction_text_delta,后由 full-compact innerOnStream 重映射而来,#550
+ * 渲染污染守门)。缺席 → 行为零变化(旧 `signal: undefined` 语义)。
  */
 async function applyCompactAttachment(
   state: LoopState,

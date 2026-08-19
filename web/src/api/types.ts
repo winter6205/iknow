@@ -110,6 +110,8 @@ export type CompactSessionResponse = {
   turns: TurnDto[];
   /** true 表示实际发生了裁剪；false 表示已低于阈值、无变化。 */
   compacted: boolean;
+  /** #548:signal abort → true,会话保持原样;其余时刻缺席 = false。 */
+  cancelled?: boolean;
   beforeCount: number;
   afterCount: number;
 };

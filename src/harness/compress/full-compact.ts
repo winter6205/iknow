@@ -246,9 +246,11 @@ export interface CompactAdapter {
  *
  * `opts.onStream` 透传:Claude Code 的压缩体感 = 模型生成可见 + 可取消,
  * 不是黑屏等待。压缩调用开始 / 结束各 emit 一条 `compaction_started` /
- * `compaction_completed`(携带 outcome.kind + latencyMs),adapter 自身的
- * text_delta / tool 事件经 request.onStream 直透到宿主层;emit 一律
- * try/catch 吞咽(观察者错误不得反流回压缩逻辑,对齐 wireStreamEvents D3)。
+ * `compaction_completed`(携带 outcome.kind + latencyMs)。adapter 在压缩
+ * 上下文内的 text_delta 经 innerOnStream 重映射为 `compaction_text_delta`
+ * (#550:摘要文本与 assistant 回复文本分轨,宿主路由到独立压缩草稿);
+ * thinking_delta 吞咽;其余事件原样透传。emit 一律 try/catch 吞咽
+ * (观察者错误不得反流回压缩逻辑,对齐 wireStreamEvents D3)。
  */
 export async function runFullCompact(opts: {
   readonly adapter: CompactAdapter;
@@ -270,8 +272,34 @@ export async function runFullCompact(opts: {
     messages: compactMessages,
     turnCount: 0,
   });
+  // #548/#550:把 opts.onStream 包裹成 innerOnStream,使 adapter 在压缩上下文
+  // 内产生的 text_delta 重映射为 compaction_text_delta(避免摘要文本泄漏进
+  // 宿主主回答草稿,Claude Code 体感),thinking_delta 吞咽(scratchpad 不应
+  // 出现在宿主 thinking 区)。compaction_* 生命周期事件由 runFullCompact 自
+  // 身经 safeEmitStream 直发 opts.onStream,本 wrapper 仅透传 + 走
+  // safeEmitStream(观察者异常不得反流,stream.ts:46-62 契约)。opts.onStream
+  // 缺席 → innerOnStream 缺席,adapter.request.onStream = undefined,与 #467
+  // 之前零变化。
+  const innerOnStream: ((event: HarnessStreamEvent) => void) | undefined =
+    opts.onStream !== undefined
+      ? (event) => {
+          if (event.type === "text_delta") {
+            safeEmitStream(opts.onStream, {
+              type: "compaction_text_delta",
+              text: event.text,
+            });
+            return;
+          }
+          if (event.type === "thinking_delta") {
+            // 压缩 scratchpad(模型思考过程)不暴露给宿主;若直透则混入宿主
+            // thinking 区,语义错误。
+            return;
+          }
+          safeEmitStream(opts.onStream, event);
+        }
+      : undefined;
   const request = Object.freeze({
-    ...(opts.onStream !== undefined ? { onStream: opts.onStream } : {}),
+    ...(innerOnStream !== undefined ? { onStream: innerOnStream } : {}),
   });
   const compactController = new AbortController();
   const compositeSignal = AbortSignal.any(
