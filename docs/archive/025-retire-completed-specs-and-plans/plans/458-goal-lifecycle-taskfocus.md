@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-08-20.** Superseded by `specs/verify-goal-gate.md`. Do not implement from this file.
+
 # Plan: 458 — goal 生命周期重构：goal/taskFocus 拆分 + model_proposed 删除 + /goal 三面 + 确定性校验
 
 **Goal:** 把 #458 map 的 G 票决议（#459 拆分定稿 / #461 T6 裁剪 + model_proposed 删除 / #460 validateGoalText / #463 固定锚调研背书）落成代码 — goal 是纯用户固定锚，taskFocus 是 deterministic 任务焦点；T6 模型提议/确认通道零落地；/goal 命令三面齐整（status/clear/\<text\>）；task 公式 `goal.text ?? taskFocus.text ?? query` 数据侧就位供 #449 消费。

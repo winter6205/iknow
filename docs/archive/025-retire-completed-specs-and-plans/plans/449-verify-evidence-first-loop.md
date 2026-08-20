@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-08-20.** Superseded by `specs/verify-goal-gate.md`. Do not implement from this file.
+
 # Plan: 449b — verify 闭环重构：证据优先编排 + 补跑信封 + 证据感知只读判官（unverified 四态）
 
 **Goal:** 把 master 现状「settings 配 command → 沙箱重跑 / command 缺失 → 判官盲查」的 A/B 二选一模型，重构为「证据优先 → 补跑 → 证据感知判官兜底」的三级判定流，并让判官拿到证据体检单、吐出四态（pass/fail/unverified/abort）、拿不准永不 PASS。

@@ -35,12 +35,11 @@
 - `196-identity-assembly.md` — 身份认知装配（identity / soul / 首启 BOOTSTRAP）
 - `serve-workspace.md` — serve/Web 工作空间制度（显式主根，禁止自动 cwd；ADR-0023, serve default = unbound, #531）
 
-### Verify 证据优先重构（#449/#458，实施顺序 A→B→C→D）
+### Verify / 完成门禁
 
-- `468-subagent-judge-tool-surface.md` — 子代理声明工具面=实际工具面（判官只读契约前置 bug fix，A）
-- `458-goal-lifecycle-taskfocus.md` — goal/taskFocus 拆分 + model_proposed 删除 + /goal 三面 + validateGoalText（B）
-- `449-evidence-checker.md` — 证据优先纯函数规则引擎（三态 verdict + 三防 + D2 探测，C）
-- `449-verify-evidence-first-loop.md` — 验证循环重构主体：证据优先编排 + 补跑信封 + 证据感知判官 unverified 四态（D）
+- `verify-goal-gate.md` — HITL vs `/goal` 自动模式两套判断逻辑；完成向 LLM 只挂自动模式；taskFocus 仅 compact（supersedes 归档 `128-verify-classifier` / `458` 判定公式 / `449-loop` 判官门禁）
+- `468-subagent-judge-tool-surface.md` — 子代理声明工具面=实际工具面（判官只读契约）
+- `449-evidence-checker.md` — 证据优先纯函数规则引擎（三态 verdict + 三防 + D2 探测）
 
 ---
 
@@ -49,6 +48,9 @@
 批量归档：`docs/archive/025-retire-completed-specs-and-plans/specs/`
 
 - `126-hook-system.md` — superseded by `#406` roundtrip mask
+- `128-verify-classifier.md` — superseded by `verify-goal-gate.md`（无 command 则每轮 completed 必跑判官 / `task` 可回退 query）
+- `458-goal-lifecycle-taskfocus.md` — 数据模型已落地；判定公式 `goal ?? taskFocus ?? query` superseded by `verify-goal-gate.md`
+- `449-verify-evidence-first-loop.md` — 三级流 shape 仍参考；「INSUFFICIENT 必请判官」+ 消费 458 公式 superseded by `verify-goal-gate.md`
 - `128-auto-correction-loop.md` — 落地完成（`012bc7c1`）
 - `119-compression-landing.md` — 落地完成（PR #239）
 - `228-memory-injection-landing.md` — 落地完成（PR #233，决策沉淀于 ADR-0009 / ADR-0010）

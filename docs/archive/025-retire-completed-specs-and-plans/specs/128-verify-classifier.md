@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-08-20.** Superseded by `specs/verify-goal-gate.md`. Do not implement from this file.
+
 # Spec: 128 — verify 分类器（子代理 LLM 判官，填空 command 缺失）
 
 > 来源：wayfinder 地图 #128 验证闭环 · 本 session（2026-08-13/14）grilling D1–D8 operator 逐条确认（见 git log `128-verify-loop` 分支讨论）

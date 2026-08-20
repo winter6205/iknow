@@ -1,10 +1,10 @@
 # Plan: 449a — evidence-checker：证据优先判定的纯函数规则引擎（三态 verdict + 三防 + D2 探测）
 
 **Goal:** 实现 #449 证据优先判定的确定性前级——纯函数规则引擎核对主会话 transcript 里的真实执行证据（bash tool_use + exit 0 + 框架 green marker + 时效 + 无削弱痕迹），产出三态 verdict（SUFFICIENT / CONTRADICTED / INSUFFICIENT），并附 D2 自动探测默认验证命令。
-**Architecture:** 纯函数层（G2-1 明示落点 `src/harness/verify/evidence-checker.ts` + `command-probe.ts`），零 IO、零 LLM、零 loop 接线、零新依赖；输入 = `ReadonlyArray<AnthropicNativeMessage>` 只读快照 + `claimIndex` 标量，输出 = `EvidenceReport`；6 条检查全部封装在 checker 内部，调用方只消费 verdict 不数条件。编排缝（`verify-loop.ts:610` produceObservation）与 VerificationRecord trace 字段扩展移交 `plans/449-verify-evidence-first-loop.md`，本 plan 不接线。
+**Architecture:** 纯函数层（G2-1 明示落点 `src/harness/verify/evidence-checker.ts` + `command-probe.ts`），零 IO、零 LLM、零 loop 接线、零新依赖；输入 = `ReadonlyArray<AnthropicNativeMessage>` 只读快照 + `claimIndex` 标量，输出 = `EvidenceReport`；6 条检查全部封装在 checker 内部，调用方只消费 verdict 不数条件。编排缝与 VerificationRecord 扩展见 `specs/verify-goal-gate.md`（旧 `plans/449-verify-evidence-first-loop.md` 已归档），本 plan 不接线。
 **Tech Stack:** TypeScript + Node（ESM，tsc strict），无新依赖。纯正则 + 字符串解析（框架 marker 识别），不引入 parser 库。
 **Spec link:** `specs/449-evidence-checker.md`（ACR PASS 5/5，2026-08-16）
-**前置依赖**: 无（可与 `plans/458-goal-lifecycle-taskfocus.md` 并行）；下游：`plans/449-verify-evidence-first-loop.md`（verdict 契约消费方，本 plan 先行的原因）。
+**前置依赖**: 无；下游编排：`specs/verify-goal-gate.md`（verdict 契约消费方）。
 **Tracker**: GitHub（label `ready-for-agent`，native blocking via addBlockedBy；票创建留待 operator 放行）
 
 ---

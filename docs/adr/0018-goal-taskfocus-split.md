@@ -1,7 +1,7 @@
 # 0018. goal 是用户固定锚、taskFocus 是确定性任务焦点；模型对两者零写入路径
 
 Date: 2026-08-16
-Status: accepted
+Status: accepted; superseded-by ADR-0024 §判定公式 only
 
 Context: #408 的 `session.goal` 一字段两用，混淆「用户固定锚」与「模型可推进活对象」两个角色；#458 map 的 #459/#461/#460 决议要求拆分，并整体裁剪 #432 的 T6 propose/confirm 侧通道。
 

@@ -86,14 +86,20 @@ _Avoid_: unbound 时 buildHarnessEngine 或 postMessage；把 unbound 说成「�
 **product SPA (web/)**: Vite + React + TypeScript chat console；同源 Session client；JSON 侧栏。
 _Avoid_: 零依赖静态壳当产品；展示层省略 trace 字段
 
-**goal（会话使命）**: 用户显式设定的整个会话固定锚，agent 沿它自主探索/建设；只由 `/goal <text>` / `## GOAL: <text>` 写入（`source = user_pin`），仅 `/goal clear` 清除，verify-loop 终局写 `status = achieved / aborted`；verify-loop 输入的第一优先段（`goal.text ?? query`，#473）。
-_Avoid_: 把 goal 当模型可推进的活对象（`model_proposed` / T6 propose-confirm 已整体删除）；模型输出 / 工具结果 / 文件内容写 goal
+**正常模式**: 默认 HITL 产品：每轮说完把回合还给用户；完成向 LLM 关闭；硬失败打回干活模型。
+_Avoid_: 每个 completed 请 LLM 评「做完没」；先问有没有 goal 再决定怎么判
 
-**taskFocus（任务焦点）**: 长上下文中模型当前该围绕什么干、compact 后仍保持焦点的**确定性提取**对象（v1 不用 LLM）；首条 user 消息 seed，`text` ≤ 500 字符、`history` ≤ 5 条 × 300 字符去重；仅 compact 边界渲染一次（焦点截 240 + 最近 3 条各截 120）；**不进入 verify 输入**（#473：稳定焦点锚喂进 verify 会让新任务被旧焦点遮蔽而误判 PASS）。
-_Avoid_: 用 LLM 摘要生成 taskFocus；普通 turn 注入；模型写 taskFocus；把 taskFocus 段喂进 verify 输入（#473）
+**自动模式**: `/goal` / `## GOAL:` 钉上后的无人值守循环，直到条件成立、判官 Impossible、不可恢复错误、可选轮次上限或用户 clear；空转停循环但 goal 可留着。
+_Avoid_: 把自动模式当成 verify 链上的第一道 if；自动模式里再用 taskFocus 当使命
 
-**task 取值公式（verify 消费端）**: `task = session.goal.text ?? query`（#473 收敛后口径）；判定层只读消费、不回写。数据侧三段公式 `goal.text ?? taskFocus.text ?? query`（SC3 / #458 T8）仍是 taskFocus/紧凑渲染的派生历史口径，但**不再作为 verify 输入的来源**。
-_Avoid_: 把 taskFocus 段喂进 verify 输入（#473）；把证据上下文塞进 task 字段（走 evidenceContext）
+**goal（会话使命）**: 自动模式的完成条件，只由 `/goal <text>` / `## GOAL:` 写入（`source = user_pin`），仅 `/goal clear` 或停档清掉；钉上即进入自动模式。
+_Avoid_: `goal.text ?? query` 当验收任务；把 goal 当模型可推进的活对象；模型输出 / 工具结果 / 文件内容写 goal
+
+**taskFocus（任务焦点）**: 正常模式 compact 保焦对象（确定性提取，v1 不用 LLM）；寒暄不 seed，像样任务句写入一次后不自动切；仅 compact 边界渲染；自动模式内不存在。
+_Avoid_: 用 LLM 摘要；普通 turn 注入；当完成验收对象或 `/goal` 的第二张焦点卡；首条「你好」当终身焦点
+
+**task 取值公式**: 无统一 `??` 链。自动模式判官 `task = goal.text`（无 fallback）；正常模式不设完成向 `task`。
+_Avoid_: `goal ?? taskFocus ?? query`；`goal.text ?? query`；把 evidenceContext 拼进 task
 
 **streaming arm**: LLM 客户端默认流式臂（`IKNOW_LLM_STREAM` 值域 `on | off`，默认 `on`，`env.ts` SSOT），`off` 回退非流式臂；原生 SSE 事件不出 adapter 边界，收敛为 `HarnessStreamEvent` 最小集（`text_delta` / `tool_call_start`，`src/harness/stream.ts`），终态经 SDK `finalMessage()` -> `interpretMessage`（SSOT）落为同形 `AssistantTurnResult`。
 _Avoid_: 把 `stream: false` + 裸 JSON 解析当默认 LLM 臂；让原生 SSE 事件逸出 adapter 边界
@@ -131,11 +137,11 @@ _Avoid_: 固定轮数一刀切；单轮退化即停；无兜底上限
 **escalate 模式**: 修正耗尽后的可选处置（默认 report 停止+如实报告）——注入升级指令（禁止重复同一修复、换思路或明确报告阻塞）并给新预算继续；总预算不重置。服务长程自主任务。
 _Avoid_: 把 escalate 当无限轮次；降级放行（验证未通过算完成）
 
-**判官（judge）**: command 缺失时接管「任务完成了吗」判定的子代理 LLM 分类器；工具面只读（deny `bash / edit_file / write_file / web_fetch / web_search`，由 def-list 期裁剪保证声明面 = 实际面）；#449 重构后为证据感知、四态输出（pass / fail / unverified / abort）。
-_Avoid_: 给判官执行能力（G1 决议只读）；与 evidence-checker（确定性纯函数规则引擎，零 LLM）混同
+**判官（judge）**: 共用的只读 LLM 分类器系统（四态；内环 `maxTurns: 2`）；完成向评价只挂自动模式逻辑模块。
+_Avoid_: 另起一个自动模式专用判官产品；command 缺失就当总开关每轮请判官；给判官执行能力；与 evidence-checker 混同
 
-**checker 三态 verdict**: 证据充分性判定 = `EVIDENCE_SUFFICIENT`（直接 PASS，零 LLM 成本）/ `EVIDENCE_CONTRADICTED`（硬矛盾：删/清空测试文件等二进制事实）/ `EVIDENCE_INSUFFICIENT`（先补跑、再判官）；6 条检查封装在 `evidence-checker.ts` 内部，调用方只消费 verdict 不数条件。
-_Avoid_: 与闭环「三态判定」（pass / 真失败 / 不稳定——那是轮次判定，这是证据充分性判定）混同；调用方自数 PASS 条件
+**checker 三态 verdict**: 证据充分性判定 = `EVIDENCE_SUFFICIENT` / `EVIDENCE_CONTRADICTED` / `EVIDENCE_INSUFFICIENT`；6 条检查封装在 `evidence-checker.ts` 内部。HITL 用它做硬失败/补跑；自动模式里它只进 `evidenceContext` 当提示，绿了仍要 LLM 评 `goal.text`。
+_Avoid_: 与闭环「三态判定」混同；调用方自数 PASS 条件；`SUFFICIENT` 当作自动模式已完成
 
 **green marker**: 测试框架输出里的通过摘要行（白名单 pytest / jest / vitest / go test / cargo test）；checker 只从框架摘要行读通过数字。
 _Avoid_: 扫描任意 stdout 判绿；白名单外自造框架解析
@@ -146,8 +152,8 @@ _Avoid_: 把 exit 0 当测试通过
 **unverified**: 判官第 4 态——判官工作正常，但读完证据后认为不足以判定完成，拒绝猜 PASS/FAIL；映射到 `unstable`（停止、不注入信封、结果原样返回用户），与 `abort`（判官自身 transport/schema/超时故障）严格区分，`VerificationRecord.reason` 落盘区分。
 _Avoid_: 把 unverified 猜成 pass 或 fail（"a verifier that bluffs is worse than none"）；与 abort 混同
 
-**evidenceContext（证据体检单）**: 判官输入信封附加字段 = checker verdict + 不足原因 + 已执行测试命令列表 + 补跑尝试结果 + 原始证据摘要（宿主侧截断 ≤ 20000 codepoints）；task 字段不重绑。
-_Avoid_: 把证据塞进 task 字段；注入前不截断
+**evidenceContext（证据体检单）**: 判官信封独立字段（checker 三态、缺因、已跑命令、摘要，宿主截断 ≤ 20000 codepoints）；是提示不是考题，`SUFFICIENT` 不是自动模式 PASS 通行证。
+_Avoid_: 把证据塞进 task 字段；注入前不截断；让判官去回答这张 JSON
 
 **补跑信封**: `EVIDENCE_INSUFFICIENT` 时注入主会话的反馈信封（"你声称完成，但缺真实测试证据 + 原因 + 请跑 <命令> 并展示框架通过摘要"）；命令来源 = 用户 `verify.command` 优先，否则 D2 探测；每闭环至多 1 次。
 _Avoid_: 与 `[VALIDATION FAILED]` 失败信封混同（补跑信封用 `[VERIFY: rerun needed]` 前缀）；无限补跑轮
@@ -169,6 +175,7 @@ _Avoid_: 与 hard-wall 职责混同；Pre 缝保持零产品消费者；把它�
 - **run() messages -> adapter streaming arm -> interpretMessage**: harness LLM path（流事件以 `HarnessStreamEvent` 经 `onStream` 暴露）
 - **turn -> LoopEngine -> tool call -> result -> next turn**: harness 驱动；tool use 经 ACI permission middleware
 - **Session HTTP -> run() -> AssistantTurnResult -> SessionHub**: session-api host 路径；messages 每回合投影到 UI
+- **正常模式 vs 自动模式**: 默认 HITL 与 `/goal` 循环是两套判断逻辑模块，共用判官系统；不是一条 `goal ?? query` 链
 
 ## Flagged ambiguities
 
@@ -183,6 +190,7 @@ _Avoid_: 与 hard-wall 职责混同；Pre 缝保持零产品消费者；把它�
 - **project stack defaults vs .env.local**: env.ts 代码默认是项目级栈 SSOT（ADR-0001）；`.env.local` 重复声明同值非密项会形成第二源 / drift。`.env.local` 职责 = 密钥值 + 机器级覆盖，不是重新声明栈
 - **secret-roundtrip mask（#406）**: 用户文本中的密钥形态被识别层替换为 `<<<SECRET_N>>>` 占位符（N 从 1 单调递增，per-engine registry 共享，in-memory 不落盘）；bash 工具 spawn 前 `restore()` 回填真值；输出 mask 经 `currentSecretValues(registry.values())` 兜底遮蔽。**session 重启后历史占位符无法还原**（registry 非持久化，占位符原样透传不抛——acceptable limitation）。`settings.secrets.mode` 控制 `roundtrip`（默认）| `block`（#126 deny-only guard 兼容）
 - **next phase focus**: harness tool surface 扩展 + session 持久化 + I4 风格的 live smoke
+- **goal vs taskFocus vs 判官 task**: goal 只开自动模式；taskFocus 只 HITL compact；完成向 `task` 仅自动模式的 `goal.text`（ADR-0024）
 
 ---
 

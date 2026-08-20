@@ -2,7 +2,7 @@
 
 > 来源：#449 map 的 G2 #451（规则引擎位置 / PASS 公式 / 三态 verdict 制）+ G4 #453（框架白名单 / 时效 / anti-gaming 两档 / fail-closed）+ G3 #452（D2 自动探测方向）；移植蓝图 = R2 #456（did-it evidence.py + agent-receipts gaming.py + truth structured/count 分层）；证据基线 = R3 #457（bash exit code 在 tool_result 结构化 JSON；插入点缝）。
 > 上游 map：#449（verify 证据优先判定）。
-> 定位：本 spec = **纯函数层**（G2-1 明示落点 `src/harness/verify/evidence-checker.ts`），零 IO、零 LLM、零 loop 接线；编排层消费归 SPEC `449-verify-evidence-first-loop`。两份 spec 同属 #449，本份先行（编排层依赖 verdict 契约）。
+> 定位：本 spec = **纯函数层**（G2-1 明示落点 `src/harness/verify/evidence-checker.ts`），零 IO、零 LLM、零 loop 接线；编排层（何时请判官、`task` 从哪来）归 SPEC `verify-goal-gate.md`。旧编排 spec `449-verify-evidence-first-loop.md` 已归档。
 > 假设闸门：operator 已授权"自己决策、自己审完写好"（delegated assumption confirmation）。
 
 ## Glossary（exact copy from docs/CONTEXT.md + 决议新术语）
@@ -19,7 +19,7 @@
 
 ## Architectural Constraints（ADR 引用）
 
-- **ADR-0003 / ADR-0008**（trace placement / token accounting）：checker 产出的 `gamingSignals` 随 `VerificationRecord` 落 TraceService（字段扩展在 SPEC 449-verify-evidence-first-loop）；checker 本体不写 trace、不做 IO。
+- **ADR-0003 / ADR-0008**（trace placement / token accounting）：checker 产出的 `gamingSignals` 随 `VerificationRecord` 落 TraceService（字段扩展在编排层 / 归档 `449-verify-evidence-first-loop`）；checker 本体不写 trace、不做 IO。
 - **ADR-0006**（tool-output-capping）：checker 只消费已被 sandbox（12k codepoints）/ executor（20k chars）截断过的 stdout——截断是上游权威，checker 不信任也不重建截断元数据（executor truncation authority 契约 X 精神）。
 - **冻结契约**：checker 是纯函数模块——不 import loop-engine / session-api / subagent；输入 = 只读 messages 数组 + 少量标量，输出 = verdict 报告。编排缝（`verify-loop.ts:610` produceObservation）的接线不在本 spec。
 
@@ -54,7 +54,7 @@ tests/harness/verify/evidence-checker/   # 【新】单元矩阵（五框架 mar
 tests/harness/verify/command-probe.test.ts
 ```
 
-不改：`verify-loop.ts`（接线归 SPEC 449-verify-evidence-first-loop）、`verdict.ts`（闭环三态，不同域）、`classifier.ts`。
+不改：`verify-loop.ts`（接线归 SPEC `verify-goal-gate.md`）、`verdict.ts`（闭环三态，不同域）、`classifier.ts`。
 
 ## Code Style
 

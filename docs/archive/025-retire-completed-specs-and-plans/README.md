@@ -18,12 +18,15 @@
 
 ## specs/
 
-原 `specs/` 下已落地 / superseded 的 10 个 spec（理由与 `specs/README.md`「已归档」段一致）：
+原 `specs/` 下已落地 / superseded 的 spec（理由与 `specs/README.md`「已归档」段一致）：
 
 - `119-compression-landing.md` — 落地完成（PR #239）
 - `126-hook-system.md` — superseded by `#406` roundtrip mask
+- `128-verify-classifier.md` — superseded by `specs/verify-goal-gate.md`（2026-08-20）
 - `128-auto-correction-loop.md` — 落地完成（`012bc7c1`）
 - `228-memory-injection-landing.md` — 落地完成（PR #233，决策沉淀于 ADR-0009 / ADR-0010）
+- `449-verify-evidence-first-loop.md` — 判官门禁 superseded by `specs/verify-goal-gate.md`（2026-08-20）
+- `458-goal-lifecycle-taskfocus.md` — 判定公式 superseded by `specs/verify-goal-gate.md`（2026-08-20）
 - `252-loop-stop-semantics.md` — 决策已进 ADR-0011 / ADR-0012 / ADR-0013
 - `321-tui-opentui-migration.md` — 渲染后端迁移完成（PR #360；旧 ink 归档 `archive/tui-ink/`）
 - `356-subagent-v1.md` — superseded by V1.5（`#361` foreground spawn 反转）
@@ -31,13 +34,16 @@
 
 ## plans/
 
-原 `plans/` 下已落地 / superseded 的 17 个 plan：
+原 `plans/` 下已落地 / superseded 的 plan：
 
 - `119-compression-landing.md` — 落地完成（PR #239）
 - `120-session-persistence.md` — 落地完成；活跃 spec `120-session-persistence.md` 保留
 - `126-hook-system.md` — superseded by `#406` roundtrip mask
+- `128-verify-classifier.md` — superseded by `specs/verify-goal-gate.md`（2026-08-20）
 - `128-auto-correction-loop.md` — 落地完成（`012bc7c1`）
 - `146-tui.md` — TUI 交互骨架落地；活跃 spec `146-tui.md` 保留
+- `449-verify-evidence-first-loop.md` — superseded by `specs/verify-goal-gate.md`（2026-08-20）
+- `458-goal-lifecycle-taskfocus.md` — superseded by `specs/verify-goal-gate.md`（2026-08-20）
 - `196-identity-assembly.md` — 身份认知装配落地；活跃 spec `196-identity-assembly.md` 保留
 - `228-memory-injection-landing.md` — 落地完成（PR #233）
 - `252-loop-stop-semantics.md` — 决策已进 ADR-0011 / ADR-0012 / ADR-0013

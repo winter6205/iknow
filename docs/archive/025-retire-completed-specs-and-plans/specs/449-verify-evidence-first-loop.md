@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-08-20.** Superseded by `specs/verify-goal-gate.md`. Do not implement from this file.
+
 # Spec: 449b — verify 闭环重构：证据优先编排 + 补跑信封 + 证据感知只读判官（unverified 四态）
 
 > 来源：#449 map——G1 #450（判官输入 = task + 主会话执行证据文本，只读）/ G2 #451（不足→先补跑再判官）/ G3 #452（command 降级可选覆盖 + 零配置默认 = 证据优先 + D2 探测）/ G5 #454（unverified 四态 / unstable 映射 / task 不重绑 + evidenceContext / 信封策略三分）；消费 SPEC `449-evidence-checker`（verdict 契约）+ SPEC `468-subagent-judge-tool-surface`（判官只读前提）+ SPEC `458-goal-lifecycle-taskfocus`（task 公式数据侧）。

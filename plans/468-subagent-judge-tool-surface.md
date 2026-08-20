@@ -8,7 +8,7 @@
 
 **Spec link:** `specs/468-subagent-judge-tool-surface.md`
 
-**前置依赖**: 无（可先行）。下游：`plans/449-verify-evidence-first-loop.md` 的判官只读前提。
+**前置依赖**: 无（可先行）。下游编排与判官门禁：`specs/verify-goal-gate.md`（旧 `plans/449-verify-evidence-first-loop.md` 已归档）。
 
 **Tracker:** GitHub（label `ready-for-agent`，native blocking via addBlockedBy；票创建留待 operator 放行）。
 

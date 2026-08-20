@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-08-20.** Superseded by `specs/verify-goal-gate.md`. Do not implement from this file.
+
 # Spec: 458 — goal 生命周期重构：goal/taskFocus 拆分 + model_proposed 删除 + /goal 三面 + 确定性校验
 
 > 来源：#458 map 的 G 票决议——#459（goal/taskFocus 拆分定稿）/ #461（T6 裁剪 + model_proposed 删除）/ #460（不加防注入层 + validateGoalText）/ #463（固定锚调研背书）；消费 #432（worktree-408-not-yet-specified-impl）中**裁剪后**的 T7/T8/T11/T12 素材。

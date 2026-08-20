@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-08-20.** Superseded by `specs/verify-goal-gate.md`. Do not implement from this file.
+
 # Plan: 128 — verify 分类器（子代理 LLM 判官，填空 command 缺失）
 
 Spec: `specs/128-verify-classifier.md`（ACR Round 2 五维全 yes，2026-08-14）

@@ -1,7 +1,7 @@
 # Spec: 468 — Sub-agent worker tool surface = declared deny-list（判官只读契约的前置 bug fix）
 
 > 来源：#468 待办 2（disallowedTools 未在 worker 消费）+ #450 G1 Resolution（"判官能力 = 只读；工具面裁剪由 #468 待办 2 承担，G1 以此为事实基线"）。
-> 上游 map：#449（verify 证据优先）/ #458（goal 生命周期）。本 spec 是 #449 G1 判官输入升级（SPEC `449-verify-evidence-first-loop`）的**前置依赖**，不依赖其他 spec，可先行。
+> 上游 map：#449（verify 证据优先）/ #458（goal 生命周期）。编排与判官门禁见 `verify-goal-gate.md`。本 spec 只保证判官 worker 声明工具面=实际工具面。
 > 假设闸门：operator 已授权"自己决策、自己审完写好"（delegated assumption confirmation，沿 `specs/408-session-goal.md` 先例）。
 
 ## Glossary（exact copy from docs/CONTEXT.md + 本 spec 新术语）

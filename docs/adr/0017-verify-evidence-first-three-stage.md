@@ -1,7 +1,7 @@
 # 0017. verify 判定改为证据优先三级流：证据核对 → 补跑 → 证据感知判官，证据充分永不重跑
 
 Date: 2026-08-16
-Status: accepted
+Status: accepted; superseded-by ADR-0024 §完成向邀请 only
 
 Context: master 的 verify 是 A/B 二选一模型——「settings 配 command → 沙箱重跑 / command 缺失 → 判官盲查」，`verify.command` 是唯一激活验证的钥匙；判官实际拿全量工具面且只收到 task 字段。
 
