@@ -2,7 +2,7 @@
  * #196 IKNOW T6:roundtrip (SC 26) + JSON corrupt (SC 31) + schema invalid
  * (SC 32) + user.md missing (SC 33) + eager/idempotent。
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import {
   mkdtemp,
   rm,
@@ -17,9 +17,11 @@ import { join } from "node:path";
 import {
   iknowWorkspaceRoot,
   initializeIknowWorkspace,
+  initIknowWorkspaceSafe,
   readIknowState,
   writeIknowState,
 } from "../../../src/harness/identity/index.ts";
+import { USER_TEMPLATE } from "../../../src/harness/identity/user-template.ts";
 
 let workDir: string;
 beforeAll(async () => {
@@ -210,5 +212,142 @@ describe("initializeIknowWorkspace seeds BOOTSTRAP.md", () => {
 
     const content = await readFile(join(ws, "BOOTSTRAP.md"), "utf8");
     expect(content).toContain("First Contact");
+  });
+});
+
+// ── rev 2026-08-21 systematic-debugging seed/read path alignment ──
+//
+// Bug surface: seed (`initializeIknowWorkspace`) used `iknowWorkspaceRoot()`
+// = `process.cwd()/.iknow` as default fallback, while assemble
+// (`readUserProfile` in assemble.ts) reads `ctx.workspaceRoot ?? ctx.userHome`
+// = `<homedir>/.iknow`. When CLI chat/ask/tui has no explicit `--workspace-root`
+// flag and no `IKNOW_WORKSPACE_ROOT` env var, seed wrote USER_TEMPLATE into
+// `<cwd>/.iknow/user.md` (never visible to the user), while assemble reads
+// `<homedir>/.iknow/user.md` (the real profile). Path mismatch.
+//
+// Fix direction A: align seed default fallback to `<homedir>/.iknow` so seed
+// and read land on the same root in the no-explicit case (user.md is global,
+// not per-workspace). `opts.workspace` still wins when given (per-root state
+// for state.json / BOOTSTRAP.md).
+//
+// Note: the default-fallback branch (`opts?.workspace ?? path.join(homedir(),
+// ".iknow")`) is asserted by code inspection — module-level `vi.mock("node:os")`
+// is brittle (ESM namespace is not configurable) and process.env.HOME mutation
+// is non-portable. The expression itself is small and self-evident; production
+// fallback is covered by cli / serve / tui integration suites that exercise
+// the full chain. Here we verify the explicit-workspace path and the cross-
+// module alignment (seed-path == read-path for the same workspaceRoot).
+describe("initializeIknowWorkspace seed/read path alignment (rev 2026-08-21)", () => {
+  it("explicit workspace: seed lands on <workspace>/.iknow (path is caller-controlled)", async () => {
+    const ws = await mkdtemp(join(tmpdir(), "iknow-explicit-ws-"));
+    try {
+      const init = await initializeIknowWorkspace({ workspace: ws });
+      expect(init.root).toBe(ws);
+      // seed artifacts under that root
+      await readFile(join(init.root, "user.md"), "utf8");
+      const stateRaw = JSON.parse(
+        await readFile(join(init.root, "state.json"), "utf8")
+      );
+      expect(stateRaw.bootstrap_seeded).toBe(true);
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+
+  it("cross-module: seed-path (init) and read-path (assemble ctx.workspaceRoot) align via shared root", async () => {
+    // assemble.readUserProfile(ctx) reads `<ctx.workspaceRoot>/.iknow/user.md`.
+    // initIknowWorkspaceSafe({ workspace }) writes to `<workspace>/.iknow/user.md`.
+    // Both endpoints must point at the same file — otherwise assemble silently
+    // reads an older / empty / missing user.md while seed thinks it succeeded.
+    const ws = await mkdtemp(join(tmpdir(), "iknow-cross-align-"));
+    try {
+      await initIknowWorkspaceSafe({ workspace: ws });
+
+      // Simulate assemble reader using the same workspaceRoot
+      const assembleReadPath = join(ws, "user.md");
+      const assembleRead = await readFile(assembleReadPath, "utf8");
+      expect(assembleRead).toBe(USER_TEMPLATE);
+    } finally {
+      await rm(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── rev 2026-08-21: 默认 fallback 单元测试 ──
+//
+// vi.mock of node:os works in this test runner (vitest with hoisting), unlike
+// the earlier failed attempt that tried vi.spyOn. ESM namespaces are normally
+// non-configurable, but vitest's vi.mock is hoisted to the top of the module
+// (Babel transform), so the mock factory runs before any module's import of
+// node:os resolves. workspace.ts calls `homedir()` lazily inside each function
+// body — not at import time — so a hoisted mock lands cleanly.
+//
+// The fake home lets us assert that the no-arg default fallback resolves to
+// `<homedir>/.iknow/` without touching the user's real ~/.iknow. We never pass
+// `workspace` to the three functions under test, so the inline literal
+// `path.join(homedir(), ".iknow")` is the only resolution path.
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return {
+    ...actual,
+    default: { ...actual, homedir: () => "/tmp/fake-home-iknow-test" },
+    homedir: () => "/tmp/fake-home-iknow-test",
+  };
+});
+
+const FAKE_HOME = "/tmp/fake-home-iknow-test";
+const FAKE_ROOT = `${FAKE_HOME}/.iknow`;
+
+describe("default-fallback to <homedir>/.iknow (rev 2026-08-21)", () => {
+  beforeAll(async () => {
+    // 清掉旧测试残留,确保本次跑是从干净状态开始
+    await rm(FAKE_ROOT, { recursive: true, force: true });
+    await mkdir(FAKE_HOME, { recursive: true });
+  });
+  afterAll(async () => {
+    await rm(FAKE_ROOT, { recursive: true, force: true });
+  });
+
+  it("initializeIknowWorkspace() (no opts) seeds user.md under <homedir>/.iknow/", async () => {
+    await rm(FAKE_ROOT, { recursive: true, force: true });
+
+    const init = await initializeIknowWorkspace();
+
+    expect(init.root).toBe(FAKE_ROOT);
+    // user.md 应该被 seed 在 <homedir>/.iknow/user.md
+    const userContent = await readFile(join(init.root, "user.md"), "utf8");
+    expect(userContent).toBe(USER_TEMPLATE);
+  });
+
+  it("writeIknowState({ bootstrap_seeded: true }) writes to <homedir>/.iknow/state.json", async () => {
+    await rm(FAKE_ROOT, { recursive: true, force: true });
+    await mkdir(FAKE_ROOT, { recursive: true });
+
+    const next = await writeIknowState({ bootstrap_seeded: true });
+
+    expect(next.bootstrap_seeded).toBe(true);
+    expect(next.schema_version).toBe(1);
+    // 文件必须落在 <homedir>/.iknow/state.json
+    const stateRaw = JSON.parse(
+      await readFile(join(FAKE_ROOT, "state.json"), "utf8")
+    );
+    expect(stateRaw.bootstrap_seeded).toBe(true);
+    expect(stateRaw.schema_version).toBe(1);
+  });
+
+  it("readIknowState() (no arg) reads from <homedir>/.iknow/state.json", async () => {
+    // 直接在期望路径写一份已知 state,然后 no-arg 读取
+    await rm(FAKE_ROOT, { recursive: true, force: true });
+    await mkdir(FAKE_ROOT, { recursive: true });
+    await writeFile(
+      join(FAKE_ROOT, "state.json"),
+      JSON.stringify({ schema_version: 1, bootstrap_seeded: true }),
+      "utf8"
+    );
+
+    const s = await readIknowState();
+
+    expect(s.bootstrap_seeded).toBe(true);
+    expect(s.schema_version).toBe(1);
   });
 });

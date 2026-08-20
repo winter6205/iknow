@@ -17,6 +17,7 @@
 import path from "node:path";
 import { promises as fs } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { homedir } from "node:os";
 
 import {
   resolveWorkspaceRoot,
@@ -143,7 +144,7 @@ function tryParseState(content: string, p: string): IknowStateV1 | undefined {
 export async function readIknowState(
   workspace?: string
 ): Promise<IknowStateV1> {
-  const ws = workspace ?? iknowWorkspaceRoot();
+  const ws = workspace ?? path.join(homedir(), ".iknow");
   const p = stateFilePath(ws);
   const content = await readIfExists(p);
   if (content === undefined) return defaultState();
@@ -176,7 +177,7 @@ export async function writeIknowState(
   patch: Partial<Omit<IknowStateV1, "schema_version">>,
   workspace?: string
 ): Promise<IknowStateV1> {
-  const ws = workspace ?? iknowWorkspaceRoot();
+  const ws = workspace ?? path.join(homedir(), ".iknow");
   const p = stateFilePath(ws);
   const current = await readIknowState(ws);
   const next: IknowStateV1 = {
@@ -215,7 +216,15 @@ export async function initIknowWorkspaceSafe(opts?: {
 export async function initializeIknowWorkspace(opts?: {
   workspace?: string;
 }): Promise<{ root: string; state: IknowStateV1 }> {
-  const root = opts?.workspace ?? iknowWorkspaceRoot();
+  // rev 2026-08-21 systematic-debugging seed/read alignment:
+  //   - `opts.workspace` 显式 → 最高优先级(per-root 状态锚)
+  //   - 缺省 → 落 `<homedir>/.iknow/`,与 `assemble.readUserProfile` 的
+  //     `ctx.workspaceRoot ?? ctx.userHome` fallback 对齐,避免 seed 路径
+  //     与 read 路径分歧(user.md 全局一份,不再在每个 workspace 下 seed)。
+  // 注意:历史 fallback 走 `iknowWorkspaceRoot()` = `<cwd>/.iknow`,会让
+  // chat/ask/tui 在没显式 --workspace-root / IKNOW_WORKSPACE_ROOT 时 seed 落到
+  // cwd 而 read 走 homedir,两者互不可见 —— 现已修复。
+  const root = opts?.workspace ?? path.join(homedir(), ".iknow");
   try {
     await fs.mkdir(root, { recursive: true });
   } catch (err) {
