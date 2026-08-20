@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppShell } from "./components/AppShell";
 import { ChatHeader } from "./components/ChatHeader";
 import { Composer } from "./components/Composer";
@@ -77,6 +77,16 @@ function ChatApp() {
   const [rewindIndex, setRewindIndex] = useState(0);
   // serve-workspace T5: picker 显示开关（CTA / chip / /workspace 三入口）。
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  // T5: 挂载一次性自动打开 picker（unbound 用户首次进站引导）。
+  // 用 ref 标记 — 用户手动关闭后不再触发, 避免每次 ws.bound 重置都弹。
+  const autoOpenedRef = useRef(false);
+  useEffect(() => {
+    if (autoOpenedRef.current) return;
+    if (ws.phase !== "ready") return;
+    if (ws.bound) return;
+    autoOpenedRef.current = true;
+    setWorkspaceOpen(true);
+  }, [ws.phase, ws.bound]);
 
   useEffect(() => {
     void api
@@ -171,9 +181,15 @@ function ChatApp() {
   // refreshSignal is bumped after newSession so the freshly created session
   // appears without a manual refresh click.
   const handleNewSession = useCallback(async () => {
+    // T5: unbound 状态下点「新会话」→ 打开 picker 引导选根（spec §Commands 1:
+    // unbound 不可发 turn）。T6 联动改 sidebar 时这条分支继续生效。
+    if (!ws.bound) {
+      setWorkspaceOpen(true);
+      return;
+    }
     await chat.newSession();
     bumpSidebar();
-  }, [chat, bumpSidebar]);
+  }, [chat, bumpSidebar, ws.bound]);
 
   const handleSelect = useCallback(
     async (id: string) => {

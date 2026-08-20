@@ -43,15 +43,42 @@ export function buildBindPayload(
 }
 
 /**
+ * serve-workspace T5: recents 列表项点击的 bind 载荷。recents 来自
+ * `GET /api/v1/workspaces`, 全部为已信任根, 无需再走 trust 二次确认 —
+ * 直接传 `confirmTrust: false`, 与 picker 内 trust toggle 路径解耦 (该路径
+ * 由 `buildBindPayload` 承担)。
+ *
+ * 把这条决策抽成纯函数 → renderToStaticMarkup 测试里也能直接断言
+ * "recents 点击 → onBind 带 confirmTrust=false" 的契约, 无需 jsdom。
+ */
+export function pickRecentForBind(root: string): {
+  path: string;
+  confirmTrust: boolean;
+} {
+  return { path: root, confirmTrust: false };
+}
+
+/**
  * serve-workspace T5: 顶部分区内联 panel（镜像 McpPanel 位置——消息流上方）。
- * 绝对路径输入 + 信任确认 toggle + 已信任根列表（点击填入输入框）。
- * 绑定失败不关闭，错误走 onNotice（消息流 notice 通道）。
+ *
+ * 二级折叠结构 (T5 UX 收紧):
+ *  - 顶部一段: 「已存在工作空间」recents 列表（round-md, basename 优先）。
+ *  - 下方一行 CTA: 「选择路径新建工作空间」, aria-expanded 折叠下方
+ *    path picker (含 input / 信任 toggle / bind / WorkspaceBrowser)。
+ *  - recents 非空 → 默认折叠 path picker; recents 空 → 自动展开
+ *    (用户进 picker 没有"已选工作空间"可点, 直接给路径编辑器)。
+ *
+ * 绑定失败不关闭, 错误走 onNotice (消息流 notice 通道)。
  */
 export function WorkspacePicker(props: WorkspacePickerProps) {
   const initialBase = resolveBrowserRoot(props.currentRoot);
   const [input, setInput] = useState(props.currentRoot ?? "");
   const [binding, setBinding] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  // T5: 默认折叠决策 — recents 缺席时直接展开, 避免空白面板无 CTA 可点。
+  const [showPathPicker, setShowPathPicker] = useState(
+    props.recents.length === 0
+  );
 
   const submit = async () => {
     const payload = buildBindPayload(input, confirming);
@@ -76,61 +103,91 @@ export function WorkspacePicker(props: WorkspacePickerProps) {
           关闭
         </button>
       </div>
-      <div className="flex gap-1">
-        <input
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="/abs/path/to/project"
-          aria-label="工作空间绝对路径"
-          className="min-w-0 flex-1 rounded-pill border border-ink-3/30 bg-surface px-2 py-1 font-mono text-[11px] outline-none focus:border-accent"
-        />
-        <button
-          type="button"
-          onClick={() => setConfirming((c) => !c)}
-          title="首次绑定新绝对路径需先确认信任"
-          aria-pressed={confirming}
-          className={`rounded-pill px-2 py-1 text-[11px] ${confirming ? "bg-warn text-ink" : "text-ink-3 hover:text-ink"}`}
-        >
-          信任{confirming ? "✓" : ""}
-        </button>
-        <button
-          type="button"
-          onClick={() => void submit()}
-          disabled={binding || !input.trim()}
-          className="rounded-pill bg-accent px-3 py-1 text-[11px] font-medium text-ink disabled:opacity-50"
-        >
-          {binding ? "绑定中…" : "绑定"}
-        </button>
-      </div>
-      <WorkspaceBrowser
-        initialBase={initialBase}
-        input={input}
-        onPickSubdir={(p) => setInput(p)}
-        onNotice={props.onNotice}
-        onBrowseSubdirs={props.onBrowseSubdirs}
-      />
       {props.recents.length > 0 ? (
         <>
-          <p className="mt-2 mb-1 text-ink-3">已信任的根（点击选择）</p>
-          <ul className="flex max-h-32 flex-col gap-0.5 overflow-y-auto">
-            {props.recents.map((r) => (
-              <li key={r}>
-                <button
-                  type="button"
-                  className={`w-full truncate rounded-pill px-2 py-1 text-left font-mono text-[11px] ${
-                    r === props.currentRoot
-                      ? "bg-accent-soft text-accent"
-                      : "hover:bg-accent-soft/50"
-                  }`}
-                  onClick={() => setInput(r)}
-                >
-                  {basename(r)} <span className="text-ink-3">· {r}</span>
-                </button>
-              </li>
-            ))}
+          <p className="mb-1 text-ink-3">已存在工作空间</p>
+          <ul
+            className="flex max-h-32 flex-col gap-0.5 overflow-y-auto"
+            aria-label="已存在工作空间列表"
+          >
+            {props.recents.map((r) => {
+              const payload = pickRecentForBind(r);
+              const name = basename(r);
+              return (
+                <li key={r}>
+                  <button
+                    type="button"
+                    aria-label={`选择工作空间 ${name}`}
+                    data-workspace-path={r}
+                    className={`flex w-full flex-col items-start gap-0.5 truncate rounded-md px-2 py-1 text-left ${
+                      r === props.currentRoot
+                        ? "bg-accent-soft text-accent"
+                        : "hover:bg-accent-soft/50"
+                    }`}
+                    onClick={() => {
+                      void props.onBind(payload.path, {
+                        confirmTrust: payload.confirmTrust,
+                      });
+                    }}
+                  >
+                    <span className="font-mono text-[11px]">{name}</span>
+                    <span className="truncate font-mono text-[10px] text-ink-3">
+                      {r}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         </>
+      ) : null}
+      <button
+        type="button"
+        aria-expanded={showPathPicker}
+        aria-controls="ws-path-picker-panel"
+        onClick={() => setShowPathPicker((s) => !s)}
+        className="mt-2 flex items-center gap-1 text-ink-3 hover:text-ink"
+      >
+        <span aria-hidden="true">{showPathPicker ? "▾" : "▸"}</span>
+        <span>选择路径新建工作空间</span>
+      </button>
+      {showPathPicker ? (
+        <div id="ws-path-picker-panel" className="mt-1">
+          <div className="flex gap-1">
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="/abs/path/to/project"
+              aria-label="工作空间绝对路径"
+              className="min-w-0 flex-1 rounded-pill border border-ink-3/30 bg-surface px-2 py-1 font-mono text-[11px] outline-none focus:border-accent"
+            />
+            <button
+              type="button"
+              onClick={() => setConfirming((c) => !c)}
+              title="首次绑定新绝对路径需先确认信任"
+              aria-pressed={confirming}
+              className={`rounded-pill px-2 py-1 text-[11px] ${confirming ? "bg-warn text-ink" : "text-ink-3 hover:text-ink"}`}
+            >
+              信任{confirming ? "✓" : ""}
+            </button>
+            <button
+              type="button"
+              onClick={() => void submit()}
+              disabled={binding || !input.trim()}
+              className="rounded-pill bg-accent px-3 py-1 text-[11px] font-medium text-ink disabled:opacity-50"
+            >
+              {binding ? "绑定中…" : "绑定"}
+            </button>
+          </div>
+          <WorkspaceBrowser
+            initialBase={initialBase}
+            input={input}
+            onPickSubdir={(p) => setInput(p)}
+            onNotice={props.onNotice}
+            onBrowseSubdirs={props.onBrowseSubdirs}
+          />
+        </div>
       ) : null}
     </div>
   );
@@ -241,12 +298,13 @@ export function WorkspaceBrowser(props: WorkspaceBrowserProps) {
                 <li key={e.path}>
                   <button
                     type="button"
+                    aria-label={`进入子目录 ${e.name}`}
                     onClick={() => {
                       const next = entryToInputPath(e);
                       setBrowseRoot(next);
                       props.onPickSubdir(next);
                     }}
-                    className="w-full truncate rounded-pill px-2 py-1 text-left font-mono text-[11px] hover:bg-accent-soft/50"
+                    className="w-full truncate rounded-md px-2 py-1 text-left font-mono text-[11px] hover:bg-accent-soft/50"
                   >
                     {e.name} <span className="text-ink-3">· {e.path}</span>
                   </button>

@@ -25,6 +25,7 @@ import {
 } from "../../web/src/components/WorkspaceChip.tsx";
 import {
   buildBindPayload,
+  pickRecentForBind,
   WorkspacePicker,
 } from "../../web/src/components/WorkspacePicker.tsx";
 
@@ -183,7 +184,7 @@ describe("WorkspaceChip 渲染", () => {
 });
 
 describe("WorkspacePicker 渲染", () => {
-  it("默认态：input + 信任 toggle + recents 列表 + 子目录浏览器(折叠)", () => {
+  it("recents 非空 → 默认折叠 path picker, 顶部「已存在工作空间」+ 折叠 CTA", () => {
     const html = renderToStaticMarkup(
       <WorkspacePicker
         recents={["/abs/old", "/abs/older"]}
@@ -195,24 +196,47 @@ describe("WorkspacePicker 渲染", () => {
       />
     );
     assert.ok(html.includes("选择工作空间根"), "must include picker title");
+    // recents 段标题 + 内容
     assert.ok(
-      html.includes('aria-label="工作空间绝对路径"'),
-      "must render path input"
+      html.includes("已存在工作空间"),
+      "must include recents section title"
     );
-    assert.ok(html.includes("信任"), "must render trust toggle");
-    // recents 列表 → 两个 basename + 全路径
     assert.ok(html.includes("old"), "must include first recent basename");
     assert.ok(html.includes("older"), "must include second recent basename");
     assert.ok(html.includes("/abs/old"), "must include full recent path");
-    // T3: 子目录浏览器(默认折叠, 仅 toggle button 可见)
-    assert.ok(html.includes("浏览子目录"), "must render browser toggle");
     assert.ok(
-      html.includes('aria-label="浏览子目录"'),
-      "must render browser aria-label"
+      html.includes("/abs/older"),
+      "must include second recent full path"
+    );
+    // path picker 默认折叠: input / trust / bind 不在 DOM
+    assert.ok(
+      !html.includes('aria-label="工作空间绝对路径"'),
+      "must NOT render path input when picker folded"
+    );
+    assert.ok(
+      !html.includes('aria-label="浏览子目录"'),
+      "must NOT render browser aria-label when picker folded"
+    );
+    assert.ok(
+      !html.includes("绑定"),
+      "must NOT render bind button when picker folded"
+    );
+    // 折叠 CTA 存在 + aria-expanded=false + aria-controls
+    assert.ok(
+      html.includes("选择路径新建工作空间"),
+      "must render fold CTA text"
+    );
+    assert.ok(
+      html.includes('aria-expanded="false"'),
+      "must mark fold CTA as collapsed by default"
+    );
+    assert.ok(
+      html.includes("ws-path-picker-panel"),
+      "must include aria-controls target id"
     );
   });
 
-  it("recents 为空 → 不渲染「已信任的根」段", () => {
+  it("recents 为空 → path picker 默认展开（CTA aria-expanded=true）", () => {
     const html = renderToStaticMarkup(
       <WorkspacePicker
         recents={[]}
@@ -223,10 +247,29 @@ describe("WorkspacePicker 渲染", () => {
         onBrowseSubdirs={async () => []}
       />
     );
-    assert.ok(!html.includes("已信任的根"), "must NOT render recents section");
+    assert.ok(
+      !html.includes("已存在工作空间"),
+      "must NOT render recents section"
+    );
+    // path picker 默认展开
+    assert.ok(
+      html.includes('aria-label="工作空间绝对路径"'),
+      "must render path input when picker auto-expanded"
+    );
+    assert.ok(html.includes("信任"), "must render trust toggle when expanded");
+    assert.ok(html.includes("绑定"), "must render bind button when expanded");
+    assert.ok(
+      html.includes('aria-expanded="true"'),
+      "must mark fold CTA as expanded by default"
+    );
+    // 子目录浏览器折叠按钮 (浏览器内仍需折叠, 不空请求)
+    assert.ok(
+      html.includes('aria-label="浏览子目录"'),
+      "must render browser toggle when picker expanded"
+    );
   });
 
-  it("currentRoot 命中 → 该项高亮（bg-accent-soft）", () => {
+  it("currentRoot 命中 → recents 该项高亮（bg-accent-soft）", () => {
     const html = renderToStaticMarkup(
       <WorkspacePicker
         recents={["/abs/active"]}
@@ -240,6 +283,78 @@ describe("WorkspacePicker 渲染", () => {
     assert.ok(
       html.includes("bg-accent-soft text-accent"),
       "must mark active recent with accent-soft"
+    );
+  });
+
+  it("recents 列表项 className 一律不含 rounded-pill (T5 list-style 收紧)", () => {
+    const html = renderToStaticMarkup(
+      <WorkspacePicker
+        recents={["/abs/old", "/abs/older"]}
+        currentRoot={null}
+        onBind={async () => {}}
+        onClose={() => {}}
+        onNotice={() => {}}
+        onBrowseSubdirs={async () => []}
+      />
+    );
+    // recents <li><button> 节点不应再贴 pill 类。路径里没有 ws-path-picker 内
+    // 的子目录 list (折叠态), 所以全 html 范围内 recents 列表项不应出现 rounded-pill。
+    assert.ok(
+      !html.includes("rounded-pill"),
+      "T5: list items must drop rounded-pill (use rounded-md)"
+    );
+    // 收紧 → 替换为小圆角 (rounded-md 即 Tailwind 6px, 或等效 rounded-[6px])
+    assert.ok(
+      html.includes("rounded-md"),
+      "must render list items with rounded-md (Tailwind 6px)"
+    );
+  });
+
+  it("recents 列表项 aria-label 含 workspace 名 (a11y)", () => {
+    const html = renderToStaticMarkup(
+      <WorkspacePicker
+        recents={["/abs/projects/iknow", "/abs/old"]}
+        currentRoot={null}
+        onBind={async () => {}}
+        onClose={() => {}}
+        onNotice={() => {}}
+        onBrowseSubdirs={async () => []}
+      />
+    );
+    assert.ok(
+      html.includes('aria-label="选择工作空间 iknow"'),
+      "must include aria-label '选择工作空间 iknow' for first recent"
+    );
+    assert.ok(
+      html.includes('aria-label="选择工作空间 old"'),
+      "must include aria-label '选择工作空间 old' for second recent"
+    );
+  });
+
+  it("折叠 CTA 自身为 button + aria-expanded/aria-controls + 不是 div onClick", () => {
+    const html = renderToStaticMarkup(
+      <WorkspacePicker
+        recents={["/abs/old"]}
+        currentRoot={null}
+        onBind={async () => {}}
+        onClose={() => {}}
+        onNotice={() => {}}
+        onBrowseSubdirs={async () => []}
+      />
+    );
+    // 折叠 CTA 是 <button>, aria-expanded + aria-controls 都在, 不允许 <div/span onClick>
+    assert.ok(
+      html.includes('aria-controls="ws-path-picker-panel"'),
+      "fold CTA must declare aria-controls"
+    );
+    // recents 列表项也都是 <button> (静态 markup 检验 — 无 div onClick)
+    assert.ok(
+      !/<div[^>]*\sonClick=/.test(html),
+      "must NOT contain <div onClick> (a11y red line)"
+    );
+    assert.ok(
+      !/<span[^>]*\sonClick=/.test(html),
+      "must NOT contain <span onClick> (a11y red line)"
     );
   });
 });
@@ -269,5 +384,28 @@ describe("WorkspacePicker — buildBindPayload（onBind 契约）", () => {
   it("纯空白输入 → null（不调用 onBind）", () => {
     assert.equal(buildBindPayload("", false), null);
     assert.equal(buildBindPayload("   ", true), null);
+  });
+});
+
+describe("WorkspacePicker — pickRecentForBind (recents 列表项 onBind 契约)", () => {
+  it("任意根 → path 不变 + confirmTrust=false（recents 全部为已信任）", () => {
+    assert.deepEqual(pickRecentForBind("/abs/projects/iknow"), {
+      path: "/abs/projects/iknow",
+      confirmTrust: false,
+    });
+  });
+
+  it("Windows 路径同样透传 + 不走 trust", () => {
+    assert.deepEqual(pickRecentForBind("C:\\Users\\me\\proj"), {
+      path: "C:\\Users\\me\\proj",
+      confirmTrust: false,
+    });
+  });
+
+  it("根路径 '/' → 原样返回 + 不走 trust", () => {
+    assert.deepEqual(pickRecentForBind("/"), {
+      path: "/",
+      confirmTrust: false,
+    });
   });
 });
