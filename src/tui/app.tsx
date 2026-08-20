@@ -560,16 +560,21 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     dataDirRef.current = props.dataDir;
   }, [props.dataDir]);
   // 复制通道：T5 优先 OSC52，失败退回原生 fallback 链。
+  // #343 修复：调用 OSC52 前必须先问 renderer.isOsc52Supported()——部分
+  // 终端（出于安全策略）会忽略 OSC52 字节但 copyToClipboardOSC52 仍返回
+  // true，导致「已复制」notice + 空剪贴板。先 gate 掉，避免盲信原生返回值。
   const doCopy = useCallback(
     async (text: string): Promise<CopyResult> => {
       if (text.length === 0) return { kind: "empty" };
-      let oscOk = false;
-      try {
-        oscOk = renderer.copyToClipboardOSC52(text);
-      } catch {
-        oscOk = false;
+      if (renderer.isOsc52Supported()) {
+        let oscOk = false;
+        try {
+          oscOk = renderer.copyToClipboardOSC52(text);
+        } catch {
+          oscOk = false;
+        }
+        if (oscOk) return { kind: "ok", method: "pbcopy" };
       }
-      if (oscOk) return { kind: "ok", method: "pbcopy" };
       return copyToClipboard(text, { dataDir: dataDirRef.current });
     },
     [renderer]
