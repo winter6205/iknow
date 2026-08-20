@@ -2,7 +2,7 @@
 
 ## 读取规范
 
-每次开始任务时按需读取：只读取与当前任务相关的文件。不要在 session start 全量加载 docs。
+每次开始任务时按需读取：只读取与当前任务相关的文件。
 
 ---
 
@@ -19,8 +19,6 @@
 @.claude/rules/security-boundaries.md
 
 ## Completion
-
-自动commit
 
 汇报使用中文
 
@@ -44,6 +42,11 @@
 
 ---
 
+## 本机已配
+
+- **本机 key 已配**。`npm run test:real-llm` 可跑。
+- `mcp__aiterm__pty_*` 已配：TUI/REPL 真实交互用它。
+
 ## 网络工具
 
 - `mcp__exa__*`。
@@ -54,12 +57,16 @@
 npm test          # vitest：unit + harness + integration
 ```
 
-## 运行时红线
+## 上游参考隔离
 
-- 禁止 runtime 链接 / import / symlink / 动态加载 `upstream-openharness`、`_upstream_gbrain/`（只读参考，gitignore）。
+- `upstream-openharness`（只读参考，gitignore）。
+
+## Git 操作
+
+- 自动commit。
 - 无用户明确 `push` 授权则不执行 `git push`。
 
-## 按需查阅（SSOT 指针，勿把正文抄进本文件）
+## 按需查阅（SSOT 指针）
 
 碰到对应任务再读；架构 / 配置 / 现状以 docs 为准，本文件不复述。
 
