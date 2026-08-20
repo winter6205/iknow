@@ -62,7 +62,7 @@ import {
 } from "../config/workspaces-recents.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
-import { MaxTurnsExceeded } from "../harness/errors.js";
+import { MaxTurnsExceeded, errorMessage } from "../harness/errors.js";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -83,12 +83,20 @@ import {
   extractTitle,
   pinGoal,
   seedTaskFocus,
+  shouldSeedTaskFocus,
   shouldPersistCheckpoint,
   toInterruptReason,
   validateGoalText,
 } from "./store/index.js";
 import type { GoalStatus, TaskFocusState } from "./store/index.js";
 import { applyTransition, assertValidTransition } from "./goal/index.js";
+import {
+  decideAutoGoalAfterTurn,
+  lastJudgeSignal,
+  nextGoalAfterDecision,
+  parseGoalPinInput,
+  turnHadToolUse,
+} from "./goal-auto.js";
 import type {
   ApiErrorBody,
   CompactCallerOpts,
@@ -231,6 +239,36 @@ export function mapStoreError(err: SessionStoreError): {
       },
     },
   };
+}
+
+/** Plain-object SessionStoreError guard (store never throws Error subclasses). */
+function isSessionStoreError(err: unknown): err is SessionStoreError {
+  if (typeof err !== "object" || err === null) return false;
+  if (err instanceof Error) return false;
+  const k = (err as { kind?: unknown }).kind;
+  return typeof k === "string" && k in STORE_ERROR_MAP;
+}
+
+/**
+ * Auto-loop persist is best-effort. Typed load faults skip persist without
+ * changing T3 continue/stop; unknown throws rethrow (store contract).
+ */
+function skipAutoPersistOnLoadError(err: unknown): void {
+  if (!isSessionStoreError(err)) {
+    throw err;
+  }
+  switch (err.kind) {
+    case "not_found":
+      // EXIT: missing session file — no auto-loop state to persist
+      return;
+    case "parse_failed":
+    case "schema_invalid":
+    case "io_error":
+    case "write_failed":
+    case "concurrent_write":
+      // EXIT: store load fault — skip persist; T3 stop unchanged
+      return;
+  }
 }
 
 // -- verify outcome → goal status (#458 T5 SC8) ------------------------------
@@ -807,15 +845,24 @@ export class SessionHub {
     // directive is skipped (goalDirective === "") and falls through to
     // validateText("") which rejects with "message text must be non-empty"
     // — preserves the existing empty-`## GOAL:` acceptance (#408 T3).
+    let pinText: string | undefined;
+    let pinMaxTurns: number | undefined;
     if (goalDirective !== null && goalDirective.length > 0) {
-      const msg = validateGoalText(goalDirective);
+      const parsed = parseGoalPinInput(goalDirective);
+      if (!parsed.ok) {
+        throw new ValidationError(parsed.error, { field: "goal_text" });
+      }
+      pinText = parsed.text;
+      pinMaxTurns = parsed.maxTurns;
+      const msg = validateGoalText(parsed.text);
       if (msg !== null) {
-        throw new ValidationError(`${goalDirective} rejected: ${msg}`, {
+        throw new ValidationError(`${parsed.text} rejected: ${msg}`, {
           field: "goal_text",
         });
       }
     }
-    const query = goalDirective !== null ? goalDirective : text.trim();
+    const query =
+      pinText ?? (goalDirective !== null ? goalDirective : text.trim());
     this.validateText(query);
     return this.serialize({
       conversationId,
@@ -838,14 +885,15 @@ export class SessionHub {
         // After pinning, `session` is reloaded so conditionalSave sees the
         // pinned goal and does NOT re-seed (else the T2 seed would overwrite
         // the T3 pin).
-        if (goalDirective !== null && goalDirective.length > 0) {
+        if (pinText !== undefined) {
           const now = new Date().toISOString();
           const pinned: SessionFileV1 = {
             ...session,
             goal: pinGoal({
               current: session.goal,
-              text: goalDirective,
+              text: pinText,
               now,
+              ...(pinMaxTurns !== undefined ? { maxTurns: pinMaxTurns } : {}),
             }),
             updatedAt: now,
             schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -858,7 +906,7 @@ export class SessionHub {
             id: randomUUID(),
             sessionId: conversationId,
             action: "pin",
-            text: goalDirective.slice(0, 200),
+            text: pinText.slice(0, 200),
             ts: now,
             conversationId,
           });
@@ -916,7 +964,8 @@ export class SessionHub {
           // 早退(行为 byte-stable,不影响停止语义 ADR-0011)。renderTaskFocusBoundary
           // 是 hub 内私有 closure — harness 域独立原则,harness 不 import
           // session-api,零反向依赖。
-          ...(session.taskFocus !== undefined
+          ...(session.taskFocus !== undefined &&
+          !(session.goal !== undefined && session.goal.text.length > 0)
             ? {
                 // 抽 const 让闭包内引用窄化后的 focus,消除非空断言。
                 boundaryAttachment: () => {
@@ -942,207 +991,223 @@ export class SessionHub {
         // #356 T7 (SC7):host drain — serve 入口每轮 run() 前,把 manager 内
         // completed 子代理结果浓缩成 user message,拼入 priorMessages 末尾。
         // 空 manager / 无 completed → priorMessages 不变 (行为零变化)。
-        const drained = await drainPendingSubagents(this.subagentManager);
-        const drainedMsg: AnthropicNativeMessage = {
-          role: "user",
-          content: [{ type: "text", text: drained }],
-        };
-        const priorMessages = drained
-          ? [...session.messages, drainedMsg]
-          : session.messages;
-        let finalResult: RunResult;
-        let verifyView: VerifyAnswerView | undefined;
-        // #408 T5: verify-loop terminal outcome (only set when verifyConfig
-        // is configured). Captured outside the try block so the post-run
-        // write-back can read it.
-        let verifyOutcome: VerifyLoopOutcome | undefined;
-        try {
-          // #128 T8:verifyConfig 非 undefined (含 command 空串) 时 run 被
-          // runVerifyLoop 包裹 (advisor 形态, 引擎零改动);缺席 → 原 run 调用
-          // 逐字节不变 (仅未接线路径)。
-          // runVerifyLoop 的 runFn 透传 onStream → wrappedOnStream 语义保持;
-          // trace 仅在 traceOut 配置时注入 (records 落盘, T7 已处理可选)。
-          // 注意: runVerifyLoop 的首轮 runFn 不带 priorMessages / onStream,
-          // 闭包必须兜底 hub 侧的 priorMessages 与 wrappedOnStream。
-          const runOutcome = this.verifyConfig
-            ? await runVerifyLoop({
-                runFn: (text, o) =>
-                  run(text, runDeps, o?.signal, {
-                    priorMessages: o?.priorMessages ?? priorMessages,
-                    onStream: o?.onStream ?? wrappedOnStream,
-                  }),
-                // #408 T4 + #449 B8 (修订 per #473): verify-loop's task
-                // field = `goal.text ?? query`. The taskFocus segment is
-                // DELIBERATELY removed from the verify input (#473): taskFocus
-                // is the stable focus anchor (seeded once, never switched by
-                // plain queries per OQ2), so feeding it into every verify
-                // round made a new task B re-verify the stale task A and
-                // short-circuit PASS. Verify must run the pinned mission
-                // (goal) or the CURRENT query — never the stable focus.
-                // taskFocus keeps its compact-boundary rendering + /goal
-                // status roles (data-side only, lifecycle unchanged).
-                userText:
-                  session.goal !== undefined && session.goal.text.length > 0
-                    ? session.goal.text
-                    : query,
-                config: this.verifyConfig,
-                sessionId: conversationId,
-                signal: opts.signal,
-                trace: runDeps.trace,
-                cwd: session.workspaceRoot ?? process.cwd(),
-                // #128 SC1 生产装配: subagentManager 在场 → 启用分类器填空
-                // (command 缺失/空串时分类器接管, spec Objective);缺席
-                // (ask 形态) → undefined, verify-loop 自然走透明关闭向后兼容。
-                runClassifier:
-                  this.subagentManager === undefined
-                    ? undefined
-                    : createRunClassifierFromManager({
-                        manager: this.subagentManager,
-                        ...(this.verifyConfig.classifierModel !== undefined
-                          ? {
-                              classifierModel:
-                                this.verifyConfig.classifierModel,
-                            }
-                          : {}),
-                      }),
-              })
-            : await run(query, runDeps, opts.signal, {
-                priorMessages,
-                onStream: wrappedOnStream,
-              });
-          const result = runOutcome.result;
-          // #408 T5: capture the terminal outcome for post-run write-back.
-          verifyOutcome =
-            "outcome" in runOutcome ? runOutcome.outcome : undefined;
-          // #128 M3: verify 最终判定 (failed / unstable / escalated) surface 到
-          // DTO, 避免"模型声称完成但验证没过"仍显示 completed (SC2/SC6 交付面)。
-          // 仅 verify 分支有 outcome/rounds; 裸 run 分支无 (字段缺席)。
-          verifyView =
-            "outcome" in runOutcome &&
-            (runOutcome.outcome === "failed" ||
-              runOutcome.outcome === "unstable" ||
-              runOutcome.outcome === "escalated")
-              ? { outcome: runOutcome.outcome, rounds: runOutcome.rounds }
-              : undefined;
-          // Violation kill → surface protocolError so the SPA client can
-          // attribute the stop; shouldPersistCheckpoint still drops
-          // protocolError context on save (mirrors the chat-session drop
-          // semantics, 维持 #120 裁决).
-          finalResult = killed
-            ? { ...result, stopReason: "protocolError" }
-            : result;
-        } catch (err) {
-          if (err instanceof MaxTurnsExceeded) {
-            // ADR-0011:不 save — run 前 session 已在盘上,throw 路径不产出
-            // 可落盘的新 messages,故不调 conditionalSave(否则会写空 messages
-            // 把已被 disk-SSOT 守门的不变式擦掉)。turnCount 透传 err.turnsRan
-            // (已跑轮数);finalText 用空串(没有 completed 文本)。摘要若有则
-            // 附 TurnAnswerDto.stopSummary(additive, byte-stable)。
-            return {
-              session: this.summarize({ file: session }),
-              turn: {
-                query,
-                answer: {
-                  finalText: "",
-                  stopReason: "maxTurns",
-                  turnCount: err.turnsRan,
-                  ...(capturedStopSummary !== undefined &&
-                  capturedStopSummary.length > 0
-                    ? { stopSummary: capturedStopSummary }
-                    : {}),
+        for (;;) {
+          const drained = await drainPendingSubagents(this.subagentManager);
+          const drainedMsg: AnthropicNativeMessage = {
+            role: "user",
+            content: [{ type: "text", text: drained }],
+          };
+          const priorMessages = drained
+            ? [...session.messages, drainedMsg]
+            : session.messages;
+          let finalResult: RunResult;
+          let verifyView: VerifyAnswerView | undefined;
+          // #408 T5: verify-loop terminal outcome (only set when verifyConfig
+          // is configured). Captured outside the try block so the post-run
+          // write-back can read it.
+          let verifyOutcome: VerifyLoopOutcome | undefined;
+          let verifyRecords: ReadonlyArray<{
+            readonly reason?: string;
+            readonly missing?: readonly string[];
+          }> = [];
+          try {
+            // #128 T8:verifyConfig 非 undefined (含 command 空串) 时 run 被
+            // runVerifyLoop 包裹 (advisor 形态, 引擎零改动);缺席 → 原 run 调用
+            // 逐字节不变 (仅未接线路径)。
+            // runVerifyLoop 的 runFn 透传 onStream → wrappedOnStream 语义保持;
+            // trace 仅在 traceOut 配置时注入 (records 落盘, T7 已处理可选)。
+            // 注意: runVerifyLoop 的首轮 runFn 不带 priorMessages / onStream,
+            // 闭包必须兜底 hub 侧的 priorMessages 与 wrappedOnStream。
+            const runOutcome = this.verifyConfig
+              ? await runVerifyLoop({
+                  runFn: (text, o) =>
+                    run(text, runDeps, o?.signal, {
+                      priorMessages: o?.priorMessages ?? priorMessages,
+                      onStream: o?.onStream ?? wrappedOnStream,
+                    }),
+                  // ADR-0024: two modules, not `goal.text ?? query`. Non-empty
+                  // goal → auto (userText = goal.text); else HITL (userText =
+                  // query). taskFocus never enters verify input (#473).
+                  completionMode:
+                    session.goal !== undefined && session.goal.text.length > 0
+                      ? "auto"
+                      : "hitl",
+                  userText:
+                    session.goal !== undefined && session.goal.text.length > 0
+                      ? session.goal.text
+                      : query,
+                  config: this.verifyConfig,
+                  sessionId: conversationId,
+                  signal: opts.signal,
+                  trace: runDeps.trace,
+                  cwd: session.workspaceRoot ?? process.cwd(),
+                  // #128 SC1 生产装配: subagentManager 在场 → 启用分类器填空
+                  // (command 缺失/空串时分类器接管, spec Objective);缺席
+                  // (ask 形态) → undefined, verify-loop 自然走透明关闭向后兼容。
+                  runClassifier:
+                    this.subagentManager === undefined
+                      ? undefined
+                      : createRunClassifierFromManager({
+                          manager: this.subagentManager,
+                          ...(this.verifyConfig.classifierModel !== undefined
+                            ? {
+                                classifierModel:
+                                  this.verifyConfig.classifierModel,
+                              }
+                            : {}),
+                        }),
+                })
+              : await run(query, runDeps, opts.signal, {
+                  priorMessages,
+                  onStream: wrappedOnStream,
+                });
+            const result = runOutcome.result;
+            // #408 T5: capture the terminal outcome for post-run write-back.
+            verifyOutcome =
+              "outcome" in runOutcome ? runOutcome.outcome : undefined;
+            verifyRecords = "records" in runOutcome ? runOutcome.records : [];
+            // #128 M3: verify 最终判定 (failed / unstable / escalated) surface 到
+            // DTO, 避免"模型声称完成但验证没过"仍显示 completed (SC2/SC6 交付面)。
+            // 仅 verify 分支有 outcome/rounds; 裸 run 分支无 (字段缺席)。
+            verifyView =
+              "outcome" in runOutcome &&
+              (runOutcome.outcome === "failed" ||
+                runOutcome.outcome === "unstable" ||
+                runOutcome.outcome === "escalated")
+                ? { outcome: runOutcome.outcome, rounds: runOutcome.rounds }
+                : undefined;
+            // Violation kill → surface protocolError so the SPA client can
+            // attribute the stop; shouldPersistCheckpoint still drops
+            // protocolError context on save (mirrors the chat-session drop
+            // semantics, 维持 #120 裁决).
+            finalResult = killed
+              ? { ...result, stopReason: "protocolError" }
+              : result;
+          } catch (err) {
+            await this.applyHubAutoError(conversationId, err);
+            if (err instanceof MaxTurnsExceeded) {
+              // ADR-0011:不 save — run 前 session 已在盘上,throw 路径不产出
+              // 可落盘的新 messages,故不调 conditionalSave(否则会写空 messages
+              // 把已被 disk-SSOT 守门的不变式擦掉)。turnCount 透传 err.turnsRan
+              // (已跑轮数);finalText 用空串(没有 completed 文本)。摘要若有则
+              // 附 TurnAnswerDto.stopSummary(additive, byte-stable)。
+              return {
+                session: this.summarize({ file: session }),
+                turn: {
+                  query,
+                  answer: {
+                    finalText: "",
+                    stopReason: "maxTurns",
+                    turnCount: err.turnsRan,
+                    ...(capturedStopSummary !== undefined &&
+                    capturedStopSummary.length > 0
+                      ? { stopSummary: capturedStopSummary }
+                      : {}),
+                  },
                 },
-              },
-            };
-          }
-          throw err;
-        }
-        // trace is destructured away → immediate GC (not logged/persisted/wired).
-        const saved = await this.conditionalSave({
-          conversationId,
-          session,
-          result: finalResult,
-          // priorMessages = the file BEFORE this run; only the messages THIS
-          // run appended count as progress for the cancelled-delta decision.
-          priorMessages: session.messages,
-          // #458 T5/T12: trace 透传 — seed 发射点使用; undefined 时无副作用。
-          ...(trace !== undefined ? { trace } : {}),
-        });
-        void saved;
-        // #458 T5 (SC8): goal.status write-back on verify-loop terminal
-        // outcome. The hub is the only writer of goal.status. Target status
-        // is looked up from OUTCOME_TO_STATUS; applyTransition runs only
-        // when target is a valid forward edge from current status
-        // (T3 assertValidTransition rejects self-transitions, so
-        // active→active / achieved→achieved are no-ops and the goal stays
-        // put). recordGoal fires for every outcome with a goal present
-        // (write-back trace 留痕 even when no status change). Placed
-        // AFTER conditionalSave so a T2-seeded goal on this same turn is
-        // promoted in the same persistence round.
-        if (verifyOutcome !== undefined && saved) {
-          const justSaved = await this.store.load(conversationId);
-          if (justSaved.goal !== undefined) {
-            const target = OUTCOME_TO_STATUS[verifyOutcome];
-            const now = new Date().toISOString();
-            // T3 assertValidTransition 守门: OUTCOME_TO_STATUS 的 target 值域
-            // 含 "active"（failed/unstable 保持态），对已处于 achieved/aborted
-            // 的 goal 属非法反向边（achieved→active 不在白名单）——守卫拦截，
-            // goal 不变，仅 recordGoal trace 留痕（与 failed/unstable 行为对齐）。
-            const transition =
-              target === undefined
-                ? undefined
-                : assertValidTransition({
-                    from: justSaved.goal.status,
-                    to: target,
-                  });
-            if (
-              target !== undefined &&
-              target !== justSaved.goal.status &&
-              transition !== undefined &&
-              transition.ok
-            ) {
-              const writeback: SessionFileV1 = {
-                ...justSaved,
-                goal: applyTransition(justSaved.goal, target, now),
-                updatedAt: now,
-                schemaVersion: CURRENT_SCHEMA_VERSION,
               };
-              await this.store.save({
-                id: conversationId,
-                file: writeback,
+            }
+            throw err;
+          }
+          // trace is destructured away → immediate GC (not logged/persisted/wired).
+          const saved = await this.conditionalSave({
+            conversationId,
+            session,
+            result: finalResult,
+            // priorMessages = the file BEFORE this run; only the messages THIS
+            // run appended count as progress for the cancelled-delta decision.
+            priorMessages: session.messages,
+            // #458 T5/T12: trace 透传 — seed 发射点使用; undefined 时无副作用。
+            ...(trace !== undefined ? { trace } : {}),
+          });
+          void saved;
+          // #458 T5 (SC8): goal.status write-back on verify-loop terminal
+          // outcome. The hub is the only writer of goal.status. Target status
+          // is looked up from OUTCOME_TO_STATUS; applyTransition runs only
+          // when target is a valid forward edge from current status
+          // (T3 assertValidTransition rejects self-transitions, so
+          // active→active / achieved→achieved are no-ops and the goal stays
+          // put). recordGoal fires for every outcome with a goal present
+          // (write-back trace 留痕 even when no status change). Placed
+          // AFTER conditionalSave so a T2-seeded goal on this same turn is
+          // promoted in the same persistence round.
+          if (verifyOutcome !== undefined && saved) {
+            const justSaved = await this.store.load(conversationId);
+            if (justSaved.goal !== undefined) {
+              const target = OUTCOME_TO_STATUS[verifyOutcome];
+              const now = new Date().toISOString();
+              // T3 assertValidTransition 守门: OUTCOME_TO_STATUS 的 target 值域
+              // 含 "active"（failed/unstable 保持态），对已处于 achieved/aborted
+              // 的 goal 属非法反向边（achieved→active 不在白名单）——守卫拦截，
+              // goal 不变，仅 recordGoal trace 留痕（与 failed/unstable 行为对齐）。
+              const transition =
+                target === undefined
+                  ? undefined
+                  : assertValidTransition({
+                      from: justSaved.goal.status,
+                      to: target,
+                    });
+              if (
+                target !== undefined &&
+                target !== justSaved.goal.status &&
+                transition !== undefined &&
+                transition.ok
+              ) {
+                const writeback: SessionFileV1 = {
+                  ...justSaved,
+                  goal: applyTransition(justSaved.goal, target, now),
+                  updatedAt: now,
+                  schemaVersion: CURRENT_SCHEMA_VERSION,
+                };
+                await this.store.save({
+                  id: conversationId,
+                  file: writeback,
+                });
+              }
+              // T12 writeback 发射点: status ?? "active" 覆盖 disabled(无
+              // target) 与 failed/unstable/自转移/非法反向边场景。
+              await runDeps.trace?.recordGoal({
+                id: randomUUID(),
+                sessionId: conversationId,
+                action: "writeback",
+                status: target ?? "active",
+                ts: now,
+                conversationId,
               });
             }
-            // T12 writeback 发射点: status ?? "active" 覆盖 disabled(无
-            // target) 与 failed/unstable/自转移/非法反向边场景。
-            await runDeps.trace?.recordGoal({
-              id: randomUUID(),
-              sessionId: conversationId,
-              action: "writeback",
-              status: target ?? "active",
-              ts: now,
-              conversationId,
-            });
           }
-        }
-        return {
-          session: this.summarize({
-            file: await this.store.load(conversationId),
-          }),
-          turn: this.toTurnDto({
-            query,
+          const dto = {
+            session: this.summarize({
+              file: await this.store.load(conversationId),
+            }),
+            turn: this.toTurnDto({
+              query,
+              result: finalResult,
+              turnMessages: finalResult.messages.slice(priorCount),
+              // B1: rendered interrupted is decided against the SAME priorMessages
+              // as conditionalSave — byte-identical shouldPersistCheckpoint verdict
+              // (saved 只在 cancelled 时消费;completed 等 stopReason 不读它)。
+              priorMessages: session.messages,
+              ...(capturedStopSummary !== undefined &&
+              capturedStopSummary.length > 0
+                ? { stopSummary: capturedStopSummary }
+                : {}),
+              // #128 M3: 验证最终判定 (failed/unstable/escalated) surface 到 DTO。
+              ...(verifyView !== undefined ? { verify: verifyView } : {}),
+            }),
+          };
+          const more = await this.applyHubAutoContinue({
+            conversationId,
             result: finalResult,
-            turnMessages: finalResult.messages.slice(priorCount),
-            // B1: rendered interrupted is decided against the SAME priorMessages
-            // as conditionalSave — byte-identical shouldPersistCheckpoint verdict
-            // (saved 只在 cancelled 时消费;completed 等 stopReason 不读它)。
-            priorMessages: session.messages,
-            ...(capturedStopSummary !== undefined &&
-            capturedStopSummary.length > 0
-              ? { stopSummary: capturedStopSummary }
-              : {}),
-            // #128 M3: 验证最终判定 (failed/unstable/escalated) surface 到 DTO。
-            ...(verifyView !== undefined ? { verify: verifyView } : {}),
-          }),
-        };
+            priorCount: session.messages.length,
+            ...(verifyOutcome !== undefined ? { verifyOutcome } : {}),
+            records: verifyRecords,
+          });
+          if (!more) {
+            return dto;
+          }
+          session = await this.store.load(conversationId);
+        }
       },
     });
   }
@@ -1481,6 +1546,85 @@ export class SessionHub {
     return joined.length > 720 ? joined.slice(0, 720) : joined;
   }
 
+  private async persistGoalDecision(
+    conversationId: string,
+    decision: ReturnType<typeof decideAutoGoalAfterTurn>
+  ): Promise<void> {
+    const existing = await this.store.load(conversationId);
+    if (existing.goal === undefined) return;
+    const now = new Date().toISOString();
+    await this.store.save({
+      id: conversationId,
+      file: {
+        ...existing,
+        goal: nextGoalAfterDecision(existing.goal, decision),
+        updatedAt: now,
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+      },
+    });
+  }
+
+  private async applyHubAutoContinue(opts: {
+    readonly conversationId: string;
+    readonly result: RunResult;
+    readonly priorCount: number;
+    readonly verifyOutcome?: VerifyLoopOutcome;
+    readonly records: ReadonlyArray<{
+      readonly reason?: string;
+      readonly missing?: readonly string[];
+    }>;
+  }): Promise<boolean> {
+    if (this.verifyConfig === undefined) return false;
+    let session: SessionFileV1;
+    try {
+      session = await this.store.load(opts.conversationId);
+    } catch (err) {
+      skipAutoPersistOnLoadError(err);
+      return false;
+    }
+    const goal = session.goal;
+    if (goal === undefined || goal.text.length === 0) return false;
+    const judge = lastJudgeSignal(opts.records);
+    const decision = decideAutoGoalAfterTurn({
+      ...(goal.maxTurns !== undefined ? { maxTurns: goal.maxTurns } : {}),
+      autoTurnsRan: goal.autoTurnsRan ?? 0,
+      idleCompletedStreak: goal.idleCompletedStreak ?? 0,
+      stopReason: opts.result.stopReason,
+      roundHadToolUse: turnHadToolUse(opts.result.messages, opts.priorCount),
+      ...(opts.verifyOutcome !== undefined
+        ? { verifyOutcome: opts.verifyOutcome }
+        : {}),
+      ...judge,
+    });
+    await this.persistGoalDecision(opts.conversationId, decision);
+    return decision.continueAuto;
+  }
+
+  private async applyHubAutoError(
+    conversationId: string,
+    err: unknown
+  ): Promise<void> {
+    let session: SessionFileV1;
+    try {
+      session = await this.store.load(conversationId);
+    } catch (loadErr) {
+      skipAutoPersistOnLoadError(loadErr);
+      return;
+    }
+    const goal = session.goal;
+    if (goal === undefined || goal.text.length === 0) return;
+    const decision = decideAutoGoalAfterTurn({
+      ...(goal.maxTurns !== undefined ? { maxTurns: goal.maxTurns } : {}),
+      autoTurnsRan: goal.autoTurnsRan ?? 0,
+      idleCompletedStreak: goal.idleCompletedStreak ?? 0,
+      stopReason: "protocolError",
+      roundHadToolUse: false,
+      errorText: errorMessage(err),
+      errorName: err instanceof Error ? err.name : undefined,
+    });
+    await this.persistGoalDecision(conversationId, decision);
+  }
+
   /** #458 T5/T12: `/goal clear` 占位 helper (T6 slash + chat-session 调用)。
    *  Clears both the pinned goal and taskFocus (SC: goal/taskFocus 一并清空),
    *  records the trace clear event, and persists atomically through the same
@@ -1581,17 +1725,14 @@ export class SessionHub {
       updatedAt: now,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       title: extractTitle(result.messages),
-      // #458 T2/T5 (SC2): seed taskFocus from the first user message text
-      // (full, trimmed) when taskFocus is still absent. `seedTaskFocus`
-      // slices the primary entry to 500 chars and prepends the prior focus
-      // (if any) to history. Seeded exactly once — subsequent turns keep
-      // the existing taskFocus (a re-pin / seedTaskFocus switch is the only
-      // overwrite). Only seeds when a user text block exists; a
-      // tool_result-only first message yields "" and is treated as absent.
-      // A user-pinned goal (source === "user_pin") never blocks the seed —
-      // taskFocus is the deterministic task field, orthogonal to the pinned
-      // goal.
-      ...(withCheckpoint.taskFocus === undefined && extractGoal(result.messages)
+      // Seed taskFocus once for compact: absent focus, no active non-empty
+      // goal (auto mode must not copy goal text), and shouldSeedTaskFocus
+      // (greetings / empty first-user text never become lifelong focus).
+      ...(withCheckpoint.taskFocus === undefined &&
+      !(
+        withCheckpoint.goal !== undefined && withCheckpoint.goal.text.length > 0
+      ) &&
+      shouldSeedTaskFocus(extractGoal(result.messages))
         ? {
             taskFocus: seedTaskFocus({
               current: withCheckpoint.taskFocus,
@@ -1602,10 +1743,16 @@ export class SessionHub {
         : {}),
     };
     await this.store.save({ id: conversationId, file: updated });
-    // #458 T5/T12: seed 发射点 — 只在本次确实 seed 了 taskFocus 时落盘
-    // (trace 仅在 traceOut 配置时存在)。textLen 不写明文, 防日志膨胀。
-    const textLen = extractGoal(result.messages).length;
-    if (withCheckpoint.taskFocus === undefined && textLen > 0) {
+    // Seed trace only when the spread above actually wrote taskFocus.
+    const firstUserText = extractGoal(result.messages);
+    const textLen = firstUserText.length;
+    if (
+      withCheckpoint.taskFocus === undefined &&
+      !(
+        withCheckpoint.goal !== undefined && withCheckpoint.goal.text.length > 0
+      ) &&
+      shouldSeedTaskFocus(firstUserText)
+    ) {
       await trace?.recordGoal({
         id: randomUUID(),
         sessionId: conversationId,

@@ -214,20 +214,11 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
 
     assert.equal(r.ranQuery, true);
     assert.match(r.output, /answer-classified/);
-    // 铁证: 判官子代理被 spawn (分类器接管, 非透明关闭)。
+    // Plan T1 HITL: no pinned goal → completion judge spawn = 0.
     assert.equal(
       spawnedDefs.length,
-      1,
-      "command 缺失 + subagentManager 在场 → 每轮 completed 后 spawn 判官"
-    );
-    // B6 后 task = userText + evidenceContext JSON 段, 断言首段 = 用户原问句 (SC6 task 不重绑)。
-    assert.equal(spawnedDefs[0]!.task.split("\n")[0], "research a topic");
-    // 分类器模型槽位: verifyConfig 无 classifierModel → adapter 不填 model →
-    // manager spawn def 无 model → worker 兜底 settings.llm.model (A7 缺省语义)。
-    assert.equal(
-      spawnedDefs[0]!.model,
-      undefined,
-      "classifierModel 缺省 → 不硬编码模型, worker 兜底 env.llm.model"
+      0,
+      "HITL (no goal) must not spawn completion-facing judge"
     );
     // 闭环 passed: 历史形状与裸 run 一致 (pass 不改消息面)。
     assert.equal(ctx.state.messages.length, 2);

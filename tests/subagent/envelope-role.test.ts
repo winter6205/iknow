@@ -120,6 +120,24 @@ describe("envelope.role: schema + parse 通道 (T2 #556)", () => {
     assert.equal(env.role, "explore");
     assert.equal(env.systemPrompt, "MY ADDENDUM");
   });
+
+  it("parseWorkerEnvelope 接受独立 finalText / evidenceContext，不并入 task", () => {
+    const env = parseWorkerEnvelope(
+      JSON.stringify({
+        task: "goal.text identity",
+        sandboxRoot: "/tmp/sb",
+        role: "judge",
+        finalText: "TRUNCATED_HOST_DIALOGUE",
+        evidenceContext: { checkerVerdict: "EVIDENCE_INSUFFICIENT" },
+      })
+    );
+    assert.equal(env.task, "goal.text identity");
+    assert.equal(env.finalText, "TRUNCATED_HOST_DIALOGUE");
+    assert.deepEqual(env.evidenceContext, {
+      checkerVerdict: "EVIDENCE_INSUFFICIENT",
+    });
+    assert.equal(env.role, "judge");
+  });
 });
 
 // ─── B. SubAgentDefinition.role → buildWorkerPayload 透传 ─────────────────────
@@ -173,6 +191,23 @@ describe("SubAgentDefinition.role → buildWorkerPayload → envelope.role (T2 #
     const { manager, captured } = makeManagerCapturingPayload();
     manager.spawn({ task: "hello", role: "unknown_id" });
     assert.equal(captured[0]!.role, "unknown_id");
+  });
+
+  it("def.finalText / evidenceContext 透传到 payload，task 保持 identity", () => {
+    const { manager, captured } = makeManagerCapturingPayload();
+    const evidenceContext = { checkerVerdict: "EVIDENCE_INSUFFICIENT" };
+    manager.spawn({
+      task: "goal.text identity",
+      role: "judge",
+      finalText: "TRUNCATED_HOST_DIALOGUE",
+      evidenceContext,
+    });
+    const payload = captured[0]!;
+    assert.equal(payload.task, "goal.text identity");
+    assert.ok(!payload.task.includes("checkerVerdict"));
+    assert.equal(payload.finalText, "TRUNCATED_HOST_DIALOGUE");
+    assert.deepEqual(payload.evidenceContext, evidenceContext);
+    assert.equal(payload.role, "judge");
   });
 });
 
@@ -274,6 +309,23 @@ describe("createWorkerDeps addendum 消费 (envelope.systemPrompt 现在被消�
   it("base=undefined + 无 role/addendum → 输出 = undefined (V1 baseline)", async () => {
     const deps = await createWorkerDeps(hermeticOpts());
     assert.equal(await deps.system?.(), undefined);
+  });
+
+  it("role=judge + addendum → system 是判官 prompt, 不含 iknow soul base", async () => {
+    const deps = await createWorkerDeps(
+      hermeticOpts({
+        role: "judge",
+        addendum: "You are a strict task-completion judge.",
+        system: async () => "# iknow Soul\nYou are iknow.",
+      })
+    );
+    const out = (await deps.system?.()) ?? "";
+    assert.ok(out.includes("strict task-completion judge"));
+    assert.ok(
+      !out.includes("# iknow Soul"),
+      "judge must not default to full iknow assistant voice"
+    );
+    assert.ok(!out.includes("You are iknow."));
   });
 });
 

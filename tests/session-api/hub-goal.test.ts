@@ -98,6 +98,18 @@ describe("taskFocus seed — first postMessage on a fresh session (#458 T2 SC2)"
     assert.equal(loaded.taskFocus?.text, "Build a C compiler");
   });
 
+  it("does not seed taskFocus from a greeting (你好 stays unfocused)", async () => {
+    const hub = makeHub();
+    const { session } = await hub.createSession();
+    await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "你好",
+    });
+    const loaded = await store.load(session.conversation_id);
+    assert.equal(loaded.taskFocus, undefined);
+    assert.equal(loaded.goal, undefined);
+  });
+
   it("does NOT re-seed on subsequent turns (taskFocus persists across turns)", async () => {
     const deps = makeDeps([
       assistantResult({ texts: ["first reply"] }),

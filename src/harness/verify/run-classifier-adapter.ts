@@ -18,7 +18,6 @@
  */
 import type { SubAgentManager } from "../subagent/manager.js";
 import type { ClassifierEnvelope, RunClassifierFn } from "./verify-loop.js";
-import type { EvidenceContext } from "./types.js";
 import { ACI_TOOLSET_NAMES } from "../aci/tools/registry.js";
 
 /**
@@ -41,6 +40,7 @@ const JUDGE_ALLOWED_TOOLS: ReadonlyArray<string> = Object.freeze([
 
 /** 判官 role: 子代理 LLM 判官 (A4 schema 契约 prompt)。 */
 const JUDGE_ROLE: SubAgentDefinitionShape = {
+  role: "judge",
   systemPrompt:
     "You are a strict task-completion judge. Given a task, evaluate whether " +
     "the work is actually done. Output ONLY a JSON object with exactly one of " +
@@ -64,11 +64,12 @@ const JUDGE_ROLE: SubAgentDefinitionShape = {
 };
 
 /**
- * JUDGE_ROLE 字段类型形状：系统 prompt / 工具面 deny / maxTurns。
+ * JUDGE_ROLE 字段类型形状：role / system prompt / 工具面 deny / maxTurns。
  * 不复用 SubAgentDefinition（其字段含 task / model / timeoutMs / sandboxRoot
- * 全部可选，且这些字段由 buildJudgeTask / 外部 opts 注入，role 不持有）。
+ * 全部可选，且这些字段由 buildJudgeTask / 外部 opts 注入）。
  */
 interface SubAgentDefinitionShape {
+  readonly role: "judge";
   readonly systemPrompt: string;
   readonly disallowedTools: ReadonlyArray<string>;
   readonly maxTurns: number;
@@ -91,18 +92,12 @@ export interface CreateRunClassifierOpts {
  * 走 SC7 透明关闭分支, 无需特殊 if)。
  */
 /**
- * #449b B6: 拼接判官任务文本 (G5-3 决议术语, SC6 task 不重绑)。
- *   - evidenceContext 缺席 → task = userText 逐字节 (既有契约);
- *   - evidenceContext 在场 → task = `<userText>\n<JSON.stringify(ctx)>`,
- *     判官从 task 单段升级到 task + 证据体检单二段, 但 task 字段语义
- *     (用户问的是什么) 未变。
+ * Exam-question text for the judge worker. `task` is goal.text only;
+ * evidenceContext stays a separate RunClassifierFn argument (prompt, not
+ * concatenated into the exam question).
  */
-function buildJudgeTask(
-  task: string,
-  evidenceContext?: EvidenceContext
-): string {
-  if (evidenceContext === undefined) return task;
-  return `${task}\n${JSON.stringify(evidenceContext)}`;
+function buildJudgeTask(task: string): string {
+  return task;
 }
 
 export function createRunClassifierFromManager(
@@ -118,11 +113,8 @@ export function createRunClassifierFromManager(
     model,
     evidenceContext,
   }): Promise<ClassifierEnvelope> => {
-    // B6 修复既有契约破口: finalText 此前静默丢弃。生产 seam 调用方
-    // (verify-loop runClassifierOnce) 实际将 summary = finalText ?? "" —— 两
-    // 字段在生产路径语义同源, adapter 无独立消费者; 此处显式 void 标记"已接
-    // 收、当前不消费", 避免 TS6133 又保留契约面。
-    void finalText;
+    // finalText / evidenceContext are independent spawn fields.
+    // They must not be concatenated into def.task (exam question = goal.text).
     // #357 code-review fix: 判官 def 不再显式传 sandboxRoot（此前锚 cwd =
     // process.cwd()）。T1 起 manager 以 parent sandboxRoot 单点校验 prefix-of-
     // parent——显式 sandboxRoot 配置（serve 路径）下 cwd ≠ parent root,判官
@@ -133,9 +125,11 @@ export function createRunClassifierFromManager(
     void cwd;
     const def = {
       ...JUDGE_ROLE,
-      task: buildJudgeTask(task, evidenceContext),
+      task: buildJudgeTask(task),
       model: model ?? classifierModel,
       timeoutMs,
+      ...(finalText !== null && finalText !== "" ? { finalText } : {}),
+      ...(evidenceContext !== undefined ? { evidenceContext } : {}),
     };
     let taskId: string;
     try {

@@ -707,6 +707,10 @@ export function createSubAgentManager(opts: {
       ...(def.maxTurns !== undefined && { maxTurns: def.maxTurns }),
       ...(def.timeoutMs !== undefined && { timeoutMs: def.timeoutMs }),
       ...(def.role !== undefined && { role: def.role }),
+      ...(def.finalText !== undefined && { finalText: def.finalText }),
+      ...(def.evidenceContext !== undefined && {
+        evidenceContext: def.evidenceContext,
+      }),
     };
   }
 

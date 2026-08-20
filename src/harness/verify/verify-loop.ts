@@ -54,6 +54,7 @@ import {
 } from "./verdict.js";
 import {
   REASON_ABORT_TYPED,
+  REASON_HITL_SKIP_COMPLETION_JUDGE,
   REASON_UNVERIFIED,
   type ClassifierCheck,
   type EvidenceContext,
@@ -127,9 +128,9 @@ export interface RunClassifierFn {
     /** 分类器模型槽位 (A7: settings.verify.classifierModel ?? settings.llm.model)。 */
     readonly model?: string;
     /**
-     * #449b B6: 证据体检单 (G5-3 决议术语)。由 runClassifierLoop 在
-     * produceObservation 闭包内组装, 通过 envelope.task 拼接段 + failure
-     * envelope.evidence_context 段两路喂入判官。
+     * #449b B6: 证据体检单 (G5-3 决议术语)。独立 RunClassifierFn 参数
+     * (prompt, not the exam question); 不得拼进 task。失败修正信封仍可
+     * 走 evidence_context 段。
      */
     readonly evidenceContext?: EvidenceContext;
   }): Promise<ClassifierEnvelope>;
@@ -160,6 +161,15 @@ export interface VerifyLoopOptions {
    * 缺席 + command 缺失 → 透明关闭 (SC7 既有语义, 向后兼容)。
    */
   readonly runClassifier?: RunClassifierFn;
+  /**
+   * Completion-facing judge dispatch (ADR-0024).
+   * `hitl` = skip LLM judge (named EXIT).
+   * `auto` = `/goal` module: spawn judge on completed unless hard-fail,
+   * including checker SUFFICIENT.
+   * Omitted keeps the legacy evidence-first short-circuit (SUFFICIENT skips
+   * the judge) so existing classifier unit tests stay on the old path.
+   */
+  readonly completionMode?: "hitl" | "auto";
   readonly cwd: string;
   readonly home?: string;
 }
@@ -808,7 +818,9 @@ async function runVerifyLoopBody(opts: {
     round += 1;
     // #449b B4 evidence-first 前级 (spec Code Style): 每轮 produceObservation 前
     // 先 checkEvidence, 三态映射:
-    //   EVIDENCE_SUFFICIENT → 直接 PASS 短路 (零判官零重跑, 即便配了 command, G3);
+    //   EVIDENCE_SUFFICIENT → 默认 PASS 短路 (零判官零重跑, 即便配了 command, G3);
+    //     例外: completionMode === "auto" 且 command 空 → 仍 spawn 完成向判官
+    //     (ADR-0024 成功也评; 不把 command 沙箱闭环混进来);
     //   EVIDENCE_CONTRADICTED → true-failure (进修正轮, 趋势/签名机制原样消费);
     //   EVIDENCE_INSUFFICIENT → 落原 produceObservation (判官/命令既有机制), 且把
     //     evidenceVerdict + gamingSignals 合并进本轮 observation (buildRecord Postel
@@ -824,7 +836,15 @@ async function runVerifyLoopBody(opts: {
         }
       | undefined;
     let observation: RoundResult;
-    if (evidenceReport.verdict === "EVIDENCE_SUFFICIENT") {
+    const autoJudgeOnSufficient =
+      options.completionMode === "auto" &&
+      (options.config.command ?? "").trim() === "";
+    if (
+      evidenceReport.verdict === "EVIDENCE_SUFFICIENT" &&
+      autoJudgeOnSufficient
+    ) {
+      observation = await opts.produceObservation(round, current);
+    } else if (evidenceReport.verdict === "EVIDENCE_SUFFICIENT") {
       observation = {
         verdict: "pass",
         exitCode: 0,
@@ -1045,6 +1065,15 @@ function runClassifierLoop(
     maxRounds,
     sessionId,
     produceObservation: (round, current) => {
+      if (options.completionMode === "hitl") {
+        // EXIT: HITL skips completion-facing LLM; checker already ran.
+        return Promise.resolve({
+          verdict: "pass" as const,
+          exitCode: 0,
+          outputText: "",
+          reason: REASON_HITL_SKIP_COMPLETION_JUDGE,
+        });
+      }
       const summary = current.result.finalText ?? "";
       // B6: 复用证据优先前级同源 report (checkEvidence 纯函数幂等, 二次调用
       // 与 body 前级各自独立无副作用; claimIndex = round 与前级对齐)。

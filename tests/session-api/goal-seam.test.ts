@@ -173,6 +173,13 @@ function capturedUserText(): string {
   return opts.userText as string;
 }
 
+function capturedCompletionMode(): unknown {
+  const opts = getLastVerifyLoopOpts() as
+    { completionMode?: unknown } | undefined;
+  assert.ok(opts !== undefined, "runVerifyLoop was not called");
+  return opts.completionMode;
+}
+
 describe("verify-loop seam: userText = goal.text ?? query (#408 T4 / #458 T8)", () => {
   it("session carrying user_pin goal.text binds userText === goal.text (NOT current query)", async () => {
     const id = "goal-bearing";
@@ -198,6 +205,7 @@ describe("verify-loop seam: userText = goal.text ?? query (#408 T4 / #458 T8)", 
       "Type-system-validate-LSP",
       "session goal must bind to verify-loop userText"
     );
+    assert.equal(capturedCompletionMode(), "auto");
   });
 
   it("session without goal → userText === query (byte-identical to pre-#408)", async () => {
@@ -211,6 +219,7 @@ describe("verify-loop seam: userText = goal.text ?? query (#408 T4 / #458 T8)", 
     assert.equal(res.turn.answer.stopReason, "completed");
     expect(runVerifyLoopMock).toHaveBeenCalledTimes(1);
     assert.equal(capturedUserText(), "build the thing");
+    assert.equal(capturedCompletionMode(), "hitl");
   });
 
   it("goal.text === '' falls back to query (defensive — empty goal must NOT be re-fed)", async () => {

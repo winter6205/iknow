@@ -68,6 +68,21 @@ describe("/goal 三面 (T6)", () => {
     expect(eff).toEqual({ type: "goal", action: "pin", text: "refactor auth" });
   });
 
+  test("goal ['--max-turns', '1', 'ship'] → pin with maxTurns 1", () => {
+    const eff = goalOf({ args: ["--max-turns", "1", "ship"] });
+    expect(eff).toEqual({
+      type: "goal",
+      action: "pin",
+      text: "ship",
+      maxTurns: 1,
+    });
+  });
+
+  test("goal ['--max-turns', '0', 'ship'] → error (not a positive integer)", () => {
+    const eff = goalOf({ args: ["--max-turns", "0", "ship"] });
+    expect(eff.type).toBe("error");
+  });
+
   // === 非法子命令 ===
   test("goal ['foo']（非 status/clear）→ 按 <text> pin 处理", () => {
     const eff = goalOf({ args: ["foo"] });
@@ -81,10 +96,10 @@ describe("/goal 三面 (T6)", () => {
   });
 
   // === HELP_TEXT ===
-  test("HELP_TEXT 含 /goal status、/goal clear 与 <status|clear|text> 提示", () => {
+  test("HELP_TEXT 含 /goal status、/goal clear 与 max-turns 提示", () => {
     expect(HELP_TEXT).toMatch(/\/goal\s+status/);
     expect(HELP_TEXT).toMatch(/\/goal\s+clear/);
-    expect(HELP_TEXT).toMatch(/<status\|clear\|text>/);
+    expect(HELP_TEXT).toMatch(/--max-turns/);
   });
 
   // === 五类边界 (defensive-contract-validator) ===

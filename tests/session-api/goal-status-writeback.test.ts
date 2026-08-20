@@ -140,7 +140,11 @@ function makeHub(): SessionHub {
   const verifyConfig: VerifyConfig = { command: "/bin/true" };
   return new SessionHub({
     store,
-    deps: makeDeps([assistantResult({ texts: ["ok"] })]),
+    deps: makeDeps(
+      Array.from({ length: 8 }, (_, i) =>
+        assistantResult({ texts: [`ok-${i}`] })
+      )
+    ),
     verifyConfig,
     traceOut: traceDir,
   });
