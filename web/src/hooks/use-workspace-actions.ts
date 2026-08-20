@@ -1,22 +1,23 @@
 /**
- * serve-workspace T7a — App 层 workspace 相关 handler + auto-open effect
- * 的纯函数抽离 (review fix M6)。
+ * serve-workspace T7a — App 层 workspace 相关 handler 抽离 (review fix M6)。
  *
  * 把 ChatApp 内零散分布在 60+ 行内的三组 workspace handler 集中到一处 hook，
  * 让 ChatApp 主文件收敛到 ≤ 200 行：
  *  - `handleNewSession`：unbound 引导 picker / bound 直接 newSession + bumpSidebar。
  *  - `handleCreateInWorkspace`：换根 + newSession，失败走 chat.pushNotice。
  *  - `handleSelect`：切到目标会话 + bumpSidebar。
- *  - `autoOpenedRef` + effect: unbound 用户首次进入自动弹 picker。
  *
- * T8: popover 关闭 (Esc / outside-click) + 焦点回 chip — 加 `usePopoverDismiss`
- * effect, 把这两个监听抽到独立 hook, 让 use-workspace-actions.ts 主体只
- * 关心 auto-open + handler 三件套。
+ * T9b: 进站 default workspace 由 serve T9a auto-bind, `ws.bound` 永远是 truthy,
+ * 因此 T5 的 `autoOpenedRef` + 一次性 effect 已是 dead code, 删除。
+ * `handleNewSession` 内 unbound 分支保留 — 用户主动解绑 (极少数) 后仍引导 picker。
+ *
+ * T8: popover 关闭 (Esc / outside-click) + 焦点回 chip — `usePopoverDismiss`
+ * effect 抽到独立 hook, 让本文件主体只关心 handler 三件套。
  *
  * 行为契约：与原 ChatApp 内 inline handler 100% 等价；只换载体。
  */
 import type { Dispatch, RefObject, SetStateAction } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { useSessionChat } from "./useSessionChat";
 import type { useWorkspace } from "./useWorkspace";
 
@@ -98,20 +99,10 @@ export function useWorkspaceActions(
   const [sidebarSignal, setSidebarSignal] = useState(0);
   const bumpSidebar = useCallback(() => setSidebarSignal((n) => n + 1), []);
 
-  // T5: 挂载一次性自动打开 picker（unbound 用户首次进站引导）。
-  // 用 ref 标记 — 用户手动关闭后不再触发, 避免每次 ws.bound 重置都弹。
-  const autoOpenedRef = useRef(false);
-  useEffect(() => {
-    if (autoOpenedRef.current) return;
-    if (ws.phase !== "ready") return;
-    if (ws.bound) return;
-    autoOpenedRef.current = true;
-    setWorkspaceOpen(true);
-  }, [ws.phase, ws.bound]);
-
   /**
-   * T5: unbound 状态下点「新会话」→ 打开 picker 引导选根（spec §Commands 1:
-   * unbound 不可发 turn）。T6 联动改 sidebar 时这条分支继续生效。
+   * T5/T9b: unbound 状态下点「新会话」→ 打开 picker 引导选根（spec §Commands 1:
+   * unbound 不可发 turn）。T9a 后, serve auto-bind 让 ws.bound 默认 truthy,
+   * 这条分支只在用户主动解绑后才会触发, 是少数派路径但仍有意义 — 保留。
    * ws.bound: 后端 hub.createSession 取 this.boundRoot (= ws.root) 写入
    * 新会话, 不需要额外传 workspaceRoot 参数(T7+ 后端扩展点)。
    */

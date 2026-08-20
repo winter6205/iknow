@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import React, { act, createElement, type ReactNode } from "react";
 import Reconciler from "react-reconciler";
-import { beforeEach, describe, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import * as api from "../../web/src/api/client.ts";
 import { useSessionChat } from "../../web/src/hooks/useSessionChat.ts";
 import type { SessionChatApi } from "../../web/src/hooks/useSessionChat.ts";
@@ -339,6 +339,162 @@ describe("useSessionChat pushNotice()", () => {
       await hook.getCurrent()?.newSession();
     });
     assert.equal(hook.getCurrent()?.messages.length, 0);
+
+    Renderer.updateContainer(null, hook.root, null, () => undefined);
+  });
+});
+
+/**
+ * serve-workspace T9b: 进站总是 fresh-on-mount, 不读 / 不写 localStorage。
+ * serve T9a auto-bind 后 `createSession` 在 default workspace 下永远成功,
+ * 因此 bootstrap 路径简化为 health → createAndAdopt, 不再有 stored 恢复 +
+ * 404 fallback 路径。
+ *
+ * localStorage mock 模式参考 tests/web/workspace-groups-storage.test.ts。
+ */
+describe("useSessionChat bootstrap — T9b fresh-on-mount", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * 安装一个计数版 localStorage: getItem/setItem/removeItem 都可被断言。
+   * 初始带一条历史 key "iknow:conversation_id" → "stale-id", 验证
+   * bootstrap 不会读取它 (旧行为的回归测试)。
+   */
+  function installCountingLocalStorage() {
+    const calls = {
+      getItem: [] as string[],
+      setItem: [] as Array<{ key: string; value: string }>,
+      removeItem: [] as string[],
+    };
+    const stub: Storage = {
+      getItem: (k) => {
+        calls.getItem.push(k);
+        return null;
+      },
+      setItem: (k, v) => {
+        calls.setItem.push({ key: k, value: v });
+      },
+      removeItem: (k) => {
+        calls.removeItem.push(k);
+      },
+      clear: () => undefined,
+      key: () => null,
+      get length() {
+        return 0;
+      },
+    };
+    vi.stubGlobal("localStorage", stub);
+    return calls;
+  }
+
+  function mockHealthAndCreate() {
+    vi.mocked(api.health).mockResolvedValue({
+      ok: true,
+      service: "session-api",
+      version: "test",
+      contextWindow: 200000,
+    });
+    vi.mocked(api.createSession).mockResolvedValue({
+      session: {
+        conversation_id: "c-fresh",
+        json_mode: false,
+        turn_count: 0,
+        prior_count: 0,
+      },
+      turns: [],
+    });
+  }
+
+  it("bootstrap 不读 localStorage (T9b fresh-on-mount)", async () => {
+    const calls = installCountingLocalStorage();
+    mockHealthAndCreate();
+    const hook = renderHook();
+
+    await act(async () => {
+      await vi.waitFor(() => assert.equal(hook.getCurrent()?.phase, "ready"));
+    });
+
+    // T9b 关键契约: 进站一次 getItem 都不发, 不读 stored conversation id。
+    assert.equal(
+      calls.getItem.length,
+      0,
+      `expected 0 localStorage.getItem calls, got ${calls.getItem.length}: ${JSON.stringify(calls.getItem)}`
+    );
+    assert.equal(hook.getCurrent()?.session?.conversation_id, "c-fresh");
+
+    Renderer.updateContainer(null, hook.root, null, () => undefined);
+  });
+
+  it("bootstrap 不写 localStorage (旧 conversation_id key 永不创建)", async () => {
+    const calls = installCountingLocalStorage();
+    mockHealthAndCreate();
+    const hook = renderHook();
+
+    await act(async () => {
+      await vi.waitFor(() => assert.equal(hook.getCurrent()?.phase, "ready"));
+    });
+
+    // 旧 key 应被废弃: bootstrap / newSession / setConversation 一概不写。
+    assert.equal(
+      calls.setItem.length,
+      0,
+      `expected 0 localStorage.setItem calls, got ${calls.setItem.length}: ${JSON.stringify(calls.setItem)}`
+    );
+    assert.equal(calls.removeItem.length, 0);
+
+    Renderer.updateContainer(null, hook.root, null, () => undefined);
+  });
+
+  it("bootstrap 直接调 createSession 并 adopt (无 stored / 404 fallback)", async () => {
+    installCountingLocalStorage();
+    mockHealthAndCreate();
+    const hook = renderHook();
+
+    await act(async () => {
+      await vi.waitFor(() => assert.equal(hook.getCurrent()?.phase, "ready"));
+    });
+
+    // 路径: health → createSession → applySession。
+    assert.equal(vi.mocked(api.health).mock.calls.length, 1);
+    assert.equal(vi.mocked(api.createSession).mock.calls.length, 1);
+    // T9b 已删: 旧 stored-restore 路径不再调 getSessionHistory (除非
+    // setConversation 显式切旧会话)。
+    assert.equal(vi.mocked(api.getSessionHistory).mock.calls.length, 0);
+    assert.equal(hook.getCurrent()?.session?.conversation_id, "c-fresh");
+    assert.equal(hook.getCurrent()?.phase, "ready");
+
+    Renderer.updateContainer(null, hook.root, null, () => undefined);
+  });
+
+  it("createSession 失败 → 置 phase=error, 不读 localStorage fallback", async () => {
+    const calls = installCountingLocalStorage();
+    vi.mocked(api.health).mockResolvedValue({
+      ok: true,
+      service: "session-api",
+      version: "test",
+      contextWindow: 200000,
+    });
+    vi.mocked(api.createSession).mockRejectedValue(
+      new Error("default workspace unavailable")
+    );
+    const hook = renderHook();
+
+    await act(async () => {
+      await vi.waitFor(() => assert.equal(hook.getCurrent()?.phase, "error"));
+    });
+
+    // T9b: 进站失败路径不再尝试从 localStorage 恢复旧会话 — 错误直接
+    // 暴露给用户重试, 不静默 fallback。
+    assert.equal(calls.getItem.length, 0);
+    assert.ok(
+      hook.getCurrent()?.error?.includes("default workspace unavailable"),
+      `expected create error message, got: ${hook.getCurrent()?.error}`
+    );
 
     Renderer.updateContainer(null, hook.root, null, () => undefined);
   });
