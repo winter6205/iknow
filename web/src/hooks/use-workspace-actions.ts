@@ -17,7 +17,7 @@
  * 行为契约：与原 ChatApp 内 inline handler 100% 等价；只换载体。
  */
 import type { Dispatch, RefObject, SetStateAction } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { useSessionChat } from "./useSessionChat";
 import type { useWorkspace } from "./useWorkspace";
 
@@ -45,11 +45,11 @@ export type UseWorkspaceActionsResult = {
 };
 
 /**
- * serve-workspace T8: popover 关闭三件套 effect。
+ * serve-workspace T8 + review fix M1/L1: popover 关闭三件套 effect。
  *
  *  - `open === false` → effect 直接 return, 不挂监听, 不抢焦点。
  *  - `open === true`:
- *      a. document `mousedown` 监听 — 命中 trigger / popover 之外的元素 → close + focus trigger。
+ *      a. document `mousedown` 监听 — 命中 popover 之外 → close + focus trigger。
  *      b. document `keydown` 监听 — Esc → close + focus trigger。
  *
  * 与 picker 子组件内 onClick / onKeyDown 无关 — popover 自身不内嵌焦点陷阱
@@ -58,6 +58,16 @@ export type UseWorkspaceActionsResult = {
  *
  * a11y 红线: Esc 关后焦点必须回到 trigger (chip button), 让键盘用户能继续
  * 操作页面其他部分 (spec §a11y 红线)。
+ *
+ * 反馈 M1 修复: 父层 inline `onClose` 是新 closure each render, 直接放 deps
+ * 会让 effect 每次 render re-attach (mousedown + keydown × 2 listeners)。
+ * 把 onClose 放进 ref, effect 闭包读 ref.current() — deps 收敛到
+ * `[open, triggerRef, popoverRef]`, stable identity consumers 可放心 memo。
+ *
+ * 反馈 L1 修复: 触发器 (chip) 已被外层 wrapper (popoverRef) 包裹
+ * (ChatHeader 的 `<div ref={workspacePopoverRef}>` 包整个 chip + popover 容器),
+ * trigger.contains 检查完全被 popover.contains 覆盖 — 删除以减表面。
+ * 前提: 调用方必须保持这个包含关系 (本 App 调用即如此)。
  */
 export function usePopoverDismiss(
   open: boolean,
@@ -65,21 +75,27 @@ export function usePopoverDismiss(
   popoverRef: RefObject<HTMLElement | null>,
   onClose: () => void
 ): void {
+  // M1: ref 包装 onClose — 永远读到最新 closure, 但 effect 自身不依赖其
+  // identity,只在 handler 内调用,避免 re-attach。
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
     if (!open) return;
     const handleMouseDown = (e: MouseEvent) => {
       const target = e.target;
       if (!(target instanceof Node)) return;
-      if (triggerRef.current?.contains(target)) return;
+      // L1: trigger 已被 popoverRef 包含 (见 App.tsx 的 ref 拓扑), 去掉
+      // triggerRef.contains 检查以减表面, 行为等价。
       if (popoverRef.current?.contains(target)) return;
-      onClose();
+      onCloseRef.current();
       // 下一帧把焦点送回 trigger, 避免与 mouseup 顺序冲突。
       queueMicrotask(() => triggerRef.current?.focus());
     };
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       e.stopPropagation();
-      onClose();
+      onCloseRef.current();
       queueMicrotask(() => triggerRef.current?.focus());
     };
     document.addEventListener("mousedown", handleMouseDown);
@@ -88,7 +104,7 @@ export function usePopoverDismiss(
       document.removeEventListener("mousedown", handleMouseDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [open, triggerRef, popoverRef, onClose]);
+  }, [open, triggerRef, popoverRef]);
 }
 
 export function useWorkspaceActions(

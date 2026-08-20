@@ -14,6 +14,7 @@
 import type { RefObject } from "react";
 import { FOCUS_RING } from "../../lib/ui";
 import type { SessionListItem } from "../../api/types";
+import type { SessionListPhase } from "../../hooks/use-session-list";
 import { GroupedView } from "./grouped-view";
 import { EmptyState, ErrorState, LoadingState } from "./sidebar-states";
 import { ChevronIcon, ChevronLeftIcon, PlusIcon, RefreshIcon } from "./icons";
@@ -91,10 +92,8 @@ function NewSessionCTA({ onNewSession }: { onNewSession: () => void }) {
   );
 }
 
-type SidebarPhase = "loading" | "ready" | "error";
-
 type ExpandedSidebarData = {
-  phase: SidebarPhase;
+  phase: SessionListPhase;
   sessions: ReadonlyArray<SessionListItem>;
   errorMsg: string | null;
   refresh: () => void;

@@ -20,7 +20,7 @@
  * 新会话" 由 App 层 handleCreateInWorkspace 负责 (本 shell 只 bind 不 newSession,
  * 与默认决议 B 对齐)。
  */
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { resolveBrowserRoot } from "../lib/workspace-browser";
 import type { WorkspaceSubdirEntry } from "../api/client";
 import { PathPickerPanel } from "./WorkspacePicker/path-picker-panel";
@@ -101,16 +101,47 @@ export function WorkspacePicker(props: WorkspacePickerProps) {
   useEffect(() => {
     const root = dialogRef.current;
     if (!root) return;
-    const queue = (cb: () => void) =>
-      typeof queueMicrotask === "function"
-        ? queueMicrotask(cb)
-        : Promise.resolve().then(cb);
-    queue(() => {
+    queueMicrotask(() => {
       const target = root.querySelector<HTMLButtonElement | HTMLInputElement>(
         '[data-ws-picker-autofocus="true"]'
       );
       target?.focus();
     });
+  }, []);
+
+  // M2 (review fix): focus trap — Tab 在 popover 内循环。
+  // - 焦点所有权: WorkspacePicker 拥有 trap (里头有可见的 focusable 元素);
+  //   usePopoverDismiss 拥有 Esc / outside-click / focus-return (见
+  //   use-workspace-actions.ts 注释)。两者职责分明。
+  // - aria-modal="true" 保留: 文件声明模态,trap 是真实行为。
+  // - 实现: 在 dialog 上挂 keydown,仅 key === "Tab" 时拦截;读 row.querySelectorAll
+  //   找 tabbable 元素,焦点在边缘时回卷。
+  // - `tabbable` 选择器: 匹配 native focusable + 通过 [tabindex] 显式打开的子节点。
+  //   `<button>` / `<input>` 默认 tabbable,disabled 不算。
+  const handleDialogKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key !== "Tab") return;
+    const root = dialogRef.current;
+    if (!root) return;
+    const tabbable = Array.from(
+      root.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )
+    ).filter((el) => !el.hasAttribute("disabled") && el.tabIndex !== -1);
+    if (tabbable.length === 0) return;
+    const first = tabbable[0]!;
+    const last = tabbable[tabbable.length - 1]!;
+    const active = document.activeElement;
+    if (e.shiftKey) {
+      if (active === first || !root.contains(active)) {
+        e.preventDefault();
+        last.focus();
+      }
+    } else {
+      if (active === last || !root.contains(active)) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
   }, []);
 
   return (
@@ -119,6 +150,7 @@ export function WorkspacePicker(props: WorkspacePickerProps) {
       role="dialog"
       aria-modal="true"
       aria-labelledby={POPOVER_TITLE_ID}
+      onKeyDown={handleDialogKeyDown}
       // Popover shell — 父层 (App/ChatHeader) 用 `absolute top-full right-0 mt-1 z-50`
       // 包本组件, shell 自身只管内容 + 边框 + shadow。
       className="w-[22rem] max-w-[calc(100vw-2rem)] border border-line bg-surface text-[12px] text-ink-2 shadow-bubble"

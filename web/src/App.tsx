@@ -25,7 +25,7 @@
  * 本文件保留 ChatApp 的核心 orchestration（state / hooks 装配 / 三个状态
  * 分支的路由）。T4-T6 行为契约不变。
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import * as api from "./api/client";
 import { AppShell } from "./components/AppShell";
 import { ChatFooter } from "./components/ChatFooter";
@@ -35,21 +35,17 @@ import { ChatSidebarContainer } from "./components/ChatSidebarContainer";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PermissionDialog } from "./components/PermissionDialog";
 import { StateBlock } from "./components/StateBlock";
-import { WorkspacePicker } from "./components/WorkspacePicker";
 import { useAsksPolling } from "./hooks/useAsksPolling";
 import { useChatCompact } from "./hooks/use-chat-compact";
 import { usePermissionMode } from "./hooks/usePermissionMode";
 import { usePermissionModeToggle } from "./hooks/use-permission-mode-toggle";
 import { useRewindConfirm } from "./hooks/use-rewind-confirm";
 import { useSessionChat } from "./hooks/useSessionChat";
-import { useSessionList } from "./hooks/use-session-list";
 import { useSlashCommands } from "./hooks/use-slash-commands";
 import { useSubagentsPolling } from "./hooks/useSubagentsPolling";
 import { useWorkspace } from "./hooks/useWorkspace";
-import {
-  usePopoverDismiss,
-  useWorkspaceActions,
-} from "./hooks/use-workspace-actions";
+import { useWorkspaceActions } from "./hooks/use-workspace-actions";
+import { useWorkspacePopover } from "./hooks/use-workspace-popover";
 import type { McpServerStatus, McpTool, SkillSummary } from "./api/types";
 import type { WebRewindTarget } from "./lib/rewind-targets";
 import { permissionModeLabel } from "./lib/permission-mode";
@@ -95,28 +91,18 @@ function ChatApp() {
   >(undefined);
   const [rewindIndex, setRewindIndex] = useState(0);
 
-  // T8: 顶层 useSessionList, 与 SessionSidebar 共享 refreshSignal — App
-  // 用它 lookup active session 的 workspaceRoot (chip 上下文感知)。
-  // Sidebar 自己也用同一份 (bump 后两边都重 fetch)。
-  const sessionList = useSessionList(sidebarSignal);
-
-  // T8: chip button + popover wrapper refs, 传给 ChatHeader 用作 popover
-  // anchor 与 outside-click hit-testing 边界。
-  const chipButtonRef = useRef<HTMLButtonElement | null>(null);
-  const popoverWrapperRef = useRef<HTMLDivElement | null>(null);
-  usePopoverDismiss(workspaceOpen, chipButtonRef, popoverWrapperRef, () =>
-    setWorkspaceOpen(false)
+  // T8 + review fix M5: popover 一族 (refs / dismiss 监听 / active session
+  // lookup / 插槽 JSX) 全部下沉到 `useWorkspacePopover`。ChatApp 只消费
+  // 返回字段,自身保持 orchestration 角色。
+  const popover = useWorkspacePopover(
+    {
+      workspaceOpen,
+      setWorkspaceOpen,
+      sidebarSignal,
+    },
+    chat,
+    ws
   );
-
-  // T8: 算 active session 的 workspaceRoot — chip 显示优先级 active 优先。
-  const activeConversationId = chat.session?.conversation_id ?? null;
-  const activeWorkspaceRoot = useMemo(() => {
-    if (!activeConversationId) return null;
-    const found = sessionList.sessions.find(
-      (s) => s.conversation_id === activeConversationId
-    );
-    return found?.workspaceRoot ?? null;
-  }, [activeConversationId, sessionList.sessions]);
 
   useEffect(() => {
     void api
@@ -153,32 +139,21 @@ function ChatApp() {
     return () => mql.removeEventListener("change", onChange);
   }, []);
 
-  // T8: popover 插槽 — WorkspacePicker 节点通过 ChatHeader 的
-  // workspacePopover 插槽渲染, 视觉定位 (absolute top-full right-0 z-50)
-  // 由 ChatHeader 内的 wrapper div 负责。
-  const workspacePopover = workspaceOpen ? (
-    <WorkspacePicker
-      recents={ws.recents}
-      currentRoot={ws.root}
-      onBind={ws.bind}
-      onClose={() => setWorkspaceOpen(false)}
-      onNotice={chat.pushNotice}
-      onBrowseSubdirs={ws.browseSubdirs}
-    />
-  ) : null;
-
+  // T8: popover 插槽 — 已经 useWorkspacePopover 内部构造好,ChatHeader
+  // 透传即可。视觉定位 (absolute top-full right-0 z-50) 由 ChatHeader 内的
+  // wrapper div 负责。
   const header = (
     <ChatHeader
       phase={chat.phase}
       healthLabel={chat.healthLabel}
       workspaceBound={ws.bound}
       workspaceRoot={ws.root}
-      activeWorkspaceRoot={activeWorkspaceRoot}
-      chipButtonRef={chipButtonRef}
-      workspacePopoverRef={popoverWrapperRef}
-      workspacePopover={workspacePopover}
-      workspaceOpen={workspaceOpen}
-      onOpenWorkspacePicker={() => setWorkspaceOpen((prev) => !prev)}
+      activeWorkspaceRoot={popover.activeWorkspaceRoot}
+      chipButtonRef={popover.chipButtonRef}
+      workspacePopoverRef={popover.popoverWrapperRef}
+      workspacePopover={popover.workspacePopover}
+      workspaceOpen={popover.open}
+      onOpenWorkspacePicker={popover.onToggleOpen}
     />
   );
 

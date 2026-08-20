@@ -160,7 +160,6 @@ async function runScenario(label: string, ov: SessionOverride): Promise<void> {
     .textContent();
 
   // 测 MessageList 高度 popover 开前
-  const messageList = page.locator('[aria-label="对话记录"], main > div');
   const before = await page.evaluate(() => {
     const main = document.querySelector("main");
     return main ? main.getBoundingClientRect().height : 0;
