@@ -23,7 +23,13 @@ import type { SessionStoreError } from "./errors.js";
 import type { SessionFileV1 } from "./schema.js";
 import { sanitizeSessionFile } from "./schema.js";
 
-/** Metadata returned by list(); intentionally excludes messages. */
+/** Metadata returned by list(); intentionally excludes messages.
+ *
+ *  `workspaceRoot` (Postel): mirror of the additive optional field on
+ *  `SessionFileV1` — omitted from the entry (not serialized as null) when
+ *  the underlying file lacks it. Legacy v3/v4 files sanitize cleanly
+ *  without the field, so a missing key is the canonical "unbound" state
+ *  (sanitize never backfills cwd / process.cwd). */
 export interface SessionListEntry {
   readonly conversation_id: string;
   readonly updatedAt: string;
@@ -31,6 +37,10 @@ export interface SessionListEntry {
   readonly lastFinalText: string;
   /** UI title excerpt (#467 renamed from `summary`). */
   readonly title: string;
+  /** Per-session workspace-root bind (ABS optional; absent = unbound,
+   *  legacy files sanitize through). Wire field name stays
+   *  `workspaceRoot` (snake-less camel) to match the file shape verbatim. */
+  readonly workspaceRoot?: string;
 }
 
 /**
@@ -208,6 +218,12 @@ export class SessionStore {
         updatedAt: file.updatedAt,
         lastFinalText,
         title: file.title,
+        // Spread only the additive optional field; sanitize never emits
+        // `workspaceRoot: undefined` (spread-discipline), so absence on the
+        // entry is the same absence on the file — the Postel contract.
+        ...(file.workspaceRoot !== undefined
+          ? { workspaceRoot: file.workspaceRoot }
+          : {}),
       };
     } catch {
       return null; // skip corrupt / unreadable files
