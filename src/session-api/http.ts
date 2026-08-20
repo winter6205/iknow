@@ -19,6 +19,7 @@ import {
 import { isWorkspacesRecentsError } from "../config/workspaces-recents.js";
 import { mapStoreError, type SessionHub } from "./hub.js";
 import type { SessionStoreError } from "./store/index.js";
+import { listSubdirectories } from "./browse-workspaces.js";
 import { parseThinkingOverride } from "./thinking-override.js";
 import type {
   ApiErrorBody,
@@ -259,6 +260,16 @@ async function handle(opts: HandleOpts): Promise<void> {
           })),
         } satisfies WorkspacesResponse,
       });
+    }
+    // serve-workspace T2: subdirectory probe for the workspace picker
+    // breadcrumb. Pure-function gated; any failure (missing / empty /
+    // relative / not_found / not_a_dir / EACCES) collapses to a typed
+    // 422 `validation` so the SPA's caller contract is predictable.
+    if (pathname === "/api/v1/workspaces/browse") {
+      if (method !== "GET") {
+        return sendMethodNotAllowed(res, method, pathname);
+      }
+      return handleBrowseWorkspaces(req, res, url);
     }
 
     if (method === "POST" && pathname === "/api/v1/sessions") {
@@ -590,6 +601,56 @@ function parsePutWorkspaceBody(raw: unknown): PutWorkspaceRequest {
     path,
     confirmTrust: Boolean(o["confirmTrust"]),
   };
+}
+
+/**
+ * serve-workspace T2: handle `GET /api/v1/workspaces/browse?root=<abs>`.
+ * The query-string root is forwarded as-is to `listSubdirectories`;
+ * every failure collapses to 422 typed validation. Kept tiny to keep
+ * the route table's complexity budget under control.
+ */
+function handleBrowseWorkspaces(
+  _req: http.IncomingMessage,
+  res: http.ServerResponse,
+  url: URL
+): void {
+  const root = url.searchParams.get("root");
+  if (root === null || root === "") {
+    return sendJson({
+      res,
+      status: 422,
+      body: {
+        error: {
+          kind: "validation",
+          message: "root query parameter is required",
+          field: "root",
+        },
+      } satisfies ApiErrorBody,
+    });
+  }
+  void listSubdirectories(root).then((result) => {
+    if (result.ok) {
+      sendJson({
+        res,
+        status: 200,
+        body: { entries: result.entries },
+      });
+      return;
+    }
+    // Every failure mode is a single 422 validation envelope so the SPA
+    // never has to branch on a second layer of status codes.
+    sendJson({
+      res,
+      status: 422,
+      body: {
+        error: {
+          kind: "validation",
+          message: result.message,
+          field: "root",
+        },
+      } satisfies ApiErrorBody,
+    });
+  });
 }
 
 /** serve-workspace T3: 405 for exact path with the wrong method. */
