@@ -72,7 +72,7 @@ export interface IknowSettingsLlm {
   /**
    * #358 T1: 单次 LLM 调用竞速上限（per-call，毫秒）。
    * 镜像 maxTurns 校验纪律：有限正整数才合法；非整数 / 非正数 / 非数字 / 错类型 → 丢弃该字段。
-   * env 链：`envOptionalInt("IKNOW_LLM_TIMEOUT_MS") ?? settings.llm.timeoutMs ?? 60_000`。
+   * env 链：`envOptionalInt("IKNOW_LLM_TIMEOUT_MS") ?? settings.llm.timeoutMs ?? 300_000`。
    */
   timeoutMs?: number;
   compress?: IknowSettingsLlmCompress;

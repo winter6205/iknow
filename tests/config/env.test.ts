@@ -324,9 +324,9 @@ describe("loadIknowEnv — llm.timeoutMs (#358 settings 双字段, per-call)", (
     for (const k of ENV_KEYS) delete process.env[k];
   });
 
-  it("default: env 不设且 settings 未配 → 60000 fallback（third-tier 默认）", () => {
+  it("default: env 不设且 settings 未配 → 300000 fallback（third-tier 默认）", () => {
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
-    assert.equal(env.llm.timeoutMs, 60_000);
+    assert.equal(env.llm.timeoutMs, 300_000);
   });
 
   it("IKNOW_LLM_TIMEOUT_MS=30000 → env.llm.timeoutMs=30000", () => {
@@ -341,16 +341,16 @@ describe("loadIknowEnv — llm.timeoutMs (#358 settings 双字段, per-call)", (
     assert.equal(env.llm.timeoutMs, 7_200_000);
   });
 
-  it("IKNOW_LLM_TIMEOUT_MS 空串 → 60000（fallback，与未设同义）", () => {
+  it("IKNOW_LLM_TIMEOUT_MS 空串 → 300000（fallback，与未设同义）", () => {
     process.env.IKNOW_LLM_TIMEOUT_MS = "";
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
-    assert.equal(env.llm.timeoutMs, 60_000);
+    assert.equal(env.llm.timeoutMs, 300_000);
   });
 
-  it("IKNOW_LLM_TIMEOUT_MS 非数字 (abc) → 60000 fallback", () => {
+  it("IKNOW_LLM_TIMEOUT_MS 非数字 (abc) → 300000 fallback", () => {
     process.env.IKNOW_LLM_TIMEOUT_MS = "abc";
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
-    assert.equal(env.llm.timeoutMs, 60_000);
+    assert.equal(env.llm.timeoutMs, 300_000);
   });
 
   it("IKNOW_LLM_TIMEOUT_MS 小数 (30000.7) → trunc 为 30000（envOptionalInt 用 trunc）", () => {
@@ -374,9 +374,9 @@ describe("loadIknowEnv — llm.timeoutMs (#358 settings 双字段, per-call)", (
     assert.equal(env.llm.timeoutMs, 45_000);
   });
 
-  it("env 不设、settings 未配 → 60000 fallback（third-tier 默认）", () => {
+  it("env 不设、settings 未配 → 300000 fallback（third-tier 默认）", () => {
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
-    assert.equal(env.llm.timeoutMs, 60_000);
+    assert.equal(env.llm.timeoutMs, 300_000);
   });
 
   it("非法 env 值视为未设 → 回退到 settings", () => {
@@ -387,10 +387,10 @@ describe("loadIknowEnv — llm.timeoutMs (#358 settings 双字段, per-call)", (
     assert.equal(env.llm.timeoutMs, 45_000);
   });
 
-  it("env 非法 + settings 未配 → 60000 fallback", () => {
+  it("env 非法 + settings 未配 → 300000 fallback", () => {
     process.env.IKNOW_LLM_TIMEOUT_MS = "abc";
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
-    assert.equal(env.llm.timeoutMs, 60_000);
+    assert.equal(env.llm.timeoutMs, 300_000);
   });
 
   it("timeoutMs 与其它 LLM env 字段独立(不影响 maxTurns / maxOutputTokens / temperature)", () => {
@@ -497,7 +497,7 @@ describe("loadIknowEnv — subagent.taskTimeoutMs (#358 settings 双字段, per-
 });
 
 describe("loadIknowEnv — maxOutputTokens default", () => {
-  // 默认值选 16384 的完整 rationale 见 src/config/env.ts 该 fallback 注释。
+  // 默认值选 32000 的完整 rationale 见 src/config/env.ts 该 fallback 注释。
   beforeEach(() => {
     delete process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS;
   });
@@ -505,9 +505,9 @@ describe("loadIknowEnv — maxOutputTokens default", () => {
     delete process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS;
   });
 
-  it("未设 IKNOW_LLM_MAX_OUTPUT_TOKENS → 落到 16384 fallback", () => {
+  it("未设 IKNOW_LLM_MAX_OUTPUT_TOKENS → 落到 32000 fallback", () => {
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
-    assert.equal(env.llm.maxOutputTokens, 16384);
+    assert.equal(env.llm.maxOutputTokens, 32_000);
   });
 
   it("显式 env 仍可覆盖 fallback", () => {

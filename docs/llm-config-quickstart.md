@@ -26,8 +26,8 @@
 ANTHROPIC_AUTH_TOKEN=<your_real_api_key_here>
 
 # --- 其它保留 env（可选，非必填）---------------------------------------------
-IKNOW_LLM_MAX_OUTPUT_TOKENS=16384
-IKNOW_LLM_TIMEOUT_MS=60000
+IKNOW_LLM_MAX_OUTPUT_TOKENS=32000
+IKNOW_LLM_TIMEOUT_MS=300000
 IKNOW_LLM_TEMPERATURE=0
 IKNOW_LLM_STREAM=on            # 流式臂开关 on|off，默认 on
 

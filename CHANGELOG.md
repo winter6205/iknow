@@ -22,6 +22,8 @@
 
 ### Fixed
 
+- **LLM 默认对齐 coding-agent 标准帽（2026-08-21）**: `maxOutputTokens` 16384 → **32000**（Claude Code `CLAUDE_CODE_MAX_OUTPUT_TOKENS` 默认；按实际生成计费）；`timeoutMs` 60s → **300s**（thinking + 长 tool_use 的 per-call 竞速）。不再按单次任务逐步加码。MCP `connectTimeoutMs` 仍 60s。历史 2048→8192 / 8192→16384 条目保留。
+
 - **maxOutputTokens 默认 8192 → 16384（#578，2026-08-21）**: `thinking: "adaptive"` + 奢侈品腕表自包含 HTML（约 150–200 行）的 `write_file` JSON 超出 8192，撞 `max_tokens` 截断导致缺 `content`。fallback 提到 16384（容纳 thinking budget + 完整 HTML）；文档示例同步。不改 `timeoutMs` / loop-engine truncation 语义。先前 2048→8192（贪吃蛇 HTML，2026-08-17）历史条目保留。
 
 - **TUI live tail 不渲染无 start 的失败工具（#578，2026-08-21）**: `max_tokens` 截断导致 `write_file` 缺 `content` 时，无 `tool_call_start` 配对；`liveToolReduce` 对 unmatched `post_tool_use` 不再 append 幽灵 `failed` 行（完成态只走 history `[失败]`）。
