@@ -14,6 +14,9 @@
  *    加 `text-ink-2` 让标签清晰（之前依赖 body 默认色，hover 时层级混乱）。
  *    AC 字面要求 "顶层 label = basename(root)(accent)" — 选择 active-only
  *    accent 方案（更清晰的 active / 非 active 区分），注释里说明权衡。
+ *
+ * T8: 第一个 recents 项打 `data-ws-picker-autofocus="true"` — popover 挂载后
+ * 父组件 useEffect 找该锚点 focus (a11y: auto-open 后焦点进 popover)。
  */
 import { basename } from "../WorkspaceChip";
 import { pickRecentForBind } from "../WorkspacePicker";
@@ -40,7 +43,7 @@ export function RecentsList({
         className="flex max-h-32 flex-col gap-0.5 overflow-y-auto"
         aria-label="已存在工作空间列表"
       >
-        {recents.map((r) => {
+        {recents.map((r, idx) => {
           const payload = pickRecentForBind(r);
           const name = basename(r);
           const isActive = r === currentRoot;
@@ -50,6 +53,7 @@ export function RecentsList({
                 type="button"
                 aria-label={`选择工作空间 ${name}`}
                 data-workspace-path={r}
+                data-ws-picker-autofocus={idx === 0 ? "true" : undefined}
                 className={`flex w-full flex-col items-start gap-0.5 truncate rounded-md px-2 py-1 text-left ${
                   isActive
                     ? "bg-accent-soft text-accent"

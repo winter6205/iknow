@@ -95,7 +95,7 @@ type SidebarPhase = "loading" | "ready" | "error";
 
 type ExpandedSidebarData = {
   phase: SidebarPhase;
-  sessions: SessionListItem[];
+  sessions: ReadonlyArray<SessionListItem>;
   errorMsg: string | null;
   refresh: () => void;
   currentConversationId: string | null;

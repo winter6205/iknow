@@ -67,6 +67,11 @@ export function PathPickerPanel({
           onChange={(e) => setInput(e.target.value)}
           placeholder="/abs/path/to/project"
           aria-label="工作空间绝对路径"
+          // T8 a11y: popover 挂载后, 父组件 useEffect 找 [data-ws-picker-autofocus="true"]
+          // 锚点 focus — recents 空 → 这里就是第一焦点收纳; recents 非空但用户
+          // 手动展开 path picker → 焦点亦可在此 (PathPickerPanel 是用户主动操作
+          // 的目标, auto-focus 不会让人意外)。
+          data-ws-picker-autofocus="true"
           className="min-w-0 flex-1 rounded-pill border border-ink-3/30 bg-surface px-2 py-1 font-mono text-[11px] outline-none focus:border-accent"
         />
         <button

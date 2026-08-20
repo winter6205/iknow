@@ -3,7 +3,6 @@
  *
  * 历史：该文件原 777 行，prop drilling 6 层（H1）、超长（H2）、ExpandedSidebar
  * 长方法（M5）。T7a 把：
- *  - useSessionList hook 留这里（fetch + 缓存 + AbortController）。
  *  - useWorkspaceGroups + WorkspaceGroupHeader / WorkspaceGroupBlock /
  *    GroupCreateButton / GroupedSessionListView 抽到 `grouped-view.tsx` + Context。
  *  - 图标 (PlusIcon / RefreshIcon / ChevronLeftIcon / ChevronIcon)
@@ -12,15 +11,16 @@
  *  - SidebarHeader / NewSessionCTA / ExpandedSidebar / CollapsedRail 抽到
  *    `sidebar-shell.tsx`。
  *
+ * T8: `useSessionList` 从本文件提到 `web/src/hooks/use-session-list.ts`,
+ * 让 App 也能用同一份 session list (lookup active session 的 workspaceRoot
+ * 喂给 WorkspaceChip)。
+ *
  * 本文件只保留 orchestration（collapsed 切换、focus 管理、useSessionList、
  * 子组件 prop 装配）。T4-T6 行为契约不变。
  */
-import { useCallback, useEffect, useRef, useState } from "react";
-import * as api from "../api/client";
-import type { SessionListItem } from "../api/types";
+import { useEffect, useRef } from "react";
+import { useSessionList } from "../hooks/use-session-list";
 import { CollapsedRail, ExpandedSidebar } from "./SessionSidebar/sidebar-shell";
-
-type SidebarPhase = "loading" | "ready" | "error";
 
 export type SessionSidebarProps = {
   currentConversationId: string | null;
@@ -42,60 +42,6 @@ export type SessionSidebarProps = {
    */
   refreshSignal?: number;
 };
-
-/** Surface any thrown value as a human-readable string. */
-function toMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
-type SessionListState = {
-  phase: SidebarPhase;
-  sessions: SessionListItem[];
-  errorMsg: string | null;
-  refresh: () => void;
-};
-
-/**
- * Fetch + cache the session list. `refresh` bumps an internal key that
- * re-runs the effect; an external `externalSignal` (App-owned) also bumps it
- * so lifecycle events (newSession / bootstrap) refresh the list without the
- * user clicking. The AbortController cancels any in-flight request on unmount
- * or re-run so a stale response can never overwrite newer state.
- *
- * #90 contract preserved: listSessions + sortSessionsByUpdatedDesc +
- * error surfacing + refresh bump — only the visual layer changed.
- */
-function useSessionList(externalSignal?: number): SessionListState {
-  const [phase, setPhase] = useState<SidebarPhase>("loading");
-  const [sessions, setSessions] = useState<SessionListItem[]>([]);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
-
-  useEffect(() => {
-    const ctrl = new AbortController();
-    setPhase("loading");
-    setErrorMsg(null);
-    api.listSessions(ctrl.signal).then(
-      (res) => {
-        if (ctrl.signal.aborted) return;
-        // 排序由 GroupedView 内的 groupSessionsByWorkspace 接管；
-        // 这里只负责把 raw sessions 暴露给上层。
-        setSessions(res.sessions);
-        setPhase("ready");
-      },
-      (e: unknown) => {
-        if (ctrl.signal.aborted) return;
-        setErrorMsg(toMessage(e));
-        setPhase("error");
-      }
-    );
-    return () => ctrl.abort();
-  }, [reloadKey, externalSignal]);
-
-  const refresh = useCallback(() => setReloadKey((k) => k + 1), []);
-
-  return { phase, sessions, errorMsg, refresh };
-}
 
 function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");

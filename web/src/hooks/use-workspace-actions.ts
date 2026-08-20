@@ -9,8 +9,13 @@
  *  - `handleSelect`：切到目标会话 + bumpSidebar。
  *  - `autoOpenedRef` + effect: unbound 用户首次进入自动弹 picker。
  *
+ * T8: popover 关闭 (Esc / outside-click) + 焦点回 chip — 加 `usePopoverDismiss`
+ * effect, 把这两个监听抽到独立 hook, 让 use-workspace-actions.ts 主体只
+ * 关心 auto-open + handler 三件套。
+ *
  * 行为契约：与原 ChatApp 内 inline handler 100% 等价；只换载体。
  */
+import type { Dispatch, RefObject, SetStateAction } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { useSessionChat } from "./useSessionChat";
 import type { useWorkspace } from "./useWorkspace";
@@ -21,7 +26,12 @@ type WsApi = ReturnType<typeof useWorkspace>;
 export type UseWorkspaceActionsResult = {
   /** Picker 显示态 — CTA / chip / /workspace 三入口共用。 */
   readonly workspaceOpen: boolean;
-  readonly setWorkspaceOpen: (open: boolean) => void;
+  /**
+   * 切换 picker 开 / 关。形参兼容 React `SetStateAction<boolean>` — 调用方
+   * 既可传 `true` / `false`, 也可传 `(prev) => !prev` 形式做 toggle
+   * (T8 chip 二次点击切换需要)。
+   */
+  readonly setWorkspaceOpen: Dispatch<SetStateAction<boolean>>;
   /** Sidebar 列表刷新信号 — lifecycle 事件后 bump。 */
   readonly sidebarSignal: number;
   readonly bumpSidebar: () => void;
@@ -32,6 +42,53 @@ export type UseWorkspaceActionsResult = {
   /** Sidebar 切换会话。 */
   readonly handleSelect: (id: string) => Promise<void>;
 };
+
+/**
+ * serve-workspace T8: popover 关闭三件套 effect。
+ *
+ *  - `open === false` → effect 直接 return, 不挂监听, 不抢焦点。
+ *  - `open === true`:
+ *      a. document `mousedown` 监听 — 命中 trigger / popover 之外的元素 → close + focus trigger。
+ *      b. document `keydown` 监听 — Esc → close + focus trigger。
+ *
+ * 与 picker 子组件内 onClick / onKeyDown 无关 — popover 自身不内嵌焦点陷阱
+ * (低耦合), 仅做 dismiss 触发。focus-return 由 effect 完成 (避免 React render
+ * 期间触发 focus 的 React 18 警告)。
+ *
+ * a11y 红线: Esc 关后焦点必须回到 trigger (chip button), 让键盘用户能继续
+ * 操作页面其他部分 (spec §a11y 红线)。
+ */
+export function usePopoverDismiss(
+  open: boolean,
+  triggerRef: RefObject<HTMLElement | null>,
+  popoverRef: RefObject<HTMLElement | null>,
+  onClose: () => void
+): void {
+  useEffect(() => {
+    if (!open) return;
+    const handleMouseDown = (e: MouseEvent) => {
+      const target = e.target;
+      if (!(target instanceof Node)) return;
+      if (triggerRef.current?.contains(target)) return;
+      if (popoverRef.current?.contains(target)) return;
+      onClose();
+      // 下一帧把焦点送回 trigger, 避免与 mouseup 顺序冲突。
+      queueMicrotask(() => triggerRef.current?.focus());
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      onClose();
+      queueMicrotask(() => triggerRef.current?.focus());
+    };
+    document.addEventListener("mousedown", handleMouseDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handleMouseDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open, triggerRef, popoverRef, onClose]);
+}
 
 export function useWorkspaceActions(
   chat: ChatApi,

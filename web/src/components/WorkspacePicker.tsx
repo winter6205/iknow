@@ -1,5 +1,5 @@
 /**
- * serve-workspace T5/T7a — WorkspacePicker orchestrator (review fix slimming)。
+ * serve-workspace T8 — WorkspacePicker 改成 popover shell。
  *
  * 历史: 该文件原 319 行, WorkspacePicker 122 行 / WorkspaceBrowser 103 行,
  * 两个长方法 (H3 / M4)。T7a 把:
@@ -8,12 +8,19 @@
  *  - 子目录浏览器 (含 Breadcrumbs / SubdirList 子组件) 抽到
  *    `WorkspacePicker/workspace-browser.tsx`。
  *
- * 本文件保留纯逻辑 (`buildBindPayload` / `pickRecentForBind`) 与
- * orchestrator (`WorkspacePicker` 顶层 composition — 折叠态 + placement),
- * 由其 <30 行。WorkspaceBrowser 的导出挪到子目录文件里, 这里仅 re-export
- * 以保证外部 import 路径稳定。
+ * T8 review: picker 改 popover — 父层 (ChatHeader / App) 把 popover shell
+ * 锚定在 WorkspaceChip 右侧 (`absolute top-full right-0 mt-1 z-50`)。
+ * shell 只负责 (a) `role="dialog"` / `aria-modal` / `aria-labelledby`
+ * 三件套 (a11y 红线) 与 (b) 内嵌 PickerHeader + RecentsList + PathPickerPanel
+ * composition。RecentsList / PathPickerPanel / WorkspaceBrowser 完全不重写
+ * (T7a 子组件契约不变: recents onClick 末尾 `onClose()`, bind 成功也
+ * `onClose()`)。
+ *
+ * pickRecent / submit / trust toggle 三条契约不变: spec §Commands 5 "换根 =
+ * 新会话" 由 App 层 handleCreateInWorkspace 负责 (本 shell 只 bind 不 newSession,
+ * 与默认决议 B 对齐)。
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { resolveBrowserRoot } from "../lib/workspace-browser";
 import type { WorkspaceSubdirEntry } from "../api/client";
 import { PathPickerPanel } from "./WorkspacePicker/path-picker-panel";
@@ -65,11 +72,95 @@ export function pickRecentForBind(root: string): {
 }
 
 /**
+ * WorkspacePicker popover 标题 — a11y labelledby 锚点。`sr-only` 让
+ * 标题对屏幕阅读器可达，对 sighted 用户不占视觉空间。
+ */
+const POPOVER_TITLE_ID = "workspace-picker-title";
+
+/**
+ * WorkspacePicker popover shell — 三件套 (role / aria-modal / aria-labelledby) +
+ * PickerHeader + RecentsList + PathPickerPanel 二级折叠。
+ *
+ * T5 既有行为: recents.length === 0 时 path picker 默认展开 (用户首次引导)；
+ * recents 非空时 path picker 折叠, 由用户点 CTA 展开。
+ *
+ * T8 mount 行为: auto-open (T5) 在 App 层 useWorkspaceActions 里, setWorkspaceOpen(true)
+ * 触发本 shell 挂载。本 shell 的 `useEffect` 把焦点送到第一个可聚焦元素
+ * (recents 首项 / path input 二选一), 满足 a11y "auto-open 后焦点进 popover"。
+ */
+export function WorkspacePicker(props: WorkspacePickerProps) {
+  const initialBase = resolveBrowserRoot(props.currentRoot);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const [showPathPicker, setShowPathPicker] = useState(
+    props.recents.length === 0
+  );
+
+  // T8 a11y: 挂载后第一项自动 focus (auto-open 路径)。recents 非空 → 首项
+  // recent button; recents 空 → path picker input。Effect 同步触发
+  // (queueMicrotask 替代 setTimeout 0, 避免测试时间敏感)。
+  useEffect(() => {
+    const root = dialogRef.current;
+    if (!root) return;
+    const queue = (cb: () => void) =>
+      typeof queueMicrotask === "function"
+        ? queueMicrotask(cb)
+        : Promise.resolve().then(cb);
+    queue(() => {
+      const target = root.querySelector<HTMLButtonElement | HTMLInputElement>(
+        '[data-ws-picker-autofocus="true"]'
+      );
+      target?.focus();
+    });
+  }, []);
+
+  return (
+    <div
+      ref={dialogRef}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={POPOVER_TITLE_ID}
+      // Popover shell — 父层 (App/ChatHeader) 用 `absolute top-full right-0 mt-1 z-50`
+      // 包本组件, shell 自身只管内容 + 边框 + shadow。
+      className="w-[22rem] max-w-[calc(100vw-2rem)] border border-line bg-surface text-[12px] text-ink-2 shadow-bubble"
+    >
+      <h2 id={POPOVER_TITLE_ID} className="sr-only">
+        工作空间选择
+      </h2>
+      <div className="border-b border-ink-3/30 bg-surface px-3 py-2">
+        <PickerHeader onClose={props.onClose} />
+      </div>
+      <div className="px-3 py-2">
+        <RecentsList
+          recents={props.recents}
+          currentRoot={props.currentRoot}
+          onBind={props.onBind}
+          onClose={props.onClose}
+        />
+        <PathPickerToggle
+          expanded={showPathPicker}
+          onToggle={() => setShowPathPicker((s) => !s)}
+        />
+        {showPathPicker ? (
+          <PathPickerPanel
+            initialBase={initialBase}
+            initialInput={props.currentRoot ?? ""}
+            onBind={props.onBind}
+            onClose={props.onClose}
+            onNotice={props.onNotice}
+            onBrowseSubdirs={props.onBrowseSubdirs}
+          />
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/**
  * WorkspacePicker 顶部行：标题 + 关闭按钮。无状态纯展示。
  */
 function PickerHeader({ onClose }: { onClose: () => void }) {
   return (
-    <div className="mb-2 flex items-center justify-between">
+    <div className="flex items-center justify-between">
       <span className="font-medium text-ink">选择工作空间根</span>
       <button type="button" className="text-ink-3" onClick={onClose}>
         关闭
@@ -97,40 +188,5 @@ function PathPickerToggle({
       <span aria-hidden="true">{expanded ? "▾" : "▸"}</span>
       <span>选择路径新建工作空间</span>
     </button>
-  );
-}
-
-/**
- * WorkspacePicker 顶层 composition — recents / path picker 二级折叠 + 关闭。
- */
-export function WorkspacePicker(props: WorkspacePickerProps) {
-  const initialBase = resolveBrowserRoot(props.currentRoot);
-  const [showPathPicker, setShowPathPicker] = useState(
-    props.recents.length === 0
-  );
-  return (
-    <div className="border-b border-ink-3/30 bg-surface px-3 py-2 text-[12px]">
-      <PickerHeader onClose={props.onClose} />
-      <RecentsList
-        recents={props.recents}
-        currentRoot={props.currentRoot}
-        onBind={props.onBind}
-        onClose={props.onClose}
-      />
-      <PathPickerToggle
-        expanded={showPathPicker}
-        onToggle={() => setShowPathPicker((s) => !s)}
-      />
-      {showPathPicker ? (
-        <PathPickerPanel
-          initialBase={initialBase}
-          initialInput={props.currentRoot ?? ""}
-          onBind={props.onBind}
-          onClose={props.onClose}
-          onNotice={props.onNotice}
-          onBrowseSubdirs={props.onBrowseSubdirs}
-        />
-      ) : null}
-    </div>
   );
 }

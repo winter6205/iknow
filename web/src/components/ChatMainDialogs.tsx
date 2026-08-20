@@ -2,8 +2,13 @@
  * serve-workspace T7a — ChatApp 主区域 inline 对话框 / 错误块。
  *
  * review fix M6: 把 ChatApp 主区域 inline 的 ErrorBlock / McpPanel /
- * RewindPicker / WorkspacePicker / MessageList 集合 (~75 行 JSX) 抽到本
+ * RewindPicker / MessageList 集合 (~75 行 JSX) 抽到本
  * 组件，让 ChatApp 主文件收敛到 ≤ 200 行。
+ *
+ * T8: WorkspacePicker 不再渲染在本主区 — 改成 popover 锚定在 ChatHeader
+ * 的 WorkspaceChip 右上 (ChatHeader 接 `workspacePopover` 插槽, App 注入)。
+ * 主区只留 MessageList + inline 错误 / 对话框 (McpPanel / RewindPicker /
+ * PermissionDialog / StateBlock), 不再有「挤掉会话框位置」的布局占位。
  *
  * 行为契约: 与原 ChatApp 内 inline JSX 100% 等价。
  */
@@ -12,19 +17,15 @@ import { McpPanel } from "./McpPanel";
 import { MessageList } from "./MessageList";
 import { RewindPicker } from "./RewindPicker";
 import { StateBlock } from "./StateBlock";
-import { WorkspacePicker } from "./WorkspacePicker";
 import type { McpServerStatus, McpTool } from "../api/types";
 import type { useSessionChat } from "../hooks/useSessionChat";
-import type { useWorkspace } from "../hooks/useWorkspace";
 import type { WebRewindTarget } from "../lib/rewind-targets";
 import * as api from "../api/client";
 
 type ChatApi = ReturnType<typeof useSessionChat>;
-type WsApi = ReturnType<typeof useWorkspace>;
 
 export function ChatMainDialogs({
   chat,
-  ws,
   permissionDialog,
   mcpOpen,
   mcpServers,
@@ -37,11 +38,8 @@ export function ChatMainDialogs({
   selectRewind,
   confirmRewind,
   closeRewind,
-  workspaceOpen,
-  closeWorkspace,
 }: {
   chat: ChatApi;
-  ws: WsApi;
   permissionDialog: ReactNode;
   mcpOpen: boolean;
   mcpServers: ReadonlyArray<McpServerStatus>;
@@ -54,8 +52,6 @@ export function ChatMainDialogs({
   selectRewind: (n: number) => void;
   confirmRewind: () => void;
   closeRewind: () => void;
-  workspaceOpen: boolean;
-  closeWorkspace: () => void;
 }) {
   return (
     <>
@@ -86,16 +82,6 @@ export function ChatMainDialogs({
           onSelect={selectRewind}
           onConfirm={confirmRewind}
           onClose={closeRewind}
-        />
-      ) : null}
-      {workspaceOpen ? (
-        <WorkspacePicker
-          recents={ws.recents}
-          currentRoot={ws.root}
-          onBind={ws.bind}
-          onClose={closeWorkspace}
-          onNotice={chat.pushNotice}
-          onBrowseSubdirs={ws.browseSubdirs}
         />
       ) : null}
       <MessageList
