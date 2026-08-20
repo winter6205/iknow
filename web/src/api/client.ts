@@ -348,6 +348,32 @@ export function listTrustedWorkspaces(
 }
 
 /**
+ * serve-workspace T3: GET /api/v1/workspaces/browse?root=<abs> 单层子目录
+ * 探测。返回 `{ entries: ReadonlyArray<{ name, path }> }`, path = join(root, name)。
+ * 不存在 / 非绝对 / 无权限 / 空串 → 后端 422 typed validation, 此处按
+ * 既有 `request<T>` 通道抛 `SessionApiError`, 调用方走 `onNotice` 兜底。
+ */
+export interface WorkspaceSubdirEntry {
+  readonly name: string;
+  readonly path: string;
+}
+
+export interface WorkspaceSubdirsResponse {
+  readonly entries: ReadonlyArray<WorkspaceSubdirEntry>;
+}
+
+export function listWorkspaceSubdirs(
+  root: string,
+  signal?: AbortSignal
+): Promise<WorkspaceSubdirsResponse> {
+  return request(
+    `${API}/workspaces/browse?root=${encodeURIComponent(root)}`,
+    {},
+    signal
+  );
+}
+
+/**
  * PUT /api/v1/workspace — 切换绑定根。`confirmTrust=true` 用于未信任路径
  * （首次绑定新绝对路径需显式确认信任）。
  */

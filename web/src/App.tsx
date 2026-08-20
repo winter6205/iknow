@@ -447,6 +447,7 @@ function ChatApp() {
               onBind={ws.bind}
               onClose={() => setWorkspaceOpen(false)}
               onNotice={chat.pushNotice}
+              onBrowseSubdirs={ws.browseSubdirs}
             />
           ) : null}
           <MessageList

@@ -183,7 +183,7 @@ describe("WorkspaceChip 渲染", () => {
 });
 
 describe("WorkspacePicker 渲染", () => {
-  it("默认态：input + 信任 toggle + recents 列表", () => {
+  it("默认态：input + 信任 toggle + recents 列表 + 子目录浏览器(折叠)", () => {
     const html = renderToStaticMarkup(
       <WorkspacePicker
         recents={["/abs/old", "/abs/older"]}
@@ -191,6 +191,7 @@ describe("WorkspacePicker 渲染", () => {
         onBind={async () => {}}
         onClose={() => {}}
         onNotice={() => {}}
+        onBrowseSubdirs={async () => []}
       />
     );
     assert.ok(html.includes("选择工作空间根"), "must include picker title");
@@ -203,6 +204,12 @@ describe("WorkspacePicker 渲染", () => {
     assert.ok(html.includes("old"), "must include first recent basename");
     assert.ok(html.includes("older"), "must include second recent basename");
     assert.ok(html.includes("/abs/old"), "must include full recent path");
+    // T3: 子目录浏览器(默认折叠, 仅 toggle button 可见)
+    assert.ok(html.includes("浏览子目录"), "must render browser toggle");
+    assert.ok(
+      html.includes('aria-label="浏览子目录"'),
+      "must render browser aria-label"
+    );
   });
 
   it("recents 为空 → 不渲染「已信任的根」段", () => {
@@ -213,6 +220,7 @@ describe("WorkspacePicker 渲染", () => {
         onBind={async () => {}}
         onClose={() => {}}
         onNotice={() => {}}
+        onBrowseSubdirs={async () => []}
       />
     );
     assert.ok(!html.includes("已信任的根"), "must NOT render recents section");
@@ -226,6 +234,7 @@ describe("WorkspacePicker 渲染", () => {
         onBind={async () => {}}
         onClose={() => {}}
         onNotice={() => {}}
+        onBrowseSubdirs={async () => []}
       />
     );
     assert.ok(
