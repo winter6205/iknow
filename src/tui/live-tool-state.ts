@@ -1,9 +1,11 @@
 /**
  * src/tui/live-tool-state.ts
  *
- * #343 T4（自 archive/tui-ink/src/live-tool-state.ts 迁移，语义不变）：
+ * #343 T4（自 archive/tui-ink/src/live-tool-state.ts 迁移）：
  * 工具调用实时状态 — 纯函数 reducer，推动 `tool_call_start` → "运行中" →
  * postToolUse 完成 → ok/failed 摘要行的两态时序。
+ * #578：unmatched `post_tool_use` 不再 append（archive 合同已倒置）；完成态
+ * 由 history `tool_result` 渲染，避免幽灵失败行。
  *
  * T5 (tui-render-optimization)：`tool_input_delta` 增量事件消费 — 运行中
  * 条目累积 partialJson 到 `partialInput`（展示层中间态，仅供 running 摘要
@@ -13,8 +15,8 @@
  * 设计：
  *  - 状态按 insert 顺序保留（`ReadonlyArray`），便于 ChatView 按序渲染；
  *  - `toolUseId` 是配对的 anchor — 由流式 `tool_call_start` 提供，postToolUse
- *    完成事件必须携带（向后兼容：缺则落回 caller 自行 append 字符串行，
- *    本 reducer 不知道"字符串行"形态，只关心结构化条目）；
+ *    完成事件必须携带；未匹配 id 时本 reducer return prev（不 append
+ *    结构化条目）。字符串 live 行仍由 caller 的 liveToolLines 通道负责；
  *  - 同 conversationId 多个工具按 FIFO 配对（首个未完成 running 被首个完成
  *    事件标记），符合 harness loop 串行特性；
  *  - `tool_input_delta` 按 `id` 精确配对（非 FIFO）：后发增量可属较早条目，
@@ -112,44 +114,30 @@ export function liveToolReduce(
       )
     );
   }
-  // post_tool_use — 配对找到的 running 转 ok/failed；未匹配（legacy id）落回
-  // append 摘要条目。新条目同样追加末尾（顺序语义：完成事件追加末尾）。
+  // post_tool_use — 配对找到的条目转 ok/failed。未匹配 id（无
+  // tool_call_start / race）与 unmatched tool_input_delta 一样忽略：
+  // 完成态由 history tool_result 渲染，append 会产生幽灵失败行（#578）。
   if (event.kind === "post_tool_use") {
     const target = prev.find((r) => r.id === event.id);
-    if (target !== undefined) {
-      return Object.freeze(
-        prev.map((r) =>
-          r === target
-            ? Object.freeze({
-                id: r.id,
-                name: r.name,
-                status: (event.ok ? "ok" : "failed") as LiveToolStatus,
-                input: event.input,
-                // T5:完成态用权威完整 input 覆盖并清除 partialInput 残留。
-                partialInput: undefined,
-                detail: event.detail,
-                message: event.message,
-                oldContent: event.oldContent,
-                newContent: event.newContent,
-              })
-            : r
-        )
-      );
-    }
-    // 未匹配 id（legacy / 异步 race）→ append 新条目。
-    return Object.freeze([
-      ...prev,
-      Object.freeze({
-        id: event.id,
-        name: event.name,
-        status: (event.ok ? "ok" : "failed") as LiveToolStatus,
-        input: event.input,
-        detail: event.detail,
-        message: event.message,
-        oldContent: event.oldContent,
-        newContent: event.newContent,
-      }),
-    ]);
+    if (target === undefined) return prev;
+    return Object.freeze(
+      prev.map((r) =>
+        r === target
+          ? Object.freeze({
+              id: r.id,
+              name: r.name,
+              status: (event.ok ? "ok" : "failed") as LiveToolStatus,
+              input: event.input,
+              // T5:完成态用权威完整 input 覆盖并清除 partialInput 残留。
+              partialInput: undefined,
+              detail: event.detail,
+              message: event.message,
+              oldContent: event.oldContent,
+              newContent: event.newContent,
+            })
+          : r
+      )
+    );
   }
   return prev;
 }
