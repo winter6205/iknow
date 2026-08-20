@@ -17,7 +17,7 @@ import {
   startSessionServe,
   type ServeOptions,
 } from "../../src/session-api/serve.ts";
-import { getDefaultSessionWorkspace } from "../../src/session-api/default-workspace.ts";
+import { resolveSessionDefaultWorkspace } from "../../src/session-api/default-workspace.ts";
 import type { ListeningServer } from "../../src/session-api/http.ts";
 import type { SessionHub } from "../../src/session-api/hub.ts";
 import { resolveProjectSessionDir } from "../../src/session-api/store/index.ts";
@@ -246,9 +246,9 @@ describe("startSessionServe — workspace pre-bind (T4)", () => {
       });
       listening = out.listening;
       // (a) picker auto-bound to `<homedir()>/.iknow/default` (T9a)。函数形式
-      // `getDefaultSessionWorkspace()` 在运行时解析 HOME,所以跟随
+      // `resolveSessionDefaultWorkspace()` 在运行时解析 HOME,所以跟随
       // installTestSettingsSource 重定向后的 tmp home —— 不写用户真实 $HOME。
-      const expectedRoot = getDefaultSessionWorkspace();
+      const expectedRoot = resolveSessionDefaultWorkspace();
       assert.deepEqual(out.hub.getWorkspaceState(), {
         bound: true,
         root: expectedRoot,

@@ -20,7 +20,7 @@ import {
 } from "../harness/identity/index.js";
 import type { ServeAskUserHandle } from "../harness/permission/ask-user.js";
 import {
-  getDefaultSessionWorkspace,
+  resolveSessionDefaultWorkspace,
   ensureDefaultWorkspace,
 } from "./default-workspace.js";
 import {
@@ -161,7 +161,7 @@ export async function startSessionServe(
     await hub.bindWorkspace(workspaceRoot, { confirmTrust: true });
   } else {
     await ensureDefaultWorkspace();
-    await hub.bindWorkspace(getDefaultSessionWorkspace(), {
+    await hub.bindWorkspace(resolveSessionDefaultWorkspace(), {
       confirmTrust: true,
     });
   }

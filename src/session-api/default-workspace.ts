@@ -7,28 +7,22 @@
  * `ws.bound === true` on UI mount). User-preference paths stay explicit
  * (rule 3: explicit bind = explicit trust).
  *
- * Two flavors exported:
- *  - `DEFAULT_SESSION_WORKSPACE` — pure constant resolved at module load.
- *    Use in production where HOME is stable across the process lifetime.
- *  - `getDefaultSessionWorkspace()` — function that re-reads $HOME at call
- *    time. Required by `ensureDefaultWorkspace()` so test HOME overrides
- *    (installTestSettingsSource redirects HOME in beforeAll, AFTER this
- *    module may already be imported) land in the tmp home, not the user's
- *    real $HOME.
+ * resolveSessionDefaultWorkspace() 是 single source of truth — runtime
+ * $HOME 解析,让 test fixture (installTestSettingsSource 在 beforeAll 重定
+ * HOME) 也能命中 tmp home。早期 export 的 `DEFAULT_SESSION_WORKSPACE` const
+ * 在 module load 时锁定 $HOME,无法被 test 改写;review L2 反馈后删除
+ * 冗余 const,只留 function。
  */
 import { homedir } from "node:os";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-
-/** Fixed default workspace path when user did not pick one. */
-export const DEFAULT_SESSION_WORKSPACE = join(homedir(), ".iknow", "default");
 
 /**
  * Default workspace path resolved against current $HOME. Use this when the
  * caller may have redirected HOME (tests via installTestSettingsSource) or
  * when the value needs to track HOME changes across the process lifetime.
  */
-export function getDefaultSessionWorkspace(): string {
+export function resolveSessionDefaultWorkspace(): string {
   return join(homedir(), ".iknow", "default");
 }
 
@@ -38,5 +32,5 @@ export function getDefaultSessionWorkspace(): string {
  * bind so `hub.bindWorkspace()` can succeed against an existing absolute path.
  */
 export async function ensureDefaultWorkspace(): Promise<void> {
-  await mkdir(getDefaultSessionWorkspace(), { recursive: true });
+  await mkdir(resolveSessionDefaultWorkspace(), { recursive: true });
 }
