@@ -66,7 +66,7 @@ const JUDGE_ROLE: SubAgentDefinitionShape = {
 /**
  * JUDGE_ROLE 字段类型形状：role / system prompt / 工具面 deny / maxTurns。
  * 不复用 SubAgentDefinition（其字段含 task / model / timeoutMs / sandboxRoot
- * 全部可选，且这些字段由 buildJudgeTask / 外部 opts 注入）。
+ * 全部可选，且这些字段由外部 opts 注入）。
  */
 interface SubAgentDefinitionShape {
   readonly role: "judge";
@@ -91,15 +91,6 @@ export interface CreateRunClassifierOpts {
  * 返回 undefined 当 manager 为 undefined (ask 形态; 调用方拿 undefined 自然
  * 走 SC7 透明关闭分支, 无需特殊 if)。
  */
-/**
- * Exam-question text for the judge worker. `task` is goal.text only;
- * evidenceContext stays a separate RunClassifierFn argument (prompt, not
- * concatenated into the exam question).
- */
-function buildJudgeTask(task: string): string {
-  return task;
-}
-
 export function createRunClassifierFromManager(
   opts: CreateRunClassifierOpts
 ): RunClassifierFn {
@@ -125,7 +116,8 @@ export function createRunClassifierFromManager(
     void cwd;
     const def = {
       ...JUDGE_ROLE,
-      task: buildJudgeTask(task),
+      // Exam question = goal.text only; evidenceContext is a separate spawn field.
+      task,
       model: model ?? classifierModel,
       timeoutMs,
       ...(finalText !== null && finalText !== "" ? { finalText } : {}),

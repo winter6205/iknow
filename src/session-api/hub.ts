@@ -62,7 +62,7 @@ import {
 } from "../config/workspaces-recents.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
-import { MaxTurnsExceeded, errorMessage } from "../harness/errors.js";
+import { MaxTurnsExceeded } from "../harness/errors.js";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -91,11 +91,9 @@ import {
 import type { GoalStatus, TaskFocusState } from "./store/index.js";
 import { applyTransition, assertValidTransition } from "./goal/index.js";
 import {
-  decideAutoGoalAfterTurn,
-  lastJudgeSignal,
-  nextGoalAfterDecision,
+  applyGoalAutoContinue,
+  applyGoalAutoError,
   parseGoalPinInput,
-  turnHadToolUse,
 } from "./goal-auto.js";
 import type {
   ApiErrorBody,
@@ -1546,24 +1544,6 @@ export class SessionHub {
     return joined.length > 720 ? joined.slice(0, 720) : joined;
   }
 
-  private async persistGoalDecision(
-    conversationId: string,
-    decision: ReturnType<typeof decideAutoGoalAfterTurn>
-  ): Promise<void> {
-    const existing = await this.store.load(conversationId);
-    if (existing.goal === undefined) return;
-    const now = new Date().toISOString();
-    await this.store.save({
-      id: conversationId,
-      file: {
-        ...existing,
-        goal: nextGoalAfterDecision(existing.goal, decision),
-        updatedAt: now,
-        schemaVersion: CURRENT_SCHEMA_VERSION,
-      },
-    });
-  }
-
   private async applyHubAutoContinue(opts: {
     readonly conversationId: string;
     readonly result: RunResult;
@@ -1575,54 +1555,29 @@ export class SessionHub {
     }>;
   }): Promise<boolean> {
     if (this.verifyConfig === undefined) return false;
-    let session: SessionFileV1;
-    try {
-      session = await this.store.load(opts.conversationId);
-    } catch (err) {
-      skipAutoPersistOnLoadError(err);
-      return false;
-    }
-    const goal = session.goal;
-    if (goal === undefined || goal.text.length === 0) return false;
-    const judge = lastJudgeSignal(opts.records);
-    const decision = decideAutoGoalAfterTurn({
-      ...(goal.maxTurns !== undefined ? { maxTurns: goal.maxTurns } : {}),
-      autoTurnsRan: goal.autoTurnsRan ?? 0,
-      idleCompletedStreak: goal.idleCompletedStreak ?? 0,
-      stopReason: opts.result.stopReason,
-      roundHadToolUse: turnHadToolUse(opts.result.messages, opts.priorCount),
+    return applyGoalAutoContinue({
+      store: this.store,
+      conversationId: opts.conversationId,
+      result: opts.result,
+      priorCount: opts.priorCount,
+      records: opts.records,
       ...(opts.verifyOutcome !== undefined
         ? { verifyOutcome: opts.verifyOutcome }
         : {}),
-      ...judge,
+      onLoadError: skipAutoPersistOnLoadError,
     });
-    await this.persistGoalDecision(opts.conversationId, decision);
-    return decision.continueAuto;
   }
 
   private async applyHubAutoError(
     conversationId: string,
     err: unknown
   ): Promise<void> {
-    let session: SessionFileV1;
-    try {
-      session = await this.store.load(conversationId);
-    } catch (loadErr) {
-      skipAutoPersistOnLoadError(loadErr);
-      return;
-    }
-    const goal = session.goal;
-    if (goal === undefined || goal.text.length === 0) return;
-    const decision = decideAutoGoalAfterTurn({
-      ...(goal.maxTurns !== undefined ? { maxTurns: goal.maxTurns } : {}),
-      autoTurnsRan: goal.autoTurnsRan ?? 0,
-      idleCompletedStreak: goal.idleCompletedStreak ?? 0,
-      stopReason: "protocolError",
-      roundHadToolUse: false,
-      errorText: errorMessage(err),
-      errorName: err instanceof Error ? err.name : undefined,
+    await applyGoalAutoError({
+      store: this.store,
+      conversationId,
+      err,
+      onLoadError: skipAutoPersistOnLoadError,
     });
-    await this.persistGoalDecision(conversationId, decision);
   }
 
   /** #458 T5/T12: `/goal clear` 占位 helper (T6 slash + chat-session 调用)。
@@ -1718,6 +1673,13 @@ export class SessionHub {
               ? { lastUsage: result.lastUsage }
               : {}),
           });
+    const firstUserText = extractGoal(result.messages);
+    const shouldSeed =
+      withCheckpoint.taskFocus === undefined &&
+      !(
+        withCheckpoint.goal !== undefined && withCheckpoint.goal.text.length > 0
+      ) &&
+      shouldSeedTaskFocus(firstUserText);
     const updated: SessionFileV1 = {
       ...withCheckpoint,
       messages: result.messages,
@@ -1728,36 +1690,23 @@ export class SessionHub {
       // Seed taskFocus once for compact: absent focus, no active non-empty
       // goal (auto mode must not copy goal text), and shouldSeedTaskFocus
       // (greetings / empty first-user text never become lifelong focus).
-      ...(withCheckpoint.taskFocus === undefined &&
-      !(
-        withCheckpoint.goal !== undefined && withCheckpoint.goal.text.length > 0
-      ) &&
-      shouldSeedTaskFocus(extractGoal(result.messages))
+      ...(shouldSeed
         ? {
             taskFocus: seedTaskFocus({
               current: withCheckpoint.taskFocus,
-              nextText: extractGoal(result.messages),
+              nextText: firstUserText,
               now,
             }),
           }
         : {}),
     };
     await this.store.save({ id: conversationId, file: updated });
-    // Seed trace only when the spread above actually wrote taskFocus.
-    const firstUserText = extractGoal(result.messages);
-    const textLen = firstUserText.length;
-    if (
-      withCheckpoint.taskFocus === undefined &&
-      !(
-        withCheckpoint.goal !== undefined && withCheckpoint.goal.text.length > 0
-      ) &&
-      shouldSeedTaskFocus(firstUserText)
-    ) {
+    if (shouldSeed) {
       await trace?.recordGoal({
         id: randomUUID(),
         sessionId: conversationId,
         action: "seed",
-        textLen,
+        textLen: firstUserText.length,
         ts: now,
         conversationId,
       });

@@ -26,7 +26,7 @@ import {
 } from "./slash.js";
 import type { SessionContext } from "../shared/schema.js";
 import { isIknowError } from "../shared/errors.js";
-import { MaxTurnsExceeded, errorMessage } from "../harness/errors.js";
+import { MaxTurnsExceeded } from "../harness/errors.js";
 import { maxTurnsNotice } from "./max-turns.js";
 import {
   clearErrLine,
@@ -66,10 +66,8 @@ import {
 } from "../session-api/store/index.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import {
-  decideAutoGoalAfterTurn,
-  lastJudgeSignal,
-  nextGoalAfterDecision,
-  turnHadToolUse,
+  applyGoalAutoContinue,
+  applyGoalAutoError,
 } from "../session-api/goal-auto.js";
 import { randomUUID } from "node:crypto";
 
@@ -215,15 +213,8 @@ async function resolveVerifyDispatch(
     }
     return { userText: query, completionMode: "hitl" };
   } catch (err) {
-    if (!isSessionStoreErrorKind(err)) {
-      throw err;
-    }
-    const kind = (err as SessionStoreError).kind;
     // EXIT: load throw → HITL, userText=query; never fail-open query as judge task.
-    // not_found = legal fresh session (silent); other kinds = real faults.
-    if (kind !== "not_found") {
-      writeErr(`${kind}: ${conversationId}`);
-    }
+    skipChatAutoOnLoadError(err, conversationId);
     return { userText: query, completionMode: "hitl" };
   }
 }
@@ -451,26 +442,6 @@ export async function processChatLine(
   }
 }
 
-async function persistGoalDecision(
-  store: SessionStore,
-  conversationId: string,
-  decision: ReturnType<typeof decideAutoGoalAfterTurn>
-): Promise<void> {
-  const existing = await store.load(conversationId);
-  if (existing.goal === undefined) return;
-  const now = new Date().toISOString();
-  const nextGoal = nextGoalAfterDecision(existing.goal, decision);
-  await store.save({
-    id: conversationId,
-    file: {
-      ...existing,
-      goal: nextGoal,
-      updatedAt: now,
-      schemaVersion: CURRENT_SCHEMA_VERSION,
-    },
-  });
-}
-
 async function applyChatAutoContinue(opts: {
   readonly ctx: ChatLineContext;
   readonly result: RunResult;
@@ -489,36 +460,17 @@ async function applyChatAutoContinue(opts: {
   const conversationId = ctx.state.conversationId;
   if (store === undefined || conversationId === null) return false;
   if (ctx.verifyConfig === undefined) return false;
-  let session: SessionFileV1;
-  try {
-    session = await store.load(conversationId);
-  } catch (err) {
-    if (!isSessionStoreErrorKind(err)) {
-      throw err;
-    }
-    const kind = (err as SessionStoreError).kind;
-    // EXIT: not_found = fresh session, no auto-continue; other kinds cannot continue.
-    if (kind !== "not_found") {
-      writeErr(`${kind}: ${conversationId}`);
-    }
-    return false;
-  }
-  const goal = session.goal;
-  if (goal === undefined || goal.text.length === 0) return false;
-  const judge = lastJudgeSignal(runOutcome.records ?? []);
-  const decision = decideAutoGoalAfterTurn({
-    ...(goal.maxTurns !== undefined ? { maxTurns: goal.maxTurns } : {}),
-    autoTurnsRan: goal.autoTurnsRan ?? 0,
-    idleCompletedStreak: goal.idleCompletedStreak ?? 0,
-    stopReason: result.stopReason,
-    roundHadToolUse: turnHadToolUse(result.messages, priorCount),
+  return applyGoalAutoContinue({
+    store,
+    conversationId,
+    result,
+    priorCount,
+    records: runOutcome.records ?? [],
     ...(runOutcome.outcome !== undefined
       ? { verifyOutcome: runOutcome.outcome }
       : {}),
-    ...judge,
+    onLoadError: (err) => skipChatAutoOnLoadError(err, conversationId),
   });
-  await persistGoalDecision(store, conversationId, decision);
-  return decision.continueAuto;
 }
 
 async function applyChatAutoError(
@@ -528,32 +480,12 @@ async function applyChatAutoError(
   const store = ctx.checkpointStore;
   const conversationId = ctx.state.conversationId;
   if (store === undefined || conversationId === null) return;
-  let session: SessionFileV1;
-  try {
-    session = await store.load(conversationId);
-  } catch (err) {
-    if (!isSessionStoreErrorKind(err)) {
-      throw err;
-    }
-    const kind = (err as SessionStoreError).kind;
-    // EXIT: not_found = fresh session, no goal to update; other kinds skip persist.
-    if (kind !== "not_found") {
-      writeErr(`${kind}: ${conversationId}`);
-    }
-    return;
-  }
-  const goal = session.goal;
-  if (goal === undefined || goal.text.length === 0) return;
-  const decision = decideAutoGoalAfterTurn({
-    ...(goal.maxTurns !== undefined ? { maxTurns: goal.maxTurns } : {}),
-    autoTurnsRan: goal.autoTurnsRan ?? 0,
-    idleCompletedStreak: goal.idleCompletedStreak ?? 0,
-    stopReason: "protocolError",
-    roundHadToolUse: false,
-    errorText: errorMessage(err),
-    errorName: err instanceof Error ? err.name : undefined,
+  await applyGoalAutoError({
+    store,
+    conversationId,
+    err,
+    onLoadError: (loadErr) => skipChatAutoOnLoadError(loadErr, conversationId),
   });
-  await persistGoalDecision(store, conversationId, decision);
 }
 
 async function processSlash(opts: {
@@ -1022,6 +954,17 @@ export async function persistChatSessionCheckpoint(opts: {
     warn?.(
       `会话检查点写入失败 ${kind}（${err instanceof Error ? err.message : String(err)}），本次进度未持久化`
     );
+  }
+}
+
+/** Kind-guard + writeErr + EXIT for store.load in auto/HITL paths. */
+function skipChatAutoOnLoadError(err: unknown, conversationId: string): void {
+  if (!isSessionStoreErrorKind(err)) {
+    throw err;
+  }
+  const kind = (err as SessionStoreError).kind;
+  if (kind !== "not_found") {
+    writeErr(`${kind}: ${conversationId}`);
   }
 }
 

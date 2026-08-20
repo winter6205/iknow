@@ -5,8 +5,10 @@
  * module — one idle streak, one optional maxTurns, one Impossible/error
  * classification. Do not add StopReason values.
  */
-import type { AnthropicNativeMessage } from "../harness/index.js";
-import type { GoalState } from "./store/schema.js";
+import type { AnthropicNativeMessage, RunResult } from "../harness/index.js";
+import { errorMessage } from "../harness/errors.js";
+import type { GoalState, SessionFileV1 } from "./store/schema.js";
+import { CURRENT_SCHEMA_VERSION } from "./store/schema.js";
 import type { VerifyLoopOutcome } from "../harness/verify/index.js";
 
 /** Frozen plan: idle = 3 consecutive `completed` turns with no `tool_use`. */
@@ -249,4 +251,125 @@ export function nextGoalAfterDecision(
     idleCompletedStreak: decision.idleCompletedStreak,
     ...(goal.maxTurns !== undefined ? { maxTurns: goal.maxTurns } : {}),
   };
+}
+
+/** Injected store for auto-loop persist; hosts pass SessionStore. */
+export type GoalAutoStore = {
+  load(id: string): Promise<SessionFileV1>;
+  save(opts: {
+    readonly id: string;
+    readonly file: SessionFileV1;
+  }): Promise<void>;
+};
+
+/** Host I/O on typed load fault: writeErr, skip, or rethrow. */
+export type GoalAutoLoadErrorHandler = (err: unknown) => void;
+
+export async function persistGoalDecision(
+  store: GoalAutoStore,
+  conversationId: string,
+  decision: AutoGoalDecision
+): Promise<void> {
+  const existing = await store.load(conversationId);
+  if (existing.goal === undefined) return;
+  const now = new Date().toISOString();
+  await store.save({
+    id: conversationId,
+    file: {
+      ...existing,
+      goal: nextGoalAfterDecision(existing.goal, decision),
+      updatedAt: now,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+    },
+  });
+}
+
+function activePinnedGoal(session: SessionFileV1): GoalState | undefined {
+  const goal = session.goal;
+  if (goal === undefined || goal.text.length === 0) return undefined;
+  return goal;
+}
+
+async function loadSessionForAutoLoop(
+  store: GoalAutoStore,
+  conversationId: string,
+  onLoadError: GoalAutoLoadErrorHandler
+): Promise<SessionFileV1 | undefined> {
+  try {
+    return await store.load(conversationId);
+  } catch (err) {
+    onLoadError(err);
+    return undefined;
+  }
+}
+
+function decideFromPinnedGoal(
+  goal: GoalState,
+  rest: Omit<
+    AutoGoalTurnInput,
+    "maxTurns" | "autoTurnsRan" | "idleCompletedStreak"
+  >
+): AutoGoalDecision {
+  return decideAutoGoalAfterTurn({
+    ...(goal.maxTurns !== undefined ? { maxTurns: goal.maxTurns } : {}),
+    autoTurnsRan: goal.autoTurnsRan ?? 0,
+    idleCompletedStreak: goal.idleCompletedStreak ?? 0,
+    ...rest,
+  });
+}
+
+export async function applyGoalAutoContinue(opts: {
+  readonly store: GoalAutoStore;
+  readonly conversationId: string;
+  readonly result: Pick<RunResult, "stopReason" | "messages">;
+  readonly priorCount: number;
+  readonly verifyOutcome?: VerifyLoopOutcome | string;
+  readonly records: ReadonlyArray<{
+    readonly reason?: string;
+    readonly missing?: readonly string[];
+  }>;
+  readonly onLoadError: GoalAutoLoadErrorHandler;
+}): Promise<boolean> {
+  const session = await loadSessionForAutoLoop(
+    opts.store,
+    opts.conversationId,
+    opts.onLoadError
+  );
+  if (session === undefined) return false;
+  const goal = activePinnedGoal(session);
+  if (goal === undefined) return false;
+  const judge = lastJudgeSignal(opts.records);
+  const decision = decideFromPinnedGoal(goal, {
+    stopReason: opts.result.stopReason,
+    roundHadToolUse: turnHadToolUse(opts.result.messages, opts.priorCount),
+    ...(opts.verifyOutcome !== undefined
+      ? { verifyOutcome: opts.verifyOutcome }
+      : {}),
+    ...judge,
+  });
+  await persistGoalDecision(opts.store, opts.conversationId, decision);
+  return decision.continueAuto;
+}
+
+export async function applyGoalAutoError(opts: {
+  readonly store: GoalAutoStore;
+  readonly conversationId: string;
+  readonly err: unknown;
+  readonly onLoadError: GoalAutoLoadErrorHandler;
+}): Promise<void> {
+  const session = await loadSessionForAutoLoop(
+    opts.store,
+    opts.conversationId,
+    opts.onLoadError
+  );
+  if (session === undefined) return;
+  const goal = activePinnedGoal(session);
+  if (goal === undefined) return;
+  const decision = decideFromPinnedGoal(goal, {
+    stopReason: "protocolError",
+    roundHadToolUse: false,
+    errorText: errorMessage(opts.err),
+    errorName: opts.err instanceof Error ? opts.err.name : undefined,
+  });
+  await persistGoalDecision(opts.store, opts.conversationId, decision);
 }
