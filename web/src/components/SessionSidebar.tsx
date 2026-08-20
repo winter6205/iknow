@@ -19,6 +19,7 @@ import {
 } from "../lib/session-list";
 import { loadCollapsed, saveCollapsed } from "../lib/workspace-groups";
 import { FOCUS_RING } from "../lib/ui";
+import { plusButtonLabel, shouldShowPlusButton } from "../lib/sidebar-plus";
 
 type SidebarPhase = "loading" | "ready" | "error";
 
@@ -28,6 +29,12 @@ export type SessionSidebarProps = {
   collapsed: boolean;
   onToggleCollapsed: () => void;
   onNewSession: () => void;
+  /**
+   * serve-workspace T6: 工作空间组头部"+"按钮的回调 — 在指定 workspace
+   * 内新建会话。App 层负责把 root 绑到 picker (若需要), 再调 chat.newSession。
+   * (未绑定) 组不渲染 + 按钮, 此回调不会被调用。
+   */
+  onCreateInWorkspace: (root: string) => void;
   /**
    * Bump to force the sidebar to re-fetch the session list. App holds the
    * counter and increments after lifecycle events (newSession / createAndAdopt
@@ -303,7 +310,11 @@ function SessionItem({
         title={session.conversation_id}
         onClick={() => onSelect(session.conversation_id)}
         className={cx(
-          "flex w-full items-baseline gap-2 truncate rounded-panel px-3 py-1.5 pr-8 text-left text-[13px]",
+          // serve-workspace T6: list 项 rounded-panel → rounded-md, 与 T5
+          // picker 列表收紧节奏一致 (recents / subdirs 都是 rounded-md)。
+          // 计数 badge / chevron / active 高亮不在此列 — 用户原话只针对
+          // **列表项**, 其它视觉锚点保留现状。
+          "flex w-full items-baseline gap-2 truncate rounded-md px-3 py-1.5 pr-8 text-left text-[13px]",
           "transition-colors duration-[160ms] ease-soft",
           active
             ? "bg-accent-soft text-accent font-medium"
@@ -334,19 +345,61 @@ function SessionItem({
 }
 
 /**
+ * serve-workspace T6: + 按钮(在指定 workspace 内新建会话)。
+ *  - 仅 bound 组渲染; (未绑定) 组由 shouldShowPlusButton 过滤。
+ *  - 16x16 PlusIcon, text-ink-3 → hover:text-accent, 与组头同排布局。
+ *  - <button aria-label> + onClick 走 group 的 workspaceRoot; 不冒泡到
+ *    折叠按钮(避免 e.stopPropagation, 我们用按钮并列而非嵌套 — 见
+ *    WorkspaceGroupHeader 结构)。
+ */
+function GroupCreateButton({
+  group,
+  onCreate,
+}: {
+  group: WorkspaceGroup;
+  onCreate: (root: string) => void;
+}) {
+  // group.isUnbound 时 group.key 是 sentinel "(未绑定)", 不能 bind —
+  // 上层 shouldShowPlusButton 已过滤; 这里再防御一道。
+  if (!shouldShowPlusButton(group) || !group.key) return null;
+  const title = plusButtonLabel(group.label);
+  return (
+    <button
+      type="button"
+      onClick={() => onCreate(group.key)}
+      title={title}
+      aria-label={title}
+      data-workspace-root={group.key}
+      className={cx(
+        "flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-ink-3",
+        "transition-colors duration-[160ms] ease-soft hover:text-accent",
+        FOCUS_RING
+      )}
+    >
+      <PlusIcon />
+    </button>
+  );
+}
+
+/**
  * serve-workspace T4: 工作空间组头。
  *  - 活跃组(isActive)展开且不响应折叠点击 — 避免用户把当前会话藏起来。
  *  - 其它组点击切换折叠态; aria-expanded 同步; chevron 跟随展开方向。
  *  - "📁 basename · 计数" 形态; 活跃组追加 "(当前)" 微标记。
+ *  - T6: 右侧追加 + 按钮(bound 组才渲染)。+ 与折叠按钮是兄弟(button
+ *    嵌 button 是非法 HTML), 所以非活跃组整体包一层 flex, 把折叠
+ *    button 设为 flex-1, + button 作为独立 sibling。
  */
 function WorkspaceGroupHeader({
   group,
   collapsed,
   onToggle,
+  onCreate,
 }: {
   group: WorkspaceGroup;
   collapsed: boolean;
   onToggle: () => void;
+  onCreate: (root: string) => void;
 }) {
   // 活跃组永远展开 — 不提供折叠交互 (button + onClick 都不发, 改用 div
   // 静态展示; 但 spec 要求 <button aria-expanded> — 改方案: 渲染 button
@@ -366,46 +419,52 @@ function WorkspaceGroupHeader({
         <span className="font-mono text-[10px] text-ink-3">
           {group.sessions.length}
         </span>
+        <GroupCreateButton group={group} onCreate={onCreate} />
       </div>
     );
   }
   const label = `${collapsed ? "展开" : "折叠"} ${group.label} · ${group.sessions.length} 会话`;
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      aria-expanded={!collapsed}
-      aria-label={label}
-      title={
-        group.isUnbound
-          ? group.label
-          : `${group.label} (${group.sessions.length})`
-      }
-      className={cx(
-        "flex w-full items-center gap-1.5 px-3 pt-3 pb-1 text-left",
-        "transition-colors duration-[160ms] ease-soft hover:bg-bg",
-        FOCUS_RING
-      )}
-    >
-      <span
-        aria-hidden="true"
+    <div className="flex items-center gap-1 px-3 pt-3 pb-1">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={!collapsed}
+        aria-label={label}
+        title={
+          group.isUnbound
+            ? group.label
+            : `${group.label} (${group.sessions.length})`
+        }
         className={cx(
-          "inline-flex h-3 w-3 items-center justify-center text-ink-3 transition-transform duration-[160ms] ease-soft",
-          collapsed ? "-rotate-90" : "rotate-0"
+          // T6: list-style 收紧 — 非活跃组折叠按钮加 rounded-md, 与
+          // T5 picker 列表节奏一致; count / chevron / icon 保持原样式。
+          "flex flex-1 items-center gap-1.5 rounded-md text-left",
+          "transition-colors duration-[160ms] ease-soft hover:bg-bg",
+          FOCUS_RING
         )}
       >
-        <ChevronDownIcon />
-      </span>
-      <span aria-hidden="true" className="text-[11px] text-ink-3">
-        {group.isUnbound ? "📂" : "📁"}
-      </span>
-      <span className="flex-1 truncate text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-2">
-        {group.label}
-      </span>
-      <span className="font-mono text-[10px] text-ink-3">
-        {group.sessions.length}
-      </span>
-    </button>
+        <span
+          aria-hidden="true"
+          className={cx(
+            "inline-flex h-3 w-3 items-center justify-center text-ink-3 transition-transform duration-[160ms] ease-soft",
+            collapsed ? "-rotate-90" : "rotate-0"
+          )}
+        >
+          <ChevronDownIcon />
+        </span>
+        <span aria-hidden="true" className="text-[11px] text-ink-3">
+          {group.isUnbound ? "📂" : "📁"}
+        </span>
+        <span className="flex-1 truncate text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-2">
+          {group.label}
+        </span>
+        <span className="font-mono text-[10px] text-ink-3">
+          {group.sessions.length}
+        </span>
+      </button>
+      <GroupCreateButton group={group} onCreate={onCreate} />
+    </div>
   );
 }
 
@@ -422,12 +481,14 @@ function WorkspaceGroupBlock({
   onSelect,
   isCollapsed,
   onToggleCollapsed,
+  onCreateInWorkspace,
 }: {
   group: WorkspaceGroup;
   currentId: string | null;
   onSelect: (id: string) => void;
   isCollapsed: boolean;
   onToggleCollapsed: () => void;
+  onCreateInWorkspace: (root: string) => void;
 }) {
   // 活跃组永远展开; 其它组按折叠态。
   const collapsed = group.isActive ? false : isCollapsed;
@@ -437,6 +498,7 @@ function WorkspaceGroupBlock({
         group={group}
         collapsed={collapsed}
         onToggle={onToggleCollapsed}
+        onCreate={onCreateInWorkspace}
       />
       <ul
         className={cx(
@@ -469,11 +531,13 @@ function GroupedSessionListView({
   currentConversationId,
   currentBoundRoot,
   onSelect,
+  onCreateInWorkspace,
 }: {
   sessions: readonly SessionListItem[];
   currentConversationId: string | null;
   currentBoundRoot: string | null;
   onSelect: (id: string) => void;
+  onCreateInWorkspace: (root: string) => void;
 }) {
   const groups = useMemo(
     () =>
@@ -495,6 +559,7 @@ function GroupedSessionListView({
           onSelect={onSelect}
           isCollapsed={isCollapsed(g.key)}
           onToggleCollapsed={() => toggleCollapsed(g.key)}
+          onCreateInWorkspace={onCreateInWorkspace}
         />
       ))}
     </ul>
@@ -514,6 +579,7 @@ type ExpandedSidebarHandlers = {
   onSelect: (id: string) => void;
   onNewSession: () => void;
   onToggleCollapsed: () => void;
+  onCreateInWorkspace: (root: string) => void;
 };
 
 function ExpandedSidebar({
@@ -533,7 +599,8 @@ function ExpandedSidebar({
     currentConversationId,
     currentBoundRoot,
   } = data;
-  const { onSelect, onNewSession, onToggleCollapsed } = handlers;
+  const { onSelect, onNewSession, onToggleCollapsed, onCreateInWorkspace } =
+    handlers;
   return (
     <div className="flex h-full w-72 shrink-0 animate-fade-in flex-col">
       <header className="flex shrink-0 items-center gap-1 px-3 pt-3">
@@ -600,6 +667,7 @@ function ExpandedSidebar({
             currentConversationId={currentConversationId}
             currentBoundRoot={currentBoundRoot}
             onSelect={onSelect}
+            onCreateInWorkspace={onCreateInWorkspace}
           />
         )}
       </div>
@@ -647,6 +715,7 @@ export function SessionSidebar({
   collapsed,
   onToggleCollapsed,
   onNewSession,
+  onCreateInWorkspace,
   refreshSignal,
   currentBoundRoot = null,
 }: SessionSidebarProps) {
@@ -694,7 +763,12 @@ export function SessionSidebar({
             currentConversationId,
             currentBoundRoot,
           }}
-          handlers={{ onSelect, onNewSession, onToggleCollapsed }}
+          handlers={{
+            onSelect,
+            onNewSession,
+            onToggleCollapsed,
+            onCreateInWorkspace,
+          }}
           collapseBtnRef={collapseBtnRef}
         />
       )}

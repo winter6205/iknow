@@ -187,9 +187,45 @@ function ChatApp() {
       setWorkspaceOpen(true);
       return;
     }
+    // ws.bound: 后端 hub.createSession 取 this.boundRoot (= ws.root)
+    // 写入新会话, 不需要额外传 workspaceRoot 参数(T7+ 后端扩展点 — 见
+    // plan §"延期项")。
     await chat.newSession();
     bumpSidebar();
   }, [chat, bumpSidebar, ws.bound]);
+
+  /**
+   * serve-workspace T6: Sidebar 组头部"+"按钮回调 — 在指定 workspace
+   * 内新建会话。
+   *
+   * 流程: 把 picker 绑到目标 root → 再建新会话。后端 createSession 取
+   * this.boundRoot 写入新会话, 所以这条路径同时实现"换根 + 新建"。
+   * 不需要单独走 createSession({ workspaceRoot }) — 当前后端不接收该
+   * 参数(T7+ 扩展点), 强行传会被 silently drop。
+   *
+   * 失败兜底: 走 chat.pushNotice 走消息流, 不破坏会话状态。
+   */
+  const handleCreateInWorkspace = useCallback(
+    async (root: string) => {
+      try {
+        if (!ws.bound || ws.root !== root) {
+          // sidebar 组根是从已存在的 session 文件读的, 必是已信任 — 无需
+          // confirmTrust。bindWorkspace 在 recentsHome 未装配(legacy)时
+          // 也总是成功。
+          await ws.bind(root);
+        }
+        await chat.newSession();
+        bumpSidebar();
+      } catch (e) {
+        chat.pushNotice(
+          `在 ${root} 内新建会话失败：${
+            e instanceof Error ? e.message : String(e)
+          }`
+        );
+      }
+    },
+    [chat, ws, bumpSidebar]
+  );
 
   const handleSelect = useCallback(
     async (id: string) => {
@@ -353,6 +389,7 @@ function ChatApp() {
       collapsed={collapsed}
       onToggleCollapsed={() => setCollapsed((c) => !c)}
       onNewSession={handleNewSession}
+      onCreateInWorkspace={handleCreateInWorkspace}
       refreshSignal={sidebarSignal}
       currentBoundRoot={ws.root}
     />
