@@ -22,6 +22,10 @@
 
 ### Fixed
 
+- **maxOutputTokens 默认 8192 → 16384（#578，2026-08-21）**: `thinking: "adaptive"` + 奢侈品腕表自包含 HTML（约 150–200 行）的 `write_file` JSON 超出 8192，撞 `max_tokens` 截断导致缺 `content`。fallback 提到 16384（容纳 thinking budget + 完整 HTML）；文档示例同步。不改 `timeoutMs` / loop-engine truncation 语义。先前 2048→8192（贪吃蛇 HTML，2026-08-17）历史条目保留。
+
+- **TUI live tail 不渲染无 start 的失败工具（#578，2026-08-21）**: `max_tokens` 截断导致 `write_file` 缺 `content` 时，无 `tool_call_start` 配对；`liveToolReduce` 对 unmatched `post_tool_use` 不再 append 幽灵 `failed` 行（完成态只走 history `[失败]`）。
+
 - **maxOutputTokens 默认 2048 → 8192（trace 8e05e04c 根因修复，2026-08-17）**: 最新 trace 8e05e04c 中用户任务（贪吃蛇 HTML 生成）在第三段会话因 `stop_reason=max_tokens`（output_tokens=2047 贴 2048 上限）被截断，`supplierStop="truncation"` 折叠进 `nonSuccessStop` → turn/session 双双 `status: "error"`，用户拿到 0 输出。根因：`IKNOW_LLM_MAX_OUTPUT_TOKENS` 默认 2048 在 `thinking: "adaptive"`（thinking tokens 计入 output 预算）+ 长生成任务下必然撞顶。修复：`src/config/env.ts` fallback 2048 → 8192（容纳 thinking budget + 完整响应，不放大成本）；`docs/integration-materials.env.example` / `docs/llm-config-quickstart.md` 示例值同步。`tests/config/env.test.ts` 新增 2 例锁定新默认值（红→绿）。未动 loop-engine 的 truncation→nonSuccessStop 折叠语义（S7 契约不变；截断仍是合法的非成功停止，只是撞顶概率大幅降低）。
 
 ### 双向持久化（settings.json 反向通道）
