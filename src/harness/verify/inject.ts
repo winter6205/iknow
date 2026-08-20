@@ -9,6 +9,19 @@ export const DEFAULT_MAX_CHARS = 20_000;
 export const VALIDATION_FIXED_INSTRUCTION =
   "Fix the failures above. Do not claim completion until validation passes.";
 
+/** Host-injected verify envelopes (fail / evidence rerun). Model-facing only. */
+export const VALIDATION_FAILED_PREFIX = "[VALIDATION FAILED]";
+export const EVIDENCE_RERUN_PREFIX = "[VERIFY: rerun needed]";
+
+/** True when text is a verify-loop envelope, not a user-typed query. */
+export function isVerifyInjectedText(text: string): boolean {
+  const t = text.trimStart();
+  return (
+    t.startsWith(VALIDATION_FAILED_PREFIX) ||
+    t.startsWith(EVIDENCE_RERUN_PREFIX)
+  );
+}
+
 export interface BuildValidationEnvelopeArgs {
   readonly round: number;
   readonly maxRounds: number;
@@ -36,7 +49,7 @@ export function buildValidationEnvelope(
   );
 
   const fields: string[] = [
-    `[VALIDATION FAILED] attempt=${args.round}/${args.maxRounds} verdict=${args.verdict}`,
+    `${VALIDATION_FAILED_PREFIX} attempt=${args.round}/${args.maxRounds} verdict=${args.verdict}`,
     `command: ${args.command}`,
     `exit_code: ${args.exitCode}`,
   ];
@@ -106,7 +119,7 @@ export function buildClassifierEnvelope(
   const taskLine = args.task.replace(/\r\n|[\r\n\u2028\u2029]/g, " ");
 
   const fields: string[] = [
-    `[VALIDATION FAILED] attempt=${args.round}/${args.maxRounds} verdict=true-failure source=classifier`,
+    `${VALIDATION_FAILED_PREFIX} attempt=${args.round}/${args.maxRounds} verdict=true-failure source=classifier`,
     `task: ${taskLine}`,
     `missing: ${missingJson}`,
     `reason: ${truncatedReason}`,
@@ -185,7 +198,7 @@ export function buildEvidenceRerunEnvelope(
 ): string {
   const truncatedReasons = args.reasons.slice(0, 5);
   const lines: string[] = [
-    `[VERIFY: rerun needed] attempt=${args.round}/${args.maxRounds}`,
+    `${EVIDENCE_RERUN_PREFIX} attempt=${args.round}/${args.maxRounds}`,
     "You claimed completion, but the automated evidence check did not find",
     "real test execution in the transcript.",
   ];

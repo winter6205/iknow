@@ -5,6 +5,7 @@ import {
   buildClassifierEnvelope,
   buildEvidenceRerunEnvelope,
   buildValidationEnvelope,
+  isVerifyInjectedText,
   truncateExcerpt,
 } from "../../../src/harness/verify/inject.ts";
 import type { EvidenceContext } from "../../../src/harness/verify/types.ts";
@@ -42,6 +43,21 @@ function assertEnvelopeShape(
     `envelope must end with the fixed instruction on the last line\n---\n${envelope}`
   );
 }
+
+describe("isVerifyInjectedText", () => {
+  it("matches validation and rerun envelopes; rejects user queries", () => {
+    assert.equal(
+      isVerifyInjectedText("[VALIDATION FAILED] attempt=1/12"),
+      true
+    );
+    assert.equal(
+      isVerifyInjectedText("  [VERIFY: rerun needed] attempt=1/12"),
+      true
+    );
+    assert.equal(isVerifyInjectedText("hello"), false);
+    assert.equal(isVerifyInjectedText(""), false);
+  });
+});
 
 describe("truncateExcerpt", () => {
   it("truncates output excerpt at 20000 chars", () => {

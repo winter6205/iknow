@@ -52,6 +52,7 @@ const JUDGE_ROLE: SubAgentDefinitionShape = {
     '{"kind":"abort","reason":"<one-line>"}\n' +
     "Rules: pass and fail MUST include at least one evidence item; never emit " +
     'pass with empty evidence. If you cannot determine completion, use "abort".',
+  excludeFromHostDrain: true,
   // #357 T2: deny = 全量 ACI 工具面 − 白名单基线（fail-closed allow-list 推导）。
   // 推导公式 = ACI_TOOLSET_NAMES 减 JUDGE_ALLOWED_TOOLS；不在白名单内一律禁。
   // 类型放宽为 ReadonlyArray<string>（与 SubAgentDefinition.disallowedTools 对齐），
@@ -71,6 +72,7 @@ interface SubAgentDefinitionShape {
   readonly systemPrompt: string;
   readonly disallowedTools: ReadonlyArray<string>;
   readonly maxTurns: number;
+  readonly excludeFromHostDrain: true;
 }
 
 export interface CreateRunClassifierOpts {

@@ -47,12 +47,16 @@ describe("subagent role: SubAgentDefinition 类型形态", () => {
       model: "opus",
       maxTurns: 5,
       timeoutMs: 30000,
+      role: "explore",
+      excludeFromHostDrain: true,
     };
     assert.equal(def.systemPrompt, "be concise");
     assert.deepEqual(def.disallowedTools, ["edit_file"]);
     assert.equal(def.model, "opus");
     assert.equal(def.maxTurns, 5);
     assert.equal(def.timeoutMs, 30000);
+    assert.equal(def.role, "explore");
+    assert.equal(def.excludeFromHostDrain, true);
     // 只读字段 typecheck 验证: 下列赋值编译期就应当失败 (运行时不需要再 assert)
   });
 

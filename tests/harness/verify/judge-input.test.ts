@@ -174,10 +174,7 @@ describe("createRunClassifierFromManager — evidence-aware judge input (#449b B
       cwd: "/tmp",
     });
     const def = captured()!;
-    assert.ok(
-      def.disallowedTools !== undefined,
-      "JUDGE_ROLE must declare disallowedTools"
-    );
+    assert.equal(def.excludeFromHostDrain, true, "判官结果不得进 host-drain");
     // fail-closed: 全量面减去白名单三件 = 全量面 − {read_file, grep, glob}。
     assert.deepEqual(
       [...def.disallowedTools].sort(),

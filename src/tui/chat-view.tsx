@@ -64,7 +64,10 @@ import type { ScrollBoxRenderable } from "@opentui/core";
 import { Markdown } from "./markdown.js";
 import { MessageBlocks } from "./message-blocks.js";
 import { liveToolPreviewBox } from "./live-tool-preview.js";
-import type { TuiSessionState } from "./session-state.js";
+import {
+  isTuiHiddenUserMessage,
+  type TuiSessionState,
+} from "./session-state.js";
 import type { LiveToolRun } from "./live-tool-state.js";
 import { EYE_LINES, eyeGradientCells } from "./banner.js";
 import { Spinner } from "./components.js";
@@ -229,29 +232,30 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         {/* 消息渲染：每条 message → MessageBlocks。
             消息间 1 行节奏由 wrapper marginTop 提供；首条 (i===0) 不带顶部
             margin，避免进入会话时第一行无谓下推造成间距抖动。 */}
-        {props.session.messages.map((message, i) => {
-          // 末条 assistant 消息携带 lastThinkingSeconds → 其 thinking 折叠行显示
-          // 「思考了 N 秒」留存（turn 结束后的秒数接棒）。仅末条 assistant 带：
-          // lastThinkingSeconds 对应刚结束的 turn，历史消息的秒数不适用。
-          const isLastAssistant =
-            i === props.session.messages.length - 1 &&
-            message.role === "assistant";
-          return (
-            <box key={i} width={contentWidth} marginTop={i === 0 ? 0 : 1}>
-              <MessageBlocks
-                message={message}
-                cols={contentWidth}
-                statusMap={statusMap}
-                thinkingExpanded={thinkingExpanded}
-                thinkingSeconds={
-                  isLastAssistant && (props.lastThinkingSeconds ?? 0) > 0
-                    ? props.lastThinkingSeconds
-                    : undefined
-                }
-              />
-            </box>
-          );
-        })}
+        {props.session.messages
+          .filter((message) => !isTuiHiddenUserMessage(message))
+          .map((message, i, visible) => {
+            // 末条 assistant 消息携带 lastThinkingSeconds → 其 thinking 折叠行显示
+            // 「思考了 N 秒」留存（turn 结束后的秒数接棒）。仅末条 assistant 带：
+            // lastThinkingSeconds 对应刚结束的 turn，历史消息的秒数不适用。
+            const isLastAssistant =
+              i === visible.length - 1 && message.role === "assistant";
+            return (
+              <box key={i} width={contentWidth} marginTop={i === 0 ? 0 : 1}>
+                <MessageBlocks
+                  message={message}
+                  cols={contentWidth}
+                  statusMap={statusMap}
+                  thinkingExpanded={thinkingExpanded}
+                  thinkingSeconds={
+                    isLastAssistant && (props.lastThinkingSeconds ?? 0) > 0
+                      ? props.lastThinkingSeconds
+                      : undefined
+                  }
+                />
+              </box>
+            );
+          })}
         {/* crunched 留存行：消息流末尾（末条消息之后、live tail 之前）。
             最近一次完成 turn 的运行时长（app 层 finally 快照传
             crunchedSeconds）；>0 才渲染（sub-second 回合不显 `0s`），
