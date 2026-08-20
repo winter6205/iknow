@@ -37,11 +37,17 @@ export interface SubAgentDefinition {
    */
   readonly sandboxRoot?: string;
   /**
-   * #556 T2: 角色路由(additive,可选) — 经 buildWorkerPayload 透传到
-   * envelope.role; worker 装配期查 catalog 取 body 注入 persona 段。
-   * 缺省 / 未知 → V1 baseline (additive 不破 legacy wire)。
+   * #556 T2: catalog persona id → WorkerEnvelope.role → worker 注入。
+   * Copied onto WorkerEnvelope. Orthogonal to excludeFromHostDrain.
    */
   readonly role?: string;
+  /**
+   * Parent-only: skip host-drain (wait:false wakeup channel).
+   * Judge / wait:true consumers already await waitFor; leaking their
+   * envelope into the next user turn would paint it as a user message.
+   * Not copied onto WorkerEnvelope.
+   */
+  readonly excludeFromHostDrain?: boolean;
 }
 
 /** 默认 deny-list: 子代理禁止再派生子代理 (防递归爆炸)。frozen。 */

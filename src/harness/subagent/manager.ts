@@ -960,7 +960,11 @@ export function createSubAgentManager(opts: {
   }> {
     const out: { taskId: string; envelope: SubAgentEnvelope }[] = [];
     for (const [id, task] of tasks) {
-      if (task.state === "completed" && task.envelope) {
+      if (
+        task.state === "completed" &&
+        task.envelope &&
+        task.def.excludeFromHostDrain !== true
+      ) {
         out.push({ taskId: id, envelope: task.envelope });
       }
     }

@@ -38,6 +38,8 @@ import {
   buildClassifierEnvelope,
   buildEvidenceRerunEnvelope,
   buildValidationEnvelope,
+  EVIDENCE_RERUN_PREFIX,
+  isVerifyInjectedText,
 } from "./inject.js";
 import {
   parseClassifierResult,
@@ -448,26 +450,14 @@ function userTextMessage(text: string): AnthropicNativeMessage {
 }
 
 /**
- * #449b B5: 已注入信封前缀集 (B5 决议把 `[VERIFY: rerun needed]` 补跑信封纳入
- * 滤除范围 —— plan B5 说 "buildNextPriorMessages 不剥它" 与本决议冲突, 采纳
- * 实施侦察: 不剥会导致 round 3+ prior 残留已失效补跑上下文)。
- * `[VALIDATION FAILED]` = 验证失败修正 (既有) + `[VERIFY: rerun needed]` =
- * 补跑提示 (B5 新增); 其它前缀不属于本循环注入, 不得剥。
- */
-const INJECTED_ENVELOPE_PREFIXES = [
-  "[VALIDATION FAILED]",
-  "[VERIFY: rerun needed]",
-] as const;
-
-/**
- * 是否为本循环注入的任一信封 (code-review High: 避免 stale 信封累积)。
- * 涵盖: 验证失败修正信封 + 补跑信封 (B5 扩展, 见 INJECTED_ENVELOPE_PREFIXES)。
+ * 是否为本循环注入的任一信封 (避免 stale 信封累积)。
+ * 涵盖: `[VALIDATION FAILED]` 修正信封 + `[VERIFY: rerun needed]` 补跑信封 (B5)。
  */
 function isInjectedEnvelope(message: AnthropicNativeMessage): boolean {
   if (message.role !== "user") return false;
   return message.content.some((b) => {
     if (b.type !== "text") return false;
-    return INJECTED_ENVELOPE_PREFIXES.some((p) => b.text.startsWith(p));
+    return isVerifyInjectedText(b.text);
   });
 }
 
@@ -495,8 +485,7 @@ const PROBE_FLAG_FILES: ReadonlySet<string> = new Set([
   "Cargo.toml",
 ]);
 
-/** #449b B5 补跑信封前缀 (rerunAttempted 消息扫描派生锚点, 与 INJECTED_ENVELOPE_PREFIXES 同源)。 */
-const RERUN_ENVELOPE_PREFIX = "[VERIFY: rerun needed]";
+/** #449b B5 补跑信封前缀 (rerunAttempted 消息扫描派生锚点, 与 inject SSOT 同源)。 */
 
 /**
  * #449b B6: 从消息历史派生 rerunAttempted (补跑是否已尝试)。
@@ -512,7 +501,7 @@ function hasRerunEnvelope(
     if (message.role !== "user") continue;
     for (const block of message.content) {
       if (block.type !== "text") continue;
-      if (block.text.startsWith(RERUN_ENVELOPE_PREFIX)) return true;
+      if (block.text.startsWith(EVIDENCE_RERUN_PREFIX)) return true;
     }
   }
   return false;
