@@ -4,6 +4,7 @@ import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
 import { isDangerousCommand } from "../permission.js";
 import { commandContainsSensitivePath } from "../../permission/hard-walls.js";
+import { validateReadonlyCommand } from "./bash-readonly.js";
 import {
   BASE_ENV_WHITELIST,
   createBwrapFence,
@@ -52,6 +53,16 @@ export interface CreateBashToolOptions {
    *  完全不受影响。生产装配 build-engine 注入 createBackgroundTaskManager +
    *  defaultBackgroundSpawn。 */
   readonly backgroundManager?: BackgroundTaskManager;
+  /** #562 T4:bash 模式 —— "readonly" 时 handler 在 isDangerousCommand 之后、
+   * commandContainsSensitivePath 之前调 validateReadonlyCommand，越界命令
+   * 抛 ReadonlyViolationError（extends ToolExecutionError）。缺省 "any" =
+   * V1 路径逐字节不变（回归基线）。 */
+  readonly bashMode?: "any" | "readonly";
+  /** #562 T5:fence cwd 级只读控制 —— true 时 fence 把 cwd bind 为 --ro-bind,
+   * 同时把 GIT_OPTIONAL_LOCKS=0 注入 fence env（git ≥2.14 防 `git status` 刷
+   * index）。缺省 / false = V1 路径逐字节不变。bashMode→cwdReadonly 映射由 T6
+   * 在 registry 装配处完成；本字段是 additive 透传缝。 */
+  readonly cwdReadonly?: boolean;
 }
 
 export function createBashTool(
@@ -79,6 +90,13 @@ export function createBashTool(
       throw new ToolExecutionError(
         `bash: dangerous command rejected: ${command}`
       );
+    // #562 T4:bashMode="readonly" → enforce read-only command policy.
+    // 缺省 ("any") → 此分支不进入，handler 逐字节不变（V1 回归基线）。
+    // validateReadonlyCommand 抛 ReadonlyViolationError（extends
+    // ToolExecutionError），executor 经既有 ToolExecutionError 路径捕获。
+    if (opts?.bashMode === "readonly") {
+      validateReadonlyCommand(command);
+    }
     if (commandContainsSensitivePath(command))
       throw new ToolExecutionError(
         `bash: command targets a sensitive path: ${command}`
@@ -106,6 +124,14 @@ export function createBashTool(
       );
     }
     const fenceEnv = envIsolation.filter(process.env);
+    // #562 T5:cwdReadonly → 注入 GIT_OPTIONAL_LOCKS=0(fence 级只读兜底)。
+    // git ≥2.14 读取时跳过 index 刷新,防止 `git status` 在 readonly fence 内
+    // 静默写 .git/index。post-filter additive:bypass BASE_ENV_WHITELIST(只用于
+    // bash-derived commands,不存在 secret 风险);缺省 / false → 不注入,V1
+    // 回归基线。
+    if (opts?.cwdReadonly === true) {
+      fenceEnv.GIT_OPTIONAL_LOCKS = "0";
+    }
     // #406 T3:构造 fence 前还原占位符 —— 还原后的命令才是真正 spawn 进 bwrap
     // 的文本。原始命令（含占位符）只见于工具调用记录 / 模型上下文；模型永不
     // 见还原后的命令，只看到 bash 输出的 stdout。
@@ -117,6 +143,12 @@ export function createBashTool(
     // 权限层（policy.ts code-ask-bash-network）已强制 ask full_auto 不豁免,
     // 此处只判严格 === true;非布尔 / 缺省 / false → 走既有隔离路径。
     const wantsHostNetwork = (input as BashInput | null)?.network === true;
+    // #562 T6: bashMode="readonly" 派生 cwdReadonly:true 传给 fence。
+    // bashMode→cwdReadonly 映射由 T6 在此装配完成 (registry 只透传 bashMode,
+    // 不读 catalog)。cwdReadonly 显式 true / bashMode==="readonly" 任一即触发。
+    // 缺省 "any" / undefined → 不传 cwdReadonly, T5 argv baseline 不破。
+    const fenceIsReadonly =
+      opts?.cwdReadonly === true || opts?.bashMode === "readonly";
     const fence = createBwrapFence({
       command: "bash",
       args: ["-c", finalCommand],
@@ -126,6 +158,7 @@ export function createBashTool(
       env: fenceEnv,
       cwd,
       ...(wantsHostNetwork ? { network: true } : {}),
+      ...(fenceIsReadonly ? { cwdReadonly: true } : {}),
     });
     const result = await runInSandbox({
       fence,

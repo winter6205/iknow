@@ -34,6 +34,12 @@ export interface WorkerEnvelope {
   readonly timeoutMs?: number;
   readonly sandboxRoot: string;
   readonly env?: Readonly<Record<string, unknown>>;
+  /**
+   * #556 T2: 来自 SubAgentDefinition.role 的 wire-additive 字段。worker 装配
+   * 期查 catalog 取 body 注入 persona 段 (T2 acceptance); 缺省 / 未知 →
+   * V1 baseline (defense-in-depth fallback, 详见 worker.ts + plan T2)。
+   */
+  readonly role?: string;
 }
 
 /** 子→父 result 信封。schema 冻结形态见 PARENT_SCHEMA。 */
@@ -76,6 +82,7 @@ export const WORKER_SCHEMA: Record<string, unknown> = {
     timeoutMs: { type: "integer", minimum: 1 },
     sandboxRoot: { type: "string" },
     env: { type: "object" },
+    role: { type: "string" },
   },
   required: ["task", "sandboxRoot"],
   additionalProperties: false,

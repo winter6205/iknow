@@ -36,6 +36,12 @@ export interface SubAgentDefinition {
    * 本地定义为可选,缺省空串兜底。
    */
   readonly sandboxRoot?: string;
+  /**
+   * #556 T2: 角色路由(additive,可选) — 经 buildWorkerPayload 透传到
+   * envelope.role; worker 装配期查 catalog 取 body 注入 persona 段。
+   * 缺省 / 未知 → V1 baseline (additive 不破 legacy wire)。
+   */
+  readonly role?: string;
 }
 
 /** 默认 deny-list: 子代理禁止再派生子代理 (防递归爆炸)。frozen。 */

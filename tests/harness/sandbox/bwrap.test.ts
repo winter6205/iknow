@@ -176,6 +176,110 @@ describe("createBwrapFence", () => {
     );
   });
 
+  // #562 T5: cwdReadonly — readonly worker fence binds cwd as --ro-bind so a
+  // validator hole still gets EROFS at the kernel layer. Default / false MUST
+  // stay byte-for-byte equal to V1 argv (no surprise regressions in the
+  // existing fence contract).
+  it("cwdReadonly:false preserves byte-for-byte V1 argv (#562 T5, regression baseline)", () => {
+    const cwd = "/workspace";
+    const baseOpts = {
+      command: "node",
+      args: ["-v"],
+      fsPolicy: createFsPolicy({ cwd, home: "/home/user", tmpDir: "/tmp/job" }),
+      networkPolicy: createNetworkPolicy(),
+      resourceLimits: createResourceLimits(),
+      env: { PATH: "/bin" },
+      cwd,
+    };
+    // V1 argv (no cwdReadonly) is the regression baseline.
+    const argvDefault = createBwrapFence(baseOpts).argv;
+    const argvFalse = createBwrapFence({
+      ...baseOpts,
+      cwdReadonly: false,
+    }).argv;
+    assert.deepEqual(
+      argvFalse,
+      argvDefault,
+      "cwdReadonly:false must produce byte-for-byte V1 argv"
+    );
+  });
+
+  it("cwdReadonly:undefined preserves byte-for-byte V1 argv (#562 T5)", () => {
+    const cwd = "/workspace";
+    const baseOpts = {
+      command: "node",
+      args: ["-v"],
+      fsPolicy: createFsPolicy({ cwd, home: "/home/user", tmpDir: "/tmp/job" }),
+      networkPolicy: createNetworkPolicy(),
+      resourceLimits: createResourceLimits(),
+      env: { PATH: "/bin" },
+      cwd,
+    };
+    const argvDefault = createBwrapFence(baseOpts).argv;
+    const argvUndef = createBwrapFence({
+      ...baseOpts,
+      cwdReadonly: undefined,
+    }).argv;
+    assert.deepEqual(argvUndef, argvDefault);
+  });
+
+  it("cwdReadonly:true switches the cwd bind to --ro-bind and keeps argv order (#562 T5)", () => {
+    const cwd = "/workspace";
+    const argv = createBwrapFence({
+      command: "node",
+      args: ["-v"],
+      fsPolicy: createFsPolicy({ cwd, home: "/home/user", tmpDir: "/tmp/job" }),
+      networkPolicy: createNetworkPolicy(),
+      resourceLimits: createResourceLimits(),
+      env: { PATH: "/bin" },
+      cwd,
+      cwdReadonly: true,
+    }).argv;
+    // No --bind <cwd> <cwd> anywhere — must be --ro-bind.
+    const bindCwdIndex = argv.findIndex(
+      (arg, index) => arg === "--bind" && argv[index + 1] === cwd
+    );
+    assert.equal(
+      bindCwdIndex,
+      -1,
+      "expected no --bind <cwd> <cwd> in argv when cwdReadonly:true"
+    );
+    // Exactly one --ro-bind <cwd> <cwd>.
+    const roCwdPairs: number[] = [];
+    for (let i = 0; i < argv.length - 2; i++) {
+      if (
+        argv[i] === "--ro-bind" &&
+        argv[i + 1] === cwd &&
+        argv[i + 2] === cwd
+      ) {
+        roCwdPairs.push(i);
+      }
+    }
+    assert.equal(
+      roCwdPairs.length,
+      1,
+      "expected exactly one --ro-bind <cwd> <cwd> in argv"
+    );
+    // Order contract (argv 顺序契约): system --ro-bind → user --bind/--ro-bind
+    // → --size/--tmpfs → 可选 cwd 重绑 → --proc/--dev-bind → --chdir → -- → 命令.
+    // The new cwd --ro-bind must come AFTER the system --ro-binds (/etc last)
+    // and BEFORE --size/--tmpfs.
+    const etcIndex = argv.indexOf("/etc");
+    assert.notEqual(etcIndex, -1);
+    const roCwdIndex = roCwdPairs[0] as number;
+    assert.ok(
+      etcIndex < roCwdIndex,
+      "cwd ro-bind must follow system --ro-bind"
+    );
+    const tmpfsIndex = argv.indexOf("--tmpfs");
+    assert.ok(
+      roCwdIndex < tmpfsIndex,
+      "cwd ro-bind must precede --size/--tmpfs"
+    );
+    // Real kernel-side EROFS cannot be asserted without spawning bwrap; sandbox
+    // probe handles it. Here we lock the fence shape only.
+  });
+
   it("throws a ToolExecutionError when fsPolicy.allowedPaths() has a single entry (M4 fail-loud)", () => {
     // Even one entry (cwd-only) is treated as misconfiguration: the home bind
     // would be impossible to synthesize without a guess.

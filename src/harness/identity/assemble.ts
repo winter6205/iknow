@@ -325,3 +325,54 @@ Parallelize by issuing multiple spawn_subagent calls in one turn: each spawns an
 export function coordinatorSegment(text: string): string {
   return `## Sub-agent coordination\n${text}`;
 }
+
+/**
+ * #562 T7 readonly worker 的 "Tool constraints for this run" 段渲染。
+ *
+ * 内容契约 (plan T7):
+ *   - 允许命令族:coreutils 读族 (cat/grep/ls/head/tail/wc/stat/...)、
+ *     git 只读子命令 (status/log/diff/show/ls-files/...)、rg、jq。
+ *   - 显式 reject:输出重定向 (>)、后台 (&)、find -delete/-exec、
+ *     sort -o、git --output、env/xargs/time/nohup/timeout。
+ *   - 替代工具引导:read_file / grep / glob / lsp_*。
+ *
+ * 措辞 mirror CC Agent tool constraints 段;纯函数,无 ctx 依赖,
+ * mode 缺省或 "any" → caller 不调用本函数 (段缺席, V1 byte-stable)。
+ * 加性段不触碰 IKNOW_ASSEMBLY_ORDER 的 5 段 LOCKED 顺序;由 worker
+ * 装配期 (withRoleExtras) 在 persona 之后追加,顺序契约:
+ *   base < persona < constraints < addendum。
+ */
+export function toolConstraintsSegment(mode: "readonly"): string {
+  if (mode !== "readonly") {
+    // 类型契约守门:本函数当前仅支持 readonly 模式;其他 mode 由调用方
+    // 自行决定是否调用本函数。编译期已限定字面量,运行时守门是冗余
+    // 防御 (callable 边)。
+    throw new Error(`toolConstraintsSegment: unsupported mode '${mode}'`);
+  }
+  return `## Tool constraints for this run
+
+You may invoke bash commands only for read-only operations in this task. Writes, deletions, and side-effecting operations are rejected.
+
+Allowed command families:
+- coreutils read: ls, cat, grep, wc, stat, du, df, ps, diff, head, tail, sha256sum, md5sum, sort (without -o/--output), file, basename, dirname, realpath, readlink, nl, fold, od, xxd, hexdump, strings, column
+- find (without -delete/-exec/-execdir/-ok/-okdir) — read-only traversal
+- git read-only subcommands: status, log, diff, show, ls-files, ls-tree, describe, rev-parse, shortlog, blame, reflog, rev-list, cat-file, name-rev, grep, whatchanged, count-objects, verify-pack, fsck, remote
+- search tools: rg
+- json tools: jq
+
+Rejected:
+- output redirection (>, >>, &>) and background operators (&) — readonly mode does not write
+- find -delete / -exec / -execdir / -ok / -okdir — write or execute side effects
+- sort -o / --output — writes output to a file
+- git --output — any path that writes; git subcommands not in the read-only whitelist are denied
+- env, xargs, time, nohup, timeout — execution agents that mutate environment or shell state
+- command substitution (\$(...) / backticks / \${}) and process substitution (<(...)) — caught upstream
+- any command not in the policy table — deny-by-default
+
+For non-bash reads, prefer the dedicated tools:
+- read_file — read a file at a path
+- grep — search file contents
+- glob — match paths by pattern
+- lsp_definition / lsp_references / lsp_hover / lsp_document_symbol / lsp_workspace_symbol / lsp_go_to_implementation / lsp_prepare_call_hierarchy / lsp_incoming_calls / lsp_outgoing_calls — code navigation
+- lsp_diagnostics — diagnostics for a file`;
+}

@@ -59,6 +59,9 @@ jobs:
         #   #468 新增：worker-tool-surface / worker.test.ts 走真实
         #   createWorkerDeps → createDefaultAciRegistry → createBashTool
         #   → requireBwrap，同属装配依赖 bwrap 类，一并排除。
+        #   #562 新增：envelope-role / tool-constraints /
+        #   bash-mode-channel（皆走 createWorkerDeps → createBashTool →
+        #   requireBwrap 装配链），一并排除。
         # 慢/重路径 + TUI 时序 flaky（runner 环境偶发，--retry 1 兜底）：
         #   e2e / integration / banner-scroll-fixes / logo-persists。
         #   e2e / integration 用 'dir/**' glob 排除整目录（vitest exclude
@@ -75,6 +78,7 @@ jobs:
             --exclude tests/harness/aci/demo.test.ts \
             --exclude tests/harness/aci/interrupt-routing.test.ts \
             --exclude tests/harness/aci/tools/bash.test.ts \
+            --exclude tests/harness/aci/tools/bash-readonly.test.ts \
             --exclude tests/harness/aci/tools/grep.test.ts \
             --exclude tests/harness/aci/permission.test.ts \
             --exclude tests/harness/aci/registry-workspace-root.test.ts \
@@ -92,6 +96,9 @@ jobs:
             --exclude tests/session-api/ensure-deps-aci-tools.test.ts \
             --exclude tests/subagent/worker-tool-surface.test.ts \
             --exclude tests/subagent/worker.test.ts \
+            --exclude tests/subagent/envelope-role.test.ts \
+            --exclude tests/subagent/tool-constraints.test.ts \
+            --exclude tests/subagent/bash-mode-channel.test.ts \
             --exclude tests/tui/banner-scroll-fixes.test.tsx \
             --exclude tests/tui/logo-persists.test.tsx \
             --exclude 'tests/harness/secret-roundtrip/**' \
@@ -139,6 +146,9 @@ jobs:
         #   #468 新增：worker-tool-surface / worker.test.ts 走真实
         #   createWorkerDeps → createDefaultAciRegistry → createBashTool
         #   → requireBwrap，同属装配依赖 bwrap 类，一并排除。
+        #   #562 新增：envelope-role / tool-constraints /
+        #   bash-mode-channel（皆走 createWorkerDeps → createBashTool →
+        #   requireBwrap 装配链），一并排除。
         #   TUI 时序 flaky（runner 环境偶发，--retry 1 兜底）：
         #     banner-scroll-fixes / logo-persists
         # 注意：sandbox/bwrap.test、resource-limits 等纯逻辑测试在 CI
@@ -152,6 +162,7 @@ jobs:
             --exclude tests/harness/aci/demo.test.ts \
             --exclude tests/harness/aci/interrupt-routing.test.ts \
             --exclude tests/harness/aci/tools/bash.test.ts \
+            --exclude tests/harness/aci/tools/bash-readonly.test.ts \
             --exclude tests/harness/aci/tools/grep.test.ts \
             --exclude tests/harness/aci/permission.test.ts \
             --exclude tests/harness/aci/registry-workspace-root.test.ts \
@@ -169,6 +180,9 @@ jobs:
             --exclude tests/session-api/ensure-deps-aci-tools.test.ts \
             --exclude tests/subagent/worker-tool-surface.test.ts \
             --exclude tests/subagent/worker.test.ts \
+            --exclude tests/subagent/envelope-role.test.ts \
+            --exclude tests/subagent/tool-constraints.test.ts \
+            --exclude tests/subagent/bash-mode-channel.test.ts \
             --exclude tests/tui/banner-scroll-fixes.test.tsx \
             --exclude tests/tui/logo-persists.test.tsx \
             --exclude tests/harness/secret-roundtrip/e2e.test.ts \

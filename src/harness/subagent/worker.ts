@@ -47,12 +47,14 @@ import { createJsonlTraceService, type TraceService } from "../trace/index.js";
 import { run, epilogueSummary } from "../loop-engine.js";
 import type { HarnessStreamEvent } from "../stream.js";
 import { MaxTurnsExceeded, ProtocolError } from "../errors.js";
+import { getAgentEntry, AgentCatalogLookupError } from "./catalog.js";
 import {
   parseWorkerEnvelope,
   truncateEnvelopeResult,
   type SubAgentEnvelope,
   type WorkerEnvelope,
 } from "./envelope.js";
+import { toolConstraintsSegment } from "../identity/assemble.js";
 
 /** stderr 日志前缀 (spec Code Style: warn 一行不泄露 env 值)。 */
 const LOG_PREFIX = "[subagent-worker]";
@@ -63,6 +65,115 @@ function log(message: string): void {
 
 /** default worker trace dir (cli.ts DEFAULT_TRACE_DIR 同形态, IKNOW_TRACE_OUT 优先)。 */
 const DEFAULT_WORKER_TRACE_DIR = "./trace/";
+
+/**
+ * #556 T2: 查 catalog 取 persona 段文本 (catalog body)。role 缺省 / 未知
+ * → 返回 undefined (不注入 persona, 走 V1 baseline fallback)。未知 id
+ * 走 catch 路径 (defense-in-depth): spawn 侧 ajv 已挡一轮, 此处为
+ * wire-mismatch 兜底, 单测 envelope-role.test.ts 显式锁定 fallback 内容
+ * (不静默吞掉 — 装配层发一行 log, 输出仍无 persona)。
+ */
+function resolvePersonaBody(role: string | undefined): string | undefined {
+  if (role === undefined) return undefined;
+  try {
+    return getAgentEntry(role).body;
+  } catch (err) {
+    if (err instanceof AgentCatalogLookupError) {
+      log(`role '${role}' not in catalog; falling back to V1 baseline`);
+      return undefined;
+    }
+    throw err;
+  }
+}
+
+/**
+ * #562 T7: 查 catalog 取 bashMode 派生 tool constraints 段文本。
+ * bashMode="readonly" → 注入 "Tool constraints for this run" 段;
+ * 其他 (role 缺省 / 未知 / bashMode 缺省 / bashMode="any") → 不注入,
+ * 走 V1 baseline (byte-stable, 段缺席)。
+ *
+ * 防御契约与 resolvePersonaBody 同形态:role 缺省 / 未知 → 不抛, 装配
+ * 期 catch 后走 fallback;catalog 是只读数据, 无副作用。
+ */
+function resolveConstraintsText(role: string | undefined): string | undefined {
+  if (role === undefined) return undefined;
+  try {
+    const entry = getAgentEntry(role);
+    if (entry.bashMode === "readonly") {
+      return toolConstraintsSegment("readonly");
+    }
+    return undefined;
+  } catch (err) {
+    if (err instanceof AgentCatalogLookupError) {
+      log(`role '${role}' not in catalog; falling back to V1 baseline`);
+      return undefined;
+    }
+    throw err;
+  }
+}
+
+/**
+ * #562 T6: 查 catalog 取 bashMode 派生出 worker 装配期的 bash 模式。
+ *
+ * 继承 plan T6 fallback 链路:
+ *   - role 缺省 → 返回 "any" (V1 baseline 等价; worker 不显式 grep,
+ *     但 deps.bashMode 字段总会显式设置, 让 wiring 显式可见);
+ *   - role 已知 (catalog 命中, e.g. "explore") → 返回 entry.bashMode,
+ *     缺省视为 "any" (catalog 默认 / explore 外其他角色不强制 readonly);
+ *   - role 未知 → 返回 "any" (defense-in-depth, 不静默吞掉 — 装配期
+ *     catch AgentCatalogLookupError 后写一行 log, 装配仍走 "any" 显式
+ *     透传, 与 resolvePersonaBody / resolveConstraintsText 同形态);
+ *
+ * 显式 "any":bash handler 不启用 readonly validator, fence 不收
+ * cwdReadonly —— 字节与 V1 一致。返回类型收窄到 "any" | "readonly",
+ * 编译期保证调用方分支覆盖完整。
+ */
+function resolveBashMode(role: string | undefined): "any" | "readonly" {
+  if (role === undefined) return "any";
+  try {
+    const entry = getAgentEntry(role);
+    return entry.bashMode ?? "any";
+  } catch (err) {
+    if (err instanceof AgentCatalogLookupError) {
+      log(`role '${role}' not in catalog; bashMode fallback to 'any'`);
+      return "any";
+    }
+    throw err;
+  }
+}
+
+/**
+ * #556 T2 + #562 T7: 加性段注入 wrapper
+ * (base < persona < constraints < addendum)。
+ *
+ * 顺序契约 (plan T7 实现选):
+ *   - persona (#556):catalog body, 角色定位。
+ *   - constraints (#562 T7):readonly mode 时追加, mode 延伸语义。
+ *   - addendum (#556):envelope.systemPrompt, 用户后置追加。
+ *
+ * 三者全缺省走外层短路 (返回 base), 字节级 byte-stable, 守 V1 baseline。
+ * base 缺席 → 输出只是 extras 三者按序 join;任一缺席 → 该 slot 在
+ * extras 数组过滤掉, 顺序保持不变。
+ *
+ * 加性段追加在 base system 之后, 不重排 IKNOW_ASSEMBLY_ORDER 的 5 段
+ * LOCKED 顺序 (identity / soul / user_profile / bootstrap / memory_layer)。
+ */
+function withRoleExtras(
+  base: () => Promise<string | undefined>,
+  persona: string | undefined,
+  constraints: string | undefined,
+  addendum: string | undefined
+): () => Promise<string | undefined> {
+  return async () => {
+    const baseText = await base();
+    const extras = [persona, constraints, addendum].filter(
+      (s): s is string => s !== undefined
+    );
+    if (extras.length === 0) return baseText;
+    if (baseText === undefined) return extras.join("\n\n");
+    return baseText + "\n\n" + extras.join("\n\n");
+  };
+}
 
 /**
  * worker 装配入参 (createWorkerDeps seam)。
@@ -97,6 +208,26 @@ export interface CreateWorkerDepsOptions {
    *  createDefaultAciRegistry 让 fs-policy 保护 `<workspaceRoot>/.iknow`。
    *  缺席 → registry 内部 fallback 到 sandboxRoot(legacy 形态)。 */
   readonly workspaceRoot?: string;
+  /**
+   * #556 T2: 来自 envelope.role 的 seam 副本 (runSubagentWorker 透传)。
+   * worker 装配期查 catalog 取 body 注入 persona 段; 缺省 / 未知 → 走 V1
+   * baseline (不入 persona 段, 不注入额外 deny, 详见 plan T2 防御契约)。
+   */
+  readonly role?: string;
+  /**
+   * #556 T2: 来自 envelope.systemPrompt 的 seam 副本 — 修复 schema 有 / 透传
+   * 有 / 此前未消费的幽灵通道。该字段在 worker 装配期作为 addendum 追加
+   * persona 段之后 (顺序: base < persona < addendum), 与 LOCKED 5 段解耦。
+   */
+  readonly addendum?: string;
+  /**
+   * #562 T6: bash 模式显式覆盖 (= 优先于 role 派生)。缺省 → worker
+   * 装配期调 resolveBashMode(role) 派生:role "explore" → "readonly",
+   * 其他全部 → "any"。该 seam 为测试与未来跨阶段注入留口 (e.g.
+   * 直接派 readonly worker 不读 catalog)。Catalog 路由仍归 spawn
+   * tool 负责;registry 只透传,不读 catalog。
+   */
+  readonly bashMode?: "any" | "readonly";
 }
 
 /**
@@ -147,6 +278,10 @@ export async function createWorkerDeps(
   // 独立 registry: 不依赖父注册表 (spec 假设 4)。worker 子进程不含
   // spawn_subagent (SC9) —— registry.ts 不传 subagentManager, 该工具不在
   // factories 里 (T2 才把两件工具 append 进 ACI_TOOLSET_NAMES)。
+  // #562 T6: bashMode 透传到 bash 工具工厂。优先 opts.bashMode 显式覆盖,
+  // 否则 resolveBashMode(role) 派生 (role 缺省 / 未知 → "any" fallback)。
+  const bashMode: "any" | "readonly" =
+    opts.bashMode ?? resolveBashMode(opts.role);
   const reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
@@ -157,6 +292,7 @@ export async function createWorkerDeps(
     ...(opts.workspaceRoot !== undefined
       ? { workspaceRoot: opts.workspaceRoot }
       : {}),
+    ...(bashMode !== undefined ? { bashMode } : {}),
   });
 
   const baseExecutor = createExecutor(reg.inner);
@@ -171,7 +307,7 @@ export async function createWorkerDeps(
   // surface "ask" → shouldIncludeBootstrap false (无 BOOTSTRAP 段); memory
   // 关闭 (worker 有界 scope, 不共享用户记忆层)。skills 段照常注入
   // (SC12: skill 工具在场就该让模型知道 available skills)。
-  const system =
+  const baseSystem =
     opts.system ??
     createIknowSystemResolver({
       cwd,
@@ -185,6 +321,24 @@ export async function createWorkerDeps(
           ...(entry.disabled ? { disabled: true } : {}),
         })),
     });
+
+  // #556 T2 + #562 T7: persona + constraints + addendum 注入 (加性段,
+  // 不触碰 IKNOW_ASSEMBLY_ORDER)。顺序 base < persona < constraints <
+  // addendum;三者全缺省 → base 透传, V1 baseline 严格 byte-stable。
+  //
+  // role 缺省 / 未知 → 不查 catalog / 不注入 persona / 不注入 constraints
+  // (T2 防御契约 + T7 readonly 派生, defense-in-depth): worker 装配期
+  // catch AgentCatalogLookupError 显式走 fallback, 单测 envelope-role
+  // 与 tool-constraints 锁定该路径。
+  const personaText = resolvePersonaBody(opts.role);
+  const constraintsText = resolveConstraintsText(opts.role);
+  const addendumText = opts.addendum;
+  const system =
+    personaText !== undefined ||
+    constraintsText !== undefined ||
+    addendumText !== undefined
+      ? withRoleExtras(baseSystem, personaText, constraintsText, addendumText)
+      : baseSystem;
 
   const deps: LoopEngineDeps = {
     adapter,
@@ -448,6 +602,12 @@ export async function runSubagentWorker(): Promise<void> {
     env,
     sandboxRoot: workerEnvelope.sandboxRoot,
     disallowedTools: workerEnvelope.disallowedTools,
+    // #556 T2: envelope.role / envelope.systemPrompt 透传到 createWorkerDeps
+    // seam —— 缺失时不传 (V1 baseline, byte-stable)。
+    ...(workerEnvelope.role !== undefined ? { role: workerEnvelope.role } : {}),
+    ...(workerEnvelope.systemPrompt !== undefined
+      ? { addendum: workerEnvelope.systemPrompt }
+      : {}),
     // ADR-0019 (review-fix H3): worker 继承父 env SSOT —— 当 spawn 父进程
     // 设置了 IKNOW_WORKSPACE_ROOT,worker 的 fs-policy fence 也按同一根
     // 保护 `.iknow`(与 build-engine 同形态)。条件解析:无 flag 且无 env

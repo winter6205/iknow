@@ -181,6 +181,11 @@ export interface CreateDefaultAciRegistryOptions {
    *  skillCatalog 同形态：只透传不条件化装配名称 —— bash 是常驻工具，参数级
    *  能力由 handler 运行时决策。 */
   readonly backgroundManager?: BackgroundTaskManager;
+  /** #562 T6:bash 模式由 worker.ts 显式透传 —— "readonly" 时 bash handler
+   *  调 validateReadonlyCommand + fence 收 cwdReadonly:true (T4+T5 双闸)。
+   * registry 这里只透传, 不读 catalog (catalog 路由归 spawn-subagent-tool
+   * 工厂负责 — plan T3 决议)。缺省 → bash 字节与 V1 一致。 */
+  readonly bashMode?: "any" | "readonly";
 }
 
 /**
@@ -238,6 +243,9 @@ export function createDefaultAciRegistry(
   const secretRegistry = opts.secretRegistry;
   const disallowedTools = opts.disallowedTools;
   const backgroundManager = opts.backgroundManager;
+  // #562 T6: bashMode 显式透传到 createBashTool。registry 不读 catalog —
+  // spawn-subagent-tool 工厂是 catalog 路由的真正 owner。
+  const bashMode = opts.bashMode;
   // ADR-0019 (T4): per-root state anchor. Threaded to bash + read_file so
   // the fence protects `<workspaceRoot>/.iknow` the same way it does
   // `<home>/.iknow`. Falls back to sandboxRoot when absent (legacy shape)
@@ -266,6 +274,8 @@ export function createDefaultAciRegistry(
         secretRegistry,
         workspaceRoot,
         ...(backgroundManager ? { backgroundManager } : {}),
+        // #562 T6: bashMode 透传 — readonly 模式触发 validator + fence cwdReadonly。
+        ...(bashMode !== undefined ? { bashMode } : {}),
       }),
     read_file: () => createReadFileTool(sandboxRoot, { workspaceRoot }),
     grep: () => createGrepTool(sandboxRoot),
