@@ -1,37 +1,58 @@
+/**
+ * serve-workspace T7a — ChatApp orchestration (review fix M6 slimming)。
+ *
+ * 历史: 该文件原 549 行, ChatApp 长方法 + 60+ 行 workspace handler 散布。
+ * T7a 把：
+ *  - useWorkspaceActions hook（handleNewSession / handleCreateInWorkspace /
+ *    handleSelect / autoOpenedRef effect）→ `hooks/use-workspace-actions.ts`。
+ *  - useSlashCommands hook（handleCommand + applyArgSetting + handleSkillLoad）
+ *    → `hooks/use-slash-commands.ts`。
+ *  - useChatCompact（/compact handler）→ `hooks/use-chat-compact.ts`。
+ *  - usePermissionModeToggle（perm cycle）→ `hooks/use-permission-mode-toggle.ts`。
+ *  - useRewindConfirm（rewind picker confirm 副作用）→ `hooks/use-rewind-confirm.ts`。
+ *  - <ChatSidebarContainer> → `components/ChatSidebarContainer.tsx`。
+ *  - <ChatMainDialogs> + useMcpReload → `components/ChatMainDialogs.tsx`。
+ *  - <ChatFooter> → `components/ChatFooter.tsx`。
+ *
+ * T8: chip 上下文感知 + picker 改 popover — App 加三件事：
+ *  - 顶层 `useSessionList` 复用同一份 session list, lookup active session
+ *    的 workspaceRoot 喂给 WorkspaceChip。
+ *  - chip button ref + popover wrapper ref 传给 ChatHeader (popover anchor)。
+ *  - `usePopoverDismiss` 监听 Esc / outside-click, 关闭时焦点回 chip。
+ *  - 渲染 <WorkspacePicker> 节点作为 ChatHeader 的 `workspacePopover` 插槽
+ *    (slot anchor: `absolute top-full right-0 mt-1 z-50`, 由 ChatHeader 包)。
+ *
+ * 本文件保留 ChatApp 的核心 orchestration（state / hooks 装配 / 三个状态
+ * 分支的路由）。T4-T6 行为契约不变。
+ */
 import { useCallback, useEffect, useState } from "react";
-import { AppShell } from "./components/AppShell";
-import { ChatHeader } from "./components/ChatHeader";
-import { Composer } from "./components/Composer";
-import { ErrorBoundary } from "./components/ErrorBoundary";
-import { MessageList } from "./components/MessageList";
-import { SessionSidebar } from "./components/SessionSidebar";
-import { StateBlock } from "./components/StateBlock";
-import { useSessionChat } from "./hooks/useSessionChat";
-import { useAsksPolling } from "./hooks/useAsksPolling";
-import { usePermissionMode } from "./hooks/usePermissionMode";
-import { useSubagentsPolling } from "./hooks/useSubagentsPolling";
-import { PermissionDialog } from "./components/PermissionDialog";
-import { SubagentStatusBar } from "./components/SubagentStatusBar";
-import { permissionModeLabel } from "./lib/permission-mode";
-import {
-  resolveArgCommand,
-  slashHelpText,
-  type SlashCommandName,
-} from "./lib/slash";
-import { formatSessionInfo } from "./lib/session-info";
-import { buildRewindTargetsFromTurns } from "./lib/rewind-targets";
-import type { WebRewindTarget } from "./lib/rewind-targets";
 import * as api from "./api/client";
-import type { McpServerStatus, McpTool, SkillSummary } from "./api/types";
-import { McpPanel } from "./components/McpPanel";
-import { RewindPicker } from "./components/RewindPicker";
-import { WorkspacePicker } from "./components/WorkspacePicker";
+import { AppShell } from "./components/AppShell";
+import { ChatFooter } from "./components/ChatFooter";
+import { ChatHeader } from "./components/ChatHeader";
+import { ChatMainDialogs, useMcpReload } from "./components/ChatMainDialogs";
+import { ChatSidebarContainer } from "./components/ChatSidebarContainer";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { PermissionDialog } from "./components/PermissionDialog";
+import { StateBlock } from "./components/StateBlock";
+import { useAsksPolling } from "./hooks/useAsksPolling";
+import { useChatCompact } from "./hooks/use-chat-compact";
+import { usePermissionMode } from "./hooks/usePermissionMode";
+import { usePermissionModeToggle } from "./hooks/use-permission-mode-toggle";
+import { useRewindConfirm } from "./hooks/use-rewind-confirm";
+import { useSessionChat } from "./hooks/useSessionChat";
+import { useSlashCommands } from "./hooks/use-slash-commands";
+import { useSubagentsPolling } from "./hooks/useSubagentsPolling";
 import { useWorkspace } from "./hooks/useWorkspace";
+import { useWorkspaceActions } from "./hooks/use-workspace-actions";
+import { useWorkspacePopover } from "./hooks/use-workspace-popover";
+import type { McpServerStatus, McpTool, SkillSummary } from "./api/types";
+import type { WebRewindTarget } from "./lib/rewind-targets";
+import { permissionModeLabel } from "./lib/permission-mode";
 import {
   loadThinkingSettings,
   saveThinkingSettings,
   toWireOverride,
-  type ThinkingEffort,
   type ThinkingSettings,
 } from "./lib/thinking-settings";
 
@@ -40,17 +61,19 @@ const NARROW_QUERY = "(max-width: 768px)";
 
 function ChatApp() {
   const chat = useSessionChat();
-  // serve-workspace T5: 顶栏 chip + picker 状态（commit 后即生效）。useWorkspace
-  // 在挂载时拉 GET /workspace + /workspaces，loading 期间 chip 暂显示 unbound
-  // CTA；recents 缺席（404）静默降级为空。
   const ws = useWorkspace();
-  // Lazy init from the current viewport so the first paint already reflects
-  // the narrow-screen collapsed state (no layout flash). Vite SPA has no SSR,
-  // so window is always available here.
+  const {
+    workspaceOpen,
+    setWorkspaceOpen,
+    sidebarSignal,
+    bumpSidebar,
+    handleNewSession,
+    handleCreateInWorkspace,
+    handleSelect,
+  } = useWorkspaceActions(chat, ws);
   const [collapsed, setCollapsed] = useState(
     () => window.matchMedia(NARROW_QUERY).matches
   );
-  // T5: 思考开关 + 强度（localStorage 持久化，每次发送随请求下发 override）。
   const [thinkingSettings, setThinkingSettings] = useState<ThinkingSettings>(
     () => loadThinkingSettings()
   );
@@ -58,14 +81,6 @@ function ChatApp() {
     setThinkingSettings(next);
     saveThinkingSettings(next);
   }, []);
-  // Bumped after lifecycle events (newSession / setConversation to a non-cached
-  // id) so the sidebar re-fetches the list and the new entry shows up without
-  // the user clicking refresh.
-  const [sidebarSignal, setSidebarSignal] = useState(0);
-  const bumpSidebar = useCallback(() => setSidebarSignal((n) => n + 1), []);
-
-  // /compact 反馈：working 时防重复触发；结果经 notice 消息进消息流。
-  const [compacting, setCompacting] = useState(false);
   const [skills, setSkills] = useState<readonly SkillSummary[]>([]);
   const [mcpOpen, setMcpOpen] = useState(false);
   const [mcpServers, setMcpServers] = useState<readonly McpServerStatus[]>([]);
@@ -75,8 +90,19 @@ function ChatApp() {
     ReadonlyArray<WebRewindTarget> | undefined
   >(undefined);
   const [rewindIndex, setRewindIndex] = useState(0);
-  // serve-workspace T5: picker 显示开关（CTA / chip / /workspace 三入口）。
-  const [workspaceOpen, setWorkspaceOpen] = useState(false);
+
+  // T8 + review fix M5: popover 一族 (refs / dismiss 监听 / active session
+  // lookup / 插槽 JSX) 全部下沉到 `useWorkspacePopover`。ChatApp 只消费
+  // 返回字段,自身保持 orchestration 角色。
+  const popover = useWorkspacePopover(
+    {
+      workspaceOpen,
+      setWorkspaceOpen,
+      sidebarSignal,
+    },
+    chat,
+    ws
+  );
 
   useEffect(() => {
     void api
@@ -85,57 +111,16 @@ function ChatApp() {
       .catch(() => setSkills([]));
   }, []);
 
-  const handleCompact = useCallback(async () => {
-    if (compacting) return;
-    setCompacting(true);
-    try {
-      const didCompact = await chat.compact();
-      // false 的两类成因分开提示：无会话（compact 早退）≠ 未达压缩阈值，
-      // 避免会话缺席时误导用户"上下文未达阈值"。
-      chat.pushNotice(
-        didCompact
-          ? "已压缩上下文"
-          : chat.session
-            ? "上下文未达压缩阈值"
-            : "当前无会话可压缩"
-      );
-    } catch (e) {
-      chat.pushNotice(
-        `压缩失败：${e instanceof Error ? e.message : String(e)}`
-      );
-    } finally {
-      setCompacting(false);
-    }
-  }, [compacting, chat]);
-
-  // Composer 只发文本；thinking override 在 App 层按当前设置合成后透传。
+  const { handleCompact } = useChatCompact(chat);
   const handleSend = useCallback(
     (text: string) => chat.sendMessage(text, toWireOverride(thinkingSettings)),
     [chat, thinkingSettings]
   );
-
-  // permission mode（TUI Shift+Tab 的 web 镜像）：状态 + 初始读取在
-  // usePermissionMode；notice 反馈留在 App（走 chat.pushNotice）。
   const perm = usePermissionMode();
-  const cyclePermMode = useCallback(async () => {
-    try {
-      const next = await perm.cycle();
-      chat.pushNotice(`权限模式：${permissionModeLabel(next)}`);
-    } catch (e) {
-      chat.pushNotice(
-        `模式切换失败：${e instanceof Error ? e.message : String(e)}`
-      );
-    }
-  }, [chat, perm]);
-
-  // Permission polling is only active while a turn is in flight AND we have a
-  // session id. When the dialog appears, it sits at the top of the message
-  // stream (decided by the ChatView composition order — rendered above the
-  // list so users cannot miss it).
+  const cyclePermMode = usePermissionModeToggle(chat, perm);
   const conversationId = chat.session?.conversation_id ?? null;
   const isSending = chat.phase === "sending";
   const askPolling = useAsksPolling(conversationId, isSending);
-  // #358 T8: 子代理状态栏轮询（spec SC8；2.5s 间隔，镜像 useAsksPolling）。
   const subagentPolling = useSubagentsPolling(conversationId);
   const permissionDialog =
     askPolling.pendingAsk && conversationId ? (
@@ -147,8 +132,6 @@ function ChatApp() {
       />
     ) : null;
 
-  // Narrow-screen auto-collapse: track live changes (device rotation, window
-  // resize across the breakpoint) after the initial render.
   useEffect(() => {
     const mql = window.matchMedia(NARROW_QUERY);
     const onChange = (e: MediaQueryListEvent) => setCollapsed(e.matches);
@@ -156,188 +139,62 @@ function ChatApp() {
     return () => mql.removeEventListener("change", onChange);
   }, []);
 
+  // T8: popover 插槽 — 已经 useWorkspacePopover 内部构造好,ChatHeader
+  // 透传即可。视觉定位 (absolute top-full right-0 z-50) 由 ChatHeader 内的
+  // wrapper div 负责。
   const header = (
     <ChatHeader
       phase={chat.phase}
       healthLabel={chat.healthLabel}
       workspaceBound={ws.bound}
       workspaceRoot={ws.root}
-      onOpenWorkspacePicker={() => setWorkspaceOpen(true)}
+      activeWorkspaceRoot={popover.activeWorkspaceRoot}
+      chipButtonRef={popover.chipButtonRef}
+      workspacePopoverRef={popover.popoverWrapperRef}
+      workspacePopover={popover.workspacePopover}
+      workspaceOpen={popover.open}
+      onOpenWorkspacePicker={popover.onToggleOpen}
     />
   );
 
-  // Sidebar lists past conversations and switches the active one. Passes the
-  // current id (or null during pre-bootstrap) so the highlight tracks live.
-  // refreshSignal is bumped after newSession so the freshly created session
-  // appears without a manual refresh click.
-  const handleNewSession = useCallback(async () => {
-    await chat.newSession();
-    bumpSidebar();
-  }, [chat, bumpSidebar]);
-
-  const handleSelect = useCallback(
-    async (id: string) => {
-      await chat.setConversation(id);
-      // setConversation may switch to a session not yet in the cached list
-      // (e.g. just-created entries still propagating); refresh to be safe.
-      bumpSidebar();
-    },
-    [chat, bumpSidebar]
-  );
-
-  // slash 命令路由（对齐 TUI 词表；浏览器能力映射）。
-  const applyArgSetting = (cmd: "thinking" | "effort", value: string) => {
-    if (cmd === "thinking") {
-      handleThinkingChange({ ...thinkingSettings, enabled: value === "on" });
-      chat.pushNotice(value === "on" ? "已开启思考" : "已关闭思考");
-      return;
-    }
-    // effort 仅在 thinking 开启时生效（toWireOverride：!enabled → mode
-    // off），故一并置 enabled=true。值已过词表值域校验（ThinkingEffort 子集）。
-    handleThinkingChange({ enabled: true, effort: value as ThinkingEffort });
-    chat.pushNotice(`思考强度已设为 ${value}`);
-  };
-
-  const handleCommand = useCallback(
-    (name: SlashCommandName, arg?: string) => {
-      switch (name) {
-        case "compact":
-          if (chat.phase === "sending") {
-            chat.pushNotice("回复生成中，稍后再试");
-          } else {
-            void handleCompact();
-          }
-          break;
-        case "new":
-          void handleNewSession();
-          break;
-        case "sessions":
-          setCollapsed(false);
-          bumpSidebar();
-          break;
-        case "help":
-          chat.pushNotice(slashHelpText(skills.map((s) => s.name)));
-          break;
-        case "info":
-          chat.pushNotice(
-            formatSessionInfo({
-              conversationId: chat.session?.conversation_id ?? null,
-              turnCount: chat.session?.turn_count ?? 0,
-              jsonMode: chat.session?.json_mode ?? false,
-              phase: chat.phase,
-              contextWindow: chat.contextWindow,
-              lastUsage: chat.lastAnswer?.lastUsage ?? null,
-              thinkingEnabled: thinkingSettings.enabled,
-              effort: thinkingSettings.effort,
-            })
-          );
-          break;
-        case "quit":
-        case "exit":
-          chat.pushNotice("浏览器中关闭标签页即可退出（无独立进程）。");
-          break;
-        case "mcp":
-          void (async () => {
-            try {
-              const [st, tools] = await Promise.all([
-                api.listMcp(),
-                api.listMcpTools(),
-              ]);
-              setMcpServers(st.servers);
-              setMcpTools(tools.tools);
-              setMcpOpen(true);
-            } catch (e) {
-              chat.pushNotice(
-                `MCP 看板失败：${e instanceof Error ? e.message : String(e)}`
-              );
-            }
-          })();
-          break;
-        case "workspace":
-          // serve-workspace T5: picker 入口（与 chip / 顶栏 CTA 同源）。
-          setWorkspaceOpen(true);
-          break;
-        case "rewind":
-          if (chat.phase === "sending") {
-            chat.pushNotice("回复生成中，稍后再试");
-            break;
-          }
-          void (async () => {
-            const id = chat.session?.conversation_id;
-            if (!id) {
-              chat.pushNotice("当前无会话可回退");
-              return;
-            }
-            try {
-              const hist = await api.getSessionHistory(id);
-              const targets = buildRewindTargetsFromTurns(hist.turns);
-              if (targets.length === 0) {
-                chat.pushNotice("Nothing to rewind to yet.");
-                return;
-              }
-              setRewindIndex(0);
-              setRewindTargets(targets);
-            } catch (e) {
-              chat.pushNotice(
-                `无法加载回退锚点：${e instanceof Error ? e.message : String(e)}`
-              );
-            }
-          })();
-          break;
-        case "thinking":
-        case "effort": {
-          const res = resolveArgCommand(name, arg);
-          if (res.ok) applyArgSetting(name, res.value);
-          else chat.pushNotice(res.notice);
-          break;
-        }
-      }
-    },
-    [
-      chat,
-      handleCompact,
-      handleNewSession,
-      handleThinkingChange,
-      bumpSidebar,
-      skills,
-      thinkingSettings,
-    ]
-  );
-
-  const handleSkillLoad = useCallback(
-    (name: string, remainder: string) => {
-      void (async () => {
-        try {
-          const { body } = await api.getSkillBody(name);
-          const sendText = `[skill-load name="${name}"]\n${body}${
-            remainder.length > 0 ? `\n\n${remainder}` : ""
-          }`;
-          const displayText = `[加载技能 ${name}]${
-            remainder.length > 0 ? ` ${remainder}` : ""
-          }`;
-          await chat.sendMessage(
-            sendText,
-            toWireOverride(thinkingSettings),
-            displayText
-          );
-        } catch (e) {
-          chat.pushNotice(
-            `加载技能失败：${e instanceof Error ? e.message : String(e)}`
-          );
-        }
-      })();
-    },
-    [chat, thinkingSettings]
-  );
-
+  const reloadMcp = useMcpReload({
+    chat,
+    setMcpServers,
+    setMcpTools,
+    setMcpReloading,
+  });
+  const confirmRewind = useRewindConfirm({
+    chat,
+    rewindTargets,
+    rewindIndex,
+    setRewindTargets,
+  });
+  const { handleCommand, handleSkillLoad } = useSlashCommands({
+    chat,
+    perm,
+    thinkingSettings,
+    skills,
+    setCollapsed,
+    bumpSidebar,
+    setWorkspaceOpen,
+    setMcpServers,
+    setMcpTools,
+    setMcpOpen,
+    setRewindTargets,
+    setRewindIndex,
+    handleThinkingChange,
+    handleCompact,
+    handleNewSession,
+  });
   const side = (
-    <SessionSidebar
-      currentConversationId={chat.session?.conversation_id ?? null}
-      onSelect={handleSelect}
+    <ChatSidebarContainer
+      chat={chat}
       collapsed={collapsed}
-      onToggleCollapsed={() => setCollapsed((c) => !c)}
+      setCollapsed={setCollapsed}
+      sidebarSignal={sidebarSignal}
+      onSelect={handleSelect}
       onNewSession={handleNewSession}
-      refreshSignal={sidebarSignal}
+      onCreateInWorkspace={handleCreateInWorkspace}
     />
   );
 
@@ -356,7 +213,6 @@ function ChatApp() {
       />
     );
   }
-
   if (chat.phase === "error" && !chat.session) {
     return (
       <AppShell
@@ -374,112 +230,43 @@ function ChatApp() {
       />
     );
   }
-
   return (
     <AppShell
       header={header}
       side={side}
       main={
-        <>
-          {chat.error ? (
-            <StateBlock
-              kind="error"
-              title="请求失败"
-              detail={chat.error}
-              onRetry={chat.session ? chat.clearError : chat.retryBootstrap}
-              retryLabel={chat.session ? "关闭错误" : "重试"}
-            />
-          ) : null}
-          {permissionDialog}
-          {mcpOpen ? (
-            <McpPanel
-              servers={mcpServers}
-              tools={mcpTools}
-              reloading={mcpReloading}
-              onReload={() => {
-                void (async () => {
-                  setMcpReloading(true);
-                  try {
-                    const st = await api.reloadMcp();
-                    const tools = await api.listMcpTools();
-                    setMcpServers(st.servers);
-                    setMcpTools(tools.tools);
-                  } catch (e) {
-                    chat.pushNotice(
-                      `MCP 重载失败：${e instanceof Error ? e.message : String(e)}`
-                    );
-                  } finally {
-                    setMcpReloading(false);
-                  }
-                })();
-              }}
-              onClose={() => setMcpOpen(false)}
-            />
-          ) : null}
-          {rewindTargets !== undefined ? (
-            <RewindPicker
-              targets={rewindTargets}
-              selectedIndex={rewindIndex}
-              confirming={true}
-              onSelect={setRewindIndex}
-              onConfirm={() => {
-                const t = rewindTargets[rewindIndex];
-                if (!t) return;
-                void (async () => {
-                  try {
-                    await chat.rewind(t.keepTurns);
-                    setRewindTargets(undefined);
-                    chat.pushNotice(`已回退到 keepTurns=${t.keepTurns}`);
-                  } catch (e) {
-                    chat.pushNotice(
-                      `回退失败：${e instanceof Error ? e.message : String(e)}`
-                    );
-                  }
-                })();
-              }}
-              onClose={() => setRewindTargets(undefined)}
-            />
-          ) : null}
-          {workspaceOpen ? (
-            <WorkspacePicker
-              recents={ws.recents}
-              currentRoot={ws.root}
-              onBind={ws.bind}
-              onClose={() => setWorkspaceOpen(false)}
-              onNotice={chat.pushNotice}
-            />
-          ) : null}
-          <MessageList
-            messages={chat.messages}
-            sending={chat.phase === "sending"}
-          />
-        </>
+        <ChatMainDialogs
+          chat={chat}
+          permissionDialog={permissionDialog}
+          mcpOpen={mcpOpen}
+          mcpServers={mcpServers}
+          mcpTools={mcpTools}
+          mcpReloading={mcpReloading}
+          reloadMcp={reloadMcp}
+          closeMcp={() => setMcpOpen(false)}
+          rewindTargets={rewindTargets}
+          rewindIndex={rewindIndex}
+          selectRewind={setRewindIndex}
+          confirmRewind={confirmRewind}
+          closeRewind={() => setRewindTargets(undefined)}
+        />
       }
       footer={
-        <>
-          {/* 子代理状态栏（spec #358 SC8）：零子代理 → 组件返回 null，不打扰 idle 会话。 */}
-          <SubagentStatusBar subagents={subagentPolling.subagents} />
-          <Composer
-            disabled={!chat.session || chat.phase === "loading" || !ws.bound}
-            sending={chat.phase === "sending"}
-            thinkingSettings={thinkingSettings}
-            onThinkingChange={handleThinkingChange}
-            onSend={handleSend}
-            onCommand={handleCommand}
-            onSkillLoad={handleSkillLoad}
-            skills={skills}
-            onNotice={chat.pushNotice}
-            usage={chat.lastAnswer?.lastUsage ?? null}
-            contextWindow={chat.contextWindow}
-            model={chat.model}
-            permissionModeLabel={
-              perm.mode !== null ? permissionModeLabel(perm.mode) : null
-            }
-            onPermissionModeToggle={() => {
-              void cyclePermMode();
-            }}
-          />
-        </>
+        <ChatFooter
+          chat={chat}
+          ws={ws}
+          subagents={subagentPolling.subagents}
+          thinkingSettings={thinkingSettings}
+          onThinkingChange={handleThinkingChange}
+          handleSend={handleSend}
+          handleCommand={handleCommand}
+          handleSkillLoad={handleSkillLoad}
+          skills={skills}
+          permissionModeLabel={
+            perm.mode !== null ? permissionModeLabel(perm.mode) : null
+          }
+          cyclePermMode={cyclePermMode}
+        />
       }
     />
   );

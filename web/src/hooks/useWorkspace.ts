@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import * as api from "../api/client";
+import type { WorkspaceSubdirEntry } from "../api/client";
 
 /**
  * serve-workspace T5: 顶栏 chip + picker 的状态锚。
@@ -22,6 +23,16 @@ export type WorkspaceApi = {
     path: string,
     opts?: { confirmTrust?: boolean }
   ) => Promise<void>;
+  /**
+   * serve-workspace T3: 单层子目录探测, 透传 `listWorkspaceSubdirs`。
+   * 不做缓存 — Picker 一开即 browse, 用户点选立刻 re-browse 新位置,
+   * 不必叠一层 useState stale 复杂度。失败按既有 `request<T>` 通道抛
+   * `SessionApiError`, 调用方走 onNotice 兜底。
+   */
+  readonly browseSubdirs: (
+    root: string,
+    signal?: AbortSignal
+  ) => Promise<ReadonlyArray<WorkspaceSubdirEntry>>;
 };
 
 export function useWorkspace(): WorkspaceApi {
@@ -82,5 +93,13 @@ export function useWorkspace(): WorkspaceApi {
     []
   );
 
-  return { phase, bound, root, recents, refresh, bind };
+  const browseSubdirs = useCallback(
+    async (root: string, signal?: AbortSignal) => {
+      const res = await api.listWorkspaceSubdirs(root, signal);
+      return res.entries;
+    },
+    []
+  );
+
+  return { phase, bound, root, recents, refresh, bind, browseSubdirs };
 }

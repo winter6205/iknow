@@ -20,6 +20,10 @@ import {
 } from "../harness/identity/index.js";
 import type { ServeAskUserHandle } from "../harness/permission/ask-user.js";
 import {
+  resolveSessionDefaultWorkspace,
+  ensureDefaultWorkspace,
+} from "./default-workspace.js";
+import {
   parsePermissionMode,
   createPermissionModeContext,
 } from "../harness/permission/modes.js";
@@ -147,9 +151,19 @@ export async function startSessionServe(
   // serve-workspace T4 (ADR-0023): flag/env 解析出 absolute root → 启动即预绑
   // 到 hub(boundRoot = resolved,recents 写入)。用户显式 `--workspace-root` /
   // `IKNOW_WORKSPACE_ROOT` = 显式信任,必须传 confirmTrust:true(未被 recents
-  // 收录的新绝对路径才能过信任门)。缺席 → hub 保持 unbound,等 SPA 显式选择。
+  // 收录的新绝对路径才能过信任门)。
+  //
+  // T9a (serve-workspace-folder-browse): flag/env 缺席时,auto-bind 到
+  // `<homedir()>/.iknow/default` —— 进站默认新会话,无需 SPA 选 workspace。
+  // 用户偏好(显式 flag/env)仍优先 —— 该分支在前;此处只覆盖 implicit-default
+  // 路径。confirmTrust:true 因为 default 是 hard-coded path,等同显式信任。
   if (workspaceRoot !== undefined) {
     await hub.bindWorkspace(workspaceRoot, { confirmTrust: true });
+  } else {
+    await ensureDefaultWorkspace();
+    await hub.bindWorkspace(resolveSessionDefaultWorkspace(), {
+      confirmTrust: true,
+    });
   }
 
   const port =

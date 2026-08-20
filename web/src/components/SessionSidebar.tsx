@@ -1,22 +1,26 @@
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type RefObject,
-} from "react";
-import * as api from "../api/client";
-import type { SessionListItem } from "../api/types";
-import { shortId } from "../lib/format";
-import { traceDeepLink } from "../lib/trace-entry";
-import {
-  isCurrentSession,
-  sortSessionsByUpdatedDesc,
-  truncateExcerpt,
-} from "../lib/session-list";
-import { FOCUS_RING } from "../lib/ui";
-
-type SidebarPhase = "loading" | "ready" | "error";
+/**
+ * serve-workspace T7a — SessionSidebar orchestrator (review fix slimming)。
+ *
+ * 历史：该文件原 777 行，prop drilling 6 层（H1）、超长（H2）、ExpandedSidebar
+ * 长方法（M5）。T7a 把：
+ *  - useWorkspaceGroups + WorkspaceGroupHeader / WorkspaceGroupBlock /
+ *    GroupCreateButton / GroupedSessionListView 抽到 `grouped-view.tsx` + Context。
+ *  - 图标 (PlusIcon / RefreshIcon / ChevronLeftIcon / ChevronIcon)
+ *    抽到 `icons.tsx`。
+ *  - 三态展示 (LoadingState / ErrorState / EmptyState) 抽到 `sidebar-states.tsx`。
+ *  - SidebarHeader / NewSessionCTA / ExpandedSidebar / CollapsedRail 抽到
+ *    `sidebar-shell.tsx`。
+ *
+ * T8: `useSessionList` 从本文件提到 `web/src/hooks/use-session-list.ts`,
+ * 让 App 也能用同一份 session list (lookup active session 的 workspaceRoot
+ * 喂给 WorkspaceChip)。
+ *
+ * 本文件只保留 orchestration（collapsed 切换、focus 管理、useSessionList、
+ * 子组件 prop 装配）。T4-T6 行为契约不变。
+ */
+import { useEffect, useRef } from "react";
+import { useSessionList } from "../hooks/use-session-list";
+import { CollapsedRail, ExpandedSidebar } from "./SessionSidebar/sidebar-shell";
 
 export type SessionSidebarProps = {
   currentConversationId: string | null;
@@ -24,6 +28,12 @@ export type SessionSidebarProps = {
   collapsed: boolean;
   onToggleCollapsed: () => void;
   onNewSession: () => void;
+  /**
+   * serve-workspace T6: 工作空间组头部"+"按钮的回调 — 在指定 workspace
+   * 内新建会话。App 层负责把 root 绑到 picker (若需要), 再调 chat.newSession。
+   * (未绑定) 组不渲染 + 按钮, 此回调不会被调用。
+   */
+  onCreateInWorkspace: (root: string) => void;
   /**
    * Bump to force the sidebar to re-fetch the session list. App holds the
    * counter and increments after lifecycle events (newSession / createAndAdopt
@@ -33,394 +43,8 @@ export type SessionSidebarProps = {
   refreshSignal?: number;
 };
 
-/** Surface any thrown value as a human-readable string. */
-function toMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
-type SessionListState = {
-  phase: SidebarPhase;
-  sessions: SessionListItem[];
-  errorMsg: string | null;
-  refresh: () => void;
-};
-
-/**
- * Fetch + cache the session list. `refresh` bumps an internal key that
- * re-runs the effect; an external `externalSignal` (App-owned) also bumps it
- * so lifecycle events (newSession / bootstrap) refresh the list without the
- * user clicking. The AbortController cancels any in-flight request on unmount
- * or re-run so a stale response can never overwrite newer state.
- *
- * #90 contract preserved: listSessions + sortSessionsByUpdatedDesc +
- * error surfacing + refresh bump — only the visual layer changed.
- */
-function useSessionList(externalSignal?: number): SessionListState {
-  const [phase, setPhase] = useState<SidebarPhase>("loading");
-  const [sessions, setSessions] = useState<SessionListItem[]>([]);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
-
-  useEffect(() => {
-    const ctrl = new AbortController();
-    setPhase("loading");
-    setErrorMsg(null);
-    api.listSessions(ctrl.signal).then(
-      (res) => {
-        if (ctrl.signal.aborted) return;
-        setSessions(sortSessionsByUpdatedDesc(res.sessions));
-        setPhase("ready");
-      },
-      (e: unknown) => {
-        if (ctrl.signal.aborted) return;
-        setErrorMsg(toMessage(e));
-        setPhase("error");
-      }
-    );
-    return () => ctrl.abort();
-  }, [reloadKey, externalSignal]);
-
-  const refresh = useCallback(() => setReloadKey((k) => k + 1), []);
-
-  return { phase, sessions, errorMsg, refresh };
-}
-
 function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
-}
-
-function PlusIcon() {
-  return (
-    <svg
-      width={16}
-      height={16}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.8}
-      strokeLinecap="round"
-      aria-hidden="true"
-    >
-      <line x1="12" y1="5" x2="12" y2="19" />
-      <line x1="5" y1="12" x2="19" y2="12" />
-    </svg>
-  );
-}
-
-function RefreshIcon() {
-  return (
-    <svg
-      width={16}
-      height={16}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.8}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <polyline points="23 4 23 10 17 10" />
-      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-    </svg>
-  );
-}
-
-function ChevronLeftIcon() {
-  return (
-    <svg
-      width={16}
-      height={16}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.8}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <polyline points="15 18 9 12 15 6" />
-    </svg>
-  );
-}
-
-function ChevronRightIcon() {
-  return (
-    <svg
-      width={16}
-      height={16}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.8}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <polyline points="9 18 15 12 9 6" />
-    </svg>
-  );
-}
-
-function LoadingState() {
-  return (
-    <div
-      className="flex flex-col items-center justify-center gap-3 px-4 py-8 text-center"
-      role="status"
-      aria-live="polite"
-    >
-      <div
-        className="h-5 w-5 animate-spin rounded-full border-2 border-line border-t-accent"
-        aria-hidden="true"
-      />
-      <p className="m-0 text-sm text-ink-2">加载会话列表…</p>
-    </div>
-  );
-}
-
-function ErrorState({
-  detail,
-  onRetry,
-}: {
-  detail: string;
-  onRetry: () => void;
-}) {
-  return (
-    <div
-      className="flex flex-col items-center justify-center gap-3 px-4 py-8 text-center"
-      role="alert"
-    >
-      <p className="m-0 text-sm font-medium text-danger">无法加载会话列表</p>
-      <p className="m-0 break-all text-xs text-ink-3">{detail}</p>
-      <button
-        type="button"
-        onClick={onRetry}
-        className={cx(
-          "mt-1 rounded-pill border border-accent/30 bg-accent-soft px-3 py-1 text-xs font-medium text-accent",
-          "transition-colors duration-[160ms] ease-soft hover:border-accent hover:bg-accent hover:text-ink",
-          FOCUS_RING
-        )}
-      >
-        重试
-      </button>
-    </div>
-  );
-}
-
-function EmptyState() {
-  return (
-    <div className="flex flex-col items-center justify-center gap-2 px-4 py-8 text-center">
-      <p className="m-0 text-sm text-ink-2">暂无会话</p>
-      <p className="m-0 text-xs text-ink-3">发送消息或点击「新会话」开始。</p>
-    </div>
-  );
-}
-
-function SessionItem({
-  session,
-  currentId,
-  onSelect,
-}: {
-  session: SessionListItem;
-  currentId: string | null;
-  onSelect: (id: string) => void;
-}) {
-  const active = isCurrentSession(session.conversation_id, currentId);
-  // If the session has no captured final text, fall back to the conversation
-  // id prefix rather than the literal "(无消息)" — looks cleaner in the list.
-  const excerpt =
-    truncateExcerpt(session.lastFinalText, 32) ||
-    shortId(session.conversation_id, 8);
-  return (
-    <li className="group relative">
-      <button
-        type="button"
-        aria-current={active ? "true" : undefined}
-        title={session.conversation_id}
-        onClick={() => onSelect(session.conversation_id)}
-        className={cx(
-          "flex w-full items-baseline gap-2 truncate rounded-panel px-3 py-1.5 pr-8 text-left text-[13px]",
-          "transition-colors duration-[160ms] ease-soft",
-          active
-            ? "bg-accent-soft text-accent font-medium"
-            : "text-ink-2 hover:bg-bg hover:text-ink",
-          FOCUS_RING
-        )}
-      >
-        <span className="truncate">{excerpt}</span>
-      </button>
-      {/* ADR-0020 contextual deep-link: hover 浮出，直达该会话的 trace 面板。
-          <a> 与 button 同级（a 嵌 button 是非法嵌套）；group-hover/focus 显隐。 */}
-      <a
-        href={traceDeepLink(session.conversation_id)}
-        title={`在 trace 面板查看 ${session.conversation_id}`}
-        aria-label={`在 trace 面板查看 ${session.conversation_id}`}
-        className={cx(
-          "absolute right-1.5 top-1/2 -translate-y-1/2 rounded-pill px-1.5 py-0.5",
-          "font-mono text-[10px] text-ink-3 opacity-0",
-          "transition-opacity duration-[160ms] ease-soft",
-          "group-hover:opacity-100 hover:text-ink focus-visible:opacity-100",
-          FOCUS_RING
-        )}
-      >
-        ⇱trace
-      </a>
-    </li>
-  );
-}
-
-function SessionListView({
-  sessions,
-  currentId,
-  onSelect,
-}: {
-  sessions: SessionListItem[];
-  currentId: string | null;
-  onSelect: (id: string) => void;
-}) {
-  return (
-    <ul className="m-0 flex list-none flex-col gap-1 px-3 pb-3">
-      {sessions.map((s) => (
-        <SessionItem
-          key={s.conversation_id}
-          session={s}
-          currentId={currentId}
-          onSelect={onSelect}
-        />
-      ))}
-    </ul>
-  );
-}
-
-type ExpandedSidebarData = {
-  phase: SidebarPhase;
-  sessions: SessionListItem[];
-  errorMsg: string | null;
-  refresh: () => void;
-  currentConversationId: string | null;
-};
-
-type ExpandedSidebarHandlers = {
-  onSelect: (id: string) => void;
-  onNewSession: () => void;
-  onToggleCollapsed: () => void;
-};
-
-function ExpandedSidebar({
-  data,
-  handlers,
-  collapseBtnRef,
-}: {
-  data: ExpandedSidebarData;
-  handlers: ExpandedSidebarHandlers;
-  collapseBtnRef: RefObject<HTMLButtonElement | null>;
-}) {
-  const { phase, sessions, errorMsg, refresh, currentConversationId } = data;
-  const { onSelect, onNewSession, onToggleCollapsed } = handlers;
-  return (
-    <div className="flex h-full w-72 shrink-0 animate-fade-in flex-col">
-      <header className="flex shrink-0 items-center gap-1 px-3 pt-3">
-        <h2 className="m-0 flex-1 truncate text-xs font-semibold uppercase tracking-[0.08em] text-ink-3">
-          会话
-        </h2>
-        <button
-          type="button"
-          onClick={refresh}
-          title="刷新列表"
-          aria-label="刷新列表"
-          className={cx(
-            "flex h-7 w-7 items-center justify-center rounded-pill text-ink-3",
-            "transition-colors duration-[160ms] ease-soft hover:bg-bg hover:text-ink",
-            FOCUS_RING
-          )}
-        >
-          <RefreshIcon />
-        </button>
-        <button
-          ref={collapseBtnRef}
-          type="button"
-          onClick={onToggleCollapsed}
-          title="收起侧栏"
-          aria-label="收起侧栏"
-          aria-expanded={true}
-          className={cx(
-            "flex h-7 w-7 items-center justify-center rounded-pill text-ink-3",
-            "transition-colors duration-[160ms] ease-soft hover:bg-bg hover:text-ink",
-            FOCUS_RING
-          )}
-        >
-          <ChevronLeftIcon />
-        </button>
-      </header>
-
-      <div className="shrink-0 px-3 pt-2">
-        <button
-          type="button"
-          onClick={onNewSession}
-          className={cx(
-            "group flex w-full items-center justify-center gap-2 rounded-pill bg-accent px-4 py-2.5",
-            "text-sm font-semibold text-ink shadow-bubble",
-            "transition-[transform,box-shadow] duration-[160ms] ease-soft",
-            "hover:-translate-y-px hover:shadow-chip active:scale-[0.97]",
-            FOCUS_RING
-          )}
-        >
-          <PlusIcon />
-          <span>新会话</span>
-        </button>
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-y-auto pt-1">
-        {phase === "loading" ? (
-          <LoadingState />
-        ) : phase === "error" ? (
-          <ErrorState detail={errorMsg ?? "未知错误"} onRetry={refresh} />
-        ) : sessions.length === 0 ? (
-          <EmptyState />
-        ) : (
-          <SessionListView
-            sessions={sessions}
-            currentId={currentConversationId}
-            onSelect={onSelect}
-          />
-        )}
-      </div>
-    </div>
-  );
-}
-
-function CollapsedRail({
-  onToggleCollapsed,
-  expandBtnRef,
-}: {
-  onToggleCollapsed: () => void;
-  expandBtnRef: RefObject<HTMLButtonElement | null>;
-}) {
-  return (
-    <div className="flex h-full w-14 shrink-0 animate-fade-in flex-col items-center gap-3 py-3">
-      <button
-        ref={expandBtnRef}
-        type="button"
-        onClick={onToggleCollapsed}
-        title="展开侧栏"
-        aria-label="展开侧栏"
-        aria-expanded={false}
-        className={cx(
-          "flex h-9 w-9 items-center justify-center rounded-pill text-ink-2",
-          "transition-colors duration-[160ms] ease-soft hover:bg-bg hover:text-ink",
-          FOCUS_RING
-        )}
-      >
-        <ChevronRightIcon />
-      </button>
-      <span
-        aria-hidden="true"
-        className="mt-1 select-none text-[10px] font-semibold uppercase tracking-[0.22em] text-ink-3 [writing-mode:vertical-rl]"
-      >
-        会话
-      </span>
-    </div>
-  );
 }
 
 export function SessionSidebar({
@@ -429,6 +53,7 @@ export function SessionSidebar({
   collapsed,
   onToggleCollapsed,
   onNewSession,
+  onCreateInWorkspace,
   refreshSignal,
 }: SessionSidebarProps) {
   const { phase, sessions, errorMsg, refresh } = useSessionList(refreshSignal);
@@ -467,8 +92,19 @@ export function SessionSidebar({
         />
       ) : (
         <ExpandedSidebar
-          data={{ phase, sessions, errorMsg, refresh, currentConversationId }}
-          handlers={{ onSelect, onNewSession, onToggleCollapsed }}
+          data={{
+            phase,
+            sessions,
+            errorMsg,
+            refresh,
+            currentConversationId,
+          }}
+          handlers={{
+            onSelect,
+            onNewSession,
+            onToggleCollapsed,
+            onCreateInWorkspace,
+          }}
           collapseBtnRef={collapseBtnRef}
         />
       )}

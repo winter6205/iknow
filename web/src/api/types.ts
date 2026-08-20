@@ -64,11 +64,14 @@ export type PostMessageRequest = {
   readonly thinking?: ThinkingOverride;
 };
 
-/** Mirrors SessionListEntry in src/session-api/store/session-store.ts. */
+/** Mirrors SessionListEntry in src/session-api/store/session-store.ts.
+ *  `workspaceRoot` is Postel: absent on legacy files (and therefore on
+ *  the list entry) means "unbound"; never serialized as null. */
 export type SessionListItem = {
   readonly conversation_id: string;
   readonly updatedAt: string;
   readonly lastFinalText: string;
+  readonly workspaceRoot?: string;
 };
 
 export type SessionSummary = {

@@ -70,28 +70,11 @@ type ApplySessionExtras = {
   model?: string | null;
 };
 
-/** localStorage key for the active conversation id (SC16 refresh restore). */
-const STORAGE_KEY = "iknow:conversation_id";
-
-function readStoredSessionId(): string | null {
-  try {
-    if (typeof localStorage === "undefined") return null;
-    return localStorage.getItem(STORAGE_KEY);
-  } catch {
-    return null;
-  }
-}
-
-function writeStoredSessionId(id: string | null): void {
-  try {
-    if (typeof localStorage === "undefined") return;
-    if (id === null) localStorage.removeItem(STORAGE_KEY);
-    else localStorage.setItem(STORAGE_KEY, id);
-  } catch {
-    // localStorage may be disabled (privacy mode, quota); fail closed.
-  }
-}
-
+/**
+ * T9b: 进站总是从 0 创建新会话, 不再读 localStorage 恢复旧的 conversation_id。
+ * serve 入口 T9a 已确保 `createSession` 在 default workspace 下永远成功,
+ * 因此 fresh-on-mount 不再需要任何回退路径 — UI 与 session 文件一一对应。
+ */
 function errMessage(e: unknown): string {
   if (e instanceof SessionApiError) return e.message;
   if (e instanceof Error) return e.message;
@@ -204,15 +187,13 @@ export function useSessionChat(): SessionChatApi {
 
   /**
    * Fetch a stored session's history and adopt it as the active conversation.
-   * Shared by `bootstrap` (stored-restore branch) and `setConversation` so the
-   * same fetch → writeStorage → applySession sequence lives in exactly one
-   * place — keeps behavior identical on initial restore and sidebar switch.
+   * Used by `setConversation` (sidebar selection / `newSession` flows that
+   * switch into an existing id).
    */
   const adoptSession = useCallback(
     async (id: string, gen: number, extras: ApplySessionExtras = {}) => {
       const got = await api.getSessionHistory(id);
       if (gen !== bootGen.current) return;
-      writeStoredSessionId(got.session.conversation_id);
       applySession(got.session, got.turns, extras);
     },
     [applySession]
@@ -223,7 +204,6 @@ export function useSessionChat(): SessionChatApi {
     async (gen: number, extras: ApplySessionExtras = {}) => {
       const created = await api.createSession({});
       if (gen !== bootGen.current) return;
-      writeStoredSessionId(created.session.conversation_id);
       applySession(created.session, created.turns, extras);
     },
     [applySession]
@@ -247,24 +227,10 @@ export function useSessionChat(): SessionChatApi {
         contextWindow: health.contextWindow,
         model: health.model ?? null,
       };
-      const stored = readStoredSessionId();
-      if (stored) {
-        // Try restoring prior session; on 404 fall back to fresh create.
-        try {
-          await adoptSession(stored, gen, healthExtras);
-        } catch (e) {
-          if (gen !== bootGen.current) return;
-          // Stale id (session deleted server-side): drop and create fresh.
-          if (e instanceof SessionApiError && e.status === 404) {
-            writeStoredSessionId(null);
-            await createAndAdopt(gen, healthExtras);
-          } else {
-            throw e;
-          }
-        }
-      } else {
-        await createAndAdopt(gen, healthExtras);
-      }
+      // T9b: 进站总是 fresh-on-mount — health 通就立刻 createSession, 不读
+      // localStorage, 不尝试恢复旧会话。serve T9a auto-bind 后
+      // `createSession` 在 default workspace 下永远成功, 无需 fallback。
+      await createAndAdopt(gen, healthExtras);
     } catch (e) {
       if (gen !== bootGen.current) return;
       setState((prev) => ({
