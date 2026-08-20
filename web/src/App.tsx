@@ -159,7 +159,6 @@ function ChatApp() {
   const side = (
     <ChatSidebarContainer
       chat={chat}
-      ws={ws}
       collapsed={collapsed}
       setCollapsed={setCollapsed}
       sidebarSignal={sidebarSignal}

@@ -27,7 +27,6 @@ function group(over: Partial<WorkspaceGroup>): WorkspaceGroup {
     latestUpdatedAt: "",
     isActive: false,
     isUnbound: false,
-    isCurrentRoot: false,
     ...over,
   };
 }

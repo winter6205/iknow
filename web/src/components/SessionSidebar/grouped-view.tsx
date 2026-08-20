@@ -1,5 +1,5 @@
 /**
- * serve-workspace T7a — SessionSidebar 工作空间分组子树。
+ * serve-workspace T7a — SessionSidebar 工作空间分组子树 (T7b review fix 落地)。
  *
  * 把原本 prop-drilling 6 层的 GroupedSessionListView → WorkspaceGroupBlock →
  * WorkspaceGroupHeader → GroupCreateButton 折叠为单文件 + Context：所有叶子
@@ -9,8 +9,10 @@
  * 拆分边界（review fix H1 + H2 + M5）：
  *  - `WorkspaceGroupsContext` + `useWorkspaceGroupsCtx`: Context 通道；
  *    叶子只读 useContext，不再接 props。
- *  - `useWorkspaceGroups`: 折叠态自管 hook（localStorage 持久化，纯函数），
- *    由 GroupedView 在 Provider 内一次性调用并下发到 Context。
+ *  - `useWorkspaceGroups`: 折叠态自管 hook（T7b review fix M3 重写为懒加载 —
+ *    通过 `CollapsedStateStore` 在 useRef 里持有缓存，避免 useEffect([groups])
+ *    在 groups 数组引用变化时重置状态），由 GroupedView 在 Provider 内一次性
+ *    调用并下发到 Context。
  *  - `GroupedView`: 顶层 composition。调 useWorkspaceGroups 拿
  *    isCollapsed / toggleCollapsed，下发给 Context；渲染 `<ul>`。
  *  - `WorkspaceGroupBlock` + `WorkspaceGroupHeader` + `GroupCreateButton`:
@@ -18,13 +20,18 @@
  *    — 它不是工作空间组上下文，且只在叶子用一次）。
  *
  * 行为契约：T4-T6 视觉 / a11y / 折叠逻辑全部不变，spec #90 / #95 不动。
+ *
+ * T7b review fix:
+ *  - M3: useWorkspaceGroups 改为 lazy per-key init（见下方 hook 注释）。
+ *  - M2: 移除 `currentBoundRoot` 入参 / Context 字段 / 叶子不再依赖。
+ *  - L3: ChevronDownIcon → ChevronIcon({ direction }).
  */
 import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -35,12 +42,12 @@ import {
   truncateExcerpt,
   type WorkspaceGroup,
 } from "../../lib/session-list";
-import { loadCollapsed, saveCollapsed } from "../../lib/workspace-groups";
+import { CollapsedStateStore } from "../../lib/workspace-groups";
 import { shortId } from "../../lib/format";
 import { traceDeepLink } from "../../lib/trace-entry";
 import { FOCUS_RING } from "../../lib/ui";
 import { plusButtonLabel, shouldShowPlusButton } from "../../lib/sidebar-plus";
-import { ChevronDownIcon, PlusIcon } from "./icons";
+import { ChevronIcon, PlusIcon } from "./icons";
 
 /** CSS 拼接 helper — 跨组件共用，集中放这里避免重复。 */
 function cx(...parts: Array<string | false | null | undefined>): string {
@@ -51,14 +58,16 @@ function cx(...parts: Array<string | false | null | undefined>): string {
  * Context 通道承载的"组上下文"。叶子 (WorkspaceGroupBlock / Header /
  * GroupCreateButton) 只读 useContext，不再走 props。
  *
- * `groups` / `currentBoundRoot` / `currentConversationId` 由 Provider 在
- * GroupedView 一次性算出，下发到所有叶子；handler 同样集中下发，避免每个
- * 叶子重接 closure。Provider 之外的子组件读 Context 会抛
- * `WorkspaceGroupsContext missing`，让错位用法早崩。
+ * `groups` / `currentConversationId` 由 Provider 在 GroupedView 一次性算出，
+ * 下发到所有叶子；handler 同样集中下发，避免每个叶子重接 closure。Provider
+ * 之外的子组件读 Context 会抛 `WorkspaceGroupsContext missing`，让错位用法
+ * 早崩。
+ *
+ * T7b review fix M2: 移除 `currentBoundRoot` 字段 — groupSessionsByWorkspace
+ * 不再接收该参数，Context 也无需透传。
  */
 type WorkspaceGroupsContextValue = {
   readonly groups: readonly WorkspaceGroup[];
-  readonly currentBoundRoot: string | null;
   readonly currentConversationId: string | null;
   readonly onSelect: (id: string) => void;
   readonly isCollapsed: (groupKey: string) => boolean;
@@ -79,36 +88,59 @@ export function useWorkspaceGroupsCtx(): WorkspaceGroupsContextValue {
 }
 
 /**
- * 折叠态自管 hook（T4）。仅持久化**非活跃组**（活跃组永远展开，不写盘）。
- * 接受 groups 列表变化时, 自动回收已不存在的组 key(无副作用, 仅内存)。
+ * 折叠态自管 hook（T4 + T7b lazy init 重写）。
+ *
+ * 旧实现 `useEffect([groups])` 在 groups 数组引用变化（sessions 更新 /
+ * currentConversationId 变化触发 useMemo 重算）时整张 map 重读 localStorage，
+ * 抹掉用户刚 toggle 的状态。
+ *
+ * 新实现：
+ *  - `CollapsedStateStore` 持有 `Map<key, boolean>`，通过 useRef 在 mount
+ *    期间持久；首次 `lookup` 走 localStorage，之后保留内存值。
+ *  - 用户的 toggle 写入 React `overrides` 状态（仅触发 setState 一次），与
+ *    store 的内存值保持一致 — `isCollapsed` 优先读 overrides，缺失则降级
+ *    到 store。
+ *  - groups 数组引用变化不再触发任何状态重置：store 内部 Map 持久，render
+ *    不再读 localStorage。
  */
 function useWorkspaceGroups(groups: readonly WorkspaceGroup[]): {
   isCollapsed: (groupKey: string) => boolean;
   toggleCollapsed: (groupKey: string) => void;
 } {
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
-  // Re-init when groups change shape (e.g. after a refresh); read once per
-  // group from localStorage. New groups not seen before default to false.
-  useEffect(() => {
-    const next: Record<string, boolean> = {};
-    for (const g of groups) {
-      next[g.key] = g.isActive ? false : loadCollapsed(g.key);
-    }
-    setCollapsed(next);
+  const storeRef = useRef<CollapsedStateStore | null>(null);
+  if (storeRef.current === null) {
+    storeRef.current = new CollapsedStateStore();
+  }
+  const store = storeRef.current;
+  const [overrides, setOverrides] = useState<Record<string, boolean>>({});
+
+  // 派生 key → isActive 查找表（每 render 重算 — O(n)，groups 通常很小）。
+  // 通过 useMemo 锁住引用，避免 isCollapsed/toggleCollapsed 的 useCallback
+  // 在无关 render 中重建。
+  const isActiveMap = useMemo(() => {
+    const m: Record<string, boolean> = {};
+    for (const g of groups) m[g.key] = g.isActive;
+    return m;
   }, [groups]);
-  const toggleCollapsed = useCallback((groupKey: string) => {
-    setCollapsed((prev) => {
-      const cur = prev[groupKey] ?? false;
-      const next = !cur;
-      // 仅非活跃组写盘 — 活跃组永远展开, 不浪费 localStorage 槽位。
-      saveCollapsed(groupKey, next);
-      return { ...prev, [groupKey]: next };
-    });
-  }, []);
+
   const isCollapsed = useCallback(
-    (groupKey: string) => collapsed[groupKey] ?? false,
-    [collapsed]
+    (groupKey: string): boolean => {
+      const ov = overrides[groupKey];
+      if (ov !== undefined) return ov;
+      return store.lookup(groupKey, isActiveMap[groupKey] ?? false);
+    },
+    [overrides, isActiveMap, store]
   );
+
+  const toggleCollapsed = useCallback(
+    (groupKey: string): void => {
+      const isActive = isActiveMap[groupKey] ?? false;
+      const next = store.toggle(groupKey, isActive);
+      setOverrides((prev) => ({ ...prev, [groupKey]: next }));
+    },
+    [isActiveMap, store]
+  );
+
   return { isCollapsed, toggleCollapsed };
 }
 
@@ -149,6 +181,9 @@ function GroupCreateButton({ group }: { group: WorkspaceGroup }) {
  *  - T6: 右侧追加 + 按钮(bound 组才渲染)。
  *
  * 不再接 collapsed / onToggle / onCreate props — 全部从 Context 拿。
+ *
+ * T7b review fix L3: ChevronDownIcon → ChevronIcon({ direction }), 折叠态
+ * 用 `direction="down"` + 父容器 `rotate-0` / `-rotate-90` 切换。
  */
 function WorkspaceGroupHeader({ group }: { group: WorkspaceGroup }) {
   const { isCollapsed, toggleCollapsed } = useWorkspaceGroupsCtx();
@@ -201,7 +236,7 @@ function WorkspaceGroupHeader({ group }: { group: WorkspaceGroup }) {
             collapsed ? "-rotate-90" : "rotate-0"
           )}
         >
-          <ChevronDownIcon />
+          <ChevronIcon direction="down" />
         </span>
         <span aria-hidden="true" className="text-[11px] text-ink-3">
           {group.isUnbound ? "📂" : "📁"}
@@ -320,39 +355,33 @@ function WorkspaceGroupBlock({ group }: { group: WorkspaceGroup }) {
 /**
  * GroupedView（T7a）— 工作空间分组子树顶层 composition。
  *
- * 入参：原始 sessions + currentConversationId + currentBoundRoot + 三个 handler。
+ * 入参：原始 sessions + currentConversationId + 两个 handler。
  * 内部：useMemo 算 groups；useWorkspaceGroups 拿折叠态；下发到 Context；
  * 渲染 <ul> + 子树。
  *
- * 调用方（SessionSidebar / ExpandedSidebar）只需 5 个 prop（之前 4 个），
+ * T7b review fix M2: 不再接 `currentBoundRoot`（已 dead）。
+ *
+ * 调用方（SessionSidebar / ExpandedSidebar）只需 4 个 prop（之前 5 个），
  * 内部叶子零 prop drilling。
  */
 export function GroupedView({
   sessions,
   currentConversationId,
-  currentBoundRoot,
   onSelect,
   onCreateInWorkspace,
 }: {
   sessions: readonly SessionListItem[];
   currentConversationId: string | null;
-  currentBoundRoot: string | null;
   onSelect: (id: string) => void;
   onCreateInWorkspace: (root: string) => void;
 }) {
   const groups = useMemo(
-    () =>
-      groupSessionsByWorkspace(
-        sessions,
-        currentConversationId,
-        currentBoundRoot
-      ),
-    [sessions, currentConversationId, currentBoundRoot]
+    () => groupSessionsByWorkspace(sessions, currentConversationId),
+    [sessions, currentConversationId]
   );
   const { isCollapsed, toggleCollapsed } = useWorkspaceGroups(groups);
   const ctx: WorkspaceGroupsContextValue = {
     groups,
-    currentBoundRoot,
     currentConversationId,
     onSelect,
     isCollapsed,

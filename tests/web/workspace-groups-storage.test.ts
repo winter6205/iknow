@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it, vi } from "vitest";
 import {
   collapseKey,
+  CollapsedStateStore,
   loadCollapsed,
   saveCollapsed,
 } from "../../web/src/lib/workspace-groups.ts";
@@ -149,5 +150,108 @@ describe("saveCollapsed — 落盘（仅非活跃组 / 容错）", () => {
   it("localStorage 缺席 → no-op 不抛", () => {
     // 不注入 localStorage
     saveCollapsed("/x/y", true);
+  });
+});
+
+/**
+ * serve-workspace T7b — CollapsedStateStore 单测（M3 lazy init）。
+ *
+ * 关键契约：
+ *  - 首次 `lookup(key)` 从 localStorage 读默认值（活跃组强制 false），之后
+ *    保留内存值，不再 re-read localStorage。
+ *  - `toggle(key)` 翻转内存值 + 落盘；返回新状态供 React overrides 用。
+ *  - 多个 key 之间独立 — 第二次 lookup 不同 key 也会读 localStorage。
+ *
+ * 这是 useWorkspaceGroups React hook 的纯逻辑底座；hook 在 useRef 里持有
+ * store 实例，配合 overrides state 让 groups 数组引用变化不再触发状态重置。
+ */
+describe("CollapsedStateStore — lazy per-key init (T7b M3)", () => {
+  it("首次 lookup 一个 key → 从 localStorage 读默认值", () => {
+    const fake = installLocalStorage();
+    fake.data.set(collapseKey("/a"), "true");
+    const store = new CollapsedStateStore();
+    assert.equal(store.lookup("/a", false), true);
+  });
+
+  it("活跃组 lookup → 首次即返回 false（不读 localStorage）", () => {
+    const fake = installLocalStorage();
+    fake.data.set(collapseKey("/a"), "true");
+    const store = new CollapsedStateStore();
+    assert.equal(store.lookup("/a", true), false);
+  });
+
+  it("同一 key 二次 lookup → 保留内存值，不重读 localStorage", () => {
+    // 模拟"toggle 后立即 refresh"：用户先 toggle 把状态改成 true 落盘，
+    // 然后某种操作让 localStorage 里的值被改成 false。如果 store 在二次
+    // lookup 时重读 localStorage，会丢用户的 toggle。T7b 修这个 bug。
+    const fake = installLocalStorage();
+    fake.data.set(collapseKey("/a"), "true");
+    const store = new CollapsedStateStore();
+    assert.equal(store.lookup("/a", false), true);
+    // 用户 toggle：内存值翻转 + 落盘
+    const next = store.toggle("/a", false);
+    assert.equal(next, false); // 从 true 翻到 false
+    assert.equal(store.lookup("/a", false), false); // 内存值是 false
+    // 模拟外部因素（用户清缓存 / 别的 tab 写入）让 localStorage 与内存值反向
+    fake.data.set(collapseKey("/a"), "true");
+    // 二次 lookup 必须仍返回内存值（false），不能被 localStorage 反向覆盖
+    assert.equal(store.lookup("/a", false), false);
+  });
+
+  it("toggle 翻转 + 落盘", () => {
+    installLocalStorage();
+    const store = new CollapsedStateStore();
+    assert.equal(store.lookup("/a", false), false); // 初始 false
+    const next = store.toggle("/a", false);
+    assert.equal(next, true);
+    assert.equal(store.lookup("/a", false), true);
+    assert.equal(loadCollapsed("/a"), true); // 落盘
+  });
+
+  it("toggle 反向 — 回到 false", () => {
+    installLocalStorage();
+    const store = new CollapsedStateStore();
+    store.toggle("/a", false); // false → true
+    const next = store.toggle("/a", false); // true → false
+    assert.equal(next, false);
+    assert.equal(loadCollapsed("/a"), false);
+  });
+
+  it("不同 key 之间独立 — lookup A 不会污染 lookup B 的初始读取", () => {
+    const fake = installLocalStorage();
+    fake.data.set(collapseKey("/a"), "true");
+    fake.data.set(collapseKey("/b"), "false");
+    const store = new CollapsedStateStore();
+    assert.equal(store.lookup("/a", false), true);
+    assert.equal(store.lookup("/b", false), false);
+    // toggle /a 不应影响 /b
+    store.toggle("/a", false);
+    assert.equal(store.lookup("/b", false), false);
+  });
+
+  it("新 key 首次 lookup（active=false）→ localStorage 缺席时返回 false", () => {
+    // 不注入 localStorage — 模拟 SSR / privacy mode
+    const store = new CollapsedStateStore();
+    assert.equal(store.lookup("/never/seen", false), false);
+  });
+
+  it("用 vi.useFakeTimers 不影响 lazy init 语义", () => {
+    // bullet 要求 fake-timer 覆盖；新实现无 setTimeout/setInterval，但
+    // 仍然跑一遍 fake timer 走读，确认不会因 timing 退化到旧 useEffect
+    // wipe-out 路径。
+    installLocalStorage();
+    saveCollapsed("/a", true);
+    vi.useFakeTimers();
+    try {
+      const store = new CollapsedStateStore();
+      assert.equal(store.lookup("/a", false), true);
+      store.toggle("/a", false);
+      vi.advanceTimersByTime(1000);
+      // 状态保留 + 落盘
+      assert.equal(store.lookup("/a", false), false);
+      assert.equal(loadCollapsed("/a"), false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

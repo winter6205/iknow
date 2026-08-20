@@ -1,22 +1,22 @@
 /**
- * serve-workspace T7a — SessionSidebar 的 ChatApp 侧 props 装配容器。
+ * serve-workspace T7a — SessionSidebar 的 ChatApp 侧 props 装配容器 (T7b 精简)。
  *
  * review fix M6: 从 ChatApp 抽出 SessionSidebar 的 props 装配，把 ~12 行
  * inline JSX + 各 handler 引用从 ChatApp 主文件挪到本容器，ChatApp 只接
  * 装配后的 side。
  *
+ * T7b review fix M2: `currentBoundRoot` 不再透传 — groupSessionsByWorkspace
+ * 不再需要 picker 当前根。同步移除 `ws` 入参（原唯一用途就是读 ws.root）。
+ *
  * 行为契约: 与原 ChatApp 内 `<SessionSidebar ... />` 100% 等价；只换载体。
  */
 import { SessionSidebar } from "./SessionSidebar";
 import type { useSessionChat } from "../hooks/useSessionChat";
-import type { useWorkspace } from "../hooks/useWorkspace";
 
 type ChatApi = ReturnType<typeof useSessionChat>;
-type WsApi = ReturnType<typeof useWorkspace>;
 
 export function ChatSidebarContainer({
   chat,
-  ws,
   collapsed,
   setCollapsed,
   sidebarSignal,
@@ -25,7 +25,6 @@ export function ChatSidebarContainer({
   onCreateInWorkspace,
 }: {
   chat: ChatApi;
-  ws: WsApi;
   collapsed: boolean;
   setCollapsed: (updater: (c: boolean) => boolean) => void;
   sidebarSignal: number;
@@ -42,7 +41,6 @@ export function ChatSidebarContainer({
       onNewSession={onNewSession}
       onCreateInWorkspace={onCreateInWorkspace}
       refreshSignal={sidebarSignal}
-      currentBoundRoot={ws.root}
     />
   );
 }

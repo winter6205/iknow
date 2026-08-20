@@ -1,22 +1,22 @@
 /**
- * serve-workspace T7a — SessionSidebar 的 UI chrome 子组件。
+ * serve-workspace T7a — SessionSidebar 的 UI chrome 子组件 (T7b review fix 落地)。
  *
  * 抽出 `SidebarHeader` / `NewSessionCTA` / `ExpandedSidebar` / `CollapsedRail`
  * 四个 layout 子组件。它们与 useSessionList 解耦（只接 phase / refresh /
  * handlers 等 props），合起来撑起"展开/折叠"两态外壳，让 SessionSidebar.tsx
  * 收敛到 orchestration（≤ 300 行）。
+ *
+ * T7b review fix:
+ *  - M2: `ExpandedSidebarData.currentBoundRoot` 字段移除 — 该字段从未被任
+ *    何消费者读取（Speculative Generality）。GroupedView 不再接收该 prop。
+ *  - L3: ChevronRightIcon → ChevronIcon({ direction: "right" }).
  */
 import type { RefObject } from "react";
 import { FOCUS_RING } from "../../lib/ui";
 import type { SessionListItem } from "../../api/types";
 import { GroupedView } from "./grouped-view";
 import { EmptyState, ErrorState, LoadingState } from "./sidebar-states";
-import {
-  ChevronLeftIcon,
-  ChevronRightIcon,
-  PlusIcon,
-  RefreshIcon,
-} from "./icons";
+import { ChevronIcon, ChevronLeftIcon, PlusIcon, RefreshIcon } from "./icons";
 
 function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
@@ -99,7 +99,6 @@ type ExpandedSidebarData = {
   errorMsg: string | null;
   refresh: () => void;
   currentConversationId: string | null;
-  currentBoundRoot: string | null;
 };
 
 type ExpandedSidebarHandlers = {
@@ -116,6 +115,8 @@ type ExpandedSidebarHandlers = {
  *  - content routing (loading / error / empty / grouped)
  *
  * Phase / error / empty 三态留本组件（与 useSessionList 紧密耦合，不到 30 行）。
+ *
+ * T7b review fix M2: `data.currentBoundRoot` 移除（GroupedView 不再需要）。
  */
 export function ExpandedSidebar({
   data,
@@ -126,14 +127,7 @@ export function ExpandedSidebar({
   handlers: ExpandedSidebarHandlers;
   collapseBtnRef: RefObject<HTMLButtonElement | null>;
 }) {
-  const {
-    phase,
-    sessions,
-    errorMsg,
-    refresh,
-    currentConversationId,
-    currentBoundRoot,
-  } = data;
+  const { phase, sessions, errorMsg, refresh, currentConversationId } = data;
   const { onSelect, onNewSession, onToggleCollapsed, onCreateInWorkspace } =
     handlers;
   return (
@@ -155,7 +149,6 @@ export function ExpandedSidebar({
           <GroupedView
             sessions={sessions}
             currentConversationId={currentConversationId}
-            currentBoundRoot={currentBoundRoot}
             onSelect={onSelect}
             onCreateInWorkspace={onCreateInWorkspace}
           />
@@ -187,7 +180,7 @@ export function CollapsedRail({
           FOCUS_RING
         )}
       >
-        <ChevronRightIcon />
+        <ChevronIcon direction="right" />
       </button>
       <span
         aria-hidden="true"

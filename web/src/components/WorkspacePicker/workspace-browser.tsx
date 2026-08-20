@@ -4,8 +4,14 @@
  *
  * review fix H3 / M4：把 `WorkspaceBrowser()` 长方法拆为：
  *  - `WorkspaceBrowser`: 顶层 composition（展开/折叠 + browse 副作用）。
- *  - `Breadcrumbs`: 面包屑路径渲染（点击切换 browseRoot, 不替换 input）。
+ *  - `Breadcrumbs`: 面包屑路径渲染（点击切换 browseRoot）。
  *  - `SubdirList`: 子目录列表渲染（点击切换 browseRoot + 替换 input）。
+ *
+ * T7b review fix L1: `input` 字段从 props 中删除 — 该字段从未被任何消费者
+ * 读取（dead prop）。父端 `path-picker-panel.tsx` 同步停止传入。
+ *
+ * T7b review fix #4: BrowserBody 外壳 `rounded-pill` → `rounded-md`，与
+ * recents / subdir 列表项视觉对齐。
  *
  * 行为契约：与原 WorkspaceBrowser 100% 等价 — 同样的 useState 管 entries /
  * loading，同样的 AbortController 取消在途请求，同样的 deps 锁闭包。
@@ -21,8 +27,6 @@ import {
 export type WorkspaceBrowserProps = {
   /** mount 时的 base (currentRoot 或 WSL_DEFAULT_BASE) — 决定首次展开位置。 */
   readonly initialBase: string;
-  /** 当前 input 值 — 决定浏览是否"贴合"用户已编辑路径。 */
-  readonly input: string;
   /** 用户点选子目录 → 替换 input。 */
   readonly onPickSubdir: (path: string) => void;
   readonly onNotice: (text: string) => void;
@@ -115,7 +119,7 @@ function BrowserBody({
   setBrowseRoot: (path: string) => void;
 }) {
   return (
-    <div className="mt-1 rounded-pill border border-ink-3/30 px-2 py-1.5">
+    <div className="mt-1 rounded-md border border-ink-3/30 px-2 py-1.5">
       <Breadcrumbs segs={breadcrumbs(browseRoot)} onPickCrumb={onPickCrumb} />
       {loading ? (
         <p className="mt-1 text-[11px] text-ink-3">浏览中…</p>

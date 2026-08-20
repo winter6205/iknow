@@ -89,7 +89,6 @@ export function PathPickerPanel({
       </div>
       <WorkspaceBrowser
         initialBase={base}
-        input={input}
         onPickSubdir={(p) => setInput(p)}
         onNotice={onNotice}
         onBrowseSubdirs={onBrowseSubdirs}

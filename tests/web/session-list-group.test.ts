@@ -36,7 +36,6 @@ function asGroups(g: readonly WorkspaceGroup[]): Array<{
   count: number;
   isActive: boolean;
   isUnbound: boolean;
-  isCurrentRoot: boolean;
   ids: string[];
 }> {
   return g.map((grp) => ({
@@ -45,7 +44,6 @@ function asGroups(g: readonly WorkspaceGroup[]): Array<{
     count: grp.sessions.length,
     isActive: grp.isActive,
     isUnbound: grp.isUnbound,
-    isCurrentRoot: grp.isCurrentRoot,
     ids: grp.sessions.map((s) => s.conversation_id),
   }));
 }
@@ -69,7 +67,7 @@ describe("groupSessionsByWorkspace — 基本分组", () => {
         workspaceRoot: "/r/b",
       }),
     ];
-    const groups = groupSessionsByWorkspace(sessions, null, null);
+    const groups = groupSessionsByWorkspace(sessions, null);
     // 两组: active=null 时仅按"组内最新 updatedAt desc"
     const keys = groups.map((g) => g.key).sort();
     assert.deepEqual(keys, ["/r/a", "/r/b"]);
@@ -85,7 +83,7 @@ describe("groupSessionsByWorkspace — 基本分组", () => {
       item({ id: "old1", updatedAt: "2026-07-30T01:00:00.000Z" }),
       item({ id: "old2", updatedAt: "2026-07-30T02:00:00.000Z" }),
     ];
-    const groups = groupSessionsByWorkspace(sessions, null, null);
+    const groups = groupSessionsByWorkspace(sessions, null);
     assert.equal(groups.length, 1);
     assert.equal(groups[0]?.key, "(未绑定)");
     assert.equal(groups[0]?.isUnbound, true);
@@ -99,13 +97,13 @@ describe("groupSessionsByWorkspace — 基本分组", () => {
         workspaceRoot: "/home/winner/projects/iknow",
       }),
     ];
-    const groups = groupSessionsByWorkspace(sessions, null, null);
+    const groups = groupSessionsByWorkspace(sessions, null);
     assert.equal(groups[0]?.label, "iknow");
   });
 
   it("(未绑定) 组 label 固定为 '(未绑定)'", () => {
     const sessions = [item({ id: "u", updatedAt: "2026-07-30T01:00:00.000Z" })];
-    const groups = groupSessionsByWorkspace(sessions, null, null);
+    const groups = groupSessionsByWorkspace(sessions, null);
     assert.equal(groups[0]?.label, "(未绑定)");
   });
 
@@ -127,7 +125,7 @@ describe("groupSessionsByWorkspace — 基本分组", () => {
         workspaceRoot: "/r/a",
       }),
     ];
-    const groups = groupSessionsByWorkspace(sessions, null, null);
+    const groups = groupSessionsByWorkspace(sessions, null);
     assert.equal(groups.length, 1);
     assert.equal(groups[0]?.sessions.length, 3);
   });
@@ -147,7 +145,7 @@ describe("groupSessionsByWorkspace — 排序 (AC #2)", () => {
         workspaceRoot: "/r/b",
       }),
     ];
-    const groups = groupSessionsByWorkspace(sessions, "b-new", "/r/b");
+    const groups = groupSessionsByWorkspace(sessions, "b-new");
     // active 组(/r/b)置顶, 另一组按 latest updatedAt desc 排
     assert.equal(groups[0]?.key, "/r/b");
     assert.equal(groups[0]?.isActive, true);
@@ -172,7 +170,7 @@ describe("groupSessionsByWorkspace — 排序 (AC #2)", () => {
         workspaceRoot: "/r/newer",
       }),
     ];
-    const groups = groupSessionsByWorkspace(sessions, "old", "/r/older");
+    const groups = groupSessionsByWorkspace(sessions, "old");
     assert.equal(groups[0]?.key, "/r/older"); // 活跃组置顶
     assert.equal(groups[0]?.isActive, true);
     assert.equal(groups[1]?.key, "/r/newer"); // 其他按最新倒序
@@ -187,7 +185,7 @@ describe("groupSessionsByWorkspace — 排序 (AC #2)", () => {
         workspaceRoot: "/r/b",
       }),
     ];
-    const groups = groupSessionsByWorkspace(sessions, null, null);
+    const groups = groupSessionsByWorkspace(sessions, null);
     // 无活跃会话 → 按组内最新倒序,但 unbound 强制末尾
     assert.equal(groups[groups.length - 1]?.key, "(未绑定)");
   });
@@ -202,7 +200,7 @@ describe("groupSessionsByWorkspace — 排序 (AC #2)", () => {
       item({ id: "u1", updatedAt: "2026-07-30T06:00:00.000Z" }),
       item({ id: "u2", updatedAt: "2026-07-30T04:00:00.000Z" }),
     ];
-    const groups = groupSessionsByWorkspace(sessions, "active", "/r/active");
+    const groups = groupSessionsByWorkspace(sessions, "active");
     assert.equal(groups[0]?.key, "/r/active"); // 活跃置顶
     assert.equal(groups[groups.length - 1]?.key, "(未绑定)"); // 末尾
   });
@@ -235,7 +233,7 @@ describe("groupSessionsByWorkspace — 排序 (AC #2)", () => {
         workspaceRoot: "/r/active",
       }),
     ];
-    const groups = groupSessionsByWorkspace(sessions, "active", "/r/active");
+    const groups = groupSessionsByWorkspace(sessions, "active");
     // /r/active 在顶(活跃); 然后 /r/newer (latest 05:30), /r/mid, /r/older
     assert.deepEqual(
       groups.map((g) => g.key),
@@ -244,8 +242,9 @@ describe("groupSessionsByWorkspace — 排序 (AC #2)", () => {
   });
 
   it("活跃组的 session 在 currentBoundRoot 不匹配时也置顶 — '找得到当前会话'优先", () => {
-    // 当前会话是 "missing" 在 /r/a; 但 picker 当前根是 /r/b (未匹配)。
+    // 当前会话是 "missing" 在 /r/a; 即便另一个组 /r/b 有更新的 session。
     // 这不应该让 active 组掉到末尾: currentConversationId 决定 isActive。
+    // (T7b M2 移除 currentBoundRoot 参数 — 该参数从未影响排序。)
     const sessions = [
       item({
         id: "missing",
@@ -258,7 +257,7 @@ describe("groupSessionsByWorkspace — 排序 (AC #2)", () => {
         workspaceRoot: "/r/b",
       }),
     ];
-    const groups = groupSessionsByWorkspace(sessions, "missing", "/r/b");
+    const groups = groupSessionsByWorkspace(sessions, "missing");
     assert.equal(groups[0]?.key, "/r/a"); // active 置顶
     assert.equal(groups[0]?.isActive, true);
   });
@@ -278,7 +277,7 @@ describe("groupSessionsByWorkspace — isActive / isUnbound 标志", () => {
         workspaceRoot: "/r/b",
       }),
     ];
-    const groups = groupSessionsByWorkspace(sessions, "b1", "/r/b");
+    const groups = groupSessionsByWorkspace(sessions, "b1");
     const a = groups.find((g) => g.key === "/r/a");
     const b = groups.find((g) => g.key === "/r/b");
     assert.equal(a?.isActive, false);
@@ -293,7 +292,7 @@ describe("groupSessionsByWorkspace — isActive / isUnbound 标志", () => {
         workspaceRoot: "/r/a",
       }),
     ];
-    const groups = groupSessionsByWorkspace(sessions, null, null);
+    const groups = groupSessionsByWorkspace(sessions, null);
     assert.equal(groups[0]?.isActive, false);
   });
 
@@ -306,63 +305,11 @@ describe("groupSessionsByWorkspace — isActive / isUnbound 标志", () => {
         workspaceRoot: "/r/a",
       }),
     ];
-    const groups = groupSessionsByWorkspace(sessions, null, null);
+    const groups = groupSessionsByWorkspace(sessions, null);
     const u = groups.find((g) => g.key === "(未绑定)");
     const a = groups.find((g) => g.key === "/r/a");
     assert.equal(u?.isUnbound, true);
     assert.equal(a?.isUnbound, false);
-  });
-});
-
-describe("groupSessionsByWorkspace — isCurrentRoot", () => {
-  it("currentBoundRoot 匹配某组 key → 该组 isCurrentRoot=true (其他 false)", () => {
-    const sessions = [
-      item({
-        id: "a1",
-        updatedAt: "2026-07-30T02:00:00.000Z",
-        workspaceRoot: "/r/a",
-      }),
-      item({
-        id: "b1",
-        updatedAt: "2026-07-30T03:00:00.000Z",
-        workspaceRoot: "/r/b",
-      }),
-    ];
-    const groups = groupSessionsByWorkspace(sessions, null, "/r/a");
-    const a = groups.find((g) => g.key === "/r/a");
-    const b = groups.find((g) => g.key === "/r/b");
-    assert.equal(a?.isCurrentRoot, true);
-    assert.equal(b?.isCurrentRoot, false);
-  });
-
-  it("currentBoundRoot=null → 没有组 isCurrentRoot=true", () => {
-    const sessions = [
-      item({
-        id: "a1",
-        updatedAt: "2026-07-30T02:00:00.000Z",
-        workspaceRoot: "/r/a",
-      }),
-    ];
-    const groups = groupSessionsByWorkspace(sessions, null, null);
-    assert.equal(groups[0]?.isCurrentRoot, false);
-  });
-
-  it("currentBoundRoot 找不到匹配组 → 所有组 isCurrentRoot=false", () => {
-    const sessions = [
-      item({
-        id: "a1",
-        updatedAt: "2026-07-30T02:00:00.000Z",
-        workspaceRoot: "/r/a",
-      }),
-    ];
-    const groups = groupSessionsByWorkspace(sessions, null, "/some/other/root");
-    assert.equal(groups[0]?.isCurrentRoot, false);
-  });
-
-  it("(未绑定) 组永远 isCurrentRoot=false (currentBoundRoot 无法匹配 sentinel)", () => {
-    const sessions = [item({ id: "u", updatedAt: "2026-07-30T02:00:00.000Z" })];
-    const groups = groupSessionsByWorkspace(sessions, null, "(未绑定)");
-    assert.equal(groups[0]?.isCurrentRoot, false);
   });
 });
 
@@ -385,7 +332,7 @@ describe("groupSessionsByWorkspace — 组内排序 (AC #5)", () => {
         workspaceRoot: "/r/a",
       }),
     ];
-    const groups = groupSessionsByWorkspace(sessions, null, null);
+    const groups = groupSessionsByWorkspace(sessions, null);
     const a = groups.find((g) => g.key === "/r/a");
     assert.deepEqual(
       a?.sessions.map((s) => s.conversation_id),
@@ -408,14 +355,14 @@ describe("groupSessionsByWorkspace — latestUpdatedAt", () => {
         workspaceRoot: "/r/a",
       }),
     ];
-    const groups = groupSessionsByWorkspace(sessions, null, null);
+    const groups = groupSessionsByWorkspace(sessions, null);
     assert.equal(groups[0]?.latestUpdatedAt, "2026-07-30T05:00:00.000Z");
   });
 });
 
 describe("groupSessionsByWorkspace — 边界", () => {
   it("空 sessions → 空数组", () => {
-    assert.deepEqual(groupSessionsByWorkspace([], null, null), []);
+    assert.deepEqual(groupSessionsByWorkspace([], null), []);
   });
 
   it("全 unbound → 单组 '(未绑定)'", () => {
@@ -423,7 +370,7 @@ describe("groupSessionsByWorkspace — 边界", () => {
       item({ id: "u1", updatedAt: "2026-07-30T02:00:00.000Z" }),
       item({ id: "u2", updatedAt: "2026-07-30T01:00:00.000Z" }),
     ];
-    const groups = groupSessionsByWorkspace(sessions, null, null);
+    const groups = groupSessionsByWorkspace(sessions, null);
     const simplified = asGroups(groups);
     assert.deepEqual(simplified, [
       {
@@ -432,7 +379,6 @@ describe("groupSessionsByWorkspace — 边界", () => {
         count: 2,
         isActive: false,
         isUnbound: true,
-        isCurrentRoot: false,
         ids: ["u1", "u2"],
       },
     ]);
@@ -447,7 +393,7 @@ describe("groupSessionsByWorkspace — 边界", () => {
       }),
       item({ id: "u", updatedAt: "2026-07-30T05:00:00.000Z" }),
     ];
-    const groups = groupSessionsByWorkspace(sessions, null, null);
+    const groups = groupSessionsByWorkspace(sessions, null);
     assert.equal(groups.length, 2);
     assert.equal(groups[0]?.key, "/r/b");
     assert.equal(groups[1]?.key, "(未绑定)");
@@ -467,7 +413,7 @@ describe("groupSessionsByWorkspace — 边界", () => {
       }),
     ];
     const beforeIds = sessions.map((s) => s.conversation_id);
-    groupSessionsByWorkspace(sessions, null, null);
+    groupSessionsByWorkspace(sessions, null);
     assert.deepEqual(
       sessions.map((s) => s.conversation_id),
       beforeIds
@@ -483,7 +429,7 @@ describe("groupSessionsByWorkspace — 边界", () => {
         workspaceRoot: "/r/y",
       }),
     ];
-    const groups = groupSessionsByWorkspace(sessions, null, null);
+    const groups = groupSessionsByWorkspace(sessions, null);
     assert.equal(groups.length, 2);
     assert.equal(groups.find((g) => g.key === "(未绑定)")?.sessions.length, 1);
     assert.equal(groups.find((g) => g.key === "/r/y")?.sessions.length, 1);

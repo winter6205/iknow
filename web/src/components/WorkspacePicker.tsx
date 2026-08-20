@@ -115,6 +115,7 @@ export function WorkspacePicker(props: WorkspacePickerProps) {
         recents={props.recents}
         currentRoot={props.currentRoot}
         onBind={props.onBind}
+        onClose={props.onClose}
       />
       <PathPickerToggle
         expanded={showPathPicker}

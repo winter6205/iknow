@@ -6,8 +6,8 @@
  *  - useSessionList hook 留这里（fetch + 缓存 + AbortController）。
  *  - useWorkspaceGroups + WorkspaceGroupHeader / WorkspaceGroupBlock /
  *    GroupCreateButton / GroupedSessionListView 抽到 `grouped-view.tsx` + Context。
- *  - 图标 (PlusIcon / RefreshIcon / ChevronLeftIcon / ChevronRightIcon /
- *    ChevronDownIcon) 抽到 `icons.tsx`。
+ *  - 图标 (PlusIcon / RefreshIcon / ChevronLeftIcon / ChevronIcon)
+ *    抽到 `icons.tsx`。
  *  - 三态展示 (LoadingState / ErrorState / EmptyState) 抽到 `sidebar-states.tsx`。
  *  - SidebarHeader / NewSessionCTA / ExpandedSidebar / CollapsedRail 抽到
  *    `sidebar-shell.tsx`。
@@ -41,11 +41,6 @@ export type SessionSidebarProps = {
    * user having to click refresh.
    */
   refreshSignal?: number;
-  /**
-   * serve-workspace T4: picker 当前绑定的 workspaceRoot (绝对路径)。
-   * 用于组头"当前"标记 (isCurrentRoot)，不参与 sort。
-   */
-  currentBoundRoot?: string | null;
 };
 
 /** Surface any thrown value as a human-readable string. */
@@ -114,7 +109,6 @@ export function SessionSidebar({
   onNewSession,
   onCreateInWorkspace,
   refreshSignal,
-  currentBoundRoot = null,
 }: SessionSidebarProps) {
   const { phase, sessions, errorMsg, refresh } = useSessionList(refreshSignal);
   const collapseBtnRef = useRef<HTMLButtonElement>(null);
@@ -158,7 +152,6 @@ export function SessionSidebar({
             errorMsg,
             refresh,
             currentConversationId,
-            currentBoundRoot,
           }}
           handlers={{
             onSelect,
