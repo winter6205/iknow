@@ -496,8 +496,8 @@ describe("loadIknowEnv — subagent.taskTimeoutMs (#358 settings 双字段, per-
   });
 });
 
-describe("loadIknowEnv — maxOutputTokens default (#trace 8e05e04c)", () => {
-  // 默认值选 8192 的完整 rationale 见 src/config/env.ts 该 fallback 注释。
+describe("loadIknowEnv — maxOutputTokens default", () => {
+  // 默认值选 16384 的完整 rationale 见 src/config/env.ts 该 fallback 注释。
   beforeEach(() => {
     delete process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS;
   });
@@ -505,9 +505,9 @@ describe("loadIknowEnv — maxOutputTokens default (#trace 8e05e04c)", () => {
     delete process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS;
   });
 
-  it("未设 IKNOW_LLM_MAX_OUTPUT_TOKENS → 落到 8192 fallback", () => {
+  it("未设 IKNOW_LLM_MAX_OUTPUT_TOKENS → 落到 16384 fallback", () => {
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
-    assert.equal(env.llm.maxOutputTokens, 8192);
+    assert.equal(env.llm.maxOutputTokens, 16384);
   });
 
   it("显式 env 仍可覆盖 fallback", () => {

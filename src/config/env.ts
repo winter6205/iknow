@@ -507,11 +507,11 @@ export function loadIknowEnv(
       maxOutputTokens: envInt({
         file,
         key: "IKNOW_LLM_MAX_OUTPUT_TOKENS",
-        // #trace 8e05e04c 根因: 2048 在 thinking=adaptive + 长生成任务下会让模型撞到
-        // max_tokens, 触发 supplierStop=truncation → nonSuccessStop → session error,
-        // 用户什么都没看到。8192 容纳 thinking budget + 完整响应(贪吃蛇 HTML 单次回
-        // 复即超过 2048 tokens), 同时不放大成本。
-        fallback: 8192,
+        // #578: 8192 仍装不下 thinking=adaptive + 奢侈品腕表自包含 HTML write_file
+        // (~150-200 行)。先前 2048→8192 (#trace 8e05e04c) 只覆盖贪吃蛇 HTML；腕表页
+        // 更大，撞 max_tokens → truncation → write_file 缺 content。16384 容纳
+        // thinking budget + 完整 HTML JSON，不改 timeoutMs。
+        fallback: 16384,
       }),
       // #358 T1: per-call LLM 调用竞速上限(env > settings > 60_000 fallback)。
       // 镜像 maxTurns 模式(envOptionalInt ?? settings),但保留第三层 60_000 默认
