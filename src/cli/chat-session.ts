@@ -68,6 +68,8 @@ import { resolveServeDataDir } from "../session-api/serve.js";
 import {
   applyGoalAutoContinue,
   applyGoalAutoError,
+  reportGoalAutoStoreLoadErr,
+  runAutoLoopSteps,
 } from "../session-api/goal-auto.js";
 import { randomUUID } from "node:crypto";
 
@@ -270,175 +272,185 @@ export async function processChatLine(
         };
   const outputs: string[] = [];
   let lastStatusLine: string | undefined;
-  for (;;) {
-    // #356 T7 (SC7):host drain — 把 manager 内 completed 子代理结果浓缩成
-    // user message,拼入本次 run 的 priorMessages 末尾。空 manager / 无
-    // completed → priorMessages 不变 (行为零变化)。
-    const drained = await drainPendingSubagents(ctx.subagentManager);
-    const priorMessages = drained
-      ? Object.freeze([
-          ...ctx.state.messages,
-          Object.freeze({
-            role: "user" as const,
-            content: Object.freeze([
-              Object.freeze({ type: "text" as const, text: drained }),
-            ]),
-          }),
-        ])
-      : ctx.state.messages;
-    try {
-      // #128 T8:verifyConfig 非 undefined (含 command 空串) 时 run 被
-      // runVerifyLoop 包裹 (advisor 形态, 引擎零改动);缺席 → 原 runHarness
-      // 调用逐字节不变 (仅未接线路径)。runVerifyLoop 的 runFn 透传 onStream →
-      // wrappedOnStream 捕获 stop_summary 的既有语义保持;trace 未注入 (chat 无
-      // trace service), VerificationRecord 不落盘 (T7 已处理 trace 可选)。
-      // 注意: runVerifyLoop 的首轮 runFn 不带 priorMessages / onStream,
-      // 闭包必须兜底 chat 侧的 priorMessages 与 wrappedOnStream, 否则多轮
-      // 历史丢失 + 流式预览失效。
-      const runOutcome =
-        verifyDispatch !== undefined && ctx.verifyConfig !== undefined
-          ? await runVerifyLoop({
-              runFn: (text, o) =>
-                runHarness(text, ctx.deps, o?.signal, {
-                  priorMessages: o?.priorMessages ?? priorMessages,
-                  onStream: o?.onStream ?? wrappedOnStream,
-                }),
-              userText: verifyDispatch.userText,
-              completionMode: verifyDispatch.completionMode,
-              config: ctx.verifyConfig,
-              sessionId: ctx.state.conversationId ?? "chat",
-              signal: ctx.abortController?.signal,
-              cwd: process.cwd(),
-              // #128 SC1 生产装配: subagentManager 在场 → 启用分类器填空
-              // (command 缺失/空串时分类器接管, spec Objective); 缺席 (ask 形态)
-              // → undefined, verify-loop 自然走透明关闭向后兼容 (SC7)。
-              runClassifier:
-                ctx.subagentManager === undefined
-                  ? undefined
-                  : createRunClassifierFromManager({
-                      manager: ctx.subagentManager,
-                      ...(ctx.verifyConfig.classifierModel !== undefined
-                        ? {
-                            classifierModel: ctx.verifyConfig.classifierModel,
-                          }
-                        : {}),
-                    }),
+  // F4: shared /goal auto-loop skeleton. Chat's `reloadSession` is a no-op
+  // (in-memory ctx.state.messages already mutated inside `run`); hub reloads
+  // via store.load. Each host controls its own error semantics (chat converts
+  // to error result; hub rethrows).
+  try {
+    return await runAutoLoopSteps({
+      run: async () => {
+        // #356 T7 (SC7):host drain — 把 manager 内 completed 子代理结果浓缩成
+        // user message,拼入本次 run 的 priorMessages 末尾。空 manager / 无
+        // completed → priorMessages 不变 (行为零变化)。
+        const drained = await drainPendingSubagents(ctx.subagentManager);
+        const priorMessages = drained
+          ? Object.freeze([
+              ...ctx.state.messages,
+              Object.freeze({
+                role: "user" as const,
+                content: Object.freeze([
+                  Object.freeze({ type: "text" as const, text: drained }),
+                ]),
+              }),
+            ])
+          : ctx.state.messages;
+        // #128 T8:verifyConfig 非 undefined (含 command 空串) 时 run 被
+        // runVerifyLoop 包裹 (advisor 形态, 引擎零改动);缺席 → 原 runHarness
+        // 调用逐字节不变 (仅未接线路径)。runVerifyLoop 的 runFn 透传 onStream →
+        // wrappedOnStream 捕获 stop_summary 的既有语义保持;trace 未注入 (chat 无
+        // trace service), VerificationRecord 不落盘 (T7 已处理 trace 可选)。
+        // 注意: runVerifyLoop 的首轮 runFn 不带 priorMessages / onStream,
+        // 闭包必须兜底 chat 侧的 priorMessages 与 wrappedOnStream, 否则多轮
+        // 历史丢失 + 流式预览失效。
+        const runOutcome =
+          verifyDispatch !== undefined && ctx.verifyConfig !== undefined
+            ? await runVerifyLoop({
+                runFn: (text, o) =>
+                  runHarness(text, ctx.deps, o?.signal, {
+                    priorMessages: o?.priorMessages ?? priorMessages,
+                    onStream: o?.onStream ?? wrappedOnStream,
+                  }),
+                userText: verifyDispatch.userText,
+                completionMode: verifyDispatch.completionMode,
+                config: ctx.verifyConfig,
+                sessionId: ctx.state.conversationId ?? "chat",
+                signal: ctx.abortController?.signal,
+                cwd: process.cwd(),
+                // #128 SC1 生产装配: subagentManager 在场 → 启用分类器填空
+                // (command 缺失/空串时分类器接管, spec Objective); 缺席 (ask 形态)
+                // → undefined, verify-loop 自然走透明关闭向后兼容 (SC7)。
+                runClassifier:
+                  ctx.subagentManager === undefined
+                    ? undefined
+                    : createRunClassifierFromManager({
+                        manager: ctx.subagentManager,
+                        ...(ctx.verifyConfig.classifierModel !== undefined
+                          ? {
+                              classifierModel: ctx.verifyConfig.classifierModel,
+                            }
+                          : {}),
+                      }),
+              })
+            : await runHarness(query, ctx.deps, ctx.abortController?.signal, {
+                priorMessages,
+                onStream: wrappedOnStream,
+              });
+        const { result, trace } = runOutcome;
+        // B1: Ctrl+C 打断反馈 —— 仅 cancelled 时提示 checkpoint 是否已保存。
+        // 与下方 persistChatSessionCheckpoint 同源判定(shouldPersistCheckpoint),
+        // 保证「状态行文案」与「实际落盘」一致;非 cancelled → undefined(无前缀)。
+        const interruptNote =
+          result.stopReason === "cancelled"
+            ? shouldPersistCheckpoint(result, priorMessages)
+              ? "已保存"
+              : "未落checkpoint"
+            : undefined;
+        const human = !ctx.state.jsonMode;
+        // #128 M3: verify 最终判定 (failed/unstable/escalated) surface 到 chat 输出,
+        // 避免"模型声称完成但验证没过"仍显示正常完成 (SC2/SC6 交付面)。
+        // 仅 verify 分支有 outcome/rounds; 裸 run 分支无 (无报告, 行为不变)。
+        const verifyReport =
+          "outcome" in runOutcome &&
+          (runOutcome.outcome === "failed" ||
+            runOutcome.outcome === "unstable" ||
+            runOutcome.outcome === "escalated")
+            ? formatVerifyReport(runOutcome.outcome, runOutcome.rounds)
+            : undefined;
+        const baseOutput = human
+          ? formatRunHuman({
+              result,
+              trace,
+              showThinking: ctx.showThinking,
+              interruptNote,
             })
-          : await runHarness(query, ctx.deps, ctx.abortController?.signal, {
-              priorMessages,
-              onStream: wrappedOnStream,
-            });
-      const { result, trace } = runOutcome;
-      // T2: post-run checkpoint 落盘(mirrors hub.ts conditionalSave)。Ask/serve/
-      // tests 没接 checkpointStore → 跳过,行为零变化(pipe / ask 一支不动)。
-      // run resolve 后才落盘 —— throw 路径(下文 catch)不进此处,刻意保持 #120
-      // 裁决("MaxTurnsExceeded 不 save"由 catch 分支自然实现:run 没 resolve 即
-      // 没有可用的 turnCount / messages,appendCheckpoint 也不可能产生 delta>0)。
-      if (ctx.checkpointStore && ctx.state.conversationId !== null) {
-        await persistChatSessionCheckpoint({
-          store: ctx.checkpointStore,
-          conversationId: ctx.state.conversationId,
-          jsonMode: ctx.state.jsonMode,
-          result,
-          priorMessages,
-        });
-      }
-      // Continue the conversation next turn on cancelled/timeout/nonSuccessStop
-      // (all append an assistant message). maxTurns no longer returns here —
-      // plan T3 / ADR-0011 upgraded it to `throw MaxTurnsExceeded`, caught below
-      // (T6) without appending anything. protocolError and emptyFinalResponse
-      // return finalState with NO assistant message appended, so continuing on
-      // them would feed a dangling user message to the model next turn and
-      // poison the loop — drop context on those two. CliChatState owned by host
-      // replaces and freezes the shallow copy so history remains append-only
-      // (harness returns ReadonlyArray).
-      if (
-        result.stopReason !== "protocolError" &&
-        result.stopReason !== "emptyFinalResponse"
-      ) {
-        ctx.state.messages = Object.freeze([...result.messages]);
-      }
-      // B1: Ctrl+C 打断反馈 —— 仅 cancelled 时提示 checkpoint 是否已保存。
-      // 与上方 persistChatSessionCheckpoint 同源判定(shouldPersistCheckpoint),
-      // 保证「状态行文案」与「实际落盘」一致;非 cancelled → undefined(无前缀)。
-      const interruptNote =
-        result.stopReason === "cancelled"
-          ? shouldPersistCheckpoint(result, priorMessages)
-            ? "已保存"
-            : "未落checkpoint"
+          : formatRunJson({ result, trace });
+        const output =
+          verifyReport !== undefined
+            ? `${baseOutput}\n${verifyReport}`
+            : baseOutput;
+        outputs.push(output);
+        lastStatusLine = human
+          ? formatStatusLine({
+              result,
+              trace,
+              showThinking: ctx.showThinking,
+              interruptNote,
+            })
           : undefined;
-      const human = !ctx.state.jsonMode;
-      // #128 M3: verify 最终判定 (failed/unstable/escalated) surface 到 chat 输出,
-      // 避免"模型声称完成但验证没过"仍显示正常完成 (SC2/SC6 交付面)。
-      // 仅 verify 分支有 outcome/rounds; 裸 run 分支无 (无报告, 行为不变)。
-      const verifyReport =
-        "outcome" in runOutcome &&
-        (runOutcome.outcome === "failed" ||
-          runOutcome.outcome === "unstable" ||
-          runOutcome.outcome === "escalated")
-          ? formatVerifyReport(runOutcome.outcome, runOutcome.rounds)
-          : undefined;
-      const baseOutput = human
-        ? formatRunHuman({
-            result,
-            trace,
-            showThinking: ctx.showThinking,
-            interruptNote,
-          })
-        : formatRunJson({ result, trace });
-      const output =
-        verifyReport !== undefined
-          ? `${baseOutput}\n${verifyReport}`
-          : baseOutput;
-      outputs.push(output);
-      lastStatusLine = human
-        ? formatStatusLine({
-            result,
-            trace,
-            showThinking: ctx.showThinking,
-            interruptNote,
-          })
-        : undefined;
-      const more = await applyChatAutoContinue({
-        ctx,
-        result,
-        runOutcome,
-        priorCount: priorMessages.length,
-      });
-      if (!more) {
-        return {
-          quit: false,
-          output: outputs.join("\n"),
-          ...(lastStatusLine !== undefined
-            ? { statusLine: lastStatusLine }
-            : {}),
-          ranQuery: true,
-        };
-      }
-    } catch (err) {
-      await applyChatAutoError(ctx, err);
-      if (err instanceof MaxTurnsExceeded) {
-        // plan T3 + T6 / ADR-0011:maxTurns 超限是强制感知信号 — 接住 throw,
-        // 呈现「已达上限」stderr + 收尾摘要(若有)。摘要经上面的 wrapper 捕获
-        // (loop-engine 在重抛前 emit stop_summary)。
-        const notice = maxTurnsNotice(err, stopSummary);
-        return {
-          quit: false,
-          output:
-            outputs.length > 0
-              ? `${outputs.join("\n")}\n${notice.output}`
-              : notice.output,
-          stderr: notice.stderr,
-          ranQuery: true,
-        };
-      }
-      return {
+        return { result, runOutcome, priorMessages };
+      },
+      persist: async (s) => {
+        // T2: post-run checkpoint 落盘(mirrors hub.ts conditionalSave)。Ask/serve/
+        // tests 没接 checkpointStore → 跳过,行为零变化(pipe / ask 一支不动)。
+        // run resolve 后才落盘 —— throw 路径(下文 catch)不进此处,刻意保持 #120
+        // 裁决("MaxTurnsExceeded 不 save"由 catch 分支自然实现:run 没 resolve 即
+        // 没有可用的 turnCount / messages,appendCheckpoint 也不可能产生 delta>0)。
+        if (ctx.checkpointStore && ctx.state.conversationId !== null) {
+          await persistChatSessionCheckpoint({
+            store: ctx.checkpointStore,
+            conversationId: ctx.state.conversationId,
+            jsonMode: ctx.state.jsonMode,
+            result: s.result,
+            priorMessages: s.priorMessages,
+          });
+        }
+        // Continue the conversation next turn on cancelled/timeout/nonSuccessStop
+        // (all append an assistant message). maxTurns no longer returns here —
+        // plan T3 / ADR-0011 upgraded it to `throw MaxTurnsExceeded`, caught below
+        // (T6) without appending anything. protocolError and emptyFinalResponse
+        // return finalState with NO assistant message appended, so continuing on
+        // them would feed a dangling user message to the model next turn and
+        // poison the loop — drop context on those two. CliChatState owned by host
+        // replaces and freezes the shallow copy so history remains append-only
+        // (harness returns ReadonlyArray).
+        if (
+          s.result.stopReason !== "protocolError" &&
+          s.result.stopReason !== "emptyFinalResponse"
+        ) {
+          ctx.state.messages = Object.freeze([...s.result.messages]);
+        }
+      },
+      decideContinue: async (s) =>
+        applyChatAutoContinue({
+          ctx,
+          result: s.result,
+          runOutcome: s.runOutcome,
+          priorCount: s.priorMessages.length,
+        }),
+      buildStop: async () => ({
         quit: false,
         output: outputs.join("\n"),
-        stderr: formatChatError(err),
+        ...(lastStatusLine !== undefined ? { statusLine: lastStatusLine } : {}),
+        ranQuery: true,
+      }),
+      reloadSession: async () => {
+        // Chat keeps session state in-memory (ctx.state.messages mutated above);
+        // reload is a no-op here. Hub passes `() => store.load(id)`.
+      },
+    });
+  } catch (err) {
+    await applyChatAutoError(ctx, err);
+    if (err instanceof MaxTurnsExceeded) {
+      // plan T3 + T6 / ADR-0011:maxTurns 超限是强制感知信号 — 接住 throw,
+      // 呈现「已达上限」stderr + 收尾摘要(若有)。摘要经上面的 wrapper 捕获
+      // (loop-engine 在重抛前 emit stop_summary)。
+      const notice = maxTurnsNotice(err, stopSummary);
+      return {
+        quit: false,
+        output:
+          outputs.length > 0
+            ? `${outputs.join("\n")}\n${notice.output}`
+            : notice.output,
+        stderr: notice.stderr,
         ranQuery: true,
       };
     }
+    return {
+      quit: false,
+      output: outputs.join("\n"),
+      stderr: formatChatError(err),
+      ranQuery: true,
+    };
   }
 }
 
@@ -463,12 +475,14 @@ async function applyChatAutoContinue(opts: {
   return applyGoalAutoContinue({
     store,
     conversationId,
-    result,
-    priorCount,
-    records: runOutcome.records ?? [],
-    ...(runOutcome.outcome !== undefined
-      ? { verifyOutcome: runOutcome.outcome }
-      : {}),
+    summary: {
+      result,
+      priorCount,
+      records: runOutcome.records ?? [],
+      ...(runOutcome.outcome !== undefined
+        ? { verifyOutcome: runOutcome.outcome }
+        : {}),
+    },
     onLoadError: (err) => skipChatAutoOnLoadError(err, conversationId),
   });
 }
@@ -957,15 +971,14 @@ export async function persistChatSessionCheckpoint(opts: {
   }
 }
 
-/** Kind-guard + writeErr + EXIT for store.load in auto/HITL paths. */
+/** Kind-guard + writeErr + EXIT for store.load in auto/HITL paths.
+ *  Delegates to the shared `reportGoalAutoStoreLoadErr` so chat and hub render
+ *  the same `${kind}: ${conversation_id}` form on the same channel. */
 function skipChatAutoOnLoadError(err: unknown, conversationId: string): void {
   if (!isSessionStoreErrorKind(err)) {
     throw err;
   }
-  const kind = (err as SessionStoreError).kind;
-  if (kind !== "not_found") {
-    writeErr(`${kind}: ${conversationId}`);
-  }
+  reportGoalAutoStoreLoadErr(err, conversationId);
 }
 
 /** Narrow a throw to SessionStoreError (typed-kind member) vs other failures. */

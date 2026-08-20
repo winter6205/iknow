@@ -621,6 +621,14 @@ const VALID_GOAL_STATUSES: ReadonlySet<GoalStatus> = new Set([
   "superseded",
 ]);
 
+/** Optional integer ≥ min (0 for streaks, 1 for maxTurns). undefined = absent.
+ *  Consolidates the maxTurns / autoTurnsRan / idleCompletedStreak validator —
+ *  three near-identical checks that all reduce to "integer at or above min". */
+function isOptionalPositiveIntField(value: unknown, min: number): boolean {
+  if (value === undefined) return true;
+  return typeof value === "number" && Number.isInteger(value) && value >= min;
+}
+
 /** Deep-validate the v5 `goal` object (all five required fields + optional
  *  history array). Reject-first: a malformed goal would silently break the
  *  verify-loop's `goal.text` binding, so it must fail loudly like checkpoints. */
@@ -638,36 +646,9 @@ function isValidGoal(g: unknown): boolean {
   ) {
     return false;
   }
-  if (
-    goal["maxTurns"] !== undefined &&
-    !(
-      typeof goal["maxTurns"] === "number" &&
-      Number.isInteger(goal["maxTurns"]) &&
-      goal["maxTurns"] >= 1
-    )
-  ) {
-    return false;
-  }
-  if (
-    goal["autoTurnsRan"] !== undefined &&
-    !(
-      typeof goal["autoTurnsRan"] === "number" &&
-      Number.isInteger(goal["autoTurnsRan"]) &&
-      goal["autoTurnsRan"] >= 0
-    )
-  ) {
-    return false;
-  }
-  if (
-    goal["idleCompletedStreak"] !== undefined &&
-    !(
-      typeof goal["idleCompletedStreak"] === "number" &&
-      Number.isInteger(goal["idleCompletedStreak"]) &&
-      goal["idleCompletedStreak"] >= 0
-    )
-  ) {
-    return false;
-  }
+  if (!isOptionalPositiveIntField(goal["maxTurns"], 1)) return false;
+  if (!isOptionalPositiveIntField(goal["autoTurnsRan"], 0)) return false;
+  if (!isOptionalPositiveIntField(goal["idleCompletedStreak"], 0)) return false;
   if (goal["history"] === undefined) return true;
   if (!Array.isArray(goal["history"])) return false;
   return (goal["history"] as ReadonlyArray<unknown>).every(isValidGoalHistory);

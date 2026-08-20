@@ -237,6 +237,43 @@ export type GoalAutoStore = {
 /** Host I/O on typed load fault: writeErr, skip, or rethrow. */
 export type GoalAutoLoadErrorHandler = (err: unknown) => void;
 
+/**
+ * Render a store-load typed error in the chat `/goal` contract form:
+ * `${kind}: ${conversation_id}`. Used by both hub and chat hosts so the
+ * stderr wire is byte-identical between the two entry points.
+ *
+ * Why a stderr-only render (no rethrow, no save): the auto-loop is best-effort
+ * — a load fault on the persist side must not change T3 continue/stop. The
+ * helper discriminates by `kind` (per code-quality.md typed-error catch 契约):
+ * `not_found` = silent (no goal state to persist on a missing file), all other
+ * kinds → render. Non-typed throws fall through unchanged so the store contract
+ * remains authoritative (defensive — store is contracted to throw only typed).
+ */
+export function reportGoalAutoStoreLoadErr(
+  err: unknown,
+  conversationId: string
+): void {
+  if (!isTypedStoreLoadError(err)) return;
+  const kind = (err as { kind: string }).kind;
+  if (kind === "not_found") return;
+  process.stderr.write(`${kind}: ${conversationId}\n`);
+}
+
+/** Narrow to typed SessionStoreError-like shape (kind + conversation_id). */
+function isTypedStoreLoadError(err: unknown): boolean {
+  if (err === null || typeof err !== "object") return false;
+  if (err instanceof Error) return false;
+  const kind = (err as { kind?: unknown }).kind;
+  return (
+    kind === "not_found" ||
+    kind === "parse_failed" ||
+    kind === "schema_invalid" ||
+    kind === "io_error" ||
+    kind === "write_failed" ||
+    kind === "concurrent_write"
+  );
+}
+
 export async function persistGoalDecision(
   store: GoalAutoStore,
   conversationId: string,
@@ -290,9 +327,12 @@ function decideFromPinnedGoal(
   });
 }
 
-export async function applyGoalAutoContinue(opts: {
-  readonly store: GoalAutoStore;
-  readonly conversationId: string;
+/**
+ * Run-side payload for `applyGoalAutoContinue`. Composed so the public opts
+ * stays ≤4 fields (S5 soft cap); the host passes this instead of
+ * `{result, priorCount, verifyOutcome, records}` individually.
+ */
+export type RunResultSummary = {
   readonly result: Pick<RunResult, "stopReason" | "messages">;
   readonly priorCount: number;
   readonly verifyOutcome?: VerifyLoopOutcome | string;
@@ -300,27 +340,64 @@ export async function applyGoalAutoContinue(opts: {
     readonly reason?: string;
     readonly missing?: readonly string[];
   }>;
+};
+
+/**
+ * Shared auto-loop pipeline (load → activePinnedGoal → buildInput →
+ * decide → persist). `applyGoalAutoContinue` and `applyGoalAutoError`
+ * delegate here; only the `buildInput` callback differs. Returns the
+ * decision when one was made, or `undefined` on load fault / no active goal.
+ */
+async function withActiveGoal(
+  store: GoalAutoStore,
+  conversationId: string,
+  onLoadError: GoalAutoLoadErrorHandler,
+  buildInput: (
+    goal: GoalState
+  ) => Omit<
+    AutoGoalTurnInput,
+    "maxTurns" | "autoTurnsRan" | "idleCompletedStreak"
+  >
+): Promise<AutoGoalDecision | undefined> {
+  const session = await loadSessionForAutoLoop(
+    store,
+    conversationId,
+    onLoadError
+  );
+  if (session === undefined) return undefined;
+  const goal = activePinnedGoal(session);
+  if (goal === undefined) return undefined;
+  const decision = decideFromPinnedGoal(goal, buildInput(goal));
+  await persistGoalDecision(store, conversationId, decision);
+  return decision;
+}
+
+export async function applyGoalAutoContinue(opts: {
+  readonly store: GoalAutoStore;
+  readonly conversationId: string;
+  readonly summary: RunResultSummary;
   readonly onLoadError: GoalAutoLoadErrorHandler;
 }): Promise<boolean> {
-  const session = await loadSessionForAutoLoop(
+  const decision = await withActiveGoal(
     opts.store,
     opts.conversationId,
-    opts.onLoadError
+    opts.onLoadError,
+    () => {
+      const judge = lastJudgeSignal(opts.summary.records);
+      return {
+        stopReason: opts.summary.result.stopReason,
+        roundHadToolUse: turnHadToolUse(
+          opts.summary.result.messages,
+          opts.summary.priorCount
+        ),
+        ...(opts.summary.verifyOutcome !== undefined
+          ? { verifyOutcome: opts.summary.verifyOutcome }
+          : {}),
+        ...judge,
+      };
+    }
   );
-  if (session === undefined) return false;
-  const goal = activePinnedGoal(session);
-  if (goal === undefined) return false;
-  const judge = lastJudgeSignal(opts.records);
-  const decision = decideFromPinnedGoal(goal, {
-    stopReason: opts.result.stopReason,
-    roundHadToolUse: turnHadToolUse(opts.result.messages, opts.priorCount),
-    ...(opts.verifyOutcome !== undefined
-      ? { verifyOutcome: opts.verifyOutcome }
-      : {}),
-    ...judge,
-  });
-  await persistGoalDecision(opts.store, opts.conversationId, decision);
-  return decision.continueAuto;
+  return decision?.continueAuto ?? false;
 }
 
 export async function applyGoalAutoError(opts: {
@@ -329,19 +406,50 @@ export async function applyGoalAutoError(opts: {
   readonly err: unknown;
   readonly onLoadError: GoalAutoLoadErrorHandler;
 }): Promise<void> {
-  const session = await loadSessionForAutoLoop(
+  await withActiveGoal(
     opts.store,
     opts.conversationId,
-    opts.onLoadError
+    opts.onLoadError,
+    () => ({
+      stopReason: "protocolError",
+      roundHadToolUse: false,
+      errorText: errorMessage(opts.err),
+      errorName: opts.err instanceof Error ? opts.err.name : undefined,
+    })
   );
-  if (session === undefined) return;
-  const goal = activePinnedGoal(session);
-  if (goal === undefined) return;
-  const decision = decideFromPinnedGoal(goal, {
-    stopReason: "protocolError",
-    roundHadToolUse: false,
-    errorText: errorMessage(opts.err),
-    errorName: opts.err instanceof Error ? opts.err.name : undefined,
-  });
-  await persistGoalDecision(opts.store, opts.conversationId, decision);
+}
+
+/**
+ * /goal auto-loop skeleton. Shared by `hub.postMessage` and the chat REPL;
+ * each host supplies its own `run` / `persist` / `buildStop` /
+ * `decideContinue` / `reloadSession`. Errors stay in the host (hub: rethrow;
+ * chat: convert to error result); reload is an explicit parameter choice —
+ * hub passes `() => store.load(id)` (refresh session between iterations);
+ * chat passes a no-op (in-memory `ctx.state.messages` already mutated
+ * inside `run`).
+ *
+ * `buildStop` runs BEFORE `decideContinue` so the stop response (hub's
+ * dto.session = the just-persisted file; chat's outputs accumulator) sees
+ * the post-persist state but the load it performs cannot shadow the
+ * `decideContinue` load (matters when load faults — hub's `applyAutoContinue`
+ * uses store.load too; building dto first lets decideContinue's load-fault
+ * propagate cleanly without re-loading).
+ */
+export async function runAutoLoopSteps<R, S>(opts: {
+  readonly run: () => Promise<R>;
+  readonly persist: (result: R) => Promise<void>;
+  readonly buildStop: (result: R) => Promise<S>;
+  readonly decideContinue: (result: R) => Promise<boolean>;
+  readonly reloadSession: () => Promise<void>;
+}): Promise<S> {
+  let last: R;
+  let lastStop: S;
+  for (;;) {
+    last = await opts.run();
+    await opts.persist(last);
+    lastStop = await opts.buildStop(last);
+    const more = await opts.decideContinue(last);
+    if (!more) return lastStop;
+    await opts.reloadSession();
+  }
 }
