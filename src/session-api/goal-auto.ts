@@ -147,97 +147,69 @@ function isImpossible(input: AutoGoalTurnInput): boolean {
   return false;
 }
 
-export function decideAutoGoalAfterTurn(
-  input: AutoGoalTurnInput
+function makeResponse(
+  continueAuto: boolean,
+  clearGoal: boolean,
+  autoTurnsRan: number,
+  idleCompletedStreak: number
 ): AutoGoalDecision {
-  const autoTurnsRan = input.autoTurnsRan + 1;
+  return { continueAuto, clearGoal, autoTurnsRan, idleCompletedStreak };
+}
 
+/** Streak advances only on completed turns that issued no tool_use. */
+function computeNextIdleStreak(input: AutoGoalTurnInput): number {
+  return input.stopReason === "completed" && !input.roundHadToolUse
+    ? input.idleCompletedStreak + 1
+    : 0;
+}
+
+/**
+ * Stop classes that do not depend on the recomputed idle streak — they fire
+ * before we burn cycles computing it. Returns undefined when none match.
+ */
+function earlyStopDecision(
+  input: AutoGoalTurnInput,
+  autoTurnsRan: number
+): AutoGoalDecision | undefined {
   if (input.stopReason === "cancelled") {
-    return {
-      continueAuto: false,
-      clearGoal: false,
-      autoTurnsRan,
-      idleCompletedStreak: input.idleCompletedStreak,
-    };
+    return makeResponse(false, false, autoTurnsRan, input.idleCompletedStreak);
   }
-
   const errClass = classifyError(input);
   if (errClass === "unrecoverable") {
-    return {
-      continueAuto: false,
-      clearGoal: true,
-      autoTurnsRan,
-      idleCompletedStreak: input.idleCompletedStreak,
-    };
+    return makeResponse(false, true, autoTurnsRan, input.idleCompletedStreak);
   }
   if (errClass === "transient") {
-    return {
-      continueAuto: false,
-      clearGoal: false,
-      autoTurnsRan,
-      idleCompletedStreak: input.idleCompletedStreak,
-    };
+    return makeResponse(false, false, autoTurnsRan, input.idleCompletedStreak);
   }
-
   if (isImpossible(input)) {
-    return {
-      continueAuto: false,
-      clearGoal: true,
-      autoTurnsRan,
-      idleCompletedStreak: input.idleCompletedStreak,
-    };
+    return makeResponse(false, true, autoTurnsRan, input.idleCompletedStreak);
   }
-
   if (input.verifyOutcome === "passed") {
-    return {
-      continueAuto: false,
-      clearGoal: false,
-      autoTurnsRan,
-      idleCompletedStreak: 0,
-    };
+    return makeResponse(false, false, autoTurnsRan, 0);
   }
-
   if (
     input.verifyOutcome === "aborted" ||
     input.verifyOutcome === "escalated"
   ) {
-    return {
-      continueAuto: false,
-      clearGoal: false,
-      autoTurnsRan,
-      idleCompletedStreak: input.idleCompletedStreak,
-    };
+    return makeResponse(false, false, autoTurnsRan, input.idleCompletedStreak);
   }
+  return undefined;
+}
 
-  const idleCompletedStreak =
-    input.stopReason === "completed" && !input.roundHadToolUse
-      ? input.idleCompletedStreak + 1
-      : 0;
-
-  if (idleCompletedStreak >= IDLE_COMPLETED_STOP) {
-    return {
-      continueAuto: false,
-      clearGoal: false,
-      autoTurnsRan,
-      idleCompletedStreak,
-    };
+export function decideAutoGoalAfterTurn(
+  input: AutoGoalTurnInput
+): AutoGoalDecision {
+  const autoTurnsRan = input.autoTurnsRan + 1;
+  const idleStreakNext = computeNextIdleStreak(input);
+  const early = earlyStopDecision(input, autoTurnsRan);
+  if (early !== undefined) return early;
+  if (idleStreakNext >= IDLE_COMPLETED_STOP) {
+    return makeResponse(false, false, autoTurnsRan, idleStreakNext);
   }
-
   if (input.maxTurns !== undefined && autoTurnsRan >= input.maxTurns) {
-    return {
-      continueAuto: false,
-      clearGoal: false,
-      autoTurnsRan,
-      idleCompletedStreak,
-    };
+    return makeResponse(false, false, autoTurnsRan, idleStreakNext);
   }
-
-  return {
-    continueAuto: true,
-    clearGoal: false,
-    autoTurnsRan,
-    idleCompletedStreak,
-  };
+  return makeResponse(true, false, autoTurnsRan, idleStreakNext);
 }
 
 export function nextGoalAfterDecision(
