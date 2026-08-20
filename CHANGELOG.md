@@ -2,6 +2,10 @@
 
 ## 0.1.0 (unreleased)
 
+### Docs
+
+- **CLAUDE.md 收成行为文件（2026-08-20）**: always-on 层只留约束 + SSOT 指针，不再复述模块清单、LLM/settings 实现、workspace-root 细节、本机 key/pty 状态。架构 / 配置 / 现状仍以 `docs/architecture.md`、`docs/STATUS.md`、`docs/llm-config-quickstart.md`、ADR-0015 / ADR-0019 为准；session start 不再全量加载 docs。
+
 ### Breaking
 
 - **serve-workspace explicit bind（ADR-0023, #531, 2026-08-19）**: `iknow serve` 不再回退到 `process.cwd()` 作为 workspace root —— long-running 进程的 cwd ≠ 用户项目根，serve hub 默认保持 unbound。WebUI Picker（chip + `/workspace` slash）是 canonical bind surface；未 bind 前 `POST /api/v1/sessions/:id/messages` 返回 400 `validation` field=`workspaceRoot`。Bind 后 `workspaceRoot` 写入每个 session 文件，引擎 `cwd === workspaceRoot === sandboxRoot` 收敛到同一绝对路径。Trust roster 落 `~/.iknow/workspaces.json`，新绝对路径需 `confirmTrust` on PUT（乐观 rev-CAS）。CLI `--workspace-root <abs>` / `IKNOW_WORKSPACE_ROOT` 仍支持显式 pre-bind（ADR-0019 D1.1 对 `chat` / `tui` / `ask` 保持不变）。详见 `docs/adr/0023-serve-workspace-explicit.md` + `specs/serve-workspace.md`；计划 `plans/serve-workspace.md` §T1-T6。
