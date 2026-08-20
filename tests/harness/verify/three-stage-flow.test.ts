@@ -1225,8 +1225,8 @@ describe("judge four-state stop behavior (#449b B7)", () => {
  * #449b B9 三级流集成测试收口 (plan B9):
  *   - SC9 只读判官集成层复断言: runVerifyLoop → createRunClassifierFromManager
  *     → stubManager 捕获 spawn def —— 声明面 (disallowedTools 5 项 / systemPrompt
- *     零 evidenceContext 泄漏) 在真实装配路径下完整保留, task 二段 (userText +
- *     evidenceContext JSON) 经集成层落到 def;
+ *     零 evidenceContext 泄漏) 在真实装配路径下完整保留, task === userText
+ *     (evidenceContext 不拼进 def.task);
  *   - 补跑中 abort: round 1 INSUFFICIENT + probe 命中 → rerun 分支第 2 次 runFn
  *     挂起 → 用户 abort → while 顶部检查点收敛 outcome=aborted, records 零伪造
  *     (rerun 轮未 produceObservation), runFn 恰 2 次 (无 stale 第三轮);
@@ -1346,23 +1346,10 @@ describe("SC9 只读判官集成层复断言 (#449b B9)", () => {
         `白名单工具 ${allowed} 必须不在 disallowedTools 内`
       );
     }
-    // SC6: task 二段 = userText 原样 + evidenceContext JSON 段 (集成层装配)。
-    const lines = def.task.split("\n");
-    assert.equal(
-      lines[0],
-      "implement goal",
-      "task 首段 = userText 逐字节 (SC6)"
-    );
-    assert.equal(
-      lines.length,
-      2,
-      "task 恰 2 段 (userText + evidenceContext JSON)"
-    );
-    const ctx = JSON.parse(lines[1]!) as EvidenceContext;
-    assert.equal(
-      ctx.checkerVerdict,
-      "EVIDENCE_INSUFFICIENT",
-      "evidenceContext.checkerVerdict 经集成层装配 (checkEvidence 三态)"
+    assert.equal(def.task, "implement goal", "task === userText (goal.text)");
+    assert.ok(
+      !def.task.includes("checkerVerdict"),
+      "task 不含 evidenceContext JSON"
     );
     // SC9: systemPrompt 零 evidenceContext 泄漏 (声明面零改动)。
     assert.equal(typeof def.systemPrompt, "string");

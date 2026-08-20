@@ -15,6 +15,7 @@
  */
 import type { AnthropicNativeMessage } from "../harness/index.js";
 import type { SessionContext } from "../shared/schema.js";
+import { parseGoalPinInput } from "../session-api/goal-auto.js";
 
 /**
  * CLI host 维护的最小对话状态。
@@ -62,7 +63,12 @@ export type SlashEffect =
    * 按 action 分派。空 args / "status" → status；"clear" → clear；其它 →
    * pin <text>（join+trim）。大小写敏感（"CLEAR" ≠ clear → pin）。
    */
-  | { type: "goal"; action: "status" | "clear" | "pin"; text: string };
+  | {
+      type: "goal";
+      action: "status" | "clear" | "pin";
+      text: string;
+      maxTurns?: number;
+    };
 
 /**
  * Strip C0 control chars (incl. ESC) and DEL so reflected command text
@@ -82,7 +88,7 @@ export const HELP_TEXT = `命令 / Commands:
   /permissions [mode]         查看/切换权限模式(default|plan|full_auto)
   /goal status                查看会话目标 · show session goal
   /goal clear                 清空会话目标 · clear session goal
-  /goal <status|clear|text>   三面: 查看 / 清空 / 覆盖 · status / clear / pin
+  /goal [--max-turns <n>] <text>  钉目标（可选轮次上限）· pin goal
 
 其他输入视为问题 · anything else is a question for the agent.`;
 
@@ -165,7 +171,18 @@ export function applySlashCommand(opts: ApplySlashCommandOpts): SlashEffect {
       if (args.length === 0) {
         return { type: "goal", action: "status", text: "" };
       }
-      return { type: "goal", action: "pin", text: args.join(" ").trim() };
+      const parsed = parseGoalPinInput(args.join(" "));
+      if (!parsed.ok) {
+        return { type: "error", text: parsed.error };
+      }
+      return parsed.maxTurns === undefined
+        ? { type: "goal", action: "pin", text: parsed.text }
+        : {
+            type: "goal",
+            action: "pin",
+            text: parsed.text,
+            maxTurns: parsed.maxTurns,
+          };
     }
 
     case "":

@@ -103,9 +103,8 @@ describe("## GOAL: re-pin via postMessage (#458 T8)", () => {
     // updatedAt advances after re-pin.
     assert.match(after2.goal!.updatedAt, /^\d{4}-\d{2}-\d{2}T/);
     assert.ok(after2.goal!.updatedAt >= now0, "updatedAt advanced");
-    // taskFocus is seeded from the query "write a type checker" because
-    // the fixture did not pre-populate taskFocus (SC2).
-    assert.equal(after2.taskFocus?.text, "write a type checker");
+    // `/goal` / `## GOAL:` must not write taskFocus (plan T1 / auto mode).
+    assert.equal(after2.taskFocus, undefined);
   });
 
   it("accumulates history monotonically across multiple re-pins", async () => {
@@ -167,8 +166,8 @@ describe("## GOAL: re-pin via postMessage (#458 T8)", () => {
     assert.equal(loaded.goal?.text, "write a type checker");
     assert.equal(loaded.goal?.source, "user_pin");
     assert.deepEqual(loaded.goal!.history ?? [], []);
-    // No pre-existing taskFocus → SC2 seeds taskFocus from the query.
-    assert.equal(loaded.taskFocus?.text, "write a type checker");
+    // Pinning a goal must not copy it into taskFocus.
+    assert.equal(loaded.taskFocus, undefined);
   });
 });
 

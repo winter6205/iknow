@@ -21,6 +21,7 @@ export {
   pinGoal,
   sanitizeSessionFile,
   seedTaskFocus,
+  shouldSeedTaskFocus,
   validateGoalText,
   validateSessionFile,
 } from "./schema.js";

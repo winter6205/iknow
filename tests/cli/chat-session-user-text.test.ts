@@ -180,16 +180,23 @@ function capturedUserText(): string {
   return opts.userText as string;
 }
 
-describe("chat-session verify-loop seam: userText = goal.text ?? query (#449 B8, 修订 per #473)", () => {
-  it("session without goal/taskFocus → userText === query (byte-identical to pre-#449 baseline)", async () => {
+function capturedCompletionMode(): unknown {
+  const opts = getLastVerifyLoopOpts() as
+    { completionMode?: unknown } | undefined;
+  assert.ok(opts !== undefined, "runVerifyLoop was not called");
+  return opts.completionMode;
+}
+
+describe("chat-session verify-loop seam: HITL vs auto dispatch (plan T1)", () => {
+  it("session without goal/taskFocus → userText === query and HITL skip judge", async () => {
     const id = "chat-no-goal-baseline";
-    // 不 seed — store.load 在 resolveVerifyUserText 里抛 not_found →
-    // 兜底 query(typed-error catch 契约)。
+    // 不 seed — store.load 在 resolveVerifyUserText 里抛 not_found。
     const ctx = makeChatCtx({ id });
     const r = await processChatLine({ line: "build it", ctx });
     assert.equal(r.ranQuery, true);
     expect(runVerifyLoopMock).toHaveBeenCalledTimes(1);
     assert.equal(capturedUserText(), "build it");
+    assert.equal(capturedCompletionMode(), "hitl");
   });
 
   it("goal absent + taskFocus present → userText === query (taskFocus 不遮蔽当前 query, #473)", async () => {
@@ -211,6 +218,7 @@ describe("chat-session verify-loop seam: userText = goal.text ?? query (#449 B8,
       "Q",
       "goal 缺席 + taskFocus 在场 → chat 端 userText 应取当前 query (taskFocus 不进 verify 输入, #473)"
     );
+    assert.equal(capturedCompletionMode(), "hitl");
   });
 
   it("goal.text === '' + taskFocus present → userText === query (空 goal 按缺席算 → 兜底 query, #473)", async () => {
@@ -262,6 +270,7 @@ describe("chat-session verify-loop seam: userText = goal.text ?? query (#449 B8,
     assert.equal(r.ranQuery, true);
     expect(runVerifyLoopMock).toHaveBeenCalledTimes(1);
     assert.equal(capturedUserText(), "G dominates chat");
+    assert.equal(capturedCompletionMode(), "auto");
   });
 
   it("taskFocus.text === '' → userText === query (空 taskFocus 按缺席算)", async () => {
@@ -332,7 +341,8 @@ describe("chat-session verify-loop seam: userText = goal.text ?? query (#449 B8,
     assert.equal(
       capturedUserText(),
       "fallback Q",
-      "store 缺席 → 兜底 query(chat 端 fail-open, 与 store.load 失败同纪律)"
+      "store 缺席 → run uses query; HITL must not treat query as judge task"
     );
+    assert.equal(capturedCompletionMode(), "hitl");
   });
 });

@@ -131,13 +131,18 @@ export interface VerificationRecord {
  */
 export const REASON_UNVERIFIED = "unverified" as const;
 export const REASON_ABORT_TYPED = "abort" as const;
+/** HITL: skip completion-facing LLM judge. Not a StopReason. */
+export const REASON_HITL_SKIP_COMPLETION_JUDGE =
+  "hitl_skip_completion_judge" as const;
 
 /**
  * reason 判别联合 (#449b B3, 判别用)。
  * classifier = 判官一句话立论 (既有语义, spec A4);
  * unverified / abort = B7 停法 typed reason (SC7/SC8)。
+ * hitl_skip_completion_judge = 正常模式命名 EXIT (ADR-0024)。
  */
-export type VerifyReasonKind = "classifier" | "unverified" | "abort";
+export type VerifyReasonKind =
+  "classifier" | "unverified" | "abort" | "hitl_skip_completion_judge";
 
 /**
  * evidence-checker 证据充分性判定 (spec 449-evidence-checker, G2 三态 verdict)。

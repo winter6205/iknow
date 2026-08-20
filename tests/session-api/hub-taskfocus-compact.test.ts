@@ -76,6 +76,7 @@ vi.mock("../../src/harness/verify/index.ts", async () => {
 import { SessionHub } from "../../src/session-api/hub.ts";
 import {
   CURRENT_SCHEMA_VERSION,
+  pinGoal,
   resolveProjectSessionDir,
   SessionStore,
   type SessionFileV1,
@@ -122,6 +123,7 @@ async function seedSession(opts: {
   readonly id: string;
   readonly messages: ReadonlyArray<AnthropicNativeMessage>;
   readonly taskFocus?: TaskFocusState;
+  readonly goal?: SessionFileV1["goal"];
 }): Promise<void> {
   const base = {
     schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -135,6 +137,7 @@ async function seedSession(opts: {
     sanitized_at: new Date().toISOString(),
     checkpoints: [],
     ...(opts.taskFocus !== undefined ? { taskFocus: opts.taskFocus } : {}),
+    ...(opts.goal !== undefined ? { goal: opts.goal } : {}),
   } satisfies Omit<SessionFileV1, never>;
   await store.save({ id: opts.id, file: base });
 }
@@ -307,6 +310,49 @@ describe("hub boundaryAttachment 接线 — taskFocus compact 边界 (#458 T7 SC
     assert.ok(
       (loaded.taskFocus?.text ?? "").length > 0,
       "seeded taskFocus.text 非空"
+    );
+  });
+
+  it("active /goal: compact does not inject taskFocus as the mission", async () => {
+    const id = "goal-active-no-focus-mission";
+    const taskFocus: TaskFocusState = {
+      text: "FOCUS-" + "x".repeat(40),
+      updatedAt: "2026-01-01T00:00:10.000Z",
+      history: [],
+    };
+    const prior = Array.from({ length: 50 }, (_, i) => longUserMessage(i));
+    await seedSession({
+      id,
+      messages: prior,
+      taskFocus,
+      goal: pinGoal({
+        current: undefined,
+        text: "ship the type checker",
+        now: "2026-01-01T00:00:00.000Z",
+      }),
+    });
+    const baseDeps = makeDeps(buildResponses(20));
+    const deps = {
+      ...baseDeps,
+      maxTurns: 30,
+      compress: { contextWindow: 200_000, thresholdTokens: 1000 },
+    };
+    const hub = new SessionHub({
+      store,
+      deps,
+      verifyConfig: { command: "/bin/true" },
+    });
+    const res = await hub.postMessage({ conversationId: id, text: "go" });
+    assert.equal(res.turn.answer.stopReason, "completed");
+    const loaded = await store.load(id);
+    const serialized = JSON.stringify(loaded.messages);
+    assert.ok(
+      serialized.includes("[compaction boundary — earlier messages cleared]"),
+      "compact still fires"
+    );
+    assert.ok(
+      !serialized.includes("FOCUS-"),
+      "auto mode must not inject taskFocus attachment"
     );
   });
 });

@@ -4,7 +4,7 @@
  * 两个方向的信封:
  *   - 父→子 worker 请求 (parseWorkerEnvelope):
  *       { task, systemPrompt?, disallowedTools?, model?, maxTurns?, timeoutMs?,
- *         sandboxRoot, env? }
+ *         sandboxRoot, env?, role?, finalText?, evidenceContext? }
  *   - 子→父 result (parseParentEnvelope / truncateEnvelopeResult):
  *       { status: "ok"|"failed", summary, result, fileRefs?, usage?, reason?,
  *         truncated?, totalLength? }
@@ -40,6 +40,14 @@ export interface WorkerEnvelope {
    * V1 baseline (defense-in-depth fallback, 详见 worker.ts + plan T2)。
    */
   readonly role?: string;
+  /**
+   * Host truncated dialogue (judge). Independent of `task`.
+   */
+  readonly finalText?: string;
+  /**
+   * Evidence prompt object (judge). Independent of `task`.
+   */
+  readonly evidenceContext?: object;
 }
 
 /** 子→父 result 信封。schema 冻结形态见 PARENT_SCHEMA。 */
@@ -83,6 +91,8 @@ export const WORKER_SCHEMA: Record<string, unknown> = {
     sandboxRoot: { type: "string" },
     env: { type: "object" },
     role: { type: "string" },
+    finalText: { type: "string" },
+    evidenceContext: { type: "object" },
   },
   required: ["task", "sandboxRoot"],
   additionalProperties: false,

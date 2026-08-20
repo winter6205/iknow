@@ -93,6 +93,15 @@ export interface GoalState {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly history?: ReadonlyArray<GoalHistoryEntry>;
+  /**
+   * Plan T3: optional host auto-loop cap from `/goal --max-turns N`.
+   * Omit = no hard cap. Shared by slash, hub, and chat.
+   */
+  readonly maxTurns?: number;
+  /** Host auto-turns completed under this pin (absent = 0). */
+  readonly autoTurnsRan?: number;
+  /** Consecutive completed rounds with no tool_use (absent = 0). */
+  readonly idleCompletedStreak?: number;
 }
 
 /** v5 (#458 T2): deterministic task focus (#459 term A) — what the current
@@ -281,8 +290,10 @@ export function pinGoal(opts: {
   readonly current: GoalState | undefined;
   readonly text: string;
   readonly now: string;
+  /** Optional host-loop cap; omit = no hard cap. Re-pin resets counters. */
+  readonly maxTurns?: number;
 }): GoalState {
-  const { current, text, now } = opts;
+  const { current, text, now, maxTurns } = opts;
   const priorHistory = current?.history ?? [];
   const newHistory = current
     ? [
@@ -302,6 +313,7 @@ export function pinGoal(opts: {
     createdAt: current?.createdAt ?? now,
     updatedAt: now,
     history: newHistory,
+    ...(maxTurns !== undefined ? { maxTurns } : {}),
   };
 }
 
@@ -328,6 +340,17 @@ export function validateGoalText(text: string): string | null {
 /** #458 T2 (T1 OQ2): main-entry text cap. `seedTaskFocus` slices the new
  *  primary `text` to this many chars. */
 export const MAX_TASK_FOCUS_CHARS = 500;
+
+/** External seed signal (ADR-0024): greetings never become lifelong focus.
+ *  `seedTaskFocus` stays a pure writer; callers consult this first. */
+const TASK_FOCUS_GREETING_RE =
+  /^(你好|您好|嗨|哈喽|hello|hi|hey|thanks|thank you|谢谢您?)([!！.。?？\s]*)$/i;
+
+export function shouldSeedTaskFocus(text: string): boolean {
+  const t = text.trim();
+  if (t.length === 0) return false;
+  return !TASK_FOCUS_GREETING_RE.test(t);
+}
 
 /** #458 T2 (T1 OQ2 algorithm): deterministic task-focus seed/re-pin.
  *
@@ -598,6 +621,14 @@ const VALID_GOAL_STATUSES: ReadonlySet<GoalStatus> = new Set([
   "superseded",
 ]);
 
+/** Optional integer ≥ min (0 for streaks, 1 for maxTurns). undefined = absent.
+ *  Consolidates the maxTurns / autoTurnsRan / idleCompletedStreak validator —
+ *  three near-identical checks that all reduce to "integer at or above min". */
+function isOptionalPositiveIntField(value: unknown, min: number): boolean {
+  if (value === undefined) return true;
+  return typeof value === "number" && Number.isInteger(value) && value >= min;
+}
+
 /** Deep-validate the v5 `goal` object (all five required fields + optional
  *  history array). Reject-first: a malformed goal would silently break the
  *  verify-loop's `goal.text` binding, so it must fail loudly like checkpoints. */
@@ -615,6 +646,9 @@ function isValidGoal(g: unknown): boolean {
   ) {
     return false;
   }
+  if (!isOptionalPositiveIntField(goal["maxTurns"], 1)) return false;
+  if (!isOptionalPositiveIntField(goal["autoTurnsRan"], 0)) return false;
+  if (!isOptionalPositiveIntField(goal["idleCompletedStreak"], 0)) return false;
   if (goal["history"] === undefined) return true;
   if (!Array.isArray(goal["history"])) return false;
   return (goal["history"] as ReadonlyArray<unknown>).every(isValidGoalHistory);

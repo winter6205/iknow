@@ -47,6 +47,7 @@ import { createJsonlTraceService, type TraceService } from "../trace/index.js";
 import { run, epilogueSummary } from "../loop-engine.js";
 import type { HarnessStreamEvent } from "../stream.js";
 import { MaxTurnsExceeded, ProtocolError } from "../errors.js";
+import type { AnthropicNativeMessage } from "../model-adapter/types.js";
 import { getAgentEntry, AgentCatalogLookupError } from "./catalog.js";
 import {
   parseWorkerEnvelope,
@@ -280,8 +281,9 @@ export async function createWorkerDeps(
   // factories 里 (T2 才把两件工具 append 进 ACI_TOOLSET_NAMES)。
   // #562 T6: bashMode 透传到 bash 工具工厂。优先 opts.bashMode 显式覆盖,
   // 否则 resolveBashMode(role) 派生 (role 缺省 / 未知 → "any" fallback)。
+  const isJudge = opts.role === "judge";
   const bashMode: "any" | "readonly" =
-    opts.bashMode ?? resolveBashMode(opts.role);
+    opts.bashMode ?? (isJudge ? "any" : resolveBashMode(opts.role));
   const reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
@@ -307,20 +309,24 @@ export async function createWorkerDeps(
   // surface "ask" → shouldIncludeBootstrap false (无 BOOTSTRAP 段); memory
   // 关闭 (worker 有界 scope, 不共享用户记忆层)。skills 段照常注入
   // (SC12: skill 工具在场就该让模型知道 available skills)。
-  const baseSystem =
-    opts.system ??
-    createIknowSystemResolver({
-      cwd,
-      userHome,
-      surface: "ask",
-      memoryEnabled: false,
-      skills: () =>
-        skillCatalog.available().map((entry) => ({
-          name: entry.name,
-          description: entry.description ?? "",
-          ...(entry.disabled ? { disabled: true } : {}),
-        })),
-    });
+  // Judge workers must not inherit the full iknow soul / assistant voice
+  // (verify-goal-gate T2). Catalog lookup is skipped so "unknown role"
+  // fallback does not re-attach the iknow base.
+  const baseSystem = isJudge
+    ? async () => undefined
+    : (opts.system ??
+      createIknowSystemResolver({
+        cwd,
+        userHome,
+        surface: "ask",
+        memoryEnabled: false,
+        skills: () =>
+          skillCatalog.available().map((entry) => ({
+            name: entry.name,
+            description: entry.description ?? "",
+            ...(entry.disabled ? { disabled: true } : {}),
+          })),
+      }));
 
   // #556 T2 + #562 T7: persona + constraints + addendum 注入 (加性段,
   // 不触碰 IKNOW_ASSEMBLY_ORDER)。顺序 base < persona < constraints <
@@ -330,8 +336,10 @@ export async function createWorkerDeps(
   // (T2 防御契约 + T7 readonly 派生, defense-in-depth): worker 装配期
   // catch AgentCatalogLookupError 显式走 fallback, 单测 envelope-role
   // 与 tool-constraints 锁定该路径。
-  const personaText = resolvePersonaBody(opts.role);
-  const constraintsText = resolveConstraintsText(opts.role);
+  const personaText = isJudge ? undefined : resolvePersonaBody(opts.role);
+  const constraintsText = isJudge
+    ? undefined
+    : resolveConstraintsText(opts.role);
   const addendumText = opts.addendum;
   const system =
     personaText !== undefined ||
@@ -446,6 +454,30 @@ export function applyEnvelopeOverrides(
 }
 
 /**
+ * Judge (and other workers) keep envelope.task as the exam-question identity.
+ * Truncated host dialogue and evidenceContext arrive as independent fields and
+ * are injected as prior user messages — prompt, not concatenated into task.
+ */
+function priorMessagesFromEnvelope(
+  env: WorkerEnvelope,
+  encodeUserText: (text: string) => AnthropicNativeMessage
+): ReadonlyArray<AnthropicNativeMessage> | undefined {
+  const prior: AnthropicNativeMessage[] = [];
+  if (env.finalText !== undefined && env.finalText.length > 0) {
+    prior.push(encodeUserText(`Host truncated dialogue:\n${env.finalText}`));
+  }
+  if (env.evidenceContext !== undefined) {
+    prior.push(
+      encodeUserText(
+        "Evidence context (prompt, not the exam question):\n" +
+          JSON.stringify(env.evidenceContext)
+      )
+    );
+  }
+  return prior.length > 0 ? prior : undefined;
+}
+
+/**
  * 测试 seam (导出仅供测试): envelope → run → truncateEnvelopeResult。
  *
  * 把 readStdin → parseWorkerEnvelope → run → 派生 envelope → 截断这一段
@@ -490,7 +522,16 @@ export async function runWorkerOnce(opts: {
     // 运行期透传 signal。onStream 不传: (a) text_delta 等热路径事件 worker
     // 无展示消费方; (b) signal 已 abort 时 run() 内部不跑收尾摘要, 不会 emit
     // stop_summary —— 摘要捕获只在下方自跑收尾轮 (runTimeoutEpilogue) 完成。
-    const { result } = await run(env.task, runDeps, controller.signal);
+    const priorMessages = priorMessagesFromEnvelope(
+      env,
+      runDeps.adapter.encodeUserText
+    );
+    const { result } = await run(
+      env.task,
+      runDeps,
+      controller.signal,
+      priorMessages !== undefined ? { priorMessages } : undefined
+    );
     // run() 正常返回 ≠ 成功: harness 协议层错误 / 空最终回应以 stopReason
     // 形态返回 (不 throw), 但 worker 必须标 failed —— 父代理 drain 收到 ok
     // 却带 protocolError stopReason 会误判子代理成功 (SC6 / SC13)。

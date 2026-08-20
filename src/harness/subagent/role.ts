@@ -48,6 +48,16 @@ export interface SubAgentDefinition {
    * Not copied onto WorkerEnvelope.
    */
   readonly excludeFromHostDrain?: boolean;
+  /**
+   * Host truncated dialogue for the judge. Copied onto WorkerEnvelope.
+   * Independent of `task` (exam question stays identity).
+   */
+  readonly finalText?: string;
+  /**
+   * Evidence prompt for the judge (not the exam question). Copied onto
+   * WorkerEnvelope as an independent field; never concatenated into `task`.
+   */
+  readonly evidenceContext?: object;
 }
 
 /** 默认 deny-list: 子代理禁止再派生子代理 (防递归爆炸)。frozen。 */

@@ -2,7 +2,7 @@
  * #449b B6 — 判官输入升级 (EvidenceContext 证据体检单进判官)。
  *
  * 覆盖维度 (spec 449 Code Style G5-3 + Testing Strategy):
- *   - SC6: task = userText 公式原样 (不重绑) + evidenceContext JSON 段;
+ *   - SC6: task = userText 逐字节 (不重绑); evidenceContext 不拼进 task;
  *   - SC9 复断言: JUDGE_ROLE 声明面 disallowedTools 5 项原样 + systemPrompt 不
  *     泄漏 evidenceContext (声明零改动);
  *   - 既有契约破口修复: lambda 解构 finalText 不再静默丢弃;
@@ -127,7 +127,7 @@ describe("createRunClassifierFromManager — evidence-aware judge input (#449b B
     );
   });
 
-  it("SC6: evidenceContext 在场时 task 第一段 = userText 原样 + 换行 + JSON 段", async () => {
+  it("SC6: evidenceContext 在场时 def.task === userText 且不含 evidence JSON", async () => {
     const { manager, captured } = makeStubManager();
     const runClassifier = createRunClassifierFromManager({ manager });
     const evidenceContext: EvidenceContext = {
@@ -140,28 +140,73 @@ describe("createRunClassifierFromManager — evidence-aware judge input (#449b B
     await runClassifier({
       task: "implement goal",
       summary: "",
-      finalText: null,
+      finalText: "truncated transcript stays out of task",
       cwd: "/tmp",
       evidenceContext,
     });
     const def = captured()!;
-    const lines = def.task.split("\n");
     assert.equal(
-      lines[0],
+      def.task,
       "implement goal",
-      "first segment must equal userText verbatim (SC6 不重绑)"
+      "task must equal userText / goal.text"
+    );
+    assert.ok(
+      !def.task.includes("checkerVerdict"),
+      "task must not contain evidenceContext JSON"
+    );
+    assert.ok(
+      !def.task.includes("truncated transcript"),
+      "finalText must not be concatenated into task"
+    );
+    assert.equal(def.maxTurns, 2, "judge inner maxTurns stays 2");
+    assert.equal(
+      def.role,
+      "judge",
+      "judge spawn must not use default iknow role"
+    );
+  });
+
+  it("Spec High: spawn def.task 是 identity；截断对话与 evidenceContext 在非 task 字段", async () => {
+    const { manager, captured } = makeStubManager();
+    const runClassifier = createRunClassifierFromManager({ manager });
+    const goalText = "ship the verify goal gate";
+    const truncated = "TRUNCATED_HOST_DIALOGUE_NOT_IN_TASK";
+    const evidenceContext: EvidenceContext = {
+      checkerVerdict: "EVIDENCE_INSUFFICIENT",
+      reasons: ["no bash test execution before claim found"],
+      executedCommands: ["npx vitest run"],
+      rerunAttempted: false,
+      evidenceSummary: "npx vitest run exit=1 green=false",
+    };
+    await runClassifier({
+      task: goalText,
+      summary: "",
+      finalText: truncated,
+      cwd: "/tmp",
+      evidenceContext,
+    });
+    const def = captured()!;
+    assert.equal(def.task, goalText, "task must equal goal.text identity");
+    assert.ok(
+      !def.task.includes("checkerVerdict"),
+      "task must not include checkerVerdict JSON"
+    );
+    assert.ok(
+      !def.task.includes(truncated),
+      "truncated dialogue must not be concatenated into task"
     );
     assert.equal(
-      lines.length,
-      2,
-      "task must have exactly 2 segments: userText + JSON evidenceContext"
+      def.finalText,
+      truncated,
+      "truncated dialogue must be an independent spawn field"
     );
-    const parsed = JSON.parse(lines[1]!) as EvidenceContext;
-    assert.equal(parsed.checkerVerdict, evidenceContext.checkerVerdict);
-    assert.deepEqual(parsed.reasons, evidenceContext.reasons);
-    assert.deepEqual(parsed.executedCommands, evidenceContext.executedCommands);
-    assert.equal(parsed.rerunAttempted, evidenceContext.rerunAttempted);
-    assert.equal(parsed.evidenceSummary, evidenceContext.evidenceSummary);
+    assert.deepEqual(
+      def.evidenceContext,
+      evidenceContext,
+      "evidenceContext must be an independent spawn field"
+    );
+    assert.equal(def.maxTurns, 2, "judge inner maxTurns stays 2");
+    assert.equal(def.role, "judge");
   });
 
   it("SC9: def.disallowedTools = 全量 ACI 工具面 − 白名单基线（fail-closed allow-list 推导）", async () => {
@@ -302,16 +347,15 @@ describe("createRunClassifierFromManager — evidence-aware judge input (#449b B
       evidenceContext: emptyShape,
     });
     const def = captured()!;
-    const lines = def.task.split("\n");
-    assert.equal(lines[0], "goal text", "first segment unchanged");
-    const parsed = JSON.parse(lines[1]!) as EvidenceContext;
-    assert.deepEqual(parsed.reasons, [], "empty reasons preserved");
-    assert.deepEqual(
-      parsed.executedCommands,
-      [],
-      "empty executedCommands preserved"
+    assert.equal(
+      def.task,
+      "goal text",
+      "empty-shape evidenceContext must not alter task"
     );
-    assert.equal(parsed.evidenceSummary, "", "empty evidenceSummary preserved");
+    assert.ok(
+      !def.task.includes("checkerVerdict"),
+      "empty-shape evidenceContext must not be JSON-appended onto task"
+    );
   });
 });
 

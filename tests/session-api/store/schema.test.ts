@@ -21,6 +21,7 @@ import {
   MAX_GOAL_CHARS,
   MAX_TASK_FOCUS_CHARS,
   seedTaskFocus,
+  shouldSeedTaskFocus,
   validateGoalText,
 } from "../../../src/session-api/store/index.ts";
 import type {
@@ -357,6 +358,31 @@ describe("validateSessionFile — v5 goal field (#408)", () => {
       "goal"
     );
   });
+
+  it("accepts additive auto-loop fields (maxTurns / streaks)", () => {
+    assert.equal(
+      validateSessionFile({
+        ...valid,
+        goal: {
+          ...validGoal,
+          maxTurns: 1,
+          autoTurnsRan: 0,
+          idleCompletedStreak: 2,
+        },
+      }),
+      null
+    );
+  });
+
+  it("rejects maxTurns 0 (not a positive integer) → 'goal'", () => {
+    assert.equal(
+      validateSessionFile({
+        ...valid,
+        goal: { ...validGoal, maxTurns: 0 },
+      }),
+      "goal"
+    );
+  });
 });
 
 describe("sanitizeSessionFile — v5 goal backfill (#408)", () => {
@@ -582,6 +608,21 @@ describe("validateSessionFile — workspaceRoot field (serve-workspace T1)", () 
 });
 
 // -- #458 T2: seedTaskFocus (T1 OQ2 algorithm) -------------------------------
+
+describe("shouldSeedTaskFocus (plan T1 — greeting signal, writer stays seedTaskFocus)", () => {
+  it("rejects greetings that must not become lifelong focus", () => {
+    assert.equal(shouldSeedTaskFocus("你好"), false);
+    assert.equal(shouldSeedTaskFocus("hello"), false);
+    assert.equal(shouldSeedTaskFocus("  Hi!  "), false);
+    assert.equal(shouldSeedTaskFocus(""), false);
+    assert.equal(shouldSeedTaskFocus("   "), false);
+  });
+
+  it("accepts a real task sentence", () => {
+    assert.equal(shouldSeedTaskFocus("Build a C compiler"), true);
+    assert.equal(shouldSeedTaskFocus("你好，帮我写一个类型检查器"), true);
+  });
+});
 
 describe("seedTaskFocus (#458 T2 — T1 OQ2 algorithm)", () => {
   const now = "2026-08-16T00:00:00.000Z";
