@@ -65,6 +65,7 @@ import {
   summarizeThinkingContent,
 } from "../cli/format.js";
 import { formatThinkingFold } from "./think-fold.js";
+import { isTuiHiddenUserMessage } from "./session-state.js";
 
 type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
 
@@ -223,6 +224,7 @@ export function MessageBlocks(props: {
       .map((b) => b.text)
       .join("\n");
     if (texts.trim() === "") return null; // 纯 tool_result：摘要行已覆盖。
+    if (isTuiHiddenUserMessage(message)) return null;
     // T7：user 底色块（pal.userBg + paddingX=1 水平缩进，无 paddingY 贴内容）。
     // 内部宽度 = cols-2（paddingX=1 两侧），text width 同步收窄避免溢出。
     return (

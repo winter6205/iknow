@@ -81,6 +81,57 @@ test("user 空文本 + 纯 tool_result：返回 null 不渲染任何节点", asy
   await setup.renderer.destroy();
 });
 
+test("host-drain 子代理结果：不渲染为 ❯ 用户气泡", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text: '## Sub-agent fdc006c7 result: {"kind":"abort","reason":"问候"}\n\n{"kind":"abort","reason":"问候"}',
+      },
+    ],
+  };
+  const setup = await renderBlocks(msg);
+  const frame = setup.captureCharFrame();
+  expect(frame.includes("❯")).toBe(false);
+  expect(frame.includes("kind")).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("verify 失败信封：不渲染为 ❯ 用户气泡", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text: "[VALIDATION FAILED] attempt=1/12 verdict=true-failure source=classifier\ntask: hi",
+      },
+    ],
+  };
+  const setup = await renderBlocks(msg);
+  const frame = setup.captureCharFrame();
+  expect(frame.includes("❯")).toBe(false);
+  expect(frame.includes("VALIDATION FAILED")).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("verify 补跑信封：不渲染为 ❯ 用户气泡", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text: "[VERIFY: rerun needed] attempt=1/12\nRun this command:\npytest -q",
+      },
+    ],
+  };
+  const setup = await renderBlocks(msg);
+  const frame = setup.captureCharFrame();
+  expect(frame.includes("❯")).toBe(false);
+  expect(frame.includes("VERIFY: rerun needed")).toBe(false);
+  await setup.renderer.destroy();
+});
+
 test("system 消息：渲染固定文案 Interrupted by user.（警示色）", async () => {
   const msg: AnthropicNativeMessage = {
     role: "system",

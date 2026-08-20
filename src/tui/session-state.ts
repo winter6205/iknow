@@ -21,6 +21,8 @@ import type {
   StopReason,
   TokenUsage,
 } from "../harness/model-adapter/types.js";
+import { isSubagentDrainText } from "../harness/subagent/host-drain.js";
+import { isVerifyInjectedText } from "../harness/verify/inject.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
 
 export type SessionRunState = "idle" | "running-fg" | "running-bg";
@@ -234,9 +236,30 @@ export function sessionRewound(
  *  - `[skill-load ` 开头：skill-load 代理正文会持久化进 transcript（见
  *    app.tsx sendTurn displayText 注释），但不得污染 ↑ 历史（显示占位
  *    约定「[加载技能 X]」）；
+ *  - host-drain / verify 信封：给模型的注入，不是用户键入（与 isTurnQuery
+ *    跳过 drain 同源，并覆盖 VALIDATION FAILED / VERIFY rerun）。
  *  - 相邻重复抑制：与上一条保留项相同则跳过（同提交路径
  *    `h[h.length-1] === text` 语义）；非相邻重复保留（真实重提同一问题）。
  */
+export function joinedUserText(message: AnthropicNativeMessage): string {
+  return message.content
+    .flatMap((block) => (block.type === "text" ? [block.text] : []))
+    .join("\n");
+}
+
+/**
+ * Host-injected user messages that must not render as typed bubbles
+ * (drain summaries + verify envelopes). Model history still holds them.
+ */
+export function isTuiHiddenUserMessage(
+  message: AnthropicNativeMessage
+): boolean {
+  if (message.role !== "user") return false;
+  const text = joinedUserText(message).trim();
+  if (text.length === 0) return false;
+  return isSubagentDrainText(text) || isVerifyInjectedText(text);
+}
+
 export function seedInputHistory(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): ReadonlyArray<string> {
@@ -248,12 +271,10 @@ export function seedInputHistory(
     ) {
       continue;
     }
-    const text = message.content
-      .flatMap((block) => (block.type === "text" ? [block.text] : []))
-      .join("\n")
-      .trim();
+    const text = joinedUserText(message).trim();
     if (text.length === 0) continue;
     if (text.startsWith("[skill-load ")) continue;
+    if (isTuiHiddenUserMessage(message)) continue;
     if (history[history.length - 1] === text) continue;
     history.push(text);
   }

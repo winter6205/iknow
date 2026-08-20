@@ -19,6 +19,7 @@ import {
   attachSession,
   canInterrupt,
   createDraftSession,
+  isTuiHiddenUserMessage,
   seedInputHistory,
   sessionCompacted,
   switchedAwayFrom,
@@ -330,6 +331,26 @@ describe("session-state: sessionCompacted（/compact 落盘后刷新）", () => 
   });
 });
 
+describe("session-state: isTuiHiddenUserMessage（host 注入不进 ❯ 气泡）", () => {
+  test("drain / VALIDATION / VERIFY 为 hidden；普通 query 否", () => {
+    expect(
+      isTuiHiddenUserMessage(
+        msg('## Sub-agent abc result: {"kind":"abort"}\n\n{}')
+      )
+    ).toBe(true);
+    expect(
+      isTuiHiddenUserMessage(
+        msg("[VALIDATION FAILED] attempt=1/12 verdict=true-failure")
+      )
+    ).toBe(true);
+    expect(
+      isTuiHiddenUserMessage(msg("[VERIFY: rerun needed] attempt=1/12"))
+    ).toBe(true);
+    expect(isTuiHiddenUserMessage(msg("真实问题"))).toBe(false);
+    expect(isTuiHiddenUserMessage(msg("答", "assistant"))).toBe(false);
+  });
+});
+
 describe("session-state: seedInputHistory（会话恢复投影输入历史）", () => {
   test("空 messages → []", () => {
     expect(seedInputHistory([])).toEqual([]);
@@ -366,6 +387,21 @@ describe("session-state: seedInputHistory（会话恢复投影输入历史）", 
       msg("正常问题"),
     ];
     expect(seedInputHistory(messages)).toEqual(["正常问题"]);
+  });
+
+  test("host-drain / verify 信封不进 ↑ 历史", () => {
+    const messages: ReadonlyArray<AnthropicNativeMessage> = [
+      msg("真实问题"),
+      msg(
+        '## Sub-agent abc result: {"kind":"abort","reason":"问候"}\n\n{"kind":"abort"}'
+      ),
+      msg(
+        "[VALIDATION FAILED] attempt=1/12 verdict=true-failure source=classifier\ntask: x"
+      ),
+      msg("[VERIFY: rerun needed] attempt=1/12\nRun this command"),
+      msg("下一问"),
+    ];
+    expect(seedInputHistory(messages)).toEqual(["真实问题", "下一问"]);
   });
 
   test("相邻重复抑制；非相邻重复保留", () => {

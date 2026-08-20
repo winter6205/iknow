@@ -583,6 +583,34 @@ describe("SubAgentManager drainCompleted (T7 host-drain 最小枚举)", () => {
     assert.ok(!drained.some((d) => d.taskId === runningTask));
     assert.ok(!drained.some((d) => d.taskId === failedTask));
   });
+
+  it("excludeFromHostDrain=true completed 任务不进 drainCompleted", () => {
+    const { manager, spawned, spawnCalls } = makeHarness();
+    const hidden = manager.spawn({ excludeFromHostDrain: true }).taskId;
+    emitEnvelope(spawned[0]!, okEnvelope("judge abort json"));
+    const visible = manager.spawn({}).taskId;
+    emitEnvelope(spawned[1]!, okEnvelope("user subagent"));
+
+    assert.equal(
+      "excludeFromHostDrain" in spawnCalls[0]!.payload,
+      false,
+      "excludeFromHostDrain is parent-only; must not land on WorkerEnvelope"
+    );
+
+    const drained = manager.drainCompleted();
+    assert.equal(drained.length, 1);
+    assert.equal(drained[0]!.taskId, visible);
+    assert.ok(!drained.some((d) => d.taskId === hidden));
+  });
+
+  it("excludeFromHostDrain 与 role 并存：payload 只拷 role", () => {
+    const { manager, spawned, spawnCalls } = makeHarness();
+    manager.spawn({ role: "explore", excludeFromHostDrain: true });
+    emitEnvelope(spawned[0]!, okEnvelope("hidden explore"));
+    assert.equal(spawnCalls[0]!.payload.role, "explore");
+    assert.equal("excludeFromHostDrain" in spawnCalls[0]!.payload, false);
+    assert.equal(manager.drainCompleted().length, 0);
+  });
 });
 
 // ── fixture 11:#361 T5 abortTask ─────────────────────────────────────────────
