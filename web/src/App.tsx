@@ -338,6 +338,7 @@ function ChatApp() {
       onToggleCollapsed={() => setCollapsed((c) => !c)}
       onNewSession={handleNewSession}
       refreshSignal={sidebarSignal}
+      currentBoundRoot={ws.root}
     />
   );
 
