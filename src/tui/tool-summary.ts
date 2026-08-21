@@ -247,6 +247,104 @@ export function formatRanSuffix(count: number): string {
   return "";
 }
 
+/** 完成态 write/edit 预览可见窗（live 完成态与历史共用；截断即折叠）。 */
+export const TOOL_PREVIEW_WINDOW = 6;
+
+export type CompletedToolPreview =
+  | { readonly kind: "empty" }
+  | {
+      readonly kind: "code";
+      readonly lines: readonly string[];
+      readonly hiddenLineCount: number;
+    }
+  | {
+      readonly kind: "diff";
+      readonly rows: readonly DiffLine[];
+      readonly hiddenLineCount: number;
+    };
+
+const EMPTY_COMPLETED_PREVIEW: CompletedToolPreview = { kind: "empty" };
+
+function splitContentLines(content: string): readonly string[] {
+  if (content.length === 0) return [];
+  const lines = content.split("\n");
+  return lines[lines.length - 1] === "" ? lines.slice(0, -1) : lines;
+}
+
+function truncateWindow<T>(items: readonly T[]): {
+  readonly visible: readonly T[];
+  readonly hiddenLineCount: number;
+} {
+  if (items.length <= TOOL_PREVIEW_WINDOW) {
+    return { visible: items, hiddenLineCount: 0 };
+  }
+  return {
+    visible: items.slice(0, TOOL_PREVIEW_WINDOW),
+    hiddenLineCount: items.length - TOOL_PREVIEW_WINDOW,
+  };
+}
+
+function resolveWriteEditPair(
+  name: string,
+  rec: Record<string, unknown>,
+  opts?: { readonly oldContent?: string; readonly newContent?: string }
+): { readonly oldContent: string; readonly newContent: string } | null {
+  let oldContent = opts?.oldContent;
+  let newContent = opts?.newContent;
+  if (oldContent === undefined || newContent === undefined) {
+    if (name === "edit_file") {
+      const o = rec.old_str;
+      const n = rec.new_str;
+      if (typeof o !== "string" || typeof n !== "string") return null;
+      oldContent = o;
+      newContent = n;
+    } else if (name === "write_file") {
+      const c = rec.content;
+      if (typeof c !== "string") return null;
+      oldContent = "";
+      newContent = c;
+    } else {
+      return null;
+    }
+  }
+  return { oldContent, newContent };
+}
+
+function hasPreviewPath(rec: Record<string, unknown>): boolean {
+  return typeof rec.path === "string" && rec.path.length > 0;
+}
+
+/**
+ * 完成态 write/edit 预览：分类（新文件→代码行；覆盖/编辑→diff）+ 截断到
+ * `TOOL_PREVIEW_WINDOW`。非 write/edit、缺 path、空正文 → `{ kind: "empty" }`。
+ * 不读工作区；权威数据 = input + 旁路 old/new。
+ */
+export function completedToolPreview(
+  name: string,
+  input: unknown,
+  opts?: { readonly oldContent?: string; readonly newContent?: string }
+): CompletedToolPreview {
+  if (name !== "write_file" && name !== "edit_file") {
+    return EMPTY_COMPLETED_PREVIEW;
+  }
+  const rec = inputRecord(input);
+  if (!hasPreviewPath(rec)) return EMPTY_COMPLETED_PREVIEW;
+  const pair = resolveWriteEditPair(name, rec, opts);
+  if (pair === null) return EMPTY_COMPLETED_PREVIEW;
+  if (pair.oldContent === "") {
+    const { visible, hiddenLineCount } = truncateWindow(
+      splitContentLines(pair.newContent)
+    );
+    if (visible.length === 0) return EMPTY_COMPLETED_PREVIEW;
+    return { kind: "code", lines: visible, hiddenLineCount };
+  }
+  const { visible, hiddenLineCount } = truncateWindow(
+    computeDiff(name, pair.oldContent, pair.newContent)
+  );
+  if (visible.length === 0) return EMPTY_COMPLETED_PREVIEW;
+  return { kind: "diff", rows: visible, hiddenLineCount };
+}
+
 /**
  * 工具内容预览行（内容可见性，统一 diff 版）：edit_file / write_file 调用
  * `computeDiff`（diff-unified.ts）产出逐行 `DiffLine[]`（带行号 + kind，
@@ -268,28 +366,10 @@ export function toolPreviewRows(
   _cols: number,
   opts?: { readonly oldContent?: string; readonly newContent?: string }
 ): readonly DiffLine[] {
-  const rec = inputRecord(input);
-  if (name === "edit_file" || name === "write_file") {
-    let oldContent = opts?.oldContent;
-    let newContent = opts?.newContent;
-    if (oldContent === undefined || newContent === undefined) {
-      if (name === "edit_file") {
-        const o = rec.old_str;
-        const n = rec.new_str;
-        if (typeof o !== "string" || typeof n !== "string") return [];
-        oldContent = o;
-        newContent = n;
-      } else {
-        // write_file：old 视为空串（新文件 / 覆盖写都按纯新增展示）。
-        const c = rec.content;
-        if (typeof c !== "string") return [];
-        oldContent = "";
-        newContent = c;
-      }
-    }
-    return computeDiff(name, oldContent, newContent);
-  }
-  return [];
+  if (name !== "edit_file" && name !== "write_file") return [];
+  const pair = resolveWriteEditPair(name, inputRecord(input), opts);
+  if (pair === null) return [];
+  return computeDiff(name, pair.oldContent, pair.newContent);
 }
 
 /** tool_use_id → is_error 状态映射（tool_result 精确配对，SSOT）。 */
