@@ -39,11 +39,12 @@ import {
 } from "react";
 import type { ReactNode } from "react";
 import { decodePasteBytes, MouseButton } from "@opentui/core";
-import type { MouseEvent } from "@opentui/core";
+import type { MouseEvent, Selection } from "@opentui/core";
 import {
   useKeyboard,
   usePaste,
   useRenderer,
+  useSelectionHandler,
   useTerminalDimensions,
 } from "@opentui/react";
 import type { HarnessStreamEvent } from "../harness/stream.js";
@@ -459,6 +460,18 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const [rewindConfirming, setRewindConfirming] = useState(false);
   const lastEscAtRef = useRef<number | undefined>(undefined);
 
+  // #343 v3 follow-up: 终端（iTerm2 / WezTerm / kitty 等）在 mouse right-up 时
+  // 会**自动**把"系统剪贴板当前内容"paste 到 stdin —— 这是 terminal-level
+  // feature，不是 OpenTUI 事件。我们 right-up 触发复制（OSC52 写剪贴板）几乎
+  // 与终端发起 paste 同时发生，时序上 paste 字节里的内容是 OSC52 **覆盖前**的
+  // 旧系统剪贴板内容（不是当前选区），最终通过 usePaste 写进输入框 —— 表现
+  // 为"右键复制 + 右键粘贴同时触发，粘贴的是上一次别处复制的内容"。应用层
+  // 无能力阻止终端发字节，但可以：在 right-up 触发复制后 arm paste-swallow
+  // 窗口（默认 250ms，覆盖 stdin→paste-event 的解析延迟）；usePaste 收到
+  // PasteEvent 时若在 arm 窗口内 → event.preventDefault() 吞掉，不进
+  // setInputValue。窗口外（用户主动 Cmd+V）保持原行为不变。
+  const pasteArmedUntilRef = useRef<number>(0);
+
   // ── 流式草稿（单会话 in-flight 时挂，bg 由落盘刷新获得终稿）─────
   const [streamDraft, setStreamDraft] = useState<StreamDraft | null>(null);
   const [draftsMasked, setDraftsMasked] = useState<string>("");
@@ -542,6 +555,26 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const compactingControllerRef = useRef<AbortController | null>(null);
   const viewRef = useRef<TuiView>(view);
   viewRef.current = view;
+  // #343 间歇性回归根因（v2 修复）：OpenTUI 在 mouse down 上若 defaultPrevented
+  // 为 false 会自动 clearSelection()（chunk-bun-8fkgaxc6.js:9109）。当 right-down
+  // 落在 (a) hitTest miss 区域或 (b) 子节点 stopPropagation 链路时，preventDefault
+  // 错过回写——clearSelection 先把每个 touchedRenderable 的本地选区 reset，再把
+  // currentSelection 置 null。handleMouseUp 再读 getSelection() → null → 报「无
+  // 选区」。v1 (ref<Selection|null>) 抓 Selection 对象引用避开了 null 分支，但仍
+  // 走「选中区域为空。」——因为 Selection 内部的 _selectedRenderables 还指向那
+  // 些已被 reset 的 renderable，getSelectedText 返回 ""。
+  // v2 改成值类型缓存：监听 OpenTUI 的 "selection" 事件（left-drag-RELEASE 时
+  // emit，那时 finishSelection 刚走完 notifySelectablesOfSelectionChange、每条
+  // touchedRenderable 的本地选区都还活着），那一刻就把 text 字符串抽出来塞进
+  // ref。字符串是值类型，clearSelection 改不到。right-up 直接读字符串拷贝。
+  const cachedSelectionTextRef = useRef<string>("");
+  useSelectionHandler((selection: Selection) => {
+    // OpenTUI 在 left-drag-RELEASE 时 emit "selection"，那时 finishSelection
+    // 刚跑完 notifySelectablesOfSelectionChange，每条 touchedRenderable 的本
+    // 地选区都还活着。立刻把 text 字符串抽出来塞进 ref —— 字符串是值类型，
+    // 后续任何 clearSelection 都改不到。
+    cachedSelectionTextRef.current = selection.getSelectedText();
+  });
 
   // ── askPending 订阅（权限 modal 挂/摘） ────────────────────────
   const [askPending, setAskPending] = useState<TuiPendingAsk | undefined>(
@@ -595,36 +628,67 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
   }
 
-  /** 右键 down 时保留当前选区，避免 OpenTUI 在 down 阶段清掉选区。 */
-  const handleMouseDown = useCallback((e: MouseEvent) => {
-    if (e.button === MouseButton.RIGHT) {
-      e.preventDefault();
-    }
-  }, []);
+  /** 右键 down：补一道缓存 + 阻止 OpenTUI 在 down 阶段自动 clearSelection()。 */
+  const handleMouseDown = useCallback(
+    (e: MouseEvent) => {
+      if (e.button === MouseButton.RIGHT) {
+        // 双保险路径：
+        //   1. 缓存：useSelectionHandler 已在 left-drag-RELEASE 那一刻把 text
+        //      字符串塞进 cachedSelectionTextRef；这里再读一次 currentSelection
+        //      把 text 写一遍 —— 兜底"selection 事件没 emit"或"currentSelection
+        //      还没被清掉"的场景（比如现有测试直接给 currentSelection 赋值）。
+        //   2. preventDefault：阻止 OpenTUI 默认行为（chunk-bun-8fkgaxc6.js:9109：
+        //      !event?.defaultPrevented && down && currentSelection → clearSelection()）。
+        const live = renderer.getSelection();
+        if (live) {
+          const text = live.getSelectedText();
+          if (text.length > 0) cachedSelectionTextRef.current = text;
+        }
+        e.preventDefault();
+      }
+    },
+    [renderer]
+  );
 
-  /** 右键 up 时复制当前选区并清掉高亮。 */
+  /** 右键 up 时复制缓存的选区文本（useSelectionHandler 已提前抽取）。 */
   const handleMouseUp = useCallback(
     (e: MouseEvent) => {
       if (e.button !== MouseButton.RIGHT) return;
-      const sel = renderer.getSelection();
-      if (sel === null) {
-        setNotice({ lines: ["无选区：先按住鼠标左键拖选文本。"] });
+      const text = cachedSelectionTextRef.current;
+      cachedSelectionTextRef.current = "";
+      if (text.length === 0) {
+        // 缓存为空：要么没拖选过、要么上一次 emit 时 Selection.getSelectedText
+        // 本身返回空（比如用户只点了一下没拖）。给具体提示区分两种情况。
+        if (renderer.getSelection() === null) {
+          setNotice({ lines: ["无选区：先按住鼠标左键拖选文本。"] });
+        } else {
+          setNotice({ lines: ["选中区域为空。"] });
+        }
         return;
       }
-      const text = sel.getSelectedText() ?? "";
-      if (text.length === 0) {
-        setNotice({ lines: ["选中区域为空。"] });
-      } else {
-        void doCopy(text).then((result) =>
-          setNoticeFromCopyResult(text, result)
-        );
-      }
+      void doCopy(text).then((result) => setNoticeFromCopyResult(text, result));
+      // arm paste-swallow 窗口：right-up 触发的"复制"几乎与终端的 paste-byte
+      // 同步到达 stdin，应用层不能阻止终端发字节，但能在 usePaste 收到事件时
+      // 吞掉。250ms 覆盖 stdin 解析→_internalKeyInput 派发→usePaste handler
+      // 触发的全程；超过 250ms 用户主动 Cmd+V 不受影响。
+      pasteArmedUntilRef.current = Date.now() + 250;
       renderer.clearSelection();
     },
     [renderer, doCopy]
   );
 
   usePaste((event) => {
+    // v3 paste-swallow：right-up 触发的复制会在 250ms 内伴随终端发出的 paste
+    // 字节（paste 的是 OSC52 覆盖前的旧系统剪贴板内容，不是当前选区）。在
+    // arm 窗口内到达的 paste 一律吞掉，不进 setInputValue。窗口外（用户主动
+    // Cmd+V / Shift+Insert）保持原行为不变。
+    if (Date.now() < pasteArmedUntilRef.current) {
+      // 显式 preventDefault 也喂给下游（即便没有 renderable listener 也保持
+      // 语义清晰：这是我们主动拒绝的粘贴事件）。
+      event.preventDefault();
+      pasteArmedUntilRef.current = 0;
+      return;
+    }
     const text = decodePasteBytes(event.bytes) ?? "";
     if (text.length > 0) {
       setInputValue((prev) => prev + text);
@@ -1545,6 +1609,19 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       // canInterrupt 拦不住);return 后不再进 turn/notice 分支。
       if (compactingControllerRef.current !== null) {
         compactingControllerRef.current.abort();
+        return;
+      }
+      // #343 v3 follow-up：选区优先复制 —— 用户在拖选后按 Ctrl+C，意图是
+      // 复制当前选区（与右键复制同源语义），而不是打断 turn。压缩取消保持
+      // 最高优先级（用户主动 /compact 的明确意图），其他场景下有选区 →
+      // 复制 + return（不打断 turn、不发"无前台运行"notice）；清 ref 走
+      // handleMouseUp 同款尾清理。text 为空 → 走原打断/notice 路径。
+      const selectedText = cachedSelectionTextRef.current;
+      if (selectedText.length > 0) {
+        cachedSelectionTextRef.current = "";
+        void doCopy(selectedText).then((result) =>
+          setNoticeFromCopyResult(selectedText, result)
+        );
         return;
       }
       if (canInterrupt(active)) {
