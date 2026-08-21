@@ -371,6 +371,71 @@ describe("plan compress-trigger-gate T2: hub.compactSession token-gate + reason 
     const loaded = await store.load(id);
     assert.equal(loaded.messages.length, 5);
   });
+
+  // plan review-fix:补齐 test.md 「命令 handler 集成测试必须接真实 store +
+  // fresh conversationId」与「fresh conversation 上的合法态与真实故障必须
+  // 区分」要求 — 此前 3 个 case 都用 seedSession 预存文件,从未触达
+  // store.load(id) 抛 not_found 的真实 typed-error 边界。
+  it("review-fix: fresh conversationId (store.load raises not_found) → serialize 队列拒绝,hub 不落盘", async () => {
+    const { store } = await storeFor();
+    const id = "never-saved-conversation-id";
+    // 不调 seedSession → store.load(id) 会抛 SessionStoreError kind:
+    // 'not_found';serialize 队列把该异常向上抛,hub 不静默吞掉。
+    const hub = new SessionHub({
+      store,
+      deps: makeCompactDeps({ adapter: makeOkAdapter("ok") }),
+    });
+    await assert.rejects(
+      () => hub.compactSession(id),
+      (err: unknown) => {
+        // typed-error 渲染契约:见 code-quality.md — `${kind}: ${conversation_id}`
+        // 形式;plain object 必须能区分 kind,而不是 [object Object]。
+        assert.ok(err !== null && typeof err === "object");
+        const e = err as { kind?: string; conversation_id?: string };
+        return e.kind === "not_found" && e.conversation_id === id;
+      },
+      "fresh conversationId 必须抛 SessionStoreError kind='not_found' 而非静默返回"
+    );
+  });
+
+  // plan review-fix:test.md 6-bullet coverage 「并发或重复提交场景」 — 之前
+  // 3 个 case 都没覆盖 serialize 队列在同一 conversationId 上并发调用的互斥
+  // 语义。两次 Promise.all(hub.compactSession(id), hub.compactSession(id))
+  // 必须串行执行,落盘文件最终状态一致(不是交错 race)。
+  it("review-fix: 同 conversationId 两次并发 compactSession → serialize 串行,落盘一致", async () => {
+    const { store } = await storeFor();
+    const id = "concurrent-compact";
+    // 灌 10 条 30k chars → estimate ≈ 30k > threshold=1000 → windowed 路径
+    const messages = Array.from({ length: 10 }, (_, i) => ({
+      role: "user" as const,
+      content: [
+        { type: "text" as const, text: `msg-${i} ${"x".repeat(30_000)}` },
+      ],
+    }));
+    await seedSession(store, id, messages);
+
+    const hub = new SessionHub({
+      store,
+      deps: makeCompactDeps({ adapter: makeOkAdapter("ok") }),
+    });
+    const [a, b] = await Promise.all([
+      hub.compactSession(id),
+      hub.compactSession(id),
+    ]);
+    // 两次都应 compacted=true(windowed 路径,无 race);
+    assert.equal(a.compacted, true);
+    assert.equal(b.compacted, true);
+    // afterCount 双方一致(serialize 串行的最终状态);
+    assert.equal(a.afterCount, b.afterCount);
+    // 落盘文件 messages 长度等于最终 afterCount。
+    const loaded = await store.load(id);
+    assert.equal(loaded.messages.length, a.afterCount);
+    // updatedAt 应被 bump(serialize 串行的最终 save 写出合法 ISO 时间戳)。
+    assert.ok(
+      typeof loaded.updatedAt === "string" && loaded.updatedAt.length > 0,
+      "updatedAt 必须有 ISO 时间戳(serialize 队列最终 save)"
+    );
+  });
 });
 
 describe("reactive compact + boundaryAttachment (#458 T8)", () => {
