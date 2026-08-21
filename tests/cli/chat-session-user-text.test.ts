@@ -1,9 +1,9 @@
 /**
- * #449 B8 (SC5, 修订 per #473): chat-session 端 verify-loop userText =
- * `goal.text ?? query`。taskFocus 段已从消费端移除 (#473): taskFocus 是
- * 稳定焦点锚(首次 seed 后不再变化, OQ2), 喂进每轮 verify 会让新任务被
- * 旧焦点遮蔽而误判 PASS。数据侧三段公式(`goal ?? taskFocus ?? query`,
- * SC3/#458 T8)不受影响 — 见 tests/session-api/goal-seam.test.ts SC3 块。
+ * #449 B8 (SC5, 修订 per #473 / #605 T2): chat-session 端 verify-loop
+ * userText = `goal.text ?? query`。taskFocus 段曾于 #473 从消费端移除
+ * (稳定焦点锚遮蔽新任务);#605 T2 将 `session.taskFocus` 字段整段退休 —
+ * seed 路径删除,sanitize-drop 剥离盘上遗留 key,加载后字段恒缺席,
+ * `goal.text ?? query` 成为唯一公式。
  *
  * Hub 端同款接线已在 `tests/session-api/goal-seam.test.ts` 覆盖;本文件
  * 守护 chat 端的等价接线。chat-session 通过 `ctx.checkpointStore.load(
@@ -88,10 +88,19 @@ import {
   SessionStore,
   type GoalState,
   type SessionFileV1,
-  type TaskFocusState,
 } from "../../src/session-api/store/index.ts";
 import { assistantResult, makeCtx } from "./_fixtures.ts";
 import type { VerifyConfig } from "../../src/harness/verify/types.ts";
+
+// Legacy on-disk shape (the runtime type was retired in #605 T2). The
+// fixture mirrors what pre-T2 disk files carried so the chat-session
+// consumer-side "taskFocus present on disk but absent after load"
+// assertion stays meaningful as a sanitize-drop contract test.
+interface LegacyTaskFocusState {
+  text: string;
+  updatedAt: string;
+  history?: ReadonlyArray<{ text: string; updatedAt: string }>;
+}
 
 let baseDir: string;
 let store: SessionStore;
@@ -112,7 +121,7 @@ afterEach(() => {
 async function seedSession(opts: {
   readonly id: string;
   readonly goal?: GoalState;
-  readonly taskFocus?: TaskFocusState;
+  readonly taskFocus?: LegacyTaskFocusState;
 }): Promise<void> {
   const now = "2026-01-01T00:00:00.000Z";
   const base = {
@@ -126,7 +135,7 @@ async function seedSession(opts: {
     cwd: process.cwd(),
     sanitized_at: now,
     checkpoints: [],
-  } satisfies Omit<SessionFileV1, "goal" | "taskFocus">;
+  } satisfies Omit<SessionFileV1, "goal">;
   await store.save({
     id: opts.id,
     file:

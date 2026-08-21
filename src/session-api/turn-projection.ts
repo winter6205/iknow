@@ -16,7 +16,6 @@ import type {
   AnthropicNativeMessage,
 } from "../harness/index.js";
 import { isSubagentDrainText } from "../harness/subagent/host-drain.js";
-import { shouldSeedTaskFocus } from "./store/schema.js";
 import type { ThinkingView, ToolCallView } from "./contract.js";
 
 /**
@@ -51,6 +50,26 @@ export function isTurnQuery(msg: AnthropicNativeMessage): boolean {
     !isSubagentDrainText(messageText(msg))
   );
 }
+
+/**
+ * External signal (ADR-0024): greetings never become a compact-boundary
+ * recent-tasks excerpt entry. #605 T2 moved this predicate from
+ * `store/schema.ts` to here — its only remaining consumer is
+ * `extractRecentUserTasks` (the seed path that wrote `session.taskFocus` is
+ * gone with the field's retirement). Keeping the predicate in the
+ * turn-projection layer removes the historical cross-layer import (schema
+ * → projection) without changing the algorithm.
+ */
+export function shouldSeedTaskFocus(text: string): boolean {
+  const t = text.trim();
+  if (t.length === 0) return false;
+  return !TASK_FOCUS_GREETING_RE.test(t);
+}
+
+/** Greeting regex (companion to `shouldSeedTaskFocus`). SSOT lives with the
+ *  predicate; export is internal (tests only — no public contract surface). */
+const TASK_FOCUS_GREETING_RE =
+  /^(你好|您好|嗨|哈喽|hello|hi|hey|thanks|thank you|谢谢您?)([!！.。?？\s]*)$/i;
 
 /** Max thinking text chars per entry (after mask, before truncation). */
 export const MAX_THINKING_TEXT_CHARS = 2000;

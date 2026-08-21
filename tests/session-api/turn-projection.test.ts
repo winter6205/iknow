@@ -26,6 +26,7 @@ import {
   messageText,
   projectThinkingView,
   projectToolCalls,
+  shouldSeedTaskFocus,
   TASK_EXCERPT_PREFIX,
 } from "../../src/session-api/turn-projection.ts";
 
@@ -681,5 +682,28 @@ describe("isTaskExcerptText — TASK_EXCERPT_PREFIX 哨兵识别", () => {
       isTaskExcerptText(`prefix-not-the-same: ${TASK_EXCERPT_PREFIX}`),
       false
     );
+  });
+});
+
+describe("shouldSeedTaskFocus — greeting filter (#605 T2 relocation)", () => {
+  // #605 T2: predicate moved from `store/schema.ts` to
+  // `turn-projection.ts` since the only remaining consumer is
+  // `extractRecentUserTasks`. Algorithm is unchanged; these tests pin
+  // the contract at its new home.
+
+  it("rejects greetings that must not become a task excerpt entry", () => {
+    assert.equal(shouldSeedTaskFocus("你好"), false);
+    assert.equal(shouldSeedTaskFocus("hello"), false);
+    assert.equal(shouldSeedTaskFocus("  Hi!  "), false);
+    assert.equal(shouldSeedTaskFocus(""), false);
+    assert.equal(shouldSeedTaskFocus("   "), false);
+    assert.equal(shouldSeedTaskFocus("hey."), false);
+    assert.equal(shouldSeedTaskFocus("thanks."), false);
+  });
+
+  it("accepts a real task sentence", () => {
+    assert.equal(shouldSeedTaskFocus("Build a C compiler"), true);
+    assert.equal(shouldSeedTaskFocus("你好，帮我写一个类型检查器"), true);
+    assert.equal(shouldSeedTaskFocus("Refactor the loop engine"), true);
   });
 });

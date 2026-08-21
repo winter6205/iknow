@@ -1,16 +1,13 @@
 /**
- * #458 T2/T5 (SC2): hub seeds taskFocus (NOT goal) on the first user message.
+ * #458 T2/T5 → #605 T2: hub no longer seeds `session.taskFocus`.
  *
- * Seed seam: `conditionalSave` materializes the new SessionFileV1 after
- * `run()` and is the natural place to seed `taskFocus` from
- * `extractGoal(result.messages)` when `session.taskFocus` is still absent.
- * The taskFocus is seeded exactly once — a re-pin (`## GOAL:` / `/goal`) or
- * `seedTaskFocus` switch is the only way to overwrite it. `goal` is no longer
- * seeded by the hub: after a fresh seed `goal === undefined` while
- * `taskFocus.text` carries the first user message text.
+ * Post-#605 T2: the `session.taskFocus` field is retired — no seed path,
+ * no clear path, no writer in `conditionalSave`. `conditionalSave` only
+ * merges the post-run messages / turnCount / title / updatedAt.
  *
- * The `## GOAL:` path additionally gates goal text through
- * `validateGoalText` (2000-char cap) before the pin reaches the store.
+ * This file keeps the `## GOAL:` validation cases and the sanitize-load
+ * cases (which now assert no `taskFocus` key on the wire), and removes
+ * the seed-on-first-postMessage coverage.
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -21,20 +18,16 @@ import { SessionHub } from "../../src/session-api/hub.ts";
 import {
   CURRENT_SCHEMA_VERSION,
   MAX_GOAL_CHARS,
-  MAX_TASK_FOCUS_CHARS,
-  resolveProjectSessionDir,
   SessionStore,
   type SessionFileV1,
 } from "../../src/session-api/store/index.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 
 let baseDir: string;
-let sessionDir: string;
 let store: SessionStore;
 
 beforeAll(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-hub-goal-"));
-  sessionDir = resolveProjectSessionDir(baseDir, process.cwd());
   store = new SessionStore(baseDir);
 });
 
@@ -48,148 +41,6 @@ function makeHub(): SessionHub {
     deps: makeDeps([assistantResult({ texts: ["ack"] })]),
   });
 }
-
-describe("taskFocus seed — first postMessage on a fresh session (#458 T2 SC2)", () => {
-  it("seeds taskFocus.text === first user message text; goal stays undefined", async () => {
-    const hub = makeHub();
-    const { session } = await hub.createSession();
-    await hub.postMessage({
-      conversationId: session.conversation_id,
-      text: "Build a C compiler",
-    });
-    const loaded: SessionFileV1 = await store.load(session.conversation_id);
-    // SC2: hub no longer seeds `goal` — the deterministic task focus replaces
-    // the goal seed path.
-    assert.equal(loaded.goal, undefined, "goal must NOT be seeded");
-    assert.ok(loaded.taskFocus, "expected taskFocus to be seeded");
-    assert.equal(loaded.taskFocus!.text, "Build a C compiler");
-    // createdAt === updatedAt — both = now from conditionalSave (taskFocus
-    // carries only text/updatedAt/history).
-    assert.match(loaded.taskFocus!.updatedAt, /^\d{4}-\d{2}-\d{2}T/);
-    // Fresh seed: history[0] = the just-seeded entry (T1 OQ2 algorithm —
-    // switch condition prepends the prior focus to history; here the prior
-    // focus is undefined, so history carries the new entry only).
-    assert.ok(loaded.taskFocus!.history);
-    assert.equal(loaded.taskFocus!.history!.length, 1);
-    assert.equal(loaded.taskFocus!.history![0]!.text, "Build a C compiler");
-  });
-
-  it("seeds a long taskFocus truncated to MAX_TASK_FOCUS_CHARS (500)", async () => {
-    const long = "x".repeat(MAX_TASK_FOCUS_CHARS + 50);
-    const hub = makeHub();
-    const { session } = await hub.createSession();
-    await hub.postMessage({
-      conversationId: session.conversation_id,
-      text: long,
-    });
-    const loaded = await store.load(session.conversation_id);
-    assert.ok(long.length > MAX_TASK_FOCUS_CHARS, "fixture must exceed cap");
-    assert.equal(loaded.taskFocus?.text, long.slice(0, MAX_TASK_FOCUS_CHARS));
-  });
-
-  it("trims leading/trailing whitespace from the seeded taskFocus text", async () => {
-    const hub = makeHub();
-    const { session } = await hub.createSession();
-    await hub.postMessage({
-      conversationId: session.conversation_id,
-      text: "  Build a C compiler  ",
-    });
-    const loaded = await store.load(session.conversation_id);
-    assert.equal(loaded.taskFocus?.text, "Build a C compiler");
-  });
-
-  it("does not seed taskFocus from a greeting (你好 stays unfocused)", async () => {
-    const hub = makeHub();
-    const { session } = await hub.createSession();
-    await hub.postMessage({
-      conversationId: session.conversation_id,
-      text: "你好",
-    });
-    const loaded = await store.load(session.conversation_id);
-    assert.equal(loaded.taskFocus, undefined);
-    assert.equal(loaded.goal, undefined);
-  });
-
-  it("does NOT re-seed on subsequent turns (taskFocus persists across turns)", async () => {
-    const deps = makeDeps([
-      assistantResult({ texts: ["first reply"] }),
-      assistantResult({ texts: ["second reply"] }),
-    ]);
-    const hub = new SessionHub({ store, deps });
-    const { session } = await hub.createSession();
-    await hub.postMessage({
-      conversationId: session.conversation_id,
-      text: "Build a C compiler",
-    });
-    const after1 = await store.load(session.conversation_id);
-    const firstFocus = after1.taskFocus;
-    assert.ok(firstFocus);
-    await hub.postMessage({
-      conversationId: session.conversation_id,
-      text: "now test it",
-    });
-    const after2 = await store.load(session.conversation_id);
-    assert.deepEqual(
-      after2.taskFocus,
-      firstFocus,
-      "taskFocus preserved byte-identical"
-    );
-    assert.equal(after2.taskFocus?.text, "Build a C compiler");
-  });
-});
-
-describe("taskFocus seed — no user message → no taskFocus (#458 T2 acceptance #3)", () => {
-  it("does not seed taskFocus when first user message is a pure tool_result message", async () => {
-    const id = "no-user-text";
-    await store.save({
-      id,
-      file: {
-        schemaVersion: CURRENT_SCHEMA_VERSION,
-        conversation_id: id,
-        messages: [
-          {
-            role: "user",
-            content: [{ type: "tool_result", tool_use_id: "x", content: [] }],
-          },
-        ],
-        jsonMode: false,
-        turnCount: 0,
-        updatedAt: new Date().toISOString(),
-        title: "",
-        cwd: process.cwd(),
-        sanitized_at: new Date().toISOString(),
-        checkpoints: [],
-      },
-    });
-    const loaded = await store.load(id);
-    assert.equal(loaded.taskFocus, undefined);
-  });
-});
-
-describe("sanitize — goal/taskFocus absent on a v4 file loaded by v5 (sanitize backfill)", () => {
-  it("v4 file (no goal/taskFocus field) loads with both undefined", async () => {
-    const id = "v4-no-goal";
-    await store.save({
-      id,
-      file: {
-        schemaVersion: 4,
-        conversation_id: id,
-        messages: [],
-        jsonMode: false,
-        turnCount: 0,
-        updatedAt: new Date().toISOString(),
-        title: "",
-        cwd: process.cwd(),
-        sanitized_at: new Date().toISOString(),
-        checkpoints: [],
-      },
-    });
-    const loaded = await store.load(id);
-    assert.equal(loaded.schemaVersion, CURRENT_SCHEMA_VERSION);
-    assert.equal(loaded.goal, undefined);
-    assert.equal(loaded.taskFocus, undefined);
-  });
-});
 
 describe("## GOAL: validateGoalText (#458 T5 SC5)", () => {
   it("rejects an over-long ## GOAL: directive with ValidationError, no pin persisted", async () => {
@@ -215,6 +66,11 @@ describe("## GOAL: validateGoalText (#458 T5 SC5)", () => {
     );
     const loaded = await store.load(session.conversation_id);
     assert.equal(loaded.goal, undefined, "rejected pin must not persist");
+    // #605 T2: no taskFocus key after a rejected pin.
+    assert.equal(
+      (loaded as unknown as Record<string, unknown>)["taskFocus"],
+      undefined
+    );
   });
 
   it("accepts a ## GOAL: directive at the 2000-char cap", async () => {
@@ -229,5 +85,73 @@ describe("## GOAL: validateGoalText (#458 T5 SC5)", () => {
     const loaded = await store.load(session.conversation_id);
     assert.equal(loaded.goal?.text, atCap);
     assert.equal(loaded.goal?.source, "user_pin");
+    assert.equal(
+      (loaded as unknown as Record<string, unknown>)["taskFocus"],
+      undefined
+    );
+  });
+});
+
+describe("post-#605 T2: hub does NOT write session.taskFocus", () => {
+  it("a fresh postMessage leaves session.taskFocus undefined on disk", async () => {
+    const hub = makeHub();
+    const { session } = await hub.createSession();
+    await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "Build a C compiler",
+    });
+    const loaded: SessionFileV1 = await store.load(session.conversation_id);
+    assert.equal(
+      (loaded as unknown as Record<string, unknown>)["taskFocus"],
+      undefined,
+      "hub must not write taskFocus — the field is retired"
+    );
+    assert.equal(loaded.goal, undefined, "goal also stays undefined on fresh");
+  });
+
+  it("a greeting postMessage still leaves taskFocus undefined (gracefully)", async () => {
+    // The greeting-filter predicate moved to turn-projection.ts
+    // (shouldSeedTaskFocus); the hub no longer consults it because the
+    // seed path is gone. This test pins the no-side-effect contract:
+    // even a greeting produces no taskFocus on disk.
+    const hub = makeHub();
+    const { session } = await hub.createSession();
+    await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "你好",
+    });
+    const loaded = await store.load(session.conversation_id);
+    assert.equal(
+      (loaded as unknown as Record<string, unknown>)["taskFocus"],
+      undefined
+    );
+  });
+});
+
+describe("sanitize — legacy taskFocus key is dropped on load", () => {
+  it("v5 file with stale taskFocus key loads without emitting taskFocus", async () => {
+    const id = "stale-taskfocus";
+    await store.save({
+      id,
+      file: {
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversation_id: id,
+        messages: [],
+        jsonMode: false,
+        turnCount: 0,
+        updatedAt: new Date().toISOString(),
+        title: "",
+        cwd: process.cwd(),
+        sanitized_at: new Date().toISOString(),
+        checkpoints: [],
+        taskFocus: { text: "stale", updatedAt: "2026-08-13T00:00:00.000Z" },
+      } as SessionFileV1,
+    });
+    const loaded = await store.load(id);
+    assert.equal(
+      (loaded as unknown as Record<string, unknown>)["taskFocus"],
+      undefined,
+      "sanitize must drop the legacy taskFocus key"
+    );
   });
 });

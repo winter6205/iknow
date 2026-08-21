@@ -19,15 +19,9 @@ import {
   sanitizeSessionFile,
   validateSessionFile,
   MAX_GOAL_CHARS,
-  MAX_TASK_FOCUS_CHARS,
-  seedTaskFocus,
-  shouldSeedTaskFocus,
   validateGoalText,
 } from "../../../src/session-api/store/index.ts";
-import type {
-  SessionFileV1,
-  TaskFocusState,
-} from "../../../src/session-api/store/index.ts";
+import type { SessionFileV1 } from "../../../src/session-api/store/index.ts";
 import { interpretMessage } from "../../../src/harness/model-adapter/anthropic-adapter.ts";
 import type {
   Message as SdkMessage,
@@ -399,10 +393,11 @@ describe("sanitizeSessionFile — v5 goal backfill (#408)", () => {
     assert.deepEqual(out.goal, goal);
   });
 
-  it("#458: v5 file with a user_initial goal migrates it to taskFocus (goal → undefined)", () => {
-    // #459 migration: `user_initial` top-level goals only exist on legacy
-    // disk; sanitize/load upgrades them to a deterministic taskFocus and
-    // drops the goal field (spreading leaves no old goal key behind).
+  it("#605 T2: legacy disk files carrying a taskFocus key load without emitting it on the wire", () => {
+    // #458 → #605: the previous "user_initial → taskFocus" migration is
+    // gone with the taskFocus field's retirement. A legacy disk file with
+    // a stale taskFocus key now loads via sanitize-drop (no migration, no
+    // validation) — the key is unconditionally deleted.
     const goal = {
       ...validGoal,
       text: "Build a C compiler",
@@ -411,23 +406,25 @@ describe("sanitizeSessionFile — v5 goal backfill (#408)", () => {
       createdAt: "2026-08-13T00:00:00.000Z",
       updatedAt: "2026-08-13T00:00:00.000Z",
     };
-    const out = sanitizeSessionFile({ ...valid, goal });
-    assert.equal(out.goal, undefined);
-    assert.equal(out.taskFocus?.text, "Build a C compiler");
-    // `valid` fixture's sanitized_at is "2026-01-01T00:00:00.000Z"; the
-    // migration uses sanitized_at as `now` for seedTaskFocus.
-    assert.equal(out.taskFocus?.updatedAt, "2026-01-01T00:00:00.000Z");
-    assert.deepEqual(out.taskFocus?.history, [
-      { text: "Build a C compiler", updatedAt: "2026-01-01T00:00:00.000Z" },
-    ]);
+    const out = sanitizeSessionFile({
+      ...valid,
+      goal,
+      taskFocus: { text: "stale", updatedAt: "2026-08-13T00:00:00.000Z" },
+    });
+    // The goal (user_initial) survives verbatim — only the taskFocus key
+    // is dropped. No migration step runs.
+    assert.deepEqual(out.goal, goal);
+    assert.equal(
+      (out as unknown as Record<string, unknown>)["taskFocus"],
+      undefined,
+      "sanitize must drop any taskFocus key — the field is retired"
+    );
   });
 
   it("preserves goal.history through sanitize", () => {
-    // #458: a top-level `user_initial` goal now migrates to `taskFocus` on
-    // load, so this history-preservation invariant is exercised with a
-    // `user_pin` goal (the source that survives sanitize verbatim). The
-    // history-entry source `user_initial` is still a valid prior-goal source
-    // (validation accepts it; only the top-level `goal.source` migrates).
+    // A `user_pin` goal survives sanitize verbatim (the only source that
+    // remains on disk post-#605 T2). History-entry source `user_initial`
+    // is still a valid prior-goal source for `user_pin` history entries.
     const goal = {
       ...validGoal,
       source: "user_pin",
@@ -479,96 +476,62 @@ describe("validateGoalText (#458 T2 — SC5)", () => {
 
 // -- #458 T2: taskFocus field validation ------------------------------------
 
-describe("validateSessionFile — taskFocus field (#458 T2)", () => {
-  const validTaskFocus: TaskFocusState = {
-    text: "Build a compiler",
-    updatedAt: "2026-08-13T00:00:00.000Z",
-  };
+// -- #605 T2: sanitize-drop the retired taskFocus key ----------------------
 
-  it("accepts a valid taskFocus object", () => {
-    assert.equal(
-      validateSessionFile({ ...valid, taskFocus: validTaskFocus }),
-      null
-    );
-  });
+describe("sanitizeSessionFile — #605 T2: drops legacy taskFocus key (no field, no validation)", () => {
+  // Local legacy-shape alias — the runtime type no longer exists, but
+  // the test fixture mirrors the on-disk shape of a pre-T2 session file.
+  interface LegacyTaskFocusState {
+    text: string;
+    updatedAt: string;
+    history?: ReadonlyArray<{ text: string; updatedAt: string }>;
+  }
 
-  it("accepts a taskFocus with a valid history array", () => {
-    const taskFocus: TaskFocusState = {
+  it("drops a well-formed legacy taskFocus object from the output", () => {
+    // The field is retired — sanitize unconditionally deletes the key
+    // (mirrors #467 T3's `delete result["summary"]` discipline).
+    const legacy: LegacyTaskFocusState = {
       text: "Build a compiler",
       updatedAt: "2026-08-13T00:00:00.000Z",
-      history: [
-        {
-          text: "Previous focus",
-          updatedAt: "2026-08-12T00:00:00.000Z",
-        },
-      ],
     };
-    assert.equal(validateSessionFile({ ...valid, taskFocus }), null);
+    const out = sanitizeSessionFile({ ...valid, taskFocus: legacy });
+    assert.equal(
+      (out as unknown as Record<string, unknown>)["taskFocus"],
+      undefined,
+      "sanitize must NOT emit a taskFocus key on the wire"
+    );
   });
 
-  it("accepts a file with both user_pin goal and taskFocus (coexist — SC3)", () => {
-    const file = {
+  it("drops a malformed legacy taskFocus object (no schema_invalid throw)", () => {
+    // Sanitize-drop is unconditional — even malformed legacy values are
+    // removed silently rather than blocking load. Validation never sees
+    // the key (no per-field branch left in validateSessionFile).
+    const malformed = { text: 1, updatedAt: "t" } as unknown;
+    const out = sanitizeSessionFile({ ...valid, taskFocus: malformed });
+    assert.equal(
+      (out as unknown as Record<string, unknown>)["taskFocus"],
+      undefined
+    );
+  });
+
+  it("preserves unknown top-level fields (spread discipline)", () => {
+    // spread-preserve must still hold: legacy taskFocus drop should NOT
+    // accidentally strip unrelated top-level fields.
+    const out = sanitizeSessionFile({
       ...valid,
-      goal: { ...validGoal, source: "user_pin" },
-      taskFocus: validTaskFocus,
-    };
-    assert.equal(validateSessionFile(file), null);
-  });
-
-  it("rejects taskFocus with non-string text → 'taskFocus'", () => {
+      taskFocus: { text: "x", updatedAt: "t" },
+      futureFlag: { kind: "experimental" },
+    });
     assert.equal(
-      validateSessionFile({
-        ...valid,
-        taskFocus: { text: 1, updatedAt: "t" },
-      }),
-      "taskFocus"
+      (out as unknown as Record<string, unknown>)["taskFocus"],
+      undefined
     );
-  });
-
-  it("rejects taskFocus missing text → 'taskFocus'", () => {
-    assert.equal(
-      validateSessionFile({ ...valid, taskFocus: { updatedAt: "t" } }),
-      "taskFocus"
+    assert.deepEqual(
+      (out as unknown as Record<string, unknown>)["futureFlag"],
+      {
+        kind: "experimental",
+      }
     );
-  });
-
-  it("rejects taskFocus missing updatedAt → 'taskFocus'", () => {
-    assert.equal(
-      validateSessionFile({ ...valid, taskFocus: { text: "x" } }),
-      "taskFocus"
-    );
-  });
-
-  it("rejects taskFocus with a non-array history → 'taskFocus'", () => {
-    assert.equal(
-      validateSessionFile({
-        ...valid,
-        taskFocus: { text: "x", updatedAt: "t", history: "oops" },
-      }),
-      "taskFocus"
-    );
-  });
-
-  it("rejects a malformed history entry → 'taskFocus'", () => {
-    assert.equal(
-      validateSessionFile({
-        ...valid,
-        taskFocus: { text: "x", updatedAt: "t", history: [{ text: 1 }] },
-      }),
-      "taskFocus"
-    );
-  });
-
-  it("rejects a taskFocus that is null or non-object → 'taskFocus'", () => {
-    assert.equal(
-      validateSessionFile({ ...valid, taskFocus: null }),
-      "taskFocus"
-    );
-    assert.equal(
-      validateSessionFile({ ...valid, taskFocus: "x" }),
-      "taskFocus"
-    );
-    assert.equal(validateSessionFile({ ...valid, taskFocus: 42 }), "taskFocus");
   });
 });
 
@@ -604,136 +567,6 @@ describe("validateSessionFile — workspaceRoot field (serve-workspace T1)", () 
         `must reject ${JSON.stringify(workspaceRoot)}`
       );
     }
-  });
-});
-
-// -- #458 T2: seedTaskFocus (T1 OQ2 algorithm) -------------------------------
-
-describe("shouldSeedTaskFocus (plan T1 — greeting signal, writer stays seedTaskFocus)", () => {
-  it("rejects greetings that must not become lifelong focus", () => {
-    assert.equal(shouldSeedTaskFocus("你好"), false);
-    assert.equal(shouldSeedTaskFocus("hello"), false);
-    assert.equal(shouldSeedTaskFocus("  Hi!  "), false);
-    assert.equal(shouldSeedTaskFocus(""), false);
-    assert.equal(shouldSeedTaskFocus("   "), false);
-  });
-
-  it("accepts a real task sentence", () => {
-    assert.equal(shouldSeedTaskFocus("Build a C compiler"), true);
-    assert.equal(shouldSeedTaskFocus("你好，帮我写一个类型检查器"), true);
-  });
-});
-
-describe("seedTaskFocus (#458 T2 — T1 OQ2 algorithm)", () => {
-  const now = "2026-08-16T00:00:00.000Z";
-
-  it("MAX_TASK_FOCUS_CHARS is 500 (main-entry text cap)", () => {
-    assert.equal(MAX_TASK_FOCUS_CHARS, 500);
-  });
-
-  it("seeds a fresh TaskFocusState when current is undefined", () => {
-    const out = seedTaskFocus({
-      current: undefined,
-      nextText: "Build a compiler",
-      now,
-    });
-    assert.equal(out.text, "Build a compiler");
-    assert.equal(out.updatedAt, now);
-    // T1 OQ2 literal: the new nextText enters history[0] — history is a
-    // chronological log of distinct seeds, not a copy of the current text.
-    assert.deepEqual(out.history, [
-      { text: "Build a compiler", updatedAt: now },
-    ]);
-  });
-
-  it("truncates the main text to MAX_TASK_FOCUS_CHARS", () => {
-    const out = seedTaskFocus({
-      current: undefined,
-      nextText: "x".repeat(MAX_TASK_FOCUS_CHARS + 1),
-      now,
-    });
-    assert.equal(out.text.length, MAX_TASK_FOCUS_CHARS);
-    assert.equal(out.text, "x".repeat(MAX_TASK_FOCUS_CHARS));
-  });
-
-  it("returns the same reference when the focus is unchanged (idempotent)", () => {
-    const current: TaskFocusState = {
-      text: "Build a compiler",
-      updatedAt: "old",
-    };
-    const out = seedTaskFocus({
-      current,
-      nextText: "  BUILD a compiler  ", // same after normalize
-      now,
-    });
-    assert.equal(out, current); // same reference — no allocation
-    assert.equal(out.updatedAt, "old"); // `now` is not applied on no-op
-  });
-
-  it("returns the same reference on identical nextText", () => {
-    const current: TaskFocusState = { text: "Focus", updatedAt: "t1" };
-    const out = seedTaskFocus({ current, nextText: "Focus", now: "t2" });
-    assert.equal(out, current);
-  });
-
-  it("switches on normalized text change and prepends nextText to history[0]", () => {
-    // T1 OQ2 literal: nextText (the new seed) enters history[0]; the prior
-    // main focus is not separately recorded — history is a chronological
-    // log of distinct seeded nextTexts.
-    const current: TaskFocusState = { text: "Old focus", updatedAt: "old" };
-    const out = seedTaskFocus({ current, nextText: "New focus", now });
-    assert.equal(out.text, "New focus");
-    assert.equal(out.updatedAt, now);
-    assert.deepEqual(out.history, [{ text: "New focus", updatedAt: now }]);
-  });
-
-  it("caps history at 5 — the 6th distinct nextText evicts the oldest", () => {
-    let current: TaskFocusState | undefined = undefined;
-    for (let i = 1; i <= 6; i++) {
-      current = seedTaskFocus({
-        current,
-        nextText: `focus-${i}`,
-        now: `t${i}`,
-      });
-    }
-    assert.equal(current?.text, "focus-6");
-    assert.equal(current?.history?.length, 5);
-    assert.deepEqual(
-      current?.history?.map((h) => h.text),
-      ["focus-6", "focus-5", "focus-4", "focus-3", "focus-2"]
-    );
-    // focus-1 evicted as the oldest
-    assert.equal(
-      current?.history?.some((h) => h.text === "focus-1"),
-      false
-    );
-  });
-
-  it("dedupes — a repeated nextText does not re-enter history", () => {
-    const first = seedTaskFocus({
-      current: undefined,
-      nextText: "A",
-      now: "t1",
-    });
-    const second = seedTaskFocus({ current: first, nextText: "B", now: "t2" });
-    // Switch back to A: A is already in history → skip prepending.
-    const third = seedTaskFocus({ current: second, nextText: "A", now: "t3" });
-    assert.equal(third.text, "A");
-    assert.equal(third.updatedAt, "t3");
-    assert.equal(third.history?.length, 2);
-    assert.deepEqual(
-      third.history?.map((h) => h.text),
-      ["B", "A"]
-    );
-  });
-
-  it("history entry text is NOT truncated — only main text is sliced to 500", () => {
-    // T1 OQ2: 历史不截断，仅主条目 text slice 500. History entries keep
-    // the full nextText; the 500 cap applies only to the main entry.
-    const long = "x".repeat(MAX_TASK_FOCUS_CHARS + 50); // 550
-    const out = seedTaskFocus({ current: undefined, nextText: long, now });
-    assert.equal(out.text.length, MAX_TASK_FOCUS_CHARS);
-    assert.equal(out.history?.[0]?.text, long);
   });
 });
 
@@ -999,7 +832,7 @@ describe("validateSessionFile — content blocks accept thinking (T1)", () => {
     // deepseek-flash-combo 返回无 signature 的 thinking 块;interpretMessage
     // 归一化为空串后,session store 校验必须通过 — 这是线上 schema_invalid
     // (field=messages) 的回归护栏。
-    const sdkResp: SdkMessage = {
+    const sdkResp = {
       id: "msg_think_nosig_schema",
       type: "message",
       role: "assistant",
@@ -1013,8 +846,11 @@ describe("validateSessionFile — content blocks accept thinking (T1)", () => {
       ] as ContentBlock[],
       stop_reason: "end_turn",
       stop_sequence: null,
-      usage: { input_tokens: 4, output_tokens: 2 },
-    };
+      usage: {
+        input_tokens: 4,
+        output_tokens: 2,
+      },
+    } as unknown as SdkMessage;
     const result = interpretMessage(sdkResp);
 
     // 归一化后 signature 存在(空串),可过 schema 校验

@@ -1,15 +1,15 @@
 /**
- * #458 T8: fresh conversation 端到端 — 真实 SessionHub + 真实 SessionStore
- * (temp dir) + chat-session /goal 三面 slash 共享同一 store 与 conversationId。
+ * #458 T8 → #605 T2: fresh conversation 端到端 — 真实 SessionHub + 真实
+ * SessionStore (temp dir) + chat-session /goal 三面 slash 共享同一 store
+ * 与 conversationId。
  *
  * 与 `goal-slash-runtime.test.ts` (T6) 不重复:T6 是 chat-session 单独
  * 路径的 /goal 三面单元;本文件是 serve 形态 SessionHub 与 chat 形态
  * processChatLine 共享持久化的端到端集成,覆盖:
  *
- *   a. 全生命周期:createSession → 首条 postMessage 走 SC2 seed path
- *      (taskFocus 从 query 落盘) → /goal status 回显 → /goal pin → /goal
- *      status 同时回显 goal + taskFocus → /goal clear 双清 → 再 postMessage
- *      让 SC2 重新 seed (formula 回落到 query)。
+ *   a. 全生命周期:createSession → 首条 postMessage (无 taskFocus seed) →
+ *      /goal status 回显 → /goal pin → /goal status 回显 → /goal clear →
+ *      再 postMessage (无 taskFocus re-seed)。
  *   b. 真实 SessionStore + fresh conversationId (不预存 session 文件),
  *      严格遵循 test.md 命令 handler 集成测试规范。
  *   c. typed-error catch 契约分流:not_found 合法态 (fresh conversation
@@ -48,7 +48,7 @@ afterAll(async () => {
 });
 
 describe("fresh conversation 端到端 (SessionHub + chat-session 共享 store)", () => {
-  it("全生命周期: create → seed taskFocus → /goal status → pin → status → clear → re-seed", async () => {
+  it("全生命周期: create → postMessage (no taskFocus seed) → /goal status → pin → status → clear", async () => {
     const { store } = await storeFor();
     const hub = new SessionHub({
       store,
@@ -64,10 +64,13 @@ describe("fresh conversation 端到端 (SessionHub + chat-session 共享 store)"
     // (0) 刚 createSession:盘上文件存在但 messages/goal/taskFocus 全空。
     let loaded = await store.load(id);
     expect(loaded.goal).toBeUndefined();
-    expect(loaded.taskFocus).toBeUndefined();
+    expect(
+      (loaded as unknown as Record<string, unknown>)["taskFocus"]
+    ).toBeUndefined();
     expect(loaded.messages).toEqual([]);
 
-    // (1) hub.postMessage 首条 → SC2 seed path:taskFocus 从 query 落盘。
+    // (1) hub.postMessage 首条 → 落盘 messages,但 conditionalSave 不再 seed
+    // taskFocus (#605 T2 退休字段)。goal 仍 undefined。
     const r1 = await hub.postMessage({
       conversationId: id,
       text: "Build a C compiler",
@@ -75,13 +78,11 @@ describe("fresh conversation 端到端 (SessionHub + chat-session 共享 store)"
     expect(r1.turn.answer.stopReason).toBe("completed");
     loaded = await store.load(id);
     expect(loaded.goal).toBeUndefined();
-    expect(loaded.taskFocus?.text).toBe("Build a C compiler");
-    // seedTaskFocus 无 current 时仍把本次文本记入 history[0]
-    // (新文本进 history, cap 5)—— 与 T2 纯函数语义一致。
-    expect(loaded.taskFocus?.history).toHaveLength(1);
-    expect(loaded.taskFocus?.history![0]?.text).toBe("Build a C compiler");
+    expect(
+      (loaded as unknown as Record<string, unknown>)["taskFocus"]
+    ).toBeUndefined();
 
-    // (2) processChatLine /goal status → 回显 taskFocus (无 goal 段)。
+    // (2) processChatLine /goal status → 仅回显 goal (无 taskFocus 段)。
     const s1 = await processChatLine({
       line: "/goal status",
       ctx: makeCtx({
@@ -90,12 +91,11 @@ describe("fresh conversation 端到端 (SessionHub + chat-session 共享 store)"
         stateOverrides: { conversationId: id },
       }),
     });
-    expect(s1.output).toContain("Build a C compiler");
-    expect(s1.output).toContain("taskFocus");
-    expect(s1.output).not.toContain("goal: ");
+    expect(s1.output).toBe("未设置 goal");
+    expect(s1.output).not.toContain("taskFocus");
     expect(s1.stderr).toBeUndefined();
 
-    // (3) /goal pin → user_pin 落盘,taskFocus 保留(SC2 seed 一次)。
+    // (3) /goal pin → user_pin 落盘,taskFocus 字段仍缺席。
     const s2 = await processChatLine({
       line: "/goal write a type checker",
       ctx: makeCtx({
@@ -110,9 +110,11 @@ describe("fresh conversation 端到端 (SessionHub + chat-session 共享 store)"
     expect(loaded.goal?.text).toBe("write a type checker");
     expect(loaded.goal?.source).toBe("user_pin");
     expect(loaded.goal?.status).toBe("active");
-    expect(loaded.taskFocus?.text).toBe("Build a C compiler");
+    expect(
+      (loaded as unknown as Record<string, unknown>)["taskFocus"]
+    ).toBeUndefined();
 
-    // (4) /goal status 同时回显 goal + taskFocus(优先级 goal > taskFocus)。
+    // (4) /goal status 回显 goal (taskFocus 段已随 T2 退休)。
     const s3 = await processChatLine({
       line: "/goal status",
       ctx: makeCtx({
@@ -121,11 +123,11 @@ describe("fresh conversation 端到端 (SessionHub + chat-session 共享 store)"
         stateOverrides: { conversationId: id },
       }),
     });
-    expect(s3.output).toContain("goal: write a type checker");
-    expect(s3.output).toContain("taskFocus: Build a C compiler");
+    expect(s3.output).toBe("goal: write a type checker");
+    expect(s3.output).not.toContain("taskFocus");
     expect(s3.stderr).toBeUndefined();
 
-    // (5) /goal clear → 双清 (goal + taskFocus 同步,SC)。
+    // (5) /goal clear → goal 清空 (taskFocus 不再参与双清,SC)。
     const s4 = await processChatLine({
       line: "/goal clear",
       ctx: makeCtx({
@@ -138,14 +140,11 @@ describe("fresh conversation 端到端 (SessionHub + chat-session 共享 store)"
     expect(s4.stderr).toBeUndefined();
     loaded = await store.load(id);
     expect(loaded.goal).toBeUndefined();
-    expect(loaded.taskFocus).toBeUndefined();
+    expect(
+      (loaded as unknown as Record<string, unknown>)["taskFocus"]
+    ).toBeUndefined();
 
-    // (6) postMessage 再来一条 → taskFocus 重新 seed(SC2:absent → seed)。
-    // 数据侧公式 goal.text ?? taskFocus.text ?? query = query (两者皆无);
-    // verify-loop userText seam(现状:goal.text ?? query)也直接 = query。
-    // 注意:conditionalSave 的 seed 文本来自 extractGoal(result.messages) —
-    // 永远取会话内第一条 user text(权威历史首条),而非本次 query;
-    // clear 之后历史仍在,故 re-seed 文本 = 首条 "Build a C compiler"。
+    // (6) postMessage 再来一条 → 仍无 taskFocus (seed 路径已退)。
     const r2 = await hub.postMessage({
       conversationId: id,
       text: "follow-up after clear",
@@ -153,7 +152,9 @@ describe("fresh conversation 端到端 (SessionHub + chat-session 共享 store)"
     expect(r2.turn.answer.stopReason).toBe("completed");
     loaded = await store.load(id);
     expect(loaded.goal).toBeUndefined();
-    expect(loaded.taskFocus?.text).toBe("Build a C compiler");
+    expect(
+      (loaded as unknown as Record<string, unknown>)["taskFocus"]
+    ).toBeUndefined();
   });
 });
 
@@ -171,7 +172,7 @@ describe("typed-error catch 契约 (fresh conversation + 真实 SessionStore)", 
         stateOverrides: { conversationId: id },
       }),
     });
-    expect(r.output).toContain("未设置 goal / taskFocus");
+    expect(r.output).toBe("未设置 goal");
     expect(r.stderr).toBeUndefined();
     // store 仍空:load 抛出被 catch 截获,无副作用。
     expect(await store.list()).toEqual([]);

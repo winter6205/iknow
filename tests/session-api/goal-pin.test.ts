@@ -103,8 +103,11 @@ describe("## GOAL: re-pin via postMessage (#458 T8)", () => {
     // updatedAt advances after re-pin.
     assert.match(after2.goal!.updatedAt, /^\d{4}-\d{2}-\d{2}T/);
     assert.ok(after2.goal!.updatedAt >= now0, "updatedAt advanced");
-    // `/goal` / `## GOAL:` must not write taskFocus (plan T1 / auto mode).
-    assert.equal(after2.taskFocus, undefined);
+    // `/goal` / `## GOAL:` never write taskFocus (#605 T2: field retired).
+    assert.equal(
+      (after2 as unknown as Record<string, unknown>)["taskFocus"],
+      undefined
+    );
   });
 
   it("accumulates history monotonically across multiple re-pins", async () => {
@@ -166,16 +169,18 @@ describe("## GOAL: re-pin via postMessage (#458 T8)", () => {
     assert.equal(loaded.goal?.text, "write a type checker");
     assert.equal(loaded.goal?.source, "user_pin");
     assert.deepEqual(loaded.goal!.history ?? [], []);
-    // Pinning a goal must not copy it into taskFocus.
-    assert.equal(loaded.taskFocus, undefined);
+    // Pinning a goal must not copy it into taskFocus (#605 T2: retired).
+    assert.equal(
+      (loaded as unknown as Record<string, unknown>)["taskFocus"],
+      undefined
+    );
   });
 });
 
 describe("## GOAL: empty → no-op (#458 T8)", () => {
-  it("empty ## GOAL: rejects (empty query) and leaves goal + taskFocus unchanged", async () => {
+  it("empty ## GOAL: rejects (empty query) and leaves goal unchanged (#605 T2: no taskFocus side)", async () => {
     const hub = makeHub();
     const { session } = await hub.createSession();
-    // First postMessage seeds taskFocus (SC2); goal stays undefined.
     await hub.postMessage({
       conversationId: session.conversation_id,
       text: "Build a C compiler",
@@ -199,14 +204,16 @@ describe("## GOAL: empty → no-op (#458 T8)", () => {
       "empty ## GOAL: must reject (no goal text to run)"
     );
     const after = await store.load(session.conversation_id);
-    // Both the (undefined) goal and the seeded taskFocus must be unchanged.
     assert.deepEqual(after.goal, before.goal);
-    assert.deepEqual(after.taskFocus, before.taskFocus);
+    assert.equal(
+      (after as unknown as Record<string, unknown>)["taskFocus"],
+      undefined
+    );
   });
 });
 
 describe("## GOAL: mid-message → no-op, normal query (#458 T8)", () => {
-  it("'hello ## GOAL: x' is NOT a pin directive; whole text is the query and seeds via T2 (taskFocus, not goal)", async () => {
+  it("'hello ## GOAL: x' is NOT a pin directive; whole text runs as the query (#605 T2: no taskFocus seed)", async () => {
     const hub = makeHub();
     const { session } = await hub.createSession();
     const res = await hub.postMessage({
@@ -215,15 +222,14 @@ describe("## GOAL: mid-message → no-op, normal query (#458 T8)", () => {
     });
     // The model ran with the full text as the query.
     assert.equal(res.turn.query, "hello ## GOAL: x");
-    // T2/T5 migration: the seed path no longer creates a top-level goal.
-    // The full text is instead captured into taskFocus (SC2). No pin
-    // happened (mid-message is not a directive), so goal is undefined.
+    // #605 T2: no pin happened (mid-message is not a directive) and the
+    // taskFocus seed path is retired — both fields stay absent on disk.
     const loaded = await store.load(session.conversation_id);
     assert.equal(loaded.goal, undefined, "mid-message must NOT pin a goal");
     assert.equal(
-      loaded.taskFocus?.text,
-      "hello ## GOAL: x",
-      "seed path captures the full text into taskFocus"
+      (loaded as unknown as Record<string, unknown>)["taskFocus"],
+      undefined,
+      "#605 T2 retired the taskFocus seed path"
     );
   });
 });

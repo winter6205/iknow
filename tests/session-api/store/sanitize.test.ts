@@ -375,13 +375,14 @@ describe("sanitizeSessionFile — schemaVersion 4 complete file", () => {
   });
 });
 
-// -- #458 T2: user_initial → taskFocus migration + user_pin passthrough ------
+// -- #458 T2 → #605 T2: user_initial no longer migrates to taskFocus ------
 
-describe("sanitizeSessionFile — #458 user_initial → taskFocus migration", () => {
-  it("loads a v5 user_initial goal as taskFocus and drops the goal field", () => {
-    // Legacy disk state (only user_initial produced top-level goals before
-    // #459): sanitize upgrades goal → deterministic taskFocus and the goal
-    // field is left undefined (spread omits it — no stale goal key).
+describe("sanitizeSessionFile — #605 T2: legacy taskFocus key is dropped (no migration, no validation)", () => {
+  it("drops a legacy taskFocus key from the wire output", () => {
+    // #458 → #605: the previous "user_initial → taskFocus" migration is
+    // gone with the field's retirement. Sanitize unconditionally deletes
+    // any taskFocus key (mirrors #467 T3's `delete result["summary"]`
+    // discipline) — no migration step runs.
     const raw = {
       schemaVersion: 5,
       conversation_id: "conv-migrate",
@@ -393,29 +394,23 @@ describe("sanitizeSessionFile — #458 user_initial → taskFocus migration", ()
       cwd: "/work",
       sanitized_at: "2026-08-13T00:00:00.000Z",
       checkpoints: [],
-      goal: {
+      taskFocus: {
         text: "Build a C compiler",
-        source: "user_initial",
-        status: "active",
-        createdAt: "2026-08-13T00:00:00.000Z",
         updatedAt: "2026-08-13T00:00:00.000Z",
       },
     };
     const out = sanitizeSessionFile(raw);
-    assert.equal(out.goal, undefined);
-    assert.equal(out.taskFocus?.text, "Build a C compiler");
-    assert.equal(out.taskFocus?.updatedAt, "2026-08-13T00:00:00.000Z");
-    // T1 OQ2 literal: the seeded nextText (the migrated goal text) enters
-    // history[0] with the migration timestamp (sanitized_at = updatedAt here).
-    assert.deepEqual(out.taskFocus?.history, [
-      {
-        text: "Build a C compiler",
-        updatedAt: "2026-08-13T00:00:00.000Z",
-      },
-    ]);
+    assert.equal(
+      (out as unknown as Record<string, unknown>)["taskFocus"],
+      undefined,
+      "sanitize must drop the legacy taskFocus key"
+    );
+    // The rest of the file round-trips normally.
+    assert.equal(out.conversation_id, "conv-migrate");
+    assert.equal(out.schemaVersion, 5);
   });
 
-  it("user_initial migration preserves unknown top-level fields (spread discipline)", () => {
+  it("sanitize-drop preserves unknown top-level fields (spread discipline)", () => {
     const out = sanitizeSessionFile({
       schemaVersion: 5,
       conversation_id: "conv-migrate2",
@@ -427,24 +422,43 @@ describe("sanitizeSessionFile — #458 user_initial → taskFocus migration", ()
       cwd: "",
       sanitized_at: "2026-08-13T00:00:00.000Z",
       checkpoints: [],
-      goal: {
-        text: "X",
-        source: "user_initial",
-        status: "active",
-        createdAt: "2026-08-13T00:00:00.000Z",
-        updatedAt: "2026-08-13T00:00:00.000Z",
-      },
+      taskFocus: { text: "X", updatedAt: "2026-08-13T00:00:00.000Z" },
       future_flag: { nested: 1 },
     });
-    assert.equal(out.goal, undefined);
-    assert.equal(out.taskFocus?.text, "X");
+    assert.equal(
+      (out as unknown as Record<string, unknown>)["taskFocus"],
+      undefined
+    );
     assert.deepEqual(
       (out as unknown as Record<string, unknown>)["future_flag"],
       { nested: 1 }
     );
   });
 
-  it("leaves a user_pin goal verbatim (no migration) — user_pin 旧盘原样", () => {
+  it("drops a malformed legacy taskFocus value without schema_invalid", () => {
+    // Sanitize-drop is unconditional — even malformed legacy values are
+    // removed silently rather than blocking load.
+    const raw = {
+      schemaVersion: 5,
+      conversation_id: "conv-malformed",
+      messages: [userMsg("hello")],
+      jsonMode: true,
+      turnCount: 1,
+      updatedAt: "2026-08-13T00:00:00.000Z",
+      title: "hello",
+      cwd: "/work",
+      sanitized_at: "2026-08-13T00:00:00.000Z",
+      checkpoints: [],
+      taskFocus: { text: 1, updatedAt: "t" }, // intentionally malformed
+    };
+    const out = sanitizeSessionFile(raw);
+    assert.equal(
+      (out as unknown as Record<string, unknown>)["taskFocus"],
+      undefined
+    );
+  });
+
+  it("leaves a user_pin goal verbatim (no migration, no taskFocus involvement)", () => {
     const raw = {
       schemaVersion: 5,
       conversation_id: "conv-pin",
@@ -466,7 +480,10 @@ describe("sanitizeSessionFile — #458 user_initial → taskFocus migration", ()
     };
     const out = sanitizeSessionFile(raw);
     assert.deepEqual(out.goal, raw.goal);
-    assert.equal(out.taskFocus, undefined);
+    assert.equal(
+      (out as unknown as Record<string, unknown>)["taskFocus"],
+      undefined
+    );
   });
 });
 

@@ -17,8 +17,8 @@
  * (write-back trace 留痕 even when no status change).
  *
  * Fixture: a user-pinned active goal (source === "user_pin") survives
- * sanitize-on-load (T2 migration drops only `user_initial` goals); a fresh
- * seed produces taskFocus (not goal) so writeback is inapplicable there.
+ * sanitize-on-load (#605 T2 retired the taskFocus field — no seed path, so a
+ * fresh session has neither goal nor taskFocus and writeback is inapplicable).
  *
  * Trace assertions: writeback recordGoal writes a JSONL line via the real
  * JsonlTraceService — read the per-session trace file and filter
@@ -86,10 +86,8 @@ import {
   type SessionFileV1,
 } from "../../src/session-api/store/index.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
-import type {
-  VerifyConfig,
-  VerifyLoopOutcome,
-} from "../../src/harness/verify/types.ts";
+import type { VerifyConfig } from "../../src/harness/verify/types.ts";
+import type { VerifyLoopOutcome } from "../../src/harness/verify/verify-loop.ts";
 
 let baseDir: string;
 let store: SessionStore;
@@ -255,13 +253,11 @@ describe("goal.status write-back on verify-loop outcome (#458 T5 SC8)", () => {
   });
 });
 
-describe("taskFocus seed on fresh session (#458 T5 SC2)", () => {
-  it("fresh session: seeds taskFocus (not goal); first user text reaches the model directly", async () => {
-    // Without verifyConfig, the user query reaches the model directly (not
-    // swapped to goal.text), so extractGoal(result.messages) returns the
-    // user query — taskFocus.text === user query. The hub's writeback block
-    // is skipped when verifyOutcome is undefined (no verifyConfig → no
-    // verify-loop → no writeback event).
+describe("post-#605 T2: no taskFocus seed on fresh session (seed path retired)", () => {
+  it("fresh session: no taskFocus on disk and NO goal seed trace record", async () => {
+    // #458 T5 SC2 seeded taskFocus on the first postMessage; #605 T2
+    // retired the field — conditionalSave only merges messages/turnCount/
+    // title. The T12 `action=seed` trace emission point is gone with it.
     const id = "t5-fresh-seed";
     await store.save({
       id,
@@ -286,24 +282,30 @@ describe("taskFocus seed on fresh session (#458 T5 SC2)", () => {
     await hub.postMessage({ conversationId: id, text: "Build a thing" });
     const after = await load(id);
     assert.equal(after.goal, undefined, "fresh session must NOT seed goal");
-    assert.equal(after.taskFocus?.text, "Build a thing");
-    // T12 seed 发射点: trace 文件应含 action=seed 的 goal record。
+    assert.equal(
+      (after as unknown as Record<string, unknown>)["taskFocus"],
+      undefined,
+      "#605 T2: taskFocus seed path is gone"
+    );
+    // The seed 发射点 must not fire: no action="seed" goal record in trace.
     const tracePath = join(traceDir, `${id}.jsonl`);
-    const raw = await readFile(tracePath, "utf8");
+    let raw = "";
+    try {
+      raw = await readFile(tracePath, "utf8");
+    } catch {
+      raw = ""; // no trace file at all is also a valid "no seed" outcome
+    }
     const seedLines = raw
       .trim()
       .split("\n")
+      .filter((l) => l.length > 0)
       .filter((l) => l.includes('"record_type":"goal"'))
       .filter((l) => l.includes('"action":"seed"'));
-    assert.ok(
-      seedLines.length >= 1,
-      `expected ≥1 goal seed record, got: ${raw}`
+    assert.equal(
+      seedLines.length,
+      0,
+      `no goal seed record expected, got: ${raw}`
     );
-    const seedRec = JSON.parse(
-      seedLines[seedLines.length - 1] ?? "{}"
-    ) as Record<string, unknown>;
-    assert.equal(seedRec["action"], "seed");
-    assert.equal(seedRec["text_len"], "Build a thing".length);
   });
 
   it("achieved goal + outcome 'failed' → 非法反向边被 assertValidTransition 拦截, status 保持 achieved, recordGoal 留痕(status: active)", async () => {
