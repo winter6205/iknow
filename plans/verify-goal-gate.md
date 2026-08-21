@@ -1,6 +1,8 @@
 # Plan: 两套判断逻辑模块（HITL vs `/goal` 自动模式）
 
-**Goal:** 默认聊天走 HITL（不请 LLM 评做完没）；`/goal` 走自动循环（成功也评、`task` 仅 goal.text）；taskFocus 只为 compact 保焦。
+> HITL compact 保焦：本 plan 里的 `taskFocus` 条款已被 `specs/recent-user-tasks.md` / ADR-0026 覆盖。verify 两套逻辑仍以本 plan 为准。
+
+**Goal:** 默认聊天走 HITL（不请 LLM 评做完没）；`/goal` 走自动循环（成功也评、`task` 仅 goal.text）；compact 保焦见任务摘录 spec。
 **Approach:** 先关掉 HITL 完成向判官并改焦点 seed，证明问候不再请判官；再接自动模式信封（含去完整 iknow 灵魂）；最后接续跑与三档停法。本 plan 拍死 spec 留给 plan 的两项：空转 = 连续 3 个 `completed` 且该轮无 `tool_use`；`/goal` 可选 `--max-turns <正整数>`，省略则无硬顶。TUI drain A+B、command 沙箱闭环、checker 纯函数不在本 plan。CONTEXT / ADR-0024 已 persist，本 plan 不写文档。
 **Spec link:** `specs/verify-goal-gate.md`
 **ACR:** all-yes（见下）

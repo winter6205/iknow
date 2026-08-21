@@ -22,7 +22,7 @@
   - 压缩触发开关、reason 文案、窗口不够时的路径（PR #601 / `evaluateCompactTrigger`）。本 spec **不改** `DEFAULT_KEEP_RECENT`、不改 `preserveToolPairs`。
   - 会话 JSON `checkpoints[]`（打断快照 / rewind）。
   - 知识记忆（`AGENTS.md`、`memory_save` / `memory_recall`、`~/.iknow/memory`）；禁止收本单进度（ADR-0009）。
-  - Wayfinder #594 及子票 595–599 的 sidecar / 每回合填卡 / 扩 taskFocus 进度栏；口径已被本 spec 取代，实施时关或改那些票，不按旧图做。
+  - Wayfinder [#594](https://github.com/winter6205/iknow/issues/594) 及子票 595–599（sidecar / 每回合填卡 / 扩 taskFocus）：口径已被本 spec 取代，**票已关**，不按旧图做。
   - `/goal` 自动模式判官信封（仍只读 `goal.text`，ADR-0024）。
 
 ## Success Criteria

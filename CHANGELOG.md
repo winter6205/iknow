@@ -4,6 +4,8 @@
 
 ### Docs
 
+- **compact 保焦改为任务摘录（ADR-0026，2026-08-22）**: spec `specs/recent-user-tasks.md`、计划 `plans/recent-user-tasks.md`。会话不再常驻 `taskFocus`；wayfinder 地图 #594–#599 已关。代码未落地（T1 #604）。
+
 - **CLAUDE.md 收成行为文件（2026-08-20）**: always-on 层只留约束 + SSOT 指针，不再复述模块清单、LLM/settings 实现、workspace-root 细节、本机 key/pty 状态。架构 / 配置 / 现状仍以 `docs/architecture.md`、`docs/STATUS.md`、`docs/llm-config-quickstart.md`、ADR-0015 / ADR-0019 为准；session start 不再全量加载 docs。
 
 ### Breaking
