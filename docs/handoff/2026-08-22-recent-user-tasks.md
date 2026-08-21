@@ -14,9 +14,10 @@
 - ADR-0026：`docs/adr/0026-recent-user-tasks.md`
 - 实施：T1 [#604](https://github.com/winter6205/iknow/issues/604) → T2 [#605](https://github.com/winter6205/iknow/issues/605) → T3 [#606](https://github.com/winter6205/iknow/issues/606)
 
-## 已关的旧图
+## 已关的旧图 / 手交
 
-wayfinder [#594](https://github.com/winter6205/iknow/issues/594) 及子票 #595–#599 已关闭。不要做 sidecar / 每回合填卡 / 扩 `taskFocus`。
+- wayfinder [#594](https://github.com/winter6205/iknow/issues/594) 及子票 #595–#599 已关闭。不要做 sidecar / 每回合填卡 / 扩 `taskFocus`。
+- [#569](https://github.com/winter6205/iknow/issues/569) 是 verify 门禁 grilling 手交，已改成归档并关闭。A+B 合在 [#570](https://github.com/winter6205/iknow/pull/570)，门禁合在 [#575](https://github.com/winter6205/iknow/pull/575)。不要从那张票读 `taskFocus`。
 
 ## 不要动
 
