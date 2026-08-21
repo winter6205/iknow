@@ -12,6 +12,7 @@ import {
   type CompletedToolPreview,
 } from "./tool-summary.js";
 import { DiffView, diffRowTexts } from "./diff-view.js";
+import { CodeBlock } from "./markdown.js";
 import { tuiPalette } from "./theme.js";
 
 /** 完成态预览的纯文本行（行账 / live text lines 与 JSX 同源）。 */
@@ -43,15 +44,11 @@ export function CompletedToolPreviewView(props: {
       : null;
   return (
     <>
-      {preview.kind === "code"
-        ? preview.lines.map((line, i) => (
-            <text key={`c${i}`} wrapMode="none">
-              {line}
-            </text>
-          ))
-        : preview.rows.length > 0 && (
-            <DiffView rows={preview.rows} cols={cols} />
-          )}
+      {preview.kind === "code" ? (
+        <CodeBlock lang="" lines={preview.lines} compact />
+      ) : (
+        preview.rows.length > 0 && <DiffView rows={preview.rows} cols={cols} />
+      )}
       {overflow !== null && (
         <text fg={tuiPalette.dim} wrapMode="none">
           {overflow}

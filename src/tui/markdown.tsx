@@ -260,10 +260,12 @@ function CodeBlockLine(props: {
 
 /** c4 围栏代码块容器：无 border / 无 title；lang 保留接收但 c4 不画
  *  （c5 才在前置画 `ts │`，c4 定稿不画）。box backgroundColor + 左右 1
- *  padding + 块间 margin 1 行的视觉契约。 */
-function CodeBlock(props: {
+ *  padding + 块间 margin 1 行的视觉契约。`compact` 去掉垂直 margin，供
+ *  工具卡内嵌预览，避免行账多 2 空行。 */
+export function CodeBlock(props: {
   readonly lang: string;
-  readonly lines: string[];
+  readonly lines: readonly string[];
+  readonly compact?: boolean;
 }): ReactNode {
   return (
     <box
@@ -271,8 +273,8 @@ function CodeBlock(props: {
       backgroundColor={tuiPalette.codeBlockBg}
       paddingLeft={1}
       paddingRight={1}
-      marginTop={1}
-      marginBottom={1}
+      marginTop={props.compact ? 0 : 1}
+      marginBottom={props.compact ? 0 : 1}
     >
       {props.lines.map((l, i) => (
         <CodeBlockLine
