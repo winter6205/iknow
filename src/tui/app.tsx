@@ -1527,13 +1527,33 @@ export function TuiApp(props: TuiAppProps): ReactNode {
                 }),
               };
             });
-            setNotice({
-              lines: ["已压缩上下文（保留尾部，裁剪早期消息）。"],
-            });
+            // plan T4:reason 区分 windowed / full_summary 文案,告诉用户真实
+            // 压缩路径而非统一「保留尾部，裁剪早期消息」误导(windowed 裁早期,
+            // full_summary 替换为 LLM 摘要前缀 + 保留尾部,行为差异显著)。
+            const compactedReason = compactResult.reason;
+            const compactedLines =
+              compactedReason === "full_summary"
+                ? ["已通过结构化摘要压缩上下文（保留尾部 + 摘要前缀）。"]
+                : ["已压缩上下文（保留尾部，裁剪早期消息）。"];
+            setNotice({ lines: compactedLines });
           } else {
-            setNotice({
-              lines: ["上下文未达压缩阈值，无需压缩。"],
-            });
+            // plan T4:reason 分类文案,告诉用户真实未压缩原因而非统一「未达
+            // 阈值」误导(below_token_threshold 真实未达;messages_too_few
+            // 是窗口不可丢且摘要失败的双失败态)。
+            const noopReason = compactResult.reason;
+            const noopLines = (() => {
+              switch (noopReason) {
+                case "below_token_threshold":
+                  return ["当前 token 未达压缩阈值，无需压缩。"];
+                case "messages_too_few":
+                  return [
+                    "消息条数过少，无法做窗口压缩，且摘要失败 — 上下文保持原样。",
+                  ];
+                default:
+                  return ["上下文未达压缩阈值，无需压缩。"];
+              }
+            })();
+            setNotice({ lines: noopLines });
           }
         } catch (err) {
           setNotice({ lines: [`压缩失败：${describeError(err)}`] });
