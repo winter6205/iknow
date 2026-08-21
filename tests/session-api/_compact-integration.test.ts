@@ -209,6 +209,170 @@ function textOf(msg: AnthropicNativeMessage): string {
   return block ? block.text : "";
 }
 
+/**
+ * plan compress-trigger-gate T2:hub.compactSession 接入 token-gate + reason
+ * 透传。3 case 覆盖 token 未达阈值、full summary 路径、runFullCompact 抛错。
+ * 装配模式沿用既有的 `makeCompactDeps`(真实 SessionStore + temp dir + 真
+ * conversationId,贴合 typed-error catch 契约测试矩阵 — `test.md`「命令 handler
+ * 集成测试必须接真实 store + fresh conversationId」)。
+ */
+
+/** 让 runFullCompact 成功的 adapter (返回固定 summary 文本)。 */
+function makeSummarizeAdapter(opts: {
+  readonly summaryText: string;
+}): LoopAdapter {
+  return Object.freeze({
+    encodeUserText: (t: string): AnthropicNativeMessage => ({
+      role: "user",
+      content: [{ type: "text", text: t }],
+    }),
+    encodeToolResults: (): AnthropicContentBlock[] => [],
+    step: async (): Promise<AssistantTurnResult> =>
+      assistantResult({
+        texts: [
+          `<analysis>scratchpad</analysis>\n<summary>${opts.summaryText}</summary>`,
+        ],
+        toolCalls: [],
+        supplierStop: "success",
+      }),
+  });
+}
+
+/** 让 runFullCompact 抛错的 adapter — step() throws,触发 adapter_failed outcome。 */
+function makeThrowingAdapter(message: string): LoopAdapter {
+  return Object.freeze({
+    encodeUserText: (t: string): AnthropicNativeMessage => ({
+      role: "user",
+      content: [{ type: "text", text: t }],
+    }),
+    encodeToolResults: (): AnthropicContentBlock[] => [],
+    step: async (): Promise<AssistantTurnResult> => {
+      throw new Error(message);
+    },
+  });
+}
+
+/** 预置带指定 messages 的 session 文件(不带 taskFocus,纯 compact 路径)。 */
+async function seedSession(
+  store: SessionStore,
+  id: string,
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): Promise<void> {
+  const now = new Date().toISOString();
+  await store.save({
+    id,
+    file: {
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      conversation_id: id,
+      messages,
+      jsonMode: false,
+      turnCount: 0,
+      updatedAt: now,
+      title: "",
+      cwd: process.cwd(),
+      sanitized_at: now,
+      checkpoints: [],
+    } satisfies SessionFileV1,
+  });
+}
+
+describe("plan compress-trigger-gate T2: hub.compactSession token-gate + reason 透传", () => {
+  it("fresh session 消息 ≤ 6 + 低 token → compacted:false + reason:below_token_threshold", async () => {
+    // 3 条 100-char 短消息 → 单条 estimate = floor(103/4) = 25;
+    // 总 raw ≈ 75 → estimate ≈ 100;thresholdTokens=10_000 远高于 estimate →
+    // evaluateCompactTrigger → action=noop,reason=below_token_threshold。
+    // fresh conversationId:不预存 session 文件,store.load 抛 not_found 是真实边界;
+    // 本 case 用 seedSession 注入 3 条以构造"非空 + 低 token"组合。
+    const { store } = await storeFor();
+    const id = "below-threshold";
+    const messages = Array.from({ length: 3 }, (_, i) => ({
+      role: "user" as const,
+      content: [{ type: "text" as const, text: `msg-${i}` }],
+    }));
+    await seedSession(store, id, messages);
+
+    // 即使有 adapter,noop 路径不会调到(runFullCompact / compactMessages 都不进)。
+    const hub = new SessionHub({
+      store,
+      deps: makeCompactDeps({ adapter: makeOkAdapter("ok") }),
+    });
+    const res = await hub.compactSession(id);
+
+    expect(res.compacted).toBe(false);
+    assert.equal(res.reason, "below_token_threshold");
+    assert.equal(res.beforeCount, 3);
+    assert.equal(res.afterCount, 3);
+    // 不落盘 — updatedAt 不变;no-op 边界。
+    const loaded = await store.load(id);
+    assert.equal(loaded.messages.length, 3);
+  });
+
+  it("5 条 + 高 token (每条灌 50k chars) → compacted:true + reason:full_summary", async () => {
+    // 5 条 50_000-char 文本 → 单条 estimate = floor(50_003/4) = 12_500;
+    // 总 raw = 62_500 → estimate ≈ 83_333;thresholdTokens=10_000 远低于 →
+    // 走 token 已超分支。messages.length=5 ≤ DEFAULT_KEEP_RECENT=6 → slicedFrom=0
+    // → compact_via_full_summary / messages_too_few。runFullCompact 成功 →
+    // reason 强制 full_summary。
+    const { store } = await storeFor();
+    const id = "full-summary-path";
+    const messages = Array.from({ length: 5 }, () => ({
+      role: "user" as const,
+      content: [{ type: "text" as const, text: "x".repeat(50_000) }],
+    }));
+    await seedSession(store, id, messages);
+
+    const hub = new SessionHub({
+      store,
+      deps: makeCompactDeps({
+        adapter: makeSummarizeAdapter({ summaryText: "sum-body" }),
+      }),
+    });
+    const res = await hub.compactSession(id);
+
+    expect(res.compacted).toBe(true);
+    assert.equal(res.reason, "full_summary");
+    assert.equal(res.beforeCount, 5);
+    // 落盘后 = [summaryUserMessage] + 0 tail = 1 条。
+    assert.equal(res.afterCount, 1);
+    const loaded = await store.load(id);
+    assert.equal(loaded.messages.length, 1);
+    const firstText = textOf(loaded.messages[0]!);
+    assert.ok(firstText.includes("This session is being continued"));
+    assert.ok(firstText.includes("sum-body"));
+  });
+
+  it("runFullCompact 抛错 → compacted:false + reason:messages_too_few", async () => {
+    // 5 条高 token + adapter 抛错 → evaluateCompactTrigger 仍判 full_summary →
+    // split = { dropped: before, kept: [] } → runFullCompact 走 throwing adapter
+    // 返回 { kind: "adapter_failed" } → nextMessages 仍 undefined →
+    // compactMessages(before) 因 slicedFrom=0 返回原数组(5 条)== before.length →
+    // 走 messages_too_few 路径。compacted:false + 不落盘。
+    const { store } = await storeFor();
+    const id = "throw-full-compact";
+    const messages = Array.from({ length: 5 }, () => ({
+      role: "user" as const,
+      content: [{ type: "text" as const, text: "x".repeat(50_000) }],
+    }));
+    await seedSession(store, id, messages);
+
+    const hub = new SessionHub({
+      store,
+      deps: makeCompactDeps({
+        adapter: makeThrowingAdapter("synthetic full-compact throw"),
+      }),
+    });
+    const res = await hub.compactSession(id);
+
+    expect(res.compacted).toBe(false);
+    assert.equal(res.reason, "messages_too_few");
+    assert.equal(res.beforeCount, 5);
+    assert.equal(res.afterCount, 5);
+    // 不落盘(messages_too_few 路径与 no-op 一致:不 bump updatedAt)。
+    const loaded = await store.load(id);
+    assert.equal(loaded.messages.length, 5);
+  });
+});
+
 describe("reactive compact + boundaryAttachment (#458 T8)", () => {
   it("taskFocus 在场 + flaky adapter → reactive compact 触发 → 落盘 messages 含 placeholder + attachment", async () => {
     const { store } = await storeFor();
