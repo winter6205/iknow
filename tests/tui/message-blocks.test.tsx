@@ -505,9 +505,7 @@ test("tool_use 摘要行：cols 收口单行不折（narrow cols）", async () =
   await setupNarrow.renderer.destroy();
 });
 
-test("tool_use preview 固定高度：content 长时渲染稳定，摘要行可见", async () => {
-  // 多行 content → toolPreviewRows 产多行 diff（write_file 纯 add）。
-  // preview 收进固定高度 ScrollableOutputRegion，不撑开渲染帧；摘要行仍在。
+test("tool_use preview 截断窗：新文件代码首窗可见，溢出标记，无全文", async () => {
   const content = Array.from(
     { length: 20 },
     (_, i) => `line-${String(i).padStart(2, "0")}`
@@ -526,19 +524,45 @@ test("tool_use preview 固定高度：content 长时渲染稳定，摘要行可�
         ],
       }}
       cols={40}
-      statusMap={new Map()}
+      statusMap={new Map([["tu-preview", false]])}
     />,
-    { width: 40, height: 12, exitOnCtrlC: false }
+    { width: 40, height: 20, exitOnCtrlC: false }
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 摘要行（单行，不折）可见。
-  const sumLines = frame.split("\n").filter((l) => l.includes("[运行中]"));
+  const sumLines = frame.split("\n").filter((l) => l.includes("[完成]"));
   expect(sumLines.length).toBeGreaterThan(0);
-  // preview 为固定高度区：帧高 12 行，末 diff 行（line-19）可见（sticky 贴底），
-  // 首 diff 行（line-00）被内部滚动折叠不可见——证明固定高度滚动，不撑开布局。
-  expect(frame).toContain("line-19");
-  expect(frame).not.toContain("line-00");
+  expect(frame).toContain("line-00");
+  expect(frame).not.toContain("line-19");
+  expect(frame).toContain("还有");
+  expect(frame).not.toContain("+line-00");
+  await setup.renderer.destroy();
+});
+
+test("tool_use preview 截断窗：edit_file 显示截断 diff", async () => {
+  const setup = await testRender(
+    <MessageBlocks
+      message={{
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "tu-edit",
+            name: "edit_file",
+            input: { path: "a.ts", old_str: "old", new_str: "new" },
+          },
+        ],
+      }}
+      cols={80}
+      statusMap={new Map([["tu-edit", false]])}
+    />,
+    { width: 80, height: 20, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("[完成]");
+  expect(frame).toContain("-old");
+  expect(frame).toContain("+new");
   await setup.renderer.destroy();
 });
 
@@ -617,6 +641,27 @@ test("T7 assistant 消息：底色 box 包裹后渲染不崩，markdown 产物�
   expect(frame).toContain("T7 标题");
   expect(frame).toContain("正文段落");
   expect(frame).toContain("列表项");
+  await setup.renderer.destroy();
+});
+
+test("history write_file 未配对（空 statusMap）：仅 [运行中] 摘要，不含 content 正文", async () => {
+  const bodyLine = "UNIQUE_WRITE_BODY_LINE_alpha";
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "tu-unpaired-write",
+        name: "write_file",
+        input: { path: "a.ts", content: `${bodyLine}\nsecond-body-line` },
+      },
+    ],
+  };
+  const setup = await renderBlocks(msg, { statusMap: emptyStatusMap() });
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("[运行中]");
+  expect(frame).not.toContain(bodyLine);
+  expect(frame).not.toContain("second-body-line");
   await setup.renderer.destroy();
 });
 

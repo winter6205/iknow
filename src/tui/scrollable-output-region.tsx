@@ -3,7 +3,7 @@
  * src/tui/scrollable-output-region.tsx
  *
  * T3（plans/tui-render-optimization.md）：固定高度工具输出区 — 把工具调用后的
- * 完整输出（bash stdout/stderr、write/edit diff 统一 `toolPreviewRows`）收进
+ * 完整输出（bash stdout/stderr；write/edit 完成态走 `completedToolPreview`）收进
  * 固定高度内部滚动区，不再撑开主消息流。
  *
  * 结构：OpenTUI `<scrollbox>`（任意可嵌套 + sticky 实例级，P0 调研已确认）

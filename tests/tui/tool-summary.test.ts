@@ -19,6 +19,8 @@ import {
   projectToolLines,
   subagentDisplayMark,
   summarizeToolCall,
+  TOOL_PREVIEW_WINDOW,
+  completedToolPreview,
   toolPreviewRows,
   visualWidth,
 } from "../../src/tui/tool-summary.js";
@@ -343,14 +345,19 @@ describe("toolPreviewRows: 写/改文件内容可见（统一 diff）", () => {
     expect(rows[0]?.text).toMatch(/^@@ -1,0 \+1,2 @@$/);
   });
 
-  test("write_file 60 行 → diff 行数 = 60 + 1 hunk 头 + 1 尾部标记（无封顶）", () => {
+  test("write_file 60 行 create → completed 截断到窗，不是无封顶绿 diff", () => {
     const content = Array.from({ length: 60 }, (_, i) => `line-${i}`).join(
       "\n"
     );
-    const rows = toolPreviewRows("write_file", { path: "a.ts", content }, 80);
-    expect(rows).toHaveLength(62);
-    expect(rows.filter((r) => r.kind === "add")).toHaveLength(60);
-    expect(rows[0]?.text).toMatch(/^@@ -1,0 \+1,60 @@$/);
+    const preview = completedToolPreview("write_file", {
+      path: "a.ts",
+      content,
+    });
+    expect(preview.kind).toBe("code");
+    if (preview.kind !== "code") return;
+    expect(preview.lines).toHaveLength(TOOL_PREVIEW_WINDOW);
+    expect(preview.lines[0]).toBe("line-0");
+    expect(preview.hiddenLineCount).toBe(60 - TOOL_PREVIEW_WINDOW);
   });
 
   test("edit_file → old（del）/ new（add）diff", () => {
@@ -497,6 +504,138 @@ describe("子代理工具专属显示（isSubagentTool / subagentDisplayMark / S
     });
     expect(line).toBe("tool_search · ok");
     expect(line).not.toContain("子代理");
+  });
+});
+
+describe("completedToolPreview: 完成态分类 + 截断窗", () => {
+  test("空 content → 无正文行", () => {
+    const preview = completedToolPreview("write_file", {
+      path: "a.ts",
+      content: "",
+    });
+    expect(preview.kind).toBe("empty");
+  });
+
+  test("缺 path → 空预览", () => {
+    expect(completedToolPreview("write_file", { content: "hello" }).kind).toBe(
+      "empty"
+    );
+    expect(
+      completedToolPreview("write_file", { path: "", content: "hello" }).kind
+    ).toBe("empty");
+  });
+
+  test("write_file 且 old 空 → kind 为代码，行来自 content", () => {
+    const preview = completedToolPreview("write_file", {
+      path: "a.ts",
+      content: "const a = 1;\nconst b = 2;",
+    });
+    expect(preview.kind).toBe("code");
+    if (preview.kind !== "code") return;
+    expect(preview.lines).toEqual(["const a = 1;", "const b = 2;"]);
+    expect(preview.hiddenLineCount).toBe(0);
+    expect(preview.lines.some((l) => l.startsWith("+"))).toBe(false);
+  });
+
+  test("side-channel old 空串 → 代码，不用 newContent 做整文件绿 diff", () => {
+    const preview = completedToolPreview(
+      "write_file",
+      { path: "a.ts", content: "ignored" },
+      { oldContent: "", newContent: "x\ny\n" }
+    );
+    expect(preview.kind).toBe("code");
+    if (preview.kind !== "code") return;
+    expect(preview.lines).toEqual(["x", "y"]);
+  });
+
+  test("write_file 覆盖（old 非空）→ kind 为 diff", () => {
+    const preview = completedToolPreview(
+      "write_file",
+      { path: "a.ts", content: "b" },
+      { oldContent: "a\n", newContent: "b\n" }
+    );
+    expect(preview.kind).toBe("diff");
+    if (preview.kind !== "diff") return;
+    expect(preview.rows.some((r) => r.kind === "del")).toBe(true);
+    expect(preview.rows.some((r) => r.kind === "add")).toBe(true);
+  });
+
+  test("edit_file → kind 为 diff", () => {
+    const preview = completedToolPreview("edit_file", {
+      path: "a.ts",
+      old_str: "foo",
+      new_str: "bar",
+    });
+    expect(preview.kind).toBe("diff");
+    if (preview.kind !== "diff") return;
+    expect(preview.rows.find((r) => r.kind === "del")?.text).toBe("-foo");
+    expect(preview.rows.find((r) => r.kind === "add")?.text).toBe("+bar");
+  });
+
+  test("edit_file old_str 空串 → kind 为 diff 不是 code", () => {
+    const preview = completedToolPreview("edit_file", {
+      path: "a.ts",
+      old_str: "",
+      new_str: "x",
+    });
+    expect(preview.kind).toBe("diff");
+  });
+
+  test("正文长于可见窗 → 只产出窗内行 + 溢出计数", () => {
+    const content = Array.from({ length: 20 }, (_, i) => `L${i}`).join("\n");
+    const preview = completedToolPreview("write_file", {
+      path: "a.ts",
+      content,
+    });
+    expect(preview.kind).toBe("code");
+    if (preview.kind !== "code") return;
+    expect(preview.lines).toHaveLength(TOOL_PREVIEW_WINDOW);
+    expect(preview.hiddenLineCount).toBe(20 - TOOL_PREVIEW_WINDOW);
+  });
+
+  test("overwrite/edit visible rows 是 toolPreviewRows 的截断前缀", () => {
+    const oldContent = Array.from({ length: 40 }, (_, i) => `old-${i}`).join(
+      "\n"
+    );
+    const newContent = Array.from({ length: 40 }, (_, i) => `new-${i}`).join(
+      "\n"
+    );
+    const input = { path: "a.ts", old_str: "x", new_str: "y" };
+    const opts = { oldContent, newContent };
+    const all = toolPreviewRows("edit_file", input, 80, opts);
+    const preview = completedToolPreview("edit_file", input, opts);
+    expect(preview.kind).toBe("diff");
+    if (preview.kind !== "diff") return;
+    expect(preview.rows).toEqual(all.slice(0, TOOL_PREVIEW_WINDOW));
+    expect(preview.hiddenLineCount).toBe(all.length - TOOL_PREVIEW_WINDOW);
+  });
+
+  test("超长 overwrite diff → 截断到同一窗常数", () => {
+    const oldContent = Array.from({ length: 40 }, (_, i) => `old-${i}`).join(
+      "\n"
+    );
+    const newContent = Array.from({ length: 40 }, (_, i) => `new-${i}`).join(
+      "\n"
+    );
+    const preview = completedToolPreview(
+      "edit_file",
+      { path: "a.ts", old_str: "x", new_str: "y" },
+      { oldContent, newContent }
+    );
+    expect(preview.kind).toBe("diff");
+    if (preview.kind !== "diff") return;
+    expect(preview.rows.length).toBeLessThanOrEqual(TOOL_PREVIEW_WINDOW);
+    expect(preview.hiddenLineCount).toBeGreaterThan(0);
+    expect(preview.rows.length + preview.hiddenLineCount).toBeGreaterThan(
+      TOOL_PREVIEW_WINDOW
+    );
+  });
+
+  test("bash 等非 write/edit → 空", () => {
+    expect(completedToolPreview("bash", { command: "ls" }).kind).toBe("empty");
+    expect(completedToolPreview("read_file", { path: "a.ts" }).kind).toBe(
+      "empty"
+    );
   });
 });
 

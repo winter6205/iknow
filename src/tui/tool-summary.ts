@@ -14,9 +14,10 @@
  * 行级窗口账目一律按 1 行计。传 `cols` 时按视觉宽度收口（预留最宽装饰），
  * 保证三种形态单行不折。
  *
- * 内容可见性：write_file / edit_file 完成后 `toolPreviewRows` 产出统一 diff
- * 预览行（computeDiff 单源），`MessageBlocks` 渲染与 `live-tool-preview`
- * 共用本函数作为单源——行账与渲染不漂移。
+ * 内容可见性：write_file / edit_file 完成后 `completedToolPreview` 产出
+ * 截断代码或 diff（UI SSOT）；live box 与历史 `ToolPreviewRows` 共用
+ * `CompletedToolPreviewView` 渲染。`toolPreviewRows` 仍是无界 DiffLine
+ * 助手（测试锁 create 整文件绿 diff），生产 UI 不直接调用。
  *
  * 文本收口助手（visualWidth / clipOneLine / clipOneLineVisual）：归档时代
  * SSOT 在 text.ts（未入 T4 迁移清单），T4 范围内收敛在本文件导出，供
@@ -247,20 +248,124 @@ export function formatRanSuffix(count: number): string {
   return "";
 }
 
+/** 完成态 write/edit 预览可见窗（live 完成态与历史共用；截断即折叠）。 */
+export const TOOL_PREVIEW_WINDOW = 6;
+
+export type CompletedToolPreview =
+  | { readonly kind: "empty" }
+  | {
+      readonly kind: "code";
+      readonly lines: readonly string[];
+      readonly hiddenLineCount: number;
+    }
+  | {
+      readonly kind: "diff";
+      readonly rows: readonly DiffLine[];
+      readonly hiddenLineCount: number;
+    };
+
+const EMPTY_COMPLETED_PREVIEW: CompletedToolPreview = { kind: "empty" };
+
+function splitContentLines(content: string): readonly string[] {
+  if (content.length === 0) return [];
+  const lines = content.split("\n");
+  return lines[lines.length - 1] === "" ? lines.slice(0, -1) : lines;
+}
+
+function truncateWindow<T>(items: readonly T[]): {
+  readonly visible: readonly T[];
+  readonly hiddenLineCount: number;
+} {
+  if (items.length <= TOOL_PREVIEW_WINDOW) {
+    return { visible: items, hiddenLineCount: 0 };
+  }
+  return {
+    visible: items.slice(0, TOOL_PREVIEW_WINDOW),
+    hiddenLineCount: items.length - TOOL_PREVIEW_WINDOW,
+  };
+}
+
+function resolveWriteEditPair(
+  name: string,
+  rec: Record<string, unknown>,
+  opts?: { readonly oldContent?: string; readonly newContent?: string }
+): { readonly oldContent: string; readonly newContent: string } | null {
+  let oldContent = opts?.oldContent;
+  let newContent = opts?.newContent;
+  if (oldContent === undefined || newContent === undefined) {
+    if (name === "edit_file") {
+      const o = rec.old_str;
+      const n = rec.new_str;
+      if (typeof o !== "string" || typeof n !== "string") return null;
+      oldContent = o;
+      newContent = n;
+    } else if (name === "write_file") {
+      const c = rec.content;
+      if (typeof c !== "string") return null;
+      oldContent = "";
+      newContent = c;
+    } else {
+      return null;
+    }
+  }
+  return { oldContent, newContent };
+}
+
+function hasPreviewPath(rec: Record<string, unknown>): boolean {
+  return typeof rec.path === "string" && rec.path.length > 0;
+}
+
 /**
- * 工具内容预览行（内容可见性，统一 diff 版）：edit_file / write_file 调用
- * `computeDiff`（diff-unified.ts）产出逐行 `DiffLine[]`（带行号 + kind，
- * 供 diff-view.tsx 上色/排行号）。其余工具 / 无内容 → 空数组。
+ * 完成态 write/edit 预览：分类（新文件→代码行；覆盖/编辑→diff）+ 截断到
+ * `TOOL_PREVIEW_WINDOW`。非 write/edit、缺 path、空正文 → `{ kind: "empty" }`。
+ * 不读工作区；权威数据 = input + 旁路 old/new。
+ */
+export function completedToolPreview(
+  name: string,
+  input: unknown,
+  opts?: { readonly oldContent?: string; readonly newContent?: string }
+): CompletedToolPreview {
+  if (name !== "write_file" && name !== "edit_file") {
+    return EMPTY_COMPLETED_PREVIEW;
+  }
+  const rec = inputRecord(input);
+  if (!hasPreviewPath(rec)) return EMPTY_COMPLETED_PREVIEW;
+  const pair = resolveWriteEditPair(name, rec, opts);
+  if (pair === null) return EMPTY_COMPLETED_PREVIEW;
+  if (name === "write_file" && pair.oldContent === "") {
+    const { visible, hiddenLineCount } = truncateWindow(
+      splitContentLines(pair.newContent)
+    );
+    if (visible.length === 0) return EMPTY_COMPLETED_PREVIEW;
+    return { kind: "code", lines: visible, hiddenLineCount };
+  }
+  const { visible, hiddenLineCount } = truncateWindow(
+    toolPreviewRows(name, rec, 0, {
+      oldContent: pair.oldContent,
+      newContent: pair.newContent,
+    })
+  );
+  if (visible.length === 0) return EMPTY_COMPLETED_PREVIEW;
+  return { kind: "diff", rows: visible, hiddenLineCount };
+}
+
+/** 完成态预览截断后的溢出提示（live / 历史共用文案）。 */
+export function previewOverflowLabel(hiddenLineCount: number): string {
+  return `还有 ${hiddenLineCount} 行`;
+}
+
+/**
+ * 无界 DiffLine 助手（非生产 UI SSOT）：edit_file / write_file 调用
+ * `computeDiff` 产出完整 `DiffLine[]`。其余工具 / 无内容 → 空数组。
+ * 生产完成态预览走 `completedToolPreview`（create 保持代码行，diff 再截断
+ * 本函数的结果）；测试仍用本函数锁 write_file create 的整文件绿 diff。
  *
  * `opts.oldContent / opts.newContent`（side-channel）：live 运行完成事件
  * 携带读盘前后全文（与 model tool_result 严格分离）→ 精确 diff。缺省（历史
  * 持久化消息，meta 在 model 边界被丢弃）回退 intent-diff：
  *  - edit_file：input.old_str / input.new_str 片段 diff；
  *  - write_file：old 视为空串 → 纯 add；
- *  - 其余工具：空数组（无 diff 预览，保持历史行账）。
- *
- * SSOT：`MessageBlocks`（全可见路径渲染）与 `live-tool-preview`（live tail）
- * 共用本函数产 diff 行——行账与渲染不漂移。
+ *  - 其余工具：空数组。
  */
 export function toolPreviewRows(
   name: string,
@@ -268,28 +373,10 @@ export function toolPreviewRows(
   _cols: number,
   opts?: { readonly oldContent?: string; readonly newContent?: string }
 ): readonly DiffLine[] {
-  const rec = inputRecord(input);
-  if (name === "edit_file" || name === "write_file") {
-    let oldContent = opts?.oldContent;
-    let newContent = opts?.newContent;
-    if (oldContent === undefined || newContent === undefined) {
-      if (name === "edit_file") {
-        const o = rec.old_str;
-        const n = rec.new_str;
-        if (typeof o !== "string" || typeof n !== "string") return [];
-        oldContent = o;
-        newContent = n;
-      } else {
-        // write_file：old 视为空串（新文件 / 覆盖写都按纯新增展示）。
-        const c = rec.content;
-        if (typeof c !== "string") return [];
-        oldContent = "";
-        newContent = c;
-      }
-    }
-    return computeDiff(name, oldContent, newContent);
-  }
-  return [];
+  if (name !== "edit_file" && name !== "write_file") return [];
+  const pair = resolveWriteEditPair(name, inputRecord(input), opts);
+  if (pair === null) return [];
+  return computeDiff(name, pair.oldContent, pair.newContent);
 }
 
 /** tool_use_id → is_error 状态映射（tool_result 精确配对，SSOT）。 */
