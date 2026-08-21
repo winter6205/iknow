@@ -19,8 +19,12 @@ export function useChatCompact(chat: ChatApi): {
     setCompacting(true);
     try {
       const didCompact = await chat.compact();
-      // false 的两类成因分开提示：无会话（compact 早退）≠ 未达压缩阈值，
-      // 避免会话缺席时误导用户"上下文未达阈值"。
+      // plan T4:web 端 useSessionChat.compact() 仍只返 boolean(避免扩
+      // SessionChatApi 公开 surface + 打破 tests/web 既有断言),hook 走
+      // 简化二分支文案。TUI 4 分支精度由 src/tui/app.tsx 承担。didCompact
+      // 涵盖 windowed / full_summary 两条压缩成功路径;false 涵盖
+      // below_token_threshold / messages_too_few / cancelled 三态,后者已
+      // 走 try/catch 抛错分支(cancelled 路径 runFullCompact 抛错)。
       chat.pushNotice(
         didCompact
           ? "已压缩上下文"
