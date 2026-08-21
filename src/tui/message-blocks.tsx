@@ -191,6 +191,10 @@ export function MessageBlocks(props: {
    *  流的 streamDraft.thinkingSeconds()）传；历史消息缺省不传 → 折叠行只显
    *  `[思考] · ran N shell commands`，避免「思考了 0 秒」伪精度。 */
   readonly thinkingSeconds?: number;
+  /** idle 时当前 turn 已由 ChatView 画 turn 级折叠行：本块不再画 `[思考]`。 */
+  readonly hideThinking?: boolean;
+  /** idle 时当前 turn 折叠：不画 `[完成] name · detail` 行；write/edit 预览仍留。 */
+  readonly hideToolSummaries?: boolean;
   readonly noTrailingSelfMargin?: boolean;
 }): ReactNode {
   const { message, cols, statusMap, thinkingExpanded = false } = props;
@@ -241,7 +245,7 @@ export function MessageBlocks(props: {
   // T7：底色块 paddingX=1 两侧 → 内部内容宽度收窄 2 列。
   const innerCols = Math.max(1, cols - 2);
   const nodes: ReactNode[] = [];
-  if (summary !== "") {
+  if (summary !== "" && props.hideThinking !== true) {
     nodes.push(
       <ThinkingSummary
         key="tk-sum"
@@ -251,7 +255,7 @@ export function MessageBlocks(props: {
       />
     );
   }
-  if (summary !== "" && thinkingExpanded) {
+  if (summary !== "" && thinkingExpanded && props.hideThinking !== true) {
     message.content.forEach((block, i) => {
       if (block.type === "thinking") {
         nodes.push(
@@ -278,7 +282,9 @@ export function MessageBlocks(props: {
     } else if (block.type === "tool_use") {
       nodes.push(
         <box key={`u${i}`} flexDirection="column">
-          <ToolSummaryRow tu={block} statusMap={statusMap} cols={innerCols} />
+          {props.hideToolSummaries !== true && (
+            <ToolSummaryRow tu={block} statusMap={statusMap} cols={innerCols} />
+          )}
           <ToolPreviewRows
             tu={block}
             cols={innerCols}
