@@ -107,6 +107,12 @@ _Avoid_: `goal.text ?? query` 当验收任务；把 goal 当模型可推进的�
 **taskFocus（任务焦点）**: 正常模式 compact 保焦对象（确定性提取，v1 不用 LLM）；寒暄不 seed，像样任务句写入一次后不自动切；仅 compact 边界渲染；自动模式内不存在。
 _Avoid_: 用 LLM 摘要；普通 turn 注入；当完成验收对象或 `/goal` 的第二张焦点卡；首条「你好」当终身焦点
 
+**compact reason**: 触发判据返回的分类标识，取值 `below_token_threshold` | `messages_too_few` | `windowed` | `full_summary`，单源 `src/harness/compress/index.ts:evaluateCompactTrigger()`；手动 `/compact`（hub.compactSession）与 loop-engine proactive 两条路径共用同一函数返回值，决定 UI 文案分支与 wire 字段（`CompactSessionResponse.reason`）。
+_Avoid_: 「未达阈值」「压缩成功」等 UI 字面字符串直接出现在业务代码；reason 字面量在 hub/loop-engine 多处内联（应经 `compactReasonFor` SSOT helper）；把 reason 错放成 `LoopTrace` / `LlmCallRecord` 字段
+
+**auto-compact token gate**: proactive compact 在每轮 step 前的 token 阈值判据，公式 `contextWindow − MAX_OUTPUT_TOKENS_FOR_SUMMARY − AUTOCOMPACT_BUFFER_TOKENS`（值见 `src/harness/compress/threshold.ts`），显式 `IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS` 可覆盖；与手动 `/compact` 共享同一函数 `evaluateCompactTrigger`，token 估算仅参与判据决策，**不**进 trace / `RunResult.lastUsage`（ADR-0008 D6）。
+_Avoid_: 把字符估算（`estimateMessagesTokens`）当作真实 token 用；gate 决策绕开 `evaluateCompactTrigger` 直接调 `shouldAutoCompact` 旧接口；把 threshold 当成「每机配置」（应是项目栈决策）
+
 **task 取值公式**: 无统一 `??` 链。自动模式判官 `task = goal.text`（无 fallback）；正常模式不设完成向 `task`。
 _Avoid_: `goal ?? taskFocus ?? query`；`goal.text ?? query`；把 evidenceContext 拼进 task
 
