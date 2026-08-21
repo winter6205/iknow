@@ -1,57 +1,8 @@
 // Q3 决议(proactive 估算触发)+ ADR-0013(reactive PromptTooLongError 触发,
 // plan T3):proactive(shouldAutoCompact)+ reactive(loop-engine 兜底,
 // 每 run 限 1 次)双保险共存,共用 `compactMessages`,无阈值/优先级冲突。
-//
-// plan compress-trigger-gate T1:新增 `evaluateCompactTrigger` 统一触发判据,
-// 手动 /compact + loop-engine proactive 共用同一函数,token 阈值 + 窗口守门
-// + full summary 降级三段分类返回;`shouldAutoCompact` 保留为兼容 wrapper
-// (外部调用方未迁移前不破)。
 import type { AnthropicNativeMessage } from "../model-adapter/types.js";
-import { DEFAULT_KEEP_RECENT } from "./constant.js";
 import { estimateMessagesTokens } from "./estimate.js";
-import { preserveToolPairs } from "./window.js";
-
-/** CompactReason — 触发判据分类标识,SSOT 见 plans/compress-trigger-gate.md */
-type CompactReason =
-  | "below_token_threshold" // token 未达阈值,不压缩
-  | "messages_too_few" // token 已超但 splitForCompaction 无窗口
-  | "windowed" // token 已超 + 有可丢前缀,走窗口压缩
-  | "full_summary"; // token 已超 + 无窗口,走 full summary 路径
-
-/** CompactTriggerDecision — 判据返回 discriminated union */
-type CompactTriggerDecision =
-  | { action: "noop"; reason: "below_token_threshold" }
-  | { action: "compact_via_full_summary"; reason: "messages_too_few" }
-  | { action: "compact_via_window"; reason: "windowed" };
-
-/**
- * 统一触发判据。手动 /compact + loop-engine proactive 共用本函数。
- *
- * ADR-0013 D3:proactive/reactive 共用 compactMessages,本函数只决定"走哪条
- * 压缩路径",不引入新压缩实现。token 估算仅供判据决策(ADR-0008 D6)。
- */
-export function evaluateCompactTrigger(
-  messages: ReadonlyArray<AnthropicNativeMessage>,
-  ctx: {
-    contextWindow: number;
-    threshold: number;
-    keepRecent?: number; // 默认 DEFAULT_KEEP_RECENT
-  }
-): CompactTriggerDecision {
-  const estimated = estimateMessagesTokens(messages);
-  if (estimated < ctx.threshold) {
-    return { action: "noop", reason: "below_token_threshold" };
-  }
-  // token 已超阈值 — 看窗口是否可丢
-  const { slicedFrom } = preserveToolPairs(
-    messages,
-    ctx.keepRecent ?? DEFAULT_KEEP_RECENT
-  );
-  if (slicedFrom === 0) {
-    return { action: "compact_via_full_summary", reason: "messages_too_few" };
-  }
-  return { action: "compact_via_window", reason: "windowed" };
-}
 
 /**
  * 判断 messages 当前累计 token 是否到达 proactive auto-compact 阈值。
@@ -59,11 +10,6 @@ export function evaluateCompactTrigger(
  * (ADR-0013,plan T3),同一模块的 `compactMessages` 是双保险共用的压缩函数
  * —— proactive 与 reactive 不分叉阈值与压缩逻辑,各自独立触发,共用输出。
  * 共存语义断言见 `tests/harness/compress/dual-insurance.test.ts`。
- *
- * @deprecated — 新 caller 请使用 `evaluateCompactTrigger`(plan
- * compress-trigger-gate T1)。本函数保留为兼容 wrapper,函数体不变以免破坏
- * 既有外部调用方;委托关系 = 仅 token 阈值判据,不含窗口守门 / full summary
- * 降级语义。
  */
 export function shouldAutoCompact(
   messages: ReadonlyArray<AnthropicNativeMessage>,
@@ -97,4 +43,3 @@ export {
   runFullCompact,
 } from "./full-compact.js";
 export type { FullCompactOutcome, CompactAdapter } from "./full-compact.js";
-export type { CompactReason, CompactTriggerDecision };

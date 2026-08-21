@@ -67,9 +67,9 @@ import {
   buildCompactPrompt,
   compactMessages,
   estimateMessagesTokens,
-  evaluateCompactTrigger,
   getAutoCompactThreshold,
   runFullCompact,
+  shouldAutoCompact,
   splitForCompaction,
 } from "./compress/index.js";
 import type { FullCompactOutcome } from "./compress/index.js";
@@ -379,97 +379,6 @@ async function applyCompactAttachment(
     ...state,
     messages: Object.freeze(composed.map((m) => freezeMessage(m))),
   };
-}
-
-/**
- * plan compress-trigger-gate T3:proactive auto-compact 在 token 已超但
- * `splitForCompaction` 无窗口(`messages.length <= DEFAULT_KEEP_RECENT`)时的
- * full summary 降级路径。整段 messages 都视为 dropped(无 kept tail)调
- * `runFullCompact` 跑一次 LLM 摘要;成功后用 `buildCompactedMessages`
- * 重建,命中与窗口压缩同一 `boundaryAttachment` 注入点。
- *
- * 与 `applyCompactAttachment` 的语义差:
- *   - 入参:整段 `state.messages` 都视为 dropped(没有 `keepRecent` 切割);
- *     `applyCompactAttachment` 走 `splitForCompaction` 留 6 条 kept tail。
- *   - 失败回退:本路径**不回退**到 `compactMessages` 纯截断 placeholder——
- *     整段消息视为 dropped 再走 `compactMessages` 等于清空,过于激进
- *     (#467 决议:摘要失败绝不阻塞主 loop,但 full summary 路径宁可保留
- *     原状让 reactive 兜底处理 PromptTooLongError,每 run 限 1 次契约保留)。
- *     失败 / 超时 / 空响应 / adapter 拒绝 → 返回 state 不变;
- *     `lastCompactTurn` 因外层 `compactedState.messages !== state.messages`
- *     检查不更新,下一轮 step 重新进 gate 再尝试(无死循环)。
- *   - signal_aborted → state 不变(Claude Code 取消语义)。
- *
- * `opts.signal` / `opts.onStream`:语义与 `applyCompactAttachment` 完全一致,
- * reactive 调用点传 `opts.signal`(PromptTooLongError 重试前压缩期间用户取消 →
- * 保持原样 → protocolError 收场);proactive 调用点传 `opts?.onStream`
- * (宿主收到 compaction_started / completed / failed + compaction_text_delta)。
- */
-async function applyFullCompactSummary(
-  state: LoopState,
-  deps: LoopEngineDeps,
-  opts?: {
-    readonly signal?: AbortSignal;
-    readonly onStream?: (event: HarnessStreamEvent) => void;
-  }
-): Promise<LoopState> {
-  if (state.messages.length === 0) return state;
-
-  const startedAt = new Date().toISOString();
-  const startMono = performance.now();
-  const inputMessages: ReadonlyArray<AnthropicNativeMessage> = Object.freeze([
-    ...state.messages,
-    deps.adapter.encodeUserText(buildCompactPrompt()),
-  ]);
-  const outcome = await runFullCompact({
-    adapter: deps.adapter,
-    dropped: state.messages,
-    signal: opts?.signal,
-    onStream: opts?.onStream,
-  });
-  const endedAt = new Date().toISOString();
-  const durationMs = performance.now() - startMono;
-
-  // Claude Code 取消语义:中途 signal abort → state 不变
-  // (与 applyCompactAttachment 同一守门,详见该 helper 注释)。
-  if (outcome.kind === "signal_aborted") return state;
-
-  if (outcome.kind === "summarized") {
-    const boundary = deps.boundaryAttachment?.();
-    const composed = buildCompactedMessages({
-      summaryText: outcome.text,
-      kept: [],
-      boundaryText: boundary,
-    });
-    await recordCompactLlmCall({
-      deps,
-      startedAt,
-      endedAt,
-      durationMs,
-      status: "ok",
-      outcome,
-      inputMessages,
-    });
-    return {
-      ...state,
-      messages: Object.freeze(composed.map((m) => freezeMessage(m))),
-    };
-  }
-
-  // 摘要失败 / 超时 / 空响应 / adapter 拒绝 → state 不变;让 reactive 兜底处理
-  // PromptTooLongError(每 run 限 1 次契约保留)。lastCompactTurn 在外层因
-  // `compactedState.messages === state.messages` 不更新 → 下一轮 re-enter gate,
-  // 死循环防御由 evaluateCompactTrigger 自己(noop 早退)兜住。
-  await recordCompactLlmCall({
-    deps,
-    startedAt,
-    endedAt,
-    durationMs,
-    status: "error",
-    outcome,
-    inputMessages,
-  });
-  return state;
 }
 
 /**
@@ -1613,43 +1522,27 @@ export async function run(
   while (true) {
     // #119 T7:compress 缝缺省(字段缺席)→ 跳过检查,行为零变化(byte-identical)。
     // 仅 turnCount 自增(>lastCompactTurn)后扫一次,避免每轮重复 estimate。
-    //
-    // plan compress-trigger-gate T3:proactive gate 改为统一判据
-    // `evaluateCompactTrigger`(token 阈值 + 窗口守门 + full summary 降级三段)。
-    // 旧 `shouldAutoCompact` 仅判 token 阈值,导致 token 已超但 messages ≤
-    // DEFAULT_KEEP_RECENT 时 `splitForCompaction` 返 undefined → applyCompactAttachment
-    // 返回 state 不变 → lastCompactTurn 不更新 → 死循环(每次都重新触发又无效)。
-    // 新判据:
-    //   - compact_via_window → applyCompactAttachment 既有窗口路径(行为不变);
-    //   - compact_via_full_summary → applyFullCompactSummary 整段视为 dropped 走
-    //     LLM 摘要,无 kept tail;成功时 messages 引用变化 → lastCompactTurn 更新;
-    //   - noop → token 未达阈值,跳过(行为零变化)。
     if (deps.compress !== undefined && state.turnCount > lastCompactTurn) {
       const threshold = getAutoCompactThreshold(
         deps.compress.contextWindow,
         deps.compress.thresholdTokens
       );
-      const decision = evaluateCompactTrigger(state.messages, {
-        contextWindow: deps.compress.contextWindow,
-        threshold,
-      });
-      if (decision.action !== "noop") {
-        let compactedState: LoopState;
-        if (decision.action === "compact_via_window") {
-          // 既有窗口路径:splitForCompaction → runFullCompact → buildCompactedMessages。
-          // 行为不变(#458 T7 SC11)。
-          compactedState = await applyCompactAttachment(state, deps, {
-            signal,
-            onStream: opts?.onStream,
-          });
-        } else {
-          // compact_via_full_summary:token 已超但 messages ≤ keepRecent,
-          // 整段视为 dropped 走 LLM 摘要,无 kept tail。
-          compactedState = await applyFullCompactSummary(state, deps, {
-            signal,
-            onStream: opts?.onStream,
-          });
-        }
+      if (
+        shouldAutoCompact(state.messages, {
+          contextWindow: deps.compress.contextWindow,
+          threshold,
+        })
+      ) {
+        // #458 T7 (SC11):applyCompactAttachment 统一 proactive + reactive
+        // 两处 compact(helper 提取无双份实现),并在 placeholder 之后注入
+        // boundaryAttachment 渲染文本。返回 state 同引用 = 未实际压缩。
+        // wait 逻辑参考 Claude Code:压缩中取消 → state 不变,下一轮
+        // stepWithTrace(raceModel)在 callerAbort/hostCancel 处停下;同时透传
+        // onStream 让宿主看到 compaction_started/completed/failed + 摘要 text_delta。
+        const compactedState = await applyCompactAttachment(state, deps, {
+          signal,
+          onStream: opts?.onStream,
+        });
         if (compactedState.messages !== state.messages) {
           // immutable 重建(SC7/Q5);不 mutate,原 messages 引用不变。
           // S10 freeze gate:压缩结果须与 appendMessage 一样冻结每一条,
