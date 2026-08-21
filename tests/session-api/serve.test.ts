@@ -309,6 +309,36 @@ describe("startSessionServe — workspace pre-bind (T4)", () => {
     }
   });
 
+  it("bound workspaceRoot does not receive user.md seed (#584 T2)", async () => {
+    const prevEnv = process.env.IKNOW_WORKSPACE_ROOT;
+    delete process.env.IKNOW_WORKSPACE_ROOT;
+    const root = await mkdtemp(join(tmpdir(), "iknow-t2-noneseeds-"));
+    const localBaseDir = await mkdtemp(
+      join(tmpdir(), "iknow-t2-noneseeds-base-")
+    );
+    try {
+      const out = await startSessionServe({
+        hubOptions: { askUser: createNoAskUser() },
+        dataDir: localBaseDir,
+        workspaceRoot: root,
+        port: 0,
+      });
+      listening = out.listening;
+      await assert.rejects(
+        readFile(join(root, ".iknow", "user.md"), "utf8"),
+        /ENOENT/
+      );
+      await assert.rejects(
+        readFile(join(root, ".iknow", "BOOTSTRAP.md"), "utf8"),
+        /ENOENT/
+      );
+    } finally {
+      if (prevEnv !== undefined) process.env.IKNOW_WORKSPACE_ROOT = prevEnv;
+      await rm(root, { recursive: true, force: true });
+      await rm(localBaseDir, { recursive: true, force: true });
+    }
+  });
+
   it("env IKNOW_WORKSPACE_ROOT → 预绑 (mirror flag 路径)", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-t4-env-"));
     const localBaseDir = await mkdtemp(join(tmpdir(), "iknow-t4-env-base-"));

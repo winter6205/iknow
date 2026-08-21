@@ -215,28 +215,12 @@ describe("initializeIknowWorkspace seeds BOOTSTRAP.md", () => {
   });
 });
 
-// ── rev 2026-08-21 systematic-debugging seed/read path alignment ──
+// ── rev 2026-08-21: seed/read path alignment (issue #584) ──
 //
-// Bug surface: seed (`initializeIknowWorkspace`) used `iknowWorkspaceRoot()`
-// = `process.cwd()/.iknow` as default fallback, while assemble
-// (`readUserProfile` in assemble.ts) reads `ctx.workspaceRoot ?? ctx.userHome`
-// = `<homedir>/.iknow`. When CLI chat/ask/tui has no explicit `--workspace-root`
-// flag and no `IKNOW_WORKSPACE_ROOT` env var, seed wrote USER_TEMPLATE into
-// `<cwd>/.iknow/user.md` (never visible to the user), while assemble reads
-// `<homedir>/.iknow/user.md` (the real profile). Path mismatch.
-//
-// Fix direction A: align seed default fallback to `<homedir>/.iknow` so seed
-// and read land on the same root in the no-explicit case (user.md is global,
-// not per-workspace). `opts.workspace` still wins when given (per-root state
-// for state.json / BOOTSTRAP.md).
-//
-// Note: the default-fallback branch (`opts?.workspace ?? path.join(homedir(),
-// ".iknow")`) is asserted by code inspection — module-level `vi.mock("node:os")`
-// is brittle (ESM namespace is not configurable) and process.env.HOME mutation
-// is non-portable. The expression itself is small and self-evident; production
-// fallback is covered by cli / serve / tui integration suites that exercise
-// the full chain. Here we verify the explicit-workspace path and the cross-
-// module alignment (seed-path == read-path for the same workspaceRoot).
+// Persona files live at `<userHome>/.iknow`. `opts.workspace` on
+// initializeIknowWorkspace is the fake-home test seam (the `.iknow` dir),
+// not workspaceRoot. Assemble reads `ctx.userHome/.iknow` and ignores
+// `ctx.workspaceRoot` for user.md / BOOTSTRAP.md.
 describe("initializeIknowWorkspace seed/read path alignment (rev 2026-08-21)", () => {
   it("explicit workspace: seed lands on <workspace>/.iknow (path is caller-controlled)", async () => {
     const ws = await mkdtemp(join(tmpdir(), "iknow-explicit-ws-"));
@@ -254,16 +238,11 @@ describe("initializeIknowWorkspace seed/read path alignment (rev 2026-08-21)", (
     }
   });
 
-  it("cross-module: seed-path (init) and read-path (assemble ctx.workspaceRoot) align via shared root", async () => {
-    // assemble.readUserProfile(ctx) reads `<ctx.workspaceRoot>/.iknow/user.md`.
-    // initIknowWorkspaceSafe({ workspace }) writes to `<workspace>/.iknow/user.md`.
-    // Both endpoints must point at the same file — otherwise assemble silently
-    // reads an older / empty / missing user.md while seed thinks it succeeded.
+  it("cross-module: seed-path (init) and read-path (assemble userHome) align via shared home", async () => {
     const ws = await mkdtemp(join(tmpdir(), "iknow-cross-align-"));
     try {
       await initIknowWorkspaceSafe({ workspace: ws });
 
-      // Simulate assemble reader using the same workspaceRoot
       const assembleReadPath = join(ws, "user.md");
       const assembleRead = await readFile(assembleReadPath, "utf8");
       expect(assembleRead).toBe(USER_TEMPLATE);
@@ -333,6 +312,39 @@ describe("default-fallback to <homedir>/.iknow (rev 2026-08-21)", () => {
     );
     expect(stateRaw.bootstrap_seeded).toBe(true);
     expect(stateRaw.schema_version).toBe(1);
+  });
+
+  it("initIknowWorkspaceSafe: exception (unwritable parent) warns and does not throw", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const blockerDir = join(workDir, "safe-exc");
+    await mkdir(blockerDir, { recursive: true });
+    await writeFile(join(blockerDir, "blocker"), "not a dir");
+    try {
+      await expect(
+        initIknowWorkspaceSafe({
+          workspace: join(blockerDir, "blocker", "sub"),
+        })
+      ).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalled();
+      const msg = warn.mock.calls.map((c) => c.join(" ")).join(" ");
+      expect(msg).toContain("workspace init failed");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("overflow: extra-long workspace path Safe-warns and does not throw", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(
+        initIknowWorkspaceSafe({
+          workspace: join("/tmp", "x".repeat(8000), ".iknow"),
+        })
+      ).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("readIknowState() (no arg) reads from <homedir>/.iknow/state.json", async () => {
