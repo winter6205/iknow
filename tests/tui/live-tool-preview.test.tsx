@@ -547,3 +547,62 @@ describe("formatRunningToolLine: 子代理工具专属运行行", () => {
     expect(formatRunningToolLine(run)).toBe("[运行中] bash");
   });
 });
+
+describe("liveToolPreviewTextLines (#589 贴底尾巴不含成功只读完成行)", () => {
+  function reduceTail(
+    events: ReadonlyArray<Parameters<typeof liveToolReduce>[1]>
+  ): ReadonlyArray<LiveToolRun> {
+    let runs: ReadonlyArray<LiveToolRun> = [];
+    for (const event of events) {
+      runs = liveToolReduce(runs, event);
+    }
+    return runs;
+  }
+
+  function previewLines(runs: ReadonlyArray<LiveToolRun>): string {
+    return runs
+      .flatMap((run) => [...liveToolPreviewTextLines(run, 80)])
+      .join("\n");
+  }
+
+  test("20 条 read_file ok + failed grep + 1 running：无完成读文案，失败行与运行中仍在", () => {
+    const events: Parameters<typeof liveToolReduce>[1][] = [];
+    for (let i = 0; i < 20; i++) {
+      const id = `tu-rf-${String(i).padStart(2, "0")}`;
+      const marker = `MARKER_READ_OK_${i}`;
+      events.push({
+        kind: "tool_call_start",
+        id,
+        name: "read_file",
+      });
+      events.push({
+        kind: "post_tool_use",
+        id,
+        name: "read_file",
+        input: { path: `${marker}.ts` },
+        ok: true,
+        detail: `读取 ${marker}.ts`,
+      });
+    }
+    events.push({ kind: "tool_call_start", id: "tu-grep-fail", name: "grep" });
+    events.push({
+      kind: "post_tool_use",
+      id: "tu-grep-fail",
+      name: "grep",
+      input: { pattern: "GREP_FAIL_MARKER" },
+      ok: false,
+      message: "no matches",
+      detail: "GREP_FAIL_MARKER",
+    });
+    events.push({
+      kind: "tool_call_start",
+      id: "tu-running",
+      name: "read_file",
+    });
+    const text = previewLines(reduceTail(events));
+    expect(text).toContain("[运行中] read_file");
+    expect(text).toContain("GREP_FAIL_MARKER");
+    expect(text).not.toContain("MARKER_READ_OK_");
+    expect(text).not.toMatch(/read_file · .* · ok/);
+  });
+});
