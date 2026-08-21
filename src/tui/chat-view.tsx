@@ -20,7 +20,10 @@
  *    眼睛段用 eyeGradientCells 逐 cell 上色（e2 黄昏魔法石渐变：#1a1d6e →
  *    #ffafaf，c 权重 0.6 / r 权重 0.4），info 栏（Version/Cwd/Data dir）取
  *    bannerLines 行尾段；窄终端（bannerLines.length === 1）保持单行降级；
- *  - 每条 session 消息 → `MessageBlocks`（user → ❯ accent / assistant
+ *  - **尾窗挂载**（`transcript-mount-window.ts`）：session 全量仍在
+ *    `session.messages`，OpenTUI 树只 mount 近端 N 条 + 「↑ K 条更早的消息」。
+ *    PgUp 在滚动顶揭示下一页。禁止行计数 / 行窗口数学。
+ *  - 每条 **已 mount** 消息 → `MessageBlocks`（user → ❯ accent / assistant
  *    → Markdown + thinking 折叠 + tool_use 摘要 + statusMap 状态染色）。
  *    **T7 消息间距 + 底色**：消息间 1 行节奏由本文件 wrapper
  *    `<box marginTop={i===0?0:1}>` 提供（首条无顶部 margin，避免进入会话时
@@ -48,7 +51,7 @@
  *  - 镜像渲染树（同一组件既走 MessageBlocks 又走 Clipped 路径）；
  *  - selection / onWindow / HighlightedLine（OpenTUI renderer 处理选区）。
  *
- * ChatViewHandle 保留：scrollToBottom + scrollbox ref 直查。
+ * ChatViewHandle：scrollToBottom + scrollbox ref 直查 + revealOlder。
  *
  * ⚠️ T6-C 再做 app.tsx 接线；本组件在此阶段已具备完整渲染能力，
  * 仅由测试与下游装配消费。
@@ -57,10 +60,13 @@ import {
   forwardRef,
   useDeferredValue,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
+  useState,
 } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
+import { useKeyboard } from "@opentui/react";
 import { Markdown } from "./markdown.js";
 import { MessageBlocks } from "./message-blocks.js";
 import { liveToolPreviewBox } from "./live-tool-preview.js";
@@ -75,6 +81,12 @@ import { tuiPalette } from "./theme.js";
 import { toolResultStatusMap } from "./tool-summary.js";
 import { formatCrunched } from "./run-stats.js";
 import { formatThinkingFold, formatThinkingLive } from "./think-fold.js";
+import {
+  TRANSCRIPT_REVEAL_PAGE,
+  TRANSCRIPT_TAIL_DEFAULT,
+  formatEarlierMessagesStub,
+  selectTranscriptMountWindow,
+} from "./transcript-mount-window.js";
 
 export interface ChatViewHandle {
   /**
@@ -87,6 +99,8 @@ export interface ChatViewHandle {
    * scrollHeight / viewport.height / scrollBy / scrollTo。未挂载时为 null。
    */
   readonly scrollbox: ScrollBoxRenderable | null;
+  /** 揭示更早一页消息（PgUp 在滚动顶时调用）。 */
+  revealOlder(): void;
 }
 
 export interface ChatViewProps {
@@ -138,6 +152,61 @@ export interface ChatViewProps {
 export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
   function ChatView(props, ref) {
     const sbRef = useRef<ScrollBoxRenderable | null>(null);
+    const keepFromBottomRef = useRef<number | null>(null);
+    const conversationId = props.session.conversationId;
+    const [windowState, setWindowState] = useState({
+      conversationId,
+      revealedCount: TRANSCRIPT_TAIL_DEFAULT,
+    });
+    if (windowState.conversationId !== conversationId) {
+      setWindowState({
+        conversationId,
+        revealedCount: TRANSCRIPT_TAIL_DEFAULT,
+      });
+    }
+    const revealedCount =
+      windowState.conversationId === conversationId
+        ? windowState.revealedCount
+        : TRANSCRIPT_TAIL_DEFAULT;
+    const visibleMessages = useMemo(
+      () =>
+        props.session.messages.filter(
+          (message) => !isTuiHiddenUserMessage(message)
+        ),
+      [props.session.messages]
+    );
+    const mountWindow = useMemo(
+      () => selectTranscriptMountWindow(visibleMessages, revealedCount),
+      [visibleMessages, revealedCount]
+    );
+    const revealOlder = () => {
+      const sb = sbRef.current;
+      if (sb !== null) {
+        keepFromBottomRef.current = sb.scrollHeight - sb.scrollTop;
+      }
+      setWindowState((prev) => ({
+        conversationId,
+        revealedCount:
+          (prev.conversationId === conversationId
+            ? prev.revealedCount
+            : TRANSCRIPT_TAIL_DEFAULT) + TRANSCRIPT_REVEAL_PAGE,
+      }));
+    };
+    useLayoutEffect(() => {
+      const keep = keepFromBottomRef.current;
+      if (keep === null) return;
+      keepFromBottomRef.current = null;
+      const sb = sbRef.current;
+      if (sb === null) return;
+      sb.scrollTop = Math.max(0, sb.scrollHeight - keep);
+    }, [mountWindow.startIndex]);
+    useKeyboard((event) => {
+      if (event.name !== "pageup") return;
+      if (mountWindow.hiddenCount <= 0) return;
+      const sb = sbRef.current;
+      if (sb !== null && sb.scrollTop > 1) return;
+      revealOlder();
+    });
     useImperativeHandle(ref, () => ({
       scrollToBottom() {
         const sb = sbRef.current;
@@ -147,6 +216,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       get scrollbox() {
         return sbRef.current;
       },
+      revealOlder,
     }));
     // 并发防御：流式草稿高频更新走低优先级（SC8 — spec 同款）。
     const deferredDrafts = useDeferredValue(props.draftsMasked ?? "");
@@ -179,6 +249,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     // bannerLines 行尾段切出（banner.ts 布局 SSOT，GAP 同值）。
     const EYE_W = [...(EYE_LINES[0] ?? "")].length;
     const BANNER_GAP = 3;
+    const earlierStub = formatEarlierMessagesStub(mountWindow.hiddenCount);
     return (
       <scrollbox
         ref={sbRef}
@@ -229,33 +300,41 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             )}
           </box>
         )}
-        {/* 消息渲染：每条 message → MessageBlocks。
-            消息间 1 行节奏由 wrapper marginTop 提供；首条 (i===0) 不带顶部
-            margin，避免进入会话时第一行无谓下推造成间距抖动。 */}
-        {props.session.messages
-          .filter((message) => !isTuiHiddenUserMessage(message))
-          .map((message, i, visible) => {
-            // 末条 assistant 消息携带 lastThinkingSeconds → 其 thinking 折叠行显示
-            // 「思考了 N 秒」留存（turn 结束后的秒数接棒）。仅末条 assistant 带：
-            // lastThinkingSeconds 对应刚结束的 turn，历史消息的秒数不适用。
-            const isLastAssistant =
-              i === visible.length - 1 && message.role === "assistant";
-            return (
-              <box key={i} width={contentWidth} marginTop={i === 0 ? 0 : 1}>
-                <MessageBlocks
-                  message={message}
-                  cols={contentWidth}
-                  statusMap={statusMap}
-                  thinkingExpanded={thinkingExpanded}
-                  thinkingSeconds={
-                    isLastAssistant && (props.lastThinkingSeconds ?? 0) > 0
-                      ? props.lastThinkingSeconds
-                      : undefined
-                  }
-                />
-              </box>
-            );
-          })}
+        {/* 尾窗：只 mount 近端消息。更早条目以一行 stub 占位，不进 MessageBlocks。 */}
+        {earlierStub !== null && (
+          <text fg={pal.dim} wrapMode="none">
+            {earlierStub}
+          </text>
+        )}
+        {mountWindow.mounted.map((message, i) => {
+          // 末条 assistant 消息携带 lastThinkingSeconds → 其 thinking 折叠行显示
+          // 「思考了 N 秒」留存（turn 结束后的秒数接棒）。仅末条 assistant 带：
+          // lastThinkingSeconds 对应刚结束的 turn，历史消息的秒数不适用。
+          const isLastAssistant =
+            i === mountWindow.mounted.length - 1 &&
+            message.role === "assistant";
+          const key = mountWindow.startIndex + i;
+          const isFirstBlock = i === 0 && mountWindow.hiddenCount === 0;
+          return (
+            <box
+              key={key}
+              width={contentWidth}
+              marginTop={isFirstBlock ? 0 : 1}
+            >
+              <MessageBlocks
+                message={message}
+                cols={contentWidth}
+                statusMap={statusMap}
+                thinkingExpanded={thinkingExpanded}
+                thinkingSeconds={
+                  isLastAssistant && (props.lastThinkingSeconds ?? 0) > 0
+                    ? props.lastThinkingSeconds
+                    : undefined
+                }
+              />
+            </box>
+          );
+        })}
         {/* crunched 留存行：消息流末尾（末条消息之后、live tail 之前）。
             最近一次完成 turn 的运行时长（app 层 finally 快照传
             crunchedSeconds）；>0 才渲染（sub-second 回合不显 `0s`），

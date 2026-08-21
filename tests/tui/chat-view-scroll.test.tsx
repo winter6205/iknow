@@ -300,17 +300,56 @@ test("强制滚底通道：scrollToBottom() 从上滚位置直达底部并恢复
   await setup.renderer.destroy();
 });
 
-test("长会话（100 条 >3 屏）渲染不崩：布局位置 ref 直查", async () => {
+test("长会话（100 条 >3 屏）只 mount 尾窗：早期消息不进画面", async () => {
   const initial = sessionWith(makeMessages(100));
   const { setup, api } = await renderChat(initial);
   const sb = api.handle!.scrollbox!;
   expect(sb.scrollHeight).toBeGreaterThan(ROWS * 3);
   expect(sb.scrollTop).toBe(maxScrollTop(api.handle!));
   expect(setup.captureCharFrame()).toContain("reply-099");
+  sb.scrollTop = 0;
+  await setup.waitForVisualIdle();
+  const top = setup.captureCharFrame();
+  expect(top).toContain("↑ 68 条更早的消息");
+  expect(top).toContain("msg-068");
+  expect(top).not.toContain("msg-000");
+  expect(top).not.toContain("reply-000");
+  api.handle!.scrollToBottom();
+  await setup.waitForVisualIdle();
   api.appendUser("追加的长会话尾巴");
   await setup.waitForVisualIdle();
   expect(sb.scrollTop).toBe(maxScrollTop(api.handle!));
   expect(setup.captureCharFrame()).toContain("追加的长会话尾巴");
+  await setup.renderer.destroy();
+});
+
+test("revealOlder 分页揭示更早消息直到全量", async () => {
+  const initial = sessionWith(makeMessages(100));
+  const { setup, api } = await renderChat(initial);
+  const sb = api.handle!.scrollbox!;
+  sb.scrollTop = 0;
+  await setup.waitForVisualIdle();
+  expect(setup.captureCharFrame()).not.toContain("msg-000");
+  await act(async () => {
+    api.handle!.revealOlder();
+  });
+  await setup.waitForVisualIdle();
+  sb.scrollTop = 0;
+  await setup.waitForVisualIdle();
+  expect(setup.captureCharFrame()).not.toContain("msg-000");
+  await act(async () => {
+    api.handle!.revealOlder();
+  });
+  await setup.waitForVisualIdle();
+  await act(async () => {
+    api.handle!.revealOlder();
+  });
+  await setup.waitForVisualIdle();
+  sb.scrollTop = 0;
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("msg-000");
+  expect(frame.includes("条更早的消息")).toBe(false);
   await setup.renderer.destroy();
 });
 
