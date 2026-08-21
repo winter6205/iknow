@@ -206,11 +206,11 @@ describe("subagent settings — env > settings 链 (#358 T1)", () => {
     assert.equal(env.subagent?.taskTimeoutMs, 7_200_000);
   });
 
-  it("env 非法 + settings 未配 → llm.timeoutMs 60000 fallback、subagent.taskTimeoutMs undefined", () => {
+  it("env 非法 + settings 未配 → llm.timeoutMs 300000 fallback、subagent.taskTimeoutMs undefined", () => {
     process.env.IKNOW_LLM_TIMEOUT_MS = "abc";
     process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "abc";
     const env = loadIknowEnv(process.cwd(), EMPTY);
-    assert.equal(env.llm.timeoutMs, 60_000);
+    assert.equal(env.llm.timeoutMs, 300_000);
     assert.equal(env.subagent?.taskTimeoutMs, undefined);
   });
 
@@ -218,7 +218,7 @@ describe("subagent settings — env > settings 链 (#358 T1)", () => {
     process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "7200000";
     const env = loadIknowEnv(process.cwd(), EMPTY);
     assert.equal(env.subagent?.taskTimeoutMs, 7_200_000);
-    assert.equal(env.llm.timeoutMs, 60_000);
+    assert.equal(env.llm.timeoutMs, 300_000);
   });
 });
 

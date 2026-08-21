@@ -72,10 +72,9 @@ export interface LlmEnv {
   maxTurns?: number;
   /**
    * #358 T1: 单次 LLM 调用竞速上限(per-call,毫秒)。
-   * env 链:`envOptionalInt("IKNOW_LLM_TIMEOUT_MS") ?? mergedSettings.llm?.timeoutMs ?? 60_000`。
-   * 第三层 60_000 默认保留(envInt 既有 fallback,延后到 envOptionalInt 之后作
-   * 兜底,不破坏既有 env=任意值的行为,只增加 upstream settings 来源)。
-   * 镜像 maxTurns 模式(env > settings),但 maxTurns 缺省 = 无限,本字段缺省 = 60s。
+   * env 链:`envOptionalInt("IKNOW_LLM_TIMEOUT_MS") ?? mergedSettings.llm?.timeoutMs ?? 300_000`。
+   * 第三层 300_000（5 min）对齐 coding-agent 单次调用（thinking + 长 tool_use），
+   * 不是 MCP 连接超时。env / settings 显式值仍覆盖。
    */
   timeoutMs: number;
 }
@@ -507,22 +506,21 @@ export function loadIknowEnv(
       maxOutputTokens: envInt({
         file,
         key: "IKNOW_LLM_MAX_OUTPUT_TOKENS",
-        // #578: 8192 仍装不下 thinking=adaptive + 奢侈品腕表自包含 HTML write_file
-        // (~150-200 行)。先前 2048→8192 (#trace 8e05e04c) 只覆盖贪吃蛇 HTML；腕表页
-        // 更大，撞 max_tokens → truncation → write_file 缺 content。16384 容纳
-        // thinking budget + 完整 HTML JSON，不改 timeoutMs。
-        fallback: 16384,
+        // Claude Code 主会话默认 CLAUDE_CODE_MAX_OUTPUT_TOKENS=32000（可配到 64k）。
+        // 按实际生成计费，帽本身不加价。不要再按单次任务（贪吃蛇 / 腕表 HTML）
+        // 逐步加码。
+        fallback: 32_000,
       }),
-      // #358 T1: per-call LLM 调用竞速上限(env > settings > 60_000 fallback)。
-      // 镜像 maxTurns 模式(envOptionalInt ?? settings),但保留第三层 60_000 默认
-      // (envInt 既有 fallback),env 不设 + settings 未配 → 60_000。
+      // #358 T1: per-call LLM 调用竞速上限(env > settings > 300_000 fallback)。
+      // 镜像 maxTurns 模式(envOptionalInt ?? settings),第三层 5 min：thinking +
+      // 32k 生成常见超过 60s。MCP connectTimeoutMs 仍是 60s。
       timeoutMs:
         envOptionalInt({
           file,
           key: "IKNOW_LLM_TIMEOUT_MS",
         }) ??
         mergedSettings.llm?.timeoutMs ??
-        60_000,
+        300_000,
       temperature: envNumber({
         file,
         key: "IKNOW_LLM_TEMPERATURE",
