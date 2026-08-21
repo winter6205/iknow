@@ -48,6 +48,7 @@ import {
   useTerminalDimensions,
 } from "@opentui/react";
 import type { HarnessStreamEvent } from "../harness/stream.js";
+import type { CompactReason } from "../harness/compress/index.js";
 import type {
   AnthropicNativeMessage,
   TokenUsage,
@@ -180,6 +181,54 @@ export { inputVisibleLineCount, inputWrapLineCount, MAX_INPUT_LINES };
  * `wrapModalLines`（wrap-ansi + {trim:false, hard:true}）复用。空数组/不含
  * 元素 → 0 行。
  */
+/**
+ * plan compress-trigger-gate T4 + review-fix:把 /compact notice 文案决策抽成
+ * module-level 纯函数,便于 bun:test 单测覆盖 4 reason 分支(避免 mount
+ * 整 TUI 渲染链路 + frozen bridge mock)。函数式 + exhaustiveness 检查
+ * (sealed CompactReason union):future 新增 reason 时 TS 编译失败。
+ */
+export function compactNoticeFor(
+  reason: CompactReason,
+  compacted: boolean
+): readonly string[] {
+  if (compacted) {
+    // compacted=true 路径:windowed → 保留尾部 + 裁早期;full_summary → 摘要前缀 + 保留尾部。
+    switch (reason) {
+      case "windowed":
+        return ["已压缩上下文（保留尾部，裁剪早期消息）。"];
+      case "full_summary":
+        return ["已通过结构化摘要压缩上下文（保留尾部 + 摘要前缀）。"];
+      case "below_token_threshold":
+      case "messages_too_few":
+        // 逻辑上 compacted=true 不该拿到这些 reason;列全满足 exhaustiveness。
+        throw new Error(
+          `unexpected no-op reason in compacted branch: ${reason}`
+        );
+      default: {
+        const _exhaustive: never = reason;
+        throw new Error(`unknown compact reason: ${String(_exhaustive)}`);
+      }
+    }
+  }
+  // compacted=false 路径:below_token_threshold / messages_too_few;windowed /
+  // full_summary 逻辑不可达但列全满足 exhaustiveness。
+  switch (reason) {
+    case "below_token_threshold":
+      return ["当前 token 未达压缩阈值，无需压缩。"];
+    case "messages_too_few":
+      return ["消息条数过少，无法做窗口压缩，且摘要失败 — 上下文保持原样。"];
+    case "windowed":
+    case "full_summary":
+      throw new Error(
+        `unexpected compressed-state reason in noop branch: ${reason}`
+      );
+    default: {
+      const _exhaustive: never = reason;
+      throw new Error(`unknown compact reason: ${String(_exhaustive)}`);
+    }
+  }
+}
+
 export function noticeRenderRows(
   lines: ReadonlyArray<string> | undefined,
   cols: number
@@ -1527,33 +1576,15 @@ export function TuiApp(props: TuiAppProps): ReactNode {
                 }),
               };
             });
-            // plan T4:reason 区分 windowed / full_summary 文案,告诉用户真实
-            // 压缩路径而非统一「保留尾部，裁剪早期消息」误导(windowed 裁早期,
-            // full_summary 替换为 LLM 摘要前缀 + 保留尾部,行为差异显著)。
-            const compactedReason = compactResult.reason;
-            const compactedLines =
-              compactedReason === "full_summary"
-                ? ["已通过结构化摘要压缩上下文（保留尾部 + 摘要前缀）。"]
-                : ["已压缩上下文（保留尾部，裁剪早期消息）。"];
-            setNotice({ lines: compactedLines });
+            // plan T4 + review-fix:文案决策抽成 compactNoticeFor 纯函数,
+            // inline 调用即可。inline 文案逻辑移至 src/tui/app.tsx:184 附近。
+            setNotice({
+              lines: compactNoticeFor(compactResult.reason, true),
+            });
           } else {
-            // plan T4:reason 分类文案,告诉用户真实未压缩原因而非统一「未达
-            // 阈值」误导(below_token_threshold 真实未达;messages_too_few
-            // 是窗口不可丢且摘要失败的双失败态)。
-            const noopReason = compactResult.reason;
-            const noopLines = (() => {
-              switch (noopReason) {
-                case "below_token_threshold":
-                  return ["当前 token 未达压缩阈值，无需压缩。"];
-                case "messages_too_few":
-                  return [
-                    "消息条数过少，无法做窗口压缩，且摘要失败 — 上下文保持原样。",
-                  ];
-                default:
-                  return ["上下文未达压缩阈值，无需压缩。"];
-              }
-            })();
-            setNotice({ lines: noopLines });
+            setNotice({
+              lines: compactNoticeFor(compactResult.reason, false),
+            });
           }
         } catch (err) {
           setNotice({ lines: [`压缩失败：${describeError(err)}`] });

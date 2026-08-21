@@ -104,6 +104,12 @@ iknow-prototype/
 # local archive of files removed/superseded during branch sync
 _archive/
 
+# prototype / scratch HTML / 一次性手动文件沉到 archive/ 根（与已 commit
+# 的子目录 archive/prototypes/ archive/onetime-probes/ archive/tests-real-llm/
+# archive/tui-ink/ 互不干扰；仅匹配 archive/ 根级的 .html / AGENTS.md）
+/archive/*.html
+/archive/AGENTS.md
+
 # .claude/ is personal tooling (hooks, rules, skills, settings);
 # this is a personal project, not team-shared
 .claude/
