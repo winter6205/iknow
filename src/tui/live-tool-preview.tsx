@@ -12,6 +12,9 @@
  * 不完整 JSON 原样截断）；无增量 → 保持 `[运行中] name` 基础行。摘要统一由
  * `summarizePartialInput`（tool-summary.ts）产出，行账仍 1 行。
  *
+ * write_file / edit_file 运行中不渲染 `content` 正文（含不完整 JSON）；
+ * 完成后用 `completedToolPreview` 截断代码或 diff。
+ *
  * 行账口径：box 渲染 = 状态行 1 行 + 预览行 N 行（diff 行按宽度折叠后
  * 可见的行）。`liveToolPreviewRows` 返回 box 实际占用的物理行数。
  */
@@ -21,16 +24,46 @@ import {
   formatCompletedToolLine,
   formatRunningToolLine,
 } from "./live-tool-state.js";
-import { summarizePartialInput, toolPreviewRows } from "./tool-summary.js";
+import {
+  completedToolPreview,
+  previewOverflowLabel,
+  summarizePartialInput,
+  summarizeToolCall,
+  type CompletedToolPreview,
+} from "./tool-summary.js";
 import { DiffView, diffRowTexts } from "./diff-view.js";
 import { tuiPalette } from "./theme.js";
+
+function isWriteEditTool(name: string): boolean {
+  return name === "write_file" || name === "edit_file";
+}
+
+function writeEditRunningLine(run: LiveToolRun, cols: number): string {
+  const partial = run.partialInput;
+  if (partial === undefined || partial.length === 0) {
+    return formatRunningToolLine(run);
+  }
+  try {
+    const parsed: unknown = JSON.parse(partial);
+    if (typeof parsed !== "object" || parsed === null) {
+      return formatRunningToolLine(run);
+    }
+    const summary = summarizeToolCall(run.name, parsed, cols).detail;
+    return summary.length === 0
+      ? formatRunningToolLine(run)
+      : `[运行中] ${run.name} · ${summary}`;
+  } catch {
+    return formatRunningToolLine(run);
+  }
+}
 
 /**
  * running 状态行：有 partialInput 增量 → `[运行中] name · <partial 摘要>`；
  * 空 / 无增量 → 基础 `[运行中] name`（formatRunningToolLine）。摘要单源 =
- * summarizePartialInput，行账 1 行。
+ * summarizePartialInput，行账 1 行。write/edit 不把 content 流进该行。
  */
 function runningLine(run: LiveToolRun, cols: number): string {
+  if (isWriteEditTool(run.name)) return writeEditRunningLine(run, cols);
   const partial = run.partialInput;
   if (partial === undefined || partial.length === 0) {
     return formatRunningToolLine(run);
@@ -41,10 +74,60 @@ function runningLine(run: LiveToolRun, cols: number): string {
     : `[运行中] ${run.name} · ${summary}`;
 }
 
+function completedPreviewOf(run: LiveToolRun): CompletedToolPreview {
+  return completedToolPreview(run.name, run.input, {
+    oldContent: run.oldContent,
+    newContent: run.newContent,
+  });
+}
+
+function completedPreviewTextLines(
+  preview: CompletedToolPreview,
+  cols: number
+): string[] {
+  if (preview.kind === "empty") return [];
+  const lines =
+    preview.kind === "code"
+      ? [...preview.lines]
+      : diffRowTexts(preview.rows, cols);
+  if (preview.hiddenLineCount > 0) {
+    lines.push(previewOverflowLabel(preview.hiddenLineCount));
+  }
+  return lines;
+}
+
+function completedPreviewNodes(
+  preview: CompletedToolPreview,
+  cols: number
+): ReactNode {
+  if (preview.kind === "empty") return null;
+  const overflow =
+    preview.hiddenLineCount > 0
+      ? previewOverflowLabel(preview.hiddenLineCount)
+      : null;
+  return (
+    <>
+      {preview.kind === "code"
+        ? preview.lines.map((line, i) => (
+            <text key={`c${i}`} wrapMode="none">
+              {line}
+            </text>
+          ))
+        : preview.rows.length > 0 && (
+            <DiffView rows={preview.rows} cols={cols} />
+          )}
+      {overflow !== null && (
+        <text fg={tuiPalette.dim} wrapMode="none">
+          {overflow}
+        </text>
+      )}
+    </>
+  );
+}
+
 /**
  * live 工具 box 的纯文本行（[状态行, ...预览行]），供行账 + flat 投影共用。
- * 预览行 = diff 行按宽度折叠后可见的行（diffRowTexts 非空），与
- * `<DiffView>` 渲染行数逐行一致。
+ * 完成态预览与 `completedToolPreview` 同源（代码或截断 diff）。
  */
 export function liveToolPreviewTextLines(
   run: LiveToolRun,
@@ -54,12 +137,9 @@ export function liveToolPreviewTextLines(
     return [runningLine(run, cols)];
   }
   const out: string[] = [formatCompletedToolLine(run, cols)];
-  const rows = toolPreviewRows(run.name, run.input, cols, {
-    oldContent: run.oldContent,
-    newContent: run.newContent,
-  });
-  const previewText = diffRowTexts(rows, cols);
-  for (const l of previewText) out.push(l);
+  for (const l of completedPreviewTextLines(completedPreviewOf(run), cols)) {
+    out.push(l);
+  }
   return out;
 }
 
@@ -68,27 +148,21 @@ export function liveToolPreviewRows(run: LiveToolRun, cols: number): number {
   return liveToolPreviewTextLines(run, cols).length;
 }
 
-/** live 工具 tail box：状态行 + 统一 diff 预览（红绿 + 行号）。
+/** live 工具 tail box：状态行 + 完成态截断预览。
  *  运行态仅状态行（T5：有 partialInput 增量时含 `· <partial 摘要>`）；
- *  完成态追加 diff 预览。 */
+ *  write/edit 运行中不画 content。 */
 export function liveToolPreviewBox(run: LiveToolRun, cols: number): ReactNode {
   const status =
     run.status === "running"
       ? runningLine(run, cols)
       : formatCompletedToolLine(run, cols);
-  const rows =
-    run.status === "running"
-      ? []
-      : toolPreviewRows(run.name, run.input, cols, {
-          oldContent: run.oldContent,
-          newContent: run.newContent,
-        });
+  const preview = run.status === "running" ? null : completedPreviewOf(run);
   return (
     <box key={run.id} flexDirection="column">
       <text fg={tuiPalette.dim} wrapMode="none">
         {status}
       </text>
-      {rows.length > 0 && <DiffView rows={rows} cols={cols} />}
+      {preview !== null && completedPreviewNodes(preview, cols)}
     </box>
   );
 }

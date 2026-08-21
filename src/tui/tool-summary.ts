@@ -345,6 +345,11 @@ export function completedToolPreview(
   return { kind: "diff", rows: visible, hiddenLineCount };
 }
 
+/** 完成态预览截断后的溢出提示（live / 历史共用文案）。 */
+export function previewOverflowLabel(hiddenLineCount: number): string {
+  return `还有 ${hiddenLineCount} 行`;
+}
+
 /**
  * 工具内容预览行（内容可见性，统一 diff 版）：edit_file / write_file 调用
  * `computeDiff`（diff-unified.ts）产出逐行 `DiffLine[]`（带行号 + kind，

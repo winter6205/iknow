@@ -118,7 +118,7 @@ describe("liveToolPreviewBox（live 工具 tail 渲染）", () => {
 });
 
 describe("liveToolPreviewTextLines（flat 行）", () => {
-  test("已完成：状态行 + 可见 diff 行", () => {
+  test("已完成 write_file 新文件：状态行 + 截断代码（非整文件绿 diff）", () => {
     const run: LiveToolRun = {
       id: "r",
       name: "write_file",
@@ -130,8 +130,43 @@ describe("liveToolPreviewTextLines（flat 行）", () => {
     };
     const rows = liveToolPreviewTextLines(run, 80);
     expect(rows[0]).toBe("write_file · 写入 a.ts（1 行） · ok");
-    expect(rows.some((r) => r.includes("+hello"))).toBe(true);
+    expect(rows).toContain("hello");
+    expect(rows.some((r) => r.includes("+hello"))).toBe(false);
     expect(rows.length).toBe(liveToolPreviewRows(run, 80));
+  });
+
+  test("已完成 write_file 超长：窗内代码 + 还有 N 行，无全文", () => {
+    const content = Array.from({ length: 20 }, (_, i) => `body-${i}`).join(
+      "\n"
+    );
+    const run: LiveToolRun = {
+      id: "r",
+      name: "write_file",
+      status: "ok",
+      input: { path: "a.ts", content },
+      detail: "写入 a.ts（20 行）",
+      oldContent: "",
+      newContent: content,
+    };
+    const rows = liveToolPreviewTextLines(run, 80);
+    expect(rows).toContain("body-0");
+    expect(rows.some((r) => r.includes("body-19"))).toBe(false);
+    expect(rows.some((r) => r.includes("还有") && r.includes("行"))).toBe(true);
+  });
+
+  test("已完成 overwrite/edit：截断 diff 可见", () => {
+    const run: LiveToolRun = {
+      id: "r",
+      name: "edit_file",
+      status: "ok",
+      input: { path: "a.ts", old_str: "old", new_str: "new" },
+      detail: "编辑 a.ts：old → new",
+      oldContent: "line1\nline2\nold\nline4\nline5\n",
+      newContent: "line1\nline2\nnew\nline4\nline5\n",
+    };
+    const rows = liveToolPreviewTextLines(run, 80);
+    expect(rows.some((r) => r.includes("-old"))).toBe(true);
+    expect(rows.some((r) => r.includes("+new"))).toBe(true);
   });
 });
 
@@ -178,7 +213,8 @@ describe("运行态 → 完成态切换（reducer 驱动）", () => {
       f.includes("write_file · 写入 a.ts（1 行） · ok")
     );
     expect(frame).not.toContain("[运行中]");
-    expect(frame).toContain("+hello");
+    expect(frame).toContain("hello");
+    expect(frame).not.toContain("+hello");
     await setup.renderer.destroy();
   });
 });
@@ -354,6 +390,33 @@ describe("T5: running 态 partial 摘要渲染", () => {
     // 视觉宽度收口契约：完整行（含 [运行中] 前缀 + 分隔符）≤ 终端列宽。
     expect(line.length).toBeGreaterThan(0);
     expect(visualWidth(line)).toBeLessThanOrEqual(30);
+  });
+
+  test("running write_file + 完整 partial：1 行且不出现 content 正文", () => {
+    const run: LiveToolRun = {
+      id: "tu-1",
+      name: "write_file",
+      status: "running",
+      input: undefined,
+      partialInput: '{"path":"a.ts","content":"SHOULD_NOT_STREAM"}',
+    };
+    const rows = liveToolPreviewTextLines(run, 80);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toContain("[运行中] write_file");
+    expect(rows.join("\n")).not.toContain("SHOULD_NOT_STREAM");
+  });
+
+  test("running write_file 不完整 JSON：1 行且不流式画出 content 片段", () => {
+    const run: LiveToolRun = {
+      id: "tu-1",
+      name: "write_file",
+      status: "running",
+      input: undefined,
+      partialInput: '{"path":"a.ts","content":"SHOULD_NOT',
+    };
+    const rows = liveToolPreviewTextLines(run, 80);
+    expect(rows).toHaveLength(1);
+    expect(rows.join("\n")).not.toContain("SHOULD_NOT");
   });
 
   test("box 渲染：partial 出现在 liveToolPreviewBox 帧", async () => {
