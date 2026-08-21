@@ -18,6 +18,7 @@ import { describe, expect, test } from "bun:test";
 import { useState } from "react";
 import { useKeyboard } from "@opentui/react";
 import { testRender } from "@opentui/react/test-utils";
+import { RGBA } from "@opentui/core";
 import {
   completedToolPreview,
   visualWidth,
@@ -33,6 +34,11 @@ import {
   liveToolReduce,
   type LiveToolRun,
 } from "../../src/tui/live-tool-state.js";
+import { tuiPalette } from "../../src/tui/theme.js";
+
+function rgbaEq(a: RGBA, b: RGBA): boolean {
+  return a.r === b.r && a.g === b.g && a.b === b.b;
+}
 
 /** 轮询式帧等待（同 list-view-scroll 注释）。 */
 async function untilFrame(
@@ -117,6 +123,36 @@ describe("liveToolPreviewBox（live 工具 tail 渲染）", () => {
     expect(frame).toContain("[运行中] bash");
     expect(frame).not.toContain("@@");
     expect(liveToolPreviewRows(running, 80)).toBe(1);
+    await setup.renderer.destroy();
+  });
+
+  test("write_file 新文件代码预览：c4 codeBlockBg + syntaxKeyword", async () => {
+    const run: LiveToolRun = {
+      id: "wf-c4",
+      name: "write_file",
+      status: "ok",
+      input: { path: "a.ts", content: "export const x = 1;\n" },
+      detail: "写入 a.ts（1 行）",
+      oldContent: "",
+      newContent: "export const x = 1;\n",
+    };
+    const setup = await renderBox(run, 80);
+    const expectedBg = RGBA.fromHex(tuiPalette.codeBlockBg);
+    const expectedKw = RGBA.fromHex(tuiPalette.syntaxKeyword);
+    const { lines } = setup.captureSpans();
+    let sawBg = false;
+    let sawKw = false;
+    for (const line of lines) {
+      for (const span of line.spans) {
+        if (rgbaEq(span.bg, expectedBg)) sawBg = true;
+        if (span.text === "export" && rgbaEq(span.fg, expectedKw)) sawKw = true;
+      }
+    }
+    expect(sawBg).toBe(true);
+    expect(sawKw).toBe(true);
+    const frame = setup.captureCharFrame();
+    const rendered = frame.split("\n").filter((l) => l.trim().length > 0);
+    expect(rendered.length).toBe(liveToolPreviewRows(run, 80));
     await setup.renderer.destroy();
   });
 });
