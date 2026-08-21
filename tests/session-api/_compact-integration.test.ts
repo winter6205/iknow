@@ -29,7 +29,6 @@ import { join } from "node:path";
 import { SessionHub } from "../../src/session-api/hub.ts";
 import {
   CURRENT_SCHEMA_VERSION,
-  resolveProjectSessionDir,
   SessionStore,
   type SessionFileV1,
   type TaskFocusState,
@@ -43,9 +42,9 @@ import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
   AssistantTurnResult,
-  LoopAdapter,
   LoopState,
 } from "../../src/harness/model-adapter/types.ts";
+import type { LoopAdapter } from "../../src/harness/loop-engine.ts";
 import { COMPACTION_BOUNDARY_PLACEHOLDER } from "../../src/harness/compress/index.ts";
 
 const baseDirs: string[] = [];
@@ -61,9 +60,6 @@ afterAll(async () => {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
 });
-
-/** 渲染文本固定值(与 hub.renderTaskFocusBoundary 输出形态对齐,用于断言)。 */
-const BOUNDARY_TEXT = "current-focus\n---\nh1";
 
 /** Flaky adapter:首次 step 抛 PromptTooLongError,后续返回正常。 */
 function makeFlakyAdapter(opts: {
@@ -170,37 +166,6 @@ async function seedSessionWithFocus(
   });
 }
 
-/** 预置带长 messages 但无 taskFocus 的 session 文件 (reactive compact 触发
- *  但 boundaryAttachment 不注入)。 */
-async function seedSessionWithoutFocus(
-  store: SessionStore,
-  id: string
-): Promise<void> {
-  const now = new Date().toISOString();
-  const prior: AnthropicNativeMessage[] = Array.from(
-    { length: 12 },
-    (_, i) => ({
-      role: "user",
-      content: [{ type: "text", text: `prior-${i} ${"z".repeat(20)}` }],
-    })
-  );
-  await store.save({
-    id,
-    file: {
-      schemaVersion: CURRENT_SCHEMA_VERSION,
-      conversation_id: id,
-      messages: prior,
-      jsonMode: false,
-      turnCount: 12,
-      updatedAt: now,
-      title: "",
-      cwd: process.cwd(),
-      sanitized_at: now,
-      checkpoints: [],
-    } satisfies SessionFileV1,
-  });
-}
-
 /** 从 messages 抽取纯文本 user 消息内容 (首个 text block)。 */
 function textOf(msg: AnthropicNativeMessage): string {
   const block = msg.content.find(
@@ -213,10 +178,45 @@ describe("reactive compact + boundaryAttachment (#458 T8)", () => {
   it("taskFocus 在场 + flaky adapter → reactive compact 触发 → 落盘 messages 含 placeholder + attachment", async () => {
     const { store } = await storeFor();
     const id = "reactive-with-focus";
-    await seedSessionWithFocus(store, id, {
-      text: "current-focus",
-      updatedAt: "2026-01-01T00:00:00.000Z",
-      history: [{ text: "h1", updatedAt: "2026-01-01T00:00:00.000Z" }],
+    // #604 T1:reframe。taskFocus 字段不再驱动 boundaryAttachment 渲染源;
+    // 渲染源 = session.messages 里最近 ≤3 句合格用户任务原话。这里 prior
+    // 用全 tool_result-only user 消息,extractRecentUserTasks → [] →
+    // attachment 不出现。仅断言 placeholder 注入 + taskFocus 字段保留。
+    const now = new Date().toISOString();
+    const prior: AnthropicNativeMessage[] = Array.from(
+      { length: 12 },
+      (_, i) => ({
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: `t-${i}`,
+            content: [{ type: "text", text: `result-${i}` }],
+          },
+        ],
+      })
+    );
+    await store.save({
+      id,
+      file: {
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversation_id: id,
+        messages: prior,
+        jsonMode: false,
+        turnCount: 12,
+        updatedAt: now,
+        title: "",
+        cwd: process.cwd(),
+        sanitized_at: now,
+        checkpoints: [],
+        // 预置 taskFocus 以保留 #458 T5 SC2 seed 路径的字面兼容(虽然
+        // 本测试不依赖它),不写也 OK;此处保留便于回归旧 schema 字段读写。
+        taskFocus: {
+          text: "current-focus",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          history: [],
+        },
+      } satisfies SessionFileV1,
     });
     const attemptCount = { value: 0 };
     const hub = new SessionHub({
@@ -240,19 +240,50 @@ describe("reactive compact + boundaryAttachment (#458 T8)", () => {
     expect(textOf(loaded.messages[0]!)).toContain(
       COMPACTION_BOUNDARY_PLACEHOLDER
     );
-    // messages[1] 是 attachment user 消息(renderTaskFocusBoundary 文本)。
-    // 焦点截 240 + 历史截 120 + cap 3 的具体 truncation 已由
-    // hub-taskfocus-compact.test.ts (T7) 覆盖;这里只断言渲染文本确实注入。
-    expect(textOf(loaded.messages[1]!)).toContain("current-focus");
-    expect(textOf(loaded.messages[1]!)).toContain("h1");
+    // #604 T1:0 句合格 → renderRecentUserTasksBoundary → undefined → 闭包
+    // 产物 undefined → attachment 文本不出现在 messages[1]。
+    const allText = loaded.messages.map((m) => textOf(m)).join("\n");
+    expect(allText).not.toContain("current-focus");
+    expect(allText).not.toContain("[Recent user tasks]");
   });
 
   it("taskFocus undefined + flaky adapter → reactive compact 仍触发 → placeholder 有、attachment 无", async () => {
     const { store } = await storeFor();
     const id = "reactive-no-focus";
-    // 不预置 taskFocus → hub 不注入 boundaryAttachment 闭包;仍预置长
-    // messages 让 reactive compact 真正触发 (state > keepRecent)。
-    await seedSessionWithoutFocus(store, id);
+    // #604 T1:reframe。taskFocus 字段不再是 boundaryAttachment 闭包的开关;
+    // 渲染源 = session.messages。若 prior 全是 tool_result-only(无合格
+    // 用户任务),extractRecentUserTasks → [] → renderRecentUserTasksBoundary
+    // → undefined → 闭包产物 undefined → boundaryAttachment 注入但无附加段。
+    // 仍预置 messages 让 reactive compact 真正触发(state > keepRecent)。
+    const now = new Date().toISOString();
+    const prior: AnthropicNativeMessage[] = Array.from(
+      { length: 12 },
+      (_, i) => ({
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: `t-${i}`,
+            content: [{ type: "text", text: `result-${i}` }],
+          },
+        ],
+      })
+    );
+    await store.save({
+      id,
+      file: {
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversation_id: id,
+        messages: prior,
+        jsonMode: false,
+        turnCount: 12,
+        updatedAt: now,
+        title: "",
+        cwd: process.cwd(),
+        sanitized_at: now,
+        checkpoints: [],
+      } satisfies SessionFileV1,
+    });
     const attemptCount = { value: 0 };
     const hub = new SessionHub({
       store,
@@ -270,9 +301,12 @@ describe("reactive compact + boundaryAttachment (#458 T8)", () => {
     expect(textOf(loaded.messages[0]!)).toContain(
       COMPACTION_BOUNDARY_PLACEHOLDER
     );
-    // attachment 由 boundaryAttachment 渲染;taskFocus undefined → 不注入。
+    // #604 T1:0 句合格 → 不贴任务摘录段。boundaryAttachment 闭包仍注入,
+    // 但 renderRecentUserTasksBoundary([]) 返回 undefined,result.messages
+    // 内仅含 placeholder,无 TASK_EXCERPT_PREFIX user 消息。
     const allText = loaded.messages.map((m) => textOf(m)).join("\n");
     expect(allText).not.toContain("current-focus");
+    expect(allText).not.toContain("[Recent user tasks]");
   });
 
   it("普通 turn (taskFocus 在场 + ok adapter) → compact 不触发 → attachment 不注入", async () => {
@@ -289,11 +323,13 @@ describe("reactive compact + boundaryAttachment (#458 T8)", () => {
     });
     const res = await hub.postMessage({ conversationId: id, text: "go" });
     expect(res.turn.answer.stopReason).toBe("completed");
-    // compact 未触发 → 无 placeholder,也无 attachment 渲染文本。
+    // compact 未触发 → 无 placeholder,也无 attachment 渲染文本(无论旧
+    // taskFocus 焦点形态还是新 task excerpt 形态,都不得出现)。
     const loaded = await store.load(id);
     const allText = loaded.messages.map((m) => textOf(m)).join("\n");
     expect(allText).not.toContain(COMPACTION_BOUNDARY_PLACEHOLDER);
     expect(allText).not.toContain("current-focus");
+    expect(allText).not.toContain("[Recent user tasks]");
   });
 
   it("reactive compact 后 taskFocus 保留 (conditionalSave 不清空渲染源)", async () => {

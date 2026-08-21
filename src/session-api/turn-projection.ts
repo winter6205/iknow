@@ -1,5 +1,6 @@
 /**
- * Per-turn wire projection for thinking / tool calls (T1).
+ * Per-turn wire projection for thinking / tool calls (T1) +
+ * compact-boundary recent-user-tasks excerpt (#604 T1).
  *
  * Pure functions, no I/O. Both projectors accept a `mask` function applied
  * to any text written to the wire before truncation (SC20 boundary,
@@ -15,6 +16,7 @@ import type {
   AnthropicNativeMessage,
 } from "../harness/index.js";
 import { isSubagentDrainText } from "../harness/subagent/host-drain.js";
+import { shouldSeedTaskFocus } from "./store/schema.js";
 import type { ThinkingView, ToolCallView } from "./contract.js";
 
 /**
@@ -185,4 +187,69 @@ function buildToolCallViews(
     }
   }
   return foundUse ? views : undefined;
+}
+
+// -- #604 T1: 任务摘录（compact 边界现抽现贴） -------------------------------
+//
+// 把会话里**最近几句合格用户任务原话**纯函数式抽出，供 hub 注入到 compact
+// 边界 placeholder 之后。取代旧 `renderTaskFocusBoundary` 的 240+history+cap720
+// 焦点渲染（taskFocus 字段仍由 conditionalSave seed，T2 才删 — 本轮只换边界
+// 渲染源）。
+//
+// 契约:
+//   - 倒序遍历 messages，按时间倒序取至多 limit(=3)条合格 user-turn 原文(trim)。
+//   - 合格谓词：role === "user" ∧ 非纯 tool_result（isTurnQuery）∧ 寒暄过滤
+//     (shouldSeedTaskFocus,同 SSOT) ∧ 非 self-reference (TASK_EXCERPT_PREFIX
+//     前缀 — 上一轮摘录段本身不得被下一轮抽到,concurrent 隔离)。
+//   - 0 句 → []。assistant / 寒暄 / drain / whitespace 一律不取。
+//   - 返回 chronological 顺序（最早→最新），latest 在末尾。
+//   - 不截断、不调 LLM：纯函数 over messages。
+
+/** SSOT:compact 边界附件任务摘录的前缀。自身不会被下一轮抽取视为合格用户
+ *  任务(concurrent 隔离)，见 `isTaskExcerptText`。 */
+export const TASK_EXCERPT_PREFIX = "[Recent user tasks]";
+
+/** 单轮默认抽取上限。spec 写明 ≤3。 */
+export const MAX_RECENT_USER_TASKS = 3;
+
+/**
+ * Pred:文本是否是上一轮 compact 注入的「任务摘录」段本身。
+ *
+ * 谓词必须 trimStart 比对(plan: 摘录段可能被前置空白包裹,但前缀哨兵仍识别);
+ * 反向:用户真发的用户任务原文若意外以 `[Recent user tasks]` 字面开头,
+ * 也会被排除 — 这是 spec 接受的代价(摘录哨兵与用户文本语义上不重叠)。
+ */
+export function isTaskExcerptText(text: string): boolean {
+  return text.trimStart().startsWith(TASK_EXCERPT_PREFIX);
+}
+
+/**
+ * 抽取会话里最近几句合格用户任务原文 — compact 边界摘录段的数据源。
+ *
+ * 遍历方向:倒序取够 limit 条即停。返回结果再 reverse 为 chronological
+ * 顺序(最早→最新)，与 renderRecentUserTasksBoundary 的 `1. 2. 3.` 列表
+ * 一致(最新交代在末尾)。
+ *
+ * 调用方对 messages 内容负全责:hub.postMessage 已在 messages 内追加了本轮
+ * query,本函数读取 session.messages 即可拿到「含本轮的视图」;若调用方需要
+ * 「取摘录前一刻」的视图,请传入 priorMessages(= conditionalSave 内
+ * `session.messages`)。
+ */
+export function extractRecentUserTasks(
+  messages: ReadonlyArray<AnthropicNativeMessage>,
+  options?: { readonly limit?: number }
+): readonly string[] {
+  const limit = options?.limit ?? MAX_RECENT_USER_TASKS;
+  const out: string[] = [];
+  for (let i = messages.length - 1; i >= 0 && out.length < limit; i--) {
+    const msg = messages[i]!;
+    if (!isTurnQuery(msg)) continue;
+    const text = messageText(msg).trim();
+    if (text.length === 0) continue;
+    if (isTaskExcerptText(text)) continue;
+    // shouldSeedTaskFocus 已包含寒暄过滤(plan §"抽取")。
+    if (!shouldSeedTaskFocus(text)) continue;
+    out.push(text);
+  }
+  return out.reverse();
 }

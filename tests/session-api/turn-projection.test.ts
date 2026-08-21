@@ -20,10 +20,13 @@ import {
   MAX_THINKING_TEXT_CHARS,
   MAX_TOOL_INPUT_PREVIEW_CHARS,
   MAX_TOOL_OUTPUT_PREVIEW_CHARS,
+  extractRecentUserTasks,
+  isTaskExcerptText,
   isTurnQuery,
   messageText,
   projectThinkingView,
   projectToolCalls,
+  TASK_EXCERPT_PREFIX,
 } from "../../src/session-api/turn-projection.ts";
 
 // helpers ---------------------------------------------------------------
@@ -497,6 +500,185 @@ describe("isTurnQuery — turn 边界判定（共享 helper）", () => {
           },
         ])
       ),
+      false
+    );
+  });
+});
+
+// -- #604 T1: extractRecentUserTasks — 任务摘录纯函数 -------------------------
+//
+// 契约(plan T1 acceptance):
+//   - 倒序遍历 messages,至多取 3 条合格 user-turn 原文(trim 后);
+//   - 合格 = isTurnQuery + shouldSeedTaskFocus(寒暄过滤)+ 非 self-reference
+//     (前缀 TASK_EXCERPT_PREFIX 的摘录文本本身不被下一轮抽到);
+//   - 0 句 → []; assistant / tool_result / 寒暄 / drain / whitespace 一律不取;
+//   - 顺序:返回 chronological(最早→最新),latest 在最后。
+
+describe("extractRecentUserTasks — task excerpt pure function (#604 T1)", () => {
+  // empty ---------------------------------------------------------------
+  it("empty messages → []", () => {
+    assert.deepEqual(extractRecentUserTasks([]), []);
+  });
+
+  // negative ------------------------------------------------------------
+  it("only greetings → [] (寒暄不过)", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [{ type: "text", text: "你好" }]),
+      assistant("user", [{ type: "text", text: "hello" }]),
+      assistant("user", [{ type: "text", text: "thanks" }]),
+    ];
+    assert.deepEqual(extractRecentUserTasks(messages), []);
+  });
+
+  it("only tool_results (无 text user) → []", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("assistant", [
+        { type: "tool_use", id: "t1", name: "noop", input: {} },
+      ]),
+      assistant("user", [
+        {
+          type: "tool_result",
+          tool_use_id: "t1",
+          content: [{ type: "text", text: "ok" }],
+        },
+      ]),
+      assistant("user", [
+        {
+          type: "tool_result",
+          tool_use_id: "t2",
+          content: [{ type: "text", text: "fine" }],
+        },
+      ]),
+    ];
+    assert.deepEqual(extractRecentUserTasks(messages), []);
+  });
+
+  it("only assistant messages → []", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("assistant", [{ type: "text", text: "hi" }]),
+      assistant("assistant", [{ type: "text", text: "again" }]),
+    ];
+    assert.deepEqual(extractRecentUserTasks(messages), []);
+  });
+
+  // normal: 1 turn ------------------------------------------------------
+  it("single qualifying user turn → [that turn, trimmed]", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [{ type: "text", text: "  please ship it  " }]),
+      assistant("assistant", [{ type: "text", text: "ok" }]),
+    ];
+    assert.deepEqual(extractRecentUserTasks(messages), ["please ship it"]);
+  });
+
+  // normal: 3 turns chronological, latest last -------------------------
+  it("3 qualifying turns → all 3, latest last (chronological order)", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [{ type: "text", text: "first task" }]),
+      assistant("assistant", [{ type: "text", text: "ok1" }]),
+      assistant("user", [{ type: "text", text: "second task" }]),
+      assistant("assistant", [{ type: "text", text: "ok2" }]),
+      assistant("user", [{ type: "text", text: "third task" }]),
+      assistant("assistant", [{ type: "text", text: "ok3" }]),
+    ];
+    assert.deepEqual(extractRecentUserTasks(messages), [
+      "first task",
+      "second task",
+      "third task",
+    ]);
+  });
+
+  // overflow limit: cap 3 (default) ------------------------------------
+  it("5 qualifying turns → only the last 3 (latest last)", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [{ type: "text", text: "turn-1" }]),
+      assistant("user", [{ type: "text", text: "turn-2" }]),
+      assistant("user", [{ type: "text", text: "turn-3" }]),
+      assistant("user", [{ type: "text", text: "turn-4" }]),
+      assistant("user", [{ type: "text", text: "turn-5" }]),
+    ];
+    assert.deepEqual(extractRecentUserTasks(messages), [
+      "turn-3",
+      "turn-4",
+      "turn-5",
+    ]);
+  });
+
+  // option limit: 1 ----------------------------------------------------
+  it("option limit: 1 → only the most recent qualifying turn", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [{ type: "text", text: "older" }]),
+      assistant("user", [{ type: "text", text: "newer" }]),
+    ];
+    assert.deepEqual(extractRecentUserTasks(messages, { limit: 1 }), ["newer"]);
+  });
+
+  // whitespace-only / empty user text ----------------------------------
+  it("whitespace-only user text → excluded", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [{ type: "text", text: "   \n\t  " }]),
+      assistant("user", [{ type: "text", text: "real task" }]),
+    ];
+    assert.deepEqual(extractRecentUserTasks(messages), ["real task"]);
+  });
+
+  // subagent drain text ------------------------------------------------
+  it("subagent drain text → excluded", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [
+        {
+          type: "text",
+          text: `${SUBAGENT_DRAIN_PREFIX}task_1 result: sum\n\nbody`,
+        },
+      ]),
+      assistant("user", [{ type: "text", text: "real follow-up" }]),
+    ];
+    assert.deepEqual(extractRecentUserTasks(messages), ["real follow-up"]);
+  });
+
+  // concurrent: self-reference isolation (TASK_EXCERPT_PREFIX) ---------
+  it("previous round's excerpt text (TASK_EXCERPT_PREFIX 前缀) → excluded (self-reference)", () => {
+    const excerpt = `${TASK_EXCERPT_PREFIX} — 2\n1. foo\n2. bar`;
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [{ type: "text", text: "real user task A" }]),
+      assistant("user", [{ type: "text", text: excerpt }]),
+      assistant("user", [{ type: "text", text: "real user task B" }]),
+    ];
+    assert.deepEqual(extractRecentUserTasks(messages), [
+      "real user task A",
+      "real user task B",
+    ]);
+  });
+
+  it("leading whitespace before excerpt prefix still excluded", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [{ type: "text", text: "   recent user task X" }]),
+      assistant("user", [
+        { type: "text", text: `\n${TASK_EXCERPT_PREFIX} — 1\n1. old` },
+      ]),
+    ];
+    assert.deepEqual(extractRecentUserTasks(messages), ["recent user task X"]);
+  });
+});
+
+describe("isTaskExcerptText — TASK_EXCERPT_PREFIX 哨兵识别", () => {
+  it("text starting with prefix → true", () => {
+    assert.equal(isTaskExcerptText(`${TASK_EXCERPT_PREFIX} — 3`), true);
+    assert.equal(
+      isTaskExcerptText(`${TASK_EXCERPT_PREFIX} — 1\n1. some task`),
+      true
+    );
+  });
+
+  it("leading whitespace before prefix → still true (trimStart)", () => {
+    assert.equal(isTaskExcerptText(`  ${TASK_EXCERPT_PREFIX} hi`), true);
+    assert.equal(isTaskExcerptText(`\n${TASK_EXCERPT_PREFIX} hi`), true);
+  });
+
+  it("text without prefix → false", () => {
+    assert.equal(isTaskExcerptText("hello world"), false);
+    assert.equal(isTaskExcerptText(""), false);
+    assert.equal(
+      isTaskExcerptText(`prefix-not-the-same: ${TASK_EXCERPT_PREFIX}`),
       false
     );
   });

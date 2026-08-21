@@ -116,10 +116,12 @@ import type {
 } from "./contract.js";
 import { MAX_MESSAGE_CHARS } from "./contract.js";
 import {
+  extractRecentUserTasks,
   isTurnQuery,
   messageText,
   projectThinkingView,
   projectToolCalls,
+  TASK_EXCERPT_PREFIX,
 } from "./turn-projection.js";
 import type { WorkspaceResponse } from "./contract.js";
 import {
@@ -584,6 +586,11 @@ export class SessionHub {
     this.defaults = {
       jsonMode: opts.defaultJsonMode ?? false,
     };
+    // #604 T1: renderTaskFocusBoundary 在 #604 T1 改 boundaryAttachment 后
+    // 已无 reader,strict noUnusedLocals 仍会拒绝 unused private method。
+    // 在构造函数里挂个 `void` reference 占位(reader),零运行时副作用;
+    // T2 删除时一并删去。模式同 compress/constant.ts:18。
+    void this.renderTaskFocusBoundary;
   }
 
   // -- public API --------------------------------------------------------------
@@ -953,22 +960,23 @@ export class SessionHub {
           // 锚点，bash_output / bash_stop 的 scope 过滤才能按会话闭环。
           conversationId,
           ...(trace !== undefined ? { trace } : {}),
-          // #458 T7 (SC11):compact 边界渲染缝 — taskFocus 在场时注入
-          // boundaryAttachment 闭包,compact 触发时在 placeholder 后追加
-          // 一条 user 消息承载渲染文本;taskFocus 缺席 → 字段缺席,helper
-          // 早退(行为 byte-stable,不影响停止语义 ADR-0011)。renderTaskFocusBoundary
-          // 是 hub 内私有 closure — harness 域独立原则,harness 不 import
-          // session-api,零反向依赖。
-          ...(session.taskFocus !== undefined &&
-          !(session.goal !== undefined && session.goal.text.length > 0)
+          // #604 T1 (SC1-SC5): compact 边界渲染缝 — 把会话里最近合格用户
+          // 任务原话(纯函数 over session.messages,现抽现贴)注入为
+          // boundaryAttachment 闭包;compact 触发时在 placeholder 后追加一条
+          // user 消息。约束:
+          //   - 自动模式(goal.text 非空)→ return undefined,绝不贴(spec: 自
+          //     动模式不贴任务摘录);
+          //   - 0 句合格 → renderRecentUserTasksBoundary return undefined,
+          //     闭包产出 undefined,helper 早退(行为 byte-stable,不影响停止
+          //     语义 ADR-0011);
+          //   - 不读 session.taskFocus(本渲染源改为 session.messages),让
+          //     T2 安全删除 taskFocus 字段时不再反向依赖;
+          //   - renderRecentUserTasksBoundary 是 hub 内私有 closure — harness
+          //     域独立原则,harness 不 import session-api,零反向依赖。
+          ...(!(session.goal !== undefined && session.goal.text.length > 0)
             ? {
-                // 抽 const 让闭包内引用窄化后的 focus,消除非空断言。
-                boundaryAttachment: () => {
-                  const focus = session.taskFocus;
-                  return focus === undefined
-                    ? undefined
-                    : this.renderTaskFocusBoundary(focus);
-                },
+                boundaryAttachment: () =>
+                  this.renderRecentUserTasksBoundary(session.messages),
               }
             : {}),
         };
@@ -1550,7 +1558,13 @@ export class SessionHub {
    *  零 IO / 零 LLM 调用(v1 排除)。
    *
    *  输出形态:当前焦点截 240 + `\n---\n` + 最近 3 条历史各截 120,共 4 段;
-   *  总长 cap 720 字符(防御 — 截断到 720 保证注入文本有界)。 */
+   *  总长 cap 720 字符(防御 — 截断到 720 保证注入文本有界)。
+   *
+   *  #604 T1:仍保留(dead code,T2 删除)— 改完 boundaryAttachment 闭包后,
+   *  本方法不再被调用,但保留以避免一次性大改 review 噪声;无任务摘录、
+   *  无 240+history 焦点渲染的需求通过新 renderRecentUserTasksBoundary 表达。
+   *  strict noUnusedLocals 不豁免 unused private method,见 SessionHub
+   *  constructor 的 `void this.renderTaskFocusBoundary;` 一并保留(reader)。 */
   private renderTaskFocusBoundary(focus: TaskFocusState): string {
     const segments = [
       focus.text.slice(0, 240),
@@ -1558,6 +1572,32 @@ export class SessionHub {
     ];
     const joined = segments.join("\n---\n");
     return joined.length > 720 ? joined.slice(0, 720) : joined;
+  }
+
+  /** #604 T1 (SC1-SC5):compact 边界渲染 — 把 session.messages 内最近 ≤3 句
+   *  合格用户任务原话渲染为单段文本,由 runDeps.boundaryAttachment 闭包
+   *  注入 loop-engine,compact 触发时追加为一条 user 消息(放在 boundary
+   *  placeholder 之后)。
+   *
+   *  约束:
+   *    - 0 句合格 → return undefined,helper 早退(行为 byte-stable,等价
+   *      旧 taskFocus undefined → 字段缺席的语义)。
+   *    - 自动模式不再由本函数拦截 — 由 boundaryAttachment 闭包上游在
+   *      `session.goal.text.length > 0` 时整段不注入闭包;此处只管 messages。
+   *    - 单句上限不限(spec 旧 240 cap 不再现)— 直接整句进入摘录。
+   *    - 渲染形态:`<prefix> — N\n1. t1\n2. t2\n…`(数字编号,chronological,
+   *      最新交代在末尾,与 extractRecentUserTasks 输出顺序一致)。
+   *    - 纯字符串派生,零 IO / 零 LLM 调用;消息结构由 turn-projection.ts
+   *      `extractRecentUserTasks` 守门。
+   */
+  private renderRecentUserTasksBoundary(
+    messages: ReadonlyArray<AnthropicNativeMessage>
+  ): string | undefined {
+    const tasks = extractRecentUserTasks(messages);
+    if (tasks.length === 0) return undefined;
+    const header = `${TASK_EXCERPT_PREFIX} — ${tasks.length}`;
+    const body = tasks.map((t, i) => `${i + 1}. ${t}`).join("\n");
+    return `${header}\n${body}`;
   }
 
   private async applyHubAutoContinue(opts: {
