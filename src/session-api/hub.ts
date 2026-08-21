@@ -25,6 +25,7 @@ import {
   evaluateCompactTrigger,
   getAutoCompactThreshold,
   type CompactReason,
+  type CompactTriggerDecision,
 } from "../harness/compress/index.js";
 import {
   runVerifyLoop,
@@ -195,6 +196,26 @@ type StoreErrorEntry = {
   status: number;
   message: (err: SessionStoreError) => string;
 };
+
+/**
+ * plan compress-trigger-gate T2 review fix:压缩失败的 reason SSOT。三处失败分支
+ * (signal_aborted / 占位 fallback 也无效 / 防御兜底)收敛到一字面量,避免
+ * divergent-change drift。
+ */
+const REASON_NO_COMPRESS: CompactReason = "messages_too_few";
+
+/**
+ * plan compress-trigger-gate T2 review fix:reason 决定 SSOT。窗口压缩成功 →
+ * "windowed";LLM 摘要成功 → "full_summary"(无论判据 action,因 nextMessages
+ * 实际是 SUMMARY_PREAMBLE + 摘要,用户应看到"摘要"文案,而不是"裁早期"文案)。
+ */
+function compactReasonFor(args: {
+  readonly useCompactMessages: boolean;
+  readonly compactAction: CompactTriggerDecision["action"] | undefined;
+}): CompactReason {
+  if (!args.useCompactMessages) return "full_summary";
+  return "windowed";
+}
 
 const STORE_ERROR_MAP: Record<SessionStoreError["kind"], StoreErrorEntry> = {
   not_found: {
@@ -1303,11 +1324,7 @@ export class SessionHub {
         // `cachedDeps.compress` 缺席(ask / oneshot 等无 harness 装配)→ 跳过
         // 判据层,fallback 到既有 splitForCompaction 行为(向后兼容)。
         const compressCfg = this.cachedDeps?.compress;
-        let compactAction:
-          | "noop"
-          | "compact_via_full_summary"
-          | "compact_via_window"
-          | undefined;
+        let compactAction: CompactTriggerDecision["action"] | undefined;
         if (compressCfg !== undefined) {
           const threshold = getAutoCompactThreshold(
             compressCfg.contextWindow,
@@ -1350,7 +1367,7 @@ export class SessionHub {
               session: this.summarize({ file: session }),
               turns: projectMessagesToTurns(before),
               compacted: false,
-              reason: "messages_too_few",
+              reason: REASON_NO_COMPRESS,
               beforeCount: before.length,
               afterCount: before.length,
             };
@@ -1408,7 +1425,7 @@ export class SessionHub {
             turns: projectMessagesToTurns(before),
             compacted: false,
             cancelled: true,
-            reason: "messages_too_few",
+            reason: REASON_NO_COMPRESS,
             beforeCount: before.length,
             afterCount: before.length,
           };
@@ -1424,7 +1441,7 @@ export class SessionHub {
             session: this.summarize({ file: session }),
             turns: projectMessagesToTurns(before),
             compacted: false,
-            reason: "messages_too_few",
+            reason: REASON_NO_COMPRESS,
             beforeCount: before.length,
             afterCount: before.length,
           };
@@ -1446,14 +1463,13 @@ export class SessionHub {
           title: extractTitle(before),
         };
         await this.store.save({ id: conversationId, file: updated });
-        // reason 取判据路径:full_summary 路径走 LLM 摘要成功 / 窗口 fallback;
-        // LLM 摘要成功时强制 full_summary(compactAction 已是 compact_via_full_summary),
-        // placeholder fallback 时降级为 windowed(沿用既有 placeholder 行为语义)。
-        const reason: CompactReason = useCompactMessages
-          ? "windowed"
-          : compactAction === "compact_via_full_summary"
-            ? "full_summary"
-            : "windowed";
+        // reason:LLM 摘要成功 → 'full_summary'(无论判据 action,因 nextMessages
+        // 实际是 SUMMARY_PREAMBLE + 摘要);placeholder fallback → 'windowed'。
+        // SSOT:helper 把 4 取值决策收敛到一处,避免 3 处 inline 字面量 drift。
+        const reason: CompactReason = compactReasonFor({
+          useCompactMessages,
+          compactAction,
+        });
         return {
           session: this.summarize({ file: updated }),
           turns: projectMessagesToTurns(compacted),

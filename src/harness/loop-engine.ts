@@ -439,7 +439,7 @@ async function applyFullCompactSummary(
     const composed = buildCompactedMessages({
       summaryText: outcome.text,
       kept: [],
-      ...(boundary !== undefined ? { boundaryText: boundary } : {}),
+      boundaryText: boundary,
     });
     await recordCompactLlmCall({
       deps,

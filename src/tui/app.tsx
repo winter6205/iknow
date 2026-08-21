@@ -48,6 +48,7 @@ import {
   useTerminalDimensions,
 } from "@opentui/react";
 import type { HarnessStreamEvent } from "../harness/stream.js";
+import type { CompactReason } from "../harness/compress/index.js";
 import type {
   AnthropicNativeMessage,
   TokenUsage,
@@ -1540,8 +1541,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             // plan T4:reason 分类文案,告诉用户真实未压缩原因而非统一「未达
             // 阈值」误导(below_token_threshold 真实未达;messages_too_few
             // 是窗口不可丢且摘要失败的双失败态)。
-            const noopReason = compactResult.reason;
-            const noopLines = (() => {
+            const noopReason: CompactReason = compactResult.reason;
+            const noopLines: readonly string[] = (() => {
               switch (noopReason) {
                 case "below_token_threshold":
                   return ["当前 token 未达压缩阈值，无需压缩。"];
@@ -1549,8 +1550,20 @@ export function TuiApp(props: TuiAppProps): ReactNode {
                   return [
                     "消息条数过少，无法做窗口压缩，且摘要失败 — 上下文保持原样。",
                   ];
-                default:
-                  return ["上下文未达压缩阈值，无需压缩。"];
+                case "windowed":
+                case "full_summary":
+                  // 逻辑上 compacted=false 路径不该拿到这些 reason
+                  // (hub.compactSession 仅在真正压缩成功时返回);列出只是
+                  // 为满足 sealed union exhaustiveness,运行时不可达。
+                  throw new Error(
+                    `unexpected compressed-state reason in noop branch: ${noopReason}`
+                  );
+                default: {
+                  const _exhaustive: never = noopReason;
+                  throw new Error(
+                    `unknown compact reason: ${String(_exhaustive)}`
+                  );
+                }
               }
             })();
             setNotice({ lines: noopLines });
