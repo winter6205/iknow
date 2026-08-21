@@ -3,7 +3,7 @@
 **Goal:** compact 时贴最近至多 3 句用户任务原话；会话不再持有 `taskFocus`。
 **Approach:** 先换 compact 附件（产品可见），再拆掉 seed/落盘/status；trigger 与窗口计数不动。#601 正交，本计划在 `master` 新工作树实施，不合入 `feat/compact-trigger-gate`。
 **Spec link:** `specs/recent-user-tasks.md`
-**Tracker:** GitHub issues（`ready-for-agent` per bullet；spec issue 另开）。创建后把编号回填本文件。
+**Tracker:** GitHub — spec [#603](https://github.com/winter6205/iknow/issues/603)；T1 [#604](https://github.com/winter6205/iknow/issues/604)；T2 [#605](https://github.com/winter6205/iknow/issues/605) blocked-by T1；T3 [#606](https://github.com/winter6205/iknow/issues/606) blocked-by T1+T2。
 **Per-ticket loop (all bullets):** tdd → typecheck+tests → code-review → verification-before-completion → one commit on the ticket branch
 
 ## ACR
