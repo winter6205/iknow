@@ -18,7 +18,11 @@ import { describe, expect, test } from "bun:test";
 import { useState } from "react";
 import { useKeyboard } from "@opentui/react";
 import { testRender } from "@opentui/react/test-utils";
-import { visualWidth } from "../../src/tui/tool-summary.js";
+import {
+  completedToolPreview,
+  visualWidth,
+} from "../../src/tui/tool-summary.js";
+import { completedToolPreviewTextLines } from "../../src/tui/completed-tool-preview-view.js";
 import {
   liveToolPreviewBox,
   liveToolPreviewRows,
@@ -133,6 +137,25 @@ describe("liveToolPreviewTextLines（flat 行）", () => {
     expect(rows).toContain("hello");
     expect(rows.some((r) => r.includes("+hello"))).toBe(false);
     expect(rows.length).toBe(liveToolPreviewRows(run, 80));
+  });
+
+  test("完成态预览行去掉状态行后与共用 view 文本同源", () => {
+    const run: LiveToolRun = {
+      id: "r",
+      name: "write_file",
+      status: "ok",
+      input: { path: "a.ts", content: "hello\nworld\n" },
+      detail: "写入 a.ts（2 行）",
+      oldContent: "",
+      newContent: "hello\nworld\n",
+    };
+    const preview = completedToolPreview(run.name, run.input, {
+      oldContent: run.oldContent,
+      newContent: run.newContent,
+    });
+    expect([...liveToolPreviewTextLines(run, 80)].slice(1)).toEqual(
+      completedToolPreviewTextLines(preview, 80)
+    );
   });
 
   test("已完成 write_file 超长：窗内代码 + 还有 N 行，无全文", () => {

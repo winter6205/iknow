@@ -35,7 +35,7 @@
  *  - `completedToolPreview` / `toolResultStatusMap`（tool-summary）
  *  - `clipOneLineVisual`（tool-summary 内联导出，归档 text.ts SSOT 已迁移）
  *  - `REDACTED_PLACEHOLDER` / `summarizeThinkingContent`（cli/format）
- *  - `DiffView`（diff-view）完成态 diff 着色
+ *  - `CompletedToolPreviewView`（与 live 共用完成态预览 JSX）
  *
  * 严禁 import：archive/tui-ink/*、markdown-lines、message-rows、row-window、
  * selection、selection-render、text、HighlightedLine——本文件应保持纯 OpenTUI
@@ -50,7 +50,6 @@ import { tuiPalette } from "./theme.js";
 import {
   summarizeToolCall,
   completedToolPreview,
-  previewOverflowLabel,
   formatRanSuffix,
   countBashCalls,
   isSubagentTool,
@@ -58,7 +57,7 @@ import {
   SUBAGENT_TOOL_LABEL,
 } from "./tool-summary.js";
 import { clipOneLineVisual } from "./tool-summary.js";
-import { DiffView } from "./diff-view.js";
+import { CompletedToolPreviewView } from "./completed-tool-preview-view.js";
 import { Markdown } from "./markdown.js";
 import {
   REDACTED_PLACEHOLDER,
@@ -119,26 +118,9 @@ function ToolPreviewRows(props: {
 }): ReactNode {
   const preview = completedToolPreview(props.tu.name, props.tu.input);
   if (preview.kind === "empty") return null;
-  const overflow =
-    preview.hiddenLineCount > 0
-      ? previewOverflowLabel(preview.hiddenLineCount)
-      : null;
   return (
     <box flexDirection="column">
-      {preview.kind === "code"
-        ? preview.lines.map((line, i) => (
-            <text key={`c${i}`} wrapMode="none">
-              {line}
-            </text>
-          ))
-        : preview.rows.length > 0 && (
-            <DiffView rows={preview.rows} cols={props.cols} />
-          )}
-      {overflow !== null && (
-        <text fg={tuiPalette.dim} wrapMode="none">
-          {overflow}
-        </text>
-      )}
+      <CompletedToolPreviewView preview={preview} cols={props.cols} />
     </box>
   );
 }

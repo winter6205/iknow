@@ -26,12 +26,13 @@ import {
 } from "./live-tool-state.js";
 import {
   completedToolPreview,
-  previewOverflowLabel,
   summarizePartialInput,
   summarizeToolCall,
-  type CompletedToolPreview,
 } from "./tool-summary.js";
-import { DiffView, diffRowTexts } from "./diff-view.js";
+import {
+  CompletedToolPreviewView,
+  completedToolPreviewTextLines,
+} from "./completed-tool-preview-view.js";
 import { tuiPalette } from "./theme.js";
 
 function isWriteEditTool(name: string): boolean {
@@ -53,6 +54,8 @@ function writeEditRunningLine(run: LiveToolRun, cols: number): string {
       ? formatRunningToolLine(run)
       : `[运行中] ${run.name} · ${summary}`;
   } catch {
+    // EXIT: incomplete write/edit JSON → keep the running summary line;
+    // do not stream content or dump raw partial JSON.
     return formatRunningToolLine(run);
   }
 }
@@ -74,55 +77,11 @@ function runningLine(run: LiveToolRun, cols: number): string {
     : `[运行中] ${run.name} · ${summary}`;
 }
 
-function completedPreviewOf(run: LiveToolRun): CompletedToolPreview {
+function completedPreviewOf(run: LiveToolRun) {
   return completedToolPreview(run.name, run.input, {
     oldContent: run.oldContent,
     newContent: run.newContent,
   });
-}
-
-function completedPreviewTextLines(
-  preview: CompletedToolPreview,
-  cols: number
-): string[] {
-  if (preview.kind === "empty") return [];
-  const lines =
-    preview.kind === "code"
-      ? [...preview.lines]
-      : diffRowTexts(preview.rows, cols);
-  if (preview.hiddenLineCount > 0) {
-    lines.push(previewOverflowLabel(preview.hiddenLineCount));
-  }
-  return lines;
-}
-
-function completedPreviewNodes(
-  preview: CompletedToolPreview,
-  cols: number
-): ReactNode {
-  if (preview.kind === "empty") return null;
-  const overflow =
-    preview.hiddenLineCount > 0
-      ? previewOverflowLabel(preview.hiddenLineCount)
-      : null;
-  return (
-    <>
-      {preview.kind === "code"
-        ? preview.lines.map((line, i) => (
-            <text key={`c${i}`} wrapMode="none">
-              {line}
-            </text>
-          ))
-        : preview.rows.length > 0 && (
-            <DiffView rows={preview.rows} cols={cols} />
-          )}
-      {overflow !== null && (
-        <text fg={tuiPalette.dim} wrapMode="none">
-          {overflow}
-        </text>
-      )}
-    </>
-  );
 }
 
 /**
@@ -137,7 +96,10 @@ export function liveToolPreviewTextLines(
     return [runningLine(run, cols)];
   }
   const out: string[] = [formatCompletedToolLine(run, cols)];
-  for (const l of completedPreviewTextLines(completedPreviewOf(run), cols)) {
+  for (const l of completedToolPreviewTextLines(
+    completedPreviewOf(run),
+    cols
+  )) {
     out.push(l);
   }
   return out;
@@ -162,7 +124,9 @@ export function liveToolPreviewBox(run: LiveToolRun, cols: number): ReactNode {
       <text fg={tuiPalette.dim} wrapMode="none">
         {status}
       </text>
-      {preview !== null && completedPreviewNodes(preview, cols)}
+      {preview !== null && (
+        <CompletedToolPreviewView preview={preview} cols={cols} />
+      )}
     </box>
   );
 }

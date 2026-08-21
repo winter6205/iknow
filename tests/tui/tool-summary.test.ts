@@ -584,6 +584,23 @@ describe("completedToolPreview: 完成态分类 + 截断窗", () => {
     expect(preview.hiddenLineCount).toBe(20 - TOOL_PREVIEW_WINDOW);
   });
 
+  test("overwrite/edit visible rows 是 toolPreviewRows 的截断前缀", () => {
+    const oldContent = Array.from({ length: 40 }, (_, i) => `old-${i}`).join(
+      "\n"
+    );
+    const newContent = Array.from({ length: 40 }, (_, i) => `new-${i}`).join(
+      "\n"
+    );
+    const input = { path: "a.ts", old_str: "x", new_str: "y" };
+    const opts = { oldContent, newContent };
+    const all = toolPreviewRows("edit_file", input, 80, opts);
+    const preview = completedToolPreview("edit_file", input, opts);
+    expect(preview.kind).toBe("diff");
+    if (preview.kind !== "diff") return;
+    expect(preview.rows).toEqual(all.slice(0, TOOL_PREVIEW_WINDOW));
+    expect(preview.hiddenLineCount).toBe(all.length - TOOL_PREVIEW_WINDOW);
+  });
+
   test("超长 overwrite diff → 截断到同一窗常数", () => {
     const oldContent = Array.from({ length: 40 }, (_, i) => `old-${i}`).join(
       "\n"

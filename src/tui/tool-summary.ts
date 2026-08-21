@@ -14,9 +14,10 @@
  * 行级窗口账目一律按 1 行计。传 `cols` 时按视觉宽度收口（预留最宽装饰），
  * 保证三种形态单行不折。
  *
- * 内容可见性：write_file / edit_file 完成后 `toolPreviewRows` 产出统一 diff
- * 预览行（computeDiff 单源），`MessageBlocks` 渲染与 `live-tool-preview`
- * 共用本函数作为单源——行账与渲染不漂移。
+ * 内容可见性：write_file / edit_file 完成后 `completedToolPreview` 产出
+ * 截断代码或 diff（UI SSOT）；live box 与历史 `ToolPreviewRows` 共用
+ * `CompletedToolPreviewView` 渲染。`toolPreviewRows` 仍是无界 DiffLine
+ * 助手（测试锁 create 整文件绿 diff），生产 UI 不直接调用。
  *
  * 文本收口助手（visualWidth / clipOneLine / clipOneLineVisual）：归档时代
  * SSOT 在 text.ts（未入 T4 迁移清单），T4 范围内收敛在本文件导出，供
@@ -339,7 +340,10 @@ export function completedToolPreview(
     return { kind: "code", lines: visible, hiddenLineCount };
   }
   const { visible, hiddenLineCount } = truncateWindow(
-    computeDiff(name, pair.oldContent, pair.newContent)
+    toolPreviewRows(name, rec, 0, {
+      oldContent: pair.oldContent,
+      newContent: pair.newContent,
+    })
   );
   if (visible.length === 0) return EMPTY_COMPLETED_PREVIEW;
   return { kind: "diff", rows: visible, hiddenLineCount };
@@ -351,19 +355,17 @@ export function previewOverflowLabel(hiddenLineCount: number): string {
 }
 
 /**
- * 工具内容预览行（内容可见性，统一 diff 版）：edit_file / write_file 调用
- * `computeDiff`（diff-unified.ts）产出逐行 `DiffLine[]`（带行号 + kind，
- * 供 diff-view.tsx 上色/排行号）。其余工具 / 无内容 → 空数组。
+ * 无界 DiffLine 助手（非生产 UI SSOT）：edit_file / write_file 调用
+ * `computeDiff` 产出完整 `DiffLine[]`。其余工具 / 无内容 → 空数组。
+ * 生产完成态预览走 `completedToolPreview`（create 保持代码行，diff 再截断
+ * 本函数的结果）；测试仍用本函数锁 write_file create 的整文件绿 diff。
  *
  * `opts.oldContent / opts.newContent`（side-channel）：live 运行完成事件
  * 携带读盘前后全文（与 model tool_result 严格分离）→ 精确 diff。缺省（历史
  * 持久化消息，meta 在 model 边界被丢弃）回退 intent-diff：
  *  - edit_file：input.old_str / input.new_str 片段 diff；
  *  - write_file：old 视为空串 → 纯 add；
- *  - 其余工具：空数组（无 diff 预览，保持历史行账）。
- *
- * SSOT：`MessageBlocks`（全可见路径渲染）与 `live-tool-preview`（live tail）
- * 共用本函数产 diff 行——行账与渲染不漂移。
+ *  - 其余工具：空数组。
  */
 export function toolPreviewRows(
   name: string,
