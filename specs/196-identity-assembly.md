@@ -1,6 +1,10 @@
 # Spec: iknow 身份认知装配（identity 认知 + soul 人格 + 启动引导 + 用户画像）
 
 > **Lean spec.** 本 spec 锁定实施层决策：身份层独立成段（`assembleIdentityContext` 注入缝）、认知/人格分层、装配顺序、文件归位、状态机、入口覆盖、测试 / Boundaries / Success Criteria。已在 spec 阶段由操作员逐条确认的 5 个决策点（issue #196 决策点 §1-§5）作为先决决议直接引用，不在本 spec 体内重开。
+>
+> ## ✅ Rev 2026-08-21 画像物理根（issue #584 / plans/global-user-profile.md）
+>
+> ADR-0019 D1.4「`user.md` / `BOOTSTRAP.md` 跟随 workspaceRoot」**superseded**（正式 ADR-0025 由 T1 domain-modeling 落盘）。seed 与 assemble 物理根 = `userHome/.iknow`（默认 `homedir()`）。`--workspace-root` 不搬走画像。A8「复用 `~/.iknow/` 同根」恢复为产品契约；workspaceRoot 只服务 memory / sessions / settings fallback / serve data。
 
 > ## ✅ Rev 2026-08-11 决策修订（已落地，12-bullet tracker `docs/plans/196-identity-bootstrap-align.md` 全部完成）
 >
