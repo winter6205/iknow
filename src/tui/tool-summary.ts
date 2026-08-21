@@ -332,7 +332,7 @@ export function completedToolPreview(
   if (!hasPreviewPath(rec)) return EMPTY_COMPLETED_PREVIEW;
   const pair = resolveWriteEditPair(name, rec, opts);
   if (pair === null) return EMPTY_COMPLETED_PREVIEW;
-  if (pair.oldContent === "") {
+  if (name === "write_file" && pair.oldContent === "") {
     const { visible, hiddenLineCount } = truncateWindow(
       splitContentLines(pair.newContent)
     );

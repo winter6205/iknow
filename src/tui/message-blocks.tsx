@@ -110,12 +110,15 @@ function ToolSummaryRow(props: {
   );
 }
 
-/** 工具内容预览（write_file / edit_file）：与 live 完成态同一
+/** 工具内容预览（write_file / edit_file）：仅 tool_result 已配对（ok/failed）
+ *  时渲染；运行中 / 未配对只留摘要行。与 live 完成态同一
  *  `completedToolPreview` + `TOOL_PREVIEW_WINDOW`。截断即折叠。 */
 function ToolPreviewRows(props: {
   readonly tu: ToolUseBlock;
   readonly cols: number;
+  readonly paired: boolean;
 }): ReactNode {
+  if (!props.paired) return null;
   const preview = completedToolPreview(props.tu.name, props.tu.input);
   if (preview.kind === "empty") return null;
   return (
@@ -276,7 +279,11 @@ export function MessageBlocks(props: {
       nodes.push(
         <box key={`u${i}`} flexDirection="column">
           <ToolSummaryRow tu={block} statusMap={statusMap} cols={innerCols} />
-          <ToolPreviewRows tu={block} cols={innerCols} />
+          <ToolPreviewRows
+            tu={block}
+            cols={innerCols}
+            paired={statusMap.has(block.id)}
+          />
         </box>
       );
     }

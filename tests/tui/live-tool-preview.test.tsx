@@ -429,6 +429,28 @@ describe("T5: running 态 partial 摘要渲染", () => {
     expect(rows.join("\n")).not.toContain("SHOULD_NOT_STREAM");
   });
 
+  test("running edit_file + 完整 JSON：1 行且帧/文本不含 new_str", async () => {
+    const distinctive = "NEWTKN99";
+    const run: LiveToolRun = {
+      id: "tu-edit-run",
+      name: "edit_file",
+      status: "running",
+      input: undefined,
+      partialInput: JSON.stringify({
+        path: "a.ts",
+        old_str: "old-token",
+        new_str: distinctive,
+      }),
+    };
+    const rows = liveToolPreviewTextLines(run, 80);
+    expect(rows).toHaveLength(1);
+    expect(rows.join("\n")).not.toContain(distinctive);
+    const setup = await renderBox(run, 80);
+    const frame = setup.captureCharFrame();
+    expect(frame).not.toContain(distinctive);
+    await setup.renderer.destroy();
+  });
+
   test("running write_file 不完整 JSON：1 行且不流式画出 content 片段", () => {
     const run: LiveToolRun = {
       id: "tu-1",

@@ -644,6 +644,27 @@ test("T7 assistant 消息：底色 box 包裹后渲染不崩，markdown 产物�
   await setup.renderer.destroy();
 });
 
+test("history write_file 未配对（空 statusMap）：仅 [运行中] 摘要，不含 content 正文", async () => {
+  const bodyLine = "UNIQUE_WRITE_BODY_LINE_alpha";
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "tu-unpaired-write",
+        name: "write_file",
+        input: { path: "a.ts", content: `${bodyLine}\nsecond-body-line` },
+      },
+    ],
+  };
+  const setup = await renderBlocks(msg, { statusMap: emptyStatusMap() });
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("[运行中]");
+  expect(frame).not.toContain(bodyLine);
+  expect(frame).not.toContain("second-body-line");
+  await setup.renderer.destroy();
+});
+
 test("T7 纯 tool_use 消息：底色 box 包裹后渲染不崩，摘要行可见", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",

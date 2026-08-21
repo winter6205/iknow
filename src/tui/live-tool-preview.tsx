@@ -28,6 +28,8 @@ import {
   completedToolPreview,
   summarizePartialInput,
   summarizeToolCall,
+  clipOneLineVisual,
+  visualWidth,
 } from "./tool-summary.js";
 import {
   CompletedToolPreviewView,
@@ -49,7 +51,17 @@ function writeEditRunningLine(run: LiveToolRun, cols: number): string {
     if (typeof parsed !== "object" || parsed === null) {
       return formatRunningToolLine(run);
     }
-    const summary = summarizeToolCall(run.name, parsed, cols).detail;
+    const rec = parsed as Record<string, unknown>;
+    const path =
+      typeof rec.path === "string" && rec.path.length > 0 ? rec.path : "?";
+    // Running write/edit: name + path (+ write line count). Never old/new/content.
+    const summary =
+      run.name === "write_file"
+        ? summarizeToolCall("write_file", parsed, cols).detail
+        : clipOneLineVisual(
+            `编辑 ${path}`,
+            Math.min(80, Math.max(4, cols - visualWidth(run.name) - 21))
+          );
     return summary.length === 0
       ? formatRunningToolLine(run)
       : `[运行中] ${run.name} · ${summary}`;

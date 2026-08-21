@@ -572,6 +572,15 @@ describe("completedToolPreview: 完成态分类 + 截断窗", () => {
     expect(preview.rows.find((r) => r.kind === "add")?.text).toBe("+bar");
   });
 
+  test("edit_file old_str 空串 → kind 为 diff 不是 code", () => {
+    const preview = completedToolPreview("edit_file", {
+      path: "a.ts",
+      old_str: "",
+      new_str: "x",
+    });
+    expect(preview.kind).toBe("diff");
+  });
+
   test("正文长于可见窗 → 只产出窗内行 + 溢出计数", () => {
     const content = Array.from({ length: 20 }, (_, i) => `L${i}`).join("\n");
     const preview = completedToolPreview("write_file", {
