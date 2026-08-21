@@ -22,9 +22,7 @@ minimal-change-verifier: yes — 决策 / 代码+测试 / 产品文档 三 commi
 
 ## 待写入
 
-- CONTEXT：`user.md`、`BOOTSTRAP.md`（首启种子）、`workspaceRoot`（不含画像）
-- ADR-0025 新决策；ADR-0019 D1.4 正文标明 superseded（Status 行保持 `accepted`，因 hook 不允许 `accepted; …` 混写）
-- T1 persist 必须先出现 transcript 里的 `domain-modeling` Skill tool_use，否则 `pre-context-write-guard` 会拦截 Write/Edit
+- （已 flush）ADR-0025、ADR-0019 D1.4 正文、CONTEXT 三词条
 
 ## Tasks (ordered by dependency)
 
@@ -32,7 +30,7 @@ minimal-change-verifier: yes — 决策 / 代码+测试 / 产品文档 三 commi
    - **Inherits:** spec 196 A8「`~/.iknow/` 复用同根，新增 user.md + state.json」；BOOTSTRAP 文案已指向 `~/.iknow/user.md`。ADR-0019 D1.1–D1.3 / D1.5 保持。
    - **Surface:** `docs/adr` / `docs/CONTEXT.md`
    - **Acceptance:** ADR-0025 accepted：identity 文件物理根 = `userHome/.iknow`，即使设置了 `--workspace-root` 也不搬走；ADR-0019 Status 含 `D1.4 superseded by ADR-0025`；CONTEXT 三词条定义与 `_Avoid_` 与该契约一致。
-   - Status: [ ] pending — blocked: Cursor transcript 无 Skill tool_use，`pre-context-write-guard` 拒写 `docs/adr` / `CONTEXT.md`
+   - Status: [x] done (ADR-0025 + CONTEXT; this commit)
 
 2. **Seed and assemble only at home** — tag: `[implementation]`
    - **Inherits:** T1 / ADR-0025。`initIknowWorkspaceSafe` 失败仍 warn 不阻塞。`opts.workspace` 仅测试/隔离 `userHome` 缝，不是 workspaceRoot。
@@ -46,4 +44,4 @@ minimal-change-verifier: yes — 决策 / 代码+测试 / 产品文档 三 commi
    - **Surface:** `docs/architecture.md` / `CHANGELOG.md` / `specs/196-identity-assembly.md`
    - **Acceptance:** architecture 的 per-root consumers 列表不再包含 `user.md` / `BOOTSTRAP.md` / identity seed；CHANGELOG 写明 D1.4 被 supersede；spec 196 有 supersede 标记指向 ADR-0025，不再把 seed 描述成跟随 workspaceRoot。
    - [blocks: T2]
-   - Status: [ ] pending
+   - Status: [x] done (this commit)

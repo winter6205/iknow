@@ -26,7 +26,7 @@ Status: accepted
 
 ### 4. `user.md` / `BOOTSTRAP.md` reads 跟随 workspaceRoot（D1.4）
 
-**Recommended: per-root**。`identity/assemble.ts` 的 `readUserProfile` / `readBootstrapIfNeeded` 从 `path.join(ctx.userHome, ".iknow")` 改为 `path.join(ctx.workspaceRoot, ".iknow")` —— user.md / BOOTSTRAP.md 读取路径 = `<workspaceRoot>/.iknow/{user.md, BOOTSTRAP.md}`，**不是** `~/.iknow/...`。Rationale：用户陈述「per-root state differs」；persona state 属于 per-root。这是 ACR axis 1（bounded-context-guardian）要点 —— 若 `assemble.ts` 仍留在 `userHome` 上会静默拆散 end-state。
+**Superseded by ADR-0025.** 原 Recommended 为 per-root。操作员后续明确画像永远全局一份；identity 文件改回 `userHome/.iknow`。D1.1–D1.3 / D1.5 不受本条 supersede 影响。
 
 ### 5. `IKNOW_WORKSPACE_ROOT` env SSOT 注册（D1.5）
 
@@ -42,7 +42,7 @@ Status: accepted
 ### Negative / Trade-offs
 
 - 既有用户在项目目录启动会看到 identity/memory 迁移到该目录 `.iknow` —— 一个 release 的 `--workspace-root $HOME` opt-out 迁移窗口兜底。
-- `assemble.ts` 的 persona 读取（user.md / BOOTSTRAP.md）默认不再从 `~/.iknow` 读 —— 若用户期望这些是 global，需要显式 `--workspace-root $HOME`。
+- `assemble.ts` 的 persona 读取（user.md / BOOTSTRAP.md）默认不再从 `~/.iknow` 读 —— 若用户期望这些是 global，需要显式 `--workspace-root $HOME`。**Outdated for persona: superseded by ADR-0025**（画像回到 home；`--workspace-root` 不再搬走 user.md）。
 
 ### Concrete Quiddity
 

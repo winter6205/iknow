@@ -8,7 +8,7 @@
 
 ### Breaking
 
-- **全局画像不再跟 workspaceRoot（#584，2026-08-21）**: `user.md` / `BOOTSTRAP.md` / identity `state.json` 只种、只读 `~/.iknow/`（测试缝 `userHome`）。`--workspace-root` / 项目 `.iknow/` 不再 seed 空模板；装配层忽略 `ctx.workspaceRoot` 作为 persona 根。ADR-0019 D1.1–D1.3 / D1.5（memory / settings fallback / serve data）不变；D1.4 per-root persona 收回（ADR-0025 待 domain-modeling 落盘）。已误种在项目目录的文件不自动删除。计划 `plans/global-user-profile.md`。
+- **全局画像不再跟 workspaceRoot（#584，2026-08-21）**: `user.md` / `BOOTSTRAP.md` / identity `state.json` 只种、只读 `~/.iknow/`（测试缝 `userHome`）。`--workspace-root` / 项目 `.iknow/` 不再 seed 空模板；装配层忽略 `ctx.workspaceRoot` 作为 persona 根。ADR-0019 D1.1–D1.3 / D1.5（memory / settings fallback / serve data）不变；D1.4 per-root persona 由 ADR-0025 supersede。已误种在项目目录的文件不自动删除。计划 `plans/global-user-profile.md`。
 
 - **serve-workspace explicit bind（ADR-0023, #531, 2026-08-19）**: `iknow serve` 不再回退到 `process.cwd()` 作为 workspace root —— long-running 进程的 cwd ≠ 用户项目根，serve hub 默认保持 unbound。WebUI Picker（chip + `/workspace` slash）是 canonical bind surface；未 bind 前 `POST /api/v1/sessions/:id/messages` 返回 400 `validation` field=`workspaceRoot`。Bind 后 `workspaceRoot` 写入每个 session 文件，引擎 `cwd === workspaceRoot === sandboxRoot` 收敛到同一绝对路径。Trust roster 落 `~/.iknow/workspaces.json`，新绝对路径需 `confirmTrust` on PUT（乐观 rev-CAS）。CLI `--workspace-root <abs>` / `IKNOW_WORKSPACE_ROOT` 仍支持显式 pre-bind（ADR-0019 D1.1 对 `chat` / `tui` / `ask` 保持不变）。详见 `docs/adr/0023-serve-workspace-explicit.md` + `specs/serve-workspace.md`；计划 `plans/serve-workspace.md` §T1-T6。
 
