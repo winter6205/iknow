@@ -30,6 +30,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { run } from "../../../src/harness/loop-engine.ts";
+import type { LoopAdapter } from "../../../src/harness/loop-engine.ts";
 import { createRegistry } from "../../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../../src/harness/tools/executor.ts";
 import { createStubModel } from "../../../src/harness/stubs/stub-model.ts";
@@ -619,6 +620,45 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
       content: [{ type: "text", text: "focus@now\n---\nhist1" }],
     });
     // 保留尾部:最终 assistant 收尾仍在。
+    assertCompletionTail(result.messages);
+  });
+
+  it("plan compress-trigger-gate T5: messages ≤ DEFAULT_KEEP_RECENT 但 token 超阈值 → 触发 full summary 路径,不静默 no-op", async () => {
+    // 5 条 prior(≤ keepRecent=6)各 50k chars → estimate ≈ 100k tokens >> threshold=1000
+    // → evaluateCompactTrigger 应返回 action: 'compact_via_full_summary'。
+    // 旧 splitForCompaction-only 路径在这场景下会 no-op(slicedFrom=0) +
+    // lastCompactTurn 不更新 → 形成"每轮重检但不压缩"死循环;
+    // 本 case 钉住新路径会真触发 runFullCompact 走 LLM 摘要。
+    const longPrior = Array.from({ length: 5 }, (_, i) =>
+      text(`prior-${i} ${"x".repeat(50_000)}`)
+    );
+    const adapter = makeCompactSummaryAdapter({
+      responses: buildResponses(TURNS),
+    });
+    const { result } = await run(
+      "hello",
+      {
+        adapter,
+        executor,
+        registry,
+        maxTurns: TURNS + 1,
+        compress: { contextWindow: 200_000, thresholdTokens: 1_000 },
+      },
+      undefined,
+      { priorMessages: longPrior }
+    );
+    assert.equal(result.stopReason, "completed");
+    // 关键断言:全量摘要轮至少 1 次 → 证明 proactive 没卡在 no-op 死循环
+    assert.ok(
+      adapter.compactSteps.value >= 1,
+      `messages ≤ keepRecent 但 token 超阈值时必须触发 full summary 路径,实际 compactSteps=${adapter.compactSteps.value}`
+    );
+    // messages[0] 应为 LLM 摘要轮(SUMMARY_PREAMBLE + 摘要内容),而不是保留原 5 条
+    assert.ok(
+      isSummaryMessage(result.messages[0]!),
+      "messages[0] 必须是 LLM 摘要轮 user 消息(full summary 路径落点)"
+    );
+    // 保留尾部:最终 assistant 收尾仍在(proactive 触发后 run() 仍能完成)
     assertCompletionTail(result.messages);
   });
 });
