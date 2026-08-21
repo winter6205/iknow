@@ -8,6 +8,7 @@
  */
 import type { StopReason, TokenUsage } from "../harness/index.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
+import type { CompactReason } from "../harness/compress/index.js";
 import type { SessionStoreErrorKind } from "./store/errors.js";
 
 /** Max user message length (code units). */
@@ -143,10 +144,14 @@ export type ResetSessionResponse = {
  * 手动压缩会话响应（web 按钮 / TUI /compact 共用 wire 形状）。
  * 压缩后 session 保持同一 conversation_id；turns 为压缩后消息投影。
  * `compacted`：true 表示实际发生了裁剪（消息数减少）；false 表示消息已
- * 低于压缩阈值、无变化（幂等 no-op，客户端据此提示“无需压缩”）。
+ * 低于压缩阈值、无变化（幂等 no-op，客户端据此提示”无需压缩”）。
  * `cancelled`：#548 — 仅在 opts.signal 中途 abort、压缩未完成时为 true；
  * 会话保持原样（messages/turnCount/updatedAt 均不动），与
- * compacted=false 的"未达阈值"语义区分(web/TUI 渲染区分)。
+ * compacted=false 的”未达阈值”语义区分(web/TUI 渲染区分)。
+ * `reason`：plan compress-trigger-gate T2 — 触发判据分类标识,SSOT 见
+ * `src/harness/compress/index.ts:evaluateCompactTrigger`。客户端据此区分
+ * 文案(`below_token_threshold` / `messages_too_few` / `windowed` /
+ * `full_summary`)。
  */
 export type CompactSessionResponse = {
   session: SessionSummary;
@@ -154,6 +159,8 @@ export type CompactSessionResponse = {
   compacted: boolean;
   /** #548:signal abort → true,会话保持原样;其余时刻缺席 = false。 */
   cancelled?: boolean;
+  /** plan T2:触发判据分类标识(4 选 1);T4 据此分文案分支。 */
+  readonly reason: CompactReason;
   /** 压缩前的消息条数（DEFAULT_KEEP_RECENT 尾窗保留判定用）。 */
   beforeCount: number;
   /** 压缩后的消息条数（no-op 时 === beforeCount）。 */

@@ -22,6 +22,11 @@ import {
   type TraceService,
 } from "../harness/index.js";
 import {
+  evaluateCompactTrigger,
+  getAutoCompactThreshold,
+  type CompactReason,
+} from "../harness/compress/index.js";
+import {
   runVerifyLoop,
   type VerifyConfig,
   type VerifyLoopOutcome,
@@ -1293,15 +1298,64 @@ export class SessionHub {
       work: async () => {
         const session = await this.store.load(conversationId);
         const before = session.messages;
-        const split = splitForCompaction(before);
-        if (split === undefined) {
+
+        // plan compress-trigger-gate T2: 走 `evaluateCompactTrigger` 统一判据。
+        // `cachedDeps.compress` 缺席(ask / oneshot 等无 harness 装配)→ 跳过
+        // 判据层,fallback 到既有 splitForCompaction 行为(向后兼容)。
+        const compressCfg = this.cachedDeps?.compress;
+        let compactAction:
+          | "noop"
+          | "compact_via_full_summary"
+          | "compact_via_window"
+          | undefined;
+        if (compressCfg !== undefined) {
+          const threshold = getAutoCompactThreshold(
+            compressCfg.contextWindow,
+            compressCfg.thresholdTokens
+          );
+          compactAction = evaluateCompactTrigger(before, {
+            contextWindow: compressCfg.contextWindow,
+            threshold,
+          }).action;
+        }
+
+        // 1) token 未达阈值 → 直接 noop 返回(reason 来自判据),不调 splitForCompaction。
+        if (compactAction === "noop") {
           return {
             session: this.summarize({ file: session }),
             turns: projectMessagesToTurns(before),
             compacted: false,
+            reason: "below_token_threshold",
             beforeCount: before.length,
             afterCount: before.length,
           };
+        }
+
+        // 2) 决定 dropped / kept:
+        //    - compact_via_window → splitForCompaction 的窗口守门结果;
+        //    - compact_via_full_summary → 整段视为 dropped,kept = [];
+        //    - compressCfg 缺席 → 走既有 splitForCompaction(无判据)。
+        let split: {
+          readonly dropped: ReadonlyArray<AnthropicNativeMessage>;
+          readonly kept: ReadonlyArray<AnthropicNativeMessage>;
+        };
+        if (compactAction === "compact_via_full_summary") {
+          split = { dropped: before, kept: [] };
+        } else {
+          const windowSplit = splitForCompaction(before);
+          if (windowSplit === undefined) {
+            // 判据与 splitForCompaction 一致:此分支不可达(windowed 必 kept>0)。
+            // 防御兜底:无 dropped 前缀 → 视为消息条数过少,no-op 返回。
+            return {
+              session: this.summarize({ file: session }),
+              turns: projectMessagesToTurns(before),
+              compacted: false,
+              reason: "messages_too_few",
+              beforeCount: before.length,
+              afterCount: before.length,
+            };
+          }
+          split = windowSplit;
         }
 
         // #467 step 2: 优先 LLM 结构化摘要(best-effort,失败回退 placeholder)。
@@ -1354,6 +1408,7 @@ export class SessionHub {
             turns: projectMessagesToTurns(before),
             compacted: false,
             cancelled: true,
+            reason: "messages_too_few",
             beforeCount: before.length,
             afterCount: before.length,
           };
@@ -1369,6 +1424,7 @@ export class SessionHub {
             session: this.summarize({ file: session }),
             turns: projectMessagesToTurns(before),
             compacted: false,
+            reason: "messages_too_few",
             beforeCount: before.length,
             afterCount: before.length,
           };
@@ -1390,10 +1446,19 @@ export class SessionHub {
           title: extractTitle(before),
         };
         await this.store.save({ id: conversationId, file: updated });
+        // reason 取判据路径:full_summary 路径走 LLM 摘要成功 / 窗口 fallback;
+        // LLM 摘要成功时强制 full_summary(compactAction 已是 compact_via_full_summary),
+        // placeholder fallback 时降级为 windowed(沿用既有 placeholder 行为语义)。
+        const reason: CompactReason = useCompactMessages
+          ? "windowed"
+          : compactAction === "compact_via_full_summary"
+            ? "full_summary"
+            : "windowed";
         return {
           session: this.summarize({ file: updated }),
           turns: projectMessagesToTurns(compacted),
           compacted: true,
+          reason,
           beforeCount: before.length,
           afterCount: compacted.length,
         };
