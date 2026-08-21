@@ -29,7 +29,6 @@ import {
   resolveWorkspaceRoot,
 } from "../config/workspace-root.js";
 import type { SessionContext } from "../shared/schema.js";
-import { join } from "node:path";
 
 export type RuntimeBundle = {
   env: IknowEnv;
@@ -112,15 +111,10 @@ export async function buildHarnessEngine(
           env: { [WORKSPACE_ROOT_ENV_KEY]: envWsRoot },
         })
       : undefined;
-  // #196 IKNOW T5 + ADR-0019 (T2): eager + idempotent 初始化 per-root identity
-  // workspace(initIknowWorkspaceSafe 内部 try/catch+warn,失败不阻塞装配 —
-  // 幂等备份,build-engine 内还有一次)。CLI 显式 workspaceRoot 在场 → seed
-  // 落 `<workspaceRoot>/.iknow`;缺省 → iknowWorkspaceRoot()(cwd,T2 D1.1)。
-  await initIknowWorkspaceSafe(
-    resolvedWorkspaceRoot
-      ? { workspace: join(resolvedWorkspaceRoot, ".iknow") }
-      : undefined
-  );
+  // #196 IKNOW T5 + issue #584: seed persona at `<homedir>/.iknow` only.
+  // `--workspace-root` / cwd must not receive user.md. Failures warn, do
+  // not block (build-engine repeats this with the userHome seam).
+  await initIknowWorkspaceSafe();
   // W1: 宿主侧执行用户初始化脚本(默认 ~/.iknow/init.sh,可被
   // IKNOW_HOST_INIT_SCRIPT 覆盖)。spawn 由宿主进程发起,不经过 agent
   // bash 工具 → 无权限确认、无 allowlist 限制。文件不存在则 skip;

@@ -61,7 +61,6 @@ import {
   resolveThinkingSettingsPath,
 } from "../config/persist-settings.js";
 import { homedir } from "node:os";
-import { join } from "node:path";
 
 /** E1/E2 类型化错误前缀（specs/321 SC 11：错误消息常量化，禁 magic string）。 */
 export const TUI_RENDERER_ERROR_PREFIX = "TUI 渲染后端初始化失败";
@@ -73,10 +72,9 @@ export interface RunTuiOptions {
   readonly dataDir?: string;
   /**
    * ADR-0019 (T2): per-root state anchor — CLI `--workspace-root` flag 透传。
-   * 装配期 resolve 一次并透传:initIknowWorkspaceSafe(seed 落
-   * `<workspaceRoot>/.iknow`)+ resolveServeDataDir(数据落 workspace)+
-   * buildTuiDeps → build-engine。缺省 undefined → 与既有行为一致
-   * (seed 默认 iknowWorkspaceRoot(),dataDir 默认 ~/.iknow,memory 默认 homedir)。
+   * 装配期 resolve 一次并透传:resolveServeDataDir(数据落 workspace)+
+   * buildTuiDeps → build-engine。Persona seed 走 userHome/.iknow,不跟
+   * workspaceRoot。缺省 undefined → dataDir 默认 ~/.iknow。
    */
   readonly workspaceRoot?: string;
   /** JSONL trace 输出路径。 */
@@ -138,8 +136,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     const runtime = await prepareRuntime();
     // review-fix (M1 / H1): TUI 用 active env 条件 resolve workspaceRoot ——
     // explicit flag 或 env SSOT 任一在场时走 resolver(typed error
-    // fail-fast);两者都缺 → undefined(保持 dataDir 默认 ~/.iknow 与
-    // initIknowWorkspaceSafe 默认 cwd 行为,不漂移)。
+    // fail-fast);两者都缺 → undefined(保持 dataDir 默认 ~/.iknow)。
     const envWsRoot = runtime.env.workspaceRoot;
     const workspaceRoot =
       options.workspaceRoot !== undefined || envWsRoot !== undefined
@@ -150,12 +147,8 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
           })
         : undefined;
     // 装配链：runtime → deps → bridge/ask/tool 桥接 → TuiApp
-    // ADR-0019 (T2): 显式 workspaceRoot → initIknowWorkspaceSafe 落
-    // `<workspaceRoot>/.iknow`(per-root identity seed)。缺省 → 与既有
-    // 行为一致(iknowWorkspaceRoot() = cwd + .iknow,T2 D1.1 default)。
-    await initIknowWorkspaceSafe(
-      workspaceRoot ? { workspace: join(workspaceRoot, ".iknow") } : undefined
-    );
+    // issue #584: persona seed 永远 `<homedir>/.iknow`,不跟 workspaceRoot。
+    await initIknowWorkspaceSafe();
     // settings-hot-reload（T4）:EnvLoader 作为 env 源。初次 get() = lazy load
     // 拿初始 env，后续 watcher 触发自动 reload。初始 env 用它（而非 bundle.env）
     // 保证「初始 adapter + envProvider 首次快照」同源一致（生产两值相同）。

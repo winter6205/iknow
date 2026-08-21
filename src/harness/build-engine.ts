@@ -109,8 +109,7 @@ export type BuildEngineOpts = {
   /**
    * ADR-0019 (T2, D1.1/D1.4): per-root state anchor — CLI `--workspace-root`
    * flag / env `IKNOW_WORKSPACE_ROOT`。per-root consumers 全部在本层消费:
-   *   - identity workspace seed (initIknowWorkspaceSafe ← workspaceRoot/.iknow)
-   *   - createIknowSystemResolver workspaceRoot(user.md/BOOTSTRAP.md 读取根)
+   *   - identity workspace seed always `<userHome>/.iknow` (issue #584)
    *   - memoryDir(resolveProjectMemoryDir ← workspaceRoot)
    *   - skill scanner userhome 档
    * `workspaceRoot` **不**加入 `LoopEngineDeps`(ACR minimal-change-verifier)。
@@ -513,22 +512,13 @@ export async function buildHarnessEngine(
   // deps.registry / executor / catalog 三方一致 — ask 入口自然不含 memory 工具。
   const registryTools: Registry = reg.inner;
 
-  // #196 IKNOW T4 + ADR-0019 (T2):启动时 eager + idempotent 初始化 per-root
-  // identity workspace(initIknowWorkspaceSafe 内部 try/catch + warn,失败不
-  // 阻塞装配 — 守 spec Boundaries Always 降级契约)。
-  //   - 显式 workspaceRoot(opts.workspaceRoot / env)→ seed 落
-  //     `<workspaceRoot>/.iknow`(identity seed 跟随 per-root state anchor)。
-  //   - 缺省→ 与 iknowWorkspaceRoot() 同值(process.cwd()/.iknow),行为不变。
-  // 兼容注:既有 T337 seam 测传 userHome ≠ homedir() 隔离 HOME(旧逻辑走
-  // `{ workspace: path.join(userHome, ".iknow") }`)—— 该缝保持优先:userHome
-  // 显式 ≠ homedir()(测试注入)时仍以 userHome 为准,workspaceRoot 只在未注入
-  // userHome 测试缝时接管(两者含意不同:userHome = global config anchor 测试
-  // 隔离,workspaceRoot = per-root state anchor 真实装配)。
-  await initIknowWorkspaceSafe(
-    userHome !== homedir()
-      ? { workspace: path.join(userHome, ".iknow") }
-      : { workspace: path.join(workspaceRoot, ".iknow") }
-  );
+  // #196 IKNOW T4 + issue #584: eager + idempotent 初始化全局 identity
+  // workspace(initIknowWorkspaceSafe 内部 try/catch + warn,失败不阻塞装配)。
+  // Persona always seeds `<userHome>/.iknow` (userHome is the test seam;
+  // workspaceRoot / cwd must not receive user.md).
+  await initIknowWorkspaceSafe({
+    workspace: path.join(userHome, ".iknow"),
+  });
   // #337 T8:MCP 条件化装配。四入口判定（#440 T11 已上移到 registry call 之前,
   // 详见上方 mcpManager 块 + holder 模式 — 此处仅保留历史注释锚点）。
   //   - surface === "ask" → 不创建 manager(SC12 守门,ask 三方视图零 mcp__*)。
@@ -569,8 +559,6 @@ export async function buildHarnessEngine(
     system: createIknowSystemResolver({
       cwd,
       userHome,
-      // ADR-0019 (T2, D1.4):user.md / BOOTSTRAP.md 读取根 = workspaceRoot
-      // (per-root persona state)。缺省与 userHome 同值(既有测试零变化)。
       workspaceRoot,
       surface,
       memoryEnabled,

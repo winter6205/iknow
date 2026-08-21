@@ -80,6 +80,15 @@ _Avoid_: 把 frontend-only server 当生产路径但不代理 `/api`
 **workspace（serve 主根）**: 用户在 product SPA 选定的已存在绝对目录；Web 上唯一项目锚。绑定后三锚合一。ADR-0023：serve 缺省不是 cwd。
 _Avoid_: 把 serve 缺省说成 `process.cwd()`；与 `workspaceRoot` 字段、`home`（global 配置锚）、`sandboxRoot` 混同
 
+**workspaceRoot**: per-root 操作状态锚（memory / sessions / tasks / settings 写回 fallback / serve data）；默认 `process.cwd()`，可被 `--workspace-root` 或 `IKNOW_WORKSPACE_ROOT` 覆盖。不含用户画像。ADR-0019 D1.1；画像根见 ADR-0025。
+_Avoid_: 用 workspaceRoot 当 `user.md` / `BOOTSTRAP.md` 的物理根；把 identity seed 跟启动目录绑在一起
+
+**user.md**: 全局用户画像，唯一落点 `~/.iknow/user.md`（测试缝 = `userHome/.iknow/user.md`）；每 turn 注入 `user_profile` 段，改文件下一轮生效。ADR-0025。
+_Avoid_: 项目 `.iknow/user.md`；per-root persona；把画像当成 workspace 状态
+
+**BOOTSTRAP.md**: 首启引导种子，与 `user.md` 同根（`~/.iknow/BOOTSTRAP.md`）；文件存在则注入 bootstrap 段，agent 删除该文件即完成。`state.json.bootstrap_seeded` 只防止重复 seed，不是完成条件。
+_Avoid_: 每个仓库一份 BOOTSTRAP；用 workspaceRoot 下的 BOOTSTRAP.md 当引导；把 bootstrap_seeded=true 当成「用户已填完画像」
+
 **unbound**: serve hub 尚未绑定主根。此时不得 buildHarnessEngine 用进程 cwd，不得 postMessage。
 _Avoid_: unbound 时 buildHarnessEngine 或 postMessage；把 unbound 说成「默认 cwd」
 

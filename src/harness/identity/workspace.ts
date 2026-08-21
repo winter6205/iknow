@@ -27,18 +27,10 @@ import { USER_TEMPLATE } from "./user-template.js";
 import { BOOTSTRAP_TEMPLATE } from "./bootstrap.js";
 
 /**
- * ADR-0019 (T2): per-root state anchor — identity workspace seed
- * (user.md / state.json / BOOTSTRAP.md) follows `resolveWorkspaceRoot()`
- * priority chain `[explicit, env, cwd]`. Default = `process.cwd()`.
- *
- * 函数名保留以避免所有调用方飘移(ref T2 任务约束)。内部委托
- * `resolveWorkspaceRoot` —— 与 plan T2 axis-1 bounded-context-guardian
- * 决策一致:identity workspace seed 与 global home 解耦。
- *
- * review-fix (H1/H2): 接受可选 opts 透传 env 槽位。调用方在 entry 层
- * 已 resolve 出真实 workspaceRoot 时应传显式值;其余调用方可用
- * `env` 透传 `IKNOW_WORKSPACE_ROOT`(env SSOT fidelity ——
- * 不读裸 `process.env`,而是 loader merge 后的 `IknowEnv.workspaceRoot`)。
+ * Per-root `.iknow` under `resolveWorkspaceRoot()` (`[explicit, env, cwd]`,
+ * default `process.cwd()`). Kept for memory / sessions / settings callers.
+ * Persona seed (user.md / BOOTSTRAP.md / identity state.json) does **not**
+ * use this helper — those files live at `userHome/.iknow` (issue #584).
  */
 export function iknowWorkspaceRoot(opts?: ResolveWorkspaceRootOpts): string {
   return path.join(resolveWorkspaceRoot(opts), ".iknow");
@@ -216,14 +208,8 @@ export async function initIknowWorkspaceSafe(opts?: {
 export async function initializeIknowWorkspace(opts?: {
   workspace?: string;
 }): Promise<{ root: string; state: IknowStateV1 }> {
-  // rev 2026-08-21 systematic-debugging seed/read alignment:
-  //   - `opts.workspace` 显式 → 最高优先级(per-root 状态锚)
-  //   - 缺省 → 落 `<homedir>/.iknow/`,与 `assemble.readUserProfile` 的
-  //     `ctx.workspaceRoot ?? ctx.userHome` fallback 对齐,避免 seed 路径
-  //     与 read 路径分歧(user.md 全局一份,不再在每个 workspace 下 seed)。
-  // 注意:历史 fallback 走 `iknowWorkspaceRoot()` = `<cwd>/.iknow`,会让
-  // chat/ask/tui 在没显式 --workspace-root / IKNOW_WORKSPACE_ROOT 时 seed 落到
-  // cwd 而 read 走 homedir,两者互不可见 —— 现已修复。
+  // `opts.workspace` is a fake-home test / isolation seam (the `.iknow`
+  // directory itself), **not** workspaceRoot. Default = `<homedir>/.iknow`.
   const root = opts?.workspace ?? path.join(homedir(), ".iknow");
   try {
     await fs.mkdir(root, { recursive: true });

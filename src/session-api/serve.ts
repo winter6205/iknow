@@ -36,9 +36,9 @@ export type ServeOptions = {
   dataDir?: string;
   /**
    * ADR-0019 (T2): per-root state anchor — CLI `--workspace-root` flag / env
-   * `IKNOW_WORKSPACE_ROOT` 透传到 serve 入口。`initIknowWorkspaceSafe` /
-   * `resolveServeDataDir` / hub 的 build-engine 都消费它;host-init 保持
-   * global (D1.2 不位移)。
+   * `IKNOW_WORKSPACE_ROOT` 透传到 serve 入口。`resolveServeDataDir` / hub
+   * 的 build-engine 消费它;persona seed 不跟 workspaceRoot (issue #584)。
+   * host-init 保持 global (D1.2 不位移)。
    */
   workspaceRoot?: string;
   hubOptions?: Omit<SessionHubOptions, "store">;
@@ -90,18 +90,10 @@ export async function startSessionServe(
           env: { [WORKSPACE_ROOT_ENV_KEY]: envWsRoot },
         })
       : undefined;
-  // #196 IKNOW T5 + ADR-0019 (T2) + ADR-0023 (T4): eager + idempotent 初始化
-  // per-root identity workspace(initIknowWorkspaceSafe 内部 try/catch+warn,
-  // 失败不阻塞装配 — 幂等备份,build-engine 内还有一次)。workspaceRoot 在场 →
-  // seed 落 `<workspaceRoot>/.iknow`;**缺席 → 完全跳过**(不再把 `process.cwd()`
-  // 当作 identity seed 写进 `<cwd>/.iknow` —— 长驻 serve 的 cwd ≠ 用户项目根,
-  // serve 必须等 SPA 显式选定 workspace 后才能发 turn,见 ADR-0023 作为 ADR-0019
-  // D1.1 的表面例外;chat/tui/ask 的 cwd 默认不变)。
-  if (workspaceRoot !== undefined) {
-    await initIknowWorkspaceSafe({
-      workspace: join(workspaceRoot, ".iknow"),
-    });
-  }
+  // #196 IKNOW T5 + issue #584: persona seed 永远 `<homedir>/.iknow`。
+  // Bound `--workspace-root` must not receive user.md. Failures warn, do
+  // not block (build-engine repeats this with the userHome seam).
+  await initIknowWorkspaceSafe();
   // W1: serve 入口也执行宿主侧 init 脚本(默认 ~/.iknow/init.sh)。
   // 与 chat/ask 共用 runHostInitScriptSafe;文件不存在则 skip,失败不阻塞。
   // D1.2:host-init 保持 global —— 不 thread workspaceRoot。

@@ -3,15 +3,19 @@
  * 链路集成测试。
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtemp, rm, writeFile, mkdir, unlink } from "node:fs/promises";
+import {
+  mkdtemp,
+  rm,
+  writeFile,
+  mkdir,
+  unlink,
+  readFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildHarnessEngine } from "../../../src/harness/build-engine.ts";
 import { createNoAskUser } from "../../../src/harness/permission/ask-user.ts";
-import {
-  initializeIknowWorkspace,
-  writeIknowState,
-} from "../../../src/harness/identity/index.js";
+import { initializeIknowWorkspace } from "../../../src/harness/identity/index.js";
 import type { IknowEnv } from "../../../src/config/env.ts";
 
 function makeEnv(apiKey: string | undefined): IknowEnv {
@@ -41,9 +45,8 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
 
 let origHome: string | undefined;
 let workDir: string;
-// ADR-0019 (T2): 显式注入 workspaceRoot = workDir,避免 build-engine /
-// initializeIknowWorkspace 默认锚到 process.cwd()(worktree 根,污染仓库)。
-// 既有 HOME 重定向保留(userHome/homedir 测试 缝),但不参与 per-root identity seam。
+// ADR-0019 (T2): 显式注入 workspaceRoot = workDir 只服务 memory/sessions;
+// persona seed 走 HOME 测试缝 (userHome = workDir)。
 
 beforeAll(async () => {
   origHome = process.env.HOME;
@@ -54,7 +57,9 @@ beforeAll(async () => {
 
 afterAll(async () => {
   process.env.HOME = origHome;
-  await rm(workDir, { recursive: true, force: true });
+  await rm(workDir, { recursive: true, force: true }).catch(() => {
+    /* MCP/npm may still hold files under the fake HOME */
+  });
 });
 
 async function buildSystem(surface: "chat" | "tui" | "ask" | "serve") {
@@ -168,5 +173,32 @@ describe("buildHarnessEngine surface → deps.system", () => {
     expect(out).toContain("iknow Soul");
     expect(out).toContain("User Profile");
     expect(out).not.toContain("memory_recall(query)");
+  });
+
+  it("negative: workspaceRoot/cwd does not receive user.md seed (#584 T2)", async () => {
+    const project = await mkdtemp(join(tmpdir(), "iknow-identity-proj-"));
+    try {
+      const { deps, shutdown } = await buildHarnessEngine({
+        env: makeEnv("sk-test-identity-global-home"),
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: project,
+        workspaceRoot: project,
+      });
+      try {
+        await readFile(join(workDir, ".iknow", "user.md"), "utf8");
+        await expect(
+          readFile(join(project, ".iknow", "user.md"), "utf8")
+        ).rejects.toThrow();
+        const out =
+          (await (deps.system as () => Promise<string | undefined>)()) ?? "";
+        expect(out).toContain("User Profile");
+        expect(out).not.toContain(join(project, ".iknow"));
+      } finally {
+        await shutdown?.();
+      }
+    } finally {
+      await rm(project, { recursive: true, force: true });
+    }
   });
 });
