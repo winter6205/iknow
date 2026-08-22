@@ -70,7 +70,6 @@ const setupA = await testRender(
     liveToolLines={[]}
     liveToolRuns={runsA}
     draftsMasked={draftA}
-    draftToolAnchor={1}
   />,
   { width: COLS, height: ROWS, exitOnCtrlC: false }
 );

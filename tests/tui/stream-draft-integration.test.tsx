@@ -539,4 +539,82 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
 
     await app.destroy();
   }, 30_000);
+
+  test("事件混排：草稿前工具在上、草稿后开始的工具在下（afterDraft 身份标记）", async () => {
+    // 内联 adapter：tool_call_start(早) → text_delta → tool_call_start(晚)，
+    // 随后 await 制造「turn 未完成」稳定窗口。帧应满足
+    // 早工具行 < 草稿文本 < 晚工具行。
+    // 回归背景：#612 的计数锚点 = 首个 text_delta 时 liveToolRuns 条数快照，
+    // 依赖 ref 镜像双写（onStream 同步写 + useEffect 异步镜像），镜像滞后
+    // flush 会用旧 state 覆盖同步写 → 锚点少计 → 先于文本的工具被顶到草稿
+    // 下。改为追加时打 afterDraft 身份标记后，判定只依赖 onStream 闭包内的
+    // 事件顺序，与 React 批处理 / 被动 effect 时序解耦。
+    const toolAdapter: ModelAdapter = {
+      async step(
+        _state: LoopState,
+        request: { onStream?: (e: HarnessStreamEvent) => void },
+        signal?: AbortSignal
+      ): Promise<AssistantTurnResult> {
+        if (signal?.aborted) {
+          throw new DOMException("This operation was aborted", "AbortError");
+        }
+        request.onStream?.({
+          type: "tool_call_start",
+          id: "tool-early",
+          name: "web_search",
+        });
+        request.onStream?.({ type: "text_delta", text: "order-probe-draft" });
+        request.onStream?.({
+          type: "tool_call_start",
+          id: "tool-late",
+          name: "bash",
+        });
+        await abortableDelay(3000, signal);
+        if (signal?.aborted) {
+          throw new DOMException("This operation was aborted", "AbortError");
+        }
+        return assistantResult({ texts: ["order-probe-final"] });
+      },
+      encodeUserText(t: string): AnthropicNativeMessage {
+        return { role: "user", content: [{ type: "text", text: t }] };
+      },
+      encodeToolResults(
+        results: ReadonlyArray<ToolExecutionResult>
+      ): AnthropicContentBlock[] {
+        return results.map((r) => ({
+          type: "tool_result",
+          tool_use_id: r.toolUseId,
+          content: r.output,
+          is_error: r.isError,
+        }));
+      },
+    };
+    const app = await mountAppAsync(
+      [],
+      "order-probe-final",
+      buildToolDeps(toolAdapter)
+    );
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    await app.typeText("hi");
+    await app.pressEnter();
+
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("[运行中] bash") && f.includes("order-probe-draft"),
+      8000,
+      "mixed-order-window"
+    );
+    const frame = app.setup.captureCharFrame();
+    const iEarly = frame.indexOf("[运行中] web_search");
+    const iDraft = frame.indexOf("order-probe-draft");
+    const iLate = frame.indexOf("[运行中] bash");
+    expect(iEarly).toBeGreaterThanOrEqual(0);
+    expect(iDraft).toBeGreaterThanOrEqual(0);
+    expect(iLate).toBeGreaterThanOrEqual(0);
+    expect(iEarly).toBeLessThan(iDraft);
+    expect(iDraft).toBeLessThan(iLate);
+
+    await app.destroy();
+  }, 30_000);
 });

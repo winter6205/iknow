@@ -37,6 +37,13 @@ export interface LiveToolRun {
   readonly name: string;
   readonly status: LiveToolStatus;
   readonly input: unknown;
+  /** 身份标记：本 turn 首个 text_delta 之后才开始 = true → ChatView 渲染在
+   *  草稿之下；缺省（先于草稿 / 无草稿）→ 渲染在草稿之上。追加时由 caller
+   *  按事件顺序打入，替代 #612 的计数锚点（计数随 #589 只读工具完成移除
+   *  漂移，且快照依赖 ref 镜像双写、存在滞后 flush 覆盖窗口）。
+   *  注意：缺省语义 = 「草稿之上」，与 #612 缺省（全部在下）相反 —— 未来
+   *  若有绕过 onStream 的 tool_call_start 生产者，必须显式打标。 */
+  readonly afterDraft?: boolean;
   /** T5:运行中 `tool_input_delta` 累积的 partial JSON 文本（展示层中间态）。
    *  运行中且收到增量时有值；完成（post_tool_use）时被完整 input 覆盖并清除。 */
   readonly partialInput?: string;
@@ -62,6 +69,9 @@ export type LiveToolEvent =
       readonly kind: "tool_call_start";
       readonly id: string;
       readonly name: string;
+      /** 该工具是否在本 turn 首个 text_delta 之后才开始（展示层拆分依据，
+       *  见 LiveToolRun.afterDraft）。缺省 = false。 */
+      readonly afterDraft?: boolean;
     }
   | {
       /** T5:工具调用 input 增量（partial_json 逐段，adapter 经
@@ -100,6 +110,7 @@ export function liveToolReduce(
         name: event.name,
         status: "running" as const,
         input: undefined,
+        afterDraft: event.afterDraft === true ? true : undefined,
       }),
     ]);
   }
@@ -138,6 +149,8 @@ export function liveToolReduce(
               id: r.id,
               name: r.name,
               status: (event.ok ? "ok" : "failed") as LiveToolStatus,
+              // afterDraft 是追加时打入的身份标记，完成重建必须保留。
+              afterDraft: r.afterDraft,
               input: event.input,
               // T5:完成态用权威完整 input 覆盖并清除 partialInput 残留。
               partialInput: undefined,

@@ -48,6 +48,9 @@ const liveToolRuns: ReadonlyArray<LiveToolRun> = [
     id: "tu-w",
     name: "write_file",
     status: "ok",
+    // 本 probe 模拟「先流式文本、后 write 预览」（#590）：生产里 app 层会给
+    // 草稿后开始的工具打 afterDraft 身份标记 → 渲染在草稿之下。
+    afterDraft: true,
     input: {
       path: "/tmp/iknow-fold-probe.html",
       content: '<!doctype html>\n<html lang="en">',
