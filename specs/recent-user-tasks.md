@@ -68,7 +68,7 @@ npx vitest run tests/session-api tests/cli tests/harness/compress
 
 ## architecture-change-reviewer
 
-实施未开始。预定接线：session-api 抽取与 `boundaryAttachment`、schema sanitize、chat-session / hub 去掉 seed 与 status 焦点、对应 tests、本 spec、`verify-goal-gate.md` 中 HITL 焦点条款、CONTEXT/ADR persist。
+已落地 PR #607（T1 #604 / T2 #605 / T3 #606）。
 
 ```
 bounded-context-guardian: yes — 抽取与附件留在 session-api；compact 窗口与 trigger 仍在 harness/compress；verify 不读摘录；不新建 bounded context

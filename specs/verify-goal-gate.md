@@ -59,9 +59,9 @@ npx vitest run tests/harness/verify tests/session-api tests/cli
 - 数据模型：`session.goal`、`/goal` 三面、`validateGoalText`。判官只读三件套与 `maxTurns: 2` 内环（`run-classifier-adapter.ts`）。`session.taskFocus` 由 `recent-user-tasks.md` / ADR-0026 退役。
 - 外挂自检层：advisor 包裹 `run()`（ADR-0011）；判官走子代理（ADR-0014）；不开新 settings 口（ADR-0015）。
 - checker 三态与 D2 探测、补跑至多 1 次：HITL 硬失败 / 补跑仍可用；不作为自动模式「绿了就不评 LLM」的通行证。
-- CONTEXT 现行抄录（本 spec **覆盖**，待 persist）：
+- CONTEXT 现行抄录（本 spec **覆盖**；taskFocus / 任务摘录已 persist，见 `recent-user-tasks.md` / ADR-0026）：
   - **goal**：`docs/CONTEXT.md` 仍写 `goal.text ?? query` 与「verify 第一优先段」。
-  - **taskFocus**：仍写首条 user seed；「不进入 verify」保留方向，缺「自动模式内不存在」与「seed 一次」。
+  - **taskFocus**：已退役；HITL compact 仅任务摘录（`recent-user-tasks.md` / ADR-0026）。
   - **task 取值公式**：`task = session.goal.text ?? query` — 判定层作废。
   - **判官**：仍写「command 缺失时接管」— 作废为总开关。
 - ADR-0017 三级流 shape 仍参考；「SUFFICIENT 永不请判官 / INSUFFICIENT 必请」在完成向上由本 spec + ADR-0024 覆盖。

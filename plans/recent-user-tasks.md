@@ -20,20 +20,20 @@ minimal-change-verifier: yes — 1 个逻辑任务（compact 保焦物替换）�
    - **Inherits:** spec：仅 compact 实际发生时从当时 `messages` 现抽；至多 3 句合格用户原话（`isTurnQuery` ∧ 寒暄过滤）；最新在最后；0 句不贴；自动模式不贴；贴出段下次不得再被抽到；不为摘录加模型；失败不阻断摘要+窗口
    - **Surface:** `session-api` compact `boundaryAttachment`；合格谓词已在 session-api / turn-projection
    - **Acceptance:** 上列 inherit 每条有测试为 yes；vitest `tests/session-api` 与 compact 附件相关用例绿；源码不再走 240+history 焦点渲染
-   - Status: [ ] pending
+   - Status: [x] done — #604 in PR #607 (`02934f39`)
 
 2. **会话不再持有 taskFocus** — tag: `[implementation]`
    - **Inherits:** spec：不再 seed / 不再写 `history` / `/goal status` 不展示焦点；load 忽略旧字段、save 不写出；不 bump schema 版本
    - **Surface:** session-api schema sanitize；chat-session / hub 写入与 slash status
    - **Acceptance:** 旧盘含 `taskFocus` 的 JSON load 不炸且运行时读不到焦点；新 save 无该键；chat/hub 不再调用焦点写入器；`/goal status` 输出不含焦点
-   - Status: [ ] pending
+   - Status: [x] done — #605 in PR #607 (`d925b6ce`) + follow-up `18764af5`
    - [blocks: T1]
 
 3. **对齐 verify-goal-gate 与索引** — tag: `[implementation]`
    - **Inherits:** spec：HITL compact 保焦条款改指向本 spec；活跃 spec 索引列出 `recent-user-tasks.md`；ADR-0024 完成向 `task` 仍仅 `goal.text`
    - **Surface:** `specs/` 活跃索引与 `verify-goal-gate.md` 中 HITL 焦点条款；相关回归测试
    - **Acceptance:** `verify-goal-gate.md` 不再要求 compact 注入 `taskFocus`；`specs/README.md` 活跃表有本 spec 一行；仍断言自动模式判官 `task === goal.text` 的测试绿
-   - Status: [ ] pending
+   - Status: [x] done — #606 in PR #607 (`ac311062`)
    - [blocks: T1, T2]
 
 ## 待写入

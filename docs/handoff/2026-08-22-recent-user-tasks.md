@@ -28,4 +28,4 @@
 
 ## 下一跳
 
-在本工作树对 [#604](https://github.com/winter6205/iknow/issues/604) 跑 `test-driven-development`。需要把分支推上去时再说一声。
+T1–T3 已在本分支落地；PR [#607](https://github.com/winter6205/iknow/pull/607) 已开（本交接不 push）。合入后关 [#603](https://github.com/winter6205/iknow/issues/603)–[#606](https://github.com/winter6205/iknow/issues/606)。剩余 hygiene 见 [#608](https://github.com/winter6205/iknow/issues/608)（非本轮）。
