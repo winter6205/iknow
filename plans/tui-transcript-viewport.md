@@ -56,7 +56,7 @@
    - **Inherits:** spec Invariants 3–6：视口+overscan；spacer 保高度；高度来自布局或常量占位；live tail 不进集合；短会话与 T2 观感相同。
    - **Surface:** TUI ChatView（窗口计算独立一层，不把算法内联进渲染函数）
    - **Acceptance:** 纯函数 5 类边界测绿；100 条滚到顶仍见最早气泡、贴底仍见最后一条；内容不足一屏时无 spacer 缺块、无 stub；挂载区间在 overflow 下明显短于总条数。既有 sticky / 强制滚底不倒退。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T2]
 
 ## Out of scope
