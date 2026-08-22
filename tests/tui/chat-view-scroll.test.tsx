@@ -31,7 +31,10 @@ import {
   createDraftSession,
   type TuiSessionState,
 } from "../../src/tui/session-state.js";
-import type { LiveToolRun } from "../../src/tui/live-tool-state.js";
+import {
+  liveToolReduce,
+  type LiveToolRun,
+} from "../../src/tui/live-tool-state.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 
 const COLS = 60;
@@ -578,6 +581,48 @@ test("crunchedSeconds 0 / undefined → 不渲染 Crunched", async () => {
   expect(frame.includes("3m 46s")).toBe(false);
   expect(frame.includes("46s")).toBe(false);
   await setup1.renderer.destroy();
+});
+
+test("#589 ChatView tail：20 条 read_file ok + 1 running 不含完成读行", async () => {
+  let runs: ReadonlyArray<LiveToolRun> = [];
+  for (let i = 0; i < 20; i++) {
+    const id = `cv-rf-${String(i).padStart(2, "0")}`;
+    const marker = `CV_READ_OK_${i}`;
+    runs = liveToolReduce(runs, {
+      kind: "tool_call_start",
+      id,
+      name: "read_file",
+    });
+    runs = liveToolReduce(runs, {
+      kind: "post_tool_use",
+      id,
+      name: "read_file",
+      input: { path: `${marker}.ts` },
+      ok: true,
+      detail: `读取 ${marker}.ts`,
+    });
+  }
+  runs = liveToolReduce(runs, {
+    kind: "tool_call_start",
+    id: "cv-running",
+    name: "grep",
+  });
+  const setup = await testRender(
+    <ChatView
+      session={sessionWith([msg("u", "user", "请读一批文件")])}
+      cols={80}
+      rows={40}
+      liveToolLines={[]}
+      liveToolRuns={runs}
+    />,
+    { width: 80, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("[运行中] grep");
+  expect(frame).not.toContain("CV_READ_OK_");
+  expect(frame).not.toContain("read_file ·");
+  await setup.renderer.destroy();
 });
 
 test("running：流式草稿排在 live write 预览之前（代码块不得插到回复前面）", async () => {

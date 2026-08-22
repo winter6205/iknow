@@ -50,6 +50,13 @@ export interface LiveToolRun {
   readonly newContent?: string;
 }
 
+/** #589：成功完成即离开 live 尾巴的只读探测族。 */
+const COMPACT_READONLY_TOOLS: ReadonlySet<string> = new Set([
+  "read_file",
+  "grep",
+  "glob",
+]);
+
 export type LiveToolEvent =
   | {
       readonly kind: "tool_call_start";
@@ -120,6 +127,10 @@ export function liveToolReduce(
   if (event.kind === "post_tool_use") {
     const target = prev.find((r) => r.id === event.id);
     if (target === undefined) return prev;
+    // #589：成功只读探测不占贴底尾巴；失败 / 非只读仍 in-place 完成。
+    if (event.ok && COMPACT_READONLY_TOOLS.has(target.name)) {
+      return Object.freeze(prev.filter((r) => r !== target));
+    }
     return Object.freeze(
       prev.map((r) =>
         r === target
