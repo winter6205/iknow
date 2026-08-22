@@ -46,9 +46,10 @@ const CLOSED_PREFIX = "- [x] ";
 
 /**
  * Governance limits (D4): file size capped at 64 KB (much smaller than the
- * memory_save 1 MB ceiling); per-item text capped at 500 codepoints (matches
- * the taskFocus discipline; `[...item].length` counts Unicode code points,
- * not UTF-16 code units, so emoji and CJK are measured correctly).
+ * memory_save 1 MB ceiling); per-item text capped at 500 codepoints
+ * (matches the recent-user-tasks excerpt discipline; `[...item].length`
+ * counts Unicode code points, not UTF-16 code units, so emoji and CJK are
+ * measured correctly).
  */
 export const MAX_FILE_BYTES = 64 * 1024;
 export const MAX_ITEM_CODEPOINTS = 500;

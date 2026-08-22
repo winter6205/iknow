@@ -17,8 +17,8 @@
  * (write-back trace 留痕 even when no status change).
  *
  * Fixture: a user-pinned active goal (source === "user_pin") survives
- * sanitize-on-load (T2 migration drops only `user_initial` goals); a fresh
- * seed produces taskFocus (not goal) so writeback is inapplicable there.
+ * sanitize-on-load (#605 T2 unconditionally drops the legacy `taskFocus`
+ * key, but never touches a user-pinned `goal`).
  *
  * Trace assertions: writeback recordGoal writes a JSONL line via the real
  * JsonlTraceService — read the per-session trace file and filter
@@ -86,10 +86,8 @@ import {
   type SessionFileV1,
 } from "../../src/session-api/store/index.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
-import type {
-  VerifyConfig,
-  VerifyLoopOutcome,
-} from "../../src/harness/verify/types.ts";
+import type { VerifyConfig } from "../../src/harness/verify/types.ts";
+import type { VerifyLoopOutcome } from "../../src/harness/verify/verify-loop.ts";
 
 let baseDir: string;
 let store: SessionStore;
@@ -255,62 +253,11 @@ describe("goal.status write-back on verify-loop outcome (#458 T5 SC8)", () => {
   });
 });
 
-describe("taskFocus seed on fresh session (#458 T5 SC2)", () => {
-  it("fresh session: seeds taskFocus (not goal); first user text reaches the model directly", async () => {
-    // Without verifyConfig, the user query reaches the model directly (not
-    // swapped to goal.text), so extractGoal(result.messages) returns the
-    // user query — taskFocus.text === user query. The hub's writeback block
-    // is skipped when verifyOutcome is undefined (no verifyConfig → no
-    // verify-loop → no writeback event).
-    const id = "t5-fresh-seed";
-    await store.save({
-      id,
-      file: {
-        schemaVersion: CURRENT_SCHEMA_VERSION,
-        conversation_id: id,
-        messages: [],
-        jsonMode: false,
-        turnCount: 0,
-        updatedAt: "2026-01-01T00:00:00.000Z",
-        title: "",
-        cwd: process.cwd(),
-        sanitized_at: "2026-01-01T00:00:00.000Z",
-        checkpoints: [],
-      } as SessionFileV1,
-    });
-    const hub = new SessionHub({
-      store,
-      deps: makeDeps([assistantResult({ texts: ["ok"] })]),
-      traceOut: traceDir,
-    });
-    await hub.postMessage({ conversationId: id, text: "Build a thing" });
-    const after = await load(id);
-    assert.equal(after.goal, undefined, "fresh session must NOT seed goal");
-    assert.equal(after.taskFocus?.text, "Build a thing");
-    // T12 seed 发射点: trace 文件应含 action=seed 的 goal record。
-    const tracePath = join(traceDir, `${id}.jsonl`);
-    const raw = await readFile(tracePath, "utf8");
-    const seedLines = raw
-      .trim()
-      .split("\n")
-      .filter((l) => l.includes('"record_type":"goal"'))
-      .filter((l) => l.includes('"action":"seed"'));
-    assert.ok(
-      seedLines.length >= 1,
-      `expected ≥1 goal seed record, got: ${raw}`
-    );
-    const seedRec = JSON.parse(
-      seedLines[seedLines.length - 1] ?? "{}"
-    ) as Record<string, unknown>;
-    assert.equal(seedRec["action"], "seed");
-    assert.equal(seedRec["text_len"], "Build a thing".length);
-  });
-
+describe("VALID_GOAL_TRANSITIONS defensive guard on write-back (post-#605)", () => {
   it("achieved goal + outcome 'failed' → 非法反向边被 assertValidTransition 拦截, status 保持 achieved, recordGoal 留痕(status: active)", async () => {
-    // Reviewer 补强（standards+spec 双轴同指）：OUTCOME_TO_STATUS 的
-    // target="active"（failed/unstable 保持态）对已 achieved 的 goal 是
-    // 非法反向边（achieved→active 不在 VALID_GOAL_TRANSITIONS）。write-back
-    // 分支经 assertValidTransition 守卫拦截，goal 不变，仅 recordGoal trace 留痕。
+    // #458 T3 SC5 assertValidTransition 守卫(独立于 taskFocus 生命周期):
+    // OUTCOME_TO_STATUS target='active' 对 achieved 状态是反向边,write-back
+    // 分支经 assertValidTransition 拦截,goal 不变,仅 recordGoal trace 留痕。
     setOutcome("failed");
     const id = "t5-achieved-failed";
     await seedSession(id, {
@@ -325,7 +272,6 @@ describe("taskFocus seed on fresh session (#458 T5 SC2)", () => {
       "achieved",
       "achieved→active 非法反向边必须被拦截, status 保持 achieved"
     );
-    // trace 仍留痕（writeback action, status 报当前 active 目标）。
     const rec = await readWritebackGoalRecord(id);
     assert.equal(rec["action"], "writeback");
     assert.equal(rec["status"], "active");

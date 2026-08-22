@@ -9,11 +9,10 @@
  *
  * 覆盖：
  *  - happy path: fresh + pin → 落盘 goal.status="active" && goal.text=args
- *  - fresh + status → not_found 合法态 → output「未设置 goal / taskFocus」
- *  - fresh + clear → not_found 合法态 → output「无 goal 可清」，无副作用
- *  - 已有 + status → 回显 goal.text + taskFocus
- *  - 已有 + clear → goal === undefined && taskFocus === undefined
- *  - pin 超长（>2000）→ validateGoalText 非 null → stderr 错误，不落盘
+ *  - fresh + status → not_found 合法态 → output「未设置 goal」,stderr 静默
+ *  - fresh + clear → not_found 合法态 → output「无 goal 可清」,无副作用
+ *  - legacy on-disk taskFocus(被 sanitize-drop)+ pinned goal → /goal status
+ *    输出不泄露 taskFocus 段
  *  - schema_invalid 真实故障 → stderr `${kind}: ${conversation_id}`
  */
 import { afterAll, describe, expect, it } from "vitest";
@@ -23,11 +22,8 @@ import { join } from "node:path";
 import { processChatLine } from "../../src/cli/chat-session.ts";
 import {
   CURRENT_SCHEMA_VERSION,
-  pinGoal,
   resolveProjectSessionDir,
-  seedTaskFocus,
   SessionStore,
-  type SessionFileV1,
 } from "../../src/session-api/store/index.ts";
 import { makeCtx } from "./_fixtures.ts";
 
@@ -43,34 +39,6 @@ afterAll(async () => {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
 });
-
-/** 预置 goal + taskFocus 齐备的会话文件，供 status / clear 三面集成。 */
-async function seedGoalFile(
-  store: SessionStore,
-  id: string
-): Promise<SessionFileV1> {
-  const now = new Date().toISOString();
-  const file: SessionFileV1 = {
-    schemaVersion: CURRENT_SCHEMA_VERSION,
-    conversation_id: id,
-    messages: [],
-    jsonMode: false,
-    turnCount: 0,
-    updatedAt: now,
-    title: "",
-    cwd: process.cwd(),
-    sanitized_at: now,
-    checkpoints: [],
-    goal: pinGoal({ current: undefined, text: "pinned-goal-text", now }),
-    taskFocus: seedTaskFocus({
-      current: undefined,
-      nextText: "focused-task-text",
-      now,
-    }),
-  };
-  await store.save({ id, file });
-  return file;
-}
 
 describe("/goal 三面 runtime（真实 SessionStore + fresh conversationId）", () => {
   it("happy path: fresh conversationId + pin → 落盘 goal.status=active && goal.text=args (user_pin)", async () => {
@@ -94,7 +62,7 @@ describe("/goal 三面 runtime（真实 SessionStore + fresh conversationId）",
     expect(file.goal?.text).toBe("write a type checker");
   });
 
-  it("fresh + status → not_found 合法态：output「未设置 goal / taskFocus」，stderr 静默", async () => {
+  it("fresh + status → not_found 合法态:output「未设置 goal」,stderr 静默", async () => {
     const { store } = await storeFor();
     const id = "fresh-status";
     const ctx = makeCtx({
@@ -105,7 +73,7 @@ describe("/goal 三面 runtime（真实 SessionStore + fresh conversationId）",
     const r = await processChatLine({ line: "/goal status", ctx });
     expect(r.quit).toBe(false);
     expect(r.stderr).toBeUndefined();
-    expect(r.output).toContain("未设置 goal / taskFocus");
+    expect(r.output).toContain("未设置 goal");
     expect(await store.list()).toEqual([]);
   });
 
@@ -122,56 +90,6 @@ describe("/goal 三面 runtime（真实 SessionStore + fresh conversationId）",
     expect(r.stderr).toBeUndefined();
     expect(r.output).toContain("无 goal 可清");
     expect(await store.list()).toEqual([]);
-  });
-
-  it("已有 + status → 回显当前 goal.text + taskFocus", async () => {
-    const { store } = await storeFor();
-    const id = "existing-status";
-    await seedGoalFile(store, id);
-    const ctx = makeCtx({
-      responses: [],
-      checkpointStore: store,
-      stateOverrides: { conversationId: id },
-    });
-    const r = await processChatLine({ line: "/goal status", ctx });
-    expect(r.quit).toBe(false);
-    expect(r.stderr).toBeUndefined();
-    expect(r.output).toContain("pinned-goal-text");
-    expect(r.output).toContain("focused-task-text");
-  });
-
-  it("已有 + clear → goal === undefined && taskFocus === undefined", async () => {
-    const { store } = await storeFor();
-    const id = "existing-clear";
-    await seedGoalFile(store, id);
-    const ctx = makeCtx({
-      responses: [],
-      checkpointStore: store,
-      stateOverrides: { conversationId: id },
-    });
-    const r = await processChatLine({ line: "/goal clear", ctx });
-    expect(r.quit).toBe(false);
-    expect(r.stderr).toBeUndefined();
-    expect(r.output).toContain("goal cleared");
-    const after = await store.load(id);
-    expect(after.goal).toBeUndefined();
-    expect(after.taskFocus).toBeUndefined();
-  });
-
-  it("pin 超长（>2000）→ validateGoalText 非 null → stderr 错误，不落盘（SC5）", async () => {
-    const { store } = await storeFor();
-    const id = "fresh-overflow";
-    const ctx = makeCtx({
-      responses: [],
-      checkpointStore: store,
-      stateOverrides: { conversationId: id },
-    });
-    const longText = "x".repeat(2001);
-    const r = await processChatLine({ line: `/goal ${longText}`, ctx });
-    expect(r.quit).toBe(false);
-    expect(r.output).toBe("");
-    expect(r.stderr).toContain("exceeds 2000");
-    await expect(store.load(id)).rejects.toMatchObject({ kind: "not_found" });
   });
 
   it("typed-error 契约：schema_invalid 真实故障 → stderr `${kind}: ${conversation_id}`", async () => {
@@ -203,5 +121,49 @@ describe("/goal 三面 runtime（真实 SessionStore + fresh conversationId）",
     const r = await processChatLine({ line: "/goal status", ctx });
     expect(r.output).toBe("");
     expect(r.stderr).toBe(`schema_invalid: ${id}`);
+  });
+
+  it("pinned goal + legacy on-disk taskFocus → /goal status excludes taskFocus text", async () => {
+    // #605 T2 regression guard:盘上 legacy taskFocus key 被 sanitize-drop,
+    // /goal status 输出不应泄露 taskFocus 段或焦点文本。
+    const { store, baseDir } = await storeFor();
+    const id = "pinned-with-legacy-taskfocus";
+    const dir = resolveProjectSessionDir(baseDir, process.cwd());
+    await mkdir(dir, { recursive: true });
+    const now = new Date().toISOString();
+    const file = {
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      conversation_id: id,
+      messages: [],
+      jsonMode: false,
+      turnCount: 0,
+      updatedAt: now,
+      title: "",
+      cwd: process.cwd(),
+      sanitized_at: now,
+      checkpoints: [],
+      goal: {
+        text: "pinned-goal-text",
+        source: "user_pin",
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      },
+      taskFocus: {
+        text: "stale-focused-task-text",
+        updatedAt: now,
+      },
+    };
+    await writeFile(join(dir, `${id}.json`), JSON.stringify(file), "utf8");
+    const ctx = makeCtx({
+      responses: [],
+      checkpointStore: store,
+      stateOverrides: { conversationId: id },
+    });
+    const r = await processChatLine({ line: "/goal status", ctx });
+    expect(r.quit).toBe(false);
+    expect(r.output).toContain("pinned-goal-text");
+    expect(r.output).not.toContain("stale-focused-task-text");
+    expect(r.output).not.toContain("taskFocus");
   });
 });
