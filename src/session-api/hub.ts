@@ -22,6 +22,12 @@ import {
   type TraceService,
 } from "../harness/index.js";
 import {
+  evaluateCompactTrigger,
+  getAutoCompactThreshold,
+  type CompactReason,
+  type CompactTriggerDecision,
+} from "../harness/compress/index.js";
+import {
   runVerifyLoop,
   type VerifyConfig,
   type VerifyLoopOutcome,
@@ -189,6 +195,26 @@ type StoreErrorEntry = {
   status: number;
   message: (err: SessionStoreError) => string;
 };
+
+/**
+ * plan compress-trigger-gate T2 review fix:压缩失败的 reason SSOT。三处失败分支
+ * (signal_aborted / 占位 fallback 也无效 / 防御兜底)收敛到一字面量,避免
+ * divergent-change drift。
+ */
+const REASON_NO_COMPRESS: CompactReason = "messages_too_few";
+
+/**
+ * plan compress-trigger-gate T2 review fix:reason 决定 SSOT。窗口压缩成功 →
+ * "windowed";LLM 摘要成功 → "full_summary"(无论判据 action,因 nextMessages
+ * 实际是 SUMMARY_PREAMBLE + 摘要,用户应看到"摘要"文案,而不是"裁早期"文案)。
+ */
+function compactReasonFor(args: {
+  readonly useCompactMessages: boolean;
+  readonly compactAction: CompactTriggerDecision["action"] | undefined;
+}): CompactReason {
+  if (!args.useCompactMessages) return "full_summary";
+  return "windowed";
+}
 
 const STORE_ERROR_MAP: Record<SessionStoreError["kind"], StoreErrorEntry> = {
   not_found: {
@@ -1291,15 +1317,60 @@ export class SessionHub {
       work: async () => {
         const session = await this.store.load(conversationId);
         const before = session.messages;
-        const split = splitForCompaction(before);
-        if (split === undefined) {
+
+        // plan compress-trigger-gate T2: 走 `evaluateCompactTrigger` 统一判据。
+        // `cachedDeps.compress` 缺席(ask / oneshot 等无 harness 装配)→ 跳过
+        // 判据层,fallback 到既有 splitForCompaction 行为(向后兼容)。
+        const compressCfg = this.cachedDeps?.compress;
+        let compactAction: CompactTriggerDecision["action"] | undefined;
+        if (compressCfg !== undefined) {
+          const threshold = getAutoCompactThreshold(
+            compressCfg.contextWindow,
+            compressCfg.thresholdTokens
+          );
+          compactAction = evaluateCompactTrigger(before, {
+            contextWindow: compressCfg.contextWindow,
+            threshold,
+          }).action;
+        }
+
+        // 1) token 未达阈值 → 直接 noop 返回(reason 来自判据),不调 splitForCompaction。
+        if (compactAction === "noop") {
           return {
             session: this.summarize({ file: session }),
             turns: projectMessagesToTurns(before),
             compacted: false,
+            reason: "below_token_threshold",
             beforeCount: before.length,
             afterCount: before.length,
           };
+        }
+
+        // 2) 决定 dropped / kept:
+        //    - compact_via_window → splitForCompaction 的窗口守门结果;
+        //    - compact_via_full_summary → 整段视为 dropped,kept = [];
+        //    - compressCfg 缺席 → 走既有 splitForCompaction(无判据)。
+        let split: {
+          readonly dropped: ReadonlyArray<AnthropicNativeMessage>;
+          readonly kept: ReadonlyArray<AnthropicNativeMessage>;
+        };
+        if (compactAction === "compact_via_full_summary") {
+          split = { dropped: before, kept: [] };
+        } else {
+          const windowSplit = splitForCompaction(before);
+          if (windowSplit === undefined) {
+            // 判据与 splitForCompaction 一致:此分支不可达(windowed 必 kept>0)。
+            // 防御兜底:无 dropped 前缀 → 视为消息条数过少,no-op 返回。
+            return {
+              session: this.summarize({ file: session }),
+              turns: projectMessagesToTurns(before),
+              compacted: false,
+              reason: REASON_NO_COMPRESS,
+              beforeCount: before.length,
+              afterCount: before.length,
+            };
+          }
+          split = windowSplit;
         }
 
         // #467 step 2: 优先 LLM 结构化摘要(best-effort,失败回退 placeholder)。
@@ -1352,6 +1423,7 @@ export class SessionHub {
             turns: projectMessagesToTurns(before),
             compacted: false,
             cancelled: true,
+            reason: REASON_NO_COMPRESS,
             beforeCount: before.length,
             afterCount: before.length,
           };
@@ -1367,6 +1439,7 @@ export class SessionHub {
             session: this.summarize({ file: session }),
             turns: projectMessagesToTurns(before),
             compacted: false,
+            reason: REASON_NO_COMPRESS,
             beforeCount: before.length,
             afterCount: before.length,
           };
@@ -1388,10 +1461,18 @@ export class SessionHub {
           title: extractTitle(before),
         };
         await this.store.save({ id: conversationId, file: updated });
+        // reason:LLM 摘要成功 → 'full_summary'(无论判据 action,因 nextMessages
+        // 实际是 SUMMARY_PREAMBLE + 摘要);placeholder fallback → 'windowed'。
+        // SSOT:helper 把 4 取值决策收敛到一处,避免 3 处 inline 字面量 drift。
+        const reason: CompactReason = compactReasonFor({
+          useCompactMessages,
+          compactAction,
+        });
         return {
           session: this.summarize({ file: updated }),
           turns: projectMessagesToTurns(compacted),
           compacted: true,
+          reason,
           beforeCount: before.length,
           afterCount: compacted.length,
         };

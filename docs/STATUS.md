@@ -160,14 +160,15 @@ npm run build --prefix web    # → web/dist  (root alias if present: npm run we
 
 ## 6. 文档索引
 
-| 文档                   | 用途                                                                 |
-| ---------------------- | -------------------------------------------------------------------- |
-| `specs/README.md`      | 活跃 module spec 活索引（SSOT；只列当前活跃，新增/归档只改那里一处） |
-| `docs/architecture.md` | 运行时能力切分                                                       |
-| `docs/CONTEXT.md`      | 领域术语                                                             |
-| `docs/CHANGELOG.md`    | 版本变更                                                             |
-| `docs/handoff/*`       | 会话交接                                                             |
-| 本文 `docs/STATUS.md`  | **已实现 / 未实现 / 展望**                                           |
+| 文档                                                                               | 用途                                                                                                                            |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `specs/README.md`                                                                  | 活跃 module spec 活索引（SSOT；只列当前活跃，新增/归档只改那里一处）                                                            |
+| `docs/architecture.md`                                                             | 运行时能力切分                                                                                                                  |
+| `docs/CONTEXT.md`                                                                  | 领域术语                                                                                                                        |
+| `docs/CHANGELOG.md`                                                                | 版本变更                                                                                                                        |
+| `docs/handoff/*`                                                                   | 会话交接                                                                                                                        |
+| `docs/archive/025-retire-completed-specs-and-plans/plans/compress-trigger-gate.md` | 压缩触发判据统一化：手动 `/compact` + 自动 proactive 共用 `evaluateCompactTrigger`（4 reason 文案分支）。与 #607 任务摘录正交。 |
+| 本文 `docs/STATUS.md`                                                              | **已实现 / 未实现 / 展望**                                                                                                      |
 
 ---
 
