@@ -154,15 +154,22 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     const sbRef = useRef<ScrollBoxRenderable | null>(null);
     const [scrollTop, setScrollTop] = useState(Number.MAX_SAFE_INTEGER);
     const [itemHeights, setItemHeights] = useState<ReadonlyArray<number>>([]);
+    const conversationId = props.session.conversationId;
+    const [heightSessionId, setHeightSessionId] = useState(conversationId);
+    if (heightSessionId !== conversationId) {
+      setHeightSessionId(conversationId);
+      setItemHeights([]);
+      setScrollTop(Number.MAX_SAFE_INTEGER);
+    }
     useLayoutEffect(() => {
       const sb = sbRef.current;
-      if (sb === null) return;
+      if (sb === null) return; // EXIT: unmounted scrollbox
       // OpenTUI 滚轮/赋值走 scrollTop setter；补丁让视口窗口跟着滚动走，
       // 避免 rAF 在 sticky 生效前读到 0 把窗口抽到顶部。
       const proto = Object.getPrototypeOf(sb) as ScrollBoxRenderable;
       const desc = Object.getOwnPropertyDescriptor(proto, "scrollTop");
       if (desc?.get === undefined || desc.set === undefined) {
-        setScrollTop(sb.scrollTop);
+        setScrollTop(sb.scrollTop); // EXIT: no accessor → one snapshot, no live tracking
         return;
       }
       Object.defineProperty(sb, "scrollTop", {
@@ -180,7 +187,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     useImperativeHandle(ref, () => ({
       scrollToBottom() {
         const sb = sbRef.current;
-        if (sb === null) return;
+        if (sb === null) return; // EXIT: unmounted
         sb.scrollTop = Math.max(0, sb.scrollHeight - sb.viewport.height);
       },
       get scrollbox() {
@@ -206,8 +213,12 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     const liveToolRuns = props.liveToolRuns ?? [];
     const bannerLines = props.bannerLines ?? [];
     const pal = tuiPalette;
-    const visibleMessages = props.session.messages.filter(
-      (message) => !isTuiHiddenUserMessage(message)
+    const visibleMessages = useMemo(
+      () =>
+        props.session.messages.filter(
+          (message) => !isTuiHiddenUserMessage(message)
+        ),
+      [props.session.messages]
     );
     const measuredViewport = sbRef.current?.viewport.height ?? 0;
     const viewportHeight = measuredViewport > 0 ? measuredViewport : props.rows;
@@ -222,7 +233,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     );
     useLayoutEffect(() => {
       const sb = sbRef.current;
-      if (sb === null) return;
+      if (sb === null) return; // EXIT: unmounted during measure
       let changed = false;
       const next = visibleMessages.map((_, i) => itemHeights[i] ?? 0);
       for (let i = mountWindow.startIndex; i < mountWindow.endIndex; i++) {

@@ -31,7 +31,7 @@ describe("selectViewportMountWindow", () => {
     expect(w.mounted).toEqual([]);
   });
 
-  test("negative: 负 scrollTop / 非正高度 clamp，不把会话渲成空白", () => {
+  test("negative: 负 scrollTop / 非正 viewport 仍能 clamp", () => {
     const messages = ids(10);
     const w = selectViewportMountWindow(messages, {
       scrollTop: -40,
@@ -49,6 +49,13 @@ describe("selectViewportMountWindow", () => {
     });
     expect(badHeight.mounted.length).toBeGreaterThan(0);
     expect(badHeight.startIndex).toBe(0);
+
+    const zeroViewport = selectViewportMountWindow(ids(80), {
+      scrollTop: 0,
+      viewportHeight: 0,
+    });
+    expect(zeroViewport.mounted.length).toBeGreaterThan(0);
+    expect(zeroViewport.mounted.length).toBeLessThan(80);
   });
 
   test("overflow: 三屏以上只挂视口+overscan，顶含首、底含末", () => {
@@ -79,6 +86,13 @@ describe("selectViewportMountWindow", () => {
     expect(bottom.endIndex).toBe(100);
     expect(bottom.spacerAfter).toBe(0);
     expect(bottom.spacerBefore).toBeGreaterThan(0);
+
+    const inf = selectViewportMountWindow(messages, {
+      scrollTop: Number.POSITIVE_INFINITY,
+      viewportHeight,
+      heights,
+    });
+    expect(inf.mounted.at(-1)).toBe("m-99");
   });
 
   test("overflow: 短会话整段落在视口内 → 全量挂载、无 spacer", () => {

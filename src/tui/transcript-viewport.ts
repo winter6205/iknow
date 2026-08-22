@@ -46,7 +46,7 @@ function resolveOverscan(
   raw: number | undefined,
   viewportHeight: number
 ): number {
-  if (!Number.isFinite(raw) || raw < 0) return viewportHeight; // EXIT: missing → at least one viewport
+  if (!Number.isFinite(raw) || raw < viewportHeight) return viewportHeight; // EXIT: missing|below one viewport
   return Math.trunc(raw);
 }
 
@@ -56,8 +56,8 @@ function clampScrollTop(
   viewportHeight: number
 ): number {
   const maxScroll = Math.max(0, contentHeight - viewportHeight);
-  if (!Number.isFinite(scrollTop) || scrollTop < 0) return 0; // EXIT: non-finite|negative
-  if (scrollTop > maxScroll) return maxScroll;
+  if (Number.isNaN(scrollTop) || scrollTop < 0) return 0; // EXIT: NaN|negative
+  if (!Number.isFinite(scrollTop) || scrollTop > maxScroll) return maxScroll; // EXIT: Infinity|overflow
   return scrollTop;
 }
 
