@@ -32,6 +32,9 @@ _Avoid_: 用估算值顶替 trace 真值；为无读者的账本建运行时承�
 **context usage (display)**: 上下文用量显示 = TUI `ContextBar`（`src/tui/context-bar.tsx`）+ Web `ContextUsageStrip`（`web/src/components/ContextUsageStrip.tsx`）共同消费 `RunResult.lastUsage`（ADR-0008 D5）；wire 字段 = `TurnAnswerDto.lastUsage?` + `HealthResponse.contextWindow`（`src/session-api/` 投影，web 镜像于 `web/src/api/types.ts`）。百分比分子 = `inputTokens + cacheReadInputTokens + cacheCreationInputTokens`（Anthropic 三类 token 互不相交）；分母 = `contextWindow`（来源 `env.compress.contextWindow`，env var `IKNOW_MODEL_CONTEXT_WINDOW`，默认 200000）。Running 时显示上一次已完成的 lastUsage（one-beat lag）。
 _Avoid_: 用 chars/N 估算顶替 lastUsage 真值；为显示引入第二份 token 账本；让 contextWindow 走 `deps.compress`（避免触发 auto-compaction 行为变化）
 
+**viewport mount**: ChatView 只把 scrollbox 当前视口加 overscan 内的 transcript 条目挂进 OpenTUI 树；滚动文档仍覆盖全量 `session.messages` 与方案 B banner，高度来自布局实测。
+_Avoid_: 固定条数尾窗；行账 / 行窗口；把 LLM `/compact` 当 UI 树裁剪
+
 **ToolExecutionContext**: Executor 透传给 handler 的执行上下文 `{ signal }`；run 第三参 signal 原样透传、不创建子 signal，超时由 Executor `Promise.race` 外包而非 ctx 携带。
 _Avoid_: 在 ctx 里放 timeoutMs；为每个 handler 建子 AbortController
 
