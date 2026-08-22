@@ -149,7 +149,7 @@ export interface ChatViewProps {
   readonly thinkingExpanded?: boolean;
   /**
    * 方案 B：banner 作为滚动区首段内容（与消息共享 scroll space）。
-   * 窄终端 cols < BANNER_MIN_COLS 时由调用方退化为单行（在 banner.ts 处理）。
+   * 眼睛放得下时由 banner.ts 画 13 行完整眼；只有点阵本身放不下才单行。
    */
   readonly bannerLines?: ReadonlyArray<string>;
 }
