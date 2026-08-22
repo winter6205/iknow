@@ -5,12 +5,13 @@
  */
 import { afterAll, afterEach, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionHub, mapStoreError } from "../../src/session-api/hub.ts";
 import {
   CURRENT_SCHEMA_VERSION,
+  parseSessionJsonl,
   resolveProjectSessionDir,
   SessionStore,
 } from "../../src/session-api/store/index.ts";
@@ -1400,5 +1401,157 @@ describe("commit B: SessionHub.listPendingAsks + resolveAsk", () => {
     assert.equal(out.decision, "allow");
     assert.ok(out.reason.includes("session"));
     assert.ok(rule.id.startsWith("session-allow-grep"));
+  });
+});
+
+// -- T3 (#620): turn 内 commit(边跑边写) -------------------------------------
+
+describe("T3 (#620): turn 内 commit — hub 注入 commitMessages 钩子", () => {
+  it("工具执行时 assistant 事件已落在盘上 JSONL(commit 先于工具,不绕开 serialize 队列)", async () => {
+    // 探针工具在 runOne 内读盘上 JSONL:assistant commit 必须先于工具执行落盘。
+    // 断言在工具外做(工具内 throw 会被 executor 收成 execution_failed,防假绿)。
+    const idRef: { current: string | null } = { current: null };
+    const observed: Array<{
+      readonly events: number;
+      readonly head: string | null;
+      readonly lastRole: string;
+    }> = [];
+    const probe = createStubTool({
+      name: "probe",
+      next: async () => {
+        const raw = await readFile(
+          join(sessionDir, `${idRef.current}.jsonl`),
+          "utf8"
+        );
+        const log = parseSessionJsonl(raw);
+        observed.push({
+          events: log.events.length,
+          head: log.head,
+          lastRole: log.events[log.events.length - 1]?.message.role ?? "none",
+        });
+        return "observed";
+      },
+    });
+    const registry = createRegistry([probe]);
+    const deps: LoopEngineDeps = {
+      adapter: createStubModel({
+        responses: [
+          assistantResult({
+            texts: [],
+            toolCalls: [{ id: "p1", name: "probe", input: {} }],
+          }),
+          assistantResult({ texts: ["done"], supplierStop: "success" }),
+        ],
+      }),
+      executor: createExecutor(registry),
+      registry,
+      maxTurns: 5,
+    };
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    idRef.current = session.conversation_id;
+
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "go",
+    });
+    assert.equal(res.turn.answer.stopReason, "completed");
+
+    // 工具执行瞬间:盘上恰有 1 条事件(assistant,含 tool_use),head 指向它。
+    assert.equal(observed.length, 1);
+    assert.equal(observed[0]!.events, 1);
+    assert.equal(observed[0]!.lastRole, "assistant");
+    assert.equal(observed[0]!.head, "e0");
+
+    // 收尾 save 重写整份 log 后,最终 transcript 与既有行为一致(4 条消息)。
+    const loaded = await store.load(session.conversation_id);
+    assert.equal(loaded.messages.length, 4);
+    const raw = await readFile(
+      join(sessionDir, `${session.conversation_id}.jsonl`),
+      "utf8"
+    );
+    const log = parseSessionJsonl(raw);
+    assert.equal(log.events.length, 4);
+    assert.equal(log.head, "e3");
+  });
+
+  it("legacy .json-only 会话:首次 commit 触发 bootstrap 迁出 JSONL,run 正常完成", async () => {
+    // 升级前遗留:盘上只有 <id>.json(无 .jsonl)。appendEvents 对 legacy 直抛
+    // write_failed;hub 钩子须先全量 save 迁出 JSONL 再重试,否则 legacy 会话
+    // 永远无法再跑。探针工具在 runOne 内读盘上 JSONL,证明 bootstrap + commit
+    // 在工具执行前已完成(断言在工具外做,防 executor 收吞 assertion 假绿)。
+    const id = "legacy-only-t3";
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(
+      join(sessionDir, `${id}.json`),
+      JSON.stringify(
+        sampleFile({
+          id,
+          overrides: {
+            messages: [
+              userMsg("old q"),
+              { role: "assistant", content: [{ type: "text", text: "old a" }] },
+            ],
+            turnCount: 1,
+          },
+        })
+      ),
+      "utf8"
+    );
+    const observed: Array<{
+      readonly events: number;
+      readonly head: string | null;
+      readonly roles: string[];
+    }> = [];
+    const probe = createStubTool({
+      name: "probe",
+      next: async () => {
+        const raw = await readFile(join(sessionDir, `${id}.jsonl`), "utf8");
+        const log = parseSessionJsonl(raw);
+        observed.push({
+          events: log.events.length,
+          head: log.head,
+          roles: log.events.map((e) => e.message.role),
+        });
+        return "observed";
+      },
+    });
+    const registry = createRegistry([probe]);
+    const deps: LoopEngineDeps = {
+      adapter: createStubModel({
+        responses: [
+          assistantResult({
+            texts: [],
+            toolCalls: [{ id: "p1", name: "probe", input: {} }],
+          }),
+          assistantResult({ texts: ["new answer"], supplierStop: "success" }),
+        ],
+      }),
+      executor: createExecutor(registry),
+      registry,
+      maxTurns: 5,
+    };
+    const hub = makeHub(deps);
+    const res = await hub.postMessage({ conversationId: id, text: "new q" });
+    assert.equal(res.turn.answer.stopReason, "completed");
+
+    // 工具执行瞬间:legacy 已迁出 JSONL —— 旧 2 条事件 + 本次 assistant,
+    // head 指向新 assistant;新 user query 由收尾 save 落盘(设计内 gap)。
+    assert.equal(observed.length, 1);
+    assert.equal(observed[0]!.events, 3);
+    assert.deepEqual(observed[0]!.roles, ["user", "assistant", "assistant"]);
+    assert.equal(observed[0]!.head, "e2");
+
+    // 收尾 save 后:旧 2 条 + 新 4 条(user query + assistant(tool_use) +
+    // user(tool_result) + assistant final),事件链完整,turnCount 累计。
+    const loaded = await store.load(id);
+    assert.equal(loaded.messages.length, 6);
+    assert.equal(loaded.turnCount, 3);
+    const raw = await readFile(join(sessionDir, `${id}.jsonl`), "utf8");
+    const log = parseSessionJsonl(raw);
+    assert.equal(log.events.length, 6);
+    assert.equal(log.head, "e5");
+    assert.equal(log.events[0]!.message.role, "user");
+    assert.equal(log.events[5]!.message.role, "assistant");
   });
 });

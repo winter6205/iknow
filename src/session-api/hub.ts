@@ -977,6 +977,19 @@ export class SessionHub {
           // serve cachedDeps 跨会话共享（hub.ts:1287 注），此处 per-run 注入会话
           // 锚点，bash_output / bash_stop 的 scope 过滤才能按会话闭环。
           conversationId,
+          // #620 T3 (spec session-jsonl-resume D4):turn 内 commit 钩子 ——
+          // assistant / 每个 tool_result 进权威历史后立刻 append 到会话
+          // JSONL log（边跑边写，崩溃可续）。
+          // 队列纪律（spec concurrent 决策）:本闭包由 run() 在 postMessage
+          // 的 serialize work 槽位内同步触发,已在同会话串行队列里 —— 绝不
+          // 能再经 this.serialize 包裹（内层槽位排队等外层释放,外层正等
+          // run() 返回 → 自等死锁）。不绕开,也不重入。
+          commitMessages: (messages) =>
+            this.appendSessionEvents({
+              conversationId,
+              session,
+              events: messages,
+            }),
           ...(trace !== undefined ? { trace } : {}),
           // #604 T1 (SC1-SC5): compact 边界渲染缝 — 把会话里最近合格用户
           // 任务原话(纯函数 over session.messages,现抽现贴)注入为
@@ -1737,6 +1750,35 @@ export class SessionHub {
       )
     );
     return next;
+  }
+
+  /**
+   * #620 T3:commit 钩子的 store 落点(仅在 postMessage serialize 槽位内被
+   * 调,见 runDeps 处注释 —— 直调 store,不重入队列)。直追 appendEvents;
+   * typed store 失败(legacy .json-only 会话升级后首跑 → write_failed;
+   * 文件被外部删除 → not_found 等)→ 以当前 session 全量 save 一次
+   * bootstrap(T1 save 双写形态;legacy 即 T2 migrate-on-save 语义的提前
+   * 触发)后重试一次。非 typed 异常原样上抛;bootstrap / 重试仍败也上抛
+   * —— 不静默吞咽(loop-engine 包 MessageCommitError 中止本次 run)。
+   */
+  private async appendSessionEvents(opts: {
+    readonly conversationId: string;
+    readonly session: SessionFileV1;
+    readonly events: ReadonlyArray<AnthropicNativeMessage>;
+  }): Promise<void> {
+    try {
+      await this.store.appendEvents({
+        id: opts.conversationId,
+        events: opts.events,
+      });
+    } catch (err) {
+      if (!isSessionStoreError(err)) throw err;
+      await this.store.save({ id: opts.conversationId, file: opts.session });
+      await this.store.appendEvents({
+        id: opts.conversationId,
+        events: opts.events,
+      });
+    }
   }
 
   /** 裁决#8 + T1: save condition based on stopReason and progress delta.

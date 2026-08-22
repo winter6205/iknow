@@ -68,6 +68,24 @@ export class ToolExecutionError extends Error {
 }
 
 /**
+ * #620 T3 (spec session-jsonl-resume D4): host 注入的 commit 钩子失败信号。
+ *
+ * loop-engine 对 commit 失败不重试、不吞咽、不映射 stop reason —— 包成
+ * MessageCommitError 原路上抛,run 随之 throw(与 adapter 抛错同一大类
+ * 控制流:内存 run 中止,已 commit 的事件留在盘上)。surface 可经
+ * instanceof 区分「持久化失败」与模型/协议/工具失败;cause 保留 host
+ * 侧原始 typed error,不丢 kind/context。
+ */
+export class MessageCommitError extends Error {
+  override readonly name = "MessageCommitError";
+  readonly cause: unknown;
+  constructor(cause: unknown) {
+    super(`MessageCommitError: commit hook failed: ${errorMessage(cause)}`);
+    this.cause = cause;
+  }
+}
+
+/**
  * #357 T1: sandboxRoot 收窄越界 typed 拒绝。
  *
  * `buildWorkerPayload` 单点校验(manager 内)发现 def.sandboxRoot 落在父

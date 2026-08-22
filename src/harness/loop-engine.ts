@@ -34,6 +34,7 @@
 
 import {
   MaxTurnsExceeded,
+  MessageCommitError,
   ProtocolError,
   PromptTooLongError,
 } from "./errors.js";
@@ -229,6 +230,26 @@ export interface LoopEngineDeps {
    * （ask / worker / oneshot 等无会话装配零行为变化）。
    */
   readonly conversationId?: string;
+  /**
+   * #620 T3 (spec session-jsonl-resume D4):turn 内 commit 钩子(可选)。
+   * host(hub / chat-session)注入纯 async 闭包,把已进权威历史的消息立即
+   * 上盘;loop-engine 自身零 IO —— 不感知 store / 文件 / 会话格式,钩子
+   * 只收 AnthropicNativeMessage(Gate B:无 session-api 类型入内核)。
+   *
+   * 调用点(同一 run 内严格按序):
+   *   (a) assistant 消息 append 进权威历史后立刻 —— 纯文本收尾与工具
+   *       回合都 commit;
+   *   (b) 每个工具结果一拿到手立刻 —— 单条 user message 承载该结果的
+   *       encoded tool_result block(与批量进权威历史的块逐块一致,
+   *       encodeToolResults 是逐元素 map)。
+   *
+   * 字段缺席 → 零 commit,行为与此前完全一致(byte-identical)。
+   * 失败语义:钩子抛错 → 包 MessageCommitError 重抛,run 中止;不重试、
+   * 不吞咽、不改 stop 语义(见 errors.ts MessageCommitError)。
+   */
+  readonly commitMessages?: (
+    messages: ReadonlyArray<AnthropicNativeMessage>
+  ) => Promise<void>;
 }
 
 /**
@@ -241,6 +262,22 @@ function freezeMessage(msg: AnthropicNativeMessage): AnthropicNativeMessage {
     role: msg.role,
     content: Object.freeze(msg.content.map((b) => Object.freeze({ ...b }))),
   });
+}
+
+/**
+ * #620 T3:调 host 注入的 commit 钩子;钩子缺席 = 零 IO 早退(行为不变)。
+ * 钩子失败统一包 MessageCommitError 上抛(命名失败,不静默吞咽)。
+ */
+async function commitMessagesOrThrow(
+  deps: LoopEngineDeps,
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): Promise<void> {
+  if (deps.commitMessages === undefined) return;
+  try {
+    await deps.commitMessages(messages);
+  } catch (err) {
+    throw new MessageCommitError(err);
+  }
 }
 
 function appendMessage(opts: {
@@ -1108,13 +1145,27 @@ async function runToolPhase(opts: {
   }));
   const toolTimeout =
     opts.deps.toolTimeoutMs ?? opts.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const results = await opts.deps.executor.executeAll(
-    toolCallViews,
-    opts.signal,
-    toolTimeout,
-    opts.deps.conversationId
-  );
-  const blocks = opts.deps.adapter.encodeToolResults(results);
+  // #620 T3 (spec D4):逐调用串行驱动 —— 每个工具结果一拿到手立刻编码并经
+  // host 钩子上盘(单条 user message;encodeToolResults 是逐元素 map,逐调用
+  // 编码与批量编码逐块一致,故内存侧仍合并为一条 user message,行为不变)。
+  // Executor 接口零改动:既有 executeAll 实现(real / permission / aci /
+  // violation 包装)内部本就是逐调用串行,逐调用驱动语义等价。
+  const results: ToolExecutionResult[] = [];
+  const blocks: AnthropicContentBlock[] = [];
+  for (const call of toolCallViews) {
+    const [result] = await opts.deps.executor.executeAll(
+      [call],
+      opts.signal,
+      toolTimeout,
+      opts.deps.conversationId
+    );
+    results.push(result);
+    const encoded = opts.deps.adapter.encodeToolResults([result]);
+    blocks.push(...encoded);
+    await commitMessagesOrThrow(opts.deps, [
+      { role: "user", content: encoded },
+    ]);
+  }
   const toolResultMsg: AnthropicNativeMessage = {
     role: "user",
     content: blocks,
@@ -1405,6 +1456,9 @@ async function stepWithTrace(opts: {
     messages: nextState.messages,
     turnCount: effectiveState.turnCount + 1,
   };
+  // #620 T3 (spec D4):assistant 一进权威历史立刻经 host 钩子上盘(边跑边写);
+  // 纯文本收尾与工具回合共用此 commit 点。
+  await commitMessagesOrThrow(opts.deps, [turnResult.nativeMessage]);
 
   if (turnResult.projection.toolCalls.length === 0) {
     const durationMs = performance.now() - started;
