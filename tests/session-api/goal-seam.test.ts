@@ -1,22 +1,18 @@
 /**
  * #408 T4 + #449 B8 (修订 per #473 / #605 T2): verify-loop seam — userText =
- * `goal.text ?? query`.
+ * `goal.text ?? query`(#605 T2 后唯一公式)。任务焦点曾由 taskFocus 段提供
+ * (稳定锚,首次 seed 后不变 — OQ2),但 #473 消费端移除 + #605 T2 字段整段
+ * 退休后,`goal.text ?? query` 成为唯一公式。
  *
  * History:
- *   - #408 T4: hub.ts userText seam = `goal.text ?? query`. user_initial
- *     fixtures bound goal to verify-loop's userText.
- *   - #458 T2 (SC4): sanitize migration moved `user_initial` goals to
- *     `taskFocus` on load. To keep T4 assertions valid as unit-level tests
- *     of the **seam binding** itself, fixtures use `source === "user_pin"`.
- *   - #449 B8: hub.ts userText seam briefly upgraded to three-segment
- *     fallback (`goal.text ?? taskFocus.text ?? query`)。
+ *   - #408 T4: hub.ts userText seam = `goal.text ?? query`.
+ *   - #449 B8: 三段 fallback (`goal.text ?? taskFocus.text ?? query`)。
  *   - #473: 消费端 taskFocus 段移除 → `goal.text ?? query`。
- *     原因:taskFocus 稳定焦点锚导致新任务被旧焦点遮蔽。
- *   - #605 T2: `session.taskFocus` 字段整段退休。seed 路径删除,sanitize
- *     无条件 drop 盘上遗留的 taskFocus key(加载后字段恒缺席)。本文件
- *     保留消费端「taskFixtures 在场也不遮蔽 query」的用例 — 现在语义是
- *     「即使盘上有 legacy taskFocus key,load 后也拿不到,userText 恒为
- *     当前 query」,与 sanitize-drop 契约互相印证。
+ *   - #605 T2: `session.taskFocus` 字段整段退休 → 数据侧 fallback 退化为
+ *     `goal.text ?? query`。
+ *
+ * #605 T2 后本文件只守护 CONSUMER-side seam (verify-loop userText 绑定),
+ * DATA-side 三段公式与 `session.taskFocus` 一同退役,不再独立描述。
  */
 import {
   afterAll,
@@ -90,16 +86,6 @@ import {
   type GoalState,
   type SessionFileV1,
 } from "../../src/session-api/store/index.ts";
-
-// Legacy on-disk shape (the runtime type was retired in #605 T2). The
-// fixture mirrors what pre-T2 disk files carried so the consumer-side
-// "taskFocus present on disk but absent after load" assertion stays
-// meaningful as a sanitize-drop contract test.
-interface LegacyTaskFocusState {
-  text: string;
-  updatedAt: string;
-  history?: ReadonlyArray<{ text: string; updatedAt: string }>;
-}
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 import type { VerifyConfig } from "../../src/harness/verify/types.ts";
 
@@ -120,6 +106,15 @@ afterEach(() => {
   runVerifyLoopMock.mockClear();
 });
 
+/** Pre-#605 legacy on-disk shape — runtime type was retired in #605 T2; we
+ *  pass this through the `as SessionFileV1` cast below to exercise the
+ *  sanitize-drop path (assertion: legacy taskFocus key disappears on load). */
+interface LegacyTaskFocusState {
+  text: string;
+  updatedAt: string;
+  history?: ReadonlyArray<{ text: string; updatedAt: string }>;
+}
+
 async function seedSession(opts: {
   readonly id: string;
   readonly goal?: GoalState;
@@ -137,7 +132,7 @@ async function seedSession(opts: {
     cwd: process.cwd(),
     sanitized_at: now,
     checkpoints: [],
-  } satisfies Omit<SessionFileV1, "goal">;
+  } satisfies Omit<SessionFileV1, "goal" | "taskFocus">;
   await store.save({
     id: opts.id,
     file:
@@ -357,11 +352,3 @@ describe("verify-loop seam: userText = goal.text ?? query (#408 T4 / #458 T8)", 
     assert.equal(capturedUserText(), "Q", "taskFocus.text === '' → 兜底 query");
   });
 });
-
-// -- #605 T2: SC3 data-side three-segment fallback RETIRED ----------------
-//
-// 历史: #458 T8 (SC3 acceptance) 把 `goal.text ?? taskFocus.text ?? query`
-// 数据侧三段 fallback 作为 acceptance matrix 断言。#449 B8 短期在消费端
-// 接入过 taskFocus 段,#473 已撤掉(稳定焦点锚遮蔽新任务)。#605 T2 整段
-// 退休 taskFocus 字段 — 该 acceptance block 不再有运行时 surface 守护,
-// 删除以避免虚假 SSOT。

@@ -393,38 +393,12 @@ describe("sanitizeSessionFile — v5 goal backfill (#408)", () => {
     assert.deepEqual(out.goal, goal);
   });
 
-  it("#605 T2: legacy disk files carrying a taskFocus key load without emitting it on the wire", () => {
-    // #458 → #605: the previous "user_initial → taskFocus" migration is
-    // gone with the taskFocus field's retirement. A legacy disk file with
-    // a stale taskFocus key now loads via sanitize-drop (no migration, no
-    // validation) — the key is unconditionally deleted.
-    const goal = {
-      ...validGoal,
-      text: "Build a C compiler",
-      source: "user_initial" as const,
-      status: "active",
-      createdAt: "2026-08-13T00:00:00.000Z",
-      updatedAt: "2026-08-13T00:00:00.000Z",
-    };
-    const out = sanitizeSessionFile({
-      ...valid,
-      goal,
-      taskFocus: { text: "stale", updatedAt: "2026-08-13T00:00:00.000Z" },
-    });
-    // The goal (user_initial) survives verbatim — only the taskFocus key
-    // is dropped. No migration step runs.
-    assert.deepEqual(out.goal, goal);
-    assert.equal(
-      (out as unknown as Record<string, unknown>)["taskFocus"],
-      undefined,
-      "sanitize must drop any taskFocus key — the field is retired"
-    );
-  });
-
   it("preserves goal.history through sanitize", () => {
-    // A `user_pin` goal survives sanitize verbatim (the only source that
-    // remains on disk post-#605 T2). History-entry source `user_initial`
-    // is still a valid prior-goal source for `user_pin` history entries.
+    // #458: a top-level `user_initial` goal now migrates to `taskFocus` on
+    // load, so this history-preservation invariant is exercised with a
+    // `user_pin` goal (the source that survives sanitize verbatim). The
+    // history-entry source `user_initial` is still a valid prior-goal source
+    // (validation accepts it; only the top-level `goal.source` migrates).
     const goal = {
       ...validGoal,
       source: "user_pin",
@@ -475,65 +449,6 @@ describe("validateGoalText (#458 T2 — SC5)", () => {
 });
 
 // -- #458 T2: taskFocus field validation ------------------------------------
-
-// -- #605 T2: sanitize-drop the retired taskFocus key ----------------------
-
-describe("sanitizeSessionFile — #605 T2: drops legacy taskFocus key (no field, no validation)", () => {
-  // Local legacy-shape alias — the runtime type no longer exists, but
-  // the test fixture mirrors the on-disk shape of a pre-T2 session file.
-  interface LegacyTaskFocusState {
-    text: string;
-    updatedAt: string;
-    history?: ReadonlyArray<{ text: string; updatedAt: string }>;
-  }
-
-  it("drops a well-formed legacy taskFocus object from the output", () => {
-    // The field is retired — sanitize unconditionally deletes the key
-    // (mirrors #467 T3's `delete result["summary"]` discipline).
-    const legacy: LegacyTaskFocusState = {
-      text: "Build a compiler",
-      updatedAt: "2026-08-13T00:00:00.000Z",
-    };
-    const out = sanitizeSessionFile({ ...valid, taskFocus: legacy });
-    assert.equal(
-      (out as unknown as Record<string, unknown>)["taskFocus"],
-      undefined,
-      "sanitize must NOT emit a taskFocus key on the wire"
-    );
-  });
-
-  it("drops a malformed legacy taskFocus object (no schema_invalid throw)", () => {
-    // Sanitize-drop is unconditional — even malformed legacy values are
-    // removed silently rather than blocking load. Validation never sees
-    // the key (no per-field branch left in validateSessionFile).
-    const malformed = { text: 1, updatedAt: "t" } as unknown;
-    const out = sanitizeSessionFile({ ...valid, taskFocus: malformed });
-    assert.equal(
-      (out as unknown as Record<string, unknown>)["taskFocus"],
-      undefined
-    );
-  });
-
-  it("preserves unknown top-level fields (spread discipline)", () => {
-    // spread-preserve must still hold: legacy taskFocus drop should NOT
-    // accidentally strip unrelated top-level fields.
-    const out = sanitizeSessionFile({
-      ...valid,
-      taskFocus: { text: "x", updatedAt: "t" },
-      futureFlag: { kind: "experimental" },
-    });
-    assert.equal(
-      (out as unknown as Record<string, unknown>)["taskFocus"],
-      undefined
-    );
-    assert.deepEqual(
-      (out as unknown as Record<string, unknown>)["futureFlag"],
-      {
-        kind: "experimental",
-      }
-    );
-  });
-});
 
 // -- serve-workspace T1: additive workspaceRoot ------------------------------
 
@@ -846,10 +761,7 @@ describe("validateSessionFile — content blocks accept thinking (T1)", () => {
       ] as ContentBlock[],
       stop_reason: "end_turn",
       stop_sequence: null,
-      usage: {
-        input_tokens: 4,
-        output_tokens: 2,
-      },
+      usage: { input_tokens: 4, output_tokens: 2 },
     } as unknown as SdkMessage;
     const result = interpretMessage(sdkResp);
 

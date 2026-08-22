@@ -375,117 +375,7 @@ describe("sanitizeSessionFile — schemaVersion 4 complete file", () => {
   });
 });
 
-// -- #458 T2 → #605 T2: user_initial no longer migrates to taskFocus ------
-
-describe("sanitizeSessionFile — #605 T2: legacy taskFocus key is dropped (no migration, no validation)", () => {
-  it("drops a legacy taskFocus key from the wire output", () => {
-    // #458 → #605: the previous "user_initial → taskFocus" migration is
-    // gone with the field's retirement. Sanitize unconditionally deletes
-    // any taskFocus key (mirrors #467 T3's `delete result["summary"]`
-    // discipline) — no migration step runs.
-    const raw = {
-      schemaVersion: 5,
-      conversation_id: "conv-migrate",
-      messages: [userMsg("hello")],
-      jsonMode: true,
-      turnCount: 1,
-      updatedAt: "2026-08-13T00:00:00.000Z",
-      title: "hello",
-      cwd: "/work",
-      sanitized_at: "2026-08-13T00:00:00.000Z",
-      checkpoints: [],
-      taskFocus: {
-        text: "Build a C compiler",
-        updatedAt: "2026-08-13T00:00:00.000Z",
-      },
-    };
-    const out = sanitizeSessionFile(raw);
-    assert.equal(
-      (out as unknown as Record<string, unknown>)["taskFocus"],
-      undefined,
-      "sanitize must drop the legacy taskFocus key"
-    );
-    // The rest of the file round-trips normally.
-    assert.equal(out.conversation_id, "conv-migrate");
-    assert.equal(out.schemaVersion, 5);
-  });
-
-  it("sanitize-drop preserves unknown top-level fields (spread discipline)", () => {
-    const out = sanitizeSessionFile({
-      schemaVersion: 5,
-      conversation_id: "conv-migrate2",
-      messages: [],
-      jsonMode: false,
-      turnCount: 0,
-      updatedAt: "2026-08-13T00:00:00.000Z",
-      title: "",
-      cwd: "",
-      sanitized_at: "2026-08-13T00:00:00.000Z",
-      checkpoints: [],
-      taskFocus: { text: "X", updatedAt: "2026-08-13T00:00:00.000Z" },
-      future_flag: { nested: 1 },
-    });
-    assert.equal(
-      (out as unknown as Record<string, unknown>)["taskFocus"],
-      undefined
-    );
-    assert.deepEqual(
-      (out as unknown as Record<string, unknown>)["future_flag"],
-      { nested: 1 }
-    );
-  });
-
-  it("drops a malformed legacy taskFocus value without schema_invalid", () => {
-    // Sanitize-drop is unconditional — even malformed legacy values are
-    // removed silently rather than blocking load.
-    const raw = {
-      schemaVersion: 5,
-      conversation_id: "conv-malformed",
-      messages: [userMsg("hello")],
-      jsonMode: true,
-      turnCount: 1,
-      updatedAt: "2026-08-13T00:00:00.000Z",
-      title: "hello",
-      cwd: "/work",
-      sanitized_at: "2026-08-13T00:00:00.000Z",
-      checkpoints: [],
-      taskFocus: { text: 1, updatedAt: "t" }, // intentionally malformed
-    };
-    const out = sanitizeSessionFile(raw);
-    assert.equal(
-      (out as unknown as Record<string, unknown>)["taskFocus"],
-      undefined
-    );
-  });
-
-  it("leaves a user_pin goal verbatim (no migration, no taskFocus involvement)", () => {
-    const raw = {
-      schemaVersion: 5,
-      conversation_id: "conv-pin",
-      messages: [userMsg("hello")],
-      jsonMode: true,
-      turnCount: 1,
-      updatedAt: "2026-08-13T00:00:00.000Z",
-      title: "hello",
-      cwd: "/work",
-      sanitized_at: "2026-08-13T00:00:00.000Z",
-      checkpoints: [],
-      goal: {
-        text: "Pinned goal",
-        source: "user_pin",
-        status: "active",
-        createdAt: "2026-08-13T00:00:00.000Z",
-        updatedAt: "2026-08-13T00:00:00.000Z",
-      },
-    };
-    const out = sanitizeSessionFile(raw);
-    assert.deepEqual(out.goal, raw.goal);
-    assert.equal(
-      (out as unknown as Record<string, unknown>)["taskFocus"],
-      undefined
-    );
-  });
-});
+// -- #458 T2: user_initial → taskFocus migration + user_pin passthrough ------
 
 // -- sanitizeSessionFile — v3 → v5 upgrade keeps system messages (#392 T1 / #408) ---
 
@@ -650,5 +540,46 @@ describe("sanitizeSessionFile — additive workspaceRoot (serve-workspace T1)", 
         }),
       isSchemaInvalid("workspaceRoot")
     );
+  });
+});
+
+// -- #605 T2: sanitize drops legacy `taskFocus` key without throwing ---------
+
+describe("sanitizeSessionFile — #605 T2: legacy taskFocus key is dropped on load", () => {
+  it("well-formed legacy taskFocus: dropped silently, other fields preserved", () => {
+    const input = {
+      ...v2File(),
+      taskFocus: {
+        text: "stale focus",
+        updatedAt: "2026-08-13T00:00:00.000Z",
+      },
+    };
+    const out = sanitizeSessionFile(input) as unknown as Record<
+      string,
+      unknown
+    >;
+    assert.equal(out["taskFocus"], undefined, "legacy key must be stripped");
+    assert.equal(out["title"], "hello");
+    assert.equal(out["turnCount"], 3);
+  });
+
+  it("malformed legacy taskFocus (non-object / non-string text): dropped silently, no schema_invalid", () => {
+    for (const bad of [
+      { taskFocus: null },
+      { taskFocus: 42 },
+      { taskFocus: "string-not-object" },
+      { taskFocus: { updatedAt: "x" } }, // missing text
+    ]) {
+      const input = { ...v2File(), ...bad };
+      const out = sanitizeSessionFile(input) as unknown as Record<
+        string,
+        unknown
+      >;
+      assert.equal(
+        out["taskFocus"],
+        undefined,
+        `legacy taskFocus ${JSON.stringify(bad.taskFocus)} must be dropped`
+      );
+    }
   });
 });

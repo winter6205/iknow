@@ -17,20 +17,18 @@
  * 不硬编码真实 LLM token value;只用 estimate 函数语义(constant 层) +
  * 自定义 threshold 模拟触发。
  *
- * #604 T1 (SC1-SC5): compact 边界渲染缝。`deps.boundaryAttachment` 可选闭包
- * 在 compact 触发时把渲染文本追加为一条 user 消息(放在 boundary placeholder
- * 之后)。两处 compact 调用点(reactive line 717 / proactive line 1339)共用
- * `applyCompactAttachment` helper:
+ * #604 T1 (SC1-SC5) supersedes #458 T7 (SC11): compact 边界渲染缝。
+ * `deps.boundaryAttachment` 可选闭包在 compact 触发时把渲染文本追加为一条
+ * user 消息(放在 boundary placeholder 之后)。两处 compact 调用点
+ * (reactive line 717 / proactive line 1339)共用 `applyCompactAttachment`
+ * helper:渲染源由 taskFocus 字段(#458 T7)改为 hub 注入的
+ * `renderRecentUserTasksBoundary` 现抽现贴(取最近 ≤3 句合格用户任务原话)。
+ * 本文件只测 `applyCompactAttachment` 缝本身,不动 hub 闭包。
  *   f. proactive compact + boundaryAttachment → messages[0]=placeholder,
  *      messages[1]=attachment user 消息,messages[2+]=保留尾部;
  *   g. boundaryAttachment 缺席 → 仅 placeholder(byte-stable);
  *   h. reactive compact 路径同样命中(共享 helper);
  *   i. 普通 turn(阈值未达)→ boundaryAttachment 不调用(no-op)。
- *
- * #604 取代 #458 T7 (SC11) — 边界渲染源从 taskFocus 字段(240+history+cap720)
- * 改为 hub 注入的 renderRecentUserTasksBoundary(取最近 ≤3 句合格用户任务原话)。
- * 本文件测试 deps.boundaryAttachment 缝本身(不动 hub 闭包),仍用合成 fixture
- * "focus@now\n---\nhist1" 验证 helper 调用 + 消息注入逻辑 — 与 #604 兼容。
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -314,7 +312,7 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
   });
 });
 
-// -- #604 T1 (SC1-SC5): compact 边界 boundaryAttachment 渲染缝 ---------------
+// -- #458 T7 (SC11): compact 边界 boundaryAttachment 渲染缝 --------------------
 
 /** Construct a minimal prior-message array. */
 const text = (value: string): AnthropicNativeMessage => ({
@@ -431,7 +429,7 @@ function makeFlakyAdapter(opts: {
   });
 }
 
-describe("loop-engine compress boundaryAttachment (#604 T1 SC1-SC5)", () => {
+describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
   const noopTool = createStubTool({
     name: "noop",
     next: () => TOOL_RESULT_TEXT,

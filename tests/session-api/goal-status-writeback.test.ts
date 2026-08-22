@@ -17,8 +17,8 @@
  * (write-back trace 留痕 even when no status change).
  *
  * Fixture: a user-pinned active goal (source === "user_pin") survives
- * sanitize-on-load (#605 T2 retired the taskFocus field — no seed path, so a
- * fresh session has neither goal nor taskFocus and writeback is inapplicable).
+ * sanitize-on-load (#605 T2 unconditionally drops the legacy `taskFocus`
+ * key, but never touches a user-pinned `goal`).
  *
  * Trace assertions: writeback recordGoal writes a JSONL line via the real
  * JsonlTraceService — read the per-session trace file and filter
@@ -253,66 +253,11 @@ describe("goal.status write-back on verify-loop outcome (#458 T5 SC8)", () => {
   });
 });
 
-describe("post-#605 T2: no taskFocus seed on fresh session (seed path retired)", () => {
-  it("fresh session: no taskFocus on disk and NO goal seed trace record", async () => {
-    // #458 T5 SC2 seeded taskFocus on the first postMessage; #605 T2
-    // retired the field — conditionalSave only merges messages/turnCount/
-    // title. The T12 `action=seed` trace emission point is gone with it.
-    const id = "t5-fresh-seed";
-    await store.save({
-      id,
-      file: {
-        schemaVersion: CURRENT_SCHEMA_VERSION,
-        conversation_id: id,
-        messages: [],
-        jsonMode: false,
-        turnCount: 0,
-        updatedAt: "2026-01-01T00:00:00.000Z",
-        title: "",
-        cwd: process.cwd(),
-        sanitized_at: "2026-01-01T00:00:00.000Z",
-        checkpoints: [],
-      } as SessionFileV1,
-    });
-    const hub = new SessionHub({
-      store,
-      deps: makeDeps([assistantResult({ texts: ["ok"] })]),
-      traceOut: traceDir,
-    });
-    await hub.postMessage({ conversationId: id, text: "Build a thing" });
-    const after = await load(id);
-    assert.equal(after.goal, undefined, "fresh session must NOT seed goal");
-    assert.equal(
-      (after as unknown as Record<string, unknown>)["taskFocus"],
-      undefined,
-      "#605 T2: taskFocus seed path is gone"
-    );
-    // The seed 发射点 must not fire: no action="seed" goal record in trace.
-    const tracePath = join(traceDir, `${id}.jsonl`);
-    let raw = "";
-    try {
-      raw = await readFile(tracePath, "utf8");
-    } catch {
-      raw = ""; // no trace file at all is also a valid "no seed" outcome
-    }
-    const seedLines = raw
-      .trim()
-      .split("\n")
-      .filter((l) => l.length > 0)
-      .filter((l) => l.includes('"record_type":"goal"'))
-      .filter((l) => l.includes('"action":"seed"'));
-    assert.equal(
-      seedLines.length,
-      0,
-      `no goal seed record expected, got: ${raw}`
-    );
-  });
-
+describe("VALID_GOAL_TRANSITIONS defensive guard on write-back (post-#605)", () => {
   it("achieved goal + outcome 'failed' → 非法反向边被 assertValidTransition 拦截, status 保持 achieved, recordGoal 留痕(status: active)", async () => {
-    // Reviewer 补强（standards+spec 双轴同指）：OUTCOME_TO_STATUS 的
-    // target="active"（failed/unstable 保持态）对已 achieved 的 goal 是
-    // 非法反向边（achieved→active 不在 VALID_GOAL_TRANSITIONS）。write-back
-    // 分支经 assertValidTransition 守卫拦截，goal 不变，仅 recordGoal trace 留痕。
+    // #458 T3 SC5 assertValidTransition 守卫(独立于 taskFocus 生命周期):
+    // OUTCOME_TO_STATUS target='active' 对 achieved 状态是反向边,write-back
+    // 分支经 assertValidTransition 拦截,goal 不变,仅 recordGoal trace 留痕。
     setOutcome("failed");
     const id = "t5-achieved-failed";
     await seedSession(id, {
@@ -327,7 +272,6 @@ describe("post-#605 T2: no taskFocus seed on fresh session (seed path retired)",
       "achieved",
       "achieved→active 非法反向边必须被拦截, status 保持 achieved"
     );
-    // trace 仍留痕（writeback action, status 报当前 active 目标）。
     const rec = await readWritebackGoalRecord(id);
     assert.equal(rec["action"], "writeback");
     assert.equal(rec["status"], "active");
