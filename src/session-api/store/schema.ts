@@ -65,13 +65,24 @@ export type InterruptReason =
 /** One interrupt snapshot: how far a session had progressed when an
  *  interrupting stop happened (turnCount / messagesCount) plus the label.
  *  `lastUsage` carries the last successful model-call usage when known
- *  (mirrors RunResult.lastUsage; absent → the interrupt saw no usage). */
+ *  (mirrors RunResult.lastUsage; absent → the interrupt saw no usage).
+ *
+ *  T5 (#622 / spec session-jsonl-resume D3): `anchorEventId` is the
+ *  authoritative anchor — the id of the JSONL event at chain position
+ *  `messagesCount - 1` (the last message of the checkpointed turn).
+ *  `messagesCount` stays as the derived view the picker joins on. The store
+ *  resolves the anchor at save (against the final chain) and at load
+ *  (migrating legacy messagesCount-only records); unresolvable records
+ *  (messagesCount beyond the chain) keep whatever anchor they carried. */
 export interface CheckpointRecord {
   readonly turnIndex: number;
   readonly messagesCount: number;
   readonly interruptedAt: string;
   readonly interruptReason: InterruptReason;
   readonly lastUsage?: unknown;
+  /** T5: authoritative event-id anchor (derived from messagesCount at
+   *  save/load; absent when the position is beyond the head chain). */
+  readonly anchorEventId?: string;
 }
 
 /** v5 (#408): session-level goal — the user's intent for the whole session.
@@ -511,7 +522,9 @@ function isValidCheckpoint(c: unknown): boolean {
     typeof r["messagesCount"] === "number" &&
     typeof r["interruptedAt"] === "string" &&
     typeof r["interruptReason"] === "string" &&
-    VALID_INTERRUPT_REASONS.has(r["interruptReason"] as InterruptReason)
+    VALID_INTERRUPT_REASONS.has(r["interruptReason"] as InterruptReason) &&
+    // T5: optional event-id anchor — present values must be strings.
+    (r["anchorEventId"] === undefined || typeof r["anchorEventId"] === "string")
   );
 }
 

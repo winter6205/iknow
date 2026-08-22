@@ -21,6 +21,11 @@
  *     hooks and T5's rewind build on them). They MUST be called under the
  *     hub serialize queue — the store stays stateless, no in-store locking
  *     (same posture as save(); spec Testing Decisions concurrent 类).
+ *   - #622 T5: save() is append-only AWARE — it aligns the caller's
+ *     projection with the persisted head chain (longest common prefix) and
+ *     only appends the divergent tail, so a rewound-away branch survives
+ *     every subsequent save. rewindToAnchor() moves the persisted head to
+ *     an earlier turn boundary WITHOUT truncating the log.
  */
 import { createHash } from "node:crypto";
 import {
@@ -39,16 +44,24 @@ import type {
 } from "../../harness/index.js";
 import type { SessionStoreError } from "./errors.js";
 import { closeoutOrphanToolUses } from "./closeout-projection.js";
-import type { ParsedSessionLog } from "./jsonl.js";
+import { resolveRewindAnchor, withCheckpointAnchors } from "./checkpoint.js";
+import type {
+  ParsedSessionLog,
+  SessionEventRecord,
+  SessionHeadRecord,
+} from "./jsonl.js";
 import {
+  headChainEvents,
+  jsonDeepEqual,
   messageEventId,
   parseSessionJsonl,
   projectSessionLog,
+  serializeSessionLog,
   SESSION_JSONL_EXT,
   sessionFileToJsonl,
 } from "./jsonl.js";
 import type { SessionFileV1 } from "./schema.js";
-import { sanitizeSessionFile } from "./schema.js";
+import { extractTitle, sanitizeSessionFile } from "./schema.js";
 
 /** Metadata returned by list(); intentionally excludes messages.
  *
@@ -109,7 +122,16 @@ export class SessionStore {
       }
       try {
         const file = projectSessionLog(log);
-        return { ...file, messages: closeoutOrphanToolUses(file.messages) };
+        // T5 (spec D3): migrate messagesCount-only checkpoints to their
+        // event-id anchor against the current head chain.
+        const anchored = withDerivedAnchors(
+          file,
+          headChainEvents(log).map((e) => e.id)
+        );
+        return {
+          ...anchored,
+          messages: closeoutOrphanToolUses(anchored.messages),
+        };
       } catch (err) {
         throw this.attachId(id, err);
       }
@@ -117,7 +139,14 @@ export class SessionStore {
     const raw = await this.readRaw(id);
     const parsed = this.parseJson({ id, raw });
     try {
-      return sanitizeSessionFile(parsed);
+      const file = sanitizeSessionFile(parsed);
+      // T5 (spec D3): a legacy file's message order is exactly what the
+      // JSONL migration writes (e0..e{N-1}), so the anchor derives from the
+      // message position.
+      return withDerivedAnchors(
+        file,
+        file.messages.map((_, i) => messageEventId(i))
+      );
     } catch (err) {
       // sanitize is pure and lacks store identity; reattach id for the typed contract.
       const field = (err as { field?: string }).field;
@@ -137,6 +166,22 @@ export class SessionStore {
    * save; the mirror stays until a later cleanup ticket). Load prefers the
    * JSONL, so a crash between the two renames never surfaces a stale
    * authority.
+   *
+   * #622 T5: the JSONL write is append-only AWARE (planSessionSave). The
+   * caller's `file.messages` projection is aligned with the persisted head
+   * chain by longest common prefix:
+   *   - identical projection → header-refresh only (records preserved
+   *     verbatim, no new event/head records);
+   *   - head chain is a prefix of the projection → append the tail events
+   *     parented at the current head;
+   *   - projection is a strict prefix of the head chain → append only a
+   *     head record moving the head backward (reset-shaped save);
+   *   - divergent projection → append the suffix as a new branch parented
+   *     at the LCP boundary (fork; the abandoned suffix stays in the file).
+   * Existing event/head records are NEVER dropped, so a rewound-away branch
+   * survives every subsequent save. A fresh session, a legacy-only mirror,
+   * or a corrupt log falls back to a full rewrite (self-heal; the pre-T5
+   * shape). The `.json` mirror always reflects the caller's projection.
    * Throws: write_failed
    */
   async save(opts: {
@@ -150,15 +195,32 @@ export class SessionStore {
     const jsonTmp = `${jsonPath}.tmp`;
     try {
       await mkdir(this.dir, { recursive: true });
-      await writeFile(jsonlTmp, sessionFileToJsonl(file), "utf8");
+      let log: ParsedSessionLog | null = null;
+      try {
+        log = await this.readJsonlLog(id, jsonlPath, {
+          legacyIsWriteFailed: false,
+        });
+      } catch (err) {
+        // not_found (fresh / legacy-only) | parse_failed | schema_invalid
+        // (corrupt log) → full rewrite, which also self-heals the file.
+        // io_error is a genuine write-path failure → write_failed below.
+        if ((err as { kind?: string }).kind === "io_error") throw err;
+        log = null;
+      }
+      const plan = planSessionSave(file, log);
+      await writeFile(jsonlTmp, plan.jsonl, "utf8");
       await rename(jsonlTmp, jsonlPath);
-      await writeFile(jsonTmp, JSON.stringify(file, null, 2), "utf8");
+      await writeFile(jsonTmp, JSON.stringify(plan.file, null, 2), "utf8");
       await rename(jsonTmp, jsonPath);
     } catch (err) {
+      const typed = err as { kind?: string; cause?: unknown };
       throw {
         kind: "write_failed",
         conversation_id: id,
-        cause: errMsg(err),
+        cause:
+          typed.kind === "io_error" && typeof typed.cause === "string"
+            ? typed.cause
+            : errMsg(err),
       } satisfies SessionStoreError;
     }
   }
@@ -262,6 +324,88 @@ export class SessionStore {
         cause: errMsg(err),
       } satisfies SessionStoreError;
     }
+  }
+
+  /**
+   * T5 (#622 / spec session-jsonl-resume): rewind = MOVE the persisted head
+   * pointer to an earlier turn-boundary anchor. The skipped chain STAYS in
+   * the same JSONL — the write is a header-refresh (recomputed
+   * turnCount/title, pruned + event-id-re-anchored checkpoints) plus one
+   * trailing head record; no event record is ever dropped. The `.json`
+   * compat mirror is refreshed to the rewound projection.
+   *
+   * `keepTurns` is clamped to [0, availableTurns]; a target at/above the
+   * available turns is a no-op (nothing written) and returns exactly what
+   * load() sees. The anchor always lands on a turn END, so a mid-turn tool
+   * pair can never be split (same boundary rule as the retired rewindFile
+   * truncation).
+   *
+   * JSONL-only: a legacy `.json`-only session fails with write_failed (the
+   * migration signal — the hub retries via load+save). MUST be called under
+   * the hub serialize queue (same posture as appendEvents/writeHead).
+   * Throws: not_found | write_failed | parse_failed | schema_invalid | io_error
+   */
+  async rewindToAnchor(opts: {
+    readonly id: string;
+    readonly keepTurns: number;
+  }): Promise<{ readonly file: SessionFileV1 }> {
+    const { id, keepTurns } = opts;
+    const path = this.jsonlPath(id);
+    const log = await this.readJsonlLog(id, path, {
+      legacyIsWriteFailed: true,
+    });
+    let chain: ReadonlyArray<SessionEventRecord>;
+    try {
+      chain = headChainEvents(log);
+    } catch (err) {
+      throw this.attachId(id, err);
+    }
+    const { headIndex, turnCount } = resolveRewindAnchor(
+      chain.map((e) => e.message),
+      keepTurns
+    );
+    const newHead = headIndex < 0 ? null : chain[headIndex]!.id;
+    if (newHead === log.head) {
+      // No-op target: nothing to persist; return the current projection.
+      return { file: await this.load(id) };
+    }
+    const kept = chain.slice(0, headIndex + 1);
+    const keptMessages = kept.map((e) => e.message);
+    const keptIds = kept.map((e) => e.id);
+    const { type: _type, ...meta } = log.header;
+    const file = sanitizeSessionFile({
+      ...meta,
+      messages: keptMessages,
+      turnCount,
+      title: extractTitle(keptMessages),
+      updatedAt: new Date().toISOString(),
+      checkpoints: withCheckpointAnchors(
+        (log.header.checkpoints ?? []).filter((c) => c.turnIndex < turnCount),
+        keptIds
+      ),
+    });
+    const { messages: _messages, ...fileMeta } = file;
+    const jsonl = serializeSessionLog(fileMeta, [
+      ...log.records,
+      { type: "head", id: newHead },
+    ]);
+    const jsonlTmp = `${path}.tmp`;
+    const jsonPath = this.filePath(id);
+    const jsonTmp = `${jsonPath}.tmp`;
+    const mirror = { ...file, messages: closeoutOrphanToolUses(file.messages) };
+    try {
+      await writeFile(jsonlTmp, jsonl, "utf8");
+      await rename(jsonlTmp, path);
+      await writeFile(jsonTmp, JSON.stringify(mirror, null, 2), "utf8");
+      await rename(jsonTmp, jsonPath);
+    } catch (err) {
+      throw {
+        kind: "write_failed",
+        conversation_id: id,
+        cause: errMsg(err),
+      } satisfies SessionStoreError;
+    }
+    return { file: mirror };
   }
 
   /**
@@ -475,6 +619,126 @@ export class SessionStore {
 }
 
 // -- module-level helpers ----------------------------------------------------
+
+/** T5 save plan: the JSONL text to persist + the mirror file (with derived
+ *  checkpoint anchors). */
+interface SavePlan {
+  readonly jsonl: string;
+  readonly file: SessionFileV1;
+}
+
+/**
+ * T5 (#622): append-only aware save planning. Aligns `file.messages` with
+ * the persisted head chain by longest common prefix (LCP) and picks the
+ * cheapest write that keeps every existing record:
+ *   identical      → header-refresh only;
+ *   extension      → append the tail events, parented at the current head;
+ *   strict prefix  → append only a head record (head moves backward);
+ *   fork           → append the divergent suffix parented at the LCP end.
+ * `log === null` (fresh / legacy-only / corrupt) → full rewrite. Pure.
+ */
+function planSessionSave(
+  file: SessionFileV1,
+  log: ParsedSessionLog | null
+): SavePlan {
+  if (log === null) return fullRewritePlan(file);
+  let chain: ReadonlyArray<SessionEventRecord>;
+  try {
+    chain = headChainEvents(log);
+  } catch {
+    return fullRewritePlan(file); // cycle / dangling head → self-heal
+  }
+  const messages = file.messages;
+  const limit = Math.min(messages.length, chain.length);
+  let prefixLen = 0;
+  while (
+    prefixLen < limit &&
+    jsonDeepEqual(messages[prefixLen], chain[prefixLen]!.message)
+  ) {
+    prefixLen++;
+  }
+  const records: Array<SessionEventRecord | SessionHeadRecord> = [
+    ...log.records,
+  ];
+  let finalIds: string[];
+  if (prefixLen === chain.length && messages.length === chain.length) {
+    // Identical projection: header-refresh only, no new records.
+    finalIds = chain.map((e) => e.id);
+  } else if (prefixLen === chain.length) {
+    // Extension: the head chain is a prefix of the projection.
+    const appended = buildEventRecords(
+      messages.slice(prefixLen),
+      log.maxEventIndex + 1,
+      log.head
+    );
+    records.push(...appended.events, appended.head);
+    finalIds = [...chain.map((e) => e.id), ...appended.events.map((e) => e.id)];
+  } else if (prefixLen === messages.length) {
+    // Strict prefix (reset-shaped): move the head backward, append nothing.
+    const newHead = prefixLen === 0 ? null : chain[prefixLen - 1]!.id;
+    records.push({ type: "head", id: newHead });
+    finalIds = chain.slice(0, prefixLen).map((e) => e.id);
+  } else {
+    // Fork: the projection diverges from the chain at prefixLen.
+    const parent = prefixLen === 0 ? null : chain[prefixLen - 1]!.id;
+    const appended = buildEventRecords(
+      messages.slice(prefixLen),
+      log.maxEventIndex + 1,
+      parent
+    );
+    records.push(...appended.events, appended.head);
+    finalIds = [
+      ...chain.slice(0, prefixLen).map((e) => e.id),
+      ...appended.events.map((e) => e.id),
+    ];
+  }
+  const finalFile = withDerivedAnchors(file, finalIds);
+  const { messages: _messages, ...meta } = finalFile;
+  return { jsonl: serializeSessionLog(meta, records), file: finalFile };
+}
+
+/** Full-rewrite plan (fresh session / legacy migration / corrupt-log
+ *  self-heal): the pre-T5 shape — header + one event per message + head. */
+function fullRewritePlan(file: SessionFileV1): SavePlan {
+  const ids = file.messages.map((_, i) => messageEventId(i));
+  const finalFile = withDerivedAnchors(file, ids);
+  return { jsonl: sessionFileToJsonl(finalFile), file: finalFile };
+}
+
+/** T5 (spec D3): derive checkpoint `anchorEventId`s against a chain's event
+ *  ids. Files without a checkpoints key pass through untouched (the key is
+ *  not materialized). */
+function withDerivedAnchors(
+  file: SessionFileV1,
+  eventIds: ReadonlyArray<string>
+): SessionFileV1 {
+  if (file.checkpoints === undefined) return file;
+  return {
+    ...file,
+    checkpoints: withCheckpointAnchors(file.checkpoints, eventIds),
+  };
+}
+
+/** Build chained event records + the trailing head record for an appended
+ *  tail, numbering from `startIndex` and parenting the first at `parent`. */
+function buildEventRecords(
+  messages: ReadonlyArray<AnthropicNativeMessage>,
+  startIndex: number,
+  parent: string | null
+): {
+  readonly events: SessionEventRecord[];
+  readonly head: SessionHeadRecord;
+} {
+  let next = startIndex;
+  let cur = parent;
+  const events: SessionEventRecord[] = [];
+  for (const message of messages) {
+    const id = messageEventId(next++);
+    events.push({ type: "message", id, parent: cur, message });
+    cur = id;
+  }
+  return { events, head: { type: "head", id: cur } };
+}
 
 function isEnoent(err: unknown): boolean {
   return (

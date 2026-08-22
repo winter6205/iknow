@@ -23,8 +23,11 @@
  * 盘上 maxEventIndex+1 继续编号,因此 rewind 后 fork 的新事件拿全新 id、
  * parent 指向当前 head,旧链留在文件里(T5 语义的原语底座)。
  *
- * 注意:save 从当前 head 投影重写整份 log —— fork 分支只保留到下一次 save
- * 之前(T5 会改 save 语义;T1 无 fork 生产者,writeHead 是唯一入口)。
+ * T5 (#622):save 改为 append-only 感知 —— 以盘上 head 链为基准做
+ * 最长公共前缀(LCP)对齐:投影一致 → 仅刷新 header(事件/head 记录原样
+ * 保留);投影是链的延伸 → 追加尾部事件;投影是链的严格前缀 → 只追加
+ * head 记录;分叉 → 从 LCP 边界续写新分支。任何情况下既有事件记录永不
+ * 丢弃,rewind 跳过的链因此跨 save 永留同一份文件。
  */
 import type { AnthropicNativeMessage } from "../../harness/index.js";
 import type { CheckpointRecord, GoalState, SessionFileV1 } from "./schema.js";
@@ -89,6 +92,9 @@ export interface ParsedSessionLog {
   readonly head: string | null;
   /** 事件中最大 `e<N>` 的 N;无事件为 -1(appendEvents 从 +1 继续编号)。 */
   readonly maxEventIndex: number;
+  /** T5:header 之后的全部记录(event + head),按文件序。save 的
+   *  header-refresh 重写依赖它原样保留既有记录(含历史 head 记录)。 */
+  readonly records: ReadonlyArray<SessionEventRecord | SessionHeadRecord>;
 }
 
 /**
@@ -153,6 +159,7 @@ export function parseSessionJsonl(raw: string): ParsedSessionLog {
     throw { kind: "schema_invalid", field: "root" } satisfies SessionJsonlError;
   }
   const events: SessionEventRecord[] = [];
+  const tail: Array<SessionEventRecord | SessionHeadRecord> = [];
   const ids = new Set<string>();
   let head: string | null = null;
   let headSeen = false;
@@ -177,11 +184,13 @@ export function parseSessionJsonl(raw: string): ParsedSessionLog {
       ids.add(rec.id);
       maxEventIndex = Math.max(maxEventIndex, Number(match[1]));
       events.push(rec);
+      tail.push(rec);
       continue;
     }
     if (isHeadRecord(rec)) {
       head = rec.id; // 最后一条 head record 生效
       headSeen = true;
+      tail.push(rec);
       continue;
     }
     throw { kind: "schema_invalid", field: "type" } satisfies SessionJsonlError;
@@ -192,7 +201,7 @@ export function parseSessionJsonl(raw: string): ParsedSessionLog {
   if (head !== null && !ids.has(head)) {
     throw { kind: "schema_invalid", field: "head" } satisfies SessionJsonlError;
   }
-  return { header: first, events, head, maxEventIndex };
+  return { header: first, events, head, maxEventIndex, records: tail };
 }
 
 /**
@@ -228,6 +237,90 @@ export function projectSessionLog(log: ParsedSessionLog): SessionFileV1 {
   messages.reverse();
   const { type: _type, ...meta } = log.header;
   return sanitizeSessionFile({ ...meta, messages });
+}
+
+/**
+ * T5: the current-head chain as EVENTS, root → head order (the same walk
+ * projectSessionLog does, but keeping id/parent). Fork branches / orphans
+ * are not included. Throws schema_invalid on a cycle or a dangling head,
+ * same as projectSessionLog. Pure.
+ */
+export function headChainEvents(
+  log: ParsedSessionLog
+): ReadonlyArray<SessionEventRecord> {
+  const byId = new Map(log.events.map((e) => [e.id, e]));
+  const chain: SessionEventRecord[] = [];
+  const seen = new Set<string>();
+  let cur = log.head;
+  while (cur !== null) {
+    if (seen.has(cur)) {
+      throw {
+        kind: "schema_invalid",
+        field: "events",
+      } satisfies SessionJsonlError;
+    }
+    seen.add(cur);
+    const event = byId.get(cur);
+    if (!event) {
+      throw {
+        kind: "schema_invalid",
+        field: "head",
+      } satisfies SessionJsonlError;
+    }
+    chain.push(event);
+    cur = event.parent;
+  }
+  chain.reverse();
+  return chain;
+}
+
+/**
+ * T5: serialize a header + record list back to JSONL text (one record per
+ * line, trailing newline). The header is built from SessionFileV1 metadata
+ * (spread-preserve, minus messages); records pass through verbatim — the
+ * append-only save relies on this to keep existing event/head records
+ * byte-stable across a header refresh. Pure.
+ */
+export function serializeSessionLog(
+  file: Omit<SessionFileV1, "messages">,
+  records: ReadonlyArray<SessionEventRecord | SessionHeadRecord>
+): string {
+  const lines: string[] = [JSON.stringify({ type: "session", ...file })];
+  for (const record of records) {
+    lines.push(JSON.stringify(record));
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/**
+ * T5: structural deep-equal over JSON-shaped values (message content blocks
+ * included). Used by the append-only save to align the caller's projection
+ * with the persisted head chain. Treats absent vs undefined as equal only
+ * when the key is absent in BOTH (plain JSON semantics); arrays are
+ * order-sensitive. Pure.
+ */
+export function jsonDeepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || b === null) return false;
+  if (typeof a !== "object" || typeof b !== "object") return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (!jsonDeepEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  const ao = a as Record<string, unknown>;
+  const bo = b as Record<string, unknown>;
+  const aKeys = Object.keys(ao).filter((k) => ao[k] !== undefined);
+  const bKeys = Object.keys(bo).filter((k) => bo[k] !== undefined);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const key of aKeys) {
+    if (!Object.prototype.hasOwnProperty.call(bo, key)) return false;
+    if (!jsonDeepEqual(ao[key], bo[key])) return false;
+  }
+  return true;
 }
 
 // -- record shape guards -------------------------------------------------------

@@ -30,7 +30,9 @@ import { join } from "node:path";
 import { SessionHub } from "../../src/session-api/hub.ts";
 import {
   CURRENT_SCHEMA_VERSION,
+  parseSessionJsonl,
   resolveProjectSessionDir,
+  SESSION_JSONL_EXT,
   SessionStore,
 } from "../../src/session-api/store/index.ts";
 import type { SessionFileV1 } from "../../src/session-api/store/index.ts";
@@ -248,5 +250,54 @@ describe("Q6 cross-entry consistency: shared pool, two independent SessionHub en
       (diskAfterB["updatedAt"] as string) > (diskAfterA["updatedAt"] as string),
       "hub B's save must bump updatedAt past hub A's last write"
     );
+  });
+});
+
+// -- T5 (#622) cross-entry rewind ----------------------------------------------
+
+describe("T5 (#622) cross-entry rewind: hub head-move is visible to an independent store", () => {
+  it("hub rewind → independent store load sees the same head; skipped chain stays in the same JSONL", async () => {
+    // A third hub with its own store instance + scripted deps models the
+    // rewinding entry point; storeB (independent) models the other reader.
+    const storeC = new SessionStore(baseDir, cwd);
+    const hubC = new SessionHub({
+      store: storeC,
+      deps: makeDeps([
+        assistantResult({ texts: ["cross-rw-a1"] }),
+        assistantResult({ texts: ["cross-rw-a2"] }),
+      ]),
+    });
+    const created = await hubC.createSession({ json_mode: true });
+    const id = created.session.conversation_id;
+    await hubC.postMessage({ conversationId: id, text: "cross-rw-q1" });
+    await hubC.postMessage({ conversationId: id, text: "cross-rw-q2" });
+
+    // Rewind via the hub entry (serialize queue → store.rewindToAnchor):
+    // head moves to the turn-0 anchor (e1), the file is NOT truncated.
+    const res = await hubC.rewindSession(id, 1);
+    assert.equal(res.keepTurns, 1);
+    assert.equal(res.session.turn_count, 1);
+
+    // The OTHER entry point (independent storeB) sees the same head (#120 Q6).
+    assert.equal(await storeB.readHead(id), "e1");
+    const loadedByB = await storeB.load(id);
+    assert.equal(loadedByB.turnCount, 1);
+    assert.deepEqual(
+      loadedByB.messages.map((m) => m.role),
+      ["user", "assistant"]
+    );
+
+    // The skipped chain stays in the SAME jsonl: all 4 events retained on disk.
+    const log = parseSessionJsonl(
+      await readFile(join(sessionDir, `${id}${SESSION_JSONL_EXT}`), "utf8")
+    );
+    assert.equal(log.events.length, 4);
+    assert.equal(log.head, "e1");
+
+    // Wire path agrees too (hub B getSession over the same pool).
+    const gotByB = await hubB.getSession(id);
+    assert.equal(gotByB.session.turn_count, 1);
+    assert.equal(gotByB.turns.length, 1);
+    assert.equal(gotByB.turns[0]!.query, "cross-rw-q1");
   });
 });

@@ -284,6 +284,9 @@ describe("SessionStore.load — dual-shape detection", () => {
             messagesCount: 2,
             interruptedAt: "2026-01-01T00:00:00.000Z",
             interruptReason: "timeout" as const,
+            // T5 (D3): save derives the event-id anchor from messagesCount
+            // (position 2 → e1); load round-trips it.
+            anchorEventId: "e1",
           },
         ],
       },

@@ -88,9 +88,13 @@ describe("SessionHub.postMessage maxTurns (serve entry, plan T6)", () => {
     // #620 T3 新契约(spec D4 边跑边写):maxTurns 是被中断 turn,其部分进度
     // 应在盘上 —— turn 内 commit 已把 assistant(tool_use) + tool_result
     // append 进 JSONL;throw 路径仍不调 conditionalSave。
+    // #622 T5:首次 engine commit 带上懒提交的 user query,故盘上部分进度
+    // 为 [query, assistant, tool_result] 三条。
     const after = await store.load(session.conversation_id);
-    assert.equal(after.messages.length, 2);
-    const [assistantEvt, toolResultEvt] = after.messages;
+    assert.equal(after.messages.length, 3);
+    const [queryEvt, assistantEvt, toolResultEvt] = after.messages;
+    assert.equal(queryEvt!.role, "user");
+    assert.equal(queryEvt!.content[0]!.type, "text");
     assert.equal(assistantEvt!.role, "assistant");
     assert.equal(assistantEvt!.content[0]!.type, "tool_use");
     assert.equal(toolResultEvt!.role, "user");
@@ -126,12 +130,16 @@ describe("SessionHub.postMessage maxTurns (serve entry, plan T6)", () => {
     assert.equal("stopSummary" in res.turn.answer, false);
     // #620 T3:turn 内 commit 的部分进度在盘上(assistant tool_use + 其
     // tool_result);conditionalSave 仍未运行 —— turnCount / checkpoints 不变。
+    // #622 T5:首次 engine commit 带上懒提交的 user query,故 messages[0]
+    // 是 query,assistant / tool_result 顺移。
     const after = await store.load(session.conversation_id);
-    assert.equal(after.messages.length, 2);
-    assert.equal(after.messages[0]!.role, "assistant");
-    assert.equal(after.messages[0]!.content[0]!.type, "tool_use");
-    assert.equal(after.messages[1]!.role, "user");
-    assert.equal(after.messages[1]!.content[0]!.type, "tool_result");
+    assert.equal(after.messages.length, 3);
+    assert.equal(after.messages[0]!.role, "user");
+    assert.equal(after.messages[0]!.content[0]!.type, "text");
+    assert.equal(after.messages[1]!.role, "assistant");
+    assert.equal(after.messages[1]!.content[0]!.type, "tool_use");
+    assert.equal(after.messages[2]!.role, "user");
+    assert.equal(after.messages[2]!.content[0]!.type, "tool_result");
     assert.equal(after.turnCount, 0);
     assert.deepEqual(after.checkpoints, []);
   });

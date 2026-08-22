@@ -23,7 +23,6 @@ import type {
   WireThinkingOverride,
 } from "../session-api/contract.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
-import { rewindFile } from "../session-api/store/index.js";
 import type { LoopEngineDeps } from "../harness/index.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { CompactCallerOpts } from "../session-api/contract.js";
@@ -132,8 +131,9 @@ export interface TuiBridge {
     /** plan T2:触发判据分类标识(4 选 1);T4 文案分支依据。 */
     readonly reason: CompactReason;
   }>;
-  /** 回退到更早 turn（/rewind / 双 Esc）：load → rewindFile → store.save →
-   *  返回更新文件。错误复用 SessionStore 既有 typed kinds，不新造。 */
+  /** 回退到更早 turn（/rewind / 双 Esc）：#622 T5 起委托 hub.rewindSession
+   *  （serialize 队列内移动持久化 head 指针，不截断文件），随后 store.load
+   *  取回投影返回。错误复用 SessionStore 既有 typed kinds，不新造。 */
   readonly rewindSession: (
     conversationId: string,
     keepTurns: number
@@ -262,17 +262,14 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
         ...(res.cancelled ? { cancelled: true } : {}),
       };
     },
-    // 与 compactSession 同纪律：load → rewindFile → save 直链。store.load /
-    // store.save 与 hub 的 serialize 队列共用同一 per-conversation 队列入口
-    // 无冲突面（rewind 走 store 裸 IO；hub 的 postMessage/compact 写盘走
-    // serialize 队列——load 读到的是队内已落盘的权威文件，save 由 rewindFile
-    // 纯截断产出）。错误复用既有 typed kinds（not_found / parse_failed /
-    // schema_invalid / write_failed / io_error），不新造。
+    // #622 T5: rewind 改走 hub.rewindSession —— 与 postMessage/compact 同
+    // 一条 per-conversation serialize 队列（此前绕开队列直调 store 裸 IO
+    // 的纪律随 rewindFile 截断语义一起退役）。hub 侧落点是
+    // store.rewindToAnchor：移动持久化 head 指针，不截断文件。随后
+    // store.load 取回投影（closeout 自愈后的权威视图）供 TUI 渲染。
     rewindSession: async (conversationId, keepTurns) => {
-      const file = await store.load(conversationId);
-      const rewound = rewindFile(file, keepTurns);
-      await store.save({ id: conversationId, file: rewound });
-      return rewound;
+      await hub.rewindSession(conversationId, keepTurns);
+      return store.load(conversationId);
     },
     inflight: opts.inflight,
     contextWindow: opts.contextWindow ?? DEFAULT_CONTEXT_WINDOW,

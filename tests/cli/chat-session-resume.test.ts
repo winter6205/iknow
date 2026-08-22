@@ -294,7 +294,9 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
     assert.equal(file.checkpoints?.length, 1, "completed 不 append checkpoint");
     assert.deepEqual(
       file.checkpoints?.[0],
-      seededCheckpoint,
+      // #622 T5 (spec D3): checkpoint 以 event id 为权威锚点 —— save/load
+      // 从 messagesCount=4 派生出链上第 4 个事件 e3。
+      { ...seededCheckpoint, anchorEventId: "e3" },
       "既有 checkpoints 必须保序不丢"
     );
   });
@@ -354,8 +356,11 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
     assert.equal(latest?.turnIndex, 4, "累计 turnIndex = 3 + 1 = 4");
     assert.equal(latest?.messagesCount, 8, "messagesCount cumulative");
     assert.equal(latest?.interruptReason, "cancelled");
-    // 既有 checkpoint 保序不丢。
-    assert.deepEqual(file.checkpoints?.[0], priorCheckpoint);
+    // 既有 checkpoint 保序不丢（T5: 派生 anchorEventId=e3，见上例注释）。
+    assert.deepEqual(file.checkpoints?.[0], {
+      ...priorCheckpoint,
+      anchorEventId: "e3",
+    });
   });
 
   it("not_found → seed 返空 + 锚点保留;后续 completed 写回同一 <id>.json(anchor-preserved 验收)", async () => {
@@ -499,6 +504,10 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
       1,
       "completed 重复 commit 不增长 checkpoints(既有保序)"
     );
-    assert.deepEqual(file.checkpoints?.[0], priorCheckpoint);
+    // T5: 派生 anchorEventId=e3（messagesCount=4 → 链上第 4 个事件）。
+    assert.deepEqual(file.checkpoints?.[0], {
+      ...priorCheckpoint,
+      anchorEventId: "e3",
+    });
   });
 });

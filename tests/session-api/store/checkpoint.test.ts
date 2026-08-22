@@ -29,11 +29,12 @@ import {
 } from "../../../src/session-api/store/index.ts";
 import {
   appendCheckpoint,
-  rewindFile,
+  resolveRewindAnchor,
   shouldPersistCheckpoint,
   splitTurns,
   toInterruptReason,
   turnSliceEnd,
+  withCheckpointAnchors,
 } from "../../../src/session-api/store/index.ts";
 
 // -- fixtures -----------------------------------------------------------------
@@ -465,11 +466,11 @@ describe("appendCheckpoint — appends a record to session.checkpoints", () => {
   });
 });
 
-// -- rewindFile ---------------------------------------------------------------
+// -- resolveRewindAnchor (T5: rewindFile truncation semantics retired) ---------
 
-describe("rewindFile — truncates a session to keepTurns turn boundaries", () => {
+describe("resolveRewindAnchor — head-move target for a keepTurns rewind", () => {
   // 正常路径
-  it("truncates messages to keepTurns turn boundaries and recomputes turnCount", () => {
+  it("resolves the anchor to the last message index of the kept turns", () => {
     const messages = [
       userMsg("q1"),
       assistantMsg([text("a1")]),
@@ -478,64 +479,14 @@ describe("rewindFile — truncates a session to keepTurns turn boundaries", () =
       userMsg("q3"),
       assistantMsg([text("a3")]),
     ];
-    const session = {
-      ...baseFile(),
-      messages,
-      turnCount: 3,
-      updatedAt: ISO,
-    };
-    const out = rewindFile(session, 2);
-    assert.equal(out.messages.length, 4);
+    const out = resolveRewindAnchor(messages, 2);
+    assert.equal(out.headIndex, 3); // turns 0..1 kept → end of turn 1
     assert.equal(out.turnCount, 2);
-    // Truncation kept turns 0..1 inclusive.
-    assert.equal(out.messages[0]?.content[0]?.type, "text");
-    assert.equal((out.messages[0]!.content[0] as { text: string }).text, "q1");
   });
 
-  it("prunes checkpoints whose turnIndex >= keepTurns", () => {
-    const ckpts: CheckpointRecord[] = [
-      {
-        turnIndex: 1,
-        messagesCount: 2,
-        interruptedAt: "t1",
-        interruptReason: "cancelled",
-      },
-      {
-        turnIndex: 2,
-        messagesCount: 4,
-        interruptedAt: "t2",
-        interruptReason: "cancelled",
-      },
-      {
-        turnIndex: 3,
-        messagesCount: 6,
-        interruptedAt: "t3",
-        interruptReason: "timeout",
-      },
-    ];
-    const messages = [
-      userMsg("q1"),
-      assistantMsg([text("a1")]),
-      userMsg("q2"),
-      assistantMsg([text("a2")]),
-      userMsg("q3"),
-      assistantMsg([text("a3")]),
-    ];
-    const session = {
-      ...baseFile(),
-      messages,
-      turnCount: 3,
-      updatedAt: ISO,
-      checkpoints: ckpts,
-    };
-    const out = rewindFile(session, 2);
-    assert.equal(out.checkpoints?.length, 1);
-    assert.equal(out.checkpoints?.[0]?.turnIndex, 1);
-  });
-
-  it("preserves tool pairing inside the kept turns (boundary at turn start)", () => {
-    // [user(q1), assistant(tool_use t1), user(tool_result t1), assistant(text), user(q2)]
-    // Two turns. Rewinding to 1 keeps the entire first turn including the pair.
+  it("keeps tool pairing inside the kept turns (boundary at turn start)", () => {
+    // [user(q1), assistant(tool_use t1), user(tool_result t1), assistant(text), user(q2), ...]
+    // Rewinding to 1 turn keeps the entire first turn including the pair.
     const messages = [
       userMsg("q1"),
       assistantMsg([toolUse("t1", "noop", {})]),
@@ -544,92 +495,95 @@ describe("rewindFile — truncates a session to keepTurns turn boundaries", () =
       userMsg("q2"),
       assistantMsg([text("a2")]),
     ];
-    const session = {
-      ...baseFile(),
-      messages,
-      turnCount: 2,
-      updatedAt: ISO,
-    };
-    const out = rewindFile(session, 1);
-    assert.equal(out.messages.length, 4);
-    // tool_use stays paired with its tool_result.
-    assert.equal(
-      (out.messages[1]!.content[0] as { type: string }).type,
-      "tool_use"
-    );
-    assert.equal(
-      (out.messages[2]!.content[0] as { type: string }).type,
-      "tool_result"
-    );
+    const out = resolveRewindAnchor(messages, 1);
+    assert.equal(out.headIndex, 3);
+    assert.equal(out.turnCount, 1);
   });
 
   // 边界 — keepTurns >= available turns
-  it("keepTurns >= total turns → no-op (returns equivalent messages)", () => {
+  it("keepTurns >= total turns → anchor = last message (no-op head)", () => {
     const messages = [
       userMsg("q1"),
       assistantMsg([text("a1")]),
       userMsg("q2"),
       assistantMsg([text("a2")]),
     ];
-    const session = {
-      ...baseFile(),
-      messages,
-      turnCount: 2,
-      updatedAt: ISO,
-    };
-    const out = rewindFile(session, 5);
-    assert.equal(out.messages.length, 4);
+    const out = resolveRewindAnchor(messages, 5);
+    assert.equal(out.headIndex, 3);
     assert.equal(out.turnCount, 2);
   });
 
-  it("keepTurns = 0 → empty messages, empty checkpoints", () => {
+  it("keepTurns = 0 → headIndex -1 (empty transcript head)", () => {
     const messages = [userMsg("q1"), assistantMsg([text("a1")])];
-    const session = {
-      ...baseFile(),
-      messages,
-      turnCount: 1,
-      checkpoints: [
-        {
-          turnIndex: 1,
-          messagesCount: 2,
-          interruptedAt: ISO,
-          interruptReason: "cancelled",
-        },
-      ],
-    };
-    const out = rewindFile(session, 0);
-    assert.equal(out.messages.length, 0);
+    const out = resolveRewindAnchor(messages, 0);
+    assert.equal(out.headIndex, -1);
     assert.equal(out.turnCount, 0);
-    assert.equal(out.checkpoints?.length ?? 0, 0);
-  });
-
-  it("recomputes title from the truncated message prefix", () => {
-    // Truncating a 3-turn session to 1 turn leaves the first user text intact.
-    const messages = [
-      userMsg("first"),
-      assistantMsg([text("a1")]),
-      userMsg("second"),
-      assistantMsg([text("a2")]),
-      userMsg("third"),
-      assistantMsg([text("a3")]),
-    ];
-    const session = {
-      ...baseFile(),
-      messages,
-      turnCount: 3,
-      title: "stale",
-      updatedAt: ISO,
-    };
-    const out = rewindFile(session, 1);
-    assert.equal(out.title, "first");
   });
 
   // 空/非法输入 — empty session
-  it("empty session + keepTurns > 0 → no-op", () => {
-    const session = { ...baseFile(), updatedAt: ISO };
-    const out = rewindFile(session, 3);
-    assert.equal(out.messages.length, 0);
+  it("empty session + keepTurns > 0 → headIndex -1, turnCount 0", () => {
+    const out = resolveRewindAnchor([], 3);
+    assert.equal(out.headIndex, -1);
     assert.equal(out.turnCount, 0);
+  });
+
+  it("negative keepTurns clamps to 0", () => {
+    const messages = [userMsg("q1"), assistantMsg([text("a1")])];
+    const out = resolveRewindAnchor(messages, -2);
+    assert.equal(out.headIndex, -1);
+    assert.equal(out.turnCount, 0);
+  });
+});
+
+// -- withCheckpointAnchors (T5 D3: anchor by event id) -------------------------
+
+describe("withCheckpointAnchors — derives anchorEventId from messagesCount", () => {
+  const ckpt = (
+    overrides: Partial<CheckpointRecord> &
+      Pick<CheckpointRecord, "messagesCount">
+  ): CheckpointRecord => ({
+    turnIndex: 0,
+    interruptedAt: ISO,
+    interruptReason: "cancelled",
+    ...overrides,
+  });
+  const ids = ["e0", "e1", "e2", "e3"];
+
+  it("resolves anchorEventId = eventIds[messagesCount - 1]", () => {
+    const out = withCheckpointAnchors([ckpt({ messagesCount: 2 })], ids);
+    assert.equal(out[0]?.anchorEventId, "e1");
+  });
+
+  it("re-derives a stale anchorEventId against the current chain (self-healing)", () => {
+    const out = withCheckpointAnchors(
+      [ckpt({ messagesCount: 3, anchorEventId: "e99" })],
+      ids
+    );
+    assert.equal(out[0]?.anchorEventId, "e2");
+  });
+
+  it("keeps an already-correct anchorEventId untouched (same reference)", () => {
+    const input = ckpt({ messagesCount: 2, anchorEventId: "e1" });
+    const out = withCheckpointAnchors([input], ids);
+    assert.equal(out[0], input);
+  });
+
+  it("messagesCount beyond the chain → record kept, existing anchor preserved", () => {
+    const withAnchor = ckpt({ messagesCount: 99, anchorEventId: "e7" });
+    const out = withCheckpointAnchors([withAnchor], ids);
+    assert.equal(out[0]?.anchorEventId, "e7");
+    const without = ckpt({ messagesCount: 99 });
+    const out2 = withCheckpointAnchors([without], ids);
+    assert.equal(out2[0]?.anchorEventId, undefined);
+  });
+
+  it("messagesCount = 0 → unresolvable, record kept as-is", () => {
+    const out = withCheckpointAnchors([ckpt({ messagesCount: 0 })], ids);
+    assert.equal(out[0]?.anchorEventId, undefined);
+  });
+
+  it("empty checkpoints → empty output", () => {
+    assert.deepEqual(withCheckpointAnchors([], ids), []);
   });
 });
 
