@@ -27,8 +27,9 @@
  *    第一行无谓下推造成的间距抖动）；MessageBlocks 内部根 box 不再产 marginTop。
  *    userBg/assistantBg 底色块由 MessageBlocks 内部实现（paddingX={1} 水平缩进
  *    + paddingY=0 底色贴内容）。
- *  - tail（liveToolRuns + legacy liveToolLines + askLine + 流式 thinking / draft
- *    面板 + spinner）。
+ *  - tail（流式 thinking / draft 面板 + liveToolRuns + legacy liveToolLines
+ *    + askLine + spinner）。live 工具必须排在草稿之后，否则 write 预览会
+ *    插到正在生成的回复前面。
  *
  * 工具输出展开位置的区分（T3，plans/tui-render-optimization.md）：
  *  - **历史消息里的 preview**：`MessageBlocks.ToolPreviewRows` 已改为内嵌
@@ -75,6 +76,12 @@ import { tuiPalette } from "./theme.js";
 import { toolResultStatusMap } from "./tool-summary.js";
 import { formatCrunched } from "./run-stats.js";
 import { formatThinkingFold, formatThinkingLive } from "./think-fold.js";
+import {
+  countToolUsesByName,
+  formatTurnActivityFold,
+  lastTurnQueryIndex,
+  sliceTurnFrom,
+} from "./turn-activity.js";
 
 export interface ChatViewHandle {
   /**
@@ -167,6 +174,20 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     const liveToolRuns = props.liveToolRuns ?? [];
     const bannerLines = props.bannerLines ?? [];
     const pal = tuiPalette;
+    const visibleMessages = props.session.messages.filter(
+      (message) => !isTuiHiddenUserMessage(message)
+    );
+    const lastQueryVisible = lastTurnQueryIndex(visibleMessages);
+    const turnToolCounts = running
+      ? []
+      : countToolUsesByName(sliceTurnFrom(visibleMessages, lastQueryVisible));
+    const turnToolTotal = turnToolCounts.reduce((n, e) => n + e.count, 0);
+    const showTurnFold =
+      !running && ((props.lastThinkingSeconds ?? 0) > 0 || turnToolTotal > 1);
+    const foldDisplayLine = showTurnFold
+      ? formatTurnActivityFold(props.lastThinkingSeconds, turnToolCounts)
+      : "";
+    const collapseToolRows = !running && turnToolTotal > 1;
     // e2 黄昏魔法石渐变（与 scripts/banner-gradient-preview/exotic-e2.ts 一致）：
     // 13×32 逐 cell 上色，对角线 t = cWeight·(c/31) + rWeight·(r/12)。
     const eyeGradient = eyeGradientCells({
@@ -232,30 +253,37 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         {/* 消息渲染：每条 message → MessageBlocks。
             消息间 1 行节奏由 wrapper marginTop 提供；首条 (i===0) 不带顶部
             margin，避免进入会话时第一行无谓下推造成间距抖动。 */}
-        {props.session.messages
-          .filter((message) => !isTuiHiddenUserMessage(message))
-          .map((message, i, visible) => {
-            // 末条 assistant 消息携带 lastThinkingSeconds → 其 thinking 折叠行显示
-            // 「思考了 N 秒」留存（turn 结束后的秒数接棒）。仅末条 assistant 带：
-            // lastThinkingSeconds 对应刚结束的 turn，历史消息的秒数不适用。
-            const isLastAssistant =
-              i === visible.length - 1 && message.role === "assistant";
-            return (
-              <box key={i} width={contentWidth} marginTop={i === 0 ? 0 : 1}>
-                <MessageBlocks
-                  message={message}
-                  cols={contentWidth}
-                  statusMap={statusMap}
-                  thinkingExpanded={thinkingExpanded}
-                  thinkingSeconds={
-                    isLastAssistant && (props.lastThinkingSeconds ?? 0) > 0
-                      ? props.lastThinkingSeconds
-                      : undefined
-                  }
-                />
-              </box>
-            );
-          })}
+        {visibleMessages.map((message, i, visible) => {
+          // 末条 assistant 消息携带 lastThinkingSeconds → 其 thinking 折叠行显示
+          // 「思考了 N 秒」留存（turn 结束后的秒数接棒）。仅末条 assistant 带：
+          // lastThinkingSeconds 对应刚结束的 turn，历史消息的秒数不适用。
+          const isLastAssistant =
+            i === visible.length - 1 && message.role === "assistant";
+          const inLastTurn = lastQueryVisible >= 0 && i > lastQueryVisible;
+          const foldLastTurn = inLastTurn && foldDisplayLine !== "";
+          return (
+            <box key={i} width={contentWidth} marginTop={i === 0 ? 0 : 1}>
+              <MessageBlocks
+                message={message}
+                cols={contentWidth}
+                statusMap={statusMap}
+                thinkingExpanded={thinkingExpanded}
+                thinkingSeconds={
+                  isLastAssistant && (props.lastThinkingSeconds ?? 0) > 0
+                    ? props.lastThinkingSeconds
+                    : undefined
+                }
+                hideThinking={foldLastTurn && !thinkingExpanded}
+                hideToolSummaries={inLastTurn && collapseToolRows}
+              />
+              {i === lastQueryVisible && foldDisplayLine !== "" && (
+                <text fg={pal.dim} wrapMode="none">
+                  {foldDisplayLine}
+                </text>
+              )}
+            </box>
+          );
+        })}
         {/* crunched 留存行：消息流末尾（末条消息之后、live tail 之前）。
             最近一次完成 turn 的运行时长（app 层 finally 快照传
             crunchedSeconds）；>0 才渲染（sub-second 回合不显 `0s`），
@@ -263,22 +291,6 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         {(props.crunchedSeconds ?? 0) > 0 && (
           <text fg={pal.dim} wrapMode="none">
             {formatCrunched(props.crunchedSeconds ?? 0)}
-          </text>
-        )}
-        {/* tail：liveToolRuns（结构化）+ liveToolLines（向后兼容）。 */}
-        {(liveToolRuns.length > 0 || props.liveToolLines.length > 0) && (
-          <box flexDirection="column" width={contentWidth}>
-            {liveToolRuns.map((run) => liveToolPreviewBox(run, contentWidth))}
-            {props.liveToolLines.map((line, i) => (
-              <text key={`legacy-${i}`} fg={pal.dim} wrapMode="none">
-                {line === "" ? " " : line}
-              </text>
-            ))}
-          </box>
-        )}
-        {props.askLine !== undefined && (
-          <text fg={pal.running} wrapMode="word" width={contentWidth}>
-            {props.askLine}
           </text>
         )}
         {/* 流式 thinking 面板：折叠态 = 1 行 静态 `思考中…` / 思考已结束 →
@@ -305,11 +317,29 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             )}
           </box>
         )}
-        {/* 流式 draft 面板（assistant 草稿）。 */}
+        {/* 流式 draft 面板（assistant 草稿）。须在 live 工具之前：同一轮
+            先出回复草稿、后出 write 预览；工具插在草稿前面会在结束后才
+            被历史 MessageBlocks 按 content 顺序纠正。 */}
         {running && deferredDrafts.length > 0 && (
           <box width={contentWidth}>
             <Markdown text={deferredDrafts} width={contentWidth} />
           </box>
+        )}
+        {/* tail：liveToolRuns（结构化）+ liveToolLines（向后兼容）。 */}
+        {(liveToolRuns.length > 0 || props.liveToolLines.length > 0) && (
+          <box flexDirection="column" width={contentWidth}>
+            {liveToolRuns.map((run) => liveToolPreviewBox(run, contentWidth))}
+            {props.liveToolLines.map((line, i) => (
+              <text key={`legacy-${i}`} fg={pal.dim} wrapMode="none">
+                {line === "" ? " " : line}
+              </text>
+            ))}
+          </box>
+        )}
+        {props.askLine !== undefined && (
+          <text fg={pal.running} wrapMode="word" width={contentWidth}>
+            {props.askLine}
+          </text>
         )}
         {running && <Spinner />}
       </scrollbox>
