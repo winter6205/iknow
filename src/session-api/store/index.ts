@@ -29,6 +29,7 @@ export {
   turnSliceEnd,
   type TurnSlice,
 } from "./checkpoint.js";
+export { closeoutOrphanToolUses } from "./closeout-projection.js";
 export {
   messageEventId,
   parseSessionJsonl,

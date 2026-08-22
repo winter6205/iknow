@@ -38,6 +38,7 @@ import type {
   AnthropicNativeMessage,
 } from "../../harness/index.js";
 import type { SessionStoreError } from "./errors.js";
+import { closeoutOrphanToolUses } from "./closeout-projection.js";
 import type { ParsedSessionLog } from "./jsonl.js";
 import {
   messageEventId,
@@ -92,6 +93,9 @@ export class SessionStore {
    * Load and validate a session file.
    * Detection by extension: `<id>.jsonl` (JSONL authority, projected to the
    * current-head transcript) wins; otherwise legacy `<id>.json`.
+   * The JSONL projection backfills synthetic tool_result(s) for orphan
+   * tool_use(s) — process closeout, #621 T4 — so consumers never receive an
+   * API-illegal transcript.
    * Throws: not_found | parse_failed | schema_invalid | io_error
    */
   async load(id: string): Promise<SessionFileV1> {
@@ -104,7 +108,8 @@ export class SessionStore {
         throw this.attachId(id, err);
       }
       try {
-        return projectSessionLog(log);
+        const file = projectSessionLog(log);
+        return { ...file, messages: closeoutOrphanToolUses(file.messages) };
       } catch (err) {
         throw this.attachId(id, err);
       }
