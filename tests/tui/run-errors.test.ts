@@ -49,8 +49,9 @@ test("E2：非法 renderer（构造成功但不可用）→ 类型化 stderr + �
 });
 
 test("无 TTY 且无注入工厂 → 类型化 stderr + 退出码 1（测试环境不挂起）", async () => {
-  // bun test 非 TTY：缺省工厂 createCliRenderer 会失败，走同一 catch 路径。
-  // 本用例同时保证 runTui 在无交互环境不挂起。
+  // bun test 非 TTY：runTui 入口 fail-fast 守卫拦截（不进 catch，不创建
+  // 渲染器）。新版 OpenTUI 非 TTY 下能成功建 renderer，无守卫会挂死在
+  // whenDestroyed —— 本用例同时保证 runTui 在无交互环境不挂起。
   stderrSpy = spyOn(process.stderr, "write");
   const code = await runTui({});
   expect(code).toBe(1);

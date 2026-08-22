@@ -24,6 +24,7 @@ import {
   resolveProjectSessionDir,
   SessionStore,
 } from "../../src/session-api/store/session-store.js";
+import { CURRENT_SCHEMA_VERSION } from "../../src/session-api/store/schema.js";
 import { SessionHub } from "../../src/session-api/hub.js";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
@@ -74,7 +75,9 @@ describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 hub 共享池", () => {
       title: string;
       cwd: string;
     };
-    expect(raw.schemaVersion).toBe(2);
+    // schemaVersion 不断言硬编码数字（曾写死 2，schema 演进到 5 后腐烂）——
+    // 与 SSOT 常量对齐，演进时自动跟随。
+    expect(raw.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
     expect(raw.turnCount).toBe(2);
     expect(raw.title).toBe("第一个问题");
     expect(raw.cwd).toBe(cwd);
