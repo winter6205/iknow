@@ -28,6 +28,7 @@ OpenTUI `ScrollBoxRenderable.viewportCulling` 不能当性能方案：它跳过 
 5. **Live tail 不进虚拟化集合。** 流式 thinking / draft / liveTool / askLine / spinner / crunched 行始终挂在消息列表之后（#590/#591 顺序不变）。
 6. **Sticky 不变。** `<scrollbox stickyScroll stickyStart="bottom">`：追加贴底；用户上滚停止跟随；滚回底部恢复。`ChatViewHandle.scrollToBottom()` 仍在。
 7. **没有「揭示更早一页」。** 删除 `revealOlder` / PgUp 翻页 / `↑ N 条更早的消息` stub。上翻 = 普通滚动。
+8. **跟随官方滚动事件。** ChatView 通过 `verticalScrollBar.on("change")` 同步视口窗口。禁止劫持 `scrollTop` setter，禁止 rAF 轮询（sticky 生效前会读到 0）。
 
 ## Never do
 
@@ -36,6 +37,7 @@ OpenTUI `ScrollBoxRenderable.viewportCulling` 不能当性能方案：它跳过 
 - 为让长会话测试通过而把「看不到最早消息」写成合格断言。
 - 改 Web `MessageList`、session-api、compact。
 - 把 banner `cols < 80` 短横幅降级塞进本 spec（独立缺陷）。
+- 用 `Object.defineProperty` 补丁或 rAF 轮询跟踪 `scrollTop`。
 
 ## EXIT
 

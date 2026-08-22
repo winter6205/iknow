@@ -3,10 +3,13 @@
  *
  * ChatView 视口挂载纯函数：决定哪一段 messages 进 OpenTUI 树。
  * 高度来自调用方传入的实测/占位，本模块不估算 markdown 行数。
+ * 同时测 `listenScrollBoxTop`：订阅 OpenTUI `verticalScrollBar` `change`。
  */
+import { EventEmitter } from "node:events";
 import { describe, expect, test } from "bun:test";
 import {
   VIEWPORT_PLACEHOLDER_HEIGHT,
+  listenScrollBoxTop,
   selectViewportMountWindow,
 } from "../../src/tui/transcript-viewport.js";
 
@@ -149,6 +152,74 @@ describe("selectViewportMountWindow", () => {
     expect(w.mounted.length).toBeLessThan(80);
     expect(w.spacerAfter).toBe(
       (80 - w.mounted.length) * VIEWPORT_PLACEHOLDER_HEIGHT
+    );
+  });
+});
+
+function fakeScrollSource(scrollTop: number): {
+  scrollTop: number;
+  verticalScrollBar: EventEmitter;
+} {
+  return { scrollTop, verticalScrollBar: new EventEmitter() };
+}
+
+describe("listenScrollBoxTop", () => {
+  test("empty: payload 无 position 时回读 source.scrollTop", () => {
+    const source = fakeScrollSource(7);
+    const seen: number[] = [];
+    const stop = listenScrollBoxTop(source, (position) => {
+      seen.push(position);
+    });
+    source.verticalScrollBar.emit("change", {});
+    expect(seen).toEqual([7]);
+    stop();
+  });
+
+  test("negative: NaN position 回读 source.scrollTop，0 仍转发", () => {
+    const source = fakeScrollSource(9);
+    const seen: number[] = [];
+    const stop = listenScrollBoxTop(source, (position) => {
+      seen.push(position);
+    });
+    source.verticalScrollBar.emit("change", { position: Number.NaN });
+    source.verticalScrollBar.emit("change", { position: 0 });
+    expect(seen).toEqual([9, 0]);
+    stop();
+  });
+
+  test("overflow: 极大 position 原样转发（clamp 留给窗口函数）", () => {
+    const source = fakeScrollSource(1);
+    const seen: number[] = [];
+    const stop = listenScrollBoxTop(source, (position) => {
+      seen.push(position);
+    });
+    source.verticalScrollBar.emit("change", {
+      position: Number.MAX_SAFE_INTEGER,
+    });
+    expect(seen).toEqual([Number.MAX_SAFE_INTEGER]);
+    stop();
+  });
+
+  test("concurrent: 连续 change 都送达，off 后不再回调", () => {
+    const source = fakeScrollSource(3);
+    const seen: number[] = [];
+    const stop = listenScrollBoxTop(source, (position) => {
+      seen.push(position);
+    });
+    source.verticalScrollBar.emit("change", { position: 12 });
+    source.verticalScrollBar.emit("change", { position: 18 });
+    expect(seen).toEqual([12, 18]);
+    stop();
+    source.verticalScrollBar.emit("change", { position: 20 });
+    expect(seen).toEqual([12, 18]);
+  });
+
+  test("exception: source / bar 非法抛 TypeError", () => {
+    expect(() => listenScrollBoxTop(null as never, () => undefined)).toThrow(
+      TypeError
+    );
+    expect(() => listenScrollBoxTop({} as never, () => undefined)).toThrow(
+      TypeError
     );
   });
 });

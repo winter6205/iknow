@@ -24,6 +24,8 @@
  *    `session.messages`；OpenTUI 树只挂视口+overscan 内的消息，spacer 撑住
  *    `scrollHeight`。禁止固定条数尾窗 / 行账。Live tail 不进虚拟化集合。
  *    方案 B banner 仍是滚动区首段（可随上翻回到眼睛）。
+ *    视口窗口的 scrollTop 来自 `verticalScrollBar` 的 `change` 事件
+ *    （赋值 scrollTop 会间接 emit）；禁止 patch setter / rAF 轮询。
  *  - 每条 **已 mount** 消息 → `MessageBlocks`（user → ❯ accent / assistant
  *    → Markdown + thinking 折叠 + tool_use 摘要 + statusMap 状态染色）。
  *    **T7 消息间距 + 底色**：消息间 1 行节奏由本文件 wrapper
@@ -82,7 +84,10 @@ import { tuiPalette } from "./theme.js";
 import { toolResultStatusMap } from "./tool-summary.js";
 import { formatCrunched } from "./run-stats.js";
 import { formatThinkingFold, formatThinkingLive } from "./think-fold.js";
-import { selectViewportMountWindow } from "./transcript-viewport.js";
+import {
+  listenScrollBoxTop,
+  selectViewportMountWindow,
+} from "./transcript-viewport.js";
 import {
   countToolUsesByName,
   formatTurnActivityFold,
@@ -164,25 +169,11 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     useLayoutEffect(() => {
       const sb = sbRef.current;
       if (sb === null) return; // EXIT: unmounted scrollbox
-      // OpenTUI 滚轮/赋值走 scrollTop setter；补丁让视口窗口跟着滚动走，
-      // 避免 rAF 在 sticky 生效前读到 0 把窗口抽到顶部。
-      const proto = Object.getPrototypeOf(sb) as ScrollBoxRenderable;
-      const desc = Object.getOwnPropertyDescriptor(proto, "scrollTop");
-      if (desc?.get === undefined || desc.set === undefined) {
-        setScrollTop(sb.scrollTop); // EXIT: no accessor → one snapshot, no live tracking
-        return;
-      }
-      Object.defineProperty(sb, "scrollTop", {
-        configurable: true,
-        get: () => desc.get!.call(sb) as number,
-        set: (value: number) => {
-          desc.set!.call(sb, value);
-          setScrollTop((prev) => (prev === value ? prev : value));
-        },
+      // Official OpenTUI path: slider change → scrollbar `change` { position }.
+      // Do not patch scrollTop (Feature Envy) or rAF-poll (sticky still 0).
+      return listenScrollBoxTop(sb, (next) => {
+        setScrollTop((prev) => (prev === next ? prev : next));
       });
-      return () => {
-        Object.defineProperty(sb, "scrollTop", desc);
-      };
     }, []);
     useImperativeHandle(ref, () => ({
       scrollToBottom() {

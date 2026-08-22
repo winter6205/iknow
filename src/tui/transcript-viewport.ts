@@ -166,3 +166,57 @@ export function selectViewportMountWindow<T>(
     spacerAfter: sumRange(heights, endIndex, n),
   };
 }
+
+/** OpenTUI ScrollBox 滚动位置；只需 on/off + 回读 scrollTop。 */
+export interface ScrollTopSource {
+  readonly scrollTop: number;
+  readonly verticalScrollBar: {
+    on(
+      event: "change",
+      listener: (evt: { position?: number }) => void
+    ): unknown;
+    off(
+      event: "change",
+      listener: (evt: { position?: number }) => void
+    ): unknown;
+  };
+}
+
+/**
+ * Subscribe to OpenTUI `verticalScrollBar` `change` (the documented path).
+ * Assigning `scrollTop` updates the slider, which emits this event.
+ * Do not patch the setter or poll with rAF (sticky can still read 0).
+ */
+export function listenScrollBoxTop(
+  source: ScrollTopSource,
+  onPosition: (position: number) => void
+): () => void {
+  if (source == null || typeof source !== "object") {
+    throw new TypeError("listenScrollBoxTop: source must be an object");
+  }
+  const bar = source.verticalScrollBar;
+  if (
+    bar == null ||
+    typeof bar.on !== "function" ||
+    typeof bar.off !== "function"
+  ) {
+    throw new TypeError(
+      "listenScrollBoxTop: verticalScrollBar must support on/off"
+    );
+  }
+  if (typeof onPosition !== "function") {
+    throw new TypeError("listenScrollBoxTop: onPosition must be a function");
+  }
+  const handler = (evt: { position?: number } | undefined): void => {
+    const fromEvt = evt?.position;
+    if (!Number.isFinite(fromEvt)) {
+      onPosition(source.scrollTop); // EXIT: missing|NaN|Infinity position → source.scrollTop
+      return;
+    }
+    onPosition(fromEvt as number);
+  };
+  bar.on("change", handler);
+  return () => {
+    bar.off("change", handler);
+  };
+}
