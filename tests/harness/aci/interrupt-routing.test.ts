@@ -164,6 +164,7 @@ describe("SC17 — TIMEOUT_TIER_MS constants", () => {
     assert.equal(TIMEOUT_TIER_MS.default, 30_000);
     assert.equal(TIMEOUT_TIER_MS.build, 300_000);
     assert.equal(TIMEOUT_TIER_MS.long, 1_800_000);
+    assert.equal(TIMEOUT_TIER_MS.unbounded, 0);
     assert.equal(Object.isFrozen(TIMEOUT_TIER_MS), true);
   });
 });

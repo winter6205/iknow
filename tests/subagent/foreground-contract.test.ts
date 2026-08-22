@@ -22,6 +22,7 @@ import {
   createSubAgentManager,
   SubAgentCapacityError,
   SubAgentAbortError,
+  SubAgentWaitTimeoutError,
   PER_TASK_TIMEOUT_MS,
 } from "../../src/harness/subagent/manager.ts";
 import type {
@@ -296,6 +297,23 @@ describe("C5: wait:true 失败 envelope 作 ok 返回; abort → execution_faile
       caught = err;
     }
     expect(caught).toBeInstanceOf(ToolExecutionError);
+  });
+
+  it("wait:true + WaitTimeoutError + queryBuffer running → timeout envelope 作 ok", async () => {
+    const fakeManager = baseManager({
+      spawn: () => ({ taskId: "tid" }),
+      queryBuffer: () => ({ status: "running" }) as const,
+      waitFor: async () => {
+        throw new SubAgentWaitTimeoutError();
+      },
+    });
+    const tool = createSpawnSubAgentTool({ manager: fakeManager });
+    const out = (await tool.handler({
+      task: "t",
+      wait: true,
+    })) as SubAgentEnvelope;
+    expect(out.status).toBe("failed");
+    expect(out.reason).toBe("timeout");
   });
 });
 

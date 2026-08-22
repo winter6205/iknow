@@ -13,7 +13,7 @@
  *   8. model 字符串透传
  *   9. maxTurns 整数透传
  *  10. wait:false → waitFor 不被调用
- *  11. aci 元数据（timeoutTier=long，前景臂 ≥ PER_TASK_TIMEOUT_MS）
+ *  11. aci 元数据（timeoutTier=unbounded，ACI 不抢 manager per-task 钟）
  *  12. #556 T3: subagent_type 可选参数 → def.role 透传（缺省 = V1 byte-stable）
  *  13. #556 T3: inputSchema.subagent_type enum = catalog ids（运行时派生）
  *  14. #556 T3: description 含 prose list（catalog entries）
@@ -28,7 +28,16 @@ import addFormats from "ajv-formats";
 
 import { createSpawnSubAgentTool } from "../../src/harness/subagent/spawn-subagent-tool.ts";
 import type { SubAgentDefinition } from "../../src/harness/subagent/manager.ts";
-import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
+import type {
+  QueryBufferResult,
+  SubAgentManager,
+} from "../../src/harness/subagent/manager.ts";
+import {
+  PER_TASK_TIMEOUT_MS,
+  SubAgentAbortError,
+  SubAgentWaitTimeoutError,
+} from "../../src/harness/subagent/manager.ts";
+import { TIMEOUT_TIER_MS } from "../../src/harness/aci/types.ts";
 import { ToolExecutionError } from "../../src/harness/errors.ts";
 import {
   resolveAgentCatalog,
@@ -260,9 +269,11 @@ describe("spawn_subagent — AciToolDef 元数据", () => {
     const tool = createSpawnSubAgentTool({ manager });
     expect(tool.name).toBe("spawn_subagent");
     expect(tool.aci.category).toBe("read-only");
-    // #361 前景臂：wait:true 阻塞至子代理终态（≤5min），tier 必须 ≥
-    // PER_TASK_TIMEOUT_MS（fast 5s 会提前砍前景）。
-    expect(tool.aci.timeoutTier).toBe("long");
+    // 前景臂寿命归 manager per-task 钟；ACI unbounded=0 不套 long(30min)
+    // 提前 abort（long < PER_TASK_TIMEOUT_MS 会砍真任务）。
+    expect(tool.aci.timeoutTier).toBe("unbounded");
+    expect(TIMEOUT_TIER_MS[tool.aci.timeoutTier]).toBe(0);
+    expect(TIMEOUT_TIER_MS.long).toBeLessThan(PER_TASK_TIMEOUT_MS);
     expect(tool.aci.interruptBehavior).toBe("cancel");
     expect(tool.aci.isConcurrencySafe).toBe(true);
     expect(tool.aci.lazy).toBe(false);
@@ -279,6 +290,15 @@ describe("spawn_subagent — AciToolDef 元数据", () => {
     expect(schema.required).toEqual(["task"]);
     expect(schema.additionalProperties).toBe(false);
     expect(Object.isFrozen(tool)).toBe(true);
+    expect(schema.properties.timeoutMs).toBeDefined();
+    expect(schema.properties.timeoutMs.type).toBe("integer");
+    const timeoutDesc = (
+      tool.inputSchema as {
+        properties: Record<string, { description?: string }>;
+      }
+    ).properties.timeoutMs.description;
+    expect(timeoutDesc).not.toMatch(/5\s*min/i);
+    expect(timeoutDesc).toMatch(/2\s*h/i);
   });
 
   it("#357 T1: inputSchema 含 sandboxRoot 字段(string,可选)", () => {
@@ -337,11 +357,12 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
     expect(description).toMatch(/multi-step exploration/);
     expect(description).toMatch(/independent verification/);
     expect(description).toMatch(/parallelizable work/);
-    // 2. 默认阻塞：wait:true → blocks until sub-agent finishes, returns full envelope; 5 min default overridable via timeoutMs
+    // 2. 默认阻塞：wait:true → blocks until sub-agent finishes；缺省墙钟 = 2h（PER_TASK），可 timeoutMs 覆盖。禁止再写 5 min（会诱导模型传 300000）。
     expect(description).toMatch(/wait[:\s]*true/i);
     expect(description).toMatch(/blocks? until/i);
     expect(description).toMatch(/envelope/i);
-    expect(description).toMatch(/5\s*min/i);
+    expect(description).not.toMatch(/5\s*min/i);
+    expect(description).toMatch(/2\s*h(?:ours?)?/i);
     expect(description).toMatch(/timeoutMs/i);
     // 3. 并行：同一 turn 多次 spawn_subagent 跑独立任务
     expect(description).toMatch(/multiple.*spawn_subagent/s);
@@ -733,5 +754,101 @@ describe("spawn_subagent description — #556 T3 prose list 段 (catalog entries
     const proseIdx = description.indexOf("Available subagent types");
     expect(introIdx).toBeGreaterThanOrEqual(0);
     expect(proseIdx).toBeGreaterThan(introIdx);
+  });
+});
+
+describe("spawn_subagent — WaitTimeoutError queryBuffer 分流", () => {
+  function managerRejectingWait(opts: {
+    readonly buffer: QueryBufferResult;
+    readonly err: Error;
+  }): SubAgentManager {
+    const { manager } = makeFakeManager();
+    return {
+      ...manager,
+      queryBuffer: () => opts.buffer,
+      waitFor: async () => {
+        throw opts.err;
+      },
+    };
+  }
+
+  it("negative: WaitTimeout + not_found → ToolExecutionError（不谎报 timeout envelope）", async () => {
+    const tool = createSpawnSubAgentTool({
+      manager: managerRejectingWait({
+        buffer: { status: "not_found" },
+        err: new SubAgentWaitTimeoutError(),
+      }),
+    });
+    await expect(tool.handler({ task: "t", wait: true })).rejects.toThrow(
+      ToolExecutionError
+    );
+    await expect(tool.handler({ task: "t", wait: true })).rejects.toThrow(
+      /not found|gone|unknown/i
+    );
+  });
+
+  it("exception: WaitTimeout + running → failed timeout envelope（ok 数据）", async () => {
+    const tool = createSpawnSubAgentTool({
+      manager: managerRejectingWait({
+        buffer: { status: "running" },
+        err: new SubAgentWaitTimeoutError(),
+      }),
+    });
+    const out = (await tool.handler({ task: "t", wait: true })) as {
+      status: string;
+      reason?: string;
+    };
+    expect(out.status).toBe("failed");
+    expect(out.reason).toBe("timeout");
+  });
+
+  it("exception: WaitTimeout + failed buffer → 原 reason/summary，不合成", async () => {
+    const tool = createSpawnSubAgentTool({
+      manager: managerRejectingWait({
+        buffer: {
+          status: "failed",
+          reason: "protocolError",
+          summary: "child protocol",
+        },
+        err: new SubAgentWaitTimeoutError(),
+      }),
+    });
+    const out = (await tool.handler({ task: "t", wait: true })) as {
+      status: string;
+      reason?: string;
+      summary?: string;
+    };
+    expect(out.status).toBe("failed");
+    expect(out.reason).toBe("protocolError");
+    expect(out.summary).toBe("child protocol");
+  });
+
+  it("concurrent: signal.aborted 优先于 WaitTimeoutError → cancelled", async () => {
+    const tool = createSpawnSubAgentTool({
+      manager: managerRejectingWait({
+        buffer: { status: "running" },
+        err: new SubAgentWaitTimeoutError(),
+      }),
+    });
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      tool.handler({ task: "t", wait: true }, { signal: controller.signal })
+    ).rejects.toThrow(ToolExecutionError);
+    await expect(
+      tool.handler({ task: "t", wait: true }, { signal: controller.signal })
+    ).rejects.toThrow(/cancel/i);
+  });
+
+  it("abort typed error 仍走 cancelled，不经 queryBuffer 合成 timeout", async () => {
+    const tool = createSpawnSubAgentTool({
+      manager: managerRejectingWait({
+        buffer: { status: "running" },
+        err: new SubAgentAbortError("fixed-task-id-1"),
+      }),
+    });
+    await expect(tool.handler({ task: "t", wait: true })).rejects.toThrow(
+      /cancelled/
+    );
   });
 });

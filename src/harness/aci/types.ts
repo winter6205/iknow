@@ -18,15 +18,18 @@ export type AciCategory = "read-only" | "write" | "execute" | "collaborate";
 /**
  * 超时分级（T5 / #124）：工具的静态超时档位。
  *
- *   fast    = 5 s       单次文件读 / glob 列表（轻量原子操作）
- *   default = 30 s      写入 / grep 大仓库（常规 IO + 子进程）
- *   build   = 5 min     bash 长命令（构建 / 测试 / 部署）
- *   long    = 30 min    罕见大作业
+ *   fast       = 5 s       单次文件读 / glob 列表（轻量原子操作）
+ *   default    = 30 s      写入 / grep 大仓库（常规 IO + 子进程）
+ *   build      = 5 min     bash 长命令（构建 / 测试 / 部署）
+ *   long       = 30 min    罕见大作业（MCP 等）
+ *   unbounded  = 0         不设 ACI 层 timer（createAciExecutor `tierTimeoutMs > 0`
+ *                          门）；寿命由工具自己的钟决定。spawn_subagent wait:true
+ *                          必须用此档：`long`(30min) < PER_TASK(2h) 会提前 abort。
  *
  * 由 `TIMEOUT_TIER_MS` 提供毫秒值；`createAciExecutor` 在 #124 决策
  * 3-4 之下，把工具的 tier 视为权威覆盖 Loop Engine 传入的 timeoutMs。
  */
-export type TimeoutTier = "fast" | "default" | "build" | "long";
+export type TimeoutTier = "fast" | "default" | "build" | "long" | "unbounded";
 
 /** 各 tier 的毫秒值（frozen — 实现层 + 测试层共源）。 */
 export const TIMEOUT_TIER_MS: Readonly<Record<TimeoutTier, number>> =
@@ -35,6 +38,7 @@ export const TIMEOUT_TIER_MS: Readonly<Record<TimeoutTier, number>> =
     default: 30_000,
     build: 300_000,
     long: 1_800_000,
+    unbounded: 0,
   });
 
 /** ACI 安全/调度元数据（延迟加载 / 并发安全 / 中断行为 / 超时分级）。 */

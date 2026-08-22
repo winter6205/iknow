@@ -36,8 +36,13 @@
 import type { AciToolDef } from "../aci/types.js";
 import type { ToolExecutionContext } from "../tools/types.js";
 import type { SubAgentDefinition } from "./role.js";
-import type { SubAgentManager } from "./manager.js";
-import { SubAgentAbortError, SubAgentCapacityError } from "./manager.js";
+import type { QueryBufferResult, SubAgentManager } from "./manager.js";
+import {
+  SubAgentAbortError,
+  SubAgentCapacityError,
+  SubAgentWaitTimeoutError,
+} from "./manager.js";
+import type { SubAgentEnvelope } from "./envelope.js";
 import { ToolExecutionError, SubAgentSandboxRootError } from "../errors.js";
 import {
   builtinCatalogResolver,
@@ -65,6 +70,45 @@ export interface SpawnSubAgentToolDeps {
   readonly catalog?: AgentCatalogResolver;
 }
 
+/**
+ * waitFor 墙钟拒绝后按 queryBuffer 分流。SubAgentWaitTimeoutError 复用于
+ * unknown task / shutdown 清 map / failed-without-envelope / 真墙钟，不能一律合成 timeout。
+ */
+function envelopeFromWaitTimeout(
+  buffer: QueryBufferResult,
+  taskId: string
+): SubAgentEnvelope {
+  // EXIT: not_found — 任务从未存在或 shutdown 已清 map；对模型是调用错误，不是 timeout 数据。
+  if (buffer.status === "not_found") {
+    throw new ToolExecutionError(
+      `spawn_subagent: task ${taskId} not found after wait timeout`
+    );
+  }
+  // EXIT: running — 墙钟到但 worker 未终态；失败是数据（C5）。
+  if (buffer.status === "running") {
+    return {
+      status: "failed",
+      reason: "timeout",
+      summary: `spawn_subagent: wait timed out while task ${taskId} still running`,
+      result: "",
+    };
+  }
+  if (buffer.status === "failed") {
+    // EXIT: buffer 已是失败投影（含 protocolError / crashed / timeout envelope）。
+    if ("result" in buffer && typeof buffer.result === "string") {
+      return buffer;
+    }
+    return {
+      status: "failed",
+      reason: buffer.reason,
+      summary: buffer.summary,
+      result: buffer.summary,
+    };
+  }
+  // EXIT: completed ok envelope 已在 buffer。
+  return buffer;
+}
+
 export function createSpawnSubAgentTool(
   deps: SpawnSubAgentToolDeps
 ): AciToolDef {
@@ -80,7 +124,7 @@ export function createSpawnSubAgentTool(
   return Object.freeze({
     name: "spawn_subagent",
     description:
-      "Delegate multi-step exploration, independent verification, or parallelizable work to a fresh sub-agent that inherits the parent's tool surface minus `spawn_subagent`. Default `wait:true` — the call blocks until the sub-agent finishes and returns its full result envelope (timeout 5 min default; override via `timeoutMs`). Issue multiple `spawn_subagent` calls in one turn to run independent tasks in parallel. Pass `wait:false` for fire-and-forget: returns `{task_id}` immediately and poll later via `subagent_result`. The returned envelope is the sole ground truth about sub-agent state — running status is observable only through it, not via elapsed time, return shape, or anything else.\n\nAvailable subagent types (set `subagent_type` to route):\n" +
+      "Delegate multi-step exploration, independent verification, or parallelizable work to a fresh sub-agent that inherits the parent's tool surface minus `spawn_subagent`. Default `wait:true` — the call blocks until the sub-agent finishes and returns its full result envelope (timeout 2 hours default; override via `timeoutMs`). Issue multiple `spawn_subagent` calls in one turn to run independent tasks in parallel. Pass `wait:false` for fire-and-forget: returns `{task_id}` immediately and poll later via `subagent_result`. The returned envelope is the sole ground truth about sub-agent state — running status is observable only through it, not via elapsed time, return shape, or anything else.\n\nAvailable subagent types (set `subagent_type` to route):\n" +
       proseLines,
     inputSchema: {
       type: "object",
@@ -134,7 +178,7 @@ export function createSpawnSubAgentTool(
           type: "integer",
           minimum: 1,
           description:
-            "Optional: per-sub-agent wallclock; default 5 min if absent.",
+            "Optional: per-sub-agent wallclock; default 2 hours if absent.",
         },
         sandboxRoot: {
           type: "string",
@@ -148,7 +192,7 @@ export function createSpawnSubAgentTool(
     aci: {
       category: "read-only", // 工具面归类为 read-only（执行耗时但不改文件系统）—— see ACR verdict 1
       lazy: false, // 常驻 prompt：spawn 是核心能力，discover 没意义
-      timeoutTier: "long", // #361 前景臂：wait:true 阻塞至子代理终态（≤5min），tier 必须 ≥ PER_TASK_TIMEOUT_MS；"fast" 5s 会提前砍前景
+      timeoutTier: "unbounded", // wait:true 寿命 = manager per-task 钟；ACI 不 timer。long(30min) < PER_TASK(2h) 会提前 abort
       isConcurrencySafe: true, // 多个 spawn_subagent 并行调用合法（不同 task_id）
       interruptBehavior: "cancel", // 前景入口；ctx.signal abort → waitFor reject → ToolExecutionError → execution_failed:cancelled
     } as const,
@@ -292,11 +336,17 @@ export function createSpawnSubAgentTool(
             `spawn_subagent: cancelled (caller aborted while waiting for task ${err.taskId})`
           );
         }
-        // Fallback: ctx.signal 已 abort → 仍归因 cancelled(fake 用 plain Error
-        // 配 name="SubAgentAbortError" 时走这条)。
+        // concurrent: ACI/caller abort 与 wait poll 竞态时 abort 优先，
+        // 不把 WaitTimeoutError 合成 timeout envelope。
         if (ctx?.signal?.aborted) {
           throw new ToolExecutionError(
             "spawn_subagent: cancelled by caller abort"
+          );
+        }
+        if (err instanceof SubAgentWaitTimeoutError) {
+          return envelopeFromWaitTimeout(
+            deps.manager.queryBuffer(taskId),
+            taskId
           );
         }
         throw err;

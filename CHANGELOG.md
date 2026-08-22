@@ -26,6 +26,8 @@
 
 ### Fixed
 
+- **spawn_subagent ACI 超时不再提前砍子代理（2026-08-23）**: 前景 `wait:true` 曾套 `timeoutTier: long`（30 min）且工具 description 写「5 min default」，均短于 manager `PER_TASK_TIMEOUT_MS`（2 h）。ACI abort 把真任务打成 cancelled。现 `unbounded=0`（executor 不设 timer，寿命归 per-task 钟，对齐 OpenHarness Agent 工具层不套短超时）；文案改为 2 hours；`SubAgentWaitTimeoutError` 按 `queryBuffer` 分流（not_found 抛错 / running → timeout envelope / 已失败 buffer 原样）。计划 `plans/632-subagent-aci-timeout-alignment.md`。
+
 - **LLM 默认对齐 coding-agent 标准帽（2026-08-21）**: `maxOutputTokens` 16384 → **32000**（Claude Code `CLAUDE_CODE_MAX_OUTPUT_TOKENS` 默认；按实际生成计费）；`timeoutMs` 60s → **300s**（thinking + 长 tool_use 的 per-call 竞速）。不再按单次任务逐步加码。MCP `connectTimeoutMs` 仍 60s。历史 2048→8192 / 8192→16384 条目保留。
 
 - **maxOutputTokens 默认 8192 → 16384（#578，2026-08-21）**: `thinking: "adaptive"` + 奢侈品腕表自包含 HTML（约 150–200 行）的 `write_file` JSON 超出 8192，撞 `max_tokens` 截断导致缺 `content`。fallback 提到 16384（容纳 thinking budget + 完整 HTML）；文档示例同步。不改 `timeoutMs` / loop-engine truncation 语义。先前 2048→8192（贪吃蛇 HTML，2026-08-17）历史条目保留。
