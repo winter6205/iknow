@@ -25,6 +25,15 @@ export interface StreamDraft {
   append(event: HarnessStreamEvent): void;
   raw(): string;
   masked(): string;
+  /**
+   * 冻结当前 answer 缓冲为一段（TUI live 交错用）。当前 raw 为空则 no-op。
+   * CLI 不调用；masked() 仍为各段拼接后的全量遮蔽。
+   */
+  sealText(): void;
+  /** 已冻结的文本段数（不含当前未 seal 缓冲）。 */
+  sealedCount(): number;
+  /** 已冻结段 + 当前缓冲（若非空），各自遮蔽。同步可读，不经 subscribe。 */
+  maskedSegments(): ReadonlyArray<string>;
   /** T3 (#175): thinking 增量累积的原始文本(独立于 answer 的 rawBuffer)。 */
   thinkingRaw(): string;
   /** T3: thinking 原始文本遮蔽后的可渲染串(SC20 一致性,密钥不裸出)。 */
@@ -47,6 +56,7 @@ export interface StreamDraft {
 
 export function createStreamDraft(): StreamDraft {
   let rawBuffer = "";
+  const sealedRaw: string[] = [];
   // T3 (#175): thinking buffer 与 answer text buffer 分离 — 两者各自累积 /
   // 遮蔽,互不污染。thinking 不进 answer rawBuffer(终稿 thinking blocks 是
   // SSOT,流式 thinking 只是临时展示层)。
@@ -126,10 +136,26 @@ export function createStreamDraft(): StreamDraft {
       }
     },
     raw(): string {
-      return rawBuffer;
+      return sealedRaw.join("") + rawBuffer;
     },
     masked(): string {
-      return createOutputMask(currentSecretValues()).mask(rawBuffer);
+      return createOutputMask(currentSecretValues()).mask(
+        sealedRaw.join("") + rawBuffer
+      );
+    },
+    sealText(): void {
+      if (rawBuffer.length === 0) return;
+      sealedRaw.push(rawBuffer);
+      rawBuffer = "";
+    },
+    sealedCount(): number {
+      return sealedRaw.length;
+    },
+    maskedSegments(): ReadonlyArray<string> {
+      const mask = createOutputMask(currentSecretValues());
+      const segments = sealedRaw.map((part) => mask.mask(part));
+      if (rawBuffer.length > 0) segments.push(mask.mask(rawBuffer));
+      return segments;
     },
     thinkingRaw(): string {
       return thinkingBuffer;
@@ -146,6 +172,7 @@ export function createStreamDraft(): StreamDraft {
     },
     reset(): void {
       rawBuffer = "";
+      sealedRaw.length = 0;
       thinkingBuffer = "";
       thinkingStartedAt = null;
       cancelPending();

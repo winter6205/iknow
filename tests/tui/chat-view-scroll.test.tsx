@@ -642,8 +642,8 @@ test("running：流式草稿排在 live write 预览之前（代码块不得插�
       id: "tu-w",
       name: "write_file",
       status: "ok",
-      // 草稿后开始的工具（afterDraft 身份标记）→ 渲染在草稿之下。
-      afterDraft: true,
+      // 草稿后开始的工具（draftEpoch ≥ 1）→ 渲染在对应草稿段之下。
+      draftEpoch: 1,
       input: {
         path: "archive/luxury.html",
         content: '<!doctype html>\n<html lang="en">',
@@ -808,11 +808,11 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
   await setup.renderer.destroy();
 });
 
-test("running：先于草稿的工具（无 afterDraft 标记）显示在流式草稿之上（按事件顺序插入）", async () => {
+test("running：先于草稿的工具（无 draftEpoch 标记）显示在流式草稿之上（按事件顺序插入）", async () => {
   // 场景：模型先调搜索工具、后流式输出回答 —— 工具显示应在上、草稿在下
   // （与历史 MessageBlocks 按 content 顺序的终态一致，避免结束时跳变）。
-  // 拆分依据 = 条目追加时由 app 层打入的 afterDraft 身份标记（缺省 = 先于
-  // 草稿），不再是首个 text_delta 时的计数快照。
+  // 拆分依据 = 条目追加时由 app 层打入的 draftEpoch（缺省 0 = 先于
+  // 第一段草稿）。
   const session: TuiSessionState = {
     ...sessionWith([msg("m-1", "user", "搜索今天的AI新闻")]),
     runState: "running-fg",
@@ -848,11 +848,10 @@ test("running：先于草稿的工具（无 afterDraft 标记）显示在流式�
   await setup.renderer.destroy();
 });
 
-test("running：afterDraft 身份标记混排 —— 草稿前工具在上、草稿后工具在下", async () => {
-  // 场景：搜索工具（草稿前）→ 流式回答 → write 工具（草稿后）。
-  // 拆分按身份标记（位置无关 filter），不按 #612 的计数快照。#589 只读
-  // 工具中途移除不错位由结构保证（filter 不依赖下标），标记保留由
-  // live-tool-state.test.ts 的 reducer 单测覆盖。
+test("running：draftEpoch 混排 —— 草稿前工具在上、草稿后工具在下", async () => {
+  // 场景：搜索工具（epoch 0）→ 流式回答 → write 工具（epoch 1）。
+  // 拆分按 draftEpoch（位置无关 filter）。#589 只读工具中途移除不错位
+  // 由结构保证（filter 不依赖下标）。
   const session: TuiSessionState = {
     ...sessionWith([msg("m-1", "user", "搜索并写入")]),
     runState: "running-fg",
@@ -870,7 +869,7 @@ test("running：afterDraft 身份标记混排 —— 草稿前工具在上、草
       name: "write_file",
       status: "running",
       input: undefined,
-      afterDraft: true,
+      draftEpoch: 1,
     },
   ];
   const setup = await testRender(
@@ -894,6 +893,54 @@ test("running：afterDraft 身份标记混排 —— 草稿前工具在上、草
   expect(iWrite).toBeGreaterThanOrEqual(0);
   expect(iSearch).toBeLessThan(iDraft);
   expect(iDraft).toBeLessThan(iWrite);
+  await setup.renderer.destroy();
+});
+
+test("running：第二段草稿画在后续工具之下（tool→text→tool→text 不把新工具顶下去）", async () => {
+  const session: TuiSessionState = {
+    ...sessionWith([msg("m-1", "user", "搜完再写")]),
+    runState: "running-fg",
+  };
+  const liveToolRuns: ReadonlyArray<LiveToolRun> = [
+    {
+      id: "tu-s",
+      name: "web_search",
+      status: "ok",
+      input: { query: "q" },
+      detail: "搜索 q",
+    },
+    {
+      id: "tu-b",
+      name: "bash",
+      status: "running",
+      input: undefined,
+      draftEpoch: 1,
+    },
+  ];
+  const setup = await testRender(
+    <ChatView
+      session={session}
+      cols={COLS}
+      rows={24}
+      liveToolLines={[]}
+      liveToolRuns={liveToolRuns}
+      draftSegments={["第一段回答", "第二段回答"]}
+    />,
+    { width: COLS, height: 24, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  const iSearch = frame.indexOf("web_search");
+  const iFirst = frame.indexOf("第一段回答");
+  const iBash = frame.indexOf("bash");
+  const iSecond = frame.indexOf("第二段回答");
+  expect(iSearch).toBeGreaterThanOrEqual(0);
+  expect(iFirst).toBeGreaterThanOrEqual(0);
+  expect(iBash).toBeGreaterThanOrEqual(0);
+  expect(iSecond).toBeGreaterThanOrEqual(0);
+  expect(iSearch).toBeLessThan(iFirst);
+  expect(iFirst).toBeLessThan(iBash);
+  expect(iBash).toBeLessThan(iSecond);
   await setup.renderer.destroy();
 });
 

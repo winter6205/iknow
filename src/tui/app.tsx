@@ -523,7 +523,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
 
   // ── 流式草稿（单会话 in-flight 时挂，bg 由落盘刷新获得终稿）─────
   const [streamDraft, setStreamDraft] = useState<StreamDraft | null>(null);
-  const [draftsMasked, setDraftsMasked] = useState<string>("");
+  const [draftSegments, setDraftSegments] = useState<ReadonlyArray<string>>([]);
   const [thinkingDraftMasked, setThinkingDraftMasked] = useState<string>("");
   // 最近一次 turn 的 thinking 最终秒数（turn 结束快照）。供历史消息末条
   // assistant 折叠行显示「思考了 N 秒」留存。**未按会话 key**：仅显示末条
@@ -557,7 +557,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const [crunchedSeconds, setCrunchedSeconds] = useState(0);
   useEffect(() => {
     if (streamDraft === null) {
-      setDraftsMasked("");
+      setDraftSegments([]);
       setThinkingDraftMasked("");
       setThinkingFrozenSeconds(0);
       return undefined;
@@ -565,11 +565,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     const unsubscribe = streamDraft.subscribe(() => {
       // SC8 双向防御：流式 high-frequency 更新标记为低优先级 transition。
       startTransition(() => {
-        setDraftsMasked(streamDraft.masked());
+        setDraftSegments(streamDraft.maskedSegments());
         setThinkingDraftMasked(streamDraft.thinkingMasked());
       });
     });
-    setDraftsMasked(streamDraft.masked());
+    setDraftSegments(streamDraft.maskedSegments());
     setThinkingDraftMasked(streamDraft.thinkingMasked());
     // tick 现仅负责 answer 开始时刻的冻结快照：thinking 进行中（thinkingRaw
     // 非空）→ answer 已开始（masked 非空）→ 冻结秒数一次（ref，不再覆盖，
@@ -1121,29 +1121,23 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     // 清掉上次总结：新 turn 开始后流末尾不再显示旧总结（app 层 ↔ chat-view
     // 通过 crunchedOf 归属校验）。
     setCrunchedOf(null);
-    // 草稿位置判定：本 turn 是否已见首个 text_delta。tool_call_start 追加
-    // 时把该判定作为 afterDraft 身份标记打入条目（ChatView 按标记拆分
-    // 渲染位置）——判定只依赖本闭包内的事件顺序，不经过 React state /
-    // ref 镜像，与批处理、被动 effect flush 时序解耦（#612 计数锚点的
-    // 双写竞态与 #589 计数漂移由此消除）。
-    let draftStarted = false;
+    // 草稿分段：tool_call_start 时 seal 当前文本段，把已 seal 段数打成
+    // draftEpoch。ChatView 按 epoch 交错渲染，与历史 content 块顺序一致。
+    // 判定只依赖本闭包事件顺序（#616），不经过 React state / ref 镜像。
     const onStream = (event: HarnessStreamEvent): void => {
       draft.append(event);
-      if (event.type === "text_delta") {
-        draftStarted = true;
-      }
       if (event.type === "tool_call_start") {
-        // 事件到达时即刻定值：setState updater 延迟到 render 才执行，在
-        // updater 内重读 draftStarted 会被后续 text_delta 污染（早工具被
-        // 错标 afterDraft=true 顶到草稿下）。
-        const afterDraft = draftStarted;
+        // 先 seal 再读 sealedCount：setState updater 延迟到 render 才执行，
+        // 禁止在 updater 内重读（#616 同类陷阱）。
+        draft.sealText();
+        const draftEpoch = draft.sealedCount();
         setLiveToolRuns((prev) => ({
           ...prev,
           [targetId]: liveToolReduce(prev[targetId] ?? [], {
             kind: "tool_call_start",
             id: event.id,
             name: event.name,
-            afterDraft,
+            draftEpoch,
           }),
         }));
       }
@@ -2003,7 +1997,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             session={active}
             cols={cols}
             rows={viewportRows}
-            draftsMasked={draftsMasked}
+            draftSegments={draftSegments}
             thinkingDraftMasked={thinkingDraftMasked}
             lastThinkingSeconds={lastThinkingSeconds}
             thinkingFrozenSeconds={thinkingFrozenSeconds}
