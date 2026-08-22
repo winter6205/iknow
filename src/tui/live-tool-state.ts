@@ -37,13 +37,10 @@ export interface LiveToolRun {
   readonly name: string;
   readonly status: LiveToolStatus;
   readonly input: unknown;
-  /** 身份标记：本 turn 首个 text_delta 之后才开始 = true → ChatView 渲染在
-   *  草稿之下；缺省（先于草稿 / 无草稿）→ 渲染在草稿之上。追加时由 caller
-   *  按事件顺序打入，替代 #612 的计数锚点（计数随 #589 只读工具完成移除
-   *  漂移，且快照依赖 ref 镜像双写、存在滞后 flush 覆盖窗口）。
-   *  注意：缺省语义 = 「草稿之上」，与 #612 缺省（全部在下）相反 —— 未来
-   *  若有绕过 onStream 的 tool_call_start 生产者，必须显式打标。 */
-  readonly afterDraft?: boolean;
+  /** 身份标记：本 turn 已 seal 的草稿段数。缺省（0 / 省略）→ 渲染在
+   *  第一段草稿之上；N ≥ 1 → 渲染在第 N 段草稿之下、第 N+1 段之上。
+   *  追加时由 caller 按事件顺序打入（#616 身份标记，不再用计数锚点）。 */
+  readonly draftEpoch?: number;
   /** T5:运行中 `tool_input_delta` 累积的 partial JSON 文本（展示层中间态）。
    *  运行中且收到增量时有值；完成（post_tool_use）时被完整 input 覆盖并清除。 */
   readonly partialInput?: string;
@@ -69,9 +66,9 @@ export type LiveToolEvent =
       readonly kind: "tool_call_start";
       readonly id: string;
       readonly name: string;
-      /** 该工具是否在本 turn 首个 text_delta 之后才开始（展示层拆分依据，
-       *  见 LiveToolRun.afterDraft）。缺省 = false。 */
-      readonly afterDraft?: boolean;
+      /** 该工具开始时已 seal 的草稿段数（展示层交错依据，
+       *  见 LiveToolRun.draftEpoch）。缺省 = 0。 */
+      readonly draftEpoch?: number;
     }
   | {
       /** T5:工具调用 input 增量（partial_json 逐段，adapter 经
@@ -110,7 +107,10 @@ export function liveToolReduce(
         name: event.name,
         status: "running" as const,
         input: undefined,
-        afterDraft: event.afterDraft === true ? true : undefined,
+        draftEpoch:
+          typeof event.draftEpoch === "number" && event.draftEpoch > 0
+            ? event.draftEpoch
+            : undefined,
       }),
     ]);
   }
@@ -149,8 +149,8 @@ export function liveToolReduce(
               id: r.id,
               name: r.name,
               status: (event.ok ? "ok" : "failed") as LiveToolStatus,
-              // afterDraft 是追加时打入的身份标记，完成重建必须保留。
-              afterDraft: r.afterDraft,
+              // draftEpoch 是追加时打入的身份标记，完成重建必须保留。
+              draftEpoch: r.draftEpoch,
               input: event.input,
               // T5:完成态用权威完整 input 覆盖并清除 partialInput 残留。
               partialInput: undefined,
@@ -164,6 +164,32 @@ export function liveToolReduce(
     );
   }
   return prev;
+}
+
+export type LiveTailSlot =
+  | { readonly kind: "tools"; readonly runs: ReadonlyArray<LiveToolRun> }
+  | { readonly kind: "draft"; readonly text: string };
+
+/** 按 draftEpoch 交错工具组与草稿段。空草稿跳过；epoch 超出段数的工具挂末尾。 */
+export function liveTailSlots(
+  runs: ReadonlyArray<LiveToolRun>,
+  segments: ReadonlyArray<string>
+): ReadonlyArray<LiveTailSlot> {
+  const maxEpoch = Math.max(
+    0,
+    ...runs.map((r) => r.draftEpoch ?? 0),
+    Math.max(0, segments.length - 1)
+  );
+  const slots: LiveTailSlot[] = [];
+  for (let i = 0; i <= maxEpoch; i++) {
+    const group = runs.filter((r) => (r.draftEpoch ?? 0) === i);
+    if (group.length > 0) slots.push({ kind: "tools", runs: group });
+    const text = segments[i];
+    if (typeof text === "string" && text.length > 0) {
+      slots.push({ kind: "draft", text });
+    }
+  }
+  return slots;
 }
 
 /** 活动工具名派生：取最后一个 status=running 条目的 name；无运行中条目 →

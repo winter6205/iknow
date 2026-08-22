@@ -8,6 +8,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  liveTailSlots,
   liveToolReduce,
   type LiveToolRun,
 } from "../../src/tui/live-tool-state.js";
@@ -241,32 +242,32 @@ describe("liveToolReduce (#589 成功只读离开 live 尾巴)", () => {
   });
 });
 
-describe("liveToolReduce afterDraft 身份标记（草稿后开始的工具渲染在草稿之下）", () => {
-  test("tool_call_start 携带 afterDraft: true → 条目记录该标记", () => {
+describe("liveToolReduce draftEpoch（工具插在第 N 段草稿之后）", () => {
+  test("tool_call_start 携带 draftEpoch: 1 → 条目记录该值", () => {
     const runs = liveToolReduce([], {
       kind: "tool_call_start",
       id: "toolu_late",
       name: "write_file",
-      afterDraft: true,
+      draftEpoch: 1,
     });
-    expect(runs[0]?.afterDraft).toBe(true);
+    expect(runs[0]?.draftEpoch).toBe(1);
   });
 
-  test("tool_call_start 缺省 afterDraft → 条目无标记（先于草稿，渲染在上）", () => {
+  test("tool_call_start 缺省 draftEpoch → 条目无标记（epoch 0，先于第一段草稿）", () => {
     const runs = liveToolReduce([], {
       kind: "tool_call_start",
       id: "toolu_early",
       name: "web_search",
     });
-    expect(runs[0]?.afterDraft).toBeUndefined();
+    expect(runs[0]?.draftEpoch).toBeUndefined();
   });
 
-  test("post_tool_use 完成重建条目时保留 afterDraft 标记", () => {
+  test("post_tool_use 完成重建条目时保留 draftEpoch", () => {
     const started = liveToolReduce([], {
       kind: "tool_call_start",
       id: "toolu_late_keep",
       name: "write_file",
-      afterDraft: true,
+      draftEpoch: 2,
     });
     const done = liveToolReduce(started, {
       kind: "post_tool_use",
@@ -277,6 +278,63 @@ describe("liveToolReduce afterDraft 身份标记（草稿后开始的工具渲�
       detail: "写入 a.txt",
     });
     expect(done[0]?.status).toBe("ok");
-    expect(done[0]?.afterDraft).toBe(true);
+    expect(done[0]?.draftEpoch).toBe(2);
+  });
+});
+
+describe("liveTailSlots 按 epoch 交错工具与草稿段", () => {
+  const run = (id: string, name: string, draftEpoch?: number): LiveToolRun => ({
+    id,
+    name,
+    status: "running",
+    input: undefined,
+    ...(draftEpoch === undefined ? {} : { draftEpoch }),
+  });
+
+  test("empty：无工具无草稿 → 空槽", () => {
+    expect(liveTailSlots([], [])).toEqual([]);
+  });
+
+  test("缺省 epoch 0 的工具在第一段草稿之上", () => {
+    const slots = liveTailSlots([run("a", "web_search")], ["hello"]);
+    expect(slots).toEqual([
+      { kind: "tools", runs: [run("a", "web_search")] },
+      { kind: "draft", text: "hello" },
+    ]);
+  });
+
+  test("tool→text→tool→text：早工具 / 段0 / 晚工具 / 段1", () => {
+    const early = run("a", "web_search");
+    const late = run("b", "bash", 1);
+    const slots = liveTailSlots([early, late], ["first", "second"]);
+    expect(slots.map((s) => s.kind)).toEqual([
+      "tools",
+      "draft",
+      "tools",
+      "draft",
+    ]);
+    expect(slots[0]).toEqual({ kind: "tools", runs: [early] });
+    expect(slots[1]).toEqual({ kind: "draft", text: "first" });
+    expect(slots[2]).toEqual({ kind: "tools", runs: [late] });
+    expect(slots[3]).toEqual({ kind: "draft", text: "second" });
+  });
+
+  test("negative：epoch 大于 segments.length → 工具挂在末尾，不丢弃", () => {
+    const extra = run("z", "write_file", 3);
+    const slots = liveTailSlots([extra], ["only"]);
+    expect(slots).toEqual([
+      { kind: "draft", text: "only" },
+      { kind: "tools", runs: [extra] },
+    ]);
+  });
+
+  test("exception：空草稿段跳过、缺字段不抛", () => {
+    const early = run("a", "grep");
+    expect(() => liveTailSlots([early], ["", "kept"])).not.toThrow();
+    const slots = liveTailSlots([early], ["", "kept"]);
+    expect(slots).toEqual([
+      { kind: "tools", runs: [early] },
+      { kind: "draft", text: "kept" },
+    ]);
   });
 });

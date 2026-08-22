@@ -304,6 +304,65 @@ describe("createStreamDraft", () => {
     assert.equal(draft.raw().length, 385);
   });
 
+  it("sealText: 当前无文本时 no-op，sealedCount 仍为 0", () => {
+    const draft = createStreamDraft();
+    draft.sealText();
+    assert.equal(draft.sealedCount(), 0);
+    assert.deepEqual(draft.maskedSegments(), []);
+  });
+
+  it("sealText: 冻结当前段后后续 text_delta 进入新段；masked() 仍为全量拼接", () => {
+    const draft = createStreamDraft();
+    draft.append({ type: "text_delta", text: "first" });
+    draft.sealText();
+    assert.equal(draft.sealedCount(), 1);
+    draft.append({ type: "text_delta", text: "second" });
+    assert.deepEqual(draft.maskedSegments(), ["first", "second"]);
+    assert.equal(draft.raw(), "firstsecond");
+    assert.equal(draft.masked(), "firstsecond");
+  });
+
+  it("sealText: 连续两次空 seal 不产空段（连续 tool 共用同一 epoch）", () => {
+    const draft = createStreamDraft();
+    draft.append({ type: "text_delta", text: "a" });
+    draft.sealText();
+    draft.sealText();
+    assert.equal(draft.sealedCount(), 1);
+    assert.deepEqual(draft.maskedSegments(), ["a"]);
+  });
+
+  it("sealText: 多段 overflow 与 reset 清空", () => {
+    const draft = createStreamDraft();
+    draft.append({ type: "text_delta", text: "s0" });
+    draft.sealText();
+    draft.append({ type: "text_delta", text: "s1" });
+    draft.sealText();
+    draft.append({ type: "text_delta", text: "s2" });
+    assert.equal(draft.sealedCount(), 2);
+    assert.deepEqual(draft.maskedSegments(), ["s0", "s1", "s2"]);
+    draft.reset();
+    assert.equal(draft.sealedCount(), 0);
+    assert.deepEqual(draft.maskedSegments(), []);
+    draft.sealText();
+    assert.equal(draft.sealedCount(), 0);
+  });
+
+  it("sealText 后立刻 maskedSegments 同步可读，不依赖 50ms notify", () => {
+    vi.useFakeTimers();
+    const draft = createStreamDraft();
+    let calls = 0;
+    draft.subscribe(() => {
+      calls += 1;
+    });
+    draft.append({ type: "text_delta", text: "alpha" });
+    draft.sealText();
+    draft.append({ type: "text_delta", text: "beta" });
+    assert.equal(calls, 0);
+    assert.deepEqual(draft.maskedSegments(), ["alpha", "beta"]);
+    vi.advanceTimersByTime(50);
+    assert.equal(calls, 1);
+  });
+
   it("T5: reset 取消 pending timer,不再 notify", () => {
     vi.useFakeTimers();
     const draft = createStreamDraft();
