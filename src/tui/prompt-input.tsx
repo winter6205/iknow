@@ -133,6 +133,15 @@ export function PromptInput(props: PromptInputProps): ReactNode {
   // 回放；由下方 useEffect 在下次值变化不一致时清除（handleContentChange 不
   // 主动清，否则回放会抢在 useEffect 前把守卫吃掉，导致 historyCursor 被误归位）。
   const navValueRef = useRef<string | null>(null);
+  // 最近一次 sync effect 经 setText 程序写入的值。不变式：buffer 内容 ==
+  // syncValueRef 当且仅当「自上次程序写入后无用户编辑」。setText 的
+  // content-changed 回放可能迟到（passive effect 调度），迟到回放时
+  // props.value 已前进、navValueRef 为 null，双重守卫均失效 —— 回放被误判
+  // 为真实编辑，onChange(旧值) 直接覆盖更新的 functional update 链（语音
+  // 输入 <15ms 抖动连发 paste 时必现：字进去了又瞬间被剪短）。此 ref 是
+  // 第三道守卫：回放时 live buffer 仍等于最后写入值 → 跳过；真实编辑通过
+  // 时立即清除（否则用户删回相同内容会被误吞）。
+  const syncValueRef = useRef<string | null>(null);
   // T8：textarea 无 value setter —— 受控值经 ref.setText 重建 buffer。onContentChange
   // 回调是用户输入的唯一内容变更信号；程序写入（history/tab / submit 清空）由
   // 下方 sync effect 检测 buffer 与 props.value 不一致时 setText 强制同步。
@@ -165,6 +174,8 @@ export function PromptInput(props: PromptInputProps): ReactNode {
       // 位光标），用户报告「快速输入时光标往前偏移」即此复合逻辑的脆弱面。
       // 统一末尾避开 savedCursor stale 风险，同时覆盖 paste / rewind /
       // submit 清空等所有程序写入路径。
+      // 先记 syncValueRef 再 setText：回放（可能迟到）凭此识别并跳过。
+      syncValueRef.current = props.value;
       ta.setText(props.value);
       ta.gotoBufferEnd();
     }
@@ -185,6 +196,13 @@ export function PromptInput(props: PromptInputProps): ReactNode {
     const ta = textareaRef.current;
     if (!ta) return;
     const v = ta.plainText;
+    // 防回环第三道守卫：sync effect setText 的迟到回放。v 读的是 live
+    // buffer —— 等于最后程序写入值说明中间无用户编辑，是回放，跳过。
+    // 不匹配则是真实编辑，清除守卫（用户后续删回相同内容不能被误吞）。
+    if (syncValueRef.current !== null) {
+      if (v === syncValueRef.current) return;
+      syncValueRef.current = null;
+    }
     // 防回环：程序写入值（history/tab）在 commit 时被 textarea 回放一次 —
     // 值与 navValueRef 相同即跳过，不改写 state。navValueRef 的清除交给
     // 上方 useEffect（值变化且不匹配时）。
