@@ -59,7 +59,8 @@ chat / TUI / serve 的会话在崩溃或 rewind 后，从 JSONL 当前头继续�
 
 ```bash
 npm run typecheck
-npx vitest run tests/session-api tests/cli tests/harness/loop-engine.test.ts
+npx vitest run tests/session-api tests/cli tests/harness/loop-engine.test.ts tests/harness/loop-engine-commit.test.ts
+bun test tests/tui/rewind.test.ts tests/tui/hub-bridge.test.ts
 ```
 
 每条 yes/no：
