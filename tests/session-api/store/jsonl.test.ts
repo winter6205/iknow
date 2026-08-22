@@ -14,7 +14,9 @@
  *   - save() writes `<id>.jsonl` (authority: header record, one message event
  *     per message with id/parent chain, trailing head record) AND keeps
  *     writing the legacy `<id>.json` mirror (expand-phase compat for direct
- *     `.json` readers; T2 owns migration-on-save).
+ *     `.json` readers; #619 T2 locked migration-on-save in
+ *     jsonl-migration.test.ts — the mirror stays until a later cleanup
+ *     ticket).
  *   - load() detects shape by EXTENSION: prefers `<id>.jsonl`, falls back to
  *     legacy `<id>.json`.
  *   - appendEvents/readHead/writeHead are JSONL-only primitives.

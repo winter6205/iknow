@@ -11,7 +11,10 @@
  *     jsonl.ts). save() writes it; load() prefers it.
  *   - Compat mirror: `<id>.json` — legacy SessionFileV1 JSON, still written
  *     by save() during the expand phase so direct `.json` readers keep
- *     working; migration-on-save (stop writing / remove the mirror) is T2.
+ *     working. #619 T2 locked migration-on-save (legacy-only `.json` → load →
+ *     save → JSONL authority); the mirror is KEPT because out-of-scope
+ *     hub/serve/tui tests read `.json` directly — mirror removal is a later
+ *     cleanup ticket, deliberately not T2.
  *   - Detection is by EXTENSION: load prefers `<id>.jsonl`, falls back to
  *     `<id>.json` (legacy path unchanged).
  *   - appendEvents/readHead/writeHead are JSONL-only primitives (T3's commit
@@ -124,8 +127,11 @@ export class SessionStore {
   /**
    * Atomic write: tmp file then rename, so a crash never leaves a half-written file.
    * Writes the JSONL authority first, then the legacy `.json` compat mirror
-   * (expand phase; T2 owns migration-on-save). Load prefers the JSONL, so a
-   * crash between the two renames never surfaces a stale authority.
+   * (expand phase; #619 T2 locked this as the migration trigger — a
+   * legacy-only `.json` session becomes JSONL-authoritative on its next
+   * save; the mirror stays until a later cleanup ticket). Load prefers the
+   * JSONL, so a crash between the two renames never surfaces a stale
+   * authority.
    * Throws: write_failed
    */
   async save(opts: {
