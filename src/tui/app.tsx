@@ -434,20 +434,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const [liveToolRuns, setLiveToolRuns] = useState<
     Record<string, ReadonlyArray<LiveToolRun>>
   >({});
-  // 草稿锚点：本 turn 首个 text_delta 到达时 liveToolRuns 的条数快照
-  // （ChatView 据此把先于文本的工具渲染在草稿之上，尾部按真实事件顺序
-  // 插入）。turn 结束随 liveToolRuns 一起清零。
-  const [draftToolAnchor, setDraftToolAnchor] = useState<
-    Record<string, number>
-  >({});
-  // onStream 闭包需要同步读当前 runs 条数（setState 函数式更新里读不到
-  // 最新值）→ ref 镜像。仅展示层锚点用途，不参与权威状态。
-  const liveToolRunsRef = useRef<Record<string, ReadonlyArray<LiveToolRun>>>(
-    {}
-  );
-  useEffect(() => {
-    liveToolRunsRef.current = liveToolRuns;
-  }, [liveToolRuns]);
   // T6 (D5): thinking 折叠面板展开态；Ctrl+O 折叠/展开，/thinking 为开关（思考Enabled）。
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
   // thinking 控制臂开关（/thinking 切换，与折叠态解耦）。初始基线 =
@@ -1135,33 +1121,29 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     // 清掉上次总结：新 turn 开始后流末尾不再显示旧总结（app 层 ↔ chat-view
     // 通过 crunchedOf 归属校验）。
     setCrunchedOf(null);
-    // 草稿锚点守卫：本 turn 首个 text_delta 到达时快照一次 liveToolRuns
-    // 条数（先于文本发生的工具数），后续 delta 不重拍。
-    let draftAnchorSet = false;
+    // 草稿位置判定：本 turn 是否已见首个 text_delta。tool_call_start 追加
+    // 时把该判定作为 afterDraft 身份标记打入条目（ChatView 按标记拆分
+    // 渲染位置）——判定只依赖本闭包内的事件顺序，不经过 React state /
+    // ref 镜像，与批处理、被动 effect flush 时序解耦（#612 计数锚点的
+    // 双写竞态与 #589 计数漂移由此消除）。
+    let draftStarted = false;
     const onStream = (event: HarnessStreamEvent): void => {
       draft.append(event);
-      if (event.type === "text_delta" && !draftAnchorSet) {
-        draftAnchorSet = true;
-        const anchor = liveToolRunsRef.current[targetId]?.length ?? 0;
-        setDraftToolAnchor((prev) => ({ ...prev, [targetId]: anchor }));
+      if (event.type === "text_delta") {
+        draftStarted = true;
       }
       if (event.type === "tool_call_start") {
-        // 同步写 ref 镜像：tool_call_start 与首个 text_delta 落入同一 React
-        // 批处理时 useEffect 镜像尚未提交，锚点会少计刚启动的工具。
-        liveToolRunsRef.current = {
-          ...liveToolRunsRef.current,
-          [targetId]: liveToolReduce(liveToolRunsRef.current[targetId] ?? [], {
-            kind: "tool_call_start",
-            id: event.id,
-            name: event.name,
-          }),
-        };
+        // 事件到达时即刻定值：setState updater 延迟到 render 才执行，在
+        // updater 内重读 draftStarted 会被后续 text_delta 污染（早工具被
+        // 错标 afterDraft=true 顶到草稿下）。
+        const afterDraft = draftStarted;
         setLiveToolRuns((prev) => ({
           ...prev,
           [targetId]: liveToolReduce(prev[targetId] ?? [], {
             kind: "tool_call_start",
             id: event.id,
             name: event.name,
+            afterDraft,
           }),
         }));
       }
@@ -1255,7 +1237,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       });
       setLiveToolLines((prev) => ({ ...prev, [targetId]: [] }));
       setLiveToolRuns((prev) => ({ ...prev, [targetId]: [] }));
-      setDraftToolAnchor((prev) => ({ ...prev, [targetId]: 0 }));
       if (stopReason === "cancelled") {
         // B1: interrupted=true → checkpoint 已保存(delta>0);false → 无新内容
         // 未落 checkpoint(delta=0);undefined → 旧链路 / 未知,保留兜底文案。
@@ -2035,11 +2016,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
               active.conversationId
                 ? (liveToolRuns[active.conversationId] ?? [])
                 : []
-            }
-            draftToolAnchor={
-              active.conversationId
-                ? (draftToolAnchor[active.conversationId] ?? 0)
-                : 0
             }
             askLine={
               askPending !== undefined && !askModalActive

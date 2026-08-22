@@ -642,6 +642,8 @@ test("running：流式草稿排在 live write 预览之前（代码块不得插�
       id: "tu-w",
       name: "write_file",
       status: "ok",
+      // 草稿后开始的工具（afterDraft 身份标记）→ 渲染在草稿之下。
+      afterDraft: true,
       input: {
         path: "archive/luxury.html",
         content: '<!doctype html>\n<html lang="en">',
@@ -806,10 +808,11 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
   await setup.renderer.destroy();
 });
 
-test("running：draftToolAnchor=1 时先到的工具显示在流式草稿之上（按事件顺序插入）", async () => {
+test("running：先于草稿的工具（无 afterDraft 标记）显示在流式草稿之上（按事件顺序插入）", async () => {
   // 场景：模型先调搜索工具、后流式输出回答 —— 工具显示应在上、草稿在下
   // （与历史 MessageBlocks 按 content 顺序的终态一致，避免结束时跳变）。
-  // draftToolAnchor = 草稿首个 text_delta 到达时已开始的工具数（app 层快照）。
+  // 拆分依据 = 条目追加时由 app 层打入的 afterDraft 身份标记（缺省 = 先于
+  // 草稿），不再是首个 text_delta 时的计数快照。
   const session: TuiSessionState = {
     ...sessionWith([msg("m-1", "user", "搜索今天的AI新闻")]),
     runState: "running-fg",
@@ -832,7 +835,6 @@ test("running：draftToolAnchor=1 时先到的工具显示在流式草稿之上�
       liveToolLines={[]}
       liveToolRuns={liveToolRuns}
       draftsMasked={draft}
-      draftToolAnchor={1}
     />,
     { width: COLS, height: 24, exitOnCtrlC: false }
   );
@@ -843,6 +845,55 @@ test("running：draftToolAnchor=1 时先到的工具显示在流式草稿之上�
   expect(iTool).toBeGreaterThanOrEqual(0);
   expect(iDraft).toBeGreaterThanOrEqual(0);
   expect(iTool).toBeLessThan(iDraft);
+  await setup.renderer.destroy();
+});
+
+test("running：afterDraft 身份标记混排 —— 草稿前工具在上、草稿后工具在下", async () => {
+  // 场景：搜索工具（草稿前）→ 流式回答 → write 工具（草稿后）。
+  // 拆分按身份标记（位置无关 filter），不按 #612 的计数快照。#589 只读
+  // 工具中途移除不错位由结构保证（filter 不依赖下标），标记保留由
+  // live-tool-state.test.ts 的 reducer 单测覆盖。
+  const session: TuiSessionState = {
+    ...sessionWith([msg("m-1", "user", "搜索并写入")]),
+    runState: "running-fg",
+  };
+  const liveToolRuns: ReadonlyArray<LiveToolRun> = [
+    {
+      id: "tu-s",
+      name: "web_search",
+      status: "ok",
+      input: { query: "q" },
+      detail: "搜索 q",
+    },
+    {
+      id: "tu-w",
+      name: "write_file",
+      status: "running",
+      input: undefined,
+      afterDraft: true,
+    },
+  ];
+  const setup = await testRender(
+    <ChatView
+      session={session}
+      cols={COLS}
+      rows={24}
+      liveToolLines={[]}
+      liveToolRuns={liveToolRuns}
+      draftsMasked="正在整理结果"
+    />,
+    { width: COLS, height: 24, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  const iSearch = frame.indexOf("web_search");
+  const iDraft = frame.indexOf("正在整理结果");
+  const iWrite = frame.indexOf("write_file");
+  expect(iSearch).toBeGreaterThanOrEqual(0);
+  expect(iDraft).toBeGreaterThanOrEqual(0);
+  expect(iWrite).toBeGreaterThanOrEqual(0);
+  expect(iSearch).toBeLessThan(iDraft);
+  expect(iDraft).toBeLessThan(iWrite);
   await setup.renderer.destroy();
 });
 

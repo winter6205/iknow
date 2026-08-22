@@ -240,3 +240,43 @@ describe("liveToolReduce (#589 成功只读离开 live 尾巴)", () => {
     });
   });
 });
+
+describe("liveToolReduce afterDraft 身份标记（草稿后开始的工具渲染在草稿之下）", () => {
+  test("tool_call_start 携带 afterDraft: true → 条目记录该标记", () => {
+    const runs = liveToolReduce([], {
+      kind: "tool_call_start",
+      id: "toolu_late",
+      name: "write_file",
+      afterDraft: true,
+    });
+    expect(runs[0]?.afterDraft).toBe(true);
+  });
+
+  test("tool_call_start 缺省 afterDraft → 条目无标记（先于草稿，渲染在上）", () => {
+    const runs = liveToolReduce([], {
+      kind: "tool_call_start",
+      id: "toolu_early",
+      name: "web_search",
+    });
+    expect(runs[0]?.afterDraft).toBeUndefined();
+  });
+
+  test("post_tool_use 完成重建条目时保留 afterDraft 标记", () => {
+    const started = liveToolReduce([], {
+      kind: "tool_call_start",
+      id: "toolu_late_keep",
+      name: "write_file",
+      afterDraft: true,
+    });
+    const done = liveToolReduce(started, {
+      kind: "post_tool_use",
+      id: "toolu_late_keep",
+      name: "write_file",
+      input: { path: "a.txt" },
+      ok: true,
+      detail: "写入 a.txt",
+    });
+    expect(done[0]?.status).toBe("ok");
+    expect(done[0]?.afterDraft).toBe(true);
+  });
+});
