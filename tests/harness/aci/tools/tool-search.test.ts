@@ -3,8 +3,8 @@
  *
  * `tool_search` 工具（第 9 件 ACI）单元测试 — 对齐 spec 224-tool-extension-path.md
  * 验收 S4 / S5：
- *   - S4：空 `{query,names}` 返回 `"(no matches)"`；子串命中；精确取名；
- *     不匹配返回 `"(no matches)"`
+ *   - S4：空 `{query,names}` 返回 `"(no matches)"` 前缀 + retry guidance；
+ *     子串命中；精确取名；不匹配返回 `"(no matches)"` + guidance
  *   - S5：handler 返回 string；每行 JSON.parse → `{name, description, inputSchema}`
  *     不含 `aci` 泄漏
  *   - ajv input 校验：合法 schema + 拒非法类型 + 拒 additionalProperties
@@ -70,44 +70,52 @@ function invokeToolSearch(toolSearch: AciToolDef, input: unknown): string {
   return handler(input) as string;
 }
 
-describe('tool_search — S4:空参 / 不匹配 → "(no matches)"', () => {
-  it('空 {} → 返回 "(no matches)"(ajv 接受,handler 判定)', () => {
+describe('tool_search — S4:空参 / 不匹配 → "(no matches)" + retry guidance', () => {
+  it('空 {} → "(no matches)" 前缀 + rephrase/`names` guidance(合法 string,非错误)', () => {
     const { toolSearch } = buildToolSearchOverFixture([
       makeTool("alpha"),
       makeTool("beta"),
     ]);
-    expect(invokeToolSearch(toolSearch, {})).toBe("(no matches)");
+    const out = invokeToolSearch(toolSearch, {});
+    expect(typeof out).toBe("string");
+    expect(out).toContain("(no matches)");
+    expect(out).toContain("Rephrase");
+    expect(out).toContain("`names`");
   });
 
-  it('query 空串 + names 空数组 → "(no matches)"', () => {
+  it('query 空串 + names 空数组 → "(no matches)" + guidance', () => {
     const { toolSearch } = buildToolSearchOverFixture([makeTool("alpha")]);
-    expect(invokeToolSearch(toolSearch, { query: "", names: [] })).toBe(
-      "(no matches)"
-    );
+    const out = invokeToolSearch(toolSearch, { query: "", names: [] });
+    expect(out).toContain("(no matches)");
+    expect(out).toContain("Rephrase");
+    expect(out).toContain("`names`");
   });
 
-  it('names 是非字符串元素数组 → "(no matches)"(fallback,handler 不抛)', () => {
+  it('names 是非字符串元素数组 → "(no matches)" + guidance(fallback,handler 不抛)', () => {
     const { toolSearch } = buildToolSearchOverFixture([makeTool("alpha")]);
-    expect(invokeToolSearch(toolSearch, { names: [1, 2] })).toBe(
-      "(no matches)"
-    );
+    const out = invokeToolSearch(toolSearch, { names: [1, 2] });
+    expect(out).toContain("(no matches)");
+    expect(out).toContain("Rephrase");
+    expect(out).toContain("`names`");
   });
 
-  it('query 不匹配任何 name/description → "(no matches)"', () => {
+  it('query 不匹配任何 name/description → "(no matches)" + guidance', () => {
     const { toolSearch } = buildToolSearchOverFixture([
       makeTool("alpha", "first tool"),
       makeTool("beta", "second tool"),
     ]);
-    expect(invokeToolSearch(toolSearch, { query: "gamma" })).toBe(
-      "(no matches)"
-    );
+    const out = invokeToolSearch(toolSearch, { query: "gamma" });
+    expect(out).toContain("(no matches)");
+    expect(out).toContain("Rephrase");
+    expect(out).toContain("`names`");
   });
 
-  it('names 精确取名无命中 → "(no matches)"', () => {
+  it('names 精确取名无命中 → "(no matches)" + guidance', () => {
     const { toolSearch } = buildToolSearchOverFixture([makeTool("alpha")]);
-    expect(invokeToolSearch(toolSearch, { names: ["nope"] })).toBe(
-      "(no matches)"
-    );
+    const out = invokeToolSearch(toolSearch, { names: ["nope"] });
+    expect(out).toContain("(no matches)");
+    expect(out).toContain("Rephrase");
+    expect(out).toContain("`names`");
   });
 });
 
@@ -251,13 +259,16 @@ describe("tool_search — ajv input 校验 (S4 / D9)", () => {
     expect(validate({ query: "x", extra: 1 })).toBe(false);
   });
 
-  it("schema 字段描述包含 spec 要求的两个英文短语", () => {
+  it("schema 字段描述包含 spec 要求的两个英文短语 + T3 检索范围/时机提示", () => {
     // #483 D9: description must contain "pull ToolDef JSON" +
     // "Discover tools beyond the current prompt" (replaces D7 "returns
     // ToolDef JSON" / "use to find tools beyond the current prompt").
+    // #631 T3: 检索范围须声明覆盖 `mcp__` 前缀工具,并提示时机(先搜后用)。
     const { toolSearch } = buildToolSearchOverFixture([makeTool("x")]);
     const desc = toolSearch.description;
     expect(desc).toContain("pull ToolDef JSON");
     expect(desc).toContain("Discover tools beyond the current prompt");
+    expect(desc).toContain("mcp__");
+    expect(desc).toContain("Search first, then use");
   });
 });
