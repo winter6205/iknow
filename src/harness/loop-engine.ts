@@ -211,10 +211,14 @@ export interface LoopEngineDeps {
   /**
    * #458 T7 (SC11): compact 边界渲染缝。可选闭包 — 当 compact 触发时,
    * 若返回非空字符串,`applyCompactAttachment` 会在 boundary placeholder
-   * user 消息之后追加一条 user 消息承载渲染文本(如 taskFocus 边界快照)。
+   * user 消息之后追加一条 user 消息承载渲染文本(如近期用户任务摘录)。
    * 字段缺席 → helper 早退,行为与现 master byte-identical(不改停止语义,
    * ADR-0011)。harness 不 import session-api;渲染文本由 caller(如 hub 的
-   * renderTaskFocusBoundary 私有 closure)经闭包注入,零反向依赖。
+   * `renderRecentUserTasksBoundary` 私有 closure)经闭包注入,零反向依赖。
+   *
+   * 历史: #458 早期版本由 taskFocus 字段驱动 (`renderTaskFocusBoundary`);
+   * #605 T2 退休 taskFocus 字段后, 渲染源改为 `session.messages` 内的
+   * `extractRecentUserTasks` 摘录。
    */
   readonly boundaryAttachment?: () => string | undefined;
   /**

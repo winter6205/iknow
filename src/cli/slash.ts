@@ -58,10 +58,13 @@ export type SlashEffect =
   | { type: "permissions"; args: string[] }
   /**
    * #458 T6: 会话级 goal 三面。/goal <text> 由 host 持久化为 session.goal
-   * （source=user_pin）；/goal status 显示当前 goal/taskFocus；/goal clear
-   * 清空 goal + taskFocus。三态统一由 host 侧 processSlash 的 case "goal"
-   * 按 action 分派。空 args / "status" → status；"clear" → clear；其它 →
+   * （source=user_pin）；/goal status 显示当前 goal；/goal clear 清空 goal。
+   * 三态统一由 host 侧 processSlash 的 case "goal" 按 action 分派。
+   * 空 args / "status" → status；"clear" → clear；其它 →
    * pin <text>（join+trim）。大小写敏感（"CLEAR" ≠ clear → pin）。
+   *
+   * 注：taskFocus 段已随 #605 T2 整段退休；status / clear 仅回显 / 清空
+   * goal。
    */
   | {
       type: "goal";

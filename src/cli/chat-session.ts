@@ -55,11 +55,8 @@ import {
   type SessionFileV1,
   CURRENT_SCHEMA_VERSION,
   extractTitle,
-  extractGoal,
   appendCheckpoint,
   pinGoal,
-  seedTaskFocus,
-  shouldSeedTaskFocus,
   shouldPersistCheckpoint,
   toInterruptReason,
   validateGoalText,
@@ -184,10 +181,10 @@ export interface ProcessChatLineOpts {
 
 /**
  * #449 B8 (SC5, 修订 per #473): chat 端 verify-loop task 公式的纯读盘 +
- * helper。`goal.text ?? query` (empty-goal-skip 同纪律)。taskFocus 段已
- * 从 verify 输入中移除 (#473): taskFocus 是稳定焦点锚(首次 seed 后不再
- * 变化, OQ2), 喂进每轮 verify 会让新任务 B 重新验证旧的 A 而误判 PASS。
- * taskFocus 的 compact 渲染 / /goal status 角色不受影响(数据侧)。
+ * helper。`goal.text ?? query` (empty-goal-skip 同纪律)。
+ *
+ * 历史: taskFocus 段曾在 #473 从 verify 输入中移除(#605 T2 已将整段
+ * session.taskFocus 字段及 seed 生命周期彻底退休), 仅 goal 字段驱动。
  *
  * 失败语义 (plan T1 named EXIT):
  * - store 缺席 / conversationId === null → HITL; userText = query。
@@ -611,8 +608,8 @@ async function processSlash(opts: {
   }
 }
 
-/** #458 T6: /goal status —— 回显当前 goal.text + taskFocus;not_found =
- *  fresh conversation 合法态「未设置 goal / taskFocus」。 */
+/** #458 T6: /goal status —— 回显当前 goal.text;not_found =
+ *  fresh conversation 合法态「未设置 goal」。 */
 async function goalStatus(
   store: SessionStore,
   conversationId: string
@@ -625,7 +622,7 @@ async function goalStatus(
       isSessionStoreErrorKind(err) &&
       (err as SessionStoreError).kind === "not_found"
     ) {
-      return { quit: false, output: "未设置 goal / taskFocus" };
+      return { quit: false, output: "未设置 goal" };
     }
     return {
       quit: false,
@@ -634,18 +631,14 @@ async function goalStatus(
     };
   }
   const goalText = existing.goal?.text;
-  const focusText = existing.taskFocus?.text;
-  if (!goalText && !focusText) {
-    return { quit: false, output: "未设置 goal / taskFocus" };
+  if (!goalText) {
+    return { quit: false, output: "未设置 goal" };
   }
-  const parts: string[] = [];
-  if (goalText) parts.push(`goal: ${goalText}`);
-  if (focusText) parts.push(`taskFocus: ${focusText}`);
-  return { quit: false, output: parts.join("\n") };
+  return { quit: false, output: `goal: ${goalText}` };
 }
 
 /** #458 T6: /goal clear —— hub.clearGoal 语义的 chat 侧镜像(经 store 原子写
- *  goal + taskFocus 双清);not_found = fresh conversation 合法态「无 goal 可清」。
+ *  goal 清空);not_found = fresh conversation 合法态「无 goal 可清」。
  *  注:CLI chat 入口不装配 SessionHub,recordGoal trace 发射点由 hub 统一落
  *  (T5),CLI 路径无 trace 副作用是既有事实。 */
 async function goalClear(
@@ -672,7 +665,6 @@ async function goalClear(
   const cleared: SessionFileV1 = {
     ...existing,
     goal: undefined,
-    taskFocus: undefined,
     updatedAt: now,
     schemaVersion: CURRENT_SCHEMA_VERSION,
   };
@@ -937,9 +929,6 @@ export async function persistChatSessionCheckpoint(opts: {
               ? { lastUsage: result.lastUsage }
               : {}),
           });
-    const nextFocusText = extractGoal(result.messages);
-    const hasActiveGoal =
-      withCheckpoint.goal !== undefined && withCheckpoint.goal.text.length > 0;
     const updated: SessionFileV1 = {
       ...withCheckpoint,
       messages: result.messages,
@@ -947,17 +936,6 @@ export async function persistChatSessionCheckpoint(opts: {
       updatedAt: now,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       title: extractTitle(result.messages),
-      ...(withCheckpoint.taskFocus === undefined &&
-      !hasActiveGoal &&
-      shouldSeedTaskFocus(nextFocusText)
-        ? {
-            taskFocus: seedTaskFocus({
-              current: withCheckpoint.taskFocus,
-              nextText: nextFocusText,
-              now,
-            }),
-          }
-        : {}),
     };
     await store.save({ id: conversationId, file: updated });
   } catch (err) {

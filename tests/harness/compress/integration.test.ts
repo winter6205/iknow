@@ -17,10 +17,13 @@
  * 不硬编码真实 LLM token value;只用 estimate 函数语义(constant 层) +
  * 自定义 threshold 模拟触发。
  *
- * #458 T7 (SC11): compact 边界渲染缝。`deps.boundaryAttachment` 可选闭包
- * 在 compact 触发时把渲染文本追加为一条 user 消息(放在 boundary placeholder
- * 之后)。两处 compact 调用点(reactive line 717 / proactive line 1339)共用
- * `applyCompactAttachment` helper:
+ * #604 T1 (SC1-SC5) supersedes #458 T7 (SC11): compact 边界渲染缝。
+ * `deps.boundaryAttachment` 可选闭包在 compact 触发时把渲染文本追加为一条
+ * user 消息(放在 boundary placeholder 之后)。两处 compact 调用点
+ * (reactive line 717 / proactive line 1339)共用 `applyCompactAttachment`
+ * helper:渲染源由 taskFocus 字段(#458 T7)改为 hub 注入的
+ * `renderRecentUserTasksBoundary` 现抽现贴(取最近 ≤3 句合格用户任务原话)。
+ * 本文件只测 `applyCompactAttachment` 缝本身,不动 hub 闭包。
  *   f. proactive compact + boundaryAttachment → messages[0]=placeholder,
  *      messages[1]=attachment user 消息,messages[2+]=保留尾部;
  *   g. boundaryAttachment 缺席 → 仅 placeholder(byte-stable);
@@ -78,6 +81,7 @@ import type {
   AssistantTurnResult,
   LoopState,
 } from "../../../src/harness/model-adapter/types.ts";
+import type { LoopAdapter } from "../../../src/harness/loop-engine.ts";
 import { toAnthropicToolResults } from "../../../src/harness/tools/tool-result.ts";
 import type { ToolExecutionResult } from "../../../src/harness/tools/types.ts";
 

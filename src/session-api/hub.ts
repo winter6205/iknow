@@ -85,16 +85,13 @@ import {
   appendCheckpoint,
   rewindFile,
   CURRENT_SCHEMA_VERSION,
-  extractGoal,
   extractTitle,
   pinGoal,
-  seedTaskFocus,
-  shouldSeedTaskFocus,
   shouldPersistCheckpoint,
   toInterruptReason,
   validateGoalText,
 } from "./store/index.js";
-import type { GoalStatus, TaskFocusState } from "./store/index.js";
+import type { GoalStatus } from "./store/index.js";
 import { applyTransition, assertValidTransition } from "./goal/index.js";
 import {
   applyGoalAutoContinue,
@@ -122,10 +119,12 @@ import type {
 } from "./contract.js";
 import { MAX_MESSAGE_CHARS } from "./contract.js";
 import {
+  extractRecentUserTasks,
   isTurnQuery,
   messageText,
   projectThinkingView,
   projectToolCalls,
+  TASK_EXCERPT_PREFIX,
 } from "./turn-projection.js";
 import type { WorkspaceResponse } from "./contract.js";
 import {
@@ -979,22 +978,23 @@ export class SessionHub {
           // 锚点，bash_output / bash_stop 的 scope 过滤才能按会话闭环。
           conversationId,
           ...(trace !== undefined ? { trace } : {}),
-          // #458 T7 (SC11):compact 边界渲染缝 — taskFocus 在场时注入
-          // boundaryAttachment 闭包,compact 触发时在 placeholder 后追加
-          // 一条 user 消息承载渲染文本;taskFocus 缺席 → 字段缺席,helper
-          // 早退(行为 byte-stable,不影响停止语义 ADR-0011)。renderTaskFocusBoundary
-          // 是 hub 内私有 closure — harness 域独立原则,harness 不 import
-          // session-api,零反向依赖。
-          ...(session.taskFocus !== undefined &&
-          !(session.goal !== undefined && session.goal.text.length > 0)
+          // #604 T1 (SC1-SC5): compact 边界渲染缝 — 把会话里最近合格用户
+          // 任务原话(纯函数 over session.messages,现抽现贴)注入为
+          // boundaryAttachment 闭包;compact 触发时在 placeholder 后追加一条
+          // user 消息。约束:
+          //   - 自动模式(goal.text 非空)→ return undefined,绝不贴(spec: 自
+          //     动模式不贴任务摘录);
+          //   - 0 句合格 → renderRecentUserTasksBoundary return undefined,
+          //     闭包产出 undefined,helper 早退(行为 byte-stable,不影响停止
+          //     语义 ADR-0011);
+          //   - 不读 session.taskFocus (#605 T2 已退休; 渲染源是
+          //     session.messages 内的合格用户任务原话);
+          //   - renderRecentUserTasksBoundary 是 hub 内私有 closure — harness
+          //     域独立原则,harness 不 import session-api,零反向依赖。
+          ...(!(session.goal !== undefined && session.goal.text.length > 0)
             ? {
-                // 抽 const 让闭包内引用窄化后的 focus,消除非空断言。
-                boundaryAttachment: () => {
-                  const focus = session.taskFocus;
-                  return focus === undefined
-                    ? undefined
-                    : this.renderTaskFocusBoundary(focus);
-                },
+                boundaryAttachment: () =>
+                  this.renderRecentUserTasksBoundary(session.messages),
               }
             : {}),
         };
@@ -1053,7 +1053,8 @@ export class SessionHub {
                       }),
                     // ADR-0024: two modules, not `goal.text ?? query`. Non-empty
                     // goal → auto (userText = goal.text); else HITL (userText =
-                    // query). taskFocus never enters verify input (#473).
+                    // query). taskFocus never entered verify input (#473) and
+                    // is gone with #605 T2's retirement.
                     completionMode:
                       session.goal !== undefined && session.goal.text.length > 0
                         ? "auto"
@@ -1118,7 +1119,6 @@ export class SessionHub {
               };
             },
             persist: async (s) => {
-              // trace is destructured away → immediate GC (not logged/persisted/wired).
               const saved = await this.conditionalSave({
                 conversationId,
                 session,
@@ -1126,8 +1126,6 @@ export class SessionHub {
                 // priorMessages = the file BEFORE this run; only the messages THIS
                 // run appended count as progress for the cancelled-delta decision.
                 priorMessages: session.messages,
-                // #458 T5/T12: trace 透传 — seed 发射点使用; undefined 时无副作用。
-                ...(trace !== undefined ? { trace } : {}),
               });
               void saved;
               // #458 T5 (SC8): goal.status write-back on verify-loop terminal
@@ -1625,20 +1623,30 @@ export class SessionHub {
     });
   }
 
-  /** #458 T7 (SC11):compact 边界渲染 — 把 TaskFocusState 渲染为单段文本,
-   *  由 runDeps.boundaryAttachment 闭包注入 loop-engine,在 compact 触发时
-   *  追加为一条 user 消息(放在 boundary placeholder 之后)。纯字符串派生,
-   *  零 IO / 零 LLM 调用(v1 排除)。
+  /** #604 T1 (SC1-SC5):compact 边界渲染 — 把 session.messages 内最近 ≤3 句
+   *  合格用户任务原话渲染为单段文本,由 runDeps.boundaryAttachment 闭包
+   *  注入 loop-engine,compact 触发时追加为一条 user 消息(放在 boundary
+   *  placeholder 之后)。
    *
-   *  输出形态:当前焦点截 240 + `\n---\n` + 最近 3 条历史各截 120,共 4 段;
-   *  总长 cap 720 字符(防御 — 截断到 720 保证注入文本有界)。 */
-  private renderTaskFocusBoundary(focus: TaskFocusState): string {
-    const segments = [
-      focus.text.slice(0, 240),
-      ...(focus.history ?? []).slice(0, 3).map((h) => h.text.slice(0, 120)),
-    ];
-    const joined = segments.join("\n---\n");
-    return joined.length > 720 ? joined.slice(0, 720) : joined;
+   *  约束:
+   *    - 0 句合格 → return undefined,helper 早退(行为 byte-stable,等价
+   *      旧 taskFocus undefined → 字段缺席的语义；#605 T2 已退休该字段)。
+   *    - 自动模式不再由本函数拦截 — 由 boundaryAttachment 闭包上游在
+   *      `session.goal.text.length > 0` 时整段不注入闭包;此处只管 messages。
+   *    - 单句上限不限(spec 旧 240 cap 不再现)— 直接整句进入摘录。
+   *    - 渲染形态:`<prefix> — N\n1. t1\n2. t2\n…`(数字编号,chronological,
+   *      最新交代在末尾,与 extractRecentUserTasks 输出顺序一致)。
+   *    - 纯字符串派生,零 IO / 零 LLM 调用;消息结构由 turn-projection.ts
+   *      `extractRecentUserTasks` 守门。
+   */
+  private renderRecentUserTasksBoundary(
+    messages: ReadonlyArray<AnthropicNativeMessage>
+  ): string | undefined {
+    const tasks = extractRecentUserTasks(messages);
+    if (tasks.length === 0) return undefined;
+    const header = `${TASK_EXCERPT_PREFIX} — ${tasks.length}`;
+    const body = tasks.map((t, i) => `${i + 1}. ${t}`).join("\n");
+    return `${header}\n${body}`;
   }
 
   private async applyHubAutoContinue(opts: {
@@ -1682,9 +1690,8 @@ export class SessionHub {
   }
 
   /** #458 T5/T12: `/goal clear` 占位 helper (T6 slash + chat-session 调用)。
-   *  Clears both the pinned goal and taskFocus (SC: goal/taskFocus 一并清空),
-   *  records the trace clear event, and persists atomically through the same
-   *  serialize queue. */
+   *  Clears the pinned goal (SC: goal 一并清空), records the trace clear event,
+   *  and persists atomically through the same serialize queue. */
   async clearGoal(conversationId: string): Promise<void> {
     await this.serialize({
       conversationId,
@@ -1694,7 +1701,6 @@ export class SessionHub {
         const cleared: SessionFileV1 = {
           ...session,
           goal: undefined,
-          taskFocus: undefined,
           updatedAt: now,
           schemaVersion: CURRENT_SCHEMA_VERSION,
         };
@@ -1747,12 +1753,8 @@ export class SessionHub {
     readonly session: SessionFileV1;
     readonly result: RunResult;
     readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
-    /** #458 T5/T12: trace for the seed 发射点 — only emitted when this
-     *  conditionalSave actually seeds a fresh taskFocus. Undefined when
-     *  traceOut is not configured (optional chain in caller). */
-    readonly trace?: TraceService;
   }): Promise<boolean> {
-    const { conversationId, session, result, priorMessages, trace } = opts;
+    const { conversationId, session, result, priorMessages } = opts;
     if (!shouldPersistCheckpoint(result, priorMessages)) return false;
     const now = new Date().toISOString();
     const turnCount = session.turnCount + result.turnCount;
@@ -1774,13 +1776,6 @@ export class SessionHub {
               ? { lastUsage: result.lastUsage }
               : {}),
           });
-    const firstUserText = extractGoal(result.messages);
-    const shouldSeed =
-      withCheckpoint.taskFocus === undefined &&
-      !(
-        withCheckpoint.goal !== undefined && withCheckpoint.goal.text.length > 0
-      ) &&
-      shouldSeedTaskFocus(firstUserText);
     const updated: SessionFileV1 = {
       ...withCheckpoint,
       messages: result.messages,
@@ -1788,30 +1783,8 @@ export class SessionHub {
       updatedAt: now,
       schemaVersion: CURRENT_SCHEMA_VERSION,
       title: extractTitle(result.messages),
-      // Seed taskFocus once for compact: absent focus, no active non-empty
-      // goal (auto mode must not copy goal text), and shouldSeedTaskFocus
-      // (greetings / empty first-user text never become lifelong focus).
-      ...(shouldSeed
-        ? {
-            taskFocus: seedTaskFocus({
-              current: withCheckpoint.taskFocus,
-              nextText: firstUserText,
-              now,
-            }),
-          }
-        : {}),
     };
     await this.store.save({ id: conversationId, file: updated });
-    if (shouldSeed) {
-      await trace?.recordGoal({
-        id: randomUUID(),
-        sessionId: conversationId,
-        action: "seed",
-        textLen: firstUserText.length,
-        ts: now,
-        conversationId,
-      });
-    }
     return true;
   }
 

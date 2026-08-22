@@ -88,10 +88,18 @@ import {
   SessionStore,
   type GoalState,
   type SessionFileV1,
-  type TaskFocusState,
 } from "../../src/session-api/store/index.ts";
 import { assistantResult, makeCtx } from "./_fixtures.ts";
 import type { VerifyConfig } from "../../src/harness/verify/types.ts";
+
+/** Pre-#605 legacy on-disk shape — runtime type was retired in #605 T2; we
+ *  pass this through the `as SessionFileV1` cast below to exercise the
+ *  sanitize-drop path (assertion: legacy taskFocus key disappears on load). */
+interface LegacyTaskFocusState {
+  text: string;
+  updatedAt: string;
+  history?: ReadonlyArray<{ text: string; updatedAt: string }>;
+}
 
 let baseDir: string;
 let store: SessionStore;
@@ -112,7 +120,7 @@ afterEach(() => {
 async function seedSession(opts: {
   readonly id: string;
   readonly goal?: GoalState;
-  readonly taskFocus?: TaskFocusState;
+  readonly taskFocus?: LegacyTaskFocusState;
 }): Promise<void> {
   const now = "2026-01-01T00:00:00.000Z";
   const base = {
