@@ -35,8 +35,9 @@
  *    间距。userBg/assistantBg 底色块由 MessageBlocks 内部实现
  *    （paddingX={1} 水平缩进 + paddingY=0 底色贴内容）。
  *  - tail（流式 thinking / draft 面板 + liveToolRuns + legacy liveToolLines
- *    + askLine + spinner）。live 工具必须排在草稿之后，否则 write 预览会
- *    插到正在生成的回复前面。
+ *    + askLine + spinner）。尾部按真实事件顺序插入：`draftToolAnchor`
+ *    之前开始的工具渲染在草稿之上（先搜索后回答），之后开始的渲染在
+ *    草稿之下（先文本后 write 预览，#590）。
  *
  * 工具输出展开位置的区分（T3，plans/tui-render-optimization.md）：
  *  - **历史消息里的 preview**：`MessageBlocks.ToolPreviewRows` 已改为内嵌
@@ -128,6 +129,16 @@ export interface ChatViewProps {
   readonly liveToolRuns?: ReadonlyArray<LiveToolRun>;
   /** 流式累积的 masked 助手文本（草稿）。running-fg 渲染于 spinner 之前。 */
   readonly draftsMasked?: string;
+  /**
+   * 草稿锚点：草稿首个 text_delta 到达时已开始的 liveToolRuns 条数
+   * （app 层快照）。前 anchor 条工具渲染在草稿**之上**（它们先于文本
+   * 发生），其余渲染在草稿之下 —— 尾部按真实事件顺序插入，与 turn 结束
+   * 后历史 MessageBlocks 按 content 顺序的终态一致，避免结束时跳变。
+   * 缺省 0 = 全部工具在草稿之下（「先文本后 write 预览」场景，#590）。
+   * 草稿是全 turn 合并缓冲（stream-draft 不分段），text→tool→text 的
+   * 多段交错只能近似：锚点记首个 text_delta 的位置。
+   */
+  readonly draftToolAnchor?: number;
   /** 流式 thinking 草稿 masked 文本。thinkingExpanded 决定折叠 / 展开。 */
   readonly thinkingDraftMasked?: string;
   /** 最近一次 turn 的 thinking 最终秒数（app 层 turn 结束快照）。传给末条
@@ -203,6 +214,17 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     // 消息内容宽度留出滚动条 / 安全区余量（scrollbox 实测，不做行数估算）。
     const contentWidth = Math.max(1, props.cols - 2);
     const liveToolRuns = props.liveToolRuns ?? [];
+    // 草稿锚点拆分：前 anchor 条工具先于文本发生 → 渲染在草稿之上；
+    // 其余在草稿之下。钳到 [0, runs.length]（#589 只读工具完成即离开
+    // 数组，锚点可能超出当前长度）。
+    const draftAnchor = Math.max(
+      0,
+      Math.min(props.draftToolAnchor ?? 0, liveToolRuns.length)
+    );
+    const runsBeforeDraft = liveToolRuns.slice(0, draftAnchor);
+    const runsAfterDraft = liveToolRuns.slice(draftAnchor);
+    const renderLiveRuns = (runs: ReadonlyArray<LiveToolRun>) =>
+      runs.map((run) => liveToolPreviewBox(run, contentWidth));
     const bannerLines = props.bannerLines ?? [];
     const pal = tuiPalette;
     const visibleMessages = useMemo(
@@ -409,18 +431,26 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             )}
           </box>
         )}
-        {/* 流式 draft 面板（assistant 草稿）。须在 live 工具之前：同一轮
-            先出回复草稿、后出 write 预览；工具插在草稿前面会在结束后才
-            被历史 MessageBlocks 按 content 顺序纠正。 */}
+        {/* 先于草稿开始的工具（draftToolAnchor 前缀）：渲染在草稿之上 ——
+            它们先于文本发生（如「先搜索后回答」），与历史终态顺序一致。 */}
+        {runsBeforeDraft.length > 0 && (
+          <box flexDirection="column" width={contentWidth}>
+            {renderLiveRuns(runsBeforeDraft)}
+          </box>
+        )}
+        {/* 流式 draft 面板（assistant 草稿）。位置由 draftToolAnchor 决定：
+            锚点前的工具在上、锚点后的工具（如文本之后发起的 write 预览）
+            在下 —— 尾部按真实事件顺序插入，turn 结束时不再跳变（#590 只
+            固定了「草稿恒在工具之上」一半，反向场景被顶乱）。 */}
         {running && deferredDrafts.length > 0 && (
           <box width={contentWidth}>
             <Markdown text={deferredDrafts} width={contentWidth} />
           </box>
         )}
-        {/* tail：liveToolRuns（结构化）+ liveToolLines（向后兼容）。 */}
-        {(liveToolRuns.length > 0 || props.liveToolLines.length > 0) && (
+        {/* tail：锚点后的 liveToolRuns + liveToolLines（向后兼容）。 */}
+        {(runsAfterDraft.length > 0 || props.liveToolLines.length > 0) && (
           <box flexDirection="column" width={contentWidth}>
-            {liveToolRuns.map((run) => liveToolPreviewBox(run, contentWidth))}
+            {renderLiveRuns(runsAfterDraft)}
             {props.liveToolLines.map((line, i) => (
               <text key={`legacy-${i}`} fg={pal.dim} wrapMode="none">
                 {line === "" ? " " : line}
