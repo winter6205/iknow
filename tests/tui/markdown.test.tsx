@@ -350,3 +350,74 @@ test("纯空白输入渲染不崩", async () => {
   expect(frame).toBeDefined();
   await setup.renderer.destroy();
 });
+
+// ── 盘古之白（pangu spacing）：CJK ↔ ASCII 字母数字边界插半角空格 ───
+
+test("盘古之白：段落文本中英数字边界插空格", async () => {
+  const setup = await renderMd("美股4月，CNBC的页面价格是100元");
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("美股 4 月");
+  expect(frame).toContain("CNBC 的页面");
+  expect(frame).toContain("价格是 100 元");
+  // 幂等输入不变：原文无空格形态不整串出现。
+  expect(frame.includes("美股4月")).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("盘古之白：blockquote 每行同样插空格", async () => {
+  const setup = await renderMd("> 涨幅10%\n> 原文引用2");
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("涨幅 10%");
+  expect(frame).toContain("原文引用 2");
+  await setup.renderer.destroy();
+});
+
+test("盘古之白：codespan 内不插空格", async () => {
+  const setup = await renderMd("前缀 `中a文123` 后缀");
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("中a文123");
+  expect(frame.includes("中 a 文")).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("盘古之白：代码围栏块内不插空格", async () => {
+  const setup = await renderMd("```ts\nconst 数=1;\n```");
+  const frame = setup.captureCharFrame();
+  // 代码块内 CJK ↔ 数字边界保持原样，不插空格。
+  expect(frame).toContain("const 数=1;");
+  expect(frame.includes("数 =1")).toBe(false);
+  expect(frame.includes("数= 1")).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("盘古之白：blockquote 内 codespan 不插空格，外围照常插", async () => {
+  const setup = await renderMd("> 涨幅10元 `中a文123` 尾注2行");
+  const frame = setup.captureCharFrame();
+  // codespan 内容保持原样（「代码内容不碰」契约）。
+  expect(frame).toContain("中a文123");
+  expect(frame.includes("中 a 文")).toBe(false);
+  // blockquote 外围中文照常插空格。
+  expect(frame).toContain("涨幅 10 元");
+  expect(frame).toContain("尾注 2 行");
+  await setup.renderer.destroy();
+});
+
+// ── 盘古之白负向锚点：排除项刻意不插空格 ────────────────────────────
+
+test("盘古之白负向：表格单元格不插空格（列宽紧凑优先）", async () => {
+  const setup = await renderMd("| 美股4月 | 备注 |\n| --- | --- |\n| 数据1行 | ok |");
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("美股4月");
+  expect(frame).toContain("数据1行");
+  expect(frame.includes("美股 4 月")).toBe(false);
+  expect(frame.includes("数据 1 行")).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("盘古之白负向：html 块不插空格", async () => {
+  const setup = await renderMd('<div class="涨幅10%">美股4月</div>');
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("美股4月");
+  expect(frame.includes("美股 4 月")).toBe(false);
+  await setup.renderer.destroy();
+});
