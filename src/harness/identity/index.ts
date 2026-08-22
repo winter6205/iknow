@@ -42,4 +42,6 @@ export type {
   IdentitySegmentKind,
   AssemblyContext,
   SkillSummary,
+  McpServiceSummary,
+  McpToolSummary,
 } from "./assemble.js";
