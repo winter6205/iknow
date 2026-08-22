@@ -72,7 +72,7 @@ npx vitest run tests/harness/verify tests/session-api tests/cli
 - 完成判定按模式分派，禁止统一 `??` 链。
 - 自动模式：LLM 完成评价每轮（非硬失败）；信封 = `goal.text` + 截断对话 + `evidenceContext` 提示。
 - HITL：完成向 LLM 关闭；焦点只服务 compact。
-- 待写入（persist → `domain-modeling`）：CONTEXT `goal` / `taskFocus` / `task 取值公式` / `判官`，并补 **正常模式** / **自动模式**；新 ADR-0024 覆盖 0017 判官邀请与 0018 公式段。
+- persist 已落地：CONTEXT `goal` / `task 取值公式` / `判官` / **正常模式** / **自动模式**；ADR-0024 accepted；ADR-0017 Status 为部分取代。ADR-0018 Status 因 write-guard 保持 `superseded by 0026`（goal 拆分仍有效，见该文件「现行」段）。
 
 ## architecture-change-reviewer
 
@@ -88,7 +88,4 @@ minimal-change-verifier: yes — 1 个逻辑任务（模式分派 + 信封 + 焦
 
 ## 待写入
 
-- CONTEXT：`goal`、`taskFocus`、`task 取值公式`、`判官`；新增 `正常模式`、`自动模式`
-- ADR-0024：两套逻辑模块 + 自动模式停法（hard to reverse ∧ surprising ∧ trade-off）
-- ADR-0017 Status：`accepted; superseded-by ADR-0024` 仅完成向邀请段
-- ADR-0018 Status：`accepted; superseded-by ADR-0024` 仅判定公式段；字段拆分仍有效
+无（persist 已 flush）。CONTEXT 与 ADR-0024 / ADR-0017 部分取代已落地。ADR-0018 Status 保持 `superseded by 0026`（write-guard 枚举）；goal 拆分与模型零写入仍有效，见 ADR-0018「现行」段 + ADR-0026。
