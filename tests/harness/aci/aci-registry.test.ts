@@ -131,22 +131,65 @@ describe("createAciRegistry — 装配期三闸门（#224 Gate 1 / Gate 2）", (
 });
 
 describe("createAciRegistry — discovered set（#224）", () => {
-  it("discover() 命中 lazy 工具后，visibleSchemas 从下一轮起包含它", () => {
+  it("discover() 命中 lazy 工具后，visibleSchemas 尾部追加（非 lazy 注册序前缀不动）", () => {
+    // b 是 lazy 且注册在 c 之前 —— 旧行为会插回注册序 [a, b, c]；
+    // 新行为尾部追加 → [a, c, b]（非 lazy 前缀逐位不变）。
     const reg = createAciRegistry([
       makeTool({ name: "a" }),
-      makeTool({ name: "X", lazy: true }),
+      makeTool({ name: "b", lazy: true }),
+      makeTool({ name: "c" }),
     ]);
     // 初始：lazy 工具不在 visibleSchemas
     const before = reg.visibleSchemas().map((t) => t.name);
-    assert.ok(!before.includes("X"));
+    assert.deepEqual(before, ["a", "c"]);
 
-    // discover("X") 命中 → 标记 discovered
-    const hit = reg.discover("X");
+    // discover("b") 命中 → 标记 discovered
+    const hit = reg.discover("b");
     assert.ok(hit !== undefined);
 
-    // 标记后：X 进入 visibleSchemas，且插入序 = tools 顺序（a 在前，X 在后）
+    // 标记后：b 追加到尾部，非 lazy 前缀 [a, c] 逐位不变
     const after = reg.visibleSchemas().map((t) => t.name);
-    assert.deepEqual(after, ["a", "X"]);
+    assert.deepEqual(after, ["a", "c", "b"]);
+  });
+
+  it("多个 lazy 工具按 discovery 顺序追加到尾部", () => {
+    const reg = createAciRegistry([
+      makeTool({ name: "a" }),
+      makeTool({ name: "l1", lazy: true }),
+      makeTool({ name: "b" }),
+      makeTool({ name: "l2", lazy: true }),
+    ]);
+    // 刻意倒序发现（相对注册序）——追加序 = discovery 序
+    reg.discover("l2");
+    reg.discover("l1");
+    assert.deepEqual(
+      reg.visibleSchemas().map((t) => t.name),
+      ["a", "b", "l2", "l1"]
+    );
+  });
+
+  it("相邻两轮无新 discovery → visible 前缀逐位不变（KV cache 前缀稳定）", () => {
+    const reg = createAciRegistry([
+      makeTool({ name: "a" }),
+      makeTool({ name: "X", lazy: true }),
+      makeTool({ name: "c" }),
+      makeTool({ name: "Y", lazy: true }),
+    ]);
+    reg.discover("X");
+    const turn1 = reg.visibleSchemas().map((t) => t.name);
+    assert.deepEqual(turn1, ["a", "c", "X"]);
+
+    // 相邻下一轮：无新 discovery
+    const turn2 = reg.visibleSchemas().map((t) => t.name);
+    // 前 N 项逐位相等（N = turn1 长度）
+    assert.deepEqual(turn2.slice(0, turn1.length), turn1);
+    assert.deepEqual(turn2, turn1);
+
+    // 再发现一个 → 只向尾部增长，前缀仍逐位不变
+    reg.discover("Y");
+    const turn3 = reg.visibleSchemas().map((t) => t.name);
+    assert.deepEqual(turn3.slice(0, turn2.length), turn2);
+    assert.deepEqual(turn3, ["a", "c", "X", "Y"]);
   });
 
   it("discover() 未注册名 → 返回 undefined，visibleSchemas 不变", () => {
