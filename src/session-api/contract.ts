@@ -177,11 +177,25 @@ export type CompactCallerOpts = {
   readonly onStream?: (event: HarnessStreamEvent) => void;
 };
 
-/** POST /api/v1/sessions/:id/rewind — 对齐 TUI rewindSession。 */
+/** POST /api/v1/sessions/:id/rewind — 对齐 TUI rewindSession（#624: head）。 */
 export type RewindSessionResponse = {
   session: SessionSummary;
   turns: TurnDto[];
-  keepTurns: number;
+  head: string | null;
+};
+
+/** GET /api/v1/sessions/:id/rewind-targets — JSONL 全量用户锚点（含跳过分支）。 */
+export type RewindTargetDto = {
+  readonly head: string | null;
+  readonly userMessageText: string;
+  readonly fullText: string;
+  readonly anchoredAt: string;
+  readonly fillInput: boolean;
+  readonly anchorTurnIndex: number;
+};
+
+export type RewindTargetsResponse = {
+  readonly targets: ReadonlyArray<RewindTargetDto>;
 };
 
 /** GET /api/v1/skills — TUI skillCatalog.available() 投影。 */

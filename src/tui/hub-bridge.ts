@@ -23,6 +23,7 @@ import type {
   WireThinkingOverride,
 } from "../session-api/contract.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
+import type { LedgerRewindTarget } from "../session-api/store/index.js";
 import type { LoopEngineDeps } from "../harness/index.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { CompactCallerOpts } from "../session-api/contract.js";
@@ -131,13 +132,15 @@ export interface TuiBridge {
     /** plan T2:触发判据分类标识(4 选 1);T4 文案分支依据。 */
     readonly reason: CompactReason;
   }>;
-  /** 回退到更早 turn（/rewind / 双 Esc）：#622 T5 起委托 hub.rewindSession
-   *  （serialize 队列内移动持久化 head 指针，不截断文件），随后 store.load
-   *  取回投影返回。错误复用 SessionStore 既有 typed kinds，不新造。 */
+  /** 回退：#624 把持久化 head 指到事件 id（null = 空 transcript）。 */
   readonly rewindSession: (
     conversationId: string,
-    keepTurns: number
+    head: string | null
   ) => Promise<SessionFileV1>;
+  /** #624：从 JSONL 全量账本列用户锚点（含跳过分支）。 */
+  readonly listRewindTargets: (
+    conversationId: string
+  ) => Promise<ReadonlyArray<LedgerRewindTarget>>;
   readonly inflight: InflightRegistry;
   /** T3: 上下文窗口容量（tokens）。仅显示用，不触发压缩。 */
   readonly contextWindow: number;
@@ -265,11 +268,15 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     // #622 T5: rewind 改走 hub.rewindSession —— 与 postMessage/compact 同
     // 一条 per-conversation serialize 队列（此前绕开队列直调 store 裸 IO
     // 的纪律随 rewindFile 截断语义一起退役）。hub 侧落点是
-    // store.rewindToAnchor：移动持久化 head 指针，不截断文件。随后
+    // #624: hub.rewindSession(id, head) → store.rewindToHead，不截断文件。
     // store.load 取回投影（closeout 自愈后的权威视图）供 TUI 渲染。
-    rewindSession: async (conversationId, keepTurns) => {
-      await hub.rewindSession(conversationId, keepTurns);
+    rewindSession: async (conversationId, head) => {
+      await hub.rewindSession(conversationId, head);
       return store.load(conversationId);
+    },
+    listRewindTargets: async (conversationId) => {
+      const { targets } = await hub.listRewindTargets(conversationId);
+      return targets;
     },
     inflight: opts.inflight,
     contextWindow: opts.contextWindow ?? DEFAULT_CONTEXT_WINDOW,

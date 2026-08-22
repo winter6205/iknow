@@ -248,10 +248,22 @@ export function projectSessionLog(log: ParsedSessionLog): SessionFileV1 {
 export function headChainEvents(
   log: ParsedSessionLog
 ): ReadonlyArray<SessionEventRecord> {
+  return chainFromHead(log, log.head);
+}
+
+/**
+ * Ancestor chain from an arbitrary head id (null = empty). Rewind to a
+ * skipped-branch user message walks this, not the current head prefix.
+ * Throws schema_invalid on a cycle or dangling id. Pure.
+ */
+export function chainFromHead(
+  log: ParsedSessionLog,
+  head: string | null
+): ReadonlyArray<SessionEventRecord> {
   const byId = new Map(log.events.map((e) => [e.id, e]));
   const chain: SessionEventRecord[] = [];
   const seen = new Set<string>();
-  let cur = log.head;
+  let cur = head;
   while (cur !== null) {
     if (seen.has(cur)) {
       throw {

@@ -11,6 +11,8 @@ export type RewindPickerProps = {
 
 export function RewindPicker(props: RewindPickerProps) {
   const t = props.targets[props.selectedIndex];
+  const rowKey = (target: WebRewindTarget, i: number): string =>
+    target.head ?? `before-first-${i}`;
   return (
     <div className="border-b border-ink-3/30 bg-surface px-3 py-2 text-[12px]">
       <div className="mb-2 flex items-center justify-between">
@@ -24,7 +26,7 @@ export function RewindPicker(props: RewindPickerProps) {
       ) : (
         <ul className="flex max-h-40 flex-col gap-0.5 overflow-y-auto">
           {props.targets.map((target, i) => (
-            <li key={target.keepTurns}>
+            <li key={rowKey(target, i)}>
               <button
                 type="button"
                 className={`w-full truncate rounded-pill px-2 py-1 text-left font-mono ${
@@ -34,7 +36,7 @@ export function RewindPicker(props: RewindPickerProps) {
                 }`}
                 onClick={() => props.onSelect(i)}
               >
-                keepTurns={target.keepTurns} · {target.label}
+                {target.userMessageText || "(无文本)"}
               </button>
             </li>
           ))}
@@ -48,7 +50,7 @@ export function RewindPicker(props: RewindPickerProps) {
               className="text-accent"
               onClick={props.onConfirm}
             >
-              确认回退到 keepTurns={t.keepTurns}
+              确认回退
             </button>
           ) : (
             <button

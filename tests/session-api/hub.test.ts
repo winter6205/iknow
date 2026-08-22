@@ -1589,8 +1589,8 @@ describe("T5 (#622): hub.rewindSession 移动 head、skipped 链保留", () => {
     assert.equal(before.events.length, 4);
     assert.equal(before.head, "e3");
 
-    const res = await hub.rewindSession(id, 1);
-    assert.equal(res.keepTurns, 1);
+    const res = await hub.rewindSession(id, "e1");
+    assert.equal(res.head, "e1");
     assert.equal(res.session.turn_count, 1);
     assert.equal(res.turns.length, 1);
 
@@ -1633,7 +1633,7 @@ describe("T5 (#622): hub.rewindSession 移动 head、skipped 链保留", () => {
     await hub.postMessage({ conversationId: id, text: "q1" });
     await hub.postMessage({ conversationId: id, text: "q2" });
 
-    await hub.rewindSession(id, 1);
+    await hub.rewindSession(id, "e1");
 
     // A second store instance over the same pool (another entry point) sees
     // the same head and the same projection.
@@ -1675,8 +1675,8 @@ describe("T5 (#622): hub.rewindSession 移动 head、skipped 链保留", () => {
       "utf8"
     );
     const hub = makeHub(makeDeps([]));
-    const res = await hub.rewindSession(id, 1);
-    assert.equal(res.keepTurns, 1);
+    const res = await hub.rewindSession(id, "e1");
+    assert.equal(res.head, "e1");
     assert.equal(res.session.turn_count, 1);
     // Migrated: the jsonl now exists, head at the anchor, all events retained.
     const log = parseSessionJsonl(

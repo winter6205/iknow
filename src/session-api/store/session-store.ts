@@ -44,13 +44,18 @@ import type {
 } from "../../harness/index.js";
 import type { SessionStoreError } from "./errors.js";
 import { closeoutOrphanToolUses } from "./closeout-projection.js";
-import { resolveRewindAnchor, withCheckpointAnchors } from "./checkpoint.js";
+import {
+  resolveRewindAnchor,
+  splitTurns,
+  withCheckpointAnchors,
+} from "./checkpoint.js";
 import type {
   ParsedSessionLog,
   SessionEventRecord,
   SessionHeadRecord,
 } from "./jsonl.js";
 import {
+  chainFromHead,
   headChainEvents,
   jsonDeepEqual,
   messageEventId,
@@ -60,6 +65,10 @@ import {
   SESSION_JSONL_EXT,
   sessionFileToJsonl,
 } from "./jsonl.js";
+import {
+  buildRewindTargetsFromLog,
+  type LedgerRewindTarget,
+} from "./rewind-targets.js";
 import type { SessionFileV1 } from "./schema.js";
 import { extractTitle, sanitizeSessionFile } from "./schema.js";
 
@@ -360,29 +369,86 @@ export class SessionStore {
     } catch (err) {
       throw this.attachId(id, err);
     }
-    const { headIndex, turnCount } = resolveRewindAnchor(
+    const { headIndex } = resolveRewindAnchor(
       chain.map((e) => e.message),
       keepTurns
     );
     const newHead = headIndex < 0 ? null : chain[headIndex]!.id;
+    return this.persistHeadMove(id, path, log, newHead);
+  }
+
+  /**
+   * #624: move the persisted head to an event id (or null). The target may
+   * be off the current chain — skipped-branch undo. Unknown ids are
+   * schema_invalid. Same append-only write as rewindToAnchor.
+   */
+  async rewindToHead(opts: {
+    readonly id: string;
+    readonly head: string | null;
+  }): Promise<{ readonly file: SessionFileV1 }> {
+    const { id, head } = opts;
+    const path = this.jsonlPath(id);
+    const log = await this.readJsonlLog(id, path, {
+      legacyIsWriteFailed: true,
+    });
+    if (head !== null && !log.events.some((e) => e.id === head)) {
+      throw {
+        kind: "schema_invalid",
+        conversation_id: id,
+        field: "head",
+      } satisfies SessionStoreError;
+    }
+    return this.persistHeadMove(id, path, log, head);
+  }
+
+  /** #624: picker rows from the full JSONL (skipped branches included). */
+  async listRewindTargets(
+    id: string
+  ): Promise<ReadonlyArray<LedgerRewindTarget>> {
+    const path = this.jsonlPath(id);
+    const raw = await this.tryReadFile(path, id);
+    if (raw !== null) {
+      try {
+        return buildRewindTargetsFromLog(parseSessionJsonl(raw));
+      } catch (err) {
+        throw this.attachId(id, err);
+      }
+    }
+    const file = await this.load(id);
+    return buildRewindTargetsFromLog(
+      parseSessionJsonl(sessionFileToJsonl(file))
+    );
+  }
+
+  private async persistHeadMove(
+    id: string,
+    path: string,
+    log: ParsedSessionLog,
+    newHead: string | null
+  ): Promise<{ readonly file: SessionFileV1 }> {
     if (newHead === log.head) {
-      // No-op target: nothing to persist; return the current projection.
       return { file: await this.load(id) };
     }
-    const kept = chain.slice(0, headIndex + 1);
+    let kept: ReadonlyArray<SessionEventRecord>;
+    try {
+      kept = chainFromHead(log, newHead);
+    } catch (err) {
+      throw this.attachId(id, err);
+    }
     const keptMessages = kept.map((e) => e.message);
     const keptIds = kept.map((e) => e.id);
+    const turnCount = splitTurns(keptMessages).length;
     const { type: _type, ...meta } = log.header;
+    const survivors = (log.header.checkpoints ?? []).filter(
+      (c) => c.turnIndex < turnCount
+    );
     const file = sanitizeSessionFile({
       ...meta,
       messages: keptMessages,
       turnCount,
       title: extractTitle(keptMessages),
       updatedAt: new Date().toISOString(),
-      checkpoints: withCheckpointAnchors(
-        (log.header.checkpoints ?? []).filter((c) => c.turnIndex < turnCount),
-        keptIds
-      ),
+      checkpoints: withCheckpointAnchors(survivors, keptIds),
     });
     const { messages: _messages, ...fileMeta } = file;
     const jsonl = serializeSessionLog(fileMeta, [

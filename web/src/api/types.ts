@@ -122,7 +122,20 @@ export type CompactSessionResponse = {
 export type RewindSessionResponse = {
   session: SessionSummary;
   turns: TurnDto[];
-  keepTurns: number;
+  head: string | null;
+};
+
+export type RewindTargetDto = {
+  readonly head: string | null;
+  readonly userMessageText: string;
+  readonly fullText: string;
+  readonly anchoredAt: string;
+  readonly fillInput: boolean;
+  readonly anchorTurnIndex: number;
+};
+
+export type RewindTargetsResponse = {
+  readonly targets: ReadonlyArray<RewindTargetDto>;
 };
 
 export type SkillSummary = {

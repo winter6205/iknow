@@ -30,9 +30,13 @@ export function useRewindConfirm({
     if (!t) return;
     void (async () => {
       try {
-        await chat.rewind(t.keepTurns);
+        await chat.rewind(t.head);
         setRewindTargets(undefined);
-        chat.pushNotice(`已回退到 keepTurns=${t.keepTurns}`);
+        chat.pushNotice(
+          t.head === null
+            ? `已回退到 ［${t.userMessageText || "(无文本)"}］ 之前。`
+            : `已将会话头指到 ［${t.userMessageText || "(无文本)"}］。`
+        );
       } catch (e) {
         chat.pushNotice(
           `回退失败：${e instanceof Error ? e.message : String(e)}`

@@ -32,6 +32,7 @@ export {
 } from "./checkpoint.js";
 export { closeoutOrphanToolUses } from "./closeout-projection.js";
 export {
+  chainFromHead,
   headChainEvents,
   jsonDeepEqual,
   messageEventId,
@@ -47,6 +48,10 @@ export {
   type SessionJsonlError,
   type SessionJsonlRecord,
 } from "./jsonl.js";
+export {
+  buildRewindTargetsFromLog,
+  type LedgerRewindTarget,
+} from "./rewind-targets.js";
 export {
   resolveProjectSessionDir,
   SessionStore,

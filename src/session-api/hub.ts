@@ -112,6 +112,7 @@ import type {
   PostMessageResponse,
   ResetSessionResponse,
   RewindSessionResponse,
+  RewindTargetsResponse,
   SessionSummary,
   SkillSummaryDto,
   TurnDto,
@@ -1537,49 +1538,51 @@ export class SessionHub {
   }
 
   /**
-   * 回退会话到 keepTurns（TUI hub-bridge.rewindSession 的 HTTP 同源落点）。
-   * 走 serialize 队列，与 compact/postMessage 同互斥。
-   *
-   * #622 T5（spec session-jsonl-resume）：rewind = 移动持久化 head 指针到
-   * 更早的 turn 边界锚点，不再截断文件 —— 被跳过的链永留同一份 JSONL，
-   * 后续 save 也不会把它擦掉（append-only 感知）。落盘由
-   * store.rewindToAnchor 一次完成（header 刷新 + 追加 head 记录 + 镜像
-   * 刷新）。legacy .json-only 会话先经 load+save 迁移成 JSONL（T2 语义
-   * 的提前触发）再重试一次，与 appendSessionEvents 的 bootstrap 同型。
+   * 回退会话：把持久化 head 指到 `head`（null = 空 transcript）。
+   * 走 serialize 队列。#624 起入参是事件 id，不再是 keepTurns。
+   * legacy .json-only 先 load+save 迁 JSONL 再重试。
    */
   async rewindSession(
     conversationId: string,
-    keepTurns: number
+    head: string | null
   ): Promise<RewindSessionResponse> {
     return this.serialize({
       conversationId,
       work: async () => {
         let file: SessionFileV1;
         try {
-          ({ file } = await this.store.rewindToAnchor({
+          ({ file } = await this.store.rewindToHead({
             id: conversationId,
-            keepTurns,
+            head,
           }));
         } catch (err) {
-          // rewindToAnchor 对 legacy .json-only 会话报 write_failed（迁移
-          // 信号）；其余 typed/非 typed 失败原样上抛。迁移后重试仍败也上抛
-          // —— 不静默吞咽。
           if (!isSessionStoreError(err) || err.kind !== "write_failed") {
             throw err;
           }
           const legacy = await this.store.load(conversationId);
           await this.store.save({ id: conversationId, file: legacy });
-          ({ file } = await this.store.rewindToAnchor({
+          ({ file } = await this.store.rewindToHead({
             id: conversationId,
-            keepTurns,
+            head,
           }));
         }
         return {
           session: this.summarize({ file }),
           turns: projectMessagesToTurns(file.messages),
-          keepTurns: file.turnCount,
+          head: await this.store.readHead(conversationId),
         };
       },
+    });
+  }
+
+  async listRewindTargets(
+    conversationId: string
+  ): Promise<RewindTargetsResponse> {
+    return this.serialize({
+      conversationId,
+      work: async () => ({
+        targets: await this.store.listRewindTargets(conversationId),
+      }),
     });
   }
 

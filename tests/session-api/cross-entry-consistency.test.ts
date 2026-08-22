@@ -274,8 +274,8 @@ describe("T5 (#622) cross-entry rewind: hub head-move is visible to an independe
 
     // Rewind via the hub entry (serialize queue → store.rewindToAnchor):
     // head moves to the turn-0 anchor (e1), the file is NOT truncated.
-    const res = await hubC.rewindSession(id, 1);
-    assert.equal(res.keepTurns, 1);
+    const res = await hubC.rewindSession(id, "e1");
+    assert.equal(res.head, "e1");
     assert.equal(res.session.turn_count, 1);
 
     // The OTHER entry point (independent storeB) sees the same head (#120 Q6).

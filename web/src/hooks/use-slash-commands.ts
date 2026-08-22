@@ -15,7 +15,7 @@ import {
   type SlashCommandName,
 } from "../lib/slash";
 import { formatSessionInfo } from "../lib/session-info";
-import { buildRewindTargetsFromTurns } from "../lib/rewind-targets";
+import type { WebRewindTarget } from "../lib/rewind-targets";
 import {
   toWireOverride,
   type ThinkingEffort,
@@ -43,8 +43,7 @@ export type UseSlashCommandsArgs = {
   ) => void;
   readonly setMcpOpen: (open: boolean) => void;
   readonly setRewindTargets: (
-    targets:
-      ReadonlyArray<import("../lib/rewind-targets").WebRewindTarget> | undefined
+    targets: ReadonlyArray<WebRewindTarget> | undefined
   ) => void;
   readonly setRewindIndex: (n: number) => void;
   readonly handleThinkingChange: (next: ThinkingSettings) => void;
@@ -165,8 +164,7 @@ export function useSlashCommands(
               return;
             }
             try {
-              const hist = await api.getSessionHistory(id);
-              const targets = buildRewindTargetsFromTurns(hist.turns);
+              const { targets } = await api.listRewindTargets(id);
               if (targets.length === 0) {
                 chat.pushNotice("Nothing to rewind to yet.");
                 return;

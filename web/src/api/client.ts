@@ -11,6 +11,7 @@ import type {
   PostMessageResponse,
   ResetSessionResponse,
   RewindSessionResponse,
+  RewindTargetsResponse,
   SessionListItem,
   SessionsResponse,
   SkillBodyResponse,
@@ -225,15 +226,26 @@ export function compactSession(
 
 export function rewindSession(
   id: string,
-  keepTurns: number,
+  head: string | null,
   signal?: AbortSignal
 ): Promise<RewindSessionResponse> {
   return request(
     `${API}/sessions/${encodeURIComponent(id)}/rewind`,
     {
       method: "POST",
-      body: JSON.stringify({ keepTurns }),
+      body: JSON.stringify({ head }),
     },
+    signal
+  );
+}
+
+export function listRewindTargets(
+  id: string,
+  signal?: AbortSignal
+): Promise<RewindTargetsResponse> {
+  return request(
+    `${API}/sessions/${encodeURIComponent(id)}/rewind-targets`,
+    {},
     signal
   );
 }
