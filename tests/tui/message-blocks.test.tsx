@@ -570,12 +570,14 @@ test("tool_use preview 截断窗：edit_file 显示截断 diff", async () => {
 // 底色 = 渲染元数据，captureCharFrame 字符帧不含背景色 → 底色断言走结构层：
 // 底色 box 包裹后渲染不崩 + 内层文本可见。
 //
-// 间距归属变更：消息间 1 行节奏由 ChatView wrapper `<box marginTop={i===0?0:1}>`
-// 提供（chat-view.tsx:208 消息 map 循环处）。MessageBlocks 根 box 不再自带
-// marginTop——单条 MessageBlocks 渲染时首行前无 padding 空白行（T9 抖动修复
-// 后的 SSOT 边界）。本节 T7 测试用「wrapper 模拟 ChatView」模式恢复间距验证。
+// 间距归属（2026-08-22 变更）：消息间 1 行节奏由 MessageBlocks 根节点的
+// `marginTop` prop 提供（ChatView 传 `visibleIndex===0?0:1`）。此前由
+// ChatView wrapper `<box marginTop>` 提供，但折叠（hideToolSummaries）后
+// 渲染为 null 的消息仍残留 wrapper margin，连成幻影空位 —— margin 改随
+// MessageBlocks 根节点存亡。缺省无 margin：单条渲染首行前无空白行（T9
+// 抖动修复后的 SSOT 边界不变）。
 
-test("T7 多消息交替：wrapper marginTop={i===0?0:1} 提供 1 行节奏（首条无 margin）", async () => {
+test("T7 多消息交替：marginTop prop={i===0?0:1} 提供 1 行节奏（首条无 margin）", async () => {
   const messages: AnthropicNativeMessage[] = [
     { role: "user", content: [{ type: "text", text: "第一条提问" }] },
     {
@@ -584,17 +586,17 @@ test("T7 多消息交替：wrapper marginTop={i===0?0:1} 提供 1 行节奏（�
     },
     { role: "user", content: [{ type: "text", text: "第二条提问" }] },
   ];
-  // 模拟 ChatView wrapper 模式：每条消息外层 <box marginTop={i===0?0:1}>。
+  // 模拟 ChatView 接线：每条消息传 marginTop={i===0?0:1}。
   const setup = await testRender(
     <>
       {messages.map((message, i) => (
-        <box key={i} width={COLS} marginTop={i === 0 ? 0 : 1}>
-          <MessageBlocks
-            message={message}
-            cols={COLS}
-            statusMap={emptyStatusMap()}
-          />
-        </box>
+        <MessageBlocks
+          key={i}
+          message={message}
+          cols={COLS}
+          statusMap={emptyStatusMap()}
+          marginTop={i === 0 ? 0 : 1}
+        />
       ))}
     </>,
     { width: COLS, height: 40, exitOnCtrlC: false }
@@ -622,8 +624,8 @@ test("T7 user 消息：底色 box 包裹后渲染不崩，❯ 前缀保留（结
   const setup = await renderBlocks(msg);
   const frame = setup.captureCharFrame();
   expect(frame).toContain("❯ 带底色的提问");
-  // 单条 MessageBlocks 渲染：根 box 无 marginTop → 文本首行 = frame[0]，
-  // 底色块紧贴内容（paddingY=0）；间距由 ChatView wrapper 提供。
+  // 单条 MessageBlocks 渲染：marginTop prop 缺省 → 文本首行 = frame[0]，
+  // 底色块紧贴内容（paddingY=0）；消息间距由 ChatView 传 marginTop 提供。
   const lines = frame.split("\n");
   const textLine = lines.findIndex((l) => l.includes("带底色的提问"));
   expect(textLine).toBe(0);
@@ -802,6 +804,61 @@ test("bash 回归：`[运行中] bash` / 完成态字节不变", async () => {
   const doneFrame = setupDone.captureCharFrame();
   expect(doneFrame).toContain("[完成] bash · npm test");
   await setupDone.renderer.destroy();
+});
+
+test("hideToolSummaries + hideThinking：无预览的纯工具消息整体返回 null（不留空壳）", async () => {
+  // turn 结束折叠后，只含 thinking + 无预览工具（bash / 搜索类）的
+  // assistant 消息不再有任何可见内容 —— 必须返回 null，让 ChatView 的
+  // 消息间距（marginTop prop）随之消失，否则每条空消息残留 1 行幻影空白。
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "先搜一下", signature: "s" },
+      {
+        type: "tool_use",
+        id: "tu-b",
+        name: "bash",
+        input: { command: "ls" },
+      },
+    ],
+  };
+  const setup = await testRender(
+    <MessageBlocks
+      message={msg}
+      cols={COLS}
+      statusMap={new Map([["tu-b", false]])}
+      hideThinking={true}
+      hideToolSummaries={true}
+      marginTop={1}
+    />,
+    { width: COLS, height: 10, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame.trim()).toBe("");
+  await setup.renderer.destroy();
+});
+
+test("marginTop prop：根节点产顶部间距（缺省无间距，首条消息用）", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "user",
+    content: [{ type: "text", text: "带间距的提问" }],
+  };
+  const setup = await testRender(
+    <MessageBlocks
+      message={msg}
+      cols={COLS}
+      statusMap={emptyStatusMap()}
+      marginTop={1}
+    />,
+    { width: COLS, height: 10, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const lines = setup.captureCharFrame().split("\n");
+  const textLine = lines.findIndex((l) => l.includes("带间距的提问"));
+  // marginTop={1} → 文本上方恰 1 行空白。
+  expect(textLine).toBe(1);
+  await setup.renderer.destroy();
 });
 
 test("hideToolSummaries：不画 [完成] 行，write 预览仍在", async () => {
