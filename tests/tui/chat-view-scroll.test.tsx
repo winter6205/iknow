@@ -670,6 +670,182 @@ test("running：流式草稿排在 live write 预览之前（代码块不得插�
   await setup.renderer.destroy();
 });
 
+test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位", async () => {
+  // 场景：turn 进行中尾部铺 2 个已完成搜索工具 + 草稿；turn 结束后历史
+  // 消息折叠（hideToolSummaries），原先被折叠的工具区域不得留下大段空白 ——
+  // 折叠行与最终文本之间最多 1 行消息间距。
+  const finalMessages: AnthropicNativeMessage[] = [
+    msg("m-1", "user", "搜索今天的AI新闻"),
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "先搜一下", signature: "s1" },
+        {
+          type: "tool_use",
+          id: "tu-s1",
+          name: "web_search",
+          input: { query: "今天的AI新闻" },
+        },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "tu-s1",
+          content: "结果一",
+          is_error: false,
+        },
+      ],
+    },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "再搜一次", signature: "s2" },
+        {
+          type: "tool_use",
+          id: "tu-s2",
+          name: "web_search",
+          input: { query: "AI news today" },
+        },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "tu-s2",
+          content: "结果二",
+          is_error: false,
+        },
+      ],
+    },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "整理输出", signature: "s3" },
+        { type: "text", text: "以下是今天的AI新闻摘要" },
+      ],
+    },
+  ];
+  interface LifecycleApi {
+    finishTurn(): void;
+  }
+  function LifecycleHarness(props: { register: (api: LifecycleApi) => void }) {
+    const [session, setSession] = useState<TuiSessionState>(() => ({
+      ...sessionWith([msg("m-1", "user", "搜索今天的AI新闻")]),
+      runState: "running-fg" as const,
+    }));
+    const [runs, setRuns] = useState<ReadonlyArray<LiveToolRun>>([
+      {
+        id: "tu-s1",
+        name: "web_search",
+        status: "ok",
+        input: { query: "今天的AI新闻" },
+        detail: "搜索 今天的AI新闻",
+      },
+      {
+        id: "tu-s2",
+        name: "web_search",
+        status: "ok",
+        input: { query: "AI news today" },
+        detail: "搜索 AI news today",
+      },
+    ]);
+    const [draft, setDraft] = useState("以下是今天的AI新闻摘要");
+    useEffect(() => {
+      props.register({
+        finishTurn: () => {
+          act(() => {
+            setSession({ ...sessionWith(finalMessages), runState: "idle" });
+            setRuns([]);
+            setDraft("");
+          });
+        },
+      });
+    });
+    return (
+      <ChatView
+        session={session}
+        cols={COLS}
+        rows={24}
+        liveToolLines={[]}
+        liveToolRuns={runs}
+        draftsMasked={draft}
+        lastThinkingSeconds={12}
+      />
+    );
+  }
+  const holder: { api: LifecycleApi | null } = { api: null };
+  const setup = await testRender(
+    <LifecycleHarness
+      register={(api) => {
+        holder.api = api;
+      }}
+    />,
+    { width: COLS, height: 24, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  if (holder.api === null) throw new Error("harness 未注册");
+  holder.api.finishTurn();
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("思考了 12 秒 · web_search × 2");
+  expect(frame).toContain("以下是今天的AI新闻摘要");
+  expect(frame.includes("[完成] web_search")).toBe(false);
+  const lines = frame.split("\n");
+  const iFold = lines.findIndex((l) => l.includes("web_search × 2"));
+  const iText = lines.findIndex((l) => l.includes("以下是今天的AI新闻摘要"));
+  expect(iFold).toBeGreaterThanOrEqual(0);
+  expect(iText).toBeGreaterThanOrEqual(0);
+  // 折叠行 →（1 行消息间距）→ 最终文本：行距 ≤ 2；被折叠的纯工具 /
+  // 纯 tool_result 消息不得各留 1 行幻影 margin 连成空位。
+  expect(iText - iFold).toBeLessThanOrEqual(2);
+  await setup.renderer.destroy();
+});
+
+test("running：draftToolAnchor=1 时先到的工具显示在流式草稿之上（按事件顺序插入）", async () => {
+  // 场景：模型先调搜索工具、后流式输出回答 —— 工具显示应在上、草稿在下
+  // （与历史 MessageBlocks 按 content 顺序的终态一致，避免结束时跳变）。
+  // draftToolAnchor = 草稿首个 text_delta 到达时已开始的工具数（app 层快照）。
+  const session: TuiSessionState = {
+    ...sessionWith([msg("m-1", "user", "搜索今天的AI新闻")]),
+    runState: "running-fg",
+  };
+  const liveToolRuns: ReadonlyArray<LiveToolRun> = [
+    {
+      id: "tu-s",
+      name: "web_search",
+      status: "ok",
+      input: { query: "今天的AI新闻" },
+      detail: "搜索 今天的AI新闻",
+    },
+  ];
+  const draft = "以下是今天的AI新闻摘要";
+  const setup = await testRender(
+    <ChatView
+      session={session}
+      cols={COLS}
+      rows={24}
+      liveToolLines={[]}
+      liveToolRuns={liveToolRuns}
+      draftsMasked={draft}
+      draftToolAnchor={1}
+    />,
+    { width: COLS, height: 24, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  const iTool = frame.indexOf("web_search");
+  const iDraft = frame.indexOf("以下是今天的AI新闻");
+  expect(iTool).toBeGreaterThanOrEqual(0);
+  expect(iDraft).toBeGreaterThanOrEqual(0);
+  expect(iTool).toBeLessThan(iDraft);
+  await setup.renderer.destroy();
+});
+
 test("idle：当前 turn 工具折叠成计数行，不再铺 [完成] bash", async () => {
   const session = sessionWith([
     msg("m-1", "user", "写个页面"),

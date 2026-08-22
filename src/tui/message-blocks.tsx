@@ -15,13 +15,16 @@
  *  - 全部 `<box>` / `<text>` + fg 属性；禁 ink 原语（Box / Text）。
  *  - **T7 消息间距 + 底色**：user / assistant 分支用 box.backgroundColor
  *    （读 theme.ts userBg / assistantBg token）+ paddingX={1} 水平缩进
- *    （无 paddingY，底色块贴合内容）。消息间 1 行节奏由 ChatView wrapper
- *    `<box marginTop={i===0?0:1}>` 提供（首条不带顶部 margin，避免进入会话
- *    时第一行无谓下推造成间距抖动）；本组件根 box 不再产 marginTop。
+ *    （无 paddingY，底色块贴合内容）。消息间 1 行节奏由根节点 `marginTop`
+ *    prop 提供（ChatView 传 `visibleIndex===0?0:1`，首条无顶部 margin，避免
+ *    进入会话时第一行无谓下推造成的间距抖动）。2026-08-22 起 margin 挂在
+ *    本组件根节点、随消息存亡：此前由 ChatView wrapper 提供，折叠
+ *    （hideToolSummaries）后渲染为 null 的消息仍残留 wrapper margin，
+ *    每条空消息留 1 行幻影空白、连成大空位。
  *    OpenTUI 无 lineHeight API，行距 = 消息块间 margin + 块内段落 margin，不自
  *    造真 leading。2026-08-13 用户反馈 paddingY=1 让消息块上下各 1 行空白叠加
  *    marginTop 造成 3 行/消息间距「太宽了」，改为 paddingY=0（底色贴内容） +
- *    marginTop=1（消息间 1 行节奏，由 wrapper 提供）。
+ *    marginTop=1（消息间 1 行节奏）。
  *
  * 留存的子组件：
  *  - `ToolSummaryRow`：tool_use 摘要行（收口 + mark 染色 + 完成态 bash
@@ -55,6 +58,7 @@ import {
   isSubagentTool,
   subagentDisplayMark,
   SUBAGENT_TOOL_LABEL,
+  type CompletedToolPreview,
 } from "./tool-summary.js";
 import { clipOneLineVisual } from "./tool-summary.js";
 import { CompletedToolPreviewView } from "./completed-tool-preview-view.js";
@@ -110,20 +114,17 @@ function ToolSummaryRow(props: {
   );
 }
 
-/** 工具内容预览（write_file / edit_file）：仅 tool_result 已配对（ok/failed）
- *  时渲染；运行中 / 未配对只留摘要行。与 live 完成态同一
+/** 工具内容预览（write_file / edit_file）：调用方先经 `completedToolPreview`
+ *  判定非空再挂载（空预览 / 未配对不产节点 —— 折叠态下空壳 box 会让
+ *  消息无法收敛为 null，残留幻影间距）。与 live 完成态同一
  *  `completedToolPreview` + `TOOL_PREVIEW_WINDOW`。截断即折叠。 */
 function ToolPreviewRows(props: {
-  readonly tu: ToolUseBlock;
+  readonly preview: CompletedToolPreview;
   readonly cols: number;
-  readonly paired: boolean;
 }): ReactNode {
-  if (!props.paired) return null;
-  const preview = completedToolPreview(props.tu.name, props.tu.input);
-  if (preview.kind === "empty") return null;
   return (
     <box flexDirection="column">
-      <CompletedToolPreviewView preview={preview} cols={props.cols} />
+      <CompletedToolPreviewView preview={props.preview} cols={props.cols} />
     </box>
   );
 }
@@ -195,6 +196,10 @@ export function MessageBlocks(props: {
   readonly hideThinking?: boolean;
   /** idle 时当前 turn 折叠：不画 `[完成] name · detail` 行；write/edit 预览仍留。 */
   readonly hideToolSummaries?: boolean;
+  /** 消息间 1 行节奏（ChatView 传 `visibleIndex===0?0:1`）。挂在根节点上
+   *  随消息存亡 —— 渲染为 null 的消息（折叠后的纯工具 assistant、纯
+   *  tool_result user）不留幻影间距。缺省无间距。 */
+  readonly marginTop?: number;
   readonly noTrailingSelfMargin?: boolean;
 }): ReactNode {
   const { message, cols, statusMap, thinkingExpanded = false } = props;
@@ -211,9 +216,11 @@ export function MessageBlocks(props: {
       .join("\n");
     const body = texts.trim() !== "" ? texts.trim() : SYSTEM_INTERRUPT_TEXT;
     return (
-      <text fg={pal.running} wrapMode="word" width={cols}>
-        {`${SYSTEM_INTERRUPT_MARK} ${body}`}
-      </text>
+      <box flexDirection="column" marginTop={props.marginTop ?? 0}>
+        <text fg={pal.running} wrapMode="word" width={cols}>
+          {`${SYSTEM_INTERRUPT_MARK} ${body}`}
+        </text>
+      </box>
     );
   }
   if (message.role === "user") {
@@ -226,7 +233,7 @@ export function MessageBlocks(props: {
     // T7：user 底色块（pal.userBg + paddingX=1 水平缩进，无 paddingY 贴内容）。
     // 内部宽度 = cols-2（paddingX=1 两侧），text width 同步收窄避免溢出。
     return (
-      <box flexDirection="column">
+      <box flexDirection="column" marginTop={props.marginTop ?? 0}>
         <box
           flexDirection="column"
           backgroundColor={pal.userBg}
@@ -280,25 +287,31 @@ export function MessageBlocks(props: {
         </box>
       );
     } else if (block.type === "tool_use") {
+      const showSummary = props.hideToolSummaries !== true;
+      const preview: CompletedToolPreview = statusMap.has(block.id)
+        ? completedToolPreview(block.name, block.input)
+        : { kind: "empty" };
+      const showPreview = preview.kind !== "empty";
+      // 摘要隐藏且无预览 → 不产节点：空壳 box 会撑住 nodes.length，让
+      // 整条消息无法收敛为 null，折叠后残留幻影间距。
+      if (!showSummary && !showPreview) return;
       nodes.push(
         <box key={`u${i}`} flexDirection="column">
-          {props.hideToolSummaries !== true && (
+          {showSummary && (
             <ToolSummaryRow tu={block} statusMap={statusMap} cols={innerCols} />
           )}
-          <ToolPreviewRows
-            tu={block}
-            cols={innerCols}
-            paired={statusMap.has(block.id)}
-          />
+          {showPreview && (
+            <ToolPreviewRows preview={preview} cols={innerCols} />
+          )}
         </box>
       );
     }
   });
   if (nodes.length === 0) return null;
   // T7：assistant 底色块（pal.assistantBg + paddingX=1 水平缩进，无 paddingY
-  // 贴内容）+ 根 marginTop=1（消息间 1 行节奏）。
+  // 贴内容）；消息间 1 行节奏由根节点 marginTop prop 提供（随消息存亡）。
   return (
-    <box flexDirection="column">
+    <box flexDirection="column" marginTop={props.marginTop ?? 0}>
       <box
         flexDirection="column"
         backgroundColor={pal.assistantBg}
