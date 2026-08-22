@@ -28,7 +28,10 @@ export interface AciRegistry {
    * 路径对陈旧 config 名不抛）。
    */
   readonly unregisterExternal: (names: ReadonlyArray<string>) => void;
-  /** 核心（非 lazy）工具 schema —— 默认进 prompt 的集合。 */
+  /**
+   * 进 prompt 的集合：非 lazy 全量（注册序）+ 已发现 lazy（discovery 序
+   * 尾部追加，保前缀稳定）。
+   */
   readonly visibleSchemas: () => ReadonlyArray<ToolDef>;
   /** 延迟加载：按需检索某工具 schema（含 lazy 的），未注册返回 undefined。 */
   readonly discover: (name: string) => ToolDef | undefined;
@@ -38,8 +41,9 @@ export interface AciRegistry {
  * 构造 ACI registry：
  *   - inner = createRegistry(tools)（协议 registry，交给 createExecutor）；
  *   - catalog 持有 AciToolDef 全量（权限层与延迟加载共用）；
- *   - visibleSchemas 过滤 !lazy + discovered 名录中命中的 lazy（按 tools
- *     顺序插入，去重）；discover() 调用即标记，下一轮起进入 promptTools()
+ *   - visibleSchemas = 非 lazy 全量（注册序，逐位稳定）+ 已发现 lazy 按
+ *     discovery 顺序尾部追加（尾部追加保 KV cache 前缀，#631）；discover()
+ *     调用即标记，下一轮起进入 promptTools()
  *     （#224 discovered set 状态 — 闭包于 createAciRegistry，不跨 session
  *     持久化，与 spec Boundaries Never 守门）；
  *   - discover 按名返回（含 lazy 工具），命中时记 discovered 标记；
@@ -135,14 +139,24 @@ export function createAciRegistry(
   };
 
   // #224 discovered set：本 run 内被检索过的工具名（闭包状态，不跨 session
-  // 持久化）。discover() 命中时 add；visibleSchemas() 按 tools 顺序拼
-  // 非 lazy + 已发现的 lazy（含去重），从下一轮起进入 promptTools()。
+  // 持久化）。discover() 命中时 add；visibleSchemas() = 非 lazy 全量（注册
+  // 序，逐位稳定）+ 已发现的 lazy 按 discovery 顺序尾部追加。尾部追加而非
+  // 插回注册序：相邻轮无新 discovery 时可见前缀逐位不变，保 KV cache 前缀
+  // 命中（#631）。
   const discovered = new Set<string>();
 
-  const visibleSchemas = (): ReadonlyArray<ToolDef> =>
-    [...tools, ...externalByExt.values()].filter(
-      (t) => !t.aci.lazy || discovered.has(t.name)
-    );
+  const visibleSchemas = (): ReadonlyArray<ToolDef> => {
+    const all = [...tools, ...externalByExt.values()];
+    // #224 不变式：非 lazy 注册序前缀逐位稳定——即使某非 lazy 工具被
+    // discover()（tool_search 对全量工具生效），也不挪位。尾部只追加
+    // 已发现的 **lazy** 工具（发现顺序）；lazy 工具不在前缀里，无需去重。
+    const prefix = all.filter((t) => !t.aci.lazy);
+    const discoveredTail = [...discovered].flatMap((name) => {
+      const def = byName.get(name) ?? externalByExt.get(name);
+      return def !== undefined && def.aci.lazy ? [def] : [];
+    });
+    return [...prefix, ...discoveredTail];
+  };
 
   const discover = (name: string): ToolDef | undefined => {
     const hit = byName.get(name) ?? externalByExt.get(name);

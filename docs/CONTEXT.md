@@ -200,6 +200,9 @@ _Avoid_: Pre 失败 fail-open 静默放行；Post 异常推翻已成功的调用
 **secrets guard**: (#126 决议 D6) Pre 缝第一个真实产品消费者——密钥模式拦截钩子，拦「工具调用参数内容夹带密钥/凭据」，与 hard-wall（命令形态 + 敏感路径）互补不重叠；模式来源双层：代码内置默认集 + 项目 settings 覆盖/追加，接入 `createAciExecutor` 产品路径。
 _Avoid_: 与 hard-wall 职责混同；Pre 缝保持零产品消费者；把它当密钥防护唯一道防线
 
+**渐进式披露 (progressive disclosure)**: (#631) 便宜索引常驻 + 重载荷按需的两级披露——索引档（skill 清单 / `<mcp_tools_overview>` MCP 概览）每轮随 system prompt 在场，重载荷（SKILL.md 全文 / 工具完整 schema）经 `skill` / `tool_search` 按需拉取。iknow 机制 = lazy 注册 + `discover()` 命中 + `visibleSchemas` 组合（非 lazy 注册序前缀字节级不变 + discovered 按发现序尾部追加，保 KV cache 前缀）。
+_Avoid_: 把发现的工具插回注册序中部（破 KV cache 前缀）；只延迟载荷不给索引线索；概览段发空串占位
+
 ## Relationships
 
 - **run() messages -> adapter streaming arm -> interpretMessage**: harness LLM path（流事件以 `HarnessStreamEvent` 经 `onStream` 暴露）

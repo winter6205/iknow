@@ -6,7 +6,8 @@
  * tool_search 同语义，非移植）：
  *   - 输入 `query`（名字/描述大小写不敏感子串）或 `names`（精确工具名列表），
  *     两字段均可选；"至少一个" 语义由 handler 入口判定 —— 空参 =
- *     `"(no matches)"`（合法返回，非错误），不交给 ajv（D9）。
+ *     `"(no matches) Rephrase ..."`（合法返回，非错误；带换词引导），
+ *     不交给 ajv（D9）。
  *   - 匹配 = 遍历 catalog.all()：`names` 非空 → 精确名 includes；否则 →
  *     name/description 子串 contains（大小写不敏感）。
  *   - 命中后逐名调 `getRegistry().discover(name)` 副作用：标记被检索过的
@@ -46,8 +47,13 @@ interface ToolSearchInput {
   readonly names?: unknown;
 }
 
-/** 无匹配 / 空参的合法返回（与 OpenHarness 同语义：缺参 = 无结果）。 */
-const NO_MATCHES = "(no matches)";
+/**
+ * 无匹配 / 空参的合法返回（与 OpenHarness 同语义：缺参 = 无结果）。
+ * T3：沿用 `skill.ts` "Use skill_search to find available skills." 先例 ——
+ * 返回不是裸标记,而是带换词引导（换词重搜 / `names` 精确取名）。
+ */
+export const NO_MATCHES =
+  "(no matches) Rephrase `query` with a different keyword, or pass exact tool names via `names`.";
 
 /**
  * 工厂：createToolSearchTool(deps) — 工具检索工具（第 9 件）。
@@ -107,7 +113,7 @@ export function createToolSearchTool(deps: ToolSearchDeps): AciToolDef {
   return Object.freeze({
     name: "tool_search",
     description:
-      "Discover tools beyond the current prompt — pass `query` (case-insensitive substring on tool name / description) or `names` (exact list) to pull ToolDef JSON. Returns one JSON object per line `(name, description, inputSchema)`; empty input or no match → `(no matches)`. Side effect: marks retrieved tools as discovered so they surface in the next prompt.",
+      "Discover tools beyond the current prompt — search scope covers all registered tools, including `mcp__`-prefixed MCP tools. Search first, then use: pass `query` (case-insensitive substring on tool name / description) or `names` (exact list) to pull ToolDef JSON. Returns one JSON object per line `(name, description, inputSchema)`; empty input or no match → `(no matches)` with guidance to rephrase `query` or pass exact `names`. Side effect: marks retrieved tools as discovered so they surface in the next prompt.",
     inputSchema: {
       type: "object",
       properties: {

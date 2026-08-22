@@ -33,7 +33,7 @@ import type { PermissionModeContext } from "./permission/modes.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
 import type { AciRegistry } from "./aci/aci-registry.js";
 import { errorMessage } from "./errors.js";
-import type { AciCatalog } from "./aci/types.js";
+import type { AciCatalog, AciToolDef } from "./aci/types.js";
 import { createLspNotifier } from "./lsp/notifier.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import type { Registry } from "./tools/types.js";
@@ -56,6 +56,8 @@ import { ValidationError } from "../shared/errors.js";
 import {
   createIknowSystemResolver,
   initIknowWorkspaceSafe,
+  type McpServiceSummary,
+  type McpToolSummary,
 } from "./identity/index.js";
 import {
   resolveProjectMemoryDir,
@@ -529,6 +531,11 @@ export async function buildHarnessEngine(
   //   shutdown 句柄透出 BuiltEngine.shutdown,RuntimeBundle 生命周期钩子
   //   (cli.ts SIGINT/SIGTERM 接线)在进程退出前调它,manager 关闭所有 client +
   //   取消 in-flight + SIGTERM stdio 子孙(SC11)。
+  // #631 T2:MCP 概览段快照源 —— deps.system 每 turn 装配期现读
+  // (manager.status() × catalog mcp__* 工具),不阻塞异步连接。
+  // const 别名:闭包内保留 narrowing(let 绑定进闭包会被 TS 重新加宽)。
+  const mcpSnapshotSource = mcpManager;
+  const mcpSnapshotCatalog = reg.catalog;
   const deps: LoopEngineDeps = {
     adapter,
     executor,
@@ -580,6 +587,19 @@ export async function buildHarnessEngine(
           description: entry.description ?? "",
           ...(entry.disabled ? { disabled: true } : {}),
         })),
+      // #631 T2:MCP 概览段注入缝(渐进式披露"索引常驻档")—— 仅 mcpManager
+      // 在场(chat/tui/serve)时注入;ask 无 manager → 缝缺席 → 段缺席
+      // (字节级零变化,守 KV 缓存稳定契约)。每 turn 装配期快照:异步连接
+      // 的服务连上后下一 turn 自然出现。
+      ...(mcpSnapshotSource
+        ? {
+            mcp: () =>
+              projectMcpServiceSummaries(
+                mcpSnapshotSource,
+                mcpSnapshotCatalog.all()
+              ),
+          }
+        : {}),
       // #558 T2: 默认路径停止注入 coordinator 段 — 引导落点收敛到
       // spawn_subagent 工具 description (T1 SSOT)。装配缝保留:
       // 调用方可显式传入 coordinatorText 让 createIknowSystemResolver 渲染该段
@@ -676,5 +696,38 @@ function createDynamicExecutorRegistry(
       }
       return v;
     },
+  });
+}
+
+/**
+ * #631 T2 — MCP 概览段投影（deps.system 注入缝的装配侧,纯只读快照）。
+ *
+ * 数据源（均为既有导出面,不改 manager 行为）：
+ *   - `manager.status()` → 服务名 + 状态机快照（装配层只渲染 connected）；
+ *   - `catalogTools`（reg.catalog.all(),含 registerExternal 注入的
+ *     `mcp__<service>__<tool>` 动态工具）→ 工具名 + description。
+ *
+ * 工具按 `mcp__<server.name>__` 前缀归属服务 —— 与注册侧形态一致：
+ * mcp/manager.ts registerTools 用原始服务名 + 仅工具段被 `sanitize`
+ * （`mcp__${slot.config.name}__${sanitize(t.name)}`），故此处不得
+ * sanitize 服务名，否则含特殊字符的服务其工具会静默漏出概览。
+ * 每装配周期调一次,不 await 任何连接。
+ */
+function projectMcpServiceSummaries(
+  manager: McpManager,
+  catalogTools: ReadonlyArray<AciToolDef>
+): ReadonlyArray<McpServiceSummary> {
+  return manager.status().map((server) => {
+    const prefix = `mcp__${server.name}__`;
+    const tools: McpToolSummary[] = [];
+    for (const def of catalogTools) {
+      if (!def.name.startsWith(prefix)) continue;
+      tools.push(
+        def.description.length > 0
+          ? { name: def.name, description: def.description }
+          : { name: def.name }
+      );
+    }
+    return { name: server.name, state: server.state, tools };
   });
 }

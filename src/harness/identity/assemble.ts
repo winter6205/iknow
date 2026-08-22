@@ -62,6 +62,11 @@ export interface AssemblyContext {
   readonly memoryResolver?: () => Promise<string | undefined>;
   readonly toolList?: () => ReadonlyArray<string> | undefined;
   readonly skills?: () => ReadonlyArray<SkillSummary> | undefined;
+  /** #631 T2 MCP 概览段注入缝 (可选,渐进式披露"索引常驻档"):每 turn 装配期
+   *  现读快照 —— 异步连接的服务连上后下一装配周期自然出现,不阻塞不空等。
+   *  缺席 / 返回空 / 过滤后无 connected 服务 → 段缺席 (KV 缓存字节级稳定);
+   *  调用抛错 → console.warn + 跳过 (降级契约对齐 memory_layer)。 */
+  readonly mcp?: () => ReadonlyArray<McpServiceSummary> | undefined;
   /** #558 T2 coordinator 段注入缝 (可选):默认路径(build-engine 在
    *  chat/tui/serve 自建 manager)不再注入 —— 引导落点已迁到 spawn_subagent
    *  工具 description (#557 T1 SSOT)。调用方显式传入非空字符串仍渲染
@@ -77,6 +82,29 @@ export interface SkillSummary {
   readonly description: string;
   readonly disabled?: boolean;
 }
+
+/** #631 T2 MCP 概览段工具元素形态(最小投影)。description 缺席/空 →
+ *  只渲染工具名。 */
+export interface McpToolSummary {
+  readonly name: string;
+  readonly description?: string;
+}
+
+/** #631 T2 MCP 概览段服务元素形态(最小投影,与 mcp/manager McpServerState
+ *  同词汇表但不跨模块导入——装配层只依赖字面量联合)。仅 "connected" 服务
+ *  入段:pending(还在连) / failed / disabled 整体不渲染。
+ *  豁免记录(对齐 #635 "每服务名+一句话描述"):mcp 只读元数据面
+ *  (manager.status / config)当前无服务级描述来源,description 为预留
+ *  字段,服务行暂只渲染名字;待 config 承载描述后启用。 */
+export interface McpServiceSummary {
+  readonly name: string;
+  readonly state: "pending" | "connected" | "failed" | "disabled";
+  readonly description?: string;
+  readonly tools: ReadonlyArray<McpToolSummary>;
+}
+
+/** #631 T2 工具短描述限值:取 description 首行,超过此长度截断 + 省略号。 */
+export const MCP_TOOL_SHORT_DESCRIPTION_MAX = 120;
 
 /** IKNOW-196 入口范围判定。对话型入口(chat / tui / serve)激活 BOOTSTRAP;
  *  仅脚本型(ask)跳过。serve 是同一主体的浏览器交互面(iknow serve + SPA),
@@ -104,6 +132,8 @@ export function createIknowSystemResolver(opts: {
   readonly toolList?: () => ReadonlyArray<string> | undefined;
   /** #337 T6 skills 注入缝 (可选):见 AssemblyContext.skills 注释。 */
   readonly skills?: () => ReadonlyArray<SkillSummary> | undefined;
+  /** #631 T2 MCP 概览段注入缝 (可选):见 AssemblyContext.mcp 注释。 */
+  readonly mcp?: () => ReadonlyArray<McpServiceSummary> | undefined;
   /** #558 T2 coordinator 段注入缝 (可选):默认路径(build-engine 在
    *  chat/tui/serve 自建 manager)不再注入 —— 引导落点已迁到 spawn_subagent
    *  工具 description (#557 T1 SSOT)。调用方显式传入非空字符串仍渲染
@@ -122,6 +152,7 @@ export function createIknowSystemResolver(opts: {
       ...(opts.memoryResolver ? { memoryResolver: opts.memoryResolver } : {}),
       ...(opts.toolList ? { toolList: opts.toolList } : {}),
       ...(opts.skills ? { skills: opts.skills } : {}),
+      ...(opts.mcp ? { mcp: opts.mcp } : {}),
       ...(opts.coordinatorText
         ? { coordinatorText: opts.coordinatorText }
         : {}),
@@ -158,6 +189,26 @@ export async function assembleIdentityContext(
   const skills = ctx.skills?.();
   if (skills !== undefined) {
     segments.push(skillsSegment(skills));
+  }
+  // #631 T2 加性段 `<mcp_tools_overview>`(渐进式披露"索引常驻档"):append 在
+  // skills 之后、coordinator 之前,不触碰 LOCKED 顺序。装配期现读快照 ——
+  // 异步连接的服务下一周期自然出现。降级契约对齐 memory_layer:缝缺席 /
+  // 返回空 / 过滤后无 connected 服务 → 段缺席(字节级零变化);调用抛错 →
+  // console.warn + 跳过,不污染其余段。
+  if (ctx.mcp) {
+    let summaries: ReadonlyArray<McpServiceSummary> | undefined;
+    try {
+      summaries = ctx.mcp();
+    } catch (err) {
+      console.warn(
+        `[identity/assemble] mcp overview resolver failed: ${String(err)}`
+      );
+      summaries = undefined;
+    }
+    if (summaries) {
+      const overview = mcpOverviewSegment(summaries);
+      if (overview !== undefined) segments.push(overview);
+    }
   }
   // #361 T8 加性段 subagent coordinator slot:append 在最末,不触碰 LOCKED 顺序。
   // 仅 subagentManager 装配 (chat/tui/serve) 时 build-engine 注入
@@ -278,6 +329,55 @@ export function skillsSegment(skills: ReadonlyArray<SkillSummary>): string {
   }
   const body = visible.map((s) => `${s.name}: ${s.description}`).join("\n");
   return `<available_skills>\n${body}\n</available_skills>`;
+}
+
+/** #631 T2 工具短描述:取首行 + 限值截断(~120 字符);缺席/空/空行 →
+ *  undefined(调用方只渲染工具名)。 */
+function shortToolDescription(
+  description: string | undefined
+): string | undefined {
+  if (description === undefined || description.length === 0) return undefined;
+  const firstLine = description.split("\n", 1)[0].trim();
+  if (firstLine.length === 0) return undefined;
+  if (firstLine.length <= MCP_TOOL_SHORT_DESCRIPTION_MAX) return firstLine;
+  return `${firstLine.slice(0, MCP_TOOL_SHORT_DESCRIPTION_MAX)}…`;
+}
+
+/** #631 T2 `<mcp_tools_overview>` 段渲染(渐进式披露"索引常驻档"):
+ *  每 connected 服务一行(名字 [+ description]),其下每工具一行
+ *  (名字 [+ 短描述]),末行引导 tool_search 精查。
+ *  加性段,不触碰 IKNOW_ASSEMBLY_ORDER;仅渲染 state === "connected" 的服务
+ *  (pending 还在连 / failed / disabled 整体不渲染);过滤后为空 →
+ *  返回 undefined(装配层不追加,绝不写空串)。 */
+export function mcpOverviewSegment(
+  services: ReadonlyArray<McpServiceSummary>
+): string | undefined {
+  const connected = services
+    .filter((s) => s.state === "connected")
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name));
+  if (connected.length === 0) return undefined;
+  const lines: string[] = [];
+  for (const service of connected) {
+    lines.push(
+      service.description && service.description.trim().length > 0
+        ? `${service.name}: ${service.description}`
+        : service.name
+    );
+    const tools = service.tools
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name));
+    for (const tool of tools) {
+      const short = shortToolDescription(tool.description);
+      lines.push(
+        short === undefined ? `- ${tool.name}` : `- ${tool.name}: ${short}`
+      );
+    }
+  }
+  lines.push(
+    "Use tool_search to look up the full schema and details of any tool listed above before calling it."
+  );
+  return `<mcp_tools_overview>\n${lines.join("\n")}\n</mcp_tools_overview>`;
 }
 
 /** #361 T8 subagent coordinator 引导文本正文 (SSOT,不含段标题——标题由
