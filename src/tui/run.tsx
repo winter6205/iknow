@@ -19,6 +19,9 @@
  * 错误路径（specs/321 Error Paths E1/E2）：渲染器构造 / 运行抛错 → 类型化
  * stderr 消息 + 退出码 1。runTui 有且仅有一个 catch 点，全部清理（destroy
  * 渲染器）收口于该点。createRenderer 注入口保留供测试诱导。
+ * 另有第三条错误路径（catch 之外）：非 TTY fail-fast —— 生产路径（未注入
+ * createRenderer）且 stdin/stdout 非交互终端时，装配前直接类型化 stderr +
+ * 退出码 1（新版 OpenTUI 非 TTY 可建 renderer，无此守卫会挂死）。
  */
 import {
   CliRenderEvents,
@@ -97,6 +100,20 @@ const RENDERER_CONFIG: CliRendererConfig = {
  * cli.ts 将返回值落为 process.exitCode。
  */
 export async function runTui(options: RunTuiOptions = {}): Promise<number> {
+  // 非 TTY fail-fast：OpenTUI 新版在非 TTY 下也能成功创建 renderer（不再
+  // 抛错），不拦截会一路装配到 whenDestroyed 永久挂死（管道 / 重定向场景
+  // 实测挂起）。此处在任何装配与渲染器创建前拦截，无资源需清理，故不进
+  // 下方单一 catch。注入 createRenderer 的测试路径（E1/E2）跳过本检查 —
+  // 它们诱导的是渲染器错误路径，与 TTY 探测无关。
+  if (
+    options.createRenderer === undefined &&
+    (!process.stdin.isTTY || !process.stdout.isTTY)
+  ) {
+    process.stderr.write(
+      `${TUI_RENDERER_ERROR_PREFIX}：未检测到交互终端（TTY），TUI 需在交互终端中运行（管道/重定向场景请用非交互子命令）\n`
+    );
+    return 1;
+  }
   const factory = options.createRenderer ?? createCliRenderer;
   let renderer: CliRenderer | undefined;
   let onQuitBridge: { destroy: () => void } | undefined;
