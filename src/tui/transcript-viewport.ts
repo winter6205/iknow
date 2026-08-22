@@ -28,12 +28,16 @@ function resolveItemHeight(
   raw: number | undefined,
   placeholder: number
 ): number {
-  if (!Number.isFinite(raw) || raw <= 0) return placeholder; // EXIT: invalid height → placeholder, never blank
+  if (raw === undefined || !Number.isFinite(raw) || raw <= 0) {
+    return placeholder; // EXIT: missing|invalid height → placeholder, never blank
+  }
   return Math.trunc(raw);
 }
 
 function resolvePlaceholder(raw: number | undefined): number {
-  if (!Number.isFinite(raw) || raw <= 0) return VIEWPORT_PLACEHOLDER_HEIGHT; // EXIT
+  if (raw === undefined || !Number.isFinite(raw) || raw <= 0) {
+    return VIEWPORT_PLACEHOLDER_HEIGHT; // EXIT
+  }
   return Math.trunc(raw);
 }
 
@@ -46,7 +50,9 @@ function resolveOverscan(
   raw: number | undefined,
   viewportHeight: number
 ): number {
-  if (!Number.isFinite(raw) || raw < viewportHeight) return viewportHeight; // EXIT: missing|below one viewport
+  if (raw === undefined || !Number.isFinite(raw) || raw < viewportHeight) {
+    return viewportHeight; // EXIT: missing|below one viewport
+  }
   return Math.trunc(raw);
 }
 
