@@ -8,8 +8,8 @@
  *    用户位置（不跟随）；滚轮回到底部后追加恢复跟随（落底即落回 sticky
  *    位置，_hasManualScroll 复位）；
  *  - 强制滚底通道：ChatViewHandle.scrollToBottom()（用户发新消息 / turn 完成）；
- *  - 长会话（100 条 >3 屏）渲染不崩，布局位置经 ref 直查
- *    （scrollTop / scrollHeight / viewport.height），不靠行数估算；
+ *  - 长会话（100 条 >3 屏）滚动文档全量：顶见最早气泡，无尾窗 stub；
+ *    布局位置经 ref 直查（scrollTop / scrollHeight / viewport.height），不靠行数估算；
  *  - 空会话（0 条消息）渲染收敛不崩（empty 边界）；
  *  - session 接线：TuiSessionState.messages + runState / 流式草稿 / liveTool /
  *    banner 段都能正确渲染（MessageBlocks 视觉一致性）。
@@ -303,7 +303,7 @@ test("强制滚底通道：scrollToBottom() 从上滚位置直达底部并恢复
   await setup.renderer.destroy();
 });
 
-test("长会话（100 条 >3 屏）只 mount 尾窗：早期消息不进画面", async () => {
+test("长会话（100 条）滚动文档全量：顶见最早、底见最末、无尾窗 stub", async () => {
   const initial = sessionWith(makeMessages(100));
   const { setup, api } = await renderChat(initial);
   const sb = api.handle!.scrollbox!;
@@ -313,46 +313,14 @@ test("长会话（100 条 >3 屏）只 mount 尾窗：早期消息不进画面",
   sb.scrollTop = 0;
   await setup.waitForVisualIdle();
   const top = setup.captureCharFrame();
-  expect(top).toContain("↑ 68 条更早的消息");
-  expect(top).toContain("msg-068");
-  expect(top).not.toContain("msg-000");
-  expect(top).not.toContain("reply-000");
+  expect(top).toContain("msg-000");
+  expect(top.includes("条更早的消息")).toBe(false);
   api.handle!.scrollToBottom();
   await setup.waitForVisualIdle();
   api.appendUser("追加的长会话尾巴");
   await setup.waitForVisualIdle();
   expect(sb.scrollTop).toBe(maxScrollTop(api.handle!));
   expect(setup.captureCharFrame()).toContain("追加的长会话尾巴");
-  await setup.renderer.destroy();
-});
-
-test("revealOlder 分页揭示更早消息直到全量", async () => {
-  const initial = sessionWith(makeMessages(100));
-  const { setup, api } = await renderChat(initial);
-  const sb = api.handle!.scrollbox!;
-  sb.scrollTop = 0;
-  await setup.waitForVisualIdle();
-  expect(setup.captureCharFrame()).not.toContain("msg-000");
-  await act(async () => {
-    api.handle!.revealOlder();
-  });
-  await setup.waitForVisualIdle();
-  sb.scrollTop = 0;
-  await setup.waitForVisualIdle();
-  expect(setup.captureCharFrame()).not.toContain("msg-000");
-  await act(async () => {
-    api.handle!.revealOlder();
-  });
-  await setup.waitForVisualIdle();
-  await act(async () => {
-    api.handle!.revealOlder();
-  });
-  await setup.waitForVisualIdle();
-  sb.scrollTop = 0;
-  await setup.waitForVisualIdle();
-  const frame = setup.captureCharFrame();
-  expect(frame).toContain("msg-000");
-  expect(frame.includes("条更早的消息")).toBe(false);
   await setup.renderer.destroy();
 });
 

@@ -52,10 +52,7 @@
    - **Inherits:** spec Never do「默认只 mount 最近 N 条」；ChatView 回到 `visibleMessages` 全量 map；无 stub、无 `revealOlder`。
    - **Surface:** TUI ChatView
    - **Acceptance:** 100 条会话 `scrollTop = 0` 的画面含最早用户气泡，**不含**「条更早的消息」；空会话与 sticky / `scrollToBottom` 既有测仍绿；尾窗模块与 `plans/tui-transcript-mount-window.md` 不在树上。
-   - Status: [ ] pending
-   - [blocks: T1]
-
-3. **过长会话按视口挂载，滚动文档仍全量** — tag: `[implementation]`
+   - Status: [x] done，滚动文档仍全量** — tag: `[implementation]`
    - **Inherits:** spec Invariants 3–6：视口+overscan；spacer 保高度；高度来自布局或常量占位；live tail 不进集合；短会话与 T2 观感相同。
    - **Surface:** TUI ChatView（窗口计算独立一层，不把算法内联进渲染函数）
    - **Acceptance:** 纯函数 5 类边界测绿；100 条滚到顶仍见最早气泡、贴底仍见最后一条；内容不足一屏时无 spacer 缺块、无 stub；挂载区间在 overflow 下明显短于总条数。既有 sticky / 强制滚底不倒退。
