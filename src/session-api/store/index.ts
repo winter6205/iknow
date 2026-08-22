@@ -22,13 +22,31 @@ export {
 } from "./schema.js";
 export {
   appendCheckpoint,
-  rewindFile,
+  resolveRewindAnchor,
   shouldPersistCheckpoint,
   splitTurns,
   toInterruptReason,
   turnSliceEnd,
+  withCheckpointAnchors,
   type TurnSlice,
 } from "./checkpoint.js";
+export { closeoutOrphanToolUses } from "./closeout-projection.js";
+export {
+  headChainEvents,
+  jsonDeepEqual,
+  messageEventId,
+  parseSessionJsonl,
+  projectSessionLog,
+  serializeSessionLog,
+  SESSION_JSONL_EXT,
+  sessionFileToJsonl,
+  type ParsedSessionLog,
+  type SessionEventRecord,
+  type SessionHeadRecord,
+  type SessionHeaderRecord,
+  type SessionJsonlError,
+  type SessionJsonlRecord,
+} from "./jsonl.js";
 export {
   resolveProjectSessionDir,
   SessionStore,

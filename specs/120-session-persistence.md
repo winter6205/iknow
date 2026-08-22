@@ -1,5 +1,7 @@
 # Spec: 会话持久化增强 + 跨入口共享池（#120 server 侧）
 
+> **Q1 更新（2026-08-22）：** 「本期不迁 JSONL」已被 `specs/session-jsonl-resume.md` / ADR-0027 覆盖。本 spec 其余（`~/.iknow` 池、sanitize、#120 Q6 跨入口一致）仍有效。
+
 > 来源：`wayfinder:grilling` #120（M3 会话持久化与续接设计，6 问收口）+ 本 spec grilling 会话（操作员逐题裁决，2026-08-04）。
 > TUI 入口的交互骨架独立成稿：`specs/146-tui.md`（blocked by 本 spec）；TUI 视觉稿 = issue #154。
 > 本 spec 覆盖：存储根目录 / 项目命名空间 / SessionFileV1 schema v2 / sanitize 前向兼容 / summary 提取 / chat 外壳只读化。**不含** TUI 命令本身、并发写文件锁、流式。

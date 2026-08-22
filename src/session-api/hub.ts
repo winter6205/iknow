@@ -83,7 +83,6 @@ import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
 import {
   appendCheckpoint,
-  rewindFile,
   CURRENT_SCHEMA_VERSION,
   extractTitle,
   pinGoal,
@@ -91,6 +90,7 @@ import {
   toInterruptReason,
   validateGoalText,
 } from "./store/index.js";
+import { recognize } from "../harness/secret-roundtrip/index.js";
 import type { GoalStatus } from "./store/index.js";
 import { applyTransition, assertValidTransition } from "./goal/index.js";
 import {
@@ -944,6 +944,28 @@ export class SessionHub {
                 env: this.overrideEnv,
               })
             : baseDeps;
+        // #622 T5: 懒提交 user query。engine 自己不 commit query（只 commit
+        // assistant / tool_result），若链上缺 query，投影与链永远差一条，
+        // 每次 post-turn save 都被迫走 re-root fork（rewind 后新链也无法
+        // parent 在 rewind 锚点上）。改为把 query 前缀进本 postMessage 的
+        // 第一次 engine commit：链与投影对齐（save 走 identical /
+        // extension），且零进展 turn（protocolError / emptyFinalResponse
+        // 在首次 commit 前停止）永不落 query —— 维持 #120 丢弃裁决。
+        // queryMessage 必须与 engine 的构造逐字节一致（secrets 占位符替换
+        // + adapter.encodeUserText，loop-engine.ts run() 同款逻辑），否则
+        // save 的 LCP 对齐会在 query 处分叉。
+        let queryCommitPending = true;
+        let queryCommitPrefix: ReadonlyArray<AnthropicNativeMessage> = [];
+        const buildUserCommit = (userText: string): AnthropicNativeMessage => {
+          let effective = userText;
+          if (
+            deps.secretsMode !== "block" &&
+            deps.secretRegistry !== undefined
+          ) {
+            effective = recognize(userText, deps.secretRegistry).replaced;
+          }
+          return deps.adapter.encodeUserText(effective);
+        };
         // T6: wrap the executor with the violation kill-session hook. Serve is
         // long-running and multi-conversation, so on kill we (a) write the
         // violation event to the JSONL trace and (b) report `protocolError`
@@ -977,6 +999,26 @@ export class SessionHub {
           // serve cachedDeps 跨会话共享（hub.ts:1287 注），此处 per-run 注入会话
           // 锚点，bash_output / bash_stop 的 scope 过滤才能按会话闭环。
           conversationId,
+          // #620 T3 (spec session-jsonl-resume D4):turn 内 commit 钩子 ——
+          // assistant / 每个 tool_result 进权威历史后立刻 append 到会话
+          // JSONL log（边跑边写，崩溃可续）。
+          // 队列纪律（spec concurrent 决策）:本闭包由 run() 在 postMessage
+          // 的 serialize work 槽位内同步触发,已在同会话串行队列里 —— 绝不
+          // 能再经 this.serialize 包裹（内层槽位排队等外层释放,外层正等
+          // run() 返回 → 自等死锁）。不绕开,也不重入。
+          commitMessages: (messages) => {
+            // T5: 首次 commit 带上 query 前缀（含 host drain 的子代理浓缩
+            // 消息，若本轮有）；之后逐次 commit 原样透传。
+            const events = queryCommitPending
+              ? [...queryCommitPrefix, ...messages]
+              : messages;
+            queryCommitPending = false;
+            return this.appendSessionEvents({
+              conversationId,
+              session,
+              events,
+            });
+          },
           ...(trace !== undefined ? { trace } : {}),
           // #604 T1 (SC1-SC5): compact 边界渲染缝 — 把会话里最近合格用户
           // 任务原话(纯函数 over session.messages,现抽现贴)注入为
@@ -1027,6 +1069,12 @@ export class SessionHub {
               const priorMessages = drained
                 ? [...session.messages, drainedMsg]
                 : session.messages;
+              // T5: query 提交前缀与本轮实际进 engine 的 user 消息对齐
+              // （drain 浓缩消息在内存历史里先于 query，链上也须同序）。
+              queryCommitPrefix = [
+                ...(drained ? [drainedMsg] : []),
+                buildUserCommit(query),
+              ];
               // #408 T5: verify-loop terminal outcome (only set when verifyConfig
               // is configured). Captured here so the post-run write-back can
               // read it.
@@ -1046,11 +1094,19 @@ export class SessionHub {
               // 闭包必须兜底 hub 侧的 priorMessages 与 wrappedOnStream。
               const runOutcome = this.verifyConfig
                 ? await runVerifyLoop({
-                    runFn: (text, o) =>
-                      run(text, runDeps, o?.signal, {
+                    runFn: (text, o) => {
+                      // T5: verify-loop 的 userText 在 auto 模式下是
+                      // goal.text 而非 query —— 以实际进 engine 的 text
+                      // 重建 commit 前缀，保持链与投影逐字节对齐。
+                      queryCommitPrefix = [
+                        ...(drained ? [drainedMsg] : []),
+                        buildUserCommit(text),
+                      ];
+                      return run(text, runDeps, o?.signal, {
                         priorMessages: o?.priorMessages ?? priorMessages,
                         onStream: o?.onStream ?? wrappedOnStream,
-                      }),
+                      });
+                    },
                     // ADR-0024: two modules, not `goal.text ?? query`. Non-empty
                     // goal → auto (userText = goal.text); else HITL (userText =
                     // query). taskFocus never entered verify input (#473) and
@@ -1483,6 +1539,13 @@ export class SessionHub {
   /**
    * 回退会话到 keepTurns（TUI hub-bridge.rewindSession 的 HTTP 同源落点）。
    * 走 serialize 队列，与 compact/postMessage 同互斥。
+   *
+   * #622 T5（spec session-jsonl-resume）：rewind = 移动持久化 head 指针到
+   * 更早的 turn 边界锚点，不再截断文件 —— 被跳过的链永留同一份 JSONL，
+   * 后续 save 也不会把它擦掉（append-only 感知）。落盘由
+   * store.rewindToAnchor 一次完成（header 刷新 + 追加 head 记录 + 镜像
+   * 刷新）。legacy .json-only 会话先经 load+save 迁移成 JSONL（T2 语义
+   * 的提前触发）再重试一次，与 appendSessionEvents 的 bootstrap 同型。
    */
   async rewindSession(
     conversationId: string,
@@ -1491,18 +1554,30 @@ export class SessionHub {
     return this.serialize({
       conversationId,
       work: async () => {
-        const session = await this.store.load(conversationId);
-        const rewound = rewindFile(session, keepTurns);
-        const updated: SessionFileV1 = {
-          ...rewound,
-          updatedAt: new Date().toISOString(),
-          schemaVersion: CURRENT_SCHEMA_VERSION,
-        };
-        await this.store.save({ id: conversationId, file: updated });
+        let file: SessionFileV1;
+        try {
+          ({ file } = await this.store.rewindToAnchor({
+            id: conversationId,
+            keepTurns,
+          }));
+        } catch (err) {
+          // rewindToAnchor 对 legacy .json-only 会话报 write_failed（迁移
+          // 信号）；其余 typed/非 typed 失败原样上抛。迁移后重试仍败也上抛
+          // —— 不静默吞咽。
+          if (!isSessionStoreError(err) || err.kind !== "write_failed") {
+            throw err;
+          }
+          const legacy = await this.store.load(conversationId);
+          await this.store.save({ id: conversationId, file: legacy });
+          ({ file } = await this.store.rewindToAnchor({
+            id: conversationId,
+            keepTurns,
+          }));
+        }
         return {
-          session: this.summarize({ file: updated }),
-          turns: projectMessagesToTurns(updated.messages),
-          keepTurns: updated.turnCount,
+          session: this.summarize({ file }),
+          turns: projectMessagesToTurns(file.messages),
+          keepTurns: file.turnCount,
         };
       },
     });
@@ -1737,6 +1812,35 @@ export class SessionHub {
       )
     );
     return next;
+  }
+
+  /**
+   * #620 T3:commit 钩子的 store 落点(仅在 postMessage serialize 槽位内被
+   * 调,见 runDeps 处注释 —— 直调 store,不重入队列)。直追 appendEvents;
+   * typed store 失败(legacy .json-only 会话升级后首跑 → write_failed;
+   * 文件被外部删除 → not_found 等)→ 以当前 session 全量 save 一次
+   * bootstrap(T1 save 双写形态;legacy 即 T2 migrate-on-save 语义的提前
+   * 触发)后重试一次。非 typed 异常原样上抛;bootstrap / 重试仍败也上抛
+   * —— 不静默吞咽(loop-engine 包 MessageCommitError 中止本次 run)。
+   */
+  private async appendSessionEvents(opts: {
+    readonly conversationId: string;
+    readonly session: SessionFileV1;
+    readonly events: ReadonlyArray<AnthropicNativeMessage>;
+  }): Promise<void> {
+    try {
+      await this.store.appendEvents({
+        id: opts.conversationId,
+        events: opts.events,
+      });
+    } catch (err) {
+      if (!isSessionStoreError(err)) throw err;
+      await this.store.save({ id: opts.conversationId, file: opts.session });
+      await this.store.appendEvents({
+        id: opts.conversationId,
+        events: opts.events,
+      });
+    }
   }
 
   /** 裁决#8 + T1: save condition based on stopReason and progress delta.

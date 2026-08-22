@@ -12,6 +12,7 @@ export {
   PromptTooLongError,
   MaxTurnsExceeded,
   ToolExecutionError,
+  MessageCommitError,
 } from "./errors.js";
 
 export type {

@@ -6,7 +6,9 @@
  * 覆盖:
  *   1. SessionHub.postMessage 带 deps.maxTurns=1 + looping responses →
  *      turn.stopReason="maxTurns"、turn.answer.turnCount=err.turnsRan、
- *      turn.answer.stopSummary=...;session 文件不被 touch(前后状态不变);
+ *      turn.answer.stopSummary=...;throw 路径不调 conditionalSave(turnCount /
+ *      checkpoints 不变),但 #620 T3 起 turn 内 commit 把部分进度(assistant
+ *      tool_use + tool_result)即时落盘 —— 文件不再 byte-stable;
  *   2. serve 侧 IKNOW_LLM_MAX_TURNS env 流经 ensureDeps → deps.maxTurns
  *      (验证既有 env→deps 接线,不走 CLI flag)。
  */
@@ -64,12 +66,11 @@ function makeMaxTurnsDeps(): LoopEngineDeps {
 }
 
 describe("SessionHub.postMessage maxTurns (serve entry, plan T6)", () => {
-  it("maxTurns 超限 → stopReason=maxTurns + stopSummary + 文件不被 touch", async () => {
+  it("maxTurns 超限 → stopReason=maxTurns + stopSummary;部分进度已落盘,conditionalSave 未运行", async () => {
     const hub = new SessionHub({ store, deps: makeMaxTurnsDeps() });
     const { session } = await hub.createSession();
-    // run 前快照
+    // run 前快照(用于比较 conditionalSave 负责的最终化字段)
     const before = await store.load(session.conversation_id);
-    const beforeJson = JSON.stringify(before);
 
     const res = await hub.postMessage({
       conversationId: session.conversation_id,
@@ -84,18 +85,26 @@ describe("SessionHub.postMessage maxTurns (serve entry, plan T6)", () => {
     // 摘要字段只在该 turn 上有(不走 completed 正常停)
     assert.equal("stopSummary" in res.turn.answer, true);
 
-    // 文件不被 touch:throw 路径不调 conditionalSave
+    // #620 T3 新契约(spec D4 边跑边写):maxTurns 是被中断 turn,其部分进度
+    // 应在盘上 —— turn 内 commit 已把 assistant(tool_use) + tool_result
+    // append 进 JSONL;throw 路径仍不调 conditionalSave。
+    // #622 T5:首次 engine commit 带上懒提交的 user query,故盘上部分进度
+    // 为 [query, assistant, tool_result] 三条。
     const after = await store.load(session.conversation_id);
-    assert.equal(
-      JSON.stringify(after),
-      beforeJson,
-      "session 文件必须保持 run 前状态"
-    );
-    assert.equal(after.messages.length, 0);
-    assert.equal(after.turnCount, 0);
+    assert.equal(after.messages.length, 3);
+    const [queryEvt, assistantEvt, toolResultEvt] = after.messages;
+    assert.equal(queryEvt!.role, "user");
+    assert.equal(queryEvt!.content[0]!.type, "text");
+    assert.equal(assistantEvt!.role, "assistant");
+    assert.equal(assistantEvt!.content[0]!.type, "tool_use");
+    assert.equal(toolResultEvt!.role, "user");
+    assert.equal(toolResultEvt!.content[0]!.type, "tool_result");
+    // conditionalSave 最终化未运行:turnCount / checkpoints 保持 run 前状态。
+    assert.equal(after.turnCount, before.turnCount);
+    assert.deepEqual(after.checkpoints, before.checkpoints);
   });
 
-  it("摘要缺失 → stopSummary 字段缺席(byte-stable),stopReason 仍 maxTurns", async () => {
+  it("摘要缺失 → stopSummary 字段缺席,stopReason 仍 maxTurns(部分进度已落盘)", async () => {
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const registry = createRegistry([tool]);
     const executor = createExecutor(registry);
@@ -119,9 +128,20 @@ describe("SessionHub.postMessage maxTurns (serve entry, plan T6)", () => {
     });
     assert.equal(res.turn.answer.stopReason, "maxTurns");
     assert.equal("stopSummary" in res.turn.answer, false);
-    // 文件仍不被 touch
+    // #620 T3:turn 内 commit 的部分进度在盘上(assistant tool_use + 其
+    // tool_result);conditionalSave 仍未运行 —— turnCount / checkpoints 不变。
+    // #622 T5:首次 engine commit 带上懒提交的 user query,故 messages[0]
+    // 是 query,assistant / tool_result 顺移。
     const after = await store.load(session.conversation_id);
-    assert.equal(after.messages.length, 0);
+    assert.equal(after.messages.length, 3);
+    assert.equal(after.messages[0]!.role, "user");
+    assert.equal(after.messages[0]!.content[0]!.type, "text");
+    assert.equal(after.messages[1]!.role, "assistant");
+    assert.equal(after.messages[1]!.content[0]!.type, "tool_use");
+    assert.equal(after.messages[2]!.role, "user");
+    assert.equal(after.messages[2]!.content[0]!.type, "tool_result");
+    assert.equal(after.turnCount, 0);
+    assert.deepEqual(after.checkpoints, []);
   });
 
   it("无 stopSummary 的正常 completed turn 不走 maxTurns 分支", async () => {

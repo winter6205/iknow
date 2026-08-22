@@ -949,6 +949,70 @@ export async function persistChatSessionCheckpoint(opts: {
   }
 }
 
+/* ---------------- turn 内 commit 钩子(T3) ---------------- */
+
+/**
+ * chat 路径的 turn 内 commit 钩子:把 harness 产出的消息即时 append 到会话
+ * JSONL 日志。chat 路径无 serialize 队列,沿用裸 store IO 现状。
+ *
+ * 首个 commit 时 JSONL 可能不存在(新会话 run 前不预写文件,或 T1 前的
+ * legacy .json-only 会话):此时先 bootstrap 建文件/迁出再 append。
+ * bootstrap 历史来源:盘上可 load(legacy 迁移)→ 以盘为准;不可 load
+ * (全新会话)→ 用 getPriors() 的内存消息(本轮 run 前的历史)。
+ * 底层 store IO 失败以 typed store error 传播,不吞。
+ */
+export function createChatSessionCommitHook(opts: {
+  readonly store: SessionStore;
+  readonly conversationId: string;
+  readonly jsonMode: boolean;
+  readonly getPriors: () => ReadonlyArray<AnthropicNativeMessage>;
+}): (messages: ReadonlyArray<AnthropicNativeMessage>) => Promise<void> {
+  const { store, conversationId, jsonMode, getPriors } = opts;
+  return async (messages) => {
+    try {
+      await store.appendEvents({ id: conversationId, events: [...messages] });
+      return;
+    } catch (err) {
+      // 仅 typed store error(JSONL 缺失/legacy/损坏)走 bootstrap;其余原样抛。
+      if (!isSessionStoreErrorKind(err)) throw err;
+    }
+    let base: SessionFileV1;
+    let priors: ReadonlyArray<AnthropicNativeMessage>;
+    try {
+      base = await store.load(conversationId);
+      // 盘上已有权威历史(legacy .json 迁移):以盘为准,不用 getPriors —
+      // 否则空 priors 会把既有历史冲掉。
+      priors = base.messages;
+    } catch {
+      // 与 persistChatSessionCheckpoint 的 not_found 分支同形态:v3 全新文件,
+      // 历史取 getPriors(本轮 run 前的内存消息)。
+      const now = new Date().toISOString();
+      base = {
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversation_id: conversationId,
+        messages: [],
+        jsonMode,
+        turnCount: 0,
+        updatedAt: now,
+        title: "",
+        cwd: process.cwd(),
+        sanitized_at: now,
+        checkpoints: [],
+      };
+      priors = getPriors();
+    }
+    await store.save({
+      id: conversationId,
+      file: {
+        ...base,
+        messages: [...priors],
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    await store.appendEvents({ id: conversationId, events: [...messages] });
+  };
+}
+
 /** Kind-guard + writeErr + EXIT for store.load in auto/HITL paths.
  *  Delegates to the shared `reportGoalAutoStoreLoadErr` so chat and hub render
  *  the same `${kind}: ${conversation_id}` form on the same channel. */
@@ -1123,6 +1187,18 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     // string | undefined —— null 用 ?? undefined 收敛到 undefined 缺省语义
     // （不过滤，与 ADR-0021 D1.4 backward-compat 路径对齐）。
     conversationId: state.conversationId ?? undefined,
+    // #620 T3:turn 内 commit —— chat 路径无 serialize 队列,直调 store(沿用
+    // 裸 store IO 现状)。getPriors 读 live state.messages(= 本轮 run 前的历史,
+    // 与 hub bootstrap 的 session.messages 同语义;当前轮 user query 仍由收尾
+    // checkpoint 落盘)。调用方已注入 commitMessages 时以调用方为准。
+    commitMessages:
+      opts.deps.commitMessages ??
+      createChatSessionCommitHook({
+        store: checkpointStore,
+        conversationId,
+        jsonMode: state.jsonMode,
+        getPriors: () => state.messages,
+      }),
   };
 
   const ctx: ChatLineContext = {

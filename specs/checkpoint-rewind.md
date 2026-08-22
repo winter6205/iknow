@@ -1,5 +1,7 @@
 # Spec: checkpoint-rewind — 检查点回退（T1 数据层 → T6 TUI 接线）
 
+> **存储语义更新（2026-08-22）：** picker / 双 Esc / 用户消息锚点 / 空态文案仍以本 spec 为准。磁盘截断（`rewindFile`）与 `messagesCount` 书签 SSOT 已被 `specs/session-jsonl-resume.md` + ADR-0027 覆盖：权威历史改为 JSONL，rewind 改 head、旧链保留。
+
 > 来源：rewind baseline 实机调研（`~/.claude/jobs/a2ba85ca/tmp/rewind-baseline.md`，2026-08-11 证据链）+ T1 检查点数据层（`src/session-api/store/checkpoint.ts`，已实现 + 已测）。
 > 范围 = 回退粒度档位表 + turnCount 降级决策 + fallback 策略 + T6 TUI 接线草图。**本 spec 不含实施代码**；T6 只接线，不新增 T1 数据原语，不修改生产文件。
 > 对标 = Claude Code rewind 行为（rewind-baseline §0-§8）；凡是 iknow 选择分歧处，在档位表「有意分歧」列显式声明。

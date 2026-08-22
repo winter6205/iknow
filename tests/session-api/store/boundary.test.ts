@@ -40,9 +40,10 @@ import type { AnthropicNativeMessage } from "../../../src/harness/index.ts";
 import {
   CURRENT_SCHEMA_VERSION,
   resolveProjectSessionDir,
-  rewindFile,
+  resolveRewindAnchor,
   SessionStore,
   splitTurns,
+  withCheckpointAnchors,
   type CheckpointRecord,
   type SessionFileV1,
   type SessionStoreError,
@@ -118,11 +119,18 @@ describe("overflow — large inputs", () => {
     assert.equal(slices[4999]!.end, 10000);
   });
 
-  it("rewindFile: 100 checkpoints + 100 turns → 剪枝到 keepTurns 边界", () => {
+  it("resolveRewindAnchor: 100 turns → keepTurns=50 锚点精确落在 turn 边界", () => {
     const messages: AnthropicNativeMessage[] = [];
     for (let i = 0; i < 100; i++) {
       messages.push(userMsg(`q${i}`), assistantMsg(`a${i}`));
     }
+    const out = resolveRewindAnchor(messages, 50);
+    // turn 49 结束于 messages[99](每 turn 2 条)→ headIndex = 50*2-1。
+    assert.equal(out.headIndex, 99);
+    assert.equal(out.turnCount, 50);
+  });
+
+  it("withCheckpointAnchors: 100 checkpoints 全量重锚到事件 id", () => {
     const checkpoints: CheckpointRecord[] = Array.from(
       { length: 100 },
       (_, i) => ({
@@ -132,19 +140,11 @@ describe("overflow — large inputs", () => {
         interruptReason: "cancelled",
       })
     );
-    const session: SessionFileV1 = {
-      ...baseFile(),
-      messages,
-      turnCount: 100,
-      checkpoints,
-    };
-    const out = rewindFile(session, 50);
-    assert.equal(out.messages.length, 100);
-    assert.equal(out.turnCount, 50);
-    // 只保留 turnIndex < 50 的记录(描述仍存在的回合)。
-    assert.equal(out.checkpoints?.length, 49);
-    assert.equal(out.checkpoints?.[0]?.turnIndex, 1);
-    assert.equal(out.checkpoints?.[48]?.turnIndex, 49);
+    const eventIds = Array.from({ length: 200 }, (_, i) => `e${i}`);
+    const out = withCheckpointAnchors(checkpoints, eventIds);
+    assert.equal(out.length, 100);
+    assert.equal(out[0]?.anchorEventId, "e1");
+    assert.equal(out[99]?.anchorEventId, "e199");
   });
 
   it("store 往返 10k messages 文件:大 payload 原子写 + load 不走样", async () => {

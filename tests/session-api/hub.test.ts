@@ -5,12 +5,13 @@
  */
 import { afterAll, afterEach, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionHub, mapStoreError } from "../../src/session-api/hub.ts";
 import {
   CURRENT_SCHEMA_VERSION,
+  parseSessionJsonl,
   resolveProjectSessionDir,
   SessionStore,
 } from "../../src/session-api/store/index.ts";
@@ -1400,5 +1401,291 @@ describe("commit B: SessionHub.listPendingAsks + resolveAsk", () => {
     assert.equal(out.decision, "allow");
     assert.ok(out.reason.includes("session"));
     assert.ok(rule.id.startsWith("session-allow-grep"));
+  });
+});
+
+// -- T3 (#620): turn 内 commit(边跑边写) -------------------------------------
+
+describe("T3 (#620): turn 内 commit — hub 注入 commitMessages 钩子", () => {
+  it("工具执行时 assistant 事件已落在盘上 JSONL(commit 先于工具,不绕开 serialize 队列)", async () => {
+    // 探针工具在 runOne 内读盘上 JSONL:assistant commit 必须先于工具执行落盘。
+    // 断言在工具外做(工具内 throw 会被 executor 收成 execution_failed,防假绿)。
+    const idRef: { current: string | null } = { current: null };
+    const observed: Array<{
+      readonly events: number;
+      readonly head: string | null;
+      readonly lastRole: string;
+    }> = [];
+    const probe = createStubTool({
+      name: "probe",
+      next: async () => {
+        const raw = await readFile(
+          join(sessionDir, `${idRef.current}.jsonl`),
+          "utf8"
+        );
+        const log = parseSessionJsonl(raw);
+        observed.push({
+          events: log.events.length,
+          head: log.head,
+          lastRole: log.events[log.events.length - 1]?.message.role ?? "none",
+        });
+        return "observed";
+      },
+    });
+    const registry = createRegistry([probe]);
+    const deps: LoopEngineDeps = {
+      adapter: createStubModel({
+        responses: [
+          assistantResult({
+            texts: [],
+            toolCalls: [{ id: "p1", name: "probe", input: {} }],
+          }),
+          assistantResult({ texts: ["done"], supplierStop: "success" }),
+        ],
+      }),
+      executor: createExecutor(registry),
+      registry,
+      maxTurns: 5,
+    };
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    idRef.current = session.conversation_id;
+
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "go",
+    });
+    assert.equal(res.turn.answer.stopReason, "completed");
+
+    // 工具执行瞬间:盘上恰有 2 条事件 —— T5 起 user query 随首个引擎 commit
+    // 一并落盘(append-only save 的对齐前提),随后才是 assistant(含 tool_use),
+    // head 指向 assistant。
+    assert.equal(observed.length, 1);
+    assert.equal(observed[0]!.events, 2);
+    assert.equal(observed[0]!.lastRole, "assistant");
+    assert.equal(observed[0]!.head, "e1");
+
+    // 收尾 save 重写整份 log 后,最终 transcript 与既有行为一致(4 条消息)。
+    const loaded = await store.load(session.conversation_id);
+    assert.equal(loaded.messages.length, 4);
+    const raw = await readFile(
+      join(sessionDir, `${session.conversation_id}.jsonl`),
+      "utf8"
+    );
+    const log = parseSessionJsonl(raw);
+    assert.equal(log.events.length, 4);
+    assert.equal(log.head, "e3");
+  });
+
+  it("legacy .json-only 会话:首次 commit 触发 bootstrap 迁出 JSONL,run 正常完成", async () => {
+    // 升级前遗留:盘上只有 <id>.json(无 .jsonl)。appendEvents 对 legacy 直抛
+    // write_failed;hub 钩子须先全量 save 迁出 JSONL 再重试,否则 legacy 会话
+    // 永远无法再跑。探针工具在 runOne 内读盘上 JSONL,证明 bootstrap + commit
+    // 在工具执行前已完成(断言在工具外做,防 executor 收吞 assertion 假绿)。
+    const id = "legacy-only-t3";
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(
+      join(sessionDir, `${id}.json`),
+      JSON.stringify(
+        sampleFile({
+          id,
+          overrides: {
+            messages: [
+              userMsg("old q"),
+              { role: "assistant", content: [{ type: "text", text: "old a" }] },
+            ],
+            turnCount: 1,
+          },
+        })
+      ),
+      "utf8"
+    );
+    const observed: Array<{
+      readonly events: number;
+      readonly head: string | null;
+      readonly roles: string[];
+    }> = [];
+    const probe = createStubTool({
+      name: "probe",
+      next: async () => {
+        const raw = await readFile(join(sessionDir, `${id}.jsonl`), "utf8");
+        const log = parseSessionJsonl(raw);
+        observed.push({
+          events: log.events.length,
+          head: log.head,
+          roles: log.events.map((e) => e.message.role),
+        });
+        return "observed";
+      },
+    });
+    const registry = createRegistry([probe]);
+    const deps: LoopEngineDeps = {
+      adapter: createStubModel({
+        responses: [
+          assistantResult({
+            texts: [],
+            toolCalls: [{ id: "p1", name: "probe", input: {} }],
+          }),
+          assistantResult({ texts: ["new answer"], supplierStop: "success" }),
+        ],
+      }),
+      executor: createExecutor(registry),
+      registry,
+      maxTurns: 5,
+    };
+    const hub = makeHub(deps);
+    const res = await hub.postMessage({ conversationId: id, text: "new q" });
+    assert.equal(res.turn.answer.stopReason, "completed");
+
+    // 工具执行瞬间:legacy 已迁出 JSONL —— 旧 2 条事件 + 本次 user query +
+    // assistant(T5 起 query 随首个引擎 commit 一并落盘),head 指向新 assistant。
+    assert.equal(observed.length, 1);
+    assert.equal(observed[0]!.events, 4);
+    assert.deepEqual(observed[0]!.roles, [
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+    ]);
+    assert.equal(observed[0]!.head, "e3");
+
+    // 收尾 save 后:旧 2 条 + 新 4 条(user query + assistant(tool_use) +
+    // user(tool_result) + assistant final),事件链完整,turnCount 累计。
+    const loaded = await store.load(id);
+    assert.equal(loaded.messages.length, 6);
+    assert.equal(loaded.turnCount, 3);
+    const raw = await readFile(join(sessionDir, `${id}.jsonl`), "utf8");
+    const log = parseSessionJsonl(raw);
+    assert.equal(log.events.length, 6);
+    assert.equal(log.head, "e5");
+    assert.equal(log.events[0]!.message.role, "user");
+    assert.equal(log.events[5]!.message.role, "assistant");
+  });
+});
+
+// -- T5 (#622): rewind 改 head、旧链保留 ----------------------------------------
+
+describe("T5 (#622): hub.rewindSession 移动 head、skipped 链保留", () => {
+  const textOf = (m: AnthropicNativeMessage): string => {
+    const b = m.content[0];
+    return b !== undefined && b.type === "text" ? b.text : "";
+  };
+
+  it("rewind → reload head 停在锚点;新 turn 从 rewind 头续链,skipped 分支永留同一份 JSONL", async () => {
+    const deps = makeDeps([
+      assistantResult({ texts: ["a1"] }),
+      assistantResult({ texts: ["a2"] }),
+      assistantResult({ texts: ["a3"] }),
+    ]);
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    await hub.postMessage({ conversationId: id, text: "q1" });
+    await hub.postMessage({ conversationId: id, text: "q2" });
+
+    // 2 turns on disk: e0=q1 e1=a1 e2=q2 e3=a2, head e3.
+    const jsonlFile = join(sessionDir, `${id}.jsonl`);
+    const before = parseSessionJsonl(await readFile(jsonlFile, "utf8"));
+    assert.equal(before.events.length, 4);
+    assert.equal(before.head, "e3");
+
+    const res = await hub.rewindSession(id, 1);
+    assert.equal(res.keepTurns, 1);
+    assert.equal(res.session.turn_count, 1);
+    assert.equal(res.turns.length, 1);
+
+    // Head moved to the anchor; nothing truncated.
+    const mid = parseSessionJsonl(await readFile(jsonlFile, "utf8"));
+    assert.equal(mid.head, "e1");
+    assert.equal(mid.events.length, 4);
+
+    // New turn after the rewind: skipped branch stays in the SAME file; the
+    // new chain parents from the rewound head with fresh ids.
+    await hub.postMessage({ conversationId: id, text: "q3" });
+    const after = parseSessionJsonl(await readFile(jsonlFile, "utf8"));
+    assert.equal(after.events.length, 6);
+    const byId = new Map(after.events.map((e) => [e.id, e]));
+    assert.ok(byId.has("e2") && byId.has("e3"), "skipped branch retained");
+    assert.equal(
+      byId.get("e4")?.parent,
+      "e1",
+      "new chain parents from the rewound head"
+    );
+    assert.equal(byId.get("e5")?.parent, "e4");
+    assert.equal(after.head, "e5");
+
+    const loaded = await store.load(id);
+    assert.deepEqual(
+      loaded.messages.map((m) => `${m.role}:${textOf(m)}`),
+      ["user:q1", "assistant:a1", "user:q3", "assistant:a3"]
+    );
+    assert.equal(loaded.turnCount, 2);
+  });
+
+  it("cross-entry: hub rewind → 独立 SessionStore 实例读到同一 head(#120 Q6)", async () => {
+    const deps = makeDeps([
+      assistantResult({ texts: ["a1"] }),
+      assistantResult({ texts: ["a2"] }),
+    ]);
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    await hub.postMessage({ conversationId: id, text: "q1" });
+    await hub.postMessage({ conversationId: id, text: "q2" });
+
+    await hub.rewindSession(id, 1);
+
+    // A second store instance over the same pool (another entry point) sees
+    // the same head and the same projection.
+    const storeB = new SessionStore(baseDir);
+    assert.equal(await storeB.readHead(id), "e1");
+    const loaded = await storeB.load(id);
+    assert.deepEqual(
+      loaded.messages.map((m) => `${m.role}:${textOf(m)}`),
+      ["user:q1", "assistant:a1"]
+    );
+    assert.equal(loaded.turnCount, 1);
+  });
+
+  it("legacy .json-only 会话:hub.rewindSession 先迁移出 JSONL 再移动 head", async () => {
+    const id = "legacy-rewind-t5";
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(
+      join(sessionDir, `${id}.json`),
+      JSON.stringify(
+        sampleFile({
+          id,
+          overrides: {
+            messages: [
+              userMsg("q1"),
+              {
+                role: "assistant",
+                content: [{ type: "text", text: "a1" }],
+              },
+              userMsg("q2"),
+              {
+                role: "assistant",
+                content: [{ type: "text", text: "a2" }],
+              },
+            ],
+            turnCount: 2,
+          },
+        })
+      ),
+      "utf8"
+    );
+    const hub = makeHub(makeDeps([]));
+    const res = await hub.rewindSession(id, 1);
+    assert.equal(res.keepTurns, 1);
+    assert.equal(res.session.turn_count, 1);
+    // Migrated: the jsonl now exists, head at the anchor, all events retained.
+    const log = parseSessionJsonl(
+      await readFile(join(sessionDir, `${id}.jsonl`), "utf8")
+    );
+    assert.equal(log.head, "e1");
+    assert.equal(log.events.length, 4);
+    const loaded = await store.load(id);
+    assert.equal(loaded.messages.length, 2);
+    assert.equal(loaded.turnCount, 1);
   });
 });

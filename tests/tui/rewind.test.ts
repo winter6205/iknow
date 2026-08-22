@@ -22,7 +22,7 @@ import {
   turnFinished,
   turnStarted,
 } from "../../src/tui/session-state.js";
-import { rewindFile } from "../../src/session-api/store/checkpoint.js";
+import { resolveRewindAnchor } from "../../src/session-api/store/checkpoint.js";
 import {
   buildRewindTargets,
   reduceRewindKey,
@@ -606,7 +606,7 @@ describe("isDoubleEsc（1000ms debounce 窗口）", () => {
 
 // -- bridge.rewindSession 集成（tmpdir 池，镜像 checkpoint.test.ts 七条） ------
 
-describe("bridge.rewindSession（load → rewindFile → save → 返回更新文件）", () => {
+describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读回）", () => {
   let baseDir: string;
 
   beforeEach(async () => {
@@ -634,28 +634,15 @@ describe("bridge.rewindSession（load → rewindFile → save → 返回更新�
     });
   }
 
-  test("rewindFile（available=1 边界）keepTurns=0 真实截空（非 no-op）", () => {
-    // available=1 时 keepTurns=0 与 available 不等 → 走截断分支（checkpoint.ts:180），
-    // messages 截空、turnCount=0、checkpoints 全清 —— 不是 no-op。
-    const out = rewindFile(
-      {
-        ...sampleFile(),
-        messages: [userMsg("q1"), assistantMsg([text("a1")])],
-        turnCount: 1,
-        checkpoints: [
-          {
-            turnIndex: 1,
-            messagesCount: 2,
-            interruptedAt: ISO,
-            interruptReason: "cancelled",
-          },
-        ],
-      },
+  test("resolveRewindAnchor（available=1 边界）keepTurns=0 → 空 transcript 头（非 no-op）", () => {
+    // available=1 时 keepTurns=0 与 available 不等 → 真实回退到起点：
+    // headIndex=-1（head 落 null）、turnCount=0 —— 不是 no-op。
+    const out = resolveRewindAnchor(
+      [userMsg("q1"), assistantMsg([text("a1")])],
       0
     );
-    expect(out.messages).toHaveLength(0);
+    expect(out.headIndex).toBe(-1);
     expect(out.turnCount).toBe(0);
-    expect(out.checkpoints).toEqual([]);
   });
 
   test("turn-boundary preservation：截断到 turn 起点", async () => {
@@ -711,6 +698,8 @@ describe("bridge.rewindSession（load → rewindFile → save → 返回更新�
         messagesCount: 4,
         interruptedAt: "2026-08-11T00:00:00.000Z",
         interruptReason: "cancelled",
+        // T5 (D3): 存活快照按事件 id 重锚（messagesCount 4 → 链上第 4 条 = e3）。
+        anchorEventId: "e3",
       },
     ]);
   });
