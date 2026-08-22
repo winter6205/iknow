@@ -803,3 +803,46 @@ test("bash 回归：`[运行中] bash` / 完成态字节不变", async () => {
   expect(doneFrame).toContain("[完成] bash · npm test");
   await setupDone.renderer.destroy();
 });
+
+test("hideToolSummaries：不画 [完成] 行，write 预览仍在", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "要写文件", signature: "s" },
+      {
+        type: "tool_use",
+        id: "tu-w",
+        name: "write_file",
+        input: { path: "a.ts", content: "export const x = 1;\n" },
+      },
+      {
+        type: "tool_use",
+        id: "tu-b",
+        name: "bash",
+        input: { command: "ls" },
+      },
+    ],
+  };
+  const setup = await testRender(
+    <MessageBlocks
+      message={msg}
+      cols={COLS}
+      statusMap={
+        new Map([
+          ["tu-w", false],
+          ["tu-b", false],
+        ])
+      }
+      hideThinking={true}
+      hideToolSummaries={true}
+    />,
+    { width: COLS, height: 40, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame.includes("[思考]")).toBe(false);
+  expect(frame.includes("[完成]")).toBe(false);
+  expect(frame.includes("bash · ls")).toBe(false);
+  expect(frame).toContain("export const x = 1;");
+  await setup.renderer.destroy();
+});

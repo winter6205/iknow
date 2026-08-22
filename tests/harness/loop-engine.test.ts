@@ -14,6 +14,7 @@ import {
   ProtocolError,
 } from "../../src/harness/errors.ts";
 import { raceModel, run, step } from "../../src/harness/loop-engine.ts";
+import type { LoopAdapter } from "../../src/harness/loop-engine.ts";
 import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
@@ -28,6 +29,7 @@ import type {
 } from "../../src/harness/tools/types.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../src/harness/tools/executor.ts";
+import { toAnthropicToolResults } from "../../src/harness/tools/tool-result.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createStubSignalTool } from "../../src/harness/stubs/stub-signal-tool.ts";
@@ -2161,6 +2163,244 @@ describe("loop engine T3 #252: reactive compact (ADR-0013)", () => {
     assert.ok(err instanceof ProtocolError);
     assert.ok(err instanceof PromptTooLongError);
     assert.equal(err.name, "PromptTooLongError");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// plan compress-trigger-gate T3: proactive compact 接入 evaluateCompactTrigger +
+// full-summary fallback(messages ≤ DEFAULT_KEEP_RECENT 时降级到 runFullCompact)
+// ---------------------------------------------------------------------------
+
+/** plan T3 stub:full-summary adapter — 区分"摘要步"与"普通 step"。
+ *  - 摘要步:`tools === undefined` 且 state 最后一条 user 含 BASE_COMPACT_PROMPT
+ *    → 按 `compactOutcomes` 脚本消费("summarized" / "adapter_failed");
+ *  - 普通 step:消费 `stepScripts` 队列(tool call / completion)。 */
+function makeFullSummaryAdapter(opts: {
+  readonly stepScripts: ReadonlyArray<AssistantTurnResult>;
+  readonly compactOutcomes: ReadonlyArray<"summarized" | "adapter_failed">;
+  readonly summaryText?: string;
+}): LoopAdapter & { readonly compactCalls: { value: number } } {
+  const queue = opts.stepScripts.slice();
+  const outcomes = opts.compactOutcomes.slice();
+  const compactCalls = { value: 0 };
+  const summaryText = opts.summaryText ?? "FULL-SUMMARY";
+  return Object.freeze({
+    encodeUserText: (t: string): AnthropicNativeMessage => ({
+      role: "user",
+      content: [{ type: "text", text: t }],
+    }),
+    // 必须产出真实 tool_result 块:evaluateCompactTrigger 内部调
+    // preserveToolPairs 做 tool_use↔tool_result 配对守门,空数组会让
+    // tool_use 悬空 → throw "missing tool_result"(实测抓到的失败)。
+    encodeToolResults: (
+      results: ReadonlyArray<ToolExecutionResult>
+    ): AnthropicContentBlock[] => toAnthropicToolResults(results),
+    step: async (
+      state: LoopState,
+      request: { readonly tools?: unknown }
+    ): Promise<AssistantTurnResult> => {
+      if (request.tools === undefined) {
+        // full-compact 摘要步:仅当 user 文本含 compact prompt 才算;
+        // 否则是收尾摘要 epilogue,走 queue 消费。
+        const lastUserText = [...state.messages]
+          .reverse()
+          .find((m) => m.role === "user")
+          ?.content.filter(
+            (b): b is { type: "text"; text: string } => b.type === "text"
+          )
+          .map((b) => b.text)
+          .join("");
+        if (
+          lastUserText?.includes(
+            "Your task is to create a detailed summary of the conversation so far"
+          ) === true
+        ) {
+          compactCalls.value += 1;
+          const outcome = outcomes.shift();
+          if (outcome === "adapter_failed") {
+            throw new Error("synthetic adapter_failed for test");
+          }
+          // "summarized"(or undefined → 兜底为 summarized)
+          return assistantResult({
+            texts: [
+              `<analysis>scratch</analysis><summary>${summaryText}</summary>`,
+            ],
+            toolCalls: [],
+            supplierStop: "success",
+          });
+        }
+      }
+      const next = queue.shift();
+      if (next === undefined) {
+        throw new Error(
+          "makeFullSummaryAdapter: scripted step responses exhausted"
+        );
+      }
+      return next;
+    },
+    compactCalls,
+  });
+}
+
+describe("loop engine T3 compress-trigger-gate: proactive full-summary fallback", () => {
+  it("messages.length=5 + 高 token 估算 → proactive 触发 full summary 路径,无死循环", async () => {
+    // 2 条 prior:每条 50000 chars → 单条 estimate = floor((50000+3)/4) = 12500;
+    // 2 条 raw total ≈ 25000;estimateMessagesTokens = ceil(25000 * 4/3) ≈ 33334。
+    // threshold=10000 远低于 estimate → evaluateCompactTrigger 必返回 full_summary。
+    // 关键路径推导:run() 初始 state = 2 prior + 1 user("Q") = 3 messages。
+    // Iter 1:turnCount=0,gate skip;step 1(tool call)→ state 增至 5 messages,
+    // turnCount=1。Iter 2:gate 进入,evaluateCompactTrigger(5 messages):
+    //   - token 估 ≈ 50000 + 小尾巴 ≫ 10000 → 阈值超;
+    //   - preserveToolPairs(5,6)→ slicedFrom=0(≤ keepRecent)→ compact_via_full_summary。
+    // 旧 `shouldAutoCompact` 路径会调 applyCompactAttachment,但 splitForCompaction
+    // 在 ≤ keepRecent 时返 undefined → 返回 state 不变 → lastCompactTurn 不更新,
+    // 进入死循环。T3 修复后改走 applyFullCompactSummary 整段视为 dropped。
+    const longPrior = Array.from({ length: 2 }, (_, i) =>
+      makeNative({ role: "user", text: `prior-${i} ${"x".repeat(50_000)}` })
+    );
+    const adapter = makeFullSummaryAdapter({
+      // step 1: tool call(before first compact attempt)
+      // step 2: tool call(after first compact SUCCESS — state = [summary user])
+      // step 3: completion(final turn)
+      stepScripts: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "noop", input: {} }],
+        }),
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t2", name: "noop", input: {} }],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+      compactOutcomes: ["summarized"],
+    });
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+
+    const { result } = await run(
+      "Q",
+      {
+        adapter,
+        executor: exec,
+        registry: reg,
+        maxTurns: 5,
+        compress: { contextWindow: 100_000, thresholdTokens: 10_000 },
+      },
+      undefined,
+      { priorMessages: longPrior }
+    );
+    assert.equal(result.stopReason, "completed");
+    // T3 acceptance:runFullCompact 的 LLM 调用 = 1(成功一次后 lastCompactTurn 更新,
+    // 下一轮 gate 估 token 已低 → noop)。若旧路径死循环,此处会 >1。
+    assert.equal(
+      adapter.compactCalls.value,
+      1,
+      "compact 只调一次 — 摘要成功后 lastCompactTurn 更新,下一轮 gate 走 noop"
+    );
+    // 摘要成功后 messages[0] = SUMMARY_PREAMBLE + FULL-SUMMARY。
+    const firstText = result.messages[0]!.content.filter(
+      (b): b is { type: "text"; text: string } => b.type === "text"
+    )
+      .map((b) => b.text)
+      .join("");
+    assert.ok(
+      firstText.includes("FULL-SUMMARY"),
+      `messages[0] 必须是 LLM 摘要轮 user 消息,实际 "${firstText.slice(0, 200)}"`
+    );
+    assert.ok(
+      firstText.startsWith("This session is being continued"),
+      "摘要轮必须用 SUMMARY_PREAMBLE 前导"
+    );
+  });
+
+  it("连续 2 轮 token 超阈值 + 条数不足 → 摘要失败不更新锚点,下一轮再尝试(不死循环)", async () => {
+    // Setup:1 条 LONG prior(50000 chars)+ 1 条 SHORT prior + 1 user("Q")
+    // = 3 初始 messages。token 估 ≈ 12500(long prior)远 > 10000 阈值。
+    // 关键设计:把 LONG 放在 prior[0],SHORT 在 prior[1]。这样 iter 3 的
+    // windowed compact dropped = [prior-0 LONG],kept = [prior-1 SHORT, ...5 small]
+    // → 摘要后 state token 骤降至 < 10000 → iter 4 gate 走 noop → 跳出死循环。
+    // 路径推导:
+    //   Iter 1:turnCount=0,gate skip;step 1(tool call)→ state = 5,turnCount=1。
+    //   Iter 2:gate(1 > 0)→ 5 ≤ 6 → full_summary。applyFullCompactSummary 第 1 次失败
+    //     (adapter_failed outcome)→ state 不变 → lastCompactTurn 保持 0。
+    //   step 2(tool call)→ state = 7,turnCount=2。
+    //   Iter 3:gate(2 > 0)→ 7 > 6 → windowed。applyCompactAttachment 摘要 dropped=[LONG]
+    //     → 成功(state = [placeholder, ...6 kept])→ lastCompactTurn = 2。
+    //   step 3(tool call)→ state = 9,turnCount=3。
+    //   Iter 4:gate(3 > 2)→ 9 > 6 → windowed,但 token < 10000 → noop。step 4 completion → stop。
+    // 关键断言:第二轮(iter 3)必须再次进 gate(而非"上一轮调过就不重检"的死循环死锁)。
+    // compactCalls = 2(第一次 full_summary fail + 第二次 windowed success)。
+    const longPrior = [
+      makeNative({ role: "user", text: `prior-0 ${"x".repeat(50_000)}` }),
+      makeNative({ role: "user", text: "prior-1 short" }),
+    ];
+    const adapter = makeFullSummaryAdapter({
+      // step 1: tool call(before first compact attempt)
+      // step 2: tool call(after first compact FAILED — state unchanged at 5 msgs)
+      // step 3: tool call(after second compact SUCCEEDED — state = [placeholder, ...6 short kept])
+      // step 4: completion(final turn)
+      stepScripts: [
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t1", name: "noop", input: {} }],
+        }),
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t2", name: "noop", input: {} }],
+        }),
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: "t3", name: "noop", input: {} }],
+        }),
+        assistantResult({
+          texts: ["done after retry"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+      compactOutcomes: ["adapter_failed", "summarized"],
+    });
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+
+    const { result } = await run(
+      "Q",
+      {
+        adapter,
+        executor: exec,
+        registry: reg,
+        maxTurns: 8,
+        compress: { contextWindow: 100_000, thresholdTokens: 10_000 },
+      },
+      undefined,
+      { priorMessages: longPrior }
+    );
+    assert.equal(result.stopReason, "completed");
+    // T3 acceptance:compact 被调 2 次(第一次失败 → 锚点不更新 → 第二次成功)。
+    // 若死循环实现(成功才更新,但旧代码根本进不去 summary 路径),此处会 =1;
+    // 若新路径锚点更新逻辑被破坏成"调过就跳过",此处会 =1;正确实现 =2。
+    assert.equal(
+      adapter.compactCalls.value,
+      2,
+      "失败不更新 lastCompactTurn → 下一轮重检 → 再尝试,非死循环"
+    );
+    // 最终 messages[0] = 第二次摘要成功后的 SUMMARY_PREAMBLE + FULL-SUMMARY。
+    const firstText = result.messages[0]!.content.filter(
+      (b): b is { type: "text"; text: string } => b.type === "text"
+    )
+      .map((b) => b.text)
+      .join("");
+    assert.ok(
+      firstText.includes("FULL-SUMMARY"),
+      `第二次摘要成功后 messages[0] 含摘要,实际 "${firstText.slice(0, 200)}"`
+    );
   });
 });
 

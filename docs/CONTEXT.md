@@ -99,13 +99,25 @@ _Avoid_: 零依赖静态壳当产品；展示层省略 trace 字段
 _Avoid_: 每个 completed 请 LLM 评「做完没」；先问有没有 goal 再决定怎么判
 
 **自动模式**: `/goal` / `## GOAL:` 钉上后的无人值守循环，直到条件成立、判官 Impossible、不可恢复错误、可选轮次上限或用户 clear；空转停循环但 goal 可留着。
-_Avoid_: 把自动模式当成 verify 链上的第一道 if；自动模式里再用 taskFocus 当使命
+_Avoid_: 把自动模式当成 verify 链上的第一道 if；自动模式里再贴任务摘录当使命
 
 **goal（会话使命）**: 自动模式的完成条件，只由 `/goal <text>` / `## GOAL:` 写入（`source = user_pin`），仅 `/goal clear` 或停档清掉；钉上即进入自动模式。
 _Avoid_: `goal.text ?? query` 当验收任务；把 goal 当模型可推进的活对象；模型输出 / 工具结果 / 文件内容写 goal
 
-**taskFocus（任务焦点）**: 正常模式 compact 保焦对象（确定性提取，v1 不用 LLM）；寒暄不 seed，像样任务句写入一次后不自动切；仅 compact 边界渲染；自动模式内不存在。
-_Avoid_: 用 LLM 摘要；普通 turn 注入；当完成验收对象或 `/goal` 的第二张焦点卡；首条「你好」当终身焦点
+**一轮**: 用户一句交代之后、模型做到把控制权交还用户为止；其间可含多次工具循环，落成多条 `messages`。
+_Avoid_: 把一条 `tool_use` / `tool_result` 当一轮；把截断窗口的条数当成「留几轮」
+
+**截断窗口**: compact 从 `messages` 末尾留下的原文条数（计 message 对象，不是轮、不是字数）；窗口内若有 `tool_result` 而对应 `tool_use` 在窗外，再把那条 `tool_use` 整条捞回。
+_Avoid_: 按 token 或字数切窗；拆开一对 `tool_use`/`tool_result`
+
+**任务摘录**: 仅 compact 发生时从当时 `messages` 现抽现贴的最近至多 3 句合格用户任务原话；不进会话字段；自动模式不贴。
+_Avoid_: taskFocus；当前任务卡；每回合或压缩时让 LLM 填卡；把摘录自己再抽成用户任务句
+
+**compact reason**: 触发判据返回的分类标识，取值 `below_token_threshold` | `messages_too_few` | `windowed` | `full_summary`，单源 `src/harness/compress/index.ts:evaluateCompactTrigger()`；手动 `/compact`（hub.compactSession）与 loop-engine proactive 两条路径共用同一函数返回值，决定 UI 文案分支与 wire 字段（`CompactSessionResponse.reason`）。
+_Avoid_: 「未达阈值」「压缩成功」等 UI 字面字符串直接出现在业务代码；reason 字面量在 hub/loop-engine 多处内联（应经 `compactReasonFor` SSOT helper）；把 reason 错放成 `LoopTrace` / `LlmCallRecord` 字段
+
+**auto-compact token gate**: proactive compact 在每轮 step 前的 token 阈值判据，公式 `contextWindow − MAX_OUTPUT_TOKENS_FOR_SUMMARY − AUTOCOMPACT_BUFFER_TOKENS`（值见 `src/harness/compress/threshold.ts`），显式 `IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS` 可覆盖；与手动 `/compact` 共享同一函数 `evaluateCompactTrigger`，token 估算仅参与判据决策，**不**进 trace / `RunResult.lastUsage`（ADR-0008 D6）。
+_Avoid_: 把字符估算（`estimateMessagesTokens`）当作真实 token 用；gate 决策绕开 `evaluateCompactTrigger` 直接调 `shouldAutoCompact` 旧接口；把 threshold 当成「每机配置」（应是项目栈决策）
 
 **task 取值公式**: 无统一 `??` 链。自动模式判官 `task = goal.text`（无 fallback）；正常模式不设完成向 `task`。
 _Avoid_: `goal ?? taskFocus ?? query`；`goal.text ?? query`；把 evidenceContext 拼进 task
@@ -199,7 +211,7 @@ _Avoid_: 与 hard-wall 职责混同；Pre 缝保持零产品消费者；把它�
 - **project stack defaults vs .env.local**: env.ts 代码默认是项目级栈 SSOT（ADR-0001）；`.env.local` 重复声明同值非密项会形成第二源 / drift。`.env.local` 职责 = 密钥值 + 机器级覆盖，不是重新声明栈
 - **secret-roundtrip mask（#406）**: 用户文本中的密钥形态被识别层替换为 `<<<SECRET_N>>>` 占位符（N 从 1 单调递增，per-engine registry 共享，in-memory 不落盘）；bash 工具 spawn 前 `restore()` 回填真值；输出 mask 经 `currentSecretValues(registry.values())` 兜底遮蔽。**session 重启后历史占位符无法还原**（registry 非持久化，占位符原样透传不抛——acceptable limitation）。`settings.secrets.mode` 控制 `roundtrip`（默认）| `block`（#126 deny-only guard 兼容）
 - **next phase focus**: harness tool surface 扩展 + session 持久化 + I4 风格的 live smoke
-- **goal vs taskFocus vs 判官 task**: goal 只开自动模式；taskFocus 只 HITL compact；完成向 `task` 仅自动模式的 `goal.text`（ADR-0024）
+- **goal vs 任务摘录 vs 判官 task**: goal 只开自动模式；任务摘录只 HITL compact 现抽现贴；完成向 `task` 仅自动模式的 `goal.text`（ADR-0024 / ADR-0026）
 
 ---
 

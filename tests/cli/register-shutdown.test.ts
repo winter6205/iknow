@@ -14,8 +14,10 @@
  *     TUI 入口只透 shutdown 句柄(Gap B)。
  *
  * 信号退出语义(DRIFT-1,真实信号投递实测校准 — #365 review blocker):
- *   - 首次信号:dispose() 完成后 process.kill(process.pid, sig) 重发一次,
- *     让外部处理器(chat-session 的 onSigint 计数器等)有机会强退;
+ *   - 首次信号入口置 reKilled,dispose() 完成后 setImmediate 里
+ *     process.kill(process.pid, sig) 重发一次,让外部处理器
+ *     (chat-session 的 onSigint 计数器等)有机会强退;setImmediate 避免
+ *     Unix 同信号合并把二次投递吃掉;
  *   - reKilled 守门:第二次信号落地后 process.exit(code) 直接退出,不再
  *     re-kill — 避免无外部处理器时 unconditional re-kill 与自身 handler
  *     互踢成 microtask 死循环(旧实现 node/bun 真实 SIGINT 挂死,SIGKILL
@@ -307,9 +309,8 @@ describe("registerShutdown (#365 T5)", () => {
   it("真实 SIGINT 投递:dispose 完成后二次强杀语义 → 进程以 130 退出(不挂死)", async () => {
     // 真实子进程 + child.kill('SIGINT') —— process.emit 只同步跑 listener,
     // 掩盖 DRIFT-1 的 re-kill 死循环(旧实现 node/bun 真实 SIGINT 挂死)。
-    // 单次 SIGINT:首次信号 dispose() → 重发一次 → 二次信号落地 reKilled
-    // 守门 → process.exit(130)。实测校准:子进程 cwd = 仓库根,内联脚本用
-    // 相对 import 加载真实 registerShutdown(runtime.ts)。
+    // 单次 SIGINT:首次信号入口置 reKilled → dispose() → setImmediate
+    // 重发一次 → 二次信号落地 reKilled 守门 → process.exit(130)。
     const r = await runSignalChild(
       "const _shutdown = async () => { writeFileSync(process.env.SIG_SENTINEL, 'ran') }",
       "SIGINT",

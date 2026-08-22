@@ -247,11 +247,29 @@ function spawnTraceCli(cwd: string, args: string[]): SpawnedTrace {
   return { child, url: urlPromise, exited };
 }
 
+/** SIGTERM 后等 close;超时再 SIGKILL。已退出则立刻返回。 */
+async function terminateChild(
+  child: ChildProcess,
+  timeoutMs = 5_000
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+    }, timeoutMs);
+    child.once("close", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.kill("SIGTERM");
+  });
+}
+
 describe("runTrace — T7 默认目录 / fail-fast / serve 分开", () => {
   let scratch: string;
   let spawned: SpawnedTrace | undefined;
-  afterEach(() => {
-    if (spawned) spawned.child.kill();
+  afterEach(async () => {
+    if (spawned) await terminateChild(spawned.child);
     spawned = undefined;
     if (scratch) rmSync(scratch, { recursive: true, force: true });
   });
@@ -292,7 +310,7 @@ describe("runTrace — T7 默认目录 / fail-fast / serve 分开", () => {
       body.sessions.some((s) => s.conversation_id === "c7"),
       "默认 ./trace/ 目录下 c7 会话应被列出"
     );
-  });
+  }, 30_000);
 
   it("旧 ./trace.jsonl 存在 → fail-fast exit 1 + 提示迁移（不静默当目录）", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-t7-legacy-"));
@@ -306,7 +324,7 @@ describe("runTrace — T7 默认目录 / fail-fast / serve 分开", () => {
     assert.equal(legacy.code, 1, "旧 ./trace.jsonl → fail-fast exit 1");
     assert.match(legacy.output, /迁移|migrate/);
     assert.match(legacy.output, /trace-migrate/);
-  });
+  }, 30_000);
 
   it("显式 --trace-out 指向旧单文件（非目录）→ fail-fast 提示迁移", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-t7-explicit-"));
@@ -316,7 +334,7 @@ describe("runTrace — T7 默认目录 / fail-fast / serve 分开", () => {
     const explicit = await spawned.exited;
     assert.equal(explicit.code, 1, "显式单文件 --trace-out → fail-fast exit 1");
     assert.match(explicit.output, /迁移|migrate/);
-  });
+  }, 30_000);
 
   it("serve 与 trace 分开：serve 解析不连带 trace 读侧字段（SC-C 20/22）", () => {
     // T7 改动是 trace 专属：serve 的 parseArgs 不应被默认 ./trace/ 目录或

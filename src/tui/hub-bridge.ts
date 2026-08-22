@@ -27,6 +27,7 @@ import { rewindFile } from "../session-api/store/index.js";
 import type { LoopEngineDeps } from "../harness/index.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { CompactCallerOpts } from "../session-api/contract.js";
+import type { CompactReason } from "../harness/compress/index.js";
 import type { TokenUsage } from "../harness/model-adapter/types.js";
 import type {
   SubAgentManager,
@@ -128,6 +129,8 @@ export interface TuiBridge {
   ) => Promise<{
     readonly compacted: boolean;
     readonly cancelled?: boolean;
+    /** plan T2:触发判据分类标识(4 选 1);T4 文案分支依据。 */
+    readonly reason: CompactReason;
   }>;
   /** 回退到更早 turn（/rewind / 双 Esc）：load → rewindFile → store.save →
    *  返回更新文件。错误复用 SessionStore 既有 typed kinds，不新造。 */
@@ -251,8 +254,11 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
           : undefined
       );
       // cancelled 透传 — TUI app 据此区分"未达阈值"与"用户中途取消" (Low #1 兜底)。
+      // reason 透传 — plan T2 触发判据分类标识,T4 据此分文案(详见 plans/
+      // compress-trigger-gate.md T4 acceptance 的「TUI 文案」分支)。
       return {
         compacted: res.compacted,
+        reason: res.reason,
         ...(res.cancelled ? { cancelled: true } : {}),
       };
     },

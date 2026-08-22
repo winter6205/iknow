@@ -48,6 +48,7 @@ import {
   useTerminalDimensions,
 } from "@opentui/react";
 import type { HarnessStreamEvent } from "../harness/stream.js";
+import type { CompactReason } from "../harness/compress/index.js";
 import type {
   AnthropicNativeMessage,
   TokenUsage,
@@ -180,6 +181,54 @@ export { inputVisibleLineCount, inputWrapLineCount, MAX_INPUT_LINES };
  * `wrapModalLines`（wrap-ansi + {trim:false, hard:true}）复用。空数组/不含
  * 元素 → 0 行。
  */
+/**
+ * plan compress-trigger-gate T4 + review-fix:把 /compact notice 文案决策抽成
+ * module-level 纯函数,便于 bun:test 单测覆盖 4 reason 分支(避免 mount
+ * 整 TUI 渲染链路 + frozen bridge mock)。函数式 + exhaustiveness 检查
+ * (sealed CompactReason union):future 新增 reason 时 TS 编译失败。
+ */
+export function compactNoticeFor(
+  reason: CompactReason,
+  compacted: boolean
+): readonly string[] {
+  if (compacted) {
+    // compacted=true 路径:windowed → 保留尾部 + 裁早期;full_summary → 摘要前缀 + 保留尾部。
+    switch (reason) {
+      case "windowed":
+        return ["已压缩上下文（保留尾部，裁剪早期消息）。"];
+      case "full_summary":
+        return ["已通过结构化摘要压缩上下文（保留尾部 + 摘要前缀）。"];
+      case "below_token_threshold":
+      case "messages_too_few":
+        // 逻辑上 compacted=true 不该拿到这些 reason;列全满足 exhaustiveness。
+        throw new Error(
+          `unexpected no-op reason in compacted branch: ${reason}`
+        );
+      default: {
+        const _exhaustive: never = reason;
+        throw new Error(`unknown compact reason: ${String(_exhaustive)}`);
+      }
+    }
+  }
+  // compacted=false 路径:below_token_threshold / messages_too_few;windowed /
+  // full_summary 逻辑不可达但列全满足 exhaustiveness。
+  switch (reason) {
+    case "below_token_threshold":
+      return ["当前 token 未达压缩阈值，无需压缩。"];
+    case "messages_too_few":
+      return ["消息条数过少，无法做窗口压缩，且摘要失败 — 上下文保持原样。"];
+    case "windowed":
+    case "full_summary":
+      throw new Error(
+        `unexpected compressed-state reason in noop branch: ${reason}`
+      );
+    default: {
+      const _exhaustive: never = reason;
+      throw new Error(`unknown compact reason: ${String(_exhaustive)}`);
+    }
+  }
+}
+
 export function noticeRenderRows(
   lines: ReadonlyArray<string> | undefined,
   cols: number
@@ -689,6 +738,18 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       pasteArmedUntilRef.current = 0;
       return;
     }
+    // B01 fix：单源化 paste 路径。preventDefault 阻断 textarea native
+    // handlePaste（InternalKeyHandler.emitWithPriority 在 defaultPrevented
+    // 时跳过 renderable listener）。同一 paste 事件若 path A 与 path B
+    // 双驱动改 inputValue（外置语音输入一次吐多段时）：
+    //  - path A functional updater (prev+text) 与 path B direct setInputValue
+    //    (ta.plainText) 跨 React 18 commit 周期错位 → 中间段被吞；
+    //  - useEffect[props.value] 反复 setText 重置 buffer（prompt-input.tsx:151）
+    //    → 跨 commit 的 buffer 中途状态被 overwrite → 错位覆盖。
+    // 现在 path A 单源 → setInputValue(prev+text) 顺序稳定 → render → effect
+    // → ta.setText(props.value) 走程序写入路径，与 history/tab/rewind/submit
+    // 同一口径，由 navValueRef 守卫拦截 textarea 回放不产生回环。
+    event.preventDefault();
     const text = decodePasteBytes(event.bytes) ?? "";
     if (text.length > 0) {
       setInputValue((prev) => prev + text);
@@ -1515,12 +1576,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
                 }),
               };
             });
+            // plan T4 + review-fix:文案决策抽成 compactNoticeFor 纯函数,
+            // inline 调用即可。inline 文案逻辑移至 src/tui/app.tsx:184 附近。
             setNotice({
-              lines: ["已压缩上下文（保留尾部，裁剪早期消息）。"],
+              lines: compactNoticeFor(compactResult.reason, true),
             });
           } else {
             setNotice({
-              lines: ["上下文未达压缩阈值，无需压缩。"],
+              lines: compactNoticeFor(compactResult.reason, false),
             });
           }
         } catch (err) {

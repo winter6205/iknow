@@ -57,11 +57,30 @@ function spawnTrace(cwd: string, args: string[]): SpawnedCli {
   child.stderr.on("data", (d) => (err += String(d)));
   const exited = new Promise<{ code: number | null; output: string }>(
     (resolve) => {
-      child.on("exit", (code) => resolve({ code, output: out + err }));
+      // close 而非 exit:stdio flush 完成后再断言,避免并行负载下 output 截断。
+      child.on("close", (code) => resolve({ code, output: out + err }));
       child.on("error", () => resolve({ code: null, output: out + err }));
     }
   );
   return { child, exited };
+}
+
+/** SIGTERM 后等 close;超时再 SIGKILL。已退出则立刻返回。 */
+async function terminateChild(
+  child: ChildProcess,
+  timeoutMs = 5_000
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+    }, timeoutMs);
+    child.once("close", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.kill("SIGTERM");
+  });
 }
 
 // -- parseArgs 侧 --------------------------------------------------------------
@@ -101,7 +120,7 @@ describe("runTrace — ADR-0020 默认探测三态", () => {
   const servers: http.Server[] = [];
 
   afterEach(async () => {
-    for (const c of children) c.kill();
+    for (const c of children) await terminateChild(c);
     children.length = 0;
     for (const s of servers) {
       await new Promise<void>((resolve) => s.close(() => resolve()));
@@ -133,30 +152,34 @@ describe("runTrace — ADR-0020 默认探测三态", () => {
     const { code, output } = await spawned.exited;
     assert.equal(code, 0, `探测成功应 exit 0，实际输出：${output}`);
     assert.match(output, new RegExp(`http://127\\.0\\.0\\.1:${port}/trace`));
-  });
+  }, 30_000);
 
   it("探测失败 → exit 1 + 提示 iknow serve / --separate", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-probe-fail-"));
-    // 拿一个必然空闲的端口：listen(0) 记录后立即关闭。
-    const probe = http.createServer();
-    await new Promise<void>((resolve) => {
-      probe.listen(0, "127.0.0.1", resolve);
+    // 独占 ephemeral 端口并保持 listen:health 回 404 → probeServeHealth
+    // false。不 close-then-reuse,避免并行 fork listen(0) 抢走端口,
+    // 把本应 exit 1 的探测变成成功。
+    const occupied = http.createServer((_req, res) => {
+      res.writeHead(404).end();
     });
-    const addr = probe.address();
-    const freePort = typeof addr === "object" && addr ? addr.port : 0;
-    await new Promise<void>((resolve) => probe.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      occupied.listen(0, "127.0.0.1", resolve);
+    });
+    servers.push(occupied);
+    const addr = occupied.address();
+    const occupiedPort = typeof addr === "object" && addr ? addr.port : 0;
 
     const spawned = spawnTrace(scratch, [
       "--no-open",
       "--port",
-      String(freePort),
+      String(occupiedPort),
     ]);
     children.push(spawned.child);
     const { code, output } = await spawned.exited;
     assert.equal(code, 1, `探测失败应 exit 1，实际输出：${output}`);
     assert.match(output, /iknow serve/);
     assert.match(output, /--separate/);
-  });
+  }, 30_000);
 
   it("--separate → 独立进程起 health（port 0 实测）", async () => {
     scratch = mkdtempSync(join(tmpdir(), "trace-separate-"));
@@ -167,14 +190,17 @@ describe("runTrace — ADR-0020 默认探测三态", () => {
       "0",
     ]);
     children.push(spawned.child);
-    // 等 stderr 打出 URL（startTraceServe 成功后立刻打）。
+    // 等 stderr 打出 URL（startTraceServe 成功后立刻打）。累加 buffer
+    // 再 match,避免 URL 跨 chunk 时单片 regex 漏匹配。
     const url = await new Promise<string>((resolve, reject) => {
       const timer = setTimeout(
         () => reject(new Error("--separate 未在时限内打出 URL")),
         20_000
       );
+      let err = "";
       spawned.child.stderr?.on("data", (d) => {
-        const m = String(d).match(/http:\/\/127\.0\.0\.1:(\d+)\//);
+        err += String(d);
+        const m = err.match(/http:\/\/127\.0\.0\.1:(\d+)\//);
         if (m) {
           clearTimeout(timer);
           resolve(`http://127.0.0.1:${m[1]}`);
@@ -185,5 +211,5 @@ describe("runTrace — ADR-0020 默认探测三态", () => {
     assert.equal(res.status, 200);
     const body = (await res.json()) as { service: string };
     assert.equal(body.service, "iknow-trace");
-  });
+  }, 30_000);
 });
