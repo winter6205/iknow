@@ -37,7 +37,8 @@
 
 ### Verify / 完成门禁
 
-- `verify-goal-gate.md` — HITL vs `/goal` 自动模式两套判断逻辑；完成向 LLM 只挂自动模式；taskFocus 仅 compact（supersedes 归档 `128-verify-classifier` / `458` 判定公式 / `449-loop` 判官门禁）
+- `verify-goal-gate.md` — HITL vs `/goal` 自动模式两套判断逻辑；完成向 LLM 只挂自动模式（supersedes 归档 `128-verify-classifier` / `458` 判定公式 / `449-loop` 判官门禁）；HITL compact 保焦见 `recent-user-tasks.md`
+- `recent-user-tasks.md` — compact 任务摘录（现抽现贴最近用户任务原话；删会话 `taskFocus`）；正交于 PR #601 压缩触发闸
 - `468-subagent-judge-tool-surface.md` — 子代理声明工具面=实际工具面（判官只读契约）
 - `449-evidence-checker.md` — 证据优先纯函数规则引擎（三态 verdict + 三防 + D2 探测）
 

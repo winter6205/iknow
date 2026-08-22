@@ -7,8 +7,6 @@ export type {
   GoalStatus,
   InterruptReason,
   SessionFileV1,
-  TaskFocusHistoryEntry,
-  TaskFocusState,
 } from "./schema.js";
 export { MAX_WORKSPACE_ROOT_CHARS } from "../../config/workspace-root.js";
 export {
@@ -17,11 +15,8 @@ export {
   extractTitle,
   isSessionFileV1,
   MAX_GOAL_CHARS,
-  MAX_TASK_FOCUS_CHARS,
   pinGoal,
   sanitizeSessionFile,
-  seedTaskFocus,
-  shouldSeedTaskFocus,
   validateGoalText,
   validateSessionFile,
 } from "./schema.js";

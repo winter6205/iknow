@@ -1,24 +1,15 @@
 /**
- * #458 T8 (SC2 + SC4 + mid-message directive behavior):
- * `## GOAL:` re-pin via postMessage — post-T2/T5 semantic migration.
+ * #458 T8 (SC2 + SC4): `## GOAL:` re-pin via postMessage — post-#605 T2 字段
+ * 退休后的纯 goal-pin 语义。
  *
- * T2/T5 changed the hub's seed path: the first user message now seeds
- * `taskFocus` (not `goal`); a re-pin via `## GOAL: <text>` produces a
- * `source === "user_pin"` goal. Legacy `source === "user_initial"` goals
- * in fixtures would be migrated to `taskFocus` on sanitize/load (SC4),
- * so the re-pin history-accumulation tests now use a pre-existing
- * `user_pin` goal fixture (explicitly constructed via `pinGoal`) — this
- * preserves the "prior pushed to history[0] with status superseded"
- * invariant without depending on the seed path.
+ * #605 T2 后 `session.taskFocus` 整段退休;本文件只覆盖 `## GOAL: <text>`
+ * 触发的 user_pin 写路径(re-pin, history 累积, 空 directive 拒绝)。
+ * mid-message(`hello ## GOAL: x` 不构成 pin directive)行为由
+ * `chat-session-user-text.test.ts` + `chat-session` 自身覆盖,不再在本文件
+ * 重复。
  *
- * The mid-message test (`hello ## GOAL: x`) retains its directive-behavior
- * assertions (model ran with the full text as the query, no pin) but the
- * goal.source assertion is removed: after T2 the seed path seeds
- * `taskFocus` (not `goal`), so a non-pin directive leaves `goal` undefined
- * and seeds `taskFocus` with the full text.
- *
- * Fixture adjustment reason (commit-message-ready): "seed 路径改走
- * taskFocus, user_pin fixture 显式构造保证既有用例继续成立"。
+ * Fixture:re-pin history-accumulation tests 使用显式 `pinGoal` 构造的
+ * `user_pin` 起点,绕过已退役的 first-postMessage seed path。
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -103,8 +94,6 @@ describe("## GOAL: re-pin via postMessage (#458 T8)", () => {
     // updatedAt advances after re-pin.
     assert.match(after2.goal!.updatedAt, /^\d{4}-\d{2}-\d{2}T/);
     assert.ok(after2.goal!.updatedAt >= now0, "updatedAt advanced");
-    // `/goal` / `## GOAL:` must not write taskFocus (plan T1 / auto mode).
-    assert.equal(after2.taskFocus, undefined);
   });
 
   it("accumulates history monotonically across multiple re-pins", async () => {
@@ -166,8 +155,6 @@ describe("## GOAL: re-pin via postMessage (#458 T8)", () => {
     assert.equal(loaded.goal?.text, "write a type checker");
     assert.equal(loaded.goal?.source, "user_pin");
     assert.deepEqual(loaded.goal!.history ?? [], []);
-    // Pinning a goal must not copy it into taskFocus.
-    assert.equal(loaded.taskFocus, undefined);
   });
 });
 
@@ -199,31 +186,7 @@ describe("## GOAL: empty → no-op (#458 T8)", () => {
       "empty ## GOAL: must reject (no goal text to run)"
     );
     const after = await store.load(session.conversation_id);
-    // Both the (undefined) goal and the seeded taskFocus must be unchanged.
+    // Reject must leave goal state unchanged (no pin persisted).
     assert.deepEqual(after.goal, before.goal);
-    assert.deepEqual(after.taskFocus, before.taskFocus);
-  });
-});
-
-describe("## GOAL: mid-message → no-op, normal query (#458 T8)", () => {
-  it("'hello ## GOAL: x' is NOT a pin directive; whole text is the query and seeds via T2 (taskFocus, not goal)", async () => {
-    const hub = makeHub();
-    const { session } = await hub.createSession();
-    const res = await hub.postMessage({
-      conversationId: session.conversation_id,
-      text: "hello ## GOAL: x",
-    });
-    // The model ran with the full text as the query.
-    assert.equal(res.turn.query, "hello ## GOAL: x");
-    // T2/T5 migration: the seed path no longer creates a top-level goal.
-    // The full text is instead captured into taskFocus (SC2). No pin
-    // happened (mid-message is not a directive), so goal is undefined.
-    const loaded = await store.load(session.conversation_id);
-    assert.equal(loaded.goal, undefined, "mid-message must NOT pin a goal");
-    assert.equal(
-      loaded.taskFocus?.text,
-      "hello ## GOAL: x",
-      "seed path captures the full text into taskFocus"
-    );
   });
 });
