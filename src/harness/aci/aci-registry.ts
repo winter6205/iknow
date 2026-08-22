@@ -147,13 +147,14 @@ export function createAciRegistry(
 
   const visibleSchemas = (): ReadonlyArray<ToolDef> => {
     const all = [...tools, ...externalByExt.values()];
+    // #224 不变式：非 lazy 注册序前缀逐位稳定——即使某非 lazy 工具被
+    // discover()（tool_search 对全量工具生效），也不挪位。尾部只追加
+    // 已发现的 **lazy** 工具（发现顺序）；lazy 工具不在前缀里，无需去重。
+    const prefix = all.filter((t) => !t.aci.lazy);
     const discoveredTail = [...discovered].flatMap((name) => {
       const def = byName.get(name) ?? externalByExt.get(name);
-      return def !== undefined ? [def] : [];
+      return def !== undefined && def.aci.lazy ? [def] : [];
     });
-    // discovered 名单里的工具统一走尾部追加（含非 lazy 的已发现外部工具，
-    // 防前缀段重复）；未发现的保持注册序过滤视图。
-    const prefix = all.filter((t) => !t.aci.lazy && !discovered.has(t.name));
     return [...prefix, ...discoveredTail];
   };
 

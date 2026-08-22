@@ -16,7 +16,10 @@
  */
 import { describe, expect, it } from "vitest";
 import { createAciRegistry } from "../../../../src/harness/aci/aci-registry.js";
-import { createToolSearchTool } from "../../../../src/harness/aci/tools/tool-search.js";
+import {
+  createToolSearchTool,
+  NO_MATCHES,
+} from "../../../../src/harness/aci/tools/tool-search.js";
 import type {
   AciRegistry,
   AciToolDef,
@@ -70,6 +73,12 @@ function invokeToolSearch(toolSearch: AciToolDef, input: unknown): string {
   return handler(input) as string;
 }
 
+/** S4 契约断言：返回是合法 string 且精确等于 NO_MATCHES（含 guidance）。 */
+function expectNoMatchesGuidance(out: unknown): void {
+  expect(typeof out).toBe("string");
+  expect(out).toBe(NO_MATCHES);
+}
+
 describe('tool_search — S4:空参 / 不匹配 → "(no matches)" + retry guidance', () => {
   it('空 {} → "(no matches)" 前缀 + rephrase/`names` guidance(合法 string,非错误)', () => {
     const { toolSearch } = buildToolSearchOverFixture([
@@ -77,26 +86,19 @@ describe('tool_search — S4:空参 / 不匹配 → "(no matches)" + retry guida
       makeTool("beta"),
     ]);
     const out = invokeToolSearch(toolSearch, {});
-    expect(typeof out).toBe("string");
-    expect(out).toContain("(no matches)");
-    expect(out).toContain("Rephrase");
-    expect(out).toContain("`names`");
+    expectNoMatchesGuidance(out);
   });
 
   it('query 空串 + names 空数组 → "(no matches)" + guidance', () => {
     const { toolSearch } = buildToolSearchOverFixture([makeTool("alpha")]);
     const out = invokeToolSearch(toolSearch, { query: "", names: [] });
-    expect(out).toContain("(no matches)");
-    expect(out).toContain("Rephrase");
-    expect(out).toContain("`names`");
+    expectNoMatchesGuidance(out);
   });
 
   it('names 是非字符串元素数组 → "(no matches)" + guidance(fallback,handler 不抛)', () => {
     const { toolSearch } = buildToolSearchOverFixture([makeTool("alpha")]);
     const out = invokeToolSearch(toolSearch, { names: [1, 2] });
-    expect(out).toContain("(no matches)");
-    expect(out).toContain("Rephrase");
-    expect(out).toContain("`names`");
+    expectNoMatchesGuidance(out);
   });
 
   it('query 不匹配任何 name/description → "(no matches)" + guidance', () => {
@@ -105,17 +107,13 @@ describe('tool_search — S4:空参 / 不匹配 → "(no matches)" + retry guida
       makeTool("beta", "second tool"),
     ]);
     const out = invokeToolSearch(toolSearch, { query: "gamma" });
-    expect(out).toContain("(no matches)");
-    expect(out).toContain("Rephrase");
-    expect(out).toContain("`names`");
+    expectNoMatchesGuidance(out);
   });
 
   it('names 精确取名无命中 → "(no matches)" + guidance', () => {
     const { toolSearch } = buildToolSearchOverFixture([makeTool("alpha")]);
     const out = invokeToolSearch(toolSearch, { names: ["nope"] });
-    expect(out).toContain("(no matches)");
-    expect(out).toContain("Rephrase");
-    expect(out).toContain("`names`");
+    expectNoMatchesGuidance(out);
   });
 });
 

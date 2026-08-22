@@ -707,16 +707,18 @@ function createDynamicExecutorRegistry(
  *   - `catalogTools`（reg.catalog.all(),含 registerExternal 注入的
  *     `mcp__<service>__<tool>` 动态工具）→ 工具名 + description。
  *
- * 工具按 `mcp__<sanitize(name)>__` 前缀归属服务 —— 前缀段形态与
- * mcp/manager.ts `sanitize`（非 [A-Za-z0-9_] 替 `_`）等价,保证服务名含
- * 特殊字符时归属不错位。每装配周期调一次,不 await 任何连接。
+ * 工具按 `mcp__<server.name>__` 前缀归属服务 —— 与注册侧形态一致：
+ * mcp/manager.ts registerTools 用原始服务名 + 仅工具段被 `sanitize`
+ * （`mcp__${slot.config.name}__${sanitize(t.name)}`），故此处不得
+ * sanitize 服务名，否则含特殊字符的服务其工具会静默漏出概览。
+ * 每装配周期调一次,不 await 任何连接。
  */
 function projectMcpServiceSummaries(
   manager: McpManager,
   catalogTools: ReadonlyArray<AciToolDef>
 ): ReadonlyArray<McpServiceSummary> {
   return manager.status().map((server) => {
-    const prefix = `mcp__${server.name.replace(/[^A-Za-z0-9_]/g, "_")}__`;
+    const prefix = `mcp__${server.name}__`;
     const tools: McpToolSummary[] = [];
     for (const def of catalogTools) {
       if (!def.name.startsWith(prefix)) continue;

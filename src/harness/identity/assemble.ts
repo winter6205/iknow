@@ -92,7 +92,10 @@ export interface McpToolSummary {
 
 /** #631 T2 MCP 概览段服务元素形态(最小投影,与 mcp/manager McpServerState
  *  同词汇表但不跨模块导入——装配层只依赖字面量联合)。仅 "connected" 服务
- *  入段:pending(还在连) / failed / disabled 整体不渲染。 */
+ *  入段:pending(还在连) / failed / disabled 整体不渲染。
+ *  豁免记录(对齐 #635 "每服务名+一句话描述"):mcp 只读元数据面
+ *  (manager.status / config)当前无服务级描述来源,description 为预留
+ *  字段,服务行暂只渲染名字;待 config 承载描述后启用。 */
 export interface McpServiceSummary {
   readonly name: string;
   readonly state: "pending" | "connected" | "failed" | "disabled";

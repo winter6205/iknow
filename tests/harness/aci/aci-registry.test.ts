@@ -192,6 +192,23 @@ describe("createAciRegistry — discovered set（#224）", () => {
     assert.deepEqual(turn3, ["a", "c", "X", "Y"]);
   });
 
+  it("discover() 命中非 lazy 工具 → 不挪位，注册序前缀逐位不变（tool_search 全量命中路径）", () => {
+    // tool_search 对全量工具调 discover()（含非 lazy）；若已发现的非
+    // lazy 工具被挪到尾段，一次检索就破 KV cache 前缀（#224 / #631 AC①）。
+    const reg = createAciRegistry([
+      makeTool({ name: "a" }),
+      makeTool({ name: "b" }),
+      makeTool({ name: "X", lazy: true }),
+      makeTool({ name: "c" }),
+    ]);
+    reg.discover("b"); // 命中非 lazy
+    reg.discover("X"); // 命中 lazy
+    assert.deepEqual(
+      reg.visibleSchemas().map((t) => t.name),
+      ["a", "b", "c", "X"] // b 留在注册位，只有 lazy 的 X 尾追加
+    );
+  });
+
   it("discover() 未注册名 → 返回 undefined，visibleSchemas 不变", () => {
     const reg = createAciRegistry([
       makeTool({ name: "a" }),

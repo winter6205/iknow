@@ -147,6 +147,39 @@ describe("buildHarnessEngine — #631 T2 MCP 概览段接线", () => {
     expect(systemText).toContain("tool_search");
   }, 30_000);
 
+  it("服务名含 '-'（注册侧不 sanitize 服务段）→ 工具仍归属并渲染", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-t2-mcp-dashed-"));
+    roots.push(root);
+    await plantMcpConfig(root, ["stub-svc"]);
+
+    const built = await buildHarnessEngine({
+      env: makeEnv("sk-test-t2-overview-3"),
+      askUser: createNoAskUser(),
+      surface: "chat",
+      userHome: join(root, "home"),
+      cwd: root,
+      createMcpClient: () =>
+        makeInstantClient([
+          {
+            name: "alpha",
+            description: "Dashed server tool",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ]),
+    });
+    shutdowns.push(async () => {
+      if (built.shutdown) await built.shutdown();
+    });
+
+    await waitForState(built, "stub-svc", "connected");
+
+    const systemText = await built.deps.system?.();
+    expect(systemText).toContain("stub-svc");
+    // 注册形态 = mcp__<原始服务名>__<sanitize(工具名)>；若投影侧
+    // sanitize 服务段，此行会静默缺席。
+    expect(systemText).toContain("mcp__stub-svc__alpha: Dashed server tool");
+  }, 30_000);
+
   it("无 mcp 配置（零连接服务）→ 段整体缺席，<available_skills> 不受影响", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-t2-mcp-empty-"));
     roots.push(root);

@@ -6,7 +6,7 @@
  * tool_search 同语义，非移植）：
  *   - 输入 `query`（名字/描述大小写不敏感子串）或 `names`（精确工具名列表），
  *     两字段均可选；"至少一个" 语义由 handler 入口判定 —— 空参 =
- *     `"(no matches) Rephrase ..."`（合法返回，非错误；带 retry guidance），
+ *     `"(no matches) Rephrase ..."`（合法返回，非错误；带换词引导），
  *     不交给 ajv（D9）。
  *   - 匹配 = 遍历 catalog.all()：`names` 非空 → 精确名 includes；否则 →
  *     name/description 子串 contains（大小写不敏感）。
@@ -50,9 +50,9 @@ interface ToolSearchInput {
 /**
  * 无匹配 / 空参的合法返回（与 OpenHarness 同语义：缺参 = 无结果）。
  * T3：沿用 `skill.ts` "Use skill_search to find available skills." 先例 ——
- * 返回不是裸标记,而是带 retry guidance（换词重搜 / `names` 精确取名）。
+ * 返回不是裸标记,而是带换词引导（换词重搜 / `names` 精确取名）。
  */
-const NO_MATCHES =
+export const NO_MATCHES =
   "(no matches) Rephrase `query` with a different keyword, or pass exact tool names via `names`.";
 
 /**
