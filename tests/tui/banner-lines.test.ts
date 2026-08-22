@@ -4,9 +4,8 @@
  * #321 T5-P0-1：renderBannerLines 纯函数单测（与消息共享 scroll space，
  * 方案 B）。无 React / 无 ANSI，行数与内容可直接断言。
  *
- *  - cols ≥ BANNER_MIN_COLS → 13 行（每行 = 眼睛行 + GAP + info 栏行，
- *    32 + 3 + 43 = 78 列 ≤ 80），info 三行垂直居中于眼睛中部第 5/6/7 行。
- *  - cols < BANNER_MIN_COLS → 1 行 bannerShortLine(version)，无分隔线。
+ *  - cols 放得下 32 列眼睛 → 13 行完整眼（79 列仍是眼睛，不塌单行）。
+ *  - 极窄、眼睛本身放不下 → 1 行 bannerShortLine(version)，无分隔线。
  */
 import { describe, expect, test } from "bun:test";
 import {
@@ -78,8 +77,15 @@ describe("renderBannerLines", () => {
     expect(row.indexOf("Version")).toBeGreaterThanOrEqual(EYE_W + GAP);
   });
 
-  test("窄终端 cols < BANNER_MIN_COLS → 单行 short，无分隔线", () => {
+  test("近阈值 79 列仍是 13 行完整眼，不塌单行", () => {
     const lines = renderBannerLines(INFO, BANNER_MIN_COLS - 1);
+    expect(lines.length).toBe(EYE_LINES.length);
+    expect(lines[0]?.startsWith(EYE_LINES[0] ?? "")).toBe(true);
+    expect(lines[0]).not.toBe(bannerShortLine(INFO.version));
+  });
+
+  test("极窄终端放不下眼睛才退单行 short", () => {
+    const lines = renderBannerLines(INFO, 20);
     expect(lines.length).toBe(1);
     expect(lines[0]).toBe(bannerShortLine(INFO.version));
     expect(lines[0]).not.toContain("─");

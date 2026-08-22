@@ -10,7 +10,8 @@
  *  - 版本号 SSOT = cli/usage.ts getVersion()（读 package.json，与归档
  *    version.ts 同源）；
  *  - info 栏三行 Version / Cwd / Data dir；
- *  - 窄终端降级：cols < BANNER_MIN_COLS → 单行 `◆ iknow <version>`。
+ *  - 眼睛放得下（≥ 32 列 + 外框）→ 13 行完整眼；只有眼睛本身放不下才
+ *    单行 `◆ iknow <version>`。不要用 80 列并排总宽把完整眼整段扔掉。
  *
  * 与归档版的差异：归档版输出 ANSI 上色字符串（ink 时代手动 paint）；
  * OpenTUI 下上色交给渲染器 fg 属性，本文件只产出纯文本 + 逐 cell 渐变分段
@@ -65,11 +66,14 @@ const KEY_W = Math.max(...KV_KEYS.map(([k]) => stringWidth(k))) + KEY_EXTRA;
 export const BANNER_INFO_WIDTH = KEY_W + 1 + VAL_W;
 
 /**
- * 窄终端降级阈值（语义对齐归档）：眼睛宽 + GAP + info 栏宽 + 外框开销（2）。
- * 32 列完整眼 → 32 + 3 + 43 + 2 = 80 列。cols < 80 → 单行降级。
+ * 完整并排布局（眼睛 + GAP + info + 外框）要 80 列。这不是「画不画眼睛」
+ * 的门槛：32×13 点阵本身 32 列；79 列终端仍应画完整眼，info 可由渲染器裁切。
  */
 export const BANNER_MIN_COLS =
   stringWidth(EYE_LINES[0] ?? "") + GAP + BANNER_INFO_WIDTH + 2;
+
+/** 眼睛本身放不下才退单行。外框 2 列。 */
+export const BANNER_EYE_MIN_COLS = stringWidth(EYE_LINES[0] ?? "") + 2;
 
 // ── 生成函数（纯函数，无 ANSI / 无 React）─────────────────────────
 
@@ -103,15 +107,9 @@ export function bannerInfoLines(info: BannerInfo): string[] {
  * 渲染 banner 为 scrollbox 文本行（spec #321 方案 B：与消息共享 scroll
  * space）。
  *
- *   - cols < BANNER_MIN_COLS → 单行 `bannerShortLine(version)`，**不**加
- *     分隔线（窄终端单行模式保留，规范一致性）。
- *   - cols ≥ BANNER_MIN_COLS → 13 行：每行 = EYE_LINES[r] + GAP(3) +
- *     info 栏行（32 + 3 + 43 = 78 列 ≤ 80，不溢出）。info 三行（Version /
- *     Cwd / Data dir）垂直居中于眼睛 13 行的中间 3 行（第 5/6/7 行，
- *     0-indexed），其余 10 行 info 段空格填充至 BANNER_INFO_WIDTH 保持右缘
- *     对齐（#343 定案：图案居左 + info 居右并排）。眼形渐变上色不归本函数
- *     负责（见 eyeGradientCells）；窄终端单行短 banner 统一 logoInk 单色。
- *     分隔线不再由本函数输出。
+ *   - 眼睛本身放不下 → 单行 `bannerShortLine(version)`。
+ *   - 否则 13 行完整眼：每行 = EYE_LINES[r] + GAP(3) + info 栏行
+ *     （32 + 3 + 43 = 78）。cols 略小于 80 时仍画眼睛，info 可被裁切。
  *
  * 纯函数，无 React / 无 ANSI，可单测。
  */
@@ -119,8 +117,8 @@ export function renderBannerLines(
   info: BannerInfo,
   cols: number
 ): ReadonlyArray<string> {
-  if (cols < BANNER_MIN_COLS) {
-    return [bannerShortLine(info.version)];
+  if (!Number.isFinite(cols) || cols < BANNER_EYE_MIN_COLS) {
+    return [bannerShortLine(info.version)]; // EXIT: eye itself does not fit
   }
   const infoLines = bannerInfoLines(info);
   // info 三行垂直居中：眼睛 13 行的中间 3 行（row 5,6,7，0-indexed）。

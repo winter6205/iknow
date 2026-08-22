@@ -1,4 +1,12 @@
 /**
+ * ARCHIVED — frozen #592 tail-window unit (commit 5bf185de). Not a live contract.
+ * The 32-message tail cap was a mistaken product choice; current product is
+ * viewport mount (`specs/tui-transcript-viewport.md`).
+ * Default `npm test` does not run archive/** (`vitest.config.ts` exclude;
+ * `bun test tests/tui/` only covers the live tree).
+ */
+
+/**
  * tests/tui/transcript-mount-window.test.ts
  *
  * ChatView 不得把整段 session 挂进 OpenTUI 树。本模块是消息级尾窗

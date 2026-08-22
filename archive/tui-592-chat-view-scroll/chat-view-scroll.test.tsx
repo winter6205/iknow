@@ -1,3 +1,13 @@
+/**
+ * ARCHIVED — frozen snapshot. Not collected.
+ *
+ * Source: git show 5bf185de:tests/tui/chat-view-scroll.test.tsx (#592 tail window).
+ * Dropped from live tests by 2d07e5a9. vitest.config.ts excludes archive/**;
+ * `npm test` runs `bun test tests/tui/` only — this file is never collected.
+ *
+ * Do not restore `revealOlder`. Do not run against current ChatView.
+ * Live contract is viewport mount + full scroll document (no stub).
+ */
 /** @jsxImportSource @opentui/react */
 /**
  * tests/tui/chat-view-scroll.test.tsx
@@ -8,8 +18,8 @@
  *    用户位置（不跟随）；滚轮回到底部后追加恢复跟随（落底即落回 sticky
  *    位置，_hasManualScroll 复位）；
  *  - 强制滚底通道：ChatViewHandle.scrollToBottom()（用户发新消息 / turn 完成）；
- *  - 长会话（100 条 >3 屏）滚动文档全量：顶见最早气泡，无尾窗 stub；
- *    布局位置经 ref 直查（scrollTop / scrollHeight / viewport.height），不靠行数估算；
+ *  - 长会话（100 条 >3 屏）渲染不崩，布局位置经 ref 直查
+ *    （scrollTop / scrollHeight / viewport.height），不靠行数估算；
  *  - 空会话（0 条消息）渲染收敛不崩（empty 边界）；
  *  - session 接线：TuiSessionState.messages + runState / 流式草稿 / liveTool /
  *    banner 段都能正确渲染（MessageBlocks 视觉一致性）。
@@ -31,10 +41,7 @@ import {
   createDraftSession,
   type TuiSessionState,
 } from "../../src/tui/session-state.js";
-import {
-  liveToolReduce,
-  type LiveToolRun,
-} from "../../src/tui/live-tool-state.js";
+import type { LiveToolRun } from "../../src/tui/live-tool-state.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 
 const COLS = 60;
@@ -303,7 +310,7 @@ test("强制滚底通道：scrollToBottom() 从上滚位置直达底部并恢复
   await setup.renderer.destroy();
 });
 
-test("长会话（100 条）滚动文档全量：顶见最早、底见最末、无尾窗 stub", async () => {
+test("长会话（100 条 >3 屏）只 mount 尾窗：早期消息不进画面", async () => {
   const initial = sessionWith(makeMessages(100));
   const { setup, api } = await renderChat(initial);
   const sb = api.handle!.scrollbox!;
@@ -313,14 +320,46 @@ test("长会话（100 条）滚动文档全量：顶见最早、底见最末、�
   sb.scrollTop = 0;
   await setup.waitForVisualIdle();
   const top = setup.captureCharFrame();
-  expect(top).toContain("msg-000");
-  expect(top.includes("条更早的消息")).toBe(false);
+  expect(top).toContain("↑ 68 条更早的消息");
+  expect(top).toContain("msg-068");
+  expect(top).not.toContain("msg-000");
+  expect(top).not.toContain("reply-000");
   api.handle!.scrollToBottom();
   await setup.waitForVisualIdle();
   api.appendUser("追加的长会话尾巴");
   await setup.waitForVisualIdle();
   expect(sb.scrollTop).toBe(maxScrollTop(api.handle!));
   expect(setup.captureCharFrame()).toContain("追加的长会话尾巴");
+  await setup.renderer.destroy();
+});
+
+test("revealOlder 分页揭示更早消息直到全量", async () => {
+  const initial = sessionWith(makeMessages(100));
+  const { setup, api } = await renderChat(initial);
+  const sb = api.handle!.scrollbox!;
+  sb.scrollTop = 0;
+  await setup.waitForVisualIdle();
+  expect(setup.captureCharFrame()).not.toContain("msg-000");
+  await act(async () => {
+    api.handle!.revealOlder();
+  });
+  await setup.waitForVisualIdle();
+  sb.scrollTop = 0;
+  await setup.waitForVisualIdle();
+  expect(setup.captureCharFrame()).not.toContain("msg-000");
+  await act(async () => {
+    api.handle!.revealOlder();
+  });
+  await setup.waitForVisualIdle();
+  await act(async () => {
+    api.handle!.revealOlder();
+  });
+  await setup.waitForVisualIdle();
+  sb.scrollTop = 0;
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("msg-000");
+  expect(frame.includes("条更早的消息")).toBe(false);
   await setup.renderer.destroy();
 });
 
@@ -588,148 +627,4 @@ test("crunchedSeconds 0 / undefined → 不渲染 Crunched", async () => {
   expect(frame.includes("3m 46s")).toBe(false);
   expect(frame.includes("46s")).toBe(false);
   await setup1.renderer.destroy();
-});
-
-test("#589 ChatView tail：20 条 read_file ok + 1 running 不含完成读行", async () => {
-  let runs: ReadonlyArray<LiveToolRun> = [];
-  for (let i = 0; i < 20; i++) {
-    const id = `cv-rf-${String(i).padStart(2, "0")}`;
-    const marker = `CV_READ_OK_${i}`;
-    runs = liveToolReduce(runs, {
-      kind: "tool_call_start",
-      id,
-      name: "read_file",
-    });
-    runs = liveToolReduce(runs, {
-      kind: "post_tool_use",
-      id,
-      name: "read_file",
-      input: { path: `${marker}.ts` },
-      ok: true,
-      detail: `读取 ${marker}.ts`,
-    });
-  }
-  runs = liveToolReduce(runs, {
-    kind: "tool_call_start",
-    id: "cv-running",
-    name: "grep",
-  });
-  const setup = await testRender(
-    <ChatView
-      session={sessionWith([msg("u", "user", "请读一批文件")])}
-      cols={80}
-      rows={40}
-      liveToolLines={[]}
-      liveToolRuns={runs}
-    />,
-    { width: 80, height: 40, exitOnCtrlC: false }
-  );
-  await setup.waitForVisualIdle();
-  const frame = setup.captureCharFrame();
-  expect(frame).toContain("[运行中] grep");
-  expect(frame).not.toContain("CV_READ_OK_");
-  expect(frame).not.toContain("read_file ·");
-  await setup.renderer.destroy();
-});
-
-test("running：流式草稿排在 live write 预览之前（代码块不得插到回复前面）", async () => {
-  const session: TuiSessionState = {
-    ...sessionWith([msg("m-1", "user", "写个页面")]),
-    runState: "running-fg",
-  };
-  const liveToolRuns: ReadonlyArray<LiveToolRun> = [
-    {
-      id: "tu-w",
-      name: "write_file",
-      status: "ok",
-      input: {
-        path: "archive/luxury.html",
-        content: '<!doctype html>\n<html lang="en">',
-      },
-    },
-  ];
-  const draft = "我新写一份不同审美的腕表页";
-  const setup = await testRender(
-    <ChatView
-      session={session}
-      cols={COLS}
-      rows={24}
-      liveToolLines={[]}
-      liveToolRuns={liveToolRuns}
-      draftsMasked={draft}
-    />,
-    { width: COLS, height: 24, exitOnCtrlC: false }
-  );
-  await setup.waitForVisualIdle();
-  const frame = setup.captureCharFrame();
-  const iDraft = frame.indexOf("我新写一份");
-  const iCode = frame.indexOf("<!doctype html>");
-  expect(iDraft).toBeGreaterThanOrEqual(0);
-  expect(iCode).toBeGreaterThanOrEqual(0);
-  expect(iDraft).toBeLessThan(iCode);
-  await setup.renderer.destroy();
-});
-
-test("idle：当前 turn 工具折叠成计数行，不再铺 [完成] bash", async () => {
-  const session = sessionWith([
-    msg("m-1", "user", "写个页面"),
-    {
-      role: "assistant",
-      content: [
-        { type: "thinking", thinking: "先扫目录", signature: "s1" },
-        {
-          type: "tool_use",
-          id: "tu-b1",
-          name: "bash",
-          input: { command: "ls archive" },
-        },
-      ],
-    },
-    {
-      role: "assistant",
-      content: [
-        { type: "thinking", thinking: "再列一次", signature: "s1b" },
-        {
-          type: "tool_use",
-          id: "tu-b2",
-          name: "bash",
-          input: { command: "ls -la" },
-        },
-      ],
-    },
-    {
-      role: "user",
-      content: [
-        {
-          type: "tool_result",
-          tool_use_id: "tu-b2",
-          content: "ok",
-          is_error: false,
-        },
-      ],
-    },
-    {
-      role: "assistant",
-      content: [
-        { type: "thinking", thinking: "收尾", signature: "s2" },
-        { type: "text", text: "完成。" },
-      ],
-    },
-  ]);
-  const setup = await testRender(
-    <ChatView
-      session={session}
-      cols={COLS}
-      rows={24}
-      liveToolLines={[]}
-      lastThinkingSeconds={29}
-    />,
-    { width: COLS, height: 24, exitOnCtrlC: false }
-  );
-  await setup.waitForVisualIdle();
-  const frame = setup.captureCharFrame();
-  expect(frame).toContain("思考了 29 秒 · bash × 2");
-  expect(frame).toContain("完成。");
-  expect(frame.includes("[完成] bash")).toBe(false);
-  await setup.renderer.destroy();
 });

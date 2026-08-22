@@ -37,10 +37,8 @@ test("空会话帧含 banner 与输入框且无崩溃", async () => {
 
 /** 窄终端降级：单行 `◆ iknow <version>`，不崩。 */
 test("窄终端 banner 降级为单行不崩", async () => {
-  // cols 40 < BANNER_MIN_COLS → renderBannerLines 返回单行 bannerShortLine。
-  // 注意：scrollbox stickyStart="bottom" 会把首行 banner 顶出视口外，本 smoke
-  // 只断言不崩 + 圆角线框/输入框仍在。窄终端短 banner 内容断言在
-  // banner-lines.test.ts 单测中（不依赖 scrollbox 渲染）。
+  // 40 列仍放得下 32 列眼睛；本 smoke 只断言不崩 + 线框/输入框仍在。
+  // 极窄单行契约在 banner-lines.test.ts（cols=20）。
   const setup = await testRender(<TuiHarness />, { width: 40, height: 40 });
   await setup.renderOnce();
   const frame = setup.captureCharFrame();
