@@ -28,6 +28,7 @@ import type { ReactNode } from "react";
 import stringWidth from "string-width";
 import { TextAttributes } from "@opentui/core";
 import { padEndVisual } from "./visual.js";
+import { panguSpacing, panguSpacingKeepingCodespans } from "./pangu.js";
 import { marked, type MarkedToken, type Token, type Tokens } from "marked";
 import { tuiPalette } from "./theme.js";
 
@@ -66,7 +67,8 @@ function renderInline(
           nodes.push(...renderInline(t.tokens, key));
           break;
         }
-        nodes.push(t.text);
+        // 盘古之白：仅渲染层变换，不回写会话数据。
+        nodes.push(panguSpacing(t.text));
         break;
       case "strong":
         nodes.push(<strong key={key}>{renderInline(t.tokens, key)}</strong>);
@@ -431,7 +433,7 @@ function renderToken(tok: Token, key: number, width: number): ReactNode {
                 attributes={TextAttributes.DIM | TextAttributes.ITALIC}
                 wrapMode="word"
               >
-                {b === "" ? " " : b}
+                {b === "" ? " " : panguSpacingKeepingCodespans(b)}
               </text>
             ))}
           </box>

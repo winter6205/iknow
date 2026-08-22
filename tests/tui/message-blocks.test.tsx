@@ -61,6 +61,18 @@ test("user 消息：渲染 ❯ 文本前缀（accent），原文不进 markdown 
   await setup.renderer.destroy();
 });
 
+test("user 消息：❯ 回显不走盘古之白（用户输入字面保留）", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "user",
+    content: [{ type: "text", text: "美股4月行情如何" }],
+  };
+  const setup = await renderBlocks(msg);
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("❯ 美股4月行情如何");
+  expect(frame.includes("美股 4 月")).toBe(false);
+  await setup.renderer.destroy();
+});
+
 test("user 空文本 + 纯 tool_result：返回 null 不渲染任何节点", async () => {
   const msg: AnthropicNativeMessage = {
     role: "user",

@@ -795,11 +795,12 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   expect(frame).toContain("思考了 12 秒 · web_search × 2");
-  expect(frame).toContain("以下是今天的AI新闻摘要");
+  // assistant 文本经 Markdown 渲染 + 盘古之白：今天的AI → 今天的 AI。
+  expect(frame).toContain("以下是今天的 AI 新闻摘要");
   expect(frame.includes("[完成] web_search")).toBe(false);
   const lines = frame.split("\n");
   const iFold = lines.findIndex((l) => l.includes("web_search × 2"));
-  const iText = lines.findIndex((l) => l.includes("以下是今天的AI新闻摘要"));
+  const iText = lines.findIndex((l) => l.includes("以下是今天的 AI 新闻摘要"));
   expect(iFold).toBeGreaterThanOrEqual(0);
   expect(iText).toBeGreaterThanOrEqual(0);
   // 折叠行 →（1 行消息间距）→ 最终文本：行距 ≤ 2；被折叠的纯工具 /
@@ -841,7 +842,8 @@ test("running：先于草稿的工具（无 draftEpoch 标记）显示在流式�
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
   const iTool = frame.indexOf("web_search");
-  const iDraft = frame.indexOf("以下是今天的AI新闻");
+  // 草稿经 Markdown 渲染 + 盘古之白：今天的AI → 今天的 AI。
+  const iDraft = frame.indexOf("以下是今天的 AI 新闻");
   expect(iTool).toBeGreaterThanOrEqual(0);
   expect(iDraft).toBeGreaterThanOrEqual(0);
   expect(iTool).toBeLessThan(iDraft);
