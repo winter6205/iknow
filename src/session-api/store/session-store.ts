@@ -2,11 +2,26 @@
  * Stateless filesystem-backed session store (022 spec §Session Store).
  *
  * Why stateless: concurrency serialization is the hub's responsibility
- * (spec A15). This class is a thin typed-IO wrapper over data/sessions/*.json.
+ * (spec A15). This class is a thin typed-IO wrapper over data/sessions/*.
  * Every failure path throws a typed SessionStoreError — never a bare Error.
+ *
+ * #618 T1 (spec session-jsonl-resume / ADR-0027): dual on-disk shapes.
+ *   - Authority: `<id>.jsonl` — single-file append-only JSONL (session header
+ *     record, id/parent message events, trailing head record; codec in
+ *     jsonl.ts). save() writes it; load() prefers it.
+ *   - Compat mirror: `<id>.json` — legacy SessionFileV1 JSON, still written
+ *     by save() during the expand phase so direct `.json` readers keep
+ *     working; migration-on-save (stop writing / remove the mirror) is T2.
+ *   - Detection is by EXTENSION: load prefers `<id>.jsonl`, falls back to
+ *     `<id>.json` (legacy path unchanged).
+ *   - appendEvents/readHead/writeHead are JSONL-only primitives (T3's commit
+ *     hooks and T5's rewind build on them). They MUST be called under the
+ *     hub serialize queue — the store stays stateless, no in-store locking
+ *     (same posture as save(); spec Testing Decisions concurrent 类).
  */
 import { createHash } from "node:crypto";
 import {
+  appendFile,
   mkdir,
   readFile,
   readdir,
@@ -20,6 +35,14 @@ import type {
   AnthropicNativeMessage,
 } from "../../harness/index.js";
 import type { SessionStoreError } from "./errors.js";
+import type { ParsedSessionLog } from "./jsonl.js";
+import {
+  messageEventId,
+  parseSessionJsonl,
+  projectSessionLog,
+  SESSION_JSONL_EXT,
+  sessionFileToJsonl,
+} from "./jsonl.js";
 import type { SessionFileV1 } from "./schema.js";
 import { sanitizeSessionFile } from "./schema.js";
 
@@ -64,9 +87,25 @@ export class SessionStore {
 
   /**
    * Load and validate a session file.
+   * Detection by extension: `<id>.jsonl` (JSONL authority, projected to the
+   * current-head transcript) wins; otherwise legacy `<id>.json`.
    * Throws: not_found | parse_failed | schema_invalid | io_error
    */
   async load(id: string): Promise<SessionFileV1> {
+    const jsonlRaw = await this.tryReadFile(this.jsonlPath(id), id);
+    if (jsonlRaw !== null) {
+      let log: ParsedSessionLog;
+      try {
+        log = parseSessionJsonl(jsonlRaw);
+      } catch (err) {
+        throw this.attachId(id, err);
+      }
+      try {
+        return projectSessionLog(log);
+      } catch (err) {
+        throw this.attachId(id, err);
+      }
+    }
     const raw = await this.readRaw(id);
     const parsed = this.parseJson({ id, raw });
     try {
@@ -84,6 +123,9 @@ export class SessionStore {
 
   /**
    * Atomic write: tmp file then rename, so a crash never leaves a half-written file.
+   * Writes the JSONL authority first, then the legacy `.json` compat mirror
+   * (expand phase; T2 owns migration-on-save). Load prefers the JSONL, so a
+   * crash between the two renames never surfaces a stale authority.
    * Throws: write_failed
    */
   async save(opts: {
@@ -91,12 +133,117 @@ export class SessionStore {
     readonly file: SessionFileV1;
   }): Promise<void> {
     const { id, file } = opts;
-    const path = this.filePath(id);
-    const tmp = `${path}.tmp`;
+    const jsonlPath = this.jsonlPath(id);
+    const jsonlTmp = `${jsonlPath}.tmp`;
+    const jsonPath = this.filePath(id);
+    const jsonTmp = `${jsonPath}.tmp`;
     try {
       await mkdir(this.dir, { recursive: true });
-      await writeFile(tmp, JSON.stringify(file, null, 2), "utf8");
-      await rename(tmp, path);
+      await writeFile(jsonlTmp, sessionFileToJsonl(file), "utf8");
+      await rename(jsonlTmp, jsonlPath);
+      await writeFile(jsonTmp, JSON.stringify(file, null, 2), "utf8");
+      await rename(jsonTmp, jsonPath);
+    } catch (err) {
+      throw {
+        kind: "write_failed",
+        conversation_id: id,
+        cause: errMsg(err),
+      } satisfies SessionStoreError;
+    }
+  }
+
+  /**
+   * Append message events to the JSONL log WITHOUT rewriting the file
+   * (#618 T1; T3's host-injected commit hooks call this mid-turn). Each event
+   * gets a fresh `e<maxIndex+1>` id chained from the persisted head, followed
+   * by a new head record — so a backward head (rewind) forks a new branch and
+   * the old chain stays in the file.
+   *
+   * Cheap = append-only (one read of the log + one append syscall); safe to
+   * call repeatedly. MUST be called under the hub serialize queue (the store
+   * is stateless; no in-store locking — spec Testing Decisions concurrent 类).
+   *
+   * JSONL-only: a legacy `.json`-only session must be save()d once first
+   * (T2 migration-on-save). Empty `events` is a no-op.
+   * Throws: not_found | write_failed | parse_failed | schema_invalid | io_error
+   */
+  async appendEvents(opts: {
+    readonly id: string;
+    readonly events: ReadonlyArray<AnthropicNativeMessage>;
+  }): Promise<void> {
+    const { id, events } = opts;
+    if (events.length === 0) return;
+    const path = this.jsonlPath(id);
+    const log = await this.readJsonlLog(id, path, {
+      legacyIsWriteFailed: true,
+    });
+    let next = log.maxEventIndex + 1;
+    let parent = log.head;
+    const lines: string[] = [];
+    for (const message of events) {
+      const eventId = messageEventId(next++);
+      const record = {
+        type: "message",
+        id: eventId,
+        parent,
+        message,
+      };
+      lines.push(JSON.stringify(record));
+      parent = eventId;
+    }
+    lines.push(JSON.stringify({ type: "head", id: parent }));
+    try {
+      await appendFile(path, `${lines.join("\n")}\n`, "utf8");
+    } catch (err) {
+      throw {
+        kind: "write_failed",
+        conversation_id: id,
+        cause: errMsg(err),
+      } satisfies SessionStoreError;
+    }
+  }
+
+  /**
+   * Read the persisted rewind head (event id, null = empty transcript).
+   * JSONL-only primitive (T5 consumes it; legacy sessions have no persisted
+   * head until migrated by a save).
+   * Throws: not_found | parse_failed | schema_invalid | io_error
+   */
+  async readHead(id: string): Promise<string | null> {
+    const log = await this.readJsonlLog(id, this.jsonlPath(id), {
+      legacyIsWriteFailed: false,
+    });
+    return log.head;
+  }
+
+  /**
+   * Persist a new rewind head by APPENDING a head record (append-only; the
+   * old chain is never truncated). `head` must be null or an existing event
+   * id in the log. T5 owns the rewind semantics built on this primitive.
+   * Throws: not_found | schema_invalid (unknown head id) | write_failed | io_error
+   */
+  async writeHead(opts: {
+    readonly id: string;
+    readonly head: string | null;
+  }): Promise<void> {
+    const { id, head } = opts;
+    const path = this.jsonlPath(id);
+    const log = await this.readJsonlLog(id, path, {
+      legacyIsWriteFailed: true,
+    });
+    if (head !== null && !log.events.some((e) => e.id === head)) {
+      throw {
+        kind: "schema_invalid",
+        conversation_id: id,
+        field: "head",
+      } satisfies SessionStoreError;
+    }
+    try {
+      await appendFile(
+        path,
+        `${JSON.stringify({ type: "head", id: head })}\n`,
+        "utf8"
+      );
     } catch (err) {
       throw {
         kind: "write_failed",
@@ -117,10 +264,19 @@ export class SessionStore {
    */
   async list(): Promise<SessionListEntry[]> {
     const names = await this.readDir();
-    const entries: SessionListEntry[] = [];
+    // Both on-disk shapes live in the same dir (#120 Q6: all entries read the
+    // same store); dedupe ids present in both (load prefers the JSONL).
+    const ids = new Set<string>();
     for (const name of names) {
-      if (!name.endsWith(".json")) continue;
-      const entry = await this.tryListEntry(name);
+      if (name.endsWith(SESSION_JSONL_EXT)) {
+        ids.add(name.slice(0, -SESSION_JSONL_EXT.length));
+      } else if (name.endsWith(".json")) {
+        ids.add(name.slice(0, -".json".length));
+      }
+    }
+    const entries: SessionListEntry[] = [];
+    for (const id of ids) {
+      const entry = await this.tryListEntry(id);
       if (entry) entries.push(entry);
     }
     entries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -128,23 +284,29 @@ export class SessionStore {
   }
 
   /**
-   * Delete a session file.
+   * Delete a session file (both on-disk shapes).
    * Throws: not_found | io_error
    */
   async delete(id: string): Promise<void> {
-    try {
-      await unlink(this.filePath(id));
-    } catch (err) {
-      if (isEnoent(err)) {
-        throw {
-          kind: "not_found",
-          conversation_id: id,
-        } satisfies SessionStoreError;
+    let removed = false;
+    for (const path of [this.jsonlPath(id), this.filePath(id)]) {
+      try {
+        await unlink(path);
+        removed = true;
+      } catch (err) {
+        if (!isEnoent(err)) {
+          throw {
+            kind: "io_error",
+            conversation_id: id,
+            cause: errMsg(err),
+          } satisfies SessionStoreError;
+        }
       }
+    }
+    if (!removed) {
       throw {
-        kind: "io_error",
+        kind: "not_found",
         conversation_id: id,
-        cause: errMsg(err),
       } satisfies SessionStoreError;
     }
   }
@@ -153,6 +315,77 @@ export class SessionStore {
 
   private filePath(id: string): string {
     return join(this.dir, `${id}.json`);
+  }
+
+  private jsonlPath(id: string): string {
+    return join(this.dir, `${id}${SESSION_JSONL_EXT}`);
+  }
+
+  /** readFile that tolerates absence: null on ENOENT, io_error otherwise. */
+  private async tryReadFile(path: string, id: string): Promise<string | null> {
+    try {
+      return await readFile(path, "utf8");
+    } catch (err) {
+      if (isEnoent(err)) return null;
+      throw {
+        kind: "io_error",
+        conversation_id: id,
+        cause: errMsg(err),
+      } satisfies SessionStoreError;
+    }
+  }
+
+  /**
+   * Read + parse the JSONL log for the append/head primitives. JSONL-only:
+   * missing log → not_found when no session file exists at all; when only the
+   * legacy `.json` mirror exists, write paths ask for write_failed (migration
+   * hint: save once to rewrite as JSONL, T2), read paths ask for not_found
+   * (a legacy session has no persisted head).
+   */
+  private async readJsonlLog(
+    id: string,
+    path: string,
+    opts: { readonly legacyIsWriteFailed: boolean }
+  ): Promise<ParsedSessionLog> {
+    const raw = await this.tryReadFile(path, id);
+    if (raw === null) {
+      const legacy = await this.tryReadFile(this.filePath(id), id);
+      if (legacy !== null && opts.legacyIsWriteFailed) {
+        throw {
+          kind: "write_failed",
+          conversation_id: id,
+          cause:
+            "session log is legacy JSON; save once to rewrite as JSONL before appending",
+        } satisfies SessionStoreError;
+      }
+      throw {
+        kind: "not_found",
+        conversation_id: id,
+      } satisfies SessionStoreError;
+    }
+    try {
+      return parseSessionJsonl(raw);
+    } catch (err) {
+      throw this.attachId(id, err);
+    }
+  }
+
+  /** Reattach conversation_id to a pure-codec error (jsonl.ts throws without
+   *  store identity, same convention as sanitizeSessionFile). */
+  private attachId(id: string, err: unknown): SessionStoreError {
+    const e = err as { kind?: string; reason?: unknown; field?: unknown };
+    if (e.kind === "parse_failed") {
+      return {
+        kind: "parse_failed",
+        conversation_id: id,
+        reason: typeof e.reason === "string" ? e.reason : "unknown",
+      };
+    }
+    return {
+      kind: "schema_invalid",
+      conversation_id: id,
+      field: typeof e.field === "string" ? e.field : "root",
+    };
   }
 
   private async readRaw(id: string): Promise<string> {
@@ -203,8 +436,7 @@ export class SessionStore {
     }
   }
 
-  private async tryListEntry(name: string): Promise<SessionListEntry | null> {
-    const id = name.slice(0, -".json".length);
+  private async tryListEntry(id: string): Promise<SessionListEntry | null> {
     try {
       const file = await this.load(id);
       const lastFinalText = lastAssistantText(file.messages);

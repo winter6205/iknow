@@ -30,6 +30,19 @@ export {
   type TurnSlice,
 } from "./checkpoint.js";
 export {
+  messageEventId,
+  parseSessionJsonl,
+  projectSessionLog,
+  SESSION_JSONL_EXT,
+  sessionFileToJsonl,
+  type ParsedSessionLog,
+  type SessionEventRecord,
+  type SessionHeadRecord,
+  type SessionHeaderRecord,
+  type SessionJsonlError,
+  type SessionJsonlRecord,
+} from "./jsonl.js";
+export {
   resolveProjectSessionDir,
   SessionStore,
   type SessionListEntry,
