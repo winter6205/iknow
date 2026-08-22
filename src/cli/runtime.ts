@@ -174,7 +174,9 @@ export function registerShutdown(built: {
   // 等)有机会强退;但无外部处理器(serve / 纯 registerShutdown) 时,
   // unconditional re-kill 会与自身 handler 互踢成 microtask 死循环(vitest
   // process.emit 同步路径掩盖;node/bun 真实信号投递实测挂死)。reKilled
-  // 守门:第二次信号落地后 force-exit,不再 re-kill,统一"二次强杀语义"。
+  // 守门:首次信号入口即置位;第二次信号落地后 force-exit,不再 re-kill。
+  // re-kill 放到 setImmediate,让 handler 先回到事件循环,降低 Unix 同
+  // 信号合并导致二次 SIGINT/SIGTERM 丢失。
   let reKilled = false;
   const dispose = async (): Promise<void> => {
     if (shuttingDown) return;
@@ -192,14 +194,17 @@ export function registerShutdown(built: {
     }
   };
   const onSignal = (sig: NodeJS.Signals): void => {
+    if (reKilled) {
+      // 第二次信号直接退出(用户强杀语义),不等待 close 兜底。
+      const code = sig === "SIGINT" ? 130 : sig === "SIGTERM" ? 143 : 128;
+      process.exit(code);
+      return;
+    }
+    reKilled = true;
     void dispose().finally(() => {
-      if (reKilled) {
-        // 第二次信号直接退出(用户强杀语义),不等待 close 兜底。
-        const code = sig === "SIGINT" ? 130 : sig === "SIGTERM" ? 143 : 128;
-        process.exit(code);
-      }
-      reKilled = true;
-      process.kill(process.pid, sig);
+      setImmediate(() => {
+        process.kill(process.pid, sig);
+      });
     });
   };
   process.on("SIGINT", onSignal);
