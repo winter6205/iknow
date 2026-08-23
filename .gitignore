@@ -97,6 +97,9 @@ trace.jsonl
 # clipboard fallback artifact when no clipboard is available (src/tui/clipboard.ts)
 last_copy.txt
 
+# local throwaway prototypes (logic/UI spikes; not team-shared)
+/prototypes/
+
 # local Next.js prototype (early-stage, not team-shared; built artifacts
 # also covered by node_modules/ etc. above)
 iknow-prototype/
