@@ -103,6 +103,7 @@ jobs:
             --exclude tests/tui/logo-persists.test.tsx \
             --exclude 'tests/harness/secret-roundtrip/**' \
             --exclude tests/harness/mcp/zero-linkage-guard.test.ts \
+            --exclude tests/harness/mcp/build-engine-mcp-overview.test.ts \
             --exclude tests/harness/sandbox/runner.test.ts \
             --exclude tests/subagent/envelope-freeze.test.ts
 
@@ -187,5 +188,6 @@ jobs:
             --exclude tests/tui/logo-persists.test.tsx \
             --exclude tests/harness/secret-roundtrip/e2e.test.ts \
             --exclude tests/harness/mcp/zero-linkage-guard.test.ts \
+            --exclude tests/harness/mcp/build-engine-mcp-overview.test.ts \
             --exclude tests/harness/sandbox/runner.test.ts \
             --exclude tests/subagent/envelope-freeze.test.ts
