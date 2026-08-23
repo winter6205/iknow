@@ -198,6 +198,234 @@ describe("sessionFileToJsonl / parseSessionJsonl (pure codec)", () => {
   });
 });
 
+// -- createdAt / messageCreatedAt (rewind prompt timestamps) ------------------
+
+describe("createdAt / messageCreatedAt (prompt timestamps)", () => {
+  /** Hand-build a JSONL text with a fixed id space; bypasses sessionFileToJsonl
+   *  to let us inject arbitrary createdAt on individual events (appendEvents
+   *  stamps per-event in a loop; here we construct the exact ISO strings for
+   *  deterministic order assertions). */
+  function buildJsonl(
+    header: Record<string, unknown>,
+    events: ReadonlyArray<Record<string, unknown>>,
+    head: string | null
+  ): string {
+    const lines: string[] = [JSON.stringify({ type: "session", ...header })];
+    for (const e of events) {
+      lines.push(JSON.stringify({ type: "message", ...e }));
+    }
+    lines.push(JSON.stringify({ type: "head", id: head }));
+    return `${lines.join("\n")}\n`;
+  }
+
+  const baseHeader = {
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    conversation_id: "ts-proj",
+    title: "",
+    cwd: "/tmp/test",
+    sanitized_at: "2026-08-20T00:00:00.000Z",
+    jsonMode: false,
+    turnCount: 1,
+    updatedAt: "2026-08-20T00:00:00.000Z",
+    checkpoints: [],
+  };
+
+  it("parseSessionJsonl tolerates legacy events without createdAt", () => {
+    // Old JSONL written before stamping: no `createdAt` on any event record.
+    const raw = buildJsonl(
+      baseHeader,
+      [
+        { id: "e0", parent: null, message: userMsg("q") },
+        { id: "e1", parent: "e0", message: assistantMsg("a") },
+      ],
+      "e1"
+    );
+    const log = parseSessionJsonl(raw);
+    assert.equal(log.events.length, 2);
+    assert.equal(log.events[0]!.createdAt, undefined);
+    assert.equal(log.events[1]!.createdAt, undefined);
+  });
+
+  it("projectSessionLog projects messageCreatedAt absent for fully legacy chains (spread-discipline)", () => {
+    // Old chain with zero timestamps → no messageCreatedAt key in projection,
+    // preserving byte-identical round-trip with the pre-stamping schema.
+    const raw = buildJsonl(
+      baseHeader,
+      [
+        { id: "e0", parent: null, message: userMsg("q") },
+        { id: "e1", parent: "e0", message: assistantMsg("a") },
+      ],
+      "e1"
+    );
+    const projected = projectSessionLog(parseSessionJsonl(raw));
+    assert.equal(
+      "messageCreatedAt" in projected,
+      false,
+      "fully legacy chain must not grow the messageCreatedAt key"
+    );
+    // Optional-chaining access yields undefined either way (picker contract).
+    assert.equal(projected.messageCreatedAt?.[0], undefined);
+  });
+
+  it("projectSessionLog collects messageCreatedAt aligned with messages, root → head order", () => {
+    // Mixed chain: e0 old (no createdAt), e1..e2 stamped. Conditional emit
+    // fires (≥1 defined); the e0 hole surfaces as undefined in the array.
+    const raw = buildJsonl(
+      baseHeader,
+      [
+        { id: "e0", parent: null, message: userMsg("q") },
+        {
+          id: "e1",
+          parent: "e0",
+          message: assistantMsg("a"),
+          createdAt: "2026-08-20T00:00:01.000Z",
+        },
+        {
+          id: "e2",
+          parent: "e1",
+          message: userMsg("q2"),
+          createdAt: "2026-08-20T00:00:05.000Z",
+        },
+      ],
+      "e2"
+    );
+    const projected = projectSessionLog(parseSessionJsonl(raw));
+    assert.deepEqual(projected.messages.length, 3);
+    assert.deepEqual(projected.messageCreatedAt, [
+      null,
+      "2026-08-20T00:00:01.000Z",
+      "2026-08-20T00:00:05.000Z",
+    ]);
+  });
+
+  it("projectSessionLog preserves messageCreatedAt ordering when head chain is non-trivial (forked parent walk)", () => {
+    // Hand-built head chain with a missing middle event (e1 is a fork branch
+    // not on head; head = e2 → e0). headChainEvents returns [e0, e2].
+    const raw = buildJsonl(
+      baseHeader,
+      [
+        {
+          id: "e0",
+          parent: null,
+          message: userMsg("q"),
+          createdAt: "2026-08-20T00:00:00.000Z",
+        },
+        {
+          id: "e1",
+          parent: "e0",
+          message: assistantMsg("orphan"),
+          createdAt: "2026-08-20T00:00:01.000Z",
+        },
+        {
+          id: "e2",
+          parent: "e0",
+          message: assistantMsg("on-head"),
+          createdAt: "2026-08-20T00:00:02.000Z",
+        },
+      ],
+      "e2"
+    );
+    const projected = projectSessionLog(parseSessionJsonl(raw));
+    // Head chain root→head = [e0, e2]; e1 is an orphan branch (not on head)
+    // and must not surface in the projection — same as messages-only behavior.
+    assert.equal(projected.messages.length, 2);
+    const texts = projected.messages.map(
+      (m) =>
+        (
+          m.content.find(
+            (b): b is Extract<typeof b, { type: "text" }> => b.type === "text"
+          ) as { text: string } | undefined
+        )?.text ?? ""
+    );
+    assert.deepEqual(texts, ["q", "on-head"]);
+    assert.deepEqual(projected.messageCreatedAt, [
+      "2026-08-20T00:00:00.000Z",
+      "2026-08-20T00:00:02.000Z",
+    ]);
+  });
+
+  it("projectSessionLog strips a stale header messageCreatedAt when the head chain has no createdAt (stale-header guard)", () => {
+    // Stale-header guard: a stamped save leaves messageCreatedAt in the
+    // session header line; a later rewind back into a pre-stamping fork
+    // branch walks a chain whose events carry no createdAt. The projection
+    // must DROP the stale header array — otherwise the picker joins
+    // index-by-index on a misaligned array and reads wrong timestamps.
+    const raw = buildJsonl(
+      {
+        ...baseHeader,
+        messageCreatedAt: [
+          "2020-01-01T00:00:00.000Z",
+          "2020-01-01T00:00:01.000Z",
+          "2020-01-01T00:00:02.000Z",
+        ],
+      },
+      [
+        // Chain events all unstamped: the pre-stamping branch rewind landed on.
+        { id: "e0", parent: null, message: userMsg("q") },
+        { id: "e1", parent: "e0", message: assistantMsg("a") },
+      ],
+      "e1"
+    );
+    const projected = projectSessionLog(parseSessionJsonl(raw));
+    assert.equal(
+      "messageCreatedAt" in projected,
+      false,
+      "stale header messageCreatedAt must be dropped when no chain event carries createdAt"
+    );
+    assert.equal(projected.messageCreatedAt?.[0], undefined);
+    assert.equal(projected.messageCreatedAt?.[1], undefined);
+  });
+
+  it("codec round-trip preserves per-event createdAt → projected messageCreatedAt (verbatim deep-equal)", () => {
+    // Pin the Open-Q #2 invariant at the pure-codec layer: parse → project
+    // must NOT mutate event records' createdAt — the strings on disk equal
+    // the strings the projection exposes via messageCreatedAt. Build a JSONL
+    // with every event stamped; the projection's array must deep-equal the
+    // disk values. This complements the store-level test that pins the same
+    // invariant through save()'s header-refresh path.
+    const stamps = [
+      "2026-08-20T00:00:00.000Z",
+      "2026-08-20T00:00:01.500Z",
+      "2026-08-20T00:00:02.250Z",
+    ];
+    const raw = buildJsonl(
+      baseHeader,
+      [
+        {
+          id: "e0",
+          parent: null,
+          message: userMsg("q"),
+          createdAt: stamps[0],
+        },
+        {
+          id: "e1",
+          parent: "e0",
+          message: assistantMsg("a"),
+          createdAt: stamps[1],
+        },
+        {
+          id: "e2",
+          parent: "e1",
+          message: userMsg("q2"),
+          createdAt: stamps[2],
+        },
+      ],
+      "e2"
+    );
+    const log = parseSessionJsonl(raw);
+    // Event records carry the same ISO strings the JSONL bytes declared.
+    assert.deepEqual(
+      log.events.map((e) => e.createdAt),
+      stamps
+    );
+    const projected = projectSessionLog(log);
+    // Projection's messageCreatedAt deep-equals the per-event stamps,
+    // aligned root→head with messages.
+    assert.deepEqual(projected.messageCreatedAt, stamps);
+    assert.equal(projected.messages.length, stamps.length);
+  });
+});
+
 // -- save: JSONL authority + legacy mirror ------------------------------------
 
 describe("SessionStore.save → JSONL 形态", () => {
@@ -401,10 +629,25 @@ describe("SessionStore.appendEvents", () => {
       .split("\n")
       .filter((l) => l.trim().length > 0)
       .map((l) => JSON.parse(l) as Record<string, unknown>);
-    assert.deepEqual(appended, [
-      { type: "message", id: "e1", parent: "e0", message: assistantMsg("a") },
-      { type: "head", id: "e1" },
-    ]);
+    // appendEvents stamps createdAt on each event it writes (prompt
+    // timestamps for the rewind picker); the exact instant is nondeterministic
+    // so assert shape + validity instead of an exact value.
+    const eventRecord = appended[0] as {
+      type: string;
+      id: string;
+      parent: string;
+      message: unknown;
+      createdAt?: unknown;
+    };
+    assert.equal(eventRecord.type, "message");
+    assert.equal(eventRecord.id, "e1");
+    assert.equal(eventRecord.parent, "e0");
+    assert.deepEqual(eventRecord.message, assistantMsg("a"));
+    assert.equal(typeof eventRecord.createdAt, "string");
+    assert.ok(
+      !Number.isNaN(new Date(eventRecord.createdAt as string).getTime())
+    );
+    assert.deepEqual(appended[1], { type: "head", id: "e1" });
     const loaded = await store.load("jl-append");
     assert.deepEqual(loaded.messages, [userMsg("q"), assistantMsg("a")]);
     assert.equal(await store.readHead("jl-append"), "e1");

@@ -66,7 +66,11 @@ function toTarget(opts: {
     head: opts.head,
     userMessageText: fullText.slice(0, 80),
     fullText,
-    anchoredAt: anchoredAtFor(opts.checkpoints, opts.anchorTurnIndex),
+    anchoredAt: anchoredAtFor(
+      opts.checkpoints,
+      opts.anchorTurnIndex,
+      opts.userEvent
+    ),
     fillInput: opts.fillInput,
     anchorTurnIndex: opts.anchorTurnIndex,
   };
@@ -79,8 +83,10 @@ function firstUserFullText(msg: AnthropicNativeMessage): string {
 
 function anchoredAtFor(
   checkpoints: ReadonlyArray<CheckpointRecord>,
-  turnIndex: number
+  turnIndex: number,
+  userEvent: SessionEventRecord
 ): string {
   const record = checkpoints.find((c) => c.turnIndex === turnIndex);
-  return record?.interruptedAt ?? "";
+  if (record?.interruptedAt) return record.interruptedAt;
+  return userEvent.createdAt ?? "";
 }
