@@ -13,6 +13,7 @@ import {
   CURRENT_SCHEMA_VERSION,
   parseSessionJsonl,
   resolveProjectSessionDir,
+  SESSION_JSONL_EXT,
   SessionStore,
 } from "../../src/session-api/store/index.ts";
 import type { SessionStoreError } from "../../src/session-api/store/index.ts";
@@ -162,20 +163,17 @@ describe("mapStoreError — 6-row error mapping contract", () => {
 // -- createSession -----------------------------------------------------------
 
 describe("createSession", () => {
-  it("writes v2 metadata to disk", async () => {
+  it("writes current-schema metadata to disk", async () => {
     const hub = makeHub(makeDeps([]));
     const { session } = await hub.createSession();
-    const raw = JSON.parse(
-      await (
-        await import("node:fs/promises")
-      ).readFile(join(sessionDir, `${session.conversation_id}.json`), "utf8")
-    );
-    // T1 checkpoint: createSession writes the v4 schema + empty checkpoints.
-    assert.equal(raw.schemaVersion, CURRENT_SCHEMA_VERSION);
-    assert.equal(raw.title, "");
-    assert.equal(typeof raw.cwd, "string");
-    assert.equal(typeof raw.sanitized_at, "string");
-    assert.deepEqual(raw.checkpoints, []);
+    // #629: createSession writes only the JSONL authority; load it back and
+    // assert the header record carries the v5 schema + empty checkpoints.
+    const loaded = await store.load(session.conversation_id);
+    assert.equal(loaded.schemaVersion, CURRENT_SCHEMA_VERSION);
+    assert.equal(loaded.title, "");
+    assert.equal(typeof loaded.cwd, "string");
+    assert.equal(typeof loaded.sanitized_at, "string");
+    assert.deepEqual(loaded.checkpoints, []);
   });
 
   it("creates a session file and returns summary", async () => {
@@ -855,16 +853,26 @@ describe("postMessage title projection", () => {
   it("recomputes title instead of preserving a dirty value", async () => {
     const hub = makeHub(makeDeps([assistantResult({ texts: ["answer"] })]));
     const { session } = await hub.createSession();
-    const path = join(sessionDir, `${session.conversation_id}.json`);
-    const { readFile, writeFile } = await import("node:fs/promises");
-    const raw = JSON.parse(await readFile(path, "utf8"));
-    raw.title = "dirty";
-    await writeFile(path, JSON.stringify(raw), "utf8");
+    // #629: legacy `.json` mirror is no longer written. Inject a stale title
+    // by rewriting the JSONL header record in place (the authority file).
+    const path = join(
+      sessionDir,
+      `${session.conversation_id}${SESSION_JSONL_EXT}`
+    );
+    const raw = await readFile(path, "utf8");
+    const lines = raw.split("\n");
+    const headerLine = lines[0]!;
+    const header = JSON.parse(headerLine) as Record<string, unknown>;
+    header["title"] = "dirty";
+    lines[0] = JSON.stringify(header);
+    await writeFile(path, lines.join("\n"), "utf8");
     await hub.postMessage({
       conversationId: session.conversation_id,
       text: "hello",
     });
-    const saved = JSON.parse(await readFile(path, "utf8"));
+    // Reload sees the recomputed title; the JSONL header is the only shape
+    // carrying metadata.
+    const saved = await store.load(session.conversation_id);
     assert.equal(saved.title, "hello");
   });
 });

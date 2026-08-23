@@ -810,9 +810,11 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
 
   test("错误路径：save write_failed → typed kind 透传（不新造）", async () => {
     await seedFile(sampleFile());
-    // 用同名目录占住 `${id}.json.tmp` 路径 → save 的 writeFile 失败 → write_failed。
+    // 用同名目录占住 `${id}.jsonl.tmp` 路径 → persistHeadMove 的 writeFile
+    // 失败 → write_failed。（#629 之前是 `${id}.json.tmp`，对应旧镜像写
+    // 路径；现在权威 JSONL 走 `${id}.jsonl.tmp`。）
     const dir = resolveProjectSessionDir(baseDir, process.cwd());
-    await mkdir(join(dir, "conv-rewind.json.tmp"), { recursive: true });
+    await mkdir(join(dir, "conv-rewind.jsonl.tmp"), { recursive: true });
     const bridge = makeBridge();
     await expect(
       bridge.rewindSession("conv-rewind", "e3")

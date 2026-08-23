@@ -31,6 +31,7 @@ import {
   type SessionHttpServerOptions,
 } from "../../src/session-api/http.ts";
 import {
+  parseSessionJsonl,
   SessionStore,
   resolveProjectSessionDir,
 } from "../../src/session-api/store/index.ts";
@@ -998,13 +999,15 @@ describe("GET/PUT /api/v1/workspace + GET /api/v1/workspaces (T3)", () => {
       assert.equal((after.body as { bound?: boolean }).bound, true);
       assert.equal((after.body as { root?: string }).root, root);
 
-      // createSession writes the bound root onto the session file.
+      // createSession writes the bound root onto the session file (JSONL authority;
+      // #629: legacy `.json` mirror is no longer written).
       const cid = await createSession();
       const dir = resolveProjectSessionDir(baseDir, process.cwd());
-      const raw = JSON.parse(
-        readFileSync(join(dir, `${cid}.json`), "utf8")
-      ) as { workspaceRoot?: string };
-      assert.equal(raw.workspaceRoot, root);
+      const headerRaw = readFileSync(join(dir, `${cid}.jsonl`), "utf8");
+      const header = parseSessionJsonl(headerRaw).header as {
+        workspaceRoot?: string;
+      };
+      assert.equal(header.workspaceRoot, root);
 
       // Recents persisted with the trusted root.
       const recents = await getJson("/api/v1/workspaces");

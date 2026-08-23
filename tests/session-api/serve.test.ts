@@ -20,7 +20,10 @@ import {
 import { resolveSessionDefaultWorkspace } from "../../src/session-api/default-workspace.ts";
 import type { ListeningServer } from "../../src/session-api/http.ts";
 import type { SessionHub } from "../../src/session-api/hub.ts";
-import { resolveProjectSessionDir } from "../../src/session-api/store/index.ts";
+import {
+  parseSessionJsonl,
+  resolveProjectSessionDir,
+} from "../../src/session-api/store/index.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import { installTestSettingsSource } from "../_helpers/install-test-settings-source.ts";
 
@@ -222,14 +225,17 @@ describe("startSessionServe — workspace pre-bind (T4)", () => {
     baseDir: string,
     conversationId: string
   ): Promise<string | undefined> {
+    // #629: read the JSONL authority; the legacy `.json` mirror is no longer
+    // written. The session header record carries `workspaceRoot`.
     const filePath = join(
       resolveProjectSessionDir(baseDir, process.cwd()),
-      `${conversationId}.json`
+      `${conversationId}.jsonl`
     );
-    const raw = JSON.parse(await readFile(filePath, "utf8")) as {
+    const raw = await readFile(filePath, "utf8");
+    const header = parseSessionJsonl(raw).header as {
       workspaceRoot?: string;
     };
-    return raw.workspaceRoot;
+    return header.workspaceRoot;
   }
 
   it("无 flag/env → hub auto-bound to ~/.iknow/default (T9a)", async () => {

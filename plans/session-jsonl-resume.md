@@ -28,7 +28,7 @@ minimal-change-verifier: yes — 1 个逻辑任务拆成下列 tracer bullets �
    - **Inherits:** spec D7：load 不炸；随后 save 为 JSONL；迁后 API 合法前缀与迁前 messages 等价。
    - **Surface:** `session-api` store
    - **Acceptance:** v5 JSON fixture → load → save → 盘上是 JSONL；再 load 的当前头与原 messages 在发给模型的前缀上一致
-   - Status: [x] done — 6bc1682c（T1 expand 已交付行为，本票锁契约测试；.json 镜像保留，移除见 #629）
+   - Status: [x] done — 6bc1682c（T1 expand 已交付行为，本票锁契约测试；.json 镜像保留，移除见 #629）→ 镜像已删除（#629 落；commit 见 `git log --grep="#629"`）
    - [blocks: T1]
 
 3. **turn 内 commit：assistant 随后每个工具一条** — tag: `[implementation]`
@@ -58,7 +58,7 @@ minimal-change-verifier: yes — 1 个逻辑任务拆成下列 tracer bullets �
 - #626 session-store.ts 拆分（769 行越 500 软阈）
 - #627 readHead/writeHead 零生产调用方
 - #628 buildUserCommit 与 loop-engine query 构造重复
-- #629 移除 .json 兼容双写镜像
+- ~~#629 移除 .json 兼容双写镜像~~（已落；commit message `chore(session-api): 移除 .json 兼容双写镜像`，见 `git log --grep="#629"`。#629.1 follow-up: 删 load fallback + list dedupe 的 `.json` 路径，待 758 个 legacy-only 一次性迁移后再下刀）
 
 ## 待写入
 

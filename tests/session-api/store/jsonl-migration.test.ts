@@ -1,10 +1,11 @@
 /**
  * T2 (#619 / spec session-jsonl-resume D7): 旧 JSON 在下一次 save 迁成 JSONL。
  *
- * Migration trigger point: SessionStore.save(). T1's expand-phase save writes
- * the `<id>.jsonl` authority unconditionally, so a legacy-only `.json` session
+ * Migration trigger point: SessionStore.save(). Save writes the
+ * `<id>.jsonl` authority unconditionally, so a legacy-only `.json` session
  * migrates on its next save: load (legacy path, must not crash) → save →
  * `<id>.jsonl` exists and is authoritative (load prefers it by extension).
+ * Save does NOT write the legacy `.json` mirror (#629).
  *
  * Locked here:
  *   - v5 / v1 legacy fixtures → load → save → JSONL authority; the re-loaded
@@ -12,23 +13,15 @@
  *     an API-legal prefix (well-formed fixture: deep-equal; orphan-tool_use
  *     tail fixture: pre-migration messages stay a PREFIX — T4's process
  *     closeout may append synthetic pairing tool_results on reload).
- *   - The legacy `.json` mirror is STILL written on save (expand-phase compat:
- *     out-of-scope hub/serve/tui tests read `.json` directly). Mirror removal
- *     is a later cleanup ticket — explicitly NOT this one.
+ *   - Save does NOT write a legacy `.json` mirror; the legacy file is left
+ *     in place only if it pre-existed (load() still falls back to it).
  *   - Migration unblocks the JSONL-only primitives (appendEvents/readHead) —
  *     the documented remedy for appendEvents' legacy write_failed (T3's
  *     commit hooks save once before appending).
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -112,7 +105,7 @@ afterAll(async () => {
 });
 
 describe("T2: legacy .json migrates to JSONL on next save", () => {
-  it("v5 fixture → load → save → <id>.jsonl exists and is authoritative; mirror kept", async () => {
+  it("v5 fixture → load → save → <id>.jsonl exists and is authoritative; mirror NOT written", async () => {
     const legacy = sampleFile({
       id: "t2-v5",
       overrides: {
@@ -148,6 +141,12 @@ describe("T2: legacy .json migrates to JSONL on next save", () => {
     const pre = await store.load("t2-v5");
     assert.deepEqual(pre.messages, legacy.messages);
 
+    // #629 — pre-save cleanup: erase the pre-existing legacy `.json` so the
+    // post-save "no mirror" assertion below is not conflated with the legacy
+    // file we just seeded. (save() does not write a `.json` mirror, but it
+    // also does not delete the legacy file — that's a #629.1 follow-up.)
+    await rm(jsonPath("t2-v5"));
+
     // The migration trigger: a plain save().
     await store.save({ id: "t2-v5", file: pre });
 
@@ -155,14 +154,11 @@ describe("T2: legacy .json migrates to JSONL on next save", () => {
     await stat(jsonlPath("t2-v5"));
     assert.equal(await store.readHead("t2-v5"), "e3");
 
-    // KEEP the dual-write `.json` mirror (expand-phase compat; removal is a
-    // later cleanup ticket) — and it reflects the migrated content.
-    const mirror = JSON.parse(await readFile(jsonPath("t2-v5"), "utf8"));
-    assert.deepEqual(mirror, JSON.parse(JSON.stringify(pre)));
+    // #629: save does NOT write a legacy `.json` mirror.
+    await assert.rejects(stat(jsonPath("t2-v5")));
 
-    // Authority proof: remove the mirror; reload must come from the JSONL and
-    // deep-equal the pre-migration load (metadata + messages).
-    await rm(jsonPath("t2-v5"));
+    // Reload must come from the JSONL and deep-equal the pre-migration load
+    // (metadata + messages).
     const reloaded = await store.load("t2-v5");
     assert.deepEqual(reloaded, pre);
   });

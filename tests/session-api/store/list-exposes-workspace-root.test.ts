@@ -19,7 +19,7 @@
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -79,9 +79,10 @@ afterAll(async () => {
 describe("SessionStore.list — workspaceRoot exposure", () => {
   it("surfaces workspaceRoot when the file carries it", async () => {
     const root = "/srv/projects/iknow";
-    // #618 T1: save writes the JSONL authority (`<id>.jsonl`) plus the legacy
-    // `.json` mirror; load/list prefer the JSONL. Saving with the field set
-    // exercises the header-record round-trip through the authority shape.
+    // #618 T1: save writes the JSONL authority (`<id>.jsonl`); load/list
+    // prefer it. #629 removed the legacy `.json` mirror write. Saving with
+    // the field set exercises the header-record round-trip through the
+    // authority shape.
     await store.save({
       id: "list-wsr-present",
       file: sampleFile({
@@ -104,20 +105,15 @@ describe("SessionStore.list — workspaceRoot exposure", () => {
 
   it("surfaces workspaceRoot from a legacy-only .json file (no .jsonl)", async () => {
     const root = "/srv/projects/iknow";
-    await store.save({
-      id: "list-wsr-legacy-only",
-      file: withReply("list-wsr-legacy-only"),
-    });
-    // Inject workspaceRoot into the raw legacy file directly and remove the
-    // JSONL authority, so the legacy load path is the one under test.
-    const path = join(sessionDir, "list-wsr-legacy-only.json");
-    const raw = JSON.parse(await readFile(path, "utf8")) as Record<
-      string,
-      unknown
-    >;
-    raw["workspaceRoot"] = root;
-    await writeFile(path, JSON.stringify(raw, null, 2), "utf8");
-    await rm(join(sessionDir, "list-wsr-legacy-only.jsonl"));
+    // #629: save no longer writes a `.json` mirror. Hand-write a legacy
+    // `.json` directly (the legacy-only on-disk shape) and ensure no `.jsonl`
+    // exists, so the legacy load path is the one under test.
+    const jsonPath = join(sessionDir, "list-wsr-legacy-only.json");
+    const jsonlPath = join(sessionDir, "list-wsr-legacy-only.jsonl");
+    const legacy = withReply("list-wsr-legacy-only");
+    (legacy as unknown as Record<string, unknown>)["workspaceRoot"] = root;
+    await writeFile(jsonPath, JSON.stringify(legacy, null, 2), "utf8");
+    await rm(jsonlPath, { force: true });
 
     const entries = await store.list();
     const entry = entries.find(

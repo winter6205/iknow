@@ -1,5 +1,5 @@
 /**
- * T1 (#618): JSONL 形态与旧 JSON 并存可读。
+ * T1 (#618): JSONL 形态权威。
  *
  * Covers spec session-jsonl-resume Testing Decisions classes that apply to T1:
  *   - empty: new empty session → header + head:null, loads back empty.
@@ -11,14 +11,12 @@
  *     locking is added (same posture as save()).
  *
  * On-disk contract locked here:
- *   - save() writes `<id>.jsonl` (authority: header record, one message event
- *     per message with id/parent chain, trailing head record) AND keeps
- *     writing the legacy `<id>.json` mirror (expand-phase compat for direct
- *     `.json` readers; #619 T2 locked migration-on-save in
- *     jsonl-migration.test.ts — the mirror stays until a later cleanup
- *     ticket).
+ *   - save() writes ONLY `<id>.jsonl` (authority: header record, one message
+ *     event per message with id/parent chain, trailing head record). The
+ *     legacy `<id>.json` mirror is NOT written — #629 closed the
+ *     expand-phase compat window.
  *   - load() detects shape by EXTENSION: prefers `<id>.jsonl`, falls back to
- *     legacy `<id>.json`.
+ *     legacy `<id>.json` (migration window — #619 T2).
  *   - appendEvents/readHead/writeHead are JSONL-only primitives.
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
@@ -426,7 +424,7 @@ describe("createdAt / messageCreatedAt (prompt timestamps)", () => {
   });
 });
 
-// -- save: JSONL authority + legacy mirror ------------------------------------
+// -- save: JSONL authority only ----------------------------------------------
 
 describe("SessionStore.save → JSONL 形态", () => {
   it("writes <id>.jsonl with header/events/head records", async () => {
@@ -440,16 +438,6 @@ describe("SessionStore.save → JSONL 形态", () => {
     assert.equal((lines[1] as { id: string }).id, "e0");
     assert.equal((lines[2] as { parent: string }).parent, "e0");
     assert.deepEqual(lines[3], { type: "head", id: "e1" });
-  });
-
-  it("still writes the legacy <id>.json mirror (expand-phase compat)", async () => {
-    const file = sampleFile({
-      id: "jl-mirror",
-      overrides: { messages: [userMsg("q"), assistantMsg("a")] },
-    });
-    await store.save({ id: "jl-mirror", file });
-    const raw = JSON.parse(await readFile(jsonPath("jl-mirror"), "utf8"));
-    assert.deepEqual(raw, JSON.parse(JSON.stringify(file)));
   });
 
   it("empty session (boundary: empty) writes header + head:null and loads back empty", async () => {
@@ -472,8 +460,8 @@ describe("SessionStore.load — dual-shape detection", () => {
       overrides: { title: "jsonl-title", messages: [userMsg("from-jsonl")] },
     });
     await store.save({ id: "jl-prefer", file });
-    // Overwrite the legacy mirror with divergent content; load must still
-    // return the JSONL projection (authority wins).
+    // Hand-write a divergent legacy `.json` next to the JSONL authority; load
+    // must still return the JSONL projection (authority wins, mirror ignored).
     await writeFile(
       jsonPath("jl-prefer"),
       JSON.stringify(
@@ -501,7 +489,7 @@ describe("SessionStore.load — dual-shape detection", () => {
     assert.deepEqual(loaded.messages, [userMsg("old")]);
   });
 
-  it("loads from .jsonl alone when the .json mirror is deleted", async () => {
+  it("save writes only JSONL; load returns from the JSONL authority", async () => {
     const file = sampleFile({
       id: "jl-no-mirror",
       overrides: {
@@ -520,7 +508,9 @@ describe("SessionStore.load — dual-shape detection", () => {
       },
     });
     await store.save({ id: "jl-no-mirror", file });
-    await rm(jsonPath("jl-no-mirror"));
+    // #629: save does not write a `.json` mirror — verify by asserting the
+    // file is absent. load returns from the JSONL authority.
+    await assert.rejects(stat(jsonPath("jl-no-mirror")));
     const loaded = await store.load("jl-no-mirror");
     assert.deepEqual(loaded, file);
   });
@@ -884,7 +874,7 @@ describe("SessionStore.list/delete with both on-disk shapes", () => {
     assert.ok(entries.some((e) => e.conversation_id === "jl-list-tailcorrupt"));
   });
 
-  it("delete() removes both .jsonl and .json; load → not_found", async () => {
+  it("delete() removes the JSONL authority; load → not_found", async () => {
     await store.save({
       id: "jl-del",
       file: sampleFile({
@@ -893,10 +883,8 @@ describe("SessionStore.list/delete with both on-disk shapes", () => {
       }),
     });
     await stat(jsonlPath("jl-del"));
-    await stat(jsonPath("jl-del"));
     await store.delete("jl-del");
     await assert.rejects(stat(jsonlPath("jl-del")));
-    await assert.rejects(stat(jsonPath("jl-del")));
     await assert.rejects(
       () => store.load("jl-del"),
       (err: unknown) => (err as SessionStoreError).kind === "not_found"

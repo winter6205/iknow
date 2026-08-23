@@ -348,11 +348,13 @@ describe("SessionStore.load", () => {
 });
 
 describe("SessionStore.save", () => {
-  it("writes the file to <namespace>/<id>.json", async () => {
+  it("writes the JSONL authority to <namespace>/<id>.jsonl (#629)", async () => {
     const file = sampleFile({ id: "conv-save-ok" });
     await store.save({ id: "conv-save-ok", file });
-    const s = await stat(join(sessionDir, "conv-save-ok.json"));
+    const s = await stat(join(sessionDir, "conv-save-ok.jsonl"));
     assert.ok(s.isFile());
+    // save no longer writes a `.json` mirror.
+    await assert.rejects(stat(join(sessionDir, "conv-save-ok.json")));
   });
 
   it("atomic write leaves no .tmp residue on success", async () => {

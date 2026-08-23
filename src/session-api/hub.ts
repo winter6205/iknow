@@ -1822,7 +1822,7 @@ export class SessionHub {
    * 调,见 runDeps 处注释 —— 直调 store,不重入队列)。直追 appendEvents;
    * typed store 失败(legacy .json-only 会话升级后首跑 → write_failed;
    * 文件被外部删除 → not_found 等)→ 以当前 session 全量 save 一次
-   * bootstrap(T1 save 双写形态;legacy 即 T2 migrate-on-save 语义的提前
+   * bootstrap(save 权威 JSONL 形态;legacy 即 T2 migrate-on-save 语义的提前
    * 触发)后重试一次。非 typed 异常原样上抛;bootstrap / 重试仍败也上抛
    * —— 不静默吞咽(loop-engine 包 MessageCommitError 中止本次 run)。
    */

@@ -821,7 +821,7 @@ function formatChatError(err: unknown): string {
  * **失败语义**:SessionStore.load 只抛 typed SessionStoreError(not_found |
  * parse_failed | schema_invalid | io_error,见 session-store.ts:58)。所有
  * typed 错误均**非阻塞** —— 返回空 messages + 触发 warn 回调(stderr 一行);
- * 调用方保留 conversationId 锚点,使后续 checkpoint 仍写回同一 `<id>.json`,
+ * 调用方保留 conversationId 锚点,使后续 checkpoint 仍写回同一 `<id>.jsonl`,
  * 而非碎片化成新 id。未知 throw(防御性 —— store 只抛 typed)→ 原样重抛。
  */
 export async function seedResumeMessages(opts: {
@@ -1144,7 +1144,7 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
   //   - load 成功 → messages 来自文件,首轮续跑 processChatLine 的 prior 直接
   //     看到历史,无需任何额外接线。
   //   - load 失败(typed)→ messages 空 + 一行 stderr 警告;**仍保留
-  //     conversationId 锚点** —— 后续 turn 的 checkpoint 写回同一 `<id>.json`,
+  //     conversationId 锚点** —— 后续 turn 的 checkpoint 写回同一 `<id>.jsonl`,
   //     不会碎片化成新 id。未知异常(防御性)→ 原样重抛。
   const { messages: seeded, warn: resumeWarn } = await seedResumeMessages({
     store: opts.resumeId !== undefined ? checkpointStore : undefined,

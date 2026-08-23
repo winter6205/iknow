@@ -8,3 +8,10 @@ Context: #120 第一轮把会话做成整份 JSON + tmp/rename，并写明「本
 Decision: 会话权威历史是带 id/parent 的单文件 append-only JSONL；进程内工作副本跟落盘的 rewind head。trace JSONL 仍只做观测。旧 SessionFileV1 可 load，下一次 save 迁走。不把续跑状态塞进 `CheckpointRecord`。
 
 Why: Claude Code 用 JSONL 流水账才能边写边留分支；整文件覆盖加截断 rewind 会丢掉半截 turn 和退回去的历史。#120 Q6（任何入口读同一份盘）仍成立，只换文件形态。
+
+## Consequences
+
+- 2026-08-22（#618 T1）：save 双写 `<id>.jsonl` 权威 + `<id>.json` 兼容镜像；load 按扩展名优先 JSONL。这是 expand 阶段的临时形态。
+- 2026-08-23（#629）：save 删 `.json` 写镜像。load 仍保留 `.json` fallback（迁移窗口）。list / delete 双 shape 路径保留到一次性迁移脚本把 legacy-only `.json` 跑 load+save 后再下刀（#629.1 follow-up）。
+- 758 个 legacy-only `<id>.json` 仍依赖 fallback 才可见；本票删写镜像**不会丢数据**（首次 save 即迁移），但读 fallback 不能同步删 —— 必须等迁移脚本先收尾。
+- 测试面：删除了 `jsonl.test.ts` 的镜像断言、`jsonl-migration.test.ts` 的 dual-write 块、`rewind.test.ts` 的 mirror-reflects 测；直读 `.json` 的测试迁去读 `<id>.jsonl` 头记录或 `store.load()`。
