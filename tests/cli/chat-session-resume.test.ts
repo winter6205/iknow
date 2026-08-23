@@ -5,7 +5,7 @@
  *   1. empty:resumeId 未设 → 零 IO,空 messages,行为与 T2 完全一致;
  *   2. negative:not_found / parse_failed / schema_invalid / io_error 全部
  *      typed 错误 → 守卫:返回空 messages + 触发 warn 回调,但**保留
- *      conversationId 锚点**,使后续 turn 的 checkpoint 写回同一 `<id>.json`;
+ *      conversationId 锚点**,使后续 turn 的 checkpoint 写回同一 `<id>.jsonl`;
  *   3. overflow / concurrent:同 conversationId 多次 completed → turnCount
  *      累计到 prior+N,消息累计;cancelled-带-turnCount=1 → checkpoint 序列
  *      在既有索引后继续 append;
@@ -363,7 +363,7 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
     });
   });
 
-  it("not_found → seed 返空 + 锚点保留;后续 completed 写回同一 <id>.json(anchor-preserved 验收)", async () => {
+  it("not_found → seed 返空 + 锚点保留;后续 completed 写回同一 <id>.jsonl(anchor-preserved 验收)", async () => {
     const s = await storeFor();
     const id = "anchor-keep";
     // 文件不存在(seed 必走 not_found 分支)。
@@ -427,7 +427,7 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
     assert.match(text, /\[schema_invalid\]/);
     assert.match(text, new RegExp(`仍锚定 ${id}`));
 
-    // 锚点保留:后续 completed 写回同一 <id>.json,重建为干净 v3 文件。
+    // 锚点保留:后续 completed 写回同一 <id>.jsonl,重建为干净 v5 文件。
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["hello"] })],
       checkpointStore: s,

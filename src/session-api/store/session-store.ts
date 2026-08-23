@@ -5,16 +5,15 @@
  * (spec A15). This class is a thin typed-IO wrapper over data/sessions/*.
  * Every failure path throws a typed SessionStoreError — never a bare Error.
  *
- * #618 T1 (spec session-jsonl-resume / ADR-0027): dual on-disk shapes.
+ * #618 T1 (spec session-jsonl-resume / ADR-0027): single on-disk shape.
  *   - Authority: `<id>.jsonl` — single-file append-only JSONL (session header
  *     record, id/parent message events, trailing head record; codec in
- *     jsonl.ts). save() writes it; load() prefers it.
- *   - Compat mirror: `<id>.json` — legacy SessionFileV1 JSON, still written
- *     by save() during the expand phase so direct `.json` readers keep
- *     working. #619 T2 locked migration-on-save (legacy-only `.json` → load →
- *     save → JSONL authority); the mirror is KEPT because out-of-scope
- *     hub/serve/tui tests read `.json` directly — mirror removal is a later
- *     cleanup ticket, deliberately not T2.
+ *     jsonl.ts). save() writes ONLY this; load() prefers it.
+ *   - Read fallback: `<id>.json` — legacy SessionFileV1 JSON, ONLY read by
+ *     load() during the migration window (#619 T2: legacy-only `.json` →
+ *     load → save → JSONL authority on the next save). save() does NOT
+ *     write the legacy mirror (#629: expand-phase compat ended, tests
+ *     migrated off direct `.json` reads).
  *   - Detection is by EXTENSION: load prefers `<id>.jsonl`, falls back to
  *     `<id>.json` (legacy path unchanged).
  *   - appendEvents/readHead/writeHead are JSONL-only primitives (T3's commit
@@ -169,12 +168,12 @@ export class SessionStore {
 
   /**
    * Atomic write: tmp file then rename, so a crash never leaves a half-written file.
-   * Writes the JSONL authority first, then the legacy `.json` compat mirror
-   * (expand phase; #619 T2 locked this as the migration trigger — a
-   * legacy-only `.json` session becomes JSONL-authoritative on its next
-   * save; the mirror stays until a later cleanup ticket). Load prefers the
-   * JSONL, so a crash between the two renames never surfaces a stale
-   * authority.
+   * Writes ONLY the JSONL authority (`<id>.jsonl`). The legacy `.json` mirror
+   * is NOT written (#629: expand-phase compat ended; tests migrated off
+   * direct `.json` reads). Load still falls back to a legacy-only `.json`,
+   * so a legacy-only session's first save migrates it to JSONL authority
+   * (`fullRewritePlan` is the natural migrator — the `readJsonlLog` not_found
+   * branch sets `log = null` and triggers it).
    *
    * #622 T5: the JSONL write is append-only AWARE (planSessionSave). The
    * caller's `file.messages` projection is aligned with the persisted head
@@ -190,7 +189,7 @@ export class SessionStore {
    * Existing event/head records are NEVER dropped, so a rewound-away branch
    * survives every subsequent save. A fresh session, a legacy-only mirror,
    * or a corrupt log falls back to a full rewrite (self-heal; the pre-T5
-   * shape). The `.json` mirror always reflects the caller's projection.
+   * shape).
    * Throws: write_failed
    */
   async save(opts: {
@@ -200,8 +199,6 @@ export class SessionStore {
     const { id, file } = opts;
     const jsonlPath = this.jsonlPath(id);
     const jsonlTmp = `${jsonlPath}.tmp`;
-    const jsonPath = this.filePath(id);
-    const jsonTmp = `${jsonPath}.tmp`;
     try {
       await mkdir(this.dir, { recursive: true });
       let log: ParsedSessionLog | null = null;
@@ -219,8 +216,6 @@ export class SessionStore {
       const plan = planSessionSave(file, log);
       await writeFile(jsonlTmp, plan.jsonl, "utf8");
       await rename(jsonlTmp, jsonlPath);
-      await writeFile(jsonTmp, JSON.stringify(plan.file, null, 2), "utf8");
-      await rename(jsonTmp, jsonPath);
     } catch (err) {
       const typed = err as { kind?: string; cause?: unknown };
       throw {
@@ -343,8 +338,9 @@ export class SessionStore {
    * pointer to an earlier turn-boundary anchor. The skipped chain STAYS in
    * the same JSONL — the write is a header-refresh (recomputed
    * turnCount/title, pruned + event-id-re-anchored checkpoints) plus one
-   * trailing head record; no event record is ever dropped. The `.json`
-   * compat mirror is refreshed to the rewound projection.
+   * trailing head record; no event record is ever dropped. The legacy
+   * `.json` mirror is NOT refreshed (#629: mirror write removed); the
+   * returned projection is recomputed from the JSONL head chain.
    *
    * `keepTurns` is clamped to [0, availableTurns]; a target at/above the
    * available turns is a no-op (nothing written) and returns exactly what
@@ -458,15 +454,14 @@ export class SessionStore {
       ...log.records,
       { type: "head", id: newHead },
     ]);
+    const projected = {
+      ...file,
+      messages: closeoutOrphanToolUses(file.messages),
+    };
     const jsonlTmp = `${path}.tmp`;
-    const jsonPath = this.filePath(id);
-    const jsonTmp = `${jsonPath}.tmp`;
-    const mirror = { ...file, messages: closeoutOrphanToolUses(file.messages) };
     try {
       await writeFile(jsonlTmp, jsonl, "utf8");
       await rename(jsonlTmp, path);
-      await writeFile(jsonTmp, JSON.stringify(mirror, null, 2), "utf8");
-      await rename(jsonTmp, jsonPath);
     } catch (err) {
       throw {
         kind: "write_failed",
@@ -474,7 +469,7 @@ export class SessionStore {
         cause: errMsg(err),
       } satisfies SessionStoreError;
     }
-    return { file: mirror };
+    return { file: projected };
   }
 
   /**
@@ -689,11 +684,10 @@ export class SessionStore {
 
 // -- module-level helpers ----------------------------------------------------
 
-/** T5 save plan: the JSONL text to persist + the mirror file (with derived
- *  checkpoint anchors). */
+/** T5 save plan: the JSONL text to persist. The mirror `.json` file was
+ *  removed in #629, so the save plan now only carries the JSONL bytes. */
 interface SavePlan {
   readonly jsonl: string;
-  readonly file: SessionFileV1;
 }
 
 /**
@@ -763,7 +757,7 @@ function planSessionSave(
   }
   const finalFile = withDerivedAnchors(file, finalIds);
   const { messages: _messages, ...meta } = finalFile;
-  return { jsonl: serializeSessionLog(meta, records), file: finalFile };
+  return { jsonl: serializeSessionLog(meta, records) };
 }
 
 /** Full-rewrite plan (fresh session / legacy migration / corrupt-log
@@ -771,7 +765,7 @@ function planSessionSave(
 function fullRewritePlan(file: SessionFileV1): SavePlan {
   const ids = file.messages.map((_, i) => messageEventId(i));
   const finalFile = withDerivedAnchors(file, ids);
-  return { jsonl: sessionFileToJsonl(finalFile), file: finalFile };
+  return { jsonl: sessionFileToJsonl(finalFile) };
 }
 
 /** T5 (spec D3): derive checkpoint `anchorEventId`s against a chain's event

@@ -23,7 +23,7 @@
    - 超时 → `timeout`，不加那句 system（现有）
    - 进程没了 → `process`（`InterruptReason` 已预留），**不加** `Interrupted by user.`
 6. mutating 工具（`bash` / `edit_file` / `write_file`）的 `process` 文案须指示模型：**先检查副作用是否已生效，未生效再重跑**。只读工具不必。
-7. 旧 `SessionFileV1` JSON：load 不炸；下一次 save 迁成 JSONL。#120 Q6（任何入口读同一份盘）仍成立。
+7. 旧 `SessionFileV1` JSON：load 不炸；下一次 save 迁成 JSONL。#120 Q6（任何入口读同一份盘）仍成立。Save 不再写 `.json` 兼容镜像（#629 已落）—— 单文件 JSONL 是唯一权威形态；`load` 仍保留 `.json` fallback 作为迁移窗口的读入口。
 8. 温度缺省省略、不 fallback 0：正交，**不在本 spec**。
 
 ## Testing Decisions

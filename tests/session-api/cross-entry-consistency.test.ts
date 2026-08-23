@@ -31,6 +31,7 @@ import { SessionHub } from "../../src/session-api/hub.ts";
 import {
   CURRENT_SCHEMA_VERSION,
   parseSessionJsonl,
+  projectSessionLog,
   resolveProjectSessionDir,
   SESSION_JSONL_EXT,
   SessionStore,
@@ -85,9 +86,17 @@ afterAll(async () => {
   await rm(baseDir, { recursive: true, force: true });
 });
 
-/** Read the raw JSON on disk — the authoritative baseline for "A's on-disk values". */
+/** Read the JSONL on disk and project it through the same codec the store
+ *  uses for `load()` (header + head-chain messages). SSOT baseline for "A's
+ *  on-disk values" (#629: `.json` mirror removed; JSONL is the only authority
+ *  shape). The codec mirrors `store.load()` so fork / rewind branches that
+ *  leave abandoned events in the log do not surface in the comparison. */
 async function readDisk(id: string): Promise<Record<string, unknown>> {
-  return JSON.parse(await readFile(join(sessionDir, `${id}.json`), "utf8"));
+  const raw = await readFile(join(sessionDir, `${id}.jsonl`), "utf8");
+  return projectSessionLog(parseSessionJsonl(raw)) as unknown as Record<
+    string,
+    unknown
+  >;
 }
 
 /** Convenience: take only the 8 fields the spec names for equality. */

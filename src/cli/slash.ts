@@ -26,7 +26,7 @@ import { parseGoalPinInput } from "../session-api/goal-auto.js";
  * (SessionContext 由 Session API 装配)。
  *
  * `conversationId` (T2) — 由 runChatSession 在入口处一次性生成（`randomUUID`），
- * 作为该 REPL 会话的 session-pool 文件名（`~/.iknow/sessions/<proj>/<id>.json`）。
+ * 作为该 REPL 会话的 session-pool 文件名（`~/.iknow/sessions/<proj>/<id>.jsonl`）。
  * T4 `--resume` 会复用同一字段在重启时锚定同一文件。Tests / makeState 默认 `null`
  * 标识"无 checkpoint 落盘路径"，processChatLine 据此跳过持久化分支。
  */

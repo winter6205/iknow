@@ -17,7 +17,14 @@
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -207,7 +214,7 @@ describe("SessionStore.rewindToAnchor (T5 head move)", () => {
     assert.deepEqual(loaded.checkpoints, file.checkpoints);
   });
 
-  it("mirror reflects the rewound projection (compat mirror, not authority)", async () => {
+  it("rewind → load sees the rewound head; legacy `.json` is NOT refreshed (#629)", async () => {
     const id = "rw-mirror";
     await store.save({
       id,
@@ -216,10 +223,29 @@ describe("SessionStore.rewindToAnchor (T5 head move)", () => {
         overrides: { messages: threeTurnMessages(), turnCount: 3 },
       }),
     });
+    // Hand-write a stale legacy `.json` mirror (the on-disk shape save no
+    // longer maintains). rewindToAnchor must NOT refresh it.
+    await writeFile(
+      jsonPath(id),
+      JSON.stringify(
+        sampleFile({
+          id,
+          overrides: { messages: threeTurnMessages(), turnCount: 3 },
+        })
+      ),
+      "utf8"
+    );
     await store.rewindToAnchor({ id, keepTurns: 1 });
-    const mirror = JSON.parse(await readFile(jsonPath(id), "utf8"));
-    assert.equal(mirror.messages.length, 2);
-    assert.equal(mirror.turnCount, 1);
+    // Load comes from the JSONL authority, which is what was rewound.
+    const loaded = await store.load(id);
+    assert.equal(loaded.messages.length, 2);
+    assert.equal(loaded.turnCount, 1);
+    // Lock the contract: rewind MUST NOT refresh the stale legacy `.json`
+    // mirror. The on-disk `.json` still deep-equals the 3-turn literal we
+    // hand-wrote (i.e. the rewound projection did NOT propagate to it).
+    const staleMirror = JSON.parse(await readFile(jsonPath(id), "utf8"));
+    assert.equal(staleMirror.messages.length, 6);
+    assert.equal(staleMirror.turnCount, 3);
   });
 
   it("legacy .json-only session → write_failed (migration signal; legacy file untouched)", async () => {
@@ -570,9 +596,11 @@ describe("checkpoint anchor by event id (T5 D3)", () => {
     });
     const loaded = await store.load(id);
     assert.equal(loaded.checkpoints?.[0]?.anchorEventId, "e3");
-    // The mirror carries the derived anchor too (mirror/header consistency).
-    const mirror = JSON.parse(await readFile(jsonPath(id), "utf8"));
-    assert.equal(mirror.checkpoints[0].anchorEventId, "e3");
+    // #629: save does NOT write a legacy `.json` mirror; the JSONL header
+    // record is the only on-disk shape that carries the derived anchor.
+    await assert.rejects(stat(jsonPath(id)));
+    const headerLine = (await readLog(id)).header;
+    assert.equal(headerLine.checkpoints?.[0]?.anchorEventId, "e3");
   });
 
   it("load migrates legacy messagesCount-only checkpoints in a hand-written jsonl header", async () => {

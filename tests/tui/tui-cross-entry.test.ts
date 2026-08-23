@@ -24,6 +24,7 @@ import {
   resolveProjectSessionDir,
   SessionStore,
 } from "../../src/session-api/store/session-store.js";
+import { parseSessionJsonl } from "../../src/session-api/store/jsonl.js";
 import { CURRENT_SCHEMA_VERSION } from "../../src/session-api/store/schema.js";
 import { SessionHub } from "../../src/session-api/hub.js";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.js";
@@ -67,9 +68,10 @@ describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 hub 共享池", () => {
     const serveView = await serveHub.getSession(id);
     expect(serveView.session.conversation_id).toBe(id);
     expect(serveView.session.turn_count).toBe(2);
-    // 磁盘 JSON 直读交叉核对（SSOT = 文件）。
+    // 磁盘 JSONL 头记录直读交叉核对（SSOT = 文件; #629 去掉 .json 镜像）。
     const dir = resolveProjectSessionDir(baseDir, cwd);
-    const raw = JSON.parse(readFileSync(join(dir, `${id}.json`), "utf8")) as {
+    const jsonlRaw = readFileSync(join(dir, `${id}.jsonl`), "utf8");
+    const raw = parseSessionJsonl(jsonlRaw).header as {
       schemaVersion: number;
       turnCount: number;
       title: string;
