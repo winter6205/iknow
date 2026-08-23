@@ -15,6 +15,10 @@
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import type {
+  AnthropicNativeMessage,
+  AnthropicContentBlock,
+} from "./model-adapter/types.js";
 import { OPEN_PREFIX, TODOS_FILE } from "./aci/tools/todo-write.js";
 
 // 未勾行锚点:直接复用账本写入方 todo-write.ts 导出的 OPEN_PREFIX —— 写入
@@ -50,6 +54,11 @@ export interface AgentStatusSnapshot {
  *
  * todo 段(`todos:` 头 + 未勾行)仅在存在未勾项时出现 —— 空槽不广告。
  */
+/** 栏文本形态检测（TUI 隐藏注入气泡、turn 边界、测试夹具共用）。 */
+export function isAgentStatusText(text: string): boolean {
+  return text.trimStart().startsWith("<agent_status>");
+}
+
 export function buildAgentStatusText(snapshot: AgentStatusSnapshot): string {
   const lines: string[] = ["<agent_status>", `last_tool: ${snapshot.lastTool}`];
   if (snapshot.openTodoLines.length > 0) {
@@ -58,6 +67,48 @@ export function buildAgentStatusText(snapshot: AgentStatusSnapshot): string {
   }
   lines.push("</agent_status>");
   return lines.join("\n");
+}
+
+const LAST_TOOL_PREFIX = "last_tool: ";
+
+/**
+ * 栏文本 → 现势快照(TUI resume hydrate / 测试直驱)。畸形输入 → null,不 throw。
+ */
+export function parseAgentStatusText(text: string): AgentStatusSnapshot | null {
+  if (!isAgentStatusText(text)) return null;
+  const lines = text.split("\n");
+  if (lines.length < 2) return null;
+  if (lines[0] !== "<agent_status>") return null;
+  if (lines[lines.length - 1] !== "</agent_status>") return null;
+  const body = lines.slice(1, -1);
+  const lastToolLine = body.find((l) => l.startsWith(LAST_TOOL_PREFIX));
+  if (lastToolLine === undefined) return null;
+  const todoHeaderIndex = body.findIndex((l) => l === "todos:");
+  const openTodoLines =
+    todoHeaderIndex >= 0 ? body.slice(todoHeaderIndex + 1) : [];
+  return Object.freeze({
+    lastTool: lastToolLine.slice(LAST_TOOL_PREFIX.length),
+    openTodoLines: Object.freeze([...openTodoLines]),
+  });
+}
+
+/**
+ * messages 里末条 agent_status user 消息 → 快照(冷启动 hydrate SSOT)。
+ * 无栏 / 末栏畸形 → null;不读 todos.md。
+ */
+export function agentStatusFromMessages(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): AgentStatusSnapshot | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role !== "user") continue;
+    const text = m.content
+      .flatMap((b) => (b.type === "text" ? [b.text] : []))
+      .join("\n");
+    if (!isAgentStatusText(text)) continue;
+    return parseAgentStatusText(text);
+  }
+  return null;
 }
 
 /**

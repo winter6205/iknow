@@ -21,6 +21,7 @@ import type {
   StopReason,
   TokenUsage,
 } from "../harness/model-adapter/types.js";
+import { isAgentStatusText } from "../harness/agent-status.js";
 import { isSubagentDrainText } from "../harness/subagent/host-drain.js";
 import { isVerifyInjectedText } from "../harness/verify/inject.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
@@ -249,7 +250,8 @@ export function joinedUserText(message: AnthropicNativeMessage): string {
 
 /**
  * Host-injected user messages that must not render as typed bubbles
- * (drain summaries + verify envelopes). Model history still holds them.
+ * (agent_status bar + drain summaries + verify envelopes). Model history
+ * still holds them; TUI status/todo footer reads agent_status stream events.
  */
 export function isTuiHiddenUserMessage(
   message: AnthropicNativeMessage
@@ -257,7 +259,11 @@ export function isTuiHiddenUserMessage(
   if (message.role !== "user") return false;
   const text = joinedUserText(message).trim();
   if (text.length === 0) return false;
-  return isSubagentDrainText(text) || isVerifyInjectedText(text);
+  return (
+    isAgentStatusText(text) ||
+    isSubagentDrainText(text) ||
+    isVerifyInjectedText(text)
+  );
 }
 
 export function seedInputHistory(

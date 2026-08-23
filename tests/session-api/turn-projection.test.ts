@@ -504,6 +504,20 @@ describe("isTurnQuery — turn 边界判定（共享 helper）", () => {
       false
     );
   });
+
+  it("agent_status 栏 user 消息 → false（host 注入非 query）", () => {
+    assert.equal(
+      isTurnQuery(
+        assistant("user", [
+          {
+            type: "text",
+            text: "<agent_status>\nlast_tool: idle\n</agent_status>",
+          },
+        ])
+      ),
+      false
+    );
+  });
 });
 
 // -- #604 T1: extractRecentUserTasks — 任务摘录纯函数 -------------------------

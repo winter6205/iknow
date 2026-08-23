@@ -144,6 +144,24 @@ test("verify 补跑信封：不渲染为 ❯ 用户气泡", async () => {
   await setup.renderer.destroy();
 });
 
+test("agent_status 栏注入：不渲染为 ❯ 用户气泡", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text: "<agent_status>\nlast_tool: web_search\ntodos:\n- [ ] 查新闻\n</agent_status>",
+      },
+    ],
+  };
+  const setup = await renderBlocks(msg);
+  const frame = setup.captureCharFrame();
+  expect(frame.includes("❯")).toBe(false);
+  expect(frame.includes("last_tool")).toBe(false);
+  expect(frame.includes("agent_status")).toBe(false);
+  await setup.renderer.destroy();
+});
+
 test("system 消息：渲染固定文案 Interrupted by user.（警示色）", async () => {
   const msg: AnthropicNativeMessage = {
     role: "system",
