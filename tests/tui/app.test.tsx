@@ -26,6 +26,7 @@ import {
   createToolEventSink,
   type TuiAppProps,
 } from "../../src/tui/app.js";
+import type { TuiSessionState } from "../../src/tui/session-state.js";
 import {
   createInflightRegistry,
   createTuiBridge,
@@ -35,6 +36,10 @@ import { createTuiAskUserBridge } from "../../src/tui/ask-user.js";
 import { createPermissionModeContext } from "../../src/harness/permission/index.js";
 import { createSessionGrants } from "../../src/harness/permission/session-grants.js";
 import type { LoopEngineDeps } from "../../src/harness/index.js";
+import { buildAgentStatusText } from "../../src/harness/agent-status.js";
+import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
+import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
+import { attachSession } from "../../src/tui/session-state.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 
 /** 帧等待：mockInput 字节经 stdin 异步解析，需轮询 renderOnce。 */
@@ -81,7 +86,8 @@ interface DrivenApp {
 async function mountAppAsync(
   responses: Parameters<typeof makeDeps>[0],
   depsOverride?: LoopEngineDeps,
-  onPersistThinking?: TuiAppProps["onPersistThinking"]
+  onPersistThinking?: TuiAppProps["onPersistThinking"],
+  initialSession?: TuiSessionState
 ): Promise<DrivenApp> {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-app-"));
   const bridge = createTuiBridge({
@@ -103,6 +109,7 @@ async function mountAppAsync(
       dataDir={dataDir}
       permissionMode={permissionMode}
       sessionGrants={sessionGrants}
+      {...(initialSession ? { initialSession } : {})}
       {...(onPersistThinking ? { onPersistThinking } : {})}
       onQuit={() => {
         if (setupRef && !setupRef.renderer.isDestroyed)
@@ -673,5 +680,54 @@ describe("#647 T3: agent 现势按会话隔离（multi-session staleness 回归�
     } finally {
       rmSync(baseDir, { recursive: true, force: true });
     }
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// T4b: resume 冷启动 hydrate —— transcript 末栏 → footer,无需新 turn
+// ---------------------------------------------------------------------------
+describe("T4b: agent_status resume hydrate", () => {
+  function sessionFileWithAgentStatusBar(): SessionFileV1 {
+    const barText = buildAgentStatusText({
+      lastTool: "web_search",
+      openTodoLines: ["- [ ] 查新闻"],
+    });
+    const messages: AnthropicNativeMessage[] = [
+      { role: "user", content: [{ type: "text", text: "用户问题" }] },
+      { role: "assistant", content: [{ type: "text", text: "答复" }] },
+      { role: "user", content: [{ type: "text", text: barText }] },
+      { role: "assistant", content: [{ type: "text", text: "继续" }] },
+    ];
+    return {
+      schemaVersion: 3,
+      conversation_id: "conv-resume-hydrate",
+      messages,
+      jsonMode: false,
+      turnCount: 2,
+      updatedAt: "2026-08-11T00:00:00.000Z",
+      title: "用户问题",
+      cwd: "",
+      sanitized_at: "2026-08-11T00:00:00.000Z",
+      checkpoints: [],
+    };
+  }
+
+  test("initialSession resume: 未发新 turn 即见 ◇ last_tool + □ todo 行", async () => {
+    const file = sessionFileWithAgentStatusBar();
+    const app = await mountAppAsync(
+      [assistantResult({ texts: ["unused"] })],
+      makeDeps([assistantResult({ texts: ["unused"] })]),
+      undefined,
+      attachSession(file)
+    );
+    const frame = await untilFrame(
+      app.setup,
+      (f) => f.includes("◇ last_tool:"),
+      8000,
+      "resume-hydrate-panel"
+    );
+    expect(frame).toContain("last_tool: web_search");
+    expect(frame).toContain("□ 查新闻");
+    await app.destroy();
   }, 30_000);
 });

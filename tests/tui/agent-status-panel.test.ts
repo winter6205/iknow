@@ -18,7 +18,12 @@ import { readdirSync, readFileSync } from "node:fs";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { HarnessStreamEvent } from "../../src/harness/stream.js";
+import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
+import {
+  buildAgentStatusText,
+  parseAgentStatusText,
+  agentStatusFromMessages,
+} from "../../src/harness/agent-status.js";
 import {
   agentStatusFromEvent,
   agentStatusLines,
@@ -30,6 +35,7 @@ import {
   createTuiBridge,
 } from "../../src/tui/hub-bridge.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
+import type { HarnessStreamEvent } from "../../src/harness/stream.js";
 
 function agentStatusEvent(
   lastTool: string,
@@ -37,6 +43,69 @@ function agentStatusEvent(
 ): HarnessStreamEvent & { type: "agent_status" } {
   return { type: "agent_status", lastTool, openTodoLines };
 }
+
+// ---------------------------------------------------------------------------
+// 冷启动 hydrate:栏文本 parse + messages 末栏投影
+// ---------------------------------------------------------------------------
+
+describe("parseAgentStatusText / agentStatusFromMessages: resume hydrate SSOT", () => {
+  test("buildAgentStatusText → parseAgentStatusText 往返", () => {
+    const snapshot = {
+      lastTool: "web_search",
+      openTodoLines: ["- [ ] alpha", "- [ ] beta"],
+    };
+    const parsed = parseAgentStatusText(buildAgentStatusText(snapshot));
+    expect(parsed).not.toBeNull();
+    expect(parsed!.lastTool).toBe("web_search");
+    expect([...parsed!.openTodoLines]).toEqual(["- [ ] alpha", "- [ ] beta"]);
+  });
+
+  test("无 todos 段 → openTodoLines 空", () => {
+    const parsed = parseAgentStatusText(
+      "<agent_status>\nlast_tool: idle\n</agent_status>"
+    );
+    expect(parsed).not.toBeNull();
+    expect(parsed!.lastTool).toBe("idle");
+    expect([...parsed!.openTodoLines]).toEqual([]);
+  });
+
+  test("畸形栏 → null 不 throw", () => {
+    expect(parseAgentStatusText("not a bar")).toBeNull();
+    expect(parseAgentStatusText("<agent_status>\n</agent_status>")).toBeNull();
+    expect(
+      parseAgentStatusText("<agent_status>\nlast_tool: x\nmissing close")
+    ).toBeNull();
+  });
+
+  test("agentStatusFromMessages: 取末条 agent_status user 消息", () => {
+    const olderBar = buildAgentStatusText({
+      lastTool: "idle",
+      openTodoLines: ["- [ ] old"],
+    });
+    const newerBar = buildAgentStatusText({
+      lastTool: "bash",
+      openTodoLines: ["- [ ] new task"],
+    });
+    const messages: AnthropicNativeMessage[] = [
+      { role: "user", content: [{ type: "text", text: "query" }] },
+      { role: "assistant", content: [{ type: "text", text: "ok" }] },
+      { role: "user", content: [{ type: "text", text: olderBar }] },
+      { role: "assistant", content: [{ type: "text", text: "ok2" }] },
+      { role: "user", content: [{ type: "text", text: newerBar }] },
+    ];
+    const snapshot = agentStatusFromMessages(messages);
+    expect(snapshot).not.toBeNull();
+    expect(snapshot!.lastTool).toBe("bash");
+    expect([...snapshot!.openTodoLines]).toEqual(["- [ ] new task"]);
+  });
+
+  test("无 agent_status 消息 → null", () => {
+    const messages: AnthropicNativeMessage[] = [
+      { role: "user", content: [{ type: "text", text: "plain query" }] },
+    ];
+    expect(agentStatusFromMessages(messages)).toBeNull();
+  });
+});
 
 // ---------------------------------------------------------------------------
 // 状态来源:事件 → 快照(replace-on-event 语义的构造性证据)

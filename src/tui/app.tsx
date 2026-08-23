@@ -137,7 +137,10 @@ import {
   agentStatusFromEvent,
   agentStatusLines,
 } from "./agent-status-line.js";
-import type { AgentStatusSnapshot } from "../harness/agent-status.js";
+import {
+  agentStatusFromMessages,
+  type AgentStatusSnapshot,
+} from "../harness/agent-status.js";
 import {
   INPUT_MAX_LINES as MAX_INPUT_LINES,
   inputVisibleLineCount,
@@ -457,7 +460,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // (in-flight 展示)分开,不混、不回流模型向任何字段。
   const [agentStatuses, setAgentStatuses] = useState<
     Record<string, AgentStatusSnapshot>
-  >({});
+  >(() => {
+    const id = initial.conversationId;
+    if (id === undefined) return {};
+    const snapshot = agentStatusFromMessages(initial.messages);
+    return snapshot === null ? {} : { [id]: snapshot };
+  });
   // T6 (D5): thinking 折叠面板展开态；Ctrl+O 折叠/展开，/thinking 为开关（思考Enabled）。
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
   // thinking 控制臂开关（/thinking 切换，与折叠态解耦）。初始基线 =
@@ -1038,6 +1046,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             ? { ...prev, [id]: seedInputHistory(attached.messages) }
             : prev
         );
+        const statusSnapshot = agentStatusFromMessages(attached.messages);
+        if (statusSnapshot !== null) {
+          setAgentStatuses((prev) => ({ ...prev, [id]: statusSnapshot }));
+        }
       } catch (err) {
         setNotice({ lines: [`打开会话失败：${describeError(err)}`] });
         return;
