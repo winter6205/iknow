@@ -256,19 +256,21 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
     ).toEqual([]);
   });
 
-  test("turnCount=1 列出 keepTurns=0 锚点（真实回退，不是 no-op）", () => {
-    // 1-turn 会话：keepTurns=0「首条用户消息之前」是真实回退（rewindFile
-    // 截空 msgs=[]/turnCount=0），必须列出，不能因为与 available 相近被吞。
+  test("turnCount=1 列出 head=null 锚点（真实回退，不是 no-op）", () => {
     const targets = buildRewindTargets({
       ...sampleFile(),
       messages: [userMsg("q1"), assistantMsg([text("a1")])],
       turnCount: 1,
     });
-    expect(targets).toHaveLength(1);
+    expect(targets).toHaveLength(2);
     expect(targets[0]).toMatchObject({
-      keepTurns: 0,
+      head: null,
       userMessageText: "q1",
       fullText: "q1",
+    });
+    expect(targets[1]).toMatchObject({
+      head: "e0",
+      userMessageText: "q1",
     });
   });
 
@@ -299,67 +301,72 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
       messages: [userMsg("q1"), assistantMsg([text("a1")]), userMsg("q2")],
       turnCount: 2,
     });
-    expect(targets.map((t) => t.keepTurns)).toEqual([0, 1]);
+    expect(targets.map((t) => t.head)).toEqual([null, "e0"]);
     expect(targets[0]).toMatchObject({
-      keepTurns: 0,
+      head: null,
       anchorTurnIndex: 0,
       userMessageText: "q1",
       fullText: "q1",
       anchoredAt: "",
     });
     expect(targets[1]).toMatchObject({
-      keepTurns: 1,
-      anchorTurnIndex: 1,
-      userMessageText: "q2",
-      fullText: "q2",
+      head: "e0",
+      anchorTurnIndex: 0,
+      userMessageText: "q1",
+      fullText: "q1",
     });
   });
 
   test("3-turn 会话 → [回到首条消息之前, 保留到 q2 之前, 保留到 q3 之前]；当前 turn(3) 不列出", () => {
     const targets = buildRewindTargets(sampleFile());
-    expect(targets.map((t) => t.keepTurns)).toEqual([0, 1, 2]);
-    // 起点锚点 = 首条用户消息（"q1"），不再是「回到会话起点」抽象标签。
+    expect(targets.map((t) => t.head)).toEqual([null, "e0", "e4", "e6"]);
     expect(targets[0]).toMatchObject({
-      keepTurns: 0,
+      head: null,
       anchorTurnIndex: 0,
       userMessageText: "q1",
       fullText: "q1",
       anchoredAt: "",
     });
     expect(targets[1]).toMatchObject({
-      keepTurns: 1,
-      anchorTurnIndex: 1,
+      head: "e0",
+      anchorTurnIndex: 0,
+      userMessageText: "q1",
+      fullText: "q1",
+    });
+    expect(targets[2]).toMatchObject({
+      head: "e4",
       userMessageText: "q2",
       fullText: "q2",
     });
-    expect(targets[2]).toMatchObject({
-      keepTurns: 2,
+    expect(targets[3]).toMatchObject({
+      head: "e6",
       userMessageText: "q3",
       fullText: "q3",
     });
-    // 回退到当前 turn(=3) 不在列表（fallback 规则 3：no-op 自然不可达）。
-    expect(targets.some((t) => t.keepTurns === 3)).toBe(false);
+    expect(targets.some((t) => t.head === "e7")).toBe(false);
   });
 
   test("锚点文本 strip + 截 80（同 extractTitle 语义）；fullText 不截断", () => {
     const long = "x".repeat(100);
     const file = {
       ...sampleFile(),
-      messages: [userMsg("q1"), assistantMsg([text("a1")]), userMsg(long)],
+      messages: [
+        userMsg("q1"),
+        assistantMsg([text("a1")]),
+        userMsg(long),
+        assistantMsg([text("a2")]),
+      ],
       turnCount: 2,
     };
     const targets = buildRewindTargets(file);
-    // 展示用文本截 80。
-    expect(targets[1]!.userMessageText).toHaveLength(80);
-    // 填回输入框的完整文本不截断（用户要修改重发时拿的是原文）。
-    expect(targets[1]!.fullText).toHaveLength(100);
+    expect(targets[2]!.userMessageText).toHaveLength(80);
+    expect(targets[2]!.fullText).toHaveLength(100);
   });
 
   test("与 checkpoints 按 turnIndex 合取 anchoredAt；无快照 → 空串", () => {
     const targets = buildRewindTargets(sampleFile());
-    expect(targets[1]!.anchoredAt).toBe("2026-08-11T00:00:00.000Z");
-    expect(targets[2]!.anchoredAt).toBe("2026-08-11T00:00:01.000Z");
-    // 起点条目无快照。
+    expect(targets[2]!.anchoredAt).toBe("2026-08-11T00:00:00.000Z");
+    expect(targets[3]!.anchoredAt).toBe("2026-08-11T00:00:01.000Z");
     expect(targets[0]!.anchoredAt).toBe("");
   });
 
@@ -371,9 +378,14 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
       messages: [userMsg("q1"), userToolResult("t-orphan")],
       turnCount: 1,
     });
-    expect(targets).toHaveLength(1);
+    expect(targets).toHaveLength(2);
+    expect(targets.map((t) => t.head)).toEqual([null, "e0"]);
     expect(targets[0]).toMatchObject({
-      keepTurns: 0,
+      head: null,
+      userMessageText: "q1",
+    });
+    expect(targets[1]).toMatchObject({
+      head: "e0",
       userMessageText: "q1",
     });
   });
@@ -399,25 +411,28 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
 describe("reduceRewindKey（选择器键路由）", () => {
   const targets: ReadonlyArray<RewindTarget> = [
     {
-      keepTurns: 0,
+      head: null,
       userMessageText: "q1",
       fullText: "q1",
       anchorTurnIndex: 0,
       anchoredAt: "",
+      fillInput: true,
     },
     {
-      keepTurns: 1,
+      head: "e3",
       userMessageText: "q2",
       fullText: "q2",
       anchorTurnIndex: 1,
       anchoredAt: ISO,
+      fillInput: true,
     },
     {
-      keepTurns: 2,
+      head: "e5",
       userMessageText: "q3",
       fullText: "q3",
       anchorTurnIndex: 2,
       anchoredAt: "",
+      fillInput: true,
     },
   ];
   const noKey = {
@@ -475,21 +490,21 @@ describe("reduceRewindKey（选择器键路由）", () => {
     ).toEqual({ type: "cancel" });
   });
 
-  test("确认态：Enter → execute（携带 keepTurns）；Esc → cancel", () => {
+  test("确认态：Enter → execute（携带 head）；Esc → cancel", () => {
     expect(
       reduceRewindKey(key({ return: true }), {
         targets,
         selectedIndex: 1,
         confirming: true,
       })
-    ).toEqual({ type: "execute", keepTurns: 1 });
+    ).toEqual({ type: "execute", head: "e3" });
     expect(
       reduceRewindKey(key({ return: true }), {
         targets,
         selectedIndex: 0,
         confirming: true,
       })
-    ).toEqual({ type: "execute", keepTurns: 0 });
+    ).toEqual({ type: "execute", head: null });
     expect(
       reduceRewindKey(key({ escape: true }), {
         targets,
@@ -530,7 +545,12 @@ describe("rewindPickerContent（picker 渲染形状）", () => {
     const targets = buildRewindTargets(sampleFile());
     const content = rewindPickerContent(targets, 0, false);
     // 3 个锚点（首条消息之前 + q2 之前 + q3 之前），主 label 必须是真实文本
-    expect(content.options.map((o) => o.label)).toEqual(["q1", "q2", "q3"]);
+    expect(content.options.map((o) => o.label)).toEqual([
+      "q1",
+      "q1",
+      "q2",
+      "q3",
+    ]);
     // 不含「回到会话起点」或「保留前」字面
     for (const opt of content.options) {
       expect(opt.label).not.toContain("回到会话起点");
@@ -538,24 +558,22 @@ describe("rewindPickerContent（picker 渲染形状）", () => {
     }
   });
 
-  test("确认态 keepTurns=0：desc 引用「首条用户消息」+「之前」+「不可恢复」", () => {
+  test("确认态 head=null：desc 引用「首条用户消息」+「之前」+ 账本保留", () => {
     const targets = buildRewindTargets(sampleFile());
     const content = rewindPickerContent(targets, 0, true);
     expect(content.title).toBe("确认回退？");
     expect(content.description).toContain("恢复到");
     expect(content.description).toContain("之前");
-    expect(content.description).toContain("不可恢复");
-    // options 固定 [execute / cancel]
+    expect(content.description).toContain("账本");
+    expect(content.description).not.toContain("不可恢复");
     expect(content.options.map((o) => o.value)).toEqual(["execute", "cancel"]);
   });
 
-  test("确认态 keepTurns>0：desc 引用锚点消息内容（q2）", () => {
+  test("确认态有 head：desc 引用锚点消息内容（q2）", () => {
     const targets = buildRewindTargets(sampleFile());
-    // targets[1] = {keepTurns:1, userMessageText:"q2"}
-    const content = rewindPickerContent(targets, 1, true);
-    expect(content.description).toContain("恢复到");
+    const content = rewindPickerContent(targets, 2, true);
     expect(content.description).toContain("q2");
-    expect(content.description).toContain("之前");
+    expect(content.description).toContain("祖先链");
   });
 
   test("1-turn 会话 keepTurns=0 锚点照常渲染（label = 首条消息 q1）", () => {
@@ -648,7 +666,7 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
   test("turn-boundary preservation：截断到 turn 起点", async () => {
     await seedFile(sampleFile());
     const bridge = makeBridge();
-    const out = await bridge.rewindSession("conv-rewind", 1);
+    const out = await bridge.rewindSession("conv-rewind", "e3");
     // turn0 结束于索引 4（tool 配对完整）。
     expect(out.messages.length).toBe(4);
     expect(out.messages[0]!.content[0]!.type).toBe("text");
@@ -665,7 +683,7 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
       turnCount: 1,
     });
     const bridge = makeBridge();
-    const out = await bridge.rewindSession("conv-rewind", 0);
+    const out = await bridge.rewindSession("conv-rewind", null);
     expect(out.messages).toHaveLength(0);
     expect(out.turnCount).toBe(0);
     expect(out.checkpoints).toEqual([]);
@@ -678,7 +696,7 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
   test("tool-pair intact：回退后 tool_use 与 tool_result 保持配对", async () => {
     await seedFile(sampleFile());
     const bridge = makeBridge();
-    const out = await bridge.rewindSession("conv-rewind", 1);
+    const out = await bridge.rewindSession("conv-rewind", "e3");
     expect((out.messages[1]!.content[0] as { type: string }).type).toBe(
       "tool_use"
     );
@@ -690,7 +708,7 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
   test("turnCount === keepTurns；checkpoints 剪枝（turnIndex ≥ keepTurns 全清）", async () => {
     await seedFile(sampleFile());
     const bridge = makeBridge();
-    const out = await bridge.rewindSession("conv-rewind", 2);
+    const out = await bridge.rewindSession("conv-rewind", "e5");
     expect(out.turnCount).toBe(2);
     expect(out.checkpoints).toEqual([
       {
@@ -707,14 +725,14 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
   test("title 从截断前缀重算", async () => {
     await seedFile(sampleFile());
     const bridge = makeBridge();
-    const out = await bridge.rewindSession("conv-rewind", 1);
+    const out = await bridge.rewindSession("conv-rewind", "e3");
     expect(out.title).toBe("q1");
   });
 
-  test("keepTurns 越界（≥ available）→ no-op 等价（钳制）", async () => {
+  test("head 已是当前链尾 → no-op", async () => {
     await seedFile(sampleFile());
     const bridge = makeBridge();
-    const out = await bridge.rewindSession("conv-rewind", 99);
+    const out = await bridge.rewindSession("conv-rewind", "e7");
     expect(out.messages.length).toBe(8);
     expect(out.turnCount).toBe(3);
   });
@@ -722,7 +740,7 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
   test("keepTurns=0 → 空消息 + 空 checkpoints（回到会话起点）", async () => {
     await seedFile(sampleFile());
     const bridge = makeBridge();
-    const out = await bridge.rewindSession("conv-rewind", 0);
+    const out = await bridge.rewindSession("conv-rewind", null);
     expect(out.messages).toHaveLength(0);
     expect(out.turnCount).toBe(0);
     expect(out.checkpoints).toEqual([]);
@@ -733,7 +751,7 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
     // target === available 走 no-op 分支（mirror checkpoint.test.ts 用例）。
     await seedFile({ ...sampleFile(), messages: [], turnCount: 0 });
     const bridge = makeBridge();
-    const out = await bridge.rewindSession("conv-rewind", 3);
+    const out = await bridge.rewindSession("conv-rewind", null);
     expect(out.messages).toHaveLength(0);
     expect(out.turnCount).toBe(0);
   });
@@ -743,14 +761,16 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "conv-bad.json"), "{garbage", "utf8");
     const bridge = makeBridge();
-    await expect(bridge.rewindSession("conv-bad", 1)).rejects.toMatchObject({
+    await expect(bridge.rewindSession("conv-bad", null)).rejects.toMatchObject({
       kind: "parse_failed",
     });
   });
 
   test("错误路径：load not_found → typed kind 透传", async () => {
     const bridge = makeBridge();
-    await expect(bridge.rewindSession("no-such-id", 1)).rejects.toMatchObject({
+    await expect(
+      bridge.rewindSession("no-such-id", null)
+    ).rejects.toMatchObject({
       kind: "not_found",
     });
   });
@@ -761,7 +781,9 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
     const dir = resolveProjectSessionDir(baseDir, process.cwd());
     await mkdir(join(dir, "conv-rewind.json.tmp"), { recursive: true });
     const bridge = makeBridge();
-    await expect(bridge.rewindSession("conv-rewind", 1)).rejects.toMatchObject({
+    await expect(
+      bridge.rewindSession("conv-rewind", "e3")
+    ).rejects.toMatchObject({
       kind: "write_failed",
     });
   });
@@ -769,7 +791,7 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
   test("rewind 后下一轮从新低基准续号（turnCount 契约，chat-session.ts:472）", async () => {
     await seedFile(sampleFile());
     const bridge = makeBridge();
-    await bridge.rewindSession("conv-rewind", 1);
+    await bridge.rewindSession("conv-rewind", "e3");
     const file = await bridge.loadSessionFile("conv-rewind");
     expect(file.turnCount).toBe(1);
   });

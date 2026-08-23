@@ -121,11 +121,12 @@ function fakeBridge(opts: FakeBridgeOptions): TuiBridge {
     listSessions: async () => [],
     loadSessionFile: async () => file,
     compactSession: async () => ({ compacted: false }),
-    rewindSession: async (id, _keepTurns) => {
+    rewindSession: async (id, _head) => {
       // 返回未修改文件(TuiApp 未在 rewind 分支;满足类型面即可)。
       void id;
       return file;
     },
+    listRewindTargets: async () => [],
     inflight,
     contextWindow: 200_000,
     listSubagents: () => [],

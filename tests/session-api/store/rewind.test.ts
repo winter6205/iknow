@@ -250,6 +250,69 @@ describe("SessionStore.rewindToAnchor (T5 head move)", () => {
   });
 });
 
+describe("SessionStore.rewindToHead + listRewindTargets (#624)", () => {
+  it("rewindToHead to a skipped-branch turn end restores that ancestor chain; events retained", async () => {
+    const id = "rw-head-undo";
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: { messages: threeTurnMessages(), turnCount: 3 },
+      }),
+    });
+    await store.rewindToAnchor({ id, keepTurns: 1 });
+    assert.equal(await store.readHead(id), "e1");
+
+    const { file } = await store.rewindToHead({ id, head: "e5" });
+    assert.deepEqual(file.messages, threeTurnMessages());
+    assert.equal(file.turnCount, 3);
+    assert.equal(await store.readHead(id), "e5");
+    const log = await readLog(id);
+    assert.equal(log.events.length, 6);
+  });
+
+  it("listRewindTargets after rewind still includes skipped user messages", async () => {
+    const id = "rw-list-skipped";
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: { messages: threeTurnMessages(), turnCount: 3 },
+      }),
+    });
+    await store.rewindToAnchor({ id, keepTurns: 1 });
+    const targets = await store.listRewindTargets(id);
+    const heads = targets.map((t) => t.head);
+    assert.ok(heads.includes(null), "before-first remains listed");
+    assert.ok(
+      heads.includes("e4"),
+      "skipped last user message listed for undo"
+    );
+    assert.equal(
+      heads.includes("e1"),
+      false,
+      "current turn end is a no-op and must not be listed"
+    );
+  });
+
+  it("unknown head → schema_invalid", async () => {
+    const id = "rw-head-unknown";
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: { messages: threeTurnMessages(), turnCount: 3 },
+      }),
+    });
+    await assert.rejects(
+      () => store.rewindToHead({ id, head: "e99" }),
+      (err: unknown) =>
+        (err as SessionStoreError).kind === "schema_invalid" &&
+        (err as SessionStoreError & { field: string }).field === "head"
+    );
+  });
+});
+
 // -- save: append-only awareness (fork preservation across saves) --------------
 
 describe("SessionStore.save — append-only aware (T5 fork preservation)", () => {

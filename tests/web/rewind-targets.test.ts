@@ -1,33 +1,21 @@
 /**
- * Web rewind 锚点投影：对齐 TUI buildRewindTargets（keepTurns=0 总在；
- * 当前最后一 turn 作为 keepTurns=total 不列出）。
+ * Web rewind 锚点与 TUI 共用 GET rewind-targets 数据模型（head 事件 id）。
  */
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
-import { buildRewindTargetsFromTurns } from "../../web/src/lib/rewind-targets.ts";
+import type { WebRewindTarget } from "../../web/src/lib/rewind-targets.ts";
 
-describe("buildRewindTargetsFromTurns", () => {
-  it("空会话 → 空数组", () => {
-    assert.deepEqual(buildRewindTargetsFromTurns([]), []);
-  });
-
-  it("一回合：仅 keepTurns=0（截空）", () => {
-    const t = buildRewindTargetsFromTurns([{ query: "hello" }]);
-    assert.equal(t.length, 1);
-    assert.equal(t[0]?.keepTurns, 0);
-    assert.equal(t[0]?.label, "hello");
-  });
-
-  it("三回合：keepTurns 0,1,2（不含 no-op 的 3）", () => {
-    const t = buildRewindTargetsFromTurns([
-      { query: "a" },
-      { query: "b" },
-      { query: "c" },
-    ]);
-    assert.deepEqual(
-      t.map((x) => x.keepTurns),
-      [0, 1, 2]
-    );
-    assert.equal(t[2]?.label, "c");
+describe("WebRewindTarget", () => {
+  it("锚点以 head 标识，不再使用 keepTurns", () => {
+    const t: WebRewindTarget = {
+      head: null,
+      userMessageText: "hello",
+      fullText: "hello",
+      anchoredAt: "",
+      fillInput: true,
+      anchorTurnIndex: 0,
+    };
+    assert.equal(t.head, null);
+    assert.equal(t.userMessageText, "hello");
   });
 });

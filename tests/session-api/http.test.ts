@@ -591,7 +591,7 @@ describe("GET /api/v1/skills + /mcp（deps 注入路径：空清单非 500）", 
 });
 
 describe("POST /api/v1/sessions/:id/rewind", () => {
-  it("keepTurns 缺席 / 非整数 → 400", async () => {
+  it("head 缺席 / 非法 → 400", async () => {
     const id = await createSession();
     const missing = await postJson({
       path: `/api/v1/sessions/${id}/rewind`,
@@ -599,24 +599,24 @@ describe("POST /api/v1/sessions/:id/rewind", () => {
     });
     assert.equal(missing.status, 400);
     assertNestedError({ body: missing.body, kind: "validation" });
-    const neg = await postJson({
+    const bad = await postJson({
       path: `/api/v1/sessions/${id}/rewind`,
-      payload: { keepTurns: -1 },
+      payload: { head: -1 },
     });
-    assert.equal(neg.status, 400);
-    assertNestedError({ body: neg.body, kind: "validation" });
+    assert.equal(bad.status, 400);
+    assertNestedError({ body: bad.body, kind: "validation" });
   });
 
   it("missing session → 404", async () => {
     const { status, body } = await postJson({
       path: "/api/v1/sessions/does-not-exist/rewind",
-      payload: { keepTurns: 0 },
+      payload: { head: null },
     });
     assert.equal(status, 404);
     assertNestedError({ body, kind: "not_found" });
   });
 
-  it("keepTurns=0 截空会话", async () => {
+  it("head=null 回到空 transcript", async () => {
     const id = await createSession();
     await postJson({
       path: `/api/v1/sessions/${id}/messages`,
@@ -624,17 +624,53 @@ describe("POST /api/v1/sessions/:id/rewind", () => {
     });
     const { status, body } = await postJson({
       path: `/api/v1/sessions/${id}/rewind`,
-      payload: { keepTurns: 0 },
+      payload: { head: null },
     });
     assert.equal(status, 200);
     const b = body as {
       session: { turn_count: number };
       turns: unknown[];
-      keepTurns: number;
+      head: string | null;
     };
-    assert.equal(b.keepTurns, 0);
+    assert.equal(b.head, null);
     assert.equal(b.session.turn_count, 0);
     assert.deepEqual(b.turns, []);
+  });
+});
+
+describe("GET /api/v1/sessions/:id/rewind-targets", () => {
+  it("空会话 → targets=[]", async () => {
+    const id = await createSession();
+    const { status, body } = await getJson(
+      `/api/v1/sessions/${id}/rewind-targets`
+    );
+    assert.equal(status, 200);
+    const b = body as { targets: unknown[] };
+    assert.deepEqual(b.targets, []);
+  });
+
+  it("rewind 后 GET 仍含被跳过的用户消息 head", async () => {
+    const id = await createSession();
+    await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: { text: "q1" },
+    });
+    await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: { text: "q2" },
+    });
+    await postJson({
+      path: `/api/v1/sessions/${id}/rewind`,
+      payload: { head: "e0" },
+    });
+    const { status, body } = await getJson(
+      `/api/v1/sessions/${id}/rewind-targets`
+    );
+    assert.equal(status, 200);
+    const b = body as { targets: Array<{ head: string | null }> };
+    const heads = b.targets.map((t) => t.head);
+    assert.ok(heads.includes(null));
+    assert.ok(heads.includes("e2"), "skipped q2 remains listed");
   });
 });
 

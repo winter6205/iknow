@@ -86,7 +86,6 @@ import {
   type TuiView,
 } from "./session-state.js";
 import {
-  buildRewindTargets,
   reduceRewindKey,
   rewindModalRows,
   rewindPickerContent,
@@ -1292,11 +1291,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
    *  typed kind。调用方已保证 idle + 非 draft。 */
   async function openRewindPicker(targetId: string): Promise<void> {
     try {
-      const file = await props.bridge.loadSessionFile(targetId);
-      const targets = buildRewindTargets(file);
+      const targets = await props.bridge.listRewindTargets(targetId);
       if (targets.length === 0) {
-        // L0 空态：无完成 turn / 空会话 → notice，零 store IO（load 已发生，
-        // 但无任何截断落盘）。对标 baseline §2 "Nothing to rewind to yet."。
         setNotice({
           lines: ["Nothing to rewind to yet."],
         });
@@ -1310,21 +1306,15 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     }
   }
 
-  /** T6：确认后执行回退（盘上截断 + UI 状态反射）。
-   *  anchorTextForInput = 回退锚点用户消息完整文本（不截断），回退后填回
-   *   输入框 — 与 baseline §2 的「清空输入框」有意分歧，用户实测要求回退后
-   *   能直接修改并重发（spec §Divergence 已记录）。
-   *  userMessageTextForNotice = 截 80 展示用版，用于 notice「已回退到 ［消息］ 之前」。 */
+  /** 确认后移动 head；fillInput 时把锚点全文填回输入框。 */
   async function executeRewind(
     targetId: string,
-    keepTurns: number,
-    anchorTextForInput: string,
-    userMessageTextForNotice: string
+    target: RewindTarget
   ): Promise<void> {
     setRewindTargets(undefined);
     setRewindConfirming(false);
     try {
-      await props.bridge.rewindSession(targetId, keepTurns);
+      await props.bridge.rewindSession(targetId, target.head);
       const fresh = await props.bridge.loadSessionFile(targetId);
       setSessions((prev) => {
         const current = prev[targetId];
@@ -1339,14 +1329,15 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           }),
         };
       });
+      const noticeText = target.userMessageText || "(无文本)";
       setNotice({
         lines: [
-          `已回退到 ［${userMessageTextForNotice || "(无文本)"}］ 之前。`,
+          target.head === null
+            ? `已回退到 ［${noticeText}］ 之前。`
+            : `已将会话头指到 ［${noticeText}］。`,
         ],
       });
-      // 输入框填回锚点消息全文 —— 用户可修改并重发（与 Claude Code baseline §2
-      // 「回退后清空输入框」的有意分歧，spec §Divergence 已记录）。
-      setInputValue(anchorTextForInput);
+      if (target.fillInput) setInputValue(target.fullText);
     } catch (err) {
       setNotice({ lines: [`回退失败：${describeError(err)}`] });
     }
@@ -1811,13 +1802,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           const targetId = active.conversationId;
           // 确认态 Enter 时 reducer 只产 execute 不产 move，此处索引安全。
           const t = rewindTargets[rewindIndex];
-          if (targetId !== undefined) {
-            void executeRewind(
-              targetId,
-              action.keepTurns,
-              t?.fullText ?? "",
-              t?.userMessageText ?? ""
-            );
+          if (targetId !== undefined && t !== undefined) {
+            void executeRewind(targetId, t);
           }
           break;
         }

@@ -52,7 +52,7 @@ export type SessionChatApi = SessionChatState & {
   ) => Promise<void>;
   reset: () => Promise<void>;
   compact: () => Promise<boolean>;
-  rewind: (keepTurns: number) => Promise<void>;
+  rewind: (head: string | null) => Promise<void>;
   newSession: () => Promise<void>;
   /** Switch to an existing conversation by id (sidebar selection). */
   setConversation: (id: string) => Promise<void>;
@@ -347,12 +347,12 @@ export function useSessionChat(): SessionChatApi {
   }, [applySession]);
 
   const rewind = useCallback(
-    async (keepTurns: number): Promise<void> => {
+    async (head: string | null): Promise<void> => {
       const gen = bootGen.current;
       const id = sessionIdRef.current;
       if (!id) return;
       try {
-        const res = await api.rewindSession(id, keepTurns);
+        const res = await api.rewindSession(id, head);
         if (gen !== bootGen.current) return;
         applySession(res.session, res.turns);
       } catch (e) {

@@ -453,12 +453,20 @@ async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
     });
     return true;
   }
-  if (method === "POST" && rest === "/rewind") {
-    const keepTurns = extractKeepTurnsField(await readJsonBody(req));
+  if (method === "GET" && rest === "/rewind-targets") {
     sendJson({
       res,
       status: 200,
-      body: await hub.rewindSession(id, keepTurns),
+      body: await hub.listRewindTargets(id),
+    });
+    return true;
+  }
+  if (method === "POST" && rest === "/rewind") {
+    const head = extractHeadField(await readJsonBody(req));
+    sendJson({
+      res,
+      status: 200,
+      body: await hub.rewindSession(id, head),
     });
     return true;
   }
@@ -550,15 +558,19 @@ function parseCreateBody(raw: unknown): {
   return out;
 }
 
-function extractKeepTurnsField(raw: unknown): number {
+function extractHeadField(raw: unknown): string | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new ValidationError("body must be a JSON object with keepTurns");
+    throw new ValidationError("body must be a JSON object with head");
   }
-  const n = (raw as Record<string, unknown>).keepTurns;
-  if (typeof n !== "number" || !Number.isInteger(n) || n < 0) {
-    throw new ValidationError("keepTurns must be a non-negative integer");
+  if (!Object.prototype.hasOwnProperty.call(raw, "head")) {
+    throw new ValidationError("body must be a JSON object with head");
   }
-  return n;
+  const head = (raw as Record<string, unknown>).head;
+  if (head === null) return null;
+  if (typeof head !== "string" || head.length === 0) {
+    throw new ValidationError("head must be a non-empty event id or null");
+  }
+  return head;
 }
 
 function extractTextField(raw: unknown): string {
