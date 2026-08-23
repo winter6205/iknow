@@ -332,6 +332,22 @@ describe("session-state: sessionCompacted（/compact 落盘后刷新）", () => 
 });
 
 describe("session-state: isTuiHiddenUserMessage（host 注入不进 ❯ 气泡）", () => {
+  test("agent_status 栏为 hidden；普通 query 否", () => {
+    expect(
+      isTuiHiddenUserMessage(
+        msg("<agent_status>\nlast_tool: idle\n</agent_status>")
+      )
+    ).toBe(true);
+    expect(
+      isTuiHiddenUserMessage(
+        msg(
+          "<agent_status>\nlast_tool: web_search\ntodos:\n- [ ] 查新闻\n</agent_status>"
+        )
+      )
+    ).toBe(true);
+    expect(isTuiHiddenUserMessage(msg("真实问题"))).toBe(false);
+  });
+
   test("drain / VALIDATION / VERIFY 为 hidden；普通 query 否", () => {
     expect(
       isTuiHiddenUserMessage(

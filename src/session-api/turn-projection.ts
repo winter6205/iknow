@@ -15,6 +15,7 @@ import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
 } from "../harness/index.js";
+import { isAgentStatusText } from "../harness/agent-status.js";
 import { isSubagentDrainText } from "../harness/subagent/host-drain.js";
 import type { ThinkingView, ToolCallView } from "./contract.js";
 
@@ -38,16 +39,18 @@ export function messageText(msg: AnthropicNativeMessage): string {
  * Turn-boundary rule SSOT (hub.ts projectMessagesToTurns 与
  * store/checkpoint.ts splitTurns 共用；原 hub `isQueryMessage` / checkpoint
  * `isQuery` 三条件收敛于此): a turn starts at a user message that carries NO
- * tool_result block and is NOT a subagent drain summary; user messages with
- * only tool_result blocks are continuation, not queries. Drain messages are
- * host-injected result summaries — they neither surface as a turn nor bound
- * the preceding turn's slice.
+ * tool_result block and is NOT a subagent drain summary nor an agent_status
+ * bar injection; user messages with only tool_result blocks are continuation,
+ * not queries. Drain / agent_status messages are host-injected — they neither
+ * surface as a turn nor bound the preceding turn's slice.
  */
 export function isTurnQuery(msg: AnthropicNativeMessage): boolean {
+  const text = messageText(msg);
   return (
     msg.role === "user" &&
     !msg.content.some((b) => b.type === "tool_result") &&
-    !isSubagentDrainText(messageText(msg))
+    !isSubagentDrainText(text) &&
+    !isAgentStatusText(text)
   );
 }
 
