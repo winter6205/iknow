@@ -63,6 +63,7 @@ import type {
 } from "./trace/index.js";
 import { safeTrace } from "./trace/index.js";
 import type { HarnessStreamEvent } from "./stream.js";
+import { safeEmitStream } from "./stream.js";
 import {
   buildCompactedMessages,
   buildCompactPrompt,
@@ -76,6 +77,10 @@ import {
 import type { FullCompactOutcome } from "./compress/index.js";
 import { recognize } from "./secret-roundtrip/index.js";
 import type { SecretRegistry } from "./secret-roundtrip/index.js";
+import {
+  AGENT_STATUS_IDLE_TOOL,
+  computeAgentStatusSnapshot,
+} from "./agent-status.js";
 
 /**
  * 把任意 reason 字符串安全映射为 TraceErrorType (消除 as 强转)。
@@ -250,6 +255,16 @@ export interface LoopEngineDeps {
   readonly commitMessages?: (
     messages: ReadonlyArray<AnthropicNativeMessage>
   ) => Promise<void>;
+  /**
+   * #645 T1 / ADR-0028:状态栏注入缝。字段在场 = stepWithTrace 每次即将
+   * 调用模型前(首次调用 + reactive-compact 压缩后的重试)把代码现算的
+   * 现势(last_tool + 未勾 todo 段)以 user 消息 immutable 追加到当时
+   * `messages` 尾;旧栏保留、不 splice、不写 deps.system。字段缺席 =
+   * 零注入(ask / worker 路径与既有测试 byte-identical)。todoDir 与
+   * todo_write 工具同一 session 目录;栏只读文件,快照计算见
+   * agent-status.ts(读失败当无 todo 段,不抛进模型回合)。
+   */
+  readonly agentStatus?: { readonly todoDir: string };
 }
 
 /**
@@ -288,6 +303,40 @@ function appendMessage(opts: {
     messages: Object.freeze([...opts.state.messages, freezeMessage(opts.msg)]),
     turnCount: opts.state.turnCount,
   };
+}
+
+/**
+ * #645 T1 / ADR-0028:把现势栏以 user 消息 immutable 追加到 `messages` 尾
+ * (经 adapter.encodeUserText 编码,与首条用户文本同一缝)。
+ * `deps.agentStatus` 缺席 → 原样返回 state(零注入);在场 → 现算快照
+ * (todos.md 读失败当无 todo 段,见 agent-status.ts),追加后返回新 state。
+ * 永不 throw:读失败已收敛为"无 todo 段",模型回合不受影响。
+ *
+ * #647 T3 / ADR-0028:同一计算点(同一份 snapshot 对象)经 safeEmitStream 发
+ * `agent_status` 流事件 —— TUI 只读最新现势的读口;事件字段即栏的数据字段,
+ * 两处不可能分叉(单一真源)。观察者异常被 safeEmitStream 吞咽,不反流进
+ * 模型回合。deps.agentStatus 缺席 → 无栏也无事件(ask / worker 路径)。
+ */
+async function appendAgentStatusBar(
+  state: LoopState,
+  deps: LoopEngineDeps,
+  lastTool: string,
+  onStream?: (event: HarnessStreamEvent) => void
+): Promise<LoopState> {
+  if (deps.agentStatus === undefined) return state;
+  const snapshot = await computeAgentStatusSnapshot({
+    lastTool,
+    todoDir: deps.agentStatus.todoDir,
+  });
+  safeEmitStream(onStream, {
+    type: "agent_status",
+    lastTool: snapshot.lastTool,
+    openTodoLines: snapshot.openTodoLines,
+  });
+  return appendMessage({
+    state,
+    msg: deps.adapter.encodeUserText(snapshot.text),
+  });
 }
 
 /** Ctrl+C / signal abort 触发的中断 system 消息固定文案（#392 T4 / G3 #388）。
@@ -1074,6 +1123,17 @@ async function runModelPhase(opts: {
 }
 
 /**
+ * 017 T5 / #645 T1:toolCallViews 的 id→name 视图名表(单次构造,多处消费:
+ * runToolPhase 的 trace 落盘、stepWithTrace 的 trace 落盘与状态栏 last_tool
+ * 更新 —— 三处共用同一构造,消除重复)。
+ */
+function toolNameById(
+  views: ReadonlyArray<{ readonly id: string; readonly name: string }>
+): ReadonlyMap<string, string> {
+  return new Map(views.map((c) => [c.id, c.name]));
+}
+
+/**
  * 017 T5:纯函数 — 把 Executor 的 ToolExecutionResult 序列映射为 trace
  * 用的 toolCalls 数组。nameById 是按 toolUseId 索引的视图名表(由上层
  * 一次构造);tool_not_found 允许自报 toolName,其他 kind 兜底空串:
@@ -1175,7 +1235,7 @@ async function runToolPhase(opts: {
     msg: toolResultMsg,
   });
   const durationMs = performance.now() - opts.started;
-  const nameById = new Map(toolCallViews.map((c) => [c.id, c.name]));
+  const nameById = toolNameById(toolCallViews);
   const toolCalls = toTraceToolCalls({ results, nameById });
   const { timedOut, cancelled } = computeToolStopFlags({
     results,
@@ -1237,6 +1297,15 @@ async function stepWithTrace(opts: {
   readonly onStream?: (event: HarnessStreamEvent) => void;
   /** plan T3 / ADR-0013:run 级闭包的 reactive-compact 已尝试标记(跨 step 传递)。 */
   readonly reactiveAttemptedRef: { attempted: boolean };
+  /**
+   * #645 T1 / ADR-0028:状态栏 last_tool 的 run 作用域可变引用。run() 创建
+   * 并跨 step 共享(一个 run = 一个用户回合);public step() 每次新建(单步
+   * 语义)。初值 AGENT_STATUS_IDLE_TOOL;每个工具批后更新为批内最后一个
+   * 成功工具名(无成功 → 保持原值)。仅 deps.agentStatus 在场时被消费
+   * (appendAgentStatusBar 读 lastTool);refs 无既有观察者 → 字段缺席时
+   * 更新零可观察行为。
+   */
+  readonly lastToolRef: { lastTool: string };
 }): Promise<{
   transition: Transition;
   turn: TurnTrace | null;
@@ -1271,11 +1340,22 @@ async function stepWithTrace(opts: {
   // `effectiveState` 记录本步模型实际看到的 messages:reactive 压缩后用它替代
   // opts.state,以便 appendMessage / finalState 反映压缩后的权威历史(append-only
   // 不变式 + 不把模型已不见的消息重新带回历史)。
+  //
+  // #645 T1 / ADR-0028:每次即将调用模型前把现势栏以 user 消息追加在当时的
+  // `messages` 尾 —— 首次调用与 reactive-compact 重试两处各追加一条(栏在
+  // compact 之后落位);proactive compact 在 run() 迭代顶部、stepWithTrace
+  // 之前发生,栏天然落在其后。旧栏永不删除 / 改写。
   type OkOrStop =
     | { kind: "ok"; result: AssistantTurnResult }
     | { kind: "stop"; transition: Transition; turn: TurnTrace };
+  const barState = await appendAgentStatusBar(
+    opts.state,
+    opts.deps,
+    opts.lastToolRef.lastTool,
+    opts.onStream
+  );
   const firstPhase = await runModelPhase({
-    state: opts.state,
+    state: barState,
     deps: opts.deps,
     signal: opts.signal,
     started,
@@ -1283,13 +1363,20 @@ async function stepWithTrace(opts: {
     onStream: opts.onStream,
     reactiveAttemptedRef: opts.reactiveAttemptedRef,
   });
-  let effectiveState: LoopState = opts.state;
+  let effectiveState: LoopState = barState;
   const modelPhase: OkOrStop =
     firstPhase.kind === "reactive_compact_pending"
       ? await (async (): Promise<OkOrStop> => {
-          effectiveState = firstPhase.state;
+          // 栏追加在 compact 之后(压缩产物尾部),重试请求的末尾即最新一条栏。
+          const compactedWithBar = await appendAgentStatusBar(
+            firstPhase.state,
+            opts.deps,
+            opts.lastToolRef.lastTool,
+            opts.onStream
+          );
+          effectiveState = compactedWithBar;
           const compressedAttempt = await runModelPhase({
-            state: firstPhase.state,
+            state: compactedWithBar,
             deps: opts.deps,
             signal: opts.signal,
             started,
@@ -1507,13 +1594,21 @@ async function stepWithTrace(opts: {
     started,
   });
 
+  // #645 T1 / ADR-0028:last_tool = 批内最后一个成功工具名(kind === "ok")。
+  // 按执行序扫(串行批即调用序),成功者覆盖、失败者永不更新;批内无成功
+  // → 保持原值。工具名经 toolCallViews 的 id→name 视图解析(与 trace 落盘
+  // 同源)。下一次 appendAgentStatusBar 消费该值。
+  const nameById = toolNameById(toolPhase.toolCallViews);
+  for (const result of toolPhase.toolResults) {
+    if (result.kind !== "ok") continue;
+    const name = nameById.get(result.toolUseId);
+    if (name !== undefined) opts.lastToolRef.lastTool = name;
+  }
+
   const toolEndedAt = new Date().toISOString();
   const toolDurationMs = performance.now() - toolStartMono;
   const toolCallIds: string[] = [];
   if (opts.deps.trace) {
-    const nameById = new Map(
-      toolPhase.toolCallViews.map((c) => [c.id, c.name])
-    );
     for (const result of toolPhase.toolResults) {
       const toolName =
         nameById.get(result.toolUseId) ??
@@ -1606,11 +1701,14 @@ export async function step(
   deps: LoopEngineDeps,
   signal?: AbortSignal
 ): Promise<Transition> {
+  // #645 T1:单步语义 —— 每次调用新建 lastToolRef(初值 idle,单步内工具批
+  // 后更新,与 run 的回合作用域状态互不共享)。
   const { transition } = await stepWithTrace({
     state,
     deps,
     signal,
     reactiveAttemptedRef: { attempted: false },
+    lastToolRef: { lastTool: AGENT_STATUS_IDLE_TOOL },
   });
   return transition;
 }
@@ -1668,6 +1766,10 @@ export async function run(
   let lastCompactTurn: number = 0;
   // plan T3 / ADR-0013:reactive-compact 已尝试标记(每 run 限 1 次,闭包变量)。
   const reactiveAttemptedRef = { attempted: false };
+  // #645 T1 / ADR-0028:状态栏 last_tool 回合作用域状态 —— 一个 run = 一个
+  // 用户回合,初值 idle(本回合尚未跑过工具),每个工具批后更新为批内最后
+  // 一个成功工具名;跨 step 共享,run 结束即弃。
+  const lastToolRef = { lastTool: AGENT_STATUS_IDLE_TOOL };
   while (true) {
     // #119 T7:compress 缝缺省(字段缺席)→ 跳过检查,行为零变化(byte-identical)。
     // 仅 turnCount 自增(>lastCompactTurn)后扫一次,避免每轮重复 estimate。
@@ -1729,6 +1831,7 @@ export async function run(
         signal,
         onStream: opts?.onStream,
         reactiveAttemptedRef,
+        lastToolRef,
       });
     } catch (err) {
       if (err instanceof MaxTurnsExceeded) {

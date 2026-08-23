@@ -31,6 +31,7 @@ import {
   MAX_FILE_BYTES,
   MAX_ITEM_CODEPOINTS,
   codepointLength,
+  TODO_WRITE_SKIP_CLAUSE,
 } from "../../../../src/harness/aci/tools/todo-write.ts";
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 
@@ -587,5 +588,32 @@ describe("createTodoWriteTool — #440 T6 D9 正面引导式 description (无负
     // (promptTools 经 reg.visibleSchemas 拿到的 def.description 字段同源)
     assert.equal(typeof factoryDesc, "string");
     assert.ok(factoryDesc.length > 20, "description should be informative");
+  });
+
+  // -- #646 T2: 跳过条件句(下一步就能做完用户这句 → 直接做完,不建清单) ----
+
+  it("#646 T2: description 含跳过条件句(正面表述仍是多步骤跨多轮才建清单)", () => {
+    const desc = readDescription();
+    assert.ok(
+      desc.includes(TODO_WRITE_SKIP_CLAUSE),
+      `description 应含 TODO_WRITE_SKIP_CLAUSE, got: ${desc}`
+    );
+    // 正面触发仍在:多步骤 / 跨多轮 / 进度持存(T2 不削弱既有正向表述)。
+    assert.ok(desc.includes("multi-step"));
+    assert.ok(desc.includes("multi-turn"));
+    assert.ok(/multiple turns/.test(desc));
+    assert.ok(desc.includes("progress"));
+  });
+
+  it("#646 T2: 跳过条件句自身为正面措辞 — NEGATIVE_PHRASES 原样守门,不出现 'simple task'", () => {
+    const clause = TODO_WRITE_SKIP_CLAUSE.toLowerCase();
+    for (const phrase of NEGATIVE_PHRASES) {
+      assert.ok(
+        !clause.includes(phrase.toLowerCase()),
+        `跳过条件句不应含负面措辞 "${phrase}", got: ${TODO_WRITE_SKIP_CLAUSE}`
+      );
+    }
+    // D9 纪律硬钉(T2 重申):无「简单任务」式模糊禁令。
+    assert.ok(!clause.includes("simple task"));
   });
 });

@@ -24,6 +24,7 @@
  *
  * 扩展点: 加新成员只需扩本联合 (消费者按 `type` 窄化), 无需改 emit / 消费点。
  */
+import type { AgentStatusSnapshot } from "./agent-status.js";
 
 export type HarnessStreamEvent =
   | { type: "text_delta"; text: string }
@@ -46,7 +47,19 @@ export type HarnessStreamEvent =
   // 主回答草稿,摘要文本会污染 assistant 回复(渲染污染 latent bug)。宿主
   // 按 `type` 窄化路由到独立压缩草稿;thinking_delta 在压缩上下文内被
   // runFullCompact 吞咽(scratchpad,不暴露)。
-  | { type: "compaction_text_delta"; text: string };
+  | { type: "compaction_text_delta"; text: string }
+  // #647 T3 / ADR-0028 / CONTEXT「状态栏」:现势快照事件 —— TUI 只读最新现势
+  // 的读口。loop-engine 在每次即将调用模型前、注入 `<agent_status>` 栏的同一
+  // 计算点发出,字段与栏同源(AgentStatusSnapshot 的数据字段,见
+  // agent-status.ts;不携带栏 text —— text 由同一快照派生,两处若可能分叉
+  // 即设计缺陷)。deps.agentStatus 缺席(ask / worker 路径)→ 栏不注入,本
+  // 事件也随之不发。事件只给宿主 UI,绝不进模型栏(in-flight 属
+  // tool_call_start 等既有事件,与本事件分开)。字段形状经 Pick 直接取自
+  // AgentStatusSnapshot(不内联重声明,单一真源;per-field 文档见
+  // agent-status.ts,本处不重复)。
+  | ({
+      type: "agent_status";
+    } & Pick<AgentStatusSnapshot, "lastTool" | "openTodoLines">);
 
 /**
  * 观察者错误不得反流回 emit 路径(对齐 ADR-0003 `safeTrace` MUST NOT throw

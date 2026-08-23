@@ -16,7 +16,7 @@
  *  5. slash 候选（输入 "/" 后 9 命令全显示）+ Tab 唯一匹配补全。
  */
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { testRender } from "@opentui/react/test-utils";
@@ -586,5 +586,92 @@ describe("/thinking 打开 thinking-picker（design-25 开关面板）", () => {
     expect(frame).not.toContain("思考开关");
 
     await app.destroy();
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// #647 T3 回归:end-of-round review Spec Medium —— 多会话 staleness。
+// agentStatus 若是全局单槽(不按 conversationId key),会话 A 的 last_tool /
+// 未勾 todo 会在切到 B / 新草稿后继续渲染在别人的视图里(T3 AC① 违例:
+// 「主 HITL 会话进行中,TUI 显示与即将送进模型的同一份现势」)。断言用面板
+// 专属字形前缀(◇ / □)做标记 —— 与 transcript 里可能出现的原始栏文本
+// (<agent_status> user 消息)区分开,只测面板渲染。
+// ---------------------------------------------------------------------------
+describe("#647 T3: agent 现势按会话隔离（multi-session staleness 回归）", () => {
+  test("A 收到 agent_status → /new 切新草稿无残留 → /sessions 切回 A 快照仍在", async () => {
+    // deps 带 agentStatus(todoDir 有未勾项)→ turn 内 harness 在注入栏的
+    // 同一计算点发 agent_status 事件(产品路径,与 e2e bridge 用例同形)。
+    const baseDir = mkdtempSync(join(tmpdir(), "iknow-tui-agent-status-key-"));
+    const todoDir = join(baseDir, "todos-dir");
+    mkdirSync(todoDir, { recursive: true });
+    writeFileSync(
+      join(todoDir, "todos.md"),
+      "- [ ] regression item A\n",
+      "utf8"
+    );
+    try {
+      const app = await mountAppAsync(
+        [assistantResult({ texts: ["A 答复"] })],
+        {
+          ...makeDeps([assistantResult({ texts: ["A 答复"] })]),
+          agentStatus: { todoDir },
+        }
+      );
+      await untilFrame(app.setup, (f) => f.includes("Version"));
+
+      // 会话 A:提交 → turn 完成 → 面板渲染 A 的现势(◇ last_tool + □ 未勾项)。
+      await app.typeText("你好A");
+      await app.pressEnter();
+      await until(
+        () => app.bridge.inflight.ids().size === 0,
+        8000,
+        "turn-done"
+      );
+      const frameA = await untilFrame(
+        app.setup,
+        (f) => f.includes("◇ last_tool:"),
+        8000,
+        "a-panel"
+      );
+      expect(frameA).toContain("□ regression item A");
+
+      // /new → 新草稿(draft 无 conversationId):面板不得残留 A 的现势。
+      // (staleness 回归点:全局单槽实现会在这里继续渲染 A 的快照。)
+      await app.typeText("/new");
+      await app.pressEnter();
+      const frameDraft = await untilFrame(
+        app.setup,
+        (f) => !f.includes("◇ last_tool:"),
+        8000,
+        "draft-clean"
+      );
+      expect(frameDraft).not.toContain("□ regression item A");
+
+      // /sessions → ↓ 选中 A(index 1,伪条目后第一条)→ Enter 打开 →
+      // A 的现势仍在(keyed 保留:切走不丢、切回复现)。
+      await app.typeText("/sessions");
+      await app.pressEnter();
+      await untilFrame(
+        app.setup,
+        (f) => f.includes("新建会话"),
+        8000,
+        "list-view"
+      );
+      app.setup.mockInput.pressArrow("down");
+      await new Promise((r) => setTimeout(r, 100));
+      await app.setup.renderOnce();
+      await app.pressEnter();
+      const frameBack = await untilFrame(
+        app.setup,
+        (f) => f.includes("◇ last_tool:"),
+        8000,
+        "a-restored"
+      );
+      expect(frameBack).toContain("□ regression item A");
+
+      await app.destroy();
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
   }, 30_000);
 });

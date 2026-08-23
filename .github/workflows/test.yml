@@ -84,6 +84,8 @@ jobs:
             --exclude tests/harness/aci/registry-workspace-root.test.ts \
             --exclude tests/harness/aci/tools/d9-description-guard.test.ts \
             --exclude tests/harness/aci/tools/registry.test.ts \
+            --exclude tests/harness/agent-status-bar.test.ts \
+            --exclude tests/harness/identity/agent-status-read-rule.test.ts \
             --exclude tests/harness/identity/system-injection.test.ts \
             --exclude tests/session-api/max-turns-serve.test.ts \
             --exclude tests/session-api/workspace-bind.test.ts \
@@ -169,6 +171,8 @@ jobs:
             --exclude tests/harness/aci/registry-workspace-root.test.ts \
             --exclude tests/harness/aci/tools/d9-description-guard.test.ts \
             --exclude tests/harness/aci/tools/registry.test.ts \
+            --exclude tests/harness/agent-status-bar.test.ts \
+            --exclude tests/harness/identity/agent-status-read-rule.test.ts \
             --exclude tests/harness/identity/system-injection.test.ts \
             --exclude tests/session-api/max-turns-serve.test.ts \
             --exclude tests/session-api/workspace-bind.test.ts \

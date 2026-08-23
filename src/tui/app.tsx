@@ -130,6 +130,14 @@ import { createStreamDraft } from "../cli/stream-draft.js";
 import { ListView, relativeTime, type TuiListEntry } from "./list-view.js";
 import { McpView, type McpToolEntry } from "./mcp-view.js";
 import { ContextBar } from "./context-bar.js";
+// #647 T3 / ADR-0028:agent 现势显示(与 ContextBar 的 context usage 显示是
+// 两回事,命名刻意区分)—— 只读 agent_status 流事件的最新一份快照。
+import {
+  AgentStatusPanel,
+  agentStatusFromEvent,
+  agentStatusLines,
+} from "./agent-status-line.js";
+import type { AgentStatusSnapshot } from "../harness/agent-status.js";
 import {
   INPUT_MAX_LINES as MAX_INPUT_LINES,
   inputVisibleLineCount,
@@ -254,6 +262,8 @@ export function noticeRenderRows(
  *   - 输入框圆角线框（inputRows 内容行 + 2 边框行；T8 起动态，
  *     输入行数增 → 视图预算随之减，不挤掉历史消息）
  *   - ContextBar 用量条 1 行
+ *   - agent 现势显示（#647 T3：动态 0-6 行，agentStatusRows；ContextBar
+ *     下方、与 context usage 显示互不相干，见 agent-status-line.tsx）
  *   - ask 槽 1 行（ChatView tail 恒预留）
  *   - slash 候选行（inputValue.trim().startsWith("/") ? … : 0）
  *   - notice 本体 + 自身 marginBottom=1
@@ -274,6 +284,9 @@ export function chromeReserveRows(opts: {
   /** 子代理状态面板行数（projectSubagentLines 实际产出，0-4）。缺省 0 →
    *   不占行（组件渲染 null / 旧行为兼容）。 */
   readonly panelRows?: number;
+  /** agent 现势显示行数（agentStatusLines 实际产出，0-6）。缺省 0 →
+   *   不占行（无快照 / 组件渲染 null / 旧行为兼容）。 */
+  readonly agentStatusRows?: number;
 }): number {
   const inputContentRows = Math.max(
     1,
@@ -282,6 +295,7 @@ export function chromeReserveRows(opts: {
   const modalRows = opts.modalRows ?? 0;
   const pickerRows = opts.pickerRows ?? 0;
   const panelRows = opts.panelRows ?? 0;
+  const agentStatusRows = opts.agentStatusRows ?? 0;
   const noticeTotal = opts.noticeRows > 0 ? opts.noticeRows + 1 : 0;
   const modalTotal = modalRows > 0 ? modalRows + 1 : 0;
   const pickerTotal = pickerRows > 0 ? pickerRows + 1 : 0;
@@ -297,6 +311,7 @@ export function chromeReserveRows(opts: {
     modalTotal +
     pickerTotal +
     panelRows +
+    agentStatusRows +
     (opts.bgLine ? 1 : 0)
   );
 }
@@ -432,6 +447,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // T4 (#175): 结构化工具调用实时状态。
   const [liveToolRuns, setLiveToolRuns] = useState<
     Record<string, ReadonlyArray<LiveToolRun>>
+  >({});
+  // #647 T3 / ADR-0028:TUI 只读最新现势 —— 按会话 key 的最新快照
+  // (conversationId → snapshot,liveToolRuns 同款 keyed 形态)。replace-on-event:
+  // 事件到达时按「事件所属回合的 conversationId」整体替换该会话槽位,无历史、
+  // 无第二份 todo 账本(数据唯一来源是 harness 注入 <agent_status> 栏同一
+  // 计算点发出的同一份快照)。渲染只取 active 会话的槽位 → 切走不残留 A 的
+  // 现势、切回仍在(end-of-round review Spec Medium 修复)。与 liveToolRuns
+  // (in-flight 展示)分开,不混、不回流模型向任何字段。
+  const [agentStatuses, setAgentStatuses] = useState<
+    Record<string, AgentStatusSnapshot>
   >({});
   // T6 (D5): thinking 折叠面板展开态；Ctrl+O 折叠/展开，/thinking 为开关（思考Enabled）。
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
@@ -869,6 +894,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const activeToolName = active.conversationId
     ? activeToolNameOf(liveToolRuns[active.conversationId] ?? [])
     : undefined;
+  // #647 T3:active 会话的现势快照(keyed by conversationId,与
+  // activeToolName 同款派生口径)——draft 无 conversationId / 该会话尚无
+  // 事件 → null,面板不渲染 → 切走不残留、切回复现。
+  const agentStatus = active.conversationId
+    ? (agentStatuses[active.conversationId] ?? null)
+    : null;
   // #358 T7: 子代理工具对称 —— activeToolName 若是子代理工具（spawn_subagent /
   // subagent_result，activeToolNameOf 派生）→ ContextBar 尾缀显示
   // `▣ 子代理`（subagentDisplayMark/SUBAGENT_TOOL_LABEL 与 tool-summary 同源，
@@ -1152,6 +1183,19 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       }
       if (event.type === "stop_summary") {
         setNotice({ lines: [event.text] });
+      }
+      if (event.type === "agent_status") {
+        // #647 T3 / ADR-0028:按本回合 conversationId(targetId —— 事件到达
+        // 时的会话归属,与上方 liveToolRuns 同款闭包捕获)整体替换该会话的
+        // 现势槽(agentStatusFromEvent 产完整独立快照,不依赖旧值 → 旧快照
+        // 不可能残留/混合)。只进本 UI,绝不回流任何模型向字段。
+        const nextAgentStatus = agentStatusFromEvent(event);
+        if (nextAgentStatus !== null) {
+          setAgentStatuses((prev) => ({
+            ...prev,
+            [targetId]: nextAgentStatus,
+          }));
+        }
       }
     };
     try {
@@ -1923,6 +1967,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     view === "chat"
       ? projectSubagentLines(subagents, Date.now(), cols).length
       : 0;
+  // #647 T3: agent 现势显示行数投影（ContextBar 下方，0-6 行）——与
+  // subagentPanelRows 同款入账；非 chat 视图 / 尚无快照 → 0（组件渲染 null）。
+  const agentStatusRowBudget =
+    view === "chat" ? agentStatusLines(agentStatus, cols).length : 0;
   const viewportRows = Math.max(
     5,
     rows -
@@ -1934,6 +1982,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         modalRows: modalRowsForBudget,
         pickerRows: pickerRowsForBudget,
         panelRows: subagentPanelRows,
+        agentStatusRows: agentStatusRowBudget,
       })
   );
   // 列表视图（ListView 路径）：底部仅 notice 占用，与 headroom 2 行。
@@ -2144,6 +2193,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             }
           />
         </box>
+      )}
+      {/* #647 T3 / ADR-0028: agent 现势显示（ContextBar 用量条下方；与
+          context usage 显示是两回事）。只读 agent_status 事件的最新一份
+          快照（无快照渲染 null，行数 0 → chromeReserveRows.agentStatusRows）；
+          in-flight 工具指示仍走 ContextBar 尾缀（liveToolRuns 派生），互不合并。 */}
+      {view === "chat" && (
+        <AgentStatusPanel snapshot={agentStatus} cols={cols} />
       )}
       {/* #358 T7: 子代理状态面板（ContextBar 下方）。条件渲染 —
           无可见子代理行时返回 null（行数 0 → chromeReserveRows.panelRows=0）；

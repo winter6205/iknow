@@ -40,9 +40,39 @@ const ALLOWED_KEYS = new Set(["mode", "item"]);
 export const TODO_WRITE_MODES = ["list", "add", "check"] as const;
 export type TodoWriteMode = (typeof TODO_WRITE_MODES)[number];
 
-/** Prefix constants — keep in sync with `formatOpenLine` / `formatClosedLine`. */
-const OPEN_PREFIX = "- [ ] ";
+/**
+ * Prefix constants — keep in sync with `formatOpenLine` / `formatClosedLine`.
+ *
+ * #645 T1: `OPEN_PREFIX` exported (additive) so the agent-status bar
+ * (`src/harness/agent-status.ts`) projects open lines with the writer's
+ * exact prefix — single source of truth for the ledger line format.
+ * add/check/list semantics unchanged.
+ */
+export const OPEN_PREFIX = "- [ ] ";
 const CLOSED_PREFIX = "- [x] ";
+
+/**
+ * #645 T1: ledger filename relative to `todoDir` (D2: `<todoDir>/todos.md`).
+ * Exported (additive) so the agent-status bar reads the same file the writer
+ * owns — no second copy of the filename knowledge.
+ */
+export const TODOS_FILE = "todos.md";
+
+/**
+ * #646 T2 / ADR-0028: skip clause — when the next step alone finishes the
+ * user's request (no multi-round progress to watch), do the work directly
+ * without a list; the positive trigger stays "multi-step across multiple
+ * turns → build a list".
+ *
+ * Lives ONLY in the tool description (never in the status bar, never in the
+ * system prompt). Positively phrased English — passes the D9 NEGATIVE_PHRASES
+ * guards verbatim (no "simple task", no negative imperatives). Exported as
+ * SSOT so the description assembly and the bar-purity test
+ * (agent-status-read-rule.test.ts T2 ③) reference the same symbol instead
+ * of copying the text.
+ */
+export const TODO_WRITE_SKIP_CLAUSE =
+  "When the next step alone finishes the user's request, work directly without a list; build a list when the work extends across multiple turns and progress needs tracking across rounds.";
 
 /**
  * Governance limits (D4): file size capped at 64 KB (much smaller than the
@@ -76,13 +106,14 @@ export interface TodoWriteToolDeps {
  * step that can promote tmp to the final path.
  */
 export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
-  const filePath = join(deps.todoDir, "todos.md");
+  const filePath = join(deps.todoDir, TODOS_FILE);
   const random = deps.randomBytes ?? ((n: number) => randomBytes(n));
 
   return Object.freeze({
     name: "todo_write",
     description:
-      "Maintain a session-scoped todo ledger at <session>/todos.md for tracking progress on multi-step, multi-turn complex tasks. Use mode=list to read all current items, mode=add to append an open `- [ ] <item>` line, mode=check to flip the first exact-match `- [ ] <item>` line to `- [x] <item>`. Designed for tasks across multiple turns where progress needs to persist between rounds.",
+      "Maintain a session-scoped todo ledger at <session>/todos.md for tracking progress on multi-step, multi-turn complex tasks. Use mode=list to read all current items, mode=add to append an open `- [ ] <item>` line, mode=check to flip the first exact-match `- [ ] <item>` line to `- [x] <item>`. Designed for tasks across multiple turns where progress needs to persist between rounds. " +
+      TODO_WRITE_SKIP_CLAUSE,
     inputSchema: {
       type: "object",
       properties: {

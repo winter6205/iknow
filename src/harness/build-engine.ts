@@ -458,6 +458,8 @@ export async function buildHarnessEngine(
     // （与 memoryEnabled / subagentManager / skillCatalog 同形态）。worker
     // 装配路径 (createWorkerDeps → createDefaultAciRegistry) 不传 todoDir
     // → 所有权边界隔在主 loop 内。
+    // (#646 T2: 本 gate 表达式与下方 agentStatusTodoDir 处是同语义的两处
+    //  内联 —— 改动任一处需同步另一处。)
     ...(surface !== "ask" && opts.todoDir ? { todoDir: opts.todoDir } : {}),
     // ADR-0019 (T4 / review-fix H3): per-root state anchor threaded into
     // bash + read_file factories so the fs-policy fence protects
@@ -536,6 +538,13 @@ export async function buildHarnessEngine(
   // const 别名:闭包内保留 narrowing(let 绑定进闭包会被 TS 重新加宽)。
   const mcpSnapshotSource = mcpManager;
   const mcpSnapshotCatalog = reg.catalog;
+  // #645 T1 / #646 T2 单一 gate 表达式:同一条件 (surface !== "ask" 且 host
+  // 注入 todoDir) 同时驱动 loop 注入缝 (deps.agentStatus,栏以 user 消息追加)
+  // 与 system 读规则段 (resolver opts.agentStatusReadRule,ADR-0028 的那句
+  // 稳定读法) —— 两处永远同门,不会漂移;ask / todoDir 缺席 → 栏与读规则
+  // 都缺席。(同语义表达式还在上方 registry todoDir seam 内联一次,改动需同步。)
+  const agentStatusTodoDir: string | undefined =
+    surface !== "ask" && opts.todoDir ? opts.todoDir : undefined;
   const deps: LoopEngineDeps = {
     adapter,
     executor,
@@ -604,6 +613,9 @@ export async function buildHarnessEngine(
       // spawn_subagent 工具 description (T1 SSOT)。装配缝保留:
       // 调用方可显式传入 coordinatorText 让 createIknowSystemResolver 渲染该段
       // (coordinator-segment.test.ts seam 用例覆盖)。
+      // #646 T2: agent-status 读规则段 gate —— 与下方 deps.agentStatus 同一
+      // agentStatusTodoDir 表达式派生 (栏在场的表面才装配读规则句)。
+      ...(agentStatusTodoDir ? { agentStatusReadRule: true } : {}),
     }),
     // #119 T7:env.compress 透传 → deps.compress(LoopEngineDeps.compress 可选缝)。
     // IknowCompressEnv 必填(contextWindow / thresholdTokens),缺失即压缩关闭由
@@ -612,6 +624,17 @@ export async function buildHarnessEngine(
       contextWindow: env.compress.contextWindow,
       thresholdTokens: env.compress.thresholdTokens,
     },
+    // #645 T1 / ADR-0028:状态栏注入缝 —— surface !== "ask" 且 host 注入
+    // todoDir 时在场(与上方 todo_write 注册同门,复用同一 session 目录);
+    // loop-engine 据此在每次模型调用前以 user 消息追加现势栏。ask 表面
+    // 缺席;worker 装配路径(createWorkerDeps 独立构造 deps)不经过本层,
+    // 自然缺席。hub 的 per-run runDeps 展开 build-engine deps,serve 自动
+    // 继承;TUI 经 buildTuiDeps(surface "tui" + todoDir)继承。
+    // #646 T2:gate 上移为 agentStatusTodoDir 单一表达式,与上方 resolver
+    // 的 agentStatusReadRule 同源(两处不漂移)。
+    ...(agentStatusTodoDir
+      ? { agentStatus: { todoDir: agentStatusTodoDir } }
+      : {}),
   };
   const engine = createLoopEngine(deps);
   return {

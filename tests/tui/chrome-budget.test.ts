@@ -6,6 +6,8 @@
  *
  *  - chromeReserveRows：headroom 1 + mode 1 + 输入框(inputRows 动态) + hint +
  *    ContextBar 1 + ask 1 + notice (rows + 1) + modal (rows + 1) + bgLine；
+ *    #647 T3 新增 agentStatusRows（agent 现势显示，0-6 行动态，缺省 0 ——
+ *    基线用例零影响；专项用例见 agent-status-panel.test.ts）。
  *  - noticeRenderRows：空 / 空字符串 / 多行 / 视觉宽度折行 后行数。
  *
  * T8：输入框行账从固定 3 → `inputRows` 动态（默认 1 内容行 + 2 圆角边框行）。
@@ -465,5 +467,59 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
       panelRows: 4,
     });
     expect(withPanel - base).toBe(4);
+  });
+
+  // #647 T3: agent 现势显示行数入账（与 panelRows 同款：缺省不占行，显式
+  // 按值入账；组件无 marginBottom）。专项投影用例见 agent-status-panel.test.ts。
+  test("agentStatusRows 缺省（undefined）= 0，不占底部行账（基线 7 不变）", () => {
+    const base = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+    });
+    const explicit = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+      agentStatusRows: undefined,
+    });
+    const explicitZero = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+      agentStatusRows: 0,
+    });
+    expect(explicit).toBe(base);
+    expect(explicitZero).toBe(base);
+    expect(base).toBe(7);
+  });
+
+  test("agentStatusRows=2（last_tool 行 + 1 未勾项）→ 预算 +2；与其他项叠加", () => {
+    const base = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+    });
+    const withStatus = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+      agentStatusRows: 2,
+    });
+    expect(withStatus - base).toBe(2);
+    const stacked = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: true,
+      inputRows: 1,
+      panelRows: 4,
+      agentStatusRows: 2,
+    });
+    expect(stacked).toBe(7 + 2 + 4 + 1);
   });
 });

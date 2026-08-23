@@ -73,6 +73,12 @@ export interface AssemblyContext {
    *  "## Sub-agent coordination" 段;缺席/undefined/空串 → 段缺席 (KV 缓存
    *  稳定契约)。 */
   readonly coordinatorText?: string;
+  /** #646 T2 agent-status 读规则段注入缝 (可选,布尔 gate;命名指读规则而非
+   *  栏本身 —— 栏永不进 deps.system,ADR-0028):true → 装配一句静态读规则
+   *  (IKNOW_AGENT_STATUS_READ_RULE);缺席/false → 段缺席 (字节级零变化,
+   *  守 KV 缓存稳定契约)。build-engine 从驱动 deps.agentStatus (T1 注入缝)
+   *  的同一 gate 派生 —— 栏会注入的表面才有读规则;ask / worker 永不注入。 */
+  readonly agentStatusReadRule?: boolean;
 }
 
 /** #337 T6 `<available_skills>` 段元素形态(最小投影:name + description + disabled)。
@@ -140,6 +146,8 @@ export function createIknowSystemResolver(opts: {
    *  "## Sub-agent coordination" 段;缺席/undefined/空串 → 段缺席 (KV 缓存
    *  稳定契约)。 */
   readonly coordinatorText?: string;
+  /** #646 T2:见 AssemblyContext.agentStatusReadRule 注释(布尔 gate,同门驱动)。 */
+  readonly agentStatusReadRule?: boolean;
 }): () => Promise<string | undefined> {
   const bootstrapActive = shouldIncludeBootstrap(opts.surface);
   return () =>
@@ -156,6 +164,7 @@ export function createIknowSystemResolver(opts: {
       ...(opts.coordinatorText
         ? { coordinatorText: opts.coordinatorText }
         : {}),
+      ...(opts.agentStatusReadRule ? { agentStatusReadRule: true } : {}),
     });
 }
 
@@ -209,6 +218,16 @@ export async function assembleIdentityContext(
       const overview = mcpOverviewSegment(summaries);
       if (overview !== undefined) segments.push(overview);
     }
+  }
+  // #646 T2 / ADR-0028 加性段 agent-status 读规则:读规则进 system 一次,
+  // 不写进每条栏(栏本身永不进 deps.system)。仅栏会注入的表面(build-engine
+  // 从 deps.agentStatus 的同一 gate 派生 agentStatusReadRule=true)在场;
+  // ask / worker 永远看不到栏,读一条 absent 栏的规则是永久噪音 → 段缺席
+  // (字节级零变化)。一段 = 一句静态文本 (IKNOW_AGENT_STATUS_READ_RULE,
+  // 无 per-turn 插值)→ 跨回合字节级不变 (KV cache 契约;surface/todoDir
+  // 会话内恒定)。追加在 coordinator 之前,coordinator 仍是最末段。
+  if (ctx.agentStatusReadRule) {
+    segments.push(IKNOW_AGENT_STATUS_READ_RULE);
   }
   // #361 T8 加性段 subagent coordinator slot:append 在最末,不触碰 LOCKED 顺序。
   // 仅 subagentManager 装配 (chat/tui/serve) 时 build-engine 注入
@@ -379,6 +398,22 @@ export function mcpOverviewSegment(
   );
   return `<mcp_tools_overview>\n${lines.join("\n")}\n</mcp_tools_overview>`;
 }
+
+/** #646 T2 / ADR-0028 / CONTEXT「状态栏」:状态栏读规则 —— 装配进
+ *  deps.system 的单句静态文本 (SSOT,装配/测试只引用,绝不复制/切片)。
+ *
+ *  内容契约 (plans/agent-status-bar.md T2 / ADR-0028 Consequences):
+ *   - 以最后一条 `<agent_status>` 消息为准 (旧栏留在 transcript,仅历史);
+ *   - `last_tool` = 本回合上一个完成的工具 (尚未跑工具为 idle);
+ *   - todo 段在场 = 当前未勾项清单;todo 段缺席 = 当前无未勾项
+ *     (空槽不广告,缺席即语义)。
+ *
+ *  形态契约:一句、英文 (与 IKNOW_IDENTITY_DEFAULT / IKNOW_SOUL_DEFAULT 同
+ *  语言)、纯静态 (无任何 per-turn 插值 → 跨回合字节级不变,KV cache 契约)、
+ *  不印在每条栏上 (栏只承载代码算出的现势,栏内不含政策散文)。
+ *  仅栏会注入的表面渲染 (ctx.agentStatusReadRule gate;ask / worker 永不注入)。 */
+export const IKNOW_AGENT_STATUS_READ_RULE =
+  "The latest `<agent_status>` message is authoritative for current state: `last_tool` is the last tool that finished this turn (`idle` before any tool has run this turn), the todos section lists the current open items, and an absent todos section means there are no open items.";
 
 /** #361 T8 subagent coordinator 引导文本正文 (SSOT,不含段标题——标题由
  *  coordinatorSegment 加 "## Sub-agent coordination" 渲染,projectPathSegment /
