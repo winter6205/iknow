@@ -253,21 +253,18 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
     ).toEqual([]);
   });
 
-  test("turnCount=1 列出 head=null 锚点（真实回退，不是 no-op）", () => {
+  test("turnCount=1：选 q1 = 回到这句之前（head=null + fillInput）", () => {
     const targets = buildRewindTargets({
       ...sampleFile(),
       messages: [userMsg("q1"), assistantMsg([text("a1")])],
       turnCount: 1,
     });
-    expect(targets).toHaveLength(2);
+    expect(targets).toHaveLength(1);
     expect(targets[0]).toMatchObject({
       head: null,
       userMessageText: "q1",
       fullText: "q1",
-    });
-    expect(targets[1]).toMatchObject({
-      head: "e0",
-      userMessageText: "q1",
+      fillInput: true,
     });
   });
 
@@ -290,56 +287,36 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
     ).toEqual([]);
   });
 
-  test("2-turn 会话 → [首条消息之前, q2 之前]（available=2 边界）", () => {
-    // available=2 ≥ 2：起点锚点合法；i=1（q2 之前）也与当前 turn 不同——只有
-    // 索引 == total 才与当前重合，所以两个锚点都列出。
+  test("2-turn 会话 → [q1 之前, q2 之前]；head 是该句 parent，fillInput 全开", () => {
     const targets = buildRewindTargets({
       ...sampleFile(),
       messages: [userMsg("q1"), assistantMsg([text("a1")]), userMsg("q2")],
       turnCount: 2,
     });
-    expect(targets.map((t) => t.head)).toEqual([null, "e0"]);
+    expect(targets.map((t) => t.head)).toEqual([null, "e1"]);
     expect(targets[0]).toMatchObject({
       head: null,
       anchorTurnIndex: 0,
       userMessageText: "q1",
       fullText: "q1",
+      fillInput: true,
       anchoredAt: "",
     });
     expect(targets[1]).toMatchObject({
-      head: "e0",
-      anchorTurnIndex: 0,
-      userMessageText: "q1",
-      fullText: "q1",
+      head: "e1",
+      anchorTurnIndex: 1,
+      userMessageText: "q2",
+      fullText: "q2",
+      fillInput: true,
     });
   });
 
-  test("3-turn 会话 → [回到首条消息之前, 保留到 q2 之前, 保留到 q3 之前]；当前 turn(3) 不列出", () => {
+  test("3-turn 会话 → 每条用户消息一行，head=parent（不含这句本身）", () => {
     const targets = buildRewindTargets(sampleFile());
-    expect(targets.map((t) => t.head)).toEqual([null, "e0", "e4", "e6"]);
-    expect(targets[0]).toMatchObject({
-      head: null,
-      anchorTurnIndex: 0,
-      userMessageText: "q1",
-      fullText: "q1",
-      anchoredAt: "",
-    });
-    expect(targets[1]).toMatchObject({
-      head: "e0",
-      anchorTurnIndex: 0,
-      userMessageText: "q1",
-      fullText: "q1",
-    });
-    expect(targets[2]).toMatchObject({
-      head: "e4",
-      userMessageText: "q2",
-      fullText: "q2",
-    });
-    expect(targets[3]).toMatchObject({
-      head: "e6",
-      userMessageText: "q3",
-      fullText: "q3",
-    });
+    expect(targets.map((t) => t.head)).toEqual([null, "e3", "e5"]);
+    expect(targets.map((t) => t.userMessageText)).toEqual(["q1", "q2", "q3"]);
+    expect(targets.every((t) => t.fillInput)).toBe(true);
+    expect(targets.some((t) => t.head === "e6")).toBe(false);
     expect(targets.some((t) => t.head === "e7")).toBe(false);
   });
 
@@ -356,14 +333,14 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
       turnCount: 2,
     };
     const targets = buildRewindTargets(file);
-    expect(targets[2]!.userMessageText).toHaveLength(80);
-    expect(targets[2]!.fullText).toHaveLength(100);
+    expect(targets[1]!.userMessageText).toHaveLength(80);
+    expect(targets[1]!.fullText).toHaveLength(100);
   });
 
   test("与 checkpoints 按 turnIndex 合取 anchoredAt；无快照 → 空串", () => {
     const targets = buildRewindTargets(sampleFile());
-    expect(targets[2]!.anchoredAt).toBe("2026-08-11T00:00:00.000Z");
-    expect(targets[3]!.anchoredAt).toBe("2026-08-11T00:00:01.000Z");
+    expect(targets[1]!.anchoredAt).toBe("2026-08-11T00:00:00.000Z");
+    expect(targets[2]!.anchoredAt).toBe("2026-08-11T00:00:01.000Z");
     expect(targets[0]!.anchoredAt).toBe("");
   });
 
@@ -375,15 +352,12 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
       messages: [userMsg("q1"), userToolResult("t-orphan")],
       turnCount: 1,
     });
-    expect(targets).toHaveLength(2);
-    expect(targets.map((t) => t.head)).toEqual([null, "e0"]);
+    expect(targets).toHaveLength(1);
+    expect(targets.map((t) => t.head)).toEqual([null]);
     expect(targets[0]).toMatchObject({
       head: null,
       userMessageText: "q1",
-    });
-    expect(targets[1]).toMatchObject({
-      head: "e0",
-      userMessageText: "q1",
+      fillInput: true,
     });
   });
 
@@ -423,11 +397,10 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
       checkpoints: [],
     };
     const targets = buildRewindTargets(file);
-    expect(targets.map((t) => t.head)).toEqual([null, "e0", "e4", "e6"]);
+    expect(targets.map((t) => t.head)).toEqual([null, "e3", "e5"]);
     expect(targets[0]!.anchoredAt).toBe("2026-08-20T10:00:00.000Z");
-    expect(targets[1]!.anchoredAt).toBe("2026-08-20T10:00:00.000Z");
-    expect(targets[2]!.anchoredAt).toBe("2026-08-20T11:00:00.000Z");
-    expect(targets[3]!.anchoredAt).toBe("2026-08-20T12:00:00.000Z");
+    expect(targets[1]!.anchoredAt).toBe("2026-08-20T11:00:00.000Z");
+    expect(targets[2]!.anchoredAt).toBe("2026-08-20T12:00:00.000Z");
   });
 
   test("checkpoint 优先于 messageCreatedAt（两段 fallback 第一段命中即返回）", () => {
@@ -456,17 +429,16 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
     };
     const targets = buildRewindTargets(file);
     expect(targets[0]!.anchoredAt).toBe("2026-08-20T10:00:00.000Z");
-    expect(targets[1]!.anchoredAt).toBe("2026-08-20T10:00:00.000Z");
-    expect(targets[2]!.anchoredAt).toBe("2026-08-20T11:00:00.000Z");
+    expect(targets[1]!.anchoredAt).toBe("2026-08-20T11:00:00.000Z");
     // turnIndex 2 命中 checkpoint → interruptedAt 胜出。
-    expect(targets[3]!.anchoredAt).toBe("2026-08-11T09:30:00.000Z");
+    expect(targets[2]!.anchoredAt).toBe("2026-08-11T09:30:00.000Z");
   });
 
   test('messageCreatedAt 缺席（旧文件）→ 非-checkpoint 锚点仍为 ""（现状不退化）', () => {
     // 旧文件没有 messageCreatedAt key：fallback 读 undefined → ""，
     // fmtAnchored 渲染空串——与 stamping 之前的行为完全一致。
     const targets = buildRewindTargets({ ...sampleFile(), checkpoints: [] });
-    expect(targets.map((t) => t.head)).toEqual([null, "e0", "e4", "e6"]);
+    expect(targets.map((t) => t.head)).toEqual([null, "e3", "e5"]);
     for (const t of targets) {
       expect(t.anchoredAt).toBe("");
     }
@@ -609,13 +581,8 @@ describe("rewindPickerContent（picker 渲染形状）", () => {
   test("3-turn 会话：选项 label = 锚点用户消息真实文本（不再用「保留前 N 轮」抽象标签）", () => {
     const targets = buildRewindTargets(sampleFile());
     const content = rewindPickerContent(targets, 0, false);
-    // 3 个锚点（首条消息之前 + q2 之前 + q3 之前），主 label 必须是真实文本
-    expect(content.options.map((o) => o.label)).toEqual([
-      "q1",
-      "q1",
-      "q2",
-      "q3",
-    ]);
+    // 3 条用户消息各一行，主 label 必须是真实文本
+    expect(content.options.map((o) => o.label)).toEqual(["q1", "q2", "q3"]);
     // 不含「回到会话起点」或「保留前」字面
     for (const opt of content.options) {
       expect(opt.label).not.toContain("回到会话起点");
@@ -634,11 +601,12 @@ describe("rewindPickerContent（picker 渲染形状）", () => {
     expect(content.options.map((o) => o.value)).toEqual(["execute", "cancel"]);
   });
 
-  test("确认态有 head：desc 引用锚点消息内容（q2）", () => {
+  test("确认态有 head：desc 引用锚点消息 + 之前（Claude Code before-this-message）", () => {
     const targets = buildRewindTargets(sampleFile());
-    const content = rewindPickerContent(targets, 2, true);
+    const content = rewindPickerContent(targets, 1, true);
     expect(content.description).toContain("q2");
-    expect(content.description).toContain("祖先链");
+    expect(content.description).toContain("之前");
+    expect(content.description).not.toContain("祖先链含");
   });
 
   test("1-turn 会话 keepTurns=0 锚点照常渲染（label = 首条消息 q1）", () => {

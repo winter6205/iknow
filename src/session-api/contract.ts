@@ -184,7 +184,9 @@ export type RewindSessionResponse = {
   head: string | null;
 };
 
-/** GET /api/v1/sessions/:id/rewind-targets — JSONL 全量用户锚点（含跳过分支）。 */
+/** GET /api/v1/sessions/:id/rewind-targets — 当前 head 链上的用户消息锚点。
+ *  `head` = 该句 parent（回退到发送这句之前）。`fillInput` 对列出的行恒为 true。
+ *  跳过分支不进默认 picker。 */
 export type RewindTargetDto = {
   readonly head: string | null;
   readonly userMessageText: string;

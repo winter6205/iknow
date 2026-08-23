@@ -33,9 +33,7 @@ export function useRewindConfirm({
         await chat.rewind(t.head);
         setRewindTargets(undefined);
         chat.pushNotice(
-          t.head === null
-            ? `已回退到 ［${t.userMessageText || "(无文本)"}］ 之前。`
-            : `已将会话头指到 ［${t.userMessageText || "(无文本)"}］。`
+          `已回退到 ［${t.userMessageText || "(无文本)"}］ 之前。`
         );
       } catch (e) {
         chat.pushNotice(

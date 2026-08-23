@@ -271,7 +271,7 @@ describe("SessionStore.rewindToHead + listRewindTargets (#624)", () => {
     assert.equal(log.events.length, 6);
   });
 
-  it("listRewindTargets after rewind still includes skipped user messages", async () => {
+  it("listRewindTargets after rewind lists only main-line user messages", async () => {
     const id = "rw-list-skipped";
     await store.save({
       id,
@@ -280,19 +280,31 @@ describe("SessionStore.rewindToHead + listRewindTargets (#624)", () => {
         overrides: { messages: threeTurnMessages(), turnCount: 3 },
       }),
     });
-    await store.rewindToAnchor({ id, keepTurns: 1 });
-    const targets = await store.listRewindTargets(id);
-    const heads = targets.map((t) => t.head);
-    assert.ok(heads.includes(null), "before-first remains listed");
-    assert.ok(
-      heads.includes("e4"),
-      "skipped last user message listed for undo"
+    const before = await store.listRewindTargets(id);
+    assert.deepEqual(
+      before.map((t) => t.head),
+      [null, "e1", "e3"],
+      "each user prompt rewinds to its parent (before that prompt)"
     );
     assert.equal(
-      heads.includes("e1"),
-      false,
-      "current turn end is a no-op and must not be listed"
+      before.every((t) => t.fillInput),
+      true
     );
+
+    await store.rewindToAnchor({ id, keepTurns: 1 });
+    const targets = await store.listRewindTargets(id);
+    assert.deepEqual(
+      targets.map((t) => t.userMessageText),
+      ["q1"]
+    );
+    assert.equal(
+      targets.some(
+        (t) => t.userMessageText === "q2" || t.userMessageText === "q3"
+      ),
+      false,
+      "skipped-branch prompts (and their timestamps) must leave the picker"
+    );
+    assert.equal(targets[0]?.fillInput, true);
   });
 
   it("unknown head → schema_invalid", async () => {

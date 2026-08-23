@@ -2,8 +2,8 @@
 /**
  * src/tui/rewind-picker.tsx
  *
- * L3 锚点选择器。#624：锚点 = JSONL 用户消息；确认后把 head 指到该 turn
- * 的结束事件（null = 首条之前）。旧链保留，确认文案不再声称截断。
+ * L3 锚点选择器。锚点 = 当前 head 链上的用户消息；确认后 head 指到该句
+ * parent（回到发送这句之前）。旧链保留，picker 默认不列跳过分支。
  */
 import type { SessionFileV1 } from "../session-api/store/schema.js";
 import {
@@ -20,7 +20,7 @@ import {
 
 export type RewindTarget = LedgerRewindTarget;
 
-/** 线性 SessionFile 投影（无跳过分支）。TUI 打开 picker 时走 store 全量账本。 */
+/** 线性 SessionFile 投影（无跳过分支）。TUI 打开 picker 时走 store 当前 head 链。 */
 export function buildRewindTargets(
   file: SessionFileV1
 ): ReadonlyArray<RewindTarget> {
@@ -37,9 +37,7 @@ export function rewindPickerContent(
     const desc =
       t === undefined
         ? ""
-        : t.head === null
-          ? "恢复到 ［首条用户消息］ 之前：当前可见历史清空。账本中的事件仍保留，可再选中回退。"
-          : `将当前头指到 ［${anchorTextForConfirm(t)}］：发给模型的是这句往回的祖先链。其后回复仍在账本中，可再 rewind。`;
+        : `恢复到 ［${anchorTextForConfirm(t)}］ 之前：当前可见历史不含这句。账本中的事件仍保留。`;
     return {
       title: "确认回退？",
       description: desc,
@@ -52,7 +50,8 @@ export function rewindPickerContent(
   }
   return {
     title: "回退到更早的回合",
-    description: "选择一条用户消息；回退后改的是头指针，旧链留在同一账本。",
+    description:
+      "选择一条用户消息；回退后从这句重新开始。账本旧链保留，面板只列当前可见历史。",
     options: targets.map((t, i) => {
       const time = t.anchoredAt !== "" ? ` · ${fmtAnchored(t.anchoredAt)}` : "";
       const text = (t.userMessageText || "(无文本)").slice(0, 40);

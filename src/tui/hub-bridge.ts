@@ -137,7 +137,7 @@ export interface TuiBridge {
     conversationId: string,
     head: string | null
   ) => Promise<SessionFileV1>;
-  /** #624：从 JSONL 全量账本列用户锚点（含跳过分支）。 */
+  /** 当前 head 链上的用户锚点（跳过分支不列出）。 */
   readonly listRewindTargets: (
     conversationId: string
   ) => Promise<ReadonlyArray<LedgerRewindTarget>>;

@@ -404,7 +404,7 @@ export class SessionStore {
     return this.persistHeadMove(id, path, log, head);
   }
 
-  /** #624: picker rows from the full JSONL (skipped branches included). */
+  /** Picker rows from the current head chain (skipped branches omitted). */
   async listRewindTargets(
     id: string
   ): Promise<ReadonlyArray<LedgerRewindTarget>> {
