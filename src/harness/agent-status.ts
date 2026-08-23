@@ -15,10 +15,7 @@
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type {
-  AnthropicNativeMessage,
-  AnthropicContentBlock,
-} from "./model-adapter/types.js";
+import type { AnthropicNativeMessage } from "./model-adapter/types.js";
 import { OPEN_PREFIX, TODOS_FILE } from "./aci/tools/todo-write.js";
 
 // 未勾行锚点:直接复用账本写入方 todo-write.ts 导出的 OPEN_PREFIX —— 写入
