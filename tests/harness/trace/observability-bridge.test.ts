@@ -2,10 +2,9 @@
  * translateToObservability (B-scope 占位 stub, GH #64)。
  *
  * 文件名 / 函数名 rename 自 orchestrator 原始 contract 的 "otel-translator / translateToOtel":
- * src/harness/public-exports.test.ts T12 Gate B capability gate(判据 12)
- * 把 "otel" / "span" / "metric" 列为禁词(A-scope 内核禁入),直到 018 真实接通。
+ * Gate B 禁止可执行面出现 OTel 导出（import / 标识符），注释用词不扫。
  * 占位 stub 改用 observability-bridge / translateToObservability 命名,
- * 保持 B-scope 占位语义不变,过 Gate B 守门。
+ * 保持 B-scope 占位语义不变。
  *
  * 4 项契约:
  * 1. translateToObservability(llm) → 抛 "B-scenario not implemented"

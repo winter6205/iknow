@@ -53,7 +53,7 @@ chat / TUI / serve 的会话在崩溃或 rewind 后，从 JSONL 当前头继续�
 - **Does:** 上列 Implementation Decisions 1–7。
 - **Out of this spec:** 上列 Out of Scope。
 - **Inherits:** `checkpoint-rewind.md` 的 picker UX（L3 / L0 空态文案 / 无消息级删除 / 确认 gate）。截断落盘与 `messagesCount` 书签 SSOT **不再 inherit**。
-- **Harness:** `src/harness/` 仍禁词 `checkpoint`（Gate B）；commit 钩子用既有 deps 注入，不把 session-api 类型拖进 loop-engine。
+- **Harness:** `src/harness/` 不实现 checkpoint 落盘（能力在 session-api）；commit 钩子用既有 deps 注入，不把 session-api 类型拖进 loop-engine。注释可以写 checkpoint 说明这条边界。
 
 ## Success Criteria
 
