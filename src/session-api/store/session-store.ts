@@ -264,11 +264,14 @@ export class SessionStore {
     const lines: string[] = [];
     for (const message of events) {
       const eventId = messageEventId(next++);
-      const record = {
+      // 每条事件自己的入账时刻(T3 commit pattern 下 user/assistant/tool
+      // 各自的时间戳彼此接近但可分辨 — plan Open questions #3)。
+      const record: SessionEventRecord = {
         type: "message",
         id: eventId,
         parent,
         message,
+        createdAt: new Date().toISOString(),
       };
       lines.push(JSON.stringify(record));
       parent = eventId;

@@ -38,7 +38,13 @@ import { sanitizeSessionFile } from "./schema.js";
 export const SESSION_JSONL_EXT = ".jsonl";
 
 /** session header record(D2 元数据)。字段镜像 SessionFileV1 减去
- *  messages;optional 字段缺席即省略(spread-discipline)。 */
+ *  messages;optional 字段缺席即省略(spread-discipline)。`messageCreatedAt`
+ *  is declared here (despite not being a SessionHeaderRecord-native field
+ *  by intent) because the header line is built via `JSON.stringify({
+ *  type:"session", ...file_minus_messages })` after a stamped save — the
+ *  array carries through to disk and back, so load() must accept it as part
+ *  of the header shape. projectSessionLog strips it on the no-stamp branch
+ *  so a stale header cannot poison the picker with misaligned timestamps. */
 export interface SessionHeaderRecord {
   readonly type: "session";
   readonly schemaVersion: number;
@@ -52,14 +58,19 @@ export interface SessionHeaderRecord {
   readonly checkpoints?: ReadonlyArray<CheckpointRecord>;
   readonly goal?: GoalState;
   readonly workspaceRoot?: string;
+  readonly messageCreatedAt?: ReadonlyArray<string | null>;
 }
 
-/** 一条 message 事件:唯一 id + parent 链 + 原生消息原文。 */
+/** 一条 message 事件:唯一 id + parent 链 + 原生消息原文。`createdAt` 是
+ *  appendEvents 写盘时的入账时刻(ISO);optional for 兼容旧 JSONL——
+ *  parseSessionJsonl 不做严格校验(spread 纪律),缺席不 fail validation,
+ *  投影时落成 messageCreatedAt[i] = null。 */
 export interface SessionEventRecord {
   readonly type: "message";
   readonly id: string;
   readonly parent: string | null;
   readonly message: AnthropicNativeMessage;
+  readonly createdAt?: string;
 }
 
 /** 落盘的 rewind 头指针;id 为 null 表示空 transcript(空会话)。 */
@@ -102,14 +113,16 @@ export interface ParsedSessionLog {
  * Pure. 未知顶层字段经 spread 进 header 透传;`messages` 不进 header。
  */
 export function sessionFileToJsonl(file: SessionFileV1): string {
-  const { messages, ...meta } = file;
+  const { messages, messageCreatedAt, ...meta } = file;
   const lines: string[] = [JSON.stringify({ type: "session", ...meta })];
   messages.forEach((message, index) => {
+    const stamp = messageCreatedAt?.[index];
     const record: SessionEventRecord = {
       type: "message",
       id: messageEventId(index),
       parent: index === 0 ? null : messageEventId(index - 1),
       message,
+      ...(typeof stamp === "string" ? { createdAt: stamp } : {}),
     };
     lines.push(JSON.stringify(record));
   });
@@ -213,6 +226,7 @@ export function parseSessionJsonl(raw: string): ParsedSessionLog {
 export function projectSessionLog(log: ParsedSessionLog): SessionFileV1 {
   const byId = new Map(log.events.map((e) => [e.id, e]));
   const messages: AnthropicNativeMessage[] = [];
+  const createdAtList: Array<string | null> = [];
   const seen = new Set<string>();
   let cur = log.head;
   while (cur !== null) {
@@ -232,11 +246,41 @@ export function projectSessionLog(log: ParsedSessionLog): SessionFileV1 {
       } satisfies SessionJsonlError;
     }
     messages.push(event.message);
+    // `event.createdAt` is `string | undefined` in-memory; coerce the hole to
+    // `null` so the parallel array matches the on-disk JSON shape (undefined
+    // would serialize to null via JSON.stringify anyway). Validator accepts
+    // only `null` holes — never `undefined`.
+    createdAtList.push(event.createdAt ?? null);
     cur = event.parent;
   }
   messages.reverse();
+  createdAtList.reverse();
   const { type: _type, ...meta } = log.header;
-  return sanitizeSessionFile({ ...meta, messages });
+  // spread-discipline: 全链都无 createdAt(纯旧文件 / 未经过 appendEvents
+  // stamping 的 fork 旧分支)时省略 key,与 sanitize.ts 的 conditional-goal-
+  // key 纪律一致(never emit `field: undefined` keys)。这样旧文件
+  // sessionFileToJsonl → parseSessionJsonl → projectSessionLog 整对象
+  // round-trip 字节不变(既有 deepEqual 测试锚定契约)。任一事件带
+  // createdAt → 发 key,数组内 null 元素来自该位置事件无 createdAt
+  // (旧链 / fork 旧分支),picker 用 ?? "" 兜底渲染。
+  const hasAny = createdAtList.some((c) => c !== null);
+  // Stale-header guard (#622 review-fix Medium): when the current head chain
+  // carries no createdAt (rewind back into a pre-stamping fork branch, or a
+  // legacy chain), a previously-stamped save left the header's
+  // messageCreatedAt at its OLD length. Spread via `...meta` would leak that
+  // stale array into the projection — picker joins index-by-index and would
+  // read misaligned timestamps. Mirror `sanitizeSessionFile`'s `delete
+  // result["summary"]` posture: drop the key explicitly when there's nothing
+  // to emit. When `hasAny === true` the explicit `messageCreatedAt:` in the
+  // result literal below overrides any stale value in `meta`.
+  if (!hasAny) {
+    delete meta.messageCreatedAt;
+  }
+  return sanitizeSessionFile({
+    ...meta,
+    messages,
+    ...(hasAny ? { messageCreatedAt: createdAtList } : {}),
+  });
 }
 
 /**

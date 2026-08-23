@@ -31,10 +31,7 @@ import {
 } from "../../src/tui/rewind-picker.js";
 import { makeDeps } from "../cli/_fixtures.ts";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
-import type {
-  CheckpointRecord,
-  SessionFileV1,
-} from "../../src/session-api/store/schema.js";
+import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 import { resolveProjectSessionDir } from "../../src/session-api/store/session-store.js";
 import { parseTuiInput } from "../../src/tui/slash.js";
 import type { ModalKeyEvent } from "../../src/tui/modal.js";
@@ -405,6 +402,74 @@ describe("buildRewindTargets（L3 锚点投影）", () => {
       ],
     });
     expect(targets[0]!.anchoredAt).toBe(ISO);
+  });
+
+  test("非-checkpoint 锚点在 messageCreatedAt 有值 → fallback 到入账时刻（非空 anchoredAt）", () => {
+    // appendEvents stamping 之后 load 出的文件：messageCreatedAt 与 messages
+    // 一一对应。无 checkpoint 快照的锚点显示消息入账时刻，不再恒为 ""。
+    const file = {
+      ...sampleFile(),
+      messageCreatedAt: [
+        "2026-08-20T10:00:00.000Z", // q1 (turn 0 起点, 索引 0)
+        null, // assistant tool_use
+        null, // tool_result
+        null, // assistant done
+        "2026-08-20T11:00:00.000Z", // q2 (turn 1 起点, 索引 4)
+        null, // a2
+        "2026-08-20T12:00:00.000Z", // q3 (turn 2 起点, 索引 6)
+        null, // a3
+      ] as ReadonlyArray<string | null>,
+      // 无任何 checkpoint：全部走 fallback 段。
+      checkpoints: [],
+    };
+    const targets = buildRewindTargets(file);
+    expect(targets.map((t) => t.head)).toEqual([null, "e0", "e4", "e6"]);
+    expect(targets[0]!.anchoredAt).toBe("2026-08-20T10:00:00.000Z");
+    expect(targets[1]!.anchoredAt).toBe("2026-08-20T10:00:00.000Z");
+    expect(targets[2]!.anchoredAt).toBe("2026-08-20T11:00:00.000Z");
+    expect(targets[3]!.anchoredAt).toBe("2026-08-20T12:00:00.000Z");
+  });
+
+  test("checkpoint 优先于 messageCreatedAt（两段 fallback 第一段命中即返回）", () => {
+    // 同一锚点既有 checkpoint.interruptedAt 又有 messageCreatedAt：
+    // 显示中断时刻，不被入账时刻覆盖。
+    const file = {
+      ...sampleFile(),
+      messageCreatedAt: [
+        "2026-08-20T10:00:00.000Z",
+        null,
+        null,
+        null,
+        "2026-08-20T11:00:00.000Z",
+        null,
+        "2026-08-20T12:00:00.000Z",
+        null,
+      ] as ReadonlyArray<string | null>,
+      checkpoints: [
+        {
+          turnIndex: 2,
+          messagesCount: 8,
+          interruptedAt: "2026-08-11T09:30:00.000Z",
+          interruptReason: "cancelled" as const,
+        },
+      ],
+    };
+    const targets = buildRewindTargets(file);
+    expect(targets[0]!.anchoredAt).toBe("2026-08-20T10:00:00.000Z");
+    expect(targets[1]!.anchoredAt).toBe("2026-08-20T10:00:00.000Z");
+    expect(targets[2]!.anchoredAt).toBe("2026-08-20T11:00:00.000Z");
+    // turnIndex 2 命中 checkpoint → interruptedAt 胜出。
+    expect(targets[3]!.anchoredAt).toBe("2026-08-11T09:30:00.000Z");
+  });
+
+  test('messageCreatedAt 缺席（旧文件）→ 非-checkpoint 锚点仍为 ""（现状不退化）', () => {
+    // 旧文件没有 messageCreatedAt key：fallback 读 undefined → ""，
+    // fmtAnchored 渲染空串——与 stamping 之前的行为完全一致。
+    const targets = buildRewindTargets({ ...sampleFile(), checkpoints: [] });
+    expect(targets.map((t) => t.head)).toEqual([null, "e0", "e4", "e6"]);
+    for (const t of targets) {
+      expect(t.anchoredAt).toBe("");
+    }
   });
 });
 

@@ -485,6 +485,61 @@ describe("validateSessionFile — workspaceRoot field (serve-workspace T1)", () 
   });
 });
 
+// -- rewind prompt timestamps: messageCreatedAt validation -------------------
+
+describe("validateSessionFile — messageCreatedAt field (rewind prompt timestamps)", () => {
+  it("accepts a file with messageCreatedAt absent", () => {
+    assert.equal(validateSessionFile(valid), null);
+    assert.equal("messageCreatedAt" in valid, false);
+  });
+
+  it("accepts an array of ISO strings (length-mismatched length tolerated at validate time)", () => {
+    assert.equal(
+      validateSessionFile({
+        ...valid,
+        messageCreatedAt: ["2026-01-01T00:00:00.000Z"],
+      }),
+      null
+    );
+  });
+
+  it("accepts an array mixing ISO strings and null (JSON round-trip holes)", () => {
+    // JSON.stringify drops `undefined` elements to `null`; disk files
+    // naturally carry null at unstamped positions. The validator must
+    // accept both spellings of "no stamp here".
+    assert.equal(
+      validateSessionFile({
+        ...valid,
+        messageCreatedAt: [
+          "2026-01-01T00:00:00.000Z",
+          null,
+          "2026-01-01T00:00:01.000Z",
+        ],
+      }),
+      null
+    );
+  });
+
+  it("returns 'messageCreatedAt' for illegal present values", () => {
+    const illegal: unknown[] = [
+      42, // not an array
+      "not-an-array",
+      null, // null is the element-level sentinel; the whole field cannot be null
+      {}, // object instead of array
+      [{ x: 1 }], // object elements
+      ["2026-01-01T00:00:00.000Z", 42], // non-string element
+      [undefined, "2026-01-01T00:00:00.000Z"], // undefined is not accepted at the element level (round-trip → null)
+    ];
+    for (const messageCreatedAt of illegal) {
+      assert.equal(
+        validateSessionFile({ ...valid, messageCreatedAt }),
+        "messageCreatedAt",
+        `must reject ${JSON.stringify(messageCreatedAt)}`
+      );
+    }
+  });
+});
+
 // -- #458 T2: goal source union shrunk (SC1) --------------------------------
 
 describe("validateSessionFile / sanitizeSessionFile — goal source union shrunk (#458)", () => {

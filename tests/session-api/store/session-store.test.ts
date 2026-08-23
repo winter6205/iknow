@@ -623,3 +623,238 @@ describe("SessionStoreError kinds (full coverage)", () => {
     assert.equal(e.kind, "concurrent_write");
   });
 });
+
+// -- appendEvents createdAt stamping (rewind prompt timestamps) --------------
+
+describe("SessionStore.appendEvents createdAt stamping", () => {
+  it("stamps an ISO createdAt on every appended event record", async () => {
+    const id = "ts-append-stamp";
+    const file = sampleFile({
+      id,
+      overrides: { messages: [userMsgShape("q")] },
+    });
+    await store.save({ id, file });
+    await store.appendEvents({
+      id,
+      events: [assistantMsgShape("a")],
+    });
+    const lines = await readJsonlLinesById(id);
+    const eventRecords = lines.filter(
+      (l): l is Record<string, unknown> =>
+        (l as { type?: string }).type === "message"
+    );
+    // Save() wrote e0 without createdAt (fullRewritePlan → sessionFileToJsonl
+    // doesn't stamp; bootstrap path), appendEvents wrote e1 with createdAt.
+    const e1 = eventRecords[1] as {
+      createdAt?: unknown;
+      id: string;
+      parent: string;
+    };
+    assert.equal(e1.id, "e1");
+    assert.equal(e1.parent, "e0");
+    assert.equal(typeof e1.createdAt, "string");
+    const stamped = new Date(e1.createdAt as string);
+    assert.ok(
+      !Number.isNaN(stamped.getTime()),
+      `createdAt must parse as a valid ISO date (got ${e1.createdAt})`
+    );
+    // Within a 60s window around now (CI clock skew margin).
+    const drift = Math.abs(stamped.getTime() - Date.now());
+    assert.ok(drift < 60_000, `createdAt drift > 60s: ${drift}ms`);
+  });
+
+  it("stamps each event in a multi-event append with a distinct ISO timestamp", async () => {
+    const id = "ts-append-multi";
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: { messages: [userMsgShape("q")] },
+      }),
+    });
+    await store.appendEvents({
+      id,
+      events: [
+        assistantMsgShape("a1"),
+        assistantMsgShape("a2"),
+        assistantMsgShape("a3"),
+      ],
+    });
+    const lines = await readJsonlLinesById(id);
+    const stamps = lines
+      .filter(
+        (l): l is { type: string; createdAt?: unknown } =>
+          (l as { type: string }).type === "message" &&
+          "createdAt" in (l as Record<string, unknown>)
+      )
+      .map((l) => l.createdAt as string);
+    // e0 was written by save() (unstamped), e1..e3 stamped by appendEvents.
+    assert.equal(stamps.length, 3);
+    for (const s of stamps) {
+      assert.ok(!Number.isNaN(new Date(s).getTime()), `bad ISO: ${s}`);
+    }
+    // Strict non-decreasing — same-millisecond is allowed.
+    for (let i = 1; i < stamps.length; i++) {
+      assert.ok(
+        new Date(stamps[i]!).getTime() >= new Date(stamps[i - 1]!).getTime()
+      );
+    }
+  });
+
+  it("load projects messageCreatedAt aligned with messages on a mixed chain", async () => {
+    // save() writes via sessionFileToJsonl which doesn't stamp (legacy /
+    // bootstrap path); appendEvents stamps each event it writes. Mixed
+    // chain: e0/e1 unstamped (undefined), e2 stamped (ISO).
+    const id = "ts-load-mixed";
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: {
+          messages: [userMsgShape("q"), assistantMsgShape("a")],
+        },
+      }),
+    });
+    await store.appendEvents({
+      id,
+      events: [userMsgShape("q2")],
+    });
+    const loaded = await store.load(id);
+    assert.equal(loaded.messages.length, 3);
+    assert.equal(loaded.messageCreatedAt?.[0], null);
+    assert.equal(loaded.messageCreatedAt?.[1], null);
+    assert.equal(typeof loaded.messageCreatedAt?.[2], "string");
+    assert.ok(
+      !Number.isNaN(new Date(loaded.messageCreatedAt?.[2] as string).getTime())
+    );
+  });
+
+  it("legacy JSONL (handwritten without createdAt) loads with no messageCreatedAt key", async () => {
+    // Hand-craft a JSONL where every event omits createdAt — mirrors a file
+    // written before the stamping change. Load must succeed and the
+    // projection must omit the messageCreatedAt key (spread-discipline,
+    // conditional emit). Picker fallback reads undefined → "".
+    await mkdir(sessionDir, { recursive: true });
+    const id = "ts-load-legacy";
+    const raw = [
+      JSON.stringify({
+        type: "session",
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversation_id: id,
+        title: "legacy",
+        cwd: "/tmp/test",
+        sanitized_at: "2026-08-20T00:00:00.000Z",
+        jsonMode: false,
+        turnCount: 1,
+        updatedAt: "2026-08-20T00:00:00.000Z",
+        checkpoints: [],
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "e0",
+        parent: null,
+        message: userMsgShape("q"),
+      }),
+      JSON.stringify({
+        type: "message",
+        id: "e1",
+        parent: "e0",
+        message: assistantMsgShape("a"),
+      }),
+      JSON.stringify({ type: "head", id: "e1" }),
+    ].join("\n");
+    const path = join(sessionDir, `${id}.jsonl`);
+    await writeFile(path, `${raw}\n`, "utf8");
+    const loaded = await store.load(id);
+    assert.equal(loaded.messages.length, 2);
+    assert.equal(
+      "messageCreatedAt" in loaded,
+      false,
+      "legacy chain must not grow messageCreatedAt key (spread-discipline)"
+    );
+    assert.equal(loaded.messageCreatedAt?.[0], undefined);
+  });
+
+  it("save() preserves stamped event createdAt verbatim through the header-refresh path", async () => {
+    // plan Open Q #2 contract: save() must not re-stamp existing event records
+    // — appendEvents is the only writer that sets `createdAt`, and its writes
+    // pass through `serializeSessionLog(meta, records)` in the identical-
+    // projection branch with no JSON re-encoding. A regression that called
+    // `createdAt: new Date().toISOString()` inside the save event builder
+    // would mutate the picker-visible timestamps on every subsequent save
+    // and silently break the rewind prompt-timestamp invariant.
+    const id = "ts-save-keep-stamps";
+    // Bootstrap a 2-message transcript via fullRewritePlan (e0/e1 unstamped).
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: { messages: [userMsgShape("q"), assistantMsgShape("a")] },
+      }),
+    });
+    // appendEvents stamps e2 with the only createdAt on disk.
+    await store.appendEvents({ id, events: [userMsgShape("q2")] });
+    const findEvent = (
+      lines: ReadonlyArray<unknown>,
+      eventId: string
+    ): { id: string; createdAt?: unknown } => {
+      const ev = lines.find(
+        (l) =>
+          (l as { type?: string; id?: string }).type === "message" &&
+          (l as { id?: string }).id === eventId
+      ) as { id: string; createdAt?: unknown } | undefined;
+      assert.ok(ev, `event ${eventId} must exist on disk before save()`);
+      return ev;
+    };
+    const before = await readJsonlLinesById(id);
+    const e2Before = findEvent(before, "e2");
+    assert.equal(
+      typeof e2Before.createdAt,
+      "string",
+      "appendEvents must have stamped e2 with a createdAt string"
+    );
+    // Re-save with the same projection → identical-branch header-refresh.
+    // (load() round-trips the same messages; no rewind happens here.)
+    const loaded = await store.load(id);
+    await store.save({ id, file: loaded });
+    const after = await readJsonlLinesById(id);
+    const e2After = findEvent(after, "e2");
+    assert.equal(
+      e2After.createdAt,
+      e2Before.createdAt,
+      "save() header-refresh must preserve stamped event createdAt verbatim"
+    );
+  });
+});
+
+// -- shared helpers for the describe above (locally scoped to avoid polluting
+// -- the file's top-level imports / sampleFile closure) -----------------------
+
+function userMsgShape(text: string): {
+  readonly role: "user";
+  readonly content: ReadonlyArray<{
+    readonly type: "text";
+    readonly text: string;
+  }>;
+} {
+  return { role: "user", content: [{ type: "text", text }] };
+}
+
+function assistantMsgShape(text: string): {
+  readonly role: "assistant";
+  readonly content: ReadonlyArray<{
+    readonly type: "text";
+    readonly text: string;
+  }>;
+} {
+  return { role: "assistant", content: [{ type: "text", text }] };
+}
+
+async function readJsonlLinesById(id: string): Promise<ReadonlyArray<unknown>> {
+  const path = join(sessionDir, `${id}.jsonl`);
+  const raw = await readFile(path, "utf8");
+  return raw
+    .split("\n")
+    .filter((l) => l.trim().length > 0)
+    .map((l) => JSON.parse(l) as unknown);
+}

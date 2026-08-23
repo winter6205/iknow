@@ -160,6 +160,15 @@ export interface SessionFileV1 {
    *  sanitize never backfills cwd or process.cwd(). Illegal present values
    *  fail validate with field `"workspaceRoot"` (not silently dropped). */
   readonly workspaceRoot?: string;
+  /** 与 messages 一一对应的入账时刻(ISO)。undefined 元素 = 该条事件无
+   *  createdAt(appendEvents stamping 之前写入的旧文件 / fork 旧链分支)。
+   *  整个 key 缺席 = 链上所有事件均无时间戳(条件输出，避免旧文件 round-trip
+   *  多出全-undefined 数组；详见 jsonl.ts:projectSessionLog 的
+   *  spread-discipline 纪律)。appendEvents stamp 后写入的事件自带
+   *  createdAt,projectSessionLog 才会挂上这个并行数组。picker 消费侧
+   *  (rewind-picker.tsx anchoredAtFor) 用 ?? "" 兜底，undefined / 缺席
+   *  同语义。 */
+  readonly messageCreatedAt?: ReadonlyArray<string | null>;
 }
 
 export const CURRENT_SCHEMA_VERSION = 5 as const;
@@ -217,6 +226,17 @@ export function validateSessionFile(value: unknown): string | null {
     !isValidWorkspaceRoot(obj["workspaceRoot"])
   ) {
     return "workspaceRoot";
+  }
+  // Optional parallel array over messages: validate shape if present, never
+  // silently coerce (a misaligned / malformed messageCreatedAt would feed the
+  // rewind picker wrong timestamps index-by-index). Elements are ISO strings
+  // or null — JSON round-trip serializes the runtime `undefined` holes to
+  // null, so both spellings mean "no stamp at this position".
+  if (
+    obj["messageCreatedAt"] !== undefined &&
+    !isValidMessageCreatedAt(obj["messageCreatedAt"])
+  ) {
+    return "messageCreatedAt";
   }
   return null;
 }
@@ -593,4 +613,21 @@ function isValidWorkspaceRoot(value: unknown): boolean {
     return false;
   }
   return path.isAbsolute(value);
+}
+
+/** Optional `messageCreatedAt` parallel array (rewind prompt timestamps):
+ *  elements are ISO strings or `null`. `null` marks a hole — the parallel
+ *  position in `messages[]` carries no timestamp (legacy / pre-stamping fork
+ *  branch). `projectSessionLog` coerces in-memory `undefined` to `null` to
+ *  match the JSON-on-disk shape; the validator accepts `null` holes only,
+ *  never `undefined`. The array length is NOT enforced here — a malformed
+ *  length surfaces downstream as `undefined` reads in the picker and breaks
+ *  loudly without ambiguity. */
+function isValidMessageCreatedAt(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  for (const el of value) {
+    if (el === null) continue;
+    if (typeof el !== "string") return false;
+  }
+  return true;
 }
