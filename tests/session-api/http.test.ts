@@ -649,7 +649,7 @@ describe("GET /api/v1/sessions/:id/rewind-targets", () => {
     assert.deepEqual(b.targets, []);
   });
 
-  it("rewind 后 GET 仍含被跳过的用户消息 head", async () => {
+  it("rewind 后 GET 只列当前主链用户消息，跳过链不进 picker", async () => {
     const id = await createSession();
     await postJson({
       path: `/api/v1/sessions/${id}/messages`,
@@ -659,18 +659,36 @@ describe("GET /api/v1/sessions/:id/rewind-targets", () => {
       path: `/api/v1/sessions/${id}/messages`,
       payload: { text: "q2" },
     });
+    const listed = await getJson(`/api/v1/sessions/${id}/rewind-targets`);
+    assert.equal(listed.status, 200);
+    const before = listed.body as {
+      targets: Array<{
+        head: string | null;
+        userMessageText: string;
+        fillInput: boolean;
+      }>;
+    };
+    const q2 = before.targets.find((t) => t.userMessageText === "q2");
+    assert.ok(q2, "q2 listed before rewind");
+    assert.equal(q2.fillInput, true);
+
     await postJson({
       path: `/api/v1/sessions/${id}/rewind`,
-      payload: { head: "e0" },
+      payload: { head: q2.head },
     });
     const { status, body } = await getJson(
       `/api/v1/sessions/${id}/rewind-targets`
     );
     assert.equal(status, 200);
-    const b = body as { targets: Array<{ head: string | null }> };
-    const heads = b.targets.map((t) => t.head);
-    assert.ok(heads.includes(null));
-    assert.ok(heads.includes("e2"), "skipped q2 remains listed");
+    const after = body as {
+      targets: Array<{ userMessageText: string }>;
+    };
+    assert.equal(
+      after.targets.some((t) => t.userMessageText === "q2"),
+      false,
+      "rewound prompt must leave the picker"
+    );
+    assert.ok(after.targets.some((t) => t.userMessageText === "q1"));
   });
 });
 

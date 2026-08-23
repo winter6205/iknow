@@ -1331,11 +1331,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       });
       const noticeText = target.userMessageText || "(无文本)";
       setNotice({
-        lines: [
-          target.head === null
-            ? `已回退到 ［${noticeText}］ 之前。`
-            : `已将会话头指到 ［${noticeText}］。`,
-        ],
+        lines: [`已回退到 ［${noticeText}］ 之前。`],
       });
       if (target.fillInput) setInputValue(target.fullText);
     } catch (err) {
