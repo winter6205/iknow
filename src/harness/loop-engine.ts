@@ -1239,26 +1239,61 @@ async function runToolPhase(opts: {
   }));
   const toolTimeout =
     opts.deps.toolTimeoutMs ?? opts.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  // #620 T3 (spec D4):逐调用串行驱动 —— 每个工具结果一拿到手立刻编码并经
-  // host 钩子上盘(单条 user message;encodeToolResults 是逐元素 map,逐调用
-  // 编码与批量编码逐块一致,故内存侧仍合并为一条 user message,行为不变)。
-  // Executor 接口零改动:既有 executeAll 实现(real / permission / aci /
-  // violation 包装)内部本就是逐调用串行,逐调用驱动语义等价。
+  // #653 T3 (spec AC51 / AC52):把 toolCallViews 按 registry 上工具声明的
+  // `aci.isConcurrencySafe` 分组成 wave ——
+  //   - 连续 `isConcurrencySafe: true` 的 call 进入同一个 wave(AC51:重叠执行);
+  //   - `isConcurrencySafe: false`(含 catalog miss 的保守默认)单独成 wave,
+  //     与任何其它 call 不重叠(spec P「unsafe 与任何其它不相交」);
+  //   - 每个 wave 内单次 `executeAll(wave)` 触发并发(AC52:从 [one] 改为 [N]);
+  //   - wave 之间严格串行(wave 边界 = 并行集边界,内层 executor / 装饰层
+  //     不会越界并发)。
+  // AciMeta 读取走 cast(createAciCatalog 已建立相同模式):registry 透传
+  // ToolDef(包括 aci 字段),loop 端用 optional chain + 默认 false 兼容
+  // 无 aci 元数据的旧工具(行为与 byte-identical 一致 — 每个 call 默认 unsafe,
+  // 各自 singleton wave,逐调用 [one])。
+  // #620 (T3 spec D4):每个结果仍逐元素 commit —— wave settle 后按输入顺序
+  // 串行 commitMessagesOrThrow,内存侧合并为单条 user message(逐元素 map),
+  // 盘上每个 tool_result 独立上盘;commit 失败 → 包 MessageCommitError 重抛。
+  const waves: Array<
+    ReadonlyArray<{ id: string; name: string; input: unknown }>
+  > = [];
+  let currentWave: Array<{ id: string; name: string; input: unknown }> = [];
+  for (const call of toolCallViews) {
+    const def = opts.deps.registry.get(call.name);
+    const isConcurrencySafe =
+      (def as { aci?: { isConcurrencySafe?: boolean } } | undefined)?.aci
+        ?.isConcurrencySafe === true;
+    if (isConcurrencySafe) {
+      currentWave.push(call);
+    } else {
+      if (currentWave.length > 0) {
+        waves.push(currentWave);
+        currentWave = [];
+      }
+      waves.push([call]); // singleton wave — unsafe / catalog-miss 单独执行
+    }
+  }
+  if (currentWave.length > 0) {
+    waves.push(currentWave);
+  }
   const results: ToolExecutionResult[] = [];
   const blocks: AnthropicContentBlock[] = [];
-  for (const call of toolCallViews) {
-    const [result] = await opts.deps.executor.executeAll(
-      [call],
+  for (const wave of waves) {
+    const waveResults = await opts.deps.executor.executeAll(
+      wave,
       opts.signal,
       toolTimeout,
       opts.deps.conversationId
     );
-    results.push(result);
-    const encoded = opts.deps.adapter.encodeToolResults([result]);
-    blocks.push(...encoded);
-    await commitMessagesOrThrow(opts.deps, [
-      { role: "user", content: encoded },
-    ]);
+    // Iterate in input order, commit each sequentially (#620 per-result commit)。
+    for (const result of waveResults) {
+      results.push(result);
+      const encoded = opts.deps.adapter.encodeToolResults([result]);
+      blocks.push(...encoded);
+      await commitMessagesOrThrow(opts.deps, [
+        { role: "user", content: encoded },
+      ]);
+    }
   }
   const toolResultMsg: AnthropicNativeMessage = {
     role: "user",
