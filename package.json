@@ -1,7 +1,7 @@
 {
   "name": "iknow",
   "version": "0.1.0",
-  "description": "Standalone agent harness (loop engine + Anthropic adapter + ACI 8-tool set) for a tool-calling LLM CLI",
+  "description": "Local coding agent: loop engine, sandboxed tools, CLI / TUI / web",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

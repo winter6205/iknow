@@ -4,7 +4,9 @@
 
 ### Feature
 
-- **TUI Verify 终态可见 + 环境现势（horizon-653 包1，PR #666，2026-08-24）**: HITL 与自动模式在 TUI 显示验证成败（`VerifyBanner`，宿主投影含 `passed`）；人读 **环境现势**（cwd / git / diff，≤2000 codepoints）挂 chrome，不写入 ADR-0028 状态栏。spec/plan 归档见 `docs/archive/025-retire-completed-specs-and-plans/`。包2 内核（沙箱对齐 → 并行调度）未做。
+- **Harness 包2：沙箱纪律 + 并行工具调度（horizon-653，PR #671，2026-08-25）**: 前台与后台 `bash` 共用同一套 bwrap 围栏；同一 tool 阶段连续 `isConcurrencySafe` 调用重叠执行，unsafe 串行，结果顺序与 `tool_use` 一致。spec/plan 归档 `docs/archive/025-retire-completed-specs-and-plans/`。
+
+- **TUI Verify 终态可见 + 环境现势（horizon-653 包1，PR #666，2026-08-24）**: HITL 与自动模式在 TUI 显示验证成败（`VerifyBanner`，宿主投影含 `passed`）；人读 **环境现势**（cwd / git / diff，≤2000 codepoints）挂 chrome，不写入 ADR-0028 状态栏。spec/plan 归档见 `docs/archive/025-retire-completed-specs-and-plans/`。
 
 ### Chore
 
@@ -12,7 +14,9 @@
 
 ### Docs
 
-- **horizon-653 包2 spec/plan（2026-08-24）**: `specs/653-horizon-pkg2-kernel.md` + `plans/653-horizon-pkg2-kernel.md`（沙箱纪律 + `isConcurrencySafe` 调度）；tracker #667–#670。
+- **产品文档收口（2026-08-25）**: 根 README 改为当前 coding-agent 产品说明；horizon-653 包2 进度写入 STATUS / gap；包2 spec/plan 归档 025；上游映射、向量检索 draft、ACI 原型契约、verify-loop v2 研究报告移入 `docs/archive/026-historical-research/`。
+
+- **horizon-653 包2 spec/plan（2026-08-24）**: `specs/653-horizon-pkg2-kernel.md` + `plans/653-horizon-pkg2-kernel.md`（沙箱纪律 + `isConcurrencySafe` 调度）；tracker #667–#670。现已落地并归档。
 
 - **horizon-653 包1 后文档对齐（2026-08-24）**: 入库 `docs/coding-agent-capability-gap.md`（状态栏≠环境现势；§6.4 内建 lazy 作废；后台 bash 已 bwrap、包2 对齐纪律）；`docs/STATUS.md` §1/§3/§4 同步可见闭环与 ACI/JSONL 口径。
 

@@ -32,6 +32,7 @@
 - `356-subagent-v1.md` — superseded by V1.5（`#361` foreground spawn 反转）
 - `trace-lifecycle-panel-v2.md` / `iknow-trace-standalone-service.md` / `traceserver-inspection-panel.md` — trace 三迭代 spec；独立 `iknow trace` 进程（`#183`）+ web trace.html 面板已取代
 - `653-horizon-pkg1-perception.md` — 落地完成（PR #666）
+- `653-horizon-pkg2-kernel.md` — 落地完成（PR #671）；前台/后台 bash 沙箱纪律对齐 + `isConcurrencySafe` 并行调度
 
 ## plans/
 
@@ -56,6 +57,7 @@
 - `383-b2-interrupt-transcript.md` — 打断作 transcript 事件落地（schema v4）
 - `auto-mode.md` — auto 权限模式落地（TUI mode 切换）
 - `653-horizon-pkg1-perception.md` — 落地完成（PR #666）
+- `653-horizon-pkg2-kernel.md` — 落地完成（PR #671）
 - `trace-lifecycle-panel-v2.md` — 独立 `iknow trace` 进程（`#183`）+ web 面板取代
 - `trace-service.md` — trace 观测落地（JSONL + 查询 API，A-scope）
 

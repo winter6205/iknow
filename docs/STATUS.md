@@ -7,7 +7,7 @@
 
 ## 1. 已实现功能
 
-### 1.1 运行时核心（独立 `iknow`，无 gbrain 依赖）
+### 1.1 运行时核心
 
 | 能力                  | 说明                                                                                                                                       | 位置                                           |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------- |
@@ -36,7 +36,9 @@
 
 **TUI skill + MCP 扩展源（#337，2026-08-11）**：TUI 入口与 chat/serve 对齐 skill 与 MCP 扩展源装配——`skill` / `skill_search` 工具 + `<available_skills>` 系统段 + MCP manager 连接（`mcp__*` 工具经 tool_search discover）。slash 输入 `/` 混显静态命令 + 动态 skill 候选，Tab 补全；`/skill-name [提示词]` 确定性加载（skill 正文拼入 user message 发送）；`/mcp` 看板查看 server 状态 / 工具详情 / reload。
 
-**TUI 可见闭环（horizon-653 包1，PR #666，2026-08-24）**：验证终态对人可见（`VerifyBanner`，HITL + 自动模式）；**环境现势**（cwd / git / diff 要点，上限 2000 codepoints）挂在 TUI chrome，与 ADR-0028 状态栏分离。模型侧 verify 长信封仍隐藏。包2（后台沙箱对齐 → 并行调度）未做。
+**TUI 可见闭环（horizon-653 包1，PR #666，2026-08-24）**：验证终态对人可见（`VerifyBanner`，HITL + 自动模式）；**环境现势**（cwd / git / diff 要点，上限 2000 codepoints）挂在 TUI chrome，与 ADR-0028 状态栏分离。模型侧 verify 长信封仍隐藏。
+
+**内核包2（horizon-653，PR #671，2026-08-25）**：前台 `runInSandbox` 与后台 `bash` spawn 共用同一套 bwrap 围栏参数；同一 tool 阶段连续 `isConcurrencySafe` 调用可重叠执行，unsafe 仍串行，`tool_result` 顺序与 `tool_use` 一致。spec/plan 已归档。
 
 ### 1.3 评测与质量门禁
 
@@ -51,7 +53,6 @@
 | 能力         | 说明                                                            |
 | ------------ | --------------------------------------------------------------- |
 | 独立仓库     | 私有 GitHub `winter6205/iknow`，`master` 跟踪 `origin`          |
-| 上游参考隔离 | `_upstream_gbrain/` 只读 + gitignore                            |
 | 接入材料模板 | 网络 API + Key 画像（`docs/integration-materials.env.example`） |
 
 ---
@@ -95,11 +96,11 @@
 
 ### 3.1 近端（建议 1–2 个迭代）
 
-1. **可见闭环（horizon-653）**
+1. **horizon-653**
    - 包1 感知：**已合入** PR #666（TUI Verify 终态 + 环境现势）。
-   - 包2 内核：spec/plan `653-horizon-pkg2-kernel`（S→P）；实施未做。
-2. **会话小增强**
-   - 可选会话导出/导入 JSON。澄清轮 / 设计审批 **defer**（#653 G5）。
+   - 包2 内核：**已合入** PR #671（沙箱纪律 + `isConcurrencySafe` 调度）。
+2. **可靠性 / 工作流**
+   - 故障恢复分类 + 指纹熔断；澄清轮 / 设计审批仍 defer（#653 G5）。
 3. **观测最小集**
    - 结构化日志：conversation_id、turn、tool 耗时、是否 llm。
 
@@ -115,11 +116,9 @@
 1. **P4 工程化**：多租户、审计合规、审批流与企业 IdP 对接。
 2. **人机协同**：approval 流产品化（受 harness ACI 装饰层授权机制承接）。
 3. **持续评测**：生产抽样 + 漂移告警 + 成本门禁。
-4. **与上游 Company Brain 能力对照升级**：仅移植思路，保持 runtime 独立。
 
 ### 3.4 非目标（刻意不做）
 
-- Runtime 链接或 vendoring 可执行 gbrain 树
 - 在 harness 通用 agent 之外另起 KB suite 取代当前工具集
 - 用「展示层省略 trace 字段」换取简洁 UI
 
@@ -165,16 +164,16 @@ npm run build --prefix web    # → web/dist  (root alias if present: npm run we
 
 ## 6. 文档索引
 
-| 文档                                                                               | 用途                                                                                                                            |
-| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `specs/README.md`                                                                  | 活跃 module spec 活索引（SSOT；只列当前活跃，新增/归档只改那里一处）                                                            |
-| `docs/architecture.md`                                                             | 运行时能力切分                                                                                                                  |
-| `docs/coding-agent-capability-gap.md`                                              | 编程智能体能力补全评估（差距矩阵 + 优先级；#653 输入 SSOT）                                                                     |
-| `docs/CONTEXT.md`                                                                  | 领域术语                                                                                                                        |
-| `docs/CHANGELOG.md`                                                                | 版本变更                                                                                                                        |
-| `docs/handoff/*`                                                                   | 会话交接                                                                                                                        |
-| `docs/archive/025-retire-completed-specs-and-plans/plans/compress-trigger-gate.md` | 压缩触发判据统一化：手动 `/compact` + 自动 proactive 共用 `evaluateCompactTrigger`（4 reason 文案分支）。与 #607 任务摘录正交。 |
-| 本文 `docs/STATUS.md`                                                              | **已实现 / 未实现 / 展望**                                                                                                      |
+| 文档                                                 | 用途                                                                 |
+| ---------------------------------------------------- | -------------------------------------------------------------------- |
+| `specs/README.md`                                    | 活跃 module spec 活索引（SSOT；只列当前活跃，新增/归档只改那里一处） |
+| `docs/architecture.md`                               | 运行时能力切分                                                       |
+| `docs/coding-agent-capability-gap.md`                | 编程智能体能力补全评估（差距矩阵 + 优先级；#653 输入 SSOT）          |
+| `docs/CONTEXT.md`                                    | 领域术语                                                             |
+| `CHANGELOG.md`                                       | 版本变更                                                             |
+| `docs/archive/025-retire-completed-specs-and-plans/` | 已落地 spec / plan                                                   |
+| `docs/archive/026-historical-research/`              | 上游映射 / 原型调研（非产品 SSOT）                                   |
+| 本文 `docs/STATUS.md`                                | **已实现 / 未实现 / 展望**                                           |
 
 ---
 

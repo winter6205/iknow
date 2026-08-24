@@ -1,6 +1,6 @@
 # Architecture — iknow (standalone)
 
-iknow is an independently packaged **agent harness** for a tool-calling LLM CLI (loop engine + Anthropic adapter + ACI tool set). Runtime code lives at the repository root under `src/`. It does **not** load the external gbrain package or the read-only `_upstream_gbrain/` checkout at runtime; its architecture and capability design are adapted from gbrain and maintained as iknow-owned code.
+iknow is a local **coding-agent harness**: loop engine + Anthropic-compatible adapter + ACI tool set. Runtime code lives under `src/`. Live design truth is `specs/README.md` plus `docs/adr/`.
 
 ## Capability modules
 
@@ -23,9 +23,9 @@ user query
     ▼
  harness (src/harness/)  ──maxTurns──►  Anthropic adapter
     │
-    ├── bash (ACI, execute; allowlist-first shell, #123 沙箱落地前过渡)
-    ├── read_file / grep / glob (ACI, read-only; 无状态 + 真 glob + 路径:行号:内容)
-    └── edit_file / write_file (ACI, write; poka-yoke linter)
+    ├── bash (ACI; foreground runInSandbox + background spawn share one bwrap fence)
+    ├── read_file / grep / glob (ACI, read-only)
+    └── edit_file / write_file (ACI, write)
 ```
 
 ## Secret 处理（#406 roundtrip mask）
@@ -36,19 +36,13 @@ Secret 处理从三层割裂补丁收敛为**单层 roundtrip mask**（识别 �
 - 新（#406 默认）：`src/harness/secret-roundtrip/` 单层 spine——识别层把用户文本中的密钥形态替换为 `<<<SECRET_N>>>`（per-engine registry，in-memory）；bash 工具在 spawn 前经 `restore()` 回填真值；输出 mask 经 `currentSecretValues(registry.values())` 兜底遮蔽 registry 值。**key 真值仅在 bash 进程构造 HTTP 请求那一瞬间物理存在**。
 - `settings.secrets.mode = "block"` 保留 #126 旧 deny-only guard 路径（向后兼容）；缺省 `roundtrip`。
 
-## Design truth vs reference
+## Design truth
 
-| Asset                   | Role                                                      |
-| ----------------------- | --------------------------------------------------------- |
-| `specs/` (module specs) | **Design truth** — Foundation per-module specs            |
-| `_upstream_gbrain/`     | **Reference only** — gitignored mirror of upstream gbrain |
-
-## The upstream checkout is reference-only, not a runtime dependency
-
-- `_upstream_gbrain/` (and obsolete `gbrain/`) are **gitignored** and **READ-ONLY**.
-- Application code must **not** import, symlink, dynamically load, execute, or package-depend on those trees.
-- Reviewed source, architecture, and capability ideas may be adapted into `src/*`; once adapted, that implementation is maintained as iknow-owned runtime code.
-- See `docs/UPSTREAM_BASELINE.md` for baseline pin and policy.
+| Asset                                    | Role                                                       |
+| ---------------------------------------- | ---------------------------------------------------------- |
+| `specs/` (live index: `specs/README.md`) | Module specs still in force                                |
+| `docs/adr/`                              | Architecture decisions                                     |
+| `docs/archive/`                          | Landed specs/plans and historical research — not live SSOT |
 
 ## Interaction design (product surface)
 
@@ -82,9 +76,9 @@ this ADR is the serve-surface exception. See
 `docs/adr/0023-serve-workspace-explicit.md` and
 `specs/serve-workspace.md` (`specs/README.md:36`).
 
-## Non-goals (this scaffold)
+## Non-goals
 
 - Durable multi-tenant store
-- Production auth / multi-tenant isolation (high-risk; separate track)
-- Bundling or re-exporting gbrain binaries
-- Re-introducing a dedicated tool suite alongside the harness ACI tool set
+- Production auth / multi-tenant isolation
+- A second tool suite beside the harness ACI set
+- Model post-training / agent self-play

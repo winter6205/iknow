@@ -226,7 +226,7 @@ _Avoid_: 把发现的工具插回注册序中部（破 KV cache 前缀）；只�
 
 ## Flagged ambiguities
 
-- **gbrain vs iknow runtime**: `_upstream_gbrain/` is READ-ONLY design reference; product runtime is standalone `iknow` with **zero** import/link to gbrain
+- **runtime vs optional local mirrors**: product runtime is standalone `iknow`; gitignored trees are never imported
 - **ordinal vs ts**: log field is `ordinal` (1-based sequence)；不用 `ts` 表示 tool call 顺序
 - **chat vs test harness**: product CLI is TTY/pipe-aware session code under `src/cli/`；单元测试调内部 helper 时不得声称这就是产品 UX
 - **9router stack probe**: 同 key 可使 `models` 200 而 `chat/completions` 401；agent shell env 与 operator 交互 shell 可能不同（探针 `scripts/i4-probe-nine-endpoints.ts`）
