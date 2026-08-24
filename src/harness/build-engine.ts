@@ -635,6 +635,14 @@ export async function buildHarnessEngine(
     ...(agentStatusTodoDir
       ? { agentStatus: { todoDir: agentStatusTodoDir } }
       : {}),
+    // #653 G1 T5 / DESIGN-ENVIRONMENT-PRESENT:环境现势事件缝 —— 仅 tui
+    // surface 注入(人读 chrome 的数据源;cwd 来源 = build-engine 已解析的
+    // workspaceRoot 优先,回退 cwd)。ask / chat / serve / worker 缺席 →
+    // 零 IO、零事件(byte-identical)。readEnvSnapshot 永不 throw,事件只给
+    // 宿主 UI,不进 messages / verify / ADR-0028 栏。
+    ...(surface === "tui"
+      ? { envSnapshot: { cwd: workspaceRoot ?? cwd } }
+      : {}),
   };
   const engine = createLoopEngine(deps);
   return {
