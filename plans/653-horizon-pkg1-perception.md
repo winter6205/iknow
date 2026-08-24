@@ -37,10 +37,9 @@ minimal-change-verifier: yes — 单逻辑任务包1-感知；包2 OOS；无新 
 
 3. **T3 TUI Verify 人读提示（双模式）** — tag: `[implementation]`
    - **Inherits:** spec V-b：HITL + 自动模式显示成功/失败（及透出态）；信封继续 `isTuiHiddenUserMessage`；缺 record 静默；投影失败 →「验证结果不可用」degraded。
-   - **Surface:** `tui`
+   - **Surface:** `tui`（`src/tui/verify-banner.tsx` + `src/tui/app.tsx` 独立槽位 + `src/tui/hub-bridge.ts` 透传）
    - **Acceptance:** 失败与成功均出现非聊天气泡人读提示；verify 信封仍隐藏；缺 record 无虚假提示；不依赖 Trace SPA；`npx vitest run tests/tui`（及相关）绿。
-   - Status: [ ] pending
-   - [blocks: T2]
+   - Status: [x] done — 8e717828 (T3 VerifyBanner HITL + auto; 32 bun:test cases; 双 reviewer gate PASS)
 
 4. **[parallel] T4 环境现势快照计算（含上限与 EXIT）** — tag: `[implementation]`
    - **Inherits:** spec：cwd + git 摘要 + diff 要点；≤2000 codepoints；cwd/git/刷新失败 → degraded 占位，不 throw；不写状态栏。
@@ -50,10 +49,9 @@ minimal-change-verifier: yes — 单逻辑任务包1-感知；包2 OOS；无新 
 
 5. **T5 TUI 挂载环境现势** — tag: `[implementation]`
    - **Inherits:** T1 锚点决议；spec：回合边界刷新；负向 — 不调用 ADR-0028 / agent-status 写 cwd。
-   - **Surface:** `tui`
+   - **Surface:** `tui`（`src/tui/env-snapshot-pane.tsx` + `src/harness/{stream,loop-engine,build-engine}.ts` 平行事件流）
    - **Acceptance:** 人读面可见 cwd + git 摘要字段；grep/测试证明不经 agent_status 写栏；`npm run typecheck` 与 `npx vitest run tests/tui tests/harness/verify tests/session-api` 绿。
-   - Status: [ ] pending
-   - [blocks: T1, T4]
+   - Status: [x] done — 77e26929 (T5 EnvSnapshotPane; 17 bun + 6 vitest cases; mcp pty 实测 cwd+diff 行渲染; 反向契约 grep 空)
 
 ## End-of-round
 
