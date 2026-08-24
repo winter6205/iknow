@@ -23,7 +23,7 @@ export function usageText(): string {
   iknow chat [options]          会话：TTY REPL 或按行管道 / chat (TTY REPL or piped lines)
   iknow serve [options]         HTTP 会话 API + Web UI + trace 面板(/trace) / session API + web UI + trace panel
   iknow trace [options]         打开 trace 面板（探测 serve）/ open trace panel (probes serve)
-  iknow tui [session-id]        终端多会话交互界面 / multi-session TUI (banners/lists/slash)
+  iknow tui [session-id] [--auto-mode] 终端多会话交互界面 / multi-session TUI (banners/lists/slash)
   iknow ask "<query>" [options] 单次 JSON 回答（脚本/CI）/ one-shot JSON (scripts/CI)
   iknow "<query>" [options]     同上（兼容写法）/ same as ask (compat)
   iknow -h | --help             显示本帮助 / show this help
@@ -42,6 +42,9 @@ export function usageText(): string {
   --no-open                     trace 不自动打开浏览器（CI/headless）/ trace: do not auto-open browser (CI/headless)
   --separate                    trace 保留独立检测进程（#183 旧行为，端口 24881）
                                 / trace: keep standalone inspection process (#183 behavior, port 24881)
+  --auto-mode                   tui 启动即 full_auto（跳过工具 ask）/ tui starts in full_auto (skip tool asks)
+                                （npm: npm run dev:tui -- --auto-mode 或 npm run dev:tui:auto-mode）
+                                / npm: npm run dev:tui -- --auto-mode or npm run dev:tui:auto-mode
 
 会话内命令 / In-chat commands:
   /help  /status  /quit  /json on|off  /reset

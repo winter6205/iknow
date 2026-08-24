@@ -91,6 +91,11 @@ export type ParsedCli = {
    * 实际消费。`undefined`(默认)= 新开会话(随机 UUID)。
    */
   resumeId?: string;
+  /**
+   * `iknow tui --auto-mode`：启动即 full_auto 权限模式（跳过工具 ask 弹窗）。
+   * 缺省 false。仅 tui 入口消费；其它命令解析保留字段但不读。
+   */
+  autoMode: boolean;
 };
 
 export type ParseArgsOptions = {
@@ -127,6 +132,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   let maxTurns: number | undefined;
   let noOpen = false;
   let separate = false;
+  let autoMode = false;
   let resumeId: string | undefined;
   const rest: string[] = [];
 
@@ -150,6 +156,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           maxTurns: undefined,
           noOpen: false,
           separate: false,
+          autoMode: false,
           query: "",
           missingQuery: false,
           versionOnly: false,
@@ -170,6 +177,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           maxTurns,
           noOpen,
           separate,
+          autoMode,
           resumeId,
           query: "",
           missingQuery: false,
@@ -229,6 +237,9 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
     } else if (a === "--separate") {
       // ADR-0020 D2.2: 布尔 flag（无实参），trace 保留独立进程模式。
       separate = true;
+    } else if (a === "--auto-mode") {
+      // TUI: 启动即 full_auto（跳过工具 ask）。布尔 flag，无实参。
+      autoMode = true;
     } else if (a === "--resume") {
       // T4: 值式 flag —— 缺失 / 空串 / 纯空白均拒绝（镜像 --port 风格）。
       const raw = argv[++i];
@@ -265,6 +276,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           maxTurns,
           noOpen,
           separate,
+          autoMode,
           resumeId,
           query: "",
           missingQuery: false,
@@ -287,6 +299,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
     maxTurns,
     noOpen,
     separate,
+    autoMode,
     resumeId,
     versionOnly: false,
   };

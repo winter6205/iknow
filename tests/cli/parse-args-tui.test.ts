@@ -46,4 +46,30 @@ describe("parseArgs: tui 分支", () => {
       "ask"
     );
   });
+
+  it("iknow tui --auto-mode → autoMode=true（启动即 full_auto）", () => {
+    const parsed = parseArgs({
+      argv: ["tui", "--auto-mode"],
+      interactive: true,
+    });
+    expect(parsed.command).toBe("tui");
+    expect(parsed.autoMode).toBe(true);
+    expect(parsed.sessionId).toBeUndefined();
+  });
+
+  it("iknow tui <session-id> --auto-mode → sessionId 与 autoMode 共存", () => {
+    const parsed = parseArgs({
+      argv: ["tui", "sess-1", "--auto-mode"],
+      interactive: true,
+    });
+    expect(parsed.command).toBe("tui");
+    expect(parsed.sessionId).toBe("sess-1");
+    expect(parsed.autoMode).toBe(true);
+  });
+
+  it("缺省无 --auto-mode → autoMode=false", () => {
+    expect(parseArgs({ argv: ["tui"], interactive: true }).autoMode).toBe(
+      false
+    );
+  });
 });
