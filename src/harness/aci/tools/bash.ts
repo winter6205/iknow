@@ -259,6 +259,13 @@ async function handleBackground(
     // #503 T11:background path 的 host-network opt-in —— 透传 spawn request,
     // defaultBackgroundSpawn 据此构造 host-net fence（去 --unshare-net）。
     ...(wantsHostNetwork ? { network: true } : {}),
+    // #653 T1:background path 的 cwdReadonly 派生 —— 镜像前台
+    // bashMode→cwdReadonly 映射(bash.ts:150-151),foreground 与 background
+    // bwrap argv 在 cwdReadonly 轴上集合相等。spec S:同一 fixture 输入下,
+    // 前台 runInSandbox 与 background:true spawn 的 bwrap 围栏参数同集。
+    ...(opts.bashMode === "readonly" || opts.cwdReadonly === true
+      ? { cwdReadonly: true }
+      : {}),
   });
   if (result.status === "spawn_error") {
     // 与 bash 既有错误形态一致:typed-error 渲染（${kind}: ${context}）装进

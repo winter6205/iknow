@@ -132,6 +132,12 @@ export interface BackgroundSpawnRequest {
    *  fence（去 --unshare-net）。缺省 / false = 既有隔离路径（与 bwrap 默认
    *  --unshare-net 行为一致）。由 bash.ts handleBackground 透传 input.network。 */
   readonly network?: boolean;
+  /** #653 T1:cwdReadonly?: boolean — 透传 defaultBackgroundSpawn 构造 readonly
+   *  fence（cwd 绑定由 `--bind` 改为 `--ro-bind`,与前台 bashMode→cwdReadonly
+   *  派生路径对齐）。缺省 / false = 既有可写 cwd（V1 baseline 不变）。
+   *  由 bash.ts handleBackground 派生 opts.bashMode==="readonly" ||
+   *  opts.cwdReadonly===true 后传入。 */
+  readonly cwdReadonly?: boolean;
 }
 
 export type BackgroundSpawnResult =
@@ -246,6 +252,11 @@ export async function defaultBackgroundSpawn(
     // netns。其余 fence（--unshare-user-try / --die-with-parent / ro-binds /
     // tmpfs / clearenv / chdir / 命令）逐字节不变,只动网络轴。
     ...(req.network ? { network: true } : {}),
+    // #653 T1:cwdReadonly:true 透传到 fence —— cwd 绑定由 --bind 改为
+    // --ro-bind,与前台 bashMode→cwdReadonly 派生路径对齐。spec S:前后台
+    // bwrap argv 隔离轴集合相等(network / cwdReadonly 开与关)。其余 fence
+    // 逐字节不变,只动 cwd-bind verb。
+    ...(req.cwdReadonly ? { cwdReadonly: true } : {}),
   });
   return nodeSpawn(fence.argv[0], fence.argv.slice(1), {
     cwd,
