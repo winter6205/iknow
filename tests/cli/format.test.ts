@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import {
   formatRunHuman,
   formatRunJson,
+  formatVerifyReport,
   renderAssistantAnswer,
   renderThinkingSummary,
   THINKING_PREFIX,
@@ -686,5 +687,22 @@ describe("renderThinkingSummary (#T6 thinking 折叠摘要)", () => {
       mkMessage("user", [{ type: "text", text: "q" }]),
     ];
     assert.equal(renderThinkingSummary(msgs), "");
+  });
+});
+
+/**
+ * T2 (#458):formatVerifyReport — passed 成功态分支。
+ *
+ * 此前参数联合仅 failed/unstable/escalated(失败面报告);T2 把 passed
+ * 纳入 wire 后, chat-session.ts:354 的调用点类型自然放宽, 需要成功
+ * label。abort/disabled 不进 wire, 不加分支。
+ */
+describe("formatVerifyReport — passed 成功态 (T2)", () => {
+  it("passed → `[验证] 验证通过（N 轮）`", () => {
+    assert.equal(formatVerifyReport("passed", 3), "[验证] 验证通过（3 轮）");
+  });
+
+  it("failed 文案不变 (backward-compat 回归锚)", () => {
+    assert.match(formatVerifyReport("failed", 1), /^\[验证\] 验证未通过/);
   });
 });
