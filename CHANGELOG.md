@@ -14,7 +14,7 @@
 
 ### Docs
 
-- **产品文档收口（2026-08-25）**: 根 README 改为当前 coding-agent 产品说明；horizon-653 包2 进度写入 STATUS / gap；包2 spec/plan 归档 025；上游映射、向量检索 draft、ACI 原型契约、verify-loop v2 研究报告移入 `docs/archive/026-historical-research/`。
+- **故障恢复路线收口（#672，2026-08-25）**: wayfinder 清图；`specs/672-fault-recovery.md` + `plans/672-fault-recovery.md` + ADR-0029（FaultClass 并行 StopReason，追加 `fused`）。落地序 T1→T2→T3，尚未写代码。
 
 - **horizon-653 包2 spec/plan（2026-08-24）**: `specs/653-horizon-pkg2-kernel.md` + `plans/653-horizon-pkg2-kernel.md`（沙箱纪律 + `isConcurrencySafe` 调度）；tracker #667–#670。现已落地并归档。
 

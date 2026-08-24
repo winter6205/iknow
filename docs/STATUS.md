@@ -100,7 +100,7 @@
    - 包1 感知：**已合入** PR #666（TUI Verify 终态 + 环境现势）。
    - 包2 内核：**已合入** PR #671（沙箱纪律 + `isConcurrencySafe` 调度）。
 2. **可靠性 / 工作流**
-   - 故障恢复分类 + 指纹熔断；澄清轮 / 设计审批仍 defer（#653 G5）。
+   - 故障恢复：**spec/plan 已开** `specs/672-fault-recovery.md`（#672 清图；T1 FaultClass → T2 传输重试 → T3 环检测+`fused`）。澄清轮 / 设计审批仍 defer。手动 `/compact` 不走 token 门挂 #270，不在 672 spec。
 3. **观测最小集**
    - 结构化日志：conversation_id、turn、tool 耗时、是否 llm。
 
