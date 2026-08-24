@@ -168,6 +168,12 @@ export interface IknowSettings {
   secrets?: IknowSettingsSecrets;
   /** #358 T1: 子代理配置段（per-task wallclock）。 */
   subagent?: IknowSettingsSubagent;
+  /** #672 T3: 工具环检测。boolean 才合法；缺省由消费方按 true。 */
+  loop?: IknowSettingsLoop;
+}
+
+export interface IknowSettingsLoop {
+  detectToolLoop?: boolean;
 }
 
 export interface LoadSettingsOpts {
@@ -480,6 +486,31 @@ function mergeSubagent(
   return out;
 }
 
+function parseLoop(raw: unknown): IknowSettingsLoop | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const out: IknowSettingsLoop = {};
+  if (typeof raw.detectToolLoop === "boolean") {
+    out.detectToolLoop = raw.detectToolLoop;
+  }
+  if (out.detectToolLoop === undefined) return undefined;
+  return out;
+}
+
+function mergeLoop(
+  user: IknowSettingsLoop | undefined,
+  project: IknowSettingsLoop | undefined
+): IknowSettingsLoop | undefined {
+  if (!user && !project) return undefined;
+  const out: IknowSettingsLoop = {};
+  if (project?.detectToolLoop !== undefined) {
+    out.detectToolLoop = project.detectToolLoop;
+  } else if (user?.detectToolLoop !== undefined) {
+    out.detectToolLoop = user.detectToolLoop;
+  }
+  if (out.detectToolLoop === undefined) return undefined;
+  return out;
+}
+
 /** 逐层合并 llm：project 字段优先，未覆盖的 user 字段保留。 */
 function mergeLlm(
   user: IknowSettingsLlm | undefined,
@@ -601,11 +632,15 @@ function mergeSettings(
   const userSubagent = parseSubagent(userRaw.subagent);
   const projectSubagent = parseSubagent(projectRaw.subagent);
   const subagent = mergeSubagent(userSubagent, projectSubagent);
+  const userLoop = parseLoop(userRaw.loop);
+  const projectLoop = parseLoop(projectRaw.loop);
+  const loop = mergeLoop(userLoop, projectLoop);
   const out: IknowSettings = {};
   if (llm) out.llm = llm;
   if (verify) out.verify = verify;
   if (secrets) out.secrets = secrets;
   if (subagent) out.subagent = subagent;
+  if (loop) out.loop = loop;
   return out;
 }
 

@@ -360,6 +360,7 @@ export async function createWorkerDeps(
     // #353 settings 回退已在 loadIknowEnv 内合并; envelope.maxTurns 由
     // runWorkerOnce 优先覆写。
     maxTurns: env.llm.maxTurns,
+    detectToolLoop: env.loop?.detectToolLoop !== false,
     timeoutMs: env.llm.timeoutMs,
     system,
     promptTools: reg.visibleSchemas,
@@ -540,6 +541,10 @@ export async function runWorkerOnce(opts: {
     // run() 正常返回 ≠ 成功: harness 协议层错误 / 空最终回应以 stopReason
     // 形态返回 (不 throw), 但 worker 必须标 failed —— 父代理 drain 收到 ok
     // 却带 protocolError stopReason 会误判子代理成功 (SC6 / SC13)。
+    if (result.stopReason === "fused") {
+      log(`run() stopReason=fused`);
+      return truncateEnvelopeResult(toFailedEnvelope("protocolError", "fused"));
+    }
     if (
       result.stopReason === "protocolError" ||
       result.stopReason === "emptyFinalResponse"

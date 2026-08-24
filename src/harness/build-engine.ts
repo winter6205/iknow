@@ -563,6 +563,7 @@ export async function buildHarnessEngine(
     // plan T5-engine / ADR-0012:env 优先(CLI --max-turns 由 surface 注入);
     // undefined = 无限(默认),长程探索不被 turn 计数误杀。
     maxTurns: env.llm.maxTurns,
+    detectToolLoop: env.loop?.detectToolLoop !== false,
     timeoutMs: env.llm.timeoutMs,
     // #224 注入装配 — 把 reg.visibleSchemas（含 discovered lazy 工具）注入到
     // promptTools；fallback 路径（缺省回退 deps.registry.list()）由 loop-engine

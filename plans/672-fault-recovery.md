@@ -47,5 +47,5 @@ minimal-change-verifier: yes — 一逻辑任务拆三 commit（G5）；T2 不�
    - **Inherits:** spec Does T3 + ADR-0029：wave settle 且 tool_result 已追加后再检查；周期+停滞；bash 非 0 in；MCP 不正规化 fail-open；注入 LOOP_DETECTED 并落盘；`StopReason: fused`；worker 失败信封；CLI/session-api 联合；可关检测（默认开）。
    - **Surface:** Loop Engine、subagent worker、session-api、CLI
    - **Acceptance:** spec Success Criteria 中环检测各条 yes；`src/harness/verify/` diff 为空；`npm run typecheck` 与 spec 所列 vitest 子集 exit 0。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T2]

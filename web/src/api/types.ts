@@ -8,7 +8,7 @@ export type TokenUsage = {
   readonly cacheReadInputTokens: number | null;
 };
 
-/** Mirrors harness StopReason (7 values). */
+/** Mirrors harness StopReason (8 values, including fused). */
 export type StopReason =
   | "completed"
   | "maxTurns"
@@ -16,7 +16,8 @@ export type StopReason =
   | "protocolError"
   | "emptyFinalResponse"
   | "cancelled"
-  | "timeout";
+  | "timeout"
+  | "fused";
 
 /** Mirrors ThinkingEntryView in src/session-api/contract.ts. */
 export type ThinkingEntryView = {
