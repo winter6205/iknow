@@ -31,6 +31,7 @@
     "ci:check-excludes": "tsx scripts/ci-check-test-excludes.ts",
     "dev": "tsx src/cli.ts",
     "dev:tui": "$HOME/.bun/bin/bun run src/cli.ts tui",
+    "dev:tui:auto-mode": "$HOME/.bun/bin/bun run src/cli.ts tui --auto-mode",
     "serve": "tsx src/cli.ts serve",
     "web:dev": "npm run dev --prefix web",
     "web:build": "npm run build --prefix web",

@@ -438,6 +438,7 @@ async function runTui(parsed: ParsedCli): Promise<void> {
       ? { workspaceRoot: parsed.workspaceRoot }
       : {}),
     traceOut: resolveTracePath(parsed.traceOut),
+    ...(parsed.autoMode ? { permissionMode: "full_auto" } : {}),
   });
   process.exitCode = exitCode;
 }

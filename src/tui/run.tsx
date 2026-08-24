@@ -9,7 +9,7 @@
  *  - createInflightRegistry + createTuiBridge（SessionStore + SessionHub
  *    + 单会话归因 soleInflightId + contextWindow 透传）；
  *  - createToolEventSink + createTuiAskUserBridge；
- *  - createPermissionModeContext（env IKNOW_PERMISSION_MODE 初始值） +
+ *  - resolvePermissionMode（`--auto-mode` / IKNOW_PERMISSION_MODE 初始值） +
  *    createSessionGrants（#279 项3 always 落点）+ 注入 deps 与 TuiApp；
  *  - sessionId resume：`iknow tui <id>` → loadSessionFile → attachSession
  *    → initialSession prop；
@@ -47,10 +47,7 @@ import { createToolEventSink, TuiApp, type TuiAppProps } from "./app.js";
 import { attachSession, type TuiSessionState } from "./session-state.js";
 import { createSessionGrants } from "../harness/permission/session-grants.js";
 import { initIknowWorkspaceSafe } from "../harness/identity/index.js";
-import {
-  createPermissionModeContext,
-  parsePermissionMode,
-} from "../harness/permission/index.js";
+import { resolvePermissionMode } from "../cli/runtime.js";
 import { loadIknowSettings } from "../config/settings.js";
 import { resolveVerifyConfig } from "../session-api/serve.js";
 import { createEnvLoader, type EnvLoader } from "../config/env-loader.js";
@@ -82,6 +79,11 @@ export interface RunTuiOptions {
   readonly workspaceRoot?: string;
   /** JSONL trace 输出路径。 */
   readonly traceOut?: string;
+  /**
+   * `iknow tui --auto-mode`：显式初始权限模式。优先于 IKNOW_PERMISSION_MODE。
+   * 缺省 undefined → 走 env → default。
+   */
+  readonly permissionMode?: string;
   /** 测试注入口：覆盖渲染器工厂（诱导 E1/E2）；生产缺省 createCliRenderer。 */
   readonly createRenderer?: (config: CliRendererConfig) => Promise<CliRenderer>;
 }
@@ -221,9 +223,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     const inflight = createInflightRegistry();
     const toolEventSink = createToolEventSink();
     const askBridge = createTuiAskUserBridge();
-    const permissionMode = createPermissionModeContext(
-      parsePermissionMode(process.env.IKNOW_PERMISSION_MODE) ?? "default"
-    );
+    const permissionMode = resolvePermissionMode(options.permissionMode);
     const sessionGrants = createSessionGrants();
 
     const depsOpts: BuildTuiDepsOptions = {
