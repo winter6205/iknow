@@ -29,6 +29,14 @@ import { spawn } from "node:child_process";
 // 公共类型 + 常量
 // ---------------------------------------------------------------------------
 
+/**
+ * EXIT 分型(DESIGN-ENVIRONMENT-PRESENT / spec Boundaries):
+ * T5 chrome 按本字段投影 `(cwd unavailable)` / `(not a git repo)` /
+ * `(git unavailable)`,不得再收成单一「环境现势不可用」。
+ */
+export type EnvDegradeReason =
+  "cwd_unavailable" | "not_a_git_repo" | "git_unavailable";
+
 /** 环境现势快照(人读 chrome 的单一真源;T5 UI 挂载不另建账本)。 */
 export interface EnvSnapshot {
   /** 当前工作目录的字符串表示(cwd 不可解析时仍保留入参兜底字符串)。 */
@@ -41,6 +49,11 @@ export interface EnvSnapshot {
   readonly dirtyCount: number | null;
   /** `git diff` 输出,已按 codepoint 上限截断;失败 / 无 diff → null。 */
   readonly diffPreview: string | null;
+  /**
+   * EXIT 分型;正常 / 部分成功(含 empty porcelain clean) → null。
+   * 非 null 时 T5 必须渲染对应 DESIGN 占位串。
+   */
+  readonly degradeReason: EnvDegradeReason | null;
 }
 
 /** 默认 diff codepoint 上限(spec 锁 2000;plan 可调,但不取消上限)。 */
@@ -144,6 +157,7 @@ export function parseEnvSnapshot(input: {
       gitStatus: null,
       dirtyCount: null,
       diffPreview,
+      degradeReason: "not_a_git_repo" as const,
     });
   }
   if (gitStdout === "") {
@@ -154,6 +168,7 @@ export function parseEnvSnapshot(input: {
       gitStatus: null,
       dirtyCount: 0,
       diffPreview,
+      degradeReason: null,
     });
   }
   const branch = parseBranchLine(gitStdout);
@@ -167,6 +182,7 @@ export function parseEnvSnapshot(input: {
     gitStatus: gitStdout,
     dirtyCount,
     diffPreview,
+    degradeReason: null,
   });
 }
 
@@ -211,6 +227,7 @@ function defaultExec(
         detached: false,
       });
     } catch (err) {
+      // EXIT: spawn 同步失败(非法 cwd / 权限等)→ reject,由 readEnvSnapshot 收敛
       reject(err);
       return;
     }
@@ -242,8 +259,8 @@ function defaultExec(
         resolve({ stdout, stderr });
       } else {
         // 退码非 0(典型:非 git 工作区 → "fatal: not a git repository");
-        // 把 stderr 透出,上层 parseEnvSnapshot 看到 "fatal: ..." 时返回
-        // 全 null(由 defaultExec 调用方 try/catch 处理)。
+        // stderr 进入 reject message,由 readEnvSnapshot catch →
+        // classifyGitStatusError 分型 not_a_git_repo | git_unavailable。
         reject(
           new Error(`${cmd} ${args.join(" ")} exited ${code}: ${stderr.trim()}`)
         );
@@ -272,21 +289,27 @@ export async function readEnvSnapshot(
   const exec = opts.exec ?? defaultExec;
   const maxDiffChars = opts.maxDiffChars ?? MAX_ENV_DIFF_CHARS;
 
+  // EXIT: cwd 不可解析(空串)→ 占位 cwd_unavailable,不跑 git、不 throw。
+  if (cwd.trim() === "") {
+    return degradedSnapshot("", "cwd_unavailable");
+  }
+
   let gitStdout = "";
   let diffStdout = "";
 
   try {
     const status = await exec("git", ["status", "--porcelain=v1", "-b"], cwd);
     gitStdout = status.stdout;
-  } catch {
-    return degradedSnapshot(cwd);
+  } catch (err) {
+    // EXIT: status 失败 → 按 stderr/message 分型 not_a_git_repo | git_unavailable
+    return degradedSnapshot(cwd, classifyGitStatusError(err));
   }
 
   try {
     const diff = await exec("git", ["--no-pager", "diff", "--no-color"], cwd);
     diffStdout = diff.stdout;
   } catch {
-    // git status 已成功 → diff 失败:保留 git 字段(branch / dirty),只丢 diffPreview。
+    // EXIT: status 已成功、diff 失败 → 保留 git 字段,只丢 diffPreview(非全量 degrade)。
     return truncateDiff(
       parseEnvSnapshot({ cwd, gitStdout, diffStdout: "" }),
       maxDiffChars
@@ -299,17 +322,28 @@ export async function readEnvSnapshot(
   );
 }
 
-function degradedSnapshot(cwd: string): EnvSnapshot {
-  return {
+/** status 失败 → DESIGN EXIT 分型(在 parse 之前分类,因 IO catch 短路 parse)。 */
+function classifyGitStatusError(err: unknown): EnvDegradeReason {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (isNotAGitRepoMessage(msg)) return "not_a_git_repo";
+  return "git_unavailable";
+}
+
+function degradedSnapshot(cwd: string, reason: EnvDegradeReason): EnvSnapshot {
+  return Object.freeze({
     cwd,
     gitBranch: null,
     gitStatus: null,
     dirtyCount: null,
     diffPreview: null,
-  };
+    degradeReason: reason,
+  });
 }
 
 function truncateDiff(snap: EnvSnapshot, max: number): EnvSnapshot {
   if (snap.diffPreview === null) return snap;
-  return { ...snap, diffPreview: truncateByCodepoints(snap.diffPreview, max) };
+  return Object.freeze({
+    ...snap,
+    diffPreview: truncateByCodepoints(snap.diffPreview, max),
+  });
 }

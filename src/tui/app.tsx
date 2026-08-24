@@ -142,15 +142,15 @@ import {
   type AgentStatusSnapshot,
 } from "../harness/agent-status.js";
 // #653 G1 T5:环境现势独立 slot —— 与 ADR-0028 状态栏同 chrome 区、并列、
-// 平行独立流。envSnapshot pane 不读 ADR-0028 状态栏的事件 / 快照 / 账本
-// 读取器(grep 守卫钉死,见 tests/tui/env-snapshot-pane.test.tsx)。
+// 平行独立流。EnvironmentPane 不读 ADR-0028 状态栏的事件 / 快照 / 账本
+// 读取器(grep 守卫钉死,见 tests/tui/environment-pane.test.tsx)。
 import {
-  EnvSnapshotPane,
+  EnvironmentPane,
   envSnapshotFromEvent,
   envSnapshotLines,
-} from "./env-snapshot-pane.js";
+} from "./environment-pane.js";
 import type { EnvSnapshot } from "../harness/env-snapshot.js";
-// #458 包2 T3:TUI verify 闭环终态人读 banner(HITL + auto 双模式 passed /
+// #653 包1 T3:TUI verify 闭环终态人读 banner(HITL + auto 双模式 passed /
 // failed / unstable / escalated)。wire 已透到 bridge.TuiPostResult.verify;
 // 投影 + 渲染壳见 verify-banner.tsx(纯函数可单测)。
 import {
@@ -2317,7 +2317,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           事件 / 快照 / 渲染路径;无快照渲染 null,行数 0 → chromeReserveRows
           .envPaneRows）。事件在回合边界刷新,给人不给模型。 */}
       {view === "chat" && (
-        <EnvSnapshotPane snapshot={envSnapshot} cols={cols} />
+        <EnvironmentPane snapshot={envSnapshot} cols={cols} />
       )}
       {/* #358 T7: 子代理状态面板（ContextBar 下方）。条件渲染 —
           无可见子代理行时返回 null（行数 0 → chromeReserveRows.panelRows=0）；

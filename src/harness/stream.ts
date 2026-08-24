@@ -63,12 +63,12 @@ export type HarnessStreamEvent =
     } & Pick<AgentStatusSnapshot, "lastTool" | "openTodoLines">)
   // #653 G1 T5 / DESIGN-ENVIRONMENT-PRESENT:环境现势快照事件 —— 与
   // `agent_status` 平行的**独立**事件流(人读 chrome 的数据源,给 TUI
-  // EnvSnapshotPane;给人不给模型)。loop-engine 在每次即将调用模型前、
+  // EnvironmentPane;给人不给模型)。loop-engine 在每次即将调用模型前、
   // `agent_status` 事件之后的同一回合边界计算点发出。**不**复用
   // agent_status 事件 / 快照结构(字段零重叠),**不**进 messages、
   // **不**进 verify 输入、**不**写 ADR-0028 状态栏。deps.envSnapshot 缺席
   // (ask / worker 路径)→ 本事件不发。snapshot 即 readEnvSnapshot 产物:
-  // git 失败 → git 字段全 null(degraded,cwd 保留),永不 throw。
+  // git 失败 → git 字段全 null + degradeReason 分型(degraded,cwd 保留),永不 throw。
   | { type: "env_snapshot"; snapshot: EnvSnapshot };
 
 /**

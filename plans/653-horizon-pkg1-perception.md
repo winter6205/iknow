@@ -32,7 +32,7 @@ minimal-change-verifier: yes — 单逻辑任务包1-感知；包2 OOS；无新 
    - **Inherits:** spec：复用 `VerificationRecord` / hub；`VerifyAnswerView` 今日仅 `failed|unstable|escalated` — 须补 `passed`（及内核已有等价态透出）；缺 record → 字段缺席；不新造判定逻辑。
    - **Surface:** `session-api`（及 TUI 若直连 chat-session 的等价投影缝）。
    - **Acceptance:** 验证成功时 wire/会话投影出现成功态；失败仍为 failed（或既有态）；未跑验证 → 无虚假成功字段；`npx vitest run tests/session-api`（及相关）绿。
-   - Status: [ ] pending
+   - Status: [x] done — 6cfda84e
    - [parallel] with T1
 
 3. **T3 TUI Verify 人读提示（双模式）** — tag: `[implementation]`
@@ -49,9 +49,9 @@ minimal-change-verifier: yes — 单逻辑任务包1-感知；包2 OOS；无新 
 
 5. **T5 TUI 挂载环境现势** — tag: `[implementation]`
    - **Inherits:** T1 锚点决议；spec：回合边界刷新；负向 — 不调用 ADR-0028 / agent-status 写 cwd。
-   - **Surface:** `tui`（`src/tui/env-snapshot-pane.tsx` + `src/harness/{stream,loop-engine,build-engine}.ts` 平行事件流）
+   - **Surface:** `tui`（`src/tui/environment-pane.tsx` + `src/harness/{stream,loop-engine,build-engine}.ts` 平行事件流）
    - **Acceptance:** 人读面可见 cwd + git 摘要字段；grep/测试证明不经 agent_status 写栏；`npm run typecheck` 与 `npx vitest run tests/tui tests/harness/verify tests/session-api` 绿。
-   - Status: [x] done — 77e26929 (T5 EnvSnapshotPane; 17 bun + 6 vitest cases; mcp pty 实测 cwd+diff 行渲染; 反向契约 grep 空)
+   - Status: [x] done — 77e26929 (T5 EnvironmentPane; follow-up 对齐 DESIGN EXIT 占位 + 命名)
 
 ## End-of-round
 
@@ -62,4 +62,7 @@ minimal-change-verifier: yes — 单逻辑任务包1-感知；包2 OOS；无新 
 整轮 review 后遗留事项（已落 follow-up commits）：
 
 - **Spec Medium**：`truncateByCodepoints` 截断到 cap=2000 后追加 marker，总长 ≈ 2000+22 cp 超 SPEC SC 字面「输出长度 ≤ 上限」。→ follow-up commit `9d2c08ec` 把 marker 长度计入预算（bodyCap = cap - markerLen），保证总长严格 ≤ cap。T4 测试断言改为「total ≤ cap」+「marker 报告实际丢弃数」。
+- **Spec Medium（PR #666 review）**：EXIT 占位收成「环境现势不可用」+ 组件名 `EnvSnapshotPane` 偏离 DESIGN。→ follow-up：`EnvSnapshot.degradeReason` 分型 + chrome 投影 `(cwd unavailable)` / `(not a git repo)` / `(git unavailable)`；重命名 `EnvironmentPane` / `environment-pane.tsx`。
 - **Standards Low ×3**（formatVerifyReport 重复 / truncateByCodepoints 内联 cap 三元 / loop-engine effectiveState 命名）：post-merge cleanup，不阻塞。
+- **Spec Low（PR #666）**：`verifyMode` 仍绑 `permMode===full_auto`，与 CONTEXT「自动模式=有 goal」不等价；需 TUI session goal plumbing，本轮延期。
+- **Standards Medium（PR #666）**：`app.tsx` god-file 再塞 chrome 状态 / `defaultExec` 超 60 行软阈值 —— post-merge cleanup，不阻塞 Spec 达标。

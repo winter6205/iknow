@@ -354,7 +354,7 @@ async function appendAgentStatusBar(
  * #653 G1 T5 / DESIGN-ENVIRONMENT-PRESENT:在 appendAgentStatusBar 之后的
  * 同一回合边界计算点,把环境现势快照经 safeEmitStream 发 `env_snapshot`
  * 流事件 —— 与 `agent_status` 平行的**独立**事件流(人读 chrome 数据源,
- * 给 TUI EnvSnapshotPane;给人不给模型)。**不**复用 agent_status 事件 /
+ * 给 TUI EnvironmentPane;给人不给模型)。**不**复用 agent_status 事件 /
  * 快照结构,**不**追加任何消息(state 原样返回),**不**进 messages /
  * verify / ADR-0028 栏。
  *

@@ -57,6 +57,7 @@ describe("parseEnvSnapshot", () => {
     assert.equal(snap.gitBranch, "main");
     // 2 modified + 2 untracked = 4 dirty 行
     assert.equal(snap.dirtyCount, 4);
+    assert.equal(snap.degradeReason, null);
     // status 文本保留逐行(便于人读面诊断)
     assert.ok(snap.gitStatus !== null);
     assert.ok(snap.gitStatus!.includes("M src/harness/agent-status.ts"));
@@ -79,6 +80,7 @@ describe("parseEnvSnapshot", () => {
     assert.equal(snap.gitStatus, null);
     assert.equal(snap.dirtyCount, null);
     assert.equal(snap.diffPreview, null);
+    assert.equal(snap.degradeReason, "not_a_git_repo");
   });
 
   it("空 stdout(空仓库 / 全部 --porcelain 输出空)→ 全 null 字段,cwd 仍在", () => {
@@ -92,6 +94,7 @@ describe("parseEnvSnapshot", () => {
     assert.equal(snap.gitStatus, null);
     assert.equal(snap.dirtyCount, 0, "empty porcelain → 0 dirty (clean tree)");
     assert.equal(snap.diffPreview, null);
+    assert.equal(snap.degradeReason, null);
   });
 
   it("branch 行缺失(stripped / corrupt) → branch = null,但 dirty 仍可计", () => {
@@ -247,6 +250,7 @@ describe("readEnvSnapshot (DI exec)", () => {
     assert.equal(snap.gitStatus, null);
     assert.equal(snap.dirtyCount, null);
     assert.equal(snap.diffPreview, null);
+    assert.equal(snap.degradeReason, "git_unavailable");
   });
 
   it("超时:exec stub throw → 不 throw,git 字段全 null", async () => {
@@ -259,6 +263,30 @@ describe("readEnvSnapshot (DI exec)", () => {
     assert.equal(snap.gitStatus, null);
     assert.equal(snap.dirtyCount, null);
     assert.equal(snap.diffPreview, null);
+    assert.equal(snap.degradeReason, "git_unavailable");
+  });
+
+  it("IO 路径非 git:fatal 进 reject message → degradeReason=not_a_git_repo", async () => {
+    const stub = makeExecStub(async () => {
+      throw new Error(
+        "git status --porcelain=v1 -b exited 128: fatal: not a git repository (or any of the parent directories): .git"
+      );
+    });
+    const snap = await readEnvSnapshot({ cwd: "/scratch", exec: stub.exec });
+    assert.equal(snap.degradeReason, "not_a_git_repo");
+    assert.equal(snap.gitBranch, null);
+  });
+
+  it("空 cwd → degradeReason=cwd_unavailable,不调用 exec", async () => {
+    let calls = 0;
+    const stub = makeExecStub(async () => {
+      calls += 1;
+      throw new Error("should not be called");
+    });
+    const snap = await readEnvSnapshot({ cwd: "  ", exec: stub.exec });
+    assert.equal(snap.degradeReason, "cwd_unavailable");
+    assert.equal(snap.cwd, "");
+    assert.equal(calls, 0);
   });
 
   it("超长 diff(> MAX_ENV_DIFF_CHARS codepoints)→ truncate + marker 长度受控", async () => {

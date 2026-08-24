@@ -1,9 +1,9 @@
 /** @jsxImportSource @opentui/react */
 /**
- * tests/tui/env-snapshot-pane.test.tsx
+ * tests/tui/environment-pane.test.tsx
  *
- * T5 (#653 G1 / 包1-感知): `EnvSnapshotPane` —— TUI 人读 chrome 的环境现势
- * 独立槽位投影。
+ * T5 (#653 G1 / 包1-感知): `EnvironmentPane` —— TUI 人读 chrome 的环境现势
+ * 独立槽位投影(DESIGN 钉死名;`EnvSnapshotPane` 已退役)。
  *
  *   - 数据唯一来源是 harness 在回合边界发出的 `env_snapshot` 流事件;
  *     `envSnapshotFromEvent` 投影:env_snapshot → EnvSnapshot(冻结);其余
@@ -12,11 +12,11 @@
  *     超长 diffPreview(>2000 cp)→ 走 truncateByCodepoints 兜底截断,
  *     标记 `[truncated N chars]` 出现在输出中(spec 2000 cp 上限,
  *     UI 兜底再截)。
- *   - 退化态:gitBranch / dirtyCount / diffPreview 全 null →
- *     「环境现势不可用」占位(spec EXIT degraded,不 throw)。
+ *   - EXIT 退化态:按 degradeReason 投影 DESIGN 占位
+ *     `(cwd unavailable)` / `(not a git repo)` / `(git unavailable)`。
  *   - 行账:`envSnapshotLines` 行数 → chromeReserveRows.envPaneRows
  *     (SSOT,与 agentStatusRows 同款 linkage,基线 7 不变)。
- *   - 反向契约:src/tui/env-snapshot-pane.tsx 零命中 `agent_status`
+ *   - 反向契约:src/tui/environment-pane.tsx 零命中 `agent_status`
  *     (平行独立流,绝不挂 agent_status 渲染路径)。
  *
  * 与 agent-status-panel.test.ts 同形态(bun:test + 纯函数直驱 +
@@ -27,10 +27,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { testRender } from "@opentui/react/test-utils";
 import {
-  EnvSnapshotPane,
+  EnvironmentPane,
   envSnapshotFromEvent,
   envSnapshotLines,
-} from "../../src/tui/env-snapshot-pane.js";
+} from "../../src/tui/environment-pane.js";
 import { chromeReserveRows } from "../../src/tui/app.js";
 import type { EnvSnapshot } from "../../src/harness/env-snapshot.ts";
 import type { HarnessStreamEvent } from "../../src/harness/stream.ts";
@@ -46,6 +46,7 @@ function makeSnapshot(overrides: Partial<EnvSnapshot> = {}): EnvSnapshot {
     gitStatus: "## main\n M src/foo.ts\n",
     dirtyCount: 1,
     diffPreview: "diff --git a/src/foo.ts b/src/foo.ts\n-old\n+new\n",
+    degradeReason: null,
     ...overrides,
   };
 }
@@ -67,6 +68,7 @@ describe("envSnapshotFromEvent: 事件 → EnvSnapshot", () => {
     expect(out!.gitBranch).toBe("main");
     expect(out!.dirtyCount).toBe(1);
     expect(out!.diffPreview).toBe(snap.diffPreview);
+    expect(out!.degradeReason).toBeNull();
     expect(Object.isFrozen(out!)).toBe(true);
   });
 
@@ -119,18 +121,50 @@ describe("envSnapshotLines: EnvSnapshot → 显示行", () => {
     expect(joined).toMatch(/truncated\s+\d+\s+chars/);
   });
 
-  test("退化态:git/diff 字段全 null → 「环境现势不可用」占位", () => {
-    const degraded: EnvSnapshot = {
+  test("EXIT cwd_unavailable → 占位 (cwd unavailable)", () => {
+    const snap = makeSnapshot({
+      cwd: "",
+      gitBranch: null,
+      gitStatus: null,
+      dirtyCount: null,
+      diffPreview: null,
+      degradeReason: "cwd_unavailable",
+    });
+    const lines = envSnapshotLines(snap, 80);
+    expect(lines.length).toBe(1);
+    expect(lines[0]!.text).toContain("(cwd unavailable)");
+    expect(lines[0]!.text).not.toContain("环境现势不可用");
+  });
+
+  test("EXIT not_a_git_repo → 占位 (not a git repo)", () => {
+    const snap = makeSnapshot({
       cwd: "/scratch",
       gitBranch: null,
       gitStatus: null,
       dirtyCount: null,
       diffPreview: null,
-    };
-    const lines = envSnapshotLines(degraded, 80);
+      degradeReason: "not_a_git_repo",
+    });
+    const lines = envSnapshotLines(snap, 80);
     expect(lines.length).toBe(1);
     expect(lines[0]!.text).toContain("/scratch");
-    expect(lines[0]!.text).toContain("环境现势不可用");
+    expect(lines[0]!.text).toContain("(not a git repo)");
+    expect(lines[0]!.text).not.toContain("环境现势不可用");
+  });
+
+  test("EXIT git_unavailable → 占位 (git unavailable)", () => {
+    const snap = makeSnapshot({
+      cwd: "/work",
+      gitBranch: null,
+      gitStatus: null,
+      dirtyCount: null,
+      diffPreview: null,
+      degradeReason: "git_unavailable",
+    });
+    const lines = envSnapshotLines(snap, 80);
+    expect(lines.length).toBe(1);
+    expect(lines[0]!.text).toContain("/work");
+    expect(lines[0]!.text).toContain("(git unavailable)");
   });
 
   test("行宽受 cols 限制:任何单行视觉宽度 ≤ cols", () => {
@@ -146,12 +180,12 @@ describe("envSnapshotLines: EnvSnapshot → 显示行", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 渲染集成:OpenTUI renderOnce 验证 EnvSnapshotPane 实际可见
+// 渲染集成:OpenTUI renderOnce 验证 EnvironmentPane 实际可见
 // ---------------------------------------------------------------------------
 
 async function renderPane(snap: EnvSnapshot | null, cols: number) {
   const setup = await testRender(
-    <EnvSnapshotPane snapshot={snap} cols={cols} />,
+    <EnvironmentPane snapshot={snap} cols={cols} />,
     {
       width: cols,
       height: 12,
@@ -161,7 +195,7 @@ async function renderPane(snap: EnvSnapshot | null, cols: number) {
   return setup;
 }
 
-describe("EnvSnapshotPane render integration", () => {
+describe("EnvironmentPane render integration", () => {
   test("正常态 snapshot → 帧文本含 cwd / branch / diff 内容", async () => {
     const setup = await renderPane(makeSnapshot(), 80);
     const frame = setup.captureCharFrame();
@@ -174,24 +208,24 @@ describe("EnvSnapshotPane render integration", () => {
   test("null snapshot → 帧不渲染组件(空内容)", async () => {
     const setup = await renderPane(null, 80);
     const frame = setup.captureCharFrame().trim();
-    // 无快照 → 组件返 null → 帧不含「环境现势」等任何文本
-    expect(frame).not.toContain("环境现势不可用");
+    expect(frame).not.toContain("(not a git repo)");
     expect(frame).not.toContain("/repo");
     await setup.renderer.destroy();
   });
 
-  test("退化态 snapshot → 帧含「环境现势不可用」占位", async () => {
+  test("退化态 snapshot → 帧含 (not a git repo) 占位", async () => {
     const degraded: EnvSnapshot = {
       cwd: "/scratch",
       gitBranch: null,
       gitStatus: null,
       dirtyCount: null,
       diffPreview: null,
+      degradeReason: "not_a_git_repo",
     };
     const setup = await renderPane(degraded, 80);
     const frame = setup.captureCharFrame();
     expect(frame).toContain("/scratch");
-    expect(frame).toContain("环境现势不可用");
+    expect(frame).toContain("(not a git repo)");
     await setup.renderer.destroy();
   });
 });
@@ -229,6 +263,7 @@ describe("chromeReserveRows: envPaneRows 投影联动", () => {
       gitStatus: null,
       dirtyCount: null,
       diffPreview: null,
+      degradeReason: "git_unavailable",
     };
     const rows = envSnapshotLines(degraded, 80).length;
     expect(rows).toBe(1);
@@ -243,31 +278,31 @@ describe("chromeReserveRows: envPaneRows 投影联动", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 反向契约:src/tui/env-snapshot-pane.tsx 零命中 agent_status
+// 反向契约:src/tui/environment-pane.tsx 零命中 agent_status
 // ---------------------------------------------------------------------------
 
-describe("no agent_status in env-snapshot-pane: 平行独立流", () => {
-  test("src/tui/env-snapshot-pane.tsx 不含 agent_status 字面量", () => {
+describe("no agent_status in environment-pane: 平行独立流", () => {
+  test("src/tui/environment-pane.tsx 不含 agent_status 字面量", () => {
     const file = join(
       import.meta.dir,
       "..",
       "..",
       "src",
       "tui",
-      "env-snapshot-pane.tsx"
+      "environment-pane.tsx"
     );
     const src = readFileSync(file, "utf8");
     expect(src.includes("agent_status")).toBe(false);
   });
 
-  test("src/tui/env-snapshot-pane.tsx 不读 todos.md / todoDir / agent-status", () => {
+  test("src/tui/environment-pane.tsx 不读 todos.md / todoDir / agent-status", () => {
     const file = join(
       import.meta.dir,
       "..",
       "..",
       "src",
       "tui",
-      "env-snapshot-pane.tsx"
+      "environment-pane.tsx"
     );
     const src = readFileSync(file, "utf8");
     for (const marker of [
@@ -281,9 +316,9 @@ describe("no agent_status in env-snapshot-pane: 平行独立流", () => {
   });
 });
 
-// 兄弟目录守卫:src/tui 全部源码不出现 EnvSnapshotPane 第二份定义。
-describe("EnvSnapshotPane 唯一组件名", () => {
-  test("src/tui/ 下 EnvSnapshotPane / env-snapshot-pane 仅一处定义", () => {
+// DESIGN 验收:src/tui/ 下 EnvironmentPane 唯一 + environment-* 文件名。
+describe("EnvironmentPane 唯一组件名", () => {
+  test("src/tui/ 下 EnvironmentPane / environment-pane 仅一处定义", () => {
     const tuiDir = join(import.meta.dir, "..", "..", "src", "tui");
     const files: string[] = [];
     const walk = (dir: string): void => {
@@ -299,16 +334,16 @@ describe("EnvSnapshotPane 唯一组件名", () => {
     walk(tuiDir);
     let defCount = 0;
     let fileMentions = 0;
+    let legacyName = 0;
     for (const file of files) {
       const src = readFileSync(file, "utf8");
-      if (/export\s+(function|const)\s+EnvSnapshotPane\b/.test(src)) defCount++;
-      if (file.endsWith("env-snapshot-pane.tsx")) fileMentions++;
+      if (/export\s+(function|const)\s+EnvironmentPane\b/.test(src)) defCount++;
+      if (file.endsWith("environment-pane.tsx")) fileMentions++;
+      if (/export\s+(function|const)\s+EnvSnapshotPane\b/.test(src))
+        legacyName++;
     }
-    // 文件名尚未存在的代码状态(red 阶段)→ fileMentions 应为 1(本测试
-    // 文件路径硬编 env-snapshot-pane.tsx);绿阶段再判定组件定义唯一。
-    // 钉死两项不变式:(1)本测试硬编的 env-snapshot-pane.tsx 必须存在;
-    // (2)组件定义在整个 src/tui/** 下唯一(防止他处出现第二份 export)。
-    expect(fileMentions).toBe(1); // 本测试硬编路径存在(red=0 / green=1)
-    expect(defCount).toBe(1); // 组件定义唯一
+    expect(fileMentions).toBe(1);
+    expect(defCount).toBe(1);
+    expect(legacyName).toBe(0);
   });
 });

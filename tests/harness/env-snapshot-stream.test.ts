@@ -220,6 +220,7 @@ describe("HarnessStreamEvent env_snapshot variant", () => {
     assert.equal(snap.gitStatus, null);
     assert.equal(snap.dirtyCount, null);
     assert.equal(snap.diffPreview, null);
+    assert.equal(snap.degradeReason, "not_a_git_repo");
   });
 
   it("④ deps.envSnapshot 缺席 → 零 env_snapshot 事件(ask / worker 零变化)", async () => {
