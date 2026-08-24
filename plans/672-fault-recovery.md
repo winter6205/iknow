@@ -40,7 +40,7 @@ minimal-change-verifier: yes — 一逻辑任务拆三 commit（G5）；T2 不�
    - **Inherits:** spec Does T2：装饰 `step`；供应商只翻译；不重试 PromptTooLong；尊重 AbortSignal；耗尽后 typed 失败不裸 `Error`；Gate B 去掉可执行面 `retry` 禁词，保留 checkpoint/cost/otel/session-api。
    - **Surface:** harness model-adapter 装配（产品入口与 worker 同一装饰语义）
    - **Acceptance:** 模拟 429 后成功只交付一次成功 step；退避中 abort 走取消语义；PromptTooLong 调用次数 = 1；含 `retry` 标识符的 harness 源文件不再因该词触发 Gate B。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T1]
 
 3. **T3 工具环检测与 fused 消费者** — tag: `[implementation]`

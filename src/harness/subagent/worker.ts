@@ -34,6 +34,8 @@ import {
   createRealAnthropicAdapter,
   buildThinkingParams,
   createExecutor,
+  withTransportRetry,
+  translateAnthropicTransportFault,
   type LoopEngineDeps,
 } from "../index.js";
 import { createDefaultAciRegistry } from "../aci/tools/registry.js";
@@ -256,17 +258,20 @@ export async function createWorkerDeps(
 
   const adapter =
     opts.model ??
-    createRealAnthropicAdapter({
-      client: new Anthropic({
-        apiKey: env.llm.apiKey,
-        baseURL: env.llm.baseUrl,
+    withTransportRetry(
+      createRealAnthropicAdapter({
+        client: new Anthropic({
+          apiKey: env.llm.apiKey,
+          baseURL: env.llm.baseUrl,
+        }),
+        model: env.llm.model,
+        maxTokens: env.llm.maxOutputTokens,
+        temperature: env.llm.temperature,
+        thinking: buildThinkingParams(env.llm),
+        stream: env.llm.stream === "on",
       }),
-      model: env.llm.model,
-      maxTokens: env.llm.maxOutputTokens,
-      temperature: env.llm.temperature,
-      thinking: buildThinkingParams(env.llm),
-      stream: env.llm.stream === "on",
-    });
+      { translate: translateAnthropicTransportFault }
+    );
 
   // skill 索引: worker 自身独立扫描 (spec OQ3 默认 —— 简化通信, 复用父装配
   // 形态); scanner 内部 try/catch + warn, 目录缺失降级, 装配不阻塞。

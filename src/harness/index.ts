@@ -10,6 +10,7 @@ export {
   RegistryConstructionError,
   ProtocolError,
   PromptTooLongError,
+  TransportRetryExhaustedError,
   MaxTurnsExceeded,
   ToolExecutionError,
   MessageCommitError,
@@ -52,6 +53,8 @@ export type { FaultClass, FaultEvent } from "./fault-class.js";
 export { createAnthropicAdapter } from "./model-adapter/anthropic-adapter.js";
 export { createRealAnthropicAdapter } from "./model-adapter/anthropic-adapter.js";
 export { buildThinkingParams } from "./model-adapter/anthropic-adapter.js";
+export { translateAnthropicTransportFault } from "./model-adapter/anthropic-adapter.js";
+export { withTransportRetry } from "./model-adapter/with-transport-retry.js";
 export type {
   AnthropicAdapter,
   AnthropicAdapterOptions,

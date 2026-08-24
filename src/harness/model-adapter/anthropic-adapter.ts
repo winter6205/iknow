@@ -20,6 +20,7 @@
  */
 
 import { ProtocolError, PromptTooLongError } from "../errors.js";
+import type { FaultEvent } from "../fault-class.js";
 import Anthropic, { APIError } from "@anthropic-ai/sdk";
 import type {
   AnthropicContentBlock,
@@ -740,4 +741,26 @@ export function buildThinkingParams(env: {
     mode: env.thinking,
     effort: env.thinkingEffort,
   };
+}
+
+/**
+ * #672 T2: 供应商只翻译瞬态 HTTP / 网络 vs PromptTooLong vs 其它。
+ * 重试循环在 withTransportRetry，不进本文件。
+ */
+export function translateAnthropicTransportFault(err: unknown): FaultEvent {
+  if (err instanceof PromptTooLongError) return { kind: "prompt_too_long" };
+  if (err instanceof APIError) {
+    return { kind: "llm_http", status: err.status ?? 0 };
+  }
+  if (err instanceof Error && err.name === "AbortError") {
+    return { kind: "user_cancel" };
+  }
+  if (
+    err instanceof Error &&
+    (err.name.includes("Connection") ||
+      /ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed|network/i.test(err.message))
+  ) {
+    return { kind: "llm_network" };
+  }
+  return { kind: "protocol_error" };
 }

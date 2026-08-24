@@ -43,6 +43,20 @@ export class PromptTooLongError extends ProtocolError {
 }
 
 /**
+ * #672 T2: ModelAdapter 传输重试耗尽。typed 失败，禁止用裸 `Error` 表示。
+ */
+export class TransportRetryExhaustedError extends Error {
+  override readonly name = "TransportRetryExhaustedError";
+  readonly attempts: number;
+  readonly cause: unknown;
+  constructor(attempts: number, cause: unknown) {
+    super(`transport retry exhausted after ${attempts} attempt(s)`);
+    this.attempts = attempts;
+    this.cause = cause;
+  }
+}
+
+/**
  * plan T3 + ADR-0011: maxTurns 超限的强制感知信号。
  *
  * 不携带 messages / usage 快照(SSOT 守门:权威历史留在 session,

@@ -21,6 +21,8 @@ import {
   buildThinkingParams,
   createExecutor,
   createLoopEngine,
+  withTransportRetry,
+  translateAnthropicTransportFault,
   type LoopEngineDeps,
 } from "./index.js";
 import { createAciExecutor } from "./aci/index.js";
@@ -169,15 +171,18 @@ export function createAdapterFromEnv(env: IknowEnv): {
     apiKey: env.llm.apiKey,
     baseURL: env.llm.baseUrl,
   });
-  const adapter = createRealAnthropicAdapter({
-    client,
-    model: env.llm.model,
-    maxTokens: env.llm.maxOutputTokens,
-    temperature: env.llm.temperature,
-    // SSOT env→adapter params (#151/#156) and stream arm (#179/#147).
-    thinking: buildThinkingParams(env.llm),
-    stream: env.llm.stream === "on",
-  });
+  const adapter = withTransportRetry(
+    createRealAnthropicAdapter({
+      client,
+      model: env.llm.model,
+      maxTokens: env.llm.maxOutputTokens,
+      temperature: env.llm.temperature,
+      // SSOT env→adapter params (#151/#156) and stream arm (#179/#147).
+      thinking: buildThinkingParams(env.llm),
+      stream: env.llm.stream === "on",
+    }),
+    { translate: translateAnthropicTransportFault }
+  );
   return { client, adapter };
 }
 
