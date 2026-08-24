@@ -56,3 +56,10 @@ minimal-change-verifier: yes — 单逻辑任务包1-感知；包2 OOS；无新 
 ## End-of-round
 
 全部 bullet 落地后：整轮 `arthurpower:code-review`（若环境启用）→ `verification-before-completion`。包2 另开 plan，不在本文件。
+
+## Code review follow-ups
+
+整轮 review 后遗留事项（已落 follow-up commits）：
+
+- **Spec Medium**：`truncateByCodepoints` 截断到 cap=2000 后追加 marker，总长 ≈ 2000+22 cp 超 SPEC SC 字面「输出长度 ≤ 上限」。→ follow-up commit `9d2c08ec` 把 marker 长度计入预算（bodyCap = cap - markerLen），保证总长严格 ≤ cap。T4 测试断言改为「total ≤ cap」+「marker 报告实际丢弃数」。
+- **Standards Low ×3**（formatVerifyReport 重复 / truncateByCodepoints 内联 cap 三元 / loop-engine effectiveState 命名）：post-merge cleanup，不阻塞。
