@@ -123,11 +123,20 @@ export type ToolExecutionResult =
 
 /** Executor 接口:接收 014 合法有序 tool-call 投影,返回匹配身份的 ToolExecutionResult。 */
 export interface Executor {
-  /** 串行执行一序列调用;015 强制:无短路、无自动重试。 */
+  /**
+   * 执行一序列调用。基础 executor 串行;ACI 调度层可对 isConcurrencySafe
+   * 批次重叠。无短路、无自动重试。onSettled 按输入下标在每个结果 settle
+   * 时回调(#620),缺省不调用。
+   */
   readonly executeAll: (
     calls: ReadonlyArray<ToolCall>,
     signal?: AbortSignal, // 017: 原样透传到 ctx.signal
     timeoutMs?: number, // 017: 单 handler Promise.race 超时;undefined = 不 race(015 语义)
-    conversationId?: string // 017 T5: 原样透传到 ctx.conversationId;缺省 = 不过滤(向后兼容)
+    conversationId?: string, // 017 T5: 原样透传到 ctx.conversationId;缺省 = 不过滤(向后兼容)
+    /** #653 / #620:each result as it settles (index = input order). Optional. */
+    onSettled?: (
+      result: ToolExecutionResult,
+      index: number
+    ) => void | Promise<void>
   ) => Promise<ReadonlyArray<ToolExecutionResult>>;
 }

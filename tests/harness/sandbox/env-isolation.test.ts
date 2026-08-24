@@ -25,6 +25,7 @@ import { join } from "node:path";
 import {
   BASE_ENV_WHITELIST,
   SECRET_ENV_NAMES,
+  applyCwdReadonlyFenceEnv,
   clearActiveExtraSecrets,
   createEnvIsolation,
   currentSecretEnvNames,
@@ -46,6 +47,16 @@ describe("createEnvIsolation", () => {
     });
     assert.deepEqual(filtered, { PATH: "/bin", HOME: "/h" });
     assert.ok(Object.isFrozen(filtered));
+  });
+
+  it("applyCwdReadonlyFenceEnv injects GIT_OPTIONAL_LOCKS without mutating freeze", () => {
+    const isolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
+    const filtered = isolation.filter({ PATH: "/bin" });
+    const withLocks = applyCwdReadonlyFenceEnv(filtered, true);
+    assert.equal(filtered.GIT_OPTIONAL_LOCKS, undefined);
+    assert.equal(withLocks.GIT_OPTIONAL_LOCKS, "0");
+    assert.equal(applyCwdReadonlyFenceEnv(filtered, false), filtered);
+    assert.equal(applyCwdReadonlyFenceEnv(filtered, undefined), filtered);
   });
 
   // 注：原「derives at least one canonical secret name from env configuration」

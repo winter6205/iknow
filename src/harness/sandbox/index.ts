@@ -28,6 +28,7 @@ export type {
 export {
   BASE_ENV_WHITELIST,
   SECRET_ENV_NAMES,
+  applyCwdReadonlyFenceEnv,
   clearActiveExtraSecrets,
   createEnvIsolation,
   currentSecretEnvNames,

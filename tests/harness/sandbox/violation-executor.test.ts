@@ -122,6 +122,53 @@ describe("wrapWithViolationHook", () => {
     assert.equal(sawSignal, controller.signal);
     assert.equal(sawTimeout, 1234);
   });
+
+  it("forwards onSettled and observes each result as it settles", async () => {
+    const settled: string[] = [];
+    const hooked: string[] = [];
+    const inner: Executor = Object.freeze({
+      executeAll: async (
+        calls: ReadonlyArray<ToolCall>,
+        _s?: AbortSignal,
+        _t?: number,
+        _c?: string,
+        onSettled?: (
+          result: ToolExecutionResult,
+          index: number
+        ) => void | Promise<void>
+      ) => {
+        const out: ToolExecutionResult[] = [];
+        for (const [i, call] of calls.entries()) {
+          const r = denied(`[hard_wall] ${call.id}`, call.id);
+          await onSettled?.(r, i);
+          out.push(r);
+        }
+        return out;
+      },
+    });
+    const wrapped = wrapWithViolationHook({
+      inner,
+      onKill: () => undefined,
+      postToolUse: ({ toolUseId }) => {
+        hooked.push(toolUseId);
+      },
+    });
+    const two: ReadonlyArray<ToolCall> = [
+      { id: "a", name: "bash", input: {} },
+      { id: "b", name: "bash", input: {} },
+    ];
+    await wrapped.executeAll(
+      two,
+      undefined,
+      undefined,
+      undefined,
+      async (r) => {
+        settled.push(r.toolUseId);
+      }
+    );
+    assert.deepEqual(settled, ["a", "b"]);
+    assert.deepEqual(hooked, ["a", "b"]);
+  });
 });
 
 describe("buildViolationWiring", () => {

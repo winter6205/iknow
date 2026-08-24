@@ -11,7 +11,7 @@
 
 | 能力                  | 说明                                                                                                                                       | 位置                                           |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------- |
-| Agent 执行层          | harness foundation（loop-engine + anthropic-adapter + executor / registry）+ ACI 装饰层（8 件工具）                                        | `src/harness/`（含 `src/harness/aci/`）        |
+| Agent 执行层          | harness foundation（loop-engine + anthropic-adapter + executor / registry）+ ACI 装饰层（条件装配下远多于 8 件，见 `registry` / gap 文）   | `src/harness/`（含 `src/harness/aci/`）        |
 | 授权（per-tool-call） | harness ACI 装饰层逐次工具调用授权                                                                                                         | `src/harness/aci/`                             |
 | 配置加载              | `.env` / `.env.local` + `process.env`；密钥只读 env 名                                                                                     | `src/config/env.ts`                            |
 | LLM 配置单承载        | `settings.llm.model` 字面值 + `settings.llm.apiKey` 字面/占位符 + `llm.fallback`；`IKNOW_LLM_API_KEY_ENV`/`IKNOW_LLM_MODEL` 退役(ADR-0015) | `src/config/settings.ts` + `src/config/env.ts` |
@@ -35,6 +35,8 @@
 **TUI 渲染后端平台声明（#321/#343，2026-08-10）**：TUI 已从 ink 迁移到 @opentui/react 0.5.1（Zig 原生渲染器，仅 bun 可驱动 FFI）。**Linux（含 WSL2）实测验收通过；macOS / Windows 未验证**（原生二进制跨平台行为属上游责任）。旧 ink 实现归档 `archive/tui-ink/`（只读参考）。
 
 **TUI skill + MCP 扩展源（#337，2026-08-11）**：TUI 入口与 chat/serve 对齐 skill 与 MCP 扩展源装配——`skill` / `skill_search` 工具 + `<available_skills>` 系统段 + MCP manager 连接（`mcp__*` 工具经 tool_search discover）。slash 输入 `/` 混显静态命令 + 动态 skill 候选，Tab 补全；`/skill-name [提示词]` 确定性加载（skill 正文拼入 user message 发送）；`/mcp` 看板查看 server 状态 / 工具详情 / reload。
+
+**TUI 可见闭环（horizon-653 包1，PR #666，2026-08-24）**：验证终态对人可见（`VerifyBanner`，HITL + 自动模式）；**环境现势**（cwd / git / diff 要点，上限 2000 codepoints）挂在 TUI chrome，与 ADR-0028 状态栏分离。模型侧 verify 长信封仍隐藏。包2（后台沙箱对齐 → 并行调度）未做。
 
 ### 1.3 评测与质量门禁
 
@@ -93,9 +95,12 @@
 
 ### 3.1 近端（建议 1–2 个迭代）
 
-1. **会话小增强**
-   - 可选会话导出/导入 JSON；澄清轮最小状态。
-2. **观测最小集**
+1. **可见闭环（horizon-653）**
+   - 包1 感知：**已合入** PR #666（TUI Verify 终态 + 环境现势）。
+   - 包2 内核：spec/plan `653-horizon-pkg2-kernel`（S→P）；实施未做。
+2. **会话小增强**
+   - 可选会话导出/导入 JSON。澄清轮 / 设计审批 **defer**（#653 G5）。
+3. **观测最小集**
    - 结构化日志：conversation_id、turn、tool 耗时、是否 llm。
 
 ### 3.2 中期
@@ -122,12 +127,12 @@
 
 ## 4. 能力地图（一句话）
 
-| 层                       | 状态                                                           |
-| ------------------------ | -------------------------------------------------------------- |
-| Harness foundation       | **有**（loop-engine + anthropic-adapter + ACI 8-tool set）     |
-| CLI 多轮交互             | **有**（进程内会话）                                           |
-| HTTP 会话 + Web SPA      | **有**（v0 内存会话 + Vite React `web/`→`dist`；SSE/鉴权未做） |
-| 生产数据 / 持久化 / 上线 | **无或极弱**                                                   |
+| 层                       | 状态                                                                 |
+| ------------------------ | -------------------------------------------------------------------- |
+| Harness foundation       | **有**（loop-engine + anthropic-adapter + ACI registry，件数见 gap） |
+| CLI 多轮交互             | **有**（进程内会话）                                                 |
+| HTTP 会话 + Web SPA      | **有**（Vite React `web/`→`dist`；SSE/鉴权未做）                     |
+| 生产数据 / 持久化 / 上线 | **会话 JSONL 有**（`~/.iknow`）；无多租户 / 无上线流水线             |
 
 ---
 
@@ -164,6 +169,7 @@ npm run build --prefix web    # → web/dist  (root alias if present: npm run we
 | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `specs/README.md`                                                                  | 活跃 module spec 活索引（SSOT；只列当前活跃，新增/归档只改那里一处）                                                            |
 | `docs/architecture.md`                                                             | 运行时能力切分                                                                                                                  |
+| `docs/coding-agent-capability-gap.md`                                              | 编程智能体能力补全评估（差距矩阵 + 优先级；#653 输入 SSOT）                                                                     |
 | `docs/CONTEXT.md`                                                                  | 领域术语                                                                                                                        |
 | `docs/CHANGELOG.md`                                                                | 版本变更                                                                                                                        |
 | `docs/handoff/*`                                                                   | 会话交接                                                                                                                        |

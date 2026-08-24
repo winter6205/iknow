@@ -281,11 +281,17 @@ export function createExecutor(registry: RegistryImpl): Executor {
     calls: ReadonlyArray<ToolCall>,
     signal?: AbortSignal,
     timeoutMs?: number,
-    conversationId?: string
+    conversationId?: string,
+    onSettled?: (
+      result: ToolExecutionResult,
+      index: number
+    ) => void | Promise<void>
   ): Promise<ReadonlyArray<ToolExecutionResult>> {
     const out: ToolExecutionResult[] = [];
-    for (const call of calls) {
-      out.push(await runOne(call, signal, timeoutMs, conversationId));
+    for (const [index, call] of calls.entries()) {
+      const result = await runOne(call, signal, timeoutMs, conversationId);
+      await onSettled?.(result, index);
+      out.push(result);
     }
     return out;
   }

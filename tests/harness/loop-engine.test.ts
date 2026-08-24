@@ -10,6 +10,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   MaxTurnsExceeded,
+  MessageCommitError,
   PromptTooLongError,
   ProtocolError,
 } from "../../src/harness/errors.ts";
@@ -2989,5 +2990,573 @@ describe("loop engine #406 T2: secret roundtrip 识别层", () => {
     const r = recognize("<<<SECRET_1>>> 再次调用", secretRegistry);
     assert.deepEqual(r.matched, []);
     assert.equal(r.replaced, "<<<SECRET_1>>> 再次调用");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #653 T3: loop tool 阶段对连续安全 tool_use 真批处理
+// (spec AC51 / AC52; #620 per-result commit preserved)
+// ---------------------------------------------------------------------------
+//
+// 设计:runToolPhase 把 toolCallViews 按 registry.get(name).aci.isConcurrencySafe
+// 分组成 wave。size ≥ 2 的 wave 单次 executeAll([N]) 触发并发;size 1 的 wave
+// 保持原状(逐调用 executeAll([one]) 语义)。每个结果 settle 后立即 commit
+// (经 host 钩子上盘),与既有 #620 契约一致。
+//
+// 关键断言:
+//   - AC51:连续安全 tool_use 重叠执行;结果写入顺序与 tool_use 顺序一致;
+//          ≥8 安全 stub 全 settle 不 hang。
+//   - AC52:runToolPhase 不再对全部 isConcurrencySafe:true 调用逐个
+//          executeAll([one]) —— T3 是驱动侧变化(从 [one] 改为 [N])。
+//
+// 测试约定:AciToolDef 通过 registry 暴露 aci 字段(registry 透传工具对象,
+// 包括 aci 字段;loop 用 (def as { aci?: ... }).aci 读取)。Stub tool 通过
+// 直接构造 AciToolDef(非 createStubTool)接入 aci 元数据。
+
+interface WaveInterval {
+  readonly batchSize: number;
+  readonly ids: ReadonlyArray<string>;
+  readonly start: number;
+  readonly end: number;
+}
+
+function makeSafeTool(
+  name: string,
+  opts?: { readonly sleepMs?: number }
+): ToolDef {
+  const sleepMs = opts?.sleepMs ?? 0;
+  return Object.freeze({
+    name,
+    description: `safe ${name}`,
+    inputSchema: { type: "object", additionalProperties: false },
+    handler: (async () => {
+      if (sleepMs > 0) await new Promise((r) => setTimeout(r, sleepMs));
+      return `ok:${name}`;
+    }) as ToolDef["handler"],
+    aci: {
+      category: "read-only" as const,
+      isConcurrencySafe: true,
+      interruptBehavior: "cancel" as const,
+      timeoutTier: "fast" as const,
+    },
+  });
+}
+
+function makeUnsafeTool(name: string): ToolDef {
+  return Object.freeze({
+    name,
+    description: `unsafe ${name}`,
+    inputSchema: { type: "object", additionalProperties: false },
+    handler: (async () => `ok:${name}`) as ToolDef["handler"],
+    aci: {
+      category: "execute" as const,
+      isConcurrencySafe: false,
+      interruptBehavior: "cancel" as const,
+      timeoutTier: "default" as const,
+    },
+  });
+}
+
+function makePlainTool(name: string): ToolDef {
+  // 无 aci 元数据(registry miss → 保守默认 unsafe)。
+  return Object.freeze({
+    name,
+    description: `plain ${name}`,
+    inputSchema: { type: "object", additionalProperties: false },
+    handler: (async () => `ok:${name}`) as ToolDef["handler"],
+  });
+}
+
+function makeWaveRecordingExecutor(opts?: {
+  readonly throwById?: Record<string, string>;
+}): {
+  readonly executor: import("../../src/harness/tools/types.ts").Executor;
+  readonly intervals: WaveInterval[];
+} {
+  const intervals: WaveInterval[] = [];
+  const executor = Object.freeze({
+    executeAll: async (
+      batch: ReadonlyArray<import("../../src/harness/tools/types.ts").ToolCall>
+    ): Promise<ReadonlyArray<ToolExecutionResult>> => {
+      const start = Date.now();
+      const results: ToolExecutionResult[] = [];
+      // 真实并发:逐 call 启动(setTimeout 不阻塞其它 call),Promise.all 收口。
+      // 这里不模拟 sleep —— 由 handler 自己注入;此 spy 仅记录 batch 元数据。
+      for (const c of batch) {
+        const thrown = opts?.throwById?.[c.id];
+        if (thrown !== undefined) {
+          results.push({
+            kind: "execution_failed",
+            toolUseId: c.id,
+            message: thrown,
+          });
+        } else {
+          results.push({
+            kind: "ok",
+            toolUseId: c.id,
+            payload: [{ type: "text" as const, text: `executed:${c.name}` }],
+          });
+        }
+      }
+      intervals.push({
+        batchSize: batch.length,
+        ids: batch.map((c) => c.id),
+        start,
+        end: Date.now(),
+      });
+      return results;
+    },
+  });
+  return { executor, intervals };
+}
+
+describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
+  it("AC51: 连续安全 tool_use 单批 executeAll([N])(不再逐个 [one])", async () => {
+    const tools = [
+      makeSafeTool("safe_a", { sleepMs: 30 }),
+      makeSafeTool("safe_b", { sleepMs: 30 }),
+      makeSafeTool("safe_c", { sleepMs: 30 }),
+    ];
+    const reg = createRegistry(tools);
+    const { executor, intervals } = makeWaveRecordingExecutor();
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            { id: "a", name: "safe_a", input: {} },
+            { id: "b", name: "safe_b", input: {} },
+            { id: "c", name: "safe_c", input: {} },
+          ],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const t0 = Date.now();
+    const { result } = await run("go", {
+      adapter: model,
+      executor,
+      registry: reg,
+      maxTurns: 5,
+    });
+    const elapsed = Date.now() - t0;
+    assert.equal(result.stopReason, "completed");
+    assert.equal(result.messages.length, 4);
+    // 关键断言:AC52 —— executeAll 仅被调 1 次,batchSize=3(连续安全批)。
+    // 旧路径(逐个 [one])会让 batchSize 全部 = 1 且调用次数 = 3。
+    assert.equal(
+      intervals.length,
+      1,
+      `expected 1 wave call, got ${intervals.length}`
+    );
+    assert.equal(intervals[0]!.batchSize, 3);
+    assert.deepEqual([...intervals[0]!.ids], ["a", "b", "c"]);
+    // 顺序保持:tool_result 块序 = tool_use 顺序。
+    const resultBlocks = result.messages[2]!.content.filter(
+      (b) => b.type === "tool_result"
+    );
+    assert.deepEqual(
+      resultBlocks.map(
+        (b) => (b as { type: "tool_result"; tool_use_id: string }).tool_use_id
+      ),
+      ["a", "b", "c"]
+    );
+    // 并发开销:3 × 30ms 串行 ≥ 90ms;并发下应明显更短(留 10ms 余量应对调度)。
+    assert.ok(
+      elapsed < 80,
+      `expected overlap (≤80ms), got ${elapsed}ms (serial ≥90ms)`
+    );
+  });
+
+  it("AC51 overflow: ≥8 安全 stub 全 settle,顺序保持", async () => {
+    const tools = [makeSafeTool("safe_only", { sleepMs: 20 })];
+    const reg = createRegistry(tools);
+    const { executor, intervals } = makeWaveRecordingExecutor();
+    const ids = Array.from({ length: 8 }, (_, i) => `s${i}`);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: ids.map((id) => ({
+            id,
+            name: "safe_only",
+            input: {},
+          })),
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const { result } = await run("go", {
+      adapter: model,
+      executor,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "completed");
+    // 关键断言:executeAll 仅 1 次调用,batchSize=8(全安全批)。
+    assert.equal(intervals.length, 1);
+    assert.equal(intervals[0]!.batchSize, 8);
+    assert.deepEqual([...intervals[0]!.ids], ids);
+    // 顺序保持:8 条 tool_result 按输入顺序。
+    const blocks = result.messages[2]!.content.filter(
+      (b) => b.type === "tool_result"
+    );
+    assert.deepEqual(
+      blocks.map(
+        (b) => (b as { type: "tool_result"; tool_use_id: string }).tool_use_id
+      ),
+      ids
+    );
+  });
+
+  it("unsafe 调用单独成 wave(singleton),不参与并行集", async () => {
+    // 模式 [safe_a, unsafe_b, safe_c, safe_d] →
+    // 期望 wave1=[safe_a](仅 1 个 safe),
+    //       wave2=[unsafe_b](单元素),
+    //       wave3=[safe_c, safe_d](2 个连续 safe)。
+    const tools = [
+      makeSafeTool("safe_x", { sleepMs: 20 }),
+      makeUnsafeTool("bash"),
+    ];
+    const reg = createRegistry(tools);
+    const { executor, intervals } = makeWaveRecordingExecutor();
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            { id: "a", name: "safe_x", input: {} },
+            { id: "u", name: "bash", input: { command: "echo" } },
+            { id: "c", name: "safe_x", input: {} },
+            { id: "d", name: "safe_x", input: {} },
+          ],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const { result } = await run("go", {
+      adapter: model,
+      executor,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "completed");
+    // 3 个 wave:singleton [a] / singleton [u] / pair [c, d]。
+    assert.equal(intervals.length, 3);
+    assert.deepEqual([...intervals[0]!.ids], ["a"]);
+    assert.deepEqual([...intervals[1]!.ids], ["u"]);
+    assert.deepEqual([...intervals[2]!.ids], ["c", "d"]);
+    // 顺序保持:tool_result 顺序 = tool_use 顺序。
+    const blocks = result.messages[2]!.content.filter(
+      (b) => b.type === "tool_result"
+    );
+    assert.deepEqual(
+      blocks.map(
+        (b) => (b as { type: "tool_result"; tool_use_id: string }).tool_use_id
+      ),
+      ["a", "u", "c", "d"]
+    );
+  });
+
+  it("全 unsafe: 行为 byte-identical(逐调用 [one])", async () => {
+    const tools = [
+      makePlainTool("p1"),
+      makePlainTool("p2"),
+      makePlainTool("p3"),
+    ];
+    const reg = createRegistry(tools);
+    const { executor, intervals } = makeWaveRecordingExecutor();
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            { id: "p1", name: "p1", input: {} },
+            { id: "p2", name: "p2", input: {} },
+            { id: "p3", name: "p3", input: {} },
+          ],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const { result } = await run("go", {
+      adapter: model,
+      executor,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "completed");
+    // 旧路径契约:每个 unsafe / plain 工具单独 wave(逐个 [one])。
+    assert.equal(intervals.length, 3);
+    for (const iv of intervals) {
+      assert.equal(iv.batchSize, 1);
+    }
+    assert.deepEqual(intervals.map((iv) => [...iv.ids]).flat(), [
+      "p1",
+      "p2",
+      "p3",
+    ]);
+  });
+
+  it("混合 safe + unsafe: unsafe 仍是 wave-breaker", async () => {
+    // 5 调用:[safe_1, safe_2, unsafe, safe_3]
+    // 期望:wave1=[safe_1, safe_2](连续 2 个 safe),
+    //       wave2=[unsafe](单元素,breaker),
+    //       wave3=[safe_3](单元素 safe)。
+    const tools = [makeSafeTool("s"), makeUnsafeTool("u")];
+    const reg = createRegistry(tools);
+    const { executor, intervals } = makeWaveRecordingExecutor();
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            { id: "s1", name: "s", input: {} },
+            { id: "s2", name: "s", input: {} },
+            { id: "u", name: "u", input: {} },
+            { id: "s3", name: "s", input: {} },
+          ],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const { result } = await run("go", {
+      adapter: model,
+      executor,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "completed");
+    assert.equal(intervals.length, 3);
+    assert.deepEqual([...intervals[0]!.ids], ["s1", "s2"]);
+    assert.deepEqual([...intervals[1]!.ids], ["u"]);
+    assert.deepEqual([...intervals[2]!.ids], ["s3"]);
+  });
+
+  it("safe wave 中 2nd handler throw → 1st + 3rd 仍有结果(隔离,不短路整批)", async () => {
+    const tools = [
+      makeSafeTool("s_ok"),
+      makeSafeTool("s_bad"),
+      makeSafeTool("s_ok2"),
+    ];
+    const reg = createRegistry(tools);
+    const { executor, intervals } = makeWaveRecordingExecutor({
+      throwById: { bad: "synthetic handler failure" },
+    });
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            { id: "a", name: "s_ok", input: {} },
+            { id: "bad", name: "s_bad", input: {} },
+            { id: "c", name: "s_ok2", input: {} },
+          ],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const { result } = await run("go", {
+      adapter: model,
+      executor,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "completed");
+    // 单 wave,3 calls。
+    assert.equal(intervals.length, 1);
+    assert.equal(intervals[0]!.batchSize, 3);
+    // 顺序保持:a → bad → c;1st / 3rd 走 ok,2nd 走 execution_failed。
+    const blocks = result.messages[2]!.content.filter(
+      (b) => b.type === "tool_result"
+    );
+    const aBlock = blocks[0] as {
+      type: "tool_result";
+      is_error?: boolean;
+      tool_use_id: string;
+    };
+    const badBlock = blocks[1] as {
+      type: "tool_result";
+      is_error?: boolean;
+      tool_use_id: string;
+    };
+    const cBlock = blocks[2] as {
+      type: "tool_result";
+      is_error?: boolean;
+      tool_use_id: string;
+    };
+    assert.equal(aBlock.tool_use_id, "a");
+    assert.equal(aBlock.is_error, undefined);
+    assert.equal(badBlock.tool_use_id, "bad");
+    assert.equal(badBlock.is_error, true);
+    assert.equal(cBlock.tool_use_id, "c");
+    assert.equal(cBlock.is_error, undefined);
+  });
+
+  it("safe wave 中 commit crash on 3rd:盘上 1st+2nd tool_result,无 3rd", async () => {
+    // 验证 T3 wave 行为的 #620 兼容:wave 内 commit 串行,前 N-1 commit 落盘,
+    // 第 N 个 throw 时盘上恰好 N-1 条 tool_result。3-safe-call wave + crash on
+    // 3rd commit = 1st + 2nd on disk,3rd 缺席(行为与 wave 串行 commit 一致)。
+    const tools = [
+      makeSafeTool("s_a"),
+      makeSafeTool("s_b"),
+      makeSafeTool("s_c"),
+    ];
+    const reg = createRegistry(tools);
+    const { executor } = makeWaveRecordingExecutor();
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            { id: "a", name: "s_a", input: {} },
+            { id: "b", name: "s_b", input: {} },
+            { id: "c", name: "s_c", input: {} },
+          ],
+        }),
+      ],
+    });
+    const boom = new Error("simulated crash on 3rd tool_result commit");
+    let calls = 0;
+    const committed: AnthropicNativeMessage[][] = [];
+    const commitMessages = async (
+      messages: ReadonlyArray<AnthropicNativeMessage>
+    ): Promise<void> => {
+      calls += 1;
+      if (calls === 4) throw boom; // assistant(=1) + tr_a(=2) + tr_b(=3) → tr_c(=4) crash
+      committed.push([...messages]);
+    };
+    await assert.rejects(
+      run("go", {
+        adapter: model,
+        executor,
+        registry: reg,
+        maxTurns: 5,
+        commitMessages,
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof MessageCommitError);
+        assert.equal(err.cause, boom);
+        return true;
+      }
+    );
+    // 4 次 commit:assistant + tr_a + tr_b + tr_c(崩溃);前 3 落盘。
+    assert.equal(calls, 4);
+    assert.equal(committed.length, 3);
+    assert.equal(committed[0]![0]!.role, "assistant");
+    assert.equal(committed[1]![0]!.role, "user");
+    assert.equal(committed[2]![0]!.role, "user");
+    // 顺序保持:tr_a 在 tr_b 之前。
+    const trA = committed[1]![0]!.content[0] as {
+      type: "tool_result";
+      tool_use_id: string;
+    };
+    const trB = committed[2]![0]!.content[0] as {
+      type: "tool_result";
+      tool_use_id: string;
+    };
+    assert.equal(trA.tool_use_id, "a");
+    assert.equal(trB.tool_use_id, "b");
+    // 盘上 JSONL:无 tr_c。
+    const trCContent = JSON.stringify(committed);
+    assert.ok(
+      !trCContent.includes('"tool_use_id":"c"'),
+      "tr_c must NOT be committed to disk"
+    );
+  });
+
+  it("#620: first result commits before the slowest wave sibling settles", async () => {
+    const tools = [makeSafeTool("fast"), makeSafeTool("slow")];
+    const reg = createRegistry(tools);
+    const settleAt = new Map<string, number>();
+    const executor = Object.freeze({
+      executeAll: async (
+        batch: ReadonlyArray<
+          import("../../src/harness/tools/types.ts").ToolCall
+        >,
+        _signal?: AbortSignal,
+        _timeoutMs?: number,
+        _conversationId?: string,
+        onSettled?: (
+          result: ToolExecutionResult,
+          index: number
+        ) => void | Promise<void>
+      ): Promise<ReadonlyArray<ToolExecutionResult>> => {
+        const sleep: Record<string, number> = { a: 20, b: 80 };
+        const promises = batch.map(async (c, index) => {
+          await new Promise((r) => setTimeout(r, sleep[c.id] ?? 0));
+          const result: ToolExecutionResult = {
+            kind: "ok",
+            toolUseId: c.id,
+            payload: [{ type: "text", text: `executed:${c.name}` }],
+          };
+          settleAt.set(c.id, Date.now());
+          await onSettled?.(result, index);
+          return result;
+        });
+        return Promise.all(promises);
+      },
+    });
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            { id: "a", name: "fast", input: {} },
+            { id: "b", name: "slow", input: {} },
+          ],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const committedAt: number[] = [];
+    const commitMessages = async (): Promise<void> => {
+      committedAt.push(Date.now());
+    };
+    const { result } = await run("go", {
+      adapter: model,
+      executor,
+      registry: reg,
+      maxTurns: 5,
+      commitMessages,
+    });
+    assert.equal(result.stopReason, "completed");
+    // assistant commit + tr_a + tr_b
+    assert.ok(committedAt.length >= 3, `commits=${committedAt.length}`);
+    const trACommit = committedAt[1]!;
+    const slowSettle = settleAt.get("b");
+    assert.ok(slowSettle !== undefined, "slow call must settle");
+    assert.ok(
+      trACommit < slowSettle,
+      `expected tr_a commit (${trACommit}) before slow settle (${slowSettle})`
+    );
   });
 });

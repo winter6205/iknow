@@ -53,6 +53,7 @@ import type {
   ToolDef,
   ToolExecutionResult,
 } from "./tools/types.js";
+import { partitionConcurrencyWaves } from "./tools/concurrency-waves.js";
 import type { CancelKind, LoopTrace, TurnTrace } from "./loop-trace.js";
 import { computeTotals } from "./loop-trace.js";
 import type {
@@ -1218,6 +1219,56 @@ export function computeToolStopFlags(opts: {
   return { timedOut, cancelled };
 }
 
+type ToolCallView = { id: string; name: string; input: unknown };
+
+/**
+ * #620:commit in tool_use order as soon as the prefix has settled.
+ * Later results may finish first but stay buffered until earlier slots fill.
+ * executeAll still receives the whole wave (AC51/52); onSettled is the
+ * commit seam so the loop does not wait for the slowest call before the
+ * first result can hit disk.
+ */
+async function executeWaveAndCommit(opts: {
+  readonly wave: ReadonlyArray<ToolCallView>;
+  readonly deps: LoopEngineDeps;
+  readonly signal: AbortSignal | undefined;
+  readonly toolTimeout: number;
+  readonly results: ToolExecutionResult[];
+  readonly blocks: AnthropicContentBlock[];
+}): Promise<void> {
+  const slots: Array<ToolExecutionResult | undefined> = Array.from(
+    { length: opts.wave.length },
+    () => undefined
+  );
+  let next = 0;
+  const flushPrefix = async (): Promise<void> => {
+    while (next < slots.length && slots[next] !== undefined) {
+      const result = slots[next]!;
+      next += 1;
+      opts.results.push(result);
+      const encoded = opts.deps.adapter.encodeToolResults([result]);
+      opts.blocks.push(...encoded);
+      await commitMessagesOrThrow(opts.deps, [
+        { role: "user", content: encoded },
+      ]);
+    }
+  };
+  const waveResults = await opts.deps.executor.executeAll(
+    opts.wave,
+    opts.signal,
+    opts.toolTimeout,
+    opts.deps.conversationId,
+    async (result, index) => {
+      slots[index] = result;
+      await flushPrefix();
+    }
+  );
+  for (let i = 0; i < waveResults.length; i++) {
+    if (slots[i] === undefined) slots[i] = waveResults[i];
+  }
+  await flushPrefix();
+}
+
 /** 017 T5:工具阶段独立收敛,保持整回合追加与停止优先级不变。 */
 async function runToolPhase(opts: {
   readonly afterAssistantState: LoopState;
@@ -1239,26 +1290,24 @@ async function runToolPhase(opts: {
   }));
   const toolTimeout =
     opts.deps.toolTimeoutMs ?? opts.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  // #620 T3 (spec D4):逐调用串行驱动 —— 每个工具结果一拿到手立刻编码并经
-  // host 钩子上盘(单条 user message;encodeToolResults 是逐元素 map,逐调用
-  // 编码与批量编码逐块一致,故内存侧仍合并为一条 user message,行为不变)。
-  // Executor 接口零改动:既有 executeAll 实现(real / permission / aci /
-  // violation 包装)内部本就是逐调用串行,逐调用驱动语义等价。
+  const waves = partitionConcurrencyWaves(toolCallViews, (call) => {
+    const def = opts.deps.registry.get(call.name);
+    return (
+      (def as { aci?: { isConcurrencySafe?: boolean } } | undefined)?.aci
+        ?.isConcurrencySafe === true
+    );
+  });
   const results: ToolExecutionResult[] = [];
   const blocks: AnthropicContentBlock[] = [];
-  for (const call of toolCallViews) {
-    const [result] = await opts.deps.executor.executeAll(
-      [call],
-      opts.signal,
+  for (const wave of waves) {
+    await executeWaveAndCommit({
+      wave,
+      deps: opts.deps,
+      signal: opts.signal,
       toolTimeout,
-      opts.deps.conversationId
-    );
-    results.push(result);
-    const encoded = opts.deps.adapter.encodeToolResults([result]);
-    blocks.push(...encoded);
-    await commitMessagesOrThrow(opts.deps, [
-      { role: "user", content: encoded },
-    ]);
+      results,
+      blocks,
+    });
   }
   const toolResultMsg: AnthropicNativeMessage = {
     role: "user",
