@@ -12,6 +12,8 @@
 
 ### Docs
 
+- **horizon-653 包2 spec/plan（2026-08-24）**: `specs/653-horizon-pkg2-kernel.md` + `plans/653-horizon-pkg2-kernel.md`（沙箱纪律 + `isConcurrencySafe` 调度）；tracker #667–#670。
+
 - **horizon-653 包1 后文档对齐（2026-08-24）**: 入库 `docs/coding-agent-capability-gap.md`（状态栏≠环境现势；§6.4 内建 lazy 作废；后台 bash 已 bwrap、包2 对齐纪律）；`docs/STATUS.md` §1/§3/§4 同步可见闭环与 ACI/JSONL 口径。
 
 - **compact 保焦改为任务摘录（ADR-0026，2026-08-22）**: spec `specs/recent-user-tasks.md`、计划 `plans/recent-user-tasks.md`。会话不再常驻 `taskFocus`；wayfinder 地图 #594–#599 已关。T1–T3 已随 PR #607 落地。

@@ -97,7 +97,7 @@
 
 1. **可见闭环（horizon-653）**
    - 包1 感知：**已合入** PR #666（TUI Verify 终态 + 环境现势）。
-   - 包2 内核：后台沙箱纪律与前台对齐（S）→ 并行工具调度尊重 `isConcurrencySafe`（P）。待 `spec-driven-development`。
+   - 包2 内核：spec/plan `653-horizon-pkg2-kernel`（S→P）；实施未做。
 2. **会话小增强**
    - 可选会话导出/导入 JSON。澄清轮 / 设计审批 **defer**（#653 G5）。
 3. **观测最小集**
