@@ -37,7 +37,14 @@ import {
   MessageCommitError,
   ProtocolError,
   PromptTooLongError,
+  TransportRetryExhaustedError,
 } from "./errors.js";
+import {
+  isStalledToolLoop,
+  LOOP_DETECTED_TEXT,
+  toolLoopEventFromCall,
+  type ToolLoopEvent,
+} from "./tool-loop-detect.js";
 import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
@@ -117,7 +124,8 @@ function toDecision(
     case "emptyFinalResponse":
     case "cancelled":
     case "timeout":
-      return reason;
+    case "fused":
+      return reason === "fused" ? "nonSuccessStop" : reason;
     default:
       return "nonSuccessStop";
   }
@@ -277,6 +285,10 @@ export interface LoopEngineDeps {
    * throw(T4 契约),观察者异常由 safeEmitStream 吞咽,模型回合不受影响。
    */
   readonly envSnapshot?: { readonly cwd: string };
+  /**
+   * #672 T3:工具环检测。缺省 / true = 开；false = 关。
+   */
+  readonly detectToolLoop?: boolean;
 }
 
 /**
@@ -1146,7 +1158,10 @@ async function runModelPhase(opts: {
         cancelKind: "none",
       });
     }
-    if (err instanceof ProtocolError)
+    if (
+      err instanceof ProtocolError ||
+      err instanceof TransportRetryExhaustedError
+    )
       return modelStop({
         state: opts.state,
         started: opts.started,
@@ -1389,6 +1404,8 @@ async function stepWithTrace(opts: {
    * 更新零可观察行为。
    */
   readonly lastToolRef: { lastTool: string };
+  /** #672 T3:本 run 工具环事件（跨 step 累积；public step 每次新建）。 */
+  readonly toolLoopRef: { events: ToolLoopEvent[]; nextPhase: number };
 }): Promise<{
   transition: Transition;
   turn: TurnTrace | null;
@@ -1766,6 +1783,39 @@ async function stepWithTrace(opts: {
     );
   }
 
+  if (
+    toolPhase.transition.kind === "continue" &&
+    opts.deps.detectToolLoop !== false
+  ) {
+    const phaseId = opts.toolLoopRef.nextPhase;
+    opts.toolLoopRef.nextPhase += 1;
+    const byId = new Map(
+      toolPhase.toolCallViews.map((v) => [v.id, v] as const)
+    );
+    for (const result of toolPhase.toolResults) {
+      const view = byId.get(result.toolUseId);
+      if (view === undefined) continue;
+      opts.toolLoopRef.events.push(
+        toolLoopEventFromCall(view.name, view.input, result, phaseId)
+      );
+    }
+    if (isStalledToolLoop(opts.toolLoopRef.events)) {
+      const envelope = freezeMessage(
+        opts.deps.adapter.encodeUserText(LOOP_DETECTED_TEXT)
+      );
+      await commitMessagesOrThrow(opts.deps, [envelope]);
+      const fusedState = appendMessage({
+        state: toolPhase.transition.nextState,
+        msg: envelope,
+      });
+      return {
+        transition: { kind: "stop", reason: "fused", finalState: fusedState },
+        turn: toolPhase.turn,
+        modelUsage: turnResult.usage,
+      };
+    }
+  }
+
   return {
     transition: toolPhase.transition,
     turn: toolPhase.turn,
@@ -1805,6 +1855,7 @@ export async function step(
     signal,
     reactiveAttemptedRef: { attempted: false },
     lastToolRef: { lastTool: AGENT_STATUS_IDLE_TOOL },
+    toolLoopRef: { events: [], nextPhase: 0 },
   });
   return transition;
 }
@@ -1866,6 +1917,7 @@ export async function run(
   // 用户回合,初值 idle(本回合尚未跑过工具),每个工具批后更新为批内最后
   // 一个成功工具名;跨 step 共享,run 结束即弃。
   const lastToolRef = { lastTool: AGENT_STATUS_IDLE_TOOL };
+  const toolLoopRef = { events: [] as ToolLoopEvent[], nextPhase: 0 };
   while (true) {
     // #119 T7:compress 缝缺省(字段缺席)→ 跳过检查,行为零变化(byte-identical)。
     // 仅 turnCount 自增(>lastCompactTurn)后扫一次,避免每轮重复 estimate。
@@ -1928,6 +1980,7 @@ export async function run(
         onStream: opts?.onStream,
         reactiveAttemptedRef,
         lastToolRef,
+        toolLoopRef,
       });
     } catch (err) {
       if (err instanceof MaxTurnsExceeded) {

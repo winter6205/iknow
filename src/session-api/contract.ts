@@ -17,7 +17,7 @@ export const MAX_MESSAGE_CHARS = 8000;
 /** 022 Q1: Session API 消息返回壳。harness RunResult 投影，wire 不外露 messages/trace。 */
 export interface TurnAnswerDto {
   readonly finalText: string; // 映射 RunResult.finalText
-  readonly stopReason: StopReason; // 复用 harness 7 类 StopReason 类型
+  readonly stopReason: StopReason; // 复用 harness 8 类 StopReason 类型（含 fused）
   readonly turnCount: number; // 映射 RunResult.turnCount（每次 run() 从 0 起）
   /** T1: 单回合内所有非空 assistant thinking 文本（按块序）。空 thinking 跳过；无任何 thinking 时整字段省略。 */
   readonly thinking?: ThinkingView;

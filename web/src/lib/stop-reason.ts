@@ -12,6 +12,7 @@ export const STOP_REASON_LABELS: Record<string, string> = {
   emptyFinalResponse: "模型返回了空回答",
   cancelled: "请求已取消",
   timeout: "请求超时",
+  fused: "工具环停滞，本轮已熔断",
 };
 
 /** completed / 缺失 / 未知值 → null（调用方不渲染）。 */

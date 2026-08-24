@@ -15,6 +15,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import {
   buildThinkingParams,
   createRealAnthropicAdapter,
+  withTransportRetry,
+  translateAnthropicTransportFault,
   type LoopEngineDeps,
 } from "../harness/index.js";
 import { loadIknowEnv, type LlmEnv } from "../config/env.js";
@@ -99,21 +101,21 @@ export function withThinkingOverride(opts: {
     apiKey: env.llm.apiKey,
     baseURL: env.llm.baseUrl,
   });
-  const adapter = createRealAnthropicAdapter({
-    client,
-    model: env.llm.model,
-    maxTokens: env.llm.maxOutputTokens,
-    temperature: env.llm.temperature,
-    thinking: buildThinkingParams({
-      thinking: override.mode,
-      thinkingEffort: override.effort ?? "",
+  const adapter = withTransportRetry(
+    createRealAnthropicAdapter({
+      client,
+      model: env.llm.model,
+      maxTokens: env.llm.maxOutputTokens,
+      temperature: env.llm.temperature,
+      thinking: buildThinkingParams({
+        thinking: override.mode,
+        thinkingEffort: override.effort ?? "",
+      }),
     }),
-  });
+    { translate: translateAnthropicTransportFault }
+  );
   return {
+    ...deps,
     adapter,
-    executor: deps.executor,
-    registry: deps.registry,
-    maxTurns: deps.maxTurns,
-    ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
   };
 }

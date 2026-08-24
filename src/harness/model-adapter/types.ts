@@ -55,7 +55,8 @@ export type StopReason =
   | "protocolError" // assistant 回合协议结构错误,整回合不进入历史
   | "emptyFinalResponse" // 供应商报告成功停止但无可展示文本,不进入权威历史
   | "cancelled" // 017: signal abort(type-only;runtime deferred to T5)
-  | "timeout"; // 017: timeoutMs hit(type-only;runtime deferred to T5)
+  | "timeout" // 017: timeoutMs hit(type-only;runtime deferred to T5)
+  | "fused"; // #672 T3: 本 run 工具环停滞（只追加，不重排既有七值）
 
 /** 016 Q1 状态机 Transition(判别联合,向后兼容扩展)。 */
 export type Transition =

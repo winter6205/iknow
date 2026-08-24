@@ -170,6 +170,10 @@ export interface IknowEnv {
   /** #358 T1: 子代理配置臂(per-task wallclock; manager SIGTERM 计时器消费)。 */
   subagent: IknowSubagentEnv;
   /**
+   * #672 T3: 工具环检测（默认开）。env `IKNOW_TOOL_LOOP_DETECTION` 与 settings.loop.detectToolLoop。
+   */
+  loop?: { detectToolLoop: boolean };
+  /**
    * ADR-0019 (T1): workspace-root per-root state anchor, read from
    * `IKNOW_WORKSPACE_ROOT` via envOptional (canonical reader; empty/unset
    * → undefined). Consumers pass this into `resolveWorkspaceRoot({env})`
@@ -223,6 +227,15 @@ function envGet(opts: EnvGetOpts): string {
 function envOptional(opts: EnvGetOpts): string | undefined {
   const raw = envGet({ file: opts.file, key: opts.key });
   return raw.length > 0 ? raw : undefined;
+}
+
+function envOptionalBool(opts: EnvGetOpts): boolean | undefined {
+  const raw = envOptional(opts);
+  if (raw === undefined) return undefined;
+  const v = raw.trim().toLowerCase();
+  if (v === "0" || v === "false" || v === "off" || v === "no") return false;
+  if (v === "1" || v === "true" || v === "on" || v === "yes") return true;
+  return undefined;
 }
 
 interface EnvIntOpts {
@@ -609,5 +622,14 @@ export function loadIknowEnv(
       file,
       key: WORKSPACE_ROOT_ENV_KEY,
     }),
+    loop: {
+      detectToolLoop:
+        envOptionalBool({
+          file,
+          key: "IKNOW_TOOL_LOOP_DETECTION",
+        }) ??
+        mergedSettings.loop?.detectToolLoop ??
+        true,
+    },
   };
 }
