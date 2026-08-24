@@ -332,3 +332,45 @@ describe("TurnAnswerDto — T6 optional stopSummary field", () => {
     ]);
   });
 });
+
+// -- T2: TurnAnswerDto.verify surfaces passed outcome (byte-stable) ------------
+//
+// 此前 VerifyAnswerView.outcome 三态白名单缺 passed → hub 装配 gate
+// (hub.ts:1156-1163) 把 passed 落 undefined → VerifyAnswerView 字段缺席。
+// T2: passed 是合法终态 (OUTCOME_TO_STATUS 也已映射 passed → "achieved"),
+// 必须在 DTO 出现。abort / disabled 仍维持字段缺席 (verify-loop 内核
+// 行为, 不进 wire)。
+
+describe("TurnAnswerDto — T2 optional verify field (passed outcome)", () => {
+  it("accepts verify {outcome:'passed', rounds:N} alongside original keys (byte-stable)", () => {
+    const answer: TurnAnswerDto = {
+      finalText: "hi",
+      stopReason: "completed",
+      turnCount: 2,
+      verify: { outcome: "passed", rounds: 3 },
+    };
+    assert.equal(answer.verify?.outcome, "passed");
+    assert.equal(answer.verify?.rounds, 3);
+    assert.deepEqual(Object.keys(answer).sort(), [
+      "finalText",
+      "stopReason",
+      "turnCount",
+      "verify",
+    ]);
+  });
+
+  it("answer without verify exposes exactly the original keys (byte-stable)", () => {
+    // abort / disabled / 未触发 verify → verify 键缺席, 与既有模式一致。
+    const answer: TurnAnswerDto = {
+      finalText: "x",
+      stopReason: "maxTurns",
+      turnCount: 1,
+    };
+    assert.equal("verify" in answer, false);
+    assert.deepEqual(Object.keys(answer).sort(), [
+      "finalText",
+      "stopReason",
+      "turnCount",
+    ]);
+  });
+});

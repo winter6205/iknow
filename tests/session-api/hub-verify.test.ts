@@ -136,6 +136,33 @@ describe("SessionHub postMessage — verify-loop 装配 (T8)", () => {
     }
   );
 
+  // T2 (#458 / #128 wire): verify 闭环最终判定为 passed 时,
+  // VerifyAnswerView.outcome 必须 = "passed" 且 rounds 落在 wire DTO 上
+  // (此前三态白名单缺 passed → 字段缺席, 与 passed 实际是合法终态矛盾)。
+  // abort / disabled 仍维持字段缺席 (本测试不覆盖, 见 contract.test.ts)。
+  it.skipIf(!hasBwrap())(
+    'verifyConfig 配置 + 验证 exit 0 → DTO 出现 verify.outcome="passed" rounds=N (T2 wire)',
+    async () => {
+      rmSync(markerPath, { force: true });
+      const hub = makeHub({
+        verifyConfig: { command: passScript },
+        responses: [assistantResult({ texts: ["fixed"] })],
+      });
+      const { session } = await hub.createSession();
+      const res = await hub.postMessage({
+        conversationId: session.conversation_id,
+        text: "fix this",
+      });
+      // T2: passed 是合法终态, 必须挂到 VerifyAnswerView DTO 上。
+      // 与 failed/unstable/escalated 同 surface;abort/disabled 仍字段缺席
+      // (byte-stable, 仅契约测试单独钉住)。
+      assert.deepEqual(res.turn.answer.verify, {
+        outcome: "passed",
+        rounds: 1,
+      });
+    }
+  );
+
   it.skipIf(!hasBwrap())(
     "verifyConfig 配置 + 验证真失败 → 注入失败信封 (下轮 priorMessages)",
     async () => {

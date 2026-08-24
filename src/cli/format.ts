@@ -241,12 +241,15 @@ export function formatRunHuman(opts: FormatRunHumanOpts): string {
 }
 
 /**
- * #128 M3: 验证闭环最终判定的 CLI 人类可读报告 (failed / unstable / escalated)。
- * 仅验证配置且最终判定非 passed/disabled/aborted 时由 chat 装配层调用;
- * 未触发返回 undefined (不污染既有 output 形状)。
+ * #128 M3: 验证闭环最终判定的 CLI 人类可读报告。
+ * T2 (#458): 参数联合增加 "passed" 成功态; abort / disabled 不进 wire。
+ * chat 装配层 chat-session.ts:354 的 gate 维持三态 (failed/unstable/escalated),
+ * 因此 chat 路径下本函数仍仅接收失败面; hub 路径下 hub.ts:1156 把 passed 也
+ * 派生到 VerifyAnswerView DTO, 但本函数目前仅 chat 调用, 类型约束依调用点
+ * 自然放宽 (passed 分支保留, 供未来 chat gate 扩展时无回归)。
  */
 export function formatVerifyReport(
-  outcome: "failed" | "unstable" | "escalated",
+  outcome: "failed" | "unstable" | "escalated" | "passed",
   rounds: number
 ): string {
   const label =
@@ -254,7 +257,13 @@ export function formatVerifyReport(
       ? "验证未通过"
       : outcome === "unstable"
         ? "验证不稳定（套件干扰）"
-        : "验证耗尽（升级后仍未通过）";
+        : outcome === "escalated"
+          ? "验证耗尽（升级后仍未通过）"
+          : "验证通过";
+  // passed 是合法终态, 不携带"未判完成"警示后缀; 其余三态保持既有文案。
+  if (outcome === "passed") {
+    return `[验证] ${label}（${rounds} 轮）`;
+  }
   return `[验证] ${label}（${rounds} 轮）—— 未判完成，结果以验证为准。`;
 }
 

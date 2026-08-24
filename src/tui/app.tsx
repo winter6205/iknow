@@ -141,6 +141,24 @@ import {
   agentStatusFromMessages,
   type AgentStatusSnapshot,
 } from "../harness/agent-status.js";
+// #653 G1 T5:环境现势独立 slot —— 与 ADR-0028 状态栏同 chrome 区、并列、
+// 平行独立流。EnvironmentPane 不读 ADR-0028 状态栏的事件 / 快照 / 账本
+// 读取器(grep 守卫钉死,见 tests/tui/environment-pane.test.tsx)。
+import {
+  EnvironmentPane,
+  envSnapshotFromEvent,
+  envSnapshotLines,
+} from "./environment-pane.js";
+import type { EnvSnapshot } from "../harness/env-snapshot.js";
+// #653 包1 T3:TUI verify 闭环终态人读 banner(HITL + auto 双模式 passed /
+// failed / unstable / escalated)。wire 已透到 bridge.TuiPostResult.verify;
+// 投影 + 渲染壳见 verify-banner.tsx(纯函数可单测)。
+import {
+  projectVerifyBanner,
+  VerifyBannerStrip,
+  verifyFromWire,
+  type VerifySlot,
+} from "./verify-banner.js";
 import {
   INPUT_MAX_LINES as MAX_INPUT_LINES,
   inputVisibleLineCount,
@@ -290,6 +308,12 @@ export function chromeReserveRows(opts: {
   /** agent 现势显示行数（agentStatusLines 实际产出，0-6）。缺省 0 →
    *   不占行（无快照 / 组件渲染 null / 旧行为兼容）。 */
   readonly agentStatusRows?: number;
+  /** #653 G1 T5:环境现势独立 slot 行数（envSnapshotLines 实际产出，0-2）。
+   *   缺省 0 → 不占行（无事件 / 组件渲染 null / 旧行为兼容）。 */
+  readonly envPaneRows?: number;
+  /** #458 包2 T3:verify 闭环终态 banner 行数（projectVerifyBanner 实际产出，
+   *   0 或 1）。缺省 0 → 不占行（无 verify / slot=none → 组件渲染 null）。 */
+  readonly verifyRows?: number;
 }): number {
   const inputContentRows = Math.max(
     1,
@@ -299,6 +323,8 @@ export function chromeReserveRows(opts: {
   const pickerRows = opts.pickerRows ?? 0;
   const panelRows = opts.panelRows ?? 0;
   const agentStatusRows = opts.agentStatusRows ?? 0;
+  const envPaneRows = opts.envPaneRows ?? 0;
+  const verifyRows = opts.verifyRows ?? 0;
   const noticeTotal = opts.noticeRows > 0 ? opts.noticeRows + 1 : 0;
   const modalTotal = modalRows > 0 ? modalRows + 1 : 0;
   const pickerTotal = pickerRows > 0 ? pickerRows + 1 : 0;
@@ -315,6 +341,8 @@ export function chromeReserveRows(opts: {
     pickerTotal +
     panelRows +
     agentStatusRows +
+    envPaneRows +
+    verifyRows +
     (opts.bgLine ? 1 : 0)
   );
 }
@@ -466,6 +494,22 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     const snapshot = agentStatusFromMessages(initial.messages);
     return snapshot === null ? {} : { [id]: snapshot };
   });
+  // #653 G1 T5:环境现势单 state 槽 —— 与 ADR-0028 状态栏平行的独立流。
+  // env 不属于会话(全局共享):不按 conversationId 分键,事件到达即整体
+  // 替换(replace-on-event,投影产完整独立快照);尚无事件 → null → 面板
+  // 不渲染。数据只进本 UI,绝不回流模型向任何字段。
+  const [envSnapshot, setEnvSnapshot] = useState<EnvSnapshot | null>(
+    () => null
+  );
+  // #458 包2 T3:verify 终态槽(conversationId → VerifySlot 判别联合)。
+  // none = 缺 verify(合法态 → banner 静默);ok = 4 终态;unavailable =
+  // wire 形状非法(degraded)。sendTurn 入口清槽(防上一回合判定残留到
+  // 下一回合 running 阶段),runTurnOnce 收到 resp 后经 verifyFromWire
+  // runtime 校验写入。resume 时 transcript 无 VerifyAnswerView → 槽空,
+  // 不从 transcript 复刻第二份账本(与 agent-status 同纪律)。
+  const [verifySlots, setVerifySlots] = useState<Record<string, VerifySlot>>(
+    {}
+  );
   // T6 (D5): thinking 折叠面板展开态；Ctrl+O 折叠/展开，/thinking 为开关（思考Enabled）。
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
   // thinking 控制臂开关（/thinking 切换，与折叠态解耦）。初始基线 =
@@ -1135,6 +1179,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     });
     const controller = new AbortController();
     aborters.current.set(targetId, controller);
+    // T3:清掉上一回合 verify 终态 —— 新 turn 进入 running 后 banner 不再
+    // 显示旧判定(与 crunchedOf 入口清空同款 turn-boundary 纪律)。
+    setVerifySlots((prev) => {
+      if (!(targetId in prev)) return prev;
+      const next = { ...prev };
+      delete next[targetId];
+      return next;
+    });
     const promise = runTurnOnce(targetId, text, controller);
     inflightPromises.current.add(promise);
     void promise.finally(() => inflightPromises.current.delete(promise));
@@ -1209,6 +1261,15 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           }));
         }
       }
+      if (event.type === "env_snapshot") {
+        // #653 G1 T5:环境现势独立 slot —— 与 ADR-0028 投影平行独立流。
+        // env 不属于会话,单 state 槽整体替换(envSnapshotFromEvent 产完整
+        // 独立快照,不依赖旧值);只进本 UI,绝不回流任何模型向字段。
+        const nextEnv = envSnapshotFromEvent(event);
+        if (nextEnv !== null) {
+          setEnvSnapshot(nextEnv);
+        }
+      }
     };
     try {
       // thinking override gate：仅当用户实际改了状态才透传（初始化即 env
@@ -1233,6 +1294,19 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       // B1: 打断反馈 —— cancelled 时 bridge 透传 true/false;非 cancelled
       // (completed 等) → undefined,notice 分支只对 cancelled 生效。
       interrupted = resp.interrupted;
+      // T3 (#458 包2):verify 终态入槽。verifyFromWire 做 runtime boundary
+      // 校验(4 outcome + rounds 形状),非法 wire → unavailable(degraded 渲染,
+      // 不抛错污染 React 栈);none → 从 map 摘除该会话键(banner 静默)。
+      setVerifySlots((prev) => {
+        const next = verifyFromWire(resp.verify);
+        if (next.kind === "none") {
+          if (!(targetId in prev)) return prev;
+          const without = { ...prev };
+          delete without[targetId];
+          return without;
+        }
+        return { ...prev, [targetId]: next };
+      });
     } catch (err) {
       stopReason = "protocolError";
       setNotice({ lines: [`turn 失败：${describeError(err)}`] });
@@ -1983,6 +2057,23 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // subagentPanelRows 同款入账；非 chat 视图 / 尚无快照 → 0（组件渲染 null）。
   const agentStatusRowBudget =
     view === "chat" ? agentStatusLines(agentStatus, cols).length : 0;
+  // #653 G1 T5:环境现势独立 slot 行数投影(ADR-0028 状态栏旁;非 chat
+  // 视图 / 尚无事件 → 0,组件渲染 null)。
+  const envPaneRowBudget =
+    view === "chat" ? envSnapshotLines(envSnapshot, cols).length : 0;
+  // #458 包2 T3:verify 闭环终态 banner 行数投影 —— active 会话槽 + 模式
+  // (hitl / auto),纯函数 projectVerifyBanner 实际行数(0 / 1)。
+  // 仅 chat 视图入账;切走会话不渲染(与 crunchedOf 同款归属校验)。
+  const verifyMode: "hitl" | "auto" =
+    permMode === "full_auto" ? "auto" : "hitl";
+  const verifySlot: VerifySlot | null =
+    view === "chat" && active.conversationId !== undefined
+      ? (verifySlots[active.conversationId] ?? { kind: "none" })
+      : { kind: "none" };
+  const verifyRowBudget =
+    view === "chat"
+      ? projectVerifyBanner(verifySlot, verifyMode, cols).length
+      : 0;
   const viewportRows = Math.max(
     5,
     rows -
@@ -1995,6 +2086,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         pickerRows: pickerRowsForBudget,
         panelRows: subagentPanelRows,
         agentStatusRows: agentStatusRowBudget,
+        envPaneRows: envPaneRowBudget,
+        verifyRows: verifyRowBudget,
       })
   );
   // 列表视图（ListView 路径）：底部仅 notice 占用，与 headroom 2 行。
@@ -2122,6 +2215,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             )}
         </box>
       )}
+      {/* #458 包2 T3:verify 闭环终态 banner —— 滚动区外、mode 行与输入框
+          之间。slot=none → 组件渲染 null(静默,无虚假提示);HITL 直显,
+          full_auto 加 [auto] 前缀。行账经 chromeReserveRows.verifyRows 入账。 */}
+      {view === "chat" && (
+        <VerifyBannerStrip slot={verifySlot} mode={verifyMode} cols={cols} />
+      )}
       {view === "chat" && (
         <PromptInput
           value={inputValue}
@@ -2212,6 +2311,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           in-flight 工具指示仍走 ContextBar 尾缀（liveToolRuns 派生），互不合并。 */}
       {view === "chat" && (
         <AgentStatusPanel snapshot={agentStatus} cols={cols} />
+      )}
+      {/* #653 G1 T5:环境现势独立 slot（与 ADR-0028 状态栏同 chrome 区、
+          并列、独立数据源 —— env_snapshot 平行流,绝不复用 agent_status
+          事件 / 快照 / 渲染路径;无快照渲染 null,行数 0 → chromeReserveRows
+          .envPaneRows）。事件在回合边界刷新,给人不给模型。 */}
+      {view === "chat" && (
+        <EnvironmentPane snapshot={envSnapshot} cols={cols} />
       )}
       {/* #358 T7: 子代理状态面板（ContextBar 下方）。条件渲染 —
           无可见子代理行时返回 null（行数 0 → chromeReserveRows.panelRows=0）；

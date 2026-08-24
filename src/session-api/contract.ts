@@ -40,16 +40,17 @@ export interface TurnAnswerDto {
    */
   readonly interrupted?: boolean;
   /**
-   * #128 失败自动修正闭环（M3 surface）：仅 verify 配置且最终判定为
-   * 真失败 / 不稳定 / 升级后仍失败时存在。passed / disabled / aborted → 字段缺席
+   * #128 失败自动修正闭环（M3 surface）：verify 配置且最终判定为
+   * 真失败 / 不稳定 / 升级后仍失败 / 通过时存在。disabled / aborted → 字段缺席
    * （byte-stable，与 stopSummary / interrupted 同模式）。
    */
   readonly verify?: VerifyAnswerView;
 }
 
-/** #128：验证闭环最终判定的 wire 视图（rounds + outcome，供 UI surface）。 */
+/** #128：验证闭环最终判定的 wire 视图（rounds + outcome，供 UI surface）。
+ * T2 (#458)：outcome 增加 "passed" 成功态；abort / disabled 仍不进 wire。 */
 export interface VerifyAnswerView {
-  readonly outcome: "failed" | "unstable" | "escalated";
+  readonly outcome: "failed" | "unstable" | "escalated" | "passed";
   readonly rounds: number;
 }
 

@@ -1150,14 +1150,16 @@ export class SessionHub {
               verifyOutcome =
                 "outcome" in runOutcome ? runOutcome.outcome : undefined;
               verifyRecords = "records" in runOutcome ? runOutcome.records : [];
-              // #128 M3: verify 最终判定 (failed / unstable / escalated) surface 到
-              // DTO, 避免"模型声称完成但验证没过"仍显示 completed (SC2/SC6 交付面)。
-              // 仅 verify 分支有 outcome/rounds; 裸 run 分支无 (字段缺席)。
+              // #128 M3: verify 最终判定 (failed / unstable / escalated / passed)
+              // surface 到 DTO, 避免"模型声称完成但验证没过"仍显示 completed
+              // (SC2/SC6 交付面)。T2: passed 成功态同样上 wire; abort/disabled
+              // 仍字段缺席。仅 verify 分支有 outcome/rounds; 裸 run 分支无。
               verifyView =
                 "outcome" in runOutcome &&
                 (runOutcome.outcome === "failed" ||
                   runOutcome.outcome === "unstable" ||
-                  runOutcome.outcome === "escalated")
+                  runOutcome.outcome === "escalated" ||
+                  runOutcome.outcome === "passed")
                   ? { outcome: runOutcome.outcome, rounds: runOutcome.rounds }
                   : undefined;
               // Violation kill → surface protocolError so the SPA client can

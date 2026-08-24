@@ -123,7 +123,10 @@ _Avoid_: 按 token 或字数切窗；拆开一对 `tool_use`/`tool_result`
 _Avoid_: taskFocus；当前任务卡；每回合或压缩时让 LLM 填卡；把摘录自己再抽成用户任务句
 
 **状态栏**: 每次即将调模型前由 harness 算出的现势，以 **user** 消息追加在 `messages` 末尾（含同一用户回合内 tool loop）；旧栏留在历史上，不替换、不写 `deps.system`；UI 只读同一份，in-flight 只给 TUI。字段仅 `last_tool`（本回合尚未跑过工具则为 idle）以及有未勾项时才出现的 todo 段（只投影 `- [ ]` 行；文件缺席 / 空 / 全勾则整段缺席）。ADR-0028。
-_Avoid_: 每轮替换/删除旧栏；写进 system；把 TUI 当主物；与 context usage (display) 混名；让 LLM 维护栏；把栏接入 verify；每跳塞任务摘录/cwd/技能清单；把调模型时的 in-flight 写进栏；taskFocus / 当前任务卡；空清单仍印 todo 段；全勾后栏里带 `- [x]`；用「本跳是否调用过 todo_write」当在场条件；政策散文进栏
+_Avoid_: 每轮替换/删除旧栏；写进 system；把 TUI 当主物；与 context usage (display) 混名；让 LLM 维护栏；把栏接入 verify；每跳塞任务摘录/cwd/技能清单；把调模型时的 in-flight 写进栏；taskFocus / 当前任务卡；空清单仍印 todo 段；全勾后栏里带 `- [x]`；用「本跳是否调用过 todo_write」当在场条件；政策散文进栏；把 **环境现势**（cwd/git/diff）塞进本栏
+
+**环境现势**: 给人看的工作区快照（至少 cwd / git 摘要 / diff 要点），投放在 TUI（或等价）人读面；**不**写入 ADR-0028 状态栏 user 消息，也**不**充当 verify 输入。#655（G1）验收画像锁定。
+_Avoid_: 状态栏；agent-status；把 cwd/git/diff 每跳追加进 `messages`；与 context usage (display) 混名
 
 **compact reason**: 触发判据返回的分类标识，取值 `below_token_threshold` | `messages_too_few` | `windowed` | `full_summary`，单源 `src/harness/compress/index.ts:evaluateCompactTrigger()`；手动 `/compact`（hub.compactSession）与 loop-engine proactive 两条路径共用同一函数返回值，决定 UI 文案分支与 wire 字段（`CompactSessionResponse.reason`）。
 _Avoid_: 「未达阈值」「压缩成功」等 UI 字面字符串直接出现在业务代码；reason 字面量在 hub/loop-engine 多处内联（应经 `compactReasonFor` SSOT helper）；把 reason 错放成 `LoopTrace` / `LlmCallRecord` 字段
@@ -213,6 +216,7 @@ _Avoid_: 把发现的工具插回注册序中部（破 KV cache 前缀）；只�
 - **Session HTTP -> run() -> AssistantTurnResult -> SessionHub**: session-api host 路径；messages 每回合投影到 UI
 - **正常模式 vs 自动模式**: 默认 HITL 与 `/goal` 循环是两套判断逻辑模块，共用判官系统；不是一条 `goal ?? query` 链
 - **状态栏 vs context usage (display)**: 状态栏是给模型的现势快照；context usage (display) 是给人看的 token 用量条
+- **状态栏 vs 环境现势**: 状态栏给模型（`last_tool` + open todos）；环境现势给人（cwd/git/diff），不进状态栏 user 消息（#655）
 - **状态栏 vs 任务摘录**: 摘录只在 compact 时贴用户原话；状态栏每轮由代码现算并追加
 - **状态栏 vs append-only messages**: 栏走同一条追加纪律；纠错靠新栏，不靠从历史上抠掉旧栏
 

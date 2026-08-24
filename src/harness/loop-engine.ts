@@ -81,6 +81,7 @@ import {
   AGENT_STATUS_IDLE_TOOL,
   computeAgentStatusSnapshot,
 } from "./agent-status.js";
+import { readEnvSnapshot } from "./env-snapshot.js";
 
 /**
  * 把任意 reason 字符串安全映射为 TraceErrorType (消除 as 强转)。
@@ -265,6 +266,16 @@ export interface LoopEngineDeps {
    * agent-status.ts(读失败当无 todo 段,不抛进模型回合)。
    */
   readonly agentStatus?: { readonly todoDir: string };
+  /**
+   * #653 G1 T5 / DESIGN-ENVIRONMENT-PRESENT:环境现势事件缝(可选)。字段
+   * 在场 = stepWithTrace 每次即将调用模型前,在 appendAgentStatusBar 之后的
+   * 同一回合边界计算点,把 readEnvSnapshot({cwd}) 的产物经 safeEmitStream
+   * 发 `env_snapshot` 流事件(与 agent_status 平行的独立流;只给宿主 UI,
+   * 绝不进 messages / verify / ADR-0028 栏)。字段缺席 → 零 IO、零事件
+   * (ask / worker / 既有 stub 装配 byte-identical)。readEnvSnapshot 永不
+   * throw(T4 契约),观察者异常由 safeEmitStream 吞咽,模型回合不受影响。
+   */
+  readonly envSnapshot?: { readonly cwd: string };
 }
 
 /**
@@ -337,6 +348,29 @@ async function appendAgentStatusBar(
     state,
     msg: deps.adapter.encodeUserText(snapshot.text),
   });
+}
+
+/**
+ * #653 G1 T5 / DESIGN-ENVIRONMENT-PRESENT:在 appendAgentStatusBar 之后的
+ * 同一回合边界计算点,把环境现势快照经 safeEmitStream 发 `env_snapshot`
+ * 流事件 —— 与 `agent_status` 平行的**独立**事件流(人读 chrome 数据源,
+ * 给 TUI EnvironmentPane;给人不给模型)。**不**复用 agent_status 事件 /
+ * 快照结构,**不**追加任何消息(state 原样返回),**不**进 messages /
+ * verify / ADR-0028 栏。
+ *
+ * deps.envSnapshot 缺席 → 零 IO 早退(ask / worker / 既有装配零行为变化)。
+ * readEnvSnapshot 永不 throw(T4:git 失败 → git 字段全 null、cwd 保留,
+ * EXIT degraded);观察者异常由 safeEmitStream 吞咽,模型回合不受影响。
+ */
+async function appendEnvSnapshot(
+  state: LoopState,
+  deps: LoopEngineDeps,
+  onStream?: (event: HarnessStreamEvent) => void
+): Promise<LoopState> {
+  if (deps.envSnapshot === undefined) return state;
+  const snapshot = await readEnvSnapshot({ cwd: deps.envSnapshot.cwd });
+  safeEmitStream(onStream, { type: "env_snapshot", snapshot });
+  return state;
 }
 
 /** Ctrl+C / signal abort 触发的中断 system 消息固定文案（#392 T4 / G3 #388）。
@@ -1354,8 +1388,15 @@ async function stepWithTrace(opts: {
     opts.lastToolRef.lastTool,
     opts.onStream
   );
+  // #653 G1 T5:环境现势快照 —— 与 agent_status 同一回合边界(栏先、
+  // 环境后)的平行独立流;只给宿主 UI,不影响 messages。
+  const barStateWithEnv = await appendEnvSnapshot(
+    barState,
+    opts.deps,
+    opts.onStream
+  );
   const firstPhase = await runModelPhase({
-    state: barState,
+    state: barStateWithEnv,
     deps: opts.deps,
     signal: opts.signal,
     started,
@@ -1374,9 +1415,15 @@ async function stepWithTrace(opts: {
             opts.lastToolRef.lastTool,
             opts.onStream
           );
-          effectiveState = compactedWithBar;
+          // #653 G1 T5:reactive compact 重试的同一回合边界同样发环境现势。
+          const compactedWithEnv = await appendEnvSnapshot(
+            compactedWithBar,
+            opts.deps,
+            opts.onStream
+          );
+          effectiveState = compactedWithEnv;
           const compressedAttempt = await runModelPhase({
-            state: compactedWithBar,
+            state: compactedWithEnv,
             deps: opts.deps,
             signal: opts.signal,
             started,
