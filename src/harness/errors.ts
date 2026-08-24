@@ -44,6 +44,7 @@ export class PromptTooLongError extends ProtocolError {
 
 /**
  * #672 T2: ModelAdapter 传输重试耗尽。typed 失败，禁止用裸 `Error` 表示。
+ * loop-engine 将其映射为 StopReason `protocolError`（整回合不进历史）。
  */
 export class TransportRetryExhaustedError extends Error {
   override readonly name = "TransportRetryExhaustedError";

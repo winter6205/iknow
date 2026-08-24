@@ -13,6 +13,7 @@ import {
   MessageCommitError,
   PromptTooLongError,
   ProtocolError,
+  TransportRetryExhaustedError,
 } from "../../src/harness/errors.ts";
 import { raceModel, run, step } from "../../src/harness/loop-engine.ts";
 import type { LoopAdapter } from "../../src/harness/loop-engine.ts";
@@ -429,6 +430,31 @@ describe("loop engine S9: protocol error turn", () => {
     assert.equal(result.finalText, null);
     // Executor was NEVER invoked on the bad-turn path.
     assert.equal(executorCallCount, 0);
+  });
+
+  it("TransportRetryExhaustedError surfaces as stopReason=protocolError, not throw", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const failingModel = Object.freeze({
+      encodeUserText: (t: string) =>
+        ({
+          role: "user",
+          content: [{ type: "text", text: t }],
+        }) as AnthropicNativeMessage,
+      encodeToolResults: () => undefined as never,
+      step: async (): Promise<AssistantTurnResult> => {
+        throw new TransportRetryExhaustedError(3, new Error("http:429"));
+      },
+    });
+    const { result } = await run("go", {
+      adapter: failingModel,
+      executor: createExecutor(reg),
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "protocolError");
+    assert.equal(result.messages.length, 1);
+    assert.equal(result.finalText, null);
   });
 });
 

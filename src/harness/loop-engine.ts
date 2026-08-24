@@ -37,6 +37,7 @@ import {
   MessageCommitError,
   ProtocolError,
   PromptTooLongError,
+  TransportRetryExhaustedError,
 } from "./errors.js";
 import {
   isStalledToolLoop,
@@ -1157,7 +1158,10 @@ async function runModelPhase(opts: {
         cancelKind: "none",
       });
     }
-    if (err instanceof ProtocolError)
+    if (
+      err instanceof ProtocolError ||
+      err instanceof TransportRetryExhaustedError
+    )
       return modelStop({
         state: opts.state,
         started: opts.started,

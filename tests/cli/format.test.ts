@@ -125,6 +125,14 @@ describe("formatRunHuman", () => {
     assert.ok(out.includes("stop=timeout"));
   });
 
+  it("renders stop=fused for fused StopReason", () => {
+    const out = formatRunHuman({
+      result: mkResult({ finalText: null, stopReason: "fused" }),
+      trace: mkTrace([]),
+    });
+    assert.ok(out.includes("stop=fused"));
+  });
+
   // -- B1: Ctrl+C 打断反馈（interruptNote 前缀） -------------------------------
 
   it("cancelled + interruptNote=已保存 → 输出含 ⏹ 已打断 与 已保存", () => {

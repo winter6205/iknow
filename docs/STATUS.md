@@ -9,13 +9,14 @@
 
 ### 1.1 运行时核心
 
-| 能力                  | 说明                                                                                                                                       | 位置                                           |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------- |
-| Agent 执行层          | harness foundation（loop-engine + anthropic-adapter + executor / registry）+ ACI 装饰层（条件装配下远多于 8 件，见 `registry` / gap 文）   | `src/harness/`（含 `src/harness/aci/`）        |
-| 授权（per-tool-call） | harness ACI 装饰层逐次工具调用授权                                                                                                         | `src/harness/aci/`                             |
-| 配置加载              | `.env` / `.env.local` + `process.env`；密钥只读 env 名                                                                                     | `src/config/env.ts`                            |
-| LLM 配置单承载        | `settings.llm.model` 字面值 + `settings.llm.apiKey` 字面/占位符 + `llm.fallback`；`IKNOW_LLM_API_KEY_ENV`/`IKNOW_LLM_MODEL` 退役(ADR-0015) | `src/config/settings.ts` + `src/config/env.ts` |
-| **会话持久化**        | `~/.iknow` 跨进程池 + SessionStore JSON v2(#120)                                                                                           | `src/session-api/store/`                       |
+| 能力                  | 说明                                                                                                                                       | 位置                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| Agent 执行层          | harness foundation（loop-engine + anthropic-adapter + executor / registry）+ ACI 装饰层（条件装配下远多于 8 件，见 `registry` / gap 文）   | `src/harness/`（含 `src/harness/aci/`）                                          |
+| 故障恢复              | FaultClass（retry/fuse/none）；ModelAdapter 有界传输重试；工具环 `StopReason: fused` + LOOP_DETECTED；`src/harness/verify/` 零改           | `src/harness/fault-class.ts` + `with-transport-retry.ts` + `tool-loop-detect.ts` |
+| 授权（per-tool-call） | harness ACI 装饰层逐次工具调用授权                                                                                                         | `src/harness/aci/`                                                               |
+| 配置加载              | `.env` / `.env.local` + `process.env`；密钥只读 env 名                                                                                     | `src/config/env.ts`                                                              |
+| LLM 配置单承载        | `settings.llm.model` 字面值 + `settings.llm.apiKey` 字面/占位符 + `llm.fallback`；`IKNOW_LLM_API_KEY_ENV`/`IKNOW_LLM_MODEL` 退役(ADR-0015) | `src/config/settings.ts` + `src/config/env.ts`                                   |
+| **会话持久化**        | `~/.iknow` 跨进程池 + SessionStore JSON v2(#120)                                                                                           | `src/session-api/store/`                                                         |
 
 ### 1.2 交互表面（I1–I3）
 
@@ -100,7 +101,7 @@
    - 包1 感知：**已合入** PR #666（TUI Verify 终态 + 环境现势）。
    - 包2 内核：**已合入** PR #671（沙箱纪律 + `isConcurrencySafe` 调度）。
 2. **可靠性 / 工作流**
-   - 故障恢复：**spec/plan 已开** `specs/672-fault-recovery.md`（#672 清图；T1 FaultClass → T2 传输重试 → T3 环检测+`fused`）。澄清轮 / 设计审批仍 defer。手动 `/compact` 不走 token 门挂 #270，不在 672 spec。
+   - 故障恢复：**已在工作树落地**（T1 FaultClass → T2 传输重试 → T3 环检测+`fused`；PR #683/#684/#685）。澄清轮 / 设计审批仍 defer。手动 `/compact` 不走 token 门挂 #270，不在 672 spec。
 3. **观测最小集**
    - 结构化日志：conversation_id、turn、tool 耗时、是否 llm。
 

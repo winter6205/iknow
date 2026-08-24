@@ -4,6 +4,8 @@
 
 ### Feature
 
+- **故障恢复（#672，2026-08-25）**: FaultClass 闭集、`ModelAdapter.step` 有界传输重试、工具环 `StopReason: fused` + LOOP_DETECTED。传输耗尽映射为 `protocolError` 停止。PR #683/#684/#685。
+
 - **Harness 包2：沙箱纪律 + 并行工具调度（horizon-653，PR #671，2026-08-25）**: 前台与后台 `bash` 共用同一套 bwrap 围栏；同一 tool 阶段连续 `isConcurrencySafe` 调用重叠执行，unsafe 串行，结果顺序与 `tool_use` 一致。spec/plan 归档 `docs/archive/025-retire-completed-specs-and-plans/`。
 
 - **TUI Verify 终态可见 + 环境现势（horizon-653 包1，PR #666，2026-08-24）**: HITL 与自动模式在 TUI 显示验证成败（`VerifyBanner`，宿主投影含 `passed`）；人读 **环境现势**（cwd / git / diff，≤2000 codepoints）挂 chrome，不写入 ADR-0028 状态栏。spec/plan 归档见 `docs/archive/025-retire-completed-specs-and-plans/`。
@@ -13,8 +15,6 @@
 - **移除 `.json` 兼容双写镜像（#629, 2026-08-23）**: `SessionStore.save()` 与 `persistHeadMove()` 不再写 `<id>.json` 兼容镜像 —— 单文件 JSONL 是会话历史唯一权威形态。`load()` 仍保留 `.json` fallback 作为迁移窗口（#619 T2 的 legacy-only 758 个 session 一次性迁移脚本未跑前不能下刀）。`delete()` 仍遍历两条路径；`list()` 仍 `.jsonl + .json` dedupe。`jsonl.test.ts` / `jsonl-migration.test.ts` / `rewind.test.ts` / `list-exposes-workspace-root.test.ts` 的镜像契约测试删除或更新；直读 `.json` 的 `http.test.ts` / `cross-entry-consistency.test.ts` / `hub.test.ts` / `tui-cross-entry.test.ts` / `serve.test.ts` 迁去读 JSONL 头记录或 `store.load()`。`hub.ts:1823` / `cli/chat-session.ts:824,1147` / `cli/slash.ts:29` 措辞同步；`plans/session-jsonl-resume.md` / `specs/session-jsonl-resume.md` / `docs/adr/0027-session-jsonl-transcript.md` 同步。
 
 ### Docs
-
-- **故障恢复路线收口（#672，2026-08-25）**: wayfinder 清图；`specs/672-fault-recovery.md` + `plans/672-fault-recovery.md` + ADR-0029（FaultClass 并行 StopReason，追加 `fused`）。落地序 T1→T2→T3，尚未写代码。
 
 - **horizon-653 包2 spec/plan（2026-08-24）**: `specs/653-horizon-pkg2-kernel.md` + `plans/653-horizon-pkg2-kernel.md`（沙箱纪律 + `isConcurrencySafe` 调度）；tracker #667–#670。现已落地并归档。
 

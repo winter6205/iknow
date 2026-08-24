@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it, vi } from "vitest";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
+import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
+import { createRegistry } from "../../src/harness/tools/registry.ts";
+import { createExecutor } from "../../src/harness/tools/executor.ts";
 import {
   buildThinkingParams,
   createRealAnthropicAdapter,
@@ -192,6 +195,50 @@ describe("subagent worker: runWorkerOnce 端到端 (stub-model + 全 deps)", () 
     });
     assert.equal(env.status, "failed");
     assert.equal(env.reason, "protocolError");
+  });
+
+  it("672 SC: stopReason fused → failed envelope, not ok", async () => {
+    const boom = createStubTool({
+      name: "boom",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { n: { type: "number" } },
+        required: ["n"],
+      },
+      next: () => {
+        throw new Error("same boom");
+      },
+    });
+    const registry = createRegistry([boom]);
+    const responses = [] as ReturnType<typeof assistantResult>[];
+    for (let i = 0; i < 8; i += 1) {
+      responses.push(
+        assistantResult({
+          texts: [],
+          toolCalls: [{ id: `call_${i}`, name: "boom", input: { n: 1 } }],
+        })
+      );
+    }
+    responses.push(
+      assistantResult({
+        texts: ["done"],
+        toolCalls: [],
+        supplierStop: "success",
+      })
+    );
+    const env = await runWorkerOnce({
+      workerEnvelope: { task: "go", sandboxRoot: "/tmp/sb" },
+      deps: {
+        adapter: createStubModel({ responses }),
+        executor: createExecutor(registry),
+        registry,
+        maxTurns: 20,
+      },
+    });
+    assert.equal(env.status, "failed");
+    assert.equal(env.reason, "protocolError");
+    assert.equal(env.summary, "fused");
   });
 
   it("workerEnvelope.maxTurns 字段透传 (不影响 envelope 内容)", async () => {
