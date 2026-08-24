@@ -2,11 +2,17 @@
 
 ## 0.1.0 (unreleased)
 
+### Feature
+
+- **TUI Verify 终态可见 + 环境现势（horizon-653 包1，PR #666，2026-08-24）**: HITL 与自动模式在 TUI 显示验证成败（`VerifyBanner`，宿主投影含 `passed`）；人读 **环境现势**（cwd / git / diff，≤2000 codepoints）挂 chrome，不写入 ADR-0028 状态栏。spec/plan 归档见 `docs/archive/025-retire-completed-specs-and-plans/`。包2 内核（沙箱对齐 → 并行调度）未做。
+
 ### Chore
 
 - **移除 `.json` 兼容双写镜像（#629, 2026-08-23）**: `SessionStore.save()` 与 `persistHeadMove()` 不再写 `<id>.json` 兼容镜像 —— 单文件 JSONL 是会话历史唯一权威形态。`load()` 仍保留 `.json` fallback 作为迁移窗口（#619 T2 的 legacy-only 758 个 session 一次性迁移脚本未跑前不能下刀）。`delete()` 仍遍历两条路径；`list()` 仍 `.jsonl + .json` dedupe。`jsonl.test.ts` / `jsonl-migration.test.ts` / `rewind.test.ts` / `list-exposes-workspace-root.test.ts` 的镜像契约测试删除或更新；直读 `.json` 的 `http.test.ts` / `cross-entry-consistency.test.ts` / `hub.test.ts` / `tui-cross-entry.test.ts` / `serve.test.ts` 迁去读 JSONL 头记录或 `store.load()`。`hub.ts:1823` / `cli/chat-session.ts:824,1147` / `cli/slash.ts:29` 措辞同步；`plans/session-jsonl-resume.md` / `specs/session-jsonl-resume.md` / `docs/adr/0027-session-jsonl-transcript.md` 同步。
 
 ### Docs
+
+- **horizon-653 包1 后文档对齐（2026-08-24）**: 入库 `docs/coding-agent-capability-gap.md`（状态栏≠环境现势；§6.4 内建 lazy 作废；后台 bash 已 bwrap、包2 对齐纪律）；`docs/STATUS.md` §1/§3/§4 同步可见闭环与 ACI/JSONL 口径。
 
 - **compact 保焦改为任务摘录（ADR-0026，2026-08-22）**: spec `specs/recent-user-tasks.md`、计划 `plans/recent-user-tasks.md`。会话不再常驻 `taskFocus`；wayfinder 地图 #594–#599 已关。T1–T3 已随 PR #607 落地。
 

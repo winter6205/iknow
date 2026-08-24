@@ -23,7 +23,6 @@
 
 - `146-tui.md` — TUI 交互骨架
 - `tui-transcript-viewport.md` — ChatView 视口挂载（取代 PR #592 固定条数尾窗；滚动文档全量，树上只挂视口+overscan）
-- `653-horizon-pkg1-perception.md` — horizon-653 包1 感知：TUI Verify 终态可见（V-b）+ 环境现势（cwd/git/diff）；不改 ADR-0028 状态栏；包2 内核另开
 
 ### 工具与扩展源
 
@@ -62,6 +61,7 @@
 - `321-tui-opentui-migration.md` — 渲染后端迁移完成（PR #360；旧 ink 归档 `archive/tui-ink/`）
 - `356-subagent-v1.md` — superseded by V1.5（`#361` foreground spawn 反转）
 - `trace-lifecycle-panel-v2.md` / `iknow-trace-standalone-service.md` / `traceserver-inspection-panel.md` — trace 三迭代 spec；独立 `iknow trace` 进程（`#183`）+ web trace.html 面板已取代；**superseded by ADR-0020（读侧融合回 `iknow serve` 同进程同端口；`iknow trace` 默认探测 + `--separate` escape hatch）**
+- `653-horizon-pkg1-perception.md` — 落地完成（PR #666）；TUI Verify 终态 + 环境现势；包2 内核另开 spec
 
 ---
 
