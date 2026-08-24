@@ -34,6 +34,7 @@ import type {
   SubagentInfo,
 } from "../harness/subagent/manager.js";
 import type { VerifyConfig } from "../harness/verify/index.js";
+import type { VerifyAnswerView } from "../session-api/contract.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import type { IknowEnv, LlmEnv } from "../config/env.js";
 
@@ -95,6 +96,11 @@ export interface TuiPostResult {
   /** B1: Ctrl+C 打断反馈 —— cancelled 时存在（true=checkpoint 已保存 /
    *  false=无新内容未落盘）；非 cancelled 缺席（undefined）。 */
   readonly interrupted?: boolean;
+  /** T3 (#458 包2): 本回合 verify 闭环终态
+   *  (passed/failed/unstable/escalated)。verifyConfig 缺席 / abort /
+   *  disabled → 字段缺席（与 resp.turn.answer.verify byte-stable 同模式）。
+   *  TUI 据此判断是否渲染 VerifyBanner，缺席 → 静默不渲染。 */
+  readonly verify?: VerifyAnswerView;
 }
 
 export interface TuiBridge {
@@ -235,6 +241,11 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
           // B1: 仅 cancelled 时 wire 存在 → 原样透传；非 cancelled 缺席 →
           // undefined（app.tsx 以 `=== undefined` 区分旧链路 / 正常停）。
           interrupted: resp.turn.answer.interrupted,
+          // T3 (#458 包2): verify 闭环终态透传。hub 已把 passed 纳入 wire
+          // (T2 commit 6cfda84e);此处仅透到 TUI 侧投影组件,字段缺席保留。
+          ...(resp.turn.answer.verify !== undefined
+            ? { verify: resp.turn.answer.verify }
+            : {}),
         };
       } finally {
         opts.inflight.unmark(conversationId);
