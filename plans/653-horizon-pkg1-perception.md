@@ -26,7 +26,7 @@ minimal-change-verifier: yes — 单逻辑任务包1-感知；包2 OOS；无新 
    - **Inherits:** spec：锚点在 banner 旁 / strip / footer 之一，plan 定一个；默认摘要上限 2000 codepoints；**不**进 ADR-0028 状态栏 / `agent-status`。
    - **Surface:** `docs/`（本 plan 决议记录）+ 确保 CONTEXT「环境现势」在实施分支可见；无新 ADR。
    - **Acceptance:** 决议写明唯一锚点 = **TUI 人读 chrome 条，与 `AgentStatusLine`（模型向状态栏投影）并列、独立槽位**（推荐：同一 chrome 区但**不**复用 agent_status 事件/快照）；摘要上限 = **2000 codepoints**；commit 可只含文档/CONTEXT，无行为代码亦可。决议全文见 `docs/design/DESIGN-ENVIRONMENT-PRESENT.md`（组件命名 `EnvironmentPane` / `EnvPresenceStrip`、平行数据流、负向契约与 EXIT 边界均以该文件为准）。
-   - Status: [x] done — T1-BACKFILL-SHA
+   - Status: [x] done — 32b7f320（sha 回填见紧随的 docs(t1) meta commit）
 
 2. **[parallel] T2 宿主 Verify 投影含成功态** — tag: `[implementation]`
    - **Inherits:** spec：复用 `VerificationRecord` / hub；`VerifyAnswerView` 今日仅 `failed|unstable|escalated` — 须补 `passed`（及内核已有等价态透出）；缺 record → 字段缺席；不新造判定逻辑。
