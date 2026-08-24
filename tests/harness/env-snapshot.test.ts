@@ -114,12 +114,17 @@ describe("truncateByCodepoints", () => {
     assert.ok(!out.includes("[truncated"));
   });
 
-  it("2001 codepoints → 截断 + marker", () => {
+  it("2001 codepoints → 截断 + marker, 总长 ≤ 上限", () => {
     const s = "a".repeat(MAX_ENV_DIFF_CHARS + 1);
     const out = truncateByCodepoints(s, MAX_ENV_DIFF_CHARS);
-    assert.ok(out.endsWith(`[truncated 1 chars]`));
-    // 主体仍是 2000 个 'a'
-    assert.ok(out.startsWith("a".repeat(MAX_ENV_DIFF_CHARS)));
+    // SPEC SC 字面:总长 = 主体 + marker 严格 ≤ cap (overflow 边界)。
+    assert.ok(
+      Array.from(out).length <= MAX_ENV_DIFF_CHARS,
+      `total ${Array.from(out).length} > cap ${MAX_ENV_DIFF_CHARS}`
+    );
+    // marker 报告主体实际丢弃数 (主体上限 = cap - marker预算,丢弃数 =
+    // codepoint 总数 - bodyCap)。
+    assert.ok(out.endsWith(`[truncated 23 chars]`));
   });
 
   it("unicode 多字节字符:按 codepoint 计数(Array.from length),不是 UTF-16 长度", () => {
@@ -138,12 +143,13 @@ describe("truncateByCodepoints", () => {
       "sanity: codepoint count is single"
     );
     const out = truncateByCodepoints(s, MAX_ENV_DIFF_CHARS);
-    // 主体应是 MAX_ENV_DIFF_CHARS 个 codepoint
-    assert.equal(
-      Array.from(out.split("[truncated")[0]!).length,
-      MAX_ENV_DIFF_CHARS
+    // SPEC SC 字面:总长 = 主体 + marker 严格 ≤ cap。marker 计入预算后
+    // 主体短于 cap,但总长 ≤ cap。
+    assert.ok(
+      Array.from(out).length <= MAX_ENV_DIFF_CHARS,
+      `total ${Array.from(out).length} > cap ${MAX_ENV_DIFF_CHARS}`
     );
-    assert.ok(out.endsWith("[truncated 1 chars]"));
+    assert.ok(out.endsWith("[truncated 23 chars]"));
   });
 
   it("空字符串 → 原样返回", () => {
@@ -218,11 +224,7 @@ describe("readEnvSnapshot (DI exec)", () => {
     // 不匹配的回归,因 `-z` 让 NUL 分隔的整段变成单行,branch 解析会带尾部
     // NUL、dirtyCount 恒 0)。
     assert.equal(stub.calls.length, 2);
-    assert.deepEqual(stub.calls[0]!.args, [
-      "status",
-      "--porcelain=v1",
-      "-b",
-    ]);
+    assert.deepEqual(stub.calls[0]!.args, ["status", "--porcelain=v1", "-b"]);
     // diff 必须带 `--no-pager` + `--no-color`,且 subcommand = "diff"。
     assert.ok(stub.calls[1]!.args.includes("diff"));
     assert.ok(stub.calls[1]!.args.includes("--no-pager"));
@@ -274,15 +276,19 @@ describe("readEnvSnapshot (DI exec)", () => {
     const snap = await readEnvSnapshot({ cwd: "/repo", exec: stub.exec });
     assert.ok(snap.diffPreview !== null);
     const preview = snap.diffPreview!;
-    // 主体截到 MAX_ENV_DIFF_CHARS,marker 报告被丢掉的字符数。
+    // marker 报告被丢掉的字符数 (主体实际丢弃 = codepoints.total - bodyCap,
+    // 其中 bodyCap = cap - marker预算)。
     assert.ok(
-      preview.endsWith("[truncated 1000 chars]"),
+      preview.endsWith("[truncated 1022 chars]"),
       `expected marker; got tail: ${JSON.stringify(preview.slice(-40))}`
     );
-    // 截断后整段输出可由 spec 断言"长度受控":不大到把模型上下文撑爆。
-    // 主体部分(去掉 marker)正好 = MAX_ENV_DIFF_CHARS codepoints。
+    // SPEC SC 字面:截断后整段输出 = 主体 + marker ≤ cap。
+    assert.ok(
+      Array.from(preview).length <= MAX_ENV_DIFF_CHARS,
+      `total ${Array.from(preview).length} > cap ${MAX_ENV_DIFF_CHARS}`
+    );
     const body = preview.split("[truncated")[0]!;
-    assert.equal(Array.from(body).length, MAX_ENV_DIFF_CHARS);
+    assert.ok(Array.from(body).length <= MAX_ENV_DIFF_CHARS);
   });
 
   it("自定义 maxDiffChars → 用自定义上限截断", async () => {
@@ -302,8 +308,13 @@ describe("readEnvSnapshot (DI exec)", () => {
     });
     assert.ok(snap.diffPreview !== null);
     const preview = snap.diffPreview!;
-    assert.ok(preview.endsWith("[truncated 400 chars]"));
+    assert.ok(preview.endsWith("[truncated 421 chars]"));
+    // SPEC SC 字面:总长 = 主体 + marker ≤ cap = 100。
+    assert.ok(
+      Array.from(preview).length <= 100,
+      `total ${Array.from(preview).length} > cap 100`
+    );
     const body = preview.split("[truncated")[0]!;
-    assert.equal(Array.from(body).length, 100);
+    assert.ok(Array.from(body).length <= 100);
   });
 });

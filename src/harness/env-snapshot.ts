@@ -68,15 +68,24 @@ const DEFAULT_GIT_TIMEOUT_SECONDS = 5;
  */
 export function truncateByCodepoints(s: string, max: number): string {
   // NaN / 负数 → cap=0(全丢); Infinity → 无上限(原样返回);
-  // 有限正数 → cap=max。截断 marker 按真实丢弃数报告,绝不虚报。
+  // 有限正数 → cap=max。SPEC SC 字面要求「输出长度 ≤ 上限」,marker 必须
+  // 计入预算:总长 = 主体 + marker,任一超出都违反约定。先按真实丢弃数生成
+  // marker,再按 marker 长度回填主体上限,保证总长严格 ≤ cap。
   const cap =
     !Number.isFinite(max) && max > 0
       ? Number.POSITIVE_INFINITY
       : Math.max(0, Number.isFinite(max) ? max : 0);
   const codepoints = Array.from(s);
   if (codepoints.length <= cap) return s;
-  const dropped = codepoints.length - cap;
-  return codepoints.slice(0, cap).join("") + `[truncated ${dropped} chars]`;
+  // 上限过小(< marker 最小长度)→ 全部空间给 marker,主体空。
+  const dropped = codepoints.length;
+  const marker = `[truncated ${dropped} chars]`;
+  const markerLen = Array.from(marker).length;
+  const bodyCap =
+    cap === Number.POSITIVE_INFINITY ? dropped : Math.max(0, cap - markerLen);
+  const finalDropped = dropped - bodyCap;
+  const finalMarker = `[truncated ${finalDropped} chars]`;
+  return codepoints.slice(0, bodyCap).join("") + finalMarker;
 }
 
 /**
