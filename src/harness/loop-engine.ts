@@ -123,7 +123,8 @@ function toDecision(
     case "emptyFinalResponse":
     case "cancelled":
     case "timeout":
-      return reason;
+    case "fused":
+      return reason === "fused" ? "nonSuccessStop" : reason;
     default:
       return "nonSuccessStop";
   }

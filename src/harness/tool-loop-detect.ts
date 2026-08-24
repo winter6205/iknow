@@ -34,6 +34,7 @@ function canonicalJson(value: unknown): string | null {
   try {
     return JSON.stringify(sortKeys(value));
   } catch {
+    // EXIT: 循环结构 / 不可序列化 → 调用键无法正规化，上层 fail-open。
     return null;
   }
 }
@@ -68,6 +69,7 @@ function resultKeyFrom(result: ToolExecutionResult): string | null {
       if (typeof code === "number") extra = `:code=${code}`;
     }
   } catch {
+    // EXIT: payload 不是 JSON → 不加 exit code 后缀，仍用原文做结果键。
     extra = "";
   }
   const body = canonicalJson(text);
@@ -99,6 +101,28 @@ export function toolLoopEventFromCall(
   };
 }
 
+function keysMatch(
+  a: ToolLoopEvent | undefined,
+  b: ToolLoopEvent | undefined
+): boolean {
+  if (a === undefined || b === undefined) return false;
+  return a.callKey === b.callKey && a.resultKey === b.resultKey;
+}
+
+function windowRepeatsPeriod(
+  window: ReadonlyArray<ToolLoopEvent>,
+  periodLen: number
+): boolean {
+  const period = window.slice(0, periodLen);
+  for (let r = 1; r < LOOP_DETECT_REPEAT; r += 1) {
+    const chunk = window.slice(r * periodLen, (r + 1) * periodLen);
+    for (let i = 0; i < periodLen; i += 1) {
+      if (!keysMatch(period[i], chunk[i])) return false;
+    }
+  }
+  return true;
+}
+
 export function isStalledToolLoop(
   events: ReadonlyArray<ToolLoopEvent>
 ): boolean {
@@ -110,21 +134,7 @@ export function isStalledToolLoop(
     if (window.some((e) => !e.normalizable)) continue;
     const phaseCount = new Set(window.map((e) => e.phaseId)).size;
     if (phaseCount < LOOP_DETECT_REPEAT) continue;
-    const period = window.slice(0, k);
-    let stalled = true;
-    for (let r = 1; r < LOOP_DETECT_REPEAT; r += 1) {
-      const chunk = window.slice(r * k, (r + 1) * k);
-      for (let i = 0; i < k; i += 1) {
-        const a = period[i]!;
-        const b = chunk[i]!;
-        if (a.callKey !== b.callKey || a.resultKey !== b.resultKey) {
-          stalled = false;
-          break;
-        }
-      }
-      if (!stalled) break;
-    }
-    if (stalled) return true;
+    if (windowRepeatsPeriod(window, k)) return true;
   }
   return false;
 }

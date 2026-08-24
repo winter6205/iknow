@@ -115,10 +115,7 @@ export function withThinkingOverride(opts: {
     { translate: translateAnthropicTransportFault }
   );
   return {
+    ...deps,
     adapter,
-    executor: deps.executor,
-    registry: deps.registry,
-    maxTurns: deps.maxTurns,
-    ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
   };
 }
