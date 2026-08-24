@@ -26,17 +26,15 @@ import type {
 } from "../tools/types.js";
 import type { PermissionOutcome } from "../permission/types.js";
 import {
-  createPermissionExecutor,
+  createPermissionRuntime,
   type PermissionExecutorOptions,
+  type PermissionRuntime,
 } from "../permission/permission-executor.js";
+import { partitionConcurrencyWaves } from "../tools/concurrency-waves.js";
 import { createAciCatalog } from "../permission/permission-executor.js";
 import { checkPermission } from "../permission/policy.js";
-import { VIOLATION_PREFIXES } from "../permission/prefixes.js";
 import { createPermissionPolicy } from "./permission.js";
 import { TIMEOUT_TIER_MS, type AciCatalog, type AciToolDef } from "./types.js";
-
-// permission_denied message prefix(同 permission-executor 内契约一致)。
-const PERMISSION_DENIED_PREFIX = VIOLATION_PREFIXES.permissionDenied;
 
 export interface AciExecutorOptions {
   readonly inner: Executor;
@@ -91,14 +89,12 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
     );
   }
   const askUser = opts.askUser ?? (async () => true); // prototype default: no-ask approve
-  const executor = createPermissionExecutor({
+  const perm = createPermissionRuntime({
     inner: opts.inner,
     registry,
     policy,
     askUser,
     preToolUse: (ctx) => {
-      // prototype had no preToolUse; v0 keeps backward behavior (always undefined).
-      // onDecision is recorded separately via middleware below.
       return opts.hooks?.preToolUse?.(ctx);
     },
     postToolUse: opts.hooks?.postToolUse,
@@ -109,166 +105,150 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
       calls: ReadonlyArray<ToolCall>,
       signal?: AbortSignal,
       _timeoutMs?: number,
-      conversationId?: string
+      conversationId?: string,
+      onSettled?: (
+        result: ToolExecutionResult,
+        index: number
+      ) => void | Promise<void>
     ): Promise<ReadonlyArray<ToolExecutionResult>> => {
-      // AC48 empty: 短路返回空数组,避免构造空 wave 触发 Promise.all([])。
       if (calls.length === 0) return [];
-
-      // 1. 按输入顺序把 calls 分组成 wave:
-      //    - safe(call.isConcurrencySafe === true 且预测非 deny) → 进入 currentWave;
-      //    - unsafe(isConcurrencySafe === false 且非 deny, 含 catalog miss 保守默认)
-      //      → flush currentWave,作为 singleton wave 单独执行;
-      //    - denied(checkPermission 预测 outcome = "deny") → 与 safe 同 wave 处理,
-      //      但「执行」路径是直接合成 execution_failed(不调 routeOneCall,
-      //      也不进 inner executor,达成 spec P「deny 不进入并行集」——
-      //      这里的并行集指的是「实际跑 routeOneCall 的 call」)。
-      //      denied 是 0 时间成本的占位,与 safe 同 wave 不影响并发节奏。
-      //    wave 维度:每个 wave 内的 call 在 executeAll 阶段并发启动;
-      //    wave 之间严格串行 — 因此 unsafe call 必不与任何其它 call 重叠。
-      type WaveItem = {
-        readonly call: ToolCall;
-        readonly def: AciToolDef | undefined;
-        readonly tierTimeoutMs: number | undefined;
-        readonly isConcurrencySafe: boolean;
-        readonly isDenied: boolean;
-        readonly denyReason: string | undefined;
-      };
-      const waves: WaveItem[][] = [];
-      let currentWave: WaveItem[] = [];
-      for (const call of calls) {
-        const def = catalogForT5.get(call.name);
-        const tierTimeoutMs =
-          opts.timeoutMsOverride ??
-          (def ? TIMEOUT_TIER_MS[def.aci.timeoutTier] : _timeoutMs);
-        const isConcurrencySafe = def?.aci.isConcurrencySafe === true;
-        // 预测 deny:仅当 def 存在且 checkPermission 确定性 deny 时纳入
-        // "denied" 路径(catalog miss → 内层 middleware 决定;
-        // ask 路径 → askUser 结果动态,此处不预测,以「safe」进入 wave —
-        // 若 askUser 拒绝,permission-executor 内部仍产 execution_failed,
-        // 不破坏整体「不抛裸 Error」契约)。
-        let isDenied = false;
-        let denyReason: string | undefined;
-        if (def) {
-          const predicted = checkPermission({
-            def,
-            input: call.input,
-            sources: policy.sources,
-            hardWalls: policy.hardWalls,
-            defaultByCategory: policy.defaultByCategory,
-          });
-          if (predicted.decision === "deny") {
-            isDenied = true;
-            denyReason = predicted.reason;
-          }
-        }
-        const item: WaveItem = {
-          call,
-          def,
-          tierTimeoutMs,
-          isConcurrencySafe,
-          isDenied,
-          denyReason,
-        };
-        // denied 进 currentWave 与 safe 同 wave(0 成本,不打断并行节奏);
-        // unsafe(且非 deny)是 wave-breaker,单独 wave 串行。
-        if (isConcurrencySafe || isDenied) {
-          currentWave.push(item);
-        } else {
-          if (currentWave.length > 0) {
-            waves.push(currentWave);
-            currentWave = [];
-          }
-          waves.push([item]); // singleton wave — unsafe 单独处理
-        }
-      }
-      if (currentWave.length > 0) {
-        waves.push(currentWave);
-      }
-
-      // 2. 逐 wave 执行,装配结果(顺序 = 输入顺序)。
-      //    onDecision 仍在每次 routeOneCall 之前触发:wave 内逐 call 顺序触发,
-      //    顺序与原 for-of 一致;permission/pre/post 步骤在 routeOneCall
-      //    → permission-executor 内逐 call 进行(per-call 语义不变)。
+      const waves = partitionConcurrencyWaves(
+        calls.map((call) =>
+          toWaveItem(call, catalogForT5, opts, _timeoutMs, policy)
+        ),
+        (item) => item.doesNotBreakWave
+      );
       const out: ToolExecutionResult[] = [];
+      let indexBase = 0;
       for (const wave of waves) {
-        if (opts.onDecision) {
-          for (const item of wave) {
-            if (!item.def) {
-              opts.onDecision(item.call, {
-                decision: "allow",
-                reason: "unknown tool — delegated to inner",
-              });
-            } else {
-              // M2:checkPermission 静态导入;middleware 仍是决策权威,
-              // onDecision 仅观测。outcome 与 permission-executor 内
-              // checkPermission 走同一份解析路径,保持一致。
-              const outcome = checkPermission({
-                def: item.def,
-                input: item.call.input,
-                sources: policy.sources,
-                hardWalls: policy.hardWalls,
-                defaultByCategory: policy.defaultByCategory,
-              });
-              opts.onDecision(item.call, outcome);
-            }
-          }
-        }
-        if (wave.length === 1) {
-          const item = wave[0]!;
-          // 预测 deny 的 call 不进 routeOneCall(middleware 也会 deny,
-          // 结果相同;此处直接合成 execution_failed 省一次中间件解析),
-          // 保证 deny 不进入并行集(spec P:并行集 = 真正调 routeOneCall 的 call)。
-          if (item.isDenied) {
-            out.push({
-              kind: "execution_failed",
-              toolUseId: item.call.id,
-              message:
-                `${PERMISSION_DENIED_PREFIX} ${item.denyReason ?? ""}`.trimEnd(),
-            });
-            continue;
-          }
-          const result = await routeOneCall({
-            executor,
-            call: item.call,
-            def: item.def,
-            tierTimeoutMs: item.tierTimeoutMs,
-            callerSignal: signal,
-            conversationId,
-          });
-          out.push(result);
-        } else {
-          // size ≥ 2:Promise.all 启动同一 wave 内的「非 deny」call,
-          // 装配结果(顺序 = 输入顺序)。denied item 在这里直接合成
-          // execution_failed(0 时间成本,不打断并行节奏)— 同时满足
-          // spec「deny 不进入并行集(指 routeOneCall 并行集)」的契约。
-          // 每个非 deny routeOneCall 仍接收自身的 def / tierTimeoutMs /
-          // callerSignal,signal 不共享 — wave 内 call 的 abort 由各自
-          // tier / caller 独立处理。
-          const results = await Promise.all(
-            wave.map((item) =>
-              item.isDenied
-                ? Promise.resolve({
-                    kind: "execution_failed" as const,
-                    toolUseId: item.call.id,
-                    message:
-                      `${PERMISSION_DENIED_PREFIX} ${item.denyReason ?? ""}`.trimEnd(),
-                  })
-                : routeOneCall({
-                    executor,
-                    call: item.call,
-                    def: item.def,
-                    tierTimeoutMs: item.tierTimeoutMs,
-                    callerSignal: signal,
-                    conversationId,
-                  })
-            )
-          );
-          for (const r of results) out.push(r);
-        }
+        const part = await runWave({
+          wave,
+          perm,
+          policy,
+          onDecision: opts.onDecision,
+          signal,
+          conversationId,
+          onSettled,
+          indexBase,
+        });
+        for (const r of part) out.push(r);
+        indexBase += wave.length;
       }
       return out;
     },
   });
+}
+
+type WaveItem = {
+  readonly call: ToolCall;
+  readonly def: AciToolDef | undefined;
+  readonly tierTimeoutMs: number | undefined;
+  readonly doesNotBreakWave: boolean;
+};
+
+function toWaveItem(
+  call: ToolCall,
+  catalog: AciCatalog,
+  opts: AciExecutorOptions,
+  fallbackTimeoutMs: number | undefined,
+  policy: ReturnType<typeof createPermissionPolicy>
+): WaveItem {
+  const def = catalog.get(call.name);
+  const predictedDeny =
+    def !== undefined &&
+    checkPermission({
+      def,
+      input: call.input,
+      sources: policy.sources,
+      hardWalls: policy.hardWalls,
+      defaultByCategory: policy.defaultByCategory,
+    }).decision === "deny";
+  return {
+    call,
+    def,
+    tierTimeoutMs:
+      opts.timeoutMsOverride ??
+      (def ? TIMEOUT_TIER_MS[def.aci.timeoutTier] : fallbackTimeoutMs),
+    doesNotBreakWave: def?.aci.isConcurrencySafe === true || predictedDeny,
+  };
+}
+
+function emitOnDecision(
+  item: WaveItem,
+  policy: ReturnType<typeof createPermissionPolicy>,
+  onDecision: AciExecutorOptions["onDecision"]
+): void {
+  if (!onDecision) return;
+  if (!item.def) {
+    onDecision(item.call, {
+      decision: "allow",
+      reason: "unknown tool — delegated to inner",
+    });
+    return;
+  }
+  onDecision(
+    item.call,
+    checkPermission({
+      def: item.def,
+      input: item.call.input,
+      sources: policy.sources,
+      hardWalls: policy.hardWalls,
+      defaultByCategory: policy.defaultByCategory,
+    })
+  );
+}
+
+async function runWave(opts: {
+  readonly wave: ReadonlyArray<WaveItem>;
+  readonly perm: PermissionRuntime;
+  readonly policy: ReturnType<typeof createPermissionPolicy>;
+  readonly onDecision: AciExecutorOptions["onDecision"];
+  readonly signal: AbortSignal | undefined;
+  readonly conversationId: string | undefined;
+  readonly onSettled:
+    | ((result: ToolExecutionResult, index: number) => void | Promise<void>)
+    | undefined;
+  readonly indexBase: number;
+}): Promise<ReadonlyArray<ToolExecutionResult>> {
+  const gated: Array<{
+    readonly item: WaveItem;
+    readonly blocked: ToolExecutionResult | undefined;
+    readonly def: AciToolDef | undefined;
+  }> = [];
+  for (const item of opts.wave) {
+    emitOnDecision(item, opts.policy, opts.onDecision);
+    const gate = await opts.perm.gateOne(item.call);
+    gated.push({
+      item,
+      blocked: gate.kind === "blocked" ? gate.result : undefined,
+      def: gate.kind === "proceed" ? gate.def : item.def,
+    });
+  }
+  return Promise.all(
+    gated.map((g, i) => {
+      const work =
+        g.blocked !== undefined
+          ? Promise.resolve(g.blocked)
+          : routeOneCall({
+              runInner: (effectiveSignal) =>
+                opts.perm.runAllowed(
+                  g.item.call,
+                  g.def,
+                  effectiveSignal,
+                  undefined,
+                  opts.conversationId
+                ),
+              call: g.item.call,
+              def: g.item.def,
+              tierTimeoutMs: g.item.tierTimeoutMs,
+              callerSignal: opts.signal,
+            });
+      return work.then(async (result) => {
+        await opts.onSettled?.(result, opts.indexBase + i);
+        return result;
+      });
+    })
+  );
 }
 
 /**
@@ -294,15 +274,15 @@ const SALVAGE_GRACE_MS = 3_000;
  * 取回已 flush 的 partial(SC13)。
  */
 async function routeOneCall(opts: {
-  readonly executor: Executor;
+  readonly runInner: (
+    signal: AbortSignal | undefined
+  ) => Promise<ToolExecutionResult>;
   readonly call: ToolCall;
   readonly def: AciToolDef | undefined;
   readonly tierTimeoutMs: number | undefined;
   readonly callerSignal: AbortSignal | undefined;
-  readonly conversationId?: string;
 }): Promise<ToolExecutionResult> {
-  const { executor, call, def, tierTimeoutMs, callerSignal, conversationId } =
-    opts;
+  const { runInner, call, def, tierTimeoutMs, callerSignal } = opts;
   const isBlock = def !== undefined && def.aci.interruptBehavior === "block";
 
   const tierAbort = new AbortController();
@@ -320,11 +300,8 @@ async function routeOneCall(opts: {
       ? AbortSignal.any([callerSignal, tierAbort.signal])
       : tierAbort.signal;
 
-  const innerPromise = executor.executeAll(
-    [call],
-    effectiveSignal,
-    undefined,
-    conversationId
+  const innerPromise = runInner(effectiveSignal).then(
+    (result) => [result] as const
   );
 
   let result: ToolExecutionResult;

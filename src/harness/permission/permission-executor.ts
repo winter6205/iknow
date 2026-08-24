@@ -117,6 +117,22 @@ export interface PermissionExecutorOptions {
   readonly onHookError?: (e: HookErrorEvent) => void;
 }
 
+export type PermissionGate =
+  | { readonly kind: "blocked"; readonly result: ToolExecutionResult }
+  | { readonly kind: "proceed"; readonly def: AciToolDef | undefined };
+
+export interface PermissionRuntime {
+  readonly executor: Executor;
+  readonly gateOne: (call: ToolCall) => Promise<PermissionGate>;
+  readonly runAllowed: (
+    call: ToolCall,
+    def: AciToolDef | undefined,
+    signal?: AbortSignal,
+    timeoutMs?: number,
+    conversationId?: string
+  ) => Promise<ToolExecutionResult>;
+}
+
 /**
  * Factory for the permission-middleware Executor. Per-call rules:
  *  - catalog miss → delegate to inner one call at a time.
@@ -124,10 +140,13 @@ export interface PermissionExecutorOptions {
  *  - deny → execution_failed [permission_denied] prefix, inner not called.
  *  - ask → await askUser; false → execution_failed [user_denied] prefix.
  *  - allow → inner.executeAll([call]) and return its single result.
+ *
+ * #653:gateOne / runAllowed 拆开,ACI 可先串行闸门再并行 inner
+ * (pre-hook → permission 不与其它 call 的 inner 重叠)。
  */
-export function createPermissionExecutor(
+export function createPermissionRuntime(
   opts: PermissionExecutorOptions
-): Executor {
+): PermissionRuntime {
   if (!opts.askUser) {
     throw new Error(
       "permission executor: ask_inlet_missing (AskUser implementation is required at construction)"
@@ -140,138 +159,154 @@ export function createPermissionExecutor(
   const policy = opts.policy;
   const onHookError = opts.onHookError;
 
+  async function gateOne(call: ToolCall): Promise<PermissionGate> {
+    const def = catalog.get(call.name);
+    if (!def) return { kind: "proceed", def: undefined };
+
+    let hookDecision: PreHookBlock | undefined;
+    try {
+      hookDecision = pre({ tool: def.name, input: call.input });
+    } catch (err) {
+      const sanitized = errMsg(err, call.input);
+      onHookError?.({ phase: "pre", tool: def.name, message: sanitized });
+      return {
+        kind: "blocked",
+        result: {
+          kind: "execution_failed",
+          toolUseId: call.id,
+          message: `${HOOK_ERROR_PREFIX} pre-hook threw: ${sanitized}`,
+        },
+      };
+    }
+    if (hookDecision !== undefined) {
+      return {
+        kind: "blocked",
+        result: {
+          kind: "execution_failed",
+          toolUseId: call.id,
+          message: `${HOOK_BLOCKED_PREFIX} ${hookDecision.reason}`,
+        },
+      };
+    }
+
+    const outcome = checkPermission({
+      def,
+      input: call.input,
+      sources: policy.sources,
+      hardWalls: policy.hardWalls,
+      defaultByCategory: policy.defaultByCategory,
+      mode: policy.mode,
+    });
+
+    if (outcome.decision === "ask") {
+      const networkRequested = isNetworkBash(def.name, call.input);
+      const hint = networkRequested
+        ? summarizeNetworkBash(call.input)
+        : summarizeInput(call.input);
+      const approved = await askUser({
+        tool: def.name,
+        input: call.input,
+        summaryHint: hint,
+        ...(networkRequested ? { network: true } : {}),
+      });
+      if (!approved) {
+        return {
+          kind: "blocked",
+          result: {
+            kind: "execution_failed",
+            toolUseId: call.id,
+            message: `${USER_DENIED_PREFIX} user declined tool call: ${def.name}`,
+          },
+        };
+      }
+    } else if (outcome.decision === "deny") {
+      return {
+        kind: "blocked",
+        result: {
+          kind: "execution_failed",
+          toolUseId: call.id,
+          message: `${PERMISSION_DENIED_PREFIX} ${outcome.reason}`,
+        },
+      };
+    }
+    return { kind: "proceed", def };
+  }
+
+  async function runAllowed(
+    call: ToolCall,
+    def: AciToolDef | undefined,
+    signal?: AbortSignal,
+    timeoutMs?: number,
+    conversationId?: string
+  ): Promise<ToolExecutionResult> {
+    const [result] = await opts.inner.executeAll(
+      [call],
+      signal,
+      timeoutMs,
+      conversationId
+    );
+    const r = result as ToolExecutionResult;
+    if (!def) return r;
+    const message =
+      r.kind === "execution_failed" || r.kind === "validation_failed"
+        ? r.message
+        : undefined;
+    const payload = r.kind === "ok" ? r.payload : undefined;
+    const meta = r.kind === "ok" ? r.meta : undefined;
+    try {
+      post({
+        toolUseId: r.toolUseId,
+        name: def.name,
+        input: call.input,
+        kind: r.kind,
+        message,
+        payload,
+        meta,
+      });
+    } catch (err) {
+      onHookError?.({
+        phase: "post",
+        tool: def.name,
+        message: errMsg(err, call.input),
+      });
+    }
+    return r;
+  }
+
   async function executeAll(
     calls: ReadonlyArray<ToolCall>,
     signal?: AbortSignal,
     timeoutMs?: number,
-    conversationId?: string
+    conversationId?: string,
+    onSettled?: (
+      result: ToolExecutionResult,
+      index: number
+    ) => void | Promise<void>
   ): Promise<ReadonlyArray<ToolExecutionResult>> {
     const out: ToolExecutionResult[] = [];
-    for (const call of calls) {
-      const def = catalog.get(call.name);
-
-      // Step 0: catalog miss → delegate to inner one-at-a-time
-      if (!def) {
-        const [result] = await opts.inner.executeAll(
-          [call],
-          signal,
-          timeoutMs,
-          conversationId
-        );
-        out.push(result as ToolExecutionResult);
-        continue;
-      }
-
-      // Step 1: preToolUse hook — 异常 fail-closed（#126 D3）：
-      // 拦不下就拒，绝不静默放行（inner 零调用，loop 继续）。
-      let hookDecision: PreHookBlock | undefined;
-      try {
-        hookDecision = pre({ tool: def.name, input: call.input });
-      } catch (err) {
-        const sanitized = errMsg(err, call.input);
-        onHookError?.({ phase: "pre", tool: def.name, message: sanitized });
-        out.push({
-          kind: "execution_failed",
-          toolUseId: call.id,
-          message: `${HOOK_ERROR_PREFIX} pre-hook threw: ${sanitized}`,
-        });
-        continue;
-      }
-      if (hookDecision !== undefined) {
-        out.push({
-          kind: "execution_failed",
-          toolUseId: call.id,
-          message: `${HOOK_BLOCKED_PREFIX} ${hookDecision.reason}`,
-        });
-        continue;
-      }
-
-      // Step 2: checkPermission (hard walls → layers → mode + default)
-      const outcome = checkPermission({
-        def,
-        input: call.input,
-        sources: policy.sources,
-        hardWalls: policy.hardWalls,
-        defaultByCategory: policy.defaultByCategory,
-        // W2: mode is resolved inside checkPermission — REPL can flip it
-        // without rebuilding the engine.
-        mode: policy.mode,
-      });
-
-      // Step 3: ask path
-      if (outcome.decision === "ask") {
-        // #503 T10 / ADR-0022:bash network:true 是宿主网络批准轴 —— hint 加
-        // `[请求宿主网络]` 标记 + 命令摘要（+ secret 占位符警告），并把
-        // `network` 字段透传到 askUser ctx（PendingAskView 两侧窗口可呈现）。
-        const networkRequested = isNetworkBash(def.name, call.input);
-        const hint = networkRequested
-          ? summarizeNetworkBash(call.input)
-          : summarizeInput(call.input);
-        const approved = await askUser({
-          tool: def.name,
-          input: call.input,
-          summaryHint: hint,
-          ...(networkRequested ? { network: true } : {}),
-        });
-        if (!approved) {
-          out.push({
-            kind: "execution_failed",
-            toolUseId: call.id,
-            message: `${USER_DENIED_PREFIX} user declined tool call: ${def.name}`,
-          });
-          continue;
-        }
-        // user approved → fall through to allow
-      } else if (outcome.decision === "deny") {
-        // Step 4 zero-side-effect: don't call inner
-        out.push({
-          kind: "execution_failed",
-          toolUseId: call.id,
-          message: `${PERMISSION_DENIED_PREFIX} ${outcome.reason}`,
-        });
-        continue;
-      }
-
-      // Step 4: allow → delegate to inner
-      const [result] = await opts.inner.executeAll(
-        [call],
-        signal,
-        timeoutMs,
-        conversationId
-      );
-      out.push(result as ToolExecutionResult);
-
-      // Step 5: postToolUse hook — 异常 fire-and-forget（#126 D3）：
-      // 观测层不反噬执行层，吞掉异常仅经 onHookError 回调上报。
-      const r = result as ToolExecutionResult;
-      const message =
-        r.kind === "execution_failed" || r.kind === "validation_failed"
-          ? r.message
-          : undefined;
-      const payload = r.kind === "ok" ? r.payload : undefined;
-      const meta = r.kind === "ok" ? r.meta : undefined;
-      try {
-        post({
-          toolUseId: r.toolUseId,
-          name: def.name,
-          input: call.input,
-          kind: r.kind,
-          message,
-          payload,
-          meta,
-        });
-      } catch (err) {
-        onHookError?.({
-          phase: "post",
-          tool: def.name,
-          message: errMsg(err, call.input),
-        });
-      }
+    for (const [index, call] of calls.entries()) {
+      const gate = await gateOne(call);
+      const result =
+        gate.kind === "blocked"
+          ? gate.result
+          : await runAllowed(call, gate.def, signal, timeoutMs, conversationId);
+      await onSettled?.(result, index);
+      out.push(result);
     }
     return out;
   }
 
-  return Object.freeze({ executeAll });
+  return Object.freeze({
+    executor: Object.freeze({ executeAll }),
+    gateOne,
+    runAllowed,
+  });
+}
+
+export function createPermissionExecutor(
+  opts: PermissionExecutorOptions
+): Executor {
+  return createPermissionRuntime(opts).executor;
 }
 
 /** Compact human-readable summary used as askUser hint (≤ 80 chars). */

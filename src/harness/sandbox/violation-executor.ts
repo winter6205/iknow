@@ -45,18 +45,18 @@ export function wrapWithViolationHook(
       calls: ReadonlyArray<ToolCall>,
       signal?: AbortSignal,
       timeoutMs?: number,
-      conversationId?: string
+      conversationId?: string,
+      onSettled?: (
+        result: ToolExecutionResult,
+        index: number
+      ) => void | Promise<void>
     ): Promise<ReadonlyArray<ToolExecutionResult>> => {
-      const out = await opts.inner.executeAll(
-        calls,
-        signal,
-        timeoutMs,
-        conversationId
-      );
-      for (let i = 0; i < out.length; i += 1) {
+      const seen = new Set<number>();
+      const observe = (r: ToolExecutionResult, i: number): void => {
+        if (seen.has(i)) return;
         const call = calls[i];
-        const r = out[i];
-        if (!call || !r) continue;
+        if (!call) return;
+        seen.add(i);
         const message =
           r.kind === "execution_failed" || r.kind === "validation_failed"
             ? r.message
@@ -70,6 +70,20 @@ export function wrapWithViolationHook(
           message,
           payload,
         });
+      };
+      const out = await opts.inner.executeAll(
+        calls,
+        signal,
+        timeoutMs,
+        conversationId,
+        async (result, index) => {
+          observe(result, index);
+          await onSettled?.(result, index);
+        }
+      );
+      for (let i = 0; i < out.length; i += 1) {
+        const r = out[i];
+        if (r) observe(r, i);
       }
       return out;
     },

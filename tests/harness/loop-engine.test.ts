@@ -3488,4 +3488,75 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
       "tr_c must NOT be committed to disk"
     );
   });
+
+  it("#620: first result commits before the slowest wave sibling settles", async () => {
+    const tools = [makeSafeTool("fast"), makeSafeTool("slow")];
+    const reg = createRegistry(tools);
+    const settleAt = new Map<string, number>();
+    const executor = Object.freeze({
+      executeAll: async (
+        batch: ReadonlyArray<
+          import("../../src/harness/tools/types.ts").ToolCall
+        >,
+        _signal?: AbortSignal,
+        _timeoutMs?: number,
+        _conversationId?: string,
+        onSettled?: (
+          result: ToolExecutionResult,
+          index: number
+        ) => void | Promise<void>
+      ): Promise<ReadonlyArray<ToolExecutionResult>> => {
+        const sleep: Record<string, number> = { a: 20, b: 80 };
+        const promises = batch.map(async (c, index) => {
+          await new Promise((r) => setTimeout(r, sleep[c.id] ?? 0));
+          const result: ToolExecutionResult = {
+            kind: "ok",
+            toolUseId: c.id,
+            payload: [{ type: "text", text: `executed:${c.name}` }],
+          };
+          settleAt.set(c.id, Date.now());
+          await onSettled?.(result, index);
+          return result;
+        });
+        return Promise.all(promises);
+      },
+    });
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            { id: "a", name: "fast", input: {} },
+            { id: "b", name: "slow", input: {} },
+          ],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const committedAt: number[] = [];
+    const commitMessages = async (): Promise<void> => {
+      committedAt.push(Date.now());
+    };
+    const { result } = await run("go", {
+      adapter: model,
+      executor,
+      registry: reg,
+      maxTurns: 5,
+      commitMessages,
+    });
+    assert.equal(result.stopReason, "completed");
+    // assistant commit + tr_a + tr_b
+    assert.ok(committedAt.length >= 3, `commits=${committedAt.length}`);
+    const trACommit = committedAt[1]!;
+    const slowSettle = settleAt.get("b");
+    assert.ok(slowSettle !== undefined, "slow call must settle");
+    assert.ok(
+      trACommit < slowSettle,
+      `expected tr_a commit (${trACommit}) before slow settle (${slowSettle})`
+    );
+  });
 });

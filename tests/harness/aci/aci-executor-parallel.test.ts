@@ -434,6 +434,32 @@ describe("createAciExecutor — 并行调度 (spec #653 T2 / P)", () => {
     );
   });
 
+  it("permission deny: still runs preToolUse (does not skip the gate)", async () => {
+    const preTools: string[] = [];
+    const { executor } = makeRecordingExecutor({});
+    const tools = [makeSafeTool("grep"), makeUnsafeTool("bash")];
+    const catalog = makeCatalog(tools);
+    const policy = createPermissionPolicy({
+      byName: { bash: "deny" },
+    });
+    const aciExec = createAciExecutor({
+      inner: executor,
+      catalog,
+      policy,
+      hooks: {
+        preToolUse: ({ tool }) => {
+          preTools.push(tool);
+          return undefined;
+        },
+      },
+    });
+    await aciExec.executeAll([
+      { id: "g", name: "grep", input: {} },
+      { id: "b", name: "bash", input: { command: "echo" } },
+    ]);
+    assert.deepEqual(preTools, ["grep", "bash"]);
+  });
+
   it("catalog miss(unknown tool): 当作 unsafe(单元素 wave),不参与并行", async () => {
     // 未知工具不应被默认放行到并行集(保守契约):
     // 既保持既有「catalog 查不到 → 委托 inner」语义,也确保不破坏顺序。
