@@ -7,8 +7,9 @@
  *   - 016:src/harness/ 不含 Gate B 能力(当时禁:重试 / 取消 / 超时 /
  *     trace / checkpoint / 并发调度)。
  *   - 017:取消 / 超时 / trace / setTimeout / AbortController 经 spec+plan+ACR
- *     授权为物理必需层;守门对齐条件式修复层——禁止自动重试 / checkpoint 落盘 /
+ *     授权为物理必需层;守门对齐条件式修复层——禁止 checkpoint 落盘 /
  *     token-cost 护栏 / OTel 导出提前入内核(扫可执行面,不扫注释用词)。
+ *   - #672 T1: FaultClass 闭集含 `retry`，可执行面允许该标识符。
  *   - #160 / ADR-0008(accepted):TokenUsage 域类型经 spec+plan+ACR 授权为显示路径
  *     观测字段;token-cost 护栏(runtime ledger / CostTracker)仍禁——
  *     ADR-0008 Decision 1 明示否决。
@@ -59,7 +60,7 @@ describe("T12 public exports + Gate B gate", () => {
     assert.ok(!(p instanceof harness.RegistryConstructionError));
   });
 
-  it("条件式修复层:src/harness/ executable surface has no retry/checkpoint/cost/OTel/session-api leaks", () => {
+  it("条件式修复层:src/harness/ executable surface has no checkpoint/cost/OTel/session-api leaks", () => {
     const files = listHarnessSource();
     assert.ok(files.length > 0, "expected harness source files");
     const violations: Array<{ file: string } & GateBViolation> = [];

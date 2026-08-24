@@ -34,7 +34,7 @@ minimal-change-verifier: yes — 一逻辑任务拆三 commit（G5）；T2 不�
    - **Inherits:** spec Does T1 + G2 表：闭集 `retry`/`fuse`/`none`；permission deny、verify FAIL、user cancel/timeout → none；API 429 样例 → retry；同参反复 execution_failed → fuse；不改 StopReason；不接传输重试与环检测行为。
    - **Surface:** harness
    - **Acceptance:** 上表样例有自动化 yes/no（empty/negative 至少各一）；本刀 diff 不含 loop 环检测、不含 adapter 重试循环、不含 `src/harness/verify/`。
-   - Status: [ ] pending
+   - Status: [x] done
 
 2. **T2 传输重试装饰 ModelAdapter** — tag: `[implementation]`
    - **Inherits:** spec Does T2：装饰 `step`；供应商只翻译；不重试 PromptTooLong；尊重 AbortSignal；耗尽后 typed 失败不裸 `Error`；Gate B 去掉可执行面 `retry` 禁词，保留 checkpoint/cost/otel/session-api。

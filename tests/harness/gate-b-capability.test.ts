@@ -11,7 +11,7 @@ describe("findGateBViolations", () => {
     assert.deepEqual(findGateBViolations("   \n\t"), []);
   });
 
-  it("line and block comments mentioning checkpoint/retry are not leaks", () => {
+  it("line and block comments mentioning checkpoint are not leaks", () => {
     const src = [
       "// host-side checkpoint; harness does not persist",
       "/* no retry in the kernel */",
@@ -19,6 +19,11 @@ describe("findGateBViolations", () => {
       "const n = 1;",
     ].join("\n");
     assert.deepEqual(findGateBViolations(src), []);
+  });
+
+  it("retry identifiers are allowed on the executable surface", () => {
+    assert.deepEqual(findGateBViolations("function retry() {}"), []);
+    assert.deepEqual(findGateBViolations('const policy = "retry";'), []);
   });
 
   it("identifier and import leaks are reported with 1-based lines", () => {
@@ -34,7 +39,7 @@ describe("findGateBViolations", () => {
     assert.ok(keys.includes("2:session-api"), keys.join(","));
     assert.ok(keys.includes("2:checkpoint"), keys.join(","));
     assert.ok(keys.includes("3:otel"), keys.join(","));
-    assert.ok(keys.includes("4:retry"), keys.join(","));
+    assert.ok(!keys.includes("4:retry"), "retry must not be a Gate B keyword");
   });
 
   it("overflow: tens of thousands of banned-word comments do not leak; trailing identifier does", () => {

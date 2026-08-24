@@ -46,6 +46,9 @@ export { createRegistry } from "./tools/registry.js";
 export { createExecutor } from "./tools/executor.js";
 export { toAnthropicToolResults } from "./tools/tool-result.js";
 
+export { classifyFault } from "./fault-class.js";
+export type { FaultClass, FaultEvent } from "./fault-class.js";
+
 export { createAnthropicAdapter } from "./model-adapter/anthropic-adapter.js";
 export { createRealAnthropicAdapter } from "./model-adapter/anthropic-adapter.js";
 export { buildThinkingParams } from "./model-adapter/anthropic-adapter.js";
