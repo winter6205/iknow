@@ -23,6 +23,7 @@
 
 - `146-tui.md` — TUI 交互骨架
 - `tui-transcript-viewport.md` — ChatView 视口挂载（取代 PR #592 固定条数尾窗；滚动文档全量，树上只挂视口+overscan）
+- `653-horizon-pkg1-perception.md` — horizon-653 包1 感知：TUI Verify 终态可见（V-b）+ 环境现势（cwd/git/diff）；不改 ADR-0028 状态栏；包2 内核另开
 
 ### 工具与扩展源
 
