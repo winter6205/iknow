@@ -7,6 +7,7 @@ import { commandContainsSensitivePath } from "../../permission/hard-walls.js";
 import { validateReadonlyCommand } from "./bash-readonly.js";
 import {
   BASE_ENV_WHITELIST,
+  applyCwdReadonlyFenceEnv,
   createBwrapFence,
   createEnvIsolation,
   createFsPolicy,
@@ -123,15 +124,16 @@ export function createBashTool(
         wantsHostNetwork
       );
     }
-    const fenceEnv = envIsolation.filter(process.env);
-    // #562 T5:cwdReadonly → 注入 GIT_OPTIONAL_LOCKS=0(fence 级只读兜底)。
-    // git ≥2.14 读取时跳过 index 刷新,防止 `git status` 在 readonly fence 内
-    // 静默写 .git/index。post-filter additive:bypass BASE_ENV_WHITELIST(只用于
-    // bash-derived commands,不存在 secret 风险);缺省 / false → 不注入,V1
-    // 回归基线。
-    if (opts?.cwdReadonly === true) {
-      fenceEnv.GIT_OPTIONAL_LOCKS = "0";
-    }
+    // #562 T6: bashMode="readonly" 派生 cwdReadonly:true 传给 fence + env。
+    // bashMode→cwdReadonly 映射由 T6 在此装配完成 (registry 只透传 bashMode,
+    // 不读 catalog)。cwdReadonly 显式 true / bashMode==="readonly" 任一即触发。
+    // 缺省 "any" / undefined → 不传 cwdReadonly, T5 argv baseline 不破。
+    const fenceIsReadonly =
+      opts?.cwdReadonly === true || opts?.bashMode === "readonly";
+    const fenceEnv = applyCwdReadonlyFenceEnv(
+      envIsolation.filter(process.env),
+      fenceIsReadonly
+    );
     // #406 T3:构造 fence 前还原占位符 —— 还原后的命令才是真正 spawn 进 bwrap
     // 的文本。原始命令（含占位符）只见于工具调用记录 / 模型上下文；模型永不
     // 见还原后的命令，只看到 bash 输出的 stdout。
@@ -143,12 +145,6 @@ export function createBashTool(
     // 权限层（policy.ts code-ask-bash-network）已强制 ask full_auto 不豁免,
     // 此处只判严格 === true;非布尔 / 缺省 / false → 走既有隔离路径。
     const wantsHostNetwork = (input as BashInput | null)?.network === true;
-    // #562 T6: bashMode="readonly" 派生 cwdReadonly:true 传给 fence。
-    // bashMode→cwdReadonly 映射由 T6 在此装配完成 (registry 只透传 bashMode,
-    // 不读 catalog)。cwdReadonly 显式 true / bashMode==="readonly" 任一即触发。
-    // 缺省 "any" / undefined → 不传 cwdReadonly, T5 argv baseline 不破。
-    const fenceIsReadonly =
-      opts?.cwdReadonly === true || opts?.bashMode === "readonly";
     const fence = createBwrapFence({
       command: "bash",
       args: ["-c", finalCommand],
@@ -260,9 +256,10 @@ async function handleBackground(
     // defaultBackgroundSpawn 据此构造 host-net fence（去 --unshare-net）。
     ...(wantsHostNetwork ? { network: true } : {}),
     // #653 T1:background path 的 cwdReadonly 派生 —— 镜像前台
-    // bashMode→cwdReadonly 映射(bash.ts:150-151),foreground 与 background
-    // bwrap argv 在 cwdReadonly 轴上集合相等。spec S:同一 fixture 输入下,
-    // 前台 runInSandbox 与 background:true spawn 的 bwrap 围栏参数同集。
+    // bashMode→cwdReadonly 映射(bash.ts fenceIsReadonly),foreground 与
+    // background bwrap argv / fence env 在 cwdReadonly 轴上集合相等。
+    // GIT_OPTIONAL_LOCKS 在 defaultBackgroundSpawn 于 filter 之后注入
+    // (freeze-safe);此处只透传旗标,不改 env(whitelist 会剥掉该键)。
     ...(opts.bashMode === "readonly" || opts.cwdReadonly === true
       ? { cwdReadonly: true }
       : {}),

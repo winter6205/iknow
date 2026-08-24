@@ -27,6 +27,7 @@ import { join } from "node:path";
 
 import {
   BASE_ENV_WHITELIST,
+  applyCwdReadonlyFenceEnv,
   createBwrapFence,
   createEnvIsolation,
   createFsPolicy,
@@ -239,7 +240,10 @@ export async function defaultBackgroundSpawn(
   const resources = createResourceLimits();
   const network = createNetworkPolicy();
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
-  const fenceEnv = envIsolation.filter(req.env ?? process.env);
+  const fenceEnv = applyCwdReadonlyFenceEnv(
+    envIsolation.filter(req.env ?? process.env),
+    req.cwdReadonly === true
+  );
   const fence = createBwrapFence({
     command: "bash",
     args: ["-c", req.command],

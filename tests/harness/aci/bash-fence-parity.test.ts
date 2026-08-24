@@ -9,7 +9,9 @@
  *     `nodeSpawn(command)` 无围栏」的产品分支。
  *
  * 驱动方式:
- *   - 前台:调 createBwrapFence(镜像 bash.ts foreground 的 fence 装配)。
+ *   - 前台:调 createBwrapFence,env 走产品缝(filter + cwdReadonly 时
+ *     GIT_OPTIONAL_LOCKS=0,镜像 bash.ts:126-134,禁止只传 cwdReadonly 旗标
+ *     而漏 fenceEnv)。
  *   - 后台:用模块级 vi.mock("node:child_process", ...) 拦截 spawn,
  *     直接调 defaultBackgroundSpawn 拿真实 fence.argv。
  *
@@ -25,6 +27,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   BASE_ENV_WHITELIST,
+  applyCwdReadonlyFenceEnv,
   createBwrapFence,
   createEnvIsolation,
   createFsPolicy,
@@ -72,7 +75,8 @@ function makeFakeChild(pid = 99001) {
 
 /**
  * 镜像 bash.ts foreground fence 装配(bash.ts:126-162)。
- * - env:envIsolation.filter(...)
+ * - env:envIsolation.filter(...) 后,cwdReadonly 时注入 GIT_OPTIONAL_LOCKS=0
+ *   (产品缝 bash.ts:132-134,post-filter additive)
  * - fence 选项:network + cwdReadonly 由 opts 透传
  */
 function foregroundFenceArgv(opts: {
@@ -81,6 +85,10 @@ function foregroundFenceArgv(opts: {
   readonly cwdReadonly: boolean;
 }): readonly string[] {
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
+  const fenceEnv = applyCwdReadonlyFenceEnv(
+    envIsolation.filter({ PATH: "/bin" }),
+    opts.cwdReadonly
+  );
   return createBwrapFence({
     command: "bash",
     args: ["-c", "echo hi"],
@@ -91,7 +99,7 @@ function foregroundFenceArgv(opts: {
     }),
     networkPolicy: createNetworkPolicy(),
     resourceLimits: createResourceLimits(),
-    env: envIsolation.filter({ PATH: "/bin" }),
+    env: fenceEnv,
     cwd: opts.cwd,
     ...(opts.network ? { network: true } : {}),
     ...(opts.cwdReadonly ? { cwdReadonly: true } : {}),
@@ -124,14 +132,17 @@ function isolationAxisFlags(argv: readonly string[]): Set<string> {
   );
   if (hasCwdRoBind) flags.add("cwd-ro-bind");
   if (hasCwdBind) flags.add("cwd-bind");
-  // GIT_OPTIONAL_LOCKS=0 (foreground cwdReadonly 注入,fsg.ts:132-134)
-  const setenvIdx = argv.indexOf("--setenv");
-  if (
-    setenvIdx !== -1 &&
-    argv[setenvIdx + 1] === "GIT_OPTIONAL_LOCKS" &&
-    argv[setenvIdx + 2] === "0"
-  ) {
-    flags.add("git-optional-locks-0");
+  // GIT_OPTIONAL_LOCKS=0 (foreground cwdReadonly 注入,bash.ts:132-134)。
+  // 扫全部 --setenv 三元组:indexOf 会命中 PATH 等先出现的键,漏掉本轴。
+  for (let i = 0; i < argv.length; i++) {
+    if (
+      argv[i] === "--setenv" &&
+      argv[i + 1] === "GIT_OPTIONAL_LOCKS" &&
+      argv[i + 2] === "0"
+    ) {
+      flags.add("git-optional-locks-0");
+      break;
+    }
   }
   return flags;
 }
@@ -284,6 +295,40 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
       cwdReadonly: false,
     });
     assert.ok(bg.includes("--unshare-net"), "bg must keep --unshare-net");
+  });
+
+  it("cwdReadonly:true → bg argv --setenv GIT_OPTIONAL_LOCKS 0 (mirror bash.ts:132-134)", async () => {
+    const bg = await backgroundFenceArgv({
+      cwd: CWD,
+      network: false,
+      cwdReadonly: true,
+    });
+    const injected = bg.some(
+      (arg, idx) =>
+        arg === "--setenv" &&
+        bg[idx + 1] === "GIT_OPTIONAL_LOCKS" &&
+        bg[idx + 2] === "0"
+    );
+    assert.ok(
+      injected,
+      `bg fence env must contain GIT_OPTIONAL_LOCKS=0 when cwdReadonly, got ${JSON.stringify(bg)}`
+    );
+  });
+
+  it("cwdReadonly:false → bg argv does not inject GIT_OPTIONAL_LOCKS", async () => {
+    const bg = await backgroundFenceArgv({
+      cwd: CWD,
+      network: false,
+      cwdReadonly: false,
+    });
+    const injected = bg.some(
+      (arg, idx) => arg === "--setenv" && bg[idx + 1] === "GIT_OPTIONAL_LOCKS"
+    );
+    assert.equal(
+      injected,
+      false,
+      "bg must not inject GIT_OPTIONAL_LOCKS when cwdReadonly is false"
+    );
   });
 });
 

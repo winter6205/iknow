@@ -107,6 +107,19 @@ export function createEnvIsolation(opts: EnvIsolationOptions): EnvIsolation {
   return Object.freeze({ filter, forbiddenNames: () => forbidden });
 }
 
+/**
+ * #562 T5 / #653:cwdReadonly 后滤注入 GIT_OPTIONAL_LOCKS=0。
+ * `filter()` 返回 freeze 对象,不能原地赋值;本函数拷贝后 additive,绕过
+ * BASE_ENV_WHITELIST(只用于 bash fence,无 secret 风险)。false / 缺省不改 env。
+ */
+export function applyCwdReadonlyFenceEnv(
+  filtered: NodeJS.ProcessEnv,
+  cwdReadonly: boolean | undefined
+): NodeJS.ProcessEnv {
+  if (cwdReadonly !== true) return filtered;
+  return { ...filtered, GIT_OPTIONAL_LOCKS: "0" };
+}
+
 export function currentSecretEnvNames(): readonly string[] {
   return configuredSecretNames();
 }
