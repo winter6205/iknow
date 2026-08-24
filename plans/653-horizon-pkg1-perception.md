@@ -44,10 +44,9 @@ minimal-change-verifier: yes — 单逻辑任务包1-感知；包2 OOS；无新 
 
 4. **[parallel] T4 环境现势快照计算（含上限与 EXIT）** — tag: `[implementation]`
    - **Inherits:** spec：cwd + git 摘要 + diff 要点；≤2000 codepoints；cwd/git/刷新失败 → degraded 占位，不 throw；不写状态栏。
-   - **Surface:** 现有 harness 或 tui 可测纯计算缝（implementer 选；禁止写入 `agent-status` 追加路径）。
+   - **Surface:** `src/harness/env-snapshot.ts`（与 `agent-status.ts` 并列纯计算 + IO 读取器 seam；DI 注入 exec）。
    - **Acceptance:** 有 git / 无 git / 超长 diff 三条可测；超长输出 ≤2000 codepoints；失败路径不 throw；单元测试绿。
-   - Status: [ ] pending
-   - [parallel] with T1 / T2
+   - Status: [x] done — b4cabf2e (T4 compute seam, harness-only, 不动 agent-status 追加路径)
 
 5. **T5 TUI 挂载环境现势** — tag: `[implementation]`
    - **Inherits:** T1 锚点决议；spec：回合边界刷新；负向 — 不调用 ADR-0028 / agent-status 写 cwd。
