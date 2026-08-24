@@ -31,8 +31,12 @@ import {
 } from "../permission/permission-executor.js";
 import { createAciCatalog } from "../permission/permission-executor.js";
 import { checkPermission } from "../permission/policy.js";
+import { VIOLATION_PREFIXES } from "../permission/prefixes.js";
 import { createPermissionPolicy } from "./permission.js";
 import { TIMEOUT_TIER_MS, type AciCatalog, type AciToolDef } from "./types.js";
+
+// permission_denied message prefix(同 permission-executor 内契约一致)。
+const PERMISSION_DENIED_PREFIX = VIOLATION_PREFIXES.permissionDenied;
 
 export interface AciExecutorOptions {
   readonly inner: Executor;
@@ -61,6 +65,13 @@ export interface AciExecutorOptions {
  * tier + interruptBehavior routing. Back-compat shim: built on top of
  * permission/permission-executor so the prototype tests (which import from
  * aci/) keep passing without changing their call sites.
+ *
+ * #653 T2 (P 包):安全批可重叠 — executeAll 在 catalog 标注的 `isConcurrencySafe`
+ * 维度上做 wave 调度:同一 wave 内连续 `isConcurrencySafe: true` 的 call 通过
+ * Promise.all 并发启动;`isConcurrencySafe: false`(以及 catalog miss 的保守默认)
+ * 的 call 必须独占一个 singleton wave,与任何其它 call 不重叠。结果顺序按输入
+ * calls 顺序保持,per-call pre/permission/post 步骤仍在各自 routeOneCall 内逐
+ * 调用走(5-step 中间件不变)。
  */
 export function createAciExecutor(opts: AciExecutorOptions): Executor {
   const policy = opts.policy ?? createPermissionPolicy();
@@ -100,44 +111,160 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
       _timeoutMs?: number,
       conversationId?: string
     ): Promise<ReadonlyArray<ToolExecutionResult>> => {
-      const out: ToolExecutionResult[] = [];
+      // AC48 empty: 短路返回空数组,避免构造空 wave 触发 Promise.all([])。
+      if (calls.length === 0) return [];
+
+      // 1. 按输入顺序把 calls 分组成 wave:
+      //    - safe(call.isConcurrencySafe === true 且预测非 deny) → 进入 currentWave;
+      //    - unsafe(isConcurrencySafe === false 且非 deny, 含 catalog miss 保守默认)
+      //      → flush currentWave,作为 singleton wave 单独执行;
+      //    - denied(checkPermission 预测 outcome = "deny") → 与 safe 同 wave 处理,
+      //      但「执行」路径是直接合成 execution_failed(不调 routeOneCall,
+      //      也不进 inner executor,达成 spec P「deny 不进入并行集」——
+      //      这里的并行集指的是「实际跑 routeOneCall 的 call」)。
+      //      denied 是 0 时间成本的占位,与 safe 同 wave 不影响并发节奏。
+      //    wave 维度:每个 wave 内的 call 在 executeAll 阶段并发启动;
+      //    wave 之间严格串行 — 因此 unsafe call 必不与任何其它 call 重叠。
+      type WaveItem = {
+        readonly call: ToolCall;
+        readonly def: AciToolDef | undefined;
+        readonly tierTimeoutMs: number | undefined;
+        readonly isConcurrencySafe: boolean;
+        readonly isDenied: boolean;
+        readonly denyReason: string | undefined;
+      };
+      const waves: WaveItem[][] = [];
+      let currentWave: WaveItem[] = [];
       for (const call of calls) {
         const def = catalogForT5.get(call.name);
         const tierTimeoutMs =
           opts.timeoutMsOverride ??
           (def ? TIMEOUT_TIER_MS[def.aci.timeoutTier] : _timeoutMs);
-        if (opts.onDecision) {
-          // M2 fix: `checkPermission` is statically imported at the top of
-          // this module. The previous dynamic `await import(...)` was a hot-
-          // path smell (per-call module load) and risked divergence between
-          // this observation and the middleware's authoritative decision.
-          // The middleware remains the decision authority; `onDecision` is
-          // observation-only.
-          if (!def) {
-            opts.onDecision(call, {
-              decision: "allow",
-              reason: "unknown tool — delegated to inner",
-            });
-          } else {
-            const outcome = checkPermission({
-              def,
-              input: call.input,
-              sources: policy.sources,
-              hardWalls: policy.hardWalls,
-              defaultByCategory: policy.defaultByCategory,
-            });
-            opts.onDecision(call, outcome);
+        const isConcurrencySafe = def?.aci.isConcurrencySafe === true;
+        // 预测 deny:仅当 def 存在且 checkPermission 确定性 deny 时纳入
+        // "denied" 路径(catalog miss → 内层 middleware 决定;
+        // ask 路径 → askUser 结果动态,此处不预测,以「safe」进入 wave —
+        // 若 askUser 拒绝,permission-executor 内部仍产 execution_failed,
+        // 不破坏整体「不抛裸 Error」契约)。
+        let isDenied = false;
+        let denyReason: string | undefined;
+        if (def) {
+          const predicted = checkPermission({
+            def,
+            input: call.input,
+            sources: policy.sources,
+            hardWalls: policy.hardWalls,
+            defaultByCategory: policy.defaultByCategory,
+          });
+          if (predicted.decision === "deny") {
+            isDenied = true;
+            denyReason = predicted.reason;
           }
         }
-        const result = await routeOneCall({
-          executor,
+        const item: WaveItem = {
           call,
           def,
           tierTimeoutMs,
-          callerSignal: signal,
-          conversationId,
-        });
-        out.push(result);
+          isConcurrencySafe,
+          isDenied,
+          denyReason,
+        };
+        // denied 进 currentWave 与 safe 同 wave(0 成本,不打断并行节奏);
+        // unsafe(且非 deny)是 wave-breaker,单独 wave 串行。
+        if (isConcurrencySafe || isDenied) {
+          currentWave.push(item);
+        } else {
+          if (currentWave.length > 0) {
+            waves.push(currentWave);
+            currentWave = [];
+          }
+          waves.push([item]); // singleton wave — unsafe 单独处理
+        }
+      }
+      if (currentWave.length > 0) {
+        waves.push(currentWave);
+      }
+
+      // 2. 逐 wave 执行,装配结果(顺序 = 输入顺序)。
+      //    onDecision 仍在每次 routeOneCall 之前触发:wave 内逐 call 顺序触发,
+      //    顺序与原 for-of 一致;permission/pre/post 步骤在 routeOneCall
+      //    → permission-executor 内逐 call 进行(per-call 语义不变)。
+      const out: ToolExecutionResult[] = [];
+      for (const wave of waves) {
+        if (opts.onDecision) {
+          for (const item of wave) {
+            if (!item.def) {
+              opts.onDecision(item.call, {
+                decision: "allow",
+                reason: "unknown tool — delegated to inner",
+              });
+            } else {
+              // M2:checkPermission 静态导入;middleware 仍是决策权威,
+              // onDecision 仅观测。outcome 与 permission-executor 内
+              // checkPermission 走同一份解析路径,保持一致。
+              const outcome = checkPermission({
+                def: item.def,
+                input: item.call.input,
+                sources: policy.sources,
+                hardWalls: policy.hardWalls,
+                defaultByCategory: policy.defaultByCategory,
+              });
+              opts.onDecision(item.call, outcome);
+            }
+          }
+        }
+        if (wave.length === 1) {
+          const item = wave[0]!;
+          // 预测 deny 的 call 不进 routeOneCall(middleware 也会 deny,
+          // 结果相同;此处直接合成 execution_failed 省一次中间件解析),
+          // 保证 deny 不进入并行集(spec P:并行集 = 真正调 routeOneCall 的 call)。
+          if (item.isDenied) {
+            out.push({
+              kind: "execution_failed",
+              toolUseId: item.call.id,
+              message:
+                `${PERMISSION_DENIED_PREFIX} ${item.denyReason ?? ""}`.trimEnd(),
+            });
+            continue;
+          }
+          const result = await routeOneCall({
+            executor,
+            call: item.call,
+            def: item.def,
+            tierTimeoutMs: item.tierTimeoutMs,
+            callerSignal: signal,
+            conversationId,
+          });
+          out.push(result);
+        } else {
+          // size ≥ 2:Promise.all 启动同一 wave 内的「非 deny」call,
+          // 装配结果(顺序 = 输入顺序)。denied item 在这里直接合成
+          // execution_failed(0 时间成本,不打断并行节奏)— 同时满足
+          // spec「deny 不进入并行集(指 routeOneCall 并行集)」的契约。
+          // 每个非 deny routeOneCall 仍接收自身的 def / tierTimeoutMs /
+          // callerSignal,signal 不共享 — wave 内 call 的 abort 由各自
+          // tier / caller 独立处理。
+          const results = await Promise.all(
+            wave.map((item) =>
+              item.isDenied
+                ? Promise.resolve({
+                    kind: "execution_failed" as const,
+                    toolUseId: item.call.id,
+                    message:
+                      `${PERMISSION_DENIED_PREFIX} ${item.denyReason ?? ""}`.trimEnd(),
+                  })
+                : routeOneCall({
+                    executor,
+                    call: item.call,
+                    def: item.def,
+                    tierTimeoutMs: item.tierTimeoutMs,
+                    callerSignal: signal,
+                    conversationId,
+                  })
+            )
+          );
+          for (const r of results) out.push(r);
+        }
       }
       return out;
     },
