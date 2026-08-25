@@ -65,7 +65,7 @@ describe("applySlashCommand", () => {
     });
   });
 
-  it("help → type=help, text mentions /help /status /reset, NOT /mode", () => {
+  it("help → type=help, text mentions /help /status /reset /continue, NOT /mode", () => {
     const ctx = { state: makeState() };
     const eff = applySlashCommand({ command: "help", args: [], ctx });
     assert.strictEqual(eff.type, "help");
@@ -73,7 +73,36 @@ describe("applySlashCommand", () => {
     assert.ok(eff.text.includes("/help"));
     assert.ok(eff.text.includes("/status"));
     assert.ok(eff.text.includes("/reset"));
+    assert.ok(eff.text.includes("/continue"));
     assert.ok(!eff.text.includes("/mode"), "HELP must not advertise /mode");
+  });
+
+  it("continue no args → {type:continue}", () => {
+    const ctx = { state: makeState() };
+    assert.deepEqual(
+      applySlashCommand({ command: "continue", args: [], ctx }),
+      { type: "continue" }
+    );
+  });
+
+  it("continue with any args → error Usage: /continue", () => {
+    const ctx = { state: makeState() };
+    const extra = applySlashCommand({
+      command: "continue",
+      args: ["now"],
+      ctx,
+    });
+    assert.strictEqual(extra.type, "error");
+    if (extra.type !== "error") return;
+    assert.match(extra.text, /usage/i);
+    assert.match(extra.text, /\/continue/);
+
+    const two = applySlashCommand({
+      command: "continue",
+      args: ["a", "b"],
+      ctx,
+    });
+    assert.strictEqual(two.type, "error");
   });
 
   it("? → same as help (type=help)", () => {
