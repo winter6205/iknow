@@ -16,6 +16,8 @@
  * - SubAgentSandboxRootError: #357 T1 — sandboxRoot 收窄越界 typed 拒绝;
  *   buildWorkerPayload 单点校验发现 def.sandboxRoot 落在父 sandboxRoot 之外
  *   / 不存在时同步抛,spawn 工厂不被调用(走 typed error,不裸抛 Error)
+ * - SkipAppendWithTextError / SkipAppendEmptyPriorError: #687 T1 —
+ *   skip-append 守卫（EXIT `skip_append_with_text` / `skip_append_empty_prior`）
  */
 
 export class RegistryConstructionError extends Error {
@@ -97,6 +99,32 @@ export class MessageCommitError extends Error {
   constructor(cause: unknown) {
     super(`MessageCommitError: commit hook failed: ${errorMessage(cause)}`);
     this.cause = cause;
+  }
+}
+
+/**
+ * continue_pending T1 (#687): skip-append 守卫。`appendUserText: false`
+ * 时禁止再带新任务 user 文本（EXIT `skip_append_with_text`）。
+ */
+export class SkipAppendWithTextError extends Error {
+  override readonly name = "SkipAppendWithTextError";
+  constructor() {
+    super(
+      "skip_append_with_text: appendUserText false requires empty userText"
+    );
+  }
+}
+
+/**
+ * continue_pending T1 (#687): skip-append 守卫。`appendUserText: false`
+ * 时 priorMessages 必须在场且 length > 0（EXIT `skip_append_empty_prior`）。
+ */
+export class SkipAppendEmptyPriorError extends Error {
+  override readonly name = "SkipAppendEmptyPriorError";
+  constructor() {
+    super(
+      "skip_append_empty_prior: appendUserText false requires non-empty priorMessages"
+    );
   }
 }
 

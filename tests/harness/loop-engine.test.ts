@@ -13,6 +13,8 @@ import {
   MessageCommitError,
   PromptTooLongError,
   ProtocolError,
+  SkipAppendEmptyPriorError,
+  SkipAppendWithTextError,
   TransportRetryExhaustedError,
 } from "../../src/harness/errors.ts";
 import { raceModel, run, step } from "../../src/harness/loop-engine.ts";
@@ -803,6 +805,295 @@ describe("run() opts.priorMessages", () => {
       (err: unknown) => {
         assert.ok(err instanceof MaxTurnsExceeded);
         assert.equal(err.turnsRan, 1);
+        return true;
+      }
+    );
+  });
+
+  it("appendUserText false with prior does not call encodeUserText and does not append a user", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const stub = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["continued"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    let encodeCallCount = 0;
+    const adapter = {
+      ...stub,
+      encodeUserText: (t: string) => {
+        encodeCallCount += 1;
+        return stub.encodeUserText(t);
+      },
+    };
+    const priorMessages = [
+      makeNative({ role: "user", text: "A" }),
+      makeNative({ role: "assistant", text: "A reply" }),
+    ];
+
+    const { result } = await run(
+      "",
+      {
+        adapter,
+        executor: exec,
+        registry: reg,
+        maxTurns: 5,
+      },
+      undefined,
+      { appendUserText: false, priorMessages }
+    );
+
+    assert.equal(encodeCallCount, 0);
+    assert.equal(result.stopReason, "completed");
+    assert.equal(result.turnCount, 1);
+    assert.equal(result.messages.length, 3);
+    assert.deepEqual(result.messages[0], priorMessages[0]);
+    assert.deepEqual(result.messages[1], priorMessages[1]);
+    assert.equal(result.messages[2]!.role, "assistant");
+    assert.equal(result.finalText, "continued");
+  });
+
+  it('default run("hi") still calls encodeUserText once', async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const stub = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["hello"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    let encodeCallCount = 0;
+    const adapter = {
+      ...stub,
+      encodeUserText: (t: string) => {
+        encodeCallCount += 1;
+        return stub.encodeUserText(t);
+      },
+    };
+
+    const { result } = await run("hi", {
+      adapter,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+
+    assert.equal(encodeCallCount, 1);
+    assert.equal(result.messages.length, 2);
+    assert.equal(result.messages[0]!.role, "user");
+  });
+
+  it("appendUserText false with non-empty userText throws skip_append_with_text", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const stub = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["should not run"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    let encodeCallCount = 0;
+    const adapter = {
+      ...stub,
+      encodeUserText: (t: string) => {
+        encodeCallCount += 1;
+        return stub.encodeUserText(t);
+      },
+    };
+    const priorMessages = [makeNative({ role: "user", text: "A" })];
+
+    await assert.rejects(
+      run(
+        "hi",
+        {
+          adapter,
+          executor: exec,
+          registry: reg,
+          maxTurns: 5,
+        },
+        undefined,
+        { appendUserText: false, priorMessages }
+      ),
+      (err: unknown) => {
+        assert.ok(err instanceof SkipAppendWithTextError);
+        assert.match(err.message, /skip_append_with_text/);
+        return true;
+      }
+    );
+    assert.equal(encodeCallCount, 0);
+  });
+
+  it("appendUserText false with missing priorMessages throws skip_append_empty_prior", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const stub = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["should not run"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    let encodeCallCount = 0;
+    const adapter = {
+      ...stub,
+      encodeUserText: (t: string) => {
+        encodeCallCount += 1;
+        return stub.encodeUserText(t);
+      },
+    };
+
+    await assert.rejects(
+      run(
+        "",
+        {
+          adapter,
+          executor: exec,
+          registry: reg,
+          maxTurns: 5,
+        },
+        undefined,
+        { appendUserText: false }
+      ),
+      (err: unknown) => {
+        assert.ok(err instanceof SkipAppendEmptyPriorError);
+        assert.match(err.message, /skip_append_empty_prior/);
+        return true;
+      }
+    );
+    assert.equal(encodeCallCount, 0);
+  });
+
+  it("appendUserText false with empty priorMessages throws skip_append_empty_prior", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["should not run"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+
+    await assert.rejects(
+      run(
+        "",
+        {
+          adapter: model,
+          executor: exec,
+          registry: reg,
+          maxTurns: 5,
+        },
+        undefined,
+        { appendUserText: false, priorMessages: [] }
+      ),
+      (err: unknown) => {
+        assert.ok(err instanceof SkipAppendEmptyPriorError);
+        assert.match(err.message, /skip_append_empty_prior/);
+        return true;
+      }
+    );
+  });
+
+  it("appendUserText false does not recognize userText (secretRegistry unchanged)", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const stub = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["ok"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    let encodeCallCount = 0;
+    const adapter = {
+      ...stub,
+      encodeUserText: (t: string) => {
+        encodeCallCount += 1;
+        return stub.encodeUserText(t);
+      },
+    };
+    const secretRegistry = createSecretRegistry();
+    const priorMessages = [
+      makeNative({
+        role: "user",
+        text: "用 sk-aaaaaaaaaaaaaaaaaaaa 处理",
+      }),
+      makeNative({ role: "assistant", text: "first" }),
+    ];
+
+    const { result } = await run(
+      "",
+      {
+        adapter,
+        executor: exec,
+        registry: reg,
+        maxTurns: 5,
+        secretRegistry,
+      },
+      undefined,
+      { appendUserText: false, priorMessages }
+    );
+
+    assert.equal(encodeCallCount, 0);
+    assert.equal(secretRegistry.size, 0);
+    const priorUserText = (
+      result.messages[0]!.content[0] as { type: "text"; text: string }
+    ).text;
+    assert.equal(priorUserText, "用 sk-aaaaaaaaaaaaaaaaaaaa 处理");
+  });
+
+  it("non-empty userText is checked before empty prior (skip_append_with_text wins)", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["should not run"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+
+    await assert.rejects(
+      run(
+        "hi",
+        {
+          adapter: model,
+          executor: exec,
+          registry: reg,
+          maxTurns: 5,
+        },
+        undefined,
+        { appendUserText: false }
+      ),
+      (err: unknown) => {
+        assert.ok(err instanceof SkipAppendWithTextError);
+        assert.match(err.message, /skip_append_with_text/);
+        assert.ok(!(err instanceof SkipAppendEmptyPriorError));
         return true;
       }
     );
