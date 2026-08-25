@@ -138,6 +138,11 @@ export interface TuiBridge {
     /** plan T2:触发判据分类标识(4 选 1);T4 文案分支依据。 */
     readonly reason: CompactReason;
   }>;
+  /** continue_pending T4: skip-append 续跑。reload/谓词在 hub；投影同 postMessage。 */
+  readonly continueSession: (
+    conversationId: string,
+    opts?: CompactCallerOpts
+  ) => Promise<TuiPostResult>;
   /** 回退：#624 把持久化 head 指到事件 id（null = 空 transcript）。 */
   readonly rewindSession: (
     conversationId: string,
@@ -206,6 +211,19 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     ...(opts.onEnvChange ? { onEnvChange: opts.onEnvChange } : {}),
   });
 
+  const toPostResult = (resp: PostMessageResponse): TuiPostResult => ({
+    conversationId: resp.session.conversation_id,
+    finalText: resp.turn.answer.finalText,
+    stopReason: resp.turn.answer.stopReason,
+    turnCount: resp.session.turn_count,
+    jsonMode: resp.session.json_mode,
+    lastUsage: resp.turn.answer.lastUsage ?? null,
+    interrupted: resp.turn.answer.interrupted,
+    ...(resp.turn.answer.verify !== undefined
+      ? { verify: resp.turn.answer.verify }
+      : {}),
+  });
+
   const bridge: TuiBridge = {
     hub,
     store,
@@ -230,23 +248,7 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
           onStream,
           ...(thinking !== undefined ? { thinking } : {}),
         });
-        return {
-          conversationId: resp.session.conversation_id,
-          finalText: resp.turn.answer.finalText,
-          stopReason: resp.turn.answer.stopReason,
-          turnCount: resp.session.turn_count,
-          jsonMode: resp.session.json_mode,
-          // T3: wire 字段缺席等价 null（与 RunResult.lastUsage 语义一致）。
-          lastUsage: resp.turn.answer.lastUsage ?? null,
-          // B1: 仅 cancelled 时 wire 存在 → 原样透传；非 cancelled 缺席 →
-          // undefined（app.tsx 以 `=== undefined` 区分旧链路 / 正常停）。
-          interrupted: resp.turn.answer.interrupted,
-          // T3 (#458 包2): verify 闭环终态透传。hub 已把 passed 纳入 wire
-          // (T2 commit 6cfda84e);此处仅透到 TUI 侧投影组件,字段缺席保留。
-          ...(resp.turn.answer.verify !== undefined
-            ? { verify: resp.turn.answer.verify }
-            : {}),
-        };
+        return toPostResult(resp);
       } finally {
         opts.inflight.unmark(conversationId);
       }
@@ -275,6 +277,15 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
         reason: res.reason,
         ...(res.cancelled ? { cancelled: true } : {}),
       };
+    },
+    continueSession: async (conversationId, continueOpts) => {
+      opts.inflight.mark(conversationId);
+      try {
+        const resp = await hub.continueSession(conversationId, continueOpts);
+        return toPostResult(resp);
+      } finally {
+        opts.inflight.unmark(conversationId);
+      }
     },
     // #622 T5: rewind 改走 hub.rewindSession —— 与 postMessage/compact 同
     // 一条 per-conversation serialize 队列（此前绕开队列直调 store 裸 IO

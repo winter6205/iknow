@@ -22,6 +22,10 @@ import {
   createTuiBridge,
 } from "../../src/tui/hub-bridge.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.js";
+import { ValidationError } from "../../src/shared/errors.js";
+import { CURRENT_SCHEMA_VERSION } from "../../src/session-api/store/schema.js";
+import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
+import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 import { resolveProjectSessionDir } from "../../src/session-api/store/session-store.js";
 import { createStubModel } from "../../src/harness/stubs/stub-model.js";
 import type { LoopEngineDeps } from "../../src/harness/loop-engine.js";
@@ -332,6 +336,109 @@ describe("hub-bridge compactSession（/compact）", () => {
     });
     expect(compacted.compacted).toBe(false);
     expect(compacted.cancelled).toBe(true);
+  });
+});
+
+describe("hub-bridge continueSession（T4 /continue）", () => {
+  let baseDir: string;
+
+  beforeEach(async () => {
+    baseDir = await mkdtemp(join(tmpdir(), "iknow-tui-bridge-continue-"));
+  });
+  afterEach(async () => {
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
+  function pendingFile(
+    id: string,
+    messages: ReadonlyArray<AnthropicNativeMessage>
+  ): SessionFileV1 {
+    return {
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      conversation_id: id,
+      title: "do",
+      cwd: "/tmp/proj",
+      sanitized_at: new Date().toISOString(),
+      messages: [...messages],
+      jsonMode: false,
+      turnCount: 1,
+      updatedAt: new Date().toISOString(),
+      checkpoints: [],
+    };
+  }
+
+  test("empty session → ValidationError nothing_pending；不调 encodeUserText", async () => {
+    const inner = makeDeps([assistantResult({ texts: ["should-not-run"] })]);
+    let encodeCount = 0;
+    const inflight = createInflightRegistry();
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      deps: {
+        ...inner,
+        adapter: {
+          ...inner.adapter,
+          encodeUserText: (t) => {
+            encodeCount += 1;
+            return inner.adapter.encodeUserText(t);
+          },
+        },
+      },
+      inflight,
+    });
+    const id = await bridge.ensureSession(undefined);
+    let thrown: unknown;
+    try {
+      await bridge.continueSession(id);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown instanceof ValidationError).toBe(true);
+    const verr = thrown as ValidationError;
+    expect(verr.details?.field).toBe("continue");
+    expect(verr.message).toContain("nothing_pending");
+    expect(encodeCount).toBe(0);
+    expect(inflight.ids().size).toBe(0);
+  });
+
+  test("P4 tool_result 尾 → skip-append；encodeUserText=0；inflight 进出；同一 conversationId", async () => {
+    const inner = makeDeps([assistantResult({ texts: ["continued"] })]);
+    let encodeCount = 0;
+    const inflight = createInflightRegistry();
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      deps: {
+        ...inner,
+        adapter: {
+          ...inner.adapter,
+          encodeUserText: (t) => {
+            encodeCount += 1;
+            return inner.adapter.encodeUserText(t);
+          },
+        },
+      },
+      inflight,
+    });
+    const id = await bridge.ensureSession(undefined);
+    await bridge.store.save({
+      id,
+      file: pendingFile(id, [
+        { role: "user", content: [{ type: "text", text: "do" }] },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "t1", name: "noop", input: {} }],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }],
+        },
+      ]),
+    });
+    const result = await bridge.continueSession(id);
+    expect(result.conversationId).toBe(id);
+    expect(result.finalText).toBe("continued");
+    expect(result.stopReason).toBe("completed");
+    expect(encodeCount).toBe(0);
+    expect(inflight.ids().size).toBe(0);
   });
 });
 

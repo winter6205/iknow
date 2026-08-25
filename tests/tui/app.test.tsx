@@ -527,7 +527,7 @@ describe("/thinking 打开 thinking-picker（design-25 开关面板）", () => {
 
   test("onPersistThinking: /thinking Esc commit → prop 被调（payload = { thinking }）", async () => {
     const calls: ReadonlyArray<{ thinking: "off" | "adaptive" }> = [];
-    const app = await mountAppAsync([], (patch) => {
+    const app = await mountAppAsync([], undefined, (patch) => {
       calls.push(patch);
       return Promise.resolve({ ok: true as const });
     });
@@ -565,7 +565,7 @@ describe("/thinking 打开 thinking-picker（design-25 开关面板）", () => {
   }, 30_000);
 
   test("onPersistThinking reject → notice「写回 settings.json 失败」（无 crash，面板已关）", async () => {
-    const app = await mountAppAsync([], () =>
+    const app = await mountAppAsync([], undefined, () =>
       Promise.reject(new Error("EACCES: permission denied"))
     );
     await untilFrame(app.setup, (f) => f.includes("Version"));

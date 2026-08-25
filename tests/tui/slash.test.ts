@@ -17,6 +17,7 @@ import {
   slashComplete,
   slashCompleteFromCandidates,
   slashCompleteFromList,
+  slashHasArg,
   slashHintLines,
   slashSuggestions,
   type SlashCandidate,
@@ -33,6 +34,7 @@ describe("parseTuiInput: 词表命中", () => {
     ["/info", "info"],
     ["/thinking", "thinking"],
     ["/compact", "compact"],
+    ["/continue", "continue"],
     ["/rewind", "rewind"],
   ] as const) {
     test(`解析 ${input} → command ${command}`, () => {
@@ -102,7 +104,7 @@ describe("parseTuiInput: 普通消息与边界", () => {
 });
 
 describe("helpLines", () => {
-  test("覆盖全部 11 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
+  test("覆盖全部 12 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
     const joined = helpLines().join("\n");
     for (const cmd of [
       "/sessions",
@@ -115,6 +117,7 @@ describe("helpLines", () => {
       "/quit",
       "/exit",
       "/compact",
+      "/continue",
       "/rewind",
     ]) {
       expect(joined).toContain(cmd);
@@ -135,7 +138,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  test('"/" → 全部 11 条静态命令（按词表插入顺序，kind="command"；rewind + mcp，无 /profile）', () => {
+  test('"/" → 全部 12 条静态命令（按词表插入顺序，kind="command"；rewind + mcp，无 /profile）', () => {
     expect(slashSuggestions("/")).toEqual([
       { kind: "command", command: "sessions" },
       { kind: "command", command: "new" },
@@ -146,6 +149,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       { kind: "command", command: "thinking" },
       { kind: "command", command: "effort" },
       { kind: "command", command: "compact" },
+      { kind: "command", command: "continue" },
       { kind: "command", command: "rewind" },
       { kind: "command", command: "mcp" },
     ]);
@@ -200,6 +204,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       { kind: "command", command: "thinking" },
       { kind: "command", command: "effort" },
       { kind: "command", command: "compact" },
+      { kind: "command", command: "continue" },
       { kind: "command", command: "rewind" },
       { kind: "command", command: "mcp" },
     ]);
@@ -232,6 +237,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       ])
     ).toEqual([
       { kind: "command", command: "compact" },
+      { kind: "command", command: "continue" },
       { kind: "skill", name: "compact-wizard", description: "压缩向导" },
       { kind: "skill", name: "code-review", description: "代码审查" },
     ]);
@@ -243,11 +249,12 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
     ]);
   });
 
-  test('"/c" 混合：静态命令（compact）在前 + skill（code-review）在后', () => {
+  test('"/c" 混合：静态命令（compact/continue）在前 + skill（code-review）在后', () => {
     expect(
       slashSuggestions("/c", [{ name: "code-review", description: "代码审查" }])
     ).toEqual([
       { kind: "command", command: "compact" },
+      { kind: "command", command: "continue" },
       { kind: "skill", name: "code-review", description: "代码审查" },
     ]);
   });
@@ -409,6 +416,7 @@ describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
     "thinking",
     "effort",
     "compact",
+    "continue",
     "rewind",
     "mcp",
   ] as const;
@@ -429,12 +437,16 @@ describe("slashCompleteFromList: 按 cursor 补全（任务 B）", () => {
     expect(slashCompleteFromList(ALL, 8)).toBe("/compact ");
   });
 
-  test("cursor=9 → /rewind （词表第 10 条）", () => {
-    expect(slashCompleteFromList(ALL, 9)).toBe("/rewind ");
+  test("cursor=9 → /continue （词表第 10 条）", () => {
+    expect(slashCompleteFromList(ALL, 9)).toBe("/continue ");
   });
 
-  test("cursor=10 → /mcp （词表末条，append-only）", () => {
-    expect(slashCompleteFromList(ALL, 10)).toBe("/mcp ");
+  test("cursor=10 → /rewind （词表第 11 条）", () => {
+    expect(slashCompleteFromList(ALL, 10)).toBe("/rewind ");
+  });
+
+  test("cursor=11 → /mcp （词表末条，append-only）", () => {
+    expect(slashCompleteFromList(ALL, 11)).toBe("/mcp ");
   });
 
   test("cursor 越界上 / 下 / 空列表 → null", () => {
@@ -816,5 +828,60 @@ describe("#377 系列 /effort 词表", () => {
     expect(slashHintLines(["effort"])).toEqual([
       { command: "effort", description: "调整思考强度" },
     ]);
+  });
+});
+
+/** T4 (#690): /continue — 续跑未完成工具环（skip-append）。 */
+describe("/continue 词表", () => {
+  test("/continue → command continue", () => {
+    expect(parseTuiInput("/continue")).toEqual({
+      kind: "command",
+      command: "continue",
+    });
+  });
+
+  test("大小写与空白容忍", () => {
+    expect(parseTuiInput("  /CONTINUE  ")).toEqual({
+      kind: "command",
+      command: "continue",
+    });
+  });
+
+  test("带参数仍命中命令（args 由宿主 usage EXIT，不把 slash 当 message）", () => {
+    expect(parseTuiInput("/continue now")).toEqual({
+      kind: "command",
+      command: "continue",
+    });
+    expect(slashHasArg("/continue now")).toBe(true);
+    expect(slashHasArg("/continue")).toBe(false);
+    expect(slashHasArg("  /CONTINUE  ")).toBe(false);
+  });
+
+  test('"/con" 前缀 → [{command: continue}]（不与 compact 冲突）', () => {
+    expect(slashSuggestions("/con")).toEqual([
+      { kind: "command", command: "continue" },
+    ]);
+  });
+
+  test('/continue 唯一匹配 → 补全 "/continue "', () => {
+    expect(slashComplete("/cont")).toBe("/continue ");
+  });
+
+  test("hint 描述：续跑未完成的工具环", () => {
+    expect(slashHintLines(["continue"])).toEqual([
+      { command: "continue", description: "续跑未完成的工具环" },
+    ]);
+  });
+
+  test("/help 覆盖 /continue 且无 emoji", () => {
+    const joined = helpLines().join("\n");
+    expect(joined).toContain("/continue");
+    expect(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(joined)).toBe(false);
+  });
+
+  test("命中静态命令 → undefined（/continue 不抢 skill-load）", () => {
+    expect(
+      parseSkillLoad("/continue", [{ name: "continue-task", description: "x" }])
+    ).toBeUndefined();
   });
 });

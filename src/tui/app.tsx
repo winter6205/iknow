@@ -97,6 +97,7 @@ import {
   parseTuiInput,
   slashComplete,
   slashCompleteFromCandidates,
+  slashHasArg,
   slashPrefix,
   slashSuggestions,
   type SlashCandidate,
@@ -120,6 +121,14 @@ import {
   type ThinkingPickerState,
 } from "./thinking-picker.js";
 import { computeThinkingOverride, formatEffortLabel } from "./thinking-gate.js";
+import {
+  continueExitFromError,
+  continueNoticeFor,
+  isContinueValidationError,
+  pendingFromLoadedSession,
+  tuiContinueBusy,
+} from "./continue-notice.js";
+import { shouldTriggerContinueFromNl } from "../session-api/continue-pending.js";
 import type {
   ThinkingEffortWire,
   WireThinkingOverride,
@@ -1192,10 +1201,55 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     void promise.finally(() => inflightPromises.current.delete(promise));
   }
 
+  async function runContinueTurn(): Promise<void> {
+    if (
+      tuiContinueBusy({
+        runState: active.runState,
+        compacting: compactingControllerRef.current !== null,
+      })
+    ) {
+      setNotice({ lines: continueNoticeFor("busy_stop_first") });
+      return;
+    }
+    const targetId = active.conversationId;
+    if (targetId === undefined) {
+      setNotice({ lines: continueNoticeFor("nothing_pending") });
+      return;
+    }
+    setNotice(undefined);
+    setSessions((prev) => {
+      const current = prev[targetId];
+      if (!current) return prev;
+      return { ...prev, [targetId]: turnStarted(current) };
+    });
+    const controller = new AbortController();
+    aborters.current.set(targetId, controller);
+    setVerifySlots((prev) => {
+      if (!(targetId in prev)) return prev;
+      const next = { ...prev };
+      delete next[targetId];
+      return next;
+    });
+    const promise = runTurnOnce(targetId, "", controller, "continue");
+    inflightPromises.current.add(promise);
+    void promise.finally(() => inflightPromises.current.delete(promise));
+  }
+
+  async function sessionPendingFromStore(): Promise<boolean> {
+    const id = active.conversationId;
+    if (id === undefined) return false;
+    const file = await props.bridge.loadSessionFile(id);
+    return pendingFromLoadedSession({
+      messages: file.messages,
+      ...(file.goal !== undefined ? { goal: file.goal } : {}),
+    });
+  }
+
   async function runTurnOnce(
     targetId: string,
     text: string,
-    controller: AbortController
+    controller: AbortController,
+    mode: "append" | "continue" = "append"
   ): Promise<void> {
     let stopReason: string | undefined;
     let lastUsage: TokenUsage | null = null;
@@ -1282,13 +1336,19 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           thinkingEnabled,
           thinkingEffort
         );
-      const resp = await props.bridge.postMessage({
-        conversationId: targetId,
-        text,
-        signal: controller.signal,
-        onStream,
-        ...(thinkingOverride ? { thinking: thinkingOverride } : {}),
-      });
+      const resp =
+        mode === "continue"
+          ? await props.bridge.continueSession(targetId, {
+              signal: controller.signal,
+              onStream,
+            })
+          : await props.bridge.postMessage({
+              conversationId: targetId,
+              text,
+              signal: controller.signal,
+              onStream,
+              ...(thinkingOverride ? { thinking: thinkingOverride } : {}),
+            });
       stopReason = resp.stopReason;
       lastUsage = resp.lastUsage;
       // B1: 打断反馈 —— cancelled 时 bridge 透传 true/false;非 cancelled
@@ -1308,8 +1368,20 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         return { ...prev, [targetId]: next };
       });
     } catch (err) {
-      stopReason = "protocolError";
-      setNotice({ lines: [`turn 失败：${describeError(err)}`] });
+      if (mode === "continue") {
+        const exit = continueExitFromError(err);
+        if (exit !== undefined) {
+          setNotice({ lines: continueNoticeFor(exit) });
+        } else if (isContinueValidationError(err)) {
+          setNotice({ lines: [err.message] });
+        } else {
+          stopReason = "protocolError";
+          setNotice({ lines: [`续跑失败：${describeError(err)}`] });
+        }
+      } else {
+        stopReason = "protocolError";
+        setNotice({ lines: [`turn 失败：${describeError(err)}`] });
+      }
     } finally {
       aborters.current.delete(targetId);
       // 快照本次 turn 的 thinking 最终秒数（reset 会置 0，必须先取）。
@@ -1532,6 +1604,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           [activeKey]: appendInputHistory(prev[activeKey] ?? [], parsed.text),
         }));
       }
+      try {
+        const pending = await sessionPendingFromStore();
+        if (shouldTriggerContinueFromNl({ line: parsed.text, pending })) {
+          await runContinueTurn();
+          return;
+        }
+      } catch (err) {
+        setNotice({ lines: [`读取会话失败：${describeError(err)}`] });
+        return;
+      }
       setNotice(undefined);
       await sendTurn(parsed.text);
       return;
@@ -1716,6 +1798,23 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         } finally {
           compactingControllerRef.current = null;
         }
+        return;
+      }
+      case "continue": {
+        if (
+          tuiContinueBusy({
+            runState: active.runState,
+            compacting: compactingControllerRef.current !== null,
+          })
+        ) {
+          setNotice({ lines: continueNoticeFor("busy_stop_first") });
+          return;
+        }
+        if (slashHasArg(text)) {
+          setNotice({ lines: continueNoticeFor("usage") });
+          return;
+        }
+        await runContinueTurn();
         return;
       }
       case "rewind": {
