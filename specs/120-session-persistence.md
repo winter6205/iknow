@@ -8,13 +8,9 @@
 
 ## Objective
 
-让 iknow 的会话存储做到 #120 Q6 唯一验收标准：**同一份磁盘文件，任何入口（serve / TUI / 将来 chat）读取都能回溯到对应会话状态**。具体三件事（借鉴 OpenHarness 能力清单 `upstream-openharness/src/openharness/services/session_storage.py`，用自己的实现）：
+让 iknow 的会话存储做到 #120 Q6 唯一验收标准：**同一份磁盘文件，任何入口（serve / TUI / 将来 chat）读取都能回溯到对应会话状态**。具体三件事（参考同类开源实现 `upstream-ref/src/ref/session_storage.py`，用自己的实现落地）：
 
-1. **共享会话池**：根目录从 `<cwd>/data` 迁到 `~/.iknow`，按项目命名空间隔离（sha1(cwd)[:12]），TUI 与 serve 天然共享同一池（#120 Q2.a α 直连 SessionStore）。
-2. **summary 摘要字段**：首条 user 消息前 80 字符，供会话列表显示（TUI / serve 共用）。
-3. **sanitize 前向兼容**：schema 演进（v1 → v2）加载不崩，旧文件读时补全、新字段写时自然落地。
-
-用户 = iknow 开发者（serve / TUI 使用者）。成功 = Q6 验收测试通过：入口 X 保存 N 轮 → 入口 Y 读取一致 → Y 续跑第 N+1 轮 → X 再读仍在。
+让 iknow 的会话存储做到 #120 Q6 唯一验收标准：**同一份磁盘文件，任何入口（serve / TUI / 将来 chat）读取都能回溯到对应会话状态**。具体三件事（参考同类开源实现 `upstream-ref/src/ref/session_storage.py`，用自己的实现落地）：
 
 ## Glossary（CONTEXT.md 原样引用，不重新定义）
 

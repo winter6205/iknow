@@ -1,7 +1,7 @@
 /**
  * network-guard（SSRF 安全出口层）：web_fetch / web_search 共用的出站 HTTP 防线。
  *
- * 行为真值：upstream-openharness utils/network_guard.py 的 DIRECT 解析模式裁剪版
+ * 行为真值：upstream-ref 的通用 Agent 工具层 utils/network_guard.py 的 DIRECT 解析模式裁剪版
  * （ACR corrective #2：不移植 PROXY / SYNTHETIC_DNS 配置管线——iknow 无此需求）。
  *
  * 防线（逐跳生效，含重定向）：
@@ -46,8 +46,8 @@ export const MAX_REDIRECTS = 5;
 /**
  * 浏览器伪装 UA（web_fetch / web_search 工具生产默认出口共享）。
  *
- * 选用 Chrome 130 桌面 UA + iknow 产品后缀，对齐 upstream-openharness 的
- * `Mozilla/... OpenHarness/0.1.7` 风格——伪装为真实浏览器以通过 Cloudflare
+ * 选用 Chrome 130 桌面 UA + iknow 产品后缀，对齐 upstream-ref 的通用 Agent 工具层
+ * `Mozilla/... iknow/<version>` 风格——伪装为真实浏览器以通过 Cloudflare
  * 等反爬 UA 过滤（实测：纯产品 UA "iknow-web-fetch/0.1" 被 Ars Technica
  * Cloudflare 拦截为 202 challenge；浏览器 UA 通过）。UA 中显式带 `iknow/`
  * 标识，避免完全伪装为不知名流量。

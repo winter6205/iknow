@@ -1,7 +1,7 @@
 /**
  * web_search 工具单元测试。
  *
- * 行为真值：upstream-openharness tools/web_search_tool.py
+ * 行为真值：upstream-ref 的通用 Agent 工具层 web_search_tool.py
  * （默认 DuckDuckGo html 端点 + result__a / result__snippet 解析 + uddg URL 归一）。
  *
  * 覆盖契约（ADR 测试规范 6 项 + ACR 5 类边界）：

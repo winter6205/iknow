@@ -3,7 +3,7 @@
  *
  * 背景:full-compact 不设默认 client-side 超时(wait 逻辑参考 Claude Code:
  * 压缩等模型自然完成,上限 = SDK 默认 HTTP timeout + 用户 signal 取消;
- * OpenHarness 的 25s/attempt + retries 模型在长上下文下不够)。本 smoke 在
+ * 同类开源实现的 25s/attempt + retries 模型在长上下文下不够)。本 smoke 在
  * 真实 LLM 上测两条 case(中等 fixture / ~80KB 长 fixture)的 latencyMs,
  * 同时验证摘要结构化 / 提取 / 重组装契约与真实 SDK abort 传播。
  *

@@ -64,7 +64,7 @@ export class TransportRetryExhaustedError extends Error {
  * 数据不双份重复),仅承载已跑轮数 + 原因;surface (chat / ask / serve /
  * tui, T6 范畴) 收到此异常时必须先写盘保存当前会话,再呈现收尾摘要。
  *
- * 行为对齐 OpenHarness (`query.py:129-134` + `ui/runtime.py:681-682`):
+ * 行为对齐 upstream-ref (`query.py:129-134` + `ui/runtime.py:681-682`):
  * `max_turns` 超限 raise `MaxTurnsExceeded` 而非 silent-stop。
  */
 export class MaxTurnsExceeded extends Error {

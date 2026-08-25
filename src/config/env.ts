@@ -100,8 +100,8 @@ export interface ChatEnv {
  * `IKNOW_WEB_SEARCH_URL`：可选 HTML 搜索端点覆写（私网后端 / 测试用）。
  * 空 → undefined（web_search 落默认 DuckDuckGo html 端点）。
  *
- * `IKNOW_WEB_PROXY`：可选出站 HTTP(S) 代理 URL（对齐 upstream
- * `OPENHARNESS_WEB_PROXY`，trust_env=False 语义 —— 显式配置才生效，
+ * `IKNOW_WEB_PROXY`：可选出站 HTTP(S) 代理 URL（trust_env=False 语义 ——
+ * 显式配置才生效，
  * 不读系统 HTTP(S)_PROXY）。装配方在 network-guard 构造 ProxyAgent
  * dispatcher；非空时 web_fetch / web_search 出口走代理（远端解析 +
  * 出网，绕开本地 DNS 污染 / egress 阻断）。代理 URL 仍走与目标同套

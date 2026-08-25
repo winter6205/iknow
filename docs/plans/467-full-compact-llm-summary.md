@@ -5,7 +5,7 @@
 
 ## Destination
 
-把压缩从「纯截断 + 边界占位符」升级为「LLM 结构化摘要压缩（OpenHarness full compact 同款）」，并把 `session.summary` 字段改名 `session.title`（消除误导名）。proactive/reactive 双触发路径（`shouldAutoCompact` / `PromptTooLongError`）保留不变，只替换/增强压缩执行体。
+把压缩从「纯截断 + 边界占位符」升级为「LLM 结构化摘要压缩（上游参考实现 full compact 同款）」，并把 `session.summary` 字段改名 `session.title`（消除误导名）。proactive/reactive 双触发路径（`shouldAutoCompact` / `PromptTooLongError`）保留不变，只替换/增强压缩执行体。
 
 ## 现状盘点（探索结论）
 
@@ -16,9 +16,9 @@
 ## 参考来源（提示词模板，不自写）
 
 1. **Claude Code full compact prompt**（社区提取，verbatim 结构）：`NO_TOOLS_PREAMBLE` + 9 节 `BASE_COMPACT_PROMPT`（Primary Request and Intent / Key Technical Concepts / Files and Code Sections / Errors and fixes / Problem Solving / All user messages / Pending Tasks / Current Work / Optional Next Step）+ `NO_TOOLS_TRAILER`；产物 `<analysis>` 草稿 + `<summary>` 正文。来源：github.com/codeaashu/claude-code `src/services/compact/prompt.ts` + Piebald-AI extraction（含 security-relevant verbatim 保留条款，采纳）。
-2. **本仓 `upstream-openharness/src/openharness/services/compact/__init__.py`**（MIT，同族移植）：`get_compact_prompt` / `format_compact_summary`（strip analysis + 提取 summary）/ `build_compact_summary_message`（"This session is being continued…" 包装）/ `compact_conversation` 流程（microcompact → split older/recent → LLM → 重组）。
-3. 采纳决策：采用 OpenHarness 的 9 节模板（与 Claude Code 同结构、MIT 可复制），加上 Piebald 版的 security-relevant 两条（安全约束逐字保留 + user 消息归属甄别）。注入消息 wrapper 沿用 Claude Code 的 "This session is being continued from a previous conversation that ran out of context…" 语义。
-4. 授权说明：模板结构与 MIT 参考一致；文本级采用 OpenHarness 版本（不逐字复制 Anthropic 闭源 bundle 提取文），文件头注明来源。
+2. **本仓 `upstream-ref/src/<baseline>/services/compact/__init__.py`**（MIT，同族移植）：`get_compact_prompt` / `format_compact_summary`（strip analysis + 提取 summary）/ `build_compact_summary_message`（"This session is being continued…" 包装）/ `compact_conversation` 流程（microcompact → split older/recent → LLM → 重组）。
+3. 采纳决策：采用上游参考实现的 9 节模板（与 Claude Code 同结构、MIT 可复制），加上 Piebald 版的 security-relevant 两条（安全约束逐字保留 + user 消息归属甄别）。注入消息 wrapper 沿用 Claude Code 的 "This session is being continued from a previous conversation that ran out of context…" 语义。
+4. 授权说明：模板结构与 MIT 参考一致；文本级采用上游参考实现版本（不逐字复制 Anthropic 闭源 bundle 提取文），文件头注明来源。
 
 ## Commit 切分（minimal-change-verifier FAIL 修复：2 个独立 logical task）
 
@@ -55,7 +55,7 @@ Exit criteria：
 
 - `summarized` 且 text 经 `extractCompactSummary` 非空 → 采用摘要；
 - 其余 3 种 → 调用方回退现有纯截断（placeholder）路径，**绝不阻塞主回路**（对齐 epilogue summary ADR-0011 纪律）；`signal_aborted` 例外——wait 逻辑参考 Claude Code：压缩中取消 = 会话保持原样，不做破坏性 fallback；
-- 不设默认 client-side 超时（2026-08-19 实测调整，参考 Claude Code + OpenHarness 双源：实测 27KB dropped ~17s 占旧 25s 的 67%，OpenHarness 的 25s/attempt + retries 模型在长上下文下不足；Claude Code 不设 client-side 超时，靠 SDK 默认 HTTP timeout + 用户 signal 兜底）。`timeoutMs` 保留为注入缝供测试 / 显式 caller 使用；产物 `docs/handoff/i467-full-compact/`；
+- 不设默认 client-side 超时（2026-08-19 实测调整，参考 Claude Code + 上游参考实现双源：实测 27KB dropped ~17s 占旧 25s 的 67%，上游参考实现的 25s/attempt + retries 模型在长上下文下不足；Claude Code 不设 client-side 超时，靠 SDK 默认 HTTP timeout + 用户 signal 兜底）。`timeoutMs` 保留为注入缝供测试 / 显式 caller 使用；产物 `docs/handoff/i467-full-compact/`；
 - 等待 UX（参考 Claude Code）：runFullCompact 透传 `opts.onStream`，emit `compaction_started` / `compaction_completed` / `compaction_failed` / `compaction_cancelled` 事件 + adapter text_delta 直透，宿主可渲染进度。
 
 ### 触发点接入（保留双触发路径语义）

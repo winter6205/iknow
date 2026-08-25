@@ -45,5 +45,5 @@ Each numbered item is one tracer bullet: vertical slice, one tag, one commit, bi
 - parallelization surface: T2/T3 (server.ts + language.ts，独立文件) 可并行；T5 (probe) 依赖 T4；T6 必须在所有 T1-T5 完成后
 - deployment checkpoint (per ACR 遗留风险): T1 必须 `npm install` 跑通 4 个新 devDep，否则 T2-T6 的 probe 单测无法跑——T1 acceptance 强制 `npm ls` 4 dep 全部 exit 0
 - resolveNpmBin / detectVenvPython helper 归属（Open Question）: 首期 server.ts 内联（复用现有 resolveLanguageServerBin 模式），T2 实施 agent 决定是否抽;spec 未强制
-- `.pyi` languageId 覆盖（Open Question）: 首期把 `.pyi` 也映射 `python`（deviation from opencode），T3 实施确认 pyright 收正确 languageId
+- `.pyi` languageId 覆盖（Open Question）: 首期把 `.pyi` 也映射 `python`（deviation from 同类实现），T3 实施确认 pyright 收正确 languageId
 - ACR re-verification: 首轮 ACR 判 defensive-contract **unclear**（overflow/concurrent 两边界类在 ACR 断言但缺测试表行）；已补 T2 overflow + T4 concurrent 测试行，spec Testing Strategy 表同步补齐，5/5 yes 成立。

@@ -178,7 +178,7 @@ D8 专项：断言 worker `deps.timeoutMs` 恒为 `env.llm.timeoutMs`，不随 s
 
 ## Open Questions
 
-无阻塞项。记录两条非阻塞观察：(1) SPEC-3 原文「时间窗查询」（startedAt/before/after 过滤）本轮以 taskId/parentTurnId 下钻覆盖核心场景，纯时间范围过滤留后续；(2) staleness/心跳监测取代 wallclock（Hermes 方向）记为后续候选，本轮不做。
+无阻塞项。记录两条非阻塞观察：(1) SPEC-3 原文「时间窗查询」（startedAt/before/after 过滤）本轮以 taskId/parentTurnId 下钻覆盖核心场景，纯时间范围过滤留后续；(2) staleness/心跳监测取代 wallclock（同类优化方向）记为后续候选，本轮不做。
 
 ## Assumptions（operator confirmed 2026-08-18）
 

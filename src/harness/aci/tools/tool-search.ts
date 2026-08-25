@@ -2,7 +2,7 @@
  * tool_search 工具（ACI 第 9 件，#224 工具扩展之路）：按名/子串检索已注册
  * 工具并返回完整 ToolDef JSON。
  *
- * 行为真值：spec 224-tool-extension-path.md § Code Style（与 OpenHarness
+ * 行为真值：spec 224-tool-extension-path.md § Code Style（与通用 Agent 工具层
  * tool_search 同语义，非移植）：
  *   - 输入 `query`（名字/描述大小写不敏感子串）或 `names`（精确工具名列表），
  *     两字段均可选；"至少一个" 语义由 handler 入口判定 —— 空参 =
@@ -48,7 +48,7 @@ interface ToolSearchInput {
 }
 
 /**
- * 无匹配 / 空参的合法返回（与 OpenHarness 同语义：缺参 = 无结果）。
+ * 无匹配 / 空参的合法返回（与通用 Agent 工具层同语义：缺参 = 无结果）。
  * T3：沿用 `skill.ts` "Use skill_search to find available skills." 先例 ——
  * 返回不是裸标记,而是带换词引导（换词重搜 / `names` 精确取名）。
  */

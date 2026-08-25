@@ -1,7 +1,7 @@
 /**
  * src/harness/secret-roundtrip/patterns.ts — SSOT for secret patterns.
  *
- * #406 secret-roundtrip: replaces the destructive Hermes-style mask with a
+ * #406 secret-roundtrip: replaces a destructive mask with a
  * placeholder + restore table. Patterns here are the SINGLE place secret
  * shapes live — secrets-guard.ts (#126 legacy `mode:"block"` path) and
  * recognize.ts (roundtrip default) both consume them, so adding a pattern

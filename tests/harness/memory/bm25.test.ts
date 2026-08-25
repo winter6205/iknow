@@ -5,7 +5,7 @@
  * 权重 2x / 正文命中权重 1x / importance 加权 / recency_boost / 空查询 → [] /
  * 单字符查询跳过 / 排序稳定). Project Structure bm25.ts.
  *
- * OpenHarness memory/search.py:15-50 同款启发式 (metadata 命中 2x + body 1x +
+ * upstream-ref memory/search.py:15-50 同款启发式 (metadata 命中 2x + body 1x +
  * importance 加权 + recency_boost + 排序稳定). bm25 is a pure function — no IO.
  */
 import { describe, it } from "vitest";

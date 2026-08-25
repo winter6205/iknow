@@ -12,7 +12,7 @@ GH issue #140 B 块（Q6/Q7/Q8，executor 底盘加固）。executor 是 Foundat
 **B-1（Q6+Q7 合并）：统一停止信号管超时与取消。**
 
 1. executor 为每次工具调用发一个统一的 **AbortSignal**，合并两种触发：超时到点 → 触发信号 → 返回 "timeout"；用户取消 → 触发同一信号 → 返回 "cancelled"。停止原因四值区分（none/callerAbort/timerTimeout/hostCancel）沿用 CONTEXT.md 既有 `cancelKind` 定义，不新发明。
-2. 工具分两类响应：**有子进程的工具**（bash、grep）必须监听信号，收到即杀子进程——SIGTERM → 等 2 秒 → SIGKILL，且 `detached` + 负 pid **杀整棵进程树**（比 OpenHarness 只杀一层进程更干净，补其漏）；**纯本地操作工具**（read_file/glob/edit_file/write_file）信号递达但无可杀对象，executor 不等待，结果丢弃。
+2. 工具分两类响应：**有子进程的工具**（bash、grep）必须监听信号，收到即杀子进程——SIGTERM → 等 2 秒 → SIGKILL，且 `detached` + 负 pid **杀整棵进程树**（比上游参考实现只杀一层进程更干净，补其漏）；**纯本地操作工具**（read_file/glob/edit_file/write_file）信号递达但无可杀对象，executor 不等待，结果丢弃。
 3. **推翻现行"只等不杀"设计意图**（executor.ts:93 注释）——改为 executor 发信号 + 子进程工具必须配合杀。
 
 **B-2（Q8）：isJsonCompatible 收紧为白名单 + 严格原型检查。**
@@ -42,6 +42,6 @@ GH issue #140 B 块（Q6/Q7/Q8，executor 底盘加固）。executor 是 Foundat
 
 - GH issue #140 B-1 / B-2 决议评论（2026-08-04）。
 - `src/harness/tools/executor.ts:38-48`（isJsonCompatible 现状）/ `:86-103`（timeout/cancel 现状）/ `:93`（被推翻的设计意图注释）。
-- OpenHarness 参照：`tools/bash_tool.py:55-100`（wait_for → SIGTERM → 2s → SIGKILL，仅杀一层）；iknow 补进程树 kill。
+- 上游参考实现参照：`tools/bash_tool.py:55-100`（wait_for → SIGTERM → 2s → SIGKILL，仅杀一层）；iknow 补进程树 kill。
 - CONTEXT.md `cancelKind` 四值枚举 + `in-flight closeout` 语义（停止原因区分沿用，不新发明）。
 - 关联 ADR：0004（工具集）/ 0006（封顶策略——契约 X 的执行主体即本 ADR 的 executor）。

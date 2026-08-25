@@ -14,7 +14,7 @@
  * hub `compactSession`) treat any non-`summarized` outcome as "fall back to
  * `compactMessages` + boundary placeholder" so the main loop is never blocked.
  *
- * Reference prompt template adapted from upstream OpenHarness (MIT licensed),
+ * Reference prompt template adapted from upstream-ref (MIT licensed),
  * with two security-preservation additions borrowed from the newer Claude
  * Code variant (analysis instructions + section 6).
  */
@@ -30,7 +30,7 @@ import { DEFAULT_KEEP_RECENT } from "./constant.js";
 import { preserveToolPairs } from "./window.js";
 
 // ---------------------------------------------------------------------------
-// Prompt template (adapted from upstream OpenHarness compact prompt)
+// Prompt template (adapted from upstream-ref compact prompt)
 // ---------------------------------------------------------------------------
 
 const NO_TOOLS_PREAMBLE = `CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
@@ -231,7 +231,7 @@ export interface CompactAdapter {
  *   - `opts.timeoutMs` 注入的 timer 触发 → `{ kind: "timeout" }`,the in-flight
  *     adapter call is aborted via internal controller;**无默认 client-side
  *     超时**(wait 逻辑参考 Claude Code:压缩不设紧凑 timeout,上限 = SDK 默认
- *     HTTP timeout + 用户 signal 取消;OpenHarness 的 25s/attempt + retries
+ *     HTTP timeout + 用户 signal 取消;upstream-ref 的 25s/attempt + retries
  *     模型在长上下文下不够——i467 smoke 实测 27KB dropped 已 ~17s)。
  *     `timeoutMs` 保留为测试 / 未来 caller 显式注入缝;
  *   - `opts.signal` aborts **mid-flight** (wait 逻辑参考 Claude Code:压缩中

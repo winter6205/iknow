@@ -1,7 +1,7 @@
 /**
  * web_search 工具（ACI Web 类，#141 工具层扩展）：网页搜索并返回紧凑结果列表。
  *
- * 行为真值：upstream-openharness tools/web_search_tool.py（行为对齐，非移植）：
+ * 行为真值：upstream-ref 的通用 Agent 工具层 web_search_tool.py（行为对齐，非移植）：
  *   - 默认端点：DuckDuckGo html（upstream 默认）在部分网络环境（本地 DNS
  *     污染 / egress 阻断，实测 WSL2 + Windows host 解析器把 duckduckgo.com
  *     解析到 Facebook IP 且直连超时）不可达。B1 决策：默认端点切到 Bing

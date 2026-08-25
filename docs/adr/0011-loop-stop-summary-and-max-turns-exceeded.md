@@ -15,7 +15,7 @@ Status: accepted
 
 超限 (maxTurns) 与其它异常停 (timeout / protocolError / cancelled) 统一改为:
 
-1. **出口形态 = throw**: 超限抛 `MaxTurnsExceeded` (OpenHarness 风格,
+1. **出口形态 = throw**: 超限抛 `MaxTurnsExceeded` (上游参考实现风格,
    `query.py:129-134` + `ui/runtime.py:681-682`),强制调用方感知,替代
    silent-stop。异常沿调用栈冒泡到外层 catch,由外层写盘保存当前会话。
 2. **异常只做信号**: `MaxTurnsExceeded` 携带已跑轮数 + 原因,不携带
@@ -63,7 +63,7 @@ Status: accepted
 ## Evidence pointers
 
 - `src/harness/loop-engine.ts:593-603` — 当前 silent stop。
-- `docs/harness-report/p02-architecture-loop.html` §2.2 — OpenHarness
+- `docs/harness-report/p02-architecture-loop.html` §2.2 — 上游参考实现
   `run_query()` 状态机,`max_turns` 超限 raise `MaxTurnsExceeded`。
 - `src/harness/stream.ts:20-23` — `HarnessStreamEvent` 三成员,无终态事件,
   需加终态成员承载摘要。

@@ -145,7 +145,7 @@ async function detectVenvPython(root: string): Promise<string | undefined> {
 }
 
 /**
- * TS 项目根标记文件集（opencode Typescript.spawn 同源）。
+ * TS 项目根标记文件集（upstream-ref Typescript.spawn 同源）。
  * 某个目录含其中任一文件即视为该目录是 TS 项目根。
  * 就近局部常量（#305 决策2：不导出顶层）。
  */
@@ -267,7 +267,7 @@ export const Pyright: LspServerInfo = {
 /**
  * YAML LSP server（yaml-language-server）— spec 302-lsp-multilang 首期 4 门之一。
  *
- * root：无 YAML 专属 root 标记（spec Open Question），沿用 opencode 现状用
+ * root：无 YAML 专属 root 标记（spec Open Question），沿用 upstream-ref 现状用
  * `_file => ctx.directory`（vscode-json-languageserver 同源行为）。
  * spawn：`resolveNpmBin("yaml-language-server", "yaml-language-server")`；init 无。
  */

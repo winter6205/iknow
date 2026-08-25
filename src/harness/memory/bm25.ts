@@ -2,13 +2,13 @@
  * #121 T3: bm25.ts (keyword heuristic scoring — pure function, no IO).
  *
  * Spec: specs/121-memory-injection.md (Project Structure bm25.ts, Testing
- * Strategy bm25 half). OpenHarness memory/search.py:15-50 同款启发式
+ * Strategy bm25 half). upstream-ref memory/search.py:15-50 同款启发式
  * (metadata 命中 2x + body 1x + importance 加权 + recency_boost + 排序稳定).
  *
  * Score formula (v0):
  *   hits_title × TITLE_WEIGHT (2.0)
  *   + hits_body  × BODY_WEIGHT  (1.0)
- *   + importance × IMPORTANCE_WEIGHT (0.4)   [additive — OpenHarness 同款]
+ *   + importance × IMPORTANCE_WEIGHT (0.4)   [additive — upstream-ref 同款]
  *   + recency_boost (≤ RECENCY_WEIGHT 0.4)
  *
  * Stable sort: descending score, ties broken by input index (Array.prototype.sort

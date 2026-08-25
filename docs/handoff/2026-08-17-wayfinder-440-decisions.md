@@ -8,7 +8,7 @@
 ## 总纲（两条设计哲学，贯穿全部决策）
 
 1. **todo_write 是模型自维护的辅助账本**——模型自治、宿主不查账、验证锚（task 公式 + 真实证据）不因它移动。
-2. **MCP resources 是协议层补全，不是工具面凑数**——照 Claude Code / OpenHarness 参考实现做两个显式工具（list→read 两步式），不进 ACI 动态注册路径。
+2. **MCP resources 是协议层补全，不是工具面凑数**——照 Claude Code / 上游参考实现参考做两个显式工具（list→read 两步式），不进 ACI 动态注册路径。
 
 ---
 
@@ -16,7 +16,7 @@
 
 ### D1 工具形状：单工具 + mode 枚举
 
-`todo_write(mode: "add" | "check" | "list", item?: string)`。否决 OpenHarness 的 `item + checked` 布尔（语义双关），否决拆三工具。
+`todo_write(mode: "add" | "check" | "list", item?: string)`。否决上游参考实现的 `item + checked` 布尔（语义双关），否决拆三工具。
 
 ### D2 存储：session 作用域，宿主注入
 
@@ -55,7 +55,7 @@
 ### D8 联动：无。模型自治
 
 - verify 不读 todos.md，不追加 evidence-checker 规则，**也不记 gaming signal**（grilling 从「第 7 条硬规则」降级为 gaming signal、再被 operator 砍到零）；
-- 理由：OpenHarness / Claude Code 都是模型自治形态；硬联动会把「辅助账本」偷偷升格成验证证据，与「todo 只是辅助」冲突；
+- 理由：上游参考实现 / Claude Code 都是模型自治形态；硬联动会把「辅助账本」偷偷升格成验证证据，与「todo 只是辅助」冲突；
 - 验证锚不动：`task = goal.text ?? taskFocus.text ?? query` + 真实执行证据；账本完全在验证链路之外；
 - 漂移出口 = 模型自己处理（勾选或注明作废），责任在模型。
 

@@ -12,7 +12,7 @@
 
 **要建什么**：
 
-1. **自建 LSP 客户端**（对标 opencode `packages/opencode/src/lsp/`）——`src/harness/lsp/` 新目录，TS 单语言首期。
+1. **自建 LSP 客户端**（对标同类实现 `packages/lsp/`）——`src/harness/lsp/` 新目录，TS 单语言首期。
 2. **LSP 工具 append**（11 → 21 件 ACI 工具，10 件新增）：
    - 9 件 operation 工具：`lsp_definition` / `lsp_references` / `lsp_hover` / `lsp_document_symbol` / `lsp_workspace_symbol` / `lsp_go_to_implementation` / `lsp_prepare_call_hierarchy` / `lsp_incoming_calls` / `lsp_outgoing_calls`（#248 B 档决议；shared position schema）
    - `lsp_diagnostics` 独立顶层工具（#250 决议，不在 9 件内）
@@ -27,7 +27,7 @@
 | -------------- | ----------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | 语言           | TypeScript（与 harness 一致，5.x ESM）          | —                                                                                                  |
 | 运行时         | Node.js                                         | —                                                                                                  |
-| LSP 客户端底层 | `vscode-jsonrpc`（`node` 入口）                 | **新增依赖**；opencode 已在用；提供 requestId/响应路由/cancel 协议层（Q1/Q3 决议）                 |
+| LSP 客户端底层 | `vscode-jsonrpc`（`node` 入口）                 | **新增依赖**；同类实现已在用；提供 requestId/响应路由/cancel 协议层（Q1/Q3 决议）                  |
 | LSP 翻译层     | `typescript-language-server`                    | **新增依赖**（项目 devDependencies）；保留翻译层 + `tsserver.path` 本地化（#247 Q1 REJECT 自写桥） |
 | TS 内核        | `typescript`（已依赖 5.9.3）                    | tsserver = `typescript/lib/tsserver.js`（零额外 dep）                                              |
 | 进程管理       | `child_process.spawn`                           | 标准库                                                                                             |
@@ -110,8 +110,8 @@ export const Typescript: Info = {
 ### `client.ts` — `getClient()` 三件套缓存
 
 ```ts
-// #247 Q8：抄 opencode lsp.ts:208-297 的复用三件套（root+id 缓存 / broken 记忆 / inflight 去重）
-// iknow 没有 opencode 的 InstanceContext；ctx 由 lsp 模块自己持有 {directory, root}，
+// #247 Q8：抄同类实现 lsp.ts:208-297 的复用三件套（root+id 缓存 / broken 记忆 / inflight 去重）
+// iknow 没有同类实现的 InstanceContext；ctx 由 lsp 模块自己持有 {directory, root}，
 // build-engine 装配时把 process.cwd() 作为 directory 透入。
 export interface LspCtx {
   readonly directory: string; // 上界 stop（NearestRoot 不允许跨出）

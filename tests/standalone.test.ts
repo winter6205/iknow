@@ -12,7 +12,11 @@ function walkTsFiles(dir: string): string[] {
     const p = join(dir, name);
     const st = statSync(p);
     if (st.isDirectory()) {
-      if (name === "node_modules" || name === "dist" || name === "_upstream_gbrain") {
+      if (
+        name === "node_modules" ||
+        name === "dist" ||
+        name === "_upstream_ref"
+      ) {
         continue;
       }
       out.push(...walkTsFiles(p));
@@ -24,9 +28,9 @@ function walkTsFiles(dir: string): string[] {
 }
 
 describe("standalone iknow boundary", () => {
-  it("package.json name is iknow and has no gbrain dependency", async () => {
+  it("package.json name is iknow", async () => {
     const pkg = JSON.parse(
-      readFileSync(join(root, "package.json"), "utf8"),
+      readFileSync(join(root, "package.json"), "utf8")
     ) as {
       name: string;
       dependencies?: Record<string, string>;
@@ -43,24 +47,19 @@ describe("standalone iknow boundary", () => {
     };
     for (const [name, ver] of Object.entries(all)) {
       assert.equal(
-        /gbrain/i.test(name),
+        /_upstream_ref/i.test(name),
         false,
-        `dependency name must not be gbrain: ${name}`,
+        `dependency name must not reference upstream ref: ${name}`
       );
       assert.equal(
-        /gbrain/i.test(ver),
+        /_upstream_ref/i.test(ver),
         false,
-        `dependency version must not reference gbrain: ${name}@${ver}`,
-      );
-      assert.equal(
-        ver.includes("_upstream_gbrain"),
-        false,
-        `must not link _upstream_gbrain: ${name}@${ver}`,
+        `dependency version must not reference upstream ref: ${name}@${ver}`
       );
     }
   });
 
-  it("no file under src/ imports path containing _upstream_gbrain or gbrain/", async () => {
+  it("no file under src/ imports path containing _upstream_ref/", async () => {
     const srcDir = join(root, "src");
     const files = walkTsFiles(srcDir);
     assert.ok(files.length > 0, "expected src ts files");
@@ -75,21 +74,16 @@ describe("standalone iknow boundary", () => {
       while ((m = importRe.exec(text)) !== null) {
         const spec = m[1] ?? m[2] ?? "";
         assert.equal(
-          spec.includes("_upstream_gbrain"),
+          spec.includes("_upstream_ref"),
           false,
-          `${relative(root, file)} imports ${spec}`,
-        );
-        assert.equal(
-          /gbrain\//i.test(spec) || /(^|\/)gbrain$/i.test(spec),
-          false,
-          `${relative(root, file)} imports ${spec}`,
+          `${relative(root, file)} imports ${spec}`
         );
       }
       // also catch dynamic path strings that look like package imports
       assert.equal(
-        /from\s+['"][^'"]*gbrain[^'"]*['"]/.test(text),
+        /from\s+['"][^'"]*_upstream_ref[^'"]*['"]/.test(text),
         false,
-        `${relative(root, file)} has gbrain import string`,
+        `${relative(root, file)} has upstream-ref import string`
       );
     }
   });

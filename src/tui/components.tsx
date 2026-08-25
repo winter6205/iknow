@@ -28,7 +28,7 @@ export function StatusLine(props: StatusLineProps): ReactNode {
   return <text fg={props.fg ?? tuiPalette.dim}>{props.text}</text>;
 }
 
-/** opencode 同款 braille-dot 轮转（80ms/帧，Q4a：前台动态指示，无 emoji）。
+/** braille-dot 轮转（80ms/帧，Q4a：前台动态指示，无 emoji）。
  *  帧序来自 archive/tui-ink/src/components.tsx SPINNER_FRAMES —— 单一来源。 */
 export const SPINNER_FRAMES: ReadonlyArray<string> = [
   "⠋",
@@ -45,7 +45,7 @@ export const SPINNER_FRAMES: ReadonlyArray<string> = [
 
 /** 100ms 心跳：返回自增帧号，驱动 spinner / 动效重渲染。
  *  periodMs <= 0 = 禁用档（不挂定时器，避免 0ms 忙轮询；hooks 顺序不变）。
- *  T6-B 简易版（去 archive 冗余 useRef 路径），opencode 周期 80ms。 */
+ *  T6-B 简易版（去 archive 冗余 useRef 路径），80ms 周期。 */
 export function useTick(periodMs = 100): number {
   const [tick, setTick] = useState(0);
   useEffect(() => {

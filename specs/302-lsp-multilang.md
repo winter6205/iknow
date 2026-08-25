@@ -266,8 +266,8 @@ async function runLang(lang: string): Promise<void> {
 
 - **Go/Rust 二期（gopls / rust-analyzer）**：无 npm wrapper，走 PATH `which` 探测；CI 无二进制时 probe graceful skip 还是 pending —— 另行决策，不在本 spec
 - **多命中并集演进**：未来加 ESLint/Biome 类工具 server（认 `.ts`）时，是否从单命中演进到并集——留 fog（#304 决策2）
-- **`.pyi` languageId 覆盖**：research #306 确认 opencode 的 `.pyi` 不在 LANGUAGE_EXTENSIONS → 回退 plaintext。本 spec 首期把 `.pyi` 也映射 `python`（避免 pyright 收 plaintext），但这是 deviation 待实测确认
-- **YAML root 标记**：opencode 用 JS lockfile 集当 YAML 项目根（无 YAML 专属标记）。本 spec 沿用 opencode 现状，待实测看是否要 YAML-specific root（如 `.yamllint`）
+- **`.pyi` languageId 覆盖**：research #306 确认同类实现的 `.pyi` 不在 LANGUAGE_EXTENSIONS → 回退 plaintext。本 spec 首期把 `.pyi` 也映射 `python`（避免 pyright 收 plaintext），但这是 deviation 待实测确认
+- **YAML root 标记**：同类实现用 JS lockfile 集当 YAML 项目根（无 YAML 专属标记）。本 spec 沿用同类实现现状，待实测看是否要 YAML-specific root（如 `.yamllint`）
 - **JSON 无 root 逻辑**：vscode-json-languageserver 自身无 project root 概念，iknow 的 `NearestRoot` 上界 stop 语义对它不适用 —— 首期用 `_file => ctx.directory`（dockerfile 同），待实测验证
 - **`resolveNpmBin` / `detectVenvPython` helper 归属**：server.ts 内新增（复用现有 `resolveLanguageServerBin` 模式），还是抽工具 —— 首期 server.ts 内联，文件增长再抽
 - **部署前置：`npm install` 跑通**：4 个新 devDep 未装，`probe:lsp --lang python/yaml/json/dockerfile` 与相关单测在 `npm install` 前无法跑——属部署前置条件，plan 早期 bullet 应设显式 checkpoint

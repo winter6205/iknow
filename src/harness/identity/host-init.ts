@@ -4,7 +4,7 @@
  * 为什么需要这个:用户的初始化脚本(读 ~/.iknow/、建目录、seed 配置)如果
  * 由 agent 用 bash 工具跑,会被 execute 分类 → ask → TTY y/N 拦截,体验
  * 上"启动脚本还要用户手动确认"违反直觉(用户的反馈)。参照
- * upstream-openharness 的 `initialize_workspace`(宿主侧直接 seed 模板,
+ * upstream-ref 的 `initialize_workspace`(宿主侧直接 seed 模板,
  * 不走 agent 权限),这里提供宿主侧的 init 脚本执行钩子:由宿主进程
  * spawn 执行用户自写脚本,不经过 agent bash 工具 → 无权限确认、无
  * allowlist 限制、无 fs 软沙箱限制(写 ~/.iknow 是宿主自己的事)。

@@ -1,8 +1,8 @@
 /**
  * IKNOW-196 首启引导模板 (spec `specs/196-identity-assembly.md` §"Bootstrap
- * 机制（rev 2026-08-11 对齐 openharness 隐式完成）").
+ * 机制（rev 2026-08-11 对齐 upstream-ref 隐式完成）").
  *
- * rev 2026-08-11 对齐 openharness:BOOTSTRAP 从"对话脚本 + /profile done 宿主
+ * rev 2026-08-11 对齐 upstream-ref:BOOTSTRAP 从"对话脚本 + /profile done 宿主
  * 钩子"改为**种子文件** `~/.iknow/BOOTSTRAP.md`。agent 首启时装配层把文件内容
  * 注入 system prompt;引导对话完成后 agent 用 write_file / edit_file / bash
  * 直接写 `~/.iknow/user.md`,然后 `rm BOOTSTRAP.md` —— 文件不在 → 下次装配不

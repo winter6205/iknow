@@ -1,7 +1,7 @@
 /**
  * web_fetch 工具（ACI Web 类，#141 工具层扩展）：抓取单个网页并返回紧凑文本。
  *
- * 行为真值：upstream-openharness tools/web_fetch_tool.py（行为对齐，非移植）：
+ * 行为真值：upstream-ref 的通用 Agent 工具层 web_fetch_tool.py（行为对齐，非移植）：
  *   - SSRF 防线复用 network-guard（逐跳校验 + 非 2xx 拒绝 + ≤5 跳重定向）。
  *   - html content-type → HTML→文本提取（跳过 script/style + 实体解码 + 折叠空白）。
  *   - 输出头：URL（最终）/ Status / Content-Type；正文前注入 UNTRUSTED_BANNER

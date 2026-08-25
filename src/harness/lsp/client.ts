@@ -12,7 +12,7 @@
  * Typescript）；无匹配 → early-return `undefined`（`"(no LSP server)"`）。
  * `opts.server` 测试注入点保留，语义从「默认 server」变「覆盖 dispatch 结果」。
  *
- * 与 opencode lsp.ts:208-297 的复用三件套同源（#247 Q8），但 iknow 无
+ * 与 upstream-ref lsp.ts:208-297 的复用三件套同源（#247 Q8），但 iknow 无
  * InstanceContext：ctx 由调用方（handler 层）持有 `{ directory }`。
  *
  * **取消语义（Q2/A9）**：中断走 JSON-RPC `$/cancelRequest`，**绝不终止
