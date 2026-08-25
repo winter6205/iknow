@@ -87,10 +87,10 @@ describe("slashCandidates — 前缀过滤", () => {
     );
   });
 
-  it("前缀过滤：/c → compact；/th → thinking；/e → effort+exit", () => {
+  it("前缀过滤：/c → compact+continue；/th → thinking；/e → effort+exit", () => {
     assert.deepEqual(
       slashCandidates("/c").map((c) => c.name),
-      ["compact"]
+      ["compact", "continue"]
     );
     assert.deepEqual(
       slashCandidates("/th").map((c) => c.name),
@@ -344,6 +344,43 @@ describe("resolveArgCommand — 带参命令值域判定", () => {
       "xhigh",
       "max",
     ]);
+  });
+});
+
+describe("T5 /continue slash 词表（web_slash_http_only）", () => {
+  it("SLASH_COMMANDS 含 continue，hint=/continue，不进带参词表", () => {
+    const cmd = SLASH_COMMANDS.find((c) => c.name === "continue");
+    assert.ok(cmd, "/continue must be in SLASH_COMMANDS");
+    assert.equal(cmd?.hint, "/continue");
+    assert.equal(matchSlash("/continue")?.name, "continue");
+    assert.equal(matchSlash("/CONTINUE")?.name, "continue");
+    assert.deepEqual(matchSlash("/continue"), { name: "continue", arg: "" });
+    assert.ok(slashHelpText().includes("/continue"));
+  });
+
+  it("带参 /continue extra → match 转发 arg（handler 发 usage EXIT；非 ARG_COMMANDS）", () => {
+    // continue 不进 ARG_COMMANDS：无值域、accept 不带尾随空格。
+    // matchSlash 仍转发 leftover，便于 handleCommand 发「用法：/continue」。
+    assert.deepEqual(matchSlash("/continue extra"), {
+      name: "continue",
+      arg: "extra",
+    });
+    assert.deepEqual(slashSubmitDecision("/continue extra"), {
+      kind: "execute",
+      name: "continue",
+      arg: "extra",
+    });
+    assert.deepEqual(slashEnterAction("/continue extra", 0), {
+      kind: "execute",
+      name: "continue",
+      arg: "extra",
+    });
+  });
+
+  it("Composer NL 续跑意图不走 slash（web_slash_http_only OUT）", () => {
+    assert.deepEqual(slashSubmitDecision("please continue"), { kind: "send" });
+    assert.deepEqual(slashSubmitDecision("请继续"), { kind: "send" });
+    assert.deepEqual(slashSubmitDecision("keep going"), { kind: "send" });
   });
 });
 

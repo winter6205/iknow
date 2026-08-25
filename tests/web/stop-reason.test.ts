@@ -20,6 +20,7 @@ describe("stopReasonLabel", () => {
     assert.equal(stopReasonLabel("emptyFinalResponse"), "模型返回了空回答");
     assert.equal(stopReasonLabel("cancelled"), "请求已取消");
     assert.equal(stopReasonLabel("timeout"), "请求超时");
+    assert.equal(stopReasonLabel("fused"), "工具环停滞，本轮已熔断");
   });
 
   it("returns null for the completed stop reason", () => {
@@ -45,7 +46,7 @@ describe("stopReasonLabel", () => {
 });
 
 describe("STOP_REASON_LABELS", () => {
-  it("covers the six non-completed harness stop reasons", () => {
+  it("covers the non-completed harness stop reasons", () => {
     assert.deepEqual(STOP_REASON_LABELS, {
       maxTurns: "已达轮次上限，回答可能不完整",
       nonSuccessStop: "模型未正常完成回答",
@@ -53,6 +54,7 @@ describe("STOP_REASON_LABELS", () => {
       emptyFinalResponse: "模型返回了空回答",
       cancelled: "请求已取消",
       timeout: "请求超时",
+      fused: "工具环停滞，本轮已熔断",
     });
   });
 
