@@ -440,8 +440,7 @@ export function createBackgroundTaskManager(
       }
     };
 
-    // 日志流式追加:stdout + stderr 合并进同一 log 文件(append,4KiB chunk
-    // 语义来自 upstream-ref 的 manager.py chunk reader 思想)。串行链保顺序:
+    // 日志流式追加:stdout + stderr 合并进同一 log 文件(append)。串行链保顺序:
     // 每 chunk 都续在 task.writeChain 尾部,并发 data 事件不乱序。
     const enqueue = (chunk: Buffer | string): void => {
       task.writeChain = task.writeChain.then(() =>

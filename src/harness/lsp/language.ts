@@ -1,7 +1,7 @@
 /**
  * 扩展名 → LSP languageId 映射 — spec 302-lsp-multilang（§ language.ts，#304 决策4）。
  *
- * 与 upstream-ref 的 LANGUAGE_EXTENSIONS 同源（#304 Q1），职责独立于
+ * LANGUAGE_EXTENSIONS 同源（#304 Q1），职责独立于
  * `server.ts` 的 `LspServerInfo.extensions`：后者做 dispatch 匹配（选哪个
  * server），本表在 didOpen 时告诉 server 目标文件的语言（languageId）。
  *

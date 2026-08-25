@@ -296,7 +296,7 @@ async function readUserProfile(
   }
 }
 
-/** rev 2026-08-11 对齐 upstream-ref 隐式完成 + issue #584:
+/** rev 2026-08-11 隐式完成 + issue #584:
  *  bootstrap_active=false → skip;否则读 `<ctx.userHome>/.iknow/BOOTSTRAP.md`。
  *  `ctx.workspaceRoot` 不参与 persona。完成机制 = agent 自己 rm BOOTSTRAP.md。
  *  文件读失败 (EACCES / EISDIR / 其他 IO) → warn + skip。 */
@@ -422,7 +422,7 @@ export const IKNOW_AGENT_STATUS_READ_RULE =
  *  内容覆盖 ADR 决策 3 五要点:
  *   ① 两工具是谁 —— spawn_subagent + subagent_result
  *   ② 何时派   —— multi-step exploration / independent verification /
- *                parallelizable work(句子同 upstream-ref 工具描述对照)
+ *                parallelizable work
  *   ③ 前景默认"阻塞等待结果" —— blocks until finished,same-turn envelope
  *   ④ 一回合多 spawn 并行 —— issue multiple spawn_subagent calls in one turn
  *   ⑤ 结果处置 —— envelope 直接返回 / failed 也是数据读 reason + summary

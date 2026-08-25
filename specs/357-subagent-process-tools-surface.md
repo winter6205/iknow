@@ -153,7 +153,7 @@ output-mask：单测断言含密钥值的 bash 输出经 mask 后不含原值（
 
 1. **D1 不建 fence override 通道**：fence 全复用主代理默认（选项 C）。来源：operator 定案 + 「从最简起步，只在可度量失败出现时才加复杂度」。
 2. **D2 sandboxRoot 收窄 = schema 加字段 + manager 单点校验**（选项 1，不做 worker 端双层）；边界 = 锁落脚目录 + 防提权，不承诺 home 级隔离。来源：operator 定案 + 边界确认。
-3. **D3 判官 allow-list 推导**（选项 3）：白名单基线 read_file/grep/glob，fail-closed，加白名单须显式拍板。来源：operator 定案；先例 = 同类开源实现的 `_READ_ONLY_TOOLS` auto-approve + 2026 Claude Code deny 散点教训。
+3. **D3 判官 allow-list 推导**（选项 3）：白名单基线 read_file/grep/glob，fail-closed，加白名单须显式拍板。来源：operator 定案。
 4. **D4 output-mask 顺手修**（选项 1）：#406 roundtrip 输出遮罩缺口在 createBashTool 内补，主+子一次生效。来源：operator 定案。
 5. **D5 4 类探针断言修正**（选项 1）：断言 = bash tool_result/trace 含 bwrap 违规 + worker completed，不扩 envelope reason 枚举（SPEC-2 原文的 `{status:"failed", reason:"fsDenied"}` 断言与实现不符，修正）。来源：operator 定案 + 调研实证。
 6. **D10 限流不做，记 ADR 候选**：429 backoff / 跨进程 quota 协调本轮不做。来源：operator 定案。

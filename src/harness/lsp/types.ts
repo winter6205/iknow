@@ -30,7 +30,7 @@ export interface LspCtx {
  * LSP server 启动配置 — server.ts 内的单语言(`Typescript`)实例
  * 的「如何 spawn + 如何解析 root」声明。
  *
- * 与 upstream-ref lsp.ts:80-89 Info 同构;保留扁平声明(spec #247 Q2 决议
+ * 与 lsp.ts:80-89 Info 同构;保留扁平声明(spec #247 Q2 决议
  * 不拆 registry/spawn/client 三文件)。
  *
  * `spawn` 返回 `undefined` 时表示该 server 在当前环境下不可用

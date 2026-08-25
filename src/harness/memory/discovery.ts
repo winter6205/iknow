@@ -7,7 +7,7 @@
  *
  * v0 design choices:
  *   - symlinks: rejected (v0 find filters them out — spec OQ5 explicitly leaves
- *     symlink resolution to a future ticket; upstream-ref same choice).
+ *     symlink resolution to a future ticket; same choice).
  *   - non-UTF-8: skipped + stderr warning (spec Boundaries Always — 坏文件跳过
  *     不中断会话; assembly still needs valid UTF-8 for body).
  *   - rules: filename asc sort (deterministic order → stable assembly output).
@@ -39,7 +39,7 @@ async function* safeDir(path: string): AsyncIterable<string> {
 async function tryReadEntry(path: string): Promise<MemoryLayerEntry | null> {
   try {
     // lstat so we can detect symlinks without following them (spec OQ5 v0
-    // rejects symlinks; upstream-ref same choice).
+    // rejects symlinks; same choice).
     const s = await lstat(path);
     if (s.isSymbolicLink()) return null;
     if (!s.isFile()) return null;

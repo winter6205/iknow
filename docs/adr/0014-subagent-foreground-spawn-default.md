@@ -17,8 +17,8 @@ trace 为 ground truth）实测发现两个叠加问题：
    → worker 结果永久滞留 buffer，主代理收不到。
 
 异步 fire-and-forget 要求模型具备"spawn 后继续编排、记得回来取结果"的高阶
-能力，实测证明当前模型不可靠掌握。参考系：Claude Code Agent 工具与开源同类
-task 工具均以**前景同步**为默认；上游参考实现的异步 drain 是阻塞轮询到终态而非
+能力，实测证明当前模型不可靠掌握。Claude Code Agent 工具与 task
+工具均以**前景同步**为默认；异步 drain 是阻塞轮询到终态而非
 被动挂下一轮。
 
 ## Decision
@@ -28,11 +28,11 @@ task 工具均以**前景同步**为默认；上游参考实现的异步 drain �
 1. **默认契约 = 前景同步**：`spawn_subagent` 增加 `wait` 参数，默认 `true` →
    handler 内 `await manager.waitFor(taskId, { timeoutMs })`，worker envelope
    直接作为 tool_result 返回，当回合闭环。"下一轮"假设从结构上删除。
-2. **异步臂保留为显式选项**（`wait:false`）：过渡期 drain 仿上游参考实现加
-   阻塞轮询（至至少一个 worker 到终态），修 pipe 模式结果丢失；终态是 V2
+2. **异步臂保留为显式选项**（`wait:false`）：过渡期 drain 加阻塞轮询
+   （至至少一个 worker 到终态），修 pipe 模式结果丢失；终态是 V2
    **事件驱动唤醒**——host watcher 监测 worker，到终态后 host 自发起 run()
    注入结果唤醒主模型，不依赖用户输入。
-3. **引导层必做**：description 仿开源同类 task 工具写时机（"Use proactively for
+3. **引导层必做**：description 仿 task 工具写时机（"Use proactively for
    multi-step exploration, independent verification, or parallelizable work"）+
    前景语义（"call blocks until finished; issue multiple calls in one turn to
    parallelize"）；system prompt 经 `identity/assemble.ts` 流水线加 ~30 行
@@ -49,7 +49,7 @@ task 工具均以**前景同步**为默认；上游参考实现的异步 drain �
 
 - **形态 1（仅用户显式触发）**：只修 drain 死锁。改动最小但子代理能力等于
   白做，模型永不主动用。被否。
-- **形态 3（env gate 混合，上游参考实现风格）**：`IKNOW_COORDINATOR_MODE=1`
+- **形态 3（env gate 混合）**：`IKNOW_COORDINATOR_MODE=1`
   才注入 coordinator prompt + 激活工具。prompt/测试矩阵翻倍，而"无 manager
   不装配工具"已是可见性 gate。被否。
 - **坚持异步默认 + 直接实现事件驱动唤醒**：唤醒需要三入口 host 自发起 run()
@@ -79,8 +79,6 @@ task 工具均以**前景同步**为默认；上游参考实现的异步 drain �
 - issue #356 / PR #359 (draft) — V1 实现（worktree `spec-356-subagent-v1`：
   `src/harness/subagent/` spawn-subagent-tool / host-drain / manager / worker）。
 - `src/cli/chat-session.ts` — drain 调用点（run() 边界注入 priorMessages）。
-- 开源同类 task 工具 `packages/<task-tool>/src/tool/task.ts` + `task.txt` — "Use proactively"
+- 开源 task 工具 `packages/<task-tool>/src/tool/task.ts` + `task.txt` — "Use proactively"
   引导范式。
-- `upstream-ref/src/<baseline>/ui/coordinator_drain.py:62-86` —
-  阻塞轮询到终态的异步 drain 参照（只读）。
 - `docs/CONTEXT.md` — 术语「host drain」「前景 spawn / 后景 spawn」。

@@ -13,8 +13,8 @@ Status: accepted
 
 ## Decision
 
-1. **maxTurns 降级为"用户显式开关",默认无限**。语义对齐上游参考实现
-   (`query.py:700` `while context.max_turns is None or turn_count < ...`):
+1. **maxTurns 降级为"用户显式开关",默认无限**。语义对齐 `query.py:700`
+   `while context.max_turns is None or turn_count < ...`:
    `None` / unset = 不设上限,探索永不会被 turn 计数误杀;只有用户显式设上限
    时才强制。
 2. **配置 source = CLI flag `--max-turns` + env 变量 `IKNOW_LLM_MAX_TURNS`**。
@@ -32,11 +32,11 @@ Status: accepted
 ## Considered Options
 
 - **设高默认值 (200) 而非无限**: 保留防 runaway 兜底,但 200 仍是"粗暴计数",
-  长程探索仍可能撞上,且上游参考实现内部逃逸默认 200 (`query.py:153`) 与面向
+  长程探索仍可能撞上,且内部逃逸默认 200 (`query.py:153`) 与面向
   用户的默认 8 (`query_engine.py:36`) 矛盾,反映"turn 上限防 runaway"本身站不住。
   被否:每次"设高一点"都只是推迟误杀,不是解决。
 - **保留 hardcoded 6 / 做复杂分层配置 (env + CLI + serve settings 三态)**:
-  前者是当前缺陷,后者 (上游参考实现 `react_launcher.py` 的 `enforce_max_turns`
+  前者是当前缺陷,后者 (`react_launcher.py` 的 `enforce_max_turns`
   三态) 是为"用户罕见想要限制"的诉求造机制,过度设计。被否。
 - **默认无限但有 cost 护栏同时落地**: 最正确,但把 017 conditional layer 的
   禁止项提前到本轮,扩大范围,是另一个 hard-to-reverse 决策。本轮不硬扩,
@@ -45,7 +45,7 @@ Status: accepted
 ## Consequences
 
 - (+) 探索撞护栏的致命问题解决:默认无限,长程任务不被 turn 计数误杀。
-- (+) 与上游参考实现语义对齐 (默认 None=无限,用户显式才设)。
+- (+) 语义对齐 (默认 None=无限,用户显式才设)。
 - (+) 配置最小:一个 CLI flag + 一个 env 变量,零新机制,不做 serve settings。
 - (−) 成本护栏落地前**无防 runaway 兜底** —— 有意的默认可infinite 取舍,
   已记入 conditional layer 待办;失控循环的兜底推迟到 token/耗时护栏。
@@ -64,7 +64,7 @@ Status: accepted
 - `docs/archive/wayfinder/issues/017-loop-hardening-for-migration.md:27` —
   "maxTurns 以外确有必要的时间、token 或成本护栏" 列入 conditional layer 显式禁止。
 - `docs/CONTEXT.md:17` — `maxTurns` 是"调用模型前检查的运行时上限"。
-- 上游参考实现基准: `upstream-ref/src/<baseline>/engine/query.py:700,882-883`
+- 基准: `query.py:700,882-883`
   (None=无限) · `query_engine.py:36` (默认 8) · `query.py:153` (逃逸默认 200) ·
   `react_launcher.py:85-100` (`--max-turns` flag)。
 - `docs/adr/0011-loop-stop-summary-and-max-turns-exceeded.md` — 超限语义

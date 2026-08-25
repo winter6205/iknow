@@ -1,7 +1,7 @@
 /**
  * Permission modes (W2).
  *
- * Mirrors upstream-ref `PermissionMode` (`default` | `plan` |
+ * Mirrors `PermissionMode` (`default` | `plan` |
  * `full_auto`), adapted to our three-layer policy. Hard-walls remain
  * un-overrideable in every mode — these modes only affect how the policy
  * resolves the gap between read-only (auto-allow) and mutating (ask by
@@ -83,7 +83,7 @@ export function asModeContext(
 /**
  * Human-readable label for a permission mode (used by TUI / REPL UI).
  *
- * Mirrors upstream-ref `_MODE_LABELS` in `ui/protocol.py`:
+ * Mirrors `_MODE_LABELS` in `ui/protocol.py`:
  *   - default   → "Default"
  *   - plan      → "Plan Mode"
  *   - full_auto → "Auto"

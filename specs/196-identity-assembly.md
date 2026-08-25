@@ -8,9 +8,9 @@
 
 > ## ✅ Rev 2026-08-11 决策修订（已落地，12-bullet tracker `docs/plans/196-identity-bootstrap-align.md` 全部完成）
 >
-> **本次修订记录 7 项对齐同类开源实现的决策，均已实施**（D1 决策 + T1-T10 落地，T11 本 spec 收口，T12 E2E）：
+> **本次修订记录 7 项决策，均已实施**（D1 决策 + T1-T10 落地，T11 本 spec 收口，T12 E2E）：
 >
-> 1. bootstrap 完成机制从 **flag 驱动** 改为 **文件驱动**（agent 自己 `rm BOOTSTRAP.md` 隐式完成，对齐同类实现的隐式完成模式）✅
+> 1. bootstrap 完成机制从 **flag 驱动** 改为 **文件驱动**（agent 自己 `rm BOOTSTRAP.md` 隐式完成）✅
 > 2. `bootstrap.ts` 不再导出 `IKNOW_BOOTSTRAP_PROMPT`，改成导出 `BOOTSTRAP_TEMPLATE`（文件内容）✅
 > 3. `initializeIknowWorkspace` 在 `bootstrap_seeded=false` 时 seed `~/.iknow/BOOTSTRAP.md` 并翻旗 ✅
 > 4. 装配层 `readBootstrapIfNeeded` 不再读 `bootstrap_seeded`，改读文件存在 ✅
@@ -48,7 +48,7 @@
 7. **A7 测试框架沿用 vitest**。不引入 jsdom / fs-mock 增强。
 8. **A8 数据路径**：`~/.iknow/` 已是 `permissions.toml`（#172）+ `sessions/`（#120）+ `memory/`（#121）根目录。本 spec 复用同根，新增 `user.md`（用户画像）+ `state.json`（bootstrap 状态机）。不入 git、不进 commit；跨机器路径在实施期 `homedir()` 解析。
 9. **A9 既有 8 工具集（ACI 0004 / 141-T11 + Web 扩展）路径不动**：本 spec 不注册新工具、不动工具目录、不动 `createAciRegistry` 拓扑。identity 注入 = `deps.system` 缝的 hook，不新增工具。
-10. **A10 reference 关系**：`upstream-ref/ohmo/{workspace,prompts}.py` 是行为真值（issue #196 决策点 §1）。本 spec 引用其 4 文件模式 + 装配顺序 + 状态机结构，但**不用 import / 不依赖 `upstream-ref` runtime**（按 CLAUDE.md / `docs/CONTEXT.md` 规则）。
+10. **A10 reference 关系**：spec 行为真值由 issue #196 决策点 §1 锁定（4 文件模式 + 装配顺序 + 状态机结构）。本 spec **不用 import / 不依赖外部 runtime**（按 CLAUDE.md / `docs/CONTEXT.md` 规则）。
 11. **A11 架构改造范围**：`master` 分支当前 `buildHarnessEngine` 产物 `LoopEngineDeps` **没有** `system` 字段（identity 注入缝在 #121 worktree 分支已存在但未合入 master）。本 spec 确认改造范围 = **把 `deps.system` 缝从 #121 worktree 提升到 master baseline**（不是只在 #121 分支上挂，是 harness 本身补齐）。触发 / 装配 / 测试逻辑直接走基线缝。
 12. **A12 入口覆盖**：4 入口走 `buildHarnessEngine`（chat / serve / tui / ask），都注入身份；对话型入口（chat / tui / serve）激活 BOOTSTRAP；仅脚本型（ask）跳过 BOOTSTRAP 段（按 `bootstrapActive` 开关）。serve 是同一主体的浏览器交互面（iknow serve + SPA），与 chat / tui 共享同一 `~/.iknow/state.json` 状态机，不再单独降级（用户 2026-08-08 裁定）。`trace` 入口走 `src/traceserver/`，不调 `buildHarnessEngine`，与本 spec 无关。
 13. **A13 认知 vs 人格边界**：identity（认知层 / 本体性事实）只放 Name / Kind / Signature；soul（人格层 / 行为风格）放 core truths / boundaries / **vibe** / continuity。判断标准 "删掉后 agent 是不是 iknow"：identity 删了 = 认知崩塌；soul 删了 = 还是 iknow 但行为不可预测。**Vibe 归 soul**（行为风格）。
@@ -226,7 +226,7 @@ export const IKNOW_SOUL_DEFAULT = `
 - Vibe 归人格（行为风格），**不**归认知
 - 后续若调整人格 / 边界，**改代码**（`src/harness/identity/soul.ts`），不进用户工作区
 
-### Workspace 初始化约束（同类实现风格 eager + idempotent）
+### Workspace 初始化约束（eager + idempotent）
 
 ```ts
 // src/harness/identity/workspace.ts — 初始化与状态机（建议骨架，writing-plans 校验）
@@ -242,7 +242,7 @@ export interface IknowStateV1 {
   readonly bootstrap_seeded: boolean;
 }
 
-/** IKNOW-196 初始化（eager + idempotent）。rev 2026-08-11 对齐同类实现:
+/** IKNOW-196 初始化（eager + idempotent）。rev 2026-08-11 行为：
  *  - mkdir -p ~/.iknow/（幂等）
  *  - 写 user.md（仅当不存在；不覆盖用户已改）
  *  - 写 state.json（仅当不存在；bs=false）
@@ -265,23 +265,23 @@ export async function writeIknowState(
   workspace?: string
 ): Promise<IknowStateV1>;
 
-/** rev 2026-08-11 新增：BOOTSTRAP.md 文件路径解析（与同类实现的 `get_bootstrap_path` 对齐）。
+/** rev 2026-08-11 新增：BOOTSTRAP.md 文件路径解析。
  *  seed 后只读、不写。完成 = 文件被删，**无需宿主钩子**。 */
 export function bootstrapFilePath(workspace: string): string;
 ```
 
-### Bootstrap 机制（rev 2026-08-11 对齐同类实现的隐式完成）
+### Bootstrap 机制（rev 2026-08-11 隐式完成）
 
-**问题溯源**：`bootstrap_seeded` flag 在 iknow 现状下被装配层每次会话读取（`readBootstrapIfNeeded` 读 state.json 决定是否注入 `IKNOW_BOOTSTRAP_PROMPT`）。同类开源实现同名 flag 只在 `initialize_workspace()` 内被读一次（决定是否 seed BOOTSTRAP.md 文件），runtime / prompts **从不读它**——行为由文件存在与否驱动，agent 自己 `rm BOOTSTRAP.md` 隐式完成。
+**问题溯源**：`bootstrap_seeded` flag 在 iknow 现状下被装配层每次会话读取（`readBootstrapIfNeeded` 读 state.json 决定是否注入 `IKNOW_BOOTSTRAP_PROMPT`）。目标行为：flag 只在 `initialize_workspace()` 内被读一次（决定是否 seed BOOTSTRAP.md 文件），runtime / prompts **从不读它**——行为由文件存在与否驱动，agent 自己 `rm BOOTSTRAP.md` 隐式完成。
 
 **对齐决策**：
 
 1. **完成机制从 flag 驱动改为文件驱动**：`bootstrap_seeded` 仅用于 `initializeIknowWorkspace` 一次性 seed 决策；装配层从读 flag 改为读 `BOOTSTRAP.md` 是否存在。
-2. **bootstrap 段从代码常量改为种子文件**：`bootstrap.ts` 不再导出 `IKNOW_BOOTSTRAP_PROMPT`（对话脚本），改成导出 `BOOTSTRAP_TEMPLATE`（文件内容），内容结尾对齐同类实现风格"This file can be deleted when done. If gone later, do not assume it should come back."。
+2. **bootstrap 段从代码常量改为种子文件**：`bootstrap.ts` 不再导出 `IKNOW_BOOTSTRAP_PROMPT`（对话脚本），改成导出 `BOOTSTRAP_TEMPLATE`（文件内容），内容结尾："This file can be deleted when done. If gone later, do not assume it should come back."。
 3. **`initializeIknowWorkspace` seed BOOTSTRAP.md**：`bootstrap_seeded=false` 且文件不存在时，把 `BOOTSTRAP_TEMPLATE` 原子写入 `~/.iknow/BOOTSTRAP.md`，随后翻 flag。幂等。
 4. **删除 `/profile done` 钩子**（chat-session / app.tsx / hub）：bootstrap 完成不再靠宿主斜杠命令；agent 引导对话结束后 `rm BOOTSTRAP.md` 即可（bash 在 bwrap sandbox 内有 home `--bind`，可写）。
 5. **删除 `appendIknowUserSections` / `BOOTSTRAP_COMPLETE_SECTIONS`**（commit d1beae5 已回撤）：基于"bash 复合命令被 hard-wall 拦"错误前提做的过度设计。实测 `bwrap.ts:49-72` 把整个 home `--bind` 进沙箱，`hard-walls.ts:230` 明示 non-allowlisted 命令走 ask tier 而非 hard-wall，`SENSITIVE_PATH_FRAGMENTS` 不含 `.iknow`，bash 可自由读写。
-6. **保留** `~/.iknow/` 路径决策（跨项目用户画像，不污染仓库）—— **不**对齐同类开源实现把 workspace 放 cwd 的做法。同类实现 = 项目级 workspace；iknow = 用户级 workspace。这是产品决策，不是设计失误。
+6. **保留** `~/.iknow/` 路径决策（跨项目用户画像，不污染仓库）。iknow = 用户级 workspace（不是把 workspace 放 cwd）。这是产品决策，不是设计失误。
 
 ### ACI 写工具 extraWriteRoots 对称（rev 2026-08-11）
 
@@ -431,7 +431,7 @@ export type IknowIdentityError =
   - 不动 `src/config/env.ts` 栈默认（守 ADR-0001）。
   - 不动既有 8 工具集拓扑（守 ADR-0004 / 141-T11）。
   - 不动 #121 既有 7 段装配顺序（守 A3）；仅在 1-2 步前置插入。
-  - 不动 `upstream-ref`（守 CLAUDE.md / `docs/CONTEXT.md`）：仅做行为参考，不 import / 不 symlink / 不加载。
+  - 不依赖任何外部参考运行时（守 CLAUDE.md / `docs/CONTEXT.md`）：仅做行为参考，不 import / 不 symlink / 不加载。
   - 不新增 npm 依赖（守 A6）。
 
 - **Ask first**：
@@ -598,7 +598,7 @@ minimal-change-verifier: yes — 依赖声明显式零新增（spec.md:507-513�
 
 ## Reference Implementation Mapping（参考实现映射）
 
-| iknow 决策                               | 同类开源实现真值                                        | 关键差异                                                                         |
+| iknow 决策                               | 参考真值                                                | 关键差异                                                                         |
 | ---------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | `identity.ts` (认知层)                   | `ohmo/identity.md` 4 行简表（Name/Kind/Vibe/Signature） | ① 移到代码（非工作区） ② Vibe 归 soul（只留 Name/Kind/Signature）                |
 | `soul.ts` (人格层)                       | `ohmo/soul.md` SOUL_TEMPLATE 全文                       | ① 移到代码（非工作区） ② 仍含 vibe / continuity                                  |
@@ -606,9 +606,9 @@ minimal-change-verifier: yes — 依赖声明显式零新增（spec.md:507-513�
 | `user-template.ts` (user.md seed)        | `ohmo/user.md` USER_TEMPLATE                            | 带位置（用户工作区）                                                             |
 | `workspace.ts` (eager + idempotent init) | `ohmo/initialize_workspace`                             | 改 JSON（state.json 替代 marker 文件） + 精简 scope（只写 user.md + state.json） |
 | `assembleIdentityContext` 5 段顺序       | `ohmo/build_ohmo_system_prompt` 8 段顺序                | 保持一致（identity 在 soul 之前）                                                |
-| `state.json` 状态机                      | `state.json` `bootstrap_seeded` 字段                    | 保持一致（同类实现风格）                                                         |
+| `state.json` 状态机                      | `state.json` `bootstrap_seeded` 字段                    | 保持一致                                                                         |
 
-> 行为真值参考 `upstream-ref/ohmo/{workspace,prompts}.py`。本 spec 不 import / 不依赖 / 不 symlink。
+> 行为真值参考见 issue #196 决策点 §1 锁定内容。本 spec 不 import / 不依赖 / 不 symlink。
 
 ---
 

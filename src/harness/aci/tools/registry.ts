@@ -5,10 +5,7 @@
  * 共享同一份"工具有哪些 + 怎么注入 env"的装配函数,避免工具集分裂
  * (历史教训:`src/tui/deps.ts` 手写 6 个文件工具漏注册 web_fetch/web_search)。
  *
- * **对齐 upstream**:upstream-ref 用 `ToolRegistry` 类 +
- * `create_default_tool_registry()` 工厂(`upstream-ref/src/<baseline>/tools/__init__.py:48`),
- * `build_runtime()`(`ui/runtime.py:324`)唯一装配点;UI 层从 `RuntimeBundle.tool_registry`
- * 读,不自己注册。本模块同构实现,但更薄 — 仅做"哪些工具 + env 透传",
+ * 本模块仅做"哪些工具 + env 透传",
  * 不替代 `createAciRegistry`(后者还管协议 registry + 延迟加载 catalog)。
  *
  * **append-only**:不重排既有 8 工具顺序(policy byName 键空间与 ADR-0006 稳定);

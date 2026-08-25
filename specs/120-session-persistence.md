@@ -8,9 +8,9 @@
 
 ## Objective
 
-让 iknow 的会话存储做到 #120 Q6 唯一验收标准：**同一份磁盘文件，任何入口（serve / TUI / 将来 chat）读取都能回溯到对应会话状态**。具体三件事（参考同类开源实现 `upstream-ref/src/ref/session_storage.py`，用自己的实现落地）：
+让 iknow 的会话存储做到 #120 Q6 唯一验收标准：**同一份磁盘文件，任何入口（serve / TUI / 将来 chat）读取都能回溯到对应会话状态**。具体三件事：
 
-让 iknow 的会话存储做到 #120 Q6 唯一验收标准：**同一份磁盘文件，任何入口（serve / TUI / 将来 chat）读取都能回溯到对应会话状态**。具体三件事（参考同类开源实现 `upstream-ref/src/ref/session_storage.py`，用自己的实现落地）：
+让 iknow 的会话存储做到 #120 Q6 唯一验收标准：**同一份磁盘文件，任何入口（serve / TUI / 将来 chat）读取都能回溯到对应会话状态**。具体三件事：
 
 ## Glossary（CONTEXT.md 原样引用，不重新定义）
 

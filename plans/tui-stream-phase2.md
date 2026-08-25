@@ -3,7 +3,7 @@
 > 来源：用户指令（流式的下一步）+ `plans/streaming-rendering.md`（第一阶段 #214 已落地）
 >
 > - `.claude/worktrees/tui-bench-research/.reference/tui-benchmark.html` 调研结论。
->   调研依据：三路 explorer（TUI 现状 / harness 协议 / 同类开源实现模式）。
+>   调研依据：三路 explorer（TUI 现状 / harness 协议 / 参照模式）。
 
 ## 0. ACR 5-verdict（pre-implementation gate）
 

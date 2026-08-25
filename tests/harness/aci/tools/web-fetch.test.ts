@@ -1,7 +1,7 @@
 /**
  * web_fetch 工具单元测试。
  *
- * 行为真值：upstream-ref 的通用 Agent 工具层 web_fetch_tool.py（SSRF 层复用 network-guard）。
+ * 行为真值：web_fetch_tool.py 形态（SSRF 层复用 network-guard）。
  *
  * 覆盖契约（ADR 测试规范 6 项 + ACR 5 类边界）：
  *   - 工厂签名 createWebFetchTool(deps?) → AciToolDef，name === "web_fetch"

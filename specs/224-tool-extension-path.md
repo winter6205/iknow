@@ -92,7 +92,7 @@ const TOOL_SEARCH_SCHEMA = {
 const handler: ToolHandler = (input, _ctx) => {
   const { query, names } = input as { query?: string; names?: string[] };
   if (!query && !names?.length) {
-    return "(no matches)"; // 与同类开源实现同语义：缺参 = 无结果
+    return "(no matches)"; // 缺参 = 无结果
   }
   const matches = catalog.all().filter((t) => {
     if (names?.length) return names.includes(t.name);
@@ -206,7 +206,7 @@ const aci = {
 - **ACI tool set**：Harness 装配层（`src/harness/aci/`）注册的工具集；SSOT = `src/harness/build-engine.ts`。
 - **Loop Engine**：Foundation 的状态机运行内核，驱动模型 → 工具 → 真实结果 → 下一轮模型 → 明确停止；位于 `src/harness/`。
 - **executor truncation authority**（契约 X，ADR-0004 / ADR-0006）：executor 是工具结果截断元数据的唯一权威——自测序列化后字符数、自截断、自合成标记；工具返回纯数据、不带 truncated/total 元字段。
-- **plain-string tool output**（契约 Y1，ADR-0004）：生产工具输出为纯字符串（对齐同类开源实现的 wire 形态）；bash 是唯一例外保留结构化 `{code, stdout, stderr}`（Y1b）。
+- **plain-string tool output**（契约 Y1，ADR-0004）：生产工具输出为纯字符串；bash 是唯一例外保留结构化 `{code, stdout, stderr}`（Y1b）。
 - **append-only messages**：Foundation 的权威 Anthropic 原生会话历史，是唯一事实来源；消息只能以不可变追加（`[...prev, x]`）更新。
 - **project stack defaults**（ADR-0001）：iknow 的 LLM 栈默认（key 变量名 `ANTHROPIC_AUTH_TOKEN`、主模型 `m3-combo`、provider/baseUrl `http://localhost:20128/v1`）是项目级决策，焊进 `src/config/env.ts` 代码默认。
 

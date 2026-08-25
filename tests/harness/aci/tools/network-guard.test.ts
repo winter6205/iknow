@@ -1,7 +1,7 @@
 /**
  * network-guard（SSRF 安全出口层）单元测试。
  *
- * 行为真值：upstream-ref 的通用 Agent 工具层 utils/network_guard.py（DIRECT 模式裁剪版，
+ * 行为真值：utils/network_guard.py（DIRECT 模式裁剪版，
  * 见 ACR corrective #2：不移植 PROXY / SYNTHETIC_DNS）。
  *
  * 覆盖契约：
@@ -10,7 +10,7 @@
  *   - 主机名规则：localhost / *.local / *.internal / 单标签拒绝
  *   - DNS 解析：解析结果含非公网 IP → 拒绝；解析失败 → could not resolve
  *   - fetchPublicResponse：非 2xx 拒绝、重定向逐跳重验（≤5 跳）、重定向到私网拒绝
- *   - 错误消息带 `${tool} failed:` 前缀（对齐 upstream-ref "web_fetch failed: ..."）
+ *   - 错误消息带 `${tool} failed:` 前缀（对齐 "web_fetch failed: ..."）
  *   - abort / timeout 边界
  *   - 并发：两个独立 deps 的调用 Promise.all 扇出互不干扰
  *
@@ -468,7 +468,7 @@ describe("fetchPublicResponse — 并发扇出（ACR corrective #3）", () => {
 
 describe("createDefaultGuardDeps — 代理出口（IKNOW_WEB_PROXY 装配路径）", () => {
   it("proxyUrl 非法(非 http/https)时构造时同步抛 ToolExecutionError", () => {
-    // SSRF 防线对齐 upstream-ref `validate_http_url(resolved_proxy)`:
+    // SSRF 防线对齐 `validate_http_url(resolved_proxy)`:
     // proxy URL 在 ProxyAgent 构造前必须通过 httpUrlViolation 校验,
     // 校验发生在工厂同步路径上,早于 fetch 闭包第一次调用。
     assert.throws(

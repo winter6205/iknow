@@ -1,6 +1,6 @@
 # Plan: 632 — spawn_subagent ACI timeout 不再提前砍子代理
 
-**Goal:** 前景 `spawn_subagent`（wait:true）的寿命由 manager per-task 钟（`PER_TASK_TIMEOUT_MS` 2h）决定，ACI tool-tier 不再用 30min `long` / 文案里的 5min 提前 abort。对齐同类开源实现/Claude Code：Agent 等待不套短工具超时。
+**Goal:** 前景 `spawn_subagent`（wait:true）的寿命由 manager per-task 钟（`PER_TASK_TIMEOUT_MS` 2h）决定，ACI tool-tier 不再用 30min `long` / 文案里的 5min 提前 abort。对齐 Claude Code：Agent 等待不套短工具超时。
 
 **Spec link:** none（对照 #358 Assumptions 1 + ADR-0014 wait:true；本轮修时钟错位，不改 wait 默认）。
 
@@ -16,7 +16,7 @@
 2. `aci.timeoutTier: "long"` = **30 min**，小于 `PER_TASK_TIMEOUT_MS` **2 h**。ACI executor 对 wait:true 下 AbortSignal，waitFor 走 cancelled，不是 timeout envelope。注释写「tier ≥ PER_TASK」但未守门。
 3. `SubAgentWaitTimeoutError` 复用于 unknown task / failed-without-envelope / shutdown / 墙钟；handler 若一律合成 timeout envelope 会误报。
 
-同类开源实现 `AgentTool` 是 fire-and-forget spawn，工具层无阻塞超时。iknow 保持 ADR-0014 `wait:true`，只把 **ACI 层超时拿掉**（`unbounded=0`，走既有 `tierTimeoutMs > 0` 门），寿命仍归 manager。
+参照 `AgentTool` 是 fire-and-forget spawn，工具层无阻塞超时。iknow 保持 ADR-0014 `wait:true`，只把 **ACI 层超时拿掉**（`unbounded=0`，走既有 `tierTimeoutMs > 0` 门），寿命仍归 manager。
 
 ---
 
