@@ -167,19 +167,41 @@ async function mountContinueApp(opts: {
       if (!setup.renderer.isDestroyed) setup.renderer.destroy();
     },
     typeText: async (text: string) => {
+      // mockInput 走 stdin 异步解析；连发过快会丢键（实测 /continue → /onine
+      // → 未知命令，untilFrame 永远等不到 nothing_pending）。
+      const inputLanded = (frame: string): boolean =>
+        frame.includes(`❯ ${text}`) || frame.includes(`❯ ${text} `);
+      const clear = async (): Promise<void> => {
+        for (let i = 0; i < 24; i++) {
+          setup.mockInput.pressBackspace();
+        }
+        await new Promise((r) => setTimeout(r, 40));
+        await setup.renderOnce();
+      };
+      const typeOnce = async (): Promise<void> => {
+        for (const ch of text) {
+          setup.mockInput.pressKey(ch);
+          await new Promise((r) => setTimeout(r, 40));
+          await setup.renderOnce();
+        }
+        await new Promise((r) => setTimeout(r, 80));
+        await setup.renderOnce();
+      };
       setup.mockInput.pressKey("/");
-      await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 80));
       await setup.renderOnce();
-      for (let i = 0; i < 5; i++) {
-        setup.mockInput.pressBackspace();
-        await new Promise((r) => setTimeout(r, 30));
+      await clear();
+      await typeOnce();
+      const start = Date.now();
+      while (!inputLanded(setup.captureCharFrame())) {
+        if (Date.now() - start > 4000) {
+          throw new Error(
+            `typeText did not land ${JSON.stringify(text)}:\n${setup.captureCharFrame()}`
+          );
+        }
+        await clear();
+        await typeOnce();
       }
-      for (const ch of text) {
-        setup.mockInput.pressKey(ch);
-        await new Promise((r) => setTimeout(r, 30));
-      }
-      await new Promise((r) => setTimeout(r, 100));
-      await setup.renderOnce();
     },
     pressEnter: async () => {
       setup.mockInput.pressEnter();
@@ -258,9 +280,16 @@ describe("TUI /continue slash", () => {
     await untilFrame(app.setup, (f) => f.includes("Version"));
     await app.typeText("/continue");
     await app.pressEnter();
+    await until(() => continueCalls.n >= 1, 8000, "continue-called");
     await untilFrame(
       app.setup,
-      (f) => f.includes(continueNoticeFor("nothing_pending")[0]!),
+      (f) => {
+        const needle = continueNoticeFor("nothing_pending")[0]!;
+        return (
+          f.includes(needle) ||
+          f.replace(/\s+/g, "").includes(needle.replace(/\s+/g, ""))
+        );
+      },
       8000,
       "nothing-pending-clean"
     );

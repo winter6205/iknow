@@ -24,6 +24,7 @@ import {
   resolveProjectSessionDir,
   SessionStore,
   type SessionFileV1,
+  type SessionStoreError,
 } from "../../src/session-api/store/index.ts";
 import type {
   AnthropicNativeMessage,
@@ -177,6 +178,31 @@ describe("T3 empty: empty session /continue → nothing_pending, run not called"
     assert.equal(spy.stepCalls.n, 0);
     assert.equal(ctx.state.messages.length, 0);
   });
+
+  it("store.load not_found → nothing_pending (not not_found); run not called", async () => {
+    const id = "fresh-never-saved";
+    const store = {
+      load: async () => {
+        const err: SessionStoreError = {
+          kind: "not_found",
+          conversation_id: id,
+        };
+        throw err;
+      },
+    } as SessionStore;
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["should-not-run"] })],
+      checkpointStore: store,
+      stateOverrides: { conversationId: id, messages: [] },
+    });
+    const spy = spyAdapter(ctx);
+    const r = await processChatLine({ line: "/continue", ctx });
+    assert.match(r.stderr ?? "", /nothing_pending/);
+    assert.doesNotMatch(r.stderr ?? "", /not_found/);
+    assert.equal(r.ranQuery, undefined);
+    assert.equal(spy.encodeCount.n, 0);
+    assert.equal(spy.stepCalls.n, 0);
+  });
 });
 
 describe("T3 negative: NL table, single-token, no-fallback, ask_out", () => {
@@ -309,6 +335,37 @@ describe("T3 concurrent: busy_stop_first does not abort in-flight turn", () => {
     assert.equal(finished.ranQuery, true);
     assert.match(finished.output, /from-inflight/);
     assert.equal(spy.encodeCount.n, 1);
+  });
+
+  it("busy + non-pending table NL → skip, not busy_stop_first; append path", async () => {
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["appended-while-busy"] })],
+      stateOverrides: {
+        messages: [userText("hi"), assistantText("done")],
+      },
+    });
+    ctx.clientBusy = { value: true };
+    const spy = spyAdapter(ctx);
+    const r = await processChatLine({ line: "please continue", ctx });
+    assert.doesNotMatch(r.stderr ?? "", /busy_stop_first/);
+    assert.equal(r.ranQuery, true);
+    assert.equal(spy.encodeCount.n, 1);
+    assert.equal(lastUserText(ctx.state.messages), "please continue");
+    assert.match(r.output, /appended-while-busy/);
+  });
+
+  it("busy + pending table NL → busy_stop_first; run not called", async () => {
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["should-not-run"] })],
+      stateOverrides: { messages: pendingMessages() },
+    });
+    ctx.clientBusy = { value: true };
+    const spy = spyAdapter(ctx);
+    const r = await processChatLine({ line: "please continue", ctx });
+    assert.match(r.stderr ?? "", /busy_stop_first/);
+    assert.equal(r.ranQuery, undefined);
+    assert.equal(spy.encodeCount.n, 0);
+    assert.equal(spy.stepCalls.n, 0);
   });
 
   it("pending NL while busy → busy_stop_first; original turn still completes", async () => {

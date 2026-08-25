@@ -283,6 +283,10 @@ async function loadContinueTranscript(
     };
   } catch (err) {
     if (!isSessionStoreErrorKind(err)) throw err;
+    // Missing disk file = empty transcript (fresh conversation; same as /goal).
+    if ((err as SessionStoreError).kind === "not_found") {
+      return { ok: true, messages: [] };
+    }
     return {
       ok: false,
       result: continueFailResult(typedGoalError(err, conversationId)),
@@ -301,7 +305,12 @@ async function prepareContinue(opts: {
   readonly mode: "slash" | "nl";
   readonly line: string;
 }): Promise<ContinuePrep> {
-  if (isClientBusy(opts.ctx)) return { kind: "busy" };
+  // Slash: busy-first (do not start a second continue). NL: load+predicate
+  // first so a table line that is not pending skip-appends as a normal query
+  // even while another turn is in-flight.
+  if (opts.mode === "slash" && isClientBusy(opts.ctx)) {
+    return { kind: "busy" };
+  }
   const loaded = await loadContinueTranscript(opts.ctx);
   if (!loaded.ok) return { kind: "exit", result: loaded.result };
   const verdict = evaluateContinuePending({
@@ -317,6 +326,7 @@ async function prepareContinue(opts: {
     ) {
       return { kind: "skip" };
     }
+    if (isClientBusy(opts.ctx)) return { kind: "busy" };
   } else if (!verdict.ok) {
     return {
       kind: "exit",

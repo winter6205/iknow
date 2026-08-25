@@ -1254,6 +1254,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     let stopReason: string | undefined;
     let lastUsage: TokenUsage | null = null;
     let interrupted: boolean | undefined;
+    // Predicate / continue ValidationError is not a turn: keep EXIT notice,
+    // restore idle, do not reload (reload overwrite → 刷新会话失败).
+    let skipTurnRefresh = false;
     const draft = createStreamDraft();
     setStreamDraft(draft);
     // 运行时长打点：turn 起始时刻（mode 行统计段「运行中」实时递增用）。
@@ -1372,8 +1375,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         const exit = continueExitFromError(err);
         if (exit !== undefined) {
           setNotice({ lines: continueNoticeFor(exit) });
+          skipTurnRefresh = true;
         } else if (isContinueValidationError(err)) {
           setNotice({ lines: [err.message] });
+          skipTurnRefresh = true;
         } else {
           stopReason = "protocolError";
           setNotice({ lines: [`续跑失败：${describeError(err)}`] });
@@ -1408,8 +1413,21 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       );
       setRunElapsed(finalRunSeconds);
       setRunStartedAt(null);
-      setCrunchedOf(targetId);
-      setCrunchedSeconds(finalRunSeconds);
+      if (!skipTurnRefresh) {
+        setCrunchedOf(targetId);
+        setCrunchedSeconds(finalRunSeconds);
+      }
+    }
+    if (skipTurnRefresh) {
+      setSessions((prev) => {
+        const current = prev[targetId];
+        if (!current) return prev;
+        return {
+          ...prev,
+          [targetId]: Object.freeze({ ...current, runState: "idle" }),
+        };
+      });
+      return;
     }
     try {
       const file = await props.bridge.loadSessionFile(targetId);
