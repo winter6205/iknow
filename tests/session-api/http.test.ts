@@ -729,6 +729,78 @@ describe("POST /api/v1/sessions/:id/compact", () => {
   });
 });
 
+// -- T2 (#688): POST /api/v1/sessions/:id/continue ---------------------------
+
+describe("POST /api/v1/sessions/:id/continue", () => {
+  it("empty body on empty session → 400 nothing_pending field=continue", async () => {
+    const id = await createSession();
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/continue`,
+      payload: undefined,
+    });
+    assert.equal(status, 400);
+    assertNestedError({ body, kind: "validation" });
+    const b = body as { error: { field?: string; message: string } };
+    assert.equal(b.error.field, "continue");
+    assert.match(b.error.message, /nothing_pending/);
+    assert.doesNotMatch(b.error.message, /busy_stop_first/);
+  });
+
+  it("{} body on empty session is accepted (not invalid JSON) → 400 nothing_pending", async () => {
+    const id = await createSession();
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/continue`,
+      payload: {},
+    });
+    assert.equal(status, 400);
+    const b = body as { error: { field?: string; message: string } };
+    assert.equal(b.error.field, "continue");
+    assert.match(b.error.message, /nothing_pending/);
+  });
+
+  it("missing session → 404 not_found", async () => {
+    const { status, body } = await postJson({
+      path: "/api/v1/sessions/does-not-exist/continue",
+      payload: {},
+    });
+    assert.equal(status, 404);
+    assertNestedError({ body, kind: "not_found" });
+  });
+
+  it("concurrent POSTs never return busy_stop_first", async () => {
+    const id = await createSession();
+    const [a, b] = await Promise.all([
+      postJson({ path: `/api/v1/sessions/${id}/continue`, payload: {} }),
+      postJson({ path: `/api/v1/sessions/${id}/continue`, payload: {} }),
+    ]);
+    for (const r of [a, b]) {
+      assert.notEqual(r.status, 409);
+      const msg = JSON.stringify(r.body);
+      assert.equal(msg.includes("busy_stop_first"), false);
+    }
+  });
+
+  it("empty POST /messages still 400 text non-empty (never treated as continue)", async () => {
+    const id = await createSession();
+    const empty = await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: { text: "" },
+    });
+    assert.equal(empty.status, 400);
+    assertNestedError({ body: empty.body, kind: "validation" });
+    const b = empty.body as { error: { field?: string; message: string } };
+    assert.equal(b.error.field, "text");
+    assert.match(b.error.message, /message text must be non-empty/);
+  });
+
+  it("GET /pending does not exist", async () => {
+    const id = await createSession();
+    const { status, body } = await getJson(`/api/v1/sessions/${id}/pending`);
+    assert.equal(status, 404);
+    assertNestedError({ body, kind: "not_found" });
+  });
+});
+
 // -- endpoint 7: POST /api/v1/sessions/:id/commands (REMOVED) ----------------
 
 describe("POST /api/v1/sessions/:id/commands (removed in T5)", () => {

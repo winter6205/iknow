@@ -75,6 +75,38 @@ describe("serve unbound postMessage", () => {
     );
     assert.equal(stepCalls, 0, "must not run the loop when unbound");
   });
+
+  it("continueSession rejects unbound with field=workspaceRoot before run", async () => {
+    const store = await makeStore();
+    let stepCalls = 0;
+    const inner = makeDeps([assistantResult({ texts: ["should-not-run"] })]);
+    const deps: typeof inner = {
+      ...inner,
+      adapter: {
+        ...inner.adapter,
+        step: async (...args) => {
+          stepCalls += 1;
+          return inner.adapter.step(...args);
+        },
+      },
+    };
+    const hub = new SessionHub({
+      store,
+      deps,
+      surface: "serve",
+    });
+    const { session } = await hub.createSession();
+    await assert.rejects(
+      () => hub.continueSession(session.conversation_id),
+      (err: unknown) => {
+        assert.ok(err instanceof ValidationError);
+        assert.equal(err.details?.["field"], "workspaceRoot");
+        assert.match(err.message, /unbound/);
+        return true;
+      }
+    );
+    assert.equal(stepCalls, 0, "must not run continue when unbound");
+  });
 });
 
 describe("default surface (chat) with injected deps", () => {

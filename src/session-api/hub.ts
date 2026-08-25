@@ -100,6 +100,11 @@ import {
   reportGoalAutoStoreLoadErr,
   runAutoLoopSteps,
 } from "./goal-auto.js";
+import {
+  continuePredicateError,
+  evaluateContinuePending,
+  mapSkipAppendToContinueError,
+} from "./continue-pending.js";
 import type {
   ApiErrorBody,
   CompactCallerOpts,
@@ -1537,6 +1542,111 @@ export class SessionHub {
         };
       },
     });
+  }
+
+  /**
+   * continue_pending T2 (#688): reload → predicate → skip-append run.
+   * Same serialize queue as compactSession; HTTP has no busy_stop_first.
+   * Does not run goal-auto. Success wire reuses PostMessageResponse.
+   */
+  async continueSession(
+    conversationId: string,
+    opts?: CompactCallerOpts
+  ): Promise<PostMessageResponse> {
+    return this.serialize({
+      conversationId,
+      work: () => this.runContinuePending(conversationId, opts),
+    });
+  }
+
+  /** Load, gate unbound/predicate, skip-append run, map skip_append → ValidationError. */
+  private async runContinuePending(
+    conversationId: string,
+    opts?: CompactCallerOpts
+  ): Promise<PostMessageResponse> {
+    const session = await this.store.load(conversationId);
+    if (this.surface === "serve" && session.workspaceRoot === undefined) {
+      throw new ValidationError(
+        "workspace is unbound; select a workspace before sending",
+        { field: "workspaceRoot" }
+      );
+    }
+    const verdict = evaluateContinuePending({
+      messages: session.messages,
+      ...(session.goal !== undefined ? { goal: session.goal } : {}),
+    });
+    if (!verdict.ok) {
+      throw continuePredicateError(verdict.exit);
+    }
+    const deps = await this.ensureDeps(session.workspaceRoot);
+    const trace = this.createTrace(conversationId);
+    const runDeps: LoopEngineDeps = {
+      ...deps,
+      agentVersion: getVersion(),
+      conversationId,
+      commitMessages: (messages) =>
+        this.appendSessionEvents({
+          conversationId,
+          session,
+          events: messages,
+        }),
+      ...(trace !== undefined ? { trace } : {}),
+    };
+    let capturedStopSummary: string | undefined;
+    const wrappedOnStream = (event: HarnessStreamEvent): void => {
+      if (event.type === "stop_summary") {
+        capturedStopSummary = event.text;
+      }
+      opts?.onStream?.(event);
+    };
+    try {
+      const { result } = await run("", runDeps, opts?.signal, {
+        priorMessages: session.messages,
+        appendUserText: false,
+        onStream: wrappedOnStream,
+      });
+      await this.conditionalSave({
+        conversationId,
+        session,
+        result,
+        priorMessages: session.messages,
+      });
+      const loaded = await this.store.load(conversationId);
+      return {
+        session: this.summarize({ file: loaded }),
+        turn: this.toTurnDto({
+          query: "",
+          result,
+          turnMessages: result.messages.slice(session.messages.length),
+          priorMessages: session.messages,
+          ...(capturedStopSummary !== undefined &&
+          capturedStopSummary.length > 0
+            ? { stopSummary: capturedStopSummary }
+            : {}),
+        }),
+      };
+    } catch (err) {
+      const mapped = mapSkipAppendToContinueError(err);
+      if (mapped !== null) throw mapped;
+      if (err instanceof MaxTurnsExceeded) {
+        return {
+          session: this.summarize({ file: session }),
+          turn: {
+            query: "",
+            answer: {
+              finalText: "",
+              stopReason: "maxTurns",
+              turnCount: err.turnsRan,
+              ...(capturedStopSummary !== undefined &&
+              capturedStopSummary.length > 0
+                ? { stopSummary: capturedStopSummary }
+                : {}),
+            },
+          },
+        };
+      }
+      throw err;
+    }
   }
 
   /**
