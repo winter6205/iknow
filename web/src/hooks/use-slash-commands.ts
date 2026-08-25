@@ -7,7 +7,7 @@
  *
  * 行为契约：与原 ChatApp 内 inline handler 100% 等价；只换载体。
  */
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import * as api from "../api/client";
 import {
   resolveArgCommand,
@@ -48,6 +48,7 @@ export type UseSlashCommandsArgs = {
   readonly setRewindIndex: (n: number) => void;
   readonly handleThinkingChange: (next: ThinkingSettings) => void;
   readonly handleCompact: () => Promise<void>;
+  readonly compacting: boolean;
   readonly handleNewSession: () => Promise<void>;
 };
 
@@ -91,8 +92,11 @@ export function useSlashCommands(
     thinkingSettings,
     skills,
     handleCompact,
+    compacting,
     handleNewSession,
   } = args;
+
+  const continueInFlight = useRef(false);
 
   const handleCommand = useCallback(
     (name: SlashCommandName, arg?: string) => {
@@ -104,6 +108,30 @@ export function useSlashCommands(
             void handleCompact();
           }
           break;
+        case "continue": {
+          if ((arg ?? "").trim() !== "") {
+            chat.pushNotice("用法：/continue");
+            break;
+          }
+          if (
+            chat.phase === "sending" ||
+            compacting ||
+            continueInFlight.current
+          ) {
+            chat.pushNotice("请先等待当前回复完成（busy_stop_first）");
+            break;
+          }
+          continueInFlight.current = true;
+          void chat
+            .continue()
+            .catch((e: unknown) => {
+              chat.pushNotice(e instanceof Error ? e.message : String(e));
+            })
+            .finally(() => {
+              continueInFlight.current = false;
+            });
+          break;
+        }
         case "new":
           void handleNewSession();
           break;
@@ -193,6 +221,7 @@ export function useSlashCommands(
       chat,
       perm,
       handleCompact,
+      compacting,
       handleNewSession,
       args,
       skills,

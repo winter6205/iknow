@@ -3,6 +3,7 @@ import React, { act, createElement, type ReactNode } from "react";
 import Reconciler from "react-reconciler";
 import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import * as api from "../../web/src/api/client.ts";
+import { SessionApiError } from "../../web/src/api/types.ts";
 import { useSessionChat } from "../../web/src/hooks/useSessionChat.ts";
 import type { SessionChatApi } from "../../web/src/hooks/useSessionChat.ts";
 
@@ -13,6 +14,7 @@ vi.mock("../../web/src/api/client.ts", () => ({
   getSessionHistory: vi.fn(),
   resetSession: vi.fn(),
   compactSession: vi.fn(),
+  continueSession: vi.fn(),
 }));
 
 type Container = { children: unknown[] };
@@ -273,6 +275,145 @@ describe("useSessionChat compact()", () => {
     // 会话 phase/消息保持不变。
     assert.equal(hook.getCurrent()?.phase, "ready");
     assert.equal(hook.getCurrent()?.error, null);
+
+    Renderer.updateContainer(null, hook.root, null, () => undefined);
+  });
+});
+
+describe("useSessionChat continue()", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function bootReady() {
+    vi.mocked(api.health).mockResolvedValue({
+      ok: true,
+      service: "session-api",
+      version: "test",
+      contextWindow: 200000,
+    });
+    vi.mocked(api.createSession).mockResolvedValue({
+      session: {
+        conversation_id: "c1",
+        json_mode: false,
+        turn_count: 0,
+        prior_count: 0,
+      },
+      turns: [],
+    });
+    return renderHook();
+  }
+
+  const continueOk = {
+    session: {
+      conversation_id: "c1",
+      json_mode: false,
+      turn_count: 1,
+      prior_count: 0,
+    },
+    turn: {
+      query: "",
+      answer: {
+        finalText: "resumed tools",
+        stopReason: "completed",
+        turnCount: 1,
+      },
+    },
+  };
+
+  it("success → agent bubble only (no optimistic userMsg); POST continue not postMessage", async () => {
+    const hook = bootReady();
+    await act(async () => {
+      await vi.waitFor(() => assert.equal(hook.getCurrent()?.phase, "ready"));
+    });
+    vi.mocked(api.continueSession).mockResolvedValue(continueOk);
+
+    await act(async () => {
+      await hook.getCurrent()?.continue();
+    });
+
+    const messages = hook.getCurrent()?.messages ?? [];
+    assert.equal(
+      messages.some((m) => m.role === "user"),
+      false
+    );
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0]?.role, "agent");
+    assert.equal(messages[0]?.text, "resumed tools");
+    assert.equal(hook.getCurrent()?.lastAnswer?.finalText, "resumed tools");
+    assert.equal(hook.getCurrent()?.session?.turn_count, 1);
+    assert.equal(hook.getCurrent()?.phase, "ready");
+    assert.equal(vi.mocked(api.continueSession).mock.calls.length, 1);
+    assert.equal(vi.mocked(api.continueSession).mock.calls[0]?.[0], "c1");
+    assert.equal(vi.mocked(api.postMessage).mock.calls.length, 0);
+
+    Renderer.updateContainer(null, hook.root, null, () => undefined);
+  });
+
+  it("in-flight → phase=sending, still no user bubble", async () => {
+    const hook = bootReady();
+    await act(async () => {
+      await vi.waitFor(() => assert.equal(hook.getCurrent()?.phase, "ready"));
+    });
+    let release!: (value: typeof continueOk) => void;
+    vi.mocked(api.continueSession).mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      })
+    );
+
+    let pending: Promise<void> | undefined;
+    act(() => {
+      pending = hook.getCurrent()?.continue();
+    });
+    assert.equal(hook.getCurrent()?.phase, "sending");
+    assert.equal(
+      (hook.getCurrent()?.messages ?? []).some((m) => m.role === "user"),
+      false
+    );
+
+    release(continueOk);
+    await act(async () => {
+      await pending;
+    });
+    assert.equal(hook.getCurrent()?.phase, "ready");
+
+    Renderer.updateContainer(null, hook.root, null, () => undefined);
+  });
+
+  it("ValidationError → rethrow, phase stays ready, no postMessage fallback", async () => {
+    const hook = bootReady();
+    await act(async () => {
+      await vi.waitFor(() => assert.equal(hook.getCurrent()?.phase, "ready"));
+    });
+    vi.mocked(api.continueSession).mockRejectedValue(
+      new SessionApiError(
+        "nothing_pending: cannot continue this session",
+        400,
+        "validation",
+        {
+          error: {
+            kind: "validation",
+            message: "nothing_pending: cannot continue this session",
+            field: "continue",
+          },
+        }
+      )
+    );
+
+    await act(async () => {
+      await assert.rejects(
+        () => hook.getCurrent()?.continue(),
+        /nothing_pending/
+      );
+    });
+    assert.equal(hook.getCurrent()?.phase, "ready");
+    assert.equal(hook.getCurrent()?.error, null);
+    assert.equal(vi.mocked(api.postMessage).mock.calls.length, 0);
+    assert.equal(
+      (hook.getCurrent()?.messages ?? []).some((m) => m.role === "user"),
+      false
+    );
 
     Renderer.updateContainer(null, hook.root, null, () => undefined);
   });

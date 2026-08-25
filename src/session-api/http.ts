@@ -485,6 +485,22 @@ async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
     });
     return true;
   }
+  // POST /continue — HITL skip-append 续跑（CLI/TUI/Web /continue 的 HTTP 侧）。
+  // 镜像 POST /compact：body 可空；无 busy_stop_first（hub serialize/queue）。
+  // 禁止用空 POST /messages 冒充 continue。
+  if (method === "POST" && rest === "/continue") {
+    await readJsonBody(req);
+    const continueController = new AbortController();
+    req.once("close", () => continueController.abort());
+    sendJson({
+      res,
+      status: 200,
+      body: await hub.continueSession(id, {
+        signal: continueController.signal,
+      }),
+    });
+    return true;
+  }
   // GET pending ask requests (process-global snapshot). The SPA polls this
   // every ~2s to surface a permission dialog when the harness emits a decision
   // of `ask`.

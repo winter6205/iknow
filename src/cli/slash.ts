@@ -50,6 +50,8 @@ export type SlashEffect =
   | { type: "info"; text: string }
   | { type: "error"; text: string }
   | { type: "reset"; message: string }
+  /** T3 (#689): host runs skip-append continue; never a user task sentence. */
+  | { type: "continue" }
   /**
    * W2: 权限模式查询/切换。args[0] ∈ {"", "status", "default", "plan",
    * "full_auto", "help"}。空 / "status" → host 显示当前 mode;其它 → host
@@ -88,6 +90,7 @@ export const HELP_TEXT = `命令 / Commands:
   /quit  /exit                退出 · leave chat
   /json on|off                切换 JSON 输出 · toggle machine JSON
   /reset                      清空会话 · clear messages (session kept)
+  /continue                   续跑未完成工具环 · continue pending (no args)
   /permissions [mode]         查看/切换权限模式(default|plan|full_auto)
   /goal status                查看会话目标 · show session goal
   /goal clear                 清空会话目标 · clear session goal
@@ -152,6 +155,12 @@ export function applySlashCommand(opts: ApplySlashCommandOpts): SlashEffect {
       // messages. Session is intentionally preserved across reset.
       ctx.state.messages = Object.freeze([]);
       return { type: "reset", message: "Session cleared." };
+
+    case "continue":
+      if (args.length > 0) {
+        return { type: "error", text: "Usage: /continue" };
+      }
+      return { type: "continue" };
 
     case "permissions":
       // W2: 权限模式查询/切换。纯解析,实际 set 落在 host(它持有

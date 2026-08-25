@@ -224,6 +224,21 @@ export function compactSession(
   );
 }
 
+/** HITL skip-append continue. Empty body; wire is PostMessageResponse. */
+export function continueSession(
+  id: string,
+  signal?: AbortSignal
+): Promise<PostMessageResponse> {
+  return request(
+    `${API}/sessions/${encodeURIComponent(id)}/continue`,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+    signal
+  );
+}
+
 export function rewindSession(
   id: string,
   head: string | null,

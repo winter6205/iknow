@@ -111,7 +111,7 @@ function ChatApp() {
       .catch(() => setSkills([]));
   }, []);
 
-  const { handleCompact } = useChatCompact(chat);
+  const { compacting, handleCompact } = useChatCompact(chat);
   const handleSend = useCallback(
     (text: string) => chat.sendMessage(text, toWireOverride(thinkingSettings)),
     [chat, thinkingSettings]
@@ -184,6 +184,7 @@ function ChatApp() {
     setRewindIndex,
     handleThinkingChange,
     handleCompact,
+    compacting,
     handleNewSession,
   });
   const side = (

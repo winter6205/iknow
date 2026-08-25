@@ -1,9 +1,9 @@
 /**
  * web/src/lib/slash.ts
  *
- * Web Composer 的 slash 命令面。词表对齐 TUI `src/tui/slash.ts`（12 条 +
- * skill 混显，含 serve-workspace 的 /workspace）；浏览器无进程退出时 /quit
- * /exit 仍进词表，由 App 做能力映射。
+ * Web Composer 的 slash 命令面。词表对齐 TUI `src/tui/slash.ts`（13 条 +
+ * skill 混显，含 serve-workspace 的 /workspace 与 continue_pending 的
+ * /continue）；浏览器无进程退出时 /quit /exit 仍进词表，由 App 做能力映射。
  */
 
 export type SlashCommandName =
@@ -16,6 +16,7 @@ export type SlashCommandName =
   | "thinking"
   | "effort"
   | "compact"
+  | "continue"
   | "rewind"
   | "mcp"
   | "workspace";
@@ -54,6 +55,7 @@ export const SLASH_COMMANDS: ReadonlyArray<SlashCommand> = [
     hint: "/effort low|medium|high|xhigh|max",
   },
   { name: "compact", description: "压缩上下文", hint: "/compact" },
+  { name: "continue", description: "续跑未完成的工具环", hint: "/continue" },
   { name: "rewind", description: "回退到更早的回合", hint: "/rewind" },
   { name: "mcp", description: "查看 MCP 服务看板", hint: "/mcp" },
   { name: "workspace", description: "选择工作空间根", hint: "/workspace" },
@@ -78,7 +80,10 @@ export function matchSlash(input: string): SlashMatch | null {
   const cmd = BY_NAME.get(name as SlashCommandName);
   if (cmd === undefined) return null;
   const rest = text.slice(head.length).trim();
-  if (!ARG_COMMANDS.has(cmd.name) && rest !== "") return null;
+  // continue 不进 ARG_COMMANDS（无值域）；带参仍 match，handler 发 usage EXIT。
+  if (rest !== "" && !ARG_COMMANDS.has(cmd.name) && cmd.name !== "continue") {
+    return null;
+  }
   return { name: cmd.name, arg: rest };
 }
 

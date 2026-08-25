@@ -5,8 +5,8 @@
  * 一致（#146 TUI 自建 slash 词表 + 解析 + Tab 补全 + hint 行）；仅文件头注释
  * 更新为本次迁移说明。纯 TS 模块，无 ink / OpenTUI 依赖。
  *
- * 词表 11 条：/sessions /new /quit /exit /help /info /thinking /effort
- * /compact /rewind /mcp。/reset 不在词表内即天然不可达（Q5c 废除）。
+ * 词表 12 条：/sessions /new /quit /exit /help /info /thinking /effort
+ * /compact /continue /rewind /mcp。/reset 不在词表内即天然不可达（Q5c 废除）。
  * rev 2026-08-11:删 /profile（首启引导由 agent 自己 rm BOOTSTRAP.md 完成,
  * 不再需要宿主斜杠钩子）；#366 加 /rewind；#337/#361 加 /mcp。
  * rev 2026-08-12:#377 系列加 /effort（思考强度调整）。
@@ -46,6 +46,7 @@ export type TuiSlashCommand =
   | "thinking"
   | "effort"
   | "compact"
+  | "continue"
   | "rewind"
   | "mcp";
 
@@ -77,6 +78,7 @@ const VOCABULARY: ReadonlySet<string> = new Set<TuiSlashCommand>([
   "thinking",
   "effort",
   "compact",
+  "continue",
   "rewind",
   "mcp",
 ]);
@@ -95,7 +97,7 @@ export function parseTuiInput(raw: string): SlashParseResult {
 
 /** /help 词表文案（无 emoji；中文与仓库 usage 文案风格一致）。
  *  #337 Phase C：`/<skill-name>  加载技能`（skill 名由调用方动态拼入，不参与
- *  静态词表）。#361 Phase D：/mcp 真描述（词表 11 条含 rewind，/mcp 末位与
+ *  静态词表）。#361 Phase D：/mcp 真描述（词表含 rewind，/mcp 末位与
  *  slashSuggestions 的词表序一致）。#377 系列加 /effort（紧邻 /thinking 之后）。 */
 export function helpLines(
   skillNames?: ReadonlyArray<string>
@@ -113,6 +115,7 @@ export function helpLines(
     "/thinking  切换思考开关（开/关模型的思考）",
     `/effort    调整思考强度（${ADJUSTABLE_EFFORT_LEVELS.join("/")}；缺省/关闭=自适应）`,
     "/compact   压缩上下文（保留尾部，裁剪早期消息）",
+    "/continue  续跑未完成的工具环（不追加新任务）",
     "/rewind    回退到更早的回合（选择锚点后确认）",
     "/quit      退出（别名 /exit）",
     ...skillLines,
@@ -131,6 +134,7 @@ const HINT_DESCRIPTIONS: Record<TuiSlashCommand, string> = {
   thinking: "切换思考开关",
   effort: "调整思考强度",
   compact: "压缩上下文",
+  continue: "续跑未完成的工具环",
   mcp: "查看 MCP 服务看板",
   rewind: "回退到更早的回合",
   quit: "退出（别名 /exit）",
@@ -301,15 +305,17 @@ export function parseEffortLevel(raw: string): ThinkingEffortWire | undefined {
 }
 
 /**
- * `/effort <level>` 是否有参数段（不含首 token 的剩余段非空）。
- * 与 parseEffortLevel 的区分用途：parseEffortLevel 把「无参」与「非法 concrete
- * 档」都返回 undefined，宿主需区分二者——无参 `/effort` 应打开档位面板（seed
- * 当前已提交档），非法档（如 `/effort auto`）才走 notice 提示可用档位。
+ * `/effort <level>` 与 `/continue` 共用：首 token 之后剩余段是否非空。
+ * /effort 需区分无参（开面板）与非法档；/continue 任何 args → usage EXIT。
  */
-export function effortHasArg(raw: string): boolean {
+export function slashHasArg(raw: string): boolean {
   const text = raw.trim();
   const firstTok = text.split(/\s+/, 1)[0] ?? text;
   return text.slice(firstTok.length).trim() !== "";
+}
+
+export function effortHasArg(raw: string): boolean {
+  return slashHasArg(raw);
 }
 
 /**

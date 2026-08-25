@@ -37,6 +37,8 @@ import {
   MessageCommitError,
   ProtocolError,
   PromptTooLongError,
+  SkipAppendEmptyPriorError,
+  SkipAppendWithTextError,
   TransportRetryExhaustedError,
 } from "./errors.js";
 import {
@@ -1881,24 +1883,42 @@ export async function run(
   opts?: {
     priorMessages?: ReadonlyArray<AnthropicNativeMessage>;
     onStream?: (event: HarnessStreamEvent) => void;
+    appendUserText?: boolean;
   }
 ): Promise<{ result: RunResult; trace: LoopTrace }> {
   // 020 Q2 priorMessages 续传接缝:历史前缀逐条冻结,单次运行 turnCount 仍从 0 起。
   // #406 T2:识别层入口 —— secretsMode 非 "block" 且 secretRegistry 在场时,
   // 先对用户文本做占位符替换再编码。占位符形态不进 registry(recognize 只扫
   // 密钥形态),跨 turn 续传时 previous 占位符原样保留。
-  let effectiveUserText = userText;
-  if (deps.secretsMode !== "block" && deps.secretRegistry !== undefined) {
-    const { replaced } = recognize(userText, deps.secretRegistry);
-    effectiveUserText = replaced;
+  // #687 T1: appendUserText 缺省 true = 今日行为; false = skip-append,
+  // 不 encodeUserText、不 recognize(userText)。
+  let state: LoopState;
+  if (opts?.appendUserText !== false) {
+    let effectiveUserText = userText;
+    if (deps.secretsMode !== "block" && deps.secretRegistry !== undefined) {
+      const { replaced } = recognize(userText, deps.secretRegistry);
+      effectiveUserText = replaced;
+    }
+    state = {
+      messages: Object.freeze([
+        ...(opts?.priorMessages ?? []).map(freezeMessage),
+        freezeMessage(deps.adapter.encodeUserText(effectiveUserText)),
+      ]),
+      turnCount: 0,
+    };
+  } else {
+    if (userText !== "") {
+      throw new SkipAppendWithTextError();
+    }
+    const prior = opts.priorMessages;
+    if (prior === undefined || prior.length === 0) {
+      throw new SkipAppendEmptyPriorError();
+    }
+    state = {
+      messages: Object.freeze(prior.map(freezeMessage)),
+      turnCount: 0,
+    };
   }
-  let state: LoopState = {
-    messages: Object.freeze([
-      ...(opts?.priorMessages ?? []).map(freezeMessage),
-      freezeMessage(deps.adapter.encodeUserText(effectiveUserText)),
-    ]),
-    turnCount: 0,
-  };
   // #160 / ADR-0008 Decision 5: 最后一次成功模型调用的 usage 可变引用。
   // 初值 null = run 无成功模型调用;仅当 step 成功且 usage 存在时更新。
   let lastUsage: TokenUsage | null = null;

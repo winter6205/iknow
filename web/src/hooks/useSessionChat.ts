@@ -52,6 +52,8 @@ export type SessionChatApi = SessionChatState & {
   ) => Promise<void>;
   reset: () => Promise<void>;
   compact: () => Promise<boolean>;
+  /** Skip-append continue: agent bubble only; failure rethrows (no StateBlock). */
+  continue: () => Promise<void>;
   rewind: (head: string | null) => Promise<void>;
   newSession: () => Promise<void>;
   /** Switch to an existing conversation by id (sidebar selection). */
@@ -346,6 +348,38 @@ export function useSessionChat(): SessionChatApi {
     }
   }, [applySession]);
 
+  const continueRun = useCallback(async (): Promise<void> => {
+    const gen = bootGen.current;
+    const id = sessionIdRef.current;
+    if (!id) return;
+    // Agent bubble only (no optimistic userMsg). phase=sending locks Composer
+    // like sendMessage; failure restores ready and rethrows (like compact).
+    setState((prev) => ({ ...prev, phase: "sending", error: null }));
+    try {
+      const res = await api.continueSession(id);
+      if (gen !== bootGen.current) return;
+      sessionIdRef.current = res.session.conversation_id;
+      const agentMsg: ChatUiMessage = {
+        id: `a-${Date.now()}-${queryIdSlice(res.turn.query || "continue")}`,
+        role: "agent",
+        text: res.turn.answer.finalText,
+        answer: res.turn.answer,
+      };
+      setState((prev) => ({
+        ...prev,
+        phase: "ready",
+        error: null,
+        session: res.session,
+        messages: [...prev.messages, agentMsg],
+        lastAnswer: res.turn.answer,
+      }));
+    } catch (e) {
+      if (gen !== bootGen.current) return;
+      setState((prev) => ({ ...prev, phase: "ready" }));
+      throw e instanceof Error ? e : new Error(errMessage(e));
+    }
+  }, []);
+
   const rewind = useCallback(
     async (head: string | null): Promise<void> => {
       const gen = bootGen.current;
@@ -447,6 +481,7 @@ export function useSessionChat(): SessionChatApi {
     sendMessage,
     reset,
     compact,
+    continue: continueRun,
     rewind,
     newSession,
     setConversation,

@@ -8,6 +8,7 @@ import {
   type AnthropicNativeMessage,
   type HarnessStreamEvent,
   type LoopEngineDeps,
+  type LoopTrace,
   type RunResult,
 } from "../harness/index.js";
 import { runVerifyLoop, type VerifyConfig } from "../harness/verify/index.js";
@@ -60,6 +61,7 @@ import {
   shouldPersistCheckpoint,
   toInterruptReason,
   validateGoalText,
+  type GoalState,
 } from "../session-api/store/index.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import {
@@ -68,6 +70,14 @@ import {
   reportGoalAutoStoreLoadErr,
   runAutoLoopSteps,
 } from "../session-api/goal-auto.js";
+import {
+  continuePredicateError,
+  evaluateContinuePending,
+  mapSkipAppendToContinueError,
+  matchesContinuePendingNlLine,
+  shouldTriggerContinueFromNl,
+} from "../session-api/continue-pending.js";
+import { MAX_MESSAGE_CHARS } from "../session-api/contract.js";
 import { randomUUID } from "node:crypto";
 
 /** Visual separator after a completed answer on TTY only. */
@@ -149,6 +159,12 @@ export type ChatLineContext = {
    * 缺席(undefined)= 不包裹 run,行为逐字节不变 (仅测试/装配未接线路径)。
    */
   readonly verifyConfig?: VerifyConfig;
+  /**
+   * T3 (#689): CLI _client_ idle/busy-guard for continue. Shared mutable box
+   * so a concurrent processChatLine can refuse continue without aborting the
+   * in-flight turn (EXIT busy_stop_first).
+   */
+  clientBusy?: { value: boolean };
 };
 
 export type ProcessChatLineResult = {
@@ -218,6 +234,281 @@ async function resolveVerifyDispatch(
   }
 }
 
+function busyBox(ctx: ChatLineContext): { value: boolean } {
+  if (ctx.clientBusy === undefined) {
+    ctx.clientBusy = { value: false };
+  }
+  return ctx.clientBusy;
+}
+
+function isClientBusy(ctx: ChatLineContext): boolean {
+  return ctx.clientBusy?.value === true;
+}
+
+function busyStopFirstResult(): ProcessChatLineResult {
+  return {
+    quit: false,
+    output: "",
+    stderr: "busy_stop_first: a turn is already in progress; not aborting",
+  };
+}
+
+function continueFailResult(stderr: string): ProcessChatLineResult {
+  return { quit: false, output: "", stderr };
+}
+
+type ContinueLoaded =
+  | {
+      ok: true;
+      messages: ReadonlyArray<AnthropicNativeMessage>;
+      goal?: GoalState;
+    }
+  | { ok: false; result: ProcessChatLineResult };
+
+/** store.load when conversationId is set; freeze-of-state is the no-disk test stand-in. */
+async function loadContinueTranscript(
+  ctx: ChatLineContext
+): Promise<ContinueLoaded> {
+  const store = ctx.checkpointStore;
+  const conversationId = ctx.state.conversationId;
+  if (store === undefined || conversationId === null) {
+    return { ok: true, messages: ctx.state.messages };
+  }
+  try {
+    const file = await store.load(conversationId);
+    return {
+      ok: true,
+      messages: file.messages,
+      ...(file.goal !== undefined ? { goal: file.goal } : {}),
+    };
+  } catch (err) {
+    if (!isSessionStoreErrorKind(err)) throw err;
+    // Missing disk file = empty transcript (fresh conversation; same as /goal).
+    if ((err as SessionStoreError).kind === "not_found") {
+      return { ok: true, messages: [] };
+    }
+    return {
+      ok: false,
+      result: continueFailResult(typedGoalError(err, conversationId)),
+    };
+  }
+}
+
+type ContinuePrep =
+  | { kind: "busy" }
+  | { kind: "exit"; result: ProcessChatLineResult }
+  | { kind: "run"; prior: ReadonlyArray<AnthropicNativeMessage> }
+  | { kind: "skip" };
+
+async function prepareContinue(opts: {
+  readonly ctx: ChatLineContext;
+  readonly mode: "slash" | "nl";
+  readonly line: string;
+}): Promise<ContinuePrep> {
+  // Slash: busy-first (do not start a second continue). NL: load+predicate
+  // first so a table line that is not pending skip-appends as a normal query
+  // even while another turn is in-flight.
+  if (opts.mode === "slash" && isClientBusy(opts.ctx)) {
+    return { kind: "busy" };
+  }
+  const loaded = await loadContinueTranscript(opts.ctx);
+  if (!loaded.ok) return { kind: "exit", result: loaded.result };
+  const verdict = evaluateContinuePending({
+    messages: loaded.messages,
+    ...(loaded.goal !== undefined ? { goal: loaded.goal } : {}),
+  });
+  if (opts.mode === "nl") {
+    if (
+      !shouldTriggerContinueFromNl({
+        line: opts.line,
+        pending: verdict.ok,
+      })
+    ) {
+      return { kind: "skip" };
+    }
+    if (isClientBusy(opts.ctx)) return { kind: "busy" };
+  } else if (!verdict.ok) {
+    return {
+      kind: "exit",
+      result: continueFailResult(continuePredicateError(verdict.exit).message),
+    };
+  }
+  return { kind: "run", prior: loaded.messages };
+}
+
+async function executeSkipAppendTurn(opts: {
+  readonly ctx: ChatLineContext;
+  readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
+}): Promise<ProcessChatLineResult> {
+  const { ctx, priorMessages } = opts;
+  const box = busyBox(ctx);
+  box.value = true;
+  let stopSummary: string | undefined;
+  const wrappedOnStream =
+    opts.onStream === undefined
+      ? undefined
+      : (event: HarnessStreamEvent): void => {
+          if (event.type === "stop_summary") stopSummary = event.text;
+          else opts.onStream!(event);
+        };
+  try {
+    return await runSkipAppendAndPresent({
+      ctx,
+      priorMessages,
+      stopSummaryRef: {
+        get: () => stopSummary,
+      },
+      ...(wrappedOnStream !== undefined ? { onStream: wrappedOnStream } : {}),
+    });
+  } finally {
+    box.value = false;
+  }
+}
+
+async function runSkipAppendAndPresent(opts: {
+  readonly ctx: ChatLineContext;
+  readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
+  readonly stopSummaryRef: { get: () => string | undefined };
+}): Promise<ProcessChatLineResult> {
+  const { ctx, priorMessages } = opts;
+  try {
+    const { result, trace } = await runHarness(
+      "",
+      ctx.deps,
+      ctx.abortController?.signal,
+      {
+        priorMessages,
+        appendUserText: false,
+        ...(opts.onStream !== undefined ? { onStream: opts.onStream } : {}),
+      }
+    );
+    if (ctx.checkpointStore && ctx.state.conversationId !== null) {
+      await persistChatSessionCheckpoint({
+        store: ctx.checkpointStore,
+        conversationId: ctx.state.conversationId,
+        jsonMode: ctx.state.jsonMode,
+        result,
+        priorMessages,
+      });
+    }
+    if (
+      result.stopReason !== "protocolError" &&
+      result.stopReason !== "emptyFinalResponse"
+    ) {
+      ctx.state.messages = Object.freeze([...result.messages]);
+    }
+    return presentChatTurn({
+      ctx,
+      result,
+      trace,
+      priorMessages,
+    });
+  } catch (err) {
+    const mapped = mapSkipAppendToContinueError(err);
+    if (mapped !== null) return continueFailResult(mapped.message);
+    if (err instanceof MaxTurnsExceeded) {
+      const notice = maxTurnsNotice(err, opts.stopSummaryRef.get());
+      return {
+        quit: false,
+        output: notice.output,
+        stderr: notice.stderr,
+        ranQuery: true,
+      };
+    }
+    return {
+      quit: false,
+      output: "",
+      stderr: formatChatError(err),
+      ranQuery: true,
+    };
+  }
+}
+
+function presentChatTurn(opts: {
+  readonly ctx: ChatLineContext;
+  readonly result: RunResult;
+  readonly trace: LoopTrace;
+  readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
+}): ProcessChatLineResult {
+  const { ctx, result, trace, priorMessages } = opts;
+  const interruptNote =
+    result.stopReason === "cancelled"
+      ? shouldPersistCheckpoint(result, priorMessages)
+        ? "已保存"
+        : "未落checkpoint"
+      : undefined;
+  const human = !ctx.state.jsonMode;
+  const output = human
+    ? formatRunHuman({
+        result,
+        trace,
+        showThinking: ctx.showThinking,
+        interruptNote,
+      })
+    : formatRunJson({ result, trace });
+  const statusLine = human
+    ? formatStatusLine({
+        result,
+        trace,
+        showThinking: ctx.showThinking,
+        interruptNote,
+      })
+    : undefined;
+  return {
+    quit: false,
+    output,
+    ...(statusLine !== undefined ? { statusLine } : {}),
+    ranQuery: true,
+  };
+}
+
+async function dispatchPreparedContinue(
+  prep: ContinuePrep,
+  ctx: ChatLineContext,
+  onStream?: (event: HarnessStreamEvent) => void
+): Promise<ProcessChatLineResult | undefined> {
+  if (prep.kind === "busy") return busyStopFirstResult();
+  if (prep.kind === "exit") return prep.result;
+  if (prep.kind === "skip") return undefined;
+  return executeSkipAppendTurn({
+    ctx,
+    priorMessages: prep.prior,
+    ...(onStream !== undefined ? { onStream } : {}),
+  });
+}
+
+async function runSlashContinue(opts: {
+  readonly ctx: ChatLineContext;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
+}): Promise<ProcessChatLineResult> {
+  const prep = await prepareContinue({
+    ctx: opts.ctx,
+    mode: "slash",
+    line: "/continue",
+  });
+  const result = await dispatchPreparedContinue(prep, opts.ctx, opts.onStream);
+  return (
+    result ??
+    continueFailResult("nothing_pending: cannot continue this session")
+  );
+}
+
+async function maybeContinueFromPendingNl(opts: {
+  readonly line: string;
+  readonly ctx: ChatLineContext;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
+}): Promise<ProcessChatLineResult | undefined> {
+  if (!matchesContinuePendingNlLine(opts.line)) return undefined;
+  const prep = await prepareContinue({
+    ctx: opts.ctx,
+    mode: "nl",
+    line: opts.line,
+  });
+  return dispatchPreparedContinue(prep, opts.ctx, opts.onStream);
+}
+
 /**
  * Pure-ish one-line handler for tests and both I/O paths.
  * Mutates ctx (state) as needed.
@@ -241,6 +532,40 @@ export async function processChatLine(
     });
   }
 
+  const query = parsedLine.text;
+
+  const fromNl = await maybeContinueFromPendingNl({
+    line: query,
+    ctx,
+    ...(opts.onStream !== undefined ? { onStream: opts.onStream } : {}),
+  });
+  if (fromNl !== undefined) return fromNl;
+
+  if (query.length > MAX_MESSAGE_CHARS) {
+    return {
+      quit: false,
+      output: "",
+      stderr: `message text exceeds max length ${MAX_MESSAGE_CHARS}`,
+    };
+  }
+
+  const box = busyBox(ctx);
+  box.value = true;
+  try {
+    return await runChatQueryLine(opts);
+  } finally {
+    box.value = false;
+  }
+}
+
+async function runChatQueryLine(
+  opts: ProcessChatLineOpts
+): Promise<ProcessChatLineResult> {
+  const { ctx } = opts;
+  const parsedLine = parseChatLine(opts.line);
+  if (parsedLine.kind !== "query") {
+    return { quit: false, output: "" };
+  }
   const query = parsedLine.text;
 
   // plan T1: HITL vs /goal auto 分派。仅 verifyConfig 在场时读盘;
@@ -525,6 +850,12 @@ async function processSlash(opts: {
 
     case "reset":
       return { quit: false, output: effect.message };
+
+    case "continue":
+      return runSlashContinue({
+        ctx,
+        ...(opts.onStream !== undefined ? { onStream: opts.onStream } : {}),
+      });
 
     case "permissions": {
       // W2: 权限模式查询/切换。无 ctx.permissionMode(ask/serve 不传)→
