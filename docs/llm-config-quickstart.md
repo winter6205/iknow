@@ -110,11 +110,62 @@ IKNOW_LLM_STREAM=on            # 流式臂开关 on|off，默认 on
 
 ---
 
-## 五、验证
+## 五、云端开发 / 远程 LLM 端点
+
+本机 WSL 网关（`http://localhost:20128/v1` / `9router`）在云端开发场景不可达。iknow 走任意 Anthropic 兼容 endpoint —— `IKNOW_LLM_BASE_URL` 切远程、模型路由 ID 写进 settings 即可，无需改代码。
+
+**完整模板在项目根 `.env.example`（git 跟踪），复制到 `.env.local` 后填真值：**
+
+```bash
+cp .env.example .env.local     # .env.local 已 gitignore
+```
+
+**`.env.local` 关键三行（MiniMax 中国站示例）：**
+
+```env
+IKNOW_LLM_BASE_URL=https://api.minimaxi.com/anthropic
+MINIMAX_API_KEY=<你的订阅 Key，从 https://platform.minimaxi.com/user-center/payment/token-plan 拿>
+# 可选（默认 32000 / 300000 / 0 / on，按需覆盖）
+IKNOW_LLM_MAX_OUTPUT_TOKENS=32000
+IKNOW_LLM_TIMEOUT_MS=300000
+IKNOW_LLM_TEMPERATURE=0
+IKNOW_LLM_STREAM=on
+```
+
+**`<cwd>/.iknow/settings.json`（项目级，已 gitignore）补 model + apiKey 占位符：**
+
+```json
+{
+  "llm": {
+    "model": "MiniMax-M3",
+    "apiKey": "${MINIMAX_API_KEY}"
+  }
+}
+```
+
+- `llm.model` 走字面值（env 已退役，ADR-0015）；MiniMax-M3 = 1M context 最新模型，支持 tool use / streaming / thinking。备选 `MiniMax-M2.7` / `MiniMax-M2.5` / `MiniMax-M2.1` / `MiniMax-M2` / `-highspeed` 变体。
+- `llm.apiKey` 用 `${MINIMAX_API_KEY}` 占位符 → `expandPlaceholders` 从 `process.env > .env.local > .env` 链解析真值（`src/config/env.ts:495-498`）。
+- 变量名不强制 `MINIMAX_API_KEY`：写什么变量名都行，settings.json 和 `.env.local` 里对齐即可（如 `"${ANTHROPIC_AUTH_TOKEN}"` + `ANTHROPIC_AUTH_TOKEN=<key>` 也可）。
+
+**其它 Anthropic 兼容 endpoint（同一链路）：**
+
+| 场景                            | `IKNOW_LLM_BASE_URL`                                                      |
+| ------------------------------- | ------------------------------------------------------------------------- |
+| 本地 WSL 网关 / 9router（默认） | 留空 → `http://localhost:20128/v1`                                        |
+| MiniMax 中国（Anthropic 兼容）  | `https://api.minimaxi.com/anthropic`                                      |
+| MiniMax 国际（Anthropic 兼容）  | `https://api.minimax.io/anthropic`                                        |
+| Anthropic 官方                  | `https://api.anthropic.com`                                               |
+| 自建 proxy / 其它 OpenAI 兼容   | `https://<host>/v1`（需 OpenAI 兼容 client；iknow 默认走 Anthropic 协议） |
+
+---
+
+## 六、验证
 
 ```bash
 # 配置后确认 iknow 能加载（settings 生效 + 真模型可达）
 npm run probe:settings-model     # i135 A/B/C/D 四组，12/12 通过 = 配置正确
+# 真远程 e2e（指向 IKNOW_LLM_BASE_URL + settings.llm.model 真实调用）
+npm run test:real-llm
 ```
 
 ---
@@ -124,3 +175,4 @@ npm run probe:settings-model     # i135 A/B/C/D 四组，12/12 通过 = 配置�
 - ADR-0015 `docs/adr/0015-llm-config-settings-single-source.md`
 - `docs/integration-materials.env.example`（完整变量名文档）
 - `plans/settings-model-extension.md`
+- `.env.example`（项目根；git 跟踪；远程端点 + 占位符真值模板）
