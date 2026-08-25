@@ -1,0 +1,20 @@
+# vendor pin 0.12.1
+using-agent-skills
+logicsync
+domain-modeling
+wayfinder
+spec-driven-development
+architecture-change-reviewer
+writing-plans
+test-driven-development
+defensive-contract-validator
+bounded-context-guardian
+complexity-anti-drift
+error-handling-enforcer
+systematic-debugging
+verification-before-completion
+code-review
+boundary-testing
+minimal-change-verifier
+dispatching-parallel-agents
+session-handoff

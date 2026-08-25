@@ -1,3 +1,5 @@
 {
-  "install": "npm install\ncurl -fsSL https://bun.sh/install | bash"
+  "install": "bash scripts/cursor-install.sh",
+  "start": "bash scripts/cursor-start.sh",
+  "terminals": []
 }

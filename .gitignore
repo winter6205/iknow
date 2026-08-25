@@ -142,5 +142,13 @@ AGENTS.md
 node_modules
 .cursor/*
 !.cursor/environment.json
+!.cursor/skills/
+!.cursor/skills/**
+!.cursor/agents/
+!.cursor/agents/**
+!.cursor/rules/
+!.cursor/rules/**
+!.cursor/vendor/
+!.cursor/vendor/**
 archive
 .iknow

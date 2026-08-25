@@ -1,0 +1,85 @@
+---
+description: arthurpower daily workflow router (Cloud-visible always-on)
+alwaysApply: true
+---
+
+# arthurpower workflow (resident)
+
+This rule is the **always-on router**. Full procedures live in `.cursor/skills/<name>/SKILL.md` and subagent briefs in `.cursor/agents/`. Vendor pin: `.cursor/vendor/arthurpower/VERSION`.
+
+Do **not** start `skill-authoring`, `self-evolving-rules`, or `setup-arthurpower` unless the operator named them. Those are not vendored here.
+
+## Current slot only
+
+Name the task class, then run **one** skill. Documented sequences are ordered gates — do not stack SPECIFY + ACR + PLAN + review in one turn. Competing skills in the same slot (ACR vs `code-review`) are not a sequence: pick one.
+
+## Flowchart
+
+SSOT for the full tree is `.cursor/skills/using-agent-skills/references/flowchart.md`. The copy below omits meta authoring (`skill-authoring` / `self-evolving-rules` / `setup-arthurpower`). If they disagree, follow the skill file.
+
+```
+Task arrives
+│
+├── Scale router (sequence — invoke the current slot only)
+│   ├── Scope 已定 + single session ─────────→ logicsync
+│   ├── Scope 已定 + multi-session ──────────→ architecture-change-reviewer → writing-plans
+│   └── Scope 未定 + multi-session ──────────→ architecture-change-reviewer → writing-plans
+│                                              (session-handoff when the session must persist)
+│
+├── Defining what to build
+│   ├── Vague / under-specified request ──→ logicsync
+│   ├── Glossary / ADR / SSOT decision ───→ domain-modeling
+│   ├── Don't know what you want yet ────→ logicsync
+│   ├── Have rough concept, need variants → wayfinder
+│   └── New project/feature/change ───────→ spec-driven-development
+│
+├── Planning implementation
+│   ├── Spec ready, ACR not yet / not yes ─→ architecture-change-reviewer
+│   ├── ACR all-yes, next artifact is plan → writing-plans
+│   └── Single-file or trivial ──────────→ minimal-change-verifier
+│
+├── Implementing code
+│   ├── TDD: failing test first ──────────→ test-driven-development
+│   ├── 5-class boundary contract ────────→ defensive-contract-validator
+│   ├── Module boundary violation ───────→ bounded-context-guardian
+│   ├── Complexity threshold breach ─────→ complexity-anti-drift
+│   └── Empty catch / null-on-failure ───→ error-handling-enforcer
+│
+├── Verifying
+│   ├── Bug / something broke ───────────→ systematic-debugging
+│   └── Pre-merge final check ──────────→ verification-before-completion
+│
+├── Reviewing
+│   ├── Pre-impl 5-verdict ─────────────→ architecture-change-reviewer
+│   └── Post-impl dual-axis review ──────→ code-review
+│
+├── Committing / branching
+│   └── 1 commit = 1 logical task ──────→ minimal-change-verifier
+│
+└── Meta / orchestration
+    └── 2+ independent tasks to fan out → dispatching-parallel-agents
+        (current agent runs the skill; workers do the work)
+```
+
+`architecture-change-reviewer` blocks on any `no` / `unclear`. `writing-plans` and `spec-driven-development` are user-invoked gates that the router may still open as the **current sequence slot**. `dispatching-parallel-agents` is model-invoked: this agent fans out workers.
+
+## After classify: open the skill file
+
+Follow `.cursor/skills/<skill>/SKILL.md` and its `references/`. Do not improvise a shorter procedure.
+
+`code-review`: dispatch `.cursor/agents/standards-reviewer-agent.md` and `.cursor/agents/spec-reviewer-agent.md` in parallel (Standards + Spec). Other S1–S6 / ACR / TDD / boundary-testing agents live in the same directory.
+
+Git commit shape: `.cursor/skills/using-agent-skills/references/git-workflow.md` plus `minimal-change-verifier`.
+
+## Phase map (resident skills)
+
+| Phase | Skill |
+| --- | --- |
+| Router | using-agent-skills |
+| Define | logicsync, domain-modeling, wayfinder, spec-driven-development |
+| Plan | architecture-change-reviewer, writing-plans |
+| Build | test-driven-development, defensive-contract-validator, bounded-context-guardian, complexity-anti-drift, error-handling-enforcer |
+| Verify | systematic-debugging, verification-before-completion, boundary-testing |
+| Review | code-review |
+| Commit | minimal-change-verifier |
+| Orchestrate | dispatching-parallel-agents, session-handoff |
