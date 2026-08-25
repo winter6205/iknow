@@ -140,6 +140,9 @@ AGENTS.md
 .mcp.json
 # 忽略 worktree symlink(共享宿主 node_modules,git add -A 会误抓)
 node_modules
+# Cloud start writes these; keep husky pre-commit/pre-push tracked.
+.husky/commit-msg
+.husky/prepare-commit-msg
 .cursor/*
 !.cursor/environment.json
 !.cursor/skills/

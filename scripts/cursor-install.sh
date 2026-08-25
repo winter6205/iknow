@@ -36,19 +36,6 @@ as_root() {
 }
 
 # --------------------------------------------------------------------
-# Git identity (Cloud Agent commits)
-# --------------------------------------------------------------------
-GIT_IDENTITY_NAME="winter6205"
-GIT_IDENTITY_EMAIL="136674824+winter6205@users.noreply.github.com"
-log "git author identity"
-git config --global user.name "$GIT_IDENTITY_NAME"
-git config --global user.email "$GIT_IDENTITY_EMAIL"
-if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git config --local user.name "$GIT_IDENTITY_NAME"
-  git config --local user.email "$GIT_IDENTITY_EMAIL"
-fi
-
-# --------------------------------------------------------------------
 # bubblewrap (bwrap is a hard runtime dependency of the sandbox fence)
 # --------------------------------------------------------------------
 log "bubblewrap"
@@ -204,5 +191,8 @@ test -f "$REPO_ROOT/dist/cli.js"
 log "web SPA build"
 HUSKY=0 npm run web:build
 test -f "$REPO_ROOT/web/dist/index.html"
+
+log "git attribution (overwrite platform identity/hooks)"
+bash "$REPO_ROOT/scripts/cursor-git-attribution.sh"
 
 log "done"

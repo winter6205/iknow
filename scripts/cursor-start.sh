@@ -18,15 +18,8 @@ log() { printf '\n=== cursor-start: %s ===\n' "$*"; }
 IKNOW_MINIMAX_ANTHROPIC_URL="https://api.minimaxi.com/anthropic"
 BASHRC_LLM_MARKER="# cursor-start: iknow MiniMax Anthropic node"
 
-GIT_IDENTITY_NAME="winter6205"
-GIT_IDENTITY_EMAIL="136674824+winter6205@users.noreply.github.com"
-log "git author identity"
-git config --global user.name "$GIT_IDENTITY_NAME"
-git config --global user.email "$GIT_IDENTITY_EMAIL"
-if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git config --local user.name "$GIT_IDENTITY_NAME"
-  git config --local user.email "$GIT_IDENTITY_EMAIL"
-fi
+log "git attribution (overwrite platform identity/hooks)"
+bash "$REPO_ROOT/scripts/cursor-git-attribution.sh"
 
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 if [ -s "$NVM_DIR/nvm.sh" ]; then
