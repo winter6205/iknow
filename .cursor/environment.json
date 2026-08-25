@@ -1,0 +1,3 @@
+{
+  "install": "npm install\ncurl -fsSL https://bun.sh/install | bash"
+}
