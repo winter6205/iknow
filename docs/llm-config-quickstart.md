@@ -170,9 +170,81 @@ npm run test:real-llm
 
 ---
 
+## 七、零摩擦：本机 → 云端三步走（跨机一键通）
+
+适用：本地 WSL 网关在云端 VM 不可达，但本机仍能写文件 → 直接把配置文件 scp 到云端，**用户只填一行 API key**。
+
+### 步骤 1：本地一次性配置（脚手架已就位）
+
+`<cwd>/.env.example`（git tracked，commit `b17875f`）+ `<cwd>/.iknow/settings.json`（gitignore，本机已含 model + apiKey 占位符）已就位。用户只需：
+
+```bash
+cd /path/to/iknow
+cp .env.example .env.local          # gitignore
+chmod 600 .env.local                 # 收紧权限
+
+vim .env.local
+# 只需改这一行（其它不动）：
+#   MINIMAX_API_KEY=<在这里填 MiniMax 订阅 Key>
+# 改完后形如：
+#   MINIMAX_API_KEY=eyJhbGciOi...
+```
+
+> `.iknow/settings.json` 已含 `model: "MiniMax-M3"` + `apiKey: "${MINIMAX_API_KEY}"`，无需再动；变量名变更时改这一处对齐即可。
+
+### 步骤 2：scp 两个文件到云端
+
+```bash
+scp .env.local .iknow/settings.json user@cloud-vm:/path/to/iknow/
+# .env.example 已 git tracked，云端 git pull 后自动有；.env.local + settings.json 是 gitignored 的，逐机传
+```
+
+### 步骤 3：云端 VM 验证
+
+```bash
+ssh user@cloud-vm
+cd /path/to/iknow
+git pull                            # 拉 .env.example（git tracked）
+ls -la .env.local .iknow/settings.json   # 应都存在
+npm run probe:settings-model        # 远程 A1/A2 应 PASS（settings 加载 + 占位符解析）
+```
+
+### 旋转 key
+
+key 换时只改云端一行即可，无需重传 settings.json：
+
+```bash
+ssh user@cloud-vm
+vim .env.local                       # 改 MINIMAX_API_KEY= 一行
+```
+
+settings.json 不变，env 链 (`process.env > .env.local > .env`) 自动热重读（`src/config/settings-watch.ts` 100ms debounce）。
+
+### 新机器全新 clone
+
+git clone 后本机没有 `.iknow/settings.json` —— 此时 iknow fail-fast 抛「no LLM model configured in settings.llm.model」。补建：
+
+```bash
+mkdir -p .iknow
+cat > .iknow/settings.json <<'EOF'
+{
+  "llm": {
+    "thinking": "adaptive",
+    "model": "MiniMax-M3",
+    "apiKey": "${MINIMAX_API_KEY}"
+  }
+}
+EOF
+chmod 600 .iknow/settings.json
+cp .env.example .env.local && chmod 600 .env.local && vim .env.local
+```
+
+---
+
 ## 关联
 
 - ADR-0015 `docs/adr/0015-llm-config-settings-single-source.md`
 - `docs/integration-materials.env.example`（完整变量名文档）
 - `plans/settings-model-extension.md`
 - `.env.example`（项目根；git 跟踪；远程端点 + 占位符真值模板）
+- commit `b17875f`（`.env.example` 首版）
