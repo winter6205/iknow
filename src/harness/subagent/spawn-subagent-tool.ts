@@ -272,6 +272,10 @@ export function createSpawnSubAgentTool(
       // 中段变成死代码(SC4 消费点证明)。
       const def: SubAgentDefinition = {
         task,
+        // F-4: 归属回合 —— manager 把它抄进 subagent_spawn / _state_change /
+        // _stop 三类 record。ctx 缺 turnId(worker / ask / 直接调 handler)时
+        // 字段整个省略,Postel 不落空值。
+        ...(ctx?.turnId !== undefined ? { parentTurnId: ctx.turnId } : {}),
         // #556 T3: subagent_type 解析结果 (undefined = 不设字段, V1 baseline)
         ...(resolvedRole !== undefined ? { role: resolvedRole } : {}),
         ...(typeof obj.systemPrompt === "string"
