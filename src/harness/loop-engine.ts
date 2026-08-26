@@ -32,6 +32,7 @@
  * computeTotals 后返回 {result, trace}。
  */
 
+import { randomUUID } from "node:crypto";
 import {
   MaxTurnsExceeded,
   MessageCommitError,
@@ -1252,6 +1253,8 @@ async function executeWaveAndCommit(opts: {
   readonly toolTimeout: number;
   readonly results: ToolExecutionResult[];
   readonly blocks: AnthropicContentBlock[];
+  /** F-4:本回合 trace turn id,透传到 ctx.turnId(spawn_subagent 的归属回合)。 */
+  readonly turnId: string;
 }): Promise<void> {
   const slots: Array<ToolExecutionResult | undefined> = Array.from(
     { length: opts.wave.length },
@@ -1278,7 +1281,8 @@ async function executeWaveAndCommit(opts: {
     async (result, index) => {
       slots[index] = result;
       await flushPrefix();
-    }
+    },
+    opts.turnId
   );
   for (let i = 0; i < waveResults.length; i++) {
     if (slots[i] === undefined) slots[i] = waveResults[i];
@@ -1294,6 +1298,8 @@ async function runToolPhase(opts: {
   readonly deps: LoopEngineDeps;
   readonly signal: AbortSignal | undefined;
   readonly started: number;
+  /** F-4:本回合 trace turn id(见 executeWaveAndCommit)。 */
+  readonly turnId: string;
 }): Promise<{
   transition: Transition;
   turn: TurnTrace;
@@ -1324,6 +1330,7 @@ async function runToolPhase(opts: {
       toolTimeout,
       results,
       blocks,
+      turnId: opts.turnId,
     });
   }
   const toolResultMsg: AnthropicNativeMessage = {
@@ -1428,6 +1435,10 @@ async function stepWithTrace(opts: {
 
   const started = performance.now();
   const turnStartedAt = new Date().toISOString();
+  // F-4:本回合 trace turn id 在回合入口生成而非 recordTurn 内部生成 —— 工具
+  // 阶段要拿它当 ctx.turnId(spawn_subagent 据此填 parentTurnId),而 recordTurn
+  // 在回合末尾才发。四条 recordTurn 出口全部复用这一个 id,一回合一行不变。
+  const turnId = randomUUID();
   const modelTimeout =
     opts.deps.modelTimeoutMs ?? opts.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
@@ -1590,6 +1601,7 @@ async function stepWithTrace(opts: {
       const reason = t2.kind === "stop" ? t2.reason : "unknown";
       await safeTrace(() =>
         opts.deps.trace!.recordTurn({
+          id: turnId,
           turnIndex: opts.state.turnCount,
           startedAt: turnStartedAt,
           endedAt: new Date().toISOString(),
@@ -1618,6 +1630,7 @@ async function stepWithTrace(opts: {
     if (opts.deps.trace) {
       await safeTrace(() =>
         opts.deps.trace!.recordTurn({
+          id: turnId,
           turnIndex: opts.state.turnCount,
           startedAt: turnStartedAt,
           endedAt: new Date().toISOString(),
@@ -1669,6 +1682,7 @@ async function stepWithTrace(opts: {
     if (opts.deps.trace) {
       await safeTrace(() =>
         opts.deps.trace!.recordTurn({
+          id: turnId,
           turnIndex: opts.state.turnCount,
           startedAt: turnStartedAt,
           endedAt: new Date().toISOString(),
@@ -1707,6 +1721,7 @@ async function stepWithTrace(opts: {
     deps: opts.deps,
     signal: opts.signal,
     started,
+    turnId,
   });
 
   // #645 T1 / ADR-0028:last_tool = 批内最后一个成功工具名(kind === "ok")。
@@ -1762,6 +1777,7 @@ async function stepWithTrace(opts: {
     const decision = toDecision(isStop ? toolTransition.reason : "completed");
     await safeTrace(() =>
       opts.deps.trace!.recordTurn({
+        id: turnId,
         turnIndex: opts.state.turnCount,
         startedAt: turnStartedAt,
         endedAt: new Date().toISOString(),
