@@ -159,12 +159,17 @@ export function createJsonlTraceService(
     },
 
     async recordTurn(record: TurnRecord): Promise<string | undefined> {
-      const id = randomUUID();
+      // 调用方预生成的 id 优先 (F-4: 子代理埋点要在回合末尾之前就知道 turn id);
+      // 缺席时退回实现生成。id 键从 snake 副本剔除, 单一载体仍是 turn_id
+      // (与 recordVerification / recordGoal 同形态)。
+      const id = record.id ?? randomUUID();
+      const snake = toSnakeCaseRecord(record);
+      delete snake.id;
       const line: Record<string, unknown> = {
         conversation_id: conversationId,
         record_type: "turn",
         turn_id: id,
-        ...toSnakeCaseRecord(record),
+        ...snake,
       };
       try {
         writeLine(line);
