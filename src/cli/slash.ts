@@ -73,7 +73,13 @@ export type SlashEffect =
       action: "status" | "clear" | "pin";
       text: string;
       maxTurns?: number;
-    };
+    }
+  /**
+   * D-α graph mode: 编排 overlay 查询/切换。args 原样透传 —— 解析与文案由
+   * `harness/graph/mode.ts` 的 `applyGraphCommand` 单点承担（chat / TUI /
+   * serve 三入口共用同一份语义）。host 持有 GraphModeContext。
+   */
+  | { type: "graph"; args: string[] };
 
 /**
  * Strip C0 control chars (incl. ESC) and DEL so reflected command text
@@ -92,6 +98,7 @@ export const HELP_TEXT = `命令 / Commands:
   /reset                      清空会话 · clear messages (session kept)
   /continue                   续跑未完成工具环 · continue pending (no args)
   /permissions [mode]         查看/切换权限模式(default|plan|full_auto)
+  /graph [on|off|status]      查看/切换 graph 编排模式(下一次 run() 生效)
   /goal status                查看会话目标 · show session goal
   /goal clear                 清空会话目标 · clear session goal
   /goal [--max-turns <n>] <text>  钉目标（可选轮次上限）· pin goal
@@ -166,6 +173,11 @@ export function applySlashCommand(opts: ApplySlashCommandOpts): SlashEffect {
       // W2: 权限模式查询/切换。纯解析,实际 set 落在 host(它持有
       // PermissionModeContext)。
       return { type: "permissions", args };
+
+    case "graph":
+      // graph 编排 overlay 查询/切换。args 不在此解析 —— 值域与文案是三入口
+      // 共享的单点(harness/graph/mode.ts),host 持有 GraphModeContext 并调它。
+      return { type: "graph", args };
 
     case "goal": {
       // #458 T6: /goal 三面 —— status / clear / pin(<text>)。

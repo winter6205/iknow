@@ -45,11 +45,15 @@ import {
 import { createStreamDraft } from "./stream-draft.js";
 import {
   parsePermissionMode,
-  modeLabel,
-  applyShiftTabModeFlip,
   type PermissionMode,
   type PermissionModeContext,
 } from "../harness/permission/modes.js";
+import {
+  agentModeLabel,
+  applyGraphCommand,
+  applyShiftTabAgentModeFlip,
+  type GraphModeContext,
+} from "../harness/graph/mode.js";
 import {
   SessionStore,
   type SessionStoreError,
@@ -106,6 +110,12 @@ export type ChatSessionOpts = {
    */
   permissionMode?: PermissionModeContext;
   /**
+   * D-α / ADR-0030: graph 编排 overlay 的会话 holder。Shift+Tab 三态轮与
+   * `/graph on|off` 改的是同一个它；装配层读它决定下一次 run() 是否露出
+   * `run_graph`。ask 不传（无 overlay）。
+   */
+  graphMode?: GraphModeContext;
+  /**
    * T4: `--resume <id>` 锚定既有 conversationId 续跑。设置时 runChatSession
    * 以该 id 作为 conversationId(写回同一 checkpoint 文件),并尝试从
    * SessionStore 加载既有 messages 作为初始历史;load 失败(typed)则保留
@@ -136,6 +146,9 @@ export type ChatLineContext = {
   showThinking?: boolean;
   /** W2: 权限模式上下文(由 runChatSession 透传,/permissions 翻它)。 */
   permissionMode?: PermissionModeContext;
+  /** D-α: graph 编排 overlay holder(由 runChatSession 透传,/graph 与
+   *  Shift+Tab 翻它)。 */
+  graphMode?: GraphModeContext;
   /**
    * T2: REPL 级 AbortController。run() 的 signal 由此接线 —— SIGINT 第一次
    * busy 时 abort() 打断 in-flight,run 以 stopReason "cancelled" resolve。
@@ -897,6 +910,24 @@ async function processSlash(opts: {
       };
     }
 
+    case "graph": {
+      // D-α graph mode: 编排 overlay 查询/切换。语义与文案走
+      // harness/graph/mode.ts 单点(TUI / serve 同源);chat 只决定文案落
+      // stdout 还是 stderr。holder 缺席(ask 入口不装)→ 提示不可用。
+      const graphCtx = ctx.graphMode;
+      if (!graphCtx) {
+        return {
+          quit: false,
+          output: "",
+          stderr: "/graph: 当前入口不提供 graph 模式上下文（ask）",
+        };
+      }
+      const result = applyGraphCommand(graphCtx, effect.args);
+      return result.ok
+        ? { quit: false, output: result.text }
+        : { quit: false, output: "", stderr: result.text };
+    }
+
     case "goal": {
       // #458 T6: /goal 三面 —— status / clear / pin(<text>)。
       // status / clear 走 typed-error catch 契约:not_found 是 fresh
@@ -1537,6 +1568,7 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     state,
     showThinking: opts.showThinking,
     permissionMode: opts.permissionMode,
+    graphMode: opts.graphMode,
     abortController,
     checkpointStore,
     subagentManager: opts.subagentManager,
@@ -1788,11 +1820,14 @@ async function runInteractive(opts: {
     key?: { name?: string; shift?: boolean; ctrl?: boolean; meta?: boolean }
   ): void => {
     if (closed) return;
-    applyShiftTabModeFlip({
+    // D-α / ADR-0030: 三态轮 Default → Auto → Graph → Default。graph holder
+    // 缺席时退化成既有单轴 permission 轮（零行为变化）。
+    applyShiftTabAgentModeFlip({
       key,
-      ctx: opts.ctx.permissionMode,
+      permission: opts.ctx.permissionMode,
+      graph: opts.ctx.graphMode,
       onFlip: (next) => {
-        writeErr(`\n权限模式: ${modeLabel(next)}`);
+        writeErr(`\n模式: ${agentModeLabel(next)}`);
         rl.prompt(true);
       },
     });
