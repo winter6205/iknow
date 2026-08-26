@@ -76,7 +76,9 @@ function readNodes(input: unknown): ReadonlyArray<RunGraphNodeInput> {
   const obj = (input ?? {}) as Record<string, unknown>;
   const raw = obj.nodes;
   if (!Array.isArray(raw) || raw.length === 0) {
-    throw new ToolExecutionError("run_graph: `nodes` must be a non-empty array");
+    throw new ToolExecutionError(
+      "run_graph: `nodes` must be a non-empty array"
+    );
   }
   return raw.map((entry, i) => {
     const node = (entry ?? {}) as Record<string, unknown>;
@@ -215,6 +217,7 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
       }
       const byId = new Map(nodes.map((n) => [n.id, n]));
       const signal = ctx?.signal;
+      const parentTurnId = ctx?.turnId;
       // 每节点现装一次 executor:task 文本要带上该节点 deps 的产出,而
       // NodePlan 是静态的 —— 现装是让「数据沿边流动」落在既有 executor
       // 上而不改它的最小做法。
@@ -232,6 +235,7 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
           manager: deps.manager,
           plans: { [id]: { task: renderTask(node, nodeCtx) } },
           ...(signal ? { signal } : {}),
+          ...(parentTurnId !== undefined ? { parentTurnId } : {}),
         })(id, nodeCtx);
       };
       const execution = await runGraph(spec, exec);

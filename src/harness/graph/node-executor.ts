@@ -21,13 +21,21 @@
  * loop-engine / build-engine / index.ts。
  */
 
+import { randomUUID } from "node:crypto";
+
 import {
   SubAgentCapacityError,
   type SubAgentDefinition,
   type SubAgentManager,
 } from "../subagent/manager.js";
 import type { SubAgentEnvelope } from "../subagent/envelope.js";
-import type { NodeExecutor, NodeOutcome } from "./types.js";
+import { safeTrace } from "../trace/jsonl.js";
+import type {
+  SubagentStepRecord,
+  TraceErrorType,
+  TraceService,
+} from "../trace/types.js";
+import type { NodeContext, NodeExecutor, NodeOutcome } from "./types.js";
 
 /** 单节点到 SubAgentDefinition 的映射。 */
 export interface NodePlan {
@@ -47,6 +55,20 @@ export interface SubAgentNodeExecutorOptions {
    * 缺席 → 与 V1 逐字节一致（waitFor 不带 signal）。
    */
   readonly signal?: AbortSignal;
+  /** 可选 SUBAGENT_STEP 写侧（graph 编排 dispatch/settle）。 */
+  readonly trace?: TraceService;
+  /**
+   * 派出这张图的那一回合的 trace turn id（F-4）。给了就同时进节点 def
+   * （→ manager 三类 record）与本执行器发的 `subagent_step`。
+   */
+  readonly parentTurnId?: string;
+}
+
+/** envelope.reason → TraceErrorType（无对应成员时归 unknown）。 */
+function stepErrorType(reason: SubAgentEnvelope["reason"]): TraceErrorType {
+  return reason === "timeout" || reason === "protocolError"
+    ? reason
+    : "unknown";
 }
 
 /**
@@ -66,8 +88,24 @@ export interface SubAgentNodeExecutorOptions {
 export function createSubAgentNodeExecutor(
   opts: SubAgentNodeExecutorOptions
 ): NodeExecutor {
-  const { manager, plans, signal } = opts;
-  return async (id: string): Promise<NodeOutcome> => {
+  const { manager, plans, signal, trace, parentTurnId } = opts;
+  let nextStepIndex = 0;
+  const parentTurnFields =
+    parentTurnId !== undefined ? { parentTurnId } : ({} as const);
+
+  function emitStep(fields: Omit<SubagentStepRecord, "id" | "origin">): void {
+    if (!trace) return;
+    void safeTrace(() =>
+      trace.recordSubagentStep({
+        id: randomUUID(),
+        origin: "parent",
+        ...parentTurnFields,
+        ...fields,
+      })
+    );
+  }
+
+  return async (id: string, _ctx?: NodeContext): Promise<NodeOutcome> => {
     const plan = plans[id];
     if (!plan) {
       return {
@@ -77,21 +115,27 @@ export function createSubAgentNodeExecutor(
     }
     const def: SubAgentDefinition = {
       ...(plan.def ?? {}),
+      excludeFromHostDrain: true,
+      ...(parentTurnId !== undefined ? { parentTurnId } : {}),
       task: plan.task,
     };
-    // spawn 同步入口（manager 内部 randomUUID）—— 立即返回 taskId 或抛
-    // SubAgentCapacityError（≥ MAX_CONCURRENT_WORKERS in-flight 时）。
     const { taskId } = manager.spawn(def);
+    const stepIndex = nextStepIndex++;
+    const startedAt = new Date().toISOString();
+    emitStep({
+      taskId,
+      stepIndex,
+      phase: "dispatch",
+      label: id,
+      startedAt,
+      status: "ok",
+      ts: startedAt,
+    });
     let envelope: SubAgentEnvelope;
     try {
-      // 前景阻塞至子代理终态（ADR-0014 V1.5 默认 wait:true 等价）。
-      // 缺省 timeoutMs 走 manager 三层链 (def.timeoutMs ?? opts.taskTimeoutMs ??
-      // PER_TASK_TIMEOUT_MS) — 单点声明保证 spawn 计时与 wait 超时同源。
       envelope = await manager.waitFor(taskId, undefined, signal);
     } catch (err) {
-      // waitFor 抛错 → typed 拒绝 surface 上抛，scheduler 转 failed。
       if (err instanceof SubAgentCapacityError) {
-        // 容量拒绝（spawn 内已抛；防御兜底，正常路径不会命中）。
         return {
           status: "failed",
           error: `${err.name}: ${err.message} (active=${err.active})`,
@@ -99,13 +143,35 @@ export function createSubAgentNodeExecutor(
       }
       throw err;
     }
+    const endedAt = new Date().toISOString();
     if (envelope.status === "ok") {
+      emitStep({
+        taskId,
+        stepIndex,
+        phase: "settle",
+        label: id,
+        startedAt,
+        endedAt,
+        status: "ok",
+        ts: endedAt,
+      });
       return { status: "done", output: envelope.result };
     }
-    // status === "failed" 必有 summary / reason 之一。
     const reasonText = envelope.reason ? `[${envelope.reason}] ` : "";
     const summary =
       envelope.summary ?? "subagent returned failed without summary";
+    emitStep({
+      taskId,
+      stepIndex,
+      phase: "settle",
+      label: id,
+      startedAt,
+      endedAt,
+      status: "error",
+      errorType: stepErrorType(envelope.reason),
+      message: `${reasonText}${summary}`.trim(),
+      ts: endedAt,
+    });
     return {
       status: "failed",
       error: `${reasonText}${summary}`.trim(),
