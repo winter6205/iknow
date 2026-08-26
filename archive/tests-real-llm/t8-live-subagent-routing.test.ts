@@ -101,15 +101,23 @@ function makeFakeSpawn(cap: Cap): SubAgentSpawn {
       exitCode: null,
       signalCode: null,
     }) as unknown as ChildProcess;
+    // TASK() 让 worker "report the word 'subagent-ok' verbatim" —— fake worker
+    // 扮演一个照做了的 worker,result 必须真带该 token,否则父代理的 final 文本
+    // 里永远不会出现它,`final 含 subagent-ok` 断言无法被满足。
     const fakeEnv: SubAgentEnvelope = {
       status: "ok",
       summary: `T8-fake:${payload.task.slice(0, 40)}`,
-      result: `T8-fake ok (role=${payload.role ?? "<none>"})`,
+      result: `subagent-ok (T8-fake role=${payload.role ?? "<none>"})`,
     };
     stdin.on("end", () => {
       stdout.write(JSON.stringify(fakeEnv) + "\n");
       cp.emit("exit", 0, null);
     });
+    // 真 worker 用 `for await (const chunk of stdin)` 读到 EOF 才开跑。
+    // PassThrough 的 "end" 只在读侧被消费完后才触发 —— 光挂 listener 不切
+    // flowing 模式,manager 的 `stdin.write(...) + stdin.end()` 之后 "end"
+    // 永不触发,envelope 永不回写,manager 一直等到 per-task timeout。
+    stdin.resume();
     return cp;
   };
 }
@@ -119,7 +127,9 @@ async function buildEngine(cap: Cap, trace: TraceService) {
     env,
     askUser: createNoAskUser(),
     surface: "chat",
-    subagentManager: createSubAgentManager({ spawn: makeFakeSpawn(cap) }),
+    // trace 必须进 manager:subagent_spawn / state_change / stop 三事件由
+    // manager 发,build-engine 的自动接线在调用方自带 manager 时不介入。
+    subagentManager: createSubAgentManager({ spawn: makeFakeSpawn(cap), trace }),
     userHome: join(scratchRoot!, `home-${cap.defs.length}`),
     cwd: scratchRoot!,
     sandboxRoot: scratchRoot!,
