@@ -135,12 +135,14 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     todoDir: "/tmp/root/session-1/todos",
     mcpManager: fakeMcpManager,
     backgroundManager: fakeBackgroundManager,
+    // D-α T3:graph overlay 在场 → run_graph 入注册表（描述同受 D9 闸门约束）。
+    graphAssembly: { enabled: () => true },
   });
 
-  // Sanity: registry assembled with the full 30-tool toolset. If this drifts,
+  // Sanity: registry assembled with the full 31-tool toolset. If this drifts,
   // the gate below would silently cover a smaller set — surface the drift
   // explicitly so the failure mode is unambiguous.
-  it("registry contains the full 30-tool ACI toolset (assembly sanity)", () => {
+  it("registry contains the full 31-tool ACI toolset (assembly sanity)", () => {
     const names = reg.catalog.all().map((t) => t.name);
     expect(names).toEqual([...ACI_TOOLSET_NAMES]);
   });
@@ -213,10 +215,10 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
 
   // Pre-#483 D9 baseline would have included bash's "Don't have a dedicated
   // tool" and a number of imperative "do not" / "never" fragments. After the
-  // audit, the only thing we pin is that all 30 tools are positive-trigger
+  // audit, the only thing we pin is that all 31 tools are positive-trigger
   // phrased — verified structurally by the blocklist assertions above.
-  it("toolset size after audit: 30 (full conditional-deps assembly)", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(30);
-    expect(reg.catalog.all()).toHaveLength(30);
+  it("toolset size after audit: 31 (full conditional-deps assembly)", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(31);
+    expect(reg.catalog.all()).toHaveLength(31);
   });
 });

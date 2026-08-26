@@ -34,6 +34,7 @@ import { createSkillTool } from "./skill.js";
 import { createSkillSearchTool } from "./skill-search.js";
 import { createSpawnSubAgentTool } from "../../subagent/spawn-subagent-tool.js";
 import { createSubAgentResultTool } from "../../subagent/subagent-result-tool.js";
+import { createRunGraphTool } from "../../graph/run-graph-tool.js";
 import type { SubAgentManager } from "../../subagent/manager.js";
 import type { BackgroundTaskManager } from "../../background/manager.js";
 import type { McpManager } from "../../mcp/manager.js";
@@ -127,6 +128,13 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   // 运行时决策——Gate 3 在 toolsetNames 端镜像过滤，见工厂尾部注释）。
   "bash_output", // #502 T4 读后台任务日志尾部 + 状态/exit_code（read-only 默认 allow）
   "bash_stop", // #502 T4 终止后台任务进程组（SIGTERM→2s→SIGKILL；write 默认 ask）
+  // D-α T3 run_graph append-only：30→31。条件化装配（graphAssembly +
+  // subagentManager 同时在场才入注册表——ask / worker / 未接 overlay 的入口
+  // 三者皆缺席；Gate 3 在 toolsetNames 端镜像过滤，见工厂尾部注释）。
+  // 注册 ≠ 可见：本 round 的 graph 快照关着时装配层把它滤出 promptTools,
+  // handler 亦二次 EXIT（ADR-0030 —— overlay 是运行期可翻的,registry 是
+  // 构造期冻结的,两者只能这样对齐）。
+  "run_graph", // D-α T3 父代理声明 DAG，host 走 waves + 前景 spawn 编排
 ] as const);
 
 /**
@@ -183,6 +191,11 @@ export interface CreateDefaultAciRegistryOptions {
    * registry 这里只透传, 不读 catalog (catalog 路由归 spawn-subagent-tool
    * 工厂负责 — plan T3 决议)。缺省 → bash 字节与 V1 一致。 */
   readonly bashMode?: "any" | "readonly";
+  /** D-α T3 / ADR-0030:本 round 的 graph 装配快照（`GraphAssembly` 的读侧）。
+   *  与 `subagentManager` 同时在场时 `run_graph` 入注册表；缺席时不装
+   *  （ask / worker / 未接 overlay 的入口）。工具**可见性**由快照决定,
+   *  装配层据此过滤 promptTools —— 见 build-engine。 */
+  readonly graphAssembly?: { readonly enabled: () => boolean };
 }
 
 /**
@@ -240,6 +253,7 @@ export function createDefaultAciRegistry(
   const secretRegistry = opts.secretRegistry;
   const disallowedTools = opts.disallowedTools;
   const backgroundManager = opts.backgroundManager;
+  const graphAssembly = opts.graphAssembly;
   // #562 T6: bashMode 显式透传到 createBashTool。registry 不读 catalog —
   // spawn-subagent-tool 工厂是 catalog 路由的真正 owner。
   const bashMode = opts.bashMode;
@@ -358,6 +372,17 @@ export function createDefaultAciRegistry(
           bash_stop: () => createBashStopTool({ backgroundManager }),
         }
       : {}),
+    // D-α T3 run_graph（条件化装配：graphAssembly + subagentManager 同时在场
+    // 才入注册表——编排底座缺一不可；Gate 3 镜像过滤，见下）。
+    ...(graphAssembly && subagentManager
+      ? {
+          run_graph: () =>
+            createRunGraphTool({
+              manager: subagentManager,
+              isEnabled: () => graphAssembly.enabled(),
+            }),
+        }
+      : {}),
   };
 
   // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。
@@ -375,6 +400,7 @@ export function createDefaultAciRegistry(
     ...(todoDir ? [] : ["todo_write"]),
     ...(mcpManager ? [] : ["list_mcp_resources", "read_mcp_resource"]),
     ...(backgroundManager ? [] : ["bash_output", "bash_stop"]),
+    ...(graphAssembly && subagentManager ? [] : ["run_graph"]),
     ...(disallowedTools ?? []),
   ];
   const toolsetNames = (ACI_TOOLSET_NAMES as ReadonlyArray<string>).filter(

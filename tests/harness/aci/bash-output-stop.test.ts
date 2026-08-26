@@ -16,7 +16,7 @@
  *      窗口 → tool.handler({task_id}) → text 长度 ≤ DEFAULT 且等于原文尾部
  *      （tail 语义，非抛错）。max_bytes 覆盖默认窗口同路径验证。
  *   5. bash_stop 幂等（kill_race 语义，T2 定稿）：对已终态任务二次 stop 不抛。
- *   6. 装配一致性：全条件装配（含 backgroundManager）→ 30 件且
+ *   6. 装配一致性：全条件装配（含 backgroundManager + graph overlay）→ 31 件且
  *      `toEqual(ACI_TOOLSET_NAMES)`；backgroundManager 缺席 → bash_output /
  *      bash_stop 排除（28 件），bash 保留（T3 常驻透传语义）。
  *   7. permission shape（checkPermission direct-call，permission.test.ts 先例）：
@@ -171,7 +171,7 @@ function makeWebEnv(): Pick<IknowEnv, "web"> {
   return { web: { searchUrl: undefined, proxy: undefined } };
 }
 
-/** 全条件装配 opts（五条件键 + backgroundManager）→ 30 件全量。 */
+/** 全条件装配 opts（五条件键 + backgroundManager + graph overlay）→ 31 件全量。 */
 function fullAssemblyOpts() {
   return {
     env: makeWebEnv(),
@@ -182,6 +182,8 @@ function fullAssemblyOpts() {
     todoDir: "/tmp/root/session-1/todos",
     mcpManager: fakeMcpManager,
     backgroundManager: fakeBackgroundManager,
+    // D-α T3:graph overlay 在场 → run_graph 入注册表（末位第 31 件）。
+    graphAssembly: { enabled: () => true },
   };
 }
 
@@ -419,10 +421,10 @@ describe("bash_output 真实物理截断（real manager）", () => {
 // ── 5. 装配一致性（registry + Gate 3 镜像过滤）───────────────────────────────
 
 describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
-  it("全条件装配（含 backgroundManager）→ 30 件，顺序 = ACI_TOOLSET_NAMES", () => {
+  it("全条件装配（含 backgroundManager + graph overlay）→ 31 件，顺序 = ACI_TOOLSET_NAMES", () => {
     const reg = createDefaultAciRegistry(fullAssemblyOpts());
     const names = reg.inner.list().map((d) => d.name);
-    assert.equal(names.length, 30);
+    assert.equal(names.length, 31);
     assert.deepEqual(names, [...ACI_TOOLSET_NAMES]);
     assert.ok(reg.catalog.get("bash_output"));
     assert.ok(reg.catalog.get("bash_stop"));

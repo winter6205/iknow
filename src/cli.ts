@@ -310,6 +310,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
       surface: "chat",
       memory: { enabled: true },
       permissionMode,
+      graphMode,
       todoDir: resolveSessionTodoDir({ surface: "chat" }),
       // review-fix (Fix 1): subagent trace 生产装配 —— 仅显式配置 traceOut/env 时
       // 注入 <traceOut>/subagent.jsonl (conversationId="subagent", 聚合所有会话)。
@@ -353,6 +354,8 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // D-α: 同一个 graph holder —— Shift+Tab 三态轮与 /graph 都翻它,
     // build-engine 的装配快照读的也是它（SC3 三入口同 holder）。
     graphMode,
+    // D-α T3: 每条查询行开跑前拍一次快照 —— 翻键「下一次 run() 生效」。
+    graphAssembly: built.graphAssembly,
     // T4: `--resume <id>` 续跑锚点。仅 chat 消费;ask/serve/tui 入口
     // 不传(解析虽 command-agnostic,host 各自决策)。undefined = 新开会话。
     resumeId: parsed.resumeId,

@@ -23,6 +23,7 @@ import {
   createPermissionModeContext,
   type PermissionModeContext,
 } from "../harness/permission/modes.js";
+import type { GraphModeContext } from "../harness/graph/mode.js";
 import { loadIknowEnv, type IknowEnv } from "../config/env.js";
 import {
   WORKSPACE_ROOT_ENV_KEY,
@@ -85,6 +86,9 @@ export async function buildHarnessEngine(
     /** W2: 权限模式上下文。chat REPL 传可变 context(可被 /permissions 翻);
      *  ask/serve 传静态 context(不可变但类型相同)。缺省 → 引擎内 default。 */
     permissionMode?: PermissionModeContext;
+    /** D-α T3 / ADR-0030: graph 编排 overlay holder 透传（chat 传可变
+     *  context；ask 不传 → run_graph 与编排段都不装配）。 */
+    graphMode?: GraphModeContext;
     /** #440 T1-fix:host 注入的 session-scoped todoDir,用于 todo_write 在主
      *  loop 装配(per-conversationId resolution 是后续 ticket,见 todo-write.ts
      * resolveSessionTodoDir 注释)。chat/ask CLI 入口由调用方解析后透传。 */
@@ -132,6 +136,8 @@ export async function buildHarnessEngine(
     surface: opts.surface ?? "chat",
     ...(opts.memory ? { memory: opts.memory } : {}),
     ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}),
+    // D-α T3:graph overlay holder 透传 — 在场才装 run_graph + 编排段。
+    ...(opts.graphMode ? { graphMode: opts.graphMode } : {}),
     ...(opts.todoDir ? { todoDir: opts.todoDir } : {}),
     ...(resolvedWorkspaceRoot ? { workspaceRoot: resolvedWorkspaceRoot } : {}),
   });

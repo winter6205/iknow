@@ -54,6 +54,7 @@ import {
   applyShiftTabAgentModeFlip,
   type GraphModeContext,
 } from "../harness/graph/mode.js";
+import type { GraphAssembly } from "../harness/graph/assembly.js";
 import {
   SessionStore,
   type SessionStoreError,
@@ -116,6 +117,12 @@ export type ChatSessionOpts = {
    */
   graphMode?: GraphModeContext;
   /**
+   * D-α T3: graph 装配快照（`BuiltEngine.graphAssembly`）。chat 的一个
+   * round = 一条用户查询行；host 在跑 run() 之前拍一次快照，翻键因此
+   * 「下一次 run() 才生效」。缺席 = 未接 overlay（工具与编排段都不存在）。
+   */
+  graphAssembly?: GraphAssembly;
+  /**
    * T4: `--resume <id>` 锚定既有 conversationId 续跑。设置时 runChatSession
    * 以该 id 作为 conversationId(写回同一 checkpoint 文件),并尝试从
    * SessionStore 加载既有 messages 作为初始历史;load 失败(typed)则保留
@@ -149,6 +156,8 @@ export type ChatLineContext = {
   /** D-α: graph 编排 overlay holder(由 runChatSession 透传,/graph 与
    *  Shift+Tab 翻它)。 */
   graphMode?: GraphModeContext;
+  /** D-α T3: graph 装配快照(由 runChatSession 透传;查询行开跑前拍一次)。 */
+  graphAssembly?: GraphAssembly;
   /**
    * T2: REPL 级 AbortController。run() 的 signal 由此接线 —— SIGINT 第一次
    * busy 时 abort() 打断 in-flight,run 以 stopReason "cancelled" resolve。
@@ -580,6 +589,11 @@ async function runChatQueryLine(
     return { quit: false, output: "" };
   }
   const query = parsedLine.text;
+
+  // D-α T3 / ADR-0030:round 边界 —— 一条用户查询行 = 一次 run()。这里拍
+  // graph 装配快照,之后本行内的所有 run()(含 verify / auto-loop 的多轮)
+  // 共用同一工具面。Shift+Tab 与 `/graph` 在这之后翻,要等下一行才生效。
+  ctx.graphAssembly?.beginRound();
 
   // plan T1: HITL vs /goal auto 分派。仅 verifyConfig 在场时读盘;
   // 缺席分支直接走 runHarness(query, ...),不引入额外 IO。
@@ -1569,6 +1583,7 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     showThinking: opts.showThinking,
     permissionMode: opts.permissionMode,
     graphMode: opts.graphMode,
+    graphAssembly: opts.graphAssembly,
     abortController,
     checkpointStore,
     subagentManager: opts.subagentManager,

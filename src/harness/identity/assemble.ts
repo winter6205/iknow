@@ -79,6 +79,11 @@ export interface AssemblyContext {
    *  守 KV 缓存稳定契约)。build-engine 从驱动 deps.agentStatus (T1 注入缝)
    *  的同一 gate 派生 —— 栏会注入的表面才有读规则;ask / worker 永不注入。 */
   readonly agentStatusReadRule?: boolean;
+  /** D-α T3 / ADR-0030 graph 编排段注入缝 (可选,布尔 gate):返回 true →
+   *  装配 "## Graph orchestration" 段;缺席 / 返回 false → 段缺席 (字节级
+   *  零变化,守 KV 缓存稳定契约)。gate 是**函数**而非布尔:overlay 会在会话
+   *  中途被翻,装配层每 turn 现读该次 run() 的快照 (GraphAssembly.enabled)。 */
+  readonly orchestration?: () => boolean;
 }
 
 /** #337 T6 `<available_skills>` 段元素形态(最小投影:name + description + disabled)。
@@ -148,6 +153,8 @@ export function createIknowSystemResolver(opts: {
   readonly coordinatorText?: string;
   /** #646 T2:见 AssemblyContext.agentStatusReadRule 注释(布尔 gate,同门驱动)。 */
   readonly agentStatusReadRule?: boolean;
+  /** D-α T3:见 AssemblyContext.orchestration 注释(每 turn 现读 run() 快照)。 */
+  readonly orchestration?: () => boolean;
 }): () => Promise<string | undefined> {
   const bootstrapActive = shouldIncludeBootstrap(opts.surface);
   return () =>
@@ -165,6 +172,7 @@ export function createIknowSystemResolver(opts: {
         ? { coordinatorText: opts.coordinatorText }
         : {}),
       ...(opts.agentStatusReadRule ? { agentStatusReadRule: true } : {}),
+      ...(opts.orchestration ? { orchestration: opts.orchestration } : {}),
     });
 }
 
@@ -236,6 +244,13 @@ export async function assembleIdentityContext(
   // prompt 一部分 (验收6 的 proactive 关键词即出于此)。
   if (ctx.coordinatorText) {
     segments.push(coordinatorSegment(ctx.coordinatorText));
+  }
+  // D-α T3 / ADR-0030 加性段 graph 编排:append 在最末,不触碰 LOCKED 顺序。
+  // gate 每 turn 现读该次 run() 的装配快照 —— 关图时段整体缺席,默认模式
+  // 的 system 文本与本刀之前字节一致 (KV 缓存契约);开图时只在尾部追加,
+  // 前缀仍逐字节稳定。
+  if (ctx.orchestration?.() === true) {
+    segments.push(orchestrationSegment(IKNOW_GRAPH_ORCHESTRATION_TEXT));
   }
   return segments.join("\n\n");
 }
@@ -454,6 +469,32 @@ Parallelize by issuing multiple spawn_subagent calls in one turn: each spawns an
  *  顺序;缺席 → 跳过,字节级零变化)。 */
 export function coordinatorSegment(text: string): string {
   return `## Sub-agent coordination\n${text}`;
+}
+
+/** D-α T3 / ADR-0030 graph 编排段正文 (SSOT,不含段标题——标题由
+ *  orchestrationSegment 加 "## Graph orchestration" 渲染,与
+ *  coordinatorSegment 同形态)。
+ *
+ *  只在该次 run() 的 graph 快照为开时装配 —— 关图时段缺席,默认模式的
+ *  system 文本字节级不变 (KV cache 契约)。
+ *
+ *  内容边界:讲的是「什么形状的活该进图」和「进图之后的语义」,不写模块
+ *  路径 (spec Out of scope:不把 src/harness/graph 写进模型 prompt),也不
+ *  锁节点数 N (spec 假设 8:N 不是产品策略)。 */
+export const IKNOW_GRAPH_ORCHESTRATION_TEXT = `
+Graph mode is on for this run, so run_graph is available alongside spawn_subagent.
+
+Reach for run_graph when the work splits into pieces that depend on each other — one piece needs another's result before it can start. Declare the whole shape in a single call: every node gets an \`id\`, a self-contained \`task\`, and the \`deps\` it waits for. Nodes whose deps are all satisfied run in parallel; a node starts only once every node it depends on has finished, and its task arrives with those results appended.
+
+Failure is data: if a node fails, the nodes downstream of it come back skipped while unrelated branches keep running, and the call still returns one report covering every node. Read that report and decide what to do next.
+
+Keep using spawn_subagent for a single task, or for several tasks with no ordering between them — a graph with no edges buys nothing over parallel spawns.
+`.trim();
+
+/** D-α T3 graph 编排段渲染:段标题 + 正文 (加性段,append 在最末,不触碰
+ *  LOCKED 顺序;缺席 → 跳过,字节级零变化)。 */
+export function orchestrationSegment(text: string): string {
+  return `## Graph orchestration\n${text}`;
 }
 
 /**

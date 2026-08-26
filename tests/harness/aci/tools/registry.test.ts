@@ -103,6 +103,8 @@ describe("createDefaultAciRegistry — 正常路径", () => {
       mcpManager: fakeMcpManager,
       // #502 T4:bash_output / bash_stop 条件化装配,backgroundManager 在场才入注册表。
       backgroundManager: fakeBackgroundManager,
+      // D-α T3:graph overlay 在场 → run_graph 入注册表(全量 31 件)。
+      graphAssembly: { enabled: () => true },
     });
     const names = reg.inner.list().map((def) => def.name);
     expect(names).toEqual([...EXPECTED_TOOLS]);
@@ -144,7 +146,9 @@ describe("createDefaultAciRegistry — 正常路径", () => {
           n !== "list_mcp_resources" &&
           n !== "read_mcp_resource" &&
           n !== "bash_output" &&
-          n !== "bash_stop"
+          n !== "bash_stop" &&
+          // D-α T3:graphAssembly + subagentManager 皆缺席 → run_graph 缺席。
+          n !== "run_graph"
       )
     );
     expect(reg.catalog.get("tool_search")).toBeDefined();
@@ -166,8 +170,8 @@ describe("createDefaultAciRegistry — 正常路径", () => {
 
   // #502 T4 全条件装配:ACI_TOOLSET_NAMES 长度 30(28 基线 + bash_output +
   // bash_stop),顺序 append-only 不重排既有。
-  it("Gate 3:ACI_TOOLSET_NAMES 长度 30,前 8 原序 + memory_* + tool_search + 10 LSP + skill + skill_search + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(30);
+  it("Gate 3:ACI_TOOLSET_NAMES 长度 31,前 8 原序 + memory_* + tool_search + 10 LSP + skill + skill_search + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(31);
     // 前 8 件原序不变(append-only 纪律)。
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
@@ -214,6 +218,8 @@ describe("createDefaultAciRegistry — 正常路径", () => {
       "bash_output",
       "bash_stop",
     ]);
+    // D-α T3 run_graph append-only:30→31,末位 1 件,不重排既有 30 件。
+    expect(ACI_TOOLSET_NAMES.slice(30, 31)).toEqual(["run_graph"]);
   });
 });
 
@@ -341,6 +347,7 @@ function expectedSurface(
     todo?: boolean;
     mcp?: boolean;
     bg?: boolean;
+    graph?: boolean;
   } = {}
 ): readonly string[] {
   const conditionallyAbsent = [
@@ -350,6 +357,8 @@ function expectedSurface(
     ...(opts.todo ? [] : ["todo_write"]),
     ...(opts.mcp ? [] : ["list_mcp_resources", "read_mcp_resource"]),
     ...(opts.bg ? [] : ["bash_output", "bash_stop"]),
+    // D-α T3:graphAssembly + subagentManager 同门,任一缺席 → run_graph 缺席。
+    ...(opts.graph && opts.subagent ? [] : ["run_graph"]),
   ];
   return [...ACI_TOOLSET_NAMES].filter(
     (n) => !conditionallyAbsent.includes(n) && !deny.includes(n)
@@ -458,6 +467,8 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
       todoDir: "/tmp/root-a/session-a/todos",
       mcpManager: fakeMcpManager,
       backgroundManager: fakeBackgroundManager,
+      // D-α T3:graph overlay 在场 → run_graph 入注册表(全量 31 件)。
+      graphAssembly: { enabled: () => true },
     });
     const b = createDefaultAciRegistry({
       env: makeWebEnv(),
@@ -468,6 +479,8 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
       todoDir: "/tmp/root-b/session-b/todos",
       mcpManager: fakeMcpManager,
       backgroundManager: fakeBackgroundManager,
+      // D-α T3:graph overlay 在场 → run_graph 入注册表(全量 31 件)。
+      graphAssembly: { enabled: () => true },
     });
     expect(a).not.toBe(b);
     expect(a.catalog).not.toBe(b.catalog);
@@ -525,6 +538,8 @@ describe("createDefaultAciRegistry — #440 T1 todoDir seam", () => {
       todoDir: "/tmp/root/session-1/todos",
       mcpManager: fakeMcpManager,
       backgroundManager: fakeBackgroundManager,
+      // D-α T3:graph overlay 在场 → run_graph 入注册表(全量 31 件)。
+      graphAssembly: { enabled: () => true },
     });
     // #502 T4 全条件装配:6 个条件化 seam 全在场 → 30 件全装配(28 基线 +
     // bash_output + bash_stop)。
