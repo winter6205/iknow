@@ -293,41 +293,51 @@ runOrSkip("#556 T8 live subagent routing + trace double-assert", () => {
     );
   }, 360_000);
 
-  it("[trace][T1] JSONL 落盘 subagent_* ≥3 + tool_call 含 subagent_type", async () => {
-    const recs = [
-      join(traceDir!, "explore.jsonl"),
-      join(traceDir!, "general.jsonl"),
-    ]
-      .flatMap((f) => readFileSync(f, "utf8").split("\n").filter(Boolean))
-      .map((l) => JSON.parse(l));
-    const sub = recs.filter(
-      (r) =>
-        typeof r.record_type === "string" &&
-        r.record_type.startsWith("subagent_")
-    );
+  it("[trace][T1] JSONL 落盘 subagent_* ≥3 + spawn/stop 同 id 配对 + 双档 tool_call", async () => {
+    const read = (conv: string): Array<Record<string, unknown>> =>
+      readFileSync(join(traceDir!, `${conv}.jsonl`), "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+    // conversationId 分档 = 路由分档:explore 任务与 general-purpose 任务各自
+    // 独立落盘,两档不得互相串味。
+    const byConv = { explore: read("explore"), general: read("general") };
+    const recs = [...byConv.explore, ...byConv.general];
+    const typeOf = (r: Record<string, unknown>): string =>
+      typeof r.record_type === "string" ? r.record_type : "";
+    const sub = recs.filter((r) => typeOf(r).startsWith("subagent_"));
+    const idsOf = (t: string): string[] =>
+      recs.filter((r) => typeOf(r) === t).map((r) => String(r.subagent_id));
+    const spawnIds = idsOf("subagent_spawn");
+    const stopIds = idsOf("subagent_stop");
     rec(
       "[trace][T1] grep -c subagent_ >= 3 + spawn/stop 同 id 配对",
       sub.length >= 3 &&
-        new Set(
-          recs
-            .filter((r) => r.record_type === "subagent_spawn")
-            .map((r) => r.subagent_id)
-        ).size >= 1,
-      `count=${sub.length}; types=${sub.map((r) => r.record_type).join(",")}`
+        spawnIds.length >= 2 &&
+        stopIds.length === spawnIds.length &&
+        stopIds.every((id) => spawnIds.includes(id)),
+      `count=${sub.length}; spawn=${spawnIds.length}; stop=${stopIds.length}; paired=${stopIds.every((id) => spawnIds.includes(id))}; types=${sub.map(typeOf).join(",")}`
     );
-    const toolCalls = recs.filter(
-      (r) => r.record_type === "tool_call" && r.tool_name === "spawn_subagent"
-    );
-    const argTypes = toolCalls.map(
-      (r) =>
-        (r.arguments as { subagent_type?: string } | undefined)?.subagent_type
-    );
+    // 为什么不断言 `arguments.subagent_type`:loop-engine 的 recordToolCall 走
+    // `argumentsCaptured: false` 且不落 `arguments`(生产 trace 不把任意工具入参
+    // 写盘)。JSONL 里该字段恒缺席,断言它等于断言一个不存在的契约。
+    // trace 侧改断"两档各自恰好一次 spawn_subagent 调用且成功";
+    // subagent_type → role 的真值由上面两条 it 的 wire 侧
+    // capturedDefs[0].role / capturedPayloads[0].role 承担。
+    // 观测面缺口(trace 无 role 字段)已记入 handoff,归 Phase 1 观测性地板。
+    const spawnCallsIn = (rs: Array<Record<string, unknown>>) =>
+      rs.filter(
+        (r) => typeOf(r) === "tool_call" && r.tool_name === "spawn_subagent"
+      );
+    const eCalls = spawnCallsIn(byConv.explore);
+    const gCalls = spawnCallsIn(byConv.general);
     rec(
-      "[trace][T1] tool_call spawn_subagent 含 'explore' + 'general-purpose'",
-      toolCalls.length >= 2 &&
-        argTypes.includes("explore") &&
-        argTypes.includes("general-purpose"),
-      `count=${toolCalls.length}; types=${JSON.stringify(argTypes)}`
+      "[trace][T1] explore / general 两档各恰好一次成功 spawn_subagent tool_call",
+      eCalls.length === 1 &&
+        gCalls.length === 1 &&
+        eCalls[0]!.status === "ok" &&
+        gCalls[0]!.status === "ok",
+      `explore=${eCalls.length}(${String(eCalls[0]?.status)}); general=${gCalls.length}(${String(gCalls[0]?.status)})`
     );
   }, 60_000);
 
