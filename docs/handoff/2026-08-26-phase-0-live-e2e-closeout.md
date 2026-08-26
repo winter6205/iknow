@@ -115,6 +115,28 @@ BASELINE (cwdReadonly 缺省)  touch baseline.txt → code=0，文件落地
 
 第三条是关键：证明 GATE2 的 EROFS 是 fence 打的，不是环境自带的。
 
+### 产品 CLI 路径 live e2e（真 worker 子进程）
+
+T8 用 `fakeSpawn` 拦住了 manager.spawn，所以 worker 子进程根本不发。为了不让"真
+worker 起不起得来"这件事只靠探针说话，另跑了一趟产品 CLI pipe 模式：
+
+```
+$ printf '<spawn_subagent explore 任务>' | node dist/cli.js chat --data-dir <tmp>
+── turn 1 ──
+The sub-agent reported "subagent-cli-ok" verbatim.
+stop=completed · turns=2 · tools=spawn_subagent · 9321ms
+```
+
+真 worker 子进程起来、跑完、结果回到父代理。
+
+**dev 模式的坑（记一笔，不改代码）**：同一条命令走 `npx tsx src/cli.ts chat` 会得到
+`The sub-agent crashed and returned no response.`。`defaultSubAgentSpawn` 用
+`spawn(process.execPath, [process.argv[1], "--subagent-worker"])` 重入，tsx 加载器
+没被继承，node 直接跑 `.ts` 文件即崩。`NODE_OPTIONS="--import tsx"` 可绕过（实测
+同一命令随即通过）。**发布路径不受影响** —— 构建产物里 `argv[1]` 是 `.js`。
+改 spawn argv 会动到 V1 冻结契约面（既有测试逐字节断言该 argv 形态），为一条 dev
+人机工程问题不值当，记为 backlog。
+
 ## 跑通证据（命令 + 结果）
 
 ```bash
@@ -136,6 +158,9 @@ $HOME/.bun/bin/bun test tests/tui/
 
 npm run probe:sandbox:subagent
 # 修复预检后真跑；net denied 一条不稳定，见"已知不稳定项"
+
+npm run build && printf '<spawn_subagent 任务>' | node dist/cli.js chat --data-dir <tmp>
+# 真 worker 子进程跑通，父代理拿到 "subagent-cli-ok"
 ```
 
 ### 基线 pre-existing 失败（本次不修，与本任务无关）
@@ -183,7 +208,9 @@ baseline `4590 passed / 4595` → 现在 `4598 passed / 4603`。
 2. **Phase 1 观测性地板补 role 字段** —— trace 三类 subagent 记录都无 role，单看
    trace 判不出路由去向。归 Phase 1，需与 #383 transcript schema v4 对齐。
 3. **`probe:sandbox:subagent` 取证脆弱性** —— 见"已知不稳定项"。
-4. **5 条 pre-existing 失败** —— env-isolation ×4 是云 VM 环境注入导致，grep ×1
+4. **dev 模式（tsx）起不了子代理** —— 见"产品 CLI 路径 live e2e"。发布路径不受
+   影响；修它要动 spawn argv（V1 冻结契约面），暂记 backlog。
+5. **5 条 pre-existing 失败** —— env-isolation ×4 是云 VM 环境注入导致，grep ×1
    与 OSC52 ×1 独立。本任务按约束不动。
 
 ## 脱敏
