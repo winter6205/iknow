@@ -18,6 +18,7 @@
  */
 
 import type { AciToolDef } from "../aci/types.js";
+import type { ToolExecutionContext } from "../tools/types.js";
 import type { SubAgentManager } from "../subagent/manager.js";
 import { ToolExecutionError } from "../errors.js";
 import { validateGraph, type GraphValidationError } from "./topo.js";
@@ -193,7 +194,7 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
       isConcurrencySafe: false,
       interruptBehavior: "cancel",
     } as const,
-    handler: async (input: unknown) => {
+    handler: async (input: unknown, ctx?: ToolExecutionContext) => {
       // EXIT:overlay 关着 —— 装配层已把工具滤出 promptTools,能走到这里
       // 说明是同 round 翻键或模型幻觉。零 spawn,typed 拒绝。
       if (!isEnabled()) {
@@ -213,17 +214,35 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
         );
       }
       const byId = new Map(nodes.map((n) => [n.id, n]));
+      const signal = ctx?.signal;
       // 每节点现装一次 executor:task 文本要带上该节点 deps 的产出,而
       // NodePlan 是静态的 —— 现装是让「数据沿边流动」落在既有 executor
       // 上而不改它的最小做法。
-      const exec: NodeExecutor = (id, ctx) => {
+      const exec: NodeExecutor = (id, nodeCtx) => {
+        // 调用侧已取消 → 本节点不再 spawn。scheduler 把它记成 failed,
+        // 下游随之 skipped;整张图收敛后由下面的 EXIT 统一归因。
+        if (signal?.aborted) {
+          return Promise.resolve({
+            status: "failed" as const,
+            error: "run_graph: cancelled by caller abort",
+          });
+        }
         const node = byId.get(id)!;
         return createSubAgentNodeExecutor({
           manager: deps.manager,
-          plans: { [id]: { task: renderTask(node, ctx) } },
-        })(id, ctx);
+          plans: { [id]: { task: renderTask(node, nodeCtx) } },
+          ...(signal ? { signal } : {}),
+        })(id, nodeCtx);
       };
       const execution = await runGraph(spec, exec);
+      // EXIT:归因调用侧取消 —— 与 spawn_subagent 一致(executor 因
+      // signal.aborted 归一 execution_failed:cancelled)。半张图的部分结果
+      // 不当成功数据返回:调用方已经不要这轮了。
+      if (signal?.aborted) {
+        throw new ToolExecutionError(
+          "run_graph: cancelled by caller abort while the graph was running"
+        );
+      }
       return condense(nodes, execution.results, execution.waveCount);
     },
   });
