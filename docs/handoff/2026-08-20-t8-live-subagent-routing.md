@@ -1,5 +1,14 @@
 # Session Handoff — #556 T8 live subagent routing + trace double-assert (2026-08-20)
 
+> **[2026-08-26 更正]** 本文下面所有把 T8 三条 LLM 用例超时归因为 "model 端点延迟 >
+> 测试预算" 的段落**结论不成立**。同一网关（`minimax-cn` / Anthropic 形态端点）单次
+> `messages` 调用实测约 2s（流式亦然），慢的不是模型。真实原因是测试 fixture 自身的
+> 三处缺陷（`fakeSpawn` 的 stdin EOF 握手 / fake envelope 的 result token / manager
+> 未拿到 trace）。修好后同一文件 15.8s 跑完、14/14 asserts 全绿。
+>
+> 收口详情与证据见 `docs/handoff/2026-08-26-phase-0-live-e2e-closeout.md`。
+> 保留本文原文不改写，便于对照当时的判断链条。
+
 ## 当前 live 状态
 
 - **任务**: T8 live 收口 — `subagent_type` 参数真实 LLM 接通 + trace double-assert + TUI smoke 留档。

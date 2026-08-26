@@ -143,6 +143,18 @@ describe("SubAgentManager spawn → completed", () => {
     assert.equal(payload.timeoutMs, 30000);
   });
 
+  it("worker 侧读 stdin 到 EOF 拿到整条 payload 行 (真 worker 的 for-await 契约)", async () => {
+    const { manager, spawned, spawnCalls } = makeHarness();
+    manager.spawn({ systemPrompt: "p", model: "opus" });
+    const chunks: string[] = [];
+    // 真 worker 的消费形态:for-await 到 EOF。manager 不 end() stdin 时这里
+    // 永远收不到 EOF,worker 永远不开跑(T8 live e2e 的挂死形态)。
+    for await (const chunk of spawned[0]!.stdin) chunks.push(String(chunk));
+    const raw = chunks.join("");
+    assert.equal(raw.endsWith("\n"), true, "payload 必须以换行收尾");
+    assert.deepEqual(JSON.parse(raw.trim()), spawnCalls[0]!.payload);
+  });
+
   it("waitFor resolves envelope on completed", async () => {
     const { manager, spawned } = makeHarness();
     const { taskId } = manager.spawn({});

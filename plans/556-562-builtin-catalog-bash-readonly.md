@@ -75,7 +75,9 @@ Each numbered item is one tracer bullet: one vertical-slice outcome, one tag, on
    - **Inherits:** #556 E — throwaway workspace fixture（两个独立 doc/模块）+ pipe + trace 同一根；两条 live 任务（explore 路由 / general-purpose 路由）；trace 断言 `subagent_type` 值、persona 注入、worker tool surface 裁剪（trace double-track：NoopTraceService deepEqual 基线，见 `.claude/rules/test.md`）；TUI 仅 smoke 非 logic gate；#556 close 不等 #562 已兑现（本 bullet 时 #562 链路已并入，readonly 全链路生效）；honest 留档项（过渡窗口 explore bash 仅 fence 兜底无 command-class 校验）此时作废。
    - **Surface:** 产品 CLI（`chat` pipe 入口）+ trace（`createJsonlTraceService` / reader）+ TUI smoke。
    - **Acceptance:** 两条 live 任务跑通且 trace 事件断言全绿；explore worker 的 tool surface 无 edit_file/write_file 且 bash readonly 生效；handoff 记录 live 证据。
-   - Status: [x] complete (commit 0a032f98; live e2e Not run — 本机 model latency > 测试预算，测试本体保留符合 LLM-touching 契约)
+   - Status: [x] complete (commit 0a032f98；live e2e 已于 2026-08-26 跑通 —— 两条路由任务 live PASS，14/14 asserts，见 `docs/handoff/2026-08-26-phase-0-live-e2e-closeout.md`)
+   - **Live 收口更正（2026-08-26）:** 此前记的 "Not run — 本机 model latency > 测试预算" 归因不成立。同一网关单次 messages 调用实测约 2s，慢的不是模型。三条 LLM 用例卡满 360s 是 fixture 缺陷：`fakeSpawn` 只挂 `stdin.on("end")`，PassThrough 读侧无人消费时该事件永不触发，fake worker 从不回写 envelope。修好后整个文件 15.8s 跑完。同批修正另两处：fake envelope 的 result 不含任务要求的 `subagent-ok` token；自带 subagentManager 时未传 `trace`，`subagent_*` 事件恒 0 条。
+   - **Acceptance 措辞更正:** 原写 "trace 断言 `subagent_type` 值"。生产 `recordToolCall` 固定 `argumentsCaptured: false` 且不落 `arguments`，该字段在 JSONL 里恒缺席，此条无法按字面兑现。路由双值真值由 wire 侧 `capturedDefs[0].role` / `capturedPayloads[0].role` 承担；trace 侧断 spawn/stop 同 id 配对 + 两 conversation 分档各恰一次成功 `spawn_subagent` tool_call。trace 记录无 role 字段属观测面缺口，归 Phase 1 观测性地板。
    - [blocks: T3, T6, T7]
 
 ## 依赖图
