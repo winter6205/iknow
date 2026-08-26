@@ -37,7 +37,9 @@ export function createAdapterExtractLlm(
     complete: async (prompt: string, signal?: AbortSignal): Promise<string> => {
       const turn = await adapter.step(
         {
-          messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
+          messages: [
+            { role: "user", content: [{ type: "text", text: prompt }] },
+          ],
           turnCount: 0,
         },
         {},

@@ -131,12 +131,20 @@ describe("planMemoryGc — supersede rule", () => {
         { slug: "old", entry: entry({ title: "Old fact" }) },
         {
           slug: "new",
-          entry: entry({ title: "New fact", supersedes: "old", disabled: true }),
+          entry: entry({
+            title: "New fact",
+            supersedes: "old",
+            disabled: true,
+          }),
         },
       ],
       { nowMs: NOW }
     );
-    assert.deepEqual(plan.disable, [], "a dead pointer must not disable a live entry");
+    assert.deepEqual(
+      plan.disable,
+      [],
+      "a dead pointer must not disable a live entry"
+    );
   });
 
   it("ignores a supersedes pointer to an unknown slug", () => {
@@ -161,11 +169,18 @@ describe("planMemoryGc — empty boundary", () => {
     const plan = planMemoryGc(
       [
         { slug: "a", entry: entry({ disabled: true }) },
-        { slug: "b", entry: entry({ disabled: true, ttl_days: 1, updated_at: daysAgo(9) }) },
+        {
+          slug: "b",
+          entry: entry({ disabled: true, ttl_days: 1, updated_at: daysAgo(9) }),
+        },
       ],
       { nowMs: NOW }
     );
-    assert.deepEqual(plan.disable, [], "already-disabled entries are not re-disabled");
+    assert.deepEqual(
+      plan.disable,
+      [],
+      "already-disabled entries are not re-disabled"
+    );
     assert.deepEqual(plan.keep, []);
   });
 });
@@ -175,7 +190,12 @@ describe("planMemoryGc — empty boundary", () => {
 describe("planMemoryGc — negative boundary", () => {
   it("treats a negative ttl_days as never expiring", () => {
     const plan = planMemoryGc(
-      [{ slug: "neg", entry: entry({ ttl_days: -5, updated_at: daysAgo(400) }) }],
+      [
+        {
+          slug: "neg",
+          entry: entry({ ttl_days: -5, updated_at: daysAgo(400) }),
+        },
+      ],
       { nowMs: NOW }
     );
     assert.deepEqual(plan.disable, []);
@@ -183,7 +203,12 @@ describe("planMemoryGc — negative boundary", () => {
 
   it("treats an unparseable updated_at as never expiring", () => {
     const plan = planMemoryGc(
-      [{ slug: "bad", entry: entry({ ttl_days: 1, updated_at: "not-a-date" }) }],
+      [
+        {
+          slug: "bad",
+          entry: entry({ ttl_days: 1, updated_at: "not-a-date" }),
+        },
+      ],
       { nowMs: NOW }
     );
     assert.deepEqual(plan.disable, []);
@@ -203,7 +228,8 @@ describe("planMemoryGc — negative boundary", () => {
   it("rejects a non-positive cap with a typed MemoryError", () => {
     assert.throws(
       () => planMemoryGc([], { nowMs: NOW, cap: 0 }),
-      (e: unknown) => e instanceof MemoryError && /cap/.test((e as Error).message)
+      (e: unknown) =>
+        e instanceof MemoryError && /cap/.test((e as Error).message)
     );
   });
 
@@ -221,8 +247,14 @@ describe("planMemoryGc — overflow boundary (cap eviction)", () => {
   it("keeps the cap-many highest-utility entries and evicts the rest", () => {
     const plan = planMemoryGc(
       [
-        { slug: "lo", entry: entry({ importance: 1, updated_at: daysAgo(300) }) },
-        { slug: "mid", entry: entry({ importance: 3, updated_at: daysAgo(30) }) },
+        {
+          slug: "lo",
+          entry: entry({ importance: 1, updated_at: daysAgo(300) }),
+        },
+        {
+          slug: "mid",
+          entry: entry({ importance: 3, updated_at: daysAgo(30) }),
+        },
         { slug: "hi", entry: entry({ importance: 5, updated_at: daysAgo(1) }) },
       ],
       { nowMs: NOW, cap: 2 }
@@ -234,8 +266,14 @@ describe("planMemoryGc — overflow boundary (cap eviction)", () => {
   it("counts recall_count from the usage sidecar in the utility score", () => {
     const plan = planMemoryGc(
       [
-        { slug: "unread", entry: entry({ importance: 2, updated_at: daysAgo(1) }) },
-        { slug: "read", entry: entry({ importance: 2, updated_at: daysAgo(1) }) },
+        {
+          slug: "unread",
+          entry: entry({ importance: 2, updated_at: daysAgo(1) }),
+        },
+        {
+          slug: "read",
+          entry: entry({ importance: 2, updated_at: daysAgo(1) }),
+        },
       ],
       {
         nowMs: NOW,
@@ -250,12 +288,17 @@ describe("planMemoryGc — overflow boundary (cap eviction)", () => {
     const plan = planMemoryGc(
       [
         { slug: "dead", entry: entry({ disabled: true, importance: 5 }) },
-        { slug: "expired", entry: entry({ ttl_days: 1, updated_at: daysAgo(9), importance: 5 }) },
+        {
+          slug: "expired",
+          entry: entry({ ttl_days: 1, updated_at: daysAgo(9), importance: 5 }),
+        },
         { slug: "live", entry: entry({ importance: 1 }) },
       ],
       { nowMs: NOW, cap: 1 }
     );
-    assert.deepEqual(plan.disable, [{ slug: "expired", reason: "ttl_expired" }]);
+    assert.deepEqual(plan.disable, [
+      { slug: "expired", reason: "ttl_expired" },
+    ]);
     assert.deepEqual(plan.keep, ["live"]);
   });
 
@@ -275,7 +318,11 @@ describe("planMemoryGc — overflow boundary (cap eviction)", () => {
       ],
       { nowMs: NOW, cap: 1 }
     );
-    assert.deepEqual(first.disable, second.disable, "input order must not change the verdict");
+    assert.deepEqual(
+      first.disable,
+      second.disable,
+      "input order must not change the verdict"
+    );
   });
 });
 
@@ -290,7 +337,11 @@ describe("memoryEntryUtility", () => {
 
   it("decays with age", () => {
     const fresh = memoryEntryUtility(entry({ updated_at: daysAgo(1) }), 0, NOW);
-    const stale = memoryEntryUtility(entry({ updated_at: daysAgo(365) }), 0, NOW);
+    const stale = memoryEntryUtility(
+      entry({ updated_at: daysAgo(365) }),
+      0,
+      NOW
+    );
     assert.ok(fresh > stale, `${fresh} must exceed ${stale}`);
   });
 
@@ -332,7 +383,9 @@ describe("runMemoryGc", () => {
     await recordRecall(memoryDir, "read", "s1");
     await recordRecall(memoryDir, "read", "s2");
     const result = await runMemoryGc(memoryDir, { nowMs: NOW, cap: 1 });
-    assert.deepEqual(result.disabled, [{ slug: "unread", reason: "cap_evicted" }]);
+    assert.deepEqual(result.disabled, [
+      { slug: "unread", reason: "cap_evicted" },
+    ]);
   });
 
   it("skips MEMORY.md and the usage sidecar", async () => {
@@ -348,7 +401,11 @@ describe("runMemoryGc", () => {
 
   // exception boundary
   it("skips a malformed entry file and still completes", async () => {
-    await writeFile(join(memoryDir, "broken.md"), "no frontmatter here", "utf8");
+    await writeFile(
+      join(memoryDir, "broken.md"),
+      "no frontmatter here",
+      "utf8"
+    );
     await put("old", { ttl_days: 5, updated_at: daysAgo(10) });
     const result = await runMemoryGc(memoryDir, { nowMs: NOW });
     assert.deepEqual(result.skipped, ["broken"]);
@@ -358,7 +415,11 @@ describe("runMemoryGc", () => {
   it("surfaces an unreadable memory dir as a typed MemoryError", async () => {
     const missing = join(memoryDir, "nope", "deeper");
     const result = await runMemoryGc(missing, { nowMs: NOW });
-    assert.deepEqual(result.disabled, [], "a missing dir is an empty store, not a crash");
+    assert.deepEqual(
+      result.disabled,
+      [],
+      "a missing dir is an empty store, not a crash"
+    );
     assert.equal(result.scanned, 0);
   });
 

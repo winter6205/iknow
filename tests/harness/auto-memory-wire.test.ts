@@ -36,7 +36,10 @@ describe("renderTranscript", () => {
       text("user", "which entry point is thread-safe?"),
       text("assistant", "bar() is."),
     ]);
-    assert.equal(out, "user: which entry point is thread-safe?\n\nassistant: bar() is.");
+    assert.equal(
+      out,
+      "user: which entry point is thread-safe?\n\nassistant: bar() is."
+    );
   });
 
   it("drops tool_use and tool_result blocks", () => {
@@ -129,10 +132,7 @@ describe("createAdapterExtractLlm", () => {
     const adapter: ModelAdapter = {
       step: async () => assistantResult({ texts: ["[", "]"] }),
     };
-    assert.equal(
-      await createAdapterExtractLlm(adapter).complete("p"),
-      "[\n]"
-    );
+    assert.equal(await createAdapterExtractLlm(adapter).complete("p"), "[\n]");
   });
 
   it("propagates the abort signal", async () => {

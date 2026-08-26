@@ -37,7 +37,10 @@ async function makeSettings(
   await mkdir(join(home, ".iknow"), { recursive: true });
   await mkdir(join(cwd, ".iknow"), { recursive: true });
   if (Object.keys(user).length > 0) {
-    await writeFile(join(home, ".iknow", "settings.json"), JSON.stringify(user));
+    await writeFile(
+      join(home, ".iknow", "settings.json"),
+      JSON.stringify(user)
+    );
   }
   if (Object.keys(project).length > 0) {
     await writeFile(

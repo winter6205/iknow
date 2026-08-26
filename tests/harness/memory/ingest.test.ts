@@ -151,7 +151,10 @@ describe("extractMemoryCandidates", () => {
 
   // empty boundary
   it("returns [] for an empty JSON array", async () => {
-    assert.deepEqual(await extractMemoryCandidates(TRANSCRIPT, llmReturning("[]")), []);
+    assert.deepEqual(
+      await extractMemoryCandidates(TRANSCRIPT, llmReturning("[]")),
+      []
+    );
   });
 
   it("returns [] without calling the model for a blank transcript", async () => {
@@ -170,7 +173,11 @@ describe("extractMemoryCandidates", () => {
   it("drops a negative-form candidate before it can be persisted", async () => {
     const llm = llmReturning(
       JSON.stringify([
-        { title: "Never call foo()", body: "foo() is unsafe.", confidence: 0.99 },
+        {
+          title: "Never call foo()",
+          body: "foo() is unsafe.",
+          confidence: 0.99,
+        },
         { title: "Use bar()", body: "bar() is thread-safe.", confidence: 0.99 },
       ])
     );
@@ -183,7 +190,9 @@ describe("extractMemoryCandidates", () => {
 
   it("drops a low-confidence candidate", async () => {
     const llm = llmReturning(
-      JSON.stringify([{ title: "Maybe", body: "Unsure about this.", confidence: 0.1 }])
+      JSON.stringify([
+        { title: "Maybe", body: "Unsure about this.", confidence: 0.1 },
+      ])
     );
     assert.deepEqual(await extractMemoryCandidates(TRANSCRIPT, llm), []);
   });
@@ -220,14 +229,24 @@ describe("extractMemoryCandidates", () => {
       body: `Body number ${i} of the batch.`,
       confidence: 0.9,
     }));
-    const out = await extractMemoryCandidates(TRANSCRIPT, llmReturning(JSON.stringify(many)));
-    assert.ok(out.length > 0 && out.length <= 8, `expected a capped batch, got ${out.length}`);
+    const out = await extractMemoryCandidates(
+      TRANSCRIPT,
+      llmReturning(JSON.stringify(many))
+    );
+    assert.ok(
+      out.length > 0 && out.length <= 8,
+      `expected a capped batch, got ${out.length}`
+    );
   });
 
   // exception boundary
   it("wraps unparseable model output in a typed MemoryExtractError", async () => {
     await assert.rejects(
-      () => extractMemoryCandidates(TRANSCRIPT, llmReturning("I think maybe nothing?")),
+      () =>
+        extractMemoryCandidates(
+          TRANSCRIPT,
+          llmReturning("I think maybe nothing?")
+        ),
       (e: unknown) => e instanceof MemoryExtractError
     );
   });
@@ -256,14 +275,22 @@ describe("decideMemoryOps", () => {
 
   it("ADDs when no neighbor is near the candidate", () => {
     const ops = decideMemoryOps(
-      [candidate({ title: "Release cadence", body: "Releases ship every Tuesday." })],
+      [
+        candidate({
+          title: "Release cadence",
+          body: "Releases ship every Tuesday.",
+        }),
+      ],
       [{ slug: "old", entry: entry() }]
     );
     assert.equal(ops[0]!.kind, "ADD");
   });
 
   it("NOOPs an exact restatement of an existing entry", () => {
-    const ops = decideMemoryOps([candidate()], [{ slug: "old", entry: entry() }]);
+    const ops = decideMemoryOps(
+      [candidate()],
+      [{ slug: "old", entry: entry() }]
+    );
     assert.equal(ops[0]!.kind, "NOOP");
     assert.equal(ops[0]!.kind === "NOOP" ? ops[0]!.slug : "", "old");
   });
@@ -299,11 +326,18 @@ describe("decideMemoryOps", () => {
       [candidate()],
       [{ slug: "old", entry: entry({ disabled: true }) }]
     );
-    assert.equal(ops[0]!.kind, "ADD", "a disabled entry is not a live neighbor");
+    assert.equal(
+      ops[0]!.kind,
+      "ADD",
+      "a disabled entry is not a live neighbor"
+    );
   });
 
   it("returns [] for no candidates", () => {
-    assert.deepEqual(decideMemoryOps([], [{ slug: "old", entry: entry() }]), []);
+    assert.deepEqual(
+      decideMemoryOps([], [{ slug: "old", entry: entry() }]),
+      []
+    );
   });
 
   it("is pure — deciding twice yields the same verdicts", () => {
@@ -342,12 +376,18 @@ describe("persistMemoryOps", () => {
         {
           kind: "UPDATE",
           slug: "old",
-          candidate: candidate({ body: "bar() is thread-safe and retries once." }),
+          candidate: candidate({
+            body: "bar() is thread-safe and retries once.",
+          }),
         },
       ],
       { now: () => NOW_ISO, randomBytes: seqBytes() }
     );
-    assert.deepEqual(await slugsOnDisk(), ["old"], "UPDATE must not fork a new slug");
+    assert.deepEqual(
+      await slugsOnDisk(),
+      ["old"],
+      "UPDATE must not fork a new slug"
+    );
     const stored = await readSlug("old");
     assert.equal(stored.body.trim(), "bar() is thread-safe and retries once.");
     assert.equal(stored.updated_at, NOW_ISO);
@@ -361,7 +401,9 @@ describe("persistMemoryOps", () => {
         {
           kind: "SUPERSEDE",
           supersedes: "old",
-          candidate: candidate({ body: "Concurrency routes through the scheduler queue." }),
+          candidate: candidate({
+            body: "Concurrency routes through the scheduler queue.",
+          }),
         },
       ],
       { now: () => NOW_ISO, randomBytes: seqBytes() }
@@ -373,7 +415,11 @@ describe("persistMemoryOps", () => {
       "auto"
     );
     const old = await readSlug("old");
-    assert.equal(old.disabled, false, "persist soft-disables nothing; GC owns that");
+    assert.equal(
+      old.disabled,
+      false,
+      "persist soft-disables nothing; GC owns that"
+    );
   });
 
   it("writes nothing for a NOOP", async () => {
@@ -381,7 +427,14 @@ describe("persistMemoryOps", () => {
     const before = await readFile(join(memoryDir, "old.md"), "utf8");
     const written = await persistMemoryOps(
       memoryDir,
-      [{ kind: "NOOP", slug: "old", candidate: candidate(), reason: "restatement" }],
+      [
+        {
+          kind: "NOOP",
+          slug: "old",
+          candidate: candidate(),
+          reason: "restatement",
+        },
+      ],
       { now: () => NOW_ISO, randomBytes: seqBytes() }
     );
     assert.deepEqual(written, []);
@@ -395,7 +448,12 @@ describe("persistMemoryOps", () => {
       () =>
         persistMemoryOps(
           memoryDir,
-          [{ kind: "ADD", candidate: candidate({ body: "Never call foo() here." }) }],
+          [
+            {
+              kind: "ADD",
+              candidate: candidate({ body: "Never call foo() here." }),
+            },
+          ],
           { now: () => NOW_ISO, randomBytes: seqBytes() }
         ),
       (e: unknown) => /negative_form/.test((e as Error).message)
@@ -442,7 +500,10 @@ describe("ingestMemory", () => {
     const slugs = await slugsOnDisk();
     assert.equal(slugs.length, 1);
     const stored = await readSlug(slugs[0]!);
-    assert.equal((stored as unknown as Record<string, unknown>)["source"], "auto");
+    assert.equal(
+      (stored as unknown as Record<string, unknown>)["source"],
+      "auto"
+    );
     assert.equal(stored.importance, 3);
   });
 
@@ -528,7 +589,11 @@ describe("ingestMemory", () => {
         }),
       (e: unknown) => e instanceof MemoryExtractError
     );
-    assert.deepEqual(await slugsOnDisk(), [], "a failed extract writes nothing");
+    assert.deepEqual(
+      await slugsOnDisk(),
+      [],
+      "a failed extract writes nothing"
+    );
   });
 
   // concurrent boundary
@@ -557,7 +622,10 @@ describe("ingestMemory", () => {
         now: () => NOW_ISO,
         randomBytes: seqBytes(),
       }),
-      save.handler({ title: "Release cadence", body: "Releases ship every Tuesday." }),
+      save.handler({
+        title: "Release cadence",
+        body: "Releases ship every Tuesday.",
+      }),
     ]);
     const slugs = await slugsOnDisk();
     assert.equal(slugs.length, 2, "both writers must land their entry");

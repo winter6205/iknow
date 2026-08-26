@@ -152,11 +152,17 @@ describe("createAutoMemoryHook — completed-turn gate", () => {
       now: () => NOW_ISO,
       nowMs: Date.parse(NOW_ISO),
     });
-    hook.onTurnComplete({ stopReason: "completed", transcript: "user: turn one" });
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: turn one",
+    });
     await hook.drain();
     assert.equal(llm.calls(), 0, "one completed turn is below the gate");
 
-    hook.onTurnComplete({ stopReason: "completed", transcript: "user: turn two" });
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: turn two",
+    });
     await hook.drain();
     assert.equal(llm.calls(), 1);
   });
@@ -247,7 +253,11 @@ describe("createAutoMemoryHook — failure containment", () => {
     assert.equal(await entryCount(), 0);
     hook.onTurnComplete({ stopReason: "completed", transcript: "user: two" });
     await hook.drain();
-    assert.equal(await entryCount(), 1, "a failed pass must not poison the hook");
+    assert.equal(
+      await entryCount(),
+      1,
+      "a failed pass must not poison the hook"
+    );
   });
 
   // concurrent boundary

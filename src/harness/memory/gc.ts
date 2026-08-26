@@ -82,7 +82,9 @@ export function memoryEntryUtility(
   recallCount: number,
   nowMs: number
 ): number {
-  return entry.importance * recency(entry.updated_at, nowMs) * (1 + recallCount);
+  return (
+    entry.importance * recency(entry.updated_at, nowMs) * (1 + recallCount)
+  );
 }
 
 /** Plan the three GC rules over a candidate set. Pure: no IO, no clock read. */
@@ -211,4 +213,3 @@ function requireCap(cap: number | undefined): number {
   }
   return cap;
 }
-

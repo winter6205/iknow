@@ -33,7 +33,9 @@ const recorder = (): {
 describe("processChatLine — auto-memory hook", () => {
   it("hands a completed turn to the hook with the rendered transcript", async () => {
     const { hook, seen } = recorder();
-    const ctx = makeCtx({ responses: [assistantResult({ texts: ["bar() is."] })] });
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["bar() is."] })],
+    });
     const result = await processChatLine({
       line: "which entry point is thread-safe?",
       ctx: { ...ctx, autoMemory: hook },
@@ -62,7 +64,9 @@ describe("processChatLine — auto-memory hook", () => {
 
   it("does not touch the hook for a slash command", async () => {
     const { hook, seen } = recorder();
-    const ctx = makeCtx({ responses: [assistantResult({ texts: ["unused"] })] });
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["unused"] })],
+    });
     const result = await processChatLine({
       line: "/status",
       ctx: { ...ctx, autoMemory: hook },

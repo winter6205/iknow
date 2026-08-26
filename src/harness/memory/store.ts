@@ -50,7 +50,9 @@ export async function listStoreEntries(
     try {
       entries.push({
         slug,
-        entry: parseMemoryEntry(await readFile(join(memoryDir, e.name), "utf8")),
+        entry: parseMemoryEntry(
+          await readFile(join(memoryDir, e.name), "utf8")
+        ),
       });
     } catch {
       // EXIT: skip-and-report — surfaced to the caller via `skipped`.

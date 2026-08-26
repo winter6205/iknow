@@ -147,7 +147,7 @@ export function buildExtractPrompt(transcript: string): string {
     "what the user asked for today, transient file paths, or debugging chatter).",
     "",
     "Write every fact in affirmative phrasing — state what to do, not what to avoid.",
-    'Prohibitions belong in the permission policy, not in memory. A candidate phrased as a',
+    "Prohibitions belong in the permission policy, not in memory. A candidate phrased as a",
     'prohibition ("never X", "don\'t X") will be discarded.',
     "",
     "Reply with a JSON array and nothing else. Each element:",
@@ -315,8 +315,7 @@ export async function persistMemoryOps(
   const written: PersistedMemoryOp[] = [];
   for (const op of ops) {
     if (op.kind === "NOOP") continue;
-    const slug =
-      op.kind === "UPDATE" ? op.slug : random(6).toString("hex");
+    const slug = op.kind === "UPDATE" ? op.slug : random(6).toString("hex");
     const entry = buildEntry({
       slug,
       candidate: op.candidate,
@@ -400,7 +399,8 @@ function stripCodeFence(raw: string): string {
 
 /** Validate + normalize one raw candidate; null when it fails a gate. */
 function toCandidate(raw: unknown): MemoryCandidate | null {
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw))
+    return null;
   const o = raw as Record<string, unknown>;
   const title = typeof o.title === "string" ? o.title.trim() : "";
   const body = typeof o.body === "string" ? o.body.trim() : "";
@@ -413,7 +413,8 @@ function toCandidate(raw: unknown): MemoryCandidate | null {
 
   if (validateAffirmativePhrasing(title, body) !== null) return null;
 
-  const type = typeof o.type === "string" && o.type.length > 0 ? o.type : "note";
+  const type =
+    typeof o.type === "string" && o.type.length > 0 ? o.type : "note";
   return { title, body, type, importance: clampImportance(o.importance) };
 }
 

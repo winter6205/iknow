@@ -55,9 +55,7 @@ async function isolate(): Promise<{ cwd: string; userHome: string }> {
   return { cwd, userHome };
 }
 
-async function build(
-  opts: Record<string, unknown> = {}
-): Promise<BuiltEngine> {
+async function build(opts: Record<string, unknown> = {}): Promise<BuiltEngine> {
   const { cwd, userHome } = await isolate();
   const engine = await buildHarnessEngine({
     env: makeEnv(),
@@ -78,7 +76,9 @@ describe("buildHarnessEngine — auto-memory opt-in", () => {
   });
 
   it("leaves autoMemory absent on an explicit false", async () => {
-    const engine = await build({ settings: { memory: { autoExtract: false } } });
+    const engine = await build({
+      settings: { memory: { autoExtract: false } },
+    });
     expect(engine.autoMemory).toBeUndefined();
   });
 
