@@ -37,6 +37,8 @@ import {
   buildHarnessEngine,
   createAdapterFromEnv,
 } from "../harness/build-engine.js";
+import { renderTranscript } from "../harness/auto-memory-wire.js";
+import type { AutoMemoryHook } from "../harness/memory/index.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
 import type {
   SubAgentManager,
@@ -468,6 +470,13 @@ export type SessionHubOptions = {
    */
   readonly subagentManager?: SubAgentManager;
   /**
+   * auto-memory T4 / ADR-0030 D1:自动记忆 host 钩子。serve 入口经
+   * `buildHarnessEngine` 自建(仅 `settings.memory.autoExtract === true`);
+   * 构造时未注入则 `ensureDeps()` 后从 `built.autoMemory` 懒取。缺席
+   * (默认 OFF / ask / 注入 deps 的测试)→ 不调,行为逐字节不变。
+   */
+  readonly autoMemory?: AutoMemoryHook;
+  /**
    * review-fix (M1 / H1): per-root state anchor。serve 入口解析后
    * 透传 —— 让 hub 的 buildHarnessEngine 走 entry-resolved workspaceRoot,
    * 保证 serve 与 CLI flag 路径同形态(seed 落 `<workspaceRoot>/.iknow`,
@@ -503,6 +512,7 @@ export type SessionHubOptions = {
     subagentManager?: SubAgentManager;
     /** D-α T3: graph 装配快照（生产由 buildHarnessEngine 透出）。 */
     graphAssembly?: GraphAssembly;
+    autoMemory?: AutoMemoryHook;
   }>;
   /**
    * serve-workspace T3: recents/trust 名单的 home 根（落
@@ -582,6 +592,7 @@ export class SessionHub {
   /** serve-workspace T2: test seam; production omits → buildHarnessEngine. */
   private readonly buildEngine:
     | ((root: string) => Promise<{
+        autoMemory?: AutoMemoryHook;
         deps: LoopEngineDeps;
         shutdown?: () => Promise<void>;
         subagentManager?: SubAgentManager;
@@ -613,6 +624,8 @@ export class SessionHub {
   >();
   /** Per-conversation serialization (spec A15). */
   private readonly inflight = new Map<string, Promise<void>>();
+  /** auto-memory T4: host 钩子（默认缺席 = 自动记忆关）。 */
+  private autoMemory: AutoMemoryHook | undefined;
 
   constructor(opts: SessionHubOptions) {
     if (!opts.askUser && !opts.deps) {
@@ -635,6 +648,7 @@ export class SessionHub {
     this.sandboxRoot = opts.sandboxRoot;
     this.surface = opts.surface;
     this.subagentManager = opts.subagentManager;
+    this.autoMemory = opts.autoMemory;
     // review-fix (M1 / H1): per-root state anchor 缓存。
     this.workspaceRoot = opts.workspaceRoot;
     this.recentsHome = opts.recentsHome;
@@ -1226,6 +1240,10 @@ export class SessionHub {
                 priorMessages: session.messages,
               });
               void saved;
+              // auto-memory T4 / ADR-0030 D1:每轮把结果交给钩子,由钩子决定
+              // completed 闸 + N 轮闸。钩子缺席(默认 OFF / ask / 注入 deps 的
+              // 测试)→ 整句 no-op,行为逐字节不变。
+              this.notifyAutoMemory(s.finalResult);
               // #458 T5 (SC8): goal.status write-back on verify-loop terminal
               // outcome. The hub is the only writer of goal.status. Target status
               // is looked up from OUTCOME_TO_STATUS; applyTransition runs only
@@ -2065,6 +2083,7 @@ export class SessionHub {
     };
     this.engineByRoot.set(root, entry);
     this.subagentManager = this.subagentManager ?? built.subagentManager;
+    this.autoMemory = this.autoMemory ?? built.autoMemory;
     return entry;
   }
 
@@ -2073,6 +2092,7 @@ export class SessionHub {
     shutdown?: () => Promise<void>;
     subagentManager?: SubAgentManager;
     graphAssembly?: GraphAssembly;
+    autoMemory?: AutoMemoryHook;
   }> {
     if (!this.askUser) {
       throw new Error(
@@ -2191,6 +2211,8 @@ export class SessionHub {
     // #356 T7: serve 懒取 subagent manager — buildHarnessEngine 在 surface !==
     // "ask" 时自建;constructor 注入优先 (测试缝),未注入则取 built 的。
     this.subagentManager = this.subagentManager ?? built.subagentManager;
+    // auto-memory T4:与 subagentManager 同形态懒取(构造注入优先)。
+    this.autoMemory = this.autoMemory ?? built.autoMemory;
     // #356 High#4 (SC12/SC3):缓存 built.shutdown(组合句柄 mcpManager first →
     // subagentManager second)。serve 入口退出前经 hub.shutdown() 触发 —
     // cli.ts runServe 挂 registerShutdown(hub),进程退出时清理 MCP 连接 +
@@ -2198,6 +2220,29 @@ export class SessionHub {
     // shutdown 缺席 → hub.shutdown() no-op。
     this.cachedShutdown = this.cachedShutdown ?? built.shutdown;
     return this.cachedDeps;
+  }
+
+  /**
+   * auto-memory T4 / ADR-0030 D5: hand a finished turn to the auto-memory
+   * hook. The hook owns the `completed` gate and the N-turn gate; the hub
+   * only reports. A hook failure must never fail postMessage.
+   */
+  private notifyAutoMemory(result: RunResult): void {
+    if (!this.autoMemory) return;
+    try {
+      this.autoMemory.onTurnComplete({
+        stopReason: result.stopReason,
+        transcript: renderTranscript(result.messages),
+      });
+    } catch (error) {
+      // EXIT: log-and-continue — the turn already succeeded; memory
+      // bookkeeping is not allowed to retroactively fail it.
+      console.warn(
+        `[memory/auto] turn hook skipped: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
   }
 
   private summarize(opts: { readonly file: SessionFileV1 }): SessionSummary {

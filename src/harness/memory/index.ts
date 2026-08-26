@@ -42,6 +42,16 @@ export {
   ingestMemory,
   persistMemoryOps,
 } from "./ingest.js";
+export {
+  DEFAULT_COMPLETED_TURN_GATE,
+  createAutoMemoryHook,
+} from "./auto-hook.js";
+export type {
+  AutoMemoryHook,
+  AutoMemoryHookOptions,
+  AutoMemoryTurn,
+} from "./auto-hook.js";
+
 export type {
   MemoryCandidate,
   MemoryExtractLlm,

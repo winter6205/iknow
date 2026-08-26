@@ -33,6 +33,7 @@ import type {
   SubAgentManager,
   SubagentInfo,
 } from "../harness/subagent/manager.js";
+import type { AutoMemoryHook } from "../harness/memory/index.js";
 import type { VerifyConfig } from "../harness/verify/index.js";
 import type { GraphAssembly } from "../harness/graph/assembly.js";
 import type { VerifyAnswerView } from "../session-api/contract.js";
@@ -172,6 +173,12 @@ export interface CreateTuiBridgeOptions {
   /** subagentManager 由 buildTuiDeps 经 buildHarnessEngine SSOT 装配，
    *  hub-bridge 透传给 SessionHub。缺省 undefined → 无 manager 路径（drain 返空）。 */
   readonly subagentManager?: SubAgentManager;
+  /**
+   * auto-memory T4 / ADR-0030 D1:自动记忆钩子。与 subagentManager 同路
+   * (buildTuiDeps → buildHarnessEngine SSOT 装配) 透传给 SessionHub。
+   * 缺席(默认 OFF)→ hub 不调,行为逐字节不变。
+   */
+  readonly autoMemory?: AutoMemoryHook;
   /** #128 T8: 验证闭环配置。缺席 = 透明关闭 (postMessage 走原 run, SC7)。 */
   readonly verifyConfig?: VerifyConfig;
   /**
@@ -206,6 +213,8 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     // subagentManager 由 buildTuiDeps 经 buildHarnessEngine SSOT 装配，
     // hub-bridge 透传给 SessionHub。
     subagentManager: opts.subagentManager,
+    // auto-memory T4:自动记忆钩子同路透传(缺席 = 关)。
+    ...(opts.autoMemory ? { autoMemory: opts.autoMemory } : {}),
     // #128 T8: verifyConfig 由 run.tsx 装配 (settings.verify 段) 透传。
     // command 缺失时 (含 verify 段缺失) 由 runClassifier 接管 (subagentManager
     // 在场);缺席 = 不包裹 run (仅未接线路径)。

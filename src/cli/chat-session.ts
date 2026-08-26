@@ -36,6 +36,8 @@ import {
   writeOut,
 } from "./session-io.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
+import { renderTranscript } from "../harness/auto-memory-wire.js";
+import type { AutoMemoryHook } from "../harness/memory/index.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
 import {
@@ -144,6 +146,11 @@ export type ChatSessionOpts = {
    * 透明关闭向后兼容 (SC7)。command 已配 → 每轮 run 被 runVerifyLoop 包裹。
    */
   readonly verifyConfig?: VerifyConfig;
+  /**
+   * auto-memory T4 / ADR-0030 D1:自动记忆 host 钩子(`BuiltEngine.autoMemory`)。
+   * 缺席(默认 OFF / ask 表面)→ 不调,行为逐字节不变。
+   */
+  readonly autoMemory?: AutoMemoryHook;
 };
 
 export type ChatLineContext = {
@@ -181,6 +188,11 @@ export type ChatLineContext = {
    * 缺席(undefined)= 不包裹 run,行为逐字节不变 (仅测试/装配未接线路径)。
    */
   readonly verifyConfig?: VerifyConfig;
+  /**
+   * auto-memory T4:同 ChatSessionOpts.autoMemory,runChatSession 透传。
+   * 缺席 = 不调钩子,行为零变化。
+   */
+  readonly autoMemory?: AutoMemoryHook;
   /**
    * T3 (#689): CLI _client_ idle/busy-guard for continue. Shared mutable box
    * so a concurrent processChatLine can refuse continue without aborting the
@@ -388,6 +400,31 @@ async function executeSkipAppendTurn(opts: {
   }
 }
 
+/**
+ * auto-memory T4 / ADR-0030 D5: hand a finished turn to the auto-memory hook.
+ *
+ * The hook owns the `completed` gate and the N-turn gate — the host only
+ * reports. `onTurnComplete` is documented as total, but a hook is host-
+ * supplied code and this is the last line between it and the user's turn.
+ */
+function notifyAutoMemory(ctx: ChatLineContext, result: RunResult): void {
+  if (!ctx.autoMemory) return;
+  try {
+    ctx.autoMemory.onTurnComplete({
+      stopReason: result.stopReason,
+      transcript: renderTranscript(result.messages),
+    });
+  } catch (error) {
+    // EXIT: log-and-continue — the answer is already on the user's screen;
+    // a memory bookkeeping failure must not retroactively fail the turn.
+    writeErr(
+      `[memory/auto] turn hook skipped: ${
+        error instanceof Error ? error.message : String(error)
+      }\n`
+    );
+  }
+}
+
 async function runSkipAppendAndPresent(opts: {
   readonly ctx: ChatLineContext;
   readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
@@ -421,6 +458,8 @@ async function runSkipAppendAndPresent(opts: {
     ) {
       ctx.state.messages = Object.freeze([...result.messages]);
     }
+    // auto-memory T4: `/continue` 也是一轮完成的 turn,与主路径同待遇。
+    notifyAutoMemory(ctx, result);
     return presentChatTurn({
       ctx,
       result,
@@ -758,6 +797,9 @@ async function runChatQueryLine(
         ) {
           ctx.state.messages = Object.freeze([...s.result.messages]);
         }
+        // auto-memory T4 / ADR-0030 D1:每轮把结果交给钩子,由钩子决定
+        // completed 闸 + N 轮闸。钩子缺席(默认 OFF / ask)→ 整句 no-op。
+        notifyAutoMemory(ctx, s.result);
       },
       decideContinue: async (s) =>
         applyChatAutoContinue({
@@ -1588,6 +1630,7 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     checkpointStore,
     subagentManager: opts.subagentManager,
     verifyConfig: opts.verifyConfig,
+    autoMemory: opts.autoMemory,
   };
 
   const interactive = isInteractive();
