@@ -21,12 +21,12 @@ Five decisions, mirroring `specs/auto-memory.md` D1–D5.
 
 2. **Write algorithm = extract → neighbor → four-state op → shared atomic write.** An LLM pass extracts atomic candidate facts from the transcript slice; each candidate is scored against existing entries with the existing BM25-lite heuristic; the top neighbor decides one of four ops:
 
-   | Op          | Condition                                                      | Effect                                                             |
-   | ----------- | -------------------------------------------------------------- | ------------------------------------------------------------------ |
-   | `ADD`       | no neighbor above the near-duplicate floor                     | new slug written                                                   |
-   | `UPDATE`    | neighbor above floor, candidate carries strictly more content  | neighbor's slug rewritten in place, `updated_at` bumped            |
-   | `SUPERSEDE` | neighbor above floor, candidate contradicts / replaces it      | new slug written with `supersedes: <old>`; old slug soft-disabled  |
-   | `NOOP`      | neighbor above the identical floor, nothing new                | nothing written                                                    |
+   | Op          | Condition                                                     | Effect                                                            |
+   | ----------- | ------------------------------------------------------------- | ----------------------------------------------------------------- |
+   | `ADD`       | no neighbor above the near-duplicate floor                    | new slug written                                                  |
+   | `UPDATE`    | neighbor above floor, candidate carries strictly more content | neighbor's slug rewritten in place, `updated_at` bumped           |
+   | `SUPERSEDE` | neighbor above floor, candidate contradicts / replaces it     | new slug written with `supersedes: <old>`; old slug soft-disabled |
+   | `NOOP`      | neighbor above the identical floor, nothing new               | nothing written                                                   |
 
    Persistence reuses the `memory_save` write discipline verbatim — tmp + rename atomic replace, affirmative-phrasing gate, frontmatter serialization. `extract` / `decide ops` / `persist` stay three separate functions so the LLM half can be faked in tests and the deterministic half can be unit-tested with no model at all.
 

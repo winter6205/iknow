@@ -4,6 +4,8 @@
 
 ### Feature
 
+- **自动记忆：抽取 + 机械 GC（ADR-0030，2026-08-26）**: 兑现 ADR-0009 D5 的延期项。新开关 `settings.memory.autoExtract`（boolean-only，**默认 OFF**）——缺失或非 `true` 时钩子不装配，宿主零调用、零额外 LLM、零写盘，行为与现网逐字节一致。开启后 chat / tui / serve 在 `StopReason=completed` 之后异步触发（累计 N≥2 完成 turn 一趟；`ask` 不接线，ADR-0010 D3 opt-out 保持）：LLM 抽原子候选 → BM25-lite 近邻 → 裁定 `ADD` / `UPDATE` / `SUPERSEDE` / `NOOP` → 复用 `memory_save` 的肯定句门禁与 tmp+rename 原子写，落盘打 `source: auto`。清理为零 LLM 的机械 GC（`ttl_days` 过期 / 被 `supersedes` 指名 / 超 store cap 按 `importance × recency × (1 + recall_count)` 驱逐），**只软禁不删文件**。自动条目不豁免 promote 门槛，也不进 `system` 通道。抽取或 IO 失败落 typed `MemoryError`，host 侧 `// EXIT: log-and-continue` 吞掉，用户 turn 仍成功。抽取 prompt 不进 loop-engine：闸在 `src/harness/memory/auto-hook.ts`，`ModelAdapter` → `MemoryExtractLlm` 端口的桥在 `src/harness/auto-memory-wire.ts`。spec `specs/auto-memory.md`；计划 `plans/auto-memory.md` §T1–T5。
+
 - **故障恢复（#672，2026-08-25）**: FaultClass 闭集、`ModelAdapter.step` 有界传输重试、工具环 `StopReason: fused` + LOOP_DETECTED。传输耗尽映射为 `protocolError` 停止。PR #683/#684/#685。
 
 - **Harness 包2：沙箱纪律 + 并行工具调度（horizon-653，PR #671，2026-08-25）**: 前台与后台 `bash` 共用同一套 bwrap 围栏；同一 tool 阶段连续 `isConcurrencySafe` 调用重叠执行，unsafe 串行，结果顺序与 `tool_use` 一致。spec/plan 归档 `docs/archive/025-retire-completed-specs-and-plans/`。

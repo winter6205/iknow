@@ -18,8 +18,10 @@ minimal-change-verifier: yes — 决策 → GC → ingest → wire → 文档 �
 
 ## 待写入
 
-- CONTEXT：`auto_extract`、`memory_op`（ADD\|UPDATE\|SUPERSEDE\|NOOP）、`memory_gc`、`source:auto`
-- ADR-0030（T1 产出）；ADR-0009 D5 标注 superseded-by-0030（范围：延期项落地，不改 D1–D4/D6）
+清单已清空（T5）。
+
+- [x] CONTEXT：`auto_extract`、`memory_op`（ADD\|UPDATE\|SUPERSEDE\|NOOP）、`memory_gc`、`source:auto` —— 四条术语 + `memory_save` vs auto_extract / `memory_gc` vs promote 两条 Relationships 已落 `docs/CONTEXT.md`（T5）
+- [x] ADR-0030（T1 产出）；ADR-0009 D5 标注 superseded-by-0030（范围：延期项落地，不改 D1–D4/D6）—— 已落（T1）
 
 ## Out of scope
 
@@ -52,14 +54,14 @@ minimal-change-verifier: yes — 决策 → GC → ingest → wire → 文档 �
    - **Surface:** config / build-engine / session-api / cli|tui
    - **Acceptance:** 默认 OFF 与现网一致；chat/tui/serve 在 completed 闸后异步调用 ingest；LLM/IO 失败 turn 仍成功（EXIT 注释）；ask 无接线；相关回归绿
    - [blocks: T3]
-   - Status: [ ] pending
+   - Status: [x] done
 
 5. **Align STATUS / architecture / CONTEXT flush** — tag: `[implementation]`
    - **Inherits:** T1–T4 已落地语义
    - **Surface:** `docs/STATUS.md` / `docs/architecture.md` / `docs/CONTEXT.md`
    - **Acceptance:** 文档写明自动记忆默认 OFF、触发闸、GC、与本仓记忆层边界；CONTEXT 待写入项已落或本票清空清单
    - [blocks: T4]
-   - Status: [ ] pending
+   - Status: [x] done
 
 ## Code review phase（整轮结束后）
 
