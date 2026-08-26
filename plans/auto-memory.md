@@ -38,7 +38,7 @@ minimal-change-verifier: yes — 决策 → GC → ingest → wire → 文档 �
    - **Surface:** `src/harness/memory`
    - **Acceptance:** 可重复调用的 GC：TTL→disabled；supersede 目标软禁；超 cap 按效用分驱逐；五类边界测绿；`npx vitest run tests/harness/memory/` 相关套件 EXIT 0
    - [blocks: T1]
-   - Status: [ ] pending
+   - Status: [x] done
 
 3. **Ingest algorithm (extract → ops → persist)** — tag: `[implementation]`
    - **Inherits:** D2/D4；T2 GC 可在写后调用；肯定句门禁与原子写与 `memory_save` 同纪律

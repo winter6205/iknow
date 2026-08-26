@@ -25,6 +25,14 @@ export class MemorySchemaInvalid extends MemoryError {
   }
 }
 
+/**
+ * A GC option is outside its declared domain (auto-memory T2 / ADR-0030 D4).
+ * Thrown before any scan or write so a bad cap cannot half-apply a plan.
+ */
+export class MemoryGcOptionInvalid extends MemoryError {
+  override readonly name: string = "MemoryGcOptionInvalid";
+}
+
 /** Filesystem-side failure (read / write / rename / directory). */
 export class MemoryIOError extends MemoryError {
   override readonly name: string = "MemoryIOError";

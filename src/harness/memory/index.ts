@@ -22,10 +22,26 @@ export {
 
 export {
   MemoryError,
+  MemoryGcOptionInvalid,
   MemoryIOError,
   MemoryQuarantinedReason,
   MemorySchemaInvalid,
 } from "./errors.js";
+
+export {
+  DEFAULT_MEMORY_STORE_CAP,
+  memoryEntryUtility,
+  planMemoryGc,
+  runMemoryGc,
+} from "./gc.js";
+export type {
+  MemoryGcCandidate,
+  MemoryGcDisable,
+  MemoryGcOptions,
+  MemoryGcPlan,
+  MemoryGcReason,
+  MemoryGcResult,
+} from "./gc.js";
 
 export {
   findProjectAgents,
