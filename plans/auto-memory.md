@@ -66,3 +66,5 @@ minimal-change-verifier: yes — 决策 → GC → ingest → wire → 文档 �
 ## Code review phase（整轮结束后）
 
 Standards + Spec 双轴；对照 `specs/auto-memory.md` 与 ADR-0030。
+
+已跑完：无阻塞项，产品代码不改。3 Medium + 6 Low 已落 `docs/STATUS.md` §2.5「自动记忆已知限制 / 遗留」，扩大 opt-in 前逐条处置。
