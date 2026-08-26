@@ -104,7 +104,7 @@ describe("parseTuiInput: 普通消息与边界", () => {
 });
 
 describe("helpLines", () => {
-  test("覆盖全部 12 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
+  test("覆盖全部 13 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
     const joined = helpLines().join("\n");
     for (const cmd of [
       "/sessions",
@@ -119,6 +119,7 @@ describe("helpLines", () => {
       "/compact",
       "/continue",
       "/rewind",
+      "/graph",
     ]) {
       expect(joined).toContain(cmd);
     }
@@ -138,7 +139,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  test('"/" → 全部 12 条静态命令（按词表插入顺序，kind="command"；rewind + mcp，无 /profile）', () => {
+  test('"/" → 全部 13 条静态命令（按词表插入顺序，kind="command"；rewind + mcp + graph，无 /profile）', () => {
     expect(slashSuggestions("/")).toEqual([
       { kind: "command", command: "sessions" },
       { kind: "command", command: "new" },
@@ -152,6 +153,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       { kind: "command", command: "continue" },
       { kind: "command", command: "rewind" },
       { kind: "command", command: "mcp" },
+      { kind: "command", command: "graph" },
     ]);
   });
 
@@ -207,6 +209,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       { kind: "command", command: "continue" },
       { kind: "command", command: "rewind" },
       { kind: "command", command: "mcp" },
+      { kind: "command", command: "graph" },
     ]);
   });
 
@@ -686,12 +689,16 @@ describe("#361 Phase D /mcp 词表", () => {
     ]);
   });
 
-  test('"/" 全部候选含 mcp（词表末位）', () => {
+  test('"/" 全部候选含 mcp（词表 append-only：/graph 追加后 mcp 退居倒二）', () => {
     const all = slashSuggestions("/");
     expect(all).toContainEqual({ kind: "command", command: "mcp" });
-    expect(all[all.length - 1]).toEqual({
+    expect(all[all.length - 2]).toEqual({
       kind: "command",
       command: "mcp",
+    });
+    expect(all[all.length - 1]).toEqual({
+      kind: "command",
+      command: "graph",
     });
   });
 

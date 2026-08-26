@@ -437,6 +437,12 @@ export type SessionHubOptions = {
    * 每条 postMessage 拍下的快照 gate。缺席 = 本入口未接 overlay。
    */
   graphMode?: GraphModeContext;
+  /**
+   * D-α T5:已建好 engine 的 host（TUI 在 run.tsx 就装配完）把
+   * `BuiltEngine.graphAssembly` 直接交进来 —— 这类 host 走注入 deps 路径，
+   * hub 自己不 build，拿不到快照句柄。缺席 = 未接 overlay（行为零变化）。
+   */
+  graphAssembly?: GraphAssembly;
   /** T2: env source for per-turn thinking override (test seam; production
    * omits it → withThinkingOverride falls back to loadIknowEnv()). */
   overrideEnv?: { readonly llm: LlmEnv };
@@ -587,6 +593,8 @@ export class SessionHub {
   /** D-α T3 / ADR-0030: graph 编排 overlay holder（serve / TUI 注入；缺席 =
    *  本入口未接 overlay → run_graph 与编排段都不存在）。 */
   private readonly graphMode: GraphModeContext | undefined;
+  /** D-α T5: 注入 deps 的 host（TUI）自带的装配快照句柄（构造 opts 传入）。 */
+  private readonly injectedGraphAssembly: GraphAssembly | undefined;
   /** D-α T3: 最近一次 ensureDeps 返回的那台 engine 的装配快照。postMessage
    *  紧接 ensureDeps 调 beginRound() —— 两者在同一串行槽位里，per-root
    *  多引擎时也不会拍错那一台。缺席 = 该 engine 未接 overlay。 */
@@ -622,6 +630,7 @@ export class SessionHub {
     this.sessionGrants = opts.sessionGrants;
     this.permissionMode = opts.permissionMode;
     this.graphMode = opts.graphMode;
+    this.injectedGraphAssembly = opts.graphAssembly;
     this.overrideEnv = opts.overrideEnv;
     this.sandboxRoot = opts.sandboxRoot;
     this.surface = opts.surface;
@@ -2111,8 +2120,9 @@ export class SessionHub {
    */
   private async ensureDeps(sessionRoot?: string): Promise<LoopEngineDeps> {
     if (this.injectedDeps) {
-      // 注入 deps 的测试路径没有 engine,自然没有 graph 装配面。
-      this.activeGraphAssembly = undefined;
+      // 注入 deps 的 host 自己 build 了 engine（TUI），快照句柄经构造 opts
+      // 进来;纯测试注入路径没有 engine → undefined,行为零变化。
+      this.activeGraphAssembly = this.injectedGraphAssembly;
       return this.cachedDeps ?? this.injectedDeps;
     }
     const mapRoot = sessionRoot ?? this.boundRoot;
