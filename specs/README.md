@@ -38,7 +38,7 @@
 ### 身份与记忆
 
 - `196-identity-assembly.md` — 身份认知装配（identity / soul / 首启 BOOTSTRAP）
-- `auto-memory.md` — 自动记忆抽取 + 机械清理（兑现 ADR-0009 D5；默认 OFF；plan: `plans/auto-memory.md`）
+- `auto-memory.md` — 自动记忆抽取 + 机械清理（兑现 ADR-0009 D5，决策沉淀于 ADR-0030；默认 OFF；plan: `plans/auto-memory.md`）
 - `serve-workspace.md` — serve/Web 工作空间制度（显式主根，禁止自动 cwd；ADR-0023, serve default = unbound, #531）
 
 ### Verify / 完成门禁

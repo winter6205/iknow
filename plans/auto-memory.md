@@ -31,7 +31,7 @@ minimal-change-verifier: yes — 决策 → GC → ingest → wire → 文档 �
    - **Inherits:** ADR-0009 D5 延期；`specs/auto-memory.md` D1–D5
    - **Surface:** `docs/adr` / `specs/auto-memory.md` / `specs/README.md`
    - **Acceptance:** ADR-0030 accepted（触发闸、四态写入、机械 GC、provenance、默认 OFF）；0009 D5 有 superseded 指针；spec 入活跃索引；无产品代码
-   - Status: [ ] pending
+   - Status: [x] done
 
 2. **Mechanical memory GC** — tag: `[implementation]`
    - **Inherits:** D3；已有 `ttl_days`/`disabled`/`supersedes`；promote 已跳过期
