@@ -245,6 +245,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // ADR-0019 (T2): workspaceRoot 透传到 build-engine identity /
       // memory / skill seam。
       ...(workspaceRoot ? { workspaceRoot } : {}),
+      // 观测性地板:与下方 createTuiBridge 的 traceOut 同一个值 —— hub 写会话
+      // 的 turn / tool 记录,deps 层的工厂让子代理三事件落同一个
+      // `<traceOut>/<conversationId>.jsonl`。
+      ...(options.traceOut !== undefined ? { traceOut: options.traceOut } : {}),
       onExtensions: (ext) => {
         tuiExtensions = ext;
       },
