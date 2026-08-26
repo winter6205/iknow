@@ -300,6 +300,44 @@ export interface SubagentStateChangeRecord {
 }
 
 /**
+ * 子代理执行步骤的两个观测点 —— 派发（把一步交给子代理）与落定（该步拿到终局）。
+ * 与 SubagentState 四态刻意不同名：状态机描述「子代理实例现在处于什么状态」，
+ * 步骤描述「父侧第 N 步在做什么」，两者在多步编排里不是一一对应。
+ */
+export type SubagentStepPhase = "dispatch" | "settle";
+
+/**
+ * SubagentStepRecord — 子代理执行步骤（D-α 观测地板第 4 件）。
+ *
+ * 与 spawn / stop / state_change 三类同形态（id 由调用方提供、Postel 可选字段、
+ * @throws never），**唯一形态差异**是 id 载体为 `subagent_step_id` 而非
+ * `subagent_id`：前三类的 `id === taskId`（同一个子代理实例），step 的 id 每步
+ * 唯一，塞进 `subagent_id` 会让该列在 step 行上变成「步骤 id」，与其余三类的
+ * 「子代理 id」语义打架。配对键仍是 `taskId` —— `?taskId=` 过滤照常把 step 与
+ * spawn / stop 收在一起。
+ *
+ * dispatch 行只有 startedAt；settle 行补 endedAt / durationMs，失败时补 error。
+ */
+export interface SubagentStepRecord {
+  readonly id: string;
+  readonly taskId: string;
+  readonly parentTurnId?: string;
+  readonly origin: "parent" | "child";
+  /** 0-based，父侧该任务内单调递增。 */
+  readonly stepIndex: number;
+  readonly phase: SubagentStepPhase;
+  /** 人读步骤名（如编排节点 id）。Postel: 无来源时缺席。 */
+  readonly label?: string;
+  readonly startedAt: string;
+  /** Postel: 仅 settle 有终局时间。 */
+  readonly endedAt?: string;
+  readonly durationMs?: number;
+  readonly status: TraceStatus;
+  readonly ts: string;
+  readonly error?: TraceError;
+}
+
+/**
  * Goal 生命周期 trace action (T4, #458).
  *
  * 自包含字面量联合 —— trace bounded context 遵循文件头注释 (types.ts:21-23)
@@ -408,4 +446,10 @@ export interface TraceService {
   recordSubagentStateChange(
     record: SubagentStateChangeRecord
   ): Promise<string | undefined>;
+  /**
+   * 记录一次子代理执行步骤 (D-α 观测地板) — 调用方提供 id (每步唯一),
+   * 实现不做 ID 生成。dispatch / settle 各一行。
+   * @throws never.
+   */
+  recordSubagentStep(record: SubagentStepRecord): Promise<string | undefined>;
 }
