@@ -21,7 +21,7 @@
 import { readFileSync } from "node:fs";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { loadIknowEnv } from "../src/config/env.js";
@@ -44,32 +44,60 @@ const PREFLIGHT_TIMEOUT_MS = 8_000;
 /** 探针结果三态:pass(证据齐) / failed(真失败) / not-run(上游模型不可用)。 */
 type ProbeOutcome = "pass" | "failed" | "not-run";
 
+/** 预检响应状态分类;"ok" 以外都不 spawn worker,但原因要说准。 */
+export type PreflightStatus =
+  "ok" | "quota" | "unauthorized" | "not-found" | "unavailable";
+
+export function classifyPreflightStatus(status: number): PreflightStatus {
+  if (status === 200) return "ok";
+  if (status === 429) return "quota";
+  if (status === 401 || status === 403) return "unauthorized";
+  if (status === 404) return "not-found";
+  return "unavailable";
+}
+
 /**
- * 上游模型网关预检:与 worker 相同的 URL/key 发一条最小 chat 请求。
- * 返回 "ok" / "out" (不可用:429 quota / 5xx / 超时 / 非 2xx)。仅用于
- * 决定"是否值得 spawn worker" —— worker 真跑不走此预检结果。
+ * 预检请求形态。必须与 worker 说同一种协议:worker 走
+ * `new Anthropic({ baseURL: env.llm.baseUrl })`,SDK 打 `${baseUrl}/v1/messages`
+ * 并用 `x-api-key`。预检若改打 OpenAI 形态的 `/chat/completions` + Bearer,
+ * 在 Anthropic 形态网关上恒 404 —— 探针永远 not-run 且误报成配额问题。
  */
-async function preflightUpstream(env: IknowEnvLike): Promise<"ok" | "out"> {
+export function buildPreflightRequest(env: IknowEnvLike): {
+  readonly url: string;
+  readonly headers: Record<string, string>;
+  readonly body: string;
+} {
+  return {
+    url: `${env.llm.baseUrl.replace(/\/$/, "")}/v1/messages`,
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": env.llm.apiKey ?? "",
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: env.llm.model,
+      max_tokens: 16,
+      messages: [{ role: "user", content: "ok?" }],
+    }),
+  };
+}
+
+/**
+ * 上游模型网关预检:与 worker 相同的 URL/key 发一条最小 messages 请求。
+ * 仅用于决定"是否值得 spawn worker" —— worker 真跑不走此预检结果。
+ */
+async function preflightUpstream(env: IknowEnvLike): Promise<PreflightStatus> {
+  const req = buildPreflightRequest(env);
   try {
-    const resp = await fetch(
-      `${env.llm.baseUrl.replace(/\/$/, "")}/chat/completions`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${env.llm.apiKey ?? ""}`,
-        },
-        body: JSON.stringify({
-          model: env.llm.model,
-          max_tokens: 16,
-          messages: [{ role: "user", content: "ok?" }],
-        }),
-        signal: AbortSignal.timeout(PREFLIGHT_TIMEOUT_MS),
-      }
-    );
-    return resp.status === 200 ? "ok" : "out";
+    const resp = await fetch(req.url, {
+      method: "POST",
+      headers: req.headers,
+      body: req.body,
+      signal: AbortSignal.timeout(PREFLIGHT_TIMEOUT_MS),
+    });
+    return classifyPreflightStatus(resp.status);
   } catch {
-    return "out";
+    return "unavailable";
   }
 }
 
@@ -89,21 +117,30 @@ interface IknowEnvLike {
 async function waitForUpstream(
   env: IknowEnvLike,
   maxMinutes: number
-): Promise<"ok" | "out"> {
+): Promise<PreflightStatus> {
   const deadline = Date.now() + maxMinutes * 60_000;
   let attempts = 0;
   for (;;) {
     attempts += 1;
     const state = await preflightUpstream(env);
     if (state === "ok") return "ok";
+    // 配置类失败(端点打错 / key 不认)不会因为等待而好转 —— 立刻返回,
+    // 不烧满重试窗口,也不把它叫成配额问题。
+    if (state === "not-found" || state === "unauthorized") {
+      console.error(
+        `gateway preflight ${state}: ${buildPreflightRequest(env).url} — ` +
+          `settings.llm.baseUrl / apiKey 与 worker 的 Anthropic 客户端不匹配,不是配额问题。`
+      );
+      return state;
+    }
     if (Date.now() >= deadline) {
       console.error(
         `gateway still unavailable after ${maxMinutes}min (${attempts} checks) — rerun once the token-plan quota clears.`
       );
-      return "out";
+      return state;
     }
     console.error(
-      `gateway NOT AVAILABLE (429/quota) — retrying in 15s (check ${attempts})`
+      `gateway NOT AVAILABLE (${state}) — retrying in 15s (check ${attempts})`
     );
     await sleep(15_000);
   }
@@ -448,12 +485,11 @@ async function main(): Promise<void> {
       traceDir = "";
     }
 
-    if (upstream === "out") {
+    if (upstream !== "ok") {
       results.push({
         name: `sandbox-subagent ${probe.id}`,
         outcome: "not-run",
-        detail:
-          "upstream model gateway unavailable (preflight) — rerun once 429/quota clears",
+        detail: `upstream model gateway preflight ${upstream}`,
       });
       continue;
     }
@@ -490,7 +526,10 @@ async function main(): Promise<void> {
   process.exitCode = failed === 0 && passed > 0 ? 0 : 1;
 }
 
-main().catch((e) => {
-  console.error(e instanceof Error ? e.message : String(e));
-  process.exit(1);
-});
+// 只有被当作入口跑时才执行探针 —— 单测 import 本模块取纯函数时不得起副作用。
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === __filename) {
+  main().catch((e) => {
+    console.error(e instanceof Error ? e.message : String(e));
+    process.exit(1);
+  });
+}
