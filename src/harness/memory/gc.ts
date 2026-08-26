@@ -18,13 +18,11 @@
  * is the thin IO shell that scans the store, applies the plan with the same
  * tmp+rename atomic replace `memory_save` uses, and reports what it skipped.
  */
-import { mkdir, opendir, readFile, rename, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-
-import { MemoryGcOptionInvalid, MemoryIOError } from "./errors.js";
-import { parseMemoryEntry, serializeMemoryEntry } from "./frontmatter.js";
+import { MemoryGcOptionInvalid } from "./errors.js";
 import { loadUsageSidecar, type UsageSidecar } from "./promote.js";
 import type { MemoryEntryV1 } from "./schema.js";
+import { listStoreEntries, type StoredMemoryEntry } from "./store.js";
+import { writeMemoryEntryAtomic } from "./tools/save.js";
 
 /** Default active-entry ceiling for one project memory store. */
 export const DEFAULT_MEMORY_STORE_CAP = 200;
@@ -41,10 +39,7 @@ const RECENCY_HALFLIFE_DAYS = 30;
 export type MemoryGcReason = "ttl_expired" | "superseded" | "cap_evicted";
 
 /** One entry offered to GC, keyed by its on-disk slug (filename stem). */
-export interface MemoryGcCandidate {
-  readonly slug: string;
-  readonly entry: MemoryEntryV1;
-}
+export type MemoryGcCandidate = StoredMemoryEntry;
 
 export interface MemoryGcDisable {
   readonly slug: string;
@@ -165,21 +160,24 @@ export async function runMemoryGc(
   memoryDir: string,
   opts?: MemoryGcOptions
 ): Promise<MemoryGcResult> {
-  const scan = await scanStore(memoryDir);
-  if (scan.candidates.length === 0) {
+  const scan = await listStoreEntries(memoryDir);
+  if (scan.entries.length === 0) {
     return { disabled: [], scanned: 0, skipped: scan.skipped };
   }
   const usage = opts?.usage ?? (await loadUsageSidecar(memoryDir));
-  const plan = planMemoryGc(scan.candidates, { ...opts, usage });
-  const bySlug = new Map(scan.candidates.map((c) => [c.slug, c.entry]));
+  const plan = planMemoryGc(scan.entries, { ...opts, usage });
+  const bySlug = new Map(scan.entries.map((c) => [c.slug, c.entry]));
   for (const action of plan.disable) {
     const entry = bySlug.get(action.slug);
     if (!entry) continue;
-    await writeSlugAtomic(memoryDir, action.slug, { ...entry, disabled: true });
+    await writeMemoryEntryAtomic(memoryDir, action.slug, {
+      ...entry,
+      disabled: true,
+    });
   }
   return {
     disabled: plan.disable,
-    scanned: scan.candidates.length,
+    scanned: scan.entries.length,
     skipped: scan.skipped,
   };
 }
@@ -214,53 +212,3 @@ function requireCap(cap: number | undefined): number {
   return cap;
 }
 
-async function scanStore(memoryDir: string): Promise<{
-  candidates: ReadonlyArray<MemoryGcCandidate>;
-  skipped: ReadonlyArray<string>;
-}> {
-  const candidates: MemoryGcCandidate[] = [];
-  const skipped: string[] = [];
-  let dir;
-  try {
-    dir = await opendir(memoryDir);
-  } catch {
-    // Missing store == empty store. GC is maintenance, not a write path.
-    return { candidates, skipped };
-  }
-  // for await over a Dir auto-closes the handle (promote.ts precedent).
-  for await (const e of dir) {
-    if (!e.isFile()) continue;
-    if (!e.name.endsWith(".md") || e.name === "MEMORY.md") continue;
-    const slug = e.name.slice(0, -3);
-    try {
-      const buf = await readFile(join(memoryDir, e.name), "utf8");
-      candidates.push({ slug, entry: parseMemoryEntry(buf) });
-    } catch {
-      // EXIT: skip-and-report — a corrupt entry must not stall the whole
-      // maintenance pass; the slug is surfaced in MemoryGcResult.skipped.
-      skipped.push(slug);
-    }
-  }
-  candidates.sort((a, b) => a.slug.localeCompare(b.slug));
-  skipped.sort();
-  return { candidates, skipped };
-}
-
-/** tmp + rename replace — same atomicity contract as tools/save.ts. */
-async function writeSlugAtomic(
-  memoryDir: string,
-  slug: string,
-  entry: MemoryEntryV1
-): Promise<void> {
-  const finalPath = join(memoryDir, `${slug}.md`);
-  const tmpPath = `${finalPath}.${process.pid}.${Date.now()}.gc.tmp`;
-  try {
-    await mkdir(memoryDir, { recursive: true });
-    await writeFile(tmpPath, serializeMemoryEntry(entry), "utf8");
-    await rename(tmpPath, finalPath);
-  } catch (error) {
-    throw new MemoryIOError(`memory gc: disable ${finalPath} failed`, {
-      cause: error,
-    });
-  }
-}

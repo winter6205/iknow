@@ -45,7 +45,7 @@ minimal-change-verifier: yes — 决策 → GC → ingest → wire → 文档 �
    - **Surface:** `src/harness/memory`
    - **Acceptance:** 给定 transcript 片段 + FakeLLM：可观测 ADD/UPDATE/SUPERSEDE/NOOP；落盘含 `source: auto`；负向句/低置信不落盘；与并发 `memory_save` 不半写；库测绿
    - [blocks: T2]
-   - Status: [ ] pending
+   - Status: [x] done
 
 4. **Host wire + settings opt-in** — tag: `[implementation]`
    - **Inherits:** D1；ADR-0010 ask opt-out；T3 ingest API
