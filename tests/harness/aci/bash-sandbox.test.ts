@@ -6,6 +6,8 @@
  *                                    partial stdout 不被丢弃（SC13）。
  *   - bash.bwrap.argvHasUnshareNet  纯逻辑，构造 fence argv 并断言关键旗标。
  *   - bash.missingBwrap.failLoud    bwrap 不在 PATH 时 fail-loud。
+ *   - bash.readonly 双闸             real spawn，validator 抛 typed error +
+ *                                    fence 把 cwd 写操作打成 EROFS。
  *
  * 守护：hasBwrap() 守卫在没有 bwrap 的 CI 环境 skip 真实 spawn 测试，
  * argv 纯逻辑测试不受影响。
@@ -13,12 +15,14 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "vitest";
 
 import { createBashTool } from "../../../src/harness/aci/tools/bash.ts";
+import { ReadonlyViolationError } from "../../../src/harness/aci/tools/bash-readonly.ts";
 import { waitForPidFile } from "./tools/spawn-test-utils.ts";
 import { createBwrapFence } from "../../../src/harness/sandbox/bwrap.ts";
 import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.ts";
@@ -227,6 +231,66 @@ describe("bash.timeout.partialOutput", () => {
       assert.equal(result.stdout, "");
     },
     5_000
+  );
+});
+
+describe("bash.readonly 双闸 (real spawn)", () => {
+  // Phase 0 验收:"explore 角色 bash 写操作被 validator 拦 + fence EROFS 兜底"。
+  // 两闸的分工只有真跑 bwrap 才看得出来 —— validator 是策略闸(命令层),
+  // fence 是物理闸(内核层)。既有 bash-readonly.test.ts 覆盖策略闸的命令
+  // taxonomy,这里补的是 fence 那一闸真的落到 EROFS。
+  it.skipIf(!hasBwrap())(
+    "validator 闸:readonly 模式的写命令抛 ReadonlyViolationError,文件不落地",
+    async () => {
+      const cwd = await makeScratch("bash-ro-validator-");
+      const tool = createBashTool(cwd, {
+        bashMode: "readonly",
+        cwdReadonly: true,
+      });
+      await assert.rejects(
+        () => tool.handler({ command: "echo hi > out.txt" }),
+        (error: unknown) => error instanceof ReadonlyViolationError
+      );
+      assert.equal(existsSync(join(cwd, "out.txt")), false);
+    },
+    15_000
+  );
+
+  it.skipIf(!hasBwrap())(
+    "fence 闸:validator 关掉后写 cwd 仍被 EROFS 硬拒(兜底不依赖 validator)",
+    async () => {
+      const cwd = await makeScratch("bash-ro-fence-");
+      // bashMode 缺省 = validator 不介入,只留 cwdReadonly 这一层 ——
+      // 模拟"validator 漏了"的形态,验证物理闸独立成立。
+      const tool = createBashTool(cwd, { cwdReadonly: true });
+      for (const command of ["echo hi > out2.txt", "touch out3.txt"]) {
+        const result = (await tool.handler({ command })) as {
+          code: number;
+          stderr: string;
+        };
+        assert.notEqual(result.code, 0, `expected non-zero for: ${command}`);
+        assert.match(result.stderr, /Read-only file system/);
+      }
+      assert.equal(existsSync(join(cwd, "out2.txt")), false);
+      assert.equal(existsSync(join(cwd, "out3.txt")), false);
+    },
+    15_000
+  );
+
+  it.skipIf(!hasBwrap())(
+    "基线:cwdReadonly 缺省时同样的写命令成功(EROFS 不是环境自带的)",
+    async () => {
+      const cwd = await makeScratch("bash-ro-baseline-");
+      const tool = createBashTool(cwd);
+      const result = (await tool.handler({
+        command: "touch baseline.txt",
+      })) as {
+        code: number;
+      };
+      assert.equal(result.code, 0);
+      assert.equal(existsSync(join(cwd, "baseline.txt")), true);
+    },
+    15_000
   );
 });
 
