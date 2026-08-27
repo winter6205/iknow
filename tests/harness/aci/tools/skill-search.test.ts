@@ -18,7 +18,10 @@ import {
   createSkillCatalog,
   type SkillEntry,
 } from "../../../../src/harness/skill/catalog.js";
-import { createSkillSearchTool } from "../../../../src/harness/aci/tools/skill-search.js";
+import {
+  createSkillSearchTool,
+  NO_MATCHES,
+} from "../../../../src/harness/aci/tools/skill-search.js";
 import type { AciToolDef } from "../../../../src/harness/aci/types.js";
 
 function makeSkill(
@@ -176,8 +179,8 @@ describe("skill_search — wire 形态 = 每行 {name, description} JSON", () =>
   });
 });
 
-describe("skill_search — 空 query / 无匹配 → '(no matches)'", () => {
-  it("空 query → '(no matches)'", () => {
+describe("skill_search — 空 query / 无匹配 → '(no matches)' + 引导", () => {
+  it("空 query → NO_MATCHES", () => {
     const catalog = createSkillCatalog([
       makeSkill({
         name: "alpha",
@@ -186,10 +189,10 @@ describe("skill_search — 空 query / 无匹配 → '(no matches)'", () => {
       }),
     ]);
     const tool = createSkillSearchTool({ catalog });
-    expect(invokeSearch(tool, { query: "" })).toBe("(no matches)");
+    expect(invokeSearch(tool, { query: "" })).toBe(NO_MATCHES);
   });
 
-  it("query 不匹配任何 name/description → '(no matches)'", () => {
+  it("query 不匹配任何 name/description → NO_MATCHES", () => {
     const catalog = createSkillCatalog([
       makeSkill({
         name: "alpha",
@@ -198,13 +201,61 @@ describe("skill_search — 空 query / 无匹配 → '(no matches)'", () => {
       }),
     ]);
     const tool = createSkillSearchTool({ catalog });
-    expect(invokeSearch(tool, { query: "gamma" })).toBe("(no matches)");
+    expect(invokeSearch(tool, { query: "gamma" })).toBe(NO_MATCHES);
   });
 
-  it("空 catalog → '(no matches)'(handler 不抛)", () => {
+  it("空 catalog → NO_MATCHES(handler 不抛)", () => {
     const catalog = createSkillCatalog([]);
     const tool = createSkillSearchTool({ catalog });
-    expect(invokeSearch(tool, { query: "anything" })).toBe("(no matches)");
+    expect(invokeSearch(tool, { query: "anything" })).toBe(NO_MATCHES);
+  });
+
+  it("NO_MATCHES 与 tool_search 引导语义对齐:'(no matches)' 前缀 + 换词/直呼名", () => {
+    // #631 T3 先例:未命中返回不是裸标记,而是带换词 / 直呼名的引导。
+    expect(NO_MATCHES.startsWith("(no matches)")).toBe(true);
+    expect(NO_MATCHES).toContain("Rephrase");
+    expect(NO_MATCHES).toContain("`query`");
+    expect(NO_MATCHES).toContain("`skill`");
+  });
+});
+
+describe("skill_search — T2:query trim 后判空", () => {
+  it("空白-only query 走 NO_MATCHES,不倾倒全量 catalog", () => {
+    const catalog = createSkillCatalog([
+      makeSkill({
+        name: "alpha",
+        dir: "/skills/alpha",
+        description: "a skill with spaces in its description",
+      }),
+      makeSkill({
+        name: "beta",
+        dir: "/skills/beta",
+        description: "another skill entry",
+      }),
+    ]);
+    const tool = createSkillSearchTool({ catalog });
+    expect(invokeSearch(tool, { query: "   " })).toBe(NO_MATCHES);
+    expect(invokeSearch(tool, { query: "\t\n" })).toBe(NO_MATCHES);
+  });
+
+  it("query '  root  ' trim 后仍子串命中(匹配算法零改动)", () => {
+    const catalog = createSkillCatalog([
+      makeSkill({
+        name: "Debugger",
+        dir: "/skills/Debugger",
+        description: "Find ROOT Causes",
+      }),
+      makeSkill({
+        name: "writer",
+        dir: "/skills/writer",
+        description: "Writes reports",
+      }),
+    ]);
+    const tool = createSkillSearchTool({ catalog });
+    const names = invokeSearch(tool, { query: "  root  " })
+      .split("\n")
+      .map((l) => JSON.parse(l).name as string);
+    expect(names).toEqual(["Debugger"]);
   });
 });
 
@@ -227,7 +278,7 @@ describe("skill_search — disabled 不出现在检索结果(SC3)", () => {
     const out = invokeSearch(tool, { query: "root" });
     const names = out
       .split("\n")
-      .filter((l) => l !== "(no matches)")
+      .filter((l) => l !== NO_MATCHES)
       .map((l) => JSON.parse(l).name as string);
     expect(names).toEqual(["Debugger"]);
     expect(names).not.toContain("secret-root");

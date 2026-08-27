@@ -44,6 +44,8 @@
 
 ### Fixed
 
+- **检索输出完整性（PR #745，2026-08-27）**: skill frontmatter 遇到不可解析的续行时跳过该行而不丢弃整个 skill，保留 `disable-model-invocation` 等有效字段；`tool_search` / `skill_search` 对 query 做 trim，空白查询不再倾倒全量结果；`tool_search` 增加 schema 校验的可选 `limit`、默认 20 条上限与整行输出预算，超限时追加收窄查询/精确取名引导，不泄漏 `truncated` / `total` 元字段。详见 `plans/search-output-integrity.md`。
+
 - **spawn_subagent ACI 超时不再提前砍子代理（2026-08-23）**: 前景 `wait:true` 曾套 `timeoutTier: long`（30 min）且工具 description 写「5 min default」，均短于 manager `PER_TASK_TIMEOUT_MS`（2 h）。ACI abort 把真任务打成 cancelled。现 `unbounded=0`（executor 不设 timer，寿命归 per-task 钟，不套短超时）；文案改为 2 hours；`SubAgentWaitTimeoutError` 按 `queryBuffer` 分流（not_found 抛错 / running → timeout envelope / 已失败 buffer 原样）。计划 `plans/632-subagent-aci-timeout-alignment.md`。
 
 - **LLM 默认对齐 coding-agent 标准帽（2026-08-21）**: `maxOutputTokens` 16384 → **32000**（Claude Code `CLAUDE_CODE_MAX_OUTPUT_TOKENS` 默认；按实际生成计费）；`timeoutMs` 60s → **300s**（thinking + 长 tool_use 的 per-call 竞速）。不再按单次任务逐步加码。MCP `connectTimeoutMs` 仍 60s。历史 2048→8192 / 8192→16384 条目保留。

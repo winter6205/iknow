@@ -89,24 +89,32 @@ async function readSkill(
     return undefined;
   }
 
-  try {
-    return toEntry(parseFrontmatter(raw), dir, warn);
-  } catch {
+  const match = FRONTMATTER.exec(raw);
+  if (!match) {
     warn(`skill skipped malformed frontmatter: ${join(dir, "SKILL.md")}`);
     return undefined;
   }
+  return toEntry(parseFrontmatter(match[1], dir, warn), dir, warn);
 }
 
-function parseFrontmatter(raw: string): SkillFrontmatter {
-  const match = FRONTMATTER.exec(raw);
-  if (!match) throw new Error("frontmatter missing");
+function parseFrontmatter(
+  block: string,
+  dir: string,
+  warn: Warn
+): SkillFrontmatter {
   const parsed: Record<string, unknown> = {};
-  for (const line of match[1].split(/\r?\n/)) {
+  let skipped = false;
+  for (const line of block.split(/\r?\n/)) {
     const separator = line.indexOf(":");
-    if (separator < 1) throw new Error("frontmatter line malformed");
-    const key = line.slice(0, separator).trim();
+    const key = separator > 0 ? line.slice(0, separator).trim() : "";
+    if (!key) {
+      if (line.trim()) skipped = true;
+      continue;
+    }
     parsed[key] = scalar(line.slice(separator + 1).trim());
   }
+  if (skipped)
+    warn(`skill skipped malformed frontmatter line: ${join(dir, "SKILL.md")}`);
   return parsed as SkillFrontmatter;
 }
 

@@ -7,8 +7,9 @@
  *   - output：每行 `JSON.stringify({name, description})` —— 仅显式两字段
  *     投影（不泄漏 aci 元数据 / handler / dir），对齐 tool_search wire 形态。
  *   - disabled 不出现（SC3）：catalog.search 已过滤 disabled，本工具不再做。
- *   - 空 query / 无匹配 → `"(no matches)"`(对齐 tool_search 语义)；
- *     handler 不抛，向模型传达"换关键词 / 直呼名"。
+ *   - 空 / 空白-only query（trim 后判空）/ 无匹配 → `"(no matches) ..."`
+ *     （对齐 tool_search 引导语义，#631 T3 先例）；handler 不抛，向模型
+ *     传达"换关键词 / 直呼名"。
  *   - aci 元数据（G1 Q1 决策）：read-only / lazy:false / timeoutTier:fast。
  *
  * **依赖注入形态**：`createSkillSearchTool(deps)` 收 catalog；T8 装配期
@@ -18,8 +19,13 @@ import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import type { SkillCatalog } from "../../skill/catalog.js";
 
-/** 无匹配 / 空 query 的合法返回（对齐 tool_search 契约）。 */
-const NO_MATCHES = "(no matches)";
+/**
+ * 无匹配 / 空 query 的合法返回（对齐 tool_search 契约）。
+ * 引导语义与 `tool_search` 的 NO_MATCHES 平齐（#631 T3）：不是裸标记，
+ * 而是换词重搜 / 用 `skill` 直呼名。
+ */
+export const NO_MATCHES =
+  "(no matches) Rephrase `query` with a different keyword, or call `skill` with the exact skill name.";
 
 /**
  * 依赖注入：`catalog.search(query)` 已做大小写不敏感子串匹配 +
@@ -41,7 +47,7 @@ export function createSkillSearchTool(deps: SkillSearchToolDeps): AciToolDef {
   return Object.freeze({
     name: "skill_search",
     description:
-      "Discover available skills by keyword before loading the chosen one via skill. Returns one JSON object `{name, description}` per line (case-insensitive substring on name / description); empty query or no match → `(no matches)`; disabled and undocumented skills are excluded.",
+      "Discover available skills by keyword before loading the chosen one via skill. Returns one JSON object `{name, description}` per line (case-insensitive substring on name / description); empty or whitespace-only query, or no match → `(no matches)` with guidance to rephrase `query` or call `skill` with an exact name; disabled and undocumented skills are excluded.",
     inputSchema: {
       type: "object",
       properties: { query: { type: "string" } },
@@ -49,7 +55,7 @@ export function createSkillSearchTool(deps: SkillSearchToolDeps): AciToolDef {
       additionalProperties: false,
     },
     handler: (input: unknown, _ctx?: ToolExecutionContext): string => {
-      const query = parseQuery(input);
+      const query = parseQuery(input).trim();
       if (query.length === 0) return NO_MATCHES;
       const hits = deps.catalog.search(query);
       if (hits.length === 0) return NO_MATCHES;

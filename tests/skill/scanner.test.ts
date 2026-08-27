@@ -136,6 +136,107 @@ describe("createSkillScanner", () => {
     expect(warn).toHaveBeenCalledOnce();
   });
 
+  it("indexes a skill whose frontmatter carries an unparseable list continuation line", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-skill-"));
+    roots.push(root);
+    const skills = join(root, "skills");
+    const warn = vi.fn();
+    await fixture(
+      skills,
+      "session-handoff",
+      "---\nname: session-handoff\ndescription: Use when a session ends with unfinished work another agent must continue.\nbucket: productivity\nversion: 1.1.0\nrelated_skills:\n  [using-agent-skills, domain-modeling, verification-before-completion]\ntype: discipline\ndisable-model-invocation: true\n---\nbody"
+    );
+
+    const entries = await createSkillScanner({
+      userHome: join(root, "home"),
+      cwd: root,
+      env: { IKNOW_SKILL_DIRS: skills },
+      warn,
+    }).scan();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      name: "session-handoff",
+      description:
+        "Use when a session ends with unfinished work another agent must continue.",
+      disabled: true,
+      version: "1.1.0",
+    });
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it("warns once per skill no matter how many frontmatter lines are unparseable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-skill-"));
+    roots.push(root);
+    const skills = join(root, "skills");
+    const warn = vi.fn();
+    await fixture(
+      skills,
+      "noisy",
+      "---\nname: noisy\n  first stray line\ndescription: still indexed\n  second stray line\n: leading separator\n---\nbody"
+    );
+
+    const entries = await createSkillScanner({
+      userHome: join(root, "home"),
+      cwd: root,
+      env: { IKNOW_SKILL_DIRS: skills },
+      warn,
+    }).scan();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      name: "noisy",
+      description: "still indexed",
+    });
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it("falls back to the parent name when no frontmatter line is parseable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-skill-"));
+    roots.push(root);
+    const skills = join(root, "skills");
+    const warn = vi.fn();
+    await fixture(
+      skills,
+      "unreadable-fields",
+      "---\nstray\nlines only\n---\nbody"
+    );
+
+    const entries = await createSkillScanner({
+      userHome: join(root, "home"),
+      cwd: root,
+      env: { IKNOW_SKILL_DIRS: skills },
+      warn,
+    }).scan();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      name: "unreadable-fields",
+      description: undefined,
+      disabled: false,
+    });
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it("indexes an empty frontmatter block without warning", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-skill-"));
+    roots.push(root);
+    const skills = join(root, "skills");
+    const warn = vi.fn();
+    await fixture(skills, "blank", "---\n\n---\nbody");
+
+    const entries = await createSkillScanner({
+      userHome: join(root, "home"),
+      cwd: root,
+      env: { IKNOW_SKILL_DIRS: skills },
+      warn,
+    }).scan();
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ name: "blank", disabled: false });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it("returns an empty index when all scan directories are absent", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-skill-"));
     roots.push(root);
