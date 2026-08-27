@@ -7,7 +7,7 @@
  *         sandboxRoot, env?, role?, finalText?, evidenceContext? }
  *   - 子→父 result (parseParentEnvelope / truncateEnvelopeResult):
  *       { status: "ok"|"failed", summary, result, fileRefs?, usage?, reason?,
- *         truncated?, totalLength? }
+ *         stop_reason?, truncated?, totalLength? }
  *
  * 校验规则 (SC13 / plan D1 acceptance 3):
  *   - 缺必填字段 / wrong type / 非对象 → throw ProtocolError (协议错误);
@@ -23,6 +23,7 @@ import Ajv from "ajv";
 import addFormats from "ajv-formats";
 import type { ValidateFunction } from "ajv";
 import { ProtocolError } from "../errors.js";
+import type { StopReason } from "../model-adapter/types.js";
 
 /** 父→子 worker 请求信封。schema 冻结形态见 WORKER_SCHEMA。 */
 export interface WorkerEnvelope {
@@ -60,6 +61,20 @@ export interface SubAgentEnvelope {
   readonly usage?: object;
   readonly reason?:
     "crashed" | "maxTurnsExceeded" | "timeout" | "protocolError";
+  /**
+   * D-α 观测地板 (additive):子代理 run() 的实际停因,来源
+   * `RunResult.stopReason`(loop-engine 八值 append-only 联合)。
+   *
+   * 与 `reason` 语义不同,**不合并**:`reason` 是父代理侧的失败归因四值枚举
+   * (crashed / maxTurnsExceeded / timeout / protocolError),`stop_reason` 是
+   * 子代理循环自身的停止原因(含 completed 等成功停因)。status / reason 两个
+   * 枚举维持 V1 冻结形态(envelope-freeze.test.ts 锁定)。
+   *
+   * TS 侧直接复用 `StopReason`(唯一声明点,联合追加值时零漂移);wire schema
+   * 侧刻意**不冻 enum**(见 PARENT_SCHEMA 注释)。缺席 = 该信封不是从一次
+   * run() 返回值派生的(如 MaxTurnsExceeded 抛出路径),不可猜测。
+   */
+  readonly stop_reason?: StopReason;
   readonly truncated?: boolean;
   readonly totalLength?: number;
 }
@@ -111,6 +126,16 @@ export const PARENT_SCHEMA: Record<string, unknown> = {
       type: "string",
       enum: ["crashed", "maxTurnsExceeded", "timeout", "protocolError"],
     },
+    // D-α 观测地板 (additive): 子代理 run() 的实际停因。
+    // `additionalProperties: false` 下新字段必须显式声明, 否则 ajv 直接把带
+    // stop_reason 的信封判成 ProtocolError。
+    //
+    // 刻意**无 enum**: `StopReason` 是 append-only 联合 (016 五值 → 017 两值
+    // → #672 fused), 把当前八值冻进 wire schema 意味着每次追加停因都要同步改
+    // 两处、且旧 parent 会拒收新 worker 的合法信封。status / reason 两个枚举
+    // 之所以冻, 是因为它们是父代理的**判定面** (V1 冻结契约 SC9); stop_reason
+    // 只是观测面, 不参与任何分支判定, 因此按 Postel 收宽。
+    stop_reason: { type: "string" },
     truncated: { type: "boolean" },
     totalLength: { type: "integer" },
   },

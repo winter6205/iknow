@@ -99,6 +99,7 @@ import {
   slashCompleteFromCandidates,
   slashHasArg,
   slashPrefix,
+  slashRemainder,
   slashSuggestions,
   type SlashCandidate,
 } from "./slash.js";
@@ -196,11 +197,14 @@ import {
 import type { SubagentInfo } from "../harness/subagent/manager.js";
 import { formatRunDuration } from "./run-stats.js";
 import { tuiPalette } from "./theme.js";
+import { createPermissionModeContext } from "../harness/permission/index.js";
 import {
-  applyShiftTabModeFlip,
-  createPermissionModeContext,
-  modeLabel,
-} from "../harness/permission/index.js";
+  agentModeLabel,
+  applyGraphCommand,
+  applyShiftTabAgentModeFlip,
+  splitGraphArgs,
+  type GraphModeContext,
+} from "../harness/graph/mode.js";
 import { createSkillBody } from "../harness/skill/body.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
 import { extractTitle } from "../session-api/store/schema.js";
@@ -402,6 +406,13 @@ export interface TuiAppProps {
   readonly cwd: string;
   readonly dataDir: string;
   readonly permissionMode?: PermissionModeContext;
+  /**
+   * D-α V1 / ADR-0030：graph 编排 overlay 的会话 holder。Shift+Tab 三态轮的
+   * 第三站与 `/graph on|off` 翻的是同一个它（SC3 三入口同 holder）。缺席 →
+   * Shift+Tab 退化成既有两态 permission 轮，`/graph` 提示未接线（测试 /
+   * fixture 兼容；产品路径由 run.tsx 注入）。
+   */
+  readonly graphMode?: GraphModeContext;
   /** #279 项3：权限 modal「总是允许」落点 — session 层授权登记表。 */
   readonly sessionGrants?: SessionGrants;
   /** 测试注入口：可选初始视图（缺省 chat）。 */
@@ -578,6 +589,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   );
   // W2 扩展：权限模式镜像（仅驱动模式指示行 re-render）。
   const [permMode, setPermMode] = useState(() => permissionMode.get());
+  // D-α V1：graph overlay 镜像（同上，只驱动模式指示行；权威在 holder）。
+  const [graphOn, setGraphOn] = useState(
+    () => props.graphMode?.get().enabled ?? false
+  );
   // #279 项3：权限 modal 槽状态（dismissed = Esc 收起后退回输入框 y/n 兜底）。
   const [askModalDismissed, setAskModalDismissed] = useState(false);
   const [permissionIndex, setPermissionIndex] = useState(0);
@@ -1677,6 +1692,22 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         });
         return;
       }
+      case "graph": {
+        // D-α V1 / SC3：`/graph` 是 Shift+Tab 的非 TTY 对等物 —— 翻同一个
+        // holder，解析与文案单点在 harness/graph/mode.ts（三入口同源）。
+        const graphCtx = props.graphMode;
+        if (!graphCtx) {
+          setNotice({ lines: ["图模式未接线（本入口未注入 graph holder）。"] });
+          return;
+        }
+        const res = applyGraphCommand(
+          graphCtx,
+          splitGraphArgs(slashRemainder(text))
+        );
+        setGraphOn(graphCtx.get().enabled);
+        setNotice({ lines: [res.text] });
+        return;
+      }
       case "thinking": {
         // design-25 picker（双面板版）：/thinking 打开纯开关面板（ON/OFF），
         // 不设 notice（面板本身即反馈）。seed 自当前 thinkingEnabled；Enter/
@@ -1891,18 +1922,21 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   useKeyboard((e) => {
     if (e.eventType !== "press") return;
 
-    // Shift+Tab 切 permission mode（让 app 层处理 — spec W2 扩展）。
+    // Shift+Tab 切 agent mode（W2 权限轮 + D-α graph overlay 的三态轮；
+    // graph holder 缺席时自动退化成既有两态 permission 轮）。
     if (
-      applyShiftTabModeFlip({
+      applyShiftTabAgentModeFlip({
         key: {
           name: e.name,
           shift: e.shift,
           ctrl: e.ctrl,
           meta: e.meta,
         },
-        ctx: permissionMode,
+        permission: permissionMode,
+        graph: props.graphMode,
         onFlip: (next) => {
-          setPermMode(next);
+          setPermMode(next.permission);
+          setGraphOn(next.graph);
         },
       })
     ) {
@@ -2317,10 +2351,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       )}
       {view === "chat" && (
         <box flexDirection="row">
-          <text fg={permMode === "full_auto" ? pal.running : pal.dim}>
+          <text
+            fg={graphOn || permMode === "full_auto" ? pal.running : pal.dim}
+          >
             {cols < 40
-              ? `[${permMode === "full_auto" ? "auto" : "def"}]`
-              : `mode: ${modeLabel(permMode)}`}
+              ? `[${graphOn ? "graph" : permMode === "full_auto" ? "auto" : "def"}]`
+              : `mode: ${agentModeLabel({ permission: permMode, graph: graphOn })}`}
           </text>
           {/* mode 右侧运行中实时显示秒数（`· Xs`，每秒跳）；结束后清空（mode
               行不残留，统计移到流末尾 `Crunched for X` 行）。实时 token 计算

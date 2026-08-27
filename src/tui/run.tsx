@@ -48,6 +48,10 @@ import { attachSession, type TuiSessionState } from "./session-state.js";
 import { createSessionGrants } from "../harness/permission/session-grants.js";
 import { initIknowWorkspaceSafe } from "../harness/identity/index.js";
 import { resolvePermissionMode } from "../cli/runtime.js";
+import {
+  createGraphModeContext,
+  resolveGraphMode,
+} from "../harness/graph/mode.js";
 import { loadIknowSettings } from "../config/settings.js";
 import { resolveVerifyConfig } from "../session-api/serve.js";
 import { createEnvLoader, type EnvLoader } from "../config/env-loader.js";
@@ -225,12 +229,18 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     const askBridge = createTuiAskUserBridge();
     const permissionMode = resolvePermissionMode(options.permissionMode);
     const sessionGrants = createSessionGrants();
+    // D-α V1 / ADR-0030:graph overlay 的会话 holder —— 初值走 settings
+    // （默认关），运行中由 Shift+Tab 与 `/graph` 就地翻，引擎不重建。
+    const graphMode = createGraphModeContext(
+      resolveGraphMode({ settings: loadIknowSettings().graph })
+    );
 
     const depsOpts: BuildTuiDepsOptions = {
       askUser: askBridge.ask,
       onToolEvent: (event) => toolEventSink.emit(event),
       soleInflightId: () => inflight.soleId(),
       permissionMode,
+      graphMode,
       sessionGrants,
       // ADR-0019 (T2): workspaceRoot 透传到 build-engine identity /
       // memory / skill seam。
@@ -241,10 +251,8 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     };
     // T2 返回平铺的 LoopEngineDeps & { subagentManager?, shutdown? }(非嵌套
     // { deps, ... }),rest 解构剥离两个句柄后 deps 即 LoopEngineDeps。
-    const { subagentManager, shutdown, ...deps } = await buildTuiDeps(
-      bundle,
-      depsOpts
-    );
+    const { subagentManager, shutdown, graphAssembly, ...deps } =
+      await buildTuiDeps(bundle, depsOpts);
     // #365 T4:挂 MCP + subagent 组合 shutdown 到进程信号(runtime.ts 语义,
     // 与 chat/serve 一致)。T4 起 registerShutdown 参数放宽为结构
     // `{ shutdown?: }`(DRIFT-1),TUI 只透 shutdown 句柄 — deps / engine /
@@ -274,6 +282,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // subagentManager 时 runClassifier 接管 (spec #128 Objective)。与 serve
       // 共用 resolveVerifyConfig 装配。
       verifyConfig: resolveVerifyConfig(loadIknowSettings().verify),
+      // D-α T5:graph 装配快照交给 hub —— 每条 postMessage 拍一次
+      // （`/graph on` 之后的**下一条**消息才装 run_graph）。
+      ...(graphAssembly ? { graphAssembly } : {}),
       inflight,
       contextWindow: currentEnv.compress.contextWindow,
       // T2: 把启动期校验过的 env 透到 hub 的 override 路径 —— override 重建
@@ -333,6 +344,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
           cwd={cwd}
           dataDir={dataDir}
           permissionMode={permissionMode}
+          graphMode={graphMode}
           sessionGrants={sessionGrants}
           // #337 Phase C：TuiApp 消费 skillCatalog（slash 候选 + /skill 加载发送）。
           // onExtensions 在 buildTuiDeps 装配期同步注入（Phase B seam）；此处

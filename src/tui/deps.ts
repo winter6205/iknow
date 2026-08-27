@@ -26,6 +26,8 @@ import { resolveSessionTodoDir } from "../harness/aci/tools/todo-write.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import type { PostToolUseHook } from "../harness/permission/types.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
+import type { GraphModeContext } from "../harness/graph/mode.js";
+import type { GraphAssembly } from "../harness/graph/assembly.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
@@ -79,6 +81,12 @@ export interface BuildTuiDepsOptions {
    * 放行不再 ask。缺省 = 无 session 层（历史行为）。
    */
   readonly sessionGrants?: SessionGrants;
+  /**
+   * D-α T5 / ADR-0030：graph 编排 overlay holder（TUI 按 Shift+Tab 或敲
+   * `/graph` 翻它）。透传给 build-engine —— `run_graph` 与编排段按返回的
+   * `graphAssembly` 每 round 快照 gate。缺席 = 本入口未接 overlay。
+   */
+  readonly graphMode?: GraphModeContext;
   /** #337 Phase B 测试缝：userHome 覆盖（默认 homedir()）。 */
   readonly userHome?: string;
   /** #337 Phase B 测试缝：cwd 覆盖（默认 process.cwd()）。 */
@@ -185,6 +193,8 @@ export async function buildTuiDeps(
   LoopEngineDeps & {
     subagentManager?: SubAgentManager;
     shutdown?: () => Promise<void>;
+    /** D-α T5:graph 装配快照句柄（仅注入 graphMode 时透出，交给 hub 拍 round）。 */
+    graphAssembly?: GraphAssembly;
   }
 > {
   if (!bundle.env.llm.apiKey) {
@@ -209,6 +219,8 @@ export async function buildTuiDeps(
     // memoryDir 同理缺省解析自 cwd(与 #146 TUI 启动目录语义一致)。
     ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}),
     ...(opts.sessionGrants ? { session: opts.sessionGrants } : {}),
+    // D-α T5:overlay holder 透传 —— run_graph / 编排段的条件装配缝。
+    ...(opts.graphMode ? { graphMode: opts.graphMode } : {}),
     // T1 观测缝:#175 T4 工具摘要行 — postToolUse 投影为 TuiToolEvent。
     ...(opts.onToolEvent ? { hooks: wrapTuiHook(opts) } : {}),
     // #337 Phase B 测试缝:userHome / cwd 覆盖(与 build-engine 同款)。
@@ -279,5 +291,6 @@ export async function buildTuiDeps(
       ? { subagentManager: built.subagentManager }
       : {}),
     ...(built.shutdown ? { shutdown: built.shutdown } : {}),
+    ...(built.graphAssembly ? { graphAssembly: built.graphAssembly } : {}),
   };
 }

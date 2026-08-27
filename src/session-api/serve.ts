@@ -27,6 +27,10 @@ import {
   parsePermissionMode,
   createPermissionModeContext,
 } from "../harness/permission/modes.js";
+import {
+  createGraphModeContext,
+  resolveGraphMode,
+} from "../harness/graph/mode.js";
 
 export type ServeOptions = {
   host?: string;
@@ -108,6 +112,12 @@ export async function startSessionServe(
   const permissionModeCtx = createPermissionModeContext(
     parsePermissionMode(process.env.IKNOW_PERMISSION_MODE) ?? "default"
   );
+  // D-α V1 / ADR-0030:graph overlay holder —— 初值走 settings(默认关),
+  // 运行中由 POST /api/v1/graph-mode(`/graph` 的 serve 对等物)翻。与
+  // permissionModeCtx 同款:hub 与 http 层共用同一实例(SC3 三入口同 holder)。
+  const graphModeCtx = createGraphModeContext(
+    resolveGraphMode({ settings: loadIknowSettings().graph })
+  );
 
   const hub = new SessionHub({
     store,
@@ -124,6 +134,7 @@ export async function startSessionServe(
     // ~/.iknow/state.json bootstrap_seeded 状态机；ask（oneshot 脚本）唯一例外。
     surface: "serve",
     permissionMode: permissionModeCtx,
+    graphMode: graphModeCtx,
     ...opts?.hubOptions,
     // review-fix (M1 / H1): serve 入口已解析的 workspaceRoot 透传给 hub →
     // 走 build-engine 时 bash fence 对齐 identity seed / dataDir 锚点。
@@ -176,6 +187,7 @@ export async function startSessionServe(
     // 模型名（settings.llm.model SSOT）：HealthResponse 下发，web 状态条显示。
     model: loadIknowSettings().llm?.model,
     permissionMode: permissionModeCtx,
+    graphMode: graphModeCtx,
     // ADR-0020: serve accepts --trace-out and mounts the READ side too —
     // `/api/v1/traces*` + `/trace` SPA live on this same server/port.
     ...(opts?.traceOut !== undefined

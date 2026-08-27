@@ -32,6 +32,8 @@ import {
 } from "./sandbox/env-isolation.js";
 import { createPermissionPolicy } from "./permission/policy.js";
 import type { PermissionModeContext } from "./permission/modes.js";
+import type { GraphModeContext } from "./graph/mode.js";
+import { createGraphAssembly, type GraphAssembly } from "./graph/assembly.js";
 import { createDefaultAciRegistry } from "./aci/tools/registry.js";
 import type { AciRegistry } from "./aci/aci-registry.js";
 import { errorMessage } from "./errors.js";
@@ -107,6 +109,12 @@ export type BuildEngineOpts = {
   /** W2: permission mode context (default / plan / full_auto). REPL slash
    *  command flips this in place without rebuilding the engine. */
   readonly permissionMode?: PermissionModeContext;
+  /** D-α T3 / ADR-0030: graph 编排 overlay 的会话 holder（Shift+Tab 三态轮
+   *  与 `/graph` 翻的是同一个）。在场 = 本入口接了 overlay：`run_graph`
+   *  进注册表，可见性与编排段按 `BuiltEngine.graphAssembly` 的 per-round
+   *  快照 gate。缺席 = 未接 overlay（ask / 老调用方）→ 工具与段都不存在，
+   *  字节级零变化。 */
+  readonly graphMode?: GraphModeContext;
   /** #337 T8 测试缝:userHome / cwd 覆盖(默认 homedir() / process.cwd())。 */
   readonly userHome?: string;
   readonly cwd?: string;
@@ -212,6 +220,12 @@ export type BuiltEngine = {
    * `{ server, tool }[]`(listMcpTools);server 名反解在 deps.ts。
    */
   readonly catalog?: AciCatalog;
+  /**
+   * D-α T3 / ADR-0030:graph 装配快照句柄（仅 `opts.graphMode` 在场时透出）。
+   * host 在每次 `run()` 之前调 `beginRound()` —— 这是「下一次 run() 才生效」
+   * 落地的那一下：翻键立刻改 holder，装配面等下一 round。
+   */
+  readonly graphAssembly?: GraphAssembly;
 };
 
 /**
@@ -440,9 +454,18 @@ export async function buildHarnessEngine(
     });
   }
 
+  // D-α T3 / ADR-0030:overlay 接了才有 graph 装配面。快照对象是本次
+  // 装配的单点 —— registry(工具在不在)、promptTools(露不露)、deps.system
+  // (编排段进不进)三处读的都是它，不各读各的 holder。
+  const graphAssembly: GraphAssembly | undefined = opts.graphMode
+    ? createGraphAssembly(opts.graphMode)
+    : undefined;
   reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
+    // D-α T3:run_graph 条件化装配 —— 需要 overlay(graphAssembly)与编排
+    // 底座(subagentManager)同时在场;registry 内部同门再判一次。
+    ...(graphAssembly ? { graphAssembly } : {}),
     ...(memoryEnabled ? { memoryDir } : undefined),
     skillCatalog,
     ...(subagentManager ? { subagentManager } : undefined),
@@ -568,7 +591,18 @@ export async function buildHarnessEngine(
     // #224 注入装配 — 把 reg.visibleSchemas（含 discovered lazy 工具）注入到
     // promptTools；fallback 路径（缺省回退 deps.registry.list()）由 loop-engine
     // 处理；本期 visibleSchemas ≡ 全量（无 lazy 工具），字节级零变化。
-    promptTools: reg.visibleSchemas,
+    // D-α T3 / spec SC2:overlay 在场时 promptTools 按本 round 的 graph
+    // 快照过滤 —— 关图那次 run() 的可见工具名不含 run_graph,同 round 内
+    // 翻键也不改本 round(快照只在 beginRound 更新)。overlay 缺席 → 原样
+    // 透传 reg.visibleSchemas(引用相同,字节级零变化)。
+    promptTools: graphAssembly
+      ? (): ReadonlyArray<import("./tools/types.js").ToolDef> => {
+          const visible = reg!.visibleSchemas();
+          return graphAssembly.enabled()
+            ? visible
+            : visible.filter((t) => t.name !== "run_graph");
+        }
+      : reg.visibleSchemas,
     // #196 IKNOW T4:每 turn 装配 identity/soul/user_profile/bootstrap + memory_layer。
     // deps.system 注入缝装配点(loop-engine 每 turn 调 deps.system?.() 透传
     // adapter.step request.system)。#194 T6:双层系统缝 — deps.system 始终挂
@@ -622,6 +656,11 @@ export async function buildHarnessEngine(
       // #646 T2: agent-status 读规则段 gate —— 与下方 deps.agentStatus 同一
       // agentStatusTodoDir 表达式派生 (栏在场的表面才装配读规则句)。
       ...(agentStatusTodoDir ? { agentStatusReadRule: true } : {}),
+      // D-α T3:编排段与 run_graph 的可见性读同一个 round 快照 —— 段与
+      // 工具永远同进同出,不会出现「讲了 run_graph 但工具没露」。
+      ...(graphAssembly
+        ? { orchestration: (): boolean => graphAssembly.enabled() }
+        : {}),
     }),
     // #119 T7:env.compress 透传 → deps.compress(LoopEngineDeps.compress 可选缝)。
     // IknowCompressEnv 必填(contextWindow / thresholdTokens),缺失即压缩关闭由
@@ -661,6 +700,9 @@ export async function buildHarnessEngine(
     skillCatalog,
     ...(mcpManager ? { mcpManager } : {}),
     catalog: reg.catalog,
+    // D-α T3:host 每次 run() 前调 beginRound() 拍快照(chat / hub 两处 run
+    // 入口)。缺席 = 本入口没接 overlay。
+    ...(graphAssembly ? { graphAssembly } : {}),
     // #356 T6:shutdown 组合 MCP + subagent + background 三清理。SC12 顺序:
     // mcpManager first → subagentManager second(两者无共享可变状态,Promise.all
     // 并发触发;顺序仅语义标注,非严格串行 — ask 入口三者都缺席时 shutdown 也

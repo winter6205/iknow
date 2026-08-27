@@ -50,6 +50,8 @@ import type {
 } from "../harness/permission/ask-user.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
+import type { GraphAssembly } from "../harness/graph/assembly.js";
+import type { GraphModeContext } from "../harness/graph/mode.js";
 import { createViolationCounter } from "../harness/sandbox/violation-handling.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
 import {
@@ -429,6 +431,18 @@ export type SessionHubOptions = {
   /** W2: permission mode context (default / plan / full_auto). Absent →
    *  buildHarnessEngine defaults to "default". */
   permissionMode?: PermissionModeContext;
+  /**
+   * D-α T3 / ADR-0030: graph 编排 overlay 的会话 holder（serve / TUI 与 CLI
+   * 共用同一形态）。透传给 buildHarnessEngine —— `run_graph` 与编排段按
+   * 每条 postMessage 拍下的快照 gate。缺席 = 本入口未接 overlay。
+   */
+  graphMode?: GraphModeContext;
+  /**
+   * D-α T5:已建好 engine 的 host（TUI 在 run.tsx 就装配完）把
+   * `BuiltEngine.graphAssembly` 直接交进来 —— 这类 host 走注入 deps 路径，
+   * hub 自己不 build，拿不到快照句柄。缺席 = 未接 overlay（行为零变化）。
+   */
+  graphAssembly?: GraphAssembly;
   /** T2: env source for per-turn thinking override (test seam; production
    * omits it → withThinkingOverride falls back to loadIknowEnv()). */
   overrideEnv?: { readonly llm: LlmEnv };
@@ -487,6 +501,8 @@ export type SessionHubOptions = {
     deps: LoopEngineDeps;
     shutdown?: () => Promise<void>;
     subagentManager?: SubAgentManager;
+    /** D-α T3: graph 装配快照（生产由 buildHarnessEngine 透出）。 */
+    graphAssembly?: GraphAssembly;
   }>;
   /**
    * serve-workspace T3: recents/trust 名单的 home 根（落
@@ -569,10 +585,20 @@ export class SessionHub {
         deps: LoopEngineDeps;
         shutdown?: () => Promise<void>;
         subagentManager?: SubAgentManager;
+        graphAssembly?: GraphAssembly;
       }>)
     | undefined;
   /** serve picker bind (T2); session file workspaceRoot is the engine Map key. */
   private boundRoot: string | undefined;
+  /** D-α T3 / ADR-0030: graph 编排 overlay holder（serve / TUI 注入；缺席 =
+   *  本入口未接 overlay → run_graph 与编排段都不存在）。 */
+  private readonly graphMode: GraphModeContext | undefined;
+  /** D-α T5: 注入 deps 的 host（TUI）自带的装配快照句柄（构造 opts 传入）。 */
+  private readonly injectedGraphAssembly: GraphAssembly | undefined;
+  /** D-α T3: 最近一次 ensureDeps 返回的那台 engine 的装配快照。postMessage
+   *  紧接 ensureDeps 调 beginRound() —— 两者在同一串行槽位里，per-root
+   *  多引擎时也不会拍错那一台。缺席 = 该 engine 未接 overlay。 */
+  private activeGraphAssembly: GraphAssembly | undefined;
   /** serve-workspace T3: recents/trust roster home (absent → T2 behavior). */
   private readonly recentsHome: string | undefined;
   /** Per-root BuiltEngine cache (same root shared across sessions). */
@@ -582,6 +608,7 @@ export class SessionHub {
       deps: LoopEngineDeps;
       shutdown?: () => Promise<void>;
       subagentManager?: SubAgentManager;
+      graphAssembly?: GraphAssembly;
     }
   >();
   /** Per-conversation serialization (spec A15). */
@@ -602,6 +629,8 @@ export class SessionHub {
     this.askHandle = opts.askHandle;
     this.sessionGrants = opts.sessionGrants;
     this.permissionMode = opts.permissionMode;
+    this.graphMode = opts.graphMode;
+    this.injectedGraphAssembly = opts.graphAssembly;
     this.overrideEnv = opts.overrideEnv;
     this.sandboxRoot = opts.sandboxRoot;
     this.surface = opts.surface;
@@ -939,6 +968,11 @@ export class SessionHub {
           });
         }
         const baseDeps = await this.ensureDeps(session.workspaceRoot);
+        // D-α T3 / ADR-0030:round 边界 —— 一条 postMessage = 一次 run()。
+        // 在这里拍 graph 装配快照（紧接 ensureDeps，同一串行槽位内，拍的
+        // 一定是本次要用的那台 engine），overlay 翻键因此「下一条消息才
+        // 生效」，与 chat 的「下一条查询行」同语义。
+        this.activeGraphAssembly?.beginRound();
         // T2: per-turn override — rebuild deps with a one-shot adapter only;
         // executor / registry / maxTurns / timeoutMs are reused from the
         // cached deps. When absent, the cached path is unchanged.
@@ -2016,6 +2050,7 @@ export class SessionHub {
     deps: LoopEngineDeps;
     shutdown?: () => Promise<void>;
     subagentManager?: SubAgentManager;
+    graphAssembly?: GraphAssembly;
   }> {
     const hit = this.engineByRoot.get(root);
     if (hit) return hit;
@@ -2026,6 +2061,7 @@ export class SessionHub {
       deps: built.deps,
       shutdown: built.shutdown,
       subagentManager: built.subagentManager,
+      graphAssembly: built.graphAssembly,
     };
     this.engineByRoot.set(root, entry);
     this.subagentManager = this.subagentManager ?? built.subagentManager;
@@ -2036,6 +2072,7 @@ export class SessionHub {
     deps: LoopEngineDeps;
     shutdown?: () => Promise<void>;
     subagentManager?: SubAgentManager;
+    graphAssembly?: GraphAssembly;
   }> {
     if (!this.askUser) {
       throw new Error(
@@ -2052,6 +2089,9 @@ export class SessionHub {
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
       ...(this.permissionMode ? { permissionMode: this.permissionMode } : {}),
+      // D-α T3 / ADR-0030:overlay holder 透传 —— serve / TUI 的 `/graph` 与
+      // Shift+Tab 翻的是同一个它（SC3 三入口同 holder）。
+      ...(this.graphMode ? { graphMode: this.graphMode } : {}),
       todoDir: resolveSessionTodoDir({ surface: "serve" }),
       ...(this.traceOut !== undefined
         ? {
@@ -2080,11 +2120,17 @@ export class SessionHub {
    */
   private async ensureDeps(sessionRoot?: string): Promise<LoopEngineDeps> {
     if (this.injectedDeps) {
+      // 注入 deps 的 host 自己 build 了 engine（TUI），快照句柄经构造 opts
+      // 进来;纯测试注入路径没有 engine → undefined,行为零变化。
+      this.activeGraphAssembly = this.injectedGraphAssembly;
       return this.cachedDeps ?? this.injectedDeps;
     }
     const mapRoot = sessionRoot ?? this.boundRoot;
     if (mapRoot !== undefined) {
-      return (await this.getOrBuildEngine(mapRoot)).deps;
+      // D-α T3:per-root 多引擎时,活跃快照跟着本次解析到的那台走。
+      const entry = await this.getOrBuildEngine(mapRoot);
+      this.activeGraphAssembly = entry.graphAssembly;
+      return entry.deps;
     }
     if (this.cachedDeps) return this.cachedDeps;
     if (!this.askUser) {
@@ -2117,6 +2163,9 @@ export class SessionHub {
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
       ...(this.permissionMode ? { permissionMode: this.permissionMode } : {}),
+      // D-α T3 / ADR-0030:overlay holder 透传 —— serve / TUI 的 `/graph` 与
+      // Shift+Tab 翻的是同一个它（SC3 三入口同 holder）。
+      ...(this.graphMode ? { graphMode: this.graphMode } : {}),
       // review-fix (M1 / H1): serve entry 已解析的 workspaceRoot 透传 —
       // 让 build-engine 的 bash fence 对齐 serve 的 identity seed / dataDir
       // (同一 per-root 锚点,不落回 sandboxRoot|cwd)。
@@ -2132,6 +2181,8 @@ export class SessionHub {
         : {}),
     });
     this.cachedDeps = built.deps;
+    // D-α T3:单引擎（未 bind 根）路径的活跃快照。
+    this.activeGraphAssembly = built.graphAssembly;
     this.skillCatalog = built.skillCatalog;
     this.mcpManager = built.mcpManager;
     this.aciCatalog = built.catalog;

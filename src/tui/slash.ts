@@ -5,11 +5,14 @@
  * 一致（#146 TUI 自建 slash 词表 + 解析 + Tab 补全 + hint 行）；仅文件头注释
  * 更新为本次迁移说明。纯 TS 模块，无 ink / OpenTUI 依赖。
  *
- * 词表 12 条：/sessions /new /quit /exit /help /info /thinking /effort
- * /compact /continue /rewind /mcp。/reset 不在词表内即天然不可达（Q5c 废除）。
+ * 词表 13 条：/sessions /new /quit /exit /help /info /thinking /effort
+ * /compact /continue /rewind /mcp /graph。/reset 不在词表内即天然不可达
+ * （Q5c 废除）。
  * rev 2026-08-11:删 /profile（首启引导由 agent 自己 rm BOOTSTRAP.md 完成,
  * 不再需要宿主斜杠钩子）；#366 加 /rewind；#337/#361 加 /mcp。
  * rev 2026-08-12:#377 系列加 /effort（思考强度调整）。
+ * rev 2026-08-26:D-α V1 加 /graph（图模式 overlay 的非 TTY 对等物,值域与
+ * 文案单点在 harness/graph/mode.ts;三入口 chat / TUI / serve 同语义）。
  * /effort help 文案由 ADJUSTABLE_EFFORT_LEVELS 派生（不硬编码第二份列表）。
  *
  * 解析规则：输入 trim 后以 "/" 开头先过词表；未命中 → unknown（UI 提示）；
@@ -48,7 +51,8 @@ export type TuiSlashCommand =
   | "compact"
   | "continue"
   | "rewind"
-  | "mcp";
+  | "mcp"
+  | "graph";
 
 export type SlashParseResult =
   | { kind: "command"; command: TuiSlashCommand }
@@ -81,6 +85,7 @@ const VOCABULARY: ReadonlySet<string> = new Set<TuiSlashCommand>([
   "continue",
   "rewind",
   "mcp",
+  "graph",
 ]);
 
 /** 解析输入框内容；空/纯空白 → message（调用方按空输入忽略）。 */
@@ -117,6 +122,7 @@ export function helpLines(
     "/compact   压缩上下文（保留尾部，裁剪早期消息）",
     "/continue  续跑未完成的工具环（不追加新任务）",
     "/rewind    回退到更早的回合（选择锚点后确认）",
+    "/graph     图模式开关（on|off|status；下一次 run() 装配生效）",
     "/quit      退出（别名 /exit）",
     ...skillLines,
     "Ctrl+C     打断前台运行中的 turn",
@@ -137,6 +143,7 @@ const HINT_DESCRIPTIONS: Record<TuiSlashCommand, string> = {
   continue: "续跑未完成的工具环",
   mcp: "查看 MCP 服务看板",
   rewind: "回退到更早的回合",
+  graph: "图模式开关（on|off|status）",
   quit: "退出（别名 /exit）",
   exit: "同 /quit",
 };
@@ -305,13 +312,21 @@ export function parseEffortLevel(raw: string): ThinkingEffortWire | undefined {
 }
 
 /**
+ * 首 token 之后的剩余段（trim 后）。`/effort <level>` / `/continue` /
+ * `/graph on` 共用同一个切法 —— 三处各写一遍 trim/split 必然漂移。
+ */
+export function slashRemainder(raw: string): string {
+  const text = raw.trim();
+  const firstTok = text.split(/\s+/, 1)[0] ?? text;
+  return text.slice(firstTok.length).trim();
+}
+
+/**
  * `/effort <level>` 与 `/continue` 共用：首 token 之后剩余段是否非空。
  * /effort 需区分无参（开面板）与非法档；/continue 任何 args → usage EXIT。
  */
 export function slashHasArg(raw: string): boolean {
-  const text = raw.trim();
-  const firstTok = text.split(/\s+/, 1)[0] ?? text;
-  return text.slice(firstTok.length).trim() !== "";
+  return slashRemainder(raw) !== "";
 }
 
 export function effortHasArg(raw: string): boolean {

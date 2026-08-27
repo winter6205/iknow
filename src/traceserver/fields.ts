@@ -49,6 +49,21 @@ const SUBAGENT_TYPES: ReadonlyArray<TraceRecordType> = [
   "subagent_state_change",
 ] as const;
 
+/**
+ * subagent_step 的关联列 (taskId / origin / parentTurnId) 与前三类同列, 但 id
+ * 列不同: step 的 id 载体是 subagent_step_id, 故 subagentId 列刻意只挂
+ * SUBAGENT_TYPES —— 见 src/harness/trace/types.ts SubagentStepRecord 注释。
+ */
+const SUBAGENT_TYPES_WITH_STEP: ReadonlyArray<TraceRecordType> = [
+  ...SUBAGENT_TYPES,
+  "subagent_step",
+] as const;
+
+const SUBAGENT_STEP_PHASE_OPTIONS: ReadonlyArray<string> = [
+  "dispatch",
+  "settle",
+] as const;
+
 const SUBAGENT_STOP_REASON_OPTIONS: ReadonlyArray<string> = [
   "crashed",
   "maxTurnsExceeded",
@@ -85,6 +100,7 @@ export const TRACE_FIELD_DEFS: ReadonlyArray<TraceFieldDef> = [
       "subagent_spawn",
       "subagent_stop",
       "subagent_state_change",
+      "subagent_step",
     ],
     options: [
       "llm_call",
@@ -94,6 +110,7 @@ export const TRACE_FIELD_DEFS: ReadonlyArray<TraceFieldDef> = [
       "subagent_spawn",
       "subagent_stop",
       "subagent_state_change",
+      "subagent_step",
     ],
   },
   {
@@ -110,6 +127,7 @@ export const TRACE_FIELD_DEFS: ReadonlyArray<TraceFieldDef> = [
       "subagent_spawn",
       "subagent_stop",
       "subagent_state_change",
+      "subagent_step",
     ],
   },
   {
@@ -124,6 +142,7 @@ export const TRACE_FIELD_DEFS: ReadonlyArray<TraceFieldDef> = [
       "session",
       "sandbox_cmd",
       "subagent_stop",
+      "subagent_step",
     ],
   },
   {
@@ -138,6 +157,7 @@ export const TRACE_FIELD_DEFS: ReadonlyArray<TraceFieldDef> = [
       "session",
       "sandbox_cmd",
       "subagent_stop",
+      "subagent_step",
     ],
   },
   {
@@ -154,6 +174,7 @@ export const TRACE_FIELD_DEFS: ReadonlyArray<TraceFieldDef> = [
       "subagent_spawn",
       "subagent_stop",
       "subagent_state_change",
+      "subagent_step",
     ],
     options: ["ok", "error"],
     tone: "status",
@@ -220,6 +241,7 @@ export const TRACE_FIELD_DEFS: ReadonlyArray<TraceFieldDef> = [
       "subagent_spawn",
       "subagent_stop",
       "subagent_state_change",
+      "subagent_step",
     ],
   },
   {
@@ -239,6 +261,7 @@ export const TRACE_FIELD_DEFS: ReadonlyArray<TraceFieldDef> = [
       "subagent_spawn",
       "subagent_stop",
       "subagent_state_change",
+      "subagent_step",
     ],
   },
   {
@@ -281,15 +304,44 @@ export const TRACE_FIELD_DEFS: ReadonlyArray<TraceFieldDef> = [
     jsonlKey: "task_id",
     type: "string",
     label: "任务 ID",
-    recordTypes: SUBAGENT_TYPES,
+    recordTypes: SUBAGENT_TYPES_WITH_STEP,
   },
   {
     key: "origin",
     jsonlKey: "origin",
     type: "enum",
     label: "来源",
-    recordTypes: SUBAGENT_TYPES,
+    recordTypes: SUBAGENT_TYPES_WITH_STEP,
     options: ["parent", "child"],
+  },
+  {
+    key: "subagentStepId",
+    jsonlKey: "subagent_step_id",
+    type: "string",
+    label: "步骤 ID",
+    recordTypes: ["subagent_step"],
+  },
+  {
+    key: "stepIndex",
+    jsonlKey: "step_index",
+    type: "number",
+    label: "步序",
+    recordTypes: ["subagent_step"],
+  },
+  {
+    key: "phase",
+    jsonlKey: "phase",
+    type: "enum",
+    label: "阶段",
+    recordTypes: ["subagent_step"],
+    options: SUBAGENT_STEP_PHASE_OPTIONS,
+  },
+  {
+    key: "label",
+    jsonlKey: "label",
+    type: "string",
+    label: "步骤名",
+    recordTypes: ["subagent_step"],
   },
   {
     key: "finalState",

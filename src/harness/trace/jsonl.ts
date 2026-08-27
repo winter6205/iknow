@@ -29,6 +29,7 @@ import type {
   SubagentSpawnRecord,
   SubagentStopRecord,
   SubagentStateChangeRecord,
+  SubagentStepRecord,
 } from "./types.js";
 
 export interface JsonlTraceOptions {
@@ -314,6 +315,28 @@ export function createJsonlTraceService(
         conversation_id: conversationId,
         record_type: "subagent_state_change",
         subagent_id: record.id,
+        ...snake,
+      };
+      try {
+        writeLine(line);
+        return record.id;
+      } catch (err) {
+        warnOnce(err);
+        return undefined;
+      }
+    },
+
+    async recordSubagentStep(
+      record: SubagentStepRecord
+    ): Promise<string | undefined> {
+      // 唯一形态差异: id 载体是 subagent_step_id —— step 的 id 每步唯一,
+      // 与前三类 "id === taskId" 的子代理实例 id 语义不同 (types.ts 注释)。
+      const snake = toSnakeCaseRecord(record);
+      delete snake.id;
+      const line: Record<string, unknown> = {
+        conversation_id: conversationId,
+        record_type: "subagent_step",
+        subagent_step_id: record.id,
         ...snake,
       };
       try {

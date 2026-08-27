@@ -41,6 +41,12 @@ export interface NodePlan {
 export interface SubAgentNodeExecutorOptions {
   readonly manager: SubAgentManager;
   readonly plans: Readonly<Record<string, NodePlan>>;
+  /**
+   * D-α T4:调用侧取消信号（ACI `ctx.signal`）。透传给 `manager.waitFor`，
+   * 让父回合被打断时前景等待立刻 reject 而不是空等到 per-task 墙钟。
+   * 缺席 → 与 V1 逐字节一致（waitFor 不带 signal）。
+   */
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -60,7 +66,7 @@ export interface SubAgentNodeExecutorOptions {
 export function createSubAgentNodeExecutor(
   opts: SubAgentNodeExecutorOptions
 ): NodeExecutor {
-  const { manager, plans } = opts;
+  const { manager, plans, signal } = opts;
   return async (id: string): Promise<NodeOutcome> => {
     const plan = plans[id];
     if (!plan) {
@@ -81,7 +87,7 @@ export function createSubAgentNodeExecutor(
       // 前景阻塞至子代理终态（ADR-0014 V1.5 默认 wait:true 等价）。
       // 缺省 timeoutMs 走 manager 三层链 (def.timeoutMs ?? opts.taskTimeoutMs ??
       // PER_TASK_TIMEOUT_MS) — 单点声明保证 spawn 计时与 wait 超时同源。
-      envelope = await manager.waitFor(taskId);
+      envelope = await manager.waitFor(taskId, undefined, signal);
     } catch (err) {
       // waitFor 抛错 → typed 拒绝 surface 上抛，scheduler 转 failed。
       if (err instanceof SubAgentCapacityError) {

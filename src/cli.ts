@@ -33,6 +33,10 @@ import {
   createPermissionModeContext,
 } from "./harness/permission/index.js";
 import type { PermissionMode } from "./harness/permission/modes.js";
+import {
+  createGraphModeContext,
+  resolveGraphMode,
+} from "./harness/graph/mode.js";
 import { isIknowError } from "./shared/errors.js";
 import {
   isWorkspaceRootError,
@@ -288,6 +292,12 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     (process.env.IKNOW_PERMISSION_MODE as PermissionMode | undefined) ??
       "default"
   );
+  // D-α / ADR-0030:graph 编排 overlay 的会话 holder。初值走 settings.graph
+  // （缺省关);Shift+Tab 三态轮与 /graph on|off 在 REPL 里就地翻它,装配层
+  // 在下一次 run() 快照它决定露不露 run_graph。
+  const graphMode = createGraphModeContext(
+    resolveGraphMode({ settings: loadIknowSettings().graph })
+  );
   try {
     // chat TTY REPL: interactive y/N prompt via stdin/stdout.
     // #196 A12:chat 激活 BOOTSTRAP(surface="chat" → bootstrapActive=true)。
@@ -300,6 +310,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
       surface: "chat",
       memory: { enabled: true },
       permissionMode,
+      graphMode,
       todoDir: resolveSessionTodoDir({ surface: "chat" }),
       // review-fix (Fix 1): subagent trace 生产装配 —— 仅显式配置 traceOut/env 时
       // 注入 <traceOut>/subagent.jsonl (conversationId="subagent", 聚合所有会话)。
@@ -340,6 +351,11 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     showThinking: bundle.env.chat.showThinking,
     // W2: 传给 REPL host,host 的 /permissions 斜杠命令就地翻 mode。
     permissionMode,
+    // D-α: 同一个 graph holder —— Shift+Tab 三态轮与 /graph 都翻它,
+    // build-engine 的装配快照读的也是它（SC3 三入口同 holder）。
+    graphMode,
+    // D-α T3: 每条查询行开跑前拍一次快照 —— 翻键「下一次 run() 生效」。
+    graphAssembly: built.graphAssembly,
     // T4: `--resume <id>` 续跑锚点。仅 chat 消费;ask/serve/tui 入口
     // 不传(解析虽 command-agnostic,host 各自决策)。undefined = 新开会话。
     resumeId: parsed.resumeId,

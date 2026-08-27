@@ -23,6 +23,7 @@ import { listSubdirectories } from "./browse-workspaces.js";
 import { parseThinkingOverride } from "./thinking-override.js";
 import type {
   ApiErrorBody,
+  GraphModeResponse,
   HealthResponse,
   PermissionModeResponse,
   PutWorkspaceRequest,
@@ -34,6 +35,11 @@ import {
   nextShiftTabMode,
   type PermissionModeContext,
 } from "../harness/permission/modes.js";
+import {
+  applyGraphCommand,
+  formatGraphStatus,
+  type GraphModeContext,
+} from "../harness/graph/mode.js";
 import { createTraceRouter } from "../traceserver/serve.js";
 import {
   resolveDefaultWebRoot,
@@ -60,6 +66,9 @@ export type SessionHttpServerOptions = {
   /** 可变 permission mode holder（与 hub 共用同一 context 实例）。
    *  在场 → GET/POST /api/v1/permission-mode 可用；缺席 → 两端点 404。 */
   permissionMode?: PermissionModeContext;
+  /** D-α V1 / ADR-0030:可变 graph overlay holder（与 hub 共用同一实例）。
+   *  在场 → GET/POST /api/v1/graph-mode 可用；缺席 → 两端点 404。 */
+  graphMode?: GraphModeContext;
   /**
    * ADR-0020: mount the trace inspection read API in-process. When present,
    * `/api/v1/traces*` routes (incl. `/api/v1/traces/sessions`) and the
@@ -109,6 +118,7 @@ export function createSessionHttpServer(
       contextWindow,
       model: opts.model,
       permissionMode: opts.permissionMode,
+      graphMode: opts.graphMode,
       traceRouter,
     });
   });
@@ -153,6 +163,8 @@ interface HandleOpts {
   readonly model?: string;
   /** 可变 permission mode holder（缺席 → permission-mode 端点 404）。 */
   readonly permissionMode?: PermissionModeContext;
+  /** 可变 graph overlay holder（缺席 → graph-mode 端点 404）。 */
+  readonly graphMode?: GraphModeContext;
   /** ADR-0020: mounted trace router (undefined = trace not mounted). */
   readonly traceRouter?: (
     req: http.IncomingMessage,
@@ -169,6 +181,7 @@ async function handle(opts: HandleOpts): Promise<void> {
     contextWindow,
     model,
     permissionMode,
+    graphMode,
     traceRouter,
   } = opts;
   try {
@@ -226,6 +239,15 @@ async function handle(opts: HandleOpts): Promise<void> {
     // 404，与 trace 未挂载同模式）。
     if (pathname === "/api/v1/permission-mode") {
       return handlePermissionModeRoute({ method, req, res, permissionMode });
+    }
+
+    // D-α V1 / SC3:graph overlay 读取 / `/graph` 对等切换（holder 缺席 →
+    // 404,与 permission-mode 未挂载同模式）。
+    if (pathname === "/api/v1/graph-mode") {
+      // `return await`:非法 args 抛 ValidationError,要落进本函数的
+      // catch → sendError(400)。裸 `return promise` 的 rejection 发生在
+      // try 之外,响应就永远不写、请求挂死。
+      return await handleGraphModeRoute({ method, req, res, graphMode });
     }
 
     // serve-workspace T3: picker bind state + recents/trust roster.
@@ -409,6 +431,60 @@ async function handlePermissionModeRoute(
     return sendJson({ res, status: 200, body });
   }
   return sendNotFound({ res, method, pathname: "/api/v1/permission-mode" });
+}
+
+/** Route context for /api/v1/graph-mode（serve 侧的 `/graph`）。 */
+type GraphModeRouteContext = {
+  method: string;
+  req: http.IncomingMessage;
+  res: http.ServerResponse;
+  graphMode?: GraphModeContext;
+};
+
+/** POST body 取 args：缺省 = 空数组（等价于裸 `/graph` 查询）。 */
+function parseGraphModeArgs(body: unknown): ReadonlyArray<string> {
+  if (body === undefined || body === null) return [];
+  if (typeof body !== "object") {
+    throw new ValidationError("body must be a JSON object");
+  }
+  const raw = (body as { args?: unknown }).args;
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.some((a) => typeof a !== "string")) {
+    throw new ValidationError("args must be an array of strings", {
+      field: "args",
+    });
+  }
+  return raw as ReadonlyArray<string>;
+}
+
+/**
+ * GET → 当前 overlay 状态；POST（body `{ args }`）→ 走 SSOT
+ * `applyGraphCommand`（与 chat / TUI 的 `/graph` 同一套值域与文案）。
+ * 非法 args 是 typed 拒绝（ValidationError → 400），holder 不动 —— serve
+ * 侧「猜用户意思」比报错更糟。holder 缺席 / 其它 method → 404。
+ */
+async function handleGraphModeRoute(ctx: GraphModeRouteContext): Promise<void> {
+  const { method, req, res, graphMode } = ctx;
+  const pathname = "/api/v1/graph-mode";
+  if (graphMode === undefined) return sendNotFound({ res, method, pathname });
+  if (method === "GET") {
+    const body: GraphModeResponse = {
+      enabled: graphMode.get().enabled,
+      message: formatGraphStatus(graphMode.get()),
+    };
+    return sendJson({ res, status: 200, body });
+  }
+  if (method === "POST") {
+    const args = parseGraphModeArgs(await readJsonBody(req));
+    const applied = applyGraphCommand(graphMode, args);
+    if (!applied.ok) throw new ValidationError(applied.text, { field: "args" });
+    const body: GraphModeResponse = {
+      enabled: graphMode.get().enabled,
+      message: applied.text,
+    };
+    return sendJson({ res, status: 200, body });
+  }
+  return sendNotFound({ res, method, pathname });
 }
 
 /** Route context for /sessions/:id(...) dispatch (keeps param count ≤ 4). */

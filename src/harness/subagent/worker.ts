@@ -40,6 +40,8 @@ import {
 } from "../index.js";
 import { createDefaultAciRegistry } from "../aci/tools/registry.js";
 import { createAciExecutor } from "../aci/index.js";
+import type { AciCatalog } from "../aci/types.js";
+import { deriveFileRefs, writeToolNamesFrom } from "./file-refs.js";
 import { createPermissionPolicy } from "../permission/policy.js";
 import { createNoAskUser } from "../permission/ask-user.js";
 import { createIknowSystemResolver } from "../identity/index.js";
@@ -248,6 +250,24 @@ export interface CreateWorkerDepsOptions {
 export async function createWorkerDeps(
   opts: CreateWorkerDepsOptions
 ): Promise<LoopEngineDeps> {
+  return (await createWorkerRuntime(opts)).deps;
+}
+
+/**
+ * D-α 观测地板: `createWorkerDeps` 的全量装配产物。
+ *
+ * `createWorkerDeps` 只透出 `deps`(既有 seam, 全部现存 caller 不变);
+ * 生产入口 `runSubagentWorker` 走本函数, 额外拿到 ACI catalog —— fileRefs
+ * 需要按 `aci.category === "write"` 派生工具名, 而 `LoopEngineDeps` 只带
+ * 无 ACI 元数据的 `registry`。不把 catalog 塞进 deps: `LoopEngineDeps` 是
+ * loop-engine 的契约面, 加一个只有 worker 消费的字段会污染它。
+ */
+export async function createWorkerRuntime(
+  opts: CreateWorkerDepsOptions
+): Promise<{
+  readonly deps: LoopEngineDeps;
+  readonly catalog: AciCatalog;
+}> {
   const { env, sandboxRoot } = opts;
   const userHome = opts.userHome ?? homedir();
   const cwd = opts.cwd ?? process.cwd();
@@ -381,9 +401,43 @@ export async function createWorkerDeps(
   // 测试缝: opts.maxTurns 覆盖 env 默认值。LoopEngineDeps.maxTurns 是
   // readonly, 必须新建对象 (不变量: 不修改 deps 而是返回新 deps, 与
   // runWorkerOnce 的 { ...deps, maxTurns } 形态一致)。
-  return opts.maxTurns !== undefined
-    ? { ...deps, maxTurns: opts.maxTurns }
-    : deps;
+  return {
+    deps:
+      opts.maxTurns !== undefined ? { ...deps, maxTurns: opts.maxTurns } : deps,
+    catalog: reg.catalog,
+  };
+}
+
+/**
+ * envelope 观测字段的派生源 (D-α 地板)。
+ *
+ * `writeToolNames` 缺席 → 不派生 fileRefs。刻意不在 worker 内兜底一份硬编码
+ * 名单: 唯一真值是 ACI catalog 的 `category:"write"` (见 file-refs.ts),
+ * 装配路径 (runSubagentWorker) 负责把它传进来。
+ */
+export interface EnvelopeObservabilityOpts {
+  readonly writeToolNames?: ReadonlySet<string>;
+}
+
+/**
+ * D-α 观测地板: 由 RunResult 派生 envelope 的两个观测字段。
+ *
+ * `stop_reason` 恒填 (run() 一定有 stopReason); `fileRefs` 仅在调用方给出
+ * write 工具名集合 (从 ACI catalog 的 `category:"write"` 派生) 且确有写路径
+ * 时落值 —— Postel: 无派生源 / 无写操作都不写 key, 与 V1 逐位兼容。
+ */
+function observabilityFields(
+  result: import("../model-adapter/types.js").RunResult,
+  opts?: EnvelopeObservabilityOpts
+): Pick<SubAgentEnvelope, "stop_reason" | "fileRefs"> {
+  const refs =
+    opts?.writeToolNames !== undefined
+      ? deriveFileRefs(result.messages, opts.writeToolNames)
+      : [];
+  return {
+    stop_reason: result.stopReason,
+    ...(refs.length > 0 ? { fileRefs: refs } : {}),
+  };
 }
 
 /**
@@ -392,12 +446,14 @@ export async function createWorkerDeps(
  * result 字段 = finalText ?? "" (浓缩结果); summary 同源 (V1 无独立
  * 摘要段, 与 finalText 同一真值, 保证父代理 drain 不会拿到空 summary)。
  * usage 透传 RunResult.lastUsage (字段缺席 = 无成功模型调用)。
+ * D-α: 追加 stop_reason (恒填) 与 fileRefs (有写操作时填)。
  *
  * 导出: 测试 seam — 直接验证 envelope 派生逻辑, 不依赖 loop-engine
  * 完整装配 (后者单测用 createStubModel + 全 deps)。
  */
 export function toOkEnvelope(
-  result: import("../model-adapter/types.js").RunResult
+  result: import("../model-adapter/types.js").RunResult,
+  opts?: EnvelopeObservabilityOpts
 ): SubAgentEnvelope {
   const text = result.finalText ?? "";
   return {
@@ -405,6 +461,7 @@ export function toOkEnvelope(
     summary: text,
     result: text,
     ...(result.lastUsage !== null ? { usage: result.lastUsage } : {}),
+    ...observabilityFields(result, opts),
   };
 }
 
@@ -412,16 +469,22 @@ export function toOkEnvelope(
  *  导出: 测试 seam — 直接验证 reason 四值各自的 envelope 形态。
  *  #358 T3 (additive): 第二参 summary 可选 — SIGTERM 优雅收尾时携带
  *  worker 自跑收尾摘要轮的 stop_summary 文本;不传时行为与旧签名逐位一致
- *  (空串), 不 breaking 既有 callers。 */
+ *  (空串), 不 breaking 既有 callers。
+ *  D-α (additive): 第三参 extras 承载 stop_reason / fileRefs —— 只有从
+ *  run() 返回值派生的失败路径 (protocolError / emptyFinalResponse / fused /
+ *  SIGTERM 收尾) 有这两个真值; 抛错路径 (MaxTurnsExceeded / ProtocolError
+ *  throw) 无 RunResult, 字段缺席。 */
 export function toFailedEnvelope(
   reason: SubAgentEnvelope["reason"],
-  summary = ""
+  summary = "",
+  extras: Pick<SubAgentEnvelope, "stop_reason" | "fileRefs"> = {}
 ): SubAgentEnvelope {
   return {
     status: "failed",
     reason,
     summary,
     result: "",
+    ...extras,
   };
 }
 
@@ -515,8 +578,18 @@ function priorMessagesFromEnvelope(
 export async function runWorkerOnce(opts: {
   readonly workerEnvelope: WorkerEnvelope;
   readonly deps: LoopEngineDeps;
+  /**
+   * D-α 观测地板: ACI catalog 派生的 write 类工具名 (fileRefs 的派生源)。
+   * 生产路径由 runSubagentWorker 从 createWorkerRuntime 的 catalog 算出;
+   * 缺席 → 不派生 fileRefs (stop_reason 不受影响, 恒填)。
+   */
+  readonly writeToolNames?: ReadonlySet<string>;
 }): Promise<SubAgentEnvelope> {
   const { workerEnvelope: env, deps } = opts;
+  const observability: EnvelopeObservabilityOpts =
+    opts.writeToolNames !== undefined
+      ? { writeToolNames: opts.writeToolNames }
+      : {};
   // #358 T2 / D8: 只应用 maxTurns 覆盖, timeoutMs 不进 deps (per-call 语义)。
   const runDeps = applyEnvelopeOverrides(env, deps);
   // #358 T3: SIGTERM → abort("subagent-timeout")。worker 由父 manager per-task
@@ -543,14 +616,26 @@ export async function runWorkerOnce(opts: {
     // 却带 protocolError stopReason 会误判子代理成功 (SC6 / SC13)。
     if (result.stopReason === "fused") {
       log(`run() stopReason=fused`);
-      return truncateEnvelopeResult(toFailedEnvelope("protocolError", "fused"));
+      return truncateEnvelopeResult(
+        toFailedEnvelope(
+          "protocolError",
+          "fused",
+          observabilityFields(result, observability)
+        )
+      );
     }
     if (
       result.stopReason === "protocolError" ||
       result.stopReason === "emptyFinalResponse"
     ) {
       log(`run() stopReason=${result.stopReason}`);
-      return truncateEnvelopeResult(toFailedEnvelope("protocolError"));
+      return truncateEnvelopeResult(
+        toFailedEnvelope(
+          "protocolError",
+          "",
+          observabilityFields(result, observability)
+        )
+      );
     }
     // #358 T3 超时收尾: stopReason=cancelled 且确系本 worker 的 SIGTERM
     // abort (signal.reason === "subagent-timeout"; 工具侧 cancelled 不误标)。
@@ -565,10 +650,14 @@ export async function runWorkerOnce(opts: {
         }`
       );
       return truncateEnvelopeResult(
-        toFailedEnvelope("timeout", summary.length > 0 ? summary : "")
+        toFailedEnvelope(
+          "timeout",
+          summary.length > 0 ? summary : "",
+          observabilityFields(result, observability)
+        )
       );
     }
-    return truncateEnvelopeResult(toOkEnvelope(result));
+    return truncateEnvelopeResult(toOkEnvelope(result, observability));
   } catch (err) {
     if (err instanceof MaxTurnsExceeded) {
       return truncateEnvelopeResult(toFailedEnvelope("maxTurnsExceeded"));
@@ -649,7 +738,7 @@ export async function runSubagentWorker(): Promise<void> {
   const input = await readStdin();
   const workerEnvelope = parseWorkerEnvelope(input);
   const env = loadIknowEnv();
-  const deps = await createWorkerDeps({
+  const { deps, catalog } = await createWorkerRuntime({
     env,
     sandboxRoot: workerEnvelope.sandboxRoot,
     disallowedTools: workerEnvelope.disallowedTools,
@@ -672,7 +761,13 @@ export async function runSubagentWorker(): Promise<void> {
         }
       : {}),
   });
-  const result = await runWorkerOnce({ workerEnvelope, deps });
+  // D-α 观测地板: fileRefs 的派生源 = 本 worker 实际装配出的 ACI catalog
+  // 里 category:"write" 的工具名 (def-list 期裁剪后的真实工具面)。
+  const result = await runWorkerOnce({
+    workerEnvelope,
+    deps,
+    writeToolNames: writeToolNamesFrom(catalog),
+  });
   process.stdout.write(JSON.stringify(result) + "\n");
   process.exit(0);
 }

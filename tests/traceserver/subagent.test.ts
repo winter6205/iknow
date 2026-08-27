@@ -361,10 +361,21 @@ describe("TRACE_FIELD_DEFS — #358 T5 subagent columns", () => {
   ] as const;
 
   it("declares subagentId / taskId / origin for all three subagent record types", () => {
-    for (const key of ["subagentId", "taskId", "origin"] as const) {
+    assert.deepEqual(
+      byKey.get("subagentId")?.recordTypes,
+      subagentTypes,
+      "subagentId scope"
+    );
+    // taskId / origin 是关联列, 后加的 subagent_step 也带这两个键 (配对键仍是
+    // task_id); subagentId 刻意不覆盖 step —— step 的 id 载体是 subagentStepId。
+    for (const key of ["taskId", "origin"] as const) {
       const def = byKey.get(key);
       assert.ok(def, `${key} must be declared`);
-      assert.deepEqual(def.recordTypes, subagentTypes, `${key} scope`);
+      assert.deepEqual(
+        def.recordTypes,
+        [...subagentTypes, "subagent_step"],
+        `${key} scope`
+      );
     }
     assert.equal(byKey.get("subagentId")?.jsonlKey, "subagent_id");
     assert.equal(byKey.get("taskId")?.jsonlKey, "task_id");
