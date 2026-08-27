@@ -167,12 +167,13 @@ function compileSearchInput(
       "web_search: query must be a non-empty string"
     );
   }
+  const query = obj.query.trim();
   const endpoint =
     typeof obj.search_url === "string" && obj.search_url.length > 0
       ? obj.search_url
       : (envSearchUrl ?? DEFAULT_SEARCH_ENDPOINT);
   return {
-    query: obj.query,
+    query,
     maxResults: clampMaxResults(obj.max_results),
     endpoint,
   };
@@ -233,9 +234,14 @@ function parseDuckDuckGoResults(
 /** Bing 解析：li.b_algo 结果块 → h2>a（title + href）+ div.b_caption（snippet）。 */
 function parseBingResults(body: string, maxResults: number): SearchResult[] {
   const results: SearchResult[] = [];
-  const pattern = /<li class="b_algo"[^>]*>([\s\S]*?)<\/li>/gi;
+  const pattern = /<li\b([^>]*)>([\s\S]*?)<\/li>/gi;
   for (const match of body.matchAll(pattern)) {
-    const block = match[1] ?? "";
+    const attrs = match[1] ?? "";
+    const classMatch = /\bclass="([^"]+)"/i.exec(attrs);
+    if (!classMatch || !/(?:^|\s)b_algo(?:\s|$)/.test(classMatch[1] ?? "")) {
+      continue;
+    }
+    const block = match[2] ?? "";
     const h2Match = /<h2[^>]*>([\s\S]*?)<\/h2>/i.exec(block);
     if (!h2Match) continue;
     const anchor = /<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i.exec(
@@ -247,7 +253,10 @@ function parseBingResults(body: string, maxResults: number): SearchResult[] {
     const captionMatch = /<div class="b_caption"[^>]*>([\s\S]*?)<\/div>/i.exec(
       block
     );
-    const snippet = captionMatch ? cleanHtml(captionMatch[1] ?? "").trim() : "";
+    const paragraphMatch = /<p\b[^>]*>([\s\S]*?)<\/p>/i.exec(block);
+    const snippet = cleanHtml(
+      captionMatch?.[1] ?? paragraphMatch?.[1] ?? ""
+    ).trim();
     if (title.length === 0 || url.length === 0) continue;
     results.push({ title, url, snippet });
     if (results.length >= maxResults) break;
