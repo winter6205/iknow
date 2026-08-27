@@ -53,6 +53,34 @@ function frameLines(setup: Setup): string[] {
   return setup.captureCharFrame().split("\n");
 }
 
+/**
+ * 两块内容行「之间」的空白行数。锚点用内容子串定位，只数两锚点之间的
+ * 区间——testRender 固定高度的帧尾填充行不参与计数。
+ */
+function blankLinesBetween(
+  setup: Setup,
+  first: string,
+  second: string
+): number {
+  const lines = frameLines(setup);
+  const a = lines.findIndex((l) => l.includes(first));
+  const b = lines.findIndex((l, i) => i > a && l.includes(second));
+  if (a < 0 || b < 0) {
+    throw new Error(
+      `锚点未命中：first=${JSON.stringify(first)}@${a} ` +
+        `second=${JSON.stringify(second)}@${b}`
+    );
+  }
+  return lines.slice(a + 1, b).filter((l) => l.trim() === "").length;
+}
+
+/** 首个内容行之前的空白行数（前导空白）。 */
+function leadingBlankLines(setup: Setup): number {
+  const lines = frameLines(setup);
+  const first = lines.findIndex((l) => l.trim() !== "");
+  return first < 0 ? 0 : first;
+}
+
 /** RGBA 颜色相等（r/g/b 三通道，alpha 略）。 */
 function rgbaEq(a: RGBA, b: RGBA): boolean {
   return a.r === b.r && a.g === b.g && a.b === b.b;
@@ -419,5 +447,47 @@ test("盘古之白负向：html 块不插空格", async () => {
   const frame = setup.captureCharFrame();
   expect(frame).toContain("美股4月");
   expect(frame.includes("美股 4 月")).toBe(false);
+  await setup.renderer.destroy();
+});
+
+// ── 块间距：容器 gap 唯一 SSOT，相邻块恰空一行 ──────────────────────
+
+test("块间距：相邻两段之间恰 1 行空白", async () => {
+  const setup = await renderMd("第一段\n\n第二段");
+  expect(blankLinesBetween(setup, "第一段", "第二段")).toBe(1);
+  await setup.renderer.destroy();
+});
+
+test("块间距：h2 标题与正文之间恰 1 行空白", async () => {
+  const setup = await renderMd("## 标题\n\n正文段落");
+  expect(blankLinesBetween(setup, "标题", "正文段落")).toBe(1);
+  await setup.renderer.destroy();
+});
+
+test("块间距：h1 标题无前导空白行，与正文之间恰 1 行空白", async () => {
+  const setup = await renderMd("# 大标题\n\n正文段落");
+  expect(leadingBlankLines(setup)).toBe(0);
+  expect(blankLinesBetween(setup, "大标题", "正文段落")).toBe(1);
+  await setup.renderer.destroy();
+});
+
+test("块间距：代码块与前后段落各恰 1 行空白（gap 不与 margin 叠加）", async () => {
+  const setup = await renderMd("前置段\n\n```ts\nconst x = 1;\n```\n\n后置段");
+  expect(blankLinesBetween(setup, "前置段", "const x = 1;")).toBe(1);
+  expect(blankLinesBetween(setup, "const x = 1;", "后置段")).toBe(1);
+  await setup.renderer.destroy();
+});
+
+test("块间距：列表与相邻段落各恰 1 行空白，列表项之间无空白行", async () => {
+  const setup = await renderMd("段落\n\n- alpha\n- beta\n\n尾段");
+  expect(blankLinesBetween(setup, "段落", "alpha")).toBe(1);
+  expect(blankLinesBetween(setup, "alpha", "beta")).toBe(0);
+  expect(blankLinesBetween(setup, "beta", "尾段")).toBe(1);
+  await setup.renderer.destroy();
+});
+
+test("块间距：单段落无前导空白行", async () => {
+  const setup = await renderMd("只有一段");
+  expect(leadingBlankLines(setup)).toBe(0);
   await setup.renderer.destroy();
 });
