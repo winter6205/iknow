@@ -49,7 +49,8 @@ export function wrapWithViolationHook(
       onSettled?: (
         result: ToolExecutionResult,
         index: number
-      ) => void | Promise<void>
+      ) => void | Promise<void>,
+      turnId?: string
     ): Promise<ReadonlyArray<ToolExecutionResult>> => {
       const seen = new Set<number>();
       const observe = (r: ToolExecutionResult, i: number): void => {
@@ -79,7 +80,8 @@ export function wrapWithViolationHook(
         async (result, index) => {
           observe(result, index);
           await onSettled?.(result, index);
-        }
+        },
+        turnId
       );
       for (let i = 0; i < out.length; i += 1) {
         const r = out[i];

@@ -112,6 +112,7 @@ function stationOf(
     case "subagent_spawn":
     case "subagent_stop":
     case "subagent_state_change":
+    case "subagent_step":
       return "subagent";
     case "violation": {
       const decision = str(record, "decision") ?? "";
@@ -182,6 +183,14 @@ function labelOf(recordType: TraceRecordType, record: TraceRecord): string {
       const toState = str(record, "to_state") ?? "?";
       return `子代理状态 ${fromState}→${toState}`;
     }
+    case "subagent_step": {
+      // step_index 是 0-based, 展示 1-based 与「回合 N」标签保持一致。
+      const head = `子代理步骤 ${num(record, "step_index") + 1} · ${
+        str(record, "phase") ?? "?"
+      }`;
+      const stepLabel = str(record, "label");
+      return stepLabel ? `${head} · ${stepLabel}` : head;
+    }
     case "turn":
       return `回合 ${num(record, "turn_index") + 1}`;
     case "violation": {
@@ -220,6 +229,11 @@ const STRUCTURAL_KEYS = new Set([
   "exit_code",
   "signal",
   "ts",
+  // subagent_step 列: id 载体 + 步序 / 阶段 / 步骤名都已进标签与列定义。
+  "subagent_step_id",
+  "step_index",
+  "phase",
+  "label",
 ]);
 
 function fieldsOf(

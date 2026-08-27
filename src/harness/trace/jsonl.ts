@@ -29,6 +29,7 @@ import type {
   SubagentSpawnRecord,
   SubagentStopRecord,
   SubagentStateChangeRecord,
+  SubagentStepRecord,
 } from "./types.js";
 
 export interface JsonlTraceOptions {
@@ -158,12 +159,17 @@ export function createJsonlTraceService(
     },
 
     async recordTurn(record: TurnRecord): Promise<string | undefined> {
-      const id = randomUUID();
+      // 调用方预生成的 id 优先 (F-4: 子代理埋点要在回合末尾之前就知道 turn id);
+      // 缺席时退回实现生成。id 键从 snake 副本剔除, 单一载体仍是 turn_id
+      // (与 recordVerification / recordGoal 同形态)。
+      const id = record.id ?? randomUUID();
+      const snake = toSnakeCaseRecord(record);
+      delete snake.id;
       const line: Record<string, unknown> = {
         conversation_id: conversationId,
         record_type: "turn",
         turn_id: id,
-        ...toSnakeCaseRecord(record),
+        ...snake,
       };
       try {
         writeLine(line);
@@ -314,6 +320,28 @@ export function createJsonlTraceService(
         conversation_id: conversationId,
         record_type: "subagent_state_change",
         subagent_id: record.id,
+        ...snake,
+      };
+      try {
+        writeLine(line);
+        return record.id;
+      } catch (err) {
+        warnOnce(err);
+        return undefined;
+      }
+    },
+
+    async recordSubagentStep(
+      record: SubagentStepRecord
+    ): Promise<string | undefined> {
+      // 唯一形态差异: id 载体是 subagent_step_id —— step 的 id 每步唯一,
+      // 与前三类 "id === taskId" 的子代理实例 id 语义不同 (types.ts 注释)。
+      const snake = toSnakeCaseRecord(record);
+      delete snake.id;
+      const line: Record<string, unknown> = {
+        conversation_id: conversationId,
+        record_type: "subagent_step",
+        subagent_step_id: record.id,
         ...snake,
       };
       try {

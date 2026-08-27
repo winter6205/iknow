@@ -25,7 +25,8 @@ export type TraceRecordType =
   | "sandbox_cmd"
   | "subagent_spawn"
   | "subagent_stop"
-  | "subagent_state_change";
+  | "subagent_state_change"
+  | "subagent_step";
 
 export const TRACE_RECORD_TYPES: ReadonlyArray<TraceRecordType> = [
   "llm_call",
@@ -37,6 +38,7 @@ export const TRACE_RECORD_TYPES: ReadonlyArray<TraceRecordType> = [
   "subagent_spawn",
   "subagent_stop",
   "subagent_state_change",
+  "subagent_step",
 ];
 
 /** Raw JSONL row, snake_case keys preserved. Read-only to discourage mutation. */

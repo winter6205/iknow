@@ -289,7 +289,8 @@ export type TraceRecordType =
   | "sandbox_cmd"
   | "subagent_spawn"
   | "subagent_stop"
-  | "subagent_state_change";
+  | "subagent_state_change"
+  | "subagent_step";
 
 export type TraceFieldType =
   "string" | "number" | "boolean" | "enum" | "datetime";

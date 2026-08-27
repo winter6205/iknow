@@ -42,6 +42,13 @@ export interface SubAgentDefinition {
    */
   readonly role?: string;
   /**
+   * Parent-only: 派出这个子代理的那一回合的 trace turn id（F-4）。manager 把它
+   * 抄进 subagent_spawn / _state_change / _stop 三类 record 的 `parentTurnId`，
+   * `?parent_turn_id=` 因此能一次捞出某回合派出的全部子代理。
+   * Not copied onto WorkerEnvelope —— 子进程不需要、也不该知道父侧回合身份。
+   */
+  readonly parentTurnId?: string;
+  /**
    * Parent-only: skip host-drain (wait:false wakeup channel).
    * Judge / wait:true consumers already await waitFor; leaking their
    * envelope into the next user turn would paint it as a user message.

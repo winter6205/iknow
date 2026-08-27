@@ -129,7 +129,8 @@ export interface PermissionRuntime {
     def: AciToolDef | undefined,
     signal?: AbortSignal,
     timeoutMs?: number,
-    conversationId?: string
+    conversationId?: string,
+    turnId?: string
   ) => Promise<ToolExecutionResult>;
 }
 
@@ -237,13 +238,16 @@ export function createPermissionRuntime(
     def: AciToolDef | undefined,
     signal?: AbortSignal,
     timeoutMs?: number,
-    conversationId?: string
+    conversationId?: string,
+    turnId?: string
   ): Promise<ToolExecutionResult> {
     const [result] = await opts.inner.executeAll(
       [call],
       signal,
       timeoutMs,
-      conversationId
+      conversationId,
+      undefined,
+      turnId
     );
     const r = result as ToolExecutionResult;
     if (!def) return r;
@@ -281,7 +285,8 @@ export function createPermissionRuntime(
     onSettled?: (
       result: ToolExecutionResult,
       index: number
-    ) => void | Promise<void>
+    ) => void | Promise<void>,
+    turnId?: string
   ): Promise<ReadonlyArray<ToolExecutionResult>> {
     const out: ToolExecutionResult[] = [];
     for (const [index, call] of calls.entries()) {
@@ -289,7 +294,14 @@ export function createPermissionRuntime(
       const result =
         gate.kind === "blocked"
           ? gate.result
-          : await runAllowed(call, gate.def, signal, timeoutMs, conversationId);
+          : await runAllowed(
+              call,
+              gate.def,
+              signal,
+              timeoutMs,
+              conversationId,
+              turnId
+            );
       await onSettled?.(result, index);
       out.push(result);
     }

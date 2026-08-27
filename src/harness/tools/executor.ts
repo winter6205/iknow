@@ -232,16 +232,19 @@ export function createExecutor(registry: RegistryImpl): Executor {
     call: ToolCall,
     signal?: AbortSignal,
     timeoutMs?: number,
-    conversationId?: string
+    conversationId?: string,
+    turnId?: string
   ): Promise<ToolExecutionResult> {
     const validation = validateCall(registry, call);
     if (!validation.ok) return validation.failure;
     const stop = buildStopSignal(signal, timeoutMs);
     // 017 T5: conversationId 并进 ctx —— tool handler（bash-output / bash-stop）
     // 读 ctx.conversationId 透传给 manager 做 scope filter。字段缺省 = 不过滤。
+    // F-4: turnId 同形态 —— spawn_subagent 读它写进 def.parentTurnId。
     const ctx: ToolExecutionContext = {
       signal: stop.signal,
       ...(conversationId !== undefined ? { conversationId } : {}),
+      ...(turnId !== undefined ? { turnId } : {}),
     };
     try {
       const out =
@@ -285,11 +288,18 @@ export function createExecutor(registry: RegistryImpl): Executor {
     onSettled?: (
       result: ToolExecutionResult,
       index: number
-    ) => void | Promise<void>
+    ) => void | Promise<void>,
+    turnId?: string
   ): Promise<ReadonlyArray<ToolExecutionResult>> {
     const out: ToolExecutionResult[] = [];
     for (const [index, call] of calls.entries()) {
-      const result = await runOne(call, signal, timeoutMs, conversationId);
+      const result = await runOne(
+        call,
+        signal,
+        timeoutMs,
+        conversationId,
+        turnId
+      );
       await onSettled?.(result, index);
       out.push(result);
     }

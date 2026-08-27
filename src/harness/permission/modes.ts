@@ -137,6 +137,19 @@ export interface ShiftTabKeyShape {
 }
 
 /**
+ * The Shift+Tab keystroke guard, shared by every mode cycle that hangs off
+ * this keystroke: `key.name === "tab" && key.shift && !key.ctrl && !key.meta`.
+ *
+ * SSOT so the single-axis permission flip below and the graph-mode overlay's
+ * tri-state cycle (`harness/graph/mode.ts`) can never diverge on what counts
+ * as Shift+Tab.
+ */
+export function isShiftTabKey(key: ShiftTabKeyShape | undefined): boolean {
+  if (!key) return false;
+  return key.name === "tab" && !!key.shift && !key.ctrl && !key.meta;
+}
+
+/**
  * Apply a Shift+Tab keystroke to the permission mode.
  *
  * Guards: `key.name === "tab" && key.shift && !key.ctrl && !key.meta`.
@@ -154,9 +167,7 @@ export function applyShiftTabModeFlip(opts: {
   readonly ctx: PermissionModeContext | undefined;
   readonly onFlip: (next: PermissionMode) => void;
 }): boolean {
-  const k = opts.key;
-  if (!k) return false;
-  if (k.name !== "tab" || !k.shift || k.ctrl || k.meta) return false;
+  if (!isShiftTabKey(opts.key)) return false;
   const modeCtx = opts.ctx;
   if (!modeCtx) return false;
   const next = nextShiftTabMode(modeCtx.get());
