@@ -10,6 +10,23 @@ export interface SeccompProfile {
   readonly fd: number;
 }
 
+/**
+ * Extra system trees that packaged host tools live in (Chrome under `/opt`,
+ * snap apps under `/snap`). Bound read-only when present — same class as
+ * `/usr`, not a per-binary allowlist. Absent prefixes stay off argv because
+ * bwrap rejects a missing bind source.
+ */
+export const OPTIONAL_HOST_RO_PREFIXES: readonly string[] = Object.freeze([
+  "/opt",
+  "/snap",
+]);
+
+function optionalHostRoBindArgs(): string[] {
+  return OPTIONAL_HOST_RO_PREFIXES.flatMap((path) =>
+    existsSync(path) ? ["--ro-bind", path, path] : []
+  );
+}
+
 export interface BwrapFenceOptions {
   readonly command: string;
   readonly args: readonly string[];
@@ -140,6 +157,7 @@ function baseArgs(
     "--ro-bind",
     "/etc",
     "/etc",
+    ...optionalHostRoBindArgs(),
     ...bindArgs(fsPolicy, cwd, overlaySensitivePaths, cwdReadonly),
     "--size",
     String(resources.tmp),

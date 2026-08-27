@@ -94,6 +94,7 @@ addSyncCheck("env isolation", 'test -z "$ANTHROPIC_AUTH_TOKEN"');
 addSyncCheck("fs sensitivity (ssh hidden)", "test ! -e ~/.ssh/id_rsa");
 addSyncCheck("/etc readonly", "touch /etc/sandbox-probe-write", false, true);
 addSyncCheck("cwd writable", "touch probe-write && rm probe-write && echo ok");
+addSyncCheck("host prefix /opt", "test ! -d /opt -o -r /opt");
 addSyncCheck(
   "network denied",
   "curl -sS --max-time 5 https://example.com",

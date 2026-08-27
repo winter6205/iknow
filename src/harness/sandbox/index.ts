@@ -40,7 +40,7 @@ export type { EnvIsolation, EnvIsolationOptions } from "./env-isolation.js";
 export { createOutputMask } from "./output-mask.js";
 export type { OutputMask } from "./output-mask.js";
 
-export { createBwrapFence } from "./bwrap.js";
+export { createBwrapFence, OPTIONAL_HOST_RO_PREFIXES } from "./bwrap.js";
 export type { BwrapFence, BwrapFenceOptions, SeccompProfile } from "./bwrap.js";
 
 export {

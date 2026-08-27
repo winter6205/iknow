@@ -234,6 +234,27 @@ describe("bash.timeout.partialOutput", () => {
   );
 });
 
+describe("bash.bwrap.hostPrefixes (real spawn)", () => {
+  it.skipIf(!hasBwrap())(
+    "optional host prefix /opt is visible inside the default fence when it exists",
+    async () => {
+      const cwd = await makeScratch("bash-host-prefix-");
+      const tool = createBashTool(cwd);
+      const result = (await tool.handler({
+        command:
+          "if [ -d /opt ]; then test -r /opt && echo visible; else echo absent; fi",
+      })) as { code: number; stdout: string; stderr: string };
+      assert.equal(result.code, 0, result.stderr);
+      if (existsSync("/opt")) {
+        assert.match(result.stdout, /visible/);
+      } else {
+        assert.match(result.stdout, /absent/);
+      }
+    },
+    15_000
+  );
+});
+
 describe("bash.readonly 双闸 (real spawn)", () => {
   // Phase 0 验收:"explore 角色 bash 写操作被 validator 拦 + fence EROFS 兜底"。
   // 两闸的分工只有真跑 bwrap 才看得出来 —— validator 是策略闸(命令层),
