@@ -213,6 +213,48 @@ describe("assembleSystemPrompt", () => {
     assert.ok(!out.includes("### "), "no promote segment expected");
   });
 
+  // -- user static layer root (#732) -----------------------------------------
+
+  it("reads the user layer from userHome even when workspaceRoot is set", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "assembly-ws-"));
+    written.push(workspaceRoot);
+    await mkdirP(join(workspaceRoot, ".iknow", "rules"));
+    await write(join(workspaceRoot, ".iknow", "AGENTS.md"), "WS AGENTS");
+    await write(join(workspaceRoot, ".iknow", "rules", "ws1.md"), "WS RULE");
+    await mkdirP(join(userHome, ".iknow", "rules"));
+    await write(join(userHome, ".iknow", "AGENTS.md"), "USER AGENTS");
+    await write(join(userHome, ".iknow", "rules", "user1.md"), "USER RULE");
+    await write(join(cwd, "AGENTS.md"), "PROJECT AGENTS");
+
+    const out = await assembleSystemPrompt(ctx({ workspaceRoot }));
+
+    assert.ok(out.includes("USER AGENTS"), "user AGENTS.md from userHome");
+    assert.ok(out.includes("USER RULE"), "user rules from userHome");
+    assert.ok(out.includes("PROJECT AGENTS"), "project layer still from cwd");
+    assert.ok(out.includes(PRIORITY_DECLARATION), "priority declaration kept");
+    assert.ok(
+      !out.includes("WS AGENTS"),
+      "workspaceRoot/.iknow/AGENTS.md is not a user layer"
+    );
+    assert.ok(
+      !out.includes("WS RULE"),
+      "workspaceRoot/.iknow/rules is not a user layer"
+    );
+    assert.ok(
+      out.indexOf("USER AGENTS") < out.indexOf(PRIORITY_DECLARATION),
+      "user layer still precedes the priority declaration"
+    );
+  });
+
+  it("treats a missing user layer as empty when workspaceRoot is set", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "assembly-ws-"));
+    written.push(workspaceRoot);
+    await write(join(cwd, "AGENTS.md"), "PROJECT ONLY");
+
+    const out = await assembleSystemPrompt(ctx({ workspaceRoot }));
+    assert.equal(out, "PROJECT ONLY");
+  });
+
   // -- all-layers-absent edge ------------------------------------------------
 
   it("emits only the existence pointer when all three layers are absent", async () => {

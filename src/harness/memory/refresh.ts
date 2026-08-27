@@ -55,17 +55,16 @@ export function createSystemResolver(
 async function discover(
   ctx: AssemblyContext
 ): Promise<ReadonlyArray<MemoryLayerEntry>> {
-  // ADR-0019 (T2):user-scope physical root 与 assembleSystemPrompt 同源
-  // (ctx.workspaceRoot ?? ctx.userHome),否则 mtime 跟踪 userHome 路径但
-  // 装配读 workspaceRoot 路径 → 缓存与实际内容漂移,per-root 编辑不触发
-  // refresh(回归风险)。
-  const userRoot = ctx.workspaceRoot ?? ctx.userHome;
+  // 用户静态层物理根与 assembleSystemPrompt 同源 = `ctx.userHome`
+  // (ADR-0019 的 workspaceRoot 只锚 per-root state,不锚用户层)。两处必须
+  // 同源,否则 mtime 跟踪的路径与装配读的路径不同 → 缓存与实际内容漂移,
+  // 编辑用户层不触发 refresh(回归风险)。
   const [projectAgents, userAgents, projectRules, userRules] =
     await Promise.all([
       findProjectAgents(ctx.cwd),
-      findUserAgents(userRoot),
+      findUserAgents(ctx.userHome),
       listRulesFiles(ctx.cwd, "project"),
-      listRulesFiles(userRoot, "user"),
+      listRulesFiles(ctx.userHome, "user"),
     ]);
   return [userAgents, ...userRules, projectAgents, ...projectRules].filter(
     (entry): entry is MemoryLayerEntry => entry !== null

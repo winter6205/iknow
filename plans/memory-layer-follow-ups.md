@@ -42,4 +42,4 @@ dream 合并、中文 BM25、默认 TTL、硬删、跨项目事实库、改 cap�
    - **Inherits:** spec SC3；ADR-0009 用户层路径；CONTEXT `user-level AGENTS.md`；项目层仍 `<cwd>/AGENTS.md`
    - **Surface:** `src/harness/memory` discovery/assembly（用户静态层根 = `userHome`，不是 workspaceRoot）
    - **Acceptance:** userHome 全局 AGENTS + cwd 项目 AGENTS 同时出现在装配结果且含项目优先声明；workspace 下 `.iknow/AGENTS.md` 不进入用户级层；缺全局文件不 fail 会话
-   - Status: [ ] pending
+   - Status: [x] done
