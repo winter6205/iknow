@@ -23,6 +23,7 @@ import { randomBytes as nodeRandomBytes } from "node:crypto";
 import { scoreMemoryEntries } from "./bm25.js";
 import { MemoryExtractError } from "./errors.js";
 import { runMemoryGc, type MemoryGcResult } from "./gc.js";
+import { normalizeMemoryType } from "./schema.js";
 import type { MemoryEntryV1 } from "./schema.js";
 import { listStoreEntries, type StoredMemoryEntry } from "./store.js";
 import {
@@ -413,8 +414,9 @@ function toCandidate(raw: unknown): MemoryCandidate | null {
 
   if (validateAffirmativePhrasing(title, body) !== null) return null;
 
-  const type =
-    typeof o.type === "string" && o.type.length > 0 ? o.type : "note";
+  // Closed enum (#731): the model is free to invent a label, but only the
+  // five legal values survive; anything else lands as `note`.
+  const type = normalizeMemoryType(o.type);
   return { title, body, type, importance: clampImportance(o.importance) };
 }
 

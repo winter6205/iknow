@@ -7,10 +7,13 @@
  */
 export { resolveProjectMemoryDir, resolveUserMemoryDir } from "./paths.js";
 
-export type { MemoryEntryV1, MemoryFileV1 } from "./schema.js";
+export type { MemoryEntryV1, MemoryFileV1, MemoryType } from "./schema.js";
 export {
   CURRENT_MEMORY_SCHEMA_VERSION,
+  DEFAULT_MEMORY_TYPE,
+  MEMORY_TYPES,
   defaultMemoryEntry,
+  normalizeMemoryType,
   sanitizeMemoryFile,
 } from "./schema.js";
 

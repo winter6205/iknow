@@ -36,7 +36,7 @@ dream 合并、中文 BM25、默认 TTL、硬删、跨项目事实库、改 cap�
    - **Inherits:** spec SC2；CONTEXT `memory_type` 五值；非法/空 → `note` 且写入成功
    - **Surface:** `src/harness/memory` save + ingest persist（同一规范化）
    - **Acceptance:** `memory_save` 与自动 persist 对非法或省略 type 落盘 `note` 且成功；合法五值原样保留
-   - Status: [ ] pending
+   - Status: [x] done
 
 3. **[parallel] User-level AGENTS.md at userHome** — tag: `[implementation]` (#732)
    - **Inherits:** spec SC3；ADR-0009 用户层路径；CONTEXT `user-level AGENTS.md`；项目层仍 `<cwd>/AGENTS.md`

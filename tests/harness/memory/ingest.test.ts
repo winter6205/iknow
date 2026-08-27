@@ -264,6 +264,94 @@ describe("extractMemoryCandidates", () => {
   });
 });
 
+// -- closed memory_type enum (#731) ------------------------------------------
+
+describe("extractMemoryCandidates — closed memory_type enum", () => {
+  const extractTypes = async (
+    types: ReadonlyArray<unknown>
+  ): Promise<ReadonlyArray<string>> => {
+    const llm = llmReturning(
+      JSON.stringify(
+        types.map((type, i) => ({
+          title: `Title ${i}`,
+          body: `Body ${i}`,
+          ...(type === undefined ? {} : { type }),
+          confidence: 0.9,
+        }))
+      )
+    );
+    const out = await extractMemoryCandidates(TRANSCRIPT, llm);
+    return out.map((c) => c.type);
+  };
+
+  it("preserves the five legal types verbatim", async () => {
+    const legal = ["convention", "decision", "gotcha", "constraint", "note"];
+    assert.deepEqual(await extractTypes(legal), legal);
+  });
+
+  it("normalizes an illegal, missing, or non-string type to note", async () => {
+    assert.deepEqual(await extractTypes(["weird", undefined, "", 7]), [
+      "note",
+      "note",
+      "note",
+      "note",
+    ]);
+  });
+
+  it("normalizes a case-variant type to note (exact match only)", async () => {
+    assert.deepEqual(await extractTypes(["Gotcha", " note "]), [
+      "note",
+      "note",
+    ]);
+  });
+
+  it("persists an illegal extracted type as note through a full ingest", async () => {
+    const llm = llmReturning(
+      JSON.stringify([
+        {
+          title: "Use bar() for concurrency",
+          body: "bar() is the thread-safe entry point in this repo.",
+          type: "weird",
+          confidence: 0.9,
+        },
+      ])
+    );
+    const result = await ingestMemory({
+      memoryDir,
+      transcript: TRANSCRIPT,
+      llm,
+      now: () => NOW_ISO,
+      randomBytes: seqBytes(),
+    });
+    assert.equal(result.written.length, 1);
+    const written = await readSlug(result.written[0]!.slug);
+    assert.equal(written.type, "note");
+  });
+
+  it("persists a legal extracted type verbatim through a full ingest", async () => {
+    const llm = llmReturning(
+      JSON.stringify([
+        {
+          title: "Use bar() for concurrency",
+          body: "bar() is the thread-safe entry point in this repo.",
+          type: "convention",
+          confidence: 0.9,
+        },
+      ])
+    );
+    const result = await ingestMemory({
+      memoryDir,
+      transcript: TRANSCRIPT,
+      llm,
+      now: () => NOW_ISO,
+      randomBytes: seqBytes(),
+    });
+    assert.equal(result.written.length, 1);
+    const written = await readSlug(result.written[0]!.slug);
+    assert.equal(written.type, "convention");
+  });
+});
+
 // -- decideMemoryOps ---------------------------------------------------------
 
 describe("decideMemoryOps", () => {
