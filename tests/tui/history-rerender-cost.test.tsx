@@ -41,6 +41,8 @@ const TURNS = 24;
 // 相互污染计数。
 
 const HISTORY_TAG = "history-rerender-cost";
+/** 每个用例一份专属正文：markdown 解析缓存是模块级的，共用正文会让「首次
+ *  挂载必须真的解析过历史」的空转守卫被上一个用例的缓存命中打掉。 */
 const historyTexts = new Set<string>();
 let historyLexCalls = 0;
 let totalLexCalls = 0;
@@ -70,8 +72,8 @@ function resetLexCounters(): void {
 
 // ── 会话构造：一轮 = user 提问 + assistant（thinking + 工具 + markdown）+ tool_result ──
 
-function assistantBody(turn: number): string {
-  return `这是第 ${turn} 轮的结论（${HISTORY_TAG}）。
+function assistantBody(nonce: string, turn: number): string {
+  return `这是第 ${turn} 轮的结论（${HISTORY_TAG} / ${nonce}）。
 
 ## 结论
 
@@ -88,15 +90,15 @@ export function selectViewportMountWindow(messages, opts) {
 后续继续验证第 ${turn} 轮的假设。`;
 }
 
-function assistantLead(turn: number): string {
-  return `先看一下第 ${turn} 轮涉及的文件（${HISTORY_TAG}）。`;
+function assistantLead(nonce: string, turn: number): string {
+  return `先看一下第 ${turn} 轮涉及的文件（${HISTORY_TAG} / ${nonce}）。`;
 }
 
-function turnMessages(turn: number): AnthropicNativeMessage[] {
-  const idA = `toolu_${HISTORY_TAG}_${turn}_a`;
-  const idB = `toolu_${HISTORY_TAG}_${turn}_b`;
-  const lead = assistantLead(turn);
-  const body = assistantBody(turn);
+function turnMessages(nonce: string, turn: number): AnthropicNativeMessage[] {
+  const idA = `toolu_${nonce}_${turn}_a`;
+  const idB = `toolu_${nonce}_${turn}_b`;
+  const lead = assistantLead(nonce, turn);
+  const body = assistantBody(nonce, turn);
   historyTexts.add(lead);
   historyTexts.add(body);
   const assistantContent: AnthropicContentBlock[] = [
@@ -144,12 +146,12 @@ function turnMessages(turn: number): AnthropicNativeMessage[] {
   ];
 }
 
-function sessionWithTurns(turns: number): TuiSessionState {
+function sessionWithTurns(nonce: string, turns: number): TuiSessionState {
   const messages: AnthropicNativeMessage[] = [];
-  for (let k = 0; k < turns; k++) messages.push(...turnMessages(k));
+  for (let k = 0; k < turns; k++) messages.push(...turnMessages(nonce, k));
   const file: SessionFileV1 = {
     schemaVersion: 1,
-    conversation_id: `${HISTORY_TAG}-session`,
+    conversation_id: `${nonce}-session`,
     messages,
     turnCount: turns,
     updatedAt: "2026-08-27T00:00:00.000Z",
@@ -165,6 +167,8 @@ interface HarnessApi {
   setDraft(text: string): void;
   /** 输入框按键 / 1Hz tick：只改与 ChatView props 无关的父状态。 */
   bumpUnrelated(): void;
+  /** 终端 resize：改 cols（历史消息必然重渲染，memo 拦不住）。 */
+  setCols(cols: number): void;
 }
 
 function Harness(props: {
@@ -173,6 +177,7 @@ function Harness(props: {
 }): ReturnType<typeof ChatView> {
   const [draft, setDraft] = useState("");
   const [, setUnrelated] = useState(0);
+  const [cols, setCols] = useState(COLS);
   // app.tsx 侧 draftSegments 是 state（引用稳定）；harness 同样稳定，否则
   // useDeferredValue 每次父渲染都多跑一遍，污染 parent 模式计数。
   const segments = useMemo(() => (draft === "" ? [] : [draft]), [draft]);
@@ -180,12 +185,13 @@ function Harness(props: {
     props.register({
       setDraft,
       bumpUnrelated: () => setUnrelated((n) => n + 1),
+      setCols,
     });
   }, []);
   return (
     <ChatView
       session={props.session}
-      cols={COLS}
+      cols={cols}
       rows={ROWS}
       liveToolLines={[]}
       liveToolRuns={[]}
@@ -194,14 +200,14 @@ function Harness(props: {
   );
 }
 
-async function mountChat(): Promise<{
+async function mountChat(nonce: string): Promise<{
   readonly setup: Awaited<ReturnType<typeof testRender>>;
   readonly api: HarnessApi;
 }> {
   const holder: { api: HarnessApi | null } = { api: null };
   const setup = await testRender(
     <Harness
-      session={sessionWithTurns(TURNS)}
+      session={sessionWithTurns(nonce, TURNS)}
       register={(api) => {
         holder.api = api;
       }}
@@ -215,7 +221,7 @@ async function mountChat(): Promise<{
 
 test("流式增量：24 轮历史挂载后，已挂载历史消息不再重跑 markdown lexer", async () => {
   resetLexCounters();
-  const { setup, api } = await mountChat();
+  const { setup, api } = await mountChat("stream");
   // 首次挂载必须真的解析过历史，否则本用例为空转。
   expect(historyLexCalls).toBeGreaterThan(0);
 
@@ -237,7 +243,7 @@ test("流式增量：24 轮历史挂载后，已挂载历史消息不再重跑 m
 
 test("无关父状态更新（按键 / tick）：不触发任何 markdown lexer", async () => {
   resetLexCounters();
-  const { setup, api } = await mountChat();
+  const { setup, api } = await mountChat("parent");
   expect(historyLexCalls).toBeGreaterThan(0);
 
   await act(async () => {
@@ -254,4 +260,36 @@ test("无关父状态更新（按键 / tick）：不触发任何 markdown lexer"
   expect(historyLexCalls).toBe(0);
   expect(totalLexCalls).toBe(0);
   await setup.renderer.destroy();
+});
+
+test("终端 resize（cols 变化）：历史消息重新排版，但正文不重跑 markdown lexer", async () => {
+  resetLexCounters();
+  const { setup, api } = await mountChat("resize");
+  expect(historyLexCalls).toBeGreaterThan(0);
+
+  // resize 让每条历史消息的 cols prop 都变化 —— memo 必然失效，只有按 text
+  // 记忆的解析结果能挡住重解析（markdown 解析与宽度无关，换行由渲染层做）。
+  resetLexCounters();
+  await act(async () => {
+    api.setCols(COLS - 20);
+  });
+  await setup.waitForVisualIdle();
+
+  expect(historyLexCalls).toBe(0);
+  await setup.renderer.destroy();
+});
+
+test("历史消息重新挂载（滚出视口再滚回）：同一段正文不重跑 markdown lexer", async () => {
+  resetLexCounters();
+  const first = await mountChat("remount");
+  expect(historyLexCalls).toBeGreaterThan(0);
+  await first.setup.renderer.destroy();
+
+  // 视口挂载会把滚出去的消息整棵卸载，回滚时组件重新 mount —— 组件内的
+  // useMemo 记忆随之丢失，只有跨实例的解析缓存能挡住重解析。
+  resetLexCounters();
+  const second = await mountChat("remount");
+
+  expect(historyLexCalls).toBe(0);
+  await second.setup.renderer.destroy();
 });

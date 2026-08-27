@@ -474,12 +474,44 @@ function renderToken(tok: Token, key: number, width: number): ReactNode {
   }
 }
 
+// -- lexer 结果缓存（按 text；解析与宽度无关） -------------------------
+
+/**
+ * `marked.lexer` 结果缓存。key 只含 text —— 本文件是唯一调用点且不传 options，
+ * 换行 / 压缩全在渲染层按 width 做，解析结果与宽度无关。
+ *
+ * 为什么需要：memo 只挡得住「props 未变」的重渲染。终端 resize（cols 变化）
+ * 与视口挂载的卸载—重挂（滚出去再滚回来）都会让历史正文重新走一遍解析，
+ * 长会话下依旧是 O(历史体量)。
+ *
+ * 容量上限 256 条、命中即刷新到队尾（LRU）：会话可以无限长，缓存不能无界。
+ * token 数组对外只读消费（renderToken 不改 token），可跨渲染共享。
+ */
+const LEXER_CACHE_LIMIT = 256;
+const lexerCache = new Map<string, MarkedToken[]>();
+
+function lexMarkdown(text: string): MarkedToken[] {
+  const hit = lexerCache.get(text);
+  if (hit !== undefined) {
+    lexerCache.delete(text);
+    lexerCache.set(text, hit);
+    return hit; // EXIT: cache hit
+  }
+  const tokens = marked.lexer(text) as MarkedToken[];
+  lexerCache.set(text, tokens);
+  if (lexerCache.size > LEXER_CACHE_LIMIT) {
+    const oldest = lexerCache.keys().next();
+    if (oldest.done !== true) lexerCache.delete(oldest.value);
+  }
+  return tokens;
+}
+
 /** 主渲染器：markdown 文本 → OpenTUI 元素树。 */
 export function Markdown(props: {
   readonly text: string;
   readonly width: number;
 }): ReactNode {
-  const tokens = marked.lexer(props.text) as MarkedToken[];
+  const tokens = lexMarkdown(props.text);
   return (
     <box flexDirection="column" width={props.width}>
       {tokens
