@@ -6,7 +6,7 @@
  * default-OFF promise and the `ask` opt-out (ADR-0010 D3) are pinned.
  */
 import { afterAll, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -102,5 +102,24 @@ describe("buildHarnessEngine — auto-memory opt-in", () => {
       settings: { memory: { autoExtract: true } },
     });
     expect(engine.autoMemory).toBeUndefined();
+  });
+
+  it("wires autoMemory from project settings.json without an injected settings object", async () => {
+    const { cwd, userHome } = await isolate();
+    await mkdir(join(cwd, ".iknow"), { recursive: true });
+    await writeFile(
+      join(cwd, ".iknow", "settings.json"),
+      JSON.stringify({ memory: { autoExtract: true } })
+    );
+    const engine = await buildHarnessEngine({
+      env: makeEnv(),
+      askUser: createNoAskUser(),
+      cwd,
+      userHome,
+      workspaceRoot: cwd,
+      sandboxRoot: cwd,
+    });
+    built.push(engine);
+    expect(engine.autoMemory).toBeDefined();
   });
 });

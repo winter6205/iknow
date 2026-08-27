@@ -395,7 +395,7 @@ export async function buildHarnessEngine(
     }
   }
   // #126 T5:settings 对象缝（测试注入隔离 settings；生产缺省 loadIknowSettings）。
-  const settings = opts.settings ?? loadIknowSettings({ cwd });
+  const settings = opts.settings ?? loadIknowSettings({ cwd, home: userHome });
   // #406 T4:secret 处理模式 —— settings.secrets.mode 驱动装配。缺省 = "roundtrip"
   // （识别 + 占位符替换 + bash 还原 + 输出 mask）；"block" = 旧 deny-only
   // preToolUse guard（#126 兼容路径），roundtrip 机制整体关闭。非法值已被
@@ -703,9 +703,7 @@ export async function buildHarnessEngine(
   // auto-memory T4 / ADR-0031 D1+D5:三重同门 —— 显式 opt-in、memory 层在场、
   // 非 ask 表面。任一不成立 → 钩子缺席,宿主侧零调用、零 LLM、零写盘。
   const autoMemory =
-    memoryEnabled &&
-    surface !== "ask" &&
-    opts.settings?.memory?.autoExtract === true
+    memoryEnabled && surface !== "ask" && settings.memory?.autoExtract === true
       ? createAutoMemoryHook({
           memoryDir,
           llm: createAdapterExtractLlm(adapter),
