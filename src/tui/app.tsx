@@ -147,6 +147,14 @@ import {
   agentStatusFromEvent,
   agentStatusLines,
 } from "./agent-status-line.js";
+import type { GraphProgressSnapshot } from "../harness/graph/progress.js";
+import {
+  GraphChromePanel,
+  graphChromeRows,
+  graphProgressFromEvent,
+  reduceGraphChromeFocus,
+  type GraphChromeFocus,
+} from "./graph-chrome.js";
 import {
   agentStatusFromMessages,
   type AgentStatusSnapshot,
@@ -327,6 +335,8 @@ export function chromeReserveRows(opts: {
   /** #458 包2 T3:verify 闭环终态 banner 行数（projectVerifyBanner 实际产出，
    *   0 或 1）。缺省 0 → 不占行（无 verify / slot=none → 组件渲染 null）。 */
   readonly verifyRows?: number;
+  /** run_graph chrome 一行（0 或 1）。缺省 0 → 无快照不占行。 */
+  readonly graphRows?: number;
 }): number {
   const inputContentRows = Math.max(
     1,
@@ -338,6 +348,7 @@ export function chromeReserveRows(opts: {
   const agentStatusRows = opts.agentStatusRows ?? 0;
   const envPaneRows = opts.envPaneRows ?? 0;
   const verifyRows = opts.verifyRows ?? 0;
+  const graphRows = opts.graphRows ?? 0;
   const noticeTotal = opts.noticeRows > 0 ? opts.noticeRows + 1 : 0;
   const modalTotal = modalRows > 0 ? modalRows + 1 : 0;
   const pickerTotal = pickerRows > 0 ? pickerRows + 1 : 0;
@@ -356,6 +367,7 @@ export function chromeReserveRows(opts: {
     agentStatusRows +
     envPaneRows +
     verifyRows +
+    graphRows +
     (opts.bgLine ? 1 : 0)
   );
 }
@@ -521,6 +533,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const [envSnapshot, setEnvSnapshot] = useState<EnvSnapshot | null>(
     () => null
   );
+  const [graphProgresses, setGraphProgresses] = useState<
+    Record<string, GraphProgressSnapshot>
+  >({});
+  const [graphChromeFocus, setGraphChromeFocus] =
+    useState<GraphChromeFocus>("input");
+  const [graphViewOpen, setGraphViewOpen] = useState(false);
   // #458 包2 T3:verify 终态槽(conversationId → VerifySlot 判别联合)。
   // none = 缺 verify(合法态 → banner 静默);ok = 4 终态;unavailable =
   // wire 形状非法(degraded)。sendTurn 入口清槽(防上一回合判定残留到
@@ -976,6 +994,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const agentStatus = active.conversationId
     ? (agentStatuses[active.conversationId] ?? null)
     : null;
+  const graphProgress = active.conversationId
+    ? (graphProgresses[active.conversationId] ?? null)
+    : null;
   // #358 T7: 子代理工具对称 —— activeToolName 若是子代理工具（spawn_subagent /
   // subagent_result，activeToolNameOf 派生）→ ContextBar 尾缀显示
   // `▣ 子代理`（subagentDisplayMark/SUBAGENT_TOOL_LABEL 与 tool-summary 同源，
@@ -1340,6 +1361,20 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         const nextEnv = envSnapshotFromEvent(event);
         if (nextEnv !== null) {
           setEnvSnapshot(nextEnv);
+        }
+      }
+      const nextGraph = graphProgressFromEvent(event);
+      if (nextGraph !== undefined) {
+        setGraphProgresses((prev) => {
+          if (nextGraph === null) {
+            const { [targetId]: _dropped, ...rest } = prev;
+            return rest;
+          }
+          return { ...prev, [targetId]: nextGraph };
+        });
+        if (nextGraph === null) {
+          setGraphChromeFocus("input");
+          setGraphViewOpen(false);
         }
       }
     };
@@ -1922,6 +1957,27 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   useKeyboard((e) => {
     if (e.eventType !== "press") return;
 
+    const graphKey = reduceGraphChromeFocus({
+      focus: graphChromeFocus,
+      hasSnapshot: graphProgress !== null,
+      key: e.name,
+    });
+    if (graphChromeFocus === "graph" || graphViewOpen) {
+      if (graphViewOpen && e.name === "escape") {
+        setGraphViewOpen(false);
+        return;
+      }
+      if (graphKey.openView === true) {
+        setGraphViewOpen(true);
+        return;
+      }
+      if (graphKey.focus !== graphChromeFocus) {
+        setGraphChromeFocus(graphKey.focus);
+        return;
+      }
+      if (graphChromeFocus === "graph") return;
+    }
+
     // Shift+Tab 切 agent mode（W2 权限轮 + D-α graph overlay 的三态轮；
     // graph holder 缺席时自动退化成既有两态 permission 轮）。
     if (
@@ -2239,6 +2295,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         agentStatusRows: agentStatusRowBudget,
         envPaneRows: envPaneRowBudget,
         verifyRows: verifyRowBudget,
+        graphRows: graphChromeRows(graphProgress),
       })
   );
   // 列表视图（ListView 路径）：底部仅 notice 占用，与 headroom 2 行。
@@ -2396,7 +2453,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           disabled={
             askModalActive ||
             rewindTargets !== undefined ||
-            thinkingPickerOpen !== null
+            thinkingPickerOpen !== null ||
+            graphChromeFocus === "graph" ||
+            graphViewOpen
           }
           onChange={setInputValue}
           onSubmit={(v) => void handleSubmit(v)}
@@ -2441,6 +2500,18 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           }}
           hintSuggestions={inputHintSuggestions}
           history={inputHistory}
+          onLeaveToChrome={() => {
+            const next = reduceGraphChromeFocus({
+              focus: graphChromeFocus,
+              hasSnapshot: graphProgress !== null,
+              key: "down",
+            });
+            if (next.focus === "graph") {
+              setGraphChromeFocus("graph");
+              return true;
+            }
+            return false;
+          }}
         />
       )}
       {view === "chat" && (
@@ -2457,6 +2528,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             }
           />
         </box>
+      )}
+      {view === "chat" && (
+        <GraphChromePanel
+          snapshot={graphProgress}
+          cols={cols}
+          focused={graphChromeFocus === "graph"}
+        />
       )}
       {/* #647 T3 / ADR-0028: agent 现势显示（ContextBar 用量条下方；与
           context usage 显示是两回事）。只读 agent_status 事件的最新一份

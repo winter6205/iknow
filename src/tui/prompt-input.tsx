@@ -115,6 +115,11 @@ export interface PromptInputProps {
   readonly hintSuggestions?: ReadonlyArray<SlashCandidate>;
   /** 命令历史（内存态，会话内有效不落盘）。仅在 hint 不可见时生效。 */
   readonly history?: ReadonlyArray<string>;
+  /**
+   * 离开输入框落到 graph chrome：Tab 补全无结果 / 单行 Down 且未在翻历史。
+   * 返回 true = 已接管，不再走默认 Tab/Down。
+   */
+  readonly onLeaveToChrome?: () => boolean;
 }
 
 export function PromptInput(props: PromptInputProps): ReactNode {
@@ -245,7 +250,13 @@ export function PromptInput(props: PromptInputProps): ReactNode {
         if (completed !== null) {
           navValueRef.current = completed;
           props.onChange(completed);
+        } else if (props.onLeaveToChrome?.() === true) {
+          e.preventDefault();
+          return;
         }
+      } else if (props.onLeaveToChrome?.() === true) {
+        e.preventDefault();
+        return;
       }
       e.preventDefault();
       return;
@@ -361,6 +372,8 @@ export function PromptInput(props: PromptInputProps): ReactNode {
             props.onChange(target);
           }
         }
+        e.preventDefault();
+      } else if (props.onLeaveToChrome?.() === true) {
         e.preventDefault();
       }
       return;
