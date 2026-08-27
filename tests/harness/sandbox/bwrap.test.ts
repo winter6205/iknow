@@ -1,6 +1,10 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { createBwrapFence } from "../../../src/harness/sandbox/bwrap.js";
+import { existsSync } from "node:fs";
+import {
+  createBwrapFence,
+  OPTIONAL_HOST_RO_PREFIXES,
+} from "../../../src/harness/sandbox/bwrap.js";
 import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.js";
 import { createNetworkPolicy } from "../../../src/harness/sandbox/network-policy.js";
 import {
@@ -136,6 +140,39 @@ describe("createBwrapFence", () => {
     assertCanonicalFenceFlags(argv, "/workspace");
   });
 
+  it("ro-binds optional host prefixes (/opt, /snap) when they exist", () => {
+    // Packaged host tools (Google Chrome under /opt, snap apps) live outside
+    // the fixed /usr|/bin|/lib|/etc set. Missing these binds is the class of
+    // failure behind playwright-cli / similar e2e runners, not a per-tool
+    // special case. Prefixes that are absent on the host must stay off argv
+    // (bwrap refuses a missing bind source).
+    const argv = fenceArgv();
+    const prefixes = OPTIONAL_HOST_RO_PREFIXES;
+    const etcIndex = argv.indexOf("/etc");
+    const sizeIndex = argv.indexOf("--size");
+    for (const prefix of prefixes) {
+      if (existsSync(prefix)) {
+        const i = argv.indexOf(prefix);
+        assert.notEqual(i, -1, `expected --ro-bind ${prefix} when it exists`);
+        assert.deepEqual(argv.slice(i - 1, i + 2), [
+          "--ro-bind",
+          prefix,
+          prefix,
+        ]);
+        assert.ok(
+          etcIndex < i && i < sizeIndex,
+          `${prefix} belongs in the system --ro-bind block (after /etc, before --size)`
+        );
+      } else {
+        assert.equal(
+          argv.includes(prefix),
+          false,
+          `absent host prefix ${prefix} must not appear in argv`
+        );
+      }
+    }
+  });
+
   it("network:false and absent network both keep --unshare-net (default isolation)", () => {
     const argvFalse = fenceArgv(false);
     assert.ok(argvFalse.includes("--unshare-net"));
@@ -262,8 +299,8 @@ describe("createBwrapFence", () => {
     );
     // Order contract (argv 顺序契约): system --ro-bind → user --bind/--ro-bind
     // → --size/--tmpfs → 可选 cwd 重绑 → --proc/--dev-bind → --chdir → -- → 命令.
-    // The new cwd --ro-bind must come AFTER the system --ro-binds (/etc last)
-    // and BEFORE --size/--tmpfs.
+    // The new cwd --ro-bind must come AFTER the system --ro-binds
+    // (/etc plus optional /opt /snap) and BEFORE --size/--tmpfs.
     const etcIndex = argv.indexOf("/etc");
     assert.notEqual(etcIndex, -1);
     const roCwdIndex = roCwdPairs[0] as number;
