@@ -657,6 +657,28 @@ export async function runWorkerOnce(opts: {
         )
       );
     }
+    if (result.stopReason === "nonSuccessStop") {
+      // EXIT: supplier non-success stop must not report ok
+      log(`run() stopReason=nonSuccessStop`);
+      return truncateEnvelopeResult(
+        toFailedEnvelope(
+          "protocolError",
+          "nonSuccessStop (e.g. truncation)",
+          observabilityFields(result, observability)
+        )
+      );
+    }
+    if (result.stopReason === "timeout") {
+      // EXIT: per-call race timeout must not report ok
+      log(`run() stopReason=timeout`);
+      return truncateEnvelopeResult(
+        toFailedEnvelope(
+          "timeout",
+          "per-call model timeout",
+          observabilityFields(result, observability)
+        )
+      );
+    }
     return truncateEnvelopeResult(toOkEnvelope(result, observability));
   } catch (err) {
     if (err instanceof MaxTurnsExceeded) {

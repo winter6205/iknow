@@ -1,5 +1,5 @@
 /**
- * RED (systematic-debugging Phase 1 / REPRODUCE) — 尚无修复,本文件当前**预期失败**。
+ * GREEN (systematic-debugging Phase 4 / FIX) — 非成功停因必须映射为失败信封。
  *
  * 复现目标:钉死「正常任务里子代理失败」在信封层的真实形态。
  *
@@ -14,11 +14,8 @@
  *     经 anthropic-adapter 映射为 `supplierStop: "truncation"`);
  *   - `timeout` —— per-call 模型调用竞速到点(loop-engine `timerTimeout`)。
  *
- * 两者都产出 `{status:"ok", result:""}`:`run()` 只在 `reason === "completed"`
- * 时派生 `finalText`(loop-engine `deriveFinalText` 调用点),非完成停因一律
- * `finalText = null` → 信封 `result` 空串。父侧 manager 按 `env.status === "ok"`
- * 直接迁 `completed`,于是「撞 token 帽」与「单次调用超时」在父代理眼里都是
- * 一次拿到空结果的**成功**子代理 —— 这正是 operator 观察到的「子代理任务失败」。
+ * 两者都必须产出 `status:"failed"`，否则父侧 manager 会按
+ * `env.status === "ok"` 直接迁移到 `completed`。
  *
  * 本文件保持 hermetic:只走 `runWorkerOnce` + stub-model,不碰
  * `createWorkerDeps` / `createDefaultAciRegistry`(那条链装配期要 bwrap,
@@ -51,7 +48,7 @@ const BASE_ENVELOPE: WorkerEnvelope = {
   sandboxRoot: "/tmp/sb",
 };
 
-describe("subagent worker: 非成功停因 → 信封状态 (RED / Phase 1 复现)", () => {
+describe("subagent worker: 非成功停因 → 信封状态 (Phase 4 修复)", () => {
   it("token 帽撞顶 (supplierStop=truncation) 不得报成 ok", async () => {
     const adapter = createStubModel({
       responses: [
@@ -71,11 +68,9 @@ describe("subagent worker: 非成功停因 → 信封状态 (RED / Phase 1 复�
       "nonSuccessStop",
       "前提: max_tokens 截断走 stopReason=nonSuccessStop"
     );
-    assert.notEqual(
-      env.status,
-      "ok",
-      `截断被报成 ok,父侧无法与成功区分 (实际信封: ${JSON.stringify(env)})`
-    );
+    assert.equal(env.status, "failed");
+    assert.equal(env.reason, "protocolError");
+    assert.equal(env.summary, "nonSuccessStop (e.g. truncation)");
   });
 
   it("token 帽撞顶且无可用文本 (thinking 吃光预算) 不得报成 ok", async () => {
@@ -88,11 +83,9 @@ describe("subagent worker: 非成功停因 → 信封状态 (RED / Phase 1 复�
     });
 
     assert.equal(env.stop_reason, "nonSuccessStop");
-    assert.notEqual(
-      env.status,
-      "ok",
-      `空结果 + ok = 父代理 drain 拿到「成功但没产出」(实际信封: ${JSON.stringify(env)})`
-    );
+    assert.equal(env.status, "failed");
+    assert.equal(env.reason, "protocolError");
+    assert.ok(env.summary.length > 0);
   });
 
   it("per-call 模型调用竞速到点 (stopReason=timeout) 不得报成 ok", async () => {
@@ -120,13 +113,88 @@ describe("subagent worker: 非成功停因 → 信封状态 (RED / Phase 1 复�
       const env = await p;
 
       assert.equal(env.stop_reason, "timeout", "前提: 竞速到点落 timeout");
-      assert.notEqual(
-        env.status,
-        "ok",
-        `per-call 超时被报成 ok (实际信封: ${JSON.stringify(env)})`
-      );
+      assert.equal(env.status, "failed");
+      assert.equal(env.reason, "timeout");
+      assert.equal(env.summary, "per-call model timeout");
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("negative: refusal supplier stop with text is failed, not ok", async () => {
+    const adapter = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["I cannot comply with that request."],
+          supplierStop: "refusal",
+        }),
+      ],
+    });
+    const env = await runWorkerOnce({
+      workerEnvelope: BASE_ENVELOPE,
+      deps: makeDeps(adapter),
+    });
+
+    assert.equal(env.stop_reason, "nonSuccessStop");
+    assert.equal(env.status, "failed");
+    assert.equal(env.reason, "protocolError");
+    assert.ok(env.summary.length > 0);
+  });
+
+  it("overflow: long partial text with truncation is failed", async () => {
+    const adapter = createStubModel({
+      responses: [
+        assistantResult({
+          texts: ["partial output ".repeat(2_000)],
+          supplierStop: "truncation",
+        }),
+      ],
+    });
+    const env = await runWorkerOnce({
+      workerEnvelope: BASE_ENVELOPE,
+      deps: makeDeps(adapter),
+    });
+
+    assert.equal(env.stop_reason, "nonSuccessStop");
+    assert.equal(env.status, "failed");
+    assert.equal(env.reason, "protocolError");
+  });
+
+  it("concurrent: two non-success runs both produce failed envelopes", async () => {
+    const [first, second] = await Promise.all(
+      [1, 2].map(() =>
+        runWorkerOnce({
+          workerEnvelope: BASE_ENVELOPE,
+          deps: makeDeps(
+            createStubModel({
+              responses: [
+                assistantResult({
+                  texts: ["partial"],
+                  supplierStop: "truncation",
+                }),
+              ],
+            })
+          ),
+        })
+      )
+    );
+
+    assert.equal(first.status, "failed");
+    assert.equal(first.reason, "protocolError");
+    assert.equal(first.stop_reason, "nonSuccessStop");
+    assert.equal(second.status, "failed");
+    assert.equal(second.reason, "protocolError");
+    assert.equal(second.stop_reason, "nonSuccessStop");
+  });
+
+  it("exception: MaxTurnsExceeded remains maxTurnsExceeded", async () => {
+    const adapter = createStubModel({ responses: [] });
+    const env = await runWorkerOnce({
+      workerEnvelope: BASE_ENVELOPE,
+      deps: { ...makeDeps(adapter), maxTurns: 0 },
+    });
+
+    assert.equal(env.status, "failed");
+    assert.equal(env.reason, "maxTurnsExceeded");
   });
 });
