@@ -48,6 +48,4 @@ minimal-change-verifier: yes — 一个契约；落地按三 commit（recall / t
 
 ## 待写入
 
-- CONTEXT：用户级 `AGENTS.md` 物理根 = `~/.iknow/AGENTS.md`（与 `user.md` 同根；避免写成 workspace `.iknow/AGENTS.md`）。
-- CONTEXT：`memory_type` 封闭枚举五值 + 非法收 `note`。
-- ADR-0009 Decision 1 用户层路径：若正文仍写死 `~/.iknow/AGENTS.md` 而实现曾跟 workspace，本 spec 把实现收回 ADR 原句；若需 superseded-by 指针，另开 ADR 只改「物理根」一句（persist 时由 domain-modeling 判断）。
+清单已清空。ADR-0009 Decision 1 已写用户层 `~/.iknow/AGENTS.md`——不另开 ADR，只把实现从 workspace 根收回该句；CONTEXT 已落 `user-level AGENTS.md` 与 `memory_type`。
