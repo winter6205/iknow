@@ -155,3 +155,4 @@ node_modules
 !.cursor/vendor/**
 archive
 .iknow
+docs/demos
