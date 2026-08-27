@@ -65,6 +65,8 @@ function firstUnmetDep(
     const dep = byId.get(id);
     if (dep === undefined || dep.status !== "done") return id;
   }
+  // EXIT: pending 且没有未完成依赖（空 deps，或 deps 均已 done）——
+  // 仍归入 waiting 簇，避免节点从分组里消失。
   return node.deps[0] ?? "unknown";
 }
 
@@ -243,4 +245,81 @@ export function moveSelection(
   if (next < 0) return ids[0]!;
   if (next >= ids.length) return ids[ids.length - 1]!;
   return ids[next]!;
+}
+
+export function formatGraphNodeDetail(
+  node: GraphNodeProgress | undefined
+): string {
+  if (node === undefined) return "(no last output)";
+  const last =
+    node.summary !== undefined && node.summary.length > 0
+      ? node.summary
+      : "(no last output)";
+  if (node.durationMs === undefined) return last;
+  return `${last}\n${node.durationMs}ms`;
+}
+
+export interface GraphViewKeyInput {
+  readonly key: string;
+  readonly selectedId: string | null;
+  readonly detail: boolean;
+  readonly selectableIds: ReadonlyArray<string>;
+}
+
+export type GraphViewKeyResult =
+  | { readonly kind: "select"; readonly selectedId: string | null }
+  | { readonly kind: "open-detail" }
+  | { readonly kind: "close-detail" }
+  | { readonly kind: "close-view" }
+  | { readonly kind: "swallow" };
+
+export function reduceGraphViewKey(
+  input: GraphViewKeyInput
+): GraphViewKeyResult {
+  if (input.key === "escape") {
+    return input.detail ? { kind: "close-detail" } : { kind: "close-view" };
+  }
+  if (input.key === "up") {
+    return {
+      kind: "select",
+      selectedId: moveSelection(input.selectableIds, input.selectedId, -1),
+    };
+  }
+  if (input.key === "down") {
+    return {
+      kind: "select",
+      selectedId: moveSelection(input.selectableIds, input.selectedId, 1),
+    };
+  }
+  if (input.key === "return" && input.selectedId !== null) {
+    return { kind: "open-detail" };
+  }
+  return { kind: "swallow" };
+}
+
+export function applyGraphViewKey(
+  input: GraphViewKeyInput,
+  on: {
+    readonly closeDetail: () => void;
+    readonly closeView: () => void;
+    readonly select: (id: string | null) => void;
+    readonly openDetail: () => void;
+  }
+): void {
+  const next = reduceGraphViewKey(input);
+  if (next.kind === "close-detail") {
+    on.closeDetail();
+    return;
+  }
+  if (next.kind === "close-view") {
+    on.closeView();
+    return;
+  }
+  if (next.kind === "select") {
+    on.select(next.selectedId);
+    return;
+  }
+  if (next.kind === "open-detail") {
+    on.openDetail();
+  }
 }

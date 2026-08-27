@@ -4,13 +4,12 @@
  * 无快照 → 0 行；有快照 → 恒 1 行英文 `graph` + 计数 + now；窄屏仍单行。
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { GraphProgressSnapshot } from "../../src/harness/graph/progress.js";
 import type { HarnessStreamEvent } from "../../src/harness/stream.js";
 import { chromeReserveRows } from "../../src/tui/app.js";
 import {
   graphChromeLine,
+  graphChromeRows,
   graphProgressFromEvent,
   reduceGraphChromeFocus,
 } from "../../src/tui/graph-chrome.js";
@@ -157,9 +156,11 @@ describe("reduceGraphChromeFocus", () => {
   });
 });
 
-describe("app.tsx 接线守卫", () => {
-  test("chromeReserveRows 调用传入 graphRows", () => {
-    const src = readFileSync(join(process.cwd(), "src/tui/app.tsx"), "utf8");
-    expect(src).toContain("graphRows:");
+describe("graphChromeRows", () => {
+  test("无快照 0 行；有快照恒 1 行", () => {
+    expect(graphChromeRows(null)).toBe(0);
+    expect(
+      graphChromeRows(snap([{ id: "a", deps: [], status: "running" }]))
+    ).toBe(1);
   });
 });

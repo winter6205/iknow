@@ -249,25 +249,27 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
         })(id, nodeCtx);
       };
       const tracker = createGraphProgressTracker(spec.nodes);
-      const execution = await runGraph(spec, exec, {
-        onWave: (wave, ids) => {
-          emitGraphProgress(ctx, tracker.onWave(wave, ids));
-        },
-        onNode: (result) => {
-          emitGraphProgress(ctx, tracker.onNode(result));
-        },
-      });
-      // EXIT:归因调用侧取消 —— 与 spawn_subagent 一致(executor 因
-      // signal.aborted 归一 execution_failed:cancelled)。半张图的部分结果
-      // 不当成功数据返回:调用方已经不要这轮了。
-      if (signal?.aborted) {
+      try {
+        const execution = await runGraph(spec, exec, {
+          onWave: (wave, ids) => {
+            emitGraphProgress(ctx, tracker.onWave(wave, ids));
+          },
+          onNode: (result) => {
+            emitGraphProgress(ctx, tracker.onNode(result));
+          },
+        });
+        // EXIT:归因调用侧取消 —— 与 spawn_subagent 一致(executor 因
+        // signal.aborted 归一 execution_failed:cancelled)。半张图的部分结果
+        // 不当成功数据返回:调用方已经不要这轮了。
+        if (signal?.aborted) {
+          throw new ToolExecutionError(
+            "run_graph: cancelled by caller abort while the graph was running"
+          );
+        }
+        return condense(nodes, execution.results, execution.waveCount);
+      } finally {
         emitGraphProgress(ctx, null);
-        throw new ToolExecutionError(
-          "run_graph: cancelled by caller abort while the graph was running"
-        );
       }
-      emitGraphProgress(ctx, null);
-      return condense(nodes, execution.results, execution.waveCount);
     },
   });
 }

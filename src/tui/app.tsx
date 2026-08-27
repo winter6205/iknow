@@ -157,8 +157,8 @@ import {
 } from "./graph-chrome.js";
 import { GraphGroupView } from "./graph-group-view.js";
 import {
+  applyGraphViewKey,
   graphGroupRows,
-  moveSelection,
   selectableNodeIds,
 } from "./graph-group.js";
 import {
@@ -1968,29 +1968,22 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     if (e.eventType !== "press") return;
 
     if (graphViewOpen && graphProgress !== null) {
-      const ids = selectableNodeIds(
-        graphGroupRows(graphProgress, graphSelectedId)
-      );
-      if (e.name === "escape") {
-        if (graphNodeDetail) {
-          setGraphNodeDetail(false);
-          return;
+      applyGraphViewKey(
+        {
+          key: e.name,
+          selectedId: graphSelectedId,
+          detail: graphNodeDetail,
+          selectableIds: selectableNodeIds(
+            graphGroupRows(graphProgress, graphSelectedId)
+          ),
+        },
+        {
+          closeDetail: () => setGraphNodeDetail(false),
+          closeView: () => setGraphViewOpen(false),
+          select: setGraphSelectedId,
+          openDetail: () => setGraphNodeDetail(true),
         }
-        setGraphViewOpen(false);
-        return;
-      }
-      if (e.name === "up") {
-        setGraphSelectedId(moveSelection(ids, graphSelectedId, -1));
-        return;
-      }
-      if (e.name === "down") {
-        setGraphSelectedId(moveSelection(ids, graphSelectedId, 1));
-        return;
-      }
-      if (e.name === "return" && graphSelectedId !== null) {
-        setGraphNodeDetail(true);
-        return;
-      }
+      );
       return;
     }
 

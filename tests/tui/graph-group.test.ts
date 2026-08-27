@@ -5,9 +5,13 @@ import { describe, expect, test } from "bun:test";
 import type { GraphProgressSnapshot } from "../../src/harness/graph/progress.js";
 import {
   GRAPH_GLYPH,
+  formatGraphNodeDetail,
   graphGroupRows,
   groupGraphSnapshot,
+  moveSelection,
+  reduceGraphViewKey,
   selectedNodeContext,
+  selectableNodeIds,
   sliceGraphViewRows,
 } from "../../src/tui/graph-group.js";
 
@@ -78,6 +82,116 @@ describe("graphGroupRows", () => {
       true
     );
     expect(rows.some((r) => r.text.includes("* a"))).toBe(true);
+  });
+
+  test("waiting on <id> 与 selected 块都出现", () => {
+    const rows = graphGroupRows(
+      snap([
+        { id: "write", deps: [], status: "running" },
+        { id: "waitA", deps: ["write"], status: "pending" },
+      ]),
+      "write"
+    );
+    expect(rows.some((r) => r.text === "waiting on write")).toBe(true);
+    expect(rows.some((r) => r.text === "selected")).toBe(true);
+    expect(
+      rows.some((r) => r.text.includes("write") && r.text.includes("unlocks"))
+    ).toBe(true);
+  });
+});
+
+describe("moveSelection / selectableNodeIds", () => {
+  const ids = ["a", "b", "c"];
+
+  test("空列表 → null", () => {
+    expect(moveSelection([], "a", 1)).toBeNull();
+    expect(selectableNodeIds([{ key: "h", kind: "header", text: "now", dim: true }])).toEqual(
+      []
+    );
+  });
+
+  test("视图内 down/up 夹在两端，不环绕", () => {
+    expect(moveSelection(ids, "a", 1)).toBe("b");
+    expect(moveSelection(ids, "c", 1)).toBe("c");
+    expect(moveSelection(ids, "a", -1)).toBe("a");
+    expect(moveSelection(ids, null, 1)).toBe("b");
+  });
+});
+
+describe("reduceGraphViewKey", () => {
+  const ids = ["a", "b"];
+
+  test("up/down 改选中；enter 进详情；esc 逐级退出", () => {
+    expect(
+      reduceGraphViewKey({
+        key: "down",
+        selectedId: "a",
+        detail: false,
+        selectableIds: ids,
+      })
+    ).toEqual({ kind: "select", selectedId: "b" });
+    expect(
+      reduceGraphViewKey({
+        key: "up",
+        selectedId: "b",
+        detail: false,
+        selectableIds: ids,
+      })
+    ).toEqual({ kind: "select", selectedId: "a" });
+    expect(
+      reduceGraphViewKey({
+        key: "return",
+        selectedId: "a",
+        detail: false,
+        selectableIds: ids,
+      })
+    ).toEqual({ kind: "open-detail" });
+    expect(
+      reduceGraphViewKey({
+        key: "escape",
+        selectedId: "a",
+        detail: true,
+        selectableIds: ids,
+      })
+    ).toEqual({ kind: "close-detail" });
+    expect(
+      reduceGraphViewKey({
+        key: "escape",
+        selectedId: "a",
+        detail: false,
+        selectableIds: ids,
+      })
+    ).toEqual({ kind: "close-view" });
+  });
+});
+
+describe("formatGraphNodeDetail", () => {
+  test("last + 耗时；无 last 走占位", () => {
+    expect(
+      formatGraphNodeDetail({
+        id: "a",
+        deps: [],
+        status: "done",
+        summary: "facts",
+        durationMs: 1500,
+      })
+    ).toContain("facts");
+    expect(
+      formatGraphNodeDetail({
+        id: "a",
+        deps: [],
+        status: "done",
+        summary: "facts",
+        durationMs: 1500,
+      })
+    ).toContain("1500ms");
+    expect(
+      formatGraphNodeDetail({
+        id: "b",
+        deps: [],
+        status: "failed",
+      })
+    ).toBe("(no last output)");
   });
 });
 

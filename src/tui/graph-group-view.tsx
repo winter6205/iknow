@@ -7,8 +7,8 @@ import type { ReactNode } from "react";
 import type { GraphProgressSnapshot } from "../harness/graph/progress.js";
 import { tuiPalette } from "./theme.js";
 import {
+  formatGraphNodeDetail,
   graphGroupRows,
-  selectedNodeContext,
   sliceGraphViewRows,
   type GraphViewRow,
 } from "./graph-group.js";
@@ -22,7 +22,7 @@ export interface GraphGroupViewProps {
 }
 
 function rowFg(row: GraphViewRow, selected: boolean): string {
-  if (selected) return tuiPalette.running;
+  if (selected) return tuiPalette.text;
   return row.dim ? tuiPalette.dim : tuiPalette.text;
 }
 
@@ -33,12 +33,11 @@ export function GraphGroupView(props: GraphGroupViewProps): ReactNode {
     Math.max(1, props.rows)
   );
   if (props.detail && props.selectedId !== null) {
-    const ctx = selectedNodeContext(props.snapshot, props.selectedId);
-    const last = ctx?.last ?? "(no last output)";
+    const node = props.snapshot.nodes.find((n) => n.id === props.selectedId);
     return (
       <box flexDirection="column" height={props.rows} width={props.cols}>
         <text fg={tuiPalette.dim}>node {props.selectedId}</text>
-        <text wrapMode="word">{last}</text>
+        <text wrapMode="word">{formatGraphNodeDetail(node)}</text>
       </box>
     );
   }

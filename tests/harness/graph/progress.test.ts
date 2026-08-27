@@ -89,4 +89,27 @@ describe("createGraphProgressTracker", () => {
     expect(snap.nodes).toHaveLength(40);
     expect(snap.nodes.every((n) => n.status === "running")).toBe(true);
   });
+
+  it("onWave→onNode 记录 durationMs（可注入 nowMs）", () => {
+    let now = 1_000;
+    const t = createGraphProgressTracker(NODES, { nowMs: () => now });
+    t.onWave(0, ["research"]);
+    now = 2_500;
+    const snap = t.onNode({ id: "research", status: "done", output: "FACT" });
+    expect(snap.nodes.find((n) => n.id === "research")!.durationMs).toBe(1_500);
+    expect(snap.nodes.find((n) => n.id === "write")!.durationMs).toBeUndefined();
+  });
+
+  it("超长 output 截成粗摘要，不整包塞进 snapshot", () => {
+    const t = createGraphProgressTracker([{ id: "solo", deps: [] }]);
+    t.onWave(0, ["solo"]);
+    const snap = t.onNode({
+      id: "solo",
+      status: "done",
+      output: "Z".repeat(800),
+    });
+    const summary = snap.nodes[0]!.summary ?? "";
+    expect(summary.length).toBeLessThanOrEqual(240);
+    expect(summary.startsWith("Z")).toBe(true);
+  });
 });
