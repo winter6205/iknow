@@ -9,6 +9,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
+  observeModelIdle,
   resetsModelIdle,
   resolveModelClocks,
   startRaceTimers,
@@ -174,6 +175,70 @@ describe("#742 T1 race-timers: 两根钟", () => {
     b.cancel();
     assert.deepEqual(noHardCap, ["idle"]);
     assert.deepEqual(noIdle, []);
+  });
+});
+
+describe("#742 T1 observeModelIdle: 包装观察者", () => {
+  it("原样转发宿主回调(顺序 + 载荷),并重置 idle", async () => {
+    const fired: string[] = [];
+    const timers = startRaceTimers({
+      hardCapMs: 5_000,
+      idleTimeoutMs: 150,
+      onExpire: (source) => fired.push(source),
+    });
+    const seen: HarnessStreamEvent[] = [];
+    const observer = observeModelIdle(timers, (event) => seen.push(event));
+    for (let i = 0; i < 10; i++) {
+      await sleep(20);
+      observer!({ type: "text_delta", text: `d${i}` });
+    }
+    timers.cancel();
+    assert.deepEqual(fired, []);
+    assert.equal(seen.length, 10);
+    assert.deepEqual(seen[0], { type: "text_delta", text: "d0" });
+    assert.deepEqual(seen[9], { type: "text_delta", text: "d9" });
+  });
+
+  it("宿主回调抛异常被吞咽,且那次增量已经重置 idle", async () => {
+    const fired: string[] = [];
+    const timers = startRaceTimers({
+      hardCapMs: 5_000,
+      idleTimeoutMs: 150,
+      onExpire: (source) => fired.push(source),
+    });
+    const observer = observeModelIdle(timers, () => {
+      throw new Error("observer blew up");
+    });
+    for (let i = 0; i < 10; i++) {
+      await sleep(20);
+      assert.doesNotThrow(() => observer!(THINKING));
+    }
+    timers.cancel();
+    assert.deepEqual(fired, []);
+  });
+
+  it("宿主未订阅时 wrapper 仍在场(否则 adapter 无处上报增量)", () => {
+    const timers = startRaceTimers({
+      hardCapMs: 5_000,
+      idleTimeoutMs: 150,
+      onExpire: () => undefined,
+    });
+    const observer = observeModelIdle(timers, undefined);
+    assert.equal(typeof observer, "function");
+    assert.doesNotThrow(() => observer!(THINKING));
+    timers.cancel();
+  });
+
+  it("idle 不在场时原样返回宿主回调(引用不变)", () => {
+    const timers = startRaceTimers({
+      hardCapMs: 5_000,
+      idleTimeoutMs: undefined,
+      onExpire: () => undefined,
+    });
+    const host = (): void => undefined;
+    assert.equal(observeModelIdle(timers, host), host);
+    assert.equal(observeModelIdle(timers, undefined), undefined);
+    timers.cancel();
   });
 });
 

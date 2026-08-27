@@ -76,7 +76,11 @@ import { safeTrace } from "./trace/index.js";
 import type { HarnessStreamEvent } from "./stream.js";
 import { safeEmitStream } from "./stream.js";
 import type { RaceTimers } from "./race-timers.js";
-import { resolveModelClocks, startRaceTimers } from "./race-timers.js";
+import {
+  observeModelIdle,
+  resolveModelClocks,
+  startRaceTimers,
+} from "./race-timers.js";
 import {
   buildCompactedMessages,
   buildCompactPrompt,
@@ -988,15 +992,9 @@ function createRaceOutcome(opts: {
         settle("timerTimeout");
       },
     });
-    // #742 T1:idle 在场时包装观察者 —— 先记增量再原样转发。转发经
-    // safeEmitStream,宿主观察者异常与既有 emit 点同样被吞咽,不反流进流式臂;
-    // 宿主没订阅时 wrapper 仍要在场,否则 adapter 无处上报增量、idle 无从重置。
-    const onStream = timers.idleEnabled
-      ? (event: HarnessStreamEvent): void => {
-          timers?.noteStreamEvent(event);
-          safeEmitStream(opts.raceOpts.onStream, event);
-        }
-      : opts.raceOpts.onStream;
+    // #742 T1:idle 在场时观察者被包一层(先记增量再原样转发);不在场则原样
+    // 透传宿主回调。转发 / 吞咽纪律见 observeModelIdle。
+    const onStream = observeModelIdle(timers, opts.raceOpts.onStream);
     abortListener = (): void => settle("callerAbort");
     if (opts.raceOpts.signal?.aborted) abortListener();
     else

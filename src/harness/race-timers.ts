@@ -19,6 +19,7 @@
  * 超时路径。
  */
 import type { HarnessStreamEvent } from "./stream.js";
+import { safeEmitStream } from "./stream.js";
 
 /**
  * idle 重置事件闭集(计划 Harvest 已定项):只有**模型输出增量**算"还在
@@ -99,6 +100,30 @@ export function startRaceTimers(opts: {
     },
     cancel,
   });
+}
+
+/**
+ * idle 在场时,给 adapter 的观察者包一层:**先**记增量再原样转发宿主回调。
+ *
+ * 先记后转发是刻意的 —— 宿主观察者炸了不该连带让 idle 漏掉这次增量。转发走
+ * `safeEmitStream`,吞咽语义与 adapter / full-compact 的既有 emit 点同一份
+ * (观察者异常不得反流进流式臂)。
+ *
+ * 宿主没订阅(`onStream === undefined`)时**仍返回 wrapper**:adapter 的
+ * `wireStreamEvents` 在观察者缺席时直接早退,不给 wrapper 就等于 idle 永远
+ * 收不到增量、必然误杀。
+ *
+ * idle 不在场 → 原样返回宿主回调(引用不变,改前行为逐字节一致)。
+ */
+export function observeModelIdle(
+  timers: RaceTimers,
+  onStream: ((event: HarnessStreamEvent) => void) | undefined
+): ((event: HarnessStreamEvent) => void) | undefined {
+  if (!timers.idleEnabled) return onStream;
+  return (event: HarnessStreamEvent): void => {
+    timers.noteStreamEvent(event);
+    safeEmitStream(onStream, event);
+  };
 }
 
 /**
