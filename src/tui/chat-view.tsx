@@ -85,7 +85,11 @@ import { Spinner } from "./components.js";
 import { tuiPalette } from "./theme.js";
 import { toolResultStatusMap } from "./tool-summary.js";
 import { formatCrunched } from "./run-stats.js";
-import { formatThinkingFold, formatThinkingLive } from "./think-fold.js";
+import {
+  formatThinkingFold,
+  formatThinkingLive,
+  thinkingPeekLines,
+} from "./think-fold.js";
 import {
   listenScrollBoxTop,
   selectViewportMountWindow,
@@ -402,13 +406,17 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             {formatCrunched(props.crunchedSeconds ?? 0)}
           </text>
         )}
-        {/* 流式 thinking 面板：折叠态 = 1 行 静态 `思考中…` / 思考已结束 →
-            显示「思考了 N 秒」冻结留存；展开态走 Markdown。frozen 非空 = answer
-            已开始、thinking 阶段结束 → 秒数不再递增，显示「思考了 N 秒」，
-            直到 turn 结束历史消息接棒（留存不消失）。
+        {/* 流式 thinking 面板：折叠态 = 静态 `思考中…` 摘要行 + 正文末 ≤3 行
+            预览 / 思考已结束 → 折回单行「思考了 N 秒」冻结留存；展开态走
+            Markdown 全文。frozen 非空 = answer 已开始、thinking 阶段结束 →
+            秒数不再递增，显示「思考了 N 秒」，直到 turn 结束历史消息接棒
+            （留存不消失）。
             文案统一（2026-08-14）：两分支都走 think-fold.ts SSOT ——
             折叠行恒 `思考中…`（无实时秒数，PR 1）/ `思考了 N 秒` 即带语义，
-            不再叠加 `[思考]` 前缀（与 message-blocks 历史折叠行同源收敛）。 */}
+            不再叠加 `[思考]` 前缀（与 message-blocks 历史折叠行同源收敛）。
+            预览窗口（plans/model-idle-thinking-peek.md T2）：思考**进行中**
+            才取，`thinkingPeekLines` 硬顶 3 行、`wrapMode="none"` 每行恒占
+            1 行 —— 折叠态高度与思考全文长度无关（不把预览当全文高度）。 */}
         {running && deferredThinkingDrafts.length > 0 && (
           <box flexDirection="column" width={contentWidth}>
             {thinkingExpanded ? (
@@ -420,9 +428,16 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
                 {formatThinkingFold(props.thinkingFrozenSeconds)}
               </text>
             ) : (
-              <text fg={pal.dim} wrapMode="none">
-                {formatThinkingLive()}
-              </text>
+              <>
+                <text fg={pal.dim} wrapMode="none">
+                  {formatThinkingLive()}
+                </text>
+                {thinkingPeekLines(deferredThinkingDrafts).map((line, i) => (
+                  <text key={`think-peek-${i}`} fg={pal.dim} wrapMode="none">
+                    {line}
+                  </text>
+                ))}
+              </>
             )}
           </box>
         )}
