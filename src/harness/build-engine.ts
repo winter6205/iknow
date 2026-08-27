@@ -598,6 +598,15 @@ export async function buildHarnessEngine(
     maxTurns: env.llm.maxTurns,
     detectToolLoop: env.loop?.detectToolLoop !== false,
     timeoutMs: env.llm.timeoutMs,
+    // #742 T1:流式臂双钟透传。条件 spread —— 字段缺席时 loop-engine 退回
+    // 今日单钟(改前行为逐字节不变);流式臂门禁在 loop-engine 侧按
+    // adapter.streamMode 判定,装配层不重复判一次。
+    ...(env.llm.idleTimeoutMs !== undefined
+      ? { modelIdleTimeoutMs: env.llm.idleTimeoutMs }
+      : {}),
+    ...(env.llm.hardCapMs !== undefined
+      ? { modelHardCapMs: env.llm.hardCapMs }
+      : {}),
     // #224 注入装配 — 把 reg.visibleSchemas（含 discovered lazy 工具）注入到
     // promptTools；fallback 路径（缺省回退 deps.registry.list()）由 loop-engine
     // 处理；本期 visibleSchemas ≡ 全量（无 lazy 工具），字节级零变化。

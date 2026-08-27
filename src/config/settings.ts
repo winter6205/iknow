@@ -75,6 +75,18 @@ export interface IknowSettingsLlm {
    * env 链：`envOptionalInt("IKNOW_LLM_TIMEOUT_MS") ?? settings.llm.timeoutMs ?? 300_000`。
    */
   timeoutMs?: number;
+  /**
+   * #742 T1: 流式臂上「模型输出增量静默」的上限（毫秒）。镜像 timeoutMs 校验
+   * 纪律：有限正整数才合法，其余丢弃。
+   * env 链：`envOptionalInt("IKNOW_LLM_IDLE_TIMEOUT_MS") ?? settings.llm.idleTimeoutMs ?? 120_000`。
+   */
+  idleTimeoutMs?: number;
+  /**
+   * #742 T1: 流式臂上单次模型调用的有限硬顶（毫秒），到点即使仍有增量也超时。
+   * 镜像 timeoutMs 校验纪律。
+   * env 链：`envOptionalInt("IKNOW_LLM_HARD_CAP_MS") ?? settings.llm.hardCapMs ?? 900_000`。
+   */
+  hardCapMs?: number;
   compress?: IknowSettingsLlmCompress;
   /** 缺省 thinking 开关；env IKNOW_LLM_THINKING 显式设置时覆盖它。 */
   thinking?: IknowSettingsThinking;
@@ -366,6 +378,10 @@ function parseLlm(raw: unknown): IknowSettingsLlm | undefined {
   if (isValidMaxTurns(raw.maxTurns)) out.maxTurns = raw.maxTurns;
   // #358 T1: per-call LLM 调用竞速上限（毫秒）。
   if (isValidTimeoutMs(raw.timeoutMs)) out.timeoutMs = raw.timeoutMs;
+  // #742 T1: 流式臂双钟（idle 静默上限 + 有限硬顶），同 timeoutMs 值域纪律。
+  if (isValidTimeoutMs(raw.idleTimeoutMs))
+    out.idleTimeoutMs = raw.idleTimeoutMs;
+  if (isValidTimeoutMs(raw.hardCapMs)) out.hardCapMs = raw.hardCapMs;
   if (isValidThinking(raw.thinking)) out.thinking = raw.thinking;
   if (isValidThinkingEffort(raw.thinkingEffort)) {
     out.thinkingEffort = raw.thinkingEffort;
@@ -393,6 +409,8 @@ function parseLlm(raw: unknown): IknowSettingsLlm | undefined {
   if (
     out.maxTurns === undefined &&
     out.timeoutMs === undefined &&
+    out.idleTimeoutMs === undefined &&
+    out.hardCapMs === undefined &&
     out.compress === undefined &&
     out.thinking === undefined &&
     out.thinkingEffort === undefined &&
@@ -598,6 +616,14 @@ function mergeLlm(
   // #358 T1: per-call LLM 调用竞速上限（per-field project > user）。
   if (project?.timeoutMs !== undefined) out.timeoutMs = project.timeoutMs;
   else if (user?.timeoutMs !== undefined) out.timeoutMs = user.timeoutMs;
+  // #742 T1: 流式臂双钟同款 per-field project > user。
+  if (project?.idleTimeoutMs !== undefined) {
+    out.idleTimeoutMs = project.idleTimeoutMs;
+  } else if (user?.idleTimeoutMs !== undefined) {
+    out.idleTimeoutMs = user.idleTimeoutMs;
+  }
+  if (project?.hardCapMs !== undefined) out.hardCapMs = project.hardCapMs;
+  else if (user?.hardCapMs !== undefined) out.hardCapMs = user.hardCapMs;
   if (project?.thinking !== undefined) out.thinking = project.thinking;
   else if (user?.thinking !== undefined) out.thinking = user.thinking;
   if (project?.thinkingEffort !== undefined) {
@@ -633,6 +659,8 @@ function mergeLlm(
   if (
     out.maxTurns === undefined &&
     out.timeoutMs === undefined &&
+    out.idleTimeoutMs === undefined &&
+    out.hardCapMs === undefined &&
     out.compress === undefined &&
     out.thinking === undefined &&
     out.thinkingEffort === undefined &&

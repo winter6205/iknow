@@ -75,6 +75,12 @@ import type {
 import { safeTrace } from "./trace/index.js";
 import type { HarnessStreamEvent } from "./stream.js";
 import { safeEmitStream } from "./stream.js";
+import type { RaceTimers } from "./race-timers.js";
+import {
+  observeModelIdle,
+  resolveModelClocks,
+  startRaceTimers,
+} from "./race-timers.js";
 import {
   buildCompactedMessages,
   buildCompactPrompt,
@@ -183,6 +189,21 @@ export interface LoopEngineDeps {
   readonly timeoutMs?: number;
   /** 017: 模型侧覆盖;生效 = modelTimeoutMs ?? timeoutMs ?? DEFAULT_TIMEOUT_MS */
   readonly modelTimeoutMs?: number;
+  /**
+   * #742 T1 / CONTEXT「model-call idle」:单次模型调用的静默上限(ms)。
+   * **仅流式臂**(`adapter.streamMode === true`)生效 —— 非流式臂没有增量
+   * 可以重置它,配了也按缺席处理(改前单钟逐字节不变)。缺席 / <= 0 → 关闭。
+   */
+  readonly modelIdleTimeoutMs?: number;
+  /**
+   * #742 T1 / CONTEXT「模型调用硬顶」:流式臂上从本次 step 起算的有限上限
+   * (ms),到点即使仍有增量也落 `timeout`。**仅流式臂**生效;缺席 → 回落
+   * `modelTimeoutMs ?? timeoutMs ?? DEFAULT_TIMEOUT_MS`。
+   *
+   * 流式臂上它取代 `timeoutMs` 当墙钟:`timeoutMs` 是"从开打起算"的单钟,
+   * 正是 T1 要修的误杀源;想在流式臂上收紧墙钟请调本字段而非 `timeoutMs`。
+   */
+  readonly modelHardCapMs?: number;
   /** 017: 工具侧覆盖;生效 = toolTimeoutMs ?? timeoutMs ?? DEFAULT_TIMEOUT_MS */
   readonly toolTimeoutMs?: number;
   /**
@@ -927,6 +948,12 @@ export interface RaceModelOpts {
   readonly onStream?: (event: HarnessStreamEvent) => void;
   /** #196 IKNOW T1:runModelPhase 每 turn 解析 deps.system?.() 后透传;undefined 时不发送 system。 */
   readonly systemText?: string;
+  /**
+   * #742 T1:模型输出增量的静默上限(ms)。缺席 / <= 0 → 只有 `timeoutMs`
+   * 一根钟(改前行为)。到点与 `timeoutMs` 同样落 `timerTimeout`。
+   * 流式臂门禁由 `resolveModelClocks` 在 stepWithTrace 处判定,本层只收数值。
+   */
+  readonly idleTimeoutMs?: number;
 }
 
 /** 023: settle 共址于 helper，统一 single-wins 与 cleanup。 */
@@ -938,7 +965,7 @@ function createRaceOutcome(opts: {
 }): Promise<RaceModelOutcome> {
   return new Promise<RaceModelOutcome>((resolve, reject) => {
     let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timers: RaceTimers | undefined;
     let abortListener: (() => void) | undefined;
     const settle = (
       source: RaceOutcomeSource,
@@ -947,7 +974,7 @@ function createRaceOutcome(opts: {
     ): void => {
       if (settled) return; // post-settle SDK error / abort 均丢弃。
       settled = true;
-      if (timer !== undefined) clearTimeout(timer);
+      timers?.cancel();
       if (opts.raceOpts.signal && abortListener)
         opts.raceOpts.signal.removeEventListener("abort", abortListener);
       opts.child.abort();
@@ -955,11 +982,19 @@ function createRaceOutcome(opts: {
       else resolve(Object.freeze({ result, source }));
     };
     opts.setChildAbort(() => settle("hostCancel"));
-    if (opts.raceOpts.timeoutMs > 0)
-      timer = setTimeout(() => {
+    // #742 T1:idle 与硬顶两根钟由 race-timers 起,胜出仲裁仍只在 settle 一处;
+    // 两根钟到点都落同一个 timerTimeout(不新增 StopReason)。
+    timers = startRaceTimers({
+      hardCapMs: opts.raceOpts.timeoutMs,
+      idleTimeoutMs: opts.raceOpts.idleTimeoutMs,
+      onExpire: () => {
         opts.child.abort(); // L1': 必须先取消 HTTP，再记录 timer 胜出。
         settle("timerTimeout");
-      }, opts.raceOpts.timeoutMs);
+      },
+    });
+    // #742 T1:idle 在场时观察者被包一层(先记增量再原样转发);不在场则原样
+    // 透传宿主回调。转发 / 吞咽纪律见 observeModelIdle。
+    const onStream = observeModelIdle(timers, opts.raceOpts.onStream);
     abortListener = (): void => settle("callerAbort");
     if (opts.raceOpts.signal?.aborted) abortListener();
     else
@@ -978,7 +1013,7 @@ function createRaceOutcome(opts: {
           ...(opts.raceOpts.systemText !== undefined
             ? { system: opts.raceOpts.systemText }
             : {}),
-          onStream: opts.raceOpts.onStream,
+          onStream,
         },
         opts.compositeSignal
       )
@@ -1063,7 +1098,10 @@ async function runModelPhase(opts: {
   readonly deps: LoopEngineDeps;
   readonly signal: AbortSignal | undefined;
   readonly started: number;
-  readonly modelTimeoutMs: number;
+  /** #742 T1:本次 step 的硬顶(ms)。非流式臂 = 今日单钟解析结果。 */
+  readonly modelHardCapMs: number;
+  /** #742 T1:本次 step 的 idle 上限(ms);undefined = 只有硬顶一根钟。 */
+  readonly modelIdleTimeoutMs: number | undefined;
   readonly onStream?: (event: HarnessStreamEvent) => void;
   /** plan T3 / ADR-0013:run 级闭包的 reactive-compact 已尝试标记。
    *   true = 本次 run 已压缩重试过一次,不再第二次。 */
@@ -1082,7 +1120,10 @@ async function runModelPhase(opts: {
       state: opts.state,
       deps: opts.deps,
       signal: opts.signal,
-      timeoutMs: opts.modelTimeoutMs,
+      timeoutMs: opts.modelHardCapMs,
+      ...(opts.modelIdleTimeoutMs !== undefined
+        ? { idleTimeoutMs: opts.modelIdleTimeoutMs }
+        : {}),
       onStream: opts.onStream,
       systemText,
     });
@@ -1441,6 +1482,15 @@ async function stepWithTrace(opts: {
   const turnId = randomUUID();
   const modelTimeout =
     opts.deps.modelTimeoutMs ?? opts.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // #742 T1:流式臂拿 idle + 硬顶两根钟,非流式臂原样只用上面那一根。
+  // 流式臂门禁读 adapter 自报的 `streamMode`(#178 T5 已有的模式申报 SSOT),
+  // 不另造第二个开关。
+  const modelClocks = resolveModelClocks({
+    modelTimeoutMs: modelTimeout,
+    streamingArm: opts.deps.adapter.streamMode === true,
+    idleTimeoutMs: opts.deps.modelIdleTimeoutMs,
+    hardCapMs: opts.deps.modelHardCapMs,
+  });
 
   const llmStartedAt = new Date().toISOString();
   const llmStartMono = performance.now();
@@ -1479,7 +1529,8 @@ async function stepWithTrace(opts: {
     deps: opts.deps,
     signal: opts.signal,
     started,
-    modelTimeoutMs: modelTimeout,
+    modelHardCapMs: modelClocks.hardCapMs,
+    modelIdleTimeoutMs: modelClocks.idleTimeoutMs,
     onStream: opts.onStream,
     reactiveAttemptedRef: opts.reactiveAttemptedRef,
   });
@@ -1506,7 +1557,8 @@ async function stepWithTrace(opts: {
             deps: opts.deps,
             signal: opts.signal,
             started,
-            modelTimeoutMs: modelTimeout,
+            modelHardCapMs: modelClocks.hardCapMs,
+            modelIdleTimeoutMs: modelClocks.idleTimeoutMs,
             onStream: opts.onStream,
             reactiveAttemptedRef: opts.reactiveAttemptedRef,
           });
