@@ -321,6 +321,7 @@ test("围栏显示窗：33 行只挂前 32 行并提示还有 1 行", async () =
   expect(frame).toContain("FENCE_LINE_32");
   expect(frame).toContain("还有 1 行");
   expect(frame.includes("FENCE_LINE_33")).toBe(false);
+  expect(blankLinesBetween(setup, "FENCE_LINE_32", "还有 1 行")).toBe(0);
   await setup.renderer.destroy();
 });
 

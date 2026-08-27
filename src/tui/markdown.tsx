@@ -276,7 +276,7 @@ export function CodeBlock(props: {
 }): ReactNode {
   const clip = clipFenceDisplayLines(props.lines);
   return (
-    <>
+    <box flexDirection="column">
       <box
         flexDirection="column"
         backgroundColor={tuiPalette.codeBlockBg}
@@ -298,7 +298,7 @@ export function CodeBlock(props: {
           {previewOverflowLabel(clip.hiddenLineCount)}
         </text>
       ) : null}
-    </>
+    </box>
   );
 }
 
