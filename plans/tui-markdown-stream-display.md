@@ -56,7 +56,7 @@
    - **Inherits:** spec Invariants 6–7：前缀钉住、边界单调、最后一块仍受显示窗约束。
    - **Surface:** TUI markdown 展示（live tail 上会变长的 text）
    - **Acceptance:** 纯函数：单块无前缀；多块时后缀变长前缀 raw 不变且边界不回退。集成：草稿先闭合一块再增长下一块，后续增量不再 lexer 第一块正文。超长未闭合围栏仍不超过 32 行代码节点。T2 测仍绿。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T2]
 
 ## Out of scope

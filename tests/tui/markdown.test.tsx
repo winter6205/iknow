@@ -10,8 +10,10 @@
  * diff 行 +/- 复用 palette.add/del。
  */
 import { expect, test } from "bun:test";
+import { act, useState } from "react";
 import { testRender } from "@opentui/react/test-utils";
 import { RGBA, TextAttributes } from "@opentui/core";
+import { marked } from "marked";
 import { Markdown, tokenizeCodeLine } from "../../src/tui/markdown.js";
 import { tuiPalette } from "../../src/tui/theme.js";
 
@@ -524,4 +526,69 @@ test("块间距：单段落无前导空白行", async () => {
   const setup = await renderMd("只有一段");
   expect(leadingBlankLines(setup)).toBe(0);
   await setup.renderer.destroy();
+});
+
+test("围栏显示窗：超长未闭合围栏不超过 32 行源码", async () => {
+  const body = Array.from({ length: 40 }, (_, i) => `OPEN_LINE_${i + 1}`).join(
+    "\n"
+  );
+  const setup = await testRender(
+    <Markdown text={"```ts\n" + body} width={WIDTH} />,
+    { width: WIDTH, height: 50 }
+  );
+  await setup.renderOnce();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("OPEN_LINE_32");
+  expect(frame).toContain("还有 8 行");
+  expect(frame.includes("OPEN_LINE_33")).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("流式冻结：闭合一块后增量不再 lexer 第一块正文", async () => {
+  const PREFIX = "FREEZE_LEX_PREFIX_UNIQUE";
+  type LexerFn = typeof marked.lexer;
+  const originalLexer = marked.lexer.bind(marked) as LexerFn;
+  let prefixLex = 0;
+  (marked as unknown as { lexer: LexerFn }).lexer = ((
+    src: string,
+    opts?: unknown
+  ) => {
+    if (typeof src === "string" && src.includes(PREFIX)) prefixLex += 1;
+    return (originalLexer as (s: string, o?: unknown) => unknown)(
+      src,
+      opts
+    ) as ReturnType<LexerFn>;
+  }) as LexerFn;
+
+  const initial = `${PREFIX}\n\nsecond`;
+  const holder: { setText: ((text: string) => void) | null } = {
+    setText: null,
+  };
+  function Harness() {
+    const [text, setText] = useState(initial);
+    holder.setText = setText;
+    return <Markdown text={text} width={WIDTH} streaming />;
+  }
+
+  try {
+    const setup = await testRender(<Harness />, {
+      width: WIDTH,
+      height: 20,
+    });
+    await setup.renderOnce();
+    const afterMount = prefixLex;
+    expect(afterMount).toBeGreaterThan(0);
+    expect(holder.setText).not.toBeNull();
+    act(() => {
+      holder.setText!(`${PREFIX}\n\nsecond grows`);
+    });
+    await setup.renderOnce();
+    expect(prefixLex).toBe(afterMount);
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain(PREFIX);
+    expect(frame).toContain("second grows");
+    await setup.renderer.destroy();
+  } finally {
+    (marked as unknown as { lexer: LexerFn }).lexer = originalLexer;
+  }
 });

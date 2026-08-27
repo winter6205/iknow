@@ -421,7 +421,11 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
           <box flexDirection="column" width={contentWidth}>
             {thinkingExpanded ? (
               <box width={contentWidth}>
-                <Markdown text={deferredThinkingDrafts} width={contentWidth} />
+                <Markdown
+                  text={deferredThinkingDrafts}
+                  width={contentWidth}
+                  streaming
+                />
               </box>
             ) : (props.thinkingFrozenSeconds ?? 0) > 0 ? (
               <text fg={pal.dim} wrapMode="none">
@@ -455,7 +459,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
           ) : (
             running && (
               <box key={`live-draft-${i}`} width={contentWidth}>
-                <Markdown text={slot.text} width={contentWidth} />
+                <Markdown text={slot.text} width={contentWidth} streaming />
               </box>
             )
           )
