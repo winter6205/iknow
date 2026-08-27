@@ -12,7 +12,8 @@ chat / tui / serve 的记忆层：作废条目不再进入模型检索视野；�
 
 - **Does:**
   - `memory_recall` 打分前丢弃 `disabled: true` 的条目；自动抽取找邻居已跳过 disabled 的，保持一致、补测钉住。
-  - `type` 合法值仅 `convention` | `decision` | `gotcha` | `constraint` | `note`。抽取 JSON、`memory_save` 入参、手改 frontmatter：非法或空 → `note`，不因此 fail 整次写入。
+  - `type` 合法值仅 `convention` | `decision` | `gotcha` | `constraint` | `note`。枚举只在**写路径**收口：`memory_save` 入参与自动 persist / ingest 的抽取 JSON，非法或空 → `note`，不因此 fail 整次写入。
+  - 读路径不收口（Decision Packet / T2 决定：write-path-only）：手改或既有落盘 frontmatter 里的 `type`（含 `preference` 等历史值）既不被拒绝、也不被改写成 `note`；`sanitizeMemoryFile` 原样带回已存的 `type`，不 fail 会话。与 `tests/harness/memory/schema.test.ts` 里钉住的「leaves the stored frontmatter type untouched (write-path-only scope)」往返用例同一口径。
   - 用户级静态层发现根 = `userHome`（测试缝同 `user.md`）：`~/.iknow/AGENTS.md` 与 `~/.iknow/rules/*.md`。装配顺序不变：user 层 → 项目优先声明 → 项目 `AGENTS.md` / 项目 rules。
 - **Confirms with human:** （本契约假设门已确认，无未决项）
 - **Out of this spec:** dream/LLM 离线合并；中文 BM25 / n-gram；默认 TTL；硬删 `.md`；跨项目事实库；改 store cap；改 `autoExtract` 默认；改 `user.md` 落点（ADR-0025 已锁）；安装主目录「子项目 ID 总控」。
