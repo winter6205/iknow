@@ -306,6 +306,38 @@ test("代码块 c4 diff：+ 行首 add 绿，- 行首 del 红", async () => {
   await setup.renderer.destroy();
 });
 
+test("围栏显示窗：33 行只挂前 32 行并提示还有 1 行", async () => {
+  const body = Array.from({ length: 33 }, (_, i) => `FENCE_LINE_${i + 1}`).join(
+    "\n"
+  );
+  const setup = await testRender(
+    <Markdown text={"```ts\n" + body + "\n```"} width={WIDTH} />,
+    { width: WIDTH, height: 50 }
+  );
+  await setup.renderOnce();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("FENCE_LINE_32");
+  expect(frame).toContain("还有 1 行");
+  expect(frame.includes("FENCE_LINE_33")).toBe(false);
+  await setup.renderer.destroy();
+});
+
+test("围栏显示窗：32 行全挂且无溢出提示", async () => {
+  const body = Array.from({ length: 32 }, (_, i) => `CAP_LINE_${i + 1}`).join(
+    "\n"
+  );
+  const setup = await testRender(
+    <Markdown text={"```ts\n" + body + "\n```"} width={WIDTH} />,
+    { width: WIDTH, height: 50 }
+  );
+  await setup.renderOnce();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("CAP_LINE_1");
+  expect(frame).toContain("CAP_LINE_32");
+  expect(frame.includes("还有")).toBe(false);
+  await setup.renderer.destroy();
+});
+
 /** c4 空行不塌缩：含空行的代码块行数 ≥ 内容行 + padding + margin。 */
 test("代码块 c4：含空行的代码块不塌缩行高", async () => {
   const setup = await renderMd("```ts\nconst a = 1;\n\nconst b = 2;\n```");
@@ -433,7 +465,9 @@ test("盘古之白：blockquote 内 codespan 不插空格，外围照常插", as
 // ── 盘古之白负向锚点：排除项刻意不插空格 ────────────────────────────
 
 test("盘古之白负向：表格单元格不插空格（列宽紧凑优先）", async () => {
-  const setup = await renderMd("| 美股4月 | 备注 |\n| --- | --- |\n| 数据1行 | ok |");
+  const setup = await renderMd(
+    "| 美股4月 | 备注 |\n| --- | --- |\n| 数据1行 | ok |"
+  );
   const frame = setup.captureCharFrame();
   expect(frame).toContain("美股4月");
   expect(frame).toContain("数据1行");

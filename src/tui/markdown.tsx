@@ -33,6 +33,8 @@ import { padEndVisual } from "./visual.js";
 import { panguSpacing, panguSpacingKeepingCodespans } from "./pangu.js";
 import { marked, type MarkedToken, type Token, type Tokens } from "marked";
 import { tuiPalette } from "./theme.js";
+import { clipFenceDisplayLines } from "./fence-display-cap.js";
+import { previewOverflowLabel } from "./tool-summary.js";
 
 // -- 视觉宽度工具（表格压缩 / 截断专用；SSOT = string-width） ---------
 
@@ -270,23 +272,31 @@ export function CodeBlock(props: {
   readonly lang: string;
   readonly lines: readonly string[];
 }): ReactNode {
+  const clip = clipFenceDisplayLines(props.lines);
   return (
-    <box
-      flexDirection="column"
-      backgroundColor={tuiPalette.codeBlockBg}
-      paddingLeft={1}
-      paddingRight={1}
-    >
-      {props.lines.map((l, i) => (
-        <CodeBlockLine
-          key={i}
-          line={l}
-          lang={props.lang}
-          bg={tuiPalette.codeBlockBg}
-          fg={tuiPalette.codeDefault}
-        />
-      ))}
-    </box>
+    <>
+      <box
+        flexDirection="column"
+        backgroundColor={tuiPalette.codeBlockBg}
+        paddingLeft={1}
+        paddingRight={1}
+      >
+        {clip.visible.map((l, i) => (
+          <CodeBlockLine
+            key={i}
+            line={l}
+            lang={props.lang}
+            bg={tuiPalette.codeBlockBg}
+            fg={tuiPalette.codeDefault}
+          />
+        ))}
+      </box>
+      {clip.hiddenLineCount > 0 ? (
+        <text fg={tuiPalette.dim} wrapMode="none">
+          {previewOverflowLabel(clip.hiddenLineCount)}
+        </text>
+      ) : null}
+    </>
   );
 }
 

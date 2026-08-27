@@ -49,7 +49,7 @@
    - **Inherits:** spec Invariants 3–5、7：32 行；`还有 N 行`；历史 / 草稿 / 展开 thinking 凡走 markdown 围栏均适用；无展开。
    - **Surface:** TUI markdown 展示
    - **Acceptance:** 纯函数 5 类边界测绿。画面：33 行围栏可见前 32 行与溢出提示，不可见第 33 行源码。不足 32 行无溢出提示。既有 write/edit 6 行预览测不倒退。`npx vitest run` 覆盖所涉 tui 测全绿。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T1]
 
 3. **流式草稿只更新最后一个顶层块** — tag: `[implementation]`
