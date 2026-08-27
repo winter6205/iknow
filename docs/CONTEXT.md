@@ -129,13 +129,16 @@ _Avoid_: unbound 时 buildHarnessEngine 或 postMessage；把 unbound 说成「�
 _Avoid_: 零依赖静态壳当产品；展示层省略 trace 字段
 
 **正常模式**: 默认 HITL 产品：每轮说完把回合还给用户；完成向 LLM 关闭；硬失败打回干活模型。
-_Avoid_: 每个 completed 请 LLM 评「做完没」；先问有没有 goal 再决定怎么判
+_Avoid_: 每个 completed 请 LLM 评「做完没」；先问有没有 goal 再决定怎么判；把正常模式当成「没开 goal」的别名
 
-**自动模式**: `/goal` / `## GOAL:` 钉上后的无人值守循环，直到条件成立、判官 Impossible、不可恢复错误、可选轮次上限或用户 clear；空转停循环但 goal 可留着。
-_Avoid_: 把自动模式当成 verify 链上的第一道 if；自动模式里再贴任务摘录当使命
+**自动模式**: 权限轴 `PermissionMode` 的 `full_auto`：本轮 mutating 不问人，跑完仍把键盘还给用户。Shift+Tab / 徽标上的 Auto 就是它。ADR-0032。
+_Avoid_: 把 `/goal` 续跑叫自动模式；全自动模式；第三种 PermissionMode
 
-**goal（会话使命）**: 自动模式的完成条件，只由 `/goal <text>` / `## GOAL:` 写入（`source = user_pin`），仅 `/goal clear` 或停档清掉；钉上即进入自动模式。
-_Avoid_: `goal.text ?? query` 当验收任务；把 goal 当模型可推进的活对象；模型输出 / 工具结果 / 文件内容写 goal
+**goal 功能**: 斜杠钉上会话使命后的续跑：`/goal <text>` 写入后 hub 用 `goal.text` 接着跑，直到条件成立、判官 Impossible、不可恢复错误、可选轮次上限或 `/goal clear`；空转停循环但 goal 可留着。不是模式，不进 Shift+Tab。ADR-0032。
+_Avoid_: 自动模式；全自动模式；`## GOAL:` 当产品入口
+
+**goal（会话使命）**: goal 功能的完成条件，只由 `/goal <text>` 写入（`source = user_pin`），仅 `/goal clear` 或停档清掉；钉上即跑 goal 功能续跑。
+_Avoid_: `## GOAL:`；钉上叫进入自动模式；`goal.text ?? query` 当验收任务；把 goal 当模型可推进的活对象；模型输出 / 工具结果 / 文件内容写 goal
 
 **一轮**: 用户一句交代之后、模型做到把控制权交还用户为止；其间可含多次工具循环，落成多条 `messages`。
 _Avoid_: 把一条 `tool_use` / `tool_result` 当一轮；把截断窗口的条数当成「留几轮」
@@ -143,7 +146,7 @@ _Avoid_: 把一条 `tool_use` / `tool_result` 当一轮；把截断窗口的条�
 **截断窗口**: compact 从 `messages` 末尾留下的原文条数（计 message 对象，不是轮、不是字数）；窗口内若有 `tool_result` 而对应 `tool_use` 在窗外，再把那条 `tool_use` 整条捞回。
 _Avoid_: 按 token 或字数切窗；拆开一对 `tool_use`/`tool_result`
 
-**任务摘录**: 仅 compact 发生时从当时 `messages` 现抽现贴的最近至多 3 句合格用户任务原话；不进会话字段；自动模式不贴。
+**任务摘录**: 仅 compact 发生时从当时 `messages` 现抽现贴的最近至多 3 句合格用户任务原话；不进会话字段；goal 功能续跑时不贴。
 _Avoid_: taskFocus；当前任务卡；每回合或压缩时让 LLM 填卡；把摘录自己再抽成用户任务句
 
 **状态栏**: 每次即将调模型前由 harness 算出的现势，以 **user** 消息追加在 `messages` 末尾（含同一用户回合内 tool loop）；旧栏留在历史上，不替换、不写 `deps.system`；UI 只读同一份，in-flight 只给 TUI。字段仅 `last_tool`（本回合尚未跑过工具则为 idle）以及有未勾项时才出现的 todo 段（只投影 `- [ ]` 行；文件缺席 / 空 / 全勾则整段缺席）。ADR-0028。
@@ -161,7 +164,7 @@ _Avoid_: 「未达阈值」「压缩成功」等 UI 字面字符串直接出现�
 **auto-compact token gate**: proactive compact 在每轮 step 前的 token 阈值判据，公式 `contextWindow − MAX_OUTPUT_TOKENS_FOR_SUMMARY − AUTOCOMPACT_BUFFER_TOKENS`（值见 `src/harness/compress/threshold.ts`），显式 `IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS` 可覆盖；与手动 `/compact` 共享同一函数 `evaluateCompactTrigger`，token 估算仅参与判据决策，**不**进 trace / `RunResult.lastUsage`（ADR-0008 D6）。
 _Avoid_: 把字符估算（`estimateMessagesTokens`）当作真实 token 用；gate 决策绕开 `evaluateCompactTrigger` 直接调 `shouldAutoCompact` 旧接口；把 threshold 当成「每机配置」（应是项目栈决策）
 
-**task 取值公式**: 无统一 `??` 链。自动模式判官 `task = goal.text`（无 fallback）；正常模式不设完成向 `task`。
+**task 取值公式**: 无统一 `??` 链。goal 功能判官 `task = goal.text`（无 fallback）；正常模式不设完成向 `task`。
 _Avoid_: `goal ?? taskFocus ?? query`；`goal.text ?? query`；把 evidenceContext 拼进 task
 
 **streaming arm**: LLM 客户端默认流式臂（`IKNOW_LLM_STREAM` 值域 `on | off`，默认 `on`，`env.ts` SSOT），`off` 回退非流式臂；原生 SSE 事件不出 adapter 边界，收敛为 `HarnessStreamEvent` 最小集（`text_delta` / `tool_call_start`，`src/harness/stream.ts`），终态经 SDK `finalMessage()` -> `interpretMessage`（SSOT）落为同形 `AssistantTurnResult`。
@@ -206,11 +209,11 @@ _Avoid_: 固定轮数一刀切；单轮退化即停；无兜底上限
 **escalate 模式**: 修正耗尽后的可选处置（默认 report 停止+如实报告）——注入升级指令（禁止重复同一修复、换思路或明确报告阻塞）并给新预算继续；总预算不重置。服务长程自主任务。
 _Avoid_: 把 escalate 当无限轮次；降级放行（验证未通过算完成）
 
-**判官（judge）**: 共用的只读 LLM 分类器系统（四态；内环 `maxTurns: 2`）；完成向评价只挂自动模式逻辑模块。
-_Avoid_: 另起一个自动模式专用判官产品；command 缺失就当总开关每轮请判官；给判官执行能力；与 evidence-checker 混同
+**判官（judge）**: 共用的只读 LLM 分类器系统（四态；内环 `maxTurns: 2`）；完成向评价只挂 goal 功能逻辑模块。
+_Avoid_: 另起一个 goal 专用判官产品；command 缺失就当总开关每轮请判官；给判官执行能力；与 evidence-checker 混同
 
-**checker 三态 verdict**: 证据充分性判定 = `EVIDENCE_SUFFICIENT` / `EVIDENCE_CONTRADICTED` / `EVIDENCE_INSUFFICIENT`；6 条检查封装在 `evidence-checker.ts` 内部。HITL 用它做硬失败/补跑；自动模式里它只进 `evidenceContext` 当提示，绿了仍要 LLM 评 `goal.text`。
-_Avoid_: 与闭环「三态判定」混同；调用方自数 PASS 条件；`SUFFICIENT` 当作自动模式已完成
+**checker 三态 verdict**: 证据充分性判定 = `EVIDENCE_SUFFICIENT` / `EVIDENCE_CONTRADICTED` / `EVIDENCE_INSUFFICIENT`；6 条检查封装在 `evidence-checker.ts` 内部。HITL 用它做硬失败/补跑；goal 功能里它只进 `evidenceContext` 当提示，绿了仍要 LLM 评 `goal.text`。
+_Avoid_: 与闭环「三态判定」混同；调用方自数 PASS 条件；`SUFFICIENT` 当作 goal 功能已完成
 
 **green marker**: 测试框架输出里的通过摘要行（白名单 pytest / jest / vitest / go test / cargo test）；checker 只从框架摘要行读通过数字。
 _Avoid_: 扫描任意 stdout 判绿；白名单外自造框架解析
@@ -221,7 +224,7 @@ _Avoid_: 把 exit 0 当测试通过
 **unverified**: 判官第 4 态——判官工作正常，但读完证据后认为不足以判定完成，拒绝猜 PASS/FAIL；映射到 `unstable`（停止、不注入信封、结果原样返回用户），与 `abort`（判官自身 transport/schema/超时故障）严格区分，`VerificationRecord.reason` 落盘区分。
 _Avoid_: 把 unverified 猜成 pass 或 fail（"a verifier that bluffs is worse than none"）；与 abort 混同
 
-**evidenceContext（证据体检单）**: 判官信封独立字段（checker 三态、缺因、已跑命令、摘要，宿主截断 ≤ 20000 codepoints）；是提示不是考题，`SUFFICIENT` 不是自动模式 PASS 通行证。
+**evidenceContext（证据体检单）**: 判官信封独立字段（checker 三态、缺因、已跑命令、摘要，宿主截断 ≤ 20000 codepoints）；是提示不是考题，`SUFFICIENT` 不是 goal 功能 PASS 通行证。
 _Avoid_: 把证据塞进 task 字段；注入前不截断；让判官去回答这张 JSON
 
 **补跑信封**: `EVIDENCE_INSUFFICIENT` 时注入主会话的反馈信封（"你声称完成，但缺真实测试证据 + 原因 + 请跑 <命令> 并展示框架通过摘要"）；命令来源 = 用户 `verify.command` 优先，否则 D2 探测；每闭环至多 1 次。
@@ -247,8 +250,10 @@ _Avoid_: 把发现的工具插回注册序中部（破 KV cache 前缀）；只�
 - **run() messages -> adapter streaming arm -> interpretMessage**: harness LLM path（流事件以 `HarnessStreamEvent` 经 `onStream` 暴露）
 - **turn -> LoopEngine -> tool call -> result -> next turn**: harness 驱动；tool use 经 ACI permission middleware
 - **Session HTTP -> run() -> AssistantTurnResult -> SessionHub**: session-api host 路径；messages 每回合投影到 UI
-- **正常模式 vs 自动模式**: 默认 HITL 与 `/goal` 循环是两套判断逻辑模块，共用判官系统；不是一条 `goal ?? query` 链
-- **continue_pending vs `/goal` auto**: continue 是 HITL 同一会话 skip-append；`/goal` 钉着则拒绝（`goal_active`），禁止把 continue 当自动模式下一跳
+- **正常模式 vs 自动模式**: HITL 每轮还键盘 vs 权限 `full_auto` 本轮不问工具；goal 功能不是这一对
+- **HITL 判官 vs goal 功能**: 两套判断逻辑模块，共用判官系统；不是一条 `goal ?? query` 链（ADR-0024 机制仍在，产品口不叫自动模式）
+- **continue_pending vs goal 功能**: continue 是 HITL 同一会话 skip-append；`/goal` 钉着则拒绝（`goal_active`），禁止把 continue 当 goal 续跑的下一跳
+- **自动模式 vs goal 功能**: 自动模式是权限；goal 功能是斜杠钉使命后的续跑。正交，可同时开
 - **continue_pending vs in-flight closeout**: continue 只消费 `store.load` 的 closeout 投影补悬空 `tool_use`；不另写 sanitize 去删改 tool 对，也不把 closeout 本身当续跑口令
 - **状态栏 vs context usage (display)**: 状态栏是给模型的现势快照；context usage (display) 是给人看的 token 用量条
 - **状态栏 vs 环境现势**: 状态栏给模型（`last_tool` + open todos）；环境现势给人（cwd/git/diff），不进状态栏 user 消息（#655）
@@ -273,7 +278,7 @@ _Avoid_: 把发现的工具插回注册序中部（破 KV cache 前缀）；只�
 - **project stack defaults vs .env.local**: env.ts 代码默认是项目级栈 SSOT（ADR-0001）；`.env.local` 重复声明同值非密项会形成第二源 / drift。`.env.local` 职责 = 密钥值 + 机器级覆盖，不是重新声明栈
 - **secret-roundtrip mask（#406）**: 用户文本中的密钥形态被识别层替换为 `<<<SECRET_N>>>` 占位符（N 从 1 单调递增，per-engine registry 共享，in-memory 不落盘）；bash 工具 spawn 前 `restore()` 回填真值；输出 mask 经 `currentSecretValues(registry.values())` 兜底遮蔽。**session 重启后历史占位符无法还原**（registry 非持久化，占位符原样透传不抛——acceptable limitation）。`settings.secrets.mode` 控制 `roundtrip`（默认）| `block`（#126 deny-only guard 兼容）
 - **next phase focus**: harness tool surface 扩展 + session 持久化 + I4 风格的 live smoke
-- **goal vs 任务摘录 vs 判官 task**: goal 只开自动模式；任务摘录只 HITL compact 现抽现贴；完成向 `task` 仅自动模式的 `goal.text`（ADR-0024 / ADR-0026）
+- **goal vs 任务摘录 vs 判官 task**: goal 只开 goal 功能；任务摘录只 HITL compact 现抽现贴；完成向 `task` 仅 `goal.text`（ADR-0024 / ADR-0026 / ADR-0032）
 
 ---
 
