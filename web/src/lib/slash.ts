@@ -19,7 +19,8 @@ export type SlashCommandName =
   | "continue"
   | "rewind"
   | "mcp"
-  | "workspace";
+  | "workspace"
+  | "graph";
 
 export type SlashCommand = {
   readonly name: SlashCommandName;
@@ -59,13 +60,22 @@ export const SLASH_COMMANDS: ReadonlyArray<SlashCommand> = [
   { name: "rewind", description: "回退到更早的回合", hint: "/rewind" },
   { name: "mcp", description: "查看 MCP 服务看板", hint: "/mcp" },
   { name: "workspace", description: "选择工作空间根", hint: "/workspace" },
+  {
+    name: "graph",
+    description: "图模式开关（下一次 run() 装配生效）",
+    hint: "/graph on|off|status",
+  },
 ];
 
 const BY_NAME = new Map<SlashCommandName, SlashCommand>(
   SLASH_COMMANDS.map((c) => [c.name, c])
 );
 
-const ARG_COMMANDS = new Set<SlashCommandName>(["thinking", "effort"]);
+/**
+ * 接受参数的命令。`graph` 在表内但**不**进 `ARG_COMMAND_SPECS` —— 值域
+ * 与拒绝理由都由服务端 `applyGraphCommand` 裁决（前端复制一份就会漂移）。
+ */
+const ARG_COMMANDS = new Set<SlashCommandName>(["thinking", "effort", "graph"]);
 
 export type SlashMatch = {
   readonly name: SlashCommandName;
@@ -268,5 +278,5 @@ export function resolveArgCommand(
 }
 
 export function commandTakesArg(name: string): boolean {
-  return name === "thinking" || name === "effort";
+  return ARG_COMMANDS.has(name as SlashCommandName);
 }

@@ -192,6 +192,15 @@ export type PermissionModeResponse = {
 };
 
 /**
+ * Mirrors GraphModeResponse in src/session-api/contract.ts.
+ * `message` is the SSOT line from applyGraphCommand / formatGraphStatus.
+ */
+export type GraphModeResponse = {
+  readonly enabled: boolean;
+  readonly message: string;
+};
+
+/**
  * Wire error body (nested). Mirrors ApiErrorBody in src/session-api/contract.ts.
  * kind is SessionStoreErrorKind | "validation" | "internal"; kept as string
  * on the web side to avoid coupling to backend enum evolution.

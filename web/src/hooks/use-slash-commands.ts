@@ -208,6 +208,21 @@ export function useSlashCommands(
             }
           })();
           break;
+        case "graph": {
+          // args 原样上送：值域与文案在服务端 applyGraphCommand。
+          const raw = (arg ?? "").trim();
+          const parts = raw === "" ? [] : raw.split(/\s+/);
+          void api
+            .applyGraphMode(parts)
+            .then((res) => {
+              chat.pushNotice(res.message);
+            })
+            .catch((e: unknown) => {
+              // EXIT: 400/404 只 notice，不 fallback 成普通消息。
+              chat.pushNotice(e instanceof Error ? e.message : String(e));
+            });
+          break;
+        }
         case "thinking":
         case "effort": {
           const res = resolveArgCommand(name, arg);

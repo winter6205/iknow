@@ -6,6 +6,7 @@ import type {
   HealthResponse,
   McpStatusResponse,
   McpToolsResponse,
+  GraphModeResponse,
   PermissionModeResponse,
   PostMessageRequest,
   PostMessageResponse,
@@ -126,6 +127,18 @@ export function cyclePermissionMode(
     { method: "POST" },
     signal
   ).then((res) => res.mode);
+}
+
+/** POST /api/v1/graph-mode：slash `/graph` 的 args 原样上送；文案由服务端渲染。 */
+export function applyGraphMode(
+  args: ReadonlyArray<string>,
+  signal?: AbortSignal
+): Promise<GraphModeResponse> {
+  return request<GraphModeResponse>(
+    `${API}/graph-mode`,
+    { method: "POST", body: JSON.stringify({ args }) },
+    signal
+  );
 }
 
 export function createSession(
