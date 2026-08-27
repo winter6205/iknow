@@ -27,6 +27,14 @@ export { validateGraph, topoWaves } from "./topo.js";
 export type { RunGraphOptions } from "./scheduler.js";
 export { runGraph } from "./scheduler.js";
 
+export type {
+  GraphNodeProgress,
+  GraphNodeSeed,
+  GraphProgressSnapshot,
+  GraphProgressTracker,
+} from "./progress.js";
+export { createGraphProgressTracker } from "./progress.js";
+
 export type { CouplingTask } from "./partition-by-coupling.js";
 export { partitionByCoupling, sameWave } from "./partition-by-coupling.js";
 
