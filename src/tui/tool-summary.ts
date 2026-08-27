@@ -149,11 +149,16 @@ const SUMMARIZERS: Readonly<
   memory_recall: (r) => `记忆 召回 ${pickString(r, "query")}`,
   memory_save: (r) => `记忆 写入 ${pickString(r, "title")}`,
   tool_search: (r) => {
-    const names = Array.isArray(r.names) ? `names=${r.names.length}` : "";
-    return `工具 ${pickString(r, "query", names || "?")}`;
+    const query = pickString(r, "query", "");
+    if (query.length > 0) return `检索工具 ${query}`;
+    if (Array.isArray(r.names) && r.names.length > 0) {
+      const firstName = r.names[0];
+      return `检索工具名 ${typeof firstName === "string" ? firstName : r.names.length}`;
+    }
+    return "检索工具 ?";
   },
   skill: (r) => `skill ${pickString(r, "name")}`,
-  skill_search: (r) => `skill ${pickString(r, "query")}`,
+  skill_search: (r) => `检索技能 ${pickString(r, "query")}`,
   spawn_subagent: (r) =>
     `派发子代理：${pickString(r, "task", "").slice(0, 60) || "?"}`,
   subagent_result: (r) => `轮询 ${pickString(r, "task_id")}`,
