@@ -29,7 +29,7 @@ import {
   type SubAgentManager,
 } from "../subagent/manager.js";
 import type { SubAgentEnvelope } from "../subagent/envelope.js";
-import { safeTrace } from "../trace/jsonl.js";
+import { safeTrace } from "../trace/safe-trace.js";
 import type {
   SubagentStepRecord,
   TraceErrorType,
@@ -168,8 +168,10 @@ export function createSubAgentNodeExecutor(
       startedAt,
       endedAt,
       status: "error",
-      errorType: stepErrorType(envelope.reason),
-      message: `${reasonText}${summary}`.trim(),
+      error: {
+        type: stepErrorType(envelope.reason),
+        message: `${reasonText}${summary}`.trim(),
+      },
       ts: endedAt,
     });
     return {
