@@ -26,6 +26,7 @@
 
 - `146-tui.md` — TUI 交互骨架
 - `tui-transcript-viewport.md` — ChatView 视口挂载（取代 PR #592 固定条数尾窗；滚动文档全量，树上只挂视口+overscan）
+- `tui-markdown-stream-display.md` — markdown 围栏显示窗（32 行）+ 流式顶层块冻结；不改 session、不是消息条数尾窗
 
 ### 工具与扩展源
 
