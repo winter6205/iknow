@@ -177,6 +177,16 @@ export interface IknowSettingsGraph {
   enabled?: boolean;
 }
 
+/**
+ * auto-memory T4 / ADR-0031 D5: 自动记忆段。
+ *
+ * `autoExtract` 只认 boolean；缺失 / 非法 → 字段不产出，消费方按 **false**
+ * 处理（默认 OFF 是决策，不是巧合）。`true` 之外的一切都不开门。
+ */
+export interface IknowSettingsMemory {
+  autoExtract?: boolean;
+}
+
 export interface IknowSettings {
   llm?: IknowSettingsLlm;
   verify?: IknowSettingsVerify;
@@ -187,6 +197,8 @@ export interface IknowSettings {
   graph?: IknowSettingsGraph;
   /** #672 T3: 工具环检测。boolean 才合法；缺省由消费方按 true。 */
   loop?: IknowSettingsLoop;
+  /** auto-memory T4: 自动记忆抽取开关（默认 OFF）。 */
+  memory?: IknowSettingsMemory;
 }
 
 export interface IknowSettingsLoop {
@@ -554,6 +566,26 @@ function mergeLoop(
   return out;
 }
 
+function parseMemory(raw: unknown): IknowSettingsMemory | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const out: IknowSettingsMemory = {};
+  if (typeof raw.autoExtract === "boolean") out.autoExtract = raw.autoExtract;
+  if (out.autoExtract === undefined) return undefined;
+  return out;
+}
+
+function mergeMemory(
+  user: IknowSettingsMemory | undefined,
+  project: IknowSettingsMemory | undefined
+): IknowSettingsMemory | undefined {
+  if (!user && !project) return undefined;
+  const out: IknowSettingsMemory = {};
+  if (project?.autoExtract !== undefined) out.autoExtract = project.autoExtract;
+  else if (user?.autoExtract !== undefined) out.autoExtract = user.autoExtract;
+  if (out.autoExtract === undefined) return undefined;
+  return out;
+}
+
 /** 逐层合并 llm：project 字段优先，未覆盖的 user 字段保留。 */
 function mergeLlm(
   user: IknowSettingsLlm | undefined,
@@ -682,6 +714,11 @@ function mergeSettings(
   const userGraph = parseGraph(userRaw.graph);
   const projectGraph = parseGraph(projectRaw.graph);
   const graph = mergeGraph(userGraph, projectGraph);
+  // auto-memory T4: 自动记忆开关（默认 OFF —— 段缺席即关）。
+  const memory = mergeMemory(
+    parseMemory(userRaw.memory),
+    parseMemory(projectRaw.memory)
+  );
   const out: IknowSettings = {};
   if (llm) out.llm = llm;
   if (verify) out.verify = verify;
@@ -689,6 +726,7 @@ function mergeSettings(
   if (subagent) out.subagent = subagent;
   if (loop) out.loop = loop;
   if (graph) out.graph = graph;
+  if (memory) out.memory = memory;
   return out;
 }
 

@@ -31,6 +31,7 @@ import type { GraphAssembly } from "../harness/graph/assembly.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { createJsonlTraceService } from "../harness/trace/index.js";
+import type { AutoMemoryHook } from "../harness/memory/index.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
 import type { AskUser } from "../harness/permission/types.js";
 import { homedir } from "node:os";
@@ -201,6 +202,7 @@ export async function buildTuiDeps(
     shutdown?: () => Promise<void>;
     /** D-α T5:graph 装配快照句柄（仅注入 graphMode 时透出，交给 hub 拍 round）。 */
     graphAssembly?: GraphAssembly;
+    autoMemory?: AutoMemoryHook;
   }
 > {
   if (!bundle.env.llm.apiKey) {
@@ -310,5 +312,8 @@ export async function buildTuiDeps(
       : {}),
     ...(built.shutdown ? { shutdown: built.shutdown } : {}),
     ...(built.graphAssembly ? { graphAssembly: built.graphAssembly } : {}),
+    // auto-memory T4:自动记忆钩子随 deps 平铺透出，run.tsx 解构后交给
+    // createTuiBridge → SessionHub。缺席（默认 OFF）→ 字段不出现。
+    ...(built.autoMemory ? { autoMemory: built.autoMemory } : {}),
   };
 }

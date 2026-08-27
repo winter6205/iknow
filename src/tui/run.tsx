@@ -255,7 +255,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     };
     // T2 返回平铺的 LoopEngineDeps & { subagentManager?, shutdown? }(非嵌套
     // { deps, ... }),rest 解构剥离两个句柄后 deps 即 LoopEngineDeps。
-    const { subagentManager, shutdown, graphAssembly, ...deps } =
+    const { subagentManager, shutdown, graphAssembly, autoMemory, ...deps } =
       await buildTuiDeps(bundle, depsOpts);
     // #365 T4:挂 MCP + subagent 组合 shutdown 到进程信号(runtime.ts 语义,
     // 与 chat/serve 一致)。T4 起 registerShutdown 参数放宽为结构
@@ -280,6 +280,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       dataDir,
       deps,
       subagentManager,
+      // auto-memory T4:钩子由 build-engine 按 settings.memory.autoExtract
+      // 装配；缺席（默认 OFF）→ hub 不调，行为逐字节不变。
+      autoMemory,
       traceOut: options.traceOut,
       // #128 T8: settings.verify 段 → 闭环配置 (经 hub-bridge 透传 SessionHub)。
       // command 缺失 (含 verify 段缺失) → { command: "" }, hub 装配

@@ -9,14 +9,18 @@
 
 ### 1.1 运行时核心
 
-| 能力                  | 说明                                                                                                                                       | 位置                                                                             |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
-| Agent 执行层          | harness foundation（loop-engine + anthropic-adapter + executor / registry）+ ACI 装饰层（条件装配下远多于 8 件，见 `registry` / gap 文）   | `src/harness/`（含 `src/harness/aci/`）                                          |
-| 故障恢复              | FaultClass（retry/fuse/none）；ModelAdapter 有界传输重试；工具环 `StopReason: fused` + LOOP_DETECTED；`src/harness/verify/` 零改           | `src/harness/fault-class.ts` + `with-transport-retry.ts` + `tool-loop-detect.ts` |
-| 授权（per-tool-call） | harness ACI 装饰层逐次工具调用授权                                                                                                         | `src/harness/aci/`                                                               |
-| 配置加载              | `.env` / `.env.local` + `process.env`；密钥只读 env 名                                                                                     | `src/config/env.ts`                                                              |
-| LLM 配置单承载        | `settings.llm.model` 字面值 + `settings.llm.apiKey` 字面/占位符 + `llm.fallback`；`IKNOW_LLM_API_KEY_ENV`/`IKNOW_LLM_MODEL` 退役(ADR-0015) | `src/config/settings.ts` + `src/config/env.ts`                                   |
-| **会话持久化**        | `~/.iknow` 跨进程池 + SessionStore JSON v2(#120)                                                                                           | `src/session-api/store/`                                                         |
+| 能力                     | 说明                                                                                                                                       | 位置                                                                             |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| Agent 执行层             | harness foundation（loop-engine + anthropic-adapter + executor / registry）+ ACI 装饰层（条件装配下远多于 8 件，见 `registry` / gap 文）   | `src/harness/`（含 `src/harness/aci/`）                                          |
+| 故障恢复                 | FaultClass（retry/fuse/none）；ModelAdapter 有界传输重试；工具环 `StopReason: fused` + LOOP_DETECTED；`src/harness/verify/` 零改           | `src/harness/fault-class.ts` + `with-transport-retry.ts` + `tool-loop-detect.ts` |
+| 授权（per-tool-call）    | harness ACI 装饰层逐次工具调用授权                                                                                                         | `src/harness/aci/`                                                               |
+| 配置加载                 | `.env` / `.env.local` + `process.env`；密钥只读 env 名                                                                                     | `src/config/env.ts`                                                              |
+| LLM 配置单承载           | `settings.llm.model` 字面值 + `settings.llm.apiKey` 字面/占位符 + `llm.fallback`；`IKNOW_LLM_API_KEY_ENV`/`IKNOW_LLM_MODEL` 退役(ADR-0015) | `src/config/settings.ts` + `src/config/env.ts`                                   |
+| **会话持久化**           | `~/.iknow` 跨进程池 + SessionStore JSON v2(#120)                                                                                           | `src/session-api/store/`                                                         |
+| **记忆层**               | 三层落盘记忆库 + BM25-lite 检索 + `memory_recall` / `memory_save` + promote 门槛（ADR-0009/0010；`ask` 全 opt-out）                        | `src/harness/memory/`                                                            |
+| **自动记忆（默认 OFF）** | `settings.memory.autoExtract = true` 才装配：completed turn 后异步 extract → 四态 op → 原子写（`source: auto`）+ 机械 GC（ADR-0031）       | `src/harness/memory/` + `src/harness/auto-memory-wire.ts`                        |
+
+**自动记忆（ADR-0031，2026-08-26）**：兑现 ADR-0009 D5 的延期项。**默认关**——`settings.memory.autoExtract` 缺失或非 `true` 时钩子不装配，宿主零调用、零额外 LLM、零写盘，与现网逐字节一致。开启后：chat / tui / serve 在 `StopReason=completed` 之后异步触发（累计 N≥2 完成 turn 一趟，`ask` 不接线），LLM 抽原子候选 → BM25-lite 近邻 → 裁定 `ADD` / `UPDATE` / `SUPERSEDE` / `NOOP` → 复用 `memory_save` 的肯定句门禁与 tmp+rename 原子写，落盘打 `source: auto`。清理是零 LLM 的机械 GC（TTL 过期 / 被 supersede / 超 cap 按 `importance × recency × (1 + recall_count)` 驱逐），**只软禁不删文件**。自动条目不豁免 promote 门槛，也不进 `system` 通道。抽取或 IO 失败经 host `// EXIT: log-and-continue` 吞掉，用户 turn 仍成功。**未做**：向量 / 图检索、LLM 离线合并、记忆管理 UI、per-turn 同步抽取。已知限制与遗留见 §2.5。
 
 ### 1.2 交互表面（I1–I3）
 
@@ -90,6 +94,22 @@
 | 限流与配额 | 无租户级 RPM/TPM 产品封装               |
 | 部署与发布 | 无标准镜像/编排/健康检查发布流水线      |
 | 密钥托管   | 依赖本机/OS env；无集成密钥管理系统说明 |
+
+### 2.5 自动记忆已知限制 / 遗留（ADR-0031 code-review follow-up）
+
+> 来源：2026-08-26 自动记忆整轮 code-review（Standards + Spec 双轴）判定「不阻塞合入」的 3 Medium + 6 Low。默认 OFF 时钩子不装配，以下全部不可达；**扩大 opt-in（尤其改默认 ON、或让 serve 多 workspace 用自动记忆）前须逐条处置或显式接受**。
+
+| 级别        | 项                              | 现状与影响                                                                                                                                                                                                                                                                    | 处置方向                                                                                       |
+| ----------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Medium      | SessionHub 多 root「首根胜出」  | `src/session-api/hub.ts` 懒取写 `this.autoMemory = this.autoMemory ?? built.autoMemory`：engine 本身按 root 缓存（`engineByRoot`），钩子却是进程级单例，只认第一个建成的 root。一个 serve 进程绑多个 workspace 时，root B 的 transcript 会写进 root A 的 `memoryDir`          | 与 `engineByRoot` 同形态改成 per-root 持有；在此之前 serve 的自动记忆按「单 root」使用并文档化 |
+| Medium      | BM25 / CJK 分词                 | `src/harness/memory/bm25.ts` 的 `tokenize` 与 `ingest.ts` 的 `tokens` 都按 `[^a-z0-9_]+` 切分（ASCII-only）。纯中文候选切不出 token → 近邻检索无命中、containment 恒等退化，四态裁定实际退化为**全 ADD**，UPDATE / SUPERSEDE / NOOP 形同虚设                                  | 中文分词或 n-gram 兜底；未做前中文项目的自动记忆会持续堆重复条目                               |
+| Medium      | `notifyAutoMemory` 双份实现     | `src/cli/chat-session.ts` 与 `src/session-api/hub.ts` 各有一份同语义的 try/catch 转发（钩子缺席即 no-op + 失败吞掉）。两处漂移会让 chat 与 serve 的吞错语义不一致                                                                                                             | 抽到 `src/harness/auto-memory-wire.ts`（已是该场景的组合缝），两 host 共用一份                 |
+| Low         | 错误类型命名域不匹配            | `src/harness/memory/auto-hook.ts` 的 `requireGate` 校验的是 hook 选项 `minCompletedTurns`，抛的却是 `MemoryGcOptionInvalid`（GC 域）                                                                                                                                          | 提取共用的 option-invalid 类型，或新增 hook 域错误类                                           |
+| Low         | `ingest.ts` 变量遮蔽            | `extractMemoryCandidates` 内层 `for (const raw of parsed)` 遮蔽了外层 `let raw: string`（LLM 原始输出）。当前无行为 bug，只是可读性与后续改动风险                                                                                                                             | 内层改名（如 `item`）                                                                          |
+| Low         | 启发式阈值未校准                | 四态判定的 `SAME_SUBJECT_FLOOR` / `NEAR_DUPLICATE_FLOOR` / `RESTATEMENT_FLOOR` / `CONTRADICTION_FLOOR` 与 `MIN_CANDIDATE_CONFIDENCE` 均为拍脑袋常量，无调参证据（ADR-0031 consequences 已承认）                                                                               | 有真实语料后统一校准；常量已集中在 `ingest.ts` 一处便于改                                      |
+| Low（Spec） | `memory_recall` 不过滤 disabled | `src/harness/memory/tools/recall.ts` 的 `readEntriesFromDisk` 读全部 `<slug>.md` 后直接送 BM25；`disabled` 只在 promote 与 ingest 近邻侧被过滤。GC 的「软禁」因此是**弱实现**——被 TTL / supersede / cap 驱逐的条目仍能被 recall 召回（仅在 metadata 里显示 `disabled: true`） | recall 读侧加 `disabled` 过滤（与 promote 同规则）                                             |
+| Low（Spec） | UPDATE 吞并邻居 provenance      | `persistMemoryOps` 的 UPDATE 复用邻居 slug 但整条重写 entry：`ttl_days` 取本次入参、`source` 覆写为 `auto`、`supersedes` 归 `null`。手写条目（`memory_save` 落盘、无 `source`）被自动 UPDATE 命中后，其 TTL 与来源标记被吞掉                                                  | UPDATE 走「读旧条目 → 合并字段」而非全量重建，至少保留 `ttl_days` / `source`                   |
+| Low（Spec） | `drain()` 未挂 host shutdown    | `AutoMemoryHook.drain` 注释自称「Test seam and shutdown hook」，实际只有 `tests/harness/memory/auto-hook.test.ts` 调用；`build-engine` 组合 shutdown 与 `hub.shutdown()` 都没挂。进程退出时 in-flight ingest 会被截断（写是 tmp+rename 原子的，不会半条，但这一趟记忆丢失）   | 挂进 host 组合 shutdown，或把注释改成「测试缝」以与接线一致                                    |
 
 ---
 

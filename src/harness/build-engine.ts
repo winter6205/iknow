@@ -66,7 +66,10 @@ import {
 import {
   resolveProjectMemoryDir,
   createSystemResolver,
+  createAutoMemoryHook,
+  type AutoMemoryHook,
 } from "./memory/index.js";
+import { createAdapterExtractLlm } from "./auto-memory-wire.js";
 import {
   WORKSPACE_ROOT_ENV_KEY,
   resolveWorkspaceRoot,
@@ -226,6 +229,13 @@ export type BuiltEngine = {
    * 落地的那一下：翻键立刻改 holder，装配面等下一 round。
    */
   readonly graphAssembly?: GraphAssembly;
+  /**
+   * auto-memory T4 / ADR-0031 D1+D5:自动记忆 host 钩子。**默认缺席** ——
+   * 只有 `settings.memory.autoExtract === true`、memory 层在场、且 surface
+   * 不是 `ask`(ADR-0010 D3 opt-out)三者同时成立才装配。缺席时宿主什么都
+   * 不调,行为与现网逐字节一致。
+   */
+  readonly autoMemory?: AutoMemoryHook;
 };
 
 /**
@@ -385,7 +395,7 @@ export async function buildHarnessEngine(
     }
   }
   // #126 T5:settings 对象缝（测试注入隔离 settings；生产缺省 loadIknowSettings）。
-  const settings = opts.settings ?? loadIknowSettings({ cwd });
+  const settings = opts.settings ?? loadIknowSettings({ cwd, home: userHome });
   // #406 T4:secret 处理模式 —— settings.secrets.mode 驱动装配。缺省 = "roundtrip"
   // （识别 + 占位符替换 + bash 还原 + 输出 mask）；"block" = 旧 deny-only
   // preToolUse guard（#126 兼容路径），roundtrip 机制整体关闭。非法值已被
@@ -690,9 +700,27 @@ export async function buildHarnessEngine(
       : {}),
   };
   const engine = createLoopEngine(deps);
+  // auto-memory T4 / ADR-0031 D1+D5:三重同门 —— 显式 opt-in、memory 层在场、
+  // 非 ask 表面。任一不成立 → 钩子缺席,宿主侧零调用、零 LLM、零写盘。
+  const autoMemory =
+    memoryEnabled && surface !== "ask" && settings.memory?.autoExtract === true
+      ? createAutoMemoryHook({
+          memoryDir,
+          llm: createAdapterExtractLlm(adapter),
+          enabled: true,
+          onError: (error) => {
+            console.warn(
+              `[memory/auto] ingest skipped: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            );
+          },
+        })
+      : undefined;
   return {
     deps,
     engine,
+    ...(autoMemory ? { autoMemory } : {}),
     ...(subagentManager ? { subagentManager } : {}),
     // #337 T8 / #361 Phase D:透出 skillCatalog + mcpManager + catalog,供
     // TUI deps 构建扩展面(TuiExtensions.skillCatalog / mcp.status / mcp.reload /

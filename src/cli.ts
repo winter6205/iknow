@@ -362,6 +362,10 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // #356 T7:host drain — chat 入口每轮 runHarness 前把 completed 子代理
     // 结果拼入 priorMessages。ask 入口无 manager(surface 门控),不传。
     subagentManager: built.subagentManager,
+    // auto-memory T4 / ADR-0031 D1:自动记忆钩子。仅
+    // `settings.memory.autoExtract === true` 时 build-engine 才装配;
+    // 缺席(默认 OFF)→ chat host 不调,行为逐字节不变。
+    autoMemory: built.autoMemory,
     // #128 T8:settings.verify 段 → 闭环配置。command 缺失 (含 verify 段缺失)
     // → { command: "" }, subagentManager 在场 (chat) 时 runClassifier 接管
     // 分类器判官 (spec #128 Objective); ask 形态无 manager → verify-loop
