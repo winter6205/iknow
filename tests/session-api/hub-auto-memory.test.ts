@@ -1,7 +1,7 @@
 /**
  * auto-memory T4: serve / TUI host wiring (SessionHub).
  *
- * Spec: specs/auto-memory.md D1/D4; ADR-0030 Decision 1/5. The hub is the
+ * Spec: specs/auto-memory.md D1/D4; ADR-0031 Decision 1/5. The hub is the
  * shared host for `serve` and the TUI, so wiring it once covers both. What is
  * pinned: every finished turn reaches the hook, a hook failure never fails
  * postMessage, and an unwired hub behaves exactly as before.

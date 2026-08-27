@@ -174,7 +174,7 @@ export interface CreateTuiBridgeOptions {
    *  hub-bridge 透传给 SessionHub。缺省 undefined → 无 manager 路径（drain 返空）。 */
   readonly subagentManager?: SubAgentManager;
   /**
-   * auto-memory T4 / ADR-0030 D1:自动记忆钩子。与 subagentManager 同路
+   * auto-memory T4 / ADR-0031 D1:自动记忆钩子。与 subagentManager 同路
    * (buildTuiDeps → buildHarnessEngine SSOT 装配) 透传给 SessionHub。
    * 缺席(默认 OFF)→ hub 不调,行为逐字节不变。
    */

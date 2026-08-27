@@ -1,7 +1,7 @@
 /**
  * auto-memory T3: ingest.ts tests (extract → ops → persist).
  *
- * Spec: specs/auto-memory.md D2/D4; ADR-0030 Decision 2/3/5. The four ops
+ * Spec: specs/auto-memory.md D2/D4; ADR-0031 Decision 2/3/5. The four ops
  * (ADD / UPDATE / SUPERSEDE / NOOP) must be observable from a transcript
  * slice plus a fake LLM; persisted entries carry `source: auto`; negative-form
  * and low-confidence candidates never reach disk.

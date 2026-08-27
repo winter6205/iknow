@@ -1,7 +1,7 @@
 /**
  * auto-memory T4: auto-memory-wire.ts tests.
  *
- * Spec: specs/auto-memory.md D1/D2; ADR-0030 Decision 1/2. This is the seam
+ * Spec: specs/auto-memory.md D1/D2; ADR-0031 Decision 1/2. This is the seam
  * that keeps `src/harness/memory/` free of ModelAdapter knowledge, so what is
  * pinned here is the shape of the bridge, not memory policy.
  */

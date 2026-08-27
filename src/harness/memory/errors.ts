@@ -27,7 +27,7 @@ export class MemorySchemaInvalid extends MemoryError {
 
 /**
  * Auto-memory ingest could not produce usable candidates (auto-memory T3 /
- * ADR-0030 D5): the extraction call failed, its output was not a JSON array,
+ * ADR-0031 D5): the extraction call failed, its output was not a JSON array,
  * or a candidate reached the write path still carrying negative-form
  * phrasing. One error type so the host wire has exactly one thing to swallow.
  */
@@ -39,7 +39,7 @@ export class MemoryExtractError extends MemoryError {
 }
 
 /**
- * A GC option is outside its declared domain (auto-memory T2 / ADR-0030 D4).
+ * A GC option is outside its declared domain (auto-memory T2 / ADR-0031 D4).
  * Thrown before any scan or write so a bad cap cannot half-apply a plan.
  */
 export class MemoryGcOptionInvalid extends MemoryError {

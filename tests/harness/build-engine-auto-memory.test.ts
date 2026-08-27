@@ -1,7 +1,7 @@
 /**
  * auto-memory T4: `BuiltEngine.autoMemory` wiring.
  *
- * Spec: specs/auto-memory.md D1/SC1; ADR-0030 Decision 1/5. The assembly
+ * Spec: specs/auto-memory.md D1/SC1; ADR-0031 Decision 1/5. The assembly
  * point is where the opt-in becomes a live hook, so this is where the
  * default-OFF promise and the `ask` opt-out (ADR-0010 D3) are pinned.
  */

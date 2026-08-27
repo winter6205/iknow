@@ -86,16 +86,16 @@ _Avoid_: 逐 slot 独立消费缓存；再拆拼接后的整串；把拼接顺�
 **surface split (identity vs memory)**: 入口面（`chat` / `tui` / `ask` / `serve`）的两层语义——身份认知层（`identity` / `soul` / `user_profile` + 仅 chat/tui 触发的 `bootstrap`）恒在；记忆层（`AGENTS.md` + rules + 记忆库 + `memory_recall` / `memory_save` 工具）只对 chat / tui / serve 装配，`ask` 全 opt-out（`memory_layer` slot 不挂、memory 工具不入注册表）。#228 决议 D3。
 _Avoid_: `ask` 全 opt-out（破"我是谁"答复路径）；`ask` 全 opt-in（破 #121 "ask 无状态"前提）；按 surface flag 同时决定两层
 
-**auto_extract**（`settings.memory.autoExtract`）: 自动记忆抽取的唯一开关，boolean-only、**默认 OFF**——段缺失或非 `true` 一律按关处理。关闭时 `BuiltEngine.autoMemory` 缺席，宿主零调用、零额外 LLM、零写盘，行为与完全未接线逐字节一致。开启后触发闸在 host 侧（chat / tui / serve）：`StopReason=completed` 之后异步，且累计 N≥2 个完成 turn 才跑一趟。ADR-0030 D1/D5。
+**auto_extract**（`settings.memory.autoExtract`）: 自动记忆抽取的唯一开关，boolean-only、**默认 OFF**——段缺失或非 `true` 一律按关处理。关闭时 `BuiltEngine.autoMemory` 缺席，宿主零调用、零额外 LLM、零写盘，行为与完全未接线逐字节一致。开启后触发闸在 host 侧（chat / tui / serve）：`StopReason=completed` 之后异步，且累计 N≥2 个完成 turn 才跑一趟。ADR-0031 D1/D5。
 _Avoid_: 把默认改成 ON；把抽取 prompt 内嵌进 loop-engine（那里管 turn 机制，不管记忆语义）；给 `ask` 接线（ADR-0010 D3 opt-out 仍然生效）；让 ingest 失败冒泡成用户 turn 失败
 
-**memory_op**（`ADD` | `UPDATE` | `SUPERSEDE` | `NOOP`）: 单条候选事实经 BM25-lite 近邻裁定后的四态写入决策——无近邻过门 → `ADD` 写新 slug；近邻过门且候选信息严格更多 → `UPDATE` 原地重写并 bump `updated_at`；近邻过门且候选相抵 → `SUPERSEDE` 写新 slug 带 `supersedes: <old>` 并软禁旧条目；近邻过同一门槛但无新信息 → `NOOP` 不落盘。`extract` / `decide ops` / `persist` 保持三个独立函数：LLM 那一半可被 FakeLLM 顶替，确定性那一半无模型也能单测。ADR-0030 D2。
+**memory_op**（`ADD` | `UPDATE` | `SUPERSEDE` | `NOOP`）: 单条候选事实经 BM25-lite 近邻裁定后的四态写入决策——无近邻过门 → `ADD` 写新 slug；近邻过门且候选信息严格更多 → `UPDATE` 原地重写并 bump `updated_at`；近邻过门且候选相抵 → `SUPERSEDE` 写新 slug 带 `supersedes: <old>` 并软禁旧条目；近邻过同一门槛但无新信息 → `NOOP` 不落盘。`extract` / `decide ops` / `persist` 保持三个独立函数：LLM 那一半可被 FakeLLM 顶替，确定性那一半无模型也能单测。ADR-0031 D2。
 _Avoid_: 把四态压成一个 upsert；绕开 `memory_save` 的肯定句门禁与 tmp+rename 原子写另起写路径；把三段合成一个函数
 
-**memory_gc**: 可重复、幂等的机械清理，三条规则、**零 LLM**——`ttl_days > 0` 且已过期 → `disabled: true`；被别的条目 `supersedes` 指名 → `disabled: true`；活跃条目超 store cap → 按效用分 `importance × recency × (1 + recall_count)`（recall 次数取自既有 `usage.json` sidecar）从低到高软禁。GC **只软禁不删文件**，误驱逐改一行 frontmatter 就能收回。ADR-0030 D4。
+**memory_gc**: 可重复、幂等的机械清理，三条规则、**零 LLM**——`ttl_days > 0` 且已过期 → `disabled: true`；被别的条目 `supersedes` 指名 → `disabled: true`；活跃条目超 store cap → 按效用分 `importance × recency × (1 + recall_count)`（recall 次数取自既有 `usage.json` sidecar）从低到高软禁。GC **只软禁不删文件**，误驱逐改一行 frontmatter 就能收回。ADR-0031 D4。
 _Avoid_: 硬删文件；把 LLM 离线合并 / 摘要塞进 GC（本轨明确不做）；让 GC 依赖 frontmatter + usage sidecar 之外的运行时状态
 
-**source: auto**: 自动写入条目的 provenance 标记，落在 frontmatter（`sanitizeMemoryFile` / `serializeMemoryEntry` 已 round-trip 未知字段，无需 schema 升版）。自动条目**只经 `memory_recall` 的 tool_result 低信通道**到达模型，永不盲注 `system`（ADR-0009 D3 双通道不变）；也不豁免 promote 门槛，仍需 ≥2 个不同 session 的 recall，没有 auto-promote 路径。该标记同时是批量回退的抓手。ADR-0030 D3。
+**source: auto**: 自动写入条目的 provenance 标记，落在 frontmatter（`sanitizeMemoryFile` / `serializeMemoryEntry` 已 round-trip 未知字段，无需 schema 升版）。自动条目**只经 `memory_recall` 的 tool_result 低信通道**到达模型，永不盲注 `system`（ADR-0009 D3 双通道不变）；也不豁免 promote 门槛，仍需 ≥2 个不同 session 的 recall，没有 auto-promote 路径。该标记同时是批量回退的抓手。ADR-0031 D3。
 _Avoid_: 给高 importance 的自动条目开 auto-promote；把 `source: auto` 当成信任等级之外的纯装饰；用别的字段区分人写 / 机写
 
 **chat REPL** / **product CLI**: TTY interactive `iknow chat`（或裸 TTY invoke）的人类视图；管道模式为串行非终端 turn。

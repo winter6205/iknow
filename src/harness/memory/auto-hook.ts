@@ -1,7 +1,7 @@
 /**
  * auto-memory T4: the host-side trigger gate.
  *
- * Spec: specs/auto-memory.md D1/D4; ADR-0030 Decision 1/5. Hosts (chat / tui /
+ * Spec: specs/auto-memory.md D1/D4; ADR-0031 Decision 1/5. Hosts (chat / tui /
  * serve) call `onTurnComplete` after every turn; everything that decides
  * whether an ingest actually happens lives here rather than in the loop
  * engine, which owns turn mechanics and not memory semantics.
@@ -22,7 +22,7 @@ import { MemoryGcOptionInvalid } from "./errors.js";
 import { ingestMemory } from "./ingest.js";
 import type { MemoryExtractLlm, MemoryIngestResult } from "./ingest.js";
 
-/** Completed turns to accumulate before a pass. ADR-0030 D1: never per-turn. */
+/** Completed turns to accumulate before a pass. ADR-0031 D1: never per-turn. */
 export const DEFAULT_COMPLETED_TURN_GATE = 2;
 
 export interface AutoMemoryTurn {
@@ -96,7 +96,7 @@ export function createAutoMemoryHook(
         });
         opts.onIngest?.(result);
       } catch (error) {
-        // EXIT: log-and-continue (ADR-0030 D5). The user's turn already
+        // EXIT: log-and-continue (ADR-0031 D5). The user's turn already
         // succeeded; a failed extraction is reported to the observer and
         // dropped. Re-throwing here would reject an unawaited promise and
         // take the host process down.

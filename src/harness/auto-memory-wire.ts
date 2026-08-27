@@ -2,7 +2,7 @@
  * auto-memory T4: the composition seam between the harness and the memory
  * context's extraction port.
  *
- * Spec: specs/auto-memory.md D1; ADR-0030 Decision 1/2. `src/harness/memory/`
+ * Spec: specs/auto-memory.md D1; ADR-0031 Decision 1/2. `src/harness/memory/`
  * declares a two-line `MemoryExtractLlm` port on purpose — it must not know
  * about `ModelAdapter`, streaming, or turn state. This file is where the
  * harness's adapter is adapted to that port, and where a run's messages are

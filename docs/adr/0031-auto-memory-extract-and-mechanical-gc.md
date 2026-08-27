@@ -1,4 +1,4 @@
-# 0030. Auto-memory — trigger gate, four-state ingest, mechanical GC, provenance, default OFF
+# 0031. Auto-memory — trigger gate, four-state ingest, mechanical GC, provenance, default OFF
 
 Date: 2026-08-26
 Status: accepted

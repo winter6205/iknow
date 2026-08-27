@@ -1,7 +1,7 @@
 /**
  * auto-memory T4: auto-hook.ts tests (host-side trigger gate).
  *
- * Spec: specs/auto-memory.md D1/D4; ADR-0030 Decision 1/5. The hook is the
+ * Spec: specs/auto-memory.md D1/D4; ADR-0031 Decision 1/5. The hook is the
  * seam a host calls after every turn. It must:
  *   - do nothing at all unless explicitly enabled (default OFF)
  *   - fire only after StopReason=completed, and only on the N>=2 turn gate

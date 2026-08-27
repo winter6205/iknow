@@ -21,7 +21,7 @@ minimal-change-verifier: yes — 决策 → GC → ingest → wire → 文档 �
 清单已清空（T5）。
 
 - [x] CONTEXT：`auto_extract`、`memory_op`（ADD\|UPDATE\|SUPERSEDE\|NOOP）、`memory_gc`、`source:auto` —— 四条术语 + `memory_save` vs auto_extract / `memory_gc` vs promote 两条 Relationships 已落 `docs/CONTEXT.md`（T5）
-- [x] ADR-0030（T1 产出）；ADR-0009 D5 标注 superseded-by-0030（范围：延期项落地，不改 D1–D4/D6）—— 已落（T1）
+- [x] ADR-0031（T1 产出）；ADR-0009 D5 标注 superseded-by-0031（范围：延期项落地，不改 D1–D4/D6）—— 已落（T1）
 
 ## Out of scope
 
@@ -32,7 +32,7 @@ minimal-change-verifier: yes — 决策 → GC → ingest → wire → 文档 �
 1. **Record auto-memory ADR + thin spec** — tag: `[decision]`
    - **Inherits:** ADR-0009 D5 延期；`specs/auto-memory.md` D1–D5
    - **Surface:** `docs/adr` / `specs/auto-memory.md` / `specs/README.md`
-   - **Acceptance:** ADR-0030 accepted（触发闸、四态写入、机械 GC、provenance、默认 OFF）；0009 D5 有 superseded 指针；spec 入活跃索引；无产品代码
+   - **Acceptance:** ADR-0031 accepted（触发闸、四态写入、机械 GC、provenance、默认 OFF）；0009 D5 有 superseded 指针；spec 入活跃索引；无产品代码
    - Status: [x] done
 
 2. **Mechanical memory GC** — tag: `[implementation]`
@@ -65,6 +65,6 @@ minimal-change-verifier: yes — 决策 → GC → ingest → wire → 文档 �
 
 ## Code review phase（整轮结束后）
 
-Standards + Spec 双轴；对照 `specs/auto-memory.md` 与 ADR-0030。
+Standards + Spec 双轴；对照 `specs/auto-memory.md` 与 ADR-0031。
 
 已跑完：无阻塞项，产品代码不改。3 Medium + 6 Low 已落 `docs/STATUS.md` §2.5「自动记忆已知限制 / 遗留」，扩大 opt-in 前逐条处置。

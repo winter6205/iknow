@@ -1,7 +1,7 @@
 /**
  * auto-memory T4: `settings.memory.autoExtract` opt-in.
  *
- * Spec: specs/auto-memory.md D1/SC1; ADR-0030 Decision 5 — default OFF, and
+ * Spec: specs/auto-memory.md D1/SC1; ADR-0031 Decision 5 — default OFF, and
  * "absent" must be indistinguishable from "off" so today's behavior is
  * byte-identical for anyone who never touches the flag.
  *

@@ -1,7 +1,7 @@
 /**
  * auto-memory T2: gc.ts tests (planMemoryGc / runMemoryGc).
  *
- * Spec: specs/auto-memory.md D3 + ADR-0030 Decision 4 — mechanical GC with
+ * Spec: specs/auto-memory.md D3 + ADR-0031 Decision 4 — mechanical GC with
  * exactly three rules (TTL disable / supersede soft-disable / cap utility
  * eviction), soft-disable only (never deletes a file), idempotent on repeat.
  *

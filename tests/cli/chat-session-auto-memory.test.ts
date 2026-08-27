@@ -1,7 +1,7 @@
 /**
  * auto-memory T4: chat host wiring.
  *
- * Spec: specs/auto-memory.md D1/D4; ADR-0030 Decision 1/5. The CLI chat host
+ * Spec: specs/auto-memory.md D1/D4; ADR-0031 Decision 1/5. The CLI chat host
  * must hand every finished turn to the hook, and a hook failure must never
  * change the outcome of the user's turn.
  */

@@ -147,7 +147,7 @@ export type ChatSessionOpts = {
    */
   readonly verifyConfig?: VerifyConfig;
   /**
-   * auto-memory T4 / ADR-0030 D1:自动记忆 host 钩子(`BuiltEngine.autoMemory`)。
+   * auto-memory T4 / ADR-0031 D1:自动记忆 host 钩子(`BuiltEngine.autoMemory`)。
    * 缺席(默认 OFF / ask 表面)→ 不调,行为逐字节不变。
    */
   readonly autoMemory?: AutoMemoryHook;
@@ -401,7 +401,7 @@ async function executeSkipAppendTurn(opts: {
 }
 
 /**
- * auto-memory T4 / ADR-0030 D5: hand a finished turn to the auto-memory hook.
+ * auto-memory T4 / ADR-0031 D5: hand a finished turn to the auto-memory hook.
  *
  * The hook owns the `completed` gate and the N-turn gate — the host only
  * reports. `onTurnComplete` is documented as total, but a hook is host-
@@ -797,7 +797,7 @@ async function runChatQueryLine(
         ) {
           ctx.state.messages = Object.freeze([...s.result.messages]);
         }
-        // auto-memory T4 / ADR-0030 D1:每轮把结果交给钩子,由钩子决定
+        // auto-memory T4 / ADR-0031 D1:每轮把结果交给钩子,由钩子决定
         // completed 闸 + N 轮闸。钩子缺席(默认 OFF / ask)→ 整句 no-op。
         notifyAutoMemory(ctx, s.result);
       },

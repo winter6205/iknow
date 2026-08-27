@@ -1,7 +1,7 @@
 /**
  * auto-memory T2: mechanical memory GC (TTL / supersede / cap eviction).
  *
- * Spec: specs/auto-memory.md D3; ADR-0030 Decision 4. Three mechanical rules,
+ * Spec: specs/auto-memory.md D3; ADR-0031 Decision 4. Three mechanical rules,
  * no LLM, soft-disable only:
  *
  *   1. `ttl_days > 0` and `updated_at + ttl_days` elapsed → `disabled: true`

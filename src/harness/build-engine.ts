@@ -700,7 +700,7 @@ export async function buildHarnessEngine(
       : {}),
   };
   const engine = createLoopEngine(deps);
-  // auto-memory T4 / ADR-0030 D1+D5:三重同门 —— 显式 opt-in、memory 层在场、
+  // auto-memory T4 / ADR-0031 D1+D5:三重同门 —— 显式 opt-in、memory 层在场、
   // 非 ask 表面。任一不成立 → 钩子缺席,宿主侧零调用、零 LLM、零写盘。
   const autoMemory =
     memoryEnabled &&

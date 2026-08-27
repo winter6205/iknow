@@ -191,7 +191,7 @@ function makeSlug(random: (n: number) => Buffer): string {
 /**
  * Write `<slug>.md` via tmp + rename: every rename lands a complete file or
  * no file, so a reader can never observe a partial entry under the final
- * path. Exported because auto-memory (ADR-0030 D2) requires the ingest write
+ * path. Exported because auto-memory (ADR-0031 D2) requires the ingest write
  * path to be this same path rather than a second implementation of it.
  */
 export async function writeMemoryEntryAtomic(

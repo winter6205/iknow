@@ -1,7 +1,7 @@
 /**
  * auto-memory T3: ingest pipeline — extract → ops → persist.
  *
- * Spec: specs/auto-memory.md D2/D4; ADR-0030 Decision 2/3/5.
+ * Spec: specs/auto-memory.md D2/D4; ADR-0031 Decision 2/3/5.
  *
  * Three independent stages, deliberately not fused:
  *
@@ -12,7 +12,7 @@
  * Keeping them apart is what makes the four ops testable with a fake LLM and
  * the four-state table testable with no model at all. The extraction prompt
  * lives here and nowhere else — the loop engine owns turn mechanics, not
- * memory semantics (ADR-0030 "why not alternatives").
+ * memory semantics (ADR-0031 "why not alternatives").
  *
  * Everything auto-written carries `source: auto` in its frontmatter. That is
  * an unknown-extra field, round-tripped verbatim by parse/serialize, so no
@@ -45,7 +45,7 @@ const MAX_IMPORTANCE = 5;
 
 /**
  * Decision floors for the four-state table. Static heuristics with no tuning
- * evidence yet (ADR-0030 consequences) — they live together so a future
+ * evidence yet (ADR-0031 consequences) — they live together so a future
  * calibration ticket has one place to touch.
  */
 /** Fraction of the candidate's title tokens the neighbor must also carry. */
@@ -76,7 +76,7 @@ export interface MemoryCandidate {
 
 export type MemoryOpKind = "ADD" | "UPDATE" | "SUPERSEDE" | "NOOP";
 
-/** The four-state write decision (ADR-0030 Decision 2). */
+/** The four-state write decision (ADR-0031 Decision 2). */
 export type MemoryOp =
   | { readonly kind: "ADD"; readonly candidate: MemoryCandidate }
   | {
@@ -360,7 +360,7 @@ function buildEntry(input: {
  * One ingest pass: read the store, extract, decide, persist, then run
  * mechanical GC so a SUPERSEDE's target is actually soft-disabled.
  *
- * Errors are typed and propagate: the caller — the host wire, ADR-0030
+ * Errors are typed and propagate: the caller — the host wire, ADR-0031
  * Decision 5 — is the layer that decides to swallow them, not this one.
  */
 export async function ingestMemory(

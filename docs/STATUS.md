@@ -18,9 +18,9 @@
 | LLM 配置单承载           | `settings.llm.model` 字面值 + `settings.llm.apiKey` 字面/占位符 + `llm.fallback`；`IKNOW_LLM_API_KEY_ENV`/`IKNOW_LLM_MODEL` 退役(ADR-0015) | `src/config/settings.ts` + `src/config/env.ts`                                   |
 | **会话持久化**           | `~/.iknow` 跨进程池 + SessionStore JSON v2(#120)                                                                                           | `src/session-api/store/`                                                         |
 | **记忆层**               | 三层落盘记忆库 + BM25-lite 检索 + `memory_recall` / `memory_save` + promote 门槛（ADR-0009/0010；`ask` 全 opt-out）                        | `src/harness/memory/`                                                            |
-| **自动记忆（默认 OFF）** | `settings.memory.autoExtract = true` 才装配：completed turn 后异步 extract → 四态 op → 原子写（`source: auto`）+ 机械 GC（ADR-0030）       | `src/harness/memory/` + `src/harness/auto-memory-wire.ts`                        |
+| **自动记忆（默认 OFF）** | `settings.memory.autoExtract = true` 才装配：completed turn 后异步 extract → 四态 op → 原子写（`source: auto`）+ 机械 GC（ADR-0031）       | `src/harness/memory/` + `src/harness/auto-memory-wire.ts`                        |
 
-**自动记忆（ADR-0030，2026-08-26）**：兑现 ADR-0009 D5 的延期项。**默认关**——`settings.memory.autoExtract` 缺失或非 `true` 时钩子不装配，宿主零调用、零额外 LLM、零写盘，与现网逐字节一致。开启后：chat / tui / serve 在 `StopReason=completed` 之后异步触发（累计 N≥2 完成 turn 一趟，`ask` 不接线），LLM 抽原子候选 → BM25-lite 近邻 → 裁定 `ADD` / `UPDATE` / `SUPERSEDE` / `NOOP` → 复用 `memory_save` 的肯定句门禁与 tmp+rename 原子写，落盘打 `source: auto`。清理是零 LLM 的机械 GC（TTL 过期 / 被 supersede / 超 cap 按 `importance × recency × (1 + recall_count)` 驱逐），**只软禁不删文件**。自动条目不豁免 promote 门槛，也不进 `system` 通道。抽取或 IO 失败经 host `// EXIT: log-and-continue` 吞掉，用户 turn 仍成功。**未做**：向量 / 图检索、LLM 离线合并、记忆管理 UI、per-turn 同步抽取。已知限制与遗留见 §2.5。
+**自动记忆（ADR-0031，2026-08-26）**：兑现 ADR-0009 D5 的延期项。**默认关**——`settings.memory.autoExtract` 缺失或非 `true` 时钩子不装配，宿主零调用、零额外 LLM、零写盘，与现网逐字节一致。开启后：chat / tui / serve 在 `StopReason=completed` 之后异步触发（累计 N≥2 完成 turn 一趟，`ask` 不接线），LLM 抽原子候选 → BM25-lite 近邻 → 裁定 `ADD` / `UPDATE` / `SUPERSEDE` / `NOOP` → 复用 `memory_save` 的肯定句门禁与 tmp+rename 原子写，落盘打 `source: auto`。清理是零 LLM 的机械 GC（TTL 过期 / 被 supersede / 超 cap 按 `importance × recency × (1 + recall_count)` 驱逐），**只软禁不删文件**。自动条目不豁免 promote 门槛，也不进 `system` 通道。抽取或 IO 失败经 host `// EXIT: log-and-continue` 吞掉，用户 turn 仍成功。**未做**：向量 / 图检索、LLM 离线合并、记忆管理 UI、per-turn 同步抽取。已知限制与遗留见 §2.5。
 
 ### 1.2 交互表面（I1–I3）
 
@@ -95,7 +95,7 @@
 | 部署与发布 | 无标准镜像/编排/健康检查发布流水线      |
 | 密钥托管   | 依赖本机/OS env；无集成密钥管理系统说明 |
 
-### 2.5 自动记忆已知限制 / 遗留（ADR-0030 code-review follow-up）
+### 2.5 自动记忆已知限制 / 遗留（ADR-0031 code-review follow-up）
 
 > 来源：2026-08-26 自动记忆整轮 code-review（Standards + Spec 双轴）判定「不阻塞合入」的 3 Medium + 6 Low。默认 OFF 时钩子不装配，以下全部不可达；**扩大 opt-in（尤其改默认 ON、或让 serve 多 workspace 用自动记忆）前须逐条处置或显式接受**。
 
@@ -106,7 +106,7 @@
 | Medium      | `notifyAutoMemory` 双份实现     | `src/cli/chat-session.ts` 与 `src/session-api/hub.ts` 各有一份同语义的 try/catch 转发（钩子缺席即 no-op + 失败吞掉）。两处漂移会让 chat 与 serve 的吞错语义不一致                                                                                                             | 抽到 `src/harness/auto-memory-wire.ts`（已是该场景的组合缝），两 host 共用一份                 |
 | Low         | 错误类型命名域不匹配            | `src/harness/memory/auto-hook.ts` 的 `requireGate` 校验的是 hook 选项 `minCompletedTurns`，抛的却是 `MemoryGcOptionInvalid`（GC 域）                                                                                                                                          | 提取共用的 option-invalid 类型，或新增 hook 域错误类                                           |
 | Low         | `ingest.ts` 变量遮蔽            | `extractMemoryCandidates` 内层 `for (const raw of parsed)` 遮蔽了外层 `let raw: string`（LLM 原始输出）。当前无行为 bug，只是可读性与后续改动风险                                                                                                                             | 内层改名（如 `item`）                                                                          |
-| Low         | 启发式阈值未校准                | 四态判定的 `SAME_SUBJECT_FLOOR` / `NEAR_DUPLICATE_FLOOR` / `RESTATEMENT_FLOOR` / `CONTRADICTION_FLOOR` 与 `MIN_CANDIDATE_CONFIDENCE` 均为拍脑袋常量，无调参证据（ADR-0030 consequences 已承认）                                                                               | 有真实语料后统一校准；常量已集中在 `ingest.ts` 一处便于改                                      |
+| Low         | 启发式阈值未校准                | 四态判定的 `SAME_SUBJECT_FLOOR` / `NEAR_DUPLICATE_FLOOR` / `RESTATEMENT_FLOOR` / `CONTRADICTION_FLOOR` 与 `MIN_CANDIDATE_CONFIDENCE` 均为拍脑袋常量，无调参证据（ADR-0031 consequences 已承认）                                                                               | 有真实语料后统一校准；常量已集中在 `ingest.ts` 一处便于改                                      |
 | Low（Spec） | `memory_recall` 不过滤 disabled | `src/harness/memory/tools/recall.ts` 的 `readEntriesFromDisk` 读全部 `<slug>.md` 后直接送 BM25；`disabled` 只在 promote 与 ingest 近邻侧被过滤。GC 的「软禁」因此是**弱实现**——被 TTL / supersede / cap 驱逐的条目仍能被 recall 召回（仅在 metadata 里显示 `disabled: true`） | recall 读侧加 `disabled` 过滤（与 promote 同规则）                                             |
 | Low（Spec） | UPDATE 吞并邻居 provenance      | `persistMemoryOps` 的 UPDATE 复用邻居 slug 但整条重写 entry：`ttl_days` 取本次入参、`source` 覆写为 `auto`、`supersedes` 归 `null`。手写条目（`memory_save` 落盘、无 `source`）被自动 UPDATE 命中后，其 TTL 与来源标记被吞掉                                                  | UPDATE 走「读旧条目 → 合并字段」而非全量重建，至少保留 `ttl_days` / `source`                   |
 | Low（Spec） | `drain()` 未挂 host shutdown    | `AutoMemoryHook.drain` 注释自称「Test seam and shutdown hook」，实际只有 `tests/harness/memory/auto-hook.test.ts` 调用；`build-engine` 组合 shutdown 与 `hub.shutdown()` 都没挂。进程退出时 in-flight ingest 会被截断（写是 tmp+rename 原子的，不会半条，但这一趟记忆丢失）   | 挂进 host 组合 shutdown，或把注释改成「测试缝」以与接线一致                                    |

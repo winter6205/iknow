@@ -470,7 +470,7 @@ export type SessionHubOptions = {
    */
   readonly subagentManager?: SubAgentManager;
   /**
-   * auto-memory T4 / ADR-0030 D1:自动记忆 host 钩子。serve 入口经
+   * auto-memory T4 / ADR-0031 D1:自动记忆 host 钩子。serve 入口经
    * `buildHarnessEngine` 自建(仅 `settings.memory.autoExtract === true`);
    * 构造时未注入则 `ensureDeps()` 后从 `built.autoMemory` 懒取。缺席
    * (默认 OFF / ask / 注入 deps 的测试)→ 不调,行为逐字节不变。
@@ -1240,7 +1240,7 @@ export class SessionHub {
                 priorMessages: session.messages,
               });
               void saved;
-              // auto-memory T4 / ADR-0030 D1:每轮把结果交给钩子,由钩子决定
+              // auto-memory T4 / ADR-0031 D1:每轮把结果交给钩子,由钩子决定
               // completed 闸 + N 轮闸。钩子缺席(默认 OFF / ask / 注入 deps 的
               // 测试)→ 整句 no-op,行为逐字节不变。
               this.notifyAutoMemory(s.finalResult);
@@ -2223,7 +2223,7 @@ export class SessionHub {
   }
 
   /**
-   * auto-memory T4 / ADR-0030 D5: hand a finished turn to the auto-memory
+   * auto-memory T4 / ADR-0031 D5: hand a finished turn to the auto-memory
    * hook. The hook owns the `completed` gate and the N-turn gate; the hub
    * only reports. A hook failure must never fail postMessage.
    */

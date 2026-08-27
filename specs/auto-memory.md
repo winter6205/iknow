@@ -19,7 +19,7 @@ chat / tui / serve 在 **opt-in** 下，于成功 run 结束后异步抽出跨�
 - ADR-0010：`memory_layer` 单 slot；ask 记忆全 opt-out。
 - 现有 `MemoryEntryV1` 已含 `importance` / `ttl_days` / `disabled` / `supersedes`；promote 已跳过过期。
 
-## Decisions（本 spec 定稿，写进 ADR-0030）
+## Decisions（本 spec 定稿，写进 ADR-0031）
 
 | ID  | 决策                                                                                                                                                               |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
