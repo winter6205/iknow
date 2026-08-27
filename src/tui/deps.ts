@@ -30,6 +30,7 @@ import type { GraphModeContext } from "../harness/graph/mode.js";
 import type { GraphAssembly } from "../harness/graph/assembly.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
+import { createJsonlTraceService } from "../harness/trace/index.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
 import type { AskUser } from "../harness/permission/types.js";
 import { homedir } from "node:os";
@@ -98,6 +99,11 @@ export interface BuildTuiDepsOptions {
    * 之外的全局 state,workspaceRoot 在 deps 层单向透明。
    */
   readonly workspaceRoot?: string;
+  /**
+   * 观测性地板:JSONL trace 写目录。在场时把 subagent 三事件交给 build-engine
+   * （与 serve hub 同形：`<traceOut>/subagent.jsonl`）。
+   */
+  readonly traceOut?: string;
   /** #337 Phase B 测试缝：MCP client 工厂覆盖（注入 stub 避免真实 stdio 启动）。 */
   readonly createMcpClient?: (
     server: import("../harness/mcp/config.js").McpServerConfig
@@ -205,6 +211,16 @@ export async function buildTuiDeps(
   // 与 build-engine #337 T8 同款。装配期 skill scanner + mcp config 都从这里取。
   const userHome = opts.userHome ?? homedir();
   const cwd = opts.cwd ?? process.cwd();
+  // 子代理生命周期事件落盘 —— 与 serve hub 同款：单例 manager 聚合到
+  // `<traceOut>/subagent.jsonl`（reader 按 task_id 过滤）。TUI 会话 turn
+  // 仍走 hub-bridge 的 per-conversation JSONL；子代理三事件与此对齐。
+  const traceOut = opts.traceOut;
+  const subagentTrace = traceOut
+    ? createJsonlTraceService({
+        filePath: traceOut,
+        conversationId: "subagent",
+      })
+    : undefined;
   // #440 T1-fix:TUI 入口注入 todoDir 让 todo_write 在主 loop 在场
   // (per-conversationId resolution 是后续 ticket — soleInflightId 动态,
   // per-conversationId 需 engine 重建,代价太高;v1 共享 ~/.iknow/todos/tui/)。
@@ -228,6 +244,8 @@ export async function buildTuiDeps(
     ...(opts.cwd ? { cwd } : {}),
     // ADR-0019 (T2): per-root state anchor 透传到 build-engine。
     ...(opts.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
+    // 观测性地板:traceOut 在场 → subagent 三事件落 `<traceOut>/subagent.jsonl`。
+    ...(subagentTrace !== undefined ? { subagentTrace } : {}),
     // #378 测试缝:createMcpManager 工厂覆盖(透传,捕获入参断言)。
     // prettier-ignore（master 一致单行：L3 review 复原；88 字符超 80 列，禁用 prettier 重排）。
     // prettier-ignore

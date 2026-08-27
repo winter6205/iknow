@@ -110,6 +110,15 @@ export interface ToolCallRecord {
 }
 
 export interface TurnRecord {
+  /**
+   * 调用方预生成的 turn id (可选)。缺席 → 实现生成 UUID (原行为)。
+   *
+   * 存在的理由只有一个: 回合内派出的子代理要把 `parentTurnId` 指回本回合,
+   * 而 recordTurn 在回合末尾才发 —— 那时工具阶段早已跑完。loop-engine 因此
+   * 在回合入口先生成 id, 一份给 tool ctx (顺着 executeAll 到 spawn_subagent),
+   * 一份在回合末尾交给 recordTurn, 两侧同源。
+   */
+  id?: string;
   turnIndex: number;
   startedAt: string;
   endedAt: string;
@@ -234,9 +243,9 @@ export type SubagentState = "starting" | "running" | "completed" | "failed";
  *
  * Postel (ADR-0003 D9): 可选字段仅存在时落盘（JSON.stringify 自动丢弃 undefined）。
  * 可选字段 model / taskPreview / maxTurns / timeoutMs / error 等仅当调用方有可填
- * 来源时才在 record 上存在 —— manager 当前无 parentTurnId 来源（spawn-subagent 工具
- * 未把 turnId 写到 SubAgentDefinition），后续 ticket 在 SubAgentDefinition 上加
- * parentTurnId?；本轮 manager 埋点对此字段置 undefined → 不落 key。
+ * 来源时才在 record 上存在。`parentTurnId` 的来源是 `SubAgentDefinition.parentTurnId`
+ * （F-4）：`spawn_subagent` 从 `ctx.turnId` 抄、graph node-executor 从派发方抄；
+ * 派发方无归属回合（如回合之外的 `/graph run`）→ 该键缺席。
  *
  * Origin 留位 v1 恒 "parent"（子代理生命周期状态机完全在父 manager 内；worker 只
  * 写 stdout 信封，schema 不变即可升级 child 留位）。

@@ -194,6 +194,21 @@ export function truncateTaskPreview(
   return def.task?.slice(0, max ?? 120) ?? "";
 }
 
+/**
+ * F-4: `def.parentTurnId` → 三类生命周期 record 的 `parentTurnId`。
+ *
+ * 单点展开而不是在四个埋点各写一遍三元式:四处漂移一处就够把某回合的
+ * 反向追溯打出一个洞(spawn 有、stop 没有 = `?parent_turn_id=` 只捞到半条命)。
+ * Postel(ADR-0003 D9):派发方没给归属回合就整个键缺席,不落 null / 空串。
+ */
+function parentTurnFields(def: SubAgentDefinition): {
+  readonly parentTurnId?: string;
+} {
+  return def.parentTurnId !== undefined
+    ? { parentTurnId: def.parentTurnId }
+    : {};
+}
+
 type TaskState = "starting" | "running" | "completed" | "failed";
 
 interface Task {
@@ -313,6 +328,7 @@ export function createSubAgentManager(opts: {
       trace.recordSubagentStateChange({
         id: task.id,
         taskId: task.id,
+        ...parentTurnFields(task.def),
         origin: "parent",
         startedAt: task.startedAt,
         status: toState === "failed" ? "error" : "ok",
@@ -354,6 +370,7 @@ export function createSubAgentManager(opts: {
       trace.recordSubagentStop({
         id: task.id,
         taskId: task.id,
+        ...parentTurnFields(task.def),
         origin: "parent",
         startedAt: task.startedAt,
         endedAt,
@@ -415,6 +432,7 @@ export function createSubAgentManager(opts: {
           trace.recordSubagentSpawn({
             id: task.id,
             taskId: task.id,
+            ...parentTurnFields(def),
             origin: "parent",
             startedAt: task.startedAt,
             status: "error",
@@ -440,6 +458,7 @@ export function createSubAgentManager(opts: {
         trace.recordSubagentSpawn({
           id: task.id,
           taskId: task.id,
+          ...parentTurnFields(def),
           origin: "parent",
           startedAt: task.startedAt,
           status: "ok",
