@@ -21,7 +21,10 @@ import { createRef } from "react";
 import { expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
 import { ChatView, type ChatViewHandle } from "../../src/tui/chat-view.js";
-import { attachSession, type TuiSessionState } from "../../src/tui/session-state.js";
+import {
+  attachSession,
+  type TuiSessionState,
+} from "../../src/tui/session-state.js";
 import {
   THINKING_PEEK_MAX_LINES,
   formatThinkingFold,
