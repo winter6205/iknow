@@ -44,7 +44,7 @@
  * selection、selection-render、text、HighlightedLine——本文件应保持纯 OpenTUI
  * 渲染，无行账 / 裁剪 / 选区概念。
  */
-import type { ReactNode } from "react";
+import { memo, type ReactNode } from "react";
 import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
@@ -182,8 +182,15 @@ const SYSTEM_INTERRUPT_MARK = "[已打断]";
  *    OpenTUI `marginBottom` 不存在「折叠」语义，元素之间天然有间距。
  *    本参数在 ChatView 已废除（scrollbox 全内容滚动不写行账，无 trailing
  *    双空行问题）。保留仅为对外 API 兼容，**当前实现忽略**。
+ *
+ *  `memo` 包裹（浅比较）：ChatView 每次流式增量 / 无关父状态更新都会重建
+ *  整段挂载消息的元素树，未记忆时每条历史消息都要重跑 markdown 解析 ——
+ *  24 轮历史下一次增量约 96 次 `marked.lexer`，成本 O(历史体量)。上面所有
+ *  props 要么是原始值，要么是 ChatView 侧已 useMemo 稳定的引用
+ *  （`message` 来自 session.messages、`statusMap` 来自 toolResultStatusMap），
+ *  浅比较即可命中。回归闸：tests/tui/history-rerender-cost.test.tsx。
  */
-export function MessageBlocks(props: {
+export const MessageBlocks = memo(function MessageBlocks(props: {
   readonly message: AnthropicNativeMessage;
   readonly cols: number;
   readonly statusMap: ReadonlyMap<string, boolean>;
@@ -322,4 +329,4 @@ export function MessageBlocks(props: {
       </box>
     </box>
   );
-}
+});
