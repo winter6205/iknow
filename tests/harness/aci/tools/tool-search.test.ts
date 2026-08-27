@@ -49,22 +49,37 @@ function makeTool(name: string, description = `fixture ${name}`): AciToolDef {
  * 装配 fixture registry + tool_search(holder 模式):
  * `getRegistry` 闭包捕获 `holder`,tool_search 实际被调用时
  * `holder.reg` 已被赋值,正常返回。
+ *
+ * `getRegistryCalls` / `discovered` 记录副作用轨迹:前者证明空白 query
+ * 根本不解引用 registry,后者证明 discover 只覆盖真正输出的工具。
  */
 function buildToolSearchOverFixture(fixtures: ReadonlyArray<AciToolDef>): {
   toolSearch: AciToolDef;
   registry: AciRegistry;
+  getRegistryCalls: ReadonlyArray<null>;
+  discovered: ReadonlyArray<string>;
 } {
   const holder: { reg?: AciRegistry } = {};
+  const getRegistryCalls: null[] = [];
+  const discovered: string[] = [];
   const toolSearch = createToolSearchTool({
     getRegistry: () => {
       if (!holder.reg) throw new Error("test fixture: registry not assembled");
-      return holder.reg;
+      getRegistryCalls.push(null);
+      const reg = holder.reg;
+      return {
+        ...reg,
+        discover: (name: string) => {
+          discovered.push(name);
+          return reg.discover(name);
+        },
+      };
     },
   });
   const allTools: ReadonlyArray<AciToolDef> = [...fixtures, toolSearch];
   const registry = createAciRegistry(allTools);
   holder.reg = registry;
-  return { toolSearch, registry };
+  return { toolSearch, registry, getRegistryCalls, discovered };
 }
 
 /** 直接调 tool_search handler(同步,返回 string)。 */
@@ -257,6 +272,36 @@ describe("tool_search — ajv input 校验 (S4 / D9)", () => {
     expect(validate({ query: "x", extra: 1 })).toBe(false);
   });
 
+  it("{query, limit: 5} → 合法(limit 可选正整数)", () => {
+    const { registry } = buildToolSearchOverFixture([makeTool("x")]);
+    const validate = registry.inner.getValidator("tool_search")!;
+    expect(validate({ query: "x", limit: 5 })).toBe(true);
+  });
+
+  it("{limit: 0} → 非法(下界 1)", () => {
+    const { registry } = buildToolSearchOverFixture([makeTool("x")]);
+    const validate = registry.inner.getValidator("tool_search")!;
+    expect(validate({ query: "x", limit: 0 })).toBe(false);
+  });
+
+  it("{limit: -3} → 非法(负数)", () => {
+    const { registry } = buildToolSearchOverFixture([makeTool("x")]);
+    const validate = registry.inner.getValidator("tool_search")!;
+    expect(validate({ query: "x", limit: -3 })).toBe(false);
+  });
+
+  it("{limit: 2.5} → 非法(非整数)", () => {
+    const { registry } = buildToolSearchOverFixture([makeTool("x")]);
+    const validate = registry.inner.getValidator("tool_search")!;
+    expect(validate({ query: "x", limit: 2.5 })).toBe(false);
+  });
+
+  it('{limit: "5"} → 非法(字符串数字)', () => {
+    const { registry } = buildToolSearchOverFixture([makeTool("x")]);
+    const validate = registry.inner.getValidator("tool_search")!;
+    expect(validate({ query: "x", limit: "5" })).toBe(false);
+  });
+
   it("schema 字段描述包含 spec 要求的两个英文短语 + T3 检索范围/时机提示", () => {
     // #483 D9: description must contain "pull ToolDef JSON" +
     // "Discover tools beyond the current prompt" (replaces D7 "returns
@@ -268,5 +313,138 @@ describe("tool_search — ajv input 校验 (S4 / D9)", () => {
     expect(desc).toContain("Discover tools beyond the current prompt");
     expect(desc).toContain("mcp__");
     expect(desc).toContain("Search first, then use");
+  });
+});
+
+/** 批量 fixture：`bulk` 子串只命中这些 fixture（tool_search 自身不含）。 */
+function bulkFixtures(count: number, descLength = 20): AciToolDef[] {
+  return Array.from({ length: count }, (_, i) =>
+    makeTool(`bulk_${i}`, `bulk ${"d".repeat(descLength)}`)
+  );
+}
+
+/** 输出末行是引导行时的拆分：JSON 行集合 + 引导行。 */
+function splitBounded(out: string): { jsonLines: string[]; guidance: string } {
+  const lines = out.split("\n");
+  const guidance = lines[lines.length - 1]!;
+  return { jsonLines: lines.slice(0, -1), guidance };
+}
+
+describe("tool_search — T2:有界输出(默认封顶 + limit + 引导行)", () => {
+  it("命中数等于默认封顶(20) → 20 行 JSON,无引导行", () => {
+    const { toolSearch } = buildToolSearchOverFixture(bulkFixtures(20));
+    const out = invokeToolSearch(toolSearch, { query: "bulk" });
+    const lines = out.split("\n");
+    expect(lines).toHaveLength(20);
+    for (const line of lines) {
+      expect(() => JSON.parse(line)).not.toThrow();
+    }
+  });
+
+  it("命中数超默认封顶 → 20 行 JSON + 一条纯文本引导行(showing 20 of 25)", () => {
+    const { toolSearch } = buildToolSearchOverFixture(bulkFixtures(25));
+    const out = invokeToolSearch(toolSearch, { query: "bulk" });
+    const { jsonLines, guidance } = splitBounded(out);
+    expect(jsonLines).toHaveLength(20);
+    for (const line of jsonLines) {
+      expect(Object.keys(JSON.parse(line) as object).sort()).toEqual([
+        "description",
+        "inputSchema",
+        "name",
+      ]);
+    }
+    expect(guidance).toContain("showing 20 of 25");
+    expect(() => JSON.parse(guidance)).toThrow();
+    expect(guidance).toContain("`names`");
+  });
+
+  it("显式 limit 收窄 → 行数 = limit,引导行标注实际比例", () => {
+    const { toolSearch } = buildToolSearchOverFixture(bulkFixtures(10));
+    const out = invokeToolSearch(toolSearch, { query: "bulk", limit: 3 });
+    const { jsonLines, guidance } = splitBounded(out);
+    expect(jsonLines).toHaveLength(3);
+    expect(guidance).toContain("showing 3 of 10");
+  });
+
+  it("limit 大于命中数 → 无引导行(未触发封顶,输出与现状一致)", () => {
+    const { toolSearch } = buildToolSearchOverFixture(bulkFixtures(4));
+    const out = invokeToolSearch(toolSearch, { query: "bulk", limit: 50 });
+    const lines = out.split("\n");
+    expect(lines).toHaveLength(4);
+    expect(out).not.toContain("showing");
+  });
+
+  it("单条超长 description 逼近 20k:整行丢弃,无半行 JSON,总长 ≤ 20000", () => {
+    const { toolSearch } = buildToolSearchOverFixture(bulkFixtures(10, 4000));
+    const out = invokeToolSearch(toolSearch, { query: "bulk" });
+    expect(out.length).toBeLessThanOrEqual(20_000);
+    const { jsonLines, guidance } = splitBounded(out);
+    expect(jsonLines.length).toBeGreaterThan(0);
+    expect(jsonLines.length).toBeLessThan(10);
+    for (const line of jsonLines) {
+      expect(() => JSON.parse(line)).not.toThrow();
+    }
+    expect(guidance).toContain(`of 10`);
+  });
+
+  it("单条命中就超预算 → 只剩引导行,不吐半行 JSON", () => {
+    const { toolSearch } = buildToolSearchOverFixture(bulkFixtures(1, 30_000));
+    const out = invokeToolSearch(toolSearch, { query: "bulk" });
+    expect(out.length).toBeLessThanOrEqual(20_000);
+    expect(out).toContain("showing 0 of 1");
+    expect(out.split("\n")).toHaveLength(1);
+  });
+
+  it("契约 X:封顶输出不含 truncated/total 元字段", () => {
+    const { toolSearch } = buildToolSearchOverFixture(bulkFixtures(25));
+    const out = invokeToolSearch(toolSearch, { query: "bulk" });
+    expect(out).not.toContain("truncated");
+    expect(out).not.toContain("total");
+  });
+
+  it("discover 副作用与输出同界:被丢弃的命中不进 discovered set", () => {
+    const { toolSearch, discovered } = buildToolSearchOverFixture(
+      bulkFixtures(25)
+    );
+    invokeToolSearch(toolSearch, { query: "bulk" });
+    expect(discovered).toHaveLength(20);
+  });
+});
+
+describe("tool_search — T2:query trim 后判空", () => {
+  it('query "   " → NO_MATCHES(不再全量倾倒)', () => {
+    const { toolSearch } = buildToolSearchOverFixture([
+      makeTool("alpha", "first tool"),
+      makeTool("beta", "second tool"),
+    ]);
+    const out = invokeToolSearch(toolSearch, { query: "   " });
+    expectNoMatchesGuidance(out);
+  });
+
+  it("空白-only query 不解引用 registry,也不触发 discover", () => {
+    const { toolSearch, getRegistryCalls, discovered } =
+      buildToolSearchOverFixture([makeTool("alpha"), makeTool("beta")]);
+    invokeToolSearch(toolSearch, { query: "\t\n " });
+    expect(getRegistryCalls).toHaveLength(0);
+    expect(discovered).toHaveLength(0);
+  });
+
+  it('query "  read  " trim 后仍子串命中(匹配算法零改动)', () => {
+    const { toolSearch } = buildToolSearchOverFixture([
+      makeTool("ReadFile"),
+      makeTool("write_file"),
+    ]);
+    const out = invokeToolSearch(toolSearch, { query: "  read  " });
+    expect(out).toContain("ReadFile");
+    expect(out).not.toContain("write_file");
+  });
+
+  it("空白 query + 非空 names → 仍走 names 精确取名", () => {
+    const { toolSearch } = buildToolSearchOverFixture([
+      makeTool("alpha"),
+      makeTool("beta"),
+    ]);
+    const out = invokeToolSearch(toolSearch, { query: " ", names: ["alpha"] });
+    expect(JSON.parse(out)).toMatchObject({ name: "alpha" });
   });
 });
