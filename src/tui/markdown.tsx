@@ -27,12 +27,16 @@
 // OpenTUI JSX 命名空间下 JSX.Element = ReactNode——组件返回类型统一用
 // ReactNode（ReactElement 收窄会与命名空间 Element 类型冲突）。
 import type { ReactNode } from "react";
+import { useMemo, useRef } from "react";
 import stringWidth from "string-width";
 import { TextAttributes } from "@opentui/core";
 import { padEndVisual } from "./visual.js";
 import { panguSpacing, panguSpacingKeepingCodespans } from "./pangu.js";
 import { marked, type MarkedToken, type Token, type Tokens } from "marked";
 import { tuiPalette } from "./theme.js";
+import { clipFenceDisplayLines } from "./fence-display-cap.js";
+import { previewOverflowLabel } from "./tool-summary.js";
+import { splitStreamingMarkdown } from "./streaming-block-freeze.js";
 
 // -- 视觉宽度工具（表格压缩 / 截断专用；SSOT = string-width） ---------
 
@@ -270,22 +274,30 @@ export function CodeBlock(props: {
   readonly lang: string;
   readonly lines: readonly string[];
 }): ReactNode {
+  const clip = clipFenceDisplayLines(props.lines);
   return (
-    <box
-      flexDirection="column"
-      backgroundColor={tuiPalette.codeBlockBg}
-      paddingLeft={1}
-      paddingRight={1}
-    >
-      {props.lines.map((l, i) => (
-        <CodeBlockLine
-          key={i}
-          line={l}
-          lang={props.lang}
-          bg={tuiPalette.codeBlockBg}
-          fg={tuiPalette.codeDefault}
-        />
-      ))}
+    <box flexDirection="column">
+      <box
+        flexDirection="column"
+        backgroundColor={tuiPalette.codeBlockBg}
+        paddingLeft={1}
+        paddingRight={1}
+      >
+        {clip.visible.map((l, i) => (
+          <CodeBlockLine
+            key={i}
+            line={l}
+            lang={props.lang}
+            bg={tuiPalette.codeBlockBg}
+            fg={tuiPalette.codeDefault}
+          />
+        ))}
+      </box>
+      {clip.hiddenLineCount > 0 ? (
+        <text fg={tuiPalette.dim} wrapMode="none">
+          {previewOverflowLabel(clip.hiddenLineCount)}
+        </text>
+      ) : null}
     </box>
   );
 }
@@ -504,8 +516,7 @@ function lexMarkdown(text: string): MarkedToken[] {
   return tokens;
 }
 
-/** 主渲染器：markdown 文本 → OpenTUI 元素树。 */
-export function Markdown(props: {
+function MarkdownStatic(props: {
   readonly text: string;
   readonly width: number;
 }): ReactNode {
@@ -517,4 +528,56 @@ export function Markdown(props: {
         .map((t, i) => renderToken(t, i, props.width))}
     </box>
   );
+}
+
+function MarkdownStreaming(props: {
+  readonly text: string;
+  readonly width: number;
+}): ReactNode {
+  const boundaryRef = useRef(0);
+  const prefixHeldRef = useRef("");
+  if (
+    props.text.length < boundaryRef.current ||
+    !props.text.startsWith(prefixHeldRef.current)
+  ) {
+    boundaryRef.current = 0;
+    prefixHeldRef.current = "";
+  }
+  const split = splitStreamingMarkdown(props.text, boundaryRef.current);
+  boundaryRef.current = split.boundary;
+  prefixHeldRef.current = split.prefixRaw;
+
+  const prefixNodes = useMemo(() => {
+    if (split.prefixRaw === "") return [];
+    return lexMarkdown(split.prefixRaw)
+      .filter((t) => t.type !== "space")
+      .map((t, i) => renderToken(t, i, props.width));
+  }, [split.prefixRaw, props.width]);
+
+  const tailNodes =
+    split.tailRaw === ""
+      ? []
+      : lexMarkdown(split.tailRaw)
+          .filter((t) => t.type !== "space")
+          .map((t, i) => renderToken(t, prefixNodes.length + i, props.width));
+
+  return (
+    <box flexDirection="column" width={props.width} gap={1}>
+      {prefixNodes}
+      {tailNodes}
+    </box>
+  );
+}
+
+/** 主渲染器：markdown 文本 → OpenTUI 元素树。
+ *  `streaming`：会变长的草稿 / 展开 thinking 才钉前缀；历史正文走全文缓存。 */
+export function Markdown(props: {
+  readonly text: string;
+  readonly width: number;
+  readonly streaming?: boolean;
+}): ReactNode {
+  if (props.streaming === true) {
+    return <MarkdownStreaming text={props.text} width={props.width} />;
+  }
+  return <MarkdownStatic text={props.text} width={props.width} />;
 }
