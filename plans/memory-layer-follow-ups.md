@@ -30,7 +30,7 @@ dream 合并、中文 BM25、默认 TTL、硬删、跨项目事实库、改 cap�
    - **Inherits:** spec SC1；`memory_gc` 只软禁；ingest 近邻已跳过 disabled
    - **Surface:** `src/harness/memory` recall 读侧
    - **Acceptance:** 库中现行条与 `disabled: true` 条并存时，`memory_recall` 返回不含废条 title/body；`npx vitest run tests/harness/memory/` 相关套件 EXIT 0
-   - Status: [ ] pending
+   - Status: [x] done
 
 2. **[parallel] Closed memory_type enum** — tag: `[implementation]` (#731)
    - **Inherits:** spec SC2；CONTEXT `memory_type` 五值；非法/空 → `note` 且写入成功

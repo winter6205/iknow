@@ -13,6 +13,7 @@
  *     is the truncation authority (contract X) — the tool never carries a
  *     truncated/total metadata field (contract Y1)
  *   - no writes, no side effects, no FS mutation
+ *   - `disabled: true` entries are dropped before scoring (#730)
  *   - scoring delegates to scoreMemoryEntries (T3 bm25 heuristic)
  *
  * Injection seam (web tool precedent): `entries` overrides disk reads so unit
@@ -64,8 +65,12 @@ export function createMemoryRecallTool(deps: MemoryRecallToolDeps): AciToolDef {
     } as const,
     handler: async (input: unknown) => {
       const params = parseInput(input);
-      const entries =
+      const resolved =
         deps.entries ?? (await readEntriesFromDisk(deps.memoryDir));
+      // Soft-disabled entries (memory_gc never hard-deletes) stay on disk but
+      // must not reach the model — drop them before scoring so they cannot
+      // occupy a limit slot either.
+      const entries = resolved.filter((entry) => !entry.disabled);
       const scored = scoreMemoryEntries(params.query, entries).slice(
         0,
         params.limit
