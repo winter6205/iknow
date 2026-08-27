@@ -237,6 +237,29 @@ describe("buildHarnessEngine (SSOT passthrough)", () => {
     expect(deps.timeoutMs).toBe(12345);
   });
 
+  it("#742 T1: env 的 idle / 硬顶透传为 deps.modelIdleTimeoutMs / modelHardCapMs", async () => {
+    const env = makeEnv("sk-test-passthrough-idle");
+    env.llm.idleTimeoutMs = 111_000;
+    env.llm.hardCapMs = 222_000;
+    const { deps } = await buildHarnessEngine({
+      env,
+      askUser: createNoAskUser(),
+    });
+
+    expect(deps.modelIdleTimeoutMs).toBe(111_000);
+    expect(deps.modelHardCapMs).toBe(222_000);
+  });
+
+  it("#742 T1: env 未给 idle / 硬顶时 deps 两字段缺席(退回今日单钟)", async () => {
+    const { deps } = await buildHarnessEngine({
+      env: makeEnv("sk-test-passthrough-no-idle"),
+      askUser: createNoAskUser(),
+    });
+
+    expect(deps.modelIdleTimeoutMs).toBeUndefined();
+    expect(deps.modelHardCapMs).toBeUndefined();
+  });
+
   it("plan T5-engine: env.llm.maxTurns=3 → deps.maxTurns === 3", async () => {
     const env = makeEnv("sk-test-passthrough-maxTurns");
     env.llm.maxTurns = 3;
