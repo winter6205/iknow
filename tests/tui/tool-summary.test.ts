@@ -93,14 +93,21 @@ describe("summarizeToolCall: 参数摘要（生成/编辑类增强）", () => {
       summarizeToolCall("memory_save", { title: "TUI 折叠", body: "x" }).detail
     ).toBe("记忆 写入 TUI 折叠");
     expect(summarizeToolCall("tool_search", { query: "web" }).detail).toBe(
-      "工具 web"
+      "检索工具 web"
     );
+    expect(
+      summarizeToolCall("tool_search", {
+        names: ["web_search", "web_fetch"],
+      }).detail
+    ).toBe("检索工具名 web_search");
+    expect(summarizeToolCall("tool_search", {}).detail).toBe("检索工具 ?");
     expect(summarizeToolCall("skill", { name: "playwright-cli" }).detail).toBe(
       "skill playwright-cli"
     );
     expect(summarizeToolCall("skill_search", { query: "tui" }).detail).toBe(
-      "skill tui"
+      "检索技能 tui"
     );
+    expect(summarizeToolCall("skill_search", {}).detail).toBe("检索技能 ?");
   });
 
   test("spawn_subagent / subagent_result 摘要（task / task_id）", () => {
