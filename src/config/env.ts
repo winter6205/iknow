@@ -77,6 +77,35 @@ export interface LlmEnv {
    * 不是 MCP 连接超时。env / settings 显式值仍覆盖。
    */
   timeoutMs: number;
+  /**
+   * #742 T1 / CONTEXT「model-call idle」:流式臂上「模型一个增量都不出」的
+   * 静默上限(毫秒)。到点落既有 `StopReason: timeout`,不新增停因;
+   * `stream=off` 无增量可重置它,harness 侧按缺席处理。
+   *
+   * env 链:`envOptionalInt("IKNOW_LLM_IDLE_TIMEOUT_MS") ?? settings.llm.idleTimeoutMs ?? 120_000`。
+   * 第三层 2 分钟:正常出字时供应商 delta 是亚秒级间隔,连续两分钟一个增量
+   * 都没有 = 这条连接已经废了,不是"还在想";取 2 分钟而非更短,是给首个
+   * delta 之前的排队 / 上游限流留余量(idle 钟从 step 起就在跑)。
+   *
+   * 可选而非必填:`IknowEnv` 字面量在测试 / 脚本里有几十处手写点,新增必填
+   * 字段会把 T1 的改动摊到这些无关文件上(minimal-change)。生产装配一律走
+   * `loadIknowEnv`,它总会填上本字段。
+   */
+  idleTimeoutMs?: number;
+  /**
+   * #742 T1 / CONTEXT「模型调用硬顶」:流式臂上从本次 `adapter.step` 起算的
+   * **有限**上限(毫秒),到点即使仍有增量也落 `timeout`(CONTEXT _Avoid_:
+   * 硬顶调成无限当验收)。
+   *
+   * env 链:`envOptionalInt("IKNOW_LLM_HARD_CAP_MS") ?? settings.llm.hardCapMs ?? 900_000`。
+   * 第三层 15 分钟:必须严格大于今日单钟默认 300_000,否则"持续出字的调用不被
+   * 从开打起算的墙钟误杀"这条验收在默认配置下不成立;取单钟默认的 3 倍,覆盖
+   * extended thinking + 32k 输出的最长合理单步,同时保持有限。
+   *
+   * 流式臂上它取代 `timeoutMs` 当墙钟(`timeoutMs` 仍是 `stream=off` 的单钟)。
+   * 可选原因同 `idleTimeoutMs`。
+   */
+  hardCapMs?: number;
 }
 
 /**
@@ -534,6 +563,22 @@ export function loadIknowEnv(
         }) ??
         mergedSettings.llm?.timeoutMs ??
         300_000,
+      // #742 T1: 流式臂双钟(env > settings > 默认)。默认值理由见 LlmEnv 字段注释;
+      // 不变式 idle < 硬顶、硬顶有限由 tests/harness/model-idle-hardcap-config.test.ts 钉。
+      idleTimeoutMs:
+        envOptionalInt({
+          file,
+          key: "IKNOW_LLM_IDLE_TIMEOUT_MS",
+        }) ??
+        mergedSettings.llm?.idleTimeoutMs ??
+        120_000,
+      hardCapMs:
+        envOptionalInt({
+          file,
+          key: "IKNOW_LLM_HARD_CAP_MS",
+        }) ??
+        mergedSettings.llm?.hardCapMs ??
+        900_000,
       temperature: envNumber({
         file,
         key: "IKNOW_LLM_TEMPERATURE",

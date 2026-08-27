@@ -15,8 +15,10 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  THINKING_PEEK_MAX_LINES,
   formatThinkingFold,
   formatThinkingLive,
+  thinkingPeekLines,
 } from "../../src/tui/think-fold.js";
 
 describe("formatThinkingFold（历史折叠行文案）", () => {
@@ -41,5 +43,55 @@ describe("formatThinkingFold（历史折叠行文案）", () => {
 describe("formatThinkingLive（流式折叠行文案）", () => {
   test("恒为 `思考中…`（实时秒数已下线 — 思考时长由事后 frozen 摘要承担）", () => {
     expect(formatThinkingLive()).toBe("思考中…");
+  });
+});
+
+describe("thinkingPeekLines（思考中折叠态正文预览）", () => {
+  test("上限常量为 3 行", () => {
+    expect(THINKING_PEEK_MAX_LINES).toBe(3);
+  });
+
+  test("多行正文 → 取末 3 行（更早的行不进预览）", () => {
+    const text = "第一行\n第二行\n第三行\n第四行\n第五行";
+    expect(thinkingPeekLines(text)).toEqual(["第三行", "第四行", "第五行"]);
+  });
+
+  test("行数不足上限 → 全给（1 行 / 2 行）", () => {
+    expect(thinkingPeekLines("只有一行")).toEqual(["只有一行"]);
+    expect(thinkingPeekLines("甲\n乙")).toEqual(["甲", "乙"]);
+  });
+
+  test("空串 / 纯空白 → 空数组（不占行、不渲染空行）", () => {
+    expect(thinkingPeekLines("")).toEqual([]);
+    expect(thinkingPeekLines("   \n\t\n")).toEqual([]);
+  });
+
+  test("空行不占预览额度（markdown 段落分隔不吃掉正文行）", () => {
+    const text = "甲\n\n乙\n\n\n丙\n\n";
+    expect(thinkingPeekLines(text)).toEqual(["甲", "乙", "丙"]);
+  });
+
+  test("尾部换行不产生空预览行（流式 delta 常以 \\n 结尾）", () => {
+    expect(thinkingPeekLines("末行内容\n")).toEqual(["末行内容"]);
+  });
+
+  test("CRLF 与行尾空白被剥掉（宽度预算按可见字符算）", () => {
+    expect(thinkingPeekLines("甲\r\n乙  \r\n")).toEqual(["甲", "乙"]);
+  });
+
+  test("limit 可自定义，但硬夹在 [0, 3]（渲染层不得越过 3 行高度上限）", () => {
+    const text = "一\n二\n三\n四\n五";
+    expect(thinkingPeekLines(text, 2)).toEqual(["四", "五"]);
+    expect(thinkingPeekLines(text, 99)).toEqual(["三", "四", "五"]);
+    expect(thinkingPeekLines(text, 0)).toEqual([]);
+    expect(thinkingPeekLines(text, -1)).toEqual([]);
+  });
+
+  test("任意输入的返回行数恒 ≤ 3（高度上限是硬合同）", () => {
+    const long = Array.from({ length: 200 }, (_, i) => `行-${i}`).join("\n");
+    expect(thinkingPeekLines(long).length).toBeLessThanOrEqual(
+      THINKING_PEEK_MAX_LINES
+    );
+    expect(thinkingPeekLines(long)).toEqual(["行-197", "行-198", "行-199"]);
   });
 });
