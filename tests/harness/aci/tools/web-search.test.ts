@@ -186,6 +186,24 @@ describe("createWebSearchTool — success path", () => {
     );
   });
 
+  it("trims padded queries before sending and formatting results", async () => {
+    const seen: string[] = [];
+    const fetch: GuardFetchFn = async (url) => {
+      seen.push(url);
+      return { status: 200, contentType: "text/html", body: ddgBody(1) };
+    };
+    const tool = createWebSearchTool({
+      fetch,
+      lookup: okLookup,
+      envSearchUrl: "https://html.duckduckgo.com/html/",
+    });
+
+    const out = (await tool.handler({ query: "  hello world  " })) as string;
+
+    assert.equal(new URL(seen[0]).searchParams.get("q"), "hello world");
+    assert.match(out, /^Search results for: hello world\n/);
+  });
+
   it("honors an explicit search_url override", async () => {
     const seen: string[] = [];
     const fetch: GuardFetchFn = async (url) => {
@@ -263,6 +281,34 @@ describe("createWebSearchTool — Bing 解析器（B1 默认端点）", () => {
     assert.match(out, /2\. Bing Title 2/);
   });
 
+  it("accepts extra b_algo classes as Bing result blocks", async () => {
+    const body =
+      '<html><body><li class="b_algo b_algoBorder"><h2><a href="https://site.example.com/page">Extra class title</a></h2>' +
+      '<div class="b_caption"><p>Extra class snippet</p></div></li></body></html>';
+    const tool = createWebSearchTool(
+      searchDeps(body, 200, "https://cn.bing.com/search")
+    );
+
+    const out = (await tool.handler({ query: "x" })) as string;
+
+    assert.match(out, /1\. Extra class title/);
+    assert.match(out, /Extra class snippet/);
+  });
+
+  it("falls back to the first paragraph when Bing has no b_caption", async () => {
+    const body =
+      '<html><body><li class="b_algo"><h2><a href="https://site.example.com/page">Fallback title</a></h2>' +
+      '<div class="b_content"><p>Fallback snippet &amp; more</p></div></li></body></html>';
+    const tool = createWebSearchTool(
+      searchDeps(body, 200, "https://cn.bing.com/search")
+    );
+
+    const out = (await tool.handler({ query: "x" })) as string;
+
+    assert.match(out, /1\. Fallback title/);
+    assert.match(out, /Fallback snippet & more/);
+  });
+
   it("max_results 截断同样作用于 Bing 解析器", async () => {
     const tool = createWebSearchTool(
       searchDeps(bingBody(8), 200, "https://cn.bing.com/search")
@@ -294,6 +340,28 @@ describe("createWebSearchTool — failure paths", () => {
       () => Promise.resolve(tool.handler({ query: "" })),
       "query"
     );
+    await expectToolError(
+      () => Promise.resolve(tool.handler({ query: "   \t\n" })),
+      "query"
+    );
+  });
+
+  it("falls back to default 5 for negative or invalid max_results", async () => {
+    const tool = createWebSearchTool(searchDeps(ddgBody(7)));
+
+    const negativeOut = (await tool.handler({
+      query: "x",
+      max_results: -1,
+    })) as string;
+    const invalidOut = (await tool.handler({
+      query: "x",
+      max_results: "invalid",
+    })) as string;
+
+    assert.match(negativeOut, /5\. Title 5/);
+    assert.ok(!negativeOut.includes("6. Title 6"));
+    assert.match(invalidOut, /5\. Title 5/);
+    assert.ok(!invalidOut.includes("6. Title 6"));
   });
 
   it("rejects when the endpoint returns no results", async () => {
