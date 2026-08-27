@@ -36,6 +36,8 @@ import {
   writeOut,
 } from "./session-io.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
+import { renderTranscript } from "../harness/auto-memory-wire.js";
+import type { AutoMemoryHook } from "../harness/memory/index.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
 import {
@@ -45,11 +47,16 @@ import {
 import { createStreamDraft } from "./stream-draft.js";
 import {
   parsePermissionMode,
-  modeLabel,
-  applyShiftTabModeFlip,
   type PermissionMode,
   type PermissionModeContext,
 } from "../harness/permission/modes.js";
+import {
+  agentModeLabel,
+  applyGraphCommand,
+  applyShiftTabAgentModeFlip,
+  type GraphModeContext,
+} from "../harness/graph/mode.js";
+import type { GraphAssembly } from "../harness/graph/assembly.js";
 import {
   SessionStore,
   type SessionStoreError,
@@ -106,6 +113,18 @@ export type ChatSessionOpts = {
    */
   permissionMode?: PermissionModeContext;
   /**
+   * D-α / ADR-0030: graph 编排 overlay 的会话 holder。Shift+Tab 三态轮与
+   * `/graph on|off` 改的是同一个它；装配层读它决定下一次 run() 是否露出
+   * `run_graph`。ask 不传（无 overlay）。
+   */
+  graphMode?: GraphModeContext;
+  /**
+   * D-α T3: graph 装配快照（`BuiltEngine.graphAssembly`）。chat 的一个
+   * round = 一条用户查询行；host 在跑 run() 之前拍一次快照，翻键因此
+   * 「下一次 run() 才生效」。缺席 = 未接 overlay（工具与编排段都不存在）。
+   */
+  graphAssembly?: GraphAssembly;
+  /**
    * T4: `--resume <id>` 锚定既有 conversationId 续跑。设置时 runChatSession
    * 以该 id 作为 conversationId(写回同一 checkpoint 文件),并尝试从
    * SessionStore 加载既有 messages 作为初始历史;load 失败(typed)则保留
@@ -127,6 +146,11 @@ export type ChatSessionOpts = {
    * 透明关闭向后兼容 (SC7)。command 已配 → 每轮 run 被 runVerifyLoop 包裹。
    */
   readonly verifyConfig?: VerifyConfig;
+  /**
+   * auto-memory T4 / ADR-0031 D1:自动记忆 host 钩子(`BuiltEngine.autoMemory`)。
+   * 缺席(默认 OFF / ask 表面)→ 不调,行为逐字节不变。
+   */
+  readonly autoMemory?: AutoMemoryHook;
 };
 
 export type ChatLineContext = {
@@ -136,6 +160,11 @@ export type ChatLineContext = {
   showThinking?: boolean;
   /** W2: 权限模式上下文(由 runChatSession 透传,/permissions 翻它)。 */
   permissionMode?: PermissionModeContext;
+  /** D-α: graph 编排 overlay holder(由 runChatSession 透传,/graph 与
+   *  Shift+Tab 翻它)。 */
+  graphMode?: GraphModeContext;
+  /** D-α T3: graph 装配快照(由 runChatSession 透传;查询行开跑前拍一次)。 */
+  graphAssembly?: GraphAssembly;
   /**
    * T2: REPL 级 AbortController。run() 的 signal 由此接线 —— SIGINT 第一次
    * busy 时 abort() 打断 in-flight,run 以 stopReason "cancelled" resolve。
@@ -159,6 +188,11 @@ export type ChatLineContext = {
    * 缺席(undefined)= 不包裹 run,行为逐字节不变 (仅测试/装配未接线路径)。
    */
   readonly verifyConfig?: VerifyConfig;
+  /**
+   * auto-memory T4:同 ChatSessionOpts.autoMemory,runChatSession 透传。
+   * 缺席 = 不调钩子,行为零变化。
+   */
+  readonly autoMemory?: AutoMemoryHook;
   /**
    * T3 (#689): CLI _client_ idle/busy-guard for continue. Shared mutable box
    * so a concurrent processChatLine can refuse continue without aborting the
@@ -366,6 +400,31 @@ async function executeSkipAppendTurn(opts: {
   }
 }
 
+/**
+ * auto-memory T4 / ADR-0031 D5: hand a finished turn to the auto-memory hook.
+ *
+ * The hook owns the `completed` gate and the N-turn gate — the host only
+ * reports. `onTurnComplete` is documented as total, but a hook is host-
+ * supplied code and this is the last line between it and the user's turn.
+ */
+function notifyAutoMemory(ctx: ChatLineContext, result: RunResult): void {
+  if (!ctx.autoMemory) return;
+  try {
+    ctx.autoMemory.onTurnComplete({
+      stopReason: result.stopReason,
+      transcript: renderTranscript(result.messages),
+    });
+  } catch (error) {
+    // EXIT: log-and-continue — the answer is already on the user's screen;
+    // a memory bookkeeping failure must not retroactively fail the turn.
+    writeErr(
+      `[memory/auto] turn hook skipped: ${
+        error instanceof Error ? error.message : String(error)
+      }\n`
+    );
+  }
+}
+
 async function runSkipAppendAndPresent(opts: {
   readonly ctx: ChatLineContext;
   readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
@@ -399,6 +458,8 @@ async function runSkipAppendAndPresent(opts: {
     ) {
       ctx.state.messages = Object.freeze([...result.messages]);
     }
+    // auto-memory T4: `/continue` 也是一轮完成的 turn,与主路径同待遇。
+    notifyAutoMemory(ctx, result);
     return presentChatTurn({
       ctx,
       result,
@@ -568,6 +629,11 @@ async function runChatQueryLine(
   }
   const query = parsedLine.text;
 
+  // D-α T3 / ADR-0030:round 边界 —— 一条用户查询行 = 一次 run()。这里拍
+  // graph 装配快照,之后本行内的所有 run()(含 verify / auto-loop 的多轮)
+  // 共用同一工具面。Shift+Tab 与 `/graph` 在这之后翻,要等下一行才生效。
+  ctx.graphAssembly?.beginRound();
+
   // plan T1: HITL vs /goal auto 分派。仅 verifyConfig 在场时读盘;
   // 缺席分支直接走 runHarness(query, ...),不引入额外 IO。
   const verifyDispatch =
@@ -731,6 +797,9 @@ async function runChatQueryLine(
         ) {
           ctx.state.messages = Object.freeze([...s.result.messages]);
         }
+        // auto-memory T4 / ADR-0031 D1:每轮把结果交给钩子,由钩子决定
+        // completed 闸 + N 轮闸。钩子缺席(默认 OFF / ask)→ 整句 no-op。
+        notifyAutoMemory(ctx, s.result);
       },
       decideContinue: async (s) =>
         applyChatAutoContinue({
@@ -895,6 +964,24 @@ async function processSlash(opts: {
         quit: false,
         output: `权限模式已切换: ${parsed}`,
       };
+    }
+
+    case "graph": {
+      // D-α graph mode: 编排 overlay 查询/切换。语义与文案走
+      // harness/graph/mode.ts 单点(TUI / serve 同源);chat 只决定文案落
+      // stdout 还是 stderr。holder 缺席(ask 入口不装)→ 提示不可用。
+      const graphCtx = ctx.graphMode;
+      if (!graphCtx) {
+        return {
+          quit: false,
+          output: "",
+          stderr: "/graph: 当前入口不提供 graph 模式上下文（ask）",
+        };
+      }
+      const result = applyGraphCommand(graphCtx, effect.args);
+      return result.ok
+        ? { quit: false, output: result.text }
+        : { quit: false, output: "", stderr: result.text };
     }
 
     case "goal": {
@@ -1537,10 +1624,13 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     state,
     showThinking: opts.showThinking,
     permissionMode: opts.permissionMode,
+    graphMode: opts.graphMode,
+    graphAssembly: opts.graphAssembly,
     abortController,
     checkpointStore,
     subagentManager: opts.subagentManager,
     verifyConfig: opts.verifyConfig,
+    autoMemory: opts.autoMemory,
   };
 
   const interactive = isInteractive();
@@ -1788,11 +1878,14 @@ async function runInteractive(opts: {
     key?: { name?: string; shift?: boolean; ctrl?: boolean; meta?: boolean }
   ): void => {
     if (closed) return;
-    applyShiftTabModeFlip({
+    // D-α / ADR-0030: 三态轮 Default → Auto → Graph → Default。graph holder
+    // 缺席时退化成既有单轴 permission 轮（零行为变化）。
+    applyShiftTabAgentModeFlip({
       key,
-      ctx: opts.ctx.permissionMode,
+      permission: opts.ctx.permissionMode,
+      graph: opts.ctx.graphMode,
       onFlip: (next) => {
-        writeErr(`\n权限模式: ${modeLabel(next)}`);
+        writeErr(`\n模式: ${agentModeLabel(next)}`);
         rl.prompt(true);
       },
     });

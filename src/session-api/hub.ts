@@ -37,6 +37,8 @@ import {
   buildHarnessEngine,
   createAdapterFromEnv,
 } from "../harness/build-engine.js";
+import { renderTranscript } from "../harness/auto-memory-wire.js";
+import type { AutoMemoryHook } from "../harness/memory/index.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
 import type {
   SubAgentManager,
@@ -50,6 +52,8 @@ import type {
 } from "../harness/permission/ask-user.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
+import type { GraphAssembly } from "../harness/graph/assembly.js";
+import type { GraphModeContext } from "../harness/graph/mode.js";
 import { createViolationCounter } from "../harness/sandbox/violation-handling.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
 import {
@@ -429,6 +433,18 @@ export type SessionHubOptions = {
   /** W2: permission mode context (default / plan / full_auto). Absent →
    *  buildHarnessEngine defaults to "default". */
   permissionMode?: PermissionModeContext;
+  /**
+   * D-α T3 / ADR-0030: graph 编排 overlay 的会话 holder（serve / TUI 与 CLI
+   * 共用同一形态）。透传给 buildHarnessEngine —— `run_graph` 与编排段按
+   * 每条 postMessage 拍下的快照 gate。缺席 = 本入口未接 overlay。
+   */
+  graphMode?: GraphModeContext;
+  /**
+   * D-α T5:已建好 engine 的 host（TUI 在 run.tsx 就装配完）把
+   * `BuiltEngine.graphAssembly` 直接交进来 —— 这类 host 走注入 deps 路径，
+   * hub 自己不 build，拿不到快照句柄。缺席 = 未接 overlay（行为零变化）。
+   */
+  graphAssembly?: GraphAssembly;
   /** T2: env source for per-turn thinking override (test seam; production
    * omits it → withThinkingOverride falls back to loadIknowEnv()). */
   overrideEnv?: { readonly llm: LlmEnv };
@@ -453,6 +469,13 @@ export type SessionHubOptions = {
    * 无 drain,行为零变化。
    */
   readonly subagentManager?: SubAgentManager;
+  /**
+   * auto-memory T4 / ADR-0031 D1:自动记忆 host 钩子。serve 入口经
+   * `buildHarnessEngine` 自建(仅 `settings.memory.autoExtract === true`);
+   * 构造时未注入则 `ensureDeps()` 后从 `built.autoMemory` 懒取。缺席
+   * (默认 OFF / ask / 注入 deps 的测试)→ 不调,行为逐字节不变。
+   */
+  readonly autoMemory?: AutoMemoryHook;
   /**
    * review-fix (M1 / H1): per-root state anchor。serve 入口解析后
    * 透传 —— 让 hub 的 buildHarnessEngine 走 entry-resolved workspaceRoot,
@@ -487,6 +510,9 @@ export type SessionHubOptions = {
     deps: LoopEngineDeps;
     shutdown?: () => Promise<void>;
     subagentManager?: SubAgentManager;
+    /** D-α T3: graph 装配快照（生产由 buildHarnessEngine 透出）。 */
+    graphAssembly?: GraphAssembly;
+    autoMemory?: AutoMemoryHook;
   }>;
   /**
    * serve-workspace T3: recents/trust 名单的 home 根（落
@@ -566,13 +592,24 @@ export class SessionHub {
   /** serve-workspace T2: test seam; production omits → buildHarnessEngine. */
   private readonly buildEngine:
     | ((root: string) => Promise<{
+        autoMemory?: AutoMemoryHook;
         deps: LoopEngineDeps;
         shutdown?: () => Promise<void>;
         subagentManager?: SubAgentManager;
+        graphAssembly?: GraphAssembly;
       }>)
     | undefined;
   /** serve picker bind (T2); session file workspaceRoot is the engine Map key. */
   private boundRoot: string | undefined;
+  /** D-α T3 / ADR-0030: graph 编排 overlay holder（serve / TUI 注入；缺席 =
+   *  本入口未接 overlay → run_graph 与编排段都不存在）。 */
+  private readonly graphMode: GraphModeContext | undefined;
+  /** D-α T5: 注入 deps 的 host（TUI）自带的装配快照句柄（构造 opts 传入）。 */
+  private readonly injectedGraphAssembly: GraphAssembly | undefined;
+  /** D-α T3: 最近一次 ensureDeps 返回的那台 engine 的装配快照。postMessage
+   *  紧接 ensureDeps 调 beginRound() —— 两者在同一串行槽位里，per-root
+   *  多引擎时也不会拍错那一台。缺席 = 该 engine 未接 overlay。 */
+  private activeGraphAssembly: GraphAssembly | undefined;
   /** serve-workspace T3: recents/trust roster home (absent → T2 behavior). */
   private readonly recentsHome: string | undefined;
   /** Per-root BuiltEngine cache (same root shared across sessions). */
@@ -582,10 +619,13 @@ export class SessionHub {
       deps: LoopEngineDeps;
       shutdown?: () => Promise<void>;
       subagentManager?: SubAgentManager;
+      graphAssembly?: GraphAssembly;
     }
   >();
   /** Per-conversation serialization (spec A15). */
   private readonly inflight = new Map<string, Promise<void>>();
+  /** auto-memory T4: host 钩子（默认缺席 = 自动记忆关）。 */
+  private autoMemory: AutoMemoryHook | undefined;
 
   constructor(opts: SessionHubOptions) {
     if (!opts.askUser && !opts.deps) {
@@ -602,10 +642,13 @@ export class SessionHub {
     this.askHandle = opts.askHandle;
     this.sessionGrants = opts.sessionGrants;
     this.permissionMode = opts.permissionMode;
+    this.graphMode = opts.graphMode;
+    this.injectedGraphAssembly = opts.graphAssembly;
     this.overrideEnv = opts.overrideEnv;
     this.sandboxRoot = opts.sandboxRoot;
     this.surface = opts.surface;
     this.subagentManager = opts.subagentManager;
+    this.autoMemory = opts.autoMemory;
     // review-fix (M1 / H1): per-root state anchor 缓存。
     this.workspaceRoot = opts.workspaceRoot;
     this.recentsHome = opts.recentsHome;
@@ -939,6 +982,11 @@ export class SessionHub {
           });
         }
         const baseDeps = await this.ensureDeps(session.workspaceRoot);
+        // D-α T3 / ADR-0030:round 边界 —— 一条 postMessage = 一次 run()。
+        // 在这里拍 graph 装配快照（紧接 ensureDeps，同一串行槽位内，拍的
+        // 一定是本次要用的那台 engine），overlay 翻键因此「下一条消息才
+        // 生效」，与 chat 的「下一条查询行」同语义。
+        this.activeGraphAssembly?.beginRound();
         // T2: per-turn override — rebuild deps with a one-shot adapter only;
         // executor / registry / maxTurns / timeoutMs are reused from the
         // cached deps. When absent, the cached path is unchanged.
@@ -1192,6 +1240,10 @@ export class SessionHub {
                 priorMessages: session.messages,
               });
               void saved;
+              // auto-memory T4 / ADR-0031 D1:每轮把结果交给钩子,由钩子决定
+              // completed 闸 + N 轮闸。钩子缺席(默认 OFF / ask / 注入 deps 的
+              // 测试)→ 整句 no-op,行为逐字节不变。
+              this.notifyAutoMemory(s.finalResult);
               // #458 T5 (SC8): goal.status write-back on verify-loop terminal
               // outcome. The hub is the only writer of goal.status. Target status
               // is looked up from OUTCOME_TO_STATUS; applyTransition runs only
@@ -2016,6 +2068,7 @@ export class SessionHub {
     deps: LoopEngineDeps;
     shutdown?: () => Promise<void>;
     subagentManager?: SubAgentManager;
+    graphAssembly?: GraphAssembly;
   }> {
     const hit = this.engineByRoot.get(root);
     if (hit) return hit;
@@ -2026,9 +2079,11 @@ export class SessionHub {
       deps: built.deps,
       shutdown: built.shutdown,
       subagentManager: built.subagentManager,
+      graphAssembly: built.graphAssembly,
     };
     this.engineByRoot.set(root, entry);
     this.subagentManager = this.subagentManager ?? built.subagentManager;
+    this.autoMemory = this.autoMemory ?? built.autoMemory;
     return entry;
   }
 
@@ -2036,6 +2091,8 @@ export class SessionHub {
     deps: LoopEngineDeps;
     shutdown?: () => Promise<void>;
     subagentManager?: SubAgentManager;
+    graphAssembly?: GraphAssembly;
+    autoMemory?: AutoMemoryHook;
   }> {
     if (!this.askUser) {
       throw new Error(
@@ -2052,6 +2109,9 @@ export class SessionHub {
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
       ...(this.permissionMode ? { permissionMode: this.permissionMode } : {}),
+      // D-α T3 / ADR-0030:overlay holder 透传 —— serve / TUI 的 `/graph` 与
+      // Shift+Tab 翻的是同一个它（SC3 三入口同 holder）。
+      ...(this.graphMode ? { graphMode: this.graphMode } : {}),
       todoDir: resolveSessionTodoDir({ surface: "serve" }),
       ...(this.traceOut !== undefined
         ? {
@@ -2080,11 +2140,17 @@ export class SessionHub {
    */
   private async ensureDeps(sessionRoot?: string): Promise<LoopEngineDeps> {
     if (this.injectedDeps) {
+      // 注入 deps 的 host 自己 build 了 engine（TUI），快照句柄经构造 opts
+      // 进来;纯测试注入路径没有 engine → undefined,行为零变化。
+      this.activeGraphAssembly = this.injectedGraphAssembly;
       return this.cachedDeps ?? this.injectedDeps;
     }
     const mapRoot = sessionRoot ?? this.boundRoot;
     if (mapRoot !== undefined) {
-      return (await this.getOrBuildEngine(mapRoot)).deps;
+      // D-α T3:per-root 多引擎时,活跃快照跟着本次解析到的那台走。
+      const entry = await this.getOrBuildEngine(mapRoot);
+      this.activeGraphAssembly = entry.graphAssembly;
+      return entry.deps;
     }
     if (this.cachedDeps) return this.cachedDeps;
     if (!this.askUser) {
@@ -2117,6 +2183,9 @@ export class SessionHub {
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
       ...(this.permissionMode ? { permissionMode: this.permissionMode } : {}),
+      // D-α T3 / ADR-0030:overlay holder 透传 —— serve / TUI 的 `/graph` 与
+      // Shift+Tab 翻的是同一个它（SC3 三入口同 holder）。
+      ...(this.graphMode ? { graphMode: this.graphMode } : {}),
       // review-fix (M1 / H1): serve entry 已解析的 workspaceRoot 透传 —
       // 让 build-engine 的 bash fence 对齐 serve 的 identity seed / dataDir
       // (同一 per-root 锚点,不落回 sandboxRoot|cwd)。
@@ -2132,6 +2201,8 @@ export class SessionHub {
         : {}),
     });
     this.cachedDeps = built.deps;
+    // D-α T3:单引擎（未 bind 根）路径的活跃快照。
+    this.activeGraphAssembly = built.graphAssembly;
     this.skillCatalog = built.skillCatalog;
     this.mcpManager = built.mcpManager;
     this.aciCatalog = built.catalog;
@@ -2140,6 +2211,8 @@ export class SessionHub {
     // #356 T7: serve 懒取 subagent manager — buildHarnessEngine 在 surface !==
     // "ask" 时自建;constructor 注入优先 (测试缝),未注入则取 built 的。
     this.subagentManager = this.subagentManager ?? built.subagentManager;
+    // auto-memory T4:与 subagentManager 同形态懒取(构造注入优先)。
+    this.autoMemory = this.autoMemory ?? built.autoMemory;
     // #356 High#4 (SC12/SC3):缓存 built.shutdown(组合句柄 mcpManager first →
     // subagentManager second)。serve 入口退出前经 hub.shutdown() 触发 —
     // cli.ts runServe 挂 registerShutdown(hub),进程退出时清理 MCP 连接 +
@@ -2147,6 +2220,29 @@ export class SessionHub {
     // shutdown 缺席 → hub.shutdown() no-op。
     this.cachedShutdown = this.cachedShutdown ?? built.shutdown;
     return this.cachedDeps;
+  }
+
+  /**
+   * auto-memory T4 / ADR-0031 D5: hand a finished turn to the auto-memory
+   * hook. The hook owns the `completed` gate and the N-turn gate; the hub
+   * only reports. A hook failure must never fail postMessage.
+   */
+  private notifyAutoMemory(result: RunResult): void {
+    if (!this.autoMemory) return;
+    try {
+      this.autoMemory.onTurnComplete({
+        stopReason: result.stopReason,
+        transcript: renderTranscript(result.messages),
+      });
+    } catch (error) {
+      // EXIT: log-and-continue — the turn already succeeded; memory
+      // bookkeeping is not allowed to retroactively fail it.
+      console.warn(
+        `[memory/auto] turn hook skipped: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
   }
 
   private summarize(opts: { readonly file: SessionFileV1 }): SessionSummary {

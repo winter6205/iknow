@@ -256,6 +256,21 @@ export type PermissionModeResponse = {
 };
 
 /**
+ * D-α V1 / ADR-0030：GET/POST /api/v1/graph-mode 响应（serve 侧的 `/graph`
+ * 对等物）。`message` 是三入口共用的那一行状态文案（chat 打到 stdout、TUI
+ * 落 notice、web 直接渲染这段）。
+ */
+export type GraphModeResponse = {
+  enabled: boolean;
+  message: string;
+};
+
+/** POST /api/v1/graph-mode 请求体：`/graph` 的 args（已切词）。缺省 = 查询。 */
+export interface GraphModeRequest {
+  readonly args?: ReadonlyArray<string>;
+}
+
+/**
  * 022 D1.1: wire 错误响应。嵌套形：`error.kind` 是 SessionStoreErrorKind 或
  * `validation` / `internal`；旧扁平形（`{ error: string; message; details? }`）退役。
  */

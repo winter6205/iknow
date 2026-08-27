@@ -98,7 +98,7 @@ export function createMemorySaveTool(deps: MemorySaveToolDeps): AciToolDef {
         updated_at: now(),
       };
       const slug = makeSlug(random);
-      await writeSlugAtomic(deps.memoryDir, slug, entry);
+      await writeMemoryEntryAtomic(deps.memoryDir, slug, entry);
       await upsertMemoryIndex(deps.memoryDir, slug, entry);
       return `[memory_save] persisted as ${slug}.md`;
     },
@@ -188,7 +188,13 @@ function makeSlug(random: (n: number) => Buffer): string {
   return random(6).toString("hex"); // 12 hex chars
 }
 
-async function writeSlugAtomic(
+/**
+ * Write `<slug>.md` via tmp + rename: every rename lands a complete file or
+ * no file, so a reader can never observe a partial entry under the final
+ * path. Exported because auto-memory (ADR-0031 D2) requires the ingest write
+ * path to be this same path rather than a second implementation of it.
+ */
+export async function writeMemoryEntryAtomic(
   memoryDir: string,
   slug: string,
   entry: MemoryEntryV1
@@ -226,7 +232,8 @@ async function writeSlugAtomic(
   }
 }
 
-async function upsertMemoryIndex(
+/** Append a `<slug>.md` link line to MEMORY.md; idempotent on replay. */
+export async function upsertMemoryIndex(
   memoryDir: string,
   slug: string,
   entry: MemoryEntryV1

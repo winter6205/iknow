@@ -29,6 +29,13 @@ export type ToolHandler = (
 export interface ToolExecutionContext {
   readonly signal?: AbortSignal;
   readonly conversationId?: string;
+  /**
+   * 本次调用所属回合的 trace turn id（F-4）。`conversationId` 回答"哪个会话"、
+   * 装配期定死;`turnId` 回答"哪一回合"、每回合翻新,所以只能顺着 executeAll 走。
+   * 消费方 = `spawn_subagent`(写进 def.parentTurnId → 子代理三类 record)。
+   * 缺省 = 无归属回合(worker / ask / 直接调 handler),下游按 Postel 不落该键。
+   */
+  readonly turnId?: string;
 }
 
 /**
@@ -137,6 +144,7 @@ export interface Executor {
     onSettled?: (
       result: ToolExecutionResult,
       index: number
-    ) => void | Promise<void>
+    ) => void | Promise<void>,
+    turnId?: string // F-4: 原样透传到 ctx.turnId;缺省 = 无归属回合
   ) => Promise<ReadonlyArray<ToolExecutionResult>>;
 }

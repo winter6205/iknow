@@ -162,14 +162,43 @@ export interface IknowSettingsSubagent {
   taskTimeoutMs?: number;
 }
 
+/**
+ * D-α V1 graph mode: graph 编排 overlay 的持久默认（ADR-0030）。
+ *
+ * graph 是**可选 overlay**：默认任务仍走一次性 `spawn_subagent` 不进图，所以
+ * 本段缺席时消费方按「关」处理（缺省不在 settings 层预填）。运行时链：
+ * `settings.graph.enabled > false`；会话内 Shift+Tab / `/graph` 再就地翻
+ * （`harness/graph/mode.ts` 的 `resolveGraphMode` 是唯一装配点）。
+ *
+ * 校验纪律镜像 `IknowSettingsSubagent`：boolean 才合法；错类型 → 丢弃该字段；
+ * 全部字段非法 / 缺席 → 不产出 graph 段。
+ */
+export interface IknowSettingsGraph {
+  enabled?: boolean;
+}
+
+/**
+ * auto-memory T4 / ADR-0031 D5: 自动记忆段。
+ *
+ * `autoExtract` 只认 boolean；缺失 / 非法 → 字段不产出，消费方按 **false**
+ * 处理（默认 OFF 是决策，不是巧合）。`true` 之外的一切都不开门。
+ */
+export interface IknowSettingsMemory {
+  autoExtract?: boolean;
+}
+
 export interface IknowSettings {
   llm?: IknowSettingsLlm;
   verify?: IknowSettingsVerify;
   secrets?: IknowSettingsSecrets;
   /** #358 T1: 子代理配置段（per-task wallclock）。 */
   subagent?: IknowSettingsSubagent;
+  /** D-α: graph 编排 overlay 的新会话默认（缺省关）。 */
+  graph?: IknowSettingsGraph;
   /** #672 T3: 工具环检测。boolean 才合法；缺省由消费方按 true。 */
   loop?: IknowSettingsLoop;
+  /** auto-memory T4: 自动记忆抽取开关（默认 OFF）。 */
+  memory?: IknowSettingsMemory;
 }
 
 export interface IknowSettingsLoop {
@@ -486,6 +515,32 @@ function mergeSubagent(
   return out;
 }
 
+/**
+ * D-α: 校验 `graph` 层 —— 非法字段丢弃（镜像 parseLoop）。
+ * 非普通对象 → undefined（丢弃该层）；非 boolean → 丢弃该字段；
+ * 字段全非法 → undefined（消费方回退默认关）。
+ */
+function parseGraph(raw: unknown): IknowSettingsGraph | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const out: IknowSettingsGraph = {};
+  if (typeof raw.enabled === "boolean") out.enabled = raw.enabled;
+  if (out.enabled === undefined) return undefined;
+  return out;
+}
+
+/** D-α: 逐层合并 graph：project 字段优先，未覆盖的 user 字段保留。 */
+function mergeGraph(
+  user: IknowSettingsGraph | undefined,
+  project: IknowSettingsGraph | undefined
+): IknowSettingsGraph | undefined {
+  if (!user && !project) return undefined;
+  const out: IknowSettingsGraph = {};
+  if (project?.enabled !== undefined) out.enabled = project.enabled;
+  else if (user?.enabled !== undefined) out.enabled = user.enabled;
+  if (out.enabled === undefined) return undefined;
+  return out;
+}
+
 function parseLoop(raw: unknown): IknowSettingsLoop | undefined {
   if (!isPlainObject(raw)) return undefined;
   const out: IknowSettingsLoop = {};
@@ -508,6 +563,26 @@ function mergeLoop(
     out.detectToolLoop = user.detectToolLoop;
   }
   if (out.detectToolLoop === undefined) return undefined;
+  return out;
+}
+
+function parseMemory(raw: unknown): IknowSettingsMemory | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const out: IknowSettingsMemory = {};
+  if (typeof raw.autoExtract === "boolean") out.autoExtract = raw.autoExtract;
+  if (out.autoExtract === undefined) return undefined;
+  return out;
+}
+
+function mergeMemory(
+  user: IknowSettingsMemory | undefined,
+  project: IknowSettingsMemory | undefined
+): IknowSettingsMemory | undefined {
+  if (!user && !project) return undefined;
+  const out: IknowSettingsMemory = {};
+  if (project?.autoExtract !== undefined) out.autoExtract = project.autoExtract;
+  else if (user?.autoExtract !== undefined) out.autoExtract = user.autoExtract;
+  if (out.autoExtract === undefined) return undefined;
   return out;
 }
 
@@ -635,12 +710,23 @@ function mergeSettings(
   const userLoop = parseLoop(userRaw.loop);
   const projectLoop = parseLoop(projectRaw.loop);
   const loop = mergeLoop(userLoop, projectLoop);
+  // D-α: graph 编排 overlay 的新会话默认（缺省关）。
+  const userGraph = parseGraph(userRaw.graph);
+  const projectGraph = parseGraph(projectRaw.graph);
+  const graph = mergeGraph(userGraph, projectGraph);
+  // auto-memory T4: 自动记忆开关（默认 OFF —— 段缺席即关）。
+  const memory = mergeMemory(
+    parseMemory(userRaw.memory),
+    parseMemory(projectRaw.memory)
+  );
   const out: IknowSettings = {};
   if (llm) out.llm = llm;
   if (verify) out.verify = verify;
   if (secrets) out.secrets = secrets;
   if (subagent) out.subagent = subagent;
   if (loop) out.loop = loop;
+  if (graph) out.graph = graph;
+  if (memory) out.memory = memory;
   return out;
 }
 

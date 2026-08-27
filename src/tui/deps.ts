@@ -26,8 +26,12 @@ import { resolveSessionTodoDir } from "../harness/aci/tools/todo-write.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import type { PostToolUseHook } from "../harness/permission/types.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
+import type { GraphModeContext } from "../harness/graph/mode.js";
+import type { GraphAssembly } from "../harness/graph/assembly.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
+import { createJsonlTraceService } from "../harness/trace/index.js";
+import type { AutoMemoryHook } from "../harness/memory/index.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
 import type { AskUser } from "../harness/permission/types.js";
 import { homedir } from "node:os";
@@ -79,6 +83,12 @@ export interface BuildTuiDepsOptions {
    * 放行不再 ask。缺省 = 无 session 层（历史行为）。
    */
   readonly sessionGrants?: SessionGrants;
+  /**
+   * D-α T5 / ADR-0030：graph 编排 overlay holder（TUI 按 Shift+Tab 或敲
+   * `/graph` 翻它）。透传给 build-engine —— `run_graph` 与编排段按返回的
+   * `graphAssembly` 每 round 快照 gate。缺席 = 本入口未接 overlay。
+   */
+  readonly graphMode?: GraphModeContext;
   /** #337 Phase B 测试缝：userHome 覆盖（默认 homedir()）。 */
   readonly userHome?: string;
   /** #337 Phase B 测试缝：cwd 覆盖（默认 process.cwd()）。 */
@@ -90,6 +100,11 @@ export interface BuildTuiDepsOptions {
    * 之外的全局 state,workspaceRoot 在 deps 层单向透明。
    */
   readonly workspaceRoot?: string;
+  /**
+   * 观测性地板:JSONL trace 写目录。在场时把 subagent 三事件交给 build-engine
+   * （与 serve hub 同形：`<traceOut>/subagent.jsonl`）。
+   */
+  readonly traceOut?: string;
   /** #337 Phase B 测试缝：MCP client 工厂覆盖（注入 stub 避免真实 stdio 启动）。 */
   readonly createMcpClient?: (
     server: import("../harness/mcp/config.js").McpServerConfig
@@ -185,6 +200,9 @@ export async function buildTuiDeps(
   LoopEngineDeps & {
     subagentManager?: SubAgentManager;
     shutdown?: () => Promise<void>;
+    /** D-α T5:graph 装配快照句柄（仅注入 graphMode 时透出，交给 hub 拍 round）。 */
+    graphAssembly?: GraphAssembly;
+    autoMemory?: AutoMemoryHook;
   }
 > {
   if (!bundle.env.llm.apiKey) {
@@ -195,6 +213,16 @@ export async function buildTuiDeps(
   // 与 build-engine #337 T8 同款。装配期 skill scanner + mcp config 都从这里取。
   const userHome = opts.userHome ?? homedir();
   const cwd = opts.cwd ?? process.cwd();
+  // 子代理生命周期事件落盘 —— 与 serve hub 同款：单例 manager 聚合到
+  // `<traceOut>/subagent.jsonl`（reader 按 task_id 过滤）。TUI 会话 turn
+  // 仍走 hub-bridge 的 per-conversation JSONL；子代理三事件与此对齐。
+  const traceOut = opts.traceOut;
+  const subagentTrace = traceOut
+    ? createJsonlTraceService({
+        filePath: traceOut,
+        conversationId: "subagent",
+      })
+    : undefined;
   // #440 T1-fix:TUI 入口注入 todoDir 让 todo_write 在主 loop 在场
   // (per-conversationId resolution 是后续 ticket — soleInflightId 动态,
   // per-conversationId 需 engine 重建,代价太高;v1 共享 ~/.iknow/todos/tui/)。
@@ -209,6 +237,8 @@ export async function buildTuiDeps(
     // memoryDir 同理缺省解析自 cwd(与 #146 TUI 启动目录语义一致)。
     ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}),
     ...(opts.sessionGrants ? { session: opts.sessionGrants } : {}),
+    // D-α T5:overlay holder 透传 —— run_graph / 编排段的条件装配缝。
+    ...(opts.graphMode ? { graphMode: opts.graphMode } : {}),
     // T1 观测缝:#175 T4 工具摘要行 — postToolUse 投影为 TuiToolEvent。
     ...(opts.onToolEvent ? { hooks: wrapTuiHook(opts) } : {}),
     // #337 Phase B 测试缝:userHome / cwd 覆盖(与 build-engine 同款)。
@@ -216,6 +246,8 @@ export async function buildTuiDeps(
     ...(opts.cwd ? { cwd } : {}),
     // ADR-0019 (T2): per-root state anchor 透传到 build-engine。
     ...(opts.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
+    // 观测性地板:traceOut 在场 → subagent 三事件落 `<traceOut>/subagent.jsonl`。
+    ...(subagentTrace !== undefined ? { subagentTrace } : {}),
     // #378 测试缝:createMcpManager 工厂覆盖(透传,捕获入参断言)。
     // prettier-ignore（master 一致单行：L3 review 复原；88 字符超 80 列，禁用 prettier 重排）。
     // prettier-ignore
@@ -279,5 +311,9 @@ export async function buildTuiDeps(
       ? { subagentManager: built.subagentManager }
       : {}),
     ...(built.shutdown ? { shutdown: built.shutdown } : {}),
+    ...(built.graphAssembly ? { graphAssembly: built.graphAssembly } : {}),
+    // auto-memory T4:自动记忆钩子随 deps 平铺透出，run.tsx 解构后交给
+    // createTuiBridge → SessionHub。缺席（默认 OFF）→ 字段不出现。
+    ...(built.autoMemory ? { autoMemory: built.autoMemory } : {}),
   };
 }

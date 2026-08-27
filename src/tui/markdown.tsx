@@ -11,8 +11,10 @@
  *    codespan→fg=palette.code；link / image 只渲锚文本（TUI 不展示 URL）。
  *  - 围栏代码块 c4 定案：深灰底 + 语法高亮（VSCode dark+ 四色）、无边框 /
  *    无语言标签（语言标签是 c5 候选，c4 不画）、左右各 1 空格 padding、
- *    wrapMode="none" 超宽不折行、空行不塌缩、marginTop/Bottom=1 块间空
- *    一行；颜色由 tuiPalette.codeBlockBg / codeDefault / syntaxXxx 提供。
+ *    wrapMode="none" 超宽不折行、空行不塌缩；颜色由 tuiPalette.codeBlockBg
+ *    / codeDefault / syntaxXxx 提供。
+ *  - 块间距 SSOT：顶层容器 `gap={1}`——相邻块之间恰空一行。块级元素自身
+ *    一律不带垂直 margin（per-token margin 与 gap 叠加会变 2 空行）。
  *  - 表格：自适应列宽压缩 + clipOneLineVisual 语义截断（CJK 按视觉宽度），
  *    超宽表格压到容器宽度内，压不下时整行兜底裁切——不溢出。
  *  - empty 边界：空字符串 / 纯空白输入渲染空 box（不留空行残影，
@@ -262,12 +264,11 @@ function CodeBlockLine(props: {
 
 /** c4 围栏代码块容器：无 border / 无 title；lang 保留接收但 c4 不画
  *  （c5 才在前置画 `ts │`，c4 定稿不画）。box backgroundColor + 左右 1
- *  padding + 块间 margin 1 行的视觉契约。`compact` 去掉垂直 margin，供
- *  工具卡内嵌预览，避免行账多 2 空行。 */
+ *  padding 的视觉契约；块间空一行由 `Markdown` 容器 gap 提供，代码块自身
+ *  不带垂直 margin（否则与 gap 叠加成 2 空行）。 */
 export function CodeBlock(props: {
   readonly lang: string;
   readonly lines: readonly string[];
-  readonly compact?: boolean;
 }): ReactNode {
   return (
     <box
@@ -275,8 +276,6 @@ export function CodeBlock(props: {
       backgroundColor={tuiPalette.codeBlockBg}
       paddingLeft={1}
       paddingRight={1}
-      marginTop={props.compact ? 0 : 1}
-      marginBottom={props.compact ? 0 : 1}
     >
       {props.lines.map((l, i) => (
         <CodeBlockLine
@@ -399,7 +398,6 @@ function renderToken(tok: Token, key: number, width: number): ReactNode {
       return (
         <text
           key={key}
-          marginTop={t.depth === 1 ? 1 : 0}
           fg={t.depth === 1 ? tuiPalette.h1 : tuiPalette.h2}
           attributes={TextAttributes.BOLD}
           wrapMode="word"
@@ -513,7 +511,7 @@ export function Markdown(props: {
 }): ReactNode {
   const tokens = lexMarkdown(props.text);
   return (
-    <box flexDirection="column" width={props.width}>
+    <box flexDirection="column" width={props.width} gap={1}>
       {tokens
         .filter((t) => t.type !== "space")
         .map((t, i) => renderToken(t, i, props.width))}

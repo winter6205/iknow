@@ -45,7 +45,7 @@ export function CompletedToolPreviewView(props: {
   return (
     <>
       {preview.kind === "code" ? (
-        <CodeBlock lang="" lines={preview.lines} compact />
+        <CodeBlock lang="" lines={preview.lines} />
       ) : (
         preview.rows.length > 0 && <DiffView rows={preview.rows} cols={cols} />
       )}

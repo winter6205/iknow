@@ -20,6 +20,7 @@
 - `session-jsonl-resume.md` — 会话 JSONL 账本（边写、process 补洞、rewind 留分支）
 - `continue-pending.md` — 截断后续跑（`/continue` + CLI/TUI pending NL；Web 仅 slash+POST；同一 conversationId；非 ACI；#686 / map #270 / Resolution #277）
 - `672-fault-recovery.md` — FaultClass + ModelAdapter 传输重试 + 本 run 工具环检测（`fused`）；map #672；ADR-0029
+- `545-d-alpha-graph-mode.md` — D-α V1 graph mode overlay + `run_graph`（#545 CLOSED / ADR-0030；草稿 PR #698–#707 对照可摘，不合整链）
 
 ### TUI
 
@@ -37,6 +38,7 @@
 ### 身份与记忆
 
 - `196-identity-assembly.md` — 身份认知装配（identity / soul / 首启 BOOTSTRAP）
+- `auto-memory.md` — 自动记忆抽取 + 机械清理（兑现 ADR-0009 D5，决策沉淀于 ADR-0031；默认 OFF；plan: `plans/auto-memory.md`）
 - `serve-workspace.md` — serve/Web 工作空间制度（显式主根，禁止自动 cwd；ADR-0023, serve default = unbound, #531）
 
 ### Verify / 完成门禁

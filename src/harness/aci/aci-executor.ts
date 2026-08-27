@@ -109,7 +109,8 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
       onSettled?: (
         result: ToolExecutionResult,
         index: number
-      ) => void | Promise<void>
+      ) => void | Promise<void>,
+      turnId?: string
     ): Promise<ReadonlyArray<ToolExecutionResult>> => {
       if (calls.length === 0) return [];
       const waves = partitionConcurrencyWaves(
@@ -128,6 +129,7 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
           onDecision: opts.onDecision,
           signal,
           conversationId,
+          turnId,
           onSettled,
           indexBase,
         });
@@ -205,6 +207,7 @@ async function runWave(opts: {
   readonly onDecision: AciExecutorOptions["onDecision"];
   readonly signal: AbortSignal | undefined;
   readonly conversationId: string | undefined;
+  readonly turnId: string | undefined;
   readonly onSettled:
     | ((result: ToolExecutionResult, index: number) => void | Promise<void>)
     | undefined;
@@ -236,7 +239,8 @@ async function runWave(opts: {
                   g.def,
                   effectiveSignal,
                   undefined,
-                  opts.conversationId
+                  opts.conversationId,
+                  opts.turnId
                 ),
               call: g.item.call,
               def: g.item.def,

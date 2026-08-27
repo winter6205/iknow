@@ -110,6 +110,15 @@ export interface ToolCallRecord {
 }
 
 export interface TurnRecord {
+  /**
+   * 调用方预生成的 turn id (可选)。缺席 → 实现生成 UUID (原行为)。
+   *
+   * 存在的理由只有一个: 回合内派出的子代理要把 `parentTurnId` 指回本回合,
+   * 而 recordTurn 在回合末尾才发 —— 那时工具阶段早已跑完。loop-engine 因此
+   * 在回合入口先生成 id, 一份给 tool ctx (顺着 executeAll 到 spawn_subagent),
+   * 一份在回合末尾交给 recordTurn, 两侧同源。
+   */
+  id?: string;
   turnIndex: number;
   startedAt: string;
   endedAt: string;
@@ -234,9 +243,9 @@ export type SubagentState = "starting" | "running" | "completed" | "failed";
  *
  * Postel (ADR-0003 D9): 可选字段仅存在时落盘（JSON.stringify 自动丢弃 undefined）。
  * 可选字段 model / taskPreview / maxTurns / timeoutMs / error 等仅当调用方有可填
- * 来源时才在 record 上存在 —— manager 当前无 parentTurnId 来源（spawn-subagent 工具
- * 未把 turnId 写到 SubAgentDefinition），后续 ticket 在 SubAgentDefinition 上加
- * parentTurnId?；本轮 manager 埋点对此字段置 undefined → 不落 key。
+ * 来源时才在 record 上存在。`parentTurnId` 的来源是 `SubAgentDefinition.parentTurnId`
+ * （F-4）：`spawn_subagent` 从 `ctx.turnId` 抄、graph node-executor 从派发方抄；
+ * 派发方无归属回合（如回合之外的 `/graph run`）→ 该键缺席。
  *
  * Origin 留位 v1 恒 "parent"（子代理生命周期状态机完全在父 manager 内；worker 只
  * 写 stdout 信封，schema 不变即可升级 child 留位）。
@@ -296,6 +305,44 @@ export interface SubagentStateChangeRecord {
   readonly toState: SubagentState;
   readonly reason?:
     "crashed" | "maxTurnsExceeded" | "timeout" | "protocolError" | "cancelled";
+  readonly error?: TraceError;
+}
+
+/**
+ * 子代理执行步骤的两个观测点 —— 派发（把一步交给子代理）与落定（该步拿到终局）。
+ * 与 SubagentState 四态刻意不同名：状态机描述「子代理实例现在处于什么状态」，
+ * 步骤描述「父侧第 N 步在做什么」，两者在多步编排里不是一一对应。
+ */
+export type SubagentStepPhase = "dispatch" | "settle";
+
+/**
+ * SubagentStepRecord — 子代理执行步骤（D-α 观测地板第 4 件）。
+ *
+ * 与 spawn / stop / state_change 三类同形态（id 由调用方提供、Postel 可选字段、
+ * @throws never），**唯一形态差异**是 id 载体为 `subagent_step_id` 而非
+ * `subagent_id`：前三类的 `id === taskId`（同一个子代理实例），step 的 id 每步
+ * 唯一，塞进 `subagent_id` 会让该列在 step 行上变成「步骤 id」，与其余三类的
+ * 「子代理 id」语义打架。配对键仍是 `taskId` —— `?taskId=` 过滤照常把 step 与
+ * spawn / stop 收在一起。
+ *
+ * dispatch 行只有 startedAt；settle 行补 endedAt / durationMs，失败时补 error。
+ */
+export interface SubagentStepRecord {
+  readonly id: string;
+  readonly taskId: string;
+  readonly parentTurnId?: string;
+  readonly origin: "parent" | "child";
+  /** 0-based，父侧该任务内单调递增。 */
+  readonly stepIndex: number;
+  readonly phase: SubagentStepPhase;
+  /** 人读步骤名（如编排节点 id）。Postel: 无来源时缺席。 */
+  readonly label?: string;
+  readonly startedAt: string;
+  /** Postel: 仅 settle 有终局时间。 */
+  readonly endedAt?: string;
+  readonly durationMs?: number;
+  readonly status: TraceStatus;
+  readonly ts: string;
   readonly error?: TraceError;
 }
 
@@ -408,4 +455,10 @@ export interface TraceService {
   recordSubagentStateChange(
     record: SubagentStateChangeRecord
   ): Promise<string | undefined>;
+  /**
+   * 记录一次子代理执行步骤 (D-α 观测地板) — 调用方提供 id (每步唯一),
+   * 实现不做 ID 生成。dispatch / settle 各一行。
+   * @throws never.
+   */
+  recordSubagentStep(record: SubagentStepRecord): Promise<string | undefined>;
 }

@@ -90,11 +90,14 @@ jobs:
             --exclude tests/session-api/max-turns-serve.test.ts \
             --exclude tests/session-api/workspace-bind.test.ts \
             --exclude tests/tui/deps-tools.test.ts \
+            --exclude tests/cli/tui-deps-subagent-trace-factory.test.ts \
             --exclude tests/build-engine-hooks.test.ts \
             --exclude tests/integration/mcp-chain.test.ts \
             --exclude tests/e2e/skill-mcp-acceptance.test.ts \
             --exclude tests/harness/build-engine.test.ts \
+            --exclude tests/harness/build-engine-auto-memory.test.ts \
             --exclude tests/harness/build-engine-subagent-trace.test.ts \
+            --exclude tests/harness/graph/run-graph-assembly.test.ts \
             --exclude tests/session-api/ensure-deps-aci-tools.test.ts \
             --exclude tests/subagent/worker-tool-surface.test.ts \
             --exclude tests/subagent/worker.test.ts \
@@ -177,11 +180,14 @@ jobs:
             --exclude tests/session-api/max-turns-serve.test.ts \
             --exclude tests/session-api/workspace-bind.test.ts \
             --exclude tests/tui/deps-tools.test.ts \
+            --exclude tests/cli/tui-deps-subagent-trace-factory.test.ts \
             --exclude tests/build-engine-hooks.test.ts \
             --exclude tests/integration/mcp-chain.test.ts \
             --exclude tests/e2e/skill-mcp-acceptance.test.ts \
             --exclude tests/harness/build-engine.test.ts \
+            --exclude tests/harness/build-engine-auto-memory.test.ts \
             --exclude tests/harness/build-engine-subagent-trace.test.ts \
+            --exclude tests/harness/graph/run-graph-assembly.test.ts \
             --exclude tests/session-api/ensure-deps-aci-tools.test.ts \
             --exclude tests/subagent/worker-tool-surface.test.ts \
             --exclude tests/subagent/worker.test.ts \

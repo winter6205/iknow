@@ -22,10 +22,61 @@ export {
 
 export {
   MemoryError,
+  MemoryExtractError,
+  MemoryGcOptionInvalid,
   MemoryIOError,
   MemoryQuarantinedReason,
   MemorySchemaInvalid,
 } from "./errors.js";
+
+export { listStoreEntries } from "./store.js";
+export type { MemoryStoreScan, StoredMemoryEntry } from "./store.js";
+
+export {
+  AUTO_MEMORY_SOURCE,
+  MAX_CANDIDATES_PER_INGEST,
+  MIN_CANDIDATE_CONFIDENCE,
+  buildExtractPrompt,
+  decideMemoryOps,
+  extractMemoryCandidates,
+  ingestMemory,
+  persistMemoryOps,
+} from "./ingest.js";
+export {
+  DEFAULT_COMPLETED_TURN_GATE,
+  createAutoMemoryHook,
+} from "./auto-hook.js";
+export type {
+  AutoMemoryHook,
+  AutoMemoryHookOptions,
+  AutoMemoryTurn,
+} from "./auto-hook.js";
+
+export type {
+  MemoryCandidate,
+  MemoryExtractLlm,
+  MemoryIngestOptions,
+  MemoryIngestResult,
+  MemoryOp,
+  MemoryOpKind,
+  MemoryPersistDeps,
+  PersistedMemoryOp,
+} from "./ingest.js";
+
+export {
+  DEFAULT_MEMORY_STORE_CAP,
+  memoryEntryUtility,
+  planMemoryGc,
+  runMemoryGc,
+} from "./gc.js";
+export type {
+  MemoryGcCandidate,
+  MemoryGcDisable,
+  MemoryGcOptions,
+  MemoryGcPlan,
+  MemoryGcReason,
+  MemoryGcResult,
+} from "./gc.js";
 
 export {
   findProjectAgents,

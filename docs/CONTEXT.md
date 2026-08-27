@@ -86,6 +86,18 @@ _Avoid_: 逐 slot 独立消费缓存；再拆拼接后的整串；把拼接顺�
 **surface split (identity vs memory)**: 入口面（`chat` / `tui` / `ask` / `serve`）的两层语义——身份认知层（`identity` / `soul` / `user_profile` + 仅 chat/tui 触发的 `bootstrap`）恒在；记忆层（`AGENTS.md` + rules + 记忆库 + `memory_recall` / `memory_save` 工具）只对 chat / tui / serve 装配，`ask` 全 opt-out（`memory_layer` slot 不挂、memory 工具不入注册表）。#228 决议 D3。
 _Avoid_: `ask` 全 opt-out（破"我是谁"答复路径）；`ask` 全 opt-in（破 #121 "ask 无状态"前提）；按 surface flag 同时决定两层
 
+**auto_extract**（`settings.memory.autoExtract`）: 自动记忆抽取的唯一开关，boolean-only、**默认 OFF**——段缺失或非 `true` 一律按关处理。关闭时 `BuiltEngine.autoMemory` 缺席，宿主零调用、零额外 LLM、零写盘，行为与完全未接线逐字节一致。开启后触发闸在 host 侧（chat / tui / serve）：`StopReason=completed` 之后异步，且累计 N≥2 个完成 turn 才跑一趟。ADR-0031 D1/D5。
+_Avoid_: 把默认改成 ON；把抽取 prompt 内嵌进 loop-engine（那里管 turn 机制，不管记忆语义）；给 `ask` 接线（ADR-0010 D3 opt-out 仍然生效）；让 ingest 失败冒泡成用户 turn 失败
+
+**memory_op**（`ADD` | `UPDATE` | `SUPERSEDE` | `NOOP`）: 单条候选事实经 BM25-lite 近邻裁定后的四态写入决策——无近邻过门 → `ADD` 写新 slug；近邻过门且候选信息严格更多 → `UPDATE` 原地重写并 bump `updated_at`；近邻过门且候选相抵 → `SUPERSEDE` 写新 slug 带 `supersedes: <old>` 并软禁旧条目；近邻过同一门槛但无新信息 → `NOOP` 不落盘。`extract` / `decide ops` / `persist` 保持三个独立函数：LLM 那一半可被 FakeLLM 顶替，确定性那一半无模型也能单测。ADR-0031 D2。
+_Avoid_: 把四态压成一个 upsert；绕开 `memory_save` 的肯定句门禁与 tmp+rename 原子写另起写路径；把三段合成一个函数
+
+**memory_gc**: 可重复、幂等的机械清理，三条规则、**零 LLM**——`ttl_days > 0` 且已过期 → `disabled: true`；被别的条目 `supersedes` 指名 → `disabled: true`；活跃条目超 store cap → 按效用分 `importance × recency × (1 + recall_count)`（recall 次数取自既有 `usage.json` sidecar）从低到高软禁。GC **只软禁不删文件**，误驱逐改一行 frontmatter 就能收回。ADR-0031 D4。
+_Avoid_: 硬删文件；把 LLM 离线合并 / 摘要塞进 GC（本轨明确不做）；让 GC 依赖 frontmatter + usage sidecar 之外的运行时状态
+
+**source: auto**: 自动写入条目的 provenance 标记，落在 frontmatter（`sanitizeMemoryFile` / `serializeMemoryEntry` 已 round-trip 未知字段，无需 schema 升版）。自动条目**只经 `memory_recall` 的 tool_result 低信通道**到达模型，永不盲注 `system`（ADR-0009 D3 双通道不变）；也不豁免 promote 门槛，仍需 ≥2 个不同 session 的 recall，没有 auto-promote 路径。该标记同时是批量回退的抓手。ADR-0031 D3。
+_Avoid_: 给高 importance 的自动条目开 auto-promote；把 `source: auto` 当成信任等级之外的纯装饰；用别的字段区分人写 / 机写
+
 **chat REPL** / **product CLI**: TTY interactive `iknow chat`（或裸 TTY invoke）的人类视图；管道模式为串行非终端 turn。
 _Avoid_: 把 one-shot JSON `ask` 当作交互产品；管道上 `terminal: true`；空 `ask` 时塞默认 demo query
 
@@ -170,6 +182,12 @@ _Avoid_: 把前景/后景与进程隔离混同；泛化的"同步/异步"；把 
 **host drain**: host 侧把 completed 子代理 envelope 浓缩成一条消息、注入下一轮 run() priorMessages 的机制（#356 V1，`src/harness/subagent/host-drain.ts`）；只 drain completed，不修改 buffer 状态。#361 裁决后仅在异步臂（`wait:false`）生效，且须阻塞轮询至至少一个 worker 到终态；终态被 V2 事件驱动唤醒取代。
 _Avoid_: 把 drain 与"结果获取"混同（前景 spawn 不经 drain）；让 agent 侧直接消费 manager buffer；把 drain 被动挂"下一轮用户输入"当作可靠唤醒源
 
+**graph mode**: 会话级编排 overlay，不是 PermissionMode。Shift+Tab 三态轮 `Default → Auto → Graph → Default`（`/graph` 为非 TTY 对等物）；进 Graph 后**下一次 `run()` 装配**才注入编排段并露出 `run_graph`，过程中切换不拦、不中途重装配。ADR-0030。
+_Avoid_: 第四种 PermissionMode；把 `src/harness/graph/` 写进 prompt；env gate 才注入；进图改 ask/auto；切模式当下 round 热替换工具面
+
+**run_graph**: 仅 graph mode 打开时装配的 ACI 工具——父代理声明 DAG，host 走 `validateGraph` → waves → `createSubAgentNodeExecutor`；图节点仍是前景 spawn。默认模式不装。
+_Avoid_: 与 spawn_subagent 混名；默认任务进图；模型 import graph 模块
+
 **外挂自检层 (external self-check layer)**: (#128 决议 D1) orchestrator 层的 advisor 形态验证闭环——`run()` 以完成收尾后执行项目 settings 声明的验证命令，失败则把结构化错误经 `priorMessages` 注入并再次 `run()`；引擎零改动、停止语义保持冻结，与引擎自带的工具级实时纠错（第一层）互补而非替代。
 _Avoid_: 把它当引擎内行为（enforcer 形态）；与第一层工具错误自动回流混同；说成"Stop 钩子拦截循环"
 
@@ -235,8 +253,12 @@ _Avoid_: 把发现的工具插回注册序中部（破 KV cache 前缀）；只�
 - **状态栏 vs context usage (display)**: 状态栏是给模型的现势快照；context usage (display) 是给人看的 token 用量条
 - **状态栏 vs 环境现势**: 状态栏给模型（`last_tool` + open todos）；环境现势给人（cwd/git/diff），不进状态栏 user 消息（#655）
 - **沙箱纪律 vs 前景/后景 spawn**: 沙箱纪律约束 `bash` 前台/后台围栏；前景/后景 spawn 是 `spawn_subagent` 的等待契约（ADR-0014）
+- **graph mode vs PermissionMode**: graph mode 是编排 overlay；PermissionMode 是 mutating 问/拒/放行。进 Graph 冻结当时 permission，不把 Graph 写入 `PERMISSION_MODES`
+- **run_graph vs spawn_subagent**: 有依赖的多节点走 `run_graph`；单次派活仍 `spawn_subagent`。图节点内部仍是前景 spawn，不经父代理再调 spawn 工具
 - **状态栏 vs 任务摘录**: 摘录只在 compact 时贴用户原话；状态栏每轮由代码现算并追加
 - **状态栏 vs append-only messages**: 栏走同一条追加纪律；纠错靠新栏，不靠从历史上抠掉旧栏
+- **`memory_save`（显式写） vs auto_extract（自动写）**: 两条写路径共用同一套肯定句门禁与 tmp+rename 原子写；显式写是模型当场决定的一次工具调用，自动写是 host 在 turn 完成后异步跑的一趟 ingest。差别只在触发方式与 `source: auto` 标记，不在信任通道——两者都只经 tool_result 回到模型
+- **memory_gc vs promote**: GC 是机械减法（TTL / supersede / 超 cap → 软禁）；promote 是机械加法（≥2 个不同 session recall → 进 `system` 段）。GC 不看 promote 状态，promote 不复活 `disabled` 条目；自动条目两边都不享受豁免
 
 ## Flagged ambiguities
 

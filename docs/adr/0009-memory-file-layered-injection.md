@@ -1,7 +1,10 @@
 # 0009. Memory-file layered injection — three layers, placement, timing, dual-channel recall, discipline
 
 Date: 2026-08-05
-Status: accepted
+Status: accepted (Decision 5 superseded by ADR-0031)
+
+> **Decision 5 只**（auto-extraction 延期项）superseded by `0031-auto-memory-extract-and-mechanical-gc.md`。
+> D1–D4 / D6（三层落盘、split-frequency 注入、双通道信任、内容纪律、静态 cap）不受影响，仍为现行决策。
 
 ## Context
 
@@ -23,7 +26,7 @@ Six decisions settled in the 2026-08-05 grilling session (Q1–Q6):
 
 4. **Content discipline.** No `@import` parsing — splitting is by directory convention: `<cwd>/.iknow/rules/*.md` (project) and `~/.iknow/rules/*.md` (user), globbed in filename order and appended after the main `AGENTS.md`. **Affirmative phrasing rule**: hard prohibitions belong in `.iknow/permissions.toml` (mechanical tool-layer enforcement, never entering model context); memory content is written affirmatively ("use bar() instead of foo() — foo() is not thread-safe"); negative-form memory is refused at write time (either upgraded to a permission-gate proposal or rewritten affirmatively). Rationale: negative rules in model context cause capability suppression and self-repeating refusal across turns (arXiv 2607.17619 shows stored preferences silently constraining future decisions), and are a persistent poisoning channel. Auto memory writes only broadly-applicable facts / gotchas / hard constraints — never per-task state (that belongs to session messages).
 
-5. **Auto memory scope = explicit-write v0; auto-extraction deferred.** The v0 surface is: the memory store (Decision 1 layout), `memory_recall` + `memory_save` tools, quarantine/promote grading. Writes are explicit only — the model calling `memory_save` or the user hand-editing files. Background LLM auto-extraction (per-turn memory proposal) is deferred to a later standalone module; vector-based recall may join in that same module (v0 recall = keyword BM25-lite heuristic scoring, no embeddings — consistent with the 023 vector-arm removal). Rationale: auto-extraction is the primary entry point for wrong memories (arXiv 2606.25161: consolidation errors become persistent system-state errors); deferring it keeps every v0 entry accountable.
+5. **Auto memory scope = explicit-write v0; auto-extraction deferred.** — _superseded by ADR-0031_（延期项已落地：host 侧 completed 闸后异步抽取 + 四态写入 + 机械 GC，默认 OFF；本条其余内容保留为历史记录）。The v0 surface is: the memory store (Decision 1 layout), `memory_recall` + `memory_save` tools, quarantine/promote grading. Writes are explicit only — the model calling `memory_save` or the user hand-editing files. Background LLM auto-extraction (per-turn memory proposal) is deferred to a later standalone module; vector-based recall may join in that same module (v0 recall = keyword BM25-lite heuristic scoring, no embeddings — consistent with the 023 vector-arm removal). Rationale: auto-extraction is the primary entry point for wrong memories (arXiv 2606.25161: consolidation errors become persistent system-state errors); deferring it keeps every v0 entry accountable.
 
 6. **Budget interaction = static caps, no dedicated token accounting.** Static size caps: ≤12000 chars per `AGENTS.md`/rules file (aligned with the upstream reference's cap); ≤4000 chars total for the promoted-memory `system` section; recall tool results go through the existing executor output cap (contract X, `OUTPUT_HARD_CAP=20000`). Compression acts on `messages` history only, never on the `system` field (KV-cache prefix stability, map #114 standing preference). No independent memory token accounting — consistent with ADR-0008's ruling that compression's token path remains blocked by failure evidence.
 

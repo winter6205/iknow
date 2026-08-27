@@ -33,7 +33,9 @@ import type {
   SubAgentManager,
   SubagentInfo,
 } from "../harness/subagent/manager.js";
+import type { AutoMemoryHook } from "../harness/memory/index.js";
 import type { VerifyConfig } from "../harness/verify/index.js";
+import type { GraphAssembly } from "../harness/graph/assembly.js";
 import type { VerifyAnswerView } from "../session-api/contract.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import type { IknowEnv, LlmEnv } from "../config/env.js";
@@ -171,8 +173,20 @@ export interface CreateTuiBridgeOptions {
   /** subagentManager 由 buildTuiDeps 经 buildHarnessEngine SSOT 装配，
    *  hub-bridge 透传给 SessionHub。缺省 undefined → 无 manager 路径（drain 返空）。 */
   readonly subagentManager?: SubAgentManager;
+  /**
+   * auto-memory T4 / ADR-0031 D1:自动记忆钩子。与 subagentManager 同路
+   * (buildTuiDeps → buildHarnessEngine SSOT 装配) 透传给 SessionHub。
+   * 缺席(默认 OFF)→ hub 不调,行为逐字节不变。
+   */
+  readonly autoMemory?: AutoMemoryHook;
   /** #128 T8: 验证闭环配置。缺席 = 透明关闭 (postMessage 走原 run, SC7)。 */
   readonly verifyConfig?: VerifyConfig;
+  /**
+   * D-α T5:graph 装配快照句柄（buildTuiDeps 透出）。TUI 自己 build engine,
+   * hub 只拿成品 deps —— 句柄必须由这里交进去,否则 `/graph` 翻了 holder 也
+   * 进不了下一次装配。缺席 = 本入口未接 overlay。
+   */
+  readonly graphAssembly?: GraphAssembly;
   /** T3: 上下文窗口容量（tokens）。缺省 `DEFAULT_CONTEXT_WINDOW = 200_000`。 */
   readonly contextWindow?: number;
   /** T2: LLM env 覆盖源，透传给 SessionHub（override 路径重建 adapter 时用，
@@ -199,10 +213,14 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     // subagentManager 由 buildTuiDeps 经 buildHarnessEngine SSOT 装配，
     // hub-bridge 透传给 SessionHub。
     subagentManager: opts.subagentManager,
+    // auto-memory T4:自动记忆钩子同路透传(缺席 = 关)。
+    ...(opts.autoMemory ? { autoMemory: opts.autoMemory } : {}),
     // #128 T8: verifyConfig 由 run.tsx 装配 (settings.verify 段) 透传。
     // command 缺失时 (含 verify 段缺失) 由 runClassifier 接管 (subagentManager
     // 在场);缺席 = 不包裹 run (仅未接线路径)。
     verifyConfig: opts.verifyConfig,
+    // D-α T5: 每条 postMessage 前拍一次 graph 装配快照（SC3 与 chat 同语义）。
+    ...(opts.graphAssembly ? { graphAssembly: opts.graphAssembly } : {}),
     // T2: LLM env 覆盖源 —— TUI 启动期校验过的 env 透到 override 路径，
     // 避免 override 重建 adapter 时回退到 process.env（reviewer blocker）。
     ...(opts.overrideEnv ? { overrideEnv: opts.overrideEnv } : {}),
