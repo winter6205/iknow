@@ -155,6 +155,12 @@ import {
   reduceGraphChromeFocus,
   type GraphChromeFocus,
 } from "./graph-chrome.js";
+import { GraphGroupView } from "./graph-group-view.js";
+import {
+  graphGroupRows,
+  moveSelection,
+  selectableNodeIds,
+} from "./graph-group.js";
 import {
   agentStatusFromMessages,
   type AgentStatusSnapshot,
@@ -539,6 +545,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const [graphChromeFocus, setGraphChromeFocus] =
     useState<GraphChromeFocus>("input");
   const [graphViewOpen, setGraphViewOpen] = useState(false);
+  const [graphSelectedId, setGraphSelectedId] = useState<string | null>(null);
+  const [graphNodeDetail, setGraphNodeDetail] = useState(false);
   // #458 包2 T3:verify 终态槽(conversationId → VerifySlot 判别联合)。
   // none = 缺 verify(合法态 → banner 静默);ok = 4 终态;unavailable =
   // wire 形状非法(degraded)。sendTurn 入口清槽(防上一回合判定残留到
@@ -1375,6 +1383,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         if (nextGraph === null) {
           setGraphChromeFocus("input");
           setGraphViewOpen(false);
+          setGraphNodeDetail(false);
+          setGraphSelectedId(null);
         }
       }
     };
@@ -1957,17 +1967,46 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   useKeyboard((e) => {
     if (e.eventType !== "press") return;
 
+    if (graphViewOpen && graphProgress !== null) {
+      const ids = selectableNodeIds(
+        graphGroupRows(graphProgress, graphSelectedId)
+      );
+      if (e.name === "escape") {
+        if (graphNodeDetail) {
+          setGraphNodeDetail(false);
+          return;
+        }
+        setGraphViewOpen(false);
+        return;
+      }
+      if (e.name === "up") {
+        setGraphSelectedId(moveSelection(ids, graphSelectedId, -1));
+        return;
+      }
+      if (e.name === "down") {
+        setGraphSelectedId(moveSelection(ids, graphSelectedId, 1));
+        return;
+      }
+      if (e.name === "return" && graphSelectedId !== null) {
+        setGraphNodeDetail(true);
+        return;
+      }
+      return;
+    }
+
     const graphKey = reduceGraphChromeFocus({
       focus: graphChromeFocus,
       hasSnapshot: graphProgress !== null,
       key: e.name,
     });
-    if (graphChromeFocus === "graph" || graphViewOpen) {
-      if (graphViewOpen && e.name === "escape") {
-        setGraphViewOpen(false);
-        return;
-      }
+    if (graphChromeFocus === "graph") {
       if (graphKey.openView === true) {
+        const ids =
+          graphProgress === null
+            ? []
+            : selectableNodeIds(graphGroupRows(graphProgress, null));
+        setGraphSelectedId(ids[0] ?? null);
+        setGraphNodeDetail(false);
         setGraphViewOpen(true);
         return;
       }
@@ -1975,7 +2014,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         setGraphChromeFocus(graphKey.focus);
         return;
       }
-      if (graphChromeFocus === "graph") return;
+      return;
     }
 
     // Shift+Tab 切 agent mode（W2 权限轮 + D-α graph overlay 的三态轮；
@@ -2334,6 +2373,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           rows={mcpViewRows}
           onReload={reloadMcpView}
           onBack={() => setView("chat")}
+        />
+      ) : graphViewOpen && graphProgress !== null ? (
+        <GraphGroupView
+          snapshot={graphProgress}
+          selectedId={graphSelectedId}
+          detail={graphNodeDetail}
+          cols={cols}
+          rows={rows}
         />
       ) : (
         <>
