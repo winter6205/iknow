@@ -95,6 +95,9 @@ _Avoid_: 把四态压成一个 upsert；绕开 `memory_save` 的肯定句门禁�
 **memory_gc**: 可重复、幂等的机械清理，三条规则、**零 LLM**——`ttl_days > 0` 且已过期 → `disabled: true`；被别的条目 `supersedes` 指名 → `disabled: true`；活跃条目超 store cap → 按效用分 `importance × recency × (1 + recall_count)`（recall 次数取自既有 `usage.json` sidecar）从低到高软禁。GC **只软禁不删文件**，误驱逐改一行 frontmatter 就能收回。ADR-0031 D4。
 _Avoid_: 硬删文件；把 LLM 离线合并 / 摘要塞进 GC（本轨明确不做）；让 GC 依赖 frontmatter + usage sidecar 之外的运行时状态
 
+**memory_type**: 事实条目 frontmatter `type` 的封闭枚举：`convention` | `decision` | `gotcha` | `constraint` | `note`。手动 `memory_save` 与自动 ingest 同一套；空或非法值收成 `note`，不 fail 写入。`specs/memory-layer-follow-ups.md`。
+_Avoid_: 自由字符串当 type；自动与手动两套词表；非法 type 整次写入失败
+
 **source: auto**: 自动写入条目的 provenance 标记，落在 frontmatter（`sanitizeMemoryFile` / `serializeMemoryEntry` 已 round-trip 未知字段，无需 schema 升版）。自动条目**只经 `memory_recall` 的 tool_result 低信通道**到达模型，永不盲注 `system`（ADR-0009 D3 双通道不变）；也不豁免 promote 门槛，仍需 ≥2 个不同 session 的 recall，没有 auto-promote 路径。该标记同时是批量回退的抓手。ADR-0031 D3。
 _Avoid_: 给高 importance 的自动条目开 auto-promote；把 `source: auto` 当成信任等级之外的纯装饰；用别的字段区分人写 / 机写
 
@@ -114,10 +117,13 @@ _Avoid_: 把 frontend-only server 当生产路径但不代理 `/api`
 _Avoid_: 把 serve 缺省说成 `process.cwd()`；与 `workspaceRoot` 字段、`home`（global 配置锚）、`sandboxRoot` 混同
 
 **workspaceRoot**: per-root 操作状态锚（memory / sessions / tasks / settings 写回 fallback / serve data）；默认 `process.cwd()`，可被 `--workspace-root` 或 `IKNOW_WORKSPACE_ROOT` 覆盖。不含用户画像。ADR-0019 D1.1；画像根见 ADR-0025。
-_Avoid_: 用 workspaceRoot 当 `user.md` / `BOOTSTRAP.md` 的物理根；把 identity seed 跟启动目录绑在一起
+_Avoid_: 用 workspaceRoot 当 `user.md` / `BOOTSTRAP.md` / 用户级 `AGENTS.md` / 用户 `rules/` 的物理根；把 identity seed 跟启动目录绑在一起
 
 **user.md**: 全局用户画像，唯一落点 `~/.iknow/user.md`（测试缝 = `userHome/.iknow/user.md`）；每 turn 注入 `user_profile` 段，改文件下一轮生效。ADR-0025。
 _Avoid_: 项目 `.iknow/user.md`；per-root persona；把画像当成 workspace 状态
+
+**user-level AGENTS.md**: 对所有项目生效的行为约定，物理根与 `user.md` 相同（`~/.iknow/AGENTS.md`，测试缝 `userHome/.iknow/AGENTS.md`）；同根 `~/.iknow/rules/*.md` 按文件名拼进用户静态层。项目 `AGENTS.md` 叠在其上，冲突时项目优先（ADR-0009）。`specs/memory-layer-follow-ups.md`。
+_Avoid_: 把 `<workspaceRoot>/.iknow/AGENTS.md` 当作用户级层；把用户级 AGENTS 和项目记忆库 `.md` 条目混成一种文件
 
 **BOOTSTRAP.md**: 首启引导种子，与 `user.md` 同根（`~/.iknow/BOOTSTRAP.md`）；文件存在则注入 bootstrap 段，agent 删除该文件即完成。`state.json.bootstrap_seeded` 只防止重复 seed，不是完成条件。
 _Avoid_: 每个仓库一份 BOOTSTRAP；用 workspaceRoot 下的 BOOTSTRAP.md 当引导；把 bootstrap_seeded=true 当成「用户已填完画像」
@@ -259,6 +265,8 @@ _Avoid_: 把发现的工具插回注册序中部（破 KV cache 前缀）；只�
 - **状态栏 vs append-only messages**: 栏走同一条追加纪律；纠错靠新栏，不靠从历史上抠掉旧栏
 - **`memory_save`（显式写） vs auto_extract（自动写）**: 两条写路径共用同一套肯定句门禁与 tmp+rename 原子写；显式写是模型当场决定的一次工具调用，自动写是 host 在 turn 完成后异步跑的一趟 ingest。差别只在触发方式与 `source: auto` 标记，不在信任通道——两者都只经 tool_result 回到模型
 - **memory_gc vs promote**: GC 是机械减法（TTL / supersede / 超 cap → 软禁）；promote 是机械加法（≥2 个不同 session recall → 进 `system` 段）。GC 不看 promote 状态，promote 不复活 `disabled` 条目；自动条目两边都不享受豁免
+- **memory_gc vs memory_recall**: 软禁只改 `disabled`；`memory_recall` 必须在打分前丢掉 disabled 条，否则模型仍看到废条（`specs/memory-layer-follow-ups.md`）
+- **user.md vs user-level AGENTS.md vs 项目 AGENTS.md**: 画像与用户级行为约定同根 `~/.iknow/`、对所有项目生效；项目仓库根 `AGENTS.md` 叠在用户级之上且项目优先；都不是记忆库事实文件
 
 ## Flagged ambiguities
 
