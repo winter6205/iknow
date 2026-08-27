@@ -36,7 +36,8 @@ Each numbered item is one tracer bullet: one vertical-slice outcome, one tag, on
      - frontmatter 块整体缺失仍硬跳过 + warn（既有 "skips malformed siblings" 测试语义不降级）。
      - 5 类边界随 bullet 落测：空 frontmatter 块 / 不可解析行（exception）/ 全行不可解析（退化为无有效字段，name fallback 到目录名的既有语义）；concurrent N/A（scan 无共享可变状态）。
      - `tests/skill/scanner.test.ts` 全绿；`npm test` + `npm run typecheck` exit 0。
-   - Status: [ ] pending
+   - Status: [x] done
+   - Evidence: `npx vitest run tests/skill/scanner.test.ts tests/harness/aci/tools/tool-search.test.ts tests/harness/aci/tools/skill-search.test.ts` → exit 0 (3 files, 62 tests passed); `npm run typecheck` → exit 0; PR CI `test-fast` → SUCCESS. Full `npm test` → exit 1 because unrelated `tests/harness/sandbox/env-isolation.test.ts` (4 failures) and `tests/harness/aci/tools/grep.test.ts` (1 failure), with no diff in their source/test files.
 
 2. **T2 bounded search output（可选 limit + 默认封顶 + trim）** — tag: `[implementation]` `[parallel]`
    - **Inherits:** 契约 X（spec 224:208 / 224:172）："executor 是工具结果截断元数据的唯一权威……工具返回纯数据、不带 truncated/total 元字段"、"不为 tool_search 单独绕开 20000 字符封顶" —— 工具自限输出坐在 executor 权威**之下**（输出少于封顶 = 遵守，非绕开），引导行是 plain data 不是截断元字段。S5 line-parseable carve-out 先例：`NO_MATCHES` 已是非 JSON 行（tool-search.ts:54，测试锁定），封顶引导行沿用同一先例形态（非 JSON 的引导性纯文本行）。#635 封禁：匹配算法（子串语义）零改动。spec 337 SC5：skill_search 每行 `{name, description}` JSON 形态不变。
@@ -48,8 +49,16 @@ Each numbered item is one tracer bullet: one vertical-slice outcome, one tag, on
      - 匹配算法零改动：未触发封顶的输入下，命中集合与现状逐字节一致（既有 S4/S5 测试全绿）。
      - 5 类边界随 bullet 落测：空/空白 query（empty）、`limit` 0/负数/非整数（negative，ajv 拒收）、命中数超 limit 及单条超长逼近 20k（overflow，整行丢弃）、registry 未装配（exception，既有 ToolExecutionError 不变）；concurrent N/A（纯 read-only handler，`isConcurrencySafe` 已声明）。
      - `tests/harness/aci/tools/tool-search.test.ts`、`tests/harness/aci/tools/skill-search.test.ts` 全绿；`npm test` + `npm run typecheck` exit 0。
-   - Status: [ ] pending
+   - Status: [x] done
+   - Evidence: `npx vitest run tests/skill/scanner.test.ts tests/harness/aci/tools/tool-search.test.ts tests/harness/aci/tools/skill-search.test.ts` → exit 0 (3 files, 62 tests passed); `npm run typecheck` → exit 0; PR CI `test-fast` → SUCCESS. Full `npm test` → exit 1 because unrelated `tests/harness/sandbox/env-isolation.test.ts` (4 failures) and `tests/harness/aci/tools/grep.test.ts` (1 failure), with no diff in their source/test files.
 
 ## Code review phase
 
-两 bullet 全部落地后，整轮改动过一次 end-of-round code review，再收尾。Status: [ ] pending
+两 bullet 全部落地后，整轮改动过一次 end-of-round code review，再收尾。Status: [x] done
+
+Review evidence:
+
+- Pinned diff: `819537e..301f5eb` (base merge `819537e`, HEAD `301f5eb`); scope is the two planned tracer bullets only.
+- Standards axis: PASS — no High findings. The implementation stays within existing scanner/ACI abstractions, keeps typed registry failure behavior, emits one warning per malformed frontmatter block, uses whole-line JSON projection, and adds no secret-bearing data or new dependency.
+- Spec axis: PASS — no High findings. T1 preserves catalog visibility, fallback naming, disabled semantics, and missing-frontmatter skip behavior; T2 preserves substring matching, adds schema-validated `limit`, trims blank queries, keeps executor as truncation authority, and does not emit `truncated`/`total` metadata. No matching-algorithm, web-search, registry-pruning, or permission scope creep found.
+- Verification: focused T1/T2 tests exit 0 and typecheck exit 0. Full product-path `npm test` exit 1 only on unrelated pre-existing/environment-sensitive failures named above; no residual defect in this slice.
