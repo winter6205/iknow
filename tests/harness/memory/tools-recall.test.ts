@@ -198,6 +198,73 @@ describe("memory_recall — output cap and boundary classes", () => {
   });
 });
 
+// -- disabled entries (#730) -------------------------------------------------
+
+describe("memory_recall — disabled entries never reach the model", () => {
+  it("drops a disabled entry from the injected entries seam", async () => {
+    const live = entry({
+      id: "live",
+      title: "Use bar() for rendering",
+      body: "Calling bar() is the supported rendering path.",
+    });
+    const dead = entry({
+      id: "dead",
+      disabled: true,
+      title: "Use baz() for rendering",
+      body: "Calling baz() was the old rendering path.",
+    });
+    const tool = createMemoryRecallTool({
+      memoryDir,
+      entries: [live, dead],
+    });
+
+    const out = (await tool.handler({ query: "rendering path" })) as string;
+    assert.ok(out.includes("### Use bar() for rendering"), "live hit present");
+    assert.ok(!out.includes("Use baz() for rendering"), "disabled title gone");
+    assert.ok(
+      !out.includes("Calling baz() was the old rendering path."),
+      "disabled body gone"
+    );
+  });
+
+  it("drops a disabled entry read from disk", async () => {
+    await writeSlug(
+      "live",
+      entry({
+        id: "live",
+        title: "Use bar() for rendering",
+        body: "Calling bar() is the supported rendering path.",
+      })
+    );
+    await writeSlug(
+      "dead",
+      entry({
+        id: "dead",
+        disabled: true,
+        title: "Use baz() for rendering",
+        body: "Calling baz() was the old rendering path.",
+      })
+    );
+    const tool = createMemoryRecallTool({ memoryDir });
+
+    const out = (await tool.handler({ query: "rendering path" })) as string;
+    assert.ok(out.includes("### Use bar() for rendering"), "live hit present");
+    assert.ok(!out.includes("Use baz() for rendering"), "disabled title gone");
+    assert.ok(
+      !out.includes("Calling baz() was the old rendering path."),
+      "disabled body gone"
+    );
+  });
+
+  it("returns an empty string when every entry is disabled", async () => {
+    const tool = createMemoryRecallTool({
+      memoryDir,
+      entries: [entry({ id: "dead", disabled: true })],
+    });
+    assert.equal(await tool.handler({ query: "bar rendering" }), "");
+  });
+});
+
 // -- concurrency-safe read ---------------------------------------------------
 
 describe("memory_recall — concurrent reads", () => {

@@ -29,6 +29,7 @@ import { join } from "node:path";
 import type { AciToolDef } from "../../aci/types.js";
 import { MemoryError, MemoryIOError } from "../errors.js";
 import { serializeMemoryEntry } from "../frontmatter.js";
+import { normalizeMemoryType } from "../schema.js";
 import type { MemoryEntryV1 } from "../schema.js";
 
 const DEFAULT_IMPORTANCE = 1;
@@ -128,8 +129,9 @@ function parseInput(input: unknown): ParsedInput {
   if (typeof raw.body !== "string" || raw.body.length === 0) {
     throw new MemoryError("[memory_save] body must be a non-empty string");
   }
-  const type =
-    typeof raw.type === "string" && raw.type.length > 0 ? raw.type : "note";
+  // Closed enum (#731): an illegal or absent type degrades to `note` rather
+  // than failing the write — a mislabeled fact is still worth keeping.
+  const type = normalizeMemoryType(raw.type);
   const importance =
     raw.importance === undefined
       ? DEFAULT_IMPORTANCE

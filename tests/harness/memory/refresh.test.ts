@@ -102,6 +102,46 @@ describe("createSystemResolver", () => {
     expect(await resolver()).not.toContain("removed-content");
   });
 
+  // -- user static layer root (#732) -----------------------------------------
+
+  it("tracks userHome AGENTS.md even when workspaceRoot is set", async () => {
+    const base = await makeContext();
+    const workspaceRoot = join(base.cwd, "..", "workspace");
+    await mkdir(workspaceRoot, { recursive: true });
+    const ctx = { ...base, workspaceRoot };
+    const userAgents = join(ctx.userHome, ".iknow", "AGENTS.md");
+    await mkdir(join(ctx.userHome, ".iknow"), { recursive: true });
+    await writeFile(userAgents, "user-agents-v1");
+
+    const resolver = createSystemResolver(ctx);
+    expect(await resolver()).toContain("user-agents-v1");
+    await tick();
+    await writeFile(userAgents, "user-agents-v2");
+    expect(await resolver()).toContain("user-agents-v2");
+  });
+
+  it("ignores workspaceRoot/.iknow/AGENTS.md as a user layer", async () => {
+    const base = await makeContext();
+    const workspaceRoot = join(base.cwd, "..", "workspace");
+    await mkdir(join(workspaceRoot, ".iknow"), { recursive: true });
+    await writeFile(join(workspaceRoot, ".iknow", "AGENTS.md"), "ws-agents");
+    await writeFile(join(base.cwd, "AGENTS.md"), "project-only");
+
+    const resolved = await createSystemResolver({ ...base, workspaceRoot })();
+    expect(resolved).toContain("project-only");
+    expect(resolved).not.toContain("ws-agents");
+  });
+
+  it("does not throw when the userHome layer is absent", async () => {
+    const base = await makeContext();
+    const workspaceRoot = join(base.cwd, "..", "workspace");
+    await mkdir(workspaceRoot, { recursive: true });
+    await writeFile(join(base.cwd, "AGENTS.md"), "project-v1");
+
+    const resolver = createSystemResolver({ ...base, workspaceRoot });
+    await expect(resolver()).resolves.toContain("project-v1");
+  });
+
   // -- review #121: 并发去重 + 装配失败不毒化缓存 -----------------------------
 
   it("dedupes concurrent first-call assembly (no duplicate discover/assemble)", async () => {

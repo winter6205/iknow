@@ -14,7 +14,9 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   CURRENT_MEMORY_SCHEMA_VERSION,
+  MEMORY_TYPES,
   MemorySchemaInvalid,
+  normalizeMemoryType,
   sanitizeMemoryFile,
 } from "../../../src/harness/memory/index.ts";
 
@@ -176,5 +178,45 @@ describe("sanitizeMemoryFile — unknown fields preserved", () => {
       (out.entries[0] as unknown as Record<string, unknown>)["extra"],
       { nested: 1 }
     );
+  });
+});
+
+// -- closed memory_type enum (#731) ------------------------------------------
+
+describe("normalizeMemoryType", () => {
+  it("declares exactly the five legal values", () => {
+    assert.deepEqual(
+      [...MEMORY_TYPES],
+      ["convention", "decision", "gotcha", "constraint", "note"]
+    );
+  });
+
+  it("returns a legal value verbatim", () => {
+    for (const legal of MEMORY_TYPES) {
+      assert.equal(normalizeMemoryType(legal), legal);
+    }
+  });
+
+  it("falls back to note for an illegal, empty, or absent value", () => {
+    for (const bad of ["nope", "", undefined, null, 7, {}, ["note"]]) {
+      assert.equal(
+        normalizeMemoryType(bad),
+        "note",
+        `${JSON.stringify(bad)} must normalize to note`
+      );
+    }
+  });
+
+  it("matches exactly — no trimming and no case folding", () => {
+    for (const near of [" note", "note ", "Note", "DECISION", "Convention"]) {
+      assert.equal(normalizeMemoryType(near), "note");
+    }
+  });
+
+  it("leaves the stored frontmatter type untouched (write-path-only scope)", () => {
+    // sanitizeMemoryFile is the read path: a legacy `preference` entry keeps
+    // its recorded type so old files round-trip verbatim.
+    const out = sanitizeMemoryFile(v1File({ entries: [entry()] }));
+    assert.equal(out.entries[0].type, "preference");
   });
 });

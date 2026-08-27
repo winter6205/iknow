@@ -40,11 +40,10 @@ const FILE_CAP = 12000;
 /**
  * Inputs needed to compose the layered system prompt.
  *   cwd + userHome: discovery roots for the static layer (AGENTS.md + rules).
- *   workspaceRoot: ADR-0019 (T2) per-root state anchor — the user scope's
- *     physical root (user-level AGENTS.md + rules read from
- *     `<workspaceRoot>/.iknow/`); project scope stays at `<cwd>`.
- *     Optional + `userHome` fallback keeps 既有 T337 seam 测 / 直接 ctx
- *     construction 零破坏;build-engine 装配期总是显式传入。
+ *     user scope reads `<userHome>/.iknow/`; project scope stays at `<cwd>`.
+ *   workspaceRoot: ADR-0019 (T2) per-root state anchor — memoryDir and the
+ *     other per-root state live under it, but the user static layer does not
+ *     (a project-local `.iknow/AGENTS.md` must not become user-level).
  *   memoryDir: project-namespaced memory root (<workspaceRoot>/.iknow/memory/
  *     <base>-<hash>, per-root memory decision).
  *   promoteEntries: optional injection — used by tests + per-turn refresh hook.
@@ -61,12 +60,14 @@ export interface AssemblyContext {
 export async function assembleSystemPrompt(
   ctx: AssemblyContext
 ): Promise<string> {
-  // ADR-0019 (T2): user-scope physical root = ctx.workspaceRoot ?? userHome
-  // (per-root state anchor;既有 T337 seam 测 / ctx 未传 workspaceRoot → 回退)。
+  // 用户静态层永远读 `<ctx.userHome>/.iknow/`,与 `user.md` 同根(ADR-0009
+  // Decision 1;identity assemble 的 persona 读法同形)。ADR-0019 的
+  // `workspaceRoot` 仍是 per-root state anchor(memoryDir / tasks / settings),
+  // 但**不**充当用户层物理根 —— 否则 `--workspace-root` 会把某个项目下的
+  // `.iknow/AGENTS.md` 冒充成对所有项目生效的用户级指令。
   // ADR-0009 read-order user-first / project-second + PRIORITY_DECLARATION 位置
   // 不位移(装配顺序与 priority declaration 由 parts.push 顺序守)。
-  const userRoot = ctx.workspaceRoot ?? ctx.userHome;
-  const user = await loadStaticLayer(userRoot, "user");
+  const user = await loadStaticLayer(ctx.userHome, "user");
   const project = await loadStaticLayer(ctx.cwd, "project");
   const hasMemory = await memoryLibraryNonEmpty(ctx.memoryDir);
   const promote =

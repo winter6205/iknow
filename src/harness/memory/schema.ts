@@ -13,6 +13,37 @@
  */
 import { MemorySchemaInvalid } from "./errors.js";
 
+/**
+ * The closed `memory_type` enum (specs/memory-layer-follow-ups.md SC 2).
+ *
+ * Write-path vocabulary only: `memory_save` input and auto-ingest candidates
+ * are normalized against it. Frontmatter already on disk is left alone, so
+ * entries written before the enum existed still round-trip verbatim.
+ */
+export const MEMORY_TYPES = [
+  "convention",
+  "decision",
+  "gotcha",
+  "constraint",
+  "note",
+] as const;
+
+export type MemoryType = (typeof MEMORY_TYPES)[number];
+
+/** The value an illegal or absent type falls back to — never a write failure. */
+export const DEFAULT_MEMORY_TYPE: MemoryType = "note";
+
+/**
+ * Map an untrusted type onto the closed enum. Exact match only: no trimming
+ * and no case folding, because a near-miss is a caller mistake, and silently
+ * repairing it would let two spellings of the same intent both look legal.
+ */
+export function normalizeMemoryType(value: unknown): MemoryType {
+  return (MEMORY_TYPES as ReadonlyArray<string>).includes(value as string)
+    ? (value as MemoryType)
+    : DEFAULT_MEMORY_TYPE;
+}
+
 /** Six core fields + title + body + timestamp (spec SC 7). */
 export interface MemoryEntryV1 {
   readonly id: string;

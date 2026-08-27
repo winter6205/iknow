@@ -220,6 +220,62 @@ describe("memory_save — schema boundary classes", () => {
   });
 });
 
+// -- closed memory_type enum (#731) ------------------------------------------
+
+describe("memory_save — closed memory_type enum", () => {
+  /** Read back the single slug file written by one save. */
+  async function persistedType(): Promise<string> {
+    const files = await readdir(memoryDir);
+    const slugs = files.filter((f) => f.endsWith(".md") && f !== "MEMORY.md");
+    assert.equal(slugs.length, 1, `expected one slug file, got ${slugs}`);
+    const raw = await readFile(join(memoryDir, slugs[0]), "utf8");
+    return parseMemoryEntry(raw).type;
+  }
+
+  for (const legal of [
+    "convention",
+    "decision",
+    "gotcha",
+    "constraint",
+    "note",
+  ]) {
+    it(`preserves the legal type "${legal}"`, async () => {
+      const tool = createMemorySaveTool({ memoryDir });
+      await tool.handler({ title: "Use bar()", body: "body", type: legal });
+      assert.equal(await persistedType(), legal);
+    });
+  }
+
+  it("persists an illegal type as note on the success path", async () => {
+    const tool = createMemorySaveTool({ memoryDir });
+    const out = await tool.handler({
+      title: "Use bar()",
+      body: "body",
+      type: "nope",
+    });
+    assert.match(out as string, /persisted as/);
+    assert.equal(await persistedType(), "note");
+  });
+
+  it("persists an omitted type as note", async () => {
+    const tool = createMemorySaveTool({ memoryDir });
+    await tool.handler({ title: "Use bar()", body: "body" });
+    assert.equal(await persistedType(), "note");
+  });
+
+  it("persists an empty-string type as note", async () => {
+    const tool = createMemorySaveTool({ memoryDir });
+    await tool.handler({ title: "Use bar()", body: "body", type: "" });
+    assert.equal(await persistedType(), "note");
+  });
+
+  it("persists a case- or space-variant type as note (exact match only)", async () => {
+    const tool = createMemorySaveTool({ memoryDir });
+    await tool.handler({ title: "Use bar()", body: "body", type: "Decision" });
+    assert.equal(await persistedType(), "note");
+  });
+});
+
 // -- concurrent writes (5 boundary class: concurrent) ------------------------
 
 describe("memory_save — concurrent writes do not corrupt the filesystem", () => {
