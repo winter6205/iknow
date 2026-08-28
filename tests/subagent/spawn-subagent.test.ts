@@ -14,7 +14,7 @@
  *   9. maxTurns 整数透传
  *  10. wait:false → waitFor 不被调用
  *  11. aci 元数据（timeoutTier=unbounded，ACI 不抢 manager per-task 钟）
- *  12. #556 T3: subagent_type 可选参数 → def.role 透传（缺省 = V1 byte-stable）
+ *  12. #556 T3/T7: subagent_type 可选参数 → def.role 透传（缺省 = general-purpose）
  *  13. #556 T3: inputSchema.subagent_type enum = catalog ids（运行时派生）
  *  14. #556 T3: description 含 prose list（catalog entries）
  *
@@ -392,7 +392,7 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
  * handler 映射 → def.role。
  *
  * 防御契约 (T3 acceptance):
- *   - subagent_type 缺省 → def.role 缺省 → V1 byte-stable（不动现有 wire）
+ *   - subagent_type 缺省 → def.role = general-purpose（与显式 general-purpose 等价）
  *   - subagent_type 已知 → def.role 显式透传 → manager.buildWorkerPayload →
  *     envelope.role → worker 注入 catalog body persona 段 (T2 装配)
  *   - ajv enum = catalog id 列表（运行时 resolveAgentCatalog 派生）
@@ -503,28 +503,32 @@ describe("spawn_subagent — #556 T3 handler: subagent_type → def.role", () =>
     );
   });
 
-  it("subagent_type 缺省 → def.role 缺省 (V1 byte-stable, 不显式置 role 字段)", async () => {
-    // plan T3 防御契约: 不传 subagent_type = 不设置 def.role = V1 byte-stable
-    // (与 V1 baseline 比对: spawn 收到的 def 没有 role 字段)
+  it("subagent_type 缺省 → def.role = general-purpose", async () => {
+    // T7: 不传 subagent_type 的默认角色必须与显式 general-purpose 一致，
+    // 让 worker 注入 persona 并保持完整工具面。
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({ task: "no-role", wait: false });
     const calledDef = spawn.mock.calls[0][0] as SubAgentDefinition;
-    expect(calledDef.role).toBeUndefined();
+    expect(calledDef.role).toBe("general-purpose");
   });
 
-  it("subagent_type 显式传 'general-purpose' 等价于不传 (V1 缺省值)", async () => {
-    // 缺省语义 = 'general-purpose' (plan T3 描述)；handler 不写死, 缺省由
-    // schema/ajv 缺省值兜底 → V1 路径 (不设置 def.role)。验证两种走法 spawn
-    // 收到的 def 在 role 字段层面一致 (都 undefined)。
+  it("subagent_type 显式传 'general-purpose' 等价于不传", async () => {
+    // T7: 两种调用都应走 general-purpose persona 和完整工具面。
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({ task: "t", wait: false });
-    await tool.handler({ task: "t", wait: false });
+    await tool.handler({
+      task: "t",
+      subagent_type: "general-purpose",
+      wait: false,
+    });
     const def1 = spawn.mock.calls[0][0] as SubAgentDefinition;
     const def2 = spawn.mock.calls[1][0] as SubAgentDefinition;
-    expect(def1.role).toBeUndefined();
-    expect(def2.role).toBeUndefined();
+    expect(def1.role).toBe("general-purpose");
+    expect(def2.role).toBe("general-purpose");
+    expect(def1.disallowedTools).toBeUndefined();
+    expect(def2.disallowedTools).toBeUndefined();
   });
 
   it("subagent_type + 其他字段组合 → 全部透传", async () => {
@@ -631,7 +635,7 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
     expect(def.disallowedTools).toBeUndefined();
   });
 
-  it("subagent_type 不传 + parent disallowedTools → def.disallowedTools = parent (V1 byte-stable)", async () => {
+  it("subagent_type 不传 + parent disallowedTools → def.disallowedTools = parent", async () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({
@@ -640,11 +644,11 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
       wait: false,
     });
     const def = spawn.mock.calls[0][0] as SubAgentDefinition;
-    expect(def.role).toBeUndefined();
+    expect(def.role).toBe("general-purpose");
     expect(def.disallowedTools).toEqual(["some_tool"]);
   });
 
-  it("subagent_type 不传 + 无 parent disallowedTools → def.disallowedTools 字段缺省 (V1 byte-stable)", async () => {
+  it("subagent_type 不传 + 无 parent disallowedTools → general-purpose 完整工具面", async () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({
@@ -652,7 +656,7 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
       wait: false,
     });
     const def = spawn.mock.calls[0][0] as SubAgentDefinition;
-    expect(def.role).toBeUndefined();
+    expect(def.role).toBe("general-purpose");
     expect(def.disallowedTools).toBeUndefined();
   });
 });

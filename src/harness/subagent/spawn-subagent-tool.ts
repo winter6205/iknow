@@ -12,9 +12,9 @@
  *
  * **#556 T3 subagent_type routing**：可选参数 `subagent_type`（CC Agent
  * tool 字面名）→ 解析为 catalog id → 写入 `def.role`（T2 装配链路已透传到
- * envelope.role → worker 注入 persona 段）。缺省 = 不设置 `def.role`（V1
- * byte-stable 路径）；ajv enum = catalog id 列表（运行时从 resolveAgentCatalog
- * 派生，不写死字面）；未知值 ajv fail-fast。
+ * envelope.role → worker 注入 persona 段）。缺省 = `general-purpose`；
+ * ajv enum = catalog id 列表（运行时从 resolveAgentCatalog 派生，不写死字面）；
+ * 未知值 ajv fail-fast。
  *
  * **依赖注入形态**：工厂收 `manager`（T2 提供）+ `catalog?`（T3 新增，
  * 可选 — 缺省走内部默认 `resolveAgentCatalog`）。装配层
@@ -212,8 +212,8 @@ export function createSpawnSubAgentTool(
       }
       // #361：默认值在 handler 内解析（ACI schema 不表达默认值）。缺省 = 前景。
       const wait = obj.wait !== false;
-      // #556 T3: subagent_type → role 解析 (additive, V1 baseline = 不写 def.role)。
-      //   - 缺省 (undefined) → 不设置 def.role (V1 byte-stable 路径)
+      // #556 T3 / T7: subagent_type → role 解析 (additive)。
+      //   - 缺省 (undefined) → catalog.get("general-purpose") (T7 默认角色)
       //   - 已知 id → 写入 def.role (= catalog id, 透传到 envelope.role → worker
       //     装配期查 catalog 取 body 注入 persona 段, T2 链路)
       //   - 未知 id → ajv enum 已在 executor 入口拒;此处 catch 防御 (ajv 漏
@@ -225,7 +225,9 @@ export function createSpawnSubAgentTool(
       let resolvedRole: string | undefined;
       let catalogDisallowed: ReadonlyArray<string> | undefined;
       if (subagentType === undefined) {
-        resolvedRole = undefined; // V1 baseline
+        const entry = catalog.get("general-purpose");
+        resolvedRole = entry.id;
+        catalogDisallowed = entry.disallowedTools;
       } else if (typeof subagentType !== "string") {
         // ajv strict 已拒, 此处防御
         throw new ToolExecutionError(
@@ -276,7 +278,7 @@ export function createSpawnSubAgentTool(
         // _stop 三类 record。ctx 缺 turnId(worker / ask / 直接调 handler)时
         // 字段整个省略,Postel 不落空值。
         ...(ctx?.turnId !== undefined ? { parentTurnId: ctx.turnId } : {}),
-        // #556 T3: subagent_type 解析结果 (undefined = 不设字段, V1 baseline)
+        // #556 T3 / T7: subagent_type 解析结果 (缺省也解析为 general-purpose)
         ...(resolvedRole !== undefined ? { role: resolvedRole } : {}),
         ...(typeof obj.systemPrompt === "string"
           ? { systemPrompt: obj.systemPrompt }
