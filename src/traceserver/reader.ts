@@ -183,7 +183,7 @@ function parseOneLine(line: string): TraceRecordRow | undefined {
 
 /**
  * Exact-match filter on conversation_id / record_type / status +
- * T5 task_id / parent_turn_id. 全部 AND 组合, 缺省 undefined 的被滤条件不生效。
+ * task_id / parent_turn_id / turn_id. 全部 AND 组合, 缺省 undefined 的被滤条件不生效。
  */
 function applyFilter(
   rows: ReadonlyArray<TraceRecordRow>,
@@ -210,6 +210,8 @@ function applyFilter(
       query.parentTurnId !== undefined &&
       row["parent_turn_id"] !== query.parentTurnId
     )
+      return false;
+    if (query.turnId !== undefined && row["turn_id"] !== query.turnId)
       return false;
     return true;
   });
