@@ -30,6 +30,8 @@ import {
   ingestMemory,
   parseMemoryEntry,
   persistMemoryOps,
+  scoreMemoryEntries,
+  selectPrefetchHits,
   serializeMemoryEntry,
 } from "../../../src/harness/memory/index.ts";
 import type {
@@ -148,6 +150,15 @@ describe("buildExtractPrompt", () => {
     const prompt = buildExtractPrompt(TRANSCRIPT, huge);
     assert.ok(prompt.includes("[truncated"));
     assert.ok(prompt.length < huge.length);
+  });
+
+  it("states the conversation-language keyword rule so a Chinese query can lexically hit English entries", () => {
+    assert.ok(
+      buildExtractPrompt(TRANSCRIPT).includes(
+        "Include keywords in the conversation's own language — when the conversation is not in English, carry its key terms verbatim in the candidate's title or body so lexical recall can match."
+      ),
+      "the bilingual keyword discipline must reach the extract model verbatim"
+    );
   });
 });
 
@@ -462,6 +473,64 @@ describe("dropOverlappingStaticLayer", () => {
       `${filler}\n\n${STATIC_LAYER}`
     );
     assert.deepEqual(kept, [unrelated]);
+  });
+});
+
+// -- bilingual keyword discipline (extract write path → lexical recall) ------
+
+/**
+ * Acceptance fixture (plan auto-memory-prefetch-dedup T5): a Chinese session
+ * yields an English entry that carries the session's key terms verbatim, so a
+ * Chinese query can hit it through the shared tokenize + scoreMemoryEntries
+ * instead of being dropped as a zero-hit entry. The keyword-free twin is what
+ * an extractor without the discipline would produce — same topic, but no
+ * token a Chinese query can match.
+ */
+describe("extract bilingual keyword discipline", () => {
+  const QUERY = "查一下今天AI新闻";
+  const bilingual = entry({
+    id: "bilingual",
+    title: "Follow these AI 新闻 sources for daily model releases",
+    body: "The assistant tracks AI 新闻 from official model labs each morning.",
+  });
+  const keywordFree = entry({
+    id: "keyword-free",
+    title: "Follow artificial-intelligence news outlets for daily model releases",
+    body: "The assistant tracks model releases from official labs each morning.",
+  });
+
+  it("keeps a Chinese-session English entry lexically reachable from a Chinese query", async () => {
+    const llm = llmReturning(
+      JSON.stringify([
+        { title: bilingual.title, body: bilingual.body, confidence: 0.95 },
+      ])
+    );
+    const result = await ingestMemory({
+      memoryDir,
+      transcript: "user: 查一下今天AI新闻\nassistant: 我来汇总今天的AI新闻。",
+      llm,
+      now: () => NOW_ISO,
+      randomBytes: seqBytes(),
+    });
+    assert.equal(result.written.length, 1);
+    const stored = await readSlug(result.written[0]!.slug);
+    const scored = scoreMemoryEntries(QUERY, [stored])[0]!;
+    assert.ok(scored.titleHits > 0, "title keywords must hit the Chinese query");
+    assert.ok(scored.bodyHits > 0, "body keywords must hit the Chinese query");
+  });
+
+  it("leaves a keyword-free English twin unmatched by the same Chinese query", () => {
+    const scored = scoreMemoryEntries(QUERY, [keywordFree])[0]!;
+    assert.equal(scored.titleHits, 0, "no English token matches a CJK query");
+    assert.equal(scored.bodyHits, 0, "no English token matches a CJK query");
+  });
+
+  it("survives the zero-hit prefetch filter while its keyword-free twin is dropped", () => {
+    const hits = selectPrefetchHits(QUERY, [keywordFree, bilingual]);
+    assert.deepEqual(
+      hits.map((hit) => hit.entry.id),
+      [bilingual.id]
+    );
   });
 });
 

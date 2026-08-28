@@ -11,6 +11,7 @@
 - **Does:**
   - 抽取前读用户 + 项目 `AGENTS.md` 与 `rules`（现成 discovery；按既有静态层文件帽截断）。把该文本和 transcript 一起交给 `buildExtractPrompt`。记忆库 body 不进抽取提示词。
   - 提示词英文纪律（实现锁定原文，测试做包含断言）：说明书里已有的不要再输出为候选；仓库/git 能推出来的（架构、路径、已合入修复）不要记；用户纠正过的以及明确肯定过的要记；本轮任务进度 / 当天需求 / 临时路径 / 调试闲聊不要记。
+  - 双语关键词纪律（实现锁定原文，测试做包含断言）：候选须带会话语言的关键词 —— 会话非英文时，把会话关键词条目原样写进候选 title 或 body，使中文 query 经共享 tokenize 可词命中英文条目（召回判定仍是 `scoreMemoryEntries`，不另起第二套）。
   - 静态层读失败：当空字符串，抽取仍跑；`// EXIT: log-and-continue`；用户 turn 成功。
   - 「仓库可推」只靠提示词，不扫工作区。
   - `extractMemoryCandidates` 之后、`decideMemoryOps` 之前：候选 title+body 与静态层用同一套 tokenize 算重叠。零词命中不得留下。重叠过线（门槛由实现选定、测例钉死）→ 丢弃，不进 ADD/UPDATE/SUPERSEDE。不回灌抽取模型、不加第二次 LLM。静态层为空则本闸不丢任何候选。
@@ -29,6 +30,7 @@
 6. 本轮 `memory_save` 成功且 N≥2 到期：extract LLM `complete` 次数为 0；无 save 时仍为 1。
 7. 跳过 extract 时，dream 开且双闸到仍可跑 dream。
 8. `npx vitest run tests/harness/memory/` 及相关 hook 测 EXIT 0。
+9. 抽取 prompt 含双语关键词纪律英文原句；夹具：中文会话产出、带会话关键词的英文条目经 `scoreMemoryEntries` 词命中（title/body 命中非零、不被零词命中剔除），同题纯英文条目零词命中作对照。
 
 ## Open Questions
 
