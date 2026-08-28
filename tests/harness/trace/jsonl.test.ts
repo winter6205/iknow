@@ -780,6 +780,30 @@ describe("createJsonlTraceService — output mask lifecycle", () => {
       maskSpy.mockRestore();
     }
   });
+
+  it("rebuilds the mask when active secrets change after factory creation", async () => {
+    clearActiveExtraSecrets();
+    try {
+      const { lines, writer } = captureWriter();
+      const svc = createJsonlTraceService({
+        filePath: scratch,
+        conversationId: "conv-mask-refresh",
+        writer,
+      });
+
+      setActiveExtraSecrets(["NEWSECRET"]);
+      await svc.recordLlmCall({
+        ...SAMPLE_LLM,
+        messages: [{ role: "user", content: "NEWSECRET" }],
+      });
+
+      assert.equal(lines.length, 1);
+      assert.equal(lines[0]!.includes("NEWSECRET"), false);
+      assert.equal(lines[0]!.includes("***"), true);
+    } finally {
+      clearActiveExtraSecrets();
+    }
+  });
 });
 
 describe("createJsonlTraceService — blob message references", () => {

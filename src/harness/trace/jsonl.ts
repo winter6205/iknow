@@ -77,6 +77,15 @@ function toSnakeCaseRecord<T extends object>(
   return out;
 }
 
+function sameSecretSet(
+  left: ReadonlyArray<string>,
+  right: ReadonlyArray<string>
+): boolean {
+  if (left.length !== right.length) return false;
+  const rightSet = new Set(right);
+  return left.every((value) => rightSet.has(value));
+}
+
 type MessageStorageMode = "full" | "blob";
 
 function resolveMessageStorageMode(): MessageStorageMode {
@@ -123,18 +132,24 @@ function toBlobReferences(
  *
  * This is intentionally coarse — we serialize the entire line, mask the
  * resulting string with the current secret values, and emit the masked
- * string. The mask is built once per factory call (cheap) and re-used
- * across all record writes for this TraceService instance. If the env
- * changes mid-run (rare; CLI products don't mutate env mid-run), the mask
- * is stale until the next createJsonlTraceService call. SC20 spec left a
- * single-serializer-point mask as the preferred wiring; this is it.
+ * string. The mask is cached per factory instance and rebuilt only when the
+ * current secret set changes.
  */
 export function createJsonlTraceService(
   options: JsonlTraceOptions
 ): TraceServiceWithHealth {
   const { filePath, conversationId } = options;
   maybeRotate(filePath, options.rotation);
-  const outputMask = createOutputMask(currentSecretValues());
+  let secretValues = currentSecretValues();
+  let outputMask = createOutputMask(secretValues);
+  function currentOutputMask(): ReturnType<typeof createOutputMask> {
+    const currentValues = currentSecretValues();
+    if (!sameSecretSet(secretValues, currentValues)) {
+      secretValues = currentValues;
+      outputMask = createOutputMask(secretValues);
+    }
+    return outputMask;
+  }
   const messageStorageMode = resolveMessageStorageMode();
   // T2 每会话独立文件: filePath 是目录, 实际写 <filePath>/<conversationId>.jsonl。
   // mkdirSync recursive 兜底, 目录不存在时先建 (产品路径 traceOut 首次使用时目录
@@ -167,7 +182,7 @@ export function createJsonlTraceService(
   }
 
   function writeLine(payload: Record<string, unknown>): void {
-    writer(outputMask.mask(JSON.stringify(payload)));
+    writer(currentOutputMask().mask(JSON.stringify(payload)));
   }
 
   const service: TraceServiceWithHealth = {
@@ -190,7 +205,7 @@ export function createJsonlTraceService(
             messages: toBlobReferences(
               record.messages,
               filePath,
-              outputMask
+              currentOutputMask()
             ),
           };
         } catch (err) {
