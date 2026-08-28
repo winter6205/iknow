@@ -38,7 +38,10 @@ import {
   createAdapterFromEnv,
 } from "../harness/build-engine.js";
 import { renderTranscript } from "../harness/auto-memory-wire.js";
-import type { AutoMemoryHook } from "../harness/memory/index.js";
+import {
+  notifyAutoMemory,
+  type AutoMemoryHook,
+} from "../harness/memory/index.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
 import type {
   SubAgentManager,
@@ -2228,21 +2231,17 @@ export class SessionHub {
    * only reports. A hook failure must never fail postMessage.
    */
   private notifyAutoMemory(result: RunResult): void {
-    if (!this.autoMemory) return;
-    try {
-      this.autoMemory.onTurnComplete({
-        stopReason: result.stopReason,
-        transcript: renderTranscript(result.messages),
-      });
-    } catch (error) {
-      // EXIT: log-and-continue — the turn already succeeded; memory
-      // bookkeeping is not allowed to retroactively fail it.
-      console.warn(
-        `[memory/auto] turn hook skipped: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
-    }
+    notifyAutoMemory({
+      hook: this.autoMemory,
+      stopReason: result.stopReason,
+      transcript: renderTranscript(result.messages),
+      onError: (error) =>
+        console.warn(
+          `[memory/auto] turn hook skipped: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        ),
+    });
   }
 
   private summarize(opts: { readonly file: SessionFileV1 }): SessionSummary {

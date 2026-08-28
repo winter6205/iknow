@@ -49,11 +49,13 @@ export {
   DEFAULT_COMPLETED_TURN_GATE,
   createAutoMemoryHook,
 } from "./auto-hook.js";
+export { notifyAutoMemory } from "./notify-auto-memory.js";
 export type {
   AutoMemoryHook,
   AutoMemoryHookOptions,
   AutoMemoryTurn,
 } from "./auto-hook.js";
+export type { NotifyAutoMemoryOptions } from "./notify-auto-memory.js";
 
 export type {
   MemoryCandidate,
