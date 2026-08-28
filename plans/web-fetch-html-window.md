@@ -17,11 +17,12 @@
 Filled after the architecture-change-reviewer agent runs against this committed file.
 
 ```
-bounded-context-guardian: pending
-defensive-contract-validator: pending
-error-handling-enforcer: pending
-complexity-anti-drift: pending
-minimal-change-verifier: pending
+bounded-context-guardian: yes — 字节上限落在 network-guard（已拥有 SSRF/重定向/传输的出口层）；GuardHttpResponse.body / fetchPublicResponse 签名不变，兄弟消费者 web-search.ts 无需改动，无反向依赖、无新增循环 import；executor / tool-summary / bash / env-isolation 已列 Never this round。
+defensive-contract-validator: yes — T1/T2/T3 各自把 empty / negative / overflow / concurrent / exception 五类落成具体断言（L49-54 / L68-74 / L87），非标签占位。
+error-handling-enforcer: yes — 所有失败路径抛 ToolExecutionError 且带 `${tool} failed:` / `web_fetch:` 前缀（L34/L45/L61/L80/L82）；禁止 null / 空串 / 半页冒充成功（L34/L54）；每处封顶与兜底预置 `// EXIT:`（L45/L48/L64/L83）。
+complexity-anti-drift: yes — handler 只编排 compile → fetch → render → slice → format（L67），四个单一职责抽取（L35）；预算所有权唯一归 sliceFetchWindow（最坏 10 位数字算 headerReserve），formatFetchOutput 纯拼接永不缩短正文（L32/L64-65）；god-handler 明确禁止，预算逻辑无重复。
+minimal-change-verifier: yes — 3 个有序 tracer bullet 各 1 commit（L4）；每 bullet 文件清单为全集，CHANGELOG.md 钉在 T3 同一 commit（L12/L92）；T1 声明 web_fetch 行为不变（L55），bullet 间无范围外溢；Out of scope（L7）+ Never this round（L13）双重围栏。
+OVERALL: PASS — hand to writing-plans
 ```
 
 ## Decision constraints (from audit)
