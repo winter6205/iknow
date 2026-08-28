@@ -25,16 +25,43 @@ export const MEMORY_PREFETCH_CHAR_CAP = 8000;
 
 export interface SelectPrefetchOpts {
   readonly promotedIds?: ReadonlySet<string>;
+  /** T1 session-level dedup: ids already injected in this conversation. */
+  readonly excludeIds?: ReadonlySet<string>;
   readonly charCap?: number;
   readonly nowMs?: number;
 }
+
+/**
+ * Per-turn overlay query options passed from the host seams (hub / chat) down
+ * to the overlay builder. Additive-optional, so existing overlay functions
+ * keep working unchanged.
+ */
+export interface PrefetchQueryOpts {
+  readonly excludeIds?: ReadonlySet<string>;
+}
+
+/**
+ * Per-turn overlay builder seam shared by every declaration site (hub option
+ * / buildEngine seam / engineByRoot / getOrBuildEngine / buildProductionEngine
+ * / build-engine BuiltEngine / chat-session opts + ctx / TUI bridge + deps).
+ */
+export type OverlayPrefetchFn = (
+  query: string,
+  prefetchOpts?: PrefetchQueryOpts
+) => Promise<string>;
 
 export function selectPrefetchHits(
   query: string,
   entries: ReadonlyArray<MemoryEntryV1>,
   opts?: SelectPrefetchOpts
 ): ReadonlyArray<ScoredEntry> {
-  const live = entries.filter((entry) => !entry.disabled);
+  const excludeIds = opts?.excludeIds;
+  // T1 contract: already-injected ids are removed BEFORE scoring, so dedup
+  // never consumes one of the top-5 slots (next-best entry backfills).
+  const live = entries.filter(
+    (entry) =>
+      !entry.disabled && !(excludeIds !== undefined && excludeIds.has(entry.id))
+  );
   const scored = scoreMemoryEntries(query, live, { nowMs: opts?.nowMs });
   const promoted = opts?.promotedIds;
   const lexical = scored.filter((row) => {
@@ -115,15 +142,17 @@ function stripPrefetchOverlayLegacy(text: string): string {
 
 /**
  * Host seam: prepend prefetch to the user turn. Failures return the original
- * text so a missing overlay cannot fail the turn.
+ * text so a missing overlay cannot fail the turn. `opts` is forwarded to the
+ * overlay function (session-level dedup: already-injected ids).
  */
 export async function applyHostPrefetch(
   userText: string,
-  overlayFn?: (query: string) => Promise<string>
+  overlayFn?: OverlayPrefetchFn,
+  opts?: PrefetchQueryOpts
 ): Promise<string> {
   if (overlayFn === undefined) return userText;
   try {
-    return attachPrefetchOverlay(userText, await overlayFn(userText));
+    return attachPrefetchOverlay(userText, await overlayFn(userText, opts));
   } catch (err) {
     // EXIT: log-and-continue — prefetch is advisory.
     const detail = err instanceof Error ? err.message : String(err);
@@ -136,6 +165,8 @@ export interface BuildPrefetchOverlayOpts {
   readonly memoryDir: string;
   readonly query: string;
   readonly entries?: ReadonlyArray<MemoryEntryV1>;
+  /** T1 session-level dedup: ids already injected in this conversation. */
+  readonly excludeIds?: ReadonlySet<string>;
   readonly nowMs?: number;
 }
 
@@ -157,9 +188,123 @@ export async function buildMemoryPrefetchOverlay(
   );
   const hits = selectPrefetchHits(opts.query, resolved, {
     promotedIds,
+    excludeIds: opts.excludeIds,
     nowMs: opts.nowMs,
   });
   return formatPrefetchOverlay(hits);
+}
+
+/**
+ * Overlay block boundary from `bodyStart`: the END marker when it comes
+ * first, else the next PREFIX, else end of text (legacy / truncated history).
+ */
+function advisoryBlockEnd(text: string, bodyStart: number): number {
+  const endMarker = text.indexOf(MEMORY_PREFETCH_END, bodyStart);
+  const nextPrefix = text.indexOf(MEMORY_ADVISORY_PREFIX, bodyStart);
+  if (endMarker >= 0 && (nextPrefix < 0 || endMarker < nextPrefix)) {
+    return endMarker;
+  }
+  return nextPrefix >= 0 ? nextPrefix : text.length;
+}
+
+/** The `id:` line payload, or undefined when the line carries no id. */
+function advisoryIdLine(line: string): string | undefined {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("id:")) return undefined;
+  const id = trimmed.slice(3).trim();
+  return id.length > 0 ? id : undefined;
+}
+
+/** Collect the `id: <id>` meta lines of one advisory block body. */
+function parseAdvisoryBodyIds(body: string, ids: Set<string>): void {
+  for (const line of body.split("\n")) {
+    const id = advisoryIdLine(line);
+    if (id !== undefined) ids.add(id);
+  }
+}
+
+/**
+ * T1 session-level dedup: collect memory ids from advisory blocks previously
+ * injected into a user-turn text. A block starts at MEMORY_ADVISORY_PREFIX and
+ * runs to MEMORY_PREFETCH_END or — when the marker is missing (legacy /
+ * truncated history) — to the next PREFIX or end of text, collecting its
+ * `id: <id>` lines. Malformed input never throws: whatever parses, counts.
+ */
+export function extractInjectedMemoryIds(text: string): Set<string> {
+  const ids = new Set<string>();
+  if (typeof text !== "string" || text.length === 0) return ids;
+  let cursor = text.indexOf(MEMORY_ADVISORY_PREFIX);
+  while (cursor >= 0) {
+    const bodyStart = cursor + MEMORY_ADVISORY_PREFIX.length;
+    const bodyEnd = advisoryBlockEnd(text, bodyStart);
+    parseAdvisoryBodyIds(text.slice(bodyStart, bodyEnd), ids);
+    cursor = text.indexOf(MEMORY_ADVISORY_PREFIX, bodyEnd);
+  }
+  return ids;
+}
+
+/** Structural guard: a user message record with array content (disk shape). */
+function isUserTextRecord(message: unknown): boolean {
+  if (message === null || typeof message !== "object") return false;
+  const record = message as { role?: unknown; content?: unknown };
+  return record.role === "user" && Array.isArray(record.content);
+}
+
+/** Structural guard: a text content block carrying a string payload. */
+function isTextBlock(block: unknown): boolean {
+  if (block === null || typeof block !== "object") return false;
+  const textBlock = block as { type?: unknown; text?: unknown };
+  return textBlock.type === "text" && typeof textBlock.text === "string";
+}
+
+/**
+ * T1 resume recovery: scan loaded conversation history (cold start from
+ * checkpoint / session JSONL) for advisory blocks inside user text blocks.
+ * History comes from disk, so every shape is guarded; unexpected failure →
+ * empty set + log-and-continue (worst case one duplicate, never a failed turn).
+ */
+export function recoverInjectedMemoryIds(messages: unknown): Set<string> {
+  const ids = new Set<string>();
+  if (!Array.isArray(messages)) return ids;
+  try {
+    for (const message of messages) {
+      if (!isUserTextRecord(message)) continue;
+      const content = (message as { content: ReadonlyArray<unknown> }).content;
+      for (const block of content) {
+        if (!isTextBlock(block)) continue;
+        const text = (block as { text: string }).text;
+        for (const id of extractInjectedMemoryIds(text)) ids.add(id);
+      }
+    }
+  } catch (err) {
+    // EXIT: log-and-continue — recovery is best-effort.
+    const detail = err instanceof Error ? err.message : String(err);
+    console.warn(`[memory/prefetch] resume recovery skipped: ${detail}`);
+    return new Set<string>();
+  }
+  return ids;
+}
+
+/**
+ * T1 post-attach bookkeeping: merge the ids actually carried by an attach
+ * result into the conversation's injected-id set. Only overlay-bearing texts
+ * introduce ids — identity fallback (empty overlay / failed overlay fn)
+ * returns the raw user text and adds nothing. When the end marker is present,
+ * scanning stops there: the user's own text pasted afterwards must not poison
+ * the dedup set (legacy texts without the marker keep the whole-text scan).
+ */
+export function recordInjectedMemoryIds(
+  target: Set<string>,
+  effectiveText: string
+): void {
+  const carriesOverlay =
+    effectiveText.includes(MEMORY_PREFETCH_END) ||
+    effectiveText.startsWith(MEMORY_ADVISORY_PREFIX);
+  if (!carriesOverlay) return;
+  const endIndex = effectiveText.indexOf(MEMORY_PREFETCH_END);
+  const overlayRegion =
+    endIndex >= 0 ? effectiveText.slice(0, endIndex) : effectiveText;
+  for (const id of extractInjectedMemoryIds(overlayRegion)) target.add(id);
 }
 
 function formatHit(e: MemoryEntryV1): string {

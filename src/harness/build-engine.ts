@@ -71,6 +71,8 @@ import {
   buildMemoryPrefetchOverlay,
   type AutoMemoryHook,
   type MemoryLiveFlags,
+  type OverlayPrefetchFn,
+  type PrefetchQueryOpts,
 } from "./memory/index.js";
 import { createAdapterExtractLlm } from "./auto-memory-wire.js";
 import {
@@ -242,9 +244,10 @@ export type BuiltEngine = {
   /**
    * auto-memory low-trust read: per-turn prefetch overlay builder. Gated on
    * `autoExtract === true` (not dream-only). Hosts prepend the string onto
-   * the user payload; it must never be written to `deps.system`.
+   * the user payload; it must never be written to `deps.system`. T1: hosts
+   * pass `excludeIds` (session-level dedup) through the second argument.
    */
-  readonly overlayMemoryPrefetch?: (query: string) => Promise<string>;
+  readonly overlayMemoryPrefetch?: OverlayPrefetchFn;
   /**
    * TUI live flags for /memory. Present when surface is `tui` and the memory
    * layer is on. The TUI mutates this box on Esc; the hook reads it per turn.
@@ -762,10 +765,14 @@ export async function buildHarnessEngine(
       : undefined;
   const overlayMemoryPrefetch =
     memoryEnabled && surface !== "ask" && (autoExtractOn || tuiLive)
-      ? async (query: string): Promise<string> => {
+      ? async (query: string, prefetchOpts?: PrefetchQueryOpts): Promise<string> => {
           if (memoryFlags.autoExtract !== true) return "";
           try {
-            return await buildMemoryPrefetchOverlay({ memoryDir, query });
+            return await buildMemoryPrefetchOverlay({
+              memoryDir,
+              query,
+              excludeIds: prefetchOpts?.excludeIds,
+            });
           } catch (error) {
             // EXIT: log-and-continue — missing prefetch must not fail the turn.
             console.warn(

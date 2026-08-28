@@ -44,7 +44,10 @@ import {
 import {
   applyHostPrefetch,
   notifyAutoMemory,
+  recoverInjectedMemoryIds,
+  recordInjectedMemoryIds,
   type AutoMemoryHook,
+  type OverlayPrefetchFn,
 } from "../harness/memory/index.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
 import type {
@@ -486,8 +489,9 @@ export type SessionHubOptions = {
   /**
    * auto-memory low-trust read: per-turn prefetch overlay. Same gate as
    * autoMemory. Host prepends onto the user payload; never deps.system.
+   * T1: hosts pass `excludeIds` (session-level dedup) via the second arg.
    */
-  readonly overlayMemoryPrefetch?: (query: string) => Promise<string>;
+  readonly overlayMemoryPrefetch?: OverlayPrefetchFn;
   /**
    * review-fix (M1 / H1): per-root state anchor。serve 入口解析后
    * 透传 —— 让 hub 的 buildHarnessEngine 走 entry-resolved workspaceRoot,
@@ -525,7 +529,7 @@ export type SessionHubOptions = {
     /** D-α T3: graph 装配快照（生产由 buildHarnessEngine 透出）。 */
     graphAssembly?: GraphAssembly;
     autoMemory?: AutoMemoryHook;
-    overlayMemoryPrefetch?: (query: string) => Promise<string>;
+    overlayMemoryPrefetch?: OverlayPrefetchFn;
   }>;
   /**
    * serve-workspace T3: recents/trust 名单的 home 根（落
@@ -606,7 +610,7 @@ export class SessionHub {
   private readonly buildEngine:
     | ((root: string) => Promise<{
         autoMemory?: AutoMemoryHook;
-        overlayMemoryPrefetch?: (query: string) => Promise<string>;
+        overlayMemoryPrefetch?: OverlayPrefetchFn;
         deps: LoopEngineDeps;
         shutdown?: () => Promise<void>;
         subagentManager?: SubAgentManager;
@@ -635,16 +639,22 @@ export class SessionHub {
       subagentManager?: SubAgentManager;
       graphAssembly?: GraphAssembly;
       autoMemory?: AutoMemoryHook;
-      overlayMemoryPrefetch?: (query: string) => Promise<string>;
+      overlayMemoryPrefetch?: OverlayPrefetchFn;
     }
   >();
   /** Per-conversation serialization (spec A15). */
   private readonly inflight = new Map<string, Promise<void>>();
+  /**
+   * auto-memory T1: session-level prefetch dedup — per-conversation sets of
+   * already-injected memory ids. Host-side state only (never loop-engine).
+   * Lazily recovered from the loaded history on first attach (empty set is
+   * cached too), then grown by the ids each turn actually injects.
+   */
+  private readonly prefetchInjectedIds = new Map<string, Set<string>>();
   /** auto-memory T4: host 钩子（默认缺席 = 自动记忆关）。 */
   private autoMemory: AutoMemoryHook | undefined;
   /** auto-memory low-trust read: per-turn user overlay (same gate as autoMemory). */
-  private overlayMemoryPrefetch:
-    ((query: string) => Promise<string>) | undefined;
+  private overlayMemoryPrefetch: OverlayPrefetchFn | undefined;
 
   constructor(opts: SessionHubOptions) {
     if (!opts.askUser && !opts.deps) {
@@ -1125,6 +1135,23 @@ export class SessionHub {
           }
           opts.onStream?.(event);
         };
+        // auto-memory T1: session-level prefetch dedup. Lazily recover the
+        // ids already injected into this conversation (first attach scans the
+        // loaded history), exclude them from the overlay, then record the ids
+        // this turn actually injects (overlay-bearing results only).
+        const prefetchExcludeIds = this.prefetchInjectedIdsFor(
+          conversationId,
+          session.messages
+        );
+        const attachPrefetch = (text: string): Promise<string> =>
+          applyHostPrefetch(
+            text,
+            this.overlayForSession(session.workspaceRoot),
+            { excludeIds: prefetchExcludeIds }
+          ).then((effective) => {
+            this.recordPrefetchOverlayIds(conversationId, effective);
+            return effective;
+          });
         // F4: shared /goal auto-loop skeleton. Hub passes
         // `reloadSession = () => store.load(id)` (refresh session between
         // iterations); chat passes a no-op. Errors stay in host: hub rethrows
@@ -1169,10 +1196,7 @@ export class SessionHub {
               const runOutcome = this.verifyConfig
                 ? await runVerifyLoop({
                     runFn: (text, o) =>
-                      applyHostPrefetch(
-                        text,
-                        this.overlayForSession(session.workspaceRoot)
-                      ).then((effective) => {
+                      attachPrefetch(text).then((effective) => {
                         queryCommitPrefix = [
                           ...(drained ? [drainedMsg] : []),
                           buildUserCommit(effective),
@@ -1216,10 +1240,7 @@ export class SessionHub {
                           }),
                   })
                 : await (async () => {
-                    const effective = await applyHostPrefetch(
-                      query,
-                      this.overlayForSession(session.workspaceRoot)
-                    );
+                    const effective = await attachPrefetch(query);
                     queryCommitPrefix = [
                       ...(drained ? [drainedMsg] : []),
                       buildUserCommit(effective),
@@ -2106,7 +2127,7 @@ export class SessionHub {
     subagentManager?: SubAgentManager;
     graphAssembly?: GraphAssembly;
     autoMemory?: AutoMemoryHook;
-    overlayMemoryPrefetch?: (query: string) => Promise<string>;
+    overlayMemoryPrefetch?: OverlayPrefetchFn;
   }> {
     const hit = this.engineByRoot.get(root);
     if (hit) return hit;
@@ -2135,7 +2156,7 @@ export class SessionHub {
     subagentManager?: SubAgentManager;
     graphAssembly?: GraphAssembly;
     autoMemory?: AutoMemoryHook;
-    overlayMemoryPrefetch?: (query: string) => Promise<string>;
+    overlayMemoryPrefetch?: OverlayPrefetchFn;
   }> {
     if (!this.askUser) {
       throw new Error(
@@ -2269,7 +2290,7 @@ export class SessionHub {
 
   private overlayForSession(
     sessionRoot: string | undefined
-  ): ((query: string) => Promise<string>) | undefined {
+  ): OverlayPrefetchFn | undefined {
     const mapRoot = sessionRoot ?? this.boundRoot;
     if (mapRoot !== undefined) {
       const entry = this.engineByRoot.get(mapRoot);
@@ -2278,6 +2299,41 @@ export class SessionHub {
       }
     }
     return this.overlayMemoryPrefetch;
+  }
+
+  /**
+   * auto-memory T1: per-conversation injected-id set, lazily recovered on
+   * first attach by scanning the already-loaded history (cold start from
+   * checkpoint / session JSONL) for advisory blocks. The empty set is cached
+   * too; recovery failure degrades to an empty set (log-and-continue inside
+   * recoverInjectedMemoryIds) so the turn can never fail on resume parsing.
+   */
+  private prefetchInjectedIdsFor(
+    conversationId: string,
+    messages: ReadonlyArray<AnthropicNativeMessage>
+  ): Set<string> {
+    const cached = this.prefetchInjectedIds.get(conversationId);
+    if (cached !== undefined) return cached;
+    const recovered = recoverInjectedMemoryIds(messages);
+    this.prefetchInjectedIds.set(conversationId, recovered);
+    return recovered;
+  }
+
+  /**
+   * auto-memory T1: merge the ids a finished attach actually injected.
+   * Identity fallbacks (empty overlay / overlay fn throw → raw user text)
+   * carry no advisory block and add nothing.
+   */
+  private recordPrefetchOverlayIds(
+    conversationId: string,
+    effectiveText: string
+  ): void {
+    let injected = this.prefetchInjectedIds.get(conversationId);
+    if (injected === undefined) {
+      injected = new Set<string>();
+      this.prefetchInjectedIds.set(conversationId, injected);
+    }
+    recordInjectedMemoryIds(injected, effectiveText);
   }
 
   /**

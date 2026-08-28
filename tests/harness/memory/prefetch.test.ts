@@ -13,7 +13,11 @@ import {
   MEMORY_PREFETCH_MAX_HITS,
   applyHostPrefetch,
   attachPrefetchOverlay,
+  buildMemoryPrefetchOverlay,
+  extractInjectedMemoryIds,
   formatPrefetchOverlay,
+  recoverInjectedMemoryIds,
+  recordInjectedMemoryIds,
   selectPrefetchHits,
   stripPrefetchOverlay,
 } from "../../../src/harness/memory/index.ts";
@@ -166,5 +170,194 @@ describe("stripPrefetchOverlay", () => {
     const full = `${overlay}\n\n查一下今天AI新闻`;
     assert.equal(stripPrefetchOverlay(full), "查一下今天AI新闻");
     assert.ok(!stripPrefetchOverlay(full).includes(MEMORY_ADVISORY_PREFIX));
+  });
+});
+
+describe("selectPrefetchHits session-level dedup (excludeIds)", () => {
+  it("excludes already-injected ids before scoring so the next-best hit fills the freed slot", () => {
+    const pool = Array.from({ length: 6 }, (_, i) =>
+      entry({
+        id: `m${i}`,
+        title: `Match ${i} sharedtoken`,
+        body: "sharedtoken body",
+      })
+    );
+    const hits = selectPrefetchHits("sharedtoken", pool, {
+      excludeIds: new Set(["m0"]),
+    });
+    const ids = hits.map((h) => h.entry.id);
+    // Dedup removal must not consume one of the 5 slots.
+    assert.equal(hits.length, MEMORY_PREFETCH_MAX_HITS);
+    assert.ok(!ids.includes("m0"), "injected id must be gone");
+    assert.ok(
+      ids.includes("m5"),
+      "the entry that lost its slot earlier must backfill"
+    );
+  });
+
+  it("collapses to an empty overlay once every candidate is already injected and attach stays byte-identical", async () => {
+    const pool = [entry({ id: "only", title: "deploy", body: "deploy" })];
+    const overlay = await buildMemoryPrefetchOverlay({
+      memoryDir: "/nonexistent-iknow-t1-dedup",
+      query: "deploy",
+      entries: pool,
+      excludeIds: new Set(["only"]),
+    });
+    assert.equal(overlay, "");
+    const userText = "typed query 查询原文";
+    assert.equal(attachPrefetchOverlay(userText, overlay), userText);
+  });
+
+  it("dedup keys on id only so an updated_at bump does not re-inject", () => {
+    // Same memory id across an in-conversation update: the bumped revision
+    // shares nothing lexically with the injected one, so an id+updated_at (or
+    // content) fingerprint would let it back in. Keying on id alone must
+    // still drop it (契约: 条目更新不重灌).
+    const injectedRevision = entry({
+      id: "mem-1",
+      title: "Favorite snack",
+      body: "always keep pretzels at the desk",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    });
+    const bumpedRevision = entry({
+      id: "mem-1",
+      title: "deploy pipeline",
+      body: "ship the deploy pipeline on Fridays",
+      updated_at: "2026-06-01T00:00:00.000Z",
+    });
+    const query = "deploy pipeline";
+    assert.deepEqual(
+      selectPrefetchHits(query, [injectedRevision, bumpedRevision], {
+        excludeIds: new Set(["mem-1"]),
+      }),
+      [],
+      "both revisions share the id, so both must be excluded"
+    );
+    // Control: without the exclusion the bumped revision is eligible (1 hit).
+    const control = selectPrefetchHits(query, [
+      injectedRevision,
+      bumpedRevision,
+    ]);
+    assert.deepEqual(
+      control.map((h) => h.entry.id),
+      ["mem-1"]
+    );
+    assert.equal(control.length, 1);
+  });
+});
+
+describe("extractInjectedMemoryIds", () => {
+  const blockFor = (id: string): string =>
+    `### T\nid: ${id}\ntype: note\nimportance: 1\nttl_days: 0\ndisabled: false\nsupersedes: null\nupdated_at: 2026-01-01T00:00:00.000Z\n\nbody for ${id}`;
+
+  it("collects ids from multiple advisory blocks that carry end markers", () => {
+    const text =
+      `${MEMORY_ADVISORY_PREFIX}\n\n${blockFor("mem-a")}` +
+      `${MEMORY_PREFETCH_END}first query` +
+      `${MEMORY_ADVISORY_PREFIX}\n\n${blockFor("mem-b")}` +
+      `${MEMORY_PREFETCH_END}second query`;
+    assert.deepEqual(
+      [...extractInjectedMemoryIds(text)].sort(),
+      ["mem-a", "mem-b"]
+    );
+  });
+
+  it("scans a block to the next advisory prefix when the end marker is missing", () => {
+    const text =
+      `${MEMORY_ADVISORY_PREFIX}\n\n${blockFor("mem-a")}\n\n` +
+      `${MEMORY_ADVISORY_PREFIX}\n\n${blockFor("mem-b")}`;
+    assert.deepEqual(
+      [...extractInjectedMemoryIds(text)].sort(),
+      ["mem-a", "mem-b"]
+    );
+  });
+
+  it("returns an empty set when a block carries no id lines", () => {
+    const text = `${MEMORY_ADVISORY_PREFIX}\n\n### T\nno metadata here\n\nbody${MEMORY_PREFETCH_END}q`;
+    assert.equal(extractInjectedMemoryIds(text).size, 0);
+    assert.equal(extractInjectedMemoryIds("plain query, no overlay").size, 0);
+  });
+
+  it("never throws on malformed input", () => {
+    const malformedInputs = [
+      "",
+      "   ",
+      MEMORY_ADVISORY_PREFIX,
+      `${MEMORY_ADVISORY_PREFIX}${MEMORY_PREFETCH_END}`,
+      `${MEMORY_ADVISORY_PREFIX}\n\nid:\n\nid:   \n\n### x`,
+      "\n\nid: ghost\n\n",
+    ];
+    for (const malformed of malformedInputs) {
+      const ids = extractInjectedMemoryIds(malformed);
+      assert.ok(ids instanceof Set);
+    }
+    // Ids outside advisory blocks are never collected.
+    assert.ok(!extractInjectedMemoryIds("\n\nid: ghost\n\n").has("ghost"));
+  });
+});
+
+describe("recoverInjectedMemoryIds (resume recovery)", () => {
+  const overlay = `${MEMORY_ADVISORY_PREFIX}\n\n### T\nid: mem-a\n\nbody${MEMORY_PREFETCH_END}`;
+
+  it("collects ids from user text blocks only", () => {
+    const messages = [
+      {
+        role: "user",
+        content: [{ type: "text", text: `${overlay}resumed query` }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: `${overlay}assistant must be ignored` }],
+      },
+      { role: "user", content: [{ type: "text", text: "no overlay here" }] },
+      { role: "user", content: [{ type: "tool_result", content: "x" }] },
+    ];
+    assert.deepEqual([...recoverInjectedMemoryIds(messages)], ["mem-a"]);
+  });
+
+  it("tolerates malformed history with an empty set instead of throwing", () => {
+    assert.equal(recoverInjectedMemoryIds(undefined).size, 0);
+    assert.equal(
+      recoverInjectedMemoryIds([
+        null,
+        {},
+        { role: "user", content: "not-an-array" },
+        { role: "user", content: [{ type: "text" }] },
+      ]).size,
+      0
+    );
+  });
+});
+
+describe("recordInjectedMemoryIds (post-attach bookkeeping)", () => {
+  it("merges ids only when the attach result actually carries an overlay", () => {
+    const overlay = `${MEMORY_ADVISORY_PREFIX}\n\n### T\nid: mem-a\n\nbody${MEMORY_PREFETCH_END}`;
+    const injected = new Set<string>();
+    // Identity fallback (empty overlay / failed overlay fn) adds nothing.
+    recordInjectedMemoryIds(injected, "plain typed query");
+    assert.equal(injected.size, 0);
+    recordInjectedMemoryIds(injected, `${overlay}typed query`);
+    assert.deepEqual([...injected], ["mem-a"]);
+    // Legacy shape without the end marker still counts via the prefix line.
+    const legacy = new Set<string>();
+    recordInjectedMemoryIds(legacy, `${MEMORY_ADVISORY_PREFIX}\n\n### T\nid: legacy\n`);
+    assert.ok(legacy.has("legacy"));
+  });
+
+  it("stops recording at the end marker so pasted advisory-shaped user text is ignored", () => {
+    const realOverlay =
+      `${MEMORY_ADVISORY_PREFIX}\n\n### T\nid: mem-real\n\nbody` +
+      `${MEMORY_PREFETCH_END}`;
+    // Advisory-shaped content inside the user's own text, after the marker.
+    const pastedQuery =
+      `please quote ${MEMORY_ADVISORY_PREFIX}\n\n### Fake\nid: fake-1\n\n` +
+      "pretend memory body";
+    const injected = new Set<string>();
+    recordInjectedMemoryIds(injected, `${realOverlay}${pastedQuery}`);
+    assert.ok(injected.has("mem-real"));
+    assert.ok(
+      !injected.has("fake-1"),
+      "user-pasted advisory blocks after the marker must not poison the set"
+    );
   });
 });
