@@ -46,6 +46,8 @@ import { buildWorkerToolSurface } from "../../subagent/role.js";
 import { RegistryConstructionError, ToolExecutionError } from "../../errors.js";
 import type { SkillCatalog } from "../../skill/catalog.js";
 import { createTodoWriteTool } from "./todo-write.js";
+import { createQueryTraceTool } from "./query-trace.js";
+import { join } from "node:path";
 
 /**
  * 11 件生产工具的命名常量 — SSOT（8 基线 + memory_recall + memory_save + tool_search）。
@@ -135,6 +137,7 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   // handler 亦二次 EXIT（ADR-0030 —— overlay 是运行期可翻的,registry 是
   // 构造期冻结的,两者只能这样对齐）。
   "run_graph", // D-α T3 父代理声明 DAG，host 走 waves + 前景 spawn 编排
+  "query_trace", // trace read-side projection and record drill-down
 ] as const);
 
 /**
@@ -196,6 +199,8 @@ export interface CreateDefaultAciRegistryOptions {
    *  （ask / worker / 未接 overlay 的入口）。工具**可见性**由快照决定,
    *  装配层据此过滤 promptTools —— 见 build-engine。 */
   readonly graphAssembly?: { readonly enabled: () => boolean };
+  /** Trace directory for the read-only query_trace tool. */
+  readonly traceDir?: string;
 }
 
 /**
@@ -383,6 +388,12 @@ export function createDefaultAciRegistry(
             }),
         }
       : {}),
+    query_trace: () =>
+      createQueryTraceTool(
+        opts.traceDir ??
+          process.env.IKNOW_TRACE_OUT ??
+          join(workspaceRoot, "trace")
+      ),
   };
 
   // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。
