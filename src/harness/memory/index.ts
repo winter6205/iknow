@@ -69,6 +69,15 @@ export type {
 } from "./ingest.js";
 
 export {
+  DREAM_MEMORY_SOURCE,
+  MAX_DREAM_ENTRIES,
+  MAX_DREAM_INPUT_CHARS,
+  buildDreamPrompt,
+  runMemoryDream,
+} from "./dream.js";
+export type { MemoryDreamOptions, MemoryDreamResult } from "./dream.js";
+
+export {
   DEFAULT_MEMORY_STORE_CAP,
   memoryEntryUtility,
   planMemoryGc,

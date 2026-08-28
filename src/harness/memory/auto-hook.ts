@@ -19,8 +19,10 @@
  *     each other's neighbor lookup and write duplicates.
  */
 import { MemoryGcOptionInvalid } from "./errors.js";
+import { runMemoryDream } from "./dream.js";
 import { ingestMemory } from "./ingest.js";
 import type { MemoryExtractLlm, MemoryIngestResult } from "./ingest.js";
+import { runMemoryGc } from "./gc.js";
 
 /** Completed turns to accumulate before a pass. ADR-0031 D1: never per-turn. */
 export const DEFAULT_COMPLETED_TURN_GATE = 2;
@@ -44,6 +46,8 @@ export interface AutoMemoryHookOptions {
   readonly llm: MemoryExtractLlm;
   /** Opt-in. Absent or non-true = off, byte-identical to no wiring at all. */
   readonly enabled?: boolean;
+  /** Independent opt-in for the offline merge pass; absent or non-true = off. */
+  readonly dream?: boolean;
   /** Completed turns per pass; positive integer. Default DEFAULT_COMPLETED_TURN_GATE. */
   readonly minCompletedTurns?: number;
   /** ISO-8601 clock for written entries; defaults to the real clock. */
@@ -67,6 +71,7 @@ export function createAutoMemoryHook(
 ): AutoMemoryHook {
   const gate = requireGate(opts.minCompletedTurns);
   const enabled = opts.enabled === true;
+  const dream = opts.dream === true;
 
   let completedTurns = 0;
   // Single-slot chain: each pass waits for the previous one, so two turns
@@ -74,9 +79,9 @@ export function createAutoMemoryHook(
   let chain: Promise<void> = Promise.resolve();
 
   const onTurnComplete = (turn: AutoMemoryTurn): void => {
-    if (!enabled) return;
+    if (!enabled && !dream) return;
     if (turn.stopReason !== "completed") return;
-    if (turn.transcript.trim().length === 0) return;
+    if (!dream && turn.transcript.trim().length === 0) return;
     completedTurns++;
     if (completedTurns < gate) return;
     completedTurns = 0;
@@ -84,17 +89,34 @@ export function createAutoMemoryHook(
     const transcript = turn.transcript;
     chain = chain.then(async () => {
       try {
-        const result = await ingestMemory({
-          memoryDir: opts.memoryDir,
-          transcript,
-          llm: opts.llm,
-          ...(opts.now ? { now: opts.now } : {}),
-          ...(opts.nowMs !== undefined ? { nowMs: opts.nowMs } : {}),
-          ...(opts.randomBytes ? { randomBytes: opts.randomBytes } : {}),
-          ...(opts.ttlDays !== undefined ? { ttlDays: opts.ttlDays } : {}),
-          ...(opts.cap !== undefined ? { cap: opts.cap } : {}),
-        });
-        opts.onIngest?.(result);
+        let ingestResult: MemoryIngestResult | undefined;
+        if (enabled && transcript.trim().length > 0) {
+          ingestResult = await ingestMemory({
+            memoryDir: opts.memoryDir,
+            transcript,
+            llm: opts.llm,
+            ...(opts.now ? { now: opts.now } : {}),
+            ...(opts.nowMs !== undefined ? { nowMs: opts.nowMs } : {}),
+            ...(opts.randomBytes ? { randomBytes: opts.randomBytes } : {}),
+            ...(opts.ttlDays !== undefined ? { ttlDays: opts.ttlDays } : {}),
+            ...(dream ? { gc: false } : {}),
+            ...(opts.cap !== undefined ? { cap: opts.cap } : {}),
+          });
+          opts.onIngest?.(ingestResult);
+        }
+        if (dream) {
+          await runMemoryDream({
+            memoryDir: opts.memoryDir,
+            llm: opts.llm,
+            ...(opts.now ? { now: opts.now } : {}),
+            ...(opts.randomBytes ? { randomBytes: opts.randomBytes } : {}),
+            ...(opts.ttlDays !== undefined ? { ttlDays: opts.ttlDays } : {}),
+          });
+          await runMemoryGc(opts.memoryDir, {
+            ...(opts.nowMs !== undefined ? { nowMs: opts.nowMs } : {}),
+            ...(opts.cap !== undefined ? { cap: opts.cap } : {}),
+          });
+        }
       } catch (error) {
         // EXIT: log-and-continue (ADR-0031 D5). The user's turn already
         // succeeded; a failed extraction is reported to the observer and

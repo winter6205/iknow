@@ -192,11 +192,12 @@ export interface IknowSettingsGraph {
 /**
  * auto-memory T4 / ADR-0031 D5: 自动记忆段。
  *
- * `autoExtract` 只认 boolean；缺失 / 非法 → 字段不产出，消费方按 **false**
- * 处理（默认 OFF 是决策，不是巧合）。`true` 之外的一切都不开门。
+ * `autoExtract` / `dream` 只认 boolean；缺失 / 非法 → 字段不产出，消费方按
+ * **false** 处理（默认 OFF 是决策，不是巧合）。两者独立。
  */
 export interface IknowSettingsMemory {
   autoExtract?: boolean;
+  dream?: boolean;
 }
 
 export interface IknowSettings {
@@ -588,7 +589,9 @@ function parseMemory(raw: unknown): IknowSettingsMemory | undefined {
   if (!isPlainObject(raw)) return undefined;
   const out: IknowSettingsMemory = {};
   if (typeof raw.autoExtract === "boolean") out.autoExtract = raw.autoExtract;
-  if (out.autoExtract === undefined) return undefined;
+  if (typeof raw.dream === "boolean") out.dream = raw.dream;
+  if (out.autoExtract === undefined && out.dream === undefined)
+    return undefined;
   return out;
 }
 
@@ -600,7 +603,10 @@ function mergeMemory(
   const out: IknowSettingsMemory = {};
   if (project?.autoExtract !== undefined) out.autoExtract = project.autoExtract;
   else if (user?.autoExtract !== undefined) out.autoExtract = user.autoExtract;
-  if (out.autoExtract === undefined) return undefined;
+  if (project?.dream !== undefined) out.dream = project.dream;
+  else if (user?.dream !== undefined) out.dream = user.dream;
+  if (out.autoExtract === undefined && out.dream === undefined)
+    return undefined;
   return out;
 }
 

@@ -14,12 +14,17 @@
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createAutoMemoryHook } from "../../../src/harness/memory/index.ts";
+import {
+  createAutoMemoryHook,
+  parseMemoryEntry,
+  serializeMemoryEntry,
+} from "../../../src/harness/memory/index.ts";
 import type { MemoryExtractLlm } from "../../../src/harness/memory/index.ts";
+import type { MemoryEntryV1 } from "../../../src/harness/memory/index.ts";
 
 let memoryDir: string;
 
@@ -278,5 +283,116 @@ describe("createAutoMemoryHook — failure containment", () => {
     hook.onTurnComplete({ stopReason: "completed", transcript: "user: two" });
     await hook.drain();
     assert.equal(maxInFlight, 1, "ingest passes must not overlap on one store");
+  });
+});
+
+describe("createAutoMemoryHook — dream pass", () => {
+  it("runs dream after the completed-turn gate even for blank transcripts", async () => {
+    const stored: MemoryEntryV1 = {
+      id: "old",
+      type: "note",
+      importance: 1,
+      ttl_days: 0,
+      disabled: false,
+      supersedes: null,
+      title: "Existing fact",
+      body: "The existing fact remains useful.",
+      updated_at: NOW_ISO,
+    };
+    await writeFile(
+      join(memoryDir, "old.md"),
+      serializeMemoryEntry(stored),
+      "utf8"
+    );
+    const llm = countingLlm("[]");
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm,
+      enabled: false,
+      dream: true,
+      now: () => NOW_ISO,
+      nowMs: Date.parse(NOW_ISO),
+    });
+
+    hook.onTurnComplete({ stopReason: "completed", transcript: "   " });
+    hook.onTurnComplete({ stopReason: "completed", transcript: "" });
+    await hook.drain();
+
+    assert.equal(llm.calls(), 1, "dream does not require a transcript");
+  });
+
+  it("does not add a merge call when dream is explicitly off", async () => {
+    const llm = countingLlm(FACT);
+    const hook = createAutoMemoryHook(
+      hookOpts(llm, { dream: false, minCompletedTurns: 2 })
+    );
+
+    hook.onTurnComplete({ stopReason: "completed", transcript: "user: one" });
+    hook.onTurnComplete({ stopReason: "completed", transcript: "user: two" });
+    await hook.drain();
+
+    assert.equal(llm.calls(), 1, "extract-only remains one LLM call");
+  });
+
+  it("runs extract, dream, then one mechanical GC pass when both are on", async () => {
+    const old: MemoryEntryV1 = {
+      id: "old",
+      type: "note",
+      importance: 1,
+      ttl_days: 0,
+      disabled: false,
+      supersedes: null,
+      title: "Use bar() for concurrency",
+      body: "bar() is the thread-safe entry point in this repo.",
+      updated_at: NOW_ISO,
+    };
+    await writeFile(
+      join(memoryDir, "old.md"),
+      serializeMemoryEntry(old),
+      "utf8"
+    );
+    const responses = [
+      FACT,
+      JSON.stringify([
+        {
+          title: "Use bar() for concurrency",
+          body: "Concurrency now routes through the scheduler queue; direct calls were removed in v3.",
+          confidence: 0.95,
+        },
+      ]),
+    ];
+    let calls = 0;
+    const hook = createAutoMemoryHook(
+      hookOpts(
+        {
+          complete: async () => responses[calls++] ?? "[]",
+        },
+        { dream: true }
+      )
+    );
+
+    hook.onTurnComplete({ stopReason: "completed", transcript: "user: hi" });
+    await hook.drain();
+
+    assert.equal(calls, 2, "one extract call followed by one dream call");
+    const files = await readdir(memoryDir);
+    const stored = await Promise.all(
+      files
+        .filter((name) => name.endsWith(".md") && name !== "MEMORY.md")
+        .map(async (name) =>
+          parseMemoryEntry(await readFile(join(memoryDir, name), "utf8"))
+        )
+    );
+    assert.ok(
+      stored.some(
+        (entry) =>
+          (entry as unknown as Record<string, unknown>).source === "dream"
+      )
+    );
+    assert.equal(
+      parseMemoryEntry(await readFile(join(memoryDir, "old.md"), "utf8"))
+        .disabled,
+      true
+    );
   });
 });

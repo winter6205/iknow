@@ -110,6 +110,8 @@ export interface MemoryPersistDeps {
   readonly randomBytes?: (n: number) => Buffer;
   /** TTL stamped on newly written auto entries; 0 (default) = never expires. */
   readonly ttlDays?: number;
+  /** Provenance marker for the write path; defaults to `source: auto`. */
+  readonly source?: string;
 }
 
 export interface MemoryIngestOptions extends MemoryPersistDeps {
@@ -329,6 +331,7 @@ export async function persistMemoryOps(
       candidate: op.candidate,
       updatedAt: now(),
       ttlDays,
+      source: deps?.source ?? AUTO_MEMORY_SOURCE,
       supersedes: op.kind === "SUPERSEDE" ? op.supersedes : null,
     });
     await writeMemoryEntryAtomic(memoryDir, slug, entry);
@@ -345,6 +348,7 @@ function buildEntry(input: {
   candidate: MemoryCandidate;
   updatedAt: string;
   ttlDays: number;
+  source: string;
   supersedes: string | null;
 }): MemoryEntryV1 {
   const entry: MemoryEntryV1 & { source: string } = {
@@ -357,7 +361,7 @@ function buildEntry(input: {
     title: input.candidate.title,
     body: input.candidate.body,
     updated_at: input.updatedAt,
-    source: AUTO_MEMORY_SOURCE,
+    source: input.source,
   };
   return entry;
 }
@@ -387,6 +391,7 @@ export async function ingestMemory(
     ...(opts.now ? { now: opts.now } : {}),
     ...(opts.randomBytes ? { randomBytes: opts.randomBytes } : {}),
     ...(opts.ttlDays !== undefined ? { ttlDays: opts.ttlDays } : {}),
+    ...(opts.source !== undefined ? { source: opts.source } : {}),
   });
   if (written.length === 0 || opts.gc === false) return { ops, written };
 
