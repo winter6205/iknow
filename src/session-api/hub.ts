@@ -2233,10 +2233,12 @@ export class SessionHub {
    * only reports. A hook failure must never fail postMessage.
    */
   private notifyAutoMemory(result: RunResult, workspaceRoot?: string): void {
+    // EXIT: a bound session uses only the per-root hook; constructor injection
+    // remains the fallback when no workspaceRoot is on the session file.
     const autoMemory =
-      (workspaceRoot === undefined
-        ? undefined
-        : this.engineByRoot.get(workspaceRoot)?.autoMemory) ?? this.autoMemory;
+      workspaceRoot === undefined
+        ? this.autoMemory
+        : this.engineByRoot.get(workspaceRoot)?.autoMemory;
     notifyAutoMemory({
       hook: autoMemory,
       stopReason: result.stopReason,

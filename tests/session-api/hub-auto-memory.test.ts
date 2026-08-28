@@ -71,6 +71,7 @@ const trackedAutoMemoryHook = (memoryDir: string): {
         ]),
     },
     enabled: true,
+    minCompletedTurns: 1,
   });
   return {
     hook: {
@@ -190,7 +191,15 @@ describe("SessionHub — auto-memory hook", () => {
 
     assert.equal(trackedA.calls(), 1);
     assert.equal(trackedB.calls(), 1);
-    assert.deepEqual(await sourceAutoFiles(memoryA), []);
-    assert.deepEqual(await sourceAutoFiles(memoryB), []);
+    const filesA = await sourceAutoFiles(memoryA);
+    const filesB = await sourceAutoFiles(memoryB);
+    assert.ok(
+      filesA.length >= 1,
+      "root A writes source: auto into its own memoryDir"
+    );
+    assert.ok(
+      filesB.length >= 1,
+      "root B writes source: auto into its own memoryDir"
+    );
   });
 });
