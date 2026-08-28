@@ -52,11 +52,15 @@ const recorder = (): {
   };
 };
 
-const trackedAutoMemoryHook = (memoryDir: string): {
+const trackedAutoMemoryHook = (
+  memoryDir: string
+): {
   readonly hook: AutoMemoryHook;
   readonly calls: () => number;
+  readonly sessionKeys: () => ReadonlyArray<string | undefined>;
 } => {
   let callCount = 0;
+  const sessionKeys: Array<string | undefined> = [];
   const hook = createAutoMemoryHook({
     memoryDir,
     llm: {
@@ -77,11 +81,13 @@ const trackedAutoMemoryHook = (memoryDir: string): {
     hook: {
       onTurnComplete: (turn) => {
         callCount++;
+        sessionKeys.push(turn.sessionKey);
         hook.onTurnComplete(turn);
       },
       drain: () => hook.drain(),
     },
     calls: () => callCount,
+    sessionKeys: () => sessionKeys,
   };
 };
 
@@ -117,6 +123,7 @@ describe("SessionHub — auto-memory hook", () => {
     assert.equal(out.turn.answer.stopReason, "completed");
     assert.equal(seen.length, 1);
     assert.equal(seen[0]!.stopReason, "completed");
+    assert.equal(seen[0]!.sessionKey, "chat");
     assert.match(seen[0]!.transcript, /which entry point is thread-safe\?/);
     assert.match(seen[0]!.transcript, /bar\(\) is thread-safe\./);
   });
@@ -166,9 +173,7 @@ describe("SessionHub — auto-memory hook", () => {
       askUser: createNoAskUser(),
       surface: "serve",
       buildEngine: async (root) => ({
-        deps: makeDeps([
-          assistantResult({ texts: [`reply from ${root}`] }),
-        ]),
+        deps: makeDeps([assistantResult({ texts: [`reply from ${root}`] })]),
         autoMemory: root === rootA ? trackedA.hook : trackedB.hook,
       }),
     });
@@ -191,6 +196,12 @@ describe("SessionHub — auto-memory hook", () => {
 
     assert.equal(trackedA.calls(), 1);
     assert.equal(trackedB.calls(), 1);
+    assert.deepEqual(trackedA.sessionKeys(), [
+      sessionA.session.conversation_id,
+    ]);
+    assert.deepEqual(trackedB.sessionKeys(), [
+      sessionB.session.conversation_id,
+    ]);
     const filesA = await sourceAutoFiles(memoryA);
     const filesB = await sourceAutoFiles(memoryB);
     assert.ok(

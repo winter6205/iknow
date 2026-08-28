@@ -441,6 +441,7 @@ async function runSkipAppendAndPresent(opts: {
       hook: ctx.autoMemory,
       stopReason: result.stopReason,
       transcript: renderTranscript(result.messages),
+      sessionKey: ctx.state.conversationId ?? "chat",
       onError: (error) =>
         writeErr(
           `[memory/auto] turn hook skipped: ${
@@ -791,6 +792,7 @@ async function runChatQueryLine(
           hook: ctx.autoMemory,
           stopReason: s.result.stopReason,
           transcript: renderTranscript(s.result.messages),
+          sessionKey: ctx.state.conversationId ?? "chat",
           onError: (error) =>
             writeErr(
               `[memory/auto] turn hook skipped: ${

@@ -49,6 +49,11 @@ export {
   DEFAULT_COMPLETED_TURN_GATE,
   createAutoMemoryHook,
 } from "./auto-hook.js";
+export {
+  DREAM_CURSOR_FILENAME,
+  DREAM_MIN_INTERVAL_MS,
+  DREAM_MIN_SESSIONS,
+} from "./dream-cursor.js";
 export { notifyAutoMemory } from "./notify-auto-memory.js";
 export type {
   AutoMemoryHook,

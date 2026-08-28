@@ -286,24 +286,48 @@ describe("createAutoMemoryHook — failure containment", () => {
   });
 });
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DREAM_CURSOR_FILE = "dream-cursor.json";
+
+const seedDreamGate = async (
+  dir: string,
+  nowMs: number,
+  sessionIds: readonly string[] = ["s1", "s2", "s3", "s4"]
+): Promise<void> => {
+  await writeFile(
+    join(dir, DREAM_CURSOR_FILE),
+    JSON.stringify({
+      lastSuccessAtMs: nowMs - DAY_MS,
+      sessionIds,
+    }),
+    "utf8"
+  );
+};
+
+const twoLiveEntries = async (): Promise<void> => {
+  const a: MemoryEntryV1 = {
+    id: "old",
+    type: "note",
+    importance: 1,
+    ttl_days: 0,
+    disabled: false,
+    supersedes: null,
+    title: "Use bar() for concurrency",
+    body: "bar() is the thread-safe entry point in this repo.",
+    updated_at: NOW_ISO,
+  };
+  const b: MemoryEntryV1 = {
+    ...a,
+    id: "sib",
+    title: "Use bar() for parallel work",
+  };
+  await writeFile(join(memoryDir, "old.md"), serializeMemoryEntry(a), "utf8");
+  await writeFile(join(memoryDir, "sib.md"), serializeMemoryEntry(b), "utf8");
+};
+
 describe("createAutoMemoryHook — dream pass", () => {
-  it("runs dream after the completed-turn gate even for blank transcripts", async () => {
-    const stored: MemoryEntryV1 = {
-      id: "old",
-      type: "note",
-      importance: 1,
-      ttl_days: 0,
-      disabled: false,
-      supersedes: null,
-      title: "Existing fact",
-      body: "The existing fact remains useful.",
-      updated_at: NOW_ISO,
-    };
-    await writeFile(
-      join(memoryDir, "old.md"),
-      serializeMemoryEntry(stored),
-      "utf8"
-    );
+  it("does not run dream on the extract N>=2 gate alone", async () => {
+    await twoLiveEntries();
     const llm = countingLlm("[]");
     const hook = createAutoMemoryHook({
       memoryDir,
@@ -314,8 +338,105 @@ describe("createAutoMemoryHook — dream pass", () => {
       nowMs: Date.parse(NOW_ISO),
     });
 
-    hook.onTurnComplete({ stopReason: "completed", transcript: "   " });
-    hook.onTurnComplete({ stopReason: "completed", transcript: "" });
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: one",
+      sessionKey: "sess-a",
+    });
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: two",
+      sessionKey: "sess-b",
+    });
+    await hook.drain();
+
+    assert.equal(llm.calls(), 0, "two completed turns are not the dream gate");
+  });
+
+  it("does not run dream when 24h has not elapsed even with five sessions", async () => {
+    await twoLiveEntries();
+    const nowMs = Date.parse(NOW_ISO);
+    await writeFile(
+      join(memoryDir, DREAM_CURSOR_FILE),
+      JSON.stringify({
+        lastSuccessAtMs: nowMs - DAY_MS + 1,
+        sessionIds: ["s1", "s2", "s3", "s4"],
+      }),
+      "utf8"
+    );
+    const llm = countingLlm("[]");
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm,
+      enabled: false,
+      dream: true,
+      minCompletedTurns: 1,
+      now: () => NOW_ISO,
+      nowMs,
+    });
+
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "",
+      sessionKey: "s5",
+    });
+    await hook.drain();
+
+    assert.equal(llm.calls(), 0);
+  });
+
+  it("does not run dream when fewer than five distinct sessions have completed", async () => {
+    await twoLiveEntries();
+    const nowMs = Date.parse(NOW_ISO);
+    await seedDreamGate(memoryDir, nowMs, ["s1", "s2", "s3"]);
+    const llm = countingLlm("[]");
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm,
+      enabled: false,
+      dream: true,
+      now: () => NOW_ISO,
+      nowMs,
+    });
+
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: a",
+      sessionKey: "s4",
+    });
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: b",
+      sessionKey: "s4",
+    });
+    await hook.drain();
+
+    assert.equal(
+      llm.calls(),
+      0,
+      "the same sessionKey must not count as a second session"
+    );
+  });
+
+  it("runs dream after 24h and five distinct sessions, including blank transcripts", async () => {
+    await twoLiveEntries();
+    const nowMs = Date.parse(NOW_ISO);
+    await seedDreamGate(memoryDir, nowMs);
+    const llm = countingLlm("[]");
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm,
+      enabled: false,
+      dream: true,
+      now: () => NOW_ISO,
+      nowMs,
+    });
+
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "   ",
+      sessionKey: "s5",
+    });
     await hook.drain();
 
     assert.equal(llm.calls(), 1, "dream does not require a transcript");
@@ -334,23 +455,27 @@ describe("createAutoMemoryHook — dream pass", () => {
     assert.equal(llm.calls(), 1, "extract-only remains one LLM call");
   });
 
-  it("runs extract, dream, then one mechanical GC pass when both are on", async () => {
-    const old: MemoryEntryV1 = {
-      id: "old",
-      type: "note",
-      importance: 1,
-      ttl_days: 0,
-      disabled: false,
-      supersedes: null,
-      title: "Use bar() for concurrency",
-      body: "bar() is the thread-safe entry point in this repo.",
-      updated_at: NOW_ISO,
-    };
-    await writeFile(
-      join(memoryDir, "old.md"),
-      serializeMemoryEntry(old),
-      "utf8"
+  it("runs extract without a merge call when dream is on but the dual gate is unmet", async () => {
+    await twoLiveEntries();
+    const llm = countingLlm(FACT);
+    const hook = createAutoMemoryHook(
+      hookOpts(llm, { dream: true, minCompletedTurns: 1 })
     );
+
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: hi",
+      sessionKey: "only-one",
+    });
+    await hook.drain();
+
+    assert.equal(llm.calls(), 1, "extract still fires; dream gate is unmet");
+  });
+
+  it("runs extract, dream, then one mechanical GC pass when both are on and the dual gate is met", async () => {
+    await twoLiveEntries();
+    const nowMs = Date.parse(NOW_ISO);
+    await seedDreamGate(memoryDir, nowMs);
     const responses = [
       FACT,
       JSON.stringify([
@@ -367,11 +492,15 @@ describe("createAutoMemoryHook — dream pass", () => {
         {
           complete: async () => responses[calls++] ?? "[]",
         },
-        { dream: true }
+        { dream: true, nowMs }
       )
     );
 
-    hook.onTurnComplete({ stopReason: "completed", transcript: "user: hi" });
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: hi",
+      sessionKey: "s5",
+    });
     await hook.drain();
 
     assert.equal(calls, 2, "one extract call followed by one dream call");
@@ -413,6 +542,20 @@ describe("createAutoMemoryHook — dream pass", () => {
       serializeMemoryEntry(stale),
       "utf8"
     );
+    await writeFile(
+      join(memoryDir, "live.md"),
+      serializeMemoryEntry({
+        ...stale,
+        id: "live",
+        ttl_days: 0,
+        updated_at: NOW_ISO,
+        title: "Live fact",
+        body: "This fact is still current.",
+      }),
+      "utf8"
+    );
+    const nowMs = Date.parse(NOW_ISO);
+    await seedDreamGate(memoryDir, nowMs);
     const hook = createAutoMemoryHook({
       memoryDir,
       llm: {
@@ -423,11 +566,14 @@ describe("createAutoMemoryHook — dream pass", () => {
       enabled: false,
       dream: true,
       now: () => NOW_ISO,
-      nowMs: Date.parse(NOW_ISO),
+      nowMs,
     });
 
-    hook.onTurnComplete({ stopReason: "completed", transcript: "" });
-    hook.onTurnComplete({ stopReason: "completed", transcript: "" });
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "",
+      sessionKey: "s5",
+    });
     await hook.drain();
 
     assert.equal(
@@ -435,6 +581,167 @@ describe("createAutoMemoryHook — dream pass", () => {
         .disabled,
       true,
       "TTL GC must still run after a dream failure"
+    );
+  });
+
+  it("advances the time gate when a met dual gate skips because live entries < 2", async () => {
+    const stored: MemoryEntryV1 = {
+      id: "old",
+      type: "note",
+      importance: 1,
+      ttl_days: 0,
+      disabled: false,
+      supersedes: null,
+      title: "Existing fact",
+      body: "The existing fact remains useful.",
+      updated_at: NOW_ISO,
+    };
+    await writeFile(
+      join(memoryDir, "old.md"),
+      serializeMemoryEntry(stored),
+      "utf8"
+    );
+    const nowMs = Date.parse(NOW_ISO);
+    await seedDreamGate(memoryDir, nowMs);
+    const llm = countingLlm("[]");
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm,
+      enabled: false,
+      dream: true,
+      now: () => NOW_ISO,
+      nowMs,
+    });
+
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "",
+      sessionKey: "s5",
+    });
+    await hook.drain();
+    assert.equal(llm.calls(), 0, "skip must not spend a dream LLM call");
+
+    await twoLiveEntries();
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "",
+      sessionKey: "s6",
+    });
+    await hook.drain();
+    assert.equal(
+      llm.calls(),
+      0,
+      "a skip advances lastSuccessAtMs so the next turn cannot immediately re-fire"
+    );
+  });
+
+  it("keeps dream cursors isolated across memoryDir roots", async () => {
+    const otherDir = await mkdtemp(join(tmpdir(), "memory-auto-hook-b-"));
+    try {
+      const nowMs = Date.parse(NOW_ISO);
+      await seedDreamGate(memoryDir, nowMs);
+      await writeFile(
+        join(otherDir, DREAM_CURSOR_FILE),
+        JSON.stringify({
+          lastSuccessAtMs: nowMs,
+          sessionIds: ["s1", "s2", "s3", "s4"],
+        }),
+        "utf8"
+      );
+      const writePair = async (dir: string): Promise<void> => {
+        const a: MemoryEntryV1 = {
+          id: "old",
+          type: "note",
+          importance: 1,
+          ttl_days: 0,
+          disabled: false,
+          supersedes: null,
+          title: "Use bar() for concurrency",
+          body: "bar() is the thread-safe entry point in this repo.",
+          updated_at: NOW_ISO,
+        };
+        await writeFile(join(dir, "old.md"), serializeMemoryEntry(a), "utf8");
+        await writeFile(
+          join(dir, "sib.md"),
+          serializeMemoryEntry({
+            ...a,
+            id: "sib",
+            title: "Use bar() elsewhere",
+          }),
+          "utf8"
+        );
+      };
+      await writePair(memoryDir);
+      await writePair(otherDir);
+
+      const llmA = countingLlm("[]");
+      const llmB = countingLlm("[]");
+      const hookA = createAutoMemoryHook({
+        memoryDir,
+        llm: llmA,
+        enabled: false,
+        dream: true,
+        now: () => NOW_ISO,
+        nowMs,
+      });
+      const hookB = createAutoMemoryHook({
+        memoryDir: otherDir,
+        llm: llmB,
+        enabled: false,
+        dream: true,
+        now: () => NOW_ISO,
+        nowMs,
+      });
+
+      hookA.onTurnComplete({
+        stopReason: "completed",
+        transcript: "",
+        sessionKey: "s5",
+      });
+      hookB.onTurnComplete({
+        stopReason: "completed",
+        transcript: "",
+        sessionKey: "s5",
+      });
+      await hookA.drain();
+      await hookB.drain();
+
+      assert.equal(llmA.calls(), 1, "root A dual gate is met");
+      assert.equal(llmB.calls(), 0, "root B still inside 24h");
+    } finally {
+      await rm(otherDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not overwrite a corrupt dream cursor with an empty window", async () => {
+    await twoLiveEntries();
+    const corrupt = "{not-json";
+    await writeFile(join(memoryDir, DREAM_CURSOR_FILE), corrupt, "utf8");
+    const seen: unknown[] = [];
+    const llm = countingLlm("[]");
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm,
+      enabled: false,
+      dream: true,
+      minCompletedTurns: 1,
+      now: () => NOW_ISO,
+      nowMs: Date.parse(NOW_ISO),
+      onError: (error) => seen.push(error),
+    });
+
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "",
+      sessionKey: "s5",
+    });
+    await hook.drain();
+
+    assert.equal(llm.calls(), 0);
+    assert.equal(seen.length, 1);
+    assert.equal(
+      await readFile(join(memoryDir, DREAM_CURSOR_FILE), "utf8"),
+      corrupt
     );
   });
 });

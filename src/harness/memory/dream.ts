@@ -44,15 +44,15 @@ export interface MemoryDreamResult {
 }
 
 /**
- * Merge live entries with one bounded model call. An empty live store is a
- * hard no-op, including no model call.
+ * Merge live entries with one bounded model call. Fewer than two live
+ * entries is a hard no-op, including no model call.
  */
 export async function runMemoryDream(
   opts: MemoryDreamOptions
 ): Promise<MemoryDreamResult> {
   const scan = await listStoreEntries(opts.memoryDir);
   const live = scan.entries.filter((entry) => !entry.entry.disabled);
-  if (live.length === 0) return { ops: [], written: [] };
+  if (live.length < 2) return { ops: [], written: [] };
 
   let raw: string;
   try {

@@ -11,7 +11,7 @@ ADR-0031 shipped extract + four-state ingest + mechanical GC and deferred LLM of
 
 1. **Shared tokenize = existing ASCII tokens + CJK overlapping bigrams (no new dependency).** `scoreMemoryEntries` and ingest neighbor tokens use one rule. Latin/digit/`_` tokens stay `[^a-z0-9_]+` with length ≥ 2. Each maximal Han/Hiragana/Katakana/Hangul run emits overlapping bigrams; a run of length 1 emits that character. Empty token sets never count as a neighbor (no containment=1 UPDATE/NOOP). Rejected: jieba (native/dict lock-in); `Intl.Segmenter` as the v0 path (runtime coverage uneven).
 
-2. **dream = second LLM write path, independent switch, never inside GC.** `settings.memory.dream` is boolean-only, default OFF (absent / non-`true` = off). Same host gate as extract (`completed`, N≥2), never per-turn. Extract still requires a non-empty transcript; dream does not. When both flags are on: ingest → dream → mechanical GC. Persist reuses four-state `memory_op` and `memory_save` discipline; entries carry `source: dream`; tool_result channel only; no auto-promote. Failures are typed and swallowed at the host with `// EXIT: log-and-continue`.
+2. **dream = second LLM write path, independent switch, never inside GC.** `settings.memory.dream` is boolean-only, default OFF (absent / non-`true` = off). Dream trigger is **not** the extract N≥2 gate: both **24h since last success-or-skip** and **5 distinct sessions** (chat/TUI: one in-process conversation; serve: `conversation_id` first completed turn in the window) must hold. Cursor JSON lives under that `memoryDir`. Never per-turn. Extract still requires a non-empty transcript; dream does not. Live entries &lt; 2: skip merge LLM and still advance the time gate. When both flags are on and the dream gate is met: ingest → dream → mechanical GC. When the dream gate is unmet: extract only (with its own GC). Persist reuses four-state `memory_op` and `memory_save` discipline; entries carry `source: dream`; tool_result channel only; no auto-promote. Failures are typed and swallowed at the host with `// EXIT: log-and-continue` (LLM failure does not advance the time gate; skip does).
 
 3. **Hook presence = `autoExtract || dream`.** The hook is absent only when both are off (byte-identical to no wiring). SessionHub holds the hook per `workspaceRoot`, same map shape as `engineByRoot`. Chat and serve share one notify helper.
 
@@ -19,7 +19,7 @@ ADR-0031 shipped extract + four-state ingest + mechanical GC and deferred LLM of
 
 - (+) CJK facts can hit neighbors so UPDATE/SUPERSEDE/NOOP work; dream merge is greppable via `source: dream` and stays off the system channel.
 - (+) GC remains model-free and reversible; the second LLM path is a separate flag with the same swallow-on-failure host contract as extract.
-- (−) One extra LLM call per gate when dream is on. Accepted: same N≥2 gate, off the user critical path, default OFF.
+- (−) One extra LLM call when the dream dual gate trips. Accepted: 24h ∧ 5 sessions, off the user critical path, default OFF.
 - (−) Bigrams are a heuristic, not a morphological analyzer. Accepted for v0; no jieba lock-in.
 
 ## Why not

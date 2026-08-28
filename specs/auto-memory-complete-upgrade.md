@@ -15,7 +15,7 @@ chat / tui / serve 在 opt-in 下：纯中文（及 CJK）候选能经 BM25 近�
 - **Does:**
   - 共用切分：`scoreMemoryEntries` 与 ingest 近邻 token 走同一套规则。ASCII 保持现状（`[^a-z0-9_]+`、长度 ≥ 2）。CJK 字系（Han / Hiragana / Katakana / Hangul）对每个连续 run 发重叠 bigram；run 长为 1 时发单字（仅此例外打破「长度 ≥ 2」）。不引入 jieba / `Intl.Segmenter` / 新 npm 依赖。
   - 空 token 集：近邻视为无命中（不得把空集 containment 当成 1 而 UPDATE/NOOP）。
-  - **dream**：`settings.memory.dream === true` 才装配合并趟；boolean-only，缺失或非 `true` 为关。与 `auto_extract` **独立**。关 dream 时零 dream LLM。开时走同一 host 闸（`StopReason=completed`、N≥2 完成 turn），**禁止**每 turn 强制合并。抽取仍要求非空 transcript；dream 趟不要求 transcript 非空。抽取与 dream 都开时：先 ingest 再 dream，再机械 GC。dream 不得进入 `gc.ts`。
+  - **dream**：`settings.memory.dream === true` 才装配合并趟；boolean-only，缺失或非 `true` 为关。与 `auto_extract` **独立**。关 dream 时零 dream LLM。开时双闸必须同时满足：**距上次成功或 skip 至少 24 小时** ∧ **至少 5 个 distinct session**（chat/TUI：一次进程内会话 = 1；serve：一个 `conversation_id` 在窗口内首次 completed turn 记 1）。闸未到零 dream LLM。**禁止**与抽取共用 N≥2，**禁止**每 turn 强制合并。抽取仍要求非空 transcript；dream 趟不要求 transcript 非空。现行条 &lt; 2：即使闸到也 skip（不调 merge LLM），**并推进时间闸**以免空转。抽取与 dream 都开且做梦闸到了：先 ingest 再 dream，再机械 GC。做梦闸未到：只走抽取（及其内部 GC）。dream 不得进入 `gc.ts`。游标 JSON 落在该 `memoryDir` 下，按根隔离。
   - dream 写出：复用四态 `memory_op` 与 `memory_save` 肯定句门禁 + tmp+rename；frontmatter `source: dream`；只经 `memory_recall` 的 tool_result；不豁免 promote；失败 typed + host `// EXIT: log-and-continue`，不 fail 用户 turn。
   - SessionHub：自动记忆钩子与 `engineByRoot` 同形态 per-root，禁止「首根胜出」把 root B 的 transcript 写入 root A 的 `memoryDir`。
   - `notifyAutoMemory`：chat 与 serve 调用同一份 harness 接线辅助（钩子缺席 no-op + 失败吞掉），禁止两宿主各写一份语义。
@@ -28,7 +28,7 @@ chat / tui / serve 在 opt-in 下：纯中文（及 CJK）候选能经 BM25 近�
 2. 既有英文 BM25 / ingest 用例仍绿（`npx vitest run tests/harness/memory/` 相关套件 EXIT 0）。
 3. 两候选 token 皆空时，近邻为无命中，不因 containment=1 写成 UPDATE（vitest）。
 4. `settings.memory.dream` 缺失或非 `true` 时，即令 `autoExtract === true`，完成闸后的 LLM 调用次数与今日抽取趟一致（无额外 merge complete）（vitest）。
-5. `dream === true`、FakeLLM 对两条近重复现行条给出可解析合并时，落盘可观测 SUPERSEDE（旧条 `disabled`）或 UPDATE，且新/改写条带 `source: dream`；`gc.ts` 源文件不出现 LLM 端口引用（vitest + 静态约定：实现不得把 merge prompt 放进 `gc.ts`）。
+5. `dream === true` 且双闸都到、FakeLLM 对两条近重复现行条给出可解析合并时，落盘可观测 SUPERSEDE（旧条 `disabled`）或 UPDATE，且新/改写条带 `source: dream`；未满 24h 或未满 5 session → 零 merge LLM；skip（现行条 &lt; 2）推进时间闸；`gc.ts` 源文件不出现 LLM 端口引用（vitest + 静态约定：实现不得把 merge prompt 放进 `gc.ts`）。
 6. 同一 SessionHub 进程两个 `workspaceRoot` 均 `autoExtract === true` 时，root B 的 completed turn 不在 root A 的 `memoryDir` 写入 `source: auto` 条（vitest）。
 7. chat 与 hub 的自动记忆转发失败路径都调用同一导出辅助；钩子缺席与抛错都不改变用户 turn 成功语义（vitest 或模块引用钉死）。
 8. `ask` 仍不注册 `memory_recall` / `memory_save`（既有测保持绿）。

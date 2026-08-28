@@ -107,8 +107,8 @@ _Avoid_: 自由字符串当 type；自动与手动两套词表；非法 type 整
 **source: auto**: 自动写入条目的 provenance 标记，落在 frontmatter（`sanitizeMemoryFile` / `serializeMemoryEntry` 已 round-trip 未知字段，无需 schema 升版）。自动条目**只经 `memory_recall` 的 tool_result 低信通道**到达模型，永不盲注 `system`（ADR-0009 D3 双通道不变）；也不豁免 promote 门槛，仍需 ≥2 个不同 session 的 recall，没有 auto-promote 路径。该标记同时是批量回退的抓手。ADR-0031 D3。
 _Avoid_: 给高 importance 的自动条目开 auto-promote；把 `source: auto` 当成信任等级之外的纯装饰；用别的字段区分人写 / 机写
 
-**dream**（`settings.memory.dream`）: LLM 离线合并的唯一开关，boolean-only、**默认 OFF**——段缺失或非 `true` 一律按关。开启后与抽取共用 host 完成闸（N≥2），在机械 **memory_gc** 之外跑一趟合并：复用 **memory_op** 与 `memory_save` 写纪律，落盘 `source: dream`，只经 tool_result，不进 `gc.ts`。ADR-0033。
-_Avoid_: 把合并塞进 GC；每 turn 强制 dream；默认 ON；dream 条 auto-promote 进 `system`；与 `autoExtract` 绑成同一个字段
+**dream**（`settings.memory.dream`）: LLM 离线合并的唯一开关，boolean-only、**默认 OFF**——段缺失或非 `true` 一律按关。开启后触发与抽取解绑：距上次成功或 skip **至少 24 小时**且至少 **5 个 distinct session**（chat/TUI 一次进程内会话 = 1；serve 一个 `conversation_id` 窗口内首次 completed turn 记 1）才跑。闸未到零 dream LLM。在机械 **memory_gc** 之外跑一趟合并：复用 **memory_op** 与 `memory_save` 写纪律，落盘 `source: dream`，只经 tool_result，不进 `gc.ts`。现行条 &lt; 2 时 skip 并推进时间闸。ADR-0033。
+_Avoid_: 把合并塞进 GC；每 turn 强制 dream；与抽取共用 N≥2；默认 ON；dream 条 auto-promote 进 `system`；与 `autoExtract` 绑成同一个字段
 
 **source: dream**: dream 合并写入条目的 provenance 标记，落在 frontmatter（未知字段 round-trip，无需 schema 升版）。与 **source: auto** 同通道：只经 `memory_recall` 的 tool_result，永不盲注 `system`，不豁免 promote。批量回退按 `source: dream` 抓。ADR-0033。
 _Avoid_: 与 `source: auto` 混用导致无法区分抽取与合并；dream 条 auto-promote
@@ -281,7 +281,7 @@ _Avoid_: 把发现的工具插回注册序中部（破 KV cache 前缀）；只�
 - **状态栏 vs 任务摘录**: 摘录只在 compact 时贴用户原话；状态栏每轮由代码现算并追加
 - **状态栏 vs append-only messages**: 栏走同一条追加纪律；纠错靠新栏，不靠从历史上抠掉旧栏
 - **`memory_save`（显式写） vs auto_extract（自动写）**: 两条写路径共用同一套肯定句门禁与 tmp+rename 原子写；显式写是模型当场决定的一次工具调用，自动写是 host 在 turn 完成后异步跑的一趟 ingest。差别只在触发方式与 `source: auto` 标记，不在信任通道——两者都只经 tool_result 回到模型
-- **dream vs auto_extract**: 两个独立 boolean，默认皆 OFF。extract 从 transcript 抽新事实；dream 对已有现行条做 LLM 合并。钩子在二者任一为 true 时装配；都关则钩子缺席。都开时先 ingest 再 dream 再机械 GC
+- **dream vs auto_extract**: 两个独立 boolean，默认皆 OFF。extract 从 transcript 抽新事实（host 闸 `completed` + N≥2）；dream 对已有现行条做 LLM 合并（24h ∧ 5 session，不共用 N≥2）。钩子在二者任一为 true 时装配；都关则钩子缺席。都开且做梦闸到了：先 ingest 再 dream 再机械 GC；做梦闸未到只走抽取
 - **dream vs memory_gc**: GC 仍是零 LLM 的机械软禁；dream 是第二条 LLM 写路径，禁止进入 `gc.ts`。dream 落盘仍可被随后的 GC 按 TTL/cap/supersede 软禁
 - **memory_gc vs promote**: GC 是机械减法（TTL / supersede / 超 cap → 软禁）；promote 是机械加法（≥2 个不同 session recall → 进 `system` 段）。GC 不看 promote 状态，promote 不复活 `disabled` 条目；自动条目两边都不享受豁免
 - **memory_gc vs memory_recall**: 软禁只改 `disabled`；`memory_recall` 必须在打分前丢掉 disabled 条，否则模型仍看到废条（`specs/memory-layer-follow-ups.md`）

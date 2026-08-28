@@ -54,6 +54,31 @@ describe("runMemoryDream", () => {
     }
   });
 
+  it("does not call the model when fewer than two live entries exist", async () => {
+    const memoryDir = await mkdtemp(join(tmpdir(), "memory-dream-one-"));
+    try {
+      await writeFile(
+        join(memoryDir, "old.md"),
+        serializeMemoryEntry(entry("old")),
+        "utf8"
+      );
+      let calls = 0;
+      const llm: MemoryExtractLlm = {
+        complete: async () => {
+          calls++;
+          return "[]";
+        },
+      };
+
+      const result = await runMemoryDream({ memoryDir, llm });
+
+      assert.deepEqual(result.ops, []);
+      assert.equal(calls, 0);
+    } finally {
+      await rm(memoryDir, { recursive: true, force: true });
+    }
+  });
+
   it("updates a near-duplicate entry with source: dream", async () => {
     const memoryDir = await mkdtemp(join(tmpdir(), "memory-dream-merge-"));
     try {
@@ -147,6 +172,11 @@ describe("runMemoryDream", () => {
       await writeFile(
         join(memoryDir, "old.md"),
         serializeMemoryEntry(entry("old")),
+        "utf8"
+      );
+      await writeFile(
+        join(memoryDir, "sib.md"),
+        serializeMemoryEntry(entry("sib", { title: "Use queue elsewhere" })),
         "utf8"
       );
       await assert.rejects(
