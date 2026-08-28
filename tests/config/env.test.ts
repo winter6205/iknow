@@ -48,6 +48,7 @@ const ENV_KEYS = [
   "IKNOW_LLM_IDLE_TIMEOUT_MS",
   "IKNOW_LLM_HARD_CAP_MS",
   "IKNOW_SUBAGENT_TASK_TIMEOUT_MS",
+  "IKNOW_SUBAGENT_MAX_CONCURRENT_WORKERS",
   "IKNOW_LLM_MAX_OUTPUT_TOKENS",
 ] as const;
 
@@ -542,6 +543,57 @@ describe("loadIknowEnv — subagent.taskTimeoutMs (#358 settings 双字段, per-
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.timeoutMs, 45_000);
     assert.equal(env.subagent?.taskTimeoutMs, 7_200_000);
+  });
+});
+
+describe("loadIknowEnv — subagent.maxConcurrentWorkers (T4)", () => {
+  beforeEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+
+  it("未设 env/settings → 默认 15", () => {
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.subagent.maxConcurrentWorkers, 15);
+  });
+
+  it("合法 env 覆盖 settings", () => {
+    process.env.IKNOW_SUBAGENT_MAX_CONCURRENT_WORKERS = "3";
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model" },
+      subagent: { maxConcurrentWorkers: 7 },
+    });
+    assert.equal(env.subagent.maxConcurrentWorkers, 3);
+  });
+
+  it("env 未设时使用合法 settings", () => {
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model" },
+      subagent: { maxConcurrentWorkers: 7 },
+    });
+    assert.equal(env.subagent.maxConcurrentWorkers, 7);
+  });
+
+  it("空/非数字/非正 env 视为未设并回退 settings 或默认 15", () => {
+    for (const bad of ["", "abc", "0", "-1"]) {
+      process.env.IKNOW_SUBAGENT_MAX_CONCURRENT_WORKERS = bad;
+      assert.equal(
+        loadIknowEnv(process.cwd(), {
+          llm: { model: "test-model" },
+          subagent: { maxConcurrentWorkers: 7 },
+        }).subagent.maxConcurrentWorkers,
+        7,
+        `maxConcurrentWorkers=${bad} 应回退到 settings`
+      );
+      assert.equal(
+        loadIknowEnv(process.cwd(), EMPTY_SETTINGS).subagent
+          .maxConcurrentWorkers,
+        15,
+        `maxConcurrentWorkers=${bad} 且 settings 未配应回退默认`
+      );
+    }
   });
 });
 

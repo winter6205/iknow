@@ -172,6 +172,8 @@ export interface IknowSettingsSecrets {
  */
 export interface IknowSettingsSubagent {
   taskTimeoutMs?: number;
+  /** 子代理同时处于 starting/running 的并发上限；正整数才生效。 */
+  maxConcurrentWorkers?: number;
 }
 
 /**
@@ -256,6 +258,13 @@ function isValidTimeoutMs(v: unknown): v is number {
  * 镜像 maxTurns 纪律：有限正整数才合法；非正 / 非整数 / 非数字 / 错类型 → 丢弃。
  */
 function isValidTaskTimeoutMs(v: unknown): v is number {
+  return (
+    typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 1
+  );
+}
+
+/** 子代理并发上限的值域：有限正整数才合法。 */
+function isValidMaxConcurrentWorkers(v: unknown): v is number {
   return (
     typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 1
   );
@@ -470,7 +479,14 @@ function parseSubagent(raw: unknown): IknowSettingsSubagent | undefined {
   if (isValidTaskTimeoutMs(raw.taskTimeoutMs)) {
     out.taskTimeoutMs = raw.taskTimeoutMs;
   }
-  if (out.taskTimeoutMs === undefined) return undefined;
+  if (isValidMaxConcurrentWorkers(raw.maxConcurrentWorkers)) {
+    out.maxConcurrentWorkers = raw.maxConcurrentWorkers;
+  }
+  if (
+    out.taskTimeoutMs === undefined &&
+    out.maxConcurrentWorkers === undefined
+  )
+    return undefined;
   return out;
 }
 
@@ -516,7 +532,7 @@ function mergeVerify(
 
 /**
  * #358 T1: 逐层合并 subagent：project 字段优先，未覆盖的 user 字段保留。
- * 仅 taskTimeoutMs 一个字段；parse 层已保证 > 0 整数，merge 仅做 project > user 选择。
+ * parse 层已保证字段为 > 0 整数，merge 仅做 project > user 选择。
  */
 function mergeSubagent(
   user: IknowSettingsSubagent | undefined,
@@ -529,7 +545,16 @@ function mergeSubagent(
   } else if (user?.taskTimeoutMs !== undefined) {
     out.taskTimeoutMs = user.taskTimeoutMs;
   }
-  if (out.taskTimeoutMs === undefined) return undefined;
+  if (project?.maxConcurrentWorkers !== undefined) {
+    out.maxConcurrentWorkers = project.maxConcurrentWorkers;
+  } else if (user?.maxConcurrentWorkers !== undefined) {
+    out.maxConcurrentWorkers = user.maxConcurrentWorkers;
+  }
+  if (
+    out.taskTimeoutMs === undefined &&
+    out.maxConcurrentWorkers === undefined
+  )
+    return undefined;
   return out;
 }
 

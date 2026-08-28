@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { loadIknowSettings, type IknowSettings } from "./settings.js";
 import { LLM_MODEL_MISSING_MESSAGE } from "./messages.js";
 import { WORKSPACE_ROOT_ENV_KEY } from "./workspace-root.js";
+import { MAX_CONCURRENT_WORKERS } from "../harness/subagent/manager.js";
 
 export interface LlmEnv {
   baseUrl: string;
@@ -180,10 +181,15 @@ export interface McpEnv {
  * env 链:`envOptionalPositiveInt("IKNOW_SUBAGENT_TASK_TIMEOUT_MS") ?? mergedSettings.subagent?.taskTimeoutMs`。
  * env 层无第三层默认值(7200s 常量由 T2 的 manager 消费点声明,
  * 避免缺省值在两处声明, settings 单一承载通过 mirror 校验)。
+ *
+ * `maxConcurrentWorkers` = 同时处于 starting/running 的 worker 并发上限。
+ * 未设 / 空 / 非数字 / 非正 → 默认 `MAX_CONCURRENT_WORKERS`(15)。
  */
 export interface IknowSubagentEnv {
   /** 子代理整任务寿命上限(毫秒);env 不设 + settings 未配 → undefined。 */
   taskTimeoutMs: number | undefined;
+  /** 子代理并发上限；loadIknowEnv 总会填入正整数默认值。 */
+  maxConcurrentWorkers?: number;
 }
 
 export interface IknowEnv {
@@ -314,6 +320,15 @@ function envOptionalPositiveInt(
 ): number | undefined {
   const n = envOptionalInt(opts);
   return n !== undefined && n > 0 ? n : undefined;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    value > 0
+  );
 }
 
 interface EnvNumberOpts {
@@ -667,6 +682,17 @@ export function loadIknowEnv(
           file,
           key: "IKNOW_SUBAGENT_TASK_TIMEOUT_MS",
         }) ?? mergedSettings.subagent?.taskTimeoutMs,
+      // T4: 并发上限(env > settings > manager default 15)。settings 可能
+      // 来自测试注入而未经过 parse，故此处再次 fail-safe 校验。
+      maxConcurrentWorkers:
+        envOptionalPositiveInt({
+          file,
+          key: "IKNOW_SUBAGENT_MAX_CONCURRENT_WORKERS",
+        }) ??
+        (isPositiveInteger(mergedSettings.subagent?.maxConcurrentWorkers)
+          ? mergedSettings.subagent.maxConcurrentWorkers
+          : undefined) ??
+        MAX_CONCURRENT_WORKERS,
     },
     // ADR-0019 (T1): workspace-root per-root state anchor (D1.5 register at
     // env SSOT; `envOptional` canonical reader — empty/unset → undefined,

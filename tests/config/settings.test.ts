@@ -588,6 +588,40 @@ describe("loadIknowSettings — llm.timeoutMs (#358 settings 双字段)", () => 
 });
 
 describe("loadIknowSettings — subagent 段 (#358 settings 双字段)", () => {
+  it("合法 maxConcurrentWorkers=6 → 透传", async () => {
+    const { home, cwd } = await makeSettings(
+      { subagent: { maxConcurrentWorkers: 6 } },
+      {}
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      subagent: { maxConcurrentWorkers: 6 },
+    });
+  });
+
+  it('drop-not-throw: maxConcurrentWorkers 0 / -5 / "abc" / 1.5 → 丢弃', async () => {
+    for (const bad of [0, -5, "abc", 1.5]) {
+      const { home, cwd } = await makeSettings(
+        { subagent: { maxConcurrentWorkers: bad } },
+        {}
+      );
+      assert.deepEqual(
+        loadIknowSettings({ home, cwd }),
+        {},
+        `maxConcurrentWorkers=${JSON.stringify(bad)} 应丢弃`
+      );
+    }
+  });
+
+  it("project maxConcurrentWorkers 覆盖 user 值", async () => {
+    const { home, cwd } = await makeSettings(
+      { subagent: { maxConcurrentWorkers: 6 } },
+      { subagent: { maxConcurrentWorkers: 3 } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }), {
+      subagent: { maxConcurrentWorkers: 3 },
+    });
+  });
+
   it("合法 taskTimeoutMs=7200000 → 透传（per-task 缺省）", async () => {
     const { home, cwd } = await makeSettings(
       { subagent: { taskTimeoutMs: 7_200_000 } },

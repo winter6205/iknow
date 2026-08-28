@@ -25,6 +25,8 @@ import type { ChildProcess } from "node:child_process";
 
 import {
   createSubAgentManager,
+  MAX_CONCURRENT_WORKERS,
+  SubAgentCapacityError,
   SubAgentWaitTimeoutError,
 } from "../../src/harness/subagent/manager.ts";
 import type {
@@ -69,7 +71,12 @@ function makeFakeChild(): FakeChild {
 
 /** 收 wrapper:记录最近一次 spawn 的 child + 入参,供测试 emit。
  *  `opts.taskTimeoutMs` 透传给 createSubAgentManager (T2 三层缺省链中段)。 */
-function makeHarness(opts: { readonly taskTimeoutMs?: number } = {}) {
+function makeHarness(
+  opts: {
+    readonly taskTimeoutMs?: number;
+    readonly maxConcurrentWorkers?: number;
+  } = {}
+) {
   const spawned: FakeChild[] = [];
   const spawnCalls: {
     def: SubAgentDefinition;
@@ -86,9 +93,56 @@ function makeHarness(opts: { readonly taskTimeoutMs?: number } = {}) {
     ...(opts.taskTimeoutMs !== undefined
       ? { taskTimeoutMs: opts.taskTimeoutMs }
       : {}),
+    ...(opts.maxConcurrentWorkers !== undefined
+      ? { maxConcurrentWorkers: opts.maxConcurrentWorkers }
+      : {}),
   });
   return { manager, spawned, spawnCalls };
 }
+
+describe("SubAgentManager concurrency capacity", () => {
+  it("default capacity is 15 and the 16th spawn fails immediately", () => {
+    assert.equal(MAX_CONCURRENT_WORKERS, 15);
+    const { manager } = makeHarness();
+
+    for (let i = 0; i < MAX_CONCURRENT_WORKERS; i++) {
+      assert.doesNotThrow(() => manager.spawn({ task: `default-${i}` }));
+    }
+    assert.throws(
+      () => manager.spawn({ task: "default-overflow" }),
+      (error: unknown) => {
+        assert.ok(error instanceof SubAgentCapacityError);
+        assert.equal(error.active, 15);
+        assert.match(error.message, /15\/15/);
+        return true;
+      }
+    );
+  });
+
+  it("uses an injected smaller capacity without queueing", () => {
+    const { manager } = makeHarness({ maxConcurrentWorkers: 2 });
+
+    manager.spawn({ task: "first" });
+    manager.spawn({ task: "second" });
+    assert.throws(
+      () => manager.spawn({ task: "overflow" }),
+      (error: unknown) => {
+        assert.ok(error instanceof SubAgentCapacityError);
+        assert.equal(error.active, 2);
+        assert.match(error.message, /2\/2/);
+        return true;
+      }
+    );
+  });
+
+  it("falls back to the default for an illegal injected capacity", () => {
+    const { manager } = makeHarness({ maxConcurrentWorkers: 0 });
+    for (let i = 0; i < MAX_CONCURRENT_WORKERS; i++) {
+      assert.doesNotThrow(() => manager.spawn({ task: `fallback-${i}` }));
+    }
+    assert.throws(() => manager.spawn({ task: "fallback-overflow" }));
+  });
+});
 
 function okEnvelope(result = "ok result"): SubAgentEnvelope {
   return { status: "ok", summary: "done", result };
