@@ -61,6 +61,7 @@ import {
   resolveWorkspaceRoot,
 } from "../config/workspace-root.js";
 import {
+  persistMemoryChanges,
   persistThinkingChanges,
   resolveThinkingSettingsPath,
 } from "../config/persist-settings.js";
@@ -224,6 +225,25 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       }
     };
 
+    const persistMemory: NonNullable<TuiAppProps["onPersistMemory"]> = async (
+      patch
+    ) => {
+      try {
+        const path = resolveThinkingSettingsPath({
+          cwd,
+          workspaceRoot,
+        });
+        const { bytes } = await persistMemoryChanges(path, patch);
+        activeEnvLoader.markSelfWrite(path, bytes);
+        return { ok: true as const };
+      } catch (err) {
+        return {
+          ok: false as const,
+          reason: err instanceof Error ? err.message : String(err),
+        };
+      }
+    };
+
     const inflight = createInflightRegistry();
     const toolEventSink = createToolEventSink();
     const askBridge = createTuiAskUserBridge();
@@ -261,6 +281,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       graphAssembly,
       autoMemory,
       overlayMemoryPrefetch,
+      memoryFlags,
       ...deps
     } = await buildTuiDeps(bundle, depsOpts);
     // #365 T4:挂 MCP + subagent 组合 shutdown 到进程信号(runtime.ts 语义,
@@ -390,6 +411,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
           // settings 双向持久化（T4）：面板 Esc → persistThinking 闭包写回
           // settings.json（失败以 notice 呈现，不 crash TUI）。
           onPersistThinking={persistThinking}
+          onPersistMemory={persistMemory}
+          defaultMemory={loadIknowSettings().memory}
+          memoryFlags={memoryFlags}
           onQuit={onQuitBridge!.destroy}
         />
       );

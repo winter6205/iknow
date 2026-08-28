@@ -5,7 +5,8 @@
  * 一致（#146 TUI 自建 slash 词表 + 解析 + Tab 补全 + hint 行）；仅文件头注释
  * 更新为本次迁移说明。纯 TS 模块，无 ink / OpenTUI 依赖。
  *
- * 词表 13 条：/sessions /new /quit /exit /help /info /thinking /effort
+ * 词表 14 条：/sessions /new /quit /exit /help /info /thinking /effort
+ * /memory /compact /continue /rewind /mcp /graph
  * /compact /continue /rewind /mcp /graph。/reset 不在词表内即天然不可达
  * （Q5c 废除）。
  * rev 2026-08-11:删 /profile（首启引导由 agent 自己 rm BOOTSTRAP.md 完成,
@@ -48,6 +49,7 @@ export type TuiSlashCommand =
   | "info"
   | "thinking"
   | "effort"
+  | "memory"
   | "compact"
   | "continue"
   | "rewind"
@@ -81,6 +83,7 @@ const VOCABULARY: ReadonlySet<string> = new Set<TuiSlashCommand>([
   "info",
   "thinking",
   "effort",
+  "memory",
   "compact",
   "continue",
   "rewind",
@@ -119,6 +122,7 @@ export function helpLines(
     "/help      本词表",
     "/thinking  切换思考开关（开/关模型的思考）",
     `/effort    调整思考强度（${ADJUSTABLE_EFFORT_LEVELS.join("/")}；缺省/关闭=自适应）`,
+    "/memory    自动记忆与 Dream 开关",
     "/compact   压缩上下文（保留尾部，裁剪早期消息）",
     "/continue  续跑未完成的工具环（不追加新任务）",
     "/rewind    回退到更早的回合（选择锚点后确认）",
@@ -139,6 +143,7 @@ const HINT_DESCRIPTIONS: Record<TuiSlashCommand, string> = {
   help: "本词表",
   thinking: "切换思考开关",
   effort: "调整思考强度",
+  memory: "自动记忆与 Dream 开关",
   compact: "压缩上下文",
   continue: "续跑未完成的工具环",
   mcp: "查看 MCP 服务看板",

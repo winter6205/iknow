@@ -23,6 +23,7 @@ import {
   noticeRenderRows,
 } from "../../src/tui/app.js";
 import { thinkingPickerRows } from "../../src/tui/thinking-picker.js";
+import { memoryPickerRows } from "../../src/tui/memory-picker.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 
 function userMsg(text: string): AnthropicNativeMessage {
@@ -521,5 +522,28 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
       agentStatusRows: 2,
     });
     expect(stacked).toBe(7 + 2 + 4 + 1);
+  });
+});
+
+describe("memoryPickerRows（/memory 双开关面板行账）", () => {
+  test("6 行 = 边框 2 + 内容 4", () => {
+    expect(memoryPickerRows()).toBe(6);
+  });
+
+  test("有 memory picker：pickerRows + 1 marginBottom = 7 行 delta", () => {
+    const base = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+    });
+    const withMemory = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+      pickerRows: memoryPickerRows(),
+    });
+    expect(withMemory - base).toBe(7);
   });
 });

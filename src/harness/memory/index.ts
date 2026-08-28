@@ -59,6 +59,7 @@ export type {
   AutoMemoryHook,
   AutoMemoryHookOptions,
   AutoMemoryTurn,
+  MemoryLiveFlags,
 } from "./auto-hook.js";
 export type { NotifyAutoMemoryOptions } from "./notify-auto-memory.js";
 

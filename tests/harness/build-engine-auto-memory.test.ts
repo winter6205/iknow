@@ -75,6 +75,13 @@ describe("buildHarnessEngine — auto-memory opt-in", () => {
     expect((await build()).autoMemory).toBeUndefined();
   });
 
+  it("wires autoMemory on TUI even when both flags are off, with live flags", async () => {
+    const engine = await build({ surface: "tui" });
+    expect(engine.autoMemory).toBeDefined();
+    expect(engine.memoryFlags).toEqual({ autoExtract: false, dream: false });
+    expect(engine.overlayMemoryPrefetch).toBeDefined();
+  });
+
   it("leaves autoMemory absent on an explicit false", async () => {
     const engine = await build({
       settings: { memory: { autoExtract: false } },

@@ -1,15 +1,17 @@
 /**
- * settings.json 反向持久化 —— 运行时 /thinking /effort 面板 Esc 保存退出时
- * 把改动写回 settings.json（T1，纯函数 + 原子写）。
+ * settings.json 反向持久化 —— 运行时 /thinking /effort /memory 面板 Esc
+ * 保存退出时把改动写回 settings.json（纯函数 + 原子写）。
  *
  * 与 settings.ts 的单向读取（文件 → 运行时）相反，本模块是反向通道
  * （运行时 → 文件）。设计约束（plans/settings-bidirectional-persist.md）：
  *   - **merge 基于原始 raw JSON，不是解析后的 IknowSettings**：IknowSettings
- *     深 frozen 且丢弃非法字段，写回必须保留用户文件里的一切字段，只改
- *     `llm.thinking` / `llm.thinkingEffort` 两键（决策 4）。
+ *     深 frozen 且丢弃非法字段，写回必须保留用户文件里的一切字段。thinking
+ *     只改 `llm.thinking` / `llm.thinkingEffort`；memory 只改 `memory.autoExtract`
+ *     / `memory.dream`。
  *   - **字段语义**：`llm.thinking` 仅 `"off" | "adaptive"`；
  *     `llm.thinkingEffort` 仅五档或 `null`（null = auto → 删除键，缺省 =
- *     自适应，与 env 缺省语义一致）。其它字段一律原样保留（决策 5/6）。
+ *     自适应，与 env 缺省语义一致）。`memory.autoExtract` / `dream` 仅
+ *     boolean；关 autoExtract 时 dream 强制 false。其它字段一律原样保留。
  *   - **原子写**：tmp 文件写入**同目录**后 rename 替换（原子）；tmp 在 rename
  *     前 chmod 0600（settings 含 apiKey，敏感）；父目录缺失 → mkdir -p。
  *     tmp 文件名 per-invocation 唯一（randomUUID 后缀）—— 并行双写同一文件
@@ -20,8 +22,6 @@
  *     写回回环。
  *   - **坏 JSON 起步**：对齐 settings.ts `readSettingsFile` 惯例 —— 文件
  *     不存在 / 坏 JSON → 从空对象合并后写回（不覆盖用户文件本身）。
- *
- * 只导出 plan T1 列出的四个 API，不暴露多余公共面。
  */
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -45,6 +45,12 @@ const SETTINGS_FILENAME = "settings.json";
 export interface ThinkingPersistPatch {
   thinking?: IknowSettingsThinking;
   thinkingEffort?: IknowSettingsThinkingEffort | null;
+}
+
+/** /memory 面板可持久化 patch。关 autoExtract 时 merge 层强制 dream=false。 */
+export interface MemoryPersistPatch {
+  autoExtract: boolean;
+  dream: boolean;
 }
 
 /** resolveThinkingSettingsPath 的注入选项（ADR-0019 D1.3 三档）。 */
@@ -158,6 +164,30 @@ export function mergeThinkingPatch(
   return next;
 }
 
+export function mergeMemoryPatch(
+  raw: Record<string, unknown>,
+  patch: MemoryPersistPatch
+): Record<string, unknown> {
+  if (typeof patch.autoExtract !== "boolean") {
+    throw new TypeError(
+      `illegal autoExtract patch value: ${JSON.stringify(patch.autoExtract)} (expected boolean)`
+    );
+  }
+  if (typeof patch.dream !== "boolean") {
+    throw new TypeError(
+      `illegal dream patch value: ${JSON.stringify(patch.dream)} (expected boolean)`
+    );
+  }
+  const next: Record<string, unknown> = { ...raw };
+  const nextMem: Record<string, unknown> = isPlainObject(next.memory)
+    ? { ...next.memory }
+    : {};
+  nextMem.autoExtract = patch.autoExtract;
+  nextMem.dream = patch.autoExtract ? patch.dream : false;
+  next.memory = nextMem;
+  return next;
+}
+
 /**
  * 选择写回目标 settings 文件路径（ADR-0019 D1.3 三档，plans/
  * workspace-root-launch.md T3 acceptance）：
@@ -180,6 +210,22 @@ export function resolveThinkingSettingsPath(
   return join(workspaceRoot, ".iknow", SETTINGS_FILENAME);
 }
 
+async function persistMergedSettings(
+  filePath: string,
+  merged: Record<string, unknown>
+): Promise<{ path: string; bytes: string }> {
+  const bytes = `${JSON.stringify(merged, null, 2)}\n`;
+  const tmpPath = join(
+    dirname(filePath),
+    `.${SETTINGS_FILENAME}.${randomUUID()}.tmp`
+  );
+  await mkdir(dirname(filePath), { recursive: true });
+  await writeFile(tmpPath, bytes, { encoding: "utf8", flag: "w" });
+  await chmod(tmpPath, 0o600);
+  await rename(tmpPath, filePath);
+  return { path: filePath, bytes };
+}
+
 /**
  * 把 thinking patch 持久化到指定 settings 文件（原子写）。
  * 读 raw JSON（文件不存在 / 坏 JSON → 空对象起步）→ 合并 patch → 写 tmp
@@ -194,17 +240,15 @@ export async function persistThinkingChanges(
   patch: ThinkingPersistPatch
 ): Promise<{ path: string; bytes: string }> {
   const raw = await readSettingsRaw(filePath);
-  const merged = mergeThinkingPatch(raw, patch);
-  const bytes = `${JSON.stringify(merged, null, 2)}\n`;
-  const tmpPath = join(
-    dirname(filePath),
-    `.${SETTINGS_FILENAME}.${randomUUID()}.tmp`
-  );
-  await mkdir(dirname(filePath), { recursive: true });
-  await writeFile(tmpPath, bytes, { encoding: "utf8", flag: "w" });
-  await chmod(tmpPath, 0o600);
-  await rename(tmpPath, filePath);
-  return { path: filePath, bytes };
+  return persistMergedSettings(filePath, mergeThinkingPatch(raw, patch));
+}
+
+export async function persistMemoryChanges(
+  filePath: string,
+  patch: MemoryPersistPatch
+): Promise<{ path: string; bytes: string }> {
+  const raw = await readSettingsRaw(filePath);
+  return persistMergedSettings(filePath, mergeMemoryPatch(raw, patch));
 }
 
 /** sha256 hex —— self-write 哨兵的内容哈希（T2 markSelfWrite 比对用）。 */
