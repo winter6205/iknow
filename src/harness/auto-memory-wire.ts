@@ -12,6 +12,7 @@
  * `memory/auto-hook.ts`.
  */
 import type { MemoryExtractLlm } from "./memory/index.js";
+import { MEMORY_SAVE_PERSISTED_PREFIX } from "./memory/tools/save.js";
 import type {
   AnthropicNativeMessage,
   ModelAdapter,
@@ -74,4 +75,53 @@ export function renderTranscript(
   return rendered.length <= TRANSCRIPT_CHAR_CAP
     ? rendered
     : rendered.slice(-TRANSCRIPT_CHAR_CAP);
+}
+
+function toolResultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const block of content) {
+    if (
+      block &&
+      typeof block === "object" &&
+      (block as { type?: unknown }).type === "text" &&
+      typeof (block as { text?: unknown }).text === "string"
+    ) {
+      parts.push((block as { text: string }).text);
+    }
+  }
+  return parts.join(" ");
+}
+
+/**
+ * True when this message slice contains a successful `memory_save`.
+ * Hosts pass only this-turn messages so a prior save does not skip extract.
+ */
+export function hasSuccessfulMemorySave(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): boolean {
+  const results = new Map<
+    string,
+    { readonly isError: boolean; readonly text: string }
+  >();
+  const saveIds: string[] = [];
+  for (const message of messages) {
+    for (const block of message.content) {
+      if (block.type === "tool_use" && block.name === "memory_save") {
+        saveIds.push(block.id);
+      } else if (block.type === "tool_result") {
+        results.set(block.tool_use_id, {
+          isError: block.is_error === true,
+          text: toolResultText(block.content),
+        });
+      }
+    }
+  }
+  for (const id of saveIds) {
+    const result = results.get(id);
+    if (!result || result.isError) continue;
+    if (result.text.includes(MEMORY_SAVE_PERSISTED_PREFIX)) return true;
+  }
+  return false;
 }

@@ -12,6 +12,9 @@ export function notifyAutoMemory(opts: NotifyAutoMemoryOptions): void {
       stopReason: opts.stopReason,
       transcript: opts.transcript,
       ...(opts.sessionKey !== undefined ? { sessionKey: opts.sessionKey } : {}),
+      ...(opts.memorySaveSucceeded !== undefined
+        ? { memorySaveSucceeded: opts.memorySaveSucceeded }
+        : {}),
     });
   } catch (error: unknown) {
     // EXIT: log-and-continue — a memory hook failure must not fail the user turn.

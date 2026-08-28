@@ -166,6 +166,53 @@ describe("createAutoMemoryHook — completed gate", () => {
 
 // -- the N>=2 turn gate ------------------------------------------------------
 
+describe("createAutoMemoryHook — static layer on extract", () => {
+  it("forwards a loaded static layer into the extract prompt", async () => {
+    const layer = "Always use bun for this project's package manager.";
+    const prompts: string[] = [];
+    const llm: MemoryExtractLlm = {
+      complete: async (prompt) => {
+        prompts.push(prompt);
+        return FACT;
+      },
+    };
+    const hook = createAutoMemoryHook(
+      hookOpts(llm, { staticLayer: async () => layer })
+    );
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: which package manager?",
+    });
+    await hook.drain();
+    assert.equal(prompts.length, 1);
+    assert.ok(prompts[0]?.includes(layer));
+  });
+
+  it("still extracts when the static-layer loader throws", async () => {
+    const llm = countingLlm(FACT);
+    const errors: unknown[] = [];
+    const hook = createAutoMemoryHook(
+      hookOpts(llm, {
+        staticLayer: async () => {
+          throw new Error("lstat failed");
+        },
+        onError: (error: unknown) => {
+          errors.push(error);
+        },
+      })
+    );
+    assert.doesNotThrow(() => {
+      hook.onTurnComplete({
+        stopReason: "completed",
+        transcript: "user: which package manager?",
+      });
+    });
+    await hook.drain();
+    assert.equal(llm.calls(), 1, "extract still runs after static-layer IO failure");
+    assert.equal(errors.length, 1);
+  });
+});
+
 describe("createAutoMemoryHook — completed-turn gate", () => {
   it("waits for the second completed turn at the default gate", async () => {
     const llm = countingLlm(FACT);
@@ -186,6 +233,53 @@ describe("createAutoMemoryHook — completed-turn gate", () => {
     hook.onTurnComplete({
       stopReason: "completed",
       transcript: "user: turn two",
+    });
+    await hook.drain();
+    assert.equal(llm.calls(), 1);
+  });
+
+  it("skips extract when this completed turn already saved memory", async () => {
+    const llm = countingLlm(FACT);
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm,
+      enabled: true,
+      now: () => NOW_ISO,
+      nowMs: Date.parse(NOW_ISO),
+    });
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: turn one",
+    });
+    await hook.drain();
+    assert.equal(llm.calls(), 0);
+
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: turn two",
+      memorySaveSucceeded: true,
+    });
+    await hook.drain();
+    assert.equal(llm.calls(), 0, "successful memory_save skips extract");
+  });
+
+  it("still extracts on the gated turn when memory_save did not succeed", async () => {
+    const llm = countingLlm(FACT);
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm,
+      enabled: true,
+      now: () => NOW_ISO,
+      nowMs: Date.parse(NOW_ISO),
+    });
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: turn one",
+    });
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: turn two",
+      memorySaveSucceeded: false,
     });
     await hook.drain();
     assert.equal(llm.calls(), 1);
@@ -489,6 +583,26 @@ describe("createAutoMemoryHook — dream pass", () => {
     await hook.drain();
 
     assert.equal(llm.calls(), 1, "extract still fires; dream gate is unmet");
+  });
+
+  it("still runs dream when extract is skipped after a successful save", async () => {
+    await twoLiveEntries();
+    const nowMs = Date.parse(NOW_ISO);
+    await seedDreamGate(memoryDir, nowMs);
+    const llm = countingLlm("[]");
+    const hook = createAutoMemoryHook(
+      hookOpts(llm, { dream: true, nowMs })
+    );
+
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: hi",
+      sessionKey: "s5",
+      memorySaveSucceeded: true,
+    });
+    await hook.drain();
+
+    assert.equal(llm.calls(), 1, "dream still runs when extract is skipped");
   });
 
   it("runs extract, dream, then one mechanical GC pass when both are on and the dual gate is met", async () => {

@@ -48,6 +48,22 @@ describe("notifyAutoMemory", () => {
     assert.equal(reported, failure);
   });
 
+  it("forwards memorySaveSucceeded onto the hook turn", () => {
+    let seen: boolean | undefined;
+    notifyAutoMemory({
+      ...turn,
+      memorySaveSucceeded: true,
+      hook: {
+        onTurnComplete: (t) => {
+          seen = t.memorySaveSucceeded;
+        },
+        drain: async () => {},
+      },
+      onError: () => {},
+    });
+    assert.equal(seen, true);
+  });
+
   it("is imported and called by chat-session and SessionHub", () => {
     const chatSource = readFileSync(
       join(process.cwd(), "src/cli/chat-session.ts"),
@@ -64,5 +80,9 @@ describe("notifyAutoMemory", () => {
     assert.match(hubSource, importPattern);
     assert.match(chatSource, /\bnotifyAutoMemory\(\{/);
     assert.match(hubSource, /\bnotifyAutoMemory\(\{/);
+    assert.match(chatSource, /\bhasSuccessfulMemorySave\b/);
+    assert.match(hubSource, /\bhasSuccessfulMemorySave\b/);
+    assert.match(chatSource, /\bmemorySaveSucceeded:/);
+    assert.match(hubSource, /\bmemorySaveSucceeded:/);
   });
 });

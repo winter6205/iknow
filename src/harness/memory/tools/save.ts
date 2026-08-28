@@ -39,6 +39,9 @@ const MAX_IMPORTANCE = 5;
 /** Allowed top-level keys — mirrors the inputSchema + write_file.ts precedent. */
 const ALLOWED_KEYS = new Set(["title", "body", "type", "importance"]);
 
+/** Prefix of a successful memory_save tool result (skip-extract detector). */
+export const MEMORY_SAVE_PERSISTED_PREFIX = "[memory_save] persisted as";
+
 /** Spec SC 9 locked rejection list. */
 const NEGATIVE_FORM_WORDS = ["don't", "never", "禁止", "不要", "不能"];
 
@@ -101,7 +104,7 @@ export function createMemorySaveTool(deps: MemorySaveToolDeps): AciToolDef {
       const slug = makeSlug(random);
       await writeMemoryEntryAtomic(deps.memoryDir, slug, entry);
       await upsertMemoryIndex(deps.memoryDir, slug, entry);
-      return `[memory_save] persisted as ${slug}.md`;
+      return `${MEMORY_SAVE_PERSISTED_PREFIX} ${slug}.md`;
     },
   });
 }

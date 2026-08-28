@@ -37,7 +37,10 @@ import {
   buildHarnessEngine,
   createAdapterFromEnv,
 } from "../harness/build-engine.js";
-import { renderTranscript } from "../harness/auto-memory-wire.js";
+import {
+  renderTranscript,
+  hasSuccessfulMemorySave,
+} from "../harness/auto-memory-wire.js";
 import {
   applyHostPrefetch,
   notifyAutoMemory,
@@ -1273,6 +1276,7 @@ export class SessionHub {
               // 测试)→ 整句 no-op,行为逐字节不变。
               this.notifyAutoMemory(
                 s.finalResult,
+                s.priorCount,
                 session.workspaceRoot,
                 conversationId
               );
@@ -2283,6 +2287,7 @@ export class SessionHub {
    */
   private notifyAutoMemory(
     result: RunResult,
+    priorMessageCount: number,
     workspaceRoot?: string,
     conversationId?: string
   ): void {
@@ -2303,6 +2308,9 @@ export class SessionHub {
       stopReason: result.stopReason,
       transcript: renderTranscript(result.messages),
       sessionKey,
+      memorySaveSucceeded: hasSuccessfulMemorySave(
+        result.messages.slice(priorMessageCount)
+      ),
       onError: (error) =>
         console.warn(
           `[memory/auto] turn hook skipped: ${

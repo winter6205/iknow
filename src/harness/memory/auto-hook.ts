@@ -47,6 +47,11 @@ export interface AutoMemoryTurn {
    * in-process conversation. Serve: conversation_id. Absent = no session increment.
    */
   readonly sessionKey?: string;
+  /**
+   * Host-computed: this completed turn already persisted a successful
+   * `memory_save`. When true, extract is skipped even if the N-turn gate is due.
+   */
+  readonly memorySaveSucceeded?: boolean;
 }
 
 export interface AutoMemoryHook {
@@ -84,6 +89,11 @@ export interface AutoMemoryHookOptions {
    * instead of snapshotting `enabled` / `dream` at construction.
    */
   readonly flags?: MemoryLiveFlags;
+  /**
+   * Host-wired static layer (user + project AGENTS.md / rules).
+   * Resolved only on an extract pass. Thrown faults are swallowed.
+   */
+  readonly staticLayer?: () => Promise<string>;
 }
 
 /** Mutable box the TUI mutates on /memory Esc without rebuilding the hook. */
@@ -137,13 +147,14 @@ export function createAutoMemoryHook(
 
     const transcript = turn.transcript;
     const sessionKey = turn.sessionKey;
+    const skipExtract = turn.memorySaveSucceeded === true;
     chain = chain.then(async () => {
       const live = liveFlags(opts);
       const dreamDue = live.dream
         ? await persistAndEvaluateDreamGate(opts, sessionKey, opts.onError)
         : false;
 
-      if (extractDue && live.enabled) {
+      if (extractDue && live.enabled && !skipExtract) {
         await runExtractPass(opts, transcript, dreamDue);
       }
       if (dreamDue) {
@@ -184,11 +195,19 @@ async function runExtractPass(
   transcript: string,
   deferGcForDream: boolean
 ): Promise<void> {
+  let staticLayer = "";
+  try {
+    staticLayer = (await opts.staticLayer?.()) ?? "";
+  } catch (error) {
+    // EXIT: log-and-continue — a static-layer fault must not fail the user turn.
+    safeReport(opts.onError, error);
+  }
   try {
     const ingestResult = await ingestMemory({
       memoryDir: opts.memoryDir,
       transcript,
       llm: opts.llm,
+      ...(staticLayer.length > 0 ? { staticLayer } : {}),
       ...(opts.now ? { now: opts.now } : {}),
       ...(opts.nowMs !== undefined ? { nowMs: opts.nowMs } : {}),
       ...(opts.randomBytes ? { randomBytes: opts.randomBytes } : {}),

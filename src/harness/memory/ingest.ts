@@ -42,6 +42,9 @@ export const MAX_CANDIDATES_PER_INGEST = 8;
 /** Candidates the model is less sure of than this never reach the store. */
 export const MIN_CANDIDATE_CONFIDENCE = 0.6;
 
+/** Prompt-side cap so joined rules cannot drown the transcript. */
+export const STATIC_LAYER_PROMPT_CAP = 24_000;
+
 const MIN_IMPORTANCE = 1;
 const MAX_IMPORTANCE = 5;
 
@@ -119,6 +122,8 @@ export interface MemoryIngestOptions extends MemoryPersistDeps {
   /** The conversation slice to mine. Blank input short-circuits with no LLM call. */
   readonly transcript: string;
   readonly llm: MemoryExtractLlm;
+  /** User + project AGENTS.md / rules text. Absent or blank = prompt without that block. */
+  readonly staticLayer?: string;
   readonly signal?: AbortSignal;
   /** Reference time for the post-write GC pass. */
   readonly nowMs?: number;
@@ -142,13 +147,21 @@ export interface MemoryIngestResult {
  * carries memory semantics, and exported so a review can read the exact text
  * the model sees.
  */
-export function buildExtractPrompt(transcript: string): string {
+export function buildExtractPrompt(
+  transcript: string,
+  staticLayer = ""
+): string {
+  const layer = clipStaticLayer(staticLayer.trim());
   return [
     "You are mining a finished coding session for facts worth keeping across future sessions.",
     "",
     "Keep only broadly-applicable knowledge: project conventions, architectural decisions,",
     "gotchas, and hard constraints. Never keep per-task state (what was edited this session,",
     "what the user asked for today, transient file paths, or debugging chatter).",
+    "",
+    "Never output a candidate that repeats or paraphrases the project or user instruction files already loaded in every session.",
+    "Never keep what the repository itself shows: architecture, file paths, or fixes already merged.",
+    "Keep corrections the user made to your work, and preferences the user explicitly confirmed.",
     "",
     "Write every fact in affirmative phrasing — state what to do, not what to avoid.",
     "Prohibitions belong in the permission policy, not in memory. A candidate phrased as a",
@@ -158,10 +171,24 @@ export function buildExtractPrompt(transcript: string): string {
     '  { "title": string, "body": string, "type": string, "importance": 1-5, "confidence": 0-1 }',
     "Reply with [] when the session contains no such fact.",
     "",
+    ...(layer.length > 0
+      ? [
+          "--- project and user instructions (already loaded; do not re-output) ---",
+          layer,
+          "--- end instructions ---",
+          "",
+        ]
+      : []),
     "--- session transcript ---",
     transcript,
     "--- end transcript ---",
   ].join("\n");
+}
+
+function clipStaticLayer(layer: string): string {
+  if (layer.length <= STATIC_LAYER_PROMPT_CAP) return layer;
+  const dropped = layer.length - STATIC_LAYER_PROMPT_CAP;
+  return `${layer.slice(0, STATIC_LAYER_PROMPT_CAP)}[truncated ${dropped} chars]`;
 }
 
 /**
@@ -176,13 +203,17 @@ export function buildExtractPrompt(transcript: string): string {
 export async function extractMemoryCandidates(
   transcript: string,
   llm: MemoryExtractLlm,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  staticLayer?: string
 ): Promise<ReadonlyArray<MemoryCandidate>> {
   if (transcript.trim().length === 0) return [];
 
   let raw: string;
   try {
-    raw = await llm.complete(buildExtractPrompt(transcript), signal);
+    raw = await llm.complete(
+      buildExtractPrompt(transcript, staticLayer ?? ""),
+      signal
+    );
   } catch (error) {
     throw new MemoryExtractError("memory ingest: extraction call failed", {
       cause: error,
@@ -210,6 +241,50 @@ export async function extractMemoryCandidates(
     if (candidate === null) continue;
     out.push(candidate);
     if (out.length === MAX_CANDIDATES_PER_INGEST) break;
+  }
+  return out;
+}
+
+/** At or above this, the candidate restates one static-layer chunk. */
+export const STATIC_LAYER_OVERLAP_FLOOR = 0.9;
+const STATIC_LAYER_CHUNK_TOKEN_CAP = 80;
+
+/**
+ * Drop extract candidates that restate AGENTS.md / rules, before the
+ * four-state table. Pure: no IO, no model.
+ *
+ * Overlap is scored per paragraph (large paragraphs split into token
+ * windows) so a long instruction file cannot saturate containment.
+ * Empty static layer: leave every candidate. Empty candidate tokens: drop
+ * only when the layer itself has tokens.
+ */
+export function dropOverlappingStaticLayer(
+  candidates: ReadonlyArray<MemoryCandidate>,
+  staticLayer: string
+): ReadonlyArray<MemoryCandidate> {
+  const chunks = layerChunks(staticLayer);
+  if (chunks.length === 0) return candidates;
+  return candidates.filter((candidate) => {
+    const candTokens = tokens(`${candidate.title} ${candidate.body}`);
+    if (candTokens.size === 0) return false;
+    return !chunks.some(
+      (chunk) => containment(candTokens, chunk) >= STATIC_LAYER_OVERLAP_FLOOR
+    );
+  });
+}
+
+function layerChunks(staticLayer: string): ReadonlyArray<ReadonlySet<string>> {
+  const out: Array<ReadonlySet<string>> = [];
+  for (const para of staticLayer.split(/\n\n+/)) {
+    const seq = tokenize(para);
+    if (seq.length === 0) continue;
+    if (seq.length <= STATIC_LAYER_CHUNK_TOKEN_CAP) {
+      out.push(new Set(seq));
+      continue;
+    }
+    for (let i = 0; i < seq.length; i += STATIC_LAYER_CHUNK_TOKEN_CAP) {
+      out.push(new Set(seq.slice(i, i + STATIC_LAYER_CHUNK_TOKEN_CAP)));
+    }
   }
   return out;
 }
@@ -378,10 +453,15 @@ function buildEntry(input: {
 export async function ingestMemory(
   opts: MemoryIngestOptions
 ): Promise<MemoryIngestResult> {
-  const candidates = await extractMemoryCandidates(
+  const extracted = await extractMemoryCandidates(
     opts.transcript,
     opts.llm,
-    opts.signal
+    opts.signal,
+    opts.staticLayer
+  );
+  const candidates = dropOverlappingStaticLayer(
+    extracted,
+    opts.staticLayer ?? ""
   );
   if (candidates.length === 0) return { ops: [], written: [] };
 
@@ -439,15 +519,15 @@ function clampImportance(value: unknown): number {
   return Math.min(MAX_IMPORTANCE, Math.max(MIN_IMPORTANCE, Math.round(value)));
 }
 
-/** Token set used by the four-state containment rules. */
+/** Token set used by four-state neighbor rules and static-layer overlap. */
 function tokens(s: string): ReadonlySet<string> {
   return new Set(tokenize(s));
 }
 
 /**
  * Fraction of `a` that `b` also contains, in [0, 1]. Directional on purpose:
- * the question the table asks is "how much of the candidate is already
- * stored", which is not symmetric.
+ * four-state asks how much of the candidate is already stored; the static
+ * overlap gate asks how much of the candidate restates one instruction chunk.
  */
 function containment(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
   if (a.size === 0) return 0;

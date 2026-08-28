@@ -39,8 +39,11 @@ export {
   AUTO_MEMORY_SOURCE,
   MAX_CANDIDATES_PER_INGEST,
   MIN_CANDIDATE_CONFIDENCE,
+  STATIC_LAYER_OVERLAP_FLOOR,
+  STATIC_LAYER_PROMPT_CAP,
   buildExtractPrompt,
   decideMemoryOps,
+  dropOverlappingStaticLayer,
   extractMemoryCandidates,
   ingestMemory,
   persistMemoryOps,
@@ -136,6 +139,7 @@ export type { SlugUsage, UsageSidecar } from "./promote.js";
 
 export {
   assembleSystemPrompt,
+  assembleStaticSystemPrompt,
   PRIORITY_DECLARATION,
   EXISTENCE_POINTER,
 } from "./assembly.js";
