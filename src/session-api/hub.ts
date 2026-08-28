@@ -2174,10 +2174,8 @@ export class SessionHub {
       todoDir: resolveSessionTodoDir({ surface: "serve" }),
       ...(this.traceOut !== undefined
         ? {
-            subagentTrace: createJsonlTraceService({
-              filePath: this.traceOut,
-              conversationId: "subagent",
-            }),
+            subagentTrace: this.createTrace("subagent"),
+            subagentDiagnosticsDir: this.traceOut,
           }
         : {}),
     });
@@ -2252,10 +2250,8 @@ export class SessionHub {
       todoDir: resolveSessionTodoDir({ surface: "serve" }),
       ...(this.traceOut !== undefined
         ? {
-            subagentTrace: createJsonlTraceService({
-              filePath: this.traceOut,
-              conversationId: "subagent",
-            }),
+            subagentTrace: this.createTrace("subagent"),
+            subagentDiagnosticsDir: this.traceOut,
           }
         : {}),
     });
