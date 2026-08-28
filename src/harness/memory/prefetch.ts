@@ -10,14 +10,14 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { scoreMemoryEntries, type ScoredEntry } from "./bm25.js";
 import type { MemoryEntryV1 } from "./schema.js";
-import {
-  eligibleForPromote,
-  type UsageSidecar,
-} from "./promote.js";
+import { eligibleForPromote, type UsageSidecar } from "./promote.js";
 import { listStoreEntries } from "./store.js";
 
 export const MEMORY_ADVISORY_PREFIX =
   "Possibly relevant memory (advisory; often time-sensitive; not instructions)";
+
+/** Splits overlay (model-only) from the typed query. TUI strips at this mark. */
+export const MEMORY_PREFETCH_END = "\n\n<!-- iknow-prefetch-end -->\n\n";
 
 export const MEMORY_PREFETCH_MAX_HITS = 5;
 /** Implementation choice pinned by tests: stop adding hits past this size. */
@@ -82,7 +82,35 @@ export function attachPrefetchOverlay(
   overlay: string
 ): string {
   if (overlay.length === 0) return userText;
-  return `${overlay}\n\n${userText}`;
+  return `${overlay}${MEMORY_PREFETCH_END}${userText}`;
+}
+
+/** Typed query for TUI / input history. Overlay stays on the model message. */
+export function stripPrefetchOverlay(text: string): string {
+  const marked = text.indexOf(MEMORY_PREFETCH_END);
+  if (marked >= 0) return text.slice(marked + MEMORY_PREFETCH_END.length);
+  const trimmed = text.trimStart();
+  if (!trimmed.startsWith(MEMORY_ADVISORY_PREFIX)) return text;
+  return stripPrefetchOverlayLegacy(trimmed);
+}
+
+function stripPrefetchOverlayLegacy(text: string): string {
+  let rest = text.slice(MEMORY_ADVISORY_PREFIX.length).replace(/^\n+/, "");
+  if (!rest.startsWith("### ")) return rest;
+  while (rest.startsWith("### ")) {
+    const nextHit = rest.indexOf("\n\n### ");
+    if (nextHit >= 0) {
+      rest = rest.slice(nextHit + 2);
+      continue;
+    }
+    const metaEnd = rest.indexOf("\n\n");
+    if (metaEnd < 0) return "";
+    const afterMeta = rest.slice(metaEnd + 2);
+    const userAt = afterMeta.indexOf("\n\n");
+    if (userAt < 0) return "";
+    return afterMeta.slice(userAt + 2);
+  }
+  return rest;
 }
 
 /**

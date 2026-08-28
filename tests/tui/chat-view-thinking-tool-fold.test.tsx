@@ -139,7 +139,7 @@ test("idle：思考秒数 + 多轮 bash → 思考了 N 秒 · bash × N，不�
   await setup.renderer.destroy();
 });
 
-test("running-fg：历史 thinking+tool 走同一 turn 折叠，不与 [完成] 交错", async () => {
+test("running-fg：不提前收成 turn 摘要，历史 [完成] 仍可见", async () => {
   const liveToolRuns: ReadonlyArray<LiveToolRun> = [
     {
       id: "tu-live",
@@ -167,9 +167,8 @@ test("running-fg：历史 thinking+tool 走同一 turn 折叠，不与 [完成] 
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("思考了 6 秒 · bash ×");
-  expect(frame.includes("[完成]")).toBe(false);
-  expect(thinkingAfterFirstTool(markerSequence(frame))).toBe(false);
-  expect(frame.includes("思考中")).toBe(false);
+  expect(frame).toContain("思考了 6 秒");
+  expect(frame.includes("bash ×")).toBe(false);
+  expect(frame.includes("[完成]")).toBe(true);
   await setup.renderer.destroy();
 });

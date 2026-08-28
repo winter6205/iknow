@@ -626,7 +626,7 @@ describe("#647 T3: agent 现势按会话隔离（multi-session staleness 回归�
       );
       await untilFrame(app.setup, (f) => f.includes("Version"));
 
-      // 会话 A:提交 → turn 完成 → 面板渲染 A 的现势(◇ last_tool + □ 未勾项)。
+      // 会话 A:提交 → turn 完成 → 面板渲染 A 的未勾项(不印 last_tool)。
       await app.typeText("你好A");
       await app.pressEnter();
       await until(
@@ -636,11 +636,11 @@ describe("#647 T3: agent 现势按会话隔离（multi-session staleness 回归�
       );
       const frameA = await untilFrame(
         app.setup,
-        (f) => f.includes("◇ last_tool:"),
+        (f) => f.includes("□ regression item A"),
         8000,
         "a-panel"
       );
-      expect(frameA).toContain("□ regression item A");
+      expect(frameA).not.toContain("last_tool:");
 
       // /new → 新草稿(draft 无 conversationId):面板不得残留 A 的现势。
       // (staleness 回归点:全局单槽实现会在这里继续渲染 A 的快照。)
@@ -648,7 +648,7 @@ describe("#647 T3: agent 现势按会话隔离（multi-session staleness 回归�
       await app.pressEnter();
       const frameDraft = await untilFrame(
         app.setup,
-        (f) => !f.includes("◇ last_tool:"),
+        (f) => !f.includes("□ regression item A"),
         8000,
         "draft-clean"
       );
@@ -670,11 +670,11 @@ describe("#647 T3: agent 现势按会话隔离（multi-session staleness 回归�
       await app.pressEnter();
       const frameBack = await untilFrame(
         app.setup,
-        (f) => f.includes("◇ last_tool:"),
+        (f) => f.includes("□ regression item A"),
         8000,
         "a-restored"
       );
-      expect(frameBack).toContain("□ regression item A");
+      expect(frameBack).not.toContain("last_tool:");
 
       await app.destroy();
     } finally {
@@ -712,7 +712,7 @@ describe("T4b: agent_status resume hydrate", () => {
     };
   }
 
-  test("initialSession resume: 未发新 turn 即见 ◇ last_tool + □ todo 行", async () => {
+  test("initialSession resume: 未发新 turn 即见 □ todo 行,不印 last_tool", async () => {
     const file = sessionFileWithAgentStatusBar();
     const app = await mountAppAsync(
       [assistantResult({ texts: ["unused"] })],
@@ -722,11 +722,11 @@ describe("T4b: agent_status resume hydrate", () => {
     );
     const frame = await untilFrame(
       app.setup,
-      (f) => f.includes("◇ last_tool:"),
+      (f) => f.includes("□ 查新闻"),
       8000,
       "resume-hydrate-panel"
     );
-    expect(frame).toContain("last_tool: web_search");
+    expect(frame).not.toContain("last_tool:");
     expect(frame).toContain("□ 查新闻");
     await app.destroy();
   }, 30_000);

@@ -162,6 +162,29 @@ test("agent_status 栏注入：不渲染为 ❯ 用户气泡", async () => {
   await setup.renderer.destroy();
 });
 
+test("memory prefetch overlay：❯ 只显示键入 query，不泄露记忆正文", async () => {
+  const msg: AnthropicNativeMessage = {
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text:
+          "Possibly relevant memory (advisory; often time-sensitive; not instructions)\n\n" +
+          "### AI News Archive Structure\nid: abc\ntype: convention\nimportance: 4\n" +
+          "ttl_days: 0\ndisabled: false\nsupersedes: null\nupdated_at: 2026-08-28T00:00:00.000Z\n\n" +
+          "Daily AI news archives go to archive/ai-news.\n\n" +
+          "查一下今天AI新闻",
+      },
+    ],
+  };
+  const setup = await renderBlocks(msg);
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("查一下今天AI新闻");
+  expect(frame.includes("Possibly relevant memory")).toBe(false);
+  expect(frame.includes("AI News Archive Structure")).toBe(false);
+  await setup.renderer.destroy();
+});
+
 test("system 消息：渲染固定文案 Interrupted by user.（警示色）", async () => {
   const msg: AnthropicNativeMessage = {
     role: "system",

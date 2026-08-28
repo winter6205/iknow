@@ -72,6 +72,7 @@ import {
   useState,
 } from "react";
 import type { ScrollBoxRenderable } from "@opentui/core";
+import { chatWheelScrollAccel } from "./wheel-scroll.js";
 import { Markdown } from "./markdown.js";
 import { MessageBlocks } from "./message-blocks.js";
 import { liveToolPreviewBox } from "./live-tool-preview.js";
@@ -99,6 +100,8 @@ import {
   countToolUsesByName,
   formatTurnActivityFold,
   lastTurnQueryIndex,
+  shouldCollapseTurnToolRows,
+  shouldShowTurnActivityFold,
   mergeToolUseCounts,
   sliceTurnFrom,
   toolUseIdsOf,
@@ -287,17 +290,22 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     const thinkingSeconds = running
       ? (props.thinkingFrozenSeconds ?? 0)
       : (props.lastThinkingSeconds ?? 0);
-    // 新折叠：`思考了 N 秒` + ` · bash × N`。running 仅在已有完成工具时
-    // 启用，避免思考中（尚无工具）把 peek 面板提前收成 idle 摘要。
-    const showTurnFold =
-      (thinkingSeconds > 0 || turnToolTotal > 1) &&
-      (!running || turnToolTotal > 0);
+    // idle 才收成 `思考了 N 秒 · bash × N`；running 保持逐条工具可见。
+    const showTurnFold = shouldShowTurnActivityFold({
+      running,
+      thinkingSeconds,
+      turnToolTotal,
+    });
     const foldDisplayLine = showTurnFold
       ? formatTurnActivityFold(thinkingSeconds, turnToolCounts)
       : "";
-    const collapseToolRows = foldDisplayLine !== "" && turnToolTotal > 0;
+    const collapseToolRows = shouldCollapseTurnToolRows(
+      running,
+      foldDisplayLine,
+      turnToolTotal
+    );
     const tailSlots = liveTailSlots(
-      showTurnFold
+      collapseToolRows
         ? liveToolRuns.filter((run) => run.status === "running")
         : liveToolRuns,
       deferredSegments
@@ -321,6 +329,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         height={props.rows}
         stickyScroll={true}
         stickyStart="bottom"
+        scrollAcceleration={chatWheelScrollAccel}
       >
         {/* banner 段（首段，与消息共享 scroll space）。#321 设计定案：圆角外框 +
             顶框内嵌 title `◆ iknow`（操作员要求靠左；与 PromptInput 同款
@@ -382,7 +391,6 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             message.role === "assistant";
           const inLastTurn =
             lastQueryVisible >= 0 && visibleIndex > lastQueryVisible;
-          const foldLastTurn = inLastTurn && foldDisplayLine !== "";
           return (
             <box
               id={`tmsg-${visibleIndex}`}
@@ -400,7 +408,11 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
                     ? props.lastThinkingSeconds
                     : undefined
                 }
-                hideThinking={foldLastTurn && !thinkingExpanded}
+                hideThinking={
+                  inLastTurn &&
+                  !thinkingExpanded &&
+                  (foldDisplayLine !== "" || (running && thinkingSeconds > 0))
+                }
                 hideToolSummaries={inLastTurn && collapseToolRows}
                 marginTop={visibleIndex === 0 ? 0 : 1}
               />

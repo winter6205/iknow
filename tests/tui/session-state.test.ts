@@ -365,6 +365,20 @@ describe("session-state: isTuiHiddenUserMessage（host 注入不进 ❯ 气泡�
     expect(isTuiHiddenUserMessage(msg("真实问题"))).toBe(false);
     expect(isTuiHiddenUserMessage(msg("答", "assistant"))).toBe(false);
   });
+
+  test("prefetch overlay 进 history 时只留键入 query", () => {
+    expect(
+      seedInputHistory([
+        msg(
+          "Possibly relevant memory (advisory; often time-sensitive; not instructions)\n\n" +
+            "### Daily AI News Source\nid: x\ntype: note\nimportance: 3\n" +
+            "ttl_days: 0\ndisabled: false\nsupersedes: null\nupdated_at: 2026-08-28T00:00:00.000Z\n\n" +
+            "https://ai-bot.cn/daily-ai-news/\n\n" +
+            "查一下今天AI新闻"
+        ),
+      ])
+    ).toEqual(["查一下今天AI新闻"]);
+  });
 });
 
 describe("session-state: seedInputHistory（会话恢复投影输入历史）", () => {

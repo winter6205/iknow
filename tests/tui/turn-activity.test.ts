@@ -14,6 +14,8 @@ import {
   lastTurnQueryIndex,
   mergeToolUseCounts,
   sliceTurnFrom,
+  shouldCollapseTurnToolRows,
+  shouldShowTurnActivityFold,
   toolUseIdsOf,
 } from "../../src/tui/turn-activity.js";
 
@@ -231,5 +233,43 @@ describe("toolUseIdsOf / countNamedCalls / mergeToolUseCounts", () => {
         ]
       )
     ).toEqual([{ name: "bash", count: 1 }]);
+  });
+});
+
+describe("shouldShowTurnActivityFold / shouldCollapseTurnToolRows", () => {
+  test("running → 不画折叠行、不藏工具", () => {
+    expect(
+      shouldShowTurnActivityFold({
+        running: true,
+        thinkingSeconds: 6,
+        turnToolTotal: 3,
+      })
+    ).toBe(false);
+    expect(shouldCollapseTurnToolRows(true, "思考了 6 秒 · bash × 3", 3)).toBe(
+      false
+    );
+  });
+
+  test("idle + 思考秒数 + 多工具 → 折叠", () => {
+    expect(
+      shouldShowTurnActivityFold({
+        running: false,
+        thinkingSeconds: 6,
+        turnToolTotal: 3,
+      })
+    ).toBe(true);
+    expect(shouldCollapseTurnToolRows(false, "思考了 6 秒 · bash × 3", 3)).toBe(
+      true
+    );
+  });
+
+  test("idle + 单次工具无思考 → 不折叠", () => {
+    expect(
+      shouldShowTurnActivityFold({
+        running: false,
+        thinkingSeconds: 0,
+        turnToolTotal: 1,
+      })
+    ).toBe(false);
   });
 });
