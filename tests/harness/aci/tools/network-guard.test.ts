@@ -22,9 +22,13 @@ import { describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 import {
+  assertDecodedBodyLimit,
+  contentLengthExceedsCap,
   createDefaultGuardDeps,
   DEFAULT_USER_AGENT,
   fetchPublicResponse,
+  MAX_DECODED_BODY_BYTES,
+  readUtf8WithByteLimit,
   validateHttpUrl,
   type GuardFetchFn,
   type GuardLookupFn,
@@ -543,3 +547,96 @@ describe("createDefaultGuardDeps - 浏览器伪装 UA（反爬可达性）", () 
     assert.ok(deps.lookup !== undefined);
   });
 });
+
+describe("decoded body byte cap", () => {
+  it("empty body and missing Content-Length succeed", async () => {
+    assert.equal(contentLengthExceedsCap(null, MAX_DECODED_BODY_BYTES), false);
+    assert.equal(contentLengthExceedsCap("", MAX_DECODED_BODY_BYTES), false);
+    const empty = await readUtf8WithByteLimit(null, MAX_DECODED_BODY_BYTES);
+    assert.equal(empty, "");
+    assert.doesNotThrow(() => assertDecodedBodyLimit(""));
+  });
+
+  it("non-numeric Content-Length is ignored (negative class)", () => {
+    assert.equal(
+      contentLengthExceedsCap("not-a-number", MAX_DECODED_BODY_BYTES),
+      false
+    );
+    assert.equal(contentLengthExceedsCap("-1", MAX_DECODED_BODY_BYTES), false);
+    assert.equal(
+      contentLengthExceedsCap(String(MAX_DECODED_BODY_BYTES + 1), MAX_DECODED_BODY_BYTES),
+      true
+    );
+  });
+
+  it("overflowing stub body is rejected without returning a partial page", async () => {
+    const huge = "x".repeat(MAX_DECODED_BODY_BYTES + 1);
+    await expectToolError(
+      () =>
+        fetchPublicResponse(
+          "https://example.com/huge",
+          { fetch: okFetch(huge), lookup: okLookup },
+          { tool: "web_fetch", timeoutMs: 1_000 }
+        ),
+      "body exceeds"
+    );
+    assert.throws(
+      () => assertDecodedBodyLimit(huge),
+      (err: unknown) =>
+        err instanceof ToolExecutionError && err.message.includes("body exceeds")
+    );
+  });
+
+  it("stream reader aborts on the first chunk that crosses the cap", async () => {
+    const cap = 8;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(Buffer.from("aaaa"));
+        controller.enqueue(Buffer.from("bbbbbbbb"));
+        controller.close();
+      },
+    });
+    await assert.rejects(
+      () => readUtf8WithByteLimit(stream, cap),
+      (err: unknown) =>
+        err instanceof ToolExecutionError && err.message.includes("body exceeds")
+    );
+  });
+
+  it("concurrent over-cap and under-cap stubs stay isolated", async () => {
+    const huge = "x".repeat(MAX_DECODED_BODY_BYTES + 1);
+    const [ok, bad] = await Promise.allSettled([
+      fetchPublicResponse(
+        "https://ok.example.com/",
+        { fetch: okFetch("small"), lookup: okLookup },
+        { tool: "web_fetch", timeoutMs: 1_000 }
+      ),
+      fetchPublicResponse(
+        "https://big.example.com/",
+        { fetch: okFetch(huge), lookup: okLookup },
+        { tool: "web_fetch", timeoutMs: 1_000 }
+      ),
+    ]);
+    assert.equal(ok.status, "fulfilled");
+    if (ok.status === "fulfilled") assert.equal(ok.value.body, "small");
+    assert.equal(bad.status, "rejected");
+    if (bad.status === "rejected") {
+      assert.ok(bad.reason instanceof ToolExecutionError);
+      assert.ok(String(bad.reason.message).includes("body exceeds"));
+    }
+  });
+
+  it("overflow is not swallowed into a truncated success body", async () => {
+    const huge = "y".repeat(MAX_DECODED_BODY_BYTES + 8);
+    await expectToolError(
+      () =>
+        fetchPublicResponse(
+          "https://example.com/huge",
+          { fetch: okFetch(huge), lookup: okLookup },
+          { tool: "web_fetch", timeoutMs: 1_000 }
+        ),
+      "web_fetch failed:"
+    );
+  });
+});
+

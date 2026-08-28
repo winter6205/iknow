@@ -43,6 +43,73 @@ type FetchDispatcher = NonNullable<Parameters<typeof fetch>[1]>["dispatcher"];
 /** 重定向上限（与 upstream MAX_REDIRECTS 对齐）。 */
 export const MAX_REDIRECTS = 5;
 
+/** 解码后响应体上限（1 MiB）。生产流式读与 stub 二次校验共用。 */
+export const MAX_DECODED_BODY_BYTES = 1_048_576;
+
+/**
+ * Content-Length 预检：仅当头是非负整数且大于上限时为 true。
+ * 缺省 / 空 / 非数字 / 负数一律 false——非法 CL 不是拒绝依据。
+ */
+export function contentLengthExceedsCap(
+  header: string | null | undefined,
+  maxBytes: number
+): boolean {
+  if (header === null || header === undefined) return false;
+  const trimmed = header.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    // EXIT: illegal Content-Length is ignored; stream accumulation is authoritative
+    return false;
+  }
+  return Number(trimmed) > maxBytes;
+}
+
+/** 已解码字符串的 UTF-8 字节数超限 → 抛无前缀 ToolExecutionError。 */
+export function assertDecodedBodyLimit(
+  body: string,
+  maxBytes: number = MAX_DECODED_BODY_BYTES
+): void {
+  const bytes = Buffer.byteLength(body, "utf8");
+  if (bytes > maxBytes) {
+    throw new ToolExecutionError(`body exceeds ${maxBytes} bytes (${bytes})`);
+  }
+}
+
+/**
+ * 从 ReadableStream 累计 UTF-8 字节，第一块越限即 abort。
+ * 无流（null）返回空串，不假装成功读到了正文。
+ */
+export async function readUtf8WithByteLimit(
+  stream: ReadableStream<Uint8Array> | null,
+  maxBytes: number
+): Promise<string> {
+  if (stream === null) {
+    // EXIT: no body stream → empty string, not a truncated success
+    return "";
+  }
+  const reader = stream.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        // EXIT: first chunk that crosses the cap aborts; no partial body returned
+        throw new ToolExecutionError(
+          `body exceeds ${maxBytes} bytes (${total})`
+        );
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 /**
  * 浏览器伪装 UA（web_fetch / web_search 工具生产默认出口共享）。
  *
@@ -173,10 +240,21 @@ export function createDefaultGuardDeps(
           { dispatcher: dispatcher as unknown as FetchDispatcher }
         : {}),
     });
+    const contentLength = response.headers.get("content-length");
+    if (contentLengthExceedsCap(contentLength, MAX_DECODED_BODY_BYTES)) {
+      // EXIT: Content-Length exceeds cap — cancel the stream, do not buffer
+      if (response.body) await response.body.cancel();
+      throw new ToolExecutionError(
+        `body exceeds ${MAX_DECODED_BODY_BYTES} bytes`
+      );
+    }
+    const body = response.body
+      ? await readUtf8WithByteLimit(response.body, MAX_DECODED_BODY_BYTES)
+      : await readTextThenLimit(response);
     return {
       status: response.status,
       contentType: response.headers.get("content-type") ?? "",
-      body: await response.text(),
+      body,
       location: response.headers.get("location") ?? undefined,
     };
   };
@@ -233,6 +311,7 @@ async function followGuardedRedirects(
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     await ensurePublicTarget(current, deps.lookup, fail);
     const response = await runFetch(deps.fetch, current, signal, fail);
+    enforceDecodedBodyLimit(response.body, fail);
     if (response.status >= 200 && response.status < 300) {
       return { ...response, finalUrl: current };
     }
@@ -251,6 +330,27 @@ function failWithPrefix(tool: string): (reason: string) => never {
   return (reason: string): never => {
     throw new ToolExecutionError(`${tool} failed: ${reason}`);
   };
+}
+
+/** stub / 生产共用：解码体超限走 fail 前缀，不返回半页。 */
+function enforceDecodedBodyLimit(
+  body: string,
+  fail: (reason: string) => never
+): void {
+  try {
+    assertDecodedBodyLimit(body);
+  } catch (error) {
+    if (error instanceof ToolExecutionError) fail(error.message);
+    const detail = error instanceof Error ? error.message : String(error);
+    fail(detail);
+  }
+}
+
+/** 无 ReadableStream 时退回 text()，仍过字节上限。 */
+async function readTextThenLimit(response: Response): Promise<string> {
+  const body = await response.text();
+  assertDecodedBodyLimit(body);
+  return body;
 }
 
 /** 执行一次注入 fetch，把中止 / 底层错误归一为带前缀的 ToolExecutionError。 */
