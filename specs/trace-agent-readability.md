@@ -47,7 +47,7 @@
 
 1. **P0 crash 取证收口**：worker crash 后，磁盘上永久存在「结构化 error 字段 + stderr 全量指针文件 + 尾部 summary」三件套；修复 exit-vs-flush 竞态与 crashedSummary 直达模型的脱敏洞。任何入口（含 chat REPL 默认配置）下复现 #783 秒崩都能一步拿到根因。
 2. **P1 读侧动线**：agent 有了 `query_trace` 工具（投影模式：llm_call 默认不返回 messages 全文，返回 `messages_count` + 首末条预览 + error；`record_id` 下钻）；traceserver 补齐 `verification`/`goal` 白名单漂移与 `turn_id` 过滤；grep 工具超长命中行截断（防单行吃光 executor 20k 预算挤出其余命中）。
-3. **P1 磁盘止血**：trace 目录 rotation 双帽默认开启（>500MB 或 >100 文件删最旧）；`IKNOW_TRACE_MESSAGES=blob` opt-in 模式用内容寻址引用消灭 98.2% 重复（实测 263.5MB → 约 37MB）；`maskJsonLine` 兑现注释承诺改工厂级缓存；写失败计数经 health 暴露。
+3. **P1 磁盘止血**：trace 目录 rotation 双帽默认开启（>500MB 或 >100 文件触发，价值分层驱逐——无 error 小文件先删，非纯 mtime）；`IKNOW_TRACE_MESSAGES=blob` opt-in 模式用内容寻址引用消灭 98.2% 重复（实测 263.5MB → 约 37MB）；`maskJsonLine` 兑现注释承诺改工厂级缓存；写失败计数经 health 暴露。
 
 用户：调试者（崩溃后定位根因）+ 运行中的主代理（自查 trace 定位错误）。成功 = Success Criteria 全绿。
 
@@ -83,7 +83,8 @@ src/cli.ts                          # chat 入口：subagent 生命周期 trace 
 src/harness/build-engine.ts         # 透传 diagnosticsDir（traceDir → manager DI 缝）
 
 # P1 写侧止血
-src/harness/trace/rotation.ts       # 新文件：maybeRotate(dir, {maxTotalBytes:500MB, maxFiles:100})，双帽删最旧
+src/harness/trace/rotation.ts       # 新文件：maybeRotate(dir, {maxTotalBytes:500MB, maxFiles:100})，双帽 + 价值分层驱逐
+                                    # （无 error 小文件先删 → mtime 最旧；error/活跃/受保护文件除外，memory_gc 式零 LLM）
 src/harness/trace/jsonl.ts          # maskJsonLine 工厂级缓存（兑现 jsonl.ts:76 注释）；IKNOW_TRACE_MESSAGES=blob
                                     # 模式：messages 元素→{sha,bytes} 引用 + blobs/<sha> 写入（mask 后）；写失败实例计数器
 src/harness/trace/noop.ts           # 计数器空实现对齐
@@ -157,7 +158,7 @@ ADR-0014 回归专项：`IKNOW_TRACE_MESSAGES` 缺省时 `subagent-foreground-tr
 2. **竞态修复**：>64KB stderr burst 后立即 `exit(2)` 的子进程，crash summary 含最后一条 stderr 行。**Check**: 竞态专项单测绿 ✅/❌
 3. **脱敏闭环**：注入已知 secret 后，stderr .log、blobs/、crashedSummary（父可见信封）三者均不含 secret 明文。**Check**: 单测 grep 断言 ✅/❌
 4. **取证无条件**：chat REPL（pipe 形态、未配 traceOut）跑一次 spawn_subagent → `trace/subagent.jsonl` 出现三类生命周期事件。**Check**: integration test 绿 ✅/❌
-5. **rotation**：夹具目录超双帽任一 → 下次工厂创建后最旧 .jsonl 被删、总数 ≤ 帽；env 关闭不删；活跃文件（mtime < 5min）受保护。**Check**: rotation 单测绿 ✅/❌
+5. **rotation**：夹具目录超双帽任一 → 无 error 且最小的夹具先被删、含 error 的夹具在帽内存活、总数 ≤ 帽；env 关闭不删；活跃文件（mtime < 5min）与受保护文件（stderr 日志 / subagent.jsonl）不删。**Check**: rotation 单测绿 ✅/❌
 6. **白名单漂移修复**：`GET /api/v1/traces?record_type=verification`（与 goal）返回 200；fields 含两型列映射；`?turn_id=` 过滤命中。**Check**: `npx vitest run tests/traceserver` 绿 ✅/❌
 7. **blob opt-in**：默认 full 下既有 e2e（含 messages_captured 断言）全绿；`IKNOW_TRACE_MESSAGES=blob` 下行内为 `{sha,bytes}`、`blobs/<sha>` 存在且内容过 mask。**Check**: 两条单测 + `npx vitest run tests/e2e/subagent-foreground-trace.test.ts` 绿 ✅/❌
 8. **query_trace 工具**：registry SSOT 含 query_trace（工具数断言更新）；`status=error` 过滤命中错误行且返回不含 messages 全文；单次返回 ≤4000 chars；`record_id` 下钻能取到单条详情。**Check**: `tests/aci/` 单测 + registry 数量断言绿 ✅/❌
@@ -178,7 +179,7 @@ ADR-0014 回归专项：`IKNOW_TRACE_MESSAGES` 缺省时 `subagent-foreground-tr
 4. **query_trace 进 registry SSOT**（第 11 个 ACI 工具，permission read-only + fast timeout tier）：不用 lazy/tool_search 通道（发现成本 > 前缀字节成本）。采纳推荐项。
 5. **C1 stderr 指针形态**：`<traceDir>/stderr/<taskId>.log`、mask 后落盘、1MiB cap；`subagent_stop` 增 `stderr_path`/`stderr_bytes` Postel 可选字段。调研锁定。
 6. **C2 竞态修复形态**：exit 保终态 + stderr close 有界 race（≤500ms），不做裸 exit→close 替换（防状态机被 stdio drain 绑架 + 潜在 close 永不来挂起）；`child.on("error")` 同修。调研锁定（skeptic 修正）。
-7. **C3 rotation 双帽**：>500MB 或 >100 文件删最旧，env 可关；worker trace 默认目录从 CWD 相对改为 workspaceRoot 锚定（ADR-0019 语义）。调研锁定。
+7. **C3 rotation 双帽 + 价值分层驱逐**：>500MB 或 >100 文件触发，env 可关；驱逐序机械零 LLM（memory_gc 先例：可重复、幂等、不判内容）——先删「无 `status:"error"` 记录且体量最小」（打招呼/调设置类会话的机械代理，同大小取更旧），再按 mtime 删最旧；error 扫描对候选惰性执行（从小文件起，成本有界）；活跃文件（mtime < 5min）、含 error 会话文件、crash stderr 日志、`subagent.jsonl` 聚合文件不删；worker trace 默认目录从 CWD 相对改为 workspaceRoot 锚定（ADR-0019 语义）。operator 复审修正（2026-08-29）：纯最旧优先太生硬，采纳价值分层。
 8. **C4 读侧补齐不加端点**：白名单 + fields 列 + `turn_id` 过滤；「最新错误」用现有 `status=error` + 降序 + `limit=1` 覆盖，不新增聚合端点。调研锁定。
 9. **C5 maskJsonLine 工厂缓存**：兑现 jsonl.ts:76 注释承诺，行为不变。调研锁定。
 10. **C6 写失败计数**：维持 D13 never-throw + warn-once，追加实例计数经 health 暴露。调研锁定。

@@ -45,10 +45,10 @@ minimal-change-verifier: yes — 1 个逻辑任务簇「trace 对 agent 可读�
 
 ### 组 B — P1 写侧止血
 
-4. **trace 目录 rotation 双帽** — tag: `[implementation]`
-   - **Inherits:** spec C3——>500MB 或 >100 文件删最旧、env 可关、活跃文件（mtime < 5min）保护；`subagent.jsonl`/`stderr/` 同策略；blobs/ 回收按 mtime orphans 规则起步（spec Open Questions 首版裁决）。
+4. **trace 目录 rotation 双帽 + 价值分层驱逐** — tag: `[implementation]`
+   - **Inherits:** spec C3（operator 复审修正 2026-08-29）——>500MB 或 >100 文件触发、env 可关、活跃文件（mtime < 5min）保护；驱逐序机械零 LLM（memory_gc 先例）：先删「无 error 记录且体量最小」（打招呼/调设置类会话的机械代理，同大小取更旧），再按 mtime 删最旧；error 扫描对候选惰性执行（从小文件起，成本有界）；crash stderr 日志与 `subagent.jsonl` 聚合文件不删；blobs/ 回收按 mtime orphans 规则起步（spec Open Questions 首版裁决）。
    - **Surface:** `src/harness/trace/`（新 rotation 模块 + jsonl 工厂接线，帽值检查在工厂创建时）。
-   - **Acceptance:** 夹具目录超任一帽 → 工厂创建后最旧被删、总数 ≤ 帽；env=off 不删；rotation 与并发写竞争时不删活跃文件。Check: rotation 单测。
+   - **Acceptance:** 夹具目录超任一帽 → 无 error 且最小的夹具先被删、含 error 的夹具在帽内存活、总数 ≤ 帽；env=off 不删；rotation 与并发写竞争时不删活跃文件与受保护文件。Check: rotation 单测。
    - Status: [ ] pending
    - [parallel]
 
