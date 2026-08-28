@@ -1276,9 +1276,9 @@ export class SessionHub {
               // 测试)→ 整句 no-op,行为逐字节不变。
               this.notifyAutoMemory(
                 s.finalResult,
+                s.priorCount,
                 session.workspaceRoot,
-                conversationId,
-                s.priorCount
+                conversationId
               );
               // #458 T5 (SC8): goal.status write-back on verify-loop terminal
               // outcome. The hub is the only writer of goal.status. Target status
@@ -2287,9 +2287,9 @@ export class SessionHub {
    */
   private notifyAutoMemory(
     result: RunResult,
+    priorMessageCount: number,
     workspaceRoot?: string,
-    conversationId?: string,
-    priorMessageCount: number
+    conversationId?: string
   ): void {
     // EXIT: a bound session uses only the per-root hook; constructor injection
     // remains the fallback when no workspaceRoot is on the session file.
