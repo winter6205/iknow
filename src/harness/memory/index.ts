@@ -90,6 +90,16 @@ export type { MemoryLayerEntry } from "./discovery.js";
 
 export { scoreMemoryEntries } from "./bm25.js";
 export type { ScoredEntry, ScoreOpts } from "./bm25.js";
+export {
+  MEMORY_ADVISORY_PREFIX,
+  MEMORY_PREFETCH_CHAR_CAP,
+  MEMORY_PREFETCH_MAX_HITS,
+  attachPrefetchOverlay,
+  buildMemoryPrefetchOverlay,
+  formatPrefetchOverlay,
+  selectPrefetchHits,
+} from "./prefetch.js";
+export type { BuildPrefetchOverlayOpts, SelectPrefetchOpts } from "./prefetch.js";
 
 export {
   eligibleForPromote,

@@ -22,6 +22,10 @@ export interface ScoredEntry {
   readonly score: number;
   /** Original input index — tie-breaker for stable ordering. */
   readonly index: number;
+  /** Query tokens found in the title (BM25 formula unchanged). */
+  readonly titleHits: number;
+  /** Query tokens found in the body (BM25 formula unchanged). */
+  readonly bodyHits: number;
 }
 
 export interface ScoreOpts {
@@ -90,7 +94,7 @@ export function scoreMemoryEntries(
       bodyHits * BODY_WEIGHT +
       entry.importance * IMPORTANCE_WEIGHT +
       recencyBoost(entry.updated_at, nowMs) * RECENCY_WEIGHT;
-    return { entry, score: raw, index };
+    return { entry, score: raw, index, titleHits, bodyHits };
   });
 
   tagged.sort((a, b) => {
