@@ -21,6 +21,9 @@ import type { AciToolDef } from "../aci/types.js";
 import type { ToolExecutionContext } from "../tools/types.js";
 import type { SubAgentManager } from "../subagent/manager.js";
 import { ToolExecutionError } from "../errors.js";
+import { safeEmitStream } from "../stream.js";
+import type { GraphProgressSnapshot } from "./progress.js";
+import { createGraphProgressTracker } from "./progress.js";
 import { validateGraph, type GraphValidationError } from "./topo.js";
 import { runGraph } from "./scheduler.js";
 import { createSubAgentNodeExecutor } from "./node-executor.js";
@@ -146,6 +149,13 @@ function renderTask(node: RunGraphNodeInput, ctx: NodeContext): string {
   return `${node.task}\n\n## Results from the tasks this one depends on\n\n${sections.join("\n\n")}`;
 }
 
+function emitGraphProgress(
+  ctx: ToolExecutionContext | undefined,
+  snapshot: GraphProgressSnapshot | null
+): void {
+  safeEmitStream(ctx?.onStream, { type: "graph_progress", snapshot });
+}
+
 export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
   const isEnabled = deps.isEnabled ?? ((): boolean => true);
   return Object.freeze({
@@ -238,16 +248,28 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
           ...(parentTurnId !== undefined ? { parentTurnId } : {}),
         })(id, nodeCtx);
       };
-      const execution = await runGraph(spec, exec);
-      // EXIT:归因调用侧取消 —— 与 spawn_subagent 一致(executor 因
-      // signal.aborted 归一 execution_failed:cancelled)。半张图的部分结果
-      // 不当成功数据返回:调用方已经不要这轮了。
-      if (signal?.aborted) {
-        throw new ToolExecutionError(
-          "run_graph: cancelled by caller abort while the graph was running"
-        );
+      const tracker = createGraphProgressTracker(spec.nodes);
+      try {
+        const execution = await runGraph(spec, exec, {
+          onWave: (wave, ids) => {
+            emitGraphProgress(ctx, tracker.onWave(wave, ids));
+          },
+          onNode: (result) => {
+            emitGraphProgress(ctx, tracker.onNode(result));
+          },
+        });
+        // EXIT:归因调用侧取消 —— 与 spawn_subagent 一致(executor 因
+        // signal.aborted 归一 execution_failed:cancelled)。半张图的部分结果
+        // 不当成功数据返回:调用方已经不要这轮了。
+        if (signal?.aborted) {
+          throw new ToolExecutionError(
+            "run_graph: cancelled by caller abort while the graph was running"
+          );
+        }
+        return condense(nodes, execution.results, execution.waveCount);
+      } finally {
+        emitGraphProgress(ctx, null);
       }
-      return condense(nodes, execution.results, execution.waveCount);
     },
   });
 }

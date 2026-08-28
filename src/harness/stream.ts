@@ -26,6 +26,7 @@
  */
 import type { AgentStatusSnapshot } from "./agent-status.js";
 import type { EnvSnapshot } from "./env-snapshot.js";
+import type { GraphProgressSnapshot } from "./graph/progress.js";
 
 export type HarnessStreamEvent =
   | { type: "text_delta"; text: string }
@@ -69,7 +70,10 @@ export type HarnessStreamEvent =
   // **不**进 verify 输入、**不**写 ADR-0028 状态栏。deps.envSnapshot 缺席
   // (ask / worker 路径)→ 本事件不发。snapshot 即 readEnvSnapshot 产物:
   // git 失败 → git 字段全 null + degradeReason 分型(degraded,cwd 保留),永不 throw。
-  | { type: "env_snapshot"; snapshot: EnvSnapshot };
+  | { type: "env_snapshot"; snapshot: EnvSnapshot }
+  // TUI run_graph 执行视图：scheduler onWave/onNode 累加快照。snapshot
+  // null = 本次 run_graph 结束或取消，宿主应撤掉 graph chrome。
+  | { type: "graph_progress"; snapshot: GraphProgressSnapshot | null };
 
 /**
  * 观察者错误不得反流回 emit 路径(对齐 ADR-0003 `safeTrace` MUST NOT throw

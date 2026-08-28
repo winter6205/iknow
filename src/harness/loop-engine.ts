@@ -1296,6 +1296,7 @@ async function executeWaveAndCommit(opts: {
   readonly blocks: AnthropicContentBlock[];
   /** F-4:本回合 trace turn id,透传到 ctx.turnId(spawn_subagent 的归属回合)。 */
   readonly turnId: string;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
 }): Promise<void> {
   const slots: Array<ToolExecutionResult | undefined> = Array.from(
     { length: opts.wave.length },
@@ -1323,7 +1324,8 @@ async function executeWaveAndCommit(opts: {
       slots[index] = result;
       await flushPrefix();
     },
-    opts.turnId
+    opts.turnId,
+    opts.onStream
   );
   for (let i = 0; i < waveResults.length; i++) {
     if (slots[i] === undefined) slots[i] = waveResults[i];
@@ -1341,6 +1343,7 @@ async function runToolPhase(opts: {
   readonly started: number;
   /** F-4:本回合 trace turn id(见 executeWaveAndCommit)。 */
   readonly turnId: string;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
 }): Promise<{
   transition: Transition;
   turn: TurnTrace;
@@ -1372,6 +1375,7 @@ async function runToolPhase(opts: {
       results,
       blocks,
       turnId: opts.turnId,
+      onStream: opts.onStream,
     });
   }
   const toolResultMsg: AnthropicNativeMessage = {
@@ -1774,6 +1778,7 @@ async function stepWithTrace(opts: {
     signal: opts.signal,
     started,
     turnId,
+    onStream: opts.onStream,
   });
 
   // #645 T1 / ADR-0028:last_tool = 批内最后一个成功工具名(kind === "ok")。

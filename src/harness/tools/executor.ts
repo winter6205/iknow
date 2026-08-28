@@ -233,7 +233,8 @@ export function createExecutor(registry: RegistryImpl): Executor {
     signal?: AbortSignal,
     timeoutMs?: number,
     conversationId?: string,
-    turnId?: string
+    turnId?: string,
+    onStream?: ToolExecutionContext["onStream"]
   ): Promise<ToolExecutionResult> {
     const validation = validateCall(registry, call);
     if (!validation.ok) return validation.failure;
@@ -245,6 +246,7 @@ export function createExecutor(registry: RegistryImpl): Executor {
       signal: stop.signal,
       ...(conversationId !== undefined ? { conversationId } : {}),
       ...(turnId !== undefined ? { turnId } : {}),
+      ...(onStream !== undefined ? { onStream } : {}),
     };
     try {
       const out =
@@ -289,7 +291,8 @@ export function createExecutor(registry: RegistryImpl): Executor {
       result: ToolExecutionResult,
       index: number
     ) => void | Promise<void>,
-    turnId?: string
+    turnId?: string,
+    onStream?: ToolExecutionContext["onStream"]
   ): Promise<ReadonlyArray<ToolExecutionResult>> {
     const out: ToolExecutionResult[] = [];
     for (const [index, call] of calls.entries()) {
@@ -298,7 +301,8 @@ export function createExecutor(registry: RegistryImpl): Executor {
         signal,
         timeoutMs,
         conversationId,
-        turnId
+        turnId,
+        onStream
       );
       await onSettled?.(result, index);
       out.push(result);

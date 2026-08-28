@@ -21,6 +21,7 @@ import type {
   Registry,
   ToolDef,
 } from "../tools/types.js";
+import type { HarnessStreamEvent } from "../stream.js";
 import type { AciCatalog, AciToolDef } from "../aci/types.js";
 import {
   checkPermission,
@@ -130,7 +131,8 @@ export interface PermissionRuntime {
     signal?: AbortSignal,
     timeoutMs?: number,
     conversationId?: string,
-    turnId?: string
+    turnId?: string,
+    onStream?: (event: HarnessStreamEvent) => void
   ) => Promise<ToolExecutionResult>;
 }
 
@@ -239,7 +241,8 @@ export function createPermissionRuntime(
     signal?: AbortSignal,
     timeoutMs?: number,
     conversationId?: string,
-    turnId?: string
+    turnId?: string,
+    onStream?: (event: HarnessStreamEvent) => void
   ): Promise<ToolExecutionResult> {
     const [result] = await opts.inner.executeAll(
       [call],
@@ -247,7 +250,8 @@ export function createPermissionRuntime(
       timeoutMs,
       conversationId,
       undefined,
-      turnId
+      turnId,
+      onStream
     );
     const r = result as ToolExecutionResult;
     if (!def) return r;
@@ -286,7 +290,8 @@ export function createPermissionRuntime(
       result: ToolExecutionResult,
       index: number
     ) => void | Promise<void>,
-    turnId?: string
+    turnId?: string,
+    onStream?: (event: HarnessStreamEvent) => void
   ): Promise<ReadonlyArray<ToolExecutionResult>> {
     const out: ToolExecutionResult[] = [];
     for (const [index, call] of calls.entries()) {
@@ -300,7 +305,8 @@ export function createPermissionRuntime(
               signal,
               timeoutMs,
               conversationId,
-              turnId
+              turnId,
+              onStream
             );
       await onSettled?.(result, index);
       out.push(result);

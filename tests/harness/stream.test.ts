@@ -104,4 +104,21 @@ describe("HarnessStreamEvent contract (D1 minimal set)", () => {
     assert.deepEqual(ids, ["toolu_1", "toolu_1"]);
     assert.deepEqual(pieces, ['{"v', 'alue":"y"}']);
   });
+
+  it("graph_progress event carries snapshot or null and discriminates on type", () => {
+    const live: HarnessStreamEvent = {
+      type: "graph_progress",
+      snapshot: {
+        waveIndex: 0,
+        nodes: [{ id: "a", deps: [], status: "running" }],
+      },
+    };
+    const cleared: HarnessStreamEvent = {
+      type: "graph_progress",
+      snapshot: null,
+    };
+    assert.equal(live.type, "graph_progress");
+    assert.equal(live.snapshot?.nodes[0]?.id, "a");
+    assert.equal(cleared.snapshot, null);
+  });
 });

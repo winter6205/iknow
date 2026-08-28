@@ -24,6 +24,7 @@ import type {
   ToolExecutionResult,
   Registry,
 } from "../tools/types.js";
+import type { HarnessStreamEvent } from "../stream.js";
 import type { PermissionOutcome } from "../permission/types.js";
 import {
   createPermissionRuntime,
@@ -110,7 +111,8 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
         result: ToolExecutionResult,
         index: number
       ) => void | Promise<void>,
-      turnId?: string
+      turnId?: string,
+      onStream?: (event: HarnessStreamEvent) => void
     ): Promise<ReadonlyArray<ToolExecutionResult>> => {
       if (calls.length === 0) return [];
       const waves = partitionConcurrencyWaves(
@@ -132,6 +134,7 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
           turnId,
           onSettled,
           indexBase,
+          onStream,
         });
         for (const r of part) out.push(r);
         indexBase += wave.length;
@@ -212,6 +215,7 @@ async function runWave(opts: {
     | ((result: ToolExecutionResult, index: number) => void | Promise<void>)
     | undefined;
   readonly indexBase: number;
+  readonly onStream: ((event: HarnessStreamEvent) => void) | undefined;
 }): Promise<ReadonlyArray<ToolExecutionResult>> {
   const gated: Array<{
     readonly item: WaveItem;
@@ -240,7 +244,8 @@ async function runWave(opts: {
                   effectiveSignal,
                   undefined,
                   opts.conversationId,
-                  opts.turnId
+                  opts.turnId,
+                  opts.onStream
                 ),
               call: g.item.call,
               def: g.item.def,

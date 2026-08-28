@@ -12,6 +12,7 @@
  */
 
 import type { AnthropicContentBlock } from "../model-adapter/types.js";
+import type { HarnessStreamEvent } from "../stream.js";
 
 /**
  * 工具运行时入口签名:接收严格校验后的输入,返回 model-facing payload。
@@ -36,6 +37,11 @@ export interface ToolExecutionContext {
    * 缺省 = 无归属回合(worker / ask / 直接调 handler),下游按 Postel 不落该键。
    */
   readonly turnId?: string;
+  /**
+   * 本回合宿主流观察者（F 图进度）。`run_graph` 经 safeEmitStream 推
+   * `graph_progress`；缺席 = 不发事件（ask / 直调 handler 默认）。
+   */
+  readonly onStream?: (event: HarnessStreamEvent) => void;
 }
 
 /**
@@ -145,6 +151,7 @@ export interface Executor {
       result: ToolExecutionResult,
       index: number
     ) => void | Promise<void>,
-    turnId?: string // F-4: 原样透传到 ctx.turnId;缺省 = 无归属回合
+    turnId?: string, // F-4: 原样透传到 ctx.turnId;缺省 = 无归属回合
+    onStream?: (event: HarnessStreamEvent) => void // 图进度等工具内 emit
   ) => Promise<ReadonlyArray<ToolExecutionResult>>;
 }
