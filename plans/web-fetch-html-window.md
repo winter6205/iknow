@@ -1,0 +1,95 @@
+# Plan: web_fetch HTML window（原始 HTML + 续抓窗口）
+
+**Goal:** 让编程智能体真正能看网页：`web_fetch` 可按窗口返回原始 HTML（或既有纯文本），截断信息放在模型可见头部以便 `start_chars` 续抓；传输层对响应体设字节上限，避免主进程被超大页面拖垮。不把 bash `network:true` curl 当看网页主路径。
+**Approach:** 三个有序 tracer bullet（T1 字节上限 → T2 窗口协议 → T3 `as:html`），各 1 commit。bash / env-isolation / ADR-0022 本轮零改动。
+**Spec / ADR:** ADR-0006（executor 20000 硬顶、不落盘、不信任工具自称截断字段）；web_fetch 既有 SSRF + `UNTRUSTED_BANNER`。不新开 ADR（无 one-way door：默认仍 `as:text`，raw 模式 opt-in）。
+**Tracker:** 本文件 fallback（环境 `gh` 只读）。
+**Out of scope:** 硬化 bash curl DNS/证书/代理 env；把 `HTTP(S)_PROXY` 加进 `BASE_ENV_WHITELIST`；HTML 落盘；`as:html` 作默认；复活 `STATIC_NETWORK_WHITELIST`；web_fetch output mask（另票）；JS 渲染 / 分页站点（续抓只覆盖「同 URL 字符窗口」）。
+
+**Affects (declared file list):**
+- T1: `src/harness/aci/tools/network-guard.ts`, `tests/harness/aci/tools/network-guard.test.ts`
+- T2: `src/harness/aci/tools/web-fetch.ts`, `tests/harness/aci/tools/web-fetch.test.ts`, `tests/harness/tools/executor.test.ts` (one e2e cap test)
+- T3: `src/harness/aci/tools/web-fetch.ts`, `tests/harness/aci/tools/web-fetch.test.ts`, `CHANGELOG.md`
+- Never this round: `src/harness/aci/tools/bash.ts`, `src/harness/sandbox/env-isolation.ts`, `src/harness/sandbox/bwrap.ts`, `src/harness/tools/executor.ts` (read-only citation of `OUTPUT_HARD_CAP`; no production edit)
+
+## ACR verdict
+
+Filled after the architecture-change-reviewer agent runs against this committed file.
+
+```
+bounded-context-guardian: pending
+defensive-contract-validator: pending
+error-handling-enforcer: pending
+complexity-anti-drift: pending
+minimal-change-verifier: pending
+```
+
+## Decision constraints (from audit)
+
+- 主路径永远是 `web_fetch` + `network-guard`，不是沙箱 curl。本机探针已证明 `network:true` 时 curl 可出网；默认隔离仍 `curl: (6)`。不改 fence env 白名单。
+- 窗口元数据必须写在 `output` 文本头部（`URL/Status/Content-Type` 同块、横幅之前）。禁止只放 envelope `meta`（executor 不把 meta 给模型）。禁止依赖正文尾部 `...[truncated]`（超 20k 时会被 executor 从尾部吃掉）。
+- 头部用纯文本 `Window:` 行（`start` / `returned` / `original_length`），不是 executor 会「信任后跳过封顶」的 JSON `truncated` 字段。executor 仍按序列化长度硬顶。
+- 工具层保证整段 `output.length <= 20000`（头部 + 横幅 + 正文），这样工具自己的窗口行不会被 executor 二次截断。`max_chars` schema 上限从 50000 收到 16000；最终正文再按「20000 − 已写头部」收口。
+- 生产 `fetch` 流式读 + 超限 abort；注入 stub 的超长 `body` 在 `fetchPublicResponse` 二次拒绝（defense in depth）。
+- `as:html` 仅当 Content-Type 含 `html`；非法 `as`、负 `start_chars`、二进制类型 → `ToolExecutionError`，消息 `${tool} failed:` / `web_fetch:` 前缀，不返回空串冒充成功。
+- 从 handler 抽出 `compileFetchInput` / `renderFetchBody` / `sliceFetchWindow` / `formatFetchOutput`，禁止把模式+窗口+格式塞进同一个 god-handler。
+- D9：description 正面措辞，过 `d9-description-guard`。
+- 不落盘完整 HTML（ADR-0006）。agent 若要把窗口 `write_file` 是它自己的选择，工具不代写。
+
+## Tasks (ordered)
+
+1. **T1 transport body byte cap** — tag: `[implementation]`
+   - **Surface:** `src/harness/aci/tools/network-guard.ts` + `tests/harness/aci/tools/network-guard.test.ts`
+   - **Behavior:**
+     - 导出 `MAX_DECODED_BODY_BYTES = 1_048_576`（1 MiB）。
+     - 抽出 `readUtf8WithByteLimit(stream, maxBytes)`：累计 UTF-8 字节，超限抛 `ToolExecutionError`（无工具前缀，由 `runFetch`/`failWithPrefix` 包一层）。`// EXIT:` 注释写明超限即 abort、不返回部分正文。
+     - `createDefaultGuardDeps` 的生产 `fetch` 用 `response.body` 流式读，不再无条件 `response.text()`。无 body 流时退回 `text()` 后再 `assertDecodedBodyLimit`。
+     - `followGuardedRedirects` 在每次成功 `runFetch` 后对 `response.body` 做 `Buffer.byteLength(..., "utf8")` 上限检查（stub 路径也能炸）。
+     - Content-Length 若可解析且大于上限：在读流前拒绝（`// EXIT: Content-Length exceeds cap`）。Compressed CL 可能偏小——流式累计仍是权威。
+   - **Tests (5 classes):**
+     - empty：空 body / 无 Content-Length → 成功，返回 `""`。
+     - negative：Content-Length 非法（非数字）忽略，走流式累计（不把非法 CL 当拒绝依据）。
+     - overflow：stub body 超 1 MiB → `ToolExecutionError` 含 `body exceeds`；流式读在越过上限的第一块 abort。
+     - concurrent：两路 fetch stub 一超一未超，互不串扰。
+     - exception：caller abort 仍 `request aborted`；超限错误不吞、不返回截断半页当成功。
+   - **Files:** 仅 network-guard + 其测试。web_fetch 行为本 commit 不变。
+   - Status: [ ] pending
+
+2. **T2 fetch window protocol** — tag: `[implementation]`
+   - **Surface:** `src/harness/aci/tools/web-fetch.ts` + `tests/harness/aci/tools/web-fetch.test.ts`；可选 `tests/harness/tools/executor.test.ts` 一条端到端（web_fetch 真工具 + `createExecutor`）。
+   - **Behavior:**
+     - 新增 `start_chars`（整数，默认 0，schema `minimum: 0`）。运行时：缺省 0；非有限数 / 非整数 → `ToolExecutionError`（`web_fetch: start_chars must be a non-negative integer`）；负数同样拒绝（不 clamp 到 0，避免静默错窗）。
+     - `start_chars > original_length`：成功返回空正文窗口，`Window:` 行 `returned=0`，`original_length` 仍报真值（empty 类，不是失败）。
+     - `MAX_MAX_CHARS` 50000 → **16000**；默认 12000、下限 500 不变。超上限 clamp 到 16000（既有 clamp 语义，改天花板）。
+     - `sliceFetchWindow` 后 `formatFetchOutput` 先拼头部（含 `Window: start=… returned=… original_length=…`），再横幅，再正文。若头部+横幅+正文将超过 `FETCH_OUTPUT_BUDGET=20000`，缩短正文使总长 ≤ 20000（`// EXIT: shrink body so executor cap never eats Window line`）。
+     - 正文仍可带 `\n...[truncated]` 当 `returned < original_length - start`；但模型续抓以头部 `Window:` 为准。`next` 起点 = `start + returned`（文档写在 description，不另造字段以免像伪造 executor meta）。
+     - 抽出 `sliceFetchWindow` / 保持 `compileFetchInput` 扩展，handler 只编排。
+   - **Tests:**
+     - empty：空 HTML、`start_chars === length` → 空窗口 + Window 行 + banner。
+     - negative：`start_chars: -1` / `"x"` → ToolExecutionError。
+     - overflow：`max_chars: 100000` clamp 16000；超长 URL 头部时正文自动再缩短，经 `createExecutor` 后 payload **不含** executor `输出超长已截断` 标记且仍含 `Window:`。
+     - concurrent：两 handler 不同 `start_chars` 并行，窗口不串。
+     - exception：既有 SSRF / 非 2xx 不变。
+     - 更新既有「clamp 到 50000」断言为 16000。
+   - Status: [ ] pending
+
+3. **T3 `as: text | html` + content-type gate** — tag: `[implementation]`
+   - **Surface:** `web-fetch.ts` / `web-fetch.test.ts`；`src/tui/tool-summary.ts` 可选显示 `as`（保持「抓取 url」即可，不强制）。description 更新过 D9。
+   - **Behavior:**
+     - `as` 缺省 `"text"`。仅允许 `"text"` | `"html"`；其它值 → `ToolExecutionError`。
+     - `as:text`：现有 `htmlToText`（html CT）/ 原样（其它 text 家族：`text/*`、`application/json`、`application/xml`、`+json`/`+xml`）。
+     - `as:html`：跳过 `htmlToText`，返回解码后的 markup 字符串；**仅当** content-type 含 `html`。否则 `web_fetch failed: content type is not html`（不回灌 PDF/乱码）。
+     - 明确拒绝的 CT（两种 as 都拒）：`image/`、`audio/`、`video/`、`application/octet-stream`、`application/pdf`。`// EXIT: binary content-type rejected`。
+     - `Representation: text|html` 写入头部（横幅前）。
+     - 注入语料：script 正文 / 属性指令 / HTML 注释指令 — `as:html` 原样出现在 banner **之后**，banner 仍在。
+     - SSRF / 超时 / 非 2xx / T1 字节上限 / T2 窗口全部沿用。
+   - **Tests:** empty html + as html；as 非法（negative）；超大 html 走窗口（overflow）；并发 text vs html 两实例；二进制 CT exception。
+   - Status: [ ] pending
+
+## Persist
+
+空。不写 ADR / CONTEXT.md。`CHANGELOG.md` 在 T3 后补一行（可并入 T3 或单独 docs commit；优先并入 T3 以免第四个逻辑任务）。
+
+## Code review phase
+
+三 bullet 全部落地后整轮 dual-axis review。未开始。
