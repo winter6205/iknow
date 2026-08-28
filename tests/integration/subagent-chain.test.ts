@@ -14,7 +14,7 @@
  *   1. fake 二进制 emit 合法 envelope → manager queryBuffer → completed (status:ok)
  *   2. 多行 stdout (首行合法 envelope + 多余行) → 首行 parsed (D1 首条独立 JSON)
  *   3. fake 二进制立即 exit 2 (无 stdout envelope) → manager queryBuffer → crashed
- *   4. exit 0 + 无 envelope → 维持 running (waitFor timeout / host drain 兜底)
+ *   4. exit 0 + 无 envelope → failed protocolError 并释放槽位
  *   5. shutdown 后 buffer 清空 → not_found
  *   6. 非法 envelope (缺 result) → failed reason=protocolError
  *
@@ -119,15 +119,20 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
     await mgr.shutdown();
   });
 
-  it("exit code 0 + 无 envelope → 维持 running (SC16 由 waitFor timeout / host drain 兜底)", async () => {
+  it("exit code 0 + 无 envelope → failed protocolError 并释放槽位", async () => {
     const fake = spawn(process.execPath, ["-e", "/* no stdout */"], {
       stdio: ["pipe", "pipe", "pipe"],
     });
     const mgr = createSubAgentManager({ spawn: () => fake });
     const { taskId } = mgr.spawn({});
     await waitExit(fake);
-    // 干净退出(0, null)且有 envelope → completed;无 envelope → 维持 running。
-    assert.deepEqual(mgr.queryBuffer(taskId), { status: "running" });
+    const q = mgr.queryBuffer(taskId);
+    assert.equal(q.status, "failed");
+    if (q.status === "failed") {
+      assert.equal(q.reason, "protocolError");
+      assert.match(q.summary, /without envelope/);
+    }
+    assert.deepEqual(mgr.listActive(), []);
     await mgr.shutdown();
   });
 

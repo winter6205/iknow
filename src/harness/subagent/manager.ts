@@ -633,8 +633,28 @@ export function createSubAgentManager(opts: {
           });
         }
       }
-      // SC16: 干净退出 (0, null) 且无 envelope → 不改 state,维持 running。
-      // 由 waitFor timeout / host drain 兜底(SC16 由兜底机制接住)。
+      // SC16: 干净退出 (0, null) 且无 envelope → protocolError 并立即放槽。
+      // 已有终态不覆盖:合法 envelope / timeout / 其他失败路径的结果保持不变。
+      if (
+        code === 0 &&
+        signal === null &&
+        task.state !== "completed" &&
+        task.state !== "failed" &&
+        task.envelope === undefined
+      ) {
+        const summary = "worker exited cleanly without envelope";
+        task.envelope = {
+          status: "failed",
+          reason: "protocolError",
+          summary,
+          result: "",
+        };
+        emitStateChange(task, "failed", { reason: "protocolError" });
+        emitStop(task, "failed", {
+          reason: "protocolError",
+          summary,
+        });
+      }
       // 干净退出(0, null)且有 envelope → 保持 completed (已在 stdout 段 emitStop)。
     });
 

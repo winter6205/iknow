@@ -236,6 +236,32 @@ describe("SubAgentManager spawn → crashed", () => {
 
 // ── fixture 3:protocolError ───────────────────────────────────────────────────
 
+describe("SubAgentManager clean exit without envelope", () => {
+  it("exit code=0 without envelope → failed protocolError and releases the slot", () => {
+    const { manager, spawned } = makeHarness();
+    const { taskId } = manager.spawn({});
+
+    spawned[0]!.emit("exit", 0, null);
+
+    const q = manager.queryBuffer(taskId);
+    assert.equal(q.status, "failed");
+    if (q.status === "failed") {
+      assert.equal(q.reason, "protocolError");
+      assert.match(q.summary, /without envelope/);
+    }
+    assert.deepEqual(manager.listActive(), []);
+  });
+
+  it("four clean exits without envelopes release capacity for a fifth spawn", () => {
+    const { manager, spawned } = makeHarness();
+    for (let i = 0; i < 4; i++) manager.spawn({});
+
+    for (const child of spawned) child.emit("exit", 0, null);
+
+    assert.doesNotThrow(() => manager.spawn({}));
+  });
+});
+
 describe("SubAgentManager spawn → protocolError", () => {
   it("invalid JSON on stdout → failed reason=protocolError", () => {
     const { manager, spawned } = makeHarness();
@@ -459,19 +485,12 @@ describe("SubAgentManager per-task 缺省链 (T2: def ?? taskTimeoutMs ?? 7200s)
     }
   });
 
-  it("waitFor 缺省 timeoutMs 也走同一链: opts.taskTimeoutMs=50 → ~50ms SubAgentWaitTimeoutError", async () => {
+  it("waitFor timeout rejects while the child remains live", async () => {
     vi.useFakeTimers();
     try {
-      const { manager, spawned } = makeHarness({ taskTimeoutMs: 50 });
+      const { manager } = makeHarness({ taskTimeoutMs: 1000 });
       const { taskId } = manager.spawn({});
-      // 关键: 先让 child 干净退出 (0, null) 且无 envelope —— SC16 下 state
-      // 维持 running 不落终态, 同时 exit handler 清掉 spawn 的 50ms SIGTERM
-      // 计时器。否则同一链值 50ms 的 spawn timer 会先把 state 标 failed
-      // (终态) → waitFor 反而 resolve 失败 envelope, 无从观察 waitFor 自身
-      // 的 effectiveTimeout 拒绝路径。清掉后剩 waitFor 的 interval 独占,
-      // 50ms 到达 → Date.now()-started >= 50 → SubAgentWaitTimeoutError。
-      spawned[0]!.emit("exit", 0, null);
-      const pending = manager.waitFor(taskId);
+      const pending = manager.waitFor(taskId, 50);
       const rejected = assert.rejects(pending, SubAgentWaitTimeoutError);
       await vi.advanceTimersByTimeAsync(100);
       await rejected;
