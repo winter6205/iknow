@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it, vi } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
@@ -383,6 +386,31 @@ describe("subagent worker: buildThinkingParams + adapter seam (type sanity)", ()
 // ---------------------------------------------------------------------------
 
 describe("subagent worker: CreateWorkerDepsOptions seam 字段 (类型契约)", () => {
+  it("general-purpose worker 注入项目 AGENTS.md, 即使 memoryEnabled=false", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "iknow-worker-static-"));
+    try {
+      const marker = "WORKER_PROJECT_INSTRUCTIONS";
+      await writeFile(join(cwd, "AGENTS.md"), marker);
+      const deps = await createWorkerDeps({
+        env: TEST_ENV,
+        sandboxRoot: cwd,
+        cwd,
+        userHome: cwd,
+        role: "general-purpose",
+        model: createStubModel({ responses: [] }),
+        skillCatalog: createSkillCatalog([]),
+        trace: createNoopTraceService(),
+      });
+
+      const system = (await deps.system?.()) ?? "";
+
+      assert.ok(system.includes(marker));
+      assert.ok(!system.includes("memory_recall"));
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("opts 必须 env + sandboxRoot, 其余 seam 字段可选", () => {
     const opts: CreateWorkerDepsOptions = {
       env: TEST_ENV,

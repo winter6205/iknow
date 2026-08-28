@@ -331,8 +331,8 @@ export async function createWorkerRuntime(
     askUser,
   });
 
-  // surface "ask" → shouldIncludeBootstrap false (无 BOOTSTRAP 段); memory
-  // 关闭 (worker 有界 scope, 不共享用户记忆层)。skills 段照常注入
+  // surface "ask" → shouldIncludeBootstrap false (无 BOOTSTRAP 段); worker
+  // 只注入静态 AGENTS.md / rules,不启用 memory library。skills 段照常注入
   // (SC12: skill 工具在场就该让模型知道 available skills)。
   // Judge workers must not inherit the full iknow soul / assistant voice
   // (verify-goal-gate T2). Catalog lookup is skipped so "unknown role"
@@ -345,6 +345,7 @@ export async function createWorkerRuntime(
         userHome,
         surface: "ask",
         memoryEnabled: false,
+        staticInstructions: true,
         skills: () =>
           skillCatalog.available().map((entry) => ({
             name: entry.name,
