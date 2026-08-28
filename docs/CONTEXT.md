@@ -95,6 +95,9 @@ _Avoid_: `ask` 全 opt-out（破"我是谁"答复路径）；`ask` 全 opt-in（
 **auto_extract**（`settings.memory.autoExtract`）: 自动记忆抽取的唯一开关，boolean-only、**默认 OFF**——段缺失或非 `true` 一律按关处理。与 **dream** 独立：仅当 extract 与 dream 均关时 `BuiltEngine.autoMemory` 缺席（宿主零调用、零额外 LLM、零写盘）。开启后触发闸在 host 侧（chat / tui / serve）：`StopReason=completed` 之后异步，且累计 N≥2 个完成 turn 才跑一趟抽取。ADR-0031 D1/D5；钩子装配条件见 ADR-0033。
 _Avoid_: 把默认改成 ON；把抽取 prompt 内嵌进 loop-engine（那里管 turn 机制，不管记忆语义）；给 `ask` 接线（ADR-0010 D3 opt-out 仍然生效）；让 ingest 失败冒泡成用户 turn 失败；把「关 autoExtract」理解成钩子一定缺席（dream 仍可单独开）
 
+**memory_prefetch**: `autoExtract === true` 时 host 在用户消息前附着的低信任预取层——每轮以用户原文跑 `scoreMemoryEntries`（零词命中不入选，≤5 条 / 8000 字符，advisory 包装首行，不进 `system`）。会话级按 id 去重：一条记忆一个 conversation 只注入一次，首轮块随 user turn 留在历史（append-only，不 strip，保 KV cache 前缀），resume 扫历史 `id:` 行恢复去重集合，失败容忍一次重复、不 fail turn。ADR-0034；去重契约 `plans/auto-memory-prefetch-dedup.md`。
+_Avoid_: 会话内每轮重复注入同一条；strip / 改写历史里的旧 overlay（破 KV cache 前缀）；把预取块写进 `system`；给 `ask` 接线；另起第二套打分（打分只此 `scoreMemoryEntries` 一处）
+
 **memory_op**（`ADD` | `UPDATE` | `SUPERSEDE` | `NOOP`）: 单条候选事实经 BM25-lite 近邻裁定后的四态写入决策——无近邻过门 → `ADD` 写新 slug；近邻过门且候选信息严格更多 → `UPDATE` 原地重写并 bump `updated_at`；近邻过门且候选相抵 → `SUPERSEDE` 写新 slug 带 `supersedes: <old>` 并软禁旧条目；近邻过同一门槛但无新信息 → `NOOP` 不落盘。`extract` / `decide ops` / `persist` 保持三个独立函数：LLM 那一半可被 FakeLLM 顶替，确定性那一半无模型也能单测。ADR-0031 D2。
 _Avoid_: 把四态压成一个 upsert；绕开 `memory_save` 的肯定句门禁与 tmp+rename 原子写另起写路径；把三段合成一个函数
 
