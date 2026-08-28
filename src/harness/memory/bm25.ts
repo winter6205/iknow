@@ -16,6 +16,7 @@
  * contract explicit and unit-testable).
  */
 import type { MemoryEntryV1 } from "./schema.js";
+import { tokenize } from "./tokenize.js";
 
 export interface ScoredEntry {
   readonly entry: MemoryEntryV1;
@@ -35,15 +36,6 @@ const IMPORTANCE_WEIGHT = 0.4;
 const RECENCY_WEIGHT = 0.4;
 /** Days → recency weight (1 / (1 + ageDays/RECENCY_HALFLIFE_DAYS)). */
 const RECENCY_HALFLIFE_DAYS = 30;
-
-/** Tokenize a string into lowercase word-like tokens (>= 2 chars). */
-function tokenize(s: string): readonly string[] {
-  if (!s) return [];
-  return s
-    .toLowerCase()
-    .split(/[^a-z0-9_]+/u)
-    .filter((t) => t.length >= 2);
-}
 
 /** Count how many query tokens appear in haystack. */
 function countHits(

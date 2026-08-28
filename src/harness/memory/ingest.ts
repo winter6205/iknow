@@ -26,6 +26,7 @@ import { runMemoryGc, type MemoryGcResult } from "./gc.js";
 import { normalizeMemoryType } from "./schema.js";
 import type { MemoryEntryV1 } from "./schema.js";
 import { listStoreEntries, type StoredMemoryEntry } from "./store.js";
+import { tokenize } from "./tokenize.js";
 import {
   upsertMemoryIndex,
   validateAffirmativePhrasing,
@@ -272,12 +273,18 @@ function nearestNeighbor(
   live: ReadonlyArray<StoredMemoryEntry>
 ): StoredMemoryEntry | null {
   if (live.length === 0) return null;
+  const candidateTokens = tokenize(`${candidate.title} ${candidate.body}`);
+  if (candidateTokens.length === 0) return null;
+  const tokenizedLive = live.filter(
+    (entry) => tokenize(`${entry.entry.title} ${entry.entry.body}`).length > 0
+  );
+  if (tokenizedLive.length === 0) return null;
   const scored = scoreMemoryEntries(
     `${candidate.title} ${candidate.body}`,
-    live.map((e) => e.entry)
+    tokenizedLive.map((e) => e.entry)
   );
   const top = scored[0];
-  return top === undefined ? null : (live[top.index] ?? null);
+  return top === undefined ? null : (tokenizedLive[top.index] ?? null);
 }
 
 // -- stage 3: persist --------------------------------------------------------
@@ -427,14 +434,9 @@ function clampImportance(value: unknown): number {
   return Math.min(MAX_IMPORTANCE, Math.max(MIN_IMPORTANCE, Math.round(value)));
 }
 
-/** Lowercase word-like tokens of 2+ chars — same shape as bm25.ts's tokenizer. */
+/** Token set used by the four-state containment rules. */
 function tokens(s: string): ReadonlySet<string> {
-  return new Set(
-    s
-      .toLowerCase()
-      .split(/[^a-z0-9_]+/u)
-      .filter((t) => t.length >= 2)
-  );
+  return new Set(tokenize(s));
 }
 
 /**
@@ -443,7 +445,7 @@ function tokens(s: string): ReadonlySet<string> {
  * stored", which is not symmetric.
  */
 function containment(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
-  if (a.size === 0) return 1;
+  if (a.size === 0) return 0;
   let hits = 0;
   for (const t of a) if (b.has(t)) hits++;
   return hits / a.size;

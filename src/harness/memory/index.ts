@@ -90,6 +90,7 @@ export type { MemoryLayerEntry } from "./discovery.js";
 
 export { scoreMemoryEntries } from "./bm25.js";
 export type { ScoredEntry, ScoreOpts } from "./bm25.js";
+export { tokenize } from "./tokenize.js";
 
 export {
   eligibleForPromote,
