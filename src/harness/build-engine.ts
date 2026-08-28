@@ -646,6 +646,9 @@ export async function buildHarnessEngine(
               // refresh discover + assemble 的 user-scope 物理根同源。
               workspaceRoot,
               memoryDir,
+              ...(settings.memory?.autoExtract === true
+                ? { autoExtract: true }
+                : {}),
             }),
           }
         : {}),

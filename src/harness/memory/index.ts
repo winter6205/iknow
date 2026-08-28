@@ -106,4 +106,12 @@ export {
   EXISTENCE_POINTER,
 } from "./assembly.js";
 export type { AssemblyContext } from "./assembly.js";
+export {
+  MEMORY_CATALOG_DISCIPLINE,
+  MEMORY_CATALOG_MAX_CHARS,
+  MEMORY_CATALOG_MAX_LINES,
+  catalogHook,
+  formatCatalogLine,
+  formatMemoryCatalog,
+} from "./catalog.js";
 export { createSystemResolver } from "./refresh.js";
