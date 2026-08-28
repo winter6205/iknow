@@ -186,6 +186,7 @@ export async function startSessionServe(
     contextWindow: env.compress.contextWindow,
     // 模型名（settings.llm.model SSOT）：HealthResponse 下发，web 状态条显示。
     model: loadIknowSettings().llm?.model,
+    traceWriteFailures: () => hub.getTraceWriteFailures(),
     permissionMode: permissionModeCtx,
     graphMode: graphModeCtx,
     // ADR-0020: serve accepts --trace-out and mounts the READ side too —
