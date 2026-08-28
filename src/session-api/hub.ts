@@ -37,7 +37,10 @@ import {
   buildHarnessEngine,
   createAdapterFromEnv,
 } from "../harness/build-engine.js";
-import { renderTranscript, hasSuccessfulMemorySave } from "../harness/auto-memory-wire.js";
+import {
+  renderTranscript,
+  hasSuccessfulMemorySave,
+} from "../harness/auto-memory-wire.js";
 import {
   applyHostPrefetch,
   notifyAutoMemory,
@@ -1275,7 +1278,7 @@ export class SessionHub {
                 s.finalResult,
                 session.workspaceRoot,
                 conversationId,
-                session.messages.length
+                s.priorCount
               );
               // #458 T5 (SC8): goal.status write-back on verify-loop terminal
               // outcome. The hub is the only writer of goal.status. Target status
@@ -2286,7 +2289,7 @@ export class SessionHub {
     result: RunResult,
     workspaceRoot?: string,
     conversationId?: string,
-    priorMessageCount = 0
+    priorMessageCount: number
   ): void {
     // EXIT: a bound session uses only the per-root hook; constructor injection
     // remains the fallback when no workspaceRoot is on the session file.

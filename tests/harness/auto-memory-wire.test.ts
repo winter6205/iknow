@@ -202,10 +202,7 @@ describe("hasSuccessfulMemorySave", () => {
 
   it("is false when the turn has no memory_save", () => {
     assert.equal(
-      hasSuccessfulMemorySave([
-        text("user", "hello"),
-        text("assistant", "hi"),
-      ]),
+      hasSuccessfulMemorySave([text("user", "hello"), text("assistant", "hi")]),
       false
     );
   });

@@ -12,6 +12,7 @@
  * `memory/auto-hook.ts`.
  */
 import type { MemoryExtractLlm } from "./memory/index.js";
+import { MEMORY_SAVE_PERSISTED_PREFIX } from "./memory/tools/save.js";
 import type {
   AnthropicNativeMessage,
   ModelAdapter,
@@ -100,7 +101,10 @@ function toolResultText(content: unknown): string {
 export function hasSuccessfulMemorySave(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): boolean {
-  const results = new Map<string, { readonly isError: boolean; readonly text: string }>();
+  const results = new Map<
+    string,
+    { readonly isError: boolean; readonly text: string }
+  >();
   const saveIds: string[] = [];
   for (const message of messages) {
     for (const block of message.content) {
@@ -117,7 +121,7 @@ export function hasSuccessfulMemorySave(
   for (const id of saveIds) {
     const result = results.get(id);
     if (!result || result.isError) continue;
-    if (result.text.includes("[memory_save] persisted as")) return true;
+    if (result.text.includes(MEMORY_SAVE_PERSISTED_PREFIX)) return true;
   }
   return false;
 }

@@ -21,6 +21,8 @@ import { join } from "node:path";
 
 import {
   MemoryExtractError,
+  STATIC_LAYER_OVERLAP_FLOOR,
+  STATIC_LAYER_PROMPT_CAP,
   buildExtractPrompt,
   decideMemoryOps,
   dropOverlappingStaticLayer,
@@ -120,7 +122,10 @@ describe("buildExtractPrompt", () => {
   it("embeds the static instruction layer and the extract-discipline sentences", () => {
     const layer = "Always use bun for this project's package manager.";
     const prompt = buildExtractPrompt(TRANSCRIPT, layer);
-    assert.ok(prompt.includes(layer), "static layer must reach the extract model");
+    assert.ok(
+      prompt.includes(layer),
+      "static layer must reach the extract model"
+    );
     assert.ok(
       prompt.includes(
         "Never output a candidate that repeats or paraphrases the project or user instruction files already loaded in every session."
@@ -136,6 +141,13 @@ describe("buildExtractPrompt", () => {
         "Keep corrections the user made to your work, and preferences the user explicitly confirmed."
       )
     );
+  });
+
+  it("caps an oversized static layer in the extract prompt", () => {
+    const huge = "abcdefghij".repeat(STATIC_LAYER_PROMPT_CAP);
+    const prompt = buildExtractPrompt(TRANSCRIPT, huge);
+    assert.ok(prompt.includes("[truncated"));
+    assert.ok(prompt.length < huge.length);
   });
 });
 
@@ -388,7 +400,7 @@ describe("extractMemoryCandidates — closed memory_type enum", () => {
 });
 
 const STATIC_LAYER =
-  "Always use bun for this project's package manager and never commit lockfile drift.";
+  "Always use bun for this project's package manager and keep the committed lockfile.";
 
 describe("dropOverlappingStaticLayer", () => {
   it("drops a candidate that restates the static layer", () => {
@@ -396,7 +408,7 @@ describe("dropOverlappingStaticLayer", () => {
       [
         candidate({
           title: "Always use bun for this project's package manager",
-          body: "Always use bun for this project's package manager and never commit lockfile drift.",
+          body: "Always use bun for this project's package manager and keep the committed lockfile.",
         }),
       ],
       STATIC_LAYER
@@ -425,6 +437,31 @@ describe("dropOverlappingStaticLayer", () => {
       dropOverlappingStaticLayer([emptyTokens], STATIC_LAYER),
       []
     );
+  });
+
+  it("pins the overlap floor at 0.9", () => {
+    assert.equal(STATIC_LAYER_OVERLAP_FLOOR, 0.9);
+  });
+
+  it("does not treat a large instruction file as overlapping an unrelated fact", () => {
+    const filler = Array.from(
+      { length: 80 },
+      (_, i) =>
+        `Paragraph ${i} describes local coding conventions for module boundaries and error handling.`
+    ).join("\n\n");
+    const unrelated = candidate({
+      title: "Retry Anthropic adapter on 529",
+      body: "The Anthropic adapter retries on HTTP 529 before failing the turn.",
+    });
+    const restating = candidate({
+      title: "Always use bun for this project's package manager",
+      body: "Always use bun for this project's package manager and keep the committed lockfile.",
+    });
+    const kept = dropOverlappingStaticLayer(
+      [unrelated, restating],
+      `${filler}\n\n${STATIC_LAYER}`
+    );
+    assert.deepEqual(kept, [unrelated]);
   });
 });
 
@@ -709,7 +746,7 @@ describe("ingestMemory", () => {
       JSON.stringify([
         {
           title: "Always use bun for this project's package manager",
-          body: "Always use bun for this project's package manager and never commit lockfile drift.",
+          body: "Always use bun for this project's package manager and keep the committed lockfile.",
           confidence: 0.95,
         },
         {

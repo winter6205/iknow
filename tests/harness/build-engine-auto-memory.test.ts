@@ -7,6 +7,7 @@
  */
 import { afterAll, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -166,5 +167,14 @@ describe("buildHarnessEngine — auto-memory opt-in", () => {
     });
     built.push(engine);
     expect(engine.autoMemory).toBeDefined();
+  });
+
+  it("wires assembleStaticSystemPrompt into the extract hook", () => {
+    const source = readFileSync(
+      join(process.cwd(), "src/harness/build-engine.ts"),
+      "utf8"
+    );
+    expect(source).toMatch(/assembleStaticSystemPrompt/);
+    expect(source).toMatch(/staticLayer:\s*\(\)\s*=>/);
   });
 });

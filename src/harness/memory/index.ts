@@ -40,6 +40,7 @@ export {
   MAX_CANDIDATES_PER_INGEST,
   MIN_CANDIDATE_CONFIDENCE,
   STATIC_LAYER_OVERLAP_FLOOR,
+  STATIC_LAYER_PROMPT_CAP,
   buildExtractPrompt,
   decideMemoryOps,
   dropOverlappingStaticLayer,

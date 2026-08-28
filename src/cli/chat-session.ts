@@ -36,7 +36,10 @@ import {
   writeOut,
 } from "./session-io.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
-import { renderTranscript, hasSuccessfulMemorySave } from "../harness/auto-memory-wire.js";
+import {
+  renderTranscript,
+  hasSuccessfulMemorySave,
+} from "../harness/auto-memory-wire.js";
 import {
   applyHostPrefetch,
   notifyAutoMemory,
