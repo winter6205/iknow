@@ -264,25 +264,15 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     return;
   }
 
-  // review-fix (Fix 1): subagent 生命周期事件落盘（spec SC1 生产装配）——
-  // chat 入口当前不写 loop-engine trace（chat-session 内无 createJsonlTraceService，
-  // 见 chat-session.ts:289 注释），但 subagent manager 必须有 trace 才能让三类事件
-  // (subagent_spawn / subagent_state_change / subagent_stop) 落 JSONL。仅当 traceOut
-  // 显式配置（flag 或 env）时构造 subagent JsonlTraceService —— 否则 manager 走
-  // build-engine 默认 NoopTraceService，零副作用（byte-stable）。单 hub 实例共享一
-  // 个 manager 时所有会话的 subagent 事件聚合到 <traceOut>/subagent.jsonl
-  // (conversationId="subagent")；reader 侧按 per-record task_id 过滤（spec SC1
-  // v1 选择 — per-session 隔离需 per-session manager，超出本 review-fix 范围，
-  // 已在 build-engine.ts:307-320 注释里说明）。
-  const tracePath = resolveTracePath(parsed.traceOut);
-  const subagentTraceConfigured =
-    parsed.traceOut !== undefined || process.env.IKNOW_TRACE_OUT !== undefined;
-  const subagentTraceService = subagentTraceConfigured
-    ? createJsonlTraceService({
-        filePath: tracePath,
-        conversationId: "subagent",
-      })
-    : undefined;
+  // ADR-0035:生命周期 trace 与 content trace 解耦。chat 不装配 content
+  // trace，但 subagent 的 spawn/state_change/stop 永久写入默认 trace 目录。
+  const tracePath = resolve(resolveTracePath(parsed.traceOut));
+  const subagentTraceService = createJsonlTraceService({
+    filePath: tracePath,
+    conversationId: "subagent",
+  });
+  // 运行时包装层保持既有参数面；用同一个已解析目录透传给 worker spawn。
+  process.env.IKNOW_TRACE_OUT = tracePath;
 
   let built: import("./harness/build-engine.js").BuiltEngine;
   // W2: chat REPL 持一个可变 PermissionModeContext —— /permissions 命令在

@@ -45,6 +45,7 @@ const mockState = vi.hoisted(() => ({
   }>,
   captureCallCount: 0,
   capturedTraceOpt: undefined as unknown,
+  capturedDiagnosticsDir: undefined as unknown,
 }));
 
 vi.mock("../../src/harness/subagent/manager.ts", async (importActual) => {
@@ -58,6 +59,7 @@ vi.mock("../../src/harness/subagent/manager.ts", async (importActual) => {
     createSubAgentManager: vi.fn((opts: Parameters<typeof realCreate>[0]) => {
       mockState.captureCallCount += 1;
       mockState.capturedTraceOpt = opts.trace;
+      mockState.capturedDiagnosticsDir = opts.diagnosticsDir;
       const fakeSpawn: (
         def: unknown,
         taskId: string,
@@ -145,6 +147,7 @@ beforeEach(() => {
   mockState.fakeChildren.length = 0;
   mockState.captureCallCount = 0;
   mockState.capturedTraceOpt = undefined;
+  mockState.capturedDiagnosticsDir = undefined;
 });
 
 afterEach(async () => {
@@ -213,5 +216,15 @@ describe("buildHarnessEngine — subagentTrace 注入缝 (Fix 1 SC1)", () => {
     };
     expect(typeof traceLike.recordSubagentSpawn).toBe("function");
     expect(await traceLike.recordSubagentSpawn({} as never)).toBeUndefined();
+  });
+
+  it("subagentDiagnosticsDir → manager receives the crash diagnostics root", async () => {
+    built = await buildHarnessEngine({
+      env: makeEnv("sk-test-bld-subagent-diagnostics-1"),
+      askUser: createNoAskUser(),
+      subagentDiagnosticsDir: scratchDir,
+    });
+
+    expect(mockState.capturedDiagnosticsDir).toBe(scratchDir);
   });
 });

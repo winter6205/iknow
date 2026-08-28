@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it, vi } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
@@ -465,6 +465,43 @@ describe("subagent worker: CreateWorkerDepsOptions seam 字段 (类型契约)", 
 
     assert.equal(deps.modelIdleTimeoutMs, 12_345);
     assert.equal(deps.modelHardCapMs, 67_890);
+  });
+
+  it("default worker trace output is anchored to workspaceRoot, not cwd", async () => {
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "iknow-worker-trace-root-")
+    );
+    const cwd = await mkdtemp(join(tmpdir(), "iknow-worker-trace-cwd-"));
+    const previousTraceOut = process.env.IKNOW_TRACE_OUT;
+    delete process.env.IKNOW_TRACE_OUT;
+    try {
+      const deps = await createWorkerDeps({
+        env: TEST_ENV,
+        sandboxRoot: cwd,
+        workspaceRoot,
+        cwd,
+        model: createStubModel({ responses: [] }),
+        skillCatalog: createSkillCatalog([]),
+        system: () => undefined,
+      });
+      await deps.trace!.recordSubagentSpawn({
+        id: "worker-trace-test",
+        taskId: "worker-trace-test",
+        origin: "child",
+        startedAt: new Date().toISOString(),
+        status: "ok",
+        ts: new Date().toISOString(),
+      });
+
+      const traceFiles = await readdir(join(workspaceRoot, "trace"));
+      assert.equal(traceFiles.length, 1);
+      await assert.rejects(readdir(join(cwd, "trace")));
+    } finally {
+      if (previousTraceOut === undefined) delete process.env.IKNOW_TRACE_OUT;
+      else process.env.IKNOW_TRACE_OUT = previousTraceOut;
+      await rm(workspaceRoot, { recursive: true, force: true });
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 });
 

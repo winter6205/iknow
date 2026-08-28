@@ -24,6 +24,7 @@
  */
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import { loadIknowEnv, type IknowEnv } from "../../config/env.js";
 import {
@@ -68,8 +69,8 @@ function log(message: string): void {
   process.stderr.write(`${LOG_PREFIX} ${message}\n`);
 }
 
-/** default worker trace dir (cli.ts DEFAULT_TRACE_DIR 同形态, IKNOW_TRACE_OUT 优先)。 */
-const DEFAULT_WORKER_TRACE_DIR = "./trace/";
+/** default worker trace dir; the per-root anchor wins over the process cwd. */
+const DEFAULT_WORKER_TRACE_DIR = "trace";
 
 /**
  * #556 T2: 查 catalog 取 persona 段文本 (catalog body)。role 缺省 / 未知
@@ -271,6 +272,10 @@ export async function createWorkerRuntime(
   const { env, sandboxRoot } = opts;
   const userHome = opts.userHome ?? homedir();
   const cwd = opts.cwd ?? process.cwd();
+  const defaultTraceDir = resolve(
+    opts.workspaceRoot ?? cwd,
+    DEFAULT_WORKER_TRACE_DIR
+  );
 
   // 任务型子代理: 用 fail-closed askUser (无交互, 权限不足即拒绝, #162 平权
   // 装配)。subagent 聚焦执行, 不重复向 operator 弹 y/N 提示。
@@ -397,7 +402,7 @@ export async function createWorkerRuntime(
     trace:
       opts.trace ??
       createJsonlTraceService({
-        filePath: process.env.IKNOW_TRACE_OUT ?? DEFAULT_WORKER_TRACE_DIR,
+        filePath: process.env.IKNOW_TRACE_OUT ?? defaultTraceDir,
         conversationId: randomUUID(),
       }),
     compress: {
