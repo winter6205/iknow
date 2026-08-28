@@ -509,21 +509,6 @@ export function createSubAgentManager(opts: {
     task.crashInFlight = true;
     task.endedAt = new Date().toISOString();
     const mask = createOutputMask(currentSecretValues());
-    const initialSummary = mask.mask(opts2.summary());
-    const initialError: TraceError = {
-      type: "unknown",
-      message: initialSummary,
-    };
-    task.envelope = {
-      status: "failed",
-      reason: "crashed",
-      summary: initialSummary,
-      result: "",
-    };
-    emitStateChange(task, "failed", {
-      reason: "crashed",
-      error: initialError,
-    });
     await Promise.race([
       opts2.stderrClosed,
       delayMs(STDERR_DRAIN_GRACE_MS),
@@ -531,6 +516,16 @@ export function createSubAgentManager(opts: {
     if (task.stoppedEmitted) return;
     const summary = mask.mask(opts2.summary());
     const error: TraceError = { type: "unknown", message: summary };
+    task.envelope = {
+      status: "failed",
+      reason: "crashed",
+      summary,
+      result: "",
+    };
+    emitStateChange(task, "failed", {
+      reason: "crashed",
+      error,
+    });
     const stderrDiagnostics =
       opts.diagnosticsDir !== undefined
         ? persistStderrDiagnostics({
@@ -540,7 +535,6 @@ export function createSubAgentManager(opts: {
             mask,
           })
         : undefined;
-    task.envelope = { ...task.envelope, summary };
     emitStop(task, "failed", {
       reason: "crashed",
       summary,
