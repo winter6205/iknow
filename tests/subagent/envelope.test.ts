@@ -4,6 +4,7 @@ import { ProtocolError } from "../../src/harness/errors.ts";
 import {
   parseParentEnvelope,
   parseWorkerEnvelope,
+  projectParentVisibleEnvelope,
   truncateEnvelopeResult,
 } from "../../src/harness/subagent/envelope.ts";
 import type {
@@ -175,17 +176,22 @@ describe("subagent envelope schema (SC13 / D1)", () => {
 });
 
 describe("subagent envelope truncation (SC10)", () => {
-  it("returns the envelope unchanged when result is within 20000 chars", () => {
+  it("replaces a mid-size draft with the parent-visible short handoff", () => {
+    const draft = "final draft body ".repeat(40);
     const env: SubAgentEnvelope = {
       status: "ok",
-      summary: "s",
-      result: "short result",
+      summary: "changed the parser",
+      result: draft,
+      fileRefs: ["src/parser.ts"],
+      stop_reason: "completed",
     };
-    const out = truncateEnvelopeResult(env);
-    assert.equal(out, env);
-    assert.equal(out.result, "short result");
-    assert.equal(out.truncated, undefined);
-    assert.equal(out.totalLength, undefined);
+    const out = projectParentVisibleEnvelope(env);
+    assert.equal(out.status, "ok");
+    assert.notEqual(out.result, draft);
+    assert.match(out.result, /changed the parser/);
+    assert.match(out.result, /src\/parser\.ts/);
+    assert.match(out.result, /Stop reason: completed/);
+    assert.equal(out.stop_reason, "completed");
   });
 
   it("folds a long success report into a short handoff with paths", () => {
@@ -235,15 +241,17 @@ describe("subagent envelope truncation (SC10)", () => {
     assert.ok(out.summary.length > 0);
   });
 
-  it("keeps exactly-20000 result untruncated", () => {
+  it("exactly-20000 draft is still a short handoff, not the full body", () => {
     const env: SubAgentEnvelope = {
       status: "ok",
       summary: "s",
       result: "y".repeat(20000),
     };
-    const out = truncateEnvelopeResult(env);
-    assert.equal(out, env);
-    assert.equal(out.truncated, undefined);
+    const out = projectParentVisibleEnvelope(env);
+    assert.notEqual(out.result, env.result);
+    assert.match(out.result, /^s/);
+    assert.equal(out.truncated, true);
+    assert.equal(out.totalLength, 20000);
   });
 });
 

@@ -104,7 +104,9 @@ describe("subagent_result — 正常路径", () => {
     const parsed = JSON.parse(out) as Record<string, unknown>;
     expect(parsed.status).toBe("ok");
     expect(parsed.summary).toBe("found the answer");
-    expect(parsed.result).toBe("42");
+    expect(parsed.result).not.toBe("42");
+    expect(String(parsed.result)).toMatch(/found the answer/);
+    expect(String(parsed.result)).toMatch(/\/tmp\/a\.txt/);
     expect(parsed.fileRefs).toEqual(["/tmp/a.txt", "/tmp/b.txt"]);
     expect(parsed.usage).toEqual({ inputTokens: 10, outputTokens: 20 });
   });

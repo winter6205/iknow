@@ -345,7 +345,7 @@ export async function createWorkerRuntime(
         userHome,
         surface: "ask",
         memoryEnabled: false,
-        staticInstructions: true,
+        staticInstructions: opts.role !== "explore",
         skills: () =>
           skillCatalog.available().map((entry) => ({
             name: entry.name,

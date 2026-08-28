@@ -113,15 +113,18 @@ describe("subagent worker: toOkEnvelope (envelope 派生 / SC2 / SC10)", () => {
     assert.equal(truncated.stop_reason, "completed");
   });
 
-  it("SC10 边界: result 恰好 20000 → 不截断", async () => {
-    const { truncateEnvelopeResult } =
+  it("SC10 边界: result 恰好 20000 → IPC 不截断，父可见层仍短交差", async () => {
+    const { truncateEnvelopeResult, projectParentVisibleEnvelope } =
       await import("../../src/harness/subagent/envelope.ts");
     const exact = "z".repeat(20000);
     const env = toOkEnvelope(fakeResult(exact));
-    const out = truncateEnvelopeResult(env);
-    assert.equal(out.truncated, undefined);
-    assert.equal(out.totalLength, undefined);
-    assert.equal(out.result.length, 20000);
+    const ipc = truncateEnvelopeResult(env);
+    assert.equal(ipc.result.length, 20000);
+    assert.equal(ipc.truncated, undefined);
+    const parent = projectParentVisibleEnvelope(env);
+    assert.equal(parent.truncated, true);
+    assert.notEqual(parent.result, exact);
+    assert.ok(parent.result.length < 20000);
   });
 });
 
@@ -406,6 +409,29 @@ describe("subagent worker: CreateWorkerDepsOptions seam 字段 (类型契约)", 
 
       assert.ok(system.includes(marker));
       assert.ok(!system.includes("memory_recall"));
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("explore worker 不注入完整项目 AGENTS.md 说明书静态层", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "iknow-worker-explore-static-"));
+    try {
+      const marker = "EXPLORE_MUST_NOT_SEE_AGENTS";
+      await writeFile(join(cwd, "AGENTS.md"), marker);
+      const deps = await createWorkerDeps({
+        env: TEST_ENV,
+        sandboxRoot: cwd,
+        cwd,
+        userHome: cwd,
+        role: "explore",
+        model: createStubModel({ responses: [] }),
+        skillCatalog: createSkillCatalog([]),
+        trace: createNoopTraceService(),
+      });
+
+      const system = (await deps.system?.()) ?? "";
+      assert.ok(!system.includes(marker));
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

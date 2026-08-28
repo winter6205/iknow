@@ -16,8 +16,8 @@
  *   - ajv 实例与仓库同款 strict 配置 (同 src/harness/tools/registry.ts
  *     makeAjv),不引入第二份配置差异。
  *
- * 父可见投影 (T5): 长终稿不作为父代理交差正文。超过上限时只保留短摘要、
- * 改过的路径、停因与「汇报已收束」标记；status/reason 不因汇报折叠而改变。
+ * 父可见投影 (T5): 父代理交差正文是短摘要、路径与停因，不是终稿全文。
+ * 原文长于交差或超过 20000 字时置 truncated（汇报已收束）；status/reason 不变。
  */
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
@@ -229,12 +229,54 @@ function shortHandoff(
 }
 
 /**
- * 父可见投影 (T5 / SC10): result > 20000 chars 时，不把终稿全文继续向上
- * 传递，而是合成短交差。result 保留摘要、路径和停因的可读副本，字段
- * `fileRefs` / `stop_reason` 仍作为结构化真值保留。
- *
- * `truncated` 表示汇报正文已收束，不表示任务失败；因此始终保留原 status
- * 与 reason。未超限的 envelope 保持对象与字段不变，避免无关路径漂移。
+ * 父可见投影：给父模型看的交差层（短摘要 + 路径 + 停因），不是终稿全文。
+ * `truncated` 在原文长于交差或超过 20000 字时为真（汇报收束，不是任务失败）。
+ */
+export function projectParentVisibleEnvelope(
+  env: SubAgentEnvelope
+): SubAgentEnvelope {
+  const summary =
+    env.status === "failed" &&
+    env.summary.length === 0 &&
+    env.reason !== "timeout"
+      ? failedSummary(env)
+      : shortSummary(env.summary, env.result);
+  const handoff = shortHandoff(summary, env.fileRefs, env.stop_reason);
+  const originalLen = env.result.length;
+  const needsFoldMarker = originalLen > TRUNCATION_LIMIT;
+  let result = handoff;
+  if (needsFoldMarker) {
+    const marker = TRUNCATION_MARKER(originalLen);
+    const separator = handoff.length > 0 ? "\n\n" : "";
+    const available = TRUNCATION_LIMIT - marker.length - separator.length;
+    const boundedHandoff =
+      handoff.length <= available
+        ? handoff
+        : `${handoff.slice(0, Math.max(0, available - 1))}…`;
+    result = `${boundedHandoff}${separator}${marker}`;
+  }
+  const truncated = needsFoldMarker || originalLen > result.length;
+  if (
+    env.summary === summary &&
+    env.result === result &&
+    env.truncated === undefined &&
+    env.totalLength === undefined &&
+    !truncated
+  ) {
+    return env;
+  }
+  return {
+    ...env,
+    summary,
+    result,
+    ...(truncated ? { truncated: true, totalLength: originalLen } : {}),
+  };
+}
+
+/**
+ * IPC 浓缩：result > 20000 时折叠，避免把终稿全文塞进进程间信封。
+ * 未超限保持字段，供 graph 节点沿边传递上游产物。父模型交差走
+ * `projectParentVisibleEnvelope`。
  */
 export function truncateEnvelopeResult(
   env: SubAgentEnvelope
@@ -249,27 +291,7 @@ export function truncateEnvelopeResult(
     }
     return env;
   }
-  const summary =
-    env.status === "failed" &&
-    env.summary.length === 0 &&
-    env.reason !== "timeout"
-      ? failedSummary(env)
-      : shortSummary(env.summary, env.result);
-  const handoff = shortHandoff(summary, env.fileRefs, env.stop_reason);
-  const marker = TRUNCATION_MARKER(env.result.length);
-  const separator = handoff.length > 0 ? "\n\n" : "";
-  const available = TRUNCATION_LIMIT - marker.length - separator.length;
-  const boundedHandoff =
-    handoff.length <= available
-      ? handoff
-      : `${handoff.slice(0, Math.max(0, available - 1))}…`;
-  return {
-    ...env,
-    summary,
-    result: `${boundedHandoff}${separator}${marker}`,
-    truncated: true,
-    totalLength: env.result.length,
-  };
+  return projectParentVisibleEnvelope(env);
 }
 
 const workerValidate = compileEnvelopeAjv(WORKER_SCHEMA);

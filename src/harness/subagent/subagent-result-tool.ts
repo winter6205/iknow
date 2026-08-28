@@ -22,6 +22,7 @@
 import type { AciToolDef } from "../aci/types.js";
 import type { ToolExecutionContext } from "../tools/types.js";
 import type { SubAgentManager } from "./manager.js";
+import { projectParentVisibleEnvelope } from "./envelope.js";
 import { ToolExecutionError } from "../errors.js";
 
 /**
@@ -70,6 +71,14 @@ export function createSubAgentResultTool(
       }
       // 同步非阻塞：直返 manager.queryBuffer 的序列化结果。
       const result = deps.manager.queryBuffer(taskId);
+      if (
+        result.status === "ok" ||
+        (result.status === "failed" &&
+          "result" in result &&
+          typeof result.result === "string")
+      ) {
+        return JSON.stringify(projectParentVisibleEnvelope(result));
+      }
       return JSON.stringify(result);
     },
   });

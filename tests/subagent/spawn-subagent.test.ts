@@ -101,7 +101,8 @@ describe("spawn_subagent — 正常路径", () => {
     const parsed = out as { status: string; summary: string; result: string };
     expect(parsed.status).toBe("ok");
     expect(parsed.summary).toBe("from-fake");
-    expect(parsed.result).toBe("fake-result");
+    expect(parsed.result).toBe("from-fake");
+    expect(parsed.result).not.toBe("fake-result");
   });
 
   it("wait:false → waitFor 不被调用", async () => {

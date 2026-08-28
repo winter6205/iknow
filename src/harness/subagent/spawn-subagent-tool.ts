@@ -43,6 +43,7 @@ import {
   SubAgentWaitTimeoutError,
 } from "./manager.js";
 import type { SubAgentEnvelope } from "./envelope.js";
+import { projectParentVisibleEnvelope } from "./envelope.js";
 import { ToolExecutionError, SubAgentSandboxRootError } from "../errors.js";
 import { DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS } from "../../config/settings.js";
 import {
@@ -97,7 +98,7 @@ function envelopeFromWaitTimeout(
   if (buffer.status === "failed") {
     // EXIT: buffer 已是失败投影（含 protocolError / crashed / timeout envelope）。
     if ("result" in buffer && typeof buffer.result === "string") {
-      return buffer;
+      return projectParentVisibleEnvelope(buffer);
     }
     return {
       status: "failed",
@@ -107,7 +108,7 @@ function envelopeFromWaitTimeout(
     };
   }
   // EXIT: completed ok envelope 已在 buffer。
-  return buffer;
+  return projectParentVisibleEnvelope(buffer);
 }
 
 export function createSpawnSubAgentTool(
@@ -334,7 +335,7 @@ export function createSpawnSubAgentTool(
         );
         // C5：成功 tool_result = envelope（executor 20000 截断,天然复用）。
         // 失败 envelope 也作 ok 数据返回（失败是数据,非异常;模型读 summary/reason）。
-        return envelope;
+        return projectParentVisibleEnvelope(envelope);
       } catch (err) {
         // #361 C5 abort 归因：ctx.signal abort → ToolExecutionError → executor
         // 因 signal.aborted 归一 execution_failed:cancelled。
