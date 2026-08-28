@@ -22,6 +22,7 @@ import type {
   SubagentState,
 } from "../trace/index.js";
 import { safeTrace } from "../trace/safe-trace.js";
+import { DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS } from "../../config/settings.js";
 
 // re-export: manager 的调用方(T4/T5 工具、host-drain)统一从 manager 侧拿
 // SubAgentDefinition,不必各自 import role.js。
@@ -118,7 +119,7 @@ export class SubAgentWaitTimeoutError extends Error {
  * #361 C1 / T4: 父代理侧并发 worker 默认上限。spawn 入口 running+starting 数 ≥ 此值
  * 立即抛 SubAgentCapacityError(显式失败,模型可降并发重试;不 queue 不静默)。
  */
-export const MAX_CONCURRENT_WORKERS = 15;
+export const MAX_CONCURRENT_WORKERS = DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS;
 
 /**
  * #361 C1: spawn 并发超限 typed 拒绝。字段 `{ status:"failed", reason:"capacity",

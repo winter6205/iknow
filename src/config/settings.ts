@@ -177,6 +177,13 @@ export interface IknowSettingsSubagent {
 }
 
 /**
+ * 子代理并发上限缺省（CONTEXT「子代理并发上限」）。
+ * env / settings 未设或非正时回退此值；manager 与 env loader 共用，禁止
+ * config 反向 import harness。
+ */
+export const DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS = 15;
+
+/**
  * D-α V1 graph mode: graph 编排 overlay 的持久默认（ADR-0030）。
  *
  * graph 是**可选 overlay**：默认任务仍走一次性 `spawn_subagent` 不进图，所以

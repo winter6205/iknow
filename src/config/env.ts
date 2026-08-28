@@ -18,10 +18,13 @@
  */
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { loadIknowSettings, type IknowSettings } from "./settings.js";
+import {
+  loadIknowSettings,
+  type IknowSettings,
+  DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS,
+} from "./settings.js";
 import { LLM_MODEL_MISSING_MESSAGE } from "./messages.js";
 import { WORKSPACE_ROOT_ENV_KEY } from "./workspace-root.js";
-import { MAX_CONCURRENT_WORKERS } from "../harness/subagent/manager.js";
 
 export interface LlmEnv {
   baseUrl: string;
@@ -183,7 +186,7 @@ export interface McpEnv {
  * 避免缺省值在两处声明, settings 单一承载通过 mirror 校验)。
  *
  * `maxConcurrentWorkers` = 同时处于 starting/running 的 worker 并发上限。
- * 未设 / 空 / 非数字 / 非正 → 默认 `MAX_CONCURRENT_WORKERS`(15)。
+ * 未设 / 空 / 非数字 / 非正 → 默认 `DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS`(15)。
  */
 export interface IknowSubagentEnv {
   /** 子代理整任务寿命上限(毫秒);env 不设 + settings 未配 → undefined。 */
@@ -692,7 +695,7 @@ export function loadIknowEnv(
         (isPositiveInteger(mergedSettings.subagent?.maxConcurrentWorkers)
           ? mergedSettings.subagent.maxConcurrentWorkers
           : undefined) ??
-        MAX_CONCURRENT_WORKERS,
+        DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS,
     },
     // ADR-0019 (T1): workspace-root per-root state anchor (D1.5 register at
     // env SSOT; `envOptional` canonical reader — empty/unset → undefined,

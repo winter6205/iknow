@@ -6,8 +6,8 @@
  * + manager.waitFor(taskId)，等待子代理终态后把 envelope.result 作为 NodeOutcome。
  *
  * 关键决策：
- * - 不引入第二份并发上限。SubAgentManager.MAX_CONCURRENT_WORKERS = 4 是项目
- *   唯一权威并发容量，溢出 typed 拒绝 (SubAgentCapacityError)；scheduler 通过
+ * - 不引入第二份并发上限。`DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS`（默认 15，
+ *   可配）是项目唯一权威并发容量，溢出 typed 拒绝 (SubAgentCapacityError)；scheduler 通过
  *   try/catch 转成 NodeOutcome { status:"failed", error }，让 findFailedUpstream
  *   把分支后续节点标 skipped（fail-fast 沿 deps 链向上传播）。
  * - 复用 SubAgentManager 内置的 TraceService seam；manager 在 spawn/stop/
