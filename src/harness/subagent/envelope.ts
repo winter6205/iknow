@@ -16,8 +16,8 @@
  *   - ajv 实例与仓库同款 strict 配置 (同 src/harness/tools/registry.ts
  *     makeAjv),不引入第二份配置差异。
  *
- * 浓缩截断 (SC10 / spec 假设 17): result > 20000 chars 在 worker emit 前
- * 截断并合成标记,父代理只收已截断 envelope。
+ * 父可见投影 (T5): 长终稿不作为父代理交差正文。超过上限时只保留短摘要、
+ * 改过的路径、停因与「汇报已收束」标记；status/reason 不因汇报折叠而改变。
  */
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
@@ -80,8 +80,9 @@ export interface SubAgentEnvelope {
 }
 
 const TRUNCATION_LIMIT = 20000;
+const SUMMARY_LIMIT = 2000;
 const TRUNCATION_MARKER = (total: number) =>
-  `[...truncated to 20000 chars; total ${total}]`;
+  `[report folded; total ${total} chars]`;
 
 /**
  * 仓库同款 ajv 配置: strict: true + ajv-formats (同
@@ -197,20 +198,69 @@ function parseEnvelope(input: string, direction: "worker" | "parent"): unknown {
   return parsed;
 }
 
+function shortSummary(summary: string, result: string): string {
+  const source = summary.length > 0 ? summary : result;
+  return source.length > SUMMARY_LIMIT
+    ? `${source.slice(0, SUMMARY_LIMIT)}…`
+    : source;
+}
+
+function failedSummary(env: SubAgentEnvelope): string {
+  return env.reason === undefined
+    ? "subagent failed"
+    : `subagent failed: ${env.reason}`;
+}
+
+function shortHandoff(
+  summary: string,
+  fileRefs: readonly string[] | undefined,
+  stopReason: StopReason | undefined
+): string {
+  const sections = [summary];
+  if (fileRefs !== undefined && fileRefs.length > 0) {
+    sections.push(
+      `Changed files:\n${fileRefs.map((fileRef) => `- ${fileRef}`).join("\n")}`
+    );
+  }
+  if (stopReason !== undefined) {
+    sections.push(`Stop reason: ${stopReason}`);
+  }
+  return sections.filter((section) => section.length > 0).join("\n\n");
+}
+
 /**
- * 浓缩截断 (SC10 / spec 假设 17): result > 20000 chars 时截断为
- * `[...truncated to 20000 chars; total NNNN]` (无中间字符),置 truncated /
- * totalLength;未超时原样返回 (不改字段)。
+ * 父可见投影 (T5 / SC10): result > 20000 chars 时，不把终稿全文继续向上
+ * 传递，而是合成短交差。result 保留摘要、路径和停因的可读副本，字段
+ * `fileRefs` / `stop_reason` 仍作为结构化真值保留。
+ *
+ * `truncated` 表示汇报正文已收束，不表示任务失败；因此始终保留原 status
+ * 与 reason。未超限的 envelope 保持对象与字段不变，避免无关路径漂移。
  */
 export function truncateEnvelopeResult(
   env: SubAgentEnvelope
 ): SubAgentEnvelope {
   if (env.result.length <= TRUNCATION_LIMIT) {
+    if (env.status === "failed" && env.summary.length === 0) {
+      return { ...env, summary: failedSummary(env) };
+    }
     return env;
   }
+  const summary =
+    env.status === "failed" && env.summary.length === 0
+      ? failedSummary(env)
+      : shortSummary(env.summary, env.result);
+  const handoff = shortHandoff(summary, env.fileRefs, env.stop_reason);
+  const marker = TRUNCATION_MARKER(env.result.length);
+  const separator = handoff.length > 0 ? "\n\n" : "";
+  const available = TRUNCATION_LIMIT - marker.length - separator.length;
+  const boundedHandoff =
+    handoff.length <= available
+      ? handoff
+      : `${handoff.slice(0, Math.max(0, available - 1))}…`;
   return {
     ...env,
-    result: TRUNCATION_MARKER(env.result.length),
+    summary,
+    result: `${boundedHandoff}${separator}${marker}`,
     truncated: true,
     totalLength: env.result.length,
   };

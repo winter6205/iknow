@@ -93,7 +93,7 @@ describe("subagent worker: toOkEnvelope (envelope 派生 / SC2 / SC10)", () => {
     assert.equal(env.result, "");
   });
 
-  it("SC10: result 超 20000 → truncateEnvelopeResult 截断并合成 marker", async () => {
+  it("SC10: result 超 20000 → 截断为短交差且保持成功状态", async () => {
     const big = "y".repeat(25000);
     // 直接调 truncateEnvelopeResult 验证 (与 envelope.ts 行为对齐)
     const { truncateEnvelopeResult } =
@@ -103,10 +103,11 @@ describe("subagent worker: toOkEnvelope (envelope 派生 / SC2 / SC10)", () => {
     assert.equal(truncated.status, "ok");
     assert.equal(truncated.truncated, true);
     assert.equal(truncated.totalLength, 25000);
-    assert.match(
-      truncated.result,
-      /^\[\.\.\.truncated to 20000 chars; total 25000\]$/
-    );
+    assert.ok(truncated.summary.length < big.length);
+    assert.ok(truncated.result.length < 20000);
+    assert.notEqual(truncated.result, big);
+    assert.match(truncated.result, /report folded/);
+    assert.equal(truncated.stop_reason, "completed");
   });
 
   it("SC10 边界: result 恰好 20000 → 不截断", async () => {

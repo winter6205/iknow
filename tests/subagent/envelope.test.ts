@@ -188,22 +188,51 @@ describe("subagent envelope truncation (SC10)", () => {
     assert.equal(out.totalLength, undefined);
   });
 
-  it("truncates result over 20000 chars with synthesized marker + meta fields", () => {
+  it("folds a long success report into a short handoff with paths", () => {
     const long = "x".repeat(25000);
     const env: SubAgentEnvelope = {
       status: "ok",
-      summary: "s",
+      summary: long,
       result: long,
+      fileRefs: ["src/changed.ts", "tests/changed.test.ts"],
+      stop_reason: "completed",
     };
     const out = truncateEnvelopeResult(env);
+    assert.equal(out.status, "ok");
     assert.equal(out.truncated, true);
     assert.equal(out.totalLength, 25000);
-    assert.match(
-      out.result,
-      /^\[\.\.\.truncated to 20000 chars; total 25000\]$/
-    );
-    assert.equal(out.status, "ok");
-    assert.equal(out.summary, "s");
+    assert.ok(out.summary.length < long.length);
+    assert.ok(out.result.length < 20000);
+    assert.notEqual(out.result, long);
+    assert.match(out.result, /src\/changed\.ts/);
+    assert.match(out.result, /tests\/changed\.test\.ts/);
+    assert.match(out.result, /report folded/);
+    assert.equal(out.stop_reason, "completed");
+  });
+
+  it("folding a failed report keeps its reason and non-empty summary", () => {
+    const out = truncateEnvelopeResult({
+      status: "failed",
+      reason: "protocolError",
+      summary: "protocol failure\n" + "x".repeat(25000),
+      result: "x".repeat(25000),
+    });
+    assert.equal(out.status, "failed");
+    assert.equal(out.reason, "protocolError");
+    assert.ok(out.summary.length > 0);
+    assert.equal(out.truncated, true);
+  });
+
+  it("failed envelope without a summary gets a parent-visible reason", () => {
+    const out = truncateEnvelopeResult({
+      status: "failed",
+      reason: "maxTurnsExceeded",
+      summary: "",
+      result: "",
+    });
+    assert.equal(out.status, "failed");
+    assert.equal(out.reason, "maxTurnsExceeded");
+    assert.ok(out.summary.length > 0);
   });
 
   it("keeps exactly-20000 result untruncated", () => {

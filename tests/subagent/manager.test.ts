@@ -344,15 +344,26 @@ describe("SubAgentManager spawn → protocolError", () => {
 // ── fixture 4:truncation ──────────────────────────────────────────────────────
 
 describe("SubAgentManager envelope truncation (SC10)", () => {
-  it("result > 20000 chars → truncated envelope in buffer", () => {
+  it("result > 20000 chars → short folded envelope in buffer", () => {
     const { manager, spawned } = makeHarness();
     const { taskId } = manager.spawn({});
-    emitEnvelope(spawned[0]!, okEnvelope("x".repeat(25000)));
+    emitEnvelope(spawned[0]!, {
+      status: "ok",
+      summary: "completed with a long report " + "x".repeat(25000),
+      result: "x".repeat(25000),
+      fileRefs: ["src/changed.ts"],
+      stop_reason: "completed",
+    });
     const q = manager.queryBuffer(taskId) as SubAgentEnvelope;
     assert.equal(q.status, "ok");
     assert.equal(q.truncated, true);
     assert.equal(q.totalLength, 25000);
-    assert.match(q.result, /^\[\.\.\.truncated to 20000 chars; total 25000\]$/);
+    assert.ok(q.summary.length < 25000);
+    assert.ok(q.result.length < 20000);
+    assert.notEqual(q.result, "x".repeat(25000));
+    assert.match(q.result, /src\/changed\.ts/);
+    assert.match(q.result, /report folded/);
+    assert.equal(q.stop_reason, "completed");
   });
 });
 
