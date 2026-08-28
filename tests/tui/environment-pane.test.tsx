@@ -316,6 +316,16 @@ describe("no agent_status in environment-pane: 平行独立流", () => {
   });
 });
 
+describe("TUI chrome 不画环境现势", () => {
+  test("src/tui/app.tsx 不挂载 EnvironmentPane（只留 ContextBar 一行）", () => {
+    const src = readFileSync(
+      join(import.meta.dir, "..", "..", "src", "tui", "app.tsx"),
+      "utf8"
+    );
+    expect(src.includes("<EnvironmentPane")).toBe(false);
+  });
+});
+
 // DESIGN 验收:src/tui/ 下 EnvironmentPane 唯一 + environment-* 文件名。
 describe("EnvironmentPane 唯一组件名", () => {
   test("src/tui/ 下 EnvironmentPane / environment-pane 仅一处定义", () => {

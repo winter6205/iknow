@@ -178,11 +178,7 @@ import {
 // #653 G1 T5:环境现势独立 slot —— 与 ADR-0028 状态栏同 chrome 区、并列、
 // 平行独立流。EnvironmentPane 不读 ADR-0028 状态栏的事件 / 快照 / 账本
 // 读取器(grep 守卫钉死,见 tests/tui/environment-pane.test.tsx)。
-import {
-  EnvironmentPane,
-  envSnapshotFromEvent,
-  envSnapshotLines,
-} from "./environment-pane.js";
+import { envSnapshotFromEvent } from "./environment-pane.js";
 import type { EnvSnapshot } from "../harness/env-snapshot.js";
 // #653 包1 T3:TUI verify 闭环终态人读 banner(HITL + auto 双模式 passed /
 // failed / unstable / escalated)。wire 已透到 bridge.TuiPostResult.verify;
@@ -320,8 +316,7 @@ export function noticeRenderRows(
  *   - 输入框圆角线框（inputRows 内容行 + 2 边框行；T8 起动态，
  *     输入行数增 → 视图预算随之减，不挤掉历史消息）
  *   - ContextBar 用量条 1 行
- *   - agent 现势显示（#647 T3：动态 0-6 行，agentStatusRows；ContextBar
- *     下方、与 context usage 显示互不相干，见 agent-status-line.tsx）
+ *   - agent 现势显示（未勾待办单行，agentStatusRows；mode 行上方）
  *   - ask 槽 1 行（ChatView tail 恒预留）
  *   - slash 候选行（inputValue.trim().startsWith("/") ? … : 0）
  *   - notice 本体 + 自身 marginBottom=1
@@ -342,7 +337,7 @@ export function chromeReserveRows(opts: {
   /** 子代理状态面板行数（projectSubagentLines 实际产出，0-4）。缺省 0 →
    *   不占行（组件渲染 null / 旧行为兼容）。 */
   readonly panelRows?: number;
-  /** agent 现势显示行数（agentStatusLines 实际产出，0-6）。缺省 0 →
+  /** agent 现势显示行数（agentStatusLines 实际产出，0-1）。缺省 0 →
    *   不占行（无快照 / 组件渲染 null / 旧行为兼容）。 */
   readonly agentStatusRows?: number;
   /** #653 G1 T5:环境现势独立 slot 行数（envSnapshotLines 实际产出，0-2）。
@@ -2407,14 +2402,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     view === "chat"
       ? projectSubagentLines(subagents, Date.now(), cols).length
       : 0;
-  // #647 T3: agent 现势显示行数投影（ContextBar 下方，0-6 行）——与
+  // agent 现势：mode 行上方未勾待办单行（0-1）——与
   // subagentPanelRows 同款入账；非 chat 视图 / 尚无快照 → 0（组件渲染 null）。
   const agentStatusRowBudget =
     view === "chat" ? agentStatusLines(agentStatus, cols).length : 0;
-  // #653 G1 T5:环境现势独立 slot 行数投影(ADR-0028 状态栏旁;非 chat
-  // 视图 / 尚无事件 → 0,组件渲染 null)。
-  const envPaneRowBudget =
-    view === "chat" ? envSnapshotLines(envSnapshot, cols).length : 0;
+  // 环境现势事件仍收（harness 给人不给模型），TUI chrome 不画 ⌂/Δ，
+  // 只留 ContextBar 一行。
+  const envPaneRowBudget = 0;
+  void envSnapshot;
   // #458 包2 T3:verify 闭环终态 banner 行数投影 —— active 会话槽 + 模式
   // (hitl / auto),纯函数 projectVerifyBanner 实际行数(0 / 1)。
   // 仅 chat 视图入账;切走会话不渲染(与 crunchedOf 同款归属校验)。
@@ -2571,6 +2566,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         />
       )}
       {view === "chat" && (
+        <AgentStatusPanel snapshot={agentStatus} cols={cols} />
+      )}
+      {view === "chat" && (
         <box flexDirection="row">
           <text
             fg={graphOn || permMode === "full_auto" ? pal.running : pal.dim}
@@ -2702,20 +2700,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           cols={cols}
           focused={graphChromeFocus === "graph"}
         />
-      )}
-      {/* #647 T3 / ADR-0028: agent 现势显示（ContextBar 用量条下方；与
-          context usage 显示是两回事）。只读 agent_status 事件的最新一份
-          快照（无快照渲染 null，行数 0 → chromeReserveRows.agentStatusRows）；
-          in-flight 工具指示仍走 ContextBar 尾缀（liveToolRuns 派生），互不合并。 */}
-      {view === "chat" && (
-        <AgentStatusPanel snapshot={agentStatus} cols={cols} />
-      )}
-      {/* #653 G1 T5:环境现势独立 slot（与 ADR-0028 状态栏同 chrome 区、
-          并列、独立数据源 —— env_snapshot 平行流,绝不复用 agent_status
-          事件 / 快照 / 渲染路径;无快照渲染 null,行数 0 → chromeReserveRows
-          .envPaneRows）。事件在回合边界刷新,给人不给模型。 */}
-      {view === "chat" && (
-        <EnvironmentPane snapshot={envSnapshot} cols={cols} />
       )}
       {/* #358 T7: 子代理状态面板（ContextBar 下方）。条件渲染 —
           无可见子代理行时返回 null（行数 0 → chromeReserveRows.panelRows=0）；

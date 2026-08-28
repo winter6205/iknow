@@ -144,3 +144,25 @@ export function formatTurnActivityFold(
   if (counts.length === 0) return think;
   return `${think} · ${counts}`;
 }
+
+/**
+ * 运行中不收成 turn 摘要：工具还在出，应逐条可见；turn 结束后再折叠。
+ * idle 且（有思考秒数或工具多于 1 次）才画折叠行。
+ */
+export function shouldShowTurnActivityFold(opts: {
+  readonly running: boolean;
+  readonly thinkingSeconds: number;
+  readonly turnToolTotal: number;
+}): boolean {
+  if (opts.running) return false;
+  return opts.thinkingSeconds > 0 || opts.turnToolTotal > 1;
+}
+
+/** 折叠行在场且 idle 才藏逐条工具行；running 始终展开。 */
+export function shouldCollapseTurnToolRows(
+  running: boolean,
+  foldLine: string,
+  turnToolTotal: number
+): boolean {
+  return !running && foldLine.length > 0 && turnToolTotal > 0;
+}

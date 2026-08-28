@@ -9,10 +9,13 @@ import assert from "node:assert/strict";
 import {
   MEMORY_ADVISORY_PREFIX,
   MEMORY_PREFETCH_CHAR_CAP,
+  MEMORY_PREFETCH_END,
   MEMORY_PREFETCH_MAX_HITS,
   applyHostPrefetch,
+  attachPrefetchOverlay,
   formatPrefetchOverlay,
   selectPrefetchHits,
+  stripPrefetchOverlay,
 } from "../../../src/harness/memory/index.ts";
 import type { MemoryEntryV1 } from "../../../src/harness/memory/index.ts";
 
@@ -141,7 +144,7 @@ describe("applyHostPrefetch", () => {
 
   it("prepends a successful overlay to the user text, not a system string", async () => {
     const out = await applyHostPrefetch("hello", async () => "OVERLAY");
-    assert.equal(out, "OVERLAY\n\nhello");
+    assert.equal(out, `OVERLAY${MEMORY_PREFETCH_END}hello`);
   });
 
   it("returns the original user text when overlay throws", async () => {
@@ -149,5 +152,19 @@ describe("applyHostPrefetch", () => {
       throw new Error("disk down");
     });
     assert.equal(out, "hello");
+  });
+});
+
+describe("stripPrefetchOverlay", () => {
+  it("returns the typed query after the end marker", () => {
+    const full = attachPrefetchOverlay("查一下今天AI新闻", "OVERLAY");
+    assert.equal(stripPrefetchOverlay(full), "查一下今天AI新闻");
+  });
+
+  it("strips a legacy overlay without the end marker", () => {
+    const overlay = formatPrefetchOverlay(selectPrefetchHits("bar", [entry()]));
+    const full = `${overlay}\n\n查一下今天AI新闻`;
+    assert.equal(stripPrefetchOverlay(full), "查一下今天AI新闻");
+    assert.ok(!stripPrefetchOverlay(full).includes(MEMORY_ADVISORY_PREFIX));
   });
 });

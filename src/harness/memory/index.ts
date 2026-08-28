@@ -110,12 +110,14 @@ export type { ScoredEntry, ScoreOpts } from "./bm25.js";
 export {
   MEMORY_ADVISORY_PREFIX,
   MEMORY_PREFETCH_CHAR_CAP,
+  MEMORY_PREFETCH_END,
   MEMORY_PREFETCH_MAX_HITS,
   attachPrefetchOverlay,
   applyHostPrefetch,
   buildMemoryPrefetchOverlay,
   formatPrefetchOverlay,
   selectPrefetchHits,
+  stripPrefetchOverlay,
 } from "./prefetch.js";
 export type {
   BuildPrefetchOverlayOpts,

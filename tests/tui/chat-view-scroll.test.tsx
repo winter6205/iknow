@@ -227,6 +227,21 @@ test("sticky 贴底：追加消息自动滚底（ref 直查 scrollTop === max）
   await setup.renderer.destroy();
 });
 
+test("滚轮一步移动 3 行（略快于 OpenTUI 默认 1 行/格）", async () => {
+  const initial = sessionWith(makeMessages(10));
+  const { setup, api } = await renderChat(initial);
+  const handle = api.handle!;
+  const sb = handle.scrollbox!;
+  const max = maxScrollTop(handle);
+  expect(sb.scrollTop).toBe(max);
+  await act(async () => {
+    await setup.mockMouse.scroll(5, 2, "up");
+  });
+  await setup.waitForVisualIdle();
+  expect(max - sb.scrollTop).toBe(3);
+  await setup.renderer.destroy();
+});
+
 test("上滚后追加：停留在用户位置不跟随（_hasManualScroll 暂停）", async () => {
   const initial = sessionWith(makeMessages(10));
   const { setup, api } = await renderChat(initial);
@@ -430,6 +445,7 @@ test("thinking 留存：lastThinkingSeconds 传给末条 assistant 折叠行 →
   const frame = setup1.captureCharFrame();
   // 末条 assistant 折叠行显示「思考了 4 秒」留存（非纯 [思考] 标记）。
   expect(frame).toContain("思考了 4 秒");
+  expect(frame.split("思考了 4 秒").length - 1).toBe(1);
   await setup1.renderer.destroy();
 });
 
