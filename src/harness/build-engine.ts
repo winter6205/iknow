@@ -67,6 +67,7 @@ import {
   resolveProjectMemoryDir,
   createSystemResolver,
   createAutoMemoryHook,
+  assembleStaticSystemPrompt,
   buildMemoryPrefetchOverlay,
   type AutoMemoryHook,
   type MemoryLiveFlags,
@@ -748,6 +749,8 @@ export async function buildHarnessEngine(
           enabled: autoExtractOn,
           dream: dreamOn,
           flags: memoryFlags,
+          staticLayer: () =>
+            assembleStaticSystemPrompt({ cwd, userHome, workspaceRoot }),
           onError: (error) => {
             console.warn(
               `[memory/auto] ingest skipped: ${

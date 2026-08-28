@@ -115,11 +115,45 @@ describe("buildExtractPrompt", () => {
   it("states the affirmative-phrasing rule so the model does not fight the gate", () => {
     assert.ok(/affirmative/i.test(buildExtractPrompt(TRANSCRIPT)));
   });
+
+  it("embeds the static instruction layer and the extract-discipline sentences", () => {
+    const layer = "Always use bun for this project's package manager.";
+    const prompt = buildExtractPrompt(TRANSCRIPT, layer);
+    assert.ok(prompt.includes(layer), "static layer must reach the extract model");
+    assert.ok(
+      prompt.includes(
+        "Never output a candidate that repeats or paraphrases the project or user instruction files already loaded in every session."
+      )
+    );
+    assert.ok(
+      prompt.includes(
+        "Never keep what the repository itself shows: architecture, file paths, or fixes already merged."
+      )
+    );
+    assert.ok(
+      prompt.includes(
+        "Keep corrections the user made to your work, and preferences the user explicitly confirmed."
+      )
+    );
+  });
 });
 
 // -- extractMemoryCandidates -------------------------------------------------
 
 describe("extractMemoryCandidates", () => {
+  it("forwards the static layer into the FakeLLM prompt", async () => {
+    const layer = "Prefer bun over npm in this repo.";
+    let seen = "";
+    const llm: MemoryExtractLlm = {
+      complete: async (prompt) => {
+        seen = prompt;
+        return "[]";
+      },
+    };
+    await extractMemoryCandidates(TRANSCRIPT, llm, undefined, layer);
+    assert.ok(seen.includes(layer));
+  });
+
   it("parses a JSON array of candidates", async () => {
     const llm = llmReturning(
       JSON.stringify([

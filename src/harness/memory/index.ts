@@ -136,6 +136,7 @@ export type { SlugUsage, UsageSidecar } from "./promote.js";
 
 export {
   assembleSystemPrompt,
+  assembleStaticSystemPrompt,
   PRIORITY_DECLARATION,
   EXISTENCE_POINTER,
 } from "./assembly.js";

@@ -84,6 +84,11 @@ export interface AutoMemoryHookOptions {
    * instead of snapshotting `enabled` / `dream` at construction.
    */
   readonly flags?: MemoryLiveFlags;
+  /**
+   * Host-wired static layer (user + project AGENTS.md / rules).
+   * Resolved only on an extract pass. Thrown faults are swallowed.
+   */
+  readonly staticLayer?: () => Promise<string>;
 }
 
 /** Mutable box the TUI mutates on /memory Esc without rebuilding the hook. */
@@ -184,11 +189,19 @@ async function runExtractPass(
   transcript: string,
   deferGcForDream: boolean
 ): Promise<void> {
+  let staticLayer = "";
+  try {
+    staticLayer = (await opts.staticLayer?.()) ?? "";
+  } catch (error) {
+    // EXIT: log-and-continue — a static-layer fault must not fail the user turn.
+    safeReport(opts.onError, error);
+  }
   try {
     const ingestResult = await ingestMemory({
       memoryDir: opts.memoryDir,
       transcript,
       llm: opts.llm,
+      ...(staticLayer.length > 0 ? { staticLayer } : {}),
       ...(opts.now ? { now: opts.now } : {}),
       ...(opts.nowMs !== undefined ? { nowMs: opts.nowMs } : {}),
       ...(opts.randomBytes ? { randomBytes: opts.randomBytes } : {}),

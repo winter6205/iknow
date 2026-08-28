@@ -166,6 +166,53 @@ describe("createAutoMemoryHook — completed gate", () => {
 
 // -- the N>=2 turn gate ------------------------------------------------------
 
+describe("createAutoMemoryHook — static layer on extract", () => {
+  it("forwards a loaded static layer into the extract prompt", async () => {
+    const layer = "Always use bun for this project's package manager.";
+    const prompts: string[] = [];
+    const llm: MemoryExtractLlm = {
+      complete: async (prompt) => {
+        prompts.push(prompt);
+        return FACT;
+      },
+    };
+    const hook = createAutoMemoryHook(
+      hookOpts(llm, { staticLayer: async () => layer })
+    );
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: which package manager?",
+    });
+    await hook.drain();
+    assert.equal(prompts.length, 1);
+    assert.ok(prompts[0]?.includes(layer));
+  });
+
+  it("still extracts when the static-layer loader throws", async () => {
+    const llm = countingLlm(FACT);
+    const errors: unknown[] = [];
+    const hook = createAutoMemoryHook(
+      hookOpts(llm, {
+        staticLayer: async () => {
+          throw new Error("lstat failed");
+        },
+        onError: (error: unknown) => {
+          errors.push(error);
+        },
+      })
+    );
+    assert.doesNotThrow(() => {
+      hook.onTurnComplete({
+        stopReason: "completed",
+        transcript: "user: which package manager?",
+      });
+    });
+    await hook.drain();
+    assert.equal(llm.calls(), 1, "extract still runs after static-layer IO failure");
+    assert.equal(errors.length, 1);
+  });
+});
+
 describe("createAutoMemoryHook — completed-turn gate", () => {
   it("waits for the second completed turn at the default gate", async () => {
     const llm = countingLlm(FACT);
