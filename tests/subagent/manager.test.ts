@@ -245,6 +245,37 @@ describe("SubAgentManager spawn → crashed", () => {
     }
   });
 
+  it("stderr before exit → crashed summary includes the bounded stderr tail", () => {
+    const { manager, spawned } = makeHarness();
+    const { taskId } = manager.spawn({});
+    const stderr = "early diagnostic\n" + "x".repeat(10_000) + "fatal: boom\n";
+
+    spawned[0]!.stderr.write(stderr);
+    assert.equal(spawned[0]!.stderr.readableLength, 0);
+    spawned[0]!.emit("exit", 2, null);
+
+    const q = manager.queryBuffer(taskId);
+    assert.equal(q.status, "failed");
+    if (q.status === "failed") {
+      assert.match(q.summary, /worker exit code=2 signal=null/);
+      assert.match(q.summary, /fatal: boom/);
+      assert.ok(q.summary.length < 5_000);
+      assert.doesNotMatch(q.summary, /early diagnostic/);
+    }
+  });
+
+  it("empty stderr → crashed summary remains unchanged", () => {
+    const { manager, spawned } = makeHarness();
+    const { taskId } = manager.spawn({});
+    spawned[0]!.emit("exit", 1, null);
+
+    const q = manager.queryBuffer(taskId);
+    assert.equal(q.status, "failed");
+    if (q.status === "failed") {
+      assert.equal(q.summary, "worker exit code=1 signal=null");
+    }
+  });
+
   it("killed by signal → failed reason=crashed", () => {
     const { manager, spawned } = makeHarness();
     const { taskId } = manager.spawn({});

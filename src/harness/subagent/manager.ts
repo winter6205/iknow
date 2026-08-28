@@ -246,6 +246,18 @@ interface Task {
 
 const WAIT_POLL_MS = 25;
 const SHUTDOWN_SIGKILL_GRACE_MS = 5000;
+const MAX_STDERR_TAIL_CHARS = 4096;
+
+function crashedSummary(
+  code: number | null,
+  signal: NodeJS.Signals | null,
+  stderrTail: string
+): string {
+  const base = `worker exit code=${code} signal=${signal}`;
+  return stderrTail.length === 0
+    ? base
+    : `${base}\nstderr tail:\n${stderrTail}`;
+}
 
 /**
  * #361 T5: SIGKILL 兜底计时器(per-task timeout 与 abortTask 共用)。
@@ -465,6 +477,14 @@ export function createSubAgentManager(opts: {
     }
     task.child = child;
     task.abortCtrl = new AbortController();
+    let stderrBuf = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderrBuf += chunk.toString("utf8");
+      // EXIT: bound retained crash diagnostics so stderr cannot grow without limit.
+      if (stderrBuf.length > MAX_STDERR_TAIL_CHARS) {
+        stderrBuf = stderrBuf.slice(-MAX_STDERR_TAIL_CHARS);
+      }
+    });
 
     // #358 T4: subagent_spawn 在 child 成功 launch 后 emit (task.state 此时还是
     // "starting",下方 emitStateChange("running") 联动跑 starting→running 迁移)。
@@ -629,13 +649,13 @@ export function createSubAgentManager(opts: {
           task.envelope = {
             status: "failed",
             reason: "crashed",
-            summary: `worker exit code=${code} signal=${signal}`,
+            summary: crashedSummary(code, signal, stderrBuf),
             result: "",
           };
           emitStateChange(task, "failed", { reason: "crashed" });
           emitStop(task, "failed", {
             reason: "crashed",
-            summary: `worker exit code=${code} signal=${signal}`,
+            summary: crashedSummary(code, signal, stderrBuf),
             ...(code !== null ? { exitCode: code } : {}),
             ...(signal !== null ? { signal } : {}),
           });
@@ -676,16 +696,18 @@ export function createSubAgentManager(opts: {
 
     child.on("error", (err) => {
       const errMsg = err.message;
+      const summary =
+        stderrBuf.length === 0 ? errMsg : `${errMsg}\nstderr tail:\n${stderrBuf}`;
       task.envelope = {
         status: "failed",
         reason: "crashed",
-        summary: errMsg,
+        summary,
         result: "",
       };
       emitStateChange(task, "failed", { reason: "crashed" });
       emitStop(task, "failed", {
         reason: "crashed",
-        summary: errMsg,
+        summary,
       });
     });
 
