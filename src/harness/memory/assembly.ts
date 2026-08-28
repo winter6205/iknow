@@ -56,28 +56,30 @@ export interface AssemblyContext {
   readonly promoteEntries?: ReadonlyArray<MemoryEntryV1>;
 }
 
-/** Compose the layered system prompt per the locked order (see file header). */
-export async function assembleSystemPrompt(
-  ctx: AssemblyContext
+/** Compose only the static instruction layer, without memory-library content. */
+export async function assembleStaticSystemPrompt(
+  ctx: Pick<AssemblyContext, "cwd" | "userHome" | "workspaceRoot">
 ): Promise<string> {
-  // 用户静态层永远读 `<ctx.userHome>/.iknow/`,与 `user.md` 同根(ADR-0009
-  // Decision 1;identity assemble 的 persona 读法同形)。ADR-0019 的
-  // `workspaceRoot` 仍是 per-root state anchor(memoryDir / tasks / settings),
-  // 但**不**充当用户层物理根 —— 否则 `--workspace-root` 会把某个项目下的
-  // `.iknow/AGENTS.md` 冒充成对所有项目生效的用户级指令。
-  // ADR-0009 read-order user-first / project-second + PRIORITY_DECLARATION 位置
-  // 不位移(装配顺序与 priority declaration 由 parts.push 顺序守)。
   const user = await loadStaticLayer(ctx.userHome, "user");
   const project = await loadStaticLayer(ctx.cwd, "project");
-  const hasMemory = await memoryLibraryNonEmpty(ctx.memoryDir);
-  const promote =
-    ctx.promoteEntries ?? (await listPromotableEntries(ctx.memoryDir));
   const parts: string[] = [];
   if (user) parts.push(user);
   if (project) {
     if (user) parts.push(PRIORITY_DECLARATION);
     parts.push(project);
   }
+  return parts.join("\n\n");
+}
+
+/** Compose the layered system prompt per the locked order (see file header). */
+export async function assembleSystemPrompt(
+  ctx: AssemblyContext
+): Promise<string> {
+  const staticPrompt = await assembleStaticSystemPrompt(ctx);
+  const hasMemory = await memoryLibraryNonEmpty(ctx.memoryDir);
+  const promote =
+    ctx.promoteEntries ?? (await listPromotableEntries(ctx.memoryDir));
+  const parts: string[] = staticPrompt ? [staticPrompt] : [];
   if (hasMemory) parts.push(EXISTENCE_POINTER);
   if (promote.length > 0) parts.push(formatPromote(promote));
   return parts.join("\n\n");

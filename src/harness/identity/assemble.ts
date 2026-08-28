@@ -27,6 +27,7 @@ import { promises as fs } from "node:fs";
 import { IKNOW_IDENTITY_DEFAULT } from "./identity.js";
 import { IKNOW_SOUL_DEFAULT } from "./soul.js";
 import { bootstrapFilePath } from "./workspace.js";
+import { assembleStaticSystemPrompt } from "../memory/assembly.js";
 
 /** IKNOW-196 + #194 T6 装配顺序 (5 段,逐步锁死)。 */
 export const IKNOW_ASSEMBLY_ORDER = [
@@ -59,6 +60,8 @@ export interface AssemblyContext {
   readonly workspaceRoot?: string;
   readonly bootstrapActive: boolean;
   readonly memoryEnabled: boolean;
+  /** Inject AGENTS.md/rules without enabling memory-library behavior. */
+  readonly staticInstructions?: boolean;
   readonly memoryResolver?: () => Promise<string | undefined>;
   readonly toolList?: () => ReadonlyArray<string> | undefined;
   readonly skills?: () => ReadonlyArray<SkillSummary> | undefined;
@@ -136,6 +139,8 @@ export function createIknowSystemResolver(opts: {
   readonly userHome: string;
   readonly surface: "chat" | "tui" | "ask" | "serve";
   readonly memoryEnabled: boolean;
+  /** Inject AGENTS.md/rules while keeping memory tools/library disabled. */
+  readonly staticInstructions?: boolean;
   readonly memoryResolver?: () => Promise<string | undefined>;
   /** Optional per-root state; ignored for user.md / BOOTSTRAP.md reads. */
   readonly workspaceRoot?: string;
@@ -164,6 +169,7 @@ export function createIknowSystemResolver(opts: {
       ...(opts.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
       bootstrapActive,
       memoryEnabled: opts.memoryEnabled,
+      ...(opts.staticInstructions ? { staticInstructions: true } : {}),
       ...(opts.memoryResolver ? { memoryResolver: opts.memoryResolver } : {}),
       ...(opts.toolList ? { toolList: opts.toolList } : {}),
       ...(opts.skills ? { skills: opts.skills } : {}),
@@ -270,6 +276,12 @@ async function resolveSegment(
     case "bootstrap":
       return readBootstrapIfNeeded(ctx, ctx.bootstrapActive);
     case "memory_layer":
+      // T6:静态说明书与记忆库解耦。worker 通过 staticInstructions 注入
+      // AGENTS.md / rules,但不启用 memory_recall / promote / existence pointer。
+      if (ctx.staticInstructions) {
+        const staticPrompt = await assembleStaticSystemPrompt(ctx);
+        return staticPrompt || undefined;
+      }
       // #194 T6:memory 层由 build-engine 注入的 resolver 装配。降级契约
       // 对齐 readUserProfile / readBootstrapIfNeeded:enabled=false →
       // 跳过;resolver 未注入 → 跳过;resolver 抛错 → console.warn + 跳过。

@@ -1,7 +1,7 @@
 /**
  * #361 / ADR-0014 — T11 边界测试 (契约「测试冲突清单」7 项逐条落实)。
  *
- *   C1: 第 5 个并发 spawn → capacity ToolExecutionError
+ *   C1: 注入 cap=4 时第 5 个并发 spawn → capacity ToolExecutionError
  *   C2: drain 空/多/阻塞后置终态/超时守卫 (host-drain async)
  *   C3: waitFor abort → SubAgentAbortError; 已终态 abort 无副作用
  *   C4: drain 中途 waitFor 拒绝 → 返回部分、不抛
@@ -62,9 +62,20 @@ function makeFakeSpawnFactory(): SubAgentSpawn {
     });
 }
 
+/** 占槽用:子进程保持 running,避免无信封 exit(0) 立刻放槽。 */
+function makeLiveSpawnFactory(): SubAgentSpawn {
+  return () =>
+    spawn(process.execPath, ["-e", "setInterval(() => {}, 1e6)"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+}
+
 describe("C1: 第 5 个并发 spawn → capacity ToolExecutionError", () => {
-  it("真实 manager:5 次并发 spawn,第 5 次抛 SubAgentCapacityError", async () => {
-    const mgr = createSubAgentManager({ spawn: makeFakeSpawnFactory() });
+  it("真实 manager:注入 cap=4 时第 5 次并发 spawn 抛 SubAgentCapacityError", async () => {
+    const mgr = createSubAgentManager({
+      spawn: makeLiveSpawnFactory(),
+      maxConcurrentWorkers: 4,
+    });
     for (let i = 0; i < 4; i++) {
       expect(() => mgr.spawn({ task: `t${i}` })).not.toThrow();
     }
@@ -122,7 +133,7 @@ describe("C2: drain 空/多/阻塞后置终态/超时守卫 (drain async)", () =
     });
     const out = await drainPendingSubagents(fakeManager);
     expect(out).toBe(
-      ["## Sub-agent a result: A\n\nrA", "## Sub-agent b result: B\n\nrB"].join(
+      ["## Sub-agent a result: A\n\nA", "## Sub-agent b result: B\n\nB"].join(
         "\n\n"
       )
     );
@@ -157,7 +168,7 @@ describe("C2: drain 空/多/阻塞后置终态/超时守卫 (drain async)", () =
       timeoutMs: 5000,
     });
     expect(out).toContain("## Sub-agent late result: late-A");
-    expect(out).toContain("late-R");
+    expect(out).toContain("late-A");
     // drain 串行:至少 3 个 poll cycle 才收到 partial —— 证明 drain 实际
     // 阻塞轮询(polls=1 立即返 → 短路; polls=3 阻塞到位)。
     expect(polls).toBeGreaterThanOrEqual(3);

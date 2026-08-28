@@ -7,7 +7,7 @@
  *   1. 带 dep 边的图按波次跑完，上游产出真的进了下游的 task 文本；
  *   2. 拓扑非法 → typed 拒绝且 **零 spawn**（校验在任何 spawn 之前）；
  *   3. 节点失败 → 下游 skipped、独立分支照跑，整体仍是一份浓缩结果；
- *   4. 打满全局 cap 4 → 走既有 `SubAgentCapacityError`，不另起 per-graph budget。
+ *   4. 打满 manager 并发上限 → 走既有 `SubAgentCapacityError`，不另起 per-graph budget。
  */
 import { describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
@@ -52,7 +52,9 @@ function makeFakeChild(): FakeChild {
   }) as unknown as FakeChild;
 }
 
-function makeManager(): { manager: SubAgentManager; children: FakeChild[] } {
+function makeManager(
+  opts: { readonly maxConcurrentWorkers?: number } = {}
+): { manager: SubAgentManager; children: FakeChild[] } {
   const children: FakeChild[] = [];
   const manager = createSubAgentManager({
     spawn: () => {
@@ -60,6 +62,9 @@ function makeManager(): { manager: SubAgentManager; children: FakeChild[] } {
       children.push(c);
       return c as unknown as ChildProcess;
     },
+    ...(opts.maxConcurrentWorkers !== undefined
+      ? { maxConcurrentWorkers: opts.maxConcurrentWorkers }
+      : {}),
   });
   return { manager, children };
 }
@@ -283,9 +288,9 @@ describe("run_graph handler — 调用侧取消", () => {
   }, 15_000);
 });
 
-describe("run_graph handler — 共用全局 cap 4（不另起 per-graph budget）", () => {
-  it("同波 5 个节点 → 第 5 个走既有 SubAgentCapacityError，前 4 个照常", async () => {
-    const { manager, children } = makeManager();
+describe("run_graph handler — 共用全局 cap（不另起 per-graph budget）", () => {
+  it("同波超过 cap 的节点 → 超额走既有 SubAgentCapacityError，cap 内照常", async () => {
+    const { manager, children } = makeManager({ maxConcurrentWorkers: 4 });
     const tool = createRunGraphTool({ manager });
     const pending = tool.handler({
       nodes: ["n1", "n2", "n3", "n4", "n5"].map((id) => ({
@@ -294,8 +299,7 @@ describe("run_graph handler — 共用全局 cap 4（不另起 per-graph budget�
       })),
     });
     await waitForChildren(children, 4);
-    // 第 5 个 spawn 被容量拒 —— manager 的 MAX_CONCURRENT_WORKERS 是项目
-    // 唯一权威并发上限,图层不复制一份。
+    // 第 5 个 spawn 被容量拒 —— manager 并发上限是项目唯一权威，图层不复制一份。
     expect(children).toHaveLength(4);
     for (const child of children) settle(child, ok("fine"));
 

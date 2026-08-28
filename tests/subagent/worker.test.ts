@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it, vi } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
@@ -93,7 +96,7 @@ describe("subagent worker: toOkEnvelope (envelope 派生 / SC2 / SC10)", () => {
     assert.equal(env.result, "");
   });
 
-  it("SC10: result 超 20000 → truncateEnvelopeResult 截断并合成 marker", async () => {
+  it("SC10: result 超 20000 → 截断为短交差且保持成功状态", async () => {
     const big = "y".repeat(25000);
     // 直接调 truncateEnvelopeResult 验证 (与 envelope.ts 行为对齐)
     const { truncateEnvelopeResult } =
@@ -103,21 +106,25 @@ describe("subagent worker: toOkEnvelope (envelope 派生 / SC2 / SC10)", () => {
     assert.equal(truncated.status, "ok");
     assert.equal(truncated.truncated, true);
     assert.equal(truncated.totalLength, 25000);
-    assert.match(
-      truncated.result,
-      /^\[\.\.\.truncated to 20000 chars; total 25000\]$/
-    );
+    assert.ok(truncated.summary.length < big.length);
+    assert.ok(truncated.result.length < 20000);
+    assert.notEqual(truncated.result, big);
+    assert.match(truncated.result, /report folded/);
+    assert.equal(truncated.stop_reason, "completed");
   });
 
-  it("SC10 边界: result 恰好 20000 → 不截断", async () => {
-    const { truncateEnvelopeResult } =
+  it("SC10 边界: result 恰好 20000 → IPC 不截断，父可见层仍短交差", async () => {
+    const { truncateEnvelopeResult, projectParentVisibleEnvelope } =
       await import("../../src/harness/subagent/envelope.ts");
     const exact = "z".repeat(20000);
     const env = toOkEnvelope(fakeResult(exact));
-    const out = truncateEnvelopeResult(env);
-    assert.equal(out.truncated, undefined);
-    assert.equal(out.totalLength, undefined);
-    assert.equal(out.result.length, 20000);
+    const ipc = truncateEnvelopeResult(env);
+    assert.equal(ipc.result.length, 20000);
+    assert.equal(ipc.truncated, undefined);
+    const parent = projectParentVisibleEnvelope(env);
+    assert.equal(parent.truncated, true);
+    assert.notEqual(parent.result, exact);
+    assert.ok(parent.result.length < 20000);
   });
 });
 
@@ -382,6 +389,54 @@ describe("subagent worker: buildThinkingParams + adapter seam (type sanity)", ()
 // ---------------------------------------------------------------------------
 
 describe("subagent worker: CreateWorkerDepsOptions seam 字段 (类型契约)", () => {
+  it("general-purpose worker 注入项目 AGENTS.md, 即使 memoryEnabled=false", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "iknow-worker-static-"));
+    try {
+      const marker = "WORKER_PROJECT_INSTRUCTIONS";
+      await writeFile(join(cwd, "AGENTS.md"), marker);
+      const deps = await createWorkerDeps({
+        env: TEST_ENV,
+        sandboxRoot: cwd,
+        cwd,
+        userHome: cwd,
+        role: "general-purpose",
+        model: createStubModel({ responses: [] }),
+        skillCatalog: createSkillCatalog([]),
+        trace: createNoopTraceService(),
+      });
+
+      const system = (await deps.system?.()) ?? "";
+
+      assert.ok(system.includes(marker));
+      assert.ok(!system.includes("memory_recall"));
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("explore worker 不注入完整项目 AGENTS.md 说明书静态层", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "iknow-worker-explore-static-"));
+    try {
+      const marker = "EXPLORE_MUST_NOT_SEE_AGENTS";
+      await writeFile(join(cwd, "AGENTS.md"), marker);
+      const deps = await createWorkerDeps({
+        env: TEST_ENV,
+        sandboxRoot: cwd,
+        cwd,
+        userHome: cwd,
+        role: "explore",
+        model: createStubModel({ responses: [] }),
+        skillCatalog: createSkillCatalog([]),
+        trace: createNoopTraceService(),
+      });
+
+      const system = (await deps.system?.()) ?? "";
+      assert.ok(!system.includes(marker));
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("opts 必须 env + sandboxRoot, 其余 seam 字段可选", () => {
     const opts: CreateWorkerDepsOptions = {
       env: TEST_ENV,
@@ -389,6 +444,27 @@ describe("subagent worker: CreateWorkerDepsOptions seam 字段 (类型契约)", 
     };
     assert.equal(opts.env.llm.maxTurns, undefined);
     assert.equal(opts.sandboxRoot, "/tmp/sb");
+  });
+
+  it("env.llm 的 idle / hard-cap 双钟透传到 worker loop deps", async () => {
+    const deps = await createWorkerDeps({
+      env: {
+        ...TEST_ENV,
+        llm: {
+          ...TEST_ENV.llm,
+          idleTimeoutMs: 12_345,
+          hardCapMs: 67_890,
+        },
+      },
+      sandboxRoot: "/tmp/sb",
+      model: createStubModel({ responses: [] }),
+      skillCatalog: createSkillCatalog([]),
+      system: () => undefined,
+      trace: createNoopTraceService(),
+    });
+
+    assert.equal(deps.modelIdleTimeoutMs, 12_345);
+    assert.equal(deps.modelHardCapMs, 67_890);
   });
 });
 

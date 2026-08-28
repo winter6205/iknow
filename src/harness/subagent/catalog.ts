@@ -60,7 +60,7 @@ const GENERAL_PURPOSE_ENTRY: AgentCatalogEntry = Object.freeze({
   id: "general-purpose",
   description:
     "General-purpose agent for multi-step tasks that may use any available tool.",
-  body: "You are a general-purpose agent. Use any available tool to accomplish the task delegated by the parent. Prefer concise, evidence-backed results and return a structured summary.",
+  body: "You are a general-purpose agent. Use any available tool to accomplish the task delegated by the parent. Keep handoffs short, list relevant file paths, and do not paste entire files into the final draft. Prefer concise, evidence-backed results and return a structured summary.",
 });
 
 /** builtin catalog 单一权威源 (frozen array singleton)。 */

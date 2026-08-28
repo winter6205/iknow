@@ -14,6 +14,30 @@ import { join } from "node:path";
 describe("memory_layer slot — resolver 降级契约", () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it("staticInstructions=true + memoryEnabled=false → 注入项目说明书且不启用记忆", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "iknow-static-project-"));
+    const userHome = await mkdtemp(join(tmpdir(), "iknow-static-home-"));
+    try {
+      const marker = "PROJECT_STATIC_INSTRUCTIONS";
+      await writeFile(join(cwd, "AGENTS.md"), marker);
+      const resolver = createIknowSystemResolver({
+        cwd,
+        userHome,
+        surface: "ask",
+        memoryEnabled: false,
+        staticInstructions: true,
+      });
+
+      const out = (await resolver()) ?? "";
+
+      expect(out).toContain(marker);
+      expect(out).not.toContain("memory_recall");
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+      await rm(userHome, { recursive: true, force: true });
+    }
+  });
+
   it("memoryEnabled=false → memory_layer absent (ask 全 opt-out)", async () => {
     const resolver = createIknowSystemResolver({
       cwd: "/tmp",

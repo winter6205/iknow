@@ -197,6 +197,15 @@ _Avoid_: 把前景/后景与进程隔离混同；泛化的"同步/异步"；把 
 **host drain**: host 侧把 completed 子代理 envelope 浓缩成一条消息、注入下一轮 run() priorMessages 的机制（#356 V1，`src/harness/subagent/host-drain.ts`）；只 drain completed，不修改 buffer 状态。#361 裁决后仅在异步臂（`wait:false`）生效，且须阻塞轮询至至少一个 worker 到终态；终态被 V2 事件驱动唤醒取代。
 _Avoid_: 把 drain 与"结果获取"混同（前景 spawn 不经 drain）；让 agent 侧直接消费 manager buffer；把 drain 被动挂"下一轮用户输入"当作可靠唤醒源
 
+**父可见信封**: 子代理交差给父模型看的那一层——短摘要、改过的路径、成败与停因；不是终稿全文，也不是磁盘上的代码。
+_Avoid_: 把完整 result 当任务产物；把汇报截断当成任务失败
+
+**子代理并发上限**: 同时处于 starting/running 的 worker 硬顶，可配、默认 15；发几张由模型决定，超限立即失败、不排队。
+_Avoid_: 静默排队；让用户每次填写要派几个
+
+**说明书静态层**: 用户级与项目级 AGENTS.md 及 rules，可注入通用 worker 的 system；与记忆工具、自动抽取、记忆库灌窗分开开关。
+_Avoid_: 用 memoryEnabled 一把关掉说明书；把说明书和 memory_recall 绑死
+
 **graph mode**: 会话级编排 overlay，不是 PermissionMode。Shift+Tab 三态轮 `Default → Auto → Graph → Default`（`/graph` 为非 TTY 对等物）；进 Graph 后**下一次 `run()` 装配**才注入编排段并露出 `run_graph`，过程中切换不拦、不中途重装配。ADR-0030。
 _Avoid_: 第四种 PermissionMode；把 `src/harness/graph/` 写进 prompt；env gate 才注入；进图改 ask/auto；切模式当下 round 热替换工具面
 
@@ -272,6 +281,9 @@ _Avoid_: 把发现的工具插回注册序中部（破 KV cache 前缀）；只�
 - **沙箱纪律 vs 前景/后景 spawn**: 沙箱纪律约束 `bash` 前台/后台围栏；前景/后景 spawn 是 `spawn_subagent` 的等待契约（ADR-0014）
 - **graph mode vs PermissionMode**: graph mode 是编排 overlay；PermissionMode 是 mutating 问/拒/放行。进 Graph 冻结当时 permission，不把 Graph 写入 `PERMISSION_MODES`
 - **run_graph vs spawn_subagent**: 有依赖的多节点走 `run_graph`；单次派活仍 `spawn_subagent`。图节点内部仍是前景 spawn，不经父代理再调 spawn 工具
+- **父可见信封 vs 磁盘产物**: 父读摘要和路径；写文件以工作区为准，不靠把全文塞进 tool_result
+- **子代理并发上限 vs 派发张数**: 上限是帽子；张数由模型按任务拆，说明书写独立才并行
+- **说明书静态层 vs memory_layer 整段开关**: 通用 worker 要说明书、不要记忆工具；禁止再靠 memoryEnabled=false 把 AGENTS.md 一起跳过
 - **状态栏 vs 任务摘录**: 摘录只在 compact 时贴用户原话；状态栏每轮由代码现算并追加
 - **状态栏 vs append-only messages**: 栏走同一条追加纪律；纠错靠新栏，不靠从历史上抠掉旧栏
 - **`memory_save`（显式写） vs auto_extract（自动写）**: 两条写路径共用同一套肯定句门禁与 tmp+rename 原子写；显式写是模型当场决定的一次工具调用，自动写是 host 在 turn 完成后异步跑的一趟 ingest。差别只在触发方式与 `source: auto` 标记，不在信任通道——两者都只经 tool_result 回到模型

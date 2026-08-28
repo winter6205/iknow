@@ -384,6 +384,13 @@ describe("worker tool surface: 并发 N/A — 占位说明", () => {
 // ---------------------------------------------------------------------------
 
 describe("worker tool surface: #440 T5 D6 ownership — todo_write 缺席", () => {
+  it("worker 装配路径不传 memoryDir → memory_recall / memory_save 均缺席", async () => {
+    const deps = await buildWorkerWithFullSkillCatalog();
+    const names = deps.registry.list().map((d) => d.name);
+    assert.ok(!names.includes("memory_recall"));
+    assert.ok(!names.includes("memory_save"));
+  });
+
   it("worker 装配路径不传 todoDir → inner.list() 不含 todo_write", async () => {
     const deps = await buildWorkerWithFullSkillCatalog();
     const names = deps.registry.list().map((d) => d.name);

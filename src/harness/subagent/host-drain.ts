@@ -24,6 +24,7 @@
  * ask 入口无 manager → 不调本函数 → 不行为变化。
  */
 import type { SubAgentManager } from "./manager.js";
+import { projectParentVisibleEnvelope } from "./envelope.js";
 
 /**
  * Drain 消息文本前缀（SSOT）。单 task 浓缩格式为
@@ -66,10 +67,10 @@ export async function drainPendingSubagents(
     const list = manager!.drainCompleted();
     if (list.length === 0) return "";
     return list
-      .map(
-        ({ taskId, envelope }) =>
-          `${SUBAGENT_DRAIN_PREFIX}${taskId} result: ${envelope.summary}\n\n${envelope.result}`
-      )
+      .map(({ taskId, envelope }) => {
+        const visible = projectParentVisibleEnvelope(envelope);
+        return `${SUBAGENT_DRAIN_PREFIX}${taskId} result: ${visible.summary}\n\n${visible.result}`;
+      })
       .join("\n\n");
   };
 

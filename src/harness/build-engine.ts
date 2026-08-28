@@ -354,11 +354,14 @@ export async function buildHarnessEngine(
         // #358 T2: per-task wallclock 链条中段 — env.subagent.taskTimeoutMs
         // (settings/env 合并已由 T1 在 env 层完成, 此处直接消费; 缺省
         // undefined → manager 回退自己的 7200s 常量)。
+        // T4: 并发上限由 env.subagent.maxConcurrentWorkers 透传;缺席时
+        // manager 回退默认 15。
         createSubAgentManager({
           spawn: defaultSubAgentSpawn,
           sandboxRoot,
           trace: opts.subagentTrace ?? createNoopTraceService(),
           taskTimeoutMs: env.subagent.taskTimeoutMs,
+          maxConcurrentWorkers: env.subagent.maxConcurrentWorkers,
         }))
       : undefined;
   // #502 T3:bash background 任务管理器 — 条件装配（surface !== "ask"）：

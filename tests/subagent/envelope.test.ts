@@ -4,6 +4,7 @@ import { ProtocolError } from "../../src/harness/errors.ts";
 import {
   parseParentEnvelope,
   parseWorkerEnvelope,
+  projectParentVisibleEnvelope,
   truncateEnvelopeResult,
 } from "../../src/harness/subagent/envelope.ts";
 import type {
@@ -175,46 +176,82 @@ describe("subagent envelope schema (SC13 / D1)", () => {
 });
 
 describe("subagent envelope truncation (SC10)", () => {
-  it("returns the envelope unchanged when result is within 20000 chars", () => {
+  it("replaces a mid-size draft with the parent-visible short handoff", () => {
+    const draft = "final draft body ".repeat(40);
     const env: SubAgentEnvelope = {
       status: "ok",
-      summary: "s",
-      result: "short result",
+      summary: "changed the parser",
+      result: draft,
+      fileRefs: ["src/parser.ts"],
+      stop_reason: "completed",
     };
-    const out = truncateEnvelopeResult(env);
-    assert.equal(out, env);
-    assert.equal(out.result, "short result");
-    assert.equal(out.truncated, undefined);
-    assert.equal(out.totalLength, undefined);
+    const out = projectParentVisibleEnvelope(env);
+    assert.equal(out.status, "ok");
+    assert.notEqual(out.result, draft);
+    assert.match(out.result, /changed the parser/);
+    assert.match(out.result, /src\/parser\.ts/);
+    assert.match(out.result, /Stop reason: completed/);
+    assert.equal(out.stop_reason, "completed");
   });
 
-  it("truncates result over 20000 chars with synthesized marker + meta fields", () => {
+  it("folds a long success report into a short handoff with paths", () => {
     const long = "x".repeat(25000);
     const env: SubAgentEnvelope = {
       status: "ok",
-      summary: "s",
+      summary: long,
       result: long,
+      fileRefs: ["src/changed.ts", "tests/changed.test.ts"],
+      stop_reason: "completed",
     };
     const out = truncateEnvelopeResult(env);
+    assert.equal(out.status, "ok");
     assert.equal(out.truncated, true);
     assert.equal(out.totalLength, 25000);
-    assert.match(
-      out.result,
-      /^\[\.\.\.truncated to 20000 chars; total 25000\]$/
-    );
-    assert.equal(out.status, "ok");
-    assert.equal(out.summary, "s");
+    assert.ok(out.summary.length < long.length);
+    assert.ok(out.result.length < 20000);
+    assert.notEqual(out.result, long);
+    assert.match(out.result, /src\/changed\.ts/);
+    assert.match(out.result, /tests\/changed\.test\.ts/);
+    assert.match(out.result, /report folded/);
+    assert.equal(out.stop_reason, "completed");
   });
 
-  it("keeps exactly-20000 result untruncated", () => {
+  it("folding a failed report keeps its reason and non-empty summary", () => {
+    const out = truncateEnvelopeResult({
+      status: "failed",
+      reason: "protocolError",
+      summary: "protocol failure\n" + "x".repeat(25000),
+      result: "x".repeat(25000),
+    });
+    assert.equal(out.status, "failed");
+    assert.equal(out.reason, "protocolError");
+    assert.ok(out.summary.length > 0);
+    assert.equal(out.truncated, true);
+  });
+
+  it("failed envelope without a summary gets a parent-visible reason", () => {
+    const out = truncateEnvelopeResult({
+      status: "failed",
+      reason: "maxTurnsExceeded",
+      summary: "",
+      result: "",
+    });
+    assert.equal(out.status, "failed");
+    assert.equal(out.reason, "maxTurnsExceeded");
+    assert.ok(out.summary.length > 0);
+  });
+
+  it("exactly-20000 draft is still a short handoff, not the full body", () => {
     const env: SubAgentEnvelope = {
       status: "ok",
       summary: "s",
       result: "y".repeat(20000),
     };
-    const out = truncateEnvelopeResult(env);
-    assert.equal(out, env);
-    assert.equal(out.truncated, undefined);
+    const out = projectParentVisibleEnvelope(env);
+    assert.notEqual(out.result, env.result);
+    assert.match(out.result, /^s/);
+    assert.equal(out.truncated, true);
+    assert.equal(out.totalLength, 20000);
   });
 });
 
