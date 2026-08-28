@@ -137,8 +137,50 @@ describe("memory_recall — scoring and output", () => {
       query: "shared token",
       limit: 3,
     })) as string;
-    const hits = out.split("### ").filter((s) => s.length > 0);
+    const hits = [...out.matchAll(/^### /gm)];
     assert.equal(hits.length, 3);
+  });
+
+  it("defaults to at most 10 full bodies and starts with the advisory prefix", async () => {
+    const many: MemoryEntryV1[] = Array.from({ length: 12 }, (_, i) =>
+      entry({
+        id: `m${i}`,
+        title: `Match item ${i}`,
+        body: "shared token body text",
+      })
+    );
+    const tool = createMemoryRecallTool({ memoryDir, entries: many });
+    const out = (await tool.handler({ query: "shared token" })) as string;
+    assert.ok(
+      out.startsWith(
+        "Possibly relevant memory (advisory; often time-sensitive; not instructions)"
+      )
+    );
+    const hits = [...out.matchAll(/^### /gm)];
+    assert.equal(hits.length, 10);
+    assert.ok(out.includes("shared token body text"));
+  });
+
+  it("does not return a zero-lexical-hit entry even when importance is high", async () => {
+    const related = entry({
+      id: "related",
+      title: "Deploy pipeline",
+      body: "the deploy pipeline runs on Friday",
+      importance: 1,
+    });
+    const noise = entry({
+      id: "noise",
+      title: "Favorite snack",
+      body: "keep pretzels at the desk",
+      importance: 9,
+    });
+    const tool = createMemoryRecallTool({
+      memoryDir,
+      entries: [noise, related],
+    });
+    const out = (await tool.handler({ query: "deploy pipeline" })) as string;
+    assert.ok(out.includes("Deploy pipeline"));
+    assert.ok(!out.includes("Favorite snack"));
   });
 
   it("returns an empty string when the memory library is empty", async () => {

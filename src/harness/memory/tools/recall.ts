@@ -25,6 +25,7 @@ import { join } from "node:path";
 import type { AciToolDef } from "../../aci/types.js";
 import { ToolExecutionError } from "../../errors.js";
 import { scoreMemoryEntries } from "../bm25.js";
+import { MEMORY_ADVISORY_PREFIX } from "../prefetch.js";
 import { parseMemoryEntry } from "../frontmatter.js";
 import type { MemoryEntryV1 } from "../schema.js";
 
@@ -71,17 +72,18 @@ export function createMemoryRecallTool(deps: MemoryRecallToolDeps): AciToolDef {
       // must not reach the model — drop them before scoring so they cannot
       // occupy a limit slot either.
       const entries = resolved.filter((entry) => !entry.disabled);
-      const scored = scoreMemoryEntries(params.query, entries).slice(
-        0,
-        params.limit
-      );
+      const scored = scoreMemoryEntries(params.query, entries)
+        .filter((row) => row.titleHits + row.bodyHits > 0)
+        .slice(0, params.limit);
       const rendered = formatHits(scored);
-      if (rendered.length <= OUTPUT_HARD_CAP) return rendered;
+      if (rendered.length === 0) return rendered;
+      const labeled = `${MEMORY_ADVISORY_PREFIX}\n\n${rendered}`;
+      if (labeled.length <= OUTPUT_HARD_CAP) return labeled;
       // Self-floor at OUTPUT_HARD_CAP (contract X: executor is the
       // truncation authority, but the tool still returns ≤ 20000 so the
       // executor floor is a no-op on this output). Pure string, no
       // truncated/total metadata (contract Y1).
-      return rendered.slice(0, OUTPUT_HARD_CAP);
+      return labeled.slice(0, OUTPUT_HARD_CAP);
     },
   });
 }
