@@ -52,7 +52,7 @@ Five decisions, mirroring `specs/auto-memory.md` D1–D5.
 - _Per-turn synchronous extraction_: doubles model calls on the hot path and consolidates task-local state that ADR-0009 D4 explicitly bans from the store ("never per-task state"). Rejected.
 - _Extraction prompt embedded in the loop engine_: the loop engine owns turn mechanics, not memory semantics; embedding the prompt there couples two bounded contexts and makes the feature untestable without a full engine. Rejected.
 - _Hard delete on GC_: a heuristic that destroys data has no recovery path, and `disabled` already exists as the soft-off mechanism honored by assembly and promote. Rejected.
-- _LLM-driven offline merge / store summarization_: a second unaccountable write path stacked on the first, before the first has any operational evidence. Deferred, not dropped.
+- _LLM-driven offline merge / store summarization_: a second unaccountable write path stacked on the first, before the first has any operational evidence. Deferred in this ADR; **discharged by ADR-0033** (`settings.memory.dream`, still default OFF, never inside GC).
 - _Default ON_: ADR-0009's whole argument for deferral was accountability; shipping this ON by default would swap one unreviewed default for another. Rejected.
 - _Auto-promote for high-importance auto entries_: promote moves content into the `system` instruction channel, which is precisely the trust boundary ADR-0009 D3 drew. Rejected.
 - _Vector / embedding recall bundled into this module_: 0009 D5 reserved the vector seam for this module, but bundling it here would make one change both "start writing automatically" and "change how recall works". Out of scope; the seam at the recall interface stays reserved.
