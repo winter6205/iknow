@@ -10,7 +10,10 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { scoreMemoryEntries } from "../../../src/harness/memory/index.ts";
+import {
+  scoreMemoryEntries,
+  tokenize,
+} from "../../../src/harness/memory/index.ts";
 import type { MemoryEntryV1 } from "../../../src/harness/memory/index.ts";
 
 // -- fixtures ----------------------------------------------------------------
@@ -42,6 +45,36 @@ describe("scoreMemoryEntries — degenerate queries", () => {
 
   it("returns [] for empty entries", () => {
     assert.deepEqual(scoreMemoryEntries("bar", []), []);
+  });
+});
+
+// -- shared CJK tokenization -------------------------------------------------
+
+describe("memory tokenize — CJK runs and ASCII compatibility", () => {
+  it("emits overlapping bigrams for a CJK run", () => {
+    assert.deepEqual(tokenize("中文文档"), ["中文", "文文", "文档"]);
+  });
+
+  it("emits a single character for a one-character CJK run", () => {
+    assert.deepEqual(tokenize("中"), ["中"]);
+  });
+
+  it("keeps ASCII tokenization unchanged", () => {
+    assert.deepEqual(tokenize("a x ab foo_bar 123"), [
+      "ab",
+      "foo_bar",
+      "123",
+    ]);
+  });
+
+  it("scores a pure-Chinese query against a pure-Chinese entry", () => {
+    const [result] = scoreMemoryEntries(
+      "中文文档",
+      [entry({ title: "中文文档", body: "中文文档内容" })],
+      { nowMs: Date.parse("2026-01-01T00:00:00.000Z") }
+    );
+    assert.ok(result !== undefined);
+    assert.ok(result!.score > 0);
   });
 });
 

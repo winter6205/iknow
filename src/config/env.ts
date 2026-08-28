@@ -318,9 +318,7 @@ function envOptionalInt(opts: EnvOptionalIntOpts): number | undefined {
 }
 
 /** Optional positive integer env values (timeouts). Non-positive → undefined. */
-function envOptionalPositiveInt(
-  opts: EnvOptionalIntOpts
-): number | undefined {
+function envOptionalPositiveInt(opts: EnvOptionalIntOpts): number | undefined {
   const n = envOptionalInt(opts);
   return n !== undefined && n > 0 ? n : undefined;
 }

@@ -6,9 +6,11 @@
  * whether an ingest actually happens lives here rather than in the loop
  * engine, which owns turn mechanics and not memory semantics.
  *
- * Three gates, in order: the feature is opted in, the turn stopped with
+ * Extract gates, in order: the feature is opted in, the turn stopped with
  * `completed`, and the conversation has accumulated `minCompletedTurns`
- * completed turns since the last pass.
+ * completed turns since the last extract pass. Dream uses a separate dual
+ * gate (24h since last success-or-skip ∧ 5 distinct sessions) persisted
+ * under the memory root.
  *
  * Two contracts the hosts depend on:
  *
@@ -19,8 +21,18 @@
  *     each other's neighbor lookup and write duplicates.
  */
 import { MemoryGcOptionInvalid } from "./errors.js";
+import {
+  dreamGatesMet,
+  loadDreamCursor,
+  recordDreamSession,
+  resetDreamCursor,
+  saveDreamCursor,
+  type DreamCursor,
+} from "./dream-cursor.js";
+import { runMemoryDream } from "./dream.js";
 import { ingestMemory } from "./ingest.js";
 import type { MemoryExtractLlm, MemoryIngestResult } from "./ingest.js";
+import { runMemoryGc } from "./gc.js";
 
 /** Completed turns to accumulate before a pass. ADR-0031 D1: never per-turn. */
 export const DEFAULT_COMPLETED_TURN_GATE = 2;
@@ -30,6 +42,11 @@ export interface AutoMemoryTurn {
   readonly stopReason: string;
   /** The conversation slice to mine. Blank input is ignored. */
   readonly transcript: string;
+  /**
+   * Host session identity for the dream 5-session gate. Chat/TUI: one
+   * in-process conversation. Serve: conversation_id. Absent = no session increment.
+   */
+  readonly sessionKey?: string;
 }
 
 export interface AutoMemoryHook {
@@ -44,6 +61,8 @@ export interface AutoMemoryHookOptions {
   readonly llm: MemoryExtractLlm;
   /** Opt-in. Absent or non-true = off, byte-identical to no wiring at all. */
   readonly enabled?: boolean;
+  /** Independent opt-in for the offline merge pass; absent or non-true = off. */
+  readonly dream?: boolean;
   /** Completed turns per pass; positive integer. Default DEFAULT_COMPLETED_TURN_GATE. */
   readonly minCompletedTurns?: number;
   /** ISO-8601 clock for written entries; defaults to the real clock. */
@@ -67,6 +86,7 @@ export function createAutoMemoryHook(
 ): AutoMemoryHook {
   const gate = requireGate(opts.minCompletedTurns);
   const enabled = opts.enabled === true;
+  const dream = opts.dream === true;
 
   let completedTurns = 0;
   // Single-slot chain: each pass waits for the previous one, so two turns
@@ -74,33 +94,33 @@ export function createAutoMemoryHook(
   let chain: Promise<void> = Promise.resolve();
 
   const onTurnComplete = (turn: AutoMemoryTurn): void => {
-    if (!enabled) return;
+    if (!enabled && !dream) return;
     if (turn.stopReason !== "completed") return;
-    if (turn.transcript.trim().length === 0) return;
-    completedTurns++;
-    if (completedTurns < gate) return;
-    completedTurns = 0;
+    const extractEligible = enabled && turn.transcript.trim().length > 0;
+    if (!extractEligible && !dream) return;
+
+    let extractDue = false;
+    if (extractEligible) {
+      completedTurns++;
+      if (completedTurns >= gate) {
+        completedTurns = 0;
+        extractDue = true;
+      }
+    }
+    if (!extractDue && !dream) return;
 
     const transcript = turn.transcript;
+    const sessionKey = turn.sessionKey;
     chain = chain.then(async () => {
-      try {
-        const result = await ingestMemory({
-          memoryDir: opts.memoryDir,
-          transcript,
-          llm: opts.llm,
-          ...(opts.now ? { now: opts.now } : {}),
-          ...(opts.nowMs !== undefined ? { nowMs: opts.nowMs } : {}),
-          ...(opts.randomBytes ? { randomBytes: opts.randomBytes } : {}),
-          ...(opts.ttlDays !== undefined ? { ttlDays: opts.ttlDays } : {}),
-          ...(opts.cap !== undefined ? { cap: opts.cap } : {}),
-        });
-        opts.onIngest?.(result);
-      } catch (error) {
-        // EXIT: log-and-continue (ADR-0031 D5). The user's turn already
-        // succeeded; a failed extraction is reported to the observer and
-        // dropped. Re-throwing here would reject an unawaited promise and
-        // take the host process down.
-        safeReport(opts.onError, error);
+      const dreamDue = dream
+        ? await persistAndEvaluateDreamGate(opts, sessionKey, opts.onError)
+        : false;
+
+      if (extractDue) {
+        await runExtractPass(opts, transcript, dreamDue);
+      }
+      if (dreamDue) {
+        await runDreamPass(opts);
       }
     });
   };
@@ -109,6 +129,87 @@ export function createAutoMemoryHook(
     onTurnComplete,
     drain: () => chain,
   };
+}
+
+async function persistAndEvaluateDreamGate(
+  opts: AutoMemoryHookOptions,
+  sessionKey: string | undefined,
+  onError: ((error: unknown) => void) | undefined
+): Promise<boolean> {
+  const nowMs = opts.nowMs ?? Date.now();
+  let cursor: DreamCursor;
+  try {
+    cursor = recordDreamSession(
+      await loadDreamCursor(opts.memoryDir),
+      sessionKey
+    );
+    await saveDreamCursor(opts.memoryDir, cursor);
+  } catch (error) {
+    // EXIT: log-and-continue — a cursor fault must not fail the user turn.
+    safeReport(onError, error);
+    return false;
+  }
+  return dreamGatesMet(cursor, nowMs);
+}
+
+async function runExtractPass(
+  opts: AutoMemoryHookOptions,
+  transcript: string,
+  deferGcForDream: boolean
+): Promise<void> {
+  try {
+    const ingestResult = await ingestMemory({
+      memoryDir: opts.memoryDir,
+      transcript,
+      llm: opts.llm,
+      ...(opts.now ? { now: opts.now } : {}),
+      ...(opts.nowMs !== undefined ? { nowMs: opts.nowMs } : {}),
+      ...(opts.randomBytes ? { randomBytes: opts.randomBytes } : {}),
+      ...(opts.ttlDays !== undefined ? { ttlDays: opts.ttlDays } : {}),
+      ...(deferGcForDream ? { gc: false } : {}),
+      ...(opts.cap !== undefined ? { cap: opts.cap } : {}),
+    });
+    opts.onIngest?.(ingestResult);
+  } catch (error) {
+    // EXIT: log-and-continue (ADR-0031 D5). Extract failure must not
+    // skip the later dream/GC stages or fail the user turn.
+    safeReport(opts.onError, error);
+  }
+}
+
+async function runDreamPass(opts: AutoMemoryHookOptions): Promise<void> {
+  const nowMs = opts.nowMs ?? Date.now();
+  let mergeFailed = false;
+  try {
+    await runMemoryDream({
+      memoryDir: opts.memoryDir,
+      llm: opts.llm,
+      ...(opts.now ? { now: opts.now } : {}),
+      ...(opts.randomBytes ? { randomBytes: opts.randomBytes } : {}),
+      ...(opts.ttlDays !== undefined ? { ttlDays: opts.ttlDays } : {}),
+    });
+  } catch (error) {
+    mergeFailed = true;
+    // EXIT: log-and-continue — merge failure still yields mechanical GC
+    // so extract SUPERSEDE targets and TTL evictions are not stranded.
+    safeReport(opts.onError, error);
+  }
+  try {
+    await runMemoryGc(opts.memoryDir, {
+      ...(opts.nowMs !== undefined ? { nowMs: opts.nowMs } : {}),
+      ...(opts.cap !== undefined ? { cap: opts.cap } : {}),
+    });
+  } catch (error) {
+    // EXIT: log-and-continue — GC is subtractive and must not fail the turn.
+    safeReport(opts.onError, error);
+  }
+  if (mergeFailed) return;
+  try {
+    await saveDreamCursor(opts.memoryDir, resetDreamCursor(nowMs));
+  } catch (error) {
+    // EXIT: log-and-continue — losing a reset retries the next turn, which is safe.
+    safeReport(opts.onError, error);
+  }
 }
 
 function requireGate(value: number | undefined): number {

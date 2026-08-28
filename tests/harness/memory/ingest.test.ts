@@ -383,6 +383,39 @@ describe("decideMemoryOps", () => {
     assert.equal(ops[0]!.kind === "NOOP" ? ops[0]!.slug : "", "old");
   });
 
+  it("NOOPs an equivalent pure-Chinese entry instead of adding a duplicate", () => {
+    const cjk = candidate({
+      title: "线程安全入口",
+      body: "调用路径保持线程安全",
+    });
+    const ops = decideMemoryOps(
+      [cjk],
+      [
+        {
+          slug: "old",
+          entry: entry({
+            title: "线程安全入口",
+            body: "调用路径保持线程安全",
+          }),
+        },
+      ]
+    );
+    assert.equal(ops[0]!.kind, "NOOP");
+  });
+
+  it("does not treat two empty-token candidates as neighbors", () => {
+    const ops = decideMemoryOps(
+      [candidate({ title: "!!!", body: "。。。" })],
+      [
+        {
+          slug: "old",
+          entry: entry({ title: "???", body: "、、、" }),
+        },
+      ]
+    );
+    assert.equal(ops[0]!.kind, "ADD");
+  });
+
   it("UPDATEs the neighbor when the candidate adds detail on the same subject", () => {
     const ops = decideMemoryOps(
       [
@@ -615,6 +648,35 @@ describe("ingestMemory", () => {
     });
     assert.deepEqual(
       result.ops.map((o) => o.kind),
+      ["NOOP"]
+    );
+    assert.deepEqual(await slugsOnDisk(), ["old"]);
+  });
+
+  it("does not add a duplicate for an equivalent pure-Chinese fact", async () => {
+    await put("old", {
+      title: "线程安全入口",
+      body: "调用路径保持线程安全",
+    });
+    const llm = llmReturning(
+      JSON.stringify([
+        {
+          title: "线程安全入口",
+          body: "调用路径保持线程安全",
+          confidence: 0.95,
+        },
+      ])
+    );
+    const result = await ingestMemory({
+      memoryDir,
+      transcript: "user: 线程安全入口\nassistant: 调用路径保持线程安全",
+      llm,
+      gc: false,
+      now: () => NOW_ISO,
+      randomBytes: seqBytes(),
+    });
+    assert.deepEqual(
+      result.ops.map((op) => op.kind),
       ["NOOP"]
     );
     assert.deepEqual(await slugsOnDisk(), ["old"]);

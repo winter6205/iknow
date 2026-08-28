@@ -52,9 +52,10 @@ function makeFakeChild(): FakeChild {
   }) as unknown as FakeChild;
 }
 
-function makeManager(
-  opts: { readonly maxConcurrentWorkers?: number } = {}
-): { manager: SubAgentManager; children: FakeChild[] } {
+function makeManager(opts: { readonly maxConcurrentWorkers?: number } = {}): {
+  manager: SubAgentManager;
+  children: FakeChild[];
+} {
   const children: FakeChild[] = [];
   const manager = createSubAgentManager({
     spawn: () => {
@@ -166,7 +167,9 @@ describe("run_graph handler — 带 dep 边的图", () => {
   it("根节点 task 不被改写（与单次 spawn_subagent 同字节）", async () => {
     const { manager, children } = makeManager();
     const tool = createRunGraphTool({ manager });
-    const pending = tool.handler({ nodes: [{ id: "solo", task: "just do it" }] });
+    const pending = tool.handler({
+      nodes: [{ id: "solo", task: "just do it" }],
+    });
     await waitForChildren(children, 1);
     const payload = children[0]!.written.join("");
     expect(payload).toContain('"task":"just do it"');
@@ -307,9 +310,12 @@ describe("run_graph handler — 共用全局 cap（不另起 per-graph budget）
     const byId = new Map(out.nodes.map((n) => [n.id, n]));
     expect(byId.get("n5")!.status).toBe("failed");
     expect(byId.get("n5")!.error?.toLowerCase()).toContain("capacity");
-    expect(
-      ["n1", "n2", "n3", "n4"].map((id) => byId.get(id)!.status)
-    ).toEqual(["done", "done", "done", "done"]);
+    expect(["n1", "n2", "n3", "n4"].map((id) => byId.get(id)!.status)).toEqual([
+      "done",
+      "done",
+      "done",
+      "done",
+    ]);
     await manager.shutdown();
   });
 });

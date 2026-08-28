@@ -88,12 +88,27 @@ describe("buildHarnessEngine — auto-memory opt-in", () => {
     expect(typeof engine.autoMemory!.onTurnComplete).toBe("function");
   });
 
+  it("wires autoMemory when dream is true without autoExtract", async () => {
+    const engine = await build({ settings: { memory: { dream: true } } });
+    expect(engine.autoMemory).toBeDefined();
+  });
+
   it("leaves autoMemory absent on the ask surface even when opted in", async () => {
     const engine = await build({
       surface: "ask",
       settings: { memory: { autoExtract: true } },
     });
     expect(engine.autoMemory).toBeUndefined();
+  });
+
+  it("keeps ask free of memory tools even when dream is enabled", async () => {
+    const engine = await build({
+      surface: "ask",
+      settings: { memory: { dream: true } },
+    });
+    const names = engine.deps.registry.list().map((tool) => tool.name);
+    expect(names).not.toContain("memory_recall");
+    expect(names).not.toContain("memory_save");
   });
 
   it("leaves autoMemory absent when the memory layer itself is off", async () => {

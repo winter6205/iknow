@@ -148,7 +148,7 @@ describe("#356 T7 E2E A: stub-model host drain 全链路 (SC14)", () => {
     assert.ok(drained.length > 0, "fake binary 应至少完成 1 个 subagent 任务");
     assert.match(
       drained,
-      /^## Sub-agent .+ result: hello from fake subagent\n\necho body$/
+      /^## Sub-agent .+ result: hello from fake subagent(?:\n\nhello from fake subagent)?$/
     );
 
     // ── host drain 注入: 第二次 run (turn 3) 前,把 drained 拼入
@@ -186,6 +186,6 @@ describe("#356 T7 E2E A: stub-model host drain 全链路 (SC14)", () => {
       )
       .join("\n");
     assert.match(joined, /## Sub-agent .+ result: hello from fake subagent/);
-    assert.ok(joined.includes("echo body"));
+    assert.ok(!joined.includes("echo body"));
   }, 30_000);
 });

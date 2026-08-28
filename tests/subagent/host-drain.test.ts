@@ -138,7 +138,10 @@ describe("drainPendingSubagents (SC7 host-drain)", () => {
       },
     ]);
     const out = await drainPendingSubagents(mgr);
-    assert.equal(out, "## Sub-agent tid-fail result: exit code=1\n\nexit code=1");
+    assert.equal(
+      out,
+      "## Sub-agent tid-fail result: exit code=1\n\nexit code=1"
+    );
   });
 });
 
@@ -166,9 +169,6 @@ describe("isSubagentDrainText / SUBAGENT_DRAIN_PREFIX (SSOT 同源)", () => {
   });
 
   it("trim 后以前缀开头即判定（容忍前导空白）", () => {
-    assert.equal(
-      isSubagentDrainText("  ## Sub-agent t result: s\n\nr"),
-      true
-    );
+    assert.equal(isSubagentDrainText("  ## Sub-agent t result: s\n\nr"), true);
   });
 });

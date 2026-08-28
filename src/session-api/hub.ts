@@ -38,7 +38,10 @@ import {
   createAdapterFromEnv,
 } from "../harness/build-engine.js";
 import { renderTranscript } from "../harness/auto-memory-wire.js";
-import type { AutoMemoryHook } from "../harness/memory/index.js";
+import {
+  notifyAutoMemory,
+  type AutoMemoryHook,
+} from "../harness/memory/index.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
 import type {
   SubAgentManager,
@@ -620,6 +623,7 @@ export class SessionHub {
       shutdown?: () => Promise<void>;
       subagentManager?: SubAgentManager;
       graphAssembly?: GraphAssembly;
+      autoMemory?: AutoMemoryHook;
     }
   >();
   /** Per-conversation serialization (spec A15). */
@@ -1243,7 +1247,11 @@ export class SessionHub {
               // auto-memory T4 / ADR-0031 D1:每轮把结果交给钩子,由钩子决定
               // completed 闸 + N 轮闸。钩子缺席(默认 OFF / ask / 注入 deps 的
               // 测试)→ 整句 no-op,行为逐字节不变。
-              this.notifyAutoMemory(s.finalResult);
+              this.notifyAutoMemory(
+                s.finalResult,
+                session.workspaceRoot,
+                conversationId
+              );
               // #458 T5 (SC8): goal.status write-back on verify-loop terminal
               // outcome. The hub is the only writer of goal.status. Target status
               // is looked up from OUTCOME_TO_STATUS; applyTransition runs only
@@ -2069,6 +2077,7 @@ export class SessionHub {
     shutdown?: () => Promise<void>;
     subagentManager?: SubAgentManager;
     graphAssembly?: GraphAssembly;
+    autoMemory?: AutoMemoryHook;
   }> {
     const hit = this.engineByRoot.get(root);
     if (hit) return hit;
@@ -2080,10 +2089,10 @@ export class SessionHub {
       shutdown: built.shutdown,
       subagentManager: built.subagentManager,
       graphAssembly: built.graphAssembly,
+      autoMemory: built.autoMemory,
     };
     this.engineByRoot.set(root, entry);
     this.subagentManager = this.subagentManager ?? built.subagentManager;
-    this.autoMemory = this.autoMemory ?? built.autoMemory;
     return entry;
   }
 
@@ -2227,22 +2236,35 @@ export class SessionHub {
    * hook. The hook owns the `completed` gate and the N-turn gate; the hub
    * only reports. A hook failure must never fail postMessage.
    */
-  private notifyAutoMemory(result: RunResult): void {
-    if (!this.autoMemory) return;
-    try {
-      this.autoMemory.onTurnComplete({
-        stopReason: result.stopReason,
-        transcript: renderTranscript(result.messages),
-      });
-    } catch (error) {
-      // EXIT: log-and-continue — the turn already succeeded; memory
-      // bookkeeping is not allowed to retroactively fail it.
-      console.warn(
-        `[memory/auto] turn hook skipped: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
-    }
+  private notifyAutoMemory(
+    result: RunResult,
+    workspaceRoot?: string,
+    conversationId?: string
+  ): void {
+    // EXIT: a bound session uses only the per-root hook; constructor injection
+    // remains the fallback when no workspaceRoot is on the session file.
+    const autoMemory =
+      workspaceRoot === undefined
+        ? this.autoMemory
+        : this.engineByRoot.get(workspaceRoot)?.autoMemory;
+    const sessionKey =
+      this.surface === "serve"
+        ? conversationId
+        : this.surface === "tui"
+          ? "tui"
+          : "chat";
+    notifyAutoMemory({
+      hook: autoMemory,
+      stopReason: result.stopReason,
+      transcript: renderTranscript(result.messages),
+      sessionKey,
+      onError: (error) =>
+        console.warn(
+          `[memory/auto] turn hook skipped: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        ),
+    });
   }
 
   private summarize(opts: { readonly file: SessionFileV1 }): SessionSummary {

@@ -4,6 +4,8 @@
 
 ### Feature
 
+- **自动记忆 dream 双闸（#774，2026-08-28）**: `settings.memory.dream` 与抽取解绑。做梦须同时满足距上次成功或 skip 至少 24h、以及至少 5 个 distinct session（chat/TUI 进程内会话；serve `conversation_id`）。游标 JSON 落在各 `memoryDir`。现行条 &lt; 2 时 skip merge LLM 并推进时间闸。抽取仍为 `completed` + N≥2。
+
 - **子代理运行时与冷启动交差（PR #773，2026-08-28）**: 非正 timeout/token env 回退 settings/默认（`0` 不当关钟、不当 `max_tokens=0`）；无信封干净 `exit(0)` 立即 `protocolError` 并放槽；worker 透传父级 idle/hard-cap；并发上限可配、默认 15、超限立即失败不排队；父模型交差为短摘要+路径（IPC 与 `run_graph` 边仍保留产物）；通用 worker 注入说明书静态层且关记忆工具，explore 不灌完整 AGENTS.md；缺省 `subagent_type` 为 `general-purpose`。计划 `plans/subagent-runtime-and-handoff.md`。
 
 - **自动记忆：抽取 + 机械 GC（ADR-0031，2026-08-26）**: 兑现 ADR-0009 D5 的延期项。新开关 `settings.memory.autoExtract`（boolean-only，**默认 OFF**）——缺失或非 `true` 时钩子不装配，宿主零调用、零额外 LLM、零写盘，行为与现网逐字节一致。开启后 chat / tui / serve 在 `StopReason=completed` 之后异步触发（累计 N≥2 完成 turn 一趟；`ask` 不接线，ADR-0010 D3 opt-out 保持）：LLM 抽原子候选 → BM25-lite 近邻 → 裁定 `ADD` / `UPDATE` / `SUPERSEDE` / `NOOP` → 复用 `memory_save` 的肯定句门禁与 tmp+rename 原子写，落盘打 `source: auto`。清理为零 LLM 的机械 GC（`ttl_days` 过期 / 被 `supersedes` 指名 / 超 store cap 按 `importance × recency × (1 + recall_count)` 驱逐），**只软禁不删文件**。自动条目不豁免 promote 门槛，也不进 `system` 通道。抽取或 IO 失败落 typed `MemoryError`，host 侧 `// EXIT: log-and-continue` 吞掉，用户 turn 仍成功。抽取 prompt 不进 loop-engine：闸在 `src/harness/memory/auto-hook.ts`，`ModelAdapter` → `MemoryExtractLlm` 端口的桥在 `src/harness/auto-memory-wire.ts`。spec `specs/auto-memory.md`；计划 `plans/auto-memory.md` §T1–T5。

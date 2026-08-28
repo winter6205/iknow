@@ -381,7 +381,9 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
     expect(description).toMatch(/paths?/i);
     expect(description).toMatch(/status/i);
     expect(description).toMatch(/stop[_ ]reason/i);
-    expect(description).toMatch(new RegExp(String(DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS)));
+    expect(description).toMatch(
+      new RegExp(String(DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS))
+    );
     expect(description).toMatch(/at capacity/i);
     expect(description).toMatch(/reduce concurrency/i);
     expect(description).toMatch(/not queued|rather than queued/i);
