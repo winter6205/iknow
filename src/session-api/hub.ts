@@ -19,7 +19,6 @@ import {
   type HarnessStreamEvent,
   type LoopEngineDeps,
   type RunResult,
-  type TraceService,
 } from "../harness/index.js";
 import type { TraceServiceWithHealth } from "../harness/trace/jsonl.js";
 import {
