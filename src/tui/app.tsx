@@ -137,6 +137,7 @@ import type {
 import { ChatView } from "./chat-view.js";
 import type { StreamDraft } from "../cli/stream-draft.js";
 import { createStreamDraft } from "../cli/stream-draft.js";
+import { pinThinkingSeconds } from "./think-fold.js";
 import { ListView, relativeTime, type TuiListEntry } from "./list-view.js";
 import { McpView, type McpToolEntry } from "./mcp-view.js";
 import { ContextBar } from "./context-bar.js";
@@ -707,7 +708,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         streamDraft.masked().length > 0 &&
         thinkingFrozenRef.current === 0
       ) {
-        const frozen = streamDraft.thinkingSeconds();
+        const frozen = pinThinkingSeconds(
+          thinkingFrozenRef.current,
+          streamDraft.thinkingRaw().length,
+          streamDraft.thinkingSeconds()
+        );
         thinkingFrozenRef.current = frozen;
         setThinkingFrozenSeconds(frozen);
       }
@@ -1335,6 +1340,17 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             draftEpoch,
           }),
         }));
+        // 思考后直接 tool_use（无 text_delta）也要钉住秒数，供 turn 折叠
+        // `思考了 N 秒 · bash × N`；已冻结不覆盖。
+        const frozen = pinThinkingSeconds(
+          thinkingFrozenRef.current,
+          draft.thinkingRaw().length,
+          draft.thinkingSeconds()
+        );
+        if (frozen > 0 && thinkingFrozenRef.current === 0) {
+          thinkingFrozenRef.current = frozen;
+          setThinkingFrozenSeconds(frozen);
+        }
       }
       if (event.type === "tool_input_delta") {
         setLiveToolRuns((prev) => ({

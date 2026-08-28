@@ -18,6 +18,7 @@ import {
   THINKING_PEEK_MAX_LINES,
   formatThinkingFold,
   formatThinkingLive,
+  pinThinkingSeconds,
   thinkingPeekLines,
 } from "../../src/tui/think-fold.js";
 
@@ -43,6 +44,24 @@ describe("formatThinkingFold（历史折叠行文案）", () => {
 describe("formatThinkingLive（流式折叠行文案）", () => {
   test("恒为 `思考中…`（实时秒数已下线 — 思考时长由事后 frozen 摘要承担）", () => {
     expect(formatThinkingLive()).toBe("思考中…");
+  });
+});
+
+describe("pinThinkingSeconds（思考结束钉秒）", () => {
+  test("已冻结不覆盖", () => {
+    expect(pinThinkingSeconds(4, 10, 9)).toBe(4);
+  });
+
+  test("无 thinking 正文 → 0", () => {
+    expect(pinThinkingSeconds(0, 0, 9)).toBe(0);
+  });
+
+  test("有 thinking → floor 秒数", () => {
+    expect(pinThinkingSeconds(0, 3, 6.9)).toBe(6);
+  });
+
+  test("负秒数兜底 → 0", () => {
+    expect(pinThinkingSeconds(0, 3, -2)).toBe(0);
   });
 });
 

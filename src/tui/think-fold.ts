@@ -45,6 +45,21 @@ export function formatThinkingLive(): string {
   return "思考中…";
 }
 
+/**
+ * 思考阶段结束时钉住秒数：已冻结不覆盖；无 thinking 正文 → 0。
+ * 触发点 = answer 开始 **或** 首个 tool_call（思考后直接调工具、没有
+ * text_delta 时也要留下「思考了 N 秒」，否则 turn 折叠只能回落 `[思考]`）。
+ */
+export function pinThinkingSeconds(
+  alreadyFrozen: number,
+  thinkingRawLength: number,
+  elapsedSeconds: number
+): number {
+  if (alreadyFrozen > 0) return alreadyFrozen;
+  if (thinkingRawLength <= 0) return 0;
+  return Math.max(0, Math.floor(elapsedSeconds));
+}
+
 /** 折叠态思考预览的行数硬顶（计划 T2：末 2–3 行，取上限 3）。 */
 export const THINKING_PEEK_MAX_LINES = 3;
 
