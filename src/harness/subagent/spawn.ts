@@ -40,7 +40,11 @@ export class SubagentWorkerSpawnArgsError extends Error {
 
 function isNodeExecutable(execPath: string): boolean {
   const executable = execPath.split(/[\\/]/).pop()?.toLowerCase();
-  return executable === "node" || executable === "node.exe" || executable === "nodejs";
+  return (
+    executable === "node" ||
+    executable === "node.exe" ||
+    executable === "nodejs"
+  );
 }
 
 function isTypeScriptEntry(argv1: string): boolean {
