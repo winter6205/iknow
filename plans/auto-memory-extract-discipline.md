@@ -30,28 +30,28 @@ minimal-change-verifier: yes — 一个写路径纪律；禁止与目录/预取/
    - **Inherits:** spec Does 静态层进 prompt；三类英文纪律；读失败当空
    - **Surface:** `src/harness/memory` ingest + hook 读 discovery
    - **Acceptance:** SC2、SC5：FakeLLM prompt 含说明书片段与纪律要点；静态层 IO 失败不 fail turn；`npx vitest run tests/harness/memory/` 相关套件 EXIT 0
-   - Status: [ ] pending
+   - Status: [x] done
 
 2. **Drop candidates that overlap the static layer** — tag: `[implementation]`
    - **Inherits:** spec Does 重叠闸；同一套 tokenize；零词命中不留；门槛测例钉死；不回灌模型
    - **Surface:** `src/harness/memory` ingest（extract 之后、decide 之前）
    - **Acceptance:** SC3–SC4：高重叠不 written；无关可 ADD；空说明书不丢候选
    - [blocks: T1]
-   - Status: [ ] pending
+   - Status: [x] done
 
 3. **Skip extract when this turn already saved** — tag: `[implementation]`
    - **Inherits:** spec Does 本轮成功 memory_save 不跑 ingest extract；dream 仍独立
    - **Surface:** `src/harness/memory` auto-hook + host 传本轮 save 成功标记
    - **Acceptance:** SC6–SC7：有 save 则 extract complete 次数 0；无 save 为 1；dream 闸到仍可跑
    - [parallel]
-   - Status: [ ] pending
+   - Status: [x] done
 
 4. **STATUS 一句** — tag: `[implementation]`
    - **Inherits:** T1–T3 落地语义
    - **Surface:** `docs/STATUS.md` 自动记忆段
    - **Acceptance:** 写明对照说明书丢弃、仓库可推只靠 prompt、本轮 save 跳过 extract；默认仍 OFF
    - [blocks: T1, T2, T3]
-   - Status: [ ] pending
+   - Status: [x] done
 
 ## End of round
 
