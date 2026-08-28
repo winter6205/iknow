@@ -23,6 +23,7 @@ import {
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 200;
+export const MAX_RECORD_ID_SCAN = 10_000;
 const RESPONSE_CAP = 4_000;
 const PREVIEW_CAP = 400;
 const RECORD_ID_KEYS = [
@@ -260,7 +261,10 @@ function findRecord(
   let result = reader.query({ ...query, limit: MAX_LIMIT, offset: 0 });
   all.push(...result.records);
   skippedLines += result.skippedLines;
-  while (all.length < result.total && all.length < 10_000) {
+  while (
+    all.length < result.total &&
+    all.length < MAX_RECORD_ID_SCAN
+  ) {
     const nextOffset = all.length;
     result = reader.query({
       ...query,
@@ -274,6 +278,15 @@ function findRecord(
   const match = all.find((row) =>
     RECORD_ID_KEYS.some((key) => row[key] === recordId)
   );
+  if (
+    match === undefined &&
+    all.length >= MAX_RECORD_ID_SCAN &&
+    (all.length < result.total || result.truncated)
+  ) {
+    throw new ToolExecutionError(
+      `query_trace: record_id scan exhausted after ${MAX_RECORD_ID_SCAN} records before finding '${recordId}'`
+    );
+  }
   return {
     records: match === undefined ? [] : [match],
     total: match === undefined ? 0 : 1,

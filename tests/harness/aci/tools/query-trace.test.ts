@@ -46,6 +46,24 @@ function makeTraceDir(): string {
   return dir;
 }
 
+function makeTraceDirWithRecordPastScanCap(): string {
+  const dir = mkdtempSync(join(tmpdir(), "iknow-query-trace-scan-"));
+  scratchPaths.push(dir);
+  const rows = Array.from({ length: 10_001 }, (_, index) => ({
+    conversation_id: "c1",
+    record_type: "llm_call",
+    llm_call_id: index === 10_000 ? "past-scan-cap" : `llm-${index}`,
+    started_at: "2026-08-28T00:00:00.000Z",
+    status: "ok",
+    messages: [],
+  }));
+  writeFileSync(
+    join(dir, "c1.jsonl"),
+    rows.map((row) => JSON.stringify(row)).join("\n") + "\n"
+  );
+  return dir;
+}
+
 afterEach(() => {
   for (const path of scratchPaths.splice(0)) {
     rmSync(path, { recursive: true, force: true });
@@ -116,6 +134,32 @@ describe("query_trace ACI tool", () => {
     assert.equal(body.records.length, 1);
     assert.equal(body.records[0]?.llm_call_id, "llm-error");
     assert.ok(Array.isArray(body.records[0]?.messages));
+  });
+
+  it("distinguishes a missing record_id from an exhausted record_id scan", async () => {
+    const missingOutput = (await createQueryTraceTool(makeTraceDir()).handler({
+      conversation_id: "c1",
+      record_id: "not-present",
+    })) as string;
+    const missingBody = JSON.parse(missingOutput) as {
+      records: Array<Record<string, unknown>>;
+      total: number;
+    };
+
+    assert.equal(missingBody.records.length, 0);
+    assert.equal(missingBody.total, 0);
+
+    const tool = createQueryTraceTool(makeTraceDirWithRecordPastScanCap());
+    await assert.rejects(
+      () =>
+        tool.handler({
+          conversation_id: "c1",
+          record_id: "past-scan-cap",
+        }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        error.message.includes("record_id scan exhausted")
+    );
   });
 
   it("rejects an unknown record_type with a typed validation error", async () => {
