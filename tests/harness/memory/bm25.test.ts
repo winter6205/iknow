@@ -60,11 +60,7 @@ describe("memory tokenize — CJK runs and ASCII compatibility", () => {
   });
 
   it("keeps ASCII tokenization unchanged", () => {
-    assert.deepEqual(tokenize("a x ab foo_bar 123"), [
-      "ab",
-      "foo_bar",
-      "123",
-    ]);
+    assert.deepEqual(tokenize("a x ab foo_bar 123"), ["ab", "foo_bar", "123"]);
   });
 
   it("scores a pure-Chinese query against a pure-Chinese entry", () => {
