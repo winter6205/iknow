@@ -15,10 +15,13 @@ export const MEMORY_CATALOG_MAX_LINES = 200;
 export const MEMORY_CATALOG_MAX_CHARS = 25 * 1024;
 const HOOK_MAX = 80;
 
-/** First non-empty body line, collapsed, capped — never the full body. */
+/** First non-empty body line as a hook — never the full body (SC2). */
 export function catalogHook(body: string): string {
   const line = body.split(/\r?\n/).find((row) => row.trim().length > 0) ?? "";
   const collapsed = line.replace(/\s+/g, " ").trim();
+  if (collapsed.length === 0) return "";
+  const collapsedFull = body.replace(/\s+/g, " ").trim();
+  if (collapsed === collapsedFull) return "";
   if (collapsed.length <= HOOK_MAX) return collapsed;
   return collapsed.slice(0, HOOK_MAX);
 }

@@ -40,6 +40,14 @@ describe("formatMemoryCatalog", () => {
     assert.equal(catalogHook("alpha hook\nrest of body"), "alpha hook");
   });
 
+  it("does not copy a single-line body into the catalog (SC2)", () => {
+    const body = "The deploy pipeline runs only on Friday.";
+    assert.equal(catalogHook(body), "");
+    const out = formatMemoryCatalog([live("a", "Deploy Fridays", body)])!;
+    assert.ok(out.includes("Deploy Fridays"));
+    assert.ok(!out.includes(body));
+  });
+
   it("caps directory lines at 200 (first-hit truncation)", () => {
     const many = Array.from({ length: MEMORY_CATALOG_MAX_LINES + 20 }, (_, i) =>
       live(`id-${i}`, `Title ${i}`, `hook ${i}`)
