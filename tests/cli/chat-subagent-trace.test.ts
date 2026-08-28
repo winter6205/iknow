@@ -111,20 +111,23 @@ describe("CLI chat pipe — unconditional subagent lifecycle trace", () => {
     const address = server.address();
     assert.ok(address && typeof address === "object");
 
+    const childEnv = {
+      ...process.env,
+      HOME: home,
+      IKNOW_LLM_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+      IKNOW_LLM_STREAM: "off",
+      IKNOW_PERMISSION_MODE: "full_auto",
+      IKNOW_LLM_TIMEOUT_MS: "5000",
+      IKNOW_LLM_MAX_OUTPUT_TOKENS: "1024",
+    };
+    delete childEnv.IKNOW_TRACE_OUT;
+
     child = spawn(
       process.execPath,
       [tsxCli, join(repoRoot, "src", "cli.ts"), "chat"],
       {
         cwd: scratch,
-        env: {
-          ...process.env,
-          HOME: home,
-          IKNOW_LLM_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
-          IKNOW_LLM_STREAM: "off",
-          IKNOW_PERMISSION_MODE: "full_auto",
-          IKNOW_LLM_TIMEOUT_MS: "5000",
-          IKNOW_LLM_MAX_OUTPUT_TOKENS: "1024",
-        },
+        env: childEnv,
         stdio: ["pipe", "pipe", "pipe"],
       }
     );

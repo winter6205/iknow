@@ -150,6 +150,7 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
   }
 
   const bundle: RuntimeBundle = await prepareRuntime();
+  const tracePath = resolveTracePath(parsed.traceOut);
 
   let built: { deps: LoopEngineDeps };
   try {
@@ -176,6 +177,7 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
       ...(parsed.workspaceRoot !== undefined
         ? { workspaceRoot: parsed.workspaceRoot }
         : {}),
+      subagentDiagnosticsDir: resolve(tracePath),
     });
   } catch (err) {
     if (err instanceof Error && err.message.includes("LLM mode needs")) {
@@ -204,7 +206,6 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     throw err;
   }
   // ask path: each invocation gets its own conversation_id (ADR-0003 D4).
-  const tracePath = resolveTracePath(parsed.traceOut);
   const conversationId = randomUUID();
   const traceService = createJsonlTraceService({
     filePath: tracePath,

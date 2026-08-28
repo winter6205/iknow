@@ -537,6 +537,9 @@ export async function buildHarnessEngine(
     // keeps the legacy callers (no opts.workspaceRoot, no env var) on
     // their `sandboxRoot` fallback inside registry.ts.
     ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+    ...(opts.subagentDiagnosticsDir
+      ? { traceDir: opts.subagentDiagnosticsDir }
+      : {}),
   });
   // #337:动态 registry 包装 —— 让 inner executor 能解析 registerExternal
   // 动态注册的 mcp__ 工具。`reg.inner` 是构造期快照（aci-registry.ts:71），

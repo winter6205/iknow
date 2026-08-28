@@ -22,7 +22,7 @@
 
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -226,5 +226,34 @@ describe("buildHarnessEngine — subagentTrace 注入缝 (Fix 1 SC1)", () => {
     });
 
     expect(mockState.capturedDiagnosticsDir).toBe(scratchDir);
+  });
+
+  it("subagentDiagnosticsDir → query_trace reads that tree, not workspaceRoot/trace", async () => {
+    const customDir = mkdtempSync(join(tmpdir(), "iknow-query-trace-dir-"));
+    writeFileSync(
+      join(customDir, "c-custom.jsonl"),
+      `${JSON.stringify({
+        conversation_id: "c-custom",
+        record_type: "turn",
+        turn_id: "turn-custom",
+        started_at: "2026-08-28T00:00:01.000Z",
+        status: "ok",
+      })}\n`
+    );
+    built = await buildHarnessEngine({
+      env: makeEnv("sk-test-bld-query-trace-dir-1"),
+      askUser: createNoAskUser(),
+      subagentDiagnosticsDir: customDir,
+    });
+    const tool = built.deps.registry
+      .list()
+      .find((entry) => entry.name === "query_trace");
+    expect(tool).toBeDefined();
+    const raw = await tool!.handler({});
+    const body = JSON.parse(raw) as { records: Array<{ turn_id?: string }> };
+    expect(body.records.some((row) => row.turn_id === "turn-custom")).toBe(
+      true
+    );
+    rmSync(customDir, { recursive: true, force: true });
   });
 });
