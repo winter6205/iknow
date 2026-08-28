@@ -236,6 +236,31 @@ export async function extractMemoryCandidates(
   return out;
 }
 
+/** At or above this, the candidate restates the static instruction layer. */
+export const STATIC_LAYER_OVERLAP_FLOOR = 0.9;
+
+/**
+ * Drop extract candidates that restate AGENTS.md / rules, before the
+ * four-state table. Pure: no IO, no model.
+ *
+ * Empty static layer: leave every candidate. Empty candidate tokens: drop
+ * only when the layer itself has tokens.
+ */
+export function dropOverlappingStaticLayer(
+  candidates: ReadonlyArray<MemoryCandidate>,
+  staticLayer: string
+): ReadonlyArray<MemoryCandidate> {
+  const layerTokens = tokens(staticLayer);
+  if (layerTokens.size === 0) return candidates;
+  return candidates.filter((candidate) => {
+    const candTokens = tokens(`${candidate.title} ${candidate.body}`);
+    if (candTokens.size === 0) return false;
+    return (
+      containment(candTokens, layerTokens) < STATIC_LAYER_OVERLAP_FLOOR
+    );
+  });
+}
+
 // -- stage 2: decide ---------------------------------------------------------
 
 /**
@@ -400,11 +425,15 @@ function buildEntry(input: {
 export async function ingestMemory(
   opts: MemoryIngestOptions
 ): Promise<MemoryIngestResult> {
-  const candidates = await extractMemoryCandidates(
+  const extracted = await extractMemoryCandidates(
     opts.transcript,
     opts.llm,
     opts.signal,
     opts.staticLayer
+  );
+  const candidates = dropOverlappingStaticLayer(
+    extracted,
+    opts.staticLayer ?? ""
   );
   if (candidates.length === 0) return { ops: [], written: [] };
 

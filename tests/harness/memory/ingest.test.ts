@@ -23,6 +23,7 @@ import {
   MemoryExtractError,
   buildExtractPrompt,
   decideMemoryOps,
+  dropOverlappingStaticLayer,
   extractMemoryCandidates,
   ingestMemory,
   parseMemoryEntry,
@@ -386,6 +387,47 @@ describe("extractMemoryCandidates — closed memory_type enum", () => {
   });
 });
 
+const STATIC_LAYER =
+  "Always use bun for this project's package manager and never commit lockfile drift.";
+
+describe("dropOverlappingStaticLayer", () => {
+  it("drops a candidate that restates the static layer", () => {
+    const kept = dropOverlappingStaticLayer(
+      [
+        candidate({
+          title: "Always use bun for this project's package manager",
+          body: "Always use bun for this project's package manager and never commit lockfile drift.",
+        }),
+      ],
+      STATIC_LAYER
+    );
+    assert.deepEqual(kept, []);
+  });
+
+  it("keeps a candidate that is unrelated to the static layer", () => {
+    const unrelated = candidate({
+      title: "Retry Anthropic adapter on 529",
+      body: "The Anthropic adapter retries on HTTP 529 before failing the turn.",
+    });
+    const kept = dropOverlappingStaticLayer([unrelated], STATIC_LAYER);
+    assert.deepEqual(kept, [unrelated]);
+  });
+
+  it("does not drop candidates when the static layer is empty", () => {
+    const fact = candidate();
+    assert.deepEqual(dropOverlappingStaticLayer([fact], ""), [fact]);
+    assert.deepEqual(dropOverlappingStaticLayer([fact], "   "), [fact]);
+  });
+
+  it("drops a zero-token candidate when the static layer has tokens", () => {
+    const emptyTokens = candidate({ title: "A", body: "B" });
+    assert.deepEqual(
+      dropOverlappingStaticLayer([emptyTokens], STATIC_LAYER),
+      []
+    );
+  });
+});
+
 // -- decideMemoryOps ---------------------------------------------------------
 
 describe("decideMemoryOps", () => {
@@ -660,6 +702,63 @@ describe("ingestMemory", () => {
       "auto"
     );
     assert.equal(stored.importance, 3);
+  });
+
+  it("does not write a candidate that overlaps the static layer", async () => {
+    const llm = llmReturning(
+      JSON.stringify([
+        {
+          title: "Always use bun for this project's package manager",
+          body: "Always use bun for this project's package manager and never commit lockfile drift.",
+          confidence: 0.95,
+        },
+        {
+          title: "Retry Anthropic adapter on 529",
+          body: "The Anthropic adapter retries on HTTP 529 before failing the turn.",
+          confidence: 0.95,
+        },
+      ])
+    );
+    const result = await ingestMemory({
+      memoryDir,
+      transcript: TRANSCRIPT,
+      llm,
+      staticLayer: STATIC_LAYER,
+      now: () => NOW_ISO,
+      randomBytes: seqBytes(),
+    });
+    assert.deepEqual(
+      result.ops.map((o) => o.kind),
+      ["ADD"]
+    );
+    assert.equal(result.written.length, 1);
+    const stored = await readSlug(result.written[0]!.slug);
+    assert.equal(stored.title, "Retry Anthropic adapter on 529");
+  });
+
+  it("does not drop candidates when ingest is given an empty static layer", async () => {
+    const llm = llmReturning(
+      JSON.stringify([
+        {
+          title: "Use bar() for concurrency",
+          body: "bar() is the thread-safe entry point in this repo.",
+          confidence: 0.95,
+        },
+      ])
+    );
+    const result = await ingestMemory({
+      memoryDir,
+      transcript: TRANSCRIPT,
+      llm,
+      staticLayer: "",
+      now: () => NOW_ISO,
+      randomBytes: seqBytes(),
+    });
+    assert.deepEqual(
+      result.ops.map((o) => o.kind),
+      ["ADD"]
+    );
+    assert.equal(result.written.length, 1);
   });
 
   it("reports NOOP and writes nothing when the fact is already stored", async () => {
