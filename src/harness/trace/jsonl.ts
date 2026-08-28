@@ -84,16 +84,12 @@ function toSnakeCaseRecord<T extends object>(
  * is stale until the next createJsonlTraceService call. SC20 spec left a
  * single-serializer-point mask as the preferred wiring; this is it.
  */
-function maskJsonLine(line: string): string {
-  const mask = createOutputMask(currentSecretValues());
-  return mask.mask(line);
-}
-
 export function createJsonlTraceService(
   options: JsonlTraceOptions
 ): TraceService {
   const { filePath, conversationId } = options;
   maybeRotate(filePath, options.rotation);
+  const outputMask = createOutputMask(currentSecretValues());
   // T2 每会话独立文件: filePath 是目录, 实际写 <filePath>/<conversationId>.jsonl。
   // mkdirSync recursive 兜底, 目录不存在时先建 (产品路径 traceOut 首次使用时目录
   // 可能未建)。仅默认 writer 时建目录 —— 注入自定义 writer (测试用 always-throw)
@@ -123,7 +119,7 @@ export function createJsonlTraceService(
   }
 
   function writeLine(payload: Record<string, unknown>): void {
-    writer(maskJsonLine(JSON.stringify(payload)));
+    writer(outputMask.mask(JSON.stringify(payload)));
   }
 
   return {

@@ -32,6 +32,7 @@ import {
   clearActiveExtraSecrets,
   setActiveExtraSecrets,
 } from "../../../src/harness/sandbox/env-isolation.ts";
+import * as sandbox from "../../../src/harness/sandbox/index.ts";
 import type {
   LlmCallRecord,
   ToolCallRecord,
@@ -744,5 +745,25 @@ describe("#406 T3 — jsonl 输出 mask 兜底 (A4)", () => {
       content.includes("sk-registry-secret"),
       `清槽位后应保留原值（实际=${content}）`
     );
+  });
+});
+
+describe("createJsonlTraceService — output mask lifecycle", () => {
+  it("constructs one output mask per factory instance", async () => {
+    const maskSpy = vi.spyOn(sandbox, "createOutputMask");
+    try {
+      const { writer } = captureWriter();
+      const svc = createJsonlTraceService({
+        filePath: scratch,
+        conversationId: "conv-mask-once",
+        writer,
+      });
+      await svc.recordLlmCall(SAMPLE_LLM);
+      await svc.recordToolCall(SAMPLE_TOOL);
+      await svc.recordTurn(SAMPLE_TURN);
+      assert.equal(maskSpy.mock.calls.length, 1);
+    } finally {
+      maskSpy.mockRestore();
+    }
   });
 });
