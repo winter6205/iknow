@@ -45,7 +45,10 @@ const ENV_KEYS = [
   "IKNOW_MCP_CONNECT_TIMEOUT_MS",
   // #358 T1: settings 双字段通道 — llm.timeoutMs (per-call) + subagent.taskTimeoutMs (per-task)。
   "IKNOW_LLM_TIMEOUT_MS",
+  "IKNOW_LLM_IDLE_TIMEOUT_MS",
+  "IKNOW_LLM_HARD_CAP_MS",
   "IKNOW_SUBAGENT_TASK_TIMEOUT_MS",
+  "IKNOW_LLM_MAX_OUTPUT_TOKENS",
 ] as const;
 
 describe("loadIknowEnv — thinking config (#151 T4)", () => {
@@ -387,6 +390,33 @@ describe("loadIknowEnv — llm.timeoutMs (#358 settings 双字段, per-call)", (
     assert.equal(env.llm.timeoutMs, 45_000);
   });
 
+  it("非正 env 值视为未设 → 回退到 settings 或第三层默认", () => {
+    for (const bad of ["0", "-1"]) {
+      process.env.IKNOW_LLM_TIMEOUT_MS = bad;
+      assert.equal(
+        loadIknowEnv(process.cwd(), {
+          llm: { model: "test-model", timeoutMs: 45_000 },
+        }).llm.timeoutMs,
+        45_000,
+        `timeoutMs=${bad} 应回退到 settings`
+      );
+      assert.equal(
+        loadIknowEnv(process.cwd(), EMPTY_SETTINGS).llm.timeoutMs,
+        300_000,
+        `timeoutMs=${bad} 且 settings 未配应回退默认`
+      );
+    }
+  });
+
+  it("有限正整数 env（含大值）仍覆盖 settings", () => {
+    const largeFiniteInteger = Number.MAX_SAFE_INTEGER;
+    process.env.IKNOW_LLM_TIMEOUT_MS = String(largeFiniteInteger);
+    const env = loadIknowEnv(process.cwd(), {
+      llm: { model: "test-model", timeoutMs: 45_000 },
+    });
+    assert.equal(env.llm.timeoutMs, largeFiniteInteger);
+  });
+
   it("env 非法 + settings 未配 → 300000 fallback", () => {
     process.env.IKNOW_LLM_TIMEOUT_MS = "abc";
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
@@ -473,6 +503,25 @@ describe("loadIknowEnv — subagent.taskTimeoutMs (#358 settings 双字段, per-
     assert.equal(env.subagent?.taskTimeoutMs, 3_600_000);
   });
 
+  it("非正 env 值视为未设 → 回退到 settings 或保持 undefined", () => {
+    for (const bad of ["0", "-1"]) {
+      process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = bad;
+      assert.equal(
+        loadIknowEnv(process.cwd(), {
+          llm: { model: "test-model" },
+          subagent: { taskTimeoutMs: 3_600_000 },
+        }).subagent?.taskTimeoutMs,
+        3_600_000,
+        `taskTimeoutMs=${bad} 应回退到 settings`
+      );
+      assert.equal(
+        loadIknowEnv(process.cwd(), EMPTY_SETTINGS).subagent?.taskTimeoutMs,
+        undefined,
+        `taskTimeoutMs=${bad} 且 settings 未配应保持 undefined`
+      );
+    }
+  });
+
   it("env 非法 + settings 未配 → undefined（无第三层默认）", () => {
     process.env.IKNOW_SUBAGENT_TASK_TIMEOUT_MS = "abc";
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
@@ -514,6 +563,21 @@ describe("loadIknowEnv — maxOutputTokens default", () => {
     process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = "4096";
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.llm.maxOutputTokens, 4096);
+  });
+
+  it("非正或非数字 env 值 → 回退 32000，不产生 max_tokens=0", () => {
+    for (const bad of ["0", "-1", "abc"]) {
+      process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = bad;
+      const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+      assert.equal(env.llm.maxOutputTokens, 32_000, `maxOutputTokens=${bad}`);
+    }
+  });
+
+  it("有限正整数大值仍可作为 maxOutputTokens", () => {
+    const largeFiniteInteger = Number.MAX_SAFE_INTEGER;
+    process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = String(largeFiniteInteger);
+    const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+    assert.equal(env.llm.maxOutputTokens, largeFiniteInteger);
   });
 });
 
