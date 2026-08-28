@@ -382,6 +382,12 @@ export async function createWorkerRuntime(
     maxTurns: env.llm.maxTurns,
     detectToolLoop: env.loop?.detectToolLoop !== false,
     timeoutMs: env.llm.timeoutMs,
+    ...(env.llm.idleTimeoutMs !== undefined
+      ? { modelIdleTimeoutMs: env.llm.idleTimeoutMs }
+      : {}),
+    ...(env.llm.hardCapMs !== undefined
+      ? { modelHardCapMs: env.llm.hardCapMs }
+      : {}),
     system,
     promptTools: reg.visibleSchemas,
     // cli.ts 同形态: traceOut flag > IKNOW_TRACE_OUT env > ./trace/。worker

@@ -390,6 +390,27 @@ describe("subagent worker: CreateWorkerDepsOptions seam 字段 (类型契约)", 
     assert.equal(opts.env.llm.maxTurns, undefined);
     assert.equal(opts.sandboxRoot, "/tmp/sb");
   });
+
+  it("env.llm 的 idle / hard-cap 双钟透传到 worker loop deps", async () => {
+    const deps = await createWorkerDeps({
+      env: {
+        ...TEST_ENV,
+        llm: {
+          ...TEST_ENV.llm,
+          idleTimeoutMs: 12_345,
+          hardCapMs: 67_890,
+        },
+      },
+      sandboxRoot: "/tmp/sb",
+      model: createStubModel({ responses: [] }),
+      skillCatalog: createSkillCatalog([]),
+      system: () => undefined,
+      trace: createNoopTraceService(),
+    });
+
+    assert.equal(deps.modelIdleTimeoutMs, 12_345);
+    assert.equal(deps.modelHardCapMs, 67_890);
+  });
 });
 
 // ---------------------------------------------------------------------------
