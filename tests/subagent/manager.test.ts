@@ -153,6 +153,18 @@ function emitEnvelope(child: FakeChild, env: SubAgentEnvelope): void {
   child.emit("exit", 0, null);
 }
 
+async function emitCrashAndWait(
+  manager: SubAgentManager,
+  child: FakeChild,
+  taskId: string,
+  code: number | null,
+  signal: NodeJS.Signals | null
+): Promise<SubAgentEnvelope> {
+  child.stderr.end();
+  child.emit("exit", code, signal);
+  return manager.waitFor(taskId, 1000);
+}
+
 // ── fixture 1:completed ───────────────────────────────────────────────────────
 
 describe("SubAgentManager spawn → completed", () => {
@@ -233,11 +245,10 @@ describe("SubAgentManager spawn → completed", () => {
 // ── fixture 2 / 5:failed(crashed) ─────────────────────────────────────────────
 
 describe("SubAgentManager spawn → crashed", () => {
-  it("exit code=1 → failed reason=crashed with summary", () => {
+  it("exit code=1 → failed reason=crashed with summary", async () => {
     const { manager, spawned } = makeHarness();
     const { taskId } = manager.spawn({});
-    spawned[0]!.emit("exit", 1, null);
-    const q = manager.queryBuffer(taskId);
+    const q = await emitCrashAndWait(manager, spawned[0]!, taskId, 1, null);
     assert.equal(q.status, "failed");
     if (q.status === "failed") {
       assert.equal(q.reason, "crashed");
@@ -257,9 +268,10 @@ describe("SubAgentManager spawn → crashed", () => {
 
     spawned[0]!.stderr.write(stderr);
     assert.equal(spawned[0]!.stderr.readableLength, 0);
+    spawned[0]!.stderr.end();
     spawned[0]!.emit("exit", 2, null);
 
-    const q = manager.queryBuffer(taskId);
+    const q = await manager.waitFor(taskId, 1000);
     assert.equal(q.status, "failed");
     if (q.status === "failed") {
       assert.match(q.summary, /worker exit code=2 signal=null/);
@@ -269,23 +281,27 @@ describe("SubAgentManager spawn → crashed", () => {
     }
   });
 
-  it("empty stderr → crashed summary remains unchanged", () => {
+  it("empty stderr → crashed summary remains unchanged", async () => {
     const { manager, spawned } = makeHarness();
     const { taskId } = manager.spawn({});
-    spawned[0]!.emit("exit", 1, null);
+    const q = await emitCrashAndWait(manager, spawned[0]!, taskId, 1, null);
 
-    const q = manager.queryBuffer(taskId);
     assert.equal(q.status, "failed");
     if (q.status === "failed") {
       assert.equal(q.summary, "worker exit code=1 signal=null");
     }
   });
 
-  it("killed by signal → failed reason=crashed", () => {
+  it("killed by signal → failed reason=crashed", async () => {
     const { manager, spawned } = makeHarness();
     const { taskId } = manager.spawn({});
-    spawned[0]!.emit("exit", null, "SIGTERM");
-    const q = manager.queryBuffer(taskId);
+    const q = await emitCrashAndWait(
+      manager,
+      spawned[0]!,
+      taskId,
+      null,
+      "SIGTERM"
+    );
     assert.equal(q.status, "failed");
     if (q.status === "failed") {
       assert.equal(q.reason, "crashed");
@@ -308,14 +324,15 @@ describe("SubAgentManager spawn → crashed", () => {
     }
   });
 
-  it("child 'error' ENOENT → failed reason=crashed summary=err.message", () => {
+  it("child 'error' ENOENT → failed reason=crashed summary=err.message", async () => {
     const { manager, spawned } = makeHarness();
     const { taskId } = manager.spawn({});
+    spawned[0]!.stderr.end();
     spawned[0]!.emit(
       "error",
       Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" })
     );
-    const q = manager.queryBuffer(taskId);
+    const q = await manager.waitFor(taskId, 1000);
     assert.equal(q.status, "failed");
     if (q.status === "failed") {
       assert.equal(q.reason, "crashed");
@@ -426,10 +443,12 @@ describe("SubAgentManager queryBuffer 四态 (SC5)", () => {
     assert.equal((q as SubAgentEnvelope).result, "r");
   });
 
-  it("failed → {status:failed, reason, summary}", () => {
+  it("failed → {status:failed, reason, summary}", async () => {
     const { manager, spawned } = makeHarness();
     const { taskId } = manager.spawn({});
+    spawned[0]!.stderr.end();
     spawned[0]!.emit("exit", 2, null);
+    await manager.waitFor(taskId, 1000);
     const q = manager.queryBuffer(taskId);
     assert.equal(q.status, "failed");
     if (q.status === "failed") assert.equal(q.reason, "crashed");
@@ -772,7 +791,9 @@ describe("SubAgentManager abortTask (#361 T5)", () => {
       const signals = spawned[0]!.kill.mock.calls.map((c) => c[0]);
       assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
       // 防止后续 spawn 留下 stray timer
+      spawned[0]!.stderr.end();
       spawned[0]!.emit("exit", null, "SIGKILL");
+      await vi.advanceTimersByTimeAsync(500);
       await manager.shutdown();
     } finally {
       vi.useRealTimers();
@@ -865,10 +886,10 @@ describe("SubAgentManager listSubagents (#358 T7)", () => {
     assert.equal(item.reason, undefined);
   });
 
-  it("failed 任务 → state=failed + reason + summary (Postel: endedAt 必在)", () => {
+  it("failed 任务 → state=failed + reason + summary (Postel: endedAt 必在)", async () => {
     const { manager, spawned } = makeHarness();
-    manager.spawn({ task: "explore the repo" });
-    spawned[0]!.emit("exit", 1, null);
+    const taskId = manager.spawn({ task: "explore the repo" }).taskId;
+    await emitCrashAndWait(manager, spawned[0]!, taskId, 1, null);
     const items = manager.listSubagents();
     assert.equal(items.length, 1);
     const item = items[0]!;
@@ -897,13 +918,13 @@ describe("SubAgentManager listSubagents (#358 T7)", () => {
     assert.equal(items[0]!.taskPreview, "");
   });
 
-  it("completed + failed + running 混合 → 返回全部三项 (每项 snapshot 只读)", () => {
+  it("completed + failed + running 混合 → 返回全部三项 (每项 snapshot 只读)", async () => {
     const { manager, spawned, spawnCalls } = makeHarness();
     manager.spawn({ task: "completed-task" }); // 0
-    manager.spawn({ task: "failed-task" }); // 1
+    const failedTask = manager.spawn({ task: "failed-task" }).taskId; // 1
     manager.spawn({ task: "running-task" }); // 2
     emitEnvelope(spawned[0]!, okEnvelope("done"));
-    spawned[1]!.emit("exit", 1, null);
+    await emitCrashAndWait(manager, spawned[1]!, failedTask, 1, null);
     assert.equal(spawnCalls.length, 3);
     const items = manager.listSubagents();
     assert.equal(items.length, 3);
