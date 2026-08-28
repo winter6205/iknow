@@ -18,7 +18,11 @@
  */
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { loadIknowSettings, type IknowSettings } from "./settings.js";
+import {
+  loadIknowSettings,
+  type IknowSettings,
+  DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS,
+} from "./settings.js";
 import { LLM_MODEL_MISSING_MESSAGE } from "./messages.js";
 import { WORKSPACE_ROOT_ENV_KEY } from "./workspace-root.js";
 
@@ -72,7 +76,7 @@ export interface LlmEnv {
   maxTurns?: number;
   /**
    * #358 T1: 单次 LLM 调用竞速上限(per-call,毫秒)。
-   * env 链:`envOptionalInt("IKNOW_LLM_TIMEOUT_MS") ?? mergedSettings.llm?.timeoutMs ?? 300_000`。
+   * env 链:`envOptionalPositiveInt("IKNOW_LLM_TIMEOUT_MS") ?? mergedSettings.llm?.timeoutMs ?? 300_000`。
    * 第三层 300_000（5 min）对齐 coding-agent 单次调用（thinking + 长 tool_use），
    * 不是 MCP 连接超时。env / settings 显式值仍覆盖。
    */
@@ -82,7 +86,7 @@ export interface LlmEnv {
    * 静默上限(毫秒)。到点落既有 `StopReason: timeout`,不新增停因;
    * `stream=off` 无增量可重置它,harness 侧按缺席处理。
    *
-   * env 链:`envOptionalInt("IKNOW_LLM_IDLE_TIMEOUT_MS") ?? settings.llm.idleTimeoutMs ?? 120_000`。
+   * env 链:`envOptionalPositiveInt("IKNOW_LLM_IDLE_TIMEOUT_MS") ?? settings.llm.idleTimeoutMs ?? 120_000`。
    * 第三层 2 分钟:正常出字时供应商 delta 是亚秒级间隔,连续两分钟一个增量
    * 都没有 = 这条连接已经废了,不是"还在想";取 2 分钟而非更短,是给首个
    * delta 之前的排队 / 上游限流留余量(idle 钟从 step 起就在跑)。
@@ -97,7 +101,7 @@ export interface LlmEnv {
    * **有限**上限(毫秒),到点即使仍有增量也落 `timeout`(CONTEXT _Avoid_:
    * 硬顶调成无限当验收)。
    *
-   * env 链:`envOptionalInt("IKNOW_LLM_HARD_CAP_MS") ?? settings.llm.hardCapMs ?? 900_000`。
+   * env 链:`envOptionalPositiveInt("IKNOW_LLM_HARD_CAP_MS") ?? settings.llm.hardCapMs ?? 900_000`。
    * 第三层 15 分钟:必须严格大于今日单钟默认 300_000,否则"持续出字的调用不被
    * 从开打起算的墙钟误杀"这条验收在默认配置下不成立;取单钟默认的 3 倍,覆盖
    * extended thinking + 32k 输出的最长合理单步,同时保持有限。
@@ -177,13 +181,18 @@ export interface McpEnv {
  * `taskTimeoutMs` = 子代理整任务寿命上限(per-task wallclock, 毫秒)。
  * 与 `LlmEnv.timeoutMs`(per-call LLM 调用竞速)语义、命名、消费点全程分离(C9)。
  *
- * env 链:`envOptionalInt("IKNOW_SUBAGENT_TASK_TIMEOUT_MS") ?? mergedSettings.subagent?.taskTimeoutMs`。
+ * env 链:`envOptionalPositiveInt("IKNOW_SUBAGENT_TASK_TIMEOUT_MS") ?? mergedSettings.subagent?.taskTimeoutMs`。
  * env 层无第三层默认值(7200s 常量由 T2 的 manager 消费点声明,
  * 避免缺省值在两处声明, settings 单一承载通过 mirror 校验)。
+ *
+ * `maxConcurrentWorkers` = 同时处于 starting/running 的 worker 并发上限。
+ * 未设 / 空 / 非数字 / 非正 → 默认 `DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS`(15)。
  */
 export interface IknowSubagentEnv {
   /** 子代理整任务寿命上限(毫秒);env 不设 + settings 未配 → undefined。 */
   taskTimeoutMs: number | undefined;
+  /** 子代理并发上限；loadIknowEnv 总会填入正整数默认值。 */
+  maxConcurrentWorkers?: number;
 }
 
 export interface IknowEnv {
@@ -306,6 +315,21 @@ function envOptionalInt(opts: EnvOptionalIntOpts): number | undefined {
   if (!raw) return undefined;
   const n = Number(raw);
   return Number.isFinite(n) ? Math.trunc(n) : undefined;
+}
+
+/** Optional positive integer env values (timeouts). Non-positive → undefined. */
+function envOptionalPositiveInt(opts: EnvOptionalIntOpts): number | undefined {
+  const n = envOptionalInt(opts);
+  return n !== undefined && n > 0 ? n : undefined;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    value > 0
+  );
 }
 
 interface EnvNumberOpts {
@@ -545,7 +569,7 @@ export function loadIknowEnv(
       // settings-model-extension：apiKey 来源 = settings.llm.apiKey（字面或 ${VAR}
       // 占位符）经 expandPlaceholders 解析；未配 / 解析不到 → undefined（消费点守卫）。
       apiKey: expandPlaceholders(mergedSettings.llm?.apiKey, file),
-      maxOutputTokens: envInt({
+      maxOutputTokens: envPositiveInt({
         file,
         key: "IKNOW_LLM_MAX_OUTPUT_TOKENS",
         // Claude Code 主会话默认 CLAUDE_CODE_MAX_OUTPUT_TOKENS=32000（可配到 64k）。
@@ -554,10 +578,10 @@ export function loadIknowEnv(
         fallback: 32_000,
       }),
       // #358 T1: per-call LLM 调用竞速上限(env > settings > 300_000 fallback)。
-      // 镜像 maxTurns 模式(envOptionalInt ?? settings),第三层 5 min：thinking +
+      // 镜像 maxTurns 模式(envOptionalPositiveInt ?? settings),第三层 5 min：thinking +
       // 32k 生成常见超过 60s。MCP connectTimeoutMs 仍是 60s。
       timeoutMs:
-        envOptionalInt({
+        envOptionalPositiveInt({
           file,
           key: "IKNOW_LLM_TIMEOUT_MS",
         }) ??
@@ -566,14 +590,14 @@ export function loadIknowEnv(
       // #742 T1: 流式臂双钟(env > settings > 默认)。默认值理由见 LlmEnv 字段注释;
       // 不变式 idle < 硬顶、硬顶有限由 tests/harness/model-idle-hardcap-config.test.ts 钉。
       idleTimeoutMs:
-        envOptionalInt({
+        envOptionalPositiveInt({
           file,
           key: "IKNOW_LLM_IDLE_TIMEOUT_MS",
         }) ??
         mergedSettings.llm?.idleTimeoutMs ??
         120_000,
       hardCapMs:
-        envOptionalInt({
+        envOptionalPositiveInt({
           file,
           key: "IKNOW_LLM_HARD_CAP_MS",
         }) ??
@@ -655,10 +679,21 @@ export function loadIknowEnv(
     // #358 T1: 子代理 per-task wallclock(env > settings,无第三层默认;7200s 常量归 T2 manager)。
     subagent: {
       taskTimeoutMs:
-        envOptionalInt({
+        envOptionalPositiveInt({
           file,
           key: "IKNOW_SUBAGENT_TASK_TIMEOUT_MS",
         }) ?? mergedSettings.subagent?.taskTimeoutMs,
+      // T4: 并发上限(env > settings > manager default 15)。settings 可能
+      // 来自测试注入而未经过 parse，故此处再次 fail-safe 校验。
+      maxConcurrentWorkers:
+        envOptionalPositiveInt({
+          file,
+          key: "IKNOW_SUBAGENT_MAX_CONCURRENT_WORKERS",
+        }) ??
+        (isPositiveInteger(mergedSettings.subagent?.maxConcurrentWorkers)
+          ? mergedSettings.subagent.maxConcurrentWorkers
+          : undefined) ??
+        DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS,
     },
     // ADR-0019 (T1): workspace-root per-root state anchor (D1.5 register at
     // env SSOT; `envOptional` canonical reader — empty/unset → undefined,

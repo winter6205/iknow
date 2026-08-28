@@ -22,6 +22,7 @@ import type {
   SubagentState,
 } from "../trace/index.js";
 import { safeTrace } from "../trace/safe-trace.js";
+import { DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS } from "../../config/settings.js";
 
 // re-export: manager 的调用方(T4/T5 工具、host-drain)统一从 manager 侧拿
 // SubAgentDefinition,不必各自 import role.js。
@@ -115,25 +116,27 @@ export class SubAgentWaitTimeoutError extends Error {
 }
 
 /**
- * #361 C1: 父代理侧并发 worker 上限。spawn 入口 running+starting 数 ≥ 此值
+ * #361 C1 / T4: 父代理侧并发 worker 默认上限。spawn 入口 running+starting 数 ≥ 此值
  * 立即抛 SubAgentCapacityError(显式失败,模型可降并发重试;不 queue 不静默)。
  */
-export const MAX_CONCURRENT_WORKERS = 4;
+export const MAX_CONCURRENT_WORKERS = DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS;
 
 /**
  * #361 C1: spawn 并发超限 typed 拒绝。字段 `{ status:"failed", reason:"capacity",
- * active }` 透传。message 含 capacity + 4/4(handler 用作 ToolExecutionError 文案)。
+ * active }` 透传。message 含 capacity + active/limit(handler 用作 ToolExecutionError 文案)。
  */
 export class SubAgentCapacityError extends Error {
   override readonly name = "SubAgentCapacityError";
   readonly status = "failed" as const;
   readonly reason = "capacity" as const;
   readonly active: number;
-  constructor(active: number) {
+  readonly maxConcurrentWorkers: number;
+  constructor(active: number, maxConcurrentWorkers = MAX_CONCURRENT_WORKERS) {
     super(
-      `spawn_subagent: at capacity (${active}/${MAX_CONCURRENT_WORKERS} concurrent workers). Requeue after a worker completes or reduce parallelism.`
+      `spawn_subagent: at capacity (${active}/${maxConcurrentWorkers} concurrent workers). Requeue after a worker completes or reduce parallelism.`
     );
     this.active = active;
+    this.maxConcurrentWorkers = maxConcurrentWorkers;
   }
 }
 
@@ -293,6 +296,11 @@ export function createSubAgentManager(opts: {
    * 透传;env 层无第三层默认 (常量唯一声明点在本文件)。
    */
   readonly taskTimeoutMs?: number;
+  /**
+   * #361 C1 / T4: 可选并发上限。仅正整数生效；缺席或非法值回退
+   * `MAX_CONCURRENT_WORKERS`(15)。超限立即抛错，不排队。
+   */
+  readonly maxConcurrentWorkers?: number;
 }): SubAgentManager {
   const tasks = new Map<string, Task>();
   /** 所有未决 waitFor 的轮询句柄(非终态,shutdown 必须清,防进程悬挂)。 */
@@ -301,6 +309,13 @@ export function createSubAgentManager(opts: {
   const waitRejecters = new Set<(reason: unknown) => void>();
   /** #358 T4: trace 句柄 closure 捕获, spawn/state_change/stop 三处共用。 */
   const trace = opts.trace;
+  const maxConcurrentWorkers =
+    typeof opts.maxConcurrentWorkers === "number" &&
+    Number.isFinite(opts.maxConcurrentWorkers) &&
+    Number.isInteger(opts.maxConcurrentWorkers) &&
+    opts.maxConcurrentWorkers > 0
+      ? opts.maxConcurrentWorkers
+      : MAX_CONCURRENT_WORKERS;
 
   /**
    * #358 T4: emitStateChange — 任何 task.state 迁移点必经此处。
@@ -387,14 +402,15 @@ export function createSubAgentManager(opts: {
   }
 
   function spawn(def: SubAgentDefinition): { readonly taskId: string } {
-    // #361 C1: running+starting ≥ MAX_CONCURRENT_WORKERS 立即抛 SubAgentCapacityError。
+    // #361 C1 / T4: running+starting ≥ configured cap 立即抛
+    // SubAgentCapacityError。
     // 显式失败 > 静默排队(handler 接住后抛 ToolExecutionError,模型降并发重试)。
     let activeCount = 0;
     for (const t of tasks.values()) {
       if (t.state === "starting" || t.state === "running") activeCount++;
     }
-    if (activeCount >= MAX_CONCURRENT_WORKERS) {
-      throw new SubAgentCapacityError(activeCount);
+    if (activeCount >= maxConcurrentWorkers) {
+      throw new SubAgentCapacityError(activeCount, maxConcurrentWorkers);
     }
 
     // #357 T1: 校验必须在 opts.spawn 之前(否则 line 205 既有 try/catch 会把
@@ -633,8 +649,28 @@ export function createSubAgentManager(opts: {
           });
         }
       }
-      // SC16: 干净退出 (0, null) 且无 envelope → 不改 state,维持 running。
-      // 由 waitFor timeout / host drain 兜底(SC16 由兜底机制接住)。
+      // SC16: 干净退出 (0, null) 且无 envelope → protocolError 并立即放槽。
+      // 已有终态不覆盖:合法 envelope / timeout / 其他失败路径的结果保持不变。
+      if (
+        code === 0 &&
+        signal === null &&
+        task.state !== "completed" &&
+        task.state !== "failed" &&
+        task.envelope === undefined
+      ) {
+        const summary = "worker exited cleanly without envelope";
+        task.envelope = {
+          status: "failed",
+          reason: "protocolError",
+          summary,
+          result: "",
+        };
+        emitStateChange(task, "failed", { reason: "protocolError" });
+        emitStop(task, "failed", {
+          reason: "protocolError",
+          summary,
+        });
+      }
       // 干净退出(0, null)且有 envelope → 保持 completed (已在 stdout 段 emitStop)。
     });
 
