@@ -8,7 +8,7 @@
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,7 +17,12 @@ import {
   SessionStore,
   resolveProjectSessionDir,
 } from "../../src/session-api/store/index.ts";
-import type { AutoMemoryTurn } from "../../src/harness/memory/index.ts";
+import {
+  createAutoMemoryHook,
+  type AutoMemoryHook,
+  type AutoMemoryTurn,
+} from "../../src/harness/memory/index.ts";
+import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 
 let baseDir: string;
@@ -47,6 +52,60 @@ const recorder = (): {
   };
 };
 
+const trackedAutoMemoryHook = (
+  memoryDir: string
+): {
+  readonly hook: AutoMemoryHook;
+  readonly calls: () => number;
+  readonly sessionKeys: () => ReadonlyArray<string | undefined>;
+} => {
+  let callCount = 0;
+  const sessionKeys: Array<string | undefined> = [];
+  const hook = createAutoMemoryHook({
+    memoryDir,
+    llm: {
+      complete: async () =>
+        JSON.stringify([
+          {
+            title: "Workspace memory",
+            body: "The workspace keeps durable project conventions.",
+            type: "note",
+            importance: 3,
+          },
+        ]),
+    },
+    enabled: true,
+    minCompletedTurns: 1,
+  });
+  return {
+    hook: {
+      onTurnComplete: (turn) => {
+        callCount++;
+        sessionKeys.push(turn.sessionKey);
+        hook.onTurnComplete(turn);
+      },
+      drain: () => hook.drain(),
+    },
+    calls: () => callCount,
+    sessionKeys: () => sessionKeys,
+  };
+};
+
+async function sourceAutoFiles(memoryDir: string): Promise<string[]> {
+  let names: string[];
+  try {
+    names = await readdir(memoryDir);
+  } catch {
+    return [];
+  }
+  const files = await Promise.all(
+    names
+      .filter((name) => name.endsWith(".md") && name !== "MEMORY.md")
+      .map((name) => readFile(join(memoryDir, name), "utf8"))
+  );
+  return files.filter((file) => file.includes("source: auto"));
+}
+
 describe("SessionHub — auto-memory hook", () => {
   it("hands a completed turn to the hook with the rendered transcript", async () => {
     const { hook, seen } = recorder();
@@ -64,6 +123,7 @@ describe("SessionHub — auto-memory hook", () => {
     assert.equal(out.turn.answer.stopReason, "completed");
     assert.equal(seen.length, 1);
     assert.equal(seen[0]!.stopReason, "completed");
+    assert.equal(seen[0]!.sessionKey, "chat");
     assert.match(seen[0]!.transcript, /which entry point is thread-safe\?/);
     assert.match(seen[0]!.transcript, /bar\(\) is thread-safe\./);
   });
@@ -99,5 +159,58 @@ describe("SessionHub — auto-memory hook", () => {
       text: "hello",
     });
     assert.equal(out.turn.answer.finalText, "reply");
+  });
+
+  it("keeps auto-memory hooks isolated by session workspaceRoot", async () => {
+    const rootA = await mkdtemp(join(baseDir, "root-a-"));
+    const rootB = await mkdtemp(join(baseDir, "root-b-"));
+    const memoryA = join(rootA, "memory");
+    const memoryB = join(rootB, "memory");
+    const trackedA = trackedAutoMemoryHook(memoryA);
+    const trackedB = trackedAutoMemoryHook(memoryB);
+    const hub = new SessionHub({
+      store,
+      askUser: createNoAskUser(),
+      surface: "serve",
+      buildEngine: async (root) => ({
+        deps: makeDeps([assistantResult({ texts: [`reply from ${root}`] })]),
+        autoMemory: root === rootA ? trackedA.hook : trackedB.hook,
+      }),
+    });
+
+    await hub.bindWorkspace(rootA);
+    const sessionA = await hub.createSession();
+    await hub.bindWorkspace(rootB);
+    const sessionB = await hub.createSession();
+
+    await hub.postMessage({
+      conversationId: sessionA.session.conversation_id,
+      text: "root A turn",
+    });
+    await hub.postMessage({
+      conversationId: sessionB.session.conversation_id,
+      text: "root B turn",
+    });
+    await trackedA.hook.drain();
+    await trackedB.hook.drain();
+
+    assert.equal(trackedA.calls(), 1);
+    assert.equal(trackedB.calls(), 1);
+    assert.deepEqual(trackedA.sessionKeys(), [
+      sessionA.session.conversation_id,
+    ]);
+    assert.deepEqual(trackedB.sessionKeys(), [
+      sessionB.session.conversation_id,
+    ]);
+    const filesA = await sourceAutoFiles(memoryA);
+    const filesB = await sourceAutoFiles(memoryB);
+    assert.ok(
+      filesA.length >= 1,
+      "root A writes source: auto into its own memoryDir"
+    );
+    assert.ok(
+      filesB.length >= 1,
+      "root B writes source: auto into its own memoryDir"
+    );
   });
 });

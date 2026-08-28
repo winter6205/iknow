@@ -1,8 +1,10 @@
 /**
  * src/tui/turn-activity.ts
  *
- * 当前 turn 的工具折叠摘要（纯函数）。ChatView 在 idle 时把「本 turn 里
- * 每个工具调用了几次」收成一行，避免结束后仍铺开每一条 `[完成] bash · …`。
+ * 当前 turn 的工具折叠摘要（纯函数）。ChatView 把「本 turn 里每个工具
+ * 调用了几次」收成一行（idle 与 running 在已有完成工具时共用），避免
+ * 旧的逐条 `[思考]` / `[完成] bash` 与 turn 级 `思考了 N 秒 · bash × N`
+ * 两套折叠叠在一起。
  *
  * turn 边界与 `isTurnQuery` 同源：最后一条无 tool_result 的 user query
  * 起到会话末尾（含中间 tool_result user 消息）。
@@ -61,27 +63,84 @@ export function countToolUsesByName(
   }));
 }
 
-/** ` · bash × 2 · write_file × 1`；空列表 → 空串。 */
+/** 本切片里 assistant `tool_use` id 集合（live 计数去重用）。 */
+export function toolUseIdsOf(
+  messages: ReadonlyArray<AnthropicNativeMessage>
+): ReadonlySet<string> {
+  const ids = new Set<string>();
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const block of message.content) {
+      if (block.type === "tool_use") ids.add(block.id);
+    }
+  }
+  return ids;
+}
+
+/**
+ * 按 name 计数；`excludeIds` 命中则跳过（历史已计入的 live 条目不双计）。
+ * 空 name 仍计一次。
+ */
+export function countNamedCalls(
+  calls: ReadonlyArray<{ readonly id: string; readonly name: string }>,
+  excludeIds: ReadonlySet<string>
+): ReadonlyArray<ToolUseCount> {
+  const order: string[] = [];
+  const map = new Map<string, number>();
+  for (const call of calls) {
+    if (excludeIds.has(call.id)) continue;
+    if (!map.has(call.name)) order.push(call.name);
+    map.set(call.name, (map.get(call.name) ?? 0) + 1);
+  }
+  return order.map((name) => ({
+    name,
+    count: Math.max(0, map.get(name) ?? 0),
+  }));
+}
+
+/** primary 名顺序优先，extra 新名接在后面；count 相加。 */
+export function mergeToolUseCounts(
+  primary: ReadonlyArray<ToolUseCount>,
+  extra: ReadonlyArray<ToolUseCount>
+): ReadonlyArray<ToolUseCount> {
+  const order: string[] = [];
+  const map = new Map<string, number>();
+  for (const group of [primary, extra]) {
+    for (const entry of group) {
+      if (entry.count <= 0) continue;
+      if (!map.has(entry.name)) order.push(entry.name);
+      map.set(entry.name, (map.get(entry.name) ?? 0) + entry.count);
+    }
+  }
+  return order.map((name) => ({
+    name,
+    count: map.get(name) ?? 0,
+  }));
+}
+
+/** `bash × 2 · write_file × 1`；空列表 → 空串（无前导分隔符）。 */
 export function formatToolUseCounts(
   entries: ReadonlyArray<ToolUseCount>
 ): string {
   if (entries.length === 0) return "";
   return entries
     .filter((e) => e.count > 0)
-    .map((e) => ` · ${e.name} × ${e.count}`)
-    .join("");
+    .map((e) => `${e.name} × ${e.count}`)
+    .join(" · ");
 }
 
 /**
- * idle 折叠行。seconds≤0 且无工具 → 空串（不画「思考了 0 秒」）。
- * 有工具无秒数 → `[思考]` + 计数；有秒数 → `思考了 N 秒` + 计数。
+ * idle 折叠行。seconds≤0 且无工具 → 空串（不画「思考了 0 秒」、不换 `[思考]`）。
+ * 有工具无秒数 → 只计数；有秒数 → `思考了 N 秒` + 计数。
  */
 export function formatTurnActivityFold(
   seconds: number | undefined,
   entries: ReadonlyArray<ToolUseCount>
 ): string {
   const counts = formatToolUseCounts(entries);
-  const s = Math.max(0, Math.floor(seconds ?? 0));
-  if (s <= 0 && counts.length === 0) return "";
-  return `${formatThinkingFold(s > 0 ? s : undefined)}${counts}`;
+  const think = formatThinkingFold(seconds);
+  if (think.length === 0 && counts.length === 0) return "";
+  if (think.length === 0) return counts;
+  if (counts.length === 0) return think;
+  return `${think} · ${counts}`;
 }

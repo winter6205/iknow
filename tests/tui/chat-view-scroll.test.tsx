@@ -371,7 +371,7 @@ test("流式 draft 渲染：running-fg 时挂载，turn 结束落定消失", asy
   await setup.renderer.destroy();
 });
 
-test("thinking 折叠态：默认 1 行 [思考]，展开时显示全文", async () => {
+test("thinking 折叠态：无秒数不画 [思考]，展开时显示全文", async () => {
   // 直接用 messages 里嵌 thinking 来测 MessageBlocks 经由 ChatView 的
   // 视觉一致性 — 折叠/展开由 setThinkingExpanded 控制（如果 ChatView
   // 接受 thinkingExpanded prop；T6-B 接受该 prop，默认 false）。
@@ -397,7 +397,7 @@ test("thinking 折叠态：默认 1 行 [思考]，展开时显示全文", async
   );
   await setup1.waitForVisualIdle();
   const frameFolded = setup1.captureCharFrame();
-  expect(frameFolded).toContain("[思考]");
+  expect(frameFolded.includes("[思考]")).toBe(false);
   expect(frameFolded.includes("链上推理")).toBe(false);
   await setup1.renderer.destroy();
 });
@@ -508,8 +508,7 @@ test("流式 thinking 子秒未冻结：折叠行显示「思考中…」不显 
 });
 
 test("thinking 留存：lastThinkingSeconds 不作用于非末条 assistant 消息", async () => {
-  // 前一条（非末条）assistant 带 thinking 的折叠行应保持 `[思考]`——秒数
-  // 只属于刚结束的 turn（末条），历史消息不伪精度。
+  // 前一条（非末条）无秒数 → 不画思考摘要；秒数只属于刚结束的 turn（末条）。
   const initial = sessionWith([
     msg("m-1", "user", "旧问题"),
     {
@@ -541,9 +540,10 @@ test("thinking 留存：lastThinkingSeconds 不作用于非末条 assistant 消�
   );
   await setup1.waitForVisualIdle();
   const frame = setup1.captureCharFrame();
-  // 末条「新回答」的折叠行带 7 秒；前一条「旧回答」的折叠行保持 [思考]。
+  // 末条「新回答」带 7 秒；前一条「旧回答」无秒 → 不回落 [思考]。
   expect(frame).toContain("思考了 7 秒");
-  expect(frame).toContain("[思考]");
+  expect(frame.includes("[思考]")).toBe(false);
+  expect(frame).toContain("旧回答");
   await setup1.renderer.destroy();
 });
 

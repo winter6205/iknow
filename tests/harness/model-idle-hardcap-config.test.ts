@@ -123,6 +123,22 @@ describe("#742 T1 env: idle / 硬顶覆盖链", () => {
       assert.equal(env.llm.hardCapMs, 900_000, `hardCap bad=${bad}`);
     }
   });
+
+  it("env 非正值视为未设 → 回退到 settings 或默认", () => {
+    for (const bad of ["0", "-1"]) {
+      process.env.IKNOW_LLM_IDLE_TIMEOUT_MS = bad;
+      process.env.IKNOW_LLM_HARD_CAP_MS = bad;
+      const fromSettings = loadIknowEnv(process.cwd(), {
+        llm: { model: "test-model", idleTimeoutMs: 30_000, hardCapMs: 400_000 },
+      });
+      assert.equal(fromSettings.llm.idleTimeoutMs, 30_000, `idle bad=${bad}`);
+      assert.equal(fromSettings.llm.hardCapMs, 400_000, `hardCap bad=${bad}`);
+
+      const fromDefaults = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
+      assert.equal(fromDefaults.llm.idleTimeoutMs, 120_000, `idle bad=${bad}`);
+      assert.equal(fromDefaults.llm.hardCapMs, 900_000, `hardCap bad=${bad}`);
+    }
+  });
 });
 
 describe("#742 T1 settings: idleTimeoutMs / hardCapMs 校验", () => {

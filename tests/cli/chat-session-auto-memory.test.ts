@@ -44,6 +44,7 @@ describe("processChatLine — auto-memory hook", () => {
     assert.equal(result.ranQuery, true);
     assert.equal(seen.length, 1);
     assert.equal(seen[0]!.stopReason, "completed");
+    assert.equal(seen[0]!.sessionKey, "chat");
     assert.match(seen[0]!.transcript, /which entry point is thread-safe\?/);
     assert.match(seen[0]!.transcript, /bar\(\) is\./);
   });

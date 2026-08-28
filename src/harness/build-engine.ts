@@ -232,15 +232,15 @@ export type BuiltEngine = {
   readonly graphAssembly?: GraphAssembly;
   /**
    * auto-memory T4 / ADR-0031 D1+D5:自动记忆 host 钩子。**默认缺席** ——
-   * 只有 `settings.memory.autoExtract === true`、memory 层在场、且 surface
-   * 不是 `ask`(ADR-0010 D3 opt-out)三者同时成立才装配。缺席时宿主什么都
-   * 不调,行为与现网逐字节一致。
+   * 只有 `settings.memory.autoExtract === true || dream === true`、memory 层
+   * 在场、且 surface 不是 `ask`(ADR-0010 D3 opt-out)三者同时成立才装配。
+   * 缺席时宿主什么都不调,行为与现网逐字节一致。
    */
   readonly autoMemory?: AutoMemoryHook;
   /**
-   * auto-memory low-trust read: per-turn prefetch overlay builder. Same gate
-   * as `autoMemory`. Hosts prepend the string onto the user payload; it must
-   * never be written to `deps.system`.
+   * auto-memory low-trust read: per-turn prefetch overlay builder. Gated on
+   * `autoExtract === true` (not dream-only). Hosts prepend the string onto
+   * the user payload; it must never be written to `deps.system`.
    */
   readonly overlayMemoryPrefetch?: (query: string) => Promise<string>;
 };
@@ -292,6 +292,7 @@ export async function buildHarnessEngine(
   const surface = opts.surface ?? "chat";
   // #194 T6:memory 开关(ask 显式关)。memoryDir = 项目命名空间记忆库根。
   const memoryEnabled = opts.memory?.enabled !== false;
+  const memoryToolsEnabled = surface !== "ask" && memoryEnabled;
   // #337 T8:userHome / cwd 测试缝(默认 = 真实 homedir() / process.cwd())。
   // 装配期 skill scanner + mcp config 都从这里取 userHome / cwd。
   // 单测用 tmp fixture 注入空 home 隔离真实用户目录,不污染 ~/.iknow。
@@ -361,11 +362,14 @@ export async function buildHarnessEngine(
         // #358 T2: per-task wallclock 链条中段 — env.subagent.taskTimeoutMs
         // (settings/env 合并已由 T1 在 env 层完成, 此处直接消费; 缺省
         // undefined → manager 回退自己的 7200s 常量)。
+        // T4: 并发上限由 env.subagent.maxConcurrentWorkers 透传;缺席时
+        // manager 回退默认 15。
         createSubAgentManager({
           spawn: defaultSubAgentSpawn,
           sandboxRoot,
           trace: opts.subagentTrace ?? createNoopTraceService(),
           taskTimeoutMs: env.subagent.taskTimeoutMs,
+          maxConcurrentWorkers: env.subagent.maxConcurrentWorkers,
         }))
       : undefined;
   // #502 T3:bash background 任务管理器 — 条件装配（surface !== "ask"）：
@@ -483,7 +487,7 @@ export async function buildHarnessEngine(
     // D-α T3:run_graph 条件化装配 —— 需要 overlay(graphAssembly)与编排
     // 底座(subagentManager)同时在场;registry 内部同门再判一次。
     ...(graphAssembly ? { graphAssembly } : {}),
-    ...(memoryEnabled ? { memoryDir } : undefined),
+    ...(memoryToolsEnabled ? { memoryDir } : undefined),
     skillCatalog,
     ...(subagentManager ? { subagentManager } : undefined),
     // #502 T3:bash background 任务管理器透传（同门条件装配）——bash 工具
@@ -643,8 +647,8 @@ export async function buildHarnessEngine(
       userHome,
       workspaceRoot,
       surface,
-      memoryEnabled,
-      ...(memoryEnabled
+      memoryEnabled: memoryToolsEnabled,
+      ...(memoryToolsEnabled
         ? {
             memoryResolver: createSystemResolver({
               cwd,
@@ -719,39 +723,43 @@ export async function buildHarnessEngine(
       : {}),
   };
   const engine = createLoopEngine(deps);
-  // auto-memory T4 / ADR-0031 D1+D5 + low-trust read:三重同门 —— 显式 opt-in、
-  // memory 层在场、非 ask 表面。任一不成立 → 钩子与预取缺席。
-  const autoReadOn =
-    memoryEnabled && surface !== "ask" && settings.memory?.autoExtract === true;
-  const autoMemory = autoReadOn
-    ? createAutoMemoryHook({
-        memoryDir,
-        llm: createAdapterExtractLlm(adapter),
-        enabled: true,
-        onError: (error) => {
-          console.warn(
-            `[memory/auto] ingest skipped: ${
-              error instanceof Error ? error.message : String(error)
-            }`
-          );
-        },
-      })
-    : undefined;
-  const overlayMemoryPrefetch = autoReadOn
-    ? async (query: string): Promise<string> => {
-        try {
-          return await buildMemoryPrefetchOverlay({ memoryDir, query });
-        } catch (error) {
-          // EXIT: log-and-continue — missing prefetch must not fail the turn.
-          console.warn(
-            `[memory/prefetch] overlay skipped: ${
-              error instanceof Error ? error.message : String(error)
-            }`
-          );
-          return "";
+  // auto-memory T4 / ADR-0031 D1+D5:三重同门 —— 显式 opt-in、memory 层在场、
+  // 非 ask 表面。任一不成立 → 钩子缺席,宿主侧零调用、零 LLM、零写盘。
+  // 读路径预取只跟 autoExtract（dream-only 不灌用户消息）。
+  const autoExtractOn = settings.memory?.autoExtract === true;
+  const dreamOn = settings.memory?.dream === true;
+  const autoMemory =
+    memoryEnabled && surface !== "ask" && (autoExtractOn || dreamOn)
+      ? createAutoMemoryHook({
+          memoryDir,
+          llm: createAdapterExtractLlm(adapter),
+          enabled: autoExtractOn,
+          dream: dreamOn,
+          onError: (error) => {
+            console.warn(
+              `[memory/auto] ingest skipped: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            );
+          },
+        })
+      : undefined;
+  const overlayMemoryPrefetch =
+    memoryEnabled && surface !== "ask" && autoExtractOn
+      ? async (query: string): Promise<string> => {
+          try {
+            return await buildMemoryPrefetchOverlay({ memoryDir, query });
+          } catch (error) {
+            // EXIT: log-and-continue — missing prefetch must not fail the turn.
+            console.warn(
+              `[memory/prefetch] overlay skipped: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            );
+            return "";
+          }
         }
-      }
-    : undefined;
+      : undefined;
   return {
     deps,
     engine,

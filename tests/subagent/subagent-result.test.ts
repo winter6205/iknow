@@ -104,7 +104,9 @@ describe("subagent_result — 正常路径", () => {
     const parsed = JSON.parse(out) as Record<string, unknown>;
     expect(parsed.status).toBe("ok");
     expect(parsed.summary).toBe("found the answer");
-    expect(parsed.result).toBe("42");
+    expect(parsed.result).not.toBe("42");
+    expect(String(parsed.result)).toMatch(/found the answer/);
+    expect(String(parsed.result)).toMatch(/\/tmp\/a\.txt/);
     expect(parsed.fileRefs).toEqual(["/tmp/a.txt", "/tmp/b.txt"]);
     expect(parsed.usage).toEqual({ inputTokens: 10, outputTokens: 20 });
   });
@@ -194,6 +196,21 @@ describe("subagent_result — AciToolDef 元数据", () => {
     expect(tool.aci.interruptBehavior).toBe("cancel");
     expect(tool.aci.isConcurrencySafe).toBe(true);
     expect(tool.aci.lazy).toBe(false);
+  });
+
+  it("description 说明父可见短交差字段，不宣称 full envelope 是唯一真值", () => {
+    const description = createSubAgentResultTool({
+      manager: makeFakeManager(),
+    }).description;
+    expect(description).toMatch(/parent-visible/i);
+    expect(description).toMatch(/short (?:handoff|summary)/i);
+    expect(description).toMatch(/summary/i);
+    expect(description).toMatch(/paths?/i);
+    expect(description).toMatch(/status/i);
+    expect(description).toMatch(/stop[_ ]reason/i);
+    expect(description).not.toMatch(/full envelope/i);
+    expect(description).not.toMatch(/sole ground truth|ground truth/i);
+    expect(description).not.toMatch(/Fork|worktree/i);
   });
 
   it("inputSchema 冻结:required=['task_id'],additionalProperties:false", () => {

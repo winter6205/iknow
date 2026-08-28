@@ -25,6 +25,8 @@ import type { ChildProcess } from "node:child_process";
 
 import {
   createSubAgentManager,
+  MAX_CONCURRENT_WORKERS,
+  SubAgentCapacityError,
   SubAgentWaitTimeoutError,
 } from "../../src/harness/subagent/manager.ts";
 import type {
@@ -69,7 +71,12 @@ function makeFakeChild(): FakeChild {
 
 /** 收 wrapper:记录最近一次 spawn 的 child + 入参,供测试 emit。
  *  `opts.taskTimeoutMs` 透传给 createSubAgentManager (T2 三层缺省链中段)。 */
-function makeHarness(opts: { readonly taskTimeoutMs?: number } = {}) {
+function makeHarness(
+  opts: {
+    readonly taskTimeoutMs?: number;
+    readonly maxConcurrentWorkers?: number;
+  } = {}
+) {
   const spawned: FakeChild[] = [];
   const spawnCalls: {
     def: SubAgentDefinition;
@@ -86,9 +93,56 @@ function makeHarness(opts: { readonly taskTimeoutMs?: number } = {}) {
     ...(opts.taskTimeoutMs !== undefined
       ? { taskTimeoutMs: opts.taskTimeoutMs }
       : {}),
+    ...(opts.maxConcurrentWorkers !== undefined
+      ? { maxConcurrentWorkers: opts.maxConcurrentWorkers }
+      : {}),
   });
   return { manager, spawned, spawnCalls };
 }
+
+describe("SubAgentManager concurrency capacity", () => {
+  it("default capacity is 15 and the 16th spawn fails immediately", () => {
+    assert.equal(MAX_CONCURRENT_WORKERS, 15);
+    const { manager } = makeHarness();
+
+    for (let i = 0; i < MAX_CONCURRENT_WORKERS; i++) {
+      assert.doesNotThrow(() => manager.spawn({ task: `default-${i}` }));
+    }
+    assert.throws(
+      () => manager.spawn({ task: "default-overflow" }),
+      (error: unknown) => {
+        assert.ok(error instanceof SubAgentCapacityError);
+        assert.equal(error.active, 15);
+        assert.match(error.message, /15\/15/);
+        return true;
+      }
+    );
+  });
+
+  it("uses an injected smaller capacity without queueing", () => {
+    const { manager } = makeHarness({ maxConcurrentWorkers: 2 });
+
+    manager.spawn({ task: "first" });
+    manager.spawn({ task: "second" });
+    assert.throws(
+      () => manager.spawn({ task: "overflow" }),
+      (error: unknown) => {
+        assert.ok(error instanceof SubAgentCapacityError);
+        assert.equal(error.active, 2);
+        assert.match(error.message, /2\/2/);
+        return true;
+      }
+    );
+  });
+
+  it("falls back to the default for an illegal injected capacity", () => {
+    const { manager } = makeHarness({ maxConcurrentWorkers: 0 });
+    for (let i = 0; i < MAX_CONCURRENT_WORKERS; i++) {
+      assert.doesNotThrow(() => manager.spawn({ task: `fallback-${i}` }));
+    }
+    assert.throws(() => manager.spawn({ task: "fallback-overflow" }));
+  });
+});
 
 function okEnvelope(result = "ok result"): SubAgentEnvelope {
   return { status: "ok", summary: "done", result };
@@ -236,6 +290,32 @@ describe("SubAgentManager spawn → crashed", () => {
 
 // ── fixture 3:protocolError ───────────────────────────────────────────────────
 
+describe("SubAgentManager clean exit without envelope", () => {
+  it("exit code=0 without envelope → failed protocolError and releases the slot", () => {
+    const { manager, spawned } = makeHarness();
+    const { taskId } = manager.spawn({});
+
+    spawned[0]!.emit("exit", 0, null);
+
+    const q = manager.queryBuffer(taskId);
+    assert.equal(q.status, "failed");
+    if (q.status === "failed") {
+      assert.equal(q.reason, "protocolError");
+      assert.match(q.summary, /without envelope/);
+    }
+    assert.deepEqual(manager.listActive(), []);
+  });
+
+  it("four clean exits without envelopes release capacity for a fifth spawn", () => {
+    const { manager, spawned } = makeHarness();
+    for (let i = 0; i < 4; i++) manager.spawn({});
+
+    for (const child of spawned) child.emit("exit", 0, null);
+
+    assert.doesNotThrow(() => manager.spawn({}));
+  });
+});
+
 describe("SubAgentManager spawn → protocolError", () => {
   it("invalid JSON on stdout → failed reason=protocolError", () => {
     const { manager, spawned } = makeHarness();
@@ -264,15 +344,26 @@ describe("SubAgentManager spawn → protocolError", () => {
 // ── fixture 4:truncation ──────────────────────────────────────────────────────
 
 describe("SubAgentManager envelope truncation (SC10)", () => {
-  it("result > 20000 chars → truncated envelope in buffer", () => {
+  it("result > 20000 chars → short folded envelope in buffer", () => {
     const { manager, spawned } = makeHarness();
     const { taskId } = manager.spawn({});
-    emitEnvelope(spawned[0]!, okEnvelope("x".repeat(25000)));
+    emitEnvelope(spawned[0]!, {
+      status: "ok",
+      summary: "completed with a long report " + "x".repeat(25000),
+      result: "x".repeat(25000),
+      fileRefs: ["src/changed.ts"],
+      stop_reason: "completed",
+    });
     const q = manager.queryBuffer(taskId) as SubAgentEnvelope;
     assert.equal(q.status, "ok");
     assert.equal(q.truncated, true);
     assert.equal(q.totalLength, 25000);
-    assert.match(q.result, /^\[\.\.\.truncated to 20000 chars; total 25000\]$/);
+    assert.ok(q.summary.length < 25000);
+    assert.ok(q.result.length < 20000);
+    assert.notEqual(q.result, "x".repeat(25000));
+    assert.match(q.result, /src\/changed\.ts/);
+    assert.match(q.result, /report folded/);
+    assert.equal(q.stop_reason, "completed");
   });
 });
 
@@ -459,19 +550,12 @@ describe("SubAgentManager per-task 缺省链 (T2: def ?? taskTimeoutMs ?? 7200s)
     }
   });
 
-  it("waitFor 缺省 timeoutMs 也走同一链: opts.taskTimeoutMs=50 → ~50ms SubAgentWaitTimeoutError", async () => {
+  it("waitFor timeout rejects while the child remains live", async () => {
     vi.useFakeTimers();
     try {
-      const { manager, spawned } = makeHarness({ taskTimeoutMs: 50 });
+      const { manager } = makeHarness({ taskTimeoutMs: 1000 });
       const { taskId } = manager.spawn({});
-      // 关键: 先让 child 干净退出 (0, null) 且无 envelope —— SC16 下 state
-      // 维持 running 不落终态, 同时 exit handler 清掉 spawn 的 50ms SIGTERM
-      // 计时器。否则同一链值 50ms 的 spawn timer 会先把 state 标 failed
-      // (终态) → waitFor 反而 resolve 失败 envelope, 无从观察 waitFor 自身
-      // 的 effectiveTimeout 拒绝路径。清掉后剩 waitFor 的 interval 独占,
-      // 50ms 到达 → Date.now()-started >= 50 → SubAgentWaitTimeoutError。
-      spawned[0]!.emit("exit", 0, null);
-      const pending = manager.waitFor(taskId);
+      const pending = manager.waitFor(taskId, 50);
       const rejected = assert.rejects(pending, SubAgentWaitTimeoutError);
       await vi.advanceTimersByTimeAsync(100);
       await rejected;

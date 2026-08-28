@@ -95,10 +95,13 @@ import {
   selectViewportMountWindow,
 } from "./transcript-viewport.js";
 import {
+  countNamedCalls,
   countToolUsesByName,
   formatTurnActivityFold,
   lastTurnQueryIndex,
+  mergeToolUseCounts,
   sliceTurnFrom,
+  toolUseIdsOf,
 } from "./turn-activity.js";
 
 export interface ChatViewHandle {
@@ -141,7 +144,7 @@ export interface ChatViewProps {
   readonly thinkingDraftMasked?: string;
   /** 最近一次 turn 的 thinking 最终秒数（app 层 turn 结束快照）。传给末条
    *  assistant 消息的 thinking 折叠行 → 显示「思考了 N 秒」留存，turn 结束后
-   *  秒数不随流式草稿清空而消失。缺省 0 → 折叠行只显 `[思考]`。 */
+   *  秒数不随流式草稿清空而消失。缺省 0 → 不画思考摘要（不回落 `[思考]`）。 */
   readonly lastThinkingSeconds?: number;
   /** thinking 阶段冻结秒数（answer 开始时刻快照）：>0 且流式 thinking 草稿
    *  仍在 → 思考已结束、折叠行显示「思考了 N 秒」（不再「思考中…」递增），
@@ -155,7 +158,7 @@ export interface ChatViewProps {
   readonly crunchedSeconds?: number;
   /** askUser 待决提示（undefined = 无 pending ask）。 */
   readonly askLine?: string;
-  /** thinking 折叠面板展开态（false = 折叠成 1 行 [思考]）。 */
+  /** thinking 折叠面板展开态（false = 隐藏 thinking 明文）。 */
   readonly thinkingExpanded?: boolean;
   /**
    * 方案 B：banner 作为滚动区首段内容（与消息共享 scroll space）。
@@ -221,7 +224,6 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     // 消息内容宽度留出滚动条 / 安全区余量（scrollbox 实测，不做行数估算）。
     const contentWidth = Math.max(1, props.cols - 2);
     const liveToolRuns = props.liveToolRuns ?? [];
-    const tailSlots = liveTailSlots(liveToolRuns, deferredSegments);
     const renderLiveRuns = (runs: ReadonlyArray<LiveToolRun>) =>
       runs.map((run) => liveToolPreviewBox(run, contentWidth));
     const bannerLines = props.bannerLines ?? [];
@@ -269,16 +271,37 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
       itemHeights,
     ]);
     const lastQueryVisible = lastTurnQueryIndex(visibleMessages);
-    const turnToolCounts = running
-      ? []
-      : countToolUsesByName(sliceTurnFrom(visibleMessages, lastQueryVisible));
+    const lastTurnSlice = sliceTurnFrom(visibleMessages, lastQueryVisible);
+    const historyToolCounts = countToolUsesByName(lastTurnSlice);
+    const liveCompletedCounts = countNamedCalls(
+      liveToolRuns
+        .filter((run) => run.status !== "running")
+        .map((run) => ({ id: run.id, name: run.name })),
+      toolUseIdsOf(lastTurnSlice)
+    );
+    const turnToolCounts = mergeToolUseCounts(
+      historyToolCounts,
+      liveCompletedCounts
+    );
     const turnToolTotal = turnToolCounts.reduce((n, e) => n + e.count, 0);
+    const thinkingSeconds = running
+      ? (props.thinkingFrozenSeconds ?? 0)
+      : (props.lastThinkingSeconds ?? 0);
+    // 新折叠：`思考了 N 秒` + ` · bash × N`。running 仅在已有完成工具时
+    // 启用，避免思考中（尚无工具）把 peek 面板提前收成 idle 摘要。
     const showTurnFold =
-      !running && ((props.lastThinkingSeconds ?? 0) > 0 || turnToolTotal > 1);
+      (thinkingSeconds > 0 || turnToolTotal > 1) &&
+      (!running || turnToolTotal > 0);
     const foldDisplayLine = showTurnFold
-      ? formatTurnActivityFold(props.lastThinkingSeconds, turnToolCounts)
+      ? formatTurnActivityFold(thinkingSeconds, turnToolCounts)
       : "";
-    const collapseToolRows = !running && turnToolTotal > 1;
+    const collapseToolRows = foldDisplayLine !== "" && turnToolTotal > 0;
+    const tailSlots = liveTailSlots(
+      showTurnFold
+        ? liveToolRuns.filter((run) => run.status === "running")
+        : liveToolRuns,
+      deferredSegments
+    );
     // e2 黄昏魔法石渐变（与 scripts/banner-gradient-preview/exotic-e2.ts 一致）：
     // 13×32 逐 cell 上色，对角线 t = cWeight·(c/31) + rWeight·(r/12)。
     const eyeGradient = eyeGradientCells({
@@ -417,7 +440,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             预览窗口（plans/model-idle-thinking-peek.md T2）：思考**进行中**
             才取，`thinkingPeekLines` 硬顶 3 行、`wrapMode="none"` 每行恒占
             1 行 —— 折叠态高度与思考全文长度无关（不把预览当全文高度）。 */}
-        {running && deferredThinkingDrafts.length > 0 && (
+        {running && deferredThinkingDrafts.length > 0 && !showTurnFold && (
           <box flexDirection="column" width={contentWidth}>
             {thinkingExpanded ? (
               <box width={contentWidth}>

@@ -37,8 +37,11 @@ import {
 } from "./session-io.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
 import { renderTranscript } from "../harness/auto-memory-wire.js";
-import type { AutoMemoryHook } from "../harness/memory/index.js";
-import { applyHostPrefetch } from "../harness/memory/index.js";
+import {
+  applyHostPrefetch,
+  notifyAutoMemory,
+  type AutoMemoryHook,
+} from "../harness/memory/index.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
 import {
@@ -410,31 +413,6 @@ async function executeSkipAppendTurn(opts: {
   }
 }
 
-/**
- * auto-memory T4 / ADR-0031 D5: hand a finished turn to the auto-memory hook.
- *
- * The hook owns the `completed` gate and the N-turn gate — the host only
- * reports. `onTurnComplete` is documented as total, but a hook is host-
- * supplied code and this is the last line between it and the user's turn.
- */
-function notifyAutoMemory(ctx: ChatLineContext, result: RunResult): void {
-  if (!ctx.autoMemory) return;
-  try {
-    ctx.autoMemory.onTurnComplete({
-      stopReason: result.stopReason,
-      transcript: renderTranscript(result.messages),
-    });
-  } catch (error) {
-    // EXIT: log-and-continue — the answer is already on the user's screen;
-    // a memory bookkeeping failure must not retroactively fail the turn.
-    writeErr(
-      `[memory/auto] turn hook skipped: ${
-        error instanceof Error ? error.message : String(error)
-      }\n`
-    );
-  }
-}
-
 async function runSkipAppendAndPresent(opts: {
   readonly ctx: ChatLineContext;
   readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
@@ -469,7 +447,18 @@ async function runSkipAppendAndPresent(opts: {
       ctx.state.messages = Object.freeze([...result.messages]);
     }
     // auto-memory T4: `/continue` 也是一轮完成的 turn,与主路径同待遇。
-    notifyAutoMemory(ctx, result);
+    notifyAutoMemory({
+      hook: ctx.autoMemory,
+      stopReason: result.stopReason,
+      transcript: renderTranscript(result.messages),
+      sessionKey: ctx.state.conversationId ?? "chat",
+      onError: (error) =>
+        writeErr(
+          `[memory/auto] turn hook skipped: ${
+            error instanceof Error ? error.message : String(error)
+          }\n`
+        ),
+    });
     return presentChatTurn({
       ctx,
       result,
@@ -815,7 +804,18 @@ async function runChatQueryLine(
         }
         // auto-memory T4 / ADR-0031 D1:每轮把结果交给钩子,由钩子决定
         // completed 闸 + N 轮闸。钩子缺席(默认 OFF / ask)→ 整句 no-op。
-        notifyAutoMemory(ctx, s.result);
+        notifyAutoMemory({
+          hook: ctx.autoMemory,
+          stopReason: s.result.stopReason,
+          transcript: renderTranscript(s.result.messages),
+          sessionKey: ctx.state.conversationId ?? "chat",
+          onError: (error) =>
+            writeErr(
+              `[memory/auto] turn hook skipped: ${
+                error instanceof Error ? error.message : String(error)
+              }\n`
+            ),
+        });
       },
       decideContinue: async (s) =>
         applyChatAutoContinue({

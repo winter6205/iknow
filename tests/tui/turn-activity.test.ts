@@ -7,11 +7,14 @@
 import { describe, expect, test } from "bun:test";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 import {
+  countNamedCalls,
   countToolUsesByName,
   formatToolUseCounts,
   formatTurnActivityFold,
   lastTurnQueryIndex,
+  mergeToolUseCounts,
   sliceTurnFrom,
+  toolUseIdsOf,
 } from "../../src/tui/turn-activity.js";
 
 function user(text: string): AnthropicNativeMessage {
@@ -152,17 +155,81 @@ describe("formatToolUseCounts / formatTurnActivityFold", () => {
     ).toBe("思考了 29 秒 · bash × 18 · write_file × 8");
   });
 
-  test("无秒数有工具 → [思考] + 计数（不造 0 秒）", () => {
+  test("无秒数有工具 → 只计数（不换 [思考]、不造 0 秒）", () => {
     expect(formatTurnActivityFold(0, [{ name: "bash", count: 2 }])).toBe(
-      "[思考] · bash × 2"
+      "bash × 2"
     );
     expect(
       formatTurnActivityFold(undefined, [{ name: "bash", count: 1 }])
-    ).toBe("[思考] · bash × 1");
+    ).toBe("bash × 1");
   });
 
   test("无秒数无工具 → 空串", () => {
     expect(formatTurnActivityFold(0, [])).toBe("");
     expect(formatTurnActivityFold(undefined, [])).toBe("");
+  });
+});
+
+describe("toolUseIdsOf / countNamedCalls / mergeToolUseCounts", () => {
+  test("empty：无 tool_use → 空 id 集", () => {
+    expect(toolUseIdsOf([])).toEqual(new Set());
+    expect(toolUseIdsOf([user("q")])).toEqual(new Set());
+  });
+
+  test("negative：excludeIds 命中的 live 条目不计", () => {
+    const ids = toolUseIdsOf([assistantTools(["bash"])]);
+    expect(ids.has("tu-bash-0")).toBe(true);
+    expect(
+      countNamedCalls(
+        [
+          { id: "tu-bash-0", name: "bash" },
+          { id: "live-1", name: "bash" },
+        ],
+        ids
+      )
+    ).toEqual([{ name: "bash", count: 1 }]);
+  });
+
+  test("overflow：extra 新名接到 primary 后，count 相加", () => {
+    expect(
+      mergeToolUseCounts(
+        [
+          { name: "bash", count: 18 },
+          { name: "write_file", count: 8 },
+        ],
+        [
+          { name: "bash", count: 2 },
+          { name: "grep", count: 1 },
+        ]
+      )
+    ).toEqual([
+      { name: "bash", count: 20 },
+      { name: "write_file", count: 8 },
+      { name: "grep", count: 1 },
+    ]);
+  });
+
+  test("concurrent：同 id 不因重复调用双计（exclude 已覆盖）", () => {
+    expect(
+      countNamedCalls(
+        [
+          { id: "a", name: "bash" },
+          { id: "a", name: "bash" },
+        ],
+        new Set()
+      )
+    ).toEqual([{ name: "bash", count: 2 }]);
+  });
+
+  test("exception：count≤0 的 extra 不进 merge", () => {
+    expect(
+      mergeToolUseCounts(
+        [{ name: "bash", count: 1 }],
+        [
+          { name: "bash", count: 0 },
+          { name: "x", count: -1 },
+        ]
+      )
+    ).toEqual([{ name: "bash", count: 1 }]);
   });
 });

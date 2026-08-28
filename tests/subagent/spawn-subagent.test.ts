@@ -14,7 +14,7 @@
  *   9. maxTurns 整数透传
  *  10. wait:false → waitFor 不被调用
  *  11. aci 元数据（timeoutTier=unbounded，ACI 不抢 manager per-task 钟）
- *  12. #556 T3: subagent_type 可选参数 → def.role 透传（缺省 = V1 byte-stable）
+ *  12. #556 T3/T7: subagent_type 可选参数 → def.role 透传（缺省 = general-purpose）
  *  13. #556 T3: inputSchema.subagent_type enum = catalog ids（运行时派生）
  *  14. #556 T3: description 含 prose list（catalog entries）
  *
@@ -37,6 +37,7 @@ import {
   SubAgentAbortError,
   SubAgentWaitTimeoutError,
 } from "../../src/harness/subagent/manager.ts";
+import { DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS } from "../../src/config/settings.ts";
 import { TIMEOUT_TIER_MS } from "../../src/harness/aci/types.ts";
 import { ToolExecutionError } from "../../src/harness/errors.ts";
 import {
@@ -100,7 +101,8 @@ describe("spawn_subagent — 正常路径", () => {
     const parsed = out as { status: string; summary: string; result: string };
     expect(parsed.status).toBe("ok");
     expect(parsed.summary).toBe("from-fake");
-    expect(parsed.result).toBe("fake-result");
+    expect(parsed.result).toBe("from-fake");
+    expect(parsed.result).not.toBe("fake-result");
   });
 
   it("wait:false → waitFor 不被调用", async () => {
@@ -340,7 +342,7 @@ describe("spawn_subagent — #357 T1: SubAgentSandboxRootError → ToolExecution
 
 /**
  * #557 T1 — spawn_subagent.description = 工具用法 SSOT。
- * 主题以 issue #555 评论为准（何时派、阻塞或并行、wait:false、无 envelope 不谎报），
+ * 主题以 issue #555 评论为准（何时派、阻塞或并行、wait:false、短交差与容量），
  * 不写嵌套政策（嵌套禁止由代码保证，不在 description 表达）。
  */
 describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
@@ -352,7 +354,7 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
     }).description;
   });
 
-  it("写入 5 主题：何时用 / 默认阻塞 / 并行 / wait:false 轮询 / 无 envelope 不谎报", () => {
+  it("写入 5 主题：何时用 / 默认阻塞 / 独立并行 / wait:false 轮询 / 短交差与容量", () => {
     // 1. 何时用：multi-step exploration / independent verification / parallelizable work → 派 sub-agent
     expect(description).toMatch(/multi-step exploration/);
     expect(description).toMatch(/independent verification/);
@@ -360,23 +362,35 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
     // 2. 默认阻塞：wait:true → blocks until sub-agent finishes；缺省墙钟 = 2h（PER_TASK），可 timeoutMs 覆盖。禁止再写 5 min（会诱导模型传 300000）。
     expect(description).toMatch(/wait[:\s]*true/i);
     expect(description).toMatch(/blocks? until/i);
-    expect(description).toMatch(/envelope/i);
+    expect(description).toMatch(/parent-visible short handoff/i);
     expect(description).not.toMatch(/5\s*min/i);
     expect(description).toMatch(/2\s*h(?:ours?)?/i);
     expect(description).toMatch(/timeoutMs/i);
-    // 3. 并行：同一 turn 多次 spawn_subagent 跑独立任务
+    // 3. 并行：同一 turn 多次 spawn_subagent 仅跑相互独立的自包含任务
     expect(description).toMatch(/multiple.*spawn_subagent/s);
     expect(description).toMatch(/one (?:single )?turn/i);
     expect(description).toMatch(/parallel/i);
+    expect(description).toMatch(/independent/i);
+    expect(description).toMatch(/self-contained/i);
     // 4. wait:false → 立即返回 {task_id},用 subagent_result 轮询
     expect(description).toMatch(/wait[:\s]*false/i);
     expect(description).toMatch(/task_id/i);
     expect(description).toMatch(/subagent_result/i);
-    // 5. 无 envelope 不谎报：envelope 是 sub-agent 状态的唯一真值，running 不能从 elapsed time / return shape 等推断
-    expect(description).toMatch(/sole ground truth|ground truth/i);
-    expect(description).toMatch(/observable/i);
-    expect(description).toMatch(/elapsed time/i);
-    expect(description).toMatch(/return shape/i);
+    // 5. 父可见短交差与容量：summary / paths / status / stop_reason；超限不排队
+    expect(description).toMatch(/summary/i);
+    expect(description).toMatch(/paths?/i);
+    expect(description).toMatch(/status/i);
+    expect(description).toMatch(/stop[_ ]reason/i);
+    expect(description).toMatch(
+      new RegExp(String(DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS))
+    );
+    expect(description).toMatch(/at capacity/i);
+    expect(description).toMatch(/reduce concurrency/i);
+    expect(description).toMatch(/not queued|rather than queued/i);
+    expect(description).toMatch(/general-purpose/);
+    expect(description).not.toMatch(/sole ground truth|ground truth/i);
+    expect(description).not.toMatch(/full result envelope/i);
+    expect(description).not.toMatch(/Fork|worktree/i);
   });
 
   it("不写入嵌套政策(nested / one level / caps at 等措辞)", () => {
@@ -392,7 +406,7 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
  * handler 映射 → def.role。
  *
  * 防御契约 (T3 acceptance):
- *   - subagent_type 缺省 → def.role 缺省 → V1 byte-stable（不动现有 wire）
+ *   - subagent_type 缺省 → def.role = general-purpose（与显式 general-purpose 等价）
  *   - subagent_type 已知 → def.role 显式透传 → manager.buildWorkerPayload →
  *     envelope.role → worker 注入 catalog body persona 段 (T2 装配)
  *   - ajv enum = catalog id 列表（运行时 resolveAgentCatalog 派生）
@@ -503,28 +517,32 @@ describe("spawn_subagent — #556 T3 handler: subagent_type → def.role", () =>
     );
   });
 
-  it("subagent_type 缺省 → def.role 缺省 (V1 byte-stable, 不显式置 role 字段)", async () => {
-    // plan T3 防御契约: 不传 subagent_type = 不设置 def.role = V1 byte-stable
-    // (与 V1 baseline 比对: spawn 收到的 def 没有 role 字段)
+  it("subagent_type 缺省 → def.role = general-purpose", async () => {
+    // T7: 不传 subagent_type 的默认角色必须与显式 general-purpose 一致，
+    // 让 worker 注入 persona 并保持完整工具面。
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({ task: "no-role", wait: false });
     const calledDef = spawn.mock.calls[0][0] as SubAgentDefinition;
-    expect(calledDef.role).toBeUndefined();
+    expect(calledDef.role).toBe("general-purpose");
   });
 
-  it("subagent_type 显式传 'general-purpose' 等价于不传 (V1 缺省值)", async () => {
-    // 缺省语义 = 'general-purpose' (plan T3 描述)；handler 不写死, 缺省由
-    // schema/ajv 缺省值兜底 → V1 路径 (不设置 def.role)。验证两种走法 spawn
-    // 收到的 def 在 role 字段层面一致 (都 undefined)。
+  it("subagent_type 显式传 'general-purpose' 等价于不传", async () => {
+    // T7: 两种调用都应走 general-purpose persona 和完整工具面。
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({ task: "t", wait: false });
-    await tool.handler({ task: "t", wait: false });
+    await tool.handler({
+      task: "t",
+      subagent_type: "general-purpose",
+      wait: false,
+    });
     const def1 = spawn.mock.calls[0][0] as SubAgentDefinition;
     const def2 = spawn.mock.calls[1][0] as SubAgentDefinition;
-    expect(def1.role).toBeUndefined();
-    expect(def2.role).toBeUndefined();
+    expect(def1.role).toBe("general-purpose");
+    expect(def2.role).toBe("general-purpose");
+    expect(def1.disallowedTools).toBeUndefined();
+    expect(def2.disallowedTools).toBeUndefined();
   });
 
   it("subagent_type + 其他字段组合 → 全部透传", async () => {
@@ -631,7 +649,7 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
     expect(def.disallowedTools).toBeUndefined();
   });
 
-  it("subagent_type 不传 + parent disallowedTools → def.disallowedTools = parent (V1 byte-stable)", async () => {
+  it("subagent_type 不传 + parent disallowedTools → def.disallowedTools = parent", async () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({
@@ -640,11 +658,11 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
       wait: false,
     });
     const def = spawn.mock.calls[0][0] as SubAgentDefinition;
-    expect(def.role).toBeUndefined();
+    expect(def.role).toBe("general-purpose");
     expect(def.disallowedTools).toEqual(["some_tool"]);
   });
 
-  it("subagent_type 不传 + 无 parent disallowedTools → def.disallowedTools 字段缺省 (V1 byte-stable)", async () => {
+  it("subagent_type 不传 + 无 parent disallowedTools → general-purpose 完整工具面", async () => {
     const { manager, spawn } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });
     await tool.handler({
@@ -652,7 +670,7 @@ describe("spawn_subagent — #556 T3 spec-review 收口: catalog disallowedTools
       wait: false,
     });
     const def = spawn.mock.calls[0][0] as SubAgentDefinition;
-    expect(def.role).toBeUndefined();
+    expect(def.role).toBe("general-purpose");
     expect(def.disallowedTools).toBeUndefined();
   });
 });
@@ -748,9 +766,9 @@ describe("spawn_subagent description — #556 T3 prose list 段 (catalog entries
   });
 
   it("prose list 在原描述之后追加 (不动现有 SSOT 段)", () => {
-    // 原描述的 "Delegate multi-step exploration" 必须仍然出现在 prose list
-    // 段之前。
-    const introIdx = description.indexOf("Delegate multi-step exploration");
+    // 原描述的 "Delegate a self-contained task" 必须仍然出现在 prose
+    // list 段之前。
+    const introIdx = description.indexOf("Delegate a self-contained task");
     const proseIdx = description.indexOf("Available subagent types");
     expect(introIdx).toBeGreaterThanOrEqual(0);
     expect(proseIdx).toBeGreaterThan(introIdx);
