@@ -13,8 +13,8 @@
  * 无 token-cost 护栏 / 无外部观测后端导出, B-scope 留位由 observability-bridge 桩负责)。
  */
 
-import { appendFileSync, mkdirSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { createOutputMask, currentSecretValues } from "../sandbox/index.js";
 import {
@@ -73,6 +73,47 @@ function toSnakeCaseRecord<T extends object>(
   return out;
 }
 
+type MessageStorageMode = "full" | "blob";
+
+function resolveMessageStorageMode(): MessageStorageMode {
+  return process.env.IKNOW_TRACE_MESSAGES?.trim().toLowerCase() === "blob"
+    ? "blob"
+    : "full";
+}
+
+function isAlreadyPresentError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "EEXIST"
+  );
+}
+
+function toBlobReferences(
+  messages: ReadonlyArray<unknown>,
+  traceDir: string,
+  outputMask: ReturnType<typeof createOutputMask>
+): Array<{ sha: string; bytes: number }> {
+  const blobsDir = join(traceDir, "blobs");
+  mkdirSync(blobsDir, { recursive: true });
+  return messages.map((message) => {
+    const serialized = JSON.stringify(message) ?? "null";
+    const masked = outputMask.mask(serialized);
+    const bytes = Buffer.byteLength(masked, "utf8");
+    const sha = createHash("sha256").update(masked, "utf8").digest("hex");
+    try {
+      writeFileSync(join(blobsDir, sha), masked, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+    } catch (error) {
+      if (!isAlreadyPresentError(error)) throw error;
+    }
+    return { sha, bytes };
+  });
+}
+
 /**
  * SC20 follow-up: mask known secret values in the serialized JSONL line.
  *
@@ -90,6 +131,7 @@ export function createJsonlTraceService(
   const { filePath, conversationId } = options;
   maybeRotate(filePath, options.rotation);
   const outputMask = createOutputMask(currentSecretValues());
+  const messageStorageMode = resolveMessageStorageMode();
   // T2 每会话独立文件: filePath 是目录, 实际写 <filePath>/<conversationId>.jsonl。
   // mkdirSync recursive 兜底, 目录不存在时先建 (产品路径 traceOut 首次使用时目录
   // 可能未建)。仅默认 writer 时建目录 —— 注入自定义 writer (测试用 always-throw)
@@ -125,12 +167,27 @@ export function createJsonlTraceService(
   return {
     async recordLlmCall(record: LlmCallRecord): Promise<string | undefined> {
       const id = randomUUID();
-      const line: Record<string, unknown> = {
+      const fullLine: Record<string, unknown> = {
         conversation_id: conversationId,
         record_type: "llm_call",
         llm_call_id: id,
         ...toSnakeCaseRecord(record),
       };
+      let line = fullLine;
+      if (messageStorageMode === "blob" && record.messages !== undefined) {
+        try {
+          line = {
+            ...fullLine,
+            messages: toBlobReferences(
+              record.messages,
+              filePath,
+              outputMask
+            ),
+          };
+        } catch (err) {
+          warnOnce(err);
+        }
+      }
       try {
         writeLine(line);
         return id;
