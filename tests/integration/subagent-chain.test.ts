@@ -103,7 +103,7 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
     assert.equal(env.result, "r");
   });
 
-  it("fake 二进制立即 exit 2 (无 stdout envelope) → queryBuffer crashed", async () => {
+    it("fake 二进制立即 exit 2 (无 stdout envelope) → queryBuffer crashed", async () => {
     const fake = spawn(process.execPath, ["-e", "process.exit(2)"], {
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -115,6 +115,25 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
     if (q.status === "failed") {
       assert.equal(q.reason, "crashed");
       assert.match(q.summary, /worker exit code=2/);
+    }
+    await mgr.shutdown();
+  });
+
+  it("fake 二进制 stderr + exit 2 → crashed summary 携带 stderr", async () => {
+    const fake = spawn(
+      process.execPath,
+      ["-e", "process.stderr.write('boom\\n'); process.exit(2)"],
+      { stdio: ["pipe", "pipe", "pipe"] }
+    );
+    const mgr = createSubAgentManager({ spawn: () => fake });
+    const { taskId } = mgr.spawn({});
+    await waitExit(fake);
+    const q = mgr.queryBuffer(taskId);
+    assert.equal(q.status, "failed");
+    if (q.status === "failed") {
+      assert.equal(q.reason, "crashed");
+      assert.match(q.summary, /worker exit code=2 signal=null/);
+      assert.match(q.summary, /boom/);
     }
     await mgr.shutdown();
   });

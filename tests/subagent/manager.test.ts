@@ -245,10 +245,15 @@ describe("SubAgentManager spawn → crashed", () => {
     }
   });
 
-  it("stderr before exit → crashed summary includes the bounded stderr tail", () => {
+  it("stderr before exit → crashed summary includes the bounded stderr tail", async () => {
+    const { SUMMARY_LIMIT } = await import(
+      "../../src/harness/subagent/envelope.ts"
+    );
     const { manager, spawned } = makeHarness();
     const { taskId } = manager.spawn({});
-    const stderr = "early diagnostic\n" + "x".repeat(10_000) + "fatal: boom\n";
+    // 2500-char body sits inside a 4096 window but outside SUMMARY_LIMIT=2000,
+    // so DROPME surviving would mean the drain still uses a second magic cap.
+    const stderr = "DROPME\n" + "x".repeat(2_500) + "\nKEEPME\n";
 
     spawned[0]!.stderr.write(stderr);
     assert.equal(spawned[0]!.stderr.readableLength, 0);
@@ -258,9 +263,9 @@ describe("SubAgentManager spawn → crashed", () => {
     assert.equal(q.status, "failed");
     if (q.status === "failed") {
       assert.match(q.summary, /worker exit code=2 signal=null/);
-      assert.match(q.summary, /fatal: boom/);
-      assert.ok(q.summary.length < 5_000);
-      assert.doesNotMatch(q.summary, /early diagnostic/);
+      assert.match(q.summary, /KEEPME/);
+      assert.doesNotMatch(q.summary, /DROPME/);
+      assert.ok(q.summary.length <= SUMMARY_LIMIT + 80);
     }
   });
 

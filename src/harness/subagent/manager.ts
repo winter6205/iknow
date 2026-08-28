@@ -11,7 +11,11 @@ import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { ChildProcess } from "node:child_process";
-import { parseParentEnvelope, truncateEnvelopeResult } from "./envelope.js";
+import {
+  parseParentEnvelope,
+  truncateEnvelopeResult,
+  SUMMARY_LIMIT,
+} from "./envelope.js";
 import type { SubAgentEnvelope, WorkerEnvelope } from "./envelope.js";
 import type { SubAgentDefinition } from "./role.js";
 import { SubAgentSandboxRootError } from "../errors.js";
@@ -246,7 +250,7 @@ interface Task {
 
 const WAIT_POLL_MS = 25;
 const SHUTDOWN_SIGKILL_GRACE_MS = 5000;
-const MAX_STDERR_TAIL_CHARS = 4096;
+const MAX_STDERR_TAIL_CHARS = SUMMARY_LIMIT;
 
 function crashedSummary(
   code: number | null,
