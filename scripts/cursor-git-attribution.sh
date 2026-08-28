@@ -131,8 +131,10 @@ apply_hooks() {
       fi
     done
     base="$(basename "$dir")"
-    if [ "$base" = "husky" ]; then
-      # User-level husky hooks only. Do not drop *.cursor.* into the worktree.
+    # hook_dirs emits the worktree husky dir as `.husky`; `husky` covers a
+    # core.hooksPath that points at an unprefixed one. Do not drop *.cursor.*
+    # into either (gitignore only covers .husky/commit-msg and prepare-commit-msg).
+    if [ "$base" = ".husky" ] || [ "$base" = "husky" ]; then
       write_file "$dir/prepare-commit-msg" strip
       write_file "$dir/commit-msg" strip
     else
