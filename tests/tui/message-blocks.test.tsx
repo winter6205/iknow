@@ -7,7 +7,7 @@
  *  - system 消息 → 独立分支：[已打断] 前缀 + 固定文案 Interrupted by user.，
  *    不进 Markdown 解析（#392 T3）；
  *  - assistant 文本 → Markdown 渲染（headings/code/lists 节选）；
- *  - thinking 折叠（默认）：单行 `[思考]` 文案；
+ *  - thinking 折叠（默认）：无秒数不画摘要；有秒 → `思考了 N 秒`；
  *  - thinking 展开：thinking 文本全文 + redacted 占位；
  *  - tool_use 摘要行 + statusMap 驱动 ok/failed/运行中 标记染色；
  *  - content 边界：空文本 user 消息返回 null，不渲染任何节点。
@@ -232,7 +232,7 @@ test("assistant 文本：Markdown 渲染（heading / code / list 节选）", asy
   await setup.renderer.destroy();
 });
 
-test("thinking 折叠态：渲染 [思考] 单行（默认）", async () => {
+test("thinking 折叠态：无秒数不画 [思考]，正文仍在，thinking 明文隐藏", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -242,8 +242,8 @@ test("thinking 折叠态：渲染 [思考] 单行（默认）", async () => {
   };
   const setup = await renderBlocks(msg);
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("[思考]");
-  // 折叠态不渲染 thinking 明文。
+  expect(frame.includes("[思考]")).toBe(false);
+  expect(frame.includes("思考了")).toBe(false);
   expect(frame.includes("链上推理明细")).toBe(false);
   expect(frame).toContain("正式回答");
   await setup.renderer.destroy();
@@ -260,8 +260,8 @@ test("thinking 展开态：渲染 thinking 全文 + redacted 占位", async () =
   };
   const setup = await renderBlocks(msg, { thinkingExpanded: true });
   const frame = setup.captureCharFrame();
-  // 折叠摘要行 + 展开正文都出现。
-  expect(frame).toContain("[思考]");
+  // 无秒数时不画 [思考] 摘要；展开只出正文 + redacted 占位。
+  expect(frame.includes("[思考]")).toBe(false);
   expect(frame).toContain("展开的思维链");
   // redacted 占位（REDACTED_PLACEHOLDER = "[已加密思考]"）。
   expect(frame).toContain("[已加密思考]");
@@ -375,7 +375,7 @@ test("thinking 折叠态 + thinkingSeconds：渲染 `思考了 N 秒` 替换 [�
   await setup.renderer.destroy();
 });
 
-test("thinking 折叠态 + thinkingSeconds=0：渲染 `[思考]`（不显「思考了 0 秒」伪精度）", async () => {
+test("thinking 折叠态 + thinkingSeconds=0：不画摘要（不换 [思考]、不造 0 秒）", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -395,14 +395,13 @@ test("thinking 折叠态 + thinkingSeconds=0：渲染 `[思考]`（不显「思�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 子秒 thinking（秒数 0）→ 历史折叠行回落 `[思考]`，不显伪精度。
-  expect(frame).toContain("[思考]");
+  expect(frame.includes("[思考]")).toBe(false);
   expect(frame.includes("思考了")).toBe(false);
   expect(frame).toContain("正式回答");
   await setup.renderer.destroy();
 });
 
-test("thinking 折叠态 + bash tool_use：无 thinkingSeconds → `[思考]`（无 ran 后缀）", async () => {
+test("thinking 折叠态 + bash tool_use：无 thinkingSeconds → 无思考摘要（无 ran 后缀）", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -427,10 +426,7 @@ test("thinking 折叠态 + bash tool_use：无 thinkingSeconds → `[思考]`（
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 2026-08-14：无 thinkingSeconds → 折叠行只显 `[思考]`（纯折叠标记），
-  // ran-N 后缀不再拼上 —— 避免 `[思考] · ran 1 command` 与工具行 ran-N
-  // 双处重复计数造成混乱观感。
-  expect(frame).toContain("[思考]");
+  expect(frame.includes("[思考]")).toBe(false);
   expect(frame.includes("ran")).toBe(false);
   await setup.renderer.destroy();
 });

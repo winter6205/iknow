@@ -10,11 +10,9 @@
  *
  * 本模块把两处收敛到同一纯函数，从源头统一文案：
  *
- *  - `formatThinkingFold(seconds)` — 历史消息 thinking 折叠行：
- *    - `seconds > 0` → `思考了 N 秒`（「思考了几秒」即带语义，不再叠加 `[思考]`
- *      前缀；与 message-blocks 历史行为一致）；
- *    - `seconds === 0` / `undefined` / 非正 → `[思考]`（不显「思考了 0 秒」
- *      伪精度；子秒 thinking 历史消息回落纯标记）。
+ *  - `formatThinkingFold(seconds)` — 结束态折叠行：
+ *    - 有限且 `seconds > 0` → `思考了 N 秒`（唯一结束态文案，不叠加 `[思考]`）；
+ *    - 缺省 / 非正 / 非有限 → 空串（不换括号标签，也不造「思考了 0 秒」）。
  *  - `thinkingPeekLines(text, limit)` — 折叠态「思考中」正文预览窗口：思考
  *    进行中露出正文**末** ≤3 行（plans/model-idle-thinking-peek.md T2），
  *    frozen / turn 结束后调用方停止取窗口，折回纯摘要行。
@@ -30,13 +28,10 @@
  * 只调本模块，禁止在渲染层另写模板字符串。
  */
 
-/** 历史折叠行纯 `[思考]` 标记（无秒数 / 子秒时）。 */
-export const THINKING_FOLD_LINE = "[思考]";
-
-/** 历史折叠行文案：`思考了 N 秒` 或 `[思考]`（秒数替换 [思考]，不叠加）。 */
+/** 结束态折叠行：`思考了 N 秒`；无可用秒数 → 空串。 */
 export function formatThinkingFold(seconds: number | undefined): string {
-  const s = Math.max(0, Math.floor(seconds ?? 0));
-  if (s <= 0) return THINKING_FOLD_LINE;
+  const s = Math.floor(seconds ?? 0);
+  if (!Number.isFinite(s) || s <= 0) return "";
   return `思考了 ${s} 秒`;
 }
 

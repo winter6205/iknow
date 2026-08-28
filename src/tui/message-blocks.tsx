@@ -10,7 +10,7 @@
  *  - **删除 `cloneElement` + `marginBottom` patch**：OpenTUI 直接按元素
  *    父子布局，无 ink margin 折叠规则，不必在末尾块裁 margin。
  *  - **thinking 折叠文案**收敛在 `./think-fold.ts`（SSOT：`formatThinkingFold` /
- *    `formatThinkingLive` + `THINKING_FOLD_LINE`），本文件仅调用，不再另写
+ *    `formatThinkingLive`），本文件仅调用，不再另写
  *    模板字符串；与 chat-view.tsx 流式折叠行同源收敛（2026-08-14）。
  *  - 全部 `<box>` / `<text>` + fg 属性；禁 ink 原语（Box / Text）。
  *  - **T7 消息间距 + 底色**：user / assistant 分支用 box.backgroundColor
@@ -129,31 +129,19 @@ function ToolPreviewRows(props: {
   );
 }
 
-/** 折叠态 thinking 摘要行（dim）。2026-08-13 用户反馈：「思考了几秒」直接
- *  替换 `[思考]` 标记，不要叠加 `[思考] 思考了 3 秒`。规则：
- *  - 有时间（流式面板 / 末条 assistant 留存）→ `思考了 {N} 秒` + 可选
- *    `· ran {M} shell command(s)` —— turn 级统一摘要（对齐参考样式
- *    `Thought for 3s, ran 1 shell command`）；
- *  - 无时间（历史消息 / 子秒）→ 仅 `[思考]` 折叠标记，**不**拼 ran-N ——
- *    工具计数只在此处（有秒数时）汇总一次，避免「思考行 + 工具行」双处
- *    重复计数造成结束状态混乱观感（2026-08-14 用户反馈）；
- *  - 工具计数英文（与参考图 `ran 2 shell commands` 一致），思考部分全中文；
- *  - bash 数 = 0 → 省略 `· ran …` 段。
- *
- * 文案经 `formatThinkingFold`（think-fold.ts SSOT，2026-08-14）——与
- * chat-view 流式折叠行同源收敛，不在渲染层另写模板字符串。 */
+/** 折叠态 thinking 摘要行（dim）。结束态只有 `思考了 N 秒`（可加 ran 后缀）；
+ *  无可用秒数 → 不渲染（不回落 `[思考]`）。 */
 function ThinkingSummary(props: {
   readonly message: AnthropicNativeMessage;
   readonly cols: number;
   readonly thinkingSeconds?: number;
 }): ReactNode {
-  const hasSeconds = (props.thinkingSeconds ?? 0) > 0;
+  const fold = formatThinkingFold(props.thinkingSeconds);
+  if (fold.length === 0) return null;
   const bashCount = countBashCalls(props.message);
   const ranSuffix =
-    hasSeconds && bashCount > 0
-      ? formatRanSuffix(bashCount).replace(/^，/, " · ")
-      : "";
-  const text = `${formatThinkingFold(props.thinkingSeconds)}${ranSuffix}`;
+    bashCount > 0 ? formatRanSuffix(bashCount).replace(/^，/, " · ") : "";
+  const text = `${fold}${ranSuffix}`;
   return (
     <text fg={tuiPalette.dim} wrapMode="none">
       {clipOneLineVisual(text, props.cols)}
@@ -175,7 +163,8 @@ const SYSTEM_INTERRUPT_MARK = "[已打断]";
  *  - `message`：权威 AnthropicNativeMessage（直接来自 session.messages）；
  *  - `cols`：终端列宽（Markdown wrap + ToolSummaryRow 单行收口共用）；
  *  - `statusMap`：`toolResultStatusMap(session.messages)`（tool_use → 是否失败）；
- *  - `thinkingExpanded`：thinking 折叠面板展开态（false = 折叠成 1 行 [思考]）；
+ *  - `thinkingExpanded`：thinking 折叠面板展开态（false = 隐藏 thinking 明文；
+ *    有正秒数才画 `思考了 N 秒`，无秒数不画摘要、不回落 `[思考]`）；
  *    折叠/展开由 Ctrl+O 翻转；/thinking 为独立开关（思考Enabled），不改折叠态。
  *    会话重启回退折叠。
  *  - `noTrailingSelfMargin`：true 时抹掉最后一个块的 marginBottom ——
@@ -195,11 +184,10 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
   readonly cols: number;
   readonly statusMap: ReadonlyMap<string, boolean>;
   readonly thinkingExpanded?: boolean;
-  /** 折叠态 thinking 行附带「思考了 N 秒」。仅流式面板（chat-view 同步当前
-   *  流的 streamDraft.thinkingSeconds()）传；历史消息缺省不传 → 折叠行只显
-   *  `[思考] · ran N shell commands`，避免「思考了 0 秒」伪精度。 */
+  /** 折叠态 thinking 行附带「思考了 N 秒」。仅末条 / 流式面板传入；
+   *  缺省或非正 → 不画思考摘要行（不回落 `[思考]`）。 */
   readonly thinkingSeconds?: number;
-  /** idle 时当前 turn 已由 ChatView 画 turn 级折叠行：本块不再画 `[思考]`。 */
+  /** idle 时当前 turn 已由 ChatView 画 turn 级折叠行：本块不再画思考摘要。 */
   readonly hideThinking?: boolean;
   /** idle 时当前 turn 折叠：不画 `[完成] name · detail` 行；write/edit 预览仍留。 */
   readonly hideToolSummaries?: boolean;
@@ -260,14 +248,16 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
   const innerCols = Math.max(1, cols - 2);
   const nodes: ReactNode[] = [];
   if (summary !== "" && props.hideThinking !== true) {
-    nodes.push(
-      <ThinkingSummary
-        key="tk-sum"
-        message={message}
-        cols={innerCols}
-        thinkingSeconds={props.thinkingSeconds}
-      />
-    );
+    if (formatThinkingFold(props.thinkingSeconds).length > 0) {
+      nodes.push(
+        <ThinkingSummary
+          key="tk-sum"
+          message={message}
+          cols={innerCols}
+          thinkingSeconds={props.thinkingSeconds}
+        />
+      );
+    }
   }
   if (summary !== "" && thinkingExpanded && props.hideThinking !== true) {
     message.content.forEach((block, i) => {

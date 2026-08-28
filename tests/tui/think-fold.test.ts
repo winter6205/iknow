@@ -9,7 +9,8 @@
  *  - message-blocks.tsx 历史折叠行旧文案 = `思考了 N 秒` / 纯 `[思考]`
  *    （秒数替换 [思考] 标记）。
  * 本模块把两处收敛到同一纯函数，从源头统一：`思考了 N 秒` 本身即带语义，
- * 不再叠加 `[思考]` 前缀；子秒 / 无秒数时回落 `[思考]`（历史）。
+ * 不再叠加 `[思考]` 前缀；子秒 / 无秒数 / 非有限 → 空串（不换括号标签，
+ * 也不造「思考了 0 秒」）。
  * 流式行不再叠加实时秒数（恒 `思考中…`）—— 思考时长由事后 frozen 摘要
  * `思考了 N 秒` 承担，避免与 mode 行运行时长视觉重复 + 语义混淆。
  */
@@ -22,21 +23,33 @@ import {
 } from "../../src/tui/think-fold.js";
 
 describe("formatThinkingFold（历史折叠行文案）", () => {
-  test("seconds > 0 → `思考了 N 秒`（替换 [思考]，不叠加前缀）", () => {
+  test("seconds > 0 → `思考了 N 秒`（不叠加 [思考] 前缀）", () => {
     expect(formatThinkingFold(7)).toBe("思考了 7 秒");
     expect(formatThinkingFold(1)).toBe("思考了 1 秒");
   });
 
-  test("seconds === 0 → `[思考]`（不显「思考了 0 秒」伪精度）", () => {
-    expect(formatThinkingFold(0)).toBe("[思考]");
+  test("empty：0 / undefined → 空串（不换 [思考]、不造 0 秒）", () => {
+    expect(formatThinkingFold(0)).toBe("");
+    expect(formatThinkingFold(undefined)).toBe("");
   });
 
-  test("undefined → `[思考]`（历史消息缺省）", () => {
-    expect(formatThinkingFold(undefined)).toBe("[思考]");
+  test("negative：负值 → 空串", () => {
+    expect(formatThinkingFold(-1)).toBe("");
   });
 
-  test("负值兜底 → `[思考]`", () => {
-    expect(formatThinkingFold(-1)).toBe("[思考]");
+  test("overflow：超大秒数仍格式化，不抛", () => {
+    expect(formatThinkingFold(1e9)).toBe("思考了 1000000000 秒");
+  });
+
+  test("concurrent：同一输入重复调用结果稳定（纯函数）", () => {
+    expect(formatThinkingFold(3)).toBe(formatThinkingFold(3));
+    expect(formatThinkingFold(0)).toBe(formatThinkingFold(0));
+  });
+
+  test("exception：NaN / Infinity → 空串（非有限不当成秒数）", () => {
+    expect(formatThinkingFold(Number.NaN)).toBe("");
+    expect(formatThinkingFold(Number.POSITIVE_INFINITY)).toBe("");
+    expect(formatThinkingFold(Number.NEGATIVE_INFINITY)).toBe("");
   });
 });
 
