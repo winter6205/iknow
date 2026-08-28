@@ -67,6 +67,7 @@ import {
   resolveProjectMemoryDir,
   createSystemResolver,
   createAutoMemoryHook,
+  buildMemoryPrefetchOverlay,
   type AutoMemoryHook,
 } from "./memory/index.js";
 import { createAdapterExtractLlm } from "./auto-memory-wire.js";
@@ -236,6 +237,12 @@ export type BuiltEngine = {
    * 不调,行为与现网逐字节一致。
    */
   readonly autoMemory?: AutoMemoryHook;
+  /**
+   * auto-memory low-trust read: per-turn prefetch overlay builder. Same gate
+   * as `autoMemory`. Hosts prepend the string onto the user payload; it must
+   * never be written to `deps.system`.
+   */
+  readonly overlayMemoryPrefetch?: (query: string) => Promise<string>;
 };
 
 /**
@@ -712,27 +719,44 @@ export async function buildHarnessEngine(
       : {}),
   };
   const engine = createLoopEngine(deps);
-  // auto-memory T4 / ADR-0031 D1+D5:三重同门 —— 显式 opt-in、memory 层在场、
-  // 非 ask 表面。任一不成立 → 钩子缺席,宿主侧零调用、零 LLM、零写盘。
-  const autoMemory =
-    memoryEnabled && surface !== "ask" && settings.memory?.autoExtract === true
-      ? createAutoMemoryHook({
-          memoryDir,
-          llm: createAdapterExtractLlm(adapter),
-          enabled: true,
-          onError: (error) => {
-            console.warn(
-              `[memory/auto] ingest skipped: ${
-                error instanceof Error ? error.message : String(error)
-              }`
-            );
-          },
-        })
-      : undefined;
+  // auto-memory T4 / ADR-0031 D1+D5 + low-trust read:三重同门 —— 显式 opt-in、
+  // memory 层在场、非 ask 表面。任一不成立 → 钩子与预取缺席。
+  const autoReadOn =
+    memoryEnabled && surface !== "ask" && settings.memory?.autoExtract === true;
+  const autoMemory = autoReadOn
+    ? createAutoMemoryHook({
+        memoryDir,
+        llm: createAdapterExtractLlm(adapter),
+        enabled: true,
+        onError: (error) => {
+          console.warn(
+            `[memory/auto] ingest skipped: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+        },
+      })
+    : undefined;
+  const overlayMemoryPrefetch = autoReadOn
+    ? async (query: string): Promise<string> => {
+        try {
+          return await buildMemoryPrefetchOverlay({ memoryDir, query });
+        } catch (error) {
+          // EXIT: log-and-continue — missing prefetch must not fail the turn.
+          console.warn(
+            `[memory/prefetch] overlay skipped: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+          return "";
+        }
+      }
+    : undefined;
   return {
     deps,
     engine,
     ...(autoMemory ? { autoMemory } : {}),
+    ...(overlayMemoryPrefetch ? { overlayMemoryPrefetch } : {}),
     ...(subagentManager ? { subagentManager } : {}),
     // #337 T8 / #361 Phase D:透出 skillCatalog + mcpManager + catalog,供
     // TUI deps 构建扩展面(TuiExtensions.skillCatalog / mcp.status / mcp.reload /

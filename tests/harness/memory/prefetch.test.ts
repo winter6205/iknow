@@ -10,6 +10,7 @@ import {
   MEMORY_ADVISORY_PREFIX,
   MEMORY_PREFETCH_CHAR_CAP,
   MEMORY_PREFETCH_MAX_HITS,
+  applyHostPrefetch,
   formatPrefetchOverlay,
   selectPrefetchHits,
 } from "../../../src/harness/memory/index.ts";
@@ -130,5 +131,23 @@ describe("formatPrefetchOverlay", () => {
 
   it("returns an empty string when there are no hits", () => {
     assert.equal(formatPrefetchOverlay([]), "");
+  });
+});
+
+describe("applyHostPrefetch", () => {
+  it("returns the original user text when no overlay function is wired", async () => {
+    assert.equal(await applyHostPrefetch("hello", undefined), "hello");
+  });
+
+  it("prepends a successful overlay to the user text, not a system string", async () => {
+    const out = await applyHostPrefetch("hello", async () => "OVERLAY");
+    assert.equal(out, "OVERLAY\n\nhello");
+  });
+
+  it("returns the original user text when overlay throws", async () => {
+    const out = await applyHostPrefetch("hello", async () => {
+      throw new Error("disk down");
+    });
+    assert.equal(out, "hello");
   });
 });

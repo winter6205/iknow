@@ -95,6 +95,7 @@ export {
   MEMORY_PREFETCH_CHAR_CAP,
   MEMORY_PREFETCH_MAX_HITS,
   attachPrefetchOverlay,
+  applyHostPrefetch,
   buildMemoryPrefetchOverlay,
   formatPrefetchOverlay,
   selectPrefetchHits,

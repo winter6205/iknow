@@ -85,6 +85,25 @@ export function attachPrefetchOverlay(
   return `${overlay}\n\n${userText}`;
 }
 
+/**
+ * Host seam: prepend prefetch to the user turn. Failures return the original
+ * text so a missing overlay cannot fail the turn.
+ */
+export async function applyHostPrefetch(
+  userText: string,
+  overlayFn?: (query: string) => Promise<string>
+): Promise<string> {
+  if (overlayFn === undefined) return userText;
+  try {
+    return attachPrefetchOverlay(userText, await overlayFn(userText));
+  } catch (err) {
+    // EXIT: log-and-continue — prefetch is advisory.
+    const detail = err instanceof Error ? err.message : String(err);
+    console.warn(`[memory/prefetch] overlay skipped: ${detail}`);
+    return userText;
+  }
+}
+
 export interface BuildPrefetchOverlayOpts {
   readonly memoryDir: string;
   readonly query: string;

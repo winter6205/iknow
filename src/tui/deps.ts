@@ -203,6 +203,7 @@ export async function buildTuiDeps(
     /** D-α T5:graph 装配快照句柄（仅注入 graphMode 时透出，交给 hub 拍 round）。 */
     graphAssembly?: GraphAssembly;
     autoMemory?: AutoMemoryHook;
+    overlayMemoryPrefetch?: (query: string) => Promise<string>;
   }
 > {
   if (!bundle.env.llm.apiKey) {
@@ -315,5 +316,8 @@ export async function buildTuiDeps(
     // auto-memory T4:自动记忆钩子随 deps 平铺透出，run.tsx 解构后交给
     // createTuiBridge → SessionHub。缺席（默认 OFF）→ 字段不出现。
     ...(built.autoMemory ? { autoMemory: built.autoMemory } : {}),
+    ...(built.overlayMemoryPrefetch
+      ? { overlayMemoryPrefetch: built.overlayMemoryPrefetch }
+      : {}),
   };
 }

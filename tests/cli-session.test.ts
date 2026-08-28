@@ -276,6 +276,29 @@ describe("processChatLine (pipe simulation)", () => {
     assert.equal(ctx.state.messages.length, beforeTurn2 + 2);
   });
 
+  it("prepends prefetch overlay onto the user message, not into system", async () => {
+    const captured: string[] = [];
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["ok"] })],
+    });
+    ctx.overlayMemoryPrefetch = async () => "PREFETCH_ONLY";
+    ctx.deps = {
+      ...ctx.deps,
+      system: async () => {
+        captured.push("system");
+        return "SYSTEM_ONLY";
+      },
+    };
+    await processChatLine({ line: "user question", ctx });
+    const userText = (
+      ctx.state.messages[0]!.content[0] as { type: "text"; text: string }
+    ).text;
+    assert.ok(userText.includes("PREFETCH_ONLY"));
+    assert.ok(userText.includes("user question"));
+    assert.ok(!userText.includes("SYSTEM_ONLY"));
+    assert.deepEqual(captured, ["system"]);
+  });
+
   it("unknown slash goes to stderr field", async () => {
     const ctx = makeCtx({ responses: [] });
     const r = await processChatLine({ line: "/nope", ctx });

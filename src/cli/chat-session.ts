@@ -38,6 +38,7 @@ import {
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
 import { renderTranscript } from "../harness/auto-memory-wire.js";
 import type { AutoMemoryHook } from "../harness/memory/index.js";
+import { applyHostPrefetch } from "../harness/memory/index.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
 import {
@@ -151,6 +152,11 @@ export type ChatSessionOpts = {
    * 缺席(默认 OFF / ask 表面)→ 不调,行为逐字节不变。
    */
   readonly autoMemory?: AutoMemoryHook;
+  /**
+   * auto-memory low-trust read: prepend scored bodies onto the user turn.
+   * Absent (default OFF / ask) → query is passed through unchanged.
+   */
+  readonly overlayMemoryPrefetch?: (query: string) => Promise<string>;
 };
 
 export type ChatLineContext = {
@@ -193,6 +199,10 @@ export type ChatLineContext = {
    * 缺席 = 不调钩子,行为零变化。
    */
   readonly autoMemory?: AutoMemoryHook;
+  /**
+   * auto-memory low-trust read: same ChatSessionOpts field, runChatSession 透传.
+   */
+  readonly overlayMemoryPrefetch?: (query: string) => Promise<string>;
   /**
    * T3 (#689): CLI _client_ idle/busy-guard for continue. Shared mutable box
    * so a concurrent processChatLine can refuse continue without aborting the
@@ -694,10 +704,13 @@ async function runChatQueryLine(
           verifyDispatch !== undefined && ctx.verifyConfig !== undefined
             ? await runVerifyLoop({
                 runFn: (text, o) =>
-                  runHarness(text, ctx.deps, o?.signal, {
-                    priorMessages: o?.priorMessages ?? priorMessages,
-                    onStream: o?.onStream ?? wrappedOnStream,
-                  }),
+                  applyHostPrefetch(text, ctx.overlayMemoryPrefetch).then(
+                    (effective) =>
+                      runHarness(effective, ctx.deps, o?.signal, {
+                        priorMessages: o?.priorMessages ?? priorMessages,
+                        onStream: o?.onStream ?? wrappedOnStream,
+                      })
+                  ),
                 userText: verifyDispatch.userText,
                 completionMode: verifyDispatch.completionMode,
                 config: ctx.verifyConfig,
@@ -719,10 +732,13 @@ async function runChatQueryLine(
                           : {}),
                       }),
               })
-            : await runHarness(query, ctx.deps, ctx.abortController?.signal, {
-                priorMessages,
-                onStream: wrappedOnStream,
-              });
+            : await applyHostPrefetch(query, ctx.overlayMemoryPrefetch).then(
+                (effective) =>
+                  runHarness(effective, ctx.deps, ctx.abortController?.signal, {
+                    priorMessages,
+                    onStream: wrappedOnStream,
+                  })
+              );
         const { result, trace } = runOutcome;
         // B1: Ctrl+C 打断反馈 —— 仅 cancelled 时提示 checkpoint 是否已保存。
         // 与下方 persistChatSessionCheckpoint 同源判定(shouldPersistCheckpoint),
@@ -1631,6 +1647,7 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     subagentManager: opts.subagentManager,
     verifyConfig: opts.verifyConfig,
     autoMemory: opts.autoMemory,
+    overlayMemoryPrefetch: opts.overlayMemoryPrefetch,
   };
 
   const interactive = isInteractive();
