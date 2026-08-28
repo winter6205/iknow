@@ -439,6 +439,19 @@ describe("createJsonlTraceService — 写盘失败处理", () => {
     }
   });
 
+  it("写盘失败增加实例级 traceWriteFailures 计数且不抛", async () => {
+    const svc = createJsonlTraceService({
+      filePath: join(scratch, "counter.jsonl"),
+      conversationId: "conv-counter",
+      writer: (): void => {
+        throw new Error("simulated disk failure");
+      },
+    });
+
+    await assert.doesNotReject(svc.recordLlmCall(SAMPLE_LLM));
+    assert.equal(svc.traceWriteFailures, 1);
+  });
+
   it("filePath 被同名文件占据 (旧 ./trace.jsonl) → 构造不抛, recordXxx 返回 undefined 不炸 turn", async () => {
     // 回归: 写侧默认曾是 ./trace.jsonl 单文件; T2 目录语义后 mkdirSync 撞旧文件
     // EEXIST 曾在构造期抛出打挂 TUI turn。

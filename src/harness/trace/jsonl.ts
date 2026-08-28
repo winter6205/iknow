@@ -51,6 +51,10 @@ export interface JsonlTraceOptions {
   rotation?: TraceRotationOptions;
 }
 
+export interface TraceServiceWithHealth extends TraceService {
+  readonly traceWriteFailures: number;
+}
+
 /**
  * camelCase → snake_case (ADR Decision 8: 集中在一处)。
  * 只对 record 顶层 schema 字段做 key 转换, 不递归进 content payload。
@@ -127,7 +131,7 @@ function toBlobReferences(
  */
 export function createJsonlTraceService(
   options: JsonlTraceOptions
-): TraceService {
+): TraceServiceWithHealth {
   const { filePath, conversationId } = options;
   maybeRotate(filePath, options.rotation);
   const outputMask = createOutputMask(currentSecretValues());
@@ -152,8 +156,10 @@ export function createJsonlTraceService(
 
   // 实例级去重: 首次写盘失败 warn 一次, 后续静默 (ADR Decision 13)。
   let warnedOnce = false;
+  let traceWriteFailures = 0;
 
-  function warnOnce(err: unknown): void {
+  function recordFailure(err: unknown): void {
+    traceWriteFailures += 1;
     if (!warnedOnce) {
       warnedOnce = true;
       console.warn("[JsonlTraceService] write failed:", err);
@@ -164,7 +170,10 @@ export function createJsonlTraceService(
     writer(outputMask.mask(JSON.stringify(payload)));
   }
 
-  return {
+  const service: TraceServiceWithHealth = {
+    get traceWriteFailures() {
+      return traceWriteFailures;
+    },
     async recordLlmCall(record: LlmCallRecord): Promise<string | undefined> {
       const id = randomUUID();
       const fullLine: Record<string, unknown> = {
@@ -185,14 +194,14 @@ export function createJsonlTraceService(
             ),
           };
         } catch (err) {
-          warnOnce(err);
+          recordFailure(err);
         }
       }
       try {
         writeLine(line);
         return id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -213,7 +222,7 @@ export function createJsonlTraceService(
         writeLine(line);
         return id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -235,7 +244,7 @@ export function createJsonlTraceService(
         writeLine(line);
         return id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -252,7 +261,7 @@ export function createJsonlTraceService(
         writeLine(line);
         return id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -271,7 +280,7 @@ export function createJsonlTraceService(
         writeLine(line);
         return id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -294,7 +303,7 @@ export function createJsonlTraceService(
         writeLine(line);
         return record.id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -319,7 +328,7 @@ export function createJsonlTraceService(
         writeLine(line);
         return record.id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -346,7 +355,7 @@ export function createJsonlTraceService(
         writeLine(line);
         return record.id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -366,7 +375,7 @@ export function createJsonlTraceService(
         writeLine(line);
         return record.id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -386,7 +395,7 @@ export function createJsonlTraceService(
         writeLine(line);
         return record.id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -408,9 +417,10 @@ export function createJsonlTraceService(
         writeLine(line);
         return record.id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
   };
+  return service;
 }

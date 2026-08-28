@@ -1,4 +1,5 @@
 import type { TraceService } from "./types.js";
+import type { TraceServiceWithHealth } from "./jsonl.js";
 
 /**
  * 零副作用 TraceService (T2, GH #64)。
@@ -13,8 +14,8 @@ import type { TraceService } from "./types.js";
  * 扩展覆盖, noop 不做任何消费 —— 零副作用语义不变 (plan T5: 接口扩展由
  * typecheck 验收)。
  */
-export function createNoopTraceService(): TraceService {
-  return {
+export function createNoopTraceService(): TraceServiceWithHealth {
+  const service: TraceService = {
     async recordLlmCall(_record) {
       return undefined;
     },
@@ -49,4 +50,9 @@ export function createNoopTraceService(): TraceService {
       return undefined;
     },
   };
+  Object.defineProperty(service, "traceWriteFailures", {
+    value: 0,
+    enumerable: false,
+  });
+  return service as TraceServiceWithHealth;
 }
