@@ -30,33 +30,33 @@ minimal-change-verifier: yes — 一个契约；落地按本 plan 分 commit，�
    - **Inherits:** spec Does 切分与空 token；ADR-0033 D1；ASCII 长度 ≥ 2 不变；SC1–SC3
    - **Surface:** `src/harness/memory`（BM25 与 ingest 近邻）
    - **Acceptance:** 纯中文近重复候选不是全 ADD；英文既有测绿；双空 token 无近邻命中；`npx vitest run tests/harness/memory/` 相关套件 EXIT 0
-   - Status: [ ] pending
+   - Status: [x] done
 
 2. **[parallel] Per-root auto-memory hook on SessionHub** — tag: `[implementation]`
    - **Inherits:** spec Does SessionHub；ADR-0033 D3；SC6；`engineByRoot` 已按根缓存 engine
    - **Surface:** `session-api`
    - **Acceptance:** 同一进程两个 workspaceRoot 均开 extract 时，B 的 completed turn 不写入 A 的 memoryDir
-   - Status: [ ] pending
+   - Status: [x] done
 
 3. **[parallel] Single notifyAutoMemory helper** — tag: `[implementation]`
    - **Inherits:** spec Does notify；ADR-0033 D3；SC7
    - **Surface:** harness 自动记忆接线 + `cli` chat + `session-api` hub
    - **Acceptance:** 两宿主调用同一导出辅助；钩子缺席与抛错都不把用户 turn 打成失败
-   - Status: [ ] pending
+   - Status: [x] done
 
 4. **dream settings + merge pass** — tag: `[implementation]`
    - **Inherits:** spec Does dream；CONTEXT `dream`；ADR-0033 D2–D3；SC4–SC5、SC8；先 ingest 再 dream 再 GC；`gc.ts` 无 LLM
    - **Surface:** `src/config` settings、`src/harness`（memory + build-engine）
    - **Acceptance:** dream 关时无额外 merge LLM；开时 FakeLLM 可观测 SUPERSEDE/UPDATE 且 `source: dream`；仅 dream 开也会装配钩子；ask 仍无记忆工具
    - [blocks: T1]
-   - Status: [ ] pending
+   - Status: [x] done
 
 5. **STATUS / architecture 对齐** — tag: `[implementation]`
    - **Inherits:** T1–T4 已落地语义；spec Out of this spec 仍写进 STATUS 未做项
    - **Surface:** `docs/STATUS.md` / `docs/architecture.md`
    - **Acceptance:** 能力表写明 CJK 近邻、dream 默认 OFF、per-root 钩子、共用 notify；§2.5 三条 Medium 标已处置或删除；Low 仍列为遗留
    - [blocks: T2, T3, T4]
-   - Status: [ ] pending
+   - Status: [x] done
 
 ## End of round
 
