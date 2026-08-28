@@ -18,8 +18,9 @@
  * 旁注）→ spawn_subagent / subagent_result / memory_recall / memory_save /
  * todo_write / list_mcp_resources / read_mcp_resource / bash_output /
  * bash_stop 九件天然缺席。本测试额外显式传 `skillCatalog:
- * createSkillCatalog([])` 让 skill / skill_search 在场以保持全量 21 件
- * 面可断言（30 - 缺席 9 = 21: memory2 + subagent2 + todo_write + mcp2 + bg2）。
+ * createSkillCatalog([])` 让 skill / skill_search 在场以保持全量 22 件
+ * 面可断言（32 - 缺席 10 = 22: memory2 + subagent2 + todo_write + mcp2 + bg2
+ * + run_graph；query_trace 为常驻只读件）。
  */
 
 import assert from "node:assert/strict";
@@ -82,17 +83,19 @@ const TEST_ENV: IknowEnv = {
 };
 
 /**
- * worker 装配后 "全量面" 名集（无 deny-list 时）= 21 件：
+ * worker 装配后 "全量面" 名集（无 deny-list 时）= 22 件：
  *   - 8 基线（bash / read_file / grep / glob / edit_file / write_file /
  *     web_fetch / web_search）
  *   - tool_search
  *   - 10 LSP（lsp_definition ... lsp_diagnostics，#251）
  *   - skill + skill_search（#337，条件化：skillCatalog 在场时入注册表）
+ *   - query_trace（T9 常驻只读，不依赖 manager）
  * 条件化缺席（worker 不装配）：memory_recall / memory_save（memoryDir 缺席），
  * spawn_subagent / subagent_result（subagentManager 缺席），todo_write
  * （todoDir 缺席），list_mcp_resources / read_mcp_resource（mcpManager 缺席），
- * bash_output / bash_stop（backgroundManager 缺席,#502 T3 同门）。
- * 全量 30 - 缺席 9 = 21，与 ACI_TOOLSET_NAMES 在 worker 装配路径下
+ * bash_output / bash_stop（backgroundManager 缺席,#502 T3 同门），
+ * run_graph（graphAssembly 缺席）。
+ * 全量 32 - 缺席 10 = 22，与 ACI_TOOLSET_NAMES 在 worker 装配路径下
  * 实际生效集合一致。
  */
 const WORKER_BASE_SURFACE: ReadonlyArray<string> = Object.freeze([
@@ -117,6 +120,7 @@ const WORKER_BASE_SURFACE: ReadonlyArray<string> = Object.freeze([
   "lsp_diagnostics",
   "skill",
   "skill_search",
+  "query_trace",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -174,7 +178,7 @@ function hermeticOpts(
 // ---------------------------------------------------------------------------
 
 describe("worker tool surface: 正常路径 — declared deny-list 全生效", () => {
-  it("deny JUDGE 25 禁项（allow-list 推导）→ inner+visibleSchemas 双面 = 白名单三件", async () => {
+  it("deny JUDGE 禁项（allow-list 推导）→ inner+visibleSchemas 双面 = 白名单三件", async () => {
     // #357 T2 判官 allow-list 推导：deny = 全量面 − {read_file, grep, glob}，
     // 装配后双面仅剩白名单三件。fail-closed：白名单外一律禁。
     const deps = await createWorkerDeps(
@@ -183,7 +187,7 @@ describe("worker tool surface: 正常路径 — declared deny-list 全生效", (
     assertSurface(deps, JUDGE_DENY, ["read_file", "grep", "glob"]);
   });
 
-  it("deny JUDGE 25 禁项 → 双面集合恰为白名单基线（与 WORKER_BASE_SURFACE - JUDGE_DENY 完全相等）", async () => {
+  it("deny JUDGE 禁项 → 双面集合恰为白名单基线（与 WORKER_BASE_SURFACE - JUDGE_DENY 完全相等）", async () => {
     const deps = await createWorkerDeps(
       hermeticOpts({ disallowedTools: [...JUDGE_DENY] })
     );

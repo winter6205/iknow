@@ -78,6 +78,7 @@ const EXPECTED_TOOLS = [
   // 入注册表;bash 仍常驻,参数级 background:true 能力由 handler 运行时决策)。
   "bash_output",
   "bash_stop",
+  "query_trace",
 ];
 
 let baseDir: string;
