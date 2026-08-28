@@ -10,6 +10,7 @@
  *   ↓ [PRIORITY_DECLARATION] — exactly once, between user and project
  *   project AGENTS + project rules
  *   ↓ [EXISTENCE_POINTER] — only when the memory library is non-empty
+ *   ↓ [memory_catalog + English discipline] — autoExtract === true and ≥1 live
  *   promote 段 (if any) — <= 4000 chars, importance desc
  *
  * The function is a pure thin composer (≤30 lines, append-only on messages via
@@ -23,8 +24,10 @@ import {
   findUserAgents,
   listRulesFiles,
 } from "./discovery.js";
+import { formatMemoryCatalog } from "./catalog.js";
 import { listPromotableEntries, PROMOTE_SEGMENT_CAP } from "./promote.js";
 import type { MemoryEntryV1 } from "./schema.js";
+import { listStoreEntries } from "./store.js";
 
 /** Locked by spec SC 4 (must appear exactly once, between user and project). */
 export const PRIORITY_DECLARATION =
@@ -46,6 +49,8 @@ const FILE_CAP = 12000;
  *     (a project-local `.iknow/AGENTS.md` must not become user-level).
  *   memoryDir: project-namespaced memory root (<workspaceRoot>/.iknow/memory/
  *     <base>-<hash>, per-root memory decision).
+ *   autoExtract: when true, append memory_catalog after EXISTENCE_POINTER.
+ *     Absent / non-true → byte-identical to the catalog-less path.
  *   promoteEntries: optional injection — used by tests + per-turn refresh hook.
  */
 export interface AssemblyContext {
@@ -53,6 +58,7 @@ export interface AssemblyContext {
   readonly userHome: string;
   readonly workspaceRoot?: string;
   readonly memoryDir: string;
+  readonly autoExtract?: boolean;
   readonly promoteEntries?: ReadonlyArray<MemoryEntryV1>;
 }
 
@@ -81,6 +87,10 @@ export async function assembleSystemPrompt(
     ctx.promoteEntries ?? (await listPromotableEntries(ctx.memoryDir));
   const parts: string[] = staticPrompt ? [staticPrompt] : [];
   if (hasMemory) parts.push(EXISTENCE_POINTER);
+  if (ctx.autoExtract === true) {
+    const catalog = await loadCatalogSegment(ctx.memoryDir);
+    if (catalog) parts.push(catalog);
+  }
   if (promote.length > 0) parts.push(formatPromote(promote));
   return parts.join("\n\n");
 }
@@ -107,6 +117,27 @@ async function loadStaticLayer(
     if (text) chunks.push(truncate(text));
   }
   return chunks.join("\n\n");
+}
+
+/**
+ * Live-entry directory + locked English discipline. IO / parse failure
+ * skips the segment so a missing catalog cannot fail the user turn.
+ */
+async function loadCatalogSegment(
+  memoryDir: string
+): Promise<string | undefined> {
+  try {
+    const scan = await listStoreEntries(memoryDir);
+    const live = scan.entries
+      .filter((row) => !row.entry.disabled)
+      .map((row) => row.entry);
+    return formatMemoryCatalog(live);
+  } catch (err) {
+    // EXIT: log-and-continue — catalog is advisory; turn still succeeds.
+    const detail = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[memory/assembly] catalog skipped: ${detail}\n`);
+    return undefined;
+  }
 }
 
 /** True when memoryDir contains any *.md entry (excluding the MEMORY.md index). */

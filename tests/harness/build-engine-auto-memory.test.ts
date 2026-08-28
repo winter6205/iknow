@@ -82,15 +82,38 @@ describe("buildHarnessEngine — auto-memory opt-in", () => {
     expect(engine.autoMemory).toBeUndefined();
   });
 
+  it("wires overlayMemoryPrefetch on an explicit true", async () => {
+    const engine = await build({ settings: { memory: { autoExtract: true } } });
+    expect(engine.overlayMemoryPrefetch).toBeDefined();
+    expect(typeof engine.overlayMemoryPrefetch).toBe("function");
+  });
+
   it("wires autoMemory on an explicit true", async () => {
     const engine = await build({ settings: { memory: { autoExtract: true } } });
     expect(engine.autoMemory).toBeDefined();
     expect(typeof engine.autoMemory!.onTurnComplete).toBe("function");
   });
 
+  it("leaves overlayMemoryPrefetch absent on the ask surface even when opted in", async () => {
+    const engine = await build({
+      surface: "ask",
+      settings: { memory: { autoExtract: true } },
+    });
+    expect(engine.overlayMemoryPrefetch).toBeUndefined();
+  });
+
+  it("leaves overlayMemoryPrefetch absent when the memory layer itself is off", async () => {
+    const engine = await build({
+      memory: { enabled: false },
+      settings: { memory: { autoExtract: true } },
+    });
+    expect(engine.overlayMemoryPrefetch).toBeUndefined();
+  });
+
   it("wires autoMemory when dream is true without autoExtract", async () => {
     const engine = await build({ settings: { memory: { dream: true } } });
     expect(engine.autoMemory).toBeDefined();
+    expect(engine.overlayMemoryPrefetch).toBeUndefined();
   });
 
   it("leaves autoMemory absent on the ask surface even when opted in", async () => {

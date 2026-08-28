@@ -39,6 +39,7 @@ import {
 } from "../harness/build-engine.js";
 import { renderTranscript } from "../harness/auto-memory-wire.js";
 import {
+  applyHostPrefetch,
   notifyAutoMemory,
   type AutoMemoryHook,
 } from "../harness/memory/index.js";
@@ -480,6 +481,11 @@ export type SessionHubOptions = {
    */
   readonly autoMemory?: AutoMemoryHook;
   /**
+   * auto-memory low-trust read: per-turn prefetch overlay. Same gate as
+   * autoMemory. Host prepends onto the user payload; never deps.system.
+   */
+  readonly overlayMemoryPrefetch?: (query: string) => Promise<string>;
+  /**
    * review-fix (M1 / H1): per-root state anchor。serve 入口解析后
    * 透传 —— 让 hub 的 buildHarnessEngine 走 entry-resolved workspaceRoot,
    * 保证 serve 与 CLI flag 路径同形态(seed 落 `<workspaceRoot>/.iknow`,
@@ -516,6 +522,7 @@ export type SessionHubOptions = {
     /** D-α T3: graph 装配快照（生产由 buildHarnessEngine 透出）。 */
     graphAssembly?: GraphAssembly;
     autoMemory?: AutoMemoryHook;
+    overlayMemoryPrefetch?: (query: string) => Promise<string>;
   }>;
   /**
    * serve-workspace T3: recents/trust 名单的 home 根（落
@@ -596,6 +603,7 @@ export class SessionHub {
   private readonly buildEngine:
     | ((root: string) => Promise<{
         autoMemory?: AutoMemoryHook;
+        overlayMemoryPrefetch?: (query: string) => Promise<string>;
         deps: LoopEngineDeps;
         shutdown?: () => Promise<void>;
         subagentManager?: SubAgentManager;
@@ -624,12 +632,16 @@ export class SessionHub {
       subagentManager?: SubAgentManager;
       graphAssembly?: GraphAssembly;
       autoMemory?: AutoMemoryHook;
+      overlayMemoryPrefetch?: (query: string) => Promise<string>;
     }
   >();
   /** Per-conversation serialization (spec A15). */
   private readonly inflight = new Map<string, Promise<void>>();
   /** auto-memory T4: host 钩子（默认缺席 = 自动记忆关）。 */
   private autoMemory: AutoMemoryHook | undefined;
+  /** auto-memory low-trust read: per-turn user overlay (same gate as autoMemory). */
+  private overlayMemoryPrefetch:
+    ((query: string) => Promise<string>) | undefined;
 
   constructor(opts: SessionHubOptions) {
     if (!opts.askUser && !opts.deps) {
@@ -653,6 +665,7 @@ export class SessionHub {
     this.surface = opts.surface;
     this.subagentManager = opts.subagentManager;
     this.autoMemory = opts.autoMemory;
+    this.overlayMemoryPrefetch = opts.overlayMemoryPrefetch;
     // review-fix (M1 / H1): per-root state anchor 缓存。
     this.workspaceRoot = opts.workspaceRoot;
     this.recentsHome = opts.recentsHome;
@@ -1152,19 +1165,20 @@ export class SessionHub {
               // 闭包必须兜底 hub 侧的 priorMessages 与 wrappedOnStream。
               const runOutcome = this.verifyConfig
                 ? await runVerifyLoop({
-                    runFn: (text, o) => {
-                      // T5: verify-loop 的 userText 在 auto 模式下是
-                      // goal.text 而非 query —— 以实际进 engine 的 text
-                      // 重建 commit 前缀，保持链与投影逐字节对齐。
-                      queryCommitPrefix = [
-                        ...(drained ? [drainedMsg] : []),
-                        buildUserCommit(text),
-                      ];
-                      return run(text, runDeps, o?.signal, {
-                        priorMessages: o?.priorMessages ?? priorMessages,
-                        onStream: o?.onStream ?? wrappedOnStream,
-                      });
-                    },
+                    runFn: (text, o) =>
+                      applyHostPrefetch(
+                        text,
+                        this.overlayForSession(session.workspaceRoot)
+                      ).then((effective) => {
+                        queryCommitPrefix = [
+                          ...(drained ? [drainedMsg] : []),
+                          buildUserCommit(effective),
+                        ];
+                        return run(effective, runDeps, o?.signal, {
+                          priorMessages: o?.priorMessages ?? priorMessages,
+                          onStream: o?.onStream ?? wrappedOnStream,
+                        });
+                      }),
                     // ADR-0024: two modules, not `goal.text ?? query`. Non-empty
                     // goal → auto (userText = goal.text); else HITL (userText =
                     // query). taskFocus never entered verify input (#473) and
@@ -1198,10 +1212,20 @@ export class SessionHub {
                               : {}),
                           }),
                   })
-                : await run(query, runDeps, opts.signal, {
-                    priorMessages,
-                    onStream: wrappedOnStream,
-                  });
+                : await (async () => {
+                    const effective = await applyHostPrefetch(
+                      query,
+                      this.overlayForSession(session.workspaceRoot)
+                    );
+                    queryCommitPrefix = [
+                      ...(drained ? [drainedMsg] : []),
+                      buildUserCommit(effective),
+                    ];
+                    return run(effective, runDeps, opts.signal, {
+                      priorMessages,
+                      onStream: wrappedOnStream,
+                    });
+                  })();
               const result = runOutcome.result;
               // #408 T5: capture the terminal outcome for post-run write-back.
               verifyOutcome =
@@ -2078,6 +2102,7 @@ export class SessionHub {
     subagentManager?: SubAgentManager;
     graphAssembly?: GraphAssembly;
     autoMemory?: AutoMemoryHook;
+    overlayMemoryPrefetch?: (query: string) => Promise<string>;
   }> {
     const hit = this.engineByRoot.get(root);
     if (hit) return hit;
@@ -2090,9 +2115,13 @@ export class SessionHub {
       subagentManager: built.subagentManager,
       graphAssembly: built.graphAssembly,
       autoMemory: built.autoMemory,
+      overlayMemoryPrefetch: built.overlayMemoryPrefetch,
     };
     this.engineByRoot.set(root, entry);
     this.subagentManager = this.subagentManager ?? built.subagentManager;
+    this.autoMemory = this.autoMemory ?? built.autoMemory;
+    this.overlayMemoryPrefetch =
+      this.overlayMemoryPrefetch ?? built.overlayMemoryPrefetch;
     return entry;
   }
 
@@ -2102,6 +2131,7 @@ export class SessionHub {
     subagentManager?: SubAgentManager;
     graphAssembly?: GraphAssembly;
     autoMemory?: AutoMemoryHook;
+    overlayMemoryPrefetch?: (query: string) => Promise<string>;
   }> {
     if (!this.askUser) {
       throw new Error(
@@ -2222,6 +2252,8 @@ export class SessionHub {
     this.subagentManager = this.subagentManager ?? built.subagentManager;
     // auto-memory T4:与 subagentManager 同形态懒取(构造注入优先)。
     this.autoMemory = this.autoMemory ?? built.autoMemory;
+    this.overlayMemoryPrefetch =
+      this.overlayMemoryPrefetch ?? built.overlayMemoryPrefetch;
     // #356 High#4 (SC12/SC3):缓存 built.shutdown(组合句柄 mcpManager first →
     // subagentManager second)。serve 入口退出前经 hub.shutdown() 触发 —
     // cli.ts runServe 挂 registerShutdown(hub),进程退出时清理 MCP 连接 +
@@ -2229,6 +2261,19 @@ export class SessionHub {
     // shutdown 缺席 → hub.shutdown() no-op。
     this.cachedShutdown = this.cachedShutdown ?? built.shutdown;
     return this.cachedDeps;
+  }
+
+  private overlayForSession(
+    sessionRoot: string | undefined
+  ): ((query: string) => Promise<string>) | undefined {
+    const mapRoot = sessionRoot ?? this.boundRoot;
+    if (mapRoot !== undefined) {
+      const entry = this.engineByRoot.get(mapRoot);
+      if (entry?.overlayMemoryPrefetch !== undefined) {
+        return entry.overlayMemoryPrefetch;
+      }
+    }
+    return this.overlayMemoryPrefetch;
   }
 
   /**

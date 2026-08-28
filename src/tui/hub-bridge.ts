@@ -179,6 +179,7 @@ export interface CreateTuiBridgeOptions {
    * 缺席(默认 OFF)→ hub 不调,行为逐字节不变。
    */
   readonly autoMemory?: AutoMemoryHook;
+  readonly overlayMemoryPrefetch?: (query: string) => Promise<string>;
   /** #128 T8: 验证闭环配置。缺席 = 透明关闭 (postMessage 走原 run, SC7)。 */
   readonly verifyConfig?: VerifyConfig;
   /**
@@ -215,6 +216,9 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     subagentManager: opts.subagentManager,
     // auto-memory T4:自动记忆钩子同路透传(缺席 = 关)。
     ...(opts.autoMemory ? { autoMemory: opts.autoMemory } : {}),
+    ...(opts.overlayMemoryPrefetch
+      ? { overlayMemoryPrefetch: opts.overlayMemoryPrefetch }
+      : {}),
     // #128 T8: verifyConfig 由 run.tsx 装配 (settings.verify 段) 透传。
     // command 缺失时 (含 verify 段缺失) 由 runClassifier 接管 (subagentManager
     // 在场);缺席 = 不包裹 run (仅未接线路径)。

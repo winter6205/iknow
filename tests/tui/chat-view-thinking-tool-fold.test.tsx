@@ -53,9 +53,7 @@ function bashTurn(
     },
     {
       role: "user",
-      content: [
-        { type: "tool_result", tool_use_id: id, content: "ok" },
-      ],
+      content: [{ type: "tool_result", tool_use_id: id, content: "ok" }],
     },
   ];
 }
@@ -65,7 +63,12 @@ function interleavedThinkingToolMessages(): AnthropicNativeMessage[] {
   return [
     {
       role: "user",
-      content: [{ type: "text", text: "发子代理，让他在归内文件夹写一个神圣礼堂的HTML" }],
+      content: [
+        {
+          type: "text",
+          text: "发子代理，让他在归内文件夹写一个神圣礼堂的HTML",
+        },
+      ],
     },
     ...bashTurn("tu-1", "先看项目根", "ls -la /home/winner/projects/iknow/"),
     ...bashTurn("tu-2", "再看 src", "ls /home/winner/projects/iknow/src/"),

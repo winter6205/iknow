@@ -366,6 +366,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // `settings.memory.autoExtract === true` 时 build-engine 才装配;
     // 缺席(默认 OFF)→ chat host 不调,行为逐字节不变。
     autoMemory: built.autoMemory,
+    overlayMemoryPrefetch: built.overlayMemoryPrefetch,
     // #128 T8:settings.verify 段 → 闭环配置。command 缺失 (含 verify 段缺失)
     // → { command: "" }, subagentManager 在场 (chat) 时 runClassifier 接管
     // 分类器判官 (spec #128 Objective); ask 形态无 manager → verify-loop

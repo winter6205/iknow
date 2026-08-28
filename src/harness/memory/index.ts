@@ -106,6 +106,20 @@ export type { MemoryLayerEntry } from "./discovery.js";
 
 export { scoreMemoryEntries } from "./bm25.js";
 export type { ScoredEntry, ScoreOpts } from "./bm25.js";
+export {
+  MEMORY_ADVISORY_PREFIX,
+  MEMORY_PREFETCH_CHAR_CAP,
+  MEMORY_PREFETCH_MAX_HITS,
+  attachPrefetchOverlay,
+  applyHostPrefetch,
+  buildMemoryPrefetchOverlay,
+  formatPrefetchOverlay,
+  selectPrefetchHits,
+} from "./prefetch.js";
+export type {
+  BuildPrefetchOverlayOpts,
+  SelectPrefetchOpts,
+} from "./prefetch.js";
 export { tokenize } from "./tokenize.js";
 
 export {
@@ -123,4 +137,12 @@ export {
   EXISTENCE_POINTER,
 } from "./assembly.js";
 export type { AssemblyContext } from "./assembly.js";
+export {
+  MEMORY_CATALOG_DISCIPLINE,
+  MEMORY_CATALOG_MAX_CHARS,
+  MEMORY_CATALOG_MAX_LINES,
+  catalogHook,
+  formatCatalogLine,
+  formatMemoryCatalog,
+} from "./catalog.js";
 export { createSystemResolver } from "./refresh.js";

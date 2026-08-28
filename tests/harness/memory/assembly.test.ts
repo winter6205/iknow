@@ -19,7 +19,10 @@ import { join } from "node:path";
 import {
   assembleSystemPrompt,
   EXISTENCE_POINTER,
+  MEMORY_CATALOG_DISCIPLINE,
+  MEMORY_CATALOG_MAX_CHARS,
   PRIORITY_DECLARATION,
+  serializeMemoryEntry,
 } from "../../../src/harness/memory/index.ts";
 import type { AssemblyContext } from "../../../src/harness/memory/index.ts";
 import type { MemoryEntryV1 } from "../../../src/harness/memory/index.ts";
@@ -266,5 +269,69 @@ describe("assembleSystemPrompt", () => {
   it("emits an empty string when everything is absent", async () => {
     const out = await assembleSystemPrompt(ctx());
     assert.equal(out, "");
+  });
+});
+
+// -- memory_catalog (specs/auto-memory-low-trust-read.md SC1–SC3) ------------
+
+describe("assembleSystemPrompt — memory_catalog", () => {
+  async function writeLive(id: string, title: string, body: string) {
+    await write(
+      join(memoryDir, `${id}.md`),
+      serializeMemoryEntry(memoryEntry(id, title, body))
+    );
+  }
+
+  it("omits the discipline sentence and catalog when autoExtract is not true", async () => {
+    await writeLive(
+      "note-1",
+      "Deploy via bar()",
+      "hook line\nUNIQUE_BODY_TOKEN_xyz"
+    );
+    const out = await assembleSystemPrompt(ctx());
+    assert.ok(out.includes(EXISTENCE_POINTER));
+    assert.ok(!out.includes(MEMORY_CATALOG_DISCIPLINE));
+    assert.ok(!out.includes("Deploy via bar()"));
+    assert.ok(!out.includes("UNIQUE_BODY_TOKEN_xyz"));
+  });
+
+  it("appends discipline + title after the existence pointer when autoExtract is on", async () => {
+    await writeLive(
+      "note-1",
+      "Deploy via bar()",
+      "short hook\nUNIQUE_BODY_TOKEN_xyz"
+    );
+    const out = await assembleSystemPrompt(ctx({ autoExtract: true }));
+    assert.ok(out.includes(MEMORY_CATALOG_DISCIPLINE));
+    assert.ok(out.includes("Deploy via bar()"));
+    assert.ok(!out.includes("UNIQUE_BODY_TOKEN_xyz"));
+    const iPointer = out.indexOf(EXISTENCE_POINTER);
+    const iDiscipline = out.indexOf(MEMORY_CATALOG_DISCIPLINE);
+    const iPromote = out.indexOf("### ");
+    assert.ok(iPointer !== -1 && iDiscipline !== -1);
+    assert.ok(iPointer < iDiscipline, "catalog follows existence pointer");
+    assert.equal(iPromote, -1, "catalog is not a promote body segment");
+  });
+
+  it("keeps the existence pointer but skips catalog when every entry is disabled", async () => {
+    const dead = memoryEntry("dead", "Disabled title", "UNIQUE_BODY_TOKEN_xyz");
+    await write(
+      join(memoryDir, "dead.md"),
+      serializeMemoryEntry({ ...dead, disabled: true })
+    );
+    const out = await assembleSystemPrompt(ctx({ autoExtract: true }));
+    assert.ok(out.includes(EXISTENCE_POINTER));
+    assert.ok(!out.includes(MEMORY_CATALOG_DISCIPLINE));
+    assert.ok(!out.includes("Disabled title"));
+  });
+
+  it("truncates an oversized catalog to the 25KB cap and still assembles", async () => {
+    const hugeTitle = `T${"x".repeat(MEMORY_CATALOG_MAX_CHARS)}`;
+    await writeLive("huge", hugeTitle, "hook");
+    const out = await assembleSystemPrompt(ctx({ autoExtract: true }));
+    assert.ok(out.includes(MEMORY_CATALOG_DISCIPLINE));
+    const catalog = out.slice(out.indexOf(MEMORY_CATALOG_DISCIPLINE));
+    assert.ok(catalog.length <= MEMORY_CATALOG_MAX_CHARS);
+    assert.ok(!catalog.includes("\n### "), "truncated catalog is not promote");
   });
 });
