@@ -65,6 +65,7 @@ interface FetchInput {
   readonly url: string;
   readonly maxChars: number;
   readonly startChars: number;
+  readonly as: "text" | "html";
 }
 
 /**
@@ -88,11 +89,16 @@ export function createWebFetchTool(deps?: WebFetchToolDeps): AciToolDef {
       timeoutMs: FETCH_TIMEOUT_MS,
       signal: ctx?.signal,
     });
-    const text = renderFetchBody(response.body, response.contentType);
+    const text = renderFetchBody(
+      response.body,
+      response.contentType,
+      parsed.as
+    );
     const reserve = headerReserve(
       response.finalUrl,
       response.status,
-      response.contentType
+      response.contentType,
+      parsed.as
     );
     const window = sliceFetchWindow(
       text,
@@ -104,6 +110,7 @@ export function createWebFetchTool(deps?: WebFetchToolDeps): AciToolDef {
       finalUrl: response.finalUrl,
       status: response.status,
       contentType: response.contentType,
+      representation: parsed.as,
       originalLength: text.length,
       window,
     });
@@ -112,7 +119,7 @@ export function createWebFetchTool(deps?: WebFetchToolDeps): AciToolDef {
   return Object.freeze({
     name: "web_fetch",
     description:
-      "Fetch a single web page when you have the URL (from web_search or the user); for bulk or interactive flows use a browser instead. Returns the final URL, HTTP status, content type, a Window line (start / returned / original_length), and the body (HTML→plain text) wrapped in an untrusted-content banner. Optional start_chars (default 0) selects the window; the next call continues at start+returned. max_chars 500..16000 (default 12000). SSRF guard rejects non-http(s) URLs, private/internal targets, and non-2xx responses; redirects validated hop-by-hop up to 5 hops.",
+      "Fetch a single web page when you have the URL (from web_search or the user); for bulk or interactive flows use a browser instead. Returns the final URL, HTTP status, content type, Representation, a Window line (start / returned / original_length), and the body wrapped in an untrusted-content banner. as=text (default) extracts HTML to plain text; as=html returns the markup when the content type includes html. Optional start_chars (default 0) selects the window; the next call continues at start+returned. max_chars 500..16000 (default 12000). SSRF guard rejects non-http(s) URLs, private/internal targets, and non-2xx responses; redirects validated hop-by-hop up to 5 hops.",
     inputSchema: {
       type: "object",
       properties: {
@@ -130,6 +137,13 @@ export function createWebFetchTool(deps?: WebFetchToolDeps): AciToolDef {
           minimum: 0,
           description:
             "0-based character offset into the rendered body for this window",
+        },
+        as: {
+          type: "string",
+          enum: ["text", "html"],
+          default: "text",
+          description:
+            "text extracts HTML to plain text; html returns markup for html content types",
         },
       },
       required: ["url"],
@@ -164,6 +178,7 @@ function compileFetchInput(input: unknown): FetchInput {
     url?: unknown;
     max_chars?: unknown;
     start_chars?: unknown;
+    as?: unknown;
   };
   if (typeof obj.url !== "string" || obj.url.trim().length === 0) {
     throw new ToolExecutionError("web_fetch: url must be a non-empty string");
@@ -172,6 +187,7 @@ function compileFetchInput(input: unknown): FetchInput {
     url: obj.url,
     maxChars: clampMaxChars(obj.max_chars),
     startChars: compileStartChars(obj.start_chars),
+    as: compileAs(obj.as),
   };
 }
 
@@ -200,9 +216,46 @@ function compileStartChars(raw: unknown): number {
   return raw;
 }
 
-/** 按 content-type 渲染正文：html → 提纯文本；其余原样。 */
-function renderFetchBody(body: string, contentType: string): string {
-  if (contentType.toLowerCase().includes("html")) {
+function compileAs(raw: unknown): "text" | "html" {
+  if (raw === undefined) return "text";
+  if (raw === "text" || raw === "html") return raw;
+  throw new ToolExecutionError('web_fetch: as must be "text" or "html"');
+}
+
+function isHtmlContentType(contentType: string): boolean {
+  return contentType.toLowerCase().includes("html");
+}
+
+function isBinaryContentType(contentType: string): boolean {
+  const ct = contentType.toLowerCase();
+  return (
+    ct.startsWith("image/") ||
+    ct.startsWith("audio/") ||
+    ct.startsWith("video/") ||
+    ct.includes("application/octet-stream") ||
+    ct.includes("application/pdf")
+  );
+}
+
+/** 按 content-type 与 as 渲染正文。 */
+function renderFetchBody(
+  body: string,
+  contentType: string,
+  as: "text" | "html"
+): string {
+  if (isBinaryContentType(contentType)) {
+    // EXIT: binary content-type rejected
+    throw new ToolExecutionError("web_fetch failed: binary content type");
+  }
+  if (as === "html") {
+    if (!isHtmlContentType(contentType)) {
+      throw new ToolExecutionError(
+        "web_fetch failed: content type is not html"
+      );
+    }
+    return body.trim();
+  }
+  if (isHtmlContentType(contentType)) {
     return htmlToText(body).trim();
   }
   return body.trim();
@@ -214,12 +267,14 @@ const WORST_WINDOW_DIGIT = 10 ** WINDOW_DIGIT_WIDTH - 1;
 export function headerReserve(
   finalUrl: string,
   status: number,
-  contentType: string
+  contentType: string,
+  representation: "text" | "html" = "text"
 ): number {
   return formatFetchOutput({
     finalUrl,
     status,
     contentType,
+    representation,
     originalLength: WORST_WINDOW_DIGIT,
     window: {
       start: WORST_WINDOW_DIGIT,
@@ -257,17 +312,26 @@ interface FormatFetchArgs {
   readonly finalUrl: string;
   readonly status: number;
   readonly contentType: string;
+  readonly representation: "text" | "html";
   readonly originalLength: number;
   readonly window: FetchWindow;
 }
 
-/** 纯拼接：URL / Status / Content-Type / Window + banner + 正文 + 可选标记。 */
+/** 纯拼接：URL / Status / Content-Type / Representation / Window + banner + 正文。 */
 export function formatFetchOutput(args: FormatFetchArgs): string {
-  const { finalUrl, status, contentType, originalLength, window } = args;
+  const {
+    finalUrl,
+    status,
+    contentType,
+    representation,
+    originalLength,
+    window,
+  } = args;
   return (
     `URL: ${finalUrl}\n` +
     `Status: ${status}\n` +
     `Content-Type: ${contentType || "(unknown)"}\n` +
+    `Representation: ${representation}\n` +
     `Window: start=${window.start} returned=${window.returned} original_length=${originalLength}\n\n` +
     `${UNTRUSTED_BANNER}\n\n` +
     window.body +
