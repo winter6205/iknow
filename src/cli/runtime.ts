@@ -25,6 +25,7 @@ import {
 } from "../harness/permission/modes.js";
 import type { GraphModeContext } from "../harness/graph/mode.js";
 import { loadIknowEnv, type IknowEnv } from "../config/env.js";
+import type { TraceService } from "../harness/trace/types.js";
 import {
   WORKSPACE_ROOT_ENV_KEY,
   resolveWorkspaceRoot,
@@ -97,6 +98,10 @@ export async function buildHarnessEngine(
      *  到 build-engine(priority chain `[explicit, env, cwd]` 在 build-engine
      *  层执行)。CLI 入口(runChat/runOneShot/runTui/runServe)各自解析后透传。 */
     workspaceRoot?: string;
+    /** Crash diagnostics / worker trace root for subagent lifecycle evidence. */
+    subagentDiagnosticsDir?: string;
+    /** Trace service for unconditional subagent lifecycle evidence. */
+    subagentTrace?: TraceService;
   }
 ): Promise<BuiltEngine> {
   // review-fix (M1 / H1/H2): CLI entry 层条件 resolve workspaceRoot —— 当
@@ -140,6 +145,10 @@ export async function buildHarnessEngine(
     ...(opts.graphMode ? { graphMode: opts.graphMode } : {}),
     ...(opts.todoDir ? { todoDir: opts.todoDir } : {}),
     ...(resolvedWorkspaceRoot ? { workspaceRoot: resolvedWorkspaceRoot } : {}),
+    ...(opts.subagentDiagnosticsDir
+      ? { subagentDiagnosticsDir: opts.subagentDiagnosticsDir }
+      : {}),
+    ...(opts.subagentTrace ? { subagentTrace: opts.subagentTrace } : {}),
   });
 }
 

@@ -271,8 +271,6 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     filePath: tracePath,
     conversationId: "subagent",
   });
-  // 运行时包装层保持既有参数面；用同一个已解析目录透传给 worker spawn。
-  process.env.IKNOW_TRACE_OUT = tracePath;
 
   let built: import("./harness/build-engine.js").BuiltEngine;
   // W2: chat REPL 持一个可变 PermissionModeContext —— /permissions 命令在
@@ -307,6 +305,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
       ...(subagentTraceService !== undefined
         ? { subagentTrace: subagentTraceService }
         : {}),
+      subagentDiagnosticsDir: tracePath,
       // review-fix (M1/M5): `!== undefined` 守门 — 空字符串透传触 empty_explicit。
       ...(parsed.workspaceRoot !== undefined
         ? { workspaceRoot: parsed.workspaceRoot }
