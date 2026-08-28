@@ -17,6 +17,10 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { createOutputMask, currentSecretValues } from "../sandbox/index.js";
+import {
+  maybeRotate,
+  type TraceRotationOptions,
+} from "./rotation.js";
 import type {
   TraceService,
   LlmCallRecord,
@@ -43,6 +47,8 @@ export interface JsonlTraceOptions {
   conversationId: string;
   /** 可选注入 writer (测试用 always-throw writer)。 */
   writer?: (line: string) => void;
+  /** Rotation caps; omitted values use the conservative defaults. */
+  rotation?: TraceRotationOptions;
 }
 
 /**
@@ -87,6 +93,7 @@ export function createJsonlTraceService(
   options: JsonlTraceOptions
 ): TraceService {
   const { filePath, conversationId } = options;
+  maybeRotate(filePath, options.rotation);
   // T2 每会话独立文件: filePath 是目录, 实际写 <filePath>/<conversationId>.jsonl。
   // mkdirSync recursive 兜底, 目录不存在时先建 (产品路径 traceOut 首次使用时目录
   // 可能未建)。仅默认 writer 时建目录 —— 注入自定义 writer (测试用 always-throw)
