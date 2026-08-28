@@ -10,11 +10,9 @@
  *
  * 本模块把两处收敛到同一纯函数，从源头统一文案：
  *
- *  - `formatThinkingFold(seconds)` — 历史消息 thinking 折叠行：
- *    - `seconds > 0` → `思考了 N 秒`（「思考了几秒」即带语义，不再叠加 `[思考]`
- *      前缀；与 message-blocks 历史行为一致）；
- *    - `seconds === 0` / `undefined` / 非正 → `[思考]`（不显「思考了 0 秒」
- *      伪精度；子秒 thinking 历史消息回落纯标记）。
+ *  - `formatThinkingFold(seconds)` — 结束态折叠行：
+ *    - 有限且 `seconds > 0` → `思考了 N 秒`（唯一结束态文案，不叠加 `[思考]`）；
+ *    - 缺省 / 非正 / 非有限 → 空串（不换括号标签，也不造「思考了 0 秒」）。
  *  - `thinkingPeekLines(text, limit)` — 折叠态「思考中」正文预览窗口：思考
  *    进行中露出正文**末** ≤3 行（plans/model-idle-thinking-peek.md T2），
  *    frozen / turn 结束后调用方停止取窗口，折回纯摘要行。
@@ -30,25 +28,19 @@
  * 只调本模块，禁止在渲染层另写模板字符串。
  */
 
-/** 历史折叠行纯 `[思考]` 标记（无秒数 / 子秒时）。 */
-export const THINKING_FOLD_LINE = "[思考]";
-
-/** 历史折叠行文案：`思考了 N 秒` 或 `[思考]`（秒数替换 [思考]，不叠加）。 */
+/** 结束态折叠行：`思考了 N 秒`；无可用秒数 → 空串。 */
 export function formatThinkingFold(seconds: number | undefined): string {
-  const s = Math.max(0, Math.floor(seconds ?? 0));
-  if (s <= 0) return THINKING_FOLD_LINE;
+  const s = Math.floor(seconds ?? 0);
+  if (!Number.isFinite(s) || s <= 0) return "";
   return `思考了 ${s} 秒`;
-}
-
-/** 流式折叠行文案（恒 `思考中…`，无实时秒数 — 见模块注释）。 */
-export function formatThinkingLive(): string {
-  return "思考中…";
 }
 
 /**
  * 思考阶段结束时钉住秒数：已冻结不覆盖；无 thinking 正文 → 0。
  * 触发点 = answer 开始 **或** 首个 tool_call（思考后直接调工具、没有
- * text_delta 时也要留下「思考了 N 秒」，否则 turn 折叠只能回落 `[思考]`）。
+ * text_delta 时也要留下秒数，否则结束态那一行根本不画）。
+ * 有正文但 elapsed 不足 1 秒 / 非有限 → 1（思考发生了就要有「思考了 N 秒」，
+ * 不造「思考了 0 秒」、也不留空行）。
  */
 export function pinThinkingSeconds(
   alreadyFrozen: number,
@@ -57,7 +49,14 @@ export function pinThinkingSeconds(
 ): number {
   if (alreadyFrozen > 0) return alreadyFrozen;
   if (thinkingRawLength <= 0) return 0;
-  return Math.max(0, Math.floor(elapsedSeconds));
+  const elapsed = Math.floor(elapsedSeconds);
+  if (!Number.isFinite(elapsed) || elapsed <= 0) return 1;
+  return elapsed;
+}
+
+/** 流式折叠行文案（恒 `思考中…`，无实时秒数 — 见模块注释）。 */
+export function formatThinkingLive(): string {
+  return "思考中…";
 }
 
 /** 折叠态思考预览的行数硬顶（计划 T2：末 2–3 行，取上限 3）。 */

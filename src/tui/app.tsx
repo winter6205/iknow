@@ -669,6 +669,17 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // 渲染用镜像（ref 不触发重渲染，UI 需 state）。frozen>0 时 ChatView 显示
   // 「思考了 N 秒」，否则按静态「思考中…」（无实时秒数，PR 1 后）。
   const [thinkingFrozenSeconds, setThinkingFrozenSeconds] = useState(0);
+  const pinAndStoreThinkingSeconds = (draft: StreamDraft): void => {
+    if (thinkingFrozenRef.current > 0) return;
+    const frozen = pinThinkingSeconds(
+      0,
+      draft.thinkingRaw().length,
+      draft.thinkingSeconds()
+    );
+    if (frozen <= 0) return;
+    thinkingFrozenRef.current = frozen;
+    setThinkingFrozenSeconds(frozen);
+  };
   // 运行时长统计（mode 行右侧实时秒数）：turn 开始打点、运行中 1Hz 递增、
   // turn 结束冻结。runStartedAt 非空 = 运行中（mode 行显示 `· Xs`）；
   // 置 null = 结束（mode 行清空，统计移到消息流末尾 Crunched 行）。
@@ -708,13 +719,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         streamDraft.masked().length > 0 &&
         thinkingFrozenRef.current === 0
       ) {
-        const frozen = pinThinkingSeconds(
-          thinkingFrozenRef.current,
-          streamDraft.thinkingRaw().length,
-          streamDraft.thinkingSeconds()
-        );
-        thinkingFrozenRef.current = frozen;
-        setThinkingFrozenSeconds(frozen);
+        pinAndStoreThinkingSeconds(streamDraft);
       }
     }, 1000);
     return () => {
@@ -1340,17 +1345,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             draftEpoch,
           }),
         }));
-        // 思考后直接 tool_use（无 text_delta）也要钉住秒数，供 turn 折叠
-        // `思考了 N 秒 · bash × N`；已冻结不覆盖。
-        const frozen = pinThinkingSeconds(
-          thinkingFrozenRef.current,
-          draft.thinkingRaw().length,
-          draft.thinkingSeconds()
-        );
-        if (frozen > 0 && thinkingFrozenRef.current === 0) {
-          thinkingFrozenRef.current = frozen;
-          setThinkingFrozenSeconds(frozen);
-        }
+        // 思考后直接 tool_use（无 text_delta）也要钉住秒数，否则结束态
+        // 「思考了 N 秒」根本没有可传的秒；已冻结不覆盖。
+        pinAndStoreThinkingSeconds(draft);
       }
       if (event.type === "tool_input_delta") {
         setLiveToolRuns((prev) => ({
@@ -1471,10 +1468,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       // answer 开始时刻，精确对应「思考结束」）；无冻结（turn 在 answer 前结束，
       // 如 abort）→ 回落 draft 现值。finalThinkingSeconds 恒写入（含 0）——
       // 防子秒 thinking 的 turn 继承上一 turn 残留秒数。
-      const finalThinkingSeconds =
-        thinkingFrozenRef.current > 0
-          ? thinkingFrozenRef.current
-          : draft.thinkingSeconds();
+      const finalThinkingSeconds = pinThinkingSeconds(
+        thinkingFrozenRef.current,
+        draft.thinkingRaw().length,
+        draft.thinkingSeconds()
+      );
       draft.reset();
       setStreamDraft(null);
       thinkingFrozenRef.current = 0;

@@ -9,7 +9,8 @@
  *  - message-blocks.tsx 历史折叠行旧文案 = `思考了 N 秒` / 纯 `[思考]`
  *    （秒数替换 [思考] 标记）。
  * 本模块把两处收敛到同一纯函数，从源头统一：`思考了 N 秒` 本身即带语义，
- * 不再叠加 `[思考]` 前缀；子秒 / 无秒数时回落 `[思考]`（历史）。
+ * 不再叠加 `[思考]` 前缀；子秒 / 无秒数 / 非有限 → 空串（不换括号标签，
+ * 也不造「思考了 0 秒」）。
  * 流式行不再叠加实时秒数（恒 `思考中…`）—— 思考时长由事后 frozen 摘要
  * `思考了 N 秒` 承担，避免与 mode 行运行时长视觉重复 + 语义混淆。
  */
@@ -23,45 +24,64 @@ import {
 } from "../../src/tui/think-fold.js";
 
 describe("formatThinkingFold（历史折叠行文案）", () => {
-  test("seconds > 0 → `思考了 N 秒`（替换 [思考]，不叠加前缀）", () => {
+  test("seconds > 0 → `思考了 N 秒`（不叠加 [思考] 前缀）", () => {
     expect(formatThinkingFold(7)).toBe("思考了 7 秒");
     expect(formatThinkingFold(1)).toBe("思考了 1 秒");
   });
 
-  test("seconds === 0 → `[思考]`（不显「思考了 0 秒」伪精度）", () => {
-    expect(formatThinkingFold(0)).toBe("[思考]");
+  test("empty：0 / undefined → 空串（不换 [思考]、不造 0 秒）", () => {
+    expect(formatThinkingFold(0)).toBe("");
+    expect(formatThinkingFold(undefined)).toBe("");
   });
 
-  test("undefined → `[思考]`（历史消息缺省）", () => {
-    expect(formatThinkingFold(undefined)).toBe("[思考]");
+  test("negative：负值 → 空串", () => {
+    expect(formatThinkingFold(-1)).toBe("");
   });
 
-  test("负值兜底 → `[思考]`", () => {
-    expect(formatThinkingFold(-1)).toBe("[思考]");
+  test("overflow：超大秒数仍格式化，不抛", () => {
+    expect(formatThinkingFold(1e9)).toBe("思考了 1000000000 秒");
+  });
+
+  test("concurrent：同一输入重复调用结果稳定（纯函数）", () => {
+    expect(formatThinkingFold(3)).toBe(formatThinkingFold(3));
+    expect(formatThinkingFold(0)).toBe(formatThinkingFold(0));
+  });
+
+  test("exception：NaN / Infinity → 空串（非有限不当成秒数）", () => {
+    expect(formatThinkingFold(Number.NaN)).toBe("");
+    expect(formatThinkingFold(Number.POSITIVE_INFINITY)).toBe("");
+    expect(formatThinkingFold(Number.NEGATIVE_INFINITY)).toBe("");
+  });
+});
+
+describe("pinThinkingSeconds（思考结束钉秒，供结束态唯一文案）", () => {
+  test("empty：无 thinking 正文 → 0（本来没思考，不造秒数）", () => {
+    expect(pinThinkingSeconds(0, 0, 9)).toBe(0);
+  });
+
+  test("negative：已冻结不覆盖；负 elapsed 且有正文 → 至少 1", () => {
+    expect(pinThinkingSeconds(4, 10, 9)).toBe(4);
+    expect(pinThinkingSeconds(0, 3, -2)).toBe(1);
+  });
+
+  test("overflow：有正文 → floor 秒数", () => {
+    expect(pinThinkingSeconds(0, 3, 6.9)).toBe(6);
+  });
+
+  test("concurrent：同一输入重复钉秒结果稳定", () => {
+    expect(pinThinkingSeconds(0, 8, 2)).toBe(pinThinkingSeconds(0, 8, 2));
+  });
+
+  test("exception：有正文但不足 1 秒 / 非有限 elapsed → 1（思考发生了就要有结束态）", () => {
+    expect(pinThinkingSeconds(0, 12, 0.4)).toBe(1);
+    expect(pinThinkingSeconds(0, 12, Number.NaN)).toBe(1);
+    expect(pinThinkingSeconds(0, 12, Number.POSITIVE_INFINITY)).toBe(1);
   });
 });
 
 describe("formatThinkingLive（流式折叠行文案）", () => {
   test("恒为 `思考中…`（实时秒数已下线 — 思考时长由事后 frozen 摘要承担）", () => {
     expect(formatThinkingLive()).toBe("思考中…");
-  });
-});
-
-describe("pinThinkingSeconds（思考结束钉秒）", () => {
-  test("已冻结不覆盖", () => {
-    expect(pinThinkingSeconds(4, 10, 9)).toBe(4);
-  });
-
-  test("无 thinking 正文 → 0", () => {
-    expect(pinThinkingSeconds(0, 0, 9)).toBe(0);
-  });
-
-  test("有 thinking → floor 秒数", () => {
-    expect(pinThinkingSeconds(0, 3, 6.9)).toBe(6);
-  });
-
-  test("负秒数兜底 → 0", () => {
-    expect(pinThinkingSeconds(0, 3, -2)).toBe(0);
   });
 });
 

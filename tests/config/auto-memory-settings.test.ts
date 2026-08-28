@@ -125,3 +125,23 @@ describe("settings.memory.autoExtract", () => {
     assert.ok(Object.isFrozen(loadIknowSettings({ home, cwd }).memory));
   });
 });
+
+describe("settings.memory.dream", () => {
+  it("reads dream independently when autoExtract is absent", async () => {
+    const { home, cwd } = await makeSettings({}, { memory: { dream: true } });
+    assert.deepEqual(loadIknowSettings({ home, cwd }).memory, { dream: true });
+  });
+
+  it("preserves an explicit false as the default-off value", async () => {
+    const { home, cwd } = await makeSettings({}, { memory: { dream: false } });
+    assert.deepEqual(loadIknowSettings({ home, cwd }).memory, { dream: false });
+  });
+
+  it("drops a non-boolean dream without overwriting the user layer", async () => {
+    const { home, cwd } = await makeSettings(
+      { memory: { dream: true } },
+      { memory: { dream: "yes" } }
+    );
+    assert.deepEqual(loadIknowSettings({ home, cwd }).memory, { dream: true });
+  });
+});

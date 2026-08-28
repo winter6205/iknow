@@ -49,11 +49,18 @@ export {
   DEFAULT_COMPLETED_TURN_GATE,
   createAutoMemoryHook,
 } from "./auto-hook.js";
+export {
+  DREAM_CURSOR_FILENAME,
+  DREAM_MIN_INTERVAL_MS,
+  DREAM_MIN_SESSIONS,
+} from "./dream-cursor.js";
+export { notifyAutoMemory } from "./notify-auto-memory.js";
 export type {
   AutoMemoryHook,
   AutoMemoryHookOptions,
   AutoMemoryTurn,
 } from "./auto-hook.js";
+export type { NotifyAutoMemoryOptions } from "./notify-auto-memory.js";
 
 export type {
   MemoryCandidate,
@@ -65,6 +72,15 @@ export type {
   MemoryPersistDeps,
   PersistedMemoryOp,
 } from "./ingest.js";
+
+export {
+  DREAM_MEMORY_SOURCE,
+  MAX_DREAM_ENTRIES,
+  MAX_DREAM_INPUT_CHARS,
+  buildDreamPrompt,
+  runMemoryDream,
+} from "./dream.js";
+export type { MemoryDreamOptions, MemoryDreamResult } from "./dream.js";
 
 export {
   DEFAULT_MEMORY_STORE_CAP,
@@ -90,6 +106,7 @@ export type { MemoryLayerEntry } from "./discovery.js";
 
 export { scoreMemoryEntries } from "./bm25.js";
 export type { ScoredEntry, ScoreOpts } from "./bm25.js";
+export { tokenize } from "./tokenize.js";
 
 export {
   eligibleForPromote,

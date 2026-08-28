@@ -313,13 +313,13 @@ test("pressBackspace：T6 PromptInput 消费，输入框删除最后一个字符
 });
 
 test("Ctrl+O：toggle 思考面板（折叠→展开→折叠）", async () => {
-  // 需要含 thinking 块的 assistant 答复：折叠态显示 `[思考]`，展开态显示
+  // 需要含 thinking 块的 assistant 答复：折叠态隐藏全文，展开态显示全文。
   // thinking 全文。用完整 mount（TuiApp + bridge）走一轮 turn，然后 Ctrl+O
   // 两次断言可见态翻转。
   const { setup } = await renderAppWithThinking();
-  // 折叠态：思考全文不可见，仅 [思考] 摘要行。
+  // 折叠态：思考全文不可见；无秒数时不画 [思考]。
   let frame = setup.captureCharFrame();
-  expect(frame).toContain("[思考]");
+  expect(frame.includes("[思考]")).toBe(false);
   expect(frame).not.toContain("链上推理");
   // 第一次 Ctrl+O → 展开（toggleThinking false → true）：思考全文可见。
   setup.mockInput.pressKey("o", { ctrl: true });
@@ -330,7 +330,7 @@ test("Ctrl+O：toggle 思考面板（折叠→展开→折叠）", async () => {
   setup.mockInput.pressKey("o", { ctrl: true });
   await settle(setup);
   frame = setup.captureCharFrame();
-  expect(frame).toContain("[思考]");
+  expect(frame.includes("[思考]")).toBe(false);
   expect(frame).not.toContain("链上推理");
   await setup.renderer.destroy();
 });

@@ -5,7 +5,7 @@
  * 是「一张有依赖的图一次性交出去」。父代理声明 DAG，host 走
  * `validateGraph` → `topoWaves`（由 `runGraph` 内部完成）→
  * `createSubAgentNodeExecutor`；节点本身仍是前景 spawn（ADR-0014），所以
- * 并发上限沿用 manager 的全局 4，不另起 per-graph budget。
+ * 并发上限沿用 manager 的全局可配硬顶（默认 15），不另起 per-graph budget。
  *
  * 两道 EXIT：
  *   - graph mode 关着还被调到（同 round 翻键 / 模型幻觉）→ `ToolExecutionError`，

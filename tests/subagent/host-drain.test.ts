@@ -71,7 +71,7 @@ describe("drainPendingSubagents (SC7 host-drain)", () => {
       completedItem("tid-aaa", "summ-A", "result-A-body"),
     ]);
     const out = await drainPendingSubagents(mgr);
-    assert.equal(out, "## Sub-agent tid-aaa result: summ-A\n\nresult-A-body");
+    assert.equal(out, "## Sub-agent tid-aaa result: summ-A\n\nsumm-A");
   });
 
   it("多个 completed → 空行分隔的拼接串", async () => {
@@ -84,9 +84,9 @@ describe("drainPendingSubagents (SC7 host-drain)", () => {
     assert.equal(
       out,
       [
-        "## Sub-agent tid-a result: sA\n\nrA",
-        "## Sub-agent tid-b result: sB\n\nrB",
-        "## Sub-agent tid-c result: sC\n\nrC",
+        "## Sub-agent tid-a result: sA\n\nsA",
+        "## Sub-agent tid-b result: sB\n\nsB",
+        "## Sub-agent tid-c result: sC\n\nsC",
       ].join("\n\n")
     );
   });
@@ -117,8 +117,8 @@ describe("drainPendingSubagents (SC7 host-drain)", () => {
     assert.equal(
       out,
       [
-        "## Sub-agent tid-done-1 result: done1\n\nr1",
-        "## Sub-agent tid-done-2 result: done2\n\nr2",
+        "## Sub-agent tid-done-1 result: done1\n\ndone1",
+        "## Sub-agent tid-done-2 result: done2\n\ndone2",
       ].join("\n\n")
     );
   });
@@ -138,7 +138,10 @@ describe("drainPendingSubagents (SC7 host-drain)", () => {
       },
     ]);
     const out = await drainPendingSubagents(mgr);
-    assert.equal(out, "## Sub-agent tid-fail result: exit code=1\n\n");
+    assert.equal(
+      out,
+      "## Sub-agent tid-fail result: exit code=1\n\nexit code=1"
+    );
   });
 });
 
@@ -166,9 +169,6 @@ describe("isSubagentDrainText / SUBAGENT_DRAIN_PREFIX (SSOT 同源)", () => {
   });
 
   it("trim 后以前缀开头即判定（容忍前导空白）", () => {
-    assert.equal(
-      isSubagentDrainText("  ## Sub-agent t result: s\n\nr"),
-      true
-    );
+    assert.equal(isSubagentDrainText("  ## Sub-agent t result: s\n\nr"), true);
   });
 });

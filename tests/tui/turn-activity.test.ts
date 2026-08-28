@@ -155,13 +155,13 @@ describe("formatToolUseCounts / formatTurnActivityFold", () => {
     ).toBe("思考了 29 秒 · bash × 18 · write_file × 8");
   });
 
-  test("无秒数有工具 → [思考] + 计数（不造 0 秒）", () => {
+  test("无秒数有工具 → 只计数（不换 [思考]、不造 0 秒）", () => {
     expect(formatTurnActivityFold(0, [{ name: "bash", count: 2 }])).toBe(
-      "[思考] · bash × 2"
+      "bash × 2"
     );
     expect(
       formatTurnActivityFold(undefined, [{ name: "bash", count: 1 }])
-    ).toBe("[思考] · bash × 1");
+    ).toBe("bash × 1");
   });
 
   test("无秒数无工具 → 空串", () => {
@@ -197,7 +197,10 @@ describe("toolUseIdsOf / countNamedCalls / mergeToolUseCounts", () => {
           { name: "bash", count: 18 },
           { name: "write_file", count: 8 },
         ],
-        [{ name: "bash", count: 2 }, { name: "grep", count: 1 }]
+        [
+          { name: "bash", count: 2 },
+          { name: "grep", count: 1 },
+        ]
       )
     ).toEqual([
       { name: "bash", count: 20 },
@@ -220,10 +223,13 @@ describe("toolUseIdsOf / countNamedCalls / mergeToolUseCounts", () => {
 
   test("exception：count≤0 的 extra 不进 merge", () => {
     expect(
-      mergeToolUseCounts([{ name: "bash", count: 1 }], [
-        { name: "bash", count: 0 },
-        { name: "x", count: -1 },
-      ])
+      mergeToolUseCounts(
+        [{ name: "bash", count: 1 }],
+        [
+          { name: "bash", count: 0 },
+          { name: "x", count: -1 },
+        ]
+      )
     ).toEqual([{ name: "bash", count: 1 }]);
   });
 });

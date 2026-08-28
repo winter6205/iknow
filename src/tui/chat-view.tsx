@@ -144,7 +144,7 @@ export interface ChatViewProps {
   readonly thinkingDraftMasked?: string;
   /** 最近一次 turn 的 thinking 最终秒数（app 层 turn 结束快照）。传给末条
    *  assistant 消息的 thinking 折叠行 → 显示「思考了 N 秒」留存，turn 结束后
-   *  秒数不随流式草稿清空而消失。缺省 0 → 折叠行只显 `[思考]`。 */
+   *  秒数不随流式草稿清空而消失。缺省 0 → 不画思考摘要（不回落 `[思考]`）。 */
   readonly lastThinkingSeconds?: number;
   /** thinking 阶段冻结秒数（answer 开始时刻快照）：>0 且流式 thinking 草稿
    *  仍在 → 思考已结束、折叠行显示「思考了 N 秒」（不再「思考中…」递增），
@@ -158,7 +158,7 @@ export interface ChatViewProps {
   readonly crunchedSeconds?: number;
   /** askUser 待决提示（undefined = 无 pending ask）。 */
   readonly askLine?: string;
-  /** thinking 折叠面板展开态（false = 折叠成 1 行 [思考]）。 */
+  /** thinking 折叠面板展开态（false = 隐藏 thinking 明文）。 */
   readonly thinkingExpanded?: boolean;
   /**
    * 方案 B：banner 作为滚动区首段内容（与消息共享 scroll space）。
@@ -440,9 +440,7 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             预览窗口（plans/model-idle-thinking-peek.md T2）：思考**进行中**
             才取，`thinkingPeekLines` 硬顶 3 行、`wrapMode="none"` 每行恒占
             1 行 —— 折叠态高度与思考全文长度无关（不把预览当全文高度）。 */}
-        {running &&
-          deferredThinkingDrafts.length > 0 &&
-          !showTurnFold && (
+        {running && deferredThinkingDrafts.length > 0 && !showTurnFold && (
           <box flexDirection="column" width={contentWidth}>
             {thinkingExpanded ? (
               <box width={contentWidth}>

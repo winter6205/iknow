@@ -118,27 +118,29 @@ export function mergeToolUseCounts(
   }));
 }
 
-/** ` · bash × 2 · write_file × 1`；空列表 → 空串。 */
+/** `bash × 2 · write_file × 1`；空列表 → 空串（无前导分隔符）。 */
 export function formatToolUseCounts(
   entries: ReadonlyArray<ToolUseCount>
 ): string {
   if (entries.length === 0) return "";
   return entries
     .filter((e) => e.count > 0)
-    .map((e) => ` · ${e.name} × ${e.count}`)
-    .join("");
+    .map((e) => `${e.name} × ${e.count}`)
+    .join(" · ");
 }
 
 /**
- * idle 折叠行。seconds≤0 且无工具 → 空串（不画「思考了 0 秒」）。
- * 有工具无秒数 → `[思考]` + 计数；有秒数 → `思考了 N 秒` + 计数。
+ * idle 折叠行。seconds≤0 且无工具 → 空串（不画「思考了 0 秒」、不换 `[思考]`）。
+ * 有工具无秒数 → 只计数；有秒数 → `思考了 N 秒` + 计数。
  */
 export function formatTurnActivityFold(
   seconds: number | undefined,
   entries: ReadonlyArray<ToolUseCount>
 ): string {
   const counts = formatToolUseCounts(entries);
-  const s = Math.max(0, Math.floor(seconds ?? 0));
-  if (s <= 0 && counts.length === 0) return "";
-  return `${formatThinkingFold(s > 0 ? s : undefined)}${counts}`;
+  const think = formatThinkingFold(seconds);
+  if (think.length === 0 && counts.length === 0) return "";
+  if (think.length === 0) return counts;
+  if (counts.length === 0) return think;
+  return `${think} · ${counts}`;
 }

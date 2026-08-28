@@ -850,7 +850,7 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
     await untilFrame(app.setup, (f) => f.includes("正式回答"), 8000, "reply");
     // 折叠态：思考全文不可见。
     let frame = app.setup.captureCharFrame();
-    expect(frame).toContain("[思考]");
+    expect(frame.includes("[思考]")).toBe(false);
     expect(frame).not.toContain("链上推理");
 
     // 打开开关面板 + Ctrl+O → 折叠态翻转（思考全文展开可见）。
@@ -866,14 +866,15 @@ describe("thinking-picker app 集成（双面板 + Enter 固定不退出）", ()
     );
     expect(frame).toContain("思考开关"); // 面板仍在（Ctrl+O 未吞键也未关面板）
 
-    // 再 Ctrl+O → 折叠回去（[思考] 摘要可见，全文不可见）。
+    // 再 Ctrl+O → 折叠回去（全文不可见，不回落 [思考]）。
     await app.pressCtrlO();
     frame = await untilFrame(
       app.setup,
-      (f) => f.includes("[思考]") && !f.includes("链上推理"),
+      (f) => f.includes("正式回答") && !f.includes("链上推理"),
       8000,
       "fold-collapsed"
     );
+    expect(frame.includes("[思考]")).toBe(false);
     expect(frame).toContain("思考开关"); // 面板仍在
     await app.destroy();
   }, 30_000);
