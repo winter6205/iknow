@@ -697,7 +697,9 @@ export function createSubAgentManager(opts: {
     child.on("error", (err) => {
       const errMsg = err.message;
       const summary =
-        stderrBuf.length === 0 ? errMsg : `${errMsg}\nstderr tail:\n${stderrBuf}`;
+        stderrBuf.length === 0
+          ? errMsg
+          : `${errMsg}\nstderr tail:\n${stderrBuf}`;
       task.envelope = {
         status: "failed",
         reason: "crashed",
