@@ -65,5 +65,5 @@ minimal-change-verifier: yes — 5 commit 按票拆分;T5 写路径独立不与�
 ## 待写入
 
 - [x] `docs/CONTEXT.md` 新增词条 **memory_prefetch**(含本计划"已定契约"的去重语义:per-conversation id 去重、resume 扫历史恢复、历史 append-only)——2026-08-28 已落盘(domain-modeling,guard exit 0)。
-- [ ] ADR 补记:去重语义是 ADR-0034 D2("每轮可附最多 5 条")的细化而非矛盾,但 ADR-0034 本身在 master 缺档(仅在 `docs/auto-memory-low-trust-read` 分支)——补档时并入去重修订,或先合 docs 分支再追加。**判定:暂不新写 ADR**(避免 0034 缺号 + 内容重复),等操作员裁决 docs 分支合并方式。
+- [x] ADR 补记:ADR-0034 已于 2026-08-28 从 `docs/auto-memory-low-trust-read` 分支补档进 master(连同 low-trust-read spec/plan 与 ADR-0009 D3 修订注);去重语义是 D2 的细化而非矛盾,落在 CONTEXT.md **memory_prefetch** 词条与本计划"已定契约"节,不改写 0034 原文。
 - [ ] T5 落地后:`specs/auto-memory-extract-discipline.md` 纪律清单追加双语关键词条目(spec 归 spec-driven-development 管,由实现票带走)。

@@ -4,7 +4,8 @@ Date: 2026-08-05
 Status: accepted (Decision 5 superseded by ADR-0031)
 
 > **Decision 5 只**（auto-extraction 延期项）superseded by `0031-auto-memory-extract-and-mechanical-gc.md`。
-> D1–D4 / D6（三层落盘、split-frequency 注入、双通道信任、内容纪律、静态 cap）不受影响，仍为现行决策。
+> **Decision 3** 中「`system` 仅一句 existence pointer、nothing more」由 ADR-0034 放宽为：抽取开启且库非空时可追加 **memory_catalog** + 英文纪律句；**未 promote 的条目 body 仍不得进 `system`**。
+> D1 / D2 / D4 / D6 不受影响，仍为现行决策。
 
 ## Context
 
@@ -22,7 +23,7 @@ Six decisions settled in the 2026-08-05 grilling session (Q1–Q6):
 
 2. **Injection timing = split-frequency.** Static layers (both `AGENTS.md` + their `rules/` dirs) load once at session start, cached in memory, refreshed on file mtime change. Auto memory is **never** loaded on a timer or per-turn by default — it is recalled on demand (Decision 3).
 
-3. **Merge strategy = explicit precedence + dual-channel routing.** For hand-written content: project-level beats user-level, stated explicitly in the assembled prompt (ch05's `project > user` mapped to the memory-file domain; CLI/enterprise/session tiers out of scope). Auto memory takes a **separate, lower-trust channel**: it does NOT enter the `system` field by default. The model accesses it through the `memory_recall(query)` tool; results return as `tool_result` content — a low-trust data channel per instruction hierarchy (arXiv 2404.13208), so recalled memories carry no instruction authority. Only after crossing an explicit promote threshold (repeated recall across ≥2 sessions, explicit promotion) may an entry be assembled into a dedicated, capped `system` memory section. The `system` field carries a one-line existence pointer to the memory store, nothing more.
+3. **Merge strategy = explicit precedence + dual-channel routing.** For hand-written content: project-level beats user-level, stated explicitly in the assembled prompt (ch05's `project > user` mapped to the memory-file domain; CLI/enterprise/session tiers out of scope). Auto memory takes a **separate, lower-trust channel**: it does NOT enter the `system` field by default. The model accesses it through the `memory_recall(query)` tool; results return as `tool_result` content — a low-trust data channel per instruction hierarchy (arXiv 2404.13208), so recalled memories carry no instruction authority. Only after crossing an explicit promote threshold (repeated recall across ≥2 sessions, explicit promotion) may an entry be assembled into a dedicated, capped `system` memory section. The `system` field carries a one-line existence pointer to the memory store. ADR-0034 additionally allows a capped live-entry catalog plus a fixed English disclaimer when extract is on — still not un-promoted bodies.
 
 4. **Content discipline.** No `@import` parsing — splitting is by directory convention: `<cwd>/.iknow/rules/*.md` (project) and `~/.iknow/rules/*.md` (user), globbed in filename order and appended after the main `AGENTS.md`. **Affirmative phrasing rule**: hard prohibitions belong in `.iknow/permissions.toml` (mechanical tool-layer enforcement, never entering model context); memory content is written affirmatively ("use bar() instead of foo() — foo() is not thread-safe"); negative-form memory is refused at write time (either upgraded to a permission-gate proposal or rewritten affirmatively). Rationale: negative rules in model context cause capability suppression and self-repeating refusal across turns (arXiv 2607.17619 shows stored preferences silently constraining future decisions), and are a persistent poisoning channel. Auto memory writes only broadly-applicable facts / gotchas / hard constraints — never per-task state (that belongs to session messages).
 
