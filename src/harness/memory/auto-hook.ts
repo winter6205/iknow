@@ -47,6 +47,11 @@ export interface AutoMemoryTurn {
    * in-process conversation. Serve: conversation_id. Absent = no session increment.
    */
   readonly sessionKey?: string;
+  /**
+   * Host-computed: this completed turn already persisted a successful
+   * `memory_save`. When true, extract is skipped even if the N-turn gate is due.
+   */
+  readonly memorySaveSucceeded?: boolean;
 }
 
 export interface AutoMemoryHook {
@@ -142,13 +147,14 @@ export function createAutoMemoryHook(
 
     const transcript = turn.transcript;
     const sessionKey = turn.sessionKey;
+    const skipExtract = turn.memorySaveSucceeded === true;
     chain = chain.then(async () => {
       const live = liveFlags(opts);
       const dreamDue = live.dream
         ? await persistAndEvaluateDreamGate(opts, sessionKey, opts.onError)
         : false;
 
-      if (extractDue && live.enabled) {
+      if (extractDue && live.enabled && !skipExtract) {
         await runExtractPass(opts, transcript, dreamDue);
       }
       if (dreamDue) {

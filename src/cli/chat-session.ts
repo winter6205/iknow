@@ -36,7 +36,7 @@ import {
   writeOut,
 } from "./session-io.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
-import { renderTranscript } from "../harness/auto-memory-wire.js";
+import { renderTranscript, hasSuccessfulMemorySave } from "../harness/auto-memory-wire.js";
 import {
   applyHostPrefetch,
   notifyAutoMemory,
@@ -452,6 +452,9 @@ async function runSkipAppendAndPresent(opts: {
       stopReason: result.stopReason,
       transcript: renderTranscript(result.messages),
       sessionKey: ctx.state.conversationId ?? "chat",
+      memorySaveSucceeded: hasSuccessfulMemorySave(
+        result.messages.slice(priorMessages.length)
+      ),
       onError: (error) =>
         writeErr(
           `[memory/auto] turn hook skipped: ${
@@ -809,6 +812,9 @@ async function runChatQueryLine(
           stopReason: s.result.stopReason,
           transcript: renderTranscript(s.result.messages),
           sessionKey: ctx.state.conversationId ?? "chat",
+          memorySaveSucceeded: hasSuccessfulMemorySave(
+            s.result.messages.slice(s.priorMessages.length)
+          ),
           onError: (error) =>
             writeErr(
               `[memory/auto] turn hook skipped: ${

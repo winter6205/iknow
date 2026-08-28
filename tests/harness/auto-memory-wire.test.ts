@@ -12,6 +12,7 @@ import {
   TRANSCRIPT_CHAR_CAP,
   TRANSCRIPT_MESSAGE_CAP,
   createAdapterExtractLlm,
+  hasSuccessfulMemorySave,
   renderTranscript,
 } from "../../src/harness/auto-memory-wire.ts";
 import type {
@@ -146,5 +147,66 @@ describe("createAdapterExtractLlm", () => {
     const controller = new AbortController();
     await createAdapterExtractLlm(adapter).complete("p", controller.signal);
     assert.equal(seen, controller.signal);
+  });
+});
+
+describe("hasSuccessfulMemorySave", () => {
+  it("is true when this turn persisted a memory_save", () => {
+    assert.equal(
+      hasSuccessfulMemorySave([
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "s1", name: "memory_save", input: {} },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "s1",
+              content: "[memory_save] persisted as abcdef012345.md",
+            },
+          ],
+        },
+      ]),
+      true
+    );
+  });
+
+  it("is false when memory_save failed", () => {
+    assert.equal(
+      hasSuccessfulMemorySave([
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "s1", name: "memory_save", input: {} },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "s1",
+              content: "[memory_save] rejected: negative_form",
+              is_error: true,
+            },
+          ],
+        },
+      ]),
+      false
+    );
+  });
+
+  it("is false when the turn has no memory_save", () => {
+    assert.equal(
+      hasSuccessfulMemorySave([
+        text("user", "hello"),
+        text("assistant", "hi"),
+      ]),
+      false
+    );
   });
 });
