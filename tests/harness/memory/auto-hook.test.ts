@@ -395,4 +395,46 @@ describe("createAutoMemoryHook — dream pass", () => {
       true
     );
   });
+
+  it("still runs mechanical GC when the dream merge throws", async () => {
+    const stale: MemoryEntryV1 = {
+      id: "stale",
+      type: "note",
+      importance: 1,
+      ttl_days: 1,
+      disabled: false,
+      supersedes: null,
+      title: "Stale fact",
+      body: "This fact expired yesterday.",
+      updated_at: "2026-08-20T00:00:00.000Z",
+    };
+    await writeFile(
+      join(memoryDir, "stale.md"),
+      serializeMemoryEntry(stale),
+      "utf8"
+    );
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm: {
+        complete: async () => {
+          throw new Error("merge exploded");
+        },
+      },
+      enabled: false,
+      dream: true,
+      now: () => NOW_ISO,
+      nowMs: Date.parse(NOW_ISO),
+    });
+
+    hook.onTurnComplete({ stopReason: "completed", transcript: "" });
+    hook.onTurnComplete({ stopReason: "completed", transcript: "" });
+    await hook.drain();
+
+    assert.equal(
+      parseMemoryEntry(await readFile(join(memoryDir, "stale.md"), "utf8"))
+        .disabled,
+      true,
+      "TTL GC must still run after a dream failure"
+    );
+  });
 });

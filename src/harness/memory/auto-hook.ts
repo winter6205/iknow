@@ -88,10 +88,9 @@ export function createAutoMemoryHook(
 
     const transcript = turn.transcript;
     chain = chain.then(async () => {
-      try {
-        let ingestResult: MemoryIngestResult | undefined;
-        if (enabled && transcript.trim().length > 0) {
-          ingestResult = await ingestMemory({
+      if (enabled && transcript.trim().length > 0) {
+        try {
+          const ingestResult = await ingestMemory({
             memoryDir: opts.memoryDir,
             transcript,
             llm: opts.llm,
@@ -103,8 +102,14 @@ export function createAutoMemoryHook(
             ...(opts.cap !== undefined ? { cap: opts.cap } : {}),
           });
           opts.onIngest?.(ingestResult);
+        } catch (error) {
+          // EXIT: log-and-continue (ADR-0031 D5). Extract failure must not
+          // skip the later dream/GC stages or fail the user turn.
+          safeReport(opts.onError, error);
         }
-        if (dream) {
+      }
+      if (dream) {
+        try {
           await runMemoryDream({
             memoryDir: opts.memoryDir,
             llm: opts.llm,
@@ -112,17 +117,20 @@ export function createAutoMemoryHook(
             ...(opts.randomBytes ? { randomBytes: opts.randomBytes } : {}),
             ...(opts.ttlDays !== undefined ? { ttlDays: opts.ttlDays } : {}),
           });
+        } catch (error) {
+          // EXIT: log-and-continue — merge failure still yields mechanical GC
+          // so extract SUPERSEDE targets and TTL evictions are not stranded.
+          safeReport(opts.onError, error);
+        }
+        try {
           await runMemoryGc(opts.memoryDir, {
             ...(opts.nowMs !== undefined ? { nowMs: opts.nowMs } : {}),
             ...(opts.cap !== undefined ? { cap: opts.cap } : {}),
           });
+        } catch (error) {
+          // EXIT: log-and-continue — GC is subtractive and must not fail the turn.
+          safeReport(opts.onError, error);
         }
-      } catch (error) {
-        // EXIT: log-and-continue (ADR-0031 D5). The user's turn already
-        // succeeded; a failed extraction is reported to the observer and
-        // dropped. Re-throwing here would reject an unawaited promise and
-        // take the host process down.
-        safeReport(opts.onError, error);
       }
     });
   };
