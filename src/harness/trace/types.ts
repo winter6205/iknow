@@ -287,6 +287,8 @@ export interface SubagentStopRecord {
     "crashed" | "maxTurnsExceeded" | "timeout" | "protocolError" | "cancelled";
   readonly summary?: string;
   readonly error?: TraceError;
+  readonly stderrPath?: string;
+  readonly stderrBytes?: number;
 }
 
 /**

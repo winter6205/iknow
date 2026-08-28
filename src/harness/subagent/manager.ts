@@ -8,8 +8,8 @@
  * 在 ./spawn.ts,T6 接线时由 build-engine 注入。
  */
 import { randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import {
   parseParentEnvelope,
@@ -28,6 +28,7 @@ import type {
 } from "../trace/index.js";
 import { safeTrace } from "../trace/safe-trace.js";
 import { DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS } from "../../config/settings.js";
+import { createOutputMask, currentSecretValues } from "../sandbox/index.js";
 
 // re-export: manager 的调用方(T4/T5 工具、host-drain)统一从 manager 侧拿
 // SubAgentDefinition,不必各自 import role.js。
@@ -255,6 +256,7 @@ const WAIT_POLL_MS = 25;
 const SHUTDOWN_SIGKILL_GRACE_MS = 5000;
 const MAX_STDERR_TAIL_CHARS = SUMMARY_LIMIT;
 const STDERR_DRAIN_GRACE_MS = 500;
+const MAX_STDERR_DIAGNOSTICS_BYTES = 1024 * 1024;
 
 function waitForStderrClose(
   stderr: ChildProcess["stderr"]
@@ -280,6 +282,34 @@ function delayMs(ms: number): Promise<void> {
     const timer = setTimeout(resolvePromise, ms);
     timer.unref?.();
   });
+}
+
+function persistStderrDiagnostics(opts: {
+  readonly diagnosticsDir: string;
+  readonly taskId: string;
+  readonly stderr: Buffer;
+  readonly mask: ReturnType<typeof createOutputMask>;
+}): { readonly path: string; readonly bytes: number } | undefined {
+  const path = join(
+    resolve(opts.diagnosticsDir),
+    "stderr",
+    `${opts.taskId}.log`
+  );
+  const masked = opts.mask.mask(opts.stderr.toString("utf8"));
+  const content = Buffer.from(masked).slice(-MAX_STDERR_DIAGNOSTICS_BYTES);
+  try {
+    mkdirSync(join(resolve(opts.diagnosticsDir), "stderr"), {
+      recursive: true,
+    });
+    writeFileSync(path, content);
+    return { path, bytes: content.byteLength };
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[subagent] stderr diagnostics write skipped for ${opts.taskId}: ${detail}`
+    );
+    return undefined;
+  }
 }
 
 function crashedSummary(
@@ -335,6 +365,11 @@ export function createSubAgentManager(opts: {
    * 发埋点;不注入则零副作用 (与既有行为 byte-stable)。
    */
   readonly trace?: TraceService;
+  /**
+   * Crash diagnostics root. When present, stderr is masked and persisted at
+   * `<diagnosticsDir>/stderr/<taskId>.log` with a 1 MiB cap.
+   */
+  readonly diagnosticsDir?: string;
   /**
    * #358 T2: per-task 缺省 wallclock (毫秒) — 消费链中段:
    * `def.timeoutMs ?? opts.taskTimeoutMs ?? PER_TASK_TIMEOUT_MS`。
@@ -420,6 +455,8 @@ export function createSubAgentManager(opts: {
       readonly reason?: SubagentStopRecord["reason"];
       readonly summary?: string;
       readonly error?: TraceError;
+      readonly stderrPath?: string;
+      readonly stderrBytes?: number;
     } = {}
   ): void {
     if (task.stoppedEmitted) return;
@@ -449,6 +486,12 @@ export function createSubAgentManager(opts: {
         ...(extras.reason !== undefined ? { reason: extras.reason } : {}),
         ...(extras.summary !== undefined ? { summary: extras.summary } : {}),
         ...(extras.error !== undefined ? { error: extras.error } : {}),
+        ...(extras.stderrPath !== undefined
+          ? { stderrPath: extras.stderrPath }
+          : {}),
+        ...(extras.stderrBytes !== undefined
+          ? { stderrBytes: extras.stderrBytes }
+          : {}),
       })
     );
   }
@@ -456,6 +499,7 @@ export function createSubAgentManager(opts: {
   async function settleCrash(opts2: {
     readonly task: Task;
     readonly stderrClosed: Promise<void>;
+    readonly stderr: () => Buffer;
     readonly summary: () => string;
     readonly exitCode?: number | null;
     readonly signal?: NodeJS.Signals | null;
@@ -464,7 +508,8 @@ export function createSubAgentManager(opts: {
     if (task.crashInFlight || task.stoppedEmitted) return;
     task.crashInFlight = true;
     task.endedAt = new Date().toISOString();
-    const initialSummary = opts2.summary();
+    const mask = createOutputMask(currentSecretValues());
+    const initialSummary = mask.mask(opts2.summary());
     const initialError: TraceError = {
       type: "unknown",
       message: initialSummary,
@@ -484,13 +529,28 @@ export function createSubAgentManager(opts: {
       delayMs(STDERR_DRAIN_GRACE_MS),
     ]);
     if (task.stoppedEmitted) return;
-    const summary = opts2.summary();
+    const summary = mask.mask(opts2.summary());
     const error: TraceError = { type: "unknown", message: summary };
+    const stderrDiagnostics =
+      opts.diagnosticsDir !== undefined
+        ? persistStderrDiagnostics({
+            diagnosticsDir: opts.diagnosticsDir,
+            taskId: task.id,
+            stderr: opts2.stderr(),
+            mask,
+          })
+        : undefined;
     task.envelope = { ...task.envelope, summary };
     emitStop(task, "failed", {
       reason: "crashed",
       summary,
       error,
+      ...(stderrDiagnostics !== undefined
+        ? {
+            stderrPath: stderrDiagnostics.path,
+            stderrBytes: stderrDiagnostics.bytes,
+          }
+        : {}),
       ...(opts2.exitCode !== undefined && opts2.exitCode !== null
         ? { exitCode: opts2.exitCode }
         : {}),
@@ -566,12 +626,17 @@ export function createSubAgentManager(opts: {
     task.child = child;
     task.abortCtrl = new AbortController();
     let stderrBuf = "";
+    let stderrCapture = Buffer.alloc(0);
     const stderrClosed = waitForStderrClose(child.stderr);
     child.stderr?.on("data", (chunk: Buffer) => {
       stderrBuf += chunk.toString("utf8");
       // EXIT: bound retained crash diagnostics so stderr cannot grow without limit.
       if (stderrBuf.length > MAX_STDERR_TAIL_CHARS) {
         stderrBuf = stderrBuf.slice(-MAX_STDERR_TAIL_CHARS);
+      }
+      stderrCapture = Buffer.concat([stderrCapture, Buffer.from(chunk)]);
+      if (stderrCapture.byteLength > MAX_STDERR_DIAGNOSTICS_BYTES) {
+        stderrCapture = stderrCapture.slice(-MAX_STDERR_DIAGNOSTICS_BYTES);
       }
     });
 
@@ -738,6 +803,7 @@ export function createSubAgentManager(opts: {
           void settleCrash({
             task,
             stderrClosed,
+            stderr: () => stderrCapture,
             summary: () => crashedSummary(code, signal, stderrBuf),
             exitCode: code,
             signal,
@@ -781,6 +847,7 @@ export function createSubAgentManager(opts: {
       void settleCrash({
         task,
         stderrClosed,
+        stderr: () => stderrCapture,
         summary: () =>
           stderrBuf.length === 0
             ? err.message
