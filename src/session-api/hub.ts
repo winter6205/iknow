@@ -1165,7 +1165,7 @@ export class SessionHub {
                     runFn: (text, o) =>
                       applyHostPrefetch(
                         text,
-                        this.overlayMemoryPrefetch
+                        this.overlayForSession(session.workspaceRoot)
                       ).then((effective) => {
                         queryCommitPrefix = [
                           ...(drained ? [drainedMsg] : []),
@@ -1212,7 +1212,7 @@ export class SessionHub {
                 : await (async () => {
                     const effective = await applyHostPrefetch(
                       query,
-                      this.overlayMemoryPrefetch
+                      this.overlayForSession(session.workspaceRoot)
                     );
                     queryCommitPrefix = [
                       ...(drained ? [drainedMsg] : []),
@@ -2094,6 +2094,7 @@ export class SessionHub {
     shutdown?: () => Promise<void>;
     subagentManager?: SubAgentManager;
     graphAssembly?: GraphAssembly;
+    overlayMemoryPrefetch?: (query: string) => Promise<string>;
   }> {
     const hit = this.engineByRoot.get(root);
     if (hit) return hit;
@@ -2251,6 +2252,19 @@ export class SessionHub {
     // shutdown 缺席 → hub.shutdown() no-op。
     this.cachedShutdown = this.cachedShutdown ?? built.shutdown;
     return this.cachedDeps;
+  }
+
+  private overlayForSession(
+    sessionRoot: string | undefined
+  ): ((query: string) => Promise<string>) | undefined {
+    const mapRoot = sessionRoot ?? this.boundRoot;
+    if (mapRoot !== undefined) {
+      const entry = this.engineByRoot.get(mapRoot);
+      if (entry?.overlayMemoryPrefetch !== undefined) {
+        return entry.overlayMemoryPrefetch;
+      }
+    }
+    return this.overlayMemoryPrefetch;
   }
 
   /**
