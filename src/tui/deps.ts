@@ -31,7 +31,10 @@ import type { GraphAssembly } from "../harness/graph/assembly.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { createJsonlTraceService } from "../harness/trace/index.js";
-import type { AutoMemoryHook } from "../harness/memory/index.js";
+import type {
+  AutoMemoryHook,
+  MemoryLiveFlags,
+} from "../harness/memory/index.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
 import type { AskUser } from "../harness/permission/types.js";
 import { homedir } from "node:os";
@@ -204,6 +207,7 @@ export async function buildTuiDeps(
     graphAssembly?: GraphAssembly;
     autoMemory?: AutoMemoryHook;
     overlayMemoryPrefetch?: (query: string) => Promise<string>;
+    memoryFlags?: MemoryLiveFlags;
   }
 > {
   if (!bundle.env.llm.apiKey) {
@@ -319,5 +323,6 @@ export async function buildTuiDeps(
     ...(built.overlayMemoryPrefetch
       ? { overlayMemoryPrefetch: built.overlayMemoryPrefetch }
       : {}),
+    ...(built.memoryFlags ? { memoryFlags: built.memoryFlags } : {}),
   };
 }

@@ -44,7 +44,9 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   hashSettingsContent,
+  mergeMemoryPatch,
   mergeThinkingPatch,
+  persistMemoryChanges,
   persistThinkingChanges,
   resolveThinkingSettingsPath,
 } from "../../src/config/persist-settings.ts";
@@ -453,5 +455,57 @@ describe("persistThinkingChanges（原子写）", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe("mergeMemoryPatch（纯函数）", () => {
+  test("memory 缺失 → 创建；其它字段原样保留", () => {
+    expect(
+      mergeMemoryPatch(
+        { llm: { model: "m1" } },
+        { autoExtract: true, dream: false }
+      )
+    ).toEqual({
+      llm: { model: "m1" },
+      memory: { autoExtract: true, dream: false },
+    });
+  });
+
+  test("自动记忆关 → 强制 dream false", () => {
+    expect(
+      mergeMemoryPatch(
+        { memory: { autoExtract: true, dream: true } },
+        { autoExtract: false, dream: true }
+      )
+    ).toEqual({ memory: { autoExtract: false, dream: false } });
+  });
+
+  test("非法 boolean → TypeError", () => {
+    expect(() => mergeMemoryPatch({}, { autoExtract: "yes" as never })).toThrow(
+      TypeError
+    );
+  });
+});
+
+describe("persistMemoryChanges（原子写）", () => {
+  test("写回 memory.autoExtract / dream 且保留 llm", async () => {
+    const base = makeTmpRoot("iknow-persist-memory-");
+    const file = join(base, ".iknow", "settings.json");
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ llm: { model: "keep-me" } }, null, 2));
+    const res = await persistMemoryChanges(file, {
+      autoExtract: true,
+      dream: true,
+    });
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    expect(parsed).toEqual({
+      llm: { model: "keep-me" },
+      memory: { autoExtract: true, dream: true },
+    });
+    expect(res.path).toBe(file);
+    expect(res.bytes).toContain("autoExtract");
   });
 });

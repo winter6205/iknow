@@ -99,6 +99,25 @@ describe("createAutoMemoryHook — default OFF", () => {
     await hook.drain();
     assert.equal(llm.calls(), 0);
   });
+
+  it("reads live flags on each turn so TUI can flip autoExtract after wiring", async () => {
+    const llm = countingLlm(FACT);
+    const flags = { autoExtract: false, dream: false };
+    const hook = createAutoMemoryHook(hookOpts(llm, { enabled: false, flags }));
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: which entry point is thread-safe?",
+    });
+    await hook.drain();
+    assert.equal(llm.calls(), 0);
+    flags.autoExtract = true;
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: which entry point is thread-safe?",
+    });
+    await hook.drain();
+    assert.equal(llm.calls(), 1);
+  });
 });
 
 // -- the completed gate ------------------------------------------------------

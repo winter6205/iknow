@@ -121,6 +121,15 @@ import {
   type CommittedThinkingPatch,
   type ThinkingPickerState,
 } from "./thinking-picker.js";
+import {
+  MemoryPicker,
+  applyMemoryPreviewToggle,
+  committedMemoryPatch,
+  memoryPickerRows,
+  reduceMemoryPickerKey,
+  seedMemoryPreview,
+  type CommittedMemoryPatch,
+} from "./memory-picker.js";
 import { computeThinkingOverride, formatEffortLabel } from "./thinking-gate.js";
 import {
   continueExitFromError,
@@ -477,6 +486,21 @@ export interface TuiAppProps {
   readonly onPersistThinking?: (
     patch: CommittedThinkingPatch
   ) => Promise<{ ok: true } | { ok: false; reason: string }>;
+  /**
+   * /memory 面板 Esc 写回 settings.memory。可选：缺省 → 仅会话内预览
+   * （测试兼容）。live flags 由宿主注入，Esc 时同步改盒内字段。
+   */
+  readonly onPersistMemory?: (
+    patch: CommittedMemoryPatch
+  ) => Promise<{ ok: true } | { ok: false; reason: string }>;
+  readonly defaultMemory?: {
+    readonly autoExtract?: boolean;
+    readonly dream?: boolean;
+  };
+  readonly memoryFlags?: {
+    autoExtract: boolean;
+    dream: boolean;
+  };
 }
 
 interface Notice {
@@ -607,6 +631,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // 退出才写 thinkingEffort）。
   const [effortFixedIndex, setEffortFixedIndex] = useState<number>(
     effortToDisplayIndex(thinkingEffort)
+  );
+  const [memoryPickerOpen, setMemoryPickerOpen] = useState(false);
+  const [memoryFocusIndex, setMemoryFocusIndex] = useState<0 | 1>(0);
+  const [memoryCommitted, setMemoryCommitted] = useState(() =>
+    seedMemoryPreview(props.defaultMemory)
+  );
+  const [memoryPreview, setMemoryPreview] = useState(() =>
+    seedMemoryPreview(props.defaultMemory)
   );
   // 档位面板自适应态（/effort）：Space/Tab 切换；Esc 保存退出时 autoOn 优先写
   // ""=自适应（保持 auto，不降级到 concrete）。seed = 当前 thinkingEffort===""
@@ -1129,6 +1161,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     setRewindConfirming(false);
     setRewindIndex(0);
     setThinkingPickerOpen(null);
+    setMemoryPickerOpen(false);
   }
   async function openSessionAt(index: number): Promise<void> {
     if (index === 0) {
@@ -1177,6 +1210,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     setRewindConfirming(false);
     setRewindIndex(0);
     setThinkingPickerOpen(null);
+    setMemoryPickerOpen(false);
   }
 
   // ── turn 发送 ───────────────────────────────────────────────────
@@ -1773,6 +1807,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         // Space/Tab 翻转预览、Esc 保存退出写 thinkingEnabled。不碰 effort。
         setThinkingPickerOpen("thinking");
         setSwitchPreview(thinkingEnabled);
+        setMemoryPickerOpen(false);
         return;
       }
       case "effort": {
@@ -1802,6 +1837,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         setEffortAutoOn(seed === "");
         setEffortFocusIndex(effortToDisplayIndex(seed));
         setEffortFixedIndex(effortToDisplayIndex(seed)); // /effort <level> 直接固定该档
+        setMemoryPickerOpen(false);
+        return;
+      }
+      case "memory": {
+        setThinkingPickerOpen(null);
+        setMemoryPickerOpen(true);
+        setMemoryFocusIndex(0);
+        setMemoryPreview(memoryCommitted);
         return;
       }
       case "compact": {
@@ -1977,6 +2020,34 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     );
   }
 
+  function persistMemoryFromCommit(patch: CommittedMemoryPatch): void {
+    if (props.memoryFlags !== undefined) {
+      props.memoryFlags.autoExtract = patch.autoExtract;
+      props.memoryFlags.dream = patch.dream;
+    }
+    if (props.onPersistMemory === undefined) return;
+    void props.onPersistMemory(patch).then(
+      (res) => {
+        if (!res.ok) {
+          setNotice({
+            lines: [
+              `记忆设置已生效（本次会话），但写回 settings.json 失败：${res.reason}`,
+            ],
+          });
+        }
+      },
+      (err) => {
+        setNotice({
+          lines: [
+            `记忆设置已生效（本次会话），但写回 settings.json 失败：${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          ],
+        });
+      }
+    );
+  }
+
   // ── 全局键位（Ctrl+C / Shift+Tab / Ctrl+O / modal） ────
   useKeyboard((e) => {
     if (e.eventType !== "press") return;
@@ -2082,6 +2153,34 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     // 与 /thinking 的开关（thinkingEnabled）解耦。
     if (e.ctrl && e.name === "o") {
       toggleThinkingFold();
+      return;
+    }
+    if (memoryPickerOpen) {
+      const action = reduceMemoryPickerKey(modalKeyEventOf(e), {
+        focusedIndex: memoryFocusIndex,
+      });
+      switch (action.type) {
+        case "move":
+          setMemoryFocusIndex(action.index);
+          break;
+        case "toggle": {
+          const row = memoryFocusIndex === 0 ? "autoExtract" : "dream";
+          setMemoryPreview((prev) => applyMemoryPreviewToggle(prev, row));
+          break;
+        }
+        case "fix":
+          break;
+        case "commit": {
+          const patch = committedMemoryPatch(memoryPreview);
+          setMemoryCommitted(patch);
+          setMemoryPreview(patch);
+          setMemoryPickerOpen(false);
+          persistMemoryFromCommit(patch);
+          break;
+        }
+        case "ignore":
+          break;
+      }
       return;
     }
     // design-25 thinking-picker（双面板版）：picker 活跃时独占键位。优先级纪律
@@ -2283,7 +2382,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const pickerRowsForBudget =
     view === "chat" && thinkingPickerOpen !== null
       ? thinkingPickerRows(thinkingPickerOpen)
-      : 0;
+      : view === "chat" && memoryPickerOpen
+        ? memoryPickerRows()
+        : 0;
   // 面板判别联合（渲染槽 + 类型标注共用，SSOT）。
   const pickerState: ThinkingPickerState | null =
     view === "chat" && thinkingPickerOpen !== null
@@ -2434,6 +2535,15 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         </box>
       )}
       {pickerState !== null && <ThinkingPicker state={pickerState} />}
+      {view === "chat" && memoryPickerOpen && (
+        <MemoryPicker
+          state={{
+            focusedIndex: memoryFocusIndex,
+            autoExtract: memoryPreview.autoExtract,
+            dream: memoryPreview.dream,
+          }}
+        />
+      )}
       {view === "chat" && (
         <ModalHost
           modal={
@@ -2493,21 +2603,24 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           placeholder={
             rewindTargets !== undefined
               ? "回退选择器中（↑↓ 选择 · Enter 确认 · Esc 关闭）"
-              : thinkingPickerOpen === "thinking"
-                ? "思考开关中（Space 切换 · Enter 固定 · Esc 保存退出）"
-                : thinkingPickerOpen === "effort"
-                  ? "思考强度中（←/→ 选档 · Tab 自动 · Enter 固定 · Esc 保存退出）"
-                  : askPending
-                    ? askModalActive
-                      ? "modal 键位接管中（Esc 退回输入）"
-                      : "y/a/n 确认工具授权（a=总是允许）"
-                    : "输入消息或 /help"
+              : memoryPickerOpen
+                ? "记忆开关中（↑↓ 选择 · Space 切换 · Enter 固定 · Esc 保存退出）"
+                : thinkingPickerOpen === "thinking"
+                  ? "思考开关中（Space 切换 · Enter 固定 · Esc 保存退出）"
+                  : thinkingPickerOpen === "effort"
+                    ? "思考强度中（←/→ 选档 · Tab 自动 · Enter 固定 · Esc 保存退出）"
+                    : askPending
+                      ? askModalActive
+                        ? "modal 键位接管中（Esc 退回输入）"
+                        : "y/a/n 确认工具授权（a=总是允许）"
+                      : "输入消息或 /help"
           }
           active={active.runState === "running-fg"}
           disabled={
             askModalActive ||
             rewindTargets !== undefined ||
             thinkingPickerOpen !== null ||
+            memoryPickerOpen ||
             graphChromeFocus === "graph" ||
             graphViewOpen
           }

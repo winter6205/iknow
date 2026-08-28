@@ -33,6 +33,7 @@ describe("parseTuiInput: 词表命中", () => {
     ["/help", "help"],
     ["/info", "info"],
     ["/thinking", "thinking"],
+    ["/memory", "memory"],
     ["/compact", "compact"],
     ["/continue", "continue"],
     ["/rewind", "rewind"],
@@ -104,7 +105,7 @@ describe("parseTuiInput: 普通消息与边界", () => {
 });
 
 describe("helpLines", () => {
-  test("覆盖全部 13 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
+  test("覆盖全部 14 条词表命令 + Ctrl+C 说明 + 鼠标拖选提示，且无 emoji；Ctrl+Y 已移除", () => {
     const joined = helpLines().join("\n");
     for (const cmd of [
       "/sessions",
@@ -114,6 +115,7 @@ describe("helpLines", () => {
       "/help",
       "/thinking",
       "/effort",
+      "/memory",
       "/quit",
       "/exit",
       "/compact",
@@ -139,7 +141,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  test('"/" → 全部 13 条静态命令（按词表插入顺序，kind="command"；rewind + mcp + graph，无 /profile）', () => {
+  test('"/" → 全部 14 条静态命令（按词表插入顺序，kind="command"；rewind + mcp + graph，无 /profile）', () => {
     expect(slashSuggestions("/")).toEqual([
       { kind: "command", command: "sessions" },
       { kind: "command", command: "new" },
@@ -149,6 +151,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       { kind: "command", command: "info" },
       { kind: "command", command: "thinking" },
       { kind: "command", command: "effort" },
+      { kind: "command", command: "memory" },
       { kind: "command", command: "compact" },
       { kind: "command", command: "continue" },
       { kind: "command", command: "rewind" },
@@ -205,6 +208,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       { kind: "command", command: "info" },
       { kind: "command", command: "thinking" },
       { kind: "command", command: "effort" },
+      { kind: "command", command: "memory" },
       { kind: "command", command: "compact" },
       { kind: "command", command: "continue" },
       { kind: "command", command: "rewind" },
@@ -683,8 +687,9 @@ describe("#361 Phase D /mcp 词表", () => {
     });
   });
 
-  test('"/m" 前缀 → 唯一候选 mcp（不与任何旧命令前缀冲突）', () => {
+  test('"/m" 前缀 → mcp 与 memory 两个候选', () => {
     expect(slashSuggestions("/m")).toEqual([
+      { kind: "command", command: "memory" },
       { kind: "command", command: "mcp" },
     ]);
   });
@@ -890,5 +895,29 @@ describe("/continue 词表", () => {
     expect(
       parseSkillLoad("/continue", [{ name: "continue-task", description: "x" }])
     ).toBeUndefined();
+  });
+});
+
+describe("/memory 词表", () => {
+  test("/memory → command memory", () => {
+    expect(parseTuiInput("/memory")).toEqual({
+      kind: "command",
+      command: "memory",
+    });
+  });
+
+  test('"/" 全部候选含 memory（紧邻 effort 之后）', () => {
+    const all = slashSuggestions("/");
+    const effortIdx = all.findIndex(
+      (c) => c.kind === "command" && c.command === "effort"
+    );
+    const memoryIdx = all.findIndex(
+      (c) => c.kind === "command" && c.command === "memory"
+    );
+    expect(memoryIdx).toBe(effortIdx + 1);
+  });
+
+  test("/help 含 /memory 行", () => {
+    expect(helpLines().join("\n")).toContain("/memory");
   });
 });

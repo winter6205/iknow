@@ -79,14 +79,39 @@ export interface AutoMemoryHookOptions {
   readonly onError?: (error: unknown) => void;
   /** Observer for completed passes. Absent = silent. */
   readonly onIngest?: (result: MemoryIngestResult) => void;
+  /**
+   * Live TUI flags. When present, `onTurnComplete` reads them each call
+   * instead of snapshotting `enabled` / `dream` at construction.
+   */
+  readonly flags?: MemoryLiveFlags;
+}
+
+/** Mutable box the TUI mutates on /memory Esc without rebuilding the hook. */
+export interface MemoryLiveFlags {
+  autoExtract: boolean;
+  dream: boolean;
+}
+
+function liveFlags(opts: AutoMemoryHookOptions): {
+  enabled: boolean;
+  dream: boolean;
+} {
+  if (opts.flags !== undefined) {
+    return {
+      enabled: opts.flags.autoExtract === true,
+      dream: opts.flags.dream === true,
+    };
+  }
+  return {
+    enabled: opts.enabled === true,
+    dream: opts.dream === true,
+  };
 }
 
 export function createAutoMemoryHook(
   opts: AutoMemoryHookOptions
 ): AutoMemoryHook {
   const gate = requireGate(opts.minCompletedTurns);
-  const enabled = opts.enabled === true;
-  const dream = opts.dream === true;
 
   let completedTurns = 0;
   // Single-slot chain: each pass waits for the previous one, so two turns
@@ -94,6 +119,7 @@ export function createAutoMemoryHook(
   let chain: Promise<void> = Promise.resolve();
 
   const onTurnComplete = (turn: AutoMemoryTurn): void => {
+    const { enabled, dream } = liveFlags(opts);
     if (!enabled && !dream) return;
     if (turn.stopReason !== "completed") return;
     const extractEligible = enabled && turn.transcript.trim().length > 0;
@@ -112,11 +138,12 @@ export function createAutoMemoryHook(
     const transcript = turn.transcript;
     const sessionKey = turn.sessionKey;
     chain = chain.then(async () => {
-      const dreamDue = dream
+      const live = liveFlags(opts);
+      const dreamDue = live.dream
         ? await persistAndEvaluateDreamGate(opts, sessionKey, opts.onError)
         : false;
 
-      if (extractDue) {
+      if (extractDue && live.enabled) {
         await runExtractPass(opts, transcript, dreamDue);
       }
       if (dreamDue) {

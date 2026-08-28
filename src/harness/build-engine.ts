@@ -69,6 +69,7 @@ import {
   createAutoMemoryHook,
   buildMemoryPrefetchOverlay,
   type AutoMemoryHook,
+  type MemoryLiveFlags,
 } from "./memory/index.js";
 import { createAdapterExtractLlm } from "./auto-memory-wire.js";
 import {
@@ -243,6 +244,11 @@ export type BuiltEngine = {
    * the user payload; it must never be written to `deps.system`.
    */
   readonly overlayMemoryPrefetch?: (query: string) => Promise<string>;
+  /**
+   * TUI live flags for /memory. Present when surface is `tui` and the memory
+   * layer is on. The TUI mutates this box on Esc; the hook reads it per turn.
+   */
+  readonly memoryFlags?: MemoryLiveFlags;
 };
 
 /**
@@ -725,16 +731,23 @@ export async function buildHarnessEngine(
   const engine = createLoopEngine(deps);
   // auto-memory T4 / ADR-0031 D1+D5:三重同门 —— 显式 opt-in、memory 层在场、
   // 非 ask 表面。任一不成立 → 钩子缺席,宿主侧零调用、零 LLM、零写盘。
+  // TUI 例外：层在场时始终装配钩子 + live flags，让 /memory 能在本会话翻转。
   // 读路径预取只跟 autoExtract（dream-only 不灌用户消息）。
   const autoExtractOn = settings.memory?.autoExtract === true;
   const dreamOn = settings.memory?.dream === true;
+  const memoryFlags: MemoryLiveFlags = {
+    autoExtract: autoExtractOn,
+    dream: dreamOn,
+  };
+  const tuiLive = surface === "tui" && memoryEnabled;
   const autoMemory =
-    memoryEnabled && surface !== "ask" && (autoExtractOn || dreamOn)
+    memoryEnabled && surface !== "ask" && (autoExtractOn || dreamOn || tuiLive)
       ? createAutoMemoryHook({
           memoryDir,
           llm: createAdapterExtractLlm(adapter),
           enabled: autoExtractOn,
           dream: dreamOn,
+          flags: memoryFlags,
           onError: (error) => {
             console.warn(
               `[memory/auto] ingest skipped: ${
@@ -745,8 +758,9 @@ export async function buildHarnessEngine(
         })
       : undefined;
   const overlayMemoryPrefetch =
-    memoryEnabled && surface !== "ask" && autoExtractOn
+    memoryEnabled && surface !== "ask" && (autoExtractOn || tuiLive)
       ? async (query: string): Promise<string> => {
+          if (memoryFlags.autoExtract !== true) return "";
           try {
             return await buildMemoryPrefetchOverlay({ memoryDir, query });
           } catch (error) {
@@ -765,6 +779,7 @@ export async function buildHarnessEngine(
     engine,
     ...(autoMemory ? { autoMemory } : {}),
     ...(overlayMemoryPrefetch ? { overlayMemoryPrefetch } : {}),
+    ...(tuiLive ? { memoryFlags } : {}),
     ...(subagentManager ? { subagentManager } : {}),
     // #337 T8 / #361 Phase D:透出 skillCatalog + mcpManager + catalog,供
     // TUI deps 构建扩展面(TuiExtensions.skillCatalog / mcp.status / mcp.reload /
