@@ -240,13 +240,19 @@ export function truncateEnvelopeResult(
   env: SubAgentEnvelope
 ): SubAgentEnvelope {
   if (env.result.length <= TRUNCATION_LIMIT) {
-    if (env.status === "failed" && env.summary.length === 0) {
+    if (
+      env.status === "failed" &&
+      env.summary.length === 0 &&
+      env.reason !== "timeout"
+    ) {
       return { ...env, summary: failedSummary(env) };
     }
     return env;
   }
   const summary =
-    env.status === "failed" && env.summary.length === 0
+    env.status === "failed" &&
+    env.summary.length === 0 &&
+    env.reason !== "timeout"
       ? failedSummary(env)
       : shortSummary(env.summary, env.result);
   const handoff = shortHandoff(summary, env.fileRefs, env.stop_reason);
