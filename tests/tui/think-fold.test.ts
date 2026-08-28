@@ -19,6 +19,7 @@ import {
   THINKING_PEEK_MAX_LINES,
   formatThinkingFold,
   formatThinkingLive,
+  pinThinkingSeconds,
   thinkingPeekLines,
 } from "../../src/tui/think-fold.js";
 
@@ -50,6 +51,31 @@ describe("formatThinkingFold（历史折叠行文案）", () => {
     expect(formatThinkingFold(Number.NaN)).toBe("");
     expect(formatThinkingFold(Number.POSITIVE_INFINITY)).toBe("");
     expect(formatThinkingFold(Number.NEGATIVE_INFINITY)).toBe("");
+  });
+});
+
+describe("pinThinkingSeconds（思考结束钉秒，供结束态唯一文案）", () => {
+  test("empty：无 thinking 正文 → 0（本来没思考，不造秒数）", () => {
+    expect(pinThinkingSeconds(0, 0, 9)).toBe(0);
+  });
+
+  test("negative：已冻结不覆盖；负 elapsed 且有正文 → 至少 1", () => {
+    expect(pinThinkingSeconds(4, 10, 9)).toBe(4);
+    expect(pinThinkingSeconds(0, 3, -2)).toBe(1);
+  });
+
+  test("overflow：有正文 → floor 秒数", () => {
+    expect(pinThinkingSeconds(0, 3, 6.9)).toBe(6);
+  });
+
+  test("concurrent：同一输入重复钉秒结果稳定", () => {
+    expect(pinThinkingSeconds(0, 8, 2)).toBe(pinThinkingSeconds(0, 8, 2));
+  });
+
+  test("exception：有正文但不足 1 秒 / 非有限 elapsed → 1（思考发生了就要有结束态）", () => {
+    expect(pinThinkingSeconds(0, 12, 0.4)).toBe(1);
+    expect(pinThinkingSeconds(0, 12, Number.NaN)).toBe(1);
+    expect(pinThinkingSeconds(0, 12, Number.POSITIVE_INFINITY)).toBe(1);
   });
 });
 

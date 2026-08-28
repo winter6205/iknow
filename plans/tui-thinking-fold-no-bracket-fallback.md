@@ -16,4 +16,6 @@ minimal-change-verifier: yes — 1 逻辑任务、1 commit
 ## Tasks
 
 1. **RED/GREEN：formatThinkingFold 无秒 → 空串** — tag: `[implementation]`
-2. **配套：turn-activity / MessageBlocks / 既有 TUI 测试合同**
+2. **收尾：首个 tool_call 也钉秒；有思考正文不足 1s → 1** — tag: `[implementation]`
+   - 结束态仍只有 `思考了 N 秒`。没有秒数可传时那一行不画（不是第二种说法）。
+   - 本 turn 内思考确实发生过时必须能钉住秒（含思考后直接 tool_use）。

@@ -35,6 +35,25 @@ export function formatThinkingFold(seconds: number | undefined): string {
   return `思考了 ${s} 秒`;
 }
 
+/**
+ * 思考阶段结束时钉住秒数：已冻结不覆盖；无 thinking 正文 → 0。
+ * 触发点 = answer 开始 **或** 首个 tool_call（思考后直接调工具、没有
+ * text_delta 时也要留下秒数，否则结束态那一行根本不画）。
+ * 有正文但 elapsed 不足 1 秒 / 非有限 → 1（思考发生了就要有「思考了 N 秒」，
+ * 不造「思考了 0 秒」、也不留空行）。
+ */
+export function pinThinkingSeconds(
+  alreadyFrozen: number,
+  thinkingRawLength: number,
+  elapsedSeconds: number
+): number {
+  if (alreadyFrozen > 0) return alreadyFrozen;
+  if (thinkingRawLength <= 0) return 0;
+  const elapsed = Math.floor(elapsedSeconds);
+  if (!Number.isFinite(elapsed) || elapsed <= 0) return 1;
+  return elapsed;
+}
+
 /** 流式折叠行文案（恒 `思考中…`，无实时秒数 — 见模块注释）。 */
 export function formatThinkingLive(): string {
   return "思考中…";
