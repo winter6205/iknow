@@ -34,37 +34,73 @@ function makeOldFile(
   return path;
 }
 
+function makeOldSession(
+  name: string,
+  content: string,
+  ageMinutes = 10
+): string {
+  const path = join(scratch, name);
+  writeFileSync(path, content);
+  const old = new Date(Date.now() - ageMinutes * 60 * 1000);
+  utimesSync(path, old, old);
+  return path;
+}
+
 describe("trace rotation", () => {
-  it("deletes oldest managed files when either cap is exceeded at factory creation", () => {
-    const oldest = makeOldFile("old.jsonl", 2, 30);
-    makeOldFile("middle.jsonl", 2, 20);
-    makeOldFile("newest.jsonl", 2, 10);
+  it("deletes a small no-error session before an older larger error session", () => {
+    const errorSession = makeOldSession(
+      "error.jsonl",
+      '{"status":"error","message":"' + "x".repeat(30) + '"}\n',
+      30
+    );
+    const noErrorSession = makeOldSession(
+      "no-error.jsonl",
+      '{"status":"ok"}\n',
+      10
+    );
 
     createJsonlTraceService({
       filePath: scratch,
       conversationId: "new-session",
-      rotation: { maxFiles: 2, maxTotalBytes: 100 },
+      rotation: { maxFiles: 1, maxTotalBytes: 100 },
       writer: () => {},
     });
 
-    assert.equal(existsSync(oldest), false);
-    assert.equal(existsSync(join(scratch, "middle.jsonl")), true);
-    assert.equal(existsSync(join(scratch, "newest.jsonl")), true);
+    assert.equal(existsSync(noErrorSession), false);
+    assert.equal(existsSync(errorSession), true);
   });
 
-  it("deletes oldest files until the total byte cap is satisfied", () => {
-    const oldest = makeOldFile("old.jsonl", 5, 20);
-    makeOldFile("new.jsonl", 5, 10);
+  it("preserves subagent.jsonl and stderr logs when rotation is over cap", () => {
+    mkdirSync(join(scratch, "stderr"));
+    const subagent = makeOldFile("subagent.jsonl", 2, 30);
+    const stderr = makeOldFile("stderr/crash.log", 2, 20);
+    const session = makeOldSession("session.jsonl", '{"status":"ok"}\n', 10);
 
     createJsonlTraceService({
       filePath: scratch,
       conversationId: "new-session",
-      rotation: { maxFiles: 100, maxTotalBytes: 6 },
+      rotation: { maxFiles: 1, maxTotalBytes: 100 },
       writer: () => {},
     });
 
-    assert.equal(existsSync(oldest), false);
-    assert.equal(existsSync(join(scratch, "new.jsonl")), true);
+    assert.equal(existsSync(subagent), true);
+    assert.equal(existsSync(stderr), true);
+    assert.equal(existsSync(session), false);
+  });
+
+  it("deletes the older no-error file when same-size sessions compete", () => {
+    const older = makeOldSession("older.jsonl", '{"status":"ok"}\n', 20);
+    const newer = makeOldSession("newer.jsonl", '{"status":"ok"}\n', 10);
+
+    createJsonlTraceService({
+      filePath: scratch,
+      conversationId: "new-session",
+      rotation: { maxFiles: 1, maxTotalBytes: 100 },
+      writer: () => {},
+    });
+
+    assert.equal(existsSync(older), false);
+    assert.equal(existsSync(newer), true);
   });
 
   it("does not delete files when rotation is disabled by environment", () => {
@@ -105,21 +141,4 @@ describe("trace rotation", () => {
     assert.equal(existsSync(oldest), false);
   });
 
-  it("rotates subagent and stderr files with the session files", () => {
-    mkdirSync(join(scratch, "stderr"));
-    const oldest = makeOldFile("subagent.jsonl", 2);
-    const stderr = makeOldFile("stderr/old.log", 2);
-    const older = new Date(Date.now() - 20 * 60 * 1000);
-    utimesSync(oldest, older, older);
-
-    createJsonlTraceService({
-      filePath: scratch,
-      conversationId: "new-session",
-      rotation: { maxFiles: 1, maxTotalBytes: 100 },
-      writer: () => {},
-    });
-
-    assert.equal(existsSync(oldest), false);
-    assert.equal(existsSync(stderr), true);
-  });
 });
