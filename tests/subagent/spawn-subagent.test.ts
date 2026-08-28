@@ -37,6 +37,7 @@ import {
   SubAgentAbortError,
   SubAgentWaitTimeoutError,
 } from "../../src/harness/subagent/manager.ts";
+import { DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS } from "../../src/config/settings.ts";
 import { TIMEOUT_TIER_MS } from "../../src/harness/aci/types.ts";
 import { ToolExecutionError } from "../../src/harness/errors.ts";
 import {
@@ -340,7 +341,7 @@ describe("spawn_subagent — #357 T1: SubAgentSandboxRootError → ToolExecution
 
 /**
  * #557 T1 — spawn_subagent.description = 工具用法 SSOT。
- * 主题以 issue #555 评论为准（何时派、阻塞或并行、wait:false、无 envelope 不谎报），
+ * 主题以 issue #555 评论为准（何时派、阻塞或并行、wait:false、短交差与容量），
  * 不写嵌套政策（嵌套禁止由代码保证，不在 description 表达）。
  */
 describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
@@ -352,7 +353,7 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
     }).description;
   });
 
-  it("写入 5 主题：何时用 / 默认阻塞 / 并行 / wait:false 轮询 / 无 envelope 不谎报", () => {
+  it("写入 5 主题：何时用 / 默认阻塞 / 独立并行 / wait:false 轮询 / 短交差与容量", () => {
     // 1. 何时用：multi-step exploration / independent verification / parallelizable work → 派 sub-agent
     expect(description).toMatch(/multi-step exploration/);
     expect(description).toMatch(/independent verification/);
@@ -360,23 +361,33 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
     // 2. 默认阻塞：wait:true → blocks until sub-agent finishes；缺省墙钟 = 2h（PER_TASK），可 timeoutMs 覆盖。禁止再写 5 min（会诱导模型传 300000）。
     expect(description).toMatch(/wait[:\s]*true/i);
     expect(description).toMatch(/blocks? until/i);
-    expect(description).toMatch(/envelope/i);
+    expect(description).toMatch(/parent-visible short handoff/i);
     expect(description).not.toMatch(/5\s*min/i);
     expect(description).toMatch(/2\s*h(?:ours?)?/i);
     expect(description).toMatch(/timeoutMs/i);
-    // 3. 并行：同一 turn 多次 spawn_subagent 跑独立任务
+    // 3. 并行：同一 turn 多次 spawn_subagent 仅跑相互独立的自包含任务
     expect(description).toMatch(/multiple.*spawn_subagent/s);
     expect(description).toMatch(/one (?:single )?turn/i);
     expect(description).toMatch(/parallel/i);
+    expect(description).toMatch(/independent/i);
+    expect(description).toMatch(/self-contained/i);
     // 4. wait:false → 立即返回 {task_id},用 subagent_result 轮询
     expect(description).toMatch(/wait[:\s]*false/i);
     expect(description).toMatch(/task_id/i);
     expect(description).toMatch(/subagent_result/i);
-    // 5. 无 envelope 不谎报：envelope 是 sub-agent 状态的唯一真值，running 不能从 elapsed time / return shape 等推断
-    expect(description).toMatch(/sole ground truth|ground truth/i);
-    expect(description).toMatch(/observable/i);
-    expect(description).toMatch(/elapsed time/i);
-    expect(description).toMatch(/return shape/i);
+    // 5. 父可见短交差与容量：summary / paths / status / stop_reason；超限不排队
+    expect(description).toMatch(/summary/i);
+    expect(description).toMatch(/paths?/i);
+    expect(description).toMatch(/status/i);
+    expect(description).toMatch(/stop[_ ]reason/i);
+    expect(description).toMatch(new RegExp(String(DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS)));
+    expect(description).toMatch(/at capacity/i);
+    expect(description).toMatch(/reduce concurrency/i);
+    expect(description).toMatch(/not queued|rather than queued/i);
+    expect(description).toMatch(/general-purpose/);
+    expect(description).not.toMatch(/sole ground truth|ground truth/i);
+    expect(description).not.toMatch(/full result envelope/i);
+    expect(description).not.toMatch(/Fork|worktree/i);
   });
 
   it("不写入嵌套政策(nested / one level / caps at 等措辞)", () => {
@@ -752,9 +763,9 @@ describe("spawn_subagent description — #556 T3 prose list 段 (catalog entries
   });
 
   it("prose list 在原描述之后追加 (不动现有 SSOT 段)", () => {
-    // 原描述的 "Delegate multi-step exploration" 必须仍然出现在 prose list
-    // 段之前。
-    const introIdx = description.indexOf("Delegate multi-step exploration");
+    // 原描述的 "Delegate a self-contained task" 必须仍然出现在 prose
+    // list 段之前。
+    const introIdx = description.indexOf("Delegate a self-contained task");
     const proseIdx = description.indexOf("Available subagent types");
     expect(introIdx).toBeGreaterThanOrEqual(0);
     expect(proseIdx).toBeGreaterThan(introIdx);

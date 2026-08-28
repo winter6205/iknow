@@ -196,6 +196,21 @@ describe("subagent_result — AciToolDef 元数据", () => {
     expect(tool.aci.lazy).toBe(false);
   });
 
+  it("description 说明父可见短交差字段，不宣称 full envelope 是唯一真值", () => {
+    const description = createSubAgentResultTool({
+      manager: makeFakeManager(),
+    }).description;
+    expect(description).toMatch(/parent-visible/i);
+    expect(description).toMatch(/short (?:handoff|summary)/i);
+    expect(description).toMatch(/summary/i);
+    expect(description).toMatch(/paths?/i);
+    expect(description).toMatch(/status/i);
+    expect(description).toMatch(/stop[_ ]reason/i);
+    expect(description).not.toMatch(/full envelope/i);
+    expect(description).not.toMatch(/sole ground truth|ground truth/i);
+    expect(description).not.toMatch(/Fork|worktree/i);
+  });
+
   it("inputSchema 冻结:required=['task_id'],additionalProperties:false", () => {
     const tool = createSubAgentResultTool({ manager: makeFakeManager() });
     const schema = tool.inputSchema as {

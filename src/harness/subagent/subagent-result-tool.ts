@@ -2,9 +2,10 @@
  * #356 T5 — subagent_result ACI 工具（主代理第 25/25 件）。
  *
  * 模型用 `spawn_subagent` 拿到 `task_id` 后，用本工具轮询 `SubAgentManager`
- * 四态 buffer：not_found / running / completed（完整 SubAgentEnvelope）/
- * failed（{reason, summary}）。与 spawn 一样同步非阻塞（≤10ms），直返
- * `manager.queryBuffer(taskId)` 的序列化结果；不做 sleep / 不 await——
+ * 四态 buffer：not_found / running / completed / failed（父可见短交差以
+ * summary / paths / status / stop_reason 为中心）。与 spawn 一样同步非阻塞
+ * （≤10ms），直返 `manager.queryBuffer(taskId)` 的序列化结果；不做 sleep /
+ * 不 await——
  * 轮询节奏由模型侧自主决定（completed 结果 host drain 也会在下一轮 turn
  * 拼入 user message，本工具是主动拉取面）。
  *
@@ -38,7 +39,7 @@ export function createSubAgentResultTool(
   return Object.freeze({
     name: "subagent_result",
     description:
-      "Poll a sub-agent that was spawned with wait:false (or re-check after a wait:true completion); sync non-blocking, call again later to re-poll. Returns one JSON object with `status` ∈ `not_found` (no such task — unknown or expired id) / `running` / `completed` (carries the full envelope: summary / result / fileRefs / usage) / `failed` (carries `{reason, summary}`).",
+      "Poll a sub-agent that was spawned with wait:false (or re-check after a wait:true completion); sync non-blocking, call again later to re-poll. Returns one JSON object whose parent-visible short handoff centers on `status`, `summary`, changed paths (`fileRefs`), and `stop_reason` when available: `status` ∈ `not_found` (no such task — unknown or expired id) / `running` / `completed` / `failed` (failed reports `reason` and `summary`).",
     inputSchema: {
       type: "object",
       properties: {

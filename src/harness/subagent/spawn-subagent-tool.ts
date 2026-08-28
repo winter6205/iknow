@@ -4,8 +4,8 @@
  * **#361 前景 spawn 反转（ADR-0014 V1.5）**：默认 `wait:true` — 模型调一次 →
  * handler `await manager.waitFor(taskId, undefined, ctx.signal)`（缺省超时
  * 由 manager 三层链 `def.timeoutMs ?? taskTimeoutMs ?? PER_TASK_TIMEOUT_MS`
- * 决定，spawn timer 同源），阻塞至子代理终态，把完整 envelope 直接作
- * tool_result 返回。多个独立任务
+ * 决定，spawn timer 同源），阻塞至子代理终态，把父可见短交差（summary /
+ * changed paths / status / stop_reason）作 tool_result 返回。多个独立任务
  * 可在同一 turn 并行发多条 spawn_subagent（wait:true 各自阻塞，executor
  * 并发安全）。`wait:false` → 立即返 `{task_id}`（异步臂），结果由 host drain
  * 在下一轮 turn 拼入 user message / subagent_result 主动拉取。
@@ -28,7 +28,7 @@
  *   - input 校验失败 → `ToolExecutionError` 同步抛（executor → execution_failed）；
  *   - `background:true` v1 拒收 → `ToolExecutionError`；
  *   - C1 并发超限（manager.spawn 抛 SubAgentCapacityError）→ handler catch →
- *     `ToolExecutionError`（消息含 capacity + 4/4）；
+ *     `ToolExecutionError`（消息含 capacity + active/limit）；
  *   - `ctx.signal` abort → waitFor reject SubAgentAbortError → handler catch →
  *     `ToolExecutionError` → executor 因 `signal.aborted === true` 归一
  *     `execution_failed: "cancelled"`（归因 = 调用侧取消）。
@@ -44,6 +44,7 @@ import {
 } from "./manager.js";
 import type { SubAgentEnvelope } from "./envelope.js";
 import { ToolExecutionError, SubAgentSandboxRootError } from "../errors.js";
+import { DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS } from "../../config/settings.js";
 import {
   builtinCatalogResolver,
   type AgentCatalogResolver,
@@ -124,7 +125,7 @@ export function createSpawnSubAgentTool(
   return Object.freeze({
     name: "spawn_subagent",
     description:
-      "Delegate multi-step exploration, independent verification, or parallelizable work to a fresh sub-agent that inherits the parent's tool surface minus `spawn_subagent`. Default `wait:true` — the call blocks until the sub-agent finishes and returns its full result envelope (timeout 2 hours default; override via `timeoutMs`). Issue multiple `spawn_subagent` calls in one turn to run independent tasks in parallel. Pass `wait:false` for fire-and-forget: returns `{task_id}` immediately and poll later via `subagent_result`. The returned envelope is the sole ground truth about sub-agent state — running status is observable only through it, not via elapsed time, return shape, or anything else.\n\nAvailable subagent types (set `subagent_type` to route):\n" +
+      `Delegate a self-contained task when it needs multi-step exploration, independent verification, or parallelizable work. The default subagent type is \`general-purpose\`; use \`explore\` for read-only work. Keep every task self-contained. Default \`wait:true\` — the call blocks until the sub-agent finishes and returns the parent-visible short handoff with summary, changed paths, status, and stop_reason when available (timeout 2 hours default; override via \`timeoutMs\`). Issue multiple \`spawn_subagent\` calls in one turn only for independent tasks. Pass \`wait:false\` for fire-and-forget: returns \`{task_id}\` immediately and poll later via \`subagent_result\`. At most ${DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS} workers run simultaneously by default; when at capacity, reduce concurrency and retry after a worker completes — requests are rejected rather than queued.\n\nAvailable subagent types (set \`subagent_type\` to route):\n` +
       proseLines,
     inputSchema: {
       type: "object",
@@ -166,7 +167,7 @@ export function createSpawnSubAgentTool(
         wait: {
           type: "boolean",
           description:
-            "When true (default), block until the sub-agent finishes and return its full result envelope. When false, return {task_id} immediately and poll with subagent_result.",
+            "When true (default), block until the sub-agent finishes and return the parent-visible short handoff (summary, changed paths, status, and stop_reason when available). When false, return {task_id} immediately and poll with subagent_result.",
         },
         maxTurns: {
           type: "integer",
@@ -306,7 +307,7 @@ export function createSpawnSubAgentTool(
         if (err instanceof SubAgentSandboxRootError) {
           throw new ToolExecutionError(err.message);
         }
-        // #361 C1: capacity → ToolExecutionError（消息含 capacity + 4/4）。
+        // #361 C1: capacity → ToolExecutionError（消息含 capacity + active/limit）。
         if (err instanceof SubAgentCapacityError) {
           throw new ToolExecutionError(err.message);
         }
