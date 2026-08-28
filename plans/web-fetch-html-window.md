@@ -54,7 +54,7 @@ OVERALL: PASS — hand to writing-plans
      - concurrent：两路 fetch stub 一超一未超，互不串扰。
      - exception：caller abort 仍 `request aborted`；超限错误不吞、不返回截断半页当成功。
    - **Files:** 仅 network-guard + 其测试。web_fetch 行为本 commit 不变。
-   - Status: [ ] pending
+   - Status: [x] done
 
 2. **T2 fetch window protocol** — tag: `[implementation]`
    - **Surface:** `src/harness/aci/tools/web-fetch.ts` + `tests/harness/aci/tools/web-fetch.test.ts`（executor 端到端也写在本文件，import `createExecutor`）。
@@ -73,7 +73,7 @@ OVERALL: PASS — hand to writing-plans
      - concurrent：两 handler 不同 `start_chars` 并行，窗口不串。
      - exception：既有 SSRF / 非 2xx 不变。
      - 更新既有「clamp 到 50000」断言为 16000。
-   - Status: [ ] pending
+   - Status: [x] done
 
 3. **T3 `as: text | html` + content-type gate** — tag: `[implementation]`
    - **Surface:** `src/harness/aci/tools/web-fetch.ts` + `tests/harness/aci/tools/web-fetch.test.ts` + `CHANGELOG.md`。description 更新过 D9。
@@ -86,7 +86,7 @@ OVERALL: PASS — hand to writing-plans
      - 注入语料：script 正文 / 属性指令 / HTML 注释指令 — `as:html` 原样出现在 banner **之后**，banner 仍在。
      - SSRF / 超时 / 非 2xx / T1 字节上限 / T2 窗口全部沿用。
    - **Tests:** empty html + as html；as 非法（negative）；超大 html 走窗口（overflow）；并发 text vs html 两实例；二进制 CT exception。
-   - Status: [ ] pending
+   - Status: [x] done
 
 ## Persist
 
