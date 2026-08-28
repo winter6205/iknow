@@ -80,7 +80,8 @@ export interface SubAgentEnvelope {
 }
 
 const TRUNCATION_LIMIT = 20000;
-const SUMMARY_LIMIT = 2000;
+/** Parent-visible summary cap (handoff + crashed stderr tail). */
+export const SUMMARY_LIMIT = 2000;
 const TRUNCATION_MARKER = (total: number) =>
   `[report folded; total ${total} chars]`;
 

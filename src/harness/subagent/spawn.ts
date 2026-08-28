@@ -17,7 +17,78 @@
  */
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import { createRequire } from "node:module";
 import type { SubAgentSpawn } from "./manager.js";
+
+const requireFromSpawn = createRequire(import.meta.url);
+
+export interface ResolveSubagentWorkerSpawnArgsOptions {
+  readonly execPath: string;
+  readonly argv1?: string;
+  /**
+   * Accepted for callers that already collect Node execution arguments. The
+   * child receives an explicit loader below, so it does not need inherited
+   * execArgv.
+   */
+  readonly execArgv?: readonly string[];
+  /** Test seam: fail tsx resolution without mocking node:module. */
+  readonly resolveTsxLoader?: () => string;
+}
+
+export class SubagentWorkerSpawnArgsError extends Error {
+  override readonly name = "SubagentWorkerSpawnArgsError";
+
+  constructor(
+    message = "Cannot spawn subagent worker: process.argv[1] is missing"
+  ) {
+    super(message);
+  }
+}
+
+function isNodeExecutable(execPath: string): boolean {
+  const executable = execPath.split(/[\\/]/).pop()?.toLowerCase();
+  return (
+    executable === "node" ||
+    executable === "node.exe" ||
+    executable === "nodejs"
+  );
+}
+
+function isTypeScriptEntry(argv1: string): boolean {
+  return /\.(?:ts|mts|tsx|cts)$/i.test(argv1);
+}
+
+function defaultResolveTsxLoader(): string {
+  return requireFromSpawn.resolve("tsx");
+}
+
+export function resolveSubagentWorkerSpawnArgs({
+  execPath,
+  argv1,
+  resolveTsxLoader = defaultResolveTsxLoader,
+}: ResolveSubagentWorkerSpawnArgsOptions): string[] {
+  if (!argv1) {
+    throw new SubagentWorkerSpawnArgsError();
+  }
+
+  // Node children need an explicit tsx ESM loader; Bun runs TypeScript natively.
+  // Resolve the loader from this module (not the child's cwd): `--import tsx`
+  // fails when the agent cwd is outside the repo (Cannot find package 'tsx').
+  if (isNodeExecutable(execPath) && isTypeScriptEntry(argv1)) {
+    let loader: string;
+    try {
+      loader = resolveTsxLoader();
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new SubagentWorkerSpawnArgsError(
+        `Cannot spawn subagent worker: tsx loader not resolved: ${detail}`
+      );
+    }
+    return ["--import", loader, argv1, "--subagent-worker"];
+  }
+
+  return [argv1, "--subagent-worker"];
+}
 
 export const defaultSubAgentSpawn: SubAgentSpawn = (
   _def,
@@ -26,7 +97,10 @@ export const defaultSubAgentSpawn: SubAgentSpawn = (
 ) => {
   const child = spawn(
     process.execPath,
-    [process.argv[1], "--subagent-worker"],
+    resolveSubagentWorkerSpawnArgs({
+      execPath: process.execPath,
+      argv1: process.argv[1],
+    }),
     { stdio: ["pipe", "pipe", "pipe"], env: process.env }
   );
   // manager 负责写 stdin（worker 协议：stdin 一行 envelope → stdout 一行 result）。
