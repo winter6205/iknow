@@ -123,8 +123,7 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
     });
     const mgr = createSubAgentManager({ spawn: () => fake });
     const { taskId } = mgr.spawn({});
-    await waitExit(fake);
-    const q = mgr.queryBuffer(taskId);
+    const q = await mgr.waitFor(taskId);
     assert.equal(q.status, "failed");
     if (q.status === "failed") {
       assert.equal(q.reason, "crashed");
@@ -141,8 +140,7 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
     );
     const mgr = createSubAgentManager({ spawn: () => fake });
     const { taskId } = mgr.spawn({});
-    await waitExit(fake);
-    const q = mgr.queryBuffer(taskId);
+    const q = await mgr.waitFor(taskId);
     assert.equal(q.status, "failed");
     if (q.status === "failed") {
       assert.equal(q.reason, "crashed");
