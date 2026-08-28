@@ -4,6 +4,8 @@
 
 ### Feature
 
+- **web_fetch HTML 窗口（2026-08-28）**: 传输层解码体 1 MiB 上限（流式读 + stub 二次拒绝）。`start_chars` 续抓，头部 `Window:` / `Representation:` 在 untrusted banner 之前；`max_chars` 上限 16000，整段 output ≤ executor 20000。opt-in `as=html` 返回 markup（仅 html content-type）；二进制类型拒绝。沙箱 curl / fence env 不改——看网页主路径仍是 SSRF 守卫下的 `web_fetch`。计划 `plans/web-fetch-html-window.md`。
+
 - **自动记忆 dream 双闸（#774，2026-08-28）**: `settings.memory.dream` 与抽取解绑。做梦须同时满足距上次成功或 skip 至少 24h、以及至少 5 个 distinct session（chat/TUI 进程内会话；serve `conversation_id`）。游标 JSON 落在各 `memoryDir`。现行条 &lt; 2 时 skip merge LLM 并推进时间闸。抽取仍为 `completed` + N≥2。
 
 - **子代理运行时与冷启动交差（PR #773，2026-08-28）**: 非正 timeout/token env 回退 settings/默认（`0` 不当关钟、不当 `max_tokens=0`）；无信封干净 `exit(0)` 立即 `protocolError` 并放槽；worker 透传父级 idle/hard-cap；并发上限可配、默认 15、超限立即失败不排队；父模型交差为短摘要+路径（IPC 与 `run_graph` 边仍保留产物）；通用 worker 注入说明书静态层且关记忆工具，explore 不灌完整 AGENTS.md；缺省 `subagent_type` 为 `general-purpose`。计划 `plans/subagent-runtime-and-handoff.md`。
