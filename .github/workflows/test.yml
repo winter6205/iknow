@@ -62,6 +62,9 @@ jobs:
         #   #562 新增：envelope-role / tool-constraints /
         #   bash-mode-channel（皆走 createWorkerDeps → createBashTool →
         #   requireBwrap 装配链），一并排除。
+        #   ADR-0037 / #814 实证：hub-worktree-isolation 经 hub executor
+        #   真 mutate → runInSandbox → requireBwrap（注释里的
+        #   buildHarnessEngine 不命中 ci-check 调用形态，须手加）。
         # 慢/重路径 + TUI 时序 flaky（runner 环境偶发，--retry 1 兜底）：
         #   e2e / integration / banner-scroll-fixes / logo-persists。
         #   e2e / integration 用 'dir/**' glob 排除整目录（vitest exclude
@@ -90,6 +93,7 @@ jobs:
             --exclude tests/harness/identity/system-injection.test.ts \
             --exclude tests/session-api/max-turns-serve.test.ts \
             --exclude tests/session-api/workspace-bind.test.ts \
+            --exclude tests/session-api/hub-worktree-isolation.test.ts \
             --exclude tests/tui/deps-tools.test.ts \
             --exclude tests/cli/tui-deps-subagent-trace-factory.test.ts \
             --exclude tests/cli/chat-subagent-trace.test.ts \
@@ -182,6 +186,7 @@ jobs:
             --exclude tests/harness/identity/system-injection.test.ts \
             --exclude tests/session-api/max-turns-serve.test.ts \
             --exclude tests/session-api/workspace-bind.test.ts \
+            --exclude tests/session-api/hub-worktree-isolation.test.ts \
             --exclude tests/tui/deps-tools.test.ts \
             --exclude tests/cli/tui-deps-subagent-trace-factory.test.ts \
             --exclude tests/cli/chat-subagent-trace.test.ts \

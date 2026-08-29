@@ -13,6 +13,7 @@ import type { ToolExecutionContext } from "../../tools/types.js";
 import type { AciToolDef } from "../types.js";
 import {
   createJsonlTraceReader,
+  projectToolResultsFromTrace,
   TRACE_RECORD_TYPES,
   listSessions,
   type TraceQuery,
@@ -48,6 +49,7 @@ interface QueryTraceInput {
   readonly turn_id?: unknown;
   readonly limit?: unknown;
   readonly record_id?: unknown;
+  readonly detail?: unknown;
   readonly resume_offset?: unknown;
 }
 
@@ -89,8 +91,14 @@ export function createQueryTraceTool(
         : findRecord(reader, parsed.query, parsed.recordId);
     const records =
       parsed.recordId === undefined
-        ? result.records.map(projectRecord)
-        : result.records;
+        ? await Promise.all(
+            result.records.map((row) => projectRecord(row, traceDir))
+          )
+        : await Promise.all(
+            result.records.map((row) =>
+              projectDrillDownRecord(row, parsed.detail, traceDir)
+            )
+          );
     return serializeResponse({
       records,
       total: result.total,
@@ -103,7 +111,7 @@ export function createQueryTraceTool(
   return Object.freeze({
     name: "query_trace",
     description:
-      "Query local JSONL trace records with filters. Normal llm_call results are projection-only (message count, first/last previews, and error); use record_id to drill into one record. Results are capped at 4000 characters.",
+      "Query local JSONL trace records with filters. Normal llm_call results are projection-only (message count, first/last previews, tool_result projection from llm_call.messages, and error); use record_id to drill into one record. By default drill-down returns tool_results; use detail=messages for messages. If the model ends the turn without a following llm_call, that last round's tool_results are not visible in the projection. Results are capped at 4000 characters.",
     inputSchema: {
       type: "object",
       properties: {
@@ -123,6 +131,11 @@ export function createQueryTraceTool(
           default: DEFAULT_LIMIT,
         },
         record_id: { type: "string" },
+        detail: {
+          type: "string",
+          enum: ["tool_results", "messages"],
+          default: "tool_results",
+        },
         resume_offset: { type: "integer", minimum: 0 },
       },
       additionalProperties: false,
@@ -141,6 +154,7 @@ function parseInput(input: unknown): {
   readonly query: TraceQuery;
   readonly conversationId?: string;
   readonly recordId?: string;
+  readonly detail?: "messages" | "tool_results";
 } {
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
     throw new ToolExecutionError("query_trace: input must be an object");
@@ -163,10 +177,12 @@ function parseInput(input: unknown): {
   const recordType = parseRecordType(raw.record_type);
   const status = parseStatus(raw.status);
   const limit = parseInteger(raw.limit, "limit", 1, MAX_LIMIT) ?? DEFAULT_LIMIT;
+  const detail = parseDetail(raw.detail);
   const resumeOffset = parseInteger(raw.resume_offset, "resume_offset", 0) ?? 0;
   return {
     ...(conversationId !== undefined ? { conversationId } : {}),
     ...(recordId !== undefined ? { recordId } : {}),
+    ...(detail !== undefined ? { detail } : {}),
     query: {
       ...(recordType !== undefined ? { recordType } : {}),
       ...(status !== undefined ? { status } : {}),
@@ -180,6 +196,17 @@ function parseInput(input: unknown): {
       resumeOffset,
     },
   };
+}
+
+function parseDetail(value: unknown): "messages" | "tool_results" | undefined {
+  if (value === undefined) return undefined;
+  if (value !== "messages" && value !== "tool_results") {
+    throw new QueryTraceValidationError(
+      "detail",
+      "detail must be one of: messages, tool_results"
+    );
+  }
+  return value;
 }
 
 function optionalNonEmptyString(
@@ -296,18 +323,48 @@ function findRecord(
   };
 }
 
-function projectRecord(row: TraceRecordRow): Record<string, unknown> {
+async function projectRecord(
+  row: TraceRecordRow,
+  traceDir: string
+): Promise<Record<string, unknown>> {
+  const projected = projectRecordBase(row);
+  if (row["record_type"] !== "llm_call") return projected;
+
+  const messages = Array.isArray(row["messages"]) ? row["messages"] : [];
+  projected.messages_count = messages.length;
+  if (messages.length > 0) {
+    projected.first_message_preview = preview(messages[0]);
+    projected.last_message_preview = preview(messages[messages.length - 1]);
+  }
+  const toolResults = await projectToolResultsFromTrace(messages, { traceDir });
+  projected.tool_result_count = toolResults.length;
+  if (toolResults.length > 0) {
+    projected.tool_result_previews = toolResults
+      .slice(0, 2)
+      .map((result) => result.preview.slice(0, 200));
+  }
+  return projected;
+}
+
+async function projectDrillDownRecord(
+  row: TraceRecordRow,
+  detail: "messages" | "tool_results" | undefined,
+  traceDir: string
+): Promise<Record<string, unknown> | TraceRecordRow> {
+  if (row["record_type"] !== "llm_call" || detail === "messages") return row;
+
+  const projected = projectRecordBase(row);
+  const messages = Array.isArray(row["messages"]) ? row["messages"] : [];
+  projected.tool_results = await projectToolResultsFromTrace(messages, {
+    traceDir,
+  });
+  return projected;
+}
+
+function projectRecordBase(row: TraceRecordRow): Record<string, unknown> {
   const projected: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(row)) {
     if (key !== "messages" && key !== "raw") projected[key] = value;
-  }
-  if (row["record_type"] === "llm_call") {
-    const messages = Array.isArray(row["messages"]) ? row["messages"] : [];
-    projected.messages_count = messages.length;
-    if (messages.length > 0) {
-      projected.first_message_preview = preview(messages[0]);
-      projected.last_message_preview = preview(messages[messages.length - 1]);
-    }
   }
   return projected;
 }
@@ -375,7 +432,10 @@ function serializeResponse(payload: {
 function compactRecord(
   record: Record<string, unknown> | TraceRecordRow
 ): Record<string, unknown> {
-  const projected = projectRecord(record);
+  const projected =
+    "messages" in record
+      ? projectRecordBase(record as TraceRecordRow)
+      : (record as Record<string, unknown>);
   const compact: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(projected)) {
     if (typeof value === "string") compact[key] = value.slice(0, 256);

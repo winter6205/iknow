@@ -37,14 +37,14 @@ minimal-change-verifier: yes — 单一读侧投影；禁止写侧 resultCapture
    - **Surface:** `src/traceserver` 或 `query_trace` 旁一处纯函数（禁止第二份拷贝）
    - **Acceptance:** SC1 夹具级（函数本身）、SC2、SC5、SC6、SC9、SC10
    - [blocks: T1]
-   - Status: [ ] pending
+   - Status: [x] done（T2）
 
 3. **List and drill-down consume the projection** — tag: `[implementation]`
    - **Inherits:** spec 列表 `tool_result_count` + 最多 2 条 ≤200 字 preview；`record_id` 默认投影、默认无 messages 全文；`detail: "messages" | "tool_results"` 缺省 `tool_results`；非法 detail typed；4000 帽仍在；工具 description 写明末轮缺口
    - **Surface:** `src/harness/aci` `query_trace` + traceserver 读路径若已投影
    - **Acceptance:** SC1（工具响应）、SC3、SC4、SC8；`npx vitest run tests/harness/aci/tools/query-trace.test.ts` EXIT 0
    - [blocks: T2]
-   - Status: [ ] pending
+   - Status: [x] done（T3）
 
 4. **Write path still does not copy tool stdout onto `tool_call`** — tag: `[implementation]`
    - **Inherits:** spec Out：不打开 `resultCaptured`；loop-engine `recordToolCall` 仍 false
@@ -52,7 +52,7 @@ minimal-change-verifier: yes — 单一读侧投影；禁止写侧 resultCapture
    - **Acceptance:** SC7
    - [parallel]
    - [blocks: T1]
-   - Status: [ ] pending
+   - Status: [x] done（T4）
 
 ## End of round
 

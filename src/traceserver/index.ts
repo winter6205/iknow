@@ -21,6 +21,16 @@ export {
 } from "./http.js";
 export { listSessions, type SessionSummary } from "./sessions.js";
 export {
+  dereferenceTraceMessages,
+  projectToolResults,
+  projectToolResultsFromTrace,
+  TOOL_RESULT_PREVIEW_CAP,
+  type BlobReference,
+  type ReadBlob,
+  type ToolResultProjection,
+  type TraceMessageDereferenceOptions,
+} from "./project-tool-results.js";
+export {
   createTraceRouter,
   startTraceServe,
   type TraceRouter,
