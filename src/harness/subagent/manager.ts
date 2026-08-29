@@ -86,7 +86,7 @@ export interface SubAgentManager {
   ) => Promise<SubAgentEnvelope>;
   /** abort in-flight + SIGTERM 子孙 + ≥5s 兜底 SIGKILL(SC12)。 */
   readonly shutdown: () => Promise<void>;
-  /** T7 host-drain 需要的最小只读枚举:返回当前 buffer 内 completed 任务列表。 */
+  /** T7 host-drain 需要的最小只读枚举:返回当前 buffer 内终态任务列表。 */
   readonly drainCompleted: () => ReadonlyArray<{
     readonly taskId: string;
     readonly envelope: SubAgentEnvelope;
@@ -1215,7 +1215,7 @@ export function createSubAgentManager(opts: {
     const out: { taskId: string; envelope: SubAgentEnvelope }[] = [];
     for (const [id, task] of tasks) {
       if (
-        task.state === "completed" &&
+        (task.state === "completed" || task.state === "failed") &&
         task.envelope &&
         task.def.excludeFromHostDrain !== true
       ) {

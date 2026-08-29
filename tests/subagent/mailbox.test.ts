@@ -177,6 +177,35 @@ describe("SubAgentManager terminal subscription", () => {
     ]);
   });
 
+  it("keeps a failed terminal envelope available to the host drain", () => {
+    const child = makeFakeChild();
+    const manager = createSubAgentManager({
+      spawn: () => child as unknown as ChildProcess,
+    });
+    const taskId = manager.spawn({ task: "fail" }).taskId;
+
+    child.stdout.write(
+      JSON.stringify({
+        status: "failed",
+        reason: "protocolError",
+        summary: "bad worker envelope",
+        result: "",
+      }) + "\n"
+    );
+
+    expect(manager.drainCompleted()).toEqual([
+      {
+        taskId,
+        envelope: {
+          status: "failed",
+          reason: "protocolError",
+          summary: "bad worker envelope",
+          result: "",
+        },
+      },
+    ]);
+  });
+
   it("repeated subscription does not mutate the manager buffer envelope", () => {
     const child = makeFakeChild();
     const manager = createSubAgentManager({

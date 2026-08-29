@@ -3,7 +3,15 @@
  * Covers 5 boundary classes (empty/negative/overflow/exception/concurrent),
  * 6-row error mapping table, cancelled/timeout stopReason, turnCount accumulation.
  */
-import { afterAll, afterEach, beforeAll, describe, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -32,6 +40,9 @@ import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../src/harness/tools/executor.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
+import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
+import type { SubAgentTerminalNotice } from "../../src/harness/subagent/mailbox.ts";
+import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
 import {
   makeTestLlmEnv,
   startLlmCapture,
@@ -106,6 +117,86 @@ describe("askUser inlet", () => {
       () => new SessionHub({ store }),
       /ask_inlet_missing: SessionHub requires AskUser or pre-built deps \(#162 \/ SC18\)/
     );
+  });
+});
+
+describe("SessionHub subagent wake", () => {
+  it("starts one silent run after a terminal notice when the session is idle", async () => {
+    const subscribers = new Set<(notice: SubAgentTerminalNotice) => void>();
+    let completed: ReadonlyArray<{
+      readonly taskId: string;
+      readonly envelope: SubAgentEnvelope;
+    }> = [];
+    const manager = {
+      spawn: () => ({ taskId: "wake-task" }),
+      queryBuffer: () => ({ status: "not_found" as const }),
+      waitFor: async () => {
+        throw new Error("unused");
+      },
+      shutdown: async () => {},
+      drainCompleted: () => completed,
+      listActive: () => [],
+      abortTask: () => false,
+      listSubagents: () => [],
+      subscribe: (subscriber: (notice: SubAgentTerminalNotice) => void) => {
+        subscribers.add(subscriber);
+        return () => subscribers.delete(subscriber);
+      },
+    } as SubAgentManager;
+    const hub = new SessionHub({
+      store,
+      deps: makeDeps([
+        assistantResult({ texts: ["initial"] }),
+        assistantResult({ texts: ["woken"] }),
+      ]),
+      subagentManager: manager,
+      surface: "serve",
+    });
+    await hub.bindWorkspace(process.cwd());
+    const created = await hub.createSession();
+
+    await hub.postMessage({
+      conversationId: created.session.conversation_id,
+      text: "start",
+    });
+    completed = [
+      {
+        taskId: "wake-task",
+        envelope: {
+          status: "ok",
+          summary: "worker done",
+          result: "worker result",
+        },
+      },
+    ];
+    for (const subscriber of [...subscribers]) {
+      subscriber({
+        taskId: "wake-task",
+        status: "ok",
+        summary: "worker done",
+        result: "worker result",
+      });
+    }
+
+    await vi.waitFor(async () => {
+      const file = await store.load(created.session.conversation_id);
+      expect(
+        file.messages.some((message) =>
+          message.content.some(
+            (block) =>
+              block.type === "text" &&
+              block.text.includes("## Sub-agent wake-task result: worker done")
+          )
+        )
+      ).toBe(true);
+      expect(
+        file.messages.some((message) =>
+          message.content.some(
+            (block) => block.type === "text" && block.text.includes("woken")
+          )
+        )
+      ).toBe(true);
+    });
   });
 });
 

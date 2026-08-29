@@ -1,11 +1,11 @@
 /**
  * #356 T7 / #361 C2·C4 — host drain: 在 chat / tui / serve 三入口的 run() 边界之间,
- * 把 SubAgentManager buffer 内 completed 任务浓缩成 user message 字符串,拼入
+ * 把 SubAgentManager buffer 内终态任务浓缩成 user message 字符串,拼入
  * 下一次 run() 的 priorMessages。
  *
  * 关键纪律 (spec SC7 / OQ5 / 契约 C2·C4):
  *   - 空 manager (undefined) / 无任务 → 立即返回 "";
- *   - 任一 completed → 立即返回拼接结果,不等其它 running;
+ *   - 任一终态任务 → 立即返回拼接结果,不等其它 running;
  *   - 仅 running → 立即返回 "",不在 run() 边界轮询等待;
  *   - **drain 永不抛**:manager buffer 或浓缩失败时静默返回 "";
  *   - 不修改 manager buffer 状态 (OQ5 buffer 永久缓存直到 shutdown);
@@ -44,11 +44,11 @@ export interface DrainPendingSubagentsOpts {
 }
 
 /**
- * 浓缩 completed 子代理结果为一条 user message 字符串。
+ * 浓缩终态子代理结果为一条 user message 字符串。
  *
  * #361 C2: 后景 host drain 只消费已经完成的 buffer。返回 "" 当:
  *   - manager 为 undefined (ask 入口形态);
- *   - manager 内无任务或没有 completed;
+ *   - manager 内无任务或没有终态任务;
  *   - manager 的只读 drain / 浓缩操作失败(永不抛)。
  *
  * `_opts` 仅为兼容既有调用方保留;running worker 不会触发等待。

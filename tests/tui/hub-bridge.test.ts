@@ -31,6 +31,7 @@ import { createStubModel } from "../../src/harness/stubs/stub-model.js";
 import type { LoopEngineDeps } from "../../src/harness/loop-engine.js";
 import type { LoopState } from "../../src/harness/model-adapter/types.js";
 import type { SubAgentManager } from "../../src/harness/subagent/manager.js";
+import type { SubAgentTerminalNotice } from "../../src/harness/subagent/mailbox.js";
 import {
   MINIMAL_SDK_MESSAGE,
   makeTestLlmEnv,
@@ -477,6 +478,7 @@ describe("hub-bridge subagentManager 透传（#365 T3）", () => {
       ],
       // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
       listSubagents: () => [],
+      subscribe: () => () => {},
     };
 
     const seen: LoopState[] = [];
@@ -512,7 +514,82 @@ describe("hub-bridge subagentManager 透传（#365 T3）", () => {
       )
       .join("\n");
     expect(joined).toContain("## Sub-agent t3-task result: t3 fake subagent");
-    expect(joined).toContain("t3 body");
+    expect(joined).toContain("t3 fake subagent");
+  });
+
+  test("terminal wake runs silently and does not create typed input history", async () => {
+    let completed: ReadonlyArray<{
+      readonly taskId: string;
+      readonly envelope: {
+        readonly status: "ok";
+        readonly summary: string;
+        readonly result: string;
+      };
+    }> = [];
+    let subscriber: ((notice: SubAgentTerminalNotice) => void) | undefined;
+    const manager = {
+      spawn: () => ({ taskId: "wake-task" }),
+      queryBuffer: () => ({ status: "not_found" as const }),
+      waitFor: async () => {
+        throw new Error("unused");
+      },
+      shutdown: async () => {},
+      drainCompleted: () => completed,
+      listActive: () => [],
+      abortTask: () => false,
+      listSubagents: () => [],
+      subscribe: (listener: (notice: SubAgentTerminalNotice) => void) => {
+        subscriber = listener;
+        return () => {
+          subscriber = undefined;
+        };
+      },
+    } as SubAgentManager;
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      deps: makeDeps([assistantResult({ texts: ["woken"] })]),
+      inflight: createInflightRegistry(),
+      subagentManager: manager,
+    });
+    const id = await bridge.ensureSession(undefined);
+    completed = [
+      {
+        taskId: "wake-task",
+        envelope: {
+          status: "ok",
+          summary: "done",
+          result: "result",
+        },
+      },
+    ];
+    subscriber?.({
+      taskId: "wake-task",
+      status: "ok",
+      summary: "done",
+      result: "result",
+    });
+
+    const result = await bridge.wakeFromSubagent(id);
+
+    expect(result?.finalText).toBe("woken");
+    const file = await bridge.loadSessionFile(id);
+    const drain = file.messages.find((message) =>
+      message.content.some(
+        (block) =>
+          block.type === "text" &&
+          block.text.startsWith("## Sub-agent wake-task result:")
+      )
+    );
+    expect(drain).toBeDefined();
+    expect(
+      file.messages
+        .filter((message) => message.role === "user")
+        .some((message) =>
+          message.content.some(
+            (block) => block.type === "text" && block.text === "woken"
+          )
+        )
+    ).toBe(false);
   });
 });
 

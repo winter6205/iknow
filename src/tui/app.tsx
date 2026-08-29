@@ -227,6 +227,10 @@ import {
 } from "../harness/graph/mode.js";
 import { createSkillBody } from "../harness/skill/body.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
+import {
+  createSubagentWake,
+  type SubagentWake,
+} from "../harness/subagent/host-wake.js";
 import { extractTitle } from "../session-api/store/schema.js";
 
 /** T8/T9：chromeReserveRows 行账封顶常量与可见行数计算函数的本地重导出
@@ -758,6 +762,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // ── 退出 / 打断 / inflight 簿记 ────────────────────────────────
   const aborters = useRef(new Map<string, AbortController>());
   const inflightPromises = useRef(new Set<Promise<unknown>>());
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
+  const activeKeyRef = useRef(activeKey);
+  activeKeyRef.current = activeKey;
+  const subagentWakeRef = useRef<SubagentWake | undefined>(undefined);
   // #548:手动压缩专属 AbortController — 与 turn 的 `aborters` map 解耦
   // (turn 中断 ↔ 压缩中断两条独立通道)。同一时刻仅一个 /compact 路径在
   // 飞(活跃会话只有一个),所以 ref 单槽足够。Esc/Ctrl+C handler 在
@@ -1332,7 +1341,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     targetId: string,
     text: string,
     controller: AbortController,
-    mode: "append" | "continue" = "append"
+    mode: "append" | "continue" | "wake" = "append"
   ): Promise<void> {
     let stopReason: string | undefined;
     let lastUsage: TokenUsage | null = null;
@@ -1442,18 +1451,24 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           thinkingEffort
         );
       const resp =
-        mode === "continue"
-          ? await props.bridge.continueSession(targetId, {
-              signal: controller.signal,
-              onStream,
-            })
-          : await props.bridge.postMessage({
-              conversationId: targetId,
-              text,
-              signal: controller.signal,
-              onStream,
-              ...(thinkingOverride ? { thinking: thinkingOverride } : {}),
-            });
+        mode === "wake"
+          ? await props.bridge.wakeFromSubagent(targetId)
+          : mode === "continue"
+            ? await props.bridge.continueSession(targetId, {
+                signal: controller.signal,
+                onStream,
+              })
+            : await props.bridge.postMessage({
+                conversationId: targetId,
+                text,
+                signal: controller.signal,
+                onStream,
+                ...(thinkingOverride ? { thinking: thinkingOverride } : {}),
+              });
+      if (resp === undefined) {
+        skipTurnRefresh = true;
+        return;
+      }
       stopReason = resp.stopReason;
       lastUsage = resp.lastUsage;
       // B1: 打断反馈 —— cancelled 时 bridge 透传 true/false;非 cancelled
@@ -1587,6 +1602,59 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       setNotice({ lines: [`刷新会话失败：${describeError(err)}`] });
     }
   }
+
+  // T4: terminal worker notices wake only the active idle session. The
+  // injected drain is sent through the bridge's silent path, so this effect
+  // never appends a user bubble or input-history entry.
+  useEffect(() => {
+    const controller = createSubagentWake({
+      manager: undefined,
+      subscribe: props.bridge.subscribeSubagentTerminal,
+      isIdle: () => {
+        const current = sessionsRef.current[activeKeyRef.current];
+        return (
+          current?.runState === "idle" && current.conversationId !== undefined
+        );
+      },
+      wake: async () => {
+        const current = sessionsRef.current[activeKeyRef.current];
+        const targetId = current?.conversationId;
+        if (targetId === undefined || current.runState !== "idle") return;
+        setSessions((prev) => {
+          const latest = prev[activeKeyRef.current];
+          if (!latest || latest.runState !== "idle") return prev;
+          return {
+            ...prev,
+            [activeKeyRef.current]: turnStarted(latest),
+          };
+        });
+        const abortController = new AbortController();
+        aborters.current.set(targetId, abortController);
+        const promise = runTurnOnce(targetId, "", abortController, "wake");
+        inflightPromises.current.add(promise);
+        void promise.finally(() => inflightPromises.current.delete(promise));
+        await promise;
+      },
+      onError: (error) => {
+        setNotice({ lines: [`后台唤醒失败：${describeError(error)}`] });
+      },
+    });
+    subagentWakeRef.current = controller;
+    controller.flush();
+    return () => {
+      controller.dispose();
+      if (subagentWakeRef.current === controller) {
+        subagentWakeRef.current = undefined;
+      }
+    };
+  }, [props.bridge]);
+
+  // A background turn can make the active session idle after a notice was
+  // queued. Flush on the state transition rather than waiting for another
+  // worker event.
+  useEffect(() => {
+    subagentWakeRef.current?.flush();
+  }, [activeKey, active.runState]);
 
   async function quit(): Promise<void> {
     const hasBg = Object.values(sessions).some(

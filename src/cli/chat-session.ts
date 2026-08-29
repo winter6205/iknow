@@ -50,6 +50,7 @@ import {
 } from "../harness/memory/index.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
+import { createSubagentWake } from "../harness/subagent/host-wake.js";
 import {
   createViolationCounter,
   wireKillSessionNotification,
@@ -500,6 +501,75 @@ async function runSkipAppendAndPresent(opts: {
       stderr: formatChatError(err),
       ranQuery: true,
     };
+  }
+}
+
+/**
+ * T4: consume a terminal subagent handoff without inventing a user input.
+ * The drain is a prior user message for the model, but it never goes through
+ * the readline/input-history path.
+ */
+export async function runChatSubagentWake(opts: {
+  readonly ctx: ChatLineContext;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
+}): Promise<ProcessChatLineResult> {
+  const { ctx } = opts;
+  const drained = await drainPendingSubagents(ctx.subagentManager);
+  if (drained.length === 0) return { quit: false, output: "" };
+  const box = busyBox(ctx);
+  if (box.value) return { quit: false, output: "" };
+  box.value = true;
+  ctx.graphAssembly?.beginRound();
+  const priorMessages = Object.freeze([
+    ...ctx.state.messages,
+    Object.freeze({
+      role: "user" as const,
+      content: Object.freeze([
+        Object.freeze({ type: "text" as const, text: drained }),
+      ]),
+    }),
+  ]);
+  try {
+    const { result, trace } = await runHarness(
+      "",
+      ctx.deps,
+      ctx.abortController?.signal,
+      {
+        priorMessages,
+        appendUserText: false,
+        ...(opts.onStream !== undefined ? { onStream: opts.onStream } : {}),
+      }
+    );
+    if (ctx.checkpointStore && ctx.state.conversationId !== null) {
+      await persistChatSessionCheckpoint({
+        store: ctx.checkpointStore,
+        conversationId: ctx.state.conversationId,
+        jsonMode: ctx.state.jsonMode,
+        result,
+        priorMessages: ctx.state.messages,
+      });
+    }
+    if (
+      result.stopReason !== "protocolError" &&
+      result.stopReason !== "emptyFinalResponse"
+    ) {
+      ctx.state.messages = Object.freeze([...result.messages]);
+    }
+    return presentChatTurn({
+      ctx,
+      result,
+      trace,
+      priorMessages,
+    });
+  } catch (err) {
+    return {
+      quit: false,
+      output: "",
+      stderr: formatChatError(err),
+      ranQuery: true,
+    };
+  } finally {
+    box.value = false;
   }
 }
 
@@ -1926,6 +1996,29 @@ async function runInteractive(opts: {
     }
   };
 
+  const wakeController = createSubagentWake({
+    manager: ctx.subagentManager,
+    isIdle: () => !busy && !closed,
+    wake: async () => {
+      busy = true;
+      try {
+        const wakeRun = chain.then(async () => {
+          const result = await runChatSubagentWake({ ctx });
+          if (result.stderr) writeErr(result.stderr);
+          if (result.output) {
+            writeOut(result.output);
+            if (result.ranQuery) writeOut(TTY_ANSWER_SEP);
+          }
+        });
+        chain = wakeRun.catch(() => {});
+        await wakeRun;
+      } finally {
+        busy = false;
+      }
+    },
+    onError: (error) => writeErr(formatChatError(error)),
+  });
+
   // W2 扩展：Shift+Tab 切换权限模式（default ↔ full_auto；plan 走
   // /permissions plan 命令不进循环）。REPL 用 readline：terminal:true 时
   // stdin 已 emit keypress，keypress 里 shift+tab = key.name==="tab" &&
@@ -1982,6 +2075,7 @@ async function runInteractive(opts: {
         });
     });
     rl.on("close", () => {
+      wakeController.dispose();
       process.off("SIGINT", onSigint);
       rl.removeListener("SIGINT", onSigint);
       // 卸载 Shift+Tab keypress 监听；与 SIGINT cleanup 同位（不积攒）。

@@ -11,7 +11,7 @@
  * Tests deleted because the underlying feature is gone: `--mode` flag,
  * `resolveStartupMode`, `/mode` slash command.
  */
-import { describe, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { parseArgs } from "../src/cli/parse-args.ts";
 import {
   processChatLine,
+  runChatSubagentWake,
   seedResumeMessages,
   type ChatLineContext,
 } from "../src/cli/chat-session.ts";
@@ -44,6 +45,8 @@ import {
   makeNative,
   makeState,
 } from "./cli/_fixtures.ts";
+import type { SubAgentManager } from "../src/harness/subagent/manager.ts";
+import type { SubAgentTerminalNotice } from "../src/harness/subagent/mailbox.ts";
 
 describe("parseArgs", () => {
   it("defaults bare invocation to chat when interactive", () => {
@@ -505,6 +508,75 @@ describe("processChatLine (pipe simulation)", () => {
     assert.equal(r.ranQuery, true);
     assert.ok(r.stderr);
     assert.match(r.stderr!, /boom-agent/);
+  });
+});
+
+describe("chat subagent wake", () => {
+  it("runs without a user query and injects only the drain into priorMessages", async () => {
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["woken answer"] })],
+      stateOverrides: {
+        conversationId: "chat-wake",
+        messages: [makeNative({ role: "user", text: "original query" })],
+      },
+    });
+    const seen: AnthropicNativeMessage[][] = [];
+    const baseAdapter = ctx.deps.adapter;
+    const manager = {
+      spawn: () => ({ taskId: "unused" }),
+      queryBuffer: () => ({ status: "not_found" as const }),
+      waitFor: async () => {
+        throw new Error("unused");
+      },
+      shutdown: async () => {},
+      drainCompleted: () => [
+        {
+          taskId: "wake-task",
+          envelope: {
+            status: "ok",
+            summary: "worker done",
+            result: "worker result",
+          },
+        },
+      ],
+      listActive: () => [],
+      abortTask: () => false,
+      listSubagents: () => [],
+      subscribe:
+        (_subscriber: (notice: SubAgentTerminalNotice) => void) => () => {},
+    } as SubAgentManager;
+    ctx.subagentManager = manager;
+    ctx.deps = {
+      ...ctx.deps,
+      adapter: {
+        ...ctx.deps.adapter,
+        step: async (state, request, signal) => {
+          seen.push([...state.messages]);
+          return baseAdapter.step(state, request, signal);
+        },
+      },
+    };
+
+    const result = await runChatSubagentWake({ ctx });
+
+    expect(result.ranQuery).toBe(true);
+    expect(seen[0]?.map((message) => message.content)).toEqual([
+      [{ type: "text", text: "original query" }],
+      [
+        {
+          type: "text",
+          text: "## Sub-agent wake-task result: worker done\n\nworker done",
+        },
+      ],
+    ]);
+    expect(ctx.state.messages.map((message) => message.content)).toContainEqual(
+      [
+        {
+          type: "text",
+          text: "## Sub-agent wake-task result: worker done\n\nworker done",
+        },
+      ]
+    );
   });
 });
 
