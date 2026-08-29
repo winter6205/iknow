@@ -350,7 +350,9 @@ describe("createAutoMemoryHook — failure containment", () => {
     });
     hook.onTurnComplete({ stopReason: "completed", transcript: "user: hi" });
     await hook.drain();
-    assert.equal(seen.length, 1, "the IO failure is reported, not thrown");
+    // autoExtract implies dream: the dream-gate persist fault is reported
+    // alongside the extract fault — two swallowed errors, still no throw.
+    assert.equal(seen.length, 2, "the IO failures are reported, not thrown");
   });
 
   it("keeps working after a failed pass", async () => {
@@ -555,17 +557,59 @@ describe("createAutoMemoryHook — dream pass", () => {
     assert.equal(llm.calls(), 1, "dream does not require a transcript");
   });
 
-  it("does not add a merge call when dream is explicitly off", async () => {
-    const llm = countingLlm(FACT);
+  it("runs dream when autoExtract is on and dream is explicitly off, dual gate met", async () => {
+    // Spec specs/auto-memory-layering.md Assumptions 2-3: autoExtract implies
+    // dream — there is no "extract without dream" escape hatch.
+    await twoLiveEntries();
+    const nowMs = Date.parse(NOW_ISO);
+    await seedDreamGate(memoryDir, nowMs);
+    const responses = [
+      FACT,
+      JSON.stringify([
+        {
+          title: "Use bar() for concurrency",
+          body: "Concurrency now routes through the scheduler queue.",
+          confidence: 0.95,
+          replaces: ["old"],
+        },
+      ]),
+    ];
+    let calls = 0;
     const hook = createAutoMemoryHook(
-      hookOpts(llm, { dream: false, minCompletedTurns: 2 })
+      hookOpts(
+        {
+          complete: async () => responses[calls++] ?? "[]",
+        },
+        { dream: false, minCompletedTurns: 1, nowMs }
+      )
     );
 
-    hook.onTurnComplete({ stopReason: "completed", transcript: "user: one" });
-    hook.onTurnComplete({ stopReason: "completed", transcript: "user: two" });
+    hook.onTurnComplete({
+      stopReason: "completed",
+      transcript: "user: hi",
+      sessionKey: "s5",
+    });
     await hook.drain();
 
-    assert.equal(llm.calls(), 1, "extract-only remains one LLM call");
+    assert.equal(
+      calls,
+      2,
+      "autoExtract implies dream: extract call then dream call"
+    );
+    assert.equal(
+      parseMemoryEntry(await readFile(join(memoryDir, "old.md"), "utf8"))
+        .disabled,
+      true,
+      "the second call was the dream merge (superseded old.md)"
+    );
+    const cursor = JSON.parse(
+      await readFile(join(memoryDir, DREAM_CURSOR_FILE), "utf8")
+    );
+    assert.equal(
+      cursor.lastSuccessAtMs,
+      nowMs,
+      "dream ran and reset the gate clock"
+    );
   });
 
   it("runs extract without a merge call when dream is on but the dual gate is unmet", async () => {

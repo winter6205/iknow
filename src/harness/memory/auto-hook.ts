@@ -66,7 +66,11 @@ export interface AutoMemoryHookOptions {
   readonly llm: MemoryExtractLlm;
   /** Opt-in. Absent or non-true = off, byte-identical to no wiring at all. */
   readonly enabled?: boolean;
-  /** Independent opt-in for the offline merge pass; absent or non-true = off. */
+  /**
+   * Opt-in for the offline merge pass; absent or non-true = off. Implied
+   * whenever auto-extract is on: `enabled === true` runs the dream pass on a
+   * met dual gate even when this flag is false (no extract-without-dream hatch).
+   */
   readonly dream?: boolean;
   /** Completed turns per pass; positive integer. Default DEFAULT_COMPLETED_TURN_GATE. */
   readonly minCompletedTurns?: number;
@@ -133,7 +137,11 @@ export function createAutoMemoryHook(
     if (!enabled && !dream) return;
     if (turn.stopReason !== "completed") return;
     const extractEligible = enabled && turn.transcript.trim().length > 0;
-    if (!extractEligible && !dream) return;
+    // autoExtract implies dream (spec specs/auto-memory-layering.md
+    // Assumptions 2-3): there is no "extract without dream" escape hatch,
+    // so the dual gate is evaluated whenever either flag is live.
+    const dreamEligible = dream || enabled;
+    if (!extractEligible && !dreamEligible) return;
 
     let extractDue = false;
     if (extractEligible) {
@@ -143,16 +151,19 @@ export function createAutoMemoryHook(
         extractDue = true;
       }
     }
-    if (!extractDue && !dream) return;
+    if (!extractDue && !dreamEligible) return;
 
     const transcript = turn.transcript;
     const sessionKey = turn.sessionKey;
     const skipExtract = turn.memorySaveSucceeded === true;
     chain = chain.then(async () => {
       const live = liveFlags(opts);
-      const dreamDue = live.dream
-        ? await persistAndEvaluateDreamGate(opts, sessionKey, opts.onError)
-        : false;
+      // Dream dual gate: evaluated when dream is on OR autoExtract is on —
+      // autoExtract implies dream (no extract-without-dream hatch).
+      const dreamDue =
+        live.dream || live.enabled
+          ? await persistAndEvaluateDreamGate(opts, sessionKey, opts.onError)
+          : false;
 
       if (extractDue && live.enabled && !skipExtract) {
         await runExtractPass(opts, transcript, dreamDue);
