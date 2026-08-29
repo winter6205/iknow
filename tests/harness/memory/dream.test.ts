@@ -7,9 +7,12 @@ import { join } from "node:path";
 
 import {
   MAX_DREAM_ENTRIES,
+  parseMemoryEntry,
   runMemoryDream,
+  runMemoryGc,
   serializeMemoryEntry,
 } from "../../../src/harness/memory/index.ts";
+import { MAX_SUPERSEDES_PER_CANDIDATE } from "../../../src/harness/memory/dream.ts";
 import type {
   MemoryEntryV1,
   MemoryExtractLlm,
@@ -197,6 +200,270 @@ describe("runMemoryDream", () => {
           assert.doesNotMatch(line, /\b(?:LLM|adapter|complete)\b/i);
         }
       }
+    } finally {
+      await rm(memoryDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// -- dream replaces → SUPERSEDE (specs/auto-memory-layering.md SC3/4/11/12) --
+
+describe("runMemoryDream — replaces", () => {
+  const seedPair = async (memoryDir: string): Promise<void> => {
+    await writeFile(
+      join(memoryDir, "old.md"),
+      serializeMemoryEntry(entry("old")),
+      "utf8"
+    );
+    await writeFile(
+      join(memoryDir, "sib.md"),
+      serializeMemoryEntry(
+        entry("sib", {
+          title: "Use queue for parallel work",
+          body: "The scheduler queue handles concurrent tasks.",
+        })
+      ),
+      "utf8"
+    );
+  };
+
+  // SC3: a dream candidate naming `replaces` persists as SUPERSEDE and the
+  // subsequent mechanical GC soft-disables the named target.
+  it("persists a replaces candidate as SUPERSEDE and GC disables the target", async () => {
+    const memoryDir = await mkdtemp(join(tmpdir(), "memory-dream-sc3-"));
+    try {
+      await seedPair(memoryDir);
+      const llm: MemoryExtractLlm = {
+        complete: async () =>
+          JSON.stringify([
+            {
+              title: "Use queue for concurrency",
+              body: "Concurrency routes through the scheduler queue as of v3.",
+              type: "convention",
+              importance: 4,
+              replaces: ["old"],
+            },
+          ]),
+      };
+
+      const result = await runMemoryDream({ memoryDir, llm });
+      assert.equal(result.ops[0]!.kind, "SUPERSEDE");
+
+      await runMemoryGc(memoryDir);
+
+      const fresh = result.written.find(
+        (written) => written.kind === "SUPERSEDE"
+      );
+      assert.ok(fresh, "the SUPERSEDE op must land on disk");
+      const stored = parseMemoryEntry(
+        await readFile(join(memoryDir, `${fresh!.slug}.md`), "utf8")
+      );
+      assert.ok(
+        stored.supersedes?.includes("old"),
+        "the new entry's supersedes must contain old"
+      );
+      assert.equal(
+        parseMemoryEntry(await readFile(join(memoryDir, "old.md"), "utf8"))
+          .disabled,
+        true,
+        "GC must soft-disable the superseded target"
+      );
+    } finally {
+      await rm(memoryDir, { recursive: true, force: true });
+    }
+  });
+
+  // SC4: without `replaces` the candidate goes through the (shrunken) decide
+  // table — a low word-overlap body never supersedes its neighbor.
+  it("never supersedes a neighbor when the candidate carries no replaces", async () => {
+    const memoryDir = await mkdtemp(join(tmpdir(), "memory-dream-sc4-"));
+    try {
+      await seedPair(memoryDir);
+      const llm: MemoryExtractLlm = {
+        complete: async () =>
+          JSON.stringify([
+            {
+              title: "Zebra herds migrate seasonally",
+              body: "Plains zebras travel toward fresh grazing ground each dry season.",
+              confidence: 0.95,
+            },
+          ]),
+      };
+
+      const result = await runMemoryDream({ memoryDir, llm });
+
+      for (const op of result.ops) {
+        assert.ok(
+          op.kind === "ADD" || op.kind === "UPDATE",
+          `expected ADD or UPDATE, got ${op.kind}`
+        );
+      }
+      await runMemoryGc(memoryDir);
+      assert.equal(
+        parseMemoryEntry(await readFile(join(memoryDir, "old.md"), "utf8"))
+          .disabled,
+        false,
+        "no replaces means no supersede — old stays live"
+      );
+    } finally {
+      await rm(memoryDir, { recursive: true, force: true });
+    }
+  });
+
+  // SC11: unknown slugs in `replaces` are reported (when an observer is
+  // wired) and skipped without failing the turn.
+  it("reports and skips unknown replaces ids, still superseding the known one", async () => {
+    const memoryDir = await mkdtemp(join(tmpdir(), "memory-dream-sc11-"));
+    try {
+      await seedPair(memoryDir);
+      const reported: unknown[] = [];
+      const llm: MemoryExtractLlm = {
+        complete: async () =>
+          JSON.stringify([
+            {
+              title: "Use queue for concurrency",
+              body: "Concurrency routes through the scheduler queue as of v3.",
+              replaces: ["ghost", "old"],
+            },
+          ]),
+      };
+
+      const result = await runMemoryDream({
+        memoryDir,
+        llm,
+        onError: (error) => reported.push(error),
+      });
+
+      const supercede = result.ops.find((op) => op.kind === "SUPERSEDE");
+      assert.ok(supercede, "the known id must still produce a SUPERSEDE");
+      assert.deepEqual(
+        supercede!.kind === "SUPERSEDE" ? supercede!.supersedes : [],
+        ["old"]
+      );
+      const fresh = result.written.find(
+        (written) => written.kind === "SUPERSEDE"
+      );
+      assert.ok(fresh);
+      const stored = parseMemoryEntry(
+        await readFile(join(memoryDir, `${fresh!.slug}.md`), "utf8")
+      );
+      assert.deepEqual(stored.supersedes, ["old"]);
+      assert.equal(reported.length, 1, "the skipped slug must be reported");
+      assert.match(
+        String(reported[0]),
+        /dream: unknown replaces slug "ghost" skipped/
+      );
+    } finally {
+      await rm(memoryDir, { recursive: true, force: true });
+    }
+  });
+
+  // SC12: at most MAX_SUPERSEDES_PER_CANDIDATE ids reach one entry.
+  it("caps replaces at 8 ids per candidate", async () => {
+    const memoryDir = await mkdtemp(join(tmpdir(), "memory-dream-sc12-"));
+    try {
+      const slugs = Array.from({ length: 10 }, (_, i) => `s${i}`);
+      for (const slug of slugs) {
+        await writeFile(
+          join(memoryDir, `${slug}.md`),
+          serializeMemoryEntry(
+            entry(slug, {
+              title: `Fact ${slug}`,
+              body: `Body of ${slug} with a stable fact.`,
+            })
+          ),
+          "utf8"
+        );
+      }
+      const llm: MemoryExtractLlm = {
+        complete: async () =>
+          JSON.stringify([
+            {
+              title: "Use queue for concurrency",
+              body: "Concurrency routes through the scheduler queue as of v3.",
+              replaces: slugs,
+            },
+          ]),
+      };
+
+      const result = await runMemoryDream({ memoryDir, llm });
+
+      const fresh = result.written.find(
+        (written) => written.kind === "SUPERSEDE"
+      );
+      assert.ok(fresh);
+      const stored = parseMemoryEntry(
+        await readFile(join(memoryDir, `${fresh!.slug}.md`), "utf8")
+      );
+      assert.ok(
+        stored.supersedes !== null && stored.supersedes.length <= 8,
+        `at most ${MAX_SUPERSEDES_PER_CANDIDATE} ids may be written`
+      );
+      assert.deepEqual(stored.supersedes, slugs.slice(0, 8));
+    } finally {
+      await rm(memoryDir, { recursive: true, force: true });
+    }
+  });
+
+  // Duplicates collapse to their first occurrence before the cap: a repeated
+  // id must not crowd a valid later slug out of the 8-id budget.
+  it("collapses duplicate replaces ids before applying the cap", async () => {
+    const memoryDir = await mkdtemp(join(tmpdir(), "memory-dream-dedup-"));
+    try {
+      const slugs = Array.from({ length: 10 }, (_, i) => `s${i}`);
+      for (const slug of slugs) {
+        await writeFile(
+          join(memoryDir, `${slug}.md`),
+          serializeMemoryEntry(
+            entry(slug, {
+              title: `Fact ${slug}`,
+              body: `Body of ${slug} with a stable fact.`,
+            })
+          ),
+          "utf8"
+        );
+      }
+      const llm: MemoryExtractLlm = {
+        complete: async () =>
+          JSON.stringify([
+            {
+              title: "Use queue for concurrency",
+              body: "Concurrency routes through the scheduler queue as of v3.",
+              replaces: [
+                "s0",
+                "s0",
+                "s1",
+                "s2",
+                "s3",
+                "s4",
+                "s5",
+                "s6",
+                "s7",
+                "s8",
+              ],
+            },
+          ]),
+      };
+
+      const result = await runMemoryDream({ memoryDir, llm });
+
+      const fresh = result.written.find(
+        (written) => written.kind === "SUPERSEDE"
+      );
+      assert.ok(fresh);
+      const stored = parseMemoryEntry(
+        await readFile(join(memoryDir, `${fresh!.slug}.md`), "utf8")
+      );
+      assert.deepEqual(stored.supersedes, [
+        "s0",
+        "s1",
+        "s2",
+        "s3",
+        "s4",
+        "s5",
+        "s6",
+        "s7",
+      ]);
     } finally {
       await rm(memoryDir, { recursive: true, force: true });
     }

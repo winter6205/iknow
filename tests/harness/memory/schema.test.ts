@@ -60,6 +60,33 @@ describe("sanitizeMemoryFile — v1 pass-through", () => {
     assert.deepEqual(out.entries, [entry()]);
   });
 
+  it("keeps a string-array supersedes verbatim", () => {
+    const out = sanitizeMemoryFile(
+      v1File({ entries: [entry({ supersedes: ["aaaa1111bbbb"] })] })
+    );
+    assert.deepEqual(out.entries[0].supersedes, ["aaaa1111bbbb"]);
+  });
+
+  it("normalizes a supersedes list to null when empty, non-array, or all-invalid", () => {
+    for (const bad of [[], [7, null, {}], "old", 42]) {
+      const out = sanitizeMemoryFile(
+        v1File({ entries: [entry({ supersedes: bad })] })
+      );
+      assert.equal(
+        out.entries[0].supersedes,
+        null,
+        `${JSON.stringify(bad)} must normalize to null`
+      );
+    }
+  });
+
+  it("keeps the string elements of a mixed supersedes list", () => {
+    const out = sanitizeMemoryFile(
+      v1File({ entries: [entry({ supersedes: ["old", 7, null] })] })
+    );
+    assert.deepEqual(out.entries[0].supersedes, ["old"]);
+  });
+
   it("returns an empty entries array for a v1 file with no entries", () => {
     const out = sanitizeMemoryFile(v1File({ entries: [] }));
     assert.deepEqual(out.entries, []);

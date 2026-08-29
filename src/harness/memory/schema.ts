@@ -51,7 +51,8 @@ export interface MemoryEntryV1 {
   readonly importance: number;
   readonly ttl_days: number;
   readonly disabled: boolean;
-  readonly supersedes: string | null;
+  /** Slugs this entry supersedes. Empty arrays normalize to null. */
+  readonly supersedes: string[] | null;
   readonly title: string;
   readonly body: string;
   /** ISO-8601 string. Empty when missing (sanitize is pure / no clock read). */
@@ -141,13 +142,23 @@ function sanitizeMemoryEntry(raw: unknown): MemoryEntryV1 {
     typeof obj["ttl_days"] === "number" ? obj["ttl_days"] : base.ttl_days;
   out["disabled"] =
     typeof obj["disabled"] === "boolean" ? obj["disabled"] : base.disabled;
-  out["supersedes"] =
-    obj["supersedes"] === null || typeof obj["supersedes"] === "string"
-      ? obj["supersedes"]
-      : base.supersedes;
+  out["supersedes"] = normalizeSupersedes(obj["supersedes"]);
   out["title"] = typeof obj["title"] === "string" ? obj["title"] : base.title;
   out["body"] = typeof obj["body"] === "string" ? obj["body"] : base.body;
   out["updated_at"] =
     typeof obj["updated_at"] === "string" ? obj["updated_at"] : base.updated_at;
   return out as unknown as MemoryEntryV1;
+}
+
+/**
+ * Normalize `supersedes` onto `string[] | null`: only string elements
+ * survive, an empty (or all-invalid) array normalizes to null — an empty
+ * pointer list must never occur on disk or in memory.
+ */
+function normalizeSupersedes(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const ids = value
+    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+    .map((v) => v.trim());
+  return ids.length > 0 ? ids : null;
 }

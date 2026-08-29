@@ -11,12 +11,14 @@
  *   project AGENTS + project rules
  *   ↓ [EXISTENCE_POINTER] — only when the memory library is non-empty
  *   ↓ [memory_catalog + English discipline] — autoExtract === true and ≥1 live
- *   promote 段 (if any) — <= 4000 chars, importance desc
+ *   ↓ [promote 段 (if any)] — autoExtract === true (specs/auto-memory-layering.md),
+ *     <= 4000 chars, importance desc
  *
  * The function is a pure thin composer (≤30 lines, append-only on messages via
  * out-params — here simply returns a string): it reads static-layer files with
  * readFile fallback (discovery is metadata-only), reads promote entries from
- * disk when no cache is provided, and NEVER mutates ctx or writes to disk.
+ * disk when no cache is provided and autoExtract is on, and NEVER mutates ctx
+ * or writes to disk.
  */
 import { readFile, opendir } from "node:fs/promises";
 import {
@@ -49,8 +51,10 @@ const FILE_CAP = 12000;
  *     (a project-local `.iknow/AGENTS.md` must not become user-level).
  *   memoryDir: project-namespaced memory root (<workspaceRoot>/.iknow/memory/
  *     <base>-<hash>, per-root memory decision).
- *   autoExtract: when true, append memory_catalog after EXISTENCE_POINTER.
- *     Absent / non-true → byte-identical to the catalog-less path.
+ *   autoExtract: when true, append memory_catalog after EXISTENCE_POINTER,
+ *     then the promote segment (if any). Absent / non-true → no catalog and
+ *     no promote segment; AGENTS layers + EXISTENCE_POINTER are unaffected
+ *     (specs/auto-memory-layering.md — promote 与抽取同闸).
  *   promoteEntries: optional injection — used by tests + per-turn refresh hook.
  */
 export interface AssemblyContext {
@@ -83,15 +87,18 @@ export async function assembleSystemPrompt(
 ): Promise<string> {
   const staticPrompt = await assembleStaticSystemPrompt(ctx);
   const hasMemory = await memoryLibraryNonEmpty(ctx.memoryDir);
-  const promote =
-    ctx.promoteEntries ?? (await listPromotableEntries(ctx.memoryDir));
   const parts: string[] = staticPrompt ? [staticPrompt] : [];
   if (hasMemory) parts.push(EXISTENCE_POINTER);
   if (ctx.autoExtract === true) {
     const catalog = await loadCatalogSegment(ctx.memoryDir);
     if (catalog) parts.push(catalog);
+    // specs/auto-memory-layering.md: promote 段与 catalog 同闸 — only when
+    // autoExtract === true; lazy-scan disk only inside the gate so the gated-off
+    // path never touches promote state.
+    const promote =
+      ctx.promoteEntries ?? (await listPromotableEntries(ctx.memoryDir));
+    if (promote.length > 0) parts.push(formatPromote(promote));
   }
-  if (promote.length > 0) parts.push(formatPromote(promote));
   return parts.join("\n\n");
 }
 

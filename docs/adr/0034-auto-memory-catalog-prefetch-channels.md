@@ -15,6 +15,8 @@ ADR-0009 D3 put un-promoted auto memory on `memory_recall` / `tool_result` only,
 
 3. **Recall still returns full hits.** Default ten hits remain title + frontmatter + body, not catalog lines. Same advisory label. Auto-memory must not auto-promote and must not outrank the user turn, the repository, or project instructions.
 
+4. **Promote assembly shares the catalog gate.** Eligible promoted bodies may enter `system` only when `autoExtract === true` (same as catalog). `AGENTS.md` / existence pointer / `memory_recall` / `memory_save` do not follow this gate. `MEMORY.md` is never injected. Amendment 2026-08-29; `specs/auto-memory-layering.md`.
+
 ## Consequences
 
 - (+) The model can see that a library exists without reloading bodies every turn; prefetch can change without busting the system prefix.

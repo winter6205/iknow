@@ -123,6 +123,32 @@ describe("serializeMemoryEntry", () => {
     assert.deepEqual(parseMemoryEntry(serializeMemoryEntry(e)), e);
   });
 
+  it("round-trips a supersedes id list as a flat comma-joined value", () => {
+    const e = { ...full(), supersedes: ["aaaa1111bbbb", "cccc2222dddd"] };
+    const serialized = serializeMemoryEntry(e);
+    assert.ok(
+      serialized.includes("\nsupersedes: aaaa1111bbbb,cccc2222dddd\n"),
+      "the flat list form must keep the supersedes key name"
+    );
+    assert.deepEqual(parseMemoryEntry(serialized).supersedes, [
+      "aaaa1111bbbb",
+      "cccc2222dddd",
+    ]);
+  });
+
+  it("normalizes an empty or blank supersedes list back to null on parse", () => {
+    for (const raw of ["supersedes:", "supersedes: null", "supersedes: , ,"]) {
+      const parsed = parseMemoryEntry(
+        frontmatter(["id: x", raw.trim()], "body")
+      );
+      assert.equal(
+        parsed.supersedes,
+        null,
+        `${raw} must parse to null (empty lists never occur)`
+      );
+    }
+  });
+
   it("writes the 6 core fields plus title and updated_at before ---", () => {
     const out = serializeMemoryEntry(full());
     assert.match(out, /^---\n/);
