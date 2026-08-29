@@ -53,6 +53,7 @@ export function TuiHarness(props: TuiHarnessProps): ReactNode {
     props.bridge ??
     createTuiBridge({
       dataDir: tmp,
+      workspaceRoot: tmp,
       deps: makeDeps([assistantResult({ texts: [] })]),
       inflight: createInflightRegistry(),
     });

@@ -131,6 +131,7 @@ async function mountAppAsync(
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-skillload-data-"));
   const bridge = createTuiBridge({
     dataDir,
+    workspaceRoot: dataDir,
     deps: makeDeps(responses, {
       ...(opts.delayMs ? { delayMs: opts.delayMs } : {}),
     }),

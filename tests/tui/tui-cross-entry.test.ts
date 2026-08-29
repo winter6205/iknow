@@ -49,6 +49,7 @@ describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 hub 共享池", () => {
     ]);
     const bridge = createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: tuiDeps,
       inflight: createInflightRegistry(),
     });
@@ -76,13 +77,15 @@ describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 hub 共享池", () => {
       turnCount: number;
       title: string;
       cwd: string;
+      workspaceRoot: string;
     };
     // schemaVersion 不断言硬编码数字（曾写死 2，schema 演进到 5 后腐烂）——
     // 与 SSOT 常量对齐，演进时自动跟随。
     expect(raw.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
     expect(raw.turnCount).toBe(2);
     expect(raw.title).toBe("第一个问题");
-    expect(raw.cwd).toBe(cwd);
+    expect(raw.cwd).toBe(baseDir);
+    expect(raw.workspaceRoot).toBe(baseDir);
 
     // Step 3：独立 hub 续跑第 N+1 轮
     await serveHub.postMessage({ conversationId: id, text: "第三个问题" });

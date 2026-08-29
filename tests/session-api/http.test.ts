@@ -60,6 +60,7 @@ async function startServer(
   const store = new SessionStore(baseDir);
   const hub = new SessionHub({
     store,
+    workspaceRoot: process.cwd(),
     deps: makeDeps(responses),
     ...hubOpts,
   });
@@ -145,6 +146,7 @@ async function restartWithOptions(
   const store = new SessionStore(baseDir);
   const hub = new SessionHub({
     store,
+    workspaceRoot: process.cwd(),
     deps: makeDeps([assistantResult({ texts: ["x"] })]),
   });
   listening = await listenSessionServer({
@@ -185,6 +187,7 @@ describe("GET /api/v1/health", () => {
     const store = new SessionStore(baseDir);
     const hub = new SessionHub({
       store,
+      workspaceRoot: process.cwd(),
       deps: makeDeps([assistantResult({ texts: ["x"] })]),
     });
     listening = await listenSessionServer({
@@ -942,7 +945,11 @@ describe("static file serving", () => {
       const store = new SessionStore(
         await mkdtemp(join(tmpdir(), "iknow-srv-"))
       );
-      const hub = new SessionHub({ store, deps: makeDeps([]) });
+      const hub = new SessionHub({
+        store,
+        deps: makeDeps([]),
+        workspaceRoot: process.cwd(),
+      });
       staticServer = await listenSessionServer({
         hub,
         host: "127.0.0.1",
@@ -1029,6 +1036,7 @@ describe("GET/PUT /api/v1/workspace + GET /api/v1/workspaces (T3)", () => {
   }
 
   it("GET unbound → 200 { bound: false }", async () => {
+    await freshServeServer();
     const { status, body } = await getJson("/api/v1/workspace");
     assert.equal(status, 200);
     const b = body as { bound?: boolean; root?: string };

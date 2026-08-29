@@ -53,8 +53,6 @@ import {
   resolveGraphMode,
 } from "../harness/graph/mode.js";
 import { loadIknowSettings } from "../config/settings.js";
-import { createTaskWorktreeProvisioner } from "../session-api/worktree-rebind.js";
-import { SessionStore } from "../session-api/store/index.js";
 import { resolveVerifyConfig } from "../session-api/serve.js";
 import { createEnvLoader, type EnvLoader } from "../config/env-loader.js";
 import type { IknowEnv } from "../config/env.js";
@@ -177,18 +175,16 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   try {
     renderer = await factory(RENDERER_CONFIG);
     const runtime = await prepareRuntime();
-    // review-fix (M1 / H1): TUI 用 active env 条件 resolve workspaceRoot ——
-    // explicit flag 或 env SSOT 任一在场时走 resolver(typed error
-    // fail-fast);两者都缺 → undefined(保持 dataDir 默认 ~/.iknow)。
+    // T1: resolve the root before any lazy session create. The resolver's
+    // final cwd fallback is an entry-level binding, never a SessionHub
+    // create-time cwd backfill.
     const envWsRoot = runtime.env.workspaceRoot;
-    const workspaceRoot =
-      options.workspaceRoot !== undefined || envWsRoot !== undefined
-        ? resolveWorkspaceRoot({
-            explicit: options.workspaceRoot,
-            cwd: process.cwd(),
-            env: { [WORKSPACE_ROOT_ENV_KEY]: envWsRoot },
-          })
-        : undefined;
+    const cwd = process.cwd();
+    const workspaceRoot = resolveWorkspaceRoot({
+      explicit: options.workspaceRoot,
+      cwd,
+      env: { [WORKSPACE_ROOT_ENV_KEY]: envWsRoot },
+    });
     // 装配链：runtime → deps → bridge/ask/tool 桥接 → TuiApp
     // issue #584: persona seed 永远 `<homedir>/.iknow`,不跟 workspaceRoot。
     await initIknowWorkspaceSafe();
@@ -212,7 +208,6 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // ADR-0019 (T2): explicit workspaceRoot → resolveServeDataDir 落
     // `<workspaceRoot>/.iknow`;缺省 → ~/.iknow(spec #120 SC 1 既有默认)。
     const dataDir = resolveServeDataDir(options.dataDir, workspaceRoot);
-    const cwd = process.cwd();
     // settings 双向持久化（T4）：/thinking /effort 面板 Esc → 写回 settings.json。
     // 目标文件按「project 存在写 project，否则 user」解析（project 本就覆盖 user，
     // 写 user 等于无效——对齐 settings.ts merge 优先级）。写回后登记 self-write
@@ -278,13 +273,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       resolveGraphMode({ settings: startupSettings.graph })
     );
 
-    // Review High-1 (2026-08-29):worktree isolation host 缝 —— provision
-    // 负责建 task worktree + 仅本会话根改绑（session-api SSOT）。开关读取
-    // 在 build-engine 启动加载点（经 depsOpts.settings）；OFF 时门禁不装配，
-    // provisioner 空转。store 与 bridge 的 SessionStore 同池（dataDir）。
-    const worktreeProvisioner = createTaskWorktreeProvisioner({
-      store: new SessionStore(dataDir),
-    });
+    // The initial TUI engine is built before createTuiBridge, so bind this
+    // host seam late to the Hub that owns dirty-root persistence. Mutates
+    // cannot reach the seam until the bridge has been created below.
+    const bridgeRef: { hub?: ReturnType<typeof createTuiBridge>["hub"] } = {};
     const worktreeIsolation = {
       provision: ({
         conversationId,
@@ -293,7 +285,11 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         conversationId?: string;
         root: string;
       }) =>
-        worktreeProvisioner.provision({ conversationId, root: sessionRoot }),
+        bridgeRef.hub?.provisionWorktree({
+          conversationId,
+          root: sessionRoot,
+        }) ??
+        Promise.reject(new Error("TUI Hub is not ready for worktree provision")),
     };
 
     const depsOpts: BuildTuiDepsOptions = {
@@ -342,7 +338,6 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // /quit 路径由 shutdownExtensions 兜底释放（幂等，重复 stop 无害）。
     // Review High-1:late-bound hub 引用 —— combinedShutdown 在 bridge 创建前
     // 注册，重建引擎的 shutdown 收口经 bridgeRef 转发。
-    const bridgeRef: { hub?: ReturnType<typeof createTuiBridge>["hub"] } = {};
     const combinedShutdown = async (): Promise<void> => {
       envLoader?.stop();
       if (shutdown) await shutdown();
@@ -356,6 +351,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // 交给 bridge,而 TuiApp 已用 resolveServeDataDir 的值,导致 bridge 内部
       // SessionStore 落点与展示层漂移(显式 workspaceRoot 时尤甚)。
       dataDir,
+      workspaceRoot,
       deps,
       subagentManager,
       // Review High-1 (2026-08-29):注入 deps 的启动根 + per-root 重建缝。

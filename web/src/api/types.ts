@@ -73,6 +73,8 @@ export type SessionListItem = {
   readonly updatedAt: string;
   readonly lastFinalText: string;
   readonly workspaceRoot?: string;
+  /** Additive binding health from the session store. */
+  readonly bindingStatus?: "unbound" | "invalid" | "bound";
 };
 
 export type SessionSummary = {

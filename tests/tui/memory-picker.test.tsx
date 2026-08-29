@@ -199,6 +199,7 @@ describe("memory-picker app 集成", () => {
     const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-mem-"));
     const bridge = createTuiBridge({
       dataDir,
+      workspaceRoot: dataDir,
       deps: makeDeps([]),
       inflight: createInflightRegistry(),
     });

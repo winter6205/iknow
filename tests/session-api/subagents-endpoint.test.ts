@@ -45,6 +45,7 @@ async function startServer(
   const store = new SessionStore(baseDir);
   const hub = new SessionHub({
     store,
+    workspaceRoot: process.cwd(),
     deps: makeDeps(responses),
     ...hubOpts,
   });

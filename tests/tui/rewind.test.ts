@@ -680,6 +680,7 @@ describe("bridge.rewindSession（hub.rewindSession 移 head → store.load 读�
   function makeBridge() {
     return createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: makeDeps([]),
       inflight: createInflightRegistry(),
     });

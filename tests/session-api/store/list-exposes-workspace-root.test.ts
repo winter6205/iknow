@@ -19,7 +19,7 @@
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -140,6 +140,44 @@ describe("SessionStore.list — workspaceRoot exposure", () => {
       "workspaceRoot" in entry,
       false,
       "workspaceRoot must be ABSENT from the entry shape, not serialized as null"
+    );
+    assert.equal(entry.bindingStatus, "unbound");
+  });
+
+  it("lists a session whose workspace directory disappeared as invalid", async () => {
+    const id = "list-wsr-missing-root";
+    const missingRoot = join(tmpdir(), "iknow-list-wsr-root-does-not-exist");
+    const file = {
+      ...withReply(id),
+      workspaceRoot: missingRoot,
+    };
+    await store.save({ id, file });
+
+    const entry = (await store.list()).find(
+      (candidate) => candidate.conversation_id === id
+    );
+    assert.ok(entry, "session with a missing root must remain listed");
+    assert.equal(entry.bindingStatus, "invalid");
+    assert.equal(entry.workspaceRoot, missingRoot);
+  });
+
+  it("classifies a malformed workspaceRoot without silently migrating the file", async () => {
+    const id = "list-wsr-malformed-root";
+    const jsonPath = join(sessionDir, `${id}.json`);
+    const legacy = { ...withReply(id), workspaceRoot: "relative/root" };
+    await writeFile(jsonPath, JSON.stringify(legacy), "utf8");
+    const before = await readFile(jsonPath, "utf8");
+
+    const entry = (await store.list()).find(
+      (candidate) => candidate.conversation_id === id
+    );
+    assert.ok(entry, "session with a malformed root must remain listed");
+    assert.equal(entry.bindingStatus, "invalid");
+    assert.equal(entry.workspaceRoot, "relative/root");
+    assert.equal(
+      await readFile(jsonPath, "utf8"),
+      before,
+      "list must not rewrite or migrate an invalid session"
     );
   });
 

@@ -72,6 +72,7 @@ function sampleFile(opts: {
     turnCount: 0,
     updatedAt: new Date().toISOString(),
     checkpoints: [],
+    workspaceRoot: process.cwd(),
     ...overrides,
   };
 }
@@ -116,7 +117,7 @@ describe("continueSession predicate rejects without run", () => {
     const { deps, stepCalls } = spyDeps([
       assistantResult({ texts: ["should-not-run"] }),
     ]);
-    const hub = new SessionHub({ store, deps });
+    const hub = new SessionHub({ store, deps, workspaceRoot: process.cwd() });
     const { session } = await hub.createSession();
     await assert.rejects(
       () => hub.continueSession(session.conversation_id),
@@ -134,7 +135,7 @@ describe("continueSession predicate rejects without run", () => {
     const { deps, stepCalls } = spyDeps([
       assistantResult({ texts: ["should-not-run"] }),
     ]);
-    const hub = new SessionHub({ store, deps });
+    const hub = new SessionHub({ store, deps, workspaceRoot: process.cwd() });
     const { session } = await hub.createSession();
     await seed(session.conversation_id, {
       messages: [userText("do"), assistantToolUse("t1"), toolResultOnly("t1")],
@@ -160,7 +161,7 @@ describe("continueSession predicate rejects without run", () => {
     const { deps, stepCalls } = spyDeps([
       assistantResult({ texts: ["should-not-run"] }),
     ]);
-    const hub = new SessionHub({ store, deps });
+    const hub = new SessionHub({ store, deps, workspaceRoot: process.cwd() });
     const { session } = await hub.createSession();
     await seed(session.conversation_id, {
       messages: [userText("do"), userText(LOOP_DETECTED_TEXT)],
@@ -183,7 +184,7 @@ describe("continueSession skip-append + reload_before_continue", () => {
     const { deps, encodeCount, stepMessages } = spyDeps([
       assistantResult({ texts: ["continued"] }),
     ]);
-    const hub = new SessionHub({ store, deps });
+    const hub = new SessionHub({ store, deps, workspaceRoot: process.cwd() });
     const { session } = await hub.createSession();
     const id = session.conversation_id;
     const diskMessages: AnthropicNativeMessage[] = [
@@ -212,7 +213,7 @@ describe("continueSession skip-append + reload_before_continue", () => {
     const { deps, stepMessages, encodeCount } = spyDeps([
       assistantResult({ texts: ["after interrupt"] }),
     ]);
-    const hub = new SessionHub({ store, deps });
+    const hub = new SessionHub({ store, deps, workspaceRoot: process.cwd() });
     const { session } = await hub.createSession();
     await seed(session.conversation_id, {
       messages: [
@@ -239,7 +240,7 @@ describe("continueSession skip-append + reload_before_continue", () => {
     const { deps, stepMessages } = spyDeps([
       assistantResult({ texts: ["closed out"] }),
     ]);
-    const hub = new SessionHub({ store, deps });
+    const hub = new SessionHub({ store, deps, workspaceRoot: process.cwd() });
     const { session } = await hub.createSession();
     await seed(session.conversation_id, {
       messages: [userText("do"), assistantToolUse("orphan-1")],
@@ -269,7 +270,7 @@ describe("continueSession skip-append + reload_before_continue", () => {
 describe("continueSession store.load failures", () => {
   it("missing session → not_found, step not called", async () => {
     const { deps, stepCalls } = spyDeps([assistantResult({ texts: ["no"] })]);
-    const hub = new SessionHub({ store, deps });
+    const hub = new SessionHub({ store, deps, workspaceRoot: process.cwd() });
     await assert.rejects(
       () => hub.continueSession("no-such-continue-id"),
       (err: unknown) => {
@@ -283,7 +284,7 @@ describe("continueSession store.load failures", () => {
 
   it("corrupt file → parse_failed, step not called", async () => {
     const { deps, stepCalls } = spyDeps([assistantResult({ texts: ["no"] })]);
-    const hub = new SessionHub({ store, deps });
+    const hub = new SessionHub({ store, deps, workspaceRoot: process.cwd() });
     await mkdir(sessionDir, { recursive: true });
     await writeFile(
       join(sessionDir, "corrupt-continue.json"),
@@ -328,7 +329,7 @@ describe("continueSession serialize queue — no busy_stop_first", () => {
         },
       },
     };
-    const hub = new SessionHub({ store, deps });
+    const hub = new SessionHub({ store, deps, workspaceRoot: process.cwd() });
     const { session } = await hub.createSession();
     await seed(session.conversation_id, {
       messages: [userText("do"), assistantToolUse("t1"), toolResultOnly("t1")],

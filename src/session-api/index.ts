@@ -22,7 +22,7 @@ export {
   projectMessagesToTurns,
   type SessionHubOptions,
 } from "./hub.js";
-export type { SessionListEntry } from "./store/index.js";
+export type { SessionBindingStatus, SessionListEntry } from "./store/index.js";
 export {
   createSessionHttpServer,
   listenSessionServer,
