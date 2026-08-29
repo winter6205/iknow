@@ -124,10 +124,6 @@ export function AgentCard({
             {renderBody ? renderBody(text) : <MarkdownBody text={text} />}
           </div>
 
-          {/* toolCalls（默认折叠，每条 mono chip + 展开看 input/output 预览）。 */}
-          {toolCalls && toolCalls.length > 0 ? (
-            <ToolCallList toolCalls={toolCalls} />
-          ) : null}
         </>
       )}
 
@@ -136,6 +132,11 @@ export function AgentCard({
         stopReason={answer?.stopReason}
         turnCount={answer?.turnCount}
       />
+
+      {/* Legacy toolCalls stay after the stop notice; ordered activity renders tools inline above. */}
+      {!hasActivity && toolCalls && toolCalls.length > 0 ? (
+        <ToolCallList toolCalls={toolCalls} />
+      ) : null}
 
       {/* Notes (quiet, mono). */}
       {notes && notes.length > 0 ? (

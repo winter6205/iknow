@@ -23,6 +23,8 @@ export interface TurnAnswerDto {
   readonly thinking?: ThinkingView;
   /** T1: 单回合内所有 tool_use，按 tool_use_id 配对 tool_result。无 tool_use 时整字段省略。 */
   readonly toolCalls?: readonly ToolCallView[];
+  /** Ordered assistant content used by clients that need text/tool placement. */
+  readonly activity?: readonly ActivityItem[];
   /** 上下文用量显示：该回合最后一次成功模型调用的 token usage。
    *  映射 RunResult.lastUsage（ADR-0008 D5）；null → 字段缺席（byte-stable，
    *  与 thinking/toolCalls 同模式）。contextWindow 经 HealthResponse 下发。 */

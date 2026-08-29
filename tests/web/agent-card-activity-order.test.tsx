@@ -52,18 +52,21 @@ describe("AgentCard — ordered activity", () => {
     assert.ok(html.indexOf("bash") < html.indexOf("following text"));
   });
 
-  it("uses the legacy thinking → body → tools layout when activity is absent or empty", () => {
+  it("renders legacy ToolCallList after StopNotice when activity is absent or empty", () => {
     const legacy = answer({
       finalText: "legacy body",
       thinking: { entries: [{ text: "legacy thinking" }], redactedCount: 0 },
       toolCalls: [tool],
+      stopReason: "maxTurns",
+      turnCount: 2,
     });
     for (const activity of [undefined, []] as const) {
       const html = renderToStaticMarkup(
         <AgentCard text="legacy body" answer={{ ...legacy, activity }} />
       );
       assert.ok(html.indexOf("legacy thinking") < html.indexOf("legacy body"));
-      assert.ok(html.indexOf("legacy body") < html.indexOf("bash"));
+      assert.ok(html.indexOf("legacy body") < html.indexOf("已达轮次上限"));
+      assert.ok(html.indexOf("已达轮次上限") < html.indexOf("bash"));
     }
   });
 });
