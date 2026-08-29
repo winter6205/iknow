@@ -64,7 +64,7 @@ OVERALL: PASS
    - **Acceptance:** each of the three entry surfaces resolves/validates a root before Hub create/bind; a missing, empty, negative-bound, or overflow root returns the typed create error before disk write; a created session file contains the validated root; no create path can infer cwd.
    - **Completion:** A fresh session can be traced from each entry surface to one Hub-owned create/bind operation with a root present, while implementers retain freedom over exact file/helper placement.
    - [blocks: T0]
-   - Status: [ ] pending
+   - Status: [x] done (2026-08-29)
 
 3. **T2 — Fail fast on execute and reject legacy unbound sessions** — tag: `[implementation]`
    - **Inherits:** T0–T1; unbound execute is invalid on all session-backed surfaces; missing-root legacy sessions are not happy-path compatible and must not run the engine.
