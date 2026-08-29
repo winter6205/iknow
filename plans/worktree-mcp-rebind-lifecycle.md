@@ -158,7 +158,7 @@ MCP server 的运行时失败继续映射到现有 `McpServerState = "failed"` �
    - **Surface:** `harness` engine assembly, ACI FS fence, and built-engine lifecycle
    - **Acceptance:** 一次 engine build 能证明同一组 roots 同时驱动 config、stdio cwd、ACI FS fence 和返回句柄；显式 sandbox root 不一致时以 `root_mismatch` fail-closed，且不 spawn、不执行工具；ask 的 registry/executor/catalog 不含 MCP 工具或连接行为；缺 root 不触达任何 MCP side effect。
    - **Completion headroom:** 实现者可以选择 holder、factory 参数或 `BuiltEngine` 字段的具体组织；禁止在 build-engine 之外再造第二套 root 解析规则。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T2, T3, T4]
 
 6. **chat/serve/TUI stable productRoot threading** — tag: `[implementation]`
