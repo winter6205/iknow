@@ -37,6 +37,10 @@ import {
 
 const DEFAULT_MAX_RESULTS = 5;
 const MAX_MAX_RESULTS = 10;
+const MAX_TITLE_CHARS = 200;
+const MAX_SNIPPET_CHARS = 500;
+const MAX_URL_CHARS = 2_000;
+const SEARCH_OUTPUT_BUDGET = 8_000;
 const SEARCH_TIMEOUT_MS = 20_000;
 /** B1 默认端点:Bing(中国区可达,DDG 在此类网络不可达)。DDG html 仍可经覆写。 */
 const DEFAULT_SEARCH_ENDPOINT = "https://cn.bing.com/search";
@@ -81,28 +85,37 @@ export function createWebSearchTool(deps?: WebSearchToolDeps): AciToolDef {
   // fail-fast:代理配置在装配时即过 SSRF 语法校验,坏的 IKNOW_WEB_PROXY
   // 在 build 期报错,而非首次搜索时才暴露。
   const guardDeps = resolveGuardDeps(deps);
+  const resultCache = new Map<string, Promise<ReadonlyArray<SearchResult>>>();
   const handler = async (
     input: unknown,
     ctx?: ToolExecutionContext
   ): Promise<string> => {
     const parsed = compileSearchInput(input, deps?.envSearchUrl);
-    const requestUrl = `${parsed.endpoint}${parsed.endpoint.includes("?") ? "&" : "?"}q=${encodeURIComponent(parsed.query)}`;
-    const response = await fetchPublicResponse(requestUrl, guardDeps, {
-      tool: "web_search",
-      timeoutMs: SEARCH_TIMEOUT_MS,
-      signal: ctx?.signal,
-    });
-    const results = parseSearchResults(
-      response.body,
-      parsed.maxResults,
-      parsed.endpoint
-    );
+    const cacheKey = `${parsed.endpoint}\u0000${parsed.query}`;
+    const cachedResults = resultCache.get(cacheKey);
+    const cacheHit = cachedResults !== undefined;
+    const resultsPromise =
+      cachedResults ?? loadSearchResults(parsed, guardDeps, ctx?.signal);
+    if (!cacheHit) {
+      resultCache.set(cacheKey, resultsPromise);
+      resultsPromise.catch(() => {
+        // EXIT: failed searches are not retained; a later call may retry.
+        if (resultCache.get(cacheKey) === resultsPromise) {
+          resultCache.delete(cacheKey);
+        }
+      });
+    }
+    const results = await resultsPromise;
     if (results.length === 0) {
       throw new ToolExecutionError(
         "web_search failed: No search results found."
       );
     }
-    return formatSearchResults(parsed.query, results);
+    return formatSearchResults(
+      parsed.query,
+      results.slice(0, parsed.maxResults),
+      !cacheHit
+    );
   };
 
   return Object.freeze({
@@ -189,6 +202,20 @@ function clampMaxResults(raw: unknown): number {
   return floored;
 }
 
+async function loadSearchResults(
+  parsed: SearchInput,
+  guardDeps: GuardDeps,
+  signal: AbortSignal | undefined
+): Promise<ReadonlyArray<SearchResult>> {
+  const requestUrl = `${parsed.endpoint}${parsed.endpoint.includes("?") ? "&" : "?"}q=${encodeURIComponent(parsed.query)}`;
+  const response = await fetchPublicResponse(requestUrl, guardDeps, {
+    tool: "web_search",
+    timeoutMs: SEARCH_TIMEOUT_MS,
+    signal,
+  });
+  return parseSearchResults(response.body, MAX_MAX_RESULTS, parsed.endpoint);
+}
+
 /**
  * 解析搜索结果页：按端点 hostname 分派解析器（DDG html vs Bing），
  * 限 maxResults 条。未知端点回退 DDG 解析（向后兼容旧 fixture）。
@@ -224,8 +251,13 @@ function parseDuckDuckGoResults(
   for (const anchor of parseDdgAnchors(body)) {
     const snippet = anchorIndex < snippets.length ? snippets[anchorIndex] : "";
     anchorIndex += 1;
-    if (anchor.title.length === 0 || anchor.url.length === 0) continue;
-    results.push({ title: anchor.title, url: anchor.url, snippet });
+    const result = projectSearchResult({
+      title: anchor.title,
+      url: anchor.url,
+      snippet,
+    });
+    if (!result) continue;
+    results.push(result);
     if (results.length >= maxResults) break;
   }
   return results;
@@ -257,11 +289,33 @@ function parseBingResults(body: string, maxResults: number): SearchResult[] {
     const snippet = cleanHtml(
       captionMatch?.[1] ?? paragraphMatch?.[1] ?? ""
     ).trim();
-    if (title.length === 0 || url.length === 0) continue;
-    results.push({ title, url, snippet });
+    const result = projectSearchResult({ title, url, snippet });
+    if (!result) continue;
     if (results.length >= maxResults) break;
+    results.push(result);
   }
   return results;
+}
+
+function projectSearchResult(result: SearchResult): SearchResult | undefined {
+  const projected = {
+    title: truncateField(result.title, MAX_TITLE_CHARS),
+    url: truncateField(result.url, MAX_URL_CHARS),
+    snippet: truncateField(result.snippet, MAX_SNIPPET_CHARS),
+  };
+  if (
+    projected.title.length === 0 &&
+    projected.url.length === 0 &&
+    projected.snippet.length === 0
+  ) {
+    // EXIT: field projection removed every field; do not emit an empty item.
+    return undefined;
+  }
+  return projected;
+}
+
+function truncateField(value: string, maxChars: number): string {
+  return Array.from(value.trim()).slice(0, maxChars).join("");
 }
 
 /** 提取 class 含 result__snippet / result-snippet 的元素文本。
@@ -319,13 +373,32 @@ function normalizeResultUrl(rawUrl: string): string {
 /** 输出拼装：`Search results for: <query>` + 编号列表。 */
 function formatSearchResults(
   query: string,
-  results: ReadonlyArray<SearchResult>
+  results: ReadonlyArray<SearchResult>,
+  includeSnippets: boolean
 ): string {
-  const lines: string[] = [`Search results for: ${query}`];
-  results.forEach((result, index) => {
-    lines.push(`${index + 1}. ${result.title}`);
-    lines.push(`   URL: ${result.url}`);
-    if (result.snippet.length > 0) lines.push(`   ${result.snippet}`);
-  });
+  const header = `Search results for: ${query}`;
+  if (header.length > SEARCH_OUTPUT_BUDGET) {
+    throw new ToolExecutionError(
+      "web_search failed: Search results exceeded output budget."
+    );
+  }
+  const lines: string[] = [header];
+  for (const [index, result] of results.entries()) {
+    const entry = [
+      `${index + 1}. ${result.title}`,
+      `   URL: ${result.url}`,
+      ...(includeSnippets && result.snippet.length > 0
+        ? [`   ${result.snippet}`]
+        : []),
+    ];
+    const next = `${lines.join("\n")}\n${entry.join("\n")}`;
+    if (next.length > SEARCH_OUTPUT_BUDGET) break;
+    lines.push(...entry);
+  }
+  if (lines.length === 1) {
+    throw new ToolExecutionError(
+      "web_search failed: Search results exceeded output budget."
+    );
+  }
   return lines.join("\n");
 }
