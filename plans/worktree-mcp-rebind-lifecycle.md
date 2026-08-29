@@ -134,7 +134,7 @@ MCP server 的运行时失败继续映射到现有 `McpServerState = "failed"` �
    - **Surface:** `harness/mcp` root-resolution boundary
    - **Acceptance:** 一次纯解析产生规范化的 `{ workspaceRoot, mcpConfigRoot }`；空白、相对、无法规范化或不一致的输入在任何文件读取、spawn 或工具执行前返回 T1 typed kind；同一 product root 始终得到同一 config root，且 resolver 不读 git、不持有 session 状态。
    - **Completion headroom:** 实现者可以选择规范化库、返回类型的声明位置和校验 helper；调用方只能消费 resolver 的结果，不得复制 root policy。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T1]
 
 3. **`config.ts` mcpConfigRoot-only loading** — tag: `[implementation]`
