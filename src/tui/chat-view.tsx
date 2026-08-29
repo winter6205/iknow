@@ -100,6 +100,7 @@ import {
   countToolUsesByName,
   formatTurnActivityFold,
   lastTurnQueryIndex,
+  orderedTurnActivitySegments,
   shouldCollapseTurnToolRows,
   shouldShowTurnActivityFold,
   mergeToolUseCounts,
@@ -290,18 +291,61 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     const thinkingSeconds = running
       ? (props.thinkingFrozenSeconds ?? 0)
       : (props.lastThinkingSeconds ?? 0);
+    const activitySegments = orderedTurnActivitySegments(
+      visibleMessages,
+      lastQueryVisible
+    );
     // idle 才收成两行：`思考了 N 秒` + `bash × N`；running 保持逐条工具可见。
     const showTurnFold = shouldShowTurnActivityFold({
       running,
       thinkingSeconds,
       turnToolTotal,
     });
-    const foldDisplayLines = showTurnFold
-      ? formatTurnActivityFold(thinkingSeconds, turnToolCounts)
-      : [];
+    const foldLinesByMessageIndex = new Map<number, ReadonlyArray<string>>();
+    if (showTurnFold) {
+      let thinkingPlaced = false;
+      const toolSegments = activitySegments.filter(
+        (
+          segment
+        ): segment is Extract<typeof segment, { readonly kind: "tools" }> =>
+          segment.kind === "tools"
+      );
+      for (const [segmentIndex, segment] of toolSegments.entries()) {
+        const entries =
+          segmentIndex === toolSegments.length - 1
+            ? mergeToolUseCounts(segment.entries, liveCompletedCounts)
+            : segment.entries;
+        const lines = formatTurnActivityFold(
+          thinkingPlaced ? 0 : thinkingSeconds,
+          entries
+        );
+        if (lines.length > 0) {
+          foldLinesByMessageIndex.set(segment.messageIndex, lines);
+          thinkingPlaced = true;
+        }
+      }
+      if (!thinkingPlaced) {
+        const lastText = [...activitySegments]
+          .reverse()
+          .find((segment) => segment.kind === "text");
+        if (lastText !== undefined) {
+          const lines = formatTurnActivityFold(
+            thinkingSeconds,
+            liveCompletedCounts
+          );
+          if (lines.length > 0) {
+            foldLinesByMessageIndex.set(lastText.messageIndex, lines);
+          }
+        }
+      }
+    }
+    const foldLineCount = [...foldLinesByMessageIndex.values()].reduce(
+      (total, lines) => total + lines.length,
+      0
+    );
     const collapseToolRows = shouldCollapseTurnToolRows(
       running,
-      foldDisplayLines.length,
+      foldLineCount,
       turnToolTotal
     );
     const tailSlots = liveTailSlots(
@@ -411,22 +455,22 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
                 hideThinking={
                   inLastTurn &&
                   !thinkingExpanded &&
-                  (foldDisplayLines.length > 0 ||
-                    (running && thinkingSeconds > 0))
+                  (foldLineCount > 0 || (running && thinkingSeconds > 0))
                 }
                 hideToolSummaries={inLastTurn && collapseToolRows}
                 marginTop={visibleIndex === 0 ? 0 : 1}
               />
-              {visibleIndex === lastQueryVisible &&
-                foldDisplayLines.map((line, foldIdx) => (
+              {(foldLinesByMessageIndex.get(visibleIndex) ?? []).map(
+                (line, foldIdx) => (
                   <text
-                    key={`turn-fold-${foldIdx}`}
+                    key={`turn-fold-${visibleIndex}-${foldIdx}`}
                     fg={pal.dim}
                     wrapMode="none"
                   >
                     {line}
                   </text>
-                ))}
+                )
+              )}
             </box>
           );
         })}

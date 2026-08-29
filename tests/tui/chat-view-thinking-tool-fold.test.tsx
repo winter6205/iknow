@@ -146,6 +146,73 @@ test("idle：思考秒数 + 多轮 bash → 思考了 N 秒 下一行 bash × N�
   await setup.renderer.destroy();
 });
 
+test("idle：文本→工具时，工具折叠出现在前置文本之后", async () => {
+  const setup = await testRender(
+    <ChatView
+      session={sessionWith([
+        {
+          role: "user",
+          content: [{ type: "text", text: "q" }],
+        },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "先说明" }],
+        },
+        ...bashTurn("tu-after-text", "思考工具", "pwd"),
+      ])}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      thinkingExpanded={false}
+      lastThinkingSeconds={29}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  const lines = frame.split("\n");
+  const textIdx = lines.findIndex((line) => line.includes("先说明"));
+  const foldIdx = lines.findIndex((line) => line.includes("bash × 1"));
+  expect(textIdx).toBeGreaterThanOrEqual(0);
+  expect(foldIdx).toBeGreaterThan(textIdx);
+  expect(frame).not.toContain("[完成]");
+  await setup.renderer.destroy();
+});
+
+test("idle：工具→文本时，工具折叠出现在后续文本之前", async () => {
+  const setup = await testRender(
+    <ChatView
+      session={sessionWith([
+        {
+          role: "user",
+          content: [{ type: "text", text: "q" }],
+        },
+        ...bashTurn("tu-before-text", "先调用工具", "pwd"),
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "后续总结" }],
+        },
+      ])}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      thinkingExpanded={false}
+      lastThinkingSeconds={29}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  const lines = frame.split("\n");
+  const foldIdx = lines.findIndex((line) => line.includes("bash × 1"));
+  const textIdx = lines.findIndex((line) => line.includes("后续总结"));
+  expect(foldIdx).toBeGreaterThanOrEqual(0);
+  expect(textIdx).toBeGreaterThanOrEqual(0);
+  expect(foldIdx).toBeLessThan(textIdx);
+  expect(frame).not.toContain("[完成]");
+  await setup.renderer.destroy();
+});
+
 test("running-fg：不提前收成 turn 摘要，历史 [完成] 仍可见", async () => {
   const liveToolRuns: ReadonlyArray<LiveToolRun> = [
     {

@@ -13,6 +13,7 @@ import {
   formatTurnActivityFold,
   lastTurnQueryIndex,
   mergeToolUseCounts,
+  orderedTurnActivitySegments,
   sliceTurnFrom,
   shouldCollapseTurnToolRows,
   shouldShowTurnActivityFold,
@@ -46,12 +47,72 @@ function assistantTools(
   return { role: "assistant", content };
 }
 
+function assistantText(text: string): AnthropicNativeMessage {
+  return { role: "assistant", content: [{ type: "text", text }] };
+}
+
 describe("lastTurnQueryIndex / sliceTurnFrom（empty）", () => {
   test("空消息 → index -1，slice 空", () => {
     expect(lastTurnQueryIndex([])).toBe(-1);
     expect(sliceTurnFrom([], -1)).toEqual([]);
     expect(sliceTurnFrom([], 0)).toEqual([]);
   });
+});
+
+describe("orderedTurnActivitySegments", () => {
+  test("文本→工具保留顺序，并把工具按连续活动聚成一段", () => {
+    expect(
+      orderedTurnActivitySegments(
+        [
+          user("q"),
+          assistantText("先说明"),
+          assistantTools(["bash", "bash"]),
+          toolResult("tu-bash-0"),
+          assistantText("再总结"),
+        ],
+        0
+      )
+    ).toEqual([
+      { kind: "text", messageIndex: 1 },
+      { kind: "tools", messageIndex: 2, entries: [{ name: "bash", count: 2 }] },
+      { kind: "text", messageIndex: 4 },
+    ]);
+  });
+
+  test("工具→文本把折叠位置留在后续文本之前", () => {
+    expect(
+      orderedTurnActivitySegments(
+        [
+          user("q"),
+          assistantTools(["bash"]),
+          toolResult("tu-bash-0"),
+          assistantText("完成"),
+        ],
+        0
+      )
+    ).toEqual([
+      { kind: "tools", messageIndex: 1, entries: [{ name: "bash", count: 1 }] },
+      { kind: "text", messageIndex: 3 },
+    ]);
+  });
+
+  test("empty / negative / overflow → 确定性空结果", () => {
+    expect(orderedTurnActivitySegments([], 0)).toEqual([]);
+    expect(orderedTurnActivitySegments([user("q")], -1)).toEqual([]);
+    expect(orderedTurnActivitySegments([user("q")], 99)).toEqual([]);
+  });
+
+  test("exception：非法 content 不抛出并回退为空结果", () => {
+    const malformed = {
+      role: "assistant",
+      get content(): never {
+        throw new Error("malformed content");
+      },
+    } as unknown as AnthropicNativeMessage;
+    expect(orderedTurnActivitySegments([malformed], 0)).toEqual([]);
+  });
+
+  // concurrent：N/A — helper 是纯同步扫描，不存在共享异步状态。
 });
 
 describe("countToolUsesByName（negative：末条无 tool_use）", () => {
