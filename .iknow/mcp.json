@@ -4,6 +4,11 @@
       "type": "stdio",
       "command": "npx",
       "args": ["-y", "codebase-memory-mcp"]
+    },
+    "iknow-trace": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["tsx", "src/trace-mcp/main.ts", "--trace-out", "trace"]
     }
   }
 }
