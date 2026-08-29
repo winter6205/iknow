@@ -9,6 +9,7 @@ import type { SubAgentEnvelope } from "./envelope.js";
  */
 export interface SubAgentTerminalNotice {
   readonly taskId: string;
+  readonly conversationId?: string;
   readonly status: SubAgentEnvelope["status"];
   readonly summary: string;
   readonly result: string;
@@ -48,6 +49,9 @@ function snapshotNotice(
 ): SubAgentTerminalNotice {
   return Object.freeze({
     taskId: notice.taskId,
+    ...(notice.conversationId !== undefined
+      ? { conversationId: notice.conversationId }
+      : {}),
     status: notice.status,
     summary: notice.summary,
     result: notice.result,

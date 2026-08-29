@@ -200,6 +200,101 @@ describe("SubAgentManager terminal subscription", () => {
     ]);
   });
 
+  it("associates a terminal notice with the parent conversation", () => {
+    const child = makeFakeChild();
+    const manager = createSubAgentManager({
+      spawn: () => child as unknown as ChildProcess,
+    });
+    const received: SubAgentTerminalNotice[] = [];
+    manager.subscribe?.((notice) => received.push(notice));
+    const taskId = manager.spawn({
+      task: "session scoped",
+      conversationId: "session-a",
+    }).taskId;
+
+    child.stdout.write(
+      JSON.stringify({
+        status: "ok",
+        summary: "finished",
+        result: "terminal result",
+      }) + "\n"
+    );
+
+    expect(received).toEqual([
+      {
+        taskId,
+        conversationId: "session-a",
+        status: "ok",
+        summary: "finished",
+        result: "terminal result",
+      },
+    ]);
+  });
+
+  it("scopes host drain results to the requested parent conversation", () => {
+    const children: FakeChild[] = [];
+    const manager = createSubAgentManager({
+      spawn: () => {
+        const child = makeFakeChild();
+        children.push(child);
+        return child as unknown as ChildProcess;
+      },
+    });
+    const sessionATask = manager.spawn({
+      task: "session A",
+      conversationId: "session-a",
+    }).taskId;
+    const sessionBTask = manager.spawn({
+      task: "session B",
+      conversationId: "session-b",
+    }).taskId;
+
+    children[0]!.stdout.write(
+      JSON.stringify({
+        status: "ok",
+        summary: "A finished",
+        result: "A result",
+      }) + "\n"
+    );
+    children[1]!.stdout.write(
+      JSON.stringify({
+        status: "ok",
+        summary: "B finished",
+        result: "B result",
+      }) + "\n"
+    );
+
+    expect(manager.drainCompleted("session-a").map(({ taskId }) => taskId)).toEqual([
+      sessionATask,
+    ]);
+    expect(manager.drainCompleted("session-b").map(({ taskId }) => taskId)).toEqual([
+      sessionBTask,
+    ]);
+  });
+
+  it("does not publish excluded terminal work to the host mailbox", () => {
+    const child = makeFakeChild();
+    const manager = createSubAgentManager({
+      spawn: () => child as unknown as ChildProcess,
+    });
+    const listener = vi.fn();
+    manager.subscribe?.(listener);
+    manager.spawn({
+      task: "judge-only",
+      excludeFromHostDrain: true,
+    });
+
+    child.stdout.write(
+      JSON.stringify({
+        status: "ok",
+        summary: "judge finished",
+        result: "judge result",
+      }) + "\n"
+    );
+
+    expect(listener).not.toHaveBeenCalled();
+  });
+
   it("keeps a failed terminal envelope available to the host drain", () => {
     const child = makeFakeChild();
     const manager = createSubAgentManager({

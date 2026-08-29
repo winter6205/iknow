@@ -276,6 +276,11 @@ export function createSpawnSubAgentTool(
       // 中段变成死代码(SC4 消费点证明)。
       const def: SubAgentDefinition = {
         task,
+        // T4: terminal notices must be attributable to the session that
+        // spawned the worker so a TUI session cannot wake another one.
+        ...(ctx?.conversationId !== undefined
+          ? { conversationId: ctx.conversationId }
+          : {}),
         // F-4: 归属回合 —— manager 把它抄进 subagent_spawn / _state_change /
         // _stop 三类 record。ctx 缺 turnId(worker / ask / 直接调 handler)时
         // 字段整个省略,Postel 不落空值。

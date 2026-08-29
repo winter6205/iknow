@@ -1195,7 +1195,9 @@ export class SessionHub {
               // #356 T7 (SC7):host drain — serve 入口每轮 run() 前,把 manager 内
               // completed 子代理结果浓缩成 user message,拼入 priorMessages 末尾。
               // 空 manager / 无 completed → priorMessages 不变 (行为零变化)。
-              const drained = await drainPendingSubagents(this.subagentManager);
+              const drained = await drainPendingSubagents(this.subagentManager, {
+                conversationId,
+              });
               const drainedMsg: AnthropicNativeMessage = {
                 role: "user",
                 content: [{ type: "text", text: drained }],
@@ -1482,9 +1484,14 @@ export class SessionHub {
     readonly thinking?: ThinkingOverride;
     readonly onStream?: (event: HarnessStreamEvent) => void;
   }): Promise<PostMessageResponse | undefined> {
-    const drained = await drainPendingSubagents(this.subagentManager);
+    const drained = await drainPendingSubagents(this.subagentManager, {
+      conversationId: opts.conversationId,
+    });
     if (drained.length === 0) return undefined;
-    const taskIds = queryableSubagentTaskIds(this.subagentManager);
+    const taskIds = queryableSubagentTaskIds(
+      this.subagentManager,
+      opts.conversationId
+    );
     try {
       return await this.postMessage({
         conversationId: opts.conversationId,

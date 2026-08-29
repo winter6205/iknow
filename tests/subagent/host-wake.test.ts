@@ -77,6 +77,32 @@ describe("createSubagentWake", () => {
     controller.dispose();
   });
 
+  it("does not wake session B for a terminal notice from session A", async () => {
+    const { manager, publish } = fakeManager();
+    const wake = vi.fn(async () => {});
+    const controller = createSubagentWake({
+      manager,
+      conversationId: "session-b",
+      isIdle: () => true,
+      wake,
+    });
+
+    publish({
+      ...notice("session-a-task"),
+      conversationId: "session-a",
+    });
+    await Promise.resolve();
+    expect(wake).not.toHaveBeenCalled();
+
+    publish({
+      ...notice("session-b-task"),
+      conversationId: "session-b",
+    });
+    await vi.waitFor(() => expect(wake).toHaveBeenCalledTimes(1));
+
+    controller.dispose();
+  });
+
   it("queues terminal notices received during a parent turn", async () => {
     const { manager, publish } = fakeManager();
     let idle = false;

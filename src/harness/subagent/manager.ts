@@ -87,7 +87,7 @@ export interface SubAgentManager {
   /** abort in-flight + SIGTERM 子孙 + ≥5s 兜底 SIGKILL(SC12)。 */
   readonly shutdown: () => Promise<void>;
   /** T7 host-drain 需要的最小只读枚举:返回当前 buffer 内终态任务列表。 */
-  readonly drainCompleted: () => ReadonlyArray<{
+  readonly drainCompleted: (conversationId?: string) => ReadonlyArray<{
     readonly taskId: string;
     readonly envelope: SubAgentEnvelope;
   }>;
@@ -471,10 +471,16 @@ export function createSubAgentManager(opts: {
   ): void {
     if (task.stoppedEmitted) return;
     task.stoppedEmitted = true;
-    if (task.envelope !== undefined) {
+    if (
+      task.envelope !== undefined &&
+      task.def.excludeFromHostDrain !== true
+    ) {
       const envelope = task.envelope;
       terminalMailbox.publish({
         taskId: task.id,
+        ...(task.def.conversationId !== undefined
+          ? { conversationId: task.def.conversationId }
+          : {}),
         status: envelope.status,
         summary: envelope.summary,
         result: envelope.result,
@@ -1208,7 +1214,7 @@ export function createSubAgentManager(opts: {
     terminalMailbox.clear();
   }
 
-  function drainCompleted(): ReadonlyArray<{
+  function drainCompleted(conversationId?: string): ReadonlyArray<{
     readonly taskId: string;
     readonly envelope: SubAgentEnvelope;
   }> {
@@ -1217,7 +1223,9 @@ export function createSubAgentManager(opts: {
       if (
         (task.state === "completed" || task.state === "failed") &&
         task.envelope &&
-        task.def.excludeFromHostDrain !== true
+        task.def.excludeFromHostDrain !== true &&
+        (conversationId === undefined ||
+          task.def.conversationId === conversationId)
       ) {
         out.push({ taskId: id, envelope: task.envelope });
       }

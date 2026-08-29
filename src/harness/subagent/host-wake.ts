@@ -73,11 +73,14 @@ export function toSubagentWakeError(
  * wake failure.
  */
 export function queryableSubagentTaskIds(
-  manager: SubAgentManager | undefined
+  manager: SubAgentManager | undefined,
+  conversationId?: string
 ): readonly string[] {
   if (manager === undefined) return [];
   try {
-    return manager.drainCompleted().map(({ taskId }) => taskId);
+    return manager
+      .drainCompleted(conversationId)
+      .map(({ taskId }) => taskId);
   } catch (error) {
     reportObserverDiagnostic("queryable task lookup failed", error);
     // EXIT: diagnostic lookup is fail-safe; no task ids can be asserted when
@@ -94,6 +97,11 @@ export interface SubagentWake {
 
 export interface CreateSubagentWakeOptions {
   readonly manager: SubAgentManager | undefined;
+  /**
+   * Optional session scope for a host. Notices for other conversations are
+   * retained by the mailbox and can be replayed when that session is active.
+   */
+  readonly conversationId?: string;
   readonly subscribe?: SubAgentManager["subscribe"];
   readonly isIdle: () => boolean;
   readonly wake: () => Promise<void>;
@@ -192,7 +200,12 @@ export function createSubagentWake(
     try {
       unsubscribe =
         subscribe((notice) => {
-          request(notice);
+          if (
+            options.conversationId === undefined ||
+            notice.conversationId === options.conversationId
+          ) {
+            request(notice);
+          }
         }) ?? (() => {});
     } catch (error) {
       reportFailure("watcherUnavailable", error);

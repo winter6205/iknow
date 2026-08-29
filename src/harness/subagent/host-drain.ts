@@ -37,6 +37,8 @@ export function isSubagentDrainText(text: string): boolean {
 }
 
 export interface DrainPendingSubagentsOpts {
+  /** Restrict the drain to workers owned by one interactive session. */
+  readonly conversationId?: string;
   /** 已废弃,为保持调用方兼容而保留;host drain 不轮询。 */
   readonly pollMs?: number;
   /** 已废弃,为保持调用方兼容而保留;host drain 不等待。 */
@@ -55,12 +57,12 @@ export interface DrainPendingSubagentsOpts {
  */
 export async function drainPendingSubagents(
   manager: SubAgentManager | undefined,
-  _opts?: DrainPendingSubagentsOpts
+  opts?: DrainPendingSubagentsOpts
 ): Promise<string> {
   if (manager === undefined) return "";
 
   try {
-    const list = manager.drainCompleted();
+    const list = manager.drainCompleted(opts?.conversationId);
     if (list.length === 0) return "";
     return list
       .map(({ taskId, envelope }) => {

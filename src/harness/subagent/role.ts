@@ -49,6 +49,11 @@ export interface SubAgentDefinition {
    */
   readonly parentTurnId?: string;
   /**
+   * Parent-only: conversation that owns this worker. Used to keep terminal
+   * wakeups and host drains scoped to one interactive session.
+   */
+  readonly conversationId?: string;
+  /**
    * Parent-only: skip host-drain (wait:false wakeup channel).
    * Judge / wait:true consumers already await waitFor; leaking their
    * envelope into the next user turn would paint it as a user message.

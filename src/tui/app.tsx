@@ -1612,25 +1612,29 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // injected drain is sent through the bridge's silent path, so this effect
   // never appends a user bubble or input-history entry.
   useEffect(() => {
+    const wakeSessionKey = activeKey;
+    const wakeConversationId = active.conversationId;
     const controller = createSubagentWake({
       manager: undefined,
       subscribe: props.bridge.subscribeSubagentTerminal,
+      conversationId: wakeConversationId,
       isIdle: () => {
-        const current = sessionsRef.current[activeKeyRef.current];
+        const current = sessionsRef.current[wakeSessionKey];
         return (
+          activeKeyRef.current === wakeSessionKey &&
           current?.runState === "idle" && current.conversationId !== undefined
         );
       },
       wake: async () => {
-        const current = sessionsRef.current[activeKeyRef.current];
+        const current = sessionsRef.current[wakeSessionKey];
         const targetId = current?.conversationId;
         if (targetId === undefined || current.runState !== "idle") return;
         setSessions((prev) => {
-          const latest = prev[activeKeyRef.current];
+          const latest = prev[wakeSessionKey];
           if (!latest || latest.runState !== "idle") return prev;
           return {
             ...prev,
-            [activeKeyRef.current]: turnStarted(latest),
+            [wakeSessionKey]: turnStarted(latest),
           };
         });
         const abortController = new AbortController();
@@ -1652,7 +1656,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         subagentWakeRef.current = undefined;
       }
     };
-  }, [props.bridge]);
+  }, [activeKey, active.conversationId, props.bridge]);
 
   // A background turn can make the active session idle after a notice was
   // queued. Flush on the state transition rather than waiting for another
