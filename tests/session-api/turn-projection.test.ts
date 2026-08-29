@@ -238,7 +238,10 @@ describe("boundary: ordered activity", () => {
     const activity = projectActivity(messages, identity);
     assert.equal(activity.length, 2);
     assert.equal(activity[0]?.type, "tool");
-    assert.equal(activity[0]?.type === "tool" && activity[0].tool.outputPreview, "first");
+    assert.equal(
+      activity[0]?.type === "tool" && activity[0].tool.outputPreview,
+      "first"
+    );
     assert.equal(
       activity[1]?.type === "tool" && activity[1].tool.outputPreview,
       ""
@@ -256,6 +259,35 @@ describe("boundary: ordered activity", () => {
       projectActivity([null as unknown as AnthropicNativeMessage], identity),
       []
     );
+  });
+
+  it("marks an unserializable tool input instead of hiding it as an empty preview", () => {
+    const circularInput: Record<string, unknown> = {};
+    circularInput.self = circularInput;
+    const messages: AnthropicNativeMessage[] = [
+      assistant("assistant", [
+        {
+          type: "tool_use",
+          id: "circular",
+          name: "inspect",
+          input: circularInput,
+        },
+      ]),
+    ];
+
+    assert.deepEqual(projectActivity(messages, identity), [
+      {
+        type: "tool",
+        tool: {
+          id: "circular",
+          name: "inspect",
+          inputPreview: "// EXIT: tool input preview unavailable",
+          outputPreview: "",
+          isError: false,
+          truncated: false,
+        },
+      },
+    ]);
   });
 });
 

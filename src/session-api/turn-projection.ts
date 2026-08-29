@@ -234,90 +234,151 @@ export function projectActivity(
   messages: ReadonlyArray<AnthropicNativeMessage>,
   mask: TextMask
 ): readonly ActivityItem[] {
-  try {
-    // EXIT: empty activity
-    if (!Array.isArray(messages) || messages.length === 0) return [];
-    const drafts: ActivityDraft[] = [];
-    const resultsById = new Map<string, ToolResultView>();
-    for (const rawMessage of messages as ReadonlyArray<unknown>) {
-      if (!rawMessage || typeof rawMessage !== "object") continue;
-      const message = rawMessage as { role?: unknown; content?: unknown };
-      if (!Array.isArray(message.content)) continue;
-      const isAssistant = message.role === "assistant";
+  // EXIT: malformed/non-array or empty input has no activity to project.
+  if (!Array.isArray(messages) || messages.length === 0) return [];
+  const { drafts, resultsById } = scanActivityMessages(messages);
+  return mapActivityDrafts(drafts, resultsById, mask);
+}
 
-      for (const rawBlock of message.content as ReadonlyArray<unknown>) {
-        if (!rawBlock || typeof rawBlock !== "object") continue;
-        const block = rawBlock as Record<string, unknown>;
-        if (block.type === "tool_result") {
-          collectActivityToolResult(block, resultsById);
-          continue;
-        }
-        if (!isAssistant) continue;
-        if (block.type === "text") {
-          if (typeof block.text === "string" && block.text.length > 0) {
-            drafts.push({ type: "text", text: block.text });
-          }
-          continue;
-        }
-        if (block.type === "tool_use") {
-          if (
-            typeof block.id !== "string" ||
-            block.id.length === 0 ||
-            typeof block.name !== "string" ||
-            block.name.length === 0 ||
-            !Object.prototype.hasOwnProperty.call(block, "input") ||
-            block.input === undefined
-          ) {
-            // EXIT: skip malformed tool_use
-            continue;
-          }
-          drafts.push({
-            type: "tool",
-            id: block.id,
-            name: block.name,
-            input: block.input,
-          });
-          continue;
-        }
-        // EXIT: skip unknown block
-      }
-    }
+type ActivityScan = {
+  readonly drafts: readonly ActivityDraft[];
+  readonly resultsById: ReadonlyMap<string, ToolResultView>;
+};
 
-    return drafts.map((draft): ActivityItem => {
-      if (draft.type === "text") {
-        return { type: "text", text: mask(draft.text) };
-      }
-      const result = resultsById.get(draft.id);
-      if (result === undefined) {
-        // EXIT: tool without result still emitted
-      }
-      return {
-        type: "tool",
-        tool: buildActivityToolView(draft, result, mask),
-      };
-    });
-  } catch {
-    // EXIT: projector returns activity items
-    return [];
+function scanActivityMessages(messages: ReadonlyArray<unknown>): ActivityScan {
+  const drafts: ActivityDraft[] = [];
+  const resultsById = new Map<string, ToolResultView>();
+  for (const rawMessage of messages) {
+    scanActivityMessage(rawMessage, drafts, resultsById);
   }
+  return { drafts, resultsById };
+}
+
+function scanActivityMessage(
+  rawMessage: unknown,
+  drafts: ActivityDraft[],
+  resultsById: Map<string, ToolResultView>
+): void {
+  try {
+    if (!isRecord(rawMessage) || !Array.isArray(rawMessage.content)) return;
+    scanActivityBlocks(
+      rawMessage.content,
+      rawMessage.role === "assistant",
+      drafts,
+      resultsById
+    );
+  } catch {
+    // EXIT: skip a malformed message while preserving other activity.
+  }
+}
+
+function scanActivityBlocks(
+  blocks: readonly unknown[],
+  isAssistant: boolean,
+  drafts: ActivityDraft[],
+  resultsById: Map<string, ToolResultView>
+): void {
+  for (const rawBlock of blocks) {
+    if (!isRecord(rawBlock)) continue;
+    const block = rawBlock;
+    if (block.type === "tool_result") {
+      collectActivityToolResult(block, resultsById);
+      continue;
+    }
+    if (!isAssistant) continue;
+    const draft = toActivityDraft(block);
+    if (draft !== undefined) drafts.push(draft);
+  }
+}
+
+function toActivityDraft(
+  block: Record<string, unknown>
+): ActivityDraft | undefined {
+  if (block.type === "text") {
+    if (typeof block.text !== "string" || block.text.length === 0) {
+      // EXIT: skip empty or malformed text block.
+      return undefined;
+    }
+    return { type: "text", text: block.text };
+  }
+  if (block.type === "tool_use") {
+    if (!isValidActivityToolUse(block)) {
+      // EXIT: skip malformed tool_use.
+      return undefined;
+    }
+    return {
+      type: "tool",
+      id: block.id,
+      name: block.name,
+      input: block.input,
+    };
+  }
+  // EXIT: skip unknown block.
+  return undefined;
+}
+
+function isValidActivityToolUse(
+  block: Record<string, unknown>
+): block is Record<string, unknown> & {
+  readonly id: string;
+  readonly name: string;
+  readonly input: unknown;
+} {
+  return (
+    typeof block.id === "string" &&
+    block.id.length > 0 &&
+    typeof block.name === "string" &&
+    block.name.length > 0 &&
+    Object.prototype.hasOwnProperty.call(block, "input") &&
+    block.input !== undefined
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+function mapActivityDrafts(
+  drafts: readonly ActivityDraft[],
+  resultsById: ReadonlyMap<string, ToolResultView>,
+  mask: TextMask
+): readonly ActivityItem[] {
+  return drafts.map((draft): ActivityItem => {
+    if (draft.type === "text") {
+      return { type: "text", text: mask(draft.text) };
+    }
+    const result = resultsById.get(draft.id);
+    // EXIT: tool without result is still emitted with an empty output preview.
+    return {
+      type: "tool",
+      tool: buildActivityToolView(draft, result, mask),
+    };
+  });
 }
 
 function collectActivityToolResult(
   block: Record<string, unknown>,
   resultsById: Map<string, ToolResultView>
 ): void {
-  if (typeof block.tool_use_id !== "string" || block.tool_use_id.length === 0) {
-    // EXIT: unpaired tool_result ignored
-    return;
+  try {
+    if (
+      typeof block.tool_use_id !== "string" ||
+      block.tool_use_id.length === 0
+    ) {
+      // EXIT: unpaired tool_result ignored.
+      return;
+    }
+    if (resultsById.has(block.tool_use_id)) {
+      // EXIT: duplicate tool_result ignored.
+      return;
+    }
+    resultsById.set(block.tool_use_id, {
+      text: toolResultText(block.content),
+      isError: block.is_error === true,
+    });
+  } catch {
+    // EXIT: malformed tool_result ignored.
   }
-  if (resultsById.has(block.tool_use_id)) {
-    // EXIT: duplicate tool_result ignored
-    return;
-  }
-  resultsById.set(block.tool_use_id, {
-    text: toolResultText(block.content),
-    isError: block.is_error === true,
-  });
 }
 
 function buildActivityToolView(
@@ -325,16 +386,8 @@ function buildActivityToolView(
   result: ToolResultView | undefined,
   mask: TextMask
 ): ToolCallView {
-  let inputJson = "";
-  try {
-    inputJson = JSON.stringify(draft.input) ?? "";
-  } catch {
-    inputJson = "";
-  }
-  const inputPreview = truncate(
-    mask(inputJson),
-    MAX_TOOL_INPUT_PREVIEW_CHARS
-  );
+  const inputJson = serializeToolInput(draft.input);
+  const inputPreview = truncate(mask(inputJson), MAX_TOOL_INPUT_PREVIEW_CHARS);
   const rawOutput = result === undefined ? "" : mask(result.text);
   return {
     id: draft.id,
@@ -344,6 +397,17 @@ function buildActivityToolView(
     isError: result?.isError ?? false,
     truncated: rawOutput.length > MAX_TOOL_OUTPUT_PREVIEW_CHARS,
   };
+}
+
+const TOOL_INPUT_PREVIEW_EXIT = "// EXIT: tool input preview unavailable";
+
+function serializeToolInput(input: unknown): string {
+  try {
+    return JSON.stringify(input) ?? TOOL_INPUT_PREVIEW_EXIT;
+  } catch {
+    // EXIT: unserializable tool input gets an explicit safe preview marker.
+    return TOOL_INPUT_PREVIEW_EXIT;
+  }
 }
 
 // -- #604 T1: 任务摘录（compact 边界现抽现贴） -------------------------------
