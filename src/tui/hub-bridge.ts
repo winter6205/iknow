@@ -205,6 +205,26 @@ export interface CreateTuiBridgeOptions {
   /** settings-hot-reload（T3）:env 变化回调，透传给 SessionHub.onEnvChange。
    *  T4 由 run.tsx 注入 EnvLoader.subscribe 链路，驱动 TUI 显示层刷新。 */
   readonly onEnvChange?: (env: IknowEnv) => void;
+  /**
+   * Review High-1 (2026-08-29 / ADR-0037)：注入 deps 的启动引擎根（TUI 的
+   * buildTuiDeps 构建根）。声明后，hub 的 ensureDeps 在会话根离开该根
+   * （worktree rebind）时落到 per-root 引擎重建（经下方 buildEngine 缝），
+   * 与 serve hub 的两条装配路径行为一致。缺席 = 今日短路语义。
+   */
+  readonly engineRoot?: string;
+  /**
+   * Review High-1: per-root 引擎重建缝（TUI 由 run.tsx 提供 —— 用同一
+   * depsOpts + 新根重跑 buildTuiDeps，rebind 后的回合跑在 worktree 根引擎上，
+   * 且复用同一启动 settings 对象，硬要求 9）。缺席 = 无重建能力（行为不变）。
+   */
+  readonly buildEngine?: (root: string) => Promise<{
+    deps: LoopEngineDeps;
+    shutdown?: () => Promise<void>;
+    subagentManager?: SubAgentManager;
+    graphAssembly?: GraphAssembly;
+    autoMemory?: AutoMemoryHook;
+    overlayMemoryPrefetch?: OverlayPrefetchFn;
+  }>;
 }
 
 export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
@@ -234,6 +254,11 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     // settings-hot-reload（T3）:env 源 + 变化回调透传（缺省 → 行为零变化）。
     ...(opts.envProvider ? { envProvider: opts.envProvider } : {}),
     ...(opts.onEnvChange ? { onEnvChange: opts.onEnvChange } : {}),
+    // Review High-1 (2026-08-29):注入 deps 的启动根 + per-root 重建缝透传。
+    ...(opts.engineRoot !== undefined
+      ? { injectedEngineRoot: opts.engineRoot }
+      : {}),
+    ...(opts.buildEngine ? { buildEngine: opts.buildEngine } : {}),
   });
 
   const toPostResult = (resp: PostMessageResponse): TuiPostResult => ({

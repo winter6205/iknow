@@ -134,8 +134,12 @@ await idleSetup.waitForVisualIdle();
 const idleFrame = idleSetup.captureCharFrame();
 console.log("===== FRAME_IDLE =====");
 console.log(idleFrame);
-if (!idleFrame.includes("思考了 29 秒 · bash × 2")) {
-  fail("idle 缺少 turn 折叠行", idleFrame);
+if (
+  !idleFrame.includes("思考了 29 秒") ||
+  !idleFrame.includes("bash × 2") ||
+  idleFrame.includes("思考了 29 秒 · bash × 2")
+) {
+  fail("idle 缺少分行的思考/工具折叠", idleFrame);
 }
 if (!idleFrame.includes("完成。")) {
   fail("idle 缺少最终回复", idleFrame);

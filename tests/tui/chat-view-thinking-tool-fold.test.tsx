@@ -118,7 +118,7 @@ function thinkingAfterFirstTool(seq: ReadonlyArray<Marker>): boolean {
   return seq.slice(firstTool + 1).includes("think");
 }
 
-test("idle：思考秒数 + 多轮 bash → 思考了 N 秒 · bash × N，不铺 [完成]", async () => {
+test("idle：思考秒数 + 多轮 bash → 思考了 N 秒 下一行 bash × N，不铺 [完成]", async () => {
   const setup = await testRender(
     <ChatView
       session={sessionWith(interleavedThinkingToolMessages())}
@@ -132,7 +132,14 @@ test("idle：思考秒数 + 多轮 bash → 思考了 N 秒 · bash × N，不�
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("思考了 29 秒 · bash × 3");
+  expect(frame).toContain("思考了 29 秒");
+  expect(frame).toContain("bash × 3");
+  expect(frame).not.toContain("思考了 29 秒 · bash × 3");
+  const frameLines = frame.split("\n");
+  const thinkIdx = frameLines.findIndex((l) => l.includes("思考了 29 秒"));
+  const toolIdx = frameLines.findIndex((l) => l.includes("bash × 3"));
+  expect(thinkIdx).toBeGreaterThanOrEqual(0);
+  expect(toolIdx).toBe(thinkIdx + 1);
   expect(frame.includes("[完成]")).toBe(false);
   expect(frame.includes("[思考]")).toBe(false);
   expect(thinkingAfterFirstTool(markerSequence(frame))).toBe(false);

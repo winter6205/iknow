@@ -33,7 +33,8 @@
  *  - 非法值（maxTurns 非有限正整数 / contextWindow / thresholdTokens 非有限正数 /
  *    thinking 非 "off"|"adaptive" / thinkingEffort 非五档 /
  *    model 非空串字符串 / fallback 非空串字符串数组 /
- *    apiKey 非字面非占位符 / verify 段各字段越界或非字面量）→ 丢弃该字段，
+ *    apiKey 非字面非占位符 / verify 段各字段越界或非字面量 /
+ *    isolation.worktreeOnMutate 非 boolean）→ 丢弃该字段，
  *    且被丢弃的字段不参与覆盖（不抹掉 user 对应值）；
  *  - 顶层 / 中间层必须是普通对象（数组 / 字符串等 → 丢弃该层 / 该字段）。
  *
@@ -209,6 +210,32 @@ export interface IknowSettingsMemory {
   dream?: boolean;
 }
 
+/**
+ * ADR-0037: 会话级 git worktree 隔离段（plans/worktree-isolation-on-mutate.md）。
+ *
+ * `worktreeOnMutate` 只认 boolean；缺失 / 非 `true` / 非法值一律按 **OFF**
+ * 处理（fail-closed，与 `memory.autoExtract` 同款值域纪律）—— OFF 时 mutate
+ * 路径行为与今日完全一致。唯一 fail-closed 读取点是 `resolveWorktreeOnMutate`。
+ *
+ * 值域合同（硬要求 9 / ADR-0037 §5）：config 层只承载 boolean 值域语义——
+ * 不读 git、不持会话状态；开关只在启动加载点读取一次。
+ */
+export interface IknowSettingsIsolation {
+  /** mutate 时建 task worktree 并改绑会话的开关（默认 OFF）。 */
+  worktreeOnMutate?: boolean;
+}
+
+/**
+ * ADR-0037: `isolation.worktreeOnMutate` 的唯一 fail-closed 读取点。
+ * 缺失 / 非 boolean / 非 `true` → false（回落至今日行为）；config 层不做
+ * 任何 git / 会话状态查询（硬要求 9）。
+ */
+export function resolveWorktreeOnMutate(
+  settings: IknowSettings | undefined | null
+): boolean {
+  return settings?.isolation?.worktreeOnMutate === true;
+}
+
 export interface IknowSettings {
   llm?: IknowSettingsLlm;
   verify?: IknowSettingsVerify;
@@ -221,6 +248,8 @@ export interface IknowSettings {
   loop?: IknowSettingsLoop;
   /** auto-memory T4: 自动记忆抽取开关（默认 OFF）。 */
   memory?: IknowSettingsMemory;
+  /** ADR-0037: 会话级 git worktree 隔离开关（默认 OFF）。 */
+  isolation?: IknowSettingsIsolation;
 }
 
 export interface IknowSettingsLoop {
@@ -636,6 +665,37 @@ function mergeMemory(
   return out;
 }
 
+/**
+ * ADR-0037: 校验 `isolation` 层 —— 非法字段丢弃（镜像 parseGraph）。
+ * 非普通对象 → undefined（丢弃该层）；worktreeOnMutate 非 boolean → 丢弃
+ * 该字段（不转型）；字段全非法 / 缺席 → undefined（消费方按 OFF 处理）。
+ */
+function parseIsolation(raw: unknown): IknowSettingsIsolation | undefined {
+  if (!isPlainObject(raw)) return undefined;
+  const out: IknowSettingsIsolation = {};
+  if (typeof raw.worktreeOnMutate === "boolean") {
+    out.worktreeOnMutate = raw.worktreeOnMutate;
+  }
+  if (out.worktreeOnMutate === undefined) return undefined;
+  return out;
+}
+
+/** ADR-0037: 逐层合并 isolation：project 字段优先，未覆盖的 user 字段保留。 */
+function mergeIsolation(
+  user: IknowSettingsIsolation | undefined,
+  project: IknowSettingsIsolation | undefined
+): IknowSettingsIsolation | undefined {
+  if (!user && !project) return undefined;
+  const out: IknowSettingsIsolation = {};
+  if (project?.worktreeOnMutate !== undefined) {
+    out.worktreeOnMutate = project.worktreeOnMutate;
+  } else if (user?.worktreeOnMutate !== undefined) {
+    out.worktreeOnMutate = user.worktreeOnMutate;
+  }
+  if (out.worktreeOnMutate === undefined) return undefined;
+  return out;
+}
+
 /** 逐层合并 llm：project 字段优先，未覆盖的 user 字段保留。 */
 function mergeLlm(
   user: IknowSettingsLlm | undefined,
@@ -779,6 +839,11 @@ function mergeSettings(
     parseMemory(userRaw.memory),
     parseMemory(projectRaw.memory)
   );
+  // ADR-0037: 会话级 git worktree 隔离开关（默认 OFF —— 段缺席即关）。
+  const isolation = mergeIsolation(
+    parseIsolation(userRaw.isolation),
+    parseIsolation(projectRaw.isolation)
+  );
   const out: IknowSettings = {};
   if (llm) out.llm = llm;
   if (verify) out.verify = verify;
@@ -787,6 +852,7 @@ function mergeSettings(
   if (loop) out.loop = loop;
   if (graph) out.graph = graph;
   if (memory) out.memory = memory;
+  if (isolation) out.isolation = isolation;
   return out;
 }
 

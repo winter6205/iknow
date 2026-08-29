@@ -3,8 +3,8 @@
  *
  * 当前 turn 的工具折叠摘要（纯函数）。ChatView 把「本 turn 里每个工具
  * 调用了几次」收成一行（idle 与 running 在已有完成工具时共用），避免
- * 旧的逐条 `[思考]` / `[完成] bash` 与 turn 级 `思考了 N 秒 · bash × N`
- * 两套折叠叠在一起。
+ * 旧的逐条 `[思考]` / `[完成] bash` 与 turn 级折叠叠在一起。
+ * 结束态两行：先 `思考了 N 秒`，下一行工具计数 `bash × N`。
  *
  * turn 边界与 `isTurnQuery` 同源：最后一条无 tool_result 的 user query
  * 起到会话末尾（含中间 tool_result user 消息）。
@@ -130,19 +130,19 @@ export function formatToolUseCounts(
 }
 
 /**
- * idle 折叠行。seconds≤0 且无工具 → 空串（不画「思考了 0 秒」、不换 `[思考]`）。
- * 有工具无秒数 → 只计数；有秒数 → `思考了 N 秒` + 计数。
+ * idle 折叠行。seconds≤0 且无工具 → 空数组。
+ * 有秒数 → 先一行 `思考了 N 秒`；有工具 → 下一行计数（不拼进同一行）。
  */
 export function formatTurnActivityFold(
   seconds: number | undefined,
   entries: ReadonlyArray<ToolUseCount>
-): string {
+): ReadonlyArray<string> {
   const counts = formatToolUseCounts(entries);
   const think = formatThinkingFold(seconds);
-  if (think.length === 0 && counts.length === 0) return "";
-  if (think.length === 0) return counts;
-  if (counts.length === 0) return think;
-  return `${think} · ${counts}`;
+  const lines: string[] = [];
+  if (think.length > 0) lines.push(think);
+  if (counts.length > 0) lines.push(counts);
+  return lines;
 }
 
 /**
@@ -161,8 +161,8 @@ export function shouldShowTurnActivityFold(opts: {
 /** 折叠行在场且 idle 才藏逐条工具行；running 始终展开。 */
 export function shouldCollapseTurnToolRows(
   running: boolean,
-  foldLine: string,
+  foldLineCount: number,
   turnToolTotal: number
 ): boolean {
-  return !running && foldLine.length > 0 && turnToolTotal > 0;
+  return !running && foldLineCount > 0 && turnToolTotal > 0;
 }

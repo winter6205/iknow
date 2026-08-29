@@ -257,9 +257,8 @@ describe("SubAgentManager spawn → crashed", () => {
   });
 
   it("stderr before exit → crashed summary includes the bounded stderr tail", async () => {
-    const { SUMMARY_LIMIT } = await import(
-      "../../src/harness/subagent/envelope.ts"
-    );
+    const { SUMMARY_LIMIT } =
+      await import("../../src/harness/subagent/envelope.ts");
     const { manager, spawned } = makeHarness();
     const { taskId } = manager.spawn({});
     // 2500-char body sits inside a 4096 window but outside SUMMARY_LIMIT=2000,
@@ -909,6 +908,14 @@ describe("SubAgentManager listSubagents (#358 T7)", () => {
     assert.equal(item.endedAt, undefined);
     assert.equal(item.summary, undefined);
     assert.equal(item.reason, undefined);
+    assert.equal(item.role, undefined);
+  });
+
+  it("spawn 带 role → listSubagents 投影 role（TUI 行首名称）", () => {
+    const { manager } = makeHarness();
+    manager.spawn({ task: "look around", role: "explore" });
+    const items = manager.listSubagents();
+    assert.equal(items[0]!.role, "explore");
   });
 
   it("task 缺席 → taskPreview 为空串 (回退不落全文)", () => {

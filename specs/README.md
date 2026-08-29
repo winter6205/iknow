@@ -46,6 +46,7 @@
 - `auto-memory-complete-upgrade.md` — CJK 近邻切分 · dream 离线合并 · §2.5 Medium（per-root 钩子 / 共用 notify）；plan: `plans/auto-memory-complete-upgrade.md`（文档轨，无 tracker issue）
 - `auto-memory-low-trust-read.md` — 目录进 system · 预取进用户消息 · 低信任英文标注（第三次读路径改进；底 = 完整升级 + dream 双闸）；plan: `plans/auto-memory-low-trust-read.md`
 - `auto-memory-extract-discipline.md` — 抽取对照说明书丢弃 · 不记仓库可推（prompt）· 本轮 save 跳过 extract；plan: `plans/auto-memory-extract-discipline.md`
+- `auto-memory-layering.md` — 抽取收窄 · 梦境 `replaces` 落盘 · promote/`autoExtract` 同闸 · `dream.json` · 软禁归档；plan: `plans/auto-memory-layering.md`
 - `serve-workspace.md` — serve/Web 工作空间制度（显式主根，禁止自动 cwd；ADR-0023, serve default = unbound, #531）
 
 ### Verify / 完成门禁

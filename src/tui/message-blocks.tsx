@@ -130,8 +130,7 @@ function ToolPreviewRows(props: {
   );
 }
 
-/** 折叠态 thinking 摘要行（dim）。结束态只有 `思考了 N 秒`（可加 ran 后缀）；
- *  无可用秒数 → 不渲染（不回落 `[思考]`）。 */
+/** 折叠态 thinking 摘要：结束态 `思考了 N 秒`；工具计数另起一行。 */
 function ThinkingSummary(props: {
   readonly message: AnthropicNativeMessage;
   readonly cols: number;
@@ -140,13 +139,18 @@ function ThinkingSummary(props: {
   const fold = formatThinkingFold(props.thinkingSeconds);
   if (fold.length === 0) return null;
   const bashCount = countBashCalls(props.message);
-  const ranSuffix =
-    bashCount > 0 ? formatRanSuffix(bashCount).replace(/^，/, " · ") : "";
-  const text = `${fold}${ranSuffix}`;
+  const ran = formatRanSuffix(bashCount).replace(/^，/, "");
   return (
-    <text fg={tuiPalette.dim} wrapMode="none">
-      {clipOneLineVisual(text, props.cols)}
-    </text>
+    <box flexDirection="column">
+      <text fg={tuiPalette.dim} wrapMode="none">
+        {clipOneLineVisual(fold, props.cols)}
+      </text>
+      {ran.length > 0 ? (
+        <text fg={tuiPalette.dim} wrapMode="none">
+          {clipOneLineVisual(ran, props.cols)}
+        </text>
+      ) : null}
+    </box>
   );
 }
 

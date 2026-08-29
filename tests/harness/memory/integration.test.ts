@@ -333,7 +333,9 @@ describe("save → recall → recordRecall → promote full chain", () => {
     assert.equal(promotables[0]!.importance, 4);
 
     // (5) Next assembled system must include the promote segment.
-    const ctx: AssemblyContext = ctxOf(p);
+    // promote follows the catalog gate: only assembled when autoExtract === true
+    // (specs/auto-memory-layering.md).
+    const ctx: AssemblyContext = { ...ctxOf(p), autoExtract: true };
     const system = await assembleSystemPrompt(ctx);
     assert.ok(system.includes(EXISTENCE_POINTER), "existence pointer present");
     assert.ok(

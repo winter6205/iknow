@@ -47,6 +47,12 @@ export interface TuiSessionState {
   readonly lastStopReason: StopReason | undefined;
   /** T3: 最近一次 turn 的 token usage（上下文用量显示；只来自运行时回执）。 */
   readonly lastUsage: TokenUsage | null;
+  /**
+   * ADR-0037 T5:会话当前工作根（T3 改绑落盘的 task worktree 路径）。
+   * undefined = 未绑定（开关 OFF / 尚未 mutate）→ 展示层零多余状态。
+   * 只读投影:TUI 不做任何 git 操作,展示值唯一来源是会话文件。
+   */
+  readonly workspaceRoot: string | undefined;
 }
 
 /** 新建 draft 会话（启动直达新会话聊天界面，Q2=C；不触盘）。 */
@@ -60,6 +66,7 @@ export function createDraftSession(): TuiSessionState {
     runState: "idle",
     lastStopReason: undefined,
     lastUsage: null,
+    workspaceRoot: undefined,
   });
 }
 
@@ -75,6 +82,8 @@ export function attachSession(file: SessionFileV1): TuiSessionState {
     lastStopReason: undefined,
     // lastUsage 只来自运行时回执，不从会话文件携带（初值 null）。
     lastUsage: null,
+    // ADR-0037 T5:改绑后的 task worktree 根随会话文件恢复（重启后现势仍在）。
+    workspaceRoot: file.workspaceRoot,
   });
 }
 
@@ -110,6 +119,11 @@ export interface TurnFinishedInput {
    *  可选既是「省略即 null」的显式语义，也保留既有调用面（app.tsx 的 T4
    *  接线前不传 lastUsage 也能编译）。 */
   readonly lastUsage?: TokenUsage | null;
+  /**
+   * ADR-0037 T5:turn 结束时落盘文件里的 workspaceRoot（改绑回合起携带）。
+   * 缺省 = 本回合未发生改绑（或文件刷新失败）→ 保留既有值，不误清。
+   */
+  readonly workspaceRoot?: string;
 }
 
 /** turn 结束（自然完成 / cancelled / timeout 均走此）：落回 idle + 整体冻结替换。 */
@@ -127,6 +141,8 @@ export function turnFinished(
     runState: "idle",
     lastStopReason: input.stopReason,
     lastUsage: input.lastUsage ?? null,
+    // ADR-0037 T5:改绑回合携带新根;普通回合缺省 → 保留既有绑定值。
+    workspaceRoot: input.workspaceRoot ?? session.workspaceRoot,
   });
 }
 

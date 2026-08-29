@@ -58,6 +58,8 @@ export interface SubagentInfo {
   readonly endedAt?: string;
   readonly summary?: string;
   readonly reason?: string;
+  /** catalog persona id（`explore` / `general-purpose`）；缺省不在场。 */
+  readonly role?: string;
 }
 
 export interface SubAgentManager {
@@ -258,9 +260,7 @@ const MAX_STDERR_TAIL_CHARS = SUMMARY_LIMIT;
 const STDERR_DRAIN_GRACE_MS = 500;
 const MAX_STDERR_DIAGNOSTICS_BYTES = 1024 * 1024;
 
-function waitForStderrClose(
-  stderr: ChildProcess["stderr"]
-): Promise<void> {
+function waitForStderrClose(stderr: ChildProcess["stderr"]): Promise<void> {
   if (!stderr || stderr.readableEnded || stderr.destroyed) {
     return Promise.resolve();
   }
@@ -509,10 +509,7 @@ export function createSubAgentManager(opts: {
     task.crashInFlight = true;
     task.endedAt = new Date().toISOString();
     const mask = createOutputMask(currentSecretValues());
-    await Promise.race([
-      opts2.stderrClosed,
-      delayMs(STDERR_DRAIN_GRACE_MS),
-    ]);
+    await Promise.race([opts2.stderrClosed, delayMs(STDERR_DRAIN_GRACE_MS)]);
     if (task.stoppedEmitted) return;
     const summary = mask.mask(opts2.summary());
     const error: TraceError = { type: "unknown", message: summary };
@@ -1080,6 +1077,9 @@ export function createSubAgentManager(opts: {
         envelope.status === "failed" &&
         envelope.reason !== undefined
           ? { reason: envelope.reason }
+          : {}),
+        ...(task.def.role !== undefined && task.def.role.trim() !== ""
+          ? { role: task.def.role.trim() }
           : {}),
       };
       out.push(item);
