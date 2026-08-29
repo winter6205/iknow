@@ -26,7 +26,7 @@ import {
   type SlashEffect,
 } from "./slash.js";
 import type { SessionContext } from "../shared/schema.js";
-import { isIknowError } from "../shared/errors.js";
+import { isIknowError, ValidationError } from "../shared/errors.js";
 import { MaxTurnsExceeded } from "../harness/errors.js";
 import { maxTurnsNotice } from "./max-turns.js";
 import {
@@ -1393,7 +1393,13 @@ async function loadGoalTarget(
       isSessionStoreErrorKind(err) &&
       (err as SessionStoreError).kind === "not_found"
     ) {
-      return { ok: true, file: freshSessionFile(conversationId, workspaceRoot) };
+      return {
+        ok: true,
+        file: freshSessionFile(
+          conversationId,
+          requireSessionWorkspaceRoot(workspaceRoot)
+        ),
+      };
     }
     return {
       ok: false,
@@ -1409,7 +1415,7 @@ async function loadGoalTarget(
 /** 最小合法 SessionFileV1(形状与 persistChatSessionCheckpoint 的重建一致)。 */
 function freshSessionFile(
   conversationId: string,
-  workspaceRoot?: string
+  workspaceRoot: string
 ): SessionFileV1 {
   const now = new Date().toISOString();
   return {
@@ -1420,11 +1426,21 @@ function freshSessionFile(
     turnCount: 0,
     updatedAt: now,
     title: "",
-    cwd: workspaceRoot ?? process.cwd(),
+    cwd: workspaceRoot,
     sanitized_at: now,
     checkpoints: [],
-    ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+    workspaceRoot,
   };
+}
+
+function requireSessionWorkspaceRoot(workspaceRoot: string | undefined): string {
+  if (workspaceRoot === undefined || workspaceRoot.trim().length === 0) {
+    throw new ValidationError(
+      "workspace root is required to create a session",
+      { field: "workspaceRoot" }
+    );
+  }
+  return workspaceRoot;
 }
 
 /** pinGoal + 原子写;save 失败 → typed-error 渲染,不 crash。 */
@@ -1586,10 +1602,10 @@ export async function persistChatSessionCheckpoint(opts: {
         turnCount: 0,
         updatedAt: new Date().toISOString(),
         title: "",
-        cwd: workspaceRoot ?? process.cwd(),
+        cwd: requireSessionWorkspaceRoot(workspaceRoot),
         sanitized_at: new Date().toISOString(),
         checkpoints: [],
-        ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+        workspaceRoot: requireSessionWorkspaceRoot(workspaceRoot),
       };
     }
     const now = new Date().toISOString();
@@ -1678,10 +1694,10 @@ export function createChatSessionCommitHook(opts: {
         turnCount: 0,
         updatedAt: now,
         title: "",
-        cwd: workspaceRoot ?? process.cwd(),
+        cwd: requireSessionWorkspaceRoot(workspaceRoot),
         sanitized_at: now,
         checkpoints: [],
-        ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+        workspaceRoot: requireSessionWorkspaceRoot(workspaceRoot),
       };
       priors = getPriors();
     }

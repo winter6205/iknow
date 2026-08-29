@@ -25,6 +25,7 @@ import {
   resolveProjectSessionDir,
   SessionStore,
 } from "../../src/session-api/store/index.ts";
+import { ValidationError } from "../../src/shared/errors.ts";
 import { makeCtx } from "./_fixtures.ts";
 
 const tempDirs: string[] = [];
@@ -63,6 +64,20 @@ describe("/goal 三面 runtime（真实 SessionStore + fresh conversationId）",
     expect(file.goal?.text).toBe("write a type checker");
     expect(file.workspaceRoot).toBe(baseDir);
     expect(file.cwd).toBe(baseDir);
+  });
+
+  it("fresh + pin without workspaceRoot → refuse bootstrap with typed error", async () => {
+    const { store } = await storeFor();
+    const id = "fresh-pin-rootless";
+    const ctx = makeCtx({
+      responses: [],
+      checkpointStore: store,
+      stateOverrides: { conversationId: id },
+    });
+    await expect(
+      processChatLine({ line: "/goal write a type checker", ctx })
+    ).rejects.toBeInstanceOf(ValidationError);
+    expect(await store.list()).toEqual([]);
   });
 
   it("fresh + status → not_found 合法态:output「未设置 goal」,stderr 静默", async () => {
