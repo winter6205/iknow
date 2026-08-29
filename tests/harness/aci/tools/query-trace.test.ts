@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
-import { createQueryTraceTool } from "../../../../src/harness/aci/tools/query-trace.ts";
+import {
+  createQueryTraceTool,
+  QueryTraceValidationError,
+} from "../../../../src/harness/aci/tools/query-trace.ts";
 import {
   ACI_TOOLSET_NAMES,
   createDefaultAciRegistry,
@@ -36,7 +39,27 @@ function makeTraceDir(): string {
         error: { type: "execution_failed", message: "provider failed" },
         messages: [
           { role: "user", content: "first secret prompt" },
-          { role: "assistant", content: "last secret response" },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "toolu-1",
+                name: "lookup",
+                input: { query: "secret" },
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "toolu-1",
+                content: "tool output secret",
+              },
+            ],
+          },
         ],
       },
     ]
@@ -93,6 +116,7 @@ describe("query_trace ACI tool", () => {
       "limit",
       "record_id",
       "resume_offset",
+      "detail",
     ]) {
       assert.ok(key in schema.properties, `missing query parameter ${key}`);
     }
@@ -111,14 +135,19 @@ describe("query_trace ACI tool", () => {
     assert.ok(output.length <= 4_000);
     assert.equal(body.records.length, 1);
     assert.equal(body.records[0]?.llm_call_id, "llm-error");
-    assert.equal(body.records[0]?.messages_count, 2);
+    assert.equal(body.records[0]?.messages_count, 3);
+    assert.equal(body.records[0]?.tool_result_count, 1);
+    assert.deepEqual(body.records[0]?.tool_result_previews, [
+      "tool output secret",
+    ]);
+    assert.ok(!("tool_results" in body.records[0]!));
+    assert.ok(!("messages" in body.records[0]!));
     assert.ok("first_message_preview" in body.records[0]!);
     assert.ok("last_message_preview" in body.records[0]!);
     assert.deepEqual(body.records[0]?.error, {
       type: "execution_failed",
       message: "provider failed",
     });
-    assert.ok(!("messages" in body.records[0]!));
   });
 
   it("uses record_id for one-record drill-down", async () => {
@@ -133,7 +162,47 @@ describe("query_trace ACI tool", () => {
 
     assert.equal(body.records.length, 1);
     assert.equal(body.records[0]?.llm_call_id, "llm-error");
+    assert.ok(!("messages" in body.records[0]!));
+    assert.deepEqual(body.records[0]?.tool_results, [
+      {
+        tool_use_id: "toolu-1",
+        name: "lookup",
+        is_error: false,
+        chars: "tool output secret".length,
+        preview: "tool output secret",
+      },
+    ]);
+  });
+
+  it("returns full messages only when detail=messages", async () => {
+    const tool = createQueryTraceTool(makeTraceDir());
+    const output = (await tool.handler({
+      conversation_id: "c1",
+      record_id: "llm-error",
+      detail: "messages",
+    })) as string;
+    const body = JSON.parse(output) as {
+      records: Array<Record<string, unknown>>;
+    };
+
+    assert.equal(body.records.length, 1);
     assert.ok(Array.isArray(body.records[0]?.messages));
+    assert.ok(!("tool_results" in body.records[0]!));
+  });
+
+  it("rejects an invalid detail with a typed validation error", async () => {
+    const tool = createQueryTraceTool(makeTraceDir());
+    await assert.rejects(
+      () =>
+        tool.handler({
+          conversation_id: "c1",
+          record_id: "llm-error",
+          detail: "everything",
+        }),
+      (error: unknown) =>
+        error instanceof QueryTraceValidationError &&
+        error.field === "detail"
+    );
   });
 
   it("distinguishes a missing record_id from an exhausted record_id scan", async () => {
