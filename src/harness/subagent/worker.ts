@@ -73,19 +73,19 @@ function log(message: string): void {
 const DEFAULT_WORKER_TRACE_DIR = "trace";
 
 /**
- * #556 T2: 查 catalog 取 persona 段文本 (catalog body)。role 缺省 / 未知
- * → 返回 undefined (不注入 persona, 走 V1 baseline fallback)。未知 id
- * 走 catch 路径 (defense-in-depth): spawn 侧 ajv 已挡一轮, 此处为
+ * #556 T2: 查 catalog 取 persona 段文本 (catalog body)。
+ * role 缺省 → general-purpose（与 spawn_subagent 缺省角色对齐）。
+ * 未知 id 走 catch 路径 (defense-in-depth): spawn 侧 ajv 已挡一轮, 此处为
  * wire-mismatch 兜底, 单测 envelope-role.test.ts 显式锁定 fallback 内容
  * (不静默吞掉 — 装配层发一行 log, 输出仍无 persona)。
  */
 function resolvePersonaBody(role: string | undefined): string | undefined {
-  if (role === undefined) return undefined;
+  const id = role ?? "general-purpose";
   try {
-    return getAgentEntry(role).body;
+    return getAgentEntry(id).body;
   } catch (err) {
     if (err instanceof AgentCatalogLookupError) {
-      log(`role '${role}' not in catalog; falling back to V1 baseline`);
+      log(`role '${id}' not in catalog; falling back to V1 baseline`);
       return undefined;
     }
     throw err;
@@ -363,10 +363,9 @@ export async function createWorkerRuntime(
   // 不触碰 IKNOW_ASSEMBLY_ORDER)。顺序 base < persona < constraints <
   // addendum;三者全缺省 → base 透传, V1 baseline 严格 byte-stable。
   //
-  // role 缺省 / 未知 → 不查 catalog / 不注入 persona / 不注入 constraints
-  // (T2 防御契约 + T7 readonly 派生, defense-in-depth): worker 装配期
-  // catch AgentCatalogLookupError 显式走 fallback, 单测 envelope-role
-  // 与 tool-constraints 锁定该路径。
+  // role 缺省 → general-purpose persona; 未知 id → 不注入 persona
+  // (defense-in-depth): worker 装配期 catch AgentCatalogLookupError 显式走
+  // fallback, 单测 envelope-role 与 tool-constraints 锁定该路径。
   const personaText = isJudge ? undefined : resolvePersonaBody(opts.role);
   const constraintsText = isJudge
     ? undefined

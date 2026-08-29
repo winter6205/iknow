@@ -2,8 +2,8 @@
  * #556 T2 — envelope `role` additive 通道 + worker persona/addendum 消费
  * + systemPrompt 幽灵通道修复 (T2 acceptance)。
  *
- * 防御契约 (ACR blocker 1 收口):
- *   - role 缺省 → V1 baseline (byte-stable)
+ * 防御契约:
+ *   - role 缺省 → 注入 general-purpose persona（与 spawn_subagent 缺省角色对齐）
  *   - role 未知 → V1 fallback (defense-in-depth, worker catch 后发 log)
  *   - role 在场 → 注入 persona (catalog body), addendum (envelope.systemPrompt) 在 persona 之后
  */
@@ -228,11 +228,11 @@ describe("createWorkerDeps persona 注入 (worker.ts envelope.role → catalog b
     assert.ok(out.includes(getAgentEntry("general-purpose").body));
   });
 
-  it("role 缺省 → deps.system() 不注入 persona (V1 baseline, byte-stable)", async () => {
+  it("role 缺省 → deps.system() 注入 general-purpose persona", async () => {
     const deps = await createWorkerDeps(hermeticOpts());
     const out = (await deps.system?.()) ?? "";
+    assert.ok(out.includes(getAgentEntry("general-purpose").body));
     assert.ok(!out.includes(getAgentEntry("explore").body));
-    assert.ok(!out.includes(getAgentEntry("general-purpose").body));
   });
 
   it("role=unknown → deps.system() 不注入 persona (V1 fallback, 不静默吞掉)", async () => {
@@ -306,9 +306,11 @@ describe("createWorkerDeps addendum 消费 (envelope.systemPrompt 现在被消�
     assert.ok(out.includes("MY ADDENDUM"));
   });
 
-  it("base=undefined + 无 role/addendum → 输出 = undefined (V1 baseline)", async () => {
+  it("base=undefined + 无 role/addendum → 仍注入 general-purpose persona", async () => {
     const deps = await createWorkerDeps(hermeticOpts());
-    assert.equal(await deps.system?.(), undefined);
+    const out = await deps.system?.();
+    assert.equal(typeof out, "string");
+    assert.ok((out ?? "").includes(getAgentEntry("general-purpose").body));
   });
 
   it("role=judge + addendum → system 是判官 prompt, 不含 iknow soul base", async () => {
