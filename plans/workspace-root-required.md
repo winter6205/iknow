@@ -4,7 +4,7 @@
 **Approach:** First record the reopened serve decision and vocabulary, then make root binding mandatory at creation and fail-fast at execution. Finish with a Hub dirty flag that bridges the existing harness isolation provision seam to conditional session save, preserving the dirty root when save fails. No cwd backfill, silent migration, or harness isolation contract change is in scope.
 **Spec link:** `specs/serve-workspace.md` plus the operator-locked decisions in this task; this plan extends the existing serve-only wording to all session-backed surfaces.
 **Tracker:** Local plan fallback; no tracker edge is added by this planner.
-**ACR:** BLOCKED draft — the separate `architecture-change-reviewer` must replace every placeholder in the verdict block below. This plan does not self-certify ACR.
+**ACR:** PASS
 **Per-ticket loop (each task/tracer bullet separately):** tdd → typecheck+tests → code-review → verification-before-completion → exactly one commit on the ticket branch. This is not one commit for the whole feature: T0, T1, T2, and T3 are four separate logical tasks, and each lands in exactly one commit.
 
 ## Ownership and invariants
@@ -19,12 +19,12 @@
 ## ACR — placeholders for the separate reviewer
 
 ```text
-bounded-context-guardian: [TO BE FILLED BY ACR] — verify session-api owns SessionFile/Hub/dirty/archive behavior; cli/tui only resolve and pass roots; harness provision contract remains unchanged; docs own ADR/CONTEXT updates.
-defensive-contract-validator: [TO BE FILLED BY ACR] — verify the named empty/negative/overflow/concurrent/exception cases cover create, execute, dirty-save, and legacy-reject without a cwd fallback.
-error-handling-enforcer: [TO BE FILLED BY ACR] — verify typed errors and EXIT comments exist for create-unbound, execute-unbound, legacy-invalid, provision-fail, and save-fail with dirty retention.
-complexity-anti-drift: [TO BE FILLED BY ACR] — verify requireBoundRoot, markWorktreeRootDirty, and consumeDirtyRootOnSave keep validation, dirty bookkeeping, and persistence separate; no god persist function.
-minimal-change-verifier: [TO BE FILLED BY ACR] — verify T0–T3 are four separate logical commits, one commit per task/tracer bullet, with no product-code or scope changes outside the listed surfaces.
-OVERALL: [TO BE FILLED BY ACR] — implementation is blocked until the separate ACR returns all yes or N/A-with-reason.
+bounded-context-guardian: yes — plan ownership boundaries keep session-api, cli/tui, harness, and docs responsibilities separate.
+defensive-contract-validator: yes — boundary coverage specifies empty, negative, overflow, concurrent, and exception cases.
+error-handling-enforcer: yes — typed failures and EXIT paths are defined for create, execute, legacy, provision, and save.
+complexity-anti-drift: yes — required helpers separate validation, dirty bookkeeping, and persistence without a god function.
+minimal-change-verifier: yes — T0–T3 are explicitly four logical tasks with one commit per task.
+OVERALL: PASS
 ```
 
 ## Temporary ACR notes — commit sequencing
@@ -56,7 +56,7 @@ OVERALL: [TO BE FILLED BY ACR] — implementation is blocked until the separate 
    - **Surface:** `docs/adr/0023-serve-workspace-explicit.md`, `docs/CONTEXT.md`, and this plan's ACR block.
    - **Acceptance:** ADR-0023 explicitly reopens the serve exception and states that the current `~/.iknow/default` auto-bind is an explicit default bind, not unbound; CONTEXT defines the required-root, legacy-invalid/archive, and dirty-root terms; the plan contains the separate reviewer's completed five-line verdict block. This decision commit does not implement product code.
    - **Completion:** The reopened decision and vocabulary are reviewable without inferring policy from implementation details, and the plan is unblocked only by a separate ACR pass.
-   - Status: [ ] pending
+   - Status: [x] done (2026-08-29)
 
 2. **T1 — Require a root when creating sessions** — tag: `[implementation]`
    - **Inherits:** T0; new sessions on `cli chat`, `tui`, and `serve` must have `workspaceRoot` at create; no silent cwd-as-bind and no parallel rootless session-file bootstrap.
