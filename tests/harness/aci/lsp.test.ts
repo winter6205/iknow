@@ -35,8 +35,14 @@ vi.mock("../../../src/harness/lsp/client.js", async (importOriginal) => {
   };
 });
 
-import { createLspToolSet } from "../../../src/harness/aci/tools/lsp.ts";
+import {
+  createLspToolSet,
+  DEFAULT_LSP_REQUEST_TIMEOUT_MS,
+  DIAGNOSTICS_WAIT_MS,
+  MAX_RESULT_BYTES,
+} from "../../../src/harness/aci/tools/lsp.ts";
 import type { AciToolDef } from "../../../src/harness/aci/types.ts";
+import { ToolExecutionError } from "../../../src/harness/errors.ts";
 
 function makeFakeClient(
   responder: (method: string, params: unknown) => unknown
@@ -85,13 +91,19 @@ const POSITION_OPS = [
   "lsp_outgoing_calls",
 ] as const;
 
+// lsp_workspace_symbol 的 file / query 均改为可选（lsp-optimization plan T3），
+// 不再属于 file-only 组；其 schema 断言见下方专用 describe。
 const FILE_ONLY_OPS = [
   "lsp_document_symbol",
-  "lsp_workspace_symbol",
   "lsp_diagnostics",
 ] as const;
 
-const ALL_TOOL_NAMES = [...POSITION_OPS, ...FILE_ONLY_OPS] as const;
+// lsp_workspace_symbol 单列（plan T3 后 schema 独立），但仍属 10 件全集。
+const ALL_TOOL_NAMES = [
+  ...POSITION_OPS,
+  ...FILE_ONLY_OPS,
+  "lsp_workspace_symbol",
+] as const;
 
 beforeEach(() => {
   mockGetClient.mockReset();
@@ -708,12 +720,21 @@ describe("initialize handshake failure propagates as tool error (exception)", ()
       () => undefined;
     mockGetClient.mockResolvedValue(client);
     const tools = createLspToolSet(ctx);
-    const out = await byName(tools, "lsp_diagnostics").handler({
-      file: "/work/src/a.ts",
-    });
-    expect(typeof out).toBe("string");
-    expect(out).toContain("<diagnostics");
-    expect(out).toContain("</diagnostics>");
+    // plan T3 后 getDiagnostics=undefined 会触发读前等待（deadline 2s）——
+    // 用 fake 时钟直接推到 deadline,避免真等 2s。
+    vi.useFakeTimers();
+    try {
+      const p = byName(tools, "lsp_diagnostics").handler({
+        file: "/work/src/a.ts",
+      });
+      await vi.advanceTimersByTimeAsync(DIAGNOSTICS_WAIT_MS);
+      const out = await p;
+      expect(typeof out).toBe("string");
+      expect(out).toContain("<diagnostics");
+      expect(out).toContain("</diagnostics>");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -832,5 +853,276 @@ describe("handler ensureOpen before request (textDocument/didOpen)", () => {
       character: 0,
     });
     expect(sequence).toEqual(["didOpen", "sendRequest"]);
+  });
+});
+
+// ── lsp_workspace_symbol 新 schema（lsp-optimization plan T3）────────────────
+//
+// file 改可选（工作区级查询无需文件锚点）、新增可选 query（旧实现恒 ""）。
+// 覆盖：无 required / additionalProperties:false / query 透传 buildParams /
+// file 缺省走 SERVERS 序试探（首试探 = Typescript 伪路径）/ 非法 query 拒绝。
+
+describe("lsp_workspace_symbol schema (plan T3)", () => {
+  it("schema has no required fields but keeps additionalProperties:false", () => {
+    const tools = createLspToolSet(ctx);
+    const schema = byName(tools, "lsp_workspace_symbol").inputSchema;
+    expect(schema.required).toBeUndefined();
+    expect(schema.additionalProperties).toBe(false);
+    expect(Object.keys(schema.properties as object).sort()).toEqual([
+      "file",
+      "query",
+    ]);
+  });
+
+  it("empty input (no file, no query) passes validation and sends empty query", async () => {
+    const { client, calls, opened } = makeFakeClient(() => []);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    const out = await byName(tools, "lsp_workspace_symbol").handler({});
+    expect(out).toBe("[]");
+    expect(calls[0].method).toBe("workspace/symbol");
+    expect(calls[0].params).toEqual({ query: "" });
+    // file 缺省 → 不 ensureOpen（无文件可打开）。
+    expect(opened).toEqual([]);
+  });
+
+  it("omitted file resolves a client by probing SERVERS in declaration order (first = Typescript)", async () => {
+    const { client } = makeFakeClient(() => []);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    await byName(tools, "lsp_workspace_symbol").handler({ query: "foo" });
+    // 首个试探：Typescript.extensions[0] = ".ts" 拼在 ctx.directory 下。
+    expect(mockGetClient).toHaveBeenCalledWith(
+      ctx,
+      "/work/iknow-workspace.ts",
+      expect.objectContaining({ server: expect.objectContaining({ id: "typescript" }) })
+    );
+  });
+
+  it("passes optional query through to buildParams (file present)", async () => {
+    const { client, calls } = makeFakeClient(() => []);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    await byName(tools, "lsp_workspace_symbol").handler({
+      file: "/work/src/a.ts",
+      query: "parseConfig",
+    });
+    expect(calls[0].method).toBe("workspace/symbol");
+    expect(calls[0].params).toEqual({ query: "parseConfig" });
+  });
+
+  it("rejects non-string query and extra properties", async () => {
+    mockGetClient.mockResolvedValue(undefined);
+    const tools = createLspToolSet(ctx);
+    await expect(
+      byName(tools, "lsp_workspace_symbol").handler({ query: 42 })
+    ).rejects.toBeInstanceOf(ToolExecutionError);
+    await expect(
+      byName(tools, "lsp_workspace_symbol").handler({ extra: true })
+    ).rejects.toBeInstanceOf(ToolExecutionError);
+  });
+});
+
+// ── 输出封顶（lsp-optimization plan T3）───────────────────────────────────────
+//
+// stringifyResult 封顶 MAX_RESULT_BYTES（48KB）：>48KB 输入截断 + footer，
+// N 为完整字节数。只截 stringify 后的结果。
+
+describe("stringifyResult cap (plan T3)", () => {
+  it("truncates oversized results with a byte-count footer", async () => {
+    const big = "x".repeat(MAX_RESULT_BYTES + 10_000);
+    const { client } = makeFakeClient(() => ({ blob: big }));
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    const out = (await byName(tools, "lsp_definition").handler({
+      file: "/work/src/a.ts",
+      line: 1,
+      character: 0,
+    })) as string;
+    const total = Buffer.byteLength(
+      JSON.stringify({ blob: big }, null, 2),
+      "utf8"
+    );
+    // footer 格式：`...[truncated, N of M bytes shown]`，N = 实际展示字节数。
+    const match = /\.\.\.\[truncated, (\d+) of (\d+) bytes shown\]$/.exec(out);
+    expect(match).not.toBeNull();
+    expect(match?.[2]).toBe(String(total));
+    // N = 展示正文的精确字节数 = out 总字节 - footer（含换行）字节。
+    const footer = `\n...[truncated, ${match?.[1]} of ${match?.[2]} bytes shown]`;
+    expect(match?.[1]).toBe(
+      String(Buffer.byteLength(out, "utf8") - Buffer.byteLength(footer, "utf8"))
+    );
+    // 展示正文 ≤ 48KB（cap），footer 有限长 → 总输出封顶在 cap + footer 内。
+    expect(Number(match?.[1])).toBeLessThanOrEqual(MAX_RESULT_BYTES);
+    expect(Buffer.byteLength(out, "utf8")).toBeLessThan(
+      MAX_RESULT_BYTES + 200
+    );
+  });
+
+  it("leaves results at or below the cap untouched (no footer)", async () => {
+    const { client } = makeFakeClient(() => ({ blob: "y".repeat(1024) }));
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    const out = (await byName(tools, "lsp_definition").handler({
+      file: "/work/src/a.ts",
+      line: 1,
+      character: 0,
+    })) as string;
+    expect(out).not.toContain("truncated");
+    expect(JSON.parse(out)).toEqual({ blob: "y".repeat(1024) });
+  });
+});
+
+// ── lsp_diagnostics 读前等待（lsp-optimization plan T3）───────────────────────
+//
+// ensureOpen 后 push 诊断尚未到达 → 立即读会误报空。fake 时钟驱动轮询：
+//   - 首查即有 → 立即返回（不进 timer）；
+//   - 轮询期间到达 → 等到内容；
+//   - deadline 到 → 用现有内容（undefined → 空渲染）；
+//   - signal aborted → 立即结束等待。
+
+describe("lsp_diagnostics wait for first push (plan T3)", () => {
+  function diagItem(message: string) {
+    return {
+      severity: 1,
+      range: { start: { line: 0, character: 0 } },
+      message,
+    };
+  }
+
+  it("returns immediately when diagnostics are already cached (first poll hits)", async () => {
+    const { client } = makeFakeClient(() => undefined);
+    (client as unknown as { getDiagnostics: () => unknown }).getDiagnostics =
+      () => [diagItem("cached err")];
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    const out = (await byName(tools, "lsp_diagnostics").handler({
+      file: "/work/src/a.ts",
+    })) as string;
+    expect(out).toContain("cached err");
+  });
+
+  it("waits for the diagnostics push to arrive within the deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const items = [diagItem("late err")];
+      let polls = 0;
+      const { client } = makeFakeClient(() => undefined);
+      (client as unknown as { getDiagnostics: () => unknown }).getDiagnostics =
+        () => {
+          polls += 1;
+          return polls >= 3 ? items : undefined;
+        };
+      mockGetClient.mockResolvedValue(client);
+      const tools = createLspToolSet(ctx);
+      const p = byName(tools, "lsp_diagnostics").handler({
+        file: "/work/src/a.ts",
+      }) as Promise<string>;
+      await vi.advanceTimersByTimeAsync(250); // 2 次 100ms 轮询后第 3 查命中
+      const out = await p;
+      expect(out).toContain("late err");
+      expect(polls).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up at the deadline and renders empty diagnostics", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client } = makeFakeClient(() => undefined);
+      (client as unknown as { getDiagnostics: () => unknown }).getDiagnostics =
+        () => undefined;
+      mockGetClient.mockResolvedValue(client);
+      const tools = createLspToolSet(ctx);
+      const p = byName(tools, "lsp_diagnostics").handler({
+        file: "/work/src/a.ts",
+      }) as Promise<string>;
+      await vi.advanceTimersByTimeAsync(DIAGNOSTICS_WAIT_MS + 100);
+      const out = await p;
+      expect(out).toContain('<diagnostics file="/work/src/a.ts">');
+      expect(out).toContain("</diagnostics>");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ends the wait early when execCtx.signal aborts", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client } = makeFakeClient(() => undefined);
+      (client as unknown as { getDiagnostics: () => unknown }).getDiagnostics =
+        () => undefined;
+      mockGetClient.mockResolvedValue(client);
+      const tools = createLspToolSet(ctx);
+      const ac = new AbortController();
+      const p = byName(tools, "lsp_diagnostics").handler(
+        { file: "/work/src/a.ts" },
+        { signal: ac.signal }
+      ) as Promise<string>;
+      ac.abort(); // 首查未命中 → 等 abort 提前结束,不等满 deadline
+      await vi.advanceTimersByTimeAsync(100);
+      const out = await p;
+      expect(out).toContain("<diagnostics");
+      // 只消费了 abort 前挂起的那次 100ms sleep,远未到 deadline。
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ── per-request 超时（lsp-optimization plan T1，工具层实现）──────────────────
+//
+// timer 到 DEFAULT_LSP_REQUEST_TIMEOUT_MS → CancellationTokenSource.cancel()
+// （真实 vscode-jsonrpc token 语义：cancel 时自动向 server 发 $/cancelRequest，
+// 不杀进程）→ pending sendRequest reject → 工具转译为 ToolExecutionError。
+
+describe("per-request timeout (plan T1)", () => {
+  it("cancels via token at 20s and throws ToolExecutionError with timeout message", async () => {
+    const { client } = makeFakeClient(() => undefined);
+    // hang 住的 sendRequest：仅在 token 被 cancel 时 reject（模拟
+    // vscode-jsonrpc 对被取消 pending request 的 RequestCancelled 拒绝）。
+    (client as unknown as { sendRequest: unknown }).sendRequest = (
+      _method: string,
+      _params: unknown,
+      token: { onCancellationRequested(cb: () => void): unknown }
+    ) =>
+      new Promise((_resolve, reject) => {
+        token.onCancellationRequested(() =>
+          reject(new Error("Request cancelled"))
+        );
+      });
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+
+    vi.useFakeTimers();
+    try {
+      const p = byName(tools, "lsp_definition").handler({
+        file: "/work/src/a.ts",
+        line: 1,
+        character: 0,
+      });
+      const expectation = expect(p).rejects.toThrow(
+        "[lsp_definition] LSP request textDocument/definition timed out after 20s (cancelled)"
+      );
+      await vi.advanceTimersByTimeAsync(DEFAULT_LSP_REQUEST_TIMEOUT_MS + 1);
+      await expectation;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not fire the timeout timer for requests that settle in time", async () => {
+    const { client, calls } = makeFakeClient(() => ({ ok: true }));
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    const out = (await byName(tools, "lsp_definition").handler({
+      file: "/work/src/a.ts",
+      line: 1,
+      character: 0,
+    })) as string;
+    expect(JSON.parse(out)).toEqual({ ok: true });
+    expect(calls).toHaveLength(1);
   });
 });

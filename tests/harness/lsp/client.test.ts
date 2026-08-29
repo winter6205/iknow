@@ -973,3 +973,181 @@ describe("getClient dispatch by extension (spec 302)", () => {
     }
   });
 });
+
+// ── 19. notifyChange（lsp-optimization plan T1）───────────────────────────────
+//
+// 锚点 client.ts:LspClient.notifyChange。edit_file 写盘后 notifier 层调用：
+//   - uri 未打开过 → 等价 ensureOpen（didOpen 现读文件，读到的即最新文本）；
+//   - 已打开 → didChange full sync，per-uri version 从 didOpen 的 1 起每次 +1。
+// 需要真实文件（readFile），沿用 ensureOpen 测试的 mkdtemp 模式。
+
+describe("notifyChange (plan T1)", () => {
+  function spawnableServer(id: string) {
+    return makeFakeServer(id, {
+      spawn: async (_root) => {
+        const child = makeFakeChildProcess();
+        return {
+          process: child as unknown as import("node:child_process").ChildProcess,
+          initialization: { tsserver: { path: "/tsserver.js" } },
+        };
+      },
+    });
+  }
+
+  it("never-opened file routes through the didOpen path (version 1, fresh text)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-notify-open-"));
+    const file = join(dir, "a.ts");
+    writeFileSync(file, "export const a = 1;\n", "utf8");
+    try {
+      const { server } = spawnableServer("notify-open");
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+
+      mockSendNotification.mockReset();
+      mockSendNotification.mockResolvedValue(undefined);
+
+      await client.notifyChange(file);
+
+      const didOpens = mockSendNotification.mock.calls.filter(
+        (c) => c[0] === "textDocument/didOpen"
+      );
+      expect(didOpens).toHaveLength(1);
+      const p = didOpens[0][1] as { textDocument: { uri: string; version: number; text: string } };
+      expect(p.textDocument.version).toBe(1);
+      expect(p.textDocument.text).toBe("export const a = 1;\n");
+      expect(p.textDocument.uri).toMatch(/\/a\.ts$/);
+      // 未打开路径不应补发 didChange。
+      expect(
+        mockSendNotification.mock.calls.filter(
+          (c) => c[0] === "textDocument/didChange"
+        )
+      ).toHaveLength(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("already-opened file sends didChange full sync with incrementing versions (2, 3)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-notify-change-"));
+    const file = join(dir, "b.ts");
+    writeFileSync(file, "export const b = 1;\n", "utf8");
+    try {
+      const { server } = spawnableServer("notify-change");
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+
+      mockSendNotification.mockReset();
+      mockSendNotification.mockResolvedValue(undefined);
+
+      await client.ensureOpen(file); // didOpen version 1
+
+      writeFileSync(file, "export const b = 2;\n", "utf8");
+      await client.notifyChange(file);
+
+      writeFileSync(file, "export const b = 3;\n", "utf8");
+      await client.notifyChange(file);
+
+      const didChanges = mockSendNotification.mock.calls.filter(
+        (c) => c[0] === "textDocument/didChange"
+      );
+      expect(didChanges).toHaveLength(2);
+      const [first, second] = didChanges.map(
+        (c) =>
+          c[1] as {
+            textDocument: { uri: string; version: number };
+            contentChanges: Array<{ text: string }>;
+          }
+      );
+      expect(first.textDocument.version).toBe(2);
+      expect(first.contentChanges).toEqual([{ text: "export const b = 2;\n" }]);
+      expect(second.textDocument.version).toBe(3);
+      expect(second.contentChanges).toEqual([{ text: "export const b = 3;\n" }]);
+      expect(first.textDocument.uri).toMatch(/\/b\.ts$/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("readFile failure rejects (notifier layer owns the catch)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-notify-err-"));
+    const file = join(dir, "c.ts");
+    writeFileSync(file, "export const c = 1;\n", "utf8");
+    try {
+      const { server } = spawnableServer("notify-err");
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+
+      await client.ensureOpen(file);
+      rmSync(file, { force: true });
+
+      await expect(client.notifyChange(file)).rejects.toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── 20. server 进程意外退出自愈（lsp-optimization plan T1）────────────────────
+//
+// 锚点 spawnClient：child.once("exit") → 把 (root, server.id) key 从模块级
+// `clients` 逐出（**不**进 broken），下次 getClient 重新 spawn；guard 保证
+// 旧进程迟到的 exit 不会逐出 respawn 后的新 client。
+
+describe("client exit self-heal (plan T1)", () => {
+  it("evicts the cached client on child exit and respawns on the next getClient (not broken)", async () => {
+    const children: import("node:events").EventEmitter[] = [];
+    const { server, calls } = makeFakeServer("exit-heal", {
+      spawn: async (_root) => {
+        const child = makeFakeChildProcess();
+        children.push(child);
+        return {
+          process: child as unknown as import("node:child_process").ChildProcess,
+          initialization: { tsserver: { path: "/tsserver.js" } },
+        };
+      },
+    });
+
+    const first = await getClient(ctx, "/root/a.ts", { server });
+    expect(first).toBeDefined();
+    expect(calls.spawn).toBe(1);
+
+    // 模拟 server 进程意外退出。
+    children[0]!.emit("exit", 1, null);
+
+    // 逐出后下次调用重新 spawn（broken 不记忆 spawn 成功过的 key）。
+    const second = await getClient(ctx, "/root/b.ts", { server });
+    expect(second).toBeDefined();
+    expect(second).not.toBe(first);
+    expect(calls.spawn).toBe(2);
+
+    // 旧 child 迟到的重复 exit 不得逐出新 client（guard: clients.get(key) === client）。
+    children[0]!.emit("exit", 1, null);
+    const third = await getClient(ctx, "/root/c.ts", { server });
+    expect(third).toBe(second);
+    expect(calls.spawn).toBe(2);
+  });
+
+  it("never kills the process on the exit path (Q2/A9)", async () => {
+    const { server } = makeFakeServer("exit-nokill", {
+      spawn: async (_root) => {
+        const child = makeFakeChildProcess();
+        return {
+          process: child as unknown as import("node:child_process").ChildProcess,
+          initialization: { tsserver: { path: "/tsserver.js" } },
+        };
+      },
+    });
+    const client = await getClient(ctx, "/root/a.ts", { server });
+    if (!client) throw new Error("expected client");
+    const killSpy = vi.spyOn(client.process, "kill");
+
+    (client.process as unknown as import("node:events").EventEmitter).emit(
+      "exit",
+      0,
+      null
+    );
+
+    // exit 只触发缓存逐出，绝不调用 kill。
+    expect(killSpy).not.toHaveBeenCalled();
+  });
+});

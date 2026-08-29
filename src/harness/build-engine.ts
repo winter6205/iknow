@@ -39,6 +39,7 @@ import type { AciRegistry } from "./aci/aci-registry.js";
 import { errorMessage } from "./errors.js";
 import type { AciCatalog, AciToolDef } from "./aci/types.js";
 import { createLspNotifier } from "./lsp/notifier.js";
+import { startLspWarmup } from "./lsp/warmup.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import type { Registry } from "./tools/types.js";
 import type { RegistryImpl } from "./tools/registry.js";
@@ -360,6 +361,11 @@ export async function buildHarnessEngine(
   // 否则两者分叉会让同一边界出现两个值。
   const lspCtx = { directory: sandboxRoot };
   const lspNotifier = createLspNotifier(lspCtx);
+  // lsp-optimization plan T4:fire-and-forget 预热 —— 装配完成即按 sandboxRoot
+  // 内文件扩展名探测预 spawn LSP server,消掉首次 lsp_* 调用的 initialize
+  // 冷启动。不 await:绝不阻塞 build 主路径;warmup 内部全量 catch(ask 同样
+  // 装配 lsp 工具,故不做 surface 区分)。
+  startLspWarmup(lspCtx);
   const skillCatalog: SkillCatalog = createSkillCatalog(
     await createSkillScanner({
       userHome,

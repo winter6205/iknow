@@ -18,6 +18,13 @@
  * **取消语义（Q2/A9）**：中断走 JSON-RPC `$/cancelRequest`，**绝不终止
  * tsserver 子进程**。本模块不存在任何进程终止调用（唯一终止操作是
  * `connection.dispose()`，仅释放连接，不涉子进程信号）。
+ *
+ * **编辑同步 + 自愈（lsp-optimization plan T1）**：`notifyChange(file)` 把
+ * edit_file 写盘后的最新文本经标准 `textDocument/didChange`（full sync）同步
+ * 给 server，后续请求基于新内容；server 进程意外 `exit` 时把对应 key 从
+ * `clients` 缓存逐出（不进 `broken`），下次调用自动重新 spawn。per-request
+ * 超时（`$/cancelRequest` 取消语义）在工具层（aci/tools/lsp.ts）实现——
+ * 距离 abort 桥接与错误转译更近，比在 sendRequest 内包 race 更可控。
  */
 import { pathToFileURL } from "node:url";
 import { readFile } from "node:fs/promises";
@@ -59,6 +66,16 @@ export interface LspClient {
    * handler 层在每次请求前调用本方法，保证目标文件已建 project。
    */
   ensureOpen(file: string): Promise<void>;
+  /**
+   * 把磁盘上的最新文本同步给 server（lsp-optimization plan T1）：
+   *   - uri 未打开过 → 等价 `ensureOpen(file)`（didOpen 读到的即最新文本）；
+   *   - 已打开 → 读文件全文发 `textDocument/didChange`（full sync，
+   *     tsserver / typescript-language-server 默认支持 full sync），per-uri
+   *     version 从 didOpen 的 1 起每次 +1。
+   *
+   * 读文件失败 → reject（调用方 notifier 层已 catch，这里不额外吞）。
+   */
+  notifyChange(file: string): Promise<void>;
   /** 取某文件最近一次 push diagnostics（latest-wins；无 → undefined）。 */
   getDiagnostics(uri: string): ReadonlyArray<unknown> | undefined;
   /** 释放连接（不杀进程；进程随宿主进程同生同灭，spec S14）。 */
@@ -142,6 +159,8 @@ async function spawnClient(
   root: string,
   ctx: LspCtx
 ): Promise<LspClient | undefined> {
+  // 与 getClient 同源的缓存 key：exit 自愈钩子逐出 `clients` 时需要。
+  const key = `${root}:${server.id}`;
   const handle = await server.spawn(root, ctx);
   if (!handle) return undefined;
 
@@ -188,8 +207,56 @@ async function spawnClient(
   // tsserver per-project 维护打开文件表；重复 didOpen 同 uri 会触发版本断言，
   // 因此本地缓存去重。仅作为同连接内的短缓存，进程退出即释放。
   const openedUris = new Set<string>();
+  // per-uri version 计数器（lsp-optimization plan T1）：didOpen 从 1 起，
+  // didChange 每次 +1。LSP 规范要求版本单调递增，重复版本会被 server 断言。
+  const versionCounters = new Map<string, number>();
 
-  return {
+  const ensureOpen = async (file: string): Promise<void> => {
+    const uri = pathToFileURL(file).href;
+    if (openedUris.has(uri)) return;
+    // 先占位再加 await 再读文件：防止并发调用同文件时都通过 has 检查、
+    // 各发一次 didOpen(version:1 重复 → tsserver 版本断言)。readFile 失败
+    // 时回滚占位,保留"失败可重试"语义;didOpen 发送失败 → 仍认为已告知
+    // server,下次 sendRequest 由 tsserver 以"未打开"状态回退。
+    openedUris.add(uri);
+    let text: string;
+    try {
+      text = await readFile(file, "utf8");
+    } catch (err) {
+      openedUris.delete(uri);
+      throw err;
+    }
+    await connection.sendNotification("textDocument/didOpen", {
+      textDocument: {
+        uri,
+        languageId: languageIdFor(file),
+        version: 1,
+        text,
+      },
+    });
+    versionCounters.set(uri, 1);
+  };
+
+  const notifyChange = async (file: string): Promise<void> => {
+    const uri = pathToFileURL(file).href;
+    if (!openedUris.has(uri)) {
+      // 未打开过 → 等价 ensureOpen：didOpen 现读文件，读到的即最新文本，
+      // 无需再补 didChange（避免 version:1 didOpen + version:2 didChange 冗余）。
+      await ensureOpen(file);
+      return;
+    }
+    // 已打开 → 读文件全文走 full sync didChange。readFile 失败直接 reject：
+    // notifier 层已 catch（best-effort），此处保留错误原文便于 stderr 归因。
+    const text = await readFile(file, "utf8");
+    const nextVersion = (versionCounters.get(uri) ?? 1) + 1;
+    versionCounters.set(uri, nextVersion);
+    await connection.sendNotification("textDocument/didChange", {
+      textDocument: { uri, version: nextVersion },
+      contentChanges: [{ text }],
+    });
+  };
+
+  const client: LspClient = {
     connection,
     process: child,
     // vscode-jsonrpc `sendRequest(method, ...args)` 靠实参数目推断参数结构：
@@ -206,32 +273,25 @@ async function spawnClient(
     sendNotification: (method, params) =>
       connection.sendNotification(method, params),
     getDiagnostics: (uri: string) => diagStore.get(uri),
-    ensureOpen: async (file: string) => {
-      const uri = pathToFileURL(file).href;
-      if (openedUris.has(uri)) return;
-      // 先占位再加 await 再读文件：防止并发调用同文件时都通过 has 检查、
-      // 各发一次 didOpen(version:1 重复 → tsserver 版本断言)。readFile 失败
-      // 时回滚占位,保留"失败可重试"语义;didOpen 发送失败 → 仍认为已告知
-      // server,下次 sendRequest 由 tsserver 以"未打开"状态回退。
-      openedUris.add(uri);
-      let text: string;
-      try {
-        text = await readFile(file, "utf8");
-      } catch (err) {
-        openedUris.delete(uri);
-        throw err;
-      }
-      await connection.sendNotification("textDocument/didOpen", {
-        textDocument: {
-          uri,
-          languageId: languageIdFor(file),
-          version: 1,
-          text,
-        },
-      });
-    },
+    ensureOpen,
+    notifyChange,
     dispose: () => connection.dispose(),
   };
+
+  // 进程意外退出自愈（lsp-optimization plan T1）：server 进程 crash 后死连接
+  // 留在 `clients` 缓存会让会话内所有后续请求持续失败。exit 时把**本实例**
+  // 占据的缓存 key 逐出，下次 getClient 自动重新 spawn。
+  //   - 不进 `broken`：spawn 成功过，属可重启失败，与 spawn 失败（bin 缺失）
+  //     语义不同；
+  //   - guard `clients.get(key) === client`：逐出后若已 respawn 出新 client，
+  //     旧进程迟到的 exit 不得把新 client 一并逐出；
+  //   - dispose()（主动关闭）后进程若退出，逐出是幂等无害的（缓存本就该
+  //     释放），无需区分主动/意外退出。
+  child.once("exit", () => {
+    if (clients.get(key) === client) clients.delete(key);
+  });
+
+  return client;
 }
 
 /**
