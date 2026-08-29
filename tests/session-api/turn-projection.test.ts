@@ -24,6 +24,7 @@ import {
   isTaskExcerptText,
   isTurnQuery,
   messageText,
+  projectActivity,
   projectThinkingView,
   projectToolCalls,
   shouldSeedTaskFocus,
@@ -47,6 +48,10 @@ const assistant = (
 // -- boundary 1: empty ----------------------------------------------------
 
 describe("boundary: empty input", () => {
+  it("projectActivity([]) → []", () => {
+    assert.deepEqual(projectActivity([], identity), []);
+  });
+
   it("projectThinkingView([]) → undefined", () => {
     assert.equal(projectThinkingView([], identity), undefined);
   });
@@ -138,6 +143,151 @@ describe("boundary: normal projection", () => {
     assert.equal(toolCalls?.length, 1);
     assert.equal(toolCalls?.[0]?.isError, true);
     assert.equal(toolCalls?.[0]?.outputPreview, "boom");
+  });
+});
+
+describe("boundary: ordered activity", () => {
+  it("preserves text → tool → text order and pairs the tool result", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [{ type: "text", text: "do this" }]),
+      assistant("assistant", [
+        { type: "text", text: "before" },
+        { type: "tool_use", id: "t1", name: "bash", input: { cmd: "pwd" } },
+        { type: "text", text: "after" },
+      ]),
+      assistant("user", [
+        {
+          type: "tool_result",
+          tool_use_id: "t1",
+          content: [{ type: "text", text: "ok" }],
+        },
+      ]),
+    ];
+    assert.deepEqual(projectActivity(messages, identity), [
+      { type: "text", text: "before" },
+      {
+        type: "tool",
+        tool: {
+          id: "t1",
+          name: "bash",
+          inputPreview: '{"cmd":"pwd"}',
+          outputPreview: "ok",
+          isError: false,
+          truncated: false,
+        },
+      },
+      { type: "text", text: "after" },
+    ]);
+    const turns = projectMessagesToTurns(messages);
+    assert.deepEqual(turns[0]?.answer.activity, [
+      { type: "text", text: "before" },
+      {
+        type: "tool",
+        tool: {
+          id: "t1",
+          name: "bash",
+          inputPreview: '{"cmd":"pwd"}',
+          outputPreview: "ok",
+          isError: false,
+          truncated: false,
+        },
+      },
+      { type: "text", text: "after" },
+    ]);
+    assert.equal(turns[0]?.answer.toolCalls?.length, 1);
+    assert.equal(turns[0]?.answer.finalText, "before after");
+  });
+
+  it("skips malformed and unknown blocks without affecting valid activity", () => {
+    const messages = [
+      assistant("assistant", [
+        { type: "text", text: "valid" },
+        { type: "tool_use", id: "missing-name" } as never,
+        { type: "unknown", text: "ignore me" } as never,
+      ]),
+    ];
+    assert.deepEqual(projectActivity(messages, identity), [
+      { type: "text", text: "valid" },
+    ]);
+  });
+
+  it("ignores unpaired results and uses the first duplicate result", () => {
+    const messages: AnthropicNativeMessage[] = [
+      assistant("user", [
+        {
+          type: "tool_result",
+          tool_use_id: "unknown",
+          content: [{ type: "text", text: "ignore" }],
+        },
+        {
+          type: "tool_result",
+          tool_use_id: "t1",
+          content: [{ type: "text", text: "first" }],
+        },
+        {
+          type: "tool_result",
+          tool_use_id: "t1",
+          content: [{ type: "text", text: "second" }],
+        },
+      ]),
+      assistant("assistant", [
+        { type: "tool_use", id: "t1", name: "echo", input: {} },
+        { type: "tool_use", id: "pending", name: "wait", input: {} },
+      ]),
+    ];
+    const activity = projectActivity(messages, identity);
+    assert.equal(activity.length, 2);
+    assert.equal(activity[0]?.type, "tool");
+    assert.equal(
+      activity[0]?.type === "tool" && activity[0].tool.outputPreview,
+      "first"
+    );
+    assert.equal(
+      activity[1]?.type === "tool" && activity[1].tool.outputPreview,
+      ""
+    );
+  });
+
+  it("returns [] instead of throwing for malformed session data", () => {
+    assert.doesNotThrow(() =>
+      projectActivity([null as unknown as AnthropicNativeMessage], identity)
+    );
+    assert.doesNotThrow(() =>
+      projectActivity(null as unknown as AnthropicNativeMessage[], identity)
+    );
+    assert.deepEqual(
+      projectActivity([null as unknown as AnthropicNativeMessage], identity),
+      []
+    );
+  });
+
+  it("marks an unserializable tool input instead of hiding it as an empty preview", () => {
+    const circularInput: Record<string, unknown> = {};
+    circularInput.self = circularInput;
+    const messages: AnthropicNativeMessage[] = [
+      assistant("assistant", [
+        {
+          type: "tool_use",
+          id: "circular",
+          name: "inspect",
+          input: circularInput,
+        },
+      ]),
+    ];
+
+    assert.deepEqual(projectActivity(messages, identity), [
+      {
+        type: "tool",
+        tool: {
+          id: "circular",
+          name: "inspect",
+          inputPreview: "// EXIT: tool input preview unavailable",
+          outputPreview: "",
+          isError: false,
+          truncated: false,
+        },
+      },
+    ]);
   });
 });
 

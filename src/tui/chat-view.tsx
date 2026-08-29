@@ -100,6 +100,7 @@ import {
   countToolUsesByName,
   formatTurnActivityFold,
   lastTurnQueryIndex,
+  orderedTurnActivitySegments,
   shouldCollapseTurnToolRows,
   shouldShowTurnActivityFold,
   mergeToolUseCounts,
@@ -290,12 +291,61 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     const thinkingSeconds = running
       ? (props.thinkingFrozenSeconds ?? 0)
       : (props.lastThinkingSeconds ?? 0);
+    const activitySegments = orderedTurnActivitySegments(
+      visibleMessages,
+      lastQueryVisible
+    );
     // idle 才收成两行：`思考了 N 秒` + `bash × N`；running 保持逐条工具可见。
     const showTurnFold = shouldShowTurnActivityFold({
       running,
       thinkingSeconds,
       turnToolTotal,
     });
+    const foldLinesBySegmentIndex = new Map<number, ReadonlyArray<string>>();
+    if (showTurnFold) {
+      let thinkingPlaced = false;
+      const toolSegments = activitySegments.flatMap((segment, segmentIndex) =>
+        segment.kind === "tools" ? [{ segment, segmentIndex }] : []
+      );
+      for (const [
+        toolIndex,
+        { segment, segmentIndex },
+      ] of toolSegments.entries()) {
+        const entries =
+          toolIndex === toolSegments.length - 1
+            ? mergeToolUseCounts(segment.entries, liveCompletedCounts)
+            : segment.entries;
+        const lines = formatTurnActivityFold(
+          thinkingPlaced ? 0 : thinkingSeconds,
+          entries
+        );
+        if (lines.length > 0) {
+          foldLinesBySegmentIndex.set(segmentIndex, lines);
+          thinkingPlaced = true;
+        }
+      }
+      if (!thinkingPlaced) {
+        const lastText = activitySegments
+          .map((segment, segmentIndex) => ({ segment, segmentIndex }))
+          .reverse()
+          .find(({ segment }) => segment.kind === "text");
+        if (lastText !== undefined) {
+          const lines = formatTurnActivityFold(
+            thinkingSeconds,
+            liveCompletedCounts
+          );
+          if (lines.length > 0) {
+            foldLinesBySegmentIndex.set(lastText.segmentIndex, lines);
+          }
+        }
+      }
+    }
+    const foldLineCount = [...foldLinesBySegmentIndex.values()].reduce(
+      (total, lines) => total + lines.length,
+      0
+    );
+    // Keep the tail-collapse decision based on the fold that would be shown,
+    // not on whether an historical message supplied an insertion point.
     const foldDisplayLines = showTurnFold
       ? formatTurnActivityFold(thinkingSeconds, turnToolCounts)
       : [];
@@ -310,6 +360,16 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
         : liveToolRuns,
       deferredSegments
     );
+    const renderFoldLines = (segmentIndex: number, keyPrefix: string) =>
+      (foldLinesBySegmentIndex.get(segmentIndex) ?? []).map((line, foldIdx) => (
+        <text
+          key={`${keyPrefix}-${segmentIndex}-${foldIdx}`}
+          fg={pal.dim}
+          wrapMode="none"
+        >
+          {line}
+        </text>
+      ));
     // e2 黄昏魔法石渐变（与 scripts/banner-gradient-preview/exotic-e2.ts 一致）：
     // 13×32 逐 cell 上色，对角线 t = cWeight·(c/31) + rWeight·(r/12)。
     const eyeGradient = eyeGradientCells({
@@ -391,6 +451,15 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
             message.role === "assistant";
           const inLastTurn =
             lastQueryVisible >= 0 && visibleIndex > lastQueryVisible;
+          const messageSegments = activitySegments
+            .map((segment, segmentIndex) => ({ segment, segmentIndex }))
+            .filter(({ segment }) => segment.messageIndex === visibleIndex);
+          const renderInContentOrder =
+            message.role === "assistant" &&
+            messageSegments.length > 1 &&
+            messageSegments.some(({ segmentIndex }) =>
+              foldLinesBySegmentIndex.has(segmentIndex)
+            );
           return (
             <box
               id={`tmsg-${visibleIndex}`}
@@ -398,35 +467,91 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
               width={contentWidth}
               flexShrink={0}
             >
-              <MessageBlocks
-                message={message}
-                cols={contentWidth}
-                statusMap={statusMap}
-                thinkingExpanded={thinkingExpanded}
-                thinkingSeconds={
-                  isLastAssistant && (props.lastThinkingSeconds ?? 0) > 0
-                    ? props.lastThinkingSeconds
-                    : undefined
-                }
-                hideThinking={
-                  inLastTurn &&
-                  !thinkingExpanded &&
-                  (foldDisplayLines.length > 0 ||
-                    (running && thinkingSeconds > 0))
-                }
-                hideToolSummaries={inLastTurn && collapseToolRows}
-                marginTop={visibleIndex === 0 ? 0 : 1}
-              />
-              {visibleIndex === lastQueryVisible &&
-                foldDisplayLines.map((line, foldIdx) => (
-                  <text
-                    key={`turn-fold-${foldIdx}`}
-                    fg={pal.dim}
-                    wrapMode="none"
-                  >
-                    {line}
-                  </text>
-                ))}
+              {renderInContentOrder ? (
+                messageSegments.map(({ segment, segmentIndex }, partIndex) => {
+                  const blockIndex = segment.contentBlockIndex;
+                  const nextSegment = messageSegments[partIndex + 1]?.segment;
+                  const endIndex =
+                    nextSegment?.messageIndex === visibleIndex
+                      ? nextSegment.contentBlockIndex
+                      : message.content.length;
+                  const activityBlocks =
+                    segment.kind === "text"
+                      ? [message.content[blockIndex]].filter(
+                          (block) => block !== undefined
+                        )
+                      : message.content
+                          .slice(blockIndex, endIndex)
+                          .filter((block) => block.type === "tool_use");
+                  const thinkingBlocks =
+                    partIndex === 0
+                      ? message.content.filter(
+                          (block) =>
+                            block.type === "thinking" ||
+                            block.type === "redacted_thinking"
+                        )
+                      : [];
+                  const segmentMessage = {
+                    ...message,
+                    content: [...thinkingBlocks, ...activityBlocks],
+                  };
+                  return (
+                    <box
+                      key={`turn-segment-${visibleIndex}-${segmentIndex}`}
+                      flexDirection="column"
+                    >
+                      <MessageBlocks
+                        message={segmentMessage}
+                        cols={contentWidth}
+                        statusMap={statusMap}
+                        thinkingExpanded={thinkingExpanded}
+                        thinkingSeconds={
+                          partIndex === 0 &&
+                          isLastAssistant &&
+                          (props.lastThinkingSeconds ?? 0) > 0
+                            ? props.lastThinkingSeconds
+                            : undefined
+                        }
+                        hideThinking={
+                          inLastTurn &&
+                          !thinkingExpanded &&
+                          (foldLineCount > 0 ||
+                            (running && thinkingSeconds > 0))
+                        }
+                        hideToolSummaries={inLastTurn && collapseToolRows}
+                        marginTop={
+                          partIndex === 0 && visibleIndex !== 0 ? 1 : 0
+                        }
+                      />
+                      {renderFoldLines(segmentIndex, "turn-fold")}
+                    </box>
+                  );
+                })
+              ) : (
+                <>
+                  <MessageBlocks
+                    message={message}
+                    cols={contentWidth}
+                    statusMap={statusMap}
+                    thinkingExpanded={thinkingExpanded}
+                    thinkingSeconds={
+                      isLastAssistant && (props.lastThinkingSeconds ?? 0) > 0
+                        ? props.lastThinkingSeconds
+                        : undefined
+                    }
+                    hideThinking={
+                      inLastTurn &&
+                      !thinkingExpanded &&
+                      (foldLineCount > 0 || (running && thinkingSeconds > 0))
+                    }
+                    hideToolSummaries={inLastTurn && collapseToolRows}
+                    marginTop={visibleIndex === 0 ? 0 : 1}
+                  />
+                  {messageSegments.flatMap(({ segmentIndex }) =>
+                    renderFoldLines(segmentIndex, "turn-fold")
+                  )}
+                </>
+              )}
             </box>
           );
         })}
