@@ -105,6 +105,7 @@ function baseDeps(): LoopEngineDeps {
 }
 
 async function createSessionId(hub: SessionHub): Promise<string> {
+  await hub.bindWorkspace(process.cwd());
   return (await hub.createSession()).session.conversation_id;
 }
 

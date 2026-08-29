@@ -23,6 +23,8 @@ export interface TurnAnswerDto {
   readonly thinking?: ThinkingView;
   /** T1: 单回合内所有 tool_use，按 tool_use_id 配对 tool_result。无 tool_use 时整字段省略。 */
   readonly toolCalls?: readonly ToolCallView[];
+  /** Ordered assistant content used by clients that need text/tool placement. */
+  readonly activity?: readonly ActivityItem[];
   /** 上下文用量显示：该回合最后一次成功模型调用的 token usage。
    *  映射 RunResult.lastUsage（ADR-0008 D5）；null → 字段缺席（byte-stable，
    *  与 thinking/toolCalls 同模式）。contextWindow 经 HealthResponse 下发。 */
@@ -73,6 +75,11 @@ export interface ToolCallView {
   readonly isError: boolean; // tool_result.is_error === true
   readonly truncated: boolean; // output 是否被截断
 }
+
+/** Ordered assistant content used by clients that need text/tool placement. */
+export type ActivityItem =
+  | { readonly type: "text"; readonly text: string }
+  | { readonly type: "tool"; readonly tool: ToolCallView };
 
 /** 022 Q1: 单次消息往返的 wire 形状。 */
 export interface TurnDto {

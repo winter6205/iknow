@@ -102,6 +102,25 @@ export async function buildHarnessEngine(
     subagentDiagnosticsDir?: string;
     /** Trace service for unconditional subagent lifecycle evidence. */
     subagentTrace?: TraceService;
+    /**
+     * Review High-1 (2026-08-29 / ADR-0037): worktree isolation host 缝 ——
+     * 透传给 build-engine。开关本体由 build-engine 从 `settings` 在启动加载点
+     * 读取（硬要求 9）；ON 时 chat 引擎的 mutate 被门禁拦截，provision 负责
+     * 建 task worktree + 仅本会话根改绑。缺席 → 不包装（行为与今日一致）。
+     */
+    worktreeIsolation?: import("../harness/isolation/worktree-gate.js").WorktreeIsolationHostOpts;
+    /**
+     * Review High-2 (2026-08-29 / 硬要求 9): 启动装配的 settings 对象透传。
+     * rebind 后 per-root 重建（chat rebuildDeps 缝）复用同一对象 —— worktree
+     * 内 `.iknow/` 缺席（gitignore），绝不隐式重载 project settings。缺席 →
+     * build-engine 自行缺省加载。
+     */
+    settings?: import("../config/settings.js").IknowSettings;
+    /**
+     * Review High-1: 引擎根覆盖（per-root 重建时传 task worktree 路径）。
+     * 缺省 = process.cwd()（与 build-engine 缺省一致）。
+     */
+    cwd?: string;
   }
 ): Promise<BuiltEngine> {
   // review-fix (M1 / H1/H2): CLI entry 层条件 resolve workspaceRoot —— 当
@@ -149,6 +168,13 @@ export async function buildHarnessEngine(
       ? { subagentDiagnosticsDir: opts.subagentDiagnosticsDir }
       : {}),
     ...(opts.subagentTrace ? { subagentTrace: opts.subagentTrace } : {}),
+    // Review High-2 / High-1 (2026-08-29):启动 settings 对象 + isolation
+    // host 缝 + per-root 重建根透传（开关读取仍在 build-engine 启动加载点）。
+    ...(opts.settings ? { settings: opts.settings } : {}),
+    ...(opts.worktreeIsolation
+      ? { worktreeIsolation: opts.worktreeIsolation }
+      : {}),
+    ...(opts.cwd ? { cwd: opts.cwd } : {}),
   });
 }
 

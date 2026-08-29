@@ -42,6 +42,7 @@ afterAll(async () => {
 function makeHub(): SessionHub {
   return new SessionHub({
     store,
+    workspaceRoot: process.cwd(),
     deps: makeDeps([assistantResult({ texts: ["ack"] })]),
   });
 }
@@ -68,6 +69,7 @@ describe("## GOAL: re-pin via postMessage (#458 T8)", () => {
         cwd: process.cwd(),
         sanitized_at: now0,
         checkpoints: [],
+        workspaceRoot: process.cwd(),
         goal: pinGoal({
           current: undefined,
           text: "Build a C compiler",
@@ -115,6 +117,7 @@ describe("## GOAL: re-pin via postMessage (#458 T8)", () => {
         cwd: process.cwd(),
         sanitized_at: now0,
         checkpoints: [],
+        workspaceRoot: process.cwd(),
         goal: pinGoal({
           current: undefined,
           text: "Build a compiler",

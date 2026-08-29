@@ -13,7 +13,10 @@ import type {
 } from "../../src/harness/index.ts";
 import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
 import type { SubAgentTerminalNotice } from "../../src/harness/subagent/mailbox.ts";
-import { assistantResult as fixtureAssistantResult, makeDeps } from "./_fixtures.ts";
+import {
+  assistantResult as fixtureAssistantResult,
+  makeDeps,
+} from "./_fixtures.ts";
 
 const mockState = vi.hoisted(() => ({
   readline: {
@@ -144,6 +147,7 @@ describe("interactive chat subagent wake", () => {
       session: {},
       jsonMode: false,
       subagentManager: managerFixture.manager,
+      workspaceRoot: process.cwd(),
     });
     await vi.waitFor(() =>
       expect(mockState.readline.createInterface).toHaveBeenCalledTimes(1)
@@ -161,8 +165,10 @@ describe("interactive chat subagent wake", () => {
     releaseFirstStep.resolve(assistantResult("parent answer"));
 
     await vi.waitFor(() => expect(stepCalls).toBe(2));
-    expect(mockState.sessionIo.writeOut).toHaveBeenCalledWith(
-      expect.stringContaining("silent wake answer")
+    await vi.waitFor(() =>
+      expect(mockState.sessionIo.writeOut).toHaveBeenCalledWith(
+        expect.stringContaining("silent wake answer")
+      )
     );
 
     readline.close();

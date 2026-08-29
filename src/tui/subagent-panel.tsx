@@ -17,16 +17,14 @@
  *   3. 完成行（completed）不单独显示（立即移除）；
  *   4. 无任何活跃行且存在 DONE_FADE_WINDOW_S 内完成的 → 单行 `✓ N 完成`
  *      淡出提示；
- *   5. 全空 → return null（条件渲染时返回 null，调用方据此入账 0 行）；
- *      非 null 时行数 = lines.length，调用方传给 chromeReserveRows.panelRows
- *      计入底部行账。
- *   6. 活跃行（含未过期 failed）> 3 → 只显示前 3 条 + `… 另有 N 个子代理`。
+ *   5. 全空 → return null；
+ *   6. 活跃行全量列出（不折叠 footer）。不计入 chrome 行账，画在输入框下方。
  *
  * 窄列分支（cols < 40）说明：产品路径 cols 下限 40（见 app.tsx cols =
  * Math.max(width ?? 80, 40)），本分支属防御 / 测试 fixture 路径；保留是为
- * 让 cols=30 fixture 的单测能直驱可见性 + 折叠逻辑（行账 SSOT 单测覆盖）。
+ * 让 cols=30 fixture 的单测能直驱可见性（行账由 app 产品路径恒 panelRows=0）。
  *
- * 字形纪律（spec #146:86 无 emoji UI 字形）：只用几何字形 `● ○ ✓ ✗ …`
+ * 字形纪律（spec #146:86 无 emoji UI 字形）：只用几何字形 `● ○ ✓ ✗`
  * （项目既有惯例，见 context-bar 的 █░ / tool-summary 的 …），禁止 emoji。
  */
 import type { ReactNode } from "react";
@@ -51,16 +49,15 @@ export interface SubagentLine {
   readonly text: string;
 }
 
-/** 活跃行（starting/running/未过期 failed）显示上限；超出折叠为 footer。 */
-const MAX_LIVE_ROWS = 3;
 /** 失败行可见窗口：endedAt 距 now ≤ 30s。导出供 app.tsx 的 watch 窗口
  *  同源消费（hasRecentEndedSubagent failed 分支用本值 ×1000）。 */
 export const FAILED_VISIBLE_WINDOW_S = 30;
 /** 完成淡出窗口：endedAt 距 now ≤ 5s。导出供 app.tsx 的 watch 窗口
  *  同源消费（hasRecentEndedSubagent completed 分支用本值 ×1000）。 */
 export const DONE_FADE_WINDOW_S = 5;
-/** 宽列行装饰预留：icon(1) + 空格(1) + ` · `(3) + elapsed 最长 8 列 = 13。 */
-const DECOR_RESERVE = 13;
+/** 宽列行装饰预留：icon(1) + 空格(1) + name 空格(1) + ` · `(3) + elapsed 最长 8 列。 */
+const DECOR_RESERVE = 14;
+const NAME_BUDGET = 20;
 
 /**
  * startedAt(ISO) → nowMs 的整秒 elapsed。非法 ISO / nowMs 早于 startedAt
@@ -74,18 +71,18 @@ export function elapsedSec(startedAt: string, nowMs: number): number {
   return Math.floor(diffMs / 1000);
 }
 
+function subagentDisplayName(info: SubagentInfo): string {
+  const role = info.role?.trim();
+  return role !== undefined && role.length > 0 ? role : "子代理";
+}
+
 /**
  * 纯函数投影：可见性过滤 + 行文本生成（不 touch OpenTUI，可单测直驱）。
  *
- *   - 活跃行：`{icon} {taskPreview 截断} · {elapsed}`（starting=○ dim /
- *     running=● running）；窄列（cols<40）退化为 `{icon} 子代理 · {elapsed}`；
- *   - 失败行：`✗ {taskPreview 截断} · {reason 截断}`（fg=error）—— reason 按
- *     视觉宽度裁到「cols − 已渲染前缀」剩余预算，避免 CJK 长 reason 溢出
- *     单行；窄列退化为 `✗ 子代理 · {reason 截断}`（reason 预算 = cols-11）；
- *   - 完成淡出行：`✓ {N} 完成`（N = 5s 窗口内 completed 数；fg=add 绿）；
- *   - 折叠 footer：`… 另有 {N} 个子代理`（fg=dim）。
- *
- * 行序 = 输入序（活跃行列表直接 slice 前 3，footer 在尾部）。
+ *   - 活跃行：`{icon} {name} {taskPreview} · {elapsed}`；窄列无 preview；
+ *   - 失败行：`✗ {name} {preview} · {reason}`；
+ *   - 完成淡出行：`✓ {N} 完成`；
+ *   - 全量列出，不折叠 footer；不计入 chrome 行账。
  */
 export function projectSubagentLines(
   subagents: ReadonlyArray<SubagentInfo>,
@@ -94,35 +91,29 @@ export function projectSubagentLines(
 ): ReadonlyArray<SubagentLine> {
   if (subagents.length === 0) return [];
   const narrow = cols < 40;
-  const previewBudget = Math.max(4, cols - DECOR_RESERVE);
-  /** 窄列失败行 reason 预算：icon(1) + 空格(1) + 子代理(6) + ` · `(3) = 11。 */
-  const narrowReasonBudget = Math.max(4, cols - 11);
-  /** 宽列失败行 reason 预算：cols − `✗ `(2) − preview 视觉宽 − ` · `(3)。 */
-  function wideReasonBudget(previewText: string): number {
-    return Math.max(4, cols - visualWidth(previewText) - 5);
-  }
-
   const live: SubagentLine[] = [];
   let doneCount = 0;
   for (const s of subagents) {
+    const name = clipOneLineVisual(subagentDisplayName(s), NAME_BUDGET);
+    const nameWidth = visualWidth(name);
+    const previewBudget = Math.max(4, cols - DECOR_RESERVE - nameWidth);
+    const narrowReasonBudget = Math.max(4, cols - (2 + nameWidth + 3));
     if (s.state === "starting" || s.state === "running") {
       const icon = s.state === "starting" ? "○" : "●";
       const fg = s.state === "starting" ? tuiPalette.dim : tuiPalette.running;
       const elapsed = formatRunDuration(elapsedSec(s.startedAt, nowMs));
       live.push(
         narrow
-          ? { icon, fg, text: `${icon} 子代理 · ${elapsed}` }
+          ? { icon, fg, text: `${icon} ${name} · ${elapsed}` }
           : {
               icon,
               fg,
-              text: `${icon} ${clipOneLineVisual(s.taskPreview, previewBudget)} · ${elapsed}`,
+              text: `${icon} ${name} ${clipOneLineVisual(s.taskPreview, previewBudget)} · ${elapsed}`,
             }
       );
     } else if (s.state === "failed") {
       if (s.endedAt === undefined) continue;
       const ended = Date.parse(s.endedAt);
-      // NaN endedAt → ageSec NaN → 下方 `!(ageSec <= WINDOW)` 为 true → 隐藏
-      //（过期即不可见，fail-safe 默认）。
       if (!Number.isFinite(ended)) continue;
       const ageSec = (nowMs - ended) / 1000;
       if (!(ageSec <= FAILED_VISIBLE_WINDOW_S)) continue;
@@ -131,18 +122,21 @@ export function projectSubagentLines(
         live.push({
           icon: "✗",
           fg: tuiPalette.error,
-          text: `✗ 子代理 · ${clipOneLineVisual(reason, narrowReasonBudget)}`,
+          text: `✗ ${name} · ${clipOneLineVisual(reason, narrowReasonBudget)}`,
         });
       } else {
         const preview = clipOneLineVisual(s.taskPreview, previewBudget);
+        const reasonBudget = Math.max(
+          4,
+          cols - visualWidth(preview) - nameWidth - 6
+        );
         live.push({
           icon: "✗",
           fg: tuiPalette.error,
-          text: `✗ ${preview} · ${clipOneLineVisual(reason, wideReasonBudget(preview))}`,
+          text: `✗ ${name} ${preview} · ${clipOneLineVisual(reason, reasonBudget)}`,
         });
       }
     } else {
-      // completed：只有 5s 窗口内的计入「N 完成」计数；其余全部忽略。
       if (s.endedAt === undefined) continue;
       const ended = Date.parse(s.endedAt);
       if (!Number.isFinite(ended)) continue;
@@ -151,18 +145,7 @@ export function projectSubagentLines(
     }
   }
 
-  const lines: SubagentLine[] = [];
-  if (live.length > MAX_LIVE_ROWS) {
-    lines.push(...live.slice(0, MAX_LIVE_ROWS));
-    lines.push({
-      icon: "…",
-      fg: tuiPalette.dim,
-      text: `… 另有 ${live.length - MAX_LIVE_ROWS} 个子代理`,
-    });
-  } else {
-    lines.push(...live);
-  }
-  // 完成淡出：任何活跃行（含未过期 failed）在场 → 不淡出。
+  const lines: SubagentLine[] = [...live];
   if (lines.length === 0 && doneCount > 0) {
     lines.push({
       icon: "✓",

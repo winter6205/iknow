@@ -3,8 +3,8 @@
  *
  * 当前 turn 的工具折叠摘要（纯函数）。ChatView 把「本 turn 里每个工具
  * 调用了几次」收成一行（idle 与 running 在已有完成工具时共用），避免
- * 旧的逐条 `[思考]` / `[完成] bash` 与 turn 级 `思考了 N 秒 · bash × N`
- * 两套折叠叠在一起。
+ * 旧的逐条 `[思考]` / `[完成] bash` 与 turn 级折叠叠在一起。
+ * 结束态两行：先 `思考了 N 秒`，下一行工具计数 `bash × N`。
  *
  * turn 边界与 `isTurnQuery` 同源：最后一条无 tool_result 的 user query
  * 起到会话末尾（含中间 tool_result user 消息）。
@@ -16,6 +16,96 @@ import { formatThinkingFold } from "./think-fold.js";
 export interface ToolUseCount {
   readonly name: string;
   readonly count: number;
+}
+
+export type TurnActivitySegment =
+  | {
+      readonly kind: "text";
+      readonly messageIndex: number;
+      readonly contentBlockIndex: number;
+    }
+  | {
+      readonly kind: "tools";
+      readonly messageIndex: number;
+      readonly contentBlockIndex: number;
+      readonly entries: ReadonlyArray<ToolUseCount>;
+    };
+
+/**
+ * assistant 活动的消息级顺序：文本段与连续 tool_use 集群按原始消息顺序
+ * 返回。thinking / tool_result / user query 不占活动段；tool_result 不打断
+ * 连续工具集群，因而一轮工具调用仍只画一个原位折叠。
+ */
+export function orderedTurnActivitySegments(
+  messages: ReadonlyArray<AnthropicNativeMessage>,
+  start: number
+): ReadonlyArray<TurnActivitySegment> {
+  if (!Number.isFinite(start) || start < 0 || start >= messages.length) {
+    // EXIT: 无效或越界的 turn 起点不应把历史消息误当作当前活动。
+    return [];
+  }
+
+  try {
+    const segments: TurnActivitySegment[] = [];
+    const toolOrder: string[] = [];
+    const toolCounts = new Map<string, number>();
+    let toolMessageIndex: number | undefined;
+    let toolContentBlockIndex: number | undefined;
+
+    const flushTools = (): void => {
+      if (toolMessageIndex === undefined) return;
+      if (toolContentBlockIndex === undefined) return;
+      segments.push({
+        kind: "tools",
+        messageIndex: toolMessageIndex,
+        contentBlockIndex: toolContentBlockIndex,
+        entries: toolOrder.map((name) => ({
+          name,
+          count: toolCounts.get(name) ?? 0,
+        })),
+      });
+      toolOrder.length = 0;
+      toolCounts.clear();
+      toolMessageIndex = undefined;
+      toolContentBlockIndex = undefined;
+    };
+
+    for (let i = Math.trunc(start); i < messages.length; i++) {
+      const message = messages[i];
+      if (message === undefined || message.role !== "assistant") continue;
+      if (!Array.isArray(message.content)) {
+        // EXIT: 非数组 content 无法安全参与有序活动投影。
+        continue;
+      }
+      for (const [contentBlockIndex, block] of message.content.entries()) {
+        if (block.type === "text" && block.text.trim().length > 0) {
+          flushTools();
+          segments.push({
+            kind: "text",
+            messageIndex: i,
+            contentBlockIndex,
+          });
+        } else if (block.type === "tool_use") {
+          if (toolMessageIndex === undefined) {
+            toolMessageIndex = i;
+            toolContentBlockIndex = contentBlockIndex;
+          } else if (toolMessageIndex !== i) {
+            // Keep the legacy cross-message cluster count and anchor the
+            // fold to the first tool in the latest assistant message.
+            toolMessageIndex = i;
+            toolContentBlockIndex = contentBlockIndex;
+          }
+          if (!toolCounts.has(block.name)) toolOrder.push(block.name);
+          toolCounts.set(block.name, (toolCounts.get(block.name) ?? 0) + 1);
+        }
+      }
+    }
+    flushTools();
+    return segments;
+  } catch {
+    // EXIT: 异常消息形态没有可推导的稳定顺序，安全地不渲染折叠。
+    return [];
+  }
 }
 
 /** 最后一条 turn query 的下标；没有 query → -1。 */
@@ -130,19 +220,19 @@ export function formatToolUseCounts(
 }
 
 /**
- * idle 折叠行。seconds≤0 且无工具 → 空串（不画「思考了 0 秒」、不换 `[思考]`）。
- * 有工具无秒数 → 只计数；有秒数 → `思考了 N 秒` + 计数。
+ * idle 折叠行。seconds≤0 且无工具 → 空数组。
+ * 有秒数 → 先一行 `思考了 N 秒`；有工具 → 下一行计数（不拼进同一行）。
  */
 export function formatTurnActivityFold(
   seconds: number | undefined,
   entries: ReadonlyArray<ToolUseCount>
-): string {
+): ReadonlyArray<string> {
   const counts = formatToolUseCounts(entries);
   const think = formatThinkingFold(seconds);
-  if (think.length === 0 && counts.length === 0) return "";
-  if (think.length === 0) return counts;
-  if (counts.length === 0) return think;
-  return `${think} · ${counts}`;
+  const lines: string[] = [];
+  if (think.length > 0) lines.push(think);
+  if (counts.length > 0) lines.push(counts);
+  return lines;
 }
 
 /**
@@ -161,8 +251,8 @@ export function shouldShowTurnActivityFold(opts: {
 /** 折叠行在场且 idle 才藏逐条工具行；running 始终展开。 */
 export function shouldCollapseTurnToolRows(
   running: boolean,
-  foldLine: string,
+  foldLineCount: number,
   turnToolTotal: number
 ): boolean {
-  return !running && foldLine.length > 0 && turnToolTotal > 0;
+  return !running && foldLineCount > 0 && turnToolTotal > 0;
 }

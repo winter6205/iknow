@@ -4,6 +4,10 @@ import {
   estimateTokens,
   estimateMessagesTokens,
 } from "../../../src/harness/compress/estimate.ts";
+import {
+  evaluateCompactTrigger,
+  getAutoCompactThreshold,
+} from "../../../src/harness/compress/index.ts";
 import { TOKEN_ESTIMATION_PADDING } from "../../../src/harness/compress/constant.ts";
 import type {
   AnthropicNativeMessage,
@@ -71,7 +75,7 @@ describe("estimateMessagesTokens", () => {
     assert.equal(estimateMessagesTokens(messages), 0);
   });
 
-  it("tool_result.content 为非字符串 (number / object) → String() 后估算", () => {
+  it("tool_result.content 为非法非字符串值 → 走非零有界降级", () => {
     const messages: AnthropicNativeMessage[] = [
       {
         role: "user",
@@ -82,13 +86,150 @@ describe("estimateMessagesTokens", () => {
       {
         role: "user",
         content: [
-          // object → '[object Object]' = 15 chars → floor((15+3)/4) = 4
+          // 非法对象走固定的非零降级估算,不调用 String(array)。
           { type: "tool_result", tool_use_id: "u2", content: { a: 1 } },
         ],
       },
     ];
-    // inner = 1 + 4 = 5; ceil(5 * 4/3) = ceil(6.666...) = 7
-    assert.equal(estimateMessagesTokens(messages), 7);
+    // inner = 1 + 1 = 2; ceil(2 * 4/3) = ceil(2.666...) = 3
+    assert.equal(estimateMessagesTokens(messages), 3);
+  });
+
+  it("tool_result.content 缺席、空数组、空串 → 有界小估算且不抛", () => {
+    const messages = [
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "missing" },
+          { type: "tool_result", tool_use_id: "array", content: [] },
+          { type: "tool_result", tool_use_id: "string", content: "" },
+        ],
+      },
+    ] as unknown as AnthropicNativeMessage[];
+
+    assert.doesNotThrow(() => estimateMessagesTokens(messages));
+    assert.equal(estimateMessagesTokens(messages), 0);
+  });
+
+  it("非法内容及非 text block → 不估成 0，且 evaluateCompactTrigger 不崩", () => {
+    const messages = [
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "number", content: 42 },
+          { type: "tool_result", tool_use_id: "object", content: { a: 1 } },
+          {
+            type: "tool_result",
+            tool_use_id: "block",
+            content: [{ type: "image", source: { data: "opaque" } }],
+          },
+        ],
+      },
+    ] as unknown as AnthropicNativeMessage[];
+
+    const estimated = estimateMessagesTokens(messages);
+    assert.ok(estimated > 0, "非法内容必须走非零降级估算");
+    assert.doesNotThrow(() =>
+      evaluateCompactTrigger(messages, {
+        contextWindow: 200_000,
+        threshold: 1,
+      })
+    );
+  });
+
+  it("超长 text block 数组 → 估算足以跨越 compact threshold", () => {
+    const content = [{ type: "text", text: "x".repeat(600_000) }];
+    const messages: AnthropicNativeMessage[] = [
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "long", content }],
+      },
+    ];
+
+    const estimated = estimateMessagesTokens(messages);
+    const threshold = getAutoCompactThreshold(200_000, undefined);
+    assert.ok(
+      estimated > threshold,
+      `正文应被计量为足够大的估算，实际为 ${estimated}`
+    );
+    assert.deepStrictEqual(
+      evaluateCompactTrigger(messages, {
+        contextWindow: 200_000,
+        threshold,
+      }),
+      { action: "compact_via_full_summary", reason: "messages_too_few" }
+    );
+  });
+
+  it("交叉估算两份 messages → 纯函数结果独立且稳定", () => {
+    const first: AnthropicNativeMessage[] = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "first",
+            content: [{ type: "text", text: "a".repeat(40_000) }],
+          },
+        ],
+      },
+    ];
+    const second: AnthropicNativeMessage[] = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "second",
+            content: [{ type: "text", text: "b".repeat(8_000) }],
+          },
+        ],
+      },
+    ];
+
+    const firstEstimate = estimateMessagesTokens(first);
+    const secondEstimate = estimateMessagesTokens(second);
+    assert.equal(estimateMessagesTokens(first), firstEstimate);
+    assert.equal(estimateMessagesTokens(second), secondEstimate);
+    assert.ok(firstEstimate > secondEstimate);
+  });
+
+  it("text block 数组 → 远高于 String(array) 的 [object Object] 低估", () => {
+    const content = [{ type: "text", text: "正文".repeat(100_000) }];
+    const messages: AnthropicNativeMessage[] = [
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "compare", content }],
+      },
+    ];
+    const legacyEstimate = estimateTokens(String(content));
+    const actualEstimate = estimateMessagesTokens(messages);
+
+    assert.equal(String(content), "[object Object]");
+    assert.ok(
+      actualEstimate > legacyEstimate * 100,
+      `实际估算 ${actualEstimate} 应显著高于旧估算 ${legacyEstimate}`
+    );
+  });
+
+  it("估算不改写 append-only messages", () => {
+    const messages: AnthropicNativeMessage[] = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "immutable",
+            content: [{ type: "text", text: "preserve me" }],
+          },
+        ],
+      },
+    ];
+    const before = structuredClone(messages);
+
+    estimateMessagesTokens(messages);
+
+    assert.deepStrictEqual(messages, before);
   });
 
   it("padding 应用:total × 4/3 → Math.ceil", () => {

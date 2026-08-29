@@ -129,6 +129,7 @@ async function seedSession(id: string, goal: GoalState): Promise<void> {
       cwd: process.cwd(),
       sanitized_at: "2026-01-01T00:00:00.000Z",
       checkpoints: [],
+      workspaceRoot: process.cwd(),
       goal,
     } as SessionFileV1,
   });

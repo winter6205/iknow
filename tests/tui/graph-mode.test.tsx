@@ -118,6 +118,7 @@ describe("TUI 装配：holder → 装配快照 → hub round", () => {
     const graphAssembly = createGraphAssembly(mode);
     const bridge = createTuiBridge({
       dataDir,
+      workspaceRoot: dataDir,
       deps: makeDeps([
         assistantResult({ texts: ["one"] }),
         assistantResult({ texts: ["two"] }),
@@ -152,6 +153,7 @@ async function mountApp(opts: {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-graph-"));
   const bridge = createTuiBridge({
     dataDir,
+    workspaceRoot: dataDir,
     deps: makeDeps([assistantResult({ texts: ["ok"] })]),
     inflight: createInflightRegistry(),
   });

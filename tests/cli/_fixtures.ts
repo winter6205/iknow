@@ -148,6 +148,8 @@ export interface MakeCtxOpts {
   readonly delayMs?: number;
   /** T2: checkpoint 落盘 store；注入时 processChatLine 走持久化分支。 */
   readonly checkpointStore?: import("../../src/session-api/store/index.ts").SessionStore;
+  /** T1: resolved root used when processChatLine bootstraps a session file. */
+  readonly workspaceRoot?: string;
   /** T2: abort controller；注入时 processChatLine 把 controller.signal 传 run()。 */
   readonly abortController?: AbortController;
 }
@@ -161,6 +163,9 @@ export function makeCtx(opts: MakeCtxOpts): ChatLineContext {
     state: makeState(opts.stateOverrides ?? {}),
     ...(opts.checkpointStore !== undefined && {
       checkpointStore: opts.checkpointStore,
+    }),
+    ...(opts.workspaceRoot !== undefined && {
+      workspaceRoot: opts.workspaceRoot,
     }),
     ...(opts.abortController !== undefined && {
       abortController: opts.abortController,

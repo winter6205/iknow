@@ -40,6 +40,11 @@ export type ToolCallView = {
   readonly truncated: boolean;
 };
 
+/** Ordered assistant content used by AgentCard to preserve text/tool order. */
+export type ActivityItem =
+  | { readonly type: "text"; readonly text: string }
+  | { readonly type: "tool"; readonly tool: ToolCallView };
+
 /** Mirrors TurnAnswerDto in src/session-api/contract.ts. */
 export type TurnAnswerDto = {
   readonly finalText: string;
@@ -49,6 +54,8 @@ export type TurnAnswerDto = {
   readonly thinking?: ThinkingView;
   /** 可选：单回合工具调用视图（后端 T1 投影；无 tool_use 时省略）。 */
   readonly toolCalls?: readonly ToolCallView[];
+  /** 可选：按 assistant 原生 content block 顺序排列的文本/工具活动。 */
+  readonly activity?: readonly ActivityItem[];
   /** 可选：camelCase token usage；仅在后端值非 null 时存在。 */
   readonly lastUsage?: TokenUsage;
 };
@@ -73,6 +80,8 @@ export type SessionListItem = {
   readonly updatedAt: string;
   readonly lastFinalText: string;
   readonly workspaceRoot?: string;
+  /** Additive binding health from the session store. */
+  readonly bindingStatus?: "unbound" | "invalid" | "bound";
 };
 
 export type SessionSummary = {

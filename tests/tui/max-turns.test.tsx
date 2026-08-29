@@ -84,6 +84,7 @@ async function mountWithStopSummary(
   });
   const bridge = createTuiBridge({
     dataDir,
+    workspaceRoot: dataDir,
     deps,
     inflight: createInflightRegistry(),
   });

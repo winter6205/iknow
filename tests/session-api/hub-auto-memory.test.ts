@@ -111,6 +111,7 @@ describe("SessionHub — auto-memory hook", () => {
     const { hook, seen } = recorder();
     const hub = new SessionHub({
       store,
+      workspaceRoot: process.cwd(),
       deps: makeDeps([assistantResult({ texts: ["bar() is thread-safe."] })]),
       autoMemory: hook,
     });
@@ -131,6 +132,7 @@ describe("SessionHub — auto-memory hook", () => {
   it("keeps postMessage successful when the hook throws", async () => {
     const hub = new SessionHub({
       store,
+      workspaceRoot: process.cwd(),
       deps: makeDeps([assistantResult({ texts: ["reply"] })]),
       autoMemory: {
         onTurnComplete: () => {
@@ -151,6 +153,7 @@ describe("SessionHub — auto-memory hook", () => {
   it("behaves exactly as before when no hook is wired", async () => {
     const hub = new SessionHub({
       store,
+      workspaceRoot: process.cwd(),
       deps: makeDeps([assistantResult({ texts: ["reply"] })]),
     });
     const { session } = await hub.createSession();

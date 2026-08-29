@@ -13,6 +13,7 @@ import {
   formatTurnActivityFold,
   lastTurnQueryIndex,
   mergeToolUseCounts,
+  orderedTurnActivitySegments,
   sliceTurnFrom,
   shouldCollapseTurnToolRows,
   shouldShowTurnActivityFold,
@@ -46,12 +47,115 @@ function assistantTools(
   return { role: "assistant", content };
 }
 
+function assistantText(text: string): AnthropicNativeMessage {
+  return { role: "assistant", content: [{ type: "text", text }] };
+}
+
 describe("lastTurnQueryIndex / sliceTurnFrom（empty）", () => {
   test("空消息 → index -1，slice 空", () => {
     expect(lastTurnQueryIndex([])).toBe(-1);
     expect(sliceTurnFrom([], -1)).toEqual([]);
     expect(sliceTurnFrom([], 0)).toEqual([]);
   });
+});
+
+describe("orderedTurnActivitySegments", () => {
+  test("文本→工具保留顺序，并把工具按连续活动聚成一段", () => {
+    expect(
+      orderedTurnActivitySegments(
+        [
+          user("q"),
+          assistantText("先说明"),
+          assistantTools(["bash", "bash"]),
+          toolResult("tu-bash-0"),
+          assistantText("再总结"),
+        ],
+        0
+      )
+    ).toEqual([
+      { kind: "text", messageIndex: 1, contentBlockIndex: 0 },
+      {
+        kind: "tools",
+        messageIndex: 2,
+        contentBlockIndex: 0,
+        entries: [{ name: "bash", count: 2 }],
+      },
+      { kind: "text", messageIndex: 4, contentBlockIndex: 0 },
+    ]);
+  });
+
+  test("工具→文本把折叠位置留在后续文本之前", () => {
+    expect(
+      orderedTurnActivitySegments(
+        [
+          user("q"),
+          assistantTools(["bash"]),
+          toolResult("tu-bash-0"),
+          assistantText("完成"),
+        ],
+        0
+      )
+    ).toEqual([
+      {
+        kind: "tools",
+        messageIndex: 1,
+        contentBlockIndex: 0,
+        entries: [{ name: "bash", count: 1 }],
+      },
+      { kind: "text", messageIndex: 3, contentBlockIndex: 0 },
+    ]);
+  });
+
+  test("同一 assistant 消息保留 tool/text/tool 的 content block 位置", () => {
+    expect(
+      orderedTurnActivitySegments(
+        [
+          user("q"),
+          {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "tu-1", name: "bash", input: {} },
+              { type: "text", text: "中间总结" },
+              { type: "tool_use", id: "tu-2", name: "bash", input: {} },
+            ],
+          },
+        ],
+        0
+      )
+    ).toEqual([
+      {
+        kind: "tools",
+        messageIndex: 1,
+        contentBlockIndex: 0,
+        entries: [{ name: "bash", count: 1 }],
+      },
+      { kind: "text", messageIndex: 1, contentBlockIndex: 1 },
+      {
+        kind: "tools",
+        messageIndex: 1,
+        contentBlockIndex: 2,
+        entries: [{ name: "bash", count: 1 }],
+      },
+    ]);
+  });
+
+  test("empty / negative / overflow → 确定性空结果", () => {
+    expect(orderedTurnActivitySegments([], 0)).toEqual([]);
+    expect(orderedTurnActivitySegments([user("q")], -1)).toEqual([]);
+    expect(orderedTurnActivitySegments([user("q")], 99)).toEqual([]);
+  });
+
+  test("exception：非法 content 不抛出并回退为空结果", () => {
+    const malformed = {
+      role: "assistant",
+      get content(): never {
+        throw new Error("malformed content");
+      },
+    } as unknown as AnthropicNativeMessage;
+    expect(orderedTurnActivitySegments([malformed], 0)).toEqual([]);
+  });
+
+  // concurrent：N/A — helper 是纯同步扫描，不存在共享异步状态。
 });
 
 describe("countToolUsesByName（negative：末条无 tool_use）", () => {
@@ -148,27 +252,31 @@ describe("formatToolUseCounts / formatTurnActivityFold", () => {
     expect(formatToolUseCounts([{ name: "bash", count: -3 }])).toBe("");
   });
 
-  test("有秒数 + 工具", () => {
+  test("有秒数 + 工具 → 思考一行、工具折叠下一行（不同行）", () => {
     expect(
       formatTurnActivityFold(29, [
         { name: "bash", count: 18 },
         { name: "write_file", count: 8 },
       ])
-    ).toBe("思考了 29 秒 · bash × 18 · write_file × 8");
+    ).toEqual(["思考了 29 秒", "bash × 18 · write_file × 8"]);
   });
 
-  test("无秒数有工具 → 只计数（不换 [思考]、不造 0 秒）", () => {
-    expect(formatTurnActivityFold(0, [{ name: "bash", count: 2 }])).toBe(
-      "bash × 2"
-    );
+  test("无秒数有工具 → 只计数一行（不换 [思考]、不造 0 秒）", () => {
+    expect(formatTurnActivityFold(0, [{ name: "bash", count: 2 }])).toEqual([
+      "bash × 2",
+    ]);
     expect(
       formatTurnActivityFold(undefined, [{ name: "bash", count: 1 }])
-    ).toBe("bash × 1");
+    ).toEqual(["bash × 1"]);
   });
 
-  test("无秒数无工具 → 空串", () => {
-    expect(formatTurnActivityFold(0, [])).toBe("");
-    expect(formatTurnActivityFold(undefined, [])).toBe("");
+  test("无秒数无工具 → 空数组", () => {
+    expect(formatTurnActivityFold(0, [])).toEqual([]);
+    expect(formatTurnActivityFold(undefined, [])).toEqual([]);
+  });
+
+  test("只有秒数无工具 → 仅思考一行", () => {
+    expect(formatTurnActivityFold(6, [])).toEqual(["思考了 6 秒"]);
   });
 });
 
@@ -245,9 +353,7 @@ describe("shouldShowTurnActivityFold / shouldCollapseTurnToolRows", () => {
         turnToolTotal: 3,
       })
     ).toBe(false);
-    expect(shouldCollapseTurnToolRows(true, "思考了 6 秒 · bash × 3", 3)).toBe(
-      false
-    );
+    expect(shouldCollapseTurnToolRows(true, 2, 3)).toBe(false);
   });
 
   test("idle + 思考秒数 + 多工具 → 折叠", () => {
@@ -258,9 +364,7 @@ describe("shouldShowTurnActivityFold / shouldCollapseTurnToolRows", () => {
         turnToolTotal: 3,
       })
     ).toBe(true);
-    expect(shouldCollapseTurnToolRows(false, "思考了 6 秒 · bash × 3", 3)).toBe(
-      true
-    );
+    expect(shouldCollapseTurnToolRows(false, 2, 3)).toBe(true);
   });
 
   test("idle + 单次工具无思考 → 不折叠", () => {

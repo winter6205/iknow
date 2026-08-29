@@ -33,10 +33,11 @@ import {
   readFile,
   readdir,
   rename,
+  stat,
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
@@ -70,6 +71,9 @@ import {
 } from "./rewind-targets.js";
 import type { SessionFileV1 } from "./schema.js";
 import { extractTitle, sanitizeSessionFile } from "./schema.js";
+import { MAX_WORKSPACE_ROOT_CHARS } from "../../config/workspace-root.js";
+
+export type SessionBindingStatus = "unbound" | "invalid" | "bound";
 
 /** Metadata returned by list(); intentionally excludes messages.
  *
@@ -85,6 +89,8 @@ export interface SessionListEntry {
   readonly lastFinalText: string;
   /** UI title excerpt (#467 renamed from `summary`). */
   readonly title: string;
+  /** Whether the persisted workspace binding is executable as-is. */
+  readonly bindingStatus: SessionBindingStatus;
   /** Per-session workspace-root bind (ABS optional; absent = unbound,
    *  legacy files sanitize through). Wire field name stays
    *  `workspaceRoot` (snake-less camel) to match the file shape verbatim. */
@@ -658,27 +664,101 @@ export class SessionStore {
   private async tryListEntry(id: string): Promise<SessionListEntry | null> {
     try {
       const file = await this.load(id);
-      const lastFinalText = lastAssistantText(file.messages);
-      // issue #96: skip sessions with no assistant text — bootstrap writes an
-      // empty file before the user sends anything, and an interrupted
-      // sendMessage can leave one with no reply. Nothing to show in the
-      // sidebar; single-session load()/get() is unaffected.
-      if (!lastFinalText.trim()) return null;
-      return {
-        conversation_id: id,
-        updatedAt: file.updatedAt,
-        lastFinalText,
-        title: file.title,
-        // Spread only the additive optional field; sanitize never emits
-        // `workspaceRoot: undefined` (spread-discipline), so absence on the
-        // entry is the same absence on the file — the Postel contract.
-        ...(file.workspaceRoot !== undefined
-          ? { workspaceRoot: file.workspaceRoot }
-          : {}),
-      };
-    } catch {
-      return null; // skip corrupt / unreadable files
+      return this.buildListEntry(
+        file,
+        await this.classifyWorkspaceRoot(file.workspaceRoot)
+      );
+    } catch (err) {
+      if (!isInvalidWorkspaceRootError(err)) return null;
+      return this.tryListInvalidWorkspaceRoot(id);
     }
+  }
+
+  /**
+   * Keep a session visible when only its workspaceRoot is malformed.
+   *
+   * The normal load path must continue rejecting malformed schema. For list,
+   * however, hiding a session makes it impossible to bind/recreate it. This
+   * read-only recovery removes the invalid field from an in-memory projection
+   * solely so the rest of the session can be summarized; it never writes a
+   * repaired file or backfills cwd.
+   */
+  private async tryListInvalidWorkspaceRoot(
+    id: string
+  ): Promise<SessionListEntry | null> {
+    try {
+      const jsonlRaw = await this.tryReadFile(this.jsonlPath(id), id);
+      if (jsonlRaw !== null) {
+        const log = parseSessionJsonl(jsonlRaw);
+        const header = { ...log.header } as Record<string, unknown>;
+        if (!Object.prototype.hasOwnProperty.call(header, "workspaceRoot")) {
+          return null;
+        }
+        const invalidRoot = header["workspaceRoot"];
+        delete header["workspaceRoot"];
+        const file = projectSessionLog({
+          ...log,
+          header: header as unknown as typeof log.header,
+        });
+        return this.buildListEntry(file, "invalid", invalidRoot);
+      }
+
+      const raw = await this.tryReadFile(this.filePath(id), id);
+      if (raw === null) return null;
+      const parsed = this.parseJson({ id, raw });
+      if (parsed === null || typeof parsed !== "object") return null;
+      const legacy = parsed as Record<string, unknown>;
+      if (!Object.prototype.hasOwnProperty.call(legacy, "workspaceRoot")) {
+        return null;
+      }
+      const invalidRoot = legacy["workspaceRoot"];
+      delete legacy["workspaceRoot"];
+      const file = sanitizeSessionFile(legacy);
+      return this.buildListEntry(file, "invalid", invalidRoot);
+    } catch {
+      // The recovery is only for a workspaceRoot schema failure. Any other
+      // malformed or unreadable content retains list()'s skip-corrupt policy.
+      return null;
+    }
+  }
+
+  private async classifyWorkspaceRoot(
+    workspaceRoot: string | undefined
+  ): Promise<SessionBindingStatus> {
+    if (workspaceRoot === undefined) return "unbound";
+    if (
+      !isAbsolute(workspaceRoot) ||
+      workspaceRoot.length === 0 ||
+      workspaceRoot.length > MAX_WORKSPACE_ROOT_CHARS
+    ) {
+      return "invalid";
+    }
+    try {
+      return (await stat(workspaceRoot)).isDirectory() ? "bound" : "invalid";
+    } catch {
+      return "invalid";
+    }
+  }
+
+  private async buildListEntry(
+    file: SessionFileV1,
+    bindingStatus: SessionBindingStatus,
+    rawWorkspaceRoot?: unknown
+  ): Promise<SessionListEntry | null> {
+    const lastFinalText = lastAssistantText(file.messages);
+    if (!lastFinalText.trim()) return null;
+    const workspaceRoot =
+      typeof rawWorkspaceRoot === "string"
+        ? rawWorkspaceRoot
+        : file.workspaceRoot;
+    return {
+      conversation_id: file.conversation_id,
+      updatedAt: file.updatedAt,
+      lastFinalText,
+      title: file.title,
+      bindingStatus,
+      ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+    };
   }
 }
 
@@ -807,6 +887,11 @@ function isEnoent(err: unknown): boolean {
   return (
     err instanceof Error && (err as NodeJS.ErrnoException).code === "ENOENT"
   );
+}
+
+function isInvalidWorkspaceRootError(err: unknown): boolean {
+  const e = err as { kind?: unknown; field?: unknown };
+  return e.kind === "schema_invalid" && e.field === "workspaceRoot";
 }
 
 function errMsg(err: unknown): string {

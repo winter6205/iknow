@@ -30,6 +30,7 @@ import {
   EnvironmentPane,
   envSnapshotFromEvent,
   envSnapshotLines,
+  worktreeIsolationLines,
 } from "../../src/tui/environment-pane.js";
 import { chromeReserveRows } from "../../src/tui/app.js";
 import type { EnvSnapshot } from "../../src/harness/env-snapshot.ts";
@@ -313,6 +314,84 @@ describe("no agent_status in environment-pane: 平行独立流", () => {
     ]) {
       expect(src.includes(marker)).toBe(false);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0037 T5: session worktree 隔离现势行（只读投影）
+// ---------------------------------------------------------------------------
+
+describe("worktreeIsolationLines: 会话 worktree 隔离现势", () => {
+  test("已绑定 task worktree → 1 行，含 worktree 标识与绑定根路径", () => {
+    const lines = worktreeIsolationLines(
+      "/repo/.iknow/worktrees/conv-1",
+      80
+    );
+    expect(lines.length).toBe(1);
+    expect(lines[0]!.text).toContain("worktree:");
+    expect(lines[0]!.text).toContain("/repo/.iknow/worktrees/conv-1");
+  });
+
+  test("未绑定（undefined / null / 空串）→ 0 行（与今日一致，无多余状态）", () => {
+    expect(worktreeIsolationLines(undefined, 80)).toEqual([]);
+    expect(worktreeIsolationLines(null, 80)).toEqual([]);
+    expect(worktreeIsolationLines("", 80)).toEqual([]);
+  });
+
+  test("改绑失败语义：root 仍 undefined → 0 行，绝不渲染「已绑定」", () => {
+    const lines = worktreeIsolationLines(undefined, 80);
+    const joined = lines.map((l) => l.text).join("\n");
+    expect(joined).not.toContain("worktree:");
+  });
+
+  // Review Medium-2 (2026-08-29): 任意非空 workspaceRoot ≠ worktree ——
+  // serve bind 在 createSession 时就把 workspaceRoot 写成主根。显示条件
+  // 锚定 task worktree 语义（`<x>/.iknow/worktrees/<conversationId>` 路径
+  // 判定，复用 session-api taskWorktreeOwnerOf），非 task worktree 根 → 0 行。
+  test("review Medium-2: 主根 / serve 绑定根（非 task worktree 路径）→ 0 行", () => {
+    expect(worktreeIsolationLines("/repo", 80)).toEqual([]);
+    expect(worktreeIsolationLines("/home/user/project", 80)).toEqual([]);
+    // serve bind 写主根的形态：workspaceRoot = 主仓根
+    expect(worktreeIsolationLines("/srv/iknow-main", 80)).toEqual([]);
+  });
+
+  test("review Medium-2: `.iknow` 下但非 worktrees 叶、worktrees 目录本身 → 0 行", () => {
+    expect(worktreeIsolationLines("/repo/.iknow/state.json", 80)).toEqual([]);
+    expect(worktreeIsolationLines("/repo/.iknow/worktrees", 80)).toEqual([]);
+    expect(worktreeIsolationLines("/repo/.iknow/other/conv-1", 80)).toEqual([]);
+  });
+
+  test("review Medium-2: task worktree 路径（含嵌套仓内树）→ 1 行", () => {
+    expect(
+      worktreeIsolationLines("/repo/.iknow/worktrees/conv-1", 80).length
+    ).toBe(1);
+    const nested = "/repo/wt/.iknow/worktrees/conv-2";
+    expect(worktreeIsolationLines(nested, 80).length).toBe(1);
+  });
+
+  test("行宽受 cols 限制：超长路径按视觉宽度单行截断", () => {
+    const longRoot = `/repo/${"w".repeat(200)}/.iknow/worktrees/conv-1`;
+    const lines = worktreeIsolationLines(longRoot, 40);
+    expect(lines.length).toBe(1);
+    const width = [...lines[0]!.text].reduce((acc, ch) => {
+      const cp = ch.codePointAt(0)!;
+      return acc + (cp > 0x2e7f ? 2 : 1);
+    }, 0);
+    expect(width).toBeLessThanOrEqual(40);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0037 T5 挂载契约:app.tsx 渲染隔离现势行并入账 envPaneRows 槽位
+// ---------------------------------------------------------------------------
+
+describe("app.tsx worktree 隔离现势挂载契约", () => {
+  test("src/tui/app.tsx 消费 worktreeIsolationLines（chat 视图渲染绑定根）", () => {
+    const src = readFileSync(
+      join(import.meta.dir, "..", "..", "src", "tui", "app.tsx"),
+      "utf8"
+    );
+    expect(src.includes("worktreeIsolationLines")).toBe(true);
   });
 });
 

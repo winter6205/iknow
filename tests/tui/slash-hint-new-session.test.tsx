@@ -68,6 +68,7 @@ async function mountAppAsync(
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-hint-"));
   const bridge = createTuiBridge({
     dataDir,
+    workspaceRoot: dataDir,
     deps: makeDeps(responses),
     inflight: createInflightRegistry(),
   });

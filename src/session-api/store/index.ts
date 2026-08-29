@@ -56,4 +56,5 @@ export {
   resolveProjectSessionDir,
   SessionStore,
   type SessionListEntry,
+  type SessionBindingStatus,
 } from "./session-store.js";

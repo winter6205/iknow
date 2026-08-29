@@ -189,6 +189,7 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
       store,
       deps: { adapter: model, executor: exec, registry: reg, maxTurns: 5 },
       traceOut: scratch,
+      workspaceRoot: process.cwd(),
     });
 
     const created = await hub.createSession();
@@ -226,6 +227,7 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
       store,
       deps: { adapter: model, executor: exec, registry: reg, maxTurns: 5 },
       traceOut: scratch,
+      workspaceRoot: process.cwd(),
     });
 
     const created = await hub.createSession();
@@ -260,6 +262,7 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
     const hub = new SessionHub({
       store,
       deps: { adapter: model, executor: exec, registry: reg, maxTurns: 5 },
+      workspaceRoot: process.cwd(),
     });
     const created = await hub.createSession();
     await hub.postMessage({
@@ -304,6 +307,7 @@ describe("serve path: SessionHub traceOut creates per-session trace", () => {
       store,
       deps: { adapter: model, executor: exec, registry: reg, maxTurns: 5 },
       traceOut: traceDir,
+      workspaceRoot: process.cwd(),
     });
 
     const s1 = await hub.createSession();

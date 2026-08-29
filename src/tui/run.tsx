@@ -135,6 +135,11 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   // 声明延后到装配成功后赋值；stop() 幂等，未初始化（装配前抛错）时 no-op。
   let envLoader: EnvLoader | undefined;
   let shutdownPromise: Promise<void> | undefined;
+  // 收敛修复 (2026-08-29 第二轮 review):late-bound hub 引用盒 —— 定义在
+  // shutdownExtensions 之前(该闭包在 try 外,拿不到 try 内的 bridgeRef)。
+  // /quit 路径经 shutdownExtensions 也必须收口 per-root 重建引擎;信号路径
+  // 由 combinedShutdown 兜底(hub.shutdown 幂等,双路径重复调用无害)。
+  const hubRef: { current?: { shutdown: () => Promise<void> } } = {};
   const shutdownExtensions = (): Promise<void> => {
     if (shutdownPromise === undefined) {
       shutdownPromise = (async () => {
@@ -151,6 +156,18 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
             }\n`
           );
         }
+        // 收敛修复:ext.shutdown() 只关初始引擎;tuiExtensions 未注入
+        // (装配早期退出)时上一行已 return —— hub.shutdown 兜底收口
+        // per-root 重建引擎(hub 持 engineByRoot 全量句柄)。
+        try {
+          await hubRef.current?.shutdown();
+        } catch (err) {
+          process.stderr.write(
+            `[tui] hub shutdown failed: ${
+              err instanceof Error ? err.message : String(err)
+            }\n`
+          );
+        }
       })();
     }
     return shutdownPromise;
@@ -158,18 +175,16 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   try {
     renderer = await factory(RENDERER_CONFIG);
     const runtime = await prepareRuntime();
-    // review-fix (M1 / H1): TUI 用 active env 条件 resolve workspaceRoot ——
-    // explicit flag 或 env SSOT 任一在场时走 resolver(typed error
-    // fail-fast);两者都缺 → undefined(保持 dataDir 默认 ~/.iknow)。
+    // T1: resolve the root before any lazy session create. The resolver's
+    // final cwd fallback is an entry-level binding, never a SessionHub
+    // create-time cwd backfill.
     const envWsRoot = runtime.env.workspaceRoot;
-    const workspaceRoot =
-      options.workspaceRoot !== undefined || envWsRoot !== undefined
-        ? resolveWorkspaceRoot({
-            explicit: options.workspaceRoot,
-            cwd: process.cwd(),
-            env: { [WORKSPACE_ROOT_ENV_KEY]: envWsRoot },
-          })
-        : undefined;
+    const cwd = process.cwd();
+    const workspaceRoot = resolveWorkspaceRoot({
+      explicit: options.workspaceRoot,
+      cwd,
+      env: { [WORKSPACE_ROOT_ENV_KEY]: envWsRoot },
+    });
     // 装配链：runtime → deps → bridge/ask/tool 桥接 → TuiApp
     // issue #584: persona seed 永远 `<homedir>/.iknow`,不跟 workspaceRoot。
     await initIknowWorkspaceSafe();
@@ -193,7 +208,6 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // ADR-0019 (T2): explicit workspaceRoot → resolveServeDataDir 落
     // `<workspaceRoot>/.iknow`;缺省 → ~/.iknow(spec #120 SC 1 既有默认)。
     const dataDir = resolveServeDataDir(options.dataDir, workspaceRoot);
-    const cwd = process.cwd();
     // settings 双向持久化（T4）：/thinking /effort 面板 Esc → 写回 settings.json。
     // 目标文件按「project 存在写 project，否则 user」解析（project 本就覆盖 user，
     // 写 user 等于无效——对齐 settings.ts merge 优先级）。写回后登记 self-write
@@ -251,9 +265,32 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     const sessionGrants = createSessionGrants();
     // D-α V1 / ADR-0030:graph overlay 的会话 holder —— 初值走 settings
     // （默认关），运行中由 Shift+Tab 与 `/graph` 就地翻，引擎不重建。
+    // Review High-2 (2026-08-29 / 硬要求 9):settings 只在启动加载点读一次，
+    // 同一对象驱动 graph / verify / depsOpts.settings —— rebind 后 per-root
+    // 重建的引擎复用它，worktree 内 `.iknow/` 缺席也绝不隐式重载 settings。
+    const startupSettings = loadIknowSettings();
     const graphMode = createGraphModeContext(
-      resolveGraphMode({ settings: loadIknowSettings().graph })
+      resolveGraphMode({ settings: startupSettings.graph })
     );
+
+    // The initial TUI engine is built before createTuiBridge, so bind this
+    // host seam late to the Hub that owns dirty-root persistence. Mutates
+    // cannot reach the seam until the bridge has been created below.
+    const bridgeRef: { hub?: ReturnType<typeof createTuiBridge>["hub"] } = {};
+    const worktreeIsolation = {
+      provision: ({
+        conversationId,
+        root: sessionRoot,
+      }: {
+        conversationId?: string;
+        root: string;
+      }) =>
+        bridgeRef.hub?.provisionWorktree({
+          conversationId,
+          root: sessionRoot,
+        }) ??
+        Promise.reject(new Error("TUI Hub is not ready for worktree provision")),
+    };
 
     const depsOpts: BuildTuiDepsOptions = {
       askUser: askBridge.ask,
@@ -265,6 +302,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // ADR-0019 (T2): workspaceRoot 透传到 build-engine identity /
       // memory / skill seam。
       ...(workspaceRoot ? { workspaceRoot } : {}),
+      // Review High-2 / High-1 (2026-08-29):启动 settings 对象 + isolation
+      // host 缝透传（build-engine 据此装配 mutate 门禁）。
+      settings: startupSettings,
+      worktreeIsolation,
       // 观测性地板:与下方 createTuiBridge 的 traceOut 同一个值 —— hub 写会话
       // 的 turn / tool 记录,deps 层的工厂让子代理三事件落同一个
       // `<traceOut>/<conversationId>.jsonl`。
@@ -295,9 +336,14 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // 进程退出前释放 fs watcher 句柄（计划风险清单：避免 serve 类进程泄漏）。
     // 信号路径（registerShutdown）不经过 onQuitBridge，需在此释放 watcher；
     // /quit 路径由 shutdownExtensions 兜底释放（幂等，重复 stop 无害）。
+    // Review High-1:late-bound hub 引用 —— combinedShutdown 在 bridge 创建前
+    // 注册，重建引擎的 shutdown 收口经 bridgeRef 转发。
     const combinedShutdown = async (): Promise<void> => {
       envLoader?.stop();
       if (shutdown) await shutdown();
+      // Review High-1:per-root 重建引擎（rebind 后经 buildEngine 缝新建）
+      // 的组合 shutdown 由 hub 收口（初始引擎不在 engineByRoot，不重复关）。
+      if (bridgeRef.hub) await bridgeRef.hub.shutdown();
     };
     registerShutdown({ shutdown: combinedShutdown });
     const bridge = createTuiBridge({
@@ -305,8 +351,39 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // 交给 bridge,而 TuiApp 已用 resolveServeDataDir 的值,导致 bridge 内部
       // SessionStore 落点与展示层漂移(显式 workspaceRoot 时尤甚)。
       dataDir,
+      workspaceRoot,
       deps,
       subagentManager,
+      // Review High-1 (2026-08-29):注入 deps 的启动根 + per-root 重建缝。
+      // rebind 后会话根离开 cwd → ensureDeps 经此缝以同一 depsOpts（同一
+      // 启动 settings,硬要求 9）在新根重跑 buildTuiDeps,下一回合跑在
+      // worktree 根引擎上。onExtensions 回调同步覆盖 tuiExtensions —— 展示面
+      // 跟随活跃引擎。
+      engineRoot: cwd,
+      buildEngine: async (root) => {
+        // buildTuiDeps 透出平铺 deps（与 initial 构建同型）；hub 的
+        // buildEngine 缝要求 { deps, ...句柄 } 形态 —— 在此重新收拢。
+        const {
+          subagentManager: sm,
+          shutdown: sd,
+          graphAssembly: ga,
+          autoMemory: am,
+          overlayMemoryPrefetch: om,
+          ...flatDeps
+        } = await buildTuiDeps(bundle, {
+          ...depsOpts,
+          cwd: root,
+          workspaceRoot: root,
+        });
+        return {
+          deps: flatDeps,
+          ...(sd ? { shutdown: sd } : {}),
+          ...(sm ? { subagentManager: sm } : {}),
+          ...(ga ? { graphAssembly: ga } : {}),
+          ...(am ? { autoMemory: am } : {}),
+          ...(om ? { overlayMemoryPrefetch: om } : {}),
+        };
+      },
       // auto-memory T4:钩子由 build-engine 按 settings.memory.autoExtract
       // 装配；缺席（默认 OFF）→ hub 不调，行为逐字节不变。
       autoMemory,
@@ -316,7 +393,8 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // command 缺失 (含 verify 段缺失) → { command: "" }, hub 装配
       // subagentManager 时 runClassifier 接管 (spec #128 Objective)。与 serve
       // 共用 resolveVerifyConfig 装配。
-      verifyConfig: resolveVerifyConfig(loadIknowSettings().verify),
+      // Review High-2:同一启动装配 settings 对象（不重读 settings 文件）。
+      verifyConfig: resolveVerifyConfig(startupSettings.verify),
       // D-α T5:graph 装配快照交给 hub —— 每条 postMessage 拍一次
       // （`/graph on` 之后的**下一条**消息才装 run_graph）。
       ...(graphAssembly ? { graphAssembly } : {}),
@@ -335,6 +413,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         rerenderApp();
       },
     });
+    // Review High-1:bridge 就绪后回填 late-bound hub 引用（见上方 bridgeRef）。
+    bridgeRef.hub = bridge.hub;
+    // 收敛修复 (2026-08-29):同一回填点供 shutdownExtensions（/quit 路径）读。
+    hubRef.current = bridge.hub;
     // settings-hot-reload（T4）:订阅 EnvLoader —— settings 文件变化 → 自动
     // reload env（成功）→ 走 hub 的 adapter 热重建通路（不直接碰 build-engine）。
     // reload 失败（坏 JSON 等）→ EnvLoader 内部保留旧 env + onError 通知，

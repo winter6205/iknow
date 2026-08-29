@@ -810,7 +810,9 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
   holder.api.finishTurn();
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("思考了 12 秒 · web_search × 2");
+  expect(frame).toContain("思考了 12 秒");
+  expect(frame).toContain("web_search × 2");
+  expect(frame).not.toContain("思考了 12 秒 · web_search × 2");
   // assistant 文本经 Markdown 渲染 + 盘古之白：今天的AI → 今天的 AI。
   expect(frame).toContain("以下是今天的 AI 新闻摘要");
   expect(frame.includes("[完成] web_search")).toBe(false);
@@ -1020,7 +1022,9 @@ test("idle：当前 turn 工具折叠成计数行，不再铺 [完成] bash", as
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  expect(frame).toContain("思考了 29 秒 · bash × 2");
+  expect(frame).toContain("思考了 29 秒");
+  expect(frame).toContain("bash × 2");
+  expect(frame).not.toContain("思考了 29 秒 · bash × 2");
   expect(frame).toContain("完成。");
   expect(frame.includes("[完成] bash")).toBe(false);
   await setup.renderer.destroy();

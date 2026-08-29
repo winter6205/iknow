@@ -178,7 +178,10 @@ import {
 // #653 G1 T5:环境现势独立 slot —— 与 ADR-0028 状态栏同 chrome 区、并列、
 // 平行独立流。EnvironmentPane 不读 ADR-0028 状态栏的事件 / 快照 / 账本
 // 读取器(grep 守卫钉死,见 tests/tui/environment-pane.test.tsx)。
-import { envSnapshotFromEvent } from "./environment-pane.js";
+import {
+  envSnapshotFromEvent,
+  worktreeIsolationLines,
+} from "./environment-pane.js";
 import type { EnvSnapshot } from "../harness/env-snapshot.js";
 // #653 包1 T3:TUI verify 闭环终态人读 banner(HITL + auto 双模式 passed /
 // failed / unstable / escalated)。wire 已透到 bridge.TuiPostResult.verify;
@@ -210,7 +213,6 @@ import {
 } from "./tool-summary.js";
 import {
   SubagentPanel,
-  projectSubagentLines,
   FAILED_VISIBLE_WINDOW_S,
   DONE_FADE_WINDOW_S,
 } from "./subagent-panel.js";
@@ -327,7 +329,7 @@ export function noticeRenderRows(
  *   - notice 本体 + 自身 marginBottom=1
  *   - modal 本体 + 自身 marginBottom=1
  *   - thinking-picker 面板 + 自身 marginBottom=1（pickerRows 同 modalRows 约定）
- *   - 子代理状态面板（动态 0-4 行，panelRows；ContextBar 下方，见 subagent-panel.tsx）
+ *   - 子代理状态面板（ContextBar 下方，不计入 chrome 行账，避免把输入框往上顶）
  *   - 后台运行标记行（存在 running-bg 时）
  */
 export function chromeReserveRows(opts: {
@@ -339,8 +341,8 @@ export function chromeReserveRows(opts: {
   readonly inputRows?: number;
   readonly modalRows?: number;
   readonly pickerRows?: number;
-  /** 子代理状态面板行数（projectSubagentLines 实际产出，0-4）。缺省 0 →
-   *   不占行（组件渲染 null / 旧行为兼容）。 */
+  /** 子代理状态面板行数。产品路径恒 0：面板画在输入框下方，不挤 transcript /
+   *   不把输入框往上顶。函数仍接受显式值（单测 / 旧调用兼容）。 */
   readonly panelRows?: number;
   /** agent 现势显示行数（agentStatusLines 实际产出，0-1）。缺省 0 →
    *   不占行（无快照 / 组件渲染 null / 旧行为兼容）。 */
@@ -1568,6 +1570,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             stopReason:
               (stopReason as TuiSessionState["lastStopReason"]) ?? "completed",
             lastUsage,
+            // ADR-0037 T5:改绑回合的落盘文件携带 task worktree 根 → 现势行
+            // 当回合即更新;普通回合字段缺席 → turnFinished 保留既有值。
+            workspaceRoot: file.workspaceRoot,
           }),
         };
       });
@@ -2471,19 +2476,20 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // 「输入多少都是一行」：长文本无 `\n` 时按 cols 折行计视觉行数）。封顶由
   // chromeReserveRows 内部做（SSOT 防误传）；超出部分 textarea 内部滚动。
   const inputContentRows = inputWrapLineCount(inputValue, cols);
-  // #358 T7: 子代理面板行数投影（ContextBar 下方，最多 4 行）——计入底部
-  // chrome 行账，矮终端视口不裁切。非 chat 视图面板不渲染 → 0。
-  const subagentPanelRows =
-    view === "chat"
-      ? projectSubagentLines(subagents, Date.now(), cols).length
-      : 0;
-  // agent 现势：mode 行上方未勾待办单行（0-1）——与
-  // subagentPanelRows 同款入账；非 chat 视图 / 尚无快照 → 0（组件渲染 null）。
+  // 子代理面板在输入框下方渲染，但不计入 chrome：计入会把 ChatView 变矮、
+  // 输入框上移。终端装不下的行溢到屏幕下方。
+  // agent 现势：mode 行上方未勾待办单行（0-1）。
+  // 非 chat 视图 / 尚无快照 → 0（组件渲染 null）。
   const agentStatusRowBudget =
     view === "chat" ? agentStatusLines(agentStatus, cols).length : 0;
-  // 环境现势事件仍收（harness 给人不给模型），TUI chrome 不画 ⌂/Δ，
-  // 只留 ContextBar 一行。
-  const envPaneRowBudget = 0;
+  // 环境现势事件仍收（harness 给人不给模型）。ADR-0037 T5:envPaneRows 槽位
+  // 现渲染会话 worktree 隔离现势行（0-1 行）—— 会话根被 T3 改绑到 task
+  // worktree 时显示绑定根;未绑定（开关 OFF / 尚未 mutate / 改绑失败）→
+  // 0 行,与今日一致。只读投影（worktreeIsolationLines）,零 git 操作。
+  const envPaneRowBudget =
+    view === "chat"
+      ? worktreeIsolationLines(active.workspaceRoot, cols).length
+      : 0;
   void envSnapshot;
   // #458 包2 T3:verify 闭环终态 banner 行数投影 —— active 会话槽 + 模式
   // (hitl / auto),纯函数 projectVerifyBanner 实际行数(0 / 1)。
@@ -2508,7 +2514,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         inputRows: inputContentRows,
         modalRows: modalRowsForBudget,
         pickerRows: pickerRowsForBudget,
-        panelRows: subagentPanelRows,
+        panelRows: 0,
         agentStatusRows: agentStatusRowBudget,
         envPaneRows: envPaneRowBudget,
         verifyRows: verifyRowBudget,
@@ -2562,37 +2568,39 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         />
       ) : (
         <>
-          <ChatView
-            session={active}
-            cols={cols}
-            rows={viewportRows}
-            draftSegments={draftSegments}
-            thinkingDraftMasked={thinkingDraftMasked}
-            lastThinkingSeconds={lastThinkingSeconds}
-            thinkingFrozenSeconds={thinkingFrozenSeconds}
-            liveToolLines={
-              active.conversationId
-                ? (liveToolLines[active.conversationId] ?? [])
-                : []
-            }
-            liveToolRuns={
-              active.conversationId
-                ? (liveToolRuns[active.conversationId] ?? [])
-                : []
-            }
-            askLine={
-              askPending !== undefined && !askModalActive
-                ? `[ask]${askPending.network === true ? " [宿主网络]" : ""} 允许 ${askPending.tool}？${
-                    askPending.summaryHint ? ` ${askPending.summaryHint}` : ""
-                  } 输入 y/a/n（a=总是允许）`
-                : undefined
-            }
-            thinkingExpanded={thinkingExpanded}
-            bannerLines={bannerLines}
-            crunchedSeconds={
-              crunchedOf === activeKey ? crunchedSeconds : undefined
-            }
-          />
+          <box height={viewportRows} flexShrink={0} flexGrow={0}>
+            <ChatView
+              session={active}
+              cols={cols}
+              rows={viewportRows}
+              draftSegments={draftSegments}
+              thinkingDraftMasked={thinkingDraftMasked}
+              lastThinkingSeconds={lastThinkingSeconds}
+              thinkingFrozenSeconds={thinkingFrozenSeconds}
+              liveToolLines={
+                active.conversationId
+                  ? (liveToolLines[active.conversationId] ?? [])
+                  : []
+              }
+              liveToolRuns={
+                active.conversationId
+                  ? (liveToolRuns[active.conversationId] ?? [])
+                  : []
+              }
+              askLine={
+                askPending !== undefined && !askModalActive
+                  ? `[ask]${askPending.network === true ? " [宿主网络]" : ""} 允许 ${askPending.tool}？${
+                      askPending.summaryHint ? ` ${askPending.summaryHint}` : ""
+                    } 输入 y/a/n（a=总是允许）`
+                  : undefined
+              }
+              thinkingExpanded={thinkingExpanded}
+              bannerLines={bannerLines}
+              crunchedSeconds={
+                crunchedOf === activeKey ? crunchedSeconds : undefined
+              }
+            />
+          </box>
         </>
       )}
       {notice !== undefined && (
@@ -2754,6 +2762,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           }}
         />
       )}
+      {/* ADR-0037 T5: 会话 worktree 隔离现势行（ContextBar 上方,envPaneRows
+          槽位入账）。未绑定 → worktreeIsolationLines 返回空 → 不渲染。 */}
+      {view === "chat" &&
+        worktreeIsolationLines(active.workspaceRoot, cols).map((line, idx) => (
+          <text key={idx} fg={line.fg} wrapMode="none">
+            {line.text}
+          </text>
+        ))}
       {view === "chat" && (
         <box flexDirection="row" justifyContent="flex-start">
           <ContextBar
@@ -2776,10 +2792,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           focused={graphChromeFocus === "graph"}
         />
       )}
-      {/* #358 T7: 子代理状态面板（ContextBar 下方）。条件渲染 —
-          无可见子代理行时返回 null（行数 0 → chromeReserveRows.panelRows=0）；
-          非 null 时行数已计入 chromeReserveRows.panelRows（上面 subagentPanelRows
-          派生），矮终端视口不裁切。 */}
+      {/* 子代理状态：输入框 / ContextBar 下方。不计入 chrome 行账。 */}
       {view === "chat" && <SubagentPanel subagents={subagents} cols={cols} />}
       {bgSession !== undefined && (
         <box>

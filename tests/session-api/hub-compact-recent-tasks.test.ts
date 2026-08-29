@@ -149,6 +149,7 @@ async function seedSession(opts: {
     cwd: process.cwd(),
     sanitized_at: new Date().toISOString(),
     checkpoints: [],
+    workspaceRoot: process.cwd(),
     ...(opts.goal !== undefined ? { goal: opts.goal } : {}),
   } satisfies Omit<SessionFileV1, never>;
   await store.save({ id: opts.id, file: base });

@@ -20,6 +20,9 @@
  *   - 行账:envSnapshotLines 行数 → chromeReserveRows.envPaneRows(SSOT,
  *     与 ADR-0028 状态栏行账同款 linkage;基线 7 不变)。
  *   - 字形纪律:几何字形 ⌂ / Δ(项目惯例,spec #146:86 无 emoji)。
+ *   - ADR-0037 T5 追加投影:worktreeIsolationLines —— 会话 worktree 隔离
+ *     现势行(数据源是会话文件的 workspaceRoot 只读透传,非 env_snapshot;
+ *     见该函数注释)。app.tsx 挂在 chat chrome 的 envPaneRows 槽位。
  *   - 反向契约:本文件零引用模型向状态栏的事件类型 / 快照结构 / 账本读取器
  *     —— 与 ADR-0028 投影平行独立流(grep 守卫由 tests/tui/
  *     environment-pane.test.tsx 钉死)。
@@ -31,6 +34,9 @@ import {
   truncateByCodepoints,
 } from "../harness/env-snapshot.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
+// Review Medium-2 (2026-08-29):显示条件锚定 task worktree 语义 —— 复用
+// session-api 的路径判定纯函数(同源 SSOT,判定与 T3/T4 所有权锚一致)。
+import { taskWorktreeOwnerOf } from "../session-api/worktree-rebind.js";
 import { clipOneLineVisual, visualWidth } from "./tool-summary.js";
 import { tuiPalette } from "./theme.js";
 
@@ -141,6 +147,51 @@ export function envSnapshotLines(
     ),
   };
   return [header, diffLine];
+}
+
+// ---------------------------------------------------------------------------
+// 投影:会话 worktree 隔离现势(ADR-0037 T5 只读投影)
+// ---------------------------------------------------------------------------
+
+/**
+ * ADR-0037 / plans/worktree-isolation-on-mutate.md T5 — 会话 worktree 隔离
+ * 现势行。与 T3 门禁的一次性 `[worktree_isolation]` 拦截消息互补:那条消息
+ * 只在改绑当场出现一次,本投影是**持久现势** —— 只要会话根仍绑在 task
+ * worktree 上,chrome 就显示绑定根,操作员无需猜路径。
+ *
+ *   - 数据唯一来源:TuiSessionState.workspaceRoot(session-state.ts 从会话
+ *     文件的 workspaceRoot 字段只读透传;T3 改绑落盘的唯一写方是 session-api
+ *     worktree-rebind)。本投影纯函数、零 git import、零 git 操作 —— TUI 只
+ *     做展示(ACR bounded-context-guardian 边界)。
+ *   - 显示条件锚定 task worktree 语义(review Medium-2, 2026-08-29):仅当
+ *     root 命中 task worktree 确定性命名(`<x>/.iknow/worktrees/<conversationId>`
+ *     —— 复用 session-api taskWorktreeOwnerOf 路径判定)才显示。任意非空
+ *     workspaceRoot 不等于 worktree —— serve `bindWorkspace` 在 createSession
+ *     时就把 workspaceRoot 写成主根,主根 / serve 绑定根 / 任意目录一律
+ *     不渲染成 worktree 绑定。
+ *   - 未绑定(undefined / null / 空串;开关 OFF / 尚未 mutate / 改绑失败)或
+ *     非 task worktree 根 → 0 行,与今日一致,不出现多余状态,也绝不显示
+ *     「已绑定」。
+ *   - 复用环境现势的字形纪律(⌂)与 dim 调色,单行按 cols 视觉宽度截断。
+ */
+export function worktreeIsolationLines(
+  root: string | null | undefined,
+  cols: number
+): ReadonlyArray<EnvSnapshotLine> {
+  if (root === null || root === undefined || root.trim().length === 0) {
+    return [];
+  }
+  // Review Medium-2: only a root that decomposes to the task worktree naming
+  // (`<x>/.iknow/worktrees/<conversationId>`) is a binding — anything else
+  // (main repo root, serve-bound root, arbitrary dir) stays at 0 lines.
+  if (taskWorktreeOwnerOf(root) === undefined) {
+    return [];
+  }
+  const text = clipOneLineVisual(
+    `${HEADER_PREFIX}worktree: ${root}`,
+    Math.max(0, cols)
+  );
+  return [{ fg: tuiPalette.dim, text }];
 }
 
 // ---------------------------------------------------------------------------

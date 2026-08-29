@@ -131,6 +131,7 @@ async function seedSession(
       cwd: process.cwd(),
       sanitized_at: now,
       checkpoints: [],
+      workspaceRoot: process.cwd(),
     } satisfies SessionFileV1,
   });
 }

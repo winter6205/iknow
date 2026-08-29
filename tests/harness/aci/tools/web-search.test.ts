@@ -48,6 +48,17 @@ function ddgBody(count: number): string {
   return `<html><body>${items.join("")}</body></html>`;
 }
 
+function ddgBodyWithLongFields(count: number): string {
+  const items: string[] = [];
+  for (let i = 1; i <= count; i++) {
+    items.push(
+      `<a class="result__a" href="https://site${i}.example.com/${"u".repeat(140)}">Title ${i} ${"t".repeat(400)}</a>`,
+      `<div class="result__snippet">Snippet ${i} ${"s".repeat(800)}</div>`
+    );
+  }
+  return `<html><body>${items.join("")}</body></html>`;
+}
+
 /** 构造 Bing 风格的结果页（真实 DOM：li.b_algo → h2>a + div.b_caption）。 */
 function bingBody(count: number): string {
   const items: string[] = [];
@@ -364,6 +375,55 @@ describe("createWebSearchTool — failure paths", () => {
     assert.ok(!invalidOut.includes("6. Title 6"));
   });
 
+  it("drops an item whose projected title, snippet, and URL are all empty", async () => {
+    const tool = createWebSearchTool(
+      searchDeps(
+        '<a class="result__a" href=" "> </a><div class="result__snippet"> </div>'
+      )
+    );
+
+    await expectToolError(
+      () => Promise.resolve(tool.handler({ query: "empty fields" })),
+      "No search results"
+    );
+  });
+
+  it("caps fields without cutting a field with a truncation marker", async () => {
+    const tool = createWebSearchTool(searchDeps(ddgBodyWithLongFields(1)));
+
+    const out = (await tool.handler({ query: "x" })) as string;
+
+    assert.match(out, /1\. Title 1/);
+    assert.ok(!out.includes("t".repeat(400)));
+    assert.ok(!out.includes("s".repeat(800)));
+    assert.ok(!out.includes("truncated"));
+    assert.ok(!out.includes("total"));
+  });
+
+  it("drops complete tail entries when the formatted result budget is exceeded", async () => {
+    const tool = createWebSearchTool(searchDeps(ddgBodyWithLongFields(10)));
+
+    const out = (await tool.handler({ query: "x", max_results: 10 })) as string;
+
+    assert.match(out, /1\. Title 1/);
+    assert.ok(!out.includes("10. Title 10"));
+    assert.ok(!out.includes("truncated"));
+    assert.ok(!out.includes("total"));
+    assert.ok(!out.includes("Title 10"));
+  });
+
+  it("throws a typed error when the budget cannot fit any result entry", async () => {
+    const tool = createWebSearchTool(searchDeps(ddgBodyWithLongFields(1)));
+
+    await expectToolError(
+      () =>
+        Promise.resolve(
+          tool.handler({ query: "q".repeat(10_000), max_results: 1 })
+        ),
+      "budget"
+    );
+  });
+
   it("rejects when the endpoint returns no results", async () => {
     const tool = createWebSearchTool(searchDeps("<html><body></body></html>"));
     await expectToolError(
@@ -413,5 +473,59 @@ describe("createWebSearchTool — concurrency", () => {
     assert.match(outB as string, /Search results for: b/);
     assert.match(outB as string, /2\. Title 2/);
     assert.ok(!(outA as string).includes("2. Title 2"));
+  });
+
+  it("deduplicates same-query requests and returns a short cached projection", async () => {
+    let fetchCount = 0;
+    const tool = createWebSearchTool({
+      fetch: async () => {
+        fetchCount += 1;
+        return {
+          status: 200,
+          contentType: "text/html",
+          body: '<a class="result__a" href="https://site.example.com/page">Cached title</a><div class="result__snippet">Long cached snippet</div>',
+        };
+      },
+      lookup: okLookup,
+      envSearchUrl: "https://html.duckduckgo.com/html/",
+    });
+
+    const [first, second] = (await Promise.all([
+      tool.handler({ query: "same query" }),
+      tool.handler({ query: "same query" }),
+    ])) as string[];
+
+    assert.equal(fetchCount, 1);
+    assert.match(first, /Long cached snippet/);
+    assert.match(second, /Cached title/);
+    assert.ok(!second.includes("Long cached snippet"));
+  });
+
+  it("does not share cached results between distinct queries", async () => {
+    let fetchCount = 0;
+    const tool = createWebSearchTool({
+      fetch: async (url) => {
+        fetchCount += 1;
+        const query = new URL(url).searchParams.get("q");
+        return {
+          status: 200,
+          contentType: "text/html",
+          body: `<a class="result__a" href="https://site.example.com/${query}">${query} title</a>`,
+        };
+      },
+      lookup: okLookup,
+      envSearchUrl: "https://html.duckduckgo.com/html/",
+    });
+
+    const [alpha, beta] = (await Promise.all([
+      tool.handler({ query: "alpha" }),
+      tool.handler({ query: "beta" }),
+    ])) as string[];
+
+    assert.equal(fetchCount, 2);
+    assert.match(alpha, /alpha title/);
+    assert.ok(!alpha.includes("beta title"));
+    assert.match(beta, /beta title/);
+    assert.ok(!beta.includes("alpha title"));
   });
 });

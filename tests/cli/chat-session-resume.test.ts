@@ -279,6 +279,7 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["a4"] })],
       checkpointStore: s,
+      workspaceRoot: process.cwd(),
       stateOverrides: {
         conversationId: id,
         messages: Object.freeze([...seeded.messages]),
@@ -378,6 +379,7 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["hello"] })],
       checkpointStore: s,
+      workspaceRoot: process.cwd(),
       stateOverrides: {
         conversationId: id,
         messages: Object.freeze([...seeded.messages]),
@@ -431,6 +433,7 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["hello"] })],
       checkpointStore: s,
+      workspaceRoot: process.cwd(),
       stateOverrides: {
         conversationId: id,
         messages: Object.freeze([...seeded.messages]),

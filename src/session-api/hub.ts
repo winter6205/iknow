@@ -61,6 +61,11 @@ import type {
   SubagentInfo,
 } from "../harness/subagent/manager.js";
 import { getVersion } from "../cli/usage.js"; // SC-W 6/7: agentVersion 注入(与 session-api/http.ts 同向 import,无循环)
+import {
+  createTaskWorktreeProvisioner,
+  type TaskWorktreeProvisioner,
+} from "./worktree-rebind.js";
+import type { WorktreeProvisionContext } from "../harness/isolation/worktree-gate.js";
 import type { AskUser } from "../harness/permission/types.js";
 import type {
   ServeAskUserHandle,
@@ -77,6 +82,7 @@ import {
   currentSecretValues,
 } from "../harness/sandbox/index.js";
 import { loadIknowEnv, type IknowEnv, type LlmEnv } from "../config/env.js";
+import type { IknowSettings } from "../config/settings.js";
 import {
   MAX_WORKSPACE_ROOT_CHARS,
   resolveWorkspaceRoot,
@@ -148,6 +154,7 @@ import {
   extractRecentUserTasks,
   isTurnQuery,
   messageText,
+  projectActivity,
   projectThinkingView,
   projectToolCalls,
   TASK_EXCERPT_PREFIX,
@@ -164,6 +171,65 @@ function safeParse(s: string): unknown {
     return JSON.parse(s);
   } catch {
     return s;
+  }
+}
+
+/**
+ * Validate the root at the session-creation boundary as well as at the
+ * entrypoint.  `SessionHub` is also constructed directly by tests and host
+ * adapters, so trusting the constructor option here would allow malformed
+ * roots to reach `SessionStore.save()` and would turn a create validation
+ * failure into a disk-write failure.
+ */
+function requireCreateWorkspaceRoot(root: unknown): string {
+  if (typeof root !== "string" || root.length === 0) {
+    throw new ValidationError(
+      "workspace root is required to create a session",
+      { field: "workspaceRoot" }
+    );
+  }
+  if (root.length > MAX_WORKSPACE_ROOT_CHARS) {
+    throw new ValidationError("workspace root exceeds the maximum length", {
+      field: "workspaceRoot",
+    });
+  }
+  try {
+    return resolveWorkspaceRoot({ explicit: root });
+  } catch {
+    throw new ValidationError(
+      "workspace root must be an absolute existing directory",
+      { field: "workspaceRoot" }
+    );
+  }
+}
+
+/**
+ * Validate the root loaded from a session before any execution work.
+ *
+ * Session files are intentionally Postel on load so legacy sessions remain
+ * inspectable. They are not executable, however: an absent root is unbound
+ * and a present root must still be an absolute existing workspace. Never
+ * substitute cwd here.
+ */
+function requireBoundRoot(root: unknown): string {
+  if (typeof root !== "string" || root.trim().length === 0) {
+    throw new ValidationError(
+      "workspace is unbound; bind a workspace before executing this session",
+      { field: "workspaceRoot" }
+    );
+  }
+  if (root.length > MAX_WORKSPACE_ROOT_CHARS) {
+    throw new ValidationError("workspace root exceeds the maximum length", {
+      field: "workspaceRoot",
+    });
+  }
+  try {
+    return resolveWorkspaceRoot({ explicit: root });
+  } catch {
+    throw new ValidationError(
+      "workspace root is invalid; bind an existing absolute directory",
+      { field: "workspaceRoot" }
+    );
   }
 }
 
@@ -372,6 +438,8 @@ export function projectMessagesToTurns(
     const turnMessages = messages.slice(i, end);
     const finalText = findFinalTextInSlice(turnMessages);
     turnIndex++;
+    const activity = projectActivity(turnMessages, mask);
+    const hasActivityTools = activity.some((item) => item.type === "tool");
     const thinking = projectThinkingView(turnMessages, mask);
     const toolCalls = projectToolCalls(turnMessages, mask);
     turns.push({
@@ -380,6 +448,7 @@ export function projectMessagesToTurns(
         finalText,
         stopReason: "completed",
         turnCount: turnIndex,
+        ...(hasActivityTools ? { activity } : {}),
         ...(thinking !== undefined ? { thinking } : {}),
         ...(toolCalls !== undefined ? { toolCalls } : {}),
       },
@@ -525,6 +594,22 @@ export type SessionHubOptions = {
    *  ensureDeps 不算「变化」→ 不触发。T4 用它驱动 TUI 显示层刷新。 */
   readonly onEnvChange?: (env: IknowEnv) => void;
   /**
+   * Review High-1 (2026-08-29): root the constructor-injected `deps` were
+   * built at (TUI). Declared → ensureDeps falls through to per-root engine
+   * rebuild when a session's root left this root (worktree rebind). Absent →
+   * injected deps short-circuit exactly as today.
+   */
+  readonly injectedEngineRoot?: string;
+  /**
+   * Review High-2 (2026-08-29 / hard req 9): settings object assembled at the
+   * startup load point (serve.ts). Reused for EVERY engine this hub builds —
+   * rebind-rebuilt worktree-rooted engines included — so project settings
+   * never silently reload (they are absent inside the gitignored worktree).
+   * Absent → build-engine's own default load (behavior unchanged for
+   * tests / non-rebinding hosts).
+   */
+  readonly settings?: IknowSettings;
+  /**
    * serve-workspace T2 测试缝：按根装配 engine，避免单测走真实 LLM。
    * 生产省略 → `buildHarnessEngine` 且 cwd/workspaceRoot/sandboxRoot 三等。
    */
@@ -561,6 +646,10 @@ export type SessionHubOptions = {
 
 export class SessionHub {
   private readonly store: SessionStore;
+  /** ADR-0037 T3:task worktree 建树 + 仅本会话根改绑的 host 缝。 */
+  private readonly worktreeProvisioner: TaskWorktreeProvisioner;
+  /** T3: roots returned by provision but not yet persisted with the turn. */
+  private readonly dirtyWorktreeRoots = new Map<string, string>();
   private cachedDeps: LoopEngineDeps | undefined;
   private readonly defaults: {
     jsonMode: boolean;
@@ -618,6 +707,25 @@ export class SessionHub {
   private lastReloadedEnv: IknowEnv | undefined;
   /** Constructor-injected deps (tests). Distinct from lazy/Map cache. */
   private readonly injectedDeps: LoopEngineDeps | undefined;
+  /**
+   * Review High-1 (2026-08-29): the root the injected deps were built at.
+   * Injected-deps hosts that support isolation (TUI) declare it so ensureDeps
+   * can detect a session root that LEFT the injected engine's root (rebind)
+   * and fall through to per-root engine rebuild — without it, a rebound
+   * session would stay on the stale engine and its mutates would be blocked
+   * forever. Absent (tests / ask) → injected branch behaves exactly as today.
+   */
+  private readonly injectedEngineRoot: string | undefined;
+  /**
+   * Review High-2 (2026-08-29 / hard req 9): the settings object assembled at
+   * the startup load point. Every engine this hub builds (main-root production
+   * path, fallback path, rebind-rebuilt worktree-rooted engines) reuses THIS
+   * object via buildHarnessEngine's `settings` opt — `.iknow/` is gitignored
+   * so a worktree-rooted `loadIknowSettings({cwd})` would silently drop
+   * project settings. Absent → build-engine keeps its own default load
+   * (tests / hosts that never rebind are unchanged).
+   */
+  private readonly startupSettings: IknowSettings | undefined;
   /** serve-workspace T2: test seam; production omits → buildHarnessEngine. */
   private readonly buildEngine:
     | ((root: string) => Promise<{
@@ -679,6 +787,8 @@ export class SessionHub {
     this.store = opts.store;
     this.injectedDeps = opts.deps;
     this.cachedDeps = opts.deps;
+    this.injectedEngineRoot = opts.injectedEngineRoot;
+    this.startupSettings = opts.settings;
     this.buildEngine = opts.buildEngine;
     this.traceOut = opts.traceOut;
     this.askUser = opts.askUser;
@@ -698,6 +808,10 @@ export class SessionHub {
     this.overlayMemoryPrefetch = opts.overlayMemoryPrefetch;
     // review-fix (M1 / H1): per-root state anchor 缓存。
     this.workspaceRoot = opts.workspaceRoot;
+    // An entry-resolved root is already a valid bind for hosts that assemble
+    // the Hub with a root (serve/TUI). Picker-driven hosts can still call
+    // bindWorkspace later to change it.
+    this.boundRoot = opts.workspaceRoot;
     this.recentsHome = opts.recentsHome;
     this.verifyConfig = opts.verifyConfig;
     this.envProvider = opts.envProvider;
@@ -705,9 +819,47 @@ export class SessionHub {
     this.defaults = {
       jsonMode: opts.defaultJsonMode ?? false,
     };
+    // ADR-0037 T3:worktree isolation host 缝 —— 建树 + 仅本会话根改绑。
+    // 开关本体由 build-engine 在启动加载点读取（硬要求 9）；hub 只在
+    // buildProductionEngine / ensureDeps 兜底路径注入 provision 缝。T4:
+    // 会话已在本会话 task worktree 的 passthrough / 外来根 fail-closed
+    // 都由 provision 按会话锚定，hub 不传 conversation-agnostic 标记。
+    // Root persistence belongs to this Hub's dirty-root conditional-save
+    // protocol. The provisioner only creates/returns the task worktree here.
+    this.worktreeProvisioner = createTaskWorktreeProvisioner({});
   }
 
   // -- public API --------------------------------------------------------------
+
+  /**
+   * Hub-visible provision seam for harness hosts (including TUI). A
+   * successful changed result is recorded for this conversation and is
+   * persisted only by the next conditional save.
+   */
+  async provisionWorktree(ctx: WorktreeProvisionContext): Promise<string> {
+    const provisionedRoot = await this.worktreeProvisioner.provision(ctx);
+    if (ctx.conversationId !== undefined) {
+      this.markWorktreeRootDirty({
+        conversationId: ctx.conversationId,
+        currentRoot: ctx.root,
+        provisionedRoot,
+      });
+    }
+    return provisionedRoot;
+  }
+
+  private markWorktreeRootDirty(opts: {
+    readonly conversationId: string;
+    readonly currentRoot: string;
+    readonly provisionedRoot: string;
+  }): void {
+    if (opts.provisionedRoot === opts.currentRoot) return;
+    // Keep the first successful changed root until its save succeeds. This
+    // prevents a concurrent provision result from replacing a retryable root.
+    if (!this.dirtyWorktreeRoots.has(opts.conversationId)) {
+      this.dirtyWorktreeRoots.set(opts.conversationId, opts.provisionedRoot);
+    }
+  }
 
   /**
    * Snapshot of pending ask requests (process-global; v0 serve hosts one
@@ -922,9 +1074,9 @@ export class SessionHub {
   async createSession(
     req?: CreateSessionRequest
   ): Promise<CreateSessionResponse> {
+    const root = requireCreateWorkspaceRoot(this.boundRoot);
     const id = randomUUID();
     const now = new Date().toISOString();
-    const root = this.boundRoot;
     const file: SessionFileV1 = {
       schemaVersion: CURRENT_SCHEMA_VERSION,
       conversation_id: id,
@@ -933,10 +1085,10 @@ export class SessionHub {
       turnCount: 0,
       updatedAt: now,
       title: "",
-      cwd: root ?? process.cwd(),
+      cwd: root,
       sanitized_at: now,
       checkpoints: [],
-      ...(root !== undefined ? { workspaceRoot: root } : {}),
+      workspaceRoot: root,
     };
     await this.store.save({ id, file });
     return {
@@ -1001,12 +1153,9 @@ export class SessionHub {
       conversationId,
       work: async () => {
         let session = await this.store.load(conversationId);
-        if (this.surface === "serve" && session.workspaceRoot === undefined) {
-          throw new ValidationError(
-            "workspace is unbound; select a workspace before sending",
-            { field: "workspaceRoot" }
-          );
-        }
+        // EXIT: reject-execute-before-engine — legacy/unbound sessions are
+        // inspectable but must never reach trace, postMessage, or the engine.
+        const boundRoot = requireBoundRoot(session.workspaceRoot);
         // #458 T5/T12: hoist the trace service so the `## GOAL:` pin block
         // (below) and runDeps share one TraceService instance for this
         // postMessage (avoid double construction; same file writer closure).
@@ -1044,7 +1193,7 @@ export class SessionHub {
             conversationId,
           });
         }
-        const baseDeps = await this.ensureDeps(session.workspaceRoot);
+        const baseDeps = await this.ensureDeps(boundRoot);
         // D-α T3 / ADR-0030:round 边界 —— 一条 postMessage = 一次 run()。
         // 在这里拍 graph 装配快照（紧接 ensureDeps，同一串行槽位内，拍的
         // 一定是本次要用的那台 engine），overlay 翻键因此「下一条消息才
@@ -1195,9 +1344,12 @@ export class SessionHub {
               // #356 T7 (SC7):host drain — serve 入口每轮 run() 前,把 manager 内
               // completed 子代理结果浓缩成 user message,拼入 priorMessages 末尾。
               // 空 manager / 无 completed → priorMessages 不变 (行为零变化)。
-              const drained = await drainPendingSubagents(this.subagentManager, {
-                conversationId,
-              });
+              const drained = await drainPendingSubagents(
+                this.subagentManager,
+                {
+                  conversationId,
+                }
+              );
               const drainedMsg: AnthropicNativeMessage = {
                 role: "user",
                 content: [{ type: "text", text: drained }],
@@ -1260,7 +1412,7 @@ export class SessionHub {
                       sessionId: conversationId,
                       signal: opts.signal,
                       trace: runDeps.trace,
-                      cwd: session.workspaceRoot ?? process.cwd(),
+                      cwd: boundRoot,
                       // #128 SC1 生产装配: subagentManager 在场 → 启用分类器填空
                       // (command 缺失/空串时分类器接管, spec Objective);缺席
                       // (ask 形态) → undefined, verify-loop 自然走透明关闭向后兼容。
@@ -1341,7 +1493,7 @@ export class SessionHub {
               this.notifyAutoMemory(
                 s.finalResult,
                 s.priorCount,
-                session.workspaceRoot,
+                boundRoot,
                 conversationId
               );
               // #458 T5 (SC8): goal.status write-back on verify-loop terminal
@@ -1760,12 +1912,9 @@ export class SessionHub {
     opts?: CompactCallerOpts
   ): Promise<PostMessageResponse> {
     const session = await this.store.load(conversationId);
-    if (this.surface === "serve" && session.workspaceRoot === undefined) {
-      throw new ValidationError(
-        "workspace is unbound; select a workspace before sending",
-        { field: "workspaceRoot" }
-      );
-    }
+    // EXIT: reject-execute-before-engine — continue has the same boundary
+    // contract as postMessage on every host surface.
+    const boundRoot = requireBoundRoot(session.workspaceRoot);
     const verdict = evaluateContinuePending({
       messages: session.messages,
       ...(session.goal !== undefined ? { goal: session.goal } : {}),
@@ -1773,7 +1922,7 @@ export class SessionHub {
     if (!verdict.ok) {
       throw continuePredicateError(verdict.exit);
     }
-    const deps = await this.ensureDeps(session.workspaceRoot);
+    const deps = await this.ensureDeps(boundRoot);
     const trace = this.createTrace(conversationId);
     const runDeps: LoopEngineDeps = {
       ...deps,
@@ -2202,37 +2351,64 @@ export class SessionHub {
     readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
   }): Promise<boolean> {
     const { conversationId, session, result, priorMessages } = opts;
-    if (!shouldPersistCheckpoint(result, priorMessages)) return false;
+    const shouldPersist = shouldPersistCheckpoint(result, priorMessages);
+    const dirtyRoot = this.dirtyWorktreeRoots.get(conversationId);
+    if (!shouldPersist && dirtyRoot === undefined) return false;
     const now = new Date().toISOString();
-    const turnCount = session.turnCount + result.turnCount;
-    const interruptReason = toInterruptReason(result.stopReason);
-    // appendCheckpoint compares record.messagesCount to session.messages.length
-    // for its delta=0 guard, so it must receive the session BEFORE new messages
-    // are merged in (otherwise delta = 0 would always be false and the guard
-    // never fires). Compute the checkpointed session first, then merge the
-    // post-run messages / turnCount / metadata on top.
-    const withCheckpoint =
-      interruptReason === null
-        ? session
-        : appendCheckpoint(session, {
-            turnIndex: turnCount,
-            messagesCount: result.messages.length,
-            interruptedAt: now,
-            interruptReason,
-            ...(result.lastUsage !== null
-              ? { lastUsage: result.lastUsage }
-              : {}),
-          });
-    const updated: SessionFileV1 = {
-      ...withCheckpoint,
-      messages: result.messages,
-      turnCount,
-      updatedAt: now,
-      schemaVersion: CURRENT_SCHEMA_VERSION,
-      title: extractTitle(result.messages),
-    };
-    await this.store.save({ id: conversationId, file: updated });
+    const updated = shouldPersist
+      ? (() => {
+          const turnCount = session.turnCount + result.turnCount;
+          const interruptReason = toInterruptReason(result.stopReason);
+          // appendCheckpoint compares record.messagesCount to
+          // session.messages.length for its delta=0 guard, so it must receive
+          // the session BEFORE new messages are merged in.
+          const withCheckpoint =
+            interruptReason === null
+              ? session
+              : appendCheckpoint(session, {
+                  turnIndex: turnCount,
+                  messagesCount: result.messages.length,
+                  interruptedAt: now,
+                  interruptReason,
+                  ...(result.lastUsage !== null
+                    ? { lastUsage: result.lastUsage }
+                    : {}),
+                });
+          return {
+            ...withCheckpoint,
+            messages: result.messages,
+            turnCount,
+            updatedAt: now,
+            schemaVersion: CURRENT_SCHEMA_VERSION,
+            title: extractTitle(result.messages),
+          };
+        })()
+      : session;
+    await this.consumeDirtyRootOnSave(conversationId, async (root) => {
+      // EXIT: report-save-failure-and-retain-dirty-root — SessionStore's
+      // typed error propagates; consumeDirtyRootOnSave clears only after this
+      // write resolves successfully.
+      await this.store.save({
+        id: conversationId,
+        file:
+          root === undefined ? updated : { ...updated, workspaceRoot: root },
+      });
+    });
     return true;
+  }
+
+  private async consumeDirtyRootOnSave(
+    conversationId: string,
+    save: (root: string | undefined) => Promise<void>
+  ): Promise<void> {
+    const dirtyRoot = this.dirtyWorktreeRoots.get(conversationId);
+    await save(dirtyRoot);
+    if (
+      dirtyRoot !== undefined &&
+      this.dirtyWorktreeRoots.get(conversationId) === dirtyRoot
+    ) {
+      this.dirtyWorktreeRoots.delete(conversationId);
+    }
   }
 
   /**
@@ -2292,6 +2468,19 @@ export class SessionHub {
       cwd: root,
       sandboxRoot: root,
       workspaceRoot: root,
+      // Review High-2 (hard req 9): reuse the startup settings object — a
+      // worktree-rooted loadIknowSettings({cwd}) would silently drop project
+      // settings (`.iknow/` is gitignored inside the worktree).
+      ...(this.startupSettings ? { settings: this.startupSettings } : {}),
+      // ADR-0037 T3:mutate 门禁 host 缝 —— 开关读取在 build-engine 启动加载点;
+      // provision 负责建树 + 仅本会话根改绑。T4:passthrough 不经
+      // conversation-agnostic 的 initiallyBound —— 会话已在本会话自己的 task
+      // worktree 时由 provision 幂等放行（返回同根），别会话的树 / 无关
+      // worktree 由 provision fail-closed（typed foreign_worktree）。
+      worktreeIsolation: {
+        provision: ({ conversationId, root: sessionRoot }) =>
+          this.provisionWorktree({ conversationId, root: sessionRoot }),
+      },
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
       ...(this.permissionMode ? { permissionMode: this.permissionMode } : {}),
@@ -2326,6 +2515,20 @@ export class SessionHub {
     if (this.injectedDeps) {
       // 注入 deps 的 host 自己 build 了 engine（TUI），快照句柄经构造 opts
       // 进来;纯测试注入路径没有 engine → undefined,行为零变化。
+      // Review High-1 (2026-08-29):host 声明 injectedEngineRoot 且会话根已
+      // 离开该根（worktree rebind）→ 落到 per-root 引擎重建（buildEngine 缝
+      // / 生产装配），与 hub.ts 两条装配路径行为一致；未声明 → 短路语义与
+      // 今日逐字节一致。
+      const mapRoot = sessionRoot ?? this.boundRoot;
+      if (
+        mapRoot !== undefined &&
+        this.injectedEngineRoot !== undefined &&
+        mapRoot !== this.injectedEngineRoot
+      ) {
+        const entry = await this.getOrBuildEngine(mapRoot);
+        this.activeGraphAssembly = entry.graphAssembly;
+        return entry.deps;
+      }
       this.activeGraphAssembly = this.injectedGraphAssembly;
       return this.cachedDeps ?? this.injectedDeps;
     }
@@ -2364,6 +2567,17 @@ export class SessionHub {
       env,
       askUser: this.askUser,
       ...(this.sandboxRoot ? { sandboxRoot: this.sandboxRoot } : {}),
+      // Review High-2 (hard req 9): fallback path reuses the startup settings
+      // object too (rebind-rebuilt engines must not reload settings).
+      ...(this.startupSettings ? { settings: this.startupSettings } : {}),
+      // ADR-0037 T3:未 bind 根的兜底路径同样接 isolation host 缝
+      // （repoRoot = sandboxRoot ?? process.cwd();session workspaceRoot 缺席
+      // 的会话在 rebind 后下一回合走 per-root 引擎路径）。T4:同上——
+      // passthrough 由 provision 按会话锚定，不设 initiallyBound。
+      worktreeIsolation: {
+        provision: ({ conversationId, root: sessionRoot }) =>
+          this.provisionWorktree({ conversationId, root: sessionRoot }),
+      },
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
       ...(this.permissionMode ? { permissionMode: this.permissionMode } : {}),
@@ -2465,12 +2679,12 @@ export class SessionHub {
     workspaceRoot?: string,
     conversationId?: string
   ): void {
-    // EXIT: a bound session uses only the per-root hook; constructor injection
-    // remains the fallback when no workspaceRoot is on the session file.
+    // EXIT: prefer the per-root hook for bound sessions; constructor injection
+    // remains the fallback for injected-deps hosts without a per-root cache.
     const autoMemory =
       workspaceRoot === undefined
         ? this.autoMemory
-        : this.engineByRoot.get(workspaceRoot)?.autoMemory;
+        : (this.engineByRoot.get(workspaceRoot)?.autoMemory ?? this.autoMemory);
     const sessionKey =
       this.surface === "serve"
         ? conversationId
@@ -2528,6 +2742,8 @@ export class SessionHub {
     const rawFinalText = result.finalText ?? "";
     const maskedFinalText = mask(rawFinalText);
     const turnMessages = opts.turnMessages ?? result.messages;
+    const activity = projectActivity(turnMessages, mask);
+    const hasActivityTools = activity.some((item) => item.type === "tool");
     const thinking = projectThinkingView(turnMessages, mask);
     const toolCalls = projectToolCalls(turnMessages, mask);
     return {
@@ -2536,6 +2752,7 @@ export class SessionHub {
         finalText: maskedFinalText,
         stopReason: result.stopReason,
         turnCount: result.turnCount,
+        ...(hasActivityTools ? { activity } : {}),
         // T1: optional fields — omitted entirely when undefined (byte-stable
         // for turns without thinking or tool use).
         ...(thinking !== undefined ? { thinking } : {}),

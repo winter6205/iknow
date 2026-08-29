@@ -21,6 +21,30 @@ export {
 } from "./http.js";
 export { listSessions, type SessionSummary } from "./sessions.js";
 export {
+  dereferenceTraceMessages,
+  projectToolResults,
+  projectToolResultsFromTrace,
+  TOOL_RESULT_PREVIEW_CAP,
+  type BlobReference,
+  type ReadBlob,
+  type ToolResultProjection,
+  type TraceMessageDereferenceOptions,
+} from "./project-tool-results.js";
+export {
+  createQueryTraceCore,
+  QUERY_TRACE_DEFAULT_LIMIT,
+  QUERY_TRACE_MAX_LIMIT,
+  QUERY_TRACE_MAX_RECORD_ID_SCAN,
+  QUERY_TRACE_PREVIEW_CAP,
+  QUERY_TRACE_RESPONSE_CAP,
+  type QueryTraceCoreHandler,
+  type QueryTraceCoreOptions,
+} from "./query-trace-core.js";
+export {
+  TraceQueryRecordScanError,
+  TraceQueryValidationError,
+} from "./query-trace-errors.js";
+export {
   createTraceRouter,
   startTraceServe,
   type TraceRouter,
