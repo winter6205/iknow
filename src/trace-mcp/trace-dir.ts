@@ -51,8 +51,16 @@ export function validateTraceDir(traceDir: string): string {
   let stats: ReturnType<typeof statSync>;
   try {
     stats = statSync(resolved);
-  } catch {
-    throw new Error(`trace directory does not exist: ${resolved}`);
+  } catch (error: unknown) {
+    if (
+      error instanceof Error &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    ) {
+      throw new Error(`trace directory does not exist: ${resolved}`, {
+        cause: error,
+      });
+    }
+    throw error;
   }
   if (!stats.isDirectory()) {
     throw new Error(`trace path is not a directory: ${resolved}`);
