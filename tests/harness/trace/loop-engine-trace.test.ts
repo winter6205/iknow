@@ -170,6 +170,8 @@ describe("T4 criterion 8/11: JsonlTraceService integration", () => {
     const turn0ToolId = turn0Tool["tool_call_id"] as string;
     const turn1LlmId = turn1Llm["llm_call_id"] as string;
     assert.equal(turn0Tool["parent_llm_call_id"], turn0LlmId);
+    assert.equal(turn0Tool["arguments_captured"], false);
+    assert.equal(turn0Tool["result_captured"], false);
     assert.deepEqual(turn0Turn["llm_call_ids"], [turn0LlmId]);
     assert.deepEqual(turn0Turn["tool_call_ids"], [turn0ToolId]);
     assert.deepEqual(turn1Turn["llm_call_ids"], [turn1LlmId]);
