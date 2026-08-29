@@ -365,9 +365,16 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
   function bootSlot(slot: Slot): Promise<void> {
     const gen = bootGeneration;
     const transportOpts: McpTransportOpts = { cwd: workspaceRoot };
-    const created = opts.createClient
-      ? opts.createClient(slot.config, transportOpts)
-      : createRealClient(slot.config, transportOpts);
+    let created: McpClientHandle;
+    try {
+      created = opts.createClient
+        ? opts.createClient(slot.config, transportOpts)
+        : createRealClient(slot.config, transportOpts);
+    } catch (err) {
+      // EXIT: spawn/factory throw → typed failed slot; start() must not hang or reject
+      markFailed(slot, errorMessage(err));
+      return Promise.resolve();
+    }
     slot.handle = created;
     slot.callAbort = new AbortController();
 

@@ -182,7 +182,7 @@ MCP server 的运行时失败继续映射到现有 `McpServerState = "failed"` �
    - **Surface:** `tests` MCP, harness, session-api, CLI, and TUI integration boundaries named by the spec
    - **Acceptance:** 矩阵可复现证明：缺失 project config 不误读 task root；正确 task cwd 才解析相对命令；长路径/大量 server 有确定排序和有限诊断；late old manager、多个 mutate、list_changed、shutdown overlap 均收敛；spawn/connect/reload exception 均到达 typed failed 状态。`npm test` 与 `npm run typecheck` 均 exit 0。
    - **Completion headroom:** 实现者可以按现有测试分层拆 fixture、stub 和集成用例；不得以缩窄覆盖、静默 skip 或固定某个测试文件路径替代五类可观察合同。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T1, T2, T3, T4, T5, T6, T7]
 
 ## 待写入（已刷新）
