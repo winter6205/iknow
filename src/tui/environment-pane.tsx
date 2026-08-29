@@ -20,6 +20,9 @@
  *   - 行账:envSnapshotLines 行数 → chromeReserveRows.envPaneRows(SSOT,
  *     与 ADR-0028 状态栏行账同款 linkage;基线 7 不变)。
  *   - 字形纪律:几何字形 ⌂ / Δ(项目惯例,spec #146:86 无 emoji)。
+ *   - ADR-0037 T5 追加投影:worktreeIsolationLines —— 会话 worktree 隔离
+ *     现势行(数据源是会话文件的 workspaceRoot 只读透传,非 env_snapshot;
+ *     见该函数注释)。app.tsx 挂在 chat chrome 的 envPaneRows 槽位。
  *   - 反向契约:本文件零引用模型向状态栏的事件类型 / 快照结构 / 账本读取器
  *     —— 与 ADR-0028 投影平行独立流(grep 守卫由 tests/tui/
  *     environment-pane.test.tsx 钉死)。
@@ -141,6 +144,38 @@ export function envSnapshotLines(
     ),
   };
   return [header, diffLine];
+}
+
+// ---------------------------------------------------------------------------
+// 投影:会话 worktree 隔离现势(ADR-0037 T5 只读投影)
+// ---------------------------------------------------------------------------
+
+/**
+ * ADR-0037 / plans/worktree-isolation-on-mutate.md T5 — 会话 worktree 隔离
+ * 现势行。与 T3 门禁的一次性 `[worktree_isolation]` 拦截消息互补:那条消息
+ * 只在改绑当场出现一次,本投影是**持久现势** —— 只要会话根仍绑在 task
+ * worktree 上,chrome 就显示绑定根,操作员无需猜路径。
+ *
+ *   - 数据唯一来源:TuiSessionState.workspaceRoot(session-state.ts 从会话
+ *     文件的 workspaceRoot 字段只读透传;T3 改绑落盘的唯一写方是 session-api
+ *     worktree-rebind)。本投影纯函数、零 git import、零 git 操作 —— TUI 只
+ *     做展示(ACR bounded-context-guardian 边界)。
+ *   - 未绑定(undefined / null / 空串;开关 OFF / 尚未 mutate / 改绑失败)→
+ *     0 行,与今日一致,不出现多余状态,也绝不显示「已绑定」。
+ *   - 复用环境现势的字形纪律(⌂)与 dim 调色,单行按 cols 视觉宽度截断。
+ */
+export function worktreeIsolationLines(
+  root: string | null | undefined,
+  cols: number
+): ReadonlyArray<EnvSnapshotLine> {
+  if (root === null || root === undefined || root.trim().length === 0) {
+    return [];
+  }
+  const text = clipOneLineVisual(
+    `${HEADER_PREFIX}worktree: ${root}`,
+    Math.max(0, cols)
+  );
+  return [{ fg: tuiPalette.dim, text }];
 }
 
 // ---------------------------------------------------------------------------

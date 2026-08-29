@@ -178,7 +178,10 @@ import {
 // #653 G1 T5:环境现势独立 slot —— 与 ADR-0028 状态栏同 chrome 区、并列、
 // 平行独立流。EnvironmentPane 不读 ADR-0028 状态栏的事件 / 快照 / 账本
 // 读取器(grep 守卫钉死,见 tests/tui/environment-pane.test.tsx)。
-import { envSnapshotFromEvent } from "./environment-pane.js";
+import {
+  envSnapshotFromEvent,
+  worktreeIsolationLines,
+} from "./environment-pane.js";
 import type { EnvSnapshot } from "../harness/env-snapshot.js";
 // #653 包1 T3:TUI verify 闭环终态人读 banner(HITL + auto 双模式 passed /
 // failed / unstable / escalated)。wire 已透到 bridge.TuiPostResult.verify;
@@ -1537,7 +1540,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       setSessions((prev) => {
         const current = prev[targetId];
         if (!current) return prev;
-        return {
+          return {
           ...prev,
           [targetId]: turnFinished(current, {
             conversationId: file.conversation_id,
@@ -1548,6 +1551,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             stopReason:
               (stopReason as TuiSessionState["lastStopReason"]) ?? "completed",
             lastUsage,
+            // ADR-0037 T5:改绑回合的落盘文件携带 task worktree 根 → 现势行
+            // 当回合即更新;普通回合字段缺席 → turnFinished 保留既有值。
+            workspaceRoot: file.workspaceRoot,
           }),
         };
       });
@@ -2406,9 +2412,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // subagentPanelRows 同款入账；非 chat 视图 / 尚无快照 → 0（组件渲染 null）。
   const agentStatusRowBudget =
     view === "chat" ? agentStatusLines(agentStatus, cols).length : 0;
-  // 环境现势事件仍收（harness 给人不给模型），TUI chrome 不画 ⌂/Δ，
-  // 只留 ContextBar 一行。
-  const envPaneRowBudget = 0;
+  // 环境现势事件仍收（harness 给人不给模型）。ADR-0037 T5:envPaneRows 槽位
+  // 现渲染会话 worktree 隔离现势行（0-1 行）—— 会话根被 T3 改绑到 task
+  // worktree 时显示绑定根;未绑定（开关 OFF / 尚未 mutate / 改绑失败）→
+  // 0 行,与今日一致。只读投影（worktreeIsolationLines）,零 git 操作。
+  const envPaneRowBudget =
+    view === "chat"
+      ? worktreeIsolationLines(active.workspaceRoot, cols).length
+      : 0;
   void envSnapshot;
   // #458 包2 T3:verify 闭环终态 banner 行数投影 —— active 会话槽 + 模式
   // (hitl / auto),纯函数 projectVerifyBanner 实际行数(0 / 1)。
@@ -2679,6 +2690,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           }}
         />
       )}
+      {/* ADR-0037 T5: 会话 worktree 隔离现势行（ContextBar 上方,envPaneRows
+          槽位入账）。未绑定 → worktreeIsolationLines 返回空 → 不渲染。 */}
+      {view === "chat" &&
+        worktreeIsolationLines(active.workspaceRoot, cols).map(
+          (line, idx) => (
+            <text key={idx} fg={line.fg} wrapMode="none">
+              {line.text}
+            </text>
+          )
+        )}
       {view === "chat" && (
         <box flexDirection="row" justifyContent="flex-start">
           <ContextBar

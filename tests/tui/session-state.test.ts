@@ -22,6 +22,7 @@ import {
   isTuiHiddenUserMessage,
   seedInputHistory,
   sessionCompacted,
+  sessionRewound,
   switchedAwayFrom,
   switchedTo,
   turnFinished,
@@ -194,6 +195,70 @@ describe("session-state: lastUsage（T3，上下文用量显示）", () => {
       lastUsage: null,
     });
     expect(done.lastUsage).toBeNull();
+  });
+});
+
+describe("session-state: workspaceRoot（ADR-0037 T5，worktree 隔离现势）", () => {
+  test("createDraftSession：workspaceRoot 初值 undefined（未绑定 = 无隔离状态）", () => {
+    expect(createDraftSession().workspaceRoot).toBeUndefined();
+  });
+
+  test("attachSession：文件带 workspaceRoot（T3 改绑落盘）→ state 携带该根", () => {
+    const wt = "/repo/.iknow/worktrees/conv-1";
+    const file = sampleFile({ workspaceRoot: wt });
+    const attached = attachSession(file);
+    expect(attached.workspaceRoot).toBe(wt);
+  });
+
+  test("attachSession：文件无 workspaceRoot（开关 OFF / 尚未 mutate）→ undefined", () => {
+    expect(attachSession(sampleFile()).workspaceRoot).toBeUndefined();
+  });
+
+  test("turnFinished：回执带 workspaceRoot（改绑回合的落盘文件）→ state 携带", () => {
+    const started = turnStarted(createDraftSession());
+    const done = turnFinished(started, {
+      conversationId: "conv-t5",
+      messages: [],
+      turnCount: 0,
+      updatedAt: "",
+      jsonMode: false,
+      stopReason: "completed",
+      workspaceRoot: "/repo/.iknow/worktrees/conv-t5",
+    });
+    expect(done.workspaceRoot).toBe("/repo/.iknow/worktrees/conv-t5");
+  });
+
+  test("turnFinished：回执不带 workspaceRoot（普通回合）→ 保留既有值，不误清", () => {
+    const bound = attachSession(
+      sampleFile({ workspaceRoot: "/repo/.iknow/worktrees/conv-1" })
+    );
+    const done = turnFinished(bound, {
+      conversationId: "conv-1",
+      messages: [],
+      turnCount: 0,
+      updatedAt: "",
+      jsonMode: false,
+      stopReason: "completed",
+    });
+    expect(done.workspaceRoot).toBe("/repo/.iknow/worktrees/conv-1");
+  });
+
+  test("sessionCompacted / sessionRewound：保留 workspaceRoot（非 turn 路径不改绑定）", () => {
+    const bound = attachSession(
+      sampleFile({ workspaceRoot: "/repo/.iknow/worktrees/conv-1" })
+    );
+    const input = {
+      messages: [] as ReadonlyArray<AnthropicNativeMessage>,
+      turnCount: 0,
+      updatedAt: "",
+      jsonMode: false,
+    };
+    expect(sessionCompacted(bound, input).workspaceRoot).toBe(
+      "/repo/.iknow/worktrees/conv-1"
+    );
+    expect(sessionRewound(bound, input).workspaceRoot).toBe(
+      "/repo/.iknow/worktrees/conv-1"
+    );
   });
 });
 

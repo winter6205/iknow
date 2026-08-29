@@ -91,9 +91,9 @@ OVERALL: yes — 全 5 项 verdict 通过，可进入 T1 实施；后续 bullet 
 
 5. **Operator-visible isolation state** — tag: `[implementation]`
    - **Inherits:** 人要能看出「当前绑在哪棵树上」
-   - **Surface:** TUI 环境现势 和/或 chat/serve 等价提示（选一处可演示即可）
+   - **Surface:** TUI 环境现势（chat chrome 的 envPaneRows 槽位：`worktreeIsolationLines` 只读投影会话文件的 `workspaceRoot`，改绑后显示绑定根；未绑定 → 0 行）
    - **Acceptance:** 改绑后操作员无需猜路径即可看到当前会话工作根（或等价明确提示）
-   - Status: [ ] pending
+   - Status: [x] done（2026-08-29 T5 完成；TUI 侧经 session-state 的 `workspaceRoot` 只读透传直接拿到会话根，session-api / config 零改动）
    - [blocks: T3]
 
 ## Code review phase (end of round)
