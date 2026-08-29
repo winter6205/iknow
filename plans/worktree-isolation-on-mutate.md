@@ -66,7 +66,7 @@ OVERALL: yes — 全 5 项 verdict 通过，可进入 T1 实施；后续 bullet 
    - **Inherits:** 上文「合同流程」与硬要求 1–5；开关默认 OFF；建树必绑会话
    - **Surface:** `docs/adr/` + `docs/CONTEXT.md`（及 settings 契约叙述）
    - **Acceptance:** ADR/CONTEXT 写明开关语义、与 ADR-0023/`workspaceRoot` 边界、失败时 fail-closed（不静默写主仓）；本 bullet 可不含运行时代码
-   - Status: [ ] pending
+   - Status: [x] done
 
 2. **Ship default-OFF setting surface** — tag: `[implementation]`
    - **Inherits:** T1；缺失或非 true → 隔离门禁不启用
