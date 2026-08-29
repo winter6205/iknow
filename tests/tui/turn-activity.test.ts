@@ -148,27 +148,31 @@ describe("formatToolUseCounts / formatTurnActivityFold", () => {
     expect(formatToolUseCounts([{ name: "bash", count: -3 }])).toBe("");
   });
 
-  test("有秒数 + 工具", () => {
+  test("有秒数 + 工具 → 思考一行、工具折叠下一行（不同行）", () => {
     expect(
       formatTurnActivityFold(29, [
         { name: "bash", count: 18 },
         { name: "write_file", count: 8 },
       ])
-    ).toBe("思考了 29 秒 · bash × 18 · write_file × 8");
+    ).toEqual(["思考了 29 秒", "bash × 18 · write_file × 8"]);
   });
 
-  test("无秒数有工具 → 只计数（不换 [思考]、不造 0 秒）", () => {
-    expect(formatTurnActivityFold(0, [{ name: "bash", count: 2 }])).toBe(
-      "bash × 2"
-    );
+  test("无秒数有工具 → 只计数一行（不换 [思考]、不造 0 秒）", () => {
+    expect(formatTurnActivityFold(0, [{ name: "bash", count: 2 }])).toEqual([
+      "bash × 2",
+    ]);
     expect(
       formatTurnActivityFold(undefined, [{ name: "bash", count: 1 }])
-    ).toBe("bash × 1");
+    ).toEqual(["bash × 1"]);
   });
 
-  test("无秒数无工具 → 空串", () => {
-    expect(formatTurnActivityFold(0, [])).toBe("");
-    expect(formatTurnActivityFold(undefined, [])).toBe("");
+  test("无秒数无工具 → 空数组", () => {
+    expect(formatTurnActivityFold(0, [])).toEqual([]);
+    expect(formatTurnActivityFold(undefined, [])).toEqual([]);
+  });
+
+  test("只有秒数无工具 → 仅思考一行", () => {
+    expect(formatTurnActivityFold(6, [])).toEqual(["思考了 6 秒"]);
   });
 });
 
@@ -245,9 +249,7 @@ describe("shouldShowTurnActivityFold / shouldCollapseTurnToolRows", () => {
         turnToolTotal: 3,
       })
     ).toBe(false);
-    expect(shouldCollapseTurnToolRows(true, "思考了 6 秒 · bash × 3", 3)).toBe(
-      false
-    );
+    expect(shouldCollapseTurnToolRows(true, 2, 3)).toBe(false);
   });
 
   test("idle + 思考秒数 + 多工具 → 折叠", () => {
@@ -258,9 +260,7 @@ describe("shouldShowTurnActivityFold / shouldCollapseTurnToolRows", () => {
         turnToolTotal: 3,
       })
     ).toBe(true);
-    expect(shouldCollapseTurnToolRows(false, "思考了 6 秒 · bash × 3", 3)).toBe(
-      true
-    );
+    expect(shouldCollapseTurnToolRows(false, 2, 3)).toBe(true);
   });
 
   test("idle + 单次工具无思考 → 不折叠", () => {

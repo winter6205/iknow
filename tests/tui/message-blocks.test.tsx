@@ -454,7 +454,7 @@ test("thinking 折叠态 + bash tool_use：无 thinkingSeconds → 无思考摘�
   await setup.renderer.destroy();
 });
 
-test("thinking 折叠态 + thinkingSeconds + bash：`思考了 3 秒 · ran 1 command`（turn 级统一摘要）", async () => {
+test("thinking 折叠态 + thinkingSeconds + bash：思考一行、ran 下一行", async () => {
   const msg: AnthropicNativeMessage = {
     role: "assistant",
     content: [
@@ -480,9 +480,14 @@ test("thinking 折叠态 + thinkingSeconds + bash：`思考了 3 秒 · ran 1 co
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // 折叠行 = `思考了 3 秒 · ran 1 command`（turn 级统一摘要 —— 对齐参考
-  // 样式 `Thought for 3s, ran 1 shell command`：思考时长 + 工具计数合并）。
-  expect(frame).toContain("思考了 3 秒 · ran 1 command");
+  expect(frame).toContain("思考了 3 秒");
+  expect(frame).toContain("ran 1 command");
+  expect(frame).not.toContain("思考了 3 秒 · ran 1 command");
+  const frameLines = frame.split("\n");
+  const thinkIdx = frameLines.findIndex((l) => l.includes("思考了 3 秒"));
+  const ranIdx = frameLines.findIndex((l) => l.includes("ran 1 command"));
+  expect(thinkIdx).toBeGreaterThanOrEqual(0);
+  expect(ranIdx).toBe(thinkIdx + 1);
   expect(frame.includes("[思考]")).toBe(false);
   await setup.renderer.destroy();
 });

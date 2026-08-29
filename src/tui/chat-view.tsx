@@ -290,18 +290,18 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
     const thinkingSeconds = running
       ? (props.thinkingFrozenSeconds ?? 0)
       : (props.lastThinkingSeconds ?? 0);
-    // idle 才收成 `思考了 N 秒 · bash × N`；running 保持逐条工具可见。
+    // idle 才收成两行：`思考了 N 秒` + `bash × N`；running 保持逐条工具可见。
     const showTurnFold = shouldShowTurnActivityFold({
       running,
       thinkingSeconds,
       turnToolTotal,
     });
-    const foldDisplayLine = showTurnFold
+    const foldDisplayLines = showTurnFold
       ? formatTurnActivityFold(thinkingSeconds, turnToolCounts)
-      : "";
+      : [];
     const collapseToolRows = shouldCollapseTurnToolRows(
       running,
-      foldDisplayLine,
+      foldDisplayLines.length,
       turnToolTotal
     );
     const tailSlots = liveTailSlots(
@@ -411,16 +411,22 @@ export const ChatView = forwardRef<ChatViewHandle, ChatViewProps>(
                 hideThinking={
                   inLastTurn &&
                   !thinkingExpanded &&
-                  (foldDisplayLine !== "" || (running && thinkingSeconds > 0))
+                  (foldDisplayLines.length > 0 ||
+                    (running && thinkingSeconds > 0))
                 }
                 hideToolSummaries={inLastTurn && collapseToolRows}
                 marginTop={visibleIndex === 0 ? 0 : 1}
               />
-              {visibleIndex === lastQueryVisible && foldDisplayLine !== "" && (
-                <text fg={pal.dim} wrapMode="none">
-                  {foldDisplayLine}
-                </text>
-              )}
+              {visibleIndex === lastQueryVisible &&
+                foldDisplayLines.map((line, foldIdx) => (
+                  <text
+                    key={`turn-fold-${foldIdx}`}
+                    fg={pal.dim}
+                    wrapMode="none"
+                  >
+                    {line}
+                  </text>
+                ))}
             </box>
           );
         })}
