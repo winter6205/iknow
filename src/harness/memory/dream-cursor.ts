@@ -1,6 +1,9 @@
 /**
  * Per-memoryDir cursor for the dream dual gate (24h ∧ 5 sessions).
  *
+ * Gate state lives in `dream.json` (specs/auto-memory-layering.md); the
+ * module keeps the historical `dream-cursor` symbol names.
+ *
  * Isolated by `memoryDir` so two workspace roots cannot share a clock or
  * session set. Process restart must not lose progress: JSON on disk.
  */
@@ -8,7 +11,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { MemoryIOError } from "./errors.js";
 
-export const DREAM_CURSOR_FILENAME = "dream-cursor.json";
+export const DREAM_CURSOR_FILENAME = "dream.json";
 export const DREAM_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export const DREAM_MIN_SESSIONS = 5;
 

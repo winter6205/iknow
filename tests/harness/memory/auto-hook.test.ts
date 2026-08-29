@@ -400,7 +400,7 @@ describe("createAutoMemoryHook — failure containment", () => {
 });
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const DREAM_CURSOR_FILE = "dream-cursor.json";
+const DREAM_CURSOR_FILE = "dream.json";
 
 const seedDreamGate = async (
   dir: string,
@@ -638,6 +638,14 @@ describe("createAutoMemoryHook — dream pass", () => {
 
     assert.equal(calls, 2, "one extract call followed by one dream call");
     const files = await readdir(memoryDir);
+    assert.ok(
+      files.includes(DREAM_CURSOR_FILE),
+      "gate state must persist to dream.json"
+    );
+    assert.ok(
+      !files.includes("dream-cursor.json"),
+      "legacy dream-cursor.json must never be created"
+    );
     const stored = await Promise.all(
       files
         .filter((name) => name.endsWith(".md") && name !== "MEMORY.md")
