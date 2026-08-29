@@ -24,6 +24,9 @@ export type {
 
 export { createNoopTraceService } from "./noop.js";
 export { createJsonlTraceService } from "./jsonl.js";
-export type { JsonlTraceOptions } from "./jsonl.js";
+export type {
+  JsonlTraceOptions,
+  TraceServiceWithHealth,
+} from "./jsonl.js";
 export { safeTrace } from "./safe-trace.js";
 export { translateToObservability } from "./observability-bridge.js";

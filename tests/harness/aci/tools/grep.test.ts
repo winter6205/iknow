@@ -276,6 +276,53 @@ describe("grep — limit truncation", () => {
   });
 });
 
+describe("grep — long matching lines", () => {
+  it("truncates a long ripgrep hit and keeps later sibling hits", async () => {
+    const root = await makeScratch("grep-long-line-");
+    await writeFile(
+      join(root, "long.txt"),
+      `needle${"x".repeat(999_994)}\nneedle sibling\n`,
+      "utf8"
+    );
+
+    const tool = createGrepTool(root);
+    const result = (await tool.handler({ pattern: "needle" })) as string;
+    const lines = result.split("\n");
+
+    assert.equal(lines.length, 2);
+    assert.match(lines[0]!, /\.\.\.\[truncated\]$/);
+    assert.ok(lines[0]!.length <= 2_100, "long result must be bounded");
+    assert.equal(lines[1], "long.txt:2:needle sibling");
+  });
+
+  it("truncates long Node-fallback hits at scanLines without losing siblings", async () => {
+    const root = await makeScratch("grep-long-fallback-");
+    await writeFile(
+      join(root, "long.txt"),
+      `needle${"x".repeat(999_994)}\nneedle sibling\n`,
+      "utf8"
+    );
+    const missingRg: GrepToolDeps = {
+      spawn: (() => {
+        const error = new Error("spawn missing ENOENT") as NodeJS.ErrnoException;
+        error.code = "ENOENT";
+        return () => {
+          throw error;
+        };
+      })(),
+    };
+
+    const tool = createGrepTool(root, missingRg);
+    const result = (await tool.handler({ pattern: "needle" })) as string;
+    const lines = result.split("\n");
+
+    assert.equal(lines.length, 2);
+    assert.match(lines[0]!, /\.\.\.\[truncated\]$/);
+    assert.ok(lines[0]!.length <= 2_100, "long result must be bounded");
+    assert.equal(lines[1], "long.txt:2:needle sibling");
+  });
+});
+
 describe("grep — invalid regex", () => {
   it("rejects with ToolExecutionError containing the pattern (ripgrep exits 2)", async () => {
     const root = await makeScratch("grep-bad-");
@@ -402,7 +449,7 @@ describe("grep — ripgrep unavailable → Node fallback", () => {
 describe("grep — abort kills the ripgrep child process tree", () => {
   it("an already-aborted signal rejects with a typed abort error", async () => {
     const root = await makeScratch("grep-abort-");
-    const filler = "a".repeat(200_000);
+    const filler = "a".repeat(2_000_000);
     await writeFile(join(root, "huge.txt"), filler);
 
     const tool = createGrepTool(root);
@@ -421,7 +468,7 @@ describe("grep — abort kills the ripgrep child process tree", () => {
 
   it("does not hang when the signal is aborted mid-flight", async () => {
     const root = await makeScratch("grep-abort-mid-");
-    const filler = "a".repeat(200_000);
+    const filler = "a".repeat(2_000_000);
     await writeFile(join(root, "big.txt"), filler);
 
     const tool = createGrepTool(root);

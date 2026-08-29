@@ -76,6 +76,7 @@ const EXPECTED_TOOLS = [
   //  bash 仍常驻,参数级 background:true 能力由 handler 运行时决策）。
   "bash_output",
   "bash_stop",
+  "query_trace",
 ];
 
 /** #440 T4 / #502 T3 条件化缺席视图:todoDir 未透传的 chat surface(默认行为)。

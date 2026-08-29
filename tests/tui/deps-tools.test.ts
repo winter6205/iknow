@@ -109,6 +109,7 @@ const EXPECTED_TOOLSET_30 = [
   // 参数级 background:true 能力由 handler 运行时决策)。
   "bash_output",
   "bash_stop",
+  "query_trace",
 ];
 
 describe("buildTuiDeps — 工具集必须与 buildHarnessEngine 对齐(30 件)", () => {

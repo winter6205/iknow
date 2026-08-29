@@ -122,6 +122,7 @@ describe("createNoopTraceService", () => {
     const svc = createNoopTraceService();
     const result = await svc.recordLlmCall(SAMPLE_LLM);
     assert.equal(result, undefined);
+    assert.equal(svc.traceWriteFailures, 0);
   });
 
   it("recordToolCall resolves undefined", async () => {

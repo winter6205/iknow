@@ -377,3 +377,52 @@ describe("SubAgentManager trace 真实 jsonl 落盘 (T4 SC1 grep -c subagent_ >=
     }
   });
 });
+
+describe("SubAgentManager crash stderr drain race (T1)", () => {
+  it("waitFor resolves only after the post-exit stderr burst is in the crash summary", async () => {
+    const h = makeTracingHarness();
+    const { taskId } = h.manager.spawn({ task: "crash wait race" });
+    const burst = "x".repeat(70_000) + "\nLAST-STDERR-LINE\n";
+
+    h.spawned[0]!.emit("exit", 2, null);
+    const pending = h.manager.waitFor(taskId, 1000);
+    assert.deepEqual(h.manager.queryBuffer(taskId), { status: "running" });
+    setImmediate(() => {
+      h.spawned[0]!.stderr.write(burst);
+      h.spawned[0]!.stderr.end();
+    });
+
+    const result = await pending;
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") {
+      assert.match(result.summary, /LAST-STDERR-LINE/);
+    }
+  });
+
+  it("waits for a >64KB stderr burst after exit before building the crash summary", async () => {
+    const h = makeTracingHarness();
+    const { taskId } = h.manager.spawn({ task: "crash race" });
+    const burst = "x".repeat(70_000) + "\nLAST-STDERR-LINE\n";
+
+    h.spawned[0]!.emit("exit", 2, null);
+    setImmediate(() => {
+      h.spawned[0]!.stderr.write(burst);
+      h.spawned[0]!.stderr.end();
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const result = h.manager.queryBuffer(taskId);
+    assert.equal(result.status, "failed");
+    if (result.status === "failed") {
+      assert.match(result.summary, /LAST-STDERR-LINE/);
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    const stateFailure = h.recorded.stateChanges.find(
+      (record) => record.toState === "failed"
+    );
+    assert.equal(stateFailure?.error?.type, "unknown");
+    assert.equal(h.recorded.stops[0]?.error?.type, "unknown");
+  });
+});

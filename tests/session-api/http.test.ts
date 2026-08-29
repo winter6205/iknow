@@ -37,6 +37,8 @@ import {
 } from "../../src/session-api/store/index.ts";
 import { createPermissionModeContext } from "../../src/harness/permission/modes.ts";
 import type { AssistantTurnResult } from "../../src/harness/index.ts";
+import { createJsonlTraceService } from "../../src/harness/trace/jsonl.ts";
+import type { LlmCallRecord } from "../../src/harness/trace/types.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 import {
   makeTestLlmEnv,
@@ -132,7 +134,10 @@ async function createSession(): Promise<string> {
 
 /** 以指定 listen 选项（model / permissionMode）重启服务器。 */
 async function restartWithOptions(
-  opts: Pick<SessionHttpServerOptions, "model" | "permissionMode">
+  opts: Pick<
+    SessionHttpServerOptions,
+    "model" | "permissionMode" | "traceWriteFailures"
+  >
 ): Promise<void> {
   await listening.close();
   await rm(baseDir, { recursive: true, force: true });
@@ -203,6 +208,34 @@ describe("GET /api/v1/health", () => {
   it("health 无 model 选项时字段缺席（byte-stable）", async () => {
     const { body } = await getJson("/api/v1/health");
     assert.equal("model" in (body as Record<string, unknown>), false);
+  });
+
+  it("health exposes the current trace write failure count", async () => {
+    const failingTrace = createJsonlTraceService({
+      filePath: baseDir,
+      conversationId: "health-counter",
+      writer: () => {
+        throw new Error("simulated trace failure");
+      },
+    });
+    const record: LlmCallRecord = {
+      startedAt: "2026-08-28T00:00:00.000Z",
+      endedAt: "2026-08-28T00:00:01.000Z",
+      durationMs: 1000,
+      stream: false,
+      messagesCaptured: false,
+      status: "ok",
+    };
+    await failingTrace.recordLlmCall(record);
+    await restartWithOptions({
+      traceWriteFailures: () => failingTrace.traceWriteFailures,
+    });
+
+    const { status, body } = await getJson("/api/v1/health");
+    assert.equal(status, 200);
+    assert.ok(
+      (body as { traceWriteFailures: number }).traceWriteFailures >= 1
+    );
   });
 });
 

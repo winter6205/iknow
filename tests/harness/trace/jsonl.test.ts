@@ -27,11 +27,13 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { createJsonlTraceService } from "../../../src/harness/trace/jsonl.ts";
 import {
   clearActiveExtraSecrets,
   setActiveExtraSecrets,
 } from "../../../src/harness/sandbox/env-isolation.ts";
+import * as sandbox from "../../../src/harness/sandbox/index.ts";
 import type {
   LlmCallRecord,
   ToolCallRecord,
@@ -437,6 +439,19 @@ describe("createJsonlTraceService — 写盘失败处理", () => {
     }
   });
 
+  it("写盘失败增加实例级 traceWriteFailures 计数且不抛", async () => {
+    const svc = createJsonlTraceService({
+      filePath: join(scratch, "counter.jsonl"),
+      conversationId: "conv-counter",
+      writer: (): void => {
+        throw new Error("simulated disk failure");
+      },
+    });
+
+    await assert.doesNotReject(svc.recordLlmCall(SAMPLE_LLM));
+    assert.equal(svc.traceWriteFailures, 1);
+  });
+
   it("filePath 被同名文件占据 (旧 ./trace.jsonl) → 构造不抛, recordXxx 返回 undefined 不炸 turn", async () => {
     // 回归: 写侧默认曾是 ./trace.jsonl 单文件; T2 目录语义后 mkdirSync 撞旧文件
     // EEXIST 曾在构造期抛出打挂 TUI turn。
@@ -744,5 +759,127 @@ describe("#406 T3 — jsonl 输出 mask 兜底 (A4)", () => {
       content.includes("sk-registry-secret"),
       `清槽位后应保留原值（实际=${content}）`
     );
+  });
+});
+
+describe("createJsonlTraceService — output mask lifecycle", () => {
+  it("constructs one output mask per factory instance", async () => {
+    const maskSpy = vi.spyOn(sandbox, "createOutputMask");
+    try {
+      const { writer } = captureWriter();
+      const svc = createJsonlTraceService({
+        filePath: scratch,
+        conversationId: "conv-mask-once",
+        writer,
+      });
+      await svc.recordLlmCall(SAMPLE_LLM);
+      await svc.recordToolCall(SAMPLE_TOOL);
+      await svc.recordTurn(SAMPLE_TURN);
+      assert.equal(maskSpy.mock.calls.length, 1);
+    } finally {
+      maskSpy.mockRestore();
+    }
+  });
+
+  it("rebuilds the mask when active secrets change after factory creation", async () => {
+    clearActiveExtraSecrets();
+    try {
+      const { lines, writer } = captureWriter();
+      const svc = createJsonlTraceService({
+        filePath: scratch,
+        conversationId: "conv-mask-refresh",
+        writer,
+      });
+
+      setActiveExtraSecrets(["NEWSECRET"]);
+      await svc.recordLlmCall({
+        ...SAMPLE_LLM,
+        messages: [{ role: "user", content: "NEWSECRET" }],
+      });
+
+      assert.equal(lines.length, 1);
+      assert.equal(lines[0]!.includes("NEWSECRET"), false);
+      assert.equal(lines[0]!.includes("***"), true);
+    } finally {
+      clearActiveExtraSecrets();
+    }
+  });
+});
+
+describe("createJsonlTraceService — blob message references", () => {
+  function withBlobMode(): () => void {
+    const previous = process.env.IKNOW_TRACE_MESSAGES;
+    process.env.IKNOW_TRACE_MESSAGES = "blob";
+    return () => {
+      if (previous === undefined) delete process.env.IKNOW_TRACE_MESSAGES;
+      else process.env.IKNOW_TRACE_MESSAGES = previous;
+    };
+  }
+
+  it("stores masked messages by sha and writes references in the JSONL row", async () => {
+    const restore = withBlobMode();
+    setActiveExtraSecrets(["blob-secret"]);
+    try {
+      const { lines, writer } = captureWriter();
+      const svc = createJsonlTraceService({
+        filePath: scratch,
+        conversationId: "conv-blob",
+        writer,
+      });
+      await svc.recordLlmCall({
+        ...SAMPLE_LLM,
+        messages: [{ role: "user", content: "blob-secret" }],
+      });
+
+      const parsed = JSON.parse(lines[0]!) as {
+        messages: Array<{ sha: string; bytes: number }>;
+      };
+      assert.equal(parsed.messages.length, 1);
+      const ref = parsed.messages[0]!;
+      assert.equal(ref.bytes > 0, true);
+      const blobPath = join(scratch, "blobs", ref.sha);
+      assert.equal(existsSync(blobPath), true);
+      const blob = readFileSync(blobPath, "utf8");
+      assert.equal(blob.includes("blob-secret"), false);
+      assert.equal(blob.includes("***"), true);
+      assert.equal(
+        ref.sha,
+        createHash("sha256").update(blob, "utf8").digest("hex")
+      );
+      assert.equal(ref.bytes, Buffer.byteLength(blob, "utf8"));
+    } finally {
+      clearActiveExtraSecrets();
+      restore();
+    }
+  });
+
+  it("falls back to the masked full row when blob storage fails", async () => {
+    const restore = withBlobMode();
+    setActiveExtraSecrets(["blob-secret"]);
+    try {
+      writeFileSync(join(scratch, "blobs"), "not a directory", "utf8");
+      const { lines, writer } = captureWriter();
+      const svc = createJsonlTraceService({
+        filePath: scratch,
+        conversationId: "conv-blob-fallback",
+        writer,
+      });
+      const result = await svc.recordLlmCall({
+        ...SAMPLE_LLM,
+        messages: [{ role: "user", content: "blob-secret" }],
+      });
+
+      assert.equal(typeof result, "string");
+      const parsed = JSON.parse(lines[0]!) as {
+        messages: Array<{ role: string; content: string }>;
+      };
+      assert.deepEqual(parsed.messages, [
+        { role: "user", content: "***" },
+      ]);
+      assert.equal(lines[0]!.includes("blob-secret"), false);
+    } finally {
+      clearActiveExtraSecrets();
+      restore();
+    }
   });
 });

@@ -25,8 +25,22 @@
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
+import {
+  clearActiveExtraSecrets,
+  setActiveExtraSecrets,
+} from "../../src/harness/sandbox/env-isolation.ts";
+import { createJsonlTraceService } from "../../src/harness/trace/jsonl.ts";
 
 const OK_ENVELOPE = JSON.stringify({
   status: "ok",
@@ -109,8 +123,7 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
     });
     const mgr = createSubAgentManager({ spawn: () => fake });
     const { taskId } = mgr.spawn({});
-    await waitExit(fake);
-    const q = mgr.queryBuffer(taskId);
+    const q = await mgr.waitFor(taskId);
     assert.equal(q.status, "failed");
     if (q.status === "failed") {
       assert.equal(q.reason, "crashed");
@@ -127,8 +140,7 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
     );
     const mgr = createSubAgentManager({ spawn: () => fake });
     const { taskId } = mgr.spawn({});
-    await waitExit(fake);
-    const q = mgr.queryBuffer(taskId);
+    const q = await mgr.waitFor(taskId);
     assert.equal(q.status, "failed");
     if (q.status === "failed") {
       assert.equal(q.reason, "crashed");
@@ -136,6 +148,131 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
       assert.match(q.summary, /boom/);
     }
     await mgr.shutdown();
+  });
+
+  it("crash diagnostics writes a masked stderr pointer for a real OS pipe", async () => {
+    const diagnosticsDir = mkdtempSync(
+      join(tmpdir(), "iknow-subagent-diagnostics-")
+    );
+    const secret = "T2_FAKE_SECRET_9f8e7d6c";
+    setActiveExtraSecrets([secret]);
+    try {
+      const trace = createJsonlTraceService({
+        filePath: diagnosticsDir,
+        conversationId: "subagent",
+      });
+      const fake = spawn(
+        process.execPath,
+        [
+          "-e",
+          `process.stderr.write(${JSON.stringify(
+            `boom-diagnostic ${secret}\n`
+          )}); process.exit(2)`,
+        ],
+        { stdio: ["pipe", "pipe", "pipe"] }
+      );
+      const mgr = createSubAgentManager({
+        spawn: () => fake,
+        diagnosticsDir,
+        trace,
+      });
+      const { taskId } = mgr.spawn({});
+      await waitExit(fake);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const q = mgr.queryBuffer(taskId);
+      assert.equal(q.status, "failed");
+      if (q.status === "failed") {
+        assert.match(q.summary, /boom-diagnostic/);
+        assert.doesNotMatch(q.summary, new RegExp(secret));
+      }
+      const stderrPath = join(diagnosticsDir, "stderr", `${taskId}.log`);
+      assert.equal(existsSync(stderrPath), true);
+      const stderrLog = readFileSync(stderrPath, "utf8");
+      assert.match(stderrLog, /boom-diagnostic/);
+      assert.doesNotMatch(stderrLog, new RegExp(secret));
+      await new Promise((resolve) => setImmediate(resolve));
+      const records = readFileSync(
+        join(diagnosticsDir, "subagent.jsonl"),
+        "utf8"
+      )
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const stop = records.find(
+        (record) => record.record_type === "subagent_stop"
+      );
+      assert.equal(stop?.stderr_path, stderrPath);
+      assert.equal(typeof stop?.stderr_bytes, "number");
+      await mgr.shutdown();
+    } finally {
+      clearActiveExtraSecrets();
+      rmSync(diagnosticsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("caps each crash log at 1MiB and isolates concurrent task IDs", async () => {
+    const diagnosticsDir = mkdtempSync(
+      join(tmpdir(), "iknow-subagent-diagnostics-cap-")
+    );
+    const children: ChildProcess[] = [];
+    try {
+      const mgr = createSubAgentManager({
+        spawn: (_def, taskId) => {
+          const child = spawn(
+            process.execPath,
+            [
+              "-e",
+              `process.stderr.write(${JSON.stringify(
+                `${taskId} `
+              )} + 'x'.repeat(1024 * 1024 + 128) + '\\n'); process.exit(2)`,
+            ],
+            { stdio: ["pipe", "pipe", "pipe"] }
+          );
+          children.push(child);
+          return child;
+        },
+        diagnosticsDir,
+      });
+      const first = mgr.spawn({});
+      const second = mgr.spawn({});
+      await Promise.all(children.map(waitExit));
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const firstPath = join(
+          diagnosticsDir,
+          "stderr",
+          `${first.taskId}.log`
+        );
+        const secondPath = join(
+          diagnosticsDir,
+          "stderr",
+          `${second.taskId}.log`
+        );
+        if (existsSync(firstPath) && existsSync(secondPath)) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      for (const taskId of [first.taskId, second.taskId]) {
+        const path = join(diagnosticsDir, "stderr", `${taskId}.log`);
+        assert.equal(existsSync(path), true, `missing diagnostics log ${path}`);
+        assert.ok(statSync(path).size <= 1024 * 1024);
+        assert.match(readFileSync(path, "utf8"), new RegExp(taskId));
+      }
+      assert.notEqual(first.taskId, second.taskId);
+      assert.notEqual(
+        readFileSync(
+          join(diagnosticsDir, "stderr", `${first.taskId}.log`),
+          "utf8"
+        ),
+        readFileSync(
+          join(diagnosticsDir, "stderr", `${second.taskId}.log`),
+          "utf8"
+        )
+      );
+      await mgr.shutdown();
+    } finally {
+      rmSync(diagnosticsDir, { recursive: true, force: true });
+    }
   });
 
   it("exit code 0 + 无 envelope → failed protocolError 并释放槽位", async () => {

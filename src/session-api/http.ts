@@ -63,6 +63,8 @@ export type SessionHttpServerOptions = {
   /** 模型路由 ID（settings.llm.model）。HealthResponse 字段；
    *  由 serve.ts 透传；缺席 → health 不带 model（byte-stable）。 */
   model?: string;
+  /** Trace 写盘失败计数读取器；缺席时 health 返回 0。 */
+  traceWriteFailures?: number | (() => number);
   /** 可变 permission mode holder（与 hub 共用同一 context 实例）。
    *  在场 → GET/POST /api/v1/permission-mode 可用；缺席 → 两端点 404。 */
   permissionMode?: PermissionModeContext;
@@ -117,6 +119,7 @@ export function createSessionHttpServer(
       webRoot,
       contextWindow,
       model: opts.model,
+      traceWriteFailures: opts.traceWriteFailures,
       permissionMode: opts.permissionMode,
       graphMode: opts.graphMode,
       traceRouter,
@@ -161,6 +164,7 @@ interface HandleOpts {
   readonly contextWindow: number;
   /** HealthResponse 模型名字段（缺席 → 不下发）。 */
   readonly model?: string;
+  readonly traceWriteFailures?: number | (() => number);
   /** 可变 permission mode holder（缺席 → permission-mode 端点 404）。 */
   readonly permissionMode?: PermissionModeContext;
   /** 可变 graph overlay holder（缺席 → graph-mode 端点 404）。 */
@@ -180,6 +184,7 @@ async function handle(opts: HandleOpts): Promise<void> {
     webRoot,
     contextWindow,
     model,
+    traceWriteFailures,
     permissionMode,
     graphMode,
     traceRouter,
@@ -193,7 +198,7 @@ async function handle(opts: HandleOpts): Promise<void> {
     const pathname = decodeURIComponent(url.pathname);
 
     if (method === "GET" && pathname === "/api/v1/health")
-      return sendHealth(res, contextWindow, model);
+      return sendHealth(res, contextWindow, model, traceWriteFailures);
     if (method === "GET" && isSsePath(pathname)) return sendSseReserved(res);
 
     if (method === "GET" && pathname === "/api/v1/skills") {
@@ -353,13 +358,18 @@ async function handle(opts: HandleOpts): Promise<void> {
 function sendHealth(
   res: http.ServerResponse,
   contextWindow: number,
-  model?: string
+  model?: string,
+  traceWriteFailures?: number | (() => number)
 ): void {
   const body: HealthResponse = {
     ok: true,
     service: "iknow-session-api",
     version: getVersion(),
     contextWindow,
+    traceWriteFailures:
+      typeof traceWriteFailures === "function"
+        ? traceWriteFailures()
+        : (traceWriteFailures ?? 0),
     ...(model !== undefined ? { model } : {}),
   };
   sendJson({ res, status: 200, body });

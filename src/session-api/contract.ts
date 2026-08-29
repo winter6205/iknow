@@ -248,6 +248,8 @@ export type HealthResponse = {
   /** 模型路由 ID（settings.llm.model）。未配置 → 字段缺席（byte-stable，
    *  与 lastUsage 同模式）。web 输入框下方状态条显示用。 */
   model?: string;
+  /** Trace 写盘失败次数；由 HTTP 层读取写侧实例的当前计数。 */
+  traceWriteFailures: number;
 };
 
 /** GET/POST /api/v1/permission-mode 响应（web Shift+Tab 模式切换）。 */

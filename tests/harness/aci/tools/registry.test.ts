@@ -170,8 +170,8 @@ describe("createDefaultAciRegistry — 正常路径", () => {
 
   // #502 T4 全条件装配:ACI_TOOLSET_NAMES 长度 30(28 基线 + bash_output +
   // bash_stop),顺序 append-only 不重排既有。
-  it("Gate 3:ACI_TOOLSET_NAMES 长度 31,前 8 原序 + memory_* + tool_search + 10 LSP + skill + skill_search + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(31);
+  it("Gate 3:ACI_TOOLSET_NAMES 长度 32,前 8 原序 + memory_* + tool_search + 10 LSP + skill + skill_search + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop + query_trace", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(32);
     // 前 8 件原序不变(append-only 纪律)。
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
@@ -220,6 +220,8 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     ]);
     // D-α T3 run_graph append-only:30→31,末位 1 件,不重排既有 30 件。
     expect(ACI_TOOLSET_NAMES.slice(30, 31)).toEqual(["run_graph"]);
+    // T9 query_trace append-only:31→32,末位 1 件,不重排既有 31 件。
+    expect(ACI_TOOLSET_NAMES.slice(31, 32)).toEqual(["query_trace"]);
   });
 });
 

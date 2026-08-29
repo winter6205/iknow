@@ -88,7 +88,10 @@ import {
   createSubAgentManager,
   type SubAgentManager,
 } from "./subagent/manager.js";
-import { defaultSubAgentSpawn } from "./subagent/spawn.js";
+import {
+  createDefaultSubAgentSpawn,
+  resolveSubagentTraceDir,
+} from "./subagent/spawn.js";
 import { createNoopTraceService } from "./trace/noop.js";
 import type { TraceService } from "./trace/types.js";
 import {
@@ -156,6 +159,8 @@ export type BuildEngineOpts = {
    * JsonlTraceService 注入 manager)。
    */
   readonly subagentTrace?: TraceService;
+  /** Crash diagnostics / worker trace root for subagent lifecycle evidence. */
+  readonly subagentDiagnosticsDir?: string;
   /** TUI 工具摘要观测缝:透传给 createAciExecutor hooks.postToolUse(chat/serve 不传 → 零变化)。 */
   readonly hooks?: PostToolUseHook;
   /** #126 T5 测试缝:settings 对象覆盖注入(生产默认不传则 loadIknowSettings({ cwd }))。
@@ -375,9 +380,15 @@ export async function buildHarnessEngine(
         // T4: 并发上限由 env.subagent.maxConcurrentWorkers 透传;缺席时
         // manager 回退默认 15。
         createSubAgentManager({
-          spawn: defaultSubAgentSpawn,
+          spawn:
+            createDefaultSubAgentSpawn(
+              opts.subagentDiagnosticsDir,
+              workspaceRoot
+            ),
           sandboxRoot,
           trace: opts.subagentTrace ?? createNoopTraceService(),
+          diagnosticsDir:
+            opts.subagentDiagnosticsDir ?? resolveSubagentTraceDir(),
           taskTimeoutMs: env.subagent.taskTimeoutMs,
           maxConcurrentWorkers: env.subagent.maxConcurrentWorkers,
         }))
@@ -529,6 +540,9 @@ export async function buildHarnessEngine(
     // keeps the legacy callers (no opts.workspaceRoot, no env var) on
     // their `sandboxRoot` fallback inside registry.ts.
     ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+    ...(opts.subagentDiagnosticsDir
+      ? { traceDir: opts.subagentDiagnosticsDir }
+      : {}),
   });
   // #337:动态 registry 包装 —— 让 inner executor 能解析 registerExternal
   // 动态注册的 mcp__ 工具。`reg.inner` 是构造期快照（aci-registry.ts:71），

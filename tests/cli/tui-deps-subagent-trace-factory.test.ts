@@ -27,6 +27,7 @@ const mockState = vi.hoisted(() => ({
     emit: (event: string | symbol, ...args: unknown[]) => boolean;
     once: (event: string | symbol, ...args: unknown[]) => unknown;
   }>,
+  capturedDiagnosticsDir: undefined as string | undefined,
 }));
 
 vi.mock("../../src/harness/subagent/manager.ts", async (importActual) => {
@@ -38,6 +39,7 @@ vi.mock("../../src/harness/subagent/manager.ts", async (importActual) => {
   return {
     ...actual,
     createSubAgentManager: vi.fn((opts: Parameters<typeof realCreate>[0]) => {
+      mockState.capturedDiagnosticsDir = opts.diagnosticsDir;
       const fakeSpawn: (
         def: unknown,
         taskId: string,
@@ -108,6 +110,7 @@ let shutdown: (() => Promise<void>) | undefined;
 
 beforeEach(() => {
   mockState.fakeChildren.length = 0;
+  mockState.capturedDiagnosticsDir = undefined;
   scratchDir = mkdtempSync(join(tmpdir(), "iknow-tui-trace-"));
   fixtureRoot = mkdtempSync(join(tmpdir(), "iknow-tui-fix-"));
 });
@@ -150,6 +153,18 @@ describe("buildTuiDeps — subagentTrace 接线", () => {
     expect(types).toContain("subagent_spawn");
     expect(types).toContain("subagent_state_change");
     expect(types).toContain("subagent_stop");
+  });
+
+  it("traceOut → manager diagnosticsDir uses the same trace tree", async () => {
+    const deps = await buildTuiDeps(makeBundle("sk-test-tui-diagnostics"), {
+      askUser: createNoAskUser(),
+      traceOut: scratchDir,
+      userHome: join(fixtureRoot, "home"),
+      cwd: fixtureRoot,
+    });
+    shutdown = deps.shutdown;
+
+    expect(mockState.capturedDiagnosticsDir).toBe(scratchDir);
   });
 
   it("不配 traceOut → 不写盘（NoopTraceService）", async () => {

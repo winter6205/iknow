@@ -13,10 +13,14 @@
  * 无 token-cost 护栏 / 无外部观测后端导出, B-scope 留位由 observability-bridge 桩负责)。
  */
 
-import { appendFileSync, mkdirSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { createOutputMask, currentSecretValues } from "../sandbox/index.js";
+import {
+  maybeRotate,
+  type TraceRotationOptions,
+} from "./rotation.js";
 import type {
   TraceService,
   LlmCallRecord,
@@ -43,6 +47,12 @@ export interface JsonlTraceOptions {
   conversationId: string;
   /** 可选注入 writer (测试用 always-throw writer)。 */
   writer?: (line: string) => void;
+  /** Rotation caps; omitted values use the conservative defaults. */
+  rotation?: TraceRotationOptions;
+}
+
+export interface TraceServiceWithHealth extends TraceService {
+  readonly traceWriteFailures: number;
 }
 
 /**
@@ -67,26 +77,80 @@ function toSnakeCaseRecord<T extends object>(
   return out;
 }
 
+function sameSecretSet(
+  left: ReadonlyArray<string>,
+  right: ReadonlyArray<string>
+): boolean {
+  if (left.length !== right.length) return false;
+  const rightSet = new Set(right);
+  return left.every((value) => rightSet.has(value));
+}
+
+type MessageStorageMode = "full" | "blob";
+
+function resolveMessageStorageMode(): MessageStorageMode {
+  return process.env.IKNOW_TRACE_MESSAGES?.trim().toLowerCase() === "blob"
+    ? "blob"
+    : "full";
+}
+
+function isAlreadyPresentError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "EEXIST"
+  );
+}
+
+function toBlobReferences(
+  messages: ReadonlyArray<unknown>,
+  traceDir: string,
+  outputMask: ReturnType<typeof createOutputMask>
+): Array<{ sha: string; bytes: number }> {
+  const blobsDir = join(traceDir, "blobs");
+  mkdirSync(blobsDir, { recursive: true });
+  return messages.map((message) => {
+    const serialized = JSON.stringify(message) ?? "null";
+    const masked = outputMask.mask(serialized);
+    const bytes = Buffer.byteLength(masked, "utf8");
+    const sha = createHash("sha256").update(masked, "utf8").digest("hex");
+    try {
+      writeFileSync(join(blobsDir, sha), masked, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+    } catch (error) {
+      if (!isAlreadyPresentError(error)) throw error;
+    }
+    return { sha, bytes };
+  });
+}
+
 /**
  * SC20 follow-up: mask known secret values in the serialized JSONL line.
  *
  * This is intentionally coarse — we serialize the entire line, mask the
  * resulting string with the current secret values, and emit the masked
- * string. The mask is built once per factory call (cheap) and re-used
- * across all record writes for this TraceService instance. If the env
- * changes mid-run (rare; CLI products don't mutate env mid-run), the mask
- * is stale until the next createJsonlTraceService call. SC20 spec left a
- * single-serializer-point mask as the preferred wiring; this is it.
+ * string. The mask is cached per factory instance and rebuilt only when the
+ * current secret set changes.
  */
-function maskJsonLine(line: string): string {
-  const mask = createOutputMask(currentSecretValues());
-  return mask.mask(line);
-}
-
 export function createJsonlTraceService(
   options: JsonlTraceOptions
-): TraceService {
+): TraceServiceWithHealth {
   const { filePath, conversationId } = options;
+  maybeRotate(filePath, options.rotation);
+  let secretValues = currentSecretValues();
+  let outputMask = createOutputMask(secretValues);
+  function currentOutputMask(): ReturnType<typeof createOutputMask> {
+    const currentValues = currentSecretValues();
+    if (!sameSecretSet(secretValues, currentValues)) {
+      secretValues = currentValues;
+      outputMask = createOutputMask(secretValues);
+    }
+    return outputMask;
+  }
+  const messageStorageMode = resolveMessageStorageMode();
   // T2 每会话独立文件: filePath 是目录, 实际写 <filePath>/<conversationId>.jsonl。
   // mkdirSync recursive 兜底, 目录不存在时先建 (产品路径 traceOut 首次使用时目录
   // 可能未建)。仅默认 writer 时建目录 —— 注入自定义 writer (测试用 always-throw)
@@ -107,8 +171,10 @@ export function createJsonlTraceService(
 
   // 实例级去重: 首次写盘失败 warn 一次, 后续静默 (ADR Decision 13)。
   let warnedOnce = false;
+  let traceWriteFailures = 0;
 
-  function warnOnce(err: unknown): void {
+  function recordFailure(err: unknown): void {
+    traceWriteFailures += 1;
     if (!warnedOnce) {
       warnedOnce = true;
       console.warn("[JsonlTraceService] write failed:", err);
@@ -116,23 +182,41 @@ export function createJsonlTraceService(
   }
 
   function writeLine(payload: Record<string, unknown>): void {
-    writer(maskJsonLine(JSON.stringify(payload)));
+    writer(currentOutputMask().mask(JSON.stringify(payload)));
   }
 
-  return {
+  const service: TraceServiceWithHealth = {
+    get traceWriteFailures() {
+      return traceWriteFailures;
+    },
     async recordLlmCall(record: LlmCallRecord): Promise<string | undefined> {
       const id = randomUUID();
-      const line: Record<string, unknown> = {
+      const fullLine: Record<string, unknown> = {
         conversation_id: conversationId,
         record_type: "llm_call",
         llm_call_id: id,
         ...toSnakeCaseRecord(record),
       };
+      let line = fullLine;
+      if (messageStorageMode === "blob" && record.messages !== undefined) {
+        try {
+          line = {
+            ...fullLine,
+            messages: toBlobReferences(
+              record.messages,
+              filePath,
+              currentOutputMask()
+            ),
+          };
+        } catch (err) {
+          recordFailure(err);
+        }
+      }
       try {
         writeLine(line);
         return id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -153,7 +237,7 @@ export function createJsonlTraceService(
         writeLine(line);
         return id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -175,7 +259,7 @@ export function createJsonlTraceService(
         writeLine(line);
         return id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -192,7 +276,7 @@ export function createJsonlTraceService(
         writeLine(line);
         return id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -211,7 +295,7 @@ export function createJsonlTraceService(
         writeLine(line);
         return id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -234,7 +318,7 @@ export function createJsonlTraceService(
         writeLine(line);
         return record.id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -259,7 +343,7 @@ export function createJsonlTraceService(
         writeLine(line);
         return record.id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -286,7 +370,7 @@ export function createJsonlTraceService(
         writeLine(line);
         return record.id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -306,7 +390,7 @@ export function createJsonlTraceService(
         writeLine(line);
         return record.id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -326,7 +410,7 @@ export function createJsonlTraceService(
         writeLine(line);
         return record.id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
@@ -348,9 +432,10 @@ export function createJsonlTraceService(
         writeLine(line);
         return record.id;
       } catch (err) {
-        warnOnce(err);
+        recordFailure(err);
         return undefined;
       }
     },
   };
+  return service;
 }

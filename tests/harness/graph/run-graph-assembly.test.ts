@@ -97,8 +97,9 @@ describe("createGraphAssembly — per-round 装配快照", () => {
 // ── 2. 条件装配 ───────────────────────────────────────────────────────────
 
 describe("run_graph — ACI 条件装配（Gate 3 镜像过滤）", () => {
-  it("ACI_TOOLSET_NAMES 末位追加 run_graph（append-only，不重排既有 30 件）", () => {
-    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 1]).toBe("run_graph");
+  it("ACI_TOOLSET_NAMES 在 run_graph 之后 append-only 追加 query_trace（不重排既有件）", () => {
+    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 2]).toBe("run_graph");
+    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 1]).toBe("query_trace");
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
       "read_file",
@@ -131,7 +132,7 @@ describe("run_graph — ACI 条件装配（Gate 3 镜像过滤）", () => {
     expect(reg.inner.list().map((d) => d.name)).not.toContain("run_graph");
   });
 
-  it("manager + graphAssembly 同时在场 → run_graph 末位入注册表", () => {
+  it("manager + graphAssembly 同时在场 → run_graph 入注册表（query_trace 仍在末位）", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -140,7 +141,8 @@ describe("run_graph — ACI 条件装配（Gate 3 镜像过滤）", () => {
       graphAssembly: { enabled: () => true },
     });
     const names = reg.inner.list().map((d) => d.name);
-    expect(names[names.length - 1]).toBe("run_graph");
+    expect(names).toContain("run_graph");
+    expect(names[names.length - 1]).toBe("query_trace");
     expect(reg.catalog.get("run_graph")).toBeDefined();
   });
 });

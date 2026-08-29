@@ -26,7 +26,9 @@ export type TraceRecordType =
   | "subagent_spawn"
   | "subagent_stop"
   | "subagent_state_change"
-  | "subagent_step";
+  | "subagent_step"
+  | "verification"
+  | "goal";
 
 export const TRACE_RECORD_TYPES: ReadonlyArray<TraceRecordType> = [
   "llm_call",
@@ -39,6 +41,8 @@ export const TRACE_RECORD_TYPES: ReadonlyArray<TraceRecordType> = [
   "subagent_stop",
   "subagent_state_change",
   "subagent_step",
+  "verification",
+  "goal",
 ];
 
 /** Raw JSONL row, snake_case keys preserved. Read-only to discourage mutation. */
@@ -63,6 +67,8 @@ export interface TraceQuery {
    * 读侧先就位, spec 升级 child 留位时即可查。
    */
   readonly parentTurnId?: string;
+  /** Exact-match turn association filter. */
+  readonly turnId?: string;
   /**
    * 增量轮询恢复字节偏移 (SC-R 14): 只读文件 resumeOffset 之后的追加行。
    * 与行分页 `offset` 正交 — 行分页是「从第 N 行开始」, 这是「从第 N 字节之后读新增」。

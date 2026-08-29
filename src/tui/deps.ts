@@ -253,7 +253,9 @@ export async function buildTuiDeps(
     // ADR-0019 (T2): per-root state anchor 透传到 build-engine。
     ...(opts.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
     // 观测性地板:traceOut 在场 → subagent 三事件落 `<traceOut>/subagent.jsonl`。
-    ...(subagentTrace !== undefined ? { subagentTrace } : {}),
+    ...(subagentTrace !== undefined
+      ? { subagentTrace, subagentDiagnosticsDir: traceOut }
+      : {}),
     // #378 测试缝:createMcpManager 工厂覆盖(透传,捕获入参断言)。
     // prettier-ignore（master 一致单行：L3 review 复原；88 字符超 80 列，禁用 prettier 重排）。
     // prettier-ignore

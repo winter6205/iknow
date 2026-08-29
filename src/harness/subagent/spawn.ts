@@ -18,6 +18,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
+import { resolve } from "node:path";
 import type { SubAgentSpawn } from "./manager.js";
 
 const requireFromSpawn = createRequire(import.meta.url);
@@ -90,19 +91,40 @@ export function resolveSubagentWorkerSpawnArgs({
   return [argv1, "--subagent-worker"];
 }
 
+export function resolveSubagentTraceDir(traceDir?: string): string {
+  return resolve(traceDir ?? process.env.IKNOW_TRACE_OUT ?? "./trace/");
+}
+
+export function createDefaultSubAgentSpawn(
+  traceDir?: string,
+  workspaceRoot?: string
+): SubAgentSpawn {
+  const resolvedTraceDir = resolveSubagentTraceDir(traceDir);
+  return (_def, _taskId, _stdinPayload) => {
+    const child = spawn(
+      process.execPath,
+      resolveSubagentWorkerSpawnArgs({
+        execPath: process.execPath,
+        argv1: process.argv[1],
+      }),
+      {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          IKNOW_TRACE_OUT: resolvedTraceDir,
+          ...(workspaceRoot !== undefined
+            ? { IKNOW_WORKSPACE_ROOT: workspaceRoot }
+            : {}),
+        },
+      }
+    );
+    // manager 负责写 stdin（worker 协议：stdin 一行 envelope → stdout 一行 result）。
+    return child as ChildProcess;
+  };
+}
+
 export const defaultSubAgentSpawn: SubAgentSpawn = (
-  _def,
-  _taskId,
-  _stdinPayload
-) => {
-  const child = spawn(
-    process.execPath,
-    resolveSubagentWorkerSpawnArgs({
-      execPath: process.execPath,
-      argv1: process.argv[1],
-    }),
-    { stdio: ["pipe", "pipe", "pipe"], env: process.env }
-  );
-  // manager 负责写 stdin（worker 协议：stdin 一行 envelope → stdout 一行 result）。
-  return child as ChildProcess;
-};
+  def,
+  taskId,
+  stdinPayload
+) => createDefaultSubAgentSpawn()(def, taskId, stdinPayload);

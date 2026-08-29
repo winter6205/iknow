@@ -8,7 +8,7 @@
  */
 import { afterAll, afterEach, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { join } from "node:path";
@@ -26,6 +26,7 @@ import {
 } from "../../src/session-api/store/index.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import { installTestSettingsSource } from "../_helpers/install-test-settings-source.ts";
+import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 
 // -- per-test cleanup --------------------------------------------------------
 
@@ -158,6 +159,52 @@ describe("startSessionServe — option propagation", () => {
     const created = await h.createSession();
     const got = await h.getSession(created.session.conversation_id);
     assert.equal(got.session.conversation_id, created.session.conversation_id);
+  });
+});
+
+describe("startSessionServe — trace health wiring", () => {
+  it("health counts failures from a trace service created by the hub", async () => {
+    baseDir = await mkdtemp(join(tmpdir(), "iknow-serve-trace-health-"));
+    const traceOut = join(baseDir, "trace-out-file");
+    await writeFile(traceOut, "", "utf8");
+
+    const out = await startSessionServe({
+      dataDir: baseDir,
+      port: 0,
+      traceOut,
+      hubOptions: {
+        deps: makeDeps([assistantResult({ texts: ["ok"] })]),
+      },
+    });
+    listening = out.listening;
+    const origin = `http://${listening.host}:${listening.port}`;
+
+    const created = await fetch(`${origin}/api/v1/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(created.status, 201);
+    const sessionId = (
+      (await created.json()) as {
+        session: { conversation_id: string };
+      }
+    ).session.conversation_id;
+
+    const posted = await fetch(
+      `${origin}/api/v1/sessions/${sessionId}/messages`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "hello" }),
+      }
+    );
+    assert.equal(posted.status, 200);
+
+    const health = await fetch(`${origin}/api/v1/health`);
+    assert.equal(health.status, 200);
+    const body = (await health.json()) as { traceWriteFailures: number };
+    assert.ok(body.traceWriteFailures >= 1);
   });
 });
 

@@ -158,6 +158,7 @@ function parseTraceQuery(url: URL): TraceQuery {
     resumeOffset: parseResumeOffset(p.get("resume_offset")),
     taskId: parseStringParam(p.get("task_id"), "task_id"),
     parentTurnId: parseStringParam(p.get("parent_turn_id"), "parent_turn_id"),
+    turnId: parseStringParam(p.get("turn_id"), "turn_id"),
   };
 }
 

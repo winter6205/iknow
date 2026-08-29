@@ -424,7 +424,7 @@ describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
   it("全条件装配（含 backgroundManager + graph overlay）→ 31 件，顺序 = ACI_TOOLSET_NAMES", () => {
     const reg = createDefaultAciRegistry(fullAssemblyOpts());
     const names = reg.inner.list().map((d) => d.name);
-    assert.equal(names.length, 31);
+    assert.equal(names.length, 32);
     assert.deepEqual(names, [...ACI_TOOLSET_NAMES]);
     assert.ok(reg.catalog.get("bash_output"));
     assert.ok(reg.catalog.get("bash_stop"));
@@ -441,7 +441,7 @@ describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
       mcpManager: fakeMcpManager,
     });
     const names = reg.inner.list().map((d) => d.name);
-    assert.equal(names.length, 28);
+    assert.equal(names.length, 29);
     assert.equal(names.includes("bash_output"), false);
     assert.equal(names.includes("bash_stop"), false);
     // bash 常驻：backgroundManager 缺席时参数级能力由 handler 运行时决策。

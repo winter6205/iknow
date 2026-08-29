@@ -22,7 +22,7 @@
 
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -45,6 +45,7 @@ const mockState = vi.hoisted(() => ({
   }>,
   captureCallCount: 0,
   capturedTraceOpt: undefined as unknown,
+  capturedDiagnosticsDir: undefined as unknown,
 }));
 
 vi.mock("../../src/harness/subagent/manager.ts", async (importActual) => {
@@ -58,6 +59,7 @@ vi.mock("../../src/harness/subagent/manager.ts", async (importActual) => {
     createSubAgentManager: vi.fn((opts: Parameters<typeof realCreate>[0]) => {
       mockState.captureCallCount += 1;
       mockState.capturedTraceOpt = opts.trace;
+      mockState.capturedDiagnosticsDir = opts.diagnosticsDir;
       const fakeSpawn: (
         def: unknown,
         taskId: string,
@@ -145,6 +147,7 @@ beforeEach(() => {
   mockState.fakeChildren.length = 0;
   mockState.captureCallCount = 0;
   mockState.capturedTraceOpt = undefined;
+  mockState.capturedDiagnosticsDir = undefined;
 });
 
 afterEach(async () => {
@@ -213,5 +216,44 @@ describe("buildHarnessEngine — subagentTrace 注入缝 (Fix 1 SC1)", () => {
     };
     expect(typeof traceLike.recordSubagentSpawn).toBe("function");
     expect(await traceLike.recordSubagentSpawn({} as never)).toBeUndefined();
+  });
+
+  it("subagentDiagnosticsDir → manager receives the crash diagnostics root", async () => {
+    built = await buildHarnessEngine({
+      env: makeEnv("sk-test-bld-subagent-diagnostics-1"),
+      askUser: createNoAskUser(),
+      subagentDiagnosticsDir: scratchDir,
+    });
+
+    expect(mockState.capturedDiagnosticsDir).toBe(scratchDir);
+  });
+
+  it("subagentDiagnosticsDir → query_trace reads that tree, not workspaceRoot/trace", async () => {
+    const customDir = mkdtempSync(join(tmpdir(), "iknow-query-trace-dir-"));
+    writeFileSync(
+      join(customDir, "c-custom.jsonl"),
+      `${JSON.stringify({
+        conversation_id: "c-custom",
+        record_type: "turn",
+        turn_id: "turn-custom",
+        started_at: "2026-08-28T00:00:01.000Z",
+        status: "ok",
+      })}\n`
+    );
+    built = await buildHarnessEngine({
+      env: makeEnv("sk-test-bld-query-trace-dir-1"),
+      askUser: createNoAskUser(),
+      subagentDiagnosticsDir: customDir,
+    });
+    const tool = built.deps.registry
+      .list()
+      .find((entry) => entry.name === "query_trace");
+    expect(tool).toBeDefined();
+    const raw = await tool!.handler({});
+    const body = JSON.parse(raw) as { records: Array<{ turn_id?: string }> };
+    expect(body.records.some((row) => row.turn_id === "turn-custom")).toBe(
+      true
+    );
+    rmSync(customDir, { recursive: true, force: true });
   });
 });

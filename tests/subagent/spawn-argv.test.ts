@@ -1,9 +1,12 @@
 import { createRequire } from "node:module";
+import type { ChildProcess } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  createDefaultSubAgentSpawn,
   resolveSubagentWorkerSpawnArgs,
   SubagentWorkerSpawnArgsError,
 } from "../../src/harness/subagent/spawn.ts";
@@ -94,5 +97,39 @@ describe("resolveSubagentWorkerSpawnArgs", () => {
         },
       })
     ).toThrow(SubagentWorkerSpawnArgsError);
+  });
+
+  it("passes a resolved IKNOW_TRACE_OUT to the worker process", async () => {
+    const root = await mkdtemp(join(process.cwd(), "tmp-spawn-env-"));
+    const script = join(root, "print-trace.js");
+    try {
+      await writeFile(
+        script,
+        "process.stdout.write(process.env.IKNOW_TRACE_OUT ?? '')"
+      );
+      const originalArgv1 = process.argv[1];
+      process.argv[1] = script;
+      let child: ChildProcess;
+      try {
+        child = createDefaultSubAgentSpawn(join(root, "trace"))(
+          {},
+          "task-id",
+          {} as never
+        );
+      } finally {
+        process.argv[1] = originalArgv1;
+      }
+      const output = await new Promise<string>((resolvePromise, reject) => {
+        let value = "";
+        child.stdout?.on("data", (chunk: Buffer) => {
+          value += chunk.toString("utf8");
+        });
+        child.once("error", reject);
+        child.once("close", () => resolvePromise(value));
+      });
+      expect(output).toBe(join(root, "trace"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

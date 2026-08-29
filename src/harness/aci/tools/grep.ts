@@ -32,6 +32,8 @@ const MAX_LIMIT = 2000;
 const FALLBACK_SCAN_LIMIT_BYTES = 1_048_576; // 与 read_file 对齐：1MB
 const FALLBACK_BINARY_PROBE_BYTES = 8_192; // 探测 NUL 的窗口大小
 const RG_BINARY = "rg";
+const MAX_MATCH_LINE_COLUMNS = 2_000;
+const TRUNCATION_MARKER = "...[truncated]";
 
 /** 测试 seam：生产 = node:child_process.spawn；测试可注入 stub（ENOENT 模拟 rg 缺失）。 */
 export type SpawnFn = (
@@ -180,6 +182,7 @@ async function runRipgrep(
   signal: AbortSignal | undefined
 ): Promise<string[]> {
   const args: string[] = ["--line-number", "--no-heading", "--color", "never"];
+  args.push(`--max-columns=${MAX_MATCH_LINE_COLUMNS}`, "--max-columns-preview");
   if (compiled.ignoreCase) args.push("--ignore-case");
   args.push("--", compiled.pattern, compiled.searchRoot);
 
@@ -320,7 +323,11 @@ function normalizeRipgrepLine(
   const rel = relative(workspaceRoot, abs);
   // Strip a leading "./" so the output matches the T1-7 contract exactly.
   const cleaned = rel.startsWith("./") ? rel.slice(2) : rel;
-  return `${cleaned}:${rest}`;
+  const lineNumberEnd = rest.indexOf(":");
+  if (lineNumberEnd === -1) return `${cleaned}:${rest}`;
+  const lineNumber = rest.slice(0, lineNumberEnd);
+  const content = rest.slice(lineNumberEnd + 1);
+  return `${cleaned}:${lineNumber}:${truncateMatchContent(content)}`;
 }
 
 async function runNodeFallback(compiled: CompiledInput): Promise<string[]> {
@@ -339,11 +346,18 @@ async function runNodeFallback(compiled: CompiledInput): Promise<string[]> {
       if (regexp.test(line)) {
         const rel = relative(ws, filePath);
         const cleaned = rel.startsWith("./") ? rel.slice(2) : rel;
-        out.push(`${cleaned}:${String(lineNo)}:${line}`);
+        out.push(
+          `${cleaned}:${String(lineNo)}:${truncateMatchContent(line)}`
+        );
       }
     });
   });
   return out;
+}
+
+function truncateMatchContent(content: string): string {
+  if (content.length <= MAX_MATCH_LINE_COLUMNS) return content;
+  return `${content.slice(0, MAX_MATCH_LINE_COLUMNS)}${TRUNCATION_MARKER}`;
 }
 
 function compileRegExp(compiled: CompiledInput): RegExp {

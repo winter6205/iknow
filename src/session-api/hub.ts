@@ -19,8 +19,8 @@ import {
   type HarnessStreamEvent,
   type LoopEngineDeps,
   type RunResult,
-  type TraceService,
 } from "../harness/index.js";
+import type { TraceServiceWithHealth } from "../harness/trace/jsonl.js";
 import {
   evaluateCompactTrigger,
   getAutoCompactThreshold,
@@ -561,6 +561,8 @@ export class SessionHub {
   };
   /** JSONL trace output path; when set, postMessage creates a per-session trace. */
   private readonly traceOut: string | undefined;
+  /** All JSONL services created by this hub, including the shared subagent trace. */
+  private readonly traceServices = new Set<TraceServiceWithHealth>();
   /** askUser inlet (#162); required unless deps are pre-built. */
   private readonly askUser: AskUser | undefined;
   /** Full serve AskUser handle (when provided, SPA can list + resolve asks). */
@@ -726,6 +728,15 @@ export class SessionHub {
     for (const entry of this.engineByRoot.values()) {
       await entry.shutdown?.();
     }
+  }
+
+  /** Sum the live JSONL trace service write-failure counters for health. */
+  getTraceWriteFailures(): number {
+    let total = 0;
+    for (const trace of this.traceServices) {
+      total += trace.traceWriteFailures;
+    }
+    return total;
   }
 
   /**
@@ -1914,12 +1925,16 @@ export class SessionHub {
   /** #458 T5/T12: per-postMessage trace service (undefined when traceOut is
    *  not configured). Hoisted at the start of serialize's work so the pin /
    *  seed / writeback 发射点 and runDeps share one instance. */
-  private createTrace(conversationId: string): TraceService | undefined {
+  private createTrace(
+    conversationId: string
+  ): TraceServiceWithHealth | undefined {
     if (!this.traceOut) return undefined;
-    return createJsonlTraceService({
+    const trace = createJsonlTraceService({
       filePath: this.traceOut,
       conversationId,
     });
+    this.traceServices.add(trace);
+    return trace;
   }
 
   /** #604 T1 (SC1-SC5):compact 边界渲染 — 把 session.messages 内最近 ≤3 句
@@ -2179,10 +2194,8 @@ export class SessionHub {
       todoDir: resolveSessionTodoDir({ surface: "serve" }),
       ...(this.traceOut !== undefined
         ? {
-            subagentTrace: createJsonlTraceService({
-              filePath: this.traceOut,
-              conversationId: "subagent",
-            }),
+            subagentTrace: this.createTrace("subagent"),
+            subagentDiagnosticsDir: this.traceOut,
           }
         : {}),
     });
@@ -2257,10 +2270,8 @@ export class SessionHub {
       todoDir: resolveSessionTodoDir({ surface: "serve" }),
       ...(this.traceOut !== undefined
         ? {
-            subagentTrace: createJsonlTraceService({
-              filePath: this.traceOut,
-              conversationId: "subagent",
-            }),
+            subagentTrace: this.createTrace("subagent"),
+            subagentDiagnosticsDir: this.traceOut,
           }
         : {}),
     });

@@ -218,7 +218,7 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
   // audit, the only thing we pin is that all 31 tools are positive-trigger
   // phrased — verified structurally by the blocklist assertions above.
   it("toolset size after audit: 31 (full conditional-deps assembly)", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(31);
-    expect(reg.catalog.all()).toHaveLength(31);
+    expect(ACI_TOOLSET_NAMES).toHaveLength(32);
+    expect(reg.catalog.all()).toHaveLength(32);
   });
 });
