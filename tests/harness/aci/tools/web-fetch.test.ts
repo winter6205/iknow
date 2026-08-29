@@ -5,14 +5,14 @@
  *
  * 覆盖契约（ADR 测试规范 6 项 + ACR 5 类边界）：
  *   - 工厂签名 createWebFetchTool(deps?) → AciToolDef，name === "web_fetch"
- *   - inputSchema: url 必填 + max_chars?(默认 12000, ge 500, le 16000) +
+ *   - inputSchema: url 必填 + max_chars?(默认 8000, ge 500, le 16000) +
  *     start_chars?(默认 0, ge 0) + additionalProperties:false
  *   - aci 元数据: category=read-only, isConcurrencySafe=true,
  *     interruptBehavior=cancel, timeoutTier=default
  *   - 成功路径：URL/Status/Content-Type 头 + UNTRUSTED_BANNER 防注入横幅 + body
  *   - html→text：跳过 script/style、实体解码、折叠空白
  *   - 非 html content-type → body 原样返回（不解 HTML）
- *   - max_chars 截断 → "\n...[truncated]" 后缀（上限 clamp 16000 / 下限 clamp 500）
+ *   - max_chars 截断 → "\n...[truncated]" 后缀（合法范围 500..16000）
  *   - Window 行在横幅之前；returned 等于横幅后、截断标记前的正文字符数
  *   - 空输入 / 非法 URL → ToolExecutionError
  *   - 非 2xx → ToolExecutionError
@@ -79,7 +79,7 @@ describe("createWebFetchTool — schema/aci shape", () => {
     assert.deepEqual(schema.required, ["url"]);
     assert.equal(schema.additionalProperties, false);
     assert.equal(schema.properties.url.type, "string");
-    assert.equal(schema.properties.max_chars.default, 12000);
+    assert.equal(schema.properties.max_chars.default, 8000);
     assert.equal(schema.properties.max_chars.minimum, 500);
     assert.equal(schema.properties.max_chars.maximum, 16000);
     assert.equal(schema.properties.start_chars.default, 0);
@@ -153,6 +153,45 @@ describe("createWebFetchTool — success path", () => {
     assert.match(out, /Alpha & Beta/);
   });
 
+  it("extracts the main article and drops navigation boilerplate", async () => {
+    const html = [
+      "<html><body>",
+      "<header>Site header</header><nav>Navigation links</nav>",
+      "<main><article><h1>Real title</h1><p>Article body.</p></article></main>",
+      "<aside>Recommended links</aside><footer>Copyright footer</footer>",
+      "</body></html>",
+    ].join("");
+    const tool = createWebFetchTool(htmlDeps(html));
+
+    const out = (await tool.handler({
+      url: "https://example.com/article",
+    })) as string;
+
+    assert.match(out, /Real title/);
+    assert.match(out, /Article body\./);
+    assert.ok(!out.includes("Navigation links"));
+    assert.ok(!out.includes("Copyright footer"));
+    assert.ok(!out.includes("Recommended links"));
+  });
+
+  it("returns an empty successful window when HTML has no visible main content", async () => {
+    const tool = createWebFetchTool(
+      htmlDeps(
+        "<html><head><style>hidden</style></head><body><nav>links</nav></body></html>"
+      )
+    );
+
+    const out = (await tool.handler({
+      url: "https://example.com/empty-main",
+    })) as string;
+
+    assert.equal(parseWindow(out).originalLength, 0);
+    assert.equal(parseWindow(out).returned, 0);
+    assert.equal(bodyAfterBanner(out), "");
+    assert.ok(out.includes("Window:"));
+    assert.ok(out.includes(UNTRUSTED_BANNER));
+  });
+
   it("returns non-html bodies as-is", async () => {
     const json = '{"answer": 42}';
     const tool = createWebFetchTool(htmlDeps(json, "application/json"));
@@ -163,7 +202,7 @@ describe("createWebFetchTool — success path", () => {
   });
 });
 
-describe("createWebFetchTool — truncation and clamps", () => {
+describe("createWebFetchTool — truncation and max_chars validation", () => {
   it("truncates bodies longer than max_chars with a marker", async () => {
     const body = "x".repeat(10_000);
     const tool = createWebFetchTool(htmlDeps(body, "text/plain"));
@@ -185,45 +224,57 @@ describe("createWebFetchTool — truncation and clamps", () => {
         { default?: number; minimum?: number; maximum?: number }
       >;
     };
-    assert.equal(schema.properties.max_chars.default, 12000);
+    assert.equal(schema.properties.max_chars.default, 8000);
     assert.equal(schema.properties.max_chars.minimum, 500);
     assert.equal(schema.properties.max_chars.maximum, 16000);
   });
 
-  it("clamps max_chars above the ceiling down to 16000 at runtime", async () => {
-    const body = "y".repeat(20_000);
-    const tool = createWebFetchTool(htmlDeps(body, "text/plain"));
-    const out = (await tool.handler({
-      url: "https://example.com/",
-      max_chars: 100_000,
-    })) as string;
-    assert.ok(out.endsWith("\n...[truncated]"));
-    assert.ok(out.includes("y".repeat(16_000)));
-    assert.ok(!out.includes("y".repeat(16_001)));
+  it("rejects max_chars above the schema ceiling instead of silently clamping", async () => {
+    const tool = createWebFetchTool(htmlDeps("x", "text/plain"));
+    await expectToolError(
+      () =>
+        Promise.resolve(
+          tool.handler({ url: "https://example.com/", max_chars: 100_000 })
+        ),
+      "max_chars"
+    );
   });
 
-  it("clamps max_chars below the floor up to 500 at runtime", async () => {
-    const body = "z".repeat(5_000);
-    const tool = createWebFetchTool(htmlDeps(body, "text/plain"));
-    const out = (await tool.handler({
-      url: "https://example.com/",
-      max_chars: 100,
-    })) as string;
-    assert.ok(out.endsWith("\n...[truncated]"));
-    assert.ok(out.includes("z".repeat(500)));
-    assert.ok(!out.includes("z".repeat(501)));
+  it("rejects max_chars below the schema floor instead of silently clamping", async () => {
+    const tool = createWebFetchTool(htmlDeps("x", "text/plain"));
+    await expectToolError(
+      () =>
+        Promise.resolve(
+          tool.handler({ url: "https://example.com/", max_chars: 100 })
+        ),
+      "max_chars"
+    );
   });
 
-  it("falls back to default 12000 when max_chars is not a finite number", async () => {
-    const body = "w".repeat(20_000);
+  it("rejects non-numeric max_chars instead of silently using the default", async () => {
+    const tool = createWebFetchTool(htmlDeps("x", "text/plain"));
+    await expectToolError(
+      () =>
+        Promise.resolve(
+          tool.handler({
+            url: "https://example.com/",
+            max_chars: "not-a-number",
+          })
+        ),
+      "max_chars"
+    );
+  });
+
+  it("uses the lower default window for long plain-text pages", async () => {
+    const body = "w".repeat(9_000);
     const tool = createWebFetchTool(htmlDeps(body, "text/plain"));
     const out = (await tool.handler({
-      url: "https://example.com/",
-      max_chars: "not-a-number",
+      url: "https://example.com/default-window",
     })) as string;
+
+    assert.equal(parseWindow(out).returned, 8_000);
+    assert.equal(bodyAfterBanner(out).length, 8_000);
     assert.ok(out.endsWith("\n...[truncated]"));
-    assert.ok(out.includes("w".repeat(12_000)));
-    assert.ok(!out.includes("w".repeat(12_001)));
   });
 });
 
@@ -291,6 +342,61 @@ describe("createWebFetchTool — concurrency", () => {
     assert.match(outA as string, /URL: https:\/\/a\.example\.com\//);
     assert.match(outB as string, /URL: https:\/\/b\.example\.com\//);
   });
+
+  it("deduplicates concurrent fetches for the same URL without sharing different URLs", async () => {
+    const calls: string[] = [];
+    const fetch: GuardFetchFn = async (url) => {
+      calls.push(url);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return {
+        status: 200,
+        contentType: "text/plain",
+        body: url.includes("/a") ? "AAA" : "BBB",
+      };
+    };
+    const tool = createWebFetchTool({ fetch, lookup: okLookup });
+
+    const [a1, a2, b] = await Promise.all([
+      tool.handler({ url: "https://example.com/a" }),
+      tool.handler({ url: "https://example.com/a", start_chars: 3 }),
+      tool.handler({ url: "https://example.com/b" }),
+    ]);
+
+    assert.equal(calls.filter((url) => url.endsWith("/a")).length, 1);
+    assert.equal(calls.filter((url) => url.endsWith("/b")).length, 1);
+    assert.match(a1 as string, /AAA/);
+    assert.equal(bodyAfterBanner(a2 as string), "");
+    assert.match(b as string, /BBB/);
+  });
+
+  it("serves a cached URL without fetching again and honors a continuation window", async () => {
+    let calls = 0;
+    const fetch: GuardFetchFn = async () => {
+      calls += 1;
+      return {
+        status: 200,
+        contentType: "text/plain",
+        body: "abcdefghij".repeat(100),
+      };
+    };
+    const tool = createWebFetchTool({ fetch, lookup: okLookup });
+
+    const first = (await tool.handler({
+      url: "https://example.com/cached",
+      max_chars: 500,
+    })) as string;
+    const second = (await tool.handler({
+      url: "https://example.com/cached",
+      start_chars: 500,
+      max_chars: 500,
+    })) as string;
+
+    assert.equal(calls, 1);
+    assert.equal(bodyAfterBanner(first), "abcdefghij".repeat(50));
+    assert.equal(bodyAfterBanner(second), "abcdefghij".repeat(50));
+    assert.equal(parseWindow(second).start, 500);
+    assert.equal(parseWindow(second).returned, 500);
+  });
 });
 
 function parseWindow(out: string): {
@@ -312,7 +418,9 @@ function parseWindow(out: string): {
 function bodyAfterBanner(out: string): string {
   const parts = out.split(UNTRUSTED_BANNER);
   assert.equal(parts.length, 2);
-  return (parts[1] ?? "").replace(/^\n\n/, "").replace(/\n\.\.\.\[truncated]$/, "");
+  return (parts[1] ?? "")
+    .replace(/^\n\n/, "")
+    .replace(/\n\.\.\.\[truncated]$/, "");
 }
 
 describe("createWebFetchTool — start_chars window", () => {
@@ -364,7 +472,7 @@ describe("createWebFetchTool — start_chars window", () => {
     const tool = createWebFetchTool(htmlDeps(body, "text/plain"));
     const out = (await tool.handler({
       url,
-      max_chars: 100_000,
+      max_chars: 16_000,
     })) as string;
     const win = parseWindow(out);
     const bannerBody = bodyAfterBanner(out);
@@ -381,8 +489,7 @@ describe("createWebFetchTool — start_chars window", () => {
       },
     ]);
     assert.equal(results[0]?.kind, "ok");
-    const payload =
-      results[0]?.kind === "ok" ? results[0].payload : undefined;
+    const payload = results[0]?.kind === "ok" ? results[0].payload : undefined;
     const text =
       Array.isArray(payload) && payload[0] && "text" in payload[0]
         ? String(payload[0].text)
@@ -519,5 +626,3 @@ describe("createWebFetchTool — as text|html and content-type gate", () => {
     assert.ok(out.includes("onclick='steal()'"));
   });
 });
-
-
