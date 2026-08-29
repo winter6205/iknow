@@ -616,6 +616,7 @@ describe("createAutoMemoryHook — dream pass", () => {
           title: "Use bar() for concurrency",
           body: "Concurrency now routes through the scheduler queue; direct calls were removed in v3.",
           confidence: 0.95,
+          replaces: ["old"],
         },
       ]),
     ];

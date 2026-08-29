@@ -75,6 +75,12 @@ export interface MemoryCandidate {
   readonly body: string;
   readonly type: string;
   readonly importance: number;
+  /**
+   * Dream-only: existing slugs the model says this candidate supersedes.
+   * Extraction never sets it — a candidate carrying `replaces` is routed to
+   * a SUPERSEDE op by the dream path, never through the decide table.
+   */
+  readonly replaces?: readonly string[];
 }
 
 export type MemoryOpKind = "ADD" | "UPDATE" | "SUPERSEDE" | "NOOP";
@@ -92,7 +98,7 @@ export type MemoryOp =
     }
   | {
       readonly kind: "SUPERSEDE";
-      readonly supersedes: string;
+      readonly supersedes: string[];
       readonly candidate: MemoryCandidate;
     }
   | {
@@ -430,7 +436,7 @@ function buildEntry(input: {
   updatedAt: string;
   ttlDays: number;
   source: string;
-  supersedes: string | null;
+  supersedes: string[] | null;
 }): MemoryEntryV1 {
   const entry: MemoryEntryV1 & { source: string } = {
     id: input.slug,

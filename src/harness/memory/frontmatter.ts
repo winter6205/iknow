@@ -24,7 +24,6 @@ import { defaultMemoryEntry } from "./schema.js";
 const FM_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/;
 
 const STRING_KEYS = new Set(["id", "type", "title", "updated_at"]);
-const NULLABLE_STRING_KEYS = new Set(["supersedes"]);
 const NUMBER_KEYS = new Set(["importance", "ttl_days"]);
 
 /** Canonical key order for serialize — known fields first, extras later sorted. */
@@ -92,7 +91,7 @@ export function computeSignature(entry: MemoryEntryV1): string {
     String(entry.importance),
     String(entry.ttl_days),
     String(entry.disabled),
-    entry.supersedes ?? "null",
+    entry.supersedes?.join(",") ?? "null",
     entry.title,
     entry.updated_at,
     entry.body,
@@ -115,11 +114,19 @@ function coerce(key: string, raw: string): unknown {
       ? n
       : defaultMemoryEntry()[key as "importance" | "ttl_days"];
   }
-  if (NULLABLE_STRING_KEYS.has(key)) {
-    return raw === "null" ? null : raw;
+  if (key === "supersedes") {
+    // Flat list form: `supersedes: a,b` (null when absent). Slugs are hex
+    // ids with no commas, so comma-joined round-trips; an empty list must
+    // not occur and normalizes back to null.
+    if (raw === "null" || raw === "") return null;
+    const ids = raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    return ids.length > 0 ? ids : null;
   }
   if (STRING_KEYS.has(key)) {
-    return raw; // empty string is a valid string (e.g. supersedes: <empty>)
+    return raw; // empty string is a valid string
   }
   // Unknown key: best-effort scalar inference so round-trip is stable.
   if (raw === "true") return true;
@@ -150,5 +157,6 @@ function formatScalar(v: unknown): string {
 function formatValue(v: unknown): string {
   if (v === null || v === undefined) return v === null ? "null" : "";
   if (typeof v === "string") return v;
+  if (Array.isArray(v)) return v.join(",");
   return String(v);
 }

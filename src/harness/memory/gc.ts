@@ -116,9 +116,10 @@ export function planMemoryGc(
   const supersededTargets = new Set<string>();
   const survivorSlugs = new Set(survivors.map((c) => c.slug));
   for (const c of survivors) {
-    const target = c.entry.supersedes;
-    if (target !== null && target !== c.slug && survivorSlugs.has(target)) {
-      supersededTargets.add(target);
+    for (const target of c.entry.supersedes ?? []) {
+      if (target !== c.slug && survivorSlugs.has(target)) {
+        supersededTargets.add(target);
+      }
     }
   }
   for (const slug of [...supersededTargets].sort()) {

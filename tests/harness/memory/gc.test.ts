@@ -117,7 +117,7 @@ describe("planMemoryGc — supersede rule", () => {
     const plan = planMemoryGc(
       [
         { slug: "old", entry: entry({ title: "Old fact" }) },
-        { slug: "new", entry: entry({ title: "New fact", supersedes: "old" }) },
+        { slug: "new", entry: entry({ title: "New fact", supersedes: ["old"] }) },
       ],
       { nowMs: NOW }
     );
@@ -133,7 +133,7 @@ describe("planMemoryGc — supersede rule", () => {
           slug: "new",
           entry: entry({
             title: "New fact",
-            supersedes: "old",
+            supersedes: ["old"],
             disabled: true,
           }),
         },
@@ -149,7 +149,7 @@ describe("planMemoryGc — supersede rule", () => {
 
   it("ignores a supersedes pointer to an unknown slug", () => {
     const plan = planMemoryGc(
-      [{ slug: "new", entry: entry({ supersedes: "does-not-exist" }) }],
+      [{ slug: "new", entry: entry({ supersedes: ["does-not-exist"] }) }],
       { nowMs: NOW }
     );
     assert.deepEqual(plan.disable, []);
@@ -451,7 +451,7 @@ describe("runMemoryGc", () => {
 
   it("keeps every file on disk — GC only soft-disables", async () => {
     await put("a", { ttl_days: 1, updated_at: daysAgo(9) });
-    await put("b", { supersedes: "a" });
+    await put("b", { supersedes: ["a"] });
     await runMemoryGc(memoryDir, { nowMs: NOW });
     const names = (await readdir(memoryDir)).filter((n) => n.endsWith(".md"));
     assert.deepEqual(names.sort(), ["a.md", "b.md"]);

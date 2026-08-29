@@ -740,7 +740,7 @@ describe("persistMemoryOps", () => {
       [
         {
           kind: "SUPERSEDE",
-          supersedes: "old",
+          supersedes: ["old"],
           candidate: candidate({
             body: "Concurrency routes through the scheduler queue.",
           }),
@@ -749,7 +749,7 @@ describe("persistMemoryOps", () => {
       { now: () => NOW_ISO, randomBytes: seqBytes() }
     );
     const fresh = await readSlug(written[0]!.slug);
-    assert.equal(fresh.supersedes, "old");
+    assert.deepEqual(fresh.supersedes, ["old"]);
     assert.equal(
       (fresh as unknown as Record<string, unknown>)["source"],
       "auto"

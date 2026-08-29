@@ -32,6 +32,9 @@ const MIN_CANDIDATE_CONFIDENCE = 0.6;
 const MIN_IMPORTANCE = 1;
 const MAX_IMPORTANCE = 5;
 
+/** At most this many slugs one dream candidate may supersede. */
+export const MAX_SUPERSEDES_PER_CANDIDATE = 8;
+
 export interface MemoryDreamOptions extends MemoryPersistDeps {
   readonly memoryDir: string;
   readonly llm: MemoryExtractLlm;
@@ -65,7 +68,23 @@ export async function runMemoryDream(
   const candidates = parseDreamCandidates(raw);
   if (candidates.length === 0) return { ops: [], written: [] };
 
-  const ops = decideMemoryOps(candidates, scan.entries);
+  const liveSlugs = new Set(live.map((entry) => entry.slug));
+  const supercedeOps: MemoryOp[] = [];
+  const decideCandidates: MemoryCandidate[] = [];
+  for (const candidate of candidates) {
+    const targets = resolveReplaces(candidate.replaces, liveSlugs);
+    if (targets.length > 0) {
+      supercedeOps.push({ kind: "SUPERSEDE", supersedes: targets, candidate });
+    } else {
+      // Absent / empty / all-unknown `replaces`: the conservative decide
+      // table decides — never a SUPERSEDE from this path.
+      decideCandidates.push(candidate);
+    }
+  }
+  const ops: MemoryOp[] = [
+    ...supercedeOps,
+    ...decideMemoryOps(decideCandidates, scan.entries),
+  ];
   const written = await persistMemoryOps(opts.memoryDir, ops, {
     ...(opts.now ? { now: opts.now } : {}),
     ...(opts.randomBytes ? { randomBytes: opts.randomBytes } : {}),
@@ -95,7 +114,7 @@ export function buildDreamPrompt(
     "Combine near-duplicates and keep the most accurate affirmative fact.",
     "Return only candidates that should replace or update an existing entry.",
     "Do not invent facts, promote entries, or use tools.",
-    'Reply with a JSON array: { "title": string, "body": string, "type": string, "importance": 1-5, "confidence": 0-1 }.',
+    'Reply with a JSON array: { "title": string, "body": string, "type": string, "importance": 1-5, "confidence": 0-1, "replaces": string[] (optional slugs this candidate supersedes) }.',
     "",
     "--- live entries (tool_result data) ---",
     rendered.join("\n"),
@@ -140,12 +159,49 @@ function toCandidate(raw: unknown): MemoryCandidate | null {
   if (confidence < MIN_CANDIDATE_CONFIDENCE) return null;
   if (validateAffirmativePhrasing(title, body) !== null) return null;
 
+  const replaces = parseReplaces(value.replaces);
   return {
     title,
     body,
     type: normalizeMemoryType(value.type),
     importance: clampImportance(value.importance),
+    ...(replaces ? { replaces } : {}),
   };
+}
+
+/**
+ * Read the optional `replaces` field: absent / non-array / empty → none;
+ * non-string elements are dropped; an all-invalid array → none.
+ */
+function parseReplaces(value: unknown): readonly string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const ids = value
+    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+    .map((v) => v.trim());
+  return ids.length > 0 ? ids : undefined;
+}
+
+/**
+ * Filter a candidate's `replaces` ids onto the live store. Unknown slugs are
+ * skipped without failing the turn, duplicates collapse, and the list is
+ * capped at MAX_SUPERSEDES_PER_CANDIDATE. Zero valid ids → empty array, so
+ * the candidate falls through to the decide path.
+ */
+function resolveReplaces(
+  replaces: readonly string[] | undefined,
+  liveSlugs: ReadonlySet<string>
+): string[] {
+  if (!replaces || replaces.length === 0) return [];
+  const out: string[] = [];
+  for (const id of replaces) {
+    if (out.length === MAX_SUPERSEDES_PER_CANDIDATE) break;
+    if (!liveSlugs.has(id)) {
+      // EXIT: log-and-continue — an unknown slug is skipped, not fatal.
+      continue;
+    }
+    if (!out.includes(id)) out.push(id);
+  }
+  return out;
 }
 
 function clampImportance(value: unknown): number {
