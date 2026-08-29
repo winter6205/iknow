@@ -13,7 +13,7 @@
  * The test never runs the LLM loop: deps.executor is driven directly, the
  * same way the loop engine would call it (executeAll carries conversationId).
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -26,6 +26,8 @@ import type { LoopEngineDeps, ToolExecutionResult } from "../../src/harness/inde
 import type { IknowSettings } from "../../src/config/settings.ts";
 import { installTestSettingsSource } from "../_helpers/install-test-settings-source.ts";
 import { readFile, writeFile } from "node:fs/promises";
+import type { AnthropicNativeMessage } from "../../src/harness/index.ts";
+import type { SessionFileV1 } from "../../src/session-api/store/index.ts";
 
 // -- helpers -----------------------------------------------------------------
 
@@ -101,6 +103,19 @@ async function runMutate(
   return result;
 }
 
+async function persistDirtyRoot(
+  hub: SessionHub,
+  conversationId: string
+): Promise<void> {
+  const session = await store.load(conversationId);
+  await privateHub(hub).conditionalSave({
+    conversationId,
+    session,
+    result: completedResult(session.messages),
+    priorMessages: session.messages,
+  });
+}
+
 // -- switch ON -----------------------------------------------------------------
 
 describe("worktree isolation wiring (switch ON)", () => {
@@ -111,6 +126,7 @@ describe("worktree isolation wiring (switch ON)", () => {
 
     const deps = await ensure(hub, repo);
     const result = await runMutate(deps, conversationId);
+    await persistDirtyRoot(hub, conversationId);
 
     // visible, typed, non-empty failure exit — the write never reached the tool
     expect(result.kind).toBe("execution_failed");
@@ -142,7 +158,9 @@ describe("worktree isolation wiring (switch ON)", () => {
 
     const deps = await ensure(hub, repo);
     await runMutate(deps, c1);
+    await persistDirtyRoot(hub, c1);
     await runMutate(deps, c2);
+    await persistDirtyRoot(hub, c2);
 
     const wt1 = join(repo, ".iknow", "worktrees", c1);
     const wt2 = join(repo, ".iknow", "worktrees", c2);
@@ -161,6 +179,7 @@ describe("worktree isolation wiring (switch ON)", () => {
 
     const firstDeps = await ensure(hub, repo);
     await runMutate(firstDeps, conversationId); // intercepted + rebind
+    await persistDirtyRoot(hub, conversationId);
 
     // next turn: ensureDeps resolves the rebound root → engine rooted at the worktree
     const file = await store.load(conversationId);
@@ -188,6 +207,7 @@ describe("worktree isolation wiring (T4 — passthrough)", () => {
     // T3 flow: first mutate on the main repo → tree + rebind
     const firstDeps = await ensure(hub, repo);
     await runMutate(firstDeps, conversationId);
+    await persistDirtyRoot(hub, conversationId);
     const file = await store.load(conversationId);
     const reboundRoot = file.workspaceRoot!;
     const worktreesBefore = git(repo, "worktree", "list");
@@ -216,6 +236,7 @@ describe("worktree isolation wiring (T4 — passthrough)", () => {
 
     const deps = await ensure(hub, repo);
     await runMutate(deps, c1); // creates wt1 and rebinds c1
+    await persistDirtyRoot(hub, c1);
     const wt1 = (await store.load(c1)).workspaceRoot!;
     const worktreesBefore = git(repo, "worktree", "list");
     const head1 = git(wt1, "rev-parse", "HEAD").trim();
@@ -330,6 +351,7 @@ describe("review High-2 — hub reuses the startup settings object across rebind
     // main-root engine: armed from the pinned object → intercept + rebind
     const deps = await ensure(hub, repo);
     const result = await runMutate(deps, c1);
+    await persistDirtyRoot(hub, c1);
     expect(result.kind).toBe("execution_failed");
     expect(result.message).toContain("[worktree_isolation]");
     const wt1 = (await store.load(c1)).workspaceRoot!;
@@ -417,5 +439,155 @@ describe("review High-1 — injected deps rebuild at the rebound root (TUI seam)
     const deps = await ensure(hub, wtRoot);
     expect(deps).toBe(stubDeps);
     expect(builtAt).toEqual([]);
+  });
+});
+
+// -- workspace-root-required T3: Hub-owned dirty-root persistence ------------
+
+type HubPrivate = {
+  provisionWorktree: (ctx: {
+    conversationId: string;
+    root: string;
+  }) => Promise<string>;
+  markWorktreeRootDirty: (opts: {
+    conversationId: string;
+    currentRoot: string;
+    provisionedRoot: string;
+  }) => void;
+  conditionalSave: (opts: {
+    conversationId: string;
+    session: SessionFileV1;
+    result: {
+      finalText: string | null;
+      messages: ReadonlyArray<AnthropicNativeMessage>;
+      turnCount: number;
+      stopReason: string;
+      lastUsage: null;
+    };
+    priorMessages: ReadonlyArray<AnthropicNativeMessage>;
+  }) => Promise<boolean>;
+};
+
+function privateHub(hub: SessionHub): HubPrivate {
+  return hub as unknown as HubPrivate;
+}
+
+function completedResult(
+  messages: ReadonlyArray<AnthropicNativeMessage> = []
+): HubPrivate["conditionalSave"] extends (
+  opts: infer T
+) => Promise<boolean>
+  ? T extends { result: infer R }
+    ? R
+    : never
+  : never {
+  return {
+    finalText: "done",
+    messages,
+    turnCount: 1,
+    stopReason: "completed",
+    lastUsage: null,
+  } as never;
+}
+
+describe("workspace-root-required T3 — Hub dirty-root conditional save", () => {
+  it("provision marks a changed root without writing the session until conditional save", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId } = await makeHubWithSession(repo);
+
+    const reboundRoot = await privateHub(hub).provisionWorktree({
+      conversationId,
+      root: repo,
+    });
+
+    expect(reboundRoot).toBe(join(repo, ".iknow", "worktrees", conversationId));
+    expect((await store.load(conversationId)).workspaceRoot).toBe(repo);
+
+    const session = await store.load(conversationId);
+    await privateHub(hub).conditionalSave({
+      conversationId,
+      session,
+      result: completedResult(),
+      priorMessages: session.messages,
+    });
+
+    expect((await store.load(conversationId)).workspaceRoot).toBe(reboundRoot);
+  });
+
+  it("unchanged provision does not create dirty work, and provision failure leaves the root unchanged", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId } = await makeHubWithSession(repo);
+    const privateApi = privateHub(hub);
+
+    const saveSpy = vi.spyOn(store, "save");
+    privateApi.markWorktreeRootDirty({
+      conversationId,
+      currentRoot: repo,
+      provisionedRoot: repo,
+    });
+    const session = await store.load(conversationId);
+    const result = {
+      ...completedResult(session.messages),
+      turnCount: 0,
+      stopReason: "cancelled",
+      finalText: null,
+    };
+    expect(
+      await privateApi.conditionalSave({
+        conversationId,
+        session,
+        result,
+        priorMessages: session.messages,
+      })
+    ).toBe(false);
+    expect(saveSpy).not.toHaveBeenCalled();
+    saveSpy.mockRestore();
+
+    const plain = mkdtempSync(join(tmpdir(), "iknow-wt-hub-t3-plain-"));
+    roots.push(plain);
+    await expect(
+      privateApi.provisionWorktree({ conversationId, root: plain })
+    ).rejects.toMatchObject({ kind: "not_a_git_repo" });
+    expect((await store.load(conversationId)).workspaceRoot).toBe(repo);
+  });
+
+  it("retains a dirty root when conditional save fails, then consumes it after retry succeeds", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId } = await makeHubWithSession(repo);
+    const privateApi = privateHub(hub);
+    const reboundRoot = join(repo, ".iknow", "worktrees", conversationId);
+    privateApi.markWorktreeRootDirty({
+      conversationId,
+      currentRoot: repo,
+      provisionedRoot: reboundRoot,
+    });
+    const session = await store.load(conversationId);
+    const failedSave = vi
+      .spyOn(store, "save")
+      .mockRejectedValueOnce({
+        kind: "write_failed",
+        conversation_id: conversationId,
+      });
+
+    await expect(
+      privateApi.conditionalSave({
+        conversationId,
+        session,
+        result: completedResult(),
+        priorMessages: session.messages,
+      })
+    ).rejects.toMatchObject({ kind: "write_failed" });
+    failedSave.mockRestore();
+
+    await privateApi.conditionalSave({
+      conversationId,
+      session,
+      result: completedResult(),
+      priorMessages: session.messages,
+    });
+    expect((await store.load(conversationId)).workspaceRoot).toBe(reboundRoot);
   });
 });

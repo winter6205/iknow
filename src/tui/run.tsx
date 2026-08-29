@@ -53,8 +53,6 @@ import {
   resolveGraphMode,
 } from "../harness/graph/mode.js";
 import { loadIknowSettings } from "../config/settings.js";
-import { createTaskWorktreeProvisioner } from "../session-api/worktree-rebind.js";
-import { SessionStore } from "../session-api/store/index.js";
 import { resolveVerifyConfig } from "../session-api/serve.js";
 import { createEnvLoader, type EnvLoader } from "../config/env-loader.js";
 import type { IknowEnv } from "../config/env.js";
@@ -275,13 +273,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       resolveGraphMode({ settings: startupSettings.graph })
     );
 
-    // Review High-1 (2026-08-29):worktree isolation host 缝 —— provision
-    // 负责建 task worktree + 仅本会话根改绑（session-api SSOT）。开关读取
-    // 在 build-engine 启动加载点（经 depsOpts.settings）；OFF 时门禁不装配，
-    // provisioner 空转。store 与 bridge 的 SessionStore 同池（dataDir）。
-    const worktreeProvisioner = createTaskWorktreeProvisioner({
-      store: new SessionStore(dataDir),
-    });
+    // The initial TUI engine is built before createTuiBridge, so bind this
+    // host seam late to the Hub that owns dirty-root persistence. Mutates
+    // cannot reach the seam until the bridge has been created below.
+    const bridgeRef: { hub?: ReturnType<typeof createTuiBridge>["hub"] } = {};
     const worktreeIsolation = {
       provision: ({
         conversationId,
@@ -290,7 +285,11 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         conversationId?: string;
         root: string;
       }) =>
-        worktreeProvisioner.provision({ conversationId, root: sessionRoot }),
+        bridgeRef.hub?.provisionWorktree({
+          conversationId,
+          root: sessionRoot,
+        }) ??
+        Promise.reject(new Error("TUI Hub is not ready for worktree provision")),
     };
 
     const depsOpts: BuildTuiDepsOptions = {
@@ -339,7 +338,6 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // /quit 路径由 shutdownExtensions 兜底释放（幂等，重复 stop 无害）。
     // Review High-1:late-bound hub 引用 —— combinedShutdown 在 bridge 创建前
     // 注册，重建引擎的 shutdown 收口经 bridgeRef 转发。
-    const bridgeRef: { hub?: ReturnType<typeof createTuiBridge>["hub"] } = {};
     const combinedShutdown = async (): Promise<void> => {
       envLoader?.stop();
       if (shutdown) await shutdown();

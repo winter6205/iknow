@@ -59,6 +59,7 @@ import {
   createTaskWorktreeProvisioner,
   type TaskWorktreeProvisioner,
 } from "./worktree-rebind.js";
+import type { WorktreeProvisionContext } from "../harness/isolation/worktree-gate.js";
 import type { AskUser } from "../harness/permission/types.js";
 import type {
   ServeAskUserHandle,
@@ -639,6 +640,8 @@ export class SessionHub {
   private readonly store: SessionStore;
   /** ADR-0037 T3:task worktree 建树 + 仅本会话根改绑的 host 缝。 */
   private readonly worktreeProvisioner: TaskWorktreeProvisioner;
+  /** T3: roots returned by provision but not yet persisted with the turn. */
+  private readonly dirtyWorktreeRoots = new Map<string, string>();
   private cachedDeps: LoopEngineDeps | undefined;
   private readonly defaults: {
     jsonMode: boolean;
@@ -804,10 +807,42 @@ export class SessionHub {
     // buildProductionEngine / ensureDeps 兜底路径注入 provision 缝。T4:
     // 会话已在本会话 task worktree 的 passthrough / 外来根 fail-closed
     // 都由 provision 按会话锚定，hub 不传 conversation-agnostic 标记。
-    this.worktreeProvisioner = createTaskWorktreeProvisioner({ store: this.store });
+    // Root persistence belongs to this Hub's dirty-root conditional-save
+    // protocol. The provisioner only creates/returns the task worktree here.
+    this.worktreeProvisioner = createTaskWorktreeProvisioner({});
   }
 
   // -- public API --------------------------------------------------------------
+
+  /**
+   * Hub-visible provision seam for harness hosts (including TUI). A
+   * successful changed result is recorded for this conversation and is
+   * persisted only by the next conditional save.
+   */
+  async provisionWorktree(ctx: WorktreeProvisionContext): Promise<string> {
+    const provisionedRoot = await this.worktreeProvisioner.provision(ctx);
+    if (ctx.conversationId !== undefined) {
+      this.markWorktreeRootDirty({
+        conversationId: ctx.conversationId,
+        currentRoot: ctx.root,
+        provisionedRoot,
+      });
+    }
+    return provisionedRoot;
+  }
+
+  private markWorktreeRootDirty(opts: {
+    readonly conversationId: string;
+    readonly currentRoot: string;
+    readonly provisionedRoot: string;
+  }): void {
+    if (opts.provisionedRoot === opts.currentRoot) return;
+    // Keep the first successful changed root until its save succeeds. This
+    // prevents a concurrent provision result from replacing a retryable root.
+    if (!this.dirtyWorktreeRoots.has(opts.conversationId)) {
+      this.dirtyWorktreeRoots.set(opts.conversationId, opts.provisionedRoot);
+    }
+  }
 
   /**
    * Snapshot of pending ask requests (process-global; v0 serve hosts one
@@ -2207,37 +2242,66 @@ export class SessionHub {
     readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
   }): Promise<boolean> {
     const { conversationId, session, result, priorMessages } = opts;
-    if (!shouldPersistCheckpoint(result, priorMessages)) return false;
+    const shouldPersist = shouldPersistCheckpoint(result, priorMessages);
+    const dirtyRoot = this.dirtyWorktreeRoots.get(conversationId);
+    if (!shouldPersist && dirtyRoot === undefined) return false;
     const now = new Date().toISOString();
-    const turnCount = session.turnCount + result.turnCount;
-    const interruptReason = toInterruptReason(result.stopReason);
-    // appendCheckpoint compares record.messagesCount to session.messages.length
-    // for its delta=0 guard, so it must receive the session BEFORE new messages
-    // are merged in (otherwise delta = 0 would always be false and the guard
-    // never fires). Compute the checkpointed session first, then merge the
-    // post-run messages / turnCount / metadata on top.
-    const withCheckpoint =
-      interruptReason === null
-        ? session
-        : appendCheckpoint(session, {
-            turnIndex: turnCount,
-            messagesCount: result.messages.length,
-            interruptedAt: now,
-            interruptReason,
-            ...(result.lastUsage !== null
-              ? { lastUsage: result.lastUsage }
-              : {}),
-          });
-    const updated: SessionFileV1 = {
-      ...withCheckpoint,
-      messages: result.messages,
-      turnCount,
-      updatedAt: now,
-      schemaVersion: CURRENT_SCHEMA_VERSION,
-      title: extractTitle(result.messages),
-    };
-    await this.store.save({ id: conversationId, file: updated });
+    const updated = shouldPersist
+      ? (() => {
+          const turnCount = session.turnCount + result.turnCount;
+          const interruptReason = toInterruptReason(result.stopReason);
+          // appendCheckpoint compares record.messagesCount to
+          // session.messages.length for its delta=0 guard, so it must receive
+          // the session BEFORE new messages are merged in.
+          const withCheckpoint =
+            interruptReason === null
+              ? session
+              : appendCheckpoint(session, {
+                  turnIndex: turnCount,
+                  messagesCount: result.messages.length,
+                  interruptedAt: now,
+                  interruptReason,
+                  ...(result.lastUsage !== null
+                    ? { lastUsage: result.lastUsage }
+                    : {}),
+                });
+          return {
+            ...withCheckpoint,
+            messages: result.messages,
+            turnCount,
+            updatedAt: now,
+            schemaVersion: CURRENT_SCHEMA_VERSION,
+            title: extractTitle(result.messages),
+          };
+        })()
+      : session;
+    await this.consumeDirtyRootOnSave(conversationId, async (root) => {
+      // EXIT: report-save-failure-and-retain-dirty-root — SessionStore's
+      // typed error propagates; consumeDirtyRootOnSave clears only after this
+      // write resolves successfully.
+      await this.store.save({
+        id: conversationId,
+        file:
+          root === undefined
+            ? updated
+            : { ...updated, workspaceRoot: root },
+      });
+    });
     return true;
+  }
+
+  private async consumeDirtyRootOnSave(
+    conversationId: string,
+    save: (root: string | undefined) => Promise<void>
+  ): Promise<void> {
+    const dirtyRoot = this.dirtyWorktreeRoots.get(conversationId);
+    await save(dirtyRoot);
+    if (
+      dirtyRoot !== undefined &&
+      this.dirtyWorktreeRoots.get(conversationId) === dirtyRoot
+    ) {
+      this.dirtyWorktreeRoots.delete(conversationId);
+    }
   }
 
   /**
@@ -2305,7 +2369,7 @@ export class SessionHub {
       // worktree 由 provision fail-closed（typed foreign_worktree）。
       worktreeIsolation: {
         provision: ({ conversationId, root: sessionRoot }) =>
-          this.worktreeProvisioner.provision({ conversationId, root: sessionRoot }),
+          this.provisionWorktree({ conversationId, root: sessionRoot }),
       },
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
@@ -2402,7 +2466,7 @@ export class SessionHub {
       // passthrough 由 provision 按会话锚定，不设 initiallyBound。
       worktreeIsolation: {
         provision: ({ conversationId, root: sessionRoot }) =>
-          this.worktreeProvisioner.provision({ conversationId, root: sessionRoot }),
+          this.provisionWorktree({ conversationId, root: sessionRoot }),
       },
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),

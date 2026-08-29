@@ -80,7 +80,7 @@ OVERALL: PASS
    - **Acceptance:** `markWorktreeRootDirty` records only a changed provision result; `consumeDirtyRootOnSave` supplies that root to conditional save and clears it only after a successful write; unchanged provision does not dirty; provision failure leaves the current root unchanged; save failure emits its typed EXIT path and retains the dirty root; TUI provisioning exercises the same Hub-visible seam; no reload-if-defined design or god persist function is introduced.
    - **Completion:** A successful rebind survives reload through one conditional save path, concurrent first mutation cannot lose the dirty root, and failure leaves enough state for a safe retry.
    - [blocks: T2]
-   - Status: [ ] pending
+   - Status: [x] done (2026-08-29)
 
 ## Required decomposition
 
