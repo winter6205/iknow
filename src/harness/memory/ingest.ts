@@ -162,6 +162,7 @@ export function buildExtractPrompt(
     "Never output a candidate that repeats or paraphrases the project or user instruction files already loaded in every session.",
     "Never keep what the repository itself shows: architecture, file paths, or fixes already merged.",
     "Keep corrections the user made to your work, and preferences the user explicitly confirmed.",
+    "Include keywords in the conversation's own language — when the conversation is not in English, carry its key terms verbatim in the candidate's title or body so lexical recall can match.",
     "",
     "Write every fact in affirmative phrasing — state what to do, not what to avoid.",
     "Prohibitions belong in the permission policy, not in memory. A candidate phrased as a",

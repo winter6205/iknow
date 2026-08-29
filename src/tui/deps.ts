@@ -34,6 +34,7 @@ import { createJsonlTraceService } from "../harness/trace/index.js";
 import type {
   AutoMemoryHook,
   MemoryLiveFlags,
+  OverlayPrefetchFn,
 } from "../harness/memory/index.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
 import type { AskUser } from "../harness/permission/types.js";
@@ -206,7 +207,7 @@ export async function buildTuiDeps(
     /** D-α T5:graph 装配快照句柄（仅注入 graphMode 时透出，交给 hub 拍 round）。 */
     graphAssembly?: GraphAssembly;
     autoMemory?: AutoMemoryHook;
-    overlayMemoryPrefetch?: (query: string) => Promise<string>;
+    overlayMemoryPrefetch?: OverlayPrefetchFn;
     memoryFlags?: MemoryLiveFlags;
   }
 > {

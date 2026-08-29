@@ -43,7 +43,10 @@ import {
 import {
   applyHostPrefetch,
   notifyAutoMemory,
+  recoverInjectedMemoryIds,
+  recordInjectedMemoryIds,
   type AutoMemoryHook,
+  type OverlayPrefetchFn,
 } from "../harness/memory/index.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
@@ -160,9 +163,10 @@ export type ChatSessionOpts = {
   readonly autoMemory?: AutoMemoryHook;
   /**
    * auto-memory low-trust read: prepend scored bodies onto the user turn.
-   * Absent (default OFF / ask) → query is passed through unchanged.
+   * Absent (default OFF / ask) → query is passed through unchanged. T1:
+   * hosts pass `excludeIds` (session-level dedup) via the second argument.
    */
-  readonly overlayMemoryPrefetch?: (query: string) => Promise<string>;
+  readonly overlayMemoryPrefetch?: OverlayPrefetchFn;
 };
 
 export type ChatLineContext = {
@@ -207,8 +211,15 @@ export type ChatLineContext = {
   readonly autoMemory?: AutoMemoryHook;
   /**
    * auto-memory low-trust read: same ChatSessionOpts field, runChatSession 透传.
+   * T1: hosts pass `excludeIds` (session-level dedup) via the second argument.
    */
-  readonly overlayMemoryPrefetch?: (query: string) => Promise<string>;
+  readonly overlayMemoryPrefetch?: OverlayPrefetchFn;
+  /**
+   * auto-memory T1: session-level prefetch dedup state — per-conversation
+   * sets of already-injected memory ids. Allocated lazily by processChatLine
+   * (runChatSession 的 ctx 存活整个 REPL,天然 per-conversation);测试可省略。
+   */
+  prefetchInjectedIds?: Map<string, Set<string>>;
   /**
    * T3 (#689): CLI _client_ idle/busy-guard for continue. Shared mutable box
    * so a concurrent processChatLine can refuse continue without aborting the
@@ -624,6 +635,25 @@ export async function processChatLine(
   }
 }
 
+/**
+ * auto-memory T1: per-conversation injected-id set for the chat path, lazily
+ * recovered from ctx.state.messages on first attach — the same messages that
+ * seedResumeMessages seeded on `--resume` (cold start from checkpoint /
+ * session JSONL). Empty set is cached too; recovery failure degrades to an
+ * empty set (log-and-continue inside recoverInjectedMemoryIds).
+ */
+function chatPrefetchExcludeIds(ctx: ChatLineContext): Set<string> {
+  const conversationId = ctx.state.conversationId ?? "chat";
+  if (ctx.prefetchInjectedIds === undefined) {
+    ctx.prefetchInjectedIds = new Map<string, Set<string>>();
+  }
+  const cached = ctx.prefetchInjectedIds.get(conversationId);
+  if (cached !== undefined) return cached;
+  const recovered = recoverInjectedMemoryIds(ctx.state.messages);
+  ctx.prefetchInjectedIds.set(conversationId, recovered);
+  return recovered;
+}
+
 async function runChatQueryLine(
   opts: ProcessChatLineOpts
 ): Promise<ProcessChatLineResult> {
@@ -665,6 +695,18 @@ async function runChatQueryLine(
         };
   const outputs: string[] = [];
   let lastStatusLine: string | undefined;
+  // auto-memory T1: session-level prefetch dedup — exclude ids already
+  // injected in this conversation (lazy resume recovery from ctx.state.messages
+  // on first attach) and record what this turn actually injects (overlay-
+  // bearing attach results only; identity fallbacks add nothing).
+  const prefetchExcludeIds = chatPrefetchExcludeIds(ctx);
+  const attachPrefetch = (text: string): Promise<string> =>
+    applyHostPrefetch(text, ctx.overlayMemoryPrefetch, {
+      excludeIds: prefetchExcludeIds,
+    }).then((effective) => {
+      recordInjectedMemoryIds(prefetchExcludeIds, effective);
+      return effective;
+    });
   // F4: shared /goal auto-loop skeleton. Chat's `reloadSession` is a no-op
   // (in-memory ctx.state.messages already mutated inside `run`); hub reloads
   // via store.load. Each host controls its own error semantics (chat converts
@@ -699,7 +741,7 @@ async function runChatQueryLine(
           verifyDispatch !== undefined && ctx.verifyConfig !== undefined
             ? await runVerifyLoop({
                 runFn: (text, o) =>
-                  applyHostPrefetch(text, ctx.overlayMemoryPrefetch).then(
+                  attachPrefetch(text).then(
                     (effective) =>
                       runHarness(effective, ctx.deps, o?.signal, {
                         priorMessages: o?.priorMessages ?? priorMessages,
@@ -727,7 +769,7 @@ async function runChatQueryLine(
                           : {}),
                       }),
               })
-            : await applyHostPrefetch(query, ctx.overlayMemoryPrefetch).then(
+            : await attachPrefetch(query).then(
                 (effective) =>
                   runHarness(effective, ctx.deps, ctx.abortController?.signal, {
                     priorMessages,

@@ -33,7 +33,10 @@ import type {
   SubAgentManager,
   SubagentInfo,
 } from "../harness/subagent/manager.js";
-import type { AutoMemoryHook } from "../harness/memory/index.js";
+import type {
+  AutoMemoryHook,
+  OverlayPrefetchFn,
+} from "../harness/memory/index.js";
 import type { VerifyConfig } from "../harness/verify/index.js";
 import type { GraphAssembly } from "../harness/graph/assembly.js";
 import type { VerifyAnswerView } from "../session-api/contract.js";
@@ -179,7 +182,7 @@ export interface CreateTuiBridgeOptions {
    * 缺席(默认 OFF)→ hub 不调,行为逐字节不变。
    */
   readonly autoMemory?: AutoMemoryHook;
-  readonly overlayMemoryPrefetch?: (query: string) => Promise<string>;
+  readonly overlayMemoryPrefetch?: OverlayPrefetchFn;
   /** #128 T8: 验证闭环配置。缺席 = 透明关闭 (postMessage 走原 run, SC7)。 */
   readonly verifyConfig?: VerifyConfig;
   /**
