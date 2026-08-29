@@ -287,6 +287,12 @@ _Avoid_: 默认开启；当成对 ADR-0014「模型实际所见」不变量的�
 **crash 取证无条件**: `subagent_spawn`/`subagent_state_change`/`subagent_stop` 生命周期事件与 stderr 指针文件在所有产品入口（含 chat REPL）落盘，与主循环 content trace 的入口开关解耦。ADR-0035（对 ADR-0003 D10 的范围修正）。
 _Avoid_: 把生命周期事件绑回 `--trace-out`；把该扩张理解为 content trace 进 chat REPL
 
+**worktree isolation mode**（`settings.isolation.worktreeOnMutate`，默认 OFF）: 全局隔离开关——OFF 时会话行为与今日完全一致；ON 时会话可只读主仓，首次 mutate（写路径）被拦截 → `git worktree add` 建 task worktree（含 task 分支）→ **session worktree rebind** 到该树，此后本会话 mutate 只进该根；已绑定则放行，不建第二棵树。只在启动加载点读取一次；config 层不读 git、不持会话状态；改绑不隐式重载 project settings。建树/绑定失败与主仓非 git 仓库一律 fail-closed：typed 可见错误，不静默放行写主仓。task worktree / 分支名已存在 → 报错不覆盖。ADR-0037（对 ADR-0023「worktree/多根只读推迟」的窄面 reopen；git worktree ≠ product workspace 多根）。
+_Avoid_: 默认 ON；把 git worktree 混成 serve 主根或 `workspaceRoot` 多根；config 层读 git 或持会话状态；改绑后隐式重载 settings；建树失败静默写主仓；只建树不改绑会话；同名树静默覆盖
+
+**session worktree rebind**: worktree isolation mode ON 下首次 mutate 成功后，把**当前会话**生效的根锚（cwd / `workspaceRoot` 取值）切到本会话 task worktree 的动作；只影响本会话——不 checkout 其它会话 / 其它 worktree 的 HEAD，push / 开 PR 不拖动主仓或其它 worktree 当前分支。同会话并发首次 mutate 建树幂等（一棵树、一个 task 分支）。ADR-0037。
+_Avoid_: 改绑波及其它会话；把 rebind 当 serve 主根重绑（ADR-0023 unbound / recents 语义不变）；让 rebind 触发 settings 重载；把改绑后的根错当成 product workspace 多根
+
 ## Relationships
 
 - **run() messages -> adapter streaming arm -> interpretMessage**: harness LLM path（流事件以 `HarnessStreamEvent` 经 `onStream` 暴露）
@@ -318,6 +324,7 @@ _Avoid_: 把生命周期事件绑回 `--trace-out`；把该扩张理解为 conte
 - **stderr 指针 vs 父可见信封**: 信封 summary 只留尾部预览进模型视野；全量诊断在 stderr .log，经指针引用，不进模型
 - **blob 引用模式 vs append-only messages**: blob 是 trace 存储层去重；messages 权威历史不受影响，TraceService 仍记录「模型实际所见」
 - **crash 取证无条件 vs ADR-0003 D10**: 生命周期三类事件 ≠ content trace；D10 的 chat REPL 排除只对 content trace 继续成立
+- **worktree isolation mode vs workspaceRoot vs workspace（serve 主根）**: git worktree 是会话级 mutate 物理隔离；`workspaceRoot` 是 per-root 状态锚（ADR-0019）；serve 主根是显式选定锚（ADR-0023）。rebind 只切本会话生效根，不改锚规则本身
 - **user.md vs user-level AGENTS.md vs 项目 AGENTS.md**: 画像与用户级行为约定同根 `~/.iknow/`、对所有项目生效；项目仓库根 `AGENTS.md` 叠在用户级之上且项目优先；都不是记忆库事实文件
 
 ## Flagged ambiguities
