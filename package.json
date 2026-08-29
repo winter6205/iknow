@@ -6,7 +6,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "iknow": "dist/cli.js"
+    "iknow": "dist/cli.js",
+    "iknow-trace-mcp": "scripts/iknow-trace-mcp.cjs"
   },
   "exports": {
     ".": {
@@ -72,6 +73,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
     "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "@opentui/core": "0.5.1",
     "@opentui/react": "0.5.1",
     "ajv": "^8.17.1",
@@ -83,6 +85,7 @@
     "string-width": "^8.2.2",
     "undici": "^7.29.0",
     "vscode-jsonrpc": "^9.0.1",
-    "wrap-ansi": "^8.1.0"
+    "wrap-ansi": "^8.1.0",
+    "zod": "^4.5.2"
   }
 }
