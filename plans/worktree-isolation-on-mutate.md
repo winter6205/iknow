@@ -72,7 +72,7 @@ OVERALL: yes — 全 5 项 verdict 通过，可进入 T1 实施；后续 bullet 
    - **Inherits:** T1；缺失或非 true → 隔离门禁不启用
    - **Surface:** `src/config`（settings 加载）
    - **Acceptance:** 默认关闭时全套 mutate 路径与今日一致；设为开启后可被运行时读到（门禁可仍为后续 bullet）
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T1]
 
 3. **Mutate gate: block → worktree → rebind session** — tag: `[implementation]`
