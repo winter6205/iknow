@@ -68,7 +68,11 @@ export async function drainPendingSubagents(
         return `${SUBAGENT_DRAIN_PREFIX}${taskId} result: ${visible.summary}\n\n${visible.result}`;
       })
       .join("\n\n");
-  } catch {
+  } catch (error) {
+    // EXIT: host drain is intentionally non-throwing; "" is the documented
+    // no-result/degraded channel, while terminal wake failures are reported
+    // separately by host-wake.
+    void error;
     return "";
   }
 }

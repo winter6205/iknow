@@ -2,6 +2,18 @@ import type { SubAgentManager } from "./manager.js";
 import type { SubAgentTerminalNotice } from "./mailbox.js";
 import { errorMessage } from "../errors.js";
 
+function reportObserverDiagnostic(scope: string, error: unknown): void {
+  try {
+    process.stderr.write(
+      `[subagent-wake] ${scope}: ${errorMessage(error)}\n`
+    );
+  } catch (diagnosticError) {
+    // EXIT: diagnostics are best-effort; a broken stderr must not rethrow into
+    // a mailbox callback or cleanup path.
+    void diagnosticError;
+  }
+}
+
 export type SubagentWakeFailureReason = "wakeFailed" | "watcherUnavailable";
 
 /**
@@ -66,7 +78,8 @@ export function queryableSubagentTaskIds(
   if (manager === undefined) return [];
   try {
     return manager.drainCompleted().map(({ taskId }) => taskId);
-  } catch {
+  } catch (error) {
+    reportObserverDiagnostic("queryable task lookup failed", error);
     return [];
   }
 }
@@ -108,9 +121,8 @@ export function createSubagentWake(
   const reportError = (error: unknown): void => {
     try {
       options.onError?.(error);
-    } catch {
-      // Error reporting is an observer and must not become an unhandled
-      // rejection from the mailbox callback.
+    } catch (observerError) {
+      reportObserverDiagnostic("onError observer failed", observerError);
     }
   };
 
@@ -195,8 +207,8 @@ export function createSubagentWake(
       pendingTaskIds.clear();
       try {
         unsubscribe();
-      } catch {
-        // Unsubscription is cleanup; a broken watcher must not escape dispose.
+      } catch (unsubscribeError) {
+        reportObserverDiagnostic("unsubscribe failed", unsubscribeError);
       }
     },
   });

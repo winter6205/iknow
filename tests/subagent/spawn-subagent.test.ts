@@ -303,6 +303,20 @@ describe("spawn_subagent — AciToolDef 元数据", () => {
     expect(timeoutDesc).toMatch(/2\s*h/i);
   });
 
+  it("wait schema describes terminal wake as the async completion path", () => {
+    const { manager } = makeFakeManager();
+    const tool = createSpawnSubAgentTool({ manager });
+    const schema = tool.inputSchema as {
+      properties: Record<string, { description?: string }>;
+    };
+    const waitDescription = schema.properties.wait?.description ?? "";
+
+    expect(waitDescription).toMatch(/terminal completion/i);
+    expect(waitDescription).toMatch(/silent run/i);
+    expect(waitDescription).toMatch(/explicit status query/i);
+    expect(waitDescription).not.toMatch(/poll with subagent_result/i);
+  });
+
   it("#357 T1: inputSchema 含 sandboxRoot 字段(string,可选)", () => {
     const { manager } = makeFakeManager();
     const tool = createSpawnSubAgentTool({ manager });

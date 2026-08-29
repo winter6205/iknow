@@ -54,6 +54,7 @@ import {
   createSubagentWake,
   queryableSubagentTaskIds,
   toSubagentWakeError,
+  type SubagentWake,
   type SubagentWakeError,
 } from "../harness/subagent/host-wake.js";
 import {
@@ -1893,6 +1894,7 @@ async function runInteractive(opts: {
 
   // Serialize turns: never start next line / prompt until previous finishes.
   let chain: Promise<void> = Promise.resolve();
+  let wakeController: SubagentWake | undefined;
 
   const handle = async (line: string): Promise<void> => {
     busy = true;
@@ -2005,10 +2007,11 @@ async function runInteractive(opts: {
       }
     } finally {
       busy = false;
+      wakeController?.flush();
     }
   };
 
-  const wakeController = createSubagentWake({
+  wakeController = createSubagentWake({
     manager: ctx.subagentManager,
     isIdle: () => !busy && !closed,
     wake: async () => {

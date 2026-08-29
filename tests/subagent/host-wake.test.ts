@@ -148,6 +148,60 @@ describe("createSubagentWake", () => {
     controller.dispose();
   });
 
+  it("diagnoses an observer failure without rejecting the mailbox callback", async () => {
+    const { manager, publish } = fakeManager();
+    const stderrWrite = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(() => true);
+    const controller = createSubagentWake({
+      manager,
+      isIdle: () => true,
+      wake: async () => {
+        throw new Error("wake failed");
+      },
+      onError: () => {
+        throw new Error("observer failed");
+      },
+    });
+
+    try {
+      expect(() => publish(notice("observer-failure"))).not.toThrow();
+      await vi.waitFor(() =>
+        expect(stderrWrite).toHaveBeenCalledWith(
+          expect.stringContaining("onError observer failed")
+        )
+      );
+    } finally {
+      controller.dispose();
+      stderrWrite.mockRestore();
+    }
+  });
+
+  it("diagnoses an unsubscribe failure without throwing from dispose", () => {
+    const stderrWrite = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(() => true);
+    const controller = createSubagentWake({
+      manager: undefined,
+      subscribe: () => {
+        return () => {
+          throw new Error("unsubscribe failed");
+        };
+      },
+      isIdle: () => true,
+      wake: async () => {},
+    });
+
+    try {
+      expect(() => controller.dispose()).not.toThrow();
+      expect(stderrWrite).toHaveBeenCalledWith(
+        expect.stringContaining("unsubscribe failed")
+      );
+    } finally {
+      stderrWrite.mockRestore();
+    }
+  });
+
   it("reports a waitFor rejection as an undelivered, queryable failure", async () => {
     const { manager, publish } = fakeManager();
     const onError = vi.fn();

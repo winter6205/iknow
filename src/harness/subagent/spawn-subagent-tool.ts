@@ -168,7 +168,7 @@ export function createSpawnSubAgentTool(
         wait: {
           type: "boolean",
           description:
-            "When true (default), block until the sub-agent finishes and return the parent-visible short handoff (summary, changed paths, status, and stop_reason when available). When false, return {task_id} immediately and poll with subagent_result.",
+            "When true (default), block until the sub-agent finishes and return the parent-visible short handoff (summary, changed paths, status, and stop_reason when available). When false, return {task_id} immediately; in chat/tui/serve, terminal completion wakes a silent run through the host mailbox/subscription. Use subagent_result only for an explicit status query.",
         },
         maxTurns: {
           type: "integer",
