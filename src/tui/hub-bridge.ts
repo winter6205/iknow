@@ -178,6 +178,11 @@ export interface CreateTuiBridgeOptions {
   readonly dataDir?: string;
   /** T1: resolved workspace root used when lazily creating a session. */
   readonly workspaceRoot?: string;
+  /**
+   * T6:稳定 productRoot（启动 workspace）。单向透传给 SessionHub，不在
+   * bridge 内重算 MCP 路径策略。
+   */
+  readonly productRoot?: string;
   /** harness deps（产品路径传 buildTuiDeps 结果；测试注入 stub deps）。 */
   readonly deps: LoopEngineDeps;
   readonly defaultJsonMode?: boolean;
@@ -268,6 +273,10 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     // T1: the bridge's resolved root is also the hub's engine/state anchor.
     ...(opts.workspaceRoot !== undefined
       ? { workspaceRoot: opts.workspaceRoot }
+      : {}),
+    // T6:稳定 productRoot 单向透传（缺席 → hub 回退 workspaceRoot）。
+    ...(opts.productRoot !== undefined
+      ? { productRoot: opts.productRoot }
       : {}),
     // Review High-1 (2026-08-29):注入 deps 的启动根 + per-root 重建缝透传。
     ...(opts.engineRoot !== undefined

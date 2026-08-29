@@ -14,8 +14,16 @@
  * same way the loop engine would call it (executeAll carries conversationId).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -439,6 +447,99 @@ describe("review High-1 — injected deps rebuild at the rebound root (TUI seam)
     const deps = await ensure(hub, wtRoot);
     expect(deps).toBe(stubDeps);
     expect(builtAt).toEqual([]);
+  });
+});
+
+// -- T6: stable productRoot through serve hub production assembly --------------
+
+describe("T6 — hub productRoot stable across per-root rebuild", () => {
+  it("buildProductionEngine keeps productRoot as mcpConfigRoot while workspaceRoot follows task root", async () => {
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const productRoot = makeGitRepo();
+    const wtRoot = join(productRoot, ".iknow", "worktrees", "conv-t6");
+    await mkdir(wtRoot, { recursive: true });
+    await mkdir(join(productRoot, ".iknow"), { recursive: true });
+    await writeFile(
+      join(productRoot, ".iknow", "mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          "from-product": { type: "stdio", command: "node" },
+        },
+      }),
+      "utf8"
+    );
+    await mkdir(join(wtRoot, ".iknow"), { recursive: true });
+    await writeFile(
+      join(wtRoot, ".iknow", "mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          "from-task": { type: "stdio", command: "node" },
+        },
+      }),
+      "utf8"
+    );
+
+    const hub = new SessionHub({
+      store,
+      askUser: createNoAskUser(),
+      surface: "serve",
+      workspaceRoot: productRoot,
+      productRoot,
+    });
+    await hub.bindWorkspace(productRoot);
+
+    type EngineEntry = {
+      mcpRoots?: { workspaceRoot: string; mcpConfigRoot: string };
+    };
+    const priv = hub as unknown as {
+      getOrBuildEngine: (root: string) => Promise<EngineEntry>;
+      mcpManager?: { status: () => ReadonlyArray<{ name: string }> };
+      shutdown: () => Promise<void>;
+    };
+
+    try {
+      const mainEntry = await priv.getOrBuildEngine(productRoot);
+      expect(mainEntry.mcpRoots).toEqual({
+        workspaceRoot: productRoot,
+        mcpConfigRoot: productRoot,
+      });
+
+      const wtEntry = await priv.getOrBuildEngine(wtRoot);
+      expect(wtEntry.mcpRoots).toEqual({
+        workspaceRoot: wtRoot,
+        mcpConfigRoot: productRoot,
+      });
+
+      // Active manager after worktree build still only sees product config.
+      const names = (priv.mcpManager?.status() ?? []).map((s) => s.name);
+      expect(names).toContain("from-product");
+      expect(names).not.toContain("from-task");
+    } finally {
+      await priv.shutdown();
+    }
+  });
+
+  it("serve.ts / hub.ts：productRoot 字段贯通，reload 不读 process.cwd() 作 config root", () => {
+    const serveSrc = readFileSync(
+      join(import.meta.dirname, "..", "..", "src", "session-api", "serve.ts"),
+      "utf8"
+    );
+    const hubSrc = readFileSync(
+      join(import.meta.dirname, "..", "..", "src", "session-api", "hub.ts"),
+      "utf8"
+    );
+    expect(serveSrc).toMatch(/productRoot/);
+    expect(hubSrc).toMatch(/readonly productRoot\?/);
+    expect(hubSrc).toMatch(/productRoot:/);
+    // reloadMcp 不得再用 process.cwd() 当 mcpConfigRoot 求值（注释提及可）
+    const reloadIdx = hubSrc.indexOf("async reloadMcp");
+    assert.ok(reloadIdx >= 0);
+    const reloadBlock = hubSrc.slice(reloadIdx, reloadIdx + 700);
+    expect(reloadBlock).not.toMatch(
+      /mcpConfigRoot[^\n]*=[^\n]*process\.cwd\(\)|process\.cwd\(\)\s*[;,]|mcpConfigRoot:\s*process\.cwd\(\)/
+    );
+    expect(reloadBlock).not.toMatch(/\?\?\s*process\.cwd\(\)/);
+    expect(reloadBlock).toMatch(/mcpConfigRoot/);
   });
 });
 

@@ -166,7 +166,7 @@ MCP server 的运行时失败继续映射到现有 `McpServerState = "failed"` �
    - **Surface:** `cli`, `session-api/serve`, `tui`, and their thin runtime/bridge assembly
    - **Acceptance:** 三个产品入口初次装配都捕获并透传稳定 `productRoot`；rebind rebuild 保留该 root、只把当前 `workspaceRoot` 切到 task worktree，并让新 engine 的 stdio cwd/ACI FS 跟随 task root、配置读取仍留在 product root；runtime wrapper 与 hub bridge 只透传参数，不从本地 cwd 重算 MCP policy。
    - **Completion headroom:** 实现者可以选择 closure、依赖对象或 host callback 的参数形态；只要三入口在初次装配与 rebuild 的可观察 roots 满足同一合同即可。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T5]
 
 7. **hub active-root reload transaction** — tag: `[implementation]`

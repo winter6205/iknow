@@ -122,3 +122,29 @@ describe("buildTuiDeps — worktree isolation host seam (review High-1)", () => 
     expect(result.message ?? "").not.toContain("[worktree_isolation]");
   });
 });
+
+describe("buildTuiDeps — T6 productRoot passthrough (worktree-mcp-rebind-lifecycle)", () => {
+  const roots: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      roots.splice(0).map((r) => rm(r, { recursive: true, force: true }))
+    );
+  });
+
+  test("opts.productRoot 透传到 buildHarnessEngine；rebuild 形态保留 productRoot", async () => {
+    const { readFileSync } = await import("node:fs");
+    const depsSrc = readFileSync(
+      join(import.meta.dirname, "..", "..", "src", "tui", "deps.ts"),
+      "utf8"
+    );
+    expect(depsSrc).toMatch(/readonly productRoot\?:\s*string/);
+    expect(depsSrc).toMatch(/opts\.productRoot/);
+    // reload 不得再用裸 cwd 当 mcpConfigRoot
+    const reloadIdx = depsSrc.indexOf("const reload");
+    expect(reloadIdx).toBeGreaterThanOrEqual(0);
+    const reloadBlock = depsSrc.slice(reloadIdx, reloadIdx + 400);
+    expect(reloadBlock).toMatch(/mcpConfigRoot/);
+    expect(reloadBlock).not.toMatch(/mcpConfigRoot:\s*cwd\b/);
+  });
+});

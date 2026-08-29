@@ -256,3 +256,116 @@ describe("mcpServerOfToolName（#361 Phase D server 反解）", () => {
     expect(mcpServerOfToolName("mcp__solo")).toBe("mcp__solo");
   });
 });
+
+describe("T6 — buildTuiDeps stable productRoot threading", () => {
+  const roots: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      roots.splice(0).map((r) => rm(r, { recursive: true, force: true }))
+    );
+  });
+
+  test("productRoot ≠ workspaceRoot：config 读 product，manager cwd 跟 task workspace", async () => {
+    const productRoot = await mkdtemp(join(tmpdir(), "iknow-tui-t6-prod-"));
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "iknow-tui-t6-task-"));
+    roots.push(productRoot, workspaceRoot);
+
+    await mkdir(join(productRoot, ".iknow"), { recursive: true });
+    await writeFile(
+      join(productRoot, ".iknow", "mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          "from-product": { type: "stdio", command: "node" },
+        },
+      }),
+      "utf8"
+    );
+    await mkdir(join(workspaceRoot, ".iknow"), { recursive: true });
+    await writeFile(
+      join(workspaceRoot, ".iknow", "mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          "from-task": { type: "stdio", command: "node" },
+        },
+      }),
+      "utf8"
+    );
+
+    const captured: Array<Record<string, unknown>> = [];
+    let capturedExt: TuiExtensions | undefined;
+    const built = await buildTuiDeps(makeBundle(), {
+      askUser: createNoAskUser(),
+      userHome: join(productRoot, "home"),
+      cwd: workspaceRoot,
+      workspaceRoot,
+      productRoot,
+      createMcpManager: (opts) => {
+        captured.push(opts as Record<string, unknown>);
+        return createMcpManager(opts);
+      },
+      createMcpClient: () => ({
+        connect: async () => {},
+        listTools: async () => [],
+        callTool: async () => ({ result: { content: [] } }),
+        close: async () => {},
+        onListChanged: () => {},
+        onClose: () => {},
+        listResources: async () => ({ resources: [] }),
+        readResource: async () => ({ contents: [] }),
+      }),
+      onExtensions: (ext) => {
+        capturedExt = ext;
+      },
+    });
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.workspaceRoot).toBe(workspaceRoot);
+    const cfg = captured[0]!.config as Array<{ name: string }>;
+    expect(cfg.map((s) => s.name)).toContain("from-product");
+    expect(cfg.map((s) => s.name)).not.toContain("from-task");
+
+    // reload 仍从 productRoot 读配置，不漂移到 task cwd
+    await mkdir(join(productRoot, ".iknow"), { recursive: true });
+    await writeFile(
+      join(productRoot, ".iknow", "mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          "from-product": { type: "stdio", command: "node" },
+          "after-reload": { type: "stdio", command: "node" },
+        },
+      }),
+      "utf8"
+    );
+    await expect(capturedExt!.mcp.reload()).resolves.toBeUndefined();
+    const statusNames = capturedExt!.mcp.status().map((s) => s.name);
+    expect(statusNames).toContain("after-reload");
+    expect(statusNames).not.toContain("from-task");
+
+    if (built.shutdown) await built.shutdown();
+  });
+
+  test("run.tsx / hub-bridge：productRoot 透传；rebuild 只换 workspaceRoot", async () => {
+    const { readFileSync } = await import("node:fs");
+    const runSrc = readFileSync(
+      join(import.meta.dirname, "..", "..", "src", "tui", "run.tsx"),
+      "utf8"
+    );
+    const bridgeSrc = readFileSync(
+      join(import.meta.dirname, "..", "..", "src", "tui", "hub-bridge.ts"),
+      "utf8"
+    );
+    const depsSrc = readFileSync(
+      join(import.meta.dirname, "..", "..", "src", "tui", "deps.ts"),
+      "utf8"
+    );
+    expect(depsSrc).toMatch(/readonly productRoot\?/);
+    expect(runSrc).toMatch(/productRoot/);
+    expect(bridgeSrc).toMatch(/productRoot/);
+    const buildEngineIdx = runSrc.indexOf("buildEngine:");
+    expect(buildEngineIdx).toBeGreaterThanOrEqual(0);
+    const block = runSrc.slice(buildEngineIdx, buildEngineIdx + 700);
+    expect(block).toMatch(/workspaceRoot:\s*root/);
+    expect(block).not.toMatch(/productRoot:\s*root\b/);
+  });
+});

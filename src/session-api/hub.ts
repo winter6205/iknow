@@ -576,6 +576,13 @@ export type SessionHubOptions = {
    */
   readonly workspaceRoot?: string;
   /**
+   * T6 / worktree-mcp-rebind-lifecycle:稳定主 checkout / bind root。
+   * 首次装配捕获后跨 rebind 不变；`buildProductionEngine` 透传给
+   * `buildHarnessEngine.productRoot`，由此派生 `mcpConfigRoot`。缺席 →
+   * 回退 `workspaceRoot` / 当前装配 root（T6 前单根形态）。
+   */
+  readonly productRoot?: string;
+  /**
    * #128 T8:验证闭环配置 (settings.verify 段经 serve.ts 构造传入)。
    * 缺席 = 透明关闭, postMessage 走原 run 路径逐字节不变 (SC7);
    * 配置时每轮 run 被 runVerifyLoop 包裹 (仅 StopReason=completed 触发
@@ -621,6 +628,8 @@ export type SessionHubOptions = {
     graphAssembly?: GraphAssembly;
     autoMemory?: AutoMemoryHook;
     overlayMemoryPrefetch?: OverlayPrefetchFn;
+    /** T6 最小接线：生产装配透出的双根；T7 reload 事务消费。 */
+    mcpRoots?: import("../harness/mcp/roots.js").McpRoots;
   }>;
   /**
    * serve-workspace T3: recents/trust 名单的 home 根（落
@@ -682,6 +691,11 @@ export class SessionHub {
   private lastConversationId: string | undefined;
   /** review-fix (M1 / H1): per-root state anchor 缓存；serve 入口解析后透传。 */
   private readonly workspaceRoot: string | undefined;
+  /**
+   * T6:稳定 productRoot（启动 bind root）。跨 per-root 重建不变；
+   * `buildProductionEngine` / reload 只消费它派生的 mcpConfigRoot。
+   */
+  private readonly productRoot: string | undefined;
   /** #128 T8: 验证闭环配置（settings.verify 段；缺席 = 透明关闭）。 */
   private readonly verifyConfig: VerifyConfig | undefined;
   /** #356 High#4: built.shutdown 缓存（组合句柄；ensureDeps 懒取，hub.shutdown 触发）。 */
@@ -691,7 +705,11 @@ export class SessionHub {
   private mcpManager: McpManager | undefined;
   private aciCatalog: AciCatalog | undefined;
   private mcpHome: string | undefined;
-  private mcpCwd: string | undefined;
+  /**
+   * T6 最小接线：最近一次生产装配的双根（T7 将改为 per-active-engine）。
+   * reload 读 `mcpConfigRoot`，不再用含糊的 cwd / process.cwd()。
+   */
+  private activeMcpRoots: import("../harness/mcp/roots.js").McpRoots | undefined;
   /**
    * settings-hot-reload（T3）:env 源（缺省 → ensureDeps 内部 loadIknowEnv）。
    * reloadFromEnv 用它拿新 env 重建 adapter；onEnvChange 在成功替换后触发。
@@ -735,6 +753,7 @@ export class SessionHub {
         shutdown?: () => Promise<void>;
         subagentManager?: SubAgentManager;
         graphAssembly?: GraphAssembly;
+        mcpRoots?: import("../harness/mcp/roots.js").McpRoots;
       }>)
     | undefined;
   /** serve picker bind (T2); session file workspaceRoot is the engine Map key. */
@@ -760,6 +779,7 @@ export class SessionHub {
       graphAssembly?: GraphAssembly;
       autoMemory?: AutoMemoryHook;
       overlayMemoryPrefetch?: OverlayPrefetchFn;
+      mcpRoots?: import("../harness/mcp/roots.js").McpRoots;
     }
   >();
   /** Per-conversation serialization (spec A15). */
@@ -808,6 +828,8 @@ export class SessionHub {
     this.overlayMemoryPrefetch = opts.overlayMemoryPrefetch;
     // review-fix (M1 / H1): per-root state anchor 缓存。
     this.workspaceRoot = opts.workspaceRoot;
+    // T6:稳定 productRoot（缺席 → workspaceRoot，保持单根形态可编译可跑）。
+    this.productRoot = opts.productRoot ?? opts.workspaceRoot;
     // An entry-resolved root is already a valid bind for hosts that assemble
     // the Hub with a root (serve/TUI). Picker-driven hosts can still call
     // bindWorkspace later to change it.
@@ -2077,9 +2099,15 @@ export class SessionHub {
     await this.ensureDeps();
     if (this.mcpManager) {
       const home = this.mcpHome ?? homedir();
-      const cwd = this.mcpCwd ?? process.cwd();
-      // T3:项目级只读 mcpConfigRoot;T7 会换成 active engine mcpRoots。当前仍透传 cwd。
-      const cfg = await loadMcpConfig({ home, mcpConfigRoot: cwd });
+      // T6:mcpConfigRoot 来自 active mcpRoots / 稳定 productRoot —— 禁止
+      // process.cwd() 第二套策略。T7 会串行化 active-root reload 事务。
+      const mcpConfigRoot =
+        this.activeMcpRoots?.mcpConfigRoot ?? this.productRoot;
+      if (mcpConfigRoot === undefined) {
+        // EXIT: no stable config root → skip reload, retain current manager
+        return this.listMcpServers();
+      }
+      const cfg = await loadMcpConfig({ home, mcpConfigRoot });
       await this.mcpManager.reload(cfg.servers);
     }
     return this.listMcpServers();
@@ -2424,6 +2452,7 @@ export class SessionHub {
     graphAssembly?: GraphAssembly;
     autoMemory?: AutoMemoryHook;
     overlayMemoryPrefetch?: OverlayPrefetchFn;
+    mcpRoots?: import("../harness/mcp/roots.js").McpRoots;
   }> {
     const hit = this.engineByRoot.get(root);
     if (hit) return hit;
@@ -2437,8 +2466,12 @@ export class SessionHub {
       graphAssembly: built.graphAssembly,
       autoMemory: built.autoMemory,
       overlayMemoryPrefetch: built.overlayMemoryPrefetch,
+      ...(built.mcpRoots ? { mcpRoots: built.mcpRoots } : {}),
     };
     this.engineByRoot.set(root, entry);
+    if (built.mcpRoots) {
+      this.activeMcpRoots = built.mcpRoots;
+    }
     this.subagentManager = this.subagentManager ?? built.subagentManager;
     if (this.subagentManager !== undefined) {
       this.attachSubagentWake(this.subagentManager);
@@ -2456,6 +2489,7 @@ export class SessionHub {
     graphAssembly?: GraphAssembly;
     autoMemory?: AutoMemoryHook;
     overlayMemoryPrefetch?: OverlayPrefetchFn;
+    mcpRoots?: import("../harness/mcp/roots.js").McpRoots;
   }> {
     if (!this.askUser) {
       throw new Error(
@@ -2463,12 +2497,15 @@ export class SessionHub {
       );
     }
     const env = this.envProvider ? this.envProvider() : loadIknowEnv();
+    // T6:productRoot 稳定；workspaceRoot/cwd/sandboxRoot 跟随当前 task root。
+    const productRoot = this.productRoot ?? this.workspaceRoot ?? root;
     const built = await buildHarnessEngine({
       env,
       askUser: this.askUser,
       cwd: root,
       sandboxRoot: root,
       workspaceRoot: root,
+      productRoot,
       // Review High-2 (hard req 9): reuse the startup settings object — a
       // worktree-rooted loadIknowSettings({cwd}) would silently drop project
       // settings (`.iknow/` is gitignored inside the worktree).
@@ -2500,7 +2537,9 @@ export class SessionHub {
     this.mcpManager = built.mcpManager;
     this.aciCatalog = built.catalog;
     this.mcpHome = homedir();
-    this.mcpCwd = root;
+    if (built.mcpRoots) {
+      this.activeMcpRoots = built.mcpRoots;
+    }
     return built;
   }
 
@@ -2589,6 +2628,8 @@ export class SessionHub {
       // 让 build-engine 的 bash fence 对齐 serve 的 identity seed / dataDir
       // (同一 per-root 锚点,不落回 sandboxRoot|cwd)。
       ...(this.workspaceRoot ? { workspaceRoot: this.workspaceRoot } : {}),
+      // T6:稳定 productRoot（缺席时 build-engine 桥接为 workspaceRoot）。
+      ...(this.productRoot ? { productRoot: this.productRoot } : {}),
       todoDir: resolveSessionTodoDir({ surface: "serve" }),
       ...(this.traceOut !== undefined
         ? {
@@ -2604,7 +2645,9 @@ export class SessionHub {
     this.mcpManager = built.mcpManager;
     this.aciCatalog = built.catalog;
     this.mcpHome = homedir();
-    this.mcpCwd = process.cwd();
+    if (built.mcpRoots) {
+      this.activeMcpRoots = built.mcpRoots;
+    }
     // #356 T7: serve 懒取 subagent manager — buildHarnessEngine 在 surface !==
     // "ask" 时自建;constructor 注入优先 (测试缝),未注入则取 built 的。
     this.subagentManager = this.subagentManager ?? built.subagentManager;
