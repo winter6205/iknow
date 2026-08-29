@@ -80,9 +80,10 @@ describe("createSubagentWake", () => {
   it("does not wake session B for a terminal notice from session A", async () => {
     const { manager, publish } = fakeManager();
     const wake = vi.fn(async () => {});
+    let activeSession = "session-b";
     const controller = createSubagentWake({
       manager,
-      conversationId: "session-b",
+      conversationId: () => activeSession,
       isIdle: () => true,
       wake,
     });
@@ -100,6 +101,9 @@ describe("createSubagentWake", () => {
     });
     await vi.waitFor(() => expect(wake).toHaveBeenCalledTimes(1));
 
+    activeSession = "session-a";
+    controller.flush();
+    await vi.waitFor(() => expect(wake).toHaveBeenCalledTimes(2));
     controller.dispose();
   });
 

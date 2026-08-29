@@ -98,10 +98,10 @@ export interface SubagentWake {
 export interface CreateSubagentWakeOptions {
   readonly manager: SubAgentManager | undefined;
   /**
-   * Optional session scope for a host. Notices for other conversations are
-   * retained by the mailbox and can be replayed when that session is active.
+   * Optional session scope for a host. A function keeps one subscription
+   * usable while an interactive host switches sessions.
    */
-  readonly conversationId?: string;
+  readonly conversationId?: string | (() => string | undefined);
   readonly subscribe?: SubAgentManager["subscribe"];
   readonly isIdle: () => boolean;
   readonly wake: () => Promise<void>;
@@ -120,13 +120,18 @@ export interface CreateSubagentWakeOptions {
 export function createSubagentWake(
   options: CreateSubagentWakeOptions
 ): SubagentWake {
-  let pending = false;
-  const pendingTaskIds = new Set<string>();
+  const pendingTaskIds = new Map<string, string | undefined>();
+  let pendingAnonymous = false;
   let running = false;
   let scheduled = false;
   let disposed = false;
   const enabled =
     options.manager !== undefined || options.subscribe !== undefined;
+  const scoped = options.conversationId !== undefined;
+  const currentConversationId = (): string | undefined =>
+    typeof options.conversationId === "function"
+      ? options.conversationId()
+      : options.conversationId;
 
   const reportError = (error: unknown): void => {
     try {
@@ -138,11 +143,12 @@ export function createSubagentWake(
 
   const reportFailure = (
     reason: SubagentWakeFailureReason,
-    error: unknown
+    error: unknown,
+    taskIds: readonly string[],
+    clearAnonymous = false
   ): void => {
-    const taskIds = [...pendingTaskIds];
-    pending = false;
-    pendingTaskIds.clear();
+    for (const taskId of taskIds) pendingTaskIds.delete(taskId);
+    if (clearAnonymous) pendingAnonymous = false;
     reportError(
       toSubagentWakeError(error, {
         reason,
@@ -154,40 +160,82 @@ export function createSubagentWake(
 
   const flush = (): void => {
     scheduled = false;
-    if (disposed || running || !pending) return;
+    if (
+      disposed ||
+      running ||
+      (pendingTaskIds.size === 0 && !pendingAnonymous)
+    )
+      return;
+    let conversationId: string | undefined;
+    try {
+      conversationId = currentConversationId();
+    } catch (error) {
+      reportFailure(
+        "watcherUnavailable",
+        error,
+        [...pendingTaskIds.keys()],
+        true
+      );
+      return;
+    }
+    const taskIds = [...pendingTaskIds].reduce<string[]>(
+      (matched, [taskId, noticeConversationId]) => {
+        if (
+          !scoped ||
+          (conversationId !== undefined &&
+            noticeConversationId === conversationId)
+        ) {
+          matched.push(taskId);
+        }
+        return matched;
+      },
+      []
+    );
+    const anonymousMatches =
+      pendingAnonymous && (!scoped || conversationId !== undefined);
+    if (taskIds.length === 0 && !anonymousMatches) return;
     let idle: boolean;
     try {
       idle = options.isIdle();
     } catch (error) {
-      reportFailure("watcherUnavailable", error);
+      reportFailure("watcherUnavailable", error, taskIds, anonymousMatches);
       return;
     }
     if (!idle) return;
-    pending = false;
+    for (const taskId of taskIds) pendingTaskIds.delete(taskId);
+    if (anonymousMatches) pendingAnonymous = false;
     running = true;
     let wakeResult: Promise<void>;
     try {
       wakeResult = options.wake();
     } catch (error) {
       running = false;
-      reportFailure("wakeFailed", error);
+      reportFailure("wakeFailed", error, taskIds, anonymousMatches);
       return;
     }
     void Promise.resolve(wakeResult)
       .catch((error: unknown) => {
-        reportFailure("wakeFailed", error);
+        reportError(
+          toSubagentWakeError(error, {
+            reason: "wakeFailed",
+            taskIds,
+            queryable: taskIds.length > 0 && options.manager !== undefined,
+          })
+        );
       })
       .finally(() => {
         running = false;
-        if (!pending) pendingTaskIds.clear();
-        if (pending && !disposed) queueMicrotask(flush);
+        if (pendingTaskIds.size > 0 && !disposed) queueMicrotask(flush);
       });
   };
 
   const request = (notice?: SubAgentTerminalNotice): void => {
     if (disposed || !enabled) return;
-    if (notice !== undefined) pendingTaskIds.add(notice.taskId);
-    pending = true;
+    if (notice !== undefined) {
+      pendingTaskIds.set(notice.taskId, notice.conversationId);
+    } else {
+      pendingAnonymous = true;
+    }
     if (!scheduled) {
       scheduled = true;
       queueMicrotask(flush);
@@ -201,6 +249,7 @@ export function createSubagentWake(
       unsubscribe =
         subscribe((notice) => {
           if (
+            typeof options.conversationId === "function" ||
             options.conversationId === undefined ||
             notice.conversationId === options.conversationId
           ) {
@@ -208,7 +257,7 @@ export function createSubagentWake(
           }
         }) ?? (() => {});
     } catch (error) {
-      reportFailure("watcherUnavailable", error);
+      reportFailure("watcherUnavailable", error, [], true);
     }
   }
 
@@ -218,7 +267,7 @@ export function createSubagentWake(
     dispose: (): void => {
       if (disposed) return;
       disposed = true;
-      pending = false;
+      pendingAnonymous = false;
       pendingTaskIds.clear();
       try {
         unsubscribe();
