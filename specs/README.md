@@ -15,6 +15,7 @@
 
 - `security-guardrails.md` — 安全护栏（权限三层 · 沙箱 · 中断/超时）
 - `trace-service.md` — trace 观测（JSONL + 查询 API · A-scope）
+- `query-trace-tool-results.md` — `query_trace` 从 llm_call.messages 投影 tool_result（不写 tool_call.result）；plan: `plans/query-trace-tool-results.md`
 - `120-session-persistence.md` — 会话持久化（schema v1→v2 + `~/.iknow` 跨进程池）；Q1「不迁 JSONL」已被 `session-jsonl-resume.md` / ADR-0027 覆盖
 - `checkpoint-rewind.md` — 检查点回退 UX（picker / 双 Esc）；截断落盘语义被 `session-jsonl-resume.md` 覆盖
 - `session-jsonl-resume.md` — 会话 JSONL 账本（边写、process 补洞、rewind 留分支）
