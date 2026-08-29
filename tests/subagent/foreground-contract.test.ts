@@ -2,17 +2,17 @@
  * #361 / ADR-0014 — T11 边界测试 (契约「测试冲突清单」7 项逐条落实)。
  *
  *   C1: 注入 cap=4 时第 5 个并发 spawn → capacity ToolExecutionError
- *   C2: drain 空/多/阻塞后置终态/超时守卫 (host-drain async)
+ *   C2: drain 空/多/运行中立即空返/异常不抛 (host-drain non-blocking)
  *   C3: waitFor abort → SubAgentAbortError; 已终态 abort 无副作用
- *   C4: drain 中途 waitFor 拒绝 → 返回部分、不抛
+ *   C4: drain 不读取运行中任务且永不抛
  *   C5: wait:true 失败 envelope 作 ok 返回; abort → execution_failed:cancelled
  *   T13: PER_TASK_TIMEOUT_MS 对齐 (default 2 h = 7_200_000 ms)
  *   T12: messages_captured 三处置 true + coordinator 段 proactive 断言
  *
  * 时序:implementer A (subagent 层) 逐文件合入 manager.ts(已) / host-drain.ts /
- * spawn-subagent-tool.ts。C1/C3/T13 的 manager 面已就绪;handler 面与 drain
- * async 面待 A 合入。本文件断言均按 V1.5 契约编写 —— 未就绪部分维持红,
- * 待 A 合入后复跑转绿。T12 messages_captured 已在 loop-engine.ts 落地 → 绿。
+ * spawn-subagent-tool.ts。C1/C3/T13 的 manager 面已就绪;handler 面已就绪。
+ * 本文件断言按当前 V1.5 / T2 契约编写。T12 messages_captured 已在
+ * loop-engine.ts 落地 → 绿。
  */
 import { describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
@@ -107,7 +107,7 @@ describe("C1: 第 5 个并发 spawn → capacity ToolExecutionError", () => {
   });
 });
 
-describe("C2: drain 空/多/阻塞后置终态/超时守卫 (drain async)", () => {
+describe("C2: drain 空/多/运行中立即空返/异常不抛 (drain non-blocking)", () => {
   it("undefined manager → 立即返回 '' (无轮询)", async () => {
     const out = await drainPendingSubagents(undefined);
     expect(out).toBe("");
@@ -139,57 +139,17 @@ describe("C2: drain 空/多/阻塞后置终态/超时守卫 (drain async)", () =
     );
   });
 
-  it("无 completed + 后置 mock 终态 → drain 阻塞轮询至 ≥1 完成返回", async () => {
-    // drain 契约:仅 running → 每 pollMs 轮询 waitFor(firstActive)。
-    // review-fix S7:消除 real sleep(原 200ms setTimeout + elapsed >=150 断言
-    // CI 慢机 flaky)—— 改 immediate-terminal mock:waitFor 立即 resolve,
-    // drainCompleted 在第 N 个 poll cycle 后才返回 partial,断言 poll 数
-    // 代替时间断言,真值零延时。
-    let polls = 0;
-    const waitFor = async (_taskId: string): Promise<SubAgentEnvelope> => {
-      polls++;
-      return { status: "ok", summary: "late-A", result: "late-R" };
-    };
+  it("仍有 running worker → 立即返回 '' 且不调用 waitFor", async () => {
+    let waitCalls = 0;
     const fakeManager = baseManager({
-      waitFor,
-      drainCompleted: () =>
-        polls >= 3
-          ? [
-              {
-                taskId: "late",
-                envelope: { status: "ok", summary: "late-A", result: "late-R" },
-              },
-            ]
-          : [],
+      waitFor: async () => {
+        waitCalls++;
+        throw new Error("waitFor must not be called by host-drain");
+      },
       listActive: () => ["pending-1"],
     });
-    const out = await drainPendingSubagents(fakeManager, {
-      pollMs: 50,
-      timeoutMs: 5000,
-    });
-    expect(out).toContain("## Sub-agent late result: late-A");
-    expect(out).toContain("late-A");
-    // drain 串行:至少 3 个 poll cycle 才收到 partial —— 证明 drain 实际
-    // 阻塞轮询(polls=1 立即返 → 短路; polls=3 阻塞到位)。
-    expect(polls).toBeGreaterThanOrEqual(3);
-  });
-
-  it("永不终态 → timeoutMs 耗尽返回 '' (不抛)", async () => {
-    const fakeManager = baseManager({
-      waitFor: (_taskId: string, timeoutMs?: number) =>
-        new Promise<SubAgentEnvelope>((_, reject) => {
-          // 模拟 manager waitFor 自己的 poll 内超时:reject SubAgentWaitTimeoutError。
-          // drain catch 视为终态 + 重检 elapsed → drain 总超时 100ms 兜底。
-          setTimeout(() => reject(new Error("timeout")), timeoutMs ?? 20);
-        }),
-      drainCompleted: () => [],
-      listActive: () => ["always-running"],
-    });
-    const out = await drainPendingSubagents(fakeManager, {
-      pollMs: 20,
-      timeoutMs: 100,
-    });
-    expect(out).toBe("");
+    expect(await drainPendingSubagents(fakeManager)).toBe("");
+    expect(waitCalls).toBe(0);
   });
 });
 
@@ -228,16 +188,14 @@ describe("C3: waitFor abort → SubAgentAbortError; 已终态 abort 无副作用
   });
 });
 
-describe("C4: drain 中途 waitFor 拒绝 → 返回部分、不抛", () => {
-  it("一个 waitFor 拒绝 + 另一个 completed → 返回 completed 部分", async () => {
-    const waitFor = (taskId: string): Promise<SubAgentEnvelope> => {
-      if (taskId === "bad") {
-        return Promise.reject(new SubAgentAbortError("bad"));
-      }
-      return Promise.resolve({ status: "ok", summary: "ok", result: "r" });
-    };
+describe("C4: drain 不读取运行中任务且永不抛", () => {
+  it("running worker 的 waitFor 拒绝也不会被 host drain 调用", async () => {
+    let waitCalls = 0;
     const fakeManager = baseManager({
-      waitFor,
+      waitFor: async () => {
+        waitCalls++;
+        throw new SubAgentAbortError("bad");
+      },
       drainCompleted: () => [
         {
           taskId: "good",
@@ -246,12 +204,10 @@ describe("C4: drain 中途 waitFor 拒绝 → 返回部分、不抛", () => {
       ],
       listActive: () => ["bad"],
     });
-    const out = await drainPendingSubagents(fakeManager, {
-      pollMs: 20,
-      timeoutMs: 200,
-    });
+    const out = await drainPendingSubagents(fakeManager);
     expect(out).toContain("## Sub-agent good result: ok");
     expect(out).not.toContain("bad");
+    expect(waitCalls).toBe(0);
   });
 });
 
