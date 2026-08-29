@@ -731,3 +731,55 @@ describe("T4b: agent_status resume hydrate", () => {
     await app.destroy();
   }, 30_000);
 });
+
+// ---------------------------------------------------------------------------
+// ADR-0037 T5: session worktree 隔离现势行（改绑后可演示）
+// ---------------------------------------------------------------------------
+
+describe("ADR-0037 T5: worktree 隔离现势行", () => {
+  function sessionFileWithWorktreeRoot(): SessionFileV1 {
+    const messages: AnthropicNativeMessage[] = [
+      { role: "user", content: [{ type: "text", text: "用户问题" }] },
+      { role: "assistant", content: [{ type: "text", text: "答复" }] },
+    ];
+    return {
+      schemaVersion: 3,
+      conversation_id: "conv-wt-isolation",
+      messages,
+      jsonMode: false,
+      turnCount: 1,
+      updatedAt: "2026-08-29T00:00:00.000Z",
+      title: "用户问题",
+      cwd: "/repo/.iknow/worktrees/conv-wt-isolation",
+      sanitized_at: "2026-08-29T00:00:00.000Z",
+      checkpoints: [],
+      workspaceRoot: "/repo/.iknow/worktrees/conv-wt-isolation",
+    };
+  }
+
+  test("改绑后的会话恢复 → 现势行显示绑定的 task worktree 路径", async () => {
+    const file = sessionFileWithWorktreeRoot();
+    const app = await mountAppAsync(
+      [assistantResult({ texts: ["unused"] })],
+      makeDeps([assistantResult({ texts: ["unused"] })]),
+      undefined,
+      attachSession(file)
+    );
+    const frame = await untilFrame(
+      app.setup,
+      (f) => f.includes("/repo/.iknow/worktrees/conv-wt-isolation"),
+      8000
+    );
+    expect(frame).toContain("worktree:");
+    expect(frame).toContain("/repo/.iknow/worktrees/conv-wt-isolation");
+    await app.destroy();
+  }, 30_000);
+
+  test("未绑定（draft / 开关 OFF）→ 无 worktree 现势行（与今日一致）", async () => {
+    const app = await mountAppAsync([assistantResult({ texts: ["unused"] })]);
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+    const frame = app.setup.captureCharFrame();
+    expect(frame).not.toContain("worktree:");
+    await app.destroy();
+  }, 30_000);
+});

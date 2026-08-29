@@ -790,3 +790,62 @@ describe("hub-bridge listSubagents 投影（#358 T7）", () => {
     expect(bridge.listSubagents()).toBe(projection);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Review High-1 (2026-08-29): engineRoot + buildEngine 转发 —— rebind 后
+// per-turn 引擎重建在注入 deps 的 host（TUI）上生效
+// ---------------------------------------------------------------------------
+
+describe("hub-bridge engineRoot / buildEngine 转发（review High-1）", () => {
+  function ensure(
+    hub: ReturnType<typeof createTuiBridge>["hub"],
+    root?: string
+  ): Promise<LoopEngineDeps> {
+    return (
+      hub as unknown as {
+        ensureDeps: (root?: string) => Promise<LoopEngineDeps>;
+      }
+    ).ensureDeps.bind(hub)(root);
+  }
+
+  test("注入 deps + engineRoot：启动根返回注入 deps；rebind 根走 buildEngine 缝", async () => {
+    const injected = makeDeps([assistantResult({ texts: ["injected"] })]);
+    const rebuilt = makeDeps([assistantResult({ texts: ["rebuilt"] })]);
+    const builtAt: string[] = [];
+    const bridge = createTuiBridge({
+      deps: injected,
+      inflight: createInflightRegistry(),
+      engineRoot: "/main",
+      buildEngine: async (root) => {
+        builtAt.push(root);
+        return { deps: rebuilt };
+      },
+    });
+
+    // 启动根：注入 deps 原样返回（今日行为不变）
+    expect(await ensure(bridge.hub, "/main")).toBe(injected);
+    expect(builtAt).toEqual([]);
+
+    // rebind 后的 task worktree 根：per-root 重建经 buildEngine 缝
+    const reboundRoot = "/main/.iknow/worktrees/conv-1";
+    expect(await ensure(bridge.hub, reboundRoot)).toBe(rebuilt);
+    expect(builtAt).toEqual([reboundRoot]);
+  });
+
+  test("未传 engineRoot：注入分支保持今日短路语义（不重建）", async () => {
+    const injected = makeDeps([assistantResult({ texts: ["injected"] })]);
+    let built = 0;
+    const bridge = createTuiBridge({
+      deps: injected,
+      inflight: createInflightRegistry(),
+      buildEngine: async (root) => {
+        built += 1;
+        return { deps: injected, builtAt: root };
+      },
+    });
+    expect(
+      await ensure(bridge.hub, "/anywhere/.iknow/worktrees/conv-2")
+    ).toBe(injected);
+    expect(built).toBe(0);
+  });
+});

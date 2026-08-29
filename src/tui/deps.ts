@@ -38,6 +38,8 @@ import type {
 } from "../harness/memory/index.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
 import type { AskUser } from "../harness/permission/types.js";
+import type { WorktreeIsolationHostOpts } from "../harness/isolation/worktree-gate.js";
+import type { IknowSettings } from "../config/settings.js";
 import { homedir } from "node:os";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
 import type { McpServerStatus } from "../harness/mcp/manager.js";
@@ -124,6 +126,22 @@ export interface BuildTuiDepsOptions {
    * Phase C/D 消费（slash 候选派生、MCP 状态显示、退出路径收口）。
    */
   readonly onExtensions?: (ext: TuiExtensions) => void;
+  /**
+   * Review High-1 (2026-08-29 / ADR-0037)：worktree isolation host 缝 ——
+   * 透传给 buildHarnessEngine。开关本体由 build-engine 在启动加载点从
+   * `settings` 读取（硬要求 9）；ON 时 TUI 引擎的 mutate 被门禁拦截，provision
+   * 负责建 task worktree + 仅本会话根改绑（TUI hub 的 per-root 重建缝见
+   * run.tsx / hub-bridge）。缺席 → 不包装，行为与今日逐字节一致。
+   */
+  readonly worktreeIsolation?: WorktreeIsolationHostOpts;
+  /**
+   * Review High-2 (2026-08-29 / 硬要求 9)：启动装配点读取的 settings 对象。
+   * 透传给 buildHarnessEngine 的 `settings` 缝 —— rebind 后 per-root 重建的
+   * 引擎复用 run.tsx 传入的同一对象，worktree 内 `.iknow/` 缺席（gitignore）
+   * 也绝不隐式重载 project settings。缺席 → build-engine 自行缺省加载
+   * （与今日等价）。
+   */
+  readonly settings?: IknowSettings;
 }
 
 /**
@@ -262,6 +280,12 @@ export async function buildTuiDeps(
     ...(opts.createMcpManager ? { createMcpManager: opts.createMcpManager } : {}),
     // #337 Phase B 测试缝:MCP client 工厂覆盖。
     ...(opts.createMcpClient ? { createMcpClient: opts.createMcpClient } : {}),
+    // Review High-2 / High-1 (2026-08-29):启动装配 settings 对象 +
+    // worktree isolation host 缝透传（开关读取仍在 build-engine 启动加载点）。
+    ...(opts.settings ? { settings: opts.settings } : {}),
+    ...(opts.worktreeIsolation
+      ? { worktreeIsolation: opts.worktreeIsolation }
+      : {}),
   });
 
   // #337 Phase B / #361 Phase D：用 build-engine 透出的装配件构建 TUI 扩展面。
