@@ -5,7 +5,7 @@
 **Spec link:** `specs/serve-workspace.md` plus the operator-locked decisions in this task; this plan extends the existing serve-only wording to all session-backed surfaces.
 **Tracker:** Local plan fallback; no tracker edge is added by this planner.
 **ACR:** BLOCKED draft — the separate `architecture-change-reviewer` must replace every placeholder in the verdict block below. This plan does not self-certify ACR.
-**Per-ticket loop (all implementation bullets):** tdd → typecheck+tests → code-review → verification-before-completion → one commit on the ticket branch
+**Per-ticket loop (each task/tracer bullet separately):** tdd → typecheck+tests → code-review → verification-before-completion → exactly one commit on the ticket branch. This is not one commit for the whole feature: T0, T1, T2, and T3 are four separate logical tasks, and each lands in exactly one commit.
 
 ## Ownership and invariants
 
@@ -23,9 +23,15 @@ bounded-context-guardian: [TO BE FILLED BY ACR] — verify session-api owns Sess
 defensive-contract-validator: [TO BE FILLED BY ACR] — verify the named empty/negative/overflow/concurrent/exception cases cover create, execute, dirty-save, and legacy-reject without a cwd fallback.
 error-handling-enforcer: [TO BE FILLED BY ACR] — verify typed errors and EXIT comments exist for create-unbound, execute-unbound, legacy-invalid, provision-fail, and save-fail with dirty retention.
 complexity-anti-drift: [TO BE FILLED BY ACR] — verify requireBoundRoot, markWorktreeRootDirty, and consumeDirtyRootOnSave keep validation, dirty bookkeeping, and persistence separate; no god persist function.
-minimal-change-verifier: [TO BE FILLED BY ACR] — verify T0–T3 are four logical commits, with no product-code or scope changes outside the listed surfaces.
+minimal-change-verifier: [TO BE FILLED BY ACR] — verify T0–T3 are four separate logical commits, one commit per task/tracer bullet, with no product-code or scope changes outside the listed surfaces.
 OVERALL: [TO BE FILLED BY ACR] — implementation is blocked until the separate ACR returns all yes or N/A-with-reason.
 ```
+
+## Temporary ACR notes — commit sequencing
+
+> Sequencing resolves the apparent commit conflict: decision first in T0, then implementation bullets T1 → T2 → T3. This feature is not one commit for the whole feature. T0, T1, T2, and T3 are four separate logical tasks; each task/tracer bullet lands in exactly one commit. The per-ticket loop's “1 commit” rule applies per bullet, not across the whole plan.
+
+**Pending re-ACR:** the verdict block above remains for the next separate ACR agent; these notes do not self-certify any verdict.
 
 ## Boundary coverage required before implementation is considered complete
 
