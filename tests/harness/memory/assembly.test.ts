@@ -94,7 +94,10 @@ describe("assembleSystemPrompt", () => {
     await write(join(memoryDir, "mem-1.md"), "# mem");
     const promoteEntries = [memoryEntry("mem-1", "Memory one", "body one")];
 
-    const out = await assembleSystemPrompt(ctx({ promoteEntries }));
+    // specs/auto-memory-layering.md: promote segment is gated on autoExtract.
+    const out = await assembleSystemPrompt(
+      ctx({ promoteEntries, autoExtract: true })
+    );
 
     const iUser = out.indexOf("USER AGENTS");
     const iPriority = out.indexOf(PRIORITY_DECLARATION);
@@ -197,7 +200,9 @@ describe("assembleSystemPrompt", () => {
       memoryEntry("low", "Low priority", lowBody, 1),
       memoryEntry("high", "High priority", highBody, 9),
     ];
-    const out = await assembleSystemPrompt(ctx({ promoteEntries }));
+    const out = await assembleSystemPrompt(
+      ctx({ promoteEntries, autoExtract: true })
+    );
 
     const iHigh = out.indexOf("### High priority");
     const iLow = out.indexOf("### Low priority");
@@ -214,6 +219,50 @@ describe("assembleSystemPrompt", () => {
   it("omits the promote segment when there are no promotable entries", async () => {
     const out = await assembleSystemPrompt(ctx());
     assert.ok(!out.includes("### "), "no promote segment expected");
+  });
+
+  // -- promote gating (specs/auto-memory-layering.md SC7/SC8) -----------------
+
+  it("omits the promote segment when autoExtract is not true, even with eligible entries on disk (SC7)", async () => {
+    await write(
+      join(memoryDir, "note-1.md"),
+      serializeMemoryEntry(
+        memoryEntry("note-1", "Gated title", "GATED_BODY_TOKEN", 5)
+      )
+    );
+    await write(
+      join(memoryDir, "usage.json"),
+      JSON.stringify({
+        entries: { "note-1": { recall_count: 5, sessions: ["a", "b"] } },
+      })
+    );
+    await write(join(cwd, "AGENTS.md"), "PROJECT AGENTS");
+
+    const out = await assembleSystemPrompt(ctx());
+
+    assert.ok(
+      !out.includes("### Gated title"),
+      "autoExtract off → no promote segment"
+    );
+    assert.ok(!out.includes("GATED_BODY_TOKEN"));
+    assert.ok(out.includes("PROJECT AGENTS"), "AGENTS section unaffected");
+    assert.ok(
+      out.includes(EXISTENCE_POINTER),
+      "existence pointer unaffected (library non-empty)"
+    );
+  });
+
+  it("includes the promote segment when autoExtract is true with a promotable entry (SC8)", async () => {
+    const promoteEntries = [
+      memoryEntry("note-1", "Promoted title", "promoted body"),
+    ];
+    const out = await assembleSystemPrompt(
+      ctx({ promoteEntries, autoExtract: true })
+    );
+    assert.ok(
+      out.includes("### Promoted title"),
+      "autoExtract on + eligible entry → title present"
+    );
   });
 
   // -- user static layer root (#732) -----------------------------------------
