@@ -14,12 +14,21 @@
  */
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   MemoryError,
+  MemoryIOError,
+  listStoreEntries,
   memoryEntryUtility,
   parseMemoryEntry,
   planMemoryGc,
@@ -455,5 +464,174 @@ describe("runMemoryGc", () => {
     await runMemoryGc(memoryDir, { nowMs: NOW });
     const names = (await readdir(memoryDir)).filter((n) => n.endsWith(".md"));
     assert.deepEqual(names.sort(), ["a.md", "b.md"]);
+  });
+});
+
+// -- runMemoryGc: archive (specs/auto-memory-layering.md SC10/SC13/SC14/SC15) --
+
+describe("runMemoryGc — archive disabled entries out of the hot dir", () => {
+  // SC10
+  it("archives a disabled entry whose updated_at is 31 days old", async () => {
+    await put("stale", { disabled: true, updated_at: daysAgo(31) });
+    const result = await runMemoryGc(memoryDir, { nowMs: NOW });
+    assert.deepEqual(result.archived, ["stale"]);
+    const hotNames = (await readdir(memoryDir)).filter((n) =>
+      n.endsWith(".md")
+    );
+    assert.ok(
+      !hotNames.includes("stale.md"),
+      "the slug must have left the hot dir"
+    );
+    const archived = parseMemoryEntry(
+      await readFile(join(memoryDir, "archive", "stale.md"), "utf8")
+    );
+    assert.equal(archived.disabled, true, "archived copy keeps content");
+    const scan = await listStoreEntries(memoryDir);
+    assert.ok(
+      !scan.entries.some((c) => c.slug === "stale"),
+      "listStoreEntries must not see archived entries"
+    );
+  });
+
+  // SC10 boundary: "≥ 30 天" — exactly 30 days archives, 29 does not.
+  it("archives at exactly 30 days but keeps a 29-day disabled entry hot", async () => {
+    await put("edge30", { disabled: true, updated_at: daysAgo(30) });
+    await put("edge29", { disabled: true, updated_at: daysAgo(29) });
+    const result = await runMemoryGc(memoryDir, { nowMs: NOW });
+    assert.deepEqual(result.archived.sort(), ["edge30"]);
+    assert.ok(
+      (await readdir(join(memoryDir, "archive"))).includes("edge30.md")
+    );
+    await get("edge29"); // still hot and parseable
+  });
+
+  // SC13: disabled-count overflow past the cap archives the excess oldest-first.
+  it("archives excess disabled entries oldest-updated_at-first when disabled count exceeds the cap", async () => {
+    await put("d1", { disabled: true, updated_at: daysAgo(29) });
+    await put("d2", { disabled: true, updated_at: daysAgo(20) });
+    await put("d3", { disabled: true, updated_at: daysAgo(10) });
+    await put("d4", { disabled: true, updated_at: daysAgo(5) });
+    await put("live", { updated_at: daysAgo(1) });
+    const result = await runMemoryGc(memoryDir, { nowMs: NOW, cap: 2 });
+    assert.deepEqual(result.archived.sort(), ["d1", "d2"]);
+    const archived = (await readdir(join(memoryDir, "archive"))).sort();
+    assert.deepEqual(archived, ["d1.md", "d2.md"]);
+    const scan = await listStoreEntries(memoryDir);
+    assert.deepEqual(
+      scan.entries.map((c) => c.slug),
+      ["d3", "d4", "live"],
+      "the remaining disabled entries and live entries stay hot"
+    );
+    assert.equal((await get("d3")).disabled, true);
+    assert.equal((await get("live")).disabled, false);
+  });
+
+  // SC13 boundary: exactly cap-many disabled entries → nothing archived.
+  it("archives nothing when disabled count equals the cap", async () => {
+    await put("d1", { disabled: true, updated_at: daysAgo(20) });
+    await put("d2", { disabled: true, updated_at: daysAgo(10) });
+    const result = await runMemoryGc(memoryDir, { nowMs: NOW, cap: 2 });
+    assert.deepEqual(result.archived, []);
+    assert.ok(
+      !(await readdir(memoryDir).then((ns) => ns.includes("archive"))),
+      "no archive/ dir is created when nothing moves"
+    );
+  });
+
+  // Live entries are never archived, however old.
+  it("never archives a live entry even when its updated_at is ancient", async () => {
+    await put("ancient", { updated_at: daysAgo(300) });
+    const result = await runMemoryGc(memoryDir, { nowMs: NOW });
+    assert.deepEqual(result.archived, []);
+    await get("ancient"); // still hot
+  });
+
+  // SC14: replay over the same memoryDir is idempotent, no half-files.
+  it("is idempotent on a second archive pass — dir contents stable, no partial files", async () => {
+    await put("stale", { disabled: true, updated_at: daysAgo(31) });
+    await put("d1", { disabled: true, updated_at: daysAgo(29) });
+    const first = await runMemoryGc(memoryDir, { nowMs: NOW, cap: 1 });
+    assert.deepEqual(first.archived.sort(), ["d1", "stale"]);
+    const hotBefore = (await readdir(memoryDir)).sort();
+    const archiveBefore = (await readdir(join(memoryDir, "archive"))).sort();
+
+    const second = await runMemoryGc(memoryDir, { nowMs: NOW, cap: 1 });
+    assert.deepEqual(second.archived, []);
+    assert.deepEqual(second.disabled, []);
+    assert.deepEqual((await readdir(memoryDir)).sort(), hotBefore);
+    assert.deepEqual(
+      (await readdir(join(memoryDir, "archive"))).sort(),
+      archiveBefore
+    );
+    assert.ok(
+      [...hotBefore, ...archiveBefore].every((n) => !n.endsWith(".tmp")),
+      "no tmp files left behind"
+    );
+  });
+
+  // SC15: archive rename failure surfaces as the typed MemoryIOError
+  // (host EXIT log-and-continue is pinned by auto-hook.test.ts around
+  // auto-hook.ts:243-251, which wraps runMemoryGc in try/catch).
+  it("throws a typed MemoryIOError when the archive path is not a directory", async () => {
+    await put("stale", { disabled: true, updated_at: daysAgo(31) });
+    await writeFile(join(memoryDir, "archive"), "not a dir", "utf8");
+    await assert.rejects(
+      runMemoryGc(memoryDir, { nowMs: NOW }),
+      (e: unknown) =>
+        e instanceof MemoryIOError && /archive/.test((e as Error).message)
+    );
+  });
+
+  // MEMORY.md policy (spec: "对应行删除或忽略失效链" — this impl deletes the line).
+  it("removes the archived slug's line from MEMORY.md and keeps other lines", async () => {
+    await put("stale", { disabled: true, updated_at: daysAgo(31) });
+    await put("keep", { updated_at: daysAgo(1) });
+    await writeFile(
+      join(memoryDir, "MEMORY.md"),
+      [
+        "- [Old fact](stale.md) · importance=1 · updated_at=2026-07-26T00:00:00.000Z",
+        "- [Keep me](keep.md) · importance=2 · updated_at=2026-08-25T00:00:00.000Z",
+        "",
+      ].join("\n"),
+      "utf8"
+    );
+    const result = await runMemoryGc(memoryDir, { nowMs: NOW });
+    assert.deepEqual(result.archived, ["stale"]);
+    const index = await readFile(join(memoryDir, "MEMORY.md"), "utf8");
+    assert.ok(!index.includes("stale.md"), "archived line must be removed");
+    assert.ok(index.includes("(keep.md)"), "live line must survive");
+  });
+
+  it("leaves MEMORY.md alone when it does not exist", async () => {
+    await put("stale", { disabled: true, updated_at: daysAgo(31) });
+    const result = await runMemoryGc(memoryDir, { nowMs: NOW });
+    assert.deepEqual(result.archived, ["stale"]);
+    assert.ok(
+      !(await readdir(memoryDir).then((ns) => ns.includes("MEMORY.md")))
+    );
+  });
+
+  // Hot scans stay archive-free: a populated archive/ subdir never leaks
+  // into listStoreEntries or GC planning.
+  it("never scans the archive/ subdirectory", async () => {
+    await mkdir(join(memoryDir, "archive"), { recursive: true });
+    await writeFile(
+      join(memoryDir, "archive", "buried.md"),
+      serializeMemoryEntry(
+        entry({ id: "buried", ttl_days: 1, updated_at: daysAgo(99) })
+      ),
+      "utf8"
+    );
+    await put("live", { updated_at: daysAgo(1) });
+    const result = await runMemoryGc(memoryDir, { nowMs: NOW });
+    assert.equal(result.scanned, 1, "archive/ contents are not scanned");
+    assert.deepEqual(result.disabled, [], "buried.md is not re-disabled");
+    assert.deepEqual(result.archived, []);
+    const scan = await listStoreEntries(memoryDir);
+    assert.deepEqual(
+      scan.entries.map((c) => c.slug),
+      ["live"],
+      "listStoreEntries must not traverse archive/"
+    );
   });
 });

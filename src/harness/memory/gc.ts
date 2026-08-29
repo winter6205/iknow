@@ -13,12 +13,24 @@
  * frontmatter line back. Repeat calls are idempotent — already-disabled
  * entries are neither re-disabled nor counted against the cap.
  *
+ * auto-memory-layering T7: disabled entries eventually leave the hot dir —
+ * `disabled: true` + (`updated_at` ≥ 30 days old OR disabled count > cap)
+ * moves `<slug>.md` to `memoryDir/archive/<slug>.md` (a rename, not a delete;
+ * no hot scan — recall / prefetch / dream / cap / `listStoreEntries` — ever
+ * opens `archive/`). The archived slug's MEMORY.md index line is removed so
+ * the human index stays truthful (policy pinned by gc.test.ts).
+ *
  * `planMemoryGc` is pure (no IO, no clock read — `nowMs` is injected) so all
  * five boundary classes are unit-reachable without a tmpdir; `runMemoryGc`
  * is the thin IO shell that scans the store, applies the plan with the same
  * tmp+rename atomic replace `memory_save` uses, and reports what it skipped.
+ * The archive plan (`planMemoryArchive`) is pure the same way; only the
+ * rename shell touches the filesystem.
  */
-import { MemoryGcOptionInvalid } from "./errors.js";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+import { MemoryGcOptionInvalid, MemoryIOError } from "./errors.js";
 import { loadUsageSidecar, type UsageSidecar } from "./promote.js";
 import type { MemoryEntryV1 } from "./schema.js";
 import { listStoreEntries, type StoredMemoryEntry } from "./store.js";
@@ -26,6 +38,13 @@ import { writeMemoryEntryAtomic } from "./tools/save.js";
 
 /** Default active-entry ceiling for one project memory store. */
 export const DEFAULT_MEMORY_STORE_CAP = 200;
+
+/**
+ * A disabled entry at least this many days past `updated_at` moves to
+ * `memoryDir/archive/` (specs/auto-memory-layering.md — `≥ 30 天`, pinned
+ * boundary: exactly 30 days archives).
+ */
+const ARCHIVE_MIN_AGE_DAYS = 30;
 
 /**
  * Recency half-life in days. Same constant as bm25.ts's recency boost — the
@@ -64,6 +83,11 @@ export interface MemoryGcOptions {
 
 export interface MemoryGcResult {
   readonly disabled: ReadonlyArray<MemoryGcDisable>;
+  /**
+   * Slugs moved to `memoryDir/archive/` this pass (auto-memory-layering:
+   * disabled + ≥30d old, or disabled-count overflow past the cap).
+   */
+  readonly archived: ReadonlyArray<string>;
   /** How many `<slug>.md` entries parsed successfully. */
   readonly scanned: number;
   /** Slugs whose file could not be parsed; skipped, not disabled. */
@@ -152,12 +176,16 @@ export function planMemoryGc(
 }
 
 /**
- * Scan a memory store, plan GC, and write the plan back as soft-disables.
+ * Scan a memory store, plan GC, and write the plan back as soft-disables,
+ * then archive disabled entries out of the hot dir.
  *
  * A missing / unreadable directory is an empty store, not a failure: GC is a
  * maintenance pass that must be safe to call before anything has been saved.
  * Individual unparseable entries are reported in `skipped` and left untouched
- * (mirrors the per-slug skip in promote.ts / tools/recall.ts).
+ * (mirrors the per-slug skip in promote.ts / tools/recall.ts). Archive moves
+ * (rename into `archive/`) and the MEMORY.md index rewrite throw the typed
+ * `MemoryIOError` on failure — the host's EXIT log-and-continue catches it
+ * (specs/auto-memory-layering.md SC15); gc.ts never swallows them.
  */
 export async function runMemoryGc(
   memoryDir: string,
@@ -165,7 +193,7 @@ export async function runMemoryGc(
 ): Promise<MemoryGcResult> {
   const scan = await listStoreEntries(memoryDir);
   if (scan.entries.length === 0) {
-    return { disabled: [], scanned: 0, skipped: scan.skipped };
+    return { disabled: [], archived: [], scanned: 0, skipped: scan.skipped };
   }
   const usage = opts?.usage ?? (await loadUsageSidecar(memoryDir));
   const plan = planMemoryGc(scan.entries, { ...opts, usage });
@@ -178,14 +206,158 @@ export async function runMemoryGc(
       disabled: true,
     });
   }
+  // Archive pass runs over the post-GC state: everything already disabled on
+  // disk plus everything this pass just disabled. Soft-disable preserves
+  // `updated_at`, so the scan's parsed entries carry the right timestamps.
+  const disabledSlugs = new Set([
+    ...scan.entries.filter((c) => c.entry.disabled).map((c) => c.slug),
+    ...plan.disable.map((d) => d.slug),
+  ]);
+  const archivePlan = planMemoryArchive(
+    scan.entries.filter((c) => disabledSlugs.has(c.slug)),
+    { cap: requireCap(opts?.cap), nowMs: opts?.nowMs ?? Date.now() }
+  );
+  for (const slug of archivePlan) {
+    await archiveEntryFile(memoryDir, slug);
+  }
+  if (archivePlan.length > 0) {
+    await removeMemoryIndexLines(memoryDir, archivePlan);
+  }
   return {
     disabled: plan.disable,
+    archived: archivePlan,
     scanned: scan.entries.length,
     skipped: scan.skipped,
   };
 }
 
 // -- helpers (not exported; index.ts re-export policy) -----------------------
+
+/**
+ * Archive plan over the post-GC disabled set. Pure: no IO, no clock read.
+ *
+ * Rule A (age): `updated_at` ≥ 30 days old → archive. Unparseable timestamps
+ * are not age-eligible (same posture as `isExpired`).
+ * Rule B (overflow): when the hot-dir disabled count exceeds the cap, the
+ * excess (disabled.length − cap) come from the not-yet-30d ones, archived
+ * oldest-`updated_at`-first (unparseable timestamps sort as oldest — same
+ * "maximally stale" posture as `recency`), ties broken by slug so the verdict
+ * never depends on scan order. Exactly cap-many disabled entries stay hot:
+ * only `> cap` archives.
+ */
+function planMemoryArchive(
+  disabled: ReadonlyArray<MemoryGcCandidate>,
+  opts: { cap: number; nowMs: number }
+): string[] {
+  const cutoffMs =
+    opts.nowMs - ARCHIVE_MIN_AGE_DAYS * 24 * 3600 * 1000;
+  const ageEligible: string[] = [];
+  const recent: MemoryGcCandidate[] = [];
+  for (const c of disabled) {
+    const t = c.entry.updated_at ? Date.parse(c.entry.updated_at) : NaN;
+    if (Number.isFinite(t) && t <= cutoffMs) {
+      ageEligible.push(c.slug);
+    } else {
+      recent.push(c);
+    }
+  }
+  const archived = [...ageEligible.sort()];
+  // Overflow is measured against the whole disabled set in the hot dir
+  // (specs/auto-memory-layering.md SC13: "热目录 disabled 条数 > store cap");
+  // age-eligible entries already archive by rule A, the excess comes from the
+  // not-yet-30d ones, oldest first.
+  if (disabled.length > opts.cap && recent.length > 0) {
+    const excess = Math.min(disabled.length - opts.cap, recent.length);
+    archived.push(
+      ...[...recent]
+        .sort(
+          (a, b) => tsOrZero(a.entry) - tsOrZero(b.entry) ||
+            a.slug.localeCompare(b.slug)
+        )
+        .slice(0, excess)
+        .map((c) => c.slug)
+        .sort()
+    );
+  }
+  return archived;
+}
+
+/** `Date.parse(updated_at)`, or 0 (oldest) when missing / unparseable. */
+function tsOrZero(entry: MemoryEntryV1): number {
+  const t = entry.updated_at ? Date.parse(entry.updated_at) : NaN;
+  return Number.isFinite(t) ? t : 0;
+}
+
+/**
+ * Move one hot `<slug>.md` into `memoryDir/archive/` via rename. Idempotent:
+ * a slug already gone from the hot dir is an archived no-op, and rename
+ * either lands the complete file or nothing (SC14 — no half-files). Missing
+ * `archive/` is created; a non-directory `archive/` path surfaces as the
+ * typed `MemoryIOError` (SC15).
+ */
+async function archiveEntryFile(
+  memoryDir: string,
+  slug: string
+): Promise<void> {
+  const srcPath = join(memoryDir, `${slug}.md`);
+  const archiveDir = join(memoryDir, "archive");
+  try {
+    await readFile(srcPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return; // already archived — idempotent replay
+    }
+    throw new MemoryIOError(`[memory_gc] read ${srcPath} failed`, {
+      cause: error,
+    });
+  }
+  try {
+    await mkdir(archiveDir, { recursive: true });
+    await rename(srcPath, join(archiveDir, `${slug}.md`));
+  } catch (error) {
+    throw new MemoryIOError(`[memory_gc] archive ${slug}.md failed`, {
+      cause: error,
+    });
+  }
+}
+
+/**
+ * Remove each archived slug's link line from MEMORY.md so the human index
+ * never points into `archive/` (specs/auto-memory-layering.md: "对应行删除
+ * 或忽略失效链" — this implementation deletes the line; pinned by
+ * gc.test.ts). Missing MEMORY.md is a no-op; unchanged content is not
+ * rewritten. Same tmp+rename atomic replace as `upsertMemoryIndex`.
+ */
+async function removeMemoryIndexLines(
+  memoryDir: string,
+  slugs: ReadonlyArray<string>
+): Promise<void> {
+  const indexPath = join(memoryDir, "MEMORY.md");
+  let existing: string;
+  try {
+    existing = await readFile(indexPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new MemoryIOError(`[memory_gc] read MEMORY.md failed`, {
+      cause: error,
+    });
+  }
+  const patterns = slugs.map((slug) => `(${slug}.md)`);
+  const next = existing
+    .split("\n")
+    .filter((line) => !patterns.some((p) => line.includes(p)))
+    .join("\n");
+  if (next === existing) return;
+  const tmpPath = `${indexPath}.${process.pid}.${Date.now()}.gc.tmp`;
+  try {
+    await writeFile(tmpPath, next, "utf8");
+    await rename(tmpPath, indexPath);
+  } catch (error) {
+    throw new MemoryIOError(`[memory_gc] MEMORY.md update failed`, {
+      cause: error,
+    });
+  }
+}
 
 /** True when ttl_days > 0 and updated_at + ttl_days has elapsed. */
 function isExpired(entry: MemoryEntryV1, nowMs: number): boolean {
