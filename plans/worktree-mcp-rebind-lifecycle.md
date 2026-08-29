@@ -142,7 +142,7 @@ MCP server 的运行时失败继续映射到现有 `McpServerState = "failed"` �
    - **Surface:** `harness/mcp` configuration loading boundary
    - **Acceptance:** 配置加载在 rebind 前后都从稳定 `mcpConfigRoot` 读取项目级文件，不读取 task root 或 `process.cwd()`；两级合并、disabled 语义和坏条目隔离保持可观察；非缺失 IO/JSON/顶层结构失败返回 T1 的 `config_load_failed`，并按启动合同降级为无 MCP、给出非空安全 warning，不阻塞其他配置级别。
    - **Completion headroom:** 实现者可以保留或重组两级读取与合并的内部 helper；Acceptance 不规定 JSON 解析器、函数数量或文件布局。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T2]
 
 4. **`manager.ts` workspaceRoot transport lifecycle** — tag: `[implementation]`

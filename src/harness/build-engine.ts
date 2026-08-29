@@ -478,7 +478,8 @@ export async function buildHarnessEngine(
   let reg: AciRegistry | undefined;
   let mcpManager: McpManager | undefined;
   if (surface !== "ask") {
-    const config = await loadMcpConfig({ home: userHome, cwd });
+    // T3:项目级只读 mcpConfigRoot;T5 会换成 resolver 返回值。当前仍透传 cwd。
+    const config = await loadMcpConfig({ home: userHome, mcpConfigRoot: cwd });
     mcpManager = (opts.createMcpManager ?? createMcpManager)({
       config: config.servers,
       // 闭包捕获 reg holder — mcpManager.start() 异步触发时 reg 已赋值。

@@ -300,7 +300,8 @@ export async function buildTuiDeps(
   // 幂等：无 mcp.json → servers 空 → reload 空集。
   const reload = async (): Promise<void> => {
     if (!mcpManager) return;
-    const cfg = await loadMcpConfig({ home: userHome, cwd });
+    // T3:项目级只读 mcpConfigRoot;T6 会换成稳定 product root。当前仍透传 cwd。
+    const cfg = await loadMcpConfig({ home: userHome, mcpConfigRoot: cwd });
     await mcpManager.reload(cfg.servers);
   };
 

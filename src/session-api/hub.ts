@@ -2078,7 +2078,8 @@ export class SessionHub {
     if (this.mcpManager) {
       const home = this.mcpHome ?? homedir();
       const cwd = this.mcpCwd ?? process.cwd();
-      const cfg = await loadMcpConfig({ home, cwd });
+      // T3:项目级只读 mcpConfigRoot;T7 会换成 active engine mcpRoots。当前仍透传 cwd。
+      const cfg = await loadMcpConfig({ home, mcpConfigRoot: cwd });
       await this.mcpManager.reload(cfg.servers);
     }
     return this.listMcpServers();
