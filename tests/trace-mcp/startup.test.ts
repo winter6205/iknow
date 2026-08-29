@@ -27,7 +27,7 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 beforeAll(() => {
   execFileSync("npm", ["run", "build"], { cwd: repoRoot, stdio: "pipe" });
-});
+}, 120_000);
 
 afterEach(() => {
   for (const path of scratchPaths.splice(0)) {
