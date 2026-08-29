@@ -70,6 +70,7 @@ async function seedGoal(id: string, goal: GoalState): Promise<void> {
     cwd: process.cwd(),
     sanitized_at: now,
     checkpoints: [],
+    workspaceRoot: process.cwd(),
     goal,
   };
   await store.save({ id, file });

@@ -132,6 +132,7 @@ async function seedSession(opts: {
     cwd: process.cwd(),
     sanitized_at: now,
     checkpoints: [],
+    workspaceRoot: process.cwd(),
   } satisfies Omit<SessionFileV1, "goal" | "taskFocus">;
   await store.save({
     id: opts.id,

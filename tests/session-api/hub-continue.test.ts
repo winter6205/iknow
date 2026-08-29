@@ -72,6 +72,7 @@ function sampleFile(opts: {
     turnCount: 0,
     updatedAt: new Date().toISOString(),
     checkpoints: [],
+    workspaceRoot: process.cwd(),
     ...overrides,
   };
 }
