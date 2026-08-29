@@ -86,6 +86,7 @@ function makeHub(opts: {
   const store = new SessionStore(dataDir);
   return new SessionHub({
     store,
+    workspaceRoot: process.cwd(),
     deps: makeDeps(opts.responses ?? []),
     ...(opts.verifyConfig !== undefined
       ? { verifyConfig: opts.verifyConfig }

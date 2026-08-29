@@ -118,6 +118,7 @@ describe("persistChatSessionCheckpoint", () => {
   it("cancelled 有增量 → 落盘 checkpoint(interruptReason=cancelled, 累计 turnCount)", async () => {
     const s = await storeFor();
     const id = "cancelled-progress";
+    const workspaceRoot = process.cwd();
     await persistChatSessionCheckpoint({
       store: s,
       conversationId: id,
@@ -129,6 +130,7 @@ describe("persistChatSessionCheckpoint", () => {
         turnCount: 1,
       }),
       priorMessages: [],
+      ...({ workspaceRoot } as { readonly workspaceRoot: string }),
     });
     const file = await s.load(id);
     assert.equal(file.turnCount, 1);
@@ -136,6 +138,8 @@ describe("persistChatSessionCheckpoint", () => {
     assert.equal(file.checkpoints?.[0]?.interruptReason, "cancelled");
     assert.equal(file.checkpoints?.[0]?.turnIndex, 1);
     assert.equal(file.checkpoints?.[0]?.messagesCount, 2);
+    assert.equal(file.workspaceRoot, workspaceRoot);
+    assert.equal(file.cwd, workspaceRoot);
   });
 
   it("completed → 落盘但无 checkpoint 记录(interruptReason=null 不 append)", async () => {

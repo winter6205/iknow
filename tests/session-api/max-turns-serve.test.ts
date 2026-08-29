@@ -67,7 +67,11 @@ function makeMaxTurnsDeps(): LoopEngineDeps {
 
 describe("SessionHub.postMessage maxTurns (serve entry, plan T6)", () => {
   it("maxTurns 超限 → stopReason=maxTurns + stopSummary;部分进度已落盘,conditionalSave 未运行", async () => {
-    const hub = new SessionHub({ store, deps: makeMaxTurnsDeps() });
+    const hub = new SessionHub({
+      store,
+      deps: makeMaxTurnsDeps(),
+      workspaceRoot: process.cwd(),
+    });
     const { session } = await hub.createSession();
     // run 前快照(用于比较 conditionalSave 负责的最终化字段)
     const before = await store.load(session.conversation_id);
@@ -119,6 +123,7 @@ describe("SessionHub.postMessage maxTurns (serve entry, plan T6)", () => {
     });
     const hub = new SessionHub({
       store,
+      workspaceRoot: process.cwd(),
       deps: { adapter, executor, registry, maxTurns: 1 },
     });
     const { session } = await hub.createSession();
@@ -153,6 +158,7 @@ describe("SessionHub.postMessage maxTurns (serve entry, plan T6)", () => {
     });
     const hub = new SessionHub({
       store,
+      workspaceRoot: process.cwd(),
       deps: { adapter, executor, registry, maxTurns: 5 },
     });
     const { session } = await hub.createSession();

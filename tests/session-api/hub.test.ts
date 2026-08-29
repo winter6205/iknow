@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { SessionHub, mapStoreError } from "../../src/session-api/hub.ts";
 import {
   CURRENT_SCHEMA_VERSION,
+  MAX_WORKSPACE_ROOT_CHARS,
   parseSessionJsonl,
   resolveProjectSessionDir,
   SESSION_JSONL_EXT,
@@ -32,6 +33,7 @@ import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../src/harness/tools/executor.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
+import { ValidationError } from "../../src/shared/errors.ts";
 import {
   makeTestLlmEnv,
   startLlmCapture,
@@ -97,7 +99,7 @@ afterAll(async () => {
 });
 
 function makeHub(deps: LoopEngineDeps): SessionHub {
-  return new SessionHub({ store, deps });
+  return new SessionHub({ store, deps, workspaceRoot: process.cwd() });
 }
 
 describe("askUser inlet", () => {
@@ -163,6 +165,69 @@ describe("mapStoreError — 6-row error mapping contract", () => {
 // -- createSession -----------------------------------------------------------
 
 describe("createSession", () => {
+  it("rejects an unbound create before allocating or writing a session file", async () => {
+    const isolatedDir = await mkdtemp(join(tmpdir(), "iknow-hub-create-unbound-"));
+    const isolatedStore = new SessionStore(isolatedDir);
+    const isolatedHub = new SessionHub({
+      store: isolatedStore,
+      deps: makeDeps([]),
+    });
+
+    try {
+      await assert.rejects(
+        () => isolatedHub.createSession(),
+        (err: unknown) => {
+          assert.ok(err instanceof ValidationError);
+          assert.equal(err.details?.["field"], "workspaceRoot");
+          return true;
+        }
+      );
+      await assert.rejects(
+        () => isolatedStore.load("any-created-id"),
+        (err: unknown) =>
+          (err as { kind?: string }).kind === "not_found"
+      );
+    } finally {
+      await rm(isolatedDir, { recursive: true, force: true });
+    }
+  });
+
+  for (const [label, workspaceRoot] of [
+    ["empty", ""],
+    ["relative", "relative/path"],
+    ["overflow", "x".repeat(MAX_WORKSPACE_ROOT_CHARS + 1)],
+  ] as const) {
+    it(`rejects ${label} bound root before writing a session file`, async () => {
+      const isolatedDir = await mkdtemp(
+        join(tmpdir(), `iknow-hub-create-${label}-`)
+      );
+      const isolatedStore = new SessionStore(isolatedDir);
+      const isolatedHub = new SessionHub({
+        store: isolatedStore,
+        deps: makeDeps([]),
+        workspaceRoot,
+      });
+
+      try {
+        await assert.rejects(
+          () => isolatedHub.createSession(),
+          (err: unknown) => {
+            assert.ok(err instanceof ValidationError);
+            assert.equal(err.details?.["field"], "workspaceRoot");
+            return true;
+          }
+        );
+        await assert.rejects(
+          () => isolatedStore.load("any-created-id"),
+          (err: unknown) =>
+            (err as { kind?: string }).kind === "not_found"
+        );
+      } finally {
+        await rm(isolatedDir, { recursive: true, force: true });
+      }
+    });
+  }
+
   it("writes current-schema metadata to disk", async () => {
     const hub = makeHub(makeDeps([]));
     const { session } = await hub.createSession();
@@ -1127,6 +1192,7 @@ describe("postMessage thinking override (T2)", () => {
       store,
       deps: makeDeps([]), // stub deps; override path replaces only the adapter
       overrideEnv: makeTestLlmEnv({ baseUrl: cap.origin }),
+      workspaceRoot: process.cwd(),
     });
     const { session } = await hub.createSession();
     const res = await hub.postMessage({
@@ -1151,6 +1217,7 @@ describe("postMessage thinking override (T2)", () => {
       store,
       deps: makeDeps([assistantResult({ texts: ["cached reply"] })]),
       overrideEnv: makeTestLlmEnv({ baseUrl: cap.origin }),
+      workspaceRoot: process.cwd(),
     });
     const { session } = await hub.createSession();
     const res = await hub.postMessage({

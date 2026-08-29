@@ -41,6 +41,8 @@ import { isIknowError } from "./shared/errors.js";
 import {
   isWorkspaceRootError,
   renderWorkspaceRootError,
+  WORKSPACE_ROOT_ENV_KEY,
+  resolveWorkspaceRoot,
 } from "./config/workspace-root.js";
 export { isWorkspaceRootError, renderWorkspaceRootError };
 import { MaxTurnsExceeded } from "./harness/errors.js";
@@ -270,6 +272,18 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  let workspaceRoot: string;
+  try {
+    workspaceRoot = resolveWorkspaceRoot({
+      explicit: parsed.workspaceRoot,
+      cwd: process.cwd(),
+      env: { [WORKSPACE_ROOT_ENV_KEY]: bundle.env.workspaceRoot },
+    });
+  } catch (err) {
+    printChatError(err);
+    process.exitCode = 1;
+    return;
+  }
 
   // ADR-0035:生命周期 trace 与 content trace 解耦。chat 不装配 content
   // trace，但 subagent 的 spawn/state_change/stop 永久写入默认 trace 目录。
@@ -320,9 +334,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
       : {}),
     subagentDiagnosticsDir: tracePath,
     // review-fix (M1/M5): `!== undefined` 守门 — 空字符串透传触 empty_explicit。
-    ...(parsed.workspaceRoot !== undefined
-      ? { workspaceRoot: parsed.workspaceRoot }
-      : {}),
+    workspaceRoot,
     // Review High-2 / High-1 (2026-08-29):启动 settings 对象 + isolation 缝。
     settings: startupSettings,
     worktreeIsolation,
@@ -372,6 +384,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     deps: chatDeps,
     session: bundle.session,
     jsonMode: parsed.json,
+    workspaceRoot,
     // #152 T5:thinking 可见面(env flag → chat-session → format-run-human)。
     // env.ts SSOT;默认 off。
     showThinking: bundle.env.chat.showThinking,

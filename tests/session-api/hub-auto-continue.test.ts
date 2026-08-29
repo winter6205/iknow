@@ -102,6 +102,7 @@ function makeHub(nResponses: number): SessionHub {
   const verifyConfig: VerifyConfig = { command: "" };
   return new SessionHub({
     store,
+    workspaceRoot: process.cwd(),
     deps: makeDeps(responses),
     verifyConfig,
   });

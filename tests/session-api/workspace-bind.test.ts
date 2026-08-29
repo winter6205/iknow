@@ -15,7 +15,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionHub } from "../../src/session-api/hub.ts";
-import { SessionStore } from "../../src/session-api/store/index.ts";
+import {
+  CURRENT_SCHEMA_VERSION,
+  SessionStore,
+} from "../../src/session-api/store/index.ts";
 import { ValidationError } from "../../src/shared/errors.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
@@ -35,6 +38,28 @@ async function tmpDir(prefix: string): Promise<string> {
 
 async function makeStore(): Promise<SessionStore> {
   return new SessionStore(await tmpDir("iknow-ws-bind-store-"));
+}
+
+async function writeUnboundSession(
+  store: SessionStore,
+  id: string
+): Promise<void> {
+  const now = new Date().toISOString();
+  await store.save({
+    id,
+    file: {
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      conversation_id: id,
+      messages: [],
+      jsonMode: false,
+      turnCount: 0,
+      updatedAt: now,
+      title: "",
+      cwd: process.cwd(),
+      sanitized_at: now,
+      checkpoints: [],
+    },
+  });
 }
 
 describe("serve unbound postMessage", () => {
@@ -57,14 +82,15 @@ describe("serve unbound postMessage", () => {
       deps,
       surface: "serve",
     });
-    const { session } = await hub.createSession();
-    const file = await store.load(session.conversation_id);
+    const conversationId = "legacy-unbound-post";
+    await writeUnboundSession(store, conversationId);
+    const file = await store.load(conversationId);
     assert.equal(file.workspaceRoot, undefined);
 
     await assert.rejects(
       () =>
         hub.postMessage({
-          conversationId: session.conversation_id,
+          conversationId,
           text: "hi",
         }),
       (err: unknown) => {
@@ -95,9 +121,10 @@ describe("serve unbound postMessage", () => {
       deps,
       surface: "serve",
     });
-    const { session } = await hub.createSession();
+    const conversationId = "legacy-unbound-continue";
+    await writeUnboundSession(store, conversationId);
     await assert.rejects(
-      () => hub.continueSession(session.conversation_id),
+      () => hub.continueSession(conversationId),
       (err: unknown) => {
         assert.ok(err instanceof ValidationError);
         assert.equal(err.details?.["field"], "workspaceRoot");
@@ -116,9 +143,10 @@ describe("default surface (chat) with injected deps", () => {
       store,
       deps: makeDeps([assistantResult({ texts: ["ok"] })]),
     });
-    const { session } = await hub.createSession();
+    const conversationId = "legacy-chat-unbound";
+    await writeUnboundSession(store, conversationId);
     const res = await hub.postMessage({
-      conversationId: session.conversation_id,
+      conversationId,
       text: "hi",
     });
     assert.equal(res.turn.answer.stopReason, "completed");

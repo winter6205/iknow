@@ -88,6 +88,7 @@ describe("SessionHub — graph 装配 round 边界", () => {
 
     const hub = new SessionHub({
       store,
+      workspaceRoot: process.cwd(),
       deps: makeDeps([
         assistantResult({ texts: ["one"] }),
         assistantResult({ texts: ["two"] }),

@@ -167,6 +167,8 @@ export interface TuiBridge {
 export interface CreateTuiBridgeOptions {
   /** 会话池根目录；缺省 ~/.iknow（与 serve 同款 resolveServeDataDir）。 */
   readonly dataDir?: string;
+  /** T1: resolved workspace root used when lazily creating a session. */
+  readonly workspaceRoot?: string;
   /** harness deps（产品路径传 buildTuiDeps 结果；测试注入 stub deps）。 */
   readonly deps: LoopEngineDeps;
   readonly defaultJsonMode?: boolean;
@@ -254,6 +256,10 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     // settings-hot-reload（T3）:env 源 + 变化回调透传（缺省 → 行为零变化）。
     ...(opts.envProvider ? { envProvider: opts.envProvider } : {}),
     ...(opts.onEnvChange ? { onEnvChange: opts.onEnvChange } : {}),
+    // T1: the bridge's resolved root is also the hub's engine/state anchor.
+    ...(opts.workspaceRoot !== undefined
+      ? { workspaceRoot: opts.workspaceRoot }
+      : {}),
     // Review High-1 (2026-08-29):注入 deps 的启动根 + per-root 重建缝透传。
     ...(opts.engineRoot !== undefined
       ? { injectedEngineRoot: opts.engineRoot }
@@ -279,6 +285,9 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     store,
     ensureSession: async (conversationId) => {
       if (conversationId !== undefined) return conversationId;
+      if (opts.workspaceRoot !== undefined) {
+        await hub.bindWorkspace(opts.workspaceRoot);
+      }
       const created = await hub.createSession();
       return created.session.conversation_id;
     },

@@ -177,18 +177,16 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   try {
     renderer = await factory(RENDERER_CONFIG);
     const runtime = await prepareRuntime();
-    // review-fix (M1 / H1): TUI 用 active env 条件 resolve workspaceRoot ——
-    // explicit flag 或 env SSOT 任一在场时走 resolver(typed error
-    // fail-fast);两者都缺 → undefined(保持 dataDir 默认 ~/.iknow)。
+    // T1: resolve the root before any lazy session create. The resolver's
+    // final cwd fallback is an entry-level binding, never a SessionHub
+    // create-time cwd backfill.
     const envWsRoot = runtime.env.workspaceRoot;
-    const workspaceRoot =
-      options.workspaceRoot !== undefined || envWsRoot !== undefined
-        ? resolveWorkspaceRoot({
-            explicit: options.workspaceRoot,
-            cwd: process.cwd(),
-            env: { [WORKSPACE_ROOT_ENV_KEY]: envWsRoot },
-          })
-        : undefined;
+    const cwd = process.cwd();
+    const workspaceRoot = resolveWorkspaceRoot({
+      explicit: options.workspaceRoot,
+      cwd,
+      env: { [WORKSPACE_ROOT_ENV_KEY]: envWsRoot },
+    });
     // 装配链：runtime → deps → bridge/ask/tool 桥接 → TuiApp
     // issue #584: persona seed 永远 `<homedir>/.iknow`,不跟 workspaceRoot。
     await initIknowWorkspaceSafe();
@@ -212,7 +210,6 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // ADR-0019 (T2): explicit workspaceRoot → resolveServeDataDir 落
     // `<workspaceRoot>/.iknow`;缺省 → ~/.iknow(spec #120 SC 1 既有默认)。
     const dataDir = resolveServeDataDir(options.dataDir, workspaceRoot);
-    const cwd = process.cwd();
     // settings 双向持久化（T4）：/thinking /effort 面板 Esc → 写回 settings.json。
     // 目标文件按「project 存在写 project，否则 user」解析（project 本就覆盖 user，
     // 写 user 等于无效——对齐 settings.ts merge 优先级）。写回后登记 self-write
@@ -356,6 +353,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // 交给 bridge,而 TuiApp 已用 resolveServeDataDir 的值,导致 bridge 内部
       // SessionStore 落点与展示层漂移(显式 workspaceRoot 时尤甚)。
       dataDir,
+      workspaceRoot,
       deps,
       subagentManager,
       // Review High-1 (2026-08-29):注入 deps 的启动根 + per-root 重建缝。

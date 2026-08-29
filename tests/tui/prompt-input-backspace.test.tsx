@@ -158,6 +158,7 @@ async function mount(): Promise<MountCtx> {
   const dataDir = mkdtempSync(join(tmpdir(), "iknow-tui-bs-"));
   const bridge = createTuiBridge({
     dataDir,
+    workspaceRoot: dataDir,
     deps: makeDeps([assistantResult({ texts: [] })]),
     inflight: createInflightRegistry(),
   });

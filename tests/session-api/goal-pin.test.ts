@@ -42,6 +42,7 @@ afterAll(async () => {
 function makeHub(): SessionHub {
   return new SessionHub({
     store,
+    workspaceRoot: process.cwd(),
     deps: makeDeps([assistantResult({ texts: ["ack"] })]),
   });
 }

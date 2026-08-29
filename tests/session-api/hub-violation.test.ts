@@ -82,6 +82,7 @@ describe("SessionHub violation kill (serve entry)", () => {
     try {
       const hub = new SessionHub({
         store,
+        workspaceRoot: process.cwd(),
         deps: makeViolationDeps(),
         traceOut: traceDir,
       });
@@ -134,7 +135,7 @@ describe("SessionHub violation kill (serve entry)", () => {
       responses: [assistantResult({ texts: ["hello world"] })],
     });
     const deps: LoopEngineDeps = { adapter, executor, registry, maxTurns: 5 };
-    const hub = new SessionHub({ store, deps });
+    const hub = new SessionHub({ store, deps, workspaceRoot: process.cwd() });
     const { session } = await hub.createSession();
     const res = await hub.postMessage({
       conversationId: session.conversation_id,

@@ -42,13 +42,14 @@ afterAll(async () => {
 
 describe("/goal 三面 runtime（真实 SessionStore + fresh conversationId）", () => {
   it("happy path: fresh conversationId + pin → 落盘 goal.status=active && goal.text=args (user_pin)", async () => {
-    const { store } = await storeFor();
+    const { store, baseDir } = await storeFor();
     const id = "fresh-pin";
     const ctx = makeCtx({
       responses: [],
       checkpointStore: store,
       stateOverrides: { conversationId: id },
     });
+    ctx.workspaceRoot = baseDir;
     const r = await processChatLine({
       line: "/goal write a type checker",
       ctx,
@@ -60,6 +61,8 @@ describe("/goal 三面 runtime（真实 SessionStore + fresh conversationId）",
     expect(file.goal?.status).toBe("active");
     expect(file.goal?.source).toBe("user_pin");
     expect(file.goal?.text).toBe("write a type checker");
+    expect(file.workspaceRoot).toBe(baseDir);
+    expect(file.cwd).toBe(baseDir);
   });
 
   it("fresh + status → not_found 合法态:output「未设置 goal」,stderr 静默", async () => {

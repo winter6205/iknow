@@ -49,6 +49,7 @@ describe("Q6 验收 TUI 半边：TUI bridge ↔ 独立 hub 共享池", () => {
     ]);
     const bridge = createTuiBridge({
       dataDir: baseDir,
+      workspaceRoot: baseDir,
       deps: tuiDeps,
       inflight: createInflightRegistry(),
     });

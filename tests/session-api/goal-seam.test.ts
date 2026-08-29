@@ -155,6 +155,7 @@ function makeHub(): SessionHub {
   const verifyConfig: VerifyConfig = { command: "/bin/true" };
   return new SessionHub({
     store,
+    workspaceRoot: process.cwd(),
     deps: makeDeps([assistantResult({ texts: ["ok"] })]),
     verifyConfig,
   });

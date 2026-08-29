@@ -109,6 +109,7 @@ async function mountContinueApp(opts: {
   const inflight = createInflightRegistry();
   const inner = createTuiBridge({
     dataDir,
+    workspaceRoot: dataDir,
     deps: opts.deps ?? makeDeps(opts.responses),
     inflight,
   });

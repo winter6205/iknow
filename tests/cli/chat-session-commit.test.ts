@@ -62,6 +62,7 @@ describe("T3 (#620): createChatSessionCommitHook", () => {
         conversationId: id,
         jsonMode: false,
         getPriors: () => priors,
+        workspaceRoot: baseDir,
       });
 
       await commit([assistantMsg("a1")]);
@@ -74,6 +75,9 @@ describe("T3 (#620): createChatSessionCommitHook", () => {
       assert.equal(log.events[0]!.message.role, "user");
       assert.equal(log.events[1]!.message.role, "assistant");
       assert.equal(log.events[1]!.parent, "e0");
+      const file = await store.load(id);
+      assert.equal(file.workspaceRoot, baseDir);
+      assert.equal(file.cwd, baseDir);
     });
   });
 

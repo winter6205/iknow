@@ -167,6 +167,36 @@ function safeParse(s: string): unknown {
 }
 
 /**
+ * Validate the root at the session-creation boundary as well as at the
+ * entrypoint.  `SessionHub` is also constructed directly by tests and host
+ * adapters, so trusting the constructor option here would allow malformed
+ * roots to reach `SessionStore.save()` and would turn a create validation
+ * failure into a disk-write failure.
+ */
+function requireCreateWorkspaceRoot(root: unknown): string {
+  if (typeof root !== "string" || root.length === 0) {
+    throw new ValidationError(
+      "workspace root is required to create a session",
+      { field: "workspaceRoot" }
+    );
+  }
+  if (root.length > MAX_WORKSPACE_ROOT_CHARS) {
+    throw new ValidationError(
+      "workspace root exceeds the maximum length",
+      { field: "workspaceRoot" }
+    );
+  }
+  try {
+    return resolveWorkspaceRoot({ explicit: root });
+  } catch {
+    throw new ValidationError(
+      "workspace root must be an absolute existing directory",
+      { field: "workspaceRoot" }
+    );
+  }
+}
+
+/**
  * #408 T3: detect a goal re-pin directive at the very start of a message.
  *
  * Matches only a **leading** `## GOAL:` marker (after trim). Returns the
@@ -727,6 +757,10 @@ export class SessionHub {
     this.overlayMemoryPrefetch = opts.overlayMemoryPrefetch;
     // review-fix (M1 / H1): per-root state anchor 缓存。
     this.workspaceRoot = opts.workspaceRoot;
+    // An entry-resolved root is already a valid bind for hosts that assemble
+    // the Hub with a root (serve/TUI). Picker-driven hosts can still call
+    // bindWorkspace later to change it.
+    this.boundRoot = opts.workspaceRoot;
     this.recentsHome = opts.recentsHome;
     this.verifyConfig = opts.verifyConfig;
     this.envProvider = opts.envProvider;
@@ -956,9 +990,9 @@ export class SessionHub {
   async createSession(
     req?: CreateSessionRequest
   ): Promise<CreateSessionResponse> {
+    const root = requireCreateWorkspaceRoot(this.boundRoot);
     const id = randomUUID();
     const now = new Date().toISOString();
-    const root = this.boundRoot;
     const file: SessionFileV1 = {
       schemaVersion: CURRENT_SCHEMA_VERSION,
       conversation_id: id,
@@ -967,10 +1001,10 @@ export class SessionHub {
       turnCount: 0,
       updatedAt: now,
       title: "",
-      cwd: root ?? process.cwd(),
+      cwd: root,
       sanitized_at: now,
       checkpoints: [],
-      ...(root !== undefined ? { workspaceRoot: root } : {}),
+      workspaceRoot: root,
     };
     await this.store.save({ id, file });
     return {
@@ -2446,12 +2480,13 @@ export class SessionHub {
     workspaceRoot?: string,
     conversationId?: string
   ): void {
-    // EXIT: a bound session uses only the per-root hook; constructor injection
-    // remains the fallback when no workspaceRoot is on the session file.
+    // EXIT: prefer the per-root hook for bound sessions; constructor injection
+    // remains the fallback for injected-deps hosts without a per-root cache.
     const autoMemory =
       workspaceRoot === undefined
         ? this.autoMemory
-        : this.engineByRoot.get(workspaceRoot)?.autoMemory;
+        : (this.engineByRoot.get(workspaceRoot)?.autoMemory ??
+          this.autoMemory);
     const sessionKey =
       this.surface === "serve"
         ? conversationId
