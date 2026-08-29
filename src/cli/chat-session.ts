@@ -173,13 +173,44 @@ export type ChatSessionOpts = {
    * worktree，下一回合由本缝以新根重建（cli.ts runChat 提供 —— 用同一装配
    * opts + 同一启动 settings 对象重跑 buildHarnessEngine，硬要求 9）。
    * 缺席（ask / tests）→ 无重建检测，行为零变化。
+   *
+   * 收敛修复（2026-08-29）：返回完整句柄 bundle（RebuiltChatEngine，对齐
+   * TUI buildEngine 缝 / hub per-root 路径形状）—— 只回 deps 会把重建引擎
+   * 的 shutdown / subagentManager 等句柄丢在缝里（split-brain + 泄漏）。
    */
-  readonly rebuildDeps?: (root: string) => Promise<LoopEngineDeps>;
+  readonly rebuildDeps?: (root: string) => Promise<RebuiltChatEngine>;
   /**
    * Review High-1:`opts.deps` 装配时的引擎根（sandboxRoot = process.cwd()）。
    * rebind 检测基准：会话文件 workspaceRoot 偏离它时触发重建。缺席 → 不检测。
    */
   readonly engineRoot?: string;
+  /**
+   * 收敛修复（2026-08-29）：活跃引擎 shutdown 句柄盒 —— cli.ts 的
+   * registerShutdown 闭包读 `current`（只挂一次信号钩子），refresh 在
+   * rebind 切换点收口旧引擎后把重建引擎 shutdown 写入 current（SC11/SC16：
+   * SIGINT/SIGTERM 必须收口**活跃**引擎，而非停留在初始引擎）。
+   */
+  readonly engineShutdown?: { current?: () => Promise<void> };
+};
+
+/**
+ * 收敛修复（2026-08-29）：rebuildDeps 缝的返回 bundle —— deps 之外还带
+ * 重建引擎的 host 句柄，形状对齐 TUI `buildEngine` 缝 / hub per-root 路径
+ * （`{ deps, shutdown?, subagentManager?, graphAssembly?, autoMemory?,
+ * overlayMemoryPrefetch? }`）。refresh 成功切换后把句柄 rewire 进 ctx。
+ */
+export type RebuiltChatEngine = {
+  readonly deps: LoopEngineDeps;
+  /** 重建引擎的组合 shutdown（mcpManager first → subagentManager second）。 */
+  readonly shutdown?: () => Promise<void>;
+  /** 重建引擎的 subagent manager —— rebind 后 spawn 落这里，drain 也消费它。 */
+  readonly subagentManager?: SubAgentManager;
+  /** 重建引擎的 graph 装配快照 —— `/graph` 与 Shift+Tab 快照随活跃引擎走。 */
+  readonly graphAssembly?: GraphAssembly;
+  /** 重建引擎的 auto-memory 钩子。 */
+  readonly autoMemory?: AutoMemoryHook;
+  /** 重建引擎的 overlay memory prefetch。 */
+  readonly overlayMemoryPrefetch?: OverlayPrefetchFn;
 };
 
 export type ChatLineContext = {
@@ -209,9 +240,10 @@ export type ChatLineContext = {
   checkpointStore?: SessionStore;
   /**
    * #356 T7:同 ChatSessionOpts.subagentManager,runChatSession 透传。
-   * 缺席(undefined)= 不调 drain,行为零变化。
+   * 缺席(undefined)= 不调 drain,行为零变化。可变 —— rebind 重建后由
+   * refreshChatDepsForRebind 换血到重建引擎的 manager（split-brain 修复）。
    */
-  readonly subagentManager?: SubAgentManager;
+  subagentManager?: SubAgentManager;
   /**
    * #128 T8:同 ChatSessionOpts.verifyConfig,runChatSession 透传。
    * 缺席(undefined)= 不包裹 run,行为逐字节不变 (仅测试/装配未接线路径)。
@@ -219,14 +251,15 @@ export type ChatLineContext = {
   readonly verifyConfig?: VerifyConfig;
   /**
    * auto-memory T4:同 ChatSessionOpts.autoMemory,runChatSession 透传。
-   * 缺席 = 不调钩子,行为零变化。
+   * 缺席 = 不调钩子,行为零变化。可变 —— rebind 重建后随活跃引擎换血。
    */
-  readonly autoMemory?: AutoMemoryHook;
+  autoMemory?: AutoMemoryHook;
   /**
    * auto-memory low-trust read: same ChatSessionOpts field, runChatSession 透传.
    * T1: hosts pass `excludeIds` (session-level dedup) via the second argument.
+   * 可变 —— rebind 重建后随活跃引擎换血。
    */
-  readonly overlayMemoryPrefetch?: OverlayPrefetchFn;
+  overlayMemoryPrefetch?: OverlayPrefetchFn;
   /**
    * auto-memory T1: session-level prefetch dedup state — per-conversation
    * sets of already-injected memory ids. Allocated lazily by processChatLine
@@ -242,12 +275,19 @@ export type ChatLineContext = {
   /**
    * Review High-1: per-root 引擎重建缝（runChatSession 装配；同
    * ChatSessionOpts.rebuildDeps）。缺席 → processChatLine 不做重建检测。
+   * 返回 RebuiltChatEngine bundle（句柄 rewire 见 refreshChatDepsForRebind）。
    */
-  rebuildDeps?: (root: string) => Promise<LoopEngineDeps>;
+  rebuildDeps?: (root: string) => Promise<RebuiltChatEngine>;
   /**
    * Review High-1: 当前 deps 绑定的引擎根（可变 —— 重建后随新根更新）。
    */
   engineRoot?: string;
+  /**
+   * 收敛修复（2026-08-29）：活跃引擎 shutdown 句柄盒（同
+   * ChatSessionOpts.engineShutdown，runChatSession 透传）。缺席（ask/tests）
+   * → 重建时不做 shutdown 收口/换血，行为与上一版一致。
+   */
+  engineShutdown?: { current?: () => Promise<void> };
   /**
    * Review High-1: 重建 deps 的包装缝（runChatSession 提供 wrapChatDeps ——
    * violation executor + conversationId + commitMessages 与初始装配同语义）。
@@ -258,9 +298,20 @@ export type ChatLineContext = {
 
 /**
  * Review High-1 (2026-08-29): rebind 检测 —— 会话文件 workspaceRoot 偏离
- * ctx.engineRoot（上一回合 T3 门禁建树改绑落盘）→ 以新根重建 deps。失败
- * 可见降级（保持旧 deps，stale 引擎门禁继续 fail-closed，绝不静默放行写
- * 旧根）。rebuildDeps / checkpointStore 缺席（ask / tests）→ no-op。
+ * ctx.engineRoot（上一回合 T3 门禁建树改绑落盘）→ 以新根重建。失败可见
+ * 降级（保持旧 deps，stale 引擎门禁继续 fail-closed，绝不静默放行写旧根）。
+ * rebuildDeps / checkpointStore 缺席（ask / tests）→ no-op。
+ *
+ * 收敛修复（2026-08-29 第二轮 review）：重建成功后把 RebuiltChatEngine
+ * bundle 的句柄 rewire 进 ctx —— subagentManager / graphAssembly /
+ * autoMemory / overlayMemoryPrefetch 全部指向重建引擎（否则 drain 旧
+ * manager 而活跃引擎 spawn 进新 manager = split-brain 丢结果；/graph 快照
+ * 反映旧装配）。shutdown 收口取舍：**旧引擎先收口，再把重建引擎 shutdown
+ * 写入 ctx.engineShutdown.current**（组合收口被否 —— registerShutdown 只
+ * 挂一次信号钩子，闭包读 current 单值，历史句柄列表会让信号路径重复关
+ * 已废弃引擎）。旧引擎在切换点已不再服务任何回合，立即收口其 mcp 连接与
+ * subagent 子进程（SC11/SC16）；其 manager 内未 drain 的 completed 结果
+ * 一并丢弃 —— 旧根产物不进新根会话（与门禁 fail-closed 同向）。
  */
 export async function refreshChatDepsForRebind(
   ctx: ChatLineContext
@@ -275,24 +326,62 @@ export async function refreshChatDepsForRebind(
   try {
     const file = await store.load(conversationId);
     newRoot = file.workspaceRoot;
-  } catch {
-    // not_found / io error → 无 rebind 信号;门禁兜底仍 fail-closed
+  } catch (err) {
+    // typed not_found = 会话文件缺席的正常形态 → 无 rebind 信号，静默
+    // （门禁兜底仍 fail-closed）。其余错误（io_error / parse_failed /
+    // schema_invalid…）是真实 IO 异常 —— 可见降级（保持旧 deps），不无声吞。
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      (err as { kind?: unknown }).kind === "not_found"
+    ) {
+      return;
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    writeErr(
+      `[worktree_isolation] rebind 检测读取会话文件失败，保持旧根（mutate 仍 fail-closed）: ${msg}\n`
+    );
     return;
   }
   if (newRoot === undefined || newRoot === ctx.engineRoot) return;
+  let rebuilt: RebuiltChatEngine;
   try {
-    const base = await rebuild(newRoot);
-    ctx.deps = ctx.wrapRebuiltDeps
-      ? ctx.wrapRebuiltDeps(base)
-      : { ...base, conversationId };
-    ctx.engineRoot = newRoot;
+    rebuilt = await rebuild(newRoot);
   } catch (err) {
     writeErr(
       `[worktree_isolation] 会话已改绑到 ${newRoot}，但引擎重建失败，保持旧根（mutate 仍 fail-closed）: ${
         err instanceof Error ? err.message : String(err)
       }\n`
     );
+    return;
   }
+  // 切换点：旧引擎先收口（await，失败仅警告 —— 收口失败不阻断新引擎接管），
+  // 再换血 ctx 句柄 + shutdown 盒。此顺序保证信号路径任意时刻读 current
+  // 都指向「已收口旧引擎之后的活跃引擎」，不存在双引擎同时持有句柄窗口。
+  const prevShutdown = ctx.engineShutdown?.current;
+  if (prevShutdown !== undefined) {
+    try {
+      await prevShutdown();
+    } catch (err) {
+      writeErr(
+        `[worktree_isolation] 旧引擎 shutdown 收口失败（继续切换）: ${
+          err instanceof Error ? err.message : String(err)
+        }\n`
+      );
+    }
+  }
+  const base = rebuilt.deps;
+  ctx.deps = ctx.wrapRebuiltDeps
+    ? ctx.wrapRebuiltDeps(base)
+    : { ...base, conversationId };
+  ctx.engineRoot = newRoot;
+  ctx.engineShutdown && (ctx.engineShutdown.current = rebuilt.shutdown);
+  // split-brain 修复：host 句柄全部指向重建引擎 —— drain / /graph 快照 /
+  // auto-memory / overlay prefetch 随活跃引擎走。
+  ctx.subagentManager = rebuilt.subagentManager;
+  ctx.graphAssembly = rebuilt.graphAssembly;
+  ctx.autoMemory = rebuilt.autoMemory;
+  ctx.overlayMemoryPrefetch = rebuilt.overlayMemoryPrefetch;
 }
 
 export type ProcessChatLineResult = {
@@ -667,12 +756,9 @@ export async function processChatLine(
     return { quit: false, output: "" };
   }
 
-  // Review High-1 (2026-08-29): rebind 检测 —— T3 门禁在上一回合把会话根改绑
-  // 到 task worktree 后，本行开跑前以新根重建 deps（仅 chat 生产装配了
-  // rebuildDeps 时生效；ask / tests 缺席 → no-op）。重建失败可见降级。
-  await refreshChatDepsForRebind(ctx);
-
   if (parsedLine.kind === "slash") {
+    // 收敛修复（2026-08-29）：slash 行不跑引擎 → 跳过 rebind 检测，省掉
+    // 每条 slash 行的 store.load IO。检测挪到引擎行路径（含 continue 行）。
     return processSlash({
       command: parsedLine.command,
       args: parsedLine.args,
@@ -680,6 +766,12 @@ export async function processChatLine(
       ...(opts.onStream !== undefined ? { onStream: opts.onStream } : {}),
     });
   }
+
+  // Review High-1 (2026-08-29): rebind 检测 —— T3 门禁在上一回合把会话根改绑
+  // 到 task worktree 后，本行开跑前以新根重建 deps（仅 chat 生产装配了
+  // rebuildDeps 时生效；ask / tests 缺席 → no-op）。重建失败可见降级。
+  // 位置：引擎行路径（slash 行已在上方返回，不做 store.load IO）。
+  await refreshChatDepsForRebind(ctx);
 
   const query = parsedLine.text;
 
@@ -1776,6 +1868,10 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
         rebuildDeps: opts.rebuildDeps,
         engineRoot: opts.engineRoot,
         wrapRebuiltDeps: wrapChatDeps,
+        // 收敛修复（2026-08-29）：活跃引擎 shutdown 句柄盒 —— refresh 在
+        // 切换点收口旧引擎 + 把重建引擎 shutdown 写入 current（cli.ts 的
+        // registerShutdown 闭包读 current）。
+        ...(opts.engineShutdown ? { engineShutdown: opts.engineShutdown } : {}),
       }
     : {}),
   };

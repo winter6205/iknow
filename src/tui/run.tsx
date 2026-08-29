@@ -137,6 +137,11 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   // 声明延后到装配成功后赋值；stop() 幂等，未初始化（装配前抛错）时 no-op。
   let envLoader: EnvLoader | undefined;
   let shutdownPromise: Promise<void> | undefined;
+  // 收敛修复 (2026-08-29 第二轮 review):late-bound hub 引用盒 —— 定义在
+  // shutdownExtensions 之前(该闭包在 try 外,拿不到 try 内的 bridgeRef)。
+  // /quit 路径经 shutdownExtensions 也必须收口 per-root 重建引擎;信号路径
+  // 由 combinedShutdown 兜底(hub.shutdown 幂等,双路径重复调用无害)。
+  const hubRef: { current?: { shutdown: () => Promise<void> } } = {};
   const shutdownExtensions = (): Promise<void> => {
     if (shutdownPromise === undefined) {
       shutdownPromise = (async () => {
@@ -149,6 +154,18 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         } catch (err) {
           process.stderr.write(
             `[tui] MCP shutdown failed: ${
+              err instanceof Error ? err.message : String(err)
+            }\n`
+          );
+        }
+        // 收敛修复:ext.shutdown() 只关初始引擎;tuiExtensions 未注入
+        // (装配早期退出)时上一行已 return —— hub.shutdown 兜底收口
+        // per-root 重建引擎(hub 持 engineByRoot 全量句柄)。
+        try {
+          await hubRef.current?.shutdown();
+        } catch (err) {
+          process.stderr.write(
+            `[tui] hub shutdown failed: ${
               err instanceof Error ? err.message : String(err)
             }\n`
           );
@@ -402,6 +419,8 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     });
     // Review High-1:bridge 就绪后回填 late-bound hub 引用（见上方 bridgeRef）。
     bridgeRef.hub = bridge.hub;
+    // 收敛修复 (2026-08-29):同一回填点供 shutdownExtensions（/quit 路径）读。
+    hubRef.current = bridge.hub;
     // settings-hot-reload（T4）:订阅 EnvLoader —— settings 文件变化 → 自动
     // reload env（成功）→ 走 hub 的 adapter 热重建通路（不直接碰 build-engine）。
     // reload 失败（坏 JSON 等）→ EnvLoader 内部保留旧 env + onError 通知，

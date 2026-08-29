@@ -354,7 +354,20 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   // 否则父死子继,subagent 子进程不被 SIGTERM 清理(SC11/SC16)。chat-session
   // 自身的二次 SIGINT process.exit(130) 保留(用户强杀语义):首次信号走本钩子
   // dispose,二次直接 exit。
-  registerShutdown(built);
+  //
+  // 收敛修复 (2026-08-29 第二轮 review):活跃引擎 shutdown 句柄盒 ——
+  // registerShutdown 只挂一次信号钩子,闭包读 activeEngineShutdown.current;
+  // rebind 重建切换点 (refreshChatDepsForRebind) 收口旧引擎后把重建引擎
+  // shutdown 写入 current。否则重建引擎的 mcpManager/subagentManager 永不
+  // 收口 (信号路径停留在初始引擎)。
+  const activeEngineShutdown: { current?: () => Promise<void> } = {
+    current: built.shutdown,
+  };
+  registerShutdown({
+    shutdown: async (): Promise<void> => {
+      await activeEngineShutdown.current?.();
+    },
+  });
   await runChatSession({
     deps: chatDeps,
     session: bundle.session,
@@ -386,9 +399,16 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // 透明关闭向后兼容 (SC7)。其余字段随行透传。
     // Review High-2:同一启动装配 settings 对象（不重读 settings 文件）。
     verifyConfig: resolveVerifyConfig(startupSettings.verify),
+    // 收敛修复 (2026-08-29):活跃引擎 shutdown 盒 —— rebind 切换点由
+    // refreshChatDepsForRebind 换血 (见上方 activeEngineShutdown 注释)。
+    engineShutdown: activeEngineShutdown,
     // Review High-1 (2026-08-29):rebind 后 per-root 引擎重建缝 —— 用同一
     // chatEngineOpts + 同一启动 settings 重跑 buildHarnessEngine，根切到
     // task worktree（cwd / workspaceRoot 锚随改绑移动，ADR-0037 §4）。
+    // 收敛修复 (2026-08-29):返回完整句柄 bundle (RebuiltChatEngine, 对齐
+    // TUI buildEngine 缝形状) —— deps 之外的 shutdown / subagentManager /
+    // graphAssembly / autoMemory / overlayMemoryPrefetch 由 refresh rewire
+    // 进 ctx;只回 deps 会把重建引擎句柄丢在缝里 (split-brain + 泄漏)。
     engineRoot: process.cwd(),
     rebuildDeps: async (root: string) => {
       const rebuilt = await buildHarnessEngine(bundle, {
@@ -397,9 +417,16 @@ async function runChat(parsed: ParsedCli): Promise<void> {
         workspaceRoot: root,
       });
       return {
-        ...rebuilt.deps,
-        agentVersion: getVersion(),
-        maxTurns: parsed.maxTurns ?? rebuilt.deps.maxTurns,
+        deps: {
+          ...rebuilt.deps,
+          agentVersion: getVersion(),
+          maxTurns: parsed.maxTurns ?? rebuilt.deps.maxTurns,
+        },
+        shutdown: rebuilt.shutdown,
+        subagentManager: rebuilt.subagentManager,
+        graphAssembly: rebuilt.graphAssembly,
+        autoMemory: rebuilt.autoMemory,
+        overlayMemoryPrefetch: rebuilt.overlayMemoryPrefetch,
       };
     },
   });
