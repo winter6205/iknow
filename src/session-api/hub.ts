@@ -373,6 +373,7 @@ export function projectMessagesToTurns(
     const finalText = findFinalTextInSlice(turnMessages);
     turnIndex++;
     const activity = projectActivity(turnMessages, mask);
+    const hasActivityTools = activity.some((item) => item.type === "tool");
     const thinking = projectThinkingView(turnMessages, mask);
     const toolCalls = projectToolCalls(turnMessages, mask);
     turns.push({
@@ -381,7 +382,7 @@ export function projectMessagesToTurns(
         finalText,
         stopReason: "completed",
         turnCount: turnIndex,
-        ...(activity.length > 0 ? { activity } : {}),
+        ...(hasActivityTools ? { activity } : {}),
         ...(thinking !== undefined ? { thinking } : {}),
         ...(toolCalls !== undefined ? { toolCalls } : {}),
       },
@@ -2513,6 +2514,7 @@ export class SessionHub {
     const maskedFinalText = mask(rawFinalText);
     const turnMessages = opts.turnMessages ?? result.messages;
     const activity = projectActivity(turnMessages, mask);
+    const hasActivityTools = activity.some((item) => item.type === "tool");
     const thinking = projectThinkingView(turnMessages, mask);
     const toolCalls = projectToolCalls(turnMessages, mask);
     return {
@@ -2521,7 +2523,7 @@ export class SessionHub {
         finalText: maskedFinalText,
         stopReason: result.stopReason,
         turnCount: result.turnCount,
-        ...(activity.length > 0 ? { activity } : {}),
+        ...(hasActivityTools ? { activity } : {}),
         // T1: optional fields — omitted entirely when undefined (byte-stable
         // for turns without thinking or tool use).
         ...(thinking !== undefined ? { thinking } : {}),
