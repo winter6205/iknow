@@ -15,6 +15,8 @@
  * 时返回递增预算 —— 视图区高度随之减，不挤掉历史消息。
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   bgStatusLine,
   chromeReserveRows,
@@ -432,8 +434,8 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
     expect(a).toBe(b);
   });
 
-  // #358 T7 fixup（M4）：子代理状态面板行数计入底部行账 —— 缺省不占行，显式
-  // panelRows 按值入账（预览行不额外 +1，面板自身无 marginBottom）。
+  // #358 T7：chromeReserveRows 仍接受 panelRows；产品路径恒传 0，
+  // 子代理画在输入框下方，不把输入框往上顶。
   test("panelRows 缺省（undefined / 未传）= 0，不占底部行账", () => {
     const base = chromeReserveRows({
       noticeRows: 0,
@@ -468,6 +470,15 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
       panelRows: 4,
     });
     expect(withPanel - base).toBe(4);
+  });
+
+  test("app 产品路径 panelRows 恒 0（子代理不挤输入框）", () => {
+    const src = readFileSync(
+      join(import.meta.dir, "..", "..", "src/tui/app.tsx"),
+      "utf8"
+    );
+    expect(src).toMatch(/panelRows:\s*0/);
+    expect(src).not.toMatch(/panelRows:\s*subagentPanelRows/);
   });
 
   // #647 T3: agent 现势显示行数入账（与 panelRows 同款：缺省不占行，显式

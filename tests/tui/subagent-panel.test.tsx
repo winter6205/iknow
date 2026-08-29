@@ -152,7 +152,33 @@ describe("projectSubagentLines 可见性 + 折叠", () => {
     expect(projectSubagentLines([expired], T0, 80)).toEqual([]);
   });
 
-  test("4 个活动 + 0 failed → 前 3 行 + `… 另有 1 个子代理`", () => {
+  test("running 行首含 role 名称", () => {
+    const lines = projectSubagentLines(
+      [
+        makeSubagent({
+          role: "explore",
+          taskPreview: "查找文档",
+          startedAt: iso(-1000),
+        }),
+      ],
+      T0,
+      80
+    );
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.text.startsWith("● explore ")).toBe(true);
+    expect(lines[0]?.text).toContain("查找文档");
+  });
+
+  test("缺 role → 行首回落「子代理」", () => {
+    const lines = projectSubagentLines(
+      [makeSubagent({ taskPreview: "查找" })],
+      T0,
+      80
+    );
+    expect(lines[0]?.text).toMatch(/^● 子代理 /);
+  });
+
+  test("4 个活动 → 4 行全量、无折叠 footer", () => {
     const subs = Array.from({ length: 4 }, (_, i) =>
       makeSubagent({
         taskId: `t-bulk-${i}`,
@@ -162,16 +188,14 @@ describe("projectSubagentLines 可见性 + 折叠", () => {
     );
     const lines = projectSubagentLines(subs, T0, 80);
     expect(lines).toHaveLength(4);
-    expect(lines[3]?.icon).toBe("…");
-    expect(lines[3]?.text).toBe("… 另有 1 个子代理");
-    // 前 3 行应包含 taskPreview（顺序 = 输入顺序）
+    expect(lines.some((l) => l.icon === "…")).toBe(false);
     expect(lines[0]?.text).toContain("任务0");
     expect(lines[1]?.text).toContain("任务1");
     expect(lines[2]?.text).toContain("任务2");
+    expect(lines[3]?.text).toContain("任务3");
   });
 
-  test("未过期 failed 计入活跃行并折叠（live>3 → 4 行 + footer）", () => {
-    // 折叠只取输入序前 3 条：failed 放最前 → 前 3 含 ✗ 行。
+  test("未过期 failed 计入活跃行（live>3 仍全量，无 footer）", () => {
     const subs = [
       makeSubagent({
         taskId: "t-fail",
@@ -187,8 +211,8 @@ describe("projectSubagentLines 可见性 + 折叠", () => {
     expect(lines).toHaveLength(4);
     expect(lines[0]?.icon).toBe("✗");
     expect(lines[0]?.text).toContain("crashed");
-    expect(lines[3]?.icon).toBe("…");
-    expect(lines[3]?.text).toBe("… 另有 1 个子代理");
+    expect(lines[3]?.icon).toBe("●");
+    expect(lines.some((l) => l.icon === "…")).toBe(false);
   });
 
   test("未过期 failed 与 1 running（合计 <3）→ 无 footer", () => {
@@ -401,11 +425,12 @@ describe("SubagentPanel 渲染（OpenTUI）", () => {
     await setup2.renderer.destroy();
   });
 
-  test("4 个 running → 前 3 行 + footer `… 另有 1 个子代理`", async () => {
+  test("4 个 running → 四行全量，行首含名称，无折叠 footer", async () => {
     const subs = Array.from({ length: 4 }, (_, i) =>
       makeSubagent({
         taskId: `t-fold-${i}`,
         state: "running",
+        role: "explore",
         taskPreview: `任务${i}`,
       })
     );
@@ -415,12 +440,12 @@ describe("SubagentPanel 渲染（OpenTUI）", () => {
       nowMs: T0,
     });
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("另有 1 个子代理");
+    expect(frame).toContain("explore");
     expect(frame).toContain("任务0");
     expect(frame).toContain("任务1");
     expect(frame).toContain("任务2");
-    // 第 4 个 taskPreview 不该渲染（被 footer 折叠）
-    expect(frame).not.toContain("任务3");
+    expect(frame).toContain("任务3");
+    expect(frame).not.toContain("另有");
     await setup.renderer.destroy();
   });
 
