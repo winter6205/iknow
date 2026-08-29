@@ -43,6 +43,7 @@ import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
 import type { SubAgentTerminalNotice } from "../../src/harness/subagent/mailbox.ts";
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
+import { SubagentWakeError } from "../../src/harness/subagent/host-wake.ts";
 import {
   makeTestLlmEnv,
   startLlmCapture,
@@ -197,6 +198,101 @@ describe("SessionHub subagent wake", () => {
         )
       ).toBe(true);
     });
+  });
+
+  it("rejects a failed silent wake with the real task status instead of a success response", async () => {
+    const manager = {
+      spawn: () => ({ taskId: "failed-wake-task" }),
+      queryBuffer: () => ({
+        status: "failed" as const,
+        reason: "crashed" as const,
+        summary: "worker failed",
+      }),
+      waitFor: async () => {
+        throw new Error("unused");
+      },
+      shutdown: async () => {},
+      drainCompleted: () => [
+        {
+          taskId: "failed-wake-task",
+          envelope: {
+            status: "ok" as const,
+            summary: "worker completed",
+            result: "worker result",
+          },
+        },
+      ],
+      listActive: () => [],
+      abortTask: () => false,
+      listSubagents: () => [],
+      subscribe: () => () => {},
+    } as SubAgentManager;
+    const hub = new SessionHub({
+      store,
+      deps: {
+        ...makeDeps([]),
+        adapter: {
+          ...makeDeps([]).adapter,
+          step: async () => {
+            throw new Error("silent run unavailable");
+          },
+        },
+      },
+      subagentManager: manager,
+      surface: "serve",
+    });
+    await hub.bindWorkspace(process.cwd());
+    const created = await hub.createSession();
+
+    await assert.rejects(
+      () =>
+        hub.wakeFromSubagent({
+          conversationId: created.session.conversation_id,
+        }),
+      (error: unknown) =>
+        error instanceof SubagentWakeError &&
+        error.status === "undelivered" &&
+        error.reason === "wakeFailed" &&
+        error.taskIds.includes("failed-wake-task") &&
+        error.queryable === true &&
+        !error.message.includes("completion")
+    );
+    const loaded = await store.load(created.session.conversation_id);
+    assert.equal(loaded.messages.length, 0);
+  });
+
+  it("returns undefined without a completion response when the manager has no envelope", async () => {
+    const manager = {
+      spawn: () => ({ taskId: "unused" }),
+      queryBuffer: () => ({ status: "not_found" as const }),
+      waitFor: async () => {
+        throw new Error("unused");
+      },
+      shutdown: async () => {},
+      drainCompleted: () => [],
+      listActive: () => [],
+      abortTask: () => false,
+      listSubagents: () => [],
+      subscribe: () => () => {},
+    } as SubAgentManager;
+    const hub = new SessionHub({
+      store,
+      deps: makeDeps([]),
+      subagentManager: manager,
+      surface: "serve",
+    });
+    await hub.bindWorkspace(process.cwd());
+    const created = await hub.createSession();
+
+    const result = await hub.wakeFromSubagent({
+      conversationId: created.session.conversation_id,
+    });
+
+    assert.equal(result, undefined);
+    assert.equal(
+      (await store.load(created.session.conversation_id)).messages.length,
+      0
+    );
   });
 });
 

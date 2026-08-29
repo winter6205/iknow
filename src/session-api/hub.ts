@@ -52,6 +52,8 @@ import {
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
 import {
   createSubagentWake,
+  queryableSubagentTaskIds,
+  toSubagentWakeError,
   type SubagentWake,
 } from "../harness/subagent/host-wake.js";
 import type {
@@ -1482,14 +1484,22 @@ export class SessionHub {
   }): Promise<PostMessageResponse | undefined> {
     const drained = await drainPendingSubagents(this.subagentManager);
     if (drained.length === 0) return undefined;
-    return this.postMessage({
-      conversationId: opts.conversationId,
-      text: "",
-      signal: opts.signal,
-      thinking: opts.thinking,
-      onStream: opts.onStream,
-      silent: true,
-    });
+    const taskIds = queryableSubagentTaskIds(this.subagentManager);
+    try {
+      return await this.postMessage({
+        conversationId: opts.conversationId,
+        text: "",
+        signal: opts.signal,
+        thinking: opts.thinking,
+        onStream: opts.onStream,
+        silent: true,
+      });
+    } catch (error) {
+      throw toSubagentWakeError(error, {
+        taskIds,
+        queryable: this.subagentManager !== undefined,
+      });
+    }
   }
 
   async resetSession(

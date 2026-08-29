@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createSubagentWake,
+  SubagentWakeError,
   type SubagentWake,
 } from "../../src/harness/subagent/host-wake.ts";
 import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
@@ -133,8 +134,147 @@ describe("createSubagentWake", () => {
     });
 
     expect(() => publish(notice("failed-wake"))).not.toThrow();
-    await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(failure));
+    await vi.waitFor(() =>
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: "undelivered",
+          reason: "wakeFailed",
+          taskIds: ["failed-wake"],
+          cause: failure,
+        })
+      )
+    );
 
+    controller.dispose();
+  });
+
+  it("reports a waitFor rejection as an undelivered, queryable failure", async () => {
+    const { manager, publish } = fakeManager();
+    const onError = vi.fn();
+    const failure = new Error("waitFor rejected");
+    const controller = createSubagentWake({
+      manager,
+      isIdle: () => true,
+      wake: async () => {
+        await manager.waitFor("wait-task");
+        throw failure;
+      },
+      onError,
+    });
+
+    publish({ ...notice("wait-task"), taskId: "wait-task" });
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+
+    const reported = onError.mock.calls[0]?.[0];
+    expect(reported).toBeInstanceOf(SubagentWakeError);
+    expect(reported).toMatchObject({
+      status: "undelivered",
+      reason: "wakeFailed",
+      taskIds: ["wait-task"],
+      queryable: true,
+    });
+    expect((reported as Error).message).toContain("subagent_result");
+
+    controller.dispose();
+  });
+
+  it("reports a synchronous injection failure without forging completion text", async () => {
+    const { manager, publish } = fakeManager();
+    const onError = vi.fn();
+    const controller = createSubagentWake({
+      manager,
+      isIdle: () => true,
+      wake: () => {
+        throw new Error("inject failed");
+      },
+      onError,
+    });
+
+    publish(notice("inject-task"));
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+
+    const reported = onError.mock.calls[0]?.[0] as SubagentWakeError;
+    expect(reported.status).toBe("undelivered");
+    expect(reported.taskIds).toEqual(["inject-task"]);
+    expect(reported.message).not.toContain("completed");
+    expect(reported.message).toContain("inject failed");
+
+    controller.dispose();
+  });
+
+  it("does not throw when the watcher is unavailable", async () => {
+    const onError = vi.fn();
+    const controller = createSubagentWake({
+      manager: undefined,
+      subscribe: () => {
+        throw new Error("watcher unavailable");
+      },
+      isIdle: () => true,
+      wake: vi.fn(async () => {}),
+      onError,
+    });
+
+    expect(controller).toBeDefined();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[0]).toMatchObject({
+      status: "undelivered",
+      reason: "watcherUnavailable",
+      taskIds: [],
+      queryable: false,
+    });
+    controller.dispose();
+  });
+
+  it("reports an idle watcher failure without throwing from flush", async () => {
+    const { manager, publish } = fakeManager();
+    const onError = vi.fn();
+    const controller = createSubagentWake({
+      manager,
+      isIdle: () => {
+        throw new Error("idle check failed");
+      },
+      wake: vi.fn(async () => {}),
+      onError,
+    });
+
+    expect(() => publish(notice("idle-task"))).not.toThrow();
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    expect(onError.mock.calls[0]?.[0]).toMatchObject({
+      status: "undelivered",
+      reason: "watcherUnavailable",
+      taskIds: ["idle-task"],
+      queryable: true,
+    });
+
+    controller.dispose();
+  });
+
+  it("does not report or invent a completion when no terminal envelope exists", async () => {
+    const { manager } = fakeManager();
+    const wake = vi.fn(async () => {
+      throw new Error("no envelope");
+    });
+    const onError = vi.fn();
+    const controller = createSubagentWake({
+      manager,
+      isIdle: () => true,
+      wake,
+      onError,
+    });
+
+    controller.request();
+    await Promise.resolve();
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+
+    expect(onError.mock.calls[0]?.[0]).toMatchObject({
+      status: "undelivered",
+      reason: "wakeFailed",
+      taskIds: [],
+      queryable: false,
+    });
+    expect((onError.mock.calls[0]?.[0] as Error).message).not.toContain(
+      "result:"
+    );
     controller.dispose();
   });
 

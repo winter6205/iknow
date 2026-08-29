@@ -229,6 +229,7 @@ import { createSkillBody } from "../harness/skill/body.js";
 import type { SkillCatalog } from "../harness/skill/catalog.js";
 import {
   createSubagentWake,
+  toSubagentWakeError,
   type SubagentWake,
 } from "../harness/subagent/host-wake.js";
 import { extractTitle } from "../session-api/store/schema.js";
@@ -1500,6 +1501,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           stopReason = "protocolError";
           setNotice({ lines: [`续跑失败：${describeError(err)}`] });
         }
+      } else if (mode === "wake") {
+        const wakeError = toSubagentWakeError(err);
+        stopReason = "protocolError";
+        setNotice({ lines: [wakeError.message] });
       } else {
         stopReason = "protocolError";
         setNotice({ lines: [`turn 失败：${describeError(err)}`] });

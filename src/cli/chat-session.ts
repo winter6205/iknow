@@ -50,7 +50,12 @@ import {
 } from "../harness/memory/index.js";
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
-import { createSubagentWake } from "../harness/subagent/host-wake.js";
+import {
+  createSubagentWake,
+  queryableSubagentTaskIds,
+  toSubagentWakeError,
+  type SubagentWakeError,
+} from "../harness/subagent/host-wake.js";
 import {
   createViolationCounter,
   wireKillSessionNotification,
@@ -244,6 +249,8 @@ export type ProcessChatLineResult = {
   stderr?: string;
   /** True when this line was a user query that ran the agent. */
   ranQuery?: boolean;
+  /** T6: a silent subagent handoff failed; no completion was fabricated. */
+  wakeFailure?: SubagentWakeError;
 };
 
 export interface ProcessChatLineOpts {
@@ -562,11 +569,16 @@ export async function runChatSubagentWake(opts: {
       priorMessages,
     });
   } catch (err) {
+    const wakeError = toSubagentWakeError(err, {
+      taskIds: queryableSubagentTaskIds(ctx.subagentManager),
+      queryable: ctx.subagentManager !== undefined,
+    });
     return {
       quit: false,
       output: "",
-      stderr: formatChatError(err),
-      ranQuery: true,
+      stderr: formatChatError(wakeError),
+      ranQuery: false,
+      wakeFailure: wakeError,
     };
   } finally {
     box.value = false;
