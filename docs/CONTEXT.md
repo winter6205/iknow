@@ -212,8 +212,11 @@ _Avoid_: 把 `stream: false` + 裸 JSON 解析当默认 LLM 臂；让原生 SSE 
 **前景 spawn / 后景 spawn**: `spawn_subagent` 的两种结果契约（#361 裁决，ADR-0014）——前景（`wait:true`，默认）= handler 同步等 worker 到终态、envelope 直接作 tool_result 返回，当回合闭环；后景（`wait:false`，显式选项）= 立即返回 task_id，结果经 host 唤醒/drain 通道回传。worker 恒为独立进程，与前景/后景正交。
 _Avoid_: 把前景/后景与进程隔离混同；泛化的"同步/异步"；把 V1"立即返回 task_id"当默认契约（已被反转）
 
-**host drain**: host 侧把 completed 子代理 envelope 浓缩成一条消息、注入下一轮 run() priorMessages 的机制（#356 V1，`src/harness/subagent/host-drain.ts`）；只 drain completed，不修改 buffer 状态。#361 裁决后仅在异步臂（`wait:false`）生效，且须阻塞轮询至至少一个 worker 到终态；终态被 V2 事件驱动唤醒取代。
-_Avoid_: 把 drain 与"结果获取"混同（前景 spawn 不经 drain）；让 agent 侧直接消费 manager buffer；把 drain 被动挂"下一轮用户输入"当作可靠唤醒源
+**host drain**: host 把 completed 子代理的父可见信封浓缩成一条带固定前缀的消息、拼进下一次 `run()` 的 priorMessages；只读 buffer、不改状态。后景臂下：已有终态则立刻浓缩；仅 running 则立刻空返。叫醒主模型靠 mailbox，不靠用户再打一行，也不靠在 `run()` 边界空转等待。
+_Avoid_: 把 drain 与"结果获取"混同（前景 spawn 不经 drain）；让 agent 侧直接消费 manager buffer；把 drain 被动挂"下一轮用户输入"或阻塞轮询当作可靠唤醒源
+
+**mailbox**: 后景 spawn 的子→父终态回传通道。只投终态浓缩结果，不承载运行中消息，也不是子↔子协议。
+_Avoid_: 进度流；swarm / 子代理互投；把 mailbox 当 D-δ 低层 messaging
 
 **父可见信封**: 子代理交差给父模型看的那一层——短摘要、改过的路径、成败与停因；不是终稿全文，也不是磁盘上的代码。
 _Avoid_: 把完整 result 当任务产物；把汇报截断当成任务失败
