@@ -127,7 +127,7 @@ MCP server 的运行时失败继续映射到现有 `McpServerState = "failed"` �
    - **Surface:** `harness` error boundary 与 MCP lifecycle failure tests
    - **Acceptance:** `missing_cwd`、`invalid_cwd`、`invalid_config_root`、`root_mismatch`、`config_load_failed`、`reload_failed` 六类失败均能以稳定 typed kind 被调用方区分；错误信息可见且安全，普通 SDK/transport 异常不会成为产品面的裸 `Error`。
    - **Completion headroom:** 实现者可以选择继承层级、kind 的表示方式和错误构造 helper；只要公开错误观察面及安全约束保持一致即可。
-   - Status: [ ] pending
+   - Status: [x] done
 
 2. **`resolveMcpRoots` dual-root resolver** — tag: `[implementation]`
    - **Inherits:** `workspaceRoot` 是当前 session/task root；`productRoot` 是首次装配捕获的稳定主 checkout root；`mcpConfigRoot` 只能由 `productRoot` 派生。缺根、非绝对根或 root mismatch 在 spawn/config/reload 前 fail-closed，禁止回退 `process.cwd()`。
