@@ -34,6 +34,9 @@ import {
   truncateByCodepoints,
 } from "../harness/env-snapshot.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
+// Review Medium-2 (2026-08-29):显示条件锚定 task worktree 语义 —— 复用
+// session-api 的路径判定纯函数(同源 SSOT,判定与 T3/T4 所有权锚一致)。
+import { taskWorktreeOwnerOf } from "../session-api/worktree-rebind.js";
 import { clipOneLineVisual, visualWidth } from "./tool-summary.js";
 import { tuiPalette } from "./theme.js";
 
@@ -160,8 +163,15 @@ export function envSnapshotLines(
  *     文件的 workspaceRoot 字段只读透传;T3 改绑落盘的唯一写方是 session-api
  *     worktree-rebind)。本投影纯函数、零 git import、零 git 操作 —— TUI 只
  *     做展示(ACR bounded-context-guardian 边界)。
- *   - 未绑定(undefined / null / 空串;开关 OFF / 尚未 mutate / 改绑失败)→
- *     0 行,与今日一致,不出现多余状态,也绝不显示「已绑定」。
+ *   - 显示条件锚定 task worktree 语义(review Medium-2, 2026-08-29):仅当
+ *     root 命中 task worktree 确定性命名(`<x>/.iknow/worktrees/<conversationId>`
+ *     —— 复用 session-api taskWorktreeOwnerOf 路径判定)才显示。任意非空
+ *     workspaceRoot 不等于 worktree —— serve `bindWorkspace` 在 createSession
+ *     时就把 workspaceRoot 写成主根,主根 / serve 绑定根 / 任意目录一律
+ *     不渲染成 worktree 绑定。
+ *   - 未绑定(undefined / null / 空串;开关 OFF / 尚未 mutate / 改绑失败)或
+ *     非 task worktree 根 → 0 行,与今日一致,不出现多余状态,也绝不显示
+ *     「已绑定」。
  *   - 复用环境现势的字形纪律(⌂)与 dim 调色,单行按 cols 视觉宽度截断。
  */
 export function worktreeIsolationLines(
@@ -169,6 +179,12 @@ export function worktreeIsolationLines(
   cols: number
 ): ReadonlyArray<EnvSnapshotLine> {
   if (root === null || root === undefined || root.trim().length === 0) {
+    return [];
+  }
+  // Review Medium-2: only a root that decomposes to the task worktree naming
+  // (`<x>/.iknow/worktrees/<conversationId>`) is a binding — anything else
+  // (main repo root, serve-bound root, arbitrary dir) stays at 0 lines.
+  if (taskWorktreeOwnerOf(root) === undefined) {
     return [];
   }
   const text = clipOneLineVisual(

@@ -106,3 +106,22 @@ OVERALL: yes — 全 5 项 verdict 通过，可进入 T1 实施；后续 bullet 
 ## Code review phase (end of round)
 
 全部 implementation bullet 落地后：一轮 `code-review`（Standards + Spec）→ `verification-before-completion`，再合入。
+
+## Review remediation (2026-08-29)
+
+一轮 blocking review 产出 2 High + 2 Medium，全部修复（1 commit「remediate review findings」），TDD：每项先补失败测试再修。不触碰 spec/ADR 合同（硬要求 1–9 原样）。
+
+- **High-1 — TUI / CLI chat 入口未接 isolation 门禁**（`src/tui/deps.ts`、`src/tui/hub-bridge.ts`、`src/cli.ts` 经 `cli/runtime.ts` 另一套 buildHarnessEngine；且 hub-bridge 的 injectedDeps 分支短路 ensureDeps，mutate 零拦截直写主仓）
+  修复：TUI（`buildTuiDeps`）与 CLI chat 入口接同一 host 缝 —— `worktreeIsolation.provision`（session-api `worktree-rebind` SSOT provisioner）+ 启动 settings 透传进 buildHarnessEngine；hub 新增 `injectedEngineRoot` opt，`ensureDeps` 在会话根离开注入引擎根（rebind）时落到 per-root 引擎重建（TUI 经 hub-bridge 新转发的 `buildEngine` 缝 = 同一 depsOpts 重跑 `buildTuiDeps`；chat 经 `chat-session` 新增的 `rebuildDeps`/`engineRoot` 缝重跑 `buildHarnessEngine`），与 hub.ts 两条生产装配路径行为一致；rebind 后 passthrough 仍由 provision 按会话锚定。失败路径（chat 重建失败）可见降级、保持旧 deps、mutate 仍 fail-closed。
+  测试：`tests/tui/deps-isolation.test.ts`（ON 拦截 + OFF 零变化）、`tests/tui/hub-bridge.test.ts`（engineRoot/buildEngine 转发）、`tests/session-api/hub-worktree-isolation.test.ts`（injected deps rebuild at rebound root）、`tests/cli/chat-session-rebind.test.ts`（重建 / 不重建 / 失败可见降级）。
+- **High-2 — rebind 后隐式重载 project settings（硬要求 9 违反）**：rebind 后 worktree 根构建的新引擎走 `loadIknowSettings({cwd: worktreeRoot})`，`.iknow/` 被 gitignore → project settings 静默失效。
+  修复：settings 只在启动加载点装配一次 —— serve.ts 收敛单次 `loadIknowSettings()` 并经 hub 新增 `settings` opt 注入；hub 的两条引擎构建路径（`buildProductionEngine` / fallback）与 TUI（run.tsx → depsOpts.settings）、CLI chat（chatEngineOpts.settings + rebuildDeps 复用）全部复用启动装配的同一 `IknowSettings` 对象。
+  测试：`hub-worktree-isolation.test.ts`「startup settings pinned across rebind」（磁盘 OFF + 注入对象 ON → 门禁在主根与重建后的 worktree 根引擎上均保持 armed）。
+- **Medium-1 — conversationId 未校验即拼路径/分支名**（`worktree-rebind.ts`；store 层无现成 id 形状契约，id 原样 join 进文件路径与分支名）。
+  修复：provision 入口校验 `^[A-Za-z0-9][A-Za-z0-9_-]*$`（首字符字母数字，拒绝 `..` / 路径分隔 / 前导 `-` / 空白 / shell 元字符），不匹配 → typed `rebind_failed`，零 git 调用、零 store 写。
+  测试：`worktree-rebind.test.ts` 9 类非法 id + 合法 id 放行。
+- **Medium-2 — T5 投影把任意非空 workspaceRoot 显示成 worktree**（serve `bindWorkspace` 在 createSession 时就写 workspaceRoot=主根，误导）。
+  修复：`worktree-rebind.ts` 导出 `taskWorktreeOwnerOf` 路径判定（T4 所有权锚同源 SSOT），`environment-pane.worktreeIsolationLines` 显示条件锚定「root 命中 `<x>/.iknow/worktrees/<conversationId>` 命名」；主根 / serve 绑定根 / 任意目录 → 0 行。TUI 仍只读投影、零 git 操作。
+  测试：`environment-pane.test.tsx` 主根 / `.iknow` 非叶 / worktrees 目录本身 → 0 行；task worktree 路径 → 1 行。
+
+验证：`npx tsc --noEmit` 干净；`tests/harness`（2722）、`tests/session-api`（736）、`tests/cli`（355）全绿；`bun test tests/tui/` 1114 pass，唯一 fail 为 pre-existing（hub-bridge subagent drain，master 同挂，stash 验证非本轮引入）。

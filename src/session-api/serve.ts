@@ -112,11 +112,16 @@ export async function startSessionServe(
   const permissionModeCtx = createPermissionModeContext(
     parsePermissionMode(process.env.IKNOW_PERMISSION_MODE) ?? "default"
   );
+  // Review High-2 (2026-08-29 / hard req 9):settings 只在启动加载点读一次，
+  // 同一对象既驱动 graph / verify 装配，也经 hub opts.settings 钉给后续所有
+  // engine 构建 —— rebind 后 worktree 根内 `.iknow/` 缺席（gitignore），隐式
+  // loadIknowSettings({cwd: worktreeRoot}) 会静默丢 project settings。
+  const startupSettings = loadIknowSettings();
   // D-α V1 / ADR-0030:graph overlay holder —— 初值走 settings(默认关),
   // 运行中由 POST /api/v1/graph-mode(`/graph` 的 serve 对等物)翻。与
   // permissionModeCtx 同款:hub 与 http 层共用同一实例(SC3 三入口同 holder)。
   const graphModeCtx = createGraphModeContext(
-    resolveGraphMode({ settings: loadIknowSettings().graph })
+    resolveGraphMode({ settings: startupSettings.graph })
   );
 
   const hub = new SessionHub({
@@ -128,7 +133,10 @@ export async function startSessionServe(
     // (spec #128 Objective); 未装配 → verify-loop 透明关闭向后兼容 (SC7)。
     // serve 的 cwd = 进程启动目录 (与 build-engine sandboxRoot fallback 一致,
     // 见 hub.sandboxRoot 注释)。
-    verifyConfig: resolveVerifyConfig(loadIknowSettings().verify),
+    verifyConfig: resolveVerifyConfig(startupSettings.verify),
+    // Review High-2 (hard req 9):启动装配的 settings 对象钉给 hub —— rebind
+    // 后 worktree 根构建的新引擎复用同一对象，不隐式重载 project settings。
+    settings: startupSettings,
     // #196 A12（用户 2026-08-08 裁定）：serve 与 chat/tui 同属对话型入口，
     // 激活 BOOTSTRAP（surface="serve" → bootstrapActive=true），共享同一
     // ~/.iknow/state.json bootstrap_seeded 状态机；ask（oneshot 脚本）唯一例外。
@@ -185,7 +193,8 @@ export async function startSessionServe(
     port: Number.isFinite(port) ? port : 8787,
     contextWindow: env.compress.contextWindow,
     // 模型名（settings.llm.model SSOT）：HealthResponse 下发，web 状态条显示。
-    model: loadIknowSettings().llm?.model,
+    // Review High-2:同一启动装配对象（不重读 settings 文件）。
+    model: startupSettings.llm?.model,
     traceWriteFailures: () => hub.getTraceWriteFailures(),
     permissionMode: permissionModeCtx,
     graphMode: graphModeCtx,

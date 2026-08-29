@@ -101,12 +101,33 @@ export function taskWorktreeBranch(conversationId: string): string {
  * the leaf name is the conversation id, "the path decomposes to X" is
  * equivalent to "the tree belongs to conversation X" — no registry needed,
  * works across server restarts.
+ *
+ * Exported for read-only display consumers (TUI environment pane, review
+ * Medium-2): "workspaceRoot looks like a task worktree" is the display
+ * condition, NOT "workspaceRoot is any non-empty string" — serve's
+ * `bindWorkspace` legitimately persists the MAIN root as workspaceRoot, and
+ * that must never render as a worktree binding.
  */
-function taskWorktreeOwnerOf(root: string): string | undefined {
+export function taskWorktreeOwnerOf(root: string): string | undefined {
   if (basename(dirname(root)) !== "worktrees") return undefined;
   if (basename(dirname(dirname(root))) !== ".iknow") return undefined;
   return basename(root);
 }
+
+/**
+ * Review Medium-1 (2026-08-29): the conversationId is concatenated verbatim
+ * into the worktree path (`<repoRoot>/.iknow/worktrees/<id>`) and the branch
+ * name (`iknow/task-<id>`). The store layer has no id-shape contract (ids are
+ * host-generated UUIDs joined into file paths as-is), so the provisioner owns
+ * the segment-safety gate: fail closed on anything that is not a single safe
+ * path/branch segment, BEFORE any git call or store write.
+ *
+ * Contract: first char alphanumeric; remainder alphanumeric / `_` / `-`.
+ * This rejects path traversal (`..`, `a/b`), leading dashes/dots (option or
+ * glob ambiguity in `git worktree add -b`), whitespace / shell metacharacters,
+ * and empty strings.
+ */
+const SAFE_CONVERSATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 /** True when `root` is a LINKED git worktree checkout (`.git` is a file, not a dir). */
 function isLinkedWorktreeRoot(root: string): boolean {
@@ -138,6 +159,15 @@ export function createTaskWorktreeProvisioner(
       throw new WorktreeIsolationError(
         "rebind_failed",
         "worktree isolation: the mutate call carried no conversation id; cannot rebind a session root without one"
+      );
+    }
+    // Review Medium-1: segment-safety gate BEFORE path/branch construction —
+    // an unsafe id must never reach `git worktree add`, the worktree path, or
+    // a session-file write (typed rebind_failed, zero side effects).
+    if (!SAFE_CONVERSATION_ID_RE.test(conversationId)) {
+      throw new WorktreeIsolationError(
+        "rebind_failed",
+        `worktree isolation: conversation id ${JSON.stringify(conversationId)} is not a safe path/branch segment (expected ^[A-Za-z0-9][A-Za-z0-9_-]*$); refusing to build a task worktree or rebind with it`
       );
     }
 

@@ -23,6 +23,7 @@ import { SessionHub } from "../../src/session-api/hub.ts";
 import { SessionStore } from "../../src/session-api/store/index.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import type { LoopEngineDeps, ToolExecutionResult } from "../../src/harness/index.ts";
+import type { IknowSettings } from "../../src/config/settings.ts";
 import { installTestSettingsSource } from "../_helpers/install-test-settings-source.ts";
 import { readFile, writeFile } from "node:fs/promises";
 
@@ -295,5 +296,126 @@ describe("worktree isolation wiring (switch OFF)", () => {
     expect(result.message ?? "").not.toContain("[worktree_isolation]");
     expect(result.kind).toBe("ok");
     expect(existsSync(join(manualWt, "hello.txt"))).toBe(true);
+  });
+});
+
+// -- review High-2 (2026-08-29): startup settings pinned across rebind ---------
+
+/**
+ * Review High-2 (hard req 9): after a rebind the hub builds the follow-up
+ * engine at the worktree root. `.iknow/` is gitignored, so project settings
+ * are ABSENT inside the worktree — an implicit `loadIknowSettings({cwd:
+ * worktreeRoot})` silently drops them. The hub must reuse the settings
+ * object assembled at startup (constructor opt) for every engine it builds,
+ * main-root or worktree-rooted alike.
+ *
+ * Discriminator: the on-disk settings say OFF; only the pinned object says
+ * ON. If the hub (re)loads settings from disk anywhere, the gate disarms and
+ * the mutate executes instead of failing closed.
+ */
+describe("review High-2 — hub reuses the startup settings object across rebind", () => {
+  it("opts.settings arm the gate even when on-disk settings say OFF, and the rebuilt worktree-rooted engine stays armed", async () => {
+    await setSettingsIsolation(false); // disk says OFF
+    const repo = makeGitRepo();
+    const hub = new SessionHub({
+      store,
+      askUser: createNoAskUser(),
+      // startup-pinned settings (what serve.ts assembles at the load point)
+      settings: { isolation: { worktreeOnMutate: true } } as IknowSettings,
+    });
+    await hub.bindWorkspace(repo);
+    const { session: s1 } = await hub.createSession();
+    const c1 = s1.conversation_id;
+
+    // main-root engine: armed from the pinned object → intercept + rebind
+    const deps = await ensure(hub, repo);
+    const result = await runMutate(deps, c1);
+    expect(result.kind).toBe("execution_failed");
+    expect(result.message).toContain("[worktree_isolation]");
+    const wt1 = (await store.load(c1)).workspaceRoot!;
+    expect(wt1).toBe(join(repo, ".iknow", "worktrees", c1));
+    expect(existsSync(join(repo, "hello.txt"))).toBe(false);
+
+    // rebuilt (worktree-rooted) engine: still armed — a foreign conversation
+    // anchored at wt1 is fail-closed instead of silently written
+    const { conversationId: c2 } = await makeHubWithSession(repo);
+    const c2file = await store.load(c2);
+    await store.save({ id: c2, file: { ...c2file, workspaceRoot: wt1 } });
+    const wtDeps = await ensure(hub, wt1);
+    const result2 = await runMutate(wtDeps, c2);
+    expect(result2.kind).toBe("execution_failed");
+    expect(result2.message).toContain("kind=foreign_worktree");
+    expect(existsSync(join(wt1, "hello.txt"))).toBe(false);
+  });
+});
+
+// -- review High-1 (2026-08-29): injected-deps hosts (TUI) rebuild per root ----
+
+/**
+ * Review High-1: TUI injects its startup deps into the hub; the injected
+ * branch of ensureDeps short-circuited per-root resolution, so a rebound
+ * session stayed on the stale main-root engine and its mutates were blocked
+ * forever. With `injectedEngineRoot` + `buildEngine` the hub rebuilds at the
+ * rebound root (TUI passes a buildTuiDeps-based seam), matching the two hub
+ * production assembly paths.
+ */
+describe("review High-1 — injected deps rebuild at the rebound root (TUI seam)", () => {
+  const stubDeps = {
+    executor: {
+      executeAll: async () => [],
+    },
+  } as unknown as LoopEngineDeps;
+
+  it("ensureDeps at the injected engine's own root returns the injected deps; at a rebound task-worktree root returns the seam-built deps", async () => {
+    const repo = makeGitRepo();
+    const wtRoot = join(repo, ".iknow", "worktrees", "conv-tui");
+    const rebuilt: LoopEngineDeps = {
+      ...stubDeps,
+      maxTurns: 7,
+    } as LoopEngineDeps;
+    const builtAt: string[] = [];
+    const hub = new SessionHub({
+      store,
+      askUser: createNoAskUser(),
+      deps: stubDeps,
+      injectedEngineRoot: repo,
+      buildEngine: async (root) => {
+        builtAt.push(root);
+        return { deps: rebuilt };
+      },
+    });
+
+    // initial root: injected deps win (byte-identical to today)
+    const initial = await ensure(hub, repo);
+    expect(initial).toBe(stubDeps);
+    expect(builtAt).toEqual([]);
+
+    // rebound root: per-root rebuild via the seam (not the stale injection)
+    const rebound = await ensure(hub, wtRoot);
+    expect(rebound).toBe(rebuilt);
+    expect(builtAt).toEqual([wtRoot]);
+
+    // and the rebuild is cached per root
+    const again = await ensure(hub, wtRoot);
+    expect(again).toBe(rebuilt);
+    expect(builtAt).toEqual([wtRoot]);
+  });
+
+  it("without injectedEngineRoot the injected branch keeps today's behavior (no rebuild)", async () => {
+    const repo = makeGitRepo();
+    const wtRoot = join(repo, ".iknow", "worktrees", "conv-legacy");
+    const builtAt: string[] = [];
+    const hub = new SessionHub({
+      store,
+      askUser: createNoAskUser(),
+      deps: stubDeps,
+      buildEngine: async (root) => {
+        builtAt.push(root);
+        return { deps: stubDeps };
+      },
+    });
+    const deps = await ensure(hub, wtRoot);
+    expect(deps).toBe(stubDeps);
+    expect(builtAt).toEqual([]);
   });
 });

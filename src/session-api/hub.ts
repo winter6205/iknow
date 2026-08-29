@@ -75,6 +75,7 @@ import {
   currentSecretValues,
 } from "../harness/sandbox/index.js";
 import { loadIknowEnv, type IknowEnv, type LlmEnv } from "../config/env.js";
+import type { IknowSettings } from "../config/settings.js";
 import {
   MAX_WORKSPACE_ROOT_CHARS,
   resolveWorkspaceRoot,
@@ -523,6 +524,22 @@ export type SessionHubOptions = {
    *  ensureDeps 不算「变化」→ 不触发。T4 用它驱动 TUI 显示层刷新。 */
   readonly onEnvChange?: (env: IknowEnv) => void;
   /**
+   * Review High-1 (2026-08-29): root the constructor-injected `deps` were
+   * built at (TUI). Declared → ensureDeps falls through to per-root engine
+   * rebuild when a session's root left this root (worktree rebind). Absent →
+   * injected deps short-circuit exactly as today.
+   */
+  readonly injectedEngineRoot?: string;
+  /**
+   * Review High-2 (2026-08-29 / hard req 9): settings object assembled at the
+   * startup load point (serve.ts). Reused for EVERY engine this hub builds —
+   * rebind-rebuilt worktree-rooted engines included — so project settings
+   * never silently reload (they are absent inside the gitignored worktree).
+   * Absent → build-engine's own default load (behavior unchanged for
+   * tests / non-rebinding hosts).
+   */
+  readonly settings?: IknowSettings;
+  /**
    * serve-workspace T2 测试缝：按根装配 engine，避免单测走真实 LLM。
    * 生产省略 → `buildHarnessEngine` 且 cwd/workspaceRoot/sandboxRoot 三等。
    */
@@ -614,6 +631,25 @@ export class SessionHub {
   private lastReloadedEnv: IknowEnv | undefined;
   /** Constructor-injected deps (tests). Distinct from lazy/Map cache. */
   private readonly injectedDeps: LoopEngineDeps | undefined;
+  /**
+   * Review High-1 (2026-08-29): the root the injected deps were built at.
+   * Injected-deps hosts that support isolation (TUI) declare it so ensureDeps
+   * can detect a session root that LEFT the injected engine's root (rebind)
+   * and fall through to per-root engine rebuild — without it, a rebound
+   * session would stay on the stale engine and its mutates would be blocked
+   * forever. Absent (tests / ask) → injected branch behaves exactly as today.
+   */
+  private readonly injectedEngineRoot: string | undefined;
+  /**
+   * Review High-2 (2026-08-29 / hard req 9): the settings object assembled at
+   * the startup load point. Every engine this hub builds (main-root production
+   * path, fallback path, rebind-rebuilt worktree-rooted engines) reuses THIS
+   * object via buildHarnessEngine's `settings` opt — `.iknow/` is gitignored
+   * so a worktree-rooted `loadIknowSettings({cwd})` would silently drop
+   * project settings. Absent → build-engine keeps its own default load
+   * (tests / hosts that never rebind are unchanged).
+   */
+  private readonly startupSettings: IknowSettings | undefined;
   /** serve-workspace T2: test seam; production omits → buildHarnessEngine. */
   private readonly buildEngine:
     | ((root: string) => Promise<{
@@ -673,6 +709,8 @@ export class SessionHub {
     this.store = opts.store;
     this.injectedDeps = opts.deps;
     this.cachedDeps = opts.deps;
+    this.injectedEngineRoot = opts.injectedEngineRoot;
+    this.startupSettings = opts.settings;
     this.buildEngine = opts.buildEngine;
     this.traceOut = opts.traceOut;
     this.askUser = opts.askUser;
@@ -2197,6 +2235,10 @@ export class SessionHub {
       cwd: root,
       sandboxRoot: root,
       workspaceRoot: root,
+      // Review High-2 (hard req 9): reuse the startup settings object — a
+      // worktree-rooted loadIknowSettings({cwd}) would silently drop project
+      // settings (`.iknow/` is gitignored inside the worktree).
+      ...(this.startupSettings ? { settings: this.startupSettings } : {}),
       // ADR-0037 T3:mutate 门禁 host 缝 —— 开关读取在 build-engine 启动加载点;
       // provision 负责建树 + 仅本会话根改绑。T4:passthrough 不经
       // conversation-agnostic 的 initiallyBound —— 会话已在本会话自己的 task
@@ -2240,6 +2282,20 @@ export class SessionHub {
     if (this.injectedDeps) {
       // 注入 deps 的 host 自己 build 了 engine（TUI），快照句柄经构造 opts
       // 进来;纯测试注入路径没有 engine → undefined,行为零变化。
+      // Review High-1 (2026-08-29):host 声明 injectedEngineRoot 且会话根已
+      // 离开该根（worktree rebind）→ 落到 per-root 引擎重建（buildEngine 缝
+      // / 生产装配），与 hub.ts 两条装配路径行为一致；未声明 → 短路语义与
+      // 今日逐字节一致。
+      const mapRoot = sessionRoot ?? this.boundRoot;
+      if (
+        mapRoot !== undefined &&
+        this.injectedEngineRoot !== undefined &&
+        mapRoot !== this.injectedEngineRoot
+      ) {
+        const entry = await this.getOrBuildEngine(mapRoot);
+        this.activeGraphAssembly = entry.graphAssembly;
+        return entry.deps;
+      }
       this.activeGraphAssembly = this.injectedGraphAssembly;
       return this.cachedDeps ?? this.injectedDeps;
     }
@@ -2278,6 +2334,9 @@ export class SessionHub {
       env,
       askUser: this.askUser,
       ...(this.sandboxRoot ? { sandboxRoot: this.sandboxRoot } : {}),
+      // Review High-2 (hard req 9): fallback path reuses the startup settings
+      // object too (rebind-rebuilt engines must not reload settings).
+      ...(this.startupSettings ? { settings: this.startupSettings } : {}),
       // ADR-0037 T3:未 bind 根的兜底路径同样接 isolation host 缝
       // （repoRoot = sandboxRoot ?? process.cwd();session workspaceRoot 缺席
       // 的会话在 rebind 后下一回合走 per-root 引擎路径）。T4:同上——

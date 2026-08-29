@@ -56,6 +56,12 @@ import {
   loadIknowSettings,
   analyzePlaceholderSyntax,
 } from "./config/settings.js";
+// ADR-0037 review High-1/High-2 (2026-08-29): chat 入口的 worktree isolation
+// host 缝与启动 settings 钉住。
+import { SessionStore } from "./session-api/store/index.js";
+import { resolveServeDataDir } from "./session-api/serve.js";
+import { createTaskWorktreeProvisioner } from "./session-api/worktree-rebind.js";
+import type { WorktreeIsolationHostOpts } from "./harness/isolation/worktree-gate.js";
 // 共享装配 (cli / serve / tui 三入口共用, SSOT): settings.verify → VerifyConfig。
 import { resolveVerifyConfig } from "./config/verify-config.js";
 
@@ -281,12 +287,46 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     (process.env.IKNOW_PERMISSION_MODE as PermissionMode | undefined) ??
       "default"
   );
-  // D-α / ADR-0030:graph 编排 overlay 的会话 holder。初值走 settings.graph
-  // （缺省关);Shift+Tab 三态轮与 /graph on|off 在 REPL 里就地翻它,装配层
-  // 在下一次 run() 快照它决定露不露 run_graph。
+  // Review High-2 (2026-08-29 / 硬要求 9):settings 只在启动加载点读一次，
+  // 同一对象驱动 graph / verify 装配与引擎构建 —— rebind 后 per-root 重建
+  // 复用它，worktree 内 `.iknow/` 缺席（gitignore）也绝不隐式重载 settings。
+  const startupSettings = loadIknowSettings();
   const graphMode = createGraphModeContext(
-    resolveGraphMode({ settings: loadIknowSettings().graph })
+    resolveGraphMode({ settings: startupSettings.graph })
   );
+  // Review High-1 (2026-08-29):worktree isolation host 缝 —— provision 负责
+  // 建 task worktree + 仅本会话根改绑（session-api worktree-rebind SSOT）。
+  // store 与 chat-session 的 checkpointStore 同池（resolveServeDataDir()）。
+  // 开关读取在 build-engine 启动加载点（经 startupSettings）；OFF → 不包装。
+  const worktreeProvisioner = createTaskWorktreeProvisioner({
+    store: new SessionStore(resolveServeDataDir()),
+  });
+  const worktreeIsolation: WorktreeIsolationHostOpts = {
+    provision: ({ conversationId, root: sessionRoot }) =>
+      worktreeProvisioner.provision({ conversationId, root: sessionRoot }),
+  };
+  // 初始装配与 rebind 重建共用的装配 opts（同一 askUser/holder/settings）。
+  const chatEngineOpts = {
+    askUser: createTtyAskUser(),
+    surface: "chat" as const,
+    memory: { enabled: true } as const,
+    permissionMode,
+    graphMode,
+    todoDir: resolveSessionTodoDir({ surface: "chat" }),
+    // review-fix (Fix 1): subagent trace 生产装配 —— 仅显式配置 traceOut/env 时
+    // 注入 <traceOut>/subagent.jsonl (conversationId="subagent", 聚合所有会话)。
+    ...(subagentTraceService !== undefined
+      ? { subagentTrace: subagentTraceService }
+      : {}),
+    subagentDiagnosticsDir: tracePath,
+    // review-fix (M1/M5): `!== undefined` 守门 — 空字符串透传触 empty_explicit。
+    ...(parsed.workspaceRoot !== undefined
+      ? { workspaceRoot: parsed.workspaceRoot }
+      : {}),
+    // Review High-2 / High-1 (2026-08-29):启动 settings 对象 + isolation 缝。
+    settings: startupSettings,
+    worktreeIsolation,
+  };
   try {
     // chat TTY REPL: interactive y/N prompt via stdin/stdout.
     // #196 A12:chat 激活 BOOTSTRAP(surface="chat" → bootstrapActive=true)。
@@ -294,24 +334,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // #440 T1-fix:chat 入口注入 todoDir 让 todo_write 在主 loop 在场
     // (per-conversationId resolution 是后续 ticket,见 todo-write.ts resolveSessionTodoDir 注释)。
     // ADR-0019 (T2):`--workspace-root` flag 透传到 per-root identity / memory seam。
-    built = await buildHarnessEngine(bundle, {
-      askUser: createTtyAskUser(),
-      surface: "chat",
-      memory: { enabled: true },
-      permissionMode,
-      graphMode,
-      todoDir: resolveSessionTodoDir({ surface: "chat" }),
-      // review-fix (Fix 1): subagent trace 生产装配 —— 仅显式配置 traceOut/env 时
-      // 注入 <traceOut>/subagent.jsonl (conversationId="subagent", 聚合所有会话)。
-      ...(subagentTraceService !== undefined
-        ? { subagentTrace: subagentTraceService }
-        : {}),
-      subagentDiagnosticsDir: tracePath,
-      // review-fix (M1/M5): `!== undefined` 守门 — 空字符串透传触 empty_explicit。
-      ...(parsed.workspaceRoot !== undefined
-        ? { workspaceRoot: parsed.workspaceRoot }
-        : {}),
-    });
+    built = await buildHarnessEngine(bundle, chatEngineOpts);
   } catch (err) {
     printChatError(err);
     process.exitCode = 1;
@@ -361,7 +384,24 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // → { command: "" }, subagentManager 在场 (chat) 时 runClassifier 接管
     // 分类器判官 (spec #128 Objective); ask 形态无 manager → verify-loop
     // 透明关闭向后兼容 (SC7)。其余字段随行透传。
-    verifyConfig: resolveVerifyConfig(loadIknowSettings().verify),
+    // Review High-2:同一启动装配 settings 对象（不重读 settings 文件）。
+    verifyConfig: resolveVerifyConfig(startupSettings.verify),
+    // Review High-1 (2026-08-29):rebind 后 per-root 引擎重建缝 —— 用同一
+    // chatEngineOpts + 同一启动 settings 重跑 buildHarnessEngine，根切到
+    // task worktree（cwd / workspaceRoot 锚随改绑移动，ADR-0037 §4）。
+    engineRoot: process.cwd(),
+    rebuildDeps: async (root: string) => {
+      const rebuilt = await buildHarnessEngine(bundle, {
+        ...chatEngineOpts,
+        cwd: root,
+        workspaceRoot: root,
+      });
+      return {
+        ...rebuilt.deps,
+        agentVersion: getVersion(),
+        maxTurns: parsed.maxTurns ?? rebuilt.deps.maxTurns,
+      };
+    },
   });
 }
 

@@ -167,6 +167,19 @@ export type ChatSessionOpts = {
    * hosts pass `excludeIds` (session-level dedup) via the second argument.
    */
   readonly overlayMemoryPrefetch?: OverlayPrefetchFn;
+  /**
+   * Review High-1 (2026-08-29 / ADR-0037): per-root 引擎重建缝。chat REPL 的
+   * deps 装配一次；T3 门禁 rebind 后会话文件 workspaceRoot 指向 task
+   * worktree，下一回合由本缝以新根重建（cli.ts runChat 提供 —— 用同一装配
+   * opts + 同一启动 settings 对象重跑 buildHarnessEngine，硬要求 9）。
+   * 缺席（ask / tests）→ 无重建检测，行为零变化。
+   */
+  readonly rebuildDeps?: (root: string) => Promise<LoopEngineDeps>;
+  /**
+   * Review High-1:`opts.deps` 装配时的引擎根（sandboxRoot = process.cwd()）。
+   * rebind 检测基准：会话文件 workspaceRoot 偏离它时触发重建。缺席 → 不检测。
+   */
+  readonly engineRoot?: string;
 };
 
 export type ChatLineContext = {
@@ -226,7 +239,61 @@ export type ChatLineContext = {
    * in-flight turn (EXIT busy_stop_first).
    */
   clientBusy?: { value: boolean };
+  /**
+   * Review High-1: per-root 引擎重建缝（runChatSession 装配；同
+   * ChatSessionOpts.rebuildDeps）。缺席 → processChatLine 不做重建检测。
+   */
+  rebuildDeps?: (root: string) => Promise<LoopEngineDeps>;
+  /**
+   * Review High-1: 当前 deps 绑定的引擎根（可变 —— 重建后随新根更新）。
+   */
+  engineRoot?: string;
+  /**
+   * Review High-1: 重建 deps 的包装缝（runChatSession 提供 wrapChatDeps ——
+   * violation executor + conversationId + commitMessages 与初始装配同语义）。
+   * 缺席 → 重建结果仅收敛 conversationId（tests）。
+   */
+  wrapRebuiltDeps?: (base: LoopEngineDeps) => LoopEngineDeps;
 };
+
+/**
+ * Review High-1 (2026-08-29): rebind 检测 —— 会话文件 workspaceRoot 偏离
+ * ctx.engineRoot（上一回合 T3 门禁建树改绑落盘）→ 以新根重建 deps。失败
+ * 可见降级（保持旧 deps，stale 引擎门禁继续 fail-closed，绝不静默放行写
+ * 旧根）。rebuildDeps / checkpointStore 缺席（ask / tests）→ no-op。
+ */
+export async function refreshChatDepsForRebind(
+  ctx: ChatLineContext
+): Promise<void> {
+  const rebuild = ctx.rebuildDeps;
+  if (rebuild === undefined) return;
+  const conversationId = ctx.state.conversationId;
+  if (conversationId === null) return;
+  const store = ctx.checkpointStore;
+  if (store === undefined) return;
+  let newRoot: string | undefined;
+  try {
+    const file = await store.load(conversationId);
+    newRoot = file.workspaceRoot;
+  } catch {
+    // not_found / io error → 无 rebind 信号;门禁兜底仍 fail-closed
+    return;
+  }
+  if (newRoot === undefined || newRoot === ctx.engineRoot) return;
+  try {
+    const base = await rebuild(newRoot);
+    ctx.deps = ctx.wrapRebuiltDeps
+      ? ctx.wrapRebuiltDeps(base)
+      : { ...base, conversationId };
+    ctx.engineRoot = newRoot;
+  } catch (err) {
+    writeErr(
+      `[worktree_isolation] 会话已改绑到 ${newRoot}，但引擎重建失败，保持旧根（mutate 仍 fail-closed）: ${
+        err instanceof Error ? err.message : String(err)
+      }\n`
+    );
+  }
+}
 
 export type ProcessChatLineResult = {
   quit: boolean;
@@ -599,6 +666,11 @@ export async function processChatLine(
   if (parsedLine.kind === "empty") {
     return { quit: false, output: "" };
   }
+
+  // Review High-1 (2026-08-29): rebind 检测 —— T3 门禁在上一回合把会话根改绑
+  // 到 task worktree 后，本行开跑前以新根重建 deps（仅 chat 生产装配了
+  // rebuildDeps 时生效；ask / tests 缺席 → no-op）。重建失败可见降级。
+  await refreshChatDepsForRebind(ctx);
 
   if (parsedLine.kind === "slash") {
     return processSlash({
@@ -1656,18 +1728,22 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     killRef.fired = true;
     notify(reason);
   };
-  const executor = wrapWithViolationHook({
-    inner: opts.deps.executor,
-    counter,
-    onKill,
+  // Review High-1 (2026-08-29):deps 包装收拢成闭包 —— 初始装配与 rebind 后
+  // 的 per-root 重建共用同一套包装语义（violation executor + conversationId
+  // + commitMessages 钩子），重建不漂移。
+  const commitHook = createChatSessionCommitHook({
+    store: checkpointStore,
+    conversationId,
+    jsonMode: state.jsonMode,
+    getPriors: () => state.messages,
   });
-  // #502 T5 / ADR-0021 D1.4:per-session conversationId 注入 deps（loop-engine
-  // 经 executor.executeAll 第 4 参透传到 tool ctx.conversationId）。build-engine
-  // 的 deps 跨会话共享,cachedDeps不变;此处在 REPL 级 wrappedDeps 闭包落 session
-  // 锚点,scope 过滤才能在同 session 内闭环。
-  const wrappedDeps: LoopEngineDeps = {
-    ...opts.deps,
-    executor,
+  const wrapChatDeps = (base: LoopEngineDeps): LoopEngineDeps => ({
+    ...base,
+    executor: wrapWithViolationHook({
+      inner: base.executor,
+      counter,
+      onKill,
+    }),
     // CliChatState.conversationId:string | null;LoopEngineDeps.conversationId:
     // string | undefined —— null 用 ?? undefined 收敛到 undefined 缺省语义
     // （不过滤，与 ADR-0021 D1.4 backward-compat 路径对齐）。
@@ -1676,15 +1752,9 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     // 裸 store IO 现状)。getPriors 读 live state.messages(= 本轮 run 前的历史,
     // 与 hub bootstrap 的 session.messages 同语义;当前轮 user query 仍由收尾
     // checkpoint 落盘)。调用方已注入 commitMessages 时以调用方为准。
-    commitMessages:
-      opts.deps.commitMessages ??
-      createChatSessionCommitHook({
-        store: checkpointStore,
-        conversationId,
-        jsonMode: state.jsonMode,
-        getPriors: () => state.messages,
-      }),
-  };
+    commitMessages: base.commitMessages ?? commitHook,
+  });
+  const wrappedDeps: LoopEngineDeps = wrapChatDeps(opts.deps);
 
   const ctx: ChatLineContext = {
     deps: wrappedDeps,
@@ -1699,6 +1769,15 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     verifyConfig: opts.verifyConfig,
     autoMemory: opts.autoMemory,
     overlayMemoryPrefetch: opts.overlayMemoryPrefetch,
+  // Review High-1 (2026-08-29):rebind 检测缝 —— 会话文件 workspaceRoot 偏离
+  // engineRoot 时以新根重建 deps（包装语义与初始装配同源，见 wrapChatDeps）。
+  ...(opts.rebuildDeps
+    ? {
+        rebuildDeps: opts.rebuildDeps,
+        engineRoot: opts.engineRoot,
+        wrapRebuiltDeps: wrapChatDeps,
+      }
+    : {}),
   };
 
   const interactive = isInteractive();

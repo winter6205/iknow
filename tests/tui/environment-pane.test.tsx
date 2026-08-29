@@ -344,6 +344,31 @@ describe("worktreeIsolationLines: 会话 worktree 隔离现势", () => {
     expect(joined).not.toContain("worktree:");
   });
 
+  // Review Medium-2 (2026-08-29): 任意非空 workspaceRoot ≠ worktree ——
+  // serve bind 在 createSession 时就把 workspaceRoot 写成主根。显示条件
+  // 锚定 task worktree 语义（`<x>/.iknow/worktrees/<conversationId>` 路径
+  // 判定，复用 session-api taskWorktreeOwnerOf），非 task worktree 根 → 0 行。
+  test("review Medium-2: 主根 / serve 绑定根（非 task worktree 路径）→ 0 行", () => {
+    expect(worktreeIsolationLines("/repo", 80)).toEqual([]);
+    expect(worktreeIsolationLines("/home/user/project", 80)).toEqual([]);
+    // serve bind 写主根的形态：workspaceRoot = 主仓根
+    expect(worktreeIsolationLines("/srv/iknow-main", 80)).toEqual([]);
+  });
+
+  test("review Medium-2: `.iknow` 下但非 worktrees 叶、worktrees 目录本身 → 0 行", () => {
+    expect(worktreeIsolationLines("/repo/.iknow/state.json", 80)).toEqual([]);
+    expect(worktreeIsolationLines("/repo/.iknow/worktrees", 80)).toEqual([]);
+    expect(worktreeIsolationLines("/repo/.iknow/other/conv-1", 80)).toEqual([]);
+  });
+
+  test("review Medium-2: task worktree 路径（含嵌套仓内树）→ 1 行", () => {
+    expect(
+      worktreeIsolationLines("/repo/.iknow/worktrees/conv-1", 80).length
+    ).toBe(1);
+    const nested = "/repo/wt/.iknow/worktrees/conv-2";
+    expect(worktreeIsolationLines(nested, 80).length).toBe(1);
+  });
+
   test("行宽受 cols 限制：超长路径按视觉宽度单行截断", () => {
     const longRoot = `/repo/${"w".repeat(200)}/.iknow/worktrees/conv-1`;
     const lines = worktreeIsolationLines(longRoot, 40);

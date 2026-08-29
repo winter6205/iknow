@@ -78,6 +78,73 @@ afterAll(() => {
 
 // -- provisioning + rebind -----------------------------------------------------
 
+/**
+ * Review Medium-1 (2026-08-29): conversationId is concatenated into the
+ * worktree path (`<repoRoot>/.iknow/worktrees/<id>`) and the branch name
+ * (`iknow/task-<id>`). The store layer carries no id-shape contract (ids are
+ * host-generated UUIDs, joined verbatim into file paths), so the provisioner
+ * itself must fail closed on non-segment-safe ids BEFORE any git call or
+ * path/branch construction — a malicious/corrupt id (`../x`, `a/b`, leading
+ * `-`, whitespace, `.`, ...) must never reach `git worktree add` nor a
+ * session-file write.
+ */
+describe("provision rejects non-segment-safe conversation ids (fail-closed, review Medium-1)", () => {
+  const unsafeIds = [
+    "../evil",
+    "a/b",
+    "a\\b",
+    ".hidden",
+    "..",
+    "-leading-dash",
+    "white space",
+    "id;rm -rf",
+    "id\nnewline",
+  ];
+
+  for (const id of unsafeIds) {
+    it(`rejects conversationId '${JSON.stringify(id)}' with typed rebind_failed, zero git calls, zero store writes`, async () => {
+      let gitCalls = 0;
+      let loads = 0;
+      let saves = 0;
+      const prov = createTaskWorktreeProvisioner({
+        store: {
+          load: async () => {
+            loads += 1;
+            throw new Error("store must not be reached for an unsafe id");
+          },
+          save: async () => {
+            saves += 1;
+          },
+        },
+        runGit: async () => {
+          gitCalls += 1;
+          return { code: 0, stdout: "true\n", stderr: "" };
+        },
+      });
+
+      await expect(
+        prov.provision({ conversationId: id, root: "/repo" })
+      ).rejects.toMatchObject({
+        name: "WorktreeIsolationError",
+        kind: "rebind_failed",
+      });
+
+      // fail-closed: nothing was probed, nothing was built, nothing rebound
+      expect(gitCalls).toBe(0);
+      expect(loads).toBe(0);
+      expect(saves).toBe(0);
+    });
+  }
+
+  it("accepts segment-safe ids (alphanumeric + inner - / _)", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, ["A9-x_Y"]);
+    const prov = createTaskWorktreeProvisioner({ store });
+    const root = await prov.provision({ conversationId: "A9-x_Y", root: repo });
+    expect(root).toBe(join(repo, ".iknow", "worktrees", "A9-x_Y"));
+  });
+});
+
 describe("createTaskWorktreeProvisioner", () => {
   it("creates the per-conversation task worktree and rebinds ONLY that session's workspaceRoot", async () => {
     const repo = makeGitRepo();
