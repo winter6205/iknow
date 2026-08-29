@@ -393,6 +393,25 @@ describe("spawn_subagent description — 工具用法 SSOT (T1 #557)", () => {
     expect(description).not.toMatch(/Fork|worktree/i);
   });
 
+  it("wait:false → chat/tui/serve rely on terminal wake, not polling, while wait:true wording stays blocking", () => {
+    const waitFalseStart = description.indexOf("Pass `wait:false`");
+    const capacityStart = description.indexOf("At most", waitFalseStart);
+    const waitFalseGuidance = description.slice(
+      waitFalseStart,
+      capacityStart
+    );
+
+    expect(waitFalseGuidance).toMatch(/mailbox/i);
+    expect(waitFalseGuidance).toMatch(/subscribe/i);
+    expect(waitFalseGuidance).toMatch(/silent run/i);
+    expect(waitFalseGuidance).toMatch(/chat\/tui\/serve/i);
+    expect(waitFalseGuidance).toMatch(/primary completion path/i);
+    expect(waitFalseGuidance).not.toMatch(/poll later/i);
+    expect(description).toContain(
+      "Default `wait:true` — the call blocks until the sub-agent finishes"
+    );
+  });
+
   it("不写入嵌套政策(nested / one level / caps at 等措辞)", () => {
     // 嵌套禁止由代码保证,description 不应假装一个语义级 SSOT
     expect(description).not.toMatch(/nested/i);

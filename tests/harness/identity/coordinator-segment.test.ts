@@ -219,7 +219,15 @@ describe("IKNOW_COORDINATOR_TEXT — SSOT 文案验收", () => {
     expect(IKNOW_COORDINATOR_TEXT).toMatch(/data, not an error/);
   });
 
-  it("措辞用 'Default contract today' 为 V2 异步纪律段留空间", () => {
-    expect(IKNOW_COORDINATOR_TEXT).toContain("Default contract today");
+  it("wait:false 引导 chat/tui/serve 走 terminal wake + silent run", () => {
+    expect(IKNOW_COORDINATOR_TEXT).toMatch(
+      /wait:false.*terminal completion wakes a silent run through the host mailbox\/subscription/s
+    );
+    expect(IKNOW_COORDINATOR_TEXT).toMatch(
+      /subagent_result only for an explicit status query/
+    );
+    expect(IKNOW_COORDINATOR_TEXT).not.toContain(
+      "A future version may add an explicit asynchronous mode"
+    );
   });
 });

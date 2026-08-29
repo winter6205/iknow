@@ -7,8 +7,8 @@
  * 决定，spawn timer 同源），阻塞至子代理终态，把父可见短交差（summary /
  * changed paths / status / stop_reason）作 tool_result 返回。多个独立任务
  * 可在同一 turn 并行发多条 spawn_subagent（wait:true 各自阻塞，executor
- * 并发安全）。`wait:false` → 立即返 `{task_id}`（异步臂），结果由 host drain
- * 在下一轮 turn 拼入 user message / subagent_result 主动拉取。
+ * 并发安全）。`wait:false` → 立即返 `{task_id}`（异步臂），chat / tui / serve
+ * 由 host mailbox/subscribe 终态唤醒 silent run；subagent_result 仍可主动查询。
  *
  * **#556 T3 subagent_type routing**：可选参数 `subagent_type`（CC Agent
  * tool 字面名）→ 解析为 catalog id → 写入 `def.role`（T2 装配链路已透传到
@@ -126,7 +126,7 @@ export function createSpawnSubAgentTool(
   return Object.freeze({
     name: "spawn_subagent",
     description:
-      `Delegate a self-contained task when it needs multi-step exploration, independent verification, or parallelizable work. The default subagent type is \`general-purpose\`; use \`explore\` for read-only work. Keep every task self-contained. Default \`wait:true\` — the call blocks until the sub-agent finishes and returns the parent-visible short handoff with summary, changed paths, status, and stop_reason when available (timeout 2 hours default; override via \`timeoutMs\`). Issue multiple \`spawn_subagent\` calls in one turn only for independent tasks. Pass \`wait:false\` for fire-and-forget: returns \`{task_id}\` immediately and poll later via \`subagent_result\`. At most ${DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS} workers run simultaneously by default; when at capacity, reduce concurrency and retry after a worker completes — requests are rejected rather than queued.\n\nAvailable subagent types (set \`subagent_type\` to route):\n` +
+      `Delegate a self-contained task when it needs multi-step exploration, independent verification, or parallelizable work. The default subagent type is \`general-purpose\`; use \`explore\` for read-only work. Keep every task self-contained. Default \`wait:true\` — the call blocks until the sub-agent finishes and returns the parent-visible short handoff with summary, changed paths, status, and stop_reason when available (timeout 2 hours default; override via \`timeoutMs\`). Issue multiple \`spawn_subagent\` calls in one turn only for independent tasks. Pass \`wait:false\` for fire-and-forget: returns \`{task_id}\` immediately. In chat/tui/serve, terminal completion wakes the host through the mailbox/subscribe path and starts a silent run; this is the primary completion path. Use \`subagent_result\` only for an explicit status query. At most ${DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS} workers run simultaneously by default; when at capacity, reduce concurrency and retry after a worker completes — requests are rejected rather than queued.\n\nAvailable subagent types (set \`subagent_type\` to route):\n` +
       proseLines,
     inputSchema: {
       type: "object",
