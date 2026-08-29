@@ -74,6 +74,11 @@ export interface ToolCallView {
   readonly truncated: boolean; // output 是否被截断
 }
 
+/** Ordered assistant content used by clients that need text/tool placement. */
+export type ActivityItem =
+  | { readonly type: "text"; readonly text: string }
+  | { readonly type: "tool"; readonly tool: ToolCallView };
+
 /** 022 Q1: 单次消息往返的 wire 形状。 */
 export interface TurnDto {
   readonly query: string; // 用户输入文本

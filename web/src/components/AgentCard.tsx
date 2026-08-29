@@ -86,6 +86,8 @@ export function AgentCard({
 
   const thinking = answer?.thinking;
   const toolCalls = answer?.toolCalls;
+  const activity = answer?.activity;
+  const hasActivity = activity !== undefined && activity.length > 0;
 
   return (
     <article
@@ -96,21 +98,44 @@ export function AgentCard({
       {/* thinking 折叠展开（默认收起，aria-expanded + 键盘可达）。 */}
       {thinking ? <ThinkingBlock thinking={thinking} /> : null}
 
-      {/* Claims / body (T3: default = GFM markdown with code highlighting; renderBody overrides for tests). */}
-      <div className="text-[15px] leading-[1.7] text-ink [overflow-wrap:anywhere]">
-        {renderBody ? renderBody(text) : <MarkdownBody text={text} />}
-      </div>
+      {/* Ordered activity replaces the legacy body/tools pair only when non-empty. */}
+      {hasActivity ? (
+        <div className="flex flex-col">
+          {activity.map((item, index) =>
+            item.type === "text" ? (
+              <div
+                key={`activity-text-${index}`}
+                className="text-[15px] leading-[1.7] text-ink [overflow-wrap:anywhere]"
+              >
+                {renderBody ? renderBody(item.text) : <MarkdownBody text={item.text} />}
+              </div>
+            ) : (
+              <ToolCallList
+                key={`activity-tool-${item.tool.id}-${index}`}
+                toolCalls={[item.tool]}
+              />
+            )
+          )}
+        </div>
+      ) : (
+        <>
+          {/* Claims / body (T3: default = GFM markdown with code highlighting; renderBody overrides for tests). */}
+          <div className="text-[15px] leading-[1.7] text-ink [overflow-wrap:anywhere]">
+            {renderBody ? renderBody(text) : <MarkdownBody text={text} />}
+          </div>
+
+          {/* toolCalls（默认折叠，每条 mono chip + 展开看 input/output 预览）。 */}
+          {toolCalls && toolCalls.length > 0 ? (
+            <ToolCallList toolCalls={toolCalls} />
+          ) : null}
+        </>
+      )}
 
       {/* Stop-reason notice (non-completed) + turnCount meta info (T6) — quiet mono row below the body. */}
       <StopNotice
         stopReason={answer?.stopReason}
         turnCount={answer?.turnCount}
       />
-
-      {/* toolCalls（默认折叠，每条 mono chip + 展开看 input/output 预览）。 */}
-      {toolCalls && toolCalls.length > 0 ? (
-        <ToolCallList toolCalls={toolCalls} />
-      ) : null}
 
       {/* Notes (quiet, mono). */}
       {notes && notes.length > 0 ? (
