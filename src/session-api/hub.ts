@@ -55,6 +55,10 @@ import type {
   SubagentInfo,
 } from "../harness/subagent/manager.js";
 import { getVersion } from "../cli/usage.js"; // SC-W 6/7: agentVersion 注入(与 session-api/http.ts 同向 import,无循环)
+import {
+  createTaskWorktreeProvisioner,
+  type TaskWorktreeProvisioner,
+} from "./worktree-rebind.js";
 import type { AskUser } from "../harness/permission/types.js";
 import type {
   ServeAskUserHandle,
@@ -555,6 +559,8 @@ export type SessionHubOptions = {
 
 export class SessionHub {
   private readonly store: SessionStore;
+  /** ADR-0037 T3:task worktree 建树 + 仅本会话根改绑的 host 缝。 */
+  private readonly worktreeProvisioner: TaskWorktreeProvisioner;
   private cachedDeps: LoopEngineDeps | undefined;
   private readonly defaults: {
     jsonMode: boolean;
@@ -690,6 +696,11 @@ export class SessionHub {
     this.defaults = {
       jsonMode: opts.defaultJsonMode ?? false,
     };
+    // ADR-0037 T3:worktree isolation host 缝 —— 建树 + 仅本会话根改绑。
+    // 开关本体由 build-engine 在启动加载点读取（硬要求 9）；hub 只在
+    // buildProductionEngine / ensureDeps 兜底路径注入 provision 缝与
+    // initiallyBound 标记。
+    this.worktreeProvisioner = createTaskWorktreeProvisioner({ store: this.store });
   }
 
   // -- public API --------------------------------------------------------------
@@ -2185,6 +2196,14 @@ export class SessionHub {
       cwd: root,
       sandboxRoot: root,
       workspaceRoot: root,
+      // ADR-0037 T3:mutate 门禁 host 缝 —— 开关读取在 build-engine 启动加载点;
+      // provision 负责建树 + 仅本会话根改绑;本根已是 task worktree 时
+      // initiallyBound（改绑后下一回合的 per-root 引擎直接放行 mutate）。
+      worktreeIsolation: {
+        provision: ({ conversationId, root: sessionRoot }) =>
+          this.worktreeProvisioner.provision({ conversationId, root: sessionRoot }),
+        initiallyBound: this.worktreeProvisioner.isTaskWorktreeRoot(root),
+      },
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
       ...(this.permissionMode ? { permissionMode: this.permissionMode } : {}),
@@ -2257,6 +2276,16 @@ export class SessionHub {
       env,
       askUser: this.askUser,
       ...(this.sandboxRoot ? { sandboxRoot: this.sandboxRoot } : {}),
+      // ADR-0037 T3:未 bind 根的兜底路径同样接 isolation host 缝
+      // （repoRoot = sandboxRoot ?? process.cwd();session workspaceRoot 缺席
+      // 的会话在 rebind 后下一回合走 per-root 引擎路径）。
+      worktreeIsolation: {
+        provision: ({ conversationId, root: sessionRoot }) =>
+          this.worktreeProvisioner.provision({ conversationId, root: sessionRoot }),
+        initiallyBound: this.worktreeProvisioner.isTaskWorktreeRoot(
+          this.sandboxRoot ?? process.cwd()
+        ),
+      },
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
       ...(this.permissionMode ? { permissionMode: this.permissionMode } : {}),

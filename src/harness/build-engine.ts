@@ -50,7 +50,11 @@ import {
   createSecretsGuardHook,
   type HookErrorEvent,
 } from "./permission/index.js";
-import { loadIknowSettings, type IknowSettings } from "../config/settings.js";
+import { loadIknowSettings, resolveWorktreeOnMutate, type IknowSettings } from "../config/settings.js";
+import {
+  createWorktreeIsolationExecutor,
+  type WorktreeIsolationHostOpts,
+} from "./isolation/worktree-gate.js";
 import type { IknowEnv } from "../config/env.js";
 import {
   createSecretRegistry,
@@ -168,6 +172,14 @@ export type BuildEngineOpts = {
   readonly settings?: IknowSettings;
   /** #126 T5 测试缝:secrets-guard 构造/运行期 hook 异常观测(production 不传 = 静默)。 */
   readonly onHookError?: (e: HookErrorEvent) => void;
+  /**
+   * ADR-0037 T3:worktree isolation host 缝（session-api hub 注入）。开关
+   * 本体在启动加载点读取（`resolveWorktreeOnMutate(settings)`，硬要求 9）：
+   * 仅当 host 提供了 provision 缝 **且** 开关为 true 时才包一层 mutate 门禁
+   * executor；否则字节级零变化（默认 OFF）。provision 负责「建 task worktree
+   * + 改绑当前会话根」，门禁本体见 `harness/isolation/worktree-gate.ts`。
+   */
+  readonly worktreeIsolation?: WorktreeIsolationHostOpts;
   /** #440 D2 seam:session 作用域 todos.md 目录。host 注入：调用方
    *  (chat-session / session-hub / TUI deps) 根据 conversationId 解析得到
    *  唯一的 per-session 目录；测试可传 mkdtemp 路径隔离。surface === "ask"
@@ -585,6 +597,22 @@ export async function buildHarnessEngine(
     },
   });
 
+  // ADR-0037 T3:mutate 门禁（harness executor 缝）。开关只在启动加载点读一次
+  // （settings 已在上方解析，硬要求 9）；host 缝（provision / initiallyBound）
+  // 由 session-api hub 注入。OFF / host 缺席 → 不包装，行为与今日逐字节一致。
+  const isolationHost = opts.worktreeIsolation;
+  const isolationEnabled =
+    isolationHost !== undefined && resolveWorktreeOnMutate(settings);
+  const loopExecutor = isolationEnabled
+    ? createWorktreeIsolationExecutor({
+        enabled: true,
+        root: sandboxRoot,
+        provision: isolationHost.provision,
+        initiallyBound: isolationHost.initiallyBound === true,
+        inner: executor,
+      })
+    : executor;
+
   // registry 单源:reg.inner 已是按 memoryEnabled 条件化的最终视图(8 或 10 件)。
   // deps.registry / executor / catalog 三方一致 — ask 入口自然不含 memory 工具。
   const registryTools: Registry = reg.inner;
@@ -620,7 +648,7 @@ export async function buildHarnessEngine(
     surface !== "ask" && opts.todoDir ? opts.todoDir : undefined;
   const deps: LoopEngineDeps = {
     adapter,
-    executor,
+    executor: loopExecutor,
     registry: registryTools,
     // #406 T2:secretRegistry 注入 deps(roundtrip 模式在场时 loop-engine
     // run() 对用户文本做占位符替换;block 模式缺席 → 跳过识别)。

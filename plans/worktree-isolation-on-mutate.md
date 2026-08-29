@@ -79,7 +79,7 @@ OVERALL: yes — 全 5 项 verdict 通过，可进入 T1 实施；后续 bullet 
    - **Inherits:** 合同流程；创建必须改绑；只影响本会话；硬要求 6–9（fail-closed / 幂等建树 / 分支冲突策略 / 开关单次读取）
    - **Surface:** harness ACI / permission 与 session-api（或持有会话根的 host 缝）
    - **Acceptance:** 开关 ON 且会话尚在主仓时，第一次 mutate 不落盘到主仓；成功后该会话后续 mutate 落在新 worktree；失败则错误可见且主仓未被改写。失败出口必须 **typed、非空、可见**（对齐 `harness/errors.ts` fault-class 与 session-api `WorkspaceRootError` 的类型化错误惯例，不返回空值、不静默吞）；边界类至少覆盖：非 git 仓库、`git worktree add` 失败、task 分支/worktree 已存在、同会话并发首次 mutate——四类均 fail-closed 且有测试钉死。
-   - Status: [x] done
+   - Status: [x] done（2026-08-29 T3 完成；开工前曾发现本项被误标 done——当时仅 T2 落地，已先改回 pending 再实施）
    - [blocks: T2]
 
 4. **Passthrough when already on session task worktree** — tag: `[implementation]`
