@@ -33,8 +33,9 @@ function isMainModule(): boolean {
     return (
       realpathSync(fileURLToPath(import.meta.url)) === realpathSync(entrypoint)
     );
-  } catch {
-    return false;
+  } catch (error: unknown) {
+    if (error instanceof Error) return false;
+    throw error;
   }
 }
 
