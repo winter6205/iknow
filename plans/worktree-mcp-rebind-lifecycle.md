@@ -174,7 +174,7 @@ MCP server 的运行时失败继续映射到现有 `McpServerState = "failed"` �
    - **Surface:** `session-api` SessionHub active-engine cache and MCP reload bridge
    - **Acceptance:** Hub reload 只消费 active engine 的 `mcpRoots`，不再依赖单一含糊 cwd；rebind 与 reload 重叠时旧 manager 先收口或被明确标记失败，再公开新 manager，工具注册表不留 stale/duplicate/split-brain；错误 root 在 shutdown 前被拒绝；串行化或 coalesce 后每个 promise 都有明确 typed 成功/失败终点。
    - **Completion headroom:** 实现者可以选择锁、队列、版本号或事务快照；Acceptance 只约束唯一可见成功面、根稳定性和 promise 收敛，不冻结并发实现。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T5, T6]
 
 8. **MCP×rebind five-boundary test matrix** — tag: `[implementation]`

@@ -94,7 +94,11 @@ import {
 } from "../config/workspaces-recents.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
-import { MaxTurnsExceeded } from "../harness/errors.js";
+import {
+  MaxTurnsExceeded,
+  McpLifecycleError,
+  errorMessage,
+} from "../harness/errors.js";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -104,6 +108,10 @@ import type { SkillCatalog } from "../harness/skill/catalog.js";
 import { createSkillBody } from "../harness/skill/body.js";
 import type { McpManager } from "../harness/mcp/manager.js";
 import { loadMcpConfig } from "../harness/mcp/config.js";
+import {
+  resolveMcpRoots,
+  type McpRoots,
+} from "../harness/mcp/roots.js";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
@@ -628,8 +636,12 @@ export type SessionHubOptions = {
     graphAssembly?: GraphAssembly;
     autoMemory?: AutoMemoryHook;
     overlayMemoryPrefetch?: OverlayPrefetchFn;
-    /** T6 最小接线：生产装配透出的双根；T7 reload 事务消费。 */
-    mcpRoots?: import("../harness/mcp/roots.js").McpRoots;
+    /** T6/T7：生产装配透出的双根；reload 事务只消费 active engine 的这份。 */
+    mcpRoots?: McpRoots;
+    /** T7：per-engine MCP manager；激活时收口旧 face 再公开。 */
+    mcpManager?: McpManager;
+    /** T7：与 mcpManager 同源的 ACI catalog（listMcpTools 可见面）。 */
+    catalog?: AciCatalog;
   }>;
   /**
    * serve-workspace T3: recents/trust 名单的 home 根（落
@@ -637,6 +649,19 @@ export type SessionHubOptions = {
    * 缺席 → bindWorkspace 保持 T2 语义（无 trust gate、不落 recents）。
    */
   readonly recentsHome?: string;
+};
+
+/** Per-root BuiltEngine cache entry (Map value + activateMcpFace 输入). */
+type HubEngineEntry = {
+  deps: LoopEngineDeps;
+  shutdown?: () => Promise<void>;
+  subagentManager?: SubAgentManager;
+  graphAssembly?: GraphAssembly;
+  autoMemory?: AutoMemoryHook;
+  overlayMemoryPrefetch?: OverlayPrefetchFn;
+  mcpRoots?: McpRoots;
+  mcpManager?: McpManager;
+  catalog?: AciCatalog;
 };
 
 // -- stop-reason persistence decision (T1: replaced DROP_REASONS set) ---------
@@ -706,10 +731,15 @@ export class SessionHub {
   private aciCatalog: AciCatalog | undefined;
   private mcpHome: string | undefined;
   /**
-   * T6 最小接线：最近一次生产装配的双根（T7 将改为 per-active-engine）。
-   * reload 读 `mcpConfigRoot`，不再用含糊的 cwd / process.cwd()。
+   * T7：当前对外可见的 active engine 双根（per-engine，非含糊单 cwd）。
+   * reload 只读这份；切 engine 时由 activateMcpFace 更新。
    */
-  private activeMcpRoots: import("../harness/mcp/roots.js").McpRoots | undefined;
+  private activeMcpRoots: McpRoots | undefined;
+  /**
+   * T7：MCP reload 串行链。并发 reloadMcp coalesce 到同一队列，
+   * 每个 promise 都有明确成功/失败终点（不悬挂）。
+   */
+  private mcpReloadChain: Promise<unknown> = Promise.resolve();
   /**
    * settings-hot-reload（T3）:env 源（缺省 → ensureDeps 内部 loadIknowEnv）。
    * reloadFromEnv 用它拿新 env 重建 adapter；onEnvChange 在成功替换后触发。
@@ -753,11 +783,18 @@ export class SessionHub {
         shutdown?: () => Promise<void>;
         subagentManager?: SubAgentManager;
         graphAssembly?: GraphAssembly;
-        mcpRoots?: import("../harness/mcp/roots.js").McpRoots;
+        mcpRoots?: McpRoots;
+        mcpManager?: McpManager;
+        catalog?: AciCatalog;
       }>)
     | undefined;
   /** serve picker bind (T2); session file workspaceRoot is the engine Map key. */
   private boundRoot: string | undefined;
+  /**
+   * T7：最近一次 activate 的 engine root。listMcp / reload 走 ensureDeps 时
+   * 优先用它，避免 bindRoot（主 checkout）把已激活的 worktree face 抢回去。
+   */
+  private activeEngineRoot: string | undefined;
   /** D-α T3 / ADR-0030: graph 编排 overlay holder（serve / TUI 注入；缺席 =
    *  本入口未接 overlay → run_graph 与编排段都不存在）。 */
   private readonly graphMode: GraphModeContext | undefined;
@@ -770,18 +807,7 @@ export class SessionHub {
   /** serve-workspace T3: recents/trust roster home (absent → T2 behavior). */
   private readonly recentsHome: string | undefined;
   /** Per-root BuiltEngine cache (same root shared across sessions). */
-  private readonly engineByRoot = new Map<
-    string,
-    {
-      deps: LoopEngineDeps;
-      shutdown?: () => Promise<void>;
-      subagentManager?: SubAgentManager;
-      graphAssembly?: GraphAssembly;
-      autoMemory?: AutoMemoryHook;
-      overlayMemoryPrefetch?: OverlayPrefetchFn;
-      mcpRoots?: import("../harness/mcp/roots.js").McpRoots;
-    }
-  >();
+  private readonly engineByRoot = new Map<string, HubEngineEntry>();
   /** Per-conversation serialization (spec A15). */
   private readonly inflight = new Map<string, Promise<void>>();
   /** Actual active work count; `inflight` retains resolved chain sentinels. */
@@ -2096,19 +2122,88 @@ export class SessionHub {
   }
 
   async reloadMcp(): Promise<readonly McpServerStatusDto[]> {
-    await this.ensureDeps();
-    if (this.mcpManager) {
-      const home = this.mcpHome ?? homedir();
-      // T6:mcpConfigRoot 来自 active mcpRoots / 稳定 productRoot —— 禁止
-      // process.cwd() 第二套策略。T7 会串行化 active-root reload 事务。
-      const mcpConfigRoot =
-        this.activeMcpRoots?.mcpConfigRoot ?? this.productRoot;
-      if (mcpConfigRoot === undefined) {
-        // EXIT: no stable config root → skip reload, retain current manager
-        return this.listMcpServers();
+    // T7:串行化 / coalesce——每个调用方 promise 都有 typed 成功或失败终点。
+    const run = this.mcpReloadChain.then(
+      () => this.reloadMcpTransaction(),
+      () => this.reloadMcpTransaction()
+    );
+    this.mcpReloadChain = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  /**
+   * T7 active-root reload 事务：先校验 active engine 的 mcpRoots，再加载
+   * config / 调 manager.reload。失败路径不得让旧+新 manager 同时成为对外
+   * 成功面；坏根在 shutdown 好 manager 之前拒绝。
+   */
+  private async reloadMcpTransaction(): Promise<
+    readonly McpServerStatusDto[]
+  > {
+    // 已有可见 face 时不再 ensureDeps：避免 cache-hit activate 覆盖本事务
+    // 要校验的 active mcpRoots，也缩小 rebind∩reload 窗口。
+    if (!this.mcpManager || this.activeMcpRoots === undefined) {
+      await this.ensureDeps();
+    }
+    const manager = this.mcpManager;
+    if (!manager) {
+      return this.listMcpServers();
+    }
+
+    // Root 校验必须先于 manager.reload（后者会 shutdown 旧 slots）。
+    let validated: McpRoots;
+    try {
+      const roots = this.activeMcpRoots;
+      if (roots === undefined) {
+        throw new McpLifecycleError(
+          "missing_cwd",
+          "active engine mcpRoots are required for MCP reload"
+        );
       }
-      const cfg = await loadMcpConfig({ home, mcpConfigRoot });
-      await this.mcpManager.reload(cfg.servers);
+      // mcpConfigRoot 合同上等于稳定 productRoot；用 resolver 再验一次。
+      validated = resolveMcpRoots({
+        workspaceRoot: roots.workspaceRoot,
+        productRoot: roots.mcpConfigRoot,
+      });
+      if (this.productRoot !== undefined) {
+        const fromProduct = resolveMcpRoots({
+          workspaceRoot: roots.workspaceRoot,
+          productRoot: this.productRoot,
+        });
+        if (fromProduct.mcpConfigRoot !== validated.mcpConfigRoot) {
+          throw new McpLifecycleError(
+            "root_mismatch",
+            "active mcpConfigRoot does not match hub productRoot"
+          );
+        }
+      }
+    } catch (err) {
+      // EXIT: bad roots → reject before shutdown of good manager
+      if (err instanceof McpLifecycleError) throw err;
+      throw new McpLifecycleError(
+        "reload_failed",
+        errorMessage(err),
+        { cause: err }
+      );
+    }
+
+    try {
+      const home = this.mcpHome ?? homedir();
+      const cfg = await loadMcpConfig({
+        home,
+        mcpConfigRoot: validated.mcpConfigRoot,
+      });
+      await manager.reload(cfg.servers);
+    } catch (err) {
+      // EXIT: reload failed → retain one coherent failed/old state; never report mixed success
+      if (err instanceof McpLifecycleError) throw err;
+      throw new McpLifecycleError(
+        "reload_failed",
+        errorMessage(err),
+        { cause: err }
+      );
     }
     return this.listMcpServers();
   }
@@ -2441,25 +2536,50 @@ export class SessionHub {
   }
 
   /**
+   * T7：切换对外可见的 MCP face。旧 manager 先 shutdown（或保持为唯一失败面），
+   * 再公开新 manager / roots / catalog——禁止旧+新同时成功。
+   */
+  private async activateMcpFace(entry: {
+    readonly mcpManager?: McpManager;
+    readonly mcpRoots?: McpRoots;
+    readonly catalog?: AciCatalog;
+  }): Promise<void> {
+    const nextManager = entry.mcpManager;
+    const prevManager = this.mcpManager;
+    if (
+      prevManager !== undefined &&
+      nextManager !== undefined &&
+      prevManager !== nextManager
+    ) {
+      await prevManager.shutdown();
+    }
+    if (entry.mcpRoots) {
+      this.activeMcpRoots = entry.mcpRoots;
+    }
+    if (nextManager !== undefined) {
+      this.mcpManager = nextManager;
+    }
+    if (entry.catalog !== undefined) {
+      this.aciCatalog = entry.catalog;
+    }
+  }
+
+  /**
    * Per-root engine cache. Session file `workspaceRoot` is the Map key
    * (picker `boundRoot` is only the fallback when listSkills etc. have no
    * session). Production assembly sets cwd/workspaceRoot/sandboxRoot equal.
    */
-  private async getOrBuildEngine(root: string): Promise<{
-    deps: LoopEngineDeps;
-    shutdown?: () => Promise<void>;
-    subagentManager?: SubAgentManager;
-    graphAssembly?: GraphAssembly;
-    autoMemory?: AutoMemoryHook;
-    overlayMemoryPrefetch?: OverlayPrefetchFn;
-    mcpRoots?: import("../harness/mcp/roots.js").McpRoots;
-  }> {
+  private async getOrBuildEngine(root: string): Promise<HubEngineEntry> {
     const hit = this.engineByRoot.get(root);
-    if (hit) return hit;
+    if (hit) {
+      this.activeEngineRoot = root;
+      await this.activateMcpFace(hit);
+      return hit;
+    }
     const built = this.buildEngine
       ? await this.buildEngine(root)
       : await this.buildProductionEngine(root);
-    const entry = {
+    const entry: HubEngineEntry = {
       deps: built.deps,
       shutdown: built.shutdown,
       subagentManager: built.subagentManager,
@@ -2467,11 +2587,14 @@ export class SessionHub {
       autoMemory: built.autoMemory,
       overlayMemoryPrefetch: built.overlayMemoryPrefetch,
       ...(built.mcpRoots ? { mcpRoots: built.mcpRoots } : {}),
+      ...(built.mcpManager ? { mcpManager: built.mcpManager } : {}),
+      ...("catalog" in built && built.catalog
+        ? { catalog: built.catalog }
+        : {}),
     };
     this.engineByRoot.set(root, entry);
-    if (built.mcpRoots) {
-      this.activeMcpRoots = built.mcpRoots;
-    }
+    this.activeEngineRoot = root;
+    await this.activateMcpFace(entry);
     this.subagentManager = this.subagentManager ?? built.subagentManager;
     if (this.subagentManager !== undefined) {
       this.attachSubagentWake(this.subagentManager);
@@ -2489,7 +2612,9 @@ export class SessionHub {
     graphAssembly?: GraphAssembly;
     autoMemory?: AutoMemoryHook;
     overlayMemoryPrefetch?: OverlayPrefetchFn;
-    mcpRoots?: import("../harness/mcp/roots.js").McpRoots;
+    mcpRoots?: McpRoots;
+    mcpManager?: McpManager;
+    catalog?: AciCatalog;
   }> {
     if (!this.askUser) {
       throw new Error(
@@ -2534,12 +2659,9 @@ export class SessionHub {
         : {}),
     });
     this.skillCatalog = built.skillCatalog;
-    this.mcpManager = built.mcpManager;
-    this.aciCatalog = built.catalog;
     this.mcpHome = homedir();
-    if (built.mcpRoots) {
-      this.activeMcpRoots = built.mcpRoots;
-    }
+    // T7:mcpManager / catalog / mcpRoots 由 getOrBuildEngine → activateMcpFace
+    // 统一切换，避免此处抢先覆盖导致旧 manager 未收口。
     return built;
   }
 
@@ -2559,7 +2681,7 @@ export class SessionHub {
       // 离开该根（worktree rebind）→ 落到 per-root 引擎重建（buildEngine 缝
       // / 生产装配），与 hub.ts 两条装配路径行为一致；未声明 → 短路语义与
       // 今日逐字节一致。
-      const mapRoot = sessionRoot ?? this.boundRoot;
+      const mapRoot = sessionRoot ?? this.activeEngineRoot ?? this.boundRoot;
       if (
         mapRoot !== undefined &&
         this.injectedEngineRoot !== undefined &&
@@ -2572,9 +2694,10 @@ export class SessionHub {
       this.activeGraphAssembly = this.injectedGraphAssembly;
       return this.cachedDeps ?? this.injectedDeps;
     }
-    const mapRoot = sessionRoot ?? this.boundRoot;
+    const mapRoot = sessionRoot ?? this.activeEngineRoot ?? this.boundRoot;
     if (mapRoot !== undefined) {
       // D-α T3:per-root 多引擎时,活跃快照跟着本次解析到的那台走。
+      // T7:优先 activeEngineRoot，避免 MCP list/reload 被 bindRoot 抢回主仓 face。
       const entry = await this.getOrBuildEngine(mapRoot);
       this.activeGraphAssembly = entry.graphAssembly;
       return entry.deps;
@@ -2642,12 +2765,12 @@ export class SessionHub {
     // D-α T3:单引擎（未 bind 根）路径的活跃快照。
     this.activeGraphAssembly = built.graphAssembly;
     this.skillCatalog = built.skillCatalog;
-    this.mcpManager = built.mcpManager;
-    this.aciCatalog = built.catalog;
     this.mcpHome = homedir();
-    if (built.mcpRoots) {
-      this.activeMcpRoots = built.mcpRoots;
-    }
+    await this.activateMcpFace({
+      ...(built.mcpManager ? { mcpManager: built.mcpManager } : {}),
+      ...(built.mcpRoots ? { mcpRoots: built.mcpRoots } : {}),
+      ...(built.catalog ? { catalog: built.catalog } : {}),
+    });
     // #356 T7: serve 懒取 subagent manager — buildHarnessEngine 在 surface !==
     // "ask" 时自建;constructor 注入优先 (测试缝),未注入则取 built 的。
     this.subagentManager = this.subagentManager ?? built.subagentManager;
