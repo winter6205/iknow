@@ -72,7 +72,7 @@ OVERALL: PASS
    - **Acceptance:** `requireBoundRoot` runs before engine construction or `postMessage`; unbound current sessions return typed `ValidationError` with the execute EXIT path; load/list can expose an archived/invalid classification for missing or malformed roots; such sessions return a clear recreate/bind error and never call the engine; no surface silently migrates or backfills cwd.
    - **Completion:** All session-backed execute callers share one observable fail-fast contract, and legacy handling is an explicit reject/archive path rather than an implicit migration.
    - [blocks: T1]
-   - Status: [ ] pending
+   - Status: [x] done (2026-08-29)
 
 4. **T3 — Persist rebinds through Hub dirty-root conditional save** — tag: `[implementation]`
    - **Inherits:** T0–T2; the harness isolation gate's provision contract is unchanged; Hub marks `conversationId → newRoot` only when provision returns a different root; conditional save applies the dirty root and clears it only after success.

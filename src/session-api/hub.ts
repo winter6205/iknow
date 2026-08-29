@@ -197,6 +197,37 @@ function requireCreateWorkspaceRoot(root: unknown): string {
 }
 
 /**
+ * Validate the root loaded from a session before any execution work.
+ *
+ * Session files are intentionally Postel on load so legacy sessions remain
+ * inspectable. They are not executable, however: an absent root is unbound
+ * and a present root must still be an absolute existing workspace. Never
+ * substitute cwd here.
+ */
+function requireBoundRoot(root: unknown): string {
+  if (typeof root !== "string" || root.trim().length === 0) {
+    throw new ValidationError(
+      "workspace is unbound; bind a workspace before executing this session",
+      { field: "workspaceRoot" }
+    );
+  }
+  if (root.length > MAX_WORKSPACE_ROOT_CHARS) {
+    throw new ValidationError(
+      "workspace root exceeds the maximum length",
+      { field: "workspaceRoot" }
+    );
+  }
+  try {
+    return resolveWorkspaceRoot({ explicit: root });
+  } catch {
+    throw new ValidationError(
+      "workspace root is invalid; bind an existing absolute directory",
+      { field: "workspaceRoot" }
+    );
+  }
+}
+
+/**
  * #408 T3: detect a goal re-pin directive at the very start of a message.
  *
  * Matches only a **leading** `## GOAL:` marker (after trim). Returns the
@@ -1063,12 +1094,9 @@ export class SessionHub {
       conversationId,
       work: async () => {
         let session = await this.store.load(conversationId);
-        if (this.surface === "serve" && session.workspaceRoot === undefined) {
-          throw new ValidationError(
-            "workspace is unbound; select a workspace before sending",
-            { field: "workspaceRoot" }
-          );
-        }
+        // EXIT: reject-execute-before-engine — legacy/unbound sessions are
+        // inspectable but must never reach trace, postMessage, or the engine.
+        const boundRoot = requireBoundRoot(session.workspaceRoot);
         // #458 T5/T12: hoist the trace service so the `## GOAL:` pin block
         // (below) and runDeps share one TraceService instance for this
         // postMessage (avoid double construction; same file writer closure).
@@ -1106,7 +1134,7 @@ export class SessionHub {
             conversationId,
           });
         }
-        const baseDeps = await this.ensureDeps(session.workspaceRoot);
+        const baseDeps = await this.ensureDeps(boundRoot);
         // D-α T3 / ADR-0030:round 边界 —— 一条 postMessage = 一次 run()。
         // 在这里拍 graph 装配快照（紧接 ensureDeps，同一串行槽位内，拍的
         // 一定是本次要用的那台 engine），overlay 翻键因此「下一条消息才
@@ -1317,7 +1345,7 @@ export class SessionHub {
                     sessionId: conversationId,
                     signal: opts.signal,
                     trace: runDeps.trace,
-                    cwd: session.workspaceRoot ?? process.cwd(),
+                    cwd: boundRoot,
                     // #128 SC1 生产装配: subagentManager 在场 → 启用分类器填空
                     // (command 缺失/空串时分类器接管, spec Objective);缺席
                     // (ask 形态) → undefined, verify-loop 自然走透明关闭向后兼容。
@@ -1393,7 +1421,7 @@ export class SessionHub {
               this.notifyAutoMemory(
                 s.finalResult,
                 s.priorCount,
-                session.workspaceRoot,
+                boundRoot,
                 conversationId
               );
               // #458 T5 (SC8): goal.status write-back on verify-loop terminal
@@ -1769,12 +1797,9 @@ export class SessionHub {
     opts?: CompactCallerOpts
   ): Promise<PostMessageResponse> {
     const session = await this.store.load(conversationId);
-    if (this.surface === "serve" && session.workspaceRoot === undefined) {
-      throw new ValidationError(
-        "workspace is unbound; select a workspace before sending",
-        { field: "workspaceRoot" }
-      );
-    }
+    // EXIT: reject-execute-before-engine — continue has the same boundary
+    // contract as postMessage on every host surface.
+    const boundRoot = requireBoundRoot(session.workspaceRoot);
     const verdict = evaluateContinuePending({
       messages: session.messages,
       ...(session.goal !== undefined ? { goal: session.goal } : {}),
@@ -1782,7 +1807,7 @@ export class SessionHub {
     if (!verdict.ok) {
       throw continuePredicateError(verdict.exit);
     }
-    const deps = await this.ensureDeps(session.workspaceRoot);
+    const deps = await this.ensureDeps(boundRoot);
     const trace = this.createTrace(conversationId);
     const runDeps: LoopEngineDeps = {
       ...deps,

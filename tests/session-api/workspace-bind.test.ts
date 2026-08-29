@@ -102,55 +102,109 @@ describe("serve unbound postMessage", () => {
     assert.equal(stepCalls, 0, "must not run the loop when unbound");
   });
 
-  it("continueSession rejects unbound with field=workspaceRoot before run", async () => {
-    const store = await makeStore();
-    let stepCalls = 0;
-    const inner = makeDeps([assistantResult({ texts: ["should-not-run"] })]);
-    const deps: typeof inner = {
-      ...inner,
-      adapter: {
-        ...inner.adapter,
-        step: async (...args) => {
-          stepCalls += 1;
-          return inner.adapter.step(...args);
+  for (const surface of [undefined, "chat", "tui", "serve"] as const) {
+    it(`continueSession rejects without session.workspaceRoot on ${surface ?? "default"} surface`, async () => {
+      const store = await makeStore();
+      let stepCalls = 0;
+      const inner = makeDeps([assistantResult({ texts: ["should-not-run"] })]);
+      const deps: typeof inner = {
+        ...inner,
+        adapter: {
+          ...inner.adapter,
+          step: async (...args) => {
+            stepCalls += 1;
+            return inner.adapter.step(...args);
+          },
         },
-      },
-    };
+      };
+      const hub = new SessionHub({
+        store,
+        deps,
+        ...(surface !== undefined ? { surface } : {}),
+      });
+      const conversationId = `legacy-unbound-continue-${surface ?? "default"}`;
+      await writeUnboundSession(store, conversationId);
+      await assert.rejects(
+        () => hub.continueSession(conversationId),
+        (err: unknown) => {
+          assert.ok(err instanceof ValidationError);
+          assert.equal(err.details?.["field"], "workspaceRoot");
+          assert.match(err.message, /unbound/);
+          return true;
+        }
+      );
+      assert.equal(stepCalls, 0, "must not run continue when unbound");
+    });
+  }
+});
+
+describe("all session-backed surfaces reject unbound execution", () => {
+  for (const surface of [undefined, "chat", "tui", "serve"] as const) {
+    it(`postMessage rejects without session.workspaceRoot on ${surface ?? "default"} surface`, async () => {
+      const store = await makeStore();
+      let stepCalls = 0;
+      const inner = makeDeps([assistantResult({ texts: ["should-not-run"] })]);
+      const deps: typeof inner = {
+        ...inner,
+        adapter: {
+          ...inner.adapter,
+          step: async (...args) => {
+            stepCalls += 1;
+            return inner.adapter.step(...args);
+          },
+        },
+      };
+      const hub = new SessionHub({
+        store,
+        deps,
+        ...(surface !== undefined ? { surface } : {}),
+      });
+      const conversationId = `legacy-unbound-post-${surface ?? "default"}`;
+      await writeUnboundSession(store, conversationId);
+
+      await assert.rejects(
+        () => hub.postMessage({ conversationId, text: "hi" }),
+        (err: unknown) => {
+          assert.ok(err instanceof ValidationError);
+          assert.equal(err.details?.["field"], "workspaceRoot");
+          return true;
+        }
+      );
+      assert.equal(stepCalls, 0, "must not run the loop when unbound");
+    });
+  }
+
+  it("postMessage rejects a missing workspace directory before building the engine", async () => {
+    const store = await makeStore();
+    let buildCalls = 0;
     const hub = new SessionHub({
       store,
-      deps,
-      surface: "serve",
+      askUser: createNoAskUser(),
+      buildEngine: async () => {
+        buildCalls += 1;
+        return { deps: makeDeps([assistantResult({ texts: ["should-not-run"] })]) };
+      },
     });
-    const conversationId = "legacy-unbound-continue";
+    const conversationId = "invalid-root-post";
     await writeUnboundSession(store, conversationId);
+    const file = await store.load(conversationId);
+    await store.save({
+      id: conversationId,
+      file: {
+        ...file,
+        workspaceRoot: join(tmpdir(), "does-not-exist-for-t2"),
+      },
+    });
+
     await assert.rejects(
-      () => hub.continueSession(conversationId),
+      () => hub.postMessage({ conversationId, text: "hi" }),
       (err: unknown) => {
         assert.ok(err instanceof ValidationError);
         assert.equal(err.details?.["field"], "workspaceRoot");
-        assert.match(err.message, /unbound/);
         return true;
       }
     );
-    assert.equal(stepCalls, 0, "must not run continue when unbound");
-  });
-});
-
-describe("default surface (chat) with injected deps", () => {
-  it("postMessage succeeds without session.workspaceRoot", async () => {
-    const store = await makeStore();
-    const hub = new SessionHub({
-      store,
-      deps: makeDeps([assistantResult({ texts: ["ok"] })]),
-    });
-    const conversationId = "legacy-chat-unbound";
-    await writeUnboundSession(store, conversationId);
-    const res = await hub.postMessage({
-      conversationId,
-      text: "hi",
-    });
-    assert.equal(res.turn.answer.stopReason, "completed");
-    assert.equal(res.turn.answer.finalText, "ok");
+    assert.equal(buildCalls, 0, "must not build an engine for an invalid root");
   });
 });
 
