@@ -20,6 +20,7 @@ import { join } from "node:path";
 
 import {
   createAutoMemoryHook,
+  DREAM_CURSOR_FILENAME,
   parseMemoryEntry,
   serializeMemoryEntry,
 } from "../../../src/harness/memory/index.ts";
@@ -208,7 +209,11 @@ describe("createAutoMemoryHook — static layer on extract", () => {
       });
     });
     await hook.drain();
-    assert.equal(llm.calls(), 1, "extract still runs after static-layer IO failure");
+    assert.equal(
+      llm.calls(),
+      1,
+      "extract still runs after static-layer IO failure"
+    );
     assert.equal(errors.length, 1);
   });
 });
@@ -402,7 +407,6 @@ describe("createAutoMemoryHook — failure containment", () => {
 });
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const DREAM_CURSOR_FILE = "dream.json";
 
 const seedDreamGate = async (
   dir: string,
@@ -410,7 +414,7 @@ const seedDreamGate = async (
   sessionIds: readonly string[] = ["s1", "s2", "s3", "s4"]
 ): Promise<void> => {
   await writeFile(
-    join(dir, DREAM_CURSOR_FILE),
+    join(dir, DREAM_CURSOR_FILENAME),
     JSON.stringify({
       lastSuccessAtMs: nowMs - DAY_MS,
       sessionIds,
@@ -472,7 +476,7 @@ describe("createAutoMemoryHook — dream pass", () => {
     await twoLiveEntries();
     const nowMs = Date.parse(NOW_ISO);
     await writeFile(
-      join(memoryDir, DREAM_CURSOR_FILE),
+      join(memoryDir, DREAM_CURSOR_FILENAME),
       JSON.stringify({
         lastSuccessAtMs: nowMs - DAY_MS + 1,
         sessionIds: ["s1", "s2", "s3", "s4"],
@@ -603,7 +607,7 @@ describe("createAutoMemoryHook — dream pass", () => {
       "the second call was the dream merge (superseded old.md)"
     );
     const cursor = JSON.parse(
-      await readFile(join(memoryDir, DREAM_CURSOR_FILE), "utf8")
+      await readFile(join(memoryDir, DREAM_CURSOR_FILENAME), "utf8")
     );
     assert.equal(
       cursor.lastSuccessAtMs,
@@ -634,9 +638,7 @@ describe("createAutoMemoryHook — dream pass", () => {
     const nowMs = Date.parse(NOW_ISO);
     await seedDreamGate(memoryDir, nowMs);
     const llm = countingLlm("[]");
-    const hook = createAutoMemoryHook(
-      hookOpts(llm, { dream: true, nowMs })
-    );
+    const hook = createAutoMemoryHook(hookOpts(llm, { dream: true, nowMs }));
 
     hook.onTurnComplete({
       stopReason: "completed",
@@ -684,7 +686,7 @@ describe("createAutoMemoryHook — dream pass", () => {
     assert.equal(calls, 2, "one extract call followed by one dream call");
     const files = await readdir(memoryDir);
     assert.ok(
-      files.includes(DREAM_CURSOR_FILE),
+      files.includes(DREAM_CURSOR_FILENAME),
       "gate state must persist to dream.json"
     );
     assert.ok(
@@ -827,7 +829,7 @@ describe("createAutoMemoryHook — dream pass", () => {
       const nowMs = Date.parse(NOW_ISO);
       await seedDreamGate(memoryDir, nowMs);
       await writeFile(
-        join(otherDir, DREAM_CURSOR_FILE),
+        join(otherDir, DREAM_CURSOR_FILENAME),
         JSON.stringify({
           lastSuccessAtMs: nowMs,
           sessionIds: ["s1", "s2", "s3", "s4"],
@@ -902,7 +904,7 @@ describe("createAutoMemoryHook — dream pass", () => {
   it("does not overwrite a corrupt dream cursor with an empty window", async () => {
     await twoLiveEntries();
     const corrupt = "{not-json";
-    await writeFile(join(memoryDir, DREAM_CURSOR_FILE), corrupt, "utf8");
+    await writeFile(join(memoryDir, DREAM_CURSOR_FILENAME), corrupt, "utf8");
     const seen: unknown[] = [];
     const llm = countingLlm("[]");
     const hook = createAutoMemoryHook({
@@ -926,7 +928,7 @@ describe("createAutoMemoryHook — dream pass", () => {
     assert.equal(llm.calls(), 0);
     assert.equal(seen.length, 1);
     assert.equal(
-      await readFile(join(memoryDir, DREAM_CURSOR_FILE), "utf8"),
+      await readFile(join(memoryDir, DREAM_CURSOR_FILENAME), "utf8"),
       corrupt
     );
   });

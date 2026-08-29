@@ -39,6 +39,12 @@ export interface MemoryDreamOptions extends MemoryPersistDeps {
   readonly memoryDir: string;
   readonly llm: MemoryExtractLlm;
   readonly signal?: AbortSignal;
+  /**
+   * Observer for recoverable skips, e.g. unknown `replaces` slugs. Absent =
+   * silent. Matches the host's `onError` seam so a skipped slug surfaces
+   * without failing the turn.
+   */
+  readonly onError?: (error: unknown) => void;
 }
 
 export interface MemoryDreamResult {
@@ -72,7 +78,11 @@ export async function runMemoryDream(
   const supercedeOps: MemoryOp[] = [];
   const decideCandidates: MemoryCandidate[] = [];
   for (const candidate of candidates) {
-    const targets = resolveReplaces(candidate.replaces, liveSlugs);
+    const targets = resolveReplaces(
+      candidate.replaces,
+      liveSlugs,
+      opts.onError
+    );
     if (targets.length > 0) {
       supercedeOps.push({ kind: "SUPERSEDE", supersedes: targets, candidate });
     } else {
@@ -182,24 +192,32 @@ function parseReplaces(value: unknown): readonly string[] | undefined {
 }
 
 /**
- * Filter a candidate's `replaces` ids onto the live store. Unknown slugs are
- * skipped without failing the turn, duplicates collapse, and the list is
- * capped at MAX_SUPERSEDES_PER_CANDIDATE. Zero valid ids → empty array, so
- * the candidate falls through to the decide path.
+ * Filter a candidate's `replaces` ids onto the live store. Duplicates
+ * collapse to their first occurrence before the cap is applied, unknown
+ * slugs are reported (when an observer is wired) and skipped without
+ * failing the turn, and the list is capped at MAX_SUPERSEDES_PER_CANDIDATE.
+ * Zero valid ids → empty array, so the candidate falls through to the
+ * decide path.
  */
 function resolveReplaces(
   replaces: readonly string[] | undefined,
-  liveSlugs: ReadonlySet<string>
+  liveSlugs: ReadonlySet<string>,
+  onError?: (error: unknown) => void
 ): string[] {
   if (!replaces || replaces.length === 0) return [];
+  const seen = new Set<string>();
   const out: string[] = [];
   for (const id of replaces) {
     if (out.length === MAX_SUPERSEDES_PER_CANDIDATE) break;
     if (!liveSlugs.has(id)) {
-      // EXIT: log-and-continue — an unknown slug is skipped, not fatal.
+      // EXIT: log-and-continue — an unknown slug is reported and skipped,
+      // not fatal.
+      onError?.(`dream: unknown replaces slug "${id}" skipped`);
       continue;
     }
-    if (!out.includes(id)) out.push(id);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
   }
   return out;
 }

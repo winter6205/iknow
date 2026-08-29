@@ -310,11 +310,13 @@ describe("runMemoryDream — replaces", () => {
     }
   });
 
-  // SC11: unknown slugs in `replaces` are skipped without failing the turn.
-  it("skips unknown replaces ids and still supersedes the known one", async () => {
+  // SC11: unknown slugs in `replaces` are reported (when an observer is
+  // wired) and skipped without failing the turn.
+  it("reports and skips unknown replaces ids, still superseding the known one", async () => {
     const memoryDir = await mkdtemp(join(tmpdir(), "memory-dream-sc11-"));
     try {
       await seedPair(memoryDir);
+      const reported: unknown[] = [];
       const llm: MemoryExtractLlm = {
         complete: async () =>
           JSON.stringify([
@@ -326,7 +328,11 @@ describe("runMemoryDream — replaces", () => {
           ]),
       };
 
-      const result = await runMemoryDream({ memoryDir, llm });
+      const result = await runMemoryDream({
+        memoryDir,
+        llm,
+        onError: (error) => reported.push(error),
+      });
 
       const supercede = result.ops.find((op) => op.kind === "SUPERSEDE");
       assert.ok(supercede, "the known id must still produce a SUPERSEDE");
@@ -342,6 +348,11 @@ describe("runMemoryDream — replaces", () => {
         await readFile(join(memoryDir, `${fresh!.slug}.md`), "utf8")
       );
       assert.deepEqual(stored.supersedes, ["old"]);
+      assert.equal(reported.length, 1, "the skipped slug must be reported");
+      assert.match(
+        String(reported[0]),
+        /dream: unknown replaces slug "ghost" skipped/
+      );
     } finally {
       await rm(memoryDir, { recursive: true, force: true });
     }
@@ -389,6 +400,70 @@ describe("runMemoryDream — replaces", () => {
         `at most ${MAX_SUPERSEDES_PER_CANDIDATE} ids may be written`
       );
       assert.deepEqual(stored.supersedes, slugs.slice(0, 8));
+    } finally {
+      await rm(memoryDir, { recursive: true, force: true });
+    }
+  });
+
+  // Duplicates collapse to their first occurrence before the cap: a repeated
+  // id must not crowd a valid later slug out of the 8-id budget.
+  it("collapses duplicate replaces ids before applying the cap", async () => {
+    const memoryDir = await mkdtemp(join(tmpdir(), "memory-dream-dedup-"));
+    try {
+      const slugs = Array.from({ length: 10 }, (_, i) => `s${i}`);
+      for (const slug of slugs) {
+        await writeFile(
+          join(memoryDir, `${slug}.md`),
+          serializeMemoryEntry(
+            entry(slug, {
+              title: `Fact ${slug}`,
+              body: `Body of ${slug} with a stable fact.`,
+            })
+          ),
+          "utf8"
+        );
+      }
+      const llm: MemoryExtractLlm = {
+        complete: async () =>
+          JSON.stringify([
+            {
+              title: "Use queue for concurrency",
+              body: "Concurrency routes through the scheduler queue as of v3.",
+              replaces: [
+                "s0",
+                "s0",
+                "s1",
+                "s2",
+                "s3",
+                "s4",
+                "s5",
+                "s6",
+                "s7",
+                "s8",
+              ],
+            },
+          ]),
+      };
+
+      const result = await runMemoryDream({ memoryDir, llm });
+
+      const fresh = result.written.find(
+        (written) => written.kind === "SUPERSEDE"
+      );
+      assert.ok(fresh);
+      const stored = parseMemoryEntry(
+        await readFile(join(memoryDir, `${fresh!.slug}.md`), "utf8")
+      );
+      assert.deepEqual(stored.supersedes, [
+        "s0",
+        "s1",
+        "s2",
+        "s3",
+        "s4",
+        "s5",
+        "s6",
+        "s7",
+      ]);
     } finally {
       await rm(memoryDir, { recursive: true, force: true });
     }

@@ -244,6 +244,7 @@ async function runDreamPass(opts: AutoMemoryHookOptions): Promise<void> {
       ...(opts.now ? { now: opts.now } : {}),
       ...(opts.randomBytes ? { randomBytes: opts.randomBytes } : {}),
       ...(opts.ttlDays !== undefined ? { ttlDays: opts.ttlDays } : {}),
+      ...(opts.onError ? { onError: opts.onError } : {}),
     });
   } catch (error) {
     mergeFailed = true;
