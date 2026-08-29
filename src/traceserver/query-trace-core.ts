@@ -330,6 +330,7 @@ function preview(value: unknown): string {
     try {
       text = JSON.stringify(value);
     } catch {
+      // EXIT: cyclic or otherwise unserializable values fall back to a string preview.
       text = String(value);
     }
   }
