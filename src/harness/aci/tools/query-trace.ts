@@ -13,12 +13,10 @@ import {
   QUERY_TRACE_DEFAULT_LIMIT,
   QUERY_TRACE_MAX_LIMIT,
   QUERY_TRACE_MAX_RECORD_ID_SCAN,
-} from "../../../traceserver/query-trace-core.js";
-import { TRACE_RECORD_TYPES } from "../../../traceserver/types.js";
-import {
+  TRACE_RECORD_TYPES,
   TraceQueryRecordScanError,
   TraceQueryValidationError as TraceserverQueryValidationError,
-} from "../../../traceserver/query-trace-errors.js";
+} from "../../../traceserver/index.js";
 
 export const MAX_RECORD_ID_SCAN = QUERY_TRACE_MAX_RECORD_ID_SCAN;
 

@@ -5,8 +5,8 @@ import {
   createQueryTraceCore,
   QUERY_TRACE_DEFAULT_LIMIT,
   QUERY_TRACE_MAX_LIMIT,
-} from "../traceserver/query-trace-core.js";
-import { TRACE_RECORD_TYPES } from "../traceserver/types.js";
+  TRACE_RECORD_TYPES,
+} from "../traceserver/index.js";
 
 const queryTraceInputSchema = z
   .object({
