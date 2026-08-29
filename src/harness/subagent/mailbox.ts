@@ -33,6 +33,16 @@ export interface CreateSubAgentMailboxOptions {
   readonly onSubscriberError?: (error: unknown) => void;
 }
 
+function reportSubscriberDiagnostic(scope: string, error: unknown): void {
+  try {
+    console.warn(`[subagent] ${scope}`, error);
+  } catch (diagnosticError) {
+    // EXIT: diagnostics are best-effort; a broken console must not escape
+    // publish() while isolating a subscriber failure.
+    void diagnosticError;
+  }
+}
+
 function snapshotNotice(
   notice: SubAgentTerminalNotice
 ): SubAgentTerminalNotice {
@@ -65,7 +75,7 @@ export function createSubAgentMailbox(
   const onSubscriberError =
     options.onSubscriberError ??
     ((error: unknown): void => {
-      console.warn("[subagent] terminal subscriber failed", error);
+      reportSubscriberDiagnostic("terminal subscriber failed", error);
     });
 
   const notify = (
@@ -78,8 +88,8 @@ export function createSubAgentMailbox(
       try {
         onSubscriberError(error);
       } catch (reportingError) {
-        console.warn(
-          "[subagent] terminal subscriber error reporter failed",
+        reportSubscriberDiagnostic(
+          "terminal subscriber error reporter failed",
           reportingError
         );
       }

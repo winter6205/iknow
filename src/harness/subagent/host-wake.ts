@@ -80,6 +80,8 @@ export function queryableSubagentTaskIds(
     return manager.drainCompleted().map(({ taskId }) => taskId);
   } catch (error) {
     reportObserverDiagnostic("queryable task lookup failed", error);
+    // EXIT: diagnostic lookup is fail-safe; no task ids can be asserted when
+    // the manager drain itself failed.
     return [];
   }
 }

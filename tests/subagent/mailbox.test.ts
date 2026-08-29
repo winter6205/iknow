@@ -113,6 +113,29 @@ describe("SubAgentMailbox", () => {
     );
   });
 
+  it("does not throw when subscriber diagnostics also fail", () => {
+    const onSubscriberError = vi.fn(() => {
+      throw new Error("reporter failed");
+    });
+    const warn = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => {
+        throw new Error("diagnostic sink failed");
+      });
+    const mailbox = createSubAgentMailbox({ onSubscriberError });
+    mailbox.subscribe(() => {
+      throw new Error("listener failed");
+    });
+
+    try {
+      expect(() =>
+        mailbox.publish(terminalNotice("diagnostic-failure"))
+      ).not.toThrow();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("freezes the notice snapshot so subscribers cannot mutate terminal facts", () => {
     const mailbox = createSubAgentMailbox();
     let received: SubAgentTerminalNotice | undefined;

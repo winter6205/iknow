@@ -2025,8 +2025,17 @@ async function runInteractive(opts: {
             if (result.ranQuery) writeOut(TTY_ANSWER_SEP);
           }
         });
-        chain = wakeRun.catch(() => {});
-        await wakeRun;
+        chain = wakeRun.catch((error: unknown) => {
+          const wakeError = toSubagentWakeError(error, {
+            reason: "wakeFailed",
+            taskIds: queryableSubagentTaskIds(ctx.subagentManager),
+            queryable: ctx.subagentManager !== undefined,
+          });
+          writeErr(formatChatError(wakeError));
+          // EXIT: keep the serialized wake chain usable after reporting this
+          // undelivered wake; never turn the failure into a success summary.
+        });
+        await chain;
       } finally {
         busy = false;
       }
