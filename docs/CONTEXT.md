@@ -278,6 +278,15 @@ _Avoid_: 与 hard-wall 职责混同；Pre 缝保持零产品消费者；把它�
 **渐进式披露 (progressive disclosure)**: (#631) 便宜索引常驻 + 重载荷按需的两级披露——索引档（skill 清单 / `<mcp_tools_overview>` MCP 概览）每轮随 system prompt 在场，重载荷（SKILL.md 全文 / 工具完整 schema）经 `skill` / `tool_search` 按需拉取。iknow 机制 = lazy 注册 + `discover()` 命中 + `visibleSchemas` 组合（非 lazy 注册序前缀字节级不变 + discovered 按发现序尾部追加，保 KV cache 前缀）。
 _Avoid_: 把发现的工具插回注册序中部（破 KV cache 前缀）；只延迟载荷不给索引线索；概览段发空串占位
 
+**stderr 指针**: worker crash 取证三件套的落盘形态——`subagent_stop.error` 结构化字段 + `stderr_path`/`stderr_bytes` 指针字段 + `<traceDir>/stderr/<taskId>.log` mask 后全量文件；父可见 summary 只留尾部 ≤2000 字符预览。specs/trace-agent-readability.md。
+_Avoid_: 把完整 stderr 内联进 JSONL 行；stderr 落盘绕过 SC20 mask；把 summary 截断当成诊断丢失
+
+**blob 引用模式**（`IKNOW_TRACE_MESSAGES=blob`，默认 `full`）: llm_call 行内 messages 元素替换为内容寻址引用 `{sha, bytes}`、正文写 `<traceDir>/blobs/<sha>` 的 opt-in trace 存储模式；`messages_captured` 捕获语义不变，物理去重（实测 98.2% 重复）。ADR-0036。
+_Avoid_: 默认开启；当成对 ADR-0014「模型实际所见」不变量的修订；与写侧 delta/off 截断混同
+
+**crash 取证无条件**: `subagent_spawn`/`subagent_state_change`/`subagent_stop` 生命周期事件与 stderr 指针文件在所有产品入口（含 chat REPL）落盘，与主循环 content trace 的入口开关解耦。ADR-0035（对 ADR-0003 D10 的范围修正）。
+_Avoid_: 把生命周期事件绑回 `--trace-out`；把该扩张理解为 content trace 进 chat REPL
+
 ## Relationships
 
 - **run() messages -> adapter streaming arm -> interpretMessage**: harness LLM path（流事件以 `HarnessStreamEvent` 经 `onStream` 暴露）
@@ -306,6 +315,9 @@ _Avoid_: 把发现的工具插回注册序中部（破 KV cache 前缀）；只�
 - **dream vs memory_gc**: GC 仍是零 LLM 的机械软禁；dream 是第二条 LLM 写路径，禁止进入 `gc.ts`。dream 落盘仍可被随后的 GC 按 TTL/cap/supersede 软禁
 - **memory_gc vs promote**: GC 是机械减法（TTL / supersede / 超 cap → 软禁）；promote 是机械加法（≥2 个不同 session recall → 进 `system` 段）。GC 不看 promote 状态，promote 不复活 `disabled` 条目；自动条目两边都不享受豁免
 - **memory_gc vs memory_recall**: 软禁只改 `disabled`；`memory_recall` 必须在打分前丢掉 disabled 条，否则模型仍看到废条（`specs/memory-layer-follow-ups.md`）
+- **stderr 指针 vs 父可见信封**: 信封 summary 只留尾部预览进模型视野；全量诊断在 stderr .log，经指针引用，不进模型
+- **blob 引用模式 vs append-only messages**: blob 是 trace 存储层去重；messages 权威历史不受影响，TraceService 仍记录「模型实际所见」
+- **crash 取证无条件 vs ADR-0003 D10**: 生命周期三类事件 ≠ content trace；D10 的 chat REPL 排除只对 content trace 继续成立
 - **user.md vs user-level AGENTS.md vs 项目 AGENTS.md**: 画像与用户级行为约定同根 `~/.iknow/`、对所有项目生效；项目仓库根 `AGENTS.md` 叠在用户级之上且项目优先；都不是记忆库事实文件
 
 ## Flagged ambiguities
