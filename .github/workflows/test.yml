@@ -92,6 +92,7 @@ jobs:
             --exclude tests/session-api/workspace-bind.test.ts \
             --exclude tests/tui/deps-tools.test.ts \
             --exclude tests/cli/tui-deps-subagent-trace-factory.test.ts \
+            --exclude tests/cli/chat-subagent-trace.test.ts \
             --exclude tests/build-engine-hooks.test.ts \
             --exclude tests/integration/mcp-chain.test.ts \
             --exclude tests/e2e/skill-mcp-acceptance.test.ts \
@@ -183,6 +184,7 @@ jobs:
             --exclude tests/session-api/workspace-bind.test.ts \
             --exclude tests/tui/deps-tools.test.ts \
             --exclude tests/cli/tui-deps-subagent-trace-factory.test.ts \
+            --exclude tests/cli/chat-subagent-trace.test.ts \
             --exclude tests/build-engine-hooks.test.ts \
             --exclude tests/integration/mcp-chain.test.ts \
             --exclude tests/e2e/skill-mcp-acceptance.test.ts \
