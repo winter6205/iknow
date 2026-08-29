@@ -25,7 +25,7 @@ OVERALL: PASS
    - **Inherits:** Slice 1 scope: ordered segments distinguish text from consecutive `tool_use` clusters; typed deterministic fallbacks retain `// EXIT:` markers; idle folding happens in place after preceding text, never after the query; `liveTailSlots` remains unchanged. Boundary coverage includes empty, negative, overflow, concurrent N/A for pure synchronous helpers, and exception paths.
    - **Surface:** TUI (`src/tui/`) and TUI tests (`tests/tui/`)
    - **Acceptance:** An idle turn with assistant text before a tool renders the collapsed tool fold after that text; a tool before later assistant text renders the fold before the following text; query-only and empty activity do not create an incorrectly positioned fold; live-tail rendering is unchanged. The ordered-segment helpers and both rendering cases are covered by `tests/tui/turn-activity.test.ts` and `tests/tui/chat-view-thinking-tool-fold.test.tsx`, and the relevant Vitest run is green.
-   - Status: [ ] pending
+   - Status: [x] done
 
 ## Deferred
 
@@ -69,7 +69,7 @@ OVERALL: PASS
    - **Surface:** Existing session-api contract/projection/response boundary and Web AgentCard; the exact allowed files are listed above.
    - **Acceptance:** The session-api exposes an ordered `activity` DTO without replacing legacy projections; native text and tool order, tool-result pairing, and all EXIT cases are observable in `tests/session-api/turn-projection.test.ts`; the Web AgentCard renders non-empty activity in text → tool and tool → text order, while absent/empty activity retains the legacy thinking → body → tools layout in `tests/web/agent-card-activity-order.test.tsx`; the relevant test/typecheck commands pass.
    - **Completion:** A second implementer can choose different helper names or internal splits while preserving the additive wire shape, EXIT outcomes, ordering behavior, compatibility fallback, and exact file scope.
-   - Status: [ ] pending
+   - Status: [x] done
 
 **Projector EXIT contract:**
 
