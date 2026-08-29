@@ -22,10 +22,12 @@ export type TurnActivitySegment =
   | {
       readonly kind: "text";
       readonly messageIndex: number;
+      readonly contentBlockIndex: number;
     }
   | {
       readonly kind: "tools";
       readonly messageIndex: number;
+      readonly contentBlockIndex: number;
       readonly entries: ReadonlyArray<ToolUseCount>;
     };
 
@@ -48,12 +50,15 @@ export function orderedTurnActivitySegments(
     const toolOrder: string[] = [];
     const toolCounts = new Map<string, number>();
     let toolMessageIndex: number | undefined;
+    let toolContentBlockIndex: number | undefined;
 
     const flushTools = (): void => {
       if (toolMessageIndex === undefined) return;
+      if (toolContentBlockIndex === undefined) return;
       segments.push({
         kind: "tools",
         messageIndex: toolMessageIndex,
+        contentBlockIndex: toolContentBlockIndex,
         entries: toolOrder.map((name) => ({
           name,
           count: toolCounts.get(name) ?? 0,
@@ -62,6 +67,7 @@ export function orderedTurnActivitySegments(
       toolOrder.length = 0;
       toolCounts.clear();
       toolMessageIndex = undefined;
+      toolContentBlockIndex = undefined;
     };
 
     for (let i = Math.trunc(start); i < messages.length; i++) {
@@ -71,12 +77,24 @@ export function orderedTurnActivitySegments(
         // EXIT: 非数组 content 无法安全参与有序活动投影。
         continue;
       }
-      for (const block of message.content) {
+      for (const [contentBlockIndex, block] of message.content.entries()) {
         if (block.type === "text" && block.text.trim().length > 0) {
           flushTools();
-          segments.push({ kind: "text", messageIndex: i });
+          segments.push({
+            kind: "text",
+            messageIndex: i,
+            contentBlockIndex,
+          });
         } else if (block.type === "tool_use") {
-          toolMessageIndex = i;
+          if (toolMessageIndex === undefined) {
+            toolMessageIndex = i;
+            toolContentBlockIndex = contentBlockIndex;
+          } else if (toolMessageIndex !== i) {
+            // Keep the legacy cross-message cluster count and anchor the
+            // fold to the first tool in the latest assistant message.
+            toolMessageIndex = i;
+            toolContentBlockIndex = contentBlockIndex;
+          }
           if (!toolCounts.has(block.name)) toolOrder.push(block.name);
           toolCounts.set(block.name, (toolCounts.get(block.name) ?? 0) + 1);
         }

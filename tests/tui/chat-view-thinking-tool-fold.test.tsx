@@ -58,6 +58,13 @@ function bashTurn(
   ];
 }
 
+function toolResultMessage(id: string): AnthropicNativeMessage {
+  return {
+    role: "user",
+    content: [{ type: "tool_result", tool_use_id: id, content: "ok" }],
+  };
+}
+
 /** 用户截图同构：一轮提问 + 多轮「思考 → bash」+ 末条思考后回答。 */
 function interleavedThinkingToolMessages(): AnthropicNativeMessage[] {
   return [
@@ -210,6 +217,103 @@ test("idle：工具→文本时，工具折叠出现在后续文本之前", asyn
   expect(textIdx).toBeGreaterThanOrEqual(0);
   expect(foldIdx).toBeLessThan(textIdx);
   expect(frame).not.toContain("[完成]");
+  await setup.renderer.destroy();
+});
+
+test("idle：同一 assistant 消息内按 tool/text 位置渲染折叠", async () => {
+  const renderCase = async (
+    content: AnthropicNativeMessage["content"],
+    text: string
+  ) => {
+    const setup = await testRender(
+      <ChatView
+        session={sessionWith([
+          {
+            role: "user",
+            content: [{ type: "text", text: "q" }],
+          },
+          { role: "assistant", content },
+          ...content
+            .filter(
+              (
+                block
+              ): block is Extract<
+                AnthropicNativeMessage["content"][number],
+                { type: "tool_use" }
+              > => block.type === "tool_use"
+            )
+            .map((block) => toolResultMessage(block.id)),
+        ])}
+        cols={COLS}
+        rows={ROWS}
+        liveToolLines={[]}
+        thinkingExpanded={false}
+        lastThinkingSeconds={29}
+      />,
+      { width: COLS, height: ROWS, exitOnCtrlC: false }
+    );
+    await setup.waitForVisualIdle();
+    const lines = setup.captureCharFrame().split("\n");
+    const textIdx = lines.findIndex((line) => line.includes(text));
+    const foldIndices = lines.flatMap((line, index) =>
+      line.includes("bash × 1") ? [index] : []
+    );
+    return { setup, textIdx, foldIndices };
+  };
+
+  const toolThenText = await renderCase(
+    [
+      { type: "tool_use", id: "tu-same-1", name: "bash", input: {} },
+      { type: "text", text: "tool-text 总结" },
+    ],
+    "tool-text 总结"
+  );
+  expect(toolThenText.foldIndices).toHaveLength(1);
+  expect(toolThenText.foldIndices[0]).toBeLessThan(toolThenText.textIdx);
+  await toolThenText.setup.renderer.destroy();
+
+  const toolTextTool = await renderCase(
+    [
+      { type: "tool_use", id: "tu-same-2", name: "bash", input: {} },
+      { type: "text", text: "tool-text-tool 总结" },
+      { type: "tool_use", id: "tu-same-3", name: "bash", input: {} },
+    ],
+    "tool-text-tool 总结"
+  );
+  expect(toolTextTool.foldIndices).toHaveLength(2);
+  expect(toolTextTool.foldIndices[0]).toBeLessThan(toolTextTool.textIdx);
+  expect(toolTextTool.foldIndices[1]).toBeGreaterThan(toolTextTool.textIdx);
+  await toolTextTool.setup.renderer.destroy();
+});
+
+test("idle：无历史 activity 时已完成 live 工具仍被折叠出 tail", async () => {
+  const setup = await testRender(
+    <ChatView
+      session={sessionWith([
+        {
+          role: "user",
+          content: [{ type: "text", text: "q" }],
+        },
+      ])}
+      cols={COLS}
+      rows={ROWS}
+      liveToolLines={[]}
+      liveToolRuns={[
+        {
+          id: "tu-live-completed",
+          name: "bash",
+          status: "ok",
+          input: { command: "pwd" },
+          detail: "pwd",
+        },
+      ]}
+      lastThinkingSeconds={29}
+    />,
+    { width: COLS, height: ROWS, exitOnCtrlC: false }
+  );
+  await setup.waitForVisualIdle();
+  const frame = setup.captureCharFrame();
+  expect(frame).not.toContain("bash · pwd · ok");
   await setup.renderer.destroy();
 });
 

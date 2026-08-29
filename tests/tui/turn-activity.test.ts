@@ -73,9 +73,14 @@ describe("orderedTurnActivitySegments", () => {
         0
       )
     ).toEqual([
-      { kind: "text", messageIndex: 1 },
-      { kind: "tools", messageIndex: 2, entries: [{ name: "bash", count: 2 }] },
-      { kind: "text", messageIndex: 4 },
+      { kind: "text", messageIndex: 1, contentBlockIndex: 0 },
+      {
+        kind: "tools",
+        messageIndex: 2,
+        contentBlockIndex: 0,
+        entries: [{ name: "bash", count: 2 }],
+      },
+      { kind: "text", messageIndex: 4, contentBlockIndex: 0 },
     ]);
   });
 
@@ -91,8 +96,46 @@ describe("orderedTurnActivitySegments", () => {
         0
       )
     ).toEqual([
-      { kind: "tools", messageIndex: 1, entries: [{ name: "bash", count: 1 }] },
-      { kind: "text", messageIndex: 3 },
+      {
+        kind: "tools",
+        messageIndex: 1,
+        contentBlockIndex: 0,
+        entries: [{ name: "bash", count: 1 }],
+      },
+      { kind: "text", messageIndex: 3, contentBlockIndex: 0 },
+    ]);
+  });
+
+  test("同一 assistant 消息保留 tool/text/tool 的 content block 位置", () => {
+    expect(
+      orderedTurnActivitySegments(
+        [
+          user("q"),
+          {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "tu-1", name: "bash", input: {} },
+              { type: "text", text: "中间总结" },
+              { type: "tool_use", id: "tu-2", name: "bash", input: {} },
+            ],
+          },
+        ],
+        0
+      )
+    ).toEqual([
+      {
+        kind: "tools",
+        messageIndex: 1,
+        contentBlockIndex: 0,
+        entries: [{ name: "bash", count: 1 }],
+      },
+      { kind: "text", messageIndex: 1, contentBlockIndex: 1 },
+      {
+        kind: "tools",
+        messageIndex: 1,
+        contentBlockIndex: 2,
+        entries: [{ name: "bash", count: 1 }],
+      },
     ]);
   });
 
