@@ -86,7 +86,14 @@ OVERALL: yes — 全 5 项 verdict 通过，可进入 T1 实施；后续 bullet 
    - **Inherits:** 「已绑定则放行」；不建第二棵树
    - **Surface:** 与 T3 同一隔离缝
    - **Acceptance:** 会话根已是本会话 task worktree 时，mutate 直接成功且不新增 worktree
-   - Status: [ ] pending
+   - Status: [x] done（2026-08-29 T4 完成。passthrough 锚定落在 provisioner：
+     deterministic naming `<repo>/.iknow/worktrees/<conversationId>` 即所有权锚，
+     本会话自己的树 → 同根 no-op 放行（零 git 调用、零改绑写、重启后仍成立）；
+     别会话的 task tree / 无关 linked worktree → typed `foreign_worktree`
+     fail-closed（ADR-0037 未裁决面，按 §6 同源 fail-closed 取舍）。hub /
+     build-engine 不再传 conversation-agnostic 的 `initiallyBound`（per-root
+     引擎可服务多会话，引擎级 bound 标记会误放行别会话的 mutate）；harness
+     gate 的 `initiallyBound` opt 保留给单会话 embedding。）
    - [blocks: T3]
 
 5. **Operator-visible isolation state** — tag: `[implementation]`

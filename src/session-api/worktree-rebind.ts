@@ -26,8 +26,15 @@
  * Failure semantics (hard req ⑥): every failure exits typed
  * (`WorktreeIsolationError`) and the session file is left untouched — the
  * rebind happens only after the tree was created successfully.
+ *
+ * T4 (passthrough): the per-conversation passthrough decision lives HERE —
+ * a mutate arriving while the session is already on its own task worktree
+ * (deterministic naming, restart-safe) is a zero-side-effect no-op; a root
+ * belonging to another conversation or an unrelated linked worktree fails
+ * closed with `foreign_worktree`.
  */
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { existsSync, statSync } from "node:fs";
 
 import {
   createTaskWorktree,
@@ -57,12 +64,25 @@ export interface TaskWorktreeProvisioner {
    * conversation: once provisioned, subsequent calls return the same root
    * without running `git worktree add` again (same-process concurrency latch
    * lives in the harness gate; this covers engine rebuilds).
+   *
+   * T4 passthrough anchoring: when `ctx.root` IS this conversation's own task
+   * worktree (deterministic naming, restart-safe), `provision` is a no-op
+   * that returns the same root — zero git calls, zero rebind writes. When
+   * `ctx.root` is another conversation's task worktree or an unrelated
+   * linked worktree, it rejects with a typed `foreign_worktree`
+   * (fail-closed; ADR-0037 defines only the main repo and the own task tree).
    */
   provision(ctx: {
     readonly conversationId?: string;
     readonly root: string;
   }): Promise<string>;
-  /** True when `root` is a task worktree this provisioner created. */
+  /**
+   * True when `root` is a task worktree this provisioner created (or
+   * recognized as a conversation's own tree — T4 passthrough registration).
+   * Ownership-AGNOSTIC introspection: it does NOT answer "is this root
+   * conversation X's own tree" — the per-conversation passthrough anchor is
+   * `provision` itself, never this predicate.
+   */
   isTaskWorktreeRoot(root: string): boolean;
 }
 
@@ -72,6 +92,31 @@ export function taskWorktreePath(repoRoot: string, conversationId: string): stri
 
 export function taskWorktreeBranch(conversationId: string): string {
   return `iknow/task-${conversationId}`;
+}
+
+/**
+ * T4 ownership anchor: decompose a root against the deterministic naming.
+ * Returns the owning conversationId when `root` IS a task worktree path
+ * (`<any>/.iknow/worktrees/<conversationId>`), undefined otherwise. Because
+ * the leaf name is the conversation id, "the path decomposes to X" is
+ * equivalent to "the tree belongs to conversation X" — no registry needed,
+ * works across server restarts.
+ */
+function taskWorktreeOwnerOf(root: string): string | undefined {
+  if (basename(dirname(root)) !== "worktrees") return undefined;
+  if (basename(dirname(dirname(root))) !== ".iknow") return undefined;
+  return basename(root);
+}
+
+/** True when `root` is a LINKED git worktree checkout (`.git` is a file, not a dir). */
+function isLinkedWorktreeRoot(root: string): boolean {
+  const dotGit = join(root, ".git");
+  if (!existsSync(dotGit)) return false;
+  try {
+    return statSync(dotGit).isFile();
+  } catch {
+    return false;
+  }
 }
 
 export function createTaskWorktreeProvisioner(
@@ -99,6 +144,33 @@ export function createTaskWorktreeProvisioner(
     const existing = bound.get(conversationId);
     if (existing !== undefined) {
       return existing; // idempotent rebind (no second `worktree add`)
+    }
+
+    // T4 — passthrough anchored to THIS conversation's own task worktree
+    // (deterministic naming is the ownership anchor, valid across restarts):
+    //   - own tree → no-op passthrough: return the same root with zero git
+    //     calls and zero rebind writes (no second tree, hard req ⑦ idempotency);
+    //   - another session's tree / any other linked worktree → typed
+    //     `foreign_worktree` fail-closed (ADR-0037 covers only the main repo
+    //     and the session's own task tree; a foreign root never gets a nested
+    //     tree, never sees a write, never has its HEAD touched).
+    const owner = taskWorktreeOwnerOf(ctx.root);
+    if (owner !== undefined) {
+      if (owner === conversationId) {
+        bound.set(conversationId, ctx.root);
+        taskRoots.add(ctx.root);
+        return ctx.root;
+      }
+      throw new WorktreeIsolationError(
+        "foreign_worktree",
+        `worktree isolation: session ${conversationId} is anchored at task worktree ${ctx.root} owned by conversation '${owner}'; a foreign task tree is never written or rebound — move this session back to the main repo first`
+      );
+    }
+    if (isLinkedWorktreeRoot(ctx.root)) {
+      throw new WorktreeIsolationError(
+        "foreign_worktree",
+        `worktree isolation: session root ${ctx.root} is a git worktree outside this session's task worktree contract; mutates fail closed here — run the session from the main repo (or its own task worktree) so the first mutate can provision an isolated tree`
+      );
     }
 
     // 1. create the tree (typed fail-closed: not_a_git_repo / git_unavailable /

@@ -15,7 +15,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -176,6 +176,88 @@ describe("worktree isolation wiring (switch ON)", () => {
   });
 });
 
+// -- T4: passthrough when already on the session's own task worktree -----------
+
+describe("worktree isolation wiring (T4 — passthrough)", () => {
+  it("session on its own task worktree (fresh hub = restarted server): mutate succeeds, no new worktree, no provision-side tree", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId } = await makeHubWithSession(repo);
+
+    // T3 flow: first mutate on the main repo → tree + rebind
+    const firstDeps = await ensure(hub, repo);
+    await runMutate(firstDeps, conversationId);
+    const file = await store.load(conversationId);
+    const reboundRoot = file.workspaceRoot!;
+    const worktreesBefore = git(repo, "worktree", "list");
+
+    // fresh hub = fresh provisioner state (server restart between turns)
+    const hub2 = new SessionHub({ store, askUser: createNoAskUser() });
+    await hub2.bindWorkspace(repo);
+    const nextDeps = await ensure(hub2, reboundRoot);
+    const result = await runMutate(nextDeps, conversationId);
+
+    // passthrough: the mutate reached the tools and landed in the own tree
+    // (writeCall targets hello.txt; the first, intercepted call never wrote it)
+    expect(result.kind).toBe("ok");
+    expect(existsSync(join(reboundRoot, "hello.txt"))).toBe(true);
+    // no second worktree, no stray provision artifacts
+    expect(git(repo, "worktree", "list")).toBe(worktreesBefore);
+    // main repo still zero-write
+    expect(git(repo, "status", "--porcelain")).toBe("");
+  });
+
+  it("session on ANOTHER conversation's task worktree: fail-closed typed block, foreign tree untouched, no new worktree", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId: c1 } = await makeHubWithSession(repo);
+    const { conversationId: c2 } = await makeHubWithSession(repo);
+
+    const deps = await ensure(hub, repo);
+    await runMutate(deps, c1); // creates wt1 and rebinds c1
+    const wt1 = (await store.load(c1)).workspaceRoot!;
+    const worktreesBefore = git(repo, "worktree", "list");
+    const head1 = git(wt1, "rev-parse", "HEAD").trim();
+
+    // c2's root anchored at c1's tree (foreign task worktree)
+    const c2file = await store.load(c2);
+    await store.save({ id: c2, file: { ...c2file, workspaceRoot: wt1 } });
+
+    const foreignDeps = await ensure(hub, wt1);
+    const result = await runMutate(foreignDeps, c2);
+
+    expect(result.kind).toBe("execution_failed");
+    expect(result.message).toContain("[worktree_isolation]");
+    expect(result.message).toContain("kind=foreign_worktree");
+    // foreign tree untouched: no write landed, no HEAD move, no nested tree
+    expect(existsSync(join(wt1, "hello.txt"))).toBe(false);
+    expect(git(wt1, "rev-parse", "HEAD").trim()).toBe(head1);
+    expect(git(repo, "worktree", "list")).toBe(worktreesBefore);
+    // c2's session file untouched (no rebind of a foreign root)
+    expect((await store.load(c2)).workspaceRoot).toBe(wt1);
+  });
+
+  it("session on an unrelated (manual) git worktree: fail-closed typed block, nothing created inside it", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const manualWt = join(repo, "..", "iknow-wt-hub-manual");
+    roots.push(manualWt);
+    git(repo, "worktree", "add", manualWt, "-b", "manual-hub-x");
+    const { hub, conversationId } = await makeHubWithSession(repo);
+    const file = await store.load(conversationId);
+    await store.save({ id: conversationId, file: { ...file, workspaceRoot: manualWt } });
+    const before = readdirSync(manualWt);
+
+    const deps = await ensure(hub, manualWt);
+    const result = await runMutate(deps, conversationId);
+
+    expect(result.kind).toBe("execution_failed");
+    expect(result.message).toContain("kind=foreign_worktree");
+    expect(readdirSync(manualWt)).toEqual(before); // zero pollution of the foreign checkout
+    expect(git(repo, "status", "--porcelain")).toBe("");
+  });
+});
+
 // -- switch OFF (boundary d) ---------------------------------------------------
 
 describe("worktree isolation wiring (switch OFF)", () => {
@@ -195,5 +277,23 @@ describe("worktree isolation wiring (switch OFF)", () => {
 
     const file = await store.load(conversationId);
     expect(file.workspaceRoot).toBe(repo); // no rebind
+  });
+
+  it("T4 boundary — switch OFF: a session on a foreign/unrelated worktree mutates exactly like today (no gate, no block)", async () => {
+    await setSettingsIsolation(false);
+    const repo = makeGitRepo();
+    const manualWt = join(repo, "..", "iknow-wt-hub-off");
+    roots.push(manualWt);
+    git(repo, "worktree", "add", manualWt, "-b", "manual-hub-off");
+    const { hub, conversationId } = await makeHubWithSession(repo);
+    const file = await store.load(conversationId);
+    await store.save({ id: conversationId, file: { ...file, workspaceRoot: manualWt } });
+
+    const deps = await ensure(hub, manualWt);
+    const result = await runMutate(deps, conversationId);
+
+    expect(result.message ?? "").not.toContain("[worktree_isolation]");
+    expect(result.kind).toBe("ok");
+    expect(existsSync(join(manualWt, "hello.txt"))).toBe(true);
   });
 });

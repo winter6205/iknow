@@ -43,7 +43,15 @@ export type WorktreeIsolationErrorKind =
   | "branch_exists"
   | "worktree_exists"
   | "worktree_add_failed"
-  | "rebind_failed";
+  | "rebind_failed"
+  /**
+   * Session root is a git worktree that is NOT this conversation's own task
+   * worktree (another session's task tree, or an unrelated manual worktree).
+   * T4 fail-closed choice: the isolation contract (ADR-0037) only defines the
+   * main repo and the session's own task tree, so a foreign root never gets a
+   * nested tree and never sees a write.
+   */
+  | "foreign_worktree";
 
 /**
  * Typed, non-empty, visible error for every gate failure. Mirrors the
@@ -231,12 +239,13 @@ export interface WorktreeProvisionContext {
 /**
  * Host-facing options the assembly (build-engine) threads through: the
  * switch itself is read once at the startup load point
- * (`resolveWorktreeOnMutate(settings)`), the host supplies only the
- * provision seam and the bound flag.
+ * (`resolveWorktreeOnMutate(settings)`), the host supplies only the provision
+ * seam. Passthrough for a session already on its task worktree is anchored
+ * PER CONVERSATION inside `provision` (T4) — the host must not blanket-mark
+ * an engine "bound" when several conversations can share a root.
  */
 export interface WorktreeIsolationHostOpts {
   readonly provision: (ctx: WorktreeProvisionContext) => Promise<string>;
-  readonly initiallyBound?: boolean;
 }
 
 export interface WorktreeIsolationGateOpts {
@@ -251,7 +260,14 @@ export interface WorktreeIsolationGateOpts {
    * the gate coalesces concurrent callers onto one invocation.
    */
   readonly provision: (ctx: WorktreeProvisionContext) => Promise<string>;
-  /** Engine built on a root that already is a task worktree (rebound engine). */
+  /**
+   * Engine built on a root that already is a task worktree (rebound engine).
+   * Harness-level prior for embeddings that serve EXACTLY the conversation
+   * owning this root (e.g. a single-session CLI engine). Multi-conversation
+   * hosts (session-api hub) must NOT set it — per-conversation passthrough is
+   * adjudicated by `provision` (T4: own task tree → same-root no-op; foreign
+   * root → typed `foreign_worktree`).
+   */
   readonly initiallyBound?: boolean;
   readonly classify?: (call: ToolCall) => MutateClass;
   /** Failure observability (typed error instance; the model still gets the block). */

@@ -192,6 +192,76 @@ describe("createTaskWorktreeProvisioner", () => {
     ).rejects.toMatchObject({ kind: "rebind_failed", message: expect.stringContaining("missing-conv") });
   });
 
+  // -- T4: passthrough anchored to THIS conversation's task worktree -------------
+
+  describe("T4 — passthrough anchored to the session's own task worktree", () => {
+    it("session already on its own task worktree (fresh provisioner = server restart): provision is a no-op passthrough — zero git calls, zero rebind writes", async () => {
+      const repo = makeGitRepo();
+      const { store } = await makeStoreWithSessions(repo, ["conv-a"]);
+      // first provision on the main repo (the T3 flow)
+      const baseProv = createTaskWorktreeProvisioner({ store });
+      const wt = await baseProv.provision({ conversationId: "conv-a", root: repo });
+
+      // fresh provisioner = fresh process: the bound map is empty, but the
+      // session root is already conv-a's own task worktree
+      let gitCalls = 0;
+      const prov = createTaskWorktreeProvisioner({
+        store,
+        runGit: async (args, cwd) => {
+          gitCalls += 1;
+          return (await import("../../src/harness/isolation/worktree-gate.ts")).defaultGitRunner(args, cwd);
+        },
+      });
+      const root = await prov.provision({ conversationId: "conv-a", root: wt });
+
+      expect(root).toBe(wt); // same tree, no second worktree
+      expect(gitCalls).toBe(0); // no `worktree add`, not even a probe
+      // no rebind write: the session file's workspaceRoot was already the tree
+      const file = await store.load("conv-a");
+      expect(file.workspaceRoot).toBe(wt);
+      // the passthrough registers the tree so introspection stays truthful
+      expect(prov.isTaskWorktreeRoot(wt)).toBe(true);
+    });
+
+    it("session on ANOTHER conversation's task worktree: typed foreign_worktree, nothing created, foreign tree untouched", async () => {
+      const repo = makeGitRepo();
+      const { store } = await makeStoreWithSessions(repo, ["conv-a", "conv-b"]);
+      const prov = createTaskWorktreeProvisioner({ store });
+      const wtA = await prov.provision({ conversationId: "conv-a", root: repo });
+      const headA = git(wtA, "rev-parse", "HEAD").trim();
+      const before = await readdir(wtA);
+
+      await expect(
+        prov.provision({ conversationId: "conv-b", root: wtA })
+      ).rejects.toMatchObject({
+        name: "WorktreeIsolationError",
+        kind: "foreign_worktree",
+        message: expect.stringContaining("conv-a"),
+      });
+      // foreign tree untouched (no nested task tree, no HEAD move, no writes)
+      expect(await readdir(wtA)).toEqual(before);
+      expect(git(wtA, "rev-parse", "HEAD").trim()).toBe(headA);
+      // conv-b's session file untouched
+      const b = await store.load("conv-b");
+      expect(b.workspaceRoot).toBe(repo);
+    });
+
+    it("session on an unrelated (manual) git worktree: typed foreign_worktree fail-closed, nothing created inside it", async () => {
+      const repo = makeGitRepo();
+      const manualWt = join(repo, "..", "iknow-wt-manual");
+      roots.push(manualWt);
+      git(repo, "worktree", "add", manualWt, "-b", "manual-x");
+      const { store } = await makeStoreWithSessions(repo, ["conv-a"]);
+      const prov = createTaskWorktreeProvisioner({ store });
+      const before = await readdir(manualWt);
+
+      await expect(
+        prov.provision({ conversationId: "conv-a", root: manualWt })
+      ).rejects.toMatchObject({ name: "WorktreeIsolationError", kind: "foreign_worktree" });
+      expect(await readdir(manualWt)).toEqual(before); // zero pollution
+    });
+  });
+
   it("worktree add failure → typed worktree_add_failed, session file untouched (zero rebind on failure)", async () => {
     const repo = makeGitRepo();
     const { store } = await makeStoreWithSessions(repo, ["conv-a"]);

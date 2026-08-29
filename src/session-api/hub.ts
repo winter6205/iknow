@@ -698,8 +698,9 @@ export class SessionHub {
     };
     // ADR-0037 T3:worktree isolation host 缝 —— 建树 + 仅本会话根改绑。
     // 开关本体由 build-engine 在启动加载点读取（硬要求 9）；hub 只在
-    // buildProductionEngine / ensureDeps 兜底路径注入 provision 缝与
-    // initiallyBound 标记。
+    // buildProductionEngine / ensureDeps 兜底路径注入 provision 缝。T4:
+    // 会话已在本会话 task worktree 的 passthrough / 外来根 fail-closed
+    // 都由 provision 按会话锚定，hub 不传 conversation-agnostic 标记。
     this.worktreeProvisioner = createTaskWorktreeProvisioner({ store: this.store });
   }
 
@@ -2197,12 +2198,13 @@ export class SessionHub {
       sandboxRoot: root,
       workspaceRoot: root,
       // ADR-0037 T3:mutate 门禁 host 缝 —— 开关读取在 build-engine 启动加载点;
-      // provision 负责建树 + 仅本会话根改绑;本根已是 task worktree 时
-      // initiallyBound（改绑后下一回合的 per-root 引擎直接放行 mutate）。
+      // provision 负责建树 + 仅本会话根改绑。T4:passthrough 不经
+      // conversation-agnostic 的 initiallyBound —— 会话已在本会话自己的 task
+      // worktree 时由 provision 幂等放行（返回同根），别会话的树 / 无关
+      // worktree 由 provision fail-closed（typed foreign_worktree）。
       worktreeIsolation: {
         provision: ({ conversationId, root: sessionRoot }) =>
           this.worktreeProvisioner.provision({ conversationId, root: sessionRoot }),
-        initiallyBound: this.worktreeProvisioner.isTaskWorktreeRoot(root),
       },
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
@@ -2278,13 +2280,11 @@ export class SessionHub {
       ...(this.sandboxRoot ? { sandboxRoot: this.sandboxRoot } : {}),
       // ADR-0037 T3:未 bind 根的兜底路径同样接 isolation host 缝
       // （repoRoot = sandboxRoot ?? process.cwd();session workspaceRoot 缺席
-      // 的会话在 rebind 后下一回合走 per-root 引擎路径）。
+      // 的会话在 rebind 后下一回合走 per-root 引擎路径）。T4:同上——
+      // passthrough 由 provision 按会话锚定，不设 initiallyBound。
       worktreeIsolation: {
         provision: ({ conversationId, root: sessionRoot }) =>
           this.worktreeProvisioner.provision({ conversationId, root: sessionRoot }),
-        initiallyBound: this.worktreeProvisioner.isTaskWorktreeRoot(
-          this.sandboxRoot ?? process.cwd()
-        ),
       },
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),

@@ -177,7 +177,9 @@ export type BuildEngineOpts = {
    * 本体在启动加载点读取（`resolveWorktreeOnMutate(settings)`，硬要求 9）：
    * 仅当 host 提供了 provision 缝 **且** 开关为 true 时才包一层 mutate 门禁
    * executor；否则字节级零变化（默认 OFF）。provision 负责「建 task worktree
-   * + 改绑当前会话根」，门禁本体见 `harness/isolation/worktree-gate.ts`。
+   * + 改绑当前会话根」，并按会话锚定 passthrough（T4：已在本会话自己的 task
+   * worktree → 同根 no-op 放行；外来 worktree → typed `foreign_worktree`
+   * fail-closed），门禁本体见 `harness/isolation/worktree-gate.ts`。
    */
   readonly worktreeIsolation?: WorktreeIsolationHostOpts;
   /** #440 D2 seam:session 作用域 todos.md 目录。host 注入：调用方
@@ -608,7 +610,10 @@ export async function buildHarnessEngine(
         enabled: true,
         root: sandboxRoot,
         provision: isolationHost.provision,
-        initiallyBound: isolationHost.initiallyBound === true,
+        // T4: passthrough 锚定交给 provision 按会话裁决（own task tree →
+        // 同根 no-op;外来根 → typed foreign_worktree）——host 缝不再携带
+        // conversation-agnostic 的 initiallyBound（per-root 引擎可服务多个
+        // 会话，引擎级 bound 标记会把别会话的 mutate 一并放行）。
         inner: executor,
       })
     : executor;
