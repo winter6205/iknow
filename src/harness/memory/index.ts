@@ -115,15 +115,20 @@ export {
   MEMORY_PREFETCH_CHAR_CAP,
   MEMORY_PREFETCH_END,
   MEMORY_PREFETCH_MAX_HITS,
-  attachPrefetchOverlay,
   applyHostPrefetch,
+  attachPrefetchOverlay,
   buildMemoryPrefetchOverlay,
+  extractInjectedMemoryIds,
   formatPrefetchOverlay,
+  recoverInjectedMemoryIds,
+  recordInjectedMemoryIds,
   selectPrefetchHits,
   stripPrefetchOverlay,
 } from "./prefetch.js";
 export type {
   BuildPrefetchOverlayOpts,
+  OverlayPrefetchFn,
+  PrefetchQueryOpts,
   SelectPrefetchOpts,
 } from "./prefetch.js";
 export { tokenize } from "./tokenize.js";

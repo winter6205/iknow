@@ -13,15 +13,28 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseArgs } from "../src/cli/parse-args.ts";
 import {
   processChatLine,
+  seedResumeMessages,
   type ChatLineContext,
 } from "../src/cli/chat-session.ts";
 import { isInteractive } from "../src/cli/session-io.ts";
 import { getVersion, usageText } from "../src/cli/usage.ts";
 import { applySlashCommand } from "../src/cli/slash.ts";
 import type { AnthropicNativeMessage } from "../src/harness/index.ts";
+import {
+  MEMORY_ADVISORY_PREFIX,
+  MEMORY_PREFETCH_END,
+} from "../src/harness/memory/index.ts";
+import {
+  CURRENT_SCHEMA_VERSION,
+  SessionStore,
+  type SessionFileV1,
+} from "../src/session-api/store/index.ts";
 import { createStubTool } from "../src/harness/stubs/stub-tool.ts";
 import { createRegistry } from "../src/harness/tools/registry.ts";
 import { createExecutor } from "../src/harness/tools/executor.ts";
@@ -297,6 +310,112 @@ describe("processChatLine (pipe simulation)", () => {
     assert.ok(userText.includes("user question"));
     assert.ok(!userText.includes("SYSTEM_ONLY"));
     assert.deepEqual(captured, ["system"]);
+  });
+
+  it("does not re-inject the same memory on a second chat query while the first block stays in history", async () => {
+    const ctx = makeCtx({
+      responses: [
+        assistantResult({ texts: ["a1"] }),
+        assistantResult({ texts: ["a2"] }),
+      ],
+    });
+    const overlay =
+      `${MEMORY_ADVISORY_PREFIX}\n\n### T\nid: mem-1\n\nbody` +
+      `${MEMORY_PREFETCH_END}`;
+    const seenExcluded: string[][] = [];
+    ctx.overlayMemoryPrefetch = async (_query, prefetchOpts) => {
+      seenExcluded.push([...(prefetchOpts?.excludeIds ?? [])]);
+      return seenExcluded.length === 1 ? overlay : "";
+    };
+
+    await processChatLine({ line: "same question", ctx });
+    await processChatLine({ line: "same question", ctx });
+
+    // Turn 1 injected with an empty set; turn 2 saw mem-1 excluded.
+    assert.deepEqual(seenExcluded[0], []);
+    assert.deepEqual(seenExcluded[1], ["mem-1"]);
+    // History keeps turn 1's advisory block; turn 2's user message has none.
+    const userTexts = ctx.state.messages
+      .filter((m) => m.role === "user")
+      .map(
+        (m) => (m.content[0] as { type: "text"; text: string }).text ?? ""
+      );
+    assert.ok(userTexts[0]!.includes(MEMORY_ADVISORY_PREFIX));
+    assert.ok(!userTexts[1]!.includes(MEMORY_ADVISORY_PREFIX));
+    assert.ok(userTexts[1]!.includes("same question"));
+  });
+
+  it("does not re-inject advisory blocks recovered from resumed history", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "iknow-cli-prefetch-resume-"));
+    try {
+      const store = new SessionStore(dir);
+      const conversationId = "cli-prefetch-resume-1";
+      const now = "2026-01-01T00:00:00.000Z";
+      const overlay =
+        `${MEMORY_ADVISORY_PREFIX}\n\n### T\nid: mem-7\n\nbody` +
+        `${MEMORY_PREFETCH_END}`;
+      const file: SessionFileV1 = {
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversation_id: conversationId,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: `${overlay}earlier question` },
+            ],
+          },
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "earlier answer" }],
+          },
+        ],
+        jsonMode: false,
+        turnCount: 1,
+        updatedAt: now,
+        title: "",
+        cwd: process.cwd(),
+        sanitized_at: now,
+        checkpoints: [],
+      };
+      await store.save({ id: conversationId, file });
+
+      // seedResumeMessages is the exact --resume seed path in runChatSession.
+      const seeded = await seedResumeMessages({
+        store,
+        id: conversationId,
+      });
+      const ctx = makeCtx({
+        responses: [assistantResult({ texts: ["a1"] })],
+        stateOverrides: { messages: seeded.messages, conversationId },
+      });
+      const seenExcluded: string[][] = [];
+      ctx.overlayMemoryPrefetch = async (_query, prefetchOpts) => {
+        seenExcluded.push([...(prefetchOpts?.excludeIds ?? [])]);
+        return "";
+      };
+
+      await processChatLine({ line: "resumed question", ctx });
+
+      assert.ok(
+        seenExcluded[0]!.includes("mem-7"),
+        "resumed advisory ids must reach the overlay as excludeIds"
+      );
+      const lastUser = [
+        ...ctx.state.messages,
+      ]
+        .reverse()
+        .find((m) => m.role === "user")!;
+      const lastUserText = (
+        lastUser.content[0] as { type: "text"; text: string }
+      ).text;
+      assert.ok(
+        !lastUserText.includes(MEMORY_ADVISORY_PREFIX),
+        "resumed conversation must not re-inject"
+      );
+      assert.ok(lastUserText.includes("resumed question"));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("unknown slash goes to stderr field", async () => {
