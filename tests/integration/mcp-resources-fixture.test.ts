@@ -203,6 +203,7 @@ describe("MCP resources integration — end-to-end real subprocess chain", () =>
 
     const cfg = makeStdioConfig("rsrc_server");
     const manager = createMcpManager({
+      workspaceRoot: repoRoot,
       config: [cfg],
       registerExternal: () => {
         /* 资源通道不走 mcp__ 工具注册 */
@@ -258,6 +259,7 @@ describe("MCP resources integration — listResources scope + state surfaces", (
 
     const cfg = makeStdioConfig("solo");
     const manager = createMcpManager({
+      workspaceRoot: repoRoot,
       config: [cfg],
       registerExternal: () => {},
     });
@@ -296,6 +298,7 @@ describe("MCP resources integration — listResources scope + state surfaces", (
     };
     const okCfg = makeStdioConfig("ok_server");
     const manager = createMcpManager({
+      workspaceRoot: repoRoot,
       config: [failingCfg, okCfg],
       registerExternal: () => {},
     });
@@ -336,6 +339,7 @@ describe("MCP resources integration — readResource content fidelity", () => {
 
     const cfg = makeStdioConfig("rsrc_server");
     const manager = createMcpManager({
+      workspaceRoot: repoRoot,
       config: [cfg],
       registerExternal: () => {},
     });
@@ -362,6 +366,7 @@ describe("MCP resources integration — readResource content fidelity", () => {
 
     const cfg = makeStdioConfig("rsrc_server");
     const manager = createMcpManager({
+      workspaceRoot: repoRoot,
       config: [cfg],
       registerExternal: () => {},
     });
@@ -389,6 +394,7 @@ describe("MCP resources integration — readResource content fidelity", () => {
 
     const cfg = makeStdioConfig("rsrc_server");
     const manager = createMcpManager({
+      workspaceRoot: repoRoot,
       config: [cfg],
       registerExternal: () => {},
     });
@@ -412,6 +418,7 @@ describe("MCP resources integration — readResource content fidelity", () => {
 
     const cfg = makeStdioConfig("rsrc_server");
     const manager = createMcpManager({
+      workspaceRoot: repoRoot,
       config: [cfg],
       registerExternal: () => {},
     });
@@ -437,6 +444,7 @@ describe("MCP resources integration — readResource content fidelity", () => {
 
     const cfg = makeStdioConfig("rsrc_server");
     const manager = createMcpManager({
+      workspaceRoot: repoRoot,
       config: [cfg],
       registerExternal: () => {},
     });
@@ -458,6 +466,7 @@ describe("MCP resources integration — readResource content fidelity", () => {
 
     const cfg = makeStdioConfig("rsrc_server");
     const manager = createMcpManager({
+      workspaceRoot: repoRoot,
       config: [cfg],
       registerExternal: () => {},
     });
@@ -490,6 +499,7 @@ describe("MCP resources integration — readResource content fidelity", () => {
     };
     const okCfg = makeStdioConfig("ok_for_read");
     const manager = createMcpManager({
+      workspaceRoot: repoRoot,
       config: [failingCfg, okCfg],
       registerExternal: () => {},
     });
@@ -519,6 +529,7 @@ describe("MCP resources integration — tool handlers wire format end-to-end", (
     activeFixtures.push(spawned);
     const cfg = makeStdioConfig("rsrc_tool_wire");
     manager = createMcpManager({
+      workspaceRoot: repoRoot,
       config: [cfg],
       registerExternal: () => {},
     });
@@ -681,6 +692,7 @@ describe("MCP resources integration — shutdown SIGTERM child exit (SC11)", () 
 
     const cfg = makeStdioConfig("sigterm_rsrc");
     const manager = createMcpManager({
+      workspaceRoot: repoRoot,
       config: [cfg],
       registerExternal: () => {},
     });

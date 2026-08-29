@@ -150,7 +150,7 @@ MCP server 的运行时失败继续映射到现有 `McpServerState = "failed"` �
    - **Surface:** `harness/mcp` transport and manager lifecycle
    - **Acceptance:** 每个 stdio server 只在 resolver 提供的 `workspaceRoot` 下启动；connect/listTools/callTool/reload/close 的失败都可收敛为 typed 状态或结果，promise 必须终结；shutdown 取消在途调用、关闭 client 和 stdio 子孙；list_changed 不打断在途调用、不重复注册同名工具，且迟到连接不能越过已终结的 manager 生命周期。
    - **Completion headroom:** 实现者可以选择 manager 内部状态机、AbortSignal 合并方式和 transport wrapper；不得要求调用方直接操作 SDK transport 或依赖某个具体 client mock 形状。
-   - Status: [ ] pending
+   - Status: [x] done
    - [blocks: T1, T2, T3]
 
 5. **`buildHarnessEngine` single-root wiring** — tag: `[implementation]`

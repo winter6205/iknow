@@ -482,6 +482,9 @@ export async function buildHarnessEngine(
     const config = await loadMcpConfig({ home: userHome, mcpConfigRoot: cwd });
     mcpManager = (opts.createMcpManager ?? createMcpManager)({
       config: config.servers,
+      // T4: stdio child cwd。T5 会换成 resolver 返回的 workspaceRoot；
+      // 当前缺显式 workspaceRoot 时用 cwd 兜底（与既有 engine 装配同形）。
+      workspaceRoot: workspaceRoot ?? cwd,
       // 闭包捕获 reg holder — mcpManager.start() 异步触发时 reg 已赋值。
       registerExternal: (defs) => {
         if (!reg) {

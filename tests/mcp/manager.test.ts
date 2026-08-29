@@ -22,12 +22,21 @@ import type {
 import type { AciToolDef } from "../../src/harness/aci/types.ts";
 import { createAciRegistry } from "../../src/harness/aci/aci-registry.ts";
 
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import {
   createMcpManager,
+  createRealClient,
   type McpClientHandle,
   type McpManager,
 } from "../../src/harness/mcp/manager.ts";
 import type { McpServerConfig } from "../../src/harness/mcp/config.ts";
+import { McpLifecycleError } from "../../src/harness/errors.ts";
+
+/** T4 fixture — absolute workspace root used by manager cwd contract tests. */
+const TEST_WORKSPACE_ROOT = "/tmp/iknow-mcp-manager-test-workspace";
 
 // ---------------------------------------------------------------------------
 // Stub client
@@ -217,6 +226,7 @@ describe("MCP manager — state machine", () => {
   it("skips connecting to disabled servers", async () => {
     const handles: McpClientHandle[] = [];
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("d1", "disabled")],
       registerExternal: () => {},
       createClient: () => {
@@ -240,6 +250,7 @@ describe("MCP manager — state machine", () => {
     let connectResolve!: () => void;
     const handles: McpClientHandle[] = [];
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("slow")],
       registerExternal: () => {},
       createClient: () => {
@@ -286,6 +297,7 @@ describe("MCP manager — state machine", () => {
     const initial: McpTool[] = [sampleTool("echo"), sampleTool("ping")];
     let registered: AciToolDef[] = [];
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("good")],
       registerExternal: (defs) => {
         registered = [...defs];
@@ -325,6 +337,7 @@ describe("MCP manager — 30s connect timeout (SC9)", () => {
     const createCalls: string[] = [];
 
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("slow"), makeStdio("fast")],
       registerExternal: () => {},
       timeoutMsOverride: 80, // 缩到测试可用
@@ -395,6 +408,7 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
     let registered: AciToolDef[] = [];
 
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("slow")],
       timeoutMsOverride: 60,
       registerExternal: (defs) => {
@@ -440,6 +454,7 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
     // 即便超时窗口过后也不翻（catch 里 clearTimeout 取消了超时器）。
     let rejectConnect!: (err: Error) => void;
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("slow")],
       timeoutMsOverride: 200,
       registerExternal: () => {},
@@ -476,6 +491,7 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
     // error 停在超时原因（markFailed 不重复标记，不覆盖）。
     let slowConnectResolve!: () => void;
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("slow")],
       timeoutMsOverride: 60,
       registerExternal: () => {},
@@ -517,6 +533,7 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
     // 第二守卫 flip-back 到 connected + 工具注册。
     let registered: AciToolDef[] = [];
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("slow")],
       timeoutMsOverride: 60,
       registerExternal: (defs) => {
@@ -555,6 +572,7 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
     // 不误翻（timedOut 未被置位，因此不存在 flip-back 通道）。
     let rejectConnect!: (err: Error) => void;
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("slow")],
       timeoutMsOverride: 200,
       registerExternal: () => {},
@@ -588,6 +606,7 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
   it("still moves to failed when the connection closes after flip-back (connected → failed)", async () => {
     let slowConnectResolve!: () => void;
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("slow")],
       timeoutMsOverride: 60,
       registerExternal: () => {},
@@ -630,6 +649,7 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
 
   it("empty: 空 config → 无 slot、status 空、start/shutdown 幂等", async () => {
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [],
       registerExternal: () => {},
       createClient: () => makeStubClient({}),
@@ -643,6 +663,7 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
 
   it("negative: timeoutMsOverride 负数 → 立即超时标 failed（envPositiveInt 上游已过滤，此处验证 manager 兜底）", async () => {
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("neg")],
       registerExternal: () => {},
       timeoutMsOverride: -1,
@@ -661,6 +682,7 @@ describe("MCP manager — connect timeout late-success flip-back (#378)", () => 
 
   it("overflow: 极大 timeoutMsOverride（Number.MAX_SAFE_INTEGER）→ 慢 connect 在窗口内正常 connected", async () => {
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("big")],
       registerExternal: () => {},
       timeoutMsOverride: Number.MAX_SAFE_INTEGER,
@@ -690,6 +712,7 @@ describe("MCP manager — list_changed re-registration (SC15)", () => {
     const registerCalls: AciToolDef[][] = [];
 
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("svc")],
       registerExternal: (defs) => {
         registerCount += 1;
@@ -775,6 +798,7 @@ describe("MCP manager — shutdown (SC11 / SC16)", () => {
     // 串到了 stub.callTool 的 signal,shutdown 时能被传播。
     let registered: AciToolDef[] = [];
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("svc")],
       registerExternal: (defs) => {
         registered = [...defs, ...registered];
@@ -817,6 +841,7 @@ describe("MCP manager — shutdown (SC11 / SC16)", () => {
 
   it("client.close is invoked on shutdown", async () => {
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("svc")],
       registerExternal: () => {},
       createClient: () =>
@@ -889,6 +914,7 @@ describe("MCP manager — shutdown (SC11 / SC16)", () => {
 
     // 借用 manager 但替换 createClient 工厂
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("svc")],
       registerExternal: () => {},
       createClient: () => handle,
@@ -917,6 +943,7 @@ describe("MCP manager — shutdown (SC11 / SC16)", () => {
 describe("MCP manager — onclose semantics", () => {
   it("moves server to failed state when SDK fires onclose and does not reconnect", async () => {
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("svc")],
       registerExternal: () => {},
       createClient: () =>
@@ -952,6 +979,7 @@ describe("MCP manager — onclose semantics", () => {
 describe("MCP manager — reload", () => {
   it("reload replaces server set: renamed / added / removed servers reflected in status()", async () => {
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("alpha")],
       registerExternal: () => {},
       createClient: () =>
@@ -982,6 +1010,7 @@ describe("MCP manager — reload", () => {
   it("reload aborts an in-flight callTool (reject, never resolve)", async () => {
     let registered: AciToolDef[] = [];
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("svc")],
       registerExternal: (defs) => {
         registered = [...defs, ...registered];
@@ -1023,6 +1052,7 @@ describe("MCP manager — reload", () => {
   it("reload with a disabled server does not construct a client and status reflects disabled", async () => {
     const handles: McpClientHandle[] = [];
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("svc")],
       registerExternal: () => {},
       createClient: () => {
@@ -1053,6 +1083,7 @@ describe("MCP manager — reload", () => {
   it("reload unregisters stale tool names of a removed server (case A)", async () => {
     const unregistered: string[][] = [];
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("alpha")],
       registerExternal: () => {},
       unregisterExternal: (names) => {
@@ -1093,6 +1124,7 @@ describe("MCP manager — reload", () => {
         closeHandlers: [],
       });
     mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("old")],
       registerExternal: (defs) => reg.registerExternal(defs),
       unregisterExternal: (names) => reg.unregisterExternal(names),
@@ -1116,6 +1148,7 @@ describe("MCP manager — reload", () => {
 
   it("reload without unregisterExternal still works (idempotent, case C)", async () => {
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("alpha")],
       registerExternal: () => {},
       // 故意不注入 unregisterExternal
@@ -1140,6 +1173,7 @@ describe("MCP manager — reload", () => {
   it("reload → 新 server 慢 connect 超时 → failed 且 error 含 connect timeout（T4 #378 reload 冷启动场景）", async () => {
     // createClient 按 server 名分派：cold 慢（悬挂），fast 快（立即成功）。
     const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
       config: [makeStdio("alpha")],
       registerExternal: () => {},
       timeoutMsOverride: 60,
@@ -1169,5 +1203,192 @@ describe("MCP manager — reload", () => {
     );
 
     await mgr.shutdown();
+  });
+});
+
+// =========================================================================
+// T4 — workspaceRoot as stdio transport cwd + late-connect lifecycle guard
+// =========================================================================
+
+describe("MCP manager — workspaceRoot transport cwd (T4)", () => {
+  it("rejects a missing workspaceRoot with McpLifecycleError missing_cwd", () => {
+    const badOpts = {
+      config: [],
+      registerExternal: () => {},
+    } as unknown as Parameters<typeof createMcpManager>[0];
+    expect(() => createMcpManager(badOpts)).toThrow(McpLifecycleError);
+    try {
+      createMcpManager(badOpts);
+    } catch (err) {
+      expect(err).toBeInstanceOf(McpLifecycleError);
+      expect((err as McpLifecycleError).kind).toBe("missing_cwd");
+    }
+  });
+
+  it("rejects a relative workspaceRoot with McpLifecycleError invalid_cwd", () => {
+    expect(() =>
+      createMcpManager({
+        workspaceRoot: "relative/task",
+        config: [],
+        registerExternal: () => {},
+      })
+    ).toThrow(McpLifecycleError);
+    try {
+      createMcpManager({
+        workspaceRoot: "relative/task",
+        config: [],
+        registerExternal: () => {},
+      });
+    } catch (err) {
+      expect(err).toBeInstanceOf(McpLifecycleError);
+      expect((err as McpLifecycleError).kind).toBe("invalid_cwd");
+    }
+  });
+
+  it("passes workspaceRoot as cwd to createClient factory on each spawn", async () => {
+    const capturedCwds: string[] = [];
+    const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
+      config: [makeStdio("a"), makeStdio("b")],
+      registerExternal: () => {},
+      createClient: (_server, transport) => {
+        capturedCwds.push(transport.cwd);
+        return makeStubClient({
+          listChangedHandlers: [],
+          closeHandlers: [],
+        });
+      },
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "a", "connected", 2000);
+    await waitForStatus(mgr, "b", "connected", 2000);
+
+    expect(capturedCwds.sort()).toEqual([
+      TEST_WORKSPACE_ROOT,
+      TEST_WORKSPACE_ROOT,
+    ]);
+    await mgr.shutdown();
+  });
+
+  it("createRealClient forwards cwd to StdioClientTransport (child process.cwd)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const marker = join(root, "child-cwd.txt");
+    try {
+      // Relative command: `./print-cwd.mjs` resolves only when child cwd = root.
+      await writeFile(
+        join(root, "print-cwd.mjs"),
+        [
+          "import { writeFileSync } from 'node:fs';",
+          `writeFileSync(${JSON.stringify(marker)}, process.cwd());`,
+          "setInterval(() => {}, 1000);",
+        ].join("\n"),
+        "utf8"
+      );
+
+      const handle = createRealClient(
+        {
+          name: "cwd-probe",
+          kind: "stdio",
+          source: "user",
+          status: "enabled",
+          entry: { command: process.execPath, args: ["./print-cwd.mjs"] },
+        },
+        { cwd: root }
+      );
+
+      // Script is not an MCP server — connect hangs on handshake. Race a short
+      // wait so spawn can write the cwd marker, then tear down.
+      await Promise.race([
+        handle.connect().catch(() => undefined),
+        new Promise<void>((r) => setTimeout(r, 800)),
+      ]);
+
+      const deadline = Date.now() + 3000;
+      let cwdWritten = "";
+      while (Date.now() < deadline) {
+        try {
+          cwdWritten = (await readFile(marker, "utf8")).trim();
+          if (cwdWritten.length > 0) break;
+        } catch {
+          /* not written yet */
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(cwdWritten).toBe(root);
+      await handle.close().catch(() => undefined);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it("late connect after shutdown does not register tools (lifecycle ended)", async () => {
+    let connectResolve!: () => void;
+    const registered: string[] = [];
+    const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
+      config: [makeStdio("late")],
+      registerExternal: (defs) => {
+        for (const d of defs) registered.push(d.name);
+      },
+      createClient: () => {
+        const handle = makeStubClient({
+          connectDelayMs: null as unknown as number,
+          initialTools: [sampleTool("echo")],
+          listChangedHandlers: [],
+          closeHandlers: [],
+        });
+        (handle as unknown as { connect: () => Promise<void> }).connect =
+          () =>
+            new Promise<void>((res) => {
+              connectResolve = res;
+            }).then(() => undefined);
+        return handle;
+      },
+    });
+
+    await mgr.start();
+    // Still pending — shutdown before connect completes.
+    expect(mgr.status().find((s) => s.name === "late")?.state).toBe("pending");
+    await mgr.shutdown();
+    expect(mgr.status().find((s) => s.name === "late")?.state).toBe("failed");
+
+    // Late connect + listTools must not flip to connected or register.
+    connectResolve();
+    await new Promise((r) => setTimeout(r, 80));
+    expect(mgr.status().find((s) => s.name === "late")?.state).toBe("failed");
+    expect(registered).toEqual([]);
+  });
+
+  it("list_changed after shutdown does not register tools", async () => {
+    const registered: string[] = [];
+    const mgr = createMcpManager({
+      workspaceRoot: TEST_WORKSPACE_ROOT,
+      config: [makeStdio("svc")],
+      registerExternal: (defs) => {
+        for (const d of defs) registered.push(d.name);
+      },
+      createClient: () =>
+        makeStubClient({
+          initialTools: [sampleTool("alpha")],
+          listChangedHandlers: [],
+          closeHandlers: [],
+        }),
+    });
+
+    await mgr.start();
+    await waitForStatus(mgr, "svc", "connected", 2000);
+    registered.length = 0;
+
+    const handle = (mgr as unknown as { _handles: McpClientHandle[] })
+      ._handles[0]!;
+    await mgr.shutdown();
+
+    const triggers = handle as unknown as {
+      _triggerListChanged: (ts: McpTool[]) => void;
+    };
+    triggers._triggerListChanged([sampleTool("alpha"), sampleTool("beta")]);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(registered).toEqual([]);
   });
 });
