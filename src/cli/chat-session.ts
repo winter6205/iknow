@@ -51,6 +51,13 @@ import {
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
 import {
+  createSubagentWake,
+  queryableSubagentTaskIds,
+  toSubagentWakeError,
+  type SubagentWake,
+  type SubagentWakeError,
+} from "../harness/subagent/host-wake.js";
+import {
   createViolationCounter,
   wireKillSessionNotification,
 } from "../harness/sandbox/violation-handling.js";
@@ -403,6 +410,8 @@ export type ProcessChatLineResult = {
   stderr?: string;
   /** True when this line was a user query that ran the agent. */
   ranQuery?: boolean;
+  /** T6: a silent subagent handoff failed; no completion was fabricated. */
+  wakeFailure?: SubagentWakeError;
 };
 
 export interface ProcessChatLineOpts {
@@ -663,6 +672,80 @@ async function runSkipAppendAndPresent(opts: {
       stderr: formatChatError(err),
       ranQuery: true,
     };
+  }
+}
+
+/**
+ * T4: consume a terminal subagent handoff without inventing a user input.
+ * The drain is a prior user message for the model, but it never goes through
+ * the readline/input-history path.
+ */
+export async function runChatSubagentWake(opts: {
+  readonly ctx: ChatLineContext;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
+}): Promise<ProcessChatLineResult> {
+  const { ctx } = opts;
+  const drained = await drainPendingSubagents(ctx.subagentManager);
+  if (drained.length === 0) return { quit: false, output: "" };
+  const box = busyBox(ctx);
+  if (box.value) return { quit: false, output: "" };
+  box.value = true;
+  ctx.graphAssembly?.beginRound();
+  const priorMessages = Object.freeze([
+    ...ctx.state.messages,
+    Object.freeze({
+      role: "user" as const,
+      content: Object.freeze([
+        Object.freeze({ type: "text" as const, text: drained }),
+      ]),
+    }),
+  ]);
+  try {
+    const { result, trace } = await runHarness(
+      "",
+      ctx.deps,
+      ctx.abortController?.signal,
+      {
+        priorMessages,
+        appendUserText: false,
+        ...(opts.onStream !== undefined ? { onStream: opts.onStream } : {}),
+      }
+    );
+    if (ctx.checkpointStore && ctx.state.conversationId !== null) {
+      await persistChatSessionCheckpoint({
+        store: ctx.checkpointStore,
+        conversationId: ctx.state.conversationId,
+        jsonMode: ctx.state.jsonMode,
+        result,
+        priorMessages: ctx.state.messages,
+      });
+    }
+    if (
+      result.stopReason !== "protocolError" &&
+      result.stopReason !== "emptyFinalResponse"
+    ) {
+      ctx.state.messages = Object.freeze([...result.messages]);
+    }
+    return presentChatTurn({
+      ctx,
+      result,
+      trace,
+      priorMessages,
+    });
+  } catch (err) {
+    const wakeError = toSubagentWakeError(err, {
+      taskIds: queryableSubagentTaskIds(ctx.subagentManager),
+      queryable: ctx.subagentManager !== undefined,
+    });
+    return {
+      quit: false,
+      output: "",
+      stderr: formatChatError(wakeError),
+      ranQuery: false,
+      wakeFailure: wakeError,
+    };
+  } finally {
+    box.value = false;
   }
 }
 
@@ -2043,6 +2126,7 @@ async function runInteractive(opts: {
 
   // Serialize turns: never start next line / prompt until previous finishes.
   let chain: Promise<void> = Promise.resolve();
+  let wakeController: SubagentWake | undefined;
 
   const handle = async (line: string): Promise<void> => {
     busy = true;
@@ -2155,8 +2239,41 @@ async function runInteractive(opts: {
       }
     } finally {
       busy = false;
+      wakeController?.flush();
     }
   };
+
+  wakeController = createSubagentWake({
+    manager: ctx.subagentManager,
+    isIdle: () => !busy && !closed,
+    wake: async () => {
+      busy = true;
+      try {
+        const wakeRun = chain.then(async () => {
+          const result = await runChatSubagentWake({ ctx });
+          if (result.stderr) writeErr(result.stderr);
+          if (result.output) {
+            writeOut(result.output);
+            if (result.ranQuery) writeOut(TTY_ANSWER_SEP);
+          }
+        });
+        chain = wakeRun.catch((error: unknown) => {
+          const wakeError = toSubagentWakeError(error, {
+            reason: "wakeFailed",
+            taskIds: queryableSubagentTaskIds(ctx.subagentManager),
+            queryable: ctx.subagentManager !== undefined,
+          });
+          writeErr(formatChatError(wakeError));
+          // EXIT: keep the serialized wake chain usable after reporting this
+          // undelivered wake; never turn the failure into a success summary.
+        });
+        await chain;
+      } finally {
+        busy = false;
+      }
+    },
+    onError: (error) => writeErr(formatChatError(error)),
+  });
 
   // W2 扩展：Shift+Tab 切换权限模式（default ↔ full_auto；plan 走
   // /permissions plan 命令不进循环）。REPL 用 readline：terminal:true 时
@@ -2214,6 +2331,7 @@ async function runInteractive(opts: {
         });
     });
     rl.on("close", () => {
+      wakeController.dispose();
       process.off("SIGINT", onSigint);
       rl.removeListener("SIGINT", onSigint);
       // 卸载 Shift+Tab keypress 监听；与 SIGINT cleanup 同位（不积攒）。

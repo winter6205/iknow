@@ -3,7 +3,15 @@
  * Covers 5 boundary classes (empty/negative/overflow/exception/concurrent),
  * 6-row error mapping table, cancelled/timeout stopReason, turnCount accumulation.
  */
-import { afterAll, afterEach, beforeAll, describe, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -33,6 +41,10 @@ import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../src/harness/tools/executor.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
+import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
+import type { SubAgentTerminalNotice } from "../../src/harness/subagent/mailbox.ts";
+import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
+import { SubagentWakeError } from "../../src/harness/subagent/host-wake.ts";
 import { ValidationError } from "../../src/shared/errors.ts";
 import {
   makeTestLlmEnv,
@@ -112,6 +124,181 @@ describe("askUser inlet", () => {
   });
 });
 
+describe("SessionHub subagent wake", () => {
+  it("starts one silent run after a terminal notice when the session is idle", async () => {
+    const subscribers = new Set<(notice: SubAgentTerminalNotice) => void>();
+    let completed: ReadonlyArray<{
+      readonly taskId: string;
+      readonly envelope: SubAgentEnvelope;
+    }> = [];
+    const manager = {
+      spawn: () => ({ taskId: "wake-task" }),
+      queryBuffer: () => ({ status: "not_found" as const }),
+      waitFor: async () => {
+        throw new Error("unused");
+      },
+      shutdown: async () => {},
+      drainCompleted: () => completed,
+      listActive: () => [],
+      abortTask: () => false,
+      listSubagents: () => [],
+      subscribe: (subscriber: (notice: SubAgentTerminalNotice) => void) => {
+        subscribers.add(subscriber);
+        return () => subscribers.delete(subscriber);
+      },
+    } as SubAgentManager;
+    const hub = new SessionHub({
+      store,
+      deps: makeDeps([
+        assistantResult({ texts: ["initial"] }),
+        assistantResult({ texts: ["woken"] }),
+      ]),
+      subagentManager: manager,
+      surface: "serve",
+    });
+    await hub.bindWorkspace(process.cwd());
+    const created = await hub.createSession();
+
+    await hub.postMessage({
+      conversationId: created.session.conversation_id,
+      text: "start",
+    });
+    completed = [
+      {
+        taskId: "wake-task",
+        envelope: {
+          status: "ok",
+          summary: "worker done",
+          result: "worker result",
+        },
+      },
+    ];
+    for (const subscriber of [...subscribers]) {
+      subscriber({
+        taskId: "wake-task",
+        status: "ok",
+        summary: "worker done",
+        result: "worker result",
+      });
+    }
+
+    await vi.waitFor(async () => {
+      const file = await store.load(created.session.conversation_id);
+      expect(
+        file.messages.some((message) =>
+          message.content.some(
+            (block) =>
+              block.type === "text" &&
+              block.text.includes("## Sub-agent wake-task result: worker done")
+          )
+        )
+      ).toBe(true);
+      expect(
+        file.messages.some((message) =>
+          message.content.some(
+            (block) => block.type === "text" && block.text.includes("woken")
+          )
+        )
+      ).toBe(true);
+    });
+  });
+
+  it("rejects a failed silent wake with the real task status instead of a success response", async () => {
+    const manager = {
+      spawn: () => ({ taskId: "failed-wake-task" }),
+      queryBuffer: () => ({
+        status: "failed" as const,
+        reason: "crashed" as const,
+        summary: "worker failed",
+      }),
+      waitFor: async () => {
+        throw new Error("unused");
+      },
+      shutdown: async () => {},
+      drainCompleted: () => [
+        {
+          taskId: "failed-wake-task",
+          envelope: {
+            status: "ok" as const,
+            summary: "worker completed",
+            result: "worker result",
+          },
+        },
+      ],
+      listActive: () => [],
+      abortTask: () => false,
+      listSubagents: () => [],
+      subscribe: () => () => {},
+    } as SubAgentManager;
+    const hub = new SessionHub({
+      store,
+      deps: {
+        ...makeDeps([]),
+        adapter: {
+          ...makeDeps([]).adapter,
+          step: async () => {
+            throw new Error("silent run unavailable");
+          },
+        },
+      },
+      subagentManager: manager,
+      surface: "serve",
+    });
+    await hub.bindWorkspace(process.cwd());
+    const created = await hub.createSession();
+
+    await assert.rejects(
+      () =>
+        hub.wakeFromSubagent({
+          conversationId: created.session.conversation_id,
+        }),
+      (error: unknown) =>
+        error instanceof SubagentWakeError &&
+        error.status === "undelivered" &&
+        error.reason === "wakeFailed" &&
+        error.taskIds.includes("failed-wake-task") &&
+        error.queryable === true &&
+        !error.message.includes("completion")
+    );
+    const loaded = await store.load(created.session.conversation_id);
+    assert.equal(loaded.messages.length, 0);
+  });
+
+  it("returns undefined without a completion response when the manager has no envelope", async () => {
+    const manager = {
+      spawn: () => ({ taskId: "unused" }),
+      queryBuffer: () => ({ status: "not_found" as const }),
+      waitFor: async () => {
+        throw new Error("unused");
+      },
+      shutdown: async () => {},
+      drainCompleted: () => [],
+      listActive: () => [],
+      abortTask: () => false,
+      listSubagents: () => [],
+      subscribe: () => () => {},
+    } as SubAgentManager;
+    const hub = new SessionHub({
+      store,
+      deps: makeDeps([]),
+      subagentManager: manager,
+      surface: "serve",
+    });
+    await hub.bindWorkspace(process.cwd());
+    const created = await hub.createSession();
+
+    const result = await hub.wakeFromSubagent({
+      conversationId: created.session.conversation_id,
+    });
+
+    assert.equal(result, undefined);
+    assert.equal(
+      (await store.load(created.session.conversation_id)).messages.length,
+      0
+    );
+  });
+});
+
 // -- mapStoreError (6-row contract table) ------------------------------------
 
 describe("mapStoreError — 6-row error mapping contract", () => {
@@ -167,7 +354,9 @@ describe("mapStoreError — 6-row error mapping contract", () => {
 
 describe("createSession", () => {
   it("rejects an unbound create before allocating or writing a session file", async () => {
-    const isolatedDir = await mkdtemp(join(tmpdir(), "iknow-hub-create-unbound-"));
+    const isolatedDir = await mkdtemp(
+      join(tmpdir(), "iknow-hub-create-unbound-")
+    );
     const isolatedStore = new SessionStore(isolatedDir);
     const isolatedHub = new SessionHub({
       store: isolatedStore,
@@ -185,8 +374,7 @@ describe("createSession", () => {
       );
       await assert.rejects(
         () => isolatedStore.load("any-created-id"),
-        (err: unknown) =>
-          (err as { kind?: string }).kind === "not_found"
+        (err: unknown) => (err as { kind?: string }).kind === "not_found"
       );
     } finally {
       await rm(isolatedDir, { recursive: true, force: true });
@@ -220,8 +408,7 @@ describe("createSession", () => {
         );
         await assert.rejects(
           () => isolatedStore.load("any-created-id"),
-          (err: unknown) =>
-            (err as { kind?: string }).kind === "not_found"
+          (err: unknown) => (err as { kind?: string }).kind === "not_found"
         );
       } finally {
         await rm(isolatedDir, { recursive: true, force: true });

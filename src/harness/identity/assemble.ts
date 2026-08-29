@@ -473,7 +473,7 @@ Result handling: a completed spawn returns the envelope {status: "ok", summary, 
 
 Parallelize by issuing multiple spawn_subagent calls in one turn: each spawns an independent worker process and they run concurrently. Keep each task self-contained; sub-agents cannot spawn further sub-agents.
 
-(Default contract today: spawn blocks until the sub-agent finishes. A future version may add an explicit asynchronous mode for fire-and-forget work.)
+(For wait:false in chat/tui/serve, terminal completion wakes a silent run through the host mailbox/subscription; use subagent_result only for an explicit status query.)
 `.trim();
 
 /** #361 T8 subagent coordinator 段渲染:段标题 + 正文 (coordinatorSegment 在

@@ -50,6 +50,12 @@ import {
   type OverlayPrefetchFn,
 } from "../harness/memory/index.js";
 import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
+import {
+  createSubagentWake,
+  queryableSubagentTaskIds,
+  toSubagentWakeError,
+  type SubagentWake,
+} from "../harness/subagent/host-wake.js";
 import type {
   SubAgentManager,
   SubagentInfo,
@@ -183,10 +189,9 @@ function requireCreateWorkspaceRoot(root: unknown): string {
     );
   }
   if (root.length > MAX_WORKSPACE_ROOT_CHARS) {
-    throw new ValidationError(
-      "workspace root exceeds the maximum length",
-      { field: "workspaceRoot" }
-    );
+    throw new ValidationError("workspace root exceeds the maximum length", {
+      field: "workspaceRoot",
+    });
   }
   try {
     return resolveWorkspaceRoot({ explicit: root });
@@ -214,10 +219,9 @@ function requireBoundRoot(root: unknown): string {
     );
   }
   if (root.length > MAX_WORKSPACE_ROOT_CHARS) {
-    throw new ValidationError(
-      "workspace root exceeds the maximum length",
-      { field: "workspaceRoot" }
-    );
+    throw new ValidationError("workspace root exceeds the maximum length", {
+      field: "workspaceRoot",
+    });
   }
   try {
     return resolveWorkspaceRoot({ explicit: root });
@@ -672,6 +676,10 @@ export class SessionHub {
   private readonly surface: "chat" | "tui" | "ask" | "serve" | undefined;
   /** #356 T7: subagent manager（host drain 消费面；懒取见 ensureDeps）。 */
   private subagentManager: SubAgentManager | undefined;
+  /** T4: serve-only terminal wake subscription; TUI owns its UI-aware wake. */
+  private subagentWake: SubagentWake | undefined;
+  /** Coarse serve target: the most recently addressed conversation. */
+  private lastConversationId: string | undefined;
   /** review-fix (M1 / H1): per-root state anchor 缓存；serve 入口解析后透传。 */
   private readonly workspaceRoot: string | undefined;
   /** #128 T8: 验证闭环配置（settings.verify 段；缺席 = 透明关闭）。 */
@@ -756,6 +764,8 @@ export class SessionHub {
   >();
   /** Per-conversation serialization (spec A15). */
   private readonly inflight = new Map<string, Promise<void>>();
+  /** Actual active work count; `inflight` retains resolved chain sentinels. */
+  private readonly activeTurnCounts = new Map<string, number>();
   /**
    * auto-memory T1: session-level prefetch dedup — per-conversation sets of
    * already-injected memory ids. Host-side state only (never loop-engine).
@@ -791,6 +801,9 @@ export class SessionHub {
     this.sandboxRoot = opts.sandboxRoot;
     this.surface = opts.surface;
     this.subagentManager = opts.subagentManager;
+    if (this.surface === "serve" && this.subagentManager !== undefined) {
+      this.attachSubagentWake(this.subagentManager);
+    }
     this.autoMemory = opts.autoMemory;
     this.overlayMemoryPrefetch = opts.overlayMemoryPrefetch;
     // review-fix (M1 / H1): per-root state anchor 缓存。
@@ -878,6 +891,7 @@ export class SessionHub {
    * ask/deps-injected 形态无 built → 缓存缺席 → no-op(行为零变化)。
    */
   async shutdown(): Promise<void> {
+    this.subagentWake?.dispose();
     await this.cachedShutdown?.();
     for (const entry of this.engineByRoot.values()) {
       await entry.shutdown?.();
@@ -1097,14 +1111,17 @@ export class SessionHub {
     readonly signal?: AbortSignal;
     readonly thinking?: ThinkingOverride;
     readonly onStream?: (event: HarnessStreamEvent) => void;
+    /** T4 internal host wake; not accepted by the HTTP adapter. */
+    readonly silent?: boolean;
   }): Promise<PostMessageResponse> {
     const { conversationId, text } = opts;
+    const silent = opts.silent === true;
     // #408 T3: leading `## GOAL:` re-pins the session goal. Detect BEFORE
     // validateText so the goal text (not the raw directive) is what gets
     // validated and run. `null` = no directive → whole text is the query.
     // `""` = empty directive → stripped to empty → validateText rejects
     // below (goal unchanged, since we only persist after run succeeds).
-    const goalDirective = parseGoalCommand(text);
+    const goalDirective = silent ? null : parseGoalCommand(text);
     // #458 T5: validate goal text length/non-empty BEFORE serialize so an
     // over-long `## GOAL: ...` never reaches the pin path / store. Empty
     // directive is skipped (goalDirective === "") and falls through to
@@ -1128,8 +1145,11 @@ export class SessionHub {
     }
     const query =
       pinText ?? (goalDirective !== null ? goalDirective : text.trim());
-    this.validateText(query);
-    return this.serialize({
+    if (!silent) this.validateText(query);
+    this.lastConversationId = conversationId;
+    const activeCount = this.activeTurnCounts.get(conversationId) ?? 0;
+    this.activeTurnCounts.set(conversationId, activeCount + 1);
+    const operation = this.serialize<PostMessageResponse>({
       conversationId,
       work: async () => {
         let session = await this.store.load(conversationId);
@@ -1324,7 +1344,12 @@ export class SessionHub {
               // #356 T7 (SC7):host drain — serve 入口每轮 run() 前,把 manager 内
               // completed 子代理结果浓缩成 user message,拼入 priorMessages 末尾。
               // 空 manager / 无 completed → priorMessages 不变 (行为零变化)。
-              const drained = await drainPendingSubagents(this.subagentManager);
+              const drained = await drainPendingSubagents(
+                this.subagentManager,
+                {
+                  conversationId,
+                }
+              );
               const drainedMsg: AnthropicNativeMessage = {
                 role: "user",
                 content: [{ type: "text", text: drained }],
@@ -1336,7 +1361,7 @@ export class SessionHub {
               // （drain 浓缩消息在内存历史里先于 query，链上也须同序）。
               queryCommitPrefix = [
                 ...(drained ? [drainedMsg] : []),
-                buildUserCommit(query),
+                ...(query.length > 0 ? [buildUserCommit(query)] : []),
               ];
               // #408 T5: verify-loop terminal outcome (only set when verifyConfig
               // is configured). Captured here so the post-run write-back can
@@ -1355,63 +1380,71 @@ export class SessionHub {
               // trace 仅在 traceOut 配置时注入 (records 落盘, T7 已处理可选)。
               // 注意: runVerifyLoop 的首轮 runFn 不带 priorMessages / onStream,
               // 闭包必须兜底 hub 侧的 priorMessages 与 wrappedOnStream。
-              const runOutcome = this.verifyConfig
-                ? await runVerifyLoop({
-                    runFn: (text, o) =>
-                      attachPrefetch(text).then((effective) => {
-                        queryCommitPrefix = [
-                          ...(drained ? [drainedMsg] : []),
-                          buildUserCommit(effective),
-                        ];
-                        return run(effective, runDeps, o?.signal, {
-                          priorMessages: o?.priorMessages ?? priorMessages,
-                          onStream: o?.onStream ?? wrappedOnStream,
-                        });
-                      }),
-                    // ADR-0024: two modules, not `goal.text ?? query`. Non-empty
-                    // goal → auto (userText = goal.text); else HITL (userText =
-                    // query). taskFocus never entered verify input (#473) and
-                    // is gone with #605 T2's retirement.
-                    completionMode:
-                      session.goal !== undefined && session.goal.text.length > 0
-                        ? "auto"
-                        : "hitl",
-                    userText:
-                      session.goal !== undefined && session.goal.text.length > 0
-                        ? session.goal.text
-                        : query,
-                    config: this.verifyConfig,
-                    sessionId: conversationId,
-                    signal: opts.signal,
-                    trace: runDeps.trace,
-                    cwd: boundRoot,
-                    // #128 SC1 生产装配: subagentManager 在场 → 启用分类器填空
-                    // (command 缺失/空串时分类器接管, spec Objective);缺席
-                    // (ask 形态) → undefined, verify-loop 自然走透明关闭向后兼容。
-                    runClassifier:
-                      this.subagentManager === undefined
-                        ? undefined
-                        : createRunClassifierFromManager({
-                            manager: this.subagentManager,
-                            ...(this.verifyConfig.classifierModel !== undefined
-                              ? {
-                                  classifierModel:
-                                    this.verifyConfig.classifierModel,
-                                }
-                              : {}),
-                          }),
-                  })
-                : await (async () => {
-                    const effective = await attachPrefetch(query);
-                    queryCommitPrefix = [
-                      ...(drained ? [drainedMsg] : []),
-                      buildUserCommit(effective),
-                    ];
-                    return run(effective, runDeps, opts.signal, {
-                      priorMessages,
-                      onStream: wrappedOnStream,
-                    });
-                  })();
+              const runOutcome =
+                !silent && this.verifyConfig
+                  ? await runVerifyLoop({
+                      runFn: (text, o) =>
+                        attachPrefetch(text).then((effective) => {
+                          queryCommitPrefix = [
+                            ...(drained ? [drainedMsg] : []),
+                            buildUserCommit(effective),
+                          ];
+                          return run(effective, runDeps, o?.signal, {
+                            priorMessages: o?.priorMessages ?? priorMessages,
+                            onStream: o?.onStream ?? wrappedOnStream,
+                          });
+                        }),
+                      // ADR-0024: two modules, not `goal.text ?? query`. Non-empty
+                      // goal → auto (userText = goal.text); else HITL (userText =
+                      // query). taskFocus never entered verify input (#473) and
+                      // is gone with #605 T2's retirement.
+                      completionMode:
+                        session.goal !== undefined &&
+                        session.goal.text.length > 0
+                          ? "auto"
+                          : "hitl",
+                      userText:
+                        session.goal !== undefined &&
+                        session.goal.text.length > 0
+                          ? session.goal.text
+                          : query,
+                      config: this.verifyConfig,
+                      sessionId: conversationId,
+                      signal: opts.signal,
+                      trace: runDeps.trace,
+                      cwd: boundRoot,
+                      // #128 SC1 生产装配: subagentManager 在场 → 启用分类器填空
+                      // (command 缺失/空串时分类器接管, spec Objective);缺席
+                      // (ask 形态) → undefined, verify-loop 自然走透明关闭向后兼容。
+                      runClassifier:
+                        this.subagentManager === undefined
+                          ? undefined
+                          : createRunClassifierFromManager({
+                              manager: this.subagentManager,
+                              ...(this.verifyConfig.classifierModel !==
+                              undefined
+                                ? {
+                                    classifierModel:
+                                      this.verifyConfig.classifierModel,
+                                  }
+                                : {}),
+                            }),
+                    })
+                  : await (async () => {
+                      const effective = silent
+                        ? ""
+                        : await attachPrefetch(query);
+                      queryCommitPrefix = [
+                        ...(drained ? [drainedMsg] : []),
+                        ...(effective.length > 0
+                          ? [buildUserCommit(effective)]
+                          : []),
+                      ];
+                      return run(effective, runDeps, opts.signal, {
+                        priorMessages,
+                        onStream: wrappedOnStream,
+                      });
+                    })();
               const result = runOutcome.result;
               // #408 T5: capture the terminal outcome for post-run write-back.
               verifyOutcome =
@@ -1520,15 +1553,17 @@ export class SessionHub {
               }
             },
             decideContinue: async (s) =>
-              this.applyHubAutoContinue({
-                conversationId,
-                result: s.finalResult,
-                priorCount: s.priorCount,
-                ...(s.verifyOutcome !== undefined
-                  ? { verifyOutcome: s.verifyOutcome }
-                  : {}),
-                records: s.verifyRecords,
-              }),
+              silent
+                ? false
+                : this.applyHubAutoContinue({
+                    conversationId,
+                    result: s.finalResult,
+                    priorCount: s.priorCount,
+                    ...(s.verifyOutcome !== undefined
+                      ? { verifyOutcome: s.verifyOutcome }
+                      : {}),
+                    records: s.verifyRecords,
+                  }),
             buildStop: async (s) => ({
               session: this.summarize({
                 file: await this.store.load(conversationId),
@@ -1556,7 +1591,7 @@ export class SessionHub {
             },
           });
         } catch (err) {
-          await this.applyHubAutoError(conversationId, err);
+          if (!silent) await this.applyHubAutoError(conversationId, err);
           if (err instanceof MaxTurnsExceeded) {
             // ADR-0011:不 save — run 前 session 已在盘上,throw 路径不产出
             // 可落盘的新 messages,故不调 conditionalSave(否则会写空 messages
@@ -1583,6 +1618,47 @@ export class SessionHub {
         }
       },
     });
+    void operation.then(
+      () => this.releaseActiveTurn(conversationId),
+      () => this.releaseActiveTurn(conversationId)
+    );
+    return operation;
+  }
+
+  /**
+   * T4: run one silent parent turn for a terminal subagent handoff.
+   * `undefined` means the manager has no host-visible terminal result; no
+   * model call is made and no synthetic success is returned.
+   */
+  async wakeFromSubagent(opts: {
+    readonly conversationId: string;
+    readonly signal?: AbortSignal;
+    readonly thinking?: ThinkingOverride;
+    readonly onStream?: (event: HarnessStreamEvent) => void;
+  }): Promise<PostMessageResponse | undefined> {
+    const drained = await drainPendingSubagents(this.subagentManager, {
+      conversationId: opts.conversationId,
+    });
+    if (drained.length === 0) return undefined;
+    const taskIds = queryableSubagentTaskIds(
+      this.subagentManager,
+      opts.conversationId
+    );
+    try {
+      return await this.postMessage({
+        conversationId: opts.conversationId,
+        text: "",
+        signal: opts.signal,
+        thinking: opts.thinking,
+        onStream: opts.onStream,
+        silent: true,
+      });
+    } catch (error) {
+      throw toSubagentWakeError(error, {
+        taskIds,
+        queryable: this.subagentManager !== undefined,
+      });
+    }
   }
 
   async resetSession(
@@ -2179,6 +2255,35 @@ export class SessionHub {
     });
   }
 
+  private attachSubagentWake(manager: SubAgentManager): void {
+    if (this.subagentWake !== undefined || this.surface !== "serve") return;
+    this.subagentWake = createSubagentWake({
+      manager,
+      isIdle: () =>
+        this.lastConversationId !== undefined &&
+        !this.activeTurnCounts.has(this.lastConversationId),
+      wake: async () => {
+        const conversationId = this.lastConversationId;
+        if (conversationId === undefined) return;
+        await this.wakeFromSubagent({ conversationId });
+      },
+      onError: (error) => {
+        console.warn("[serve] subagent wake failed", error);
+      },
+    });
+  }
+
+  private releaseActiveTurn(conversationId: string): void {
+    const count = this.activeTurnCounts.get(conversationId);
+    if (count === undefined || count <= 1) {
+      this.activeTurnCounts.delete(conversationId);
+      this.subagentWake?.flush();
+      return;
+    }
+    this.activeTurnCounts.set(conversationId, count - 1);
+    this.subagentWake?.flush();
+  }
+
   /**
    * Serialize operations on the same conversation_id (spec A15).
    * Different ids run in parallel; same id chains sequentially.
@@ -2286,9 +2391,7 @@ export class SessionHub {
       await this.store.save({
         id: conversationId,
         file:
-          root === undefined
-            ? updated
-            : { ...updated, workspaceRoot: root },
+          root === undefined ? updated : { ...updated, workspaceRoot: root },
       });
     });
     return true;
@@ -2336,6 +2439,9 @@ export class SessionHub {
     };
     this.engineByRoot.set(root, entry);
     this.subagentManager = this.subagentManager ?? built.subagentManager;
+    if (this.subagentManager !== undefined) {
+      this.attachSubagentWake(this.subagentManager);
+    }
     this.autoMemory = this.autoMemory ?? built.autoMemory;
     this.overlayMemoryPrefetch =
       this.overlayMemoryPrefetch ?? built.overlayMemoryPrefetch;
@@ -2578,8 +2684,7 @@ export class SessionHub {
     const autoMemory =
       workspaceRoot === undefined
         ? this.autoMemory
-        : (this.engineByRoot.get(workspaceRoot)?.autoMemory ??
-          this.autoMemory);
+        : (this.engineByRoot.get(workspaceRoot)?.autoMemory ?? this.autoMemory);
     const sessionKey =
       this.surface === "serve"
         ? conversationId

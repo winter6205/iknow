@@ -33,6 +33,7 @@ import type {
   SubAgentManager,
   SubagentInfo,
 } from "../harness/subagent/manager.js";
+import type { SubAgentTerminalNotice } from "../harness/subagent/mailbox.js";
 import type {
   AutoMemoryHook,
   OverlayPrefetchFn,
@@ -125,6 +126,14 @@ export interface TuiBridge {
     readonly thinking?: WireThinkingOverride;
     readonly onStream?: (event: HarnessStreamEvent) => void;
   }) => Promise<TuiPostResult>;
+  /** T4: host wake subscription; absent manager is a no-op (ask-safe). */
+  readonly subscribeSubagentTerminal: (
+    subscriber: (notice: SubAgentTerminalNotice) => void
+  ) => () => void;
+  /** T4: run a silent turn with the pending terminal drain. */
+  readonly wakeFromSubagent: (
+    conversationId: string
+  ) => Promise<TuiPostResult | undefined>;
   readonly listSessions: () => ReturnType<SessionHub["listSessions"]>;
   readonly loadSessionFile: (conversationId: string) => Promise<SessionFileV1>;
   /** 手动压缩会话（/compact）。返回 `{ compacted, cancelled? }`,`compacted`
@@ -308,6 +317,17 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
           ...(thinking !== undefined ? { thinking } : {}),
         });
         return toPostResult(resp);
+      } finally {
+        opts.inflight.unmark(conversationId);
+      }
+    },
+    subscribeSubagentTerminal:
+      opts.subagentManager?.subscribe ?? (() => () => {}),
+    wakeFromSubagent: async (conversationId) => {
+      opts.inflight.mark(conversationId);
+      try {
+        const resp = await hub.wakeFromSubagent({ conversationId });
+        return resp === undefined ? undefined : toPostResult(resp);
       } finally {
         opts.inflight.unmark(conversationId);
       }
