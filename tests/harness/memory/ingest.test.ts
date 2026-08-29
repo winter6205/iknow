@@ -1,10 +1,11 @@
 /**
  * auto-memory T3: ingest.ts tests (extract → ops → persist).
  *
- * Spec: specs/auto-memory.md D2/D4; ADR-0031 Decision 2/3/5. The four ops
- * (ADD / UPDATE / SUPERSEDE / NOOP) must be observable from a transcript
- * slice plus a fake LLM; persisted entries carry `source: auto`; negative-form
- * and low-confidence candidates never reach disk.
+ * Spec: specs/auto-memory.md D2/D4; ADR-0031 Decision 2/3/5. The extraction
+ * ops (ADD / UPDATE / NOOP) must be observable from a transcript slice plus
+ * a fake LLM — SUPERSEDE is dream-path only, but its persist support stays
+ * observable via a hand-built op. Persisted entries carry `source: auto`;
+ * negative-form and low-confidence candidates never reach disk.
  *
  * Five boundary classes (ACR defensive-contract-validator):
  *   empty      — no candidates / empty transcript → nothing written
@@ -611,7 +612,7 @@ describe("decideMemoryOps", () => {
     assert.equal(ops[0]!.kind === "UPDATE" ? ops[0]!.slug : "", "old");
   });
 
-  it("SUPERSEDEs when the same subject carries a materially different body", () => {
+  it("UPDATEs when the same subject carries a materially different body", () => {
     const ops = decideMemoryOps(
       [
         candidate({
@@ -620,8 +621,44 @@ describe("decideMemoryOps", () => {
       ],
       [{ slug: "old", entry: entry() }]
     );
-    assert.equal(ops[0]!.kind, "SUPERSEDE");
-    assert.equal(ops[0]!.kind === "SUPERSEDE" ? ops[0]!.supersedes : "", "old");
+    assert.equal(ops[0]!.kind, "UPDATE");
+    assert.equal(ops[0]!.kind === "UPDATE" ? ops[0]!.slug : "", "old");
+  });
+
+  // SC1 (specs/auto-memory-layering.md): extraction never supersedes. A
+  // low word-overlap body on a same-subject neighbor is a different aspect,
+  // not a contradiction — it must land as ADD or UPDATE, never SUPERSEDE.
+  it("never SUPERSEDEs — a low-overlap body on the same subject lands as ADD or UPDATE", () => {
+    const ops = decideMemoryOps(
+      [
+        candidate({
+          body: "bar() accepts an optional timeout parameter for deadline enforcement.",
+        }),
+      ],
+      [{ slug: "old", entry: entry() }]
+    );
+    const kind = ops[0]!.kind;
+    assert.ok(
+      kind === "ADD" || kind === "UPDATE",
+      `expected ADD or UPDATE, got ${kind}`
+    );
+  });
+
+  it("carries the neighbor's ttl_days into an UPDATE op", () => {
+    const ops = decideMemoryOps(
+      [
+        candidate({
+          body: "bar() is the thread-safe entry point in this repo, and it retries once on contention.",
+        }),
+      ],
+      [{ slug: "old", entry: entry({ ttl_days: 30 }) }]
+    );
+    assert.ok(ops[0]!.kind === "UPDATE");
+    assert.equal(
+      ops[0]!.kind === "UPDATE" ? ops[0]!.ttlDays : -1,
+      30,
+      "UPDATE must preserve the stored entry's ttl_days"
+    );
   });
 
   it("ignores disabled entries when picking a neighbor", () => {
@@ -722,6 +759,41 @@ describe("persistMemoryOps", () => {
       old.disabled,
       false,
       "persist soft-disables nothing; GC owns that"
+    );
+  });
+
+  it("preserves the neighbor's ttl_days on UPDATE while ADD keeps the deps ttl", async () => {
+    await put("old", { ttl_days: 30 });
+    // Decide against the store so the UPDATE op carries the stored ttl_days.
+    const ops = decideMemoryOps(
+      [
+        candidate({
+          body: "bar() is the thread-safe entry point in this repo, and it retries once on contention.",
+        }),
+      ],
+      [{ slug: "old", entry: entry({ ttl_days: 30 }) }]
+    );
+    const written = await persistMemoryOps(memoryDir, ops, {
+      now: () => NOW_ISO,
+      randomBytes: seqBytes(),
+      ttlDays: 7,
+    });
+    assert.equal(written[0]!.kind, "UPDATE");
+    assert.equal(
+      (await readSlug("old")).ttl_days,
+      30,
+      "UPDATE must not clobber the neighbor's ttl_days with the deps ttl"
+    );
+
+    const added = await persistMemoryOps(
+      memoryDir,
+      [{ kind: "ADD", candidate: candidate({ title: "Release cadence", body: "Releases ship every Tuesday." }) }],
+      { now: () => NOW_ISO, randomBytes: () => Buffer.from("aabbccddeeff", "hex"), ttlDays: 7 }
+    );
+    assert.equal(
+      (await readSlug(added[0]!.slug)).ttl_days,
+      7,
+      "non-UPDATE ops keep the deps ttl behavior"
     );
   });
 
@@ -921,7 +993,7 @@ describe("ingestMemory", () => {
     assert.deepEqual(await slugsOnDisk(), ["old"]);
   });
 
-  it("soft-disables the superseded entry by running GC after the write", async () => {
+  it("keeps the old entry live by UPDATEing in place and still runs GC after the write", async () => {
     await put("old");
     const llm = llmReturning(
       JSON.stringify([
@@ -942,9 +1014,20 @@ describe("ingestMemory", () => {
     });
     assert.deepEqual(
       result.ops.map((o) => o.kind),
-      ["SUPERSEDE"]
+      ["UPDATE"],
+      "extraction never supersedes"
     );
-    assert.equal((await readSlug("old")).disabled, true);
+    assert.deepEqual(
+      await slugsOnDisk(),
+      ["old"],
+      "UPDATE must not fork a new slug"
+    );
+    assert.equal(
+      (await readSlug("old")).disabled,
+      false,
+      "the old entry stays live — no SUPERSEDE happens on extraction"
+    );
+    assert.ok(result.gc !== undefined, "GC still runs after the write");
   });
 
   // empty boundary

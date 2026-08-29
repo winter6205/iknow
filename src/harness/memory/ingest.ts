@@ -6,11 +6,11 @@
  * Three independent stages, deliberately not fused:
  *
  *   extractMemoryCandidates  LLM half — the only stage that needs a model.
- *   decideMemoryOps          pure half — BM25 neighbor + the four-state table.
+ *   decideMemoryOps          pure half — BM25 neighbor + the decision table.
  *   persistMemoryOps         IO half  — the `memory_save` atomic write path.
  *
- * Keeping them apart is what makes the four ops testable with a fake LLM and
- * the four-state table testable with no model at all. The extraction prompt
+ * Keeping them apart is what makes the ops testable with a fake LLM and
+ * the decision table testable with no model at all. The extraction prompt
  * lives here and nowhere else — the loop engine owns turn mechanics, not
  * memory semantics (ADR-0031 "why not alternatives").
  *
@@ -49,9 +49,9 @@ const MIN_IMPORTANCE = 1;
 const MAX_IMPORTANCE = 5;
 
 /**
- * Decision floors for the four-state table. Static heuristics with no tuning
- * evidence yet (ADR-0031 consequences) — they live together so a future
- * calibration ticket has one place to touch.
+ * Decision floors for the extraction decision table. Static heuristics with
+ * no tuning evidence yet (ADR-0031 consequences) — they live together so a
+ * future calibration ticket has one place to touch.
  */
 /** Fraction of the candidate's title tokens the neighbor must also carry. */
 const SAME_SUBJECT_FLOOR = 0.6;
@@ -59,8 +59,6 @@ const SAME_SUBJECT_FLOOR = 0.6;
 const NEAR_DUPLICATE_FLOOR = 0.5;
 /** At or above this the candidate says nothing the neighbor does not. */
 const RESTATEMENT_FLOOR = 0.9;
-/** Below this the bodies disagree enough to count as a replacement. */
-const CONTRADICTION_FLOOR = 0.34;
 
 /**
  * Minimal LLM seam. The memory context deliberately does not depend on
@@ -81,13 +79,16 @@ export interface MemoryCandidate {
 
 export type MemoryOpKind = "ADD" | "UPDATE" | "SUPERSEDE" | "NOOP";
 
-/** The four-state write decision (ADR-0031 Decision 2). */
+/** The write decision (ADR-0031 Decision 2). Extraction emits ADD/UPDATE/NOOP;
+ * SUPERSEDE stays a valid kind for the dream merge path. */
 export type MemoryOp =
   | { readonly kind: "ADD"; readonly candidate: MemoryCandidate }
   | {
       readonly kind: "UPDATE";
       readonly slug: string;
       readonly candidate: MemoryCandidate;
+      /** The stored entry's ttl_days, carried over so UPDATE cannot clobber it. */
+      readonly ttlDays?: number;
     }
   | {
       readonly kind: "SUPERSEDE";
@@ -129,7 +130,7 @@ export interface MemoryIngestOptions extends MemoryPersistDeps {
   readonly nowMs?: number;
   /** Active-entry ceiling handed to GC. */
   readonly cap?: number;
-  /** Run mechanical GC after persisting. Default true — SUPERSEDE relies on it. */
+  /** Run mechanical GC after persisting. Default true. */
   readonly gc?: boolean;
 }
 
@@ -293,12 +294,15 @@ function layerChunks(staticLayer: string): ReadonlyArray<ReadonlySet<string>> {
 // -- stage 2: decide ---------------------------------------------------------
 
 /**
- * Map candidates onto the four-state table against the live store. Pure: no
- * IO, no clock read, no model.
+ * Map candidates onto the extraction decision table against the live store.
+ * Pure: no IO, no clock read, no model.
  *
  * The nearest neighbor comes from the existing BM25-lite ranking; the verdict
  * then comes from bounded token-containment ratios, because BM25 scores are
  * unbounded and cannot carry a stable threshold.
+ *
+ * Extraction is conservative by design: ADD / UPDATE / NOOP only. SUPERSEDE
+ * is never produced here — replacement of an entry is the dream path's job.
  */
 export function decideMemoryOps(
   candidates: ReadonlyArray<MemoryCandidate>,
@@ -335,14 +339,12 @@ function decideOne(
       reason: "restates a stored entry",
     };
   }
-  const agreement = containment(
-    tokens(candidate.body),
-    tokens(neighbor.entry.body)
-  );
-  if (agreement < CONTRADICTION_FLOOR) {
-    return { kind: "SUPERSEDE", supersedes: neighbor.slug, candidate };
-  }
-  return { kind: "UPDATE", slug: neighbor.slug, candidate };
+  return {
+    kind: "UPDATE",
+    slug: neighbor.slug,
+    candidate,
+    ttlDays: neighbor.entry.ttl_days,
+  };
 }
 
 /** Highest BM25-lite hit, or null when the store has no live entry. */
@@ -402,11 +404,14 @@ export async function persistMemoryOps(
   for (const op of ops) {
     if (op.kind === "NOOP") continue;
     const slug = op.kind === "UPDATE" ? op.slug : random(6).toString("hex");
+    // UPDATE preserves the neighbor's stored ttl_days (the candidate carries
+    // no TTL of its own); a hand-built UPDATE without one falls back to deps.
+    const opTtlDays = op.kind === "UPDATE" ? (op.ttlDays ?? ttlDays) : ttlDays;
     const entry = buildEntry({
       slug,
       candidate: op.candidate,
       updatedAt: now(),
-      ttlDays,
+      ttlDays: opTtlDays,
       source: deps?.source ?? AUTO_MEMORY_SOURCE,
       supersedes: op.kind === "SUPERSEDE" ? op.supersedes : null,
     });
@@ -446,7 +451,7 @@ function buildEntry(input: {
 
 /**
  * One ingest pass: read the store, extract, decide, persist, then run
- * mechanical GC so a SUPERSEDE's target is actually soft-disabled.
+ * mechanical GC so ttl evictions and the active-entry cap are applied.
  *
  * Errors are typed and propagate: the caller — the host wire, ADR-0031
  * Decision 5 — is the layer that decides to swallow them, not this one.
