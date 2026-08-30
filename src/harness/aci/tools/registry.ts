@@ -307,8 +307,22 @@ export function createDefaultAciRegistry(
     edit_file: () => createEditFileTool(sandboxRoot, { onEdit }),
     write_file: () => createWriteFileTool(sandboxRoot),
     web_fetch: () => createWebFetchTool({ proxyUrl }),
+    // #826 T4: 把 searchBackend + 三个 vendor key 透传给 web_search。
+    // env loader 已把 EXA_API_KEY / TAVILY_API_KEY / BRAVE_API_KEY 经
+    // expandPlaceholders 解析（空 / "yes" / 占位符解析失败 → undefined）；
+    // T3 handler 的 assertBackendConfig 据此三态 fail-closed（missing_key /
+    // backend_unset_with_key / 默认 bing）—— 本层只透传，不二次校验。
+    // searchBackend 在 schema reject 非法值后落到闭集（loader 抛 typed error
+    // 时 buildHarnessEngine 装配即失败，不会到这里），故透传即可。
     web_search: () =>
-      createWebSearchTool({ envSearchUrl: searchUrl, proxyUrl }),
+      createWebSearchTool({
+        envSearchUrl: searchUrl,
+        proxyUrl,
+        backend: env.web.searchBackend,
+        exaApiKey: env.web.exaApiKey,
+        tavilyApiKey: env.web.tavilyApiKey,
+        braveApiKey: env.web.braveApiKey,
+      }),
     ...(memoryDir
       ? {
           memory_recall: () => createMemoryRecallTool({ memoryDir }),
