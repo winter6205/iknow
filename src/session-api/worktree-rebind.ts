@@ -42,7 +42,10 @@ import {
   WorktreeIsolationError,
   defaultGitRunner,
 } from "../harness/isolation/worktree-gate.js";
-import type { GitRunner } from "../harness/isolation/worktree-gate.js";
+import type {
+  GitRunner,
+  WorktreeProvisionContext,
+} from "../harness/isolation/worktree-gate.js";
 import { errorMessage } from "../harness/errors.js";
 import type { SessionFileV1 } from "./store/index.js";
 
@@ -78,10 +81,7 @@ export interface TaskWorktreeProvisioner {
    * linked worktree, it rejects with a typed `foreign_worktree`
    * (fail-closed; ADR-0037 defines only the main repo and the own task tree).
    */
-  provision(ctx: {
-    readonly conversationId?: string;
-    readonly root: string;
-  }): Promise<string>;
+  provision(ctx: WorktreeProvisionContext): Promise<string>;
   /**
    * True when `root` is a task worktree this provisioner created (or
    * recognized as a conversation's own tree — T4 passthrough registration).
@@ -154,10 +154,7 @@ export function createTaskWorktreeProvisioner(
   /** All task worktree roots created here (per-root engine flag source). */
   const taskRoots = new Set<string>();
 
-  async function provision(ctx: {
-    conversationId?: string;
-    root: string;
-  }): Promise<string> {
+  async function provision(ctx: WorktreeProvisionContext): Promise<string> {
     const conversationId = ctx.conversationId;
     if (conversationId === undefined || conversationId.length === 0) {
       throw new WorktreeIsolationError(

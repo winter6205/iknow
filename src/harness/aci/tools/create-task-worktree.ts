@@ -34,24 +34,19 @@
  */
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
-import { ToolExecutionError } from "../../errors.js";
-import { errorMessage } from "../../errors.js";
-import type { WorktreeProvisionContext } from "../../isolation/worktree-gate.js";
+import { ToolExecutionError, errorMessage } from "../../errors.js";
+import type { WorktreeProvisionFn } from "../../isolation/worktree-gate.js";
 import { WorktreeIsolationError } from "../../isolation/worktree-gate.js";
 
 /**
- * Host provision seam shape (structurally identical to the hub's
- * `provisionWorktree` / the gate's `WorktreeIsolationHostOpts.provision`).
- * Resolves with the rebound session root (the task worktree path); rejects
- * with typed `WorktreeIsolationError`.
+ * Back-compat alias for the gate's `WorktreeProvisionFn` SSOT (registry.ts
+ * imports this name); the definition lives in worktree-gate.ts only.
  */
-export type CreateTaskWorktreeProvisionFn = (
-  ctx: WorktreeProvisionContext
-) => Promise<string>;
+export type { WorktreeProvisionFn as CreateTaskWorktreeProvisionFn };
 
 export interface CreateTaskWorktreeToolDeps {
   /** Host provision seam (session-api hub, threaded through build-engine). */
-  readonly provision: CreateTaskWorktreeProvisionFn;
+  readonly provision: WorktreeProvisionFn;
   /** This engine's root — the session's current root at assembly time. */
   readonly root: string;
 }

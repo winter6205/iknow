@@ -31,6 +31,7 @@ import { createNoopTraceService } from "../../src/harness/trace/noop.ts";
 import type { WorkerEnvelope } from "../../src/harness/subagent/envelope.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 import { assistantResult } from "../cli/_fixtures.ts";
+import { captureStderrOf } from "../_helpers/capture-stderr.ts";
 
 const TEST_ENV: IknowEnv = {
   llm: {
@@ -91,23 +92,8 @@ async function spawnOnce(opts: {
 
 // -- stderr 捕获 ---------------------------------------------------------------
 
-async function captureStderr(fn: () => Promise<void>): Promise<string> {
-  const original = process.stderr.write.bind(process.stderr);
-  const chunks: string[] = [];
-  (process.stderr as unknown as { write: typeof original }).write = ((
-    chunk: string | Uint8Array,
-    ...rest: unknown[]
-  ) => {
-    chunks.push(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
-    return original(chunk as never, ...(rest as never[]));
-  }) as typeof original;
-  try {
-    await fn();
-  } finally {
-    (process.stderr as unknown as { write: typeof original }).write = original;
-  }
-  return chunks.join("");
-}
+// Shared helper (tests/_helpers/capture-stderr.ts); passthrough=true keeps
+// this file's original semantics: record AND forward to the real stderr.
 
 // -- 验收 ----------------------------------------------------------------------
 
@@ -115,7 +101,7 @@ describe("#837 T2: missing rules dirs are empty, not fatal", () => {
   it("user + project rules dirs both missing → general-purpose spawn completes with ok envelope, stderr clean", async () => {
     const userHome = await tmpDir("t2-home-missing-");
     const cwd = await tmpDir("t2-cwd-missing-");
-    const stderr = await captureStderr(() => spawnOnce({ userHome, cwd }));
+    const stderr = await captureStderrOf(() => spawnOnce({ userHome, cwd }), { passthrough: true });
     assert.equal(stderr.includes("[subagent-worker] fatal"), false);
     assert.equal(stderr.includes("scandir"), false);
     assert.equal(stderr.includes("ENOENT"), false);
@@ -126,7 +112,7 @@ describe("#837 T2: missing rules dirs are empty, not fatal", () => {
     const cwd = await tmpDir("t2-cwd-bare-");
     await mkdir(join(userHome, ".iknow"), { recursive: true });
     await mkdir(join(cwd, ".iknow"), { recursive: true });
-    const stderr = await captureStderr(() => spawnOnce({ userHome, cwd }));
+    const stderr = await captureStderrOf(() => spawnOnce({ userHome, cwd }), { passthrough: true });
     assert.equal(stderr.includes("[subagent-worker] fatal"), false);
     assert.equal(stderr.includes("scandir"), false);
     assert.equal(stderr.includes("ENOENT"), false);

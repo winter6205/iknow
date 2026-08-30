@@ -284,6 +284,14 @@ export interface WorktreeProvisionContext {
 }
 
 /**
+ * Host provision seam shape (SSOT): resolves with the rebound session root
+ * (the task worktree path); rejects with typed `WorktreeIsolationError`.
+ * Shared by the gate's host opts, the `create-task-worktree` ACI tool deps,
+ * and the session-api provisioner — no per-module structural copies.
+ */
+export type WorktreeProvisionFn = (ctx: WorktreeProvisionContext) => Promise<string>;
+
+/**
  * Host-facing options the assembly (build-engine) threads through: the
  * switch itself is read once at the startup load point
  * (`resolveWorktreeOnMutate(settings)`), the host supplies only the provision
@@ -292,7 +300,7 @@ export interface WorktreeProvisionContext {
  * an engine "bound" when several conversations can share a root.
  */
 export interface WorktreeIsolationHostOpts {
-  readonly provision: (ctx: WorktreeProvisionContext) => Promise<string>;
+  readonly provision: WorktreeProvisionFn;
 }
 
 export interface WorktreeIsolationGateOpts {
@@ -312,7 +320,7 @@ export interface WorktreeIsolationGateOpts {
    * idempotent per conversation — the gate coalesces concurrent callers onto
    * one invocation.
    */
-  readonly provision: (ctx: WorktreeProvisionContext) => Promise<string>;
+  readonly provision: WorktreeProvisionFn;
   /**
    * Engine built on a root that already is a task worktree (rebound engine).
    * Harness-level prior for embeddings that serve EXACTLY the conversation
