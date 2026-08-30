@@ -56,6 +56,10 @@ import {
   createEnterTaskWorktreeTool,
   type WorktreeEnterToolDeps,
 } from "./enter-task-worktree.js";
+import {
+  createExitTaskWorktreeTool,
+  type WorktreeExitToolDeps,
+} from "./exit-task-worktree.js";
 import { join } from "node:path";
 
 /**
@@ -160,6 +164,12 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   // toolsetNames 端镜像过滤，见工厂尾部注释）。工具只收 owner conversationId，
   // 目标路径由 SSOT `taskWorktreePath` 派生，不收自由路径。
   "enter-task-worktree",
+  // T8 (plans/worktree-isolation-model-provision.md) exit-task-worktree
+  // append-only：34→35。条件化装配（worktreeExit host 缝缺席时不入注册表
+  // —— TUI 只接 provision / worker 装配路径 / 无 hub 的入口；Gate 3 在
+  // toolsetNames 端镜像过滤，见工厂尾部注释）。工具无参数；主仓根由 host
+  // 从树本身派生（git common dir），树保留不删。
+  "exit-task-worktree",
 ] as const);
 
 /**
@@ -245,6 +255,13 @@ export interface CreateDefaultAciRegistryOptions {
    * the Gate 3 mirror filter.
    */
   readonly worktreeEnter?: WorktreeEnterToolDeps["worktreeEnter"];
+  /**
+   * T8 / ADR-0037 (amended 2026-08-30): symmetric-exit host seam. Present →
+   * the `exit-task-worktree` ACI tool enters the registry; absent (TUI
+   * provision-only wiring, worker assembly, hub-less inlets) → excluded via
+   * the Gate 3 mirror filter.
+   */
+  readonly worktreeExit?: WorktreeExitToolDeps["worktreeExit"];
 }
 
 /**
@@ -325,6 +342,9 @@ export function createDefaultAciRegistry(
   // 在 isolation ON 且 host 注入 enter 缝时透传；TUI（只接 provision）/
   // worker / hub-less 入口不传 → 工具不入注册表。Gate 3 镜像过滤见下。
   const worktreeEnter = opts.worktreeEnter;
+  // T8:exit-task-worktree 的条件化装配开关（host exit 缝）。同 worktreeEnter
+  // 形态：TUI（只接 provision）/ worker / hub-less 入口不传 → 不入注册表。
+  const worktreeExit = opts.worktreeExit;
 
   // holder:tool_search 自引用的惰性解引用点(装配完成前闭包返回 undefined,
   // tool-search.ts:resolveRegistry 触发 ToolExecutionError 兜底)。
@@ -486,6 +506,18 @@ export function createDefaultAciRegistry(
             }),
         }
       : {}),
+    // T8 exit-task-worktree（条件化装配：worktreeExit host 缝缺席时不入
+    // 注册表）。handler 闭包绑定本引擎的 sandboxRoot = 会话当前 task 树；
+    // 回绑主仓根 + 树保留的副作用全部委托 host exit 缝。
+    ...(worktreeExit
+      ? {
+          "exit-task-worktree": () =>
+            createExitTaskWorktreeTool({
+              worktreeExit,
+              root: sandboxRoot,
+            }),
+        }
+      : {}),
   };
 
   // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。
@@ -509,6 +541,7 @@ export function createDefaultAciRegistry(
     // enter 工具不入注册表。
     ...(worktreeProvision ? [] : ["create-task-worktree"]),
     ...(worktreeEnter ? [] : ["enter-task-worktree"]),
+    ...(worktreeExit ? [] : ["exit-task-worktree"]),
     ...(disallowedTools ?? []),
   ];
   const toolsetNames = (ACI_TOOLSET_NAMES as ReadonlyArray<string>).filter(

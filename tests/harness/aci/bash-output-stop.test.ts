@@ -185,9 +185,11 @@ function fullAssemblyOpts() {
     // D-α T3:graph overlay 在场 → run_graph 入注册表。
     graphAssembly: { enabled: () => true },
     // T4:worktreeProvision 在场 → create-task-worktree 入注册表。
-    // T7:worktreeEnter 在场 → enter-task-worktree 入注册表（全量 34 件）。
+    // T7/T8:worktreeEnter / worktreeExit 在场 → enter/exit 工具入注册表
+    // （全量 35 件）。
     worktreeProvision: async () => "/tmp/root/.iknow/worktrees/conv",
     worktreeEnter: async () => "/tmp/root/.iknow/worktrees/conv-target",
+    worktreeExit: async () => "/tmp/repo-root",
   };
 }
 
@@ -425,10 +427,10 @@ describe("bash_output 真实物理截断（real manager）", () => {
 // ── 5. 装配一致性（registry + Gate 3 镜像过滤）───────────────────────────────
 
 describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
-  it("全条件装配（含 backgroundManager + graph overlay + worktreeProvision + worktreeEnter）→ 34 件，顺序 = ACI_TOOLSET_NAMES", () => {
+  it("全条件装配（含 backgroundManager + graph overlay + worktree 三缝）→ 35 件，顺序 = ACI_TOOLSET_NAMES", () => {
     const reg = createDefaultAciRegistry(fullAssemblyOpts());
     const names = reg.inner.list().map((d) => d.name);
-    assert.equal(names.length, 34);
+    assert.equal(names.length, 35);
     assert.deepEqual(names, [...ACI_TOOLSET_NAMES]);
     assert.ok(reg.catalog.get("bash_output"));
     assert.ok(reg.catalog.get("bash_stop"));

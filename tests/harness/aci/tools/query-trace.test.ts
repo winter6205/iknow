@@ -254,10 +254,11 @@ describe("query_trace ACI tool", () => {
 
   it("registers query_trace as the append-only SSOT member", () => {
     // T4: create-task-worktree append-only 追加在 query_trace 之后；
-    // T7: enter-task-worktree 再追加在 create-task-worktree 之后。
-    assert.equal(ACI_TOOLSET_NAMES.at(-3), "query_trace");
-    assert.equal(ACI_TOOLSET_NAMES.at(-2), "create-task-worktree");
-    assert.equal(ACI_TOOLSET_NAMES.at(-1), "enter-task-worktree");
+    // T7/T8: enter-task-worktree / exit-task-worktree 依次追加。
+    assert.equal(ACI_TOOLSET_NAMES.at(-4), "query_trace");
+    assert.equal(ACI_TOOLSET_NAMES.at(-3), "create-task-worktree");
+    assert.equal(ACI_TOOLSET_NAMES.at(-2), "enter-task-worktree");
+    assert.equal(ACI_TOOLSET_NAMES.at(-1), "exit-task-worktree");
     const registry = createDefaultAciRegistry({
       env: { web: { searchUrl: undefined, proxy: undefined } },
       sandboxRoot: makeTraceDir(),

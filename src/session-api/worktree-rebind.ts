@@ -33,7 +33,7 @@
  * belonging to another conversation or an unrelated linked worktree fails
  * closed with `foreign_worktree`.
  */
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { existsSync, statSync } from "node:fs";
 
 import {
@@ -109,6 +109,21 @@ export interface TaskWorktreeProvisioner {
    */
   enter(req: WorktreeEnterRequest): Promise<string>;
   /**
+   * T8 symmetric exit: return the conversation to its MAIN repo root. No
+   * tree is deleted (orphan cleanup is an explicit plan non-goal) and no
+   * foreign HEAD is touched — the only effect is the caller's own rebind
+   * back (store-mode persists workspaceRoot; hub-mode returns the root for
+   * the dirty-root conditional-save protocol).
+   *
+   * The main repo root is derived from the tree itself
+   * (`git rev-parse --path-format=absolute --git-common-dir` of the tree,
+   * then up one level) — restart-safe, no recorded state. Rebound detection:
+   * in-process bound entry, the durable workspaceRoot anchor
+   * (`sessionWorkspaceRoot`), or a task-worktree-shaped current root;
+   * anything else fails closed with typed `rebind_failed`.
+   */
+  exit(req: WorktreeExitRequest): Promise<string>;
+  /**
    * True when `root` is a task worktree this provisioner created (or
    * recognized as a conversation's own tree — T4 passthrough registration).
    * Ownership-AGNOSTIC introspection: it does NOT answer "is this root
@@ -135,6 +150,19 @@ export interface WorktreeEnterRequest {
   readonly root: string;
   /** Owner conversation id whose task worktree to enter. */
   readonly targetConversationId: string;
+}
+
+/** T8 exit request (mirrors the harness `WorktreeExitContext` SSOT + anchor). */
+export interface WorktreeExitRequest {
+  /** Calling conversation (the session that leaves the task worktree). */
+  readonly conversationId?: string;
+  /** The caller's current engine root (the task worktree being exited). */
+  readonly currentRoot: string;
+  /**
+   * The caller's persisted workspaceRoot (loaded by the hub) — the durable
+   * rebind record that identifies a rebound session across restarts.
+   */
+  readonly sessionWorkspaceRoot?: string;
 }
 
 export function taskWorktreePath(repoRoot: string, conversationId: string): string {
@@ -210,7 +238,7 @@ export function createTaskWorktreeProvisioner(
    */
   async function gitCommonDir(
     cwd: string,
-    failureKind: "not_a_git_repo" | "foreign_worktree"
+    failureKind: "not_a_git_repo" | "foreign_worktree" | "rebind_failed"
   ): Promise<string> {
     let res: GitResult;
     try {
@@ -456,9 +484,88 @@ export function createTaskWorktreeProvisioner(
     return target;
   }
 
+  async function exit(req: WorktreeExitRequest): Promise<string> {
+    const conversationId = req.conversationId;
+    if (conversationId === undefined || conversationId.length === 0) {
+      throw new WorktreeIsolationError(
+        "rebind_failed",
+        "worktree isolation: the exit call carried no conversation id; cannot rebind a session root without one"
+      );
+    }
+    if (!SAFE_CONVERSATION_ID_RE.test(conversationId)) {
+      throw new WorktreeIsolationError(
+        "rebind_failed",
+        `worktree isolation: conversation id ${JSON.stringify(conversationId)} is not a safe path/branch segment (expected ^[A-Za-z0-9][A-Za-z0-9_-]*$); refusing to rebind with it`
+      );
+    }
+
+    // Rebound detection (fail-closed): a session that never rebound has no
+    // in-process entry, no durable anchor, and no shaped engine root.
+    const boundRoot = bound.get(conversationId);
+    const shapedCurrent =
+      taskWorktreeOwnerOf(req.currentRoot) !== undefined
+        ? req.currentRoot
+        : undefined;
+    const shapedAnchor =
+      req.sessionWorkspaceRoot !== undefined &&
+      taskWorktreeOwnerOf(req.sessionWorkspaceRoot) !== undefined
+        ? req.sessionWorkspaceRoot
+        : undefined;
+    if (boundRoot === undefined && shapedCurrent === undefined && shapedAnchor === undefined) {
+      throw new WorktreeIsolationError(
+        "rebind_failed",
+        `worktree isolation: session ${conversationId} is not currently rebound to a task worktree; there is nothing to exit`
+      );
+    }
+    const tree = shapedCurrent ?? boundRoot ?? shapedAnchor!;
+    if (tree === undefined) {
+      throw new WorktreeIsolationError(
+        "rebind_failed",
+        `worktree isolation: session ${conversationId} has no task worktree to exit`
+      );
+    }
+
+    // Main repo root SSOT: the git common dir of the tree is
+    // `<repoRoot>/.git` (worktree-safe, restart-safe) — one level up is the
+    // main repo checkout. No recorded origin state, no orphan deletion.
+    const commonDir = await gitCommonDir(tree, "rebind_failed");
+    const repoRoot = dirname(commonDir);
+
+    bound.delete(conversationId);
+
+    // Legacy standalone persistence hook (mirrors `provision` / `enter`).
+    if (opts.store !== undefined) {
+      let file: SessionFileV1;
+      try {
+        file = await opts.store.load(conversationId);
+      } catch (err) {
+        throw new WorktreeIsolationError(
+          "rebind_failed",
+          `worktree isolation: cannot load session ${conversationId} for exit rebind: ${errorMessage(err)}`
+        );
+      }
+      const updated: SessionFileV1 = {
+        ...file,
+        workspaceRoot: repoRoot,
+        updatedAt: now(),
+      };
+      try {
+        await opts.store.save({ id: conversationId, file: updated });
+      } catch (err) {
+        throw new WorktreeIsolationError(
+          "rebind_failed",
+          `worktree isolation: cannot persist exit rebind for session ${conversationId}: ${errorMessage(err)}`
+        );
+      }
+    }
+
+    return repoRoot;
+  }
+
   return Object.freeze({
     provision,
     enter,
+    exit,
     isTaskWorktreeRoot: (root: string) => taskRoots.has(root),
   });
 }

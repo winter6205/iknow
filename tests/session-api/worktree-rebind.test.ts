@@ -587,3 +587,104 @@ describe("T7 — provision adoption via the persistent workspaceRoot anchor", ()
     });
   });
 });
+
+// -- T8: exit-task-worktree host seam ------------------------------------------
+
+/**
+ * T8 (plans/worktree-isolation-model-provision.md) — symmetric exit: a
+ * session currently rebound to a task worktree returns to the MAIN repo
+ * root. No input, no deletion: the tree is preserved (orphan cleanup is an
+ * explicit non-goal of the plan). The main repo root is derived from the
+ * tree itself (`git rev-parse --path-format=absolute --git-common-dir`) —
+ * restart-safe, no recorded state. Rebound detection = in-process bound
+ * entry OR the durable workspaceRoot anchor OR a task-worktree-shaped
+ * current root; anything else fails closed with typed rebind_failed.
+ */
+describe("T8 — exit: return to the main repo root, tree preserved", () => {
+  it("exits after enter: returns the repo root, rebinds ONLY the caller's session, preserves the tree and its branch", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, ["conv-a", "conv-b"]);
+    const prov = createTaskWorktreeProvisioner({ store });
+    const wtA = await prov.provision({ conversationId: "conv-a", root: repo });
+    await prov.enter({
+      conversationId: "conv-b",
+      root: repo,
+      targetConversationId: "conv-a",
+    });
+    const before = git(repo, "worktree", "list");
+
+    const repoRoot = await prov.exit({
+      conversationId: "conv-b",
+      currentRoot: wtA,
+      sessionWorkspaceRoot: wtA,
+    });
+
+    expect(repoRoot).toBe(repo);
+    // tree preserved: same worktree registration, branch still checked out
+    expect(git(repo, "worktree", "list")).toBe(before);
+    expect(git(wtA, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe(
+      "iknow/task-conv-a"
+    );
+    // only the caller's session moved back; conv-a stays on its own tree
+    expect((await store.load("conv-b")).workspaceRoot).toBe(repo);
+    expect((await store.load("conv-a")).workspaceRoot).toBe(wtA);
+  });
+
+  it("exit is restart-safe: a fresh provisioner with no recorded state derives the repo root from the tree (durable anchor)", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, ["conv-a", "conv-b"]);
+    const prov0 = createTaskWorktreeProvisioner({ store });
+    const wtA = await prov0.provision({ conversationId: "conv-a", root: repo });
+    await prov0.enter({
+      conversationId: "conv-b",
+      root: repo,
+      targetConversationId: "conv-a",
+    });
+
+    // fresh provisioner = server restart; the durable anchor + shaped engine
+    // root identify the rebound session
+    const prov = createTaskWorktreeProvisioner({ store });
+    const repoRoot = await prov.exit({
+      conversationId: "conv-b",
+      currentRoot: wtA,
+      sessionWorkspaceRoot: wtA,
+    });
+    expect(repoRoot).toBe(repo);
+    expect((await store.load("conv-b")).workspaceRoot).toBe(repo);
+  });
+
+  it("not currently rebound (no bound entry, anchor and current root not tree-shaped) → typed rebind_failed, session untouched", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, ["conv-b"]);
+    const prov = createTaskWorktreeProvisioner({ store });
+
+    await expect(
+      prov.exit({
+        conversationId: "conv-b",
+        currentRoot: repo,
+        sessionWorkspaceRoot: repo,
+      })
+    ).rejects.toMatchObject({
+      name: "WorktreeIsolationError",
+      kind: "rebind_failed",
+    });
+    expect((await store.load("conv-b")).workspaceRoot).toBe(repo);
+  });
+
+  it("unsafe conversation id → typed rebind_failed before any fs/git access", async () => {
+    let fsOrGitTouched = false;
+    const prov = createTaskWorktreeProvisioner({
+      runGit: async () => {
+        fsOrGitTouched = true;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await expect(
+      prov.exit({ conversationId: "../evil", currentRoot: "/repo" })
+    ).rejects.toMatchObject({ kind: "rebind_failed" });
+    await expect(
+      prov.exit({ conversationId: "", currentRoot: "/repo" })
+    ).rejects.toMatchObject({ kind: "rebind_failed" });
+    expect(fsOrGitTouched).toBe(false);
+  });
+});

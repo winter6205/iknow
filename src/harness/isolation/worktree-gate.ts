@@ -334,6 +334,28 @@ export interface WorktreeEnterContext {
 export type WorktreeEnterFn = (ctx: WorktreeEnterContext) => Promise<string>;
 
 /**
+ * T8 symmetric-exit seam context: the session (conversationId) currently
+ * executing on `root` returns to the main repo root. No target input — the
+ * tree is identified by the engine root / the session's durable rebind
+ * record; the main repo root is derived from the tree itself.
+ */
+export interface WorktreeExitContext {
+  /** Calling conversation (the session that leaves the task worktree). */
+  readonly conversationId?: string;
+  /** The caller's current engine root (the task worktree being exited). */
+  readonly root: string;
+}
+
+/**
+ * T8 host exit seam shape (SSOT): resolves with the session's main repo
+ * root; rejects with typed `WorktreeIsolationError` (rebind_failed /
+ * git_unavailable). The tree is preserved (orphan cleanup is a plan
+ * non-goal). Shared by the host opts, the `exit-task-worktree` ACI tool
+ * deps, and the session-api provisioner — no per-module structural copies.
+ */
+export type WorktreeExitFn = (ctx: WorktreeExitContext) => Promise<string>;
+
+/**
  * Host-facing options the assembly (build-engine) threads through: the
  * switch itself is read once at the startup load point
  * (`resolveWorktreeOnMutate(settings)`), the host supplies only the provision
@@ -352,6 +374,15 @@ export interface WorktreeIsolationHostOpts {
    * `provision` adjudication later adopts.
    */
   readonly worktreeEnter?: WorktreeEnterFn;
+  /**
+   * T8 symmetric-exit seam (session-api hub / CLI provisioner). Present →
+   * the `exit-task-worktree` ACI tool enters the registry; absent (worker
+   * assembly, hub-less inlets) → excluded via the Gate 3 mirror filter. The
+   * gate itself never calls it — exit is a model-invoked tool whose durable
+   * rebind record puts the session back under the unbound gate on the main
+   * repo.
+   */
+  readonly worktreeExit?: WorktreeExitFn;
 }
 
 export interface WorktreeIsolationGateOpts {

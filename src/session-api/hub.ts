@@ -946,6 +946,38 @@ export class SessionHub {
     return enteredRoot;
   }
 
+  /**
+   * T8 Hub-visible exit seam for harness hosts (including TUI): move this
+   * conversation back to its main repo root from the task worktree it is
+   * currently on. The provisioner derives the main root from the tree
+   * (restart-safe) and rebinds in memory; the changed root is recorded for
+   * this conversation and persisted only by the next conditional save. The
+   * task worktree is preserved — no `git worktree remove` anywhere.
+   */
+  async exitWorktree(ctx: {
+    conversationId?: string;
+    root: string;
+  }): Promise<string> {
+    const anchorSessionRoot = await this.loadSessionWorkspaceRoot(
+      ctx.conversationId
+    );
+    const repoRoot = await this.worktreeProvisioner.exit({
+      conversationId: ctx.conversationId,
+      currentRoot: ctx.root,
+      ...(anchorSessionRoot !== undefined
+        ? { sessionWorkspaceRoot: anchorSessionRoot }
+        : {}),
+    });
+    if (ctx.conversationId !== undefined) {
+      this.markWorktreeRootDirty({
+        conversationId: ctx.conversationId,
+        currentRoot: ctx.root,
+        provisionedRoot: repoRoot,
+      });
+    }
+    return repoRoot;
+  }
+
   private markWorktreeRootDirty(opts: {
     readonly conversationId: string;
     readonly currentRoot: string;
@@ -2697,6 +2729,9 @@ export class SessionHub {
         // worktree（含他人树）；授权锚 = 持久化的 session.workspaceRoot。
         worktreeEnter: ({ conversationId, root: sessionRoot, targetConversationId }) =>
           this.enterWorktree({ conversationId, root: sessionRoot, targetConversationId }),
+        // T8:exit-task-worktree 工具缝 —— 会话回到主仓根，树保留不删。
+        worktreeExit: ({ conversationId, root: sessionRoot }) =>
+          this.exitWorktree({ conversationId, root: sessionRoot }),
       },
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),
@@ -2798,6 +2833,9 @@ export class SessionHub {
         // worktree（含他人树）；授权锚 = 持久化的 session.workspaceRoot。
         worktreeEnter: ({ conversationId, root: sessionRoot, targetConversationId }) =>
           this.enterWorktree({ conversationId, root: sessionRoot, targetConversationId }),
+        // T8:exit-task-worktree 工具缝 —— 会话回到主仓根，树保留不删。
+        worktreeExit: ({ conversationId, root: sessionRoot }) =>
+          this.exitWorktree({ conversationId, root: sessionRoot }),
       },
       ...(this.surface ? { surface: this.surface } : {}),
       ...(this.sessionGrants ? { session: this.sessionGrants } : {}),

@@ -989,6 +989,10 @@ type HubPrivate = {
     root: string;
     targetConversationId: string;
   }) => Promise<string>;
+  exitWorktree: (ctx: {
+    conversationId?: string;
+    root: string;
+  }) => Promise<string>;
   conditionalSave: (opts: {
     conversationId: string;
     session: SessionFileV1;
@@ -1388,6 +1392,99 @@ describe("worktree isolation wiring (T7 - enter-task-worktree)", () => {
 
     expect(enterResult.kind).toBe("execution_failed");
     expect(enterResult.message).toContain("kind=worktree_not_found");
+    expect((await store.load(convB)).workspaceRoot).toBe(repo);
+  });
+});
+
+// -- T8: exit-task-worktree (symmetric return to the main repo root) ----------
+
+/**
+ * T8 (plans/worktree-isolation-model-provision.md) - the exit face of the
+ * tool contract: a session currently rebound to a task worktree calls the
+ * exit-task-worktree ACI tool and returns to the MAIN repo root. The tree is
+ * preserved (orphan cleanup is a plan non-goal); after the conditional save
+ * persists workspaceRoot = repo, the session's next turn is gated again on
+ * the main repo (unbound mutates blocked with the ACI-tool notice).
+ */
+describe("worktree isolation wiring (T8 - exit-task-worktree)", () => {
+  it("session B exits the entered tree: rebind back to the repo persists, the gate blocks mutates on the main repo again, the tree is preserved", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId: convA } = await makeHubWithSession(repo);
+    const { conversationId: convB } = await makeHubWithSession(repo);
+
+    // A provisions its own tree; B enters it (the T7 flow) and persists
+    const wtA = await privateHub(hub).provisionWorktree({
+      conversationId: convA,
+      root: repo,
+    });
+    await persistDirtyRoot(hub, convA);
+    const bDeps = await ensure(hub, repo);
+    const [enterResult] = await bDeps.executor.executeAll(
+      [
+        {
+          id: "enter-1",
+          name: "enter-task-worktree",
+          input: { conversationId: convA },
+        },
+      ],
+      undefined,
+      undefined,
+      convB
+    );
+    expect(enterResult.kind).toBe("ok");
+    await persistDirtyRoot(hub, convB);
+    expect((await store.load(convB)).workspaceRoot).toBe(wtA);
+
+    const worktreesBefore = git(repo, "worktree", "list");
+
+    // (f) B calls exit-task-worktree on the entered tree's engine
+    const enteredDeps = await ensure(hub, wtA);
+    const [exitResult] = await enteredDeps.executor.executeAll(
+      [{ id: "exit-1", name: "exit-task-worktree", input: {} }],
+      undefined,
+      undefined,
+      convB
+    );
+    expect(exitResult.kind).toBe("ok");
+    expect(resultText(exitResult)).toContain(repo);
+
+    // the rebind back persists through the dirty-root conditional save
+    await persistDirtyRoot(hub, convB);
+    expect((await store.load(convB)).workspaceRoot).toBe(repo);
+
+    // next turn on the main repo engine: the gate intercepts again
+    const mainDeps = await ensure(hub, repo);
+    const mutateResult = await runMutate(mainDeps, convB);
+    expect(mutateResult.kind).toBe("execution_failed");
+    expect(mutateResult.message).toContain("[worktree_isolation]");
+    expect(mutateResult.message).toContain("create-task-worktree ACI tool");
+
+    // the tree is preserved: same worktree registration (no `worktree remove`)
+    expect(git(repo, "worktree", "list")).toBe(worktreesBefore);
+    expect(existsSync(wtA)).toBe(true);
+    expect(git(wtA, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe(
+      `iknow/task-${convA}`
+    );
+    // main repo still zero-write
+    expect(git(repo, "status", "--porcelain")).toBe("");
+  });
+
+  it("(g) exit without a rebind (session still anchored at the main repo) -> typed kind=rebind_failed", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId: convB } = await makeHubWithSession(repo);
+
+    const deps = await ensure(hub, repo);
+    const [exitResult] = await deps.executor.executeAll(
+      [{ id: "exit-404", name: "exit-task-worktree", input: {} }],
+      undefined,
+      undefined,
+      convB
+    );
+
+    expect(exitResult.kind).toBe("execution_failed");
+    expect(exitResult.message).toContain("kind=rebind_failed");
     expect((await store.load(convB)).workspaceRoot).toBe(repo);
   });
 });

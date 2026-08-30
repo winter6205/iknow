@@ -98,12 +98,20 @@ describe("createGraphAssembly — per-round 装配快照", () => {
 
 describe("run_graph — ACI 条件装配（Gate 3 镜像过滤）", () => {
   it("ACI_TOOLSET_NAMES 在 run_graph 之后 append-only 追加 query_trace（不重排既有件）", () => {
-    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 3]).toBe("run_graph");
-    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 2]).toBe("query_trace");
+    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 5]).toBe("run_graph");
+    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 4]).toBe("query_trace");
     // T4:创建工作树 ACI 工具 append-only 追加在末位（worktreeProvision
     // 条件化装配；worktree-gate.ts hint 常量同名字对齐）。
-    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 1]).toBe(
+    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 3]).toBe(
       "create-task-worktree"
+    );
+    // T7/T8:enter/exit 工具 append-only 追加在 create-task-worktree 之后
+    // （worktreeEnter / worktreeExit host 缝条件化装配）。
+    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 2]).toBe(
+      "enter-task-worktree"
+    );
+    expect(ACI_TOOLSET_NAMES[ACI_TOOLSET_NAMES.length - 1]).toBe(
+      "exit-task-worktree"
     );
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",

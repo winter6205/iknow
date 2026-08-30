@@ -660,6 +660,11 @@ export async function buildHarnessEngine(
           ...(isolationHost.worktreeEnter
             ? { worktreeEnter: isolationHost.worktreeEnter }
             : {}),
+          // T8:exit 缝在场时透传（同一 isolationEnabled 判定源）；缺席 →
+          // exit-task-worktree 不入注册表。
+          ...(isolationHost.worktreeExit
+            ? { worktreeExit: isolationHost.worktreeExit }
+            : {}),
         }
       : {}),
   });

@@ -140,8 +140,9 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     // T4:worktreeProvision 在场 → create-task-worktree 入注册表（描述同受
     // D9 闸门约束 —— 门禁文案指向的工具必须同样过负面短语闸）。
     worktreeProvision: async () => "/tmp/root/.iknow/worktrees/conv",
-    // T7:worktreeEnter 在场 → enter-task-worktree 入注册表（描述同受闸）。
+    // T7/T8:enter/exit 缝在场 → enter/exit 工具入注册表（描述同受闸）。
     worktreeEnter: async () => "/tmp/root/.iknow/worktrees/conv-target",
+    worktreeExit: async () => "/tmp/repo-root",
   });
 
   // Sanity: registry assembled with the full ACI toolset. If this drifts,
@@ -223,7 +224,7 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
   // audit, the only thing we pin is that all 31 tools are positive-trigger
   // phrased — verified structurally by the blocklist assertions above.
   it("toolset size after audit: full conditional-deps assembly", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(34);
-    expect(reg.catalog.all()).toHaveLength(34);
+    expect(ACI_TOOLSET_NAMES).toHaveLength(35);
+    expect(reg.catalog.all()).toHaveLength(35);
   });
 });

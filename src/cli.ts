@@ -330,6 +330,13 @@ async function runChat(parsed: ParsedCli): Promise<void> {
         root: sessionRoot,
         targetConversationId,
       }),
+    // T8:chat 入口同样接 exit 缝 —— 会话回到主仓根（树保留不删）；
+    // provisioner 的 store 模式在此直接持久化 workspaceRoot。
+    worktreeExit: ({ conversationId, root: sessionRoot }) =>
+      worktreeProvisioner.exit({
+        conversationId,
+        currentRoot: sessionRoot,
+      }),
   };
   // T6:启动 workspace 即稳定 productRoot —— rebind 只换 workspaceRoot，
   // MCP 项目配置根跨 rebuild 保持本值。
