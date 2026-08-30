@@ -732,11 +732,16 @@ const EXA_ENDPOINT = "https://api.exa.ai/search";
  * #826 T4: Exa 投影用的形态描述。Exa 真响应 `SearchResponse` (`results[]`)
  * 在 Exa docs 里字段非常宽（image / publishedDate / author / id 等），但
  * spec Assumption 8 只关心三字段 + highlights/text，故用窄类型描述 contract。
+ *
+ * 注：spec Assumption 8 原本写 `highlights[0].text`（视 highlights 为
+ * `Array<{text: string}>`），但 T8 真出网 probe 实测发现 Exa 真响应
+ * `highlights: string[]` —— 每条 highlight 是字符串本身，不是包了 `text`
+ * 字段的对象。本接口已对齐真 API 形态；spec 修正留后续 ticket。
  */
 interface ExaResultRaw {
   readonly title?: unknown;
   readonly url?: unknown;
-  readonly highlights?: unknown;
+  readonly highlights?: ReadonlyArray<unknown>;
   readonly text?: unknown;
 }
 
@@ -781,7 +786,9 @@ export interface ExaBackendCtorOptions {
  *       **不**降级为 silent empty
  *
  *   - `project`：把 Exa JSON 投到 Bing-shape `SearchResult[]`，
- *     `snippet = highlights?.[0]?.text ?? text ?? ""`。字段 cap 走
+ *     `snippet = highlights?.[0] ?? text ?? ""`（高亮按 Exa 真 API
+ *     `string[]` 形态取第一条；落空时按 spec 兜底走 `result.text`）。
+ *     字段 cap 走
  *     `projectSearchResult`（T4 起 export 出来供各家 keyed backend 共用，
  *     与 Bing HTML 路径字节级一致 —— spec SC #3「T2 字段 cap 一刀切，
  *     adapter 不写自家 cap」）。`maxResults` cap 在 `project` 内部施加
@@ -934,21 +941,22 @@ export class ExaBackend implements SearchBackend {
 }
 
 /**
- * #826 T4 / spec Assumption 8：`snippet = highlights?.[0]?.text ?? text ?? ""`。
+ * #826 T4 / spec Assumption 8：`snippet = highlights?.[0] ?? text ?? ""`。
  * 抽出来便于单测 + 隔离 ExaResultRaw 的窄类型描述。
+ *
+ * 注：spec Assumption 8 原本写 `highlights[0].text`（视每条 highlight 为
+ * ` {text: string}` 对象），但 T8 真出网 probe 实测发现 Exa 真响应
+ * `highlights: string[]` —— 每条 highlight 是字符串本身（按 Exa docs：
+ * 「a relevant excerpt/sentence from the result text」）。本函数已对齐真
+ * API 形态：`highlights?.[0]` 取第一条字符串 highlight；落空时按 spec
+ * 兜底走 `item.text`（部分 Exa 响应只给 `text` 不给 highlights），再
+ * 落空返 `""`。spec 修正留后续 ticket。
  */
 function pickExaSnippet(item: ExaResultRaw): string {
   const highlights = item.highlights;
   if (Array.isArray(highlights) && highlights.length > 0) {
     const first = highlights[0];
-    if (
-      typeof first === "object" &&
-      first !== null &&
-      typeof (first as { text?: unknown }).text === "string"
-    ) {
-      const text = (first as { text: string }).text;
-      if (text.length > 0) return text;
-    }
+    if (typeof first === "string" && first.length > 0) return first;
   }
   if (typeof item.text === "string" && item.text.length > 0) return item.text;
   return "";

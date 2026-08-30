@@ -607,7 +607,7 @@ function makeConcurrencyToolPair(id: "bing" | "exa" | "tavily" | "brave"): {
             {
               title: "Exa Title 1",
               url: "https://site1.example.com/a",
-              highlights: [{ text: "Highlight 1" }],
+              highlights: ["Highlight 1"],
             },
           ],
         }),
@@ -620,12 +620,12 @@ function makeConcurrencyToolPair(id: "bing" | "exa" | "tavily" | "brave"): {
             {
               title: "Exa Title 1",
               url: "https://site1.example.com/a",
-              highlights: [{ text: "Highlight 1" }],
+              highlights: ["Highlight 1"],
             },
             {
               title: "Exa Title 2",
               url: "https://site2.example.com/b",
-              highlights: [{ text: "Highlight 2" }],
+              highlights: ["Highlight 2"],
             },
           ],
         }),
@@ -818,7 +818,7 @@ function makeConcurrencyCachedTool(id: "bing" | "exa" | "tavily" | "brave"): {
             {
               title: "Exa Title 1",
               url: "https://site.example.com/page",
-              highlights: [{ text: "Highlight 1" }],
+              highlights: ["Highlight 1"],
             },
           ],
         }),
@@ -941,7 +941,7 @@ function makeConcurrencyDistinctQueriesTool(
             {
               title: `${body.query} title`,
               url: `https://site.example.com/${body.query}`,
-              highlights: [{ text: `${body.query} highlight` }],
+              highlights: [`${body.query} highlight`],
             },
           ],
         }),

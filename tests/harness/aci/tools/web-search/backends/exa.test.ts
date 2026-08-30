@@ -3,7 +3,10 @@
  *
  * 覆盖契约（spec SC #3 衍生 + T4 acceptance criteria）：
  *   - basic: fixture JSON（`{ results: [{title, highlights, text, url}] }`）→
- *     Bing-shape `{title, snippet, url}`，`snippet = highlights[0].text ?? text ?? ""`。
+ *     Bing-shape `{title, snippet, url}`，`snippet = highlights[0] ?? text ?? ""`
+ *     （T8 probe 实测发现 Exa 真响应 `highlights: string[]`，故 `highlights[0]`
+ *     是字符串本身而非 `{text: string}` 对象 —— 本文件 fixture 已按真 API 形态
+ *     用 `"..."` 直接构造；spec Assumption 8 需后续 ticket 修正）。
  *   - empty: `results: []` → 空数组（与 Bing 零结果同失败族，不 silent 改写）。
  *   - field-cap: 8 results + `maxResults=3` → 恰好 3 条；下游 shared cap
  *     （title ≤ 200 / snippet ≤ 500 / url ≤ 2000）由既有 `projectSearchResult`
@@ -84,7 +87,7 @@ function exaFixtureResults(): Array<Record<string, unknown>> {
     {
       title: "Exa Title 1",
       url: "https://site1.example.com/page",
-      highlights: [{ text: "Highlight 1" }],
+      highlights: ["Highlight 1"],
       text: "Body text 1",
     },
     {
@@ -245,7 +248,7 @@ describe("ExaBackend — project (#826 T4)", () => {
     fetch: (() => undefined) as unknown as typeof globalThis.fetch,
   });
 
-  it("basic: highlights[0].text 优先于 text", () => {
+  it("basic: highlights[0] 优先于 text", () => {
     const out = backend.project({ results: exaFixtureResults() }, 10) as Array<{
       title: string;
       url: string;
@@ -270,7 +273,7 @@ describe("ExaBackend — project (#826 T4)", () => {
     const many = Array.from({ length: 8 }, (_, i) => ({
       title: `Title ${i + 1}`,
       url: `https://site${i + 1}.example.com/page`,
-      highlights: [{ text: `Snippet ${i + 1}` }],
+      highlights: [`Snippet ${i + 1}`],
     }));
     const out = backend.project({ results: many }, 3) as Array<{
       title: string;
@@ -316,6 +319,36 @@ describe("ExaBackend — project (#826 T4)", () => {
     const raw = { results: [{ foo: "bar" }] };
     const out = backend.project(raw, 10) as unknown[];
     assert.deepEqual(out, []);
+  });
+
+  it("project: highlights[0] 是 string（真 Exa API 形态）→ 投影为 snippet (T8 regression)", () => {
+    // T8 probe 实测发现真 Exa API 返 `highlights: string[]` 而非
+    // `Array<{text: string}>`。spec Assumption 8 原本误读为对象形态，
+    // 修正后 `pickExaSnippet` 应正确取 `highlights[0]` 作为字符串本身。
+    // 本测试用真 API 形态 fixture 直接走 `project` 路径端到端验证；
+    // `pickExaSnippet` 本身未 export（与 web-search.ts 内部其他 helper
+    // 同形），故走 `ExaBackend.project` 间接覆盖。
+    const raw = {
+      results: [
+        {
+          title: "Paris capital",
+          url: "https://en.wikipedia.org/wiki/Paris",
+          highlights: [
+            "Paris is the capital and most populous city of France.",
+          ],
+        },
+      ],
+    };
+    const out = backend.project(raw, 5) as Array<{
+      title: string;
+      url: string;
+      snippet: string;
+    }>;
+    assert.equal(out.length, 1);
+    assert.equal(
+      out[0].snippet,
+      "Paris is the capital and most populous city of France."
+    );
   });
 });
 
