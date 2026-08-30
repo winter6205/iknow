@@ -93,14 +93,30 @@ OVERALL: yes
    - Status: [ ] pending
    - [blocks: T3]
 
-5. **Subagents inherit the rebound session root** ([T5](https://github.com/winter6205/iknow/issues/840)) — tag: `[implementation]`
+5. **[parallel] ACI tool enters an existing task worktree and rebinds the session** ([T7](https://github.com/winter6205/iknow/issues/839)) — tag: `[implementation]`
+   - **Inherits:** 硬要求 2–6；工具成功 = 会话根已切到既有 task worktree（含他人树）
+   - **Surface:** harness ACI 工具集（enter-task-worktree）+ session-api provision/rebind（host worktreeEnter 缝 + provision adoption）
+   - **Acceptance:** 模型可调用该工具（只收 owner conversationId，过 segment-safety 闸；目标路径由 SSOT `taskWorktreePath` 派生，不收自由路径）；目标不存在 → typed `worktree_not_found`，非本仓 linked worktree / 调用方已在树内 → typed `foreign_worktree`，unsafe id → typed `rebind_failed`（任何 fs/git 访问之前）；成功 = 仅本会话改绑到目标树（主仓零写入、worktree list 不变、树内容零污染），经 dirty-root conditionalSave 持久化；改绑的持久记录（`session.workspaceRoot` === 引擎 task-worktree 形状根）即 provision 的 adoption 锚 —— 重启后该会话在他会话树上的 mutate 被放行（显式进入语义）；无持久锚的外来根维持 `foreign_worktree` fail-closed；门禁本体零改动；worker / TUI(仅 provision) 工具面缺席有钉子
+   - Status: [x] done (commit `feat(harness): enter-task-worktree ACI tool with durable adoption anchor`)
+   - [blocks: T3, T4]
+   - [parallel]
+
+6. **[parallel] ACI tool exits the task worktree back to the main repo root, tree preserved** ([T8](https://github.com/winter6205/iknow/issues/839)) — tag: `[implementation]`
+   - **Inherits:** 硬要求 2–6；exit = 改绑回主仓根，树保留不删（孤儿树自动删除仍是明确非目标）
+   - **Surface:** harness ACI 工具集（exit-task-worktree）+ session-api provision/rebind（host worktreeExit 缝）
+   - **Acceptance:** 模型可调用该工具（无参数）；当前未改绑（无 bound 条目且持久锚与引擎根均非树形状）→ typed `rebind_failed`；成功 = 仅本会话根回到主仓（主仓根由树经 `git rev-parse --path-format=absolute --git-common-dir` 派生，重启安全、不依赖进程内状态），经 dirty-root conditionalSave 持久化后下一回合门禁在主仓重新武装（拦 + ACI 工具文案）；`git worktree list` 计数不变（树与其分支保留）；失败 → 主仓零写入；worker / TUI(仅 provision) 工具面缺席有钉子
+   - Status: [x] done (commit `feat(harness): exit-task-worktree ACI tool for symmetric return to the main repo root`)
+   - [blocks: T7]
+   - [parallel]
+
+7. **Subagents inherit the rebound session root** ([T5](https://github.com/winter6205/iknow/issues/840)) — tag: `[implementation]`
    - **Inherits:** 硬要求 7、9（explore 不注入说明书；general-purpose 开场注入已有文件）
    - **Surface:** harness subagent worker / spawn
    - **Acceptance:** 父会话已改绑后 spawn 的子代理 cwd/sandbox 在同一 task worktree；general-purpose 在说明书文件存在时注入其内容；explore 不注入项目 AGENTS.md 正文
    - Status: [ ] pending
    - [blocks: T2, T4]
 
-6. **Parent does not dump all rules bodies at session start** ([T6](https://github.com/winter6205/iknow/issues/841)) — tag: `[implementation]`
+8. **Parent does not dump all rules bodies at session start** ([T6](https://github.com/winter6205/iknow/issues/841)) — tag: `[implementation]`
    - **Inherits:** 硬要求 9–10
    - **Surface:** harness identity / memory 静态层装配（chat / tui / serve 父会话）
    - **Acceptance:** 父会话 system 不因存在多份 `.iknow/rules/*.md` 而把全部正文灌进开场上下文；模型仍可用读路径打开其中一份；无 rules 时会话正常开始

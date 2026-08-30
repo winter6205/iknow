@@ -5,6 +5,7 @@ Date: 2026-08-29
 Status: accepted (amended 2026-08-30: 建树职责由 host 自动建树改为模型调用「创建工作树 ACI 工具」)
 
 > **Amendment 2026-08-30**（issue #836 / 地图 #829）：ON 时门禁**只拦写、不自动 `git worktree add`**——建 task worktree 与会话根改绑由**模型调用「创建工作树 ACI 工具」**完成（成功 = 树在且会话根已切到该路径）；Host 不同波重放被拦的写，被拦的写由模型在新根上自己再调。原文 Decision 1 中「首次 mutate 被拦截 → host `git worktree add` 建树改绑」的读法 **superseded**。同批修订：说明书（rules）改为按需读——父会话不整段灌 rules、缺目录视为空，见 ADR-0009 D2 的 amended 说明与 `docs/CONTEXT.md` 术语「说明书读法」。
+> **Amendment 2026-08-30（工具面扩展，issue #839 / 地图 #829）**：enter/exit 对称工具——`enter-task-worktree` **显式进入**一棵本仓已存在的 task worktree（含他人树；授权锚 = 持久化的 `session.workspaceRoot`，只由工具成功 + 会话保存写成外来树，故是天然的显式进入持久记录；provision 据此 adoption 放行该会话在其上的 mutate），`exit-task-worktree` **回到主仓根**（主仓根由树经 git common dir 派生，重启安全）；exit **树保留不删**（孤儿树自动删除仍是明确非目标）。门禁本体不变。
 
 ## Context
 
