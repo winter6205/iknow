@@ -39,6 +39,7 @@
 - `lsp-mcp-server.md` — stdio MCP（SDK 2.0）暴露 10 件只读 `lsp_*`；plan 内嵌 ACR
 - `337-skill-mcp-extension.md` — skill + MCP 扩展源
 - `406-secret-roundtrip-mask.md` — Secret roundtrip mask（supersedes `#126` hook-system）
+- `pluggable-web-search-backends.md` — web_search 可插拔 HTTP 后端（首版仅 Exa 真 HTTP）; plan: `plans/pluggable-web-search-backends.md`
 
 ### 身份与记忆
 
