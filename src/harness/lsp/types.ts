@@ -24,6 +24,27 @@
 export interface LspCtx {
   /** LSP 服务根目录搜索的上界(NearestRoot 不允许跨出)。 */
   readonly directory: string;
+  /**
+   * per-request LSP 超时上限（毫秒，lsp-optimization 二期 B7）。缺省由工具层
+   * DEFAULT_LSP_REQUEST_TIMEOUT_MS（20_000）兜底。来源：settings.lsp.requestTimeoutMs。
+   */
+  readonly requestTimeoutMs?: number;
+  /**
+   * lsp_diagnostics 读前等待 deadline（毫秒，二期 B7）。缺省由工具层
+   * DIAGNOSTICS_WAIT_MS（2_000）兜底。来源：settings.lsp.diagnosticsWaitMs。
+   */
+  readonly diagnosticsWaitMs?: number;
+  /**
+   * 空闲客户端回收阈值（毫秒，二期 B7/B5）。≤0 或 undefined → 不 sweep。
+   * 来源：settings.lsp.idleTimeoutMs；缺省语义（10min）由 client.ts sweep
+   * 消费方在装配层决定（build-engine 注入缺省 600_000）。
+   */
+  readonly idleTimeoutMs?: number;
+  /**
+   * 禁用的 server id 列表（二期 B7）。命中的 server 在 getClientDetailed
+   * 里按 no-server 处理（视为未配置）。来源：settings.lsp.disabledServers。
+   */
+  readonly disabledServers?: ReadonlyArray<string>;
 }
 
 /**
@@ -52,6 +73,11 @@ export interface LspServerInfo {
     root: string,
     ctx: LspCtx
   ) => Promise<LspServerHandle | undefined>;
+  /**
+   * 可读的安装提示（lsp-optimization 二期 B3）：spawn-failed 哨兵渲染时
+   * 附带给模型的一句 `npm i -g <pkg>`。缺席 → 哨兵省略 hint 句。
+   */
+  readonly installHint?: string;
 }
 
 /** spawn 返回的 server 句柄:子进程 + initializationOptions(typescript-language-server 透传 tsserver.path)。 */

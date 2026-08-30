@@ -71,7 +71,8 @@ describe("startLspWarmup (plan T4)", () => {
   it("warms up every server whose extensions hit a sample (mixed ts+py project)", async () => {
     const { dir, tsFile, pyFile } = makeMixedProject();
     try {
-      mockGetClient.mockResolvedValue({ connection: {}, process: {} });
+      const ensureOpen = vi.fn(async (_file: string) => undefined);
+      mockGetClient.mockResolvedValue({ connection: {}, process: {}, ensureOpen });
       startLspWarmup({ directory: dir });
       await vi.waitFor(() => expect(mockGetClient).toHaveBeenCalledTimes(2));
 
@@ -82,6 +83,10 @@ describe("startLspWarmup (plan T4)", () => {
       expect(pyCalls).toHaveLength(1);
       expect(tsCalls[0]![1]).toBe(tsFile);
       expect(pyCalls[0]![1]).toBe(pyFile);
+      // 二期 B4：getClient 成功后对样本 ensureOpen（预热 project 加载）。
+      await vi.waitFor(() => expect(ensureOpen).toHaveBeenCalledTimes(2));
+      expect(ensureOpen).toHaveBeenCalledWith(tsFile);
+      expect(ensureOpen).toHaveBeenCalledWith(pyFile);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -121,6 +126,32 @@ describe("startLspWarmup (plan T4)", () => {
         .filter((s) => s.includes("[lsp-warmup] partial:"));
       expect(lines).toHaveLength(1);
       expect(lines[0]).toContain("typescript: spawn boom");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("continues to the next server when ensureOpen throws (phase2 B4)", async () => {
+    const { dir } = makeMixedProject();
+    try {
+      // Typescript 的 ensureOpen 抛错 → 只留痕一行并继续 Pyright。
+      mockGetClient.mockImplementation(async (_ctx: unknown, _file: string, opts?: { server?: { id: string } }) => {
+        if (opts?.server?.id === Typescript.id) {
+          return { ensureOpen: async () => { throw new Error("open boom"); } };
+        }
+        return { ensureOpen: async () => undefined };
+      });
+      const stderrSpy = vi
+        .spyOn(process.stderr, "write")
+        .mockImplementation(() => true);
+      startLspWarmup({ directory: dir });
+      await vi.waitFor(() => expect(mockGetClient).toHaveBeenCalledTimes(2));
+      expect(callsForServer(Pyright.id)).toHaveLength(1);
+      const lines = stderrSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((st) => st.includes("[lsp-warmup] partial:"));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain("typescript: open boom");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

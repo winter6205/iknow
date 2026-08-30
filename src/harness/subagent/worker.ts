@@ -42,6 +42,9 @@ import {
 import { createDefaultAciRegistry } from "../aci/tools/registry.js";
 import { createAciExecutor } from "../aci/index.js";
 import type { AciCatalog } from "../aci/types.js";
+import { createLspNotifier } from "../lsp/notifier.js";
+import { startLspWarmup } from "../lsp/warmup.js";
+import { DEFAULT_LSP_IDLE_TIMEOUT_MS } from "../lsp/client.js";
 import { deriveFileRefs, writeToolNamesFrom } from "./file-refs.js";
 import { createPermissionPolicy } from "../permission/policy.js";
 import { createNoAskUser } from "../permission/ask-user.js";
@@ -245,8 +248,9 @@ export interface CreateWorkerDepsOptions {
  *   - trace = createJsonlTraceService (cli.ts 同形态; 测试覆盖 noop);
  *   - compress 透传 env.compress (与 build-engine 同形态)。
  *
- * worker 子进程是任务型 (有界 scope), 不装配 MCP manager / memory layer /
- * LSP notifier —— 与 build-engine 的差异注释见各装配点。
+ * worker 子进程是任务型 (有界 scope), 不装配 MCP manager / memory layer ——
+ * 与 build-engine 的差异注释见各装配点。LSP notifier / warmup 二期 B6 起与
+ * build-engine 同构装配（SSOT: LspCtx.directory ≡ sandboxRoot）。
  */
 export async function createWorkerDeps(
   opts: CreateWorkerDepsOptions
@@ -314,10 +318,22 @@ export async function createWorkerRuntime(
   const isJudge = opts.role === "judge";
   const bashMode: "any" | "readonly" =
     opts.bashMode ?? (isJudge ? "any" : resolveBashMode(opts.role));
+  // lsp-optimization 二期 B6/B7 closeout: worker 同构装配 LSP notifier +
+  // warmup（与 build-engine 同缝）。SSOT: LspCtx.directory ≡ sandboxRoot。
+  // worker 不读 settings 文件，但注入 idleTimeoutMs 缺省（10min），与
+  // plan「走默认值」一致；超时/等待仍走工具层常量。
+  const lspCtx = {
+    directory: sandboxRoot,
+    idleTimeoutMs: DEFAULT_LSP_IDLE_TIMEOUT_MS,
+  };
+  const lspNotifier = createLspNotifier(lspCtx);
+  startLspWarmup(lspCtx);
   const reg = createDefaultAciRegistry({
     env,
     sandboxRoot,
     skillCatalog,
+    onEdit: (file) => lspNotifier.invalidate(file),
+    lspCtx,
     ...(opts.disallowedTools ? { disallowedTools: opts.disallowedTools } : {}),
     // ADR-0019 (review-fix H3): spread-guard 透传 —— 缺席时 registry
     // 内部 fallback sandboxRoot(legacy 字节不变)。

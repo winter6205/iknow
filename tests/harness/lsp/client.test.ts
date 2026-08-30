@@ -1151,3 +1151,213 @@ describe("client exit self-heal (plan T1)", () => {
     expect(killSpy).not.toHaveBeenCalled();
   });
 });
+
+// ── 二期 B1：诊断 entry（pushVersion 透传）+ getOpenVersion ──────────────────
+//
+// 锚点 client.ts spawnClient：publishDiagnostics 订阅把 params.version 为
+// number 时透传进 entry.pushVersion（缺省 undefined）；openedUris 升级为
+// Map<uri, version>（didOpen=1、didChange 每次 +1）。
+
+import {
+  getClientDetailed,
+  DEFAULT_LSP_IDLE_TIMEOUT_MS,
+} from "../../../src/harness/lsp/client.ts";
+
+describe("diagnostics entry pushVersion passthrough (phase2 B1)", () => {
+  it("stores pushVersion from publishDiagnostics params.version and defaults to undefined", async () => {
+    const { server } = makeFakeServer("push-version");
+    const client = await getClient(ctx, "/root/pv.ts", { server });
+    expect(client).toBeDefined();
+    if (!client) throw new Error("expected client");
+
+    // 取 spawnClient 注册的 publishDiagnostics 处理器（connection.onNotification mock）。
+    const conn = mockCreateConnection.mock.results[0]!.value as {
+      onNotification: ReturnType<typeof vi.fn>;
+    };
+    const handler = conn.onNotification.mock.calls.find(
+      (c) => c[0] === "textDocument/publishDiagnostics"
+    )?.[1] as (params: unknown) => void;
+    expect(handler).toBeDefined();
+
+    handler({ uri: "file:///root/pv.ts", diagnostics: [{ m: 1 }], version: 7 });
+    expect(client.getDiagnosticsEntry("file:///root/pv.ts")).toEqual({
+      items: [{ m: 1 }],
+      pushVersion: 7,
+    });
+    expect(client.getDiagnostics("file:///root/pv.ts")).toEqual([{ m: 1 }]);
+
+    handler({ uri: "file:///root/pv.ts", diagnostics: [] }); // 无 version
+    expect(client.getDiagnosticsEntry("file:///root/pv.ts")).toEqual({
+      items: [],
+      pushVersion: undefined,
+    });
+
+    // 未推送过的 uri → undefined。
+    expect(client.getDiagnosticsEntry("file:///root/other.ts")).toBeUndefined();
+  });
+
+  it("getOpenVersion tracks didOpen=1 and notifyChange increments", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-openver-"));
+    const file = join(dir, "v.ts");
+    writeFileSync(file, "export const v = 1;\n", "utf8");
+    try {
+      const { server } = makeFakeServer("open-version", {
+        spawn: async (_root) => {
+          const child = makeFakeChildProcess();
+          return {
+            process: child as unknown as import("node:child_process").ChildProcess,
+            initialization: { tsserver: { path: "/tsserver.js" } },
+          };
+        },
+      });
+      const client = await getClient(ctx, file, { server });
+      if (!client) throw new Error("expected client");
+
+      const uri = (await import("node:url")).pathToFileURL(file).href;
+      expect(client.getOpenVersion(uri)).toBeUndefined(); // 未打开
+      await client.ensureOpen(file);
+      expect(client.getOpenVersion(uri)).toBe(1); // didOpen
+      await client.notifyChange(file);
+      expect(client.getOpenVersion(uri)).toBe(2); // didChange +1
+      await client.notifyChange(file);
+      expect(client.getOpenVersion(uri)).toBe(3);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── 二期 B3：getClientDetailed 三 reason 分支 + disabledServers ──────────────
+
+describe("getClientDetailed failure reasons (phase2 B3)", () => {
+  it("no-server: unmatched extension → failure without serverId", async () => {
+    const res = await getClientDetailed(ctx, "/root/a.xyz");
+    expect(res.client).toBeUndefined();
+    expect(res.failure).toEqual({ reason: "no-server" });
+  });
+
+  it("no-root: server.root() undefined → failure with serverId", async () => {
+    const { server, calls } = makeFakeServer("detailed-root-empty", {
+      root: async () => undefined,
+    });
+    const res = await getClientDetailed(ctx, "/root/a.ts", { server });
+    expect(res.client).toBeUndefined();
+    expect(res.failure).toEqual({ reason: "no-root", serverId: "detailed-root-empty" });
+    expect(calls.spawn).toBe(0);
+  });
+
+  it("spawn-failed: spawn undefined memoized; broken hit reports spawn-failed with serverId", async () => {
+    const { server, calls } = makeFakeServer("detailed-spawn-fail", {
+      spawn: async () => undefined,
+    });
+    const first = await getClientDetailed(ctx, "/root/a.ts", { server });
+    expect(first.client).toBeUndefined();
+    expect(first.failure).toEqual({
+      reason: "spawn-failed",
+      serverId: "detailed-spawn-fail",
+    });
+    // broken 记忆命中 → 同 reason，不重试。
+    const second = await getClientDetailed(ctx, "/root/b.ts", { server });
+    expect(second.failure).toEqual({
+      reason: "spawn-failed",
+      serverId: "detailed-spawn-fail",
+    });
+    expect(calls.spawn).toBe(1);
+  });
+
+  it("spawn throw → spawn-failed (broken memoized, no unhandled rejection)", async () => {
+    const { server, calls } = makeFakeServer("detailed-spawn-throw", {
+      spawn: async () => {
+        throw new Error("boom");
+      },
+    });
+    const res = await getClientDetailed(ctx, "/root/a.ts", { server });
+    expect(res.client).toBeUndefined();
+    expect(res.failure).toEqual({
+      reason: "spawn-failed",
+      serverId: "detailed-spawn-throw",
+    });
+    expect(calls.spawn).toBe(1);
+  });
+
+  it("disabledServers → no-server with serverId, without touching root/spawn (B7)", async () => {
+    const { server, calls } = makeFakeServer("disabled-srv");
+    const res = await getClientDetailed({ directory: "/work", disabledServers: ["disabled-srv"] }, "/root/a.ts", {
+      server,
+    });
+    expect(res.client).toBeUndefined();
+    expect(res.failure).toEqual({ reason: "no-server", serverId: "disabled-srv" });
+    expect(calls.spawn).toBe(0);
+  });
+
+  it("getClient stays a thin wrapper: client on success, undefined on failure", async () => {
+    const ok = makeFakeServer("wrapper-ok");
+    const bad = makeFakeServer("wrapper-bad", { spawn: async () => undefined });
+    const client = await getClient(ctx, "/root/a.ts", { server: ok.server });
+    expect(client).toBeDefined();
+    const none = await getClient(ctx, "/root/a.ts", { server: bad.server });
+    expect(none).toBeUndefined();
+  });
+});
+
+// ── 二期 B5：空闲回收（sweepIdleClients）─────────────────────────────────────
+
+describe("idle sweep (phase2 B5)", () => {
+  function sweepableServer(id: string) {
+    return makeFakeServer(id, {
+      spawn: async (_root) => {
+        const child = makeFakeChildProcess();
+        return {
+          process: child as unknown as import("node:child_process").ChildProcess,
+          initialization: { tsserver: { path: "/tsserver.js" } },
+        };
+      },
+    });
+  }
+
+  it("disposes and evicts clients idle beyond idleTimeoutMs, then respawns", async () => {
+    const { server, calls } = sweepableServer("sweep-evict");
+    const ctxSweep = { directory: "/work", idleTimeoutMs: 5 };
+
+    const first = await getClientDetailed(ctxSweep, "/root/a.ts", { server });
+    expect(first.client).toBeDefined();
+    expect(calls.spawn).toBe(1);
+    const disposeSpy = vi.spyOn(first.client!, "dispose");
+
+    // 未超时 → 缓存复用。
+    const reused = await getClientDetailed(ctxSweep, "/root/b.ts", { server });
+    expect(reused.client).toBe(first.client);
+    expect(calls.spawn).toBe(1);
+
+    // 超过 idleTimeoutMs → dispose + 逐出 → 下次重新 spawn。
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    const second = await getClientDetailed(ctxSweep, "/root/c.ts", { server });
+    expect(second.client).toBeDefined();
+    expect(second.client).not.toBe(first.client);
+    expect(calls.spawn).toBe(2);
+    expect(disposeSpy).toHaveBeenCalledTimes(1); // dispose 释放连接，不杀进程
+  });
+
+  it("does not sweep when idleTimeoutMs is absent (worker path)", async () => {
+    const { server, calls } = sweepableServer("sweep-absent");
+    const first = await getClientDetailed(ctx, "/root/a.ts", { server });
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    const second = await getClientDetailed(ctx, "/root/b.ts", { server });
+    expect(second.client).toBe(first.client); // 无 sweep → 仍复用
+    expect(calls.spawn).toBe(1);
+  });
+
+  it("does not sweep when idleTimeoutMs <= 0", async () => {
+    const { server, calls } = sweepableServer("sweep-zero");
+    const ctxZero = { directory: "/work", idleTimeoutMs: 0 };
+    const first = await getClientDetailed(ctxZero, "/root/a.ts", { server });
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    const second = await getClientDetailed(ctxZero, "/root/b.ts", { server });
+    expect(second.client).toBe(first.client);
+    expect(calls.spawn).toBe(1);
+  });
+
+  it("exports the build-engine default idle timeout of 10 minutes", () => {
+    expect(DEFAULT_LSP_IDLE_TIMEOUT_MS).toBe(10 * 60 * 1000);
+  });
+});

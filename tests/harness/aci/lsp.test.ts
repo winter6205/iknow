@@ -20,8 +20,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ToolExecutionError } from "../../../src/harness/errors.ts";
 
-const { mockGetClient } = vi.hoisted(() => ({
+const { mockGetClient, mockGetClientDetailed } = vi.hoisted(() => ({
   mockGetClient: vi.fn<() => Promise<unknown>>(),
+  mockGetClientDetailed: vi.fn<() => Promise<unknown>>(),
 }));
 
 // 动态导入必须在 mock 安装之后（对齐 client.test.ts）。
@@ -32,6 +33,10 @@ vi.mock("../../../src/harness/lsp/client.js", async (importOriginal) => {
   return {
     ...actual,
     getClient: (...args: unknown[]) => mockGetClient(...args),
+    // 二期 B3：工具层统一走 getClientDetailed（哨兵分层）；默认实现委托
+    // mockGetClient（保住既有 toHaveBeenCalledWith 断言），client 缺失时
+    // 归一为 no-server failure。
+    getClientDetailed: (...args: unknown[]) => mockGetClientDetailed(...args),
   };
 });
 
@@ -40,6 +45,7 @@ import {
   DEFAULT_LSP_REQUEST_TIMEOUT_MS,
   DIAGNOSTICS_WAIT_MS,
   MAX_RESULT_BYTES,
+  isLspFailureSentinel,
 } from "../../../src/harness/aci/tools/lsp.ts";
 import type { AciToolDef } from "../../../src/harness/aci/types.ts";
 import { ToolExecutionError } from "../../../src/harness/errors.ts";
@@ -66,8 +72,18 @@ function makeFakeClient(
       },
       sendNotification: async () => undefined,
       // #251:lsp_diagnostics 读 push 缓存(latest-wins),fake 默认空数组;
-      // 需要覆盖时在测试里 `client.getDiagnostics = () => items`。
+      // 需要覆盖时在测试里 `client.getDiagnosticsEntry = () => ({ items })`。
       getDiagnostics: (_uri: string) => [] as ReadonlyArray<unknown>,
+      // 二期 B1:诊断 entry（含 pushVersion）+ didChange 版本。默认"首推已到、
+      // 未编辑"（openVersion=1）→ 等待逻辑立即返回空 items。
+      getDiagnosticsEntry: (_uri: string) =>
+        ({ items: [] as ReadonlyArray<unknown> }) as
+          | {
+              readonly items: ReadonlyArray<unknown>;
+              readonly pushVersion?: number;
+            }
+          | undefined,
+      getOpenVersion: (_uri: string) => 1,
       dispose: () => undefined,
     },
   };
@@ -93,10 +109,7 @@ const POSITION_OPS = [
 
 // lsp_workspace_symbol 的 file / query 均改为可选（lsp-optimization plan T3），
 // 不再属于 file-only 组；其 schema 断言见下方专用 describe。
-const FILE_ONLY_OPS = [
-  "lsp_document_symbol",
-  "lsp_diagnostics",
-] as const;
+const FILE_ONLY_OPS = ["lsp_document_symbol", "lsp_diagnostics"] as const;
 
 // lsp_workspace_symbol 单列（plan T3 后 schema 独立），但仍属 10 件全集。
 const ALL_TOOL_NAMES = [
@@ -107,6 +120,12 @@ const ALL_TOOL_NAMES = [
 
 beforeEach(() => {
   mockGetClient.mockReset();
+  mockGetClientDetailed.mockReset();
+  // 默认：detailed 委托 mockGetClient（同参透传），undefined → no-server failure。
+  mockGetClientDetailed.mockImplementation(async (...args: unknown[]) => {
+    const client = (await mockGetClient(...args)) as unknown;
+    return client ? { client } : { failure: { reason: "no-server" as const } };
+  });
 });
 
 describe("createLspToolSet shape", () => {
@@ -144,13 +163,21 @@ describe("inputSchema required fields", () => {
     }
   });
 
-  it("file-only ops require only file (no position)", () => {
+  it("document_symbol requires only file (no position)", () => {
     const tools = createLspToolSet(ctx);
-    for (const name of FILE_ONLY_OPS) {
-      const schema = byName(tools, name).inputSchema;
-      const required = schema.required as string[];
-      expect(required).toEqual(["file"]);
-    }
+    const schema = byName(tools, "lsp_document_symbol").inputSchema;
+    expect(schema.required).toEqual(["file"]);
+  });
+
+  it("lsp_diagnostics has no required fields (file / files exclusive, B2)", () => {
+    const tools = createLspToolSet(ctx);
+    const schema = byName(tools, "lsp_diagnostics").inputSchema;
+    expect(schema.required).toBeUndefined();
+    expect(schema.additionalProperties).toBe(false);
+    expect(Object.keys(schema.properties as object).sort()).toEqual([
+      "file",
+      "files",
+    ]);
   });
 });
 
@@ -222,7 +249,7 @@ describe("ajv validation", () => {
 });
 
 describe("no client path", () => {
-  it("returns the no-server string when getClient returns undefined", async () => {
+  it("returns the tiered no-server sentinel when no client is available (B3)", async () => {
     mockGetClient.mockResolvedValue(undefined);
     const tools = createLspToolSet(ctx);
     for (const name of ALL_TOOL_NAMES) {
@@ -232,8 +259,10 @@ describe("no client path", () => {
         name === "lsp_workspace_symbol"
           ? { file: "x.ts" }
           : { file: "x.ts", line: 1, character: 0 };
-      const out = await byName(tools, name).handler(input);
-      expect(out).toBe("(no LSP server available for file)");
+      const out = (await byName(tools, name).handler(input)) as string;
+      expect(out).toMatch(
+        /^\(no LSP server configured for x\.ts; supported extensions: /
+      );
     }
   });
 });
@@ -415,9 +444,14 @@ describe("lsp_diagnostics", () => {
     const { client } = makeFakeClient(() => undefined);
     (
       client as unknown as {
-        getDiagnostics: (uri: string) => ReadonlyArray<unknown>;
+        getDiagnosticsEntry: (uri: string) =>
+          | {
+              readonly items: ReadonlyArray<unknown>;
+              readonly pushVersion?: number;
+            }
+          | undefined;
       }
-    ).getDiagnostics = () => items;
+    ).getDiagnosticsEntry = () => ({ items });
     mockGetClient.mockResolvedValue(client);
     const tools = createLspToolSet(ctx);
     const out = await byName(tools, "lsp_diagnostics").handler({
@@ -440,9 +474,14 @@ describe("lsp_diagnostics", () => {
     const { client } = makeFakeClient(() => undefined);
     (
       client as unknown as {
-        getDiagnostics: (uri: string) => ReadonlyArray<unknown>;
+        getDiagnosticsEntry: (uri: string) =>
+          | {
+              readonly items: ReadonlyArray<unknown>;
+              readonly pushVersion?: number;
+            }
+          | undefined;
       }
-    ).getDiagnostics = () => items;
+    ).getDiagnosticsEntry = () => ({ items });
     mockGetClient.mockResolvedValue(client);
     const tools = createLspToolSet(ctx);
     const out = await byName(tools, "lsp_diagnostics").handler({
@@ -454,11 +493,17 @@ describe("lsp_diagnostics", () => {
     expect(shownCount).toBe(20);
   });
 
-  it("requires only file (no position schema)", async () => {
-    mockGetClient.mockResolvedValue(undefined);
+  it("rejects file and files together (exactly-one-of, B2)", async () => {
     const tools = createLspToolSet(ctx);
-    const schema = byName(tools, "lsp_diagnostics").inputSchema;
-    expect(schema.required).toEqual(["file"]);
+    await expect(
+      byName(tools, "lsp_diagnostics").handler({
+        file: "/work/src/a.ts",
+        files: ["/work/src/b.ts"],
+      })
+    ).rejects.toThrow("exactly one of `file` or `files`");
+    await expect(byName(tools, "lsp_diagnostics").handler({})).rejects.toThrow(
+      "exactly one of `file` or `files`"
+    );
   });
 
   it("diagnostics filter drops severity < 1 (negative and zero), keeps positive", async () => {
@@ -482,9 +527,14 @@ describe("lsp_diagnostics", () => {
     const { client } = makeFakeClient(() => undefined);
     (
       client as unknown as {
-        getDiagnostics: (uri: string) => ReadonlyArray<unknown>;
+        getDiagnosticsEntry: (uri: string) =>
+          | {
+              readonly items: ReadonlyArray<unknown>;
+              readonly pushVersion?: number;
+            }
+          | undefined;
       }
-    ).getDiagnostics = () => items;
+    ).getDiagnosticsEntry = () => ({ items });
     mockGetClient.mockResolvedValue(client);
     const tools = createLspToolSet(ctx);
     const out = await byName(tools, "lsp_diagnostics").handler({
@@ -617,9 +667,14 @@ describe("lsp_diagnostics cap at exactly 20 (overflow)", () => {
     const { client } = makeFakeClient(() => undefined);
     (
       client as unknown as {
-        getDiagnostics: (uri: string) => ReadonlyArray<unknown>;
+        getDiagnosticsEntry: (uri: string) =>
+          | {
+              readonly items: ReadonlyArray<unknown>;
+              readonly pushVersion?: number;
+            }
+          | undefined;
       }
-    ).getDiagnostics = () => items;
+    ).getDiagnosticsEntry = () => ({ items });
     mockGetClient.mockResolvedValue(client);
     const tools = createLspToolSet(ctx);
     const out = await byName(tools, "lsp_diagnostics").handler({
@@ -640,9 +695,14 @@ describe("lsp_diagnostics cap at exactly 20 (overflow)", () => {
     const { client } = makeFakeClient(() => undefined);
     (
       client as unknown as {
-        getDiagnostics: (uri: string) => ReadonlyArray<unknown>;
+        getDiagnosticsEntry: (uri: string) =>
+          | {
+              readonly items: ReadonlyArray<unknown>;
+              readonly pushVersion?: number;
+            }
+          | undefined;
       }
-    ).getDiagnostics = () => items;
+    ).getDiagnosticsEntry = () => ({ items });
     mockGetClient.mockResolvedValue(client);
     const tools = createLspToolSet(ctx);
     const out = await byName(tools, "lsp_diagnostics").handler({
@@ -716,8 +776,16 @@ describe("initialize handshake failure propagates as tool error (exception)", ()
 
   it("diagnostics handler tolerates getDiagnostics returning non-array (empty)", async () => {
     const { client } = makeFakeClient(() => undefined);
-    (client as unknown as { getDiagnostics: () => unknown }).getDiagnostics =
-      () => undefined;
+    (
+      client as unknown as {
+        getDiagnosticsEntry: () =>
+          | {
+              readonly items: ReadonlyArray<unknown>;
+              readonly pushVersion?: number;
+            }
+          | undefined;
+      }
+    ).getDiagnosticsEntry = () => undefined;
     mockGetClient.mockResolvedValue(client);
     const tools = createLspToolSet(ctx);
     // plan T3 后 getDiagnostics=undefined 会触发读前等待（deadline 2s）——
@@ -895,7 +963,9 @@ describe("lsp_workspace_symbol schema (plan T3)", () => {
     expect(mockGetClient).toHaveBeenCalledWith(
       ctx,
       "/work/iknow-workspace.ts",
-      expect.objectContaining({ server: expect.objectContaining({ id: "typescript" }) })
+      expect.objectContaining({
+        server: expect.objectContaining({ id: "typescript" }),
+      })
     );
   });
 
@@ -954,9 +1024,7 @@ describe("stringifyResult cap (plan T3)", () => {
     );
     // 展示正文 ≤ 48KB（cap），footer 有限长 → 总输出封顶在 cap + footer 内。
     expect(Number(match?.[1])).toBeLessThanOrEqual(MAX_RESULT_BYTES);
-    expect(Buffer.byteLength(out, "utf8")).toBeLessThan(
-      MAX_RESULT_BYTES + 200
-    );
+    expect(Buffer.byteLength(out, "utf8")).toBeLessThan(MAX_RESULT_BYTES + 200);
   });
 
   it("leaves results at or below the cap untouched (no footer)", async () => {
@@ -992,8 +1060,16 @@ describe("lsp_diagnostics wait for first push (plan T3)", () => {
 
   it("returns immediately when diagnostics are already cached (first poll hits)", async () => {
     const { client } = makeFakeClient(() => undefined);
-    (client as unknown as { getDiagnostics: () => unknown }).getDiagnostics =
-      () => [diagItem("cached err")];
+    (
+      client as unknown as {
+        getDiagnosticsEntry: () =>
+          | {
+              readonly items: ReadonlyArray<unknown>;
+              readonly pushVersion?: number;
+            }
+          | undefined;
+      }
+    ).getDiagnosticsEntry = () => ({ items: [diagItem("cached err")] });
     mockGetClient.mockResolvedValue(client);
     const tools = createLspToolSet(ctx);
     const out = (await byName(tools, "lsp_diagnostics").handler({
@@ -1008,11 +1084,19 @@ describe("lsp_diagnostics wait for first push (plan T3)", () => {
       const items = [diagItem("late err")];
       let polls = 0;
       const { client } = makeFakeClient(() => undefined);
-      (client as unknown as { getDiagnostics: () => unknown }).getDiagnostics =
-        () => {
-          polls += 1;
-          return polls >= 3 ? items : undefined;
-        };
+      (
+        client as unknown as {
+          getDiagnosticsEntry: () =>
+            | {
+                readonly items: ReadonlyArray<unknown>;
+                readonly pushVersion?: number;
+              }
+            | undefined;
+        }
+      ).getDiagnosticsEntry = () => {
+        polls += 1;
+        return polls >= 3 ? { items } : undefined;
+      };
       mockGetClient.mockResolvedValue(client);
       const tools = createLspToolSet(ctx);
       const p = byName(tools, "lsp_diagnostics").handler({
@@ -1031,8 +1115,16 @@ describe("lsp_diagnostics wait for first push (plan T3)", () => {
     vi.useFakeTimers();
     try {
       const { client } = makeFakeClient(() => undefined);
-      (client as unknown as { getDiagnostics: () => unknown }).getDiagnostics =
-        () => undefined;
+      (
+        client as unknown as {
+          getDiagnosticsEntry: () =>
+            | {
+                readonly items: ReadonlyArray<unknown>;
+                readonly pushVersion?: number;
+              }
+            | undefined;
+        }
+      ).getDiagnosticsEntry = () => undefined;
       mockGetClient.mockResolvedValue(client);
       const tools = createLspToolSet(ctx);
       const p = byName(tools, "lsp_diagnostics").handler({
@@ -1051,8 +1143,16 @@ describe("lsp_diagnostics wait for first push (plan T3)", () => {
     vi.useFakeTimers();
     try {
       const { client } = makeFakeClient(() => undefined);
-      (client as unknown as { getDiagnostics: () => unknown }).getDiagnostics =
-        () => undefined;
+      (
+        client as unknown as {
+          getDiagnosticsEntry: () =>
+            | {
+                readonly items: ReadonlyArray<unknown>;
+                readonly pushVersion?: number;
+              }
+            | undefined;
+        }
+      ).getDiagnosticsEntry = () => undefined;
       mockGetClient.mockResolvedValue(client);
       const tools = createLspToolSet(ctx);
       const ac = new AbortController();
@@ -1124,5 +1224,319 @@ describe("per-request timeout (plan T1)", () => {
     })) as string;
     expect(JSON.parse(out)).toEqual({ ok: true });
     expect(calls).toHaveLength(1);
+  });
+});
+
+// ── 二期 B2：批量诊断（files）─────────────────────────────────────────────────
+//
+// 覆盖：互斥报错（上方 schema describe）/ 封顶 10 / 分组输出（每文件一段
+// `<diagnostics file=...>`，段落间空行）/ 无 server 文件降级为哨兵段。
+
+describe("lsp_diagnostics batch files (B2)", () => {
+  function diagItem(message: string) {
+    return {
+      severity: 1,
+      range: { start: { line: 0, character: 0 } },
+      message,
+    };
+  }
+
+  it("renders one <diagnostics> segment per file, blank-line separated", async () => {
+    const { client } = makeFakeClient(() => undefined);
+    (
+      client as unknown as {
+        getDiagnosticsEntry: () =>
+          | {
+              readonly items: ReadonlyArray<unknown>;
+              readonly pushVersion?: number;
+            }
+          | undefined;
+      }
+    ).getDiagnosticsEntry = () => ({ items: [diagItem("batch err")] });
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    const out = (await byName(tools, "lsp_diagnostics").handler({
+      files: ["/work/src/a.ts", "/work/src/b.ts"],
+    })) as string;
+    expect(out).toContain('<diagnostics file="/work/src/a.ts">');
+    expect(out).toContain('<diagnostics file="/work/src/b.ts">');
+    expect(out).toContain("batch err");
+    // 段落间空行：`</diagnostics>\n\n<diagnostics`。
+    expect(out).toContain("</diagnostics>\n\n<diagnostics");
+  });
+
+  it("rejects files with more than 10 entries", async () => {
+    const tools = createLspToolSet(ctx);
+    const files = Array.from({ length: 11 }, (_, i) => `/work/f${i}.ts`);
+    await expect(
+      byName(tools, "lsp_diagnostics").handler({ files })
+    ).rejects.toThrow(/must NOT have more than 10 items|at most 10 entries/);
+  });
+
+  it("degrades a no-server file to a sentinel segment and keeps the rest", async () => {
+    const fake = makeFakeClient(() => undefined);
+    (
+      fake.client as unknown as {
+        getDiagnosticsEntry: () => unknown;
+      }
+    ).getDiagnosticsEntry = () => ({ items: [diagItem("ok err")] });
+    mockGetClient
+      .mockResolvedValueOnce(undefined) // 第一个文件无 server
+      .mockResolvedValueOnce(fake.client);
+    const tools = createLspToolSet(ctx);
+    const out = (await byName(tools, "lsp_diagnostics").handler({
+      files: ["/work/none.ts", "/work/src/b.ts"],
+    })) as string;
+    expect(out).toContain("(no LSP server configured for /work/none.ts;");
+    expect(out).toContain('<diagnostics file="/work/src/b.ts">');
+    expect(out).toContain("ok err");
+  });
+});
+
+// ── 二期 B1：编辑后诊断收敛（pushVersion 追平 openVersion）───────────────────
+
+describe("lsp_diagnostics edit-aware wait (B1)", () => {
+  function diagItem(message: string) {
+    return {
+      severity: 1,
+      range: { start: { line: 0, character: 0 } },
+      message,
+    };
+  }
+
+  it("waits for pushVersion to catch up with openVersion after an edit", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client } = makeFakeClient(() => undefined);
+      let openVersion = 2; // 编辑过（didChange 后）
+      let entry:
+        | {
+            readonly items: ReadonlyArray<unknown>;
+            readonly pushVersion?: number;
+          }
+        | undefined = { items: [diagItem("stale")], pushVersion: 1 };
+      (
+        client as unknown as {
+          getDiagnosticsEntry: () =>
+            | {
+                readonly items: ReadonlyArray<unknown>;
+                readonly pushVersion?: number;
+              }
+            | undefined;
+          getOpenVersion: () => number | undefined;
+        }
+      ).getDiagnosticsEntry = () => entry;
+      (
+        client as unknown as { getOpenVersion: () => number | undefined }
+      ).getOpenVersion = () => openVersion;
+      mockGetClient.mockResolvedValue(client);
+      const tools = createLspToolSet(ctx);
+      const p = byName(tools, "lsp_diagnostics").handler({
+        file: "/work/src/a.ts",
+      }) as Promise<string>;
+      // 轮询进行中：server 基于新内容重推（pushVersion 追平 openVersion）。
+      await vi.advanceTimersByTimeAsync(150);
+      entry = { items: [diagItem("fresh")], pushVersion: 2 };
+      // 再推一轮 timer：让下一次 100ms 轮询读到 fresh entry 后返回。
+      await vi.advanceTimersByTimeAsync(100);
+      const out = await p;
+      expect(out).toContain("fresh");
+      expect(out).not.toContain("stale");
+      void openVersion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns the stale content at the deadline when pushVersion never catches up", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client } = makeFakeClient(() => undefined);
+      (
+        client as unknown as {
+          getDiagnosticsEntry: () =>
+            | {
+                readonly items: ReadonlyArray<unknown>;
+                readonly pushVersion?: number;
+              }
+            | undefined;
+          getOpenVersion: () => number | undefined;
+        }
+      ).getDiagnosticsEntry = () => ({
+        items: [diagItem("stale")],
+        pushVersion: 1,
+      });
+      (
+        client as unknown as { getOpenVersion: () => number | undefined }
+      ).getOpenVersion = () => 2;
+      mockGetClient.mockResolvedValue(client);
+      const tools = createLspToolSet(ctx);
+      const p = byName(tools, "lsp_diagnostics").handler({
+        file: "/work/src/a.ts",
+      }) as Promise<string>;
+      await vi.advanceTimersByTimeAsync(DIAGNOSTICS_WAIT_MS + 100);
+      const out = await p;
+      expect(out).toContain("stale"); // deadline 到 → 用现有内容
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("consumes diagnosticsWaitMs from ctx (B7)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client } = makeFakeClient(() => undefined);
+      (
+        client as unknown as {
+          getDiagnosticsEntry: () => undefined;
+          getOpenVersion: () => number | undefined;
+        }
+      ).getDiagnosticsEntry = () => undefined;
+      (
+        client as unknown as { getOpenVersion: () => number | undefined }
+      ).getOpenVersion = () => 2;
+      mockGetClient.mockResolvedValue(client);
+      const ctxCustom = { ...ctx, diagnosticsWaitMs: 500 };
+      const tools = createLspToolSet(ctxCustom);
+      const p = byName(tools, "lsp_diagnostics").handler({
+        file: "/work/src/a.ts",
+      }) as Promise<string>;
+      await vi.advanceTimersByTimeAsync(600);
+      const out = await p;
+      expect(out).toContain('<diagnostics file="/work/src/a.ts">');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ── 二期 B3：哨兵分层（no-server / no-root / spawn-failed）───────────────────
+
+describe("tiered no-server sentinel (B3)", () => {
+  it("no-root failure renders the missing-root-marker message", async () => {
+    mockGetClientDetailed.mockResolvedValue({
+      failure: { reason: "no-root", serverId: "typescript" },
+    });
+    const tools = createLspToolSet(ctx);
+    const out = (await byName(tools, "lsp_definition").handler({
+      file: "/work/src/a.ts",
+      line: 1,
+      character: 0,
+    })) as string;
+    expect(out).toBe(
+      "(no LSP project root found above /work/src/a.ts within /work; missing root marker for typescript)"
+    );
+  });
+
+  it("spawn-failed failure renders the installHint from the server declaration", async () => {
+    mockGetClientDetailed.mockResolvedValue({
+      failure: { reason: "spawn-failed", serverId: "pyright" },
+    });
+    const tools = createLspToolSet(ctx);
+    const out = (await byName(tools, "lsp_definition").handler({
+      file: "/work/src/a.py",
+      line: 1,
+      character: 0,
+    })) as string;
+    expect(out).toBe(
+      "(LSP server pyright unavailable; hint: npm i -g pyright)"
+    );
+  });
+
+  it("spawn-failed without installHint omits the hint sentence", async () => {
+    mockGetClientDetailed.mockResolvedValue({
+      failure: { reason: "spawn-failed", serverId: "no-hint-server" },
+    });
+    const tools = createLspToolSet(ctx);
+    const out = (await byName(tools, "lsp_definition").handler({
+      file: "/work/src/a.ts",
+      line: 1,
+      character: 0,
+    })) as string;
+    expect(out).toBe("(LSP server no-hint-server unavailable)");
+  });
+
+  it("disabledServers hit renders no-server with serverId (B7)", async () => {
+    mockGetClientDetailed.mockResolvedValue({
+      failure: { reason: "no-server", serverId: "typescript" },
+    });
+    const tools = createLspToolSet(ctx);
+    const out = (await byName(tools, "lsp_definition").handler({
+      file: "/work/src/a.ts",
+      line: 1,
+      character: 0,
+    })) as string;
+    expect(out).toBe(
+      "(no LSP server configured for /work/src/a.ts; supported extensions: .ts, .tsx, .js, .jsx, .mjs, .cjs, .mts, .cts, .py, .pyi, .yaml, .yml, .json, .dockerfile, Dockerfile)"
+    );
+  });
+});
+
+// ── 二期 B7：requestTimeoutMs 从 ctx 消费─────────────────────────────────────
+
+describe("ctx.requestTimeoutMs consumption (B7)", () => {
+  it("times out at the ctx-configured deadline instead of the 20s default", async () => {
+    const { client } = makeFakeClient(() => undefined);
+    (client as unknown as { sendRequest: unknown }).sendRequest = (
+      _method: string,
+      _params: unknown,
+      token: { onCancellationRequested(cb: () => void): unknown }
+    ) =>
+      new Promise((_resolve, reject) => {
+        token.onCancellationRequested(() =>
+          reject(new Error("Request cancelled"))
+        );
+      });
+    mockGetClient.mockResolvedValue(client);
+    const ctxCustom = { ...ctx, requestTimeoutMs: 1_000 };
+    const tools = createLspToolSet(ctxCustom);
+
+    vi.useFakeTimers();
+    try {
+      const p = byName(tools, "lsp_definition").handler({
+        file: "/work/src/a.ts",
+        line: 1,
+        character: 0,
+      });
+      const expectation = expect(p).rejects.toThrow(
+        "[lsp_definition] LSP request textDocument/definition timed out after 1s (cancelled)"
+      );
+      await vi.advanceTimersByTimeAsync(1_001);
+      await expectation;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("isLspFailureSentinel (probe FAIL detection, B3 closeout)", () => {
+  it("treats no-server / no-root / spawn-failed strings as failure sentinels", () => {
+    expect(
+      isLspFailureSentinel(
+        "(no LSP server configured for /work/a.ts; supported extensions: .ts)"
+      )
+    ).toBe(true);
+    expect(
+      isLspFailureSentinel(
+        "(no LSP project root found above /work/a.ts within /work; missing root marker for typescript)"
+      )
+    ).toBe(true);
+    expect(
+      isLspFailureSentinel(
+        "(LSP server pyright unavailable; hint: npm i -g pyright)"
+      )
+    ).toBe(true);
+    expect(
+      isLspFailureSentinel("(LSP server no-hint-server unavailable)")
+    ).toBe(true);
+  });
+
+  it("does not treat a successful hover or empty diagnostics payload as a sentinel", () => {
+    expect(isLspFailureSentinel('{"contents":"ok"}')).toBe(false);
+    expect(
+      isLspFailureSentinel('<diagnostics file="a.ts">\n</diagnostics>')
+    ).toBe(false);
+    expect(isLspFailureSentinel("")).toBe(false);
+    expect(isLspFailureSentinel(undefined)).toBe(false);
   });
 });

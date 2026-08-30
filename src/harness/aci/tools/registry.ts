@@ -30,6 +30,7 @@ import { createMemoryRecallTool } from "../../memory/tools/recall.js";
 import { createMemorySaveTool } from "../../memory/tools/save.js";
 import { createToolSearchTool } from "./tool-search.js";
 import { createLspToolSet } from "./lsp.js";
+import type { LspCtx } from "../../lsp/types.js";
 import { createSkillTool } from "./skill.js";
 import { createSkillSearchTool } from "./skill-search.js";
 import { createSpawnSubAgentTool } from "../../subagent/spawn-subagent-tool.js";
@@ -162,6 +163,13 @@ export interface CreateDefaultAciRegistryOptions {
   readonly mcpManager?: McpManager;
   /** #251 onEdit 接缝:edit_file 写盘成功后回调(装配层接 LSP notifier)。 */
   readonly onEdit?: (file: string) => void;
+  /**
+   * lsp-optimization 二期 B7 closeout：完整 LspCtx 透传给 createLspToolSet。
+   * 缺席时回落 `{ directory: sandboxRoot }`（与一轮行为一致）。
+   * build-engine / worker 必须传入与 notifier/warmup 同一份对象，否则
+   * settings.lsp（timeout / wait / idle / disabledServers）对工具路径不生效。
+   */
+  readonly lspCtx?: LspCtx;
   /** ADR-0019 (T4): per-root state anchor. Threaded into bash + read_file
    *  factories so the fs-policy fence binds `<workspaceRoot>` and the
    *  protected-state pathset covers `<workspaceRoot>/.iknow` at parity
@@ -235,8 +243,8 @@ export interface CreateDefaultAciRegistryOptions {
  * / lsp_outgoing_calls / lsp_diagnostics）。createLspToolSet(ctx) 返回冻结
  * AciToolDef 列表；每件按 ACI_TOOLSET_NAMES 中的 key 索引。
  */
-function lspTools(directory: string): Record<string, () => AciToolDef> {
-  const tools = createLspToolSet({ directory });
+function lspTools(ctx: LspCtx): Record<string, () => AciToolDef> {
+  const tools = createLspToolSet(ctx);
   const map: Record<string, () => AciToolDef> = {};
   for (const t of tools) {
     map[t.name] = () => t;
@@ -317,9 +325,10 @@ export function createDefaultAciRegistry(
           return r;
         },
       }),
-    // #251 LSP 工具集：NearestRoot 上界 stop=ctx.directory=sandboxRoot
-    // （build-engine 传 process.cwd()，与 fs 工具软沙箱同根语义一致）。
-    ...lspTools(sandboxRoot),
+    // #251 LSP 工具集：NearestRoot 上界 stop=ctx.directory。
+    // B7 closeout：优先用装配层同一份 lspCtx（settings / idle / disabledServers），
+    // 缺席回落 sandboxRoot-only（worker 以外的遗留调用方）。
+    ...lspTools(opts.lspCtx ?? { directory: sandboxRoot }),
     // #337 T5 skill 工具集（条件化装配：skillCatalog 缺席时不入注册表）。
     ...(skillCatalog
       ? {

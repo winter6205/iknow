@@ -40,6 +40,8 @@ import { errorMessage } from "./errors.js";
 import type { AciCatalog, AciToolDef } from "./aci/types.js";
 import { createLspNotifier } from "./lsp/notifier.js";
 import { startLspWarmup } from "./lsp/warmup.js";
+import { DEFAULT_LSP_IDLE_TIMEOUT_MS } from "./lsp/client.js";
+import type { LspCtx } from "./lsp/types.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
 import type { Registry } from "./tools/types.js";
 import type { RegistryImpl } from "./tools/registry.js";
@@ -51,7 +53,11 @@ import {
   createSecretsGuardHook,
   type HookErrorEvent,
 } from "./permission/index.js";
-import { loadIknowSettings, resolveWorktreeOnMutate, type IknowSettings } from "../config/settings.js";
+import {
+  loadIknowSettings,
+  resolveWorktreeOnMutate,
+  type IknowSettings,
+} from "../config/settings.js";
 import {
   createWorktreeIsolationExecutor,
   type WorktreeIsolationHostOpts,
@@ -354,12 +360,35 @@ export async function buildHarnessEngine(
   // (全 surface,ask 也装配 — SC12 守门)。
   // **降级契约**:scanner 自身 try/catch + warn(目录缺失跳过),scan 抛错被
   // createSkillScanner 的 warn 吞掉,build 不阻塞装配。
+  // #126 T5:settings 对象缝（测试注入隔离 settings；生产缺省 loadIknowSettings）。
+  // 二期 B7：上移到 LSP 装配之前 —— settings.lsp 注入 LspCtx（工具层超时/
+  // 等待 + client idle sweep + disabledServers 过滤）。
+  const settings = opts.settings ?? loadIknowSettings({ cwd, home: userHome });
   // #251 LSP 联动缝:edit_file 写盘成功后由装配层注入 lspNotifier.invalidate
   // 作为 registry 的 onEdit 回调(notifier 内部 fire-and-forget + 失败降级,
   // 详见 src/harness/lsp/notifier.ts)。SSOT:LspCtx.directory 必须等于
   // sandboxRoot(LS 工具的 NearestRoot 上界 stop 与 fs 软沙箱同根语义),
   // 否则两者分叉会让同一边界出现两个值。
-  const lspCtx = { directory: sandboxRoot };
+  // 二期 B7:settings.lsp 四字段注入 LspCtx（全部可选；缺席走工具层/client
+  // 缺省 —— requestTimeoutMs 20s / diagnosticsWaitMs 2s / idleTimeoutMs 10min /
+  // disabledServers 空）。
+  const lspCtx: LspCtx = {
+    directory: sandboxRoot,
+    ...(settings.lsp?.requestTimeoutMs !== undefined
+      ? { requestTimeoutMs: settings.lsp.requestTimeoutMs }
+      : {}),
+    ...(settings.lsp?.diagnosticsWaitMs !== undefined
+      ? { diagnosticsWaitMs: settings.lsp.diagnosticsWaitMs }
+      : {}),
+    // idle sweep 缺省 10min（plan B5）：settings 未配置时注入缺省值；
+    // 显式 0 = 关闭 sweep（负数已被 parse 丢掉）。
+    ...(settings.lsp?.idleTimeoutMs !== undefined
+      ? { idleTimeoutMs: settings.lsp.idleTimeoutMs }
+      : { idleTimeoutMs: DEFAULT_LSP_IDLE_TIMEOUT_MS }),
+    ...(settings.lsp?.disabledServers !== undefined
+      ? { disabledServers: settings.lsp.disabledServers }
+      : {}),
+  };
   const lspNotifier = createLspNotifier(lspCtx);
   // lsp-optimization plan T4:fire-and-forget 预热 —— 装配完成即按 sandboxRoot
   // 内文件扩展名探测预 spawn LSP server,消掉首次 lsp_* 调用的 initialize
@@ -400,11 +429,10 @@ export async function buildHarnessEngine(
         // T4: 并发上限由 env.subagent.maxConcurrentWorkers 透传;缺席时
         // manager 回退默认 15。
         createSubAgentManager({
-          spawn:
-            createDefaultSubAgentSpawn(
-              opts.subagentDiagnosticsDir,
-              workspaceRoot
-            ),
+          spawn: createDefaultSubAgentSpawn(
+            opts.subagentDiagnosticsDir,
+            workspaceRoot
+          ),
           sandboxRoot,
           trace: opts.subagentTrace ?? createNoopTraceService(),
           diagnosticsDir:
@@ -446,8 +474,8 @@ export async function buildHarnessEngine(
       );
     }
   }
-  // #126 T5:settings 对象缝（测试注入隔离 settings；生产缺省 loadIknowSettings）。
-  const settings = opts.settings ?? loadIknowSettings({ cwd, home: userHome });
+  // #126 T5:settings 对象缝 —— 已上移至 LSP 装配点之前（二期 B7：settings.lsp
+  // 注入 LspCtx），此处沿用同一份 settings。
   // #406 T4:secret 处理模式 —— settings.secrets.mode 驱动装配。缺省 = "roundtrip"
   // （识别 + 占位符替换 + bash 还原 + 输出 mask）；"block" = 旧 deny-only
   // preToolUse guard（#126 兼容路径），roundtrip 机制整体关闭。非法值已被
@@ -539,6 +567,7 @@ export async function buildHarnessEngine(
     // 实际调用时取当前值)。
     ...(mcpManager ? { mcpManager } : {}),
     onEdit: (file) => lspNotifier.invalidate(file),
+    lspCtx,
     // #406 T3:secret registry 透传 → bash 工具 handler 在 spawn 前还原占位符。
     // secretRegistry 已在上方构造（T2 段），registry 工厂只在 handler 调用时
     // 解引用 opts.secretRegistry（惰性），无循环依赖。
@@ -818,7 +847,10 @@ export async function buildHarnessEngine(
       : undefined;
   const overlayMemoryPrefetch =
     memoryEnabled && surface !== "ask" && (autoExtractOn || tuiLive)
-      ? async (query: string, prefetchOpts?: PrefetchQueryOpts): Promise<string> => {
+      ? async (
+          query: string,
+          prefetchOpts?: PrefetchQueryOpts
+        ): Promise<string> => {
           if (memoryFlags.autoExtract !== true) return "";
           try {
             return await buildMemoryPrefetchOverlay({

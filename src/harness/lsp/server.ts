@@ -199,6 +199,7 @@ async function resolveLanguageServerBin(): Promise<string | undefined> {
  */
 export const Typescript: LspServerInfo = {
   id: "typescript",
+  installHint: "npm i -g typescript typescript-language-server",
   root: NearestRoot(TS_LOCKFILES, TS_EXCLUDE),
   extensions: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"],
   async spawn(root, _ctx) {
@@ -239,6 +240,7 @@ export const Typescript: LspServerInfo = {
  */
 export const Pyright: LspServerInfo = {
   id: "pyright",
+  installHint: "npm i -g pyright",
   root: NearestRoot([
     "pyproject.toml",
     "setup.py",
@@ -273,6 +275,7 @@ export const Pyright: LspServerInfo = {
  */
 export const YamlLS: LspServerInfo = {
   id: "yaml-language-server",
+  installHint: "npm i -g yaml-language-server",
   root: (_file, ctx) => Promise.resolve(ctx.directory),
   extensions: [".yaml", ".yml"],
   async spawn(root, _ctx) {
@@ -299,6 +302,7 @@ export const YamlLS: LspServerInfo = {
  */
 export const JsonLS: LspServerInfo = {
   id: "json-language-server",
+  installHint: "npm i -g vscode-langservers-extracted",
   root: (_file, ctx) => Promise.resolve(ctx.directory),
   extensions: [".json"],
   async spawn(root, _ctx) {
@@ -328,6 +332,7 @@ export const JsonLS: LspServerInfo = {
  */
 export const DockerfileLS: LspServerInfo = {
   id: "dockerfile-language-server-nodejs",
+  installHint: "npm i -g dockerfile-language-server-nodejs",
   root: (_file, ctx) => Promise.resolve(ctx.directory),
   extensions: [".dockerfile", "Dockerfile"],
   async spawn(root, _ctx) {

@@ -13,7 +13,10 @@
  *     扩展名命中样本的 server 逐个预热——混合语言项目（ts+py 等）里每个
  *     server 都可能承担首次冷启动；单个 server 失败（undefined / throw）
  *     只留痕并继续下一个。
- *   - **不 ensureOpen**：预打开无关文件会污染 server 侧 project 状态。
+ *   - **ensureOpen 样本（二期 B4）**：getClient 成功后对样本文件 ensureOpen
+ *     ——预热 server 侧 project 加载（tsserver 对未打开文件不建 project），
+ *     首次 lsp_* 调用连 project 加载也免了。ensureOpen 读的是 warmup 扫描
+ *     出的样本文件（磁盘现状即最新），单文件失败 try/catch 留痕继续。
  *   - 找不到任何候选文件（空目录 / 全是跳过目录）→ 静默放弃，不报错。
  *
  * **取消语义（Q2/A9）**：本模块只经 `getClient` 建连接，不终止任何
@@ -57,13 +60,14 @@ async function warmup(ctx: LspCtx): Promise<void> {
       if (!sample) continue; // 该 server 的扩展名在本项目无样本 → 跳过
       try {
         // 逐个预热所有命中 server（不早退）：混合语言项目（ts+py 等）里
-        // 每个 server 都可能承担首次 lsp_* 调用的冷启动。不 ensureOpen，
-        // 避免预打开无关文件污染 server 侧 project。
-        await getClient(ctx, sample, { server });
+        // 每个 server 都可能承担首次 lsp_* 调用的冷启动。getClient 成功后
+        // 对样本 ensureOpen（二期 B4）——预热 server 侧 project 加载；样本
+        // 是 warmup 自己扫描出的磁盘文件，didOpen 读到的即磁盘现状。
+        const client = await getClient(ctx, sample, { server });
+        if (client) await client.ensureOpen(sample);
       } catch (err) {
-        // 单个 server 失败（如 bin 缺失 / spawn 抛错）只记录，继续下一个；
-        // getClient 自身已把 spawn 失败归一为 undefined，此处 catch 兜底
-        // 预料外的 throw。S3 禁空 catch：失败统一 stderr 留痕。
+        // EXIT: 单个 server spawn/ensureOpen 抛错 → 记入 failures 后继续下一
+        // server；getClient 已把 spawn 失败归一为 undefined，此处兜底预料外 throw。
         failures.push(
           `${server.id}: ${err instanceof Error ? err.message : String(err)}`
         );
@@ -73,8 +77,8 @@ async function warmup(ctx: LspCtx): Promise<void> {
       process.stderr.write(`[lsp-warmup] partial: ${failures.join("; ")}\n`);
     }
   } catch (err) {
-    // 预热是纯优化：任何失败（目录不可读等）都只留痕一行，首次 lsp_*
-    // 调用会走正常 getClient 路径自愈。
+    // EXIT: 预热整体失败（目录不可读等）→ 只 stderr 一行，不抛；首次 lsp_*
+    // 走正常 getClient 自愈。
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(`[lsp-warmup] skipped: ${msg}\n`);
   }

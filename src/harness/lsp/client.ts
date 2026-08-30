@@ -41,6 +41,13 @@ import type { LspCtx, LspServerInfo } from "./types.js";
 import { resolveServer } from "./server.js";
 import { languageIdFor } from "./language.js";
 
+/**
+ * 空闲客户端回收的缺省阈值（lsp-optimization 二期 B5）：常驻引擎
+ * （build-engine）在 settings.lsp.idleTimeoutMs 未配置时注入本值，让 sweep
+ * 生效；worker 不读 settings 文件，但注入本缺省值（与常驻引擎同 sweep）。
+ */
+export const DEFAULT_LSP_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
 /** 客户端包装：对上层（handler）暴露薄透传的 sendRequest / sendNotification / dispose。 */
 export interface LspClient {
   /** 底层 vscode-jsonrpc `MessageConnection`（cancel 等进阶用法可直达）。 */
@@ -78,27 +85,98 @@ export interface LspClient {
   notifyChange(file: string): Promise<void>;
   /** 取某文件最近一次 push diagnostics（latest-wins；无 → undefined）。 */
   getDiagnostics(uri: string): ReadonlyArray<unknown> | undefined;
+  /**
+   * 取某文件的诊断 entry（含 items 与 pushVersion，lsp-optimization 二期 B1）。
+   * `pushVersion` 是 server 推送时携带的 textDocument 版本（params.version 为
+   * number 时透传，缺省 undefined）；工具层据此判断「编辑后的新诊断是否已到」。
+   */
+  getDiagnosticsEntry(
+    uri: string
+  ):
+    | { readonly items: ReadonlyArray<unknown>; readonly pushVersion?: number }
+    | undefined;
+  /**
+   * 该 uri 当前 didChange 版本（二期 B1）：didOpen=1、notifyChange 每次 +1；
+   * 未打开 → undefined。工具层据此判定「编辑过」（version ≥ 2）并等待
+   * pushVersion 追平 openVersion。
+   */
+  getOpenVersion(uri: string): number | undefined;
   /** 释放连接（不杀进程；进程随宿主进程同生同灭，spec S14）。 */
   dispose(): void;
 }
+
+/**
+ * getClientDetailed 的失败原因（lsp-optimization 二期 B3 哨兵分层）：
+ *   - `no-server`：resolveServer 无匹配扩展名，或命中的 server.id 在
+ *     ctx.disabledServers（视为未配置）；
+ *   - `no-root`：server.root() 未找到项目根标记；
+ *   - `spawn-failed`：spawn 返回 undefined / throw（bin 缺失等），或命中的
+ *     是 broken 记忆。
+ * `serverId` 在已知命中目标时携带（no-server 的扩展名不匹配分支无 id）。
+ */
+export type LspClientFailure = {
+  reason: "no-server" | "no-root" | "spawn-failed";
+  serverId?: string;
+};
 
 /** 三件套缓存 —— 模块级状态（spec S14：同进程同生，不跨 session 持久化）。 */
 
 /** key = `${root}:${server.id}` → 已建立并复用的客户端。 */
 const clients = new Map<string, LspClient>();
-/** 已确认 spawn 失败（不可用）的 key；记忆后不再重试。 */
-const broken = new Set<string>();
+/**
+ * 已确认 spawn 失败（不可用）的 key → 失败原因（二期 B3：Set 升级 Map，
+ * value 留扩展余地；当前唯一取值 "spawn-failed"）。记忆后不再重试。
+ */
+const broken = new Map<string, "spawn-failed">();
 /** 正在 spawn 中的 key → in-flight Promise；并发请求共享一次 spawn。 */
 const inflight = new Map<string, Promise<LspClient | undefined>>();
+/**
+ * key → 最近一次被使用的时刻（二期 B5 空闲回收）。getClientDetailed 的
+ * 成功路径刷新；sweepIdleClients 按 ctx.idleTimeoutMs 回收超时条目。
+ */
+const lastUsedAt = new Map<string, number>();
 
 /**
- * 按 (file, ctx) 取得（或建立）对应 LSP 客户端。
+ * 空闲客户端回收（二期 B5）：把 `now - lastUsedAt > idleTimeoutMs` 的缓存
+ * 客户端 dispose + 逐出。dispose 只释放连接（子进程 stdin EOF → server 自行
+ * 退出，本模块**绝不 kill 进程**）；exit 逐出幂等（clients.get(key) guard）。
  *
- * 流程（spec § client.ts）：
- *   1. `root = await server.root(file, ctx)`；undefined → 本文件无 LSP 服务。
- *   2. `key = root + ":" + server.id`。
- *   3. `broken.has(key)` → 已知不可用，不重试。
- *   4. `clients.has(key)` → 复用缓存。
+ * @param idleTimeoutMs 回收阈值；undefined / NaN / ≤0 → 不 sweep。
+ */
+function evictCachedClient(key: string, expected?: LspClient): void {
+  if (expected !== undefined && clients.get(key) !== expected) return;
+  clients.delete(key);
+  lastUsedAt.delete(key);
+}
+
+function sweepIdleClients(idleTimeoutMs: number | undefined): void {
+  if (
+    idleTimeoutMs === undefined ||
+    !Number.isFinite(idleTimeoutMs) ||
+    idleTimeoutMs <= 0 ||
+    clients.size === 0
+  )
+    return;
+  const now = Date.now();
+  for (const [key, client] of clients) {
+    if (now - (lastUsedAt.get(key) ?? 0) > idleTimeoutMs) {
+      client.dispose();
+      evictCachedClient(key, client);
+    }
+  }
+}
+
+/**
+ * 按 (file, ctx) 取得（或建立）对应 LSP 客户端，并给出失败原因
+ * （lsp-optimization 二期 B3 哨兵分层）。
+ *
+ * 流程（spec § client.ts + 二期扩展）：
+ *   0. 入口 lazy sweep（二期 B5）：按 ctx.idleTimeoutMs 回收空闲客户端。
+ *   1. `server = opts?.server ?? resolveServer(file)`；无匹配 → no-server。
+ *      命中的 server.id 在 ctx.disabledServers → no-server（视为未配置）。
+ *   2. `root = await server.root(file, ctx)`；undefined → no-root。
+ *   3. `key = root + ":" + server.id`；`broken` 命中 → spawn-failed。
+ *   4. `clients.has(key)` → 复用缓存（刷新 lastUsedAt）。
  *   5. `inflight.has(key)` → 共享 in-flight spawn Promise（并发去重）。
  *   6. 否则发起 `spawnClient` 任务：失败标 `broken`；成功存 `clients`；
  *      `.finally` 释放 `inflight`。
@@ -106,44 +184,77 @@ const inflight = new Map<string, Promise<LspClient | undefined>>();
  * `opts.server` 可注入测试替身，**覆盖** `resolveServer(file)` 的 dispatch
  * 结果（默认按扩展名路由到对应 server）。
  *
- * @returns 客户端；`undefined` 表示该文件无可用 LSP server（host 转纯字符串）。
+ * @returns `{ client }` 或 `{ failure }`——恰有一个字段（client 缺失时
+ *          failure 必在场；failure 的 serverId 供哨兵渲染）。
  */
-export async function getClient(
+export async function getClientDetailed(
   ctx: LspCtx,
   file: string,
   opts?: { readonly server?: LspServerInfo }
-): Promise<LspClient | undefined> {
+): Promise<{ client?: LspClient; failure?: LspClientFailure }> {
+  sweepIdleClients(ctx.idleTimeoutMs);
   const server = opts?.server ?? resolveServer(file);
-  if (!server) return undefined; // 无匹配扩展名 → 本文件无 LSP server（graceful）
+  if (!server) return { failure: { reason: "no-server" } };
+  // disabledServers（二期 B7）：命中的 server 被禁用 → 与「无匹配扩展名」
+  // 同为 no-server（视为未配置），但携带 serverId 便于哨兵归因。
+  if (ctx.disabledServers?.includes(server.id)) {
+    return { failure: { reason: "no-server", serverId: server.id } };
+  }
   const root = await server.root(file, ctx);
-  if (!root) return undefined;
+  if (!root) return { failure: { reason: "no-root", serverId: server.id } };
 
   const key = `${root}:${server.id}`;
-  if (broken.has(key)) return undefined;
-  if (clients.has(key)) return clients.get(key);
-  if (inflight.has(key)) return inflight.get(key);
+  const spawnFailed = (): { failure: LspClientFailure } => ({
+    failure: { reason: "spawn-failed", serverId: server.id },
+  });
+  const cached = clients.get(key);
+  if (cached) {
+    lastUsedAt.set(key, Date.now());
+    return { client: cached };
+  }
+  if (broken.has(key)) return spawnFailed();
+  const pending = inflight.get(key);
+  if (pending) {
+    const client = await pending;
+    return client ? { client } : spawnFailed();
+  }
 
   const task = spawnClient(server, root, ctx)
     .then((client) => {
       if (client) {
         clients.set(key, client);
+        lastUsedAt.set(key, Date.now());
         return client;
       }
-      broken.add(key);
+      broken.set(key, "spawn-failed");
       return undefined;
     })
     .catch(() => {
       // spawn 意外 throw（如 spawnProcess ENOENT）归一为不可用：记 broken、
       // 返回 undefined，避免 rejection 逃逸成 unhandled、每次调用重试 spawn。
       // 与 spawn return undefined 同路径（契约 types.ts:Handle | undefined）。
-      broken.add(key);
+      broken.set(key, "spawn-failed");
       return undefined;
     })
     .finally(() => {
       inflight.delete(key);
     });
   inflight.set(key, task);
-  return task;
+  const client = await task;
+  return client ? { client } : spawnFailed();
+}
+
+/**
+ * 按 (file, ctx) 取得（或建立）对应 LSP 客户端 —— `getClientDetailed` 的
+ * 薄包装（二期 B3）：只取 client，失败归一为 undefined。签名与行为对既有
+ * 调用方（notifier / warmup / 探针）完全兼容。
+ */
+export async function getClient(
+  ctx: LspCtx,
+  file: string,
+  opts?: { readonly server?: LspServerInfo }
+): Promise<LspClient | undefined> {
+  return (await getClientDetailed(ctx, file, opts)).client;
 }
 
 /**
@@ -191,25 +302,34 @@ async function spawnClient(
   // 订阅 push diagnostics：tsserver / typescript-language-server 不实现
   // pull 的 textDocument/diagnostic（LSP 3.16+），用 publishDiagnostics 通知
   // 累积最近一次 per-uri 的诊断列表。latest-wins:同一 uri 多次推送覆盖。
-  const diagStore = new Map<string, ReadonlyArray<unknown>>();
+  // 二期 B1：entry 记录 server 推送时的 textDocument 版本（params.version 为
+  // number 时透传，缺省 undefined），供工具层判断「编辑后的新诊断是否已到」。
+  const diagStore = new Map<
+    string,
+    { items: ReadonlyArray<unknown>; pushVersion?: number }
+  >();
   connection.onNotification(
     "textDocument/publishDiagnostics",
     (params: unknown) => {
       if (!params || typeof params !== "object") return;
-      const p = params as { uri?: unknown; diagnostics?: unknown };
+      const p = params as {
+        uri?: unknown;
+        diagnostics?: unknown;
+        version?: unknown;
+      };
       if (typeof p.uri !== "string") return;
       const items = Array.isArray(p.diagnostics) ? p.diagnostics : [];
-      diagStore.set(p.uri, items);
+      const pushVersion = typeof p.version === "number" ? p.version : undefined;
+      diagStore.set(p.uri, { items, pushVersion });
     }
   );
 
   // opened URIs cache：同一 connection 内 ensureOpen(file) 幂等。
   // tsserver per-project 维护打开文件表；重复 didOpen 同 uri 会触发版本断言，
   // 因此本地缓存去重。仅作为同连接内的短缓存，进程退出即释放。
-  const openedUris = new Set<string>();
-  // per-uri version 计数器（lsp-optimization plan T1）：didOpen 从 1 起，
-  // didChange 每次 +1。LSP 规范要求版本单调递增，重复版本会被 server 断言。
-  const versionCounters = new Map<string, number>();
+  // 二期 B1：Set 升级 Map<uri, version>——didOpen 置 1，didChange 每次 +1，
+  // 与 versionCounters 合并（同源计数，避免双 Map 漂移）。
+  const openedUris = new Map<string, number>();
 
   const ensureOpen = async (file: string): Promise<void> => {
     const uri = pathToFileURL(file).href;
@@ -218,7 +338,7 @@ async function spawnClient(
     // 各发一次 didOpen(version:1 重复 → tsserver 版本断言)。readFile 失败
     // 时回滚占位,保留"失败可重试"语义;didOpen 发送失败 → 仍认为已告知
     // server,下次 sendRequest 由 tsserver 以"未打开"状态回退。
-    openedUris.add(uri);
+    openedUris.set(uri, 1);
     let text: string;
     try {
       text = await readFile(file, "utf8");
@@ -234,7 +354,6 @@ async function spawnClient(
         text,
       },
     });
-    versionCounters.set(uri, 1);
   };
 
   const notifyChange = async (file: string): Promise<void> => {
@@ -248,8 +367,8 @@ async function spawnClient(
     // 已打开 → 读文件全文走 full sync didChange。readFile 失败直接 reject：
     // notifier 层已 catch（best-effort），此处保留错误原文便于 stderr 归因。
     const text = await readFile(file, "utf8");
-    const nextVersion = (versionCounters.get(uri) ?? 1) + 1;
-    versionCounters.set(uri, nextVersion);
+    const nextVersion = (openedUris.get(uri) ?? 1) + 1;
+    openedUris.set(uri, nextVersion);
     await connection.sendNotification("textDocument/didChange", {
       textDocument: { uri, version: nextVersion },
       contentChanges: [{ text }],
@@ -272,7 +391,9 @@ async function spawnClient(
       ),
     sendNotification: (method, params) =>
       connection.sendNotification(method, params),
-    getDiagnostics: (uri: string) => diagStore.get(uri),
+    getDiagnostics: (uri: string) => diagStore.get(uri)?.items,
+    getDiagnosticsEntry: (uri: string) => diagStore.get(uri),
+    getOpenVersion: (uri: string) => openedUris.get(uri),
     ensureOpen,
     notifyChange,
     dispose: () => connection.dispose(),
@@ -288,7 +409,7 @@ async function spawnClient(
   //   - dispose()（主动关闭）后进程若退出，逐出是幂等无害的（缓存本就该
   //     释放），无需区分主动/意外退出。
   child.once("exit", () => {
-    if (clients.get(key) === client) clients.delete(key);
+    evictCachedClient(key, client);
   });
 
   return client;
