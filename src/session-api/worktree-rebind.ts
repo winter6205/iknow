@@ -33,11 +33,12 @@
  * belonging to another conversation or an unrelated linked worktree fails
  * closed with `foreign_worktree`.
  */
-import { basename, dirname, join } from "node:path";
+import { join } from "node:path";
 import { existsSync, statSync } from "node:fs";
 
 import {
   createTaskWorktree,
+  taskWorktreeOwnerOf,
   WorktreeIsolationError,
   defaultGitRunner,
 } from "../harness/isolation/worktree-gate.js";
@@ -107,17 +108,15 @@ export function taskWorktreeBranch(conversationId: string): string {
  * equivalent to "the tree belongs to conversation X" — no registry needed,
  * works across server restarts.
  *
- * Exported for read-only display consumers (TUI environment pane, review
- * Medium-2): "workspaceRoot looks like a task worktree" is the display
- * condition, NOT "workspaceRoot is any non-empty string" — serve's
+ * Single SSOT lives in `harness/isolation/worktree-gate.ts` (the mutate gate
+ * routes on the same predicate — T3 model-provision contract); re-exported
+ * here for the provisioner and read-only display consumers (TUI environment
+ * pane, review Medium-2): "workspaceRoot looks like a task worktree" is the
+ * display condition, NOT "workspaceRoot is any non-empty string" — serve's
  * `bindWorkspace` legitimately persists the MAIN root as workspaceRoot, and
  * that must never render as a worktree binding.
  */
-export function taskWorktreeOwnerOf(root: string): string | undefined {
-  if (basename(dirname(root)) !== "worktrees") return undefined;
-  if (basename(dirname(dirname(root))) !== ".iknow") return undefined;
-  return basename(root);
-}
+export { taskWorktreeOwnerOf };
 
 /**
  * Review Medium-1 (2026-08-29): the conversationId is concatenated verbatim

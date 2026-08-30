@@ -1,18 +1,20 @@
 /**
- * T3 (plans/worktree-isolation-on-mutate.md) — mutate gate + task worktree
- * creation at the harness seam.
+ * T3 (plans/worktree-isolation-model-provision.md) — mutate gate at the
+ * harness seam, model-provision contract (ADR-0037 amendment 2026-08-30):
  *
- * Covers ADR-0037 boundary classes:
- *   a. non-git repo / git unavailable → fail-closed typed error, zero writes
- *   b. task branch / worktree path already exists → deterministic typed
- *      error, no silent overwrite (ADR-0037 §3)
- *   c. concurrent first mutate in the same session → idempotent provisioning
- *      (one worktree, both calls bound to the same tree)
- *   d. switch OFF → byte-identical to today (gate transparent)
+ *   - ON + session NOT yet bound (main-repo root): the mutate is BLOCKED and
+ *     the gate NEVER provisions — no `provision()` call, hence no
+ *     `git worktree add` on the execution path, main repo zero-write. The
+ *     block message points the model at the create-task-worktree ACI tool
+ *     (not an auto-provision "end the turn and retry" protocol).
+ *   - ON + engine rooted at a task-worktree-shaped root (post-rebind): the
+ *     per-conversation passthrough adjudication via `provision` still holds
+ *     (own tree → same-root no-op passthrough; concurrent mutates coalesce
+ *     onto one adjudication; failures stay typed and fail-closed).
+ *   - OFF → byte-identical to today (gate transparent).
  *
- * Plus hard requirements: create-without-rebind is invalid (gate blocks the
- * intercepted call — a stale-root engine must never write the main repo),
- * failures surface as typed, non-empty, visible errors.
+ * The git layer (`createTaskWorktree`) is unchanged and stays covered with
+ * real git — it serves the session-api provisioner and the T4 ACI tool.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
@@ -22,10 +24,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  CREATE_TASK_WORKTREE_TOOL_HINT,
   WorktreeIsolationError,
   classifyCall,
   createTaskWorktree,
   createWorktreeIsolationExecutor,
+  taskWorktreeOwnerOf,
   WORKTREE_ISOLATION_PREFIX,
 } from "../../../src/harness/isolation/worktree-gate.ts";
 import type {
@@ -243,6 +247,25 @@ describe("classifyCall", () => {
   });
 });
 
+// -- taskWorktreeOwnerOf (deterministic task-worktree path shape) -------------
+
+describe("taskWorktreeOwnerOf", () => {
+  it("decomposes `<any>/.iknow/worktrees/<conversationId>` into its owner", () => {
+    expect(taskWorktreeOwnerOf("/repo/.iknow/worktrees/conv-1")).toBe("conv-1");
+    expect(taskWorktreeOwnerOf("/deep/nest/repo/.iknow/worktrees/abc-123")).toBe(
+      "abc-123"
+    );
+  });
+
+  it("returns undefined for main roots and non-task shapes", () => {
+    expect(taskWorktreeOwnerOf("/repo")).toBeUndefined();
+    expect(taskWorktreeOwnerOf("/repo/.iknow")).toBeUndefined();
+    expect(taskWorktreeOwnerOf("/repo/.iknow/worktrees")).toBeUndefined();
+    expect(taskWorktreeOwnerOf("/repo/.iknow/other/conv-1")).toBeUndefined();
+    expect(taskWorktreeOwnerOf("")).toBeUndefined();
+  });
+});
+
 // -- gate executor ------------------------------------------------------------
 
 describe("createWorktreeIsolationExecutor", () => {
@@ -280,7 +303,7 @@ describe("createWorktreeIsolationExecutor", () => {
     expect(out[0]!.kind).toBe("ok");
   });
 
-  it("first mutate is intercepted (zero inner calls = zero main-repo writes), then rebind notice; provision runs once", async () => {
+  it("T3 model-provision contract — unbound mutate on a main-repo root is blocked WITHOUT provisioning (no git worktree add, main repo zero-write)", async () => {
     const { inner, calls } = fakeInner();
     let provisioned = 0;
     const gate = createWorktreeIsolationExecutor({
@@ -296,78 +319,35 @@ describe("createWorktreeIsolationExecutor", () => {
     const first = await gate.executeAll([writeCall()]);
     expect(first[0]!.kind).toBe("execution_failed");
     expect(first[0]!.message!.startsWith(`${WORKTREE_ISOLATION_PREFIX} `)).toBe(true);
-    expect(first[0]!.message).toContain("/wt");
+    // the message points the model at the create-worktree ACI tool, NOT at an
+    // auto-provision "end the turn and retry" protocol
+    expect(first[0]!.message).toContain(CREATE_TASK_WORKTREE_TOOL_HINT);
+    expect(first[0]!.message).not.toContain("end the turn");
     expect(first[0]!.message!.length).toBeGreaterThan(20);
-    expect(calls).toHaveLength(0); // inner never reached → main repo zero-write
+    // the gate NEVER provisions on the blocked path: no provision() call means
+    // no `git worktree add` anywhere on the execution path; inner never
+    // reached → main repo zero-write
+    expect(provisioned).toBe(0);
+    expect(calls).toHaveLength(0);
 
-    // subsequent mutate on the same (stale-root) engine: still blocked, no re-provision
+    // subsequent mutates keep blocking with zero side effects (still fail-closed)
     const second = await gate.executeAll([writeCall("c2")]);
     expect(second[0]!.kind).toBe("execution_failed");
-    expect(provisioned).toBe(1);
+    expect(second[0]!.message).toContain(CREATE_TASK_WORKTREE_TOOL_HINT);
+    expect(provisioned).toBe(0);
     expect(calls).toHaveLength(0);
   });
 
-  it("boundary c — concurrent first mutates in the same session provision exactly once and bind to the same tree", async () => {
+  it("passthrough adjudication survives on a task-worktree-rooted engine: own tree → same-root no-op, provision runs once", async () => {
     const { inner, calls } = fakeInner();
     let provisioned = 0;
-    let resolveProvision!: (root: string) => void;
+    const ownTreeRoot = "/repo/.iknow/worktrees/conv-1";
     const gate = createWorktreeIsolationExecutor({
       enabled: true,
-      root: "/main",
+      root: ownTreeRoot,
       provision: async () => {
         provisioned += 1;
-        await new Promise<void>((r) => (resolveProvision = r));
-        return "/wt";
-      },
-      inner,
-    });
-
-    const p1 = gate.executeAll([writeCall("a")]);
-    const p2 = gate.executeAll([writeCall("b")]);
-    await Promise.resolve();
-    resolveProvision("/wt");
-    const [r1, r2] = await Promise.all([p1, p2]);
-
-    expect(provisioned).toBe(1); // one worktree, one branch
-    expect(calls).toHaveLength(0);
-    for (const batch of [r1, r2]) {
-      expect(batch[0]!.kind).toBe("execution_failed");
-      expect(batch[0]!.message).toContain("/wt"); // both bound to the same tree
-    }
-  });
-
-  it("per-session state: different conversationIds provision independently (rebind must not leak across sessions)", async () => {
-    const { inner, calls } = fakeInner();
-    const provisionedFor: (string | undefined)[] = [];
-    const gate = createWorktreeIsolationExecutor({
-      enabled: true,
-      root: "/main",
-      provision: async ({ conversationId }) => {
-        provisionedFor.push(conversationId);
-        return `/wt-${conversationId}`;
-      },
-      inner,
-    });
-
-    const [r1, r2] = await Promise.all([
-      gate.executeAll([writeCall("a")], undefined, undefined, "conv-1"),
-      gate.executeAll([writeCall("b")], undefined, undefined, "conv-2"),
-    ]);
-    expect(provisionedFor.sort()).toEqual(["conv-1", "conv-2"]);
-    expect(r1[0]!.message).toContain("/wt-conv-1");
-    expect(r2[0]!.message).toContain("/wt-conv-2");
-    expect(calls).toHaveLength(0);
-  });
-
-  it("mutate passes through when the engine root already is the bound task worktree (provision no-op / initiallyBound)", async () => {
-    const { inner, calls } = fakeInner();
-    let provisioned = 0;
-    const gate = createWorktreeIsolationExecutor({
-      enabled: true,
-      root: "/wt",
-      provision: async () => {
-        provisioned += 1;
-        return "/wt"; // host: session already rebound to this very root
+        return ownTreeRoot; // host: session already rebound to this very root
       },
       inner,
     });
@@ -389,13 +369,79 @@ describe("createWorktreeIsolationExecutor", () => {
     expect(out2[0]!.kind).toBe("ok");
   });
 
-  it("boundary a/failure — provision failure is fail-closed: typed visible error, inner never called, retry allowed", async () => {
+  it("stale-root defensive branch — provision resolving elsewhere still blocks with the rebind notice", async () => {
+    const { inner, calls } = fakeInner();
+    const gate = createWorktreeIsolationExecutor({
+      enabled: true,
+      root: "/repo/.iknow/worktrees/conv-1",
+      provision: async () => "/other-wt",
+      inner,
+    });
+    const out = await gate.executeAll([writeCall()]);
+    expect(out[0]!.kind).toBe("execution_failed");
+    expect(out[0]!.message).toContain("/other-wt");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("boundary c — concurrent first mutates on a task-worktree-rooted engine coalesce onto one adjudication", async () => {
+    const { inner, calls } = fakeInner();
+    let provisioned = 0;
+    let resolveProvision!: (root: string) => void;
+    const gate = createWorktreeIsolationExecutor({
+      enabled: true,
+      root: "/repo/.iknow/worktrees/conv-1",
+      provision: async () => {
+        provisioned += 1;
+        await new Promise<void>((r) => (resolveProvision = r));
+        return "/wt";
+      },
+      inner,
+    });
+
+    const p1 = gate.executeAll([writeCall("a")]);
+    const p2 = gate.executeAll([writeCall("b")]);
+    await Promise.resolve();
+    resolveProvision("/wt");
+    const [r1, r2] = await Promise.all([p1, p2]);
+
+    expect(provisioned).toBe(1); // one adjudication, one tree
+    expect(calls).toHaveLength(0);
+    for (const batch of [r1, r2]) {
+      expect(batch[0]!.kind).toBe("execution_failed");
+      expect(batch[0]!.message).toContain("/wt"); // both bound to the same tree
+    }
+  });
+
+  it("per-session state: different conversationIds adjudicate independently (rebind must not leak across sessions)", async () => {
+    const { inner, calls } = fakeInner();
+    const provisionedFor: (string | undefined)[] = [];
+    const gate = createWorktreeIsolationExecutor({
+      enabled: true,
+      root: "/repo/.iknow/worktrees/conv-1",
+      provision: async ({ conversationId }) => {
+        provisionedFor.push(conversationId);
+        return `/wt-${conversationId}`;
+      },
+      inner,
+    });
+
+    const [r1, r2] = await Promise.all([
+      gate.executeAll([writeCall("a")], undefined, undefined, "conv-1"),
+      gate.executeAll([writeCall("b")], undefined, undefined, "conv-2"),
+    ]);
+    expect(provisionedFor.sort()).toEqual(["conv-1", "conv-2"]);
+    expect(r1[0]!.message).toContain("/wt-conv-1");
+    expect(r2[0]!.message).toContain("/wt-conv-2");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("boundary a/failure — adjudication failure is fail-closed: typed visible error, inner never called, retry allowed", async () => {
     const { inner, calls } = fakeInner();
     let attempts = 0;
     const observed: WorktreeIsolationError[] = [];
     const gate = createWorktreeIsolationExecutor({
       enabled: true,
-      root: "/main",
+      root: "/repo/.iknow/worktrees/conv-1",
       provision: async () => {
         attempts += 1;
         throw new WorktreeIsolationError("not_a_git_repo", "not a git repository: /main");
@@ -413,18 +459,18 @@ describe("createWorktreeIsolationExecutor", () => {
     expect(observed).toHaveLength(1);
     expect(observed[0]!.kind).toBe("not_a_git_repo");
 
-    // next mutate retries provisioning (still fail-closed while it fails)
+    // next mutate retries the adjudication (still fail-closed while it fails)
     const out2 = await gate.executeAll([writeCall("c2")]);
     expect(out2[0]!.kind).toBe("execution_failed");
     expect(attempts).toBe(2);
     expect(calls).toHaveLength(0);
   });
 
-  it("non-Error provision throw is wrapped into a typed rebind_failed error", async () => {
+  it("non-Error adjudication throw is wrapped into a typed rebind_failed error", async () => {
     const { inner } = fakeInner();
     const gate = createWorktreeIsolationExecutor({
       enabled: true,
-      root: "/main",
+      root: "/repo/.iknow/worktrees/conv-1",
       provision: async () => {
         throw "boom"; // eslint-disable-line no-throw-literal
       },

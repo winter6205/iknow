@@ -544,7 +544,9 @@ describe("T8 matrix — concurrent", () => {
     };
     const gate = createWorktreeIsolationExecutor({
       enabled: true,
-      root: "/main",
+      // T3 model-provision 合同：provision 裁决只在 task-worktree 形状的根上
+      // 触发（改绑后 per-root 重建引擎的形态）；主仓根一律拦下不建树。
+      root: TASK_WORKTREE,
       provision: async () => {
         provisioned += 1;
         await new Promise<void>((r) => {

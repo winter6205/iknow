@@ -1,40 +1,64 @@
 /**
  * src/harness/isolation/worktree-gate.ts
  *
- * ADR-0037 / plans/worktree-isolation-on-mutate.md T3 — mutate gate at the
- * harness executor seam: when the isolation switch is ON and the session is
- * still on the main checkout, the first workspace-mutating tool call is
- * intercepted, the host provisions a per-session task worktree (git layer
- * below) and rebinds the session root (host seam), and subsequent turns run
- * on the worktree-rooted engine where mutates pass through.
+ * ADR-0037 (amended 2026-08-30) / plans/worktree-isolation-model-provision.md
+ * T3 — mutate gate at the harness executor seam. Model-provision contract:
+ * when the isolation switch is ON and the session is still on the main
+ * checkout, the first workspace-mutating tool call is BLOCKED — the gate
+ * NEVER provisions. Creating the per-conversation task worktree and rebinding
+ * the session root is the model's job via the create-task-worktree ACI tool
+ * (T4); the block message says exactly that. Once the session root moved to
+ * its task worktree (host rebuilds the engine at that root), mutates are
+ * adjudicated per conversation by the host `provision` seam: the session's
+ * own tree is a same-root no-op passthrough, a foreign root fails closed.
  *
  * Module boundary (ACR bounded-context-guardian):
  *   - this module owns ONLY the gate + git layer; it holds no session state
- *     beyond the per-conversation provisioning latch, reads no settings and
+ *     beyond the per-conversation adjudication latch, reads no settings and
  *     imports no session-api code. The host (session-api) supplies the
- *     `provision` callback that creates the tree and rebinds the session.
+ *     `provision` callback; the deterministic task-worktree path shape
+ *     (`taskWorktreeOwnerOf`) lives here because the gate routes on it —
+ *     session-api re-exports it as the single SSOT.
  *
  * Failure semantics (ADR-0037 §6, fail-closed):
  *   - every failure exits as a typed `WorktreeIsolationError` (non-empty,
  *     visible message) and the intercepted call NEVER reaches the tool
  *     handler — the main repo gets zero writes;
- *   - a successful rebind on a stale-root engine still blocks the in-flight
- *     call (the tools below this executor still target the old root); the
- *     model is told the session moved and the next turn runs on the new
- *     worktree-rooted engine where mutates pass through (hard req: create
- *     without effective rebind = invalid).
+ *   - the unbound block is side-effect free and idempotent: every mutate
+ *     re-blocks with the ACI-tool notice until the model provisions and the
+ *     host rebinds.
  *
  * Switch OFF → `createWorktreeIsolationExecutor` is not wired by the
  * assembly (build-engine), i.e. byte-identical to today's behavior.
  */
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { basename, dirname } from "node:path";
 import { errorMessage } from "../errors.js";
 import { validateReadonlyCommand } from "../aci/tools/bash-readonly.js";
 import type { Executor, ToolCall, ToolExecutionResult } from "../tools/types.js";
 
 /** Visible message prefix for every gate-produced block (SSOT for tests). */
 export const WORKTREE_ISOLATION_PREFIX = "[worktree_isolation]";
+
+/**
+ * Hint the gate emits on unbound mutates (T3 model-provision contract): the
+ * model must call the create-task-worktree ACI tool (T4) — the gate never
+ * auto-creates. T4's tool name/registration must align with this wording.
+ */
+export const CREATE_TASK_WORKTREE_TOOL_HINT = "create-task-worktree ACI tool";
+
+/**
+ * Unbound-mutate block notice: visible, actionable, and free of the old
+ * auto-provision protocol wording ("end the turn and retry").
+ */
+export function unboundMutateNotice(): string {
+  return (
+    `${WORKTREE_ISOLATION_PREFIX} workspace mutation blocked: worktree isolation is ON and this session is not yet bound to a task worktree. ` +
+    `Call the ${CREATE_TASK_WORKTREE_TOOL_HINT} to create this conversation's task worktree and rebind the session root, ` +
+    `then re-issue this write in the new root. The main repo stays read-only until the rebind lands (no auto-provisioning).`
+  );
+}
 
 /** Typed failure kinds (ADR-0037 §6 / plan hard req 6–8). */
 export type WorktreeIsolationErrorKind =
@@ -227,6 +251,29 @@ export function classifyCall(call: ToolCall): MutateClass {
   return "read";
 }
 
+// -- task worktree path shape -----------------------------------------------------
+
+/**
+ * Ownership anchor for the deterministic task-worktree naming
+ * (`<any>/.iknow/worktrees/<conversationId>`, session-api provisioner SSOT):
+ * returns the owning conversationId when `root` IS a task-worktree path,
+ * undefined otherwise.
+ *
+ * The GATE routes on this predicate (T3 model-provision contract): a mutate
+ * arriving at an engine whose root is NOT task-worktree-shaped can never be a
+ * bound session (bound roots are always shaped), so it is blocked with the
+ * ACI-tool notice and `provision` is never invoked — structurally impossible
+ * for the gate to auto-run `git worktree add`. A shaped root goes through the
+ * per-conversation `provision` adjudication (own tree → same-root no-op
+ * passthrough; foreign → typed `foreign_worktree`). session-api re-exports
+ * this function for its provisioner and read-only display consumers.
+ */
+export function taskWorktreeOwnerOf(root: string): string | undefined {
+  if (basename(dirname(root)) !== "worktrees") return undefined;
+  if (basename(dirname(dirname(root))) !== ".iknow") return undefined;
+  return basename(root);
+}
+
 // -- gate executor ----------------------------------------------------------------
 
 export interface WorktreeProvisionContext {
@@ -254,10 +301,16 @@ export interface WorktreeIsolationGateOpts {
   /** This engine's root — the bound-tree comparison anchor. */
   readonly root: string;
   /**
-   * Host seam (session-api): create the task worktree AND rebind the current
-   * session root; resolves with the new root (or the current root when the
-   * session is already bound there). MUST be idempotent per conversation —
-   * the gate coalesces concurrent callers onto one invocation.
+   * Host seam (session-api). T3 model-provision contract: the gate calls this
+   * ONLY for engines rooted at a task-worktree-shaped path (post-rebind), as
+   * the per-conversation passthrough adjudicator — the session's own tree
+   * resolves to the same root (zero-side-effect no-op), a foreign root
+   * rejects with typed `foreign_worktree`. The creation path of the
+   * underlying host provisioner is reserved for the create-task-worktree ACI
+   * tool (T4): the gate NEVER routes main-repo traffic here, so no
+   * `git worktree add` is ever triggered by a blocked mutate. MUST be
+   * idempotent per conversation — the gate coalesces concurrent callers onto
+   * one invocation.
    */
   readonly provision: (ctx: WorktreeProvisionContext) => Promise<string>;
   /**
@@ -281,16 +334,25 @@ interface GateSessionState {
 }
 
 /**
- * Wrap an executor with the mutate gate. Read calls and switch-OFF traffic
- * pass through untouched; mutates on an unbound session are coalesced onto a
- * single `provision()` per conversation (boundary c idempotency), then:
+ * Wrap an executor with the mutate gate (model-provision contract, ADR-0037
+ * amendment). Read calls and switch-OFF traffic pass through untouched. For
+ * mutates:
  *
- *   - provision resolved to this engine's root → passthrough (mutates land
- *     in the worktree the engine is rooted at);
- *   - provision resolved elsewhere → the call is blocked with a visible
- *     rebind notice (stale-root tools must not write the old root);
- *   - provision failed → blocked with the typed `kind=<kind>` message;
- *     state resets so the next mutate retries (still fail-closed).
+ *   - unbound session on a NON-task-worktree root (main repo) → blocked with
+ *     the create-task-worktree ACI-tool notice; `provision` is never called,
+ *     so no `git worktree add` runs and the main repo sees zero writes. The
+ *     block is side-effect free and idempotent — every mutate re-blocks until
+ *     the model provisions (T4 tool) and the host rebinds the session root;
+ *   - engine rooted at a task-worktree-shaped path → per-conversation
+ *     adjudication via `provision`, coalesced onto a single invocation per
+ *     conversation (boundary c idempotency):
+ *
+ *       - provision resolved to this engine's root → passthrough (mutates
+ *         land in the worktree the engine is rooted at);
+ *       - provision resolved elsewhere → the call is blocked with a visible
+ *         rebind notice (stale-root tools must not write the old root);
+ *       - provision failed → blocked with the typed `kind=<kind>` message;
+ *         state resets so the next mutate retries (still fail-closed).
  */
 export function createWorktreeIsolationExecutor(
   opts: WorktreeIsolationGateOpts & { readonly inner: Executor }
@@ -330,6 +392,13 @@ export function createWorktreeIsolationExecutor(
     let state = stateFor(conversationId);
     if (state.status === "bound" && state.boundRoot === root) {
       return undefined; // passthrough
+    }
+    // T3 model-provision contract: a session on a non-task-worktree root
+    // (main repo) can never be bound — block with the ACI-tool notice and
+    // NEVER provision (no `git worktree add` on the execution path). The
+    // block is side-effect free; state stays open so later mutates re-block.
+    if (state.status === "open" && taskWorktreeOwnerOf(root) === undefined) {
+      return block(call.id, unboundMutateNotice());
     }
     if (state.status === "open") {
       const pending = provision({ conversationId, root });
