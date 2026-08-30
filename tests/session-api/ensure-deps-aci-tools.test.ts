@@ -30,11 +30,13 @@ import { installTestSettingsSource } from "../_helpers/install-test-settings-sou
 // #224 末尾追加 tool_search(11 件;与 tests/harness/build-engine.test.ts
 // EXPECTED_TOOLS 同形)。
 // #356 T6:build-engine 全装配(surface 默认 chat)自建 subagentManager →
-// registry 末尾追加 spawn_subagent / subagent_result(→ 25 件)。
+// registry 末尾追加 spawn_subagent / subagent_result(→ 15 件)。
 // #440 双 Stream 并集:todo_write(T4) + MCP resources 两件(T11) append-only
-// 25→28(serve 走 build-engine 全装配,todoDir + mcpManager 均自建 → 三件在场)。
+// 15→18(serve 走 build-engine 全装配,todoDir + mcpManager 均自建 → 三件在场)。
 // #502 T3:serve surface !== "ask" → build-engine 自建 backgroundManager →
-// registry 末尾追加 bash_output / bash_stop(→ 30 件,与 build-engine 全装配同形)。
+// registry 末尾追加 bash_output / bash_stop(→ 20 件,与 build-engine 全装配同形)。
+// symbol-primary-aci T5:10 件 lsp_* 已退役,总数由 30 → 25。
+// 13..18 与 build-engine.test.ts 的 EXPECTED_TOOLS 同位 —— ssot 真值一致。
 const EXPECTED_TOOLS = [
   "bash",
   "read_file",
@@ -47,38 +49,48 @@ const EXPECTED_TOOLS = [
   "memory_recall",
   "memory_save",
   "tool_search",
-  // #251 LSP 工具集 append-only:11→21,10 件在末尾。
-  "lsp_definition",
-  "lsp_references",
-  "lsp_hover",
-  "lsp_document_symbol",
-  "lsp_workspace_symbol",
-  "lsp_go_to_implementation",
-  "lsp_prepare_call_hierarchy",
-  "lsp_incoming_calls",
-  "lsp_outgoing_calls",
-  "lsp_diagnostics",
-  // #337 T5 skill 工具集 append-only:21→23,末尾两件(skillCatalog 装配后
+  // #337 T5 skill 工具集 append-only:11→13,末尾两件(skillCatalog 装配后
   // 静态名单;与 ACI_TOOLSET_NAMES 对齐)。
   "skill",
   "skill_search",
-  // #356 T6 subagent 工具集 append-only:23→25,末尾两件(serve 走 build-engine
+  // #356 T6 subagent 工具集 append-only:13→15,末尾两件(serve 走 build-engine
   // 全装配,subagentManager 自建 → 两件在场)。
   "spawn_subagent",
   "subagent_result",
-  // #440 T4 todo_write append-only:25→26,末位 1 件(serve T1-fix 后透传 todoDir →
+  // #440 T4 todo_write append-only:15→16,末位 1 件(serve T1-fix 后透传 todoDir →
   // 在场 — 与 build-engine 装配侧一致)。
   "todo_write",
-  // #440 T11 MCP resources 工具集 append-only:26→28,末尾两件(serve 走
+  // #440 T11 MCP resources 工具集 append-only:16→18,末尾两件(serve 走
   // build-engine 全装配,mcpManager 自建 → 两件在场)。
   "list_mcp_resources",
   "read_mcp_resource",
-  // #502 T3 bash_output / bash_stop 工具集 append-only:28→30,末位 2 件
+  // #502 T3 bash_output / bash_stop 工具集 append-only:18→20,末位 2 件
   // (serve 走 build-engine 全装配,backgroundManager 自建 → bash_output/bash_stop
   // 入注册表;bash 仍常驻,参数级 background:true 能力由 handler 运行时决策)。
   "bash_output",
   "bash_stop",
   "query_trace",
+  // symbol-primary-aci T2 符号查询工具集 append-only:20→30,末位 10 件常驻
+  //（与 lsp.ts SSOT 共享 lspCtx；旧 10 件 lsp_* 已在 T5 退役）。
+  "find_symbol",
+  "find_declaration",
+  "find_referencing_symbols",
+  "find_implementations",
+  "get_symbols_overview",
+  "get_hover",
+  "get_diagnostics_for_file",
+  "prepare_call_hierarchy",
+  "list_incoming_calls",
+  "list_outgoing_calls",
+  // symbol-primary-aci T4 符号改工具集 append-only:30→35,末位 5 件常驻
+  //（category=write；不条件化——与查询面共享 lspCtx；onEdit
+  //  透传自 build-engine lspNotifier.invalidate，写盘后 textDocument/didChange
+  //  与 edit_file 同链路）。
+  "rename_symbol",
+  "replace_symbol_body",
+  "insert_before_symbol",
+  "insert_after_symbol",
+  "safe_delete_symbol",
 ];
 
 let baseDir: string;
@@ -99,7 +111,7 @@ afterAll(async () => {
 });
 
 describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
-  it("returns the ACI 26-tool registry (incl. todo_write) when serve constructs without deps", async () => {
+  it("returns the ACI 25-tool registry (incl. todo_write) when serve constructs without deps", async () => {
     const hub = new SessionHub({
       store,
       askUser: createNoAskUser(),
@@ -110,7 +122,8 @@ describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
 
     const deps = await ensure();
     const names = deps.registry.list().map((def) => def.name);
-    // #440 T1-fix:serve 入口注入 todoDir → todo_write 装配,SSOT 26 件全在场。
+    // #440 T1-fix:serve 入口注入 todoDir → todo_write 装配,SSOT 25 件全在场
+    // （T5 退役 10 lsp_* 后从 30 → 25）。
     for (const expected of EXPECTED_TOOLS) {
       expect(names).toContain(expected);
     }

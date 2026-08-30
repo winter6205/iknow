@@ -119,18 +119,69 @@ describe("summarizeToolCall: 参数摘要（生成/编辑类增强）", () => {
     ).toBe("轮询 t-1");
   });
 
-  test("LSP 工具 → LSP <op> file[:line]（不落 JSON 全文）", () => {
-    const { detail } = summarizeToolCall("lsp_definition", {
-      file: "src/a.ts",
-      line: 12,
-    });
-    expect(detail).toBe("LSP definition src/a.ts:12");
+  test("符号查询工具 → symbol <verb> file#symbol_path / outline / diagnostics / find（14 件统一短 verb 形态,旧 lsp_* 已退役）", () => {
+    // symbol-primary-aci T5 起,符号工具是默认工具面,坐标 lsp_* 已退役。
+    // 14 件统一以「short verb + file#symbol_path」模板呈现（symbolAt 接受 verb
+    // 参数；查询面 10 件 verb = find/declare/references/implements/outline/
+    // hover/diagnostics/hierarchy/incoming/outgoing）。
     expect(
-      summarizeToolCall("lsp_document_symbol", { file: "b.ts" }).detail
-    ).toBe("LSP documentSymbol b.ts");
+      summarizeToolCall("find_declaration", {
+        file: "src/a.ts",
+        symbol_path: "Foo#bar",
+      }).detail
+    ).toBe("symbol declare src/a.ts#Foo#bar");
+    expect(summarizeToolCall("find_symbol", { query: "Foo" }).detail).toBe(
+      "symbol find Foo"
+    );
     expect(
-      summarizeToolCall("lsp_workspace_symbol", { query: "foo" }).detail
-    ).toBe("LSP workspaceSymbol foo");
+      summarizeToolCall("get_symbols_overview", { file: "b.ts" }).detail
+    ).toBe("symbol outline b.ts");
+    expect(
+      summarizeToolCall("get_diagnostics_for_file", { file: "b.ts" }).detail
+    ).toBe("symbol diagnostics b.ts");
+    expect(
+      summarizeToolCall("list_incoming_calls", {
+        file: "src/a.ts",
+        symbol_path: "Foo#bar",
+      }).detail
+    ).toBe("symbol incoming src/a.ts#Foo#bar");
+  });
+
+  test("符号改工具 → symbol <op> file#symbol_path [→ new_name]（category=write，旧 lsp_* 已退役）", () => {
+    // 5 件符号改工具的 detail 在 file#symbol_path 上附加动作字段
+    // (rename 还要附 new_name)。同查询面共享 lspCtx + lspNotifier.invalidate
+    // 接缝（onEdit 走 build-engine 装配层)。
+    expect(
+      summarizeToolCall("rename_symbol", {
+        file: "src/a.ts",
+        symbol_path: "Foo#bar",
+        new_name: "Baz",
+      }).detail
+    ).toBe("symbol rename src/a.ts#Foo#bar → Baz");
+    expect(
+      summarizeToolCall("replace_symbol_body", {
+        file: "src/a.ts",
+        symbol_path: "Foo#bar",
+      }).detail
+    ).toBe("symbol replace_body src/a.ts#Foo#bar");
+    expect(
+      summarizeToolCall("insert_before_symbol", {
+        file: "src/a.ts",
+        symbol_path: "Foo#bar",
+      }).detail
+    ).toBe("symbol insert_before src/a.ts#Foo#bar");
+    expect(
+      summarizeToolCall("insert_after_symbol", {
+        file: "src/a.ts",
+        symbol_path: "Foo#bar",
+      }).detail
+    ).toBe("symbol insert_after src/a.ts#Foo#bar");
+    expect(
+      summarizeToolCall("safe_delete_symbol", {
+        file: "src/a.ts",
+        symbol_path: "Foo#bar",
+      }).detail
+    ).toBe("symbol safe_delete src/a.ts#Foo#bar");
   });
 });
 

@@ -83,8 +83,17 @@ _Avoid_: 把 "fallback" 与 "default" 混名（无 fallback）；让 keyed 失�
 **search backend adapter seam**: `web_search` ACI 工具的可插拔 HTTP 后端接缝——同文件 `BACKENDS: Record<SearchBackendId, SearchBackend>` 表 + `selectBackend(id)` 分派；每家 adapter 投影到 Bing-shape `{title, snippet, url}`，T2 字段 cap 一刀切；v1 仅 Exa 真 HTTP，Tavily / Brave schema 占位（`fetchResults` 抛 typed `not_shipped`）；handler envelope `{output, meta?: {adapter, latencyMs, requestId?}}` 走 observability side-channel（v1 因 executor `isEnvelope` 白名单未扩，meta 通道推迟）；非 bing backend 拒 `search_url` 覆写。
 _Avoid_: 给每家 adapter 写自家 field cap；让 keyed key 解析失败改 silent empty；让 TUI/Web 直接读 handler 原始返回对象（破 observability side-channel）；不查 backend 就读 key
 
-**ACI tool set**: Harness 装配层（`src/harness/aci/`）注册的工具集；当前 8 件：`bash` / `read_file` / `grep` / `glob` / `edit_file` / `write_file` / `web_fetch` / `web_search`，SSOT 工厂 = `src/harness/aci/tools/registry.ts:createDefaultAciRegistry`，所有入口（`build-engine` / `tui/deps`）从这里取，工具数永不同步漂移（#141 / #191 / a277f68）。每次工具调用经 permission middleware（ADR-0004）与 timeout tier 装饰。
-_Avoid_: 在 harness 之外另起 tool 注册表；在 entry point 手写工具数组（#228 决议 D4——`memory_recall` / `memory_save` 入 SSOT 8+2=10）；让工具返回结构化 metadata
+**ACI tool set**: Harness 装配层（`src/harness/aci/`）注册的工具集；SSOT 工厂 = `src/harness/aci/tools/registry.ts:createDefaultAciRegistry`，所有入口（`build-engine` / `tui/deps`）从这里取，工具数永不同步漂移。每次工具调用经 permission middleware（ADR-0004）与 timeout tier 装饰。可分析代码的默认发现与符号级修改见 **符号主路径**（ADR-0038）。
+_Avoid_: 在 harness 之外另起 tool 注册表；在 entry point 手写工具数组；让工具返回结构化 metadata；把坐标 `lsp_*` 当代码导航主 API
+
+**符号主路径**: 智能体对可分析代码的默认工作方式——按 **符号身份** 查找并做符号级修改；`grep` / `read_file` / `edit_file` 只用于非代码、未知名字、语言服务器不可用，以及非单一符号的文本补丁。ADR-0038。
+_Avoid_: 先全文搜索再对行列问语言服务器当主路径；坐标工具与符号工具长期双暴露给模型
+
+**符号身份**: 指向源码实体的稳定键：文件内符号树路径（如 `ClassName/methodName`）加上相对项目根的文件路径，而不是行号列号。
+_Avoid_: 把 1-based line / character 当模型主入参；把 grep 命中行当成符号键
+
+**使用规则**: `deps.system` 中独立于 identity 卡片和 soul 的代码锁死段（装配名 `usage`），规定何时用符号工具、何时才 grep；四入口恒在（含 ask）。落点建议 `src/harness/identity/usage.ts`，与 `identity.ts` / `soul.ts` 并列。ADR-0038。
+_Avoid_: 把工具路由写进 soul Vibe；只靠 AGENTS.md 承载这条纪律；把使用规则当成身份 Name/Kind/Signature
 
 **声明工具面 vs 实际工具面**: `SubAgentDefinition.disallowedTools` 写进 `WorkerEnvelope` 的是声明面；worker 进程装配后真正可被模型调用的工具集是实际面，二者必须相等——裁剪发生在 `createAciRegistry(tools)` **之前**的 def-list 期（`createDefaultAciRegistry` 工厂内），由构造期快照保证，不事后修补（`AciRegistry.inner` 是冻结快照）。
 _Avoid_: 给 `AciRegistry` 加 `.tools` 字段在产物上事后裁剪；声明 deny-list 但 worker 不消费（#468 修复对象）
@@ -95,8 +104,8 @@ _Avoid_: 在 adapter 或 host 层直接拼系统；发送空串 `system`（KV ca
 **memory_layer slot**: #196 9 段流水线 slots 5-9（user AGENTS / `PRIORITY_DECLARATION` / project AGENTS / `EXISTENCE_POINTER` / 可选 **memory_catalog** / promote 段）收敛后的单 slot 名，位置仍在 bootstrap 之后；委托 #121 `createSystemResolver`（`memory/refresh.ts`：mtime 缓存 + inflight 去重 + 装配失败不毒化缓存），内部拼接顺序由 ADR-0009 锁定，目录段由 ADR-0034 追加。#228 决议 D2。
 _Avoid_: 逐 slot 独立消费缓存；再拆拼接后的整串；把拼接顺序拆出 slot 边界独立决策
 
-**surface split (identity vs memory)**: 入口面（`chat` / `tui` / `ask` / `serve`）的两层语义——身份认知层（`identity` / `soul` / `user_profile` + 仅 chat/tui 触发的 `bootstrap`）恒在；记忆层（`AGENTS.md` + rules + 记忆库 + `memory_recall` / `memory_save` 工具）只对 chat / tui / serve 装配，`ask` 全 opt-out（`memory_layer` slot 不挂、memory 工具不入注册表）。#228 决议 D3。
-_Avoid_: `ask` 全 opt-out（破"我是谁"答复路径）；`ask` 全 opt-in（破 #121 "ask 无状态"前提）；按 surface flag 同时决定两层
+**surface split (identity vs memory)**: 入口面（`chat` / `tui` / `ask` / `serve`）的两层语义——身份认知层（`identity` / `soul` / **使用规则** / `user_profile` + 仅对话入口触发的 `bootstrap`）恒在；记忆层（`AGENTS.md` + rules + 记忆库 + `memory_recall` / `memory_save` 工具）只对 chat / tui / serve 装配，`ask` 全 opt-out（`memory_layer` slot 不挂、memory 工具不入注册表）。#228 决议 D3；usage 段 ADR-0038。
+_Avoid_: `ask` 全 opt-out（破"我是谁"答复路径）；`ask` 全 opt-in（破 #121 "ask 无状态"前提）；按 surface flag 同时决定两层；ask 去掉使用规则
 
 **auto_extract**（`settings.memory.autoExtract`）: 自动记忆抽取的产品总闸，boolean-only、**默认 OFF**——段缺失或非 `true` 一律关抽取与 **promote** 装配。`true` 时 host 仍按 N≥2 抽，且梦境双闸满足时必跑梦境 LLM（即使 `settings.memory.dream === false`）。仅当 extract 与 dream 均关时 `BuiltEngine.autoMemory` 缺席。ADR-0031 D1/D5；分层 `specs/auto-memory-layering.md`；钩子见 ADR-0033。
 _Avoid_: 把默认改成 ON；开抽取却不要梦境；关抽取仍拼 promote 段；把抽取 prompt 内嵌进 loop-engine；给 `ask` 接线；让 ingest 失败冒泡成用户 turn 失败；开抽取却不注 memory_catalog

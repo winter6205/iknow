@@ -7,9 +7,14 @@
  * build-engine 在 deps.system 注册此函数 (T4) 每 turn 调一次。
  * 顺序 LOCKED —— Spec 锁死,不得重排。
  *
- * 5 段顺序:#194 T6 落地后,user_agents / priority_dec / project_agents /
- * existence_pointer / promote 5 段合并为单 `memory_layer` 段(由 build-engine
- * 注入 `memoryResolver` 装配,降级契约:resolver 抛错 → warn + undefined)。
+ * 6 段顺序:identity / soul / usage / user_profile / bootstrap / memory_layer。
+ *  `usage` 是 IKNOW-symbol-primary T1 (spec `specs/symbol-primary-aci.md`)
+ *  新增的恒在段(soul 之后、user_profile 之前),chat / tui / serve / ask 全部
+ *  注入(SC1),声明"代码主路径走符号工具、grep 三类回退、edit_file 让位"等
+ *  优先级要点。`memory_layer` 由 build-engine 注入 `memoryResolver` 装配,
+ *  降级契约:resolver 抛错 → warn + undefined(沿用 #194 T6 落地后的合并形态)。
+ *  #194 T6 落地前为 user_agents / priority_dec / project_agents /
+ *  existence_pointer / promote 五段合并后的单 slot。
  *
  * 锁定约束:
  * - 字段缺席 → 返回 undefined (不写空 system,KV 缓存字节级稳定,T1 决策)
@@ -26,16 +31,19 @@ import { promises as fs } from "node:fs";
 
 import { IKNOW_IDENTITY_DEFAULT } from "./identity.js";
 import { IKNOW_SOUL_DEFAULT } from "./soul.js";
+import { IKNOW_USAGE_DEFAULT } from "./usage.js";
 import { bootstrapFilePath } from "./workspace.js";
 import { assembleStaticSystemPrompt } from "../memory/assembly.js";
 
-/** IKNOW-196 + #194 T6 装配顺序 (5 段,逐步锁死)。 */
+/** IKNOW-196 + #194 T6 + IKNOW-symbol-primary T1 装配顺序 (6 段 LOCKED)。 */
 export const IKNOW_ASSEMBLY_ORDER = [
   "identity", // 1. 认知层 (代码 LOCKED):Name/Kind/Signature
   "soul", // 2. 人格层 (代码 LOCKED):core truths/boundaries/vibe/continuity
-  "user_profile", // 3. 用户画像 (~/.iknow/user.md) — 用户可改
-  "bootstrap", // 4. 首启引导 (rev 2026-08-11:文件驱动 — BOOTSTRAP.md 存在即注入)
-  "memory_layer", // 5. 记忆层 (#194 / #121:AGENTS.md / rules / memory promote)
+  "usage", // 3. 使用规则 (代码 LOCKED, IKNOW-symbol-primary T1):
+  //          代码主路径走符号工具 + grep 三类回退 + edit_file 让位
+  "user_profile", // 4. 用户画像 (~/.iknow/user.md) — 用户可改
+  "bootstrap", // 5. 首启引导 (rev 2026-08-11:文件驱动 — BOOTSTRAP.md 存在即注入)
+  "memory_layer", // 6. 记忆层 (#194 / #121:AGENTS.md / rules / memory promote)
 ] as const;
 
 /** 装配顺序常量数组的元素类型。 */
@@ -271,6 +279,12 @@ async function resolveSegment(
       return IKNOW_IDENTITY_DEFAULT;
     case "soul":
       return IKNOW_SOUL_DEFAULT;
+    case "usage":
+      // IKNOW-symbol-primary T1:使用规则与 identity / soul 相同的恒在层,
+      // 装配层不读取 user.md / BOOTSTRAP.md / resolver,直接返回 SSOT 字符串。
+      // 缺席 / 失败 / 语言服务器不可用 — 均不触发回退,使用规则正文本身就是
+      // 兜底纪律(spec Assumptions 2 / 使用规则段)。
+      return IKNOW_USAGE_DEFAULT;
     case "user_profile":
       return readUserProfile(ctx);
     case "bootstrap":
@@ -512,16 +526,20 @@ export function orchestrationSegment(text: string): string {
 /**
  * #562 T7 readonly worker 的 "Tool constraints for this run" 段渲染。
  *
- * 内容契约 (plan T7):
+ * 内容契约 (plan T7 + spec symbol-primary-aci T3):
  *   - 允许命令族:coreutils 读族 (cat/grep/ls/head/tail/wc/stat/...)、
  *     git 只读子命令 (status/log/diff/show/ls-files/...)、rg、jq。
  *   - 显式 reject:输出重定向 (>)、后台 (&)、find -delete/-exec、
  *     sort -o、git --output、env/xargs/time/nohup/timeout。
- *   - 替代工具引导:read_file / grep / glob / lsp_*。
+ *   - 符号工具优先 + grep/read_file 三类回退 (spec SC8):列出 10 件符号
+ *     查询工具(find_symbol / find_declaration / ...),明示 grep / read_file
+ *     仅三类回退场景 (非代码 / 还没找到符号名 / 语言服务器不可用重试一次
+ *     仍失败)。旧 `lsp_*` 此步仍在 model face (T5 才删),但本段不再并列
+ *     成与 grep 同等首选 —— spec Assumptions 2/9 + T3 acceptance。
  *
  * 措辞 mirror CC Agent tool constraints 段;纯函数,无 ctx 依赖,
  * mode 缺省或 "any" → caller 不调用本函数 (段缺席, V1 byte-stable)。
- * 加性段不触碰 IKNOW_ASSEMBLY_ORDER 的 5 段 LOCKED 顺序;由 worker
+ * 加性段不触碰 IKNOW_ASSEMBLY_ORDER 的 6 段 LOCKED 顺序;由 worker
  * 装配期 (withRoleExtras) 在 persona 之后追加,顺序契约:
  *   base < persona < constraints < addendum。
  */
@@ -552,10 +570,25 @@ Rejected:
 - command substitution (\$(...) / backticks / \${}) and process substitution (<(...)) — caught upstream
 - any command not in the policy table — deny-by-default
 
-For non-bash reads, prefer the dedicated tools:
-- read_file — read a file at a path
-- grep — search file contents
-- glob — match paths by pattern
-- lsp_definition / lsp_references / lsp_hover / lsp_document_symbol / lsp_workspace_symbol / lsp_go_to_implementation / lsp_prepare_call_hierarchy / lsp_incoming_calls / lsp_outgoing_calls — code navigation
-- lsp_diagnostics — diagnostics for a file`;
+For non-bash reads, prefer the symbol tools over grep:
+
+- find_symbol — locate a symbol by name (substring / pattern when the exact name is unknown)
+- find_declaration — jump to the symbol's declaration or definition
+- find_referencing_symbols — list every reference to the symbol across the project
+- find_implementations — find the concrete implementations of an interface or method
+- get_symbols_overview — read the symbol tree of a single file
+- get_hover — read the type, signature or doc attached to a symbol
+- get_diagnostics_for_file — surface diagnostics for a file
+- prepare_call_hierarchy / list_incoming_calls / list_outgoing_calls — walk the call graph
+
+\`grep\` and \`read_file\` are restricted to three fallback situations:
+
+- Non-code content — comments, string literals, configuration files, documentation
+- Unknown symbol — still prefer \`find_symbol\` substring / pattern before falling back to grepping source
+- Language server unavailable — retry once; if it still fails, fall back to grep with the readable failure string from the tool
+
+Other helpers:
+
+- read_file — read a file at a path (when symbol tools are not the right fit)
+- glob — match paths by pattern (not for searching file contents)`;
 }

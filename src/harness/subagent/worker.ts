@@ -164,8 +164,8 @@ function resolveBashMode(role: string | undefined): "any" | "readonly" {
  * base 缺席 → 输出只是 extras 三者按序 join;任一缺席 → 该 slot 在
  * extras 数组过滤掉, 顺序保持不变。
  *
- * 加性段追加在 base system 之后, 不重排 IKNOW_ASSEMBLY_ORDER 的 5 段
- * LOCKED 顺序 (identity / soul / user_profile / bootstrap / memory_layer)。
+ * 加性段追加在 base system 之后, 不重排 IKNOW_ASSEMBLY_ORDER 的 6 段
+ * LOCKED 顺序 (identity / soul / usage / user_profile / bootstrap / memory_layer)。
  */
 function withRoleExtras(
   base: () => Promise<string | undefined>,
@@ -226,7 +226,7 @@ export interface CreateWorkerDepsOptions {
   /**
    * #556 T2: 来自 envelope.systemPrompt 的 seam 副本 — 修复 schema 有 / 透传
    * 有 / 此前未消费的幽灵通道。该字段在 worker 装配期作为 addendum 追加
-   * persona 段之后 (顺序: base < persona < addendum), 与 LOCKED 5 段解耦。
+   * persona 段之后 (顺序: base < persona < addendum), 与 LOCKED 6 段解耦。
    */
   readonly addendum?: string;
   /**

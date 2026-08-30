@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 
 import { createLspMcpServer } from "../../src/lsp-mcp/server.ts";
+import { SYMBOL_QUERY_TOOL_NAMES } from "../../src/harness/aci/tools/symbol.ts";
 
 const { mockGetClientDetailed } = vi.hoisted(() => ({
   mockGetClientDetailed: vi.fn(),
@@ -29,18 +30,10 @@ afterEach(() => {
   }
 });
 
-const LSP_TOOL_NAMES = [
-  "lsp_definition",
-  "lsp_references",
-  "lsp_hover",
-  "lsp_document_symbol",
-  "lsp_workspace_symbol",
-  "lsp_go_to_implementation",
-  "lsp_prepare_call_hierarchy",
-  "lsp_incoming_calls",
-  "lsp_outgoing_calls",
-  "lsp_diagnostics",
-] as const;
+// 工具面与 `src/harness/aci/tools/symbol.ts` 的 `SYMBOL_QUERY_TOOL_NAMES`
+// 一一对齐（spec `symbol-primary-aci` Assumption 12 + T6 acceptance）：
+// MCP `tools/list` 返回 10 件符号查询名，与 ACI 查询面同构（无 lsp_*）。
+// 直接 import SSOT —— 不再内联复刻名单，避免 drift。
 
 async function connectServer(directory: string): Promise<{
   readonly client: Client;
@@ -67,13 +60,15 @@ async function connectServer(directory: string): Promise<{
 }
 
 describe("lsp MCP server (SDK 2.0)", () => {
-  it("registers the 10 read-only lsp_* tools", async () => {
+  it("registers the 10 read-only symbol-query tools (no lsp_*)", async () => {
     const directory = mkdtempSync(join(tmpdir(), "iknow-lsp-mcp-list-"));
     scratch.push(directory);
     const connected = await connectServer(directory);
     try {
       const result = await connected.client.listTools();
-      expect(result.tools.map((t) => t.name)).toEqual([...LSP_TOOL_NAMES]);
+      expect(result.tools.map((t) => t.name)).toEqual([
+        ...SYMBOL_QUERY_TOOL_NAMES,
+      ]);
       expect(
         result.tools.every((t) => t.annotations?.readOnlyHint === true)
       ).toBe(true);
@@ -92,11 +87,10 @@ describe("lsp MCP server (SDK 2.0)", () => {
     const connected = await connectServer(directory);
     try {
       const result = await connected.client.callTool({
-        name: "lsp_hover",
+        name: "get_hover",
         arguments: {
           file: join(directory, "src", "a.ts"),
-          line: 1,
-          character: 0,
+          symbol_path: "Class/method",
         },
       });
       const text = result.content[0];
@@ -114,16 +108,21 @@ describe("lsp MCP server (SDK 2.0)", () => {
     scratch.push(directory);
     const connected = await connectServer(directory);
     try {
+      // 缺 query → schema 拒绝（find_symbol 必填 query）；session 不掉。
       const invalid = await connected.client.callTool({
-        name: "lsp_hover",
-        arguments: { file: "/x.ts", line: 0, character: 0 },
+        name: "find_symbol",
+        arguments: {},
       });
       mockGetClientDetailed.mockResolvedValue({
         failure: { reason: "no-server" },
       });
+      // 合法 find_symbol（query 非空 + 可选 file 锚定）→ 不应报错。
       const valid = await connected.client.callTool({
-        name: "lsp_workspace_symbol",
-        arguments: { query: "Foo" },
+        name: "find_symbol",
+        arguments: {
+          query: "Foo",
+          file: join(directory, "src", "a.ts"),
+        },
       });
       expect(invalid.isError).toBe(true);
       expect(valid.isError).not.toBe(true);

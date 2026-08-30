@@ -33,6 +33,7 @@
 - `trace-lifecycle-panel-v2.md` / `iknow-trace-standalone-service.md` / `traceserver-inspection-panel.md` — trace 三迭代 spec；独立 `iknow trace` 进程（`#183`）+ web trace.html 面板已取代
 - `653-horizon-pkg1-perception.md` — 落地完成（PR #666）
 - `653-horizon-pkg2-kernel.md` — 落地完成（PR #671）；前台/后台 bash 沙箱纪律对齐 + `isConcurrencySafe` 并行调度
+- `251-lsp-tool.md` — superseded by `specs/symbol-primary-aci.md`（坐标模型面合同；客户端实现仍用）
 
 ## plans/
 

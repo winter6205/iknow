@@ -29,7 +29,8 @@ import { createWebSearchTool } from "./web-search.js";
 import { createMemoryRecallTool } from "../../memory/tools/recall.js";
 import { createMemorySaveTool } from "../../memory/tools/save.js";
 import { createToolSearchTool } from "./tool-search.js";
-import { createLspToolSet } from "./lsp.js";
+import { createSymbolQueryToolSet } from "./symbol.js";
+import { createSymbolMutateToolSet } from "./symbol-mutate.js";
 import type { LspCtx } from "../../lsp/types.js";
 import { createSkillTool } from "./skill.js";
 import { createSkillSearchTool } from "./skill-search.js";
@@ -96,19 +97,6 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   "memory_recall", // #228 layer 3（条件化:memoryDir 缺席时不装配）
   "memory_save", // #228 layer 3（同上）
   "tool_search", // #224 扩展路径
-  // #251 LSP 工具集 append-only：10 件（9 operation + lsp_diagnostics）。
-  // spec 写「8 operation + lsp_diagnostics = 9 件」但列了 9 个 operation 名
-  // → 实为 10 件；总量 11→21。append-only 纪律：不重排既有 11 件。
-  "lsp_definition", // #251 LSP operation
-  "lsp_references", // #251
-  "lsp_hover", // #251
-  "lsp_document_symbol", // #251
-  "lsp_workspace_symbol", // #251
-  "lsp_go_to_implementation", // #251
-  "lsp_prepare_call_hierarchy", // #251
-  "lsp_incoming_calls", // #251
-  "lsp_outgoing_calls", // #251
-  "lsp_diagnostics", // #251
   // #337 T5 skill 工具集 append-only：21→23。
   // 两件工具都条件化装配（skillCatalog 缺席时不入注册表,与 memoryDir
   // 同形态：Gate 3 在 toolsetNames 端镜像过滤,见工厂尾部注释）。
@@ -170,6 +158,34 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   // toolsetNames 端镜像过滤，见工厂尾部注释）。工具无参数；主仓根由 host
   // 从树本身派生（git common dir），树保留不删。
   "exit-task-worktree",
+  // symbol-primary-aci T2 符号查询工具集 append-only：35→45。
+  // 与 #251 的 10 件 `lsp_*` **并存**（T5 才把坐标面从模型面移除）：本批以
+  // 符号身份（`{ file, symbol_path }`）提问，行列译码封在 symbol-resolver.ts。
+  // append 在末尾而非插在 lsp_* 之后 —— 本文件的 append-only 纪律（policy
+  // byName 键空间与 ADR-0006 稳定）要求不重排既有 35 件。
+  "find_symbol", // 工作区按名字/模式找符号（空 query 由 schema 拒绝）
+  "find_declaration", // 声明/定义
+  "find_referencing_symbols", // 引用（含声明）
+  "find_implementations", // 接口/抽象成员 → 具体实现
+  "get_symbols_overview", // 单文件大纲（拿 symbol_path 的入口）
+  "get_hover", // 类型/签名/文档
+  "get_diagnostics_for_file", // 文件诊断（file 与 files 互斥）
+  "prepare_call_hierarchy", // 调用图 item
+  "list_incoming_calls", // 调用者
+  "list_outgoing_calls", // 被调用者
+  // symbol-primary-aci T4 符号改工具集 append-only:33→37（去掉旧 lsp_* 后
+  // 的末位 5 件,常驻,category=write）。以符号身份（`{ file, symbol_path }`）
+  // 改代码，行列译码封在 symbol-resolver.ts。category="write"，写盘后经
+  // onEdit → lspNotifier 触发 textDocument/didChange 与 edit_file 同链路。
+  // edit_file 仍在 —— 留给不是单一符号的文本补丁（spec §使用规则段）。
+  // spec symbol-primary-aci.md T5: tool surface = 8 基线 + memory_* (2 件) +
+  // tool_search + skill 2 + subagent 2 + todo + mcp 2 + bg 2 + run_graph +
+  // query_trace + 10 符号查询 + 5 符号改 = 37 件名。
+  "rename_symbol", // 全项目按符号改名（textDocument/rename + applyEdit）
+  "replace_symbol_body", // 替换定义体（range = node.range，签名 + body）
+  "insert_before_symbol", // 在符号定义前插入（range.start 位置）
+  "insert_after_symbol", // 在符号定义后插入（range.end 位置）
+  "safe_delete_symbol", // 无引用才删；仍有引用返 typed 失败 + 引用列表
 ] as const);
 
 /**
@@ -195,10 +211,13 @@ export interface CreateDefaultAciRegistryOptions {
   /** #251 onEdit 接缝:edit_file 写盘成功后回调(装配层接 LSP notifier)。 */
   readonly onEdit?: (file: string) => void;
   /**
-   * lsp-optimization 二期 B7 closeout：完整 LspCtx 透传给 createLspToolSet。
-   * 缺席时回落 `{ directory: sandboxRoot }`（与一轮行为一致）。
-   * build-engine / worker 必须传入与 notifier/warmup 同一份对象，否则
-   * settings.lsp（timeout / wait / idle / disabledServers）对工具路径不生效。
+   * lsp-optimization 二期 B7 closeout：完整 LspCtx 透传给符号工具集
+   * （symbol.ts / symbol-resolver.ts / symbol-mutate.ts 内部消费 lsp.ts
+   * SSOT 时取用本 ctx —— T5 起旧的 10 件 `lsp_*` 已从模型面退役，本字段
+   * 仅服务符号工具）。缺席时回落 `{ directory: sandboxRoot }`（与一轮
+   * 行为一致）。build-engine / worker 必须传入与 notifier/warmup 同一份
+   * 对象，否则 settings.lsp（timeout / wait / idle / disabledServers）
+   * 对符号工具路径不生效。
    */
   readonly lspCtx?: LspCtx;
   /** ADR-0019 (T4): per-root state anchor. Threaded into bash + read_file
@@ -290,14 +309,50 @@ export interface CreateDefaultAciRegistryOptions {
  * 解引用。装配未完成即被调用 → 抛 ToolExecutionError（fail-fast）。
  */
 /**
- * 把 LSP 工具集展开成 factories 记录（10 件:lsp_definition / lsp_references
- * / lsp_hover / lsp_document_symbol / lsp_workspace_symbol /
- * lsp_go_to_implementation / lsp_prepare_call_hierarchy / lsp_incoming_calls
- * / lsp_outgoing_calls / lsp_diagnostics）。createLspToolSet(ctx) 返回冻结
- * AciToolDef 列表；每件按 ACI_TOOLSET_NAMES 中的 key 索引。
+ * `lsp.ts` 的 10 件坐标 `lsp_*` AciToolDef（`createLspToolSet`）已从模型面
+ * 退役（spec symbol-primary-aci.md §37-53 + SC2 + SC7）—— `lsp.ts` 仍作
+ * 内部 SSOT：`LSP_ACI_META` / `renderNoServer` / `extractCallHierarchyItems` /
+ * `getClientForWorkspaceDetailed` / `compileValidator` / `stringifyResult` /
+ * `createRequestCancellation` / `timeoutError` / `isLspFailureSentinel` /
+ * `makeOperationTool` / `makeDiagnosticsTool` / `makeCallHierarchyCallTool`
+ * 诸导出由 symbol-resolver / symbol-mutate 直接 import 复用，
+ * 不再走 factories map 的 `...lspTools(lspCtx)` 展开路径。
+ *
+ * 内部 SSOT 覆盖测试（`tests/harness/aci/lsp.test.ts` 等）仍按 AciToolDef
+ * 形态直接调 `createLspToolSet` —— 见 lsp.ts 顶部 SSOT 注释。T5 后本
+ * `createDefaultAciRegistry` 不再 export 任何把 lsp_* 拉入模型面的接口。
  */
-function lspTools(ctx: LspCtx): Record<string, () => AciToolDef> {
-  const tools = createLspToolSet(ctx);
+
+/**
+ * 把符号查询工具集展开成 factories 记录（symbol-primary-aci T2，10 件：
+ * find_symbol / find_declaration / find_referencing_symbols /
+ * find_implementations / get_symbols_overview / get_hover /
+ * get_diagnostics_for_file / prepare_call_hierarchy / list_incoming_calls /
+ * list_outgoing_calls）。共享同一份 lspCtx（B7 语义）：旧 10 件 `lsp_*` 与
+ * 本批共同消费 `lsp.ts` 内部 SSOT，模型面仅符号工具可见（spec §37-53 + SC2 + SC7）。
+ */
+function symbolQueryTools(ctx: LspCtx): Record<string, () => AciToolDef> {
+  const tools = createSymbolQueryToolSet(ctx);
+  const map: Record<string, () => AciToolDef> = {};
+  for (const t of tools) {
+    map[t.name] = () => t;
+  }
+  return map;
+}
+
+/**
+ * 把符号改工具集展开成 factories 记录（symbol-primary-aci T4，5 件：
+ * rename_symbol / replace_symbol_body / insert_before_symbol /
+ * insert_after_symbol / safe_delete_symbol）。与 symbolQueryTools
+ * 同形态：工厂返回冻结 AciToolDef 列表，按 ACI_TOOLSET_NAMES 中的 key 索引；
+ * 共享同一份 lspCtx（B7 语义）。`onEdit` 透传自 registry 的 opts，写盘后
+ * 触发 lspNotifier.invalidate(file) 与 edit_file 同一接缝（plan T1）。
+ */
+function symbolMutateTools(
+  ctx: LspCtx,
+  onEdit: ((file: string) => void) | undefined
+): Record<string, () => AciToolDef> {
+  const tools = createSymbolMutateToolSet({ ctx, onEdit });
   const map: Record<string, () => AciToolDef> = {};
   for (const t of tools) {
     map[t.name] = () => t;
@@ -349,6 +404,11 @@ export function createDefaultAciRegistry(
   // holder:tool_search 自引用的惰性解引用点(装配完成前闭包返回 undefined,
   // tool-search.ts:resolveRegistry 触发 ToolExecutionError 兜底)。
   const assembled: { reg?: AciRegistry } = {};
+
+  // #251 / symbol-primary-aci T2:坐标面与符号面共享同一份 LspCtx —— 两套
+  // 工具走同一条客户端/取消/超时链路,ctx 分叉即 settings.lsp 半生效。
+  // B7 closeout:优先用装配层同一份 lspCtx,缺席回落 sandboxRoot-only。
+  const lspCtx: LspCtx = opts.lspCtx ?? { directory: sandboxRoot };
 
   // append-only:顺序与 build-engine.ts 既有策略(policy byName 键空间)一致。
   // memoryDir 缺席 → memory_recall / memory_save 从 factories 剔除
@@ -404,10 +464,13 @@ export function createDefaultAciRegistry(
           return r;
         },
       }),
-    // #251 LSP 工具集：NearestRoot 上界 stop=ctx.directory。
-    // B7 closeout：优先用装配层同一份 lspCtx（settings / idle / disabledServers），
-    // 缺席回落 sandboxRoot-only（worker 以外的遗留调用方）。
-    ...lspTools(opts.lspCtx ?? { directory: sandboxRoot }),
+    // #251 / symbol-primary-aci T5：坐标面 lsp_* 已从模型面移除（spec
+    // symbol-primary-aci.md §37-53 + SC2 / SC7 / ACR complexity-anti-drift）；
+    // lsp.ts 实现的 client / cancel / timeout / sentinel / diagnostics / call
+    // hierarchy 等 SSOT 复用层由 symbol.ts / symbol-resolver.ts / symbol-mutate.ts
+    // 消费，model surface 由符号工具（find_* / get_* / *_calls + 5 件改工具）
+    // 接班。nearestRoot 边界、settings.lsp / idle / disabledServers 等 B7 语义
+    // 落 lspCtx 一份 → 符号工具共享。
     // #337 T5 skill 工具集（条件化装配：skillCatalog 缺席时不入注册表）。
     ...(skillCatalog
       ? {
@@ -518,6 +581,16 @@ export function createDefaultAciRegistry(
             }),
         }
       : {}),
+    // symbol-primary-aci T2 符号查询工具集（常驻，符号主路径是默认）。
+    // 与符号改工具共享同一份 lspCtx；键顺序必须与 ACI_TOOLSET_NAMES 末尾
+    // 10 项逐项一致（Gate 3）。
+    ...symbolQueryTools(lspCtx),
+    // symbol-primary-aci T4 符号改工具集（常驻，category=write）。
+    // 与符号查询共享同一份 lspCtx；onEdit 来自 registry 的 opts.onEdit
+    // （build-engine 装配时注入 lspNotifier.invalidate）—— 写盘后触发
+    // textDocument/didChange 与 edit_file 同链路。键顺序必须与
+    // ACI_TOOLSET_NAMES 末尾 5 项逐项一致（Gate 3）。
+    ...symbolMutateTools(lspCtx, onEdit),
   };
 
   // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。

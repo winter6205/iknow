@@ -264,7 +264,7 @@ describe("createWorkerDeps addendum 消费 (envelope.systemPrompt 现在被消�
     assert.ok(!out.includes("MY ADDENDUM"));
   });
 
-  it("role + addendum → persona 在前, addendum 在后 (LOCKED 5 段不破)", async () => {
+  it("role + addendum → persona 在前, addendum 在后 (LOCKED 6 段不破)", async () => {
     const deps = await createWorkerDeps(
       hermeticOpts({ role: "explore", addendum: "MY ADDENDUM" })
     );
@@ -275,7 +275,7 @@ describe("createWorkerDeps addendum 消费 (envelope.systemPrompt 现在被消�
     assert.ok(addendumIdx > personaIdx, "addendum 在 persona 之后");
   });
 
-  it("role + addendum → base (LOCKED 5 段) 在 persona 之前 (顺序不变)", async () => {
+  it("role + addendum → base (LOCKED 6 段) 在 persona 之前 (顺序不变)", async () => {
     const baseText = "BASE_SYSTEM_TEXT";
     const deps = await createWorkerDeps(
       hermeticOpts({

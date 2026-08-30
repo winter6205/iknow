@@ -166,6 +166,7 @@ describe("assembleIdentityContext MCP 概览段注入", () => {
     expect([...IKNOW_ASSEMBLY_ORDER]).toEqual([
       "identity",
       "soul",
+      "usage",
       "user_profile",
       "bootstrap",
       "memory_layer",

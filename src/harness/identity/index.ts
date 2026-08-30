@@ -30,6 +30,7 @@ export type {
 
 export { IKNOW_IDENTITY_DEFAULT } from "./identity.js";
 export { IKNOW_SOUL_DEFAULT } from "./soul.js";
+export { IKNOW_USAGE_DEFAULT } from "./usage.js";
 export { BOOTSTRAP_TEMPLATE } from "./bootstrap.js";
 
 export {

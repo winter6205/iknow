@@ -7,7 +7,7 @@
  * can sense which project it is in by default.
  *
  * Additive, parallel to `toolListSegment`: does NOT touch IKNOW_ASSEMBLY_ORDER
- * (locked at 5: identity / soul / user_profile / bootstrap / memory_layer).
+ * (locked at 6: identity / soul / usage / user_profile / bootstrap / memory_layer).
  * cwd is constant per process → output stays byte-stable across turns (KV
  * cache contract preserved).
  */
@@ -21,6 +21,7 @@ import {
   type AssemblyContext,
 } from "../../../src/harness/identity/assemble.ts";
 import { IKNOW_IDENTITY_DEFAULT } from "../../../src/harness/identity/identity.ts";
+import { IKNOW_USAGE_DEFAULT } from "../../../src/harness/identity/usage.ts";
 
 let workDir: string;
 let origHome: string | undefined;
@@ -60,6 +61,14 @@ describe("identity assembly — project path additive segment", () => {
     const idxPath = out!.indexOf("## Project path");
     expect(idxIdentity).toBeGreaterThanOrEqual(0);
     expect(idxPath).toBeGreaterThan(idxIdentity);
+  });
+
+  it("project path segment appears AFTER the 6-segment LOCKED base (usage last)", async () => {
+    const out = await assembleIdentityContext(baseCtx("/x"));
+    const idxUsage = out!.indexOf(IKNOW_USAGE_DEFAULT);
+    const idxPath = out!.indexOf("## Project path");
+    expect(idxUsage).toBeGreaterThanOrEqual(0);
+    expect(idxPath).toBeGreaterThan(idxUsage);
   });
 
   it("createIknowSystemResolver threads cwd through to the project path segment", async () => {

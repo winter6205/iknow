@@ -1,16 +1,20 @@
 /**
  * tests/harness/aci/tools/registry.test.ts
  *
- * `createDefaultAciRegistry` — 30 件 SSOT 工具注册层单元测试
- * （六条件键 memoryDir / skillCatalog / subagentManager / todoDir / mcpManager
- *  / backgroundManager 全部缺席 → 19 件 = 8 基线 + tool_search + 10 LSP；
- *  只 memoryDir → 21 件；memoryDir+skillCatalog → 23 件；三者皆在场 → 25 件；
- *  五者皆在场 → 28 件；六者皆在场 → 30 件 = 全量 #502 T4 末态）。
+ * `createDefaultAciRegistry` — SSOT 工具注册层单元测试。装配形态与
+ * ACI_TOOLSET_NAMES 同源；具体件数 = 全条件在场 37、缺席子集后 filter
+ * 推导。本测试不在注释里枚举加法（count 易漂），每条用例以 `.filter(...)`
+ * 表达式为 source of truth，对照 `ACI_TOOLSET_NAMES.length` 与 Gate 3 镜像。
+ *
+ * 旧 10 件 lsp_* 已退役（spec symbol-primary-aci.md §37-53 + SC2 + SC7），
+ * 其实现仍在 `lsp.ts` 作 `symbol.ts` 的 SSOT 复用层，
+ * createLspToolSet 不再装配到 factories。
  *
  * 对齐 upstream `create_default_tool_registry()`(tools/__init__.py:48):
  * 单一装配函数返回注册表,所有入口共享。本测试锁 5 边界类:
  *
- *   - 正常路径:返回 AciRegistry,list() 30 工具(六条件键全在场),顺序 append-only
+ *   - 正常路径:返回 AciRegistry,list() 工具名 = `ACI_TOOLSET_NAMES` 全集
+ *     （全条件在场 + graphAssembly → 37），顺序 append-only
  *   - 空输入:env.web 全空(undefined)→ 直连不抛;sandboxRoot:"" → 不抛
  *   - 非法输入:proxy 非 http/https / 含凭据 → 装配期同步抛 ToolExecutionError
  *   - 溢出/边界:sandboxRoot 指向不存在路径 → 装配期不抛(执行期由 fs 工具越界逻辑拒绝)
@@ -36,6 +40,9 @@ import type { IknowEnv } from "../../../../src/config/env.js";
 import type { SubAgentManager } from "../../../../src/harness/subagent/manager.js";
 import type { McpManager } from "../../../../src/harness/mcp/manager.js";
 import type { BackgroundTaskManager } from "../../../../src/harness/background/manager.js";
+import type { CreateTaskWorktreeProvisionFn } from "../../../../src/harness/aci/tools/create-task-worktree.js";
+import type { WorktreeEnterToolDeps } from "../../../../src/harness/aci/tools/enter-task-worktree.js";
+import type { WorktreeExitToolDeps } from "../../../../src/harness/aci/tools/exit-task-worktree.js";
 
 /** 合法最小 env(仅 web 字段;LLM 字段工厂不消费)。 */
 function makeWebEnv(
@@ -45,24 +52,6 @@ function makeWebEnv(
 }
 
 const EXPECTED_TOOLS: readonly string[] = ACI_TOOLSET_NAMES;
-
-/** T4:worktree isolation host provision 缝 fake（仅用于装配期断言
- * create-task-worktree 在场；handler 路径单测在
- * tests/harness/aci/tools/create-task-worktree.test.ts）。 */
-const fakeWorktreeProvision = async (): Promise<string> =>
-  "/tmp/root/.iknow/worktrees/conv";
-
-/** T7:worktree isolation host enter 缝 fake（仅用于装配期断言
- * enter-task-worktree 在场；handler 路径单测在
- * tests/harness/aci/tools/enter-task-worktree.test.ts）。 */
-const fakeWorktreeEnter = async (): Promise<string> =>
-  "/tmp/root/.iknow/worktrees/conv-target";
-
-/** T8:worktree isolation host exit 缝 fake（仅用于装配期断言
- * exit-task-worktree 在场；handler 路径单测在
- * tests/harness/aci/tools/exit-task-worktree.test.ts）。 */
-const fakeWorktreeExit = async (): Promise<string> =>
-  "/tmp/repo-root";
 
 /** #356 T4/T5 fake subagentManager（仅用于 createDefaultAciRegistry 装配期断言
  * spawn_subagent / subagent_result 在场；handler 路径单测在
@@ -77,7 +66,25 @@ const fakeSubagentManager: SubAgentManager = {
   abortTask: () => false,
   // #358 T7: 接口新增只读枚举面 —— fake 补全保持结构兼容。
   listSubagents: () => [],
+  // master SubAgentManager 接口扩展:subscribe 用于父代监听子代理状态变更
+  // (mailbox 契约 #361)。fake 不实现回调机制,返回 noop unsubscribe。
+  subscribe: () => () => {},
 };
+
+/** worktree isolation 三缝 fake —— 装配期断言 create-task-worktree /
+ * enter-task-worktree / exit-task-worktree 在场。handler 路径不在本文件。 */
+const fakeWorktreeProvision = (async () => ({
+  taskId: "fake-task",
+  worktreePath: "/tmp/fake-worktree",
+  branchName: "fake/branch",
+})) as unknown as CreateTaskWorktreeProvisionFn;
+const fakeWorktreeEnter = (async () => ({
+  worktreePath: "/tmp/fake-worktree",
+  branchName: "fake/branch",
+})) as unknown as WorktreeEnterToolDeps["worktreeEnter"];
+const fakeWorktreeExit = (async () => ({
+  mainRepoRoot: "/tmp/fake-main",
+})) as unknown as WorktreeExitToolDeps["worktreeExit"];
 
 /** #440 T11 fake mcpManager（仅用于 createDefaultAciRegistry 装配期断言
  * list_mcp_resources / read_mcp_resource 在场；handler 路径单测在
@@ -106,10 +113,11 @@ const fakeBackgroundManager: BackgroundTaskManager = {
 } as unknown as BackgroundTaskManager;
 
 describe("createDefaultAciRegistry — 正常路径", () => {
-  // #502 T4 全条件装配：memoryDir + skillCatalog + subagentManager +
-  // todoDir + mcpManager + backgroundManager 同时在场 → list() 全量 30 件
-  // （28 基线 + bash_output + bash_stop），顺序 append-only。
-  it("memoryDir + skillCatalog + subagentManager + todoDir + mcpManager + backgroundManager 同时在场 → list() 全量 30 件,顺序 append-only", () => {
+  // symbol-primary-aci T5 全条件装配：memoryDir + skillCatalog + subagentManager +
+  // todoDir + mcpManager + backgroundManager + graphAssembly 同时在场 → list()
+  // 全量 37 件（= ACI_TOOLSET_NAMES 全长），顺序 append-only。10 件 lsp_*
+  // 已退役（坐标面 → 符号面接班），lsp.ts 实现的 SSOT 不变。
+  it("memoryDir + skillCatalog + subagentManager + todoDir + mcpManager + backgroundManager + graphAssembly 同时在场 → list() 全量 40 件,顺序 append-only", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -121,19 +129,15 @@ describe("createDefaultAciRegistry — 正常路径", () => {
       mcpManager: fakeMcpManager,
       // #502 T4:bash_output / bash_stop 条件化装配,backgroundManager 在场才入注册表。
       backgroundManager: fakeBackgroundManager,
-      // D-α T3:graph overlay 在场 → run_graph 入注册表。
+      // D-α T3:graph overlay 在场 → run_graph 入注册表(全量 31 件)。
       graphAssembly: { enabled: () => true },
-      // T4:worktreeProvision 在场 → create-task-worktree 入注册表。
-      // T7/T8:worktreeEnter / worktreeExit 在场 → enter/exit 工具入注册表
-      // (全量 35 件)。
+      // worktree isolation (ADR-0037):3 件条件化装配,host 缝在场才入注册表。
       worktreeProvision: fakeWorktreeProvision,
       worktreeEnter: fakeWorktreeEnter,
       worktreeExit: fakeWorktreeExit,
     });
     const names = reg.inner.list().map((def) => def.name);
     expect(names).toEqual([...EXPECTED_TOOLS]);
-    // T4:worktreeProvision 条件化装配,在场时 create-task-worktree 入注册表。
-    expect(reg.catalog.get("create-task-worktree")).toBeDefined();
     expect(reg.catalog.get("web_fetch")).toBeDefined();
     expect(reg.catalog.get("web_search")).toBeDefined();
     expect(reg.catalog.get("memory_recall")).toBeDefined();
@@ -153,7 +157,7 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(reg.catalog.get("bash_stop")).toBeDefined();
   });
 
-  it("memoryDir + skillCatalog + subagentManager 都缺席 → list() 19 件(8 基线 + tool_search + 10 LSP,无 memory/skill/spawn/todo/mcp/bg 工具)", () => {
+  it("memoryDir + skillCatalog + subagentManager 都缺席 → list() 25 件(8 基线 + tool_search + query_trace + 10 符号查询 + 5 符号改,无 memory/skill/spawn/todo/mcp/bg/run_graph)", () => {
     const reg = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root",
@@ -175,11 +179,10 @@ describe("createDefaultAciRegistry — 正常路径", () => {
           n !== "bash_stop" &&
           // D-α T3:graphAssembly + subagentManager 皆缺席 → run_graph 缺席。
           n !== "run_graph" &&
-          // T4:worktreeProvision 缺席 → create-task-worktree 缺席。
+          // worktree isolation (ADR-0037):worktreeProvision / worktreeEnter /
+          // worktreeExit host 缝皆缺席 → 3 件 worktree 工具缺席。
           n !== "create-task-worktree" &&
-          // T7:worktreeEnter 缺席 → enter-task-worktree 缺席。
           n !== "enter-task-worktree" &&
-          // T8:worktreeExit 缺席 → exit-task-worktree 缺席。
           n !== "exit-task-worktree"
       )
     );
@@ -200,10 +203,12 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(reg.catalog.get("bash_stop")).toBeUndefined();
   });
 
-  // #502 T4 全条件装配:ACI_TOOLSET_NAMES 长度 30(28 基线 + bash_output +
-  // bash_stop),顺序 append-only 不重排既有。
-  it("Gate 3:ACI_TOOLSET_NAMES 长度 35,前 8 原序 + memory_* + tool_search + 10 LSP + skill + skill_search + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop + query_trace + create-task-worktree + enter-task-worktree + exit-task-worktree", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(35);
+  // symbol-primary-aci T5:ACI_TOOLSET_NAMES 长度 37
+  // (T2+T4 末态 32 + 5 件 T4 符号改 - 10 件退役 lsp_*)。
+  // append-only 纪律保留 23 件既有 + 末位 14 件符号面 / 改工具。
+  // 旧 10 件 lsp_* 已退役（spec symbol-primary-aci.md §37-53 + SC2 + SC7）。
+  it("Gate 3:ACI_TOOLSET_NAMES 长度 40,前 8 原序 + memory_* + tool_search + skill + skill_search + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop + run_graph + query_trace + 10 符号查询 + 5 符号改 + worktree 3 件", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(40);
     // 前 8 件原序不变(append-only 纪律)。
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
@@ -218,48 +223,60 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(ACI_TOOLSET_NAMES[8]).toBe("memory_recall");
     expect(ACI_TOOLSET_NAMES[9]).toBe("memory_save");
     expect(ACI_TOOLSET_NAMES[10]).toBe("tool_search");
-    // #251 LSP 工具集 append-only:11→21,10 件在末尾,不重排既有 11 件。
-    expect(ACI_TOOLSET_NAMES.slice(11, 21)).toEqual([
-      "lsp_definition",
-      "lsp_references",
-      "lsp_hover",
-      "lsp_document_symbol",
-      "lsp_workspace_symbol",
-      "lsp_go_to_implementation",
-      "lsp_prepare_call_hierarchy",
-      "lsp_incoming_calls",
-      "lsp_outgoing_calls",
-      "lsp_diagnostics",
-    ]);
-    // #337 T5 skill 工具集 append-only:21→23,2 件在末尾,不重排既有 21 件。
-    expect(ACI_TOOLSET_NAMES.slice(21, 23)).toEqual(["skill", "skill_search"]);
-    // #356 T4 spawn_subagent append-only:23→24,末位 1 件,不重排既有 23 件。
-    expect(ACI_TOOLSET_NAMES.slice(23, 24)).toEqual(["spawn_subagent"]);
-    // #356 T5 subagent_result append-only:24→25,末位 1 件,不重排既有 24 件。
-    expect(ACI_TOOLSET_NAMES.slice(24, 25)).toEqual(["subagent_result"]);
+    // T5:LSP 工具集已退役；本表 11..21 段改为 skill 2 (T5 末态保持 11=skill / 12=skill_search)。
+    // skill 工具集 append-only:11→13,2 件在末尾,不重排既有 11 件。
+    expect(ACI_TOOLSET_NAMES.slice(11, 13)).toEqual(["skill", "skill_search"]);
+    // #356 T4 spawn_subagent append-only:13→14,末位 1 件,不重排既有 13 件。
+    expect(ACI_TOOLSET_NAMES.slice(13, 14)).toEqual(["spawn_subagent"]);
+    // #356 T5 subagent_result append-only:14→15,末位 1 件,不重排既有 14 件。
+    expect(ACI_TOOLSET_NAMES.slice(14, 15)).toEqual(["subagent_result"]);
     // #440 双 Stream 并集:todo_write (T4) + MCP resources (T11) 三件
-    // 末尾 append-only,不重排既有 25 件。
-    expect(ACI_TOOLSET_NAMES.slice(25, 28)).toEqual([
+    // 末尾 append-only,不重排既有 15 件。append-only 段 15..18。
+    expect(ACI_TOOLSET_NAMES.slice(15, 18)).toEqual([
       "todo_write",
       "list_mcp_resources",
       "read_mcp_resource",
     ]);
-    // #502 T4 bash_output / bash_stop 工具集 append-only:28→30,末位 2 件,
-    // 不重排既有 28 件。
-    expect(ACI_TOOLSET_NAMES.slice(28, 30)).toEqual([
+    // #502 T4 bash_output / bash_stop 工具集 append-only:18→20,末位 2 件,
+    // 不重排既有 18 件。
+    expect(ACI_TOOLSET_NAMES.slice(18, 20)).toEqual([
       "bash_output",
       "bash_stop",
     ]);
-    // D-α T3 run_graph append-only:30→31,末位 1 件,不重排既有 30 件。
-    expect(ACI_TOOLSET_NAMES.slice(30, 31)).toEqual(["run_graph"]);
-    // T9 query_trace append-only:31→32,末位 1 件,不重排既有 31 件。
-    expect(ACI_TOOLSET_NAMES.slice(31, 32)).toEqual(["query_trace"]);
-    // T4 create-task-worktree append-only:32→33,末位 1 件,不重排既有 32 件。
-    expect(ACI_TOOLSET_NAMES.slice(32, 33)).toEqual(["create-task-worktree"]);
-    // T7 enter-task-worktree append-only:33→34,末位 1 件,不重排既有 33 件。
-    expect(ACI_TOOLSET_NAMES.slice(33, 34)).toEqual(["enter-task-worktree"]);
-    // T8 exit-task-worktree append-only:34→35,末位 1 件,不重排既有 34 件。
-    expect(ACI_TOOLSET_NAMES.slice(34, 35)).toEqual(["exit-task-worktree"]);
+    // D-α T3 run_graph append-only:20→21,末位 1 件,不重排既有 20 件。
+    expect(ACI_TOOLSET_NAMES.slice(20, 21)).toEqual(["run_graph"]);
+    // T9 query_trace append-only:21→22,末位 1 件,不重排既有 21 件。
+    expect(ACI_TOOLSET_NAMES.slice(21, 22)).toEqual(["query_trace"]);
+    // worktree isolation (master ADR-0037):三件 append-only:22→25,末位 3 件,
+    // 不重排既有 22 件。create/enter/exit 三件顺序与工作流先后一致。
+    expect(ACI_TOOLSET_NAMES.slice(22, 25)).toEqual([
+      "create-task-worktree",
+      "enter-task-worktree",
+      "exit-task-worktree",
+    ]);
+    // symbol-primary-aci T2 符号查询工具集 append-only:25→35,末位 10 件,
+    // 不重排既有 25 件。
+    expect(ACI_TOOLSET_NAMES.slice(25, 35)).toEqual([
+      "find_symbol",
+      "find_declaration",
+      "find_referencing_symbols",
+      "find_implementations",
+      "get_symbols_overview",
+      "get_hover",
+      "get_diagnostics_for_file",
+      "prepare_call_hierarchy",
+      "list_incoming_calls",
+      "list_outgoing_calls",
+    ]);
+    // symbol-primary-aci T4 符号改工具集 append-only:35→40,末位 5 件,
+    // 不重排既有 35 件（与查询面并列；category=write，与 edit_file 共存）。
+    expect(ACI_TOOLSET_NAMES.slice(35, 40)).toEqual([
+      "rename_symbol",
+      "replace_symbol_body",
+      "insert_before_symbol",
+      "insert_after_symbol",
+      "safe_delete_symbol",
+    ]);
   });
 });
 
@@ -388,6 +405,7 @@ function expectedSurface(
     mcp?: boolean;
     bg?: boolean;
     graph?: boolean;
+    worktree?: boolean;
   } = {}
 ): readonly string[] {
   const conditionallyAbsent = [
@@ -399,9 +417,9 @@ function expectedSurface(
     ...(opts.bg ? [] : ["bash_output", "bash_stop"]),
     // D-α T3:graphAssembly + subagentManager 同门,任一缺席 → run_graph 缺席。
     ...(opts.graph && opts.subagent ? [] : ["run_graph"]),
-    // T4:worktreeProvision 缺席 → create-task-worktree 缺席。
-    // T7/T8:enter/exit 缝缺席 → 两个工具缺席（与 wt 同门装配）。
-    ...(opts.wt
+    // worktree isolation (ADR-0037):worktreeProvision / worktreeEnter /
+    // worktreeExit host 缝皆在场时才入注册表。
+    ...(opts.worktree
       ? []
       : ["create-task-worktree", "enter-task-worktree", "exit-task-worktree"]),
   ];
@@ -500,9 +518,10 @@ describe("createDefaultAciRegistry — #468 disallowedTools 裁剪", () => {
 
 describe("createDefaultAciRegistry — 并发闭包隔离", () => {
   it("两次工厂调用返回的 AciRegistry 相互独立", () => {
-    // #502 T4 全条件装配:两 registry 都给 todoDir + mcpManager +
-    // backgroundManager → 30 件,验证 catalog.all() 长度独立（闭包隔离,
-    // 共享类型不串味）。
+    // symbol-primary-aci T5 + #502 T4 全条件装配:两 registry 都给 todoDir + mcpManager +
+    // backgroundManager → 25 件,验证 catalog.all() 长度独立（闭包隔离,
+    // 共享类型不串味；T5 退役 10 lsp_* 后从 30 降到 25）。
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const a = createDefaultAciRegistry({
       env: makeWebEnv(),
       sandboxRoot: "/tmp/root-a",
@@ -514,9 +533,6 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
       backgroundManager: fakeBackgroundManager,
       // D-α T3:graph overlay 在场 → run_graph 入注册表(全量 31 件)。
       graphAssembly: { enabled: () => true },
-      // T4:worktreeProvision 在场 → create-task-worktree 入注册表。
-      // T7/T8:worktreeEnter / worktreeExit 在场 → enter/exit 工具入注册表
-      // (全量 35 件)。
       worktreeProvision: fakeWorktreeProvision,
       worktreeEnter: fakeWorktreeEnter,
       worktreeExit: fakeWorktreeExit,
@@ -532,9 +548,6 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
       backgroundManager: fakeBackgroundManager,
       // D-α T3:graph overlay 在场 → run_graph 入注册表(全量 31 件)。
       graphAssembly: { enabled: () => true },
-      // T4:worktreeProvision 在场 → create-task-worktree 入注册表。
-      // T7/T8:worktreeEnter / worktreeExit 在场 → enter/exit 工具入注册表
-      // (全量 35 件)。
       worktreeProvision: fakeWorktreeProvision,
       worktreeEnter: fakeWorktreeEnter,
       worktreeExit: fakeWorktreeExit,
@@ -595,17 +608,15 @@ describe("createDefaultAciRegistry — #440 T1 todoDir seam", () => {
       todoDir: "/tmp/root/session-1/todos",
       mcpManager: fakeMcpManager,
       backgroundManager: fakeBackgroundManager,
-      // D-α T3:graph overlay 在场 → run_graph 入注册表(全量 31 件)。
+      // D-α T3:graph overlay 在场 → run_graph 入注册表(全量 25 件)。
       graphAssembly: { enabled: () => true },
-      // T4:worktreeProvision 在场 → create-task-worktree 入注册表。
-      // T7/T8:worktreeEnter / worktreeExit 在场 → enter/exit 工具入注册表
-      // (全量 35 件)。
       worktreeProvision: fakeWorktreeProvision,
       worktreeEnter: fakeWorktreeEnter,
       worktreeExit: fakeWorktreeExit,
     });
-    // #502 T4 全条件装配:6 个条件化 seam 全在场 → 30 件全装配(28 基线 +
-    // bash_output + bash_stop)。
+    // symbol-primary-aci T5 + #502 T4 全条件装配:6 个条件化 seam 全在场
+    // → 25 件全装配(22 基线 + bash_output + bash_stop + run_graph)。
+    // 旧 lsp_* 10 件已退役,符号面 10 + 5 + 5 符号改 = 15 件接班。
     expect(reg.inner.list().map((d) => d.name)).toEqual([...EXPECTED_TOOLS]);
   });
 });

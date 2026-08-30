@@ -132,8 +132,13 @@ export const DIAGNOSTICS_WAIT_MS = 2_000;
  */
 export const MAX_RESULT_BYTES = 48 * 1024;
 
-/** 工具共用的 ajv 元数据（spec aci 元：read-only / 非并发安全 / cancel / 30s）。 */
-const LSP_ACI_META = {
+/**
+ * 工具共用的 ajv 元数据（spec aci 元：read-only / 非并发安全 / cancel / 30s）。
+ *
+ * symbol-primary-aci T2：符号查询工具集（`symbol.ts`）复用同一份元数据 —
+ * 两套工具走同一条 LSP 客户端/取消/超时链路，元数据分叉即语义分叉。
+ */
+export const LSP_ACI_META = {
   category: "read-only" as const,
   isConcurrencySafe: false,
   interruptBehavior: "cancel" as const,
@@ -169,7 +174,7 @@ interface DiagnosticsInput {
  *   - no-root：说明在 file 之上、ctx.directory 之内找不到 serverId 的根标记；
  *   - spawn-failed：serverId 不可用 + installHint（server 声明缺席则省略 hint 句）。
  */
-function renderNoServer(
+export function renderNoServer(
   ctx: LspCtx,
   failure: LspClientFailure,
   file?: string
@@ -207,7 +212,7 @@ export function isLspFailureSentinel(result: unknown): result is string {
  * 把任意 LSP 响应规范成纯字符串（契约 Y1：永不返回结构化 payload），
  * 并封顶到 MAX_RESULT_BYTES（截 stringify 后的结果；N = 完整字节数）。
  */
-function stringifyResult(result: unknown): string {
+export function stringifyResult(result: unknown): string {
   let text: string;
   if (result === undefined) text = "";
   else if (result === null) text = "null";
@@ -241,7 +246,7 @@ function capResult(text: string): string {
 }
 
 /** 编译 schema 为 ajv validator + 构造抛错版 parse。 */
-function compileValidator(
+export function compileValidator(
   schema: Record<string, unknown>,
   toolName: string
 ): (input: unknown) => unknown {
@@ -331,7 +336,7 @@ interface OperationSpec {
  * ToolExecutionError（模型可读），其余错误原样上抛。dispose 清 timer + 移除
  * abort listener（照旧语义）。
  */
-function createRequestCancellation(
+export function createRequestCancellation(
   execCtx: ToolExecutionContext | undefined,
   timeoutMs: number
 ): {
@@ -365,7 +370,7 @@ function createRequestCancellation(
 }
 
 /** 超时错误的统一文案（模型可读；含触发超时的 method 与实际超时秒数）。 */
-function timeoutError(
+export function timeoutError(
   toolName: string,
   method: string,
   timeoutMs: number
@@ -382,7 +387,7 @@ function timeoutError(
  * NearestRoot/spawn 全链路，首个可用即返回；全部不可用 → 返回最后一次失败
  * 原因（handler 转分层哨兵字符串）。
  */
-async function getClientForWorkspaceDetailed(
+export async function getClientForWorkspaceDetailed(
   ctx: LspCtx
 ): Promise<{ client?: LspClient; failure?: LspClientFailure }> {
   let lastFailure: LspClientFailure = { reason: "no-server" };
@@ -543,7 +548,9 @@ function unwrapItems(raw: unknown): ReadonlyArray<unknown> {
 }
 
 /** tsserver 返回的 prepareCallHierarchy 形态归一化：取 items 数组。 */
-function extractCallHierarchyItems(prepared: unknown): ReadonlyArray<unknown> {
+export function extractCallHierarchyItems(
+  prepared: unknown
+): ReadonlyArray<unknown> {
   return unwrapItems(prepared);
 }
 
@@ -567,11 +574,19 @@ function extractCallHierarchyItems(prepared: unknown): ReadonlyArray<unknown> {
  * deadline 来自 ctx.diagnosticsWaitMs（缺省 DIAGNOSTICS_WAIT_MS = 2s）。
  *
  * 输出：纯字符串（契约 Y1）。
+ *
+ * **name 参数（symbol-primary-aci T2）**：符号查询面复用同一 handler 语义
+ * 暴露成 `get_diagnostics_for_file`（诊断本就按文件提问，无符号身份可谈）。
+ * 缺省 `"lsp_diagnostics"` → 旧工具行为 byte-identical。
  */
-function makeDiagnosticsTool(ctx: LspCtx, description: string): AciToolDef {
-  const validate = compileValidator(DIAGNOSTICS_SCHEMA, "lsp_diagnostics");
+export function makeDiagnosticsTool(
+  ctx: LspCtx,
+  description: string,
+  name = "lsp_diagnostics"
+): AciToolDef {
+  const validate = compileValidator(DIAGNOSTICS_SCHEMA, name);
   return Object.freeze({
-    name: "lsp_diagnostics",
+    name,
     description,
     inputSchema: DIAGNOSTICS_SCHEMA,
     aci: LSP_ACI_META,
@@ -583,7 +598,7 @@ function makeDiagnosticsTool(ctx: LspCtx, description: string): AciToolDef {
       // 互斥（二期 B2）：file 与 files 恰好一个（xor）。都缺省或都在场 → 报错。
       if ((params.file !== undefined) === (params.files !== undefined)) {
         throw new ToolExecutionError(
-          "[lsp_diagnostics] provide exactly one of `file` or `files`"
+          `[${name}] provide exactly one of \`file\` or \`files\``
         );
       }
       // 批量封顶：> DIAGNOSTICS_MAX_FILES 个 → 报错（minItems=1 由 schema 管）。
@@ -592,7 +607,7 @@ function makeDiagnosticsTool(ctx: LspCtx, description: string): AciToolDef {
         params.files.length > DIAGNOSTICS_MAX_FILES
       ) {
         throw new ToolExecutionError(
-          `[lsp_diagnostics] files accepts at most ${DIAGNOSTICS_MAX_FILES} entries; got ${params.files.length}`
+          `[${name}] files accepts at most ${DIAGNOSTICS_MAX_FILES} entries; got ${params.files.length}`
         );
       }
       const targets: readonly string[] =

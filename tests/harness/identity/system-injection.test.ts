@@ -94,6 +94,7 @@ describe("buildHarnessEngine surface → deps.system", () => {
     const out = await buildSystem("ask");
     expect(out).toContain("iknow Identity");
     expect(out).toContain("iknow Soul");
+    expect(out).toContain("Usage rules");
     expect(out).toContain("User Profile");
     expect(out).not.toContain("First Contact");
   });
@@ -106,13 +107,16 @@ describe("buildHarnessEngine surface → deps.system", () => {
     expect(out).toContain("First Contact");
   });
 
-  it("order: identity < soul < user_profile < bootstrap", async () => {
+  it("order: identity < soul < usage < user_profile < bootstrap", async () => {
     const out = await buildSystem("chat");
     expect(out.indexOf("iknow Identity")).toBeGreaterThanOrEqual(0);
     expect(out.indexOf("iknow Identity")).toBeLessThan(
       out.indexOf("iknow Soul")
     );
-    expect(out.indexOf("iknow Soul")).toBeLessThan(out.indexOf("User Profile"));
+    expect(out.indexOf("iknow Soul")).toBeLessThan(out.indexOf("Usage rules"));
+    expect(out.indexOf("Usage rules")).toBeLessThan(
+      out.indexOf("User Profile")
+    );
     expect(out.indexOf("User Profile")).toBeLessThan(
       out.indexOf("First Contact")
     );
