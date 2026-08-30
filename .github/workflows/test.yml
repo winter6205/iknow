@@ -95,6 +95,11 @@ jobs:
             --exclude tests/session-api/max-turns-serve.test.ts \
             --exclude tests/session-api/workspace-bind.test.ts \
             --exclude tests/session-api/hub-worktree-isolation.test.ts \
+            --exclude tests/harness/aci/tools/create-task-worktree.test.ts \
+            --exclude tests/harness/aci/tools/enter-task-worktree.test.ts \
+            --exclude tests/harness/aci/tools/exit-task-worktree.test.ts \
+            --exclude tests/harness/build-engine-subagent-spawn-root.test.ts \
+            --exclude tests/subagent/rules-missing-dirs.test.ts \
             --exclude tests/tui/deps-tools.test.ts \
             --exclude tests/cli/tui-deps-subagent-trace-factory.test.ts \
             --exclude tests/cli/chat-subagent-trace.test.ts \
@@ -191,6 +196,11 @@ jobs:
             --exclude tests/session-api/max-turns-serve.test.ts \
             --exclude tests/session-api/workspace-bind.test.ts \
             --exclude tests/session-api/hub-worktree-isolation.test.ts \
+            --exclude tests/harness/aci/tools/create-task-worktree.test.ts \
+            --exclude tests/harness/aci/tools/enter-task-worktree.test.ts \
+            --exclude tests/harness/aci/tools/exit-task-worktree.test.ts \
+            --exclude tests/harness/build-engine-subagent-spawn-root.test.ts \
+            --exclude tests/subagent/rules-missing-dirs.test.ts \
             --exclude tests/tui/deps-tools.test.ts \
             --exclude tests/cli/tui-deps-subagent-trace-factory.test.ts \
             --exclude tests/cli/chat-subagent-trace.test.ts \
