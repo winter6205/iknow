@@ -30,6 +30,7 @@ import {
   createWebSearchTool,
   ExaBackend,
   selectBackend,
+  TavilyBackend,
   type SearchBackend,
   type SearchBackendId,
   type WebSearchToolDeps,
@@ -467,13 +468,18 @@ describe("createWebSearchTool — failure paths", () => {
 
 describe("createWebSearchTool — concurrency", () => {
   /**
-   * #826 T4 acceptance: 并发测试 parametrize over `[bing, exa]`（T5/T6 落地后
-   * 再扩 `[bing, exa, tavily, brave]`）。`resultCache` 是 per-tool 状态而非
-   * per-backend，故同一 tool 实例的 bing / exa 共享同一 cache —— 测试仅切
-   * 后端形态，handler 路径（assertBackendConfig / loadSearchResults /
-   * resultCache.set）一行不动，避免重复 cache 逻辑。
+   * #826 T5 acceptance: 并发测试 parametrize over `[bing, exa, tavily]`
+   * （T6 落地 brave 后扩 `[bing, exa, tavily, brave]`）。`resultCache` 是
+   * per-tool 状态而非 per-backend，故同一 tool 实例的各家 backend 共享同一
+   * cache —— 测试仅切后端形态，handler 路径（assertBackendConfig /
+   * loadSearchResults / resultCache.set）一行不动，避免重复 cache 逻辑。
+   *
+   * Tavily stub 注入 `backendFactory`：stub `fetchResults` 返 fixture（绕过
+   * `not_shipped`），让 cache 层验证用同一形态覆盖三个 backend（spec SC #9
+   * 「parametrize over backend id」的 ground truth 是 cache 层，而非
+   * backend 自身的 HTTP 行为 —— Tavily HTTP 行为在 `tavily.test.ts` 单测）。
    */
-  const concurrencyBackendIds = ["bing", "exa"] as const;
+  const concurrencyBackendIds = ["bing", "exa", "tavily"] as const;
 
   it.each(concurrencyBackendIds)(
     "%s: two parallel handler calls with distinct stubs stay isolated",
@@ -485,10 +491,14 @@ describe("createWebSearchTool — concurrency", () => {
       ]);
       assert.match(outA as string, /Search results for: a/);
       assert.match(outB as string, /Search results for: b/);
-      // 不同的 stub 后端：bing 出 `Title N`、exa 出 `Exa Title N`。
+      // 不同的 stub 后端：bing 出 `Title N`、exa 出 `Exa Title N`、
+      // tavily 出 `Tavily Title N`（同形态验证 toolB 含 2 条、toolA 不含）。
       if (id === "exa") {
         assert.match(outB as string, /2\. Exa Title 2/);
         assert.ok(!(outA as string).includes("2. Exa Title 2"));
+      } else if (id === "tavily") {
+        assert.match(outB as string, /2\. Tavily Title 2/);
+        assert.ok(!(outA as string).includes("2. Tavily Title 2"));
       } else {
         assert.match(outB as string, /2\. Title 2/);
         assert.ok(!(outA as string).includes("2. Title 2"));
@@ -510,6 +520,10 @@ describe("createWebSearchTool — concurrency", () => {
         assert.match(first, /Highlight 1/);
         assert.match(second, /Exa Title 1/);
         assert.ok(!second.includes("Highlight 1"));
+      } else if (id === "tavily") {
+        assert.match(first, /Content 1/);
+        assert.match(second, /Tavily Title 1/);
+        assert.ok(!second.includes("Content 1"));
       } else {
         assert.match(first, /Long cached snippet/);
         assert.match(second, /Cached title/);
@@ -537,11 +551,16 @@ describe("createWebSearchTool — concurrency", () => {
 });
 
 /**
- * #826 T4 helper: 为并发 describe 构造一对独立 stub tool（Bing / Exa 各一）。
- * Exa 路径用 backendFactory 注入 stub fetch；Bing 沿用既有 searchDeps。
+ * #826 T4/T5 helper: 为并发 describe 构造一对独立 stub tool。
+ *   - Bing 沿用既有 searchDeps。
+ *   - Exa 路径用 backendFactory 注入 stub fetch。
+ *   - Tavily stub 路径同样用 backendFactory 注入：stub `fetchResults` 返
+ *     canned JSON（绕过 Tavily v1 stub 的 `not_shipped`），让 cache 层验证
+ *     用同一形态覆盖三个 backend。
+ *
  * `resultCache` 是 per-tool 状态 —— 这对 tool 各自一份 cache，互不共享。
  */
-function makeConcurrencyToolPair(id: "bing" | "exa"): {
+function makeConcurrencyToolPair(id: "bing" | "exa" | "tavily"): {
   toolA: ReturnType<typeof createWebSearchTool>;
   toolB: ReturnType<typeof createWebSearchTool>;
 } {
@@ -561,66 +580,132 @@ function makeConcurrencyToolPair(id: "bing" | "exa"): {
   }
   // exa: toolA stub 出 1 条、toolB stub 出 2 条 — 让 toolA 的 output 不含
   // "Exa Title 2"，与 bing 路径下「toolA 出 1 条 / toolB 出 2 条」同形态。
-  const stubFetchA: typeof globalThis.fetch = async () =>
-    new Response(
-      JSON.stringify({
-        results: [
-          {
-            title: "Exa Title 1",
-            url: "https://site1.example.com/a",
-            highlights: [{ text: "Highlight 1" }],
-          },
-        ],
-      }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
-  const stubFetchB: typeof globalThis.fetch = async () =>
-    new Response(
-      JSON.stringify({
-        results: [
-          {
-            title: "Exa Title 1",
-            url: "https://site1.example.com/a",
-            highlights: [{ text: "Highlight 1" }],
-          },
-          {
-            title: "Exa Title 2",
-            url: "https://site2.example.com/b",
-            highlights: [{ text: "Highlight 2" }],
-          },
-        ],
-      }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
-  const dummyFetch = (() => undefined) as unknown as GuardFetchFn;
-  const lookup: GuardLookupFn = async () => [];
-  // 两个独立 factory —— toolA / toolB 各自的 ExaBackend 实例 + 各自的
-  // resultCache（per-tool 状态；同一 factory 拉两份也是各自独立 cache，
-  // 这里分两份 factory 是为了让 fetch 实例分别绑定 stubFetchA / stubFetchB）。
+  if (id === "exa") {
+    const stubFetchA: typeof globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          results: [
+            {
+              title: "Exa Title 1",
+              url: "https://site1.example.com/a",
+              highlights: [{ text: "Highlight 1" }],
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    const stubFetchB: typeof globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          results: [
+            {
+              title: "Exa Title 1",
+              url: "https://site1.example.com/a",
+              highlights: [{ text: "Highlight 1" }],
+            },
+            {
+              title: "Exa Title 2",
+              url: "https://site2.example.com/b",
+              highlights: [{ text: "Highlight 2" }],
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    const dummyFetch = (() => undefined) as unknown as GuardFetchFn;
+    const lookup: GuardLookupFn = async () => [];
+    // 两个独立 factory —— toolA / toolB 各自的 ExaBackend 实例 + 各自的
+    // resultCache（per-tool 状态；同一 factory 拉两份也是各自独立 cache，
+    // 这里分两份 factory 是为了让 fetch 实例分别绑定 stubFetchA / stubFetchB）。
+    const toolA = createWebSearchTool({
+      fetch: dummyFetch,
+      lookup,
+      backend: "exa",
+      exaApiKey: "fake-exa-key",
+      backendFactory: () =>
+        new ExaBackend({ apiKey: "fake-exa-key", fetch: stubFetchA }),
+    });
+    const toolB = createWebSearchTool({
+      fetch: dummyFetch,
+      lookup,
+      backend: "exa",
+      exaApiKey: "fake-exa-key",
+      backendFactory: () =>
+        new ExaBackend({ apiKey: "fake-exa-key", fetch: stubFetchB }),
+    });
+    return { toolA, toolB };
+  }
+  // tavily: stub `fetchResults` 返 fixture（绕过 Tavily v1 stub 的
+  // `not_shipped`），让 cache 层验证用同一形态覆盖三个 backend。fixture
+  // 形态仿 Tavily JSON：`{results: [{title, content, url}]}` —— `project`
+  // 走真实 TavilyBackend.project 路径（通过 backendFactory 拉一份真
+  // TavilyBackend 实例，仅 fetchResults 被 stub 替换）。
+  const tavilyFetchA: () => unknown = () => ({
+    results: [
+      {
+        title: "Tavily Title 1",
+        url: "https://site1.example.com/a",
+        content: "Content 1",
+      },
+    ],
+  });
+  const tavilyFetchB: () => unknown = () => ({
+    results: [
+      {
+        title: "Tavily Title 1",
+        url: "https://site1.example.com/a",
+        content: "Content 1",
+      },
+      {
+        title: "Tavily Title 2",
+        url: "https://site2.example.com/b",
+        content: "Content 2",
+      },
+    ],
+  });
+  const dummyFetchTavily = (() => undefined) as unknown as GuardFetchFn;
+  const lookupTavily: GuardLookupFn = async () => [];
   const toolA = createWebSearchTool({
-    fetch: dummyFetch,
-    lookup,
-    backend: "exa",
-    exaApiKey: "fake-exa-key",
-    backendFactory: () =>
-      new ExaBackend({ apiKey: "fake-exa-key", fetch: stubFetchA }),
+    fetch: dummyFetchTavily,
+    lookup: lookupTavily,
+    backend: "tavily",
+    tavilyApiKey: "fake-tavily-key",
+    backendFactory: () => ({
+      id: "tavily" as const,
+      fetchResults: async () => tavilyFetchA(),
+      project: (raw: unknown, maxResults: number) =>
+        // 走真 TavilyBackend.project：与 BACKENDS.tavily 工厂路径字节级一致。
+        new TavilyBackend().project(raw, maxResults),
+      describe: (raw: unknown, startedAt: number) => ({
+        adapter: "tavily" as const,
+        latencyMs: Date.now() - startedAt,
+      }),
+    }),
   });
   const toolB = createWebSearchTool({
-    fetch: dummyFetch,
-    lookup,
-    backend: "exa",
-    exaApiKey: "fake-exa-key",
-    backendFactory: () =>
-      new ExaBackend({ apiKey: "fake-exa-key", fetch: stubFetchB }),
+    fetch: dummyFetchTavily,
+    lookup: lookupTavily,
+    backend: "tavily",
+    tavilyApiKey: "fake-tavily-key",
+    backendFactory: () => ({
+      id: "tavily" as const,
+      fetchResults: async () => tavilyFetchB(),
+      project: (raw: unknown, maxResults: number) =>
+        new TavilyBackend().project(raw, maxResults),
+      describe: (raw: unknown, startedAt: number) => ({
+        adapter: "tavily" as const,
+        latencyMs: Date.now() - startedAt,
+      }),
+    }),
   });
   return { toolA, toolB };
 }
 
 /**
- * #826 T4 helper: 「同 query dedup」并发。bing 走 searchDeps 同形态；exa
- * 走 backendFactory 注入单条 Exa fixture + 计数器。
+ * #826 T4/T5 helper: 「同 query dedup」并发。bing 走 searchDeps 同形态；
+ * exa / tavily 走 backendFactory 注入单条 fixture + 计数器。
  */
-function makeConcurrencyCachedTool(id: "bing" | "exa"): {
+function makeConcurrencyCachedTool(id: "bing" | "exa" | "tavily"): {
   tool: ReturnType<typeof createWebSearchTool>;
   fetchCount: () => number;
 } {
@@ -640,39 +725,72 @@ function makeConcurrencyCachedTool(id: "bing" | "exa"): {
     });
     return { tool, fetchCount: () => fetchCount };
   }
-  // exa
-  let exaCalls = 0;
-  const stubFetch: typeof globalThis.fetch = async () => {
-    exaCalls += 1;
-    return new Response(
-      JSON.stringify({
-        results: [
-          {
-            title: "Exa Title 1",
-            url: "https://site.example.com/page",
-            highlights: [{ text: "Highlight 1" }],
-          },
-        ],
-      }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
-  };
+  if (id === "exa") {
+    let exaCalls = 0;
+    const stubFetch: typeof globalThis.fetch = async () => {
+      exaCalls += 1;
+      return new Response(
+        JSON.stringify({
+          results: [
+            {
+              title: "Exa Title 1",
+              url: "https://site.example.com/page",
+              highlights: [{ text: "Highlight 1" }],
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    };
+    const tool = createWebSearchTool({
+      fetch: (() => undefined) as unknown as GuardFetchFn,
+      lookup: async () => [],
+      backend: "exa",
+      exaApiKey: "fake-exa-key",
+      backendFactory: () =>
+        new ExaBackend({ apiKey: "fake-exa-key", fetch: stubFetch }),
+    });
+    return { tool, fetchCount: () => exaCalls };
+  }
+  // tavily: stub `fetchResults` 返 fixture（绕过 Tavily v1 stub 的
+  // `not_shipped`），让 cache 层验证用同一形态覆盖三个 backend。`project`
+  // 走真 TavilyBackend.project。
+  let tavilyCalls = 0;
   const tool = createWebSearchTool({
     fetch: (() => undefined) as unknown as GuardFetchFn,
     lookup: async () => [],
-    backend: "exa",
-    exaApiKey: "fake-exa-key",
-    backendFactory: () =>
-      new ExaBackend({ apiKey: "fake-exa-key", fetch: stubFetch }),
+    backend: "tavily",
+    tavilyApiKey: "fake-tavily-key",
+    backendFactory: () => ({
+      id: "tavily" as const,
+      fetchResults: async () => {
+        tavilyCalls += 1;
+        return {
+          results: [
+            {
+              title: "Tavily Title 1",
+              url: "https://site.example.com/page",
+              content: "Content 1",
+            },
+          ],
+        };
+      },
+      project: (raw: unknown, maxResults: number) =>
+        new TavilyBackend().project(raw, maxResults),
+      describe: (raw: unknown, startedAt: number) => ({
+        adapter: "tavily" as const,
+        latencyMs: Date.now() - startedAt,
+      }),
+    }),
   });
-  return { tool, fetchCount: () => exaCalls };
+  return { tool, fetchCount: () => tavilyCalls };
 }
 
 /**
- * #826 T4 helper: 「不同 query 不共享 cache」并发。同 query dedup helper
+ * #826 T4/T5 helper: 「不同 query 不共享 cache」并发。同 query dedup helper
  * 的对偶 —— 两条 query 调出两次 fetch。
  */
-function makeConcurrencyDistinctQueriesTool(id: "bing" | "exa"): {
+function makeConcurrencyDistinctQueriesTool(id: "bing" | "exa" | "tavily"): {
   tool: ReturnType<typeof createWebSearchTool>;
   fetchCount: () => number;
 } {
@@ -693,35 +811,71 @@ function makeConcurrencyDistinctQueriesTool(id: "bing" | "exa"): {
     });
     return { tool, fetchCount: () => fetchCount };
   }
-  // exa: 从 fetch URL 的 body 反读 query（post body 难解 —— 用 side table）。
-  let exaCalls = 0;
+  if (id === "exa") {
+    // exa: 从 fetch URL 的 body 反读 query（post body 难解 —— 用 side table）。
+    let exaCalls = 0;
+    const queriesSeen: string[] = [];
+    const stubFetch: typeof globalThis.fetch = async (_url, init) => {
+      exaCalls += 1;
+      const body = JSON.parse(init?.body as string) as { query?: string };
+      queriesSeen.push(body.query ?? "");
+      return new Response(
+        JSON.stringify({
+          results: [
+            {
+              title: `${body.query} title`,
+              url: `https://site.example.com/${body.query}`,
+              highlights: [{ text: `${body.query} highlight` }],
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    };
+    const tool = createWebSearchTool({
+      fetch: (() => undefined) as unknown as GuardFetchFn,
+      lookup: async () => [],
+      backend: "exa",
+      exaApiKey: "fake-exa-key",
+      backendFactory: () =>
+        new ExaBackend({ apiKey: "fake-exa-key", fetch: stubFetch }),
+    });
+    return { tool, fetchCount: () => exaCalls };
+    void queriesSeen;
+  }
+  // tavily: stub `fetchResults` 返 fixture（带 query 字符串），与 exa path
+  // 同形态（用 side table 反读 query，因 v1 不真发 HTTP，body 不解析）。
+  let tavilyCalls = 0;
   const queriesSeen: string[] = [];
-  const stubFetch: typeof globalThis.fetch = async (_url, init) => {
-    exaCalls += 1;
-    const body = JSON.parse(init?.body as string) as { query?: string };
-    queriesSeen.push(body.query ?? "");
-    return new Response(
-      JSON.stringify({
-        results: [
-          {
-            title: `${body.query} title`,
-            url: `https://site.example.com/${body.query}`,
-            highlights: [{ text: `${body.query} highlight` }],
-          },
-        ],
-      }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
-  };
   const tool = createWebSearchTool({
     fetch: (() => undefined) as unknown as GuardFetchFn,
     lookup: async () => [],
-    backend: "exa",
-    exaApiKey: "fake-exa-key",
-    backendFactory: () =>
-      new ExaBackend({ apiKey: "fake-exa-key", fetch: stubFetch }),
+    backend: "tavily",
+    tavilyApiKey: "fake-tavily-key",
+    backendFactory: () => ({
+      id: "tavily" as const,
+      fetchResults: async (args: { query: string }) => {
+        tavilyCalls += 1;
+        queriesSeen.push(args.query);
+        return {
+          results: [
+            {
+              title: `${args.query} title`,
+              url: `https://site.example.com/${args.query}`,
+              content: `${args.query} content`,
+            },
+          ],
+        };
+      },
+      project: (raw: unknown, maxResults: number) =>
+        new TavilyBackend().project(raw, maxResults),
+      describe: (raw: unknown, startedAt: number) => ({
+        adapter: "tavily" as const,
+        latencyMs: Date.now() - startedAt,
+      }),
+    }),
   });
-  return { tool, fetchCount: () => exaCalls };
+  return { tool, fetchCount: () => tavilyCalls };
   void queriesSeen;
 }
 
@@ -833,13 +987,13 @@ describe("BingBackend — three-method same-shape (#826 T2)", () => {
   });
 });
 
-describe("Tavily / Exa / Brave placeholders (#826 T2 → T4 落地 Exa)", () => {
-  // #826 T4: Exa 替换为真 fetch，不再抛 not_shipped。本 describe 仅覆盖
-  // Tavily / Brave 两家占位（T5/T6 落地后此 describe 整体收缩到只剩
-  // Tavily/Brave，T6 落地 Brave 后只剩 Tavily）。
+describe("Tavily / Exa / Brave backends (#826 T2 → T5 落地 Tavily stub)", () => {
+  // #826 T5: Tavily 替换为 stub backend —— `fetchResults` 抛 typed
+  // `not_shipped`（spec SC #8），`project` / `describe` 走真实现。
+  // T6 落地 brave 后此 describe 整体收缩到只剩 brave。
   it.each(["tavily", "brave"] as SearchBackendId[])(
-    "%s factory yields a backend that throws typed not_shipped until T5/T6 lands",
-    (id) => {
+    "%s factory yields a backend whose fetchResults throws typed not_shipped (until T6 lands brave)",
+    async (id) => {
       const factory = selectBackend(id);
       const backend: SearchBackend = factory({
         guardDeps: {
@@ -849,14 +1003,16 @@ describe("Tavily / Exa / Brave placeholders (#826 T2 → T4 落地 Exa)", () => 
         endpoint: "https://example.invalid",
       });
       assert.equal(backend.id, id);
-      // #826 T3: 占位 throw 从 plain Error 升级为 typed SearchBackendError
-      // (kind="not_shipped")，让 handler 出口能 1:1 转译（spec SC #8）。
-      for (const call of [
-        () => backend.fetchResults({ query: "x", maxResults: 1 }),
-        () => backend.project({}, 1),
-        () => backend.describe({}, Date.now()),
-      ]) {
-        assert.throws(call, (err: unknown) => {
+      // #826 T3/T5: 占位 throw 从 plain Error 升级为 typed
+      // SearchBackendError (kind="not_shipped")，让 handler 出口能 1:1
+      // 转译（spec SC #8）。Tavily 是 async（Promise.reject），brave 仍
+      // 是占位（sync throw）。`Promise.resolve().then(...)` 把 sync throw
+      // 也归一化为 promise rejection，统一走 `assert.rejects` 断言路径。
+      await assert.rejects(
+        Promise.resolve().then(() =>
+          backend.fetchResults({ query: "x", maxResults: 1 })
+        ),
+        (err: unknown) => {
           assert.ok(
             isSearchBackendError(err),
             `expected a typed SearchBackendError, got ${String(err)}`
@@ -864,10 +1020,36 @@ describe("Tavily / Exa / Brave placeholders (#826 T2 → T4 落地 Exa)", () => 
           assert.equal(err.kind, "not_shipped");
           assert.ok(err.message.includes(id), err.message);
           return true;
-        });
-      }
+        }
+      );
     }
   );
+
+  // #826 T5: Tavily stub 的 `project` / `describe` 走真实现 —— fetchResults
+  // 抛 typed not_shipped 是有意偏离；project / describe 不抛。
+  it("tavily factory yields a real TavilyBackend whose project/describe work (T5 lands)", () => {
+    const factory = selectBackend("tavily");
+    const backend: SearchBackend = factory({
+      guardDeps: {
+        fetch: (() => undefined) as unknown as GuardFetchFn,
+        lookup: okLookup,
+      },
+      endpoint: "https://example.invalid",
+    });
+    assert.equal(backend.id, "tavily");
+    assert.ok(backend instanceof TavilyBackend);
+    // project / describe 不抛：T5 stub 仅 fetchResults 抛 typed not_shipped。
+    assert.doesNotThrow(() =>
+      backend.project(
+        {
+          results: [{ title: "x", url: "https://x", content: "c" }],
+        },
+        5
+      )
+    );
+    const meta = backend.describe({}, Date.now() - 5);
+    assert.equal(meta.adapter, "tavily");
+  });
 
   // #826 T4: BACKENDS.exa 是真工厂，返回 ExaBackend 实例。
   it("exa factory now yields a real ExaBackend (T4 lands)", () => {
@@ -1313,10 +1495,12 @@ describe("createWebSearchTool — backend error translation (#826 T3)", () => {
     }
   });
 
-  // #826 T4: Exa 已是真 fetch（spec Assumption 1），不再抛 not_shipped；
-  // 该 id 已从「placeholder」退出，本 describe 仅覆盖 Tavily / Brave。
+  // #826 T5: Tavily stub backend（fetchResults 抛 typed not_shipped，
+  // project/describe 走真实现）；Exa 已是真 fetch。该测试覆盖
+  // handler 出口把 typed not_shipped 1:1 转译为 ToolExecutionError —— Tavily /
+  // Brave 走相同路径（Brave T6 落地后此 describe 整体收缩到只剩 brave）。
   it.each(["tavily", "brave"] as SearchBackendId[])(
-    "backend=%s placeholder surfaces not_shipped through the handler exit",
+    "backend=%s surfaces not_shipped through the handler exit",
     async (id) => {
       const tool = createWebSearchTool({
         fetch: (() => undefined) as unknown as GuardFetchFn,

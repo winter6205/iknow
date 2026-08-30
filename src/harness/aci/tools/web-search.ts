@@ -722,7 +722,8 @@ export function selectBackend(id: SearchBackendId): SearchBackendFactory {
  * （T2 曾抛 plain `Error`；spec Assumption 1 + SC #8 要求 typed，且要与
  * `missing_key` 的 fail-closed 区分开）。handler 出口的 try/catch 据此
  * 1:1 转译为 `ToolExecutionError`。T4-T6 起 Exa/Tavily/Brave 逐个替换为
- * 真 fetch，本函数随最后一家落地而消失。
+ * 真 fetch，本函数随最后一家落地而消失（T5 起仅 brave 占位仍走此路径，
+ * T6 落地后整段消失）。
  */
 function notImplemented(id: SearchBackendId): never {
   throw createSearchBackendError({
@@ -733,7 +734,8 @@ function notImplemented(id: SearchBackendId): never {
 
 /**
  * #826 T2: 占位 backend 实例（与 `SearchBackend` 同形，三方法均抛）。
- * factory 返回同一份实例（无 per-call state）即可。
+ * factory 返回同一份实例（无 per-call state）即可。T5 后仅 brave 占位
+ * 走此函数（T6 落地后整段消失）。
  */
 function placeholderBackend(id: SearchBackendId): SearchBackend {
   return {
@@ -982,6 +984,123 @@ function pickExaSnippet(item: ExaResultRaw): string {
 }
 
 /**
+ * #826 T5: Tavily 真端点（v2 真 fetch 推进；v1 stub 抛 typed `not_shipped`）。
+ * v1 不出网 —— `TavilyBackend.fetchResults` 立即抛 typed
+ * `SearchBackendError(kind="not_shipped")`；`project` 按 spec Assumption 8
+ * 把 Tavily JSON 投到 Bing-shape（**忽略** `result.answer`）。真 fetch 落地
+ * 后保留 endpoint 常量，factory 替换 fetch 实现即可。
+ */
+const TAVILY_ENDPOINT = "https://api.tavily.com/search";
+
+/**
+ * #826 T5: Tavily 单条 result 形态（spec Assumption 8）。
+ * `answer` 是 Tavily 上游 LLM-synthesized answer field —— spec 明文**忽略**，
+ * 不进 snippet（snippet 走 `content`）。
+ */
+interface TavilyResultRaw {
+  readonly title?: unknown;
+  readonly url?: unknown;
+  readonly content?: unknown;
+  /** #826 T5: Tavily 上游特有字段；spec 强制忽略 —— 投影函数直接不看。 */
+  readonly answer?: unknown;
+}
+
+/**
+ * #826 T5: Tavily 响应形态（最少需要 `results[]`）。
+ */
+interface TavilyResponseRaw {
+  readonly results?: unknown;
+}
+
+/**
+ * #826 T5: TavilyBackend v1 stub。
+ *
+ *   - `fetchResults`：立即抛 typed
+ *     `SearchBackendError(kind="not_shipped", endpoint=api.tavily.com)`，
+ *     message 含 backend id "tavily" + v2 提示。**不**发真 HTTP；v2 真 fetch
+ *     推进时实现 POST + Authorization。
+ *   - `project`：把 Tavily JSON 投到 Bing-shape `SearchResult[]`
+ *     （`title = result.title`、`snippet = result.content`、
+ *     `url = result.url`，**`result.answer` 忽略**）。字段 cap 走
+ *     `projectSearchResult`（与 Bing HTML 路径字节级一致 —— spec SC #3
+ *     「T2 字段 cap 一刀切，adapter 不写自家 cap」）；`maxResults` cap 在
+ *     `project` 内 `if (out.length >= maxResults) break` 施加，与
+ *     `ExaBackend.project` / Bing 解析路径同形态。
+ *   - `describe`：`adapter: "tavily" + latencyMs`。
+ *
+ * v1 状态：无 constructor 参数（无 per-call state、无 apiKey 字段 ——
+ * 真 fetch 推进时再加 apiKey，与 ExaBackend 一致）。
+ */
+export class TavilyBackend implements SearchBackend {
+  readonly id: SearchBackendId = "tavily";
+
+  async fetchResults(_args: {
+    query: string;
+    maxResults: number;
+    signal?: AbortSignal;
+  }): Promise<unknown> {
+    // EXIT: v1 stub — 立即抛 typed not_shipped；handler 出口的 try/catch
+    // 据此 1:1 转译为 ToolExecutionError（spec SC #8）。不读 apiKey（v2
+    // 真 fetch 时再读），不带 key 字面值 / Authorization / endpoint query
+    // —— `createSearchBackendError` 兜底脱敏。
+    throw createSearchBackendError({
+      kind: "not_shipped",
+      message:
+        'backend "tavily" is not implemented yet — pick backend=bing, or wait for the tavily adapter to ship (v2 plan)',
+      endpoint: TAVILY_ENDPOINT,
+    });
+  }
+
+  project(raw: unknown, maxResults: number): SearchResult[] {
+    if (typeof raw !== "object" || raw === null) {
+      throw createSearchBackendError({
+        kind: "parse",
+        message: "expected a JSON object with results[]",
+        endpoint: TAVILY_ENDPOINT,
+      });
+    }
+    const response = raw as TavilyResponseRaw;
+    if (!Array.isArray(response.results)) {
+      throw createSearchBackendError({
+        kind: "parse",
+        message: "expected results[] in upstream response",
+        endpoint: TAVILY_ENDPOINT,
+      });
+    }
+    const out: SearchResult[] = [];
+    for (const itemRaw of response.results) {
+      if (typeof itemRaw !== "object" || itemRaw === null) {
+        // EXIT: 单条 result 形态畸形 —— 跳过（不抛错），保持与 Bing 路径 /
+        // Exa project 的容错形态一致（skip malformed 单条）。
+        continue;
+      }
+      const item = itemRaw as TavilyResultRaw;
+      const title = typeof item.title === "string" ? item.title : "";
+      const url = typeof item.url === "string" ? item.url : "";
+      // spec Assumption 8: snippet = result.content。**刻意不看 result.answer**
+      // —— Tavily 上游独有 LLM-synthesized 字段，spec 强制忽略；projected
+      // snippet 永不含 answer 字面值，handler formatter 也不会带回。
+      const snippet = typeof item.content === "string" ? item.content : "";
+      const projected = projectSearchResult({ title, url, snippet });
+      if (!projected) continue;
+      out.push(projected);
+      if (out.length >= maxResults) break;
+    }
+    return out;
+  }
+
+  describe(
+    _raw: unknown,
+    startedAt: number
+  ): { adapter: SearchBackendId; latencyMs: number; requestId?: string } {
+    return {
+      adapter: "tavily",
+      latencyMs: Date.now() - startedAt,
+    };
+  }
+}
+
+/**
  * #826 T2: `BACKENDS` 表 — 按 `id` 持 backend 工厂。T2 仅 bing 真接；
  * tavily/exa/brave 占位 throws。`selectBackend(id)` 返回工厂；handler
  * 调工厂拉实例。
@@ -990,10 +1109,14 @@ function pickExaSnippet(item: ExaResultRaw): string {
  * `ExaBackend` 构造函数。handler 在 `assertBackendConfig` 之后才调
  * 工厂，故 apiKey 一定 non-empty；构造函数的空串兜底是防绕过 entry
  * 校验的直调路径（测试 / 装配脚本）留下无 key 实例。
+ *
+ * T5 起：Tavily stub 落地（`project` 真实、`fetchResults` 抛 typed
+ * `not_shipped`）。`TavilyBackend` 无 constructor 参数，工厂直接 `new`
+ * 即可。brave 仍是占位（待 T6）。
  */
 export const BACKENDS: Record<SearchBackendId, SearchBackendFactory> = {
   bing: ({ guardDeps, endpoint }) => new BingBackend(guardDeps, endpoint),
-  tavily: () => placeholderBackend("tavily"),
+  tavily: () => new TavilyBackend(),
   exa: ({ apiKey }) => new ExaBackend({ apiKey: apiKey ?? "" }),
   brave: () => placeholderBackend("brave"),
 };
