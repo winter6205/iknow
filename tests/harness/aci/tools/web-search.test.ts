@@ -33,6 +33,13 @@ import {
   type SearchBackendId,
   type WebSearchToolDeps,
 } from "../../../../src/harness/aci/tools/web-search.ts";
+import {
+  SEARCH_BACKEND_ERROR_KINDS,
+  createSearchBackendError,
+  isSearchBackendError,
+  toToolExecutionError,
+  type SearchBackendErrorKind,
+} from "../../../../src/harness/aci/tools/web-search-errors.ts";
 import type {
   GuardFetchFn,
   GuardLookupFn,
@@ -645,21 +652,34 @@ describe("BingBackend — three-method same-shape (#826 T2)", () => {
 
 describe("Tavily / Exa / Brave placeholders (#826 T2)", () => {
   it.each(["tavily", "exa", "brave"] as SearchBackendId[])(
-    "%s factory yields a backend that throws until T4/T5/T6 lands",
+    "%s factory yields a backend that throws typed not_shipped until T4/T5/T6 lands",
     (id) => {
       const factory = selectBackend(id);
       const backend: SearchBackend = factory({
-        fetch: (() => undefined) as unknown as GuardFetchFn,
-        lookup: okLookup,
+        guardDeps: {
+          fetch: (() => undefined) as unknown as GuardFetchFn,
+          lookup: okLookup,
+        },
         endpoint: "https://example.invalid",
       });
       assert.equal(backend.id, id);
-      assert.throws(
+      // #826 T3: 占位 throw 从 plain Error 升级为 typed SearchBackendError
+      // (kind="not_shipped")，让 handler 出口能 1:1 转译（spec SC #8）。
+      for (const call of [
         () => backend.fetchResults({ query: "x", maxResults: 1 }),
-        /not implemented/i
-      );
-      assert.throws(() => backend.project({}, 1), /not implemented/i);
-      assert.throws(() => backend.describe({}, Date.now()), /not implemented/i);
+        () => backend.project({}, 1),
+        () => backend.describe({}, Date.now()),
+      ]) {
+        assert.throws(call, (err: unknown) => {
+          assert.ok(
+            isSearchBackendError(err),
+            `expected a typed SearchBackendError, got ${String(err)}`
+          );
+          assert.equal(err.kind, "not_shipped");
+          assert.ok(err.message.includes(id), err.message);
+          return true;
+        });
+      }
     }
   );
 });
@@ -698,6 +718,446 @@ describe("createWebSearchTool — backend='bing' byte-identical (#826 T2)", () =
           tool.handler({ query: "x", search_url: "http://127.0.0.1:9000/" })
         ),
       "non-public"
+    );
+  });
+});
+
+// =============================================================================
+// #826 T3: typed SearchBackendError + handler 出口 try/catch → ToolExecutionError。
+// 三态 fail-closed（spec Assumption 6）在 handler entry 判定（不依赖 fetch 阶段）；
+// 六 kind 闭集 1:1 转译到 ToolExecutionError；message 不带 key / Authorization。
+// =============================================================================
+
+/** T3 测试里用的假 Exa key 字面值 —— 断言它绝不出现在任何 error message 里。 */
+const FAKE_EXA_KEY = "exa-secret-do-not-leak-0123456789";
+
+/** 只在 handler entry 检查全过之后才可能被调到的 fetch —— 调用即记账。 */
+function countingFetch(body = bingBody(1)): {
+  fetch: GuardFetchFn;
+  calls: () => number;
+} {
+  let calls = 0;
+  const fetch: GuardFetchFn = async () => {
+    calls += 1;
+    return { status: 200, contentType: "text/html", body };
+  };
+  return { fetch, calls: () => calls };
+}
+
+/**
+ * 注入一个自定义 backend 工厂（deps 覆盖点，与 deps.fetch / deps.lookup 同族）：
+ * 让 T3 在 T4/T5/T6 真 adapter 落地前也能驱动 http_non_2xx / timeout / parse
+ * 三条出口路径，而不去改 BACKENDS 表全局状态。
+ */
+function throwingBackendDeps(thrown: unknown): WebSearchToolDeps {
+  return {
+    fetch: (() => undefined) as unknown as GuardFetchFn,
+    lookup: okLookup,
+    backend: "exa",
+    exaApiKey: FAKE_EXA_KEY,
+    backendFactory: () => ({
+      id: "exa" as const,
+      fetchResults: async () => {
+        throw thrown;
+      },
+      project: () => [],
+      describe: () => ({ adapter: "exa" as const, latencyMs: 0 }),
+    }),
+  };
+}
+
+describe("web-search-errors — SearchBackendError typed shape (#826 T3)", () => {
+  it("exposes exactly the six-kind closed set", () => {
+    assert.deepEqual(
+      [...SEARCH_BACKEND_ERROR_KINDS],
+      [
+        "missing_key",
+        "backend_unset_with_key",
+        "http_non_2xx",
+        "parse",
+        "timeout",
+        "not_shipped",
+      ]
+    );
+  });
+
+  it("isSearchBackendError accepts every kind in the closed set", () => {
+    for (const kind of SEARCH_BACKEND_ERROR_KINDS) {
+      assert.ok(
+        isSearchBackendError({ kind, message: "boom" }),
+        `kind ${kind} must be recognized`
+      );
+    }
+  });
+
+  it("isSearchBackendError rejects non-objects, unknown kinds, bad payloads", () => {
+    assert.equal(isSearchBackendError(null), false);
+    assert.equal(isSearchBackendError(undefined), false);
+    assert.equal(isSearchBackendError("missing_key"), false);
+    assert.equal(isSearchBackendError(new Error("missing_key")), false);
+    assert.equal(isSearchBackendError({ kind: "nope", message: "x" }), false);
+    assert.equal(isSearchBackendError({ kind: "parse" }), false);
+    assert.equal(isSearchBackendError({ kind: "parse", message: 1 }), false);
+    assert.equal(
+      isSearchBackendError({ kind: "parse", message: "x", endpoint: 7 }),
+      false
+    );
+  });
+
+  it("isSearchBackendError does not confuse the WebEnvConfigError shape", () => {
+    assert.equal(
+      isSearchBackendError({
+        kind: "invalid_search_backend",
+        varName: "IKNOW_WEB_SEARCH_BACKEND",
+        value: "nope",
+        expected: ["bing"],
+      }),
+      false
+    );
+  });
+
+  it("createSearchBackendError narrows endpoint to a bare domain", () => {
+    const err = createSearchBackendError({
+      kind: "http_non_2xx",
+      message: "upstream returned 429",
+      endpoint: "https://api.exa.ai/search?api_key=leaky&x=1",
+    });
+    assert.equal(err.endpoint, "api.exa.ai");
+    assert.ok(!JSON.stringify(err).includes("leaky"));
+  });
+
+  it("createSearchBackendError scrubs bearer tokens / Authorization from message", () => {
+    const err = createSearchBackendError({
+      kind: "http_non_2xx",
+      message: `401 from Authorization: Bearer ${FAKE_EXA_KEY}`,
+      endpoint: "api.exa.ai",
+    });
+    assert.ok(!err.message.includes(FAKE_EXA_KEY), err.message);
+    assert.ok(!/authorization/i.test(err.message), err.message);
+  });
+
+  it("createSearchBackendError keeps a bare-domain endpoint and preserves cause", () => {
+    const cause = new Error("socket hang up");
+    const err = createSearchBackendError({
+      kind: "timeout",
+      message: "aborted",
+      endpoint: "api.exa.ai",
+      cause,
+    });
+    assert.equal(err.endpoint, "api.exa.ai");
+    assert.equal(err.cause, cause);
+  });
+
+  it("toToolExecutionError maps all six kinds to distinguishable errors", () => {
+    const messages = new Set<string>();
+    for (const kind of SEARCH_BACKEND_ERROR_KINDS) {
+      const translated = toToolExecutionError(
+        createSearchBackendError({ kind, message: "detail here" })
+      );
+      assert.ok(translated instanceof ToolExecutionError);
+      assert.ok(translated.message.startsWith("web_search failed:"));
+      assert.ok(translated.message.includes(kind), translated.message);
+      assert.ok(translated.message.includes("detail here"));
+      messages.add(translated.message);
+    }
+    assert.equal(messages.size, SEARCH_BACKEND_ERROR_KINDS.length);
+  });
+
+  it("toToolExecutionError appends the endpoint domain when present", () => {
+    const translated = toToolExecutionError(
+      createSearchBackendError({
+        kind: "http_non_2xx",
+        message: "upstream status 503",
+        endpoint: "https://api.exa.ai/search",
+      })
+    );
+    assert.ok(translated.message.includes("503"), translated.message);
+    assert.ok(translated.message.includes("api.exa.ai"), translated.message);
+  });
+
+  it("toToolExecutionError preserves the typed error as cause", () => {
+    const typed = createSearchBackendError({ kind: "parse", message: "bad" });
+    const translated = toToolExecutionError(typed);
+    assert.equal(translated.cause, typed);
+  });
+});
+
+describe("createWebSearchTool — search_url schema reject (#826 T3)", () => {
+  it.each(["tavily", "exa", "brave"] as SearchBackendId[])(
+    "backend=%s + search_url → typed reject before any fetch",
+    async (id) => {
+      const { fetch, calls } = countingFetch();
+      const tool = createWebSearchTool({
+        fetch,
+        lookup: okLookup,
+        backend: id,
+        exaApiKey: FAKE_EXA_KEY,
+        tavilyApiKey: FAKE_EXA_KEY,
+        braveApiKey: FAKE_EXA_KEY,
+      });
+
+      await expectToolError(
+        () =>
+          Promise.resolve(
+            tool.handler({
+              query: "x",
+              search_url: "https://html.duckduckgo.com/html/",
+            })
+          ),
+        "search_url only valid with backend=bing"
+      );
+      assert.equal(calls(), 0, "reject must precede fetchResults");
+    }
+  );
+
+  it("backend=bing keeps the existing search_url override path", async () => {
+    const seen: string[] = [];
+    const fetch: GuardFetchFn = async (url) => {
+      seen.push(url);
+      return { status: 200, contentType: "text/html", body: ddgBody(1) };
+    };
+    const tool = createWebSearchTool({
+      fetch,
+      lookup: okLookup,
+      backend: "bing",
+    });
+
+    await tool.handler({
+      query: "x",
+      search_url: "https://search.internal.example.com/html/",
+    });
+
+    assert.ok(seen[0].startsWith("https://search.internal.example.com/html/"));
+  });
+});
+
+describe("createWebSearchTool — fail-closed handler entry (#826 T3)", () => {
+  it.each([
+    ["exa", "EXA_API_KEY"],
+    ["tavily", "TAVILY_API_KEY"],
+    ["brave", "BRAVE_API_KEY"],
+  ] as ReadonlyArray<readonly [SearchBackendId, string]>)(
+    "backend=%s with no key → missing_key typed error naming %s",
+    async (id, envKey) => {
+      const { fetch, calls } = countingFetch();
+      const tool = createWebSearchTool({
+        fetch,
+        lookup: okLookup,
+        backend: id,
+      });
+
+      for (const needle of ["missing_key", envKey, id]) {
+        await expectToolError(
+          () => Promise.resolve(tool.handler({ query: "x" })),
+          needle
+        );
+      }
+      assert.equal(calls(), 0, "missing_key must precede fetchResults");
+    }
+  );
+
+  it("treats a blank key as missing (placeholder resolution failure shape)", async () => {
+    const tool = createWebSearchTool({
+      fetch: (() => undefined) as unknown as GuardFetchFn,
+      lookup: okLookup,
+      backend: "exa",
+      exaApiKey: "   ",
+    });
+    await expectToolError(
+      () => Promise.resolve(tool.handler({ query: "x" })),
+      "missing_key"
+    );
+  });
+
+  it.each([
+    ["exaApiKey", "EXA_API_KEY"],
+    ["tavilyApiKey", "TAVILY_API_KEY"],
+    ["braveApiKey", "BRAVE_API_KEY"],
+  ] as ReadonlyArray<readonly [string, string]>)(
+    "backend unset + %s set → backend_unset_with_key (no silent bing fallback)",
+    async (depsField, envKey) => {
+      const { fetch, calls } = countingFetch();
+      const tool = createWebSearchTool({
+        fetch,
+        lookup: okLookup,
+        [depsField]: FAKE_EXA_KEY,
+      } as WebSearchToolDeps);
+
+      for (const needle of [
+        "backend_unset_with_key",
+        envKey,
+        "IKNOW_WEB_SEARCH_BACKEND",
+      ]) {
+        await expectToolError(
+          () => Promise.resolve(tool.handler({ query: "x" })),
+          needle
+        );
+      }
+      assert.equal(calls(), 0, "misconfig must precede fetchResults");
+    }
+  );
+
+  it("fail-closed messages never leak the key literal", async () => {
+    const tool = createWebSearchTool({
+      fetch: (() => undefined) as unknown as GuardFetchFn,
+      lookup: okLookup,
+      exaApiKey: FAKE_EXA_KEY,
+    });
+    await assert.rejects(
+      () => Promise.resolve(tool.handler({ query: "x" })),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.ok(!err.message.includes(FAKE_EXA_KEY), err.message);
+        assert.ok(!/authorization/i.test(err.message), err.message);
+        return true;
+      }
+    );
+  });
+
+  it("backend unset + zero keys stays on the default Bing path", async () => {
+    const tool = createWebSearchTool(
+      searchDeps(bingBody(1), 200, "https://cn.bing.com/search")
+    );
+    const out = (await tool.handler({ query: "x" })) as string;
+    assert.match(out, /1\. Bing Title 1/);
+  });
+
+  it("explicit backend='bing' with a keyed key set is not a misconfig", async () => {
+    const tool = createWebSearchTool({
+      ...searchDeps(bingBody(1), 200, "https://cn.bing.com/search"),
+      backend: "bing",
+      exaApiKey: FAKE_EXA_KEY,
+    });
+    const out = (await tool.handler({ query: "x" })) as string;
+    assert.match(out, /1\. Bing Title 1/);
+  });
+});
+
+describe("createWebSearchTool — backend error translation (#826 T3)", () => {
+  it("http_non_2xx keeps upstream status + endpoint domain but not the key", async () => {
+    const tool = createWebSearchTool(
+      throwingBackendDeps(
+        createSearchBackendError({
+          kind: "http_non_2xx",
+          message: "upstream returned 401",
+          endpoint: `https://api.exa.ai/search?token=${FAKE_EXA_KEY}`,
+        })
+      )
+    );
+
+    await assert.rejects(
+      () => Promise.resolve(tool.handler({ query: "x" })),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.ok(err.message.includes("http_non_2xx"), err.message);
+        assert.ok(err.message.includes("401"), err.message);
+        assert.ok(err.message.includes("api.exa.ai"), err.message);
+        assert.ok(!err.message.includes(FAKE_EXA_KEY), err.message);
+        assert.ok(!/authorization/i.test(err.message), err.message);
+        return true;
+      }
+    );
+  });
+
+  it("timeout raised from an aborted signal translates to a typed timeout error", async () => {
+    const controller = new AbortController();
+    const tool = createWebSearchTool({
+      fetch: (() => undefined) as unknown as GuardFetchFn,
+      lookup: okLookup,
+      backend: "exa",
+      exaApiKey: FAKE_EXA_KEY,
+      backendFactory: () => ({
+        id: "exa" as const,
+        fetchResults: async (args: { signal?: AbortSignal }) => {
+          controller.abort();
+          if (args.signal?.aborted) {
+            throw createSearchBackendError({
+              kind: "timeout",
+              message: "request aborted after 20000ms",
+              endpoint: "api.exa.ai",
+            });
+          }
+          return {};
+        },
+        project: () => [],
+        describe: () => ({ adapter: "exa" as const, latencyMs: 0 }),
+      }),
+    });
+
+    await expectToolError(
+      () =>
+        Promise.resolve(
+          tool.handler({ query: "x" }, { signal: controller.signal })
+        ),
+      "timeout"
+    );
+  });
+
+  it("parse (malformed upstream JSON) translates to a typed parse error", async () => {
+    const tool = createWebSearchTool(
+      throwingBackendDeps(
+        createSearchBackendError({
+          kind: "parse",
+          message: "malformed JSON: expected an object with results[]",
+          endpoint: "api.exa.ai",
+        })
+      )
+    );
+
+    for (const needle of ["parse", "malformed JSON"]) {
+      await expectToolError(
+        () => Promise.resolve(tool.handler({ query: "x" })),
+        needle
+      );
+    }
+  });
+
+  it.each(["tavily", "exa", "brave"] as SearchBackendId[])(
+    "backend=%s placeholder surfaces not_shipped through the handler exit",
+    async (id) => {
+      const tool = createWebSearchTool({
+        fetch: (() => undefined) as unknown as GuardFetchFn,
+        lookup: okLookup,
+        backend: id,
+        exaApiKey: FAKE_EXA_KEY,
+        tavilyApiKey: FAKE_EXA_KEY,
+        braveApiKey: FAKE_EXA_KEY,
+      });
+
+      for (const needle of ["not_shipped", id]) {
+        await expectToolError(
+          () => Promise.resolve(tool.handler({ query: "x" })),
+          needle
+        );
+      }
+    }
+  );
+
+  it("does not swallow untyped errors thrown by a backend", async () => {
+    const boom = new RangeError("some unexpected runtime failure");
+    const tool = createWebSearchTool(throwingBackendDeps(boom));
+
+    await assert.rejects(
+      () => Promise.resolve(tool.handler({ query: "x" })),
+      (err: unknown) => {
+        assert.ok(
+          err instanceof RangeError,
+          `untyped errors must pass through unchanged, got ${String(err)}`
+        );
+        assert.equal(err.message, "some unexpected runtime failure");
+        return true;
+      }
+    );
+  });
+
+  it("leaves the existing Bing non-2xx ToolExecutionError untouched", async () => {
+    const tool = createWebSearchTool({
+      ...searchDeps("gateway down", 502, "https://cn.bing.com/search"),
+      backend: "bing",
+    });
+    await expectToolError(
+      () => Promise.resolve(tool.handler({ query: "x" })),
+      "web_search failed: unexpected status 502"
     );
   });
 });

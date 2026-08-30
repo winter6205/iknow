@@ -26,6 +26,17 @@
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
+import {
+  BRAVE_API_KEY_ENV_KEY,
+  EXA_API_KEY_ENV_KEY,
+  SEARCH_BACKEND_ENV_KEY,
+  TAVILY_API_KEY_ENV_KEY,
+} from "../../../config/env.js";
+import {
+  createSearchBackendError,
+  isSearchBackendError,
+  toToolExecutionError,
+} from "./web-search-errors.js";
 import { cleanHtml, decodeEntities } from "./html-text.js";
 import {
   createDefaultGuardDeps,
@@ -60,13 +71,25 @@ export interface WebSearchToolDeps {
   readonly envSearchUrl?: string | undefined;
   readonly proxyUrl?: string;
   /**
-   * #826 T2: 选定的 web_search 后端 id（默认 `"bing"` — 与 v0 字节级一致）。
-   * T2 阶段 factory 仅识别 `"bing"`；`"tavily"` / `"exa"` / `"brave"` 仍
-   * 走 BACKENDS 表的占位实现（throws "backend not implemented yet —
-   * see T4/T5/T6"），handler 不会真调到。T3 起加 schema reject 与 typed
-   * `SearchBackendError`。
+   * #826 T2: 选定的 web_search 后端 id。**未设 = 未设**，不等于显式
+   * `"bing"` —— T3 的 `backend_unset_with_key` 三态判定依赖这个区分
+   * （未设 + 某 keyed key 已设 = 配错，不静默回 Bing）。
    */
   readonly backend?: SearchBackendId;
+  /**
+   * #826 T3: keyed 后端 API key（装配方经 T1 env loader 解析 `EXA_API_KEY` /
+   * `TAVILY_API_KEY` / `BRAVE_API_KEY` 后注入；工具自身不读 process.env，
+   * env.ts SSOT）。缺失 / 空白 → `missing_key` fail-closed。
+   */
+  readonly exaApiKey?: string;
+  readonly tavilyApiKey?: string;
+  readonly braveApiKey?: string;
+  /**
+   * #826 T3: backend 工厂覆盖点（与 `fetch` / `lookup` 同族的注入缝）。
+   * 缺省 = `selectBackend(backendId)`（BACKENDS 表）。测试用它驱动
+   * `http_non_2xx` / `timeout` / `parse` 出口路径，而不改全局 BACKENDS 表。
+   */
+  readonly backendFactory?: SearchBackendFactory;
 }
 
 interface SearchInput {
@@ -146,14 +169,21 @@ export function createWebSearchTool(deps?: WebSearchToolDeps): AciToolDef {
   // 在 build 期报错,而非首次搜索时才暴露。
   const guardDeps = resolveGuardDeps(deps);
   const resultCache = new Map<string, Promise<ReadonlyArray<SearchResult>>>();
-  // #826 T2: 选定后端工厂(per-call 由 handler 拉实例;T2 仅 bing 真
-  // 接,tavily/exa/brave 占位 throws — handler 不会真调过去)。
+  // #826 T2/T3: 选定后端工厂(per-call 由 handler 拉实例)。`backend` 未设
+  // 与显式 "bing" 在 `backendId` 上收敛,但三态 fail-closed 需要区分,
+  // 故单独记 `backendUnset`。
+  const backendUnset = deps?.backend === undefined;
   const backendId: SearchBackendId = deps?.backend ?? "bing";
-  const backendFactory = selectBackend(backendId);
+  const backendFactory = deps?.backendFactory ?? selectBackend(backendId);
+  const apiKeys = collectApiKeys(deps);
   const handler = async (
     input: unknown,
     ctx?: ToolExecutionContext
   ): Promise<string> => {
+    // #826 T3: 三态 fail-closed 的两个配置态在 handler entry 判定 —— 先于
+    // compileSearchInput / 任何 backend 调用,配错不消耗一次出网。
+    assertBackendConfig(backendId, backendUnset, apiKeys);
+    assertSearchUrlAllowed(backendId, input);
     const parsed = compileSearchInput(input, deps?.envSearchUrl);
     const cacheKey = `${parsed.endpoint}\u0000${parsed.query}`;
     const cachedResults = resultCache.get(cacheKey);
@@ -175,7 +205,17 @@ export function createWebSearchTool(deps?: WebSearchToolDeps): AciToolDef {
         }
       });
     }
-    const results = await resultsPromise;
+    let results: ReadonlyArray<SearchResult>;
+    try {
+      results = await resultsPromise;
+    } catch (err) {
+      // EXIT: #826 T3 — 六 kind typed 失败 1:1 转译为 ToolExecutionError
+      // (executor 原样回灌模型)。非 typed 的一律原样上抛:既有 Bing 路径的
+      // ToolExecutionError (network-guard `web_search failed: ...`) 与任何
+      // 意外运行时错误都不得被本出口吞掉 / 改写 (SC #5 字节级一致)。
+      if (isSearchBackendError(err)) throw toToolExecutionError(err);
+      throw err;
+    }
     if (results.length === 0) {
       throw new ToolExecutionError(
         "web_search failed: No search results found."
@@ -233,6 +273,104 @@ function resolveGuardDeps(deps?: WebSearchToolDeps): GuardDeps {
     fetch: deps?.fetch ?? production.fetch,
     lookup: deps?.lookup ?? production.lookup,
   };
+}
+
+/**
+ * #826 T3: keyed 后端 id → 注入的 API key / 对应 env var 名。
+ * `bing` 不在表里（零 key 默认路径）；表的键集 = spec Assumption 6 里
+ * "keyed backend" 的定义。
+ */
+const KEYED_BACKEND_ENV_KEYS = {
+  exa: EXA_API_KEY_ENV_KEY,
+  tavily: TAVILY_API_KEY_ENV_KEY,
+  brave: BRAVE_API_KEY_ENV_KEY,
+} as const;
+
+type KeyedBackendId = keyof typeof KEYED_BACKEND_ENV_KEYS;
+
+type KeyedApiKeys = Readonly<Record<KeyedBackendId, string | undefined>>;
+
+/** keyed backend id 判定（`bing` 之外的三家）。 */
+function isKeyedBackendId(id: SearchBackendId): id is KeyedBackendId {
+  return id !== "bing";
+}
+
+/**
+ * #826 T3: 把注入的三个 key 收成一张表。空白串按缺失处理 —— T1 env loader
+ * 已把「空串 / 占位符解析失败」折成 undefined，这里再兜一次（直调 handler
+ * 的测试 / 装配方绕过 loader 的路径同样 fail-closed，而非带着空 key 出网）。
+ */
+function collectApiKeys(deps?: WebSearchToolDeps): KeyedApiKeys {
+  const normalize = (raw: string | undefined): string | undefined => {
+    const trimmed = raw?.trim();
+    return trimmed ? trimmed : undefined;
+  };
+  return {
+    exa: normalize(deps?.exaApiKey),
+    tavily: normalize(deps?.tavilyApiKey),
+    brave: normalize(deps?.braveApiKey),
+  };
+}
+
+/**
+ * #826 T3 (spec Assumption 6): 三态 fail-closed 里的两个**配置态**，在
+ * handler entry 判定 —— 不依赖 fetch 阶段，配错不消耗一次出网。
+ *
+ *   ① backend = keyed 但对应 key 缺失 → `missing_key`
+ *   ② backend 未设 但某个 keyed key 已设 → `backend_unset_with_key`
+ *      （防配错静默回 Bing；显式 `backend="bing"` + key 已设**不是**配错）
+ *
+ * 第三态（backend = bing / 未设 + 零 key → 走 Bing HTML）无错误，直接放行。
+ * message 只出 backend id 与 env var **名**，绝不出 key 值。
+ */
+function assertBackendConfig(
+  backendId: SearchBackendId,
+  backendUnset: boolean,
+  apiKeys: KeyedApiKeys
+): void {
+  if (isKeyedBackendId(backendId)) {
+    if (apiKeys[backendId] === undefined) {
+      // EXIT: keyed backend selected without a usable key — fail closed.
+      throw toToolExecutionError(
+        createSearchBackendError({
+          kind: "missing_key",
+          message: `backend "${backendId}" is selected but no API key resolved — set ${KEYED_BACKEND_ENV_KEYS[backendId]} (env / .env.local / .env), or unset ${SEARCH_BACKEND_ENV_KEY} to fall back to the default bing backend`,
+        })
+      );
+    }
+    return;
+  }
+  if (!backendUnset) return;
+  for (const id of Object.keys(KEYED_BACKEND_ENV_KEYS) as KeyedBackendId[]) {
+    if (apiKeys[id] === undefined) continue;
+    // EXIT: a keyed key is configured but no backend was chosen — refusing
+    // to silently serve Bing under a misconfiguration.
+    throw toToolExecutionError(
+      createSearchBackendError({
+        kind: "backend_unset_with_key",
+        message: `${KEYED_BACKEND_ENV_KEYS[id]} is set but ${SEARCH_BACKEND_ENV_KEY} is unset — set ${SEARCH_BACKEND_ENV_KEY}=${id} to use it, or remove the key to stay on the default bing backend`,
+      })
+    );
+  }
+}
+
+/**
+ * #826 T3 (spec Assumption 9): `search_url` 覆写只对 `backend="bing"` 有意义
+ * （它是 HTML 端点覆写 + SSRF 验证路径）。keyed backend 下传入 = schema
+ * reject，**不**走 SSRF 验证路径，也不静默忽略。
+ */
+function assertSearchUrlAllowed(
+  backendId: SearchBackendId,
+  input: unknown
+): void {
+  if (backendId === "bing") return;
+  const searchUrl = (input as { search_url?: unknown } | null | undefined)
+    ?.search_url;
+  if (searchUrl === undefined) return;
+  // EXIT: search_url is a bing-only override; reject rather than ignore.
+  throw new ToolExecutionError(
+    `web_search: search_url only valid with backend=bing (current backend: "${backendId}")`
+  );
 }
 
 /** 入参校验：query 非空；max_results clamp [1,10]；端点优先级 search_url > env > 默认。 */
@@ -554,16 +692,17 @@ export function selectBackend(id: SearchBackendId): SearchBackendFactory {
 }
 
 /**
- * #826 T2: 占位实现 — T2 阶段 handler 不会真调到（factory 边界 default
- * 到 bing，T3 起 schema reject 把非 bing + search_url / 非 bing 真 fetch
- * 路径都接管）。这里抛 plain `Error` 是 T2 故意：typed `SearchBackendError`
- * 在 T3 落地（spec Assumption 6 六 kind 闭集 + 转译 `ToolExecutionError`），
- * T4-T6 起 Exa/Tavily/Brave 替换为真 fetch。
+ * #826 T3: 占位实现 —— 抛 typed `SearchBackendError` kind=`not_shipped`
+ * （T2 曾抛 plain `Error`；spec Assumption 1 + SC #8 要求 typed，且要与
+ * `missing_key` 的 fail-closed 区分开）。handler 出口的 try/catch 据此
+ * 1:1 转译为 `ToolExecutionError`。T4-T6 起 Exa/Tavily/Brave 逐个替换为
+ * 真 fetch，本函数随最后一家落地而消失。
  */
 function notImplemented(id: SearchBackendId): never {
-  throw new Error(
-    `web_search: backend "${id}" not implemented yet — see T4/T5/T6`
-  );
+  throw createSearchBackendError({
+    kind: "not_shipped",
+    message: `backend "${id}" is not implemented yet — pick backend=bing, or wait for the ${id} adapter to ship`,
+  });
 }
 
 /**
