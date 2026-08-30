@@ -45,6 +45,19 @@ export interface LspCtx {
    * 里按 no-server 处理（视为未配置）。来源：settings.lsp.disabledServers。
    */
   readonly disabledServers?: ReadonlyArray<string>;
+  /**
+   * 连接池实例（MCP / 多 workspace）。缺席走 client.ts 模块缺省池。
+   * 类型在 client.ts，这里用 import type 避免运行时环。
+   */
+  readonly pool?: import("./client.js").LspClientPool;
+  /**
+   * 覆盖 language-server / tsserver 可执行文件解析。返回绝对路径或 PATH 名；
+   * undefined 则回落默认 node_modules + which。
+   */
+  readonly resolveBin?: (
+    pkgName: string,
+    binName: string
+  ) => Promise<string | undefined>;
 }
 
 /**

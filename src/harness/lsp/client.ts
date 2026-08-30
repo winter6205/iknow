@@ -119,51 +119,58 @@ export type LspClientFailure = {
   serverId?: string;
 };
 
-/** 三件套缓存 —— 模块级状态（spec S14：同进程同生，不跨 session 持久化）。 */
-
-/** key = `${root}:${server.id}` → 已建立并复用的客户端。 */
-const clients = new Map<string, LspClient>();
 /**
- * 已确认 spawn 失败（不可用）的 key → 失败原因（二期 B3：Set 升级 Map，
- * value 留扩展余地；当前唯一取值 "spawn-failed"）。记忆后不再重试。
+ * 可实例化的 LSP 连接池（MCP 与 iknow 进程隔离；disposeAll 供 SIGTERM）。
+ * 缺省仍有一份模块级池，保持 getClient 既有调用方行为。
  */
-const broken = new Map<string, "spawn-failed">();
-/** 正在 spawn 中的 key → in-flight Promise；并发请求共享一次 spawn。 */
-const inflight = new Map<string, Promise<LspClient | undefined>>();
-/**
- * key → 最近一次被使用的时刻（二期 B5 空闲回收）。getClientDetailed 的
- * 成功路径刷新；sweepIdleClients 按 ctx.idleTimeoutMs 回收超时条目。
- */
-const lastUsedAt = new Map<string, number>();
+export class LspClientPool {
+  /** key = `${root}:${server.id}` → 已建立并复用的客户端。 */
+  readonly clients = new Map<string, LspClient>();
+  readonly broken = new Map<string, "spawn-failed">();
+  readonly inflight = new Map<string, Promise<LspClient | undefined>>();
+  readonly lastUsedAt = new Map<string, number>();
 
-/**
- * 空闲客户端回收（二期 B5）：把 `now - lastUsedAt > idleTimeoutMs` 的缓存
- * 客户端 dispose + 逐出。dispose 只释放连接（子进程 stdin EOF → server 自行
- * 退出，本模块**绝不 kill 进程**）；exit 逐出幂等（clients.get(key) guard）。
- *
- * @param idleTimeoutMs 回收阈值；undefined / NaN / ≤0 → 不 sweep。
- */
-function evictCachedClient(key: string, expected?: LspClient): void {
-  if (expected !== undefined && clients.get(key) !== expected) return;
-  clients.delete(key);
-  lastUsedAt.delete(key);
-}
+  evictCachedClient(key: string, expected?: LspClient): void {
+    if (expected !== undefined && this.clients.get(key) !== expected) return;
+    this.clients.delete(key);
+    this.lastUsedAt.delete(key);
+  }
 
-function sweepIdleClients(idleTimeoutMs: number | undefined): void {
-  if (
-    idleTimeoutMs === undefined ||
-    !Number.isFinite(idleTimeoutMs) ||
-    idleTimeoutMs <= 0 ||
-    clients.size === 0
-  )
-    return;
-  const now = Date.now();
-  for (const [key, client] of clients) {
-    if (now - (lastUsedAt.get(key) ?? 0) > idleTimeoutMs) {
-      client.dispose();
-      evictCachedClient(key, client);
+  sweepIdleClients(idleTimeoutMs: number | undefined): void {
+    if (
+      idleTimeoutMs === undefined ||
+      !Number.isFinite(idleTimeoutMs) ||
+      idleTimeoutMs <= 0 ||
+      this.clients.size === 0
+    )
+      return;
+    const now = Date.now();
+    for (const [key, client] of this.clients) {
+      if (now - (this.lastUsedAt.get(key) ?? 0) > idleTimeoutMs) {
+        client.dispose();
+        this.evictCachedClient(key, client);
+      }
     }
   }
+
+  async disposeAll(): Promise<void> {
+    for (const [key, client] of [...this.clients]) {
+      client.dispose();
+      this.evictCachedClient(key, client);
+    }
+    this.broken.clear();
+    this.inflight.clear();
+  }
+}
+
+const defaultPool = new LspClientPool();
+
+export function createLspClientPool(): LspClientPool {
+  return new LspClientPool();
+}
+
+function poolOf(ctx: LspCtx): LspClientPool {
+  return ctx.pool ?? defaultPool;
 }
 
 /**
@@ -192,11 +199,10 @@ export async function getClientDetailed(
   file: string,
   opts?: { readonly server?: LspServerInfo }
 ): Promise<{ client?: LspClient; failure?: LspClientFailure }> {
-  sweepIdleClients(ctx.idleTimeoutMs);
+  const pool = poolOf(ctx);
+  pool.sweepIdleClients(ctx.idleTimeoutMs);
   const server = opts?.server ?? resolveServer(file);
   if (!server) return { failure: { reason: "no-server" } };
-  // disabledServers（二期 B7）：命中的 server 被禁用 → 与「无匹配扩展名」
-  // 同为 no-server（视为未配置），但携带 serverId 便于哨兵归因。
   if (ctx.disabledServers?.includes(server.id)) {
     return { failure: { reason: "no-server", serverId: server.id } };
   }
@@ -207,39 +213,36 @@ export async function getClientDetailed(
   const spawnFailed = (): { failure: LspClientFailure } => ({
     failure: { reason: "spawn-failed", serverId: server.id },
   });
-  const cached = clients.get(key);
+  const cached = pool.clients.get(key);
   if (cached) {
-    lastUsedAt.set(key, Date.now());
+    pool.lastUsedAt.set(key, Date.now());
     return { client: cached };
   }
-  if (broken.has(key)) return spawnFailed();
-  const pending = inflight.get(key);
+  if (pool.broken.has(key)) return spawnFailed();
+  const pending = pool.inflight.get(key);
   if (pending) {
     const client = await pending;
     return client ? { client } : spawnFailed();
   }
 
-  const task = spawnClient(server, root, ctx)
+  const task = spawnClient(pool, server, root, ctx)
     .then((client) => {
       if (client) {
-        clients.set(key, client);
-        lastUsedAt.set(key, Date.now());
+        pool.clients.set(key, client);
+        pool.lastUsedAt.set(key, Date.now());
         return client;
       }
-      broken.set(key, "spawn-failed");
+      pool.broken.set(key, "spawn-failed");
       return undefined;
     })
     .catch(() => {
-      // spawn 意外 throw（如 spawnProcess ENOENT）归一为不可用：记 broken、
-      // 返回 undefined，避免 rejection 逃逸成 unhandled、每次调用重试 spawn。
-      // 与 spawn return undefined 同路径（契约 types.ts:Handle | undefined）。
-      broken.set(key, "spawn-failed");
+      pool.broken.set(key, "spawn-failed");
       return undefined;
     })
     .finally(() => {
-      inflight.delete(key);
+      pool.inflight.delete(key);
     });
-  inflight.set(key, task);
+  pool.inflight.set(key, task);
   const client = await task;
   return client ? { client } : spawnFailed();
 }
@@ -266,6 +269,7 @@ export async function getClient(
  * stdio 未 pipe（stdout/stdin 缺失）同样视为不可用 → `undefined`。
  */
 async function spawnClient(
+  pool: LspClientPool,
   server: LspServerInfo,
   root: string,
   ctx: LspCtx
@@ -409,7 +413,7 @@ async function spawnClient(
   //   - dispose()（主动关闭）后进程若退出，逐出是幂等无害的（缓存本就该
   //     释放），无需区分主动/意外退出。
   child.once("exit", () => {
-    evictCachedClient(key, client);
+    pool.evictCachedClient(key, client);
   });
 
   return client;

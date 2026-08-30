@@ -77,6 +77,7 @@ import {
   getClient,
   cancelRequest,
   signalToCancellationToken,
+  createLspClientPool,
 } from "../../../src/harness/lsp/client.ts";
 
 // ── fakeServer + fake child 工厂 ──────────────────────────────────────────────
@@ -822,7 +823,9 @@ describe("getClient dispatch by extension (spec 302)", () => {
   // cross-test 缓存命中污染。spawn 用 vi.spyOn 拦截 → 不触真实 bin。
   function fakeSpawnFor() {
     const impl = async () => {
-      const child = makeFakeChildProcess(9000 + Math.floor(Math.random() * 100));
+      const child = makeFakeChildProcess(
+        9000 + Math.floor(Math.random() * 100)
+      );
       return {
         process: child as unknown as import("node:child_process").ChildProcess,
         initialization: { tsserver: { path: "/tsserver.js" } },
@@ -903,7 +906,12 @@ describe("getClient dispatch by extension (spec 302)", () => {
     const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-dispatch-ts-"));
     writeFileSync(join(dir, "package-lock.json"), "{}", "utf8");
     try {
-      await assertRoutesTo(join(dir, "index.ts"), Typescript, dir, join(dir, ".."));
+      await assertRoutesTo(
+        join(dir, "index.ts"),
+        Typescript,
+        dir,
+        join(dir, "..")
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -987,7 +995,8 @@ describe("notifyChange (plan T1)", () => {
       spawn: async (_root) => {
         const child = makeFakeChildProcess();
         return {
-          process: child as unknown as import("node:child_process").ChildProcess,
+          process:
+            child as unknown as import("node:child_process").ChildProcess,
           initialization: { tsserver: { path: "/tsserver.js" } },
         };
       },
@@ -1012,7 +1021,9 @@ describe("notifyChange (plan T1)", () => {
         (c) => c[0] === "textDocument/didOpen"
       );
       expect(didOpens).toHaveLength(1);
-      const p = didOpens[0][1] as { textDocument: { uri: string; version: number; text: string } };
+      const p = didOpens[0][1] as {
+        textDocument: { uri: string; version: number; text: string };
+      };
       expect(p.textDocument.version).toBe(1);
       expect(p.textDocument.text).toBe("export const a = 1;\n");
       expect(p.textDocument.uri).toMatch(/\/a\.ts$/);
@@ -1061,7 +1072,9 @@ describe("notifyChange (plan T1)", () => {
       expect(first.textDocument.version).toBe(2);
       expect(first.contentChanges).toEqual([{ text: "export const b = 2;\n" }]);
       expect(second.textDocument.version).toBe(3);
-      expect(second.contentChanges).toEqual([{ text: "export const b = 3;\n" }]);
+      expect(second.contentChanges).toEqual([
+        { text: "export const b = 3;\n" },
+      ]);
       expect(first.textDocument.uri).toMatch(/\/b\.ts$/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1101,7 +1114,8 @@ describe("client exit self-heal (plan T1)", () => {
         const child = makeFakeChildProcess();
         children.push(child);
         return {
-          process: child as unknown as import("node:child_process").ChildProcess,
+          process:
+            child as unknown as import("node:child_process").ChildProcess,
           initialization: { tsserver: { path: "/tsserver.js" } },
         };
       },
@@ -1132,7 +1146,8 @@ describe("client exit self-heal (plan T1)", () => {
       spawn: async (_root) => {
         const child = makeFakeChildProcess();
         return {
-          process: child as unknown as import("node:child_process").ChildProcess,
+          process:
+            child as unknown as import("node:child_process").ChildProcess,
           initialization: { tsserver: { path: "/tsserver.js" } },
         };
       },
@@ -1205,7 +1220,8 @@ describe("diagnostics entry pushVersion passthrough (phase2 B1)", () => {
         spawn: async (_root) => {
           const child = makeFakeChildProcess();
           return {
-            process: child as unknown as import("node:child_process").ChildProcess,
+            process:
+              child as unknown as import("node:child_process").ChildProcess,
             initialization: { tsserver: { path: "/tsserver.js" } },
           };
         },
@@ -1242,7 +1258,10 @@ describe("getClientDetailed failure reasons (phase2 B3)", () => {
     });
     const res = await getClientDetailed(ctx, "/root/a.ts", { server });
     expect(res.client).toBeUndefined();
-    expect(res.failure).toEqual({ reason: "no-root", serverId: "detailed-root-empty" });
+    expect(res.failure).toEqual({
+      reason: "no-root",
+      serverId: "detailed-root-empty",
+    });
     expect(calls.spawn).toBe(0);
   });
 
@@ -1282,11 +1301,18 @@ describe("getClientDetailed failure reasons (phase2 B3)", () => {
 
   it("disabledServers → no-server with serverId, without touching root/spawn (B7)", async () => {
     const { server, calls } = makeFakeServer("disabled-srv");
-    const res = await getClientDetailed({ directory: "/work", disabledServers: ["disabled-srv"] }, "/root/a.ts", {
-      server,
-    });
+    const res = await getClientDetailed(
+      { directory: "/work", disabledServers: ["disabled-srv"] },
+      "/root/a.ts",
+      {
+        server,
+      }
+    );
     expect(res.client).toBeUndefined();
-    expect(res.failure).toEqual({ reason: "no-server", serverId: "disabled-srv" });
+    expect(res.failure).toEqual({
+      reason: "no-server",
+      serverId: "disabled-srv",
+    });
     expect(calls.spawn).toBe(0);
   });
 
@@ -1308,7 +1334,8 @@ describe("idle sweep (phase2 B5)", () => {
       spawn: async (_root) => {
         const child = makeFakeChildProcess();
         return {
-          process: child as unknown as import("node:child_process").ChildProcess,
+          process:
+            child as unknown as import("node:child_process").ChildProcess,
           initialization: { tsserver: { path: "/tsserver.js" } },
         };
       },
@@ -1359,5 +1386,31 @@ describe("idle sweep (phase2 B5)", () => {
 
   it("exports the build-engine default idle timeout of 10 minutes", () => {
     expect(DEFAULT_LSP_IDLE_TIMEOUT_MS).toBe(10 * 60 * 1000);
+  });
+});
+
+describe("LspClientPool isolation", () => {
+  it("does not share cached clients across pools and disposeAll forces respawn", async () => {
+    const poolA = createLspClientPool();
+    const poolB = createLspClientPool();
+    const { server, calls } = makeFakeServer("pool-iso");
+    const ctxA = { directory: "/work", pool: poolA };
+    const ctxB = { directory: "/work", pool: poolB };
+
+    const a1 = await getClient(ctxA, "/root/a.ts", { server });
+    const b1 = await getClient(ctxB, "/root/a.ts", { server });
+    expect(a1).toBeDefined();
+    expect(b1).toBeDefined();
+    expect(a1).not.toBe(b1);
+    expect(calls.spawn).toBe(2);
+
+    await poolA.disposeAll();
+    const a2 = await getClient(ctxA, "/root/b.ts", { server });
+    expect(a2).toBeDefined();
+    expect(a2).not.toBe(a1);
+    expect(calls.spawn).toBe(3);
+    const b2 = await getClient(ctxB, "/root/b.ts", { server });
+    expect(b2).toBe(b1);
+    expect(calls.spawn).toBe(3);
   });
 });
