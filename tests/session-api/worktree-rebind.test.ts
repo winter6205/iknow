@@ -615,7 +615,7 @@ describe("T8 — exit: return to the main repo root, tree preserved", () => {
 
     const repoRoot = await prov.exit({
       conversationId: "conv-b",
-      currentRoot: wtA,
+      root: wtA,
       sessionWorkspaceRoot: wtA,
     });
 
@@ -646,7 +646,7 @@ describe("T8 — exit: return to the main repo root, tree preserved", () => {
     const prov = createTaskWorktreeProvisioner({ store });
     const repoRoot = await prov.exit({
       conversationId: "conv-b",
-      currentRoot: wtA,
+      root: wtA,
       sessionWorkspaceRoot: wtA,
     });
     expect(repoRoot).toBe(repo);
@@ -661,7 +661,7 @@ describe("T8 — exit: return to the main repo root, tree preserved", () => {
     await expect(
       prov.exit({
         conversationId: "conv-b",
-        currentRoot: repo,
+        root: repo,
         sessionWorkspaceRoot: repo,
       })
     ).rejects.toMatchObject({
@@ -680,10 +680,10 @@ describe("T8 — exit: return to the main repo root, tree preserved", () => {
       },
     });
     await expect(
-      prov.exit({ conversationId: "../evil", currentRoot: "/repo" })
+      prov.exit({ conversationId: "../evil", root: "/repo" })
     ).rejects.toMatchObject({ kind: "rebind_failed" });
     await expect(
-      prov.exit({ conversationId: "", currentRoot: "/repo" })
+      prov.exit({ conversationId: "", root: "/repo" })
     ).rejects.toMatchObject({ kind: "rebind_failed" });
     expect(fsOrGitTouched).toBe(false);
   });

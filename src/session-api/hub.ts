@@ -922,9 +922,10 @@ export class SessionHub {
   }
 
   /**
-   * T7 Hub-visible enter seam for harness hosts (including TUI): move this
-   * conversation onto an EXISTING task worktree of this repository (owner =
-   * targetConversationId). The provisioner validates the tree (exists /
+   * T7 Hub-visible enter seam (serve/chat harness hosts; TUI wires
+   * provision-only): move this conversation onto an EXISTING task worktree
+   * of this repository (owner = targetConversationId). The provisioner
+   * validates the tree (exists /
    * linked / same repo) and rebinds in memory; the changed root is recorded
    * for this conversation and persisted only by the next conditional save —
    * the same dirty-root protocol the create path uses. The tree itself is
@@ -947,9 +948,10 @@ export class SessionHub {
   }
 
   /**
-   * T8 Hub-visible exit seam for harness hosts (including TUI): move this
-   * conversation back to its main repo root from the task worktree it is
-   * currently on. The provisioner derives the main root from the tree
+   * T8 Hub-visible exit seam (serve/chat harness hosts; TUI wires
+   * provision-only): move this conversation back to its main repo root from
+   * the task worktree it is currently on. The provisioner derives the main
+   * root from the tree
    * (restart-safe) and rebinds in memory; the changed root is recorded for
    * this conversation and persisted only by the next conditional save. The
    * task worktree is preserved — no `git worktree remove` anywhere.
@@ -963,7 +965,7 @@ export class SessionHub {
     );
     const repoRoot = await this.worktreeProvisioner.exit({
       conversationId: ctx.conversationId,
-      currentRoot: ctx.root,
+      root: ctx.root,
       ...(anchorSessionRoot !== undefined
         ? { sessionWorkspaceRoot: anchorSessionRoot }
         : {}),

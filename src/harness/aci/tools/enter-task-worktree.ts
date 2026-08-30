@@ -100,8 +100,10 @@ export function createEnterTaskWorktreeTool(
         );
       }
       if (!SAFE_CONVERSATION_ID_RE.test(target)) {
+        // Same typed-exit label as the WorktreeIsolationError mapping below —
+        // the provisioner fails this id with kind=rebind_failed too.
         throw new ToolExecutionError(
-          `[enter-task-worktree] conversationId ${JSON.stringify(target)} is not a safe path/branch segment (expected ^[A-Za-z0-9][A-Za-z0-9_-]*$)`
+          `[enter-task-worktree] kind=rebind_failed — conversationId ${JSON.stringify(target)} is not a safe path/branch segment (expected ^[A-Za-z0-9][A-Za-z0-9_-]*$)`
         );
       }
       try {

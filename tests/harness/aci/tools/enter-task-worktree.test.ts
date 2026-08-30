@@ -146,7 +146,9 @@ describe("enter-task-worktree — handler", () => {
         def.handler({ conversationId: bad }, CTX("conv-b"))
       ).rejects.toMatchObject({
         name: "ToolExecutionError",
-        message: expect.stringContaining("[enter-task-worktree]"),
+        message: expect.stringContaining(
+          "[enter-task-worktree] kind=rebind_failed —"
+        ),
       });
     }
     expect(calls).toEqual([]);

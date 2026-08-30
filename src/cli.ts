@@ -335,7 +335,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     worktreeExit: ({ conversationId, root: sessionRoot }) =>
       worktreeProvisioner.exit({
         conversationId,
-        currentRoot: sessionRoot,
+        root: sessionRoot,
       }),
   };
   // T6:启动 workspace 即稳定 productRoot —— rebind 只换 workspaceRoot，

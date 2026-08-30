@@ -47,6 +47,8 @@ import type {
   GitRunner,
   GitResult,
   WorktreeProvisionContext,
+  WorktreeEnterContext,
+  WorktreeExitContext,
 } from "../harness/isolation/worktree-gate.js";
 import { errorMessage } from "../harness/errors.js";
 import type { SessionFileV1 } from "./store/index.js";
@@ -142,22 +144,16 @@ export interface WorktreeProvisionAnchor {
   readonly sessionWorkspaceRoot?: string;
 }
 
-/** T7 enter request (mirrors the harness `WorktreeEnterContext` SSOT). */
-export interface WorktreeEnterRequest {
-  /** Calling conversation (the session that moves onto the target tree). */
-  readonly conversationId?: string;
-  /** The caller's current root — the main repo (path SSOT base). */
-  readonly root: string;
-  /** Owner conversation id whose task worktree to enter. */
-  readonly targetConversationId: string;
-}
+/**
+ * T7 enter request — the harness `WorktreeEnterContext` SSOT (no local copy).
+ */
+export type WorktreeEnterRequest = WorktreeEnterContext;
 
-/** T8 exit request (mirrors the harness `WorktreeExitContext` SSOT + anchor). */
-export interface WorktreeExitRequest {
-  /** Calling conversation (the session that leaves the task worktree). */
-  readonly conversationId?: string;
-  /** The caller's current engine root (the task worktree being exited). */
-  readonly currentRoot: string;
+/**
+ * T8 exit request: the harness `WorktreeExitContext` SSOT (engine root is
+ * `root`) plus the durable rebind anchor.
+ */
+export interface WorktreeExitRequest extends WorktreeExitContext {
   /**
    * The caller's persisted workspaceRoot (loaded by the hub) — the durable
    * rebind record that identifies a rebound session across restarts.
@@ -263,6 +259,44 @@ export function createTaskWorktreeProvisioner(
     return res.stdout.trim();
   }
 
+  /**
+   * Legacy standalone persistence hook shared by provision / enter / exit:
+   * callers outside SessionHub rebind the session file here (store mode);
+   * SessionHub omits the store and persists the returned root through
+   * conditionalSave. `action` keeps the per-seam error wording ("rebind" /
+   * "enter rebind" / "exit rebind") — the typed exit (rebind_failed) and the
+   * load-then-save discipline are identical across all three seams.
+   */
+  async function persistWorkspaceRoot(
+    conversationId: string,
+    workspaceRoot: string,
+    action: "rebind" | "enter rebind" | "exit rebind"
+  ): Promise<void> {
+    if (opts.store === undefined) return;
+    let file: SessionFileV1;
+    try {
+      file = await opts.store.load(conversationId);
+    } catch (err) {
+      throw new WorktreeIsolationError(
+        "rebind_failed",
+        `worktree isolation: cannot load session ${conversationId} for ${action}: ${errorMessage(err)}`
+      );
+    }
+    const updated: SessionFileV1 = {
+      ...file,
+      workspaceRoot,
+      updatedAt: now(),
+    };
+    try {
+      await opts.store.save({ id: conversationId, file: updated });
+    } catch (err) {
+      throw new WorktreeIsolationError(
+        "rebind_failed",
+        `worktree isolation: cannot persist ${action} for session ${conversationId}: ${errorMessage(err)}`
+      );
+    }
+  }
+
   async function provision(
     ctx: WorktreeProvisionContext,
     anchor?: WorktreeProvisionAnchor
@@ -354,30 +388,7 @@ export function createTaskWorktreeProvisioner(
     // 2. Preserve the historical standalone persistence hook when supplied.
     // SessionHub omits it so the host can observe this returned root and
     // persist it together with the turn through conditionalSave.
-    if (opts.store !== undefined) {
-      let file: SessionFileV1;
-      try {
-        file = await opts.store.load(conversationId);
-      } catch (err) {
-        throw new WorktreeIsolationError(
-          "rebind_failed",
-          `worktree isolation: cannot load session ${conversationId} for rebind: ${errorMessage(err)}`
-        );
-      }
-      const updated: SessionFileV1 = {
-        ...file,
-        workspaceRoot: worktreePath,
-        updatedAt: now(),
-      };
-      try {
-        await opts.store.save({ id: conversationId, file: updated });
-      } catch (err) {
-        throw new WorktreeIsolationError(
-          "rebind_failed",
-          `worktree isolation: cannot persist rebind for session ${conversationId}: ${errorMessage(err)}`
-        );
-      }
-    }
+    await persistWorkspaceRoot(conversationId, worktreePath, "rebind");
 
     bound.set(conversationId, worktreePath);
     taskRoots.add(worktreePath);
@@ -454,30 +465,7 @@ export function createTaskWorktreeProvisioner(
     // Legacy standalone persistence hook (mirrors `provision`): callers
     // outside SessionHub rebind the session file here; SessionHub omits the
     // store and persists the returned root through conditionalSave.
-    if (opts.store !== undefined) {
-      let file: SessionFileV1;
-      try {
-        file = await opts.store.load(conversationId);
-      } catch (err) {
-        throw new WorktreeIsolationError(
-          "rebind_failed",
-          `worktree isolation: cannot load session ${conversationId} for enter rebind: ${errorMessage(err)}`
-        );
-      }
-      const updated: SessionFileV1 = {
-        ...file,
-        workspaceRoot: target,
-        updatedAt: now(),
-      };
-      try {
-        await opts.store.save({ id: conversationId, file: updated });
-      } catch (err) {
-        throw new WorktreeIsolationError(
-          "rebind_failed",
-          `worktree isolation: cannot persist enter rebind for session ${conversationId}: ${errorMessage(err)}`
-        );
-      }
-    }
+    await persistWorkspaceRoot(conversationId, target, "enter rebind");
 
     bound.set(conversationId, target);
     taskRoots.add(target);
@@ -503,9 +491,7 @@ export function createTaskWorktreeProvisioner(
     // in-process entry, no durable anchor, and no shaped engine root.
     const boundRoot = bound.get(conversationId);
     const shapedCurrent =
-      taskWorktreeOwnerOf(req.currentRoot) !== undefined
-        ? req.currentRoot
-        : undefined;
+      taskWorktreeOwnerOf(req.root) !== undefined ? req.root : undefined;
     const shapedAnchor =
       req.sessionWorkspaceRoot !== undefined &&
       taskWorktreeOwnerOf(req.sessionWorkspaceRoot) !== undefined
@@ -518,12 +504,6 @@ export function createTaskWorktreeProvisioner(
       );
     }
     const tree = shapedCurrent ?? boundRoot ?? shapedAnchor!;
-    if (tree === undefined) {
-      throw new WorktreeIsolationError(
-        "rebind_failed",
-        `worktree isolation: session ${conversationId} has no task worktree to exit`
-      );
-    }
 
     // Main repo root SSOT: the git common dir of the tree is
     // `<repoRoot>/.git` (worktree-safe, restart-safe) — one level up is the
@@ -534,30 +514,7 @@ export function createTaskWorktreeProvisioner(
     bound.delete(conversationId);
 
     // Legacy standalone persistence hook (mirrors `provision` / `enter`).
-    if (opts.store !== undefined) {
-      let file: SessionFileV1;
-      try {
-        file = await opts.store.load(conversationId);
-      } catch (err) {
-        throw new WorktreeIsolationError(
-          "rebind_failed",
-          `worktree isolation: cannot load session ${conversationId} for exit rebind: ${errorMessage(err)}`
-        );
-      }
-      const updated: SessionFileV1 = {
-        ...file,
-        workspaceRoot: repoRoot,
-        updatedAt: now(),
-      };
-      try {
-        await opts.store.save({ id: conversationId, file: updated });
-      } catch (err) {
-        throw new WorktreeIsolationError(
-          "rebind_failed",
-          `worktree isolation: cannot persist exit rebind for session ${conversationId}: ${errorMessage(err)}`
-        );
-      }
-    }
+    await persistWorkspaceRoot(conversationId, repoRoot, "exit rebind");
 
     return repoRoot;
   }
