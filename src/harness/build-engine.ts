@@ -60,6 +60,7 @@ import {
 } from "../config/settings.js";
 import {
   createWorktreeIsolationExecutor,
+  taskWorktreeOwnerOf,
   type WorktreeIsolationHostOpts,
 } from "./isolation/worktree-gate.js";
 import type { IknowEnv } from "../config/env.js";
@@ -463,7 +464,17 @@ export async function buildHarnessEngine(
         createSubAgentManager({
           spawn: createDefaultSubAgentSpawn(
             opts.subagentDiagnosticsDir,
-            workspaceRoot
+            workspaceRoot,
+            // T5 (hard req 7): 子代理继承父会话改绑后的根 —— 引擎被重建到
+            // task worktree（hub buildProductionEngine / CLI rebuildDeps 把
+            // cwd/workspaceRoot 切到 `<repo>/.iknow/worktrees/<convId>`）时，
+            // worker 子进程以该根为 cwd 启动；未改绑（主仓根，非 task
+            // worktree 形状）时不传 → 子进程继承父进程 cwd，行为与今日逐
+            // 字节一致。worker 注册表从不携带 isolation 缝 → 子代理不触发
+            // 第二棵树 / 二次 provision（worker-tool-surface 测试钉住）。
+            taskWorktreeOwnerOf(workspaceRoot) !== undefined
+              ? workspaceRoot
+              : undefined
           ),
           sandboxRoot,
           trace: opts.subagentTrace ?? createNoopTraceService(),

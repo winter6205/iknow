@@ -95,9 +95,19 @@ export function resolveSubagentTraceDir(traceDir?: string): string {
   return resolve(traceDir ?? process.env.IKNOW_TRACE_OUT ?? "./trace/");
 }
 
+/**
+ * T5 (plans/worktree-isolation-model-provision.md, hard req 7): the worker
+ * child inherits the parent session's REBOUND root. When the parent session
+ * was rebound to its task worktree, build-engine passes that root here and
+ * the child starts with `cwd` = the task worktree (its 说明书 discovery /
+ * skill scan / bash-relative reads happen in the same tree as the parent);
+ * undefined (unbound session / worker defaults) = no cwd option = the child
+ * inherits the parent process cwd byte-identically to today.
+ */
 export function createDefaultSubAgentSpawn(
   traceDir?: string,
-  workspaceRoot?: string
+  workspaceRoot?: string,
+  sessionRoot?: string
 ): SubAgentSpawn {
   const resolvedTraceDir = resolveSubagentTraceDir(traceDir);
   return (_def, _taskId, _stdinPayload) => {
@@ -116,6 +126,7 @@ export function createDefaultSubAgentSpawn(
             ? { IKNOW_WORKSPACE_ROOT: workspaceRoot }
             : {}),
         },
+        ...(sessionRoot !== undefined ? { cwd: sessionRoot } : {}),
       }
     );
     // manager 负责写 stdin（worker 协议：stdin 一行 envelope → stdout 一行 result）。
