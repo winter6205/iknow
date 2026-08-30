@@ -134,10 +134,20 @@ export interface SearchBackend {
  * #826 T2: backend 实例化需要的 per-call 上下文（guardDeps 装配期绑定；
  * endpoint 由 `compileSearchInput` 在 handler 内解析 — 含 SSRF 验证、
  * search_url 覆写、envSearchUrl fallback）。
+ *
+ * #826 T4: 增 `apiKey` 字段（keyed backend 需要）。handler 在
+ * `assertBackendConfig` 之后才调工厂，故 keyed backend 拿到的一定是
+ * 已解析的真值（空白 / 占位符解析失败已在 entry fail-closed）。
  */
 export interface SearchBackendCtorOptions {
   readonly guardDeps: GuardDeps;
   readonly endpoint: string;
+  /**
+   * #826 T4: keyed backend 的 API key。仅 keyed backend 关心（bing
+   * 不读）。`assertBackendConfig` 已在 entry 校验 non-empty，本字段
+   * 是「已验证非空」的真值透传 —— 不再二次判空。
+   */
+  readonly apiKey?: string;
 }
 
 /**
@@ -190,9 +200,14 @@ export function createWebSearchTool(deps?: WebSearchToolDeps): AciToolDef {
     const cacheHit = cachedResults !== undefined;
     // #826 T2: per-call backend 实例(带 endpoint;Tavily/Exa/Brave
     // 占位 backend 不读 endpoint,但传同一个 shape 保持工厂同形)。
+    // T4: 透传 keyed backend 的 apiKey（已由 assertBackendConfig 校验
+    // 非空；bing 不读此字段）。
     const backend = backendFactory({
       guardDeps,
       endpoint: parsed.endpoint,
+      ...(isKeyedBackendId(backendId) && apiKeys[backendId] !== undefined
+        ? { apiKey: apiKeys[backendId] }
+        : {}),
     });
     const resultsPromise =
       cachedResults ?? loadSearchResults(parsed, backend, ctx?.signal);
@@ -510,7 +525,18 @@ function parseBingResults(body: string, maxResults: number): SearchResult[] {
   return results;
 }
 
-function projectSearchResult(result: SearchResult): SearchResult | undefined {
+/**
+ * #826 T4: shared 单条投影 —— `projectSearchResult` 升级为 export，让
+ * ExaBackend（T4）/ TavilyBackend（T5）/ BraveBackend（T6）走同一份
+ * T2 字段 cap + 全空丢弃，与 Bing HTML 解析路径字节级一致。
+ *
+ * spec SC #3 + Assumption 8 锚定："T2 字段 cap 一刀切，adapter 不写自家 cap"。
+ * T2 把这条 cap 落到了 Bing path 内的私有函数；T4 起 export 出来供
+ * keyed backend 共用，避免每家重写一份。
+ */
+export function projectSearchResult(
+  result: SearchResult
+): SearchResult | undefined {
   const projected = {
     title: truncateField(result.title, MAX_TITLE_CHARS),
     url: truncateField(result.url, MAX_URL_CHARS),
@@ -718,14 +744,256 @@ function placeholderBackend(id: SearchBackendId): SearchBackend {
   };
 }
 
+// =============================================================================
+// #826 T4: ExaBackend v1 真 fetch — Exa 真 HTTP + spec Assumption 8 投影。
+// =============================================================================
+
+/**
+ * #826 T4: Exa 真端点。`api.exa.ai` 不走 SSRF 防线（既非私网也不是用户
+ * 覆写），handler 里 compileSearchInput 解析的 endpoint 对 keyed backend
+ * 不生效 —— Exa 路径写死此常量。
+ */
+const EXA_ENDPOINT = "https://api.exa.ai/search";
+
+/**
+ * #826 T4: Exa 投影用的形态描述。Exa 真响应 `SearchResponse` (`results[]`)
+ * 在 Exa docs 里字段非常宽（image / publishedDate / author / id 等），但
+ * spec Assumption 8 只关心三字段 + highlights/text，故用窄类型描述 contract。
+ */
+interface ExaResultRaw {
+  readonly title?: unknown;
+  readonly url?: unknown;
+  readonly highlights?: unknown;
+  readonly text?: unknown;
+}
+
+/**
+ * #826 T4: Exa 真响应形态（最少需要 results[]）。`requestId` 由 envelope
+ * meta spec 接管前不消费；T4 保留字段在 raw 上以备后续。
+ */
+interface ExaResponseRaw {
+  readonly results?: unknown;
+  readonly requestId?: unknown;
+}
+
+/**
+ * #826 T4: ExaBackend 构造选项。
+ *
+ * - `apiKey` 必须非空（已由 `assertBackendConfig` 在 handler entry 校验）；
+ *   工厂层兜底拒绝空串，防止绕过 entry 校验的直调路径（测试 / 装配脚本）、
+ *   让 backend 实例持有无 key 状态而出网。
+ * - `fetch` 注入点：测试用 stub fetch 替换 `globalThis.fetch`，生产
+ *   默认走全局 fetch（undici 已内置）。`AbortSignal` 直接透传给 fetch，
+ *   fetch 抛 `AbortError` 时由 `fetchResults` 翻译为 typed
+ *   `SearchBackendError(kind="timeout")`。
+ */
+export interface ExaBackendCtorOptions {
+  readonly apiKey: string;
+  /** #826 T4: 测试 seam —— 替换 fetch（生产默认 = `globalThis.fetch`）。 */
+  readonly fetch?: typeof globalThis.fetch;
+}
+
+/**
+ * #826 T4: Exa 真 fetch + spec Assumption 8 投影。
+ *
+ *   - `fetchResults`：
+ *     - POST `https://api.exa.ai/search`，body `{ query, numResults, contents:{highlights:true} }`
+ *     - `Authorization: Bearer ${apiKey}` header
+ *     - 非 2xx → typed `SearchBackendError(kind="http_non_2xx", endpoint=api.exa.ai, ...)`；
+ *       message **不**带 key 字面值 / Authorization header（`createSearchBackendError`
+ *       的 redactAuthSecrets 兜底）
+ *     - `AbortError`（signal aborted）→ typed
+ *       `SearchBackendError(kind="timeout", endpoint=api.exa.ai, ...)`
+ *     - 畸形 JSON（parse 失败）→ typed `SearchBackendError(kind="parse", ...)`，
+ *       **不**降级为 silent empty
+ *
+ *   - `project`：把 Exa JSON 投到 Bing-shape `SearchResult[]`，
+ *     `snippet = highlights?.[0]?.text ?? text ?? ""`。字段 cap 走
+ *     `projectSearchResult`（T4 起 export 出来供各家 keyed backend 共用，
+ *     与 Bing HTML 路径字节级一致 —— spec SC #3「T2 字段 cap 一刀切，
+ *     adapter 不写自家 cap」）。`maxResults` cap 在 `project` 内部施加
+ *     （Bing 路径同形态：`parseBingResults` 在循环里 `if (results.length >= maxResults) break`）。
+ *
+ *   - `describe`：`adapter: "exa" + latencyMs` —— envelope meta spec
+ *     未落地前 `requestId` 留 undefined。
+ *
+ * 不读 process.env、不调 `fetchPublicResponse`（Exa 是固定 vendor endpoint，
+ * 不需要 SSRF 防线 / 重定向跳限制 / 字节上限；改走 native fetch 拿 200 即可）。
+ */
+export class ExaBackend implements SearchBackend {
+  readonly id: SearchBackendId = "exa";
+
+  private readonly apiKey: string;
+  private readonly fetchFn: typeof globalThis.fetch;
+
+  constructor(opts: ExaBackendCtorOptions) {
+    // EXIT: 拒绝空 key —— 防 backend 实例持有无 key 状态而出网。
+    if (!opts.apiKey) {
+      throw new ToolExecutionError("ExaBackend: apiKey is required");
+    }
+    this.apiKey = opts.apiKey;
+    this.fetchFn = opts.fetch ?? globalThis.fetch;
+  }
+
+  async fetchResults(args: {
+    query: string;
+    maxResults: number;
+    signal?: AbortSignal;
+  }): Promise<unknown> {
+    let response: Response;
+    try {
+      response = await this.fetchFn(EXA_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify({
+          query: args.query,
+          numResults: args.maxResults,
+          // highlights 必须显式开 —— 否则上游不返回 highlights 字段，
+          // project 会一律落 text（snippet 偏长），与 spec Assumption 8
+          // 的「highlights[0] 优先」承诺不一致。
+          contents: { highlights: true },
+        }),
+        signal: args.signal,
+      });
+    } catch (err) {
+      // EXIT: fetch 抛的 abort / 其它底层错都先翻译为 typed timeout
+      // （spec SC #3 「Timeout → typed SearchBackendError(kind=timeout)
+      // when signal.aborted」）。其它底层网络错也走同 typed 路径，避免
+      // 漏到 handler 出口的「untyped pass-through」分支给模型看到原始
+      // 错误栈。非 abort 错误仍归 timeout 是有意偏离 —— abort 是这类
+      // 失败在生产环境的唯一可观察态，区分信号本身已经在外层 signal 上。
+      const aborted =
+        args.signal?.aborted === true ||
+        (err instanceof Error && err.name === "AbortError");
+      throw createSearchBackendError({
+        kind: "timeout",
+        message: aborted
+          ? "request aborted"
+          : `fetch failed: ${err instanceof Error ? err.message : String(err)}`,
+        endpoint: EXA_ENDPOINT,
+        ...(err === undefined ? {} : { cause: err }),
+      });
+    }
+
+    if (!response.ok) {
+      // EXIT: 上游非 2xx —— typed http_non_2xx；status + endpoint 进 message，
+      // key / Authorization 由 redactAuthSecrets 兜底脱敏。
+      throw createSearchBackendError({
+        kind: "http_non_2xx",
+        message: `upstream returned status ${response.status}`,
+        endpoint: EXA_ENDPOINT,
+      });
+    }
+
+    let text: string;
+    try {
+      text = await response.text();
+    } catch (err) {
+      throw createSearchBackendError({
+        kind: "parse",
+        message: "failed to read response body",
+        endpoint: EXA_ENDPOINT,
+        ...(err === undefined ? {} : { cause: err }),
+      });
+    }
+
+    try {
+      return JSON.parse(text) as unknown;
+    } catch (err) {
+      throw createSearchBackendError({
+        kind: "parse",
+        message: `malformed JSON response: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+        endpoint: EXA_ENDPOINT,
+        ...(err === undefined ? {} : { cause: err }),
+      });
+    }
+  }
+
+  project(raw: unknown, maxResults: number): SearchResult[] {
+    if (typeof raw !== "object" || raw === null) {
+      throw createSearchBackendError({
+        kind: "parse",
+        message: "expected a JSON object with results[]",
+        endpoint: EXA_ENDPOINT,
+      });
+    }
+    const response = raw as ExaResponseRaw;
+    if (!Array.isArray(response.results)) {
+      throw createSearchBackendError({
+        kind: "parse",
+        message: "expected results[] in upstream response",
+        endpoint: EXA_ENDPOINT,
+      });
+    }
+    const out: SearchResult[] = [];
+    for (const itemRaw of response.results) {
+      if (typeof itemRaw !== "object" || itemRaw === null) {
+        // EXIT: 单条 result 形态畸形 —— 跳过（不抛错），保持与 Bing 路径
+        // 单条解析失败的容错形态一致（Bing 用 `continue` 跳过畸形 li 块）。
+        continue;
+      }
+      const item = itemRaw as ExaResultRaw;
+      const title = typeof item.title === "string" ? item.title : "";
+      const url = typeof item.url === "string" ? item.url : "";
+      const snippet = pickExaSnippet(item);
+      const projected = projectSearchResult({ title, url, snippet });
+      if (!projected) continue;
+      out.push(projected);
+      if (out.length >= maxResults) break;
+    }
+    return out;
+  }
+
+  describe(
+    _raw: unknown,
+    startedAt: number
+  ): { adapter: SearchBackendId; latencyMs: number; requestId?: string } {
+    return {
+      adapter: "exa",
+      latencyMs: Date.now() - startedAt,
+    };
+  }
+}
+
+/**
+ * #826 T4 / spec Assumption 8：`snippet = highlights?.[0]?.text ?? text ?? ""`。
+ * 抽出来便于单测 + 隔离 ExaResultRaw 的窄类型描述。
+ */
+function pickExaSnippet(item: ExaResultRaw): string {
+  const highlights = item.highlights;
+  if (Array.isArray(highlights) && highlights.length > 0) {
+    const first = highlights[0];
+    if (
+      typeof first === "object" &&
+      first !== null &&
+      typeof (first as { text?: unknown }).text === "string"
+    ) {
+      const text = (first as { text: string }).text;
+      if (text.length > 0) return text;
+    }
+  }
+  if (typeof item.text === "string" && item.text.length > 0) return item.text;
+  return "";
+}
+
 /**
  * #826 T2: `BACKENDS` 表 — 按 `id` 持 backend 工厂。T2 仅 bing 真接；
  * tavily/exa/brave 占位 throws。`selectBackend(id)` 返回工厂；handler
  * 调工厂拉实例。
+ *
+ * T4 起：Exa 真 fetch 落地，`BACKENDS.exa` 工厂改为透传 apiKey 给
+ * `ExaBackend` 构造函数。handler 在 `assertBackendConfig` 之后才调
+ * 工厂，故 apiKey 一定 non-empty；构造函数的空串兜底是防绕过 entry
+ * 校验的直调路径（测试 / 装配脚本）留下无 key 实例。
  */
 export const BACKENDS: Record<SearchBackendId, SearchBackendFactory> = {
   bing: ({ guardDeps, endpoint }) => new BingBackend(guardDeps, endpoint),
   tavily: () => placeholderBackend("tavily"),
-  exa: () => placeholderBackend("exa"),
+  exa: ({ apiKey }) => new ExaBackend({ apiKey: apiKey ?? "" }),
   brave: () => placeholderBackend("brave"),
 };

@@ -28,6 +28,7 @@ import {
   BACKENDS,
   BingBackend,
   createWebSearchTool,
+  ExaBackend,
   selectBackend,
   type SearchBackend,
   type SearchBackendId,
@@ -465,58 +466,220 @@ describe("createWebSearchTool — failure paths", () => {
 });
 
 describe("createWebSearchTool — concurrency", () => {
-  it("two parallel handler calls with distinct stubs stay isolated", async () => {
-    const toolA = createWebSearchTool(searchDeps(ddgBody(1)));
-    const fetchB: GuardFetchFn = async () => ({
-      status: 200,
-      contentType: "text/html",
-      body: ddgBody(2),
-    });
-    const toolB = createWebSearchTool({
-      fetch: fetchB,
-      lookup: okLookup,
-      envSearchUrl: "https://html.duckduckgo.com/html/",
-    });
-    const [outA, outB] = await Promise.all([
-      toolA.handler({ query: "a" }),
-      toolB.handler({ query: "b" }),
-    ]);
-    assert.match(outA as string, /Search results for: a/);
-    assert.match(outB as string, /Search results for: b/);
-    assert.match(outB as string, /2\. Title 2/);
-    assert.ok(!(outA as string).includes("2. Title 2"));
-  });
+  /**
+   * #826 T4 acceptance: 并发测试 parametrize over `[bing, exa]`（T5/T6 落地后
+   * 再扩 `[bing, exa, tavily, brave]`）。`resultCache` 是 per-tool 状态而非
+   * per-backend，故同一 tool 实例的 bing / exa 共享同一 cache —— 测试仅切
+   * 后端形态，handler 路径（assertBackendConfig / loadSearchResults /
+   * resultCache.set）一行不动，避免重复 cache 逻辑。
+   */
+  const concurrencyBackendIds = ["bing", "exa"] as const;
 
-  it("deduplicates same-query requests and returns a short cached projection", async () => {
+  it.each(concurrencyBackendIds)(
+    "%s: two parallel handler calls with distinct stubs stay isolated",
+    async (id) => {
+      const { toolA, toolB } = makeConcurrencyToolPair(id);
+      const [outA, outB] = await Promise.all([
+        toolA.handler({ query: "a" }),
+        toolB.handler({ query: "b" }),
+      ]);
+      assert.match(outA as string, /Search results for: a/);
+      assert.match(outB as string, /Search results for: b/);
+      // 不同的 stub 后端：bing 出 `Title N`、exa 出 `Exa Title N`。
+      if (id === "exa") {
+        assert.match(outB as string, /2\. Exa Title 2/);
+        assert.ok(!(outA as string).includes("2. Exa Title 2"));
+      } else {
+        assert.match(outB as string, /2\. Title 2/);
+        assert.ok(!(outA as string).includes("2. Title 2"));
+      }
+    }
+  );
+
+  it.each(concurrencyBackendIds)(
+    "%s: deduplicates same-query requests and returns a short cached projection",
+    async (id) => {
+      const { tool, fetchCount } = makeConcurrencyCachedTool(id);
+      const [first, second] = (await Promise.all([
+        tool.handler({ query: "same query" }),
+        tool.handler({ query: "same query" }),
+      ])) as string[];
+
+      assert.equal(fetchCount(), 1);
+      if (id === "exa") {
+        assert.match(first, /Highlight 1/);
+        assert.match(second, /Exa Title 1/);
+        assert.ok(!second.includes("Highlight 1"));
+      } else {
+        assert.match(first, /Long cached snippet/);
+        assert.match(second, /Cached title/);
+        assert.ok(!second.includes("Long cached snippet"));
+      }
+    }
+  );
+
+  it.each(concurrencyBackendIds)(
+    "%s: does not share cached results between distinct queries",
+    async (id) => {
+      const { tool, fetchCount } = makeConcurrencyDistinctQueriesTool(id);
+      const [alpha, beta] = (await Promise.all([
+        tool.handler({ query: "alpha" }),
+        tool.handler({ query: "beta" }),
+      ])) as string[];
+
+      assert.equal(fetchCount(), 2);
+      assert.match(alpha, /alpha/);
+      assert.ok(!alpha.includes("beta"));
+      assert.match(beta, /beta/);
+      assert.ok(!beta.includes("alpha"));
+    }
+  );
+});
+
+/**
+ * #826 T4 helper: 为并发 describe 构造一对独立 stub tool（Bing / Exa 各一）。
+ * Exa 路径用 backendFactory 注入 stub fetch；Bing 沿用既有 searchDeps。
+ * `resultCache` 是 per-tool 状态 —— 这对 tool 各自一份 cache，互不共享。
+ */
+function makeConcurrencyToolPair(id: "bing" | "exa"): {
+  toolA: ReturnType<typeof createWebSearchTool>;
+  toolB: ReturnType<typeof createWebSearchTool>;
+} {
+  if (id === "bing") {
+    return {
+      toolA: createWebSearchTool(searchDeps(ddgBody(1))),
+      toolB: createWebSearchTool({
+        fetch: (async () => ({
+          status: 200,
+          contentType: "text/html",
+          body: ddgBody(2),
+        })) as unknown as GuardFetchFn,
+        lookup: okLookup,
+        envSearchUrl: "https://html.duckduckgo.com/html/",
+      }),
+    };
+  }
+  // exa: toolA stub 出 1 条、toolB stub 出 2 条 — 让 toolA 的 output 不含
+  // "Exa Title 2"，与 bing 路径下「toolA 出 1 条 / toolB 出 2 条」同形态。
+  const stubFetchA: typeof globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        results: [
+          {
+            title: "Exa Title 1",
+            url: "https://site1.example.com/a",
+            highlights: [{ text: "Highlight 1" }],
+          },
+        ],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  const stubFetchB: typeof globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        results: [
+          {
+            title: "Exa Title 1",
+            url: "https://site1.example.com/a",
+            highlights: [{ text: "Highlight 1" }],
+          },
+          {
+            title: "Exa Title 2",
+            url: "https://site2.example.com/b",
+            highlights: [{ text: "Highlight 2" }],
+          },
+        ],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  const dummyFetch = (() => undefined) as unknown as GuardFetchFn;
+  const lookup: GuardLookupFn = async () => [];
+  // 两个独立 factory —— toolA / toolB 各自的 ExaBackend 实例 + 各自的
+  // resultCache（per-tool 状态；同一 factory 拉两份也是各自独立 cache，
+  // 这里分两份 factory 是为了让 fetch 实例分别绑定 stubFetchA / stubFetchB）。
+  const toolA = createWebSearchTool({
+    fetch: dummyFetch,
+    lookup,
+    backend: "exa",
+    exaApiKey: "fake-exa-key",
+    backendFactory: () =>
+      new ExaBackend({ apiKey: "fake-exa-key", fetch: stubFetchA }),
+  });
+  const toolB = createWebSearchTool({
+    fetch: dummyFetch,
+    lookup,
+    backend: "exa",
+    exaApiKey: "fake-exa-key",
+    backendFactory: () =>
+      new ExaBackend({ apiKey: "fake-exa-key", fetch: stubFetchB }),
+  });
+  return { toolA, toolB };
+}
+
+/**
+ * #826 T4 helper: 「同 query dedup」并发。bing 走 searchDeps 同形态；exa
+ * 走 backendFactory 注入单条 Exa fixture + 计数器。
+ */
+function makeConcurrencyCachedTool(id: "bing" | "exa"): {
+  tool: ReturnType<typeof createWebSearchTool>;
+  fetchCount: () => number;
+} {
+  if (id === "bing") {
     let fetchCount = 0;
     const tool = createWebSearchTool({
-      fetch: async () => {
+      fetch: (async () => {
         fetchCount += 1;
         return {
           status: 200,
           contentType: "text/html",
           body: '<a class="result__a" href="https://site.example.com/page">Cached title</a><div class="result__snippet">Long cached snippet</div>',
         };
-      },
+      }) as unknown as GuardFetchFn,
       lookup: okLookup,
       envSearchUrl: "https://html.duckduckgo.com/html/",
     });
-
-    const [first, second] = (await Promise.all([
-      tool.handler({ query: "same query" }),
-      tool.handler({ query: "same query" }),
-    ])) as string[];
-
-    assert.equal(fetchCount, 1);
-    assert.match(first, /Long cached snippet/);
-    assert.match(second, /Cached title/);
-    assert.ok(!second.includes("Long cached snippet"));
+    return { tool, fetchCount: () => fetchCount };
+  }
+  // exa
+  let exaCalls = 0;
+  const stubFetch: typeof globalThis.fetch = async () => {
+    exaCalls += 1;
+    return new Response(
+      JSON.stringify({
+        results: [
+          {
+            title: "Exa Title 1",
+            url: "https://site.example.com/page",
+            highlights: [{ text: "Highlight 1" }],
+          },
+        ],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  };
+  const tool = createWebSearchTool({
+    fetch: (() => undefined) as unknown as GuardFetchFn,
+    lookup: async () => [],
+    backend: "exa",
+    exaApiKey: "fake-exa-key",
+    backendFactory: () =>
+      new ExaBackend({ apiKey: "fake-exa-key", fetch: stubFetch }),
   });
+  return { tool, fetchCount: () => exaCalls };
+}
 
-  it("does not share cached results between distinct queries", async () => {
+/**
+ * #826 T4 helper: 「不同 query 不共享 cache」并发。同 query dedup helper
+ * 的对偶 —— 两条 query 调出两次 fetch。
+ */
+function makeConcurrencyDistinctQueriesTool(id: "bing" | "exa"): {
+  tool: ReturnType<typeof createWebSearchTool>;
+  fetchCount: () => number;
+} {
+  if (id === "bing") {
     let fetchCount = 0;
     const tool = createWebSearchTool({
-      fetch: async (url) => {
+      fetch: (async (url: string) => {
         fetchCount += 1;
         const query = new URL(url).searchParams.get("q");
         return {
@@ -524,23 +687,43 @@ describe("createWebSearchTool — concurrency", () => {
           contentType: "text/html",
           body: `<a class="result__a" href="https://site.example.com/${query}">${query} title</a>`,
         };
-      },
+      }) as unknown as GuardFetchFn,
       lookup: okLookup,
       envSearchUrl: "https://html.duckduckgo.com/html/",
     });
-
-    const [alpha, beta] = (await Promise.all([
-      tool.handler({ query: "alpha" }),
-      tool.handler({ query: "beta" }),
-    ])) as string[];
-
-    assert.equal(fetchCount, 2);
-    assert.match(alpha, /alpha title/);
-    assert.ok(!alpha.includes("beta title"));
-    assert.match(beta, /beta title/);
-    assert.ok(!beta.includes("alpha title"));
+    return { tool, fetchCount: () => fetchCount };
+  }
+  // exa: 从 fetch URL 的 body 反读 query（post body 难解 —— 用 side table）。
+  let exaCalls = 0;
+  const queriesSeen: string[] = [];
+  const stubFetch: typeof globalThis.fetch = async (_url, init) => {
+    exaCalls += 1;
+    const body = JSON.parse(init?.body as string) as { query?: string };
+    queriesSeen.push(body.query ?? "");
+    return new Response(
+      JSON.stringify({
+        results: [
+          {
+            title: `${body.query} title`,
+            url: `https://site.example.com/${body.query}`,
+            highlights: [{ text: `${body.query} highlight` }],
+          },
+        ],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  };
+  const tool = createWebSearchTool({
+    fetch: (() => undefined) as unknown as GuardFetchFn,
+    lookup: async () => [],
+    backend: "exa",
+    exaApiKey: "fake-exa-key",
+    backendFactory: () =>
+      new ExaBackend({ apiKey: "fake-exa-key", fetch: stubFetch }),
   });
-});
+  return { tool, fetchCount: () => exaCalls };
+  void queriesSeen;
+}
 
 // =============================================================================
 // #826 T2: SearchBackend seam (BACKENDS / selectBackend / BingBackend) tests.
@@ -650,9 +833,12 @@ describe("BingBackend — three-method same-shape (#826 T2)", () => {
   });
 });
 
-describe("Tavily / Exa / Brave placeholders (#826 T2)", () => {
-  it.each(["tavily", "exa", "brave"] as SearchBackendId[])(
-    "%s factory yields a backend that throws typed not_shipped until T4/T5/T6 lands",
+describe("Tavily / Exa / Brave placeholders (#826 T2 → T4 落地 Exa)", () => {
+  // #826 T4: Exa 替换为真 fetch，不再抛 not_shipped。本 describe 仅覆盖
+  // Tavily / Brave 两家占位（T5/T6 落地后此 describe 整体收缩到只剩
+  // Tavily/Brave，T6 落地 Brave 后只剩 Tavily）。
+  it.each(["tavily", "brave"] as SearchBackendId[])(
+    "%s factory yields a backend that throws typed not_shipped until T5/T6 lands",
     (id) => {
       const factory = selectBackend(id);
       const backend: SearchBackend = factory({
@@ -682,6 +868,21 @@ describe("Tavily / Exa / Brave placeholders (#826 T2)", () => {
       }
     }
   );
+
+  // #826 T4: BACKENDS.exa 是真工厂，返回 ExaBackend 实例。
+  it("exa factory now yields a real ExaBackend (T4 lands)", () => {
+    const factory = selectBackend("exa");
+    const backend: SearchBackend = factory({
+      guardDeps: {
+        fetch: (() => undefined) as unknown as GuardFetchFn,
+        lookup: okLookup,
+      },
+      endpoint: "https://example.invalid",
+      apiKey: "fake-exa-key",
+    });
+    assert.equal(backend.id, "exa");
+    assert.ok(backend instanceof ExaBackend);
+  });
 });
 
 describe("createWebSearchTool — backend='bing' byte-identical (#826 T2)", () => {
@@ -1112,7 +1313,9 @@ describe("createWebSearchTool — backend error translation (#826 T3)", () => {
     }
   });
 
-  it.each(["tavily", "exa", "brave"] as SearchBackendId[])(
+  // #826 T4: Exa 已是真 fetch（spec Assumption 1），不再抛 not_shipped；
+  // 该 id 已从「placeholder」退出，本 describe 仅覆盖 Tavily / Brave。
+  it.each(["tavily", "brave"] as SearchBackendId[])(
     "backend=%s placeholder surfaces not_shipped through the handler exit",
     async (id) => {
       const tool = createWebSearchTool({
