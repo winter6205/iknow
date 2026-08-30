@@ -13,8 +13,10 @@ export {
   TransportRetryExhaustedError,
   MaxTurnsExceeded,
   ToolExecutionError,
+  McpLifecycleError,
   MessageCommitError,
 } from "./errors.js";
+export type { McpLifecycleErrorKind } from "./errors.js";
 
 export type {
   AnthropicContentBlock,

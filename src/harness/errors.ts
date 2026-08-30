@@ -81,7 +81,77 @@ export class MaxTurnsExceeded extends Error {
 }
 
 export class ToolExecutionError extends Error {
-  override readonly name = "ToolExecutionError";
+  override readonly name: string = "ToolExecutionError";
+}
+
+/** Stable failure discriminants for MCP root/config/reload lifecycle edges. */
+export type McpLifecycleErrorKind =
+  | "missing_cwd"
+  | "invalid_cwd"
+  | "invalid_config_root"
+  | "root_mismatch"
+  | "config_load_failed"
+  | "reload_failed";
+
+const MCP_LIFECYCLE_DETAIL_FALLBACK = "MCP lifecycle operation failed";
+
+/**
+ * Keep lifecycle diagnostics useful without copying raw transport input into
+ * the product-visible error. In particular, command arguments and
+ * secret-shaped values must not cross this error boundary.
+ */
+function sanitizeMcpLifecycleDetail(detail: string): string {
+  let safeDetail =
+    typeof detail === "string" ? detail.trim() : MCP_LIFECYCLE_DETAIL_FALLBACK;
+
+  if (!safeDetail) return MCP_LIFECYCLE_DETAIL_FALLBACK;
+
+  safeDetail = safeDetail
+    .replace(
+      /\b(?:command|cmd|argv|args)\b\s*[:=]\s*[^\n;]*/gi,
+      "[command redacted]"
+    )
+    .replace(
+      /\b(?:node|npm|npx|bun|deno|bash|sh|python|tsx)\b(?:\s+\S+)+/gi,
+      "[command redacted]"
+    )
+    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(
+      /\b(api[-_ ]?key|token|secret|password|passwd|authorization|credential|cookie)\b\s*[:=]\s*\S+/gi,
+      "$1=[redacted]"
+    )
+    .replace(
+      /\b[A-Z][A-Z0-9_]*(?:_KEY|_TOKEN|_SECRET|_PASSWORD)\s*=\s*\S+/g,
+      "[env]=[redacted]"
+    )
+    .replace(
+      /\bprocess\.env\.[A-Za-z_][A-Za-z0-9_]*\b/g,
+      "process.env.[redacted]"
+    )
+    .replace(/\$[A-Z_][A-Z0-9_]*/g, "$[redacted]");
+
+  return safeDetail.trim() || MCP_LIFECYCLE_DETAIL_FALLBACK;
+}
+
+/**
+ * Typed, stable MCP lifecycle failure. Callers branch on `kind`, while
+ * `message` and `detail` remain non-empty and safe for product surfaces.
+ */
+export class McpLifecycleError extends ToolExecutionError {
+  override readonly name: string = "McpLifecycleError";
+  readonly kind: McpLifecycleErrorKind;
+  readonly detail: string;
+
+  constructor(
+    kind: McpLifecycleErrorKind,
+    detail: string,
+    options?: { readonly cause?: unknown }
+  ) {
+    const safeDetail = sanitizeMcpLifecycleDetail(detail);
+    super(`McpLifecycleError: ${kind} — ${safeDetail}`, options);
+    this.kind = kind;
+    this.detail = safeDetail;
+  }
 }
 
 /**

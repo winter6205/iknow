@@ -1,31 +1,58 @@
 /**
- * T3 (#344) — MCP 两级 config 解析器单测。
+ * T3 (plans/worktree-mcp-rebind-lifecycle.md) — MCP 两级 config 解析器单测。
  *
- * 验收(参见 plans/337-skill-mcp-extension.md §T3 + specs/337 §G2 D1):
- *  1. 两级 union:`~/.iknow/mcp.json`(user) + `<cwd>/.iknow/mcp.json`(project),
- *     同名 server **条目级整体覆盖**(无字段级深合并)。
- *  2. 判别联合 `{type:"stdio"|"remote"}`;`disabled:true` / `enabled:false`
- *     → disabled 态;坏条目跳过 + warn 恰好一行 + 不含 env 值。
- *  3. 不读 `~/.claude.json` / `.kiro/settings/mcp.json`(Never 区)。
+ * 验收:
+ *  1. 两级 union:`~/.iknow/mcp.json`(user) + `<mcpConfigRoot>/.iknow/mcp.json`
+ *     (project),同名 server **条目级整体覆盖**(无字段级深合并)。
+ *  2. 项目级**只**读 `mcpConfigRoot`,绝不读 task worktree / `process.cwd()`。
+ *  3. 文件缺失 → 该级空集;非缺失 IO / JSON / 顶层结构失败 →
+ *     `McpLifecycleError` kind `config_load_failed`。
+ *  4. 判别联合 / disabled / 坏条目 skip+warn / Never 区保持既有合同。
  *
  * 测试只用 tmp fixture(never 真实 ~/.iknow);warn 通过 console.warn spy
  * 收集并断言内容。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  McpLifecycleError,
+  type McpLifecycleErrorKind,
+} from "../../src/harness/errors.ts";
+import {
   loadMcpConfig,
-  type McpServerConfig,
   type McpServerSource,
 } from "../../src/harness/mcp/config.ts";
 
 /** 写一个 fixture 文件,自动 mkdir parent。 */
 async function writeJsonFixture(path: string, body: unknown): Promise<void> {
   await mkdir(join(path, ".."), { recursive: true });
+  if (typeof body === "string") {
+    await writeFile(path, body, "utf8");
+    return;
+  }
   await writeFile(path, JSON.stringify(body), "utf8");
+}
+
+/** 断言异步调用抛出指定 kind 的 typed error。 */
+async function expectLifecycleError(
+  call: () => Promise<unknown>,
+  kind: McpLifecycleErrorKind
+): Promise<McpLifecycleError> {
+  let caught: unknown;
+  try {
+    await call();
+  } catch (err) {
+    caught = err;
+  }
+  expect(caught).toBeInstanceOf(McpLifecycleError);
+  const error = caught as McpLifecycleError;
+  expect(error.kind).toBe(kind);
+  expect(error.message.trim()).not.toBe("");
+  expect(error.detail.trim()).not.toBe("");
+  return error;
 }
 
 /** 收集 console.warn 调用,返回单测结束时的快照。 */
@@ -35,7 +62,6 @@ let warnSpy: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   warnCalls = [];
   warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-  // 把每个 call 的 args 序列化成单行字符串,断言 reason 时只看字符串。
   warnSpy.mockImplementation((...args: unknown[]) => {
     warnCalls.push(args.map((a) => String(a)).join(" "));
   });
@@ -45,10 +71,65 @@ afterEach(() => {
   warnSpy.mockRestore();
 });
 
+describe("loadMcpConfig — mcpConfigRoot-only project path", () => {
+  it("reads project config from mcpConfigRoot, never from task worktree", async () => {
+    const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
+    const productRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-product-"));
+    const taskWorktree = await mkdtemp(join(tmpdir(), "iknow-mcp-task-"));
+    await writeJsonFixture(join(productRoot, ".iknow", "mcp.json"), {
+      mcpServers: {
+        fromProduct: { type: "stdio", command: "product-cmd" },
+      },
+    });
+    await writeJsonFixture(join(taskWorktree, ".iknow", "mcp.json"), {
+      mcpServers: {
+        fromTask: { type: "stdio", command: "task-cmd" },
+      },
+    });
+
+    const result = await loadMcpConfig({
+      home,
+      mcpConfigRoot: productRoot,
+    });
+
+    expect(result.servers.map((s) => s.name)).toEqual(["fromProduct"]);
+    expect(result.servers[0]?.source).toBe<McpServerSource>("project");
+    if (result.servers[0]?.kind !== "stdio") throw new Error("stdio");
+    expect(result.servers[0].entry.command).toBe("product-cmd");
+  });
+
+  it("never calls process.cwd() while loading", async () => {
+    const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
+    await writeJsonFixture(join(mcpConfigRoot, ".iknow", "mcp.json"), {
+      mcpServers: { a: { type: "stdio", command: "x" } },
+    });
+    const cwdSpy = vi.spyOn(process, "cwd");
+
+    await loadMcpConfig({ home, mcpConfigRoot });
+
+    expect(cwdSpy).not.toHaveBeenCalled();
+    cwdSpy.mockRestore();
+  });
+
+  it("missing project file → empty project level, user still loads", async () => {
+    const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
+    await writeJsonFixture(join(home, ".iknow", "mcp.json"), {
+      mcpServers: { onlyUser: { type: "stdio", command: "u" } },
+    });
+
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
+
+    expect(result.servers.map((s) => s.name)).toEqual(["onlyUser"]);
+    expect(warnCalls).toEqual([]);
+  });
+});
+
 describe("loadMcpConfig — 两级 union", () => {
   it("user 级独有 server:返回 + source=user", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
     await writeJsonFixture(join(home, ".iknow", "mcp.json"), {
       mcpServers: {
         onlyUser: {
@@ -59,7 +140,7 @@ describe("loadMcpConfig — 两级 union", () => {
       },
     });
 
-    const result = await loadMcpConfig({ home, cwd });
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
 
     expect(result.servers).toHaveLength(1);
     expect(result.servers[0]?.name).toBe("onlyUser");
@@ -70,8 +151,8 @@ describe("loadMcpConfig — 两级 union", () => {
 
   it("project 级独有 server:并入 + source=project", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
-    await writeJsonFixture(join(cwd, ".iknow", "mcp.json"), {
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
+    await writeJsonFixture(join(mcpConfigRoot, ".iknow", "mcp.json"), {
       mcpServers: {
         onlyProject: {
           type: "remote",
@@ -80,7 +161,7 @@ describe("loadMcpConfig — 两级 union", () => {
       },
     });
 
-    const result = await loadMcpConfig({ home, cwd });
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
 
     expect(result.servers).toHaveLength(1);
     expect(result.servers[0]?.name).toBe("onlyProject");
@@ -90,7 +171,7 @@ describe("loadMcpConfig — 两级 union", () => {
 
   it("同名 server:project 整体替换 user(无字段级深合并)", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
     await writeJsonFixture(join(home, ".iknow", "mcp.json"), {
       mcpServers: {
         shared: {
@@ -101,11 +182,7 @@ describe("loadMcpConfig — 两级 union", () => {
         },
       },
     });
-    // project 改了 command,但**没有** env 字段;期望覆盖后:
-    //  - command = "project-cmd"
-    //  - args = ["--from-project"]
-    //  - env 整段不存在(被整体替换,user 的 env 不会保留)
-    await writeJsonFixture(join(cwd, ".iknow", "mcp.json"), {
+    await writeJsonFixture(join(mcpConfigRoot, ".iknow", "mcp.json"), {
       mcpServers: {
         shared: {
           type: "stdio",
@@ -115,7 +192,7 @@ describe("loadMcpConfig — 两级 union", () => {
       },
     });
 
-    const result = await loadMcpConfig({ home, cwd });
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
 
     expect(result.servers).toHaveLength(1);
     const s = result.servers[0];
@@ -124,18 +201,16 @@ describe("loadMcpConfig — 两级 union", () => {
     expect(s?.kind).toBe("stdio");
     if (s?.kind !== "stdio") throw new Error("expected stdio");
 
-    // 关键断言:user 的 env 整段消失,不是字段 merge
     expect(s.entry.env).toBeUndefined();
     expect(s.entry.command).toBe("project-cmd");
     expect(s.entry.args).toEqual(["--from-project"]);
-    // user 的 USER_ONLY_SECRET 绝不能出现在最终配置里
     expect(JSON.stringify(s)).not.toContain("USER_ONLY_SECRET");
     expect(JSON.stringify(s)).not.toContain("must-not-leak");
   });
 
   it("project + user 混合:输出顺序稳定(按字母序),project 标记覆盖 user", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
     await writeJsonFixture(join(home, ".iknow", "mcp.json"), {
       mcpServers: {
         alpha: { type: "stdio", command: "u-alpha" },
@@ -143,14 +218,14 @@ describe("loadMcpConfig — 两级 union", () => {
         gamma: { type: "stdio", command: "u-gamma" },
       },
     });
-    await writeJsonFixture(join(cwd, ".iknow", "mcp.json"), {
+    await writeJsonFixture(join(mcpConfigRoot, ".iknow", "mcp.json"), {
       mcpServers: {
-        beta: { type: "stdio", command: "p-beta" }, // 覆盖
-        delta: { type: "stdio", command: "p-delta" }, // 新增
+        beta: { type: "stdio", command: "p-beta" },
+        delta: { type: "stdio", command: "p-delta" },
       },
     });
 
-    const result = await loadMcpConfig({ home, cwd });
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
     const byName = new Map(result.servers.map((s) => [s.name, s]));
     expect([...byName.keys()].sort()).toEqual([
       "alpha",
@@ -170,63 +245,63 @@ describe("loadMcpConfig — 两级 union", () => {
 describe("loadMcpConfig — 判别联合 + disabled", () => {
   it("disabled:true → status=disabled", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
     await writeJsonFixture(join(home, ".iknow", "mcp.json"), {
       mcpServers: {
         d: { type: "stdio", command: "x", disabled: true },
       },
     });
 
-    const result = await loadMcpConfig({ home, cwd });
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
     expect(result.servers).toHaveLength(1);
     expect(result.servers[0]?.status).toBe("disabled");
   });
 
   it("enabled:false → status=disabled", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
     await writeJsonFixture(join(home, ".iknow", "mcp.json"), {
       mcpServers: {
         e: { type: "remote", url: "https://x", enabled: false },
       },
     });
 
-    const result = await loadMcpConfig({ home, cwd });
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
     expect(result.servers[0]?.status).toBe("disabled");
   });
 
   it("enabled:true 覆盖 disabled:true → enabled(以 enabled 为权威)", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
     await writeJsonFixture(join(home, ".iknow", "mcp.json"), {
       mcpServers: {
         b: { type: "stdio", command: "x", disabled: true, enabled: true },
       },
     });
 
-    const result = await loadMcpConfig({ home, cwd });
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
     expect(result.servers[0]?.status).toBe("enabled");
   });
 
   it("缺 type 且有 url → 推断 remote", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
     await writeJsonFixture(join(home, ".iknow", "mcp.json"), {
       mcpServers: { r: { url: "https://x" } },
     });
 
-    const result = await loadMcpConfig({ home, cwd });
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
     expect(result.servers[0]?.kind).toBe("remote");
   });
 
   it("缺 type 且无 url → 推断 stdio", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
     await writeJsonFixture(join(home, ".iknow", "mcp.json"), {
       mcpServers: { s: { command: "npx", args: ["x"] } },
     });
 
-    const result = await loadMcpConfig({ home, cwd });
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
     expect(result.servers[0]?.kind).toBe("stdio");
   });
 });
@@ -234,15 +309,15 @@ describe("loadMcpConfig — 判别联合 + disabled", () => {
 describe("loadMcpConfig — 坏条目隔离", () => {
   it("stdio 缺 command → skip + warn 恰好 1 行", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
     await writeJsonFixture(join(home, ".iknow", "mcp.json"), {
       mcpServers: {
-        bad: { type: "stdio", args: ["x"] }, // 缺 command
+        bad: { type: "stdio", args: ["x"] },
         good: { type: "stdio", command: "ok" },
       },
     });
 
-    const result = await loadMcpConfig({ home, cwd });
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
 
     const names = result.servers.map((s) => s.name).sort();
     expect(names).toEqual(["good"]);
@@ -253,12 +328,12 @@ describe("loadMcpConfig — 坏条目隔离", () => {
 
   it("remote 缺 url → skip + warn", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
     await writeJsonFixture(join(home, ".iknow", "mcp.json"), {
       mcpServers: { r: { type: "remote" } },
     });
 
-    const result = await loadMcpConfig({ home, cwd });
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
     expect(result.servers).toHaveLength(0);
     expect(warnCalls).toHaveLength(1);
     expect(warnCalls[0]).toContain("r");
@@ -266,12 +341,12 @@ describe("loadMcpConfig — 坏条目隔离", () => {
 
   it("非法 type → skip + warn(不会强行推断)", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
     await writeJsonFixture(join(home, ".iknow", "mcp.json"), {
       mcpServers: { x: { type: "websocket" } },
     });
 
-    const result = await loadMcpConfig({ home, cwd });
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
     expect(result.servers).toHaveLength(0);
     expect(warnCalls).toHaveLength(1);
     expect(warnCalls[0]).toContain("x");
@@ -279,23 +354,19 @@ describe("loadMcpConfig — 坏条目隔离", () => {
 
   it("SC7:warn 行绝不包含 env 值 / command 值", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
     const SECRET = "sk-very-secret-token-abc-123";
     const CMD = "/usr/local/private/binary";
-    // 故意构造坏条目:无 type + 无 url + 无 command → 走 stdio 推断再校验失败 → skip + warn
-    // 但条目里仍带 env / args,验证 warn 不抄写它们的值。
     await writeJsonFixture(join(home, ".iknow", "mcp.json"), {
       mcpServers: {
         leakProbe: {
           args: ["--secret", SECRET],
           env: { TOKEN: SECRET, PWD_SECRET: SECRET },
-          // 不给 type / command / url → 必然被 skip + warn,
-          // 同时 env 里埋 SECRET 验证 warn 不外泄
         },
       },
     });
 
-    const result = await loadMcpConfig({ home, cwd });
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
 
     expect(result.servers).toHaveLength(0);
     expect(warnCalls).toHaveLength(1);
@@ -308,7 +379,7 @@ describe("loadMcpConfig — 坏条目隔离", () => {
 
   it("warn 一条坏条目一行 — 多条坏条目产生多行 warn", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
     await writeJsonFixture(join(home, ".iknow", "mcp.json"), {
       mcpServers: {
         a: { type: "stdio" },
@@ -318,7 +389,7 @@ describe("loadMcpConfig — 坏条目隔离", () => {
       },
     });
 
-    const result = await loadMcpConfig({ home, cwd });
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
     expect(result.servers.map((s) => s.name)).toEqual(["c"]);
     expect(warnCalls).toHaveLength(3);
     expect(warnCalls.some((w) => w.includes("a"))).toBe(true);
@@ -327,73 +398,96 @@ describe("loadMcpConfig — 坏条目隔离", () => {
   });
 });
 
-describe("loadMcpConfig — 文件缺失 / 损坏 / 形态", () => {
+describe("loadMcpConfig — 文件缺失 / hard fail / 形态", () => {
   it("两个文件都缺失 → 空 config,不抛", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
 
-    const result = await loadMcpConfig({ home, cwd });
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
     expect(result.servers).toEqual([]);
     expect(warnCalls).toEqual([]);
   });
 
-  it("JSON 损坏 → warn,降级为空(不影响其他级)", async () => {
+  it("JSON 损坏 → McpLifecycleError config_load_failed", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
     await writeJsonFixture(join(home, ".iknow", "mcp.json"), "{ not json");
-    await writeJsonFixture(join(cwd, ".iknow", "mcp.json"), {
+    await writeJsonFixture(join(mcpConfigRoot, ".iknow", "mcp.json"), {
       mcpServers: { ok: { type: "stdio", command: "x" } },
     });
 
-    const result = await loadMcpConfig({ home, cwd });
-    expect(result.servers.map((s) => s.name)).toEqual(["ok"]);
-    expect(warnCalls).toHaveLength(1);
-    expect(warnCalls[0]).toContain("[mcp/config]");
+    const err = await expectLifecycleError(
+      () => loadMcpConfig({ home, mcpConfigRoot }),
+      "config_load_failed"
+    );
+    expect(err.detail).not.toMatch(/sk-|secret|TOKEN|password/i);
   });
 
-  it("顶层就是 server map(无 mcpServers 包裹)— 也兼容", async () => {
+  it("顶层是数组(非对象) → McpLifecycleError config_load_failed", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
-    await writeJsonFixture(join(home, ".iknow", "mcp.json"), {
-      direct: { type: "stdio", command: "x" },
-    });
-
-    const result = await loadMcpConfig({ home, cwd });
-    expect(result.servers.map((s) => s.name)).toEqual(["direct"]);
-  });
-
-  it("空对象 → 空 config,不 warn", async () => {
-    const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
-    await writeJsonFixture(join(home, ".iknow", "mcp.json"), {});
-
-    const result = await loadMcpConfig({ home, cwd });
-    expect(result.servers).toEqual([]);
-    expect(warnCalls).toEqual([]);
-  });
-
-  it("顶层是数组(非对象) → warn + 降级空", async () => {
-    const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
     await writeJsonFixture(join(home, ".iknow", "mcp.json"), [
       "not",
       "an",
       "object",
     ]);
 
-    const result = await loadMcpConfig({ home, cwd });
+    await expectLifecycleError(
+      () => loadMcpConfig({ home, mcpConfigRoot }),
+      "config_load_failed"
+    );
+  });
+
+  it("非缺失 IO 错误 → McpLifecycleError config_load_failed", async () => {
+    const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
+    const projectPath = join(mcpConfigRoot, ".iknow", "mcp.json");
+    await writeJsonFixture(projectPath, {
+      mcpServers: { a: { type: "stdio", command: "x" } },
+    });
+    // 去掉读权限 → EACCES(若平台允许;否则 skip 本断言)。
+    await chmod(projectPath, 0);
+    try {
+      await expectLifecycleError(
+        () => loadMcpConfig({ home, mcpConfigRoot }),
+        "config_load_failed"
+      );
+    } finally {
+      await chmod(projectPath, 0o644);
+      await rm(home, { recursive: true, force: true }).catch(() => {});
+      await rm(mcpConfigRoot, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  it("顶层就是 server map(无 mcpServers 包裹)— 也兼容", async () => {
+    const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
+    await writeJsonFixture(join(home, ".iknow", "mcp.json"), {
+      direct: { type: "stdio", command: "x" },
+    });
+
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
+    expect(result.servers.map((s) => s.name)).toEqual(["direct"]);
+  });
+
+  it("空对象 → 空 config,不 warn", async () => {
+    const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
+    await writeJsonFixture(join(home, ".iknow", "mcp.json"), {});
+
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
     expect(result.servers).toEqual([]);
-    expect(warnCalls.length).toBeGreaterThanOrEqual(1);
+    expect(warnCalls).toEqual([]);
   });
 
   it("server 条目不是对象(string) → skip + warn", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
     await writeJsonFixture(join(home, ".iknow", "mcp.json"), {
       mcpServers: { weird: "not-an-object" },
     });
 
-    const result = await loadMcpConfig({ home, cwd });
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
     expect(result.servers).toEqual([]);
     expect(warnCalls).toHaveLength(1);
     expect(warnCalls[0]).toContain("weird");
@@ -403,7 +497,7 @@ describe("loadMcpConfig — 文件缺失 / 损坏 / 形态", () => {
 describe("loadMcpConfig — 返回值类型稳定", () => {
   it("返回的 entry 是判别联合:stdio 一定有 command,remote 一定有 url", async () => {
     const home = await mkdtemp(join(tmpdir(), "iknow-mcp-home-"));
-    const cwd = await mkdtemp(join(tmpdir(), "iknow-mcp-cwd-"));
+    const mcpConfigRoot = await mkdtemp(join(tmpdir(), "iknow-mcp-root-"));
     await writeJsonFixture(join(home, ".iknow", "mcp.json"), {
       mcpServers: {
         s: { type: "stdio", command: "c", args: ["a"] },
@@ -411,12 +505,11 @@ describe("loadMcpConfig — 返回值类型稳定", () => {
       },
     });
 
-    const result = await loadMcpConfig({ home, cwd });
+    const result = await loadMcpConfig({ home, mcpConfigRoot });
     const s = result.servers.find((x) => x.name === "s");
     const r = result.servers.find((x) => x.name === "r");
     expect(s?.kind).toBe("stdio");
     expect(r?.kind).toBe("remote");
-    // 类型守门 — 编译期不报错,运行期 narrow
     if (s?.kind === "stdio") {
       expect(s.entry.command).toBe("c");
       expect(s.entry.args).toEqual(["a"]);

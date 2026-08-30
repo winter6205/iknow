@@ -301,7 +301,8 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       sessionGrants,
       // ADR-0019 (T2): workspaceRoot 透传到 build-engine identity /
       // memory / skill seam。
-      ...(workspaceRoot ? { workspaceRoot } : {}),
+      // T6:启动 workspace 即稳定 productRoot —— rebuild 只换 workspaceRoot。
+      ...(workspaceRoot ? { workspaceRoot, productRoot: workspaceRoot } : {}),
       // Review High-2 / High-1 (2026-08-29):启动 settings 对象 + isolation
       // host 缝透传（build-engine 据此装配 mutate 门禁）。
       settings: startupSettings,
@@ -352,17 +353,20 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // SessionStore 落点与展示层漂移(显式 workspaceRoot 时尤甚)。
       dataDir,
       workspaceRoot,
+      // T6:稳定 productRoot = 启动 workspace；bridge 单向透传给 hub。
+      ...(workspaceRoot ? { productRoot: workspaceRoot } : {}),
       deps,
       subagentManager,
       // Review High-1 (2026-08-29):注入 deps 的启动根 + per-root 重建缝。
-      // rebind 后会话根离开 cwd → ensureDeps 经此缝以同一 depsOpts（同一
-      // 启动 settings,硬要求 9）在新根重跑 buildTuiDeps,下一回合跑在
-      // worktree 根引擎上。onExtensions 回调同步覆盖 tuiExtensions —— 展示面
-      // 跟随活跃引擎。
-      engineRoot: cwd,
+      // rebind 后会话根离开启动根 → ensureDeps 经此缝以同一 depsOpts（同一
+      // 启动 settings + 稳定 productRoot,硬要求 9 / T6）在新根重跑
+      // buildTuiDeps,下一回合跑在 worktree 根引擎上。onExtensions 回调同步
+      // 覆盖 tuiExtensions —— 展示面跟随活跃引擎。
+      engineRoot: workspaceRoot,
       buildEngine: async (root) => {
         // buildTuiDeps 透出平铺 deps（与 initial 构建同型）；hub 的
         // buildEngine 缝要求 { deps, ...句柄 } 形态 —— 在此重新收拢。
+        // T6:productRoot 经 depsOpts 保留；只覆盖 cwd / workspaceRoot。
         const {
           subagentManager: sm,
           shutdown: sd,

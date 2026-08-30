@@ -319,6 +319,9 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     provision: ({ conversationId, root: sessionRoot }) =>
       worktreeProvisioner.provision({ conversationId, root: sessionRoot }),
   };
+  // T6:启动 workspace 即稳定 productRoot —— rebind 只换 workspaceRoot，
+  // MCP 项目配置根跨 rebuild 保持本值。
+  const productRoot = workspaceRoot;
   // 初始装配与 rebind 重建共用的装配 opts（同一 askUser/holder/settings）。
   const chatEngineOpts = {
     askUser: createTtyAskUser(),
@@ -335,6 +338,7 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     subagentDiagnosticsDir: tracePath,
     // review-fix (M1/M5): `!== undefined` 守门 — 空字符串透传触 empty_explicit。
     workspaceRoot,
+    productRoot,
     // Review High-2 / High-1 (2026-08-29):启动 settings 对象 + isolation 缝。
     settings: startupSettings,
     worktreeIsolation,
@@ -418,16 +422,18 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // Review High-1 (2026-08-29):rebind 后 per-root 引擎重建缝 —— 用同一
     // chatEngineOpts + 同一启动 settings 重跑 buildHarnessEngine，根切到
     // task worktree（cwd / workspaceRoot 锚随改绑移动，ADR-0037 §4）。
+    // T6:productRoot 经 chatEngineOpts 原样保留；只换 workspaceRoot/cwd。
     // 收敛修复 (2026-08-29):返回完整句柄 bundle (RebuiltChatEngine, 对齐
     // TUI buildEngine 缝形状) —— deps 之外的 shutdown / subagentManager /
     // graphAssembly / autoMemory / overlayMemoryPrefetch 由 refresh rewire
     // 进 ctx;只回 deps 会把重建引擎句柄丢在缝里 (split-brain + 泄漏)。
-    engineRoot: process.cwd(),
+    engineRoot: productRoot,
     rebuildDeps: async (root: string) => {
       const rebuilt = await buildHarnessEngine(bundle, {
         ...chatEngineOpts,
         cwd: root,
         workspaceRoot: root,
+        productRoot,
       });
       return {
         deps: {

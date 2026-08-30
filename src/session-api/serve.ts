@@ -106,6 +106,16 @@ export async function startSessionServe(
   // cwd defaults to process.cwd() → the store picks its project namespace.
   const store = new SessionStore(dataDir);
 
+  // T6:稳定 productRoot = 启动 bind root（显式 workspace 或 default workspace）。
+  // rebind 后 task worktree 只换 session workspaceRoot，MCP config 仍读本根。
+  let productRoot: string;
+  if (workspaceRoot !== undefined) {
+    productRoot = workspaceRoot;
+  } else {
+    await ensureDefaultWorkspace();
+    productRoot = resolveSessionDefaultWorkspace();
+  }
+
   // W2: serve 从 env IKNOW_PERMISSION_MODE 读初始 mode(可选)。holder 提为
   // 局部变量,hub 与 http 层共用同一实例 —— web Shift+Tab 经
   // POST /api/v1/permission-mode 运行时切换(与 TUI 同 SSOT nextShiftTabMode)。
@@ -144,9 +154,10 @@ export async function startSessionServe(
     permissionMode: permissionModeCtx,
     graphMode: graphModeCtx,
     ...opts?.hubOptions,
-    // review-fix (M1 / H1): serve 入口已解析的 workspaceRoot 透传给 hub →
-    // 走 build-engine 时 bash fence 对齐 identity seed / dataDir 锚点。
-    ...(workspaceRoot ? { workspaceRoot } : {}),
+    // review-fix (M1 / H1) + T6:启动 bind root 透传 —— bash fence / identity
+    // 与稳定 productRoot（MCP config）同源；rebind 不改 productRoot。
+    workspaceRoot: productRoot,
+    productRoot,
     // serve-workspace T4 (ADR-0023): recents/trust 名单落 home —— 显式
     // `--workspace-root` / `IKNOW_WORKSPACE_ROOT` 预绑时以 confirmTrust=true
     // 写入 `<homedir>/.iknow/workspaces.json`(规则 3:显式指定 = 显式信任)。
@@ -159,23 +170,10 @@ export async function startSessionServe(
       : {}),
   });
 
-  // serve-workspace T4 (ADR-0023): flag/env 解析出 absolute root → 启动即预绑
-  // 到 hub(boundRoot = resolved,recents 写入)。用户显式 `--workspace-root` /
-  // `IKNOW_WORKSPACE_ROOT` = 显式信任,必须传 confirmTrust:true(未被 recents
-  // 收录的新绝对路径才能过信任门)。
-  //
-  // T9a (serve-workspace-folder-browse): flag/env 缺席时,auto-bind 到
-  // `<homedir()>/.iknow/default` —— 进站默认新会话,无需 SPA 选 workspace。
-  // 用户偏好(显式 flag/env)仍优先 —— 该分支在前;此处只覆盖 implicit-default
-  // 路径。confirmTrust:true 因为 default 是 hard-coded path,等同显式信任。
-  if (workspaceRoot !== undefined) {
-    await hub.bindWorkspace(workspaceRoot, { confirmTrust: true });
-  } else {
-    await ensureDefaultWorkspace();
-    await hub.bindWorkspace(resolveSessionDefaultWorkspace(), {
-      confirmTrust: true,
-    });
-  }
+  // serve-workspace T4 / T9a:启动即预绑到 productRoot（显式 flag/env 或
+  // default workspace）。confirmTrust:true —— 显式指定 / hard-coded default
+  // 均等同显式信任。
+  await hub.bindWorkspace(productRoot, { confirmTrust: true });
 
   const port =
     opts?.port ??

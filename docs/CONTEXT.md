@@ -317,6 +317,12 @@ _Avoid_: 默认 ON；把 git worktree 混成 serve 主根或 `workspaceRoot` 多
 **session worktree rebind**: worktree isolation mode ON 下首次 mutate 成功后，把**当前会话**生效的根锚（cwd / `workspaceRoot` 取值）切到本会话 task worktree 的动作；只影响本会话——不 checkout 其它会话 / 其它 worktree 的 HEAD，push / 开 PR 不拖动主仓或其它 worktree 当前分支。同会话并发首次 mutate 建树幂等（一棵树、一个 task 分支）。ADR-0037。
 _Avoid_: 改绑波及其它会话；把 rebind 当 serve 主根重绑（ADR-0023 unbound / recents 语义不变）；让 rebind 触发 settings 重载；把改绑后的根错当成 product workspace 多根
 
+**productRoot**: 每个产品入口首次装配确定的稳定主 checkout root；session worktree rebind 后保持不变，不随当前 task worktree 改写。
+_Avoid_: workspaceRoot；task worktree root；product workspace 多根
+
+**mcpConfigRoot**: 由 productRoot 派生、跨 session worktree rebind 保持稳定的 MCP 配置根；只读取 `<mcpConfigRoot>/.iknow/mcp.json`，不切换到 task worktree。
+_Avoid_: workspaceRoot；task worktree；process.cwd()
+
 ## Relationships
 
 - **run() messages -> adapter streaming arm -> interpretMessage**: harness LLM path（流事件以 `HarnessStreamEvent` 经 `onStream` 暴露）

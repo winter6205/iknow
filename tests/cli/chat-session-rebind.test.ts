@@ -450,3 +450,37 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
     expect(sessionSrc.includes("engineShutdown: opts.engineShutdown")).toBe(true);
   });
 });
+
+describe("T6 — chat stable productRoot threading (worktree-mcp-rebind-lifecycle)", () => {
+  it("cli.ts：初次装配捕获 productRoot；rebuildDeps 只换 workspaceRoot/cwd，保留 productRoot", () => {
+    const src = readFileSync(
+      join(import.meta.dirname, "..", "..", "src", "cli.ts"),
+      "utf8"
+    );
+    // 启动 workspace 成为稳定 productRoot（= workspaceRoot at first assembly）
+    expect(src).toMatch(/productRoot\s*=\s*workspaceRoot/);
+    expect(src).toMatch(/productRoot(?:\s*,|\s*:)/);
+    // rebuild 闭包不得把 productRoot 改成 task root
+    const rebuildIdx = src.indexOf("rebuildDeps:");
+    assert.ok(rebuildIdx >= 0, "rebuildDeps 缝必须存在");
+    const rebuildBlock = src.slice(rebuildIdx, rebuildIdx + 900);
+    expect(rebuildBlock).toMatch(/workspaceRoot:\s*root/);
+    expect(rebuildBlock).toMatch(/cwd:\s*root/);
+    // productRoot 原样透传（变量引用），不得写成 productRoot: root
+    expect(rebuildBlock).not.toMatch(/productRoot:\s*root\b/);
+    expect(rebuildBlock).toMatch(/productRoot(?:\s*,|\s*\})/);
+    // engineRoot 与启动 product/workspace 对齐（非裸 process.cwd()）
+    expect(src).toMatch(/engineRoot:\s*(?:productRoot|workspaceRoot)\b/);
+  });
+
+  it("cli/runtime.ts：productRoot 单向透传到 buildHarnessEngine，不从 process.cwd() 重算", () => {
+    const src = readFileSync(
+      join(import.meta.dirname, "..", "..", "src", "cli", "runtime.ts"),
+      "utf8"
+    );
+    expect(src).toMatch(/productRoot\?:\s*string/);
+    expect(src).toMatch(/opts\.productRoot\s*\?\s*\{\s*productRoot:\s*opts\.productRoot/);
+    // wrapper 不得用 process.cwd() 派生 productRoot
+    expect(src).not.toMatch(/productRoot:\s*process\.cwd\(\)/);
+  });
+});

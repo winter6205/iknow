@@ -299,10 +299,14 @@ describe("buildHarnessEngine (SSOT passthrough)", () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-build-engine-root-"));
     const outside = await mkdtemp(join(tmpdir(), "iknow-build-engine-out-"));
     try {
+      // T5:显式 sandboxRoot 必须与 resolveMcpRoots 的 workspaceRoot 一致；
+      // 同根透传后 ACI FS fence 仍以该 root 拒越界路径。
       const { deps } = await buildHarnessEngine({
         env: makeEnv("sk-test-passthrough-2"),
         askUser: createNoAskUser(),
         sandboxRoot: root,
+        workspaceRoot: root,
+        productRoot: root,
       });
 
       const [result] = await deps.executor.executeAll([
