@@ -253,7 +253,7 @@ describe("per-turn mtime refresh", () => {
     assert.ok(a !== undefined && a.includes("STABLE"));
   });
 
-  it("refresh propagates across both project AGENTS.md and project rules", async () => {
+  it("refresh propagates across project AGENTS.md and project rules (#841 T6: rules stay manifest-only)", async () => {
     const p = await setupProject({
       agentsBody: "PROJ-A",
       projectRuleBody: "PROJ-RULE-A",
@@ -262,7 +262,12 @@ describe("per-turn mtime refresh", () => {
     const initial = await resolver();
     assert.ok(initial !== undefined);
     assert.ok(initial.includes("PROJ-A"));
-    assert.ok(initial.includes("PROJ-RULE-A"));
+    // #841 T6: the parent opener lists the rule path, never the body.
+    assert.ok(
+      initial.includes(join(p.cwd, ".iknow", "rules", "proj-rule.md")),
+      "rule path listed in the manifest"
+    );
+    assert.ok(!initial.includes("PROJ-RULE-A"), "rule body absent");
 
     await tick();
     await writeFile(join(p.cwd, "AGENTS.md"), "PROJ-B", "utf8");
@@ -270,9 +275,15 @@ describe("per-turn mtime refresh", () => {
     await writeFile(rulePath, "PROJ-RULE-B", "utf8");
     const refreshed = await resolver();
     assert.ok(refreshed !== undefined);
-    assert.ok(refreshed.includes("PROJ-B"));
-    assert.ok(refreshed.includes("PROJ-RULE-B"));
-    assert.ok(!refreshed.includes("PROJ-RULE-A"));
+    assert.ok(refreshed.includes("PROJ-B"), "AGENTS.md refresh propagates");
+    assert.ok(
+      refreshed.includes(rulePath),
+      "rule path still listed after refresh"
+    );
+    assert.ok(
+      !refreshed.includes("PROJ-RULE-A") && !refreshed.includes("PROJ-RULE-B"),
+      "no rule body leaks before or after the refresh"
+    );
   });
 });
 

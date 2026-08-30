@@ -69,7 +69,7 @@ describe("createSystemResolver", () => {
     expect(await resolver()).toBe(first);
   });
 
-  it("tracks rule files independently", async () => {
+  it("tracks rule files independently (body edit triggers re-assembly, text stays manifest-only)", async () => {
     const ctx = await makeContext();
     const projectRules = join(ctx.cwd, ".iknow", "rules");
     const userRules = join(ctx.userHome, ".iknow", "rules");
@@ -84,12 +84,19 @@ describe("createSystemResolver", () => {
       writeFile(userRule, "user-rule-v1"),
     ]);
     const resolver = createSystemResolver(ctx);
-    await resolver();
+    const initial = await resolver();
+    // #841 T6: parent opener lists rule paths, never bodies.
+    expect(initial).toContain(userRule);
+    expect(initial).toContain(projectRule);
+    expect(initial).not.toContain("user-rule-v1");
+    expect(spiedAssemble).toHaveBeenCalledTimes(1);
     await tick();
     await writeFile(userRule, "user-rule-v2");
     const refreshed = await resolver();
-    expect(refreshed).toContain("user-rule-v2");
-    expect(refreshed).toContain("project-rule-v1");
+    // The manifest text is unchanged by a body edit (paths are stable), but
+    // the mtime change must still have triggered a re-assembly.
+    expect(refreshed).toBe(initial);
+    expect(spiedAssemble).toHaveBeenCalledTimes(2);
   });
 
   it("treats a deleted tracked file as absent without throwing", async () => {
