@@ -653,7 +653,14 @@ export async function buildHarnessEngine(
     // registry，handler 闭包绑定 sandboxRoot = 会话当前根。OFF / worker /
     // hub-less 入口不透传 → 工具不入注册表（Gate 3 镜像过滤）。
     ...(isolationEnabled && isolationHost
-      ? { worktreeProvision: isolationHost.provision }
+      ? {
+          worktreeProvision: isolationHost.provision,
+          // T7:enter 缝在场时透传（与 provision 同一 isolationEnabled 判定源）；
+          // 缺席（TUI 只接 provision）→ enter-task-worktree 不入注册表。
+          ...(isolationHost.worktreeEnter
+            ? { worktreeEnter: isolationHost.worktreeEnter }
+            : {}),
+        }
       : {}),
   });
   // #337:动态 registry 包装 —— 让 inner executor 能解析 registerExternal

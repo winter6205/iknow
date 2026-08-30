@@ -52,6 +52,12 @@ const EXPECTED_TOOLS: readonly string[] = ACI_TOOLSET_NAMES;
 const fakeWorktreeProvision = async (): Promise<string> =>
   "/tmp/root/.iknow/worktrees/conv";
 
+/** T7:worktree isolation host enter 缝 fake（仅用于装配期断言
+ * enter-task-worktree 在场；handler 路径单测在
+ * tests/harness/aci/tools/enter-task-worktree.test.ts）。 */
+const fakeWorktreeEnter = async (): Promise<string> =>
+  "/tmp/root/.iknow/worktrees/conv-target";
+
 /** #356 T4/T5 fake subagentManager（仅用于 createDefaultAciRegistry 装配期断言
  * spawn_subagent / subagent_result 在场；handler 路径单测在
  * tests/subagent/spawn-subagent.test.ts 与 tests/subagent/subagent-result.test.ts）。 */
@@ -111,8 +117,10 @@ describe("createDefaultAciRegistry — 正常路径", () => {
       backgroundManager: fakeBackgroundManager,
       // D-α T3:graph overlay 在场 → run_graph 入注册表。
       graphAssembly: { enabled: () => true },
-      // T4:worktreeProvision 在场 → create-task-worktree 入注册表(全量 33 件)。
+      // T4:worktreeProvision 在场 → create-task-worktree 入注册表。
+      // T7:worktreeEnter 在场 → enter-task-worktree 入注册表(全量 34 件)。
       worktreeProvision: fakeWorktreeProvision,
+      worktreeEnter: fakeWorktreeEnter,
     });
     const names = reg.inner.list().map((def) => def.name);
     expect(names).toEqual([...EXPECTED_TOOLS]);
@@ -160,7 +168,9 @@ describe("createDefaultAciRegistry — 正常路径", () => {
           // D-α T3:graphAssembly + subagentManager 皆缺席 → run_graph 缺席。
           n !== "run_graph" &&
           // T4:worktreeProvision 缺席 → create-task-worktree 缺席。
-          n !== "create-task-worktree"
+          n !== "create-task-worktree" &&
+          // T7:worktreeEnter 缺席 → enter-task-worktree 缺席。
+          n !== "enter-task-worktree"
       )
     );
     expect(reg.catalog.get("tool_search")).toBeDefined();
@@ -182,8 +192,8 @@ describe("createDefaultAciRegistry — 正常路径", () => {
 
   // #502 T4 全条件装配:ACI_TOOLSET_NAMES 长度 30(28 基线 + bash_output +
   // bash_stop),顺序 append-only 不重排既有。
-  it("Gate 3:ACI_TOOLSET_NAMES 长度 33,前 8 原序 + memory_* + tool_search + 10 LSP + skill + skill_search + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop + query_trace + create-task-worktree", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(33);
+  it("Gate 3:ACI_TOOLSET_NAMES 长度 34,前 8 原序 + memory_* + tool_search + 10 LSP + skill + skill_search + spawn_subagent + subagent_result + todo_write + list_mcp_resources + read_mcp_resource + bash_output + bash_stop + query_trace + create-task-worktree + enter-task-worktree", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(34);
     // 前 8 件原序不变(append-only 纪律)。
     expect(ACI_TOOLSET_NAMES.slice(0, 8)).toEqual([
       "bash",
@@ -236,6 +246,8 @@ describe("createDefaultAciRegistry — 正常路径", () => {
     expect(ACI_TOOLSET_NAMES.slice(31, 32)).toEqual(["query_trace"]);
     // T4 create-task-worktree append-only:32→33,末位 1 件,不重排既有 32 件。
     expect(ACI_TOOLSET_NAMES.slice(32, 33)).toEqual(["create-task-worktree"]);
+    // T7 enter-task-worktree append-only:33→34,末位 1 件,不重排既有 33 件。
+    expect(ACI_TOOLSET_NAMES.slice(33, 34)).toEqual(["enter-task-worktree"]);
   });
 });
 
@@ -376,7 +388,8 @@ function expectedSurface(
     // D-α T3:graphAssembly + subagentManager 同门,任一缺席 → run_graph 缺席。
     ...(opts.graph && opts.subagent ? [] : ["run_graph"]),
     // T4:worktreeProvision 缺席 → create-task-worktree 缺席。
-    ...(opts.wt ? [] : ["create-task-worktree"]),
+    // T7:worktreeEnter 缺席 → enter-task-worktree 缺席（与 wt 同门装配）。
+    ...(opts.wt ? [] : ["create-task-worktree", "enter-task-worktree"]),
   ];
   return [...ACI_TOOLSET_NAMES].filter(
     (n) => !conditionallyAbsent.includes(n) && !deny.includes(n)
@@ -487,8 +500,10 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
       backgroundManager: fakeBackgroundManager,
       // D-α T3:graph overlay 在场 → run_graph 入注册表(全量 31 件)。
       graphAssembly: { enabled: () => true },
-      // T4:worktreeProvision 在场 → create-task-worktree 入注册表(全量 33 件)。
+      // T4:worktreeProvision 在场 → create-task-worktree 入注册表。
+      // T7:worktreeEnter 在场 → enter-task-worktree 入注册表(全量 34 件)。
       worktreeProvision: fakeWorktreeProvision,
+      worktreeEnter: fakeWorktreeEnter,
     });
     const b = createDefaultAciRegistry({
       env: makeWebEnv(),
@@ -501,8 +516,10 @@ describe("createDefaultAciRegistry — 并发闭包隔离", () => {
       backgroundManager: fakeBackgroundManager,
       // D-α T3:graph overlay 在场 → run_graph 入注册表(全量 31 件)。
       graphAssembly: { enabled: () => true },
-      // T4:worktreeProvision 在场 → create-task-worktree 入注册表(全量 33 件)。
+      // T4:worktreeProvision 在场 → create-task-worktree 入注册表。
+      // T7:worktreeEnter 在场 → enter-task-worktree 入注册表(全量 34 件)。
       worktreeProvision: fakeWorktreeProvision,
+      worktreeEnter: fakeWorktreeEnter,
     });
     expect(a).not.toBe(b);
     expect(a.catalog).not.toBe(b.catalog);
@@ -562,8 +579,10 @@ describe("createDefaultAciRegistry — #440 T1 todoDir seam", () => {
       backgroundManager: fakeBackgroundManager,
       // D-α T3:graph overlay 在场 → run_graph 入注册表(全量 31 件)。
       graphAssembly: { enabled: () => true },
-      // T4:worktreeProvision 在场 → create-task-worktree 入注册表(全量 33 件)。
+      // T4:worktreeProvision 在场 → create-task-worktree 入注册表。
+      // T7:worktreeEnter 在场 → enter-task-worktree 入注册表(全量 34 件)。
       worktreeProvision: fakeWorktreeProvision,
+      worktreeEnter: fakeWorktreeEnter,
     });
     // #502 T4 全条件装配:6 个条件化 seam 全在场 → 30 件全装配(28 基线 +
     // bash_output + bash_stop)。

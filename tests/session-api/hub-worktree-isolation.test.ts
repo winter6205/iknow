@@ -123,6 +123,23 @@ async function runMutate(
   return result;
 }
 
+/** Extract the text payload of an `ok` tool result (ACI tool success). */
+function resultText(result: ToolExecutionResult): string {
+  if (result.kind !== "ok") return result.message ?? "";
+  const payload = (result as { payload?: unknown }).payload;
+  if (typeof payload === "string") return payload;
+  if (Array.isArray(payload)) {
+    return payload
+      .map((b) =>
+        typeof b === "object" && b !== null && "text" in b
+          ? String((b as { text: unknown }).text)
+          : ""
+      )
+      .join("");
+  }
+  return "";
+}
+
 async function persistDirtyRoot(
   hub: SessionHub,
   conversationId: string
@@ -256,7 +273,7 @@ describe("worktree isolation wiring (T4 — passthrough)", () => {
     expect(git(repo, "status", "--porcelain")).toBe("");
   });
 
-  it("session on ANOTHER conversation's task worktree: fail-closed typed block, foreign tree untouched, no new worktree", async () => {
+  it("T7 adoption: a session durably anchored at ANOTHER conversation's task worktree (the explicit-enter record) mutates there; no new worktree, main repo zero-write", async () => {
     await setSettingsIsolation(true);
     const repo = makeGitRepo();
     const { hub, conversationId: c1 } = await makeHubWithSession(repo);
@@ -267,23 +284,23 @@ describe("worktree isolation wiring (T4 — passthrough)", () => {
     const wt1 = await hub.provisionWorktree({ conversationId: c1, root: repo });
     await persistDirtyRoot(hub, c1);
     const worktreesBefore = git(repo, "worktree", "list");
-    const head1 = git(wt1, "rev-parse", "HEAD").trim();
 
-    // c2's root anchored at c1's tree (foreign task worktree)
+    // c2 durably anchored at c1's tree (the persisted workspaceRoot is the
+    // explicit-enter record — only a tool success + session save writes it)
     const c2file = await store.load(c2);
     await store.save({ id: c2, file: { ...c2file, workspaceRoot: wt1 } });
 
-    const foreignDeps = await ensure(hub, wt1);
-    const result = await runMutate(foreignDeps, c2);
+    const enteredDeps = await ensure(hub, wt1);
+    const result = await runMutate(enteredDeps, c2);
 
-    expect(result.kind).toBe("execution_failed");
-    expect(result.message).toContain("[worktree_isolation]");
-    expect(result.message).toContain("kind=foreign_worktree");
-    // foreign tree untouched: no write landed, no HEAD move, no nested tree
-    expect(existsSync(join(wt1, "hello.txt"))).toBe(false);
-    expect(git(wt1, "rev-parse", "HEAD").trim()).toBe(head1);
+    // admitted: the durable anchor authorizes the mutate on the entered tree
+    expect(result.kind).toBe("ok");
+    expect(existsSync(join(wt1, "hello.txt"))).toBe(true);
+    // no new worktree, main repo zero-write
     expect(git(repo, "worktree", "list")).toBe(worktreesBefore);
-    // c2's session file untouched (no rebind of a foreign root)
+    expect(existsSync(join(repo, "hello.txt"))).toBe(false);
+    expect(git(repo, "status", "--porcelain")).toBe("");
+    // the adoption did not rewrite c2's session file
     expect((await store.load(c2)).workspaceRoot).toBe(wt1);
   });
 
@@ -296,7 +313,11 @@ describe("worktree isolation wiring (T4 — passthrough)", () => {
     const { hub, conversationId } = await makeHubWithSession(repo);
     const file = await store.load(conversationId);
     await store.save({ id: conversationId, file: { ...file, workspaceRoot: manualWt } });
-    const before = readdirSync(manualWt);
+    // Engine assembly lazily materializes the per-root state anchor
+    // (`<root>/.iknow`, gitignored) via a fire-and-forget async — it races
+    // with the readdir compares below. The contract under test is zero
+    // WORKSPACE pollution, so the state anchor is filtered from both sides.
+    const before = readdirSync(manualWt).filter((n) => n !== ".iknow");
 
     const deps = await ensure(hub, manualWt);
     const result = await runMutate(deps, conversationId);
@@ -306,7 +327,7 @@ describe("worktree isolation wiring (T4 — passthrough)", () => {
     expect(result.kind).toBe("execution_failed");
     expect(result.message).toContain("[worktree_isolation]");
     expect(result.message).toContain("create-task-worktree ACI tool");
-    expect(readdirSync(manualWt)).toEqual(before); // zero pollution of the foreign checkout
+    expect(readdirSync(manualWt).filter((n) => n !== ".iknow")).toEqual(before); // zero pollution of the foreign checkout
     expect(git(repo, "status", "--porcelain")).toBe("");
 
     // and if the model calls the create-worktree tool there anyway, the host
@@ -314,7 +335,7 @@ describe("worktree isolation wiring (T4 — passthrough)", () => {
     await expect(
       hub.provisionWorktree({ conversationId, root: manualWt })
     ).rejects.toMatchObject({ kind: "foreign_worktree" });
-    expect(readdirSync(manualWt)).toEqual(before);
+    expect(readdirSync(manualWt).filter((n) => n !== ".iknow")).toEqual(before);
   });
 });
 
@@ -401,11 +422,11 @@ describe("review High-2 — hub reuses the startup settings object across rebind
     await persistDirtyRoot(hub, c1);
     expect(wt1).toBe(join(repo, ".iknow", "worktrees", c1));
 
-    // rebuilt (worktree-rooted) engine: still armed — a foreign conversation
-    // anchored at wt1 is fail-closed instead of silently written
+    // rebuilt (worktree-rooted) engine: still armed — a conversation WITHOUT
+    // a durable anchor at wt1 (c2's workspaceRoot is still the main repo) is
+    // fail-closed foreign_worktree on the rebuilt engine instead of silently
+    // written; the gate did not reload the OFF-on-disk settings
     const { conversationId: c2 } = await makeHubWithSession(repo);
-    const c2file = await store.load(c2);
-    await store.save({ id: c2, file: { ...c2file, workspaceRoot: wt1 } });
     const wtDeps = await ensure(hub, wt1);
     const result2 = await runMutate(wtDeps, c2);
     expect(result2.kind).toBe("execution_failed");
@@ -963,6 +984,11 @@ type HubPrivate = {
     currentRoot: string;
     provisionedRoot: string;
   }) => void;
+  enterWorktree: (ctx: {
+    conversationId?: string;
+    root: string;
+    targetConversationId: string;
+  }) => Promise<string>;
   conditionalSave: (opts: {
     conversationId: string;
     session: SessionFileV1;
@@ -1243,5 +1269,125 @@ describe("worktree isolation wiring (T4 — create-task-worktree ACI tool)", () 
     expect(git(repo, "branch", "--list", `iknow/task-${conversationId}`)).toBe("");
     expect((await store.load(conversationId)).workspaceRoot).toBe(repo);
     expect(git(repo, "status", "--porcelain")).toBe("");
+  });
+});
+
+// -- T7: enter-task-worktree (explicit adoption of an existing task worktree) --
+
+/**
+ * T7 (plans/worktree-isolation-model-provision.md) - the enter face of the
+ * tool contract: session B, anchored at the MAIN repo, calls the
+ * enter-task-worktree ACI tool through its engine executor (target = the
+ * tree conversation A owns) and lands ON A's tree. Authorization lives in
+ * the durable record, not in-process: after the tool succeeds and the
+ * conditional save persists workspaceRoot = wtA, the hub's provision seam
+ * adopts B on wtA's engine (mutates are ADMITTED on another conversation's
+ * tree - the explicit-enter contract). The fail-closed counter-example:
+ * without that persisted anchor (fresh hub, session still anchored at the
+ * main repo), the foreign root still rejects with typed foreign_worktree.
+ */
+describe("worktree isolation wiring (T7 - enter-task-worktree)", () => {
+  it("session B enters session A's task worktree via the ACI tool: ok, zero main-repo writes, worktree list unchanged, rebind persisted", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId: convA } = await makeHubWithSession(repo);
+    const { conversationId: convB } = await makeHubWithSession(repo);
+
+    // (a) A provisions its own tree (the T4 flow) and persists the rebind
+    const wtA = await privateHub(hub).provisionWorktree({
+      conversationId: convA,
+      root: repo,
+    });
+    await persistDirtyRoot(hub, convA);
+    await ensure(hub, wtA);
+    const worktreesBefore = git(repo, "worktree", "list");
+
+    // (b) B (anchored at the main repo) calls the enter-task-worktree tool
+    // through its engine executor, exactly as the model would
+    const bDeps = await ensure(hub, repo);
+    const [enterResult] = await bDeps.executor.executeAll(
+      [
+        {
+          id: "enter-1",
+          name: "enter-task-worktree",
+          input: { conversationId: convA },
+        },
+      ],
+      undefined,
+      undefined,
+      convB
+    );
+    expect(enterResult.kind).toBe("ok");
+    expect(resultText(enterResult)).toContain(wtA);
+    // main repo zero-write, worktree list unchanged (enter creates no tree)
+    expect(existsSync(join(repo, "hello.txt"))).toBe(false);
+    expect(git(repo, "worktree", "list")).toBe(worktreesBefore);
+    expect(git(repo, "status", "--porcelain")).toBe("");
+
+    // (c) the rebind persists through the dirty-root conditional save
+    await persistDirtyRoot(hub, convB);
+    expect((await store.load(convB)).workspaceRoot).toBe(wtA);
+
+    // (d) B's next turn runs on the entered tree's engine - the mutate is
+    // ADMITTED on another conversation's tree (core assertion of this ticket)
+    const enteredDeps = await ensure(hub, wtA);
+    const mutateResult = await runMutate(enteredDeps, convB);
+    expect(mutateResult.kind).toBe("ok");
+    expect(existsSync(join(wtA, "hello.txt"))).toBe(true);
+    // main repo still zero-write
+    expect(existsSync(join(repo, "hello.txt"))).toBe(false);
+    expect(git(repo, "status", "--porcelain")).toBe("");
+  });
+
+  it("fail-closed: without the persisted enter anchor (fresh hub, session still at the main repo) a mutate on the foreign tree engine is typed foreign_worktree", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId: convA } = await makeHubWithSession(repo);
+    const { conversationId: convB } = await makeHubWithSession(repo);
+
+    const wtA = await privateHub(hub).provisionWorktree({
+      conversationId: convA,
+      root: repo,
+    });
+    await persistDirtyRoot(hub, convA);
+
+    // fresh hub = fresh provisioner + no persisted anchor for B (its
+    // workspaceRoot is still the main repo) - the same fail-closed contract
+    // as before T7 for foreign roots
+    const hub2 = new SessionHub({ store, askUser: createNoAskUser() });
+    await hub2.bindWorkspace(repo);
+    const foreignDeps = await ensure(hub2, wtA);
+    const result = await runMutate(foreignDeps, convB);
+
+    expect(result.kind).toBe("execution_failed");
+    expect(result.message).toContain("[worktree_isolation]");
+    expect(result.message).toContain("kind=foreign_worktree");
+    // foreign tree untouched
+    expect(existsSync(join(wtA, "hello.txt"))).toBe(false);
+  });
+
+  it("tool boundary: entering a conversation that owns no tree -> kind=worktree_not_found, no rebind", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId: convB } = await makeHubWithSession(repo);
+    const { conversationId: convGhost } = await makeHubWithSession(repo);
+
+    const deps = await ensure(hub, repo);
+    const [enterResult] = await deps.executor.executeAll(
+      [
+        {
+          id: "enter-404",
+          name: "enter-task-worktree",
+          input: { conversationId: convGhost },
+        },
+      ],
+      undefined,
+      undefined,
+      convB
+    );
+
+    expect(enterResult.kind).toBe("execution_failed");
+    expect(enterResult.message).toContain("kind=worktree_not_found");
+    expect((await store.load(convB)).workspaceRoot).toBe(repo);
   });
 });

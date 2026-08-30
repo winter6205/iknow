@@ -52,6 +52,10 @@ import {
   createCreateTaskWorktreeTool,
   type CreateTaskWorktreeProvisionFn,
 } from "./create-task-worktree.js";
+import {
+  createEnterTaskWorktreeTool,
+  type WorktreeEnterToolDeps,
+} from "./enter-task-worktree.js";
 import { join } from "node:path";
 
 /**
@@ -150,6 +154,12 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   // `CREATE_TASK_WORKTREE_TOOL_HINT`（"create-task-worktree ACI tool"）
   // 逐字对齐 —— 被拦 mutate 的 block 文案指向的工具名必须真实存在。
   "create-task-worktree",
+  // T7 (plans/worktree-isolation-model-provision.md) enter-task-worktree
+  // append-only：33→34。条件化装配（worktreeEnter host 缝缺席时不入注册表
+  // —— TUI 只接 provision / worker 装配路径 / 无 hub 的入口；Gate 3 在
+  // toolsetNames 端镜像过滤，见工厂尾部注释）。工具只收 owner conversationId，
+  // 目标路径由 SSOT `taskWorktreePath` 派生，不收自由路径。
+  "enter-task-worktree",
 ] as const);
 
 /**
@@ -228,6 +238,13 @@ export interface CreateDefaultAciRegistryOptions {
    * filter, keeping OFF byte-identical to today's tool surface.
    */
   readonly worktreeProvision?: CreateTaskWorktreeProvisionFn;
+  /**
+   * T7 / ADR-0037 (amended 2026-08-30): explicit-enter host seam. Present →
+   * the `enter-task-worktree` ACI tool enters the registry; absent (TUI
+   * provision-only wiring, worker assembly, hub-less inlets) → excluded via
+   * the Gate 3 mirror filter.
+   */
+  readonly worktreeEnter?: WorktreeEnterToolDeps["worktreeEnter"];
 }
 
 /**
@@ -304,6 +321,10 @@ export function createDefaultAciRegistry(
   // ask / hub-less 入口不传 → create-task-worktree 不入注册表。Gate 3
   // 镜像过滤见下。
   const worktreeProvision = opts.worktreeProvision;
+  // T7:enter-task-worktree 的条件化装配开关（host enter 缝）。build-engine
+  // 在 isolation ON 且 host 注入 enter 缝时透传；TUI（只接 provision）/
+  // worker / hub-less 入口不传 → 工具不入注册表。Gate 3 镜像过滤见下。
+  const worktreeEnter = opts.worktreeEnter;
 
   // holder:tool_search 自引用的惰性解引用点(装配完成前闭包返回 undefined,
   // tool-search.ts:resolveRegistry 触发 ToolExecutionError 兜底)。
@@ -453,6 +474,18 @@ export function createDefaultAciRegistry(
             }),
         }
       : {}),
+    // T7 enter-task-worktree（条件化装配：worktreeEnter host 缝缺席时不入
+    // 注册表）。handler 闭包绑定本引擎的 sandboxRoot = 会话当前根（主仓）；
+    // 树校验 + 改绑副作用全部委托 host enter 缝。
+    ...(worktreeEnter
+      ? {
+          "enter-task-worktree": () =>
+            createEnterTaskWorktreeTool({
+              worktreeEnter,
+              root: sandboxRoot,
+            }),
+        }
+      : {}),
   };
 
   // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。
@@ -472,7 +505,10 @@ export function createDefaultAciRegistry(
     ...(backgroundManager ? [] : ["bash_output", "bash_stop"]),
     ...(graphAssembly && subagentManager ? [] : ["run_graph"]),
     // T4：host 缝缺席（开关 OFF / worker / hub-less 入口）→ 建树工具不入注册表。
+    // T7：enter 缝缺席（TUI provision-only / worker / hub-less 入口）→
+    // enter 工具不入注册表。
     ...(worktreeProvision ? [] : ["create-task-worktree"]),
+    ...(worktreeEnter ? [] : ["enter-task-worktree"]),
     ...(disallowedTools ?? []),
   ];
   const toolsetNames = (ACI_TOOLSET_NAMES as ReadonlyArray<string>).filter(

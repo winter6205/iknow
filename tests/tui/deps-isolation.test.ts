@@ -124,6 +124,25 @@ describe("buildTuiDeps — worktree isolation host seam (review High-1)", () => 
     expect(provisionCalls).toBe(0);
     expect(result.message ?? "").not.toContain("[worktree_isolation]");
   });
+
+  test("T7/T8：TUI 只接 provision 缝（worktreeEnter / worktreeExit 缺席）→ 两个 enter/exit 工具名不入注册表", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-tui-deps-iso-surface-"));
+    roots.push(root);
+    const deps = await buildTuiDeps(makeBundle(), {
+      askUser: createNoAskUser(),
+      userHome: join(root, "home"),
+      cwd: root,
+      settings: { isolation: { worktreeOnMutate: true } } as IknowSettings,
+      worktreeIsolation: {
+        provision: async ({ conversationId, root: sessionRoot }) =>
+          join(sessionRoot, ".iknow", "worktrees", conversationId ?? "x"),
+      },
+    });
+
+    const names = deps.registry.list().map((d) => d.name);
+    expect(names).not.toContain("enter-task-worktree");
+    expect(names).not.toContain("exit-task-worktree");
+  });
 });
 
 describe("buildTuiDeps — T6 productRoot passthrough (worktree-mcp-rebind-lifecycle)", () => {

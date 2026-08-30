@@ -41,9 +41,11 @@ import {
   taskWorktreeOwnerOf,
   WorktreeIsolationError,
   defaultGitRunner,
+  SAFE_CONVERSATION_ID_RE,
 } from "../harness/isolation/worktree-gate.js";
 import type {
   GitRunner,
+  GitResult,
   WorktreeProvisionContext,
 } from "../harness/isolation/worktree-gate.js";
 import { errorMessage } from "../harness/errors.js";
@@ -80,8 +82,32 @@ export interface TaskWorktreeProvisioner {
    * `ctx.root` is another conversation's task worktree or an unrelated
    * linked worktree, it rejects with a typed `foreign_worktree`
    * (fail-closed; ADR-0037 defines only the main repo and the own task tree).
+   *
+   * T7 adoption anchor: `anchor.sessionWorkspaceRoot` (the caller's PERSISTED
+   * workspaceRoot, loaded by the hub) equal to `ctx.root` on a
+   * task-worktree-shaped root admits the mutate even when the tree belongs
+   * to ANOTHER conversation — that durable record is written only by an
+   * explicit enter/create tool success, so it is the restart-safe explicit
+   * opt-in. Non-shaped roots (manual worktrees) are never adopted.
    */
-  provision(ctx: WorktreeProvisionContext): Promise<string>;
+  provision(
+    ctx: WorktreeProvisionContext,
+    anchor?: WorktreeProvisionAnchor
+  ): Promise<string>;
+  /**
+   * T7 explicit enter: move a session anchored at the MAIN repo onto an
+   * EXISTING task worktree of THIS repository (deterministic path SSOT,
+   * owner = `targetConversationId`). Creates no tree and touches no foreign
+   * HEAD — the only effect is the caller's own rebind (store-mode persists
+   * workspaceRoot; hub-mode returns the root for the dirty-root
+   * conditional-save protocol). Idempotent per conversation.
+   *
+   * Fail-closed: missing target → `worktree_not_found`; target that is not a
+   * linked checkout or belongs to another repository → `foreign_worktree`;
+   * caller already inside a worktree → `foreign_worktree` (exit first);
+   * unsafe ids → `rebind_failed` before any fs/git access.
+   */
+  enter(req: WorktreeEnterRequest): Promise<string>;
   /**
    * True when `root` is a task worktree this provisioner created (or
    * recognized as a conversation's own tree — T4 passthrough registration).
@@ -90,6 +116,25 @@ export interface TaskWorktreeProvisioner {
    * `provision` itself, never this predicate.
    */
   isTaskWorktreeRoot(root: string): boolean;
+}
+
+/**
+ * T7 adoption input: the caller's persisted workspace root (loaded from the
+ * session file by the hub before invoking `provision`). Undefined / absent
+ * = no durable record → the T4 fail-closed contract stands unchanged.
+ */
+export interface WorktreeProvisionAnchor {
+  readonly sessionWorkspaceRoot?: string;
+}
+
+/** T7 enter request (mirrors the harness `WorktreeEnterContext` SSOT). */
+export interface WorktreeEnterRequest {
+  /** Calling conversation (the session that moves onto the target tree). */
+  readonly conversationId?: string;
+  /** The caller's current root — the main repo (path SSOT base). */
+  readonly root: string;
+  /** Owner conversation id whose task worktree to enter. */
+  readonly targetConversationId: string;
 }
 
 export function taskWorktreePath(repoRoot: string, conversationId: string): string {
@@ -129,9 +174,12 @@ export { taskWorktreeOwnerOf };
  * Contract: first char alphanumeric; remainder alphanumeric / `_` / `-`.
  * This rejects path traversal (`..`, `a/b`), leading dashes/dots (option or
  * glob ambiguity in `git worktree add -b`), whitespace / shell metacharacters,
- * and empty strings.
+ * and empty strings. The regex SSOT lives in
+ * `harness/isolation/worktree-gate.ts` (the T7 enter-task-worktree tool
+ * validates its model-supplied id against the same contract); re-exported
+ * here for existing importers.
  */
-const SAFE_CONVERSATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+export { SAFE_CONVERSATION_ID_RE };
 
 /** True when `root` is a LINKED git worktree checkout (`.git` is a file, not a dir). */
 function isLinkedWorktreeRoot(root: string): boolean {
@@ -149,12 +197,48 @@ export function createTaskWorktreeProvisioner(
 ): TaskWorktreeProvisioner {
   const runGit = opts.runGit ?? defaultGitRunner;
   const now = opts.now ?? (() => new Date().toISOString());
-  /** conversationId → worktree path (provisioned set). */
+  /** conversationId → worktree path (provisioned / entered set). */
   const bound = new Map<string, string>();
-  /** All task worktree roots created here (per-root engine flag source). */
+  /** All task worktree roots created or entered here (per-root engine flag source). */
   const taskRoots = new Set<string>();
 
-  async function provision(ctx: WorktreeProvisionContext): Promise<string> {
+  /**
+   * Absolute git common dir of `cwd` (`<repoRoot>/.git` for a repo and all
+   * its linked worktrees). Used by `enter` to prove the target tree belongs
+   * to the SAME repository as the caller's root, regardless of where the
+   * checkout physically lives.
+   */
+  async function gitCommonDir(
+    cwd: string,
+    failureKind: "not_a_git_repo" | "foreign_worktree"
+  ): Promise<string> {
+    let res: GitResult;
+    try {
+      res = await runGit(
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd
+      );
+    } catch (err) {
+      throw new WorktreeIsolationError(
+        "git_unavailable",
+        `git is not available (spawn failed): ${errorMessage(err)}`
+      );
+    }
+    if (res.code !== 0) {
+      throw new WorktreeIsolationError(
+        failureKind,
+        `worktree isolation: ${cwd} is not a usable git repository${
+          res.stderr.trim().length > 0 ? ` — ${res.stderr.trim()}` : ""
+        }`
+      );
+    }
+    return res.stdout.trim();
+  }
+
+  async function provision(
+    ctx: WorktreeProvisionContext,
+    anchor?: WorktreeProvisionAnchor
+  ): Promise<string> {
     const conversationId = ctx.conversationId;
     if (conversationId === undefined || conversationId.length === 0) {
       throw new WorktreeIsolationError(
@@ -175,6 +259,22 @@ export function createTaskWorktreeProvisioner(
     const existing = bound.get(conversationId);
     if (existing !== undefined) {
       return existing; // idempotent rebind (no second `worktree add`)
+    }
+
+    // T7 — adoption via the durable enter record: a session whose PERSISTED
+    // workspaceRoot equals this engine's root has explicitly entered (or
+    // created) this tree — the anchor is written only by a tool success plus
+    // a session save, so it is the restart-safe explicit opt-in. Admit the
+    // mutate even when the tree belongs to ANOTHER conversation, but ONLY on
+    // task-worktree-shaped roots: an unrelated (manual) worktree persisted as
+    // workspaceRoot is never adopted and stays fail-closed foreign_worktree.
+    if (
+      anchor?.sessionWorkspaceRoot === ctx.root &&
+      taskWorktreeOwnerOf(ctx.root) !== undefined
+    ) {
+      bound.set(conversationId, ctx.root);
+      taskRoots.add(ctx.root);
+      return ctx.root;
     }
 
     // T4 — passthrough anchored to THIS conversation's own task worktree
@@ -256,8 +356,109 @@ export function createTaskWorktreeProvisioner(
     return worktreePath;
   }
 
+  async function enter(req: WorktreeEnterRequest): Promise<string> {
+    const conversationId = req.conversationId;
+    if (conversationId === undefined || conversationId.length === 0) {
+      throw new WorktreeIsolationError(
+        "rebind_failed",
+        "worktree isolation: the enter call carried no conversation id; cannot rebind a session root without one"
+      );
+    }
+    // Segment-safety gate BEFORE path construction — both ids are joined into
+    // the target path verbatim (Review Medium-1 discipline).
+    if (!SAFE_CONVERSATION_ID_RE.test(conversationId)) {
+      throw new WorktreeIsolationError(
+        "rebind_failed",
+        `worktree isolation: conversation id ${JSON.stringify(conversationId)} is not a safe path/branch segment (expected ^[A-Za-z0-9][A-Za-z0-9_-]*$); refusing to rebind with it`
+      );
+    }
+    if (!SAFE_CONVERSATION_ID_RE.test(req.targetConversationId)) {
+      throw new WorktreeIsolationError(
+        "rebind_failed",
+        `worktree isolation: target conversation id ${JSON.stringify(req.targetConversationId)} is not a safe path/branch segment (expected ^[A-Za-z0-9][A-Za-z0-9_-]*$); refusing to resolve a task worktree with it`
+      );
+    }
+
+    // Enter only from the main repo: a caller already inside a linked
+    // worktree must exit first — this structurally prevents nested task
+    // trees (`<tree>/.iknow/worktrees/<id>`) and chained rebinds.
+    if (isLinkedWorktreeRoot(req.root)) {
+      throw new WorktreeIsolationError(
+        "foreign_worktree",
+        `worktree isolation: session ${conversationId} is currently inside a git worktree (${req.root}); return to the main repo root (exit-task-worktree) before entering another task worktree`
+      );
+    }
+
+    // Path SSOT: the tool takes the owner's conversation id, never a
+    // free-form path — the target is always `<root>/.iknow/worktrees/<id>`.
+    const target = taskWorktreePath(req.root, req.targetConversationId);
+    const current = bound.get(conversationId);
+    if (current === target) {
+      return target; // idempotent re-enter (zero writes)
+    }
+
+    // Target validation, cheapest checks first:
+    //   1. exists on disk → `worktree_not_found`
+    //   2. is a LINKED checkout (`.git` is a file) → `foreign_worktree`
+    //   3. belongs to the SAME repository as the caller's root (common-dir
+    //      comparison) → `foreign_worktree` on mismatch
+    if (!existsSync(target)) {
+      throw new WorktreeIsolationError(
+        "worktree_not_found",
+        `worktree isolation: no task worktree at ${target} (conversation '${req.targetConversationId}' owns no tree here); check the conversation id, or create the tree first with the create-task-worktree tool`
+      );
+    }
+    if (!isLinkedWorktreeRoot(target)) {
+      throw new WorktreeIsolationError(
+        "foreign_worktree",
+        `worktree isolation: ${target} exists but is not a linked git worktree checkout; refusing to rebind a session root onto it`
+      );
+    }
+    const repoCommon = await gitCommonDir(req.root, "not_a_git_repo");
+    const targetCommon = await gitCommonDir(target, "foreign_worktree");
+    if (targetCommon !== repoCommon) {
+      throw new WorktreeIsolationError(
+        "foreign_worktree",
+        `worktree isolation: task worktree ${target} belongs to a different repository (${targetCommon}) than the session root (${repoCommon}); a foreign tree is never entered or rebound`
+      );
+    }
+
+    // Legacy standalone persistence hook (mirrors `provision`): callers
+    // outside SessionHub rebind the session file here; SessionHub omits the
+    // store and persists the returned root through conditionalSave.
+    if (opts.store !== undefined) {
+      let file: SessionFileV1;
+      try {
+        file = await opts.store.load(conversationId);
+      } catch (err) {
+        throw new WorktreeIsolationError(
+          "rebind_failed",
+          `worktree isolation: cannot load session ${conversationId} for enter rebind: ${errorMessage(err)}`
+        );
+      }
+      const updated: SessionFileV1 = {
+        ...file,
+        workspaceRoot: target,
+        updatedAt: now(),
+      };
+      try {
+        await opts.store.save({ id: conversationId, file: updated });
+      } catch (err) {
+        throw new WorktreeIsolationError(
+          "rebind_failed",
+          `worktree isolation: cannot persist enter rebind for session ${conversationId}: ${errorMessage(err)}`
+        );
+      }
+    }
+
+    bound.set(conversationId, target);
+    taskRoots.add(target);
+    return target;
+  }
+
   return Object.freeze({
     provision,
+    enter,
     isTaskWorktreeRoot: (root: string) => taskRoots.has(root),
   });
 }

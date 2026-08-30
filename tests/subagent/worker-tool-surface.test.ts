@@ -95,8 +95,9 @@ const TEST_ENV: IknowEnv = {
  * （todoDir 缺席），list_mcp_resources / read_mcp_resource（mcpManager 缺席），
  * bash_output / bash_stop（backgroundManager 缺席,#502 T3 同门），
  * run_graph（graphAssembly 缺席），create-task-worktree（T4:worktreeProvision
- * host 缝缺席 —— worker 装配路径不注入建树缝）。
- * 全量 33 - 缺席 11 = 22，与 ACI_TOOLSET_NAMES 在 worker 装配路径下
+ * host 缝缺席 —— worker 装配路径不注入建树缝），enter-task-worktree（T7:
+ * worktreeEnter host 缝缺席 —— worker 装配路径不注入 enter 缝）。
+ * 全量 34 - 缺席 12 = 22，与 ACI_TOOLSET_NAMES 在 worker 装配路径下
  * 实际生效集合一致。
  */
 const WORKER_BASE_SURFACE: ReadonlyArray<string> = Object.freeze([
@@ -464,3 +465,25 @@ async function buildWorkerWithFullSkillCatalog(): Promise<LoopEngineDeps> {
   };
   return createWorkerDeps(opts);
 }
+
+// ---------------------------------------------------------------------------
+// T7 (plans/worktree-isolation-model-provision.md) — worktree enter 缝缺席
+// 钉子：worker 装配路径从不注入 worktreeEnter host 缝（子代理不进入他人
+// task worktree / 不改绑父会话根），新工具名必须缺席。
+// ---------------------------------------------------------------------------
+
+describe("worker tool surface: T7 worktree enter 缝缺席", () => {
+  it("worker 装配路径不传 worktreeEnter → 双面均不含 enter-task-worktree", async () => {
+    const deps = await buildWorkerWithFullSkillCatalog();
+    const innerNames = deps.registry.list().map((d) => d.name);
+    assert.ok(
+      !innerNames.includes("enter-task-worktree"),
+      `worker surface should exclude enter-task-worktree, got: ${innerNames.join(", ")}`
+    );
+    if (!deps.promptTools) {
+      return;
+    }
+    const promptNames = deps.promptTools().map((d) => d.name);
+    assert.ok(!promptNames.includes("enter-task-worktree"));
+  });
+});

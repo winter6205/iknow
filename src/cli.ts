@@ -318,6 +318,18 @@ async function runChat(parsed: ParsedCli): Promise<void> {
   const worktreeIsolation: WorktreeIsolationHostOpts = {
     provision: ({ conversationId, root: sessionRoot }) =>
       worktreeProvisioner.provision({ conversationId, root: sessionRoot }),
+    // T7:chat 入口同样接 enter 缝 —— 会话显式进入本仓已存在的 task worktree
+    // （含他人树）；provisioner 的 store 模式在此直接持久化 workspaceRoot。
+    worktreeEnter: ({
+      conversationId,
+      root: sessionRoot,
+      targetConversationId,
+    }) =>
+      worktreeProvisioner.enter({
+        conversationId,
+        root: sessionRoot,
+        targetConversationId,
+      }),
   };
   // T6:启动 workspace 即稳定 productRoot —— rebind 只换 workspaceRoot，
   // MCP 项目配置根跨 rebuild 保持本值。

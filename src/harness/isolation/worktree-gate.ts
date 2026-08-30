@@ -75,7 +75,14 @@ export type WorktreeIsolationErrorKind =
    * main repo and the session's own task tree, so a foreign root never gets a
    * nested tree and never sees a write.
    */
-  | "foreign_worktree";
+  | "foreign_worktree"
+  /**
+   * T7 enter-task-worktree: the requested target task worktree does not
+   * exist (no directory at `<repoRoot>/.iknow/worktrees/<conversationId>`).
+   * Distinct from `foreign_worktree` so the model can tell "wrong id / tree
+   * never created" apart from "tree exists but belongs elsewhere".
+   */
+  | "worktree_not_found";
 
 /**
  * Typed, non-empty, visible error for every gate failure. Mirrors the
@@ -276,6 +283,16 @@ export function taskWorktreeOwnerOf(root: string): string | undefined {
 
 // -- gate executor ----------------------------------------------------------------
 
+/**
+ * Segment-safety gate for conversation ids that reach a worktree path or
+ * branch name (SSOT; session-api worktree-rebind re-exports it). Contract:
+ * first char alphanumeric; remainder alphanumeric / `_` / `-` — rejects path
+ * traversal (`..`, `a/b`), leading dashes/dots, whitespace / shell
+ * metacharacters, and empty strings. The T7 enter-task-worktree tool runs
+ * this against its model-supplied `conversationId` BEFORE any host call.
+ */
+export const SAFE_CONVERSATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
 export interface WorktreeProvisionContext {
   /** Owning conversation (from the executor call chain); undefined = anonymous. */
   readonly conversationId?: string;
@@ -292,6 +309,31 @@ export interface WorktreeProvisionContext {
 export type WorktreeProvisionFn = (ctx: WorktreeProvisionContext) => Promise<string>;
 
 /**
+ * T7 explicit-enter seam context: a session (conversationId) anchored at the
+ * main repo (root) adopts the EXISTING task worktree owned by
+ * `targetConversationId`. The target path is SSOT-derived
+ * (`taskWorktreePath(root, targetConversationId)`) — the tool takes the
+ * owner's id, never a free-form path.
+ */
+export interface WorktreeEnterContext {
+  /** Calling conversation (the session that moves onto the target tree). */
+  readonly conversationId?: string;
+  /** The caller's current engine root — the main repo (path SSOT base). */
+  readonly root: string;
+  /** Owner conversation id whose task worktree to enter. */
+  readonly targetConversationId: string;
+}
+
+/**
+ * T7 host enter seam shape (SSOT): resolves with the entered task worktree
+ * path; rejects with typed `WorktreeIsolationError`
+ * (worktree_not_found / foreign_worktree / rebind_failed / git_unavailable).
+ * Shared by the host opts, the `enter-task-worktree` ACI tool deps, and the
+ * session-api provisioner — no per-module structural copies.
+ */
+export type WorktreeEnterFn = (ctx: WorktreeEnterContext) => Promise<string>;
+
+/**
  * Host-facing options the assembly (build-engine) threads through: the
  * switch itself is read once at the startup load point
  * (`resolveWorktreeOnMutate(settings)`), the host supplies only the provision
@@ -301,6 +343,15 @@ export type WorktreeProvisionFn = (ctx: WorktreeProvisionContext) => Promise<str
  */
 export interface WorktreeIsolationHostOpts {
   readonly provision: WorktreeProvisionFn;
+  /**
+   * T7 explicit-enter seam (session-api hub / CLI provisioner). Present → the
+   * `enter-task-worktree` ACI tool enters the registry (alongside
+   * `create-task-worktree`); absent (worker assembly, hub-less inlets) →
+   * excluded via the Gate 3 mirror filter. The gate itself never calls it —
+   * enter is a model-invoked tool, and its durable rebind record is what the
+   * `provision` adjudication later adopts.
+   */
+  readonly worktreeEnter?: WorktreeEnterFn;
 }
 
 export interface WorktreeIsolationGateOpts {
