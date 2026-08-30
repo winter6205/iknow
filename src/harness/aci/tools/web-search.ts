@@ -59,6 +59,14 @@ export interface WebSearchToolDeps {
   readonly lookup?: GuardLookupFn;
   readonly envSearchUrl?: string | undefined;
   readonly proxyUrl?: string;
+  /**
+   * #826 T2: 选定的 web_search 后端 id（默认 `"bing"` — 与 v0 字节级一致）。
+   * T2 阶段 factory 仅识别 `"bing"`；`"tavily"` / `"exa"` / `"brave"` 仍
+   * 走 BACKENDS 表的占位实现（throws "backend not implemented yet —
+   * see T4/T5/T6"），handler 不会真调到。T3 起加 schema reject 与 typed
+   * `SearchBackendError`。
+   */
+  readonly backend?: SearchBackendId;
 }
 
 interface SearchInput {
@@ -66,6 +74,58 @@ interface SearchInput {
   readonly maxResults: number;
   readonly endpoint: string;
 }
+
+/**
+ * #826 T2 (spec Assumption 7): web_search 后端 id 闭集。
+ * 装配路径（registry → buildHarnessEngine）经 T1 env loader 解析
+ * `IKNOW_WEB_SEARCH_BACKEND`（不合法 → typed `WebEnvConfigError`，
+ * **不**回退默认）；T3 起 factory 边界加 schema reject + 默认到 bing。
+ */
+export type SearchBackendId = "bing" | "tavily" | "exa" | "brave";
+
+/**
+ * #826 T2 (spec Assumption 7): SearchBackend 三方法同形接口。
+ *   - `fetchResults` 发 HTTP 拿上游响应（raw shape：Bing 是 HTML 字符串，
+ *     Tavily/Exa/Brave T4-T6 是 JSON）。
+ *   - `project` 把上游 raw 投到 Bing-shape `SearchResult[]`（spec Assumption 8）。
+ *   - `describe` 出 observability 侧通道 meta（`adapter` / `latencyMs` /
+ *     `requestId?`），T12 envelope spec 未落地前不消费。
+ */
+export interface SearchBackend {
+  readonly id: SearchBackendId;
+  fetchResults(args: {
+    query: string;
+    maxResults: number;
+    /** executor 透传的取消信号；T2 阶段 ctx?.signal 可能未传，故 `signal?`。 */
+    signal?: AbortSignal;
+  }): Promise<unknown>;
+  /** Project the raw upstream payload into Bing-shape `SearchResult[]`. */
+  project(raw: unknown, maxResults: number): SearchResult[];
+  describe(
+    raw: unknown,
+    startedAt: number
+  ): { adapter: SearchBackendId; latencyMs: number; requestId?: string };
+}
+
+/**
+ * #826 T2: backend 实例化需要的 per-call 上下文（guardDeps 装配期绑定；
+ * endpoint 由 `compileSearchInput` 在 handler 内解析 — 含 SSRF 验证、
+ * search_url 覆写、envSearchUrl fallback）。
+ */
+export interface SearchBackendCtorOptions {
+  readonly guardDeps: GuardDeps;
+  readonly endpoint: string;
+}
+
+/**
+ * #826 T2: 后端工厂签名。`BACKENDS` 表按 `id` 持工厂函数，每调用拉一份
+ * 实例 — BingBackend 需要 `endpoint`（per-call），Tavily/Exa/Brave 仍
+ * 占位实现（不持 state）。T4-T6 起把 Tavily/Exa/Brave 替换为真 fetch，
+ * 工厂签名不变。
+ */
+export type SearchBackendFactory = (
+  opts: SearchBackendCtorOptions
+) => SearchBackend;
 
 interface SearchResult {
   readonly title: string;
@@ -86,6 +146,10 @@ export function createWebSearchTool(deps?: WebSearchToolDeps): AciToolDef {
   // 在 build 期报错,而非首次搜索时才暴露。
   const guardDeps = resolveGuardDeps(deps);
   const resultCache = new Map<string, Promise<ReadonlyArray<SearchResult>>>();
+  // #826 T2: 选定后端工厂(per-call 由 handler 拉实例;T2 仅 bing 真
+  // 接,tavily/exa/brave 占位 throws — handler 不会真调过去)。
+  const backendId: SearchBackendId = deps?.backend ?? "bing";
+  const backendFactory = selectBackend(backendId);
   const handler = async (
     input: unknown,
     ctx?: ToolExecutionContext
@@ -94,8 +158,14 @@ export function createWebSearchTool(deps?: WebSearchToolDeps): AciToolDef {
     const cacheKey = `${parsed.endpoint}\u0000${parsed.query}`;
     const cachedResults = resultCache.get(cacheKey);
     const cacheHit = cachedResults !== undefined;
+    // #826 T2: per-call backend 实例(带 endpoint;Tavily/Exa/Brave
+    // 占位 backend 不读 endpoint,但传同一个 shape 保持工厂同形)。
+    const backend = backendFactory({
+      guardDeps,
+      endpoint: parsed.endpoint,
+    });
     const resultsPromise =
-      cachedResults ?? loadSearchResults(parsed, guardDeps, ctx?.signal);
+      cachedResults ?? loadSearchResults(parsed, backend, ctx?.signal);
     if (!cacheHit) {
       resultCache.set(cacheKey, resultsPromise);
       resultsPromise.catch(() => {
@@ -202,18 +272,23 @@ function clampMaxResults(raw: unknown): number {
   return floored;
 }
 
+/**
+ * #826 T2: 用选定的 `SearchBackend` 拉一次结果 — 把 v0 内联的 fetch +
+ * parse 拆成 backend.fetchResults (raw) + backend.project (Bing-shape)。
+ * Bing 路径下 backend === BingBackend，与 v0 字节级一致（同一
+ * `fetchPublicResponse` + 同一 `parseSearchResults` hostname dispatch）。
+ */
 async function loadSearchResults(
   parsed: SearchInput,
-  guardDeps: GuardDeps,
+  backend: SearchBackend,
   signal: AbortSignal | undefined
 ): Promise<ReadonlyArray<SearchResult>> {
-  const requestUrl = `${parsed.endpoint}${parsed.endpoint.includes("?") ? "&" : "?"}q=${encodeURIComponent(parsed.query)}`;
-  const response = await fetchPublicResponse(requestUrl, guardDeps, {
-    tool: "web_search",
-    timeoutMs: SEARCH_TIMEOUT_MS,
+  const raw = await backend.fetchResults({
+    query: parsed.query,
+    maxResults: parsed.maxResults,
     signal,
   });
-  return parseSearchResults(response.body, MAX_MAX_RESULTS, parsed.endpoint);
+  return backend.project(raw, parsed.maxResults);
 }
 
 /**
@@ -402,3 +477,116 @@ function formatSearchResults(
   }
   return lines.join("\n");
 }
+
+// =============================================================================
+// #826 T2: SearchBackend seam — BingBackend + selectBackend + BACKENDS 表。
+// 同文件 BACKENDS 表(spec 决议),handler 路径:selectBackend(id)(guardDeps, endpoint)
+// → backend.fetchResults → backend.project。T2 阶段仅 bing 真接;
+// tavily/exa/brave 占位 throws,T3 起替换为 typed SearchBackendError。
+// =============================================================================
+
+/**
+ * #826 T2: BingBackend — 把既有 `cn.bing.com/search` HTML 解析路径包成同形
+ * `SearchBackend` 三方法签名。
+ *
+ *   - `fetchResults`：走 `fetchPublicResponse`（含 SSRF 验证 + 既有重定向
+ *     跳逐跳校验），返回原始 HTML 字符串。
+ *   - `project`：调既有 `parseSearchResults(raw, maxResults, endpoint)`
+ *     hostname 分派（Bing 走 `parseBingResults`，search_url 覆写到 DDG
+ *     等非 Bing hostname 走 `parseDuckDuckGoResults`，保持 v0 行为）。
+ *   - `describe`：返回 `{ adapter: "bing", latencyMs, requestId? }` —
+ *     envelope spec 未落地前 `requestId` 留 undefined（spec Assumption 12）。
+ *
+ * `search_url` 覆写在 handler 里经 `compileSearchInput` 提前解析（已
+ * SSRF 校验），endpoint 由 caller 经 `backendFactory({ endpoint, ... })`
+ * 注入；本类不读 process.env（env.ts SSOT）。
+ */
+export class BingBackend implements SearchBackend {
+  readonly id: SearchBackendId = "bing";
+
+  constructor(
+    private readonly guardDeps: GuardDeps,
+    private readonly endpoint: string
+  ) {}
+
+  async fetchResults(args: {
+    query: string;
+    maxResults: number;
+    signal?: AbortSignal;
+  }): Promise<unknown> {
+    const requestUrl = `${this.endpoint}${this.endpoint.includes("?") ? "&" : "?"}q=${encodeURIComponent(args.query)}`;
+    const response = await fetchPublicResponse(requestUrl, this.guardDeps, {
+      tool: "web_search",
+      timeoutMs: SEARCH_TIMEOUT_MS,
+      signal: args.signal,
+    });
+    return response.body;
+  }
+
+  project(raw: unknown, maxResults: number): SearchResult[] {
+    // raw 是 fetchPublicResponse 返回的 HTML body；既有解析器依赖字符串。
+    return parseSearchResults(raw as string, maxResults, this.endpoint);
+  }
+
+  describe(
+    _raw: unknown,
+    startedAt: number
+  ): { adapter: SearchBackendId; latencyMs: number; requestId?: string } {
+    return {
+      adapter: "bing",
+      latencyMs: Date.now() - startedAt,
+    };
+  }
+}
+
+/**
+ * #826 T2: 后端分派。`BACKENDS` 表按 `id` 持工厂；运行时拿到的总是
+ * `SearchBackendFactory`（types 保证），运行时再 guard 防意外未知键。
+ */
+export function selectBackend(id: SearchBackendId): SearchBackendFactory {
+  const factory = BACKENDS[id];
+  if (!factory) {
+    throw new ToolExecutionError(
+      `web_search: unknown backend "${id}" — known ids: bing, tavily, exa, brave`
+    );
+  }
+  return factory;
+}
+
+/**
+ * #826 T2: 占位实现 — T2 阶段 handler 不会真调到（factory 边界 default
+ * 到 bing，T3 起 schema reject 把非 bing + search_url / 非 bing 真 fetch
+ * 路径都接管）。这里抛 plain `Error` 是 T2 故意：typed `SearchBackendError`
+ * 在 T3 落地（spec Assumption 6 六 kind 闭集 + 转译 `ToolExecutionError`），
+ * T4-T6 起 Exa/Tavily/Brave 替换为真 fetch。
+ */
+function notImplemented(id: SearchBackendId): never {
+  throw new Error(
+    `web_search: backend "${id}" not implemented yet — see T4/T5/T6`
+  );
+}
+
+/**
+ * #826 T2: 占位 backend 实例（与 `SearchBackend` 同形，三方法均抛）。
+ * factory 返回同一份实例（无 per-call state）即可。
+ */
+function placeholderBackend(id: SearchBackendId): SearchBackend {
+  return {
+    id,
+    fetchResults: () => notImplemented(id),
+    project: () => notImplemented(id),
+    describe: () => notImplemented(id),
+  };
+}
+
+/**
+ * #826 T2: `BACKENDS` 表 — 按 `id` 持 backend 工厂。T2 仅 bing 真接；
+ * tavily/exa/brave 占位 throws。`selectBackend(id)` 返回工厂；handler
+ * 调工厂拉实例。
+ */
+export const BACKENDS: Record<SearchBackendId, SearchBackendFactory> = {
+  bing: ({ guardDeps, endpoint }) => new BingBackend(guardDeps, endpoint),
+  tavily: () => placeholderBackend("tavily"),
+  exa: () => placeholderBackend("exa"),
+  brave: () => placeholderBackend("brave"),
+};

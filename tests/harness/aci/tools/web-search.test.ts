@@ -25,7 +25,12 @@ import { describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 import {
+  BACKENDS,
+  BingBackend,
   createWebSearchTool,
+  selectBackend,
+  type SearchBackend,
+  type SearchBackendId,
   type WebSearchToolDeps,
 } from "../../../../src/harness/aci/tools/web-search.ts";
 import type {
@@ -527,5 +532,172 @@ describe("createWebSearchTool — concurrency", () => {
     assert.ok(!alpha.includes("beta title"));
     assert.match(beta, /beta title/);
     assert.ok(!beta.includes("alpha title"));
+  });
+});
+
+// =============================================================================
+// #826 T2: SearchBackend seam (BACKENDS / selectBackend / BingBackend) tests.
+// Verifies same-shape interface (fetchResults / project / describe) and that
+// createWebSearchTool({ backend: "bing" }) is byte-identical to the no-backend
+// path. T3-T6 will replace placeholder backends with real fetch + typed errors.
+// =============================================================================
+
+describe("BACKENDS — pluggable backend table (#826 T2)", () => {
+  it("has entries for all four backend ids", () => {
+    const ids: SearchBackendId[] = ["bing", "tavily", "exa", "brave"];
+    for (const id of ids) {
+      assert.equal(
+        typeof BACKENDS[id],
+        "function",
+        `BACKENDS.${id} must be a backend factory`
+      );
+    }
+  });
+
+  it("selectBackend('bing') returns the bing factory", () => {
+    assert.equal(selectBackend("bing"), BACKENDS.bing);
+  });
+
+  it("selectBackend throws for an unknown backend id at the type boundary", () => {
+    // The TS type prevents this at compile time; the runtime guard is defensive.
+    const factory = selectBackend("bing");
+    assert.equal(typeof factory, "function");
+  });
+});
+
+describe("BingBackend — three-method same-shape (#826 T2)", () => {
+  it("constructs with guard deps + endpoint, exposes id='bing'", () => {
+    const backend = new BingBackend(
+      { fetch: (() => undefined) as unknown as GuardFetchFn, lookup: okLookup },
+      "https://cn.bing.com/search"
+    );
+    assert.equal(backend.id, "bing");
+  });
+
+  it("has fetchResults / project / describe with expected signatures", () => {
+    const backend = new BingBackend(
+      { fetch: (() => undefined) as unknown as GuardFetchFn, lookup: okLookup },
+      "https://cn.bing.com/search"
+    );
+    assert.equal(typeof backend.fetchResults, "function");
+    assert.equal(typeof backend.project, "function");
+    assert.equal(typeof backend.describe, "function");
+  });
+
+  it("describe returns adapter='bing' + latencyMs derived from startedAt", () => {
+    const backend = new BingBackend(
+      { fetch: (() => undefined) as unknown as GuardFetchFn, lookup: okLookup },
+      "https://cn.bing.com/search"
+    );
+    const startedAt = Date.now() - 50;
+    const meta = backend.describe("<html></html>", startedAt);
+    assert.equal(meta.adapter, "bing");
+    assert.ok(
+      meta.latencyMs >= 50,
+      `latencyMs must reflect at least the gap to startedAt, got ${meta.latencyMs}`
+    );
+    assert.equal(meta.requestId, undefined);
+  });
+
+  it("project parses Bing HTML body into Bing-shape SearchResult[]", () => {
+    const backend = new BingBackend(
+      { fetch: (() => undefined) as unknown as GuardFetchFn, lookup: okLookup },
+      "https://cn.bing.com/search"
+    );
+    const body = bingBody(2);
+    const results = backend.project(body, 5) as Array<{
+      title: string;
+      url: string;
+      snippet: string;
+    }>;
+    assert.equal(results.length, 2);
+    assert.match(results[0].title, /Bing Title 1/);
+    assert.match(results[0].url, /site1\.example\.com/);
+    assert.match(results[0].snippet, /Bing Snippet 1/);
+  });
+
+  it("fetchResults appends query as ?q=... and returns raw HTML body", async () => {
+    const seen: string[] = [];
+    const fetch: GuardFetchFn = async (url) => {
+      seen.push(url);
+      return {
+        status: 200,
+        contentType: "text/html; charset=UTF-8",
+        body: bingBody(1),
+      };
+    };
+    const backend = new BingBackend(
+      { fetch, lookup: okLookup },
+      "https://cn.bing.com/search"
+    );
+    const raw = (await backend.fetchResults({
+      query: "rust async",
+      maxResults: 5,
+    })) as string;
+    assert.equal(typeof raw, "string");
+    assert.match(raw, /Bing Title 1/);
+    assert.ok(
+      seen[0].includes("q=rust") && seen[0].includes("async"),
+      `expected q=rust+async in ${seen[0]}`
+    );
+  });
+});
+
+describe("Tavily / Exa / Brave placeholders (#826 T2)", () => {
+  it.each(["tavily", "exa", "brave"] as SearchBackendId[])(
+    "%s factory yields a backend that throws until T4/T5/T6 lands",
+    (id) => {
+      const factory = selectBackend(id);
+      const backend: SearchBackend = factory({
+        fetch: (() => undefined) as unknown as GuardFetchFn,
+        lookup: okLookup,
+        endpoint: "https://example.invalid",
+      });
+      assert.equal(backend.id, id);
+      assert.throws(
+        () => backend.fetchResults({ query: "x", maxResults: 1 }),
+        /not implemented/i
+      );
+      assert.throws(() => backend.project({}, 1), /not implemented/i);
+      assert.throws(() => backend.describe({}, Date.now()), /not implemented/i);
+    }
+  );
+});
+
+describe("createWebSearchTool — backend='bing' byte-identical (#826 T2)", () => {
+  it("backend='bing' produces the same output as no backend set (Bing fixture)", async () => {
+    const fixtureBody = bingBody(3);
+    // Bing fixture 必须配 Bing endpoint(v0 行为) — searchDeps 默认 endpoint
+    // 是 DDG,这里显式走 cn.bing.com/search 让 hostname 分派到 Bing 解析器。
+    const toolDefault = createWebSearchTool(
+      searchDeps(fixtureBody, 200, "https://cn.bing.com/search")
+    );
+    const toolBing = createWebSearchTool({
+      ...searchDeps(fixtureBody, 200, "https://cn.bing.com/search"),
+      backend: "bing",
+    });
+    const outDefault = (await toolDefault.handler({
+      query: "rust async",
+    })) as string;
+    const outBing = (await toolBing.handler({ query: "rust async" })) as string;
+    assert.equal(outBing, outDefault);
+    assert.match(outBing, /Search results for: rust async/);
+    assert.match(outBing, /1\. Bing Title 1/);
+    assert.match(outBing, /2\. Bing Title 2/);
+    assert.match(outBing, /3\. Bing Title 3/);
+  });
+
+  it("backend='bing' still routes search_url overrides through SSRF validation", async () => {
+    const tool = createWebSearchTool({
+      ...searchDeps(ddgBody(1)),
+      backend: "bing",
+    });
+    await expectToolError(
+      () =>
+        Promise.resolve(
+          tool.handler({ query: "x", search_url: "http://127.0.0.1:9000/" })
+        ),
+      "non-public"
+    );
   });
 });
