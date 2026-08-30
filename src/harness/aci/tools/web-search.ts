@@ -717,35 +717,6 @@ export function selectBackend(id: SearchBackendId): SearchBackendFactory {
   return factory;
 }
 
-/**
- * #826 T3: 占位实现 —— 抛 typed `SearchBackendError` kind=`not_shipped`
- * （T2 曾抛 plain `Error`；spec Assumption 1 + SC #8 要求 typed，且要与
- * `missing_key` 的 fail-closed 区分开）。handler 出口的 try/catch 据此
- * 1:1 转译为 `ToolExecutionError`。T4-T6 起 Exa/Tavily/Brave 逐个替换为
- * 真 fetch，本函数随最后一家落地而消失（T5 起仅 brave 占位仍走此路径，
- * T6 落地后整段消失）。
- */
-function notImplemented(id: SearchBackendId): never {
-  throw createSearchBackendError({
-    kind: "not_shipped",
-    message: `backend "${id}" is not implemented yet — pick backend=bing, or wait for the ${id} adapter to ship`,
-  });
-}
-
-/**
- * #826 T2: 占位 backend 实例（与 `SearchBackend` 同形，三方法均抛）。
- * factory 返回同一份实例（无 per-call state）即可。T5 后仅 brave 占位
- * 走此函数（T6 落地后整段消失）。
- */
-function placeholderBackend(id: SearchBackendId): SearchBackend {
-  return {
-    id,
-    fetchResults: () => notImplemented(id),
-    project: () => notImplemented(id),
-    describe: () => notImplemented(id),
-  };
-}
-
 // =============================================================================
 // #826 T4: ExaBackend v1 真 fetch — Exa 真 HTTP + spec Assumption 8 投影。
 // =============================================================================
@@ -1013,6 +984,82 @@ interface TavilyResponseRaw {
 }
 
 /**
+ * #826 T6: Brave 真端点（v2 真 fetch 推进；v1 stub 抛 typed `not_shipped`）。
+ * v1 不出网 —— `BraveBackend.fetchResults` / `project` / `describe` 三方法
+ * 均抛 typed `SearchBackendError(kind="not_shipped")`，统一语义；
+ * 真 fetch 落地后保留 endpoint 常量，工厂替换 fetch 实现即可。
+ */
+const BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
+
+/**
+ * #826 T6: BraveBackend v1 stub。
+ *
+ *   - `fetchResults`：立即抛 typed
+ *     `SearchBackendError(kind="not_shipped", endpoint=api.search.brave.com)`，
+ *     message 含 backend id "brave" + v2 提示。**不**发真 HTTP；v2 真 fetch
+ *     推进时实现 GET + X-Subscription-Token header。
+ *   - `project`：抛 typed `not_shipped`（spec Assumption 8「Brave v1 不实现
+ *     `project`」+ T6 acceptance #2 推荐「uniform semantics —— all three
+ *     methods throw not_shipped for v1」）。v2 真 fetch 推进时按
+ *     spec Assumption 8 投影（`result.title` / `result.description` /
+ *     `result.url`，字段 cap 走共享 `projectSearchResult`）。
+ *   - `describe`：抛 typed `not_shipped`（T6 acceptance #3 同语义）。
+ *     v2 推进时落真形态 `{ adapter: "brave" + latencyMs }`，与 Tavily /
+ *     Exa / Bing 同形态。
+ *
+ * v1 状态：无 constructor 参数（无 per-call state、无 apiKey 字段 —— 真 fetch
+ * 推进时再加 apiKey，与 ExaBackend 一致）。所有三方法都直接 sync / async
+ * 抛 typed not_shipped；handler 出口的 try/catch 据此 1:1 转译为
+ * `ToolExecutionError`（spec SC #8）。
+ */
+export class BraveBackend implements SearchBackend {
+  readonly id: SearchBackendId = "brave";
+
+  async fetchResults(_args: {
+    query: string;
+    maxResults: number;
+    signal?: AbortSignal;
+  }): Promise<unknown> {
+    // EXIT: v1 stub — 立即抛 typed not_shipped；handler 出口的 try/catch
+    // 据此 1:1 转译为 ToolExecutionError（spec SC #8）。不读 apiKey（v2
+    // 真 fetch 时再读），不带 key 字面值 / Authorization / endpoint query
+    // —— `createSearchBackendError` 兜底脱敏。
+    throw createSearchBackendError({
+      kind: "not_shipped",
+      message:
+        'backend "brave" is not implemented yet — pick backend=bing, or wait for the brave adapter to ship (v2 plan)',
+      endpoint: BRAVE_ENDPOINT,
+    });
+  }
+
+  project(_raw: unknown, _maxResults: number): SearchResult[] {
+    // EXIT: v1 stub — `project` 也抛 typed not_shipped（spec Assumption 8
+    // 钉"Brave v1 不实现 `project`"；T6 acceptance #2 推荐三方法统一语义）。
+    // v2 真 fetch 推进时按 spec Assumption 8 投影到 Bing-shape。
+    throw createSearchBackendError({
+      kind: "not_shipped",
+      message:
+        'backend "brave" is not implemented yet — pick backend=bing, or wait for the brave adapter to ship (v2 plan)',
+      endpoint: BRAVE_ENDPOINT,
+    });
+  }
+
+  describe(
+    _raw: unknown,
+    _startedAt: number
+  ): { adapter: SearchBackendId; latencyMs: number; requestId?: string } {
+    // EXIT: v1 stub — `describe` 也抛 typed not_shipped（T6 acceptance #3
+    // 同语义）；v2 推进时落真形态。
+    throw createSearchBackendError({
+      kind: "not_shipped",
+      message:
+        'backend "brave" is not implemented yet — pick backend=bing, or wait for the brave adapter to ship (v2 plan)',
+      endpoint: BRAVE_ENDPOINT,
+    });
+  }
+}
+
+/**
  * #826 T5: TavilyBackend v1 stub。
  *
  *   - `fetchResults`：立即抛 typed
@@ -1112,11 +1159,15 @@ export class TavilyBackend implements SearchBackend {
  *
  * T5 起：Tavily stub 落地（`project` 真实、`fetchResults` 抛 typed
  * `not_shipped`）。`TavilyBackend` 无 constructor 参数，工厂直接 `new`
- * 即可。brave 仍是占位（待 T6）。
+ * 即可。
+ *
+ * T6 起：Brave stub 落地（三方法均抛 typed `not_shipped`，统一语义）。
+ * `BraveBackend` 无 constructor 参数，工厂直接 `new` 即可。v2 真 fetch
+ * 推进时按 ExaBackend 形态补 apiKey 注入即可。
  */
 export const BACKENDS: Record<SearchBackendId, SearchBackendFactory> = {
   bing: ({ guardDeps, endpoint }) => new BingBackend(guardDeps, endpoint),
   tavily: () => new TavilyBackend(),
   exa: ({ apiKey }) => new ExaBackend({ apiKey: apiKey ?? "" }),
-  brave: () => placeholderBackend("brave"),
+  brave: () => new BraveBackend(),
 };
