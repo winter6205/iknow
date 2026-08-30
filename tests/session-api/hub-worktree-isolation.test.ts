@@ -24,6 +24,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -1097,5 +1098,150 @@ describe("workspace-root-required T3 — Hub dirty-root conditional save", () =>
       priorMessages: session.messages,
     });
     expect((await store.load(conversationId)).workspaceRoot).toBe(reboundRoot);
+  });
+});
+
+// -- T4: create-task-worktree ACI tool (model-facing provision entry) ---------
+
+/**
+ * T4 (plans/worktree-isolation-model-provision.md) — the model calls the
+ * `create-task-worktree` ACI tool through the SAME gated executor the loop
+ * engine uses (executeAll carries conversationId). These tests pin:
+ *   - the tool is present in the session engine's registry (switch ON) and
+ *     absent when OFF;
+ *   - one tool call creates the task worktree and rebinds the session
+ *     (persisted via the hub's dirty-root conditional save), so the NEXT
+ *     turn's mutate lands in the worktree with the main repo zero-write;
+ *   - same-name branch / worktree path already exists → typed error, no
+ *     overwrite, no rebind, main repo zero-write;
+ *   - the SAME turn's blocked write stays blocked (Host replays nothing
+ *     mid-turn; the model re-issues it in the new root next turn).
+ */
+describe("worktree isolation wiring (T4 — create-task-worktree ACI tool)", () => {
+  async function runTool(
+    deps: LoopEngineDeps,
+    conversationId: string
+  ): Promise<ToolExecutionResult> {
+    const [result] = await deps.executor.executeAll(
+      [{ id: "aci-tool-1", name: "create-task-worktree", input: {} }],
+      undefined,
+      undefined,
+      conversationId
+    );
+    return result;
+  }
+
+  it("switch ON: the tool is registered in the session engine registry", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId } = await makeHubWithSession(repo);
+    const deps = await ensure(hub, repo);
+    expect(deps.registry.get("create-task-worktree")).toBeDefined();
+
+    // switch OFF → tool absent (OFF stays byte-identical to today)
+    await setSettingsIsolation(false);
+    const repo2 = makeGitRepo();
+    const { hub: hub2 } = await makeHubWithSession(repo2);
+    const deps2 = await ensure(hub2, repo2);
+    expect(deps2.registry.get("create-task-worktree")).toBeUndefined();
+    void conversationId;
+  });
+
+  it("model calls the tool: tree created + session rebound; next turn's mutate lands in the worktree, main repo zero-write", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId } = await makeHubWithSession(repo);
+    const worktreesBefore = git(repo, "worktree", "list");
+
+    const deps = await ensure(hub, repo);
+    // gate blocks the first mutate and points at the tool
+    const blocked = await runMutate(deps, conversationId);
+    expect(blocked.kind).toBe("execution_failed");
+    expect(blocked.message).toContain("create-task-worktree ACI tool");
+
+    // the model calls the ACI tool through the same executor
+    const result = await runTool(deps, conversationId);
+    expect(result.kind).toBe("ok");
+    const reboundRoot = join(repo, ".iknow", "worktrees", conversationId);
+    const resultText = (result.payload as Array<{ text?: string }>)
+      .map((b) => b.text ?? "")
+      .join("");
+    expect(resultText).toContain(reboundRoot);
+
+    // the tree exists on the deterministic branch
+    expect(git(repo, "worktree", "list")).toContain(reboundRoot);
+    expect(git(reboundRoot, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe(
+      `iknow/task-${conversationId}`
+    );
+
+    // same turn: the previously blocked write stays blocked on the OLD root
+    // (Host replays nothing mid-turn; the model re-issues it next turn)
+    const sameTurn = await runMutate(deps, conversationId);
+    expect(sameTurn.kind).toBe("execution_failed");
+    expect(sameTurn.message).toContain("[worktree_isolation]");
+    expect(existsSync(join(repo, "hello.txt"))).toBe(false);
+
+    // rebind persists through the hub's dirty-root conditional save
+    await persistDirtyRoot(hub, conversationId);
+    expect((await store.load(conversationId)).workspaceRoot).toBe(reboundRoot);
+
+    // next turn: engine resolves at the worktree root → mutate lands there
+    const nextDeps = await ensure(hub, reboundRoot);
+    const next = await runMutate(nextDeps, conversationId);
+    expect(next.kind).toBe("ok");
+    expect(existsSync(join(reboundRoot, "hello.txt"))).toBe(true);
+    // main repo zero-write throughout
+    expect(existsSync(join(repo, "hello.txt"))).toBe(false);
+    expect(git(repo, "status", "--porcelain")).toBe("");
+    expect(git(repo, "worktree", "list").split("\n").length).toBe(
+      worktreesBefore.split("\n").length + 1
+    );
+  });
+
+  it("same-name task branch already exists → typed branch_exists, no overwrite, no rebind, main repo zero-write", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId } = await makeHubWithSession(repo);
+    const deps = await ensure(hub, repo);
+    const worktreesBefore = git(repo, "worktree", "list");
+
+    // a leftover branch with the deterministic task name
+    git(repo, "branch", `iknow/task-${conversationId}`);
+
+    const result = await runTool(deps, conversationId);
+    expect(result.kind).toBe("execution_failed");
+    expect(result.message).toContain("kind=branch_exists");
+    expect(result.message).toContain(`iknow/task-${conversationId}`);
+
+    // no tree, no overwrite, no rebind, main repo zero-write
+    expect(existsSync(join(repo, ".iknow", "worktrees"))).toBe(false);
+    expect(git(repo, "worktree", "list")).toBe(worktreesBefore);
+    expect((await store.load(conversationId)).workspaceRoot).toBe(repo);
+    expect(git(repo, "status", "--porcelain")).toBe("");
+    expect(existsSync(join(repo, "hello.txt"))).toBe(false);
+  });
+
+  it("same-name worktree path already exists → typed worktree_exists, no overwrite, main repo zero-write", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId } = await makeHubWithSession(repo);
+    const deps = await ensure(hub, repo);
+    const worktreesBefore = git(repo, "worktree", "list");
+
+    // a leftover directory at the deterministic task path (branch absent)
+    const leftover = join(repo, ".iknow", "worktrees", conversationId);
+    mkdirSync(leftover, { recursive: true });
+    writeFileSync(join(leftover, "sentinel.txt"), "leftover", "utf8");
+
+    const result = await runTool(deps, conversationId);
+    expect(result.kind).toBe("execution_failed");
+    expect(result.message).toContain("kind=worktree_exists");
+
+    // the leftover tree is untouched, no branch created, no rebind
+    expect(readFileSync(join(leftover, "sentinel.txt"), "utf8")).toBe("leftover");
+    expect(git(repo, "worktree", "list")).toBe(worktreesBefore);
+    expect(git(repo, "branch", "--list", `iknow/task-${conversationId}`)).toBe("");
+    expect((await store.load(conversationId)).workspaceRoot).toBe(repo);
+    expect(git(repo, "status", "--porcelain")).toBe("");
   });
 });

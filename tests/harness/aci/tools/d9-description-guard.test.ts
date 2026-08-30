@@ -137,12 +137,15 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
     backgroundManager: fakeBackgroundManager,
     // D-α T3:graph overlay 在场 → run_graph 入注册表（描述同受 D9 闸门约束）。
     graphAssembly: { enabled: () => true },
+    // T4:worktreeProvision 在场 → create-task-worktree 入注册表（描述同受
+    // D9 闸门约束 —— 门禁文案指向的工具必须同样过负面短语闸）。
+    worktreeProvision: async () => "/tmp/root/.iknow/worktrees/conv",
   });
 
   // Sanity: registry assembled with the full 31-tool toolset. If this drifts,
   // the gate below would silently cover a smaller set — surface the drift
   // explicitly so the failure mode is unambiguous.
-  it("registry contains the full 31-tool ACI toolset (assembly sanity)", () => {
+  it("registry contains the full 32-tool ACI toolset (assembly sanity)", () => {
     const names = reg.catalog.all().map((t) => t.name);
     expect(names).toEqual([...ACI_TOOLSET_NAMES]);
   });
@@ -217,8 +220,8 @@ describe("#483 D9 — regression guard: every ACI tool description avoids NEGATI
   // tool" and a number of imperative "do not" / "never" fragments. After the
   // audit, the only thing we pin is that all 31 tools are positive-trigger
   // phrased — verified structurally by the blocklist assertions above.
-  it("toolset size after audit: 31 (full conditional-deps assembly)", () => {
-    expect(ACI_TOOLSET_NAMES).toHaveLength(32);
-    expect(reg.catalog.all()).toHaveLength(32);
+  it("toolset size after audit: 32 (full conditional-deps assembly)", () => {
+    expect(ACI_TOOLSET_NAMES).toHaveLength(33);
+    expect(reg.catalog.all()).toHaveLength(33);
   });
 });

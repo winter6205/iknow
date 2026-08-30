@@ -48,6 +48,10 @@ import { RegistryConstructionError, ToolExecutionError } from "../../errors.js";
 import type { SkillCatalog } from "../../skill/catalog.js";
 import { createTodoWriteTool } from "./todo-write.js";
 import { createQueryTraceTool } from "./query-trace.js";
+import {
+  createCreateTaskWorktreeTool,
+  type CreateTaskWorktreeProvisionFn,
+} from "./create-task-worktree.js";
 import { join } from "node:path";
 
 /**
@@ -139,6 +143,13 @@ export const ACI_TOOLSET_NAMES = Object.freeze([
   // 构造期冻结的,两者只能这样对齐）。
   "run_graph", // D-α T3 父代理声明 DAG，host 走 waves + 前景 spawn 编排
   "query_trace", // trace read-side projection and record drill-down
+  // T4 (plans/worktree-isolation-model-provision.md) 创建工作树 ACI 工具
+  // append-only：31→32。条件化装配（worktreeProvision host 缝缺席时不入
+  // 注册表 —— 开关 OFF / worker 装配路径 / 无 hub 的入口；Gate 3 在
+  // toolsetNames 端镜像过滤，见工厂尾部注释）。名字与 T3 门禁 hint 常量
+  // `CREATE_TASK_WORKTREE_TOOL_HINT`（"create-task-worktree ACI tool"）
+  // 逐字对齐 —— 被拦 mutate 的 block 文案指向的工具名必须真实存在。
+  "create-task-worktree",
 ] as const);
 
 /**
@@ -209,6 +220,14 @@ export interface CreateDefaultAciRegistryOptions {
   readonly graphAssembly?: { readonly enabled: () => boolean };
   /** Trace directory for the read-only query_trace tool. */
   readonly traceDir?: string;
+  /**
+   * T4 / ADR-0037 (amended 2026-08-30): worktree isolation host provision
+   * seam (session-api hub, threaded by build-engine). Present → the
+   * `create-task-worktree` ACI tool enters the registry; absent (switch
+   * OFF, worker assembly, hub-less inlets) → excluded via the Gate 3 mirror
+   * filter, keeping OFF byte-identical to today's tool surface.
+   */
+  readonly worktreeProvision?: CreateTaskWorktreeProvisionFn;
 }
 
 /**
@@ -280,6 +299,11 @@ export function createDefaultAciRegistry(
   // todo_write 不入 worker 工具面（D6 所有权边界）；ask 不传 → tool 不
   // 入注册表（SC8 oneshot 剥离）。Gate 3 镜像过滤见下。
   const todoDir = opts.todoDir;
+  // T4:创建工作树 ACI 工具的条件化装配开关（host provision 缝）。build-engine
+  // 仅在 worktree isolation 开关 ON 且 hub 注入 host 缝时透传；worker /
+  // ask / hub-less 入口不传 → create-task-worktree 不入注册表。Gate 3
+  // 镜像过滤见下。
+  const worktreeProvision = opts.worktreeProvision;
 
   // holder:tool_search 自引用的惰性解引用点(装配完成前闭包返回 undefined,
   // tool-search.ts:resolveRegistry 触发 ToolExecutionError 兜底)。
@@ -417,6 +441,18 @@ export function createDefaultAciRegistry(
           process.env.IKNOW_TRACE_OUT ??
           join(workspaceRoot, "trace")
       ),
+    // T4 创建工作树 ACI 工具（条件化装配：worktreeProvision host 缝缺席时
+    // 不入注册表）。handler 闭包绑定本引擎的 sandboxRoot = 会话当前根；
+    // 建树 + 改绑副作用全部委托 host provision 缝（session-api hub）。
+    ...(worktreeProvision
+      ? {
+          "create-task-worktree": () =>
+            createCreateTaskWorktreeTool({
+              provision: worktreeProvision,
+              root: sandboxRoot,
+            }),
+        }
+      : {}),
   };
 
   // Gate 3 校验:factories 键与 ACI_TOOLSET_NAMES 严格一致(长度+顺序+成员)。
@@ -435,6 +471,8 @@ export function createDefaultAciRegistry(
     ...(mcpManager ? [] : ["list_mcp_resources", "read_mcp_resource"]),
     ...(backgroundManager ? [] : ["bash_output", "bash_stop"]),
     ...(graphAssembly && subagentManager ? [] : ["run_graph"]),
+    // T4：host 缝缺席（开关 OFF / worker / hub-less 入口）→ 建树工具不入注册表。
+    ...(worktreeProvision ? [] : ["create-task-worktree"]),
     ...(disallowedTools ?? []),
   ];
   const toolsetNames = (ACI_TOOLSET_NAMES as ReadonlyArray<string>).filter(
